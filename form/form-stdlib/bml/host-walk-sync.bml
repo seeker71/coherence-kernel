@@ -4,16 +4,22 @@
 // (--autostash), and realigns the branch on origin. Only rows that merge as a union are set aside (a modified
 // receipts/*.jsonl main still holds, read as text), so nothing comes back with an edge to conflict on; any other
 // change in the tree is named "dirty:" with the tree left as it stands, never stashed onto the stash stack this
-// checkout shares with every worktree of the repo. A sync names "conflict:" only when git names an unmerged file (a
-// replay that conflicts, or rows that came back unmerged), and such a sync takes no turn (hw-held-turns): a tree
-// main has left behind would only grow the conflict. A "dirty:" sync leaves no unmerged path, and the turns go on
-// over the tree as it stands; the walk's log names what holds it from main. hw-sync is a flow of git steps whose
-// rows Form reads (hw-sync-at). hw-build and hw-carrier rebuild the kernel and the Metal carrier into fresh inodes
-// when their sources are newer.
-// What it needs: host-walk-text.bml (hw-line, hw-rc-text, hw-has?, hw-ends?) and host-child.bml (every git step is
-// an argv child with its exit read from the host).
+// checkout shares with every worktree of the repo. A replay that stops on conflicts in files the body knows how to
+// settle only (a river of rows: joined by union; a page it draws: main's side, then remade from the joined ledgers and
+// recorded as one new commit) is settled round by round and the rebase finishes: the sync says "healed:" with the
+// paths and goes on to its push. A sync names "conflict:" only when git names an unmerged file the body does not know
+// (the rebase is aborted; the same conflict coming back past the round cap is named too), or rows that came back
+// unmerged, and such a sync takes no turn (hw-held-turns): a tree main has left behind would only grow the conflict. A
+// "dirty:" sync leaves no unmerged path, and the turns go on over the tree as it stands; the walk's log names what holds
+// it from main. hw-sync is a flow of git steps whose rows Form reads (hw-sync-at). hw-build and hw-carrier rebuild the
+// kernel and the Metal carrier into fresh inodes when their sources are newer.
+// What it needs: host-walk-text.bml (hw-line, hw-rc-text, hw-has?, hw-ends?), host-child.bml (every git step is an
+// argv child with its exit read from the host) and host-walk-settle.bml (the healed lines and the redraw's commit;
+// the rounds themselves are the reunion's, fcr-rounds-in).
 import form-stdlib/bml/host-walk-text.bml;
 import form-stdlib/bml/host-child.bml;
+import form-stdlib/bml/form-cli-reunion.bml;
+import form-stdlib/bml/host-walk-settle.bml;
 section [form.bml] {
  class HostWalkSync {
   // The branch follows main with the tree's own rows set aside and returned. Only rows that merge as a union are
@@ -21,47 +27,60 @@ section [form.bml] {
   // holds as a blob and git reads as text. Anything else the tree holds (a source, a row in a ledger main deleted
   // or renamed, a ledger git reads as binary) comes back from a stash with an edge to conflict on, so it is named
   // "dirty:" and the tree stays as it stands, never stashed. "conflict:" names unmerged files only: a replay that
-  // conflicts (the rebase is aborted), or rows that came back unmerged after a rebase git counted done, read once
-  // more after it. A rebase refused for another reason names "dirty:" and the status.
+  // conflicts in a file the body does not know (the rebase is aborted), or rows that came back unmerged after a rebase
+  // git counted done, read once more after it. A rebase refused for another reason names "dirty:" and the status.
   //
   // The flow is git steps by argv, each answering its exit from the host, and Form reads their rows (every step's
-  // full output stays under <io>/sync-<step>.out). The answer is the text a sync has always said: "" or one line
-  // ("dirty: <rows>", "conflict: <files>", "conflict: <files>, as the set-aside rows returned"), then "sync=<exit>".
+  // full output stays under <io>/sync-<step>.out). The answer is the text a sync has always said: "" or lines
+  // ("dirty: <rows>", "conflict: <files>", "conflict: <files>, as the set-aside rows returned", and when conflicts were
+  // settled "healed: <paths>" with the redraw's line), then "sync=<exit>": a healed sync reads sync=0 as any other.
   // A step whose child was never born reads "sync=nothing". Rows come from `status --porcelain -z`, so a name is
-  // never quoted and a rename (R or C) carries its second field.
-  def hw-sync-at(io, dir, branch) = hw-sync-said(hw-sync-fetch(io, dir, branch));
+  // never quoted and a rename (R or C) carries its second field. hw-sync-with names the door that remakes the drawn
+  // pages (an argv run from the process's directory); the walk's own is the reunion's (fcr-redraw-argv).
+  def hw-sync-at(io, dir, branch) = hw-sync-with(io, dir, branch, fcr-redraw-argv());
+  def hw-sync-with(io, dir, branch, redraw) = hw-sync-said(hw-sync-fetch(io, dir, branch, redraw));
   def hw-sync-in(dir, branch) = hw-sync-at(hch-dir(), dir, branch);
   def hw-sync(branch) = hw-line(hw-sync-in(".", branch));
   def hw-sync-said(r) = (String) r[0] == "" ? "sync=" ++ hw-rc-text(r[1]) : r[0] ++ "\nsync=" ++ hw-rc-text(r[1]);
   // every step answers [lines, exit]; a step that fails ends the flow with its own exit
-  def hw-sync-fetch(io, dir, branch) {
+  def hw-sync-fetch(io, dir, branch, redraw) {
    let fetched = hch-git-in(io, dir, "sync-fetch", ["fetch", "-q", "origin", "main", branch]);
-   hch-ok?(fetched) ? hw-sync-tree(io, dir, branch) : ["", fetched[0]];
+   hch-ok?(fetched) ? hw-sync-tree(io, dir, branch, redraw) : ["", fetched[0]];
   }
-  def hw-sync-tree(io, dir, branch) {
+  def hw-sync-tree(io, dir, branch, redraw) {
    let rows = hw-porcelain(io, dir, "sync-status", ["status", "--porcelain", "-z", "--untracked-files=no"]);
    let kept = filter(row => !hw-aside?(io, dir, row), rows);
-   nil?(kept) ? hw-sync-rebase(io, dir, branch) : [hw-dirty-line(hw-rows-text(kept)), 1];
+   nil?(kept) ? hw-sync-rebase(io, dir, branch, redraw) : [hw-dirty-line(hw-rows-text(kept)), 1];
   }
-  def hw-sync-rebase(io, dir, branch) {
+  def hw-sync-rebase(io, dir, branch, redraw) {
    let rebased = hch-git-in(io, dir, "sync-rebase", ["rebase", "-q", "--autostash", "origin/main"]);
-   hch-ok?(rebased) ? hw-sync-returned(io, dir, branch) : hw-sync-refused(io, dir);
+   hch-ok?(rebased) ? hw-sync-returned(io, dir, branch, redraw, []) : hw-sync-refused(io, dir, branch, redraw);
   }
-  // a rebase git refused: a named unmerged file is a conflict (the rebase is aborted); anything else is dirty,
-  // named by the whole status, untracked files included
-  def hw-sync-refused(io, dir) {
+  // a rebase git refused: unmerged files are met by the reunion's rounds (what the body knows is settled and the
+  // rebase finishes); a wall, a file it does not know, aborts the rebase and is a conflict; with nothing unmerged it
+  // is dirty, named by the whole status, untracked files included
+  def hw-sync-refused(io, dir, branch, redraw) {
    let unmerged = hw-unmerged(io, dir);
-   (String) unmerged == "" ? [hw-dirty-line(hw-rows-text(hw-porcelain(io, dir, "sync-status-all", ["status", "--porcelain", "-z"]))), 1] : hw-sync-aborted(io, dir, unmerged);
+   (String) unmerged == "" ? hw-sync-dirty(io, dir) : hw-sync-met(io, dir, branch, redraw, fcr-rounds-in(io, dir, 0, []));
+  }
+  def hw-sync-dirty(io, dir) = [hw-dirty-line(hw-rows-text(hw-porcelain(io, dir, "sync-status-all", ["status", "--porcelain", "-z"]))), 1];
+  def hw-sync-met(io, dir, branch, redraw, joined) = (String) joined[0] == "joined" ? hw-sync-returned(io, dir, branch, redraw, joined[1]) : hw-sync-walled(io, dir, joined);
+  def hw-sync-walled(io, dir, wall) = (String) wall[1] == "" ? hw-sync-undone(io, dir) : hw-sync-aborted(io, dir, wall[1] ++ wall[2]);
+  def hw-sync-undone(io, dir) {
+   let aborted = hch-git-in(io, dir, "sync-abort", ["rebase", "--abort"]);
+   hw-sync-dirty(io, dir);
   }
   def hw-sync-aborted(io, dir, unmerged) {
    let aborted = hch-git-in(io, dir, "sync-abort", ["rebase", "--abort"]);
    ["conflict: " ++ unmerged, 1];
   }
-  // rows that came back unmerged after a rebase git counted done
-  def hw-sync-returned(io, dir, branch) {
+  // rows that came back unmerged after a rebase git counted done; else what was settled is said, the drawn pages are
+  // remade into the branch, and the branch goes to its push
+  def hw-sync-returned(io, dir, branch, redraw, done) {
    let unmerged = hw-unmerged(io, dir);
-   (String) unmerged == "" ? hw-sync-push(io, dir, branch) : ["conflict: " ++ unmerged ++ ", as the set-aside rows returned", 1];
+   (String) unmerged == "" ? hw-sync-healed(hw-healed-lines(done, hw-redrawn-in(io, dir, redraw, done)), hw-sync-push(io, dir, branch)) : ["conflict: " ++ unmerged ++ ", as the set-aside rows returned", 1];
   }
+  def hw-sync-healed(healed, pushed) = (String) healed == "" ? pushed : (String) pushed[0] == "" ? [healed, pushed[1]] : [healed ++ "\n" ++ pushed[0], pushed[1]];
   def hw-sync-push(io, dir, branch) {
    let pushed = hch-git-in(io, dir, "sync-push", ["push", "-q", "--force-with-lease", "origin", "HEAD:" ++ branch]);
    ["", pushed[0]];
@@ -88,25 +107,6 @@ section [form.bml] {
   def hw-text-diff?(io, dir, path) {
    let numstat = hch-git-quiet-in(io, dir, "sync-numstat", ["diff", "--numstat", "origin/main", "--", path])[1];
    len(numstat) == 0 || ((String) substring(numstat, 0, 1) != "-");
-  }
-  def hw-conflicted?(sync) = nothing?(sync) ? false : any?(line => {
-   let marker = "conflict:";
-   let at = str_find(line, marker, 0);
-   at >= 0 && trim(substring(line, at + len(marker), len(line))) != "";
-  }, split-on(sync, "\n"));
-  def hw-held-turns(sync) {
-   let refusal = "rebase-refused:";
-   let detail = hw-conflicted?(sync) ? str-join-with(
-    split-on(sync, "\n") |> filter(hw-conflicted?) |> map(line => {
-     let marker = "conflict:";
-     let at = str_find(line, marker, 0);
-     trim(substring(line, at + len(marker), len(line)));
-    }), ", ") : {
-     let text = str-join-with(split-on(sync, "\n") |> map(trim), "; ");
-     str_find(text, refusal, 0) == 0 ? text : refusal + " " + text;
-    };
-   print_str("[walk] no turn starts: the branch could not follow main (" + detail + ")");
-   0;
   }
   // A product is fresh when it stands and is newer than its source (file_mtime, whole seconds: a source touched in
   // the product's own second rebuilds). Otherwise the compiler runs through the child door; the kernel is built beside
