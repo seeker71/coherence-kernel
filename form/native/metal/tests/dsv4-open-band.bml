@@ -1,13 +1,13 @@
 ; dsv4-open-band.bml -- the DeepSeek-V4 driver opens the Form-built fixture as Metal handles, counted through metal_live, with a state, and closes it back to nothing.
 ;
 ; WHAT THIS PINS. native/metal/dsv4-open.fk mirrors Qwen's q38-open-span, q38-new-state and q38-free-state: the same eleven-slot context (so q38-context-ok?, q38-state-ok?, q38-close,
-; q38-close-expected and q38-state-handle-count read it unchanged), the 86 tensors of the fixture mapped one view each (dsv4-bind.fk), the six graph units compiled once (62 kernels), 50
+; q38-close-expected and q38-state-handle-count read it unchanged), the 86 tensors of the fixture mapped one view each (dsv4-bind.fk), the six graph units compiled once (63 kernels), 50
 ; scratch buffers sized from the layout (dsv4-layout.fk's 28 and 22 extras), and a state row [kv, comp state, comp score, comp rows] per block. This band opens ONLY the fixture it writes under
 ; temp_dir (1,515,232 bytes); no model, voice or session is opened and no real file is read past a header. It reads the carrier's counters (metal_live words 2 and 4) before and after each step.
 ;
-; Verdict 255 when every claim lands:
+; Verdict 511 when every claim lands:
 ;   1     admission and shape: opening the fixture at capacity 8 answers a 13-slot context; q38-context-ok? (Qwen's own checker) reads 1; the layout in slot 2 is the fixture's (3 blocks, n_embd 256,
-;         86 tensors, ratios 0 4 2); the pipelines are the 62 kernels of the six graph units, every handle positive
+;         86 tensors, ratios 0 4 2); the pipelines are the 63 kernels of the six graph units, every handle positive
 ;   2     scratch: 50 buffers (28 of the layout, 22 extras), distinct positive handles, every one read at its exact planned size and refused one byte past it; sizes pinned by value (resid 4,096,
 ;         logits 128, the attention score 104 = 2 heads x 13 rows (8 raw + 5 compressed at most) x 4); the scratch record names every buffer
 ;   4     views and layers: four lists (24, 28, 28 tensors by block, the head's 3), the Qwen-shaped views of token_embd [32 rows, 256 cols, F16], output.weight (type 41) and output_norm, an expert stack's
@@ -22,6 +22,8 @@
 ;         answers [], a text file answers [], and none of them moves the counters
 ;   128   the checks can fail: q38-context-ok? reads 0 for a context whose scratch holds a zero handle and for []; closing the context without its state leaves live buffers exactly 9 above the
 ;         start, and freeing the state returns them
+;   256   a refused pipeline refuses the open: dsv4-open-span-with given the graph units plus a source that does not compile (its kernel's handle is 0) answers [] and moves no counter (nothing was
+;         mapped or allocated before the check); the same call with the graph units alone opens
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door (metal_pipeline, metal_buf_alloc, metal_buf_from_file, metal_buf_read, metal_buf_free, metal_live).
 ; The band writes only under temp_dir and removes what it made.
@@ -37,7 +39,7 @@ section [form.bml] {
   def dob-refused(h, off, n) = try (str_len(metal_buf_read(h, off, n)) != n) catch true;
   def dob-size?(h, n) = h > 0 && str_len(metal_buf_read(h, 0, n)) == n && dob-refused(h, 0, n + 1);
   def dob-names(us) = len(us) == 0 ? [] : append(dkr-kernel-names(us[0][1]), dob-names(us[1:]));
-  def dob-pipes-ok?(ps) = len(dob-names(dkr-graph-units())) == 62 && dob-positive?(dob-handles(ps, dob-names(dkr-graph-units())));
+  def dob-pipes-ok?(ps) = len(dob-names(dkr-graph-units())) == 63 && dob-positive?(dob-handles(ps, dob-names(dkr-graph-units())));
   def dob-handles(ps, names) = len(names) == 0 ? [] : cons(record_get(ps, names[0]), dob-handles(ps, names[1:]));
 
   // ---- 1
@@ -98,6 +100,12 @@ section [form.bml] {
    let ctx = dsv4-open-span(path, cap, 1);
    len(ctx) == 0 && dvb-live() == live && dvb-mapped() == mapped;
   }
+  // an open whose pipeline is refused answers [] and moves nothing; the same open with the graph's units alone (the default) opens and closes clean
+  def dob-bad-units() = append(dkr-graph-units(), [["bad", "#include <metal_stdlib>\nkernel void form_dsv4_not_msl(device float* x [[buffer(0)]]) { this is not msl }"]]);
+  def dob-pipe-refused(path, live0, mapped0) {
+   let ctx = dsv4-open-span-with(path, 8, 1, dob-bad-units());
+   len(ctx) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0;
+  }
   def dob-retype(specs, name, ty) = len(specs) == 0 ? [] : cons(specs[0][0] == name ? [specs[0][0], ty, specs[0][2], specs[0][3], specs[0][4], specs[0][5]] : specs[0], dob-retype(specs[1:], name, ty));
  }
  let root = temp_dir() ++ "/dsv4-open-band-" ++ now_unix_ms().str();
@@ -146,7 +154,12 @@ section [form.bml] {
  let freedC = len(ctxC) == 13 ? q38-close(ctxC, stsC) : 0;
  let afterC = freedC == expectC && expectC == 145 && dvb-live() == live0 && dvb-mapped() == mapped0;
  let c32 = dob-bit(try afterB && afterC catch false, 32);
- let removed = host_path_remove(path) + host_path_remove(cutPath) + host_path_remove(unpricedPath) + host_path_remove(textPath);
- print_str("dsv4-open-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " live " ++ live0.str() ++ "/" ++ live1.str() ++ "/" ++ live2.str() ++ "/" ++ live3.str() ++ "/" ++ live4.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ mapped1.str() ++ "/" ++ dvb-mapped().str() ++ " freedC " ++ freedC.str() ++ "/" ++ expectC.str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
+ let refusedP = try dob-pipe-refused(path, live0, mapped0) catch false;
+ let ctxD = dsv4-open-span-with(path, 8, 1, dkr-graph-units());
+ let openedD = len(ctxD) == 13;
+ let leftD = openedD ? dsv4-close(ctxD, []) : [0];
+ let c256 = dob-bit(refusedP && openedD && len(leftD) == 0 && dvb-live() == live0, 256);
+ let removed = host_path_remove(path) +host_path_remove(cutPath) + host_path_remove(unpricedPath) + host_path_remove(textPath);
+ print_str("dsv4-open-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " live " ++ live0.str() ++ "/" ++ live1.str() ++ "/" ++ live2.str() ++ "/" ++ live3.str() ++ "/" ++ live4.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ mapped1.str() ++ "/" ++ dvb-mapped().str() ++ " freedC " ++ freedC.str() ++ "/" ++ expectC.str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256;
 }
