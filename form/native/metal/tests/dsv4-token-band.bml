@@ -1,0 +1,245 @@
+; dsv4-token-band.bml -- the DeepSeek-V4 driver's token loop on the Metal door, on the Form-built fixture: the output head against the oracle's own head arithmetic, token-major prefill with the head read at the last
+; token, one decode step, the greedy loop, the refusals, release.
+;
+; WHAT THIS PINS. native/metal/dsv4-token-handle.fk enqueues the embedding, every block (dsv4-layer.fk), the output head (the stream rms, the F16 output_hc_fn matvec, the head gates, the stream sum,
+; output_norm, the MXFP8 output.weight matvec into the logits at bs[28], the device argmax) over the handles dsv4-open.fk opened. This band opens the fixture it writes under temp_dir (1,515,232 bytes) at capacity 8 and:
+;   HEAD   feeds the head two residuals of its own (four streams of 256 values, k/64 exactly representable in f32, drawn from the body's Park-Miller) and reads every stage back against the oracle's fp64
+;          arithmetic on the same file (dnr-rms, dfo-f16-matrix over output_hc_fn, dnr-gates over dnr-mix, dfo-weighted-streams, dnr-rms-weight, dfo-mx8 over output.weight), each in the 3e-5 floor
+;          (nd = max|gpu - ref| / max|ref|, the oracle harness's floor of max(8 ne, 3e-5): metal_dsv4_stack_oracle.sh above cmpOra, history 8a6f123d3^)
+;   LOOP   prefill [5 17 3 22] at position 0 on one state, the same four tokens as three forward-state calls and a decode on a second state, then the loop (dsv4-generate) against repeated decode
+; The oracle holds no head of its own (dfo-* stops at the layer), so the HEAD leg's reference composes its numeric twin's pieces (dnr-hc-head's own steps, stage by stage, over the oracle's matrix readers).
+; THE LAYERS ARE NOT COMPARED TO THE ORACLE HERE: that is the end-to-end band's job (dsv4-end-to-end-band.bml); this band holds the loop's own seams.
+;
+; Verdict 255 when every claim lands:
+;   1     admission and shape: dsv4-admitted? reads true, the logits are bs[28] (the seat Qwen's sampler reads), the head gate buffer is 16 bytes, the capacity the context was opened for reads 8, and
+;         dsv4-embed leaves the token's F16 row (the oracle's own row, exactly) in the four streams of `resid`
+;   2     the head against the oracle on two residuals: seven enqueues, hc_mix, the gates, the collapsed stream, output_norm's output and all 32 logits each in the floor, the device argmax equal to the
+;         reference's and the reference's top-two gap more than twice the largest logit disagreement (an argmax with margin), the logits read through dsv4-logits equal to bs[28]
+;   4     prefill and decode: dsv4-prefill-span-sliced on [5 17 3 22] answers [id, 4]; the same tokens as three dsv4-forward-state calls then dsv4-decode on a second state answer the same id with the
+;         logits BIT-EQUAL (all 32 words) and the compressed rows of block 1 and 2 bit-equal between the two states
+;   8     the loop: dsv4-generate for four steps from the prefilled id equals four dsv4-decode calls on the stepwise state (ids and the last logits bit-equal), a stop id ends the walk without being kept,
+;         n = 0 answers the accumulator, and the positions advance by one a step (the state at position 5 and beyond answers what stepwise answers)
+;   16    the head is asked once: dsv4-forward-state leaves the logits buffer exactly as the caller left it (a sentinel), and after prefill the logits are the LAST token's (they equal the stepwise decode's, not
+;         the first token's, which the fresh head of another state reads differently)
+;   32    refusals answer nothing and touch no buffer: an id at the vocabulary and a negative id, a position at the capacity, a span that passes it, an empty span, a context whose head tensor has the wrong type
+;         (a copy of the views with output_norm retyped), and dsv4-argmax over an index buffer the head never wrote (the sentinel reads as nothing)
+;   64    the checks can fail: a residual tilted by 1e-4 reads outside the floor; the reference's head over the WRONG gates (the stream sum with equal weights) reads far from the GPU's collapsed stream;
+;         the oracle's argmax over the reversed logits differs from the GPU's
+;   128   release: dsv4-close in synced rounds leaves no handle and metal_live reads what it read before the open
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door; the fixture is written and read as a binary file. Light GPU: a few hundred threads over a 1.5 MB fixture, a handful
+; of single-token passes. Never maps a model; writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk form/form-stdlib/bml/dsv4-oracle-reference.bml
+section [form.bml] {
+ class Dsv4TokenBand {
+  def dtb-bit(held, bit) = held ? bit : 0;
+  def dtb-ctx(c) = record_get(c, "ctx");
+  def dtb-e() = 256;
+  def dtb-vocab() = 32;
+  def dtb-rd(ctx, name, n) = dkr-read(dso-buf(ctx, name), n);
+  def dtb-prompt() = [5, 17, 3, 22];
+
+  // ---- the residuals: k/64 for an integer k in [-256, 256], from the body's generator ----------------------------------------
+  def dtb-resid-go(seed, k, n) = k == n ? [] : cons((1.0 * (dsv4-pm-at(seed, k) % 513 - 256)) / 64.0, dtb-resid-go(seed, k + 1, n));
+  def dtb-resid(seed) = dtb-resid-go(seed, 0, 1024);
+  def dtb-write-resid(ctx, xs) = metal_buf_write(dso-buf(ctx, "resid"), 0, dkr-f32-bytes(xs));
+
+  // ---- the reference head: the numeric twin's steps over the oracle's matrix readers -------------------------------------------------
+  def dtb-ref-head(c, resid) {
+   let r = record_get(c, "r");
+   let g = record_get(c, "g");
+   let n = record_get(g, "hc");
+   let e = record_get(g, "e");
+   let flat = dnr-rms(resid, record_get(g, "eps"));
+   let mix = dfo-f16-matrix(r, "output_hc_fn.weight", flat);
+   let scale = dfo-plain(r, "output_hc_scale.weight", 0);
+   let w = dnr-gates(dnr-mix(mix, dfo-plain(r, "output_hc_base.weight", 0), scale[0], 0, n, 0), 1.0, record_get(g, "hc-eps"));
+   let cur = dfo-weighted-streams(resid, w, e, dnr-fill(e, 0.0));
+   let xn = dnr-rms-weight(cur, dfo-plain(r, "output_norm.weight", 0), record_get(g, "eps"));
+   let logits = dfo-mx8(r, "output.weight", xn);
+   record_new(0, "mix", mix, "w", w, "cur", cur, "xn", xn, "logits", logits);
+  }
+  def dtb-argmax-of-go(xs, i, best, bi) = i == len(xs) ? bi : (xs[i] > best ? dtb-argmax-of-go(xs, i + 1, xs[i], i) : dtb-argmax-of-go(xs, i + 1, best, bi));
+  def dtb-argmax-of(xs) = dtb-argmax-of-go(xs, 1, xs[0], 0);
+  def dtb-second-go(xs, i, top, best) = i == len(xs) ? best : dtb-second-go(xs, i + 1, top, (i != top && xs[i] > best) ? xs[i] : best);
+  def dtb-second(xs) = dtb-second-go(xs, 0, dtb-argmax-of(xs), 0.0 - 1.0e30);
+  def dtb-gap(xs) = xs[dtb-argmax-of(xs)] - dtb-second(xs);
+  def dtb-reverse(xs) = reverse(xs);
+
+  // ---- 2: the head against the oracle on one residual ---------------------------------------------------------------------------------
+  def dtb-head-run(c, label, seed) {
+   let ctx = dtb-ctx(c);
+   let resid = dtb-resid(seed);
+   let w = dtb-write-resid(ctx, resid);
+   let h = dsv4-head(ctx);
+   let id = dsv4-argmax(ctx);
+   let ref = dtb-ref-head(c, resid);
+   let gmix = dtb-rd(ctx, "hc-mix", 4);
+   let gw = dtb-rd(ctx, "head-w", 4);
+   let gcur = dtb-rd(ctx, "head-cur", 256);
+   let gxn = dtb-rd(ctx, "xn", 256);
+   let glog = dsv4-logits(ctx);
+   let slot = dkr-read(dso-buf(ctx, "logits"), 32);
+   let nds = [dkr-nd(gmix, record_get(ref, "mix")), dkr-nd(gw, record_get(ref, "w")), dkr-nd(gcur, record_get(ref, "cur")), dkr-nd(gxn, record_get(ref, "xn")), dkr-nd(glog, record_get(ref, "logits"))];
+   let rl = record_get(ref, "logits");
+   let rid = dtb-argmax-of(rl);
+   let dmax = dkr-maxdiff(glog, rl);
+   let said = print_str("  head " ++ label ++ " enq " ++ h.str() ++ " nd mix " ++ nds[0].str() ++ " w " ++ nds[1].str() ++ " cur " ++ nds[2].str() ++ " xn " ++ nds[3].str() ++ " logits " ++ nds[4].str() ++ " argmax " ++ id.str() ++ "/" ++ rid.str() ++ " gap " ++ dtb-gap(rl).str() ++ " maxdiff " ++ dmax.str());
+   h == 7 && !nothing?(id) && id == rid && dtb-gap(rl) > 2.0 * dmax && dtb-below(nds, dkr-floor()) && glog == slot;
+  }
+  def dtb-below(nds, bound) = len(nds) == 0 ? true : (nds[0] < bound && dtb-below(nds[1:], bound));
+
+  // ---- 1: shape ------------------------------------------------------------------------------------------------------------------------------
+  def dtb-shape(c) {
+   let ctx = dtb-ctx(c);
+   let r = record_get(c, "r");
+   let emb = dsv4-embed(ctx, 17);
+   let s = metal_sync();
+   let resid = dtb-rd(ctx, "resid", 1024);
+   let row = dfo-plain(r, "token_embd.weight", 17);
+   dsv4-admitted?(ctx) && dso-logits-slot() == 28 && ctx[1][28] == dso-buf(ctx, "logits") && dob-ok?(ctx) && dso-cap(ctx) == 8 && emb == 2
+    && resid == append(row, append(row, append(row, row)));
+  }
+  def dob-ok?(ctx) = str_len(metal_buf_read(dso-buf(ctx, "head-w"), 0, 16)) == 16 && str_len(metal_buf_read(dso-buf(ctx, "logits"), 0, 128)) == 128;
+
+  // ---- 4 and 8: prefill, decode and the loop ----------------------------------------------------------------------------------------------------
+  def dtb-bits(xs) = len(xs) == 0 ? [] : cons(md-f32-bits(xs[0]), dtb-bits(xs[1:]));
+  def dtb-comp-bits(ctx, sts, il, n) = dtb-bits(dkr-read(sts[il][3], n));
+  def dtb-step-state(ctx, sts, ids, pos) = len(ids) == 0 ? 1 : (!nothing?(dsv4-forward-state(ctx, sts, ids[0], pos)) ? { let s = metal_sync(); dtb-step-state(ctx, sts, ids[1:], pos + 1); } : nothing());
+  def dtb-decodes(ctx, sts, id, pos, n) = n == 0 ? [] : { let nid = dsv4-decode(ctx, sts, id, pos); nothing?(nid) ? [] : cons(nid, dtb-decodes(ctx, sts, nid, pos + 1, n - 1)); };
+  def dtb-logits-bits(ctx) = dtb-bits(dsv4-logits(ctx));
+
+  def dtb-loop(c, stsA, stsB, fal) {
+   let ctx = dtb-ctx(c);
+   let p = dtb-prompt();
+   let pf = dsv4-prefill-span-sliced(ctx, stsA, p, 0);
+   let lgA = dtb-logits-bits(ctx);
+   let cA1 = dtb-comp-bits(ctx, stsA, 1, 128);
+   let cA2 = dtb-comp-bits(ctx, stsA, 2, 256);
+   let st = dtb-step-state(ctx, stsB, p[0:3], 0);
+   let nidB = dsv4-decode(ctx, stsB, p[3], 3);
+   let lgB = dtb-logits-bits(ctx);
+   let cB1 = dtb-comp-bits(ctx, stsB, 1, 128);
+   let cB2 = dtb-comp-bits(ctx, stsB, 2, 256);
+   let said = print_str("  prefill " ++ pf.str() ++ " stepwise " ++ nidB.str() ++ " logits bit-equal " ++ (lgA == lgB).str() ++ " comp rows bit-equal " ++ (cA1 == cB1 && cA2 == cB2).str());
+   let ok4 = !nothing?(pf) && !nothing?(st) && !nothing?(nidB) && pf[0] == nidB && pf[1] == 4 && lgA == lgB && cA1 == cB1 && cA2 == cB2;
+   record_set(fal, "ok4", ok4);
+   record_set(fal, "first", pf[0]);
+   record_set(fal, "lgA", lgA);
+   // the loop on A against repeated decode on B, four steps from the prefilled id at position 4
+   let genA = dsv4-generate(ctx, stsA, pf[0], 4, 3, [], []);
+   let lastA = dtb-logits-bits(ctx);
+   let genB = dtb-decodes(ctx, stsB, pf[0], 4, 3);
+   let lastB = dtb-logits-bits(ctx);
+   let said2 = print_str("  loop " ++ genA.str() ++ " stepwise " ++ genB.str() ++ " last logits bit-equal " ++ (lastA == lastB).str());
+   record_set(fal, "gen", genA);
+   ok4 && len(genA) == 3 && genA == genB && lastA == lastB;
+  }
+  // a stop id ends the walk, n = 0 answers the accumulator, a one-step walk answers the next id
+  def dtb-stops(c, stsC, first, gen) {
+   let ctx = dtb-ctx(c);
+   let pf = dsv4-prefill-span-sliced(ctx, stsC, dtb-prompt(), 0);
+   let stopHit = dsv4-generate(ctx, stsC, pf[0], 4, 3, [gen[1]], []);
+   let zero = dsv4-generate(ctx, stsC, pf[0], 4, 0, [], [99]);
+   let said = print_str("  stop at " ++ gen[1].str() ++ " kept " ++ stopHit.str() ++ " n=0 " ++ zero.str());
+   !nothing?(pf) && pf[0] == first && stopHit == [gen[0]] && zero == [99];
+  }
+
+  // ---- 16: the head is asked once -------------------------------------------------------------------------------------------------------------------
+  def dtb-once(c, stsD, fal) {
+   let ctx = dtb-ctx(c);
+   let w = metal_buf_write(dso-buf(ctx, "logits"), 0, dkr-sentinel(128));
+   let st = dsv4-forward-state(ctx, stsD, 5, 0);
+   let s = metal_sync();
+   let after = dtb-rd(ctx, "logits", 32);
+   // the first token's logits (a one-token prefill) differ from the last token's (the four-token prefill)
+   let one = dsv4-prefill-span-sliced(ctx, stsD, [5], 0);
+   let first = dtb-logits-bits(ctx);
+   record_get(fal, "ok4") && st == 1 && after[0] > 1.0e15 && after[31] > 1.0e15 && !nothing?(one) && first != record_get(fal, "lgA");
+  }
+
+  // ---- 32: refusals -----------------------------------------------------------------------------------------------------------------------------------
+  def dtb-fake-vx(ctx) {
+   let vx = record_new(0);
+   let names = dso-head-names();
+   let a = dtb-copy-views(ctx, vx, append(names, ["token_embd.weight", "output.weight", "output_norm.weight"]));
+   let v = record_get(vx, "output_norm.weight");
+   record_set(vx, "output_norm.weight", [v[0], v[1], 1, v[3], v[4], v[5]]);
+   vx;
+  }
+  def dtb-copy-views(ctx, vx, names) = len(names) == 0 ? 0 : { record_set(vx, names[0], dso-view(ctx, names[0])); dtb-copy-views(ctx, vx, names[1:]); };
+  def dtb-refusals(c, sts) {
+   let ctx = dtb-ctx(c);
+   let w1 = metal_buf_write(dso-buf(ctx, "resid"), 0, dkr-sentinel(4096));
+   let w2 = metal_buf_write(dso-buf(ctx, "logits"), 0, dkr-sentinel(128));
+   let a = dsv4-decode(ctx, sts, 32, 0);
+   let b = dsv4-decode(ctx, sts, 0 - 1, 0);
+   let d = dsv4-decode(ctx, sts, 5, 8);
+   let e = dsv4-prefill-span-sliced(ctx, sts, [1, 2, 3], 6);
+   let f = dsv4-prefill-span-sliced(ctx, sts, [], 0);
+   let g = dsv4-prefill-span-sliced(ctx, sts, [1, 40], 0);
+   let fake = [ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], ctx[7], ctx[8], ctx[9], ctx[10], ctx[11], dtb-fake-vx(ctx)];
+   let h = dsv4-decode(fake, sts, 5, 0);
+   let hh = dsv4-head(fake);
+   let s = metal_sync();
+   let rs = dtb-rd(ctx, "resid", 1024);
+   let lg = dtb-rd(ctx, "logits", 32);
+   let w3 = metal_buf_write(dso-buf(ctx, "argmax-idx"), 0, dkr-u32-bytes([4294967295]));
+   let none = dsv4-argmax(ctx);
+   let said = print_str("  refusals " ++ [nothing?(a), nothing?(b), nothing?(d), nothing?(e), nothing?(f), nothing?(g), nothing?(h), nothing?(hh), nothing?(none)].str() ++ " admitted fake " ++ dsv4-admitted?(fake).str());
+   nothing?(a) && nothing?(b) && nothing?(d) && nothing?(e) && nothing?(f) && nothing?(g) && nothing?(h) && nothing?(hh) && nothing?(none) && !dsv4-admitted?(fake)
+    && rs[0] > 1.0e15 && rs[1023] > 1.0e15 && lg[0] > 1.0e15 && lg[31] > 1.0e15 && dsv4-admitted?(ctx);
+  }
+
+  // ---- 64: the checks can fail -------------------------------------------------------------------------------------------------------------------------
+  def dtb-tilt(xs, i) = len(xs) == 0 ? [] : cons(xs[0] * (1.0 + ((i % 2) == 0 ? 0.0001 : 0.0 - 0.0001)), dtb-tilt(xs[1:], i + 1));
+  def dtb-falsifiers(c) {
+   let ctx = dtb-ctx(c);
+   let resid = dtb-resid(7);
+   let ref = dtb-ref-head(c, resid);
+   let w = dtb-write-resid(ctx, dtb-tilt(resid, 0));
+   let h = dsv4-head(ctx);
+   let glog = dsv4-logits(ctx);
+   let tilted = dkr-nd(glog, record_get(ref, "logits"));
+   let w2 = dtb-write-resid(ctx, resid);
+   let h2 = dsv4-head(ctx);
+   let gcur = dtb-rd(ctx, "head-cur", 256);
+   let g = record_get(c, "g");
+   let equal = dfo-weighted-streams(resid, [0.25, 0.25, 0.25, 0.25], 256, dnr-fill(256, 0.0));
+   let wrongGates = dkr-nd(gcur, equal);
+   let id = dsv4-argmax(ctx);
+   let revId = dtb-argmax-of(dtb-reverse(record_get(ref, "logits")));
+   let said = print_str("  falsifiers tilted nd " ++ tilted.str() ++ " wrong gates nd " ++ wrongGates.str() ++ " argmax " ++ id.str() ++ " reversed oracle argmax " ++ revId.str());
+   tilted > dkr-floor() && wrongGates > 0.001 && revId != id && dkr-nd(gcur, record_get(ref, "cur")) < dkr-floor();
+  }
+ }
+ let root = temp_dir() ++ "/dsv4-token-band-" ++ now_unix_ms().str();
+ let path = root ++ ".gguf";
+ let wrote = dfx-write(path);
+ let r = dfo-open(path);
+ let live0 = dvb-live();
+ let mapped0 = dvb-mapped();
+ let ctx = dsv4-open-span(path, 8, 1);
+ let opened = len(ctx) == 13;
+ let m = opened ? ctx[2] : nothing();
+ let c = record_new(0, "r", r, "g", dfo-geometry(r), "m", m, "ctx", ctx);
+ let prep = opened ? dsv4-prepare(ctx) : 0;
+ let stsA = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let stsB = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let stsC = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let stsD = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let stsE = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let fal = record_new(0);
+ let r1 = try opened && dtb-shape(c) catch false;
+ let r2 = try opened && dtb-head-run(c, "A", 3) && dtb-head-run(c, "B", 11) catch false;
+ let r4 = try opened && dtb-loop(c, stsA, stsB, fal) catch false;
+ let r8 = try r4 && dtb-stops(c, stsC, record_get(fal, "first"), record_get(fal, "gen")) catch false;
+ let r16 = try r4 && dtb-once(c, stsD, fal) catch false;
+ let r32 = try opened && dtb-refusals(c, stsE) catch false;
+ let r64 = try opened && dtb-falsifiers(c) catch false;
+ let left = opened ? dsv4-close(ctx, append(stsA, append(stsB, append(stsC, append(stsD, stsE))))) : [0];
+ let c128 = dtb-bit(try opened && len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
+ let removed = host_path_remove(path);
+ print_str("dsv4-token-band claims " ++ dtb-bit(r1, 1).str() ++ " " ++ dtb-bit(r2, 2).str() ++ " " ++ dtb-bit(r4, 4).str() ++ " " ++ dtb-bit(r8, 8).str() ++ " " ++ dtb-bit(r16, 16).str() ++ " " ++ dtb-bit(r32, 32).str() ++ " " ++ dtb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ dvb-mapped().str() ++ " removed " ++ removed.str());
+ dtb-bit(r1, 1) + dtb-bit(r2, 2) + dtb-bit(r4, 4) + dtb-bit(r8, 8) + dtb-bit(r16, 16) + dtb-bit(r32, 32) + dtb-bit(r64, 64) + c128;
+}
