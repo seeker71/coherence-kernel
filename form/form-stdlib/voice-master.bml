@@ -1,0 +1,735 @@
+//////////////////////////////////////////////////////////////////////
+// voice-master.bml — the body masters its own sleep track, on its own metal, with no tool beside it.
+//
+// A narration made of sentence chunks is not yet a track. This is the stage that makes it one, and it
+// replaces the sox + ffmpeg chain the first sleep tracks were mastered with:
+//
+//   assemble  chunks joined with rests (clause 0.5 s, sentence 1.2 s, paragraph 3.4 s); each chunk takes a
+//             30 ms half-sine fade-in and a 60 ms fade-out and is peak-normalised to -20 dBFS (sox `fade h`,
+//             `norm -20`); a WAV chunk at another rate is resampled by a Hann-windowed sinc (the ear's own shape)
+//   tone      highpass 70 Hz, lowpass 5800 Hz, low shelf +3 dB at 180 Hz, treble shelf -4 dB at 3200 Hz,
+//             low shelf +2 dB at 120 Hz — the RBJ biquads sox builds, in float32, in overlapped blocks
+//   dynamics  sox `compand 0.08,0.6 6:-70,-60,-25 -6 -90 0.2`: a peak follower on |x| (attack 0.08 s, decay
+//             0.6 s), the transfer curve read as sox reads it, a 0.2 s look-ahead delay on the signal.
+//             SOX READS "-70,-60,-25" AS THE POINTS (-70,-70), (-60,-25) and the assumed (0,0) — an omitted
+//             out-dB defaults to in-dB — so the curve is an UPWARD compressor, not a gentle trim: a -50 dBFS
+//             envelope leaves at -26.8, -40 at -22.7, -20 at -14.3, -3 at -7.2 (each includes the -6 makeup).
+//             The knee rounds a corner over +-min(6 dB, half the shorter neighbouring segment); the speech
+//             levels sit on the straight segment, far from either corner.
+//   room      a small warm room: eight damped combs and four allpasses (the Freeverb network sox's reverb
+//             is built on) plus a sparse early-reflection tap line, wet level set against the network's own
+//             measured impulse-response energy, not against a constant somebody remembered
+//   ends      linear fade-in 6 s, linear fade-out 15 s (sox `fade t 6 0 15`)
+//   loudness  ITU-R BS.1770 K-weighted, gated integrated loudness, EBU R128 loudness range, sample and
+//             4x true peak — measured on the device, applied as one gain to land the target LUFS
+//   write     one 16-bit mono WAV, header and samples built on the device, read back once and written once
+//
+// WHY THE SHAPE IS WHAT IT IS. A track is 46–59 minutes, up to 60 million samples. An interpreted
+// per-sample loop is the wrong place for any of it, and so is a one-thread loop over the whole line:
+//
+//   * A RECURSIVE FILTER IS PARALLEL IF ITS MEMORY IS SHORT. Every IIR here forgets its state: the
+//     slowest pole of the tone chain decays by e^-115 in 8192 samples. So each GPU thread owns a block,
+//     starts `warm` samples EARLIER with a zero state, and writes only its own block. The seam is
+//     below float32 and the band proves it against the same filter run in one piece.
+//   * THE FOLLOWER IS THE ONE TRULY SEQUENTIAL THING (a nonlinear one-pole with two time constants).
+//     It runs as ONE simdgroup: 32 lanes load 1024 samples coalesced into threadgroup memory, lane 0
+//     walks them, 32 lanes store. The gain curve (a log and an exp per sample) is then parallel.
+//   * THE ROOM'S memory is its reverberation time, so it takes the same blocked shape with two RT60 of
+//     warm-up; each thread keeps its delay lines in its own slice of a scratch buffer.
+//   * THE FILE LEAVES IN ONE PIECE. metal_buf_read answers a whole region as one string and write_file
+//     writes one string; 120 MB moved in 0.14 s. Nothing is joined, so nothing can be quadratic.
+//
+// Float32 on the device, doubles in Form: every coefficient, curve table and reference number is
+// designed in Form (its own sine and cosine, below) and handed over as float32 bytes. No `using
+// namespace metal;` — emitted units qualify with metal::.
+//
+// Proven by: form/form-stdlib/tests/voice-master-band.fk  ·  run it: observe/voice-master-run.fk
+// preflight-exec: forbidden
+import form/form-stdlib/core.fk;
+import form/form-stdlib/metal-door.fk;
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+ class FormVoiceMaster {
+
+  // ================= numbers: the body's own sine, in doubles =================
+  def vmm-pi() = 3.141592653589793;
+  def vmm-twopi() = 6.283185307179586;
+  def vmm-wrap(x) = x - (float_to_int((x / vmm-twopi()) + (x < 0.0 ? (0.0 - 0.5) : 0.5)) * vmm-twopi());
+  def vmm-sin-go(r2, term, n, acc) = n > 13 ? acc : vmm-sin-go(r2, (term * (0.0 - r2)) / (((2 * n) + 2) * (((2 * n) + 3) * 1.0)), n + 1, acc + term);
+  def vmm-sin(x) {
+   let r = vmm-wrap(x);
+   vmm-sin-go(r * r, r, 0, 0.0);
+  }
+  def vmm-cos(x) = vmm-sin(x + (vmm-pi() * 0.5));
+  def vmm-tan(x) = vmm-sin(x) / vmm-cos(x);
+  def vmm-log10(x) = math_log(x) / math_log(10.0);
+  def vmm-db(x) = 20.0 * vmm-log10(x);
+  def vmm-undb(d) = math_pow(10.0, d / 20.0);
+  def vmm-round(x) = float_to_int(x + 0.5);
+  def vmm-ceil-div(a, b) = (a + (b - 1)) / b;
+  def vmm-min(a, b) = a < b ? a : b;
+  def vmm-max(a, b) = a > b ? a : b;
+  def vmm-r3(x) = round_ndigits(x, 3);
+  def vmm-r2(x) = round_ndigits(x, 2);
+  // list join (`++` joins strings only)
+  def vmm-cat(xs, ys) = nil?(xs) ? ys : cons(xs[0], vmm-cat(xs[1:], ys));
+  def vmm-flat(xss) = nil?(xss) ? [] : vmm-cat(xss[0], vmm-flat(xss[1:]));
+  def vmm-take(xs, k) = k <= 0 ? [] : cons(xs[0], vmm-take(xs[1:], k - 1));
+
+  // ================= biquads: RBJ cookbook, the forms sox's highpass/lowpass/bass/treble use =================
+  // a coefficient set is [b0, b1, b2, a1, a2] with a0 divided out
+  def vmm-bq-norm(b0, b1, b2, a0, a1, a2) = [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+  def vmm-bq-hp(fs, f, q) {
+   let w = vmm-twopi() * f / fs;
+   let cw = vmm-cos(w);
+   let al = vmm-sin(w) / (2.0 * q);
+   vmm-bq-norm((1.0 + cw) / 2.0, 0.0 - (1.0 + cw), (1.0 + cw) / 2.0, 1.0 + al, 0.0 - (2.0 * cw), 1.0 - al);
+  }
+  def vmm-bq-lp(fs, f, q) {
+   let w = vmm-twopi() * f / fs;
+   let cw = vmm-cos(w);
+   let al = vmm-sin(w) / (2.0 * q);
+   vmm-bq-norm((1.0 - cw) / 2.0, 1.0 - cw, (1.0 - cw) / 2.0, 1.0 + al, 0.0 - (2.0 * cw), 1.0 - al);
+  }
+  // shelf with slope S (sox's default width is 0.5 slope); hi = 0 low shelf, 1 high shelf
+  def vmm-bq-shelf(fs, f, gdb, s, hi) {
+   let w = vmm-twopi() * f / fs;
+   let cw = vmm-cos(w);
+   let A = math_pow(10.0, gdb / 40.0);
+   let al = vmm-sin(w) / 2.0 * math_sqrt(((A + (1.0 / A)) * ((1.0 / s) - 1.0)) + 2.0);
+   let t = 2.0 * math_sqrt(A) * al;
+   (Comparable) hi == 0 ? vmm-bq-norm(A * ((A + 1.0) - ((A - 1.0) * cw) + t), 2.0 * A * ((A - 1.0) - ((A + 1.0) * cw)), A * ((A + 1.0) - ((A - 1.0) * cw) - t), (A + 1.0) + ((A - 1.0) * cw) + t, 0.0 - (2.0 * ((A - 1.0) + ((A + 1.0) * cw))), (A + 1.0) + ((A - 1.0) * cw) - t) : vmm-bq-norm(A * ((A + 1.0) + ((A - 1.0) * cw) + t), 0.0 - (2.0 * A * ((A - 1.0) + ((A + 1.0) * cw))), A * ((A + 1.0) + ((A - 1.0) * cw) - t), (A + 1.0) - ((A - 1.0) * cw) + t, 2.0 * ((A - 1.0) - ((A + 1.0) * cw)), (A + 1.0) - ((A - 1.0) * cw) - t);
+  }
+  // the tone chain, every number sox was given
+  def vmm-tone-chain(fs) = [vmm-bq-hp(fs, 70.0, 0.7071067811865476), vmm-bq-lp(fs, 5800.0, 0.7071067811865476), vmm-bq-shelf(fs, 180.0, 3.0, 0.5, 0), vmm-bq-shelf(fs, 3200.0, 0.0 - 4.0, 0.5, 1), vmm-bq-shelf(fs, 120.0, 2.0, 0.5, 0)];
+  // BS.1770-4 K-weighting at any rate: the high shelf then the RLB highpass, from the standard's own
+  // analogue prototypes (the 48 kHz table is the band's witness)
+  def vmm-k-stage1(fs) {
+   let K = vmm-tan(vmm-pi() * 1681.974450955533 / fs);
+   let Q = 0.7071752369554196;
+   let Vh = math_pow(10.0, 3.999843853973347 / 20.0);
+   let Vb = math_pow(Vh, 0.4996667741545416);
+   let d = 1.0 + (K / Q) + (K * K);
+   [(Vh + (Vb * K / Q) + (K * K)) / d, 2.0 * ((K * K) - Vh) / d, (Vh - (Vb * K / Q) + (K * K)) / d, 2.0 * ((K * K) - 1.0) / d, (1.0 - (K / Q) + (K * K)) / d];
+  }
+  def vmm-k-stage2(fs) {
+   let K = vmm-tan(vmm-pi() * 38.13547087602444 / fs);
+   let Q = 0.5003270373238773;
+   let d = 1.0 + (K / Q) + (K * K);
+   [1.0, 0.0 - 2.0, 1.0, 2.0 * ((K * K) - 1.0) / d, (1.0 - (K / Q) + (K * K)) / d];
+  }
+  def vmm-k-chain(fs) = [vmm-k-stage1(fs), vmm-k-stage2(fs)];
+  // analytic response |H(e^jw)| of one stage and of a chain, in dB — the truth the device is held against
+  def vmm-bq-db(c, fs, f) {
+   let w = vmm-twopi() * f / fs;
+   let nr = c[0] + (c[1] * vmm-cos(w)) + (c[2] * vmm-cos(2.0 * w));
+   let ni = 0.0 - ((c[1] * vmm-sin(w)) + (c[2] * vmm-sin(2.0 * w)));
+   let dr = 1.0 + (c[3] * vmm-cos(w)) + (c[4] * vmm-cos(2.0 * w));
+   let di = 0.0 - ((c[3] * vmm-sin(w)) + (c[4] * vmm-sin(2.0 * w)));
+   10.0 * vmm-log10(((nr * nr) + (ni * ni)) / ((dr * dr) + (di * di)));
+  }
+  def vmm-chain-db(cs, fs, f) = nil?(cs) ? 0.0 : (vmm-bq-db(cs[0], fs, f) + vmm-chain-db(cs[1:], fs, f));
+  // the same biquad in doubles, direct form II transposed — the reference a float32 pass is held to
+  def vmm-ref-stage(c, xs, z1, z2, acc) {
+   let x = xs[0];
+   let o = (c[0] * x) + z1;
+   nil?(xs[1:]) ? reverse(cons(o, acc)) : vmm-ref-stage(c, xs[1:], (c[1] * x) - (c[3] * o) + z2, (c[2] * x) - (c[4] * o), cons(o, acc));
+  }
+  def vmm-ref-chain(cs, xs) = nil?(cs) ? xs : vmm-ref-chain(cs[1:], vmm-ref-stage(cs[0], xs, 0.0, 0.0, []));
+
+  // ================= the compressor's transfer curve, as sox reads it =================
+  // points are [in_dB, out_dB]; an omitted out defaults to in; the point 0,0 is assumed. Below the first
+  // point the line has slope 1. Corners are rounded by a quadratic over +-radius dB (radius capped at half
+  // the shorter neighbouring segment). A piece is [x_start, y_start, a, b]: y = ys + t*(b + a*t), t = x - xs.
+  def vmm-knee-width() = 6.0;
+  def vmm-slope(p, q) = (q[1] - p[1]) / (q[0] - p[0]);
+  def vmm-knee-r(pts, k, knee) {
+   let right = (pts[k + 1][0] - pts[k][0]) / 2.0;
+   let left = (Comparable) k == 0 ? knee : ((pts[k][0] - pts[k - 1][0]) / 2.0);
+   vmm-min(knee, vmm-min(left, right));
+  }
+  def vmm-pieces-go(pts, k, mprev, acc) {
+   let m = vmm-slope(pts[k], pts[k + 1]);
+   let r = vmm-knee-r(pts, k, vmm-knee-width());
+   let x = pts[k][0];
+   let y = pts[k][1];
+   let acc2 = r > 0.0 ? cons([x + r, y + (m * r), 0.0, m], cons([x - r, y - (mprev * r), (m - mprev) / (4.0 * r), mprev], acc)) : cons([x, y, 0.0, m], acc);
+   (k + 2) >= len(pts) ? reverse(acc2) : vmm-pieces-go(pts, k + 1, m, acc2);
+  }
+  def vmm-with-origin(pts) = pts[len(pts) - 1][0] < 0.0 ? vmm-cat(pts, [[0.0, 0.0]]) : pts;
+  def vmm-pieces(pts0) {
+   let pts = vmm-with-origin(pts0);
+   cons([0.0 - 400.0, 0.0 - 400.0, 0.0, 1.0], vmm-pieces-go(pts, 0, 1.0, []));
+  }
+  def vmm-curve-go(ps, L, best) = nil?(ps) ? best : vmm-curve-go(ps[1:], L, L >= ps[0][0] ? ps[0] : best);
+  def vmm-curve(ps, L) {
+   let p = vmm-curve-go(ps[1:], L, ps[0]);
+   let t = L - p[0];
+   p[1] + (t * (p[3] + (p[2] * t)));
+  }
+  // what sox was given: compand 0.08,0.6 6:-70,-60,-25 -6 -90 0.2
+  def vmm-comp-points() = [[0.0 - 70.0, 0.0 - 70.0], [0.0 - 60.0, 0.0 - 25.0]];
+  def vmm-comp-makeup() = 0.0 - 6.0;
+  def vmm-comp-attack() = 0.08;
+  def vmm-comp-decay() = 0.6;
+  def vmm-comp-initial-db() = 0.0 - 90.0;
+  def vmm-comp-delay() = 0.2;
+
+  // ================= bytes: float32 and u32 in, float32 out =================
+  def vmm-f32-chunks(xs, acc) = nil?(xs) ? acc : vmm-f32-chunks(xs[1:], cons(md-le32(md-f32-bits(xs[0])), acc));
+  def vmm-f32s(xs) = nil?(xs) ? "" : str-join-reversed(vmm-f32-chunks(xs, []));
+  def vmm-u32-chunks(xs, acc) = nil?(xs) ? acc : vmm-u32-chunks(xs[1:], cons(md-le32(xs[0]), acc));
+  def vmm-u32s(xs) = nil?(xs) ? "" : str-join-reversed(vmm-u32-chunks(xs, []));
+  def vmm-cf(x) = md-f32-bits(x);
+  def vmm-f32-at(s, o) {
+   let b0 = str_byte_at(s, o);
+   let b1 = str_byte_at(s, o + 1);
+   let b2 = str_byte_at(s, o + 2);
+   let b3 = str_byte_at(s, o + 3);
+   let e = ((b3 % 128) * 2) + (b2 / 128);
+   let m = ((b2 % 128) * 65536) + (b1 * 256) + b0;
+   let v = (Comparable) e == 0 ? 0.0 : ((1.0 + ((m * 1.0) / 8388608.0)) * math_pow(2.0, (e - 127) * 1.0));
+   b3 >= 128 ? (0.0 - v) : v;
+  }
+  def vmm-f32-go(s, i, n, acc) = i >= n ? reverse(acc) : vmm-f32-go(s, i + 1, n, cons(vmm-f32-at(s, i * 4), acc));
+  def vmm-u16(s, o) = str_byte_at(s, o) + (str_byte_at(s, o + 1) * 256);
+  def vmm-u32(s, o) = vmm-u16(s, o) + (vmm-u16(s, o + 2) * 65536);
+  // the 44-byte RIFF/WAVE header of a mono 16-bit PCM file of n frames
+  def vmm-wav-header(sr, n) {
+   let data = n * 2;
+   "RIFF" ++ md-le32(36 + data) ++ "WAVEfmt " ++ md-le32(16) ++ md-le16(1) ++ md-le16(1) ++ md-le32(sr) ++ md-le32(sr * 2) ++ md-le16(2) ++ md-le16(16) ++ "data" ++ md-le32(data);
+  }
+
+  // ================= the metal: every kernel qualifies with metal:: =================
+  def vmm-msl-head() = "#include <metal_stdlib>
+inline float vmm_s16(device const uchar* p, ulong i) { ushort w = (ushort)(p[2 * i] | (p[2 * i + 1] << 8)); return (float)as_type<short>(w) / 32768.0f; }
+inline uint vmm_hash(uint v) { uint s = v * 747796405u + 2891336453u; uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+inline float vmm_fadeh(uint i, uint n, uint fin, uint fout) {
+  float w = 1.0f;
+  if (i < fin) w *= 0.5f - 0.5f * metal::cos(3.14159265358979f * (float)i / (float)fin);
+  uint r = n - 1u - i;
+  if (r < fout) w *= 0.5f - 0.5f * metal::cos(3.14159265358979f * (float)r / (float)fout);
+  return w; }
+inline float vmm_rs(device const uchar* p, uint ns, uint j, uint num, uint den) {
+  if (num == den) return vmm_s16(p, j);
+  ulong ph = (ulong)j * num; long c = (long)(ph / den); float fr = (float)(ph % den) / (float)den;
+  float cut = metal::min(1.0f, (float)den / (float)num); int rad = (int)metal::ceil(16.0f / cut); float acc = 0.0f; float wsum = 0.0f;
+  for (int k = -rad + 1; k <= rad; k++) {
+    float x = (float)k - fr; float u = x * cut;
+    float s = metal::fabs(u) < 1e-6f ? 1.0f : metal::sin(3.14159265358979f * u) / (3.14159265358979f * u);
+    float w = 0.5f + 0.5f * metal::cos(3.14159265358979f * x / (float)rad); float h = cut * s * w;
+    long idx = c + k; if (idx >= 0 && idx < (long)ns) acc += h * vmm_s16(p, (ulong)idx); wsum += h; }
+  return acc / wsum; }
+";
+  // fills and probes
+  def vmm-msl-gen() = "kernel void vmm_zero(device float* y [[buffer(0)]], constant uint& n [[buffer(1)]], uint gid [[thread_position_in_grid]]) { if (gid >= n) return; y[gid] = 0.0f; }
+kernel void vmm_fill(device float* y [[buffer(0)]], constant uint& off [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& v [[buffer(3)]], uint gid [[thread_position_in_grid]]) { if (gid >= n) return; y[off + gid] = v; }
+kernel void vmm_sine(device float* y [[buffer(0)]], constant uint& off [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& f [[buffer(3)]], constant uint& sr [[buffer(4)]], constant float& amp [[buffer(5)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= n) return; ulong ph = ((ulong)gid * f) % sr; y[off + gid] = amp * metal::sin(6.28318530717959f * (float)ph / (float)sr); }
+kernel void vmm_noise(device float* y [[buffer(0)]], constant uint& off [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& seed [[buffer(3)]], constant float& amp [[buffer(4)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= n) return; uint h = vmm_hash(gid + seed * 2654435761u); y[off + gid] = amp * ((float)(h >> 8) * (1.0f / 8388608.0f) - 1.0f); }
+kernel void vmm_stats(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& from [[buffer(2)]], constant uint& cnt [[buffer(3)]], uint lane [[thread_index_in_simdgroup]]) {
+  float ss = 0.0f; float mx = 0.0f; float sm = 0.0f;
+  for (uint i = lane; i < cnt; i += 32u) { float v = x[from + i]; ss += v * v; sm += v; mx = metal::max(mx, metal::fabs(v)); }
+  ss = metal::simd_sum(ss); sm = metal::simd_sum(sm); mx = metal::simd_max(mx);
+  if (lane == 0u) { out[0] = ss / (float)cnt; out[1] = mx; out[2] = sm / (float)cnt; } }
+";
+  // assembly: a chunk's peak after its fades, and the chunk placed at its offset, normalised
+  def vmm-msl-asm() = "kernel void vmm_peak(device const uchar* src [[buffer(0)]], device float* pk [[buffer(1)]], constant uint& ns [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& k [[buffer(4)]], constant uint& fin [[buffer(5)]], constant uint& fout [[buffer(6)]], constant uint& num [[buffer(7)]], constant uint& den [[buffer(8)]], uint lane [[thread_index_in_simdgroup]]) {
+  float m = 0.0f;
+  for (uint i = lane; i < n; i += 32u) { float v = metal::fabs(vmm_rs(src, ns, i, num, den)) * vmm_fadeh(i, n, fin, fout); m = metal::max(m, v); }
+  m = metal::simd_max(m); if (lane == 0u) pk[k] = m; }
+kernel void vmm_place(device const uchar* src [[buffer(0)]], device float* dst [[buffer(1)]], device const float* pk [[buffer(2)]], constant uint& ns [[buffer(3)]], constant uint& n [[buffer(4)]], constant uint& k [[buffer(5)]], constant uint& off [[buffer(6)]], constant uint& fin [[buffer(7)]], constant uint& fout [[buffer(8)]], constant uint& num [[buffer(9)]], constant uint& den [[buffer(10)]], constant float& target [[buffer(11)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= n) return; float p = pk[k]; float g = p > 0.0f ? target / p : 0.0f;
+  dst[off + gid] = vmm_rs(src, ns, gid, num, den) * vmm_fadeh(gid, n, fin, fout) * g; }
+";
+  // the tone chain: overlapped blocks, direct form II transposed, up to eight stages
+  def vmm-msl-iir() = "kernel void vmm_iir(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], device const float* c [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& ns [[buffer(4)]], constant uint& blk [[buffer(5)]], constant uint& warm [[buffer(6)]], uint t [[thread_position_in_grid]]) {
+  ulong b0 = (ulong)t * blk; if (b0 >= n) return; ulong end = metal::min((ulong)n, b0 + blk); ulong s = b0 > warm ? b0 - warm : 0ul;
+  float z1[8]; float z2[8]; for (uint k = 0; k < 8u; k++) { z1[k] = 0.0f; z2[k] = 0.0f; }
+  for (ulong i = s; i < end; i++) {
+    float v = x[i];
+    for (uint k = 0; k < ns; k++) { float o = c[5u * k] * v + z1[k]; z1[k] = c[5u * k + 1u] * v - c[5u * k + 3u] * o + z2[k]; z2[k] = c[5u * k + 2u] * v - c[5u * k + 4u] * o; v = o; }
+    if (i >= b0) y[i] = v; } }
+";
+  // dynamics: the follower (one simdgroup, tiles through threadgroup memory) and the parallel gain
+  def vmm-msl-comp() = "kernel void vmm_env(device const float* x [[buffer(0)]], device float* env [[buffer(1)]], device float* st [[buffer(2)]], constant uint& from [[buffer(3)]], constant uint& cnt [[buffer(4)]], constant float& ra [[buffer(5)]], constant float& rd [[buffer(6)]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tile[1024]; float v = st[0];
+  for (uint base = 0; base < cnt; base += 1024u) {
+    uint m = metal::min(1024u, cnt - base);
+    for (uint j = lane; j < m; j += 32u) tile[j] = x[from + base + j];
+    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+    if (lane == 0u) { for (uint j = 0; j < m; j++) { float a = metal::fabs(tile[j]); float c = a > v ? ra : rd; v = a + (v - a) * c; tile[j] = v; } }
+    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+    for (uint j = lane; j < m; j += 32u) env[from + base + j] = tile[j];
+    threadgroup_barrier(metal::mem_flags::mem_threadgroup); }
+  if (lane == 0u) st[0] = v; }
+kernel void vmm_comp(device const float* x [[buffer(0)]], device const float* env [[buffer(1)]], device float* y [[buffer(2)]], device const float* pc [[buffer(3)]], constant uint& n [[buffer(4)]], constant uint& delay [[buffer(5)]], constant uint& np [[buffer(6)]], constant float& makeup [[buffer(7)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= n) return; float e = metal::max(env[gid], 1.0e-9f); float L = 20.0f * metal::log10(e);
+  uint k = 0u; for (uint q = 1u; q < np; q++) { if (L >= pc[4u * q]) k = q; }
+  float t = L - pc[4u * k]; float Y = pc[4u * k + 1u] + t * (pc[4u * k + 3u] + pc[4u * k + 2u] * t);
+  float g = metal::exp((Y - L + makeup) * 0.11512925465f);
+  float xv = gid >= delay ? x[gid - delay] : 0.0f; y[gid] = xv * g; }
+";
+  // the room: Freeverb's combs and allpasses plus a sparse early-reflection line, in overlapped blocks.
+  // geo = [nc, comb delays x8, na, allpass delays x4, ne, early delays x8]; gp = [comb feedback x8, damp, allpass feedback, early gains x8, wet]
+  def vmm-msl-room() = "kernel void vmm_room(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], device float* sc [[buffer(2)]], device const uint* geo [[buffer(3)]], device const float* gp [[buffer(4)]], constant uint& n [[buffer(5)]], constant uint& blk [[buffer(6)]], constant uint& warm [[buffer(7)]], constant uint& S [[buffer(8)]], constant float& dry [[buffer(9)]], uint t [[thread_position_in_grid]]) {
+  ulong b0 = (ulong)t * blk; if (b0 >= n) return; ulong end = metal::min((ulong)n, b0 + blk); ulong s = b0 > warm ? b0 - warm : 0ul;
+  device float* ring = sc + (ulong)t * S; for (uint q = 0; q < S; q++) ring[q] = 0.0f;
+  uint nc = geo[0]; uint na = geo[9]; uint ne = geo[14];
+  uint coff[8]; uint cdel[8]; uint cpos[8]; float cfl[8]; uint aoff[4]; uint adel[4]; uint apos[4]; uint o = 0u;
+  for (uint k = 0; k < nc; k++) { cdel[k] = geo[1u + k]; coff[k] = o; o += cdel[k]; cpos[k] = 0u; cfl[k] = 0.0f; }
+  for (uint k = 0; k < na; k++) { adel[k] = geo[10u + k]; aoff[k] = o; o += adel[k]; apos[k] = 0u; }
+  float damp = gp[8]; float apfb = gp[9]; float wet = gp[18];
+  for (ulong i = s; i < end; i++) {
+    float xi = x[i]; float acc = 0.0f;
+    for (uint k = 0; k < nc; k++) { float ov = ring[coff[k] + cpos[k]]; cfl[k] = ov * (1.0f - damp) + cfl[k] * damp; ring[coff[k] + cpos[k]] = xi + cfl[k] * gp[k]; cpos[k]++; if (cpos[k] >= cdel[k]) cpos[k] = 0u; acc += ov; }
+    for (uint k = 0; k < na; k++) { float bo = ring[aoff[k] + apos[k]]; float ov = bo - acc; ring[aoff[k] + apos[k]] = acc + bo * apfb; apos[k]++; if (apos[k] >= adel[k]) apos[k] = 0u; acc = ov; }
+    for (uint e = 0; e < ne; e++) { ulong de = geo[15u + e]; if (i >= de) acc += x[i - de] * gp[10u + e]; }
+    if (i >= b0) y[i] = dry * xi + acc * wet; } }
+";
+  // ends, measurement, spectrum, and the file
+  def vmm-msl-end() = "kernel void vmm_ramp(device float* y [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& fin [[buffer(2)]], constant uint& fout [[buffer(3)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= n) return; float w = 1.0f; if (gid < fin) w *= (float)gid / (float)fin; uint r = n - 1u - gid; if (r < fout) w *= (float)r / (float)fout; y[gid] *= w; }
+kernel void vmm_hop(device const float* x [[buffer(0)]], device float* h [[buffer(1)]], constant uint& hs [[buffer(2)]], constant uint& nh [[buffer(3)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= nh) return; ulong b = (ulong)gid * hs; float a = 0.0f; float s = 0.0f;
+  for (uint i = 0; i < hs; i++) { float v = x[b + i]; a += v * v; if ((i & 255u) == 255u) { s += a; a = 0.0f; } }
+  h[gid] = s + a; }
+kernel void vmm_gate(device const float* hop [[buffer(0)]], device float* out [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hs [[buffer(3)]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup uint hist[4000];
+  for (uint q = lane; q < 4000u; q += 32u) hist[q] = 0u;
+  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+  if (lane == 0u) {
+    for (uint q = 0; q < 12u; q++) out[q] = 0.0f;
+    float I = -120.0f; float gam = -120.0f; float cb = 0.0f; float c1 = 0.0f;
+    if (nh >= 4u) {
+      float inv = 1.0f / (4.0f * (float)hs); uint nb = nh - 3u;
+      float s1 = 0.0f; float a1 = 0.0f; uint k1 = 0u; float n1 = 0.0f;
+      for (uint j = 0; j < nb; j++) { float m = (hop[j] + hop[j + 1u] + hop[j + 2u] + hop[j + 3u]) * inv; if (m > 0.0f && (-0.691f + 10.0f * metal::log10(m)) > -70.0f) { a1 += m; n1 += 1.0f; k1++; if ((k1 & 255u) == 0u) { s1 += a1; a1 = 0.0f; } } }
+      c1 = n1;
+      if (n1 > 0.0f) {
+        gam = -0.691f + 10.0f * metal::log10((s1 + a1) / n1) - 10.0f; float thr = metal::max(-70.0f, gam);
+        float s2 = 0.0f; float a2 = 0.0f; uint k2 = 0u; float n2 = 0.0f;
+        for (uint j = 0; j < nb; j++) { float m = (hop[j] + hop[j + 1u] + hop[j + 2u] + hop[j + 3u]) * inv; if (m > 0.0f && (-0.691f + 10.0f * metal::log10(m)) > thr) { a2 += m; n2 += 1.0f; k2++; if ((k2 & 255u) == 0u) { s2 += a2; a2 = 0.0f; } } }
+        cb = n2; if (n2 > 0.0f) I = -0.691f + 10.0f * metal::log10((s2 + a2) / n2); } }
+    out[0] = I; out[1] = gam; out[2] = cb; out[8] = c1;
+    float lra = 0.0f; float l10 = 0.0f; float l95 = 0.0f; float gst = -120.0f; float nst = 0.0f;
+    if (nh >= 30u) {
+      float inv3 = 1.0f / (30.0f * (float)hs); uint nw = nh - 29u;
+      float s3 = 0.0f; float a3 = 0.0f; uint k3 = 0u; float n3 = 0.0f;
+      for (uint j = 0; j < nw; j++) { float sm = 0.0f; for (uint q = 0; q < 30u; q++) sm += hop[j + q]; float m = sm * inv3; if (m > 0.0f && (-0.691f + 10.0f * metal::log10(m)) > -70.0f) { a3 += m; n3 += 1.0f; k3++; if ((k3 & 255u) == 0u) { s3 += a3; a3 = 0.0f; } } }
+      if (n3 > 0.0f) {
+        gst = -0.691f + 10.0f * metal::log10((s3 + a3) / n3) - 20.0f; float thr3 = metal::max(-70.0f, gst); float cnt = 0.0f;
+        for (uint j = 0; j < nw; j++) { float sm = 0.0f; for (uint q = 0; q < 30u; q++) sm += hop[j + q]; float m = sm * inv3; if (m > 0.0f) { float L = -0.691f + 10.0f * metal::log10(m); if (L > thr3) { int b = (int)((L + 80.0f) * 50.0f); b = metal::clamp(b, 0, 3999); hist[b] += 1u; cnt += 1.0f; } } }
+        nst = cnt;
+        if (cnt > 0.0f) {
+          float t10 = cnt * 0.10f; float t95 = cnt * 0.95f; float cum = 0.0f; bool f10 = false; bool f95 = false;
+          for (uint b = 0; b < 4000u; b++) { cum += (float)hist[b]; if (!f10 && cum >= t10) { l10 = -80.0f + ((float)b + 0.5f) * 0.02f; f10 = true; } if (!f95 && cum >= t95) { l95 = -80.0f + ((float)b + 0.5f) * 0.02f; f95 = true; } }
+          lra = l95 - l10; } } }
+    out[3] = lra; out[4] = l10; out[5] = l95; out[6] = gst; out[7] = nst; } }
+kernel void vmm_peaks(device const float* x [[buffer(0)]], device metal::atomic_uint* out [[buffer(1)]], device const float* tp [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& per [[buffer(4)]], uint gid [[thread_position_in_grid]]) {
+  ulong a = (ulong)gid * per; if (a >= n) return; ulong b = metal::min((ulong)n, a + per); float sp = 0.0f; float tk = 0.0f;
+  for (ulong i = a; i < b; i++) {
+    float v = metal::fabs(x[i]); sp = metal::max(sp, v);
+    for (uint p = 0; p < 3u; p++) { float acc = 0.0f; for (uint k = 0; k < 24u; k++) { long j = (long)i + (long)k - 11; if (j >= 0 && j < (long)n) acc += x[j] * tp[p * 24u + k]; } tk = metal::max(tk, metal::fabs(acc)); } }
+  tk = metal::max(tk, sp);
+  metal::atomic_fetch_max_explicit(out, as_type<uint>(sp), metal::memory_order_relaxed); metal::atomic_fetch_max_explicit(out + 1, as_type<uint>(tk), metal::memory_order_relaxed); }
+kernel void vmm_fft_load(device const float* x [[buffer(0)]], device float* buf [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& nf [[buffer(3)]], constant uint& stride [[buffer(4)]], constant uint& L [[buffer(5)]], constant uint& hann [[buffer(6)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= nf * L) return; uint f = gid / L; uint m = gid - f * L; ulong p = (ulong)f * stride + m; float s = p < n ? x[p] : 0.0f;
+  if (hann != 0u) s *= 0.5f - 0.5f * metal::cos(6.28318530717959f * (float)m / (float)L);
+  buf[2ul * gid] = s; buf[2ul * gid + 1ul] = 0.0f; }
+kernel void vmm_fft_stage(device const float* a [[buffer(0)]], device float* b [[buffer(1)]], constant uint& L [[buffer(2)]], constant uint& Ns [[buffer(3)]], constant uint& nj [[buffer(4)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= nj) return; uint h = L / 2u; uint f = gid / h; uint j = gid - f * h; ulong base = (ulong)f * L;
+  uint k = j % Ns; float ang = -3.14159265358979f * (float)k / (float)Ns; float c = metal::precise::cos(ang); float s = metal::precise::sin(ang);
+  ulong i0 = base + j; ulong i1 = i0 + h; float r0 = a[2ul * i0]; float q0 = a[2ul * i0 + 1ul]; float r1 = a[2ul * i1]; float q1 = a[2ul * i1 + 1ul];
+  float vr = r1 * c - q1 * s; float vi = r1 * s + q1 * c;
+  uint d = (j / Ns) * Ns * 2u + k; ulong o0 = base + d; ulong o1 = o0 + Ns;
+  b[2ul * o0] = r0 + vr; b[2ul * o0 + 1ul] = q0 + vi; b[2ul * o1] = r0 - vr; b[2ul * o1 + 1ul] = q0 - vi; }
+kernel void vmm_fft_mag(device const float* buf [[buffer(0)]], device float* pw [[buffer(1)]], constant uint& nf [[buffer(2)]], constant uint& L [[buffer(3)]], uint k [[thread_position_in_grid]]) {
+  if (k > L / 2u) return; float acc = 0.0f;
+  for (uint f = 0; f < nf; f++) { ulong i = (ulong)f * L + k; float re = buf[2ul * i]; float im = buf[2ul * i + 1ul]; acc += metal::sqrt(re * re + im * im); }
+  pw[k] = acc; }
+kernel void vmm_cent(device const float* pw [[buffer(0)]], device float* out [[buffer(1)]], constant uint& nb [[buffer(2)]], constant float& hz [[buffer(3)]], uint lane [[thread_index_in_simdgroup]]) {
+  float num = 0.0f; float den = 0.0f;
+  for (uint k = lane; k < nb; k += 32u) { float p = pw[k] * pw[k]; num += p * (float)k * hz; den += p; }
+  num = metal::simd_sum(num); den = metal::simd_sum(den); if (lane == 0u) { out[0] = den > 0.0f ? num / den : 0.0f; out[1] = den; } }
+kernel void vmm_pack(device const float* x [[buffer(0)]], device uchar* o [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& hdr [[buffer(3)]], constant float& g [[buffer(4)]], constant uint& dith [[buffer(5)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= n) return; float v = x[gid] * g * 32768.0f;
+  if (dith != 0u) { uint h1 = vmm_hash(gid * 2u + 1u); uint h2 = vmm_hash(gid * 2u + 2u); v += ((float)(h1 >> 8) - (float)(h2 >> 8)) * (1.0f / 16777216.0f); }
+  v = metal::clamp(metal::rint(v), -32768.0f, 32767.0f); ushort u = as_type<ushort>((short)v); ulong p = (ulong)hdr + 2ul * gid; o[p] = (uchar)(u & 255u); o[p + 1ul] = (uchar)(u >> 8); }
+kernel void vmm_unpack(device const uchar* src [[buffer(0)]], device float* y [[buffer(1)]], constant uint& n [[buffer(2)]], uint gid [[thread_position_in_grid]]) {
+  if (gid >= n) return; y[gid] = vmm_s16(src, gid); }
+";
+  def vmm-msl() = vmm-msl-head() ++ vmm-msl-gen() ++ vmm-msl-asm() ++ vmm-msl-iir() ++ vmm-msl-comp() ++ vmm-msl-room() ++ vmm-msl-end();
+  // a kernel named here is also defined in vmm-msl; its POSITION is its pipeline index: append, never insert
+  def vmm-names() = ["vmm_zero", "vmm_fill", "vmm_sine", "vmm_noise", "vmm_stats", "vmm_peak", "vmm_place", "vmm_iir", "vmm_env", "vmm_comp", "vmm_room", "vmm_ramp", "vmm_hop", "vmm_gate", "vmm_peaks", "vmm_fft_load", "vmm_fft_stage", "vmm_pack", "vmm_unpack", "vmm_cent", "vmm_fft_mag"];
+  def vmm-pi-zero() = 0;
+  def vmm-pi-fill() = 1;
+  def vmm-pi-sine() = 2;
+  def vmm-pi-noise() = 3;
+  def vmm-pi-stats() = 4;
+  def vmm-pi-peak() = 5;
+  def vmm-pi-place() = 6;
+  def vmm-pi-iir() = 7;
+  def vmm-pi-env() = 8;
+  def vmm-pi-comp() = 9;
+  def vmm-pi-room() = 10;
+  def vmm-pi-ramp() = 11;
+  def vmm-pi-hop() = 12;
+  def vmm-pi-gate() = 13;
+  def vmm-pi-peaks() = 14;
+  def vmm-pi-fftload() = 15;
+  def vmm-pi-fftstage() = 16;
+  def vmm-pi-pack() = 17;
+  def vmm-pi-unpack() = 18;
+  def vmm-pi-cent() = 19;
+  def vmm-pi-fftmag() = 20;
+
+  // ================= the door: pipelines, buffers, dispatches =================
+  def vmm-pipes-go(msl, names) = nil?(names) ? [] : cons(metal_pipeline(msl, names[0]), vmm-pipes-go(msl, names[1:]));
+  def vmm-pipes-ok?(ps) = nil?(ps) ? true : (ps[0] > 0 ? vmm-pipes-ok?(ps[1:]) : false);
+  // the pipelines, or nothing: a carrier that is not admitted answers 0 to everything, so the canary
+  // is read first and a pipeline that did not compile refuses the whole door
+  def vmm-open() {
+   let live = md-door-live?();
+   let ps = live ? vmm-pipes-go(vmm-msl(), vmm-names()) : [];
+   live ? (vmm-pipes-ok?(ps) ? ps : form_error("voice-master: a kernel did not compile: " ++ metal_status())) : form_error("voice-master: the Metal carrier is not admitted: " ++ metal_status());
+  }
+  def vmm-alloc(bytes) {
+   let h = metal_buf_alloc(bytes);
+   h <= 0 ? form_error("voice-master: allocation of " ++ bytes.str() ++ " bytes refused") : h;
+  }
+  def vmm-falloc(n) = vmm-alloc(n * 4);
+  def vmm-put(h, off, s) = metal_buf_write(h, off, s) < 0 ? form_error("voice-master: buffer write refused") : h;
+  def vmm-fput(xs) {
+   let h = vmm-falloc(len(xs));
+   vmm-put(h, 0, vmm-f32s(xs));
+  }
+  def vmm-uput(xs) {
+   let h = vmm-falloc(len(xs));
+   vmm-put(h, 0, vmm-u32s(xs));
+  }
+  def vmm-sync() = metal_sync() < 0 ? form_error("voice-master: the device did not finish") : 1;
+  def vmm-free(hs) = nil?(hs) ? 1 : vmm-free-next(metal_buf_free(hs[0]), hs[1:]);
+  def vmm-free-next(rc, rest) = rc < 0 ? form_error("voice-master: buffer release refused") : vmm-free(rest);
+  def vmm-go(ps, i, bufs, cs, threads) {
+   let rc = metal_enqueue(ps[i], md-bind(bufs, cs), threads);
+   rc < 0 ? form_error("voice-master: dispatch refused: " ++ vmm-names()[i]) : rc;
+  }
+  // one simdgroup: the kernel walks or reduces alone
+  def vmm-go1(ps, i, bufs, cs) {
+   let rc = metal_enqueue(ps[i], md-bind16(bufs, cs, 32, 0, 1, 0), 1);
+   rc < 0 ? form_error("voice-master: dispatch refused: " ++ vmm-names()[i]) : rc;
+  }
+  def vmm-zero(ps, h, n) = vmm-go(ps, vmm-pi-zero(), [h], [n], n);
+  def vmm-fill-at(ps, h, off, n, v) = vmm-go(ps, vmm-pi-fill(), [h], [off, n, vmm-cf(v)], n);
+  def vmm-read(h, from, n) {
+   let s = metal_buf_read(h, from * 4, n * 4);
+   nothing?(s) ? form_error("voice-master: read refused") : (len(s) < (n * 4) ? form_error("voice-master: short read") : vmm-f32-go(s, 0, n, []));
+  }
+  // mean square, max |x| and mean of x[from, from+cnt)
+  def vmm-stats(ps, x, from, cnt) {
+   let o = vmm-falloc(4);
+   let r = vmm-go1(ps, vmm-pi-stats(), [x, o], [from, cnt]);
+   let sy = vmm-sync();
+   let v = vmm-read(o, 0, 3);
+   let f = vmm-free([o]);
+   v;
+  }
+  def vmm-db-ms(ms) = ms <= 0.0 ? (0.0 - 200.0) : (10.0 * vmm-log10(ms));
+  // a one-dispatch tone/filter chain over x -> y, blocks of blk with warm samples of lead-in
+  def vmm-iir(ps, x, y, n, chain, blk, warm) {
+   let cb = vmm-fput(vmm-flat(chain));
+   let r = vmm-go(ps, vmm-pi-iir(), [x, y, cb], [n, len(chain), blk, warm], vmm-ceil-div(n, blk));
+   let sy = vmm-sync();
+   let f = vmm-free([cb]);
+   r;
+  }
+
+  // ================= assemble: chunks, rests, fades, norm =================
+  def vmm-rest-samples(sr, flag) = (Comparable) flag == 0 ? vmm-round(sr * 0.5) : ((Comparable) flag == 1 ? vmm-round(sr * 1.2) : vmm-round(sr * 3.4));
+  def vmm-wav-fmt(b) = len(b) < 16 ? [] : [vmm-u16(b, 2), vmm-u32(b, 4), vmm-u16(b, 14), vmm-u16(b, 0)];
+  // a WAV chunk: [data offset, data bytes, rate, channels, bits, tag], or [] when it is not a RIFF
+  def vmm-wav-walk(path, at, size, fmt) {
+   let h = (at + 8) > size ? "" : read_file_slice(path, at, 8);
+   let id = len(h) < 8 ? "" : substring(h, 0, 4);
+   let n = len(h) < 8 ? 0 : vmm-u32(h, 4);
+   (len(h) < 8) ? [] : ((String) id == "fmt " ? vmm-wav-walk(path, at + 8 + n + (n % 2), size, vmm-wav-fmt(read_file_slice(path, at + 8, vmm-min(n, 16)))) : ((String) id == "data" ? ((nil?(fmt)) ? [] : [at + 8, vmm-min(n, size - at - 8), fmt[1], fmt[0], fmt[2], fmt[3]]) : vmm-wav-walk(path, at + 8 + n + (n % 2), size, fmt)));
+  }
+  def vmm-wav-info(path) {
+   let size = file_size(path);
+   let h = size < 12 ? "" : read_file_slice(path, 0, 12);
+   (len(h) < 12) ? [] : (((String) substring(h, 0, 4) == "RIFF") ? vmm-wav-walk(path, 12, size, []) : []);
+  }
+  // one planned chunk: [path, byte offset, source samples, source rate, rest flag]; [] when the id has no audio
+  def vmm-chunk-plan(pcm-dir, wav-dir, id, flag, sr) {
+   let pp = pcm-dir ++ "/" ++ id.str() ++ ".pcm";
+   let wp = wav-dir ++ "/" ++ id.str() ++ ".wav";
+   let ps = file_size(pp);
+   let wi = ps > 0 ? [] : vmm-wav-info(wp);
+   ps > 0 ? [pp, 0, ps / 2, sr, flag] : ((nil?(wi)) ? [] : ((((Comparable) wi[3] == 1) && (((Comparable) wi[4] == 16) && ((Comparable) wi[5] == 1))) ? [wp, wi[0], wi[1] / 2, wi[2], flag] : []));
+  }
+  def vmm-map-flags(s, i, acc) = i >= len(s) ? reverse(acc) : vmm-map-flags(s, i + 1, (str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 50) ? cons(str_byte_at(s, i) - 48, acc) : acc);
+  def vmm-plan-go(pcm-dir, wav-dir, flags, i, sr, acc) = nil?(flags) ? reverse(acc) : vmm-plan-go(pcm-dir, wav-dir, flags[1:], i + 1, sr, (nil?(vmm-chunk-plan(pcm-dir, wav-dir, 1000 + i, flags[0], sr))) ? acc : cons(vmm-chunk-plan(pcm-dir, wav-dir, 1000 + i, flags[0], sr), acc));
+  def vmm-plan(pcm-dir, wav-dir, map-path, sr) = vmm-plan-go(pcm-dir, wav-dir, vmm-map-flags(read_file(map-path), 0, []), 0, sr, []);
+  // length of a chunk at the track's rate: ceil(ns * sr / rate)
+  def vmm-out-len(c, sr) = ((c[2] * sr) + (c[3] - 1)) / c[3];
+  def vmm-plan-total(plan, sr) = nil?(plan) ? 0 : (vmm-out-len(plan[0], sr) + vmm-rest-samples(sr, plan[0][4]) + vmm-plan-total(plan[1:], sr));
+  // place every chunk: map the file, find its peak after the fades, write it normalised at its offset.
+  // Returns the mapped handles (the caller frees them after the sync).
+  def vmm-place-go(ps, plan, out, pkb, k, pos, sr, fin, fout, acc) {
+   let c = plan[0];
+   let n = vmm-out-len(c, sr);
+   let h = metal_buf_from_file(c[0], c[1], c[2] * 2);
+   let okh = h <= 0 ? form_error("voice-master: could not map " ++ c[0]) : h;
+   let pk = vmm-go1(ps, vmm-pi-peak(), [okh, pkb], [c[2], n, k, fin, fout, c[3], sr]);
+   let pl = vmm-go(ps, vmm-pi-place(), [okh, out, pkb], [c[2], n, k, pos, fin, fout, c[3], sr, vmm-cf(0.1)], n);
+   nil?(plan[1:]) ? cons(okh, acc) : vmm-place-go(ps, plan[1:], out, pkb, k + 1, pos + n + vmm-rest-samples(sr, c[4]), sr, fin, fout, cons(okh, acc));
+  }
+  // the whole assembly into `out` (n floats, zeroed here); returns [mapped handles, peak buffer]
+  def vmm-assemble(ps, out, n, plan, sr) {
+   let z = vmm-zero(ps, out, n);
+   let pkb = vmm-falloc(len(plan) + 1);
+   let hs = nil?(plan) ? [] : vmm-place-go(ps, plan, out, pkb, 0, 0, sr, vmm-round(sr * 0.03), vmm-round(sr * 0.06), []);
+   [hs, pkb];
+  }
+
+  // ================= dynamics =================
+  def vmm-comp-pieces-buf(pieces) = vmm-fput(vmm-flat(pieces));
+  // the follower over [0, n) in slices, then the gain; x -> y (y may not alias x or env)
+  def vmm-env-slices(ps, x, env, st, from, n, slice, ra, rd) {
+   let cnt = vmm-min(slice, n - from);
+   let r = vmm-go1(ps, vmm-pi-env(), [x, env, st], [from, cnt, vmm-cf(ra), vmm-cf(rd)]);
+   let sy = vmm-sync();
+   (from + cnt) >= n ? 1 : vmm-env-slices(ps, x, env, st, from + cnt, n, slice, ra, rd);
+  }
+  def vmm-compress(ps, x, env, y, n, sr, pieces, makeup, attack, decay, initial-db, delay-s) {
+   let st = vmm-fput([vmm-undb(initial-db), 0.0, 0.0, 0.0]);
+   let pc = vmm-comp-pieces-buf(pieces);
+   let ra = math_exp(0.0 - (1.0 / (sr * attack)));
+   let rd = math_exp(0.0 - (1.0 / (sr * decay)));
+   let e = vmm-env-slices(ps, x, env, st, 0, n, 4194304, ra, rd);
+   let g = vmm-go(ps, vmm-pi-comp(), [x, env, y, pc], [n, vmm-round(sr * delay-s), len(pieces), vmm-cf(makeup)], n);
+   let sy = vmm-sync();
+   let f = vmm-free([st, pc]);
+   g;
+  }
+
+  // ================= room =================
+  def vmm-room-comb-base() = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
+  def vmm-room-ap-base() = [556, 441, 341, 225];
+  // early reflections: delay in ms, gain (signs alternate so the line colours the sound little)
+  def vmm-room-er-ms() = [7.3, 11.9, 17.1, 23.7, 29.3, 36.1, 43.9, 52.3];
+  def vmm-room-er-gain() = [0.5, 0.0 - 0.42, 0.36, 0.0 - 0.3, 0.26, 0.0 - 0.22, 0.18, 0.0 - 0.15];
+  def vmm-scale-list(xs, f) = nil?(xs) ? [] : cons(vmm-max(1, vmm-round(xs[0] * f)), vmm-scale-list(xs[1:], f));
+  def vmm-ms-list(xs, sr, f) = nil?(xs) ? [] : cons(vmm-max(1, vmm-round(xs[0] * sr * f / 1000.0)), vmm-ms-list(xs[1:], sr, f));
+  def vmm-sum-i(xs) = nil?(xs) ? 0 : (xs[0] + vmm-sum-i(xs[1:]));
+  def vmm-comb-feedback(ds, sr, rt60) = nil?(ds) ? [] : cons(math_pow(10.0, (0.0 - 3.0) * ds[0] / (rt60 * sr)), vmm-comb-feedback(ds[1:], sr, rt60));
+  // geometry: [geo uints, gain floats, ring floats per thread]. `room` scales every delay (1.0 is Freeverb's own at this rate).
+  def vmm-room-geometry(sr, room, rt60, damp, wet) {
+   let f = sr / 44100.0 * room;
+   let cd = vmm-scale-list(vmm-room-comb-base(), f);
+   let ad = vmm-scale-list(vmm-room-ap-base(), f);
+   let ed = vmm-ms-list(vmm-room-er-ms(), sr, room);
+   [vmm-flat([[8], cd, [4], ad, [8], ed]), vmm-flat([vmm-comb-feedback(cd, sr, rt60), [damp, 0.5], vmm-room-er-gain(), [wet]]), vmm-sum-i(cd) + vmm-sum-i(ad)];
+  }
+  // the room over x -> y with `dry` mixed; wet is gp[18]. blk 0 runs it as one thread (warm is then ignored).
+  def vmm-room-run(ps, x, y, n, geo, gpv, ring, blk, warm, dry) {
+   let gb = vmm-uput(geo);
+   let pb = vmm-fput(gpv);
+   let threads = vmm-ceil-div(n, blk);
+   let sc = vmm-falloc(threads * ring);
+   let r = vmm-go(ps, vmm-pi-room(), [x, y, sc, gb, pb], [n, blk, warm, ring, vmm-cf(dry)], threads);
+   let sy = vmm-sync();
+   let f = vmm-free([gb, pb, sc]);
+   r;
+  }
+  def vmm-with-wet(gpv, wet) = vmm-cat(vmm-take(gpv, 18), [wet]);
+  // the wet path's impulse-response energy (sum h^2 with the wet gain at 1), measured by running an impulse through it
+  def vmm-room-energy(ps, geo, gpv, ring, sr, rt60) {
+   let m = vmm-round(sr * rt60 * 5.0) + vmm-round(sr * 0.2);
+   let x = vmm-falloc(m);
+   let y = vmm-falloc(m);
+   let z = vmm-zero(ps, x, m);
+   let one = vmm-fill-at(ps, x, 0, 1, 1.0);
+   let r = vmm-room-run(ps, x, y, m, geo, vmm-with-wet(gpv, 1.0), ring, m, 0, 0.0);
+   let st = vmm-stats(ps, y, 0, m);
+   let f = vmm-free([x, y]);
+   st[0] * m;
+  }
+  // the wet gain that puts the wet path at wet_db relative to unit-energy: wet power / white-noise dry power = wet_db
+  def vmm-room-wet-gain(energy, wet-db) = vmm-undb(wet-db) / math_sqrt(energy);
+
+  // ================= ends, loudness, peaks, spectrum =================
+  def vmm-ramp(ps, y, n, fin, fout) = vmm-go(ps, vmm-pi-ramp(), [y], [n, fin, fout], n);
+  def vmm-hop-samples(sr) = vmm-round(sr * 0.1);
+  // [integrated LUFS, relative gate, gated blocks, LRA, L10, L95, ST gate, ST count, abs-gated blocks]
+  def vmm-loudness(ps, x, scratch, n, sr) {
+   let hs = vmm-hop-samples(sr);
+   let nh = n / hs;
+   let k = vmm-iir(ps, x, scratch, n, vmm-k-chain(sr), 16384, 16384);
+   let hb = vmm-falloc(nh + 4);
+   let h = vmm-go(ps, vmm-pi-hop(), [scratch, hb], [hs, nh], nh);
+   let ob = vmm-falloc(12);
+   let g = vmm-go1(ps, vmm-pi-gate(), [hb, ob], [nh, hs]);
+   let sy = vmm-sync();
+   let r = vmm-read(ob, 0, 9);
+   let f = vmm-free([hb, ob]);
+   r;
+  }
+  // the 4x oversampling taps: three phases of a 24-tap Hann-windowed sinc
+  def vmm-tp-tap(k, p) {
+   let a = ((k - 11) * 1.0) - ((p + 1) * 0.25);
+   let s = (Comparable) a == 0.0 ? 1.0 : vmm-sin(vmm-pi() * a) / (vmm-pi() * a);
+   s * (0.5 + (0.5 * vmm-cos(vmm-pi() * a / 12.5)));
+  }
+  def vmm-tp-taps-go(i, acc) = i >= 72 ? reverse(acc) : vmm-tp-taps-go(i + 1, cons(vmm-tp-tap(i % 24, i / 24), acc));
+  // [sample peak, true peak] as linear amplitudes
+  def vmm-peaks(ps, x, n) {
+   let ob = vmm-falloc(4);
+   let zb = vmm-put(ob, 0, vmm-u32s([0, 0, 0, 0]));
+   let tb = vmm-fput(vmm-tp-taps-go(0, []));
+   let per = 4096;
+   let r = vmm-go(ps, vmm-pi-peaks(), [x, ob, tb], [n, per], vmm-ceil-div(n, per));
+   let sy = vmm-sync();
+   let v = vmm-read(ob, 0, 2);
+   let f = vmm-free([ob, tb]);
+   v;
+  }
+  // The centroid, in Hz, of the squared MEAN-MAGNITUDE spectrum: nf frames of L samples spread evenly across the
+  // track, a DFT of each (rectangular window, or Hann), the magnitude averaged per bin across frames, then squared —
+  // the quantity the sleep-track assessment reads. L is a power of two (an FFT, Stockham radix-2, 15 dispatches for
+  // every frame at once), so 1 Hz bins are not on offer; the centroid does not need them.
+  def vmm-fft-run(ps, a, b, L, nf, ns) {
+   let r = ns >= L ? 0 : vmm-go(ps, vmm-pi-fftstage(), [a, b], [L, ns, nf * (L / 2)], nf * (L / 2));
+   ns >= L ? a : vmm-fft-run(ps, b, a, L, nf, ns * 2);
+  }
+  def vmm-pow2-ceil(n, p) = p >= n ? p : vmm-pow2-ceil(n, p * 2);
+  def vmm-centroid-frames(ps, x, n, sr, L, nf, hann) {
+   let stride = nf > 1 ? ((n - L) / (nf - 1)) : 0;
+   let nb = (L / 2) + 1;
+   let fa = vmm-falloc(nf * L * 2);
+   let fb = vmm-falloc(nf * L * 2);
+   let pw = vmm-falloc(nb);
+   let out = vmm-falloc(2);
+   let a = vmm-go(ps, vmm-pi-fftload(), [x, fa], [n, nf, stride, L, hann], nf * L);
+   let res = vmm-fft-run(ps, fa, fb, L, nf, 1);
+   let m = vmm-go(ps, vmm-pi-fftmag(), [res, pw], [nf, L], nb);
+   let c = vmm-go1(ps, vmm-pi-cent(), [pw, out], [nb, vmm-cf((sr * 1.0) / L)]);
+   let sy = vmm-sync();
+   let r = vmm-read(out, 0, 1);
+   let f = vmm-free([fa, fb, pw, out]);
+   r[0];
+  }
+  def vmm-centroid-nf(n, L) = n < (2 * L) ? 1 : vmm-min(120, ((n - L) / L) + 1);
+  def vmm-centroid(ps, x, n, sr) {
+   let L = vmm-pow2-ceil(sr, 1);
+   vmm-centroid-frames(ps, x, n, sr, L, vmm-centroid-nf(n, L), 0);
+  }
+
+  // ================= the file =================
+  // header and samples built on the device in one buffer, read back once, written once
+  def vmm-emit(ps, x, n, gain, dither, sr, path) {
+   let total = 44 + (n * 2);
+   let o = vmm-alloc(total);
+   let hd = vmm-put(o, 0, vmm-wav-header(sr, n));
+   let p = vmm-go(ps, vmm-pi-pack(), [x, o], [n, 44, vmm-cf(gain), dither], n);
+   let sy = vmm-sync();
+   let s = metal_buf_read(o, 0, total);
+   let w = nothing?(s) ? form_error("voice-master: read of the packed file refused") : write_file(path, s);
+   let f = vmm-free([o]);
+   w < 0 ? form_error("voice-master: could not write " ++ path) : w;
+  }
+
+  // ================= measuring a file that already exists =================
+  // loudness, loudness range, peaks and centroid of n floats in x (scratch is a second n-float buffer)
+  def vmm-measure-buf(ps, x, scratch, n, sr) {
+   let ld = vmm-loudness(ps, x, scratch, n, sr);
+   let pk = vmm-peaks(ps, x, n);
+   let ce = vmm-centroid(ps, x, n, sr);
+   [["seconds", vmm-r2(n * 1.0 / sr)], ["lufs", vmm-r3(ld[0])], ["lra", vmm-r3(ld[3])], ["l10", vmm-r3(ld[4])], ["l95", vmm-r3(ld[5])], ["sample_peak_dbfs", vmm-r3(vmm-db(pk[0]))], ["true_peak_dbtp", vmm-r3(vmm-db(pk[1]))], ["centroid_hz", vmm-r2(ce)]];
+  }
+  // a mono 16-bit PCM WAV, mapped and measured on the device. [] rows when it is some other file.
+  def vmm-measure-wav(ps, path) {
+   let wi = vmm-wav-info(path);
+   (nil?(wi)) ? [] : vmm-measure-wav-go(ps, path, wi);
+  }
+  def vmm-measure-wav-go(ps, path, wi) {
+   let n = wi[1] / 2;
+   let m = metal_buf_from_file(path, wi[0], n * 2);
+   let a = vmm-falloc(n);
+   let b = vmm-falloc(n);
+   let u = vmm-go(ps, vmm-pi-unpack(), [m, a], [n], n);
+   let sy = vmm-sync();
+   let rows = (((Comparable) wi[3] == 1) && ((Comparable) wi[4] == 16)) ? vmm-measure-buf(ps, a, b, n, wi[2]) : [];
+   let f = vmm-free([a, b, m]);
+   rows;
+  }
+
+  // ================= one GPU at a time =================
+  // concurrent Metal clients wedge in uninterruptible waits, so a run that touches the device holds a directory
+  // lock: mkdir makes it (1 when this call made it), rmdir lets it go. A held lock is waited for, 20 s at a time.
+  def vmm-lock-path() = ".hearth/gpu.lock";
+  def vmm-gpu-lock(tries) {
+   let got = host_dir_mkdir(vmm-lock-path());
+   (Comparable) got == 1 ? 1 : ((tries <= 0) ? 0 : vmm-gpu-lock-wait(tries));
+  }
+  def vmm-gpu-lock-wait(tries) {
+   let s = host_sleep_ms(20000);
+   vmm-gpu-lock(tries - 1);
+  }
+  def vmm-gpu-unlock() = host_dir_rmdir(vmm-lock-path());
+
+  // ================= the recipe, end to end =================
+  def vmm-tone-blk() = 16384;
+  def vmm-tone-warm() = 8192;
+  def vmm-target-lufs() = 0.0 - 30.0;
+  def vmm-target-tp() = 0.0 - 8.0;
+  def vmm-room-rt60() = 0.7;
+  def vmm-room-wet-db() = 0.0 - 6.0;
+  def vmm-room-damp() = 0.4;
+  def vmm-tail-seconds() = 1.5;
+  def vmm-now() = host_monotonic_ms();
+  // The mastered track. plan comes from vmm-plan; the report is a list of [name, value] rows.
+  def vmm-master(ps, plan, out-path, sr) {
+   let t0 = vmm-now();
+   let n-asm = vmm-plan-total(plan, sr);
+   let delay = vmm-round(sr * vmm-comp-delay());
+   let n = n-asm + delay + vmm-round(sr * vmm-tail-seconds());
+   let A = vmm-falloc(n);
+   let B = vmm-falloc(n);
+   let C = vmm-falloc(n);
+   let as = vmm-assemble(ps, A, n, plan, sr);
+   let sy1 = vmm-sync();
+   let fr1 = vmm-free(cons(as[1], as[0]));
+   let t1 = vmm-now();
+   let tone = vmm-iir(ps, A, B, n, vmm-tone-chain(sr), vmm-tone-blk(), vmm-tone-warm());
+   let t2 = vmm-now();
+   let cm = vmm-compress(ps, B, C, A, n, sr, vmm-pieces(vmm-comp-points()), vmm-comp-makeup(), vmm-comp-attack(), vmm-comp-decay(), vmm-comp-initial-db(), vmm-comp-delay());
+   let t3 = vmm-now();
+   let geom = vmm-room-geometry(sr, 1.0, vmm-room-rt60(), vmm-room-damp(), 1.0);
+   let en = vmm-room-energy(ps, geom[0], geom[1], geom[2], sr, vmm-room-rt60());
+   let wet = vmm-room-wet-gain(en, vmm-room-wet-db());
+   let warm = vmm-round(sr * vmm-room-rt60() * 2.0);
+   let rm = vmm-room-run(ps, A, B, n, geom[0], vmm-with-wet(geom[1], wet), geom[2], 32768, warm, 1.0);
+   let t4 = vmm-now();
+   let ld0 = vmm-loudness(ps, A, C, n, sr);
+   let ld1 = vmm-loudness(ps, B, C, n, sr);
+   let rp = vmm-ramp(ps, B, n, vmm-round(sr * 6.0), vmm-round(sr * 15.0));
+   let sy2 = vmm-sync();
+   let ld = vmm-loudness(ps, B, C, n, sr);
+   let pk = vmm-peaks(ps, B, n);
+   let sane = pk[1] > 100.0 ? form_error("voice-master: the signal is not finite (a NaN or an infinity reached the peak meter)") : 1;
+   let t5 = vmm-now();
+   let g-loud = vmm-undb(vmm-target-lufs() - ld[0]);
+   let g-tp = vmm-undb(vmm-target-tp()) / pk[1];
+   let gain = vmm-min(g-loud, g-tp);
+   let ce = vmm-centroid(ps, B, n, sr);
+   let wr = vmm-emit(ps, B, n, gain, 1, sr, out-path);
+   let t6 = vmm-now();
+   let fr2 = vmm-free([A, B, C]);
+   [["chunks", len(plan)], ["samples", n], ["seconds", vmm-r2(n * 1.0 / sr)], ["bytes", wr], ["assemble_ms", t1 - t0], ["tone_ms", t2 - t1], ["compress_ms", t3 - t2], ["room_ms", t4 - t3], ["measure_ms", t5 - t4], ["write_ms", t6 - t5], ["total_ms", t6 - t0], ["room_wet_energy", vmm-r3(en)], ["room_adds_lu", vmm-r3(ld1[0] - ld0[0])], ["pre_lufs", vmm-r3(ld[0])], ["pre_lra", vmm-r3(ld[3])], ["gain_db", vmm-r3(vmm-db(gain))], ["limited_by_peak", g-tp < g-loud ? 1 : 0], ["lufs", vmm-r3(ld[0] + vmm-db(gain))], ["lra", vmm-r3(ld[3])], ["sample_peak_dbfs", vmm-r3(vmm-db(pk[0] * gain))], ["true_peak_dbtp", vmm-r3(vmm-db(pk[1] * gain))], ["centroid_hz", vmm-r2(ce)]];
+  }
+ }
+ 0;
+}
