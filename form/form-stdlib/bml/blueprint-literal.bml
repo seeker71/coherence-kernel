@@ -1,0 +1,412 @@
+//////////////////////////////////////////////////////////////////////
+// blueprint-literal.bml — a literal for a composite blueprint, and the core blueprints it rests on.
+//
+// Urs, 2026-10-02: "we also need an intrinsic literal for a complex blueprint that is built with other
+// blueprints and support natively map and other NUMS core blueprints."
+//
+// NUMS (the Go reference whose package.level.type.instance shape the body kept, operator-type-id.bml) names the
+// core shapes a program is made of: list, map, set, pair, tuple, option. Here each is a blueprint of the body's
+// own, pkg 1 level 2 type 97, and each value of one is a cell: the same composition is the same NodeID (axiom 3).
+//
+//   LIST 1.2.97.1   MAP 1.2.97.2   PAIR 1.2.97.3   SET 1.2.97.4   TUPLE 1.2.97.5
+//   SOME 1.2.97.6   NONE 1.2.97.7  BOOL 1.2.97.8   DECL 1.2.97.9   FIELD 1.2.97.10
+//
+// A composite blueprint is declared with other blueprints and the core ones, and the declaration is itself a cell:
+// its name and its fields' names and types are its children, so the declaration's own NodeID is the category of
+// every value built from it. Same declaration, same blueprint, on every kernel and in every session.
+//
+//   blueprint LineItem { sku: string, qty: int }
+//   blueprint Order {
+//     id: int, items: list<LineItem>, meta: map<string,float>, tags: set<string>,
+//     note: option<string>, at: tuple<int,int>
+//   }
+//
+// A value is written the way it is declared, and reads to one cell:
+//
+//   Order{ id: 7, items: [ LineItem{sku: "a", qty: 2} ], meta: {"w": 1.5, "h": 2.0},
+//          tags: set["x", "y"], note: some("rush"), at: (3, 4) }
+//
+//   int 3 -7   float 1.5   string "a\nb"   bool true false   none   some(v)   [v, ...]   set[v, ...]
+//   (v, ...) a tuple   {k: v, ...} a map   Name{field: v, ...} a record of a declared blueprint
+//
+// A map's pairs and a set's members are put in byte order of their canonical text before the cell is built, so
+// the same map is the same cell whatever order it was written in; a record's fields are put in declared order and
+// an absent option field is none. A literal that does not fit its declaration, or repeats a map key, reads as
+// nothing(). bl-show writes a cell back as its canonical literal, so text -> cell -> text is a fixed point.
+//
+//   bl-defs(declarations)        the declarations -> defs
+//   bl-read(text, defs)          a literal -> its cell, or nothing()
+//   bl-read-as(type, text, defs) the same, the literal required to be of that type text, e.g. "list<Order>"
+//   bl-show(cell, defs)          a cell -> its canonical literal text, or nothing()
+//   bl-registry(defs)            the Blueprint registry for encode/decode (parse.bml) of these cells as JSON
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk form-stdlib/bml/parse.bml form-stdlib/bml/order.bml
+section [form.bml] {
+ class FormBlueprint {
+  // ---- the core blueprints ----------------------------------------------------------
+  def bl-core(inst) = make_nodeid(1, 2, 97, inst);
+  def bl-LIST() = bl-core(1);
+  def bl-MAP() = bl-core(2);
+  def bl-PAIR() = bl-core(3);
+  def bl-SET() = bl-core(4);
+  def bl-TUPLE() = bl-core(5);
+  def bl-SOME() = bl-core(6);
+  def bl-NONE() = bl-core(7);
+  def bl-BOOL() = bl-core(8);
+  def bl-DECL() = bl-core(9);
+  def bl-FIELD() = bl-core(10);
+
+  // ---- reading text ------------------------------------------------------------------
+  def bl-ws?(b) = (b == 32) || (b == 9) || (b == 10) || (b == 13);
+  def bl-ws(s, i) = (i < len(s)) && bl-ws?(str_byte_at(s, i)) ? bl-ws(s, i + 1) : i;
+  def bl-alpha?(b) = ((b >= 65) && (b <= 90)) || ((b >= 97) && (b <= 122)) || (b == 95);
+  def bl-ident-byte?(b) = bl-alpha?(b) || ((b >= 48) && (b <= 57)) || (b == 45) || (b == 46);
+  def bl-ident-end(s, i) = (i < len(s)) && bl-ident-byte?(str_byte_at(s, i)) ? bl-ident-end(s, i + 1) : i;
+  def bl-num-byte?(b) = ((b >= 48) && (b <= 57)) || (b == 46) || (b == 43) || (b == 45) || (b == 101) || (b == 69);
+  def bl-num-end(s, i) = (i < len(s)) && bl-num-byte?(str_byte_at(s, i)) ? bl-num-end(s, i + 1) : i;
+  def bl-byte-at(s, i) = i < len(s) ? str_byte_at(s, i) : 0 - 1;
+  def bl-qend(s, i, esc) {
+   i >= len(s) ? nothing() :
+   esc == 1 ? bl-qend(s, i + 1, 0) :
+   str_byte_at(s, i) == 92 ? bl-qend(s, i + 1, 1) :
+   str_byte_at(s, i) == 34 ? i : bl-qend(s, i + 1, 0);
+  }
+
+  // a value: [ast, next position], or nothing()
+  def bl-value(s, i) {
+   let j = bl-ws(s, i);
+   j >= len(s) ? nothing() : bl-value-at(s, j, str_byte_at(s, j));
+  }
+  def bl-value-at(s, j, b) {
+   b == 34 ? bl-string(s, j) :
+   b == 91 ? bl-wrap("list", bl-items(s, j + 1, 93, [])) :
+   b == 40 ? bl-wrap("tuple", bl-items(s, j + 1, 41, [])) :
+   b == 123 ? bl-wrap("map", bl-pairs(s, j + 1, 125, 0, [])) :
+   ((b >= 48) && (b <= 57)) || (b == 45) || (b == 43) ? bl-number(s, j) :
+   bl-alpha?(b) ? bl-word(s, j) : nothing();
+  }
+  def bl-wrap(kind, r) = nothing?(r) ? nothing() : [[kind, r[0]], r[1]];
+  def bl-string(s, j) {
+   let q = bl-qend(s, j + 1, 0);
+   nothing?(q) ? nothing() : bl-string-at(s, j, q);
+  }
+  def bl-string-at(s, j, q) {
+   let text = decode(substring(s, j, q + 1), []);
+   (String) value_kind(text) == "string" ? [["str", text], q + 1] : nothing();
+  }
+  def bl-number(s, j) {
+   let e = bl-num-end(s, j);
+   let n = parse-number(substring(s, j, e));
+   nothing?(n) ? nothing() : [[(String) value_kind(n) == "int" ? "int" : "float", n], e];
+  }
+  def bl-word(s, j) {
+   let e = bl-ident-end(s, j);
+   let w = substring(s, j, e);
+   (String) w == "true" ? [["bool", 1], e] :
+   (String) w == "false" ? [["bool", 0], e] :
+   (String) w == "none" ? [["none"], e] :
+   (String) w == "some" ? bl-some(s, bl-ws(s, e)) :
+   (String) w == "set" ? (bl-byte-at(s, bl-ws(s, e)) == 91 ? bl-wrap("set", bl-items(s, bl-ws(s, e) + 1, 93, [])) : nothing()) :
+   bl-byte-at(s, bl-ws(s, e)) == 123 ? bl-record(w, bl-pairs(s, bl-ws(s, e) + 1, 125, 1, [])) : nothing();
+  }
+  def bl-some(s, k) {
+   bl-byte-at(s, k) != 40 ? nothing() : bl-some-close(s, bl-value(s, k + 1));
+  }
+  def bl-some-close(s, r) {
+   nothing?(r) ? nothing() : (bl-byte-at(s, bl-ws(s, r[1])) == 41 ? [["some", r[0]], bl-ws(s, r[1]) + 1] : nothing());
+  }
+  def bl-record(name, r) = nothing?(r) ? nothing() : [["rec", name, r[0]], r[1]];
+
+  // items up to the closing byte: [[ast...], next position]
+  def bl-items(s, i, close, acc) {
+   let j = bl-ws(s, i);
+   bl-byte-at(s, j) == close ? [wr-reverse(acc), j + 1] : bl-items-value(s, j, close, acc, bl-value(s, j));
+  }
+  def bl-items-value(s, j, close, acc, r) {
+   nothing?(r) ? nothing() : bl-items-sep(s, close, cons(r[0], acc), bl-ws(s, r[1]));
+  }
+  def bl-items-sep(s, close, acc, k) {
+   bl-byte-at(s, k) == 44 ? bl-items(s, k + 1, close, acc) :
+   bl-byte-at(s, k) == close ? [wr-reverse(acc), k + 1] : nothing();
+  }
+
+  // pairs up to the closing byte: [[[key, ast]...], next position]. keymode 0: the key is a value; 1: a field name
+  def bl-pairs(s, i, close, keymode, acc) {
+   let j = bl-ws(s, i);
+   bl-byte-at(s, j) == close ? [wr-reverse(acc), j + 1] : bl-pair-key(s, j, close, keymode, acc);
+  }
+  def bl-pair-key(s, j, close, keymode, acc) {
+   keymode == 1 ? bl-pair-name(s, j, close, acc) : bl-pair-colon(s, close, keymode, acc, bl-value(s, j));
+  }
+  def bl-pair-name(s, j, close, acc) {
+   let e = bl-ident-end(s, j);
+   e == j ? nothing() : bl-pair-colon(s, close, 1, acc, [substring(s, j, e), e]);
+  }
+  def bl-pair-colon(s, close, keymode, acc, kr) {
+   nothing?(kr) ? nothing() : (bl-byte-at(s, bl-ws(s, kr[1])) == 58 ? bl-pair-value(s, close, keymode, acc, kr[0], bl-value(s, bl-ws(s, kr[1]) + 1)) : nothing());
+  }
+  def bl-pair-value(s, close, keymode, acc, key, vr) {
+   nothing?(vr) ? nothing() : bl-pairs-sep(s, close, keymode, cons([key, vr[0]], acc), bl-ws(s, vr[1]));
+  }
+  def bl-pairs-sep(s, close, keymode, acc, k) {
+   bl-byte-at(s, k) == 44 ? bl-pairs(s, k + 1, close, keymode, acc) :
+   bl-byte-at(s, k) == close ? [wr-reverse(acc), k + 1] : nothing();
+  }
+
+  // the whole text is one value
+  def bl-parse(text) {
+   let r = bl-value(text, 0);
+   nothing?(r) ? nothing() : (bl-ws(text, r[1]) == len(text) ? r[0] : nothing());
+  }
+
+  // ---- types and declarations ----------------------------------------------------------
+  // a type: [name, [argument types]] read as  name  or  name<arg, ...>
+  def bl-type(s, i) {
+   let j = bl-ws(s, i);
+   let e = bl-ident-end(s, j);
+   e == j ? nothing() : bl-type-args-open(s, substring(s, j, e), e);
+  }
+  def bl-type-args-open(s, name, e) {
+   let k = bl-ws(s, e);
+   bl-byte-at(s, k) == 60 ? bl-type-wrap(name, bl-type-args(s, k + 1, [])) : [[name, []], e];
+  }
+  def bl-type-wrap(name, r) = nothing?(r) ? nothing() : [[name, r[0]], r[1]];
+  def bl-type-args(s, i, acc) {
+   let r = bl-type(s, i);
+   nothing?(r) ? nothing() : bl-type-args-sep(s, cons(r[0], acc), bl-ws(s, r[1]));
+  }
+  def bl-type-args-sep(s, acc, k) {
+   bl-byte-at(s, k) == 44 ? bl-type-args(s, k + 1, acc) :
+   bl-byte-at(s, k) == 62 ? [wr-reverse(acc), k + 1] : nothing();
+  }
+  def bl-type-parse(text) {
+   let r = bl-type(text, 0);
+   nothing?(r) ? nothing() : (bl-ws(text, r[1]) == len(text) ? r[0] : nothing());
+  }
+  def bl-type-text(t) = nil?(t[1]) ? t[0] : (t[0] ++ "<" ++ pr-join(t[1] |> map(a => bl-type-text(a)), ",") ++ ">");
+
+  // fields up to the closing brace: [[[name, type]...], next position]
+  def bl-fields(s, i, acc) {
+   let j = bl-ws(s, i);
+   bl-byte-at(s, j) == 125 ? [wr-reverse(acc), j + 1] : bl-field-name(s, j, acc);
+  }
+  def bl-field-name(s, j, acc) {
+   let e = bl-ident-end(s, j);
+   e == j ? nothing() : bl-field-colon(s, substring(s, j, e), bl-ws(s, e), acc);
+  }
+  def bl-field-colon(s, name, k, acc) {
+   bl-byte-at(s, k) != 58 ? nothing() : bl-field-type(s, name, acc, bl-type(s, k + 1));
+  }
+  def bl-field-type(s, name, acc, tr) {
+   nothing?(tr) ? nothing() : bl-fields-sep(s, cons([name, tr[0]], acc), bl-ws(s, tr[1]));
+  }
+  def bl-fields-sep(s, acc, k) {
+   bl-byte-at(s, k) == 44 ? bl-fields(s, k + 1, acc) :
+   bl-byte-at(s, k) == 125 ? [wr-reverse(acc), k + 1] : nothing();
+  }
+  // declarations:  blueprint Name { field: type, ... }  repeated
+  def bl-decls-at(s, i, acc) {
+   let j = bl-ws(s, i);
+   j >= len(s) ? wr-reverse(acc) : bl-decl-word(s, j, acc);
+  }
+  def bl-decl-word(s, j, acc) {
+   let e = bl-ident-end(s, j);
+   (String) substring(s, j, e) == "blueprint" ? bl-decl-name(s, bl-ws(s, e), acc) : nothing();
+  }
+  def bl-decl-name(s, j, acc) {
+   let e = bl-ident-end(s, j);
+   e == j ? nothing() : bl-decl-open(s, substring(s, j, e), bl-ws(s, e), acc);
+  }
+  def bl-decl-open(s, name, k, acc) {
+   bl-byte-at(s, k) != 123 ? nothing() : bl-decl-close(s, name, acc, bl-fields(s, k + 1, []));
+  }
+  def bl-decl-close(s, name, acc, fr) {
+   nothing?(fr) ? nothing() : bl-decls-at(s, fr[1], cons([name, fr[0]], acc));
+  }
+  def bl-field-cell(f) = intern_node(bl-FIELD(), [intern_trivial_string(f[0]), intern_trivial_string(bl-type-text(f[1]))]);
+  def bl-decl-cell(name, fields) = intern_node(bl-DECL(), cons(intern_trivial_string(name), fields |> map(f => bl-field-cell(f))));
+  // defs: [[name, declaration cell, [[field, type]...]]...]
+  def bl-defs(text) {
+   let decls = bl-decls-at(text, 0, []);
+   nothing?(decls) ? nothing() : (decls |> map(d => [d[0], bl-decl-cell(d[0], d[1]), d[1]]));
+  }
+  def bl-find(name, defs) = nil?(defs) ? nothing() : ((String) defs[0][0] == (String) name ? defs[0] : bl-find(name, defs[1:]));
+  def bl-find-cell(cat, defs) = nil?(defs) ? nothing() : (eq(defs[0][1], cat) ? defs[0] : bl-find-cell(cat, defs[1:]));
+  def bl-fget(pairs, name) = nil?(pairs) ? nothing() : ((String) pairs[0][0] == (String) name ? pairs[0][1] : bl-fget(pairs[1:], name));
+  def bl-registry(defs) = append([wr-entry("LIST", bl-LIST()), wr-entry("MAP", bl-MAP()), wr-entry("PAIR", bl-PAIR()), wr-entry("SET", bl-SET()), wr-entry("TUPLE", bl-TUPLE()), wr-entry("SOME", bl-SOME()), wr-entry("NONE", bl-NONE()), wr-entry("BOOL", bl-BOOL())], defs |> map(d => wr-entry(d[0], d[1])));
+
+  // ---- does a literal fit its type? 1 or 0 ----------------------------------------------
+  def bl-all(xs, t, defs) = nil?(xs) ? 1 : (bl-check(xs[0], t, defs) == 1 ? bl-all(xs[1:], t, defs) : 0);
+  def bl-all-valid(xs, defs) = nil?(xs) ? 1 : (bl-valid(xs[0], defs) == 1 ? bl-all-valid(xs[1:], defs) : 0);
+  def bl-all-pairs(ps, kt, vt, defs) = nil?(ps) ? 1 : ((bl-check(ps[0][0], kt, defs) == 1) && (bl-check(ps[0][1], vt, defs) == 1) ? bl-all-pairs(ps[1:], kt, vt, defs) : 0);
+  def bl-all-valid-pairs(ps, defs) = nil?(ps) ? 1 : ((bl-valid(ps[0][0], defs) == 1) && (bl-valid(ps[0][1], defs) == 1) ? bl-all-valid-pairs(ps[1:], defs) : 0);
+  def bl-all-zip(xs, ts, defs) = nil?(xs) ? 1 : (bl-check(xs[0], ts[0], defs) == 1 ? bl-all-zip(xs[1:], ts[1:], defs) : 0);
+  def bl-declared?(name, fields) = nil?(fields) ? false : ((String) fields[0][0] == (String) name ? true : bl-declared?(name, fields[1:]));
+  def bl-no-extra(pairs, fields) = nil?(pairs) ? 1 : (bl-declared?(pairs[0][0], fields) ? bl-no-extra(pairs[1:], fields) : 0);
+  def bl-fields-ok(fields, pairs, defs) {
+   nil?(fields) ? 1 : bl-field-ok(fields, pairs, defs, bl-fget(pairs, fields[0][0]));
+  }
+  def bl-field-ok(fields, pairs, defs, v) {
+   nothing?(v) ? ((String) fields[0][1][0] == "option" ? bl-fields-ok(fields[1:], pairs, defs) : 0) :
+   (bl-check(v, fields[0][1], defs) == 1 ? bl-fields-ok(fields[1:], pairs, defs) : 0);
+  }
+  def bl-rec-ok(a, d, defs) {
+   nothing?(d) ? 0 : ((bl-fields-ok(d[2], a[2], defs) == 1) && (bl-no-extra(a[2], d[2]) == 1) ? 1 : 0);
+  }
+  def bl-arity-ok(n, args) {
+   ((String) n == "list") || ((String) n == "set") || ((String) n == "option") ? len(args) == 1 :
+   (String) n == "map" ? len(args) == 2 : true;
+  }
+  def bl-check(a, t, defs) {
+   let n = t[0];
+   let args = t[1];
+   !bl-arity-ok(n, args) ? 0 :
+   (String) n == "any" ? bl-valid(a, defs) :
+   (String) n == "int" ? ((String) a[0] == "int" ? 1 : 0) :
+   (String) n == "float" ? ((String) a[0] == "float" ? 1 : 0) :
+   (String) n == "string" ? ((String) a[0] == "str" ? 1 : 0) :
+   (String) n == "bool" ? ((String) a[0] == "bool" ? 1 : 0) :
+   (String) n == "list" ? (((String) a[0] == "list") && (bl-all(a[1], args[0], defs) == 1) ? 1 : 0) :
+   (String) n == "set" ? (((String) a[0] == "set") && (bl-all(a[1], args[0], defs) == 1) ? 1 : 0) :
+   (String) n == "option" ? ((String) a[0] == "none" ? 1 : ((String) a[0] == "some" ? bl-check(a[1], args[0], defs) : 0)) :
+   (String) n == "map" ? (((String) a[0] == "map") && (bl-all-pairs(a[1], args[0], args[1], defs) == 1) ? 1 : 0) :
+   (String) n == "tuple" ? (((String) a[0] == "tuple") && (len(a[1]) == len(args)) && (bl-all-zip(a[1], args, defs) == 1) ? 1 : 0) :
+   (((String) a[0] == "rec") && ((String) a[1] == (String) n)) ? bl-rec-ok(a, bl-find(n, defs), defs) : 0;
+  }
+  // a literal that fits its own declarations wherever it names one
+  def bl-valid(a, defs) {
+   ((String) a[0] == "list") || ((String) a[0] == "set") || ((String) a[0] == "tuple") ? bl-all-valid(a[1], defs) :
+   (String) a[0] == "some" ? bl-valid(a[1], defs) :
+   (String) a[0] == "map" ? bl-all-valid-pairs(a[1], defs) :
+   (String) a[0] == "rec" ? bl-rec-ok(a, bl-find(a[1], defs), defs) : 1;
+  }
+
+  // ---- canonical text ---------------------------------------------------------------------
+  def bl-text-all(xs) = pr-join(xs |> map(x => bl-text(x)), ", ");
+  def bl-text(a) {
+   (String) a[0] == "int" ? value_str(a[1]) :
+   (String) a[0] == "float" ? pr-float-text(a[1]) :
+   (String) a[0] == "str" ? json-quote-string(a[1]) :
+   (String) a[0] == "bool" ? (a[1] == 1 ? "true" : "false") :
+   (String) a[0] == "none" ? "none" :
+   (String) a[0] == "some" ? ("some(" ++ bl-text(a[1]) ++ ")") :
+   (String) a[0] == "list" ? ("[" ++ bl-text-all(a[1]) ++ "]") :
+   (String) a[0] == "set" ? ("set[" ++ bl-text-all(a[1]) ++ "]") :
+   (String) a[0] == "tuple" ? ("(" ++ bl-text-all(a[1]) ++ ")") :
+   (String) a[0] == "map" ? ("{" ++ pr-join(a[1] |> map(p => bl-text(p[0]) ++ ": " ++ bl-text(p[1])), ", ") ++ "}") :
+   (String) a[0] == "rec" ? (a[1] ++ "{" ++ pr-join(a[2] |> map(p => p[0] ++ ": " ++ bl-text(p[1])), ", ") ++ "}") : "";
+  }
+
+  // ---- canonical order: the same value is written one way ------------------------------------
+  def bl-norm-all(xs, defs) {
+   nil?(xs) ? [] : bl-norm-cons(bl-norm(xs[0], defs), xs[1:], defs);
+  }
+  def bl-norm-cons(h, rest, defs) {
+   nothing?(h) ? nothing() : bl-norm-join(h, bl-norm-all(rest, defs));
+  }
+  def bl-norm-join(h, t) = nothing?(t) ? nothing() : cons(h, t);
+  def bl-norm-pairs(ps, defs) {
+   nil?(ps) ? [] : bl-norm-pair(bl-norm(ps[0][0], defs), bl-norm(ps[0][1], defs), ps[1:], defs);
+  }
+  def bl-norm-pair(k, v, rest, defs) {
+   (nothing?(k) || nothing?(v)) ? nothing() : bl-norm-join([k, v], bl-norm-pairs(rest, defs));
+  }
+  def bl-rows(xs) = xs |> map(x => [bl-text(x), x]);
+  // adjacent rows with one key are repeats
+  def bl-has-repeat?(rows) = (len(rows) < 2) ? false : (((String) rows[0][0] == (String) rows[1][0]) ? true : bl-has-repeat?(rows[1:]));
+  def bl-set-norm(xs) = sort-keyed(bl-rows(xs)) |> map(r => r[1]);
+  def bl-dedupe-by-text(xs) = nil?(xs) ? [] : (nil?(xs[1:]) ? xs : (((String) bl-text(xs[0]) == (String) bl-text(xs[1])) ? bl-dedupe-by-text(xs[1:]) : cons(xs[0], bl-dedupe-by-text(xs[1:]))));
+  def bl-map-sorted(ps) = sort-keyed(ps |> map(p => [bl-text(p[0]), p]));
+  def bl-norm-map(ps, defs) {
+   let n = bl-norm-pairs(ps, defs);
+   nothing?(n) ? nothing() : bl-map-finish(bl-map-sorted(n));
+  }
+  def bl-map-finish(rows) = bl-has-repeat?(rows) ? nothing() : ["map", rows |> map(r => r[1])];
+  def bl-norm-fields(fields, pairs, defs) {
+   nil?(fields) ? [] : bl-norm-field(fields, pairs, defs, bl-fget(pairs, fields[0][0]));
+  }
+  def bl-norm-field(fields, pairs, defs, v) {
+   nothing?(v) ? bl-norm-join([fields[0][0], ["none"]], bl-norm-fields(fields[1:], pairs, defs)) : bl-norm-field-has(fields, pairs, defs, bl-norm(v, defs));
+  }
+  def bl-norm-field-has(fields, pairs, defs, nv) {
+   nothing?(nv) ? nothing() : bl-norm-join([fields[0][0], nv], bl-norm-fields(fields[1:], pairs, defs));
+  }
+  def bl-norm(a, defs) {
+   (String) a[0] == "some" ? bl-wrap1("some", bl-norm(a[1], defs)) :
+   (String) a[0] == "list" ? bl-wrap1("list", bl-norm-all(a[1], defs)) :
+   (String) a[0] == "tuple" ? bl-wrap1("tuple", bl-norm-all(a[1], defs)) :
+   (String) a[0] == "set" ? bl-norm-set(bl-norm-all(a[1], defs)) :
+   (String) a[0] == "map" ? bl-norm-map(a[1], defs) :
+   (String) a[0] == "rec" ? bl-norm-rec(a, bl-find(a[1], defs), defs) : a;
+  }
+  def bl-wrap1(kind, x) = nothing?(x) ? nothing() : [kind, x];
+  def bl-norm-set(xs) = nothing?(xs) ? nothing() : ["set", bl-dedupe-by-text(bl-set-norm(xs))];
+  def bl-norm-rec(a, d, defs) {
+   nothing?(d) ? nothing() : bl-norm-rec-fields(a[1], bl-norm-fields(d[2], a[2], defs));
+  }
+  def bl-norm-rec-fields(name, fs) = nothing?(fs) ? nothing() : ["rec", name, fs];
+
+  // ---- a normalized literal becomes one cell ---------------------------------------------------
+  def bl-build-all(xs, defs) = xs |> map(x => bl-build(x, defs));
+  def bl-build(a, defs) {
+   (String) a[0] == "int" ? intern_trivial_int(a[1]) :
+   (String) a[0] == "float" ? make_float64(a[1]) :
+   (String) a[0] == "str" ? intern_trivial_string(a[1]) :
+   (String) a[0] == "bool" ? intern_node(bl-BOOL(), [intern_trivial_int(a[1])]) :
+   (String) a[0] == "none" ? intern_node(bl-NONE(), []) :
+   (String) a[0] == "some" ? intern_node(bl-SOME(), [bl-build(a[1], defs)]) :
+   (String) a[0] == "list" ? intern_node(bl-LIST(), bl-build-all(a[1], defs)) :
+   (String) a[0] == "set" ? intern_node(bl-SET(), bl-build-all(a[1], defs)) :
+   (String) a[0] == "tuple" ? intern_node(bl-TUPLE(), bl-build-all(a[1], defs)) :
+   (String) a[0] == "map" ? intern_node(bl-MAP(), a[1] |> map(p => intern_node(bl-PAIR(), [bl-build(p[0], defs), bl-build(p[1], defs)]))) :
+   (String) a[0] == "rec" ? intern_node(bl-find(a[1], defs)[1], a[2] |> map(p => bl-build(p[1], defs))) : nothing();
+  }
+
+  // ---- reading and showing ---------------------------------------------------------------------
+  def bl-read(text, defs) {
+   let a = bl-parse(text);
+   nothing?(a) ? nothing() : (bl-valid(a, defs) == 1 ? bl-read-norm(bl-norm(a, defs), defs) : nothing());
+  }
+  def bl-read-norm(n, defs) = nothing?(n) ? nothing() : bl-build(n, defs);
+  def bl-read-as(typeText, text, defs) {
+   let t = bl-type-parse(typeText);
+   let a = bl-parse(text);
+   (nothing?(t) || nothing?(a)) ? nothing() : (bl-check(a, t, defs) == 1 ? bl-read-norm(bl-norm(a, defs), defs) : nothing());
+  }
+
+  // a cell back to its literal tree: leaves by their value, core blueprints by their category, a record by its declaration
+  def bl-cell-all(cs, defs) = nil?(cs) ? [] : bl-cell-join(bl-cell-ast(cs[0], defs), bl-cell-all(cs[1:], defs));
+  def bl-cell-join(h, t) = (nothing?(h) || nothing?(t)) ? nothing() : cons(h, t);
+  def bl-cell-pairs(cs, defs) = nil?(cs) ? [] : bl-cell-pair-join(bl-cell-all(node_children(cs[0]), defs), bl-cell-pairs(cs[1:], defs));
+  def bl-cell-pair-join(kv, rest) = (nothing?(kv) || nothing?(rest)) ? nothing() : cons([kv[0], kv[1]], rest);
+  def bl-cell-fields(fields, kids, defs) = nil?(fields) ? [] : bl-cell-field-join(fields[0][0], bl-cell-ast(kids[0], defs), bl-cell-fields(fields[1:], kids[1:], defs));
+  def bl-cell-field-join(name, v, rest) = (nothing?(v) || nothing?(rest)) ? nothing() : cons([name, v], rest);
+  def bl-cell-leaf(c) {
+   let v = node_value(c);
+   (String) value_kind(v) == "int" ? ["int", v] :
+   (String) value_kind(v) == "float" ? ["float", v] :
+   (String) value_kind(v) == "string" ? ["str", v] : nothing();
+  }
+  def bl-cell-ast(c, defs) {
+   (String) value_kind(c) != "node_id" ? nothing() :
+   (Comparable) node_level(c) == 1 ? bl-cell-leaf(c) : bl-cell-composite(c, node_category(c), node_children(c), defs);
+  }
+  def bl-cell-composite(c, cat, kids, defs) {
+   eq(cat, bl-LIST()) ? bl-wrap1("list", bl-cell-all(kids, defs)) :
+   eq(cat, bl-SET()) ? bl-wrap1("set", bl-cell-all(kids, defs)) :
+   eq(cat, bl-TUPLE()) ? bl-wrap1("tuple", bl-cell-all(kids, defs)) :
+   eq(cat, bl-MAP()) ? bl-wrap1("map", bl-cell-pairs(kids, defs)) :
+   eq(cat, bl-SOME()) ? bl-wrap1("some", bl-cell-ast(kids[0], defs)) :
+   eq(cat, bl-NONE()) ? ["none"] :
+   eq(cat, bl-BOOL()) ? ["bool", node_value(kids[0])] : bl-cell-rec(bl-find-cell(cat, defs), kids, defs);
+  }
+  def bl-cell-rec(d, kids, defs) {
+   nothing?(d) ? nothing() : bl-norm-rec-fields(d[0], bl-cell-fields(d[2], kids, defs));
+  }
+  def bl-show(c, defs) {
+   let a = bl-cell-ast(c, defs);
+   nothing?(a) ? nothing() : bl-text(a);
+  }
+ }
+ 0;
+}
