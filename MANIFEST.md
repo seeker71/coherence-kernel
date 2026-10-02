@@ -50,7 +50,8 @@ rows' count, swervecount and saturation), and they move onto those rows.
 **Source is the run lane.** `./fkwu file.fk` runs Form source through the kernel's own front-end; `./fkwu file.bml`
 lowers the high grammar in memory through the body's own compiler. The artifacts are the `.fkb` / `.sym` image
 caches beside a source, and a `.dylib` where a native carrier sits: the Metal carrier
-(`form/native/metal/fk-metal-carrier.m`) builds into a dylib `fkwu` loads in its own process.
+(`form/native/metal/fk-metal-carrier.m`) is built into a dylib by `fkwu` itself on its first Metal call, when absent
+or older than its source, and loaded in its own process.
 
 **The walkers witness; fkwu carries.** Each walker is an independent lexer and evaluator, doing the minimum needed to
 witness four-way agreement on the pure-recipe surface. Everything natively owned lives in or derives from `fkwu`:

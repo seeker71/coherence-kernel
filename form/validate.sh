@@ -305,20 +305,11 @@ fi
 FKWU_SRC=""
 build_fkwu_src() {
     local src="../runtime/fkwu-uni.c" bin="../fkwu"
-    local carrier_src="native/metal/fk-metal-carrier.m"
-    local carrier_dylib="native/metal/fk-metal-carrier.dylib"
     [[ -f "$src" ]] || return 0
     if [[ ! -x "$bin" || "$src" -nt "$bin" ]]; then
         command -v cc >/dev/null 2>&1 || return 0
         echo "  building runtime fkwu (repo root, plain seed)..." >&2
         cc -O2 -o "$bin" "$src" || return 1
-    fi
-    if [[ "$(uname -s)" == "Darwin" && -f "$carrier_src" &&
-          ( ! -f "$carrier_dylib" || "$carrier_src" -nt "$carrier_dylib" ) ]]; then
-        command -v cc >/dev/null 2>&1 || return 0
-        echo "  building dynamic Metal carrier..." >&2
-        cc -O2 -dynamiclib -o "$carrier_dylib" "$carrier_src" \
-            -framework Metal -framework Foundation -fobjc-arc || return 1
     fi
     [[ -x "$bin" ]] && FKWU_SRC="$bin"
 }

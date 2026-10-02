@@ -2213,6 +2213,76 @@ static int fk_metal_dyn_default_path(char *out) {
     out[pos] = 0;
     return 1;
 }
+/* The carrier is admitted on demand: a first Metal call that finds it absent runs the body's own
+ * admission once (observe/metal-carrier-admit-run.bml, which reads form-stdlib/metal-carrier.bml) from
+ * this binary's directory, then loads what stands. The policy is Form's; this only asks for it. */
+#if defined(__APPLE__)
+extern int setenv(const char *, const char *, int);
+extern int chdir(const char *);
+/* Absent, or older than its source (the .m beside it): form-stdlib/metal-carrier.bml's two states that build. */
+static int fk_metal_dyn_wants_admission(const char *path) {
+    char src[FK_PATH_CAP];
+    struct stat built;
+    struct stat made;
+    long long n = fk_cstrlen(path);
+    if (stat(path, &built) != 0) {
+        return 1;
+    }
+    if (n < 6 || n + 1 >= FK_PATH_CAP) {
+        return 0;
+    }
+    memcpy(src, path, (unsigned long)(n - 6));
+    src[n - 6] = '.';
+    src[n - 5] = 'm';
+    src[n - 4] = 0;
+    return stat(src, &made) == 0 && made.st_mtime > built.st_mtime;
+}
+static void fk_metal_dyn_admit(void) {
+    char dir[FK_PATH_CAP];
+    long long last = -1;
+    long long i = 0;
+    int status = 0;
+    int pid;
+    if (getenv("FKWU_CARRIER_ADMITTING") != 0) {
+        return;
+    }
+    while (fk_self_path[i] != 0 && i + 1 < FK_PATH_CAP) {
+        dir[i] = fk_self_path[i];
+        if (fk_self_path[i] == '/') {
+            last = i;
+        }
+        i = i + 1;
+    }
+    if (last < 0) {
+        return;
+    }
+    dir[last + 1] = 0;
+    pid = fork();
+    if (pid < 0) {
+        return;
+    }
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+        char *child_argv[3];
+        setenv("FKWU_CARRIER_ADMITTING", "1", 1);
+        if (nul >= 0) {
+            dup2(nul, 0);
+            dup2(nul, 1);
+            dup2(nul, 2);
+        }
+        if (chdir(dir) != 0) {
+            _exit(127);
+        }
+        child_argv[0] = (char *)fk_self_path;
+        child_argv[1] = (char *)"observe/metal-carrier-admit-run.bml";
+        child_argv[2] = 0;
+        execvp(fk_self_path, child_argv);
+        _exit(127);
+    }
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+}
+#endif
 static int fk_metal_dyn_load(void) {
     char *env;
     char path[FK_PATH_CAP];
@@ -2230,6 +2300,11 @@ static int fk_metal_dyn_load(void) {
     if (!fk_metal_dyn_default_path(path)) {
         return 0;
     }
+#if defined(__APPLE__)
+    if (fk_metal_dyn_wants_admission(path)) {
+        fk_metal_dyn_admit();
+    }
+#endif
     return fk_metal_dyn_try_path(path);
 }
 static long long fk_metal_status_append(char *out, long long cap, long long off, const char *msg) {

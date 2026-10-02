@@ -288,13 +288,10 @@ runtime or model server.
 # linked into the seed.
 cc -O2 -o fkwu runtime/fkwu-uni.c
 
-# Darwin: build the optional carrier artifact. fkwu admits it dynamically on
-# first Metal call; it SKIP's when the machine has no GPU.
-if [ "$(uname -s)" = Darwin ] && [ -f form/native/metal/fk-metal-carrier.m ]; then
-  cc -O2 -dynamiclib -o form/native/metal/fk-metal-carrier.dylib \
-    form/native/metal/fk-metal-carrier.m \
-    -framework Metal -framework Foundation -fobjc-arc
-fi
+# Darwin: nothing to pre-build. On its first Metal call fkwu builds the carrier
+# when it is absent or older than form/native/metal/fk-metal-carrier.m (it runs
+# observe/metal-carrier-admit-run.bml, which reads form-stdlib/metal-carrier.bml),
+# then loads it; it SKIP's when the machine has no GPU.
 
 # Windows (mingw-w64 / TDM-GCC) — the seed carries its Windows shapes and checks clean; a Windows host has yet to witness the link and the run
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
