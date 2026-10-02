@@ -39,7 +39,8 @@
 // THE RECORDED REFERENCES (read from the recording, never recomputed): the logits of ds4's dump on its 14-token chat-templated prompt (the JSON is pinned by SHA-256; the recording does not carry
 // the 14 prompt ids, so that leg runs when the caller supplies them as logits_prompt_ids and waits otherwise), judged by Pearson r, top-10 overlap and the TIE BUDGET (the reference's top-two margin
 // against our largest delta over its top 64: a token flips when the delta exceeds the margin); and the 24-token greedy stream for the raw prompt ids 671 6102 294 8760 344 (a cycle of 7), matched
-// token by token, run twice for bit equality of ids and last logits.
+// token by token, run twice for bit equality of ids and last logits, and read at every step for OUR top-two margin and the recorded id's gap below our top (dvr-step, the receipt's stream_margins and
+// stream_recorded_gap): the stream leg has no reference logits of its own, so its near ties are told from our own margins, and the tie budget proper is the logits leg's.
 //
 // Proven by: form-stdlib/tests/dsv4-validate-band.bml (the plan, the dry door's output, the abort rules and the ask on scripted readings, the holders, the references' arithmetic, the receipt row; nothing opened).
 //////////////////////////////////////////////////////////////////////
@@ -134,10 +135,13 @@ section [form.bml] {
   // A NOTE, NOT A GAP. The recorded stream was earned by ds4 on the IQ2XXS file: ds4 quantises the activation of a Q8_0 dense matvec to int8 per 32-block and dots in integers (ds4.c:6814, :7051), reads
   // Q2_K in a plain ascending f32 sum (:3480) and its F16 dots on two NEON accumulators. The driver's lanes read f32 activations and sum by lane tree (each within 3e-5 of the oracle's fp64 on the fixture),
   // so on a near tie the greedy stream can differ from ds4's by that rounding alone (ds4-order-match.fk's header records a third-step margin of 0.0197 of 24 logits on the earlier lane); the ds4 order lanes
-  // (dkr-unit-ds4q8, dkr-unit-ds4q2k: compiled by the kernels band, not in the graph) are what to wire if the window's stream leg and tie budget say so. That is a MEASUREMENT the window exists to make: it does not
+  // (dkr-unit-ds4q8, dkr-unit-ds4q2k: compiled by the kernels band, not in the graph) are what to wire if the window's readings say so. WHAT THE WINDOW READS, and which leg: the STREAM leg runs on the raw
+  // prompt ids alone and records, for each of its 24 steps, OUR top-two logit margin (stream_margins) and how far the recorded id's logit sits below our top (stream_recorded_gap, 0 where we chose it), so a flip
+  // at a step can be told from a near tie (a miss with a gap near the margin's scale is rounding; a miss with a large gap is not). The reference's own TIE BUDGET (its top-two margin against our largest delta)
+  // belongs to the LOGITS leg, which needs the 14 chat-templated prompt ids the recording does not carry and WAITS until they are supplied. It is a MEASUREMENT the window exists to make: it does not
   // stop the window from running, so it is printed in the plan and never counted among the gaps.
   def dvr-has-q-types?(m) = dvl-type-in?(dvl-type(record_get(m, "index"), "output.weight"), [8]) || dvl-type-in?(dvl-type(record_get(m, "index"), "blk.0.ffn_down_exps.weight"), [10]);
-  def dvr-order-note() = "note, not a gap: the recorded stream was earned with ds4's own order (Q8_0 activations quantised to int8 per 32-block, Q2_K in a plain ascending sum); the driver's lanes read f32 activations and sum by lane tree, so a near-tie token may differ: the stream leg and the tie budget are what measure it, and the ds4q8 and ds4q2k units are the lanes to wire if they say so";
+  def dvr-order-note() = "note, not a gap: the recorded stream was earned with ds4's own order (Q8_0 activations quantised to int8 per 32-block, Q2_K in a plain ascending sum); the driver's lanes read f32 activations and sum by lane tree, so a near-tie token may differ: the stream leg records our top-two margin and the recorded id's gap at each of its 24 steps (the logits leg's tie budget waits for its 14 prompt ids), and the ds4q8 and ds4q2k units are the lanes to wire if they say so";
   def dvr-notes(m) = dvr-has-q-types?(m) ? [dvr-order-note()] : [];
 
   // ---- the processes: who else holds the GPU -------------------------------------------------------------------------------------------
@@ -214,6 +218,19 @@ section [form.bml] {
   // the stream: how many of the recorded ids the walk matched from the start, and the first index it did not
   def dvr-match-go(got, want, i) = (i == len(got) || i == len(want)) ? i : (got[i] == want[i] ? dvr-match-go(got, want, i + 1) : i);
   def dvr-matched(got, want) = dvr-match-go(got, want, 0);
+  // ONE STEP OF THE STREAM, read from OUR logits: [our argmax, our top-two margin (top minus second; 0 on a tie), how far the logit of the recorded id `want` sits below our top (0 where it is our top; -1 reads
+  // want as no id)]. One pass with the best and second so far (a recursion that called itself twice a level would take 2^n steps over 129,280 values); the strict > keeps the earlier index on a tie, and an equal
+  // second reads margin 0.
+  def dvr-two-go(xs, i, bi, bv, sv) = i == len(xs) ? [bi, bv, sv] : (xs[i] > bv ? dvr-two-go(xs, i + 1, i, xs[i], bv) : (xs[i] > sv ? dvr-two-go(xs, i + 1, bi, bv, xs[i]) : dvr-two-go(xs, i + 1, bi, bv, sv)));
+  def dvr-two(xs) = dvr-two-go(xs, 1, 0, xs[0], 0.0 - 1.0e30);
+  def dvr-step(ours, want) {
+   let t = dvr-two(ours);
+   [t[0], t[1] - t[2], (want >= 0 && want < len(ours)) ? t[1] - ours[want] : 0.0];
+  }
+  def dvr-steps-margins(readings) = len(readings) == 0 ? [] : cons(readings[0][1], dvr-steps-margins(readings[1:]));
+  def dvr-steps-gaps(readings) = len(readings) == 0 ? [] : cons(readings[0][2], dvr-steps-gaps(readings[1:]));
+  // the recorded id of step i, or -1 past the recorded stream
+  def dvr-want-at(i) = i < len(dvr-stream()) ? dvr-stream()[i] : 0 - 1;
   def dvr-bits(xs) = len(xs) == 0 ? [] : cons(md-f32-bits(xs[0]), dvr-bits(xs[1:]));
   // the recorded logits, read from the pinned file: 129,280 values
   def dvr-ref-logits() {
@@ -231,6 +248,7 @@ section [form.bml] {
   def dvr-kv(k, v) = dvr-q(k) ++ ":" ++ v;
   def dvr-join(xs, sep) = len(xs) == 0 ? "" : (len(xs) == 1 ? xs[0] : xs[0] ++ sep ++ dvr-join(xs[1:], sep));
   def dvr-ids-json(xs) = "[" ++ dvr-join(map(x => x.str(), xs), ",") ++ "]";
+  def dvr-floats-json(xs) = "[" ++ dvr-join(map(x => x.str(), xs), ",") ++ "]";
   def dvr-stage-json(s) = "{" ++ dvr-join([dvr-kv("stage", dvr-q(s[0])), dvr-kv("estimate", s[1].str()), dvr-kv("wired_delta", s[2].str()), dvr-kv("ms", s[3].str())], ",") ++ "}";
   // r: the run's record: status reason file bytes lease cap cache stages(list of [label est delta ms]) wirespan(delta slice stack kind) cold_ms matched ids deterministic agreement gaps
   def dvr-receipt-row(date, at, r) = "{" ++ dvr-join([
@@ -240,6 +258,7 @@ section [form.bml] {
    dvr-kv("stages", "[" ++ dvr-join(map(s => dvr-stage-json(s), record_get(r, "stages")), ",") ++ "]"),
    dvr-kv("wirespan", "{" ++ dvr-join([dvr-kv("delta", record_get(r, "ws-delta").str()), dvr-kv("slice", record_get(r, "ws-slice").str()), dvr-kv("stack", record_get(r, "ws-stack").str()), dvr-kv("kind", dvr-q(record_get(r, "ws-kind")))], ",") ++ "}"),
    dvr-kv("cold_token_ms", record_get(r, "cold-ms").str()), dvr-kv("stream_matched", record_get(r, "matched").str()), dvr-kv("stream_of", "24"), dvr-kv("ids", dvr-ids-json(record_get(r, "ids"))),
+   dvr-kv("stream_margins", dvr-floats-json(record_get(r, "margins"))), dvr-kv("stream_recorded_gap", dvr-floats-json(record_get(r, "rgaps"))),
    dvr-kv("deterministic", record_get(r, "deterministic").str()),
    dvr-kv("logits", record_get(r, "logits")), dvr-kv("driver_gaps", "[" ++ dvr-join(map(g => dvr-q(g), record_get(r, "gaps")), ",") ++ "]"),
    dvr-kv("elapsed_ms", record_get(r, "elapsed").str())], ",") ++ "}";
@@ -251,7 +270,7 @@ section [form.bml] {
   def dvr-said(lines) = len(lines) == 0 ? 0 : dvr-said-next(print_str(lines[0]), lines[1:]);
   def dvr-said-next(said, rest) = dvr-said(rest);
   def dvr-env(file, m, size, shared, cap, cache, base, lease) = record_new(0, "file", file, "m", m, "bytes", size, "shared", shared, "cap", cap, "cache", cache, "base", base, "lease", lease, "prev", base, "t0", host_monotonic_ms(),
-    "log", [], "ctx", [], "sts", [], "reason", "", "ws-delta", 0, "ws-slice", 0, "ws-stack", 0, "ws-kind", "none", "cold-ms", 0, "matched", 0, "ids", [], "deterministic", 0, "logits", "{\"waits\":\"no logits_prompt_ids supplied\"}", "extra", []);
+    "log", [], "ctx", [], "sts", [], "reason", "", "ws-delta", 0, "ws-slice", 0, "ws-stack", 0, "ws-kind", "none", "cold-ms", 0, "matched", 0, "ids", [], "margins", [], "rgaps", [], "deterministic", 0, "logits", "{\"waits\":\"no logits_prompt_ids supplied\"}", "extra", []);
   def dvr-elapsed(env) = host_monotonic_ms() - record_get(env, "t0");
   def dvr-note(env, key, v) = record_set(env, key, v);
   def dvr-log-add(env, row) = record_set(env, "log", append(record_get(env, "log"), [row]));
@@ -348,12 +367,23 @@ section [form.bml] {
    nothing?(a) ? nothing() : 1;
   }
   // [ids, last logits bits] of one 24-id walk from a fresh state
+  // [ids, the reading of each step (dvr-step: our argmax, our top-two margin, the recorded id's gap below our top), the last logits' bits] of one 24-id walk from a fresh state: the prefill answers id 0 from
+  // the logits it leaves, and each decode answers the next id from the logits IT leaves, each read before the next step overwrites them
+  def dvr-walk-go(ctx, sts, id, pos, left, ids, rd, lg) {
+   left == 0 ? [ids, rd, dvr-bits(lg)] : {
+    let nid = dsv4-decode(ctx, sts, id, pos);
+    nothing?(nid) ? [ids, rd, dvr-bits(lg)] : {
+     let lg2 = dsv4-logits(ctx);
+     dvr-walk-go(ctx, sts, nid, pos + 1, left - 1, append(ids, [nid]), append(rd, [dvr-step(lg2, dvr-want-at(len(ids)))]), lg2);
+    };
+   };
+  }
   def dvr-walk(env) {
    let fresh = dvr-fresh-state(env);
    let ctx = dvr-ctx(env);
    let pf = nothing?(fresh) ? nothing() : dsv4-prefill-span-sliced(ctx, dvr-sts(env), dvr-prompt(), 0);
-   let rest = nothing?(pf) ? [] : dsv4-generate(ctx, dvr-sts(env), pf[0], pf[1], len(dvr-stream()) - 1, [], []);
-   nothing?(pf) ? nothing() : [cons(pf[0], rest), dvr-bits(dsv4-logits(ctx))];
+   let lg0 = nothing?(pf) ? [] : dsv4-logits(ctx);
+   nothing?(pf) ? nothing() : dvr-walk-go(ctx, dvr-sts(env), pf[0], pf[1], len(dvr-stream()) - 1, [pf[0]], [dvr-step(lg0, dvr-want-at(0))], lg0);
   }
   def dvr-do-stream(env) {
    let a = dvr-walk(env);
@@ -361,9 +391,12 @@ section [form.bml] {
    let m1 = nothing?(a) ? 0 : dvr-matched(a[0], dvr-stream());
    let k1 = record_set(env, "ids", nothing?(a) ? [] : a[0]);
    let k2 = record_set(env, "matched", m1);
-   let same = (nothing?(a) || nothing?(b)) ? 0 : (a[0] == b[0] && a[1] == b[1] ? 1 : 0);
+   let same = (nothing?(a) || nothing?(b)) ? 0 : (a[0] == b[0] && a[2] == b[2] && a[1] == b[1] ? 1 : 0);
    let k3 = record_set(env, "deterministic", same);
-   let said = print_str("[dsv4-validate] stream: " ++ m1.str() ++ " of 24 recorded ids matched from the start; twice from a fresh state: " ++ (same == 1 ? "ids and last logits bit-equal" : "NOT bit-equal"));
+   let k4 = record_set(env, "margins", nothing?(a) ? [] : dvr-steps-margins(a[1]));
+   let k5 = record_set(env, "rgaps", nothing?(a) ? [] : dvr-steps-gaps(a[1]));
+   let said = print_str("[dsv4-validate] stream: " ++ m1.str() ++ " of 24 recorded ids matched from the start; twice from a fresh state: " ++ (same == 1 ? "ids and last logits bit-equal" : "NOT bit-equal")
+    ++ "; our top-two margin at each step " ++ dvr-floats-json(record_get(env, "margins")) ++ ", the recorded id's gap below our top " ++ dvr-floats-json(record_get(env, "rgaps")));
    nothing?(a) || nothing?(b) ? nothing() : 1;
   }
   def dvr-steps(env, m, opts) {
@@ -394,7 +427,7 @@ section [form.bml] {
   }
   def dvr-record(env, status, reason, held) = record_new(0, "status", status, "reason", reason, "file", record_get(env, "file"), "bytes", record_get(env, "bytes"), "shared", record_get(env, "shared"), "cap", record_get(env, "cap"),
     "cache", record_get(env, "cache"), "stages", record_get(env, "log"), "ws-delta", record_get(env, "ws-delta"), "ws-slice", record_get(env, "ws-slice"), "ws-stack", record_get(env, "ws-stack"), "ws-kind", record_get(env, "ws-kind"),
-    "cold-ms", record_get(env, "cold-ms"), "matched", record_get(env, "matched"), "ids", record_get(env, "ids"), "deterministic", record_get(env, "deterministic"), "logits", record_get(env, "logits"),
+    "cold-ms", record_get(env, "cold-ms"), "matched", record_get(env, "matched"), "ids", record_get(env, "ids"), "margins", record_get(env, "margins"), "rgaps", record_get(env, "rgaps"), "deterministic", record_get(env, "deterministic"), "logits", record_get(env, "logits"),
     "gaps", dvr-gaps(record_get(env, "m")), "elapsed", dvr-elapsed(env), "held", held);
   def dvr-finish(env, opts, why) {
    let held = dvr-release(env);
