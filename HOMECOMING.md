@@ -80,7 +80,10 @@ recipe execution; lower training loss does not yet establish improved answer qua
   window. The planner takes the next pending request in
   [`learn/local-requests.jsonl`](learn/local-requests.jsonl), a local voice writes
   it as a band-first gap, and Form verifies the gap before it joins the queue. A
-  queued gap is turned at once.
+  queued gap is turned at once. When none is pending, requests whose cited code
+  moved since their review follow; a moved request whose band already reads full
+  under failing stubs ends moot, and the walk plans again after a moot (at most
+  four planner walks for a turn that found no gap, and none past the window).
 - **Lessons** — [`observe/session-pairs-run.bml`](observe/session-pairs-run.bml)
   turns each rented turn into a chat row the native trainer reads (the
   transcripts are found under `HEARTH_PERSON_HOME` in `fkwu.conf`);

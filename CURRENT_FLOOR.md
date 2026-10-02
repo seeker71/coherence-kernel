@@ -44,15 +44,15 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=35 claims=720 broken=0 (each broken claim named on its own line; 2026-10-01)
+./fkwu observe/door-link-health-run.bml  -> docs=35 claims=752 broken=0 (each broken claim named on its own line; 2026-10-02)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=303 readable=140 unreadable=163 seen=1 flaws=5, exit 1 (each band's
-                                            declared full read against the most its claims sum to, and the queue and
-                                            manifest copies of a full against the head pin, with no band run, in about
-                                            0.2 s; the 5 flaws are decimal and count folds, each silenced by `; FOLD:
-                                            decimal|count` on a head line; a sweep that lists no band is a flaw too;
-                                            2026-10-02)
+./fkwu observe/band-truth-run.bml        -> bands=306 readable=143 unreadable=163 absent=0 seen=1 flaws=0, exit 0
+                                            (each band's declared full read against the most its claims sum to, and
+                                            the queue and manifest copies of a full against the head pin, with no
+                                            band run, in about 0.3 s; a decimal or count fold that stands on purpose
+                                            says `; FOLD: decimal|count` on a head line; a sweep that lists no band
+                                            is a flaw too; 2026-10-02)
 form/form-stdlib/tests/band-truth-band   -> 1048575
 ./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
@@ -60,7 +60,8 @@ observe/tests/belief-rewitness-band      -> 63
 learn/tests/homecoming-distillation-corpus-band -> 32767
 value-eq-arena-band 31 · import-carry-band 255 · form-cli-author-high-band 4095
 closure-lines-band 31 · sort-band 31   (the queue's two gaps, written by the local lane; 2026-10-01)
-form-cli-landing-band 63   (the landing reads its witness's exit; a red witness holds the landing)
+form-cli-landing-band 16383   (the landing and the walk read every child's exit from `host_wait` through
+                                `host-child.bml` (`hch-run`), never from a printed mark; a red witness holds the landing)
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · offer-ack-core-band 32767
@@ -88,9 +89,9 @@ lapse. The release ledger's open rows are the body's named work, each with its w
 A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
 `form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
 whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
-beside it. Of 553 tracked `.bml` files, 487 carry a `section [form.bml]` block and three carry
+beside it. Of 594 tracked `.bml` files, 528 carry a `section [form.bml]` block and three carry
 `section [form.lift]` (`git ls-files '*.bml' | xargs command grep -a -l '^section \[form.bml\]' | wc -l`,
-read on the tree that carries this line, 2026-10-01; the counts grow with each new unit). `true` and `false` are literals in the
+read on the tree that carries this line, 2026-10-02; the counts grow with each new unit). `true` and `false` are literals in the
 dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
 
 The cursor (`grammars/form-bml.fk`, lowered by `form-bml-lower.fk`) is the compiler's one reader of a
@@ -99,12 +100,12 @@ refusals all come through it. It reads a section whole, with direct backtracking
 the compiler's own constructors, so a def lowers to the very node its flat Form spelling builds:
 
 ```text
-./fkwu observe/bml-cursor-coverage-run.bml -> files=1399 sections=1041 read=1041 stops=0 refused=0
+./fkwu observe/bml-cursor-coverage-run.bml -> files=1443 sections=1088 read=1088 stops=0 refused=0
                                               (read = sections: every `^section [form.bml|route|action]` line in
                                               the `.bml` and `.fk` files under the root, outside .git, .hearth,
                                               .claude, .cache, node_modules, target and dist; the counts grow
                                               with each new unit; read on the tree that carries this line,
-                                              2026-10-01)
+                                              2026-10-02, in 152 s)
                                               a section it refuses is named by line, word and wanted rule
 form-bml-cursor-full-band 105
 ```
