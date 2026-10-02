@@ -200,26 +200,43 @@ DeepSeek server and the page cache could each pass their own check and together 
   was and the lane ends with a reason through its checkpoint, the walk takes no turn.
 - **Leases: a promise another process can see before the pages show in the reading.** One reading is not enough (two
   processes that start together can both see room), so a grant is a lease: `/private/tmp/form-memory-leases/<pid>.lease`,
-  one JSON line `{pid, who, key, shared, private, granted_unix_ms}`. `key` names the shared thing (the model file's
-  path, `""` for none), `shared` its bytes (the weights' file size), `private` the bytes only this process owns (KV
-  state, scratch, margin). `mg-lease` reads the leases and the machine under one lock (`dir-lock.bml`: a directory
-  only one maker makes, its owner's pid inside, a dead or overlong holder taken over, released in a deferred step so a
-  stop releases it too), removes the file of every dead pid, and judges `private` + `shared` (unless a live lease already
-  holds the same key: the weights are one physical copy in the page cache) + the pending bytes of every other lease
-  granted less than 180 s ago through the same policy. Granted writes the lease; held writes nothing and names why.
-  A process's lease is its whole promise (the same key restates it, key `""` adds a renewal's second KV state to it,
-  `mg-release` removes it where the session closes). Doors that open models take leases: `fcms-open-context` (key = the
-  model path, released at the session's close or when the open gives up), `fcmr-prepare`, `lpr-ask`. The walk's own
-  pre-check (`hw-ready`) stays a bare wait: its child lane takes the real lease in its own process. Proven
-  model-free in `memory-governor-band` with each defect planted (no lock, a key counted twice, pending ignored, a dead
-  lease never removed, a lock never released on a stop) and read below its head.
+  one JSON line `{pid, who, key, shared, private, granted_unix_ms, extra, extra_unix_ms}`. `key` names the shared thing
+  (the model file's path, `""` for none), `shared` its bytes (the weights' file size), `private` the bytes only this
+  process owns (KV state, scratch, margin; it includes `extra`, the part granted later than the weights, a renewal's
+  second KV state, stamped on its own). `shared` and `private` read 0 to 2^50 bytes; any other row reads as no lease and
+  is removed with the torn ones (and a stale `<pid>.lease.part`). `mg-lease` reads the leases and the machine under one
+  lock (`dir-lock.bml`: a directory only one maker makes, its owner's pid inside, released in a deferred step so a stop
+  releases it too; a dead holder is taken over at once, a live one is waited for until its own stamp is a minute old,
+  then the waiter's 10 s patience answers `lease-lock-busy`; the grant reads the lock's owner once more before it
+  writes), removes the file of every dead pid, and judges `private` + `shared` (unless a live lease already holds the
+  same key: the weights are one physical copy in the page cache) + the pending bytes of every other lease (its grant for
+  180 s, its extra for 180 s from its own stamp, never the whole lease again) through the same policy. Granted writes the
+  lease; held writes nothing and names why. When the lease directory itself cannot be made the bare reading's verdict
+  answers, named `lease-dir-unavailable`, so the machine is still guarded by one reading. A process's lease is its whole
+  promise (the same key restates it, key `""` adds a renewal's second KV state as extra, `mg-lease-return` gives it back
+  when a stream is retired, `mg-release` removes it where the session closes). Doors that open models take leases:
+  `fcms-open-context` (key = the model path, released at the session's close or when the open gives up),
+  `fcmr-prepare`, `lpr-ask`. The walk's own pre-check (`hw-ready`) stays a bare wait: its child lane takes the real
+  lease in its own process. `observe/memory-governor-run.bml` judges through the same lease-aware policy without taking
+  a lease, so the verdict it prints counts the leases it lists. Proven model-free in `memory-governor-band` 67108863
+  with each defect planted and read below its head (no lock, a key counted twice, pending ignored, a dead lease never
+  removed, no deferred release; then a fail-closed directory, an unchecked owner, no range check, a renewal that
+  restamps the whole lease, a no-op return, a door that ignores leases, a part file never swept, a takeover at the
+  waiter's patience).
 - **A lane that already holds memory gives it back.** `fcac-loop` (`form-cli-code-live.bml`) is entered once at each
   turn boundary and asks `mg-low?` of the machine (available below half the reserve, wired above 80 percent, or the
   compressor above 40 percent): a low reading saves the checkpoint and ends the lane through `fcac-finish` with the
   reason `host-memory-low`, its session released at the settle, so a later walk resumes the checkpoint and no model
-  token is spent. A roomy reading, or one that did not arrive, continues unchanged. The walk reads that ending as a
-  choice point (`hw-memory-low?`): not idle, not an unknown spend, no option spent (`nt-memory-low?`), its wall no
-  option's measure, and the next turn's `hw-ready` waits for the machine. Band: `form-cli-code-low-memory-band` 511.
+  token is spent. A roomy reading, or one that did not arrive, continues unchanged, and a lane that spent all its turns
+  ends by that, not as a memory ending. The walk reads that ending, and a session open refused for memory
+  (`host-memory-held:<why>`), as a choice point (`mg-memory-ending?`, the one word its readers share): not idle, not an
+  unknown spend, no option spent (`nt-memory-low?`, `nt-attempts`), its wall no option's measure (`hw-wall`), no row in
+  the review's options (`lfr-options`: never a split, never a lane failure), no tried approach in the ladder
+  (`ntl-hist-of`: an interrupted row, so the first way is not refused and the resume is not capped). A memory ending
+  that saved a checkpoint and is the contract's latest row leaves one pending row in the history: the resume way takes
+  its checkpoint and hears `ntl-continue-text` (nothing failed, so no "diagnose" instruction), and the first way waits
+  for it (`memory-pending`). The next turn's `hw-ready` waits for the machine. Bands: `form-cli-code-low-memory-band`
+  1023, `native-turn-ladder-band` 262143, `local-flow-reading-band` 32767.
 
 ## Present floor and direction
 
