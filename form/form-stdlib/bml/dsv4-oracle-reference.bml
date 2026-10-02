@@ -131,11 +131,39 @@ section [form.bml] {
   def dfo-mx8(r,key,x) {
    let run = record_get(r,"matrix-mx8"); run(r,key,x);
   }
-  def dfo-ref-mx8(r,key,x) {
+  // The dense matrix of a tensor by its OWN type, read from the table: MXFP8 (41, two planes) or Q8_0 (8, blocks of an f16 scale and 32 signed bytes, ggml's block_q8_0).
+  def dfo-ref-mx8(r,key,x) = if ((Comparable) head(dfo-tensor(r,key)) == 8) then dfo-ref-q80(r,key,x) else dfo-ref-mx8-plane(r,key,x);
+  def dfo-ref-mx8-plane(r,key,x) {
    let t = dfo-tensor(r,key); let dims = nth(t,1); let cols = head(dims); let rows = nth(dims,1); let at = dfo-abs(r,t); let cells = (rows * cols);
    dfo-require((((Comparable) head(t) == 41) && (((Comparable) (cols % 32) == 0) && ((Comparable) len(x) == cols))),str_concat("MXFP8 matrix geometry: ",key));
    let data = dfo-bytes(r,at,cells); let scales = dfo-bytes(r,(at + cells),(cells / 32));
    dfo-mx8-rows(data,scales,cols,0,rows,x,list());
+  }
+  // Q8_0, fp64: w = d x q with d the block's f16 and q a signed byte (every product is exact in fp64); a row is its blocks' d x (sum of q x) in ascending order. The block stride is 34 bytes.
+  def dfo-s8(b) = if (b >= 128) then (b - 256) else b;
+  def dfo-q80-dot(data,at,x,left,sum) = if ((Comparable) left == 0) then list(sum,x) else dfo-q80-dot(data,(at + 1),tail(x),(left - 1),(sum + ((1.0 * dfo-s8(str_byte_at(data,at))) * head(x))));
+  def dfo-q80-blocks(data,at,x,left,sum) = if ((Comparable) left == 0) then sum else dfo-q80-block-next(data,at,left,sum,dfo-f16(dfo-le(data,at,2)),dfo-q80-dot(data,(at + 2),x,32,0.0));
+  def dfo-q80-block-next(data,at,left,sum,d,part) = dfo-q80-blocks(data,(at + 34),nth(part,1),(left - 1),(sum + (d * head(part))));
+  def dfo-q80-rows(data,cols,row,end,x,acc) = if ((Comparable) row == end) then reverse(acc) else dfo-q80-rows(data,cols,(row + 1),end,x,cons(dfo-q80-blocks(data,((row * (cols / 32)) * 34),x,(cols / 32),0.0),acc));
+  def dfo-ref-q80(r,key,x) {
+   let t = dfo-tensor(r,key); let dims = nth(t,1); let cols = head(dims); let rows = nth(dims,1); let at = dfo-abs(r,t); let bytes = ((rows * (cols / 32)) * 34);
+   dfo-require((((Comparable) head(t) == 8) && (((Comparable) (cols % 32) == 0) && ((Comparable) len(x) == cols))),str_concat("Q8_0 matrix geometry: ",key));
+   dfo-q80-rows(dfo-bytes(r,at,bytes),cols,0,rows,x,list());
+  }
+  // Q2_K, fp64 (ggml's block_q2_K, 84 bytes: scales[16] at 0, qs[64] at 16, d at 80, dmin at 82): group g of 16 weights (g = 0 to 15) has scale = low nibble and min = high nibble of scales[g], its codes are the
+  // 2-bit fields of qs at 32 (g / 8) + 16 (g mod 2) + l shifted right by 2 ((g / 2) mod 4), and each weight is d x scale x code - dmin x min.
+  def dfo-p4(k) = if ((Comparable) k == 0) then 1 else (4 * dfo-p4((k - 1)));
+  def dfo-q2k-code(data,b,g,l) = ((str_byte_at(data,((b + 16) + (((32 * (g / 8)) + (16 * (g % 2))) + l))) / dfo-p4(((g / 2) % 4))) % 4);
+  def dfo-q2k-elems(data,b,g,l,dl,ml,x,sum) = if ((Comparable) l == 16) then list(sum,x) else dfo-q2k-elems(data,b,g,(l + 1),dl,ml,tail(x),(sum + ((((dl * (1.0 * dfo-q2k-code(data,b,g,l))) - ml)) * head(x))));
+  def dfo-q2k-groups(data,b,g,d,dmin,x,sum) = if ((Comparable) g == 16) then list(sum,x) else dfo-q2k-group-next(data,b,g,d,dmin,sum,dfo-q2k-elems(data,b,g,0,(d * (1.0 * (str_byte_at(data,(b + g)) % 16))),(dmin * (1.0 * (str_byte_at(data,(b + g)) / 16))),x,0.0));
+  def dfo-q2k-group-next(data,b,g,d,dmin,sum,part) = dfo-q2k-groups(data,b,(g + 1),d,dmin,nth(part,1),(sum + head(part)));
+  def dfo-q2k-blocks(data,b,x,left,sum) = if ((Comparable) left == 0) then sum else dfo-q2k-block-next(data,b,left,dfo-q2k-groups(data,b,0,dfo-f16(dfo-le(data,(b + 80),2)),dfo-f16(dfo-le(data,(b + 82),2)),x,0.0),sum);
+  def dfo-q2k-block-next(data,b,left,part,sum) = dfo-q2k-blocks(data,(b + 84),nth(part,1),(left - 1),(sum + head(part)));
+  def dfo-q2k-rows(data,cols,row,rows,x,acc) = if ((Comparable) row == rows) then reverse(acc) else dfo-q2k-rows(data,cols,(row + 1),rows,x,cons(dfo-q2k-blocks(data,((row * (cols / 256)) * 84),x,(cols / 256),0.0),acc));
+  def dfo-q2k(r,t,expert,x) {
+   let dims = nth(t,1); let cols = head(dims); let rows = nth(dims,1); let stride = ((rows * (cols / 256)) * 84);
+   dfo-require((((Comparable) (cols % 256) == 0) && ((Comparable) len(x) == cols)),"Q2_K expert geometry");
+   dfo-q2k-rows(dfo-bytes(r,(dfo-abs(r,t) + (expert * stride)),stride),cols,0,rows,x,list());
   }
   def dfo-f16-dot(src,at,x,sum) = if nil?(x) then sum else dfo-f16-dot(src,(at + 2),tail(x),(sum + (dfo-f16(dfo-le(src,at,2)) * head(x))));
   def dfo-f16-rows(src,cols,row,rows,x,acc) = if ((Comparable) row == rows) then reverse(acc) else dfo-f16-rows(src,cols,(row + 1),rows,x,cons(dfo-f16-dot(src,((row * cols) * 2),x,0.0),acc));
@@ -185,7 +213,7 @@ section [form.bml] {
   def dfo-ref-expert(r,key,expert,x) {
    let t = dfo-tensor(r,key);
    dfo-require((((Comparable) len(nth(t,1)) == 3) && ((expert >= 0) && (expert < nth(nth(t,1),2)))),"expert outside tensor stack");
-   if ((Comparable) head(t) == 40) then dfo-mx4(r,t,expert,x) else if ((Comparable) head(t) == 16) then dfo-iq2(r,t,expert,x) else form_error(str_concat("DSV4 oracle: unsupported expert type for ",key));
+   if ((Comparable) head(t) == 40) then dfo-mx4(r,t,expert,x) else if ((Comparable) head(t) == 16) then dfo-iq2(r,t,expert,x) else if ((Comparable) head(t) == 10) then dfo-q2k(r,t,expert,x) else form_error(str_concat("DSV4 oracle: unsupported expert type for ",key));
   }
   def dfo-round-even(x) {
    let low = floor(x); let part = (x - (1.0 * low));
@@ -263,9 +291,9 @@ section [form.bml] {
   def dfo-equal-dims(a,b) = if (nil?(a) || nil?(b)) then (nil?(a) && nil?(b)) else (((Comparable) head(a) == head(b)) && dfo-equal-dims(tail(a),tail(b)));
   def dfo-type-in(kind,kinds) = if nil?(kinds) then 0 else (((Comparable) kind == head(kinds)) || dfo-type-in(kind,tail(kinds)));
   def dfo-tensor-size(t) {
-   let kind = head(t); let dims = nth(t,1); let cells = dfo-dim-cells(dims,1); let group = if ((Comparable) kind == 16) then 256 else if (((Comparable) kind == 40) || ((Comparable) kind == 41)) then 32 else 1;
+   let kind = head(t); let dims = nth(t,1); let cells = dfo-dim-cells(dims,1); let group = if (((Comparable) kind == 16) || ((Comparable) kind == 10)) then 256 else if (((Comparable) kind == 40) || (((Comparable) kind == 41) || ((Comparable) kind == 8))) then 32 else 1;
    dfo-require(((Comparable) (head(dims) % group) == 0),"quantized tensor column group extent");
-   dfo-size(if (((Comparable) kind == 0) || ((Comparable) kind == 26)) then dfo-product(cells,4) else if ((Comparable) kind == 1) then dfo-product(cells,2) else if ((Comparable) kind == 16) then dfo-product((cells / 256),66) else if ((Comparable) kind == 40) then dfo-sum((cells / 2),(cells / 32)) else if ((Comparable) kind == 41) then dfo-sum(cells,(cells / 32)) else nothing());
+   dfo-size(if (((Comparable) kind == 0) || ((Comparable) kind == 26)) then dfo-product(cells,4) else if ((Comparable) kind == 1) then dfo-product(cells,2) else if ((Comparable) kind == 16) then dfo-product((cells / 256),66) else if ((Comparable) kind == 40) then dfo-sum((cells / 2),(cells / 32)) else if ((Comparable) kind == 41) then dfo-sum(cells,(cells / 32)) else if ((Comparable) kind == 8) then dfo-product((cells / 32),34) else if ((Comparable) kind == 10) then dfo-product((cells / 256),84) else nothing());
   }
   def dfo-admit-tensor(r,key,kinds,dims) {
    let t = dfo-tensor(r,key); dfo-require((dfo-type-in(head(t),kinds) && (dfo-positive-dims(nth(t,1)) && dfo-equal-dims(nth(t,1),dims))),str_concat("tensor format/dimensions: ",key));
@@ -279,7 +307,7 @@ section [form.bml] {
    let p = str_concat("blk.",str_concat(int_to_str(il),".")); let e = record_get(g,"e"); let nh = record_get(g,"nh"); let hd = record_get(g,"hd"); let qr = record_get(g,"qr"); let ng = record_get(g,"ng"); let rank = record_get(g,"rank"); let hidden = nth(expert,1); let count = nth(expert,2);
    let shared = nth(dfo-tensor(r,str_concat(p,"ffn_gate_shexp.weight")),1); dfo-require((((Comparable) len(shared) == 2) && ((Comparable) head(shared) == e)),"shared expert input geometry"); let sh = nth(shared,1);
    let router = nth(dfo-tensor(r,str_concat(p,"ffn_gate_inp.weight")),1); dfo-require((((Comparable) len(router) == 2) && (((Comparable) head(router) == e) && (nth(router,1) >= count))),"router rows cover actual stored experts"); let nr = nth(router,1);
-   dfo-admit-tensor-rows(r,p,list(list("attn_norm.weight",list(0),list(e)),list("attn_q_a.weight",list(41),list(e,qr)),list("attn_q_a_norm.weight",list(0),list(qr)),list("attn_q_b.weight",list(41),list(qr,(nh * hd))),list("attn_kv.weight",list(41),list(e,hd)),list("attn_kv_a_norm.weight",list(0),list(hd)),list("attn_sinks.weight",list(0),list(nh)),list("attn_output_a.weight",list(41),list(((nh * hd) / ng),(ng * rank))),list("attn_output_b.weight",list(41),list((ng * rank),e)),list("ffn_norm.weight",list(0),list(e)),list("ffn_gate_inp.weight",list(1),list(e,nr)),list("ffn_gate_exps.weight",list(40,16),list(e,hidden,count)),list("ffn_up_exps.weight",list(40,16),list(e,hidden,count)),list("ffn_down_exps.weight",list(40,16),list(hidden,e,count)),list("ffn_gate_shexp.weight",list(41),list(e,sh)),list("ffn_up_shexp.weight",list(41),list(e,sh)),list("ffn_down_shexp.weight",list(41),list(sh,e))));
+   dfo-admit-tensor-rows(r,p,list(list("attn_norm.weight",list(0),list(e)),list("attn_q_a.weight",list(41,8),list(e,qr)),list("attn_q_a_norm.weight",list(0),list(qr)),list("attn_q_b.weight",list(41,8),list(qr,(nh * hd))),list("attn_kv.weight",list(41,8),list(e,hd)),list("attn_kv_a_norm.weight",list(0),list(hd)),list("attn_sinks.weight",list(0),list(nh)),list("attn_output_a.weight",list(41,8),list(((nh * hd) / ng),(ng * rank))),list("attn_output_b.weight",list(41,8),list((ng * rank),e)),list("ffn_norm.weight",list(0),list(e)),list("ffn_gate_inp.weight",list(1),list(e,nr)),list("ffn_gate_exps.weight",list(40,16,10),list(e,hidden,count)),list("ffn_up_exps.weight",list(40,16,10),list(e,hidden,count)),list("ffn_down_exps.weight",list(40,16,10),list(hidden,e,count)),list("ffn_gate_shexp.weight",list(41,8),list(e,sh)),list("ffn_up_shexp.weight",list(41,8),list(e,sh)),list("ffn_down_shexp.weight",list(41,8),list(sh,e))));
    dfo-admit-hc-shapes(r,g,str_concat(p,"hc_attn")); dfo-admit-hc-shapes(r,g,str_concat(p,"hc_ffn"));
    if record_has(record_get(r,"tensors"),str_concat(p,"ffn_gate_tid2eid.weight")) then dfo-admit-tensor(r,str_concat(p,"ffn_gate_tid2eid.weight"),list(26),list(used,record_get(r,"admitted-vocabulary"))) else dfo-admit-tensor(r,str_concat(p,"exp_probs_b.bias"),list(0),list(nr)); 1;
   }
@@ -347,7 +375,15 @@ section [form.bml] {
   def dfo-out-a(r,key,x,g) {
    let run = record_get(r,"matrix-out-a"); run(r,key,x,g);
   }
-  def dfo-ref-out-a(r,key,x,g) {
+  // the grouped output factor by the tensor's own type: Q8_0 rows (group g reads its own slice of x) or the MXFP8 planes
+  def dfo-ref-out-a(r,key,x,g) = if ((Comparable) head(dfo-tensor(r,key)) == 8) then dfo-ref-q80-out-a(r,key,x,g) else dfo-ref-out-a-plane(r,key,x,g);
+  def dfo-q80-out-a-groups(data,cols,rank,group,groups,x) = if ((Comparable) group == groups) then list() else dnr-cat(dfo-q80-rows(data,cols,(group * rank),((group + 1) * rank),dnr-take(x,cols),list()),dfo-q80-out-a-groups(data,cols,rank,(group + 1),groups,dnr-drop(x,cols)));
+  def dfo-ref-q80-out-a(r,key,x,g) {
+   let t = dfo-tensor(r,key); let cols = head(nth(t,1)); let rows = nth(nth(t,1),1); let groups = record_get(g,"ng"); let rank = record_get(g,"rank"); let at = dfo-abs(r,t);
+   dfo-require((((Comparable) head(t) == 8) && (((Comparable) (cols % 32) == 0) && (((Comparable) rows == (groups * rank)) && ((Comparable) len(x) == (groups * cols))))),"grouped Q8_0 output factor geometry");
+   dfo-q80-out-a-groups(dfo-bytes(r,at,((rows * (cols / 32)) * 34)),cols,rank,0,groups,x);
+  }
+  def dfo-ref-out-a-plane(r,key,x,g) {
    let t = dfo-tensor(r,key); let cols = head(nth(t,1)); let rows = nth(nth(t,1),1); let groups = record_get(g,"ng"); let rank = record_get(g,"rank"); let cells = (cols * rows); let at = dfo-abs(r,t);
    dfo-require((((Comparable) head(t) == 41) && (((Comparable) rows == (groups * rank)) && ((Comparable) len(x) == (groups * cols)))),"grouped output factor geometry");
    let data = dfo-bytes(r,at,cells); let scales = dfo-bytes(r,(at + cells),(cells / 32));

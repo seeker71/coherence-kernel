@@ -121,11 +121,27 @@ section [form.bml] {
     def dfx-seeded(specs, n) = len(specs) == 0 ? [] : cons([specs[0][0], specs[0][1], specs[0][2], specs[0][3], 1000 * (n + 1), specs[0][5]], dfx-seeded(specs[1:], n + 1));
     def dfx-specs() = dfx-seeded(append(dfx-global-specs(), dfx-all-layers(0)), 0);
 
+    // ---- the second variant: the real IQ2XXS file's tensor types --------------------------------------------------------------
+    // The DeepSeek-V4-Flash IQ2XXS file (DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8) holds Q8_0 (type 8) for every dense projection (attn_q_a, attn_q_b, attn_kv,
+    // attn_output_a, attn_output_b, the three shared-expert tensors, output.weight), IQ2_XXS (type 16) for the gate and up experts and Q2_K (type 10) for the down experts, with
+    // F16 routers and hyper-connection matrices and F32 norms as the first fixture has. This variant is THE FIRST FIXTURE'S CENSUS with those types: the same 86 tensors in the same
+    // order with the same seeds, every MXFP8 tensor retyped Q8_0 over its own dims, and the experts of every layer retyped IQ2_XXS (gate, up: [n_embd, 256, 4]) and Q2_K (down:
+    // [256, n_embd, 4]); Q2_K needs 256-wide columns on the down tensor, so every layer's hidden width is 256 (the first fixture's layers 1 and 2 are 64). The first fixture
+    // (dfx-specs, dfx-write) is untouched and its bytes are the ones pinned; this one has its own pinned digest in the variant band.
+    def dfx-v-has?(name, frag) = str_find(name, frag, 0) >= 0;
+    def dfx-v-hidden() = 256;
+    def dfx-v-tweak(s) = s[1] == 41 ? [s[0], 8, s[2], "q80", s[4], s[5]]
+        : (dfx-v-has?(s[0], "ffn_gate_exps") || dfx-v-has?(s[0], "ffn_up_exps")) ? [s[0], 16, [dfx-e(), dfx-v-hidden(), dfx-nexp()], "exp", s[4], s[5]]
+        : dfx-v-has?(s[0], "ffn_down_exps") ? [s[0], 10, [dfx-v-hidden(), dfx-e(), dfx-nexp()], "exp", s[4], s[5]]
+        : s;
+    def dfx-v-map(specs) = len(specs) == 0 ? [] : cons(dfx-v-tweak(specs[0]), dfx-v-map(specs[1:]));
+    def dfx-v-specs() = dfx-v-map(dfx-specs());
+
     // ---- sizes: the layout this writer promises, priced independently of the readers that will check it ---
     def dfx-cells(ds) = len(ds) == 0 ? 1 : ds[0] * dfx-cells(ds[1:]);
     def dfx-tbytes(ty, ds) = {
         let c = dfx-cells(ds);
-        ty == 0 ? c * 4 : ty == 1 ? c * 2 : ty == 26 ? c * 4 : ty == 41 ? c + (c / 32) : ty == 40 ? (c / 2) + (c / 32) : ty == 16 ? (c / 256) * 66 : 0 - 1;
+        ty == 0 ? c * 4 : ty == 1 ? c * 2 : ty == 26 ? c * 4 : ty == 41 ? c + (c / 32) : ty == 40 ? (c / 2) + (c / 32) : ty == 16 ? (c / 256) * 66 : ty == 8 ? (c / 32) * 34 : ty == 10 ? (c / 256) * 84 : 0 - 1;
     };
     def dfx-align(x) = ((x + 31) / 32) * 32;
     // each tensor starts on a 32-byte boundary of the data region, as GGUF's default alignment says
@@ -169,9 +185,14 @@ section [form.bml] {
         let j = i % (data + (ce / 32));
         j >= data ? 120 + (b % 3) : ty == 41 ? dfx-code8(b) : b;
     };
+    // Q8_0 (type 8), blocks of 34 bytes: an f16 scale (exponent field 2 or 3: 2^-13 to 2^-11, so the weights d x q read near 0.02 like the MXFP8 ones) then 32 signed bytes, -128 avoided
+    // (a ggml quantiser never writes it). Q2_K (type 10), blocks of 84 bytes: sixteen scale bytes (low nibble the scale, high nibble the min, any value), 64 bytes of 2-bit codes, then
+    // d (exponent field 5: 2^-10 to 2^-9) and dmin (exponent field 4) as f16, so d x sc x q - dmin x min stays near 0.01. Every byte is a valid encoding and none decodes to a non-finite.
+    def dfx-q80-byte(b, pos) = pos == 0 ? b : pos == 1 ? 8 + (b % 8) : (b == 128 ? 129 : b);
+    def dfx-q2k-byte(b, pos) = pos == 81 ? 20 + (b % 4) : pos == 83 ? 16 + (b % 4) : b;
     def dfx-qbyte(s, i) = {
         let b = dfx-rb(s[4], i);
-        s[1] == 16 ? dfx-iq2-byte(b, i % 66) : dfx-mx-byte(s[1], s[2], b, i);
+        s[1] == 16 ? dfx-iq2-byte(b, i % 66) : s[1] == 8 ? dfx-q80-byte(b, i % 34) : s[1] == 10 ? dfx-q2k-byte(b, i % 84) : dfx-mx-byte(s[1], s[2], b, i);
     };
     // each builder halves its range, so a million leaves join in twenty levels of concatenation
     def dfx-q-go(s, lo, n) = n <= 1 ? byte_to_str(dfx-qbyte(s, lo)) : str_concat(dfx-q-go(s, lo, n / 2), dfx-q-go(s, lo + (n / 2), n - (n / 2)));
@@ -258,5 +279,7 @@ section [form.bml] {
     def dfx-image(specs) = str_concat(dfx-header(specs), dfx-join(dfx-data-parts(specs)));
     // the file under `path`: answers its byte count (write_file answers the length it wrote)
     def dfx-write(path) = write_file(path, dfx-image(dfx-specs()));
+    // the variant file (Q8_0 dense, IQ2_XXS gate and up, Q2_K down) under `path`
+    def dfx-v-write(path) = write_file(path, dfx-image(dfx-v-specs()));
     0;
 }
