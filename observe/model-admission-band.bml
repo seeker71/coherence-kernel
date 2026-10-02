@@ -1,7 +1,8 @@
 // model-admission-band.bml — form-stdlib/bml/model-admission.bml queues large weight loads in arrival order, admits one
 // load at a time when the OS has headroom, counts shared weights once, and lets decode run alongside the next load. No
 // model runs and no memory is read from the host: the numbers are injected, the tickets are a scratch directory, and the
-// other processes are pid 1 (alive) and pid 999999 (gone). Last line: rows that agree.
+// other processes are pid 1 (alive) and pid 999999 (gone); the governor's verdict is injected as granted or not. Last line:
+// rows that agree.
 // preflight-exec: forbidden
 // preludes: form-stdlib/bml/model-admission.bml
 section [form.bml] {
@@ -23,18 +24,21 @@ section [form.bml] {
    let dead = adm-enter-at(mab-root(), 999999, t0 + 2);
    let c1 = mab-row("tickets line up in arrival order", adm-position(mab-root(), a) == 0 && adm-position(mab-root(), b) == 1);
    let c2 = mab-row("a ticket whose process is gone is cleared as it is met", nothing?(adm-position(mab-root(), dead)) && len(adm-tickets(mab-root())) == 2);
-   let w = adm-try-at(mab-root(), b, "probe", 1, "/m/big.gguf", big, mab-gib(100), reserve, false);
+   let w = adm-try-at(mab-root(), b, "probe", 1, "/m/big.gguf", big, true, "", false);
    let c3 = mab-row("a load behind another waits though memory is free", w[0] == 0 && str_find(w[1], "a load is ahead", 0) >= 0);
-   let t = adm-try-at(mab-root(), a, "lane", me, "/m/big.gguf", big, mab-gib(30), reserve, false);
-   let c4 = mab-row("the first in line waits when the load would leave less than the reserve", t[0] == 0 && str_find(t[1], "waits for memory", 0) >= 0);
-   let s = adm-try-at(mab-root(), a, "lane", me, "/m/big.gguf", big, mab-gib(30), reserve, true);
-   let c5 = mab-row("weights another process already maps are shared, so the same memory admits it", s[0] == 1 && str_find(s[1], "shared", 0) >= 0);
+   let t = adm-try-at(mab-root(), a, "lane", me, "/m/big.gguf", big, false, "wired 71 GiB of 128 GiB", false);
+   let c4 = mab-row("the first in line waits when the governor does not grant, and says why", t[0] == 0 && str_find(t[1], "waits for memory: wired 71", 0) >= 0);
+   let s = adm-try-at(mab-root(), a, "lane", me, "/m/big.gguf", big, true, "", true);
+   let c5 = mab-row("weights a live process already holds are shared, so the load is admitted", s[0] == 1 && str_find(s[1], "shared", 0) >= 0);
+   let nd = adm-need(mab-gib(28), false);
+   let ns = adm-need(mab-gib(28), true);
+   let c19 = mab-row("an unheld file costs its bytes and the session's KV margin; a held one only the margin", (nd == mab-gib(28) + mg-kv-margin()) && (ns == mg-kv-margin()));
    let n = read_file(adm-note-path(mab-root(), me)) ?? "";
    let c6 = mab-row("an admitted load leaves a residency note naming its file", (String) n == "/m/big.gguf");
-   let still = adm-try-at(mab-root(), b, "probe", 1, "/m/other.gguf", mab-gib(2), mab-gib(100), reserve, false);
+   let still = adm-try-at(mab-root(), b, "probe", 1, "/m/other.gguf", mab-gib(2), true, "", false);
    let c7 = mab-row("the load slot stays held while the open runs", still[0] == 0);
    let freed = adm-loaded-at(mab-root(), a);
-   let next = adm-try-at(mab-root(), b, "probe", 1, "/m/other.gguf", mab-gib(2), mab-gib(100), reserve, false);
+   let next = adm-try-at(mab-root(), b, "probe", 1, "/m/other.gguf", mab-gib(2), true, "", false);
    let c8 = mab-row("the slot frees when the open completes, so the next load may begin while the first decodes", next[0] == 1);
    let c9 = mab-row("the first load is still resident while it decodes", adm-peer-resident?(mab-root(), 1, "/m/big.gguf"));
    let c10 = mab-row("a file this process already holds is shared with itself, never waited on", adm-peer-resident?(mab-root(), me, "/m/big.gguf"));
@@ -52,9 +56,10 @@ section [form.bml] {
    let c15 = mab-row("closing every session leaves no ticket and no note", len(adm-tickets(mab-root())) == 0 && len(adm-residents(mab-root())) == 0);
    let c16 = mab-row("a note whose process is gone is swept", (adm-admitted(mab-root(), "x", 999999, "/m/dead.gguf", false)[0] == 1) && len(adm-residents(mab-root())) == 0);
    let c17 = mab-row("dropping a file that was never noted changes nothing", (adm-note-drop(mab-root(), me, "/m/never.gguf") == 0) || true);
-   let c18 = mab-row("the gibibyte reads whole", (String) adm-gib(mab-gib(28)) == "28 GiB");
+   let held = adm-note-add(mab-root(), 1, "/m/shared.gguf");
+   let c18 = mab-row("another live process's note makes the file held elsewhere; this process's own does not", adm-held-elsewhere?(mab-root(), me, "/m/shared.gguf") && !adm-held-elsewhere?(mab-root(), 1, "/m/shared.gguf"));
    let tail = host_dir_rmdir(mab-root());
-   print_str("[model-admission-band] " ++ value_str(c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9 + c10 + c11 + c12 + c13 + c14 + c15 + c16 + c17 + c18) ++ " of 18");
+   print_str("[model-admission-band] " ++ value_str(c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9 + c10 + c11 + c12 + c13 + c14 + c15 + c16 + c17 + c18 + c19) ++ " of 19");
   }
  }
  mab-run();
