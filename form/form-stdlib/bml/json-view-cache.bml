@@ -1,0 +1,106 @@
+// Indexed immutable view fields. The owned byte snapshot survives file renewal;
+// values parse once on demand and unchanged fields render without reparsing.
+import form-stdlib/bml/json-view-parse.bml;
+import form-stdlib/bmf-core.fk;
+import form-stdlib/keyed-map.fk;
+section [form.bml] {
+ class JsonViewCache {
+  def jvc-mark() = "FORM-VIEW-CACHE-v2\n";
+  def jvc-footer-mark() = "FORM-VIEW-INDEX-v2:";
+  def jvc-digits() = "0000000000000000000";
+  def jvc-footer-size() = len(jvc-footer-mark()) + len(jvc-digits());
+  def jvc-clear(owner,keys) = nil?(keys) ? 0 : { record_set(owner,keys[0],0); jvc-clear(owner,keys[1:]); };
+  def jvc-close(owner) { jvc-clear(owner,record_keys(owner)); record_set(owner,"state","closed"); 1; }
+  def jvc-pack-field(owner,pair) {
+   let kind=jv-kind(pair[1]); let text=kind == 3 ? jv-value(pair[1]) : jv-emit(pair[1]); record_set(owner,"parts",cons(text,record_get(owner,"parts")));
+   len(pair[0]).str() + "\n" + pair[0] + kind.str() + "\n" + len(text).str() + "\n";
+  }
+  def jvc-pack(rows) {
+   let owner=record_new(0,"parts",[jvc-mark()]); defer jvc-close(owner);
+   let index=len(rows).str() + "\n" + jv-emit-text(rows |> map(row=>{
+    let pairs=jv-pairs(row); len(pairs).str() + "\n" + jv-emit-text(pairs |> map(pair=>jvc-pack-field(owner,pair)));
+   }));
+   let count=len(index).str();
+   let footer=jvc-footer-mark() + substring(jvc-digits(),0,len(jvc-digits()) - len(count)) + count;
+   jv-emit-text(append(reverse(record_get(owner,"parts")),[index,footer]));
+  }
+  def jvc-primitive(text,kind) {
+   if kind == 3 then jv-string(text)
+   else if kind == 4 then str_to_int(text).str() == text ? jv-int(str_to_int(text)) : form_error("indexed integer changed")
+   else if kind == 6 then {
+    let number=str_to_float(text);
+    value_kind(number) == "float" && number * 0.0 == 0.0 && float-precise-str(number) == text ? jv-float(number) : form_error("indexed float changed");
+   }
+   else if kind == 7 then text == "true" ? jv-bool(true) : text == "false" ? jv-bool(false) : form_error("indexed boolean changed")
+   else if kind == 8 then text == "null" ? jv-null() : form_error("indexed absence changed")
+   else jvp-parse(text);
+  }
+  def jvc-read(data) {
+   let owner=data[4]; let open=record_get(owner,"state") == "open";
+   let prior=open ? km-get(record_get(owner,"values"),[data[5]],nothing) : nothing;
+   !nothing?(prior) ? prior : jvc-load(data,open);
+  }
+  def jvc-load(data,open) {
+   let owner=data[4]; let kind=data[3];
+   let began=host_monotonic_ms();
+   let text=substring(data[0],data[1],data[1] + data[2]);
+   let value=jvc-primitive(text,kind);
+   if jv-kind(value) != kind then form_error("indexed JSON field kind changed") else 0;
+   if open then {
+    record_set(owner,"values",km-put(record_get(owner,"values"),[data[5]],value));
+    record_set(owner,"loaded_fields",record_get(owner,"loaded_fields") + 1);
+    record_set(owner,"parse_ms",record_get(owner,"parse_ms") + host_monotonic_ms() - began);
+   } else 0; value;
+  }
+  def jvc-render(data) {
+   let text=substring(data[0],data[1],data[1] + data[2]); data[3] == 3 ? json-quote-string(text) : text;
+  }
+  def jvc-number(owner) {
+   let cursor=record_get(owner,"cursor"); let text=surf-payload(cur-surface(cursor)); let end=str_find(text,"\n",cur-pos(cursor));
+   if end < 0 then nothing else {
+    let word=cur-slice(cursor,end); let number=str_to_int(word);
+    if number < 0 || number.str() != word then nothing else { record_set(owner,"cursor",cur-advance(cursor,end - cur-pos(cursor) + 1)); number; };
+   };
+  }
+  def jvc-key(owner) {
+   let size=jvc-number(owner); let cursor=record_get(owner,"cursor");
+   if nothing?(size) || size > surf-len(cur-surface(cursor)) - cur-pos(cursor) then nothing else {
+    let key=cur-slice(cursor,cur-pos(cursor) + size); record_set(owner,"cursor",cur-advance(cursor,size)); key;
+   };
+  }
+  def jvc-field(owner,end) {
+   let key=jvc-key(owner); let kind=jvc-number(owner); let size=jvc-number(owner); let start=record_get(owner,"position");
+   if nothing?(key) || nothing?(size) || !any?(tag=>kind == tag,[1,2,3,4,6,7,8]) then nothing else {
+    if (size == 0 && kind != 3) || start > end || size > end - start then nothing else {
+     record_set(owner,"position",start + size); record_set(owner,"field_count",record_get(owner,"field_count") + 1);
+     jv-pair(key,jv-defer(jvc-read,jvc-render,kind,[record_get(owner,"bytes"),start,size,kind,owner,record_get(owner,"field_count")]));
+    };
+   };
+  }
+  def jvc-row(owner,end) {
+   let count=jvc-number(owner); let cursor=record_get(owner,"cursor");
+   let valid=!nothing?(count) && count <= surf-len(cur-surface(cursor)) - cur-pos(cursor);
+   let fields=valid ? 0 .. count |> map(ignored=>jvc-field(owner,end)) : [nothing];
+   any?(field=>nothing?(field),fields) ? nothing : jv-object(fields);
+  }
+  def jvc-open(text) {
+   if nothing?(text) || len(text) < len(jvc-mark()) + jvc-footer-size() || substring(text,0,len(jvc-mark())) != jvc-mark() then nothing else {
+    let footer=len(text) - jvc-footer-size(); let word=substring(text,footer + len(jvc-footer-mark()),len(text)); let size=str_to_int(word);
+    let start=footer - size;
+    let framed=substring(text,footer,footer + len(jvc-footer-mark())) == jvc-footer-mark() && size > 0 && start >= len(jvc-mark()) && substring(jvc-digits(),0,len(word) - len(size.str())) + size.str() == word;
+    if !framed then nothing else {
+     let began=host_monotonic_ms(); let owner=record_new(0,"bytes",text,"cursor",cursor-str(substring(text,start,footer)),"position",len(jvc-mark()),"loaded_fields",0,"field_count",0,"parse_ms",0,"index_bytes",size);
+     let count=jvc-number(owner); let rows=nothing?(count) || count > size ? [nothing] : 0 .. count |> map(ignored=>jvc-row(owner,start));
+     record_set(owner,"admission_ms",host_monotonic_ms() - began);
+     record_set(owner,"index_parse_ms",record_get(owner,"admission_ms"));
+     let valid=!any?(row=>nothing?(row),rows) && record_get(owner,"position") == start && cur-eof?(record_get(owner,"cursor"));
+     record_set(owner,"bytes",0); record_set(owner,"cursor",0);
+     if !valid then { jvc-close(owner); nothing; } else {
+      record_set(owner,"values",km-for(record_get(owner,"field_count"))); record_set(owner,"state","open"); [rows,owner];
+     };
+    };
+   };
+  }
+ }
+ 0;
+}

@@ -168,7 +168,7 @@ Normal training preparation requests related rehearsal through this same flow
 and incorporates accepted examples in the actual gradient batch. Retaining a
 new verified example wakes the worker, which also revisits the last candidate's
 open needs. Each serialized drain retains one native event reader across its
-rounds. A new worker resumes a matching `evidence-reader.jsonl` checkpoint;
+rounds. A new worker resumes a matching `evidence-reader.view` checkpoint;
 without one, its first attendance reads the existing history. Subsequent
 attendances consume newly appended complete records and retain current observations.
 Attention selects the candidate's live needs directly from retained JSON views.
@@ -191,10 +191,23 @@ The owned reader release publishes a changed checkpoint once per drain, rather
 than copying its current state every training round. Its health event carries
 restore and publication timings and any refused publication's resource need.
 The checkpoint atomically retains the offset, unfinished record, admission
-count and complete current observations in the reclaimable JSON view lane.
-Its header, row count, complete records and source anchors must match before
-reuse. The source's append-only generation remains authoritative: rewriting
+count and current observations in the reclaimable JSON view lane. A scannerless
+BMF cursor reads its compact field index. Header, row count, contiguous field
+extents, observation contracts and source anchors must match before reuse.
+Each returned span owns its immutable bytes through ordinary Form values.
+Plain accessors leave no per-field record or captured byte root. The reader's
+one keyed memo is cleared on release or source reset; retained snapshots remain
+readable through their owned spans. Primitive fields restore their
+typed values directly; containers parse and check their declared JSON kind on
+first use. Unchanged containers render from their original
+bytes without parsing. No checkpoint value enters primary content identity.
+The source's append-only generation remains authoritative: rewriting
 earlier bytes requires renewal, as it does for an already open reader.
+Live counters distinguish index admission, fields loaded, value parsing and
+the complete restore. Large delivery evidence stays deferred until requested.
+The [current checkpoint observation](../receipts/native-evidence-checkpoint.json)
+retains matched and expanded restore measurements, source parity, reader release,
+actual local learning, review attempts and observed rented usage.
 
 The reader indexes current observations by their exact `(organ, flow, aspect)`
 key through Form's keyed map. It supplies the matching prior observation to
