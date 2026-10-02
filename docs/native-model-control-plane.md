@@ -150,7 +150,10 @@ answering each closed control (`receipts/form-token-eval.jsonl`, the row at 1790
   a row whose question a train row asks (`ftr-split`), the traces band (claim 64) holds the zero overlap the
   training gates above require, and the corpus has 64 held-out rows: the 62 of the fifteen families the
   adapter's run drew on, and the two the `recipe-import` family (18 rows, written after the run) holds out,
-  which the adapter was never asked. The adapter was trained before that change (on 514 rows, the two
+  which the adapter was never asked. Twelve `eval-refusal` rows (eleven train rows and the held-out
+  `ftr-eval-refusal-7`) were rewritten in place under their old ids when the sandbox was lifted, and
+  `receipts/form-token-eval.jsonl` lines 4 and 5, the adapter's run, cite those ids, so the adapter
+  answered those twelve questions as the corpus then worded them, not as it words them now. The adapter was trained before that change (on 514 rows, the two
   repeats' train copies among them) and has not been retrained or re-asked.
 - taught-by-prompt: 16 of 64 stopped at eos after a successful observation. The arm is limited by the
   continuation seam: the untrained voice writes eos right after Form's envelope, so 32 of its 64 answers are

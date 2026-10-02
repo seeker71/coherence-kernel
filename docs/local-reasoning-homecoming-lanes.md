@@ -107,7 +107,10 @@ name with its executable address; data coordinates remain inputs to `node`.
 Its target accepts a name, a library export (`training-cost.plan`), an address or
 a BML expression selecting a recipe reference. Target selection and input evaluation
 share the control's one deadline; the selected callable retains its original
-dependencies and usage trace. Each export is also kept in the workspace under its
+dependencies. A call through a held recipe's address (recipe-exec by name or address, a
+choice alternative, `recipe("LIBRARY.EXPORT")(x)` in eval) is counted in `form_recipe_usage`
+and recorded as a `form-recipe-usage` observation; an affine birth and a function a control
+made as a value hold no address and are not counted. Each export is also kept in the workspace under its
 `LIBRARY.EXPORT` name, so a later reply or request of the lineage reaches it.
 `recipe("training-cost.plan")`
 fits latency and estimated additional memory, then selects the largest admissible
