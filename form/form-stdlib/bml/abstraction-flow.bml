@@ -5,22 +5,36 @@ import form-stdlib/bml/form-source-lift.bml;
 section [form.bml] {
  class AbstractionFlow {
   def af-levels() = ["host-c","form","bml-primitive-spelling","bml-expression","bml-composed"];
-  def af-definitions(files) = foldl((out,file) => append(map(d => append([file[0],file[1],file[3]],d),file[4]),out),[],files);
+  def af-definitions(files) = fo-definitions(files);
   def af-insert(row,rows,k) = nil?(rows) || row[k] > rows[0][k] ? cons(row,rows) : cons(rows[0],af-insert(row,rows[1:],k));
   def af-top(rows,k,n) = foldl((out,row) => take(n,af-insert(row,out,k)),[],rows);
-  def af-index(defs) = foldl((index,d) => record_set(index,d[3],cons(d,record_has(index,d[3]) ? record_get(index,d[3]) : [])),record_new(0),defs);
-  def af-locate(index,hashes,row) {
+  def af-index(defs) {
+   let index=foldl((m,d) => record_set(m,d[3],cons(d,record_has(m,d[3]) ? record_get(m,d[3]) : [])),record_new(0),defs);
+   record_set(index,"$units",foldl((m,d) => record_set(m,bml-source-absolute(d[0]),[d[0],d[1]]),record_new(0),defs)); index;
+  }
+  def af-locate(index,hashes,row,origins) {
    let candidates = record_has(index,row[1]) ? record_get(index,row[1]) : [];
-   let direct = filter(d => d[0] == row[2],candidates);
-   let selected = len(direct) == 1 ? direct : candidates;
+   let direct = filter(d => fo-same-unit(d[0],row[2]),candidates);
+   let origin=record_has(origins,fo-key(row)) ? record_get(origins,fo-key(row)) : [];
+   let retained=filter(d => !nil?(origin) && d[0] == origin[1] && d[1] == origin[2] && d[5] == origin[3],candidates);
+   let selected = !nil?(origin) ? retained : len(direct) == 1 ? direct : candidates;
+   let unit=bml-source-absolute(row[2]); let units=record_get(index,"$units");
+   !nil?(origin) && (!record_has(units,bml-source-absolute(origin[1])) || record_get(units,bml-source-absolute(origin[1]))[1] != origin[2]) ? ["stale",origin[1],""] :
+   nil?(candidates) && str_find(row[1],"$lambda",0) == 0 && record_has(units,unit) ? {
+    let home=record_get(units,unit);
+    [record_has(hashes,unit) && record_get(hashes,unit) == home[1] ? "generated" : "stale",home[0],""];
+   } :
    len(selected) != 1 ? [len(selected) == 0 ? "unattributed" : "ambiguous","",""] :
-    !record_has(hashes,selected[0][0]) || record_get(hashes,selected[0][0]) != selected[0][1] ? ["stale",selected[0][0],""] : [selected[0][4],selected[0][0],selected[0][5]];
+    !record_has(hashes,bml-source-absolute(selected[0][0])) || record_get(hashes,bml-source-absolute(selected[0][0])) != selected[0][1] ? ["stale",selected[0][0],""] : [selected[0][4],selected[0][0],selected[0][5]];
   }
   def af-runs() = map(name => sa-read(sa-path(name)),filter(name => str_find(name,"run-",0) == 0 && fs-suffix?(name,".fkb"),fs_list(sa-home()) ?? []));
   def af-joined(run,index) {
-   let hashes = foldl((m,row) => record_set(m,row[0],row[1]),record_new(0),run[4]);
-   map(row => append(row,af-locate(index,hashes,row)),run[8]);
+   let hashes = foldl((m,row) => record_set(m,bml-source-absolute(row[0]),row[1]),record_new(0),run[4]);
+   let origins=foldl((m,row) => record_set(m,row[0],row),record_new(0),af-origin-rows(run));
+   map(row => append(row,af-locate(index,hashes,row,origins)),run[8]);
   }
+  def af-has-origins(run) = len(run) >= 13 && value_kind(run[12]) == "list";
+  def af-origin-rows(run) = !af-has-origins(run) ? [] : run[12][0] == "live-origins-v1" ? run[12][2] : run[12];
   def af-sum(rows,k) = foldl((n,row) => n + row[k],0,rows);
   def af-same-sources(a,b) {
    let index = foldl((m,row) => record_set(m,row[0],row[1]),record_new(0),b);
@@ -46,12 +60,13 @@ section [form.bml] {
    let old = sa-read(fo-file(run[1],run[2]) + ".previous");
    let delta = !nil?(old) && old[0] == "complete" ? str-join([" previous-ms=",old[5].str()," source-set=",af-same-sources(old[4],run[4]) ? "same" : "changed"]) : "";
    str-join([run[1]," ",run[2],": elapsed-ms=",run[5].str()," cpu-us=",run[6].str(),delta,"\n",
-    len(run) >= 14 ? str-join(["  admission+execution-ms=",run[13].str()," process-exit=",run[12].str(),"\n"]) : "",
+    af-has-origins(run) && run[12][0] == "live-origins-v1" ? "  source-recovery-ms=" + run[12][1].str() + "\n" : "",
+    len(run) >= (af-has-origins(run) ? 15 : 14) ? str-join(["  admission+execution-ms=",run[af-has-origins(run) ? 14 : 13].str()," process-exit=",run[af-has-origins(run) ? 13 : 12].str(),"\n"]) : "",
     "  counters: observed=",af-sum(rows,0).str()," window=",run[7].str(),"; same process, entry counts; no per-function timing or child coverage\n",
     "  host-c: call counters unmeasured\n",str-join(map(level => {
      let selected = filter(row => row[10] == level,rows);
      str-join(["  ",level,": used-functions=",len(selected).str()," entries=",af-sum(selected,0).str()," ram-jit-entries=",af-sum(selected,9).str(),"\n"]);
-    },append(af-levels()[1:],["unattributed","ambiguous","stale"]))),
+    },append(af-levels()[1:],["generated","unattributed","ambiguous","stale"]))),
     "  attention by observed entries:\n",str-join(map(row => str-join(["    ",row[0].str()," ",row[1]," ",row[10]," ",row[11],"\n"]),af-top(rows,0,8))),
     "  discovery frames retained=",len(run[9]).str()," total-new-frames=",run[10].str()," retained-root-window=",run[11].str(),"\n",
     str-join(map(row => str-join(["    ",row[1].str(),"ms ",row[0],"\n"]),af-top(run[9],1,5)))]);
