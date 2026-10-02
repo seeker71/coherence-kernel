@@ -288,12 +288,12 @@ stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels co
                ds4-order-match-band.bml 255       (the quantiser and the Q8_0 row dot against a Form reference of ds4's order)
 references     ds4-recorded-references-band.bml 8191   (the logits pinned by a SHA-256 of the whole file, by the body's own door; their 14 chat-templated prompt ids derived by the body's
                                                         template over the IQ2XXS header and held to the row beside them)
-driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 511 · native/metal/tests/dsv4-bind-band.bml 511
-driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 511 · native/metal/tests/dsv4-layer-band.bml 2047
+driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 1023 · native/metal/tests/dsv4-bind-band.bml 511
+driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 1023 · native/metal/tests/dsv4-layer-band.bml 2047
 driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/dsv4-end-to-end-band.bml 511
-               dsv4-lease-band.bml 255 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 2047
+               dsv4-lease-band.bml 511 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 4095
 driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 511 · native/metal/tests/dsv4-layer-q8q2-band.bml 4095
-               native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 101 kernels, dsv4-open-band 511 with 72 in the graph)
+               native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 101 kernels, dsv4-open-band 1023 with 72 in the graph)
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -393,8 +393,22 @@ physical window: the window itself (one run, alone, governor-checked, the door d
 tensors (`indexer.attn_q_b`, `indexer.proj`, `indexer_compressor_{kv,gate,ape,norm}`, on the 21 ratio-4 layers) are present in the file and unrouted, and a ratio-4 block
 refuses at position 2048 or later (the indexer stops being inert there). The kernels' multi-block rows (4 and 8 blocks a row of Q2_K and IQ2_XXS, shared and per-slot
 input) read 1.2e-7 to 2.6e-7 against the oracle on a third file, the second fixture's rows being one block; the Q8_0 and Q2_K plants split into a wrong number (Q2_K scale as the
-min, Q8_0 codes unsigned, an IQ2_XXS kernel on a Q2_K stack: finite, far) and not a number (a Q8_0 stride of 33, an MXFP8 kernel on a Q8_0 tensor: non-finite). The doors after this change: door-link-health docs=39 claims=841 broken=0 (prelude-reach missing=0 untracked=0 shadow=0), band-truth bands=360
+min, Q8_0 codes unsigned, an IQ2_XXS kernel on a Q2_K stack: finite, far) and not a number (a Q8_0 stride of 33, an MXFP8 kernel on a Q8_0 tensor: non-finite). The doors after this change: door-link-health docs=39 claims=845 broken=0 (prelude-reach missing=0 untracked=0 shadow=0), band-truth bands=360
 readable=182 unreadable=178 absent=0 seen=1 flaws=0. Found on the way: a recursive peak that calls itself twice a level takes 2^n steps (64 values never returned), so the band's peak is one fold.
+
+The first physical window (receipts/dsv4-validation.jsonl, 2026-10-03 06:47:57 WITA, run by the lead alone) stopped itself after 988 ms at the state stage: wired +198,148,096 B against an estimate of 18,270,208 B, over
+twice max(estimate, 64 MiB). The price was right and the sensor was not (read 06:50 to 07:19 WITA, each band alone, memory room before each run, every exit 0). From the header's 44 ratios and key length 512 with plain
+arithmetic (`dsv4-layout-band.bml` bit 512): 43 raw arenas of 131,072 B (5,636,096), the compressed rows (17 of 2,048 B on each of 21 ratio-4 layers, 1 on each of 20 ratio-128 layers: 772,096) and the compressors'
+state and score (32,768 B twice on the 21, 262,144 B twice on the 20: 11,862,016, the same at any capacity) make 18,270,208, which is `dvl-kv-total(m, 64)` to the byte (now the sum of `dvl-raw-total`,
+`dvl-comp-rows-total` and `dvl-comp-state-total`); at 8,192 positions 824,068,096. The device's own ledger agrees (`dsv4-open-band.bml` bit 512, metal_live word 18 = currentAllocatedSize, which no other process moves): the
+state at 1,024, 8,192 and 65,536 positions grows it within 13,312 B of its price and frees back to the byte, and the first dispatch in a process (the init kernel) moved wired memory by 0. What moved wired memory is the
+machine: it is every process's, and on this Mac a sibling not yet named moves it by 306 to 328 MB every second or so, up and down (900 readings 10 ms apart: 7 steps over 16 MiB, 5 over 128 MiB; spreads over 1 s from 0.7 MB
+to 963 MB; a stage that does no work read +0.6 GiB, and a 3 s reading was 19.8 MB then 331.9 MB: it is bursty). The lease did not move (`dsv4-lease-band.bml` bit 256): shared 26,787,475,292 B and the 8 GiB margin, 35,377,409,884 B at
+64 positions, 805,797,888 B more at 8,192 and only the capacity-bound terms grow. The guard stays and reads truly: `dvr-ambient` reads wired memory for 3 s before the window (the dry plan prints it too), a stage
+is judged by its wired growth less that movement (`dvr-own-delta`; with no movement the rule is the rule it was, and twice the estimate plus the movement plus one still ends the run), a stage-delta is met with a second 3 s
+reading before the run ends, the wirespan probe reads 'stack' only past half a stack once the movement is taken from the delta and 'between' where the movement hides which, and every stage line and receipt row carries the
+device's own bytes (`own_delta`) beside the wired growth, with the movement named (`wired_noise`): `dsv4-validate-band.bml` bit 2048, a window that ignores the movement reads 2047. The compile and map estimates are bounds
+(512 MiB, and 512 MiB plus the scratch plan), not readings: the window's +309,854,208 B and +43,286,528 B are the first measurements of them, taken through the same noisy sensor.
 
 Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
 (rust and ts hand back a different file there); `./validate.sh --list` prints which. The restored emitters, the
@@ -409,7 +423,7 @@ The recorded references are `form/form-stdlib/tests/oracles/ds4-logits-capital-o
 row names the reap25 file, which it cannot, so they judge a native lane on the IQ2XXS file and a reap25 lane is judged by
 the Form reference. The radius is one prompt, a cycle, never past position 127. The logits' own prompt ids are the row
 `form/form-stdlib/tests/oracles/ds4-logits-capital-of-france-prompt.json` (read 2026-10-03 WITA through `./fkwu form/form-stdlib/tests/ds4-recorded-references-band.bml </dev/null`
--> 8191 and `dsv4-validate-band.bml` -> 2047, the governor reading room before each run, every exit 0): the 14 ids [0 3476 477 260 11502 22896 128803 671 6102 294 8760 344 128804 128821],
+-> 8191 and `dsv4-validate-band.bml` (then 2047), the governor reading room before each run, every exit 0): the 14 ids [0 3476 477 260 11502 22896 128803 671 6102 294 8760 344 128804 128821],
 which are BOS, ds4's default system "You are a helpful assistant" (5 ids), User, the prompt "The capital of France is" (the raw prompt's 5), Assistant and `<think>`. `form/form-stdlib/bml/dsv4-chat-template.bml` derives them
 from the IQ2XXS header alone, finding each marker by its bytes in the file's own vocabulary (BOS equals the header's `tokenizer.ggml.bos_token_id`) and detokenizing back to the template's text; the template is ds4's own
 (`ds4.c:36195`, the default system at `ds4_cli.c:1767`, thinking on at `:1774`) and the count it gives, 1 + 5 + 1 + 5 + 1 + 1, is the recording's `"prompt_tokens":14`. The same code gives the token counts
