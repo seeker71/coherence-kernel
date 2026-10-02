@@ -183,7 +183,8 @@ cell drives the device and the device agrees with Form's own arithmetic.
   [form-first-reasoning](teachings/form-first-reasoning.form),
   [voice-attunement](teachings/voice-attunement.md),
   [difficult-conversations](teachings/difficult-conversations.md),
-  [surprise-is-a-choice-point](teachings/surprise-is-a-choice-point.md)) and the **concept tissue**
+  [surprise-is-a-choice-point](teachings/surprise-is-a-choice-point.md),
+  [tuning-phrases](teachings/tuning-phrases.md)) and the **concept tissue**
   ([`teachings/concepts/`](teachings/concepts/lc-trust-over-fear.md), network-lived teachings, each carrying the
   frequency it speaks at).
 
