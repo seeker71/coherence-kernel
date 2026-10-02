@@ -15,7 +15,7 @@ Form; Metal remains a dynamically admitted host carrier.
 | `dsv4-oracle-request.bml`, `dsv4-oracle-input.bml` | Complete physical input, finite typed configuration and admission before mapped weights and matrix resources |
 | `dsv4-tensor-views.bml`, `dsv4-tensor-views-input.bml`, `dsv4-view-publication.bml` | Exact tensor view geometry and owned plan publication |
 | `metal-fp32-compensated.bml` | Paired fp32 projection and normalization programs, with explicit arithmetic and dispatch contracts |
-| `dsv4-proof-metadata.bml`, `dsv4-proof-output.bml` | Metadata emission, complete checked stdout and retained output settlement |
+| `dsv4-proof-emission.bml`, `dsv4-proof-metadata.bml`, `dsv4-proof-output.bml` | Native shader and metadata emission, complete checked stdout and retained output settlement |
 | `dsv4-proof-retention.bml` | Complete proof archive capture, exclusive publication and readback before caller cleanup |
 
 The [ordered MXFP8 matrix owner](native-fp64-matrix.md) supplies the shared CPU
@@ -105,6 +105,12 @@ promise exact accumulation, universal correct rounding or underflow behavior.
 The error-free transformation basis is described in
 [Hida, Li and Bailey's arithmetic algorithms](https://www.davidhbailey.com/dhbpapers/qd.pdf);
 the actual device comparisons below establish this program's observed behavior.
+
+The [native proof emission door](native-dsv4-proof-emission.md) selects
+`core-precision` or `hc-precision` and composes the complete shader in RAM from
+its Form authorities. It owns complete framing, partial writes, interruption,
+readiness and output settlement. Its metadata reader validates the complete
+header and tensor extents before output, with no fixed header-size cap.
 
 The reference attention
 denominator accumulates the sink first, then key weights in order. Larger RoPE
