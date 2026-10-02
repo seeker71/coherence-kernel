@@ -1,0 +1,152 @@
+//////////////////////////////////////////////////////////////////////
+// session-progress.bml — every rented session of this repo, measured once, and the progression they make.
+//
+// Urs, 2026-10-02: a signal is for attention and healing, never for reporting; look at many sessions, not two; a gap
+// is filled, not reported. The closing measure had waited for someone to type one transcript's path, so the ledger
+// held two rows from one session while the repo's checkouts held 123 transcripts. Here the measure finds its own
+// ground: this session's id from the host (CLAUDE_CODE_SESSION_ID), every project directory of this repo's
+// checkouts (the main checkout, each worktree, the walk checkout), and every main transcript in them. A session
+// whose transcripts have not changed since its last row is kept as it stands; one that grew, or was never read, is
+// measured and its row lands. The row is a declared blueprint, so it is checked when it is written and read.
+//
+//   sp-measure-all()     measure every session that needs it; one line per session read; [measured, kept, refused]
+//   sp-progress-lines()  the progression: day by day, then earlier against later, from the whole ledger
+//   sp-session-now()     this session's id, or ""
+//
+// A row keeps what the earlier ones kept (rented requests, input, cache, output; local drafts, generated, lane) and
+// adds when the session began and last moved, and the bytes of its transcripts (the key that says it has not changed).
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/session-rent.bml form-stdlib/bml/local-run.bml
+section [form.bml] {
+ blueprint SessionRented { requests: int, input: int, cache_write: int, cache_read: int, output: int, transcripts: int }
+ blueprint SessionLocal { drafts: int, generated: int, lane_options: option<int>, lane_generated: option<int>, lane_injected: option<int>, runs: option<int>, run_generated: option<int> }
+ blueprint SessionRent { at_unix_ms: int, session: string, rented: SessionRented, local: SessionLocal, local_share_ppm: int, began_unix_ms: option<int>, ended_unix_ms: option<int>, bytes: option<int> }
+ class SessionProgress {
+  def sp-ledger() = "receipts/session-rent-ledger.jsonl";
+  def sp-drafts() = "receipts/draft-ledger.jsonl";
+
+  // ---- the host's own facts ------------------------------------------------------------------------------------------
+  def sp-out(command) = trim(host-exec(command, ""));
+  def sp-env(name) = sp-out("printenv " ++ name);
+  def sp-session-now() = sp-env("CLAUDE_CODE_SESSION_ID");
+  // a path as the name its transcripts' directory wears: every / and . becomes -
+  def sp-slug(path) = str-join-with(split-on(str-join-with(split-on(path, "/"), "-"), "."), "-");
+  // the repo's checkouts share one prefix; a worktree's name begins after --claude-worktrees-
+  def sp-prefix() {
+   let slug = sp-slug(host_cwd());
+   let cut = str_find(slug, "--claude-worktrees-", 0);
+   cut < 0 ? slug : substring(slug, 0, cut);
+  }
+  def sp-root() = sp-env("HOME") ++ "/.claude/projects";
+  def sp-dirs() = fs_list(sp-root()) |> filter(name => starts-with?(name, sp-prefix())) |> map(name => sp-root() ++ "/" ++ name) |> filter(dir => (Comparable) fs_is_dir(dir) == 1);
+  def sp-transcripts() = foldl((found, dir) => append(found, fs_list(dir) |> filter(name => sr-jsonl?(name)) |> map(name => dir ++ "/" ++ name)), [], sp-dirs());
+  // when the main transcript was made and last written, in ms
+  def sp-times(path) = split-on(sp-out("stat -f '%B %m' '" ++ path ++ "'"), " ") |> map(secs => (parse-int(secs) ?? 0) * 1000);
+  def sp-bytes(files) = foldl((total, file) => total + file_size(file), 0, files);
+
+  // ---- one session's row ------------------------------------------------------------------------------------------------
+  def sp-share(generated, output) = (generated + output) == 0 ? 0 : (generated * 1000000) / (generated + output);
+  def sp-lane-part(lane, i) = nothing?(lane) ? nothing() : lane[i];
+  // The local tokens a session is known to have spent: the voice door counts every ask (local-run.bml), the drafts and
+  // the coding lane count their own; the larger is the truer, since an ask a draft made is in both.
+  def sp-run-generated(runs) = foldl((total, row) => total + (row-get(row, "generated_ids") ?? 0), 0, runs);
+  def sp-known-local(legacy, runs) = nil?(runs) ? legacy : max2(legacy, sp-run-generated(runs));
+  def sp-cell(main, turnRows, runRows, bytes) {
+   let measured = sr-measure(main, sp-drafts(), turnRows);
+   let rented = measured[2];
+   let local = measured[3];
+   let lane = measured[4];
+   let times = sp-times(main);
+   let runs = local-run-of(runRows, measured[0]);
+   let legacy = local[1] + (nothing?(lane) ? 0 : lane[1]);
+   SessionRent{
+    at_unix_ms: now_unix_ms(),
+    session: measured[0],
+    rented: SessionRented{requests: rented[4], input: rented[0], cache_write: rented[1], cache_read: rented[2], output: rented[3], transcripts: len(measured[1])},
+    local: SessionLocal{drafts: local[0], generated: local[1], lane_options: sp-lane-part(lane, 0), lane_generated: sp-lane-part(lane, 1), lane_injected: sp-lane-part(lane, 2), runs: nil?(runs) ? nothing() : len(runs), run_generated: nil?(runs) ? nothing() : sp-run-generated(runs)},
+    local_share_ppm: sp-share(sp-known-local(legacy, runs), rented[3]),
+    began_unix_ms: times[0],
+    ended_unix_ms: times[1],
+    bytes: bytes
+   };
+  }
+  // the sessions already held, each by the bytes it was read at
+  def sp-held-key(session, bytes) = session ++ "|" ++ int_to_str(bytes);
+  def sp-held() = ledger-rows(sp-ledger(), "SessionRent") |> map(row => sp-held-key(row-get(row, "session"), row-get(row, "bytes") ?? -1));
+  def sp-held?(held, session, bytes) = held |> any?(key => key == sp-held-key(session, bytes));
+
+  // ---- every session ------------------------------------------------------------------------------------------------------
+  def sp-measure-one(main, held, turnRows, runRows) {
+   let bytes = sp-bytes(sr-files(main));
+   let session = sr-session(main);
+   sp-held?(held, session, bytes) ? "kept" : sp-land(session, bytes, ledger-append(sp-ledger(), sp-cell(main, turnRows, runRows, bytes)));
+  }
+  def sp-land(session, bytes, landed) {
+   let said = print_str("measured " ++ session ++ " " ++ int_to_str(bytes) ++ " bytes: " ++ (nothing?(landed) ? "refused" : landed));
+   nothing?(landed) ? "refused" : ((String) landed == "appended" ? "measured" : "refused");
+  }
+  def sp-count(outcomes, word) = len(outcomes |> filter(o => o == word));
+  def sp-measure-all() {
+   let held = sp-held();
+   let turnRows = sr-turn-rows();
+   let runRows = local-run-rows();
+   let outcomes = sp-transcripts() |> map(main => sp-measure-one(main, held, turnRows, runRows));
+   [sp-count(outcomes, "measured"), sp-count(outcomes, "kept"), sp-count(outcomes, "refused")];
+  }
+
+  // ---- the progression ------------------------------------------------------------------------------------------------------
+  def sp-zeros(k) = k <= 0 ? "" : ("0" ++ sp-zeros(k - 1));
+  def sp-sortable(n) = sp-zeros(15 - len(int_to_str(n))) ++ int_to_str(n);
+  def sp-when(row) = row-get(row, "began_unix_ms") ?? row-get(row, "at_unix_ms");
+  def sp-date(ms) = sp-out("date -r " ++ int_to_str(ms / 1000) ++ " +%Y-%m-%d");
+  // the latest row of each session: the ledger is a time series, and a session's last row is what it came to
+  def sp-latest(rows) = rows |> map(row => [row-get(row, "session"), row]) |> sp-keep-last;
+  def sp-keep-last(pairs) = nil?(pairs) ? [] : cons(sp-last-of(pairs[0][0], pairs), sp-keep-last(pairs |> filter(p => p[0] != pairs[0][0])));
+  def sp-last-of(session, pairs) = sp-newest(pairs |> filter(p => p[0] == session))[1];
+  def sp-newest(pairs) = nil?(pairs[1:]) ? pairs[0] : (row-get(pairs[0][1], "at_unix_ms") >= row-get(pairs[1][1], "at_unix_ms") ? sp-newest(cons(pairs[0], pairs[2:])) : sp-newest(pairs[1:]));
+  def sp-by-time(rows) = sort-keyed(rows |> map(row => [sp-sortable(sp-when(row)), row])) |> map(pair => pair[1]);
+  def sp-field(row, part, name) {
+   let sub = row-get(row, part);
+   nothing?(sub) ? nothing() : row-get(sub, name);
+  }
+  def sp-sum(rows, part, name) = foldl((total, row) => total + (sp-field(row, part, name) ?? 0), 0, rows);
+  def sp-day-of(row) = sp-date(sp-when(row));
+  // a row's local tokens: the larger of what the drafts and lane counted and what the voice door counted
+  def sp-local-of(row) = max2((sp-field(row, "local", "generated") ?? 0) + (sp-field(row, "local", "lane_generated") ?? 0), sp-field(row, "local", "run_generated") ?? 0);
+  def sp-padl(text, width) = len(text) >= width ? text : (sp-spaces(width - len(text)) ++ text);
+  def sp-spaces(k) = k <= 0 ? "" : (" " ++ sp-spaces(k - 1));
+  def sp-line(label, rows) {
+   let output = sp-sum(rows, "rented", "output");
+   let generated = foldl((total, row) => total + sp-local-of(row), 0, rows);
+   str-join-with([sp-padl(label, 12), sp-padl(int_to_str(len(rows)), 9), sp-padl(int_to_str(sp-sum(rows, "rented", "requests")), 10), sp-padl(int_to_str(output / 1000) ++ "K", 10), sp-padl(int_to_str(sp-sum(rows, "rented", "cache_read") / 1000000) ++ "M", 10), sp-padl(int_to_str(generated), 10), sp-padl(int_to_str(sp-share(generated, output)), 10)], " ");
+  }
+  def sp-days(rows) = nil?(rows) ? [] : sp-days-of(rows, sp-day-of(rows[0]));
+  def sp-days-of(rows, day) = cons(sp-line(day, rows |> filter(r => sp-day-of(r) == day)), sp-days(rows |> filter(r => sp-day-of(r) != day)));
+  def sp-progress-lines() {
+   let rows = sp-by-time(sp-latest(ledger-rows(sp-ledger(), "SessionRent")));
+   let half = len(rows) / 2;
+   append(
+    [sp-padl("day", 12) ++ " " ++ sp-padl("sessions", 9) ++ " " ++ sp-padl("requests", 10) ++ " " ++ sp-padl("output", 10) ++ " " ++ sp-padl("cache read", 10) ++ " " ++ sp-padl("local gen", 10) ++ " " ++ sp-padl("share ppm", 10)],
+    append(sp-days(rows), [sp-line("all", rows), sp-line("earlier half", rows |> take(half)), sp-line("later half", rows |> drop(half))]));
+  }
+  def sp-print(lines) {
+   let shown = lines |> map(line => print_str(line));
+   0;
+  }
+
+  // ---- closing a session: every session read, then the progression they make ------------------------------------------------
+  def sp-close() {
+   let counts = sp-measure-all();
+   let said = print_str("[session-rent] this session " ++ sp-session-now() ++ "; measured " ++ int_to_str(counts[0]) ++ ", kept " ++ int_to_str(counts[1]) ++ ", refused " ++ int_to_str(counts[2]));
+   let shown = sp-print(sp-progress-lines());
+   counts;
+  }
+  // one named transcript, as the closing measure always allowed
+  def sp-close-one(path) {
+   let outcome = (Comparable) fs_exists(path) == 1 ? sp-measure-one(path, sp-held(), sr-turn-rows(), local-run-rows()) : "refused";
+   let said = print_str("[session-rent] " ++ path ++ ": " ++ outcome);
+   outcome;
+  }
+ }
+ 0;
+}
