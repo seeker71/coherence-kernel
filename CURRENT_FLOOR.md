@@ -72,8 +72,12 @@ memory-governor-band 67108863 (form/form-stdlib/bml/memory-governor.bml asks the
 form-cli-code-low-memory-band 1023  (a running coding lane saves its checkpoint and ends with host-memory-low when the machine
                                 runs low, continues on a roomy or unreadable reading, and a lane that spent its turns keeps that
                                 ending; the walk reads it as a choice point)
-native-turn-ladder-band 262143 · local-flow-reading-band 32767  (a memory ending, host-memory-low or host-memory-held:*, is no
+native-turn-ladder-band 262143 · local-flow-reading-band 4194303  (a memory ending, host-memory-low or host-memory-held:*, is no
                                 tried approach and no option of the review; its checkpoint is the resume's target, with no failure text)
+                                (the review's phase fold is standing: every option whose lane output this host holds, in its own
+                                checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
+                                the wall, its renewals and the prompt IDs they re-fed; a lane killed at its deadline writes no counts
+                                and its counts are folded from its stamps and said so; the day option reproduces to the ms)
 host-walk-band 2147483647     (the walk's turn waits for memory within the window and a held answer takes no turn)
 form-cli-landing-band 16383   (the landing and the walk read every child's exit from `host_wait` through
                                 `host-child.bml` (`hch-run`), never from a printed mark; a red witness holds the landing)
