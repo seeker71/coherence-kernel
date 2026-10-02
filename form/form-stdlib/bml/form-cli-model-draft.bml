@@ -20,12 +20,23 @@
 //
 // A surprise is a choice point: a marked verify that refuses restores the mark and the same step lands as a
 // span of 1; its finding travels in the walk's memory (oac-backtrack-walk) into the refusal reason when no
-// option lands. Counters hold no IDs and no text.
+// option lands. A restore that itself refuses is not a choice point but a loss: the recurrent state has folded
+// IDs the lane did not accept, so the owner is marked dirty, the span-of-1 option refuses on it, every later
+// step and boundary forward refuses, and the session is refused with the findings of both. Counters hold no
+// IDs and no text.
 //
 // The owner is session slot 18 (15 adapter, 16 sampler, 17 observation owner), a mutable record. The
-// session-bound quantum lives in form-cli-code-session.bml; this file knows no session but its slot.
+// session-bound quantum lives in form-cli-code-session.bml; this file knows no session but its slot. The
+// owner holds the history of the stream it was fed: a session whose position is not where the history ends (a
+// renewed stream inherits the slot) rebases the owner to an empty history at that position (fcmdr-sync), which
+// costs hit rate and never exactness.
+//
+// The verdict the lane waits on is fcmdr-judge: an arm counts only when it produced the planned number of IDs,
+// the throughput (IDs per second) of the drafted arm beats the token-wise arm by a margin, drafts were offered
+// and accepted, nothing was refused and every session was released.
 import control/offer-ack-core.fk;
 import control/choice-lane-core.fk;
+import form-stdlib/json.fk;
 import form-stdlib/bml/qwen38-draft-verify.bml;
 section [form.bml] {
  class FormCliModelDraft {
@@ -36,15 +47,20 @@ section [form.bml] {
   field DraftOwnerWidth = 3;
   // A draft shorter than this is not worth a mark (one sync) and a possible restore plus re-run.
   field DraftOwnerMin = 2;
-  // The live hook: 0 until receipts/prompt-lookup.jsonl holds a row of observe/prompt-lookup-run.bml with
-  // identical 1 and draft width 3 faster than token-wise, and a landing flips it to 1 (as fcsw-seeding-live).
+  // The throughput the drafted arm must beat the token-wise arm by, in percent: one timing per arm is noisy.
+  field DraftGateMargin = 5;
+  // The live hook: 0 until receipts/prompt-lookup.jsonl holds a row of observe/prompt-lookup-run.bml whose
+  // verdict (fcmdr-judge) reads open, and a landing flips it to 1 (as fcsw-seeding-live).
   def fcmdr-live() = 0;
   def fcmdr-width() = DraftOwnerWidth();
   def fcmdr-min() = DraftOwnerMin();
+  def fcmdr-margin() = DraftGateMargin();
   // ── the owner ──
-  // [hist: int -> ID, n, grams: "a b c" or "a b" -> index of the last ID of the latest occurrence, spare, kmax,
-  //  kmin, span, counters]. nothing() when the session has none.
-  def fcmdr-new(kmax, kmin, span, spare) = record_new(0, "hist", record_new(0), "n", 0, "grams", record_new(0), "spare", spare, "kmax", kmax, "kmin", kmin, "span", span, "steps", 0, "verifies", 0, "drafted", 0, "accepted", 0, "reruns", 0, "marks", 0, "lookups", 0, "found", 0, "refused", 0);
+  // [hist: digits -> ID, n (IDs held), base (the position the held history begins at), dirty (a restore was
+  //  refused: the recurrent state is not the mark's), rebases, grams: "a b c" or "a b" -> index of the last ID
+  //  of the latest occurrence, spare, kmax, kmin, span, settle and free (how the spare is settled and freed: the
+  //  device's, replaceable by a band), counters]. nothing() when the session has none.
+  def fcmdr-new(kmax, kmin, span, spare) = record_new(0, "hist", record_new(0), "n", 0, "base", 0, "dirty", 0, "rebases", 0, "grams", record_new(0), "spare", spare, "kmax", kmax, "kmin", kmin, "span", span, "settle", (u) => metal_sync(), "free", q38dv-free, "steps", 0, "verifies", 0, "drafted", 0, "accepted", 0, "reruns", 0, "marks", 0, "lookups", 0, "found", 0, "refused", 0);
   def fcmdr-owner(session) = len(session) > DraftOwnerSlot() ? session[DraftOwnerSlot()] : nothing();
   // Slots 15..17 keep the shape their owners read: no carrier and no sampler read as [], no observation owner
   // reads as nothing().
@@ -61,11 +77,29 @@ section [form.bml] {
   def fcmdr-counts(o) = nothing?(o) ? [] : [record_get(o, "steps"), record_get(o, "verifies"), record_get(o, "drafted"), record_get(o, "accepted"), record_get(o, "reruns"), record_get(o, "marks"), record_get(o, "lookups"), record_get(o, "found"), record_get(o, "refused")];
   // The spare's handles, counted before they are freed; the close answers against it.
   def fcmdr-owned(o) = nothing?(o) ? 0 : q38dv-spare-owned(record_get(o, "spare"));
+  // The owner settles the device before it frees handles it owns, and frees through its own port.
   def fcmdr-close(o) {
    let spare = nothing?(o) ? [] : record_get(o, "spare");
-   let freed = nil?(spare) ? 0 : q38dv-free(spare);
+   nil?(spare) || (q38dv-spare-owned(spare) == 0) ? 0 : fcmdr-port(o, "settle", 0);
+   let freed = nil?(spare) ? 0 : fcmdr-port(o, "free", spare);
    nothing?(o) ? 0 : record_set(o, "spare", []);
    freed;
+  }
+  def fcmdr-port(o, name, arg) {
+   let f = record_get(o, name);
+   f(arg);
+  }
+  def fcmdr-dirty?(o) = !nothing?(o) && (record_get(o, "dirty") == 1);
+  // The history is the stream the owner was fed; when the session is not where that history ends, the history
+  // belongs to another stream (a renewed one inherits slot 18): start it again at this position.
+  def fcmdr-sync(o, pos) = nothing?(o) ? 0 : (record_get(o, "n") + record_get(o, "base") == pos) ? 0 : fcmdr-rebase(o, pos);
+  def fcmdr-rebase(o, pos) {
+   record_set(o, "hist", record_new(0));
+   record_set(o, "grams", record_new(0));
+   record_set(o, "n", 0);
+   record_set(o, "base", pos);
+   record_set(o, "rebases", record_get(o, "rebases") + 1);
+   1;
   }
   // ── the n-gram index ──
   def fcmdr-key2(a, b) = a.str() ++ " " ++ b.str();
@@ -85,7 +119,7 @@ section [form.bml] {
   }
   // The IDs that entered the context (prompt, observations, emitted IDs the walk consumed), in order. The
   // pending ID is not among them until it is consumed. A feed that does not arrive costs hit rate only.
-  def fcmdr-feed(o, ids) = nothing?(o) || nil?(ids) ? 0 : fcmdr-put(o, ids[0]) + fcmdr-feed(o, ids[1:]);
+  def fcmdr-feed(o, ids) = nothing?(o) || nil?(ids) ? 0 : foldl((count, id) => count + fcmdr-put(o, id), 0, ids);
   def fcmdr-find(o, key) = record_has(record_get(o, "grams"), key) ? record_get(record_get(o, "grams"), key) : -1;
   // The end of the latest earlier occurrence of the tail ending at `pending`: three IDs, else two; -1 when
   // neither was seen.
@@ -141,7 +175,8 @@ section [form.bml] {
    let found = asked ? fcmdr-cut(fcmdr-lookup(o, id, k) ?? [], stops) : [];
    len(found) >= fcmdr-kmin(o) ? found : [];
   }
-  def fcmdr-step(o, io, id, pos, left, stops, maxpos) {
+  def fcmdr-step(o, io, id, pos, left, stops, maxpos) = fcmdr-dirty?(o) ? fcmdr-refused(o, [["state-dirty", 1]]) : fcmdr-step-clean(o, io, id, pos, left, stops, maxpos);
+  def fcmdr-step-clean(o, io, id, pos, left, stops, maxpos) {
    let draft = fcmdr-draft-for(o, id, pos, left, stops, maxpos);
    nil?(draft) ? 0 : fcmdr-bump(o, "found", 1);
    let walked = oac-backtrack-walk([fcmdr-draft-option, fcmdr-plain-option], [o, io, id, pos, draft], []);
@@ -169,7 +204,7 @@ section [form.bml] {
   }
   def fcmdr-draft-verified(o, io, id, pos, draft, argmaxes) {
    fcmdr-bump(o, "verifies", 1);
-   nothing?(argmaxes) || len(argmaxes) != len(draft) + 1 ? fcmdr-undo(io, ["draft-verify-refused", len(draft)]) : fcmdr-draft-read(o, io, id, pos, draft, argmaxes, fcmdr-accepted(draft, argmaxes, 0));
+   nothing?(argmaxes) || len(argmaxes) != len(draft) + 1 ? fcmdr-undo(o, io, ["draft-verify-refused", len(draft)]) : fcmdr-draft-read(o, io, id, pos, draft, argmaxes, fcmdr-accepted(draft, argmaxes, 0));
   }
   def fcmdr-draft-read(o, io, id, pos, draft, argmaxes, j) {
    fcmdr-bump(o, "drafted", len(draft));
@@ -180,17 +215,21 @@ section [form.bml] {
   // accepted ones. The KV rows past them are never read (attention reads up to the position) and are overwritten.
   def fcmdr-draft-rerun(o, io, id, pos, kept, next) {
    fcmdr-bump(o, "reruns", 1);
-   fcmdr-restore(io) == 1 ? fcmdr-draft-advanced(io, cons(id, kept), next, fcmdr-advance(io, cons(id, kept), pos)) : oac-node(["draft-restore-refused", len(kept)]);
+   fcmdr-restore(io) == 1 ? fcmdr-draft-advanced(o, io, cons(id, kept), next, fcmdr-advance(io, cons(id, kept), pos)) : fcmdr-lost(o, ["draft-restore-refused", len(kept)]);
   }
-  def fcmdr-draft-advanced(io, taken, next, advanced) = advanced == 1 ? oac-one([taken, next, ""]) : fcmdr-undo(io, ["draft-advance-refused", len(taken)]);
-  // The finding is the option's; the state it leaves is the mark's, so the next option starts from where this one did.
-  def fcmdr-undo(io, finding) {
-   fcmdr-restore(io);
+  def fcmdr-draft-advanced(o, io, taken, next, advanced) = advanced == 1 ? oac-one([taken, next, ""]) : fcmdr-undo(o, io, ["draft-advance-refused", len(taken)]);
+  // The finding is the option's; the state it leaves is the mark's, so the next option starts from where this one
+  // did. When the restore itself refuses the state is not the mark's: see fcmdr-lost.
+  def fcmdr-undo(o, io, finding) = fcmdr-restore(io) == 1 ? oac-node(finding) : fcmdr-lost(o, [finding[0] ++ "+restore-refused", finding[1]]);
+  // The recurrent state holds IDs the lane did not accept and nothing here can take them out: the next option
+  // must not verify on it, nor any later step.
+  def fcmdr-lost(o, finding) {
+   record_set(o, "dirty", 1);
    oac-node(finding);
   }
   def fcmdr-plain-option(offered) {
    let a = oac-option-args(offered);
-   fcmdr-plain-read(a[0], a[2], fcmdr-verify(a[1], [a[2]], a[3]));
+   fcmdr-dirty?(a[0]) ? oac-node(["state-dirty", 1]) : fcmdr-plain-read(a[0], a[2], fcmdr-verify(a[1], [a[2]], a[3]));
   }
   def fcmdr-plain-read(o, id, argmaxes) {
    fcmdr-bump(o, "verifies", 1);
@@ -211,16 +250,69 @@ section [form.bml] {
   // Logits bytes from several splits: all arrived and all equal.
   def fcmdr-bytes-equal(bytes) = nil?(bytes) ? 0 : nothing?(bytes[0]) ? 0 : fcmdr-bytes-same(bytes[0], bytes[1:]);
   def fcmdr-bytes-same(first, rest) = nil?(rest) ? 1 : nothing?(rest[0]) ? 0 : (String) rest[0] == (String) first ? fcmdr-bytes-same(first, rest[1:]) : 0;
-  // The lane may open only when the drafted reply is the undrafted one, the logits do not depend on the split, and
-  // the drafted lane took less wall time than the lane as it runs today.
-  def fcmdr-verdict(identical, equal, faster) = (identical == 1 && equal == 1 && faster == 1) ? "open" : "hold";
-  // The last row that carries a verdict: a row that records only the model-free bands' readings says none.
-  def fcmdr-verdict-rows(rows) = filter(r => str_find(r, "\"verdict\":", 0) >= 0, rows);
+  // An arm of the run: [name, ids, ms, released, counters (fcmdr-counts order), probe].
+  def fcmdr-arm(name, ids, ms, released, counts, probe) = [name, ids, ms, released, counts, probe];
+  def fcmdr-arm-ids(a) = a[1];
+  def fcmdr-arm-ms(a) = a[2];
+  def fcmdr-arm-released(a) = a[3];
+  def fcmdr-arm-counts(a) = a[4];
+  def fcmdr-arm-probe(a) = a[5];
+  def fcmdr-sum(xs) = foldl((total, x) => total + x, 0, xs);
+  def fcmdr-pool-ids(arms) = fcmdr-sum(map(a => len(fcmdr-arm-ids(a)), arms));
+  def fcmdr-pool-ms(arms) = fcmdr-sum(map(a => fcmdr-arm-ms(a), arms));
+  // IDs per second, times 1000, over the arms taken together.
+  def fcmdr-pool-milli(arms) = fcmdr-milli(fcmdr-pool-ids(arms), fcmdr-pool-ms(arms));
+  def fcmdr-ms-at(arms, i) = i < len(arms) ? fcmdr-arm-ms(arms[i]) : 0;
+  // Every arm produced exactly the planned IDs in a measured time: a short arm is not a faster one.
+  def fcmdr-full(arms, expected) = (expected <= 0) || nil?(arms) ? 0 : foldl((ok, a) => (ok == 1 && len(fcmdr-arm-ids(a)) == expected && fcmdr-arm-ms(a) > 0) ? 1 : 0, 1, arms);
+  // The drafted replies are the undrafted one, ID for ID.
+  def fcmdr-same(first, arms) = len(first) > 0 ? foldl((ok, a) => (ok == 1 && fcmdr-arm-ids(a) == first) ? 1 : 0, 1, arms) : 0;
+  // The drafted arms' throughput beats the token-wise arms' by the margin (percent). Throughput, not wall time.
+  def fcmdr-faster(tws, k3s) = (fcmdr-pool-milli(tws) > 0) && (fcmdr-pool-milli(k3s) * 100 > fcmdr-pool-milli(tws) * (100 + fcmdr-margin())) ? 1 : 0;
+  def fcmdr-count(arms, i) = fcmdr-sum(map(a => nil?(fcmdr-arm-counts(a)) ? 0 : fcmdr-arm-counts(a)[i], arms));
+  // Drafts were offered and taken in the drafted arms, and no step of those arms or of the undrafted one was refused.
+  def fcmdr-offered(k0, k3s) = (fcmdr-count(k3s, 2) > 0) && (fcmdr-count(k3s, 3) > 0) && (fcmdr-count(k3s, 8) == 0) && (fcmdr-count([k0], 8) == 0) ? 1 : 0;
+  // Every session of the run was released clean.
+  def fcmdr-clean(arms) = nil?(arms) ? 0 : foldl((ok, a) => (ok == 1 && fcmdr-arm-released(a) == 1) ? 1 : 0, 1, arms);
+  // The lane may open only when every arm produced the planned IDs, the drafted reply is the undrafted one, the
+  // logits do not depend on the split, the drafted lane decodes more IDs per second than the lane as it runs today
+  // by the margin, drafts were offered and taken without a refusal, and every session was released.
+  def fcmdr-verdict(full, identical, equal, faster, offered, clean) = (full == 1 && identical == 1 && equal == 1 && faster == 1 && offered == 1 && clean == 1) ? "open" : "hold";
+  // [full, identical, equal, faster, offered, clean, verdict] from the arms: tws and k3s are lists of arms (the
+  // token-wise and the drafted ones, measured in a palindromic order), k0 the undrafted drafted-lane arm, others
+  // the arms that only warm the machine; equal is the split probe's reading.
+  def fcmdr-judge(expected, tws, k0, k3s, equal, others) {
+   let timed = append(append(tws, [k0]), k3s);
+   let full = fcmdr-full(timed, expected);
+   let identical = fcmdr-same(fcmdr-arm-ids(k0), k3s);
+   let faster = full == 1 ? fcmdr-faster(tws, k3s) : 0;
+   let offered = fcmdr-offered(k0, k3s);
+   let clean = fcmdr-clean(append(timed, others));
+   [full, identical, equal, faster, offered, clean, fcmdr-verdict(full, identical, equal, faster, offered, clean)];
+  }
+  def fcmdr-jn(key, value) = json-node-pair(key, json-node-int(value));
+  def fcmdr-js(key, value) = json-node-pair(key, json-node-string(value));
+  // The row the physical run appends (a JSON node): the judged readings beside the numbers they came from.
+  def fcmdr-row(at, model, fixture, width, expected, tws, k0, k3s, digest, judged) = json-node-object([fcmdr-jn("at_unix_ms", at), fcmdr-js("model", model), fcmdr-js("fixture", fixture), fcmdr-jn("ids_n", expected), fcmdr-jn("width", width), fcmdr-jn("kmax", fcmdr-width()),
+   fcmdr-jn("full", judged[0]), fcmdr-jn("identical", judged[1]), fcmdr-jn("split_equal", judged[2]), fcmdr-js("split_digest", digest),
+   fcmdr-jn("tokenwise_ids_n", len(fcmdr-arm-ids(tws[0]))), fcmdr-jn("tokenwise_agree", fcmdr-agree(fcmdr-arm-ids(tws[0]), fcmdr-arm-ids(k0))),
+   fcmdr-jn("ms_tokenwise", fcmdr-ms-at(tws, 0)), fcmdr-jn("ms_tokenwise_b", fcmdr-ms-at(tws, 1)), fcmdr-jn("ms_k0", fcmdr-arm-ms(k0)), fcmdr-jn("ms_k3", fcmdr-ms-at(k3s, 0)), fcmdr-jn("ms_k3_b", fcmdr-ms-at(k3s, 1)),
+   fcmdr-jn("tok_s_milli_tokenwise", fcmdr-pool-milli(tws)), fcmdr-jn("tok_s_milli_k0", fcmdr-pool-milli([k0])), fcmdr-jn("tok_s_milli_k3", fcmdr-pool-milli(k3s)), fcmdr-jn("margin_pct", fcmdr-margin()),
+   fcmdr-jn("steps", fcmdr-count(k3s, 0)), fcmdr-jn("verifies", fcmdr-count(k3s, 1)), fcmdr-jn("drafted", fcmdr-count(k3s, 2)), fcmdr-jn("accepted", fcmdr-count(k3s, 3)), fcmdr-jn("reruns", fcmdr-count(k3s, 4)), fcmdr-jn("marks", fcmdr-count(k3s, 5)), fcmdr-jn("lookups", fcmdr-count(k3s, 6)), fcmdr-jn("found", fcmdr-count(k3s, 7)), fcmdr-jn("refused", fcmdr-count(k3s, 8)),
+   fcmdr-jn("faster", judged[3]), fcmdr-jn("offered", judged[4]), fcmdr-jn("released", judged[5]), fcmdr-js("verdict", judged[6])]);
+  // The last row that carries a verdict: a row that records only the model-free bands' readings says none, and a
+  // row cut short in the writing (it does not close its object) is not read.
+  def fcmdr-whole?(row) {
+   let t = trim(row);
+   len(t) < 2 ? 0 : (str_byte_at(t, 0) == 123) && (str_byte_at(t, len(t) - 1) == 125) ? 1 : 0;
+  }
+  def fcmdr-verdict-rows(rows) = filter(r => (fcmdr-whole?(r) == 1) && (str_find(r, "\"verdict\":", 0) >= 0), rows);
   def fcmdr-last-verdict(rows) = nil?(fcmdr-verdict-rows(rows)) ? "none" : str_find(fcmdr-verdict-rows(rows)[-1], "\"verdict\":\"open\"", 0) >= 0 ? "open" : "hold";
   // The forward the walk's boundary takes between quanta (fcacs-next): one position through the same verify,
   // so a drafted lane runs one arithmetic. Answers the next prediction, or -1 as q38-forward does when it fails.
   def fcmdr-forward(o, io, id, pos) {
-   let argmaxes = fcmdr-verify(io, [id], pos);
+   fcmdr-sync(o, pos);
+   let argmaxes = fcmdr-dirty?(o) ? nothing() : fcmdr-verify(io, [id], pos);
    let arrived = !nothing?(argmaxes) && len(argmaxes) == 1 && argmaxes[0] >= 0;
    fcmdr-bump(o, "verifies", 1);
    arrived ? fcmdr-bump(o, "steps", 1) : fcmdr-bump(o, "refused", 1);

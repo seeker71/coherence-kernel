@@ -34,14 +34,23 @@ section [form.bml] {
   // kmax is the draft width: 0 is the same lane with nothing drafted (every position a span of 1), the arm
   // observe/prompt-lookup-run.bml reads the drafted one against.
   def fcacs-attach-draft-with(s, prompt, profile, kmax) = !fcms-live?(s) ? s : fcacs-attached(s, q38dv-spare(fcms-ctx(s)), fcmo-segment-ids(s, fcmg-chat-segments-profile(prompt, profile, qsx-load(fcms-path(s)))), kmax);
-  def fcacs-attached(s, spare, ids, kmax) = (q38dv-spare-ok?(spare) && (q38dv-spare-owned(spare) > 0) && !nothing?(ids)) ? fcacs-owned(s, spare, ids, kmax) : fcacs-unattached(s, spare);
-  def fcacs-unattached(s, spare) {
-   metal_sync();
-   q38dv-free(spare);
+  // The device's settle and free: how a spare is given back. The owner keeps them for its close
+  // (fcms-release-ok?), and a band hands in its own to read the wiring with no device.
+  def fcacs-ports() = [(u) => metal_sync(), q38dv-free];
+  def fcacs-attached(s, spare, ids, kmax) = fcacs-attached-by(s, spare, ids, kmax, fcacs-ports());
+  def fcacs-attached-by(s, spare, ids, kmax, ports) = (q38dv-spare-ok?(spare) && (q38dv-spare-owned(spare) > 0) && !nothing?(ids)) ? fcacs-owned(s, spare, ids, kmax, ports) : fcacs-unattached(s, spare, ports);
+  // What was allocated and cannot be owned is given back, settled first, and the session stays as it was.
+  def fcacs-unattached(s, spare, ports) {
+   let settle = ports[0];
+   let free = ports[1];
+   settle(0);
+   free(spare);
    s;
   }
-  def fcacs-owned(s, spare, ids, kmax) {
+  def fcacs-owned(s, spare, ids, kmax, ports) {
    let owner = fcmdr-new(kmax, fcmdr-min(), q38-ctx-span(fcms-ctx(s)), spare);
+   record_set(owner, "settle", ports[0]);
+   record_set(owner, "free", ports[1]);
    fcmdr-feed(owner, ids);
    fcmdr-with-owner(s, owner);
   }
@@ -62,9 +71,13 @@ section [form.bml] {
    let closed = fcacs-stage-close(open, fcacs-stage-word(after), (fcms-injected-ids(after) - fcms-injected-ids(s)), 0);
    after;
   }
-  def fcacs-observed(s, walked) = if (!((String) walked[0] == "done")) then fcacs-refuse(s, "coding-tokenizer-index-refused") else if nil?(walked[2]) then fcacs-refuse(s,"coding-observation-empty") else fcacs-fed(fcms-observe-ids(s, reverse(walked[2]), "coding-observation-context-capacity"), reverse(walked[2]));
+  def fcacs-observed(s, walked) = fcacs-observed-by(s, walked, fcms-observe-ids);
+  // observe is the injection (session, ids, refusal reason): the device's prefill, or a band's own.
+  def fcacs-observed-by(s, walked, observe) = if (!((String) walked[0] == "done")) then fcacs-refuse(s, "coding-tokenizer-index-refused") else if nil?(walked[2]) then fcacs-refuse(s,"coding-observation-empty") else fcacs-fed(observe(s, reverse(walked[2]), "coding-observation-context-capacity"), reverse(walked[2]));
   // The IDs an observation put into the context are what the voice copies from: the draft owner takes them in
-  // (a session without one, or one the observation refused, takes nothing).
+  // (a session without one, or one the observation refused, takes nothing). They are the very list the
+  // injection prefilled: the pending ID and the role crossing are among them (fcacs-segments), so the history
+  // ends where the session's position does.
   def fcacs-fed(after, ids) {
    fcms-live?(after) ? fcmdr-feed(fcmdr-owner(after), ids) : 0;
    after;
@@ -89,6 +102,7 @@ section [form.bml] {
   def fcacs-draft-quantum(s, stops, width) = fcacs-draft-quantum-with(s, fcmdr-owner(s), fcacs-draft-io(s, fcmdr-owner(s)), stops, width);
   // fcacs-greedy-quantum's result from the drafted walk: the same fields move, a refusal refuses the session.
   def fcacs-draft-quantum-with(s, owner, io, stops, width) {
+   fcmdr-sync(owner, fcms-pos(s));
    let walked = fcmdr-walk(owner, io, fcms-pending(s), fcms-pos(s), width, stops, fcms-maxpos(s), []);
    let ids = walked[0];
    let next = fcms-with-stream(s, walked[2], walked[1], walked[3], (fcms-generated-ids(s) + len(ids)), fcms-injected-ids(s), fcms-observations(s));
