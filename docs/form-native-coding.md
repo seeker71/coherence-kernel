@@ -331,6 +331,20 @@ executable recipes lead. An observed native answer takes precedence over model
 prose; local models contribute what the substrate cannot yet complete. Form
 owns tools, choices, care, original checks, checkpoints and release throughout.
 
+Every rented contribution is a local reproduction target, including planning,
+source selection, request authoring, diagnosis, implementation, measurement,
+review and landing. Required assistance leaves an owned local capability gap
+with its intent, inputs, sources, checks, findings and completed effects. Improve
+the local prompt, tool, harness or model choice and replay that task locally.
+Ground guidance in the current enquiry and relevant source; retained observations
+keep their task and source scope. Aggregate counters guide attention, while the
+particular task's checks and observed behavior establish its completion.
+
+The [current local guidance receipt](../receipts/native-local-guidance.json)
+retains source-backed local reasoning, actual usage and a checked retained
+answer. Its scoped guidance result does not establish complete independence of
+request assembly, source selection, coding or landing.
+
 Local tokens never have a penalty. Encourage useful local guidance, review,
 repair, prompt A/B on the same tasks and checks, multiple perspectives and
 changed attempts. Prefer a local guide; after repeated local guidance failures,
