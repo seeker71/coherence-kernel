@@ -30,6 +30,7 @@
 import form-stdlib/form-cli-model-generate.fk;
 import form-stdlib/model-registry.bml;
 import form-stdlib/bml/form-cli-model-admission.bml;
+import form-stdlib/bml/model-admission.bml;
 import form-stdlib/bml/form-cli-model-observation.bml;
 import form-stdlib/bml/form-cli-model-adapter.bml;
 import form-stdlib/bml/form-cli-model-sampling.bml;
@@ -155,7 +156,22 @@ section [form.bml] {
     // Allocate from the counted prompt plus the caller's output/observation
     // reserve. Artifact capacity is still checked before model admission.
     def fcms-open-reserved(path, prompt, reserve, profile) = reserve <= 0 ? fcms-none("session-output-reserve-refused") : fcms-open-sized(path, prompt, 0, profile, reserve);
-    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = {
+    // Every open queues for its weights at this one place (model-admission.bml), so the voice, the code lane, learning,
+    // prompt lookup and every probe share one queue: oldest first, admitted when the OS has headroom for what the load adds
+    // (a file a live process already holds is shared, not loaded again). The load slot frees when the open completes; the
+    // residency note stays until the session is closed (fcms-release-ok?). Not admitted within the wait: a typed refusal.
+    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, adm-admit("fcms-open", path, adm-wait-ms()));
+    def fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, claim) = (Comparable) claim[0] == 1 ? fcms-open-held(path, prompt, requested-maxpos, profile, reserve, claim[2]) : fcms-none(("model-queued: " + claim[1]));
+    def fcms-open-held(path, prompt, requested-maxpos, profile, reserve, ticket) = {
+        let opened = fcms-open-body(path, prompt, requested-maxpos, profile, reserve);
+        let loaded = adm-loaded(ticket);
+        (Comparable) fcms-resident?(opened) == 1 ? opened : fcms-open-refused(opened, path);
+    };
+    def fcms-open-refused(opened, path) = {
+        let dropped = adm-drop(path);
+        opened;
+    };
+    def fcms-open-body(path, prompt, requested-maxpos, profile, reserve) = {
         let _seal-begin = fcmg-live-stage("model-session-seal-begin", 8388609);
         let verdict = qaf-seal-verdict(path);
         let _seal-complete = fcmg-live-stage("model-session-seal-complete", 8388610);
@@ -332,6 +348,7 @@ fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stre
     // The rejected prediction is not included in ids and never reaches q38-forward.
     def fcms-observe-rejection(s, text) = fcms-observe-ids(s, fcms-rejection-observation-ids(s, text), "rejection-observation-context-window-refused");
     def fcms-release-ok?(s) = {
+        let dropped = adm-drop(fcms-path(s));
         let cursor-released = fcmo-release-index(s);
         let sampler-expected = fcsam-owned(fcsam-owner(s));
         let sampler-closed = fcsam-close(fcsam-owner(s));
