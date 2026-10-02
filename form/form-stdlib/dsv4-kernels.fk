@@ -76,6 +76,21 @@ section [form.bml] {
     // the NaN scan: counts the words of an f32 buffer whose exponent bits are all ones (NaN and both infinities), by the bits. See dkr-logits-clean? for why it exists.
     def dkr-nan-count-body() = "kernel void form_dsv4_nan_count(device const float* x [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& n [[buffer(2)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]]) { threadgroup uint part[1024]; uint t = tpitg.x; uint T = ntg.x; device const uint* w = (device const uint*)x; uint c = 0u; for (uint j = t; j < n; j += T) { if ((w[j] & 2139095040u) == 2139095040u) c = c + 1u; } part[t] = c; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint s = T / 2u; s > 0u; s = s / 2u) { if (t < s) part[t] = part[t] + part[t + s]; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (t == 0u) out[0] = part[0]; } ";
 
+    // ---- the router's softplus that keeps its digits ---------------------------------------------------------------------------
+    // The restored router kernels (form_dsv4_hash_probs, form_dsv4_topk_probs and the weights kernels) form p = sqrt(softplus(z)) as ln(1 + exp(z)) in f32. For negative z, 1 + exp(z) rounds away the
+    // digits of exp(z) (z = -7: exp = 9.1e-4, one ulp of 1 is 6e-8, so 7e-5 relative): the band reads the probability 2.7e-5 off at z = -7 and 1.1e-4 off at z = -9. These variants (same
+    // signatures, new names; the restored kernels are untouched) use the stable form  softplus(z) = max(z, 0) + log1p(exp(-|z|))  with e = exp(-|z|) in (0, 1]:
+    //   e < 0.1   log1p(e) = e - e^2/2 + e^3/3 - ... + e^8/8 (Horner, eight terms: the first neglected term is e^9/9, a relative 1.1e-9 at e = 0.1 against the f32 half-epsilon 6.0e-8; seven terms would
+    //             leave 1.25e-8, still under it)
+    //   e >= 0.1  log(u) * (e / (u - 1)) with u = 1 + e rounded: the logarithm of the ROUNDED argument corrected by the exact ratio, so the rounding of 1 + e cancels (plain log(1 + e) here is 5.8e-7
+    //             off at e = 0.1: ten times the f32 epsilon, and the band's plant for it)
+    // exp and log are metal::precise (the library's correctly rounded forms, unaffected by fast math); the uniform branch is on e alone. The probability is sqrt of that, metal::precise::sqrt.
+    def dkr-softplus-msl() = "static inline float dsp_log1p(float e) { if (e < 0.1f) { return e * (1.0f + e * (-0.5f + e * (0.33333334f + e * (-0.25f + e * (0.2f + e * (-0.16666667f + e * (0.14285715f + e * (-0.125f)))))))); } float u = 1.0f + e; return metal::precise::log(u) * (e / (u - 1.0f)); } static inline float dsp_softplus(float z) { float e = metal::precise::exp(-metal::abs(z)); return metal::max(z, 0.0f) + dsp_log1p(e); } static inline float dsp_prob(float z) { return metal::precise::sqrt(dsp_softplus(z)); } ";
+    def dkr-hash-probs-s-body() = "kernel void form_dsv4_hash_probs_s(device const float* logits [[buffer(0)]], device float* probs [[buffer(1)]], constant uint& ne [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= ne) return; probs[i] = dsp_prob(logits[i]); } ";
+    def dkr-topk-probs-s-body() = "kernel void form_dsv4_topk_probs_s(device const float* logits [[buffer(0)]], device const float* bias [[buffer(1)]], device float* probs [[buffer(2)]], device float* sc [[buffer(3)]], constant uint& ne [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= ne) return; float p = dsp_prob(logits[i]); probs[i] = p; sc[i] = p + bias[i]; } ";
+    // the softplus itself over a vector, for the band's sweep (out[i] = dsp_softplus(z[i]))
+    def dkr-softplus-s-body() = "kernel void form_dsv4_softplus_s(device const float* z [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; out[i] = dsp_softplus(z[i]); } ";
+
     // hc_post reading the post gates and the combine matrix out of the split kernel's own output (pre | post | comb, so post at n_hc and comb at 2 n_hc): the carrier binds a buffer at its view offset only,
     // so the restored form_hc_post_f32 (post and comb as buffers of their own) would need two copies a layer. Same arithmetic: out[dst][d] = block[d] * post[dst] + sum over src ascending of
     // comb[dst + src * n_hc] * residual[src][d], the combine read TRANSPOSED against how the split stores it
@@ -91,7 +106,7 @@ section [form.bml] {
     // hc: the seven hyper-connection kernels
     def dkr-unit-hc() = dkr-pragmas() ++ hc-msl-unit() ++ dkr-hc-post-split-body();
     // moe: the router, both routing regimes, the clamped SwiGLU, plus the id-weighted SwiGLU, the slot sum and the argmax
-    def dkr-unit-moe() = dkr-pragmas() ++ dsv4-stack-ffn-source() ++ dkr-swiglu-id-body() ++ dkr-sum-slots-body() ++ dkr-argmax-body() ++ dkr-nan-count-body();
+    def dkr-unit-moe() = dkr-pragmas() ++ dsv4-stack-ffn-source() ++ dkr-swiglu-id-body() ++ dkr-sum-slots-body() ++ dkr-argmax-body() ++ dkr-nan-count-body() ++ dkr-softplus-msl() ++ dkr-hash-probs-s-body() ++ dkr-topk-probs-s-body() ++ dkr-softplus-s-body();
     // experts: the MXFP4 and IQ2_XXS expert matvecs by ids
     def dkr-unit-experts() = dkr-pragmas() ++ dkr-inc() ++ mx4m-msl-helpers() ++ iq2m-msl-helpers() ++ dkr-mx4-id-body() ++ dkr-iq2-id-body();
     // comp: the second cache's four kernels
