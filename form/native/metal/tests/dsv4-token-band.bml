@@ -22,7 +22,8 @@
 ;   16    the head is asked once: dsv4-forward-state leaves the logits buffer exactly as the caller left it (a sentinel), and after prefill the logits are the LAST token's (they equal the stepwise decode's, not
 ;         the first token's, which the fresh head of another state reads differently)
 ;   32    refusals answer nothing and touch no buffer: an id at the vocabulary and a negative id, a position at the capacity, a span that passes it, an empty span, a context whose head tensor has the wrong type
-;         (a copy of the views with output_norm retyped), and dsv4-argmax over an index buffer the head never wrote (the sentinel reads as nothing)
+;         (a copy of the views with output_norm retyped), and dsv4-argmax over an index buffer the head never wrote (the sentinel reads as nothing); and the NaN scan (dkr-logits-clean?): with one NaN word, or one
+;         infinity, planted among the logits the argmax is nothing, and a clean head answers its id again
 ;   64    the checks can fail: a residual tilted by 1e-4 reads outside the floor; the reference's head over the WRONG gates (the stream sum with equal weights) reads far from the GPU's collapsed stream;
 ;         the oracle's argmax over the reversed logits differs from the GPU's
 ;   128   release: dsv4-close in synced rounds leaves no handle and metal_live reads what it read before the open
@@ -158,6 +159,23 @@ section [form.bml] {
    record_get(fal, "ok4") && st == 1 && after[0] > 1.0e15 && after[31] > 1.0e15 && !nothing?(one) && first != record_get(fal, "lgA");
   }
 
+  // the NaN scan: a head that ran answers its id; one NaN word, or one infinity, among the logits and the argmax is not trusted (the device argmax skips a lone NaN and would answer a plausible id);
+  // the clean head answers again
+  def dtb-nan(c) {
+   let ctx = dtb-ctx(c);
+   let w = dtb-write-resid(ctx, dtb-resid(3));
+   let h = dsv4-head(ctx);
+   let good = dsv4-argmax(ctx);
+   let p1 = metal_buf_write(dso-buf(ctx, "logits"), 12, dkr-u32-bytes([2143289344]));
+   let withNan = dsv4-argmax(ctx);
+   let p2 = metal_buf_write(dso-buf(ctx, "logits"), 12, dkr-u32-bytes([2139095040]));
+   let withInf = dsv4-argmax(ctx);
+   let again = dsv4-head(ctx);
+   let clean = dsv4-argmax(ctx);
+   let said = print_str("  nan scan: clean " ++ good.str() ++ ", one NaN " ++ (nothing?(withNan) ? "nothing" : withNan.str()) ++ ", one infinity " ++ (nothing?(withInf) ? "nothing" : withInf.str()) ++ ", clean again " ++ clean.str());
+   h == 7 && !nothing?(good) && nothing?(withNan) && nothing?(withInf) && !nothing?(clean) && clean == good;
+  }
+
   // ---- 32: refusals -----------------------------------------------------------------------------------------------------------------------------------
   def dtb-fake-vx(ctx) {
    let vx = record_new(0);
@@ -235,7 +253,7 @@ section [form.bml] {
  let r4 = try opened && dtb-loop(c, stsA, stsB, fal) catch false;
  let r8 = try r4 && dtb-stops(c, stsC, record_get(fal, "first"), record_get(fal, "gen")) catch false;
  let r16 = try r4 && dtb-once(c, stsD, fal) catch false;
- let r32 = try opened && dtb-refusals(c, stsE) catch false;
+ let r32 = try opened && dtb-refusals(c, stsE) && dtb-nan(c) catch false;
  let r64 = try opened && dtb-falsifiers(c) catch false;
  let left = opened ? dsv4-close(ctx, append(stsA, append(stsB, append(stsC, append(stsD, stsE))))) : [0];
  let c128 = dtb-bit(try opened && len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
