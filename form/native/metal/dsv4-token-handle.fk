@@ -1,0 +1,159 @@
+// dsv4-token-handle.fk -- the DeepSeek-V4 driver's token loop: the embedding, every block, the output head, the device argmax, prefill and greedy decode, all Metal dispatches held in Form.
+//
+// WHAT IT IS. qwen35-dense-token-handle.fk has q38-forward (embed, every block, head, argmax), q38-prefill-lm (token-major, the head asked once at the last token) and q38-generate. This
+// file is the same three for DeepSeek, over the context dsv4-open.fk opened and the blocks dsv4-layer.fk enqueues:
+//   dsv4-embed          the token's F16 row of token_embd into hc-cur, broadcast to the four streams in `resid` (two enqueues)
+//   dsv4-head           the output head, seven enqueues, in the order the oracle's logits are computed (dnr-hc-head, dnr-rms-weight, dnr-matvec):
+//                         rms of the four streams (no weight, one group of 256) -> hc-flat; the F16 output_hc_fn matvec [hc x e to hc] -> hc-mix; the head gates
+//                         w[i] = sigmoid(pre[i] x scale + base[i]) + hc_eps (form_hc_headw_f32) -> head-w; the stream sum -> head-cur; output_norm (weighted, one group of 256) -> xn;
+//                         output.weight (MXFP8) [e to vocab] -> LOGITS; the device argmax (one group of 1024 threads) -> argmax-idx, argmax-val
+//   dsv4-forward-state  embed and every block at one position (no head): what a prompt position needs, since only the last position's answer is read
+//   dsv4-prefill-span-sliced  token-major over a span of ids, the head enqueued ONCE after the last token; answers [next id, next position]
+//   dsv4-decode         one step: embed, every block, head, argmax: the next id
+//   dsv4-generate       n greedy steps from an id at a position, stopping at a stop id
+//
+// LOGITS SIT AT bs[28], the seat q38-head fills and the session's sampler reads (form-cli-model-session.fk fcms-ctx(s)[1][28]); dsv4-open.fk puts them there. The argmax answers are in the named
+// buffers argmax-idx and argmax-val (dsv4-open.fk extras). The index buffer is written 0xFFFFFFFF before every head, so a head that did not run, or an all-NaN vector (the kernel answers
+// 0xFFFFFFFF), is read as NOTHING and never as a plausible token 0; an id at or past the vocabulary is nothing too.
+//
+// THE ORDER IS THE CARRIER'S. Enqueues run in the order they are made (no barrier is set anywhere), so the host syncs once a token (prefill, after every position's blocks; decode, after the head) and then reads. Nothing here
+// writes a buffer from the host between enqueues: the rope tables were written once by dsv4-prepare, and the hash table of a hashed block is read on the device by the token id carried as a constant.
+//
+// WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong token: a context whose blocks are not all supported (dsv4-layer.fk dkl-supported?), whose head tensors are not what the head kernels read
+// (output_hc_fn F16 [hc x e, hc]; scale and base F32; output_norm F32 [e]; token_embd F16 [e, vocab]; output.weight MXFP8 [e, vocab]), a position at or past the capacity the context was opened for, a ratio-4
+// block at position 2048 or later (dsv4-layer.fk), an id outside the vocabulary, an empty span. Admission is checked before the first enqueue, so a refusal touches no buffer and advances no cache.
+// The head uses `eps` for the stream rms and `hyper_connection.epsilon` for the gates, as the layer's hc_pre does; the fixture holds the two equal (1e-6), so a file where they differ is not witnessed here.
+//
+// Proven by: native/metal/tests/dsv4-token-band.bml (the head against the oracle's own head arithmetic on the fixture, prefill and decode, the loop, the refusals, release).
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/equireach.fk;
+import form-stdlib/gguf-meta.fk;
+import form-stdlib/metal-door.fk;
+import form-stdlib/lora-adapter.bml;
+import form-stdlib/dsv4-layout.fk;
+import form-stdlib/dsv4-kernels.fk;
+import native/metal/dsv4-bind.fk;
+import native/metal/dsv4-open.fk;
+import native/metal/dsv4-layer.fk;
+section [form.bml] {
+    // ---- admission ------------------------------------------------------------------------------------------
+    def dth-view(ctx, name) = dso-view(ctx, name);
+    def dth-type(ctx, name) = record_has(dso-vx(ctx), name) ? dth-view(ctx, name)[2] : 0 - 1;
+    def dth-dims(ctx, name) = record_has(dso-vx(ctx), name) ? dth-view(ctx, name)[3] : [];
+    // the head's tensors are what its kernels read
+    def dth-head-ok?(ctx) {
+        let m = dso-geo(ctx);
+        let hc = record_get(m, "hc");
+        let e = record_get(m, "e");
+        let vocab = record_get(m, "vocab");
+        dth-type(ctx, "output_hc_fn.weight") == 1 && dth-dims(ctx, "output_hc_fn.weight") == [hc * e, hc]
+         && dth-type(ctx, "output_hc_scale.weight") == 0 && dth-type(ctx, "output_hc_base.weight") == 0 && dth-dims(ctx, "output_hc_base.weight") == [hc]
+         && dth-type(ctx, "output_norm.weight") == 0 && dth-dims(ctx, "output_norm.weight") == [e]
+         && dth-type(ctx, "token_embd.weight") == 1 && dth-dims(ctx, "token_embd.weight") == [e, vocab]
+         && dth-type(ctx, "output.weight") == 41 && dth-dims(ctx, "output.weight") == [e, vocab]
+         && hc == 4 && vocab > 0 && vocab <= 1048576;
+    }
+    def dth-blocks-ok?(ctx, il) = il == record_get(dso-geo(ctx), "layers-n") ? true : (dkl-supported?(ctx, il) && dth-blocks-ok?(ctx, il + 1));
+    // no ratio-4 block runs at position 2048 or later (the indexer stops being inert: dsv4-layer.fk)
+    def dth-pos-ok?(ctx, il, pos) = il == record_get(dso-geo(ctx), "layers-n") ? true : (!(dkl-l(ctx, il, "ratio") == 4 && pos >= 2048) && dth-pos-ok?(ctx, il + 1, pos));
+    def dsv4-admitted?(ctx) = len(ctx) == 13 && record_has(dso-geo(ctx), "cap") && dth-head-ok?(ctx) && dth-blocks-ok?(ctx, 0);
+    def dsv4-position-ok?(ctx, pos) = pos >= 0 && pos < dso-cap(ctx) && dth-pos-ok?(ctx, 0, pos);
+    def dsv4-id-ok?(ctx, id) = id >= 0 && id < record_get(dso-geo(ctx), "vocab");
+
+    // ---- the embedding ---------------------------------------------------------------------------------------
+    // the token's row into hc-cur, then to the four streams in `resid`: the count of enqueues, or nothing
+    def dsv4-embed(ctx, id) {
+        let m = dso-geo(ctx);
+        let e = record_get(m, "e");
+        let hc = record_get(m, "hc");
+        let r1 = dkr-go(dkl-p(ctx, "form_dsv4_embed_f16"), [dso-handle(ctx, "token_embd.weight"), dkl-b(ctx, "hc-cur")], [id, e], e);
+        let r2 = dkr-go(dkl-p(ctx, "form_hc_broadcast_f32"), [dkl-b(ctx, "hc-cur"), dkl-b(ctx, "resid")], [hc, e], hc * e);
+        (r1 == 1 && r2 == 1) ? 2 : nothing();
+    }
+
+    // ---- the head --------------------------------------------------------------------------------------------
+    def dth-sentinel-idx(ctx) = metal_buf_write(dkl-b(ctx, "argmax-idx"), 0, dkr-u32-bytes([4294967295]));
+    // the seven enqueues of the head; the logits land in bs[28] and the argmax in argmax-idx and argmax-val
+    def dth-head-go(ctx) {
+        let m = dso-geo(ctx);
+        let hc = record_get(m, "hc");
+        let e = record_get(m, "e");
+        let hce = hc * e;
+        let vocab = record_get(m, "vocab");
+        let fnv = dth-view(ctx, "output_hc_fn.weight");
+        let ov = dth-view(ctx, "output.weight");
+        let w0 = dth-sentinel-idx(ctx);
+        let r1 = dkr-go-tg(dkl-p(ctx, "form_hc_rmsnorm_nw_wide_f32"), [dkl-b(ctx, "resid"), dkl-b(ctx, "hc-flat")], [hce, dkl-f(record_get(m, "eps"))], 1, 256);
+        let r2 = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec"), [fnv[1], dkl-b(ctx, "hc-flat"), dkl-b(ctx, "hc-mix")], [dkl-rows(fnv), hce], dkl-rows(fnv));
+        let r3 = dkr-go(dkl-p(ctx, "form_hc_headw_f32"), [dkl-b(ctx, "hc-mix"), dso-handle(ctx, "output_hc_scale.weight"), dso-handle(ctx, "output_hc_base.weight"), dkl-b(ctx, "head-w")], [hc, dkl-f(record_get(m, "hc-eps"))], hc);
+        let r4 = dkr-go(dkl-p(ctx, "form_hc_wsum_f32"), [dkl-b(ctx, "resid"), dkl-b(ctx, "head-w"), dkl-b(ctx, "head-cur")], [hc, e], e);
+        let r5 = dkl-norm(ctx, "head-cur", dso-handle(ctx, "output_norm.weight"), "xn", e);
+        let r6 = dkl-mx8(ctx, ov, "xn", "logits");
+        let r7 = dkr-go-tg(dkl-p(ctx, "form_dsv4_argmax_f32"), [dkl-b(ctx, "logits"), dkl-b(ctx, "argmax-idx"), dkl-b(ctx, "argmax-val")], [vocab], 1, 1024);
+        (w0 >= 0 && r1 == 1 && r2 == 1 && r3 == 1 && r4 == 1 && r5 == 1 && r6 == 1 && r7 == 1) ? 7 : nothing();
+    }
+    // the head over the residual `resid`: the count of enqueues (7), or nothing
+    def dsv4-head(ctx) = dth-head-ok?(ctx) ? dth-head-go(ctx) : nothing();
+    // the argmax the head left, once the work is synced: an id, or nothing (the sentinel stayed, or the id is outside the vocabulary)
+    def dsv4-argmax(ctx) {
+        let s = metal_sync();
+        let idx = dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1)[0];
+        (s >= 0 && idx < record_get(dso-geo(ctx), "vocab")) ? idx : nothing();
+    }
+    // the logits the head left (synced first): vocab f32
+    def dsv4-logits(ctx) {
+        let s = metal_sync();
+        dkr-read(dkl-b(ctx, "logits"), record_get(dso-geo(ctx), "vocab"));
+    }
+
+    // ---- the state half: embed and every block at one position ----------------------------------------------------
+    def dth-layers(ctx, sts, il, n, id, pos, cap) {
+        il == n ? 1 : {
+            let r = dsv4-layer(ctx, sts, il, pos, id, cap);
+            nothing?(r) ? nothing() : dth-layers(ctx, sts, il + 1, n, id, pos, cap);
+        };
+    }
+    def dth-state-go(ctx, sts, id, pos) {
+        let emb = dsv4-embed(ctx, id);
+        nothing?(emb) ? nothing() : dth-layers(ctx, sts, 0, record_get(dso-geo(ctx), "layers-n"), id, pos, dso-cap(ctx));
+    }
+    // enqueues the embedding and every block at pos (no sync, no head): 1, or nothing before any enqueue when the context, the position or the id is refused
+    def dsv4-forward-state(ctx, sts, id, pos) = (dsv4-admitted?(ctx) && len(sts) == record_get(dso-geo(ctx), "layers-n") && dsv4-position-ok?(ctx, pos) && dsv4-id-ok?(ctx, id)) ? dth-state-go(ctx, sts, id, pos) : nothing();
+
+    // ---- prefill, token-major, the head read at the last token only ------------------------------------------------------
+    def dth-prefill-go(ctx, sts, ids, i, pos0) {
+        let n = len(ids);
+        let st = dsv4-forward-state(ctx, sts, ids[i], pos0 + i);
+        nothing?(st) ? nothing() : (i == n - 1 ? dth-prefill-last(ctx) : { let s = metal_sync(); s >= 0 ? dth-prefill-go(ctx, sts, ids, i + 1, pos0) : nothing(); });
+    }
+    def dth-prefill-last(ctx) {
+        let h = dsv4-head(ctx);
+        nothing?(h) ? nothing() : dsv4-argmax(ctx);
+    }
+    def dth-ids-ok?(ctx, ids) = len(ids) == 0 ? true : (dsv4-id-ok?(ctx, ids[0]) && dth-ids-ok?(ctx, ids[1:]));
+    // the ids at positions pos0 ...: [the next id, the next position], or nothing (a refusal before any enqueue leaves every cache as it was)
+    def dsv4-prefill-span-sliced(ctx, sts, ids, pos0) {
+        let n = len(ids);
+        (n > 0 && dsv4-admitted?(ctx) && dth-ids-ok?(ctx, ids) && dsv4-position-ok?(ctx, pos0) && dsv4-position-ok?(ctx, pos0 + n - 1)) ? {
+            let nid = dth-prefill-go(ctx, sts, ids, 0, pos0);
+            nothing?(nid) ? nothing() : [nid, pos0 + n];
+        } : nothing();
+    }
+
+    // ---- one decode step and the loop ----------------------------------------------------------------------------------------
+    // embed, every block, head, argmax: the next id, or nothing
+    def dsv4-decode(ctx, sts, id, pos) {
+        let st = dsv4-forward-state(ctx, sts, id, pos);
+        nothing?(st) ? nothing() : dth-prefill-last(ctx);
+    }
+    def dth-stop?(id, stops) = len(stops) == 0 ? false : (id == stops[0] || dth-stop?(id, stops[1:]));
+    // n greedy steps from `id` at `pos`: the ids generated, in order (a stop id or a refusal ends the walk; the stop id is not kept)
+    def dsv4-generate(ctx, sts, id, pos, n, stops, acc) {
+        n <= 0 ? acc : {
+            let nid = dsv4-decode(ctx, sts, id, pos);
+            (nothing?(nid) || dth-stop?(nid, stops)) ? acc : dsv4-generate(ctx, sts, nid, pos + 1, n - 1, stops, append(acc, [nid]));
+        };
+    }
+    0;
+}
