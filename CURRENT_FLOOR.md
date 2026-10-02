@@ -249,6 +249,38 @@ defined-correctness number, re-earned only through that sealed door. Its consent
 a Form data table, and the DS4 engine is found at runtime through its directory with its header
 verified.
 
+## The Form-native DeepSeek V4 chain
+
+Read on 2026-10-02 (WITA) through `./fkwu form/form-stdlib/tests/<band> </dev/null`, the memory governor
+reading room before each run, every exit 0. No band maps the model: the ones that read the registry's file
+(the reap25 build) read its header, an 8 MB window, and the recorded logits are 1.5 MB. The whole stack through
+Metal over the mapped weights has not been run on today's kernel: the shell runners that drove it (the stack runner
+is 2,670 lines with a Swift program embedded) stand in history at 93154a720, and a Form cell over the fkwu Metal
+doors takes their place. What the bands below pin is what that cell takes as input and judges against.
+
+```text
+tokenizer      dsv4-tokenizer-band 8191 · dsv4-tokenizer-native-band 15 · dsv4-token-recipe-swap-band 65535
+quant, tensor  ds4-quant-layout-band 127 · ds4-tensor-table-band 255 · f16-decode-band 4095 · gguf-manifest-band 255
+               iq2xxs-dequant-band 1073741823 · iq2xxs-msl-band 8191 · mx-plane-band 511 · mx-msl-band 511
+               q2k-dequant-band 511 · q2k-msl-band 255 · q8-0-msl-band 255 · windowed-residency-band 4095
+reference      dsv4-oracle-recipes-band.bml 16383   (the reference arithmetic against the body's carvers, the view
+               geometry, the request admission, the header-only plan of 1,406 tensors, the retention and fp64 matrix doors)
+emitters       dsv4-compressor-band 2047 · dsv4-kv-cache-band 511 · dsv4-hc-band 63 · dsv4-hc-msl-band 63
+               dsv4-moe-msl-band 63 · dsv4-forward-band 127 · mla-msl-band 127 · moe-route-radius-band 63
+               moe-route-wide-msl-band 255
+stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels compiled on the device, two run)
+               ds4-order-match-band.bml 255       (the quantiser and the Q8_0 row dot against a Form reference of ds4's order)
+references     ds4-recorded-references-band.bml 255
+```
+
+The recorded references are `form/form-stdlib/tests/oracles/ds4-logits-capital-of-france.json` (129,280 logits, argmax
+2581 "We" at 36.7579117) and the 24-token stream for the raw prompt ids [671 6102 294 8760 344] (a period-7 cycle,
+" Paris. The capital of France is"). They were earned on the IQ2XXS file, which ds4 can read; the registry's `ds4flash`
+row names the reap25 file, which it cannot, so they judge a native lane on the IQ2XXS file and a reap25 lane is judged by
+the Form reference. The radius is one prompt, a cycle, never past position 127. The kernels the order-match band runs
+carry `#pragma clang fp reassociate(off)` and `contract(off)`: `metal_pipeline` compiles with the default options, and
+without them the eight-thread Q8_0 twin read 8 ulps from the one-thread kernel.
+
 ## The senses
 
 What the body hears, says and perceives, read by bands that open no microphone, speaker or model:
