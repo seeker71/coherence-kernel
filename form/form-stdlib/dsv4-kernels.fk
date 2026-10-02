@@ -6,7 +6,7 @@
 // MXFP8 matvec, the KV fp8+f16 round, the compensated F16 matvec), dsv4-compressor.fk (the second cache's four kernels), dsv4-kv-cache.fk (the append), mxfp8-msl.fk and
 // mxfp4-msl.fk and iq2xxs-msl.fk and q8-0-msl.fk and q2k-msl.fk (the dequant and the fused matvecs), ds4-order-match.fk. This file composes them into ten units (six that the
 // fixture's dispatch graph runs, one for Q8_0, three for the real IQ2XXS file's order-match lanes that the band compiles and does not run) and writes
-// only what the dispatch graph needs that no emitter gave: the F16 embedding row, the 32-lane F16 matvec, the in-place RoPE, the expert matvecs that read their
+// only what the dispatch graph needs that no emitter gave: the F16 embedding row, the 32-lane F16 matvec, the in-place RoPE, hc_post over the split buffer (no buffer offsets), the expert matvecs that read their
 // expert ids from the device (MXFP4 and IQ2_XXS), the id-weighted SwiGLU, the slot sum and the device argmax.
 //
 // THE TWO PRAGMAS ARE THE FIRST TWO LINES OF EVERY SOURCE. metal_pipeline compiles with default options: multiply-add contraction on, reassociation allowed
@@ -74,6 +74,11 @@ section [form.bml] {
     // compiles with fast math, under which `v == v` is assumed true and the band witnessed `v == v` pass a NaN (index 0 answered); the pragmas do not change that.
     def dkr-argmax-body() = "kernel void form_dsv4_argmax_f32(device const float* x [[buffer(0)]], device uint* out_idx [[buffer(1)]], device float* out_val [[buffer(2)]], constant uint& n [[buffer(3)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]]) { threadgroup float sv[1024]; threadgroup uint si[1024]; uint t = tpitg.x; uint T = ntg.x; float bv = 0.0f; uint bi = 4294967295u; for (uint j = t; j < n; j += T) { float v = x[j]; bool nanv = (as_type<uint>(v) & 2147483647u) > 2139095040u; if (!nanv && (bi == 4294967295u || v > bv)) { bv = v; bi = j; } } sv[t] = bv; si[t] = bi; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint s = T / 2u; s > 0u; s = s / 2u) { if (t < s) { float ov = sv[t + s]; uint oi = si[t + s]; bool take = (si[t] == 4294967295u) ? (oi != 4294967295u) : (oi != 4294967295u && (ov > sv[t] || (ov == sv[t] && oi < si[t]))); if (take) { sv[t] = ov; si[t] = oi; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (t == 0u) { out_idx[0] = si[0]; out_val[0] = sv[0]; } } ";
 
+    // hc_post reading the post gates and the combine matrix out of the split kernel's own output (pre | post | comb, so post at n_hc and comb at 2 n_hc): the carrier binds a buffer at its view offset only,
+    // so the restored form_hc_post_f32 (post and comb as buffers of their own) would need two copies a layer. Same arithmetic: out[dst][d] = block[d] * post[dst] + sum over src ascending of
+    // comb[dst + src * n_hc] * residual[src][d], the combine read TRANSPOSED against how the split stores it
+    def dkr-hc-post-split-body() = "kernel void form_dsv4_hc_post_split(device const float* block_out [[buffer(0)]], device const float* residual [[buffer(1)]], device const float* split [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant uint& n_embd [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint total = n_hc * n_embd; if (gid >= total) return; uint dst = gid / n_embd; uint d = gid - dst * n_embd; float acc = 0.0f; for (uint src = 0u; src < n_hc; ++src) acc = acc + split[2u * n_hc + dst + src * n_hc] * residual[src * n_embd + d]; out[gid] = block_out[d] * split[n_hc + dst] + acc; } ";
+
     // ---- the units -------------------------------------------------------------------------------------------
     // dense: the MXFP8 projections (plain and grouped), the F16 matvecs (compensated one-thread and the lane fold), the embedding row, the KV fp8+f16 round (one thread, and the parallel form)
     def dkr-unit-dense() = dkr-pragmas() ++ dkr-inc() ++ mx8m-msl-helpers() ++ mx8m-matvec-body("form_dsv4_mx8_matvec") ++ dsv4-mx8-grouped-body() ++ dsv4-f16-matvec-body() ++ dkr-f16-lane-body() ++ dkr-embed-body() ++ dsv4-kvq-body() ++ dsv4-kvq-par-body();
@@ -82,7 +87,7 @@ section [form.bml] {
     // mla: the norms (one thread, simdgroup, wide), the head norms, the attention in its three stages over two arenas, the cache append, the RoPE
     def dkr-unit-mla() = dkr-pragmas() ++ mla-msl-unit() ++ dkv-append-msl-body() ++ dkr-rope-body();
     // hc: the seven hyper-connection kernels
-    def dkr-unit-hc() = dkr-pragmas() ++ hc-msl-unit();
+    def dkr-unit-hc() = dkr-pragmas() ++ hc-msl-unit() ++ dkr-hc-post-split-body();
     // moe: the router, both routing regimes, the clamped SwiGLU, plus the id-weighted SwiGLU, the slot sum and the argmax
     def dkr-unit-moe() = dkr-pragmas() ++ dsv4-stack-ffn-source() ++ dkr-swiglu-id-body() ++ dkr-sum-slots-body() ++ dkr-argmax-body();
     // experts: the MXFP4 and IQ2_XXS expert matvecs by ids
@@ -143,8 +148,8 @@ section [form.bml] {
         dkr-freqs-go(0, nrot / 2, nrot, base, scale, ext, 1.0 * low, 1.0 * high);
     }
     // the table of layer il from the layout record m (dsv4-layout.fk)
-    def dkr-layer-freqs(m, il) {
-        let compressed = dvl-l(m, il, "ratio") != 0;
+    // the two tables a model needs: the plain one (ratio 0) and the compressed one (every nonzero ratio shares it)
+    def dkr-rope-table(m, compressed) {
         let factor = record_get(m, "rope-factor");
         let cb = record_get(m, "compress-base");
         let base = (compressed && cb > 0.0) ? cb : record_get(m, "rope-base");
@@ -152,6 +157,7 @@ section [form.bml] {
         let ext = (compressed && factor > 1.0) ? 1.0 : 0.0;
         dkr-freqs(record_get(m, "nrot"), base, scale, ext, compressed ? record_get(m, "orig-ctx") : 0, record_get(m, "beta-fast"), record_get(m, "beta-slow"));
     }
+    def dkr-layer-freqs(m, il) = dkr-rope-table(m, dvl-l(m, il, "ratio") != 0);
 
     // ---- bytes: f32 vectors in and out ------------------------------------------------------------------------
     def dkr-words(xs) = len(xs) == 0 ? [] : cons(md-f32-bits(xs[0]), dkr-words(xs[1:]));

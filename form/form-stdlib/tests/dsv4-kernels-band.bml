@@ -11,19 +11,19 @@
 ;
 ; Verdict 1023 when every claim lands:
 ;   1     text: every one of the ten sources starts with the pragma pair exactly, none uses `using namespace`, no kernel name repeats inside the six graph units, and the catalogue read from
-;         the sources is 95 kernels
-;   2     device: every kernel of every unit compiles through metal_pipeline (95 handles, all positive); a second open of the same sources returns the same 95 handles (compile once,
+;         the sources is 96 kernels
+;   2     device: every kernel of every unit compiles through metal_pipeline (96 handles, all positive); a second open of the same sources returns the same 96 handles (compile once,
 ;         handle kept)
 ;   4     the pragmas bite on this device: the probe kernel a*b+c on a = b = 1 + 2^-12, c = -1 reads 973078528 (the unfused word) when wrapped by dkr-wrap and 973079552 (the fma word) when the
 ;         same text is compiled without the pragma pair
 ;   8     dense: the F16 embedding row (exact), the F16 matvec in both forms (compensated one thread and the lane fold) on blk.1.hc_attn_fn, the MXFP8 matvec on blk.0.attn_q_a, the grouped MXFP8
 ;         matvec on blk.0.attn_output_a, and the four Q8_0 forms on the three-block fixture row, each within the gate of the oracle
 ;   16    norms, rope and KV round: the weighted RMSNorm (wide and one thread), the head norm (wide and one thread), RoPE forward and inverse at layer 0 (plain base) and layer 1 (compressed base,
-;         YaRN ramp) against the oracle's own rotation factors, the KV fp8+f16 round (one thread and parallel) against dfo-kv-round
+;         YaRN ramp) against the oracle's own rotation factors (and the two host tables: plain for block 0, compressed shared by blocks 1 and 2, 32 pairs each), the KV fp8+f16 round (one thread and parallel) against dfo-kv-round
 ;   32    attention: the three-stage split (scores, stats in both forms, acc) and the single mixed kernel over raw plus compressed arenas against dnr-heads, the no-compressed case, the cache append
 ;         at a position and its refusal at the cap
 ;   64    hyper-connection: broadcast, the wide no-weight norm, the Sinkhorn split (seq4) with fixture scale and base against dnr-hc-split, the stream sum, hc_post with an asymmetric combine
-;         against dnr-hc-post, the output-head gates
+;         against dnr-hc-post (and the same post read from the split buffer, no buffer offsets), the output-head gates
 ;   128   MoE: biased top-k with the sentinel expert refused and the unbiased weights, the hash lookup of layer 0 and its weights, the clamped SwiGLU by ids (the clamp bites), the MXFP4 expert matvec
 ;         by ids (gate/up shared input, down per-slot input) and the IQ2_XXS expert matvec by ids against dfo-expert-matrix, the slot sum
 ;   256   the compressor's four kernels against the author twin dsv4-compressor.fk (the oracle holds no compressor: this is a twin, not an independent reference) at ratio 4 (coff 2) and ratio 2
@@ -62,7 +62,7 @@ section [form.bml] {
   def dkb-text() {
    let us = dkr-units();
    let names = dkr-all-names(us);
-   len(us) == 10 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 95
+   len(us) == 10 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 96
     && dkr-pragmas() == "#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\n";
   }
 
@@ -73,7 +73,7 @@ section [form.bml] {
   def dkb-compiled(first, second, us) {
    let a = dkb-unit-hs(first, us);
    let b = dkb-unit-hs(second, us);
-   len(a) == 95 && dkb-positive?(a) && a == b;
+   len(a) == 96 && dkb-positive?(a) && a == b;
   }
 
   // ---- 4: the contraction probe, compiled with and without the pragma pair
@@ -181,7 +181,12 @@ section [form.bml] {
    let ref = dfo-rope-heads(v, 128, 64, dfo-rope-factors(rp, 64, pos, inv));
    e == 1 && dkb-chk("rope layer " ++ il.str() ++ " pos " ++ pos.str() ++ (inv == 1 ? " inverse" : " forward"), dkr-read(vb, 256), ref);
   }
-  def dkb-rope(c) = dkb-rope-one(c, 0, 3, 0) && dkb-rope-one(c, 0, 7, 1) && dkb-rope-one(c, 1, 3, 0) && dkb-rope-one(c, 1, 11, 1) && dkb-rope-one(c, 2, 5, 0);
+  // the two tables a model needs: the plain one is block 0's, the compressed one is shared by blocks 1 and 2 (and they differ)
+  def dkb-tables(c) {
+   let m = dkb-g(c, "m");
+   dkr-rope-table(m, false) == dkr-layer-freqs(m, 0) && dkr-rope-table(m, true) == dkr-layer-freqs(m, 1) && dkr-rope-table(m, true) == dkr-layer-freqs(m, 2) && dkr-rope-table(m, true) != dkr-rope-table(m, false) && len(dkr-rope-table(m, true)) == 32;
+  }
+  def dkb-rope(c) = dkb-tables(c) && dkb-rope-one(c, 0, 3, 0) && dkb-rope-one(c, 0, 7, 1) && dkb-rope-one(c, 1, 3, 0) && dkb-rope-one(c, 1, 11, 1) && dkb-rope-one(c, 2, 5, 0);
   def dkb-kvround(c) {
    let reg = dkb-g(c, "reg");
    let v = dkb-x(24, 128, 3.0);
@@ -281,13 +286,17 @@ section [form.bml] {
    let o5 = dkr-buf-empty(reg, 1024);
    let e5 = dkr-go(dkb-p(c, "form_hc_post_f32"), [bb, rb, pb, cbuf, o5], [4, 256], 1024);
    let ok5 = e5 == 1 && dkb-chk("hc post 4x256 with the asymmetric combine", dkr-read(o5, 1024), dnr-hc-post(block, resid, post, comb, 256, 4));
+   // the same post read from the split kernel's own output (post at 4, comb at 8: no buffer offsets)
+   let o7 = dkr-buf-empty(reg, 1024);
+   let e7 = dkr-go(dkb-p(c, "form_dsv4_hc_post_split"), [bb, rb, o3, o7], [4, 256], 1024);
+   let ok7 = e7 == 1 && dkb-chk("hc post from the split buffer (offset free)", dkr-read(o7, 1024), dnr-hc-post(block, resid, post, comb, 256, 4));
    let hp = dkb-x(45, 4, 2.0);
    let hb = dkr-buf-f32(reg, hp);
    let o6 = dkr-buf-empty(reg, 4);
    let e6 = dkr-go(dkb-p(c, "form_hc_headw_f32"), [hb, dkb-vh(c, "output_hc_scale.weight"), dkb-vh(c, "output_hc_base.weight"), o6], [4, dkr-f(dkb-eps-hc())], 4);
    let ref6 = dnr-gates(dnr-mix(hp, dkb-plain(c, "output_hc_base.weight"), dkb-plain(c, "output_hc_scale.weight")[0], 0, 4, 0), 1.0, dkb-eps-hc());
    let ok6 = e6 == 1 && dkb-chk("hc output-head weights", dkr-read(o6, 4), ref6);
-   ok1 && ok2 && ok3 && ok4 && ok5 && ok6;
+   ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7;
   }
 
   // ---- 128: MoE
