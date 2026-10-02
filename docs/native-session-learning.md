@@ -324,6 +324,17 @@ whole target set's mean loss. A refused candidate restores both vectors;
 retain partial admission and release outcomes. Observation-token meters read
 the session's actual numeric counters; generated model IDs remain a separate list.
 
+`form/form-stdlib/lora-lanes.bml` names a frozen-base rank-one lane for every
+registry model and for the mouth. Each lane has its own adapter file and its
+own role prompt (`form/form-stdlib/role-prompts.bml`). The native voice wears
+that prompt for the model it is asking. It does not wear the adapter. Qwen
+uses the rank-one head's width, kat-coder uses its embedding width, and
+whisper-tiny uses the ear's tiny width. A model whose shape has not been read
+keeps width 0, so no adapter bytes are invented for it.
+`observe/lora-lanes-run.fk` mints the known lanes under `.form-lora/`. Every
+lane stays unpromoted until a held-out check of that role passes. The 3B
+session school remains the only full trainer.
+
 `form/form-stdlib/qwen-lora-head.fk` writes measured float32 safetensors A and B
 at Qwen width 5120 and admits them through independent buffers; the GGUF
 mapping stays unwritten. An absent artifact stays absent. There is no hash-corpus
