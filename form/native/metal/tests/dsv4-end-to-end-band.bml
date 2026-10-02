@@ -1,0 +1,217 @@
+; dsv4-end-to-end-band.bml -- the whole tiny DeepSeek-V4 model through the Form-native Metal driver, end to end: a prompt and eight greedy steps on the Form-built fixture, every step's logits against the
+; oracle's full forward, the argmax with margin, and the whole run twice for determinism.
+;
+; WHAT THIS PINS. native/metal/dsv4-token-handle.fk (embed, the three blocks of dsv4-layer.fk, the output head, the device argmax) is run by dsv4-prefill-span-sliced on the prompt [5 17 3 22] (positions 0 to 3, the head
+; asked once, at position 3) and then by seven dsv4-decode steps (positions 4 to 10): eight greedy steps, step k answering the logits at position 2 + k. The fixture is the one the stage bands use (1,515,232 bytes,
+; written under temp_dir, opened at capacity 16: the ratio-4 block compresses at positions 3 and 7, the ratio-2 block at 1, 3, 5, 7 and 9, so the compressed lane is read by every step but the first's early positions).
+; THE REFERENCE is the oracle's full forward in fp64 over the same file: per position, the embedding broadcast to four streams, then for each block dfo-attention-half and dfo-ffn (the oracle's own MLA, hyper-connection,
+; router and experts, with the raw KV history it keeps threaded), then the output head by the numeric twin's own steps (dnr-rms, the F16 output_hc_fn matrix, dnr-gates over dnr-mix, the stream sum, dnr-rms-weight,
+; dfo-mx8 over output.weight). The reference is fed the GPU's own greedy ids as its inputs (teacher forcing); that is sound because step by step the argmax is held equal to the reference's own, so the reference's own greedy
+; walk is the same walk. The tolerance is the oracle harness's (metal_dsv4_stack_oracle.sh above cmpOra, history 8a6f123d3^): nd = max|gpu - ref| / max|ref| below max(8 ne, 3e-5), where ne is measured by the oracle's
+; own tilt: the SAME fp64 recipe run again with every layer's output stream tilted by 1.4e-5 (the oracle's dqs-perturb: alternating sign, multiplicative), ne = max|ref' - ref| / max|ref| at each step.
+;
+; WHERE THIS IS NOT INDEPENDENT (named, not hidden): (1) THE COMPRESSOR. The oracle holds no compressed lane. The reference's compressed rows come from the author twin dsv4-compressor.fk (pool, norm) with the oracle's own
+; rotation and fp8+f16 round; a wrong compressor recipe that the twin shares would pass here exactly as it passes the layer band. The falsifier below shows the lane is read (the reference without the rows reads far from the
+; GPU), not that the recipe is right. (2) THE SWIGLU CLAMP. The fixture's clamp is 10.0 and its activations never reach it, so no step here witnesses the clamp; the id SwiGLU kernel's clamp is witnessed on synthetic
+; inputs in dsv4-kernels-band only. (3) The fixture holds eps and hyper_connection.epsilon equal (1e-6), so the head's choice of which epsilon feeds the stream rms is not witnessed.
+;
+; WHAT THE CHAINED NUMBERS ARE. Chained, the GPU feeds itself, so f32 noise of 1e-7 to 1e-6 leaving block 0 is amplified by the model: a block's output at positions 4 and 5 reads 1.6e-5 to 8e-5 from the reference
+; (block 1 and 2), above the 3e-5 floor and far inside the oracle's own measured envelope (8 ne = 1e-3 to 8e-3: a 1.4e-5 tilt opens a 1e-3 gap, a 70-fold amplification). That is the model's conditioning, not a kernel's: claim 256
+; runs every block alone, fed the reference's own input, at all eleven positions, and holds each to the floor (they read 1.4e-7 to 1.8e-6).
+;
+; Verdict 511 when every claim lands:
+;   1     the run: the prefill answers [id, 4], seven decodes follow, so eight ids and eight logit vectors of 32 values, every logit finite, every id inside the vocabulary
+;   2     the logits: at each of the eight steps nd = max|gpu - ref| / max|ref| is below max(8 ne, 3e-5) with ne measured by the tilted reference; every nd and ne is printed
+;   4     the argmax: at each step the device's id equals the reference's argmax, and the reference's top-two gap exceeds twice the largest logit disagreement (an argmax with margin, so a flip needs a larger error)
+;   8     determinism: the whole run on a second fresh state is BIT-EQUAL (eight ids and 8 x 32 logit words); a third run through dsv4-generate answers the same seven ids after the prefill's
+;   16    the measured envelope is real: ne is above zero at every step, so the bound is the oracle's own and not the floor alone (the largest 8 ne and the floor are printed)
+;   32    the checks can fail: a reference fed the prompt [5 17 3 21] reads outside the bound from the GPU's first step; the reference without its compressed rows (raw history only) reads far from the GPU's first step
+;   64    the same GPU walk is the walk the reference's own greedy argmax would take: the reference's argmax ids (not the GPU's) equal the ids the reference was fed at the next positions
+;   128   release: dsv4-close in synced rounds leaves no handle and metal_live reads what it read before the open
+;   256   every block alone: 33 block runs (three blocks, eleven positions), each fed the reference's own input at that block, each output stream within the floor 3e-5 of the reference's (nd = max|gpu - ref| / max|ref|)
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door; the fixture is written and read as a binary file. Light GPU: three eleven-position walks over a 1.5 MB fixture (a few seconds);
+; the fp64 references take the rest. Never maps a model; writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk form/form-stdlib/bml/dsv4-oracle-reference.bml form/form-stdlib/bml/dsv4-oracle-stack.bml
+section [form.bml] {
+ class Dsv4EndBand {
+  def deb-bit(held, bit) = held ? bit : 0;
+  def deb-prompt() = [5, 17, 3, 22];
+  def deb-cap() = 16;
+  def deb-steps() = 8;
+  def deb-ne-tilt() = 0.000014;
+  def deb-ratio(c, il) = dvl-l(record_get(c, "m"), il, "ratio");
+  def deb-hd(c) = record_get(record_get(c, "m"), "hd");
+  def deb-nrot(c) = record_get(record_get(c, "m"), "nrot");
+  def deb-eps() = 0.000001;
+  def deb-pre(il) = "blk." ++ il.str() ++ ".";
+  def deb-ape-rows(r, key, k, n) = k == n ? [] : append(dfo-plain(r, key, k), deb-ape-rows(r, key, k + 1, n));
+
+  // ---- the GPU walk -------------------------------------------------------------------------------------------------------
+  def deb-more(ctx, sts, id, pos, left, ids, lgs) {
+   left == 0 ? [ids, lgs] : {
+    let nid = dsv4-decode(ctx, sts, id, pos);
+    nothing?(nid) ? [ids, lgs] : deb-more(ctx, sts, nid, pos + 1, left - 1, append(ids, [nid]), append(lgs, [dsv4-logits(ctx)]));
+   };
+  }
+  // [ids, logits per step]; the prefill's id is step 1
+  def deb-gpu-run(ctx, sts) {
+   let pf = dsv4-prefill-span-sliced(ctx, sts, deb-prompt(), 0);
+   nothing?(pf) ? [[], []] : deb-more(ctx, sts, pf[0], pf[1], deb-steps() - 1, [pf[0]], [dsv4-logits(ctx)]);
+  }
+  def deb-bits(xs) = len(xs) == 0 ? [] : cons(md-f32-bits(xs[0]), deb-bits(xs[1:]));
+  def deb-bits-all(lgs) = len(lgs) == 0 ? [] : cons(deb-bits(lgs[0]), deb-bits-all(lgs[1:]));
+
+  // ---- the reference: the oracle's layer over a raw history and the twin's compressed rows (the layer band's own reference), the output head, per position -----------------
+  def deb-ls-new(c, il) = [[], [], deb-ratio(c, il) == 0 ? nothing() : dcp-state-new(deb-ratio(c, il), deb-hd(c))];
+  def deb-comp-step(c, il, pos, resid, ls) {
+   let r = record_get(c, "r");
+   let g = record_get(c, "g");
+   let p = deb-pre(il);
+   let pre = dfo-hc-pre(r, p, "attn", resid, g);
+   let xn = dnr-rms-weight(record_get(pre, "cur"), dfo-plain(r, p ++ "attn_norm.weight", 0), deb-eps());
+   let ratio = deb-ratio(c, il);
+   dcp-step(ls[2], ratio, deb-hd(c), pos, dfo-f16-matrix(r, p ++ "attn_compressor_kv.weight", xn), dfo-f16-matrix(r, p ++ "attn_compressor_gate.weight", xn),
+    deb-ape-rows(r, p ++ "attn_compressor_ape.weight", 0, ratio), dfo-plain(r, p ++ "attn_compressor_norm.weight", 0), deb-eps());
+  }
+  def deb-comp-row(c, il, pos, normed) {
+   let r = record_get(c, "r");
+   let ratio = deb-ratio(c, il);
+   dfo-kv-round(dfo-rope-heads(normed, deb-hd(c), deb-nrot(c), dfo-rope-factors(dfo-rope-params(r, il), deb-nrot(c), pos + 1 - ratio, 0)), deb-hd(c), deb-nrot(c));
+  }
+  // one block: [out, raw rows after, compressed rows after, twin state after]; usecomp false hands attention the raw history only (the falsifier)
+  def deb-ref-layer(c, il, pos, token, resid, ls, usecomp) {
+   let r = record_get(c, "r");
+   let g = record_get(c, "g");
+   let ratio = deb-ratio(c, il);
+   let step = ratio == 0 ? nothing() : deb-comp-step(c, il, pos, resid, ls);
+   let emitted = (ratio == 0 || len(step[1]) == 0) ? false : true;
+   let comp1 = emitted ? append(ls[1], [deb-comp-row(c, il, pos, step[1])]) : ls[1];
+   let a = dfo-attention-half(r, deb-pre(il), resid, g, il, pos, usecomp ? append(ls[0], comp1) : ls[0]);
+   let f = dfo-ffn(r, deb-pre(il), record_get(a, "after_attn_hc"), g, token, il);
+   [record_get(f, "out_hc"), append(ls[0], [record_get(a, "kv")]), comp1, ratio == 0 ? nothing() : step[0]];
+  }
+  // [the final streams, each block's state after, each block's [input, output] streams]
+  def deb-ref-layers(c, pos, token, lss, il, resid, tilt, usecomp) = il == 3 ? [resid, [], []] : {
+   let lr = deb-ref-layer(c, il, pos, token, resid, lss[il], usecomp);
+   let out = tilt ? dqs-perturb(lr[0], deb-ne-tilt()) : lr[0];
+   let rest = deb-ref-layers(c, pos, token, lss, il + 1, out, tilt, usecomp);
+   [rest[0], cons([lr[1], lr[2], lr[3]], rest[1]), cons([resid, lr[0]], rest[2])];
+  };
+  // the output head over the final four streams: the numeric twin's steps over the oracle's matrix readers
+  def deb-ref-head(c, resid) {
+   let r = record_get(c, "r");
+   let g = record_get(c, "g");
+   let n = record_get(g, "hc");
+   let e = record_get(g, "e");
+   let flat = dnr-rms(resid, record_get(g, "eps"));
+   let mix = dfo-f16-matrix(r, "output_hc_fn.weight", flat);
+   let scale = dfo-plain(r, "output_hc_scale.weight", 0);
+   let w = dnr-gates(dnr-mix(mix, dfo-plain(r, "output_hc_base.weight", 0), scale[0], 0, n, 0), 1.0, record_get(g, "hc-eps"));
+   let cur = dfo-weighted-streams(resid, w, e, dnr-fill(e, 0.0));
+   let xn = dnr-rms-weight(cur, dfo-plain(r, "output_norm.weight", 0), record_get(g, "eps"));
+   dfo-mx8(r, "output.weight", xn);
+  }
+  // over the positions of `tokens`: [the logits at every position from n0 on, per position each block's [input, output]]
+  def deb-ref-loop(c, tokens, pos, lss, tilt, usecomp, n0, acc, ios) = pos == len(tokens) ? [reverse(acc), reverse(ios)] : {
+   let r = record_get(c, "r");
+   let embed = dfo-plain(r, "token_embd.weight", tokens[pos]);
+   let layers = deb-ref-layers(c, pos, tokens[pos], lss, 0, dnr-flat(dnr-fill(4, embed)), tilt, usecomp);
+   let lg = pos >= n0 ? deb-ref-head(c, layers[0]) : [];
+   deb-ref-loop(c, tokens, pos + 1, layers[1], tilt, usecomp, n0, pos >= n0 ? cons(lg, acc) : acc, cons(layers[2], ios));
+  };
+  def deb-ref(c, tokens, tilt, usecomp) = deb-ref-loop(c, tokens, 0, [deb-ls-new(c, 0), deb-ls-new(c, 1), deb-ls-new(c, 2)], tilt, usecomp, len(deb-prompt()) - 1, [], []);
+
+  // ---- every block ALONE: the GPU is fed the reference's own input at each block and position (the oracle harness's THIS-LAYER-ALONE gate) ----------------
+  def deb-alone-block(c, ctx, sts, ios, pos, il, token) {
+   let fed = metal_buf_write(dso-buf(ctx, "resid"), 0, dkr-f32-bytes(ios[pos][il][0]));
+   let n1 = dsv4-layer-attn(ctx, sts, il, pos, deb-cap());
+   let n2 = dsv4-layer-ffn(ctx, il, token);
+   let s = metal_sync();
+   (fed >= 0 && !nothing?(n1) && !nothing?(n2)) ? dkr-nd(dkr-read(dso-buf(ctx, "resid"), 1024), ios[pos][il][1]) : 1.0e30;
+  }
+  def deb-alone-pos(c, ctx, sts, ios, tokens, pos) = [deb-alone-block(c, ctx, sts, ios, pos, 0, tokens[pos]), deb-alone-block(c, ctx, sts, ios, pos, 1, tokens[pos]), deb-alone-block(c, ctx, sts, ios, pos, 2, tokens[pos])];
+  def deb-alone-all(c, ctx, sts, ios, tokens, pos) = pos == len(tokens) ? [] : append(deb-alone-pos(c, ctx, sts, ios, tokens, pos), deb-alone-all(c, ctx, sts, ios, tokens, pos + 1));
+  def deb-max(xs) = deb-max-go(xs, 0.0);
+  def deb-max-go(xs, best) = len(xs) == 0 ? best : deb-max-go(xs[1:], xs[0] > best ? xs[0] : best);
+  def deb-below?(xs, bound) = len(xs) == 0 ? true : (xs[0] < bound && deb-below?(xs[1:], bound));
+
+  // ---- the comparison --------------------------------------------------------------------------------------------------------
+  def deb-argmax-go(xs, i, best, bi) = i == len(xs) ? bi : (xs[i] > best ? deb-argmax-go(xs, i + 1, xs[i], i) : deb-argmax-go(xs, i + 1, best, bi));
+  def deb-argmax(xs) = deb-argmax-go(xs, 1, xs[0], 0);
+  def deb-second-go(xs, i, top, best) = i == len(xs) ? best : deb-second-go(xs, i + 1, top, (i != top && xs[i] > best) ? xs[i] : best);
+  def deb-gap(xs) = xs[deb-argmax(xs)] - deb-second-go(xs, 0, deb-argmax(xs), 0.0 - 1.0e30);
+  def deb-bound(ne) = (8.0 * ne) > dkr-floor() ? 8.0 * ne : dkr-floor();
+  def deb-nds(gpu, ref) = len(ref) == 0 ? [] : cons(dkr-nd(gpu[0], ref[0]), deb-nds(gpu[1:], ref[1:]));
+  def deb-maxdiffs(gpu, ref) = len(ref) == 0 ? [] : cons(dkr-maxdiff(gpu[0], ref[0]), deb-maxdiffs(gpu[1:], ref[1:]));
+  def deb-all-32?(lgs) = len(lgs) == 0 ? true : (len(lgs[0]) == 32 && deb-all-32?(lgs[1:]));
+  def deb-all-positive?(xs) = len(xs) == 0 ? true : (xs[0] > 0.0 && deb-all-positive?(xs[1:]));
+  def deb-gaps(ref) = len(ref) == 0 ? [] : cons(deb-gap(ref[0]), deb-gaps(ref[1:]));
+  def deb-within(nds, nes, i) = i == len(nds) ? true : (nds[i] < deb-bound(nes[i]) && deb-within(nds, nes, i + 1));
+  def deb-margins(gpuIds, gpu, ref, dmax, i) = i == len(gpu) ? true : (gpuIds[i] == deb-argmax(ref[i]) && deb-gap(ref[i]) > 2.0 * dmax[i] && deb-margins(gpuIds, gpu, ref, dmax, i + 1));
+  def deb-ref-ids-follow?(ref, tokens, i) = i == len(ref) - 1 ? true : (deb-argmax(ref[i]) == tokens[len(deb-prompt()) + i] && deb-ref-ids-follow?(ref, tokens, i + 1));
+  def deb-all-finite?(lgs) = len(lgs) == 0 ? true : (dkr-all-finite?(lgs[0]) && deb-all-finite?(lgs[1:]));
+  def deb-in-vocab?(ids) = len(ids) == 0 ? true : (ids[0] >= 0 && ids[0] < 32 && deb-in-vocab?(ids[1:]));
+  def deb-str-list(xs) = len(xs) == 0 ? "" : (xs[0].str() ++ " " ++ deb-str-list(xs[1:]));
+  def deb-str-ids(xs) = len(xs) == 0 ? "" : (xs[0].str() ++ " " ++ deb-str-ids(xs[1:]));
+ }
+ let root = temp_dir() ++ "/dsv4-end-to-end-band-" ++ now_unix_ms().str();
+ let path = root ++ ".gguf";
+ let wrote = dfx-write(path);
+ let r = dfo-open(path);
+ let live0 = dvb-live();
+ let mapped0 = dvb-mapped();
+ let ctx = dsv4-open-span(path, deb-cap(), 1);
+ let opened = len(ctx) == 13;
+ let m = opened ? ctx[2] : nothing();
+ let c = record_new(0, "r", r, "g", dfo-geometry(r), "m", m, "ctx", ctx);
+ let prep = opened ? dsv4-prepare(ctx) : 0;
+ let stsA = opened ? dsv4-new-state(m, ctx[0], deb-cap()) : nothing();
+ let stsB = opened ? dsv4-new-state(m, ctx[0], deb-cap()) : nothing();
+ let stsC = opened ? dsv4-new-state(m, ctx[0], deb-cap()) : nothing();
+ let runA = opened ? deb-gpu-run(ctx, stsA) : [[], []];
+ let runB = opened ? deb-gpu-run(ctx, stsB) : [[], []];
+ let pfC = opened ? dsv4-prefill-span-sliced(ctx, stsC, deb-prompt(), 0) : nothing();
+ let genC = nothing?(pfC) ? [] : dsv4-generate(ctx, stsC, pfC[0], pfC[1], deb-steps() - 1, [], []);
+ let idsA = runA[0];
+ let lgsA = runA[1];
+ let said1 = print_str("gpu walk: ids " ++ deb-str-ids(idsA) ++ " (second run " ++ deb-str-ids(runB[0]) ++ ", generate " ++ deb-str-ids(genC) ++ ")");
+ let r1 = try opened && len(idsA) == 8 && len(lgsA) == 8 && deb-in-vocab?(idsA) && deb-all-finite?(lgsA) && deb-all-32?(lgsA) catch false;
+ // the reference walk, fed the GPU's own ids: the prompt then the first seven ids
+ let tokens = r1 ? append(deb-prompt(), idsA[0:7]) : [];
+ let refAll = r1 ? deb-ref(c, tokens, false, true) : [[], []];
+ let ref = refAll[0];
+ let ios = refAll[1];
+ let said2 = print_str("reference built: " ++ len(ref).str() ++ " steps over " ++ len(tokens).str() ++ " positions");
+ let refT = r1 ? deb-ref(c, tokens, true, true)[0] : [];
+ let nds = r1 ? deb-nds(lgsA, ref) : [];
+ let nes = r1 ? deb-nds(refT, ref) : [];
+ let dmax = r1 ? deb-maxdiffs(lgsA, ref) : [];
+ let said3 = print_str("per-step nd " ++ deb-str-list(nds));
+ let said4 = print_str("per-step ne " ++ deb-str-list(nes));
+ let said5 = print_str("per-step max|gpu - ref| " ++ deb-str-list(dmax));
+ let said6 = print_str("per-step reference gap " ++ (r1 ? deb-str-list(deb-gaps(ref)) : ""));
+ let r2 = try r1 && len(ref) == 8 && deb-within(nds, nes, 0) catch false;
+ let r4 = try r1 && len(ref) == 8 && deb-margins(idsA, lgsA, ref, dmax, 0) catch false;
+ let r8 = try r1 && runB[0] == idsA && deb-bits-all(runB[1]) == deb-bits-all(lgsA) && len(genC) == 7 && genC == idsA[1:8] catch false;
+ let r16 = try r1 && len(nes) == 8 && deb-all-positive?(nes) catch false;
+ let r64 = try r1 && deb-ref-ids-follow?(ref, tokens, 0) catch false;
+ // the falsifiers: another prompt, and no compressed rows, each read against the GPU's first step (four positions of reference each)
+ let wrongTokens = [5, 17, 3, 21];
+ let refWrong = r1 ? deb-ref-loop(c, wrongTokens, 0, [deb-ls-new(c, 0), deb-ls-new(c, 1), deb-ls-new(c, 2)], false, true, 3, [], [])[0] : [];
+ let refRaw = r1 ? deb-ref-loop(c, deb-prompt(), 0, [deb-ls-new(c, 0), deb-ls-new(c, 1), deb-ls-new(c, 2)], false, false, 3, [], [])[0] : [];
+ let ndWrong = r1 ? dkr-nd(lgsA[0], refWrong[0]) : 0.0;
+ let ndRaw = r1 ? dkr-nd(lgsA[0], refRaw[0]) : 0.0;
+ let said7 = print_str("falsifiers: first step against the prompt [5 17 3 21] nd " ++ ndWrong.str() ++ ", against the raw history only nd " ++ ndRaw.str() ++ " (bound " ++ (r1 ? deb-bound(nes[0]).str() : "") ++ ")");
+ let r32 = try r1 && ndWrong > deb-bound(nes[0]) && ndRaw > 0.001 && ndRaw > deb-bound(nes[0]) catch false;
+ // 256: every block alone at every one of the eleven positions, fed the reference's own input: the oracle harness's THIS-LAYER-ALONE gate (the floor)
+ let stsD = opened ? dsv4-new-state(m, ctx[0], deb-cap()) : nothing();
+ let alone = r1 ? deb-alone-all(c, ctx, stsD, ios, tokens, 0) : [];
+ let said8 = print_str("alone: " ++ len(alone).str() ++ " block runs, nd " ++ deb-str-list(alone));
+ let r256 = try r1 && len(alone) == 33 && deb-below?(alone, dkr-floor()) catch false;
+ let left = opened ? dsv4-close(ctx, append(stsA, append(stsB, append(stsC, stsD)))) : [0];
+ let c128 = deb-bit(try opened && len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
+ let removed = host_path_remove(path);
+ print_str("dsv4-end-to-end-band claims " ++ deb-bit(r1, 1).str() ++ " " ++ deb-bit(r2, 2).str() ++ " " ++ deb-bit(r4, 4).str() ++ " " ++ deb-bit(r8, 8).str() ++ " " ++ deb-bit(r16, 16).str() ++ " " ++ deb-bit(r32, 32).str() ++ " " ++ deb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " " ++ deb-bit(r256, 256).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ dvb-mapped().str() ++ " removed " ++ removed.str());
+ deb-bit(r1, 1) + deb-bit(r2, 2) + deb-bit(r4, 4) + deb-bit(r8, 8) + deb-bit(r16, 16) + deb-bit(r32, 32) + deb-bit(r64, 64) + c128 + deb-bit(r256, 256);
+}
