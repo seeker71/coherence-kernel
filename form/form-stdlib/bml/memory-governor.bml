@@ -1,0 +1,82 @@
+// memory-governor.bml — how much RAM the body may take, asked before it takes it, and given back when RAM runs low.
+//
+// On 2026-10-02 the host restarted three times while model doors ran. A model's weights live in wired Metal memory
+// (the 27B Q8 voice is about 29 GB, its KV state several more), no kernel can swap them out, and every check the body
+// had looked at its own process: nlg-room reads this process's Metal bytes (metal_live words 18 and 19) against the
+// device's recommended working set, so two or three kernels, a DeepSeek server and the page cache could each pass
+// their own check and together pass the machine's memory. The Qwen session door (fcms-open-context) asked nothing.
+//
+// This reads the whole machine, not the process: host_vm_stat() is Mach's own count of every process's pages (free,
+// speculative, purgeable, file-backed, wired, compressor), so what another process wired is already in the reading.
+//   available   free + speculative + purgeable + file-backed pages: what the system can hand over without swapping
+//   wired       pages no process can lose: the Metal buffers of every model door on the host
+// A request for `need` bytes is granted when all hold afterwards:
+//   the wired cap       wired + need <= 60 percent of the machine's memory
+//   the reserve         available - need >= the larger of 8 GiB and a tenth of the machine's memory
+//   the compressor      the compressor holds at most a quarter of the machine's memory (a machine that is already
+//                       compressing hard is paging; a new model on top of it is how it falls over)
+// A reading that did not arrive (the door answers nil off macOS, or a short list) grants nothing: a missing truth is
+// never an optimistic one. Low is a smaller set of the same facts, for loops that already hold memory and must
+// give it back: available below half the reserve, wired above 80 percent, or the compressor above 40 percent.
+//
+// The doors: mg-ask is one reading and one verdict; mg-wait asks again with growing naps (10 s, doubling to 60 s)
+// until a time on host_monotonic_ms and answers the last verdict, so a caller that cannot wait for ever backs off
+// and says why. The caller keeps the choice (oac-backtrack: a held grant is a choice point, not a stop): the walk
+// ends its window held, the planner waits, a session open answers nothing named host-memory-held.
+//
+// PROOF: form-stdlib/tests/memory-governor-band.bml; the door is observe/memory-governor-run.bml.
+section [form.bml] {
+ class MemoryGovernor {
+  def mg-gib() = 1073741824;
+  def mg-max(a, b) = a > b ? a : b;
+  def mg-pct(mem, p) = (mem / 100) * p;
+  // policy, in bytes of a machine with `mem` bytes
+  def mg-reserve-of(mem) = mg-max(8 * mg-gib(), mem / 10);
+  def mg-wired-cap-of(mem) = mg-pct(mem, 60);
+  def mg-compressor-cap-of(mem) = mem / 4;
+  // what a Qwen session takes beyond its weights: the KV state, the activations and the prefill spans
+  def mg-kv-margin() = 8 * mg-gib();
+  // host_vm_stat(): [page, memsize, free, active, inactive, wired, speculative, purgeable, compressor, pageins,
+  // pageouts, compressions, decompressions, swapins, swapouts, external, internal], pages except the first two
+  def mg-sense() = host_vm_stat();
+  def mg-vm-ok?(vm) = ((String) value_kind(vm) == "list") && (len(vm) >= 17) && (vm[0] > 0) && (vm[1] > 0);
+  def mg-bytes(vm, k) = vm[k] * vm[0];
+  def mg-mem(vm) = vm[1];
+  def mg-wired(vm) = mg-bytes(vm, 5);
+  def mg-compressor(vm) = mg-bytes(vm, 8);
+  def mg-available(vm) = mg-bytes(vm, 2) + mg-bytes(vm, 6) + mg-bytes(vm, 7) + mg-bytes(vm, 15);
+  // tenths of a GiB, said with one decimal
+  def mg-gib-text(b) = ((b * 10) / mg-gib() / 10).str() ++ "." ++ (((b * 10) / mg-gib()) - (((b * 10) / mg-gib() / 10) * 10)).str() ++ " GiB";
+  // [granted 1 or 0, reason, available, wired, mem]; reason is room, memory-unreadable, wired-cap, reserve or compressor
+  def mg-verdict(vm, need) {
+   let ok = mg-vm-ok?(vm);
+   let mem = ok ? mg-mem(vm) : 0;
+   let wired = ok ? mg-wired(vm) : 0;
+   let avail = ok ? mg-available(vm) : 0;
+   let why = !ok ? "memory-unreadable" : ((wired + need) > mg-wired-cap-of(mem)) ? "wired-cap" : ((avail - need) < mg-reserve-of(mem)) ? "reserve" : (mg-compressor(vm) > mg-compressor-cap-of(mem)) ? "compressor" : "room";
+   [why == "room" ? 1 : 0, why, avail, wired, mem];
+  }
+  def mg-granted?(v) = v[0] == 1;
+  def mg-low?(vm) = mg-vm-ok?(vm) && ((mg-available(vm) < (mg-reserve-of(mg-mem(vm)) / 2)) || (mg-wired(vm) > mg-pct(mg-mem(vm), 80)) || (mg-compressor(vm) > mg-pct(mg-mem(vm), 40)));
+  def mg-ask(need) = mg-verdict(mg-sense(), need);
+  def mg-status-line(vm) = !mg-vm-ok?(vm) ? "[memory] unreadable: host_vm_stat answered nothing; no heavy open is granted" : "[memory] machine " ++ mg-gib-text(mg-mem(vm)) ++ ", available " ++ mg-gib-text(mg-available(vm)) ++ ", wired " ++ mg-gib-text(mg-wired(vm)) ++ ", compressor " ++ mg-gib-text(mg-compressor(vm)) ++ ", reserve " ++ mg-gib-text(mg-reserve-of(mg-mem(vm))) ++ (mg-low?(vm) ? ", LOW: heavy work gives memory back" : ", room");
+  def mg-line(who, need, v) = "[memory] " ++ (mg-granted?(v) ? "granted" : "held") ++ " " ++ who ++ " needs " ++ mg-gib-text(need) ++ ": " ++ v[1] ++ " (available " ++ mg-gib-text(v[2]) ++ ", wired " ++ mg-gib-text(v[3]) ++ " of " ++ mg-gib-text(v[4]) ++ ")";
+  // ask again, with growing naps, until a time on host_monotonic_ms; the last verdict stands. sense() answers a
+  // reading and sleep(ms) rests, so a band scripts both; now() is the clock.
+  def mg-nap-first() = 10000;
+  def mg-nap-most() = 60000;
+  def mg-wait-with(who, need, until, sense, sleep, now, nap) {
+   let v = mg-verdict(sense(), need);
+   (mg-granted?(v) || (now() >= until)) ? v : mg-wait-rest(who, need, until, sense, sleep, now, nap, v);
+  }
+  def mg-wait-rest(who, need, until, sense, sleep, now, nap, v) {
+   let told = (nap == mg-nap-first()) ? print_str(mg-line(who, need, v) ++ "; waiting for it to fall") : 0;
+   let rested = sleep(nap);
+   mg-wait-with(who, need, until, sense, sleep, now, (nap * 2) > mg-nap-most() ? mg-nap-most() : (nap * 2));
+  }
+  def mg-rest(ms) = host_sleep_ms(ms);
+  def mg-now() = host_monotonic_ms();
+  def mg-wait(who, need, until) = mg-wait-with(who, need, until, () => mg-sense(), ms => mg-rest(ms), () => mg-now(), mg-nap-first());
+ }
+ 0;
+}

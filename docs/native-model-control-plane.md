@@ -172,6 +172,33 @@ answering each closed control (`receipts/form-token-eval.jsonl`, the row at 1790
   do not outlive the run; the export door (`ntr-export-config`) no longer writes them and the checked-in
   config has them removed. It still names the base model by its absolute path in this Mac's Hugging Face cache.
 
+## Memory: what is shared, what is asked, and who backs off
+
+On 2026-10-02 the host restarted three times while model doors ran. Every check the body had looked at one process
+(`nlg-room` reads this process's Metal bytes against the device's recommended working set), so several kernels, a
+DeepSeek server and the page cache could each pass their own check and together pass the machine.
+
+- **Weights are shared.** `metal_buf_from_file` (`form/native/metal/fk-metal-carrier.m`) maps each tensor of the
+  GGUF `MAP_PRIVATE` from the file and wraps the pages without a copy, and the Qwen open binds every tensor that
+  way (`q38-open-span`, `qsx-open-span`). The operating system keeps one physical copy in the page cache for every
+  process that maps the same file. Measured on 2026-10-02 with two kernels mapping one 6 GiB model file and the GPU
+  reading every page: the file-backed page count rose 6.2 GiB for the first and 0.0 GiB for the second.
+- **What a process still owns** is its KV state, its scratch buffers and a 40 MB header read; another engine's
+  weights (the DeepSeek server `ds4` holds about 24 GiB of its own plus an expert cache) are not ours to share.
+- **Wired memory is not steady.** Metal wires a buffer's pages while the GPU uses them; the machine's wired count read
+  35.8, 7.3 and 35.1 GiB within 40 seconds as other sessions' model work came and went, so one reading can pass
+  two processes that start together.
+- **Admission** is `form/form-stdlib/bml/memory-governor.bml`, over `host_vm_stat()` (Mach's own count of every
+  process's pages): a request for `need` bytes is granted when wired + need stays within 60 percent of the
+  machine's memory, available - need stays above the larger of 8 GiB and a tenth of it, and the compressor holds at
+  most a quarter of it; a reading that did not arrive grants nothing. `observe/memory-governor-run.bml` prints the
+  machine's reading and, given `{"need_gib":N,"who":"..."}`, the verdict (band: `memory-governor-band` 1023). It is
+  asked before a Qwen session opens its weights (`fcms-open-context`), before a renewal allocates its second KV
+  state (`fcmr-prepare`), before a walk turn begins (`hw-ready`, which waits no later than the window's last
+  moment a turn could still start) and before the planner opens its voice (`lpr-ask`). A held answer is a choice
+  point: the session opens nothing and names `host-memory-held`, the renewal leaves the owner as it was and the lane
+  ends with a reason through its checkpoint, the walk takes no turn.
+
 ## Present floor and direction
 
 Alive: the classified registry, Form-owned evidence logic, native-first routing,
