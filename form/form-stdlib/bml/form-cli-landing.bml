@@ -6,17 +6,23 @@
 //    "paths":["file", ...], "subject":"<commit subject>", "body":"<commit body>",
 //    "restart":"origin/main" (optional), "main":1 (optional: the landed commit also fast-forwards main)}
 // The witness runs first, its output is shown, and its exit is read: a named
-// witness that does not exit 0, or whose launch vanished, lands nothing. The
-// drift gates run next as a child fkwu; a refused gate lands nothing. Then host git adds each named
+// witness that does not exit 0, or whose launch was refused at birth, lands nothing. The
+// drift gates run next as a child fkwu; a refused gate lands nothing. Then git adds each named
 // path that is present, or tracked and gone (a path that is neither is named and left unstaged, since
 // one unmatched pathspec would stage nothing), commits with exactly subject, blank line, body, and pushes the
 // current branch to its own name on origin; the push answers with its own
-// exit, so a commit that did not reach origin reads held, never landed. Every crossing to a child process
+// exit, so a commit that did not reach origin reads held, never landed. Every child is an argv spawned
+// through form-stdlib/bml/host-child.bml, and its exit is the one the host answers: the witness runs as
+// `/bin/sh -c <witness>` (a witness is shell text by contract), git runs by argv, and the paths to add reach
+// git as a NUL-separated file (--pathspec-from-file), so the number of paths is bounded by no argv. The full
+// output of each step stays under .hearth/walk-io/land-*.out. Every crossing to a child process
 // happens inside this call's census window and is printed at the end, so what
-// left the body is counted, never hidden. The message file lives under
+// left the body is counted, never hidden: each child is reaped once through host_wait, which the census
+// counts as local-process. The message file lives under
 // .form-heal, which git forgets.
 // preflight-exec: forbidden
 import form-stdlib/bml/form-cli-reunion.bml;
+import form-stdlib/bml/host-child.bml;
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/meaning-codes.bml;
 import observe/form-membrane-runtime-census.fk;
@@ -28,16 +34,29 @@ section [form.bml] {
   def ld-str(doc, key) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : "";
   def ld-int(doc, key) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : 0;
   def ld-paths(doc) = json-object-has?(doc, "paths") ? oh-values(json-array-elements(json-object-get(doc, "paths"))) : [];
-  def ld-quote(s) = "'" ++ str-join-with(split-on(s, "'"), "'\\''") ++ "'";
-  def ld-quoted(paths) = paths |> map(ld-quote);
   // git add stages nothing at all when one named path matches no file (fatal: pathspec did not match), so a path is
   // added when it is present, or tracked and gone (its removal is staged); any other is named and left unstaged
   def ld-has?(xs, x) = nil?(xs) ? false : ((String) xs[0] == x) || ld-has?(xs[1:], x);
   def ld-absent(paths) = filter(p => file_size(p) < 0, paths);
-  // each absent path git still tracks, in the spelling it was named (git's own listing quotes some names)
-  def ld-tracked-in(dir, absent) = nil?(absent) ? [] : filter(p => (Comparable) len(p) > 0, split-on(trim(host-exec("cd " ++ ld-quote(dir) ++ " && for p in " ++ str-join-with(ld-quoted(absent), " ") ++ "; do git ls-files --error-unmatch -- \"$p\" >/dev/null 2>&1 && printf '%s\\n' \"$p\"; done", "") ?? ""), "\n"));
-  def ld-tracked(absent) = ld-tracked-in(".", absent);
-  def ld-addable(paths) = append(filter(p => file_size(p) >= 0, paths), ld-tracked(ld-absent(paths)));
+  // Each absent path git still tracks, in the spelling it was named: git lists the tracked names under the absent
+  // paths (ls-files -z, so no name is quoted), a chunk at a time because an argv holds 32 words, and Form matches a
+  // name that is the path or lies under it (a path git tracks as a directory). Paths are literal, never globs.
+  def ld-chunk-size() = 24;
+  def ld-head(xs, n) = nil?(xs) || n <= 0 ? [] : cons(xs[0], ld-head(xs[1:], n - 1));
+  def ld-rest(xs, n) = nil?(xs) || n <= 0 ? xs : ld-rest(xs[1:], n - 1);
+  def ld-nul() = byte_to_str(0);
+  def ld-names(text) = filter(name => (Comparable) len(name) > 0, split-on(text ?? "", ld-nul()));
+  def ld-listed(io, dir, chunk) = ld-names(hch-git-quiet-in(io, dir, "land-tracked", append(["--literal-pathspecs", "ls-files", "-z", "--"], chunk))[1]);
+  def ld-listed-all(io, dir, paths) = nil?(paths) ? [] : append(ld-listed(io, dir, ld-head(paths, ld-chunk-size())), ld-listed-all(io, dir, ld-rest(paths, ld-chunk-size())));
+  def ld-bare(p) = len(p) > 1 && (Comparable) str_byte_at(p, len(p) - 1) == 47 ? ld-bare(substring(p, 0, len(p) - 1)) : p;
+  def ld-under?(names, p) = nil?(names) ? false : ((String) names[0] == p) || (len(names[0]) > len(p) && ((String) substring(names[0], 0, len(p) + 1) == p ++ "/")) || ld-under?(names[1:], p);
+  def ld-tracked-in(io, dir, absent) {
+   let named = filter(p => (Comparable) len(p) > 0, absent);
+   let names = nil?(named) ? [] : ld-listed-all(io, dir, named);
+   filter(p => ld-under?(names, ld-bare(p)), named);
+  }
+  def ld-addable-in(io, dir, paths) = append(filter(p => file_size(p) >= 0, paths), ld-tracked-in(io, dir, ld-absent(paths)));
+  def ld-addable(paths) = ld-addable-in(hch-dir(), ".", paths);
   def ld-unstaged(paths, addable) = filter(p => !ld-has?(addable, p), ld-absent(paths));
   def ld-unstaged-line(left) = nil?(left) ? "" : "[paths] neither present nor tracked, left unstaged: " ++ str-join-with(left, " ") ++ "\n";
   def ld-tail(text, n) = len(text) <= n ? text : substring(text, len(text) - n, len(text));
@@ -69,7 +88,24 @@ section [form.bml] {
    let w = write_file_text(path, substring(text, 0, at) ++ new ++ substring(text, at + len(old), len(text)));
    0;
   }
-  def ld-restart(base) = (String) base == "" ? "" : host-exec("git fetch origin main 2>&1 | tail -1 && git checkout -B \"$(git rev-parse --abbrev-ref HEAD)\" " ++ base ++ " 2>&1 | tail -1 && git push --force-with-lease -u origin HEAD 2>&1 | tail -1", "");
+  // The restart is three git steps by argv, each saying its last line; a step that fails ends the restart with its
+  // own exit named, so the branch is never moved onto an origin/main that did not fetch.
+  def ld-restart(base) = ld-restart-at(hch-dir(), ".", base);
+  def ld-restart-at(io, dir, base) = (String) base == "" ? "" : ld-restart-fetch(io, dir, base);
+  def ld-step-line(run) = hch-tail-line(hch-said(run)) ++ (hch-ok?(run) ? "" : " (exit " ++ hch-status-text(run) ++ ")");
+  def ld-restart-fetch(io, dir, base) {
+   let fetched = hch-git-in(io, dir, "land-restart-fetch", ["fetch", "origin", "main"]);
+   hch-ok?(fetched) ? ld-restart-checkout(io, dir, base, ld-step-line(fetched)) : ld-step-line(fetched) ++ "\n";
+  }
+  def ld-restart-checkout(io, dir, base, said) {
+   let branch = hch-read(hch-git-argv(dir, ["rev-parse", "--abbrev-ref", "HEAD"]));
+   let moved = hch-git-in(io, dir, "land-restart-checkout", ["checkout", "-B", branch, base]);
+   hch-ok?(moved) ? ld-restart-push(io, dir, said ++ "\n" ++ ld-step-line(moved)) : said ++ "\n" ++ ld-step-line(moved) ++ "\n";
+  }
+  def ld-restart-push(io, dir, said) {
+   let pushed = hch-git-in(io, dir, "land-restart-push", ["push", "--force-with-lease", "-u", "origin", "HEAD"]);
+   said ++ "\n" ++ ld-step-line(pushed) ++ "\n";
+  }
   // A landing that is held says so as a reading with the reason it was held and
   // what would carry it: the hold is a signal into the body, not a silent stop.
   // A push refused for want of a fast-forward is not a reason to hold: origin
@@ -102,29 +138,35 @@ section [form.bml] {
    let output = (String) fhn-read(fhn-stage-path(job, "gates", ".out")) + fhn-read(fhn-stage-path(job, "gates", ".err"));
    [status, output, job];
   }
-  // The witness: the named command runs in its own subshell with its stderr
-  // folded in, and its exit is the last line it leaves (the carrier shape of
-  // gate/drift-gates.bml dg-wrap). The exit is read after the LAST mark, so a
-  // witness that prints the mark itself cannot answer for its own exit. No
-  // witness named reads [shown "", exit nothing] and holds nothing; a named
-  // witness whose launch vanished (host-exec answers nothing) has no exit, and
-  // an exit that did not arrive is never a pass.
+  // The witness: the named command runs as `/bin/sh -c <witness>` (a witness is shell text by contract) with its
+  // stderr folded into its stdout, and its exit is the host's own answer (host_wait), so a witness that prints
+  // "[witness] exit=0" itself cannot answer for its own exit. The shown text ends with the exit's own line. No
+  // witness named reads [shown "", exit nothing] and holds nothing; a named witness whose launch host_spawn_at
+  // refused at birth has no exit, and an exit that did not arrive is never a pass.
   def ld-witness-mark() = "[witness] exit=";
-  def ld-witness-wrap(witness) = "( " ++ witness ++ " ) 2>&1; printf '\\n" ++ ld-witness-mark() ++ "%s\\n' $?";
-  def ld-rfind(s, needle, from, last) {
-   let i = str_find(s, needle, from);
-   i < 0 ? last : ld-rfind(s, needle, i + 1, i);
-  }
-  def ld-digit?(c) = (ord(c) >= 48) && (ord(c) <= 57);
-  def ld-digits(s, i, acc, seen) = i >= len(s) ? (seen > 0 ? acc : nothing()) : ld-digit?(char_at(s, i)) ? ld-digits(s, i + 1, (acc * 10) + (ord(char_at(s, i)) - 48), 1) : (seen > 0 ? acc : nothing());
-  def ld-witness-rc(out) {
-   let at = ld-rfind(out, ld-witness-mark(), 0, 0 - 1);
-   at < 0 ? nothing() : ld-digits(out, at + len(ld-witness-mark()), 0, 0);
-  }
-  def ld-witness-read(out) = nothing?(out) ? ["[witness] the launch vanished: no exit arrived", nothing()] : [out, ld-witness-rc(out)];
-  def ld-witness-run(witness) = (String) witness == "" ? ["", nothing()] : ld-witness-read(host-exec(ld-witness-wrap(witness), ""));
+  def ld-witness-read(run) = nothing?(run[0]) ? ["[witness] the launch was refused at birth: no exit arrived (" ++ run[2] ++ ")", nothing()] : [run[1] ++ "\n" ++ ld-witness-mark() ++ run[0].str() ++ "\n", run[0]];
+  def ld-witness-at(io, shell, witness) = (String) witness == "" ? ["", nothing()] : ld-witness-read(hch-run-in(io, "land-witness", [shell, "-c", witness], "", nothing()));
+  def ld-witness-run(witness) = ld-witness-at(hch-dir(), "/bin/sh", witness);
   def ld-witness-ok?(witness, rc) = ((String) witness == "") || ((!nothing?(rc)) && ((Comparable) rc == 0));
   def ld-witness-said(rc) = nothing?(rc) ? "no exit arrived" : "exit " ++ rc.str();
+  // Staging, the commit and the pushes, each a git step by argv whose exit is the host's own. The paths to add
+  // reach git as a NUL-separated file named by --pathspec-from-file, so no argv bounds how many a landing carries.
+  def ld-paths-path() = ".form-heal/land-paths";
+  def ld-nul-join(paths) = nil?(paths) ? "" : paths[0] ++ ld-nul() ++ ld-nul-join(paths[1:]);
+  def ld-add-at(io, dir, listpath, paths) {
+   let wrote = write_file_text(listpath, ld-nul-join(paths));
+   hch-said(hch-git-in(io, dir, "land-add", ["--literal-pathspecs", "add", "--pathspec-from-file=" ++ listpath, "--pathspec-file-nul"]));
+  }
+  def ld-rc(run) = nothing?(run[0]) ? "none" : run[0].str();
+  def ld-commit-at(io, dir, message) {
+   let run = hch-git-in(io, dir, "land-commit", ["-c", "user.name=Claude", "-c", "user.email=noreply@anthropic.com", "commit", "-q", "-F", message]);
+   "[commit] exit=" ++ ld-rc(run) ++ " " ++ hch-read(hch-git-argv(dir, ["log", "--oneline", "-1"])) ++ "\n";
+  }
+  // "<label> exit=<exit> <the push's last line>"
+  def ld-push-at(io, dir, step, label, args) {
+   let run = hch-git-in(io, dir, step, args);
+   label ++ " exit=" ++ ld-rc(run) ++ " " ++ hch-tail-line(hch-said(run)) ++ "\n";
+  }
   def ld-held-why(witnessOk, green, misses, paths, subject, ready, commitOk, pushOk) = ready && (commitOk && pushOk) ? "landed" : ready && commitOk ? "push-did-not-reach-origin" : ready ? "the-commit-did-not-take" : !witnessOk ? "the-witness-refused" : !green ? "a-gate-refused" : misses > 0 ? "an-edit-found-no-place" : nil?(paths) ? "no-paths" : (String) subject == "" ? "no-subject" : "held";
   def ld-landing-line(why, witnessRc) = (String) why == "landed" ? "landed" : (String) why == "push-did-not-reach-origin" ? "held: the push did not reach origin" : (String) why == "the-commit-did-not-take" ? "held: the commit did not take" : (String) why == "the-witness-refused" ? "held: the witness refused (" ++ ld-witness-said(witnessRc) ++ ")" : (String) why == "a-gate-refused" ? "held: a gate refused" : (String) why == "an-edit-found-no-place" ? "held: an edit missed" : "held: no paths or no subject";
   def ld-health(subject, why, landed) = oh-reading(ld-organ(), (String) subject == "" ? "landing" : subject, "origin", json-node-string("landed"), json-node-string(why), json-node-int(landed ? 1 : 0), landed ? [] : [oh-need(why, json-node-string(ld-message-path()))], ["retry-push", "heal-the-tree", "name-the-paths"], oh-reference(ld-message-path()));
@@ -153,13 +195,11 @@ section [form.bml] {
    let saved0 = write_file_text(ld-message-path(), subject ++ "\n\n" ++ ld-str(request, "body") ++ "\n");
    let saved = saved0 ?? 0;
    let addable = ready ? ld-addable(paths) : [];
-   let added = ready ? ld-unstaged-line(ld-unstaged(paths, addable)) ++ (nil?(addable) ? "" : host-exec("git add " ++ str-join-with(ld-quoted(addable), " ") ++ " 2>&1", "") ?? "") : "";
-   let committed0 = ready ? host-exec("out=$(git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q -F " ++ ld-message-path() ++ " 2>&1); code=$?; printf '[commit] exit=%s %s\\n' \"$code\" \"$(git log --oneline -1)\"", "") : "";
-   let committed = committed0 ?? "";
+   let added = ready ? ld-unstaged-line(ld-unstaged(paths, addable)) ++ (nil?(addable) ? "" : ld-add-at(hch-dir(), ".", ld-paths-path(), addable)) : "";
+   let committed = ready ? ld-commit-at(hch-dir(), ".", ld-message-path()) : "";
    let commitOk = str_find(committed, "[commit] exit=0", 0) >= 0;
    // the push answers with its own exit: a commit that did not reach origin is held, never landed
-   let pushed0 = commitOk ? host-exec("out=$(git push -u origin HEAD 2>&1); code=$?; printf '[push] exit=%s %s\\n' \"$code\" \"$(printf '%s' \"$out\" | tail -n 1)\"", "") : "";
-   let pushed = pushed0 ?? "";
+   let pushed = commitOk ? ld-push-at(hch-dir(), ".", "land-push", "[push]", ["push", "-u", "origin", "HEAD"]) : "";
    let pushFirst = str_find(pushed, "[push] exit=0", 0) >= 0;
    let rejoined = pushFirst ? [pushed, "not-asked"] : ld-reunion(pushed);
    let pushed2 = rejoined[0];
@@ -167,8 +207,7 @@ section [form.bml] {
    let pushOk = str_find(pushed2, "[push] exit=0", 0) >= 0;
    // optional "main": 1 carries a landed commit onto main as a fast-forward, so a landing no session watches still
    // reaches main; a main that moved meanwhile answers non-fast-forward, and the branch landing stands
-   let mained0 = pushOk && ((Comparable) ld-int(request, "main") == 1) ? host-exec("out=$(git push origin HEAD:main 2>&1); code=$?; printf '[main] exit=%s %s\\n' \"$code\" \"$(printf '%s' \"$out\" | tail -n 1)\"", "") : "";
-   let mained = mained0 ?? "";
+   let mained = pushOk && ((Comparable) ld-int(request, "main") == 1) ? ld-push-at(hch-dir(), ".", "land-main", "[main]", ["push", "origin", "HEAD:main"]) : "";
    let why = ld-held-why(witnessOk, green, misses, paths, subject, ready, commitOk, pushOk);
    let readings = oh-voice-all([ld-health(subject, why, ready && (commitOk && pushOk))]);
    [((String) witness == "" ? "" : "[witness] " ++ witness ++ "\n" ++ witnessOut ++ "\n") ++ ((String) restarted == "" ? "" : "[restart] " ++ restarted ++ "\n") ++ "[files] written=" ++ written.str() ++ " appended=" ++ appendedFiles.str() ++ " edit-misses=" ++ misses.str() ++ "\n" ++ "[gates] exit=" ++ gateStatus ++ " evidence=" ++ gateRun[2] ++ "\n" ++ ld-tail(gates, 120) ++ "\n" ++ "[landing] " ++ ld-landing-line(why, witnessRc) ++ "\n" ++ (ready ? added ++ committed ++ "\n" ++ pushed2 ++ "\n" ++ ((String) reunion == "not-asked" ? "" : "[reunion] " ++ reunion ++ "\n") ++ mained : ""), readings];

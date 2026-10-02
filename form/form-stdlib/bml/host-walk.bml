@@ -24,6 +24,16 @@
 // hw-with-published, which restores it on every path a process lives through; hw-heal-publishes returns what a
 // killed publish left, and each walk heals before it syncs.
 //
+// No step of the walk is a shell line. Every child is an argv spawned through form-stdlib/bml/host-child.bml: its
+// stdin is a file, its stdout and stderr share one file, and the exit is read from the host. The whole of what each
+// child said stays under .hearth/walk-io/<step>.{in,out,exit}, and the run before it under <step>.prev.* (turn, plan,
+// review, gates, movement, build, carrier, push, sync-*), so a turn, a review or a gate that failed leaves its
+// evidence for the findings feeder, and a failed turn can be replayed by hand with the very options it read. A turn
+// or a plan still running half an hour past its window's end is hung, and the child door stops it (hw-backstop-ms),
+// so a hung child no longer holds the walk's lock. hw-sync is a flow of git steps whose rows Form reads
+// (hw-sync-at). The day and the hour come from the host's own zone (the footer of /etc/localtime) and the unix
+// clock, with no child (hw-day, hw-hhmm).
+//
 // The window: a walk's turns live inside it (hw-turns). Each turn reads the window's end on stdin as its wall
 // deadline, {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>}; the host's monotonic clock is one
 // clock for every process on this host, so the turn reads the same deadline its walk set, starts no option the
@@ -34,29 +44,186 @@
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/meaning-codes.bml;
 import form-stdlib/bml/live.bml;
+import form-stdlib/bml/host-child.bml;
 section [form.bml] {
  class HostWalk {
   def hw-line(text) = trim(text ?? "");
-  def hw-branch() = hw-line(host-exec("git rev-parse --abbrev-ref HEAD", ""));
-  def hw-day() = hw-line(host-exec("date +%F", ""));
-  def hw-hhmm() = str_to_int(hw-line(host-exec("date +%H%M", "")));
+  def hw-branch() = hw-line(hch-read(["git", "rev-parse", "--abbrev-ref", "HEAD"]));
+  // ── the clock, with no child ──
+  // The host's zone is the footer of its TZif file (/etc/localtime): a POSIX zone string such as "WITA-8" or
+  // "<+08>-8" (the sign is west of UTC, so "-8" is eight hours east). A footer that carries a daylight rule, or a
+  // file that does not read, backtracks to `date +%z` (an argv child, not a shell); when that says nothing too the
+  // zone is nothing(), and the day reads "" and the hour reads 0 (hw-hhmm), which is no on-hour for any door.
+  // TZ in the environment is not read: the walk's launchd doors set only PATH.
+  def hw-tz-path() = "/etc/localtime";
+  def hw-rfind(s, needle, from, last) {
+   let i = str_find(s, needle, from);
+   i < 0 ? last : hw-rfind(s, needle, i + 1, i);
+  }
+  def hw-tz-footer(tz) {
+   let end = len(tz) - 1;
+   let body = end > 3 && ((String) substring(tz, 0, 4) == "TZif") && ((Comparable) str_byte_at(tz, end) == 10);
+   let from = body ? hw-rfind(substring(tz, 0, end), "\n", 0, -1) : -1;
+   from < 0 ? nothing() : substring(tz, from + 1, end);
+  }
+  def hw-letter?(b) = ((b >= 65) && (b <= 90)) || ((b >= 97) && (b <= 122));
+  def hw-letters-end(s, i) = (i < len(s)) && hw-letter?(str_byte_at(s, i)) ? hw-letters-end(s, i + 1) : i;
+  // where the zone's name ends: "<+08>" through its ">", or a run of three letters or more; 0 when it reads neither
+  def hw-posix-name-end(f) {
+   let angle = len(f) > 0 && ((Comparable) str_byte_at(f, 0) == 60);
+   let close = angle ? str_find(f, ">", 0) : -1;
+   angle ? (close < 0 ? 0 : close + 1) : (hw-letters-end(f, 0) >= 3 ? hw-letters-end(f, 0) : 0);
+  }
+  // "[+-]hh[:mm[:ss]]" as seconds, nothing() for anything else (a daylight name or rule after it included)
+  def hw-posix-seconds(t) {
+   let sign = len(t) > 0 && ((Comparable) str_byte_at(t, 0) == 45) ? -1 : 1;
+   let signed = len(t) > 0 && (((Comparable) str_byte_at(t, 0) == 45) || ((Comparable) str_byte_at(t, 0) == 43));
+   hw-posix-parts(sign, split-on(signed ? substring(t, 1, len(t)) : t, ":"));
+  }
+  def hw-posix-parts(sign, parts) {
+   let h = hw-number(parts[0]);
+   let m = len(parts) > 1 ? hw-number(parts[1]) : 0;
+   let s = len(parts) > 2 ? hw-number(parts[2]) : 0;
+   len(parts) > 3 || nothing?(h) || nothing?(m) || nothing?(s) ? nothing() : sign * ((h * 3600) + (m * 60) + s);
+  }
+  // the zone's offset east of UTC in ms from a POSIX footer: the sign of the POSIX offset is inverted
+  def hw-zone-of-footer(f) {
+   let at = nothing?(f) ? 0 : hw-posix-name-end(f);
+   let west = at <= 0 ? nothing() : hw-posix-seconds(substring(f, at, len(f)));
+   nothing?(west) ? nothing() : (0 - west) * 1000;
+  }
+  def hw-zone-of-tz(tz) = hw-zone-of-footer(hw-tz-footer(tz ?? ""));
+  // `date +%z` reads "+0800"
+  def hw-zone-of-z(z) {
+   let t = trim(z ?? "");
+   let sign = len(t) == 5 && ((Comparable) str_byte_at(t, 0) == 45) ? -1 : 1;
+   let signed = len(t) == 5 && (((Comparable) str_byte_at(t, 0) == 45) || ((Comparable) str_byte_at(t, 0) == 43));
+   let h = signed ? hw-number(substring(t, 1, 3)) : nothing();
+   let m = signed ? hw-number(substring(t, 3, 5)) : nothing();
+   nothing?(h) || nothing?(m) ? nothing() : sign * ((h * 3600) + (m * 60)) * 1000;
+  }
+  def hw-zone-ms() {
+   let footer = hw-zone-of-tz(read_file(hw-tz-path()));
+   nothing?(footer) ? hw-zone-of-z(hch-read(["/bin/date", "+%z"])) : footer;
+  }
+  // the civil date of a day count since 1970 (the era arithmetic form-stdlib/perception-rows.bml pr-civil folds)
+  def hw-civil(days) {
+   let z = days + 719468;
+   let era = z / 146097;
+   let doe = z - (era * 146097);
+   let yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
+   let doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
+   let mp = ((5 * doy) + 2) / 153;
+   let dd = doy - (((153 * mp) + 2) / 5) + 1;
+   let mm = mp < 10 ? mp + 3 : mp - 9;
+   [yoe + (era * 400) + (mm <= 2 ? 1 : 0), mm, dd];
+  }
+  def hw-pad2(n) = n < 10 ? "0" ++ n.str() : n.str();
+  // local time is the unix ms shifted by the zone: its day, and its hour and minute as hhmm
+  def hw-day-of(local) = hw-day-text(hw-civil(local / 86400000));
+  def hw-day-text(c) = c[0].str() ++ "-" ++ hw-pad2(c[1]) ++ "-" ++ hw-pad2(c[2]);
+  def hw-hhmm-of(local) = ((local / 3600000) % 24) * 100 + ((local / 60000) % 60);
+  def hw-day-in(zone, now) = nothing?(zone) ? "" : hw-day-of(now + zone);
+  def hw-hhmm-in(zone, now) = nothing?(zone) ? nothing() : hw-hhmm-of(now + zone);
+  def hw-day() = hw-day-in(hw-zone-ms(), now_unix_ms());
+  // the hour as hhmm; 0 when the zone did not read: a door names an unread hour 0000, and 0000 is no on-hour
+  def hw-hhmm() = hw-hhmm-in(hw-zone-ms(), now_unix_ms()) ?? 0;
   // The branch follows main with the tree's own rows set aside and returned. Only rows that merge as a union are
   // set aside: a modification of a file git merges as a union (.gitattributes: receipts/*.jsonl), which main still
   // holds as a blob and git reads as text. Anything else the tree holds (a source, a row in a ledger main deleted
   // or renamed, a ledger git reads as binary) comes back from a stash with an edge to conflict on, so it is named
   // "dirty:" and the tree stays as it stands, never stashed. "conflict:" names unmerged files only: a replay that
   // conflicts (the rebase is aborted), or rows that came back unmerged after a rebase git counted done, read once
-  // more after it. A rebase refused for another reason names "dirty:" and the status. (No `case` inside `$( )`:
-  // the host's /bin/sh does not parse it.)
-  def hw-sync-command(branch) = "git fetch -q origin main " ++ branch ++ " && { o=$(git status --porcelain --untracked-files=no | while IFS= read -r l; do x=${l%\"${l#??}\"}; f=${l#???}; if { [ \"$x\" = \" M\" ] || [ \"$x\" = \"M \" ] || [ \"$x\" = \"MM\" ]; } && git check-attr merge -- \"$f\" | grep -q ': merge: union$' && [ \"$(git cat-file -t \"origin/main:$f\" 2>/dev/null)\" = blob ] && [ \"$(git diff --numstat origin/main -- \"$f\" | cut -c1)\" != - ]; then :; else echo \"$l\"; fi; done | paste -sd' ' -); if [ -n \"$o\" ]; then echo dirty: $o; false; else git rebase -q --autostash origin/main >/dev/null 2>&1 || { u=$(git diff --name-only --diff-filter=U | paste -sd' ' -); if [ -n \"$u\" ]; then echo conflict: $u; git rebase --abort >/dev/null 2>&1; else echo dirty: $(git status --porcelain | paste -sd' ' -); fi; false; }; fi; } && { u=$(git diff --name-only --diff-filter=U | paste -sd' ' -); if [ -n \"$u\" ]; then echo conflict: $u, as the set-aside rows returned; false; fi; } && git push -q --force-with-lease origin HEAD:" ++ branch ++ "; echo sync=$?";
-  def hw-sync(branch) = hw-line(host-exec(hw-sync-command(branch), ""));
+  // more after it. A rebase refused for another reason names "dirty:" and the status.
+  //
+  // The flow is git steps by argv, each answering its exit from the host, and Form reads their rows (every step's
+  // full output stays under <io>/sync-<step>.out). The answer is the text a sync has always said: "" or one line
+  // ("dirty: <rows>", "conflict: <files>", "conflict: <files>, as the set-aside rows returned"), then "sync=<exit>".
+  // A step whose child was never born reads "sync=nothing". Rows come from `status --porcelain -z`, so a name is
+  // never quoted and a rename (R or C) carries its second field.
+  def hw-sync-at(io, dir, branch) = hw-sync-said(hw-sync-fetch(io, dir, branch));
+  def hw-sync-in(dir, branch) = hw-sync-at(hch-dir(), dir, branch);
+  def hw-sync(branch) = hw-line(hw-sync-in(".", branch));
+  def hw-sync-said(r) = (String) r[0] == "" ? "sync=" ++ hw-rc-text(r[1]) : r[0] ++ "\nsync=" ++ hw-rc-text(r[1]);
+  def hw-rc-text(rc) = nothing?(rc) ? "nothing" : rc.str();
+  // every step answers [lines, exit]; a step that fails ends the flow with its own exit
+  def hw-sync-fetch(io, dir, branch) {
+   let fetched = hch-git-in(io, dir, "sync-fetch", ["fetch", "-q", "origin", "main", branch]);
+   hch-ok?(fetched) ? hw-sync-tree(io, dir, branch) : ["", fetched[0]];
+  }
+  def hw-sync-tree(io, dir, branch) {
+   let rows = hw-porcelain(io, dir, "sync-status", ["status", "--porcelain", "-z", "--untracked-files=no"]);
+   let kept = filter(row => !hw-aside?(io, dir, row), rows);
+   nil?(kept) ? hw-sync-rebase(io, dir, branch) : [hw-dirty-line(hw-rows-text(kept)), 1];
+  }
+  def hw-sync-rebase(io, dir, branch) {
+   let rebased = hch-git-in(io, dir, "sync-rebase", ["rebase", "-q", "--autostash", "origin/main"]);
+   hch-ok?(rebased) ? hw-sync-returned(io, dir, branch) : hw-sync-refused(io, dir);
+  }
+  // a rebase git refused: a named unmerged file is a conflict (the rebase is aborted); anything else is dirty,
+  // named by the whole status, untracked files included
+  def hw-sync-refused(io, dir) {
+   let unmerged = hw-unmerged(io, dir);
+   (String) unmerged == "" ? [hw-dirty-line(hw-rows-text(hw-porcelain(io, dir, "sync-status-all", ["status", "--porcelain", "-z"]))), 1] : hw-sync-aborted(io, dir, unmerged);
+  }
+  def hw-sync-aborted(io, dir, unmerged) {
+   let aborted = hch-git-in(io, dir, "sync-abort", ["rebase", "--abort"]);
+   ["conflict: " ++ unmerged, 1];
+  }
+  // rows that came back unmerged after a rebase git counted done
+  def hw-sync-returned(io, dir, branch) {
+   let unmerged = hw-unmerged(io, dir);
+   (String) unmerged == "" ? hw-sync-push(io, dir, branch) : ["conflict: " ++ unmerged ++ ", as the set-aside rows returned", 1];
+  }
+  def hw-sync-push(io, dir, branch) {
+   let pushed = hch-git-in(io, dir, "sync-push", ["push", "-q", "--force-with-lease", "origin", "HEAD:" ++ branch]);
+   ["", pushed[0]];
+  }
+  def hw-unmerged(io, dir) = hw-names-text(hch-git-quiet-in(io, dir, "sync-unmerged", ["diff", "--name-only", "-z", "--diff-filter=U"])[1]);
+  def hw-nul() = byte_to_str(0);
+  def hw-fields(text) = filter(f => (Comparable) len(f) > 0, split-on(text ?? "", hw-nul()));
+  def hw-names-text(text) = hch-join(hw-fields(text), " ");
+  // a status row: [XY, path, the path a rename or copy came from ("" for any other row)]
+  def hw-porcelain(io, dir, step, args) = hw-rows-of(hw-fields(hch-git-quiet-in(io, dir, step, args)[1]));
+  def hw-moved-from?(rec) = len(rec) > 1 && (((String) substring(rec, 0, 1) == "R") || ((String) substring(rec, 0, 1) == "C") || ((String) substring(rec, 1, 2) == "R") || ((String) substring(rec, 1, 2) == "C"));
+  def hw-rows-of(recs) = nil?(recs) ? [] : len(recs[0]) < 4 ? hw-rows-of(recs[1:]) : hw-moved-from?(recs[0]) ? cons([substring(recs[0], 0, 2), substring(recs[0], 3, len(recs[0])), nil?(recs[1:]) ? "" : recs[1]], hw-rows-of(recs[2:])) : cons([substring(recs[0], 0, 2), substring(recs[0], 3, len(recs[0])), ""], hw-rows-of(recs[1:]));
+  def hw-row-text(row) = (String) row[2] == "" ? row[0] ++ " " ++ row[1] : row[0] ++ " " ++ row[2] ++ " -> " ++ row[1];
+  // the rows as one line the way an unquoted `echo` said them: single spaces, none at the ends
+  def hw-collapse(s) = hch-join(filter(w => (Comparable) len(w) > 0, split-on(s, " ")), " ");
+  def hw-rows-text(rows) = hw-collapse(hch-join(rows |> map(row => hw-row-text(row)), " "));
+  def hw-dirty-line(text) = (String) text == "" ? "dirty:" : "dirty: " ++ text;
+  // A row is set aside only when it merges as a union: a modification (" M", "M ", "MM") of a file whose merge
+  // attribute is union, that main still holds as a blob, and that git reads as text against main
+  def hw-aside-kind?(xy) = ((String) xy == " M") || ((String) xy == "M ") || ((String) xy == "MM");
+  def hw-aside?(io, dir, row) = hw-aside-kind?(row[0]) && hw-union?(io, dir, row[1]) && hw-main-blob?(io, dir, row[1]) && hw-text-diff?(io, dir, row[1]);
+  def hw-union?(io, dir, path) = hw-ends?(hw-line(hch-git-quiet-in(io, dir, "sync-attr", ["check-attr", "merge", "--", path])[1]), ": merge: union");
+  def hw-main-blob?(io, dir, path) = (String) hw-line(hch-git-quiet-in(io, dir, "sync-blob", ["cat-file", "-t", "origin/main:" ++ path])[1]) == "blob";
+  def hw-text-diff?(io, dir, path) {
+   let numstat = hch-git-quiet-in(io, dir, "sync-numstat", ["diff", "--numstat", "origin/main", "--", path])[1];
+   len(numstat) == 0 || ((String) substring(numstat, 0, 1) != "-");
+  }
   def hw-conflicted?(sync) = hw-has?(sync, "conflict:");
   def hw-held-turns(sync) {
    let said = print_str("[walk] no turn starts: the branch could not follow main (" ++ sync ++ ")");
    0;
   }
-  def hw-build() = hw-line(host-exec("if [ fkwu -nt runtime/fkwu-uni.c ]; then echo build=fresh; else cc -O2 -o fkwu.next runtime/fkwu-uni.c && mv fkwu.next fkwu; echo build=$?; fi", ""));
-  def hw-carrier() = hw-line(host-exec("if [ form/native/metal/fk-metal-carrier.dylib -nt form/native/metal/fk-metal-carrier.m ]; then echo carrier=fresh; else cc -O2 -dynamiclib -o form/native/metal/fk-metal-carrier.dylib form/native/metal/fk-metal-carrier.m -framework Metal -framework Foundation -fobjc-arc; echo carrier=$?; fi", ""));
+  // A product is fresh when it stands and is newer than its source (file_mtime, whole seconds: a source touched in
+  // the product's own second rebuilds). Otherwise the compiler runs through the child door; the kernel is built beside
+  // itself and renamed over fkwu (a new inode, never a write into the live binary). The answer is "<name>=fresh" or
+  // "<name>=<the compiler's exit>"; a compiler that was never born reads "<name>=nothing".
+  def hw-mtime(path) = file_mtime(path);
+  def hw-mtime-int?(at) = (String) value_kind(at) == "int" && at > 0;
+  def hw-fresh?(product, source) = hw-mtime-int?(hw-mtime(product)) && (!hw-mtime-int?(hw-mtime(source)) || hw-mtime(product) > hw-mtime(source));
+  def hw-make(io, name, product, source, argv, built) = hw-fresh?(product, source) ? name ++ "=fresh" : hw-made(io, name, product, built, hch-run-in(io, name, argv, "", nothing()));
+  def hw-made(io, name, product, built, run) = name ++ "=" ++ hw-rc-text(hch-ok?(run) ? hw-placed(product, built) : run[0]);
+  // the compiler wrote `built`; it takes the product's place (a compiler that wrote the product itself needs none)
+  def hw-placed(product, built) = (String) built == product ? 0 : host_path_rename(built, product);
+  def hw-build-argv() = ["cc", "-O2", "-o", "fkwu.next", "runtime/fkwu-uni.c"];
+  def hw-build-at(io) = hw-make(io, "build", "fkwu", "runtime/fkwu-uni.c", hw-build-argv(), "fkwu.next");
+  def hw-build() = hw-build-at(hch-dir());
+  def hw-carrier-argv() = ["cc", "-O2", "-dynamiclib", "-o", "form/native/metal/fk-metal-carrier.dylib", "form/native/metal/fk-metal-carrier.m", "-framework", "Metal", "-framework", "Foundation", "-fobjc-arc"];
+  def hw-carrier-at(io) = hw-make(io, "carrier", "form/native/metal/fk-metal-carrier.dylib", "form/native/metal/fk-metal-carrier.m", hw-carrier-argv(), "form/native/metal/fk-metal-carrier.dylib");
+  def hw-carrier() = hw-carrier-at(hch-dir());
   // one walk at a time in this checkout
   def hw-lock() = ".hearth/walk.lock";
   def hw-owner-path(lock) = lock ++ "/owner";
@@ -186,7 +353,12 @@ section [form.bml] {
   }
   // the options a turn reads on stdin: its turn budget, and its wall deadline on the host's monotonic clock
   def hw-turn-options(turns, deadline) = json-emit(json-node-object([fhn-n("turns", turns), fhn-n("deadline_ms", deadline)]));
-  def hw-turn-once(turns, deadline) = hw-reviewed(hw-turn-lines(host-exec("./fkwu observe/native-turn-run.bml 2>&1", hw-turn-options(turns, deadline) ++ "\n")));
+  // A child that hangs would hold the walk's lock for good and cost the next window its turns: a turn and a plan
+  // hear the window's end and stop their own lanes there, so a turn or plan still running hw-backstop-ms after
+  // that is hung, and the child door stops it (its output to that point stays in .hearth/walk-io).
+  def hw-backstop-ms() = 1800000;
+  def hw-turn-run(turns, deadline) = hch-run("turn", ["./fkwu", "observe/native-turn-run.bml"], hw-turn-options(turns, deadline) ++ "\n", deadline + hw-backstop-ms());
+  def hw-turn-once(turns, deadline) = hw-reviewed(hw-turn-lines(hch-said(hw-turn-run(turns, deadline))));
   // A queue with no open gap is planned inside the same window: the local planner (observe/local-plan-run.bml) takes
   // the next pending request in learn/local-requests.jsonl, a local voice writes it as a band-first gap, and Form
   // verifies it before it is queued. Its options are the planner's attempts, each opened only while the window
@@ -195,7 +367,7 @@ section [form.bml] {
   def hw-plan-options(deadline) = json-emit(json-node-object([fhn-n("next", 1), fhn-n("until_ms", deadline)]));
   def hw-plan-line(out) = hw-plan-keep(split-on(out ?? "", "\n"), "");
   def hw-plan-keep(lines, last) = nil?(lines) ? last : hw-plan-keep(lines[1:], hw-starts?(lines[0], "[local-plan") && !hw-starts?(lines[0], "[local-plan:voice]") ? trim(lines[0]) : last);
-  def hw-plan(deadline) = hw-plan-line(host-exec("./fkwu observe/local-plan-run.bml 2>&1", hw-plan-options(deadline) ++ "\n"));
+  def hw-plan(deadline) = hw-plan-line(hch-said(hch-run("plan", ["./fkwu", "observe/local-plan-run.bml"], hw-plan-options(deadline) ++ "\n", deadline + hw-backstop-ms())));
   def hw-no-gap?(turn) = str_find(turn ?? "", "[native-turn] no open gap", 0) >= 0;
   def hw-planned?(line) = hw-starts?(line, "[local-plan:result] ") && str_find(line, "\"status\":\"queued\"", 0) >= 0;
   def hw-native-turn(turns, deadline) = hw-turn-planned(hw-turn-once(turns, deadline), deadline, hw-plan, () => hw-turn-once(turns, deadline));
@@ -221,7 +393,7 @@ section [form.bml] {
   // the turn, and its next line is spoken beside the turn's. A turn that ran none lands nothing, so it is not
   // reviewed: its review row would stand in the tracked tree with no landing to carry it, and the turn's own line
   // already says why it ran none.
-  def hw-review() = hw-line(host-exec("./fkwu observe/local-flow-review.bml 2>&1 | grep -F '[local-flow-review] next:' | tail -1", ""));
+  def hw-review() = hw-line(hch-last(hch-said(hch-run("review", ["./fkwu", "observe/local-flow-review.bml"], "", nothing())), "[local-flow-review] next:"));
   def hw-reviewed(turn) = hw-reviewed-by(turn, hw-review);
   def hw-reviewed-by(turn, review) {
    let said = hw-turned?(turn) ? hw-say(review()) : 0;
@@ -285,7 +457,7 @@ section [form.bml] {
   def hw-queue-row-paths(row) = append(hw-writable(json-array-elements(json-object-get(row, "writable"))), (String) hw-str(row, "band") == "" ? [] : [json-node-string(hw-str(row, "band"))]);
   def hw-queue-paths(lines) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? hw-queue-paths(lines[1:]) : append(hw-queue-row-paths(parse-json("queue-row", lines[0])), hw-queue-paths(lines[1:]));
   def hw-paths() = cons(json-node-string("receipts/draft-ledger.jsonl"), cons(json-node-string("receipts/native-turn-ledger.jsonl"), cons(json-node-string("receipts/local-flow-review.jsonl"), cons(json-node-string("learn/native-turn-queue.jsonl"), file_size("learn/native-turn-queue.jsonl") < 1 ? [] : hw-queue-paths(split-on(fhn-read("learn/native-turn-queue.jsonl"), "\n"))))));
-  def hw-movement(request) = host-exec("./fkwu observe/movement-run.bml 2>&1", json-emit(request) ++ "\n");
+  def hw-movement(request) = hch-said(hch-run("movement", ["./fkwu", "observe/movement-run.bml"], json-emit(request) ++ "\n", nothing()));
   // ── a candidate in the tracked tree: published inside one door, restored on every path ──
   // hw-with-published(dir, paths, before, texts, run) writes a marker (<dir>/publish-<pid>.marker: the pid, its
   // stamp, the paths, their checkpoint texts and the bytes this publish writes) and reads it back, publishes the
@@ -374,7 +546,7 @@ section [form.bml] {
   // push goes again, twice at most. A rebase that conflicts meets no repair: it holds, naming its files.
   def hw-digits-end(s, i) = (i < len(s)) && (str_byte_at(s, i) >= 48) && (str_byte_at(s, i) <= 57) ? hw-digits-end(s, i + 1) : i;
   def hw-number(t) = ((Comparable) len(t) > 0) && ((Comparable) hw-digits-end(t, 0) == len(t)) ? str_to_int(t) : nothing();
-  def hw-ahead() = hw-number(hw-line(host-exec("git rev-list --count origin/main..HEAD", "")));
+  def hw-ahead() = hw-number(hw-line(hch-read(["git", "rev-list", "--count", "origin/main..HEAD"])));
   def hw-field(s, key) {
    let at = str_find(s, key, 0);
    let from = at + len(key);
@@ -382,11 +554,18 @@ section [form.bml] {
   }
   // the gates' own summary: every row that ran passed and none refused
   def hw-gates-green?(line) = (!nothing?(hw-field(line, "pass="))) && ((Comparable) hw-field(line, "pass=") == hw-field(line, "full=")) && ((Comparable) hw-field(line, "refused=") == 0);
-  def hw-gates() = hw-line(host-exec("./fkwu gate/drift-gates-run.bml 2>/dev/null | grep -F 'drift-gates pass=' | tail -1", ""));
+  def hw-gates() = hw-line(hch-last(hch-run-quiet("gates", ["./fkwu", "gate/drift-gates-run.bml"], "", nothing())[1], "drift-gates pass="));
   def hw-has?(out, word) = (!nothing?(out)) && (str_find(out, word, 0) >= 0);
   def hw-synced?(out, branch) = hw-has?(out, "sync=0");
   def hw-green?(line, branch) = hw-gates-green?(line);
-  def hw-push(branch) = hw-line(host-exec("out=$(git push -q origin HEAD:main 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; echo main=$rc", ""));
+  // The push says one line and its exit: "<line>\nmain=<exit>". The line is the one that names a rejection when
+  // git said one ("! [rejected] ... (fetch first)": the last line of a rejected push is a hint that names none of
+  // the words hw-main-moved? looks for, so the moved main it would repair went unread), else the push's last line.
+  def hw-rejection-words() = ["[rejected]", "fetch first", "non-fast-forward"];
+  def hw-push-line(text, said) = (String) hch-last-of(hch-matching(text, hw-rejection-words())) != "" ? hch-last-of(hch-matching(text, hw-rejection-words())) : hch-tail-line(said);
+  def hw-push-at(io, dir) = hw-push-read(hch-git-in(io, dir, "push", ["push", "-q", "origin", "HEAD:main"]));
+  def hw-push-read(run) = hw-push-line(run[1], hch-said(run)) ++ "\nmain=" ++ hw-rc-text(run[0]);
+  def hw-push(branch) = hw-line(hw-push-at(hch-dir(), "."));
   def hw-pushed?(out, branch) = hw-has?(out, "main=0");
   def hw-main-moved?(out, branch) = hw-has?(out, "fetch first") || hw-has?(out, "non-fast-forward") || hw-has?(out, "rejected");
   // the repair a moved main meets: follow it again, and read the gates over what the rebase brought

@@ -1,11 +1,24 @@
-; host-walk-band.bml — the walk's window, its lock, its turns, its sync and its publish window, with no model;
-; git runs only over a scratch origin under temp_dir.
+; host-walk-band.bml — the walk's window, its lock, its turns, its sync, its children, its clock and its publish
+; window, with no model; git runs only over a scratch origin under temp_dir.
 ;
-; Verdict 67108863 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
+; Verdict 268435455 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
 ;   | 128 releases | 256 floor | 512 unmeasured | 1024 room | 2048 turn-lines | 4096 turns | 8192 elsewhere
 ;   | 16384 yield | 32768 sync | 65536 reviewed | 131072 idle | 262144 stale-mark | 524288 publish
 ;   | 1048576 heal | 2097152 sync-rows | 4194304 publish-absent | 8388608 band-after | 16777216 planned
-;   | 33554432 queue-paths
+;   | 33554432 queue-paths | 67108864 spawn | 134217728 clock
+;
+; The children (form-stdlib/bml/host-child.bml): a stdin file reaches the child, its stdout and stderr share one file
+; (or stderr goes nowhere), the exit is the host's own (a child that exits 3 reads 3), the step's last out file is
+; replaced and never appended to, a binary that is not there is nothing at birth (never -1) and leaves its reason in
+; the out file, and a child past its deadline is stopped (SIGTERM, then SIGKILL after its grace for one that ignores
+; it) and reads nothing with what it had printed kept. The readers
+; that replaced grep and tail answer the lines they did. The build and the carrier read "fresh" while the product
+; is newer than its source, else run the compiler through the child door and put the product in place (a failing
+; compiler reads its exit, one never born reads nothing); the push answers its rejection's own line, so a main that
+; moved reads as moved. The clock: a POSIX zone footer ("WITA-8", "<+08>-8", "IST-5:30", "UTC0") reads its offset
+; east of UTC, a footer with a daylight rule reads nothing, and fixed instants name the day and the hhmm the zone
+; puts them on (the 03:30 night and the 12:30 day turn, the midnight rollover, a leap day, a zone west of UTC); the
+; host's own reading agrees with `date`.
 ;
 ; A turn reads {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>} on stdin. One walk holds a
 ; checkout's lock: a fresh claim holds it, a living holder refuses a later start and is named, a gone holder (a
@@ -177,55 +190,85 @@ section [form.bml] {
    hwb-bit(((String) quiet == "") && ((String) walking == "[walk-yield] observe/movement-run.bml (pid 11) in /elsewhere still walks, and the window no longer holds an option") && (spent < hw-yield-poll-ms()));
   }
   // ── the sync, over a scratch origin under temp_dir ──
-  def hwb-sh(dir, cmd) = hw-line(host-exec("cd '" ++ dir ++ "' && { " ++ cmd ++ " ; } 2>/dev/null", ""));
-  def hwb-git-setup() = "git init -q --bare origin.git && git clone -q origin.git main && cd main && git config user.email band@host && git config user.name band && mkdir receipts && printf 'receipts/*.jsonl merge=union\\n' > .gitattributes && printf '{\"r\":0}\\n' > receipts/ledger.jsonl && printf 'one\\ntwo\\n' > src.txt && git add -A && git commit -q -m base && git branch -M main && git push -q origin main && cd .. && git clone -q origin.git walk && cd walk && git config user.email walk@host && git config user.name walk && git checkout -q -b walk && git push -q origin walk && echo ready";
-  def hwb-main-moves() = "cd main && printf '{\"r\":1}\\n' >> receipts/ledger.jsonl && git commit -q -am main1 && git push -q origin main && cd ../walk && printf '{\"r\":\"walk\"}\\n' >> receipts/ledger.jsonl && echo ready";
-  def hwb-both-edit() = "cd walk && git commit -q -am row && printf 'one\\nWALK\\n' > src.txt && git commit -q -am walk-src && cd ../main && printf 'one\\nMAIN\\n' > src.txt && git commit -q -am main-src && git push -q origin main && cd ../walk && printf '{\"r\":\"walk-2\"}\\n' >> receipts/ledger.jsonl && echo ready";
-  def hwb-untracked() = "cd walk && git checkout -q -- receipts/ledger.jsonl && git reset -q --hard origin/main && cd ../main && printf 'new\\n' > newfile.txt && git add newfile.txt && git commit -q -m main-new && git push -q origin main && cd ../walk && printf 'mine\\n' > newfile.txt && echo ready";
+  // A scenario is a list of steps over a base directory, none of them a shell line: ["git", dir, args] runs git there
+  // (git -C), ["write", path, text] and ["append", path, text] put bytes in a file, ["mkdir", path] and
+  // ["remove", path] make and remove. hwb-steps answers "ready", or the step that failed.
+  def hwb-io(ctx) = hwb-root(ctx) ++ "/io";
+  def hwb-g(dir, args) = ["git", dir, args];
+  def hwb-done(x) = true;
+  def hwb-step(ctx, base, step) {
+   let kind = (String) step[0];
+   let path = base ++ "/" ++ step[1];
+   kind == "git" ? hch-ok?(hch-git-in(hwb-io(ctx), path, "band", step[2]))
+   : kind == "write" ? hwb-done(write_file_text(path, step[2]))
+   : kind == "append" ? hwb-done(fhn-append(path, step[2]))
+   : kind == "mkdir" ? ((Comparable) host_dir_mkdir(path) == 1)
+   : hwb-done(host_path_remove(path));
+  }
+  def hwb-steps(ctx, base, steps) = hwb-steps-from(ctx, base, steps, 0);
+  def hwb-steps-from(ctx, base, steps, n) = nil?(steps) ? "ready" : hwb-step(ctx, base, steps[0]) ? hwb-steps-from(ctx, base, steps[1:], n + 1) : "failed at step " ++ n.str() ++ ": " ++ steps[0][0] ++ " " ++ steps[0][1];
+  def hwb-who(dir, name) = [hwb-g(dir, ["config", "user.email", name ++ "@host"]), hwb-g(dir, ["config", "user.name", name])];
+  // the origin, a clone that plays main, and a clone on its own branch "walk"; `files` are written before the base commit
+  def hwb-origin(files) = append([hwb-g(".", ["init", "-q", "--bare", "origin.git"]), hwb-g(".", ["clone", "-q", "origin.git", "main"])], append(hwb-who("main", "band"), append([["mkdir", "main/receipts"], ["write", "main/.gitattributes", "receipts/*.jsonl merge=union\n"]], append(files, [hwb-g("main", ["add", "-A"]), hwb-g("main", ["commit", "-q", "-m", "base"]), hwb-g("main", ["branch", "-M", "main"]), hwb-g("main", ["push", "-q", "origin", "main"]), hwb-g(".", ["clone", "-q", "origin.git", "walk"])]))));
+  def hwb-walk-branch() = append(hwb-who("walk", "walk"), [hwb-g("walk", ["checkout", "-q", "-b", "walk"]), hwb-g("walk", ["push", "-q", "origin", "walk"])]);
+  def hwb-git-setup() = append(hwb-origin([["write", "main/receipts/ledger.jsonl", "{\"r\":0}\n"], ["write", "main/src.txt", "one\ntwo\n"]]), hwb-walk-branch());
+  def hwb-main-moves() = [["append", "main/receipts/ledger.jsonl", "{\"r\":1}\n"], hwb-g("main", ["commit", "-q", "-am", "main1"]), hwb-g("main", ["push", "-q", "origin", "main"]), ["append", "walk/receipts/ledger.jsonl", "{\"r\":\"walk\"}\n"]];
+  def hwb-both-edit() = [hwb-g("walk", ["commit", "-q", "-am", "row"]), ["write", "walk/src.txt", "one\nWALK\n"], hwb-g("walk", ["commit", "-q", "-am", "walk-src"]), ["write", "main/src.txt", "one\nMAIN\n"], hwb-g("main", ["commit", "-q", "-am", "main-src"]), hwb-g("main", ["push", "-q", "origin", "main"]), ["append", "walk/receipts/ledger.jsonl", "{\"r\":\"walk-2\"}\n"]];
+  def hwb-untracked() = [hwb-g("walk", ["checkout", "-q", "--", "receipts/ledger.jsonl"]), hwb-g("walk", ["reset", "-q", "--hard", "origin/main"]), ["write", "main/newfile.txt", "new\n"], hwb-g("main", ["add", "newfile.txt"]), hwb-g("main", ["commit", "-q", "-m", "main-new"]), hwb-g("main", ["push", "-q", "origin", "main"]), ["write", "walk/newfile.txt", "mine\n"]];
   // a source the walk left dirty while main changed the same line: set aside, it would come back conflicted
-  def hwb-dirty-source() = "cd walk && rm -f newfile.txt && git checkout -q -- receipts/ledger.jsonl && git reset -q --hard origin/main && printf 'one\\nWALKDIRTY\\n' > src.txt && printf '{\"r\":\"walk-3\"}\\n' >> receipts/ledger.jsonl && cd ../main && git pull -q origin main && printf 'one\\nMAIN2\\n' > src.txt && git commit -q -am main-src2 && git push -q origin main && echo ready";
+  def hwb-dirty-source() = [["remove", "walk/newfile.txt"], hwb-g("walk", ["checkout", "-q", "--", "receipts/ledger.jsonl"]), hwb-g("walk", ["reset", "-q", "--hard", "origin/main"]), ["write", "walk/src.txt", "one\nWALKDIRTY\n"], ["append", "walk/receipts/ledger.jsonl", "{\"r\":\"walk-3\"}\n"], hwb-g("main", ["pull", "-q", "origin", "main"]), ["write", "main/src.txt", "one\nMAIN2\n"], hwb-g("main", ["commit", "-q", "-am", "main-src2"]), hwb-g("main", ["push", "-q", "origin", "main"])];
+  // what a sync left behind: stash entries, then unmerged paths ("0 0" when it left neither)
+  def hwb-count(run) = len(filter(l => (Comparable) len(l) > 0, split-on(run[1], "\n")));
+  def hwb-left(ctx, dir) = hwb-count(hch-git-in(hwb-io(ctx), dir, "band-left", ["stash", "list"])).str() ++ " " ++ hwb-count(hch-git-in(hwb-io(ctx), dir, "band-left", ["diff", "--name-only", "--diff-filter=U"])).str();
+  def hwb-sync-of(ctx, walk) = hw-line(hw-sync-at(hwb-io(ctx), walk, "walk"));
   def hwb-sync(ctx) {
    let root = hwb-root(ctx) ++ "/sync";
    let made = host_dir_mkdir(root);
    let walk = root ++ "/walk";
-   let ready = hwb-sh(root, hwb-git-setup());
-   let moved = hwb-sh(root, hwb-main-moves());
-   let dirty = hwb-sh(walk, hw-sync-command("walk"));
+   let ready = hwb-steps(ctx, root, hwb-git-setup());
+   let moved = hwb-steps(ctx, root, hwb-main-moves());
+   let dirty = hwb-sync-of(ctx, walk);
    let ledger = read_file(walk ++ "/receipts/ledger.jsonl") ?? "";
-   let crossed = hwb-sh(root, hwb-both-edit());
-   let conflict = hwb-sh(walk, hw-sync-command("walk"));
+   let crossed = hwb-steps(ctx, root, hwb-both-edit());
+   let conflict = hwb-sync-of(ctx, walk);
    let kept = read_file(walk ++ "/src.txt") ?? "";
    let rebasing = host_path_exists(walk ++ "/.git/rebase-merge");
    let row = hwb-has?(read_file(walk ++ "/receipts/ledger.jsonl") ?? "", "walk-2");
-   let placed = hwb-sh(root, hwb-untracked());
-   let refused = hwb-sh(walk, hw-sync-command("walk"));
-   let soiled = hwb-sh(root, hwb-dirty-source());
-   let seam = hwb-sh(walk, hw-sync-command("walk"));
-   let stashed = hwb-sh(walk, "git stash list | wc -l | tr -d ' '");
-   let unmerged = hwb-sh(walk, "git diff --name-only --diff-filter=U | wc -l | tr -d ' '");
+   let placed = hwb-steps(ctx, root, hwb-untracked());
+   let refused = hwb-sync-of(ctx, walk);
+   let soiled = hwb-steps(ctx, root, hwb-dirty-source());
+   let seam = hwb-sync-of(ctx, walk);
+   let left = hwb-left(ctx, walk);
    let source = read_file(walk ++ "/src.txt") ?? "";
    let rows = hwb-has?(read_file(walk ++ "/receipts/ledger.jsonl") ?? "", "walk-3");
-   hwb-bit(((String) ready == "ready") && ((String) moved == "ready") && hwb-has?(dirty, "sync=0") && (!hw-conflicted?(dirty)) && ((String) ledger == "{\"r\":0}\n{\"r\":1}\n{\"r\":\"walk\"}\n") && ((String) crossed == "ready") && hwb-has?(conflict, "conflict: src.txt") && hwb-has?(conflict, "sync=1") && hw-conflicted?(conflict) && ((String) kept == "one\nWALK\n") && ((Comparable) rebasing == 0) && row && ((String) placed == "ready") && hwb-has?(refused, "dirty: ?? newfile.txt") && hwb-has?(refused, "sync=1") && (!hw-conflicted?(refused)) && ((String) soiled == "ready") && hwb-has?(seam, "dirty: M src.txt") && hwb-has?(seam, "sync=1") && ((String) stashed == "0") && ((String) unmerged == "0") && ((String) source == "one\nWALKDIRTY\n") && rows);
+   let norepo = hwb-sync-of(ctx, root);
+   let evidence = read_file(hwb-io(ctx) ++ "/sync-fetch.exit") ?? "";
+   hwb-bit(((String) ready == "ready") && ((String) moved == "ready") && hwb-has?(dirty, "sync=0") && (!hw-conflicted?(dirty)) && ((String) ledger == "{\"r\":0}\n{\"r\":1}\n{\"r\":\"walk\"}\n") && ((String) crossed == "ready") && hwb-has?(conflict, "conflict: src.txt") && hwb-has?(conflict, "sync=1") && hw-conflicted?(conflict) && ((String) kept == "one\nWALK\n") && ((Comparable) rebasing == 0) && row && ((String) placed == "ready") && hwb-has?(refused, "dirty: ?? newfile.txt") && hwb-has?(refused, "sync=1") && (!hw-conflicted?(refused)) && ((String) soiled == "ready") && hwb-has?(seam, "dirty: M src.txt") && hwb-has?(seam, "sync=1") && ((String) left == "0 0") && ((String) source == "one\nWALKDIRTY\n") && rows && ((String) norepo == "sync=128") && ((String) evidence == "128\n"));
   }
   // ── rows that would not merge as a union stay in the tree: a ledger main deleted, a ledger git reads as binary ──
-  def hwb-rows-setup() = "git init -q --bare origin.git && git clone -q origin.git main && cd main && git config user.email band@host && git config user.name band && mkdir receipts && printf 'receipts/*.jsonl merge=union\\n' > .gitattributes && printf '{\"g\":0}\\n' > receipts/gone.jsonl && printf '{\"b\":0}\\n\\000\\n' > receipts/bin.jsonl && git add -A && git commit -q -m base && git branch -M main && git push -q origin main && cd .. && git clone -q origin.git walk && cd walk && git config user.email walk@host && git config user.name walk && git checkout -q -b walk && git push -q origin walk && echo ready";
-  def hwb-rows-gone() = "cd walk && printf '{\"g\":\"walk\"}\\n' >> receipts/gone.jsonl && cd ../main && git rm -q receipts/gone.jsonl && git commit -q -m main-gone && git push -q origin main && echo ready";
-  def hwb-rows-binary() = "cd walk && git checkout -q -- receipts/gone.jsonl && git reset -q --hard origin/main && printf '{\"b\":\"walk\"}\\n' >> receipts/bin.jsonl && cd ../main && printf '{\"b\":\"main\"}\\n' >> receipts/bin.jsonl && git commit -q -am main-bin && git push -q origin main && echo ready";
-  // what a sync left behind: stash entries, then unmerged paths ("0 0" when it left neither)
-  def hwb-left() = "echo $(git stash list | wc -l) $(git diff --name-only --diff-filter=U | wc -l)";
+  def hwb-rows-setup() = append(hwb-origin([["write", "main/receipts/gone.jsonl", "{\"g\":0}\n"], ["write", "main/receipts/bin.jsonl", "{\"b\":0}\n" ++ byte_to_str(0) ++ "\n"]]), hwb-walk-branch());
+  def hwb-rows-gone() = [["append", "walk/receipts/gone.jsonl", "{\"g\":\"walk\"}\n"], hwb-g("main", ["rm", "-q", "receipts/gone.jsonl"]), hwb-g("main", ["commit", "-q", "-m", "main-gone"]), hwb-g("main", ["push", "-q", "origin", "main"])];
+  def hwb-rows-binary() = [hwb-g("walk", ["checkout", "-q", "--", "receipts/gone.jsonl"]), hwb-g("walk", ["reset", "-q", "--hard", "origin/main"]), ["append", "walk/receipts/bin.jsonl", "{\"b\":\"walk\"}\n"], ["append", "main/receipts/bin.jsonl", "{\"b\":\"main\"}\n"], hwb-g("main", ["commit", "-q", "-am", "main-bin"]), hwb-g("main", ["push", "-q", "origin", "main"])];
+  // status -z records read as rows: a rename carries its second field, a name with a space stays one name, the
+  // dirty line says single spaces the way an unquoted echo did, and an empty status says "dirty:" alone
+  def hwb-porcelain-text() = "R  new.txt" ++ hw-nul() ++ "old.txt" ++ hw-nul() ++ " M a b.txt" ++ hw-nul() ++ "?? c.txt" ++ hw-nul();
+  def hwb-porcelain-pure() {
+   let rows = hw-rows-of(hw-fields(hwb-porcelain-text()));
+   ((Comparable) len(rows) == 3) && ((String) rows[0][1] == "new.txt") && ((String) rows[0][2] == "old.txt") && ((String) rows[1][0] == " M") && ((String) rows[1][1] == "a b.txt") && ((String) rows[2][2] == "") && ((String) hw-rows-text(rows) == "R old.txt -> new.txt M a b.txt ?? c.txt") && ((String) hw-dirty-line(hw-rows-text([])) == "dirty:") && ((String) hw-sync-said(["", 0]) == "sync=0") && ((String) hw-sync-said(["conflict: x", 1]) == "conflict: x\nsync=1") && ((String) hw-sync-said(["", nothing()]) == "sync=nothing");
+  }
   def hwb-sync-rows(ctx) {
    let root = hwb-root(ctx) ++ "/sync-rows";
    let made = host_dir_mkdir(root);
    let walk = root ++ "/walk";
-   let ready = hwb-sh(root, hwb-rows-setup());
-   let deleted = hwb-sh(root, hwb-rows-gone());
-   let gone = hwb-sh(walk, hw-sync-command("walk"));
-   let goneLeft = hwb-sh(walk, hwb-left());
+   let ready = hwb-steps(ctx, root, hwb-rows-setup());
+   let deleted = hwb-steps(ctx, root, hwb-rows-gone());
+   let gone = hwb-sync-of(ctx, walk);
+   let goneLeft = hwb-left(ctx, walk);
    let goneRow = hwb-has?(read_file(walk ++ "/receipts/gone.jsonl") ?? "", "walk");
-   let appended = hwb-sh(root, hwb-rows-binary());
-   let binary = hwb-sh(walk, hw-sync-command("walk"));
-   let binaryLeft = hwb-sh(walk, hwb-left());
-   hwb-bit(((String) ready == "ready") && ((String) deleted == "ready") && hwb-has?(gone, "dirty: M receipts/gone.jsonl") && hwb-has?(gone, "sync=1") && (!hw-conflicted?(gone)) && ((String) goneLeft == "0 0") && goneRow && ((String) appended == "ready") && hwb-has?(binary, "dirty: M receipts/bin.jsonl") && hwb-has?(binary, "sync=1") && ((String) binaryLeft == "0 0"));
+   let appended = hwb-steps(ctx, root, hwb-rows-binary());
+   let binary = hwb-sync-of(ctx, walk);
+   let binaryLeft = hwb-left(ctx, walk);
+   hwb-bit(((String) ready == "ready") && ((String) deleted == "ready") && hwb-has?(gone, "dirty: M receipts/gone.jsonl") && hwb-has?(gone, "sync=1") && (!hw-conflicted?(gone)) && ((String) goneLeft == "0 0") && goneRow && ((String) appended == "ready") && hwb-has?(binary, "dirty: M receipts/bin.jsonl") && hwb-has?(binary, "sync=1") && ((String) binaryLeft == "0 0") && hwb-porcelain-pure());
   }
   // ── only a turn that ran a gap is reviewed ──
   def hwb-review-mark(mark) {
@@ -372,10 +415,102 @@ section [form.bml] {
    let second = hw-heal-publishes(dir);
    hwb-bit((!nothing?(gone)) && ((Comparable) first[0] == 0) && ((Comparable) len(first[1]) == 1) && hwb-has?(first[1][0], "heal-other.txt holds bytes the killed publish did not write") && ((String) back == "A\n") && ((String) stays == "Z\n") && ((Comparable) marked == 1) && ((Comparable) second[0] == 2) && nil?(second[1]) && ((Comparable) host_path_exists(killed) == 0) && ((Comparable) host_path_exists(dir ++ "/publish-1.marker") == 0) && ((Comparable) host_path_exists(dir ++ "/publish-" ++ parent.str() ++ ".marker") == 1) && ((String) read_file(held) == "B\n") && hwb-has?(hw-heal-line(first), "heal-other.txt"));
   }
+  // ── the children: a stdin file, one out file, the host's exit, a deadline ──
+  // a child that is a tiny shell program (the child door spawns it by argv, as any other)
+  def hwb-sh(text) = ["/bin/sh", "-c", text];
+  def hwb-spawn-io(ctx) {
+   let io = hwb-io(ctx) ++ "/spawn";
+   let fed = hch-run-in(io, "cat", ["/bin/cat"], "hello\nworld\n", nothing());
+   let both = hch-run-in(io, "both", hwb-sh("echo out; echo err 1>&2; exit 3"), "", nothing());
+   let quiet = hch-run-quiet-in(io, "quiet", hwb-sh("echo out; echo err 1>&2"), "", nothing());
+   let first = hch-run-in(io, "again", hwb-sh("echo first"), "", nothing());
+   let second = hch-run-in(io, "again", hwb-sh("echo second"), "", nothing());
+   let unborn = hch-run-in(io, "unborn", ["/no/such/binary"], "", nothing());
+   let empty = hch-run-in(io, "empty", [], "", nothing());
+   let signalled = hch-run-in(io, "signalled", hwb-sh("kill -9 $$"), "", nothing());
+   let quick = hch-run-in(io, "quick", hwb-sh("echo fast"), "", host_monotonic_ms() + 60000);
+   hwb-bit(hch-ok?(fed) && ((String) fed[1] == "hello\nworld\n") && ((String) (read_file(io ++ "/cat.in") ?? "") == "hello\nworld\n") && ((String) (read_file(io ++ "/cat.exit") ?? "") == "0\n") && ((Comparable) both[0] == 3) && hwb-has?(both[1], "out\n") && hwb-has?(both[1], "err\n") && ((String) (read_file(io ++ "/both.exit") ?? "") == "3\n") && hch-ok?(quiet) && ((String) quiet[1] == "out\n") && ((String) first[1] == "first\n") && ((String) second[1] == "second\n") && ((String) (read_file(io ++ "/again.prev.out") ?? "") == "first\n") && ((String) (read_file(io ++ "/again.out") ?? "") == "second\n") && nothing?(unborn[0]) && hwb-has?(unborn[2], "birth refused: the binary did not exec (-4)") && ((String) unborn[1] == "") && hwb-has?(read_file(io ++ "/unborn.out") ?? "", "[host-child] birth refused") && hwb-has?(read_file(io ++ "/unborn.exit") ?? "", "none birth refused") && hwb-has?(hch-said(unborn), "[host-child] birth refused") && nothing?(empty[0]) && hwb-has?(empty[2], "(-1)") && ((Comparable) signalled[0] == 137) && hch-ok?(quick) && ((String) quick[1] == "fast\n") && ((String) quick[2] == ""));
+  }
+  // a child past its deadline is stopped: it reads nothing, what it had printed stays, and the wait ends near the deadline
+  def hwb-spawn-deadline(ctx) {
+   let io = hwb-io(ctx) ++ "/deadline";
+   let began = host_monotonic_ms();
+   let hung = hch-run-in(io, "hung", hwb-sh("echo partial; exec sleep 30"), "", began + 300);
+   let spent = host_monotonic_ms() - began;
+   let blocked = hch-run-in(io, "blocked", hwb-sh("exit 4"), "", nothing());
+   let stubborn = hch-run-in(io, "stubborn", hwb-sh("trap '' TERM; echo up; exec sleep 60"), "", host_monotonic_ms() + 200);
+   hwb-bit(nothing?(hung[0]) && ((String) hung[1] == "partial\n") && hwb-has?(hung[2], "deadline: the child ran past its deadline and was stopped") && (spent < 20000) && (spent >= 300) && ((Comparable) blocked[0] == 4) && ((Comparable) hw-backstop-ms() == 1800000) && nothing?(stubborn[0]) && hwb-has?(stubborn[2], "ended with SIGKILL") && ((String) stubborn[1] == "up\n") && hwb-has?(hch-said(hung), "partial\n[host-child] deadline") && hwb-has?(read_file(io ++ "/hung.exit") ?? "", "none deadline"));
+  }
+  // the readers that replaced `grep -F ... | tail -1` and `grep -F -e ... -e ...`, and the lines they read
+  def hwb-spawn-readers(ctx) {
+   let text = "form-organ health {}\n[local-flow-review] next: first\nmid\n[local-flow-review] next: second\n[draft] need a home\n[draft] drafted 6\n\n";
+   hwb-bit(((String) hch-last(text, "[local-flow-review] next:") == "[local-flow-review] next: second") && ((String) hch-last(text, "[nothing here]") == "") && ((String) hch-with(text, ["[draft] need", "[draft] drafted"]) == "[draft] need a home\n[draft] drafted 6") && ((String) hch-with(text, ["[absent]"]) == "") && ((String) hch-tail-line("a\nlast line\n\n") == "last line") && ((String) hch-tail-line("") == "") && ((String) hch-last("junk drift-gates pass=3 full=3 refused=0 x\n", "drift-gates pass=") == "junk drift-gates pass=3 full=3 refused=0 x") && ((String) hch-read(["/bin/echo", "  one line  "]) == "one line") && ((String) hch-read(["/no/such/binary"]) == "") && ((String) hch-join(["a", "b", "c"], "-") == "a-b-c") && ((String) hch-git-argv("d", ["status"])[2] == "d"));
+  }
+  // the build and the carrier: fresh while the product is newer than its source, else the compiler runs and the product takes its place
+  def hwb-spawn-make(ctx) {
+   let root = hwb-root(ctx) ++ "/make";
+   let made = host_dir_mkdir(root);
+   let io = root ++ "/io";
+   let source = root ++ "/prog.c";
+   let product = root ++ "/prog";
+   let built = root ++ "/prog.next";
+   let wrote = write_file_text(source, "source\n");
+   let missing = hw-make(io, "build", product, source, ["/bin/cp", source, built], built);
+   let placed = read_file(product) ?? "";
+   let moved = host_path_exists(built);
+   let slept = host_sleep_ms(1100);
+   let newer = write_file_text(product, "newer\n");
+   let fresh = hw-make(io, "build", product, source, ["/usr/bin/false"], built);
+   let kept = read_file(product) ?? "";
+   let touched = write_file_text(source, "edited\n");
+   let stale = hw-make(io, "build", product, source, ["/usr/bin/false"], built);
+   let held = read_file(product) ?? "";
+   let unborn = hw-make(io, "carrier", product, source, ["/no/such/compiler"], product);
+   let direct = hw-make(io, "carrier", product, source, ["/bin/cp", source, product], product);
+   let wrote2 = read_file(product) ?? "";
+   let first = hw-fresh?(root ++ "/no-such-product", source);
+   let argv = hw-build-argv();
+   hwb-bit(((String) missing == "build=0") && ((String) placed == "source\n") && ((Comparable) moved == 0) && ((String) fresh == "build=fresh") && ((String) kept == "newer\n") && ((String) stale == "build=1") && ((String) held == "newer\n") && ((String) unborn == "carrier=nothing") && ((String) direct == "carrier=0") && ((String) wrote2 == "edited\n") && (!first) && ((String) argv[0] == "cc") && ((String) argv[3] == "fkwu.next"));
+  }
+  // the push says the line that names a rejection, so a main that moved reads as moved; a push that went reads main=0
+  def hwb-push-steps() = append(hwb-origin([["write", "main/f.txt", "f\n"]]), [hwb-g("walk", ["checkout", "-q", "-b", "side"]), ["write", "walk/g.txt", "g\n"], hwb-g("walk", ["add", "g.txt"])]);
+  def hwb-spawn-push(ctx) {
+   let root = hwb-root(ctx) ++ "/push";
+   let made = host_dir_mkdir(root);
+   let io = hwb-io(ctx) ++ "/push";
+   let ready = hwb-steps(ctx, root, append(hwb-push-steps(), hwb-who("walk", "walk")));
+   let committed = hwb-steps(ctx, root, [hwb-g("walk", ["commit", "-q", "-m", "side"]), ["write", "main/h.txt", "h\n"], hwb-g("main", ["add", "h.txt"]), hwb-g("main", ["commit", "-q", "-m", "ahead"]), hwb-g("main", ["push", "-q", "origin", "main"])]);
+   let rejected = hw-line(hw-push-at(io, root ++ "/walk"));
+   let followed = hwb-steps(ctx, root, [hwb-g("walk", ["fetch", "-q", "origin", "main"]), hwb-g("walk", ["rebase", "-q", "origin/main"])]);
+   let pushed = hw-line(hw-push-at(io, root ++ "/walk"));
+   let unborn = hw-line(hw-push-read(hch-run-in(io, "push", ["/no/such/git"], "", nothing())));
+   hwb-bit(((String) ready == "ready") && ((String) committed == "ready") && hwb-has?(rejected, "[rejected]") && hwb-has?(rejected, "fetch first") && hwb-has?(rejected, "main=1") && hw-main-moved?(rejected, "walk") && (!hw-pushed?(rejected, "walk")) && ((String) followed == "ready") && ((String) pushed == "main=0") && hw-pushed?(pushed, "walk") && (!hw-main-moved?(pushed, "walk")) && hwb-has?(unborn, "main=nothing") && (!hw-pushed?(unborn, "walk")));
+  }
+  def hwb-spawn(ctx) = hwb-bit(((Comparable) hwb-spawn-io(ctx) == 1) && ((Comparable) hwb-spawn-deadline(ctx) == 1) && ((Comparable) hwb-spawn-readers(ctx) == 1) && ((Comparable) hwb-spawn-make(ctx) == 1) && ((Comparable) hwb-spawn-push(ctx) == 1));
+  // ── the clock: the zone from a POSIX footer, the day and the hhmm it puts an instant on, with no child ──
+  def hwb-tzif(footer) = "TZif2" ++ byte_to_str(0) ++ "binary" ++ byte_to_str(0) ++ "\nTZif2" ++ byte_to_str(0) ++ "more\n" ++ footer ++ "\n";
+  def hwb-zone(footer) = hw-zone-of-tz(hwb-tzif(footer));
+  def hwb-hour(h) = h * 3600000;
+  def hwb-zones(ctx) = ((Comparable) hwb-zone("WITA-8") == 28800000) && ((Comparable) hwb-zone("<+08>-8") == 28800000) && ((Comparable) hwb-zone("UTC0") == 0) && ((Comparable) hwb-zone("<-03>3") == 0 - hwb-hour(3)) && ((Comparable) hwb-zone("IST-5:30") == hwb-hour(5) + 1800000) && ((Comparable) hwb-zone("EST5") == 0 - hwb-hour(5)) && nothing?(hwb-zone("EST5EDT,M3.2.0,M11.1.0")) && nothing?(hwb-zone("CET-1CEST,M3.5.0,M10.5.0/3")) && nothing?(hwb-zone("")) && nothing?(hwb-zone("garbage")) && nothing?(hw-zone-of-tz("not a tzif file\nWITA-8\n")) && nothing?(hw-zone-of-tz("")) && nothing?(hw-zone-of-tz(nothing())) && ((String) hw-tz-footer(hwb-tzif("WITA-8")) == "WITA-8") && ((Comparable) hw-zone-of-z("+0800") == 28800000) && ((Comparable) hw-zone-of-z("-0530\n") == 0 - 19800000) && nothing?(hw-zone-of-z("")) && nothing?(hw-zone-of-z("+08"));
+  // fixed instants (unix ms) against a zone: [instant, zone, day, hhmm]
+  def hwb-instants() = [[1790883000000, hwb-hour(8), "2026-10-02", 330], [1790915400000, hwb-hour(8), "2026-10-02", 1230], [1790870399000, hwb-hour(8), "2026-10-01", 2359], [1790870400000, hwb-hour(8), "2026-10-02", 0], [1767236400000, 0 - hwb-hour(5), "2025-12-31", 2200], [1709208000000, 0, "2024-02-29", 1200], [1709251200000, 0, "2024-03-01", 0]];
+  def hwb-instant?(row) = ((String) hw-day-in(row[1], row[0]) == row[2]) && ((Comparable) hw-hhmm-in(row[1], row[0]) == row[3]);
+  def hwb-instants-hold(rows) = nil?(rows) ? true : hwb-instant?(rows[0]) && hwb-instants-hold(rows[1:]);
+  // the host's own reading agrees with `date` (read before and after, so a minute turning between the two reads cannot fail it)
+  def hwb-host-clock(ctx) {
+   let before = hch-read(["/bin/date", "+%F %H%M"]);
+   let zone = hw-zone-ms();
+   let day = hw-day();
+   let hhmm = hw-hhmm();
+   let after = hch-read(["/bin/date", "+%F %H%M"]);
+   !nothing?(zone) && (zone >= 0 - hwb-hour(12)) && (zone <= hwb-hour(14)) && hwb-has?(before ++ "|" ++ after, day ++ " ") && (hwb-has?(before, hwb-pad4(hhmm)) || hwb-has?(after, hwb-pad4(hhmm)));
+  }
+  def hwb-pad4(n) = n < 10 ? "000" ++ n.str() : n < 100 ? "00" ++ n.str() : n < 1000 ? "0" ++ n.str() : n.str();
+  def hwb-clock(ctx) = hwb-bit(hwb-zones(ctx) && hwb-instants-hold(hwb-instants()) && nothing?(hw-hhmm-in(nothing(), 1790883000000)) && ((String) hw-day-in(nothing(), 1790883000000) == "") && hwb-host-clock(ctx));
  }
  let ctx = hwb-fresh();
  nothing?(ctx) ? form_error("host-walk band needs a fresh directory under temp_dir") : 0;
- let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal], ["sync-rows", 2097152, 1, hwb-sync-rows], ["publish-absent", 4194304, 1, hwb-publish-absent], ["band-after", 8388608, 1, hwb-band-after], ["planned", 16777216, 1, hwb-planned], ["queue-paths", 33554432, 1, hwb-queue-paths]]);
+ let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal], ["sync-rows", 2097152, 1, hwb-sync-rows], ["publish-absent", 4194304, 1, hwb-publish-absent], ["band-after", 8388608, 1, hwb-band-after], ["planned", 16777216, 1, hwb-planned], ["queue-paths", 33554432, 1, hwb-queue-paths], ["spawn", 67108864, 1, hwb-spawn], ["clock", 134217728, 1, hwb-clock]]);
  host_dir_rmdir(hwb-root(ctx));
  verdict;
 }
