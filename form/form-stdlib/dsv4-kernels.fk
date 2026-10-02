@@ -73,6 +73,8 @@ section [form.bml] {
     // a NaN is never chosen and an all-NaN vector answers index 0xFFFFFFFF (a reading that did not arrive, never a plausible 0). The NaN test is on the bits: metal_pipeline
     // compiles with fast math, under which `v == v` is assumed true and the band witnessed `v == v` pass a NaN (index 0 answered); the pragmas do not change that.
     def dkr-argmax-body() = "kernel void form_dsv4_argmax_f32(device const float* x [[buffer(0)]], device uint* out_idx [[buffer(1)]], device float* out_val [[buffer(2)]], constant uint& n [[buffer(3)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]]) { threadgroup float sv[1024]; threadgroup uint si[1024]; uint t = tpitg.x; uint T = ntg.x; float bv = 0.0f; uint bi = 4294967295u; for (uint j = t; j < n; j += T) { float v = x[j]; bool nanv = (as_type<uint>(v) & 2147483647u) > 2139095040u; if (!nanv && (bi == 4294967295u || v > bv)) { bv = v; bi = j; } } sv[t] = bv; si[t] = bi; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint s = T / 2u; s > 0u; s = s / 2u) { if (t < s) { float ov = sv[t + s]; uint oi = si[t + s]; bool take = (si[t] == 4294967295u) ? (oi != 4294967295u) : (oi != 4294967295u && (ov > sv[t] || (ov == sv[t] && oi < si[t]))); if (take) { sv[t] = ov; si[t] = oi; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (t == 0u) { out_idx[0] = si[0]; out_val[0] = sv[0]; } } ";
+    // the NaN scan: counts the words of an f32 buffer whose exponent bits are all ones (NaN and both infinities), by the bits. See dkr-logits-clean? for why it exists.
+    def dkr-nan-count-body() = "kernel void form_dsv4_nan_count(device const float* x [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& n [[buffer(2)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]]) { threadgroup uint part[1024]; uint t = tpitg.x; uint T = ntg.x; device const uint* w = (device const uint*)x; uint c = 0u; for (uint j = t; j < n; j += T) { if ((w[j] & 2139095040u) == 2139095040u) c = c + 1u; } part[t] = c; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint s = T / 2u; s > 0u; s = s / 2u) { if (t < s) part[t] = part[t] + part[t + s]; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (t == 0u) out[0] = part[0]; } ";
 
     // hc_post reading the post gates and the combine matrix out of the split kernel's own output (pre | post | comb, so post at n_hc and comb at 2 n_hc): the carrier binds a buffer at its view offset only,
     // so the restored form_hc_post_f32 (post and comb as buffers of their own) would need two copies a layer. Same arithmetic: out[dst][d] = block[d] * post[dst] + sum over src ascending of
@@ -89,7 +91,7 @@ section [form.bml] {
     // hc: the seven hyper-connection kernels
     def dkr-unit-hc() = dkr-pragmas() ++ hc-msl-unit() ++ dkr-hc-post-split-body();
     // moe: the router, both routing regimes, the clamped SwiGLU, plus the id-weighted SwiGLU, the slot sum and the argmax
-    def dkr-unit-moe() = dkr-pragmas() ++ dsv4-stack-ffn-source() ++ dkr-swiglu-id-body() ++ dkr-sum-slots-body() ++ dkr-argmax-body();
+    def dkr-unit-moe() = dkr-pragmas() ++ dsv4-stack-ffn-source() ++ dkr-swiglu-id-body() ++ dkr-sum-slots-body() ++ dkr-argmax-body() ++ dkr-nan-count-body();
     // experts: the MXFP4 and IQ2_XXS expert matvecs by ids
     def dkr-unit-experts() = dkr-pragmas() ++ dkr-inc() ++ mx4m-msl-helpers() ++ iq2m-msl-helpers() ++ dkr-mx4-id-body() ++ dkr-iq2-id-body();
     // comp: the second cache's four kernels
@@ -201,10 +203,44 @@ section [form.bml] {
     def dkr-maxdiff-go(a, b, i, best) = i == len(a) ? best : dkr-maxdiff-go(a, b, i + 1, dkr-abs(a[i] - b[i]) > best ? dkr-abs(a[i] - b[i]) : best);
     def dkr-maxdiff(a, b) = dkr-maxdiff-go(a, b, 0, 0.0);
     // finite as an f32 is (the compressor's unwritten score rows hold -1e30 on purpose; an unrun buffer holds 1.5e16 and is caught by the size of its disagreement)
-    def dkr-finite?(v) = v == v && dkr-abs(v) < 3.0e38;
+    // A NaN or an infinity does not arrive as a number: ln-f32-decode answers null for it (value_kind "null"), and an order test on a null stops ("only numbers have an order"). So the kind is
+    // read FIRST, and a reading that is not a number is not finite, never a stop.
+    def dkr-number?(v) = value_kind(v) == "float" || value_kind(v) == "int";
+    def dkr-finite?(v) = dkr-number?(v) && v == v && dkr-abs(v) < 3.0e38;
     def dkr-all-finite?(xs) = len(xs) == 0 ? true : (dkr-finite?(xs[0]) && dkr-all-finite?(xs[1:]));
-    // the normalised disagreement; 1e30 when the lengths differ or a value is not finite (a sentinel left by an unrun kernel is 1.5e16 and reads as a huge nd)
-    def dkr-nd(gpu, ref) = (len(gpu) != len(ref) || len(ref) == 0 || !dkr-all-finite?(gpu)) ? 1.0e30 : (dkr-maxabs(ref) <= 0.0 ? dkr-maxdiff(gpu, ref) : dkr-maxdiff(gpu, ref) / dkr-maxabs(ref));
+    // the index of the first reading that is not finite, or -1
+    def dkr-first-bad(xs, i) = i == len(xs) ? 0 - 1 : (dkr-finite?(xs[i]) ? dkr-first-bad(xs, i + 1) : i);
+    // the normalised disagreement; 1e30 when the lengths differ or a value (of either side) is not finite (a sentinel left by an unrun kernel is 1.5e16 and reads as a huge nd)
+    def dkr-nd(gpu, ref) = (len(gpu) != len(ref) || len(ref) == 0 || !dkr-all-finite?(gpu) || !dkr-all-finite?(ref)) ? 1.0e30 : (dkr-maxabs(ref) <= 0.0 ? dkr-maxdiff(gpu, ref) : dkr-maxdiff(gpu, ref) / dkr-maxabs(ref));
+    // why a comparison read the failure value, in words the band can print: which stage failed (the length, a non-finite GPU reading and where, a non-finite reference reading and where)
+    def dkr-nd-why(gpu, ref) = len(gpu) != len(ref) ? ("length " ++ len(gpu).str() ++ " against " ++ len(ref).str())
+        : len(ref) == 0 ? "empty reference"
+        : dkr-first-bad(gpu, 0) >= 0 ? ("non-finite GPU reading at index " ++ dkr-first-bad(gpu, 0).str() ++ " of " ++ len(gpu).str())
+        : dkr-first-bad(ref, 0) >= 0 ? ("non-finite reference reading at index " ++ dkr-first-bad(ref, 0).str() ++ " of " ++ len(ref).str()) : "finite";
     def dkr-within?(gpu, ref) = dkr-nd(gpu, ref) < dkr-floor();
+
+    // ---- the NaN scan ------------------------------------------------------------------------------------------------------
+    // The argmax answers 0xFFFFFFFF only for an ALL-NaN vector: one NaN logit among numbers is skipped, and a bad dequant that poisons a few logits would be argmaxed silently. The physical
+    // driver calls dkr-logits-clean? on the logits buffer BEFORE it trusts the argmax and aborts when the answer is not true. The scan counts the words whose exponent bits are all ones (NaN and
+    // both infinities) by the bits: metal_pipeline compiles with fast math, under which `v == v` and `v != v` are not tests of a NaN (the band holds that: the `v != v` scan counts 0).
+    // One group of T threads (a power of two, at most 1024), each strides the buffer, a tree sums the counts.
+    // (the kernel text, dkr-nan-count-body, sits with the other kernel bodies above the units: a name used above its definition binds numb in this body)
+    // the count of non-finite words in the first n floats of the buffer xbuf, or nothing when the scan could not run (the pipeline is refused, the enqueue or the read fails): it allocates its own
+    // four bytes, syncs, reads, and frees them in synced rounds
+    def dkr-nan-count(pipe, xbuf, n) {
+        pipe <= 0 ? nothing() : {
+            let ob = metal_buf_alloc(4);
+            let w = metal_buf_write(ob, 0, dkr-sentinel(4));
+            let e = metal_enqueue(pipe, md-bind16([xbuf, ob], [n], 256, 0, 1, 0), 1);
+            let raw = metal_buf_read(ob, 0, 4);
+            let left = dvb-free-rounds([ob], 4);
+            (ob > 0 && e == 1 && str_len(raw) == 4 && len(left) == 0) ? dkr-u32-at(raw, 0) : nothing();
+        };
+    }
+    // true only when the scan ran and counted ZERO: a scan that did not run is not clean
+    def dkr-logits-clean?(pipe, xbuf, n) {
+        let c = dkr-nan-count(pipe, xbuf, n);
+        nothing?(c) ? false : c == 0;
+    }
     0;
 }
