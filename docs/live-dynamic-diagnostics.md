@@ -215,8 +215,11 @@ The flows run on it:
   main, read the gates, fast-forward main, each a live step. A fast-forward
   refused because main moved meanwhile is met at once: the branch follows main
   again, the gates read again, and the push goes again, twice at most. A push
-  refused for any other reason, or a rebase that conflicts (its files named),
-  meets no repair and holds.
+  refused for any other reason, or a rebase that conflicts in a file the body
+  does not know (named, the rebase aborted), meets no repair and holds. A rebase
+  that stops on a river of rows or on a page the body draws is settled inside the
+  follow itself (`host-walk-settle.bml`, the reunion's rounds): the sync says
+  `healed:` and `redrawn:` before `sync=0`, and the turns go on.
 - The gates (`gate/drift-gates.bml`): a landing runs only the rows whose ground
   moved since origin/main. Each kernel row names the paths it guards; a row whose
   ground no path touches sits out, said on its own line and absent from the fold.

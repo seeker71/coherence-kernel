@@ -78,8 +78,12 @@ native-turn-ladder-band 262143 · local-flow-reading-band 4194303  (a memory end
                                 checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
                                 the wall, its renewals and the prompt IDs they re-fed; a lane killed at its deadline writes no counts
                                 and its counts are folded from its stamps and said so; the day option reproduces to the ms)
-host-walk-band 8589934591     (the walk's turn waits for memory within the window and a held answer takes no turn;
-                                host-walk.bml is an aggregator over nine parts `host-walk-<seam>.bml`, each under 12000 bytes so the
+host-walk-band 137438953471   (the walk's turn waits for memory within the window and a held answer takes no turn;
+                                the sync settles what the body knows through the reunion's rounds: a drawn page takes main's side
+                                and is remade into one new commit, a river of at_unix_ms rows is joined by union, and the sync
+                                says `healed:` before sync=0; a file the body does not know, or the same conflict past eight
+                                rounds, aborts the rebase and names its files;
+                                host-walk.bml is an aggregator over ten parts `host-walk-<seam>.bml`, each under 12000 bytes so the
                                 local lane reads one whole and can read it twice, and every definition's name (not its body) is pinned
                                 in tests/fixtures/host-walk-defs.txt)
 form-cli-landing-band 16383   (the landing and the walk read every child's exit from `host_wait` through
