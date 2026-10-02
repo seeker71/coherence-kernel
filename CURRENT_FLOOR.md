@@ -44,10 +44,10 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=35 claims=753 broken=0 (each broken claim named on its own line; 2026-10-02)
+./fkwu observe/door-link-health-run.bml  -> docs=35 claims=759 broken=0 (each broken claim named on its own line; 2026-10-02)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=307 readable=144 unreadable=163 absent=0 seen=1 flaws=0, exit 0
+./fkwu observe/band-truth-run.bml        -> bands=312 readable=144 unreadable=168 absent=0 seen=1 flaws=0, exit 0
                                             (each band's declared full read against the most its claims sum to, and
                                             the queue and manifest copies of a full against the head pin, with no
                                             band run, in about 0.3 s; a decimal or count fold that stands on purpose
