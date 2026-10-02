@@ -11,7 +11,7 @@
 ;   1     built: the writer's byte count is the file's size, the size is the data base 7,168 plus the data region the layout promises, the file begins GGUF version 3, 86 tensors and 36 pairs
 ;   2     the census through the table: 25 Q8_0 (8), 6 IQ2_XXS (16), 3 Q2_K (10), 17 F16, 34 F32, 1 I32 and no MXFP8 or MXFP4, every row's type, dims, offset and priced bytes (gm-bytes) as the writer set them;
 ;         the layout reads gate 16, up 16, down 10 and hidden 256 on all three layers, is consistent, has nothing unpriced and 24 28 28 driver tensors
-;   4     every tensor's bytes read from the file equal what the generator says and every pad is zero; the whole file's SHA-256 is pinned and a second build is the same file
+;   4     every tensor's bytes read from the file equal what the generator says and every pad is zero; the whole file's SHA-256 is pinned (eb93eed0...87b0e1, 1,778,144 bytes) and a second build is the same file
 ;   8     the first fixture's pinned digest still reads b90181a1...1353b5e (its generator did not move) and its Q8_0-free census is unchanged (25 MXFP8, 6 MXFP4, 3 IQ2_XXS, no type 8 or 10)
 ;   16    the oracle admits the file (dfo-open, dfo-admit-model 1, dfo-admit-position 0 and 4095) and its geometry is the one built
 ;   32    the oracle's Q8_0 matrix (blk.0.attn_q_a, 256 -> 64; blk.1.attn_kv; output.weight; the shared down) equals a dot over the carver's own weights (q80-flat-at), within 1e-12 of the row peak,
@@ -19,7 +19,8 @@
 ;   64    the oracle's Q2_K expert (blk.1.ffn_down_exps experts 0, 2 and 3; blk.2 expert 1) equals a dot over the carver's own weights (q2k-at), within 1e-12 of the row peak; the weights are sane
 ;         (every Q8_0 scale in [2^-13, 2^-11), every Q2_K d in [2^-10, 2^-8) and dmin in [2^-11, 2^-9), the oracle's readings finite and under 8 on a ramp)
 ;   128   the checks can fail: a Q8_0 block stride read as 33 bytes, a Q2_K min read as the scale, a flipped byte inside a Q2_K scale byte and a flipped Q8_0 code each read far from the carver or
-;         from the unflipped oracle; a copy cut short and an expert tensor retyped to an unpriced type are refused by the oracle
+;         from the unflipped oracle; a copy cut short and an expert tensor retyped to an unpriced type are refused by the oracle; and the layout's gap list (dvl-driver-gaps: the one table the layer, the head and
+;         the validation window read) is EMPTY on this fixture and reads one line each for a Q2_K stack whose columns the 256-wide block does not tile and a Q8_0 projection retyped F16
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- the fixture is written and read as a binary file through write_file and read_file_slice (rust and ts hand back a different file there) and a SHA-256 is taken
 ; through the Form-emitted CPU door (a Darwin ARM64 in-RAM native). The band writes only under temp_dir and removes what it made.
@@ -29,7 +30,7 @@ section [form.bml] {
   def dqb-bit(held, bit) = held ? bit : 0;
   def dqb-hex(d, i) = i == len(d) ? "" : (substring("0123456789abcdef", str_byte_at(d, i) / 16, (str_byte_at(d, i) / 16) + 1) ++ substring("0123456789abcdef", str_byte_at(d, i) % 16, (str_byte_at(d, i) % 16) + 1) ++ dqb-hex(d, i + 1));
   def dqb-sha(path) { let d = record_get(sho-file(path), "digest"); len(d) == 32 ? dqb-hex(d, 0) : ""; }
-  def dqb-pinned() = "PIN";
+  def dqb-pinned() = "eb93eed0aaf888853f74e18329919fe35f8f6db5ab61caf7363272824287b0e1";
   def dqb-first-pinned() = "b90181a115536345bbbe503098c1418d38403c9616555d98d343241ce1353b5e";
   def dqb-src(path) = eqr-of-file(path, 0, file_size(path));
   def dqb-abs(x) = x < 0.0 ? 0.0 - x : x;
@@ -230,6 +231,25 @@ section [form.bml] {
    let x4 = host_path_remove(ret);
    caught && w1 == str_len(whole) && w2 == str_len(whole) && w3 == 1000000 && x1 == 0 && x2 == 0 && x3 == 0 && x4 == 0;
   }
+
+  // the layout's gap list (dvl-driver-gaps, the one table the layer, the head and the validation window read) is EMPTY on this fixture and on the first one, and reads one line for a Q2_K stack
+  // whose columns the 256-wide block does not tile, and one for a Q8_0 projection retyped to a type no kernel reads
+  def dqb-retype-dims(specs, name, ty, dims) = len(specs) == 0 ? [] : cons(specs[0][0] == name ? [specs[0][0], ty, dims, specs[0][3], specs[0][4], specs[0][5]] : specs[0], dqb-retype-dims(specs[1:], name, ty, dims));
+  def dqb-gaps-of(path) = dvl-driver-gaps(dvl-open(dqb-src(path)));
+  def dqb-gap-reads(root, path) {
+   let untiled = root ++ "-untiled.gguf";
+   let f16ed = root ++ "-f16ed.gguf";
+   let w1 = write_file(untiled, dfx-image(dqb-retype-dims(dfx-v-specs(), "blk.2.ffn_down_exps.weight", 10, [64, 256, 4])));
+   let w2 = write_file(f16ed, dfx-image(dqb-retype(dfx-v-specs(), "blk.0.attn_kv.weight", 1)));
+   let clean = dqb-gaps-of(path);
+   let a = dqb-gaps-of(untiled);
+   let b = dqb-gaps-of(f16ed);
+   let said = print_str("  gaps: clean " ++ len(clean).str() ++ ", untiled Q2_K " ++ a.str() ++ ", Q8_0 retyped F16 " ++ b.str());
+   let x1 = host_path_remove(untiled);
+   let x2 = host_path_remove(f16ed);
+   len(clean) == 0 && len(a) == 1 && dqb-has?(a[0], "ffn_down_exps.weight type 10") && len(b) == 1 && dqb-has?(b[0], "attn_kv.weight type 1") && x1 == 0 && x2 == 0 && w1 > 0 && w2 > 0;
+  }
+  def dqb-has?(s, part) = str_find(s, part, 0) >= 0;
  }
  let root = temp_dir() ++ "/dsv4-fixture-q8q2-band-" ++ now_unix_ms().str();
  let pathA = root ++ "-a.gguf";
@@ -254,7 +274,7 @@ section [form.bml] {
  let k32 = print_str("  claim 32 at " ++ (now_unix_ms() - t0).str() ++ " ms");
  let c64 = dqb-bit(try dqb-oracle-q2k(pathA) catch false, 64);
  let k64 = print_str("  claim 64 at " ++ (now_unix_ms() - t0).str() ++ " ms");
- let c128 = dqb-bit(try dqb-stride-33(pathA, dfo-open(pathA)) && dqb-min-as-scale(pathA, dfo-open(pathA)) && dqb-negatives(root, pathA, specs) catch false, 128);
+ let c128 = dqb-bit(try dqb-stride-33(pathA, dfo-open(pathA)) && dqb-min-as-scale(pathA, dfo-open(pathA)) && dqb-negatives(root, pathA, specs) && dqb-gap-reads(root, pathA) catch false, 128);
  let digest = dqb-sha(pathA);
  let r1 = host_path_remove(pathA);
  let r2 = host_path_remove(pathB);
