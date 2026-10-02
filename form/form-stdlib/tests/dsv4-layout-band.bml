@@ -11,7 +11,7 @@
 ; and 1,202 driver tensors from the lead's design (derived from the old runner), and every per-type and per-layer count from gm-emit-manifest's own
 ; printed table (a different walk of the same header).
 ;
-; Verdict 511 when every claim lands:
+; Verdict 1023 when every claim lands:
 ;   1     the fixture, from exactly its 7,168 header bytes: 3 layers, 86 tensors, data base 7,168, and the widths (n_embd 256, 2 heads of 128, nrot 64, q rank 64,
 ;         2 groups of rank 32, 4 streams, vocabulary 32, 2 of 4 experts, shared 32, mix 24) with the numeric keys the driver reads (eps, rope base, factor)
 ;   2     the fixture's layer table: ratios 0 4 2, compressing on 1 and 2 with coff 2 and 1 (read from the compressor's own width) and ape rows equal to the ratio,
@@ -32,6 +32,12 @@
 ;         1,515,232, and the fixture's layout from those bytes equals its layout from the whole file
 ;   256   the layout can refuse: a fixture built without layer 1's compressor kv tensor reads inconsistent (ratio 4 with no compressor), one built without a layer's
 ;         shared up projection reads a missing driver tensor, and one that retypes a layer's router to an unpriced type reads unpriced
+;   512   THE STATE'S PRICE FROM FIRST PRINCIPLES (2026-10-03: the first physical window read the state stage's wired growth 10.8 times its price and the price was right: the machine's wired memory moved
+;         by itself): from the 44 ratios and the key length alone, with plain arithmetic that calls no dvl- function, the IQ2XXS file's state at 64 positions is 43 raw arenas of 131,072 B (5,636,096),
+;         the compressed rows (17 of 2,048 B on each of 21 ratio-4 layers, 1 on each of 20 ratio-128 layers: 772,096) and the compressors' state and score (32,768 B twice on the 21 and 262,144 B twice on the 20:
+;         11,862,016), 18,270,208 in all, and each term is dvl-raw-total, dvl-comp-rows-total, dvl-comp-state-total; at 8,192 positions 824,068,096 (812,206,080 that grow and the same 11,862,016), and doubling the
+;         capacity from 64 to 128 adds 6,365,184 and no state. The fixture's 142,336 is its own hand sum (98,304 + 25,600 + 18,432). Plants: a price that drops the compressor term (6,408,192 at 64) and
+;         one that charges the state once a capacity step (128 times it at 8,192) each read a different number from the hand sum
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- bits 8 to 128 read the two model files' headers (host-local paths outside the tree; the 8 MB windows), and every bit reads
 ; the fixture through write_file and read_file_slice (rust and ts hand back a different file there). No weight is read and no model is opened.
@@ -101,6 +107,32 @@ section [form.bml] {
     && dvl-kv-total(m, 1024) == total1024 && len(dvl-driver-names(m)) == 1202 && dlb-all(m, "missing", 0, 0) && dvl-unpriced(m) == 0 && dvl-consistent?(m);
   }
 
+  // ---- 512
+  // the state's price by hand: no dvl- function, only the ratios and the key length. A ratio-4 layer overlaps its windows (coff 2), a ratio-128 layer does not (coff 1); state and score are 2 buffers of
+  // (coff x ratio) rows of (coff x key_length) f32, the compressed rows are cap / ratio + 1 of key_length f32
+  def dlb-coff(r) = r == 4 ? 2 : 1;
+  def dlb-hand-raw(n, hd, cap) = n * cap * hd * 4;
+  def dlb-hand-rows(rs, hd, cap) = len(rs) == 0 ? 0 : (rs[0] > 0 ? ((cap / rs[0]) + 1) * hd * 4 : 0) + dlb-hand-rows(rs[1:], hd, cap);
+  def dlb-hand-state(rs, hd) = len(rs) == 0 ? 0 : (rs[0] > 0 ? 2 * (dlb-coff(rs[0]) * rs[0]) * (dlb-coff(rs[0]) * hd) * 4 : 0) + dlb-hand-state(rs[1:], hd);
+  def dlb-hand(rs, hd, cap) = dlb-hand-raw(len(rs), hd, cap) + dlb-hand-rows(rs, hd, cap) + dlb-hand-state(rs, hd);
+  def dlb-state-price(iq2, fix) {
+   let rs = dlb-real-ratios()[0:43];
+   let hd = dlb-g(iq2, "hd");
+   let t64 = dlb-hand(rs, hd, 64);
+   let t8192 = dlb-hand(rs, hd, 8192);
+   let plantDrop = dvl-raw-total(iq2, 64) + dvl-comp-rows-total(iq2, 64);
+   let plantPerStep = dvl-raw-total(iq2, 8192) + dvl-comp-rows-total(iq2, 8192) + ((8192 / 64) * dvl-comp-state-total(iq2));
+   let said = print_str("  state price at 64: hand " ++ t64.str() ++ " layout " ++ dvl-kv-total(iq2, 64).str() ++ " (raw " ++ dvl-raw-total(iq2, 64).str() ++ " rows " ++ dvl-comp-rows-total(iq2, 64).str() ++ " state " ++ dvl-comp-state-total(iq2).str() ++ "); at 8192: " ++ t8192.str() ++ "; plants " ++ plantDrop.str() ++ " " ++ plantPerStep.str());
+   hd == 512 && len(rs) == 43 && dlb-hand-raw(43, hd, 64) == 5636096 && dlb-hand-rows(rs, hd, 64) == 772096 && dlb-hand-state(rs, hd) == 11862016 && t64 == 18270208
+    && dvl-raw-total(iq2, 64) == 5636096 && dvl-comp-rows-total(iq2, 64) == 772096 && dvl-comp-state-total(iq2) == 11862016 && dvl-kv-total(iq2, 64) == t64
+    && t8192 == 824068096 && dvl-kv-total(iq2, 8192) == t8192 && dlb-hand-rows(rs, hd, 8192) + dlb-hand-raw(43, hd, 8192) == 812206080
+    && dvl-kv-total(iq2, 128) - dvl-kv-total(iq2, 64) == 6365184 && dlb-hand(rs, hd, 128) - t64 == 6365184
+    && plantDrop == 6408192 && plantDrop != t64 && (t64 - plantDrop) == dvl-comp-state-total(iq2)
+    && plantPerStep != t8192 && plantPerStep == t8192 + (127 * 11862016)
+    && dlb-hand([0, 4, 2], 128, 64) == 142336 && dlb-hand-raw(3, 128, 64) == 98304 && dlb-hand-rows([0, 4, 2], 128, 64) == 25600 && dlb-hand-state([0, 4, 2], 128) == 18432
+    && dvl-raw-total(fix, 64) + dvl-comp-rows-total(fix, 64) + dvl-comp-state-total(fix) == 142336 && dvl-kv-total(fix, 64) == 142336;
+  }
+
   // ---- 32
   def dlb-reap-table(m) {
    dlb-g(m, "arch") == "deepseek4" && dlb-g(m, "layers-n") == 43 && dlb-g(m, "table-blocks") == 43 && dlb-g(m, "tensors") == 1406 && dlb-g(m, "data-base") == 5339744
@@ -163,7 +195,8 @@ section [form.bml] {
  let c64 = dlb-bit(try dlb-43(iq2, reap, reapSrc) catch false, 64);
  let c128 = dlb-bit(try dlb-header-only(iq2Src, reapSrc, iq2, reap, fixSrc, fixFull, fixPath) catch false, 128);
  let c256 = dlb-bit(try dlb-negatives(specs) catch false, 256);
+ let c512 = dlb-bit(try dlb-state-price(iq2, fix) catch false, 512);
  let removed = host_path_remove(fixPath);
- print_str("dsv4-layout-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256;
+ print_str("dsv4-layout-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512;
 }

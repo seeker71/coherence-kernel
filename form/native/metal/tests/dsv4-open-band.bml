@@ -5,7 +5,7 @@
 ; scratch buffers sized from the layout (dsv4-layout.fk's 28, the head's gate buffer, and 22 extras), and a state row [kv, comp state, comp score, comp rows] per block. This band opens ONLY the fixture it writes under
 ; temp_dir (1,515,232 bytes); no model, voice or session is opened and no real file is read past a header. It reads the carrier's counters (metal_live words 2 and 4) before and after each step.
 ;
-; Verdict 511 when every claim lands:
+; Verdict 1023 when every claim lands:
 ;   1     admission and shape: opening the fixture at capacity 8 answers a 13-slot context; q38-context-ok? (Qwen's own checker) reads 1; the layout in slot 2 is the fixture's (3 blocks, n_embd 256,
 ;         86 tensors, ratios 0 4 2); the pipelines are the 72 kernels of the seven graph units, every handle positive
 ;   2     scratch: 51 buffers (28 of the layout, head-w, 22 extras; the logits are bs[28], the seat Qwen's sampler reads, and the capacity the context was opened for is kept in the layout record), distinct positive handles, every one read at its exact planned size and refused one byte past it; sizes pinned by value (resid 4,096,
@@ -24,6 +24,11 @@
 ;         start, and freeing the state returns them
 ;   256   a refused pipeline refuses the open: dsv4-open-span-with given the graph units plus a source that does not compile (its kernel's handle is 0) answers [] and moves no counter (nothing was
 ;         mapped or allocated before the check); the same call with the graph units alone opens
+;   512   THE PRICE IS THE LIVE BYTES (2026-10-03: the first physical window read the state stage's wired growth 10.8 times its price; this bit is what ties dvl-kv-total to what dsv4-new-state really allocates, read from the
+;         device's own ledger, metal_live word 18 = currentAllocatedSize, which no other process moves): on the fixture the state at capacities 1,024, 8,192 and 65,536 grows the ledger by 1,985,536, 15,748,096 and 125,848,576
+;         B priced, each read within one 16 KiB page of its price (the allocator rounds up a small constant: 13,312 B on this device) and freed back to the byte (a state of a few KiB, as at capacity 8, can sit inside the
+;         allocator's own slack and is not claimed). Plants: a price that drops the compressor term and one that charges the state once a capacity step each read further than a page from the ledger; the ledger is
+;         where the price is held, and a wired reading is not (the machine's wired memory is every process's)
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door (metal_pipeline, metal_buf_alloc, metal_buf_from_file, metal_buf_read, metal_buf_free, metal_live).
 ; The band writes only under temp_dir and removes what it made.
@@ -106,6 +111,30 @@ section [form.bml] {
    let ctx = dsv4-open-span-with(path, 8, 1, dob-bad-units());
    len(ctx) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0;
   }
+  // ---- 512
+  // the device's own bytes for this process (metal_live word 18); 0 when Metal is not up
+  def dob-own() = len(metal_live()) > 18 ? metal_live()[18] : 0;
+  def dob-page() = 16384;
+  def dob-within(d, price) = abs(d - price) < dob-page();
+  // the ledger's growth for a state at cap positions, freed after: [growth, the layout's price, handles left after the free, the ledger back at where it was]
+  def dob-grown(ctx, m, cap) {
+   let b0 = dob-own();
+   let sts = dsv4-new-state(m, ctx[0], cap);
+   let grown = dob-own() - b0;
+   let left = nothing?(sts) ? [0] : dsv4-free-state(sts);
+   [grown, dvl-kv-total(m, cap), len(left), dob-own() - b0];
+  }
+  def dob-plant-drop(m, cap) = dvl-raw-total(m, cap) + dvl-comp-rows-total(m, cap);
+  def dob-plant-step(m, cap) = dvl-raw-total(m, cap) + dvl-comp-rows-total(m, cap) + ((cap / 64) * dvl-comp-state-total(m));
+  def dob-priced(ctx) {
+   let m = ctx[2];
+   let a = dob-grown(ctx, m, 1024);
+   let b = dob-grown(ctx, m, 8192);
+   let c = dob-grown(ctx, m, 65536);
+   let said = print_str("  ledger growth against price: 1024 " ++ a[0].str() ++ "/" ++ a[1].str() ++ ", 8192 " ++ b[0].str() ++ "/" ++ b[1].str() ++ ", 65536 " ++ c[0].str() ++ "/" ++ c[1].str() ++ "; back to " ++ [a[3], b[3], c[3]].str() ++ "; plants at 8192 " ++ dob-plant-drop(m, 8192).str() ++ " " ++ dob-plant-step(m, 8192).str());
+   a[1] == 1985536 && b[1] == 15748096 && c[1] == 125848576 && dob-within(a[0], a[1]) && dob-within(b[0], b[1]) && dob-within(c[0], c[1]) && a[2] == 0 && b[2] == 0 && c[2] == 0 && a[3] == 0 && b[3] == 0 && c[3] == 0
+    && !dob-within(b[0], dob-plant-drop(m, 8192)) && !dob-within(b[0], dob-plant-step(m, 8192)) && !dob-within(c[0], dob-plant-drop(m, 65536)) && !dob-within(c[0], dob-plant-step(m, 65536));
+  }
   def dob-retype(specs, name, ty) = len(specs) == 0 ? [] : cons(specs[0][0] == name ? [specs[0][0], ty, specs[0][2], specs[0][3], specs[0][4], specs[0][5]] : specs[0], dob-retype(specs[1:], name, ty));
  }
  let root = temp_dir() ++ "/dsv4-open-band-" ++ now_unix_ms().str();
@@ -159,7 +188,11 @@ section [form.bml] {
  let openedD = len(ctxD) == 13;
  let leftD = openedD ? dsv4-close(ctxD, []) : [0];
  let c256 = dob-bit(refusedP && openedD && len(leftD) == 0 && dvb-live() == live0, 256);
+ let ctxE = dsv4-open-span(path, 8, 1);
+ let pricedE = len(ctxE) == 13 ? (try dob-priced(ctxE) catch false) : false;
+ let leftE = len(ctxE) == 13 ? dsv4-close(ctxE, []) : [0];
+ let c512 = dob-bit(pricedE && len(leftE) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0, 512);
  let removed = host_path_remove(path) +host_path_remove(cutPath) + host_path_remove(unpricedPath) + host_path_remove(textPath);
- print_str("dsv4-open-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " live " ++ live0.str() ++ "/" ++ live1.str() ++ "/" ++ live2.str() ++ "/" ++ live3.str() ++ "/" ++ live4.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ mapped1.str() ++ "/" ++ dvb-mapped().str() ++ " freedC " ++ freedC.str() ++ "/" ++ expectC.str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256;
+ print_str("dsv4-open-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " live " ++ live0.str() ++ "/" ++ live1.str() ++ "/" ++ live2.str() ++ "/" ++ live3.str() ++ "/" ++ live4.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ mapped1.str() ++ "/" ++ dvb-mapped().str() ++ " freedC " ++ freedC.str() ++ "/" ++ expectC.str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512;
 }
