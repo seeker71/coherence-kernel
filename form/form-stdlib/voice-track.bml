@@ -17,12 +17,14 @@
 // supervisor is done when every piece has its sound or its marker.
 //////////////////////////////////////////////////////////////////////
 import form/form-stdlib/voice-say.bml;
+import form/form-stdlib/voice-master.bml;
 section [form.bml] {
     class FormVoiceTrack {
         field VTRDir = ".hearth/voice-track";
         field VTRIdleMs = 150000;
         field VTRPollMs = 10000;
         field VTRTries = 60;
+        field VTRBatch = 100;
         def vtr-pcm-dir(code) = vg-cat([VTRDir(), "/pcm-", code]);
         def vtr-stem(code, i) = vg-cat([vtr-pcm-dir(code), "/", (1000 + i).str()]);
         def vtr-chunks(code) = vg-drop-empty(split-on(read_file(vg-cat([VTRDir(), "/", code, "-chunks.txt"])), vg-nl()));
@@ -39,29 +41,56 @@ section [form.bml] {
             print_str(vg-cat([code, " ", i.str(), " untaught"]));
             0;
         }
+        // A render allocates its intermediate tensors on the device and the pass frees none of them (the carrier's
+        // handles carry a generation, so a numeric range is no ledger: found 2026-10-03). After ~160 renders in one
+        // process the allocations answer empty and a render reads as zero samples — silently, and the first track
+        // wrote those as empty files and called them done. So: a worker renders at most VTRBatch pieces and exits
+        // (its memory goes with it), the supervisor spawns it again, and an empty rendering is never written down.
         def vtr-sound(st, code, i, ids) {
             let o = vv-render(st, ids, vtr-scale(code));
             let pcm = vv-pcm(st, o);
+            if ((Comparable) len(pcm) == 0) then vtr-silent(code, i) else vtr-write(code, i, pcm);
+        }
+        def vtr-silent(code, i) {
+            print_str(vg-cat([code, " ", i.str(), " rendered no samples"]));
+            0;
+        }
+        def vtr-write(code, i, pcm) {
             let w = write_file(vg-cat([vtr-stem(code, i), ".pcm"]), pcm);
             print_str(vg-cat([code, " ", i.str(), " ", len(pcm).str()]));
             1;
         }
         def vtr-have?(code, i) = if (file_size(vg-cat([vtr-stem(code, i), ".pcm"])) > 0) then 1 else if (file_size(vg-cat([vtr-stem(code, i), ".untaught"])) >= 0) then 1 else 0;
-        def vtr-walk(st, cfg, ltab, wtab, code, i, xs) {
+        def vtr-walk(st, cfg, ltab, wtab, code, i, xs, budget) {
             if ((Comparable) len(xs) == 0) then 0
-                else vtr-walk-step(st, cfg, ltab, wtab, code, i, xs, if ((Comparable) vtr-have?(code, i) == 1) then 0 else vtr-one(st, cfg, ltab, wtab, code, i, xs[0]));
+                else if ((Comparable) budget <= 0) then 0
+                else vtr-walk-step(st, cfg, ltab, wtab, code, i, xs, budget, if ((Comparable) vtr-have?(code, i) == 1) then 0 else vtr-one(st, cfg, ltab, wtab, code, i, xs[0]));
         }
-        def vtr-walk-step(st, cfg, ltab, wtab, code, i, xs, done) = vtr-walk(st, cfg, ltab, wtab, code, (i + 1), xs[1:]);
+        def vtr-walk-step(st, cfg, ltab, wtab, code, i, xs, budget, rendered) = vtr-walk(st, cfg, ltab, wtab, code, (i + 1), xs[1:], (budget - rendered));
         def vtr-work(code) {
             let made = fs-mkdir(vtr-pcm-dir(code));
             let name = vs-voice(code);
             let cfg = vp-cfg(name);
             let st = vv-open(vp-model-path(name));
             if ((Comparable) vv-open-ok?(st) == 0) then print_str(vg-cat([code, " voice does not open natively: ", vv-open-why(st)]))
-                else vtr-walk(st, cfg, vg-load(code, "line"), vg-load(code, "word"), code, 0, vtr-chunks(code));
+                else vtr-walk(st, cfg, vg-load(code, "line"), vg-load(code, "word"), code, 0, vtr-chunks(code), VTRBatch());
         }
+        // ---- the pieces as WAV, for the ear: the master's own header in front of the samples ----
+        def vtr-wav-one(code, i) {
+            let p = vg-cat([vtr-stem(code, i), ".pcm"]);
+            let pcm = if (file_size(p) > 0) then read_file(p) else "";
+            if ((Comparable) len(pcm) == 0) then 0 else vtr-wav-write(code, i, pcm);
+        }
+        def vtr-wav-write(code, i, pcm) {
+            let w = write_file(vg-cat([vtr-stem(code, i), ".wav"]), vg-cat([vmm-wav-header(22050, (len(pcm) / 2)), pcm]));
+            1;
+        }
+        def vtr-wav-go(code, i, n, done) = if (i >= n) then done else vtr-wav-go(code, (i + 1), n, (done + vtr-wav-one(code, i)));
+        def vtr-wav-all(code) = vtr-wav-go(code, 0, len(vtr-chunks(code)), 0);
         // ---- the supervisor ----
-        def vtr-landed(code) = len(fs-list(vtr-pcm-dir(code)));
+        // a piece has landed when its file holds something (an untaught marker holds the text that was refused)
+        def vtr-count-go(dir, names, n) = if ((Comparable) len(names) == 0) then n else vtr-count-go(dir, names[1:], if (file_size(vg-cat([dir, "/", names[0]])) > 0) then (n + 1) else n);
+        def vtr-landed(code) = vtr-count-go(vtr-pcm-dir(code), fs-list(vtr-pcm-dir(code)), 0);
         def vtr-done?(code) = if ((Comparable) vtr-landed(code) >= len(vtr-chunks(code))) then 1 else 0;
         def vtr-request(code) = write_file(vg-cat([VTRDir(), "/worker.request"]), code);
         def vtr-spawn(code) {
