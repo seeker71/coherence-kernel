@@ -98,6 +98,13 @@ Use `code <JSON>` or `code @request.json` in the source-backed form-cli. The sta
 
 Tool checks are `{tool,arguments,input?,stdout,exit?}`. They require exact stdout, empty diagnostics and the requested exit (default 0, otherwise a canonical nonnegative integer). For example `{"tool":"rg","arguments":["-F","obsolete claim","answer.md"],"stdout":"","exit":1}` expects a normal no-match. Missing source remains a failure. Failed assertions retain actual output/status and checked source identities; source text stays in the resident catalog.
 
+`bml-syntax` with `arguments:[path]` parses the resident document's executable
+BML sections through the native compiler, preserving documents without publishing
+candidate files or invoking a process. Success returns `bml-syntax: admitted\n`. A refused grammar
+publishes its cause through the live framebuffer and returns the current attempt's
+compiler diagnostic to the tool caller. This checks syntax; imported bindings
+and behavior still need the original execution checks.
+
 Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a document, or `field` instead of `path` for a top-level report string. Inclusive nonnegative bounds use the shared ASCII-whitespace counter, including headings. Missing text differs from empty text. Failure supplies observed count and repair direction; count agreement does not establish content quality. Report checks take the report on stdin, have no document access and accept no `input` override. The additional `{kind:"provider-usage-sequences"}` report assertion takes no other field; `form/form-stdlib/bml/form-cli-code-request.bml` (`fcaq-replay-check`) owns its meaning.
 
 ### Direct implementation entry

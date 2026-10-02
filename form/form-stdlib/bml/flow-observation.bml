@@ -11,11 +11,37 @@ section [form.bml] {
   def fo-key(row) = str-join([row[2],":",row[3].str(),":",row[4].str(),":",row[1]]);
   def fo-same-unit(a,b) = bml-source-absolute(a) == bml-source-absolute(b);
   def fo-definitions(files) = foldl((out,file) => append(map(d => append([file[0],file[1],file[3]],d),file[4]),out),[],files);
+  def fo-definition-index(defs) = foldl((m,d) => record_set(m,d[3],cons(d,record_has(m,d[3]) ? record_get(m,d[3]) : [])),record_new(0),defs);
+  // Exact serialized bytes establish catalog identity. Reuse its immutable
+  // reading in this process; changed bytes replace hashes and definitions.
+  def fo-catalog() {
+   let path=sa-path("source.fkb"); let bytes=read_file(path);
+   let pid=host_pid(); let header=kernel_ast(pid,-1);
+   let names=0 .. header[2] |> map(i => { let slot=kernel_ast(pid,["defn",i]); kernel_ast(pid,["src",slot[0],slot[1]]); });
+   let symbols=str-join-with(names,"\n");
+   record_has(fo-catalog-held,"bytes") && (String) bytes == record_get(fo-catalog-held,"bytes") && (String) symbols == record_get(fo-catalog-held,"symbols") ? record_get(fo-catalog-held,"value") : {
+    let node=read_form_binary(path);
+    let wanted=foldl((m,name) => record_set(m,name,1),record_new(0),names);
+    let files=node_children(node); let index=record_new(0);
+    let sources=files |> map(file => {
+     let cells=node_children(file); let path=node_value(cells[0]); let hash=node_value(cells[1]); let scope=node_value(cells[3]);
+     node_children(cells[4]) |> map(definition => {
+      let name=node_value(node_children(definition)[0]);
+      record_has(wanted,name) ? record_set(index,name,cons([path,hash,scope,definition,cells[4]],record_has(index,name) ? record_get(index,name) : [])) : 0;
+     }); [path,hash];
+    });
+    let value=[sources,index];
+    record_set(fo-catalog-held,"bytes",bytes); record_set(fo-catalog-held,"symbols",symbols); record_set(fo-catalog-held,"value",value); value;
+   };
+  }
+  def fo-block-owns(source,block,offset,start) {
+   let at=str_find(source,block,start);
+   at < 0 || at > offset ? false : offset < at + len(block) ? true : fo-block-owns(source,block,offset,at + len(block));
+  }
   // Cached merged units can name their enclosing unit. Recover only observed
-  // names, from the live definition offsets and exact admitted module bytes.
-  def fo-origins(rows) {
-   let defs=fo-definitions(sa-read(sa-path("source.fkb")));
-   let index=foldl((m,d) => record_set(m,d[3],cons(d,record_has(m,d[3]) ? record_get(m,d[3]) : [])),record_new(0),defs);
+  // names from live offsets: source text has exact module bytes; cached images
+  // have export-name blocks. Retain that distinction with the recovered owner.
+  def fo-origins(rows,index) {
    let needed=rows |> filter(row => record_has(index,row[1]) && len(record_get(index,row[1])) > 1 && len(filter(d => fo-same-unit(d[0],row[2]),record_get(index,row[1]))) != 1);
    nil?(needed) ? [] : {
     let names=foldl((m,row) => record_set(m,row[1],1),record_new(0),needed);
@@ -27,12 +53,15 @@ section [form.bml] {
     needed |> map(row => {
      let offset=record_has(positions,row[3].str()) ? record_get(positions,row[3].str()) + row[4] - 1 : nothing;
      let observed=filter(slot => slot[0] == row[1] && slot[1] == offset,slots);
+     let cached=!nothing?(offset) && offset >= 2 && kernel_ast(pid,["src",offset - 2,2]) == "; ";
      let matched=record_get(index,row[1]) |> filter(d => {
-      !record_has(modules,d[0]) ? record_set(modules,d[0],read_file(d[0])) : 0;
-      let text=record_get(modules,d[0]); let at=str_find(source,text,0);
-      len(text) > 0 && at >= 0 && any?(slot => slot[1] >= at && slot[1] < at + len(text),observed);
+      !record_has(modules,d[0]) ? record_set(modules,d[0],[read_file(d[0]),str-join(node_children(d[4]) |> map(n => "; " + node_value(node_children(n)[0]) + "\n"))]) : 0;
+      let module=record_get(modules,d[0]); let text=module[0]; let at=str_find(source,text,0);
+      any?(slot => cached ? len(module[1]) > 0 && fo-block-owns(source,module[1],slot[1],0) : len(text) > 0 && at >= 0 && slot[1] >= at && slot[1] < at + len(text),observed);
      });
-     len(matched) == 1 ? [fo-key(row),matched[0][0],matched[0][1],matched[0][5]] : [];
+     let widest=cached ? foldl((n,d) => max2(n,len(record_get(modules,d[0])[1])),0,matched) : 0;
+     let selected=(cached ? filter(d => len(record_get(modules,d[0])[1]) == widest,matched) : matched) |> map(d => append(d[0:3],map(cell => node_value(cell),node_children(d[3]))));
+     len(selected) == 1 ? [fo-key(row),selected[0][0],selected[0][1],selected[0][5],cached ? "maximal-unique-export-block" : "exact-module-bytes"] : [];
     }) |> filter(origin => !nil?(origin));
    };
   }
@@ -49,12 +78,14 @@ section [form.bml] {
   // these fingerprints, rather than assigning old heat to replacement code.
   def fo-open(lane,owner) {
    sa-prepare();
-   let sources = map(row => [row[0],row[1]],sa-read(sa-path("source.fkb")));
+   kernel_stat(0);
+   let reading=host_monotonic_ms(); let catalog=fo-catalog(); let catalog-ms=host_monotonic_ms() - reading;
+   let sources = catalog[0];
    let path = fo-file(lane,owner);
    let old = sa-read(path);
    !nil?(old) && old[0] == "complete" ? sa-write(path + ".previous",old) : "";
    sa-write(path,["open",lane,owner,now_unix_ms(),sources]);
-   [path,lane,owner,now_unix_ms(),sources,fo-snapshot()];
+   [path,lane,owner,now_unix_ms(),sources,fo-snapshot(),catalog[1],catalog-ms];
   }
   def fo-close(window) {
    let end = fo-snapshot(); let start = window[5];
@@ -62,8 +93,8 @@ section [form.bml] {
    let frames = filter(n => node_value(node_category(n)) == "bml-discovery-ms",drop(max2(0,len(roots) - count),roots));
    let timings = map(n => map(child => node_value(child),node_children(n)),frames);
    let rows = fo-deltas(start[3],end[3]);
-   let recovery=host_monotonic_ms(); let origins=fo-origins(rows);
-   let report = ["complete",window[1],window[2],window[3],window[4],end[0] - start[0],end[1] - start[1],end[2] - start[2],rows,timings,count,len(roots),["live-origins-v1",host_monotonic_ms() - recovery,origins]];
+   let recovery=host_monotonic_ms(); let origins=fo-origins(rows,window[6]);
+   let report = ["complete",window[1],window[2],window[3],window[4],end[0] - start[0],end[1] - start[1],end[2] - start[2],rows,timings,count,len(roots),["live-origins-v1",host_monotonic_ms() - recovery,origins,window[7]]];
    sa-write(window[0],report);
    fb_record(intern_node(intern_trivial_string("abstraction-flow"),[intern_trivial_string(window[1]),intern_trivial_string(window[2]),intern_trivial_int(report[5]),intern_trivial_int(report[7])]),window[2],0);
    report;
@@ -72,4 +103,5 @@ section [form.bml] {
    let window = fo-open(lane,owner); let answer = work(); fo-close(window); answer;
   }
  }
+ let fo-catalog-held=record_new(0);
 }
