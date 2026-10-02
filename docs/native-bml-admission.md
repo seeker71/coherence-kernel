@@ -330,8 +330,10 @@ With a `decline` that answers a node, the walk lands on 41 with one payload in
 memory: the option read how many refusals came before it. A zero ends the walk
 too. Spots: `bml/live.bml` (`live-option`: every declined option leaves one
 finding, so the memory length is the index of the repair the next option
-offers), `observe/native-turn-run.bml` (`nt-walk`: the second option receives
-what the first saw), `bml/native-events-darwin.bml` (`nve-continue` starts
+offers), `observe/native-turn-run.bml` (`nt-walk`: one option per way of the
+ladder in `bml/native-turn-ladder.bml`, the native rung before any model way; an option that did not turn the
+band green hands the next what it saw, and a way the clinamen gate refuses, because its approach digest already
+stands with a non-green outcome, spends no GPU, is kept in the walk's memory as a refusal and hands on no finding), `bml/native-events-darwin.bml` (`nve-continue` starts
 `nve-care-walk` from the memory a held continuation kept and stores the walk's
 memory back), `control/session-recording-lifecycle.fk` (`oac-census`).
 

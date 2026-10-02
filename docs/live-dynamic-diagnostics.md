@@ -231,10 +231,15 @@ The flows run on it:
 Two carriers meet their surprises the same way outside `live.bml`:
 
 - The landing (`form/form-stdlib/bml/form-cli-landing.bml`, `ld-land`): the
-  witness runs first and its exit is read after the last `[witness] exit=` mark it
-  leaves, so a witness cannot answer for its own exit by printing the mark. A named
-  witness that does not exit 0, or whose launch vanished, holds the landing, and
-  the report says `held: the witness refused (exit N)` (`form-cli-landing-band` 63).
+  witness runs first as an argv child (`/bin/sh -c <witness>`, through
+  `form-stdlib/bml/host-child.bml`, `hch-run`), and its exit is the host's own answer
+  (`host_wait`), never a printed mark: a witness that prints `[witness] exit=0`
+  cannot answer for its own exit, and the line the landing shows ends with the
+  exit it read. A named witness that does not exit 0, or whose launch was refused
+  at birth (no exit arrived), holds the landing, and the report says
+  `held: the witness refused (exit N)` (`form-cli-landing-band` 16383). The walk
+  reads its own children the same way: a turn, plan, review or gate has an exit
+  from `host_wait` or reads nothing with its reason (`[host-child] deadline: ...`).
 - The sweep (`form/validate.sh`): every leg runs beside a watch that bounds it. A
   sibling's deadline is fkwu's own wall time on that band times a factor, between a
   floor and a ceiling; a leg past it is ended with its whole process tree, its band

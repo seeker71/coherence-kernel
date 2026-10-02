@@ -194,17 +194,29 @@ Each stage below is a BML organ with its own band; none of the bands opens a mod
 - **The remote guide** (`form-cli-guide-packet.bml`, read by `local-flow-reading.bml`, `session-rent.bml` and
   the review doors): one light remote guide is earned only from rung rows that show distinct failed swerves,
   saturation and a second local guide, the last rungs repeating earlier outcomes; a green rung never earns
-  it. A row without digests reads swervecount 0 and is never saturated, so the rows the walk's ledger holds
-  today, which carry no ladder fields, earn nothing. `form-cli-guide-packet-band` 16383.
+  it. A row without digests reads swervecount 0 and is never saturated, so the ledger's rows written before the
+  native-turn ladder, which carry no ladder fields, earn nothing; a row the ladder writes carries `rung`,
+  `approach_digest` and `outcome_digest`. `form-cli-guide-packet-band` 16383.
 
 ### Checkpoints, resume and feedback
 
 `observe/native-turn-run.bml` offers six local attempts by default; stdin
 `attempts` selects a positive allowance. Each admission allows 64 local replies
 by default, twice the earlier allowance; `turns` selects another amount.
-It starts the supplied task directly,
-then resumes the same checkpoint with identified execution feedback under the
-unchanged original goal, documents and checks. Queue `sources` adds read-only
+A gap is walked as a ladder of
+distinct approaches (`form-stdlib/bml/native-turn-ladder.bml`), each an option of one backtrack walk. First a
+coherence check: a gap whose band reads above its `full`, or whose own `; Verdict n` head names another number,
+cannot be met, so the turn lands one `contract` row with zero options and the gap waits on its contract (its
+checks, its documents, its band and its `full`). Then the native rung (rung 0, no model, no local ID): the
+body's boolean-syntax repair and one-value wrapper search against the band, with `native_rehearsal_checks`
+on every model request after it. Then the model ways in order: `first` (the supplied task), `resume` (the same
+checkpoint with identified execution feedback under the unchanged original goal, documents and checks),
+`context` (a fresh checkpoint carrying the finding as text), `lens` (a smaller document view) and `voice` (the
+next model of the write-code chain). A clinamen gate stands before every way: an option whose approach
+digest already stands in the gap's history under the same contract with a non-green outcome is refused with
+no option and no GPU (`[native-turn:clinamen] ... refused`), and the walk moves on; a `resume` is admitted
+again only while the outcomes move. A row the walk stopped (the deadline, a lane that never launched, a
+refused publish) judged nothing and is no history. Queue `sources` adds read-only
 caller/helper context alongside `writable`. Catalog admission is the default;
 focused native reads supply source as needed, and `document_context:"full"`
 requests the complete text. Missing checkpoints and source
@@ -244,15 +256,18 @@ checkpoint retains original goals, source identity, checks and completed
 effects while changed local choices repair failures.
 
 The existing task loop offers work through `learn/native-turn-queue.jsonl`.
-`observe/native-turn-run.bml` runs the original checks, offers the task to the
-native coding lane, publishes a released candidate against unchanged source,
-and observes its checks again. An unsuccessful choice retains its finding and
-candidate before restoring source; the next choice resumes the same contract.
+`observe/native-turn-run.bml` runs the original checks, walks the ladder above (the native rung before any
+model way, each model way offering the task to the native coding lane), publishes a released candidate against
+unchanged source, and observes its checks again. An unsuccessful choice retains its finding and candidate before
+restoring source; the next way is a different approach under the same contract.
 The current scheduled doors are `observe/day-turn.bml` and
 `observe/scheduled-walk.bml`.
 
 Each option records local generated/injected IDs, attempts, checks, release and
-elapsed time in `receipts/native-turn-ledger.jsonl`. `local_verified` requires
+elapsed time in `receipts/native-turn-ledger.jsonl`, with the ladder's fields: `rung`, `approach`,
+`approach_digest`, `outcome_digest`, `clinamen` (what differs from the nearest earlier model approach),
+`finding`, `stillstreak_max` and `remote_dependence`; the native rung's row carries no `wall_ms` and a known 0
+local IDs. `local_verified` requires
 actual native coding, complete status, observed release and a passing changed
 candidate. Dry, test, supplied-candidate and `publish_from` observations cannot
 establish local coding success. A legacy green band remains its own observation
