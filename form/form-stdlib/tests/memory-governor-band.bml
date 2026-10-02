@@ -1,0 +1,83 @@
+; memory-governor-band.bml — the body asks the whole machine before it takes memory, and backs off when it is short.
+;
+; Verdict 1023 when every claim lands:
+;   1     a roomy 128 GiB machine (60 GiB available, 20 GiB wired, compressor small) grants a 40 GiB open
+;   2     the wired cap holds: 70 GiB already wired and 20 GiB asked is held, reason wired-cap, though 50 GiB is available
+;   4     the reserve holds: 30 GiB available and 20 GiB asked leaves 10 GiB under the 12.8 GiB reserve, held, reason reserve
+;   8     the compressor holds: a machine compressing 40 GiB of 128 holds a small ask too, reason compressor
+;   16    a reading that did not arrive grants nothing: nil, a short list and a zero memsize are held, reason memory-unreadable
+;   32    low is a smaller set of the same facts: available under half the reserve, wired over 80 percent or the compressor
+;         over 40 percent read low; the roomy machine and an unreadable reading do not
+;   64    the wait backs off: held twice then granted rests 10 s then 20 s and answers granted; a machine that stays short
+;         rests 10, 20, 40, 60, 60 s (the nap doubles to a minute and stops there) and answers held once the clock passes
+;   128   the words: 40 GiB reads "40.0 GiB", 1.5 GiB reads "1.5 GiB"; the lines say granted or held with the reason, and
+;         the status line says LOW only when low and names an unreadable machine
+;   256   this host: host_vm_stat answers a reading the governor can use, and its status line names the machine's memory
+;   512   the door: a status-only run prints the machine's line, and a run that asks for 10000 GiB prints "[memory] held"
+;         with the reason wired-cap
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- host_vm_stat and host-exec are fkwu doors; the reference kernels do not answer them.
+// preludes: form-stdlib/core.fk form-stdlib/bml/memory-governor.bml
+section [form.bml] {
+ class MemoryGovernorBand {
+  def mgb-bit(held, bit) = held ? bit : 0;
+  def mgb-pages(gib) = gib * 65536;
+  // a machine of mem GiB: free, speculative, purgeable and file-backed GiB, wired and compressor GiB
+  def mgb-vm(mem, free, spec, purg, ext, wired, comp) = [16384, mem * mg-gib(), mgb-pages(free), 0, 0, mgb-pages(wired), mgb-pages(spec), mgb-pages(purg), mgb-pages(comp), 0, 0, 0, 0, 0, 0, mgb-pages(ext), 0];
+  def mgb-roomy() = mgb-vm(128, 8, 2, 2, 48, 20, 4);
+  def mgb-need(gib) = gib * mg-gib();
+  def mgb-reason(vm, gib) = mg-verdict(vm, mgb-need(gib))[1];
+  def mgb-has?(s, part) = str_find(s, part, 0) >= 0;
+  // a sense that answers each of its readings in turn and then the last one again; a record of the naps
+  def mgb-script(readings, i) = () => readings[i < len(readings) ? i : (len(readings) - 1)];
+  def mgb-wait-granted() {
+   let naps = record_new(0, "list", []);
+   let clock = record_new(0, "t", 0);
+   let calls = record_new(0, "i", 0);
+   let sense = () => mgb-next-reading(calls, [mgb-vm(128, 1, 0, 0, 2, 70, 0), mgb-vm(128, 1, 0, 0, 2, 70, 0), mgb-roomy()]);
+   let sleep = ms => mgb-rest-clock(naps, clock, ms);
+   let v = mg-wait-with("band", mgb-need(40), 3600000, sense, sleep, () => record_get(clock, "t"), mg-nap-first());
+   mgb-bit(mg-granted?(v) && (record_get(naps, "list") == [10000, 20000]), 1);
+  }
+  def mgb-next-reading(calls, readings) {
+   let i = record_get(calls, "i");
+   let set = record_set(calls, "i", i + 1);
+   readings[i < len(readings) ? i : (len(readings) - 1)];
+  }
+  def mgb-rest(naps, ms) {
+   let set = record_set(naps, "list", append(record_get(naps, "list"), [ms]));
+   0;
+  }
+  def mgb-wait-short() {
+   let naps = record_new(0, "list", []);
+   let clock = record_new(0, "t", 0);
+   let sleep = ms => mgb-rest-clock(naps, clock, ms);
+   let v = mg-wait-with("band", mgb-need(40), 160000, () => mgb-vm(128, 1, 0, 0, 2, 70, 0), sleep, () => record_get(clock, "t"), mg-nap-first());
+   !mg-granted?(v) && (record_get(naps, "list") == [10000, 20000, 40000, 60000, 60000]);
+  }
+  def mgb-rest-clock(naps, clock, ms) {
+   let a = mgb-rest(naps, ms);
+   let t = record_set(clock, "t", record_get(clock, "t") + ms);
+   0;
+  }
+ }
+ let roomy = mgb-roomy();
+ let c1 = mgb-bit(mg-granted?(mg-verdict(roomy, mgb-need(40))) && (mgb-reason(roomy, 40) == "room"), 1);
+ let c2 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 40, 70, 4), 20) == "wired-cap") && (mg-available(mgb-vm(128, 8, 2, 2, 40, 70, 4)) > mgb-need(50)), 2);
+ let c4 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 18, 20, 4), 20) == "reserve") && (mg-available(mgb-vm(128, 8, 2, 2, 18, 20, 4)) == mgb-need(30)), 4);
+ let c8 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 48, 20, 40), 4) == "compressor") && (mgb-reason(roomy, 4) == "room"), 8);
+ let short = [16384, 1];
+ let c16 = mgb-bit((mgb-reason(nothing(), 1) == "memory-unreadable") && (mgb-reason(short, 1) == "memory-unreadable") && (mgb-reason(mgb-vm(0, 8, 2, 2, 48, 20, 4), 1) == "memory-unreadable") && (!mg-granted?(mg-verdict(nothing(), 1))), 16);
+ let c32 = mgb-bit(mg-low?(mgb-vm(128, 1, 0, 0, 2, 20, 4)) && mg-low?(mgb-vm(128, 8, 2, 2, 48, 105, 4)) && mg-low?(mgb-vm(128, 8, 2, 2, 48, 20, 52)) && (!mg-low?(roomy)) && (!mg-low?(nothing())) && (!mg-low?(short)), 32);
+ let c64 = mgb-bit(mgb-wait-granted() == 1 && mgb-wait-short(), 64);
+ let granted = mg-verdict(roomy, mgb-need(40));
+ let heldv = mg-verdict(mgb-vm(128, 8, 2, 2, 40, 70, 4), mgb-need(20));
+ let c128 = mgb-bit((mg-gib-text(mgb-need(40)) == "40.0 GiB") && (mg-gib-text((mg-gib() * 3) / 2) == "1.5 GiB") && mgb-has?(mg-line("w", mgb-need(40), granted), "[memory] granted w needs 40.0 GiB: room") && mgb-has?(mg-line("w", mgb-need(20), heldv), "[memory] held w needs 20.0 GiB: wired-cap") && mgb-has?(mg-status-line(mgb-vm(128, 1, 0, 0, 2, 20, 4)), "LOW") && (!mgb-has?(mg-status-line(roomy), "LOW")) && mgb-has?(mg-status-line(nothing()), "unreadable"), 128);
+ let live = mg-sense();
+ let c256 = mgb-bit(mg-vm-ok?(live) && mgb-has?(mg-status-line(live), "[memory] machine ") && (mg-mem(live) > (4 * mg-gib())), 256);
+ let status = host-exec("./fkwu observe/memory-governor-run.bml </dev/null 2>&1", "") ?? "";
+ let asked = host-exec("echo '{\"need_gib\":10000,\"who\":\"band\"}' | ./fkwu observe/memory-governor-run.bml 2>&1", "") ?? "";
+ let c512 = mgb-bit(mgb-has?(status, "[memory] machine ") && mgb-has?(asked, "[memory] held band needs 10000.0 GiB: wired-cap"), 512);
+ print_str("memory-governor-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512;
+}
