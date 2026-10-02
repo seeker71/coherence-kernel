@@ -1,27 +1,40 @@
 // The reunion: the body goes and gets what origin gained while it was walking.
 //
-// A landing whose push is refused is not blocked. Origin holds rows this
-// checkout has not seen, and this checkout holds rows origin has not; both are
-// true, and joining them is ordinary. A hand did this six times on 2026-09-22
-// and it never varied.
+// A landing whose push is refused is not blocked, and a walk whose branch must follow main is not held. Origin holds
+// rows this checkout has not seen, and this checkout holds rows origin has not; both are true, and joining them is
+// ordinary. A hand did this six times on 2026-09-22 and it never varied.
 //
 // The body recognises a river by reading it, not by where it lives: if every
 // line on both banks is a row carrying the moment it was written, then the two
 // banks are one river and the union is simply all of it, each row once, in the
-// order the rows happened. A caller says what it can draw again — a page made
-// from the rows is not worth merging, it is remade once the rows agree.
+// order the rows happened. A page made from the rows is not worth merging
+// (fcr-drawn): it takes main's side, and it is remade once the rows agree.
+//
+// The rounds are the one authority for this settling (fcr-rounds-in): a rebase that stopped on conflicts is met
+// round by round, each round settles every unmerged path the body knows (a river by union, a drawn page by main's
+// side), stages it and continues, and a round that meets a path the body does not know, or the same conflict coming
+// back past fcr-round-cap rounds, answers the wall and leaves the rebase standing for its caller to let go of. Two
+// callers join through it: the landing's reunion below (after a push refused for want of a fast-forward) and the
+// walk's sync (form-stdlib/bml/host-walk-settle.bml). Every git step is an argv child through host-child.bml in a
+// directory the caller names, so the settling reads one checkout whatever the process's own directory is.
 //
 // And when the body meets a kind it has not learned, it does not refuse. It
 // looks, keeps both banks where they can be read, says what it saw and what it
 // could do, and lets go of the attempt so the checkout stands clean. An
 // unlearned kind is unfinished work, and the next reunion can know it.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/bml/host-child.bml;
 import form-stdlib/meaning-codes.bml;
 section [form.bml] {
  class FormCliReunion {
   def fcr-mine() = "<<<<<<<";
   def fcr-theirs() = ">>>>>>>";
   def fcr-split() = "=======";
+  // What the body draws again from its ledgers, and the door that draws it: a conflict on these is not merged, the
+  // page is remade once the rows agree. The one place either is named.
+  def fcr-drawn() = ["docs/rent-ladder.html"];
+  def fcr-redraw-argv() = ["./fkwu", "observe/rent-ladder-page-run.bml"];
+  def fcr-round-cap() = 8;
   // A row is a line that says when it was written. A river is a file whose every
   // live line is one — both banks of it, markers aside. The body reads the file to
   // know this; nothing depends on where the file sits or what it is called.
@@ -30,7 +43,6 @@ section [form.bml] {
   def fcr-river?(path) = fcr-river-of(file_size(path) > 0 ? fhn-read(path) : "");
   def fcr-river-of(text) = (String) trim(text) == "" ? 0 : fcr-all-rows?(fcr-without-marks(fcr-live(split-on(text, "\n"))));
   def fcr-among?(paths, path) = nil?(paths) ? 0 : (String) trim(paths[0]) == path ? 1 : fcr-among?(paths[1:], path);
-  def fcr-known?(path, drawn) = fcr-river?(path) || fcr-among?(drawn, path);
   // ── the union of two banks of rows ──
   def fcr-live(xs) = nil?(xs) ? [] : (String) trim(xs[0]) == "" ? fcr-live(xs[1:]) : cons(xs[0], fcr-live(xs[1:]));
   def fcr-marked?(line, mark) = (Comparable) str_find(line, mark, 0) == 0;
@@ -47,60 +59,64 @@ section [form.bml] {
   // Both banks, each row once, in the order the rows were written.
   def fcr-union(text) = fcr-join(fcr-order(fcr-once(fcr-without-marks(fcr-live(split-on(text, "\n"))), []), []));
   def fcr-settle-ledger(path) = write_file_text(path, fcr-union(fhn-read(path)));
-  // ── the walk ──
-  def fcr-run(cmd) = fcr-said(host-exec(cmd, ""));
-  def fcr-said(out) = out ?? "";
-  def fcr-ok?(out) = str_find(out, "[ok] exit=0", 0) >= 0;
-  def fcr-exit(cmd) = fcr-run("out=$(" ++ cmd ++ " 2>&1); code=$?; printf '[ok] exit=%s %s\\n' \"$code\" \"$(printf '%s' \"$out\" | tail -n 1)\"");
-  def fcr-conflicts() = fcr-live(split-on(trim(fcr-run("git diff --name-only --diff-filter=U 2>/dev/null")), "\n"));
-  def fcr-unlearned(paths, drawn) = nil?(paths) ? [] : fcr-known?(trim(paths[0]), drawn) ? fcr-unlearned(paths[1:], drawn) : cons(trim(paths[0]), fcr-unlearned(paths[1:], drawn));
-  def fcr-redraws?(paths, drawn) = nil?(paths) ? 0 : fcr-among?(drawn, trim(paths[0])) ? 1 : fcr-redraws?(paths[1:], drawn);
-  def fcr-settle(path) = fcr-river?(path) ? fcr-settle-then(path, fcr-settle-ledger(path)) : fcr-settle-then(path, fcr-run("git checkout --theirs " ++ path ++ " 2>/dev/null"));
-  def fcr-settle-then(path, settled) = fcr-run("git add " ++ path ++ " 2>/dev/null");
-  def fcr-settle-all(paths) = nil?(paths) ? 0 : fcr-settle-all-next(paths[1:], fcr-settle(trim(paths[0])));
-  def fcr-settle-all-next(rest, done) = fcr-settle-all(rest);
-  // Each round: settle what the body may settle, or stop at the wall and undo
-  // the rebase, so a checkout is never left standing in a half-joined state.
-  def fcr-rounds(round, redraw, drawn) {
-   let conflicts = fcr-conflicts();
-   nil?(conflicts) ? ["joined", "", drawn]
-   : round >= 8 ? fcr-unlearned-kind("the same conflict came back eight times", conflicts)
-   : fcr-round-at(round, redraw, drawn, conflicts, fcr-unlearned(conflicts, redraw));
+  // ── the rounds, by argv in a named directory ──
+  def fcr-nul() = byte_to_str(0);
+  def fcr-at(dir, path) = dir ++ "/" ++ path;
+  def fcr-with(parts, sep) = nil?(parts) ? "" : nil?(parts[1:]) ? parts[0] : parts[0] ++ sep ++ fcr-with(parts[1:], sep);
+  def fcr-conflicts-in(io, dir) = filter(name => (Comparable) len(name) > 0, split-on(hch-git-quiet-in(io, dir, "reunion-unmerged", ["diff", "--name-only", "-z", "--diff-filter=U"])[1] ?? "", fcr-nul()));
+  // a path is known when it reads as a river (both banks, markers aside) or is a page the body draws
+  def fcr-known-in?(dir, path) = ((Comparable) fcr-river?(fcr-at(dir, path)) == 1) || ((Comparable) fcr-among?(fcr-drawn(), path) == 1);
+  def fcr-unlearned-in(dir, paths) = filter(path => !fcr-known-in?(dir, path), paths);
+  // a river is joined by union and a drawn page takes main's side (in a rebase, "ours" is the branch being rebased onto)
+  def fcr-settle-in(io, dir, path) = (Comparable) fcr-river?(fcr-at(dir, path)) == 1 ? fcr-settle-staged(io, dir, path, fcr-settle-ledger(fcr-at(dir, path))) : fcr-settle-staged(io, dir, path, hch-git-in(io, dir, "reunion-ours", ["checkout", "--ours", "--", path]));
+  def fcr-settle-staged(io, dir, path, settled) = hch-ok?(hch-git-in(io, dir, "reunion-add", ["add", "--", path]));
+  def fcr-settle-all-in(io, dir, paths) = nil?(paths) ? 0 : fcr-settle-next(io, dir, paths[1:], fcr-settle-in(io, dir, paths[0]));
+  def fcr-settle-next(io, dir, rest, done) = fcr-settle-all-in(io, dir, rest);
+  // Each round settles what the body knows and continues the rebase. The answer is ["joined", the paths settled, each
+  // once] when the rebase finished, or ["wall", the unmerged files the body does not know (or, past the cap, the files
+  // that kept coming back), a note] with the rebase still standing: its caller lets go of it, and names the files.
+  def fcr-rounds-in(io, dir, round, done) = fcr-round-of(io, dir, round, done, fcr-conflicts-in(io, dir));
+  def fcr-round-of(io, dir, round, done, conflicts) {
+   let unlearned = fcr-unlearned-in(dir, conflicts);
+   nil?(conflicts) ? ["wall", "", ""]
+   : !nil?(unlearned) ? ["wall", fcr-with(unlearned, " "), ""]
+   : round >= fcr-round-cap() ? ["wall", fcr-with(conflicts, " "), ", the same conflict came back " ++ fcr-round-cap().str() ++ " times"]
+   : fcr-round-went(io, dir, round, append(done, conflicts), fcr-settle-all-in(io, dir, conflicts));
   }
-  def fcr-round-at(round, redraw, drawn, conflicts, unlearned) {
-   !nil?(unlearned) ? fcr-unlearned-kind(unlearned[0], conflicts)
-   : fcr-round-go(round, redraw, ((Comparable) drawn == 1) || ((Comparable) fcr-redraws?(conflicts, redraw) == 1), fcr-settle-all(conflicts));
-  }
-  def fcr-round-go(round, redraw, drawn, settled) = fcr-rounds-after(round, redraw, drawn, fcr-exit("git -c core.editor=true rebase --continue"));
-  def fcr-rounds-after(round, redraw, drawn, out) = fcr-rounds(round + 1, redraw, drawn ? 1 : 0);
-  def fcr-wall(path, drawn) = fcr-wall-undone(path, fcr-run("git rebase --abort 2>/dev/null"));
-  def fcr-wall-undone(path, undone) = ["wall", path, 0];
-  // A kind the body has not learned. Not a refusal: both banks are kept where a
-  // person or a later door can read them, the attempt is let go so the checkout
-  // stands clean, and what was seen is said with what could be done about it.
+  def fcr-round-went(io, dir, round, done, settled) = fcr-round-continued(io, dir, round, done, hch-git-in(io, dir, "reunion-continue", ["-c", "core.editor=true", "rebase", "--continue"]));
+  def fcr-round-continued(io, dir, round, done, run) = hch-ok?(run) ? ["joined", fcr-once(done, [])] : fcr-rounds-in(io, dir, round + 1, done);
+  // The drawn pages remade from the rows that now agree and staged; "" when they are, else what stopped it.
+  def fcr-redraw-in(io, dir, argv) = fcr-redraw-added(io, dir, hch-run-in(io, "reunion-redraw", argv, "", hch-by(hch-step-backstop-ms())));
+  def fcr-redraw-added(io, dir, drew) = !hch-ok?(drew) ? "redraw exit=" ++ hch-status-text(drew) : fcr-redraw-said(hch-git-in(io, dir, "reunion-add", append(["add", "--"], fcr-drawn())));
+  def fcr-redraw-said(added) = hch-ok?(added) ? "" : "add exit=" ++ hch-status-text(added);
+  def fcr-touches?(done) = any?(path => (Comparable) fcr-among?(fcr-drawn(), path) == 1, done);
+  // ── a kind the body has not learned ──
+  // Not a refusal: both banks are kept where a person or a later door can read them, the attempt is let go so the
+  // checkout stands clean, and what was seen is said with what could be done about it.
   def fcr-keep() = fhn-at(fhn-at(fhn-root(), ".form-heal"), "reunion-unlearned");
   def fcr-keep-banks(paths) = fcr-keep-go(paths, fs_mkdir(fcr-keep()));
   def fcr-keep-go(paths, made) = nil?(paths) ? 0 : fcr-keep-next(paths[1:], fcr-keep-one(trim(paths[0])));
   def fcr-keep-next(rest, kept) = fcr-keep-go(rest, 0);
   def fcr-flat(path) = fcr-with(split-on(path, "/"), "_");
-  def fcr-with(parts, sep) = nil?(parts) ? "" : nil?(parts[1:]) ? parts[0] : parts[0] ++ sep ++ fcr-with(parts[1:], sep);
   def fcr-keep-one(path) = write_file_text(fhn-at(fcr-keep(), fcr-flat(path)), file_size(path) > 0 ? fhn-read(path) : "");
-  def fcr-unlearned-kind(path, conflicts) = fcr-unlearned-said(path, fcr-keep-banks(conflicts), fcr-run("git rebase --abort 2>/dev/null"));
-  def fcr-unlearned-said(path, kept, released) = ["unlearned", path, 0];
-  // The reunion itself: bring origin in, join, redraw what is drawn, push once
-  // on the new ground. The push that follows is not the push that failed.
-  def fcr-reunion(redraw, drawn) {
-   let fetched = fcr-exit("git fetch origin main");
-   let rebased = fcr-exit("git rebase origin/main");
-   let joined = fcr-ok?(rebased) ? ["joined", "", 0] : fcr-rounds(0, drawn, 0);
-   !((String) joined[0] == "joined") ? ["unlearned", "a kind the body has not learned yet, both banks kept at " ++ fcr-keep() ++ ": " ++ joined[1], ""]
-   : fcr-reunion-drawn(redraw, joined[2]);
+  def fcr-unlearned-kind(io, dir, wall) = fcr-unlearned-said(wall, fcr-keep-banks(fcr-conflicts-in(io, dir)), hch-git-in(io, dir, "reunion-abort", ["rebase", "--abort"]));
+  def fcr-unlearned-said(wall, kept, released) = ["unlearned", "a kind the body has not learned yet, both banks kept at " ++ fcr-keep() ++ ": " ++ wall[1] ++ wall[2], ""];
+  // ── the reunion ──
+  // Bring origin in, join, remake what is drawn (into the landing's own commit), push once on the new ground. The push
+  // that follows is not the push that failed. It answers ["joined", "", "[ok] exit=<exit> <the push's last line>"], or
+  // ["unlearned", what was seen, ""].
+  def fcr-reunion() = fcr-reunion-in(hch-dir(), ".");
+  def fcr-reunion-in(io, dir) {
+   let fetched = hch-git-in(io, dir, "reunion-fetch", ["fetch", "origin", "main"]);
+   let rebased = hch-git-in(io, dir, "reunion-rebase", ["rebase", "origin/main"]);
+   let joined = hch-ok?(rebased) ? ["joined", []] : fcr-rounds-in(io, dir, 0, []);
+   (String) joined[0] == "joined" ? fcr-reunion-drawn(io, dir, joined[1]) : fcr-unlearned-kind(io, dir, joined);
   }
-  def fcr-reunion-drawn(redraw, drawn) {
-   let drew = ((Comparable) drawn == 1) && (len(redraw) > 0) ? fcr-redraw(redraw) : "";
-   ["joined", "", fcr-exit("git push -u origin HEAD")];
+  def fcr-reunion-drawn(io, dir, done) {
+   let drew = fcr-touches?(done) ? fcr-redraw-amended(io, dir, fcr-redraw-in(io, dir, fcr-redraw-argv())) : "";
+   ["joined", "", fcr-pushed(hch-git-in(io, dir, "reunion-push", ["push", "-u", "origin", "HEAD"]))];
   }
-  def fcr-redraw(redraw) = fcr-redrawn(fcr-run(redraw), fcr-run("git add docs/rent-ladder.html 2>/dev/null"));
-  def fcr-redrawn(drew, added) = fcr-run("git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q --amend --no-edit 2>&1 | tail -1");
+  def fcr-redraw-amended(io, dir, said) = (String) said != "" ? said : hch-said(hch-git-in(io, dir, "reunion-amend", ["-c", "user.name=Claude", "-c", "user.email=noreply@anthropic.com", "commit", "-q", "--amend", "--no-edit"]));
+  def fcr-pushed(run) = "[ok] exit=" ++ hch-status-text(run) ++ " " ++ hch-tail-line(hch-said(run));
  }
 }
