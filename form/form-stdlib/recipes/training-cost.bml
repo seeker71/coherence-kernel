@@ -1,0 +1,45 @@
+// Pure numerical recipes. plan([rows, budgetsGiB, ridge, headroom]) returns
+// [secondsCoefficients, GiBCoefficients, plans]. Each row is
+// [tokens, forwardPlusBackwardSeconds, estimatedAdditionalBytes]; each plan is
+// [tokens, predictedSeconds, predictedAdditionalGiB] or nothing.
+import form-stdlib/bml/pure-stdlib.bml;
+section [form.bml] {
+ def numeric(x) = (value_kind(x) == "int" || value_kind(x) == "float") && x - x == 0;
+ def values(n) = value_kind(n) != "node_id" ? n : kind(n) == "list" ? map(values, kids(n)) : node_value(n);
+ def dot(q) = len(q[0]) != len(q[1]) ? nothing : sum(map(i => q[0][i] * q[1][i], 0 .. len(q[0])));
+ def features(t) { let hundreds = t / 100.0; [1.0, hundreds, hundreds*hundreds]; }
+ def gibibytes(bytes) = bytes / 1073741824.0;
+ def gram(q) {
+  let columns = map(i => map(row => row[i], q[0]), 0 .. len(q[0][0]));
+  map(i => map(j => dot([columns[i], columns[j]]) + (i == j ? q[1] : 0.0), 0 .. len(columns)), 0 .. len(columns));
+ }
+ def rhs(q) = map(i => dot([map(row => row[i], q[0]), q[1]]), 0 .. len(q[0][0]));
+ def symmetric(m) = len(m) > 0 && all?(row => value_kind(row) == "list" && len(row) == len(m) && all?(numeric, row), m) && all?(i => all?(j => m[i][j] == m[j][i], 0 .. i), 0 .. len(m));
+ def cholesky(m) = !symmetric(m) ? nothing : foldl((rows, i) => nothing?(rows) ? nothing : {
+  let row = foldl((xs, j) => nothing?(xs) ? nothing : {
+   let rest = m[i][j] - dot([xs, j == i ? xs : rows[j][:j]]);
+   let pivot = j == i ? (rest > 0 ? sqrt(rest) : nothing) : rest / rows[j][j];
+   nothing?(pivot) ? nothing : append(xs, [pivot]);
+  }, [], 0 .. (i + 1));
+  nothing?(row) ? nothing : append(rows, [append(row, map(ignored => 0.0, (i + 1) .. len(m)))]);
+ }, [], 0 .. len(m));
+ def forward(q) = foldl((xs, i) => append(xs, [(q[1][i] - dot([q[0][i][:i], xs])) / q[0][i][i]]), [], 0 .. len(q[0]));
+ def backward(q) = foldl((xs, i) => cons((q[1][i] - dot([map(j => q[0][j][i], (i + 1) .. len(q[0])), xs])) / q[0][i][i], xs), [], reverse(0 .. len(q[0])));
+ def solve(q) {
+  let l = cholesky(q[0]);
+  nothing?(l) || value_kind(q[1]) != "list" || len(q[1]) != len(q[0]) || !all?(numeric, q[1]) ? nothing : backward([l, forward([l, q[1]])]);
+ }
+ def fit(q) = len(q[0]) == 0 || len(q[0]) != len(q[1]) || len(q[0][0]) == 0 || q[2] < 0 || !all?(row => len(row) == len(q[0][0]), q[0]) ? nothing : solve([gram([q[0], q[2]]), rhs([q[0], q[1]])]);
+ def predict(q) = dot([q[0], features(q[1])]);
+ def admit(q) {
+  let candidates = filter(t => predict([q[1], t]) >= 0 && predict([q[1], t]) <= q[3] * q[4], q[2]);
+  len(candidates) == 0 ? nothing : { let t = max(candidates); [t, predict([q[0], t]), predict([q[1], t])]; };
+ }
+ def observations(rows) = value_kind(rows) == "list" && len(rows) > 0 && all?(row => value_kind(row) == "list" && len(row) == 3 && all?(numeric, row) && row[0] > 0 && row[1] >= 0 && row[2] >= 0, rows);
+ def plan(q) = value_kind(q) != "list" || len(q) != 4 || !observations(q[0]) || value_kind(q[1]) != "list" || !numeric(q[2]) || q[2] < 0 || !numeric(q[3]) || q[3] <= 0 || q[3] > 1 || !all?(budget => numeric(budget) && budget > 0, q[1]) ? nothing : {
+  let x = map(row => features(row[0]), q[0]);
+  let seconds = fit([x, map(row => row[1], q[0]), q[2]]);
+  let memory = fit([x, map(row => gibibytes(row[2]), q[0]), q[2]]);
+  nothing?(seconds) || nothing?(memory) ? nothing : [seconds, memory, map(budget => admit([seconds, memory, map(row => row[0], q[0]), budget, q[3]]), q[1])];
+ };
+}
