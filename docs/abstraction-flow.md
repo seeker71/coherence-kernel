@@ -62,9 +62,18 @@ its coverage rather than becoming zero-cost work.
 
 The guide joins names to authored definitions, compares absolute source paths
 and checks the retained fingerprint. For a cached merged unit, the executing
-window reads live definition offsets through `kernel_ast` and matches exact
-module bytes to recover the physical owner. Only observed ambiguous names need
-this recovery; its small origin rows travel with the window. Generated lambdas
+window reads live definition offsets through `kernel_ast`. Source admission
+matches exact module bytes. Cached admission exposes export names rather than
+function bodies: a unique maximal complete export block infers the physical
+owner. The retained origin names its basis; a tie remains unresolved. This
+inference establishes source attribution, not equivalence of cached code to a
+source body. Only observed ambiguous names need recovery; its small origin rows
+travel with the window. Catalog admission
+and origin recovery have separate elapsed readings. The observer reads binary
+definition nodes on demand, reuses exactly matching serialized catalog bytes and
+live symbols in the same process,
+and preserves an unchanged workload file so its native image remains reusable.
+Generated lambdas
 carry their module attribution in a separate `generated` category without an
 invented authored span. Flattened line numbers never establish source identity.
 Missing or changed evidence directs attention to admission and source recovery.
