@@ -2,14 +2,16 @@
 //
 // The lock is a directory (host_dir_mkdir makes one level, for one maker only) holding its holder's owner file,
 // "pid=<pid> at=<unix ms>". A waiter backs off (host_sleep_ms: 1, 2, 4 ... 32 ms) and tries again. A lock is stale
-// when its holder is gone (host_alive), is a pid the host handed out again since the stamp (it began after it), has
-// held it longer than the patience, or when this wait has used its patience; a lock that names no holder yet reads
-// its own age. A stale lock is taken through a mark inside it that only one taker can make (<lock>/took-<holder>),
-// and only while the lock still names that holder; a mark older than the patience (a taker that ended) is removed.
-// A lock is released only by the pid it names, so a holder that was taken over from never removes the taker's lock,
-// and the release removes the marks with it. dl-take gives up (answers 0) when the lock's directory cannot be made
-// at all (its parent is not there, or not writable) or the wait outlives twice its patience: a lock that cannot be
-// had is a held answer for the caller to meet, never a loop.
+// when its holder is gone (host_alive) or is a pid the host handed out again since the stamp (it began after it): it
+// is taken over at once. A holder that is alive is waited for, slow or not, until its own stamp is a minute old
+// (dl-live-ms); a lock that names no holder yet reads its own age (two seconds). A stale lock is taken through a mark
+// inside it that only one taker can make (<lock>/took-<holder>), and only while the lock still names that holder; a
+// mark older than ten seconds (a taker that ended) is removed. A lock is released only by the pid it names, so a
+// holder that was taken over from never removes the taker's lock (nor does a take whose owner file did not read back
+// remove a lock another pid owns), and the release removes the marks with it. dl-take gives up (answers 0) when its
+// patience is spent on a live holder, or when the lock's directory cannot be made at all (its parent is not there, or
+// not writable): a lock that cannot be had is a held answer for the caller to meet, never a loop and never a theft
+// from a holder that is only slow.
 //
 // The same pattern keeps form-token-workspace.bml's ftw-lock-* (one writer per store) and host-walk.bml's hw-claim
 // (one walk per checkout, which names its holder to the person who started the second walk); this one is the small
@@ -36,7 +38,7 @@ section [form.bml] {
   }
   def dl-holds?(pid, at) = (Comparable) host_alive(pid) != 1 ? false : nothing?(at) ? true : nothing?(dl-began(pid)) ? true : dl-began(pid) <= at + 1000;
   // 1 when this process holds the lock, 0 when it gave up
-  def dl-take(lock, patience) = dl-take-by(lock, patience, host_monotonic_ms() + patience, host_monotonic_ms() + (patience * 2), 0);
+  def dl-take(lock, patience) = dl-take-by(lock, patience, host_monotonic_ms() + patience, host_monotonic_ms() + patience, 0);
   def dl-take-by(lock, patience, deadline, giveup, tries) = (Comparable) host_dir_mkdir(lock) == 1 ? dl-own(lock)
    : (Comparable) host_path_is_dir(lock) != 1 ? dl-gone(lock, patience, deadline, giveup, tries)
    : host_monotonic_ms() >= giveup ? 0
@@ -49,10 +51,10 @@ section [form.bml] {
    let wrote = write_file_text(dl-owner-path(lock), text);
    (String) dl-owner(lock) == text ? 1 : dl-unmade(lock);
   }
-  def dl-unmade(lock) {
-   let gone = host_dir_rmdir(lock);
-   0;
-  }
+  // the owner file did not read back: the lock is removed only when no other pid owns it (a lock another pid took in
+  // between is theirs)
+  def dl-unmade(lock) = nothing?(dl-field(dl-owner(lock), "pid=")) || ((Comparable) dl-field(dl-owner(lock), "pid=") == host_pid()) ? dl-removed(host_dir_rmdir(lock)) : 0;
+  def dl-removed(gone) = 0;
   def dl-found(lock, patience, deadline, giveup, tries, text) = dl-stale?(lock, patience, deadline, text) ? dl-takeover(lock, patience, deadline, giveup, tries, text) : dl-again(lock, patience, deadline, giveup, tries);
   def dl-again(lock, patience, deadline, giveup, tries) {
    let rested = host_sleep_ms(dl-backoff(tries));
@@ -60,12 +62,16 @@ section [form.bml] {
   }
   // 1, 2, 4 ... 32 ms
   def dl-backoff(tries) = tries >= 5 ? 32 : [1, 2, 4, 8, 16][tries];
+  // a holder that is gone is taken over at once; one that is alive is waited for (a slow holder is not a dead one)
+  // until its own stamp is a minute old; a lock that names no holder yet reads its own age
+  def dl-live-ms() = 60000;
+  def dl-unowned-ms() = 2000;
+  def dl-mark-ms() = 10000;
   def dl-stale?(lock, patience, deadline, text) {
    let pid = dl-field(text, "pid=");
    let at = dl-field(text, " at=");
-   host_monotonic_ms() >= deadline ? true
-   : (nothing?(pid) || nothing?(at)) ? dl-age-ms(lock) > (patience / 5)
-   : !dl-holds?(pid, at) || ((now_unix_ms() - at) > patience);
+   (nothing?(pid) || nothing?(at)) ? dl-age-ms(lock) > dl-unowned-ms()
+   : !dl-holds?(pid, at) || ((now_unix_ms() - at) > dl-live-ms());
   }
   def dl-takeover(lock, patience, deadline, giveup, tries, text) {
    let pid = dl-field(text, "pid=");
@@ -73,7 +79,7 @@ section [form.bml] {
    ((Comparable) host_dir_mkdir(mark) == 1) && ((String) dl-owner(lock) == text) ? dl-own(lock) : dl-unmark(lock, mark, patience, deadline, giveup, tries);
   }
   def dl-unmark(lock, mark, patience, deadline, giveup, tries) {
-   let cleared = dl-age-ms(mark) > patience ? host_dir_rmdir(mark) : 0;
+   let cleared = dl-age-ms(mark) > dl-mark-ms() ? host_dir_rmdir(mark) : 0;
    dl-again(lock, patience, deadline, giveup, tries);
   }
   // released by the pid the lock names, and by no other: 0 when removed, -1 when it stays
