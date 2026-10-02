@@ -44,10 +44,10 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=39 claims=822 broken=0 (each broken claim named on its own line; 2026-10-03)
+./fkwu observe/door-link-health-run.bml  -> docs=39 claims=826 broken=0 (each broken claim named on its own line; 2026-10-03)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=348 readable=170 unreadable=178 absent=0 seen=1 flaws=0, exit 0
+./fkwu observe/band-truth-run.bml        -> bands=351 readable=173 unreadable=178 absent=0 seen=1 flaws=0, exit 0
                                             (each band's declared full read against the most its claims sum to, and
                                             the queue and manifest copies of a full against the head pin, with no
                                             band run, in about 0.3 s; a decimal or count fold that stands on purpose
@@ -255,8 +255,9 @@ Read on 2026-10-02 (WITA) through `./fkwu form/form-stdlib/tests/<band> </dev/nu
 reading room before each run, every exit 0. No band maps the model: the ones that read the registry's file
 (the reap25 build) read its header, an 8 MB window, and the recorded logits are 1.5 MB. What stands is the chain
 restored model-free: the tokenizer, the quant and tensor readers, the emitters, the reference arithmetic and the
-emission door, and the driver's CPU-only foundation (driver stage 1, below). What does not stand: the dispatch of
-the stack through Metal over the mapped weights (the driver's kernels, its open, layers, head and token loop; its
+emission door, and the driver's foundation (driver stages 1 and 2, below: the fixture, layout and bind on the CPU;
+the kernel set, the open and one layer on the device, all on the Form-built fixture). What does not stand: the dispatch of
+the stack through Metal over a real file's mapped weights (the driver's head and token loop; its
 design is in the lead's notes, to be built as dsv4-token-handle under form/native/metal) is not in the tree;
 the Form-native lane is not wired (`model-registry.bml` keeps the
 `deepseek4` lane row at `ds4-query`, off); the control-plane rows `challenger.deepseek-ds4-metal` and
@@ -278,6 +279,7 @@ stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels co
                ds4-order-match-band.bml 255       (the quantiser and the Q8_0 row dot against a Form reference of ds4's order)
 references     ds4-recorded-references-band.bml 1023   (the logits pinned by a SHA-256 of the whole file, by the body's own door)
 driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 511 · native/metal/tests/dsv4-bind-band.bml 511
+driver stage 2 dsv4-kernels-band.bml 1023 · native/metal/tests/dsv4-open-band.bml 255 · native/metal/tests/dsv4-layer-band.bml 255
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -292,9 +294,25 @@ blk.42 are the layers, and 3 draft layers (`dspark.0` to `dspark.2`) follow in t
 is 43 plus 3 (the comment beside the control-plane row is left as it stands). The fixture, layout and bind bands
 declare `PROOF LEVEL: FOURTH-ARM ONLY` (binary fixture, host-local headers, a live Metal device) and are not rowed in
 `form/fourth-arm-bands.txt`. The driver's kernels must emit `#pragma clang fp reassociate(off)` and `contract(off)`
-(each of the three cells says so in its header). Still ahead: the kernels, the open, the layers (compressor, MLA, MoE
-against the oracle on the fixture), the head and prefill, the fixture end to end, the session wiring and the physical
-window.
+(each of the three cells says so in its header). Still ahead after stage 2: the head and prefill, the fixture end to end,
+the session wiring and the physical window.
+
+Driver stage 2 (read 2026-10-03 WITA on this Mac's GPU, each band alone, memory room and no model door resident before
+each run, every exit 0; each band's planted defects dropped its reading and were restored): `form/form-stdlib/dsv4-kernels.fk`
+composes the restored emitters and the kernels the graph still needed into ten Form-emitted units, every source opening with
+the two fp pragmas (a*b+c on 1+2^-12 reads 973078528 with them and 973079552 without), 96 kernels compiled through
+metal_pipeline once and each answering small inputs within the oracle harness's 3e-5 floor against the oracle's fp64
+arithmetic on the fixture's own tensors (53 readings, 0 to 4.7e-7); `form/native/metal/dsv4-open.fk` opens the fixture as
+handles in Qwen's context shape (86 views, 50 scratch buffers, a state of [kv, comp state, comp score, comp rows] a block) so
+`q38-context-ok?`, `q38-state-ok?` and `q38-close` apply, counted through metal_live and released to 0 live in synced rounds;
+`form/native/metal/dsv4-layer.fk` runs one block (hc_pre, MLA with the compressor, hc_post, the router by hash or biased
+top-k, experts by device ids, the shared expert) and reads back at 1.1e-6 or less against the oracle's layer on all three
+fixture blocks over four positions, alone and chained (chained 2.2e-7 to 1.2e-6). The compressor has no independent oracle:
+its legs are pinned to the author twin `dsv4-compressor.fk`. The fixture's clamp (10.0) never bites at its activations, so
+the block bands witness no clamp; the id SwiGLU kernel's clamp is witnessed on synthetic inputs in the kernel band. No
+carrier change was needed. Found on the way: `metal_pipeline` compiles with fast math, under which `v == v` is true of a
+NaN (the argmax tests the bits). Not wired: the real IQ2XXS file's Q8_0 dense path and Q2_K down experts have kernels (the
+Q8_0 lane has a reading; Q2_K is compiled only) and no wiring in the layer; `n_hc` other than 4 is refused.
 
 Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
 (rust and ts hand back a different file there); `./validate.sh --list` prints which. The restored emitters, the
