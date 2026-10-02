@@ -7,27 +7,40 @@
 //                                     checkpoint hears its finding), context (a fresh checkpoint carries the
 //                                     finding as text), lens (the staged entry, and a smaller document view
 //                                     where the gap held the whole file), voice (the next model of the
-//                                     write-code chain). The rung names are fcgp's own swerve kinds
-//                                     (form-cli-guide-packet.bml), so fcgp-reading counts them unchanged.
+//                                     write-code chain). The rungs context, lens and voice are fcgp's own swerve
+//                                     kinds (form-cli-guide-packet.bml), so fcgp-reading counts them unchanged;
+//                                     native, first and resume are not kinds.
 //   ntl-approach-digest(a)            sha256 of the approach's fields in a fixed order. It never reads the finding:
 //                                     the finding is evidence, not approach.
 //   ntl-outcome-digest(...)           sha256 of what the option left: the band's reading, the lane's reason, the
 //                                     caller assertion's core, the first compiler line with its paths and stamps
 //                                     cut, and the claim aspects that did not hold. Never the diff, so a respelled
-//                                     candidate that fails the same way reads the same.
+//                                     candidate that fails the same way reads the same. The reason is cut the same
+//                                     way as the compiler line: the lane's "evidence retained at .hearth/..." names
+//                                     a stamped path, and two identical failures read the same outcome.
+//   ntl-hist-of(rows, id, cd, bd)     a gap's history: its rows under one contract (cd: the checks and the texts of
+//                                     the documents; bd: the band's text and the gap's full) that tried an approach,
+//                                     did not go green, and were not interrupted. A row the walk stopped (the lane at
+//                                     the deadline, a lane that never launched, the native rung at the window's end,
+//                                     a band stopped, a publish refused, a tree that moved under a repair) judged
+//                                     nothing: it is no history, and the approach stays open.
 //   ntl-admit(a, hist, avail)         the clinamen gate: [admit, clinamen, reason]. An approach whose digest already
-//                                     stands in this gap's rows (same contract, not dry) with a non-green outcome is
-//                                     refused with no options; a resume is admitted again only while the outcomes
-//                                     are moving (the last two differ) and fewer than ntl-resume-max() stand. The
-//                                     clinamen of an admitted approach names the fields that differ from the
-//                                     nearest earlier approach.
+//                                     stands in this gap's history is refused with no options; a resume is admitted
+//                                     again only while the outcomes are moving (the last two differ) and fewer than
+//                                     ntl-resume-max() stand. The clinamen of an admitted approach names the fields
+//                                     that differ from the nearest earlier model approach (the native rung and a
+//                                     contract row are no model approach).
 //   ntl-band-reason(before, full, t)  the coherence check: "band-above-full" when the band read above its full,
 //                                     "band-head-differs" when the band's own "; Verdict n" head names another
-//                                     number than the gap's full, "" otherwise. A band that read nothing is
-//                                     coherent: a gap that adds a definition reads nothing before it is written.
+//                                     number than the gap's full, "" otherwise. The head is read as validate.sh reads
+//                                     it: the first "Verdict <digits>" on a ';' line before the first code line. A
+//                                     band that read nothing is coherent: a gap that adds a definition reads nothing
+//                                     before it is written.
 //   ntl-native(texts, check, budget)  rung 0: boolean syntax repair, then the one-value wrapper search
 //                                     (form-bml-value-search.bml), each candidate judged by check(i, text) ->
-//                                     [0|1, observation]. No model: it generates no ID.
+//                                     [0|1, observation]. An observation that says the judging was stopped
+//                                     (window-closed, band-stopped, publish-refused) ends the rung as "interrupted".
+//                                     No model: it generates no ID.
 // A refusal is oac-nothing() in the walk: it spends no GPU and keeps the memory as it stood. Rows are data,
 // never instructions; a field a row does not carry reads nothing, never 0. Instruments (the caps, the budget)
 // are tuned on ledger rows, never goals.
@@ -48,6 +61,9 @@ section [form.bml] {
   def ntl-rehearsal-checks() = 16;
   def ntl-resume-max() = 3;
   def ntl-contract-reasons() = ["band-above-full", "band-head-differs"];
+  // the reasons and lanes of a row the walk stopped: it judged nothing, so it is no history
+  def ntl-interrupt-reasons() = ["deadline", "window-closed", "band-stopped", "publish-refused", "source-moved", "lane-launch-unavailable"];
+  def ntl-interrupt-lanes() = ["lane-deadline", "lane-launch-unavailable"];
   // ── small readings ──
   def ntl-sha(s) = hex-encode(sha256-stream-string(s));
   def ntl-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : mc-cat([xs[0], sep, ntl-join(xs[1:], sep)]);
@@ -59,6 +75,11 @@ section [form.bml] {
   def ntl-digit?(b) = ((Comparable) b >= 48) && ((Comparable) b <= 57);
   def ntl-run-end(s, i) = ((i < len(s)) && ntl-digit?(str_byte_at(s, i))) ? ntl-run-end(s, (i + 1)) : i;
   def ntl-reading-word(after) = nothing?(after) ? "nothing" : after.str();
+  // a text cut at n bytes never splits a code point: the cut steps back over continuation bytes (0x80-0xBF), so a
+  // tracked ledger row stays valid UTF-8 text on every kernel
+  def ntl-continuation?(b) = ((Comparable) b >= 128) && ((Comparable) b <= 191);
+  def ntl-cut-point(text, n) = ((n > 0) && ntl-continuation?(str_byte_at(text, n))) ? ntl-cut-point(text, (n - 1)) : n;
+  def ntl-clip(text, n) = ((Comparable) len(text) > n) ? substring(text, 0, ntl-cut-point(text, n)) : text;
   // ── the approach and its digest ──
   def ntl-approach(rung, model, entry, ctx, decode, resume, source) = json-node-object([fhn-s("rung", rung), fhn-s("model", model), fhn-s("code_entry", entry), fhn-s("document_context", ctx), fhn-s("decode", decode), fhn-n("resume", resume), fhn-s("feedback_source", source)]);
   def ntl-fields() = ["rung", "model", "code_entry", "document_context", "decode", "resume", "feedback_source"];
@@ -83,18 +104,25 @@ section [form.bml] {
   def ntl-cut-digits(s, i, out) = (i >= len(s)) ? out : ntl-cut-run(s, i, ntl-run-end(s, i), out);
   def ntl-cut-run(s, i, e, out) = (e == i) ? ntl-cut-digits(s, (i + 1), mc-cat([out, substring(s, i, (i + 1))])) : ntl-cut-digits(s, e, mc-cat([out, ((e - i) >= 6) ? "#" : substring(s, i, e)]));
   def ntl-plain(line) = ntl-cut-digits(ntl-join(map(t => ntl-token(t), split-on(ntl-first-line(line), " ")), " "), 0, "");
-  def ntl-outcome-text(after, reason, blocking, errors, aspects) = mc-cat(["after=", ntl-reading-word(after), ";reason=", reason, ";check=", json-emit(fcctg-assertion-core(blocking)), ";error=", ntl-plain(errors), ";held-not=", ntl-join(aspects, ",")]);
+  def ntl-outcome-text(after, reason, blocking, errors, aspects) = mc-cat(["after=", ntl-reading-word(after), ";reason=", ntl-plain(reason), ";check=", json-emit(fcctg-assertion-core(blocking)), ";error=", ntl-plain(errors), ";held-not=", ntl-join(aspects, ",")]);
   def ntl-outcome-digest(after, reason, blocking, errors, aspects) = ntl-sha(ntl-outcome-text(after, reason, blocking, errors, aspects));
   // ── the gate ──
-  // this gap's rows under this contract that tried an approach and did not go green; dry rows tried nothing
-  def ntl-hist-of(rows, id, digest) = filter(r => ((String) fcgp-str(r, "gap") == id) && ((Comparable) (fcgp-num(r, "dry") ?? 0) == 0) && ((String) fcgp-str(r, "checks_digest") == digest) && ((Comparable) len(fcgp-str(r, "approach_digest")) > 0) && (!fcgp-green?(r)), rows);
+  // this gap's rows under this contract (cd: its checks and the texts of its documents; bd: its band and its full)
+  // that tried an approach, did not go green and were not interrupted; dry rows tried nothing, and a row the walk
+  // stopped (the lane at the deadline, a lane that never launched, the native rung at the window's end) judged nothing
+  def ntl-interrupted?(r) = fcgp-member?(ntl-interrupt-reasons(), fcgp-str(r, "lane_reason")) || fcgp-member?(ntl-interrupt-lanes(), fcgp-str(r, "lane"));
+  def ntl-hist-of(rows, id, cd, bd) = filter(r => ((String) fcgp-str(r, "gap") == id) && ((Comparable) (fcgp-num(r, "dry") ?? 0) == 0) && ((String) fcgp-str(r, "checks_digest") == cd) && ((String) fcgp-str(r, "band_digest") == bd) && ((Comparable) len(fcgp-str(r, "approach_digest")) > 0) && (!fcgp-green?(r)) && (!ntl-interrupted?(r)), rows);
+  // the rows of a model's approach: the native rung and a contract row tried no model, so they are no nearest approach
+  // and no word for a model to hear
+  def ntl-model-row?(r) = ((String) fcgp-str(r, "rung") != "native") && ((String) fcgp-str(r, "rung") != "contract");
+  def ntl-model-rows(hist) = filter(r => ntl-model-row?(r), hist);
   def ntl-outs(hist) = filter(o => (Comparable) len(o) > 0, map(r => fcgp-str(r, "outcome_digest"), hist));
   def ntl-repeating?(hist) {
    let o = ntl-outs(hist);
    ((Comparable) len(o) >= 2) && ((String) o[-1] == o[-2]);
   }
-  def ntl-nearest(hist) = nil?(hist) ? json-node-object([]) : fcgp-obj(hist[-1], "approach");
-  def ntl-clinamen(a, hist) = nil?(hist) ? [] : filter(k => (String) ntl-field(a, k) != ntl-field(ntl-nearest(hist), k), ntl-method-fields());
+  def ntl-nearest(hist) = nil?(ntl-model-rows(hist)) ? json-node-object([]) : fcgp-obj(ntl-model-rows(hist)[-1], "approach");
+  def ntl-clinamen(a, hist) = nil?(ntl-model-rows(hist)) ? [] : filter(k => (String) ntl-field(a, k) != ntl-field(ntl-nearest(hist), k), ntl-method-fields());
   // avail: [native applies (a writable form.bml source), a checkpoint to resume (1/0)]
   def ntl-unavailable(a, avail) = (((String) ntl-rung(a) == "native") && ((Comparable) avail[0] == 0)) ? "native-inapplicable: no writable form.bml source" : (((Comparable) (fcgp-num(a, "resume") ?? 0) == 1) && ((Comparable) avail[1] == 0)) ? "no-checkpoint-to-resume" : (((String) ntl-rung(a) == "voice") && ((String) fcgp-str(a, "model") == "")) ? "no-other-voice" : "";
   def ntl-admit(a, hist, avail) {
@@ -110,8 +138,17 @@ section [form.bml] {
   // ── the coherence of a band's reading against its full ──
   def ntl-band-above?(before, full) = nothing?(before) ? false : ((Comparable) before > full);
   def ntl-lead-int(s) = ((Comparable) ntl-run-end(s, 0) == 0) ? nothing() : str_to_int(substring(s, 0, ntl-run-end(s, 0)));
-  def ntl-head-line(lines, n) = (nil?(lines) || (n <= 0)) ? nothing() : ntl-starts?(lines[0], "; Verdict ") ? ntl-lead-int(substring(lines[0], 10, len(lines[0]))) : ntl-head-line(lines[1:], (n - 1));
-  def ntl-head-verdict(text) = ntl-head-line(split-on(text, "\n"), 60);
+  // validate.sh's reading (fk_band_declared_verdict): the first "Verdict <digits>" on a ';' line, before the first
+  // line that is neither a comment nor blank; a comment line that has none is passed over
+  def ntl-verdict-from(line, from) {
+   let at = str_find(line, "Verdict ", from);
+   if (at < 0) then nothing()
+   else if (((at + 8) < len(line)) && ntl-digit?(str_byte_at(line, (at + 8)))) then ntl-lead-int(substring(line, (at + 8), len(line)))
+   else ntl-verdict-from(line, (at + 8));
+  }
+  def ntl-head-line(lines) = nil?(lines) ? nothing() : ntl-starts?(lines[0], ";") ? ntl-head-next(lines, ntl-verdict-from(lines[0], 0)) : ((Comparable) len(trim(lines[0])) == 0) ? ntl-head-line(lines[1:]) : nothing();
+  def ntl-head-next(lines, found) = nothing?(found) ? ntl-head-line(lines[1:]) : found;
+  def ntl-head-verdict(text) = ntl-head-line(split-on(text, "\n"));
   def ntl-head-differs?(text, full) {
    let head = ntl-head-verdict(text);
    nothing?(head) ? false : !((Comparable) head == full);
@@ -125,23 +162,37 @@ section [form.bml] {
   // the texts a search changed, nothing where a document stands as it was (hw-over keeps the checkpoint there)
   def ntl-changed(before, after) = nil?(before) ? [] : cons(((String) before[0] == after[0]) ? nothing() : after[0], ntl-changed(before[1:], after[1:]));
   def ntl-known(known, src) = nil?(known) ? [] : ((String) known[0][0] == src) ? [known[0][1]] : ntl-known(known[1:], src);
+  // the kind of stop an observation names ("" when it names none): a check that answered [0, "window-closed"],
+  // [0, "band-stopped"] or [0, "publish-refused: ..."] did not judge its candidate, the judging was stopped
+  def ntl-stop-kind(o) = ((String) o == "window-closed") ? "window-closed" : ((String) o == "band-stopped") ? "band-stopped" : ntl-starts?(o, "publish-refused") ? "publish-refused" : "";
+  def ntl-judged-stop(c) = ((Comparable) c[0] == 0) ? ntl-stop-kind(c[1]) : "";
+  // a search attempt is [start, end, wrapper, passed, observation, sha]
+  def ntl-attempt-stop(a) = ntl-judged-stop([a[3], a[4]]);
+  def ntl-attempts-stop(attempts) = nil?(attempts) ? "" : ((Comparable) len(ntl-attempt-stop(attempts[0])) > 0) ? ntl-attempt-stop(attempts[0]) : ntl-attempts-stop(attempts[1:]);
+  // the band runs a search spent: its attempts but the original's own reading, and but those that were stopped
+  def ntl-attempts-used(attempts) = nil?(attempts) ? 0 : len(filter(a => (Comparable) len(ntl-attempt-stop(a)) == 0, attempts[1:]));
   // one document: a boolean-syntax repair (judged by check), then the one-value wrapper search over the repaired
   // source. A candidate the search already judged is never judged twice. Answers [status, text, checks, reason,
-  // observation]; every status but repaired keeps the document's original bytes.
+  // observation]; every status but repaired keeps the document's original bytes. A check that was stopped ends the
+  // document as "interrupted" (the reason names the stop): nothing was judged, so no approach was read.
   def ntl-native-doc(original, i, check, left) {
    let syn = fbr-repair(original);
    let base = (syn[0] && !nil?(syn[2])) ? syn[1] : original;
    let c0 = ((String) base == original) ? [0, "before"] : check(i, base);
    let spent = ((String) base == original) ? 0 : 1;
+   let stop0 = ((String) base == original) ? "" : ntl-judged-stop(c0);
    if (((String) base != original) && ((Comparable) c0[0] == 1)) then ["repaired", base, spent, "boolean-syntax-repair", c0[1]]
+   else if ((Comparable) len(stop0) > 0) then ["interrupted", original, spent, stop0, ""]
    else if ((Comparable) (left - spent) <= 0) then ["exhausted", original, spent, "check-budget-exhausted", ""]
    else ntl-native-search(original, base, i, check, left, spent, ((String) base == original) ? [[original, [0, "before"]]] : [[original, [0, "before"]], [base, c0]]);
   }
   def ntl-native-search(original, base, i, check, left, spent, known) {
    let judge = (contract, src) => nil?(ntl-known(known, src)) ? check(i, src) : ntl-known(known, src)[0];
    let r = fbvs-search(base, judge, 0, min2(((left - spent) + 1), fbvs-limit()));
-   let used = max2(0, (len(r[2]) - 1));
+   let used = ntl-attempts-used(r[2]);
+   let stop = ntl-attempts-stop(r[2]);
    if ((String) r[0] == "repaired") then ["repaired", r[1], (spent + used), "one-value-wrapper", r[3]]
+   else if ((Comparable) len(stop) > 0) then ["interrupted", original, (spent + used), stop, ""]
    else ["exhausted", original, (spent + used), r[3], ""];
   }
   def ntl-native(texts, check, budget) = ntl-native-from(texts, 0, check, budget, 0, "inapplicable", "no-form-bml-source");
@@ -151,6 +202,7 @@ section [form.bml] {
    else {
     let one = ntl-native-doc(texts[i], i, check, left);
     if ((String) one[0] == "repaired") then ["repaired", ntl-put(texts, i, one[1]), (spent + one[2]), one[3], one[4]]
+    else if ((String) one[0] == "interrupted") then ["interrupted", texts, (spent + one[2]), one[3], ""]
     else ntl-native-from(texts, (i + 1), check, (left - one[2]), (spent + one[2]), "exhausted", one[3]);
    };
   }
