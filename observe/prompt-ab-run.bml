@@ -1,0 +1,50 @@
+// One resident, every task, every prompt arm. Stdin is one registry name.
+// A model the qwen35 generate door cannot hold is named and not scored.
+// preflight-exec: forbidden
+import form/form-stdlib/prompt-ab.bml;
+import form/form-stdlib/model-registry.bml;
+import form/form-stdlib/form-cli-model-generate.fk;
+import form/form-stdlib/bml/stdin-source.bml;
+section [form.bml] {
+ def pab-tokens() = 24;
+ def pab-gguf?(path) = str_find(path, ".gguf", 0) >= 0 ? 1 : 0;
+ def pab-door?(name) = {
+  let path = mr-path(mr-find(name));
+  (Comparable) mr-file?(path) == 0 ? 0 : (Comparable) pab-gguf?(path) == 0 ? 0 : (String) mr-arch(mr-find(name)) == "qwen35" ? mr-wired?(mr-arch(mr-find(name))) : 0;
+ };
+ def pab-reply(report) = fcmg-local-plan-text(report);
+ def pab-refused?(report) = str_find(report, "generation refused", 0) >= 0 ? 1 : 0;
+ def pab-trial(resident, path, model, task, arm) = {
+  let asked = pab-arm-text(model, arm, task[1]);
+  let out = fcmg-generate-with-at(resident, path, asked, pab-tokens(), "knowledge-query");
+  let text = pab-reply(out[0]);
+  let refused = pab-refused?(out[0]);
+  let points = (Comparable) refused == 1 ? 0 : pab-points(text, task[2]);
+  print([model, task[0], arm, points, len(text), (Comparable) refused == 1 ? "refused" : text]);
+  [out[1], pab-row(arm, points, len(text)), refused];
+ };
+ def pab-arms-go(resident, path, model, task, arms, rows) = (Comparable) len(arms) == 0 ? [resident, rows, 0] : {
+  let one = pab-trial(resident, path, model, task, arms[0]);
+  (Comparable) one[2] == 1 ? [one[0], append(rows, [one[1]]), 1] : pab-arms-go(one[0], path, model, task, arms[1:], append(rows, [one[1]]));
+ };
+ def pab-tasks-go(resident, path, model, tasks, totals) = (Comparable) len(tasks) == 0 ? [resident, totals] : {
+  let round = pab-arms-go(resident, path, model, tasks[0], pab-arms(), []);
+  let best = pab-best(round[1]);
+  print(["best-task", model, tasks[0][0], best[0], best[1]]);
+  (Comparable) round[2] == 1 ? [round[0], pab-add(totals, round[1])] : pab-tasks-go(round[0], path, model, tasks[1:], pab-add(totals, round[1]));
+ };
+ def pab-add-one(totals, row) = (Comparable) len(totals) == 0 ? [row] : (String) totals[0][0] == row[0] ? cons(pab-row(row[0], totals[0][1] + row[1], totals[0][2] + row[2]), totals[1:]) : cons(totals[0], pab-add-one(totals[1:], row));
+ def pab-add(totals, rows) = (Comparable) len(rows) == 0 ? totals : pab-add(pab-add-one(totals, rows[0]), rows[1:]);
+ def pab-run(name) = (Comparable) pab-door?(name) == 0 ? ["prompt-ab", name, "unfinished-on-generate-door"] : {
+  let path = mr-path(mr-find(name));
+  let done = pab-tasks-go(fcmr-none(), path, name, pab-tasks(), []);
+  let closed = fcmr-release-ok?(done[0]);
+  let best = pab-best(done[1]);
+  print(["best-model", name, best[0], best[1], "of", len(pab-tasks()) * 2, "release", closed]);
+  ["prompt-ab", name, best[0], best[1], closed];
+ };
+ def pab-all(rows) = (Comparable) len(rows) == 0 ? [] : cons(pab-run(mr-name(rows[0])), pab-all(rows[1:]));
+ let name = trim(stdin-text());
+ print((String) name == "" ? pab-all(mr-registry()) : pab-run(name));
+ 0;
+}
