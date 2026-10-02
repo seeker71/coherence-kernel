@@ -1,22 +1,31 @@
 ; host-walk-band.bml — the walk's window, its lock, its turns, its sync, its children, its clock and its publish
 ; window, with no model; git runs only over a scratch origin under temp_dir.
 ;
-; Verdict 268435455 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
+; Verdict 536870911 = 1 options | 2 claims | 4 refuses | 8 takes-gone | 16 takes-reused | 32 one-taker | 64 unowned
 ;   | 128 releases | 256 floor | 512 unmeasured | 1024 room | 2048 turn-lines | 4096 turns | 8192 elsewhere
 ;   | 16384 yield | 32768 sync | 65536 reviewed | 131072 idle | 262144 stale-mark | 524288 publish
 ;   | 1048576 heal | 2097152 sync-rows | 4194304 publish-absent | 8388608 band-after | 16777216 planned
-;   | 33554432 queue-paths | 67108864 spawn | 134217728 clock
+;   | 33554432 queue-paths | 67108864 spawn | 134217728 clock | 268435456 sync-lease
 ;
 ; The children (form-stdlib/bml/host-child.bml): a stdin file reaches the child, its stdout and stderr share one file
 ; (or stderr goes nowhere), the exit is the host's own (a child that exits 3 reads 3), the step's last out file is
 ; replaced and never appended to, a binary that is not there is nothing at birth (never -1) and leaves its reason in
 ; the out file, and a child past its deadline is stopped (SIGTERM, then SIGKILL after its grace for one that ignores
-; it) and reads nothing with what it had printed kept. The readers
+; it) and reads nothing with what it had printed kept. The SIGKILL escalation is pinned by time: a child that ignores
+; TERM and would sleep a minute is gone within its grace plus a few seconds. A child that ends is noticed within about a
+; second of its end (a four second child under a ten minute deadline returns near four seconds). A child's
+; descendants among the fkwu kernels are stopped with it (a grandchild kernel the child began is not alive after the
+; deadline). The wiring of the walk's turn and plan is pinned: hw-turn-run-of and hw-plan-run-of begin a stub in the
+; child's place and the deadline reaching the door is the window's end plus hw-backstop-ms (a stub whose window
+; ended hw-backstop-ms less 0.3 s ago is stopped 0.3 s after it begins; a turn passed no deadline would run its
+; whole 30 s, one passed the window's end without the backstop would be stopped at once); a plan the door stopped
+; answers [local-plan:stopped], and one that queued its gap before it hung answers its result. The readers
 ; that replaced grep and tail answer the lines they did. The build and the carrier read "fresh" while the product
 ; is newer than its source, else run the compiler through the child door and put the product in place (a failing
 ; compiler reads its exit, one never born reads nothing); the push answers its rejection's own line, so a main that
 ; moved reads as moved. The clock: a POSIX zone footer ("WITA-8", "<+08>-8", "IST-5:30", "UTC0") reads its offset
-; east of UTC, a footer with a daylight rule reads nothing, and fixed instants name the day and the hhmm the zone
+; east of UTC, a footer with a daylight rule reads nothing (so does one whose hours pass 24, whose minutes or
+; seconds pass 59, or whose angle name is empty, and `date +%z` is the fallback for all of them), and fixed instants name the day and the hhmm the zone
 ; puts them on (the 03:30 night and the 12:30 day turn, the midnight rollover, a leap day, a zone west of UTC); the
 ; host's own reading agrees with `date`.
 ;
@@ -43,7 +52,9 @@
 ; the row; a real conflict names its file, holds, and leaves the tree as it was; a rebase refused by an untracked
 ; file reads dirty, never conflict; a dirty source while main changed the same line reads dirty, and the tree keeps
 ; its bytes with no stash entry and no unmerged path. Rows that would not merge as a union (a row in a ledger main
-; deleted, a row in a ledger git reads as binary) read dirty the same way. The publish window restores the
+; deleted, a row in a ledger git reads as binary) read dirty the same way. The sync's push is a lease: when origin's
+; branch moved after the walk last read it, the push is refused (a nonzero exit) and origin keeps the other commit;
+; after the walk reads and follows it, the same push goes. The publish window restores the
 ; checkpoint when its run answers and when it stops, clears its marker, refuses a moved tree and a marker this pid
 ; already holds; with the tree as it stands as its checkpoint, a path not there yet publishes, its run sees it, and
 ; it is gone again after the window, while a candidate that names no text for it leaves it absent. A window reads
@@ -270,6 +281,26 @@ section [form.bml] {
    let binaryLeft = hwb-left(ctx, walk);
    hwb-bit(((String) ready == "ready") && ((String) deleted == "ready") && hwb-has?(gone, "dirty: M receipts/gone.jsonl") && hwb-has?(gone, "sync=1") && (!hw-conflicted?(gone)) && ((String) goneLeft == "0 0") && goneRow && ((String) appended == "ready") && hwb-has?(binary, "dirty: M receipts/bin.jsonl") && hwb-has?(binary, "sync=1") && ((String) binaryLeft == "0 0") && hwb-porcelain-pure());
   }
+  // ── the sync's push is a lease: origin's branch moved after the walk last read it, so the push is refused ──
+  def hwb-other-moves() = append([hwb-g(".", ["clone", "-q", "origin.git", "other"])], append(hwb-who("other", "other"), [hwb-g("other", ["checkout", "-q", "-B", "walk", "origin/walk"]), ["write", "other/o.txt", "o\n"], hwb-g("other", ["add", "o.txt"]), hwb-g("other", ["commit", "-q", "-m", "other"]), hwb-g("other", ["push", "-q", "origin", "walk"])]));
+  def hwb-walk-local() = [["write", "walk/w.txt", "w\n"], hwb-g("walk", ["add", "w.txt"]), hwb-g("walk", ["commit", "-q", "-m", "walk-local"])];
+  def hwb-ref(ctx, dir, ref) = trim(hch-git-in(hwb-io(ctx), dir, "band-ref", ["rev-parse", ref])[1]);
+  def hwb-sync-lease(ctx) {
+   let root = hwb-root(ctx) ++ "/lease";
+   let made = host_dir_mkdir(root);
+   let walk = root ++ "/walk";
+   let origin = root ++ "/origin.git";
+   let ready = hwb-steps(ctx, root, hwb-git-setup());
+   let moved = hwb-steps(ctx, root, hwb-other-moves());
+   let local = hwb-steps(ctx, root, hwb-walk-local());
+   let theirs = hwb-ref(ctx, origin, "walk");
+   let refused = hw-sync-push(hwb-io(ctx), walk, "walk");
+   let kept = hwb-ref(ctx, origin, "walk");
+   let followed = hwb-steps(ctx, root, [hwb-g("walk", ["fetch", "-q", "origin", "walk"]), hwb-g("walk", ["rebase", "-q", "origin/walk"])]);
+   let went = hw-sync-push(hwb-io(ctx), walk, "walk");
+   let landed = hwb-ref(ctx, origin, "walk");
+   hwb-bit(((String) ready == "ready") && ((String) moved == "ready") && ((String) local == "ready") && (len(theirs) == 40) && (!nothing?(refused[1])) && ((Comparable) refused[1] != 0) && ((String) kept == theirs) && ((String) followed == "ready") && ((Comparable) went[1] == 0) && ((String) landed == hwb-ref(ctx, walk, "HEAD")) && ((String) landed != theirs));
+  }
   // ── only a turn that ran a gap is reviewed ──
   def hwb-review-mark(mark) {
    let wrote = write_file_text(mark, "reviewed\n");
@@ -438,8 +469,53 @@ section [form.bml] {
    let hung = hch-run-in(io, "hung", hwb-sh("echo partial; exec sleep 30"), "", began + 300);
    let spent = host_monotonic_ms() - began;
    let blocked = hch-run-in(io, "blocked", hwb-sh("exit 4"), "", nothing());
-   let stubborn = hch-run-in(io, "stubborn", hwb-sh("trap '' TERM; echo up; exec sleep 60"), "", host_monotonic_ms() + 200);
-   hwb-bit(nothing?(hung[0]) && ((String) hung[1] == "partial\n") && hwb-has?(hung[2], "deadline: the child ran past its deadline and was stopped") && (spent < 20000) && (spent >= 300) && ((Comparable) blocked[0] == 4) && ((Comparable) hw-backstop-ms() == 1800000) && nothing?(stubborn[0]) && hwb-has?(stubborn[2], "ended with SIGKILL") && ((String) stubborn[1] == "up\n") && hwb-has?(hch-said(hung), "partial\n[host-child] deadline") && hwb-has?(read_file(io ++ "/hung.exit") ?? "", "none deadline"));
+   // a child that ignores TERM (and would sleep a minute): only SIGKILL ends it, so the run is as long as the grace
+   // and no longer than the grace plus a few seconds. Without the escalation host_wait blocks for the minute.
+   let stubbornBegan = host_monotonic_ms();
+   let stubborn = hch-run-in(io, "stubborn", hwb-sh("trap '' TERM; echo up; exec sleep 60"), "", stubbornBegan + 200);
+   let stubbornSpent = host_monotonic_ms() - stubbornBegan;
+   hwb-bit(nothing?(hung[0]) && ((String) hung[1] == "partial\n") && hwb-has?(hung[2], "deadline: the child ran past its deadline and was stopped") && (spent < 20000) && (spent >= 300) && ((Comparable) blocked[0] == 4) && ((Comparable) hw-backstop-ms() == 1800000) && nothing?(stubborn[0]) && hwb-has?(stubborn[2], "ended with SIGKILL") && ((String) stubborn[1] == "up\n") && (stubbornSpent >= hch-grace-ms()) && (stubbornSpent < hch-grace-ms() + 6000) && hwb-has?(hch-said(hung), "partial\n[host-child] deadline") && hwb-has?(read_file(io ++ "/hung.exit") ?? "", "none deadline"));
+  }
+  // a child that ends is noticed within about a second of its end, whatever its deadline: six and a half seconds of
+  // work under a ten minute deadline returns near six and a half seconds. A poll whose naps double up to a minute
+  // notices this child late: from 50 ms it looks at 6.35 s and then 12.75 s, from 10 ms at 5.1 s and then 10.2 s.
+  def hwb-spawn-late(ctx) {
+   let io = hwb-io(ctx) ++ "/late";
+   let began = host_monotonic_ms();
+   let slow = hch-run-in(io, "slow", hwb-sh("sleep 6.5; echo done"), "", began + 600000);
+   let spent = host_monotonic_ms() - began;
+   hwb-bit(hch-ok?(slow) && ((String) slow[1] == "done\n") && (spent >= 6500) && (spent < 8500));
+  }
+  // the lineage: a child that began an fkwu kernel and waits for it is stopped with the kernel it began
+  def hwb-spawn-family(ctx) {
+   let dir = hwb-root(ctx) ++ "/family";
+   let io = dir ++ "/io";
+   let made = host_dir_mkdir(dir);
+   let sleeper = dir ++ "/sleeper.bml";
+   let wrote = write_file_text(sleeper, "section [form.bml] {\n host_sleep_ms(40000);\n print_str(\"never\");\n}\n");
+   let began = host_monotonic_ms();
+   let run = hch-run-in(io, "family", hwb-sh("./fkwu " ++ sleeper ++ " & echo $!; wait"), "", began + 2500);
+   let spent = host_monotonic_ms() - began;
+   let grandchild = hw-number(hw-line(split-on(run[1], "\n")[0]));
+   hwb-bit(nothing?(run[0]) && !nothing?(grandchild) && ((Comparable) host_alive(grandchild) == 0) && hwb-has?(run[2], "with 1 descendant(s)") && (spent < 20000));
+  }
+  // the walk's turn and plan reach the door with the window's end plus the backstop: a stub in the child's place whose
+  // window ended hw-backstop-ms less 0.3 s ago is stopped 0.3 s after it begins, with the options it read kept
+  def hwb-spawn-wiring(ctx) {
+   let io = hwb-io(ctx) ++ "/wiring";
+   let began = host_monotonic_ms();
+   let deadline = began + 300 - hw-backstop-ms();
+   let turn = hw-turn-run-of(io, hwb-sh("cat; exec sleep 30"), 24, deadline);
+   let turnSpent = host_monotonic_ms() - began;
+   let planBegan = host_monotonic_ms();
+   let plan = hw-plan-run-of(io, hwb-sh("cat >/dev/null; echo '[local-plan] opened'; exec sleep 30"), planBegan + 300 - hw-backstop-ms());
+   let planSpent = host_monotonic_ms() - planBegan;
+   let queuedFile = io ++ "/queued.txt";
+   let wroteQueued = write_file_text(queuedFile, hwb-queued-line() ++ "\n");
+   let queuedBegan = host_monotonic_ms();
+   let queued = hw-plan-run-of(io, hwb-sh("cat " ++ queuedFile ++ "; exec sleep 30"), queuedBegan + 300 - hw-backstop-ms());
+   let turnArgv = hw-turn-argv();
+   hwb-bit(nothing?(turn[0]) && hwb-has?(turn[2], "deadline: the child ran past its deadline") && hwb-has?(turn[1], "\"turns\":24") && hwb-has?(turn[1], "\"deadline_ms\":" ++ deadline.str()) && (turnSpent >= 300) && (turnSpent < 15000) && nothing?(plan[0]) && hwb-has?(plan[2], "deadline: the child ran past its deadline") && (planSpent >= 300) && (planSpent < 15000) && hwb-has?(hw-plan-answer(plan), "[local-plan:stopped] deadline: the child ran past its deadline") && ((String) hw-plan-answer(queued) == hwb-queued-line()) && ((String) hw-plan-or-stopped([0, "", ""], "[local-plan] no request") == "[local-plan] no request") && hwb-has?(hw-plan-or-stopped([nothing(), "", "birth refused: x"], ""), "[local-plan:stopped] birth refused: x") && ((String) turnArgv[1] == "observe/native-turn-run.bml") && ((String) hw-plan-argv()[1] == "observe/local-plan-run.bml") && ((Comparable) hch-step-backstop-ms() == 7200000) && ((Comparable) hch-git-backstop-ms() == 1800000));
   }
   // the readers that replaced `grep -F ... | tail -1` and `grep -F -e ... -e ...`, and the lines they read
   def hwb-spawn-readers(ctx) {
@@ -486,12 +562,12 @@ section [form.bml] {
    let unborn = hw-line(hw-push-read(hch-run-in(io, "push", ["/no/such/git"], "", nothing())));
    hwb-bit(((String) ready == "ready") && ((String) committed == "ready") && hwb-has?(rejected, "[rejected]") && hwb-has?(rejected, "fetch first") && hwb-has?(rejected, "main=1") && hw-main-moved?(rejected, "walk") && (!hw-pushed?(rejected, "walk")) && ((String) followed == "ready") && ((String) pushed == "main=0") && hw-pushed?(pushed, "walk") && (!hw-main-moved?(pushed, "walk")) && hwb-has?(unborn, "main=nothing") && (!hw-pushed?(unborn, "walk")));
   }
-  def hwb-spawn(ctx) = hwb-bit(((Comparable) hwb-spawn-io(ctx) == 1) && ((Comparable) hwb-spawn-deadline(ctx) == 1) && ((Comparable) hwb-spawn-readers(ctx) == 1) && ((Comparable) hwb-spawn-make(ctx) == 1) && ((Comparable) hwb-spawn-push(ctx) == 1));
+  def hwb-spawn(ctx) = hwb-bit(((Comparable) hwb-spawn-io(ctx) == 1) && ((Comparable) hwb-spawn-deadline(ctx) == 1) && ((Comparable) hwb-spawn-late(ctx) == 1) && ((Comparable) hwb-spawn-family(ctx) == 1) && ((Comparable) hwb-spawn-wiring(ctx) == 1) && ((Comparable) hwb-spawn-readers(ctx) == 1) && ((Comparable) hwb-spawn-make(ctx) == 1) && ((Comparable) hwb-spawn-push(ctx) == 1));
   // ── the clock: the zone from a POSIX footer, the day and the hhmm it puts an instant on, with no child ──
   def hwb-tzif(footer) = "TZif2" ++ byte_to_str(0) ++ "binary" ++ byte_to_str(0) ++ "\nTZif2" ++ byte_to_str(0) ++ "more\n" ++ footer ++ "\n";
   def hwb-zone(footer) = hw-zone-of-tz(hwb-tzif(footer));
   def hwb-hour(h) = h * 3600000;
-  def hwb-zones(ctx) = ((Comparable) hwb-zone("WITA-8") == 28800000) && ((Comparable) hwb-zone("<+08>-8") == 28800000) && ((Comparable) hwb-zone("UTC0") == 0) && ((Comparable) hwb-zone("<-03>3") == 0 - hwb-hour(3)) && ((Comparable) hwb-zone("IST-5:30") == hwb-hour(5) + 1800000) && ((Comparable) hwb-zone("EST5") == 0 - hwb-hour(5)) && nothing?(hwb-zone("EST5EDT,M3.2.0,M11.1.0")) && nothing?(hwb-zone("CET-1CEST,M3.5.0,M10.5.0/3")) && nothing?(hwb-zone("")) && nothing?(hwb-zone("garbage")) && nothing?(hw-zone-of-tz("not a tzif file\nWITA-8\n")) && nothing?(hw-zone-of-tz("")) && nothing?(hw-zone-of-tz(nothing())) && ((String) hw-tz-footer(hwb-tzif("WITA-8")) == "WITA-8") && ((Comparable) hw-zone-of-z("+0800") == 28800000) && ((Comparable) hw-zone-of-z("-0530\n") == 0 - 19800000) && nothing?(hw-zone-of-z("")) && nothing?(hw-zone-of-z("+08"));
+  def hwb-zones(ctx) = ((Comparable) hwb-zone("WITA-8") == 28800000) && ((Comparable) hwb-zone("<+08>-8") == 28800000) && ((Comparable) hwb-zone("UTC0") == 0) && ((Comparable) hwb-zone("<-03>3") == 0 - hwb-hour(3)) && ((Comparable) hwb-zone("IST-5:30") == hwb-hour(5) + 1800000) && ((Comparable) hwb-zone("EST5") == 0 - hwb-hour(5)) && nothing?(hwb-zone("EST5EDT,M3.2.0,M11.1.0")) && nothing?(hwb-zone("CET-1CEST,M3.5.0,M10.5.0/3")) && nothing?(hwb-zone("")) && nothing?(hwb-zone("garbage")) && nothing?(hwb-zone("WITA-99")) && nothing?(hwb-zone("WITA-25")) && ((Comparable) hwb-zone("WITA-24") == hwb-hour(24)) && nothing?(hwb-zone("WITA-8:99:99")) && nothing?(hwb-zone("WITA-8:60")) && ((Comparable) hwb-zone("WITA-8:59:59") == hwb-hour(8) + 3599000) && nothing?(hwb-zone("<>-8")) && ((Comparable) hwb-zone("<A>-8") == hwb-hour(8)) && nothing?(hw-zone-of-z("+9900")) && nothing?(hw-zone-of-z("+0860")) && nothing?(hw-zone-of-tz("not a tzif file\nWITA-8\n")) && nothing?(hw-zone-of-tz("")) && nothing?(hw-zone-of-tz(nothing())) && ((String) hw-tz-footer(hwb-tzif("WITA-8")) == "WITA-8") && ((Comparable) hw-zone-of-z("+0800") == 28800000) && ((Comparable) hw-zone-of-z("-0530\n") == 0 - 19800000) && nothing?(hw-zone-of-z("")) && nothing?(hw-zone-of-z("+08"));
   // fixed instants (unix ms) against a zone: [instant, zone, day, hhmm]
   def hwb-instants() = [[1790883000000, hwb-hour(8), "2026-10-02", 330], [1790915400000, hwb-hour(8), "2026-10-02", 1230], [1790870399000, hwb-hour(8), "2026-10-01", 2359], [1790870400000, hwb-hour(8), "2026-10-02", 0], [1767236400000, 0 - hwb-hour(5), "2025-12-31", 2200], [1709208000000, 0, "2024-02-29", 1200], [1709251200000, 0, "2024-03-01", 0]];
   def hwb-instant?(row) = ((String) hw-day-in(row[1], row[0]) == row[2]) && ((Comparable) hw-hhmm-in(row[1], row[0]) == row[3]);
@@ -510,7 +586,7 @@ section [form.bml] {
  }
  let ctx = hwb-fresh();
  nothing?(ctx) ? form_error("host-walk band needs a fresh directory under temp_dir") : 0;
- let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal], ["sync-rows", 2097152, 1, hwb-sync-rows], ["publish-absent", 4194304, 1, hwb-publish-absent], ["band-after", 8388608, 1, hwb-band-after], ["planned", 16777216, 1, hwb-planned], ["queue-paths", 33554432, 1, hwb-queue-paths], ["spawn", 67108864, 1, hwb-spawn], ["clock", 134217728, 1, hwb-clock]]);
+ let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal], ["sync-rows", 2097152, 1, hwb-sync-rows], ["publish-absent", 4194304, 1, hwb-publish-absent], ["band-after", 8388608, 1, hwb-band-after], ["planned", 16777216, 1, hwb-planned], ["queue-paths", 33554432, 1, hwb-queue-paths], ["spawn", 67108864, 1, hwb-spawn], ["clock", 134217728, 1, hwb-clock], ["sync-lease", 268435456, 1, hwb-sync-lease]]);
  host_dir_rmdir(hwb-root(ctx));
  verdict;
 }

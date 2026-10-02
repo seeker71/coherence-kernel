@@ -25,9 +25,18 @@
 // name, and the turn before the last is not lost to the next.
 //
 // A deadline (until) is a time on host_monotonic_ms, the clock every process on this host shares; nothing() blocks
-// on host_wait, so a turn that runs for hours costs no polling. With a deadline the door looks at host_alive after
-// 50 ms, and again after twice as long each time up to a minute. At the deadline it asks the child to stop
-// (host_kill), gives it hch-grace-ms, and then ends it with SIGKILL; a hung child no longer holds the walk's lock.
+// on host_wait, so a child with no deadline costs no polling. With a deadline the door looks at host_alive after
+// 10 ms, and again after twice as long each time up to a second (hch-poll-max-ms, one host_alive per tick), so a
+// child that ended is noticed within a second of its end, however long the deadline is. At the deadline it stops
+// the child's whole lineage: it reads the descendants among the fkwu kernels (the lanes and sessions a turn begins
+// are fkwu kernels, and a stopped parent's children are orphans no later read finds), asks each to stop (host_kill),
+// gives them hch-grace-ms, and ends the survivors with SIGKILL.
+//
+// Which children carry a deadline: a turn and a plan (the window's end plus hw-backstop-ms), the review, the gates,
+// the movement, the drafts and the page (hch-step-backstop-ms, two hours), and every git step (hch-git-backstop-ms,
+// half an hour). A hung one of these no longer holds the walk's lock. Not covered, said plainly: a witness the
+// landing names (it runs inside the movement's child, so the movement's backstop reaches it), the one-line reads
+// (hch-read, host_capture, which only the kernel can bound), and the two shell crossings form-cli-landing.bml names.
 //
 // PROOF: form-stdlib/tests/host-walk-band.bml (claim "spawn").
 import form-stdlib/line-grammar.fk;
@@ -37,9 +46,13 @@ section [form.bml] {
   def hch-out-path(io, step) = io ++ "/" ++ step ++ ".out";
   def hch-in-path(io, step) = io ++ "/" ++ step ++ ".in";
   def hch-exit-path(io, step) = io ++ "/" ++ step ++ ".exit";
-  def hch-poll-first-ms() = 50;
-  def hch-poll-max-ms() = 60000;
+  def hch-poll-first-ms() = 10;
+  def hch-poll-max-ms() = 1000;
   def hch-grace-ms() = 5000;
+  // a deadline is a time on host_monotonic_ms; hch-by names one that far from now
+  def hch-by(ms) = host_monotonic_ms() + ms;
+  def hch-step-backstop-ms() = 7200000;
+  def hch-git-backstop-ms() = 1800000;
   // the directories of a path, outermost first (host_dir_mkdir makes one level)
   def hch-prefixes(dir, from) {
    let at = str_find(dir, "/", from);
@@ -61,16 +74,35 @@ section [form.bml] {
    let rested = host_sleep_ms(left < 1 ? 1 : nap < left ? nap : left);
    hch-poll(pid, until, nap * 2 > hch-poll-max-ms() ? hch-poll-max-ms() : nap * 2);
   }
-  // past its deadline: asked to stop, given its grace, then ended; an exit is read for the reaping, never believed
-  def hch-stop(pid) {
-   let asked = host_kill(pid);
-   let gone = hch-gone?(pid, host_monotonic_ms() + hch-grace-ms());
-   let forced = gone ? 0 : host_wait(host_spawn_quiet(["/bin/kill", "-KILL", pid.str()]));
-   let reaped = host_wait(pid);
-   [nothing(), "deadline: the child ran past its deadline and was stopped" ++ (gone ? "" : " (ended with SIGKILL)")];
+  // The child's lineage: the child and every descendant that is an fkwu kernel (host_processes names kernels by
+  // prefix and answers each row's parent), read before any signal because a stopped parent's children are no longer
+  // found through it. A pass adds the rows whose parent is already in the set, until a pass adds none.
+  def hch-roster() {
+   let rows = host_processes("fkwu*");
+   (String) value_kind(rows) == "list" ? rows : [];
   }
-  def hch-gone?(pid, until) = (Comparable) host_alive(pid) != 1 ? true : host_monotonic_ms() >= until ? false : hch-gone-again(pid, until, host_sleep_ms(50));
-  def hch-gone-again(pid, until, rested) = hch-gone?(pid, until);
+  def hch-row-ok?(row) = (String) value_kind(row) == "list" && len(row) > 5 && (String) value_kind(row[0]) == "int" && (String) value_kind(row[5]) == "int";
+  def hch-in?(xs, x) = nil?(xs) ? false : ((Comparable) xs[0] == x) || hch-in?(xs[1:], x);
+  def hch-grow(rows, set) {
+   let more = filter(row => hch-row-ok?(row) && !hch-in?(set, row[0]) && hch-in?(set, row[5]), rows);
+   nil?(more) ? set : hch-grow(rows, append(set, more |> map(row => row[0])));
+  }
+  def hch-lineage(pid) = hch-grow(hch-roster(), [pid]);
+  def hch-asked(family) = foldl((acc, one) => host_kill(one), 0, family);
+  def hch-gone-all?(family, until) = nil?(filter(one => (Comparable) host_alive(one) == 1, family)) ? true : host_monotonic_ms() >= until ? false : hch-gone-again(family, until, host_sleep_ms(50));
+  def hch-gone-again(family, until, rested) = hch-gone-all?(family, until);
+  def hch-standing(family) = filter(one => (Comparable) host_alive(one) == 1, family);
+  def hch-kill-argv(family) = append(["/bin/kill", "-KILL"], hch-standing(family) |> map(one => one.str()));
+  // past its deadline: the lineage is asked to stop, given its grace, and the survivors ended; the child's exit is read
+  // for the reaping, never believed
+  def hch-stop(pid) {
+   let family = hch-lineage(pid);
+   let asked = hch-asked(family);
+   let gone = hch-gone-all?(family, host_monotonic_ms() + hch-grace-ms());
+   let forced = gone ? 0 : host_wait(host_spawn_quiet(hch-kill-argv(family)));
+   let reaped = host_wait(pid);
+   [nothing(), "deadline: the child ran past its deadline and was stopped" ++ (len(family) > 1 ? " with " ++ (len(family) - 1).str() ++ " descendant(s)" : "") ++ (gone ? "" : " (ended with SIGKILL)")];
+  }
   // the step's reading, one line beside its output
   def hch-exit-line(status, why) = nothing?(status) ? "none " ++ why : status.str();
   def hch-answer(io, step, out, waited) {
@@ -112,8 +144,8 @@ section [form.bml] {
   def hch-run-quiet(step, argv, input, until) = hch-run-quiet-in(hch-dir(), step, argv, input, until);
   // git has no cwd argument here: -C names the checkout
   def hch-git-argv(dir, args) = cons("git", cons("-C", cons(dir, args)));
-  def hch-git-in(io, dir, step, args) = hch-run-in(io, step, hch-git-argv(dir, args), "", nothing());
-  def hch-git-quiet-in(io, dir, step, args) = hch-run-quiet-in(io, step, hch-git-argv(dir, args), "", nothing());
+  def hch-git-in(io, dir, step, args) = hch-run-in(io, step, hch-git-argv(dir, args), "", hch-by(hch-git-backstop-ms()));
+  def hch-git-quiet-in(io, dir, step, args) = hch-run-quiet-in(io, step, hch-git-argv(dir, args), "", hch-by(hch-git-backstop-ms()));
   def hch-ok?(run) = !nothing?(run[0]) && (Comparable) run[0] == 0;
   def hch-status-text(run) = nothing?(run[0]) ? "nothing" : run[0].str();
   // the text of a run, with a child that never exited named on its last line (a reader of the text sees why)
