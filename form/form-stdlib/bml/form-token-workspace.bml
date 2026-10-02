@@ -574,19 +574,26 @@ section [form.bml] {
   def ftw-hash-at(text, i, n, a, b) = i >= n ? a.str() ++ "-" ++ b.str() : ftw-hash-at(text, i + 1, n, ((a * 33) + str_byte_at(text, i)) % 2147483647, ((b * 131) + str_byte_at(text, i)) % 1000000007);
   def ftw-arg-list(arity) = str-join-with(map(i => "vals[" ++ i.str() ++ "]", range(0, arity)), ", ");
   def ftw-serve-name(carrier) = carrier == ftw-lean-carrier() ? "ftw-serve-at" : "ftv-serve-at";
-  def ftw-unit-text(home, name, arity, carrier, dir) = "import " ++ carrier ++ ";\nimport " ++ home ++ ";\nsection [form.bml] {\n " ++ ftw-serve-name(carrier) ++ "(\"" ++ dir ++ "\", vals => " ++ name ++ "(" ++ ftw-arg-list(arity) ++ "));\n}\n";
+  // a native has no home to import: its unit is the carrier and the call (ftw-native-call)
+  def ftw-unit-text(home, name, arity, carrier, dir) = "import " ++ carrier ++ ";\n" ++ (home == "" ? "" : "import " ++ home ++ ";\n") ++ "section [form.bml] {\n " ++ ftw-serve-name(carrier) ++ "(\"" ++ dir ++ "\", vals => " ++ name ++ "(" ++ ftw-arg-list(arity) ++ "));\n}\n";
   // the units a checkout keeps compiled: the newest ftw-doors-kept() (an image weighs 1 to 23 MB);
   // an older one leaves with its image, its lowering and its symbols when a new one is written
   def ftw-doors-kept() = 8;
+  // A unit is evicted by use: one in use is touched (its modification time moves, its bytes stay),
+  // so the oldest is the one used longest ago. A unit is written whole to a fresh name and renamed
+  // into place, so a child that starts on it never reads half of it.
   def ftw-door-unit(dir, text) {
    let unit = dir ++ "/door-" ++ ftw-hash(text) ++ ".bml";
-   let wrote = (read_file(unit) ?? "") == text ? 0 : ftw-door-write(dir, unit, text);
+   let used = (read_file(unit) ?? "") == text ? ftw-door-touch(unit) : ftw-door-write(dir, unit, text);
    unit;
   }
+  def ftw-door-touch(unit) = fs_truncate(unit, file_size(unit));
   def ftw-door-write(dir, unit, text) {
    let units = map(n => dir ++ "/" ++ n, filter(n => ftw-starts?(n, "door-") && ftw-ends?(n, ".bml"), fs_list(dir) ?? []));
    let pruned = ftw-doors-prune(units, len(units) - (ftw-doors-kept() - 1));
-   write_file(unit, text);
+   let part = unit ++ ".w" ++ host_pid().str();
+   let wrote = write_file(part, text);
+   fs_rename(part, unit);
   }
   def ftw-doors-prune(units, extra) = (extra <= 0) || nil?(units) ? 0 : ftw-doors-prune-oldest(units, extra, foldl((old, u) => file_mtime(u) < file_mtime(old) ? u : old, units[0], units));
   def ftw-doors-prune-oldest(units, extra, oldest) {
@@ -609,6 +616,11 @@ section [form.bml] {
    let picked = try oac-choice(alts, 0) catch nothing();
    nothing?(picked) ? [0, record_get(last, "why"), record_get(last, "printed")] : picked;
   }
+  // A native that waits on the network (http_get, tls_request, sock_request) runs the same way, in a
+  // child on a unit of just the call: [1, value, printed] or [0, reason, printed]. A reason that
+  // names the deadline is door-timeout:<name>.
+  def ftw-native-call(name, vals, deadline) = ftw-door-reason(name, ftw-body-call-homes(name, vals, ftw-lean-carrier(), [""], deadline));
+  def ftw-door-reason(name, answer) = answer[0] == 1 ? answer : [0, ftw-starts?(answer[1], "body-call-timeout") ? "door-timeout:" ++ name : answer[1], answer[2]];
   def ftw-body-alt(name, vals, carrier, home, deadline, last) {
    let answer = host_monotonic_ms() >= deadline ? [0, "body-call-timeout", ""] : ftw-body-run(name, vals, carrier, home, deadline);
    answer[0] == 1 ? answer : ftw-body-failed(last, answer[1] ++ ":" ++ name, answer[2]);
@@ -656,6 +668,27 @@ section [form.bml] {
    let ended = ftw-wait-child(pid, host_monotonic_ms() + 2000);
    let forced = ended == 1 ? 0 : host_wait(host_spawn_quiet(["/bin/kill", "-KILL", pid.str()]));
    host_wait(pid);
+  }
+  // A process run to its end by the deadline (host_capture and host-exec in a control): it reads
+  // nothing from this process's stdin (/dev/null, or the input it was given, from a file) and speaks
+  // into a file read back, so neither of the lane's channels reaches it. [1, its stdout] when it
+  // ended, [0, ""] when the deadline came first (it is stopped and reaped, ftw-stop-child: only the
+  // process itself, so a shell pipeline's other members finish by themselves), [-1, ""] when it
+  // could not be run. A binary that is absent ends with nothing said, as a capture reads it.
+  def ftw-run-process(argv, input, deadline) {
+   let dir = ftw-doors-dir();
+   let made = ftw-mkdirs(dir);
+   let stem = dir ++ "/run-" ++ host_pid().str() ++ "-" ++ ftw-next-seq().str();
+   let fed = len(input) > 0 ? write_file(stem ++ ".in", input) : 0;
+   let pid = host_spawn_at(argv, [len(input) > 0 ? stem ++ ".in" : "/dev/null", stem ++ ".out", ""]);
+   let answer = pid > 0 ? ftw-run-ended(pid, stem, deadline) : pid == -4 ? [1, ""] : [-1, ""];
+   let gone = map(s => file_size(stem ++ s) >= 0 ? fs_remove(stem ++ s) : 0, [".in", ".out"]);
+   answer;
+  }
+  def ftw-run-ended(pid, stem, deadline) {
+   let ended = ftw-wait-child(pid, deadline);
+   let status = ended == 1 ? host_wait(pid) : ftw-stop-child(pid);
+   [ended, read_file(stem ++ ".out") ?? ""];
   }
   def ftw-said(out) {
    let back = file_size(out) > 0 ? (try ftw-decode(read_form_binary(out)) catch nothing()) : nothing();
