@@ -1,0 +1,93 @@
+//////////////////////////////////////////////////////////////////////
+// ledger.bml — a ledger's row is a declared blueprint: written as flat JSON, read back as a typed cell.
+//
+// Seventeen ledgers under receipts/ and .hearth/ are written one hand-built row at a time (json-node-object over
+// fhn-n / fhn-s, then json-emit, then fhn-append) and read back one field at a time by parse-json and a string
+// accessor. A row declared once is checked when it is written and when it is read, and the same row is the same
+// cell, so a repeat is known by its NodeID. The file stays what it was: one JSON object per line, field names as
+// declared, so every reader that exists keeps reading it.
+//
+//   blueprint CompanionRow { at_unix_ms: int, lang: string, said: string, answer: string, voice: string }
+//   ledger-append(path, CompanionRow{at_unix_ms: now_unix_ms(), lang: "en", said: s, answer: a, voice: v});
+//   ledger-rows(path, "CompanionRow")      the rows that read, as cells; a row that does not fit is not one
+//   row-get(row, "said")                   a field as the program's own value
+//   row-json(row) / row-cell(name, text)   one row as a line, and a line as a row, or nothing()
+//
+// Field types: int float string bool, option<T> (null), list<T> set<T> tuple<...> (JSON arrays), map<string,V> (an
+// object), and a declared blueprint (a nested object). A map with other keys is written as an array of [key, value]
+// pairs. A row whose line is not strict JSON, names a field the blueprint does not declare, leaves out one it
+// requires, or holds a value of the wrong type reads as nothing(), and the ledger's other rows read on.
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/bml/blueprint-literal.bml form-stdlib/bml/json-view-parse.bml form-stdlib/spool-bell-transport.fk
+section [form.bml] {
+ class FormLedger {
+  // ---- a row as one line of JSON, the fields as declared ---------------------------------------------------------
+  def row-key(k) = k[0] == "str" ? json-quote-string(k[1]) : json-quote-string(bl-text(k));
+  def row-all-text-keys?(pairs) = all?(p => p[0][0] == "str", pairs);
+  def row-value(a) = match a[0] {
+   "int" => value_str(a[1]),
+   "float" => float-text(a[1]),
+   "str" => json-quote-string(a[1]),
+   "bool" => a[1] == 1 ? "true" : "false",
+   "none" => "null",
+   "some" => row-value(a[1]),
+   "list" | "set" | "tuple" => "[" ++ str-join-with(a[1] |> map(m => row-value(m)), ",") ++ "]",
+   "map" => row-all-text-keys?(a[1]) ? ("{" ++ str-join-with(a[1] |> map(p => row-key(p[0]) ++ ":" ++ row-value(p[1])), ",") ++ "}") : ("[" ++ str-join-with(a[1] |> map(p => "[" ++ row-value(p[0]) ++ "," ++ row-value(p[1]) ++ "]"), ",") ++ "]"),
+   "rec" => row-object(a[2]),
+   _ => "null"
+  };
+  def row-object(fields) = "{" ++ str-join-with(fields |> map(f => json-quote-string(f[0]) ++ ":" ++ row-value(f[1])), ",") ++ "}";
+  def row-json(row) {
+   let a = bl-cell-ast(row, bl-now());
+   nothing?(a) ? nothing() : (a[0] == "rec" ? row-object(a[2]) : nothing());
+  }
+
+  // ---- a line as a row: the strict JSON view, then each value read as the type its field declares -----------------------
+  def row-elem-type(t, i) = match t[0] {
+   "list" | "set" | "option" => t[1][0],
+   "tuple" => i < len(t[1]) ? t[1][i] : ["any", []],
+   _ => ["any", []]
+  };
+  def row-val-type(t) = t[0] == "map" ? t[1][1] : ["any", []];
+  def row-native(view, t, defs) = match jv-kind(view) {
+   1 => row-object-native(view, t, defs),
+   2 => row-array-native(jv-items(view), t, defs),
+   3 | 4 | 6 => jv-value(view),
+   7 => jv-value(view) ? 1 : 0,
+   _ => nothing()
+  };
+  def row-array-native(items, t, defs) = (0 .. len(items)) |> map(i => row-native(items[i], row-elem-type(t, i), defs));
+  def row-object-native(view, t, defs) = nothing?(bl-find(t[0], defs)) ? (jv-pairs(view) |> map(p => [p[0], row-native(p[1], row-val-type(t), defs)])) : row-cell-from-view(t[0], view, defs);
+  def row-field-type(d, fname) {
+   let ft = bl-field-type(d, fname);
+   nothing?(ft) ? ["any", []] : ft;
+  }
+  def row-cell-from-view(name, view, defs) {
+   let d = bl-find(name, defs);
+   (nothing?(d) || (jv-kind(view) != 1)) ? nothing() : bl-make(name, jv-pairs(view) |> map(p => [p[0], row-native(p[1], row-field-type(d, p[0]), defs)]));
+  }
+  def row-cell(name, text) = jwa-valid(text) ? row-cell-from-view(name, jvp-admitted(text), bl-now()) : nothing();
+
+  // ---- a row's field as the program's own value ------------------------------------------------------------------------------
+  def ast-native(a) = match a[0] {
+   "int" | "float" | "str" | "bool" => a[1],
+   "none" => nothing(),
+   "some" => ast-native(a[1]),
+   "list" | "set" | "tuple" => a[1] |> map(m => ast-native(m)),
+   _ => bl-built(a, bl-now())
+  };
+  def row-get(row, field) {
+   let a = bl-cell-ast(row, bl-now());
+   let hit = (nothing?(a) || (a[0] != "rec")) ? nothing() : bl-fget(a[2], field);
+   nothing?(hit) ? nothing() : ast-native(hit);
+  }
+
+  // ---- the file ----------------------------------------------------------------------------------------------------------------------
+  def ledger-append(path, row) {
+   let line = row-json(row);
+   nothing?(line) ? nothing() : (sbt-append-count(path, line ++ "\n") == len(line) + 1 ? "appended" : "refused:short-append");
+  }
+  def ledger-rows(path, name) = file_size(path) < 1 ? [] : (split-on(read_file(path), "\n") |> filter(line => len(trim(line)) > 0) |> map(line => row-cell(name, line)) |> filter(row => !nothing?(row)));
+ }
+ 0;
+}
