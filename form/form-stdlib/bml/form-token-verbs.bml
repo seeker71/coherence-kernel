@@ -1254,10 +1254,15 @@ section [form.bml] {
    let row = rows |> filter(row => row[0] == name);
    name == "?" ? ftv-render(session, rows) : nil?(row) ? ftv-nothing("unknown-library:use-recipe-import-?") : {
     let path = record_get(session, "root") ++ row[0][1];
-    let source = file_size(path) > 0 ? read_file(path) : nothing();
-    nothing?(source) ? ftv-nothing("library-source-unavailable") : ftv-library-admit(session, name, source);
+    let ctx = ftv-ctx(session);
+    let bytes = ftv-late?(ctx) ? 0 : file_size(path);
+    let source = bytes > 0 && bytes <= ftv-library-max() ? read_file(path) : nothing();
+    ftv-late?(ctx) ? ftv-nothing(ftv-deadline-reason()) : nothing?(source) ? ftv-nothing("library-source-unavailable") : ftv-library-admit(session, name, source, ctx);
    };
   }
+  // a library source is read whole and parsed, so it is bounded; the import answers by the control's
+  // deadline before it reads and again before it admits what it parsed
+  def ftv-library-max() = 65536;
   def ftv-library-parse(source) {
    let at = fsc-find-section-open(source, 0);
    let end = at < 0 ? -1 : fsc-find-char-from(source, "]", at + 9);
@@ -1267,7 +1272,7 @@ section [form.bml] {
     fsc-find-section-open(source, close + 1) >= 0 ? nothing() : fbl-section-recipes(substring(source, open + 1, close), fbr-line-at(source, open + 1));
    };
   }
-  def ftv-library-admit(session, name, source) {
+  def ftv-library-admit(session, name, source, ctx) {
    let identity = intern_trivial_string(source);
    let libraries = record_get(session, "libraries");
    let prior = record_has(libraries, name) ? record_get(libraries, name) : nothing();
@@ -1275,7 +1280,7 @@ section [form.bml] {
     let key = "library:" ++ ftv-coord(identity);
     let defs = record_has(FTV-OPENINGS, key) ? record_get(FTV-OPENINGS, key) : try ftv-library-parse(source) catch nothing();
     let valid = !nothing?(defs) && len(defs) > 0 && all?(defn => node_eq(node_category(defn), FTV-FNDEF) && len(node_children(node_children(defn)[1])) == 1, defs);
-    !valid ? ftv-nothing("library-definitions") : {
+    !valid ? ftv-nothing("library-definitions") : ftv-late?(ctx) ? ftv-nothing(ftv-deadline-reason()) : {
      record_set(FTV-OPENINGS, key, defs);
      let stage = ftv-session(); let exports = record_new(0);
      let env = foldl((env, defn) => ftv-library-function(stage, exports, env, defn), [], defs);
@@ -1318,9 +1323,12 @@ section [form.bml] {
    let dot = str_find(address, ".", 0); let name = dot > 0 ? substring(address, 0, dot) : "";
    let advertised = ftv-library-catalog() |> filter(row => row[0] == name);
    !nil?(held) ? "library-container:execute-" ++ held[0] ++ ".EXPORT;input=one-BML-value;carrier=form"
-   : !nil?(advertised) && !record_has(libraries, name) ? "library-not-imported:" ++ name ++ ";recipe-import=" ++ name
+   : !nil?(advertised) && !ftv-library-imported?(session, name) ? "library-not-imported:" ++ name ++ ";recipe-import=" ++ name
    : "unknown-recipe";
   }
+  // a library is imported when this session imported it, or the workspace holds any LIB.NAME it kept
+  // from an earlier control or request (a missing export of one is unknown-recipe, not a missing import)
+  def ftv-library-imported?(session, name) = record_has(record_get(session, "libraries"), name) || any?(n => ftv-starts?(n, name ++ "."), ftw-names(ftv-ws(session), ""));
   // LIB.EXPORT answers the export's address when the session imported LIB; any other key stays
   def ftv-recipe-address(session, key) {
    let at = str_find(key, ".", 0); let libraries = record_get(session, "libraries");
@@ -1382,22 +1390,34 @@ section [form.bml] {
   // expression that answers the function to run: recipe("LIB.EXPORT"), or any call.
   def ftv-exec(session, ref, input, carrier, ctx) {
    let f = ftv-recipe-ref(session, ref);
-   if nothing?(f) then ftv-exec-target(session, ref, input, carrier, ctx) else ftv-exec-with(session, f, input, carrier, ctx);
+   if nothing?(f) then ftv-exec-target(session, ref, input, carrier, ctx) else ftv-exec-with(session, f, ftv-recipe-ref-address(session, ref), input, carrier, ctx);
+  }
+  // the address a held recipe runs under, "" for a function that holds none (an affine birth, a
+  // function a control made as a value): a call through an address is counted (ftv-recipe-apply)
+  def ftv-recipe-ref-address(session, ref) {
+   let mapped = ftv-recipe-address(session, ref);
+   if ftv-starts?(mapped, "@") then mapped
+   else if ftv-name?(ref) || ftv-qualified?(ref) then ftv-recipe-named-address(session, ref)
+   else "";
+  }
+  def ftv-recipe-named-address(session, name) {
+   let bound = ftw-lookup(ftv-ws(session), name);
+   nothing?(bound) || (bound[1] != "recipe") || (value_kind(bound[0]) != "node_id") ? "" : ftv-coord(bound[0]);
   }
   def ftv-exec-target(session, ref, input, carrier, ctx) {
    let body = ftv-recipe-spelling?(ref) ? nothing() : ftv-parse-expr(ftv-at-rewrite(ref));
    if nothing?(body) then ftv-nothing(ftv-recipe-miss(session, ref)) else {
     let target = ftv-guarded(ctx, () => ftv-ev(ctx, body, []));
     if ftv-refused?(ctx) then ftv-settle(ctx, target)
-    else if ftv-function?(target) then ftv-exec-with(session, target, input, carrier, ctx)
+    else if ftv-function?(target) then ftv-exec-with(session, target, record_get(target, "ftv") == "recipe" ? record_get(target, "address") : "", input, carrier, ctx)
     else ftv-nothing("target-is-a-held-recipe-reference");
    };
   }
-  def ftv-exec-with(session, f, input, carrier, ctx) {
+  def ftv-exec-with(session, f, address, input, carrier, ctx) {
    if carrier == "metal" then ftv-nothing("carrier-unavailable")
    else if !((carrier == "auto") || (carrier == "cpu") || (carrier == "form")) then ftv-nothing("carrier-choice")
    else if record_get(f, "ftv") == "affine" then ftv-exec-affine(session, record_get(f, "node"), input)
-   else ftv-exec-fn(session, f, input, ctx);
+   else ftv-exec-fn(session, f, address, input, ctx);
   }
   def ftv-affine(recipe, x) = (x * frbt-recipe-mul(recipe)) + frbt-recipe-add(recipe);
   def ftv-exec-affine(session, recipe, input) {
@@ -1407,14 +1427,16 @@ section [form.bml] {
    else ftv-render(session, ftv-keep-value(session, ftv-affine(recipe, x)));
   }
   // the input is read as BML in the whole environment, then the function runs on it
-  def ftv-exec-fn(session, f, input, ctx) {
+  def ftv-exec-fn(session, f, address, input, ctx) {
    let body = ftv-parse-expr(ftv-at-rewrite(input));
-   let value = nothing?(body) ? nothing() : ftv-guarded(ctx, () => ftv-apply-input(ctx, f, body));
+   let value = nothing?(body) ? nothing() : ftv-guarded(ctx, () => ftv-apply-input(ctx, f, address, body));
    nothing?(body) ? ftv-nothing("input-parse-refused:input-is-one-BML-expression;group-multiple-values-as-[value1,value2,...]") : ftv-settle(ctx, value);
   }
-  def ftv-apply-input(ctx, f, body) {
+  // a held recipe's call goes through its address, so recipe-exec and choice are counted as the
+  // recipe(...) call inside eval is
+  def ftv-apply-input(ctx, f, address, body) {
    let arg = ftv-ev(ctx, body, []);
-   ftv-refused?(ctx) ? nothing() : ftv-apply(ctx, f, [arg]);
+   ftv-refused?(ctx) ? nothing() : len(address) > 0 ? ftv-recipe-apply(ctx, address, [arg]) : ftv-apply(ctx, f, [arg]);
   }
   // A held recipe runs through its address: each call is counted in the session's recipe-usage
   // (calls, returns, inclusive milliseconds) and recorded as a form-recipe-usage observation.
