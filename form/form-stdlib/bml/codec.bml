@@ -1,0 +1,100 @@
+//////////////////////////////////////////////////////////////////////
+// codec.bml — text becomes any value or cell, and any value becomes text it can be read back from.
+//
+// Urs, 2026-10-02: "stdlib and BML shall know how to parse any primitive and any cell of any type," and "BML shall
+// have an intrinsic way to convert between types, especially string to any type for streaming and storage."
+// parse.bml reads the scalars; this stands on it for what is structured: JSON, a list, and a cell of any Blueprint.
+//
+//   parse-as(kind,text,registry)  kind: int float number bool string json cell
+//   parse-any(text,registry)      nothing, bool, number, JSON document, cell, else the text itself
+//   encode(value,registry)        any value -> typed JSON text (int, float, string, nothing, list, cell)
+//   decode(text,registry)         that text -> the same value; a cell to the same NodeID
+//   encode-lines / decode-lines   a list of values <-> newline-delimited rows (a ledger, a stream)
+//   convert(value,kind,registry)  between kinds: string int float bool list cell text any
+//
+// A cell is read through the Blueprint registry (wire-registry.fk): the same name and children mint the same
+// NodeID, so a cell decoded here is the cell that was written (axiom 3). A reading that cannot arrive is nothing().
+// decode(encode(v)) is v for every kind, and a row never holds a raw newline.
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/bml/parse.bml form-stdlib/json.fk form-stdlib/wire-registry.fk form-stdlib/cell-serialize.fk
+section [form.bml] {
+ class FormCodec {
+  // ---- the two structured readers ------------------------------------------------
+  def pr-json(text) = parse-json("parse", text);
+  def pr-cell(text, registry) = json-to-cell(text, registry);
+  def pr-structured?(t) = (len(t) > 0) && ((str_byte_at(t, 0) == 123) || (str_byte_at(t, 0) == 91));
+
+  // ---- by kind -----------------------------------------------------------------
+  def parse-as(kind, text, registry) {
+   (String) kind == "int" ? parse-int(text) :
+   (String) kind == "float" ? parse-float(text) :
+   (String) kind == "number" ? parse-number(text) :
+   (String) kind == "bool" ? parse-bool(text) :
+   (String) kind == "string" ? text :
+   (String) kind == "json" ? pr-json(text) :
+   (String) kind == "cell" ? pr-cell(text, registry) : nothing();
+  }
+
+  // ---- by shape: the reader finds the kind ---------------------------------------
+  def parse-any(text, registry) {
+   let t = trim(text);
+   pr-nothing?(t) ? nothing() :
+   !nothing?(parse-bool(t)) ? parse-bool(t) :
+   !nothing?(parse-number(t)) ? parse-number(t) :
+   pr-structured?(t) ? pr-cell(t, registry) : text;
+  }
+
+  // ---- storage and streaming: one text for any value, and back ---------------------
+  // encode(v) writes a value as typed JSON text: ints and floats as numbers (a float keeps its point, so 7.0 does
+  // not come back as 7), strings quoted and escaped, nothing as null, a list as an array, a cell as its Blueprint
+  // object. decode(text) reads that text back to the same kind, and a cell to the same NodeID.
+  def encode(v, registry) {
+   nothing?(v) ? "null" :
+   (String) value_kind(v) == "int" ? value_str(v) :
+   (String) value_kind(v) == "float" ? pr-float-text(v) :
+   (String) value_kind(v) == "string" ? json-quote-string(v) :
+   (String) value_kind(v) == "list" ? ("[" ++ pr-join(v |> map(x => encode(x, registry)), ",") ++ "]") :
+   (String) value_kind(v) == "node_id" ? cell-to-json(v, registry) : "null";
+  }
+  // elements of "[a,b,[c]]": split on the commas at depth 0, outside strings
+  def pr-scan(s, i, start, depth, inq, esc, acc) {
+   i >= len(s) ? wr-reverse(cons(substring(s, start, len(s)), acc)) : pr-scan-byte(s, i, str_byte_at(s, i), start, depth, inq, esc, acc);
+  }
+  def pr-scan-byte(s, i, b, start, depth, inq, esc, acc) {
+   inq == 1 ? (esc == 1 ? pr-scan(s, i + 1, start, depth, 1, 0, acc) : (b == 92 ? pr-scan(s, i + 1, start, depth, 1, 1, acc) : (b == 34 ? pr-scan(s, i + 1, start, depth, 0, 0, acc) : pr-scan(s, i + 1, start, depth, 1, 0, acc)))) :
+   b == 34 ? pr-scan(s, i + 1, start, depth, 1, 0, acc) :
+   ((b == 91) || (b == 123)) ? pr-scan(s, i + 1, start, depth + 1, 0, 0, acc) :
+   ((b == 93) || (b == 125)) ? pr-scan(s, i + 1, start, depth - 1, 0, 0, acc) :
+   ((b == 44) && (depth == 0)) ? pr-scan(s, i + 1, i + 1, depth, 0, 0, cons(substring(s, start, i), acc)) : pr-scan(s, i + 1, start, depth, 0, 0, acc);
+  }
+  def pr-list-text?(t) = (len(t) >= 2) && (str_byte_at(t, 0) == 91) && (str_byte_at(t, len(t) - 1) == 93);
+  def pr-unwrap(c) = (String) value_kind(c) != "node_id" ? c : (wr-null?(c) ? nothing() : ((Comparable) node_level(c) == 1 ? node_value(c) : c));
+  def decode(text, registry) {
+   let t = trim(text);
+   len(t) == 0 ? nothing() :
+   pr-list-text?(t) ? (len(trim(substring(t, 1, len(t) - 1))) == 0 ? [] : (pr-scan(substring(t, 1, len(t) - 1), 0, 0, 0, 0, 0, []) |> map(x => decode(x, registry)))) :
+   pr-unwrap(pr-cell(t, registry));
+  }
+  def encode-lines(values, registry) = nil?(values) ? "" : (encode(values[0], registry) ++ "\n" ++ encode-lines(values[1:], registry));
+  def pr-lines(xs) = nil?(xs) ? [] : (len(trim(xs[0])) == 0 ? pr-lines(xs[1:]) : cons(xs[0], pr-lines(xs[1:])));
+  def decode-lines(text, registry) = pr-lines(split-on(text, "\n")) |> map(x => decode(x, registry));
+
+  // ---- between kinds -------------------------------------------------------------
+  // convert(value, kind, registry): kind is string int float bool list cell text any. A reading that cannot
+  // arrive is nothing(); nothing converts to nothing. "text" is the storage form (encode); "any" reads a string
+  // by its shape (decode); every other kind reads a string as that kind.
+  def pr-as-string(v, registry) = (String) value_kind(v) == "string" ? v : (((String) value_kind(v) == "int") || ((String) value_kind(v) == "float") ? value_str(v) : encode(v, registry));
+  def convert(v, kind, registry) {
+   nothing?(v) ? nothing() :
+   (String) kind == "string" ? pr-as-string(v, registry) :
+   (String) kind == "int" ? pr-as-int(v) :
+   (String) kind == "float" ? pr-as-float(v) :
+   (String) kind == "bool" ? pr-as-bool(v) :
+   (String) kind == "text" ? encode(v, registry) :
+   (String) kind == "list" ? ((String) value_kind(v) == "list" ? v : ((String) value_kind(v) == "string" ? decode(v, registry) : nothing())) :
+   (String) kind == "cell" ? ((String) value_kind(v) == "node_id" ? v : ((String) value_kind(v) == "string" ? pr-cell(v, registry) : nothing())) :
+   (String) kind == "any" ? ((String) value_kind(v) == "string" ? decode(v, registry) : v) : nothing();
+  }
+ }
+ 0;
+}

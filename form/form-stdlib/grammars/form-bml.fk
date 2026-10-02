@@ -11,6 +11,15 @@
 ; patterns, `let [a, _, c] = xs;` binds by place, and `defer e;` runs e when its block
 ; ends -- on a normal exit and on a stop alike -- so an acquired thing always comes back.
 ;
+; Composite values are first-class (preluded from form-stdlib/bml/blueprint-literal.bml): a
+; `blueprint Name { field: type, ... }` statement declares a blueprint from other blueprints and the core
+; ones (int float string bool any, list<T> set<T> option<T> map<K,V> tuple<A,B>), and a value is written
+; the way it is declared -- `Name{field: v, ...}`, `map{k: v, ...}`, `set[v, ...]`, `tuple[v, ...]` -- and
+; is one content-addressed cell: the same composition is the same NodeID, a map's pairs and a set's members
+; meet in one order, and a literal that does not fit its declaration is nothing(). `(as T) e` converts
+; e to the kind T (int float bool string text any list cell) through one door, nothing() when the reading
+; cannot arrive; `(Value)` / `(String)` / `(Number)` / `(Comparable)` stay comparison contracts.
+;
 ; Two entry points over the SAME rule set:
 ;   form-bml-grammar          — start "fdef": one expression def, including braces
 ;   form-bml-section-grammar  — start "section": a whole section body -> do[...]
@@ -52,7 +61,27 @@
         ;; def-block BEFORE def-expr (shared `def name(params)` prefix; the `{` vs `=`
         ;; decides), both BEFORE exprstmt (else `def` parses as a bare ident).
         (rule3 "topstmt" (p-cap "v" (list "alt" (p-ref "classblock") (p-ref "templateblock") (p-ref "templateline")
-            (p-ref "importstmt") (p-ref "defblock") (p-ref "fdef") (p-ref "letstmt") (p-ref "exprstmt"))) (t-splice "v"))
+            (p-ref "importstmt") (p-ref "blueprintstmt") (p-ref "defblock") (p-ref "fdef") (p-ref "letstmt") (p-ref "exprstmt"))) (t-splice "v"))
+
+        ;; -- blueprint Name { field: type, ... }  a composite blueprint declared from other blueprints
+        ;; and the core ones (int float string bool any, list<T> set<T> option<T> map<K,V> tuple<A,B>, or a
+        ;; declared Name). It declares at load: bl-declare[name, list[list[field, type]...]] registers the
+        ;; declaration cell (blueprint-literal.bml), whose NodeID is the category of every value built from it.
+        (rule3 "blueprintstmt" (list "seq"
+            (p-kw "blueprint") (p-cap "name" (p-run "bmlname")) (p-lit "{")
+            (p-cap "fs" (p-sep (p-ref "bpfield") (p-lit ","))) (p-opt (p-lit ",")) (p-lit "}") (p-opt (p-lit ";")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "bl-declare"))) (t-splice "name")
+            (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splices "fs"))))))
+        (rule3 "bpfield" (list "seq" (p-cap "n" (p-run "bmlname")) (p-lit ":") (p-cap "t" (p-ref "bptype")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splice "n") (t-splice "t"))))
+        (rule3 "bptype" (p-cap "v" (list "alt" (p-ref "bptypegeneric") (p-ref "bptypeplain"))) (t-splice "v"))
+        (rule3 "bptypegeneric" (list "seq" (p-cap "n" (p-run "bmlname")) (p-lit "<")
+            (p-cap "as" (p-sep (p-ref "bptype") (p-lit ","))) (p-lit ">"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "bl-ty"))) (t-splice "n")
+            (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splices "as"))))))
+        (rule3 "bptypeplain" (p-cap "n" (p-run "bmlname"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "bl-ty"))) (t-splice "n")
+            (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))))))))
 
         ;; -- template Name<T, ...> { member name: Type; ... }  and  template Name<T, ...>;
         ;; bind the name to its language template, as the compiler's template walker does
@@ -210,7 +239,7 @@
         (rule3 "opexpr" (p-cap "v" (p-infix (p-ref "unary") (form-bml-operators))) (t-splice "v"))
         ;; !e, -e, a comparison cast (Type) e, or a call chain
         (rule3 "unary" (p-cap "v" (list "alt" (p-ref "notx")
-            (p-ref "castvalue") (p-ref "caststring") (p-ref "castnumber") (p-ref "castcomparable")
+            (p-ref "castas") (p-ref "castvalue") (p-ref "caststring") (p-ref "castnumber") (p-ref "castcomparable")
             (p-ref "negx") (p-ref "callchain"))) (t-splice "v"))
         (rule3 "notx" (list "seq" (p-lit "!") (p-cap "e" (p-ref "unary")))
           (t-emit "fncall" (list (t-emit "ident" (list (t-const "not"))) (t-splice "e"))))
@@ -218,6 +247,11 @@
         ;; negation of a name/call/group takes precedence over a dashed name.
         (rule3 "negx" (list "seq" (p-lit "-") (p-not (p-num)) (p-cap "e" (p-ref "unary")))
           (t-emit "sub" (list (t-const-int 0) (t-splice "e"))))
+        ;; (as int) e, (as float) e, (as bool) e, (as string) e, (as text) e, (as any) e -- a conversion, not a
+        ;; comparison contract: the value becomes that kind, read through the one door (blueprint-literal.bml),
+        ;; and a reading that cannot arrive is nothing(). `as` is a word of its own, so (as int) can mean nothing else.
+        (rule3 "castas" (list "seq" (p-lit "(") (p-kw "as") (p-cap "k" (p-run "bmlname")) (p-lit ")") (p-cap "e" (p-ref "unary")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "bl-convert"))) (t-splice "k") (t-splice "e"))))
         (rule3 "castvalue" (list "seq" (p-lit "(") (p-kw "Value") (p-lit ")") (p-cap "e" (p-ref "unary")))
           (t-emit "fncall" (list (t-emit "ident" (list (t-const "$bml-as"))) (t-const "Value") (t-splice "e"))))
         (rule3 "caststring" (list "seq" (p-lit "(") (p-kw "String") (p-lit ")") (p-cap "e" (p-ref "unary")))
@@ -251,7 +285,27 @@
         ;; -- primary: keyword literals first, then numbers, names, strings, parens
         (rule3 "primary" (p-cap "v" (list "alt"
             (p-ref "litempty") (p-ref "litnothing") (p-ref "litfail") (p-ref "litstop") (p-ref "littrue") (p-ref "litfalse")
-            (p-ref "litnum") (p-ref "litneg") (p-ref "litstr") (p-ref "listliteral") (p-ref "ident") (p-ref "paren") (p-ref "blockexpr"))) (t-splice "v"))
+            (p-ref "litnum") (p-ref "litneg") (p-ref "litstr") (p-ref "listliteral") (p-ref "maplit") (p-ref "setlit") (p-ref "tuplelit") (p-ref "reclit") (p-ref "ident") (p-ref "paren") (p-ref "blockexpr"))) (t-splice "v"))
+        ;; the literals of the core blueprints: map{k: v, ...}  set[v, ...]  tuple[v, ...]  and a declared
+        ;; blueprint's  Name{field: v, ...}. Each is one call: bl-map / bl-set / bl-tuple / bl-make over a list
+        ;; (blueprint-literal.bml), so a literal is a cell and the same composition is the same NodeID.
+        (rule3 "maplit" (list "seq" (p-kw "map") (p-lit "{") (p-cap "ps" (p-sep (p-ref "mappair") (p-lit ","))) (p-opt (p-lit ",")) (p-lit "}"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "bl-map")))
+            (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splices "ps"))))))
+        (rule3 "mappair" (list "seq" (p-cap "k" (p-ref "expr")) (p-lit ":") (p-cap "v" (p-ref "expr")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splice "k") (t-splice "v"))))
+        (rule3 "setlit" (list "seq" (p-kw "set") (p-lit "[") (p-cap "items" (p-sep (p-ref "expr") (p-lit ","))) (p-lit "]"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "bl-set")))
+            (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splices "items"))))))
+        (rule3 "tuplelit" (list "seq" (p-kw "tuple") (p-lit "[") (p-cap "items" (p-sep (p-ref "expr") (p-lit ","))) (p-lit "]"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "bl-tuple")))
+            (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splices "items"))))))
+        (rule3 "reclit" (list "seq" (p-cap "n" (p-run "bmlname")) (p-lit "{")
+            (p-cap "fs" (p-sep (p-ref "recfield") (p-lit ","))) (p-opt (p-lit ",")) (p-lit "}"))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "bl-make"))) (t-splice "n")
+            (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splices "fs"))))))
+        (rule3 "recfield" (list "seq" (p-cap "n" (p-run "bmlname")) (p-lit ":") (p-cap "v" (p-ref "expr")))
+          (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splice "n") (t-splice "v"))))
         (rule3 "listliteral" (list "seq" (p-lit "[")
             (p-cap "items" (p-sep (p-ref "expr") (p-lit ","))) (p-lit "]"))
           (t-emit "fncall" (list (t-emit "ident" (list (t-const "list"))) (t-splices "items"))))
