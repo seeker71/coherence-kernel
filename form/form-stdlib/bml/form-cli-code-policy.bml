@@ -151,8 +151,20 @@ section [form.bml] {
   def fcap-tool(s, obj) = if (!fcap-string-array(json-object-get(obj, "arguments"))) then fcap-revise(s, "Tool arguments must be an array of strings.") else if (json-object-has?(obj, "input") && (!fat-wire-string?(json-object-get(obj, "input")))) then fcap-revise(s, "Tool input must be a string.") else fcap-tool-ready(s, fcap-string(obj, "tool"), fcap-array(obj, "arguments"), fcap-string(obj, "input"));
   def fcap-tool-ready(s, tool, args, input) = if (!fcap-tool-allowed(s, tool, args)) then fcap-revise(s, "Tool unavailable in this role or target is not caller-writable.") else fcap-tool-observed(s, tool, args, input, if ((String) tool == "repair-bml") then fcbmr-call(fcap-docs(s),args,input) else if tool == "lift-bml" then fcbl-call(fcap-docs(s),args,input) else fat-call(fcap-docs(s), tool, args, input));
   def fcap-tool-history(s) = if (len(fcap-memory(s)) >= 6) then fcap-memory(s)[5] else [[], 0];
+  // The signature identifies a call and its result for same-call detection; it is not where a result is kept. A stdout
+  // over fcap-signature-max() bytes is held as [sha256, bytes] (the same result digests the same, a different one does
+  // not), and a stderr over it as its first 200 bytes and its digest, so a checkpoint's tool history never carries a
+  // whole read (the note carries it, or its bounded form when the lane bounds it). The bound stands under every
+  // observation cap (a fifth of the window, at least 1024 IDs at 3 bytes: 3072), so any bounded result is held digested.
+  def fcap-signature-max() = 2048;
+  def fcap-held-stdout(out) = if (len(out) <= fcap-signature-max()) then out else [hex-encode(sha256-stream-string(out)),len(out)];
+  def fcap-held-stderr(err) = if (len(err) <= fcap-signature-max()) then err else (fcap-clip(err,fcap-excerpt-line()) + (" [stderr sha256 " + (hex-encode(sha256-stream-string(err)) + (" bytes " + (len(err).str() + "]")))));
+  def fcap-held-signature(signature) = if (!((Comparable) len(signature) == 6)) then signature else [signature[0],signature[1],signature[2],signature[3],if ((String) value_kind(signature[4]) == "string") then fcap-held-stdout(signature[4]) else signature[4],if ((String) value_kind(signature[5]) == "string") then fcap-held-stderr(signature[5]) else signature[5]];
+  // what the guards read of a held signature: the stdout as text (a digest reads as its identity) and its byte count
+  def fcap-signature-out(signature) = if ((String) value_kind(signature[4]) == "string") then signature[4] else ("sha256:" + (signature[4][0] + ("/" + signature[4][1].str())));
+  def fcap-signature-bytes(signature) = if ((String) value_kind(signature[4]) == "string") then len(signature[4]) else signature[4][1];
   def fcap-tool-observed(s, tool, args, input, result) {
-   let signature = [tool, args, input, fat-exit(result), fat-out(result), fat-error(result)];
+   let signature = [tool, args, input, fat-exit(result), fcap-held-stdout(fat-out(result)), fcap-held-stderr(fat-error(result))];
    let history = fcap-tool-history(s);
    let same = (((Value) signature == history[0]) && ((Value) fcap-docs(s) == fat-documents(result)));
    let count = if same then (history[1] + 1) else 1;
@@ -555,6 +567,7 @@ section [form.bml] {
    if (fat-wire-object?(inner) && (json-object-has?(inner,"exit") && (json-object-has?(inner,"stdout") && (fat-wire-string?(json-object-get(inner,"stdout")) && (!json-object-has?(inner,"verification_scope")))))) then inner else nothing();
   }
   def fcap-result-stdout(result) = node_value(json-object-get(result,"stdout"));
+  def fcap-result-stderr(result) = if (json-object-has?(result,"stderr") && fat-wire-string?(json-object-get(result,"stderr"))) then node_value(json-object-get(result,"stderr")) else "";
   def fcap-clip-lines(lines) = lines |> map(line => fcap-clip(line,fcap-excerpt-line()));
   def fcap-lines-count(lines) = if ((len(lines) > 0) && ((String) lines[len(lines) - 1] == "")) then (len(lines) - 1) else len(lines);
   // the document the last native call named (one of the lane's own documents), or ""
@@ -563,9 +576,22 @@ section [form.bml] {
    let hits = if ((Comparable) len(signature) == 6) then filter(doc => fat-has(signature[1],doc[1]),fcap-docs(s)) else [];
    if nil?(hits) then "" else hits[0][1];
   }
+  // The result's lines are the document's lines only when the last call was a whole read or cat of one lane document (the
+  // identity transform); after rg, sort, jq, head, tail, sed or any other query they number the result, not the document,
+  // so no document window is offered for them.
+  def fcap-excerpt-identity?(s) {
+   let signature = fcap-tool-history(s)[0];
+   (((Comparable) len(signature) == 6) && (fat-has(["read","cat"],signature[0]) && (((Comparable) len(signature[1]) == 1) && (!((String) fcap-excerpt-path(s) == "")))));
+  }
   // lines per window: half the cap in bytes at the result's own average line, within 1 to 400
   def fcap-window-lines(bytes,lines,capBytes) = fat-max(1,fat-min(400,((capBytes / 2) / fat-max(1,(bytes / fat-max(1,lines))))));
-  def fcap-window-pairs(s,count,window,path) = if ((String) path == "") then [] else [json-node-pair("path",json-node-string(path)),fcap-shape-n("window_lines",window),json-node-pair("read_window",json-node-object([fcap-shape-s("tool","sed"),json-node-pair("arguments",json-node-array(fcap-string-json(["-n","A,Bp",path]))),fcap-shape-s("input","")])),fcap-shape-s("read_window_note",("Replace A,B with a one-based line range of at most window_lines lines, from 1 to " + (count.str() + "; a longer range is bounded again."))),json-node-pair("find",json-node-object([fcap-shape-s("tool","rg"),json-node-pair("arguments",json-node-array(fcap-string-json(["-n","-F","SYMBOL",path]))),fcap-shape-s("input","")]))];
+  def fcap-window-reading(count,window,path) = [fcap-shape-n("window_lines",window),json-node-pair("read_window",json-node-object([fcap-shape-s("tool","sed"),json-node-pair("arguments",json-node-array(fcap-string-json(["-n","A,Bp",path]))),fcap-shape-s("input","")])),fcap-shape-s("read_window_note",("Replace A,B with a one-based line range of at most window_lines lines, from 1 to " + (count.str() + "; a longer range is bounded again.")))];
+  def fcap-window-pairs(s,count,window,path,identity) = if ((String) path == "") then [] else append([json-node-pair("path",json-node-string(path))],append(if identity then fcap-window-reading(count,window,path) else [],[json-node-pair("find",json-node-object([fcap-shape-s("tool","rg"),json-node-pair("arguments",json-node-array(fcap-string-json(["-n","-F","SYMBOL",path]))),fcap-shape-s("input","")]))]));
+  // a failed call's diagnostics ride in the bounded note, clipped: the stderr is what makes the failure intelligible
+  def fcap-stderr-pairs(result) {
+   let err = fcap-result-stderr(result);
+   if ((String) err == "") then [] else [fcap-shape-n("stderr_bytes",len(err)),fcap-shape-s("stderr",fcap-clip(err,800))];
+  }
   def fcap-observation-excerpt(s,capBytes) {
    let result = fcap-observation-result(s);
    let stdout = fcap-result-stdout(result);
@@ -575,12 +601,36 @@ section [form.bml] {
    let tailFrom = fat-max(headCount,(count - fcap-excerpt-tail()));
    let window = fcap-window-lines(len(stdout),count,capBytes);
    let shown = [json-node-pair("exit",json-object-get(result,"exit")),fcap-shape-n("stdout_bytes",len(stdout)),fcap-shape-n("stdout_lines",count),fcap-shape-s("stdout_sha256",hex-encode(sha256-stream-string(stdout))),json-node-pair("head",json-node-array(fcap-string-json(fcap-clip-lines(fat-take(lines,headCount))))),fcap-shape-n("tail_from_line",(tailFrom + 1)),json-node-pair("tail",json-node-array(fcap-string-json(fcap-clip-lines(fat-take(fat-drop(lines,tailFrom),(count - tailFrom))))))];
-   json-node-object(append(shown,fcap-window-pairs(s,count,window,fcap-excerpt-path(s))));
+   json-node-object(append(shown,append(fcap-stderr-pairs(result),fcap-window-pairs(s,count,window,fcap-excerpt-path(s),fcap-excerpt-identity?(s)))));
   }
-  def fcap-bounded-change(excerpted,cause) {
+  // what the note says of the exact bytes depends on whether any were kept; what it says of the way on depends on whether
+  // the excerpt's lines are the document's own (a whole read or cat) or a query result's
+  def fcap-bounded-change(excerpted,identity,held,cause) {
    let lead = if ((String) cause == fcap-cause-cap()) then "The last observation was larger than the lane's observation cap, so it did not enter the decoder whole. " else "The last observation did not enter the decoder. ";
-   let how = if excerpted then "observation_excerpt carries its exit, byte and line counts, sha256, first and last lines; read any window with read_window (sed -n over the path, at most window_lines lines) or find a symbol with rg -n -F, instead of repeating the whole read." else "Retrieve the needed symbols with focused rg/head/tail queries instead of repeating a whole-file read.";
-   (lead + ("Its exact bytes remain in private evidence and source remains available through native tools. Keep the original goal, candidate and completed effects. " + (how + " No weights or context were replaced.")));
+   let kept = if held then "Its exact bytes remain in private evidence and source remains available through native tools. " else "Its exact bytes were not retained (the private evidence write failed); source remains available through native tools. ";
+   let how = if (excerpted && identity) then "observation_excerpt carries its exit, byte and line counts, sha256, first and last lines; read any window with read_window (sed -n over the path, at most window_lines lines) or find a symbol with rg -n -F, instead of repeating the whole read." else if excerpted then "observation_excerpt carries this result's exit, byte and line counts, sha256, first and last lines; its line numbers count the result, not the document, so run a narrower query (rg -n -F for a symbol, or head, tail or sed with a line range over the document) instead of repeating the call." else "Retrieve the needed symbols with focused rg/head/tail queries instead of repeating a whole-file read.";
+   (lead + (kept + ("Keep the original goal, candidate and completed effects. " + (how + " No weights or context were replaced."))));
+  }
+  // A bounded note replaces the observation, and a failing tool result also wrote the whole note into the repair's failure
+  // evidence and its pending rows (fcap-tool-result-noted: "Native tool failed: " + note). `next` is the state the lane
+  // built from the bounded note (s is the state before): where s held a failed tool's whole note as its failure evidence,
+  // the evidence and the pending rows that repeat it become the bounded note too (the observation then reads "See
+  // failure_evidence."), so nothing the decoder is shown or a checkpoint keeps holds the whole result. The repair's own
+  // repeat flag stands as the repair set it, and the next identical failure is counted by the call count (the policy's
+  // third), the evidence no longer being the whole text it compares.
+  def fcap-bounded-failure(s,next,note,capBytes) {
+   let before = fcap-evidence(s);
+   let failed = ((fcap-failures(s) > 0) && (fat-starts(before,"Native tool failed: ") && (((String) before == ("Native tool failed: " + fcap-note(s))) || (len(before) > capBytes))));
+   if (!failed) then next else {
+    let pending = next[5] |> map(row => if ((Value) row == before) then note else row);
+    let moved = fcap-inherit(next,fcap-state(fcap-stage(next),next[1],next[2],fcap-docs(next),next[4],pending,next[6],next[7],fcap-note(next),fcap-turns(next),fcap-calls(next),next[11]));
+    fcap-with-memory(moved,[fcap-failures(moved),note,fcap-reflections(moved),fcap-checks(moved),fcap-repeat(moved)]);
+   };
+  }
+  // the tool history of a state written before fcap-signature-max held a whole stdout: its signature is digested
+  def fcap-with-held-signature(s) {
+   let history = fcap-tool-history(s);
+   fcap-with-memory(s,append(fat-take(fcap-memory(s),5),[[fcap-held-signature(history[0]),history[1]]]));
   }
   // The note that stands in for a bounded observation: cause, role, the private evidence (when it was retained), the
   // document catalog, the excerpt when the observation is a tool result, and the way on.
@@ -592,7 +642,7 @@ section [form.bml] {
    let at = str_find(note,"{",0);
    let preface = if (at > 0) then [fcap-shape-s("note_preface",fcap-clip(substring(note,0,at),800))] else [];
    let shown = if excerpted then append([json-node-pair("observation_excerpt",fcap-observation-excerpt(s,capBytes))],preface) else [];
-   json-node-object(append([fcap-shape-s("cause",cause),fcap-shape-s("role",fcap-stage(s))],append(held,append([json-node-pair("document_catalog",json-node-array(fcap-document-catalog(fcap-docs(s))))],append(shown,[fcap-shape-s("change",fcap-bounded-change(excerpted,cause))])))));
+   json-node-object(append([fcap-shape-s("cause",cause),fcap-shape-s("role",fcap-stage(s))],append(held,append([json-node-pair("document_catalog",json-node-array(fcap-document-catalog(fcap-docs(s))))],append(shown,[fcap-shape-s("change",fcap-bounded-change(excerpted,fcap-excerpt-identity?(s),(!((String) evidence == "")),cause))])))));
   }
   // Verification retains the checked source hashes, but those hashes are not
   // the counterexample. A changed file can still produce the same failure.

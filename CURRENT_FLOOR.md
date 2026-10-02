@@ -72,12 +72,6 @@ memory-governor-band 67108863 (form/form-stdlib/bml/memory-governor.bml asks the
 form-cli-code-low-memory-band 1023  (a running coding lane saves its checkpoint and ends with host-memory-low when the machine
                                 runs low, continues on a roomy or unreadable reading, and a lane that spent its turns keeps that
                                 ending; the walk reads it as a choice point)
-form-cli-code-bounded-note-band 8191  (the 12:30 day option's livelock, replayed from its retained replies with the decoder and
-                                renewer scripted: a tool result over the observation cap, a fifth of the window, enters the
-                                stream as its head, tail, counts and sed window (nothing lost: the exact bytes stay in private
-                                evidence); a renewal prompt must leave an eighth of the window, is retried once with its trigger
-                                bounded and else ends the lane with a named reason; a refused read is not fresh sight in the
-                                next context, so the policy and the swerve count it across renewals and end the fifth repeat)
 native-turn-ladder-band 262143 · local-flow-reading-band 32767  (a memory ending, host-memory-low or host-memory-held:*, is no
                                 tried approach and no option of the review; its checkpoint is the resume's target, with no failure text)
 host-walk-band 2147483647     (the walk's turn waits for memory within the window and a held answer takes no turn)
