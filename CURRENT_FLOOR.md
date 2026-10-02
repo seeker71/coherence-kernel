@@ -166,7 +166,13 @@ aside; they train now) against plain 25 and taught-by-prompt 5 on the bare model
 continuation seam and does not isolate the training; the Qwen3.8 opening fit's separation 10.0 over 2.2 stands on
 n=7 held-out sites and predates the filter that keeps held-out rows out of its sites. What it shows and does not:
 `docs/native-model-control-plane.md`, "The Form-token adapter". Bands: `form-token-traces-band` 127,
-`form-token-lora-band` 32767, `form-token-eval-band` 8191, `form-token-census-band` 2047.
+`form-token-lora-band` 32767, `form-token-eval-band` 8191, `form-token-census-band` 4095.
+
+The controls a voice writes in stream (`form/form-stdlib/bml/form-token-grammar.bml`: nine verbs, `recipe-import`
+the newest) run in one trusted living workspace (`form-token-workspace.bml`): what a control makes persists in a
+local, request, lineage or global scope, eval reaches every door the runtime carries and every function the body
+defines, and each control answers within its deadline. Bands: `form-token-verbs-band` 4095,
+`form-token-workspace-band` 4095, `form-token-grammar-band` 1023. The trace corpus is 596 rows in sixteen families.
 
 ### The GPU lanes
 

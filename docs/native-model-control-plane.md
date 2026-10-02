@@ -146,10 +146,12 @@ answering each closed control (`receipts/form-token-eval.jsonl`, the row at 1790
 - Two of the 64 held-out rows repeated a train row's question (`ftr-eval-float-15` of `ftr-eval-float-1`,
   "What is the square root of 16?"; `ftr-eval-text-23` of `ftr-eval-text-3`). The adapter answered both
   exactly, so the figure with them set aside is 53 of 62; the receipt's per-row results
-  (`questions_judged`) hold this. The corpus asks sixteen questions twice in 578 rows; the split now trains
+  (`questions_judged`) hold this. The corpus asks sixteen questions twice in its 596 rows (sixteen families); the split now trains
   a row whose question a train row asks (`ftr-split`), the traces band (claim 64) holds the zero overlap the
-  training gates above require, and the corpus has 62 held-out rows. The adapter was trained before that
-  change (on 514 rows, the two repeats' train copies among them) and has not been retrained or re-asked.
+  training gates above require, and the corpus has 64 held-out rows: the 62 of the fifteen families the
+  adapter's run drew on, and the two the `recipe-import` family (18 rows, written after the run) holds out,
+  which the adapter was never asked. The adapter was trained before that change (on 514 rows, the two
+  repeats' train copies among them) and has not been retrained or re-asked.
 - taught-by-prompt: 16 of 64 stopped at eos after a successful observation. The arm is limited by the
   continuation seam: the untrained voice writes eos right after Form's envelope, so 32 of its 64 answers are
   empty (31 of those 32 after at least one observation, 15 of them after a refused one, 16 after successes).

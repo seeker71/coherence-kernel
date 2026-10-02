@@ -2,9 +2,9 @@
 
 `generate --reasoning N --tokens M <enquiry>` in the source-backed form-cli owns
 one local Qwen session. During its initial stage, decoded model bytes enter the
-scannerless Form cursor. One control grammar carries pure BML evaluation, source
-lookup, native nodes and recipes. A recipe-birth control creates a pure BML
-function, numeric f32 expression or affine signed-i32 Form node. An execution
+scannerless Form cursor. One control grammar carries BML evaluation in the body's
+whole environment, source lookup, native nodes and recipes. A recipe-birth control
+creates a BML function, numeric f32 expression or affine signed-i32 Form node. An execution
 control addresses it; ordered choice continues through unavailable or refused
 alternatives in the same context, including mixed Form and Metal recipes. Form emits Metal in RAM,
 admits one pipeline per recipe identity, and reuses that pipeline for later
@@ -29,7 +29,7 @@ Native node verbs operate directly on immutable field content:
 
 Creation returns `node=@address;`; copy that actual coordinate in the next
 control. Reads return `value=[kind, value, [children]];`, including content created
-by another owner. Selection returns the first candidate whose pure BML predicate
+by another owner. Selection returns the first candidate whose BML predicate
 holds. BML indexing selects a child; `[-1]` means the last child and `[1:]` means
 the remaining list. Missing content and out-of-range indices remain absence.
 The response releases its lookup references;
@@ -40,10 +40,14 @@ Native composite, string and float64 coordinates index their storage slot;
 a missing or mismatched slot returns absence without scanning the field.
 
 `<|form:eval|>17 * 23 + 4<|/form:eval|>` returns `value=395;` through Form's own
-BML cursor and evaluator. `bml;x => x * x + 1` births a pure Form function;
-`carrier=form` executes it over the supplied value. Host effects need their
-owned execution doors and are refused by this pure evaluator. All carriers use
-the same RESULT shapes and observation envelope. Precise float rendering keeps
+BML cursor and evaluator. `bml;x => x * x + 1` births a Form function;
+`carrier=form` executes it over the supplied value. eval is trusted: a name
+resolves through the payload, the walker's own words, the living workspace
+(`form-token-workspace.bml`: local, request, lineage and global scopes, so what
+a control makes is there for the next control and the next request), every door
+the runtime carries and every function the body defines. Every control answers
+within its deadline (`nothing=eval-stopped:deadline`, `nothing=door-timeout:DOOR`
+for a waiting door). All carriers use the same RESULT shapes and observation envelope. Precise float rendering keeps
 small nonzero constants and observed values intact at the compiler boundary.
 When a result exceeds the available observation envelope, its delivered RESULT
 and owner status both report absence. Completed hardware work and its readout
@@ -100,9 +104,11 @@ their separate stages; this census does not measure every host function.
 The returned catalog supplies the input contract. Import returns each callable
 name with its executable address; data coordinates remain inputs to `node`.
 `recipe-exec` takes one BML expression, grouping multiple values in one list.
-Its target accepts a name, address or BML expression selecting an owned recipe
-reference. Target selection and input evaluation share the same pure budget;
-the selected callable retains its original dependencies and usage trace.
+Its target accepts a name, a library export (`training-cost.plan`), an address or
+a BML expression selecting a recipe reference. Target selection and input evaluation
+share the control's one deadline; the selected callable retains its original
+dependencies and usage trace. Each export is also kept in the workspace under its
+`LIBRARY.EXPORT` name, so a later reply or request of the lineage reaches it.
 `recipe("training-cost.plan")`
 fits latency and estimated additional memory, then selects the largest admissible
 observed row for each offered budget. Coefficients pass directly between native
@@ -113,8 +119,9 @@ Source bytes select the parse cache; each function's lowered body and captured
 dependency cells determine its identity. An unchanged import reuses the owner's
 bindings. Changed imports publish new bindings, while already held functions
 retain their original dependency cells. A malformed import preserves the current
-library. The catalog currently offers `training-cost`; general effectful modules
-are not admitted through this pure interface. Its earlier declarations supply
+library. The catalog currently offers `training-cost`; the door admits a section
+of ordinary definitions, and eval reaches the body's other functions and doors
+itself. Its earlier declarations supply
 dependencies; this door does not recursively load arbitrary imports. The shared
 [pure standard library](../form/form-stdlib/bml/pure-stdlib.bml) supplies the same
 numeric and node surfaces to ordinary BML and this evaluator.
@@ -126,7 +133,7 @@ the numerical source needs no comparison workaround.
 
 The [training observation reader](../form/form-stdlib/bml/training-observations.bml)
 correlates completed worker rows with their starts and offers immutable numeric
-cells. `node("actual-coordinate")` reads a native cell in pure evaluation;
+cells. `node("actual-coordinate")` reads a native cell in evaluation;
 `recipe("training-cost.values")(node("actual-coordinate"))` reads the offered rows
 without copying their table through model output. The
 [direct execution door](../observe/training-cost-run.bml) accepts an events path,
