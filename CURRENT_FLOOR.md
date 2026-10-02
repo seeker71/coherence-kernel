@@ -279,7 +279,7 @@ stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels co
                ds4-order-match-band.bml 255       (the quantiser and the Q8_0 row dot against a Form reference of ds4's order)
 references     ds4-recorded-references-band.bml 1023   (the logits pinned by a SHA-256 of the whole file, by the body's own door)
 driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 511 · native/metal/tests/dsv4-bind-band.bml 511
-driver stage 2 dsv4-kernels-band.bml 4095 · native/metal/tests/dsv4-open-band.bml 511 · native/metal/tests/dsv4-layer-band.bml 1023
+driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 511 · native/metal/tests/dsv4-layer-band.bml 2047
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -300,7 +300,7 @@ the session wiring and the physical window.
 Driver stage 2 (read 2026-10-03 WITA on this Mac's GPU, each band alone, memory room and no model door resident before
 each run, every exit 0; each band's planted defects dropped its reading and were restored): `form/form-stdlib/dsv4-kernels.fk`
 composes the restored emitters and the kernels the graph still needed into ten Form-emitted units, every source opening with
-the two fp pragmas (a*b+c on 1+2^-12 reads 973078528 with them and 973079552 without), 97 kernels compiled through
+the two fp pragmas (a*b+c on 1+2^-12 reads 973078528 with them and 973079552 without), 100 kernels compiled through
 metal_pipeline once and each answering small inputs within the oracle harness's 3e-5 floor against the oracle's fp64
 arithmetic on the fixture's own tensors (54 readings, 0 to 4.7e-7, plus the argmax line and the NaN-scan line); a NaN or an
 infinity in a reading is a failure with its stage named, never a stop (`dkr-nd`, `dkr-nd-why`), and `form_dsv4_nan_count` with
@@ -319,8 +319,12 @@ to 3.2e-5 after it). The fixture's SwiGLU clamp is 10.0, 1.0, 2.0 (its pinned SH
 b90181a115536345bbbe503098c1418d38403c9616555d98d343241ce1353b5e): it bites on blocks 1 and 2, `dkl-clamp` equals the
 metadata, and a layer that read no clamp reads wrong. No carrier change was needed. Found on the way: `metal_pipeline`
 compiles with fast math, under which `v == v` and `v != v` are not tests of a NaN (both the argmax and the scan test the bits);
-and the router's softplus, ln(1 + exp(z)) in f32, loses precision for z below about -6 (probability relative error 2.7e-5 at
-z = -7 and 1.1e-4 at z = -9 against the oracle; not changed here). Not wired: the real IQ2XXS file's Q8_0 dense path and Q2_K
+and the restored router's softplus, ln(1 + exp(z)) in f32, loses its digits for negative z (probability relative error 2.7e-5
+at z = -7, 1.1e-4 at z = -9, the whole value from z = -17 down, against the oracle). The new kernels `form_dsv4_hash_probs_s` and
+`form_dsv4_topk_probs_s` use max(z, 0) + log1p(exp(-|z|)) with an eight-term series below 0.1: over z = -20 to +20 the
+probability reads at most 9.2e-8 and the softplus 1.4e-7 (4.5e-8 at -7, 6.6e-8 at -9), the restored form stays in the band as the
+control, and the layer routes with the new ones (block 0's router weights 2.8e-5 to 1.7e-7, its output streams 1.0e-5 to 4.9e-7;
+block 2's output streams 1.48e-5 to 1.49e-5, flip-dominated). Not wired: the real IQ2XXS file's Q8_0 dense path and Q2_K
 down experts have kernels (the Q8_0 lane has a reading; Q2_K is compiled only) and no wiring in the layer; `n_hc` other than 4
 is refused.
 
