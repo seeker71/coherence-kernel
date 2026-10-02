@@ -9,10 +9,10 @@
 ; ne is the envelope a 1.4e-5 per-layer tilt opens in the reference (metal_dsv4_stack_oracle.sh above cmpOra, history 8a6f123d3^, read 2026-10-03) and a kernel alone is held to the floor 3e-5
 ; (that harness holds its THIS-LAYER-ALONE gates there). Every output buffer is pre-filled with 0x5A bytes (f32 1.5e16, no value of any run) so a kernel that never ran reads as a huge nd.
 ;
-; Verdict 1023 when every claim lands:
+; Verdict 4095 when every claim lands:
 ;   1     text: every one of the ten sources starts with the pragma pair exactly, none uses `using namespace`, no kernel name repeats inside the six graph units, and the catalogue read from
-;         the sources is 96 kernels
-;   2     device: every kernel of every unit compiles through metal_pipeline (96 handles, all positive); a second open of the same sources returns the same 96 handles (compile once,
+;         the sources is 97 kernels
+;   2     device: every kernel of every unit compiles through metal_pipeline (97 handles, all positive); a second open of the same sources returns the same 97 handles (compile once,
 ;         handle kept)
 ;   4     the pragmas bite on this device: the probe kernel a*b+c on a = b = 1 + 2^-12, c = -1 reads 973078528 (the unfused word) when wrapped by dkr-wrap and 973079552 (the fma word) when the
 ;         same text is compiled without the pragma pair
@@ -30,6 +30,11 @@
 ;         (coff 1): state, pool, norm, shift; and the device argmax (ties keep the earlier index, an all-NaN vector answers 0xFFFFFFFF, one group of 1024 threads over 129,280 values)
 ;   512   the checks can fail: a transposed combine matrix reads far from the GPU's hc_post, the clamp forced off reads far from the GPU's id SwiGLU, weights taken from the biased score read far
 ;         from the GPU's router weights, an unrun buffer reads as the sentinel, and the gate refuses a wrong length
+;   1024  a NaN or an infinity is a failure, never a stop: a buffer holding NaN, +Inf and -Inf words reads back (the decoder answers null for them), and dkr-nd answers the failure value 1e30 for each
+;         form, in either side, with dkr-nd-why naming the failing stage ("non-finite GPU reading at index 0 of 4"); finite readings (the compressor's -1e30 included) are unchanged
+;   2048  the NaN scan: form_dsv4_nan_count counts the non-finite words of an f32 buffer by their exponent bits: a vector holding one NaN and one +Inf reads 2, a clean vector 0, the compressor's -1e30 and
+;         the unrun 1.5e16 sentinel 0, 129,280 values (one group of 1024 threads) with one NaN at the last place 1; the argmax over a vector holding one NaN still answers an index (it skips the NaN: the
+;         reason the scan exists); dkr-logits-clean? is true only for a counted zero, and false for a vector with a NaN and for a pipeline that was not made
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- every bit past 1 needs a live Metal device behind metal_pipeline and the handle door, bit 4 compiles two probe sources, and the fixture is written and read as a binary
 ; file (write_file, read_file_slice). Light GPU: kernels of a few hundred threads over a 1.5 MB fixture. Never maps a model; writes only under temp_dir and removes what it made.
@@ -50,7 +55,7 @@ section [form.bml] {
   // one reading: print it and answer whether it is inside the gate
   def dkb-chk(label, gpu, ref) {
    let nd = dkr-nd(gpu, ref);
-   let said = print_str("  " ++ label ++ " nd " ++ nd.str());
+   let said = print_str("  " ++ label ++ " nd " ++ nd.str() ++ (nd >= 1.0e29 ? " (" ++ dkr-nd-why(gpu, ref) ++ ")" : ""));
    nd < dkr-floor();
   }
   def dkb-rows(xs, w) = len(xs) == 0 ? [] : cons(xs[0:w], dkb-rows(xs[w:], w));
@@ -62,7 +67,7 @@ section [form.bml] {
   def dkb-text() {
    let us = dkr-units();
    let names = dkr-all-names(us);
-   len(us) == 10 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 96
+   len(us) == 10 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 97
     && dkr-pragmas() == "#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\n";
   }
 
@@ -73,7 +78,7 @@ section [form.bml] {
   def dkb-compiled(first, second, us) {
    let a = dkb-unit-hs(first, us);
    let b = dkb-unit-hs(second, us);
-   len(a) == 96 && dkb-positive?(a) && a == b;
+   len(a) == 97 && dkb-positive?(a) && a == b;
   }
 
   // ---- 4: the contraction probe, compiled with and without the pragma pair
@@ -485,6 +490,55 @@ section [form.bml] {
   def dkb-comp-argmax(c) = dkb-comp-run(c, 1, 4, 61) && dkb-comp-run(c, 2, 2, 65) && dkb-argmax(c);
 
   // ---- 512: the checks can fail
+  // ---- 1024: a non-finite reading is a failure, never a stop
+  def dkb-nanw() = 2143289344;
+  def dkb-infw() = 2139095040;
+  def dkb-ninfw() = 4286578688;
+  def dkb-one-bad(c, words) {
+   let reg = dkb-g(c, "reg");
+   let b = dkr-buf-u32(reg, words);
+   let got = dkr-read(b, len(words));
+   let ref = dkb-ones(len(words));
+   dkr-nd(got, ref) == 1.0e30 && !dkr-within?(got, ref) && dkr-first-bad(got, 0) >= 0;
+  }
+  def dkb-ones(n) = n == 0 ? [] : cons(1.0, dkb-ones(n - 1));
+  def dkb-nonfinite(c) {
+   let reg = dkb-g(c, "reg");
+   let ones = [1065353216, 1065353216, 1065353216, 1065353216];
+   let mixed = dkr-read(dkr-buf-u32(reg, [dkb-nanw(), dkb-infw(), dkb-ninfw(), 1065353216]), 4);
+   let refSide = dkr-nd([1.0, 2.0], dkr-read(dkr-buf-u32(reg, [dkb-nanw(), 1065353216]), 2));
+   dkb-one-bad(c, [dkb-nanw(), 1065353216, 1065353216, 1065353216]) && dkb-one-bad(c, [1065353216, dkb-infw(), 1065353216, 1065353216]) && dkb-one-bad(c, [1065353216, 1065353216, 1065353216, dkb-ninfw()])
+    && dkb-one-bad(c, [dkb-nanw(), dkb-infw(), dkb-ninfw(), 1065353216]) && dkr-nd-why(mixed, dkb-ones(4)) == "non-finite GPU reading at index 0 of 4"
+    && dkr-nd-why([1.0, 2.0], dkb-ones(3)) == "length 2 against 3" && dkr-nd-why(dkr-read(dkr-buf-u32(reg, ones), 4), dkb-ones(4)) == "finite"
+    && refSide == 1.0e30 && dkr-nd-why([1.0, 2.0], dkr-read(dkr-buf-u32(reg, [dkb-nanw(), 1065353216]), 2)) == "non-finite reference reading at index 0 of 2"
+    && dkr-nd([0.0 - 1.0e30, 1.0], [0.0 - 1.0e30, 1.0]) == 0.0 && dkr-finite?(0.0 - 1.0e30) && !dkr-finite?(nothing()) && dkr-nd([nothing()], [1.0]) == 1.0e30;
+  }
+
+  // ---- 2048: the NaN scan
+  def dkb-scan(c, words, tpgOk) = dkr-nan-count(dkb-p(c, "form_dsv4_nan_count"), dkr-buf-u32(dkb-g(c, "reg"), words), len(words));
+  def dkb-nan-scan(c) {
+   let reg = dkb-g(c, "reg");
+   let pipe = dkb-p(c, "form_dsv4_nan_count");
+   let base = dkr-words(dkb-x(91, 1000, 1.0));
+   let two = dkb-set(dkb-set(base, 700, dkb-nanw()), 3, dkb-infw());
+   let sentinelWords = [md-f32-bits(0.0 - 1.0e30), 1515870810, md-f32-bits(0.0 - 1.0e30), 1515870810];
+   // 129,280 values: the unrun sentinel everywhere (finite) and one NaN written at the last place
+   let big = dkr-buf-empty(reg, 129280);
+   let clean0 = dkr-nan-count(pipe, big, 129280);
+   let w = metal_buf_write(big, 4 * 129279, dkr-u32-bytes([dkb-nanw()]));
+   let one = dkr-nan-count(pipe, big, 129280);
+   // the argmax over a vector with one NaN skips it and answers an index: the scan is what refuses the vector
+   let am = dkb-argmax-run(c, dkb-set(dkb-x(92, 64, 1.0), 10, 5.0), 256);
+   let nb = dkr-buf-u32(reg, dkb-set(dkr-words(dkb-x(92, 64, 1.0)), 20, dkb-nanw()));
+   let oi = dkr-buf-empty(reg, 1);
+   let ov = dkr-buf-empty(reg, 1);
+   let e = dkr-go-tg(dkb-p(c, "form_dsv4_argmax_f32"), [nb, oi, ov], [64], 1, 256);
+   let idx = dkr-read-u32(oi, 1)[0];
+   let said = print_str("  nan scan: two bad " ++ dkb-scan(c, two, true).str() ++ " clean " ++ dkb-scan(c, base, true).str() ++ " sentinels " ++ dkb-scan(c, sentinelWords, true).str() ++ " vocab clean/one " ++ clean0.str() ++ "/" ++ one.str() ++ " argmax over one NaN answers " ++ idx.str());
+   dkb-scan(c, two, true) == 2 && dkb-scan(c, base, true) == 0 && dkb-scan(c, sentinelWords, true) == 0 && clean0 == 0 && one == 1 && e == 1 && idx != 4294967295 && am[0] == 10
+    && dkr-logits-clean?(pipe, nb, 64) == false && dkr-logits-clean?(pipe, big, 129280) == false
+    && dkr-logits-clean?(pipe, dkr-buf-u32(reg, base), 1000) == true && dkr-logits-clean?(0, nb, 64) == false && nothing?(dkr-nan-count(0, nb, 64));
+  }
   def dkb-transposed(comb) = [comb[0], comb[4], comb[8], comb[12], comb[1], comb[5], comb[9], comb[13], comb[2], comb[6], comb[10], comb[14], comb[3], comb[7], comb[11], comb[15]];
   def dkb-falsifiers(c) {
    let resid = dkb-x(41, 1024, 2.0);
@@ -522,9 +576,11 @@ section [form.bml] {
  let c128 = dkb-bit(try dkb-moe(c) catch false, 128);
  let c256 = dkb-bit(try dkb-comp-argmax(c) catch false, 256);
  let c512 = dkb-bit(try dkb-falsifiers(c) catch false, 512);
+ let c1024 = dkb-bit(try dkb-nonfinite(c) catch false, 1024);
+ let c2048 = dkb-bit(try dkb-nan-scan(c) catch false, 2048);
  let leftBufs = dkr-reg-free(reg);
  let leftViews = nothing?(views) ? [] : dvb-close(views);
  let removed = host_path_remove(path);
- print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512;
+ print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048;
 }
