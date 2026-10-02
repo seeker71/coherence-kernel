@@ -95,13 +95,17 @@ section [form.bml] {
     // A session takes the weights' pages (mapped from the file, one physical copy for every kernel that maps it) and
     // a KV state and scratch of its own: the machine is asked first (memory-governor.bml), and a held answer opens
     // nothing, named host-memory-held with its reason, so the caller backs off instead of the host falling over.
-    def fcms-memory-need(path) = (file_size(path) < 0 ? 0 : file_size(path)) + mg-kv-margin();
+    // The grant is a lease (mg-lease): a promise other processes see before the pages show in the machine's reading,
+    // keyed by the model file so a second process mapping the same weights is charged its private bytes only. The
+    // lease goes where the session closes (fcms-release-ok?) or where this open gives up.
+    def fcms-weights-bytes(path) = file_size(path) < 0 ? 0 : file_size(path);
+    def fcms-memory-need(path) = fcms-weights-bytes(path) + mg-kv-margin();
     def fcms-memory-held(path, v) = {
-        let said = print_str(mg-line("model session " ++ path, fcms-memory-need(path), v));
+        let said = print_str(mg-line("model session " ++ path, mg-need-of(v, fcms-memory-need(path)), v));
         fcms-none("host-memory-held:" ++ v[1]);
     };
     def fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) = {
-        let granted = mg-ask(fcms-memory-need(path));
+        let granted = mg-lease("model session " ++ path, path, fcms-weights-bytes(path), mg-kv-margin());
         mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) : fcms-memory-held(path, granted);
     };
     def fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) = {
@@ -112,6 +116,7 @@ section [form.bml] {
         let _open-ready = q38oo-stage("model-session-context-open-ready", 8388620);
         !((Comparable) q38-context-ok?(ctx) == 1) ? {
             let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
+            let unleased = mg-release();
             fcms-none("model-context-open-refused");
         } : {
             let _state-begin = q38oo-stage("model-session-state-begin", 8388621);
@@ -120,6 +125,7 @@ section [form.bml] {
             !((Comparable) q38-state-ok?(sts) == 1) ? {
                 let state-closed = q38-free-state(sts);
                 let context-closed = q38-close(ctx, []);
+                let unleased = mg-release();
                 fcms-none("model-stream-state-refused");
             } : (Comparable) live-cursor == 1 ? {
                 let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
@@ -342,7 +348,8 @@ fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stre
             let state-closed = q38-free-state(fcms-sts(s));
             let context-expected = q38-close-expected(fcms-ctx(s), []);
             let context-closed = q38-close(fcms-ctx(s), []);
-            draft-ok && ((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
+            let unleased = mg-release();
+            draft-ok &&((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
         };
     };
     0;
