@@ -29,31 +29,50 @@
 // that start together can both see room and then collide: a model's pages show in the reading only after the open
 // has mapped and the GPU has read them. A lease is a promise another process can see before the memory shows up.
 //   the file        /private/tmp/form-memory-leases/<pid>.lease, one JSON line {pid, who, key, shared, private,
-//                   granted_unix_ms}. key names the shared thing (the model file's path for weights, "" for none),
-//                   shared is the bytes of that shared thing (the weights' file size), private the bytes only this
-//                   process owns (KV state, scratch, margin).
+//                   granted_unix_ms, extra, extra_unix_ms}. key names the shared thing (the model file's path for
+//                   weights, "" for none), shared is the bytes of that shared thing (the weights' file size), private
+//                   the bytes only this process owns (KV state, scratch, margin; it includes extra). extra is the part
+//                   of private granted later than the weights (a renewal's second KV state), stamped on its own at
+//                   extra_unix_ms. shared and private read as 0 to 2^50 bytes, and a file with any other value reads
+//                   as no lease (it is removed like a torn one).
 //   live            while host_alive(pid) says so and the pid began no later than the grant (a pid the host handed
-//                   out again is not it); the file of a dead pid, or one that reads no lease, is removed by the next ask.
+//                   out again is not it); the file of a dead pid, or one that reads no lease, is removed by the next
+//                   ask, and so is a <pid>.lease.part a killed writer left more than a minute ago.
 //   the weights are one physical copy in the page cache for every kernel that maps the same GGUF (measured: two
 //                   kernels mapping one 6 GiB file added 6.2 GiB of file-backed pages for the first and 0.0 for the
 //                   second), so the same key is counted once: an ask whose key a live lease already holds is
 //                   charged its private bytes only.
 //   pending         a lease granted less than 180 s ago has not yet shown in the reading, so another ask is charged
 //                   its bytes too (its private bytes, and its shared bytes when it was the first holder of its key);
+//                   its extra bytes count pending for 180 s from their own stamp, never the whole lease again;
 //                   after 180 s the pages are in the reading and the lease no longer counts as pending, but it still
 //                   holds its key.
 //   the lock        the reading, the leases and the write happen under one lock (dir-lock.bml: a directory only one
-//                   maker makes, its owner's pid inside, a dead or overlong holder taken over, released in a deferred
-//                   step so a stop releases it too), so two processes asking at the same moment are judged one after
-//                   the other: the second sees the first's lease.
-//   one per process a process's lease is its whole promise: mg-lease with the same key replaces it (a second ask of
-//                   the same weights restates the promise); with key "" it adds private bytes to it and keeps its
-//                   key (a renewal's second KV state); a different key restates the key and counts the old weights
-//                   as private bytes; mg-release removes it, where the session closes.
+//                   maker makes, its owner's pid inside, released in a deferred step so a stop releases it too), so
+//                   two processes asking at the same moment are judged one after the other: the second sees the
+//                   first's lease. A holder that is gone is taken over at once; one that is alive is waited for (a
+//                   slow holder is not a dead one) up to 60 s of its own stamp, and a waiter whose patience (10 s) is
+//                   spent answers lease-lock-busy, which is the closed answer. Just before it writes, the grant
+//                   reads the lock's owner once more: a lock taken from it meanwhile is a held answer, not a write.
+//   no directory    when the lease directory itself cannot be made (a full or read-only /private/tmp, a directory
+//                   another user owns) the machine is still guarded by one reading: the bare verdict answers, named
+//                   lease-dir-unavailable (granted without a lease, or held with the policy's reason after it).
+//   one per process a process's lease is its whole promise: mg-lease with the same key restates it while it is
+//                   pending (a second ask of the same weights) and adds a second session's KV as extra once it is
+//                   settled; with key "" it adds private bytes to it, as extra, and keeps its key (a renewal's second
+//                   KV state); a different key restates the key and counts the old weights as private bytes;
+//                   mg-lease-return gives back what a retired stream held; mg-release removes the lease where the
+//                   session closes.
 // mg-lease answers the verdict plus [charged, pending]: granted writes the lease, held writes nothing and names why
-// (room, wired-cap, reserve, compressor, memory-unreadable, or lease-lock-busy when the lock could not be had).
+// (room, wired-cap, reserve, compressor, memory-unreadable, lease-lock-busy, or lease-dir-unavailable).
 // mg-lease-wait asks again with the same naps as mg-wait. The walk's own pre-check (hw-ready) stays mg-wait with no
-// lease: the child lane it begins takes the real one in its own process.
+// lease: the child lane it begins takes the real one in its own process. The door (observe/memory-governor-run.bml)
+// judges through the same lease-aware policy without taking a lease (mg-lease-ask-read), so the verdict it prints
+// counts the leases it lists.
+//
+// The walk's readers share one word for a lane that gave memory back or was refused it: mg-memory-ending? reads the
+// reason host-memory-low (the lane saved its checkpoint and stopped: form-cli-code-live.bml fcac-memory-stop) and
+// host-memory-held:<why> (the session open or the renewal's second state was refused). Neither is a failed option.
 //
 // PROOF: form-stdlib/tests/memory-governor-band.bml; the door is observe/memory-governor-run.bml.
 import form-stdlib/json.fk;
@@ -92,6 +111,11 @@ section [form.bml] {
   def mg-granted?(v) = v[0] == 1;
   def mg-low?(vm) = mg-vm-ok?(vm) && ((mg-available(vm) < (mg-reserve-of(mg-mem(vm)) / 2)) || (mg-wired(vm) > mg-pct(mg-mem(vm), 80)) || (mg-compressor(vm) > mg-pct(mg-mem(vm), 40)));
   def mg-ask(need) = mg-verdict(mg-sense(), need);
+  // the reasons a lane's end names when the machine, not the work, ended it
+  def mg-low-reason() = "host-memory-low";
+  def mg-held-reason() = "host-memory-held:";
+  def mg-memory-held?(reason) = ((String) value_kind(reason) == "string") && (len(reason) >= len(mg-held-reason())) && ((String) substring(reason, 0, len(mg-held-reason())) == mg-held-reason());
+  def mg-memory-ending?(reason) = ((String) value_kind(reason) == "string") && (((String) reason == mg-low-reason()) || mg-memory-held?(reason));
   def mg-status-line(vm) = !mg-vm-ok?(vm) ? "[memory] unreadable: host_vm_stat answered nothing; no heavy open is granted" : "[memory] machine " ++ mg-gib-text(mg-mem(vm)) ++ ", available " ++ mg-gib-text(mg-available(vm)) ++ ", wired " ++ mg-gib-text(mg-wired(vm)) ++ ", compressor " ++ mg-gib-text(mg-compressor(vm)) ++ ", reserve " ++ mg-gib-text(mg-reserve-of(mg-mem(vm))) ++ (mg-low?(vm) ? ", LOW: heavy work gives memory back" : ", room");
   def mg-line(who, need, v) = "[memory] " ++ (mg-granted?(v) ? "granted" : "held") ++ " " ++ who ++ " needs " ++ mg-gib-text(need) ++ ": " ++ v[1] ++ " (available " ++ mg-gib-text(v[2]) ++ ", wired " ++ mg-gib-text(v[3]) ++ " of " ++ mg-gib-text(v[4]) ++ ")";
   // ask again, with growing naps, until a time on host_monotonic_ms; the last verdict stands. sense() answers a
@@ -118,13 +142,19 @@ section [form.bml] {
   def mg-lease-dir() = "/private/tmp/form-memory-leases";
   def mg-lease-pending-ms() = 180000;
   def mg-lease-patience-ms() = 10000;
+  def mg-lease-part-ms() = 60000;
+  def mg-lease-max() = 1125899906842624;
   def mg-lease-path(dir, pid) = dir ++ "/" ++ pid.str() ++ ".lease";
   def mg-lease-lock(dir) = dir ++ "/lock";
-  def mg-lease-text(pid, who, key, shared, priv, at) = json-emit(json-node-object([json-node-pair("pid", json-node-int(pid)), json-node-pair("who", json-node-string(who)), json-node-pair("key", json-node-string(key)), json-node-pair("shared", json-node-int(shared)), json-node-pair("private", json-node-int(priv)), json-node-pair("granted_unix_ms", json-node-int(at))])) ++ "\n";
-  // a lease as a row: [pid, who, key, shared, private, granted_unix_ms]; a file that reads no lease is nothing
+  def mg-lease-text-full(pid, who, key, shared, priv, at, extra, extraAt) = json-emit(json-node-object([json-node-pair("pid", json-node-int(pid)), json-node-pair("who", json-node-string(who)), json-node-pair("key", json-node-string(key)), json-node-pair("shared", json-node-int(shared)), json-node-pair("private", json-node-int(priv)), json-node-pair("granted_unix_ms", json-node-int(at)), json-node-pair("extra", json-node-int(extra)), json-node-pair("extra_unix_ms", json-node-int(extraAt))])) ++ "\n";
+  def mg-lease-text(pid, who, key, shared, priv, at) = mg-lease-text-full(pid, who, key, shared, priv, at, 0, 0);
+  // a lease as a row: [pid, who, key, shared, private, granted_unix_ms, extra, extra_unix_ms]; a file that reads no lease is nothing
   def mg-lease-has?(doc) = json-object-has?(doc, "pid") && json-object-has?(doc, "who") && json-object-has?(doc, "key") && json-object-has?(doc, "shared") && json-object-has?(doc, "private") && json-object-has?(doc, "granted_unix_ms");
-  def mg-lease-row-of(doc) = [json-int-value(json-object-get(doc, "pid")), json-string-value(json-object-get(doc, "who")), json-string-value(json-object-get(doc, "key")), json-int-value(json-object-get(doc, "shared")), json-int-value(json-object-get(doc, "private")), json-int-value(json-object-get(doc, "granted_unix_ms"))];
-  def mg-lease-row-ok?(r) = ((String) value_kind(r[0]) == "int") && ((String) value_kind(r[1]) == "string") && ((String) value_kind(r[2]) == "string") && ((String) value_kind(r[3]) == "int") && ((String) value_kind(r[4]) == "int") && ((String) value_kind(r[5]) == "int");
+  def mg-lease-opt-int(doc, key) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : 0;
+  def mg-lease-row-of(doc) = [json-int-value(json-object-get(doc, "pid")), json-string-value(json-object-get(doc, "who")), json-string-value(json-object-get(doc, "key")), json-int-value(json-object-get(doc, "shared")), json-int-value(json-object-get(doc, "private")), json-int-value(json-object-get(doc, "granted_unix_ms")), mg-lease-opt-int(doc, "extra"), mg-lease-opt-int(doc, "extra_unix_ms")];
+  def mg-lease-int?(n) = (String) value_kind(n) == "int";
+  def mg-lease-bytes?(n) = mg-lease-int?(n) && (n >= 0) && (n <= mg-lease-max());
+  def mg-lease-row-ok?(r) = mg-lease-int?(r[0]) && (r[0] >= 1) && ((String) value_kind(r[1]) == "string") && ((String) value_kind(r[2]) == "string") && mg-lease-bytes?(r[3]) && mg-lease-bytes?(r[4]) && mg-lease-int?(r[5]) && (r[5] >= 0) && mg-lease-bytes?(r[6]) && mg-lease-int?(r[7]) && (r[7] >= 0);
   def mg-lease-row-read(text) {
    let doc = parse-json("memory-lease", text);
    mg-lease-has?(doc) ? mg-lease-row-checked(mg-lease-row-of(doc)) : nothing();
@@ -132,67 +162,100 @@ section [form.bml] {
   def mg-lease-row-checked(r) = mg-lease-row-ok?(r) ? r : nothing();
   def mg-lease-row(text) = (String) text == "" ? nothing() : (try mg-lease-row-read(text) else nothing());
   def mg-lease-file?(name) = (len(name) > 6) && ((String) substring(name, len(name) - 6, len(name)) == ".lease");
+  def mg-lease-part?(name) = (len(name) > 11) && ((String) substring(name, len(name) - 11, len(name)) == ".lease.part");
   def mg-lease-names(dir) = filter(n => mg-lease-file?(n), host_dir_list(dir) ?? []);
   def mg-lease-read(dir, name) = mg-lease-row(read_file(dir ++ "/" ++ name) ?? "");
   // live: the pid is alive and began no later than the grant
   def mg-lease-live?(r) = dl-holds?(r[0], r[5]);
   // the live leases as they stand (a view: nothing is removed)
   def mg-lease-view(dir) = filter(r => (!nothing?(r)) && mg-lease-live?(r), map(n => mg-lease-read(dir, n), mg-lease-names(dir)));
-  // the live leases, removing the file of every pid that is gone and every file that reads no lease (under the lock)
-  def mg-lease-sweep(dir) = mg-lease-sweep-names(dir, mg-lease-names(dir));
+  // a part file a killed writer left (written, never renamed) older than maxage ms is removed: 1 each
+  def mg-lease-sweep-parts(dir, maxage) = foldl((a, n) => a + mg-lease-part-gone(dir, n, maxage), 0, filter(n => mg-lease-part?(n), host_dir_list(dir) ?? []));
+  def mg-lease-part-gone(dir, name, maxage) = dl-age-ms(dir ++ "/" ++ name) >= maxage ? (((Comparable) host_path_remove(dir ++ "/" ++ name) == 0) ? 1 : 0) : 0;
+  // the live leases, removing the file of every pid that is gone, every file that reads no lease and every stale
+  // part file (under the lock)
+  def mg-lease-sweep(dir) {
+   let parts = mg-lease-sweep-parts(dir, mg-lease-part-ms());
+   mg-lease-sweep-names(dir, mg-lease-names(dir));
+  }
   def mg-lease-sweep-names(dir, names) = nil?(names) ? [] : mg-lease-sweep-one(dir, names[0], mg-lease-read(dir, names[0]), names[1:]);
   def mg-lease-sweep-one(dir, name, row, rest) = (!nothing?(row)) && mg-lease-live?(row) ? cons(row, mg-lease-sweep-names(dir, rest)) : mg-lease-sweep-gone(dir, host_path_remove(dir ++ "/" ++ name), rest);
   def mg-lease-sweep-gone(dir, removed, rest) = mg-lease-sweep-names(dir, rest);
   def mg-lease-mine(rows, pid) = nil?(rows) ? nothing() : ((Comparable) rows[0][0] == pid) ? rows[0] : mg-lease-mine(rows[1:], pid);
-  // rows are [pid, who, key, shared, private, at]: a is the earlier holder of its key than b when it was granted first
+  // rows are [pid, who, key, shared, private, at, extra, extra_at]; a row written without the last two reads them 0
+  def mg-lease-extra(r) = len(r) > 6 ? r[6] : 0;
+  def mg-lease-extra-at(r) = len(r) > 7 ? r[7] : 0;
+  def mg-lease-extra-pending?(r, now) = (mg-lease-extra(r) > 0) && ((now - mg-lease-extra-at(r)) < mg-lease-pending-ms());
+  // a is the earlier holder of its key than b when it was granted first
   def mg-lease-earlier?(a, b) = (a[5] < b[5]) || ((a[5] == b[5]) && (a[0] < b[0]));
   def mg-lease-holds?(key, others) = ((String) key != "") && any?(o => (String) o[2] == key, others);
   // the first holder of its key carries the key's shared bytes; a lease with no key carries its own
   def mg-lease-first?(r, others) = ((String) r[2] == "") || (!any?(o => ((String) o[2] == r[2]) && ((Comparable) o[0] != r[0]) && mg-lease-earlier?(o, r), others));
-  def mg-lease-pending(r, others, now) = (now - r[5]) < mg-lease-pending-ms() ? r[4] + (mg-lease-first?(r, others) ? r[3] : 0) : 0;
+  // the bytes of a lease the reading does not show yet: the grant's own (private less extra, and shared when first) for
+  // 180 s from its stamp, and the extra for 180 s from its own
+  def mg-lease-base-pending(r, others, now) = (now - r[5]) < mg-lease-pending-ms() ? mg-max(0, r[4] - mg-lease-extra(r)) + (mg-lease-first?(r, others) ? r[3] : 0) : 0;
+  def mg-lease-pending(r, others, now) = mg-lease-base-pending(r, others, now) + (mg-lease-extra-pending?(r, now) ? mg-lease-extra(r) : 0);
   def mg-lease-pending-sum(others, now) = foldl((a, r) => a + mg-lease-pending(r, others, now), 0, others);
-  // the pid's lease after this ask, and what it asks: [key, shared, private, ask key, ask shared, ask private]
-  def mg-lease-plan(mine, key, shared, priv) = nothing?(mine) ? ((String) key == "" ? ["", 0, priv + shared, "", 0, priv + shared] : [key, shared, priv, key, shared, priv])
-   : (String) key == "" ? [mine[2], mine[3], mine[4] + priv + shared, "", 0, priv + shared]
-   : (String) key == mine[2] ? [key, shared, priv, key, shared, priv]
-   : [key, shared, mine[4] + mine[3] + priv, key, shared, priv];
+  // the pid's lease after this ask, and what it asks:
+  // [key, shared, private, extra, extra stamp, ask key, ask shared, ask private, grant stamp]
+  def mg-lease-plan(mine, key, shared, priv, now) = nothing?(mine) ? ((String) key == "" ? ["", 0, priv + shared, 0, 0, "", 0, priv + shared, now] : [key, shared, priv, 0, 0, key, shared, priv, now])
+   : (String) key == "" ? mg-lease-plan-more(mine, priv + shared, now)
+   : ((String) key == mine[2]) && ((now - mine[5]) >= mg-lease-pending-ms()) ? [key, mine[3], mine[4] + priv, priv, now, key, shared, priv, mine[5]]
+   : (String) key == mine[2] ? [key, shared, priv, 0, 0, key, shared, priv, now]
+   : [key, shared, mine[4] + mine[3] + priv, 0, 0, key, shared, priv, now];
+  // a second KV state of this process: its private bytes are stamped on their own, the weights keep their stamp
+  def mg-lease-plan-more(mine, p, now) = [mine[2], mine[3], mine[4] + p, (mg-lease-extra-pending?(mine, now) ? mg-lease-extra(mine) : 0) + p, now, "", 0, p, mine[5]];
   // what an ask is charged: its private bytes, its shared bytes unless a live lease of another process holds its key, and
   // the pending bytes of every other live lease
   // (this process's own lease of the same key, once settled, holds the key too: its pages are in the reading; while it
   // is pending its bytes are not, and the restated ask is charged them once, as this process's lease is replaced)
   def mg-lease-own-settled?(mine, key, now) = (!nothing?(mine)) && ((String) key != "") && ((String) mine[2] == key) && ((now - mine[5]) >= mg-lease-pending-ms());
-  def mg-lease-charge(plan, mine, others, now) = plan[5] + ((mg-lease-holds?(plan[3], others) || mg-lease-own-settled?(mine, plan[3], now)) ? 0 : plan[4]) + mg-lease-pending-sum(others, now);
+  def mg-lease-charge(plan, mine, others, now) = plan[7] + ((mg-lease-holds?(plan[5], others) || mg-lease-own-settled?(mine, plan[5], now)) ? 0 : plan[6]) + mg-lease-pending-sum(others, now);
   def mg-lease-write(dir, pid, text) {
    let part = mg-lease-path(dir, pid) ++ ".part";
    let wrote = write_file_text(part, text);
    (String) (read_file(part) ?? "") == text ? host_path_rename(part, mg-lease-path(dir, pid)) : -1;
   }
+  // the verdict over the leases as rows, with nothing written and nothing removed: [verdict, plan, charged, pending]
+  def mg-lease-decide(rows, pid, key, shared, priv, vm, now) {
+   let others = filter(r => (Comparable) r[0] != pid, rows);
+   let mine = mg-lease-mine(rows, pid);
+   let plan = mg-lease-plan(mine, key, shared, priv, now);
+   let charged = mg-lease-charge(plan, mine, others, now);
+   [mg-verdict(vm, charged), plan, charged, mg-lease-pending-sum(others, now)];
+  }
   // the leases first, then the machine's reading last (the freshest truth the verdict can have), then the clock
-  def mg-lease-judge(dir, pid, who, key, shared, priv, sense, clock) {
+  def mg-lease-judge(dir, lock, pid, who, key, shared, priv, sense, clock) {
    let rows = mg-lease-sweep(dir);
    let vm = sense();
    let now = clock();
-   let others = filter(r => (Comparable) r[0] != pid, rows);
-   let mine = mg-lease-mine(rows, pid);
-   let plan = mg-lease-plan(mine, key, shared, priv);
-   let pending = mg-lease-pending-sum(others, now);
-   let charged = mg-lease-charge(plan, mine, others, now);
-   mg-lease-verdict(dir, pid, who, plan, charged, pending, now, mg-verdict(vm, charged));
+   mg-lease-verdict(dir, lock, pid, who, mg-lease-decide(rows, pid, key, shared, priv, vm, now));
   }
   // granted writes the lease; held writes nothing. A grant whose file could not be written is still a grant (the
-  // memory is there), named room-unleased so no one reads a promise that was not made
-  def mg-lease-verdict(dir, pid, who, plan, charged, pending, now, v) = mg-granted?(v) ? mg-lease-granted(v, charged, pending, mg-lease-write(dir, pid, mg-lease-text(pid, who, plan[0], plan[1], plan[2], now))) : [v[0], v[1], v[2], v[3], v[4], charged, pending];
+  // memory is there), named room-unleased so no one reads a promise that was not made. Just before the write the lock
+  // is read once more: a lock a waiter took from this process meanwhile (it was slow, not dead) is a held answer.
+  def mg-lease-verdict(dir, lock, pid, who, d) = !mg-granted?(d[0]) ? [d[0][0], d[0][1], d[0][2], d[0][3], d[0][4], d[2], d[3]]
+   : !mg-lease-owned?(lock) ? mg-lease-busy-of(d[0])
+   : mg-lease-granted(d[0], d[2], d[3], mg-lease-write(dir, pid, mg-lease-text-full(pid, who, d[1][0], d[1][1], d[1][2], d[1][8], d[1][3], d[1][4])));
+  def mg-lease-owned?(lock) = (Comparable) dl-field(dl-owner(lock), "pid=") == host_pid();
   def mg-lease-granted(v, charged, pending, wrote) = [1, (Comparable) wrote == 0 ? v[1] : "room-unleased", v[2], v[3], v[4], charged, pending];
   def mg-lease-busy(vm) = mg-lease-busy-of(mg-verdict(vm, 0));
   def mg-lease-busy-of(v) = [0, "lease-lock-busy", v[2], v[3], v[4], 0, 0];
   def mg-lease-held(dir, lock, pid, who, key, shared, priv, sense, now) {
    defer dl-release(lock);
-   mg-lease-judge(dir, pid, who, key, shared, priv, sense, now);
+   mg-lease-judge(dir, lock, pid, who, key, shared, priv, sense, now);
   }
-  def mg-lease-at(dir, pid, who, key, shared, priv, sense, now) {
+  // the lease directory cannot be made: the machine is still guarded by one reading, the bare verdict of the same policy
+  def mg-lease-bare(need, sense) = mg-lease-bare-of(need, mg-verdict(sense(), need));
+  def mg-lease-bare-of(need, v) = [v[0], mg-granted?(v) ? "lease-dir-unavailable" : "lease-dir-unavailable:" ++ v[1], v[2], v[3], v[4], need, 0];
+  def mg-lease-at(dir, pid, who, key, shared, priv, sense, now) = mg-lease-at-wait(mg-lease-patience-ms(), dir, pid, who, key, shared, priv, sense, now);
+  def mg-lease-at-wait(patience, dir, pid, who, key, shared, priv, sense, now) {
    let made = host_dir_mkdir(dir);
+   (Comparable) host_path_is_dir(dir) != 1 ? mg-lease-bare(shared + priv, sense) : mg-lease-locked(patience, dir, pid, who, key, shared, priv, sense, now);
+  }
+  def mg-lease-locked(patience, dir, pid, who, key, shared, priv, sense, now) {
    let lock = mg-lease-lock(dir);
-   (Comparable) dl-take(lock, mg-lease-patience-ms()) == 1 ? mg-lease-held(dir, lock, pid, who, key, shared, priv, sense, now) : mg-lease-busy(sense());
+   (Comparable) dl-take(lock, patience) == 1 ? mg-lease-held(dir, lock, pid, who, key, shared, priv, sense, now) : mg-lease-busy(sense());
   }
   def mg-lease(who, key, shared, priv) = mg-lease-at(mg-lease-dir(), host_pid(), who, key, shared, priv, () => mg-sense(), () => now_unix_ms());
   def mg-lease-wait-with(who, key, shared, priv, until, ask, sleep, now) = mg-wait-ask(who, shared + priv, until, ask, sleep, now, mg-nap-first());
@@ -200,6 +263,21 @@ section [form.bml] {
   // the lease of this pid goes where the session closes: 0 when removed, -1 when it held none
   def mg-release-at(dir, pid) = host_path_remove(mg-lease-path(dir, pid));
   def mg-release() = mg-release-at(mg-lease-dir(), host_pid());
+  // A retired stream gives its bytes back: the lease's private bytes (and its extra) fall by them, and the lease goes
+  // when nothing is left of it. Only this pid writes its own file, so no lock is taken; 0 when it stands as it should.
+  def mg-lease-return-at(dir, pid, bytes, now) = mg-lease-returned(dir, pid, bytes, mg-lease-read(dir, pid.str() ++ ".lease"));
+  def mg-lease-returned(dir, pid, bytes, r) = nothing?(r) ? -1
+   : ((r[4] - bytes) <= 0) && (r[3] == 0) ? host_path_remove(mg-lease-path(dir, pid))
+   : mg-lease-write(dir, pid, mg-lease-text-full(pid, r[1], r[2], r[3], mg-max(0, r[4] - bytes), r[5], mg-max(0, mg-lease-extra(r) - bytes), mg-lease-extra-at(r)));
+  def mg-lease-return(bytes) = mg-lease-return-at(mg-lease-dir(), host_pid(), bytes, now_unix_ms());
+  // the verdict the door prints: the same policy over the live leases as they stand, taking none (read-only)
+  def mg-lease-ask-read-at(dir, need, vm, now) {
+   let d = mg-lease-decide(mg-lease-view(dir), 0, "", 0, need, vm, now);
+   [d[0][0], d[0][1], d[0][2], d[0][3], d[0][4], d[2], d[3]];
+  }
+  def mg-lease-ask-read(dir, need) = mg-lease-ask-read-at(dir, need, mg-sense(), now_unix_ms());
+  def mg-lease-wait-read(dir, who, need, until) = mg-wait-ask(who, need, until, () => mg-lease-ask-read(dir, need), ms => mg-rest(ms), () => mg-now(), mg-nap-first());
+  def mg-lease-note(v) = (len(v) > 6) && (v[6] > 0) ? "; the other leases still count " ++ mg-gib-text(v[6]) ++ " as pending" : "";
   // the leases a reader sees, one line each (the read-only door; nothing is removed)
   def mg-lease-age-s(r, now) = (now - r[5]) / 1000;
   def mg-lease-state(r, now) = (now - r[5]) < mg-lease-pending-ms() ? "pending" : "settled";

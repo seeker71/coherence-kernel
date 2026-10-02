@@ -22,8 +22,14 @@
 //                                     the documents; bd: the band's text and the gap's full) that tried an approach,
 //                                     did not go green, and were not interrupted. A row the walk stopped (the lane at
 //                                     the deadline, a lane that never launched, the native rung at the window's end,
-//                                     a band stopped, a publish refused, a tree that moved under a repair) judged
-//                                     nothing: it is no history, and the approach stays open.
+//                                     a band stopped, a publish refused, a tree that moved under a repair, a lane
+//                                     that gave its memory back (host-memory-low) or was refused it
+//                                     (host-memory-held:*)) judged nothing: it is no history, and the approach stays
+//                                     open. A memory ending that saved a checkpoint, when it is the contract's latest
+//                                     row, ends the history with a pending row (rung "memory", no digest, no
+//                                     finding) that carries the checkpoint: the resume way takes it as its target and
+//                                     hears no failure text (ntl-feedback-text), and the first way waits for it
+//                                     (ntl-admit: memory-pending).
 //   ntl-admit(a, hist, avail)         the clinamen gate: [admit, clinamen, reason]. An approach whose digest already
 //                                     stands in this gap's history is refused with no options; a resume is admitted
 //                                     again only while the outcomes are moving (the last two differ) and fewer than
@@ -50,6 +56,7 @@ import form-stdlib/bml/form-bml-boolean-repair.bml;
 import form-stdlib/bml/form-bml-value-search.bml;
 import form-stdlib/bml/form-cli-code-turn-guard.bml;
 import form-stdlib/meaning-codes.bml;
+import form-stdlib/bml/memory-governor.bml;
 import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
 section [form.bml] {
@@ -110,11 +117,26 @@ section [form.bml] {
   // this gap's rows under this contract (cd: its checks and the texts of its documents; bd: its band and its full)
   // that tried an approach, did not go green and were not interrupted; dry rows tried nothing, and a row the walk
   // stopped (the lane at the deadline, a lane that never launched, the native rung at the window's end) judged nothing
-  def ntl-interrupted?(r) = fcgp-member?(ntl-interrupt-reasons(), fcgp-str(r, "lane_reason")) || fcgp-member?(ntl-interrupt-lanes(), fcgp-str(r, "lane"));
-  def ntl-hist-of(rows, id, cd, bd) = filter(r => ((String) fcgp-str(r, "gap") == id) && ((Comparable) (fcgp-num(r, "dry") ?? 0) == 0) && ((String) fcgp-str(r, "checks_digest") == cd) && ((String) fcgp-str(r, "band_digest") == bd) && ((Comparable) len(fcgp-str(r, "approach_digest")) > 0) && (!fcgp-green?(r)) && (!ntl-interrupted?(r)), rows);
+  def ntl-interrupted?(r) = fcgp-member?(ntl-interrupt-reasons(), fcgp-str(r, "lane_reason")) || fcgp-member?(ntl-interrupt-lanes(), fcgp-str(r, "lane")) || mg-memory-ending?(fcgp-str(r, "lane_reason"));
+  // this gap's rows under this contract that tried an approach (dry rows tried nothing)
+  def ntl-contract-rows(rows, id, cd, bd) = filter(r => ((String) fcgp-str(r, "gap") == id) && ((Comparable) (fcgp-num(r, "dry") ?? 0) == 0) && ((String) fcgp-str(r, "checks_digest") == cd) && ((String) fcgp-str(r, "band_digest") == bd) && ((Comparable) len(fcgp-str(r, "approach_digest")) > 0), rows);
+  def ntl-judged-of(rows, id, cd, bd) = filter(r => (!fcgp-green?(r)) && (!ntl-interrupted?(r)), ntl-contract-rows(rows, id, cd, bd));
+  // a memory ending that saved a checkpoint and is the contract's latest row: one pending row, the row with its approach
+  // and checkpoint kept and its rung, digests and finding blanked, so it is no tried approach and no failure to hear
+  def ntl-pending-key?(k) = (String) k == "approach_digest" || (String) k == "outcome_digest" || (String) k == "finding";
+  def ntl-pending-pair(p) = ntl-pending-key?(json-pair-key(p)) ? fhn-s(json-pair-key(p), "") : (String) json-pair-key(p) == "rung" ? fhn-s("rung", "memory") : p;
+  def ntl-pending-made(r) = json-node-object(map(p => ntl-pending-pair(p), json-object-pairs(r)));
+  def ntl-pending-row(contract) = nil?(contract) ? [] : ((String) fcgp-str(contract[-1], "lane_reason") == mg-low-reason()) && ((Comparable) len(fcgp-str(contract[-1], "checkpoint_id")) > 0) ? [ntl-pending-made(contract[-1])] : [];
+  def ntl-hist-of(rows, id, cd, bd) = append(ntl-judged-of(rows, id, cd, bd), ntl-pending-row(ntl-contract-rows(rows, id, cd, bd)));
+  def ntl-memory-pending?(hist) = (!nil?(hist)) && ((String) fcgp-str(hist[-1], "rung") == "memory");
+  // what a resume hears beside the checkpoint: the finding and what to do with it, or, after a memory ending (nothing
+  // failed: the machine ran short), only that the lane resumes
+  def ntl-resume-text() = "\nKeep the original goal, candidate and checks. Diagnose this observation; choose a different repair if the same failure remains. Use focused reads for missing evidence and native repair/lift tools where applicable. Complete the pending task and review after verification.";
+  def ntl-continue-text() = "The host ran short of memory and ended the lane after its checkpoint; nothing failed. Keep the original goal, candidate and checks, and continue from the checkpoint.";
+  def ntl-feedback-text(finding) = (String) finding == "" ? ntl-continue-text() : finding + ntl-resume-text();
   // the rows of a model's approach: the native rung and a contract row tried no model, so they are no nearest approach
   // and no word for a model to hear
-  def ntl-model-row?(r) = ((String) fcgp-str(r, "rung") != "native") && ((String) fcgp-str(r, "rung") != "contract");
+  def ntl-model-row?(r) = ((String) fcgp-str(r, "rung") != "native") && ((String) fcgp-str(r, "rung") != "contract") && ((String) fcgp-str(r, "rung") != "memory");
   def ntl-model-rows(hist) = filter(r => ntl-model-row?(r), hist);
   def ntl-outs(hist) = filter(o => (Comparable) len(o) > 0, map(r => fcgp-str(r, "outcome_digest"), hist));
   def ntl-repeating?(hist) {
@@ -135,6 +157,7 @@ section [form.bml] {
    let blocked = ntl-unavailable(a, avail);
    let resume = ((Comparable) (fcgp-num(a, "resume") ?? 0) == 1);
    if ((Comparable) len(blocked) > 0) then [0, [], blocked]
+   else if ((String) ntl-rung(a) == "first") && ntl-memory-pending?(hist) then [0, [], "memory-pending: the checkpoint a memory ending saved is resumed first"]
    else if resume then (ntl-repeating?(hist) ? [0, [], "resume-outcome-repeats: the last two outcomes read the same"] : ((Comparable) len(stands) >= ntl-resume-max()) ? [0, [], "resume-cap: the same checkpoint heard its finding often enough"] : [1, ntl-clinamen(a, hist), ""])
    else if nil?(stands) then [1, ntl-clinamen(a, hist), ""]
    else [0, [], mc-cat(["approach-stands: ", d, " already read ", fcgp-str(stands[-1], "outcome_digest")])];

@@ -1,6 +1,6 @@
 ; memory-governor-band.bml — the body asks the whole machine before it takes memory, and backs off when it is short.
 ;
-; Verdict 1048575 when every claim lands:
+; Verdict 67108863 when every claim lands:
 ;   1     a roomy 128 GiB machine (60 GiB available, 20 GiB wired, compressor small) grants a 40 GiB open
 ;   2     the wired cap holds: 70 GiB already wired and 20 GiB asked is held, reason wired-cap, though 50 GiB is available
 ;   4     the reserve holds: 30 GiB available and 20 GiB asked leaves 10 GiB under the 12.8 GiB reserve, held, reason reserve
@@ -34,11 +34,28 @@
 ;   32768 release removes this pid's lease and no other's, answers -1 when it held none, and the key it held is charged
 ;         again afterwards
 ;   65536 a stop inside the locked section (the reading stops) releases the lock and writes no lease; the next ask runs
-;   131072 the lock: one taker holds it (an overlong live holder is taken over only after the patience), a dead holder
-;         is taken over at once, only the pid the lock names releases it, and a directory that cannot be made is a 0
+;   131072 the lock: one taker holds it, a live holder is waited for (the taker gives up at its patience and the holder
+;         keeps the lock), a dead holder is taken over at once, only the pid the lock names releases it, and a directory
+;         that cannot be made is a 0
 ;   262144 the door prints the live leases of a directory beside the machine's reading, and removes nothing
 ;   524288 the doors are wired: the Qwen open, the renewal and the planner ask through leases, the session close
 ;         releases, and the walk's own pre-check stays a bare wait (its child lane takes the lease)
+; The review's repairs:
+;   1048576 a lease directory that cannot be made (/private/var/empty/nope/leases) answers the bare reading's verdict
+;         named lease-dir-unavailable (granted with room, held with the policy's reason after the name, an unreadable
+;         machine held), in milliseconds; a lock held by a live process stays the closed answer lease-lock-busy
+;   2097152 a holder that is only slow is not taken from: a lock stolen after the reading (the owner names another pid
+;         just before the write) answers lease-lock-busy and writes no lease; a live holder is taken over only once its
+;         own stamp is a minute old (61 s old: taken at once)
+;   4194304 a lease row outside 0 to 2^50 bytes (a 26-digit private, a negative one, 2^50 + 1) reads as no lease and is
+;         removed with the torn ones; 2^50 itself reads
+;   8388608 a renewal adds its second KV state as extra, stamped on its own (the weights keep their stamp: another
+;         ask is charged the 8 GiB, not the 37 GiB again) and mg-lease-return gives it back (the lease falls to the
+;         weights' own private bytes; a lease with nothing left is removed; one that held none answers -1)
+;   16777216 the door's verdict counts the leases it lists (a pending lease of 2^49 bytes holds a 1 GiB ask; the same ask over
+;         an empty directory is granted), read-only
+;   33554432 a stale <pid>.lease.part is swept (a fresh one is kept), and a take whose owner did not read back never removes a
+;         lock another pid owns (an ownerless one is removed)
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- host_vm_stat, host_alive, host_spawn_at and host-exec are fkwu doors; the reference kernels do not answer them.
 ; The band writes only under temp_dir and removes what it made; the child it spawns is
@@ -120,7 +137,7 @@ section [form.bml] {
    let junk = write_file_text(dir ++ "/999999.lease", "this is not a lease\n");
    let view = mg-lease-view(dir);
    let line = len(view) == 1 ? mg-lease-line(view[0], now) : "";
-   mgb-bit((!nothing?(gone)) && (len(view) == 1) && ((Value) view[0] == [1, "band-holder", "/m/k.gguf", mgb-gib(6), mgb-gib(4), now - 10000]) && mgb-has?(line, "pid 1 band-holder key /m/k.gguf shared 6.0 GiB private 4.0 GiB age 10 s pending") && mgb-there?(mg-lease-path(dir, 1)) && mgb-there?(mg-lease-path(dir, gone)) && mgb-there?(dir ++ "/999999.lease") && (len(mg-lease-lines([], now)) == 0), 1024);
+   mgb-bit((!nothing?(gone)) && (len(view) == 1) && ((Value) view[0] == [1, "band-holder", "/m/k.gguf", mgb-gib(6), mgb-gib(4), now - 10000, 0, 0]) && mgb-has?(line, "pid 1 band-holder key /m/k.gguf shared 6.0 GiB private 4.0 GiB age 10 s pending") && mgb-there?(mg-lease-path(dir, 1)) && mgb-there?(mg-lease-path(dir, gone)) && mgb-there?(dir ++ "/999999.lease") && (len(mg-lease-lines([], now)) == 0), 1024);
   }
   // 2048: one key, counted once
   def mgb-c-once(root) {
@@ -246,9 +263,108 @@ section [form.bml] {
    let began3 = host_monotonic_ms();
    let t3 = dl-take(live, 300);
    let waited = host_monotonic_ms() - began3;
-   let stole = (Comparable) dl-field(dl-owner(live), "pid=") == mgb-self();
+   let stole = (Comparable) dl-field(dl-owner(live), "pid=") == 1;
    let t4 = dl-take(dir ++ "/no/such/parent/lock", 300);
-   mgb-bit((!nothing?(ended)) && ((Comparable) t1 == 1) && ((Comparable) dl-field(owner, "pid=") == mgb-self()) && ((Comparable) other == -1) && stood && ((Comparable) mine == 0) && gone && ((Comparable) t2 == 1) && (quick < 1500) && took && ((Comparable) t3 == 1) && (waited >= 300) && (waited < 3000) && stole && ((Comparable) t4 == 0), 131072);
+   mgb-bit((!nothing?(ended)) && ((Comparable) t1 == 1) && ((Comparable) dl-field(owner, "pid=") == mgb-self()) && ((Comparable) other == -1) && stood && ((Comparable) mine == 0) && gone && ((Comparable) t2 == 1) && (quick < 1500) && took && ((Comparable) t3 == 0) && (waited >= 300) && (waited < 3000) && stole && ((Comparable) t4 == 0), 131072);
+  }
+  // 1048576: a lease directory that cannot be made leaves the machine guarded by one reading, not by nothing and not
+  // by a lock that can never be taken; lock contention stays the closed answer
+  def mgb-c-nodir(root) {
+   let bad = "/private/var/empty/nope/leases";
+   let now = now_unix_ms();
+   let began = host_monotonic_ms();
+   let roomy = mg-lease-at(bad, mgb-self(), "band", "/m/k.gguf", mgb-gib(6), mgb-gib(4), () => mgb-roomy(), () => now);
+   let big = mg-lease-at(bad, mgb-self(), "band", "", 0, mgb-gib(200), () => mgb-roomy(), () => now);
+   let blind = mg-lease-at(bad, mgb-self(), "band", "", 0, mgb-gib(1), () => nothing(), () => now);
+   let spent = host_monotonic_ms() - began;
+   let dir = mgb-sub(root, "nodir-busy");
+   let lock = mgb-sub(dir, "lock");
+   let named = write_file_text(dl-owner-path(lock), dl-text(1, now_unix_ms()));
+   let busy = mg-lease-at-wait(300, dir, mgb-self(), "band", "", 0, mgb-gib(1), () => mgb-roomy(), () => now);
+   mgb-bit(mg-granted?(roomy) && ((String) roomy[1] == "lease-dir-unavailable") && (roomy[5] == mgb-gib(10)) && (!mg-granted?(big)) && ((String) big[1] == "lease-dir-unavailable:wired-cap") && (!mg-granted?(blind)) && ((String) blind[1] == "lease-dir-unavailable:memory-unreadable") && (spent < 3000) && (!mg-granted?(busy)) && ((String) busy[1] == "lease-lock-busy") && (!mgb-there?(mg-lease-path(dir, mgb-self()))), 1048576);
+  }
+  // 2097152: a holder that is only slow is not taken from: the lock is read once more before the write (a lock taken
+  // meanwhile answers held, writes nothing), a live holder is waited for until its own stamp is a minute old, and a
+  // holder a minute old is taken at once
+  def mgb-steal-vm(dir) {
+   let stolen = write_file_text(dl-owner-path(mg-lease-lock(dir)), dl-text(1, now_unix_ms()));
+   mgb-roomy();
+  }
+  def mgb-c-slow(root) {
+   let now = now_unix_ms();
+   let dir = mgb-sub(root, "slow");
+   let v = mg-lease-at(dir, mgb-self(), "band", "", 0, mgb-gib(1), () => mgb-steal-vm(dir), () => now);
+   let left = mgb-there?(mg-lease-lock(dir));
+   let swept = host_dir_rmdir(mg-lease-lock(dir));
+   let old = mgb-sub(root, "slow-old");
+   let lock = old ++ "/lock";
+   let made = host_dir_mkdir(lock);
+   let named = write_file_text(dl-owner-path(lock), dl-text(1, now_unix_ms() - 61000));
+   let began = host_monotonic_ms();
+   let taken = dl-take(lock, 300);
+   let quick = host_monotonic_ms() - began;
+   mgb-bit((!mg-granted?(v)) && ((String) v[1] == "lease-lock-busy") && (!mgb-there?(mg-lease-path(dir, mgb-self()))) && left && ((Comparable) taken == 1) && (quick < 250) && ((Comparable) dl-field(dl-owner(lock), "pid=") == mgb-self()), 2097152);
+  }
+  // 4194304: a lease row outside 0 to 2^50 bytes reads as no lease and is removed like a torn one
+  def mgb-raw(pid, priv, shared) = "{\"pid\":" ++ pid.str() ++ ",\"who\":\"raw\",\"key\":\"\",\"shared\":" ++ shared ++ ",\"private\":" ++ priv ++ ",\"granted_unix_ms\":" ++ (now_unix_ms() - 200000).str() ++ "}\n";
+  def mgb-c-range(root) {
+   let dir = mgb-sub(root, "range");
+   let ok = write_file_text(dir ++ "/ok.lease", mgb-raw(1, "1073741824", "0"));
+   let huge = write_file_text(dir ++ "/huge.lease", mgb-raw(1, "99999999999999999999999999", "0"));
+   let neg = write_file_text(dir ++ "/neg.lease", mgb-raw(1, "-1000000000000", "0"));
+   let over = write_file_text(dir ++ "/over.lease", mgb-raw(1, "0", "1125899906842625"));
+   let top = write_file_text(dir ++ "/top.lease", mgb-raw(1, "0", "1125899906842624"));
+   let view = mg-lease-view(dir);
+   let asked = mgb-ask(dir, "", 0, mgb-gib(1), mgb-roomy(), now_unix_ms());
+   mgb-bit((len(view) == 2) && mg-granted?(asked) && mgb-there?(dir ++ "/ok.lease") && mgb-there?(dir ++ "/top.lease") && (!mgb-there?(dir ++ "/huge.lease")) && (!mgb-there?(dir ++ "/neg.lease")) && (!mgb-there?(dir ++ "/over.lease")) && (asked[6] >= 0), 4194304);
+  }
+  // 8388608: a renewal's second KV state is stamped pending on its own (the weights keep their stamp), and is given
+  // back when the stream is retired
+  def mgb-c-renew(root) {
+   let now = now_unix_ms();
+   let dir = mgb-sub(root, "renew");
+   let vm = mgb-vm(128, 60, 0, 0, 0, 20, 4);
+   let first = mg-lease-at(dir, 1, "renewer", "/m/k.gguf", mgb-gib(29), mgb-gib(8), () => vm, () => now - 200000);
+   let more = mg-lease-at(dir, 1, "renewer", "", 0, mgb-gib(8), () => vm, () => now);
+   let row = mg-lease-read(dir, "1.lease");
+   let other = mgb-ask(dir, "", 0, mgb-gib(1), vm, now);
+   let back = mg-lease-return-at(dir, 1, mgb-gib(8), now);
+   let after = mg-lease-read(dir, "1.lease");
+   let cold = mgb-sub(root, "renew-c");
+   let lone = mg-lease-at(cold, 1, "renewer", "", 0, mgb-gib(8), () => vm, () => now);
+   let gone = mg-lease-return-at(cold, 1, mgb-gib(8), now);
+   let none = mg-lease-return-at(cold, 1, mgb-gib(8), now);
+   mgb-bit(mg-granted?(first) && mg-granted?(more) && (more[5] == mgb-gib(8)) && (!nothing?(row)) && (row[4] == mgb-gib(16)) && (row[5] == now - 200000) && (row[6] == mgb-gib(8)) && (row[7] == now) && mg-granted?(other) && (other[6] == mgb-gib(8)) && (other[5] == mgb-gib(9)) && ((Comparable) back == 0) && (!nothing?(after)) && (after[4] == mgb-gib(8)) && (after[6] == 0) && mg-granted?(lone) && ((Comparable) gone == 0) && (!mgb-there?(mg-lease-path(cold, 1))) && ((Comparable) none == -1) && (mg-lease-pending(after, [], now) == 0), 8388608);
+  }
+  // 16777216: the door's verdict counts the leases it lists (read-only), as a lease would
+  def mgb-c-doorv(root) {
+   let now = now_unix_ms();
+   let dir = mgb-sub(root, "doorv");
+   let empty = mgb-sub(root, "doorv-empty");
+   let held = mgb-place(dir, 1, "door-holder", "", 0, 562949953421312, now - 10000);
+   let pure = mg-lease-ask-read-at(dir, mgb-gib(1), mgb-roomy(), now);
+   let clear = mg-lease-ask-read-at(empty, mgb-gib(1), mgb-roomy(), now);
+   let text = host-exec("echo '{\"lease_dir\":\"" ++ dir ++ "\",\"need_gib\":1,\"who\":\"band\"}' | ./fkwu observe/memory-governor-run.bml 2>&1", "") ?? "";
+   mgb-bit((!mg-granted?(pure)) && (pure[6] == 562949953421312) && mg-granted?(clear) && (clear[6] == 0) && mgb-has?(text, "[memory] held band needs 1.0 GiB") && mgb-has?(text, "still count") && (!mgb-has?(text, "[memory] granted band")) && mgb-there?(mg-lease-path(dir, 1)), 16777216);
+  }
+  // 33554432: a stale part file a killed writer left is swept, and a take whose owner did not read back never removes a
+  // lock another pid owns
+  def mgb-c-notes(root) {
+   let dir = mgb-sub(root, "notes");
+   let part = write_file_text(dir ++ "/9.lease.part", "torn");
+   let kept = mg-lease-sweep-parts(dir, 60000);
+   let stood = mgb-there?(dir ++ "/9.lease.part");
+   let swept = mg-lease-sweep-parts(dir, 0);
+   let gone = !mgb-there?(dir ++ "/9.lease.part");
+   let theirs = mgb-sub(dir, "theirs");
+   let named = write_file_text(dl-owner-path(theirs), dl-text(1, now_unix_ms()));
+   let left = dl-unmade(theirs);
+   let mine = mgb-sub(dir, "mine");
+   let own = write_file_text(dl-owner-path(mine), dl-text(mgb-self(), now_unix_ms()));
+   let removed = dl-unmade(mine);
+   let blank = mgb-sub(dir, "blank");
+   let cleared = dl-unmade(blank);
+   mgb-bit(((Comparable) kept == 0) && stood && ((Comparable) swept == 1) && gone && mgb-there?(theirs) && (!mgb-there?(mine)) && (!mgb-there?(blank)), 33554432);
   }
   // 524288: the doors are wired (read from their sources)
   def mgb-src(path) = read_file(path) ?? "";
@@ -301,7 +417,13 @@ section [form.bml] {
  let c131072 = mgb-c-lock(root);
  let c262144 = mgb-c-door(root);
  let c524288 = mgb-c-wired();
+ let c1048576 = mgb-c-nodir(root);
+ let c2097152 = mgb-c-slow(root);
+ let c4194304 = mgb-c-range(root);
+ let c8388608 = mgb-c-renew(root);
+ let c16777216 = mgb-c-doorv(root);
+ let c33554432 = mgb-c-notes(root);
  let swept = host_dir_rmdir(root);
- print_str("memory-governor-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " leases " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str() ++ " " ++ c16384.str() ++ " " ++ c32768.str() ++ " " ++ c65536.str() ++ " " ++ c131072.str() ++ " " ++ c262144.str() ++ " " ++ c524288.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096 + c8192 + c16384 + c32768 + c65536 + c131072 + c262144 + c524288;
+ print_str("memory-governor-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " leases " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str() ++ " " ++ c16384.str() ++ " " ++ c32768.str() ++ " " ++ c65536.str() ++ " " ++ c131072.str() ++ " " ++ c262144.str() ++ " " ++ c524288.str() ++ " review " ++ c1048576.str() ++ " " ++ c2097152.str() ++ " " ++ c4194304.str() ++ " " ++ c8388608.str() ++ " " ++ c16777216.str() ++ " " ++ c33554432.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096 + c8192 + c16384 + c32768 + c65536 + c131072 + c262144 + c524288 + c1048576 + c2097152 + c4194304 + c8388608 + c16777216 + c33554432;
 }
