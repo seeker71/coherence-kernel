@@ -1,0 +1,94 @@
+//////////////////////////////////////////////////////////////////////
+// voice-g2p.bml — letters to phonemes, at home.
+//
+// The mouth (voice-say.bml) was native from phoneme ids to samples, and the one step before it —
+// letters to phonemes — left through a Python process running espeak-ng. This cell is the body's
+// own reading of that step, with no process and no foreign library in the path.
+//
+// What the body holds is two tables per tongue under form/form-stdlib/data, one row to a line,
+// the key and the phonemes divided by a tab, the phonemes divided by byte 31:
+//
+//   g2p-<tongue>-line.tsv   a whole line of text -> the phonemes its pronunciation was taught as.
+//                           Exact, and sentence-level: stress, liaison and the rise at a comma are
+//                           already in it, because the teacher heard the whole line.
+//   g2p-<tongue>-word.tsv   one word -> its phonemes. The walk for a line the body has not been
+//                           taught: each word is looked up, the punctuation the voice's table holds
+//                           (, . ? ! : ; - ' ( )) is kept as a phoneme, a space stands between words.
+//
+// A line with neither a taught row nor every word known answers NOTHING — never a guess and never a
+// crossing. "No walk to sounds here yet" is a true answer, and the teaching door
+// (observe/voice-g2p-teach-run.fk) is how a tongue grows one: the oracle (espeak, named as such in
+// voice-say.bml) is asked ONCE per line and word, its answers are written into these tables, and
+// from then on the body does not ask again. The oracle is a teacher, as the oracle catalog says of
+// every teacher; the rows it leaves are the body's.
+//
+// What is still open, honestly: a word the tables do not hold. The open grapheme-to-phoneme model
+// that would cover it is a download Urs has agreed to in principle and not yet fetched.
+//////////////////////////////////////////////////////////////////////
+import form/form-stdlib/line-grammar.fk;
+section [form.bml] {
+    class FormVoiceG2P {
+        field VGRoot = "form/form-stdlib/data";
+        def vg-cat(xs) = if ((Comparable) len(xs) == 0) then "" else ((String) xs[0] + vg-cat(xs[1:]));
+        def vg-tab() = byte_to_str(9);
+        def vg-nl() = byte_to_str(10);
+        def vg-sep() = byte_to_str(31);
+        def vg-path(code, kind) = vg-cat([VGRoot(), "/g2p-", code, "-", kind, ".tsv"]);
+        // ---- a table, read once into the body's own string-keyed map ----
+        def vg-row-add(tab, row) {
+            let at = str_find(row, vg-tab(), 0);
+            if (at < 1) then tab else record_set(tab, substring(row, 0, at), substring(row, (at + 1), len(row)));
+        }
+        def vg-rows-add(tab, rows) = if ((Comparable) len(rows) == 0) then tab else vg-rows-add(vg-row-add(tab, rows[0]), rows[1:]);
+        def vg-load(code, kind) {
+            let p = vg-path(code, kind);
+            let text = if (file_size(p) > 0) then read_file(p) else "";
+            vg-rows-add(record_new(0), split-on(text, vg-nl()));
+        }
+        // a taught answer is the phoneme string; nothing taught reads 0 from the map
+        def vg-taught(tab, key) = record_get(tab, key);
+        def vg-phs-of(s) = if ((Comparable) len(s) == 0) then [] else split-on(s, vg-sep());
+        def vg-has?(v) = if (value_kind(v) == "string") then 1 else 0;
+        // ---- words and the punctuation the voice's table holds ----
+        def vg-punct() = [",", ".", "?", "!", ":", ";", "-", "(", ")", "،", "؟", "؛"];
+        // strings are bytes, and the Persian marks are two of them: a mark is matched whole, by its own length
+        def vg-mark-at(ps, s, i) = if ((Comparable) len(ps) == 0) then 0 else if (((i + len(ps[0])) <= len(s)) && ((String) substring(s, i, (i + len(ps[0]))) == ps[0])) then len(ps[0]) else vg-mark-at(ps[1:], s, i);
+        def vg-mark-before(ps, s, i) = if ((Comparable) len(ps) == 0) then 0 else if (((i - len(ps[0])) >= 0) && ((String) substring(s, (i - len(ps[0])), i) == ps[0])) then len(ps[0]) else vg-mark-before(ps[1:], s, i);
+        // the phoneme a punctuation mark stands for: the Persian marks speak as their Latin twins
+        def vg-punct-phoneme(c) = if ((String) c == "،") then "," else if ((String) c == "؟") then "?" else if ((String) c == "؛") then ";" else c;
+        // a token splits into the punctuation before it, its word, and the punctuation after it
+        def vg-lead-n(tok, i) = if (i >= len(tok)) then i else if ((Comparable) vg-mark-at(vg-punct(), tok, i) == 0) then i else vg-lead-n(tok, (i + vg-mark-at(vg-punct(), tok, i)));
+        def vg-trail-n(tok, i, lo) = if (i <= lo) then lo else if ((Comparable) vg-mark-before(vg-punct(), tok, i) == 0) then i else vg-trail-n(tok, (i - vg-mark-before(vg-punct(), tok, i)), lo);
+        def vg-marks(s, i) = if (i >= len(s)) then [] else if ((Comparable) vg-mark-at(vg-punct(), s, i) == 0) then vg-marks(s, (i + 1)) else cons(vg-punct-phoneme(substring(s, i, (i + vg-mark-at(vg-punct(), s, i)))), vg-marks(s, (i + vg-mark-at(vg-punct(), s, i))));
+        // a token's phonemes from the word table; nothing when its word is not taught
+        def vg-token(wtab, tok) {
+            let a = vg-lead-n(tok, 0);
+            let b = vg-trail-n(tok, len(tok), a);
+            let core = substring(tok, a, b);
+            let got = if ((Comparable) len(core) == 0) then "" else vg-taught(wtab, core);
+            if ((Comparable) len(core) == 0) then append(vg-marks(substring(tok, 0, a), 0), vg-marks(substring(tok, b, len(tok)), 0))
+                else if ((Comparable) vg-has?(got) == 0) then nothing()
+                else append(vg-marks(substring(tok, 0, a), 0), append(vg-phs-of(got), vg-marks(substring(tok, b, len(tok)), 0)));
+        }
+        // the whole line from the word table: tokens joined by the space phoneme, nothing if any word is unknown
+        def vg-words-go(wtab, toks, acc, first) {
+            if ((Comparable) len(toks) == 0) then acc
+                else vg-words-step(wtab, toks, acc, first, vg-token(wtab, toks[0]));
+        }
+        def vg-words-step(wtab, toks, acc, first, ph) {
+            if (nothing?(ph)) then nothing()
+                else vg-words-go(wtab, toks[1:], append(acc, if ((Comparable) first == 1) then ph else cons(" ", ph)), 0);
+        }
+        def vg-from-words(wtab, text) = vg-words-go(wtab, vg-drop-empty(split-on(text, " ")), [], 1);
+        def vg-drop-empty(xs) = if ((Comparable) len(xs) == 0) then [] else if ((Comparable) len(xs[0]) == 0) then vg-drop-empty(xs[1:]) else cons(xs[0], vg-drop-empty(xs[1:]));
+        // ---- the door: a taught line first, then the walk through taught words, else nothing ----
+        // (ltab, wtab) are the two loaded tables; load them once per tongue, never per line
+        def vg-phonemes(ltab, wtab, text) {
+            let line = vg-taught(ltab, text);
+            if ((Comparable) vg-has?(line) == 1) then vg-phs-of(line) else vg-from-words(wtab, text);
+        }
+        // how much of a tongue the body holds, as numbers a band can pin
+        def vg-count(tab) = len(record_keys(tab));
+    }
+    0;
+}

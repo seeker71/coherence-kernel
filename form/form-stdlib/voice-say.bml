@@ -47,6 +47,7 @@ import form/form-stdlib/form-fs.fk;
 import form/form-stdlib/line-grammar.fk;
 import form/form-stdlib/spool-bell-transport.fk;
 import form/form-stdlib/voice-pass.bml;
+import form/form-stdlib/voice-g2p.bml;
 //////////////////////////////////////////////////////////////////////
 section [form.bml] {
     class FormVoiceSay {
@@ -79,7 +80,14 @@ section [form.bml] {
         // piper runs with the voice store as its working directory, because the Chinese
         // pinyin lane looks for its lookup tables in ./g2pW and they live beside the voices;
         // the wav still lands in the body's own .hearth, named absolutely before the cd.
-        def vs-command(code, text) = vs-cat(["mkdir -p \"$PWD/.hearth\" && W=\"$PWD/", vs-wav(code), "\" && cd ", VSRoot(), " && printf '%s' \"", text, "\" | ", VSPiper(), " -m ", vs-model(code), " -f \"$W\" >/dev/null 2>&1 && echo rendered"]);
+        // A line travels to the shell as ONE single-quoted word. It used to ride inside double quotes, and a
+        // line that carried a quote ("Hey, I have just had this encounter...") ended the word where the quote
+        // stood: the phonemizer heard half a sentence and the mouth said half a sentence (found 2026-10-02 on
+        // the sleep track: two lines of forty words came back as seven). Inside single quotes only the single
+        // quote itself is special, and it is closed, escaped and reopened.
+        def vs-join(xs, sep) = if ((Comparable) len(xs) == 0) then "" else if ((Comparable) len(xs) == 1) then xs[0] else vs-cat([xs[0], sep, vs-join(xs[1:], sep)]);
+        def vs-shq(s) = vs-cat(["'", vs-join(split-on(s, "'"), "'\\''"), "'"]);
+        def vs-command(code, text) = vs-cat(["mkdir -p \"$PWD/.hearth\" && W=\"$PWD/", vs-wav(code), "\" && cd ", VSRoot(), " && printf '%s' ", vs-shq(text), " | ", VSPiper(), " -m ", vs-model(code), " -f \"$W\" >/dev/null 2>&1 && echo rendered"]);
         // ── the wav, read by the body and sounded by the body ────────────────────────────
         // The rate is READ, never assumed. These voices render at 22050 Hz, not at the
         // ear's 16 kHz, and a 22050 Hz voice through a 16 kHz queue comes back a fourth
@@ -131,15 +139,36 @@ section [form.bml] {
         field VSPy = "/Users/ursmuff/.mlx-venv/bin/python";
         def vs-espeak-code(code) = vp-espeak-voice(vp-cfg(vs-voice(code)));
         def vs-native?(code) = if ((Comparable) vs-has-voice?(code) == 0) then 0 else if ((String) vp-phoneme-type(vp-cfg(vs-voice(code))) == "espeak") then 1 else 0;
-        def vs-phon-command(code, text) = vs-cat([VSPy(), " -c \"from piper.phonemize_espeak import EspeakPhonemizer;import sys;[print(ph) for s in EspeakPhonemizer().phonemize(sys.argv[1],sys.argv[2]) for ph in s]\" \"", vs-espeak-code(code), "\" \"", text, "\""]);
-        def vs-phonemes(code, text) {
+        def vs-phon-command(code, text) = vs-cat([VSPy(), " -c \"from piper.phonemize_espeak import EspeakPhonemizer;import sys;[print(ph) for s in EspeakPhonemizer().phonemize(sys.argv[1],sys.argv[2]) for ph in s]\" \"", vs-espeak-code(code), "\" ", vs-shq(text)]);
+        // THE ORACLE — espeak-ng through a Python process, the one crossing this cell still names. It is the
+        // body's TEACHER for letters->phonemes (observe/voice-g2p-teach-run.fk asks it once per line and word and
+        // writes the answers into the body's own tables); a speaking path never reaches it unless VSOracle is 1.
+        field VSOracle = 0;
+        def vs-phonemes-oracle(code, text) {
             let out = host-exec(vs-phon-command(code, text), "");
             if nothing?(out) then [] else vp-lines-of(out);
+        }
+        // many lines, one process: each line's phonemes end at a line holding byte 31
+        def vs-shq-all(xs) = if ((Comparable) len(xs) == 0) then "" else vs-cat([" ", vs-shq(xs[0]), vs-shq-all(xs[1:])]);
+        def vs-phon-batch-command(code, texts) = vs-cat([VSPy(), " -c \"from piper.phonemize_espeak import EspeakPhonemizer;import sys;P=EspeakPhonemizer();[([print(ph) for s in P.phonemize(sys.argv[1],t) for ph in s],print(chr(31))) for t in sys.argv[2:]]\" \"", vs-espeak-code(code), "\"", vs-shq-all(texts)]);
+        def vs-group-go(lines, cur, acc) = if ((Comparable) len(lines) == 0) then reverse(acc) else if ((String) lines[0] == byte_to_str(31)) then vs-group-go(lines[1:], [], cons(reverse(cur), acc)) else vs-group-go(lines[1:], cons(lines[0], cur), acc);
+        def vs-phonemes-oracle-batch(code, texts) {
+            let out = host-exec(vs-phon-batch-command(code, texts), "");
+            if nothing?(out) then [] else vs-group-go(split-on(out, byte_to_str(10)), [], []);
+        }
+        // AT HOME: the body's own tables first (voice-g2p.bml); with two tables loaded once per tongue
+        def vs-phonemes-with(ltab, wtab, text) = vg-phonemes(ltab, wtab, text);
+        def vs-phonemes-home(code, text) = vg-phonemes(vg-load(code, "line"), vg-load(code, "word"), text);
+        // what the speaking path calls: home first; nothing() is an honest answer when the body has not been taught
+        def vs-phonemes(code, text) {
+            let home = vs-phonemes-home(code, text);
+            if (!nothing?(home)) then home else if ((Comparable) VSOracle() == 1) then vs-phonemes-oracle(code, text) else nothing();
         }
         // the whole line, rendered and sounded by the body — (played, samples)
         def vs-native-speak(code, text) {
             let cfg = vp-cfg(vs-voice(code));
-            let phs = vs-phonemes(code, text);
+            let heard = vs-phonemes(code, text);
+            let phs = if nothing?(heard) then [] else heard;
             let ids = if ((Comparable) len(phs) == 0) then [] else vp-ids(cfg, phs);
             let st = if ((Comparable) len(ids) == 0) then [] else vv-open(vp-model-path(vs-voice(code)));
             let ok = if ((Comparable) len(st) == 0) then 0 else vv-open-ok?(st);

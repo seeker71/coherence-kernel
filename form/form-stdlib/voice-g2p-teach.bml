@@ -1,0 +1,82 @@
+//////////////////////////////////////////////////////////////////////
+// voice-g2p-teach.bml — the teacher's one visit.
+//
+// The body reads letters to phonemes from its own tables (voice-g2p.bml). Those tables begin empty for a
+// tongue, and this is how one is filled: the oracle (espeak-ng, voice-say.bml's `vs-phonemes-oracle-batch`)
+// is asked for every line of a text and for every distinct word in it, once, and its answers are written
+// into form/form-stdlib/data/g2p-<tongue>-line.tsv and -word.tsv. A row already taught is not asked again,
+// so a run that the host cut short resumes where it stopped. After the visit the body speaks that text
+// with no process in the path at all.
+//
+// The answers are exact, not generalised: a line is taught as its whole pronunciation (so stress and the
+// rise at a comma are the teacher's own), a word as the teacher said it alone. Words said alone lose a
+// little of what a sentence gives them; `vgt-fidelity` measures how often the word walk reproduces the
+// taught line, so the number is a thing the body reads rather than a hope.
+//////////////////////////////////////////////////////////////////////
+import form/form-stdlib/voice-say.bml;
+section [form.bml] {
+    class FormVoiceG2PTeach {
+        field VGTBatch = 24;
+        def vgt-lines-of(path) = vg-drop-empty(split-on(read_file(path), vg-nl()));
+        // a halved join: a left fold of str_concat copies the whole prefix each time and is quadratic
+        def vgt-join(xs) = if ((Comparable) len(xs) == 0) then "" else if ((Comparable) len(xs) == 1) then xs[0] else vgt-join2(xs, (len(xs) / 2));
+        def vgt-join2(xs, h) = vg-cat([vgt-join(take(h, xs)), vgt-join(drop(h, xs))]);
+        def vgt-row(key, phs) = vg-cat([key, vg-tab(), vs-join(phs, vg-sep()), vg-nl()]);
+        // ---- the lines ----
+        def vgt-batch-rows(code, texts) {
+            let got = vs-phonemes-oracle-batch(code, texts);
+            if ((Comparable) len(got) != len(texts)) then [] else vgt-rows-zip(texts, got);
+        }
+        def vgt-rows-zip(texts, got) = if ((Comparable) len(texts) == 0) then [] else cons(vgt-row(texts[0], got[0]), vgt-rows-zip(texts[1:], got[1:]));
+        // lines not already in the table, in order, each once
+        def vgt-new-go(tab, xs, seen, acc) {
+            if ((Comparable) len(xs) == 0) then reverse(acc)
+                else if ((Comparable) vg-has?(vg-taught(tab, xs[0])) == 1) then vgt-new-go(tab, xs[1:], seen, acc)
+                else if ((Comparable) vg-has?(record_get(seen, xs[0])) == 1) then vgt-new-go(tab, xs[1:], seen, acc)
+                else vgt-new-go(tab, xs[1:], record_set(seen, xs[0], "1"), cons(xs[0], acc));
+        }
+        def vgt-teach-batches(code, xs, acc) {
+            if ((Comparable) len(xs) == 0) then acc
+                else vgt-teach-batches(code, drop(VGTBatch(), xs), append(acc, vgt-batch-rows(code, take(VGTBatch(), xs))));
+        }
+        // ---- the words: every distinct core a line's tokens hold ----
+        def vgt-core(tok) {
+            let a = vg-lead-n(tok, 0);
+            let b = vg-trail-n(tok, len(tok), a);
+            substring(tok, a, b);
+        }
+        def vgt-cores-go(toks, acc) = if ((Comparable) len(toks) == 0) then acc else vgt-cores-go(toks[1:], cons(vgt-core(toks[0]), acc));
+        def vgt-cores(text) = vg-drop-empty(vgt-cores-go(vg-drop-empty(split-on(text, " ")), []));
+        def vgt-words-go(lines, tab, seen, acc) {
+            if ((Comparable) len(lines) == 0) then reverse(acc)
+                else vgt-words-take(lines, tab, seen, acc, vgt-cores(lines[0]));
+        }
+        def vgt-words-take(lines, tab, seen, acc, cores) {
+            if ((Comparable) len(cores) == 0) then vgt-words-go(lines[1:], tab, seen, acc)
+                else if ((Comparable) vg-has?(vg-taught(tab, cores[0])) == 1) then vgt-words-take(lines, tab, seen, acc, cores[1:])
+                else if ((Comparable) vg-has?(record_get(seen, cores[0])) == 1) then vgt-words-take(lines, tab, seen, acc, cores[1:])
+                else vgt-words-take(lines, tab, record_set(seen, cores[0], "1"), cons(cores[0], acc), cores[1:]);
+        }
+        // ---- a tongue's visit: (new line rows, new word rows) ----
+        def vgt-teach(code, chunks-path) {
+            let lines = vgt-lines-of(chunks-path);
+            let ltab = vg-load(code, "line");
+            let wtab = vg-load(code, "word");
+            let newlines = vgt-new-go(ltab, lines, record_new(0), []);
+            let lrows = vgt-teach-batches(code, newlines, []);
+            let lw = write_file(vg-path(code, "line"), vg-cat([if (file_size(vg-path(code, "line")) > 0) then read_file(vg-path(code, "line")) else "", vgt-join(lrows)]));
+            let newwords = vgt-words-go(lines, wtab, record_new(0), []);
+            let wrows = vgt-teach-batches(code, newwords, []);
+            let ww = write_file(vg-path(code, "word"), vg-cat([if (file_size(vg-path(code, "word")) > 0) then read_file(vg-path(code, "word")) else "", vgt-join(wrows)]));
+            [len(lrows), len(wrows)];
+        }
+        // ---- fidelity: how often the word walk alone reproduces the taught line ----
+        def vgt-same?(a, b) = if (nothing?(a)) then 0 else if ((String) value_str(a) == value_str(b)) then 1 else 0;
+        def vgt-fid-go(ltab, wtab, lines, same, n) {
+            if ((Comparable) len(lines) == 0) then [same, n]
+                else vgt-fid-go(ltab, wtab, lines[1:], (same + vgt-same?(vg-from-words(wtab, lines[0]), vg-phs-of(vg-taught(ltab, lines[0])))), (n + 1));
+        }
+        def vgt-fidelity(code, chunks-path) = vgt-fid-go(vg-load(code, "line"), vg-load(code, "word"), vgt-lines-of(chunks-path), 0, 0);
+    }
+    0;
+}
