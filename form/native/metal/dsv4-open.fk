@@ -18,13 +18,15 @@
 // WHAT OPENING DOES AND REFUSES. The header is read once through the layout (no weight byte); the layout must be consistent with itself (dvl-consistent?: every tensor the driver binds is in the
 // table, the ratios agree with the compressor tensors, the router covers the stored experts), every row must be priced, the plan must be disjoint and lie inside the file (a file cut short is
 // refused before anything is mapped), and the architecture must read deepseek4. A refusal answers [] (Qwen's open answers [] too, and q38-context-ok? reads [] as 0) and leaves the carrier's
-// counters where they were. Past admission: the kernels compile once (the carrier keys a pipeline by its source), the views map (dsv4-bind.fk: dvb-open frees what it had mapped when one refuses),
+// counters where they were. Past admission: the kernels compile once (the carrier keys a pipeline by its source) and EVERY pipeline handle must be positive, checked before anything is mapped (a kernel
+// the device refuses makes the open answer [] with the counters unmoved; dsv4-open-span-with names the units, so the band can hand it a source that does not compile), the views map (dsv4-bind.fk: dvb-open frees what it had mapped when one refuses),
 // the scratch allocates (and frees itself, with the views, when one allocation refuses). The scratch is allocated once and does not scale with span: DeepSeek's prefill is token-major.
 //
 // THE STATE is dsv4-new-state: per block a row [kv, comp state, comp score, comp rows], the four handles q38-state-row-ok? counts. kv is the raw arena (cap rows of key_length f32, never
 // evicted: dsv4-kv-cache.fk), a compressing layer adds its compressor state and score ((coff x ratio) rows of (coff x key_length) f32 each) and its compressed rows (cap/ratio + 1 of key_length);
 // a layer with ratio 0 holds [kv, 0, 0, 0]. The compressor's state is born by its own init kernel (kv 0, score -1e30: a partial first window contributes nothing) and settled in a sync before
-// new-state answers. cap is the position capacity the caller chose; dvl-kv-total prices it.
+// new-state answers. cap is the position capacity the caller chose; dvl-kv-total prices it. A REFUSED state (nothing) frees the rows it had made and leaves the CONTEXT open: live buffers
+// stay at the opened count until the caller closes it (dsv4-close with the states it holds, or none).
 //
 // CLOSE IN SYNCED ROUNDS. fkwu's native wrapper reads the carrier's refusal of metal_buf_free (work naming the buffer is unsettled) as 0, so dsv4-close frees every handle of ctx and state,
 // syncs, frees what was refused, and answers the handles still held after four rounds (empty: everything released). The caller reads metal_live after (dvb-live, dvb-mapped).
@@ -91,25 +93,30 @@ section [form.bml] {
 
     // ---- open ------------------------------------------------------------------------------------------------------
     // the same arguments as q38-open-span: the path, the position capacity, the span (kept in ctx slot 10; the scratch is not span-wide)
-    def dsv4-open-span(path, maxpos, span) {
+    def dsv4-open-span(path, maxpos, span) = dsv4-open-span-with(path, maxpos, span, dkr-graph-units());
+    // the same with the kernel units named (the graph's own six by default): every kernel of every unit must compile (a refused pipeline is a handle 0), checked BEFORE anything is mapped, so an
+    // open whose pipeline is refused answers [] and moves no counter
+    def dso-pipes-ok?(ps, names) = len(names) == 0 ? true : (record_get(ps, names[0]) > 0 && dso-pipes-ok?(ps, names[1:]));
+    def dso-units-names(units) = len(units) == 0 ? [] : append(dkr-kernel-names(units[0][1]), dso-units-names(units[1:]));
+    def dsv4-open-span-with(path, maxpos, span, units) {
         let src = file_size(path) > 24 ? dso-window-src(path) : "";
         let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
         let plan = nothing?(m) ? nothing() : dvb-plan-driver(m);
-        (nothing?(m) || maxpos < 1 || !dso-admitted?(path, m, plan)) ? [] : dso-open-admitted(path, maxpos, span, src, m, plan);
+        (nothing?(m) || maxpos < 1 || !dso-admitted?(path, m, plan)) ? [] : dso-open-piped(path, maxpos, span, src, m, plan, dkr-open-pipes(units), units);
     }
-    def dso-open-admitted(path, maxpos, span, src, m, plan) {
+    def dso-open-piped(path, maxpos, span, src, m, plan, ps, units) = dso-pipes-ok?(ps, dso-units-names(units)) ? dso-open-admitted(path, maxpos, span, src, m, plan, ps) : [];
+    def dso-open-admitted(path, maxpos, span, src, m, plan, ps) {
         let views = dvb-open(path, plan);
-        nothing?(views) ? [] : dso-open-views(path, maxpos, span, src, m, views);
+        nothing?(views) ? [] : dso-open-views(path, maxpos, span, src, m, views, ps);
     }
-    def dso-open-views(path, maxpos, span, src, m, views) {
+    def dso-open-views(path, maxpos, span, src, m, views, ps) {
         let splan = dso-scratch-plan(m, maxpos);
         let bs = dso-alloc(splan);
-        nothing?(bs) ? dso-release-views(views) : dso-open-built(path, maxpos, span, src, m, views, splan, bs);
+        nothing?(bs) ? dso-release-views(views) : dso-open-built(path, maxpos, span, src, m, views, splan, bs, ps);
     }
     def dso-release-views(views) { let held = dvb-close(views); []; }
-    def dso-open-built(path, maxpos, span, src, m, views, splan, bs) {
+    def dso-open-built(path, maxpos, span, src, m, views, splan, bs, ps) {
         let vx = dvb-index(views);
-        let ps = dkr-open-pipes(dkr-graph-units());
         let lays = dso-lays(m, vx);
         let sx = dso-index(dso-plan-names(splan), bs);
         [ps, bs, m, lays, dvb-tv(record_get(vx, "token_embd.weight")), dvb-tv(record_get(vx, "output_norm.weight")), dvb-tv(record_get(vx, "output.weight")), src, record_get(m, "data-base"), path, span, sx, vx];
