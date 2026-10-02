@@ -1,7 +1,7 @@
 ; form-token-workspace-band.bml — the living workspace the in-stream verbs build in: four scopes read through one chain,
 ; every making kept as a named cell by composition identity, requests that build on one another, model-free.
 ; preludes: form-stdlib/bml/form-token-grammar.bml
-; Verdict 511
+; Verdict 1023
 ; PROOF LEVEL: FOURTH-ARM ONLY — eval reaches every door the runtime carries (the band reads the runtime's own op table
 ; to prove it), node_at reads the host field, and another process is a child fkwu born by host_spawn_at; the siblings
 ; carry none of them
@@ -34,6 +34,9 @@
 ;        builds on both by name; the voice lane does not see them
 ;   256  the voice's own names come first: a name it made that matches a walker word (max, count, sum) is reached by
 ;        name in the next control and in the next request, as a value, a number to compute with and a node to read
+;   512  one writer at a time: two processes (this one and a child fkwu, released together at a gate) each write 40 names
+;        to one lineage store and all 80 are kept, with no lock left behind; a lock whose holder is gone is taken over at
+;        once, and a stop inside the write releases the lock
 section [form.bml] {
  class FormTokenWorkspaceBand {
   def ftwb-claim(ok, bit) = ok ? bit : 0;
@@ -167,6 +170,37 @@ section [form.bml] {
    let b2 = ftg-observe-with(b, "eval", "[4, 9, 2] |> sum");
    (a1 == "value=10;") && (a2 == "value=11;") && (a4 == "value=6;") && ftv-starts?(a5, "node=@") && (a6 == "value=[1, 2];") && (b1 == "value=32;") && (b2 == "nothing=not-a-function;") && any?(n => n == "max", ftw-names(ftv-ws(b), ""));
   }
+  // two processes write one lineage store in the same moment: the child waits at a gate (go) the parent opens
+  // after the child says it is ready, then each writes 40 names; all 80 are kept, and no lock is left behind
+  def ftwb-child-text(root) = "import form-stdlib/bml/form-token-workspace.bml;\nsection [form.bml] {\n let ws = ftw-open(\"" ++ root ++ "\", \"lin\", \"child\");\n let ready = write_file(\"" ++ root ++ "/ready\", \"1\");\n let gate = ftw-wait-file(\"" ++ root ++ "/go\", host_monotonic_ms() + 30000);\n map(i => ftw-put(ws, \"lineage\", \"c\" ++ i.str(), \"value\", i), range(0, 40));\n 0;\n}\n";
+  def ftwb-names-held(root, tags) = all?(t => all?(i => !nothing?(ftw-lookup(ftw-open(root, "lin", "reader"), t ++ i.str())), range(0, 40)), tags);
+  def ftwb-writers(root) {
+   let made = fs_mkdir(root);
+   let wrote = write_file(root ++ "/child.bml", ftwb-child-text(root));
+   let child = host_spawn_at([ftw-fkwu(), root ++ "/child.bml"], ["/dev/null", root ++ "/child.out", root ++ "/child.err"]);
+   let ws = ftw-open(root, "lin", "parent");
+   let ready = ftw-wait-file(root ++ "/ready", host_monotonic_ms() + 30000);
+   let go = write_file(root ++ "/go", "1");
+   let mine = map(i => ftw-put(ws, "lineage", "p" ++ i.str(), "value", i), range(0, 40));
+   let status = host_wait(child);
+   let cells = len(channel-read(root ++ "/lineage-lin.fkb"));
+   (ready == 1) && (status == 0) && (cells == 80) && ftwb-names-held(root, ["p", "c"]) && (fs_exists(root ++ "/lineage-lin.fkb.lock") == 0);
+  }
+  // a lock whose holder is gone is taken over at once, and a stop inside the write releases the lock
+  def ftwb-stale(root) {
+   let made = fs_mkdir(root);
+   let dead = host_spawn_quiet(["/usr/bin/true"]);
+   let reaped = host_wait(dead);
+   let ws = ftw-open(root, "stale", "r");
+   let lock = ftw-store-path(ws, ftw-store-key(ws, "lineage")) ++ ".lock";
+   let held = fs_mkdir(lock);
+   let named = write_file_text(lock ++ "/owner", "pid=" ++ dead.str() ++ " at=" ++ now_unix_ms().str());
+   let t0 = host_monotonic_ms();
+   let put = ftw-put(ws, "lineage", "after", "value", 1);
+   let took = host_monotonic_ms() - t0;
+   let stopped = try ftw-file-write(ws, ftw-store-key(ws, "lineage"), nothing()) catch 7;
+   (held == 1) && (host_alive(dead) != 1) && !nothing?(ftw-lookup(ftw-open(root, "stale", "r2"), "after")) && (took < 2000) && (fs_exists(lock) == 0);
+  }
   def ftwb-run() {
    let root = temp_dir() ++ "/form-token-workspace-band-" ++ host_pid().str() ++ "-" ++ now_unix_ms().str();
    let made = fs_mkdir(root);
@@ -179,9 +213,10 @@ section [form.bml] {
    let c7 = ftwb-claim(ftwb-environment(), 64);
    let c8 = ftwb-claim(ftwb-lane(root ++ "/lane"), 128);
    let c9 = ftwb-claim(ftwb-words(root ++ "/words"), 256);
+   let c10 = ftwb-claim(ftwb-writers(root ++ "/writers") && ftwb-stale(root ++ "/stale"), 512);
    let gone = fs_rmdir(root);
-   print_str("form-token-workspace-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c3.str() ++ " " ++ c4.str() ++ " " ++ c5.str() ++ " " ++ c6.str() ++ " " ++ c7.str() ++ " " ++ c8.str() ++ " " ++ c9.str());
-   c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9;
+   print_str("form-token-workspace-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c3.str() ++ " " ++ c4.str() ++ " " ++ c5.str() ++ " " ++ c6.str() ++ " " ++ c7.str() ++ " " ++ c8.str() ++ " " ++ c9.str() ++ " " ++ c10.str());
+   c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9 + c10;
   }
  }
  ftwb-run();
