@@ -1,0 +1,152 @@
+; dsv4-open-band.bml -- the DeepSeek-V4 driver opens the Form-built fixture as Metal handles, counted through metal_live, with a state, and closes it back to nothing.
+;
+; WHAT THIS PINS. native/metal/dsv4-open.fk mirrors Qwen's q38-open-span, q38-new-state and q38-free-state: the same eleven-slot context (so q38-context-ok?, q38-state-ok?, q38-close,
+; q38-close-expected and q38-state-handle-count read it unchanged), the 86 tensors of the fixture mapped one view each (dsv4-bind.fk), the six graph units compiled once (61 kernels), 49
+; scratch buffers sized from the layout (dsv4-layout.fk's 28 and 21 extras), and a state row [kv, comp state, comp score, comp rows] per block. This band opens ONLY the fixture it writes under
+; temp_dir (1,515,232 bytes); no model, voice or session is opened and no real file is read past a header. It reads the carrier's counters (metal_live words 2 and 4) before and after each step.
+;
+; Verdict 255 when every claim lands:
+;   1     admission and shape: opening the fixture at capacity 8 answers a 13-slot context; q38-context-ok? (Qwen's own checker) reads 1; the layout in slot 2 is the fixture's (3 blocks, n_embd 256,
+;         86 tensors, ratios 0 4 2); the pipelines are the 61 kernels of the six graph units, every handle positive
+;   2     scratch: 49 buffers (28 of the layout, 21 extras), distinct positive handles, every one read at its exact planned size and refused one byte past it; sizes pinned by value (resid 4,096,
+;         logits 128, the attention score 104 = 2 heads x 13 rows (8 raw + 5 compressed at most) x 4); the scratch record names every buffer
+;   4     views and layers: four lists (24, 28, 28 tensors by block, the head's 3), the Qwen-shaped views of token_embd [32 rows, 256 cols, F16], output.weight (type 41) and output_norm, an expert stack's
+;         third dimension 4, the layer-1 q_b view [256 rows, 64 cols] of type 41; every one of the 135 handles appears once
+;   8     the counts: the carrier's live buffers rose by 135 (86 views + 49 scratch) and its file mappings by 86; dsv4-ctx-handle-count reads 135; Qwen's q38-close-expected reads the same 135
+;   16    the state: dsv4-new-state at capacity 8 gives three rows, q38-state-ok? reads 1 and q38-state-handle-count 9 (the four handles of blocks 1 and 2, block 0's kv), live buffers up by 9; every
+;         arena read at its exact size and refused one byte past (kv 4,096 B a block; block 1: state and score 8,192, compressed rows 1,536; block 2: 1,024 and 2,560), the compressor state read back
+;         as the init kernel left it (kv 0.0, score -1e30, first and last element), the total equal to dvl-kv-total (34,816)
+;   32    close in synced rounds: dsv4-close answers no handle still held and live buffers and mappings read exactly what they read before the open; a second open then closed by Qwen's own q38-close
+;         frees 135 plus the state's 9 (q38-close-expected agrees) and the counters read the same again
+;   64    refusals: a copy cut to 700,000 bytes (header whole, data short) answers [], a header-only file retyping one tensor to an unpriced type answers [], capacity 0 answers [], a missing path
+;         answers [], a text file answers [], and none of them moves the counters
+;   128   the checks can fail: q38-context-ok? reads 0 for a context whose scratch holds a zero handle and for []; closing the context without its state leaves live buffers exactly 9 above the
+;         start, and freeing the state returns them
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door (metal_pipeline, metal_buf_alloc, metal_buf_from_file, metal_buf_read, metal_buf_free, metal_live).
+; The band writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/qwen35-dense-token-handle.fk
+section [form.bml] {
+ class Dsv4OpenBand {
+  def dob-bit(held, bit) = held ? bit : 0;
+  def dob-g(ctx, i) = ctx[i];
+  def dob-distinct(hs) = len(hs) == 0 ? true : (hs[0] > 0 && !dob-member(hs[0], hs[1:]) && dob-distinct(hs[1:]));
+  def dob-member(x, xs) = len(xs) == 0 ? false : (xs[0] == x || dob-member(x, xs[1:]));
+  def dob-positive?(hs) = len(hs) == 0 ? true : (hs[0] > 0 && dob-positive?(hs[1:]));
+  // a buffer read at exactly n bytes, and refused one byte past
+  def dob-refused(h, off, n) = try (str_len(metal_buf_read(h, off, n)) != n) catch true;
+  def dob-size?(h, n) = h > 0 && str_len(metal_buf_read(h, 0, n)) == n && dob-refused(h, 0, n + 1);
+  def dob-names(us) = len(us) == 0 ? [] : append(dkr-kernel-names(us[0][1]), dob-names(us[1:]));
+  def dob-pipes-ok?(ps) = len(dob-names(dkr-graph-units())) == 61 && dob-positive?(dob-handles(ps, dob-names(dkr-graph-units())));
+  def dob-handles(ps, names) = len(names) == 0 ? [] : cons(record_get(ps, names[0]), dob-handles(ps, names[1:]));
+
+  // ---- 1
+  def dob-shape(ctx, path) {
+   let m = ctx[2];
+   len(ctx) == 13 && q38-context-ok?(ctx) == 1 && record_get(m, "layers-n") == 3 && record_get(m, "e") == 256 && record_get(m, "tensors") == 86 && record_get(m, "ratios") == [0, 4, 2, 0]
+    && dob-pipes-ok?(ctx[0]) && ctx[9] == path && ctx[10] == 1 && ctx[8] == 7168 && str_len(ctx[7]) > 7168;
+  }
+
+  // ---- 2
+  def dob-sizes-ok?(bs, plan, i) = i == len(plan) ? true : (dob-size?(bs[i], plan[i][1]) && dob-sizes-ok?(bs, plan, i + 1));
+  def dob-index-ok?(sx, plan, bs, i) = i == len(plan) ? true : (record_get(sx, plan[i][0]) == bs[i] && dob-index-ok?(sx, plan, bs, i + 1));
+  def dob-scratch(ctx, m) {
+   let plan = dso-scratch-plan(m, 8);
+   let bs = ctx[1];
+   len(plan) == 49 && len(bs) == 49 && len(dvl-buffers(m)) == 28 && dob-distinct(bs) && dob-sizes-ok?(bs, plan, 0) && dob-index-ok?(ctx[11], plan, bs, 0)
+    && dvl-buffer-bytes(plan, "resid") == 4096 && dvl-buffer-bytes(plan, "logits") == 128 && dvl-buffer-bytes(plan, "att-score") == 104 && dso-plan-bytes(plan) > 0
+    && dso-attn-rows(m, 8) == 13;
+  }
+
+  // ---- 4
+  def dob-lens(lays) = len(lays) == 0 ? [] : cons(len(lays[0]), dob-lens(lays[1:]));
+  def dob-all-lay-handles(ctx) = dsv4-ctx-handles(ctx);
+  def dob-views(ctx) {
+   let lays = ctx[3];
+   let q = lays[1][3];
+   let gate = dso-view(ctx, "blk.1.ffn_gate_exps.weight");
+   dob-lens(lays) == [24, 28, 28, 3] && ctx[4][1] == 32 && ctx[4][2] == 256 && ctx[4][3] == 1 && ctx[6][1] == 32 && ctx[6][2] == 256 && ctx[6][3] == 41
+    && ctx[5][1] == 1 && ctx[5][2] == 256 && ctx[5][3] == 0 && dvb-d2(gate) == 4 && q[1] == 256 && q[2] == 64 && q[3] == 41
+    && len(dob-all-lay-handles(ctx)) == 135 && dob-distinct(dob-all-lay-handles(ctx)) && ctx[4][0] == dso-handle(ctx, "token_embd.weight") && lays[3][0][0] == dso-handle(ctx, "output_hc_fn.weight");
+  }
+
+  // ---- 8
+  def dob-counts(ctx, live0, mapped0) = dvb-live() == live0 + 135 && dvb-mapped() == mapped0 + 86 && dsv4-ctx-handle-count(ctx) == 135 && q38-close-expected(ctx, []) == 135;
+
+  // ---- 16
+  // the f32 nearest -1e30 (-1.00000002e30) is not the double -1e30: the init kernel's value is read as the sentinel it is
+  def dob-neg-inf?(v) = v < 0.0 - 9.9e29 && v > 0.0 - 1.1e30;
+  def dob-zeros?(raw, i, n) = i == n ? true : (str_byte_at(raw, i) == 0 && dob-zeros?(raw, i + 1, n));
+  def dob-state-sizes(sts) = dob-size?(sts[0][0], 4096) && dob-size?(sts[1][0], 4096) && dob-size?(sts[1][1], 8192) && dob-size?(sts[1][2], 8192) && dob-size?(sts[1][3], 1536)
+   && dob-size?(sts[2][0], 4096) && dob-size?(sts[2][1], 1024) && dob-size?(sts[2][2], 1024) && dob-size?(sts[2][3], 2560) && sts[0][1] == 0 && sts[0][2] == 0 && sts[0][3] == 0;
+  def dob-born(sts) {
+   let kv1 = metal_buf_read(sts[1][1], 0, 8192);
+   let sc1 = dkr-f32s(metal_buf_read(sts[1][2], 0, 8192), 2048);
+   let kv2 = metal_buf_read(sts[2][1], 0, 1024);
+   let sc2 = dkr-f32s(metal_buf_read(sts[2][2], 0, 1024), 256);
+   dob-zeros?(kv1, 0, 8192) && dob-zeros?(kv2, 0, 1024) && dob-neg-inf?(sc1[0]) && dob-neg-inf?(sc1[2047]) && dob-neg-inf?(sc2[0]) && dob-neg-inf?(sc2[255])
+    && dob-neg-inf?(sc1[1000]) && dob-neg-inf?(sc2[100]);
+  }
+  def dob-state(m, sts, live0) = !nothing?(sts) && len(sts) == 3 && q38-state-ok?(sts) == 1 && q38-state-handle-count(sts) == 9 && dvb-live() == live0 + 9 && dob-state-sizes(sts) && dob-born(sts)
+   && dvl-kv-total(m, 8) == 34816 && len(dsv4-state-handles(sts)) == 9;
+
+  // ---- 64
+  // a refused open answers [] and leaves the counters exactly where they stood when it was asked
+  def dob-refuse(path, cap) {
+   let live = dvb-live();
+   let mapped = dvb-mapped();
+   let ctx = dsv4-open-span(path, cap, 1);
+   len(ctx) == 0 && dvb-live() == live && dvb-mapped() == mapped;
+  }
+  def dob-retype(specs, name, ty) = len(specs) == 0 ? [] : cons(specs[0][0] == name ? [specs[0][0], ty, specs[0][2], specs[0][3], specs[0][4], specs[0][5]] : specs[0], dob-retype(specs[1:], name, ty));
+ }
+ let root = temp_dir() ++ "/dsv4-open-band-" ++ now_unix_ms().str();
+ let path = root ++ ".gguf";
+ let cutPath = root ++ "-cut.gguf";
+ let unpricedPath = root ++ "-unpriced.gguf";
+ let textPath = root ++ "-text.txt";
+ let specs = dfx-specs();
+ let wrote = dfx-write(path);
+ let cutWrote = write_file(cutPath, read_file_slice(path, 0, 700000));
+ let unpricedWrote = write_file(unpricedPath, dfx-header(dob-retype(specs, "blk.1.ffn_gate_inp.weight", 31)));
+ let textWrote = write_file(textPath, "this is not a gguf file, it is a line of text kept to prove an open refuses it");
+ let live0 = dvb-live();
+ let mapped0 = dvb-mapped();
+ let ctx = dsv4-open-span(path, 8, 1);
+ let live1 = dvb-live();
+ let mapped1 = dvb-mapped();
+ let opened = len(ctx) == 13;
+ let m = opened ? ctx[2] : nothing();
+ let c1 = dob-bit(try opened && dob-shape(ctx, path) catch false, 1);
+ let c2 = dob-bit(try opened && dob-scratch(ctx, m) catch false, 2);
+ let c4 = dob-bit(try opened && dob-views(ctx) catch false, 4);
+ let c8 = dob-bit(try opened && live1 == live0 + 135 && mapped1 == mapped0 + 86 && dob-counts(ctx, live0, mapped0) catch false, 8);
+ let sts = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
+ let live2 = dvb-live();
+ let c16 = dob-bit(try opened && dob-state(m, sts, live1) catch false, 16);
+ let c64 = dob-bit(try dob-refuse(cutPath, 8) && dob-refuse(unpricedPath, 8) && dob-refuse(path, 0) && dob-refuse(root ++ "-missing.gguf", 8) && dob-refuse(textPath, 8) && dvb-live() == live1 + 9 && dvb-mapped() == mapped1 catch false, 64);
+ // 128, while everything is still open: a tampered context, [], and a close that forgets the state
+ let tampered = opened ? [ctx[0], cons(0, ctx[1][1:]), ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], ctx[7], ctx[8], ctx[9], ctx[10]] : [];
+ let blind = q38-context-ok?(tampered) == 0 && q38-context-ok?([]) == 0;
+ let noState = opened ? dsv4-close(ctx, []) : [0];
+ let live3 = dvb-live();
+ let leaked = live3 == live0 + 9 && mapped0 == dvb-mapped();
+ let stateLeft = nothing?(sts) ? [0] : dsv4-free-state(sts);
+ let live4 = dvb-live();
+ let c128 = dob-bit(try blind && len(noState) == 0 && leaked && len(stateLeft) == 0 && live4 == live0 catch false, 128);
+ // 32: close in synced rounds (a fresh open: the first was closed above), then Qwen's own q38-close on a second one
+ let ctxB = dsv4-open-span(path, 8, 1);
+ let stsB = len(ctxB) == 13 ? dsv4-new-state(ctxB[2], ctxB[0], 8) : nothing();
+ let liveB = dvb-live();
+ let leftB = len(ctxB) == 13 ? dsv4-close(ctxB, nothing?(stsB) ? [] : stsB) : [0];
+ let afterB = dvb-live() == live0 && dvb-mapped() == mapped0 && len(leftB) == 0 && liveB == live0 + 144;
+ let ctxC = dsv4-open-span(path, 8, 1);
+ let stsC = len(ctxC) == 13 ? dsv4-new-state(ctxC[2], ctxC[0], 8) : nothing();
+ let expectC = len(ctxC) == 13 ? q38-close-expected(ctxC, stsC) : 0;
+ let freedC = len(ctxC) == 13 ? q38-close(ctxC, stsC) : 0;
+ let afterC = freedC == expectC && expectC == 144 && dvb-live() == live0 && dvb-mapped() == mapped0;
+ let c32 = dob-bit(try afterB && afterC catch false, 32);
+ let removed = host_path_remove(path) + host_path_remove(cutPath) + host_path_remove(unpricedPath) + host_path_remove(textPath);
+ print_str("dsv4-open-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " live " ++ live0.str() ++ "/" ++ live1.str() ++ "/" ++ live2.str() ++ "/" ++ live3.str() ++ "/" ++ live4.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ mapped1.str() ++ "/" ++ dvb-mapped().str() ++ " freedC " ++ freedC.str() ++ "/" ++ expectC.str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
+}

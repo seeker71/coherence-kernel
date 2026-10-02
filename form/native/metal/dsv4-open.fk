@@ -1,0 +1,171 @@
+// dsv4-open.fk -- open a DeepSeek-V4 GGUF as Metal handles: dsv4-open-span, dsv4-new-state, dsv4-free-state, mirroring Qwen's q38-open-span, q38-new-state and q38-free-state.
+//
+// THE SAME CONTEXT SHAPE, so Qwen's closers apply. qwen35-dense-token-handle.fk returns ctx = [ps, bs, geo, lays, embTv, onormTv, projTv, src, base, path, span] and its q38-context-ok?,
+// q38-close, q38-close-expected and q38-free-state read slots 1 (a list of scratch handles), 3 (per layer a list of tensor views [handle, rows, cols, type]), 4 to 6 (three tensor views)
+// and a state list of rows [a, b, c, d] of handles (0 where a layer holds none). DeepSeek's ctx is those eleven slots with the same meanings, and two more that only this lane reads:
+//   0 ps       the pipelines, one record name -> handle for every kernel of the six units the graph dispatches (dsv4-kernels.fk: dkr-open-pipes, compiled once)
+//   1 bs       the scratch handles, in the order of dso-scratch-plan: dvl-buffers (dsv4-layout.fk) then the extras this lane adds (attention scores, the id buffers sized for all used experts,
+//              the layer stages the layout's list does not name, the rope tables, the argmax answer)
+//   2 geo      the layout record (dvl-open: widths, per-layer ratio / routing regime / expert count / types, the tensor table)
+//   3 lays     one list of tensor views per block, in dvl-l(m, il, "names") order (the 23 tensors every layer carries, the compressor's four when its ratio is nonzero, its one routing tensor),
+//              then ONE MORE list: the output head's three small tensors (output_hc_fn, output_hc_scale, output_hc_base). DeepSeek's head has six global tensors where Qwen's has three; the
+//              extra list is what lets q38-close and q38-context-ok? reach all six handles without being told about them.
+//   4 embTv    token_embd.weight    5 onormTv  output_norm.weight    6 projTv  output.weight     (tensor views: [handle, rows, cols, type], dvb-tv)
+//   7 src      the header source (dvl-src: the header window, or the whole file when it is smaller than the 8 MB window)   8 base  the data base   9 path   10 span
+//   11 sx      the scratch by name: one record name -> handle
+//   12 vx      the views by name: one record name -> [name, handle, type, dims, absolute offset, bytes] (dvb-index)
+//
+// WHAT OPENING DOES AND REFUSES. The header is read once through the layout (no weight byte); the layout must be consistent with itself (dvl-consistent?: every tensor the driver binds is in the
+// table, the ratios agree with the compressor tensors, the router covers the stored experts), every row must be priced, the plan must be disjoint and lie inside the file (a file cut short is
+// refused before anything is mapped), and the architecture must read deepseek4. A refusal answers [] (Qwen's open answers [] too, and q38-context-ok? reads [] as 0) and leaves the carrier's
+// counters where they were. Past admission: the kernels compile once (the carrier keys a pipeline by its source), the views map (dsv4-bind.fk: dvb-open frees what it had mapped when one refuses),
+// the scratch allocates (and frees itself, with the views, when one allocation refuses). The scratch is allocated once and does not scale with span: DeepSeek's prefill is token-major.
+//
+// THE STATE is dsv4-new-state: per block a row [kv, comp state, comp score, comp rows], the four handles q38-state-row-ok? counts. kv is the raw arena (cap rows of key_length f32, never
+// evicted: dsv4-kv-cache.fk), a compressing layer adds its compressor state and score ((coff x ratio) rows of (coff x key_length) f32 each) and its compressed rows (cap/ratio + 1 of key_length);
+// a layer with ratio 0 holds [kv, 0, 0, 0]. The compressor's state is born by its own init kernel (kv 0, score -1e30: a partial first window contributes nothing) and settled in a sync before
+// new-state answers. cap is the position capacity the caller chose; dvl-kv-total prices it.
+//
+// CLOSE IN SYNCED ROUNDS. fkwu's native wrapper reads the carrier's refusal of metal_buf_free (work naming the buffer is unsettled) as 0, so dsv4-close frees every handle of ctx and state,
+// syncs, frees what was refused, and answers the handles still held after four rounds (empty: everything released). The caller reads metal_live after (dvb-live, dvb-mapped).
+//
+// Proven by: native/metal/tests/dsv4-open-band.bml (the fixture opened and nothing else: handles counted through metal_live, a state allocated and its compressor state read back, q38-context-ok?,
+// q38-state-ok? and q38-close applied to the DeepSeek context, close in synced rounds, metal_live back to where it was, the refusals).
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/equireach.fk;
+import form-stdlib/gguf-meta.fk;
+import form-stdlib/dsv4-layout.fk;
+import form-stdlib/dsv4-kernels.fk;
+import native/metal/dsv4-bind.fk;
+section [form.bml] {
+    // ---- the scratch plan: [name, bytes] ---------------------------------------------------------------
+    // the most compressed rows any layer holds at capacity cap, and the rows attention may see (raw + compressed)
+    def dso-max-comp-go(m, il, cap, best) = il == record_get(m, "layers-n") ? best : dso-max-comp-go(m, il + 1, cap, dvl-comp-rows(m, il, cap) > best ? dvl-comp-rows(m, il, cap) : best);
+    def dso-max-comp(m, cap) = dso-max-comp-go(m, 0, cap, 0);
+    def dso-attn-rows(m, cap) = cap + dso-max-comp(m, cap);
+    // what the layout's list does not name: the stages between its buffers, the expert buffers for ALL used experts (the id kernels run every used expert in one dispatch), the attention score
+    // and exponent scratch, the two rope tables (plain and compressed base), the argmax answer
+    def dso-extras(m, cap) {
+        let e = record_get(m, "e");
+        let hd = record_get(m, "hd");
+        let nh = record_get(m, "nh");
+        let qdim = nh * hd;
+        let used = record_get(m, "used");
+        let hidden = dvl-max-layer(m, "hidden");
+        let rows = dso-attn-rows(m, cap);
+        [["hc-split", record_get(m, "mix") * 4], ["q-latn", record_get(m, "qr") * 4], ["q-n", qdim * 4], ["kv-raw", hd * 4], ["kv-n", hd * 4], ["kv-q", hd * 4],
+         ["comp-pool", hd * 4], ["comp-normed", hd * 4], ["comp-q", hd * 4], ["ffn-out", e * 4],
+         ["att-score", nh * rows * 4], ["att-exp", nh * rows * 4], ["att-inv", nh * 4],
+         ["xgate", used * hidden * 4], ["xup", used * hidden * 4], ["xmid", used * hidden * 4], ["xdown", used * e * 4],
+         ["rope-plain", (record_get(m, "nrot") / 2) * 4], ["rope-comp", (record_get(m, "nrot") / 2) * 4], ["argmax-idx", 4], ["argmax-val", 4]];
+    }
+    def dso-scratch-plan(m, cap) = append(dvl-buffers(m), dso-extras(m, cap));
+    def dso-plan-names(plan) = len(plan) == 0 ? [] : cons(plan[0][0], dso-plan-names(plan[1:]));
+    def dso-plan-bytes(plan) = len(plan) == 0 ? 0 : plan[0][1] + dso-plan-bytes(plan[1:]);
+    // allocate the plan in order; one refused allocation frees the rest and answers nothing
+    def dso-alloc-go(plan, acc) {
+        len(plan) == 0 ? reverse(acc) : {
+            let h = metal_buf_alloc(plan[0][1]);
+            h > 0 ? dso-alloc-go(plan[1:], cons(h, acc)) : dso-refused(acc);
+        };
+    }
+    def dso-refused(acc) {
+        let held = dvb-free-rounds(acc, 4);
+        nothing();
+    }
+    def dso-alloc(plan) = dso-alloc-go(plan, []);
+    def dso-index-go(names, hs, ix) = len(names) == 0 ? ix : { record_set(ix, names[0], hs[0]); dso-index-go(names[1:], hs[1:], ix); };
+    def dso-index(names, hs) = dso-index-go(names, hs, record_new(0));
+
+    // ---- the layer lists -----------------------------------------------------------------------------------
+    def dso-tvs(vx, names) = len(names) == 0 ? [] : cons(dvb-tv(record_get(vx, names[0])), dso-tvs(vx, names[1:]));
+    def dso-lays-go(m, vx, il, n) = il == n ? [] : cons(dso-tvs(vx, dvl-l(m, il, "names")), dso-lays-go(m, vx, il + 1, n));
+    def dso-head-names() = ["output_hc_fn.weight", "output_hc_scale.weight", "output_hc_base.weight"];
+    def dso-lays(m, vx) = append(dso-lays-go(m, vx, 0, record_get(m, "layers-n")), [dso-tvs(vx, dso-head-names())]);
+
+    // ---- admission --------------------------------------------------------------------------------------------
+    def dso-admitted?(path, m, plan) = !nothing?(plan) && dvl-consistent?(m) && record_get(m, "arch") == "deepseek4" && dvl-unpriced(m) == 0
+        && dvb-disjoint?(plan) && dvb-inside?(plan, file_size(path)) && record_get(m, "layers-n") > 0 && record_get(m, "vocab") > 0;
+    def dso-window-src(path) = dvl-src(path);
+
+    // ---- open ------------------------------------------------------------------------------------------------------
+    // the same arguments as q38-open-span: the path, the position capacity, the span (kept in ctx slot 10; the scratch is not span-wide)
+    def dsv4-open-span(path, maxpos, span) {
+        let src = file_size(path) > 24 ? dso-window-src(path) : "";
+        let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
+        let plan = nothing?(m) ? nothing() : dvb-plan-driver(m);
+        (nothing?(m) || maxpos < 1 || !dso-admitted?(path, m, plan)) ? [] : dso-open-admitted(path, maxpos, span, src, m, plan);
+    }
+    def dso-open-admitted(path, maxpos, span, src, m, plan) {
+        let views = dvb-open(path, plan);
+        nothing?(views) ? [] : dso-open-views(path, maxpos, span, src, m, views);
+    }
+    def dso-open-views(path, maxpos, span, src, m, views) {
+        let splan = dso-scratch-plan(m, maxpos);
+        let bs = dso-alloc(splan);
+        nothing?(bs) ? dso-release-views(views) : dso-open-built(path, maxpos, span, src, m, views, splan, bs);
+    }
+    def dso-release-views(views) { let held = dvb-close(views); []; }
+    def dso-open-built(path, maxpos, span, src, m, views, splan, bs) {
+        let vx = dvb-index(views);
+        let ps = dkr-open-pipes(dkr-graph-units());
+        let lays = dso-lays(m, vx);
+        let sx = dso-index(dso-plan-names(splan), bs);
+        [ps, bs, m, lays, dvb-tv(record_get(vx, "token_embd.weight")), dvb-tv(record_get(vx, "output_norm.weight")), dvb-tv(record_get(vx, "output.weight")), src, record_get(m, "data-base"), path, span, sx, vx];
+    }
+    // accessors
+    def dso-ps(ctx) = ctx[0];
+    def dso-geo(ctx) = ctx[2];
+    def dso-sx(ctx) = ctx[11];
+    def dso-vx(ctx) = ctx[12];
+    def dso-buf(ctx, name) = record_get(ctx[11], name);
+    def dso-view(ctx, name) = record_get(ctx[12], name);
+    def dso-handle(ctx, name) = record_get(ctx[12], name)[1];
+    def dso-pipe(ctx, name) = record_get(ctx[0], name);
+    def dso-ctx-cap(ctx) = len(ctx) > 13 ? ctx[13] : 0;
+
+    // ---- the state -----------------------------------------------------------------------------------------------------
+    // one block's row [kv, comp state, comp score, comp rows]; a compressing layer's state and score are born by the init kernel
+    def dso-alloc-row(m, il, cap) {
+        let kv = metal_buf_alloc(dvl-raw-arena-bytes(m, cap));
+        dvl-l(m, il, "compressed") ? {
+            let sb = metal_buf_alloc(dvl-state-bytes(m, il));
+            let sc = metal_buf_alloc(dvl-state-bytes(m, il));
+            let cr = metal_buf_alloc(dvl-comp-arena-bytes(m, il, cap));
+            [kv, sb, sc, cr];
+        } : [kv, 0, 0, 0];
+    }
+    def dso-row-ok?(row) = row[0] > 0 && row[1] >= 0 && row[2] >= 0 && row[3] >= 0 && ((row[1] == 0 && row[2] == 0 && row[3] == 0) || (row[1] > 0 && row[2] > 0 && row[3] > 0));
+    def dso-rows-go(m, il, n, cap) = il == n ? [] : cons(dso-alloc-row(m, il, cap), dso-rows-go(m, il + 1, n, cap));
+    def dso-row-handles(row) = [row[0], row[1], row[2], row[3]];
+    def dso-rows-handles(rows) = len(rows) == 0 ? [] : append(dso-row-handles(rows[0]), dso-rows-handles(rows[1:]));
+    def dso-rows-ok?(rows) = len(rows) == 0 ? true : (dso-row-ok?(rows[0]) && dso-rows-ok?(rows[1:]));
+    // the compressor's init, enqueued for every compressing row (the kernel sets kv 0 and score -1e30 over the whole state)
+    def dso-init-row(ps, m, il, row) = dvl-l(m, il, "compressed") ? metal_enqueue(record_get(ps, "form_dsv4_comp_init_f32"), md-bind([row[1], row[2]], [dvl-state-bytes(m, il) / 4]), dvl-state-bytes(m, il) / 4) : 1;
+    def dso-init-rows(ps, m, il, rows) = len(rows) == 0 ? true : (dso-init-row(ps, m, il, rows[0]) == 1 && dso-init-rows(ps, m, il + 1, rows[1:]));
+    // the state for cap positions: one row per block, or nothing (what was allocated is freed)
+    def dsv4-new-state(m, ps, cap) {
+        let rows = dso-rows-go(m, 0, record_get(m, "layers-n"), cap);
+        dso-rows-ok?(rows) && dso-init-rows(ps, m, 0, rows) ? dso-settled(rows) : dso-state-refused(rows);
+    }
+    def dso-settled(rows) { let s = metal_sync(); s >= 0 ? rows : dso-state-refused(rows); }
+    def dso-state-refused(rows) { let held = dvb-free-rounds(dso-handles-positive(dso-rows-handles(rows)), 4); nothing(); }
+    def dso-handles-positive(hs) = len(hs) == 0 ? [] : (hs[0] > 0 ? cons(hs[0], dso-handles-positive(hs[1:])) : dso-handles-positive(hs[1:]));
+    // the handles the state holds, and the bytes its arenas hold (dvl-kv-total at the same cap)
+    def dsv4-state-handles(sts) = dso-handles-positive(dso-rows-handles(sts));
+    // free a state in synced rounds: the handles still held (empty: all freed)
+    def dsv4-free-state(sts) = dvb-free-rounds(dsv4-state-handles(sts), 4);
+
+    // ---- close ------------------------------------------------------------------------------------------------------------
+    def dso-tv-handles(tvs) = len(tvs) == 0 ? [] : cons(tvs[0][0], dso-tv-handles(tvs[1:]));
+    def dso-lay-handles(lays) = len(lays) == 0 ? [] : append(dso-tv-handles(lays[0]), dso-lay-handles(lays[1:]));
+    // every handle the ctx holds: scratch, layer views, the three tensor views (the head's other three are in the last layer list)
+    def dsv4-ctx-handles(ctx) = append(ctx[1], append(dso-lay-handles(ctx[3]), [ctx[4][0], ctx[5][0], ctx[6][0]]));
+    def dsv4-close(ctx, sts) {
+        let s0 = metal_sync();
+        dvb-free-rounds(append(dsv4-ctx-handles(ctx), dsv4-state-handles(sts)), 4);
+    }
+    def dsv4-ctx-handle-count(ctx) = len(dsv4-ctx-handles(ctx));
+    0;
+}
