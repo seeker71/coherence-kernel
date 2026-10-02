@@ -13,26 +13,32 @@ section [form.bml] {
   def jv-float(number) = [6,number];
   def jv-bool(value) = [7,!(!value)];
   def jv-null() = [8];
-  def jv-kind(view) = (Comparable) view[0] == 0 ? jv-node-kind(view[1]) : (Comparable) view[0] == 5 ? 1 : view[0];
+  def jv-deferred-tag() = 9;
+  // Immutable data owns the snapshot; plain accessors introduce no captured
+  // byte roots or per-field mutable records. The reader owns any live memo.
+  def jv-defer(read,render,kind,data) = [jv-deferred-tag(),kind,read,render,data];
+  def jv-force(view) = view[0] != jv-deferred-tag() ? view : { let read=view[2]; read(view[4]); };
+  def jv-deferred-text(view) { let render=view[3]; render(view[4]); }
+  def jv-kind(view) = view[0] == jv-deferred-tag() ? view[1] : (Comparable) view[0] == 0 ? jv-node-kind(view[1]) : (Comparable) view[0] == 5 ? 1 : view[0];
   def jv-node-kind(node) = node_eq(node_category(node),JSON-OBJECT()) ? 1 : node_eq(node_category(node),JSON-ARRAY()) ? 2 : node_eq(node_category(node),JSON-NULL()) ? 8 : (Comparable) node_type(node) == 2 ? 3 : (Comparable) node_type(node) == 1 ? 4 : (Comparable) node_type(node) == 7 ? 6 : (Comparable) node_type(node) == 3 ? 7 : 9;
   def jv-pair(key,value) = [key,value];
   def jv-s(key,text) = jv-pair(key,jv-string(text));
   def jv-n(key,number) = jv-pair(key,jv-int(number));
   def jv-overlay(view,pairs) = [5,view,pairs];
-  def jv-base(view) = (Comparable) view[0] == 0 ? view[1] : (Comparable) view[0] == 5 ? jv-base(view[1]) : form_error("JSON view has no borrowed node base");
+  def jv-base(view) = view[0] == jv-deferred-tag() ? jv-base(jv-force(view)) : (Comparable) view[0] == 0 ? view[1] : (Comparable) view[0] == 5 ? jv-base(view[1]) : form_error("JSON view has no borrowed node base");
   def jv-wrap(nodes) = nodes |> map(jv-node);
   def jv-wrap-pairs(pairs) = pairs |> map(pair => jv-pair(json-pair-key(pair),jv-node(json-pair-value(pair))));
   def jv-find(pairs,key) = nil?(pairs) ? [] : (String) pairs[0][0] == key ? pairs[0] : jv-find(pairs[1:],key);
   def jv-without(pairs,replacements) = nil?(pairs) ? [] : !nil?(jv-find(replacements,pairs[0][0])) ? jv-without(pairs[1:],replacements) : cons(pairs[0],jv-without(pairs[1:],replacements));
-  def jv-pairs(view) = (Comparable) view[0] == 0 ? jv-wrap-pairs(json-object-pairs(view[1])) : (Comparable) view[0] == 1 ? view[1] : (Comparable) view[0] == 5 ? append(jv-without(jv-pairs(view[1]),view[2]),view[2]) : form_error("JSON view is not an object");
+  def jv-pairs(view) = view[0] == jv-deferred-tag() ? jv-pairs(jv-force(view)) : (Comparable) view[0] == 0 ? jv-wrap-pairs(json-object-pairs(view[1])) : (Comparable) view[0] == 1 ? view[1] : (Comparable) view[0] == 5 ? append(jv-without(jv-pairs(view[1]),view[2]),view[2]) : form_error("JSON view is not an object");
   def jv-field(view,key) = !((Comparable) jv-kind(view) == 1) ? [] : (Comparable) view[0] == 5 ? jv-overlay-field(view,key,jv-find(view[2],key)) : jv-find(jv-pairs(view),key);
   def jv-overlay-field(view,key,pair) = nil?(pair) ? jv-field(view[1],key) : pair;
   def jv-has(view,key) = !nil?(jv-field(view,key));
   def jv-get(view,key) = jv-field-value(jv-field(view,key));
   def jv-field-value(pair) = nil?(pair) ? jv-string("") : pair[1];
-  def jv-value(view) = (Comparable) view[0] == 0 ? node_value(view[1]) : ((Comparable) view[0] == 3) || (((Comparable) view[0] == 4) || (((Comparable) view[0] == 6) || ((Comparable) view[0] == 7))) ? view[1] : nothing();
+  def jv-value(view) = view[0] == jv-deferred-tag() ? jv-value(jv-force(view)) : (Comparable) view[0] == 0 ? node_value(view[1]) : ((Comparable) view[0] == 3) || (((Comparable) view[0] == 4) || (((Comparable) view[0] == 6) || ((Comparable) view[0] == 7))) ? view[1] : nothing();
   def jv-str(view,key) = jv-value(jv-get(view,key));
-  def jv-items(view) = (Comparable) view[0] == 0 ? jv-wrap(json-array-elements(view[1])) : (Comparable) view[0] == 2 ? view[1] : [];
+  def jv-items(view) = view[0] == jv-deferred-tag() ? jv-items(jv-force(view)) : (Comparable) view[0] == 0 ? jv-wrap(json-array-elements(view[1])) : (Comparable) view[0] == 2 ? view[1] : [];
   // Current-state updates copy the surviving pairs, not an overlay chain of
   // obsolete revisions. Returned snapshots keep their independent references.
   def jv-set(view,key,value) = jv-object(append(jv-without(jv-pairs(view),[jv-pair(key,value)]),[jv-pair(key,value)]));
@@ -46,11 +52,11 @@ section [form.bml] {
   def jv-emit-items(items) = jv-emit-text(jv-emit-item-parts(items));
   def jv-emit-pair-parts(pairs) = nil?(pairs) ? [] : cons(json-quote-string(pairs[0][0]),cons(":",cons(jv-emit(pairs[0][1]),nil?(pairs[1:]) ? [] : cons(",",jv-emit-pair-parts(pairs[1:])))));
   def jv-emit-pairs(pairs) = jv-emit-text(jv-emit-pair-parts(pairs));
-  def jv-emit(view) = (Comparable) view[0] == 0 ? json-emit-precise(view[1]) : ((Comparable) view[0] == 1) || ((Comparable) view[0] == 5) ? ("{" + (jv-emit-pairs(jv-pairs(view)) + "}")) : (Comparable) view[0] == 2 ? ("[" + (jv-emit-items(view[1]) + "]")) : (Comparable) view[0] == 3 ? json-quote-string(view[1]) : (Comparable) view[0] == 4 ? view[1].str() : (Comparable) view[0] == 6 ? float-precise-str(view[1]) : (Comparable) view[0] == 7 ? (view[1] ? "true" : "false") : (Comparable) view[0] == 8 ? "null" : form_error("unknown JSON view kind");
+  def jv-emit(view) = view[0] == jv-deferred-tag() ? jv-deferred-text(view) : (Comparable) view[0] == 0 ? json-emit-precise(view[1]) : ((Comparable) view[0] == 1) || ((Comparable) view[0] == 5) ? ("{" + (jv-emit-pairs(jv-pairs(view)) + "}")) : (Comparable) view[0] == 2 ? ("[" + (jv-emit-items(view[1]) + "]")) : (Comparable) view[0] == 3 ? json-quote-string(view[1]) : (Comparable) view[0] == 4 ? view[1].str() : (Comparable) view[0] == 6 ? float-precise-str(view[1]) : (Comparable) view[0] == 7 ? (view[1] ? "true" : "false") : (Comparable) view[0] == 8 ? "null" : form_error("unknown JSON view kind");
   // Explicit admission into content identity, only for callers asking for nodes.
   def jv-materialize-items(items) = items |> map(jv-materialize);
   def jv-materialize-pairs(pairs) = pairs |> map(pair => json-node-pair(pair[0],jv-materialize(pair[1])));
-  def jv-materialize(view) = (Comparable) view[0] == 0 ? view[1] : ((Comparable) view[0] == 1) || ((Comparable) view[0] == 5) ? json-node-object(jv-materialize-pairs(jv-pairs(view))) : (Comparable) view[0] == 2 ? json-node-array(jv-materialize-items(view[1])) : (Comparable) view[0] == 3 ? json-node-string(view[1]) : (Comparable) view[0] == 4 ? json-node-int(view[1]) : (Comparable) view[0] == 6 ? make_float64(view[1]) : (Comparable) view[0] == 7 ? json-node-bool(view[1]) : (Comparable) view[0] == 8 ? json-node-null() : form_error("unknown JSON view kind");
+  def jv-materialize(view) = view[0] == jv-deferred-tag() ? jv-materialize(jv-force(view)) : (Comparable) view[0] == 0 ? view[1] : ((Comparable) view[0] == 1) || ((Comparable) view[0] == 5) ? json-node-object(jv-materialize-pairs(jv-pairs(view))) : (Comparable) view[0] == 2 ? json-node-array(jv-materialize-items(view[1])) : (Comparable) view[0] == 3 ? json-node-string(view[1]) : (Comparable) view[0] == 4 ? json-node-int(view[1]) : (Comparable) view[0] == 6 ? make_float64(view[1]) : (Comparable) view[0] == 7 ? json-node-bool(view[1]) : (Comparable) view[0] == 8 ? json-node-null() : form_error("unknown JSON view kind");
  }
  0;
 }
