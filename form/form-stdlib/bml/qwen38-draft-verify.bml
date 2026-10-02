@@ -1,0 +1,71 @@
+// qwen38-draft-verify.bml -- the verify half of speculative decoding, on kernels the lane already has.
+//
+// A span of k+1 tokens [pending, d1..dk] enters the resident context at pos, through the same span walkers
+// that admit a prompt and every observation (q38-lm-embed, q38-lm-layers-span, then a settle). What the
+// prompt prefill never needed is the head at EVERY row, not only the last: row t of the span predicts the
+// token that follows input t, so one span answers k+1 argmaxes. Each row is gathered into the head's input
+// and read the way q38-head-only reads the last one.
+//
+// Qwen3.8's linear layers keep a recurrent state that knows no position, so a rejected draft cannot be
+// undone by rewinding pos (the full-attention KV can: attention reads up to pos+1, and later turns
+// overwrite the rows). The device-side copy that recycles a context per turn (q38-state-mark and
+// q38-state-restore, banded by tests/recur-recycle-band.fk) is used here once per marked verify: mark
+// before, restore when a draft is cut short, then advance over only the accepted tokens.
+//
+// Every function answers nothing() when a reading did not arrive; none answers -1. The caller
+// (form-cli-model-draft.bml) takes the refusal as a choice point. Greedy exactness is held inside THIS lane
+// only: the span matmul and the decode matvec are two arithmetics (tests/q8-0-matmul-mma-band.fk: "bytes
+// are not the claim"), so a drafted reply is compared with the same lane at draft width 0, never with the
+// token-wise path. tests/q8-0-mma-prefix-band.fk holds the claim span-split invariance at the matmul;
+// observe/prompt-lookup-run.bml reads it across the whole stack.
+import native/metal/qwen35-dense-token-handle.fk;
+import form-stdlib/bml/qwen38-prefill-completion.bml;
+import form-stdlib/bml/form-cli-model-adapter.bml;
+section [form.bml] {
+ class Qwen38DraftVerify {
+  // The ids enter at pos and every layer's state and KV take them; no head is read. 1 when the carrier
+  // settled the work, 0 when it did not (the span walk is not retried on a state it may have mutated).
+  def q38dv-span(ctx, sts, ids, pos) {
+   let n = len(ids);
+   q38pc-wait-policy();
+   metal_batch_concurrent();
+   q38-lm-embed(ctx[0], ctx[1], ctx[2], ctx[4], ids, 0);
+   q38-lm-layers-span(ctx[0], ctx[1], ctx[2], ctx[3], sts, 0, ctx[2][21], n, pos);
+   q38pc-sync(pos, n);
+  }
+  def q38dv-fits?(ctx, ids) = (len(ids) > 0) && (len(ids) <= q38-ctx-span(ctx));
+  // State only: the re-run after a restore, over the accepted prefix.
+  def q38dv-advance(ctx, sts, ids, pos) = q38dv-fits?(ctx, ids) ? q38dv-span(ctx, sts, ids, pos) : 0;
+  // The head after row t, as the session reads its own: base, or with the rank-one carrier the session wears
+  // (as fcmd-pending does). The settle closed the batch, so each row re-arms it before its barrier-bearing
+  // gather and head, or their enqueues refuse and the argmax is read from a buffer nothing wrote.
+  def q38dv-row(ctx, carrier, t) {
+   metal_batch_concurrent();
+   q38-gather(ctx[0], ctx[1], ctx[2], t, 1);
+   nil?(carrier) ? q38-head(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6]) : q38-head-adapted(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6], fcmd-adapter(carrier));
+   let bytes = metal_buf_read(ctx[1][31], 0, 4);
+   q38pc-head-bytes?(bytes) ? kth-u32at(bytes, 0) : nothing();
+  }
+  def q38dv-rows(ctx, carrier, t, n, out) = t >= n ? out : q38dv-rows-next(ctx, carrier, t, n, out, q38dv-row(ctx, carrier, t));
+  def q38dv-rows-next(ctx, carrier, t, n, out, id) = nothing?(id) ? nothing() : q38dv-rows(ctx, carrier, t + 1, n, append(out, [id]));
+  // The k+1 argmaxes for ids = [pending, d1..dk] at pos, or nothing() when the span did not settle or a head
+  // byte read failed. The span is the session context's width at most.
+  def q38dv-verify(ctx, sts, carrier, ids, pos) = q38dv-fits?(ctx, ids) && (q38dv-span(ctx, sts, ids, pos) == 1) ? q38dv-rows(ctx, carrier, 0, len(ids), []) : nothing();
+  // ── span-split invariance across the whole stack: the logits after the last row of the same IDs, run as the
+  // chunks given (one span, a span per ID, 3 and 5), read as bytes from the head's output buffer ──
+  def q38dv-chunks(ctx, sts, chunks, pos) = nil?(chunks) ? 1 : q38dv-chunks-next(ctx, sts, chunks, pos, q38dv-advance(ctx, sts, chunks[0], pos));
+  def q38dv-chunks-next(ctx, sts, chunks, pos, ran) = ran == 1 ? q38dv-chunks(ctx, sts, chunks[1:], pos + len(chunks[0])) : 0;
+  def q38dv-logits(ctx, sts, carrier, chunks, pos) = q38dv-chunks(ctx, sts, chunks, pos) == 1 ? q38dv-logits-read(ctx, q38dv-row(ctx, carrier, len(chunks[-1]) - 1)) : nothing();
+  def q38dv-logits-read(ctx, argmax) = nothing?(argmax) ? nothing() : metal_buf_read(ctx[1][28], 0, ctx[2][19] * 4);
+  // ── the mark: one spare of the recurrent state per session, allocated once ──
+  def q38dv-spare(ctx) = q38-spare-state(ctx[2]);
+  def q38dv-spare-row-ok?(row) = ((row[0] == 0) && (row[1] == 0)) || ((row[0] > 0) && (row[1] > 0));
+  def q38dv-spare-ok?(spare) = nil?(spare) ? 1 : q38dv-spare-row-ok?(spare[0]) && q38dv-spare-ok?(spare[1:]);
+  def q38dv-spare-owned(spare) = nil?(spare) ? 0 : ((spare[0][0] > 0 ? 1 : 0) + (spare[0][1] > 0 ? 1 : 0)) + q38dv-spare-owned(spare[1:]);
+  def q38dv-mark(ctx, sts, spare) = q38-state-mark(ctx[0], sts, spare, ctx[2]) > 0 ? 1 : 0;
+  def q38dv-restore(ctx, sts, spare) = q38-state-restore(ctx[0], sts, spare, ctx[2]) > 0 ? 1 : 0;
+  // After metal_sync; the count freed answers against q38dv-spare-owned taken before.
+  def q38dv-free(spare) = q38-free-spare(spare);
+ }
+ 0;
+}

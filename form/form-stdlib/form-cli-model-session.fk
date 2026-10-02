@@ -31,6 +31,7 @@ import form-stdlib/bml/form-cli-model-admission.bml;
 import form-stdlib/bml/form-cli-model-observation.bml;
 import form-stdlib/bml/form-cli-model-adapter.bml;
 import form-stdlib/bml/form-cli-model-sampling.bml;
+import form-stdlib/bml/form-cli-model-draft.bml;
 section [form.bml] {
     // session = tag status reason path src ctx sts maxpos pos pending
     //           stopped prompt-ids generated-ids injected-ids observation-count
@@ -198,17 +199,21 @@ section [form.bml] {
     def fcms-decode-pulse(completed-steps) = fcmg-live-stage(("model-session-decode-checkpoint-" + completed-steps.str()), 8388613);
     // result = (ids pending pos stopped). Returned ids are model speech only;
     // the stop/control prediction is retained separately for the next crossing.
-    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = id < 0 ? [out, -1, pos, 1] : (Comparable) q38-stop?(id, stops) == 1 ? [out, id, pos, 1] : left <= 0 ? [out, id, pos, 0] : {
+    // The forward is the caller's step, as fcsam-walk takes its own: fcms-walk is this walk with the session's
+    // token-wise forward, and the draft lane's band (tests/form-cli-model-draft-band.bml) holds its walk to
+    // this one's contract by running the same scripted predictions through both.
+    def fcms-walk-by(step, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = id < 0 ? [out, -1, pos, 1] : (Comparable) q38-stop?(id, stops) == 1 ? [out, id, pos, 1] : left <= 0 ? [out, id, pos, 0] : {
         let out2 = append(out, [id]);
         let completed2 = completed-steps + 1;
         let pulse = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? fcms-decode-pulse(completed2) : 0;
         let next-left = fcms-decode-next-left(steps-to-checkpoint, checkpoint-width);
         let next-width = fcms-decode-next-width(steps-to-checkpoint, checkpoint-width);
         (Comparable) left == 1 ? [out2, id, pos, 0] : {
-            let nid = fcms-forward(s, id, pos);
-            nid < 0 ? [out2, -1, pos + 1, 1] : (Comparable) q38-stop?(nid, stops) == 1 ? [out2, nid, pos + 1, 1] : fcms-walk(s, nid, pos + 1, left - 1, stops, out2, next-left, next-width, completed2);
+            let nid = step(s, id, pos);
+            nid < 0 ? [out2, -1, pos + 1, 1] : (Comparable) q38-stop?(nid, stops) == 1 ? [out2, nid, pos + 1, 1] : fcms-walk-by(step, s, nid, pos + 1, left - 1, stops, out2, next-left, next-width, completed2);
         };
     };
+    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-by(fcms-forward, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps);
     // generation = tag text ids updated-session. No generated text is needed to
     // resume; the bytes are exposed only for the Form/BMF boundary that asks.
     def fcms-generation(text, ids, session) = ["form-cli-model-session-generation-v1", text, ids, session];
@@ -314,12 +319,17 @@ fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stre
         adapter-expected > 0 ? metal_sync() : 0;
         let adapter-closed = fcmd-close(fcmd-carrier(s));
         let adapter-ok = sampler-ok && (Comparable) adapter-closed == adapter-expected;
-        (Comparable) fcms-resident?(s) == 0 ? adapter-ok : {
+        // Slot 18 owns the draft lane's spare recurrent state (form-cli-model-draft.bml); the same expected-against-closed count.
+        let draft-expected = fcmdr-owned(fcmdr-owner(s));
+        draft-expected > 0 ? metal_sync() : 0;
+        let draft-closed = fcmdr-close(fcmdr-owner(s));
+        let draft-ok = adapter-ok && (Comparable) draft-closed == draft-expected;
+        (Comparable) fcms-resident?(s) == 0 ? draft-ok : {
             let state-expected = q38-state-handle-count(fcms-sts(s));
             let state-closed = q38-free-state(fcms-sts(s));
             let context-expected = q38-close-expected(fcms-ctx(s), []);
             let context-closed = q38-close(fcms-ctx(s), []);
-            adapter-ok && ((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
+            draft-ok && ((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
         };
     };
     0;
