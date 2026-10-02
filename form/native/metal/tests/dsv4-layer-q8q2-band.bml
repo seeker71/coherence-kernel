@@ -4,7 +4,7 @@
 ; are the fixture and the claims that were pinned to the first fixture's weights (the softplus stage maxima, the clamp's bite); each tensor is read by the type its own table row carries.
 ;
 ; WHAT THIS PINS. native/metal/dsv4-layer.fk enqueues one block at one position over the handles dsv4-open.fk opened (hc_pre, the MLA half with the compressor, hc_post, the FFN half). This band
-; opens the fixture it writes under temp_dir (1,515,232 bytes) at capacity 8, writes the two rope tables, and runs eight tokens (5, 17, 3, 22, 9, 28, 14, 1) through the three blocks two ways:
+; opens the fixture it writes under temp_dir (1,778,144 bytes) at capacity 8, writes the two rope tables, and runs eight tokens (5, 17, 3, 22, 9, 28, 14, 1) through the three blocks two ways:
 ;   ALONE   each block is fed the REFERENCE's own input at that position (the previous block's fp64 output, rounded to f32 by the write), so one block's disagreement is its own and does not compound
 ;           (the oracle harness's THIS-LAYER-ALONE gate: nd = max|gpu - ref| / max|ref| below the 3e-5 floor of max(8 ne, 3e-5), metal_dsv4_stack_oracle.sh above cmpOra, history 8a6f123d3^);
 ;   CHAINED the GPU feeds itself (block 0 -> 1 -> 2 at each position, its own residual and its own caches), held to the chain gate max(8 x 1.4e-5, 3e-5) = 1.12e-4.
@@ -14,7 +14,7 @@
 ; round). The compressed legs (block 1 at positions 3 and 7, block 2 at positions 1 to 7) are therefore pinned to the TWIN, not to an independent oracle: a wrong compressor recipe that the twin shares
 ; would pass. Everything else in the reference is the oracle's.
 ;
-; Verdict 2047 when every claim lands:
+; Verdict 4095 when every claim lands:
 ;   1     the cell and its refusals: every block of the fixture is supported; the dispatch counts are pinned (block 0: attention 22, FFN 19 with three routing dispatches; blocks 1 and 2: FFN 18, attention
 ;         25 a token of which the compressor's state work is 3, and 6 more (ratio 4) or 5 more (ratio 2) at a boundary); a position at the capacity, a block out of range and a ratio-4 block at position
 ;         2048 each answer nothing and touch no buffer (a sentinel in the output stays)
@@ -37,6 +37,9 @@
 ;         34 stand, and with the IQ2_XXS kernel routed to a Q2_K stack, each planted pipeline put in the context under the real kernel's name for one block run (block 1 at position 0, block 0 at position 0),
 ;         the block reads OUTSIDE the gate; the control (the unplanted kernel) and the restored kernel read inside it. The first fixture's own claim 1024 (the router's softplus against stage maxima pinned on
 ;         THAT fixture's weights) is not repeated: its numbers belong to its weights
+;   2048  an expert type no kernel reads is a refusal, never a neighbour's kernel: dkl-expert-kernel names the three kernels for types 40, 16 and 10 and reads nothing for 12, 41, 8, 0 or -1; with block 1's
+;         down stack retyped 12 in the context's own view record for one run, dkl-supported? refuses the block, dsv4-layer-ffn answers nothing, dkl-experts (called past admission) answers [0] and
+;         enqueues none of its dispatches (the expert and stream buffers keep their sentinel); with the view restored the same calls read supported and four enqueues
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door; the fixture is written and read as a binary file. Light GPU: 24 block runs of a few hundred threads over a 1.5 MB
 ; fixture, one tilted run, a chained pass of 24 more. Never maps a model; writes only under temp_dir and removes what it made.
@@ -301,6 +304,33 @@ section [form.bml] {
    let said = print_str("  plants: control " ++ control.str() ++ ", Q2_K scale mis-read " ++ a.str() ++ ", Q8_0 stride 33 " ++ b.str() ++ ", wrong type routed (the IQ2_XXS kernel on Q2_K) " ++ w.str() ++ ", restored " ++ again.str());
    scale > 0 && stride > 0 && control && !a && !b && !w && again;
   }
+  // ---- 2048: an expert type no kernel reads is a refusal, never a neighbour's kernel ------------------------------------------------------------------
+  // dkl-expert-kernel names the three kernels for 40, 16 and 10 and reads NOTHING for any other type. The plant: block 1's down stack's view retyped 12 (Q4_K: priced, with no id kernel) in the context's own
+  // view record for one run and restored: dkl-supported? refuses the block, dsv4-layer-ffn answers nothing, dkl-experts (called directly, past admission) answers [0] and enqueues none of its four dispatches
+  // (the expert buffers and the stream buffer keep their sentinel), and with the view restored the same calls read supported and four enqueues.
+  def dql-kernel-names() = dkl-expert-kernel(40) == "form_dsv4_mx4_matvec_id" && dkl-expert-kernel(16) == "form_dsv4_iq2_matvec_id" && dkl-expert-kernel(10) == "form_dsv4_q2k_matvec_id"
+   && nothing?(dkl-expert-kernel(12)) && nothing?(dkl-expert-kernel(41)) && nothing?(dkl-expert-kernel(8)) && nothing?(dkl-expert-kernel(0)) && nothing?(dkl-expert-kernel(0 - 1));
+  def dql-sentinels(ctx) = metal_buf_write(dso-buf(ctx, "xgate"), 0, dkr-sentinel(16)) >= 0 && metal_buf_write(dso-buf(ctx, "xdown"), 0, dkr-sentinel(16)) >= 0 && metal_buf_write(dso-buf(ctx, "resid-next"), 0, dkr-sentinel(16)) >= 0;
+  def dql-untouched?(ctx) = dql-rd(ctx, "xgate", 4)[0] > 1.0e15 && dql-rd(ctx, "xdown", 4)[0] > 1.0e15 && dql-rd(ctx, "resid-next", 4)[0] > 1.0e15;
+  def dql-expert-refusal(c) {
+   let ctx = dql-ctx(c);
+   let vx = dso-vx(ctx);
+   let name = "blk.1.ffn_down_exps.weight";
+   let v = record_get(vx, name);
+   let armed = dql-sentinels(ctx);
+   let p1 = record_set(vx, name, [v[0], v[1], 12, v[3], v[4], v[5]]);
+   let sup = dkl-supported?(ctx, 1);
+   let ex = dkl-experts(ctx, 1);
+   let f = dsv4-layer-ffn(ctx, 1, dql-tokens()[0]);
+   let s1 = metal_sync();
+   let held = dql-untouched?(ctx);
+   let p2 = record_set(vx, name, v);
+   let sup2 = dkl-supported?(ctx, 1);
+   let ex2 = dkl-experts(ctx, 1);
+   let s2 = metal_sync();
+   let said = print_str("  expert type refusal: kernel names " ++ dql-kernel-names().str() ++ ", planted type 12: supported " ++ sup.str() ++ ", dkl-experts " ++ ex.str() ++ ", layer-ffn nothing " ++ nothing?(f).str() ++ ", buffers untouched " ++ held.str() ++ "; restored: supported " ++ sup2.str() ++ ", dkl-experts " ++ ex2.str());
+   dql-kernel-names() && armed && !sup && ex == [0] && nothing?(f) && held && sup2 && ex2 == [1, 1, 1, 1];
+  }
   def dql-clamp-bites(c, ref) {
    let b0 = dql-bite(c, ref, 0);
    let b1 = dql-bite(c, ref, 1);
@@ -345,9 +375,10 @@ section [form.bml] {
  let c64 = dql-bit(try opened && dql-witnessed(fal) && dql-shift-witnessed(fal) && dql-tilted(c, ref, stsT) && dql-embedding(c, ref) catch false, 64);
  let stsP = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
  let c1024 = dql-bit(try opened && dql-plants(c, ref, stsP) catch false, 1024);
+ let c2048 = dql-bit(try opened && dql-expert-refusal(c) catch false, 2048);
  let left = opened ? dsv4-close(ctx, append(stsA, append(stsB, append(stsT, stsP)))) : [0];
  let c128 = dql-bit(try opened && len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
  let removed = host_path_remove(path);
- print_str("dsv4-layer-q8q2-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " unshifted " ++ (record_has(fal, "ns-1-7") ? record_get(fal, "ns-1-7").str() : "none") ++ " nocomp " ++ (record_has(fal, "nc-1-3") ? record_get(fal, "nc-1-3").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-1") ? record_get(fal, "nc-2-1").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-3") ? record_get(fal, "nc-2-3").str() : "none") ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ dvb-mapped().str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024;
+ print_str("dsv4-layer-q8q2-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " unshifted " ++ (record_has(fal, "ns-1-7") ? record_get(fal, "ns-1-7").str() : "none") ++ " nocomp " ++ (record_has(fal, "nc-1-3") ? record_get(fal, "nc-1-3").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-1") ? record_get(fal, "nc-2-1").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-3") ? record_get(fal, "nc-2-3").str() : "none") ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ dvb-mapped().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048;
 }

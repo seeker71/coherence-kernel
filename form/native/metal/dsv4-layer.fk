@@ -218,8 +218,8 @@ section [form.bml] {
     def dkl-ones(xs) = len(xs) == 0 ? [] : cons(xs[0] == 1, dkl-ones(xs[1:]));
 
     // ---- the FFN half --------------------------------------------------------------------------------------------------------------
-    // the routed-expert matvec by the stack's own type: MXFP4 (40), Q2_K (10), else IQ2_XXS (16; admission refuses every other type before a dispatch)
-    def dkl-expert-kernel(ty) = ty == 40 ? "form_dsv4_mx4_matvec_id" : (ty == 10 ? "form_dsv4_q2k_matvec_id" : "form_dsv4_iq2_matvec_id");
+    // the routed-expert matvec by the stack's own type: MXFP4 (40), IQ2_XXS (16) or Q2_K (10); any other type reads NOTHING (no kernel reads it), never a neighbouring type's kernel
+    def dkl-expert-kernel(ty) = ty == 40 ? "form_dsv4_mx4_matvec_id" : (ty == 16 ? "form_dsv4_iq2_matvec_id" : (ty == 10 ? "form_dsv4_q2k_matvec_id" : nothing()));
     def dkl-route(ctx, il, token) {
         let m = dkl-m(ctx);
         let used = record_get(m, "used");
@@ -240,13 +240,15 @@ section [form.bml] {
         let e = record_get(m, "e");
         let hidden = dkl-l(ctx, il, "hidden");
         let lim = dkl-f(dkl-clamp(ctx, il));
-        let gt = dkl-l(ctx, il, "gate-type");
-        let ut = dkl-l(ctx, il, "up-type");
-        let dt = dkl-l(ctx, il, "down-type");
-        [dkr-go(dkl-p(ctx, dkl-expert-kernel(gt)), [dkl-w(ctx, il, "ffn_gate_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xgate"), dkl-b(ctx, "expert-ids")], [hidden, e, used, 0], used * hidden * 32),
-         dkr-go(dkl-p(ctx, dkl-expert-kernel(ut)), [dkl-w(ctx, il, "ffn_up_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-ids")], [hidden, e, used, 0], used * hidden * 32),
+        // each stack's kernel from the type ITS OWN table row carries (the view's slot 2); a type no kernel reads refuses the whole FFN before any of its four dispatches (the result [0] is not 1, so the block answers nothing)
+        let gk = dkl-expert-kernel(dkl-type(dkl-view(ctx, il, "ffn_gate_exps.weight")));
+        let uk = dkl-expert-kernel(dkl-type(dkl-view(ctx, il, "ffn_up_exps.weight")));
+        let dk = dkl-expert-kernel(dkl-type(dkl-view(ctx, il, "ffn_down_exps.weight")));
+        (nothing?(gk) || nothing?(uk) || nothing?(dk)) ? [0] : [
+         dkr-go(dkl-p(ctx, gk), [dkl-w(ctx, il, "ffn_gate_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xgate"), dkl-b(ctx, "expert-ids")], [hidden, e, used, 0], used * hidden * 32),
+         dkr-go(dkl-p(ctx, uk), [dkl-w(ctx, il, "ffn_up_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-ids")], [hidden, e, used, 0], used * hidden * 32),
          dkr-go(dkl-p(ctx, "form_dsv4_swiglu_id"), [dkl-b(ctx, "xgate"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-weights"), dkl-b(ctx, "xmid")], [hidden, used, lim], used * hidden),
-         dkr-go(dkl-p(ctx, dkl-expert-kernel(dt)), [dkl-w(ctx, il, "ffn_down_exps.weight"), dkl-b(ctx, "xmid"), dkl-b(ctx, "xdown"), dkl-b(ctx, "expert-ids")], [e, hidden, used, hidden], used * e * 32)];
+         dkr-go(dkl-p(ctx, dk), [dkl-w(ctx, il, "ffn_down_exps.weight"), dkl-b(ctx, "xmid"), dkl-b(ctx, "xdown"), dkl-b(ctx, "expert-ids")], [e, hidden, used, hidden], used * e * 32)];
     }
     def dkl-shared(ctx, il) {
         let m = dkl-m(ctx);
