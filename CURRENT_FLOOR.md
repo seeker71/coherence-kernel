@@ -44,10 +44,10 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=39 claims=808 broken=0 (each broken claim named on its own line; 2026-10-02)
+./fkwu observe/door-link-health-run.bml  -> docs=39 claims=817 broken=0 (each broken claim named on its own line; 2026-10-02)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=343 readable=166 unreadable=177 absent=0 seen=1 flaws=0, exit 0
+./fkwu observe/band-truth-run.bml        -> bands=345 readable=167 unreadable=178 absent=0 seen=1 flaws=0, exit 0
                                             (each band's declared full read against the most its claims sum to, and
                                             the queue and manifest copies of a full against the head pin, with no
                                             band run, in about 0.3 s; a decimal or count fold that stands on purpose
@@ -253,25 +253,37 @@ verified.
 
 Read on 2026-10-02 (WITA) through `./fkwu form/form-stdlib/tests/<band> </dev/null`, the memory governor
 reading room before each run, every exit 0. No band maps the model: the ones that read the registry's file
-(the reap25 build) read its header, an 8 MB window, and the recorded logits are 1.5 MB. The whole stack through
-Metal over the mapped weights has not been run on today's kernel: the shell runners that drove it (the stack runner
-is 2,670 lines with a Swift program embedded) stand in history at 93154a720, and a Form cell over the fkwu Metal
-doors takes their place. What the bands below pin is what that cell takes as input and judges against.
+(the reap25 build) read its header, an 8 MB window, and the recorded logits are 1.5 MB. What stands is the chain
+restored model-free: the tokenizer, the quant and tensor readers, the emitters, the reference arithmetic and the
+emission door. What does not stand: the physical driver that would run the stack through Metal over the mapped
+weights is not in the tree (its design is in the lead's notes, to be built as dsv4-token-handle under
+form/native/metal); the Form-native lane is not wired (`model-registry.bml` keeps the
+`deepseek4` lane row at `ds4-query`, off); the control-plane rows `challenger.deepseek-ds4-metal` and
+`oracle.deepseek-ds4-imatrix` are unchanged; and the validation window is pending: one window, alone,
+governor-checked, against the recorded references earned on the IQ2XXS file.
 
 ```text
 tokenizer      dsv4-tokenizer-band 8191 · dsv4-tokenizer-native-band 15 · dsv4-token-recipe-swap-band 65535
 quant, tensor  ds4-quant-layout-band 127 · ds4-tensor-table-band 255 · f16-decode-band 4095 · gguf-manifest-band 255
                iq2xxs-dequant-band 1073741823 · iq2xxs-msl-band 8191 · mx-plane-band 511 · mx-msl-band 511
                q2k-dequant-band 511 · q2k-msl-band 255 · q8-0-msl-band 255 · windowed-residency-band 4095
-reference      dsv4-oracle-recipes-band.bml 16383   (the reference arithmetic against the body's carvers, the view
-               geometry, the request admission, the header-only plan of 1,406 tensors, the retention and fp64 matrix doors)
+reference      dsv4-oracle-recipes-band.bml 65535   (the reference arithmetic against the body's carvers, the view
+               geometry, the request admission, the header-only plan of 1,406 tensors, the retention and fp64 matrix
+               doors, the one minting door of the native organs' owner ids, the pipe owner's flow key)
 emitters       dsv4-compressor-band 2047 · dsv4-kv-cache-band 511 · dsv4-hc-band 63 · dsv4-hc-msl-band 63
-               dsv4-moe-msl-band 63 · dsv4-forward-band 127 · mla-msl-band 127 · moe-route-radius-band 63
-               moe-route-wide-msl-band 255
+               dsv4-moe-msl-band 63 · dsv4-forward-band 127 · mla-attn-band 63 · mla-msl-band 127
+               moe-msl-band 511 · moe-route-radius-band 63 · moe-route-wide-msl-band 255
 stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels compiled on the device, two run)
                ds4-order-match-band.bml 255       (the quantiser and the Q8_0 row dot against a Form reference of ds4's order)
-references     ds4-recorded-references-band.bml 255
+references     ds4-recorded-references-band.bml 1023   (the logits pinned by a SHA-256 of the whole file, by the body's own door)
 ```
+
+Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
+(rust and ts hand back a different file there); `./validate.sh --list` prints which. The restored emitters, the
+`*-real.fk` cells, `dsv4-token.fk` and the windowed residency emitter say in their own headers whether a band proves
+them or they are restored for the spec and not run physically. The reference evidence
+`docs/evidence/fkwu/dsv4-oracle.json` is the reading of 2026-09-11 and is left as observed; the sidecar
+`docs/evidence/fkwu/dsv4-oracle-reread.json` names which of its pinned identities still match.
 
 The recorded references are `form/form-stdlib/tests/oracles/ds4-logits-capital-of-france.json` (129,280 logits, argmax
 2581 "We" at 36.7579117) and the 24-token stream for the raw prompt ids [671 6102 294 8760 344] (a period-7 cycle,
