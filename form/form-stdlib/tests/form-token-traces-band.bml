@@ -1,6 +1,6 @@
 ; form-token-traces-band.bml — the training traces Form wrote are read back and run again.
 ; preludes: form-stdlib/bml/form-token-traces.bml
-; Verdict 63
+; Verdict 127
 ; PROOF LEVEL: FOURTH-ARM ONLY -- each trace is replayed through the in-stream verbs, which parse with the
 ; body's live cursor inside the running fkwu; the reference kernels hold no live lowering.
 ;
@@ -8,7 +8,8 @@
 ;     1  at least 500 rows; every row carries question, controls, observations, answer, prompt,
 ;        completion and stream, verified=1, replayed=1 and zero rented tokens
 ;     2  all fifteen families and all eight verbs are present; each family marks a held-out split,
-;        one row in eight
+;        one row in eight, except a row whose question a train row also asks, which trains (the file's
+;        every row carries the split the writer's rule gives its slot and question)
 ;     4  every eval, node and recipe row is rebuilt at band time: the writer's own generator makes
 ;        the case from its seed, a fresh session runs it, the oracle computed apart from the verb
 ;        must hold, and the row the writer would write equals the file's line byte for byte once
@@ -24,6 +25,9 @@
 ;        a sense row with a changed sense, and a receipt row with a changed title
 ;    32  completion is the first control and carries no observation; stream interleaves each control
 ;        with its observation and ends with the answer
+;    64  no held-out question is asked by a row that trains (the corpus holds sixteen questions asked
+;        twice; a held-out slot whose question a train row asks is not held out); the rule on its own:
+;        slot 7 with a free question holds out, with a taken question trains, any other slot trains
 section [form.bml] {
  class FormTokenTracesBand {
   def ftrb-claim(ok, bit) = ok ? bit : 0;
@@ -36,10 +40,24 @@ section [form.bml] {
   def ftrb-families() = ["eval-arith", "eval-compare", "eval-text", "eval-lists", "eval-recursion", "eval-float", "eval-refusal", "knowledge-receipts", "knowledge-enrich", "node-make", "node-get", "node-select", "recipe-affine", "recipe-choice", "recipe-bml"];
   def ftrb-of(rows, family) = filter(r => ftrb-text(r, "family") == family, rows);
   def ftrb-heldout(rows) = len(filter(r => ftrb-text(r, "split") == "heldout", rows));
-  def ftrb-split-ok(rows) = (ftrb-heldout(rows) >= 1) && (ftrb-heldout(rows) == (len(rows) / 8));
+  // the questions of the rows in a train slot (the eighth row of a family is not one), as the file records them
+  def ftrb-slot-questions(rs, i) = nil?(rs) ? [] : ftr-held-slot?(i) ? ftrb-slot-questions(rs[1:], i + 1) : cons(ftrb-text(rs[0], "question"), ftrb-slot-questions(rs[1:], i + 1));
+  def ftrb-trained(rows) = foldl((acc, f) => append(acc, ftrb-slot-questions(ftrb-of(rows, f), 0)), [], ftrb-families());
+  // every row of a family, in file order, carries the split the writer's rule gives its slot and question
+  def ftrb-splits-at?(rs, i, trained) = nil?(rs) ? 1 : ftrb-text(rs[0], "split") == ftr-split(i, ftrb-text(rs[0], "question"), trained) ? ftrb-splits-at?(rs[1:], i + 1, trained) : 0;
+  def ftrb-split-ok(rs, trained) = (ftrb-heldout(rs) >= 1) && (ftrb-heldout(rs) <= (len(rs) / 8)) && ftrb-splits-at?(rs, 0, trained);
   def ftrb-coverage(rows) {
    let verbs = foldl((acc, r) => append(acc, ftrb-strings(r, "verbs")), [], rows);
-   all?(f => ftrb-split-ok(ftrb-of(rows, f)), ftrb-families()) && all?(v => any?(x => x == v, verbs), ftg-verbs());
+   let trained = ftrb-trained(rows);
+   all?(f => ftrb-split-ok(ftrb-of(rows, f), trained), ftrb-families()) && all?(v => any?(x => x == v, verbs), ftg-verbs());
+  }
+  // no held-out question is asked by a row that trains; and the writer's rule: a held-out slot holds out
+  // unless a train row asks its question, no other slot holds out
+  def ftrb-no-overlap(rows) {
+   let train = map(r => ftrb-text(r, "question"), filter(r => ftrb-text(r, "split") == "train", rows));
+   let held = filter(r => ftrb-text(r, "split") == "heldout", rows);
+   (len(held) > 0) && all?(h => !any?(q => q == ftrb-text(h, "question"), train), held)
+    && (ftr-split(7, "q", []) == "heldout") && (ftr-split(7, "q", ["p", "q"]) == "train") && (ftr-split(6, "q", []) == "train") && (ftr-split(15, "r", ["q"]) == "heldout");
   }
   def ftrb-knowledge?(family) = ftv-starts?(family, "knowledge-");
 
@@ -55,17 +73,17 @@ section [form.bml] {
   }
   // the line the writer writes for case c at index i, from one fresh run, or "" when the oracle
   // does not hold (the writer skips such a case and does not count it)
-  def ftrb-built-line(c, i) {
+  def ftrb-built-line(c, i, trained) {
    let run = ftr-run(c);
    let held = try [c[4](run[2])] catch [0];
-   held[0] == 1 ? json-emit(ftr-row(c, run, c[3](run[2]), i)) : "";
+   held[0] == 1 ? json-emit(ftr-row(c, run, c[3](run[2]), i, ftr-split(i, c[1], trained))) : "";
   }
-  def ftrb-rebuild(cases, recorded, i) {
-   let line = nil?(cases) ? "" : ftrb-built-line(cases[0], i);
+  def ftrb-rebuild(cases, recorded, i, trained) {
+   let line = nil?(cases) ? "" : ftrb-built-line(cases[0], i, trained);
    if nil?(cases) then nil?(recorded)
-   else if len(line) == 0 then ftrb-rebuild(cases[1:], recorded, i)
+   else if len(line) == 0 then ftrb-rebuild(cases[1:], recorded, i, trained)
    else if nil?(recorded) then 0
-   else if ftrb-same-row?(line, recorded[0]) then ftrb-rebuild(cases[1:], recorded[1:], i + 1)
+   else if ftrb-same-row?(line, recorded[0]) then ftrb-rebuild(cases[1:], recorded[1:], i + 1, trained)
    else ftrb-miss(line, recorded[0]);
   }
   def ftrb-miss(line, recorded) {
@@ -75,7 +93,10 @@ section [form.bml] {
   // [family, recorded lines]: the file's lines of one family, in file order
   def ftrb-family-lines(lines, rows, family) = ftrb-family-lines-at(lines, rows, family, []);
   def ftrb-family-lines-at(lines, rows, family, out) = nil?(lines) ? reverse(out) : ftrb-family-lines-at(lines[1:], rows[1:], family, ftrb-text(rows[0], "family") == family ? cons(lines[0], out) : out);
-  def ftrb-rebuilds(lines, rows) = all?(f => ftrb-rebuild(f[1], ftrb-family-lines(lines, rows, f[0]), 0), filter(f => !ftrb-knowledge?(f[0]), ftr-families()));
+  def ftrb-rebuilds(lines, rows) {
+   let trained = ftrb-trained(rows);
+   all?(f => ftrb-rebuild(f[1], ftrb-family-lines(lines, rows, f[0]), 0, trained), filter(f => !ftrb-knowledge?(f[0]), ftr-families()));
+  }
 
   // ── knowledge rows against their sources ─────────────────────────────
   def ftrb-term(question) = substring(question, len("Which receipt in this body speaks of "), len(question) - 1);
@@ -119,9 +140,9 @@ section [form.bml] {
   // another session maps onto it; the corpus's own first sense row with a changed sense and its
   // first receipt row with a changed title are refused, while the rows as written hold.
   def ftrb-tamper-refused(rows) {
-   let line = ftrb-built-line(ftr-eval("eval-arith", "What is 6 * 7?", "6 * 7", 42), 0);
-   let forged = json-emit(ftr-row(ftr-eval("eval-arith", "What is 6 * 7?", "6 * 7", 42), [["eval"], ["<|form:eval|>6 * 8<|/form:eval|>"], ["value=48;"]], "48", 0));
-   let node = ftrb-built-line(ftr-node-get(0), 0);
+   let line = ftrb-built-line(ftr-eval("eval-arith", "What is 6 * 7?", "6 * 7", 42), 0, []);
+   let forged = json-emit(ftr-row(ftr-eval("eval-arith", "What is 6 * 7?", "6 * 7", 42), [["eval"], ["<|form:eval|>6 * 8<|/form:eval|>"], ["value=48;"]], "48", 0, "train"));
+   let node = ftrb-built-line(ftr-node-get(0), 0, []);
    let s = ftrb-of(rows, "knowledge-enrich")[0];
    let r = ftrb-of(rows, "knowledge-receipts")[0];
    let control = ftrb-strings(s, "controls")[0];
@@ -129,7 +150,7 @@ section [form.bml] {
    let sense = ftrb-sense-ok?(control, ftg-observation("value=" ++ word ++ ": a changed sense [cognition/form-neutral-word-field.fk];"));
    let title = ftrb-receipt-ok?(ftrb-text(r, "question"), ftrb-text(r, "answer"), ftg-observation("value=" ++ ftrb-text(r, "answer") ++ ": A changed title;"));
    let asWritten = ftrb-sense-ok?(control, ftrb-strings(s, "observations")[0]) && ftrb-receipt-ok?(ftrb-text(r, "question"), ftrb-text(r, "answer"), ftrb-strings(r, "observations")[0]);
-   ftrb-same-row?(line, line) && !ftrb-same-row?(line, forged) && ftrb-same-row?(node, ftrb-built-line(ftr-node-get(0), 0)) && asWritten && !sense && !title;
+   ftrb-same-row?(line, line) && !ftrb-same-row?(line, forged) && ftrb-same-row?(node, ftrb-built-line(ftr-node-get(0), 0, [])) && asWritten && !sense && !title;
   }
   def ftrb-stream(r) {
    let controls = ftrb-strings(r, "controls");
@@ -146,8 +167,9 @@ section [form.bml] {
    let c4 = ftrb-claim(ftrb-grounded(rows), 8);
    let c5 = ftrb-claim(ftrb-check(rows), 16);
    let c6 = ftrb-claim(all?(r => ftrb-stream(r), rows), 32);
-   print_str("form-token-traces-band rows " ++ len(rows).str() ++ " claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c3.str() ++ " " ++ c4.str() ++ " " ++ c5.str() ++ " " ++ c6.str());
-   c1 + c2 + c3 + c4 + c5 + c6;
+   let c7 = ftrb-claim(ftrb-no-overlap(rows), 64);
+   print_str("form-token-traces-band rows " ++ len(rows).str() ++ " claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c3.str() ++ " " ++ c4.str() ++ " " ++ c5.str() ++ " " ++ c6.str() ++ " " ++ c7.str());
+   c1 + c2 + c3 + c4 + c5 + c6 + c7;
   }
  }
  ftrb-run();
