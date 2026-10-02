@@ -1,0 +1,87 @@
+// dir-lock.bml — one process at a time, by a directory only one maker makes.
+//
+// The lock is a directory (host_dir_mkdir makes one level, for one maker only) holding its holder's owner file,
+// "pid=<pid> at=<unix ms>". A waiter backs off (host_sleep_ms: 1, 2, 4 ... 32 ms) and tries again. A lock is stale
+// when its holder is gone (host_alive), is a pid the host handed out again since the stamp (it began after it), has
+// held it longer than the patience, or when this wait has used its patience; a lock that names no holder yet reads
+// its own age. A stale lock is taken through a mark inside it that only one taker can make (<lock>/took-<holder>),
+// and only while the lock still names that holder; a mark older than the patience (a taker that ended) is removed.
+// A lock is released only by the pid it names, so a holder that was taken over from never removes the taker's lock,
+// and the release removes the marks with it. dl-take gives up (answers 0) when the lock's directory cannot be made
+// at all (its parent is not there, or not writable) or the wait outlives twice its patience: a lock that cannot be
+// had is a held answer for the caller to meet, never a loop.
+//
+// The same pattern keeps form-token-workspace.bml's ftw-lock-* (one writer per store) and host-walk.bml's hw-claim
+// (one walk per checkout, which names its holder to the person who started the second walk); this one is the small
+// door a lib with no other imports takes (memory-governor.bml, the cross-process leases).
+//
+// PROOF: form-stdlib/tests/memory-governor-band.bml (claim "lock").
+section [form.bml] {
+ class DirLock {
+  def dl-owner-path(lock) = lock ++ "/owner";
+  def dl-owner(lock) = read_file(dl-owner-path(lock)) ?? "";
+  def dl-text(pid, now) = "pid=" ++ pid.str() ++ " at=" ++ now.str();
+  def dl-digits(text, from, i) = (i < len(text)) && (str_byte_at(text, i) >= 48) && (str_byte_at(text, i) <= 57) ? dl-digits(text, from, i + 1) : i > from ? str_to_int(substring(text, from, i)) : nothing();
+  def dl-field(text, key) {
+   let at = str_find(text, key, 0);
+   at < 0 ? nothing() : dl-digits(text, at + len(key), at + len(key));
+  }
+  // seconds since a path last changed; a path that is not there (or reads no time) is no age at all
+  def dl-age-of(at, now) = (String) value_kind(at) != "int" ? 0 : at <= 0 ? 0 : (now / 1000) - at;
+  def dl-age-ms(path) = dl-age-of(file_mtime(path), now_unix_ms()) * 1000;
+  // the unix ms a pid's process began, or nothing when the host does not say
+  def dl-began(pid) {
+   let row = host_process(pid);
+   (String) value_kind(row) != "list" ? nothing() : len(row) < 6 ? nothing() : (String) value_kind(row[5]) != "int" ? nothing() : row[5];
+  }
+  def dl-holds?(pid, at) = (Comparable) host_alive(pid) != 1 ? false : nothing?(at) ? true : nothing?(dl-began(pid)) ? true : dl-began(pid) <= at + 1000;
+  // 1 when this process holds the lock, 0 when it gave up
+  def dl-take(lock, patience) = dl-take-by(lock, patience, host_monotonic_ms() + patience, host_monotonic_ms() + (patience * 2), 0);
+  def dl-take-by(lock, patience, deadline, giveup, tries) = (Comparable) host_dir_mkdir(lock) == 1 ? dl-own(lock)
+   : (Comparable) host_path_is_dir(lock) != 1 ? dl-gone(lock, patience, deadline, giveup, tries)
+   : host_monotonic_ms() >= giveup ? 0
+   : dl-found(lock, patience, deadline, giveup, tries, dl-owner(lock));
+  // the make was refused and no lock stands: the holder released between the two, so the make goes again; three
+  // refusals in a row are a directory that cannot be made (its parent is not there, or not writable)
+  def dl-gone(lock, patience, deadline, giveup, tries) = tries >= 3 ? 0 : dl-again(lock, patience, deadline, giveup, tries);
+  def dl-own(lock) {
+   let text = dl-text(host_pid(), now_unix_ms());
+   let wrote = write_file_text(dl-owner-path(lock), text);
+   (String) dl-owner(lock) == text ? 1 : dl-unmade(lock);
+  }
+  def dl-unmade(lock) {
+   let gone = host_dir_rmdir(lock);
+   0;
+  }
+  def dl-found(lock, patience, deadline, giveup, tries, text) = dl-stale?(lock, patience, deadline, text) ? dl-takeover(lock, patience, deadline, giveup, tries, text) : dl-again(lock, patience, deadline, giveup, tries);
+  def dl-again(lock, patience, deadline, giveup, tries) {
+   let rested = host_sleep_ms(dl-backoff(tries));
+   dl-take-by(lock, patience, deadline, giveup, tries + 1);
+  }
+  // 1, 2, 4 ... 32 ms
+  def dl-backoff(tries) = tries >= 5 ? 32 : [1, 2, 4, 8, 16][tries];
+  def dl-stale?(lock, patience, deadline, text) {
+   let pid = dl-field(text, "pid=");
+   let at = dl-field(text, " at=");
+   host_monotonic_ms() >= deadline ? true
+   : (nothing?(pid) || nothing?(at)) ? dl-age-ms(lock) > (patience / 5)
+   : !dl-holds?(pid, at) || ((now_unix_ms() - at) > patience);
+  }
+  def dl-takeover(lock, patience, deadline, giveup, tries, text) {
+   let pid = dl-field(text, "pid=");
+   let mark = lock ++ "/took-" ++ (nothing?(pid) ? "unowned" : pid.str());
+   ((Comparable) host_dir_mkdir(mark) == 1) && ((String) dl-owner(lock) == text) ? dl-own(lock) : dl-unmark(lock, mark, patience, deadline, giveup, tries);
+  }
+  def dl-unmark(lock, mark, patience, deadline, giveup, tries) {
+   let cleared = dl-age-ms(mark) > patience ? host_dir_rmdir(mark) : 0;
+   dl-again(lock, patience, deadline, giveup, tries);
+  }
+  // released by the pid the lock names, and by no other: 0 when removed, -1 when it stays
+  def dl-release-as(lock, pid) {
+   let holder = dl-field(dl-owner(lock), "pid=");
+   !nothing?(holder) && ((Comparable) holder == pid) ? host_dir_rmdir(lock) : -1;
+  }
+  def dl-release(lock) = dl-release-as(lock, host_pid());
+ }
+ 0;
+}

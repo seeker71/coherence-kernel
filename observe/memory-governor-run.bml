@@ -1,14 +1,18 @@
-// memory-governor-run.bml — how much RAM the machine can give right now, and whether a heavy open may take more.
+// memory-governor-run.bml — how much RAM the machine can give right now, who has promised some, and whether a heavy open may take more.
 //
-//   ./fkwu observe/memory-governor-run.bml </dev/null                       the machine's reading, one line
+//   ./fkwu observe/memory-governor-run.bml </dev/null                       the machine's reading and the live leases
 //   echo '{"need_gib":40,"who":"walk"}' | ./fkwu observe/memory-governor-run.bml
 //   echo '{"need_gib":40,"who":"walk","wait_ms":600000}' | ./fkwu observe/memory-governor-run.bml
 //
 // stdin, optional, one JSON line: need_gib (what the caller is about to take; a model's weights plus its KV margin),
 // who (named in the line), wait_ms (ask again with growing naps for this long before answering held; 0 or absent
-// asks once). It prints the machine's reading (mg-status-line) and, when a need is named, the verdict: a line
-// that starts "[memory] granted" or "[memory] held". A caller that is a shell reads that line (grep -c
-// "^\[memory\] granted"); a caller in Form calls mg-ask / mg-wait of form-stdlib/bml/memory-governor.bml itself.
+// asks once), lease_dir (read the leases of this directory instead of the host's own; for a band). It prints the
+// machine's reading (mg-status-line), one line per live lease (who, key, bytes, age, pending or settled; a lease is a
+// promise another process can see before the memory shows up in the reading) and, when a need is named, the verdict:
+// a line that starts "[memory] granted" or "[memory] held". The door is read-only: it takes no lease and removes no
+// file; leases are taken by the doors that open models (fcms-open-context, fcmr-prepare, lpr-ask) and the verdict
+// here is the bare reading's, not a lease's. A caller that is a shell reads the verdict line (grep -c
+// "^\[memory\] granted"); a caller in Form calls mg-ask / mg-wait / mg-lease of form-stdlib/bml/memory-governor.bml itself.
 // The reading is the machine's, not this process's: see memory-governor.bml for what it counts and why.
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml
@@ -20,9 +24,12 @@ section [form.bml] {
    let line = trim(stdin-text());
    (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("memory-options", line) : json-node-object([]);
   }
+  def mgr-said(lines) = nil?(lines) ? 0 : mgr-said-next(print_str(lines[0]), lines[1:]);
+  def mgr-said-next(said, rest) = mgr-said(rest);
   def mgr-run() {
    let opts = mgr-options();
    let said = print_str(mg-status-line(mg-sense()));
+   let leases = mgr-said(mg-lease-lines(mg-lease-view(mgr-text(opts, "lease_dir", mg-lease-dir())), now_unix_ms()));
    let need = mgr-int(opts, "need_gib", 0) * mg-gib();
    let who = mgr-text(opts, "who", "caller");
    let wait = mgr-int(opts, "wait_ms", 0);
