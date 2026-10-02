@@ -255,14 +255,14 @@ Read on 2026-10-02 (WITA) through `./fkwu form/form-stdlib/tests/<band> </dev/nu
 reading room before each run, every exit 0. No band maps the model: the ones that read the registry's file
 (the reap25 build) read its header, an 8 MB window, and the recorded logits are 1.5 MB. What stands is the chain
 restored model-free: the tokenizer, the quant and tensor readers, the emitters, the reference arithmetic and the
-emission door, and the driver's foundation (driver stages 1 and 2, below: the fixture, layout and bind on the CPU;
-the kernel set, the open and one layer on the device, all on the Form-built fixture). What does not stand: the dispatch of
-the stack through Metal over a real file's mapped weights (the driver's head and token loop; its
-design is in the lead's notes, to be built as dsv4-token-handle under form/native/metal) is not in the tree;
-the Form-native lane is not wired (`model-registry.bml` keeps the
-`deepseek4` lane row at `ds4-query`, off); the control-plane rows `challenger.deepseek-ds4-metal` and
-`oracle.deepseek-ds4-imatrix` are unchanged; and the validation window is pending: one window, alone,
-governor-checked, against the recorded references earned on the IQ2XXS file.
+emission door, and the driver (driver stages 1 to 3, below: the fixture, layout and bind on the CPU; the kernel set, the
+open, one layer, the head, prefill and the greedy loop, the whole fixture model end to end on the device, all on the
+Form-built fixture; the session and generate doors, the derived memory lease and the validation window written with the
+lane off). What does not stand: the driver over a real file's mapped weights (the IQ2XXS file's Q8_0 dense and Q2_K down
+tensors have kernels and no wiring in a block); the Form-native lane is not wired (`model-registry.bml` keeps the
+`deepseek4` lane row at `ds4-query`, off, and `fcds-lane-wired?` in `form-cli-model-ds4.fk` is its twin, 0); the
+control-plane rows `challenger.deepseek-ds4-metal` and `oracle.deepseek-ds4-imatrix` are unchanged; and the validation
+window has not run: one window, alone, governor-checked, against the recorded references earned on the IQ2XXS file.
 
 ```text
 tokenizer      dsv4-tokenizer-band 8191 · dsv4-tokenizer-native-band 15 · dsv4-token-recipe-swap-band 65535
@@ -280,6 +280,8 @@ stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels co
 references     ds4-recorded-references-band.bml 1023   (the logits pinned by a SHA-256 of the whole file, by the body's own door)
 driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 511 · native/metal/tests/dsv4-bind-band.bml 511
 driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 511 · native/metal/tests/dsv4-layer-band.bml 2047
+driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/dsv4-end-to-end-band.bml 511
+               dsv4-lease-band.bml 255 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 255
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -294,8 +296,8 @@ blk.42 are the layers, and 3 draft layers (`dspark.0` to `dspark.2`) follow in t
 is 43 plus 3 (the comment beside the control-plane row is left as it stands). The fixture, layout and bind bands
 declare `PROOF LEVEL: FOURTH-ARM ONLY` (binary fixture, host-local headers, a live Metal device) and are not rowed in
 `form/fourth-arm-bands.txt`. The driver's kernels must emit `#pragma clang fp reassociate(off)` and `contract(off)`
-(each of the three cells says so in its header). Still ahead after stage 2: the head and prefill, the fixture end to end,
-the session wiring and the physical window.
+(each of the three cells says so in its header). Still ahead after stage 3: the Q8_0 dense and Q2_K down wiring in a block, and
+the physical window.
 
 Driver stage 2 (read 2026-10-03 WITA on this Mac's GPU, each band alone, memory room and no model door resident before
 each run, every exit 0; each band's planted defects dropped its reading and were restored): `form/form-stdlib/dsv4-kernels.fk`
@@ -306,7 +308,7 @@ arithmetic on the fixture's own tensors (54 readings, 0 to 4.7e-7, plus the argm
 infinity in a reading is a failure with its stage named, never a stop (`dkr-nd`, `dkr-nd-why`), and `form_dsv4_nan_count` with
 `dkr-logits-clean?` counts the non-finite words of the logits by their exponent bits, which the driver must read as zero before
 it trusts the argmax (the argmax skips a single NaN); `form/native/metal/dsv4-open.fk` opens the fixture as
-handles in Qwen's context shape (86 views, 50 scratch buffers, a state of [kv, comp state, comp score, comp rows] a block) so
+handles in Qwen's context shape (86 views, 50 scratch buffers, 51 since stage 3 added the head's gate buffer so the logits are bs[28], a state of [kv, comp state, comp score, comp rows] a block) so
 `q38-context-ok?`, `q38-state-ok?` and `q38-close` apply, counted through metal_live and released to 0 live in synced rounds,
 and an open whose kernel the device refuses answers [] before anything is mapped;
 `form/native/metal/dsv4-layer.fk` runs one block (hc_pre, MLA with the compressor, hc_post, the router by hash or biased
@@ -327,6 +329,29 @@ control, and the layer routes with the new ones (block 0's router weights 2.8e-5
 block 2's output streams 1.48e-5 to 1.49e-5, flip-dominated). Not wired: the real IQ2XXS file's Q8_0 dense path and Q2_K
 down experts have kernels (the Q8_0 lane has a reading; Q2_K is compiled only) and no wiring in the layer; `n_hc` other than 4
 is refused.
+
+Driver stage 3 (read 2026-10-03 WITA, memory room and no model door resident before each run, every exit 0; each band's planted
+defects dropped its reading and were restored): `form/native/metal/dsv4-token-handle.fk` runs the embedding, every block, the
+output head (stream rms, F16 `output_hc_fn`, the head gates, the stream sum, `output_norm`, the MXFP8 `output.weight` into the logits
+at bs[28], where Qwen's sampler reads them) and the device argmax, which is trusted only after the NaN scan; prefill is token-major
+with the head asked once, at the last token. On the fixture the head reads 3e-8 to 4e-7 against the oracle's own head arithmetic;
+prefill and the stepwise path agree bit for bit; the whole model (a prompt of four tokens and eight greedy steps, ids 27 24 29 6 17 15
+16 3) agrees with the oracle's full forward at every step (nd 1.2e-6 to 6.9e-5 against the tilt-measured bound max(8 ne, 3e-5) =
+3.2e-4 to 9.1e-4, the argmax equal with a margin of at least 100 times the disagreement), the run twice is bit-equal, and every
+block alone at all eleven positions reads 1.9e-7 to 1.9e-6: chained, the model amplifies f32 noise (steps above the 3e-5 floor), which is its
+conditioning and not a kernel's. Not independently witnessed: the compressor (the oracle has none; its leg is pinned to the author
+twin), the fixture's own clamp values, and the head's choice of epsilon (the fixture holds `eps` and `hyper_connection.epsilon` equal).
+`form/form-stdlib/dsv4-lease.fk` derives what a DeepSeek session asks the governor for, from the header (dense bytes + 64 experts a layer
++ KV; derived, not measured): 27,593,273,180 B for the IQ2XXS file and 31,060,815,708 B for reap25 at 8,192 positions, against a wired cap of
+82,463,372,040 B that the files themselves (86.7 and 91.3 GB) exceed; `fcms-weights-bytes` and `adm-admit` charge it for a deepseek4
+file and file_size for every other (the Qwen file reads 29,047,086,048 exactly). `form/form-stdlib/form-cli-model-ds4.fk` seats DeepSeek
+at the generate and session doors (the DeepSeek tokenizer's raw ids, the lease, the driver's open, prefill, greedy steps and close); the lane
+switch reads 0, today's refusals read word for word, a DeepSeek session refuses observations, and nothing here has run on a device.
+`observe/dsv4-validate-run.bml` is the validation window, written and not run: `{"dry":1}` prints its plan (24.9 GiB lease, the stages
+and asks, the abort rules, the references) and opens nothing; the plan names the gap the window would meet first: the IQ2XXS file's
+Q8_0 dense tensors and Q2_K down experts (the reap25 header reads none). The doors, as they read after this change:
+`./fkwu observe/door-link-health-run.bml </dev/null` -> docs=39 claims=831 broken=0 (prelude-reach missing=0 untracked=0 shadow=0),
+`./fkwu observe/band-truth-run.bml </dev/null` -> bands=356 readable=178 unreadable=178 absent=0 seen=1 flaws=0 (the five stage-3 bands are read: 351 -> 356, 173 -> 178).
 
 Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
 (rust and ts hand back a different file there); `./validate.sh --list` prints which. The restored emitters, the
