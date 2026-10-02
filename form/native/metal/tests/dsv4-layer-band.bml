@@ -12,7 +12,7 @@
 ; round). The compressed legs (block 1 at positions 3 and 7, block 2 at positions 1 to 7) are therefore pinned to the TWIN, not to an independent oracle: a wrong compressor recipe that the twin shares
 ; would pass. Everything else in the reference is the oracle's.
 ;
-; Verdict 1023 when every claim lands:
+; Verdict 2047 when every claim lands:
 ;   1     the cell and its refusals: every block of the fixture is supported; the dispatch counts are pinned (block 0: attention 22, FFN 19 with three routing dispatches; blocks 1 and 2: FFN 18, attention
 ;         25 a token of which the compressor's state work is 3, and 6 more (ratio 4) or 5 more (ratio 2) at a boundary); a position at the capacity, a block out of range and a ratio-4 block at position
 ;         2048 each answer nothing and touch no buffer (a sentinel in the output stays)
@@ -29,6 +29,9 @@
 ;   128   release: dsv4-close in synced rounds leaves no handle and metal_live reads what it read before the open
 ;   256   the second windows, positions 4 to 7 of blocks 1 and 2 alone: block 1's second ratio-4 window (position 7) pools over the state comp_shift left, so a launch that shifts nothing or too little
 ;         reads wrong there; block 2 emits at 5 and 7 as well as 1 and 3; every stage in the gate, the compressed arena (two rows on block 1, four on block 2) equal to the twin's
+;   1024  the router's softplus that keeps its digits (the layer routes with form_dsv4_hash_probs_s and form_dsv4_topk_probs_s) is at least as accurate everywhere: against the stage maxima the
+;         layer read with the restored form (pinned in dlb-before) no stage of any block reads more than 1% above, the router weights of every block read no more, and on block 0 the weights,
+;         the FFN sum and the output streams read under 1e-6 where they read 2.8e-5, 9.7e-6 and 1.0e-5; the chained streams read no more than before
 ;   512   the clamp is wired per block and it bites: dkl-clamp reads 10.0, 1.0, 2.0 from the header, equal to the fixture's own metadata (dfo-meta) on each block; on the oracle's own activations at
 ;         position 0 the clamp changes the first routed expert's mid and the shared expert's mid by well over 1% on block 1 (lim 1.0) and block 2 (lim 2.0) and by exactly nothing on block 0 (lim
 ;         10.0), and the oracle's own mid equals the clamped one
@@ -155,6 +158,8 @@ section [form.bml] {
    let ncomp = dlb-ratio(c, il) == 0 ? 0 : (pos + 1) / dlb-ratio(c, il);
    let compNd = ncomp == 0 ? 0.0 : dkr-nd(dkr-read(sts[il][3], ncomp * dlb-hd(c)), dlb-flat(lr[4]));
    let noted = nothing?(input) ? 0 : dlb-noted(c, fal, il, pos, input, lr, heads);
+   let mx1 = dlb-max-all(fal, il, ta, nda);
+   let mx2 = dlb-max-all(fal, il, tf, ndf);
    let enq = record_set(fal, "enq-" ++ il.str() ++ "-" ++ pos.str(), [n1, n2]);
    // at the second ratio-4 emission the GPU's two compressed rows against the rows an UNSHIFTED state would give (the shift's witness)
    let ns = (dlb-ratio(c, il) == 4 && ncomp == 2) ? record_set(fal, "ns-" ++ il.str() ++ "-" ++ pos.str(), dkr-nd(dkr-read(sts[il][3], 2 * dlb-hd(c)), dlb-flat(lr[8]))) : 0;
@@ -165,6 +170,38 @@ section [form.bml] {
    let flipOk = len(flips) > 0 && len(flips) <= 2 && dlb-one-step?(flips);
    let bound = flipOk ? dlb-chain-bound() : dkr-floor();
    fed && !nothing?(n1) && !nothing?(n2) && ids == refIds && dlb-below(nda, bound) && dlb-below(ndf, bound) && (compNd < dkr-floor() || flipOk);
+  }
+  // the largest disagreement each stage of each block reaches over the eight alone positions (key "max-<block>-<stage>"), and the chained output streams ("max-chain-<block>")
+  def dlb-max-set(fal, key, v) = record_set(fal, key, (record_has(fal, key) && record_get(fal, key) >= v) ? record_get(fal, key) : v);
+  def dlb-max-all(fal, il, ts, nds) = len(ts) == 0 ? 0 : { let s = dlb-max-set(fal, "max-" ++ il.str() ++ "-" ++ ts[0][0], nds[0]); dlb-max-all(fal, il, ts[1:], nds[1:]); };
+  def dlb-stage-labels() = ["xn", "q", "kv", "heads", "low", "attn_out", "after_attn", "ffn_cur", "ffn_norm", "logits", "w", "shared", "ffn_out", "out_hc"];
+  def dlb-maxes-line(fal, il, labels) = len(labels) == 0 ? "" : (labels[0] ++ " " ++ record_get(fal, "max-" ++ il.str() ++ "-" ++ labels[0]).str() ++ "  " ++ dlb-maxes-line(fal, il, labels[1:]));
+  def dlb-print-maxes(fal) {
+   let a = print_str("  stage maxima block 0: " ++ dlb-maxes-line(fal, 0, dlb-stage-labels()));
+   let b = print_str("  stage maxima block 1: " ++ dlb-maxes-line(fal, 1, dlb-stage-labels()));
+   let c = print_str("  stage maxima block 2: " ++ dlb-maxes-line(fal, 2, dlb-stage-labels()));
+   let d = print_str("  chained out_hc maxima: " ++ record_get(fal, "max-chain-0").str() ++ " " ++ record_get(fal, "max-chain-1").str() ++ " " ++ record_get(fal, "max-chain-2").str());
+   1;
+  }
+  // ---- 1024: the router's softplus that keeps its digits is at least as accurate everywhere ---------------------------------------------------------
+  // the stage maxima the layer read BEFORE it used form_dsv4_hash_probs_s / form_dsv4_topk_probs_s (witnessed 2026-10-03 02:15 WITA with the restored ln(1 + exp(z)) form), in dlb-stage-labels order
+  def dlb-before(il) = il == 0 ? [1.7095452308641835e-7, 3.6808884496246675e-7, 4.129577554127199e-8, 4.269569293347805e-7, 5.702471618184583e-7, 4.797806020007651e-7, 4.935472857906541e-7, 3.623854895845059e-7, 3.4058505518960517e-7, 1.2837468975063077e-7, 2.8148138060383888e-5, 7.208938493468613e-7, 9.652798799459582e-6, 1.0106141621636948e-5]
+   : il == 1 ? [1.5423574116247401e-7, 4.040386666963142e-7, 1.2715657552083333e-6, 3.6858010945610364e-7, 4.6017998829040275e-7, 5.929242830879721e-7, 3.4132331247395537e-7, 2.3636183546580175e-7, 2.2713453609638455e-7, 1.1879243011143886e-7, 1.366026365960515e-7, 7.723003634822912e-7, 7.856185047140311e-7, 6.844882869710477e-7]
+   : [1.4336140930459134e-7, 4.334594959567722e-7, 6.985425608011445e-7, 3.1920306199220736e-5, 2.417712705339631e-5, 1.7597381215085426e-5, 6.146890145088406e-6, 6.617071271320153e-6, 4.375543399631931e-6, 1.0527046374250867e-6, 4.6783603708471013e-7, 6.913512081081541e-6, 2.3573438298951938e-5, 1.4817192620370496e-5];
+  def dlb-before-chain() = [1.0106141621636948e-5, 1.7857394808527947e-5, 3.40465286472786e-5];
+  def dlb-now(fal, il, labels) = len(labels) == 0 ? [] : cons(record_get(fal, "max-" ++ il.str() ++ "-" ++ labels[0]), dlb-now(fal, il, labels[1:]));
+  // no stage of any block reads more than 1% above its earlier maximum (every stage that does not depend on the router reads the same bits), the router weights of every block read no more than
+  // before, and the three stages the router feeds on block 0 (weights, FFN sum, output streams) read under 1e-6 where they read 2.8e-5, 9.7e-6 and 1.0e-5; the chained streams read no more than before
+  def dlb-le-scaled(now, before, k) = len(now) == 0 ? true : (now[0] <= before[0] * k && dlb-le-scaled(now[1:], before[1:], k));
+  def dlb-softplus-in-layer(fal) {
+   let l = dlb-stage-labels();
+   let n0 = dlb-now(fal, 0, l);
+   let n1 = dlb-now(fal, 1, l);
+   let n2 = dlb-now(fal, 2, l);
+   dlb-le-scaled(n0, dlb-before(0), 1.01) && dlb-le-scaled(n1, dlb-before(1), 1.01) && dlb-le-scaled(n2, dlb-before(2), 1.01)
+    && n0[10] <= dlb-before(0)[10] && n1[10] <= dlb-before(1)[10] && n2[10] <= dlb-before(2)[10]
+    && n0[10] < 0.000001 && n0[12] < 0.000001 && n0[13] < 0.000001
+    && dlb-le-scaled([record_get(fal, "max-chain-0"), record_get(fal, "max-chain-1"), record_get(fal, "max-chain-2")], dlb-before-chain(), 1.0);
   }
   def dlb-one-step?(flips) = len(flips) == 0 ? true : (dkr-abs(flips[0][1] - flips[0][2]) <= 0.00098 * (dkr-abs(flips[0][1]) > dkr-abs(flips[0][2]) ? dkr-abs(flips[0][1]) : dkr-abs(flips[0][2])) && dlb-one-step?(flips[1:]));
   // the elements two vectors disagree on beyond a part in 1e9 of the larger's peak: [index, gpu, ref]
@@ -192,7 +229,7 @@ section [form.bml] {
   }
 
   // ---- 32: chained -------------------------------------------------------------------------------------------------------------------------------
-  def dlb-chain-layer(c, ref, il, pos, sts) {
+  def dlb-chain-layer(c, ref, il, pos, sts, fal) {
    let ctx = dlb-ctx(c);
    let token = dlb-tokens()[pos];
    let n1 = dsv4-layer-attn(ctx, sts, il, pos, 8);
@@ -200,16 +237,17 @@ section [form.bml] {
    let s = metal_sync();
    let nd = dkr-nd(dlb-rd(ctx, "resid", 1024), dlb-lr(ref, pos, il)[2]);
    let ids = dlb-read-ids(ctx);
+   let mx = dlb-max-set(fal, "max-chain-" ++ il.str(), nd);
    let said = print_str("  chained block " ++ il.str() ++ " pos " ++ pos.str() ++ " out_hc nd " ++ nd.str() ++ " ids " ++ ids.str() ++ "/" ++ record_get(dlb-lr(ref, pos, il)[1], "selected").str());
    !nothing?(n1) && !nothing?(n2) && nd < dlb-chain-bound() && ids == record_get(dlb-lr(ref, pos, il)[1], "selected");
   }
-  def dlb-chain-pos(c, ref, pos, sts) {
+  def dlb-chain-pos(c, ref, pos, sts, fal) {
    let ctx = dlb-ctx(c);
    let fed = dlb-embed-in(ctx, dlb-tokens()[pos]);
-   fed && dlb-chain-layer(c, ref, 0, pos, sts) && dlb-chain-layer(c, ref, 1, pos, sts) && dlb-chain-layer(c, ref, 2, pos, sts);
+   fed && dlb-chain-layer(c, ref, 0, pos, sts, fal) && dlb-chain-layer(c, ref, 1, pos, sts, fal) && dlb-chain-layer(c, ref, 2, pos, sts, fal);
   }
-  def dlb-chain-from(c, ref, pos, sts) = pos == len(dlb-tokens()) ? true : (dlb-chain-pos(c, ref, pos, sts) && dlb-chain-from(c, ref, pos + 1, sts));
-  def dlb-chain(c, ref, sts) = dlb-chain-from(c, ref, 0, sts);
+  def dlb-chain-from(c, ref, pos, sts, fal) = pos == len(dlb-tokens()) ? true : (dlb-chain-pos(c, ref, pos, sts, fal) && dlb-chain-from(c, ref, pos + 1, sts, fal));
+  def dlb-chain(c, ref, sts, fal) = dlb-chain-from(c, ref, 0, sts, fal);
 
   // ---- 64: the checks can fail -----------------------------------------------------------------------------------------------------------------------
   def dlb-tilt(xs, i) = len(xs) == 0 ? [] : cons(xs[0] * (1.0 + ((i % 2) == 0 ? 0.0001 : 0.0 - 0.0001)), dlb-tilt(xs[1:], i + 1));
@@ -295,11 +333,13 @@ section [form.bml] {
  let c8 = dlb-bit(r8, 8);
  let c16 = dlb-bit(r16, 16);
  let c1 = dlb-bit(try opened && dlb-supported(c) && dlb-counts(fal) && dlb-refusals(c, stsA) catch false, 1);
- let c32 = dlb-bit(try opened && dlb-chain(c, ref, stsB) catch false, 32);
+ let c32 = dlb-bit(try opened && dlb-chain(c, ref, stsB, fal) catch false, 32);
+ let printed = try dlb-print-maxes(fal) catch 0;
+ let c1024 = dlb-bit(try opened && dlb-softplus-in-layer(fal) catch false, 1024);
  let c64 = dlb-bit(try opened && dlb-witnessed(fal) && dlb-shift-witnessed(fal) && dlb-tilted(c, ref, stsT) && dlb-embedding(c, ref) catch false, 64);
  let left = opened ? dsv4-close(ctx, append(stsA, append(stsB, stsT))) : [0];
  let c128 = dlb-bit(try opened && len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
  let removed = host_path_remove(path);
- print_str("dsv4-layer-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " unshifted " ++ (record_has(fal, "ns-1-7") ? record_get(fal, "ns-1-7").str() : "none") ++ " nocomp " ++ (record_has(fal, "nc-1-3") ? record_get(fal, "nc-1-3").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-1") ? record_get(fal, "nc-2-1").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-3") ? record_get(fal, "nc-2-3").str() : "none") ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ dvb-mapped().str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512;
+ print_str("dsv4-layer-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " unshifted " ++ (record_has(fal, "ns-1-7") ? record_get(fal, "ns-1-7").str() : "none") ++ " nocomp " ++ (record_has(fal, "nc-1-3") ? record_get(fal, "nc-1-3").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-1") ? record_get(fal, "nc-2-1").str() : "none") ++ "/" ++ (record_has(fal, "nc-2-3") ? record_get(fal, "nc-2-3").str() : "none") ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " mapped " ++ mapped0.str() ++ "/" ++ dvb-mapped().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024;
 }
