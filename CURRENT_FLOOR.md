@@ -86,8 +86,10 @@ host-walk-band 137438953471   (the walk's turn waits for memory within the windo
                                 host-walk.bml is an aggregator over ten parts `host-walk-<seam>.bml`, each under 12000 bytes so the
                                 local lane reads one whole and can read it twice, and every definition's name (not its body) is pinned
                                 in tests/fixtures/host-walk-defs.txt)
-form-cli-landing-band 16383   (the landing and the walk read every child's exit from `host_wait` through
-                                `host-child.bml` (`hch-run`), never from a printed mark; a red witness holds the landing)
+form-cli-landing-band 32767   (the landing and the walk read every child's exit from `host_wait` through
+                                `host-child.bml` (`hch-run`), never from a printed mark; a red witness holds the landing; the
+                                reunion after a push behind origin is argv in the checkout it joins and is read end to end in a
+                                scratch origin)
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · offer-ack-core-band 32767
