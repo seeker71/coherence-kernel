@@ -1,0 +1,204 @@
+// dsv4-kernels.fk -- the Metal kernel set the DeepSeek-V4 driver dispatches, every source EMITTED BY FORM, every source starting with the two pragmas.
+//
+// WHAT THIS IS. Qwen's lane runs on kernels the body emits (qwen35-dense-token-handle.fk: q38-msl, q38-pipes). The DeepSeek lane needs its own set, and most of it is
+// already in the tree as emitters restored for the spec: mla-msl.fk (the norms, the head norm, the three-stage attention), dsv4-hc-msl.fk (the hyper-connection kernels),
+// dsv4-moe-msl.fk with dsv4-stack-real.fk and dsv4-layer-real.fk (the router, the hash and biased top-k routing, the clamped SwiGLU), dsv4-mla-real.fk (the grouped
+// MXFP8 matvec, the KV fp8+f16 round, the compensated F16 matvec), dsv4-compressor.fk (the second cache's four kernels), dsv4-kv-cache.fk (the append), mxfp8-msl.fk and
+// mxfp4-msl.fk and iq2xxs-msl.fk and q8-0-msl.fk and q2k-msl.fk (the dequant and the fused matvecs), ds4-order-match.fk. This file composes them into ten units (six that the
+// fixture's dispatch graph runs, one for Q8_0, three for the real IQ2XXS file's order-match lanes that the band compiles and does not run) and writes
+// only what the dispatch graph needs that no emitter gave: the F16 embedding row, the 32-lane F16 matvec, the in-place RoPE, the expert matvecs that read their
+// expert ids from the device (MXFP4 and IQ2_XXS), the id-weighted SwiGLU, the slot sum and the device argmax.
+//
+// THE TWO PRAGMAS ARE THE FIRST TWO LINES OF EVERY SOURCE. metal_pipeline compiles with default options: multiply-add contraction on, reassociation allowed
+// (fk-metal-carrier.m header, "FP CONTRACTION"). Witnessed 2026-10-02 (ds4-order-match-band): without `#pragma clang fp reassociate(off)` and `#pragma clang fp contract(off)`
+// the bit-identical eight-thread Q8_0 twin read 8 ulps from the one-thread kernel. dkr-wrap puts them in front of every unit, so no kernel of the driver is compiled
+// without them; the band holds that as a text check on every source and as a witness on the device (a*b+c on 1+2^-12 reads 973078528 with the pragmas, 973079552 without).
+//
+// THE ARITHMETIC IS THE EMITTERS'. The restored kernels keep their own folds (tb-dot's right fold, ln-sumsq's left fold, the transcribed exp/ln/sqrt/sin): this file adds
+// no second transcription of any of them. The new kernels are the plainest possible: a lane fold ascending, simd_sum across the lanes; metal::precise::sin and cos in the
+// RoPE (f32 angle range reduction done properly; the restored form_mla_rope_f32 reduces by truncation and is exact only within a few periods of 2 pi, named in mla-msl.fk).
+//
+// EXPERT IDS STAY ON THE DEVICE. The carrier binds a buffer at its view offset and no other (fk-metal-carrier.m: setBuffer takes the view's offset only), so one kernel
+// that indexes `qb + expert * stride` itself replaces the host's per-expert rebinding. The id kernels take `ids` as a buffer (written by the router or the hash read),
+// one dispatch for all used experts: slot = row / rows, the output of slot j lands at y[j * rows + r], the input of slot j is x + j * xstride (xstride 0 shares one input,
+// the gate and the up; the down reads one mid vector per slot). The per-expert stride is derived in the kernel from the shape: MXFP4 nel/2 + nel/32 bytes (data plane then
+// scale plane), IQ2_XXS rows x (cols/256) x 66 bytes. Strides stay under 2^32: the largest real expert stack is 1.14 GB.
+//
+// WHAT IS NOT HERE. No dispatch order, no buffer plan, no layer: those are dsv4-open.fk and dsv4-layer.fk. The restored emitters keep the limits they name in their
+// own headers (MLA_MAX_HD 512, the router's 256 experts and 8 used, the compressor's ratio-4-only coff 2).
+//
+// Proven by: form-stdlib/tests/dsv4-kernels-band.bml (text checks on the pragmas and the catalogue; every kernel of every unit compiled on the device through metal_pipeline,
+// once, handles kept; the contraction witness; each kernel run on small deterministic inputs against the oracle's fp64 arithmetic).
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/metal-door.fk;
+import form-stdlib/lora-adapter.bml;
+import form-stdlib/mla-msl.fk;
+import form-stdlib/dsv4-hc-msl.fk;
+import form-stdlib/dsv4-kv-cache.fk;
+import form-stdlib/dsv4-compressor.fk;
+import form-stdlib/mxfp4-msl.fk;
+import form-stdlib/mxfp8-msl.fk;
+import form-stdlib/iq2xxs-msl.fk;
+import form-stdlib/q8-0-msl.fk;
+import form-stdlib/q2k-msl.fk;
+import form-stdlib/qk-matvec-lane.fk;
+import form-stdlib/dsv4-moe-msl.fk;
+import form-stdlib/ds4-order-match.fk;
+import native/metal/dsv4-stack-real.fk;
+import native/metal/dsv4-bind.fk;
+section [form.bml] {
+    // ---- the pragmas, once --------------------------------------------------------------------------------
+    def dkr-pragmas() = "#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\n";
+    def dkr-wrap(body) = dkr-pragmas() ++ body;
+    def dkr-inc() = "#include <metal_stdlib>\n";
+
+    // ---- the new kernels -------------------------------------------------------------------------------------
+    // the F16 embedding row: dst[i] = float(half at src[(row * n + i) * 2]); the bytes are assembled, so no alignment is assumed
+    def dkr-embed-body() = "kernel void form_dsv4_embed_f16(device const uchar* src [[buffer(0)]], device float* dst [[buffer(1)]], constant uint& row [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) { if (gid >= n) return; ulong at = ((ulong)row * (ulong)n + (ulong)gid) * 2ul; ushort h = (ushort)src[at] | ((ushort)src[at + 1ul] << 8); dst[gid] = float(as_type<half>(h)); } ";
+    // the F16 matvec on a simdgroup a row: lane L folds columns L, L+32, ... ascending, simd_sum across the lanes (the association is the lane tree, answered by the band's tolerance)
+    def dkr-f16-lane-body() = "kernel void form_dsv4_f16_matvec_lane(device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; ulong base = (ulong)r * (ulong)cols; for (uint j = lane; j < cols; j += 32u) { ulong at = (base + (ulong)j) * 2ul; ushort h = (ushort)qb[at] | ((ushort)qb[at + 1ul] << 8); acc = acc + float(as_type<half>(h)) * x[j]; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ";
+    // RoPE in place over nh heads of hd, the trailing nrot rotated pair-adjacent; freqs[k] is the effective frequency of pair k (the host's table, YaRN ramp folded in),
+    // angle = pos * freqs[k]; sign +1 forward (query and cache row), -1 inverse (the attention output). One thread a pair.
+    def dkr-rope-body() = "kernel void form_dsv4_rope_f32(device float* v [[buffer(0)]], device const float* freqs [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& nrot [[buffer(4)]], constant float& pos [[buffer(5)]], constant float& sign [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint npair = nrot / 2u; if (gid >= nh * npair) return; uint h = gid / npair; uint k = gid - h * npair; float a = pos * freqs[k]; float ca = metal::precise::cos(a); float sa = sign * metal::precise::sin(a); uint lo = h * hd + (hd - nrot) + 2u * k; float x0 = v[lo]; float x1 = v[lo + 1u]; v[lo] = x0 * ca - x1 * sa; v[lo + 1u] = x0 * sa + x1 * ca; } ";
+    // the MXFP4 expert matvec with the expert read from ids[slot] (gate and up: xstride 0; down: xstride = hidden). MXFP4 expert slice: data plane nel/2, scale plane nel/32.
+    def dkr-mx4-id-body() = "kernel void form_dsv4_mx4_matvec_id(device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& nused [[buffer(6)]], constant uint& xstride [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rr = gid / 32u; uint slot = rr / rows; if (slot >= nused) return; uint r = rr - slot * rows; uint nel = rows * cols; device const uchar* q = qb + (ulong)ids[slot] * (ulong)(nel / 2u + nel / 32u); device const float* xs = x + slot * xstride; uint ng = cols / 32u; uint g0 = (r * cols) / 32u; uint sbase = nel / 2u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(q[sbase + g0 + g])); uint p = (r * cols + g * 32u) / 2u; device const float* xv = xs + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 16u; ++m) { int by = int(q[p + m]); acc = acc + xv[m * 2u] * mx4_val(mxm_mod(by, 16)); acc = acc + xv[m * 2u + 1u] * mx4_val(by / 16); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[slot * rows + r] = sv; } ";
+    // the IQ2_XXS expert matvec by ids: the lane fold counts DOWN inside a lane (the right fold direction of the restored form_dsv4_iq2_matvec), the experts are rows x (cols/256) x 66 bytes apart
+    def dkr-iq2-id-body() = "kernel void form_dsv4_iq2_matvec_id(device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& nused [[buffer(6)]], constant uint& xstride [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rr = gid / 32u; uint slot = rr / rows; if (slot >= nused) return; uint r = rr - slot * rows; device const uchar* q = qb + (ulong)ids[slot] * (ulong)(rows * (cols / 256u) * 66u); device const float* xs = x + slot * xstride; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; acc = iq2_w(q, r * cols + j) * xs[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[slot * rows + r] = s; } ";
+    // the SwiGLU of every used expert in one dispatch: out = (silu(min(gate, lim)) * clamp(up, -lim, lim)) * wts[slot]; the clamp is off at lim <= 1e-6 (dm_cl_hi, dm_cl_lo)
+    def dkr-swiglu-id-body() = "kernel void form_dsv4_swiglu_id(device const float* gate [[buffer(0)]], device const float* up [[buffer(1)]], device const float* wts [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n [[buffer(4)]], constant uint& nused [[buffer(5)]], constant float& lim [[buffer(6)]], uint gid [[thread_position_in_grid]]) { if (gid >= n * nused) return; uint slot = gid / n; float g = dm_cl_hi(gate[gid], lim); float u = dm_cl_lo(dm_cl_hi(up[gid], lim), lim); out[gid] = (dm_silu(g) * u) * wts[slot]; } ";
+    // the routed experts' slot sum then the shared expert: out[i] = ((0 + d0) + d1 + ...) + shared[i], slots ascending
+    def dkr-sum-slots-body() = "kernel void form_dsv4_sum_slots(device const float* down [[buffer(0)]], device const float* shared [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& nused [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float acc = 0.0f; for (uint j = 0u; j < nused; ++j) acc = acc + down[j * n + i]; out[i] = acc + shared[i]; } ";
+    // the device argmax: ONE threadgroup of T threads (a power of two, at most 1024), each strides the vector, then a tree; strict > keeps the earlier index on a tie;
+    // a NaN is never chosen and an all-NaN vector answers index 0xFFFFFFFF (a reading that did not arrive, never a plausible 0). The NaN test is on the bits: metal_pipeline
+    // compiles with fast math, under which `v == v` is assumed true and the band witnessed `v == v` pass a NaN (index 0 answered); the pragmas do not change that.
+    def dkr-argmax-body() = "kernel void form_dsv4_argmax_f32(device const float* x [[buffer(0)]], device uint* out_idx [[buffer(1)]], device float* out_val [[buffer(2)]], constant uint& n [[buffer(3)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]]) { threadgroup float sv[1024]; threadgroup uint si[1024]; uint t = tpitg.x; uint T = ntg.x; float bv = 0.0f; uint bi = 4294967295u; for (uint j = t; j < n; j += T) { float v = x[j]; bool nanv = (as_type<uint>(v) & 2147483647u) > 2139095040u; if (!nanv && (bi == 4294967295u || v > bv)) { bv = v; bi = j; } } sv[t] = bv; si[t] = bi; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint s = T / 2u; s > 0u; s = s / 2u) { if (t < s) { float ov = sv[t + s]; uint oi = si[t + s]; bool take = (si[t] == 4294967295u) ? (oi != 4294967295u) : (oi != 4294967295u && (ov > sv[t] || (ov == sv[t] && oi < si[t]))); if (take) { sv[t] = ov; si[t] = oi; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (t == 0u) { out_idx[0] = si[0]; out_val[0] = sv[0]; } } ";
+
+    // ---- the units -------------------------------------------------------------------------------------------
+    // dense: the MXFP8 projections (plain and grouped), the F16 matvecs (compensated one-thread and the lane fold), the embedding row, the KV fp8+f16 round (one thread, and the parallel form)
+    def dkr-unit-dense() = dkr-pragmas() ++ dkr-inc() ++ mx8m-msl-helpers() ++ mx8m-matvec-body("form_dsv4_mx8_matvec") ++ dsv4-mx8-grouped-body() ++ dsv4-f16-matvec-body() ++ dkr-f16-lane-body() ++ dkr-embed-body() ++ dsv4-kvq-body() ++ dsv4-kvq-par-body();
+    // q8: the Q8_0 dense path of the IQ2XXS file: dequant, one-thread matvec, lane matvec, and the grouped pair
+    def dkr-unit-q8() = dkr-pragmas() ++ dkr-inc() ++ q80-msl-unit("form_dsv4_q80_dequant", "form_dsv4_q80_matvec_1t", "form_dsv4_q80_matvec_lane") ++ dsv4-q80-grouped-body();
+    // mla: the norms (one thread, simdgroup, wide), the head norms, the attention in its three stages over two arenas, the cache append, the RoPE
+    def dkr-unit-mla() = dkr-pragmas() ++ mla-msl-unit() ++ dkv-append-msl-body() ++ dkr-rope-body();
+    // hc: the seven hyper-connection kernels
+    def dkr-unit-hc() = dkr-pragmas() ++ hc-msl-unit();
+    // moe: the router, both routing regimes, the clamped SwiGLU, plus the id-weighted SwiGLU, the slot sum and the argmax
+    def dkr-unit-moe() = dkr-pragmas() ++ dsv4-stack-ffn-source() ++ dkr-swiglu-id-body() ++ dkr-sum-slots-body() ++ dkr-argmax-body();
+    // experts: the MXFP4 and IQ2_XXS expert matvecs by ids
+    def dkr-unit-experts() = dkr-pragmas() ++ dkr-inc() ++ mx4m-msl-helpers() ++ iq2m-msl-helpers() ++ dkr-mx4-id-body() ++ dkr-iq2-id-body();
+    // comp: the second cache's four kernels
+    def dkr-unit-comp() = dkr-pragmas() ++ dkr-inc() ++ dcp-msl-appendix();
+    // the real IQ2XXS file's lanes, from the restored order-match emitters: compiled by the band, not run (no real weight is mapped in this stage)
+    def dkr-unit-ds4iq2() = dkr-pragmas() ++ dsv4-iq2-matvec-source();
+    def dkr-unit-ds4q2k() = dkr-pragmas() ++ dkr-inc() ++ q2km-msl-helpers() ++ q2km-msl-appendix() ++ dom-q2k-appendix();
+    def dkr-unit-ds4q8() = dkr-pragmas() ++ dkr-inc() ++ q80-msl-spine() ++ q80-msl-weight() ++ dom-msl-appendix();
+    // [name, source] in the order the driver's graph meets them; the first six are the units the fixture's dispatch graph runs, the last three the real file's order-match lanes
+    def dkr-units() = [["dense", dkr-unit-dense()], ["q8", dkr-unit-q8()], ["mla", dkr-unit-mla()], ["hc", dkr-unit-hc()], ["moe", dkr-unit-moe()], ["experts", dkr-unit-experts()], ["comp", dkr-unit-comp()],
+        ["ds4iq2", dkr-unit-ds4iq2()], ["ds4q2k", dkr-unit-ds4q2k()], ["ds4q8", dkr-unit-ds4q8()]];
+    def dkr-u-name(u) = u[0];
+    def dkr-u-src(u) = u[1];
+
+    // ---- the catalogue: every kernel a source defines, read from the source text ---------------------------------
+    def dkr-ident-char?(c) = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || c == 95 || (c >= 97 && c <= 122);
+    def dkr-ident-end(s, i) = (i < str_len(s) && dkr-ident-char?(str_byte_at(s, i))) ? dkr-ident-end(s, i + 1) : i;
+    def dkr-names-from(s, at) {
+        let p = str_find(s, "kernel void ", at);
+        p < 0 ? [] : { let en = dkr-ident-end(s, p + 12); cons(substring(s, p + 12, en), dkr-names-from(s, en)); };
+    }
+    def dkr-kernel-names(src) = dkr-names-from(src, 0);
+    // the pragma pair opens the source (the first two lines, exactly)
+    def dkr-pragma-first?(src) = str_len(src) > str_len(dkr-pragmas()) && str_eq(substring(src, 0, str_len(dkr-pragmas())), dkr-pragmas());
+    def dkr-member?(x, xs) = len(xs) == 0 ? false : (xs[0] == x || dkr-member?(x, xs[1:]));
+    def dkr-dup?(xs) = len(xs) < 2 ? false : (dkr-member?(xs[0], xs[1:]) || dkr-dup?(xs[1:]));
+    def dkr-all-names(units) = len(units) == 0 ? [] : append(dkr-kernel-names(units[0][1]), dkr-all-names(units[1:]));
+
+    // ---- the pipelines: compile once, keep the handle (the carrier keys a pipeline by its source) -----------------
+    // one record name -> handle for every kernel of the units given; a kernel the device refuses is 0 in the record (and the caller reads it)
+    def dkr-pipes-go(src, names, rec) = len(names) == 0 ? rec : { record_set(rec, names[0], metal_pipeline(src, names[0])); dkr-pipes-go(src, names[1:], rec); };
+    def dkr-pipes-of(units, rec) = len(units) == 0 ? rec : { dkr-pipes-go(units[0][1], dkr-kernel-names(units[0][1]), rec); dkr-pipes-of(units[1:], rec); };
+    def dkr-open-pipes(units) = dkr-pipes-of(units, record_new(0));
+    // the units the fixture's graph dispatches
+    def dkr-graph-units() = [["dense", dkr-unit-dense()], ["mla", dkr-unit-mla()], ["hc", dkr-unit-hc()], ["moe", dkr-unit-moe()], ["experts", dkr-unit-experts()], ["comp", dkr-unit-comp()]];
+    def dkr-pipe(ps, name) = record_get(ps, name);
+
+    // ---- the host's RoPE table (the kernel forms angle = pos * freqs[k] and the rotation) ----------------------------
+    // freqs[k] = base^(-2k/nrot) * (scale * (1 - ramp_k) + ramp_k), the YaRN blend of the interpolated and the extrapolated angle per pair; ramp_k = ext * (1 - clamp((k - low)/max(0.001, high - low)))
+    // with low and high the correction range of the fast and slow betas. A layer whose compression ratio is zero rotates with the plain base and no scaling; any nonzero ratio takes
+    // the compressed base and the 1/factor scale (the file's own metadata: ds4.c:10155/:10162 as the oracle reads them). The magnitude scale the reference carries (attn x (1 + 0.1 ln(1/scale)))
+    // is exactly 1 by construction, so the table is the whole rotation. The band holds this table to the oracle's own factors (dfo-rope-factors) at layers 0 and 1.
+    def dkr-corr(nrot, ctx, beta, base) = (1.0 * nrot * math_log((1.0 * ctx) / (beta * 6.283185307179586))) / (2.0 * math_log(base));
+    def dkr-clamp(v, lo, hi) = v < lo ? lo : (v > hi ? hi : v);
+    def dkr-freq(k, nrot, base, scale, ext, low, high) {
+        let step = math_pow(base, (0.0 - 2.0 * k) / (1.0 * nrot));
+        let span = (high - low) > 0.001 ? (high - low) : 0.001;
+        let ramp = ext * (1.0 - dkr-clamp(((1.0 * k) - low) / span, 0.0, 1.0));
+        step * ((scale * (1.0 - ramp)) + ramp);
+    }
+    def dkr-freqs-go(k, n, nrot, base, scale, ext, low, high) = k == n ? [] : cons(dkr-freq(k, nrot, base, scale, ext, low, high), dkr-freqs-go(k + 1, n, nrot, base, scale, ext, low, high));
+    def dkr-freqs(nrot, base, scale, ext, ctx, fast, slow) {
+        let on = (ext > 0.0) && (ctx > 0);
+        let low = on ? floor(dkr-clamp(dkr-corr(nrot, ctx, fast, base), 0.0, 1.0 * nrot)) : 0;
+        let high = on ? (0 - floor(0.0 - dkr-clamp(dkr-corr(nrot, ctx, slow, base), 0.0, 1.0 * (nrot - 1)))) : 0;
+        dkr-freqs-go(0, nrot / 2, nrot, base, scale, ext, 1.0 * low, 1.0 * high);
+    }
+    // the table of layer il from the layout record m (dsv4-layout.fk)
+    def dkr-layer-freqs(m, il) {
+        let compressed = dvl-l(m, il, "ratio") != 0;
+        let factor = record_get(m, "rope-factor");
+        let cb = record_get(m, "compress-base");
+        let base = (compressed && cb > 0.0) ? cb : record_get(m, "rope-base");
+        let scale = (compressed && factor > 0.0) ? 1.0 / factor : 1.0;
+        let ext = (compressed && factor > 1.0) ? 1.0 : 0.0;
+        dkr-freqs(record_get(m, "nrot"), base, scale, ext, compressed ? record_get(m, "orig-ctx") : 0, record_get(m, "beta-fast"), record_get(m, "beta-slow"));
+    }
+
+    // ---- bytes: f32 vectors in and out ------------------------------------------------------------------------
+    def dkr-words(xs) = len(xs) == 0 ? [] : cons(md-f32-bits(xs[0]), dkr-words(xs[1:]));
+    def dkr-f32-bytes(xs) = md-le32-list(dkr-words(xs), "");
+    def dkr-u32-bytes(xs) = md-le32-list(xs, "");
+    def dkr-f32-at(raw, i) = ln-f32-decode(ln-u32-le(raw, 4 * i));
+    def dkr-f32-go(raw, i, n) = i == n ? [] : cons(dkr-f32-at(raw, i), dkr-f32-go(raw, i + 1, n));
+    def dkr-f32s(raw, n) = dkr-f32-go(raw, 0, n);
+    def dkr-u32-at(raw, i) = ln-u32-le(raw, 4 * i);
+    // a buffer holding an f32 vector, and one of n f32 holding the sentinel 0x5A5A5A5A (1.5e16: no run's value), so a kernel that never ran cannot pass
+    def dkr-sentinel(n) = n <= 0 ? "" : (n == 1 ? "Z" : str_concat(dkr-sentinel(n / 2), dkr-sentinel(n - (n / 2))));
+    // every buffer a caller makes through these is entered in its registry (a record holding "hs"), so the caller releases them all in synced rounds at the close
+    def dkr-reg-new() = record_new(0, "hs", []);
+    def dkr-reg-add(reg, h) { record_set(reg, "hs", cons(h, record_get(reg, "hs"))); h; }
+    def dkr-reg-count(reg) = len(record_get(reg, "hs"));
+    // the handles the carrier refused to release after four synced rounds (empty: all released)
+    def dkr-reg-free(reg) = dvb-free-rounds(record_get(reg, "hs"), 4);
+    def dkr-buf-f32(reg, xs) { let h = metal_buf_alloc(4 * len(xs)); let w = metal_buf_write(h, 0, dkr-f32-bytes(xs)); dkr-reg-add(reg, h); }
+    def dkr-buf-u32(reg, xs) { let h = metal_buf_alloc(4 * len(xs)); let w = metal_buf_write(h, 0, dkr-u32-bytes(xs)); dkr-reg-add(reg, h); }
+    def dkr-buf-bytes(reg, bytes) { let h = metal_buf_alloc(str_len(bytes)); let w = metal_buf_write(h, 0, bytes); dkr-reg-add(reg, h); }
+    def dkr-buf-empty(reg, n) { let h = metal_buf_alloc(4 * n); let w = metal_buf_write(h, 0, dkr-sentinel(4 * n)); dkr-reg-add(reg, h); }
+    def dkr-read(h, n) = dkr-f32s(metal_buf_read(h, 0, 4 * n), n);
+    def dkr-read-u32(h, n) { let raw = metal_buf_read(h, 0, 4 * n); dkr-u32-go(raw, 0, n); }
+    def dkr-u32-go(raw, i, n) = i == n ? [] : cons(dkr-u32-at(raw, i), dkr-u32-go(raw, i + 1, n));
+
+    // ---- dispatch: one op per call (serial order; the carrier runs enqueues in order) --------------------------
+    // threads is the total thread count (dispatchThreads), the carrier picks the group
+    def dkr-go(pipe, bufs, consts, threads) = metal_enqueue(pipe, md-bind(bufs, consts), threads);
+    // groups of exactly tpg threads (dispatch mode 1): the cooperative kernels (wide norms, the argmax, the parallel KV round)
+    def dkr-go-tg(pipe, bufs, consts, groups, tpg) = metal_enqueue(pipe, md-bind16(bufs, consts, tpg, 0, 1, 0), groups);
+    def dkr-f(x) = md-f32-bits(x);
+
+    // ---- the comparison: normalised disagreement, the oracle harness's own gate ----------------------------------
+    // nd = max|gpu - ref| / max|ref|; passes when below the bound. The bound is max(8 * ne, 3e-5): ne is the envelope that a 1.4e-5 per-layer tilt opens in the reference
+    // (metal_dsv4_stack_oracle.sh, the comment above cmpOra, history 8a6f123d3^); a single kernel or one layer alone is held to the floor 3e-5 (ne = 0), as that
+    // harness holds its THIS-LAYER-ALONE gates.
+    def dkr-floor() = 0.00003;
+    def dkr-abs(v) = v < 0.0 ? 0.0 - v : v;
+    def dkr-maxabs-go(xs, best) = len(xs) == 0 ? best : dkr-maxabs-go(xs[1:], dkr-abs(xs[0]) > best ? dkr-abs(xs[0]) : best);
+    def dkr-maxabs(xs) = dkr-maxabs-go(xs, 0.0);
+    def dkr-maxdiff-go(a, b, i, best) = i == len(a) ? best : dkr-maxdiff-go(a, b, i + 1, dkr-abs(a[i] - b[i]) > best ? dkr-abs(a[i] - b[i]) : best);
+    def dkr-maxdiff(a, b) = dkr-maxdiff-go(a, b, 0, 0.0);
+    // finite as an f32 is (the compressor's unwritten score rows hold -1e30 on purpose; an unrun buffer holds 1.5e16 and is caught by the size of its disagreement)
+    def dkr-finite?(v) = v == v && dkr-abs(v) < 3.0e38;
+    def dkr-all-finite?(xs) = len(xs) == 0 ? true : (dkr-finite?(xs[0]) && dkr-all-finite?(xs[1:]));
+    // the normalised disagreement; 1e30 when the lengths differ or a value is not finite (a sentinel left by an unrun kernel is 1.5e16 and reads as a huge nd)
+    def dkr-nd(gpu, ref) = (len(gpu) != len(ref) || len(ref) == 0 || !dkr-all-finite?(gpu)) ? 1.0e30 : (dkr-maxabs(ref) <= 0.0 ? dkr-maxdiff(gpu, ref) : dkr-maxdiff(gpu, ref) / dkr-maxabs(ref));
+    def dkr-within?(gpu, ref) = dkr-nd(gpu, ref) < dkr-floor();
+    0;
+}
