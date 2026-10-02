@@ -282,8 +282,8 @@ references     ds4-recorded-references-band.bml 1023   (the logits pinned by a S
 driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 511 · native/metal/tests/dsv4-bind-band.bml 511
 driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 511 · native/metal/tests/dsv4-layer-band.bml 2047
 driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/dsv4-end-to-end-band.bml 511
-               dsv4-lease-band.bml 255 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 511
-driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 255 · native/metal/tests/dsv4-layer-q8q2-band.bml 2047
+               dsv4-lease-band.bml 255 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 1023
+driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 511 · native/metal/tests/dsv4-layer-q8q2-band.bml 4095
                native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 101 kernels, dsv4-open-band 511 with 72 in the graph)
 ```
 
@@ -375,9 +375,16 @@ tensor, the Q2_K scale nibble read as the min, the Q8_0 block stride 33 for 34 e
 block (the control and the restored kernel inside the gate). Through the validation door the IQ2XXS header now reads NO gap (dry, `./fkwu observe/dsv4-validate-run.bml
 </dev/null`: "the driver cannot run yet: nothing named by the header"); a doctored header reads one line a tensor type. The ordering of ds4's own lanes is
 a printed note and not a gap: ds4 quantises a Q8_0 matvec's activation to int8 per 32-block (ds4.c:7051, :6814) and sums Q2_K in a plain ascending f32 order
-(:3480), and the driver's lanes read f32 activations, so a near-tie token may differ; the window's stream leg and tie budget measure that, and the `ds4q8` and
-`ds4q2k` units are what to wire if they say so. What still blocks the physical window: only the window itself (one run, alone, governor-checked; the logits leg
-waits for its prompt ids). The doors after this change: door-link-health docs=39 claims=837 broken=0 (prelude-reach missing=0 untracked=0 shadow=0), band-truth bands=360
+(:3480), and the driver's lanes read f32 activations, so a near-tie token may differ. What the window reads of that, by leg: the STREAM leg (the 24 greedy ids for the raw prompt, which needs no extra input) matches
+ids and now records, per step, OUR top-two logit margin and how far the recorded id's logit sits below our top (`stream_margins`, `stream_recorded_gap` in the
+receipt), so a flip is told from a near tie; the reference's own tie budget (its top-two margin against our largest delta over its top 64) belongs to the LOGITS leg,
+which needs the 14 chat-templated prompt ids the recording does not carry and WAITS until they are supplied. The `ds4q8` and `ds4q2k` units are what to wire if the
+readings say so. An expert type no kernel reads is an explicit refusal (`dkl-expert-kernel` reads nothing; the FFN answers [0] before any dispatch). What still blocks the
+physical window: the window itself (one run, alone, governor-checked, the door dry by default and `{"go":1}` explicit), for positions below 2048 only: the 126 indexer
+tensors (`indexer.attn_q_b`, `indexer.proj`, `indexer_compressor_{kv,gate,ape,norm}`, on the 21 ratio-4 layers) are present in the file and unrouted, and a ratio-4 block
+refuses at position 2048 or later (the indexer stops being inert there). The kernels' multi-block rows (4 and 8 blocks a row of Q2_K and IQ2_XXS, shared and per-slot
+input) read 1.2e-7 to 2.6e-7 against the oracle on a third file, the second fixture's rows being one block; the Q8_0 and Q2_K plants split into a wrong number (Q2_K scale as the
+min, Q8_0 codes unsigned, an IQ2_XXS kernel on a Q2_K stack: finite, far) and not a number (a Q8_0 stride of 33, an MXFP8 kernel on a Q8_0 tensor: non-finite). The doors after this change: door-link-health docs=39 claims=837 broken=0 (prelude-reach missing=0 untracked=0 shadow=0), band-truth bands=360
 readable=182 unreadable=178 absent=0 seen=1 flaws=0. Found on the way: a recursive peak that calls itself twice a level takes 2^n steps (64 values never returned), so the band's peak is one fold.
 
 Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
