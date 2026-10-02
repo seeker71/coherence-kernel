@@ -1,0 +1,260 @@
+// dsv4-fixture-gguf.fk -- a tiny DeepSeek-V4-shaped GGUF, built by Form, byte for byte from a seed.
+//
+// WHY THIS EXISTS. The Form-native Metal driver for DeepSeek V4 must be proven before it is ever pointed at an 80 GB
+// file, and the proof needs a model that is small, deterministic and honest about its arithmetic: three layers, every
+// code path the real file exercises (the compressor at two coffs, a hashed layer and biased top-k layers, MXFP8 and MXFP4
+// and IQ2_XXS and F16 and F32 and I32 tensors), written by this body as a real GGUF and read back by the readers the body
+// already has. The reference arithmetic (bml/dsv4-oracle-reference.bml) admits it by the same relations it applies to the
+// real file, so the oracle can say what the GPU must reproduce.
+//
+// THE SHAPE (read from the oracle's admission, dsv4-oracle-reference.bml:243-289, and from the real headers; the file's
+// own geometry is in the metadata, never assumed by a reader):
+//   n_embd 256, 2 heads of 128 (nrot 64), q rank 64, 2 output groups of rank 32, 4 hyper-connection streams, vocabulary 32.
+//   three layers with compression ratios 0, 4, 2:  the ratio-4 layer compresses with the overlapping coff 2 (compressor
+//   matrices 256 x 256), the ratio-2 layer with coff 1 (256 x 128), the ratio-0 layer carries no compressor tensors.
+//   layer 0 routes by a hash table (blk.0.ffn_gate_tid2eid.weight, I32, two experts a token), layers 1 and 2 by the
+//   biased top-k (exp_probs_b.bias; layer 1 carries a -1e30 sentinel on expert 3 so the bias is witnessed refusing it).
+//   four routed experts, two used; layer 0's experts are IQ2_XXS (hidden 256: the type needs 256-wide columns), layers 1 and
+//   2's MXFP4 (hidden 64); every dense projection is MXFP8, every router and hyper-connection matrix F16, every norm F32.
+//   86 tensors, 36 metadata pairs, 1,515,232 bytes: the hyper-connection matrices (1024 x 24 F16, six of them, 295 KB) and the two
+//   compressors (397 KB) are most of the weight, and the oracle's admission pins their types, so the file cannot be much
+//   smaller at n_embd 256 without losing a layer's structure.
+//
+// THE WEIGHTS ARE SANE ON PURPOSE. A GGUF of random bytes decodes through MXFP8 scales and F16 exponents to infinities. Every
+// element here is a valid encoding drawn from a narrow band (F16 magnitudes in [2^-7, 2^-3), E4M3 codes with exponent field
+// 5..8 and no NaN code, scale bytes 120..122, F32 gains in [1, 1.25), IQ2_XXS block scales near 2^-12), so activations stay
+// finite through three layers and a relative tolerance means something. The generator is the body's own Park-Miller
+// (dsv4-forward.fk: dsv4-pm-at), one value an element, tensor t drawing from seed 1000 * (t + 1).
+//
+// NOTE FOR THE KERNELS THE NEXT STAGE EMITS (not this file): metal_pipeline compiles with default options. Without
+// `#pragma clang fp reassociate(off)` and `#pragma clang fp contract(off)` at the top of the source the 'bit-identical'
+// eight-thread Q8_0 twin read 8 ulps from the one-thread kernel (witnessed by ds4-order-match-band). Every DeepSeek kernel
+// the driver emits carries those two lines.
+//
+// Proven by: form-stdlib/tests/dsv4-fixture-gguf-band.bml.
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/format-arith.fk;
+import form-stdlib/metal-door.fk;
+import form-stdlib/dsv4-forward.fk;
+section [form.bml] {
+    // ---- the geometry ------------------------------------------------------------------------------
+    def dfx-e() = 256;
+    def dfx-nh() = 2;
+    def dfx-hd() = 128;
+    def dfx-nrot() = 64;
+    def dfx-qr() = 64;
+    def dfx-ng() = 2;
+    def dfx-rank() = 32;
+    def dfx-hc() = 4;
+    def dfx-vocab() = 32;
+    def dfx-nexp() = 4;
+    def dfx-used() = 2;
+    def dfx-sh() = 32;
+    def dfx-layers() = 3;
+    def dfx-mix() = (dfx-hc() * dfx-hc()) + (2 * dfx-hc());
+    def dfx-ratio(il) = il == 0 ? 0 : il == 1 ? 4 : 2;
+    def dfx-coff(il) = dfx-ratio(il) == 4 ? 2 : 1;
+    // layer 0's experts are IQ2_XXS (type 16), which needs 256-wide columns on its down tensor: hidden 256
+    def dfx-hidden(il) = il == 0 ? 256 : 64;
+    def dfx-etype(il) = il == 0 ? 16 : 40;
+    def dfx-hashed?(il) = il == 0;
+    // the biased layers' sentinel: expert 3 of layer 1 carries -1e30 and is never chosen
+    def dfx-sentinel(il) = il == 1 ? 3 : 0 - 1;
+
+    // ---- the tensor census, in file order ---------------------------------------------------------------
+    // a spec is [name, ggml type, dims, role, seed, aux]
+    def dfx-sp(name, ty, dims, role, aux) = [name, ty, dims, role, 0, aux];
+    def dfx-layer-name(il, leaf) = "blk." ++ il.str() ++ "." ++ leaf;
+    def dfx-attn-specs(il) = [
+        dfx-sp(dfx-layer-name(il, "attn_norm.weight"), 0, [dfx-e()], "norm", 0),
+        dfx-sp(dfx-layer-name(il, "attn_q_a.weight"), 41, [dfx-e(), dfx-qr()], "mx8", 0),
+        dfx-sp(dfx-layer-name(il, "attn_q_a_norm.weight"), 0, [dfx-qr()], "norm", 0),
+        dfx-sp(dfx-layer-name(il, "attn_q_b.weight"), 41, [dfx-qr(), dfx-nh() * dfx-hd()], "mx8", 0),
+        dfx-sp(dfx-layer-name(il, "attn_kv.weight"), 41, [dfx-e(), dfx-hd()], "mx8", 0),
+        dfx-sp(dfx-layer-name(il, "attn_kv_a_norm.weight"), 0, [dfx-hd()], "norm", 0),
+        dfx-sp(dfx-layer-name(il, "attn_sinks.weight"), 0, [dfx-nh()], "sink", 0),
+        dfx-sp(dfx-layer-name(il, "attn_output_a.weight"), 41, [dfx-nh() * dfx-hd() / dfx-ng(), dfx-ng() * dfx-rank()], "mx8", 0),
+        dfx-sp(dfx-layer-name(il, "attn_output_b.weight"), 41, [dfx-ng() * dfx-rank(), dfx-e()], "mx8", 0)
+    ];
+    // the second cache's four tensors, on exactly the layers whose ratio is nonzero
+    def dfx-comp-specs(il) = dfx-ratio(il) == 0 ? [] : [
+        dfx-sp(dfx-layer-name(il, "attn_compressor_ape.weight"), 1, [dfx-coff(il) * dfx-hd(), dfx-ratio(il)], "w16", 0),
+        dfx-sp(dfx-layer-name(il, "attn_compressor_norm.weight"), 0, [dfx-hd()], "norm", 0),
+        dfx-sp(dfx-layer-name(il, "attn_compressor_gate.weight"), 1, [dfx-e(), dfx-coff(il) * dfx-hd()], "w16", 0),
+        dfx-sp(dfx-layer-name(il, "attn_compressor_kv.weight"), 1, [dfx-e(), dfx-coff(il) * dfx-hd()], "w16", 0)
+    ];
+    // the two routing regimes carry different tensors; which one a layer has IS the regime
+    def dfx-route-specs(il) = dfx-hashed?(il)
+        ? [dfx-sp(dfx-layer-name(il, "ffn_gate_tid2eid.weight"), 26, [dfx-used(), dfx-vocab()], "hash", 0)]
+        : [dfx-sp(dfx-layer-name(il, "exp_probs_b.bias"), 0, [dfx-nexp()], "bias", dfx-sentinel(il))];
+    def dfx-ffn-specs(il) = [
+        dfx-sp(dfx-layer-name(il, "ffn_norm.weight"), 0, [dfx-e()], "norm", 0),
+        dfx-sp(dfx-layer-name(il, "ffn_gate_inp.weight"), 1, [dfx-e(), dfx-nexp()], "w16", 0),
+        dfx-sp(dfx-layer-name(il, "ffn_gate_exps.weight"), dfx-etype(il), [dfx-e(), dfx-hidden(il), dfx-nexp()], "exp", 0),
+        dfx-sp(dfx-layer-name(il, "ffn_up_exps.weight"), dfx-etype(il), [dfx-e(), dfx-hidden(il), dfx-nexp()], "exp", 0),
+        dfx-sp(dfx-layer-name(il, "ffn_down_exps.weight"), dfx-etype(il), [dfx-hidden(il), dfx-e(), dfx-nexp()], "exp", 0),
+        dfx-sp(dfx-layer-name(il, "ffn_gate_shexp.weight"), 41, [dfx-e(), dfx-sh()], "mx8", 0),
+        dfx-sp(dfx-layer-name(il, "ffn_up_shexp.weight"), 41, [dfx-e(), dfx-sh()], "mx8", 0),
+        dfx-sp(dfx-layer-name(il, "ffn_down_shexp.weight"), 41, [dfx-sh(), dfx-e()], "mx8", 0)
+    ];
+    def dfx-hc-specs(il) = [
+        dfx-sp(dfx-layer-name(il, "hc_attn_fn.weight"), 1, [dfx-hc() * dfx-e(), dfx-mix()], "w16", 0),
+        dfx-sp(dfx-layer-name(il, "hc_attn_scale.weight"), 0, [3], "hcs", 0),
+        dfx-sp(dfx-layer-name(il, "hc_attn_base.weight"), 0, [dfx-mix()], "hcb", 0),
+        dfx-sp(dfx-layer-name(il, "hc_ffn_fn.weight"), 1, [dfx-hc() * dfx-e(), dfx-mix()], "w16", 0),
+        dfx-sp(dfx-layer-name(il, "hc_ffn_scale.weight"), 0, [3], "hcs", 0),
+        dfx-sp(dfx-layer-name(il, "hc_ffn_base.weight"), 0, [dfx-mix()], "hcb", 0)
+    ];
+    def dfx-layer-specs(il) = append(dfx-attn-specs(il), append(dfx-comp-specs(il), append(dfx-route-specs(il), append(dfx-ffn-specs(il), dfx-hc-specs(il)))));
+    def dfx-global-specs() = [
+        dfx-sp("token_embd.weight", 1, [dfx-e(), dfx-vocab()], "w16", 0),
+        dfx-sp("output_hc_base.weight", 0, [dfx-hc()], "hcb", 0),
+        dfx-sp("output_hc_fn.weight", 1, [dfx-hc() * dfx-e(), dfx-hc()], "w16", 0),
+        dfx-sp("output_hc_scale.weight", 0, [1], "hcs", 0),
+        dfx-sp("output.weight", 41, [dfx-e(), dfx-vocab()], "mx8", 0),
+        dfx-sp("output_norm.weight", 0, [dfx-e()], "norm", 0)
+    ];
+    def dfx-all-layers(il) = il == dfx-layers() ? [] : append(dfx-layer-specs(il), dfx-all-layers(il + 1));
+    // seeds are handed out in file order, 1000 apart: a stream is under 1.2 million elements and a seed enters the
+    // generator multiplied by 100003, so no two tensors draw overlapping runs of the generator
+    def dfx-seeded(specs, n) = len(specs) == 0 ? [] : cons([specs[0][0], specs[0][1], specs[0][2], specs[0][3], 1000 * (n + 1), specs[0][5]], dfx-seeded(specs[1:], n + 1));
+    def dfx-specs() = dfx-seeded(append(dfx-global-specs(), dfx-all-layers(0)), 0);
+
+    // ---- sizes: the layout this writer promises, priced independently of the readers that will check it ---
+    def dfx-cells(ds) = len(ds) == 0 ? 1 : ds[0] * dfx-cells(ds[1:]);
+    def dfx-tbytes(ty, ds) = {
+        let c = dfx-cells(ds);
+        ty == 0 ? c * 4 : ty == 1 ? c * 2 : ty == 26 ? c * 4 : ty == 41 ? c + (c / 32) : ty == 40 ? (c / 2) + (c / 32) : ty == 16 ? (c / 256) * 66 : 0 - 1;
+    };
+    def dfx-align(x) = ((x + 31) / 32) * 32;
+    // each tensor starts on a 32-byte boundary of the data region, as GGUF's default alignment says
+    def dfx-offsets(specs, at) = len(specs) == 0 ? [] : cons(at, dfx-offsets(specs[1:], dfx-align(at + dfx-tbytes(specs[0][1], specs[0][2]))));
+    def dfx-data-size(specs) = {
+        let offs = dfx-offsets(specs, 0);
+        let last = len(specs) - 1;
+        offs[last] + dfx-tbytes(specs[last][1], specs[last][2]);
+    };
+
+    // ---- the generator: sane encodings drawn from Park-Miller ----------------------------------------
+    def dfx-r(seed, k) = dsv4-pm-at(seed, k);
+    def dfx-rb(seed, k) = dfx-r(seed, k) / 256 % 256;
+    def dfx-le16(v) = byte_to_str(v % 256) ++ byte_to_str(v / 256 % 256);
+    // F16 weight: sign, exponent field 8..11 (magnitude in [2^-7, 2^-3)), ten random mantissa bits
+    def dfx-f16-bits(r) = {
+        let v = r / 256 % 65536;
+        (v / 32768 * 32768) + ((8 + (v / 1024 % 4)) * 1024) + (v % 1024);
+    };
+    def dfx-f32-bits(role, aux, r, k) = {
+        let sign = r % 2;
+        let mant = r / 2 % 8388608;
+        role == "norm" ? (127 * 8388608) + (mant / 4)
+         : role == "sink" ? (sign * 2147483648) + (125 * 8388608) + mant
+         : role == "hcb" ? (sign * 2147483648) + (124 * 8388608) + mant
+         : role == "hcs" ? (126 * 8388608) + mant
+         : (k == aux) ? md-f32-bits(0.0 - 1.0e30) : (sign * 2147483648) + (122 * 8388608) + mant;
+    };
+    // the two experts a token hashes to: distinct, from the row's own draw
+    def dfx-hash-pick(r, j) = {
+        let a = r / 256 % dfx-nexp();
+        j == 0 ? a : (a + 1 + (r / 65536 % (dfx-nexp() - 1))) % dfx-nexp();
+    };
+    def dfx-hash-row(s, token) = [dfx-hash-pick(dfx-r(s[4], token), 0), dfx-hash-pick(dfx-r(s[4], token), 1)];
+    def dfx-code8(b) = (b / 128 * 128) + ((5 + (b / 8 % 4)) * 8) + (b % 8);
+    def dfx-iq2-byte(b, pos) = pos == 0 ? b : pos == 1 ? 12 + (b % 4) : b;
+    // MXFP8 and MXFP4 are laid out one expert at a time: its data plane, then its scale plane
+    def dfx-mx-byte(ty, ds, b, i) = {
+        let ce = ds[0] * ds[1];
+        let data = ty == 41 ? ce : ce / 2;
+        let j = i % (data + (ce / 32));
+        j >= data ? 120 + (b % 3) : ty == 41 ? dfx-code8(b) : b;
+    };
+    def dfx-qbyte(s, i) = {
+        let b = dfx-rb(s[4], i);
+        s[1] == 16 ? dfx-iq2-byte(b, i % 66) : dfx-mx-byte(s[1], s[2], b, i);
+    };
+    // each builder halves its range, so a million leaves join in twenty levels of concatenation
+    def dfx-q-go(s, lo, n) = n <= 1 ? byte_to_str(dfx-qbyte(s, lo)) : str_concat(dfx-q-go(s, lo, n / 2), dfx-q-go(s, lo + (n / 2), n - (n / 2)));
+    def dfx-f16-go(s, lo, n) = n <= 1 ? dfx-le16(dfx-f16-bits(dfx-r(s[4], lo))) : str_concat(dfx-f16-go(s, lo, n / 2), dfx-f16-go(s, lo + (n / 2), n - (n / 2)));
+    def dfx-f32-go(s, lo, n) = n <= 1 ? md-le32(dfx-f32-bits(s[3], s[5], dfx-r(s[4], lo), lo)) : str_concat(dfx-f32-go(s, lo, n / 2), dfx-f32-go(s, lo + (n / 2), n - (n / 2)));
+    def dfx-i32-go(s, lo, n) = n <= 1 ? md-le32(dfx-hash-pick(dfx-r(s[4], lo / dfx-used()), lo % dfx-used())) : str_concat(dfx-i32-go(s, lo, n / 2), dfx-i32-go(s, lo + (n / 2), n - (n / 2)));
+    // one tensor's bytes, exactly dfx-tbytes long
+    def dfx-tensor-bytes(s) = s[1] == 0 ? dfx-f32-go(s, 0, dfx-cells(s[2]))
+        : s[1] == 1 ? dfx-f16-go(s, 0, dfx-cells(s[2]))
+        : s[1] == 26 ? dfx-i32-go(s, 0, dfx-cells(s[2]))
+        : dfx-q-go(s, 0, dfx-tbytes(s[1], s[2]));
+
+    // ---- the GGUF writer ------------------------------------------------------------------------------
+    def dfx-u32(v) = md-le32(v);
+    def dfx-u64(v) = md-le32(v % 4294967296) ++ md-le32(v / 4294967296);
+    def dfx-str(s) = dfx-u64(str_len(s)) ++ s;
+    def dfx-pad(n) = n == 0 ? "" : byte_to_str(0) ++ dfx-pad(n - 1);
+    def dfx-kv-u32(k, v) = dfx-str(k) ++ dfx-u32(4) ++ dfx-u32(v);
+    def dfx-kv-f32(k, x) = dfx-str(k) ++ dfx-u32(6) ++ dfx-u32(md-f32-bits(x));
+    def dfx-kv-str(k, v) = dfx-str(k) ++ dfx-u32(8) ++ dfx-str(v);
+    def dfx-kv-bool(k, v) = dfx-str(k) ++ dfx-u32(7) ++ byte_to_str(v);
+    def dfx-le32s(xs) = len(xs) == 0 ? "" : md-le32(xs[0]) ++ dfx-le32s(xs[1:]);
+    def dfx-f32s(xs) = len(xs) == 0 ? "" : md-le32(md-f32-bits(xs[0])) ++ dfx-f32s(xs[1:]);
+    def dfx-kv-i32s(k, xs) = dfx-str(k) ++ dfx-u32(9) ++ dfx-u32(5) ++ dfx-u64(len(xs)) ++ dfx-le32s(xs);
+    def dfx-kv-f32s(k, xs) = dfx-str(k) ++ dfx-u32(9) ++ dfx-u32(6) ++ dfx-u64(len(xs)) ++ dfx-f32s(xs);
+    // the real header's ratio array carries one entry past the blocks (the next-token layer): zero
+    def dfx-ratios() = [dfx-ratio(0), dfx-ratio(1), dfx-ratio(2), 0];
+    def dfx-clamps() = [10.0, 10.0, 10.0];
+    def dfx-kvs() = [
+        dfx-kv-str("general.architecture", "deepseek4"),
+        dfx-kv-str("general.type", "model"),
+        dfx-kv-str("general.name", "DeepSeek V4 fixture, built by Form"),
+        dfx-kv-u32("deepseek4.block_count", dfx-layers()),
+        dfx-kv-u32("deepseek4.context_length", 65536),
+        dfx-kv-u32("deepseek4.embedding_length", dfx-e()),
+        dfx-kv-u32("deepseek4.attention.head_count", dfx-nh()),
+        dfx-kv-u32("deepseek4.attention.head_count_kv", 1),
+        dfx-kv-str("deepseek4.rope.scaling.type", "yarn"),
+        dfx-kv-f32("deepseek4.rope.scaling.factor", 16.0),
+        dfx-kv-u32("deepseek4.rope.scaling.original_context_length", 4096),
+        dfx-kv-f32("deepseek4.rope.scaling.yarn_beta_fast", 32.0),
+        dfx-kv-f32("deepseek4.rope.scaling.yarn_beta_slow", 1.0),
+        dfx-kv-f32("deepseek4.rope.freq_base", 10000.0),
+        dfx-kv-f32("deepseek4.attention.layer_norm_rms_epsilon", 0.000001),
+        dfx-kv-u32("deepseek4.expert_used_count", dfx-used()),
+        dfx-kv-u32("deepseek4.expert_gating_func", 4),
+        dfx-kv-u32("deepseek4.attention.key_length", dfx-hd()),
+        dfx-kv-u32("deepseek4.attention.value_length", dfx-hd()),
+        dfx-kv-u32("deepseek4.vocab_size", dfx-vocab()),
+        dfx-kv-u32("deepseek4.rope.dimension_count", dfx-nrot()),
+        dfx-kv-u32("deepseek4.attention.q_lora_rank", dfx-qr()),
+        dfx-kv-u32("deepseek4.attention.output_lora_rank", dfx-rank()),
+        dfx-kv-u32("deepseek4.attention.output_group_count", dfx-ng()),
+        dfx-kv-i32s("deepseek4.attention.compress_ratios", dfx-ratios()),
+        dfx-kv-f32("deepseek4.attention.compress_rope_freq_base", 160000.0),
+        dfx-kv-u32("deepseek4.expert_count", dfx-nexp()),
+        dfx-kv-u32("deepseek4.expert_shared_count", 1),
+        dfx-kv-f32("deepseek4.expert_weights_scale", 1.5),
+        dfx-kv-u32("deepseek4.hash_layer_count", 1),
+        dfx-kv-bool("deepseek4.expert_weights_norm", 1),
+        dfx-kv-f32s("deepseek4.swiglu_clamp_exp", dfx-clamps()),
+        dfx-kv-u32("deepseek4.attention.sliding_window", 128),
+        dfx-kv-u32("deepseek4.hyper_connection.count", dfx-hc()),
+        dfx-kv-u32("deepseek4.hyper_connection.sinkhorn_iterations", 20),
+        dfx-kv-f32("deepseek4.hyper_connection.epsilon", 0.000001)
+    ];
+    def dfx-join(xs) = len(xs) == 0 ? "" : len(xs) == 1 ? xs[0] : str_concat(dfx-join(xs[0:len(xs) / 2]), dfx-join(xs[len(xs) / 2:]));
+    def dfx-dims(ds) = len(ds) == 0 ? "" : dfx-u64(ds[0]) ++ dfx-dims(ds[1:]);
+    def dfx-info(s, off) = dfx-str(s[0]) ++ dfx-u32(len(s[2])) ++ dfx-dims(s[2]) ++ dfx-u32(s[1]) ++ dfx-u64(off);
+    def dfx-infos(specs, offs) = len(specs) == 0 ? [] : cons(dfx-info(specs[0], offs[0]), dfx-infos(specs[1:], offs[1:]));
+    // everything before the data region: magic, version, counts, metadata, tensor table, zero padding to 32
+    def dfx-header(specs) = {
+        let offs = dfx-offsets(specs, 0);
+        let body = "GGUF" ++ dfx-u32(3) ++ dfx-u64(len(specs)) ++ dfx-u64(len(dfx-kvs())) ++ dfx-join(dfx-kvs()) ++ dfx-join(dfx-infos(specs, offs));
+        body ++ dfx-pad(dfx-align(str_len(body)) - str_len(body));
+    };
+    // the data region: each tensor, then zeros up to the next 32-byte boundary
+    def dfx-data-parts(specs) = len(specs) == 0 ? [] : {
+        let b = dfx-tensor-bytes(specs[0]);
+        cons(b ++ dfx-pad(dfx-align(str_len(b)) - str_len(b)), dfx-data-parts(specs[1:]));
+    };
+    def dfx-image(specs) = str_concat(dfx-header(specs), dfx-join(dfx-data-parts(specs)));
+    // the file under `path`: answers its byte count (write_file answers the length it wrote)
+    def dfx-write(path) = write_file(path, dfx-image(dfx-specs()));
+    0;
+}
