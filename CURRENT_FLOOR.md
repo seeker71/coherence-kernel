@@ -44,7 +44,7 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=39 claims=817 broken=0 (each broken claim named on its own line; 2026-10-02)
+./fkwu observe/door-link-health-run.bml  -> docs=39 claims=818 broken=0 (each broken claim named on its own line; 2026-10-02)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
 ./fkwu observe/band-truth-run.bml        -> bands=345 readable=167 unreadable=178 absent=0 seen=1 flaws=0, exit 0
