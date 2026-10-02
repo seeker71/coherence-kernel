@@ -144,6 +144,14 @@ receipt-texture-band                       -> 16383
 lora-backward-band 511 · lora-step-live-band 511 · lora-adapter-band 31 · symbol-voice-band 63
 ```
 
+The Llama-3.2-3B voice has an adapter for speaking Form in its own stream, `form/form-stdlib/adapters/llama-3.2-3b-form-tokens`:
+55 of 64 held-out answers exact (53 of 62 once the two held-out rows that repeated a train question are set
+aside; they train now) against plain 25 and taught-by-prompt 5 on the bare model, which is limited by the
+continuation seam and does not isolate the training; the Qwen3.8 opening fit's separation 10.0 over 2.2 stands on
+n=7 held-out sites and predates the filter that keeps held-out rows out of its sites. What it shows and does not:
+`docs/native-model-control-plane.md`, "The Form-token adapter". Bands: `form-token-traces-band` 127,
+`form-token-lora-band` 32767, `form-token-eval-band` 8191, `form-token-census-band` 2047.
+
 ### The GPU lanes
 
 Every layer is a Form recipe first and then a carrier on a GPU, held to that recipe. Four light

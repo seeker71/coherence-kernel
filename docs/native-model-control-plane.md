@@ -128,6 +128,45 @@ Until production routes append valid accepted-final events, owned-work share is
 **unmeasured**, never zero. Installed models and evaluation traffic do not supply
 the missing denominator.
 
+## The Form-token adapter: what was measured and what it does not show
+
+`form/form-stdlib/adapters/llama-3.2-3b-form-tokens` is a Llama-3.2-3B-Instruct 4-bit LoRA (rank 8, eight
+layers) trained 100 steps (batch 4, learning rate 1e-4) from `llama-3.2-3b-voice-native` on the replayed rows
+of `learn/form-token-traces.jsonl`, exported through the checkpoint door. The ledger row
+(`receipts/form-token-lora.jsonl`, `lane: llama`) reads held-out loss 2935 milli before and 42 after; the
+commit that landed it rounds the first to 2.936. The held-out questions were asked in stream, the grammar
+answering each closed control (`receipts/form-token-eval.jsonl`, the row at 1790897633574):
+
+| arm | model | exact of 64 | of 62 without the two repeats |
+|---|---|---|---|
+| plain | bare instruct model | 25 | 23 |
+| taught by prompt | bare instruct model | 5 | 4 |
+| taught by LoRA | adapter chain from voice-native | 55 | 53 |
+
+- Two of the 64 held-out rows repeated a train row's question (`ftr-eval-float-15` of `ftr-eval-float-1`,
+  "What is the square root of 16?"; `ftr-eval-text-23` of `ftr-eval-text-3`). The adapter answered both
+  exactly, so the figure with them set aside is 53 of 62; the receipt's per-row results
+  (`questions_judged`) hold this. The corpus asks sixteen questions twice in 578 rows; the split now trains
+  a row whose question a train row asks (`ftr-split`), the traces band (claim 64) holds the zero overlap the
+  training gates above require, and the corpus has 62 held-out rows. The adapter was trained before that
+  change (on 514 rows, the two repeats' train copies among them) and has not been retrained or re-asked.
+- taught-by-prompt: 16 of 64 stopped at eos after a successful observation. The arm is limited by the
+  continuation seam: the untrained voice writes eos right after Form's envelope, so 32 of its 64 answers are
+  empty (31 of those 32 after at least one observation, 15 of them after a refused one, 16 after successes).
+  5 of 64 measures that seam as much as the teaching.
+- Plain and taught run the bare instruct model; the lora arm wears an adapter chain that starts from
+  `llama-3.2-3b-voice-native` (`observe/form-token-eval-run.bml`, `ftev-arms-of`). No arm isolates the new
+  training with Form in stream on the same base weights, so 55 against 5 reads the training and the earlier
+  adapter together.
+- The Qwen3.8 rank-one opening fit reads a held-out separation of 10.0 over a scrambled floor of 2.2
+  (10025 and 2212 milli, `receipts/form-token-lora.jsonl`, `lane: qwen`) on n=7 held-out sites (4 openings, 3
+  opened). The 24 sites were drawn from all 578 rows, the corpus's held-out rows among them, so a site of a
+  row the corpus keeps for evaluation could have been fitted. `ftlr-trace-sites` now leaves heldout rows out
+  (the lora band pins it); the reading predates that and was not refitted.
+- `adapter_config.json` of the export named the run's and the data's `.hearth/` scratch directories, which
+  do not outlive the run; the export door (`ntr-export-config`) no longer writes them and the checked-in
+  config has them removed. It still names the base model by its absolute path in this Mac's Hugging Face cache.
+
 ## Present floor and direction
 
 Alive: the classified registry, Form-owned evidence logic, native-first routing,
