@@ -1,0 +1,126 @@
+; mxfp8-msl.fk — GGUF type 41 (MXFP8, plane-split) as a Metal kernel the BODY emits. The same plane
+; split as mxfp4-msl.fk, one payload width up: 8 bits per element, the identical E8M0 scale plane behind
+; it, and the identical slot — the 32-element scale group.
+;
+; ONE E8M0 ON THE DEVICE. This cell preludes mxfp4-msl.fk and emits `mxm-msl-spine` unchanged rather
+; than a copy of it, exactly as mxfp8-plane-dequant.fk reaches for mxp-e8m0 instead of restating it. The
+; band checks that the combined translation unit contains the spine EXACTLY ONCE — which is both a
+; meaning claim (one E8M0) and a compile fact (a repeated `static inline` is an error, not a warning).
+;
+; WHAT IS EMITTED:
+;   mx8m-dequant-msl  qb[] (raw plane-split bytes) -> w[] f32, one thread per weight.
+;   mx8m-matvec-msl   qb[] x[] -> y[], the fused kernel on the same slot map: 32 lanes per row, one
+;                     scale group per lane per step, 32 payload bytes each feeding ONE weight.
+;
+; THE ONE PLACE THIS DIFFERS FROM THE TYPE-40 KERNEL, BESIDES WIDTH — and it is the honest kind.
+; The payload has NO packing at all: one element is one byte, so the element index IS the byte offset
+; and there is no nibble-order question here. mxfp4's named uncertainty simply does not arise. The
+; scale plane starts at `nel`, not `nel/2`.
+;
+; BIT-EXACTNESS, and the same power-of-two argument as type 40's, checked against E4M3's actual value
+; set. w = 2^(e-127) * E4M3(b): E4M3 carries at most 4 significand bits, so every code is exactly an
+; f32; 2^(e-127) is an exact power of two; the product is an exact f32 whenever it stays inside f32's
+; representable range. So the gate is equality with no epsilon, and mx8m-e-safe? names the wall
+; (E4M3's smallest nonzero magnitude is 2^-9, so exactness needs e - 127 >= -140, and its largest is
+; 448 < 2^9, so e - 127 <= 118).
+;
+; THE DECLARED DEVIATION TRAVELS WITH THE VALUE MAP, unchanged from mxfp8-plane-dequant.fk. OCP E4M3
+; reserves S.1111.111 (0x7F / 0xFF) alone as NaN; fd-value has no special-case branch and decodes those
+; two codes as +-480. mx8_val transcribes fd-value, so the device inherits exactly that deviation and no
+; other. Those codes occur 0 times in 128 KB sampled across three type-41 tensors, and mxp8-nan? already
+; names them CPU-side; mx8m-code-ok? names them here so a carrier can check a buffer before dispatch.
+;
+; THE RADIUS THIS CELL SPEAKS FOR — and it does NOT widen Stone 15's. The GEOMETRY is STRUCTURAL, not
+; bit-exact against any independent implementation, because none exists. GPU agreeing with CPU proves
+; the TRANSCRIPTION; both read the same hypothesis. cols must be a multiple of 32 and SIMD width exactly
+; 32. `nel` is the SLICE element count (the exoscalar seam), required on every entry point.
+;
+; A FURTHER RADIUS THAT IS THIS CELL'S OWN, and it is a fact about this machine at this hour rather than
+; about the format: no type-41 tensor is inside the downloaded prefix of the 85 GiB file. Type-41 data
+; begins at absolute 72 766 954 336 and the local file has reached ~28 GB. So the GPU witness for this
+; cell runs on the committed 1056-byte fixture — REAL bytes of blk.0.attn_kv.weight, fetched by byte
+; range in Stone 15 — at head and tail of 1024 elements, while the type-40 witness runs at head and tail
+; of a 8 388 608-element slice of the real file. That asymmetry is stated in the receipt and in the
+; harness's own output, not smoothed over.
+;
+; Kin: mxfp8-plane-dequant.fk (mxp8-* — the CPU carver this must equal), mxfp4-msl.fk (the mxm_ spine,
+; the slot map, and the emit idiom), f16-decode.fk (fd-value at (4,3) — what mx8_val transcribes).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/mxfp4-plane-dequant.fk form-stdlib/mxfp8-plane-dequant.fk form-stdlib/mxfp4-msl.fk
+;
+; Proven by: form-stdlib/tests/mx-msl-band.fk and form/native/metal/metal_mx_gpu.sh
+
+(do
+    ; ================= the transcription, read back into Form =================
+
+    ; --- E4M3: fd-value at (eb 4, mb 3), bias 7. mxm-mod / mxm-pow2 come from mxfp4-msl.fk. ---
+    (defn mx8m-val (b)
+        (do
+            (let mant (mxm-mod b 8))
+            (let ex   (mxm-mod (div b 8) 16))
+            (let sgn  (div b 128))
+            (let frac (div (mul 1.0 mant) 8.0))
+            (let mag (if (eq ex 0)
+                         (mul (mxm-pow2 (sub 0 6)) frac)
+                         (mul (mxm-pow2 (sub ex 7)) (add 1.0 frac))))
+            (if (eq sgn 1) (sub 0.0 mag) mag)))
+
+    ; the two codes where this decode and OCP E4M3 disagree (OCP: NaN). Named on the device side too.
+    (defn mx8m-code-ok? (b) (if (eq b 127) 0 (if (eq b 255) 0 1)))
+    ; the exactness wall of the bit-exactness sentence in the header
+    (defn mx8m-e-safe? (e) (if (lt (sub e 127) (sub 0 140)) 0 (if (gt (sub e 127) 118) 0 1)))
+
+    ; --- one weight at FLAT element index idx of a slice of `nel` elements starting at `base`.
+    ; No packing: the index IS the offset, and the scale plane starts at nel.
+    (defn mx8m-flat-at (src base nel idx)
+        (mul (mxm-e8m0 (eqr-at src (add base (add nel (div idx 32)))))
+             (mx8m-val  (eqr-at src (add base idx)))))
+
+    ; --- the slot map, read back into Form ---
+    (defn mx8m-scale-read (nel r cols g) (add nel (add (mx4m-g0 r cols) g)))
+    (defn mx8m-pay-read (r cols g m) (add (mul r cols) (add (mul g 32) m)))
+    (defn mx8m-admissible? (cols) (mx4m-admissible? cols))
+
+    ; ================= the emitted MSL =================
+
+    ; --- E4M3, mx8m-val in C ---
+    (defn mx8m-msl-val ()
+        "static inline float mx8_val(int b) { int mant = mxm_mod(b, 8); int ex = mxm_mod(b / 8, 16); int sgn = b / 128; float frac = float(mant) / 8.0f; float mag = (ex == 0) ? (mxm_pow2(-6) * frac) : (mxm_pow2(ex - 7) * (1.0f + frac)); return (sgn == 1) ? -mag : mag; } ")
+
+    ; --- one weight, mx8m-flat-at in C ---
+    (defn mx8m-msl-weight ()
+        "static inline float mx8_w(device const uchar* qb, uint nel, uint idx) { int e = int(qb[nel + idx / 32u]); return mxm_e8m0(e) * mx8_val(int(qb[idx])); } ")
+
+    ; the spine is mxfp4-msl.fk's, not a copy of it
+    (defn mx8m-msl-helpers ()
+        (str_concat (mxm-msl-spine) (str_concat (mx8m-msl-val) (mx8m-msl-weight))))
+
+    (defn mx8m-dequant-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& cnt [[buffer(3)]], constant uint& nel [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= cnt) return; w[i] = mx8_w(qb, nel, off + i); }")))
+
+    (defn mx8m-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 32u; uint g0 = (r * cols) / 32u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[nel + g0 + g])); uint p = r * cols + g * 32u; device const float* xv = x + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 32u; ++m) { acc = acc + xv[m] * mx8_val(int(qb[p + m])); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")))
+
+    (defn mx8m-dequant-msl (fname) (str_concat (mx8m-msl-helpers) (mx8m-dequant-body fname)))
+    (defn mx8m-matvec-msl  (fname) (str_concat (mx8m-msl-helpers) (mx8m-matvec-body  fname)))
+    (defn mx8m-msl-unit (dname mname)
+        (str_concat (mx8m-msl-helpers)
+        (str_concat (mx8m-dequant-body dname) (mx8m-matvec-body mname))))
+
+    ; --- BOTH TYPES AS ONE TRANSLATION UNIT, with the mxm_ spine appearing exactly once. This is what a
+    ; carrier compiles; the assembling cell puts qml-msl-header in front of it and nothing else. ---
+    (defn mxm-msl-unit (d4 m4 d8 m8)
+        (str_concat (mxm-msl-spine)
+        (str_concat (mx4m-msl-val)
+        (str_concat (mx4m-msl-weight)
+        (str_concat (mx8m-msl-val)
+        (str_concat (mx8m-msl-weight)
+        (str_concat (mx4m-dequant-body d4)
+        (str_concat (mx4m-matvec-body m4)
+        (str_concat (mx8m-dequant-body d8) (mx8m-matvec-body m8))))))))))
+
+    0)
