@@ -286,11 +286,12 @@ emitters       dsv4-compressor-band 2047 · dsv4-kv-cache-band 511 · dsv4-hc-ba
                moe-msl-band 511 · moe-route-radius-band 63 · moe-route-wide-msl-band 255
 stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels compiled on the device, two run)
                ds4-order-match-band.bml 255       (the quantiser and the Q8_0 row dot against a Form reference of ds4's order)
-references     ds4-recorded-references-band.bml 1023   (the logits pinned by a SHA-256 of the whole file, by the body's own door)
+references     ds4-recorded-references-band.bml 8191   (the logits pinned by a SHA-256 of the whole file, by the body's own door; their 14 chat-templated prompt ids derived by the body's
+                                                        template over the IQ2XXS header and held to the row beside them)
 driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 511 · native/metal/tests/dsv4-bind-band.bml 511
 driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 511 · native/metal/tests/dsv4-layer-band.bml 2047
 driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/dsv4-end-to-end-band.bml 511
-               dsv4-lease-band.bml 255 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 1023
+               dsv4-lease-band.bml 255 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 2047
 driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 511 · native/metal/tests/dsv4-layer-q8q2-band.bml 4095
                native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 101 kernels, dsv4-open-band 511 with 72 in the graph)
 ```
@@ -386,13 +387,13 @@ a printed note and not a gap: ds4 quantises a Q8_0 matvec's activation to int8 p
 (:3480), and the driver's lanes read f32 activations, so a near-tie token may differ. What the window reads of that, by leg: the STREAM leg (the 24 greedy ids for the raw prompt, which needs no extra input) matches
 ids and now records, per step, OUR top-two logit margin and how far the recorded id's logit sits below our top (`stream_margins`, `stream_recorded_gap` in the
 receipt), so a flip is told from a near tie; the reference's own tie budget (its top-two margin against our largest delta over its top 64) belongs to the LOGITS leg,
-which needs the 14 chat-templated prompt ids the recording does not carry and WAITS until they are supplied. The `ds4q8` and `ds4q2k` units are what to wire if the
+which runs on the recording's 14 chat-templated prompt ids (pinned in the row beside the recording, below; a request's `logits_prompt_ids` replaces them, and the leg waits only when neither holds). The `ds4q8` and `ds4q2k` units are what to wire if the
 readings say so. An expert type no kernel reads is an explicit refusal (`dkl-expert-kernel` reads nothing; the FFN answers [0] before any dispatch). What still blocks the
 physical window: the window itself (one run, alone, governor-checked, the door dry by default and `{"go":1}` explicit), for positions below 2048 only: the 126 indexer
 tensors (`indexer.attn_q_b`, `indexer.proj`, `indexer_compressor_{kv,gate,ape,norm}`, on the 21 ratio-4 layers) are present in the file and unrouted, and a ratio-4 block
 refuses at position 2048 or later (the indexer stops being inert there). The kernels' multi-block rows (4 and 8 blocks a row of Q2_K and IQ2_XXS, shared and per-slot
 input) read 1.2e-7 to 2.6e-7 against the oracle on a third file, the second fixture's rows being one block; the Q8_0 and Q2_K plants split into a wrong number (Q2_K scale as the
-min, Q8_0 codes unsigned, an IQ2_XXS kernel on a Q2_K stack: finite, far) and not a number (a Q8_0 stride of 33, an MXFP8 kernel on a Q8_0 tensor: non-finite). The doors after this change: door-link-health docs=39 claims=837 broken=0 (prelude-reach missing=0 untracked=0 shadow=0), band-truth bands=360
+min, Q8_0 codes unsigned, an IQ2_XXS kernel on a Q2_K stack: finite, far) and not a number (a Q8_0 stride of 33, an MXFP8 kernel on a Q8_0 tensor: non-finite). The doors after this change: door-link-health docs=39 claims=841 broken=0 (prelude-reach missing=0 untracked=0 shadow=0), band-truth bands=360
 readable=182 unreadable=178 absent=0 seen=1 flaws=0. Found on the way: a recursive peak that calls itself twice a level takes 2^n steps (64 values never returned), so the band's peak is one fold.
 
 Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
@@ -406,7 +407,16 @@ The recorded references are `form/form-stdlib/tests/oracles/ds4-logits-capital-o
 2581 "We" at 36.7579117) and the 24-token stream for the raw prompt ids [671 6102 294 8760 344] (a period-7 cycle,
 " Paris. The capital of France is"). They were earned on the IQ2XXS file, which ds4 can read; the registry's `ds4flash`
 row names the reap25 file, which it cannot, so they judge a native lane on the IQ2XXS file and a reap25 lane is judged by
-the Form reference. The radius is one prompt, a cycle, never past position 127. The kernels the order-match band runs
+the Form reference. The radius is one prompt, a cycle, never past position 127. The logits' own prompt ids are the row
+`form/form-stdlib/tests/oracles/ds4-logits-capital-of-france-prompt.json` (read 2026-10-03 WITA through `./fkwu form/form-stdlib/tests/ds4-recorded-references-band.bml </dev/null`
+-> 8191 and `dsv4-validate-band.bml` -> 2047, the governor reading room before each run, every exit 0): the 14 ids [0 3476 477 260 11502 22896 128803 671 6102 294 8760 344 128804 128821],
+which are BOS, ds4's default system "You are a helpful assistant" (5 ids), User, the prompt "The capital of France is" (the raw prompt's 5), Assistant and `<think>`. `form/form-stdlib/bml/dsv4-chat-template.bml` derives them
+from the IQ2XXS header alone, finding each marker by its bytes in the file's own vocabulary (BOS equals the header's `tokenizer.ggml.bos_token_id`) and detokenizing back to the template's text; the template is ds4's own
+(`ds4.c:36195`, the default system at `ds4_cli.c:1767`, thinking on at `:1774`) and the count it gives, 1 + 5 + 1 + 5 + 1 + 1, is the recording's `"prompt_tokens":14`. The same code gives the token counts
+the official DeepSeek API reported for three prompts with no system text (21, 18, 27). What the records do not say: the recording names neither the prompt nor the flags, so the prompt is read from the
+commit that took it (`09c69ba8e`, "for the same prompt") and the corpus rows 939 and 948, and thinking on is the default path (a `</think>` ending, thinking off, has the same count and differs in the one last id, 128822; the recording's argmax "We" is, in the commit's words, ds4 opening its
+reasoning, which fits `<think>`, and no flag is recorded). The dry door prints the ids and the leg's ask in place of the old WAITS line. Plants (each read a different list or no ids): a wrong id, a wrong count, a missing BOS in the row
+(the recorded-references band's bits 1024 to 4096 and the validate band's 1024). The kernels the order-match band runs
 carry `#pragma clang fp reassociate(off)` and `contract(off)`: `metal_pipeline` compiles with the default options, and
 without them the eight-thread Q8_0 twin read 8 ulps from the one-thread kernel.
 

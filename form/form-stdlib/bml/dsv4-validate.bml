@@ -28,7 +28,7 @@
 // (status refused, reason driver-gaps), gives back any lease this process holds, and stops. A stop inside a stage reads as an abort (try/catch), so the handles, the lease and the receipt always follow.
 // THE WIRESPAN PROBE is judged by its own limit (twice the stack, dvr-wirespan-limit), not by twice the slice: half a stack (277 MB on the IQ2XXS file) is over the slice's 128 MiB floor, and the
 // generic delta rule would have ended the run as stage-delta before the probe could say 'stack'.
-// The stream stage's estimate is the expert cache (every new expert the 24 ids meet grows wired memory), and a logits leg without its prompt ids is a named 'waits' row in the log and no run.
+// The stream stage's estimate is the expert cache (every new expert the 24 ids meet grows wired memory), and a logits leg whose prompt ids hold nowhere (none supplied, the pinned row missing or failing its check) is a named 'waits' row in the log and no run.
 //
 // WHAT THE DRIVER CANNOT RUN YET (dvr-gaps = dsv4-layout.fk dvl-driver-gaps, read from the header, printed by the dry plan): every tensor of the header whose type its role has no kernel for, from the layout's one
 // table of the types each role may carry (a dense projection MXFP8 or Q8_0, an expert stack MXFP4, IQ2_XXS or Q2_K, the routers and the embedding F16, the norms F32). Since driver stage 4 the layer and the head
@@ -37,7 +37,7 @@
 // the plan prints beside it (dvr-notes), never a gap: it is what the window's stream leg and tie budget measure.
 //
 // THE RECORDED REFERENCES (read from the recording, never recomputed): the logits of ds4's dump on its 14-token chat-templated prompt (the JSON is pinned by SHA-256; the recording does not carry
-// the 14 prompt ids, so that leg runs when the caller supplies them as logits_prompt_ids and waits otherwise), judged by Pearson r, top-10 overlap and the TIE BUDGET (the reference's top-two margin
+// the 14 prompt ids; the row beside it pins them: dvr-logits-prompt-path, derived from the IQ2XXS header by bml/dsv4-chat-template.bml, so that leg runs on them unless the caller supplies others as logits_prompt_ids), judged by Pearson r, top-10 overlap and the TIE BUDGET (the reference's top-two margin
 // against our largest delta over its top 64: a token flips when the delta exceeds the margin); and the 24-token greedy stream for the raw prompt ids 671 6102 294 8760 344 (a cycle of 7), matched
 // token by token, run twice for bit equality of ids and last logits, and read at every step for OUR top-two margin and the recorded id's gap below our top (dvr-step, the receipt's stream_margins and
 // stream_recorded_gap): the stream leg has no reference logits of its own, so its near ties are told from our own margins, and the tie budget proper is the logits leg's.
@@ -54,6 +54,8 @@ section [form.bml] {
   def dvr-logits-sha() = "3898af1731936bf0a59d0c0ce01a60df62f54b9b64552673c7f93df3b7c79d27";
   def dvr-prompt() = [671, 6102, 294, 8760, 344];
   def dvr-stream() = [11111, 16, 455, 6102, 294, 8760, 344, 11111, 16, 455, 6102, 294, 8760, 344, 11111, 16, 455, 6102, 294, 8760, 344, 11111, 16, 455];
+  def dvr-logits-prompt-path() = "form/form-stdlib/tests/oracles/ds4-logits-capital-of-france-prompt.json";
+  def dvr-logits-count() = 14;
   def dvr-receipt-path() = "receipts/dsv4-validation.jsonl";
   def dvr-budget-ms() = 1800000;
   def dvr-abort-ms() = 1200000;
@@ -74,6 +76,18 @@ section [form.bml] {
   // THE WINDOW IS NEVER THE DEFAULT. Empty stdin, {} and {"dry":1} all print the plan; only an explicit {"go":1} (and no dry) runs the window.
   def dvr-go?(opts) = dvr-int(opts, "go", 0) == 1 && dvr-int(opts, "dry", 0) != 1;
   def dvr-dry?(opts) = !dvr-go?(opts);
+
+  // ---- the logits leg's prompt ids: the request's own, else the pinned row's, never a guess ----------------------------------------------
+  // The row beside the recording (tests/oracles/ds4-logits-capital-of-france-prompt.json) holds the 14 ids ds4's chat template gives its prompt, derived natively from the IQ2XXS header (bml/dsv4-chat-template.bml)
+  // and held to the row by tests/ds4-recorded-references-band.bml. The door reads them as they stand, after one check: the ids are the row's own parts in order (BOS, the system ids, User, the prompt ids, Assistant,
+  // think), their number is the recording's prompt_tokens, and the prompt ids are the raw prompt the stream leg pins. A wrong id, a wrong count or a missing BOS reads false and the leg waits.
+  def dvr-logits-row() = parse-json("dsv4-logits-prompt", read_file_slice(dvr-logits-prompt-path(), 0, 8192));
+  def dvr-chat-parts(row) = append(append([dvr-int(row, "bos", 0 - 1)], dvr-ints(row, "system_ids")), append(append([dvr-int(row, "user", 0 - 1)], dvr-ints(row, "prompt_ids")), [dvr-int(row, "assistant", 0 - 1), dvr-int(row, "think", 0 - 1)]));
+  def dvr-chat-ids-ok?(ids, row) = len(ids) == dvr-logits-count() && ids == dvr-chat-parts(row) && dvr-int(row, "bos", 0 - 1) >= 0 && ids[0] == dvr-int(row, "bos", 0 - 1) && dvr-ints(row, "prompt_ids") == dvr-prompt() && dvr-int(row, "prompt_tokens", 0) == dvr-logits-count();
+  def dvr-pinned-go(row) = dvr-chat-ids-ok?(dvr-ints(row, "ids"), row) ? dvr-ints(row, "ids") : [];
+  def dvr-pinned-ids() = try dvr-pinned-go(dvr-logits-row()) catch [];
+  def dvr-logits-ids(opts) = len(dvr-ints(opts, "logits_prompt_ids")) > 0 ? dvr-ints(opts, "logits_prompt_ids") : dvr-pinned-ids();
+  def dvr-logits-from(opts) = len(dvr-ints(opts, "logits_prompt_ids")) > 0 ? "supplied" : (len(dvr-pinned-ids()) > 0 ? "pinned" : "none");
 
   // ---- the machine: the abort rules on a reading -----------------------------------------------------------------------------
   // the governor's ask for a stage, refused with its reason (an empty string when it is granted)
@@ -138,10 +152,10 @@ section [form.bml] {
   // (dkr-unit-ds4q8, dkr-unit-ds4q2k: compiled by the kernels band, not in the graph) are what to wire if the window's readings say so. WHAT THE WINDOW READS, and which leg: the STREAM leg runs on the raw
   // prompt ids alone and records, for each of its 24 steps, OUR top-two logit margin (stream_margins) and how far the recorded id's logit sits below our top (stream_recorded_gap, 0 where we chose it), so a flip
   // at a step can be told from a near tie (a miss with a gap near the margin's scale is rounding; a miss with a large gap is not). The reference's own TIE BUDGET (its top-two margin against our largest delta)
-  // belongs to the LOGITS leg, which needs the 14 chat-templated prompt ids the recording does not carry and WAITS until they are supplied. It is a MEASUREMENT the window exists to make: it does not
+  // belongs to the LOGITS leg, which runs on the recording's 14 chat-templated prompt ids (pinned in the row beside the recording; a request may supply others). It is a MEASUREMENT the window exists to make: it does not
   // stop the window from running, so it is printed in the plan and never counted among the gaps.
   def dvr-has-q-types?(m) = dvl-type-in?(dvl-type(record_get(m, "index"), "output.weight"), [8]) || dvl-type-in?(dvl-type(record_get(m, "index"), "blk.0.ffn_down_exps.weight"), [10]);
-  def dvr-order-note() = "note, not a gap: the recorded stream was earned with ds4's own order (Q8_0 activations quantised to int8 per 32-block, Q2_K in a plain ascending sum); the driver's lanes read f32 activations and sum by lane tree, so a near-tie token may differ: the stream leg records our top-two margin and the recorded id's gap at each of its 24 steps (the logits leg's tie budget waits for its 14 prompt ids), and the ds4q8 and ds4q2k units are the lanes to wire if they say so";
+  def dvr-order-note() = "note, not a gap: the recorded stream was earned with ds4's own order (Q8_0 activations quantised to int8 per 32-block, Q2_K in a plain ascending sum); the driver's lanes read f32 activations and sum by lane tree, so a near-tie token may differ: the stream leg records our top-two margin and the recorded id's gap at each of its 24 steps (the logits leg's tie budget is read on the recording's 14 prompt ids), and the ds4q8 and ds4q2k units are the lanes to wire if they say so";
   def dvr-notes(m) = dvr-has-q-types?(m) ? [dvr-order-note()] : [];
 
   // ---- the processes: who else holds the GPU -------------------------------------------------------------------------------------------
@@ -169,6 +183,14 @@ section [form.bml] {
   // ---- the plan, as lines (the dry door prints these and opens nothing) ------------------------------------------------------------------------
   def dvr-gib(b) = mg-gib-text(b);
   def dvr-stage-line(row) = "[dsv4-validate] stage " ++ row[0] ++ ": ask " ++ dvr-gib(row[1]) ++ " (" ++ row[1].str() ++ " B); " ++ row[2];
+  // the logits leg's line: the ids it will run on and the ask of its stage, or why it waits
+  def dvr-ask-text(ask) = "ask " ++ dvr-gib(ask) ++ " (" ++ ask.str() ++ " B)";
+  def dvr-logits-line(opts, ids, ask) {
+   let from = dvr-logits-from(opts);
+   from == "supplied" ? "will run on the " ++ len(ids).str() ++ " prompt ids supplied " ++ dvr-ids-json(ids) ++ ", " ++ dvr-ask-text(ask)
+    : (from == "pinned" ? "will run on the " ++ len(ids).str() ++ " chat-templated prompt ids " ++ dvr-ids-json(ids) ++ " pinned beside the recording (" ++ dvr-logits-prompt-path() ++ ": BOS, system, User, prompt, Assistant, <think>; a supplied logits_prompt_ids replaces them), " ++ dvr-ask-text(ask)
+    : "WAITS: no logits_prompt_ids supplied and the row " ++ dvr-logits-prompt-path() ++ " is missing or fails its check (14 ids that are its own parts in order); supply them as logits_prompt_ids");
+  }
   def dvr-plan-lines(m, size, opts, facts) {
    let cap = dvr-int(opts, "cap", dvr-default-cap());
    let c = dvr-int(opts, "cache_experts", dls-cache-experts());
@@ -176,7 +198,7 @@ section [form.bml] {
    let lease = shared + mg-kv-margin();
    let layers = dvr-est-layers(m);
    let gaps = dvr-gaps(m);
-   let logitsIds = dvr-ints(opts, "logits_prompt_ids");
+   let logitsIds = dvr-logits-ids(opts);
    append(["[dsv4-validate] DRY: the plan below is what the window WILL do; nothing is opened, nothing mapped, no lease taken, no row written, no kernel compiled",
     "[dsv4-validate] file " ++ dvr-text(opts, "file", dvr-file()) ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), " ++ record_get(m, "arch") ++ ", " ++ record_get(m, "layers-n").str() ++ " layers, " ++ record_get(m, "tensors").str() ++ " tensors, header read only",
     "[dsv4-validate] lease: shared " ++ dvr-gib(shared) ++ " (" ++ shared.str() ++ " B: dense " ++ dls-dense(m).str() ++ " + " ++ c.str() ++ " experts a layer " ++ dls-cache(m, c).str() ++ " + KV at " ++ cap.str() ++ " positions " ++ dvl-kv-total(m, cap).str() ++ "), private " ++ dvr-gib(mg-kv-margin()) ++ ", derived and not measured",
@@ -187,7 +209,7 @@ section [form.bml] {
        "[dsv4-validate] abort on: a denied ask, host-memory-low, wired above the lease (" ++ dvr-gib(lease) ++ " past the baseline), a stage delta over twice its estimate (floor 64 MiB), 20 minutes of 30, a stage the driver refuses, a wirespan probe that wires half the stack or more",
        "[dsv4-validate] on an abort: metal_sync, free every handle in synced rounds, mg-release, a receipt row with the reason; nothing is retried",
        "[dsv4-validate] references: recorded logits " ++ dvr-logits-path() ++ " (" ++ dvr-logits-bytes().str() ++ " B, SHA-256 " ++ dvr-logits-sha() ++ "); the stream " ++ dvr-ids-json(dvr-stream()) ++ " for the raw prompt " ++ dvr-ids-json(dvr-prompt()),
-       "[dsv4-validate] logits leg: " ++ (len(logitsIds) > 0 ? "will run on the " ++ len(logitsIds).str() ++ " prompt ids supplied" : "WAITS: the recording does not carry its 14 chat-templated prompt ids; supply them as logits_prompt_ids"),
+       "[dsv4-validate] logits leg: " ++ dvr-logits-line(opts, logitsIds, dls-cache(m, c)),
        "[dsv4-validate] the driver cannot run yet: " ++ (len(gaps) == 0 ? "nothing named by the header" : flp-join(gaps, "; ")),
        "[dsv4-validate] ordering: " ++ (len(dvr-notes(m)) == 0 ? "the file holds no Q8_0 output or Q2_K down tensor, so ds4's own order is not in question" : dvr-notes(m)[0]),
        "[dsv4-validate] receipt: one dated row appended to " ++ dvr-text(opts, "receipt", dvr-receipt-path()),
@@ -400,7 +422,7 @@ section [form.bml] {
    nothing?(a) || nothing?(b) ? nothing() : 1;
   }
   def dvr-steps(env, m, opts) {
-   let ids = dvr-ints(opts, "logits_prompt_ids");
+   let ids = dvr-logits-ids(opts);
    append([() => dvr-stage(env, "compile", dvr-bound(), () => dvr-do-compile(env)),
            () => dvr-stage(env, "map", dvr-est-map(m, record_get(env, "cap")), () => dvr-do-map(env)),
            () => dvr-stage(env, "state", dvl-kv-total(m, record_get(env, "cap")), () => dvr-do-state(env)),
@@ -414,7 +436,7 @@ section [form.bml] {
   // a leg that waits for what the caller has not supplied: named in the log and the output, no estimate, no run, no abort
   def dvr-waits(env, label) {
    let logged = dvr-log-add(env, [label ++ "-waits-for-prompt-ids", 0, 0, 0]);
-   let said = print_str("[dsv4-validate] stage " ++ label ++ ": waits for logits_prompt_ids (the recording does not carry its prompt ids); not run");
+   let said = print_str("[dsv4-validate] stage " ++ label ++ ": waits for logits_prompt_ids (none supplied and the pinned row does not hold); not run");
    "";
   }
   // free everything the window holds, give the lease back, answer the handles still held
