@@ -281,7 +281,7 @@ references     ds4-recorded-references-band.bml 1023   (the logits pinned by a S
 driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 511 · native/metal/tests/dsv4-bind-band.bml 511
 driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 511 · native/metal/tests/dsv4-layer-band.bml 2047
 driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/dsv4-end-to-end-band.bml 511
-               dsv4-lease-band.bml 255 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 255
+               dsv4-lease-band.bml 255 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 511
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -347,9 +347,14 @@ twin), the fixture's own clamp values, and the head's choice of epsilon (the fix
 file and file_size for every other (the Qwen file reads 29,047,086,048 exactly). `form/form-stdlib/form-cli-model-ds4.fk` seats DeepSeek
 at the generate and session doors (the DeepSeek tokenizer's raw ids, the lease, the driver's open, prefill, greedy steps and close); the lane
 switch reads 0, today's refusals read word for word, a DeepSeek session refuses observations, and nothing here has run on a device.
-`observe/dsv4-validate-run.bml` is the validation window, written and not run: `{"dry":1}` prints its plan (24.9 GiB lease, the stages
-and asks, the abort rules, the references) and opens nothing; the plan names the gap the window would meet first: the IQ2XXS file's
-Q8_0 dense tensors and Q2_K down experts (the reap25 header reads none). The doors, as they read after this change:
+`observe/dsv4-validate-run.bml` is the validation window, written and not run: its default (empty stdin, `{}`, `{"dry":1}`) prints its plan
+(24.9 GiB lease, the stages and asks, the abort rules, the references) and opens nothing; only `{"go":1}` runs it, and while the header names
+tensors the driver cannot run it maps nothing and writes a refusal row. The eleven gaps the plan prints for the IQ2XXS file: the Q8_0 dense
+tensors (type 8: attn q_a, q_b, kv, output_a, output_b and the shared expert's gate, up and down; their `form_dsv4_q80_matvec_*` and grouped
+kernels are compiled, not in `dkr-graph-units`), the Q8_0 `output.weight` (the head reads type 41), the Q2_K down experts (type 10;
+`form_dsv4_q2k_matvec_experts*` compiled only, `dkl-expert-type-ok?` accepts 40 and 16), and the ds4 order-match Q8_0 and Q2_K units the
+recorded stream was matched with. The reap25 header reads none. The lease's belief that only touched pages wire is derived, not witnessed:
+if whole expert stacks wire, the set is about 85 GB, above the 82.46 GB cap, and the window's wirespan probe is the witness. The doors, as they read after this change:
 `./fkwu observe/door-link-health-run.bml </dev/null` -> docs=39 claims=831 broken=0 (prelude-reach missing=0 untracked=0 shadow=0),
 `./fkwu observe/band-truth-run.bml </dev/null` -> bands=356 readable=178 unreadable=178 absent=0 seen=1 flaws=0 (the five stage-3 bands are read: 351 -> 356, 173 -> 178).
 
