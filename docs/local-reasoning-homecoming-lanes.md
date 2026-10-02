@@ -90,6 +90,52 @@ call can carry absence; it is not a success count. Millisecond readings can roun
 to zero, and parent and child times overlap. Metal admission and execution keep
 their separate stages; this census does not measure every host function.
 
+`recipe-import` discovers and admits reusable ordinary BML libraries:
+
+```text
+<|form:recipe-import|>?<|/form:recipe-import|>
+<|form:recipe-import|>training-cost<|/form:recipe-import|>
+```
+
+The returned catalog supplies the input contract. `recipe("training-cost.plan")`
+fits latency and estimated additional memory, then selects the largest admissible
+observed row for each offered budget. Coefficients pass directly between native
+functions. The same library solves positive-definite systems of the supplied
+dimension; a singular system and a budget with no admissible row return absence.
+Its authority is [ordinary BML source](../form/form-stdlib/recipes/training-cost.bml).
+Source bytes select the parse cache; each function's lowered body and captured
+dependency cells determine its identity. An unchanged import reuses the owner's
+bindings. Changed imports publish new bindings, while already held functions
+retain their original dependency cells. A malformed import preserves the current
+library. The catalog currently offers `training-cost`; general effectful modules
+are not admitted through this pure interface. Its earlier declarations supply
+dependencies; this door does not recursively load arbitrary imports. The shared
+[pure standard library](../form/form-stdlib/bml/pure-stdlib.bml) supplies the same
+numeric and node surfaces to ordinary BML and this evaluator.
+Shared `==` compares int and float values numerically, including nested lists,
+while int-to-int comparison retains the complete native word. Explicit `Value`
+contracts retain structural representation comparison. The
+[value operators](../form/form-stdlib/bml/value-operators.bml) carry this behavior;
+the numerical source needs no comparison workaround.
+
+The [training observation reader](../form/form-stdlib/bml/training-observations.bml)
+correlates completed worker rows with their starts and offers immutable numeric
+cells. `node("actual-coordinate")` reads a native cell in pure evaluation;
+`recipe("training-cost.values")(node("actual-coordinate"))` reads the offered rows
+without copying their table through model output. The
+[direct execution door](../observe/training-cost-run.bml) accepts an events path,
+budgets in GiB, ridge and headroom as JSON on stdin. Times cover forward plus
+backward execution. Memory remains the worker's estimate, and the budgets remain
+caller-offered scenarios. Pure results retain their typed observations, including
+absence inside a list; opaque functions retain only their rendered label.
+Refused controls emit their reason as an organ signal immediately and return
+that same observation to the decoding context for the next local choice.
+The [numerical receipt](../receipts/native-training-cost-library.json) retains two
+actual worker datasets, independent coefficient and residual checks, a
+four-dimensional system and the observed function census. Ordinary BML and the
+stream evaluator produce equivalent plans. These Form calls use the pure
+evaluator; their census does not claim CPU or Metal JIT compilation.
+
 The [training-cost library](../receipts/native-training-plan.md) witnesses
 intercalling recipes in a real decoding stream: two ridge fits, three budget
 inputs, an independent linear solve and a five-input RAM Metal map. Its retained
