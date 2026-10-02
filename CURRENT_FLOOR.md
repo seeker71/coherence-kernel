@@ -60,10 +60,15 @@ observe/tests/belief-rewitness-band      -> 63
 learn/tests/homecoming-distillation-corpus-band -> 32767
 value-eq-arena-band 31 · import-carry-band 255 · form-cli-author-high-band 4095
 closure-lines-band 31 · sort-band 31   (the queue's two gaps, written by the local lane; 2026-10-01)
-memory-governor-band 1023     (form/form-stdlib/bml/memory-governor.bml asks the whole machine, not one process, before a
+memory-governor-band 1048575  (form/form-stdlib/bml/memory-governor.bml asks the whole machine, not one process, before a
                                 Qwen session opens, a renewal allocates a second KV state, a walk turn begins or the planner
                                 opens its voice; the weights themselves are one physical copy in the page cache for every
-                                kernel that maps the file, measured 2026-10-02; observe/memory-governor-run.bml prints the reading)
+                                kernel that maps the file, measured 2026-10-02; a grant is a lease other processes see
+                                (/private/tmp/form-memory-leases/<pid>.lease, one lock, the same weights file counted once,
+                                pending bytes counted for 180 s, a dead pid's file removed), each defect planted and read below
+                                its head; observe/memory-governor-run.bml prints the reading and the live leases)
+form-cli-code-low-memory-band 511  (a running coding lane saves its checkpoint and ends with host-memory-low when the machine
+                                runs low, continues on a roomy or unreadable reading; the walk reads it as a choice point)
 host-walk-band 2147483647     (the walk's turn waits for memory within the window and a held answer takes no turn)
 form-cli-landing-band 16383   (the landing and the walk read every child's exit from `host_wait` through
                                 `host-child.bml` (`hch-run`), never from a printed mark; a red witness holds the landing)

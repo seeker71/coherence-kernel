@@ -1,0 +1,99 @@
+; form-cli-code-low-memory-band.bml — a coding lane that already holds memory gives it back when the machine runs low:
+; it saves its checkpoint and ends with the named reason host-memory-low, and the walk reads that ending as a choice
+; point, not a spent option or a failed gap. No model runs: the lane is entered through fcac-loop-with over a scripted
+; session (no weights, no state) and a scripted machine reading, the one seam fcac-loop stands on at every turn.
+;
+; Verdict 511 when every claim lands:
+;   1    a low reading (3 GiB available of a 128 GiB machine, under half the 12.8 GiB reserve) ends the lane: the answer
+;        is the same [session, state] pair every terminal ending gives, the state is done, and its reason is exactly
+;        host-memory-low
+;   2    its checkpoint is saved and reads back: the checkpoint file stands under the scripted root, its state is the
+;        state the lane held (same stage and turns, not done), so a later walk resumes it
+;   4    the ending is a terminal one the lane settles: the answer is no renewable context (fcac-renewable reads 0), so
+;        fcac-finish-contexts releases the session through fcac-settle as it does for every ending
+;   8    a roomy reading continues unchanged: the turn goes on to its own next decision (here the caller's turn budget,
+;        caller-turn-budget-reached) and no memory ending is made
+;   16   a reading that did not arrive (nothing, a short list, a zero memsize) continues exactly as the roomy one does: a
+;        lane already holding memory is not stopped because a door failed to answer
+;   32   a lane that is already done keeps its own reason: a low reading does not rewrite a terminal ending
+;   64   the walk reads a host-memory-low row as a choice point: it is not idle (its lane generated no ID and moved no band,
+;        which reads idle for any other reason), the walk's unknown line names the memory, and the row's wall is no
+;        option's measure (hw-wall)
+;   128  native-turn-run.bml reads it the same way where it writes the row: the option is not spent (nt-spent), the walk
+;        ends there (the machine is short for every way), by the one word the walk's readers share
+;   256  the seam: fcac-loop is the one entry of every turn (the first, each turn fcac-observed continues, a renewed
+;        context) and asks the machine through fcac-loop-with; fcac-advance still continues through it
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- the checkpoint is FORMBIN2 written through the carrier and read back, and host-walk.bml
+; speaks fkwu host doors. The band writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/host-walk.bml
+section [form.bml] {
+ class FormCliCodeLowMemoryBand {
+  def lmb-bit(ok, bit) = ok ? bit : 0;
+  def lmb-has?(s, part) = str_find(s, part, 0) >= 0;
+  def lmb-pages(gib) = gib * 65536;
+  // a machine of mem GiB: free, speculative, purgeable and file-backed GiB, wired and compressor GiB
+  def lmb-vm(mem, free, spec, purg, ext, wired, comp) = [16384, mem * mg-gib(), lmb-pages(free), 0, 0, lmb-pages(wired), lmb-pages(spec), lmb-pages(purg), lmb-pages(comp), 0, 0, 0, 0, 0, 0, lmb-pages(ext), 0];
+  def lmb-low() = lmb-vm(128, 1, 0, 0, 2, 20, 4);
+  def lmb-roomy() = lmb-vm(128, 8, 2, 2, 48, 20, 4);
+  def lmb-session() = fcms-session("live", "scripted", "/scripted.gguf", "", [], [], 4096, 10, -1, 0, 0, 0, 0, 0);
+  def lmb-goal() = "Add (defn cl-unit-at (text line) ...) inside the (do ...) before the final 0.";
+  def lmb-docs() = [["closure-lines.fk", "closure-lines.fk", "(do\n    0)\n"]];
+  def lmb-state(root) = fcam-with(fcap-open-direct-code(lmb-goal(), lmb-docs(), ["closure-lines.fk"]), [root, "memory-low-band", fcam-scope(lmb-goal(), lmb-docs(), ["closure-lines.fk"], "[]"), 0]);
+  def lmb-checkpoint(root) = fcam-path(root, "memory-low-band", "checkpoint");
+  def lmb-note(result) = fcap-note(result[1]);
+  // a lane turn entered with the machine reading vm, under a turn budget of 0 (what a roomy turn reaches next)
+  def lmb-enter(root, vm) = fcac-loop-with(lmb-session(), lmb-state(root), [], 0, now_unix_ms(), () => vm);
+  def lmb-row(reason) = parse-json("memory-low-row", json-emit(json-node-object([json-node-pair("gap", json-node-string("g1")), json-node-pair("option", json-node-int(1)), json-node-pair("lane_reason", json-node-string(reason)), json-node-pair("local_generated_ids", json-node-int(0)), json-node-pair("wall_ms", json-node-int(1234))])));
+  def lmb-src(path) = read_file(path) ?? "";
+  def lmb-c-stop(root) {
+   let result = lmb-enter(root, lmb-low());
+   let saved = fcam-read(lmb-checkpoint(root));
+   let held = nothing?(saved) ? nothing() : fcam-state-from(saved);
+   let before = lmb-state(root);
+   let c1 = lmb-bit((len(result) == 2) && ((Value) result[0] == lmb-session()) && fcap-done(result[1]) && ((String) lmb-note(result) == "host-memory-low"), 1);
+   let c2 = lmb-bit((!nothing?(saved)) && (!nothing?(held)) && ((String) fcap-stage(held) == fcap-stage(before)) && ((Comparable) fcap-turns(held) == fcap-turns(before)) && (!fcap-done(held)), 2);
+   let c4 = lmb-bit(((Comparable) fcac-renewable(result, 0, 10) == 0) && ((Comparable) len(result) == 2), 4);
+   c1 + c2 + c4;
+  }
+  def lmb-c-continue(root) {
+   let roomy = lmb-enter(root, lmb-roomy());
+   let short = lmb-enter(root, [16384, 1]);
+   let none = lmb-enter(root, nothing());
+   let zero = lmb-enter(root, lmb-vm(0, 8, 2, 2, 48, 20, 4));
+   let c8 = lmb-bit(((String) lmb-note(roomy) == "caller-turn-budget-reached;checkpoint-retained") && (!((String) lmb-note(roomy) == "host-memory-low")), 8);
+   let c16 = lmb-bit(((String) lmb-note(short) == lmb-note(roomy)) && ((String) lmb-note(none) == lmb-note(roomy)) && ((String) lmb-note(zero) == lmb-note(roomy)), 16);
+   c8 + c16;
+  }
+  def lmb-c-done(root) {
+   let done = fcap-terminal(lmb-state(root), "own-reason");
+   let result = fcac-loop-with(lmb-session(), done, [], 0, now_unix_ms(), () => lmb-low());
+   lmb-bit(((String) lmb-note(result) == "own-reason") && fcap-done(result[1]), 32);
+  }
+  def lmb-c-walk() {
+   let low = lmb-row("host-memory-low");
+   let other = lmb-row("caller-turn-budget-reached;checkpoint-retained");
+   let line = hw-unknown-line("[native-turn] " ++ json-emit(low));
+   let ledger = "{\"gap\":\"g1\",\"wall_ms\":1234,\"lane_reason\":\"host-memory-low\"}";
+   let normal = "{\"gap\":\"g1\",\"wall_ms\":1234,\"lane_reason\":\"caller-turn-budget-reached\"}";
+   lmb-bit(((String) hw-idle-why-of(low) == "") && ((String) hw-idle-why-of(other) != "") && lmb-has?(hw-unknown-why-of(low), "gave its memory back") && lmb-has?(line, "[walk-window] its lane gave its memory back (host-memory-low)") && lmb-has?(line, "the window goes on") && nothing?(hw-wall(ledger)) && (!nothing?(hw-wall(normal))) && ((Comparable) hw-wall(normal) == 1234), 64);
+  }
+  def lmb-c-source() {
+   let run = lmb-src("observe/native-turn-run.bml");
+   let live = lmb-src("form/form-stdlib/bml/form-cli-code-live.bml");
+   let c128 = lmb-bit(lmb-has?(run, "|| nt-memory-low?(reason),nt-memory-low?(reason) ? 0 : 1,\"option\"]") && lmb-has?(run, "def nt-memory-low?(reason) = (String) reason == hw-memory-low-reason();") && (str_find(live, "\"host-memory-low\"", 0) >= 0), 128);
+   let c256 = lmb-bit(lmb-has?(live, "def fcac-loop(session, state, checker, turns, started) = fcac-loop-with(session, state, checker, turns, started, () => mg-sense());") && lmb-has?(live, "else fcac-loop(after,admitted,checker,turns,started);") && lmb-has?(live, "fcac-loop-turn(session, state, checker, turns, started);"), 256);
+   c128 + c256;
+  }
+ }
+ let root = temp_dir() ++ "/form-cli-code-low-memory-band-" ++ now_unix_ms().str();
+ let made = host_dir_mkdir(root);
+ let stop = lmb-c-stop(root);
+ let cont = lmb-c-continue(root);
+ let done = lmb-c-done(root);
+ let walk = lmb-c-walk();
+ let source = lmb-c-source();
+ let swept = host_dir_rmdir(root);
+ print_str("form-cli-code-low-memory-band claims " ++ stop.str() ++ " " ++ cont.str() ++ " " ++ done.str() ++ " " ++ walk.str() ++ " " ++ source.str());
+ stop + cont + done + walk + source;
+}

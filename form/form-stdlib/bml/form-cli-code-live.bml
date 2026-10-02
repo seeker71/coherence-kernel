@@ -1,5 +1,7 @@
 // Native Qwen coding with owned stream renewal after completed work.
 // No process, HTTP, Ollama or rented fallback is invoked by this module.
+// A lane that already holds memory gives it back when the machine runs low: at each turn boundary (fcac-loop) a low
+// reading saves the checkpoint and ends the lane with the reason host-memory-low (fcac-memory-stop).
 import form-stdlib/bml/form-cli-code-memory.bml;
 import form-stdlib/bml/form-cli-code-session.bml;
 import form-stdlib/bml/form-cli-code-swerve.bml;
@@ -9,6 +11,7 @@ import form-stdlib/form-glass-telemetry-membrane.bml;
 import form-stdlib/hearth.bml;
 import form-stdlib/organ-health.bml;
 import form-stdlib/bml/form-token-grammar.bml;
+import form-stdlib/bml/memory-governor.bml;
 section [form.bml] {
  class FormCliCodeLive {
   field CodeProgressQuantum = 4;
@@ -109,7 +112,25 @@ section [form.bml] {
    let observed = fcac-observe(final, last, started);
    [final, released, fcms-generated-ids(last), fcms-injected-ids(last), fcms-observations(last)];
   }
-  def fcac-loop(session, state, checker, turns, started) {
+  // A lane that already holds memory gives it back when the machine runs low (memory-governor.bml mg-low?: available
+  // below half the reserve, wired above 80 percent, or the compressor above 40 percent). fcac-loop is entered once at
+  // each turn boundary (the first turn, every turn fcac-observed continues, a renewed context), so the one check
+  // stands there: a low reading saves the checkpoint and ends the lane with the named reason host-memory-low
+  // through fcac-finish, as every terminal ending does (the reason is exactly host-memory-low: the walk reads it as
+  // a choice point, native-turn-run.bml nt-memory-low?), and its session is released at the settle; a later walk
+  // resumes the checkpoint once memory is back, and no model token is spent. A roomy reading continues the turn
+  // unchanged, and so does one that did not arrive (mg-low? reads an unreadable machine as not low): a lane already
+  // holding memory is not stopped because a door failed to answer. sense() answers a host_vm_stat() reading.
+  def fcac-memory-reason() = "host-memory-low";
+  def fcac-memory-low?(sense) = mg-low?(sense());
+  def fcac-loop(session, state, checker, turns, started) = fcac-loop-with(session, state, checker, turns, started, () => mg-sense());
+  def fcac-loop-with(session, state, checker, turns, started, sense) = ((!fcap-done(state)) && fcac-memory-low?(sense)) ? fcac-memory-stop(session, state, started) : fcac-loop-turn(session, state, checker, turns, started);
+  def fcac-memory-stop(session, state, started) {
+   let saved = fcam-save(state);
+   let said = print_str("[memory] host-memory-low: the lane gives its memory back; " ++ (saved ? "its checkpoint is saved" : "its checkpoint did not write") ++ " and a later walk resumes it");
+   fcac-finish(session, fcap-terminal(state, saved ? fcac-memory-reason() : "checkpoint-write-refused;candidate-retained"), started);
+  }
+  def fcac-loop-turn(session, state, checker, turns, started) {
    let saved = fcam-save(state);
    let observed = fcac-observe(state, session, started);
    let lane = fcac-token-lane(state);
