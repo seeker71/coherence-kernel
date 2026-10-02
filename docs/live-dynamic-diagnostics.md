@@ -240,7 +240,7 @@ Two carriers meet their surprises the same way outside `live.bml`:
   cannot answer for its own exit, and the line the landing shows ends with the
   exit it read. A named witness that does not exit 0, or whose launch was refused
   at birth (no exit arrived), holds the landing, and the report says
-  `held: the witness refused (exit N)` (`form-cli-landing-band` 16383). The walk
+  `held: the witness refused (exit N)` (`form-cli-landing-band` 32767). The walk
   reads its own children the same way: a turn, plan, review or gate has an exit
   from `host_wait` or reads nothing with its reason (`[host-child] deadline: ...`).
 - The sweep (`form/validate.sh`): every leg runs beside a watch that bounds it. A
