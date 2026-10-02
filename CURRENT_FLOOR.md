@@ -44,15 +44,15 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=39 claims=818 broken=0 (each broken claim named on its own line; 2026-10-02)
+./fkwu observe/door-link-health-run.bml  -> docs=39 claims=822 broken=0 (each broken claim named on its own line; 2026-10-03)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=345 readable=167 unreadable=178 absent=0 seen=1 flaws=0, exit 0
+./fkwu observe/band-truth-run.bml        -> bands=348 readable=170 unreadable=178 absent=0 seen=1 flaws=0, exit 0
                                             (each band's declared full read against the most its claims sum to, and
                                             the queue and manifest copies of a full against the head pin, with no
                                             band run, in about 0.3 s; a decimal or count fold that stands on purpose
                                             says `; FOLD: decimal|count` on a head line; a sweep that lists no band
-                                            is a flaw too; 2026-10-02)
+                                            is a flaw too; 2026-10-03)
 form/form-stdlib/tests/band-truth-band   -> 1048575
 ./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
@@ -255,9 +255,10 @@ Read on 2026-10-02 (WITA) through `./fkwu form/form-stdlib/tests/<band> </dev/nu
 reading room before each run, every exit 0. No band maps the model: the ones that read the registry's file
 (the reap25 build) read its header, an 8 MB window, and the recorded logits are 1.5 MB. What stands is the chain
 restored model-free: the tokenizer, the quant and tensor readers, the emitters, the reference arithmetic and the
-emission door. What does not stand: the physical driver that would run the stack through Metal over the mapped
-weights is not in the tree (its design is in the lead's notes, to be built as dsv4-token-handle under
-form/native/metal); the Form-native lane is not wired (`model-registry.bml` keeps the
+emission door, and the driver's CPU-only foundation (driver stage 1, below). What does not stand: the dispatch of
+the stack through Metal over the mapped weights (the driver's kernels, its open, layers, head and token loop; its
+design is in the lead's notes, to be built as dsv4-token-handle under form/native/metal) is not in the tree;
+the Form-native lane is not wired (`model-registry.bml` keeps the
 `deepseek4` lane row at `ds4-query`, off); the control-plane rows `challenger.deepseek-ds4-metal` and
 `oracle.deepseek-ds4-imatrix` are unchanged; and the validation window is pending: one window, alone,
 governor-checked, against the recorded references earned on the IQ2XXS file.
@@ -276,7 +277,24 @@ emitters       dsv4-compressor-band 2047 · dsv4-kv-cache-band 511 · dsv4-hc-ba
 stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels compiled on the device, two run)
                ds4-order-match-band.bml 255       (the quantiser and the Q8_0 row dot against a Form reference of ds4's order)
 references     ds4-recorded-references-band.bml 1023   (the logits pinned by a SHA-256 of the whole file, by the body's own door)
+driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 511 · native/metal/tests/dsv4-bind-band.bml 511
 ```
+
+Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
+defects read below its 511 and came back): `form/form-stdlib/dsv4-fixture-gguf.fk` writes a tiny DeepSeek-shaped
+GGUF from the body's Park-Miller generator (3 layers, ratios 0 4 2, layer 0 hashed, 4 experts 2 used, n_embd 256, 86
+tensors, 1,515,232 bytes, SHA-256 pinned) and the oracle's own admission accepts it; `form/form-stdlib/dsv4-layout.fk`
+computes the widths, layer table, KV bytes a token and scratch sizes from a header alone, on the fixture and on both
+real files (88,064 B a token over 43 layers; 1,202 driver tensors on each); `form/native/metal/dsv4-bind.fk` plans a
+view per tensor and maps, reads, clips and releases the fixture's 86, while the real files' plans are computed from
+their headers and map nothing. The reap25 header settles its layer count: `deepseek4.block_count` reads 43, blk.0 to
+blk.42 are the layers, and 3 draft layers (`dspark.0` to `dspark.2`) follow in the table, so the control plane's 46
+is 43 plus 3 (the comment beside the control-plane row is left as it stands). The fixture, layout and bind bands
+declare `PROOF LEVEL: FOURTH-ARM ONLY` (binary fixture, host-local headers, a live Metal device) and are not rowed in
+`form/fourth-arm-bands.txt`. The driver's kernels must emit `#pragma clang fp reassociate(off)` and `contract(off)`
+(each of the three cells says so in its header). Still ahead: the kernels, the open, the layers (compressor, MLA, MoE
+against the oracle on the fixture), the head and prefill, the fixture end to end, the session wiring and the physical
+window.
 
 Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
 (rust and ts hand back a different file there); `./validate.sh --list` prints which. The restored emitters, the
