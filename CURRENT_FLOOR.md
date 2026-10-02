@@ -47,11 +47,13 @@ gate/tests/structural-gate-band          -> 16383
 ./fkwu observe/door-link-health-run.bml  -> docs=35 claims=720 broken=0 (each broken claim named on its own line; 2026-10-01)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=303 readable=142 unreadable=161 seen=1 flaws=5, exit 1 (each band's
+./fkwu observe/band-truth-run.bml        -> bands=303 readable=140 unreadable=163 seen=1 flaws=5, exit 1 (each band's
                                             declared full read against the most its claims sum to, and the queue and
                                             manifest copies of a full against the head pin, with no band run, in about
-                                            0.2 s; the 5 flaws are decimal and count folds; 2026-10-02)
-form/form-stdlib/tests/band-truth-band   -> 65535
+                                            0.2 s; the 5 flaws are decimal and count folds, each silenced by `; FOLD:
+                                            decimal|count` on a head line; a sweep that lists no band is a flaw too;
+                                            2026-10-02)
+form/form-stdlib/tests/band-truth-band   -> 1048575
 ./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
 ./fkwu form/form-stdlib/release-ledger.bml -> open=22 moving=0, then 22000000 (2026-10-01)
