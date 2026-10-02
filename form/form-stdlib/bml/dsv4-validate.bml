@@ -15,7 +15,7 @@
 //   stage-delta        a stage's wired growth is over twice its estimate (a floor of 64 MiB, so a small estimate is not a hair trigger)
 //   budget             20 minutes of the 30 the window is given have passed
 //   stage-refused      the driver answered nothing for the stage (a block it does not support, a refused open)
-//   wirespan           the one-expert probe grew wired memory by half the expert STACK or more: the working-set estimate (an expert slice, not a stack) is wrong, and the lease with it
+//   wirespan           the one-expert probe grew wired memory by half the expert STACK or more (read by the probe's own limit, below): the working-set estimate (a slice, not a stack) is wrong, and the lease with it
 // On an abort: metal_sync, free every handle (dsv4-close in synced rounds), mg-release, a receipt row with status aborted and the reason, the exit says aborted. Nothing is retried.
 //
 // REFUSED BEFORE ANYTHING OPENS: another model door resident (the same process rows flp-gpu-holders reads, plus a ds4 process and another copy of this door), a lease another process holds, the
@@ -24,7 +24,14 @@
 // THE ESTIMATES ARE DERIVED FROM THE HEADER, NOT MEASURED (the window is what measures them): a layer's token-1 step touches that layer's dense tensors and six experts' slices; the map and
 // compile stages are bounds (512 MiB); the wirespan probe expects one expert slice (2,162,688 B on the IQ2XXS file's layer 0 gate stack of 553,648,128 B).
 //
-// WHAT THE DRIVER CANNOT RUN YET (dvr-gaps, read from the header, printed by the dry plan): dsv4-layer.fk runs MXFP8 dense tensors (type 41) and MXFP4 or IQ2_XXS experts (types 40 and 16). The IQ2XXS
+// THE WINDOW IS NEVER THE DEFAULT: empty stdin, {} and {"dry":1} print the plan; only {"go":1} runs it. And with a gap below present, {"go":1} still maps nothing: it writes a receipt row naming the gaps
+// (status refused, reason driver-gaps), gives back any lease this process holds, and stops. A stop inside a stage reads as an abort (try/catch), so the handles, the lease and the receipt always follow.
+// THE WIRESPAN PROBE is judged by its own limit (twice the stack, dvr-wirespan-limit), not by twice the slice: half a stack (277 MB on the IQ2XXS file) is over the slice's 128 MiB floor, and the
+// generic delta rule would have ended the run as stage-delta before the probe could say 'stack'.
+// The stream stage's estimate is the expert cache (every new expert the 24 ids meet grows wired memory), and a logits leg without its prompt ids is a named 'waits' row in the log and no run.
+//
+// WHAT THE DRIVER CANNOT RUN YET (dvr-gaps, read from the header, printed by the dry plan): the dense Q8_0 tensors (q_a, q_b, kv, output_a, output_b, the shared expert's three: type 8, not 41), the Q8_0
+// output.weight (the head reads 41), the Q2_K down experts (type 10, the block reads 40 or 16), and the ds4 order-match Q8_0 and Q2_K units the recorded stream needs; the reap25 header reads none. In detail: dsv4-layer.fk runs MXFP8 dense tensors (type 41) and MXFP4 or IQ2_XXS experts (types 40 and 16). The IQ2XXS
 // file holds Q8_0 dense tensors (type 8) and Q2_K down experts (type 10): their kernels are compiled (dsv4-kernels.fk) and not wired into a block, so the first layer stage refuses and the window aborts
 // with stage-refused before it has measured a wired byte of a layer. The plan names the gaps so the window is not spent finding them.
 //
@@ -62,7 +69,9 @@ section [form.bml] {
    let line = trim(stdin-text());
    (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("dsv4-validate-options", line) : json-node-object([]);
   }
-  def dvr-dry?(opts) = dvr-int(opts, "dry", 0) == 1;
+  // THE WINDOW IS NEVER THE DEFAULT. Empty stdin, {} and {"dry":1} all print the plan; only an explicit {"go":1} (and no dry) runs the window.
+  def dvr-go?(opts) = dvr-int(opts, "go", 0) == 1 && dvr-int(opts, "dry", 0) != 1;
+  def dvr-dry?(opts) = !dvr-go?(opts);
 
   // ---- the machine: the abort rules on a reading -----------------------------------------------------------------------------
   // the governor's ask for a stage, refused with its reason (an empty string when it is granted)
@@ -76,6 +85,9 @@ section [form.bml] {
    !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : (mg-wired(vm) - base) > lease ? "wired-above-lease" : delta > 2 * (est > dvr-floor() ? est : dvr-floor()) ? "stage-delta" : elapsed > dvr-abort-ms() ? "budget" : "";
   // the wirespan probe: the delta against the slice and the stack it was read from: "slice" (the working-set estimate holds), "stack" (it does not), "between"
   def dvr-wirespan-kind(delta, slice, stack) = delta >= stack / 2 ? "stack" : delta <= slice * 2 + dvr-floor() ? "slice" : "between";
+  // The probe's stage is asked for the slice but JUDGED against the stack: a delta of half the stack (277 MB on the IQ2XXS file) is over twice the slice's estimate, so the generic delta rule
+  // would end the run as stage-delta before the probe could name what it found. The probe's own limit is twice the stack; dvr-judge-wirespan reads the kind and ends the run on 'stack'.
+  def dvr-wirespan-limit(m) = dvr-stack(m);
 
   // ---- the layout's figures, from the header ------------------------------------------------------------------------------------
   def dvr-sum-bytes(ix, names) = len(names) == 0 ? 0 : (dvl-has?(ix, names[0]) ? dvl-r-bytes(dvl-row-of(ix, names[0])) : 0) + dvr-sum-bytes(ix, names[1:]);
@@ -105,7 +117,7 @@ section [form.bml] {
     ["layers", dvr-sum(dvr-est-layers(m)), "token 1 through every block, one stage a block, the machine read after each"],
     ["head", dvr-est-head(m), "the output head and the first greedy id (the cold token's clock stops here)"],
     ["logits", dls-cache(m, c), "the recorded-logits prompt through prefill (the expert cache is the bound), compared by r, top-10 overlap and the tie budget"],
-    ["stream", 0, "the raw prompt ids, 24 greedy ids against the recorded stream, then once more from a fresh state for bit equality"]];
+    ["stream", dls-cache(m, c), "the raw prompt ids, 24 greedy ids against the recorded stream (every new expert it meets grows wired memory, up to the expert cache: that is its estimate, not 0), then once more from a fresh state for bit equality"]];
   }
 
   // ---- what the driver cannot run yet, from the header alone ------------------------------------------------------------------------
@@ -126,7 +138,20 @@ section [form.bml] {
   def dvr-uniq(xs) = len(xs) == 0 ? [] : (dvr-member?(xs[0], xs[1:]) ? dvr-uniq(xs[1:]) : cons(xs[0], dvr-uniq(xs[1:])));
   def dvr-gaps-go(m, il, n) = il == n ? [] : append(dvr-layer-gaps(m, il), dvr-gaps-go(m, il + 1, n));
   // the distinct gaps over every layer, with the layers they hold on counted by the caller if it wants (the distinct text is what the lead acts on)
-  def dvr-gaps(m) = dvr-uniq(dvr-gaps-go(m, 0, record_get(m, "layers-n")));
+  // the head's tensors against what dsv4-token-handle.fk dth-head-ok? reads: [name, the types it reads, what it reads]
+  def dvr-head-rows() = [["token_embd.weight", [1], "F16 (type 1)"], ["output_hc_fn.weight", [1], "F16 (type 1)"], ["output_hc_scale.weight", [0], "F32 (type 0)"], ["output_hc_base.weight", [0], "F32 (type 0)"],
+   ["output_norm.weight", [0], "F32 (type 0)"], ["output.weight", [41], "MXFP8 (type 41)"]];
+  def dvr-head-gaps-go(ix, rows) = len(rows) == 0 ? [] : append(dvr-member?(dvl-type(ix, rows[0][0]), rows[0][1]) ? [] : [rows[0][0] ++ " type " ++ dvl-type(ix, rows[0][0]).str() ++ " (the head reads " ++ rows[0][2] ++ ")"], dvr-head-gaps-go(ix, rows[1:]));
+  def dvr-head-gaps(m) = dvr-head-gaps-go(record_get(m, "index"), dvr-head-rows());
+  // the recorded stream was order-matched with ds4's own Q8_0 and Q2_K dequant order: its units (dkr-unit-ds4q8, dkr-unit-ds4q2k) are compiled by the kernels band and are not in the graph units
+  def dvr-order-note() = "the recorded stream was order-matched with ds4's Q8_0 and Q2_K order (the ds4q8 and ds4q2k units): compiled in dsv4-kernels.fk, not in dkr-graph-units, with the q80_matvec and q2k_matvec_experts kernels the dense, head and down tensors need";
+  def dvr-has-q?(gaps) = len(gaps) == 0 ? false : (dvr-str-has?(gaps[0], " type 8 (") || dvr-str-has?(gaps[0], " type 10 (") || dvr-has-q?(gaps[1:]));
+  def dvr-str-has?(s, part) = str_find(s, part, 0) >= 0;
+  // the distinct gaps over every layer, then the head's, then the order note when a Q8_0 or Q2_K tensor is among them (empty when the driver can run the file)
+  def dvr-gaps(m) {
+   let found = append(dvr-uniq(dvr-gaps-go(m, 0, record_get(m, "layers-n"))), dvr-head-gaps(m));
+   dvr-has-q?(found) ? append(found, [dvr-order-note()]) : found;
+  }
 
   // ---- the processes: who else holds the GPU -------------------------------------------------------------------------------------------
   def dvr-validate-row?(row, mine) = (String) value_kind(row) == "list" && len(row) >= 5 && !flp-pid-in?(mine, row[0]) && (String) value_kind(row[4]) == "list" && len(row[4]) >= 2 && (String) value_kind(row[4][1]) == "string" && flp-ends?(row[4][1], "observe/dsv4-validate-run.bml");
@@ -230,7 +255,7 @@ section [form.bml] {
    dvr-kv("deterministic", record_get(r, "deterministic").str()),
    dvr-kv("logits", record_get(r, "logits")), dvr-kv("driver_gaps", "[" ++ dvr-join(map(g => dvr-q(g), record_get(r, "gaps")), ",") ++ "]"),
    dvr-kv("elapsed_ms", record_get(r, "elapsed").str())], ",") ++ "}";
-  def dvr-logits-json(a) = "{" ++ dvr-join([dvr-kv("r", a[0].str()), dvr-kv("top10_overlap", a[1].str()), dvr-kv("argmax_ours", a[2].str()), dvr-kv("argmax_ref", a[3].str()), dvr-kv("ref_margin", a[4].str()), dvr-kv("max_delta_top64", a[5].str())], ",") ++ "}";
+  def dvr-logits-json(a) = "{" ++ dvr-join([dvr-kv("r", a[0].str()), dvr-kv("top10_overlap", a[1].str()), dvr-kv("argmax_ours", a[2].str()), dvr-kv("argmax_ref", a[3].str()), dvr-kv("ref_margin", a[4].str()), dvr-kv("max_delta_top64", a[5].str()), dvr-kv("finite", a[6].str())], ",") ++ "}";
   def dvr-date() = trim(host-exec("date '+%Y-%m-%d %H:%M:%S %Z'", ""));
   def dvr-append(path, line) = write_file_text(path, (read_file(path) ?? "") ++ line ++ "\n");
 
@@ -243,12 +268,14 @@ section [form.bml] {
   def dvr-note(env, key, v) = record_set(env, key, v);
   def dvr-log-add(env, row) = record_set(env, "log", append(record_get(env, "log"), [row]));
   // one stage: ask, run, sync, read, judge. Answers "" when it held, or the reason the run ends.
-  def dvr-stage(env, label, est, run) {
+  def dvr-stage(env, label, est, run) = dvr-stage-with(env, label, est, est, run);
+  // est is what the governor is asked for; limit is what the stage-delta rule is held to (the same, but for the wirespan probe)
+  def dvr-stage-with(env, label, est, limit, run) {
    let before = mg-sense();
    let why = dvr-ask-reason(before, est);
-   why != "" ? dvr-stop(env, label, why) : dvr-stage-run(env, label, est, run);
+   why != "" ? dvr-stop(env, label, why) : dvr-stage-run(env, label, est, limit, run);
   }
-  def dvr-stage-run(env, label, est, run) {
+  def dvr-stage-run(env, label, est, limit, run) {
    let t = host_monotonic_ms();
    let r = run();
    let s = metal_sync();
@@ -257,7 +284,7 @@ section [form.bml] {
    let noted = record_set(env, "prev", mg-wired(vm));
    let logged = dvr-log-add(env, [label, est, delta, host_monotonic_ms() - t]);
    let said = print_str("[dsv4-validate] stage " ++ label ++ ": wired " ++ (delta >= 0 ? "+" : "-") ++ dvr-gib(delta >= 0 ? delta : 0 - delta) ++ " against an estimate of " ++ dvr-gib(est) ++ ", " ++ (host_monotonic_ms() - t).str() ++ " ms");
-   let why = nothing?(r) ? "stage-refused" : dvr-abort-reason(vm, record_get(env, "base"), record_get(env, "lease"), est, delta, dvr-elapsed(env));
+   let why = nothing?(r) ? "stage-refused" : dvr-abort-reason(vm, record_get(env, "base"), record_get(env, "lease"), limit, delta, dvr-elapsed(env));
    why == "" ? "" : dvr-stop(env, label, why);
   }
   def dvr-stop(env, label, why) {
@@ -356,12 +383,18 @@ section [form.bml] {
    append([() => dvr-stage(env, "compile", dvr-bound(), () => dvr-do-compile(env)),
            () => dvr-stage(env, "map", dvr-est-map(m, record_get(env, "cap")), () => dvr-do-map(env)),
            () => dvr-stage(env, "state", dvl-kv-total(m, record_get(env, "cap")), () => dvr-do-state(env)),
-           () => dvr-stage(env, "wirespan", dvr-slice(m), () => dvr-do-wirespan(env)),
+           () => dvr-stage-with(env, "wirespan", dvr-slice(m), dvr-wirespan-limit(m), () => dvr-do-wirespan(env)),
            () => dvr-judge-wirespan(env)],
      append(dvr-layer-steps(env, m, 0),
       append([() => dvr-stage(env, "head", dvr-est-head(m), () => dvr-do-head(env))],
-       append(len(ids) > 0 ? [() => dvr-stage(env, "logits", dls-cache(m, record_get(env, "cache")), () => dvr-do-logits(env, ids))] : [],
-        [() => dvr-stage(env, "stream", 0, () => dvr-do-stream(env))]))));
+       append(len(ids) > 0 ? [() => dvr-stage(env, "logits", dls-cache(m, record_get(env, "cache")), () => dvr-do-logits(env, ids))] : [() => dvr-waits(env, "logits")],
+        [() => dvr-stage(env, "stream", dls-cache(m, record_get(env, "cache")), () => dvr-do-stream(env))]))));
+  }
+  // a leg that waits for what the caller has not supplied: named in the log and the output, no estimate, no run, no abort
+  def dvr-waits(env, label) {
+   let logged = dvr-log-add(env, [label ++ "-waits-for-prompt-ids", 0, 0, 0]);
+   let said = print_str("[dsv4-validate] stage " ++ label ++ ": waits for logits_prompt_ids (the recording does not carry its prompt ids); not run");
+   "";
   }
   // free everything the window holds, give the lease back, answer the handles still held
   def dvr-release(env) {
@@ -395,7 +428,7 @@ section [form.bml] {
    let src = size > 24 ? dvl-src(file) : "";
    let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
    let facts = dvr-facts();
-   !(!nothing?(m) && dvl-consistent?(m)) ? dvr-refuse("the file is not a deepseek4 GGUF with a consistent layout", file) : !dvr-facts-clear?(facts) ? dvr-refuse(flp-join(dvr-facts-lines(facts), " | "), file) : !dvr-logits-pinned?() ? dvr-refuse("the recorded logits file is not the one pinned", file) : dvr-window-leased(opts, file, size, m);
+   !(!nothing?(m) && dvl-consistent?(m)) ? dvr-refuse("the file is not a deepseek4 GGUF with a consistent layout", file) : !dvr-facts-clear?(facts) ? dvr-refuse(flp-join(dvr-facts-lines(facts), " | "), file) : !dvr-logits-pinned?() ? dvr-refuse("the recorded logits file is not the one pinned", file) : len(dvr-gaps(m)) > 0 ? dvr-refuse-gaps(opts, file, size, m) : dvr-window-leased(opts, file, size, m);
   }
   def dvr-window-leased(opts, file, size, m) {
    let cap = dvr-int(opts, "cap", dvr-default-cap());
@@ -407,8 +440,20 @@ section [form.bml] {
   def dvr-window-run(opts, file, size, m, shared, cap, cache) {
    let vm0 = mg-sense();
    let env = dvr-env(file, m, size, shared, cap, cache, mg-wired(vm0), shared + mg-kv-margin());
-   let why = dvr-seq(dvr-steps(env, m, opts));
+   // a stop inside a stage is a backtrack point, not the end of the window: it reads as an abort, and the handles, the lease and the receipt follow
+   let why = try dvr-seq(dvr-steps(env, m, opts)) catch "walker-stop";
    dvr-finish(env, opts, why);
+  }
+  // the header names tensors the driver cannot run: the window cannot succeed, so nothing is mapped or compiled, any lease this process holds is given back, and the receipt names the gaps
+  def dvr-refuse-gaps(opts, file, size, m) {
+   let cap = dvr-int(opts, "cap", dvr-default-cap());
+   let cache = dvr-int(opts, "cache_experts", dls-cache-experts());
+   let env = dvr-env(file, m, size, dls-shared(m, cache, cap), cap, cache, 0, 0);
+   let unleased = mg-release();
+   let row = dvr-receipt-row(dvr-date(), now_unix_ms(), dvr-record(env, "refused", "driver-gaps", 0));
+   let wrote = dvr-append(dvr-text(opts, "receipt", dvr-receipt-path()), row);
+   let said = print_str("[dsv4-validate] REFUSED before anything was mapped: the driver cannot run " ++ len(dvr-gaps(m)).str() ++ " things this file holds (" ++ flp-join(dvr-gaps(m), "; ") ++ "); receipt row " ++ (wrote >= 0 ? "written" : "NOT written"));
+   1;
   }
   // the door: the dry plan, or the window
   def dvr-main() {
