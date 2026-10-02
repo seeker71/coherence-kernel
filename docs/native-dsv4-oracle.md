@@ -120,13 +120,26 @@ establish universally correctly rounded trigonometry.
 
 ## Observed execution
 
-What follows was observed on 2026-09-11 through the shell and Swift consumers,
-which stand in history (commit 93154a720) and not in the tree; the retained
-evidence below holds their readings. What the tree pins today, without a model
-mapping, is `form/form-stdlib/tests/dsv4-oracle-recipes-band.bml`: the reference's
-decoders and group dots against the body's own carvers, the view geometry, the
-request admission, the header-only plan of the real model, and the retention and
-native fp64 matrix doors.
+What the tree pins today, without a model mapping, is
+`form/form-stdlib/tests/dsv4-oracle-recipes-band.bml`: the reference's decoders and
+group dots against the body's own carvers, the view geometry, the request
+admission, the header-only plan of the real model, the single minting door of the
+native organs' owner ids, and the retention and native fp64 matrix doors. The
+oracle door `observe/dsv4-oracle-run.bml` loads and has not been executed on
+today's kernel: it maps the model whole. The physical driver that would compare a
+GPU stack with this reference is not in the tree, and the validation window
+(one window, alone, governor-checked, against the recorded references earned on
+the IQ2XXS file) is pending.
+
+The paragraphs below are the readings of 2026-09-11, taken on the bytes of that
+day; the retained evidence is `evidence/fkwu/dsv4-oracle.json`. Since then the
+files were compacted and healed, so the 1,106 checks were earned on older bytes:
+the sidecar `evidence/fkwu/dsv4-oracle-reread.json` names, by the body's own
+SHA-256 door, which of the pinned identities still match, which now differ (bytes
+at the run beside bytes now) and which are no longer in the tree; the evidence file
+itself is left byte for byte as observed, and `evidence/fkwu/dsv4-held-source-rewitness.json`
+pins its length and digest. Nothing in the tree reads either file. The healed files
+are pinned by band readings, not by that count.
 
 On that day the full 43-layer GPU consumer passed all 861 checks at positions zero
 and seven. The two-token, four-layer consumer passed all 184 checks, including
@@ -173,18 +186,18 @@ containing the capture directory, including aliases through directory symlinks.
 These are cooperative path and lifetime contracts, not an atomic filesystem
 snapshot against concurrent writers or parent replacement.
 
-The three proof callers (history, 93154a720) used `FORM_DS4_PROOF_ARCHIVE` to retain their compiled
-inputs and internal native-reference streams. Relative paths bind to the
-invocation directory. A retention failure preserves the work directory and
-refuses a successful exit; an existing numerical failure retains its status.
-The archive owner observes exact binary extraction, unusual filenames,
-unchanged existing destinations, explicit refusal and resource settlement.
+A proof caller retains its compiled inputs and internal native-reference streams
+through this door. Relative paths bind to the invocation directory. A retention
+failure preserves the work directory and refuses a successful exit; an existing
+numerical failure retains its status. The archive owner observes exact binary
+extraction, unusual filenames, unchanged existing destinations, explicit refusal
+and resource settlement; the oracle band holds a small archive, a refused
+existing destination and a refused archive inside its source.
 
 The north star is one Form-owned numerical graph with resident activations,
 explicit concurrent leases and replaceable CPU/device programs. Comparison
 captures the same input once, retains each selected version until completion,
 and observes numerical behavior, resource footprint and execution cost together.
-The comparison scripts used native Form emission and numerical references.
-Their Swift GPU carriers and shell launchers were host-side code, including
-device compilation and numerical comparison orchestration; they stand in history
-(93154a720), and a Form cell over the fkwu Metal doors is what replaces them.
+The Form-native lane is not wired: `model-registry.bml` keeps the `deepseek4` lane
+row at `ds4-query`, off, and the control-plane rows for the challenger and the
+oracle are unchanged until the validation window.

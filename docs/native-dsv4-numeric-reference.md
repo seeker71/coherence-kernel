@@ -37,8 +37,7 @@ The separate [real-model Form oracle](native-dsv4-oracle.md) owns an independent
 GGUF parser, F16/F32/MXFP8/MXFP4/IQ2_XXS reads, YaRN choices, the fp8-plus-f16
 key/value round trip, routed experts and per-layer multi-token history. Its
 matrix programs execute in RAM over mapped weights and preserve complete
-intermediate vectors. Its physical request door is `observe/dsv4-oracle-run.bml`
-(the three Metal comparison callers that drove it stand in history, 93154a720).
+intermediate vectors. Its physical request door is `observe/dsv4-oracle-run.bml`.
 
 The small algebra witnesses above and the real-model comparisons establish
 different observations. Their inputs, execution contracts and tolerances remain

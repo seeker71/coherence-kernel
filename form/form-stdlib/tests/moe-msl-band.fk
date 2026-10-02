@@ -1,0 +1,165 @@
+; preludes: form/form-stdlib/metal-door.fk form/form-stdlib/jit-tensor-emit.fk form/form-stdlib/moe-msl.fk form/form-stdlib/moe-route-wide-msl.fk
+; Expected: 511
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+;
+; moe-msl-band — the router, the router's gate and the expert sum that moe-msl.fk emits, run on this
+; Mac's GPU through the handle door and held to Form.
+;
+; moe-msl.fk has named this band as its proof since 2026-07-22, and it did not exist
+; (receipts/2026-07-22-first-form-native-moe-token.md, "Gaps left open", item 3). The kernels ran only
+; inside the Swift carrier of form/native/metal/metal_moe_token.sh — gate 6, the routing of a real
+; 141 B token — where the body itself could not re-run them.
+;
+; Exactness is arranged. Routing ids are integers, and the separated fixture keeps every logit at least
+; 1/4 from its neighbours, far above anything f32 rounding could flip. The gate matvec and the sum run
+; on small integers and powers of two, so no partial result leaves what f32 holds exactly. The routing
+; WEIGHTS pass through fexp and are not exact in general, so they are asked exactly only where exactness
+; is arranged — four experts tied at the maximum and the rest 200 below, where every exponential is
+; exactly 1 or exactly 0 — and elsewhere they are asked against a second, separately written kernel.
+;
+; Verdict 511:
+;    1  one unit mints all five kernels — route, F16 gate matvec, scale, axpy and the wide router, over the
+;       llama helper floor (fexp) and the q6k f16 decode — and the door says it is live
+;    2  Mixtral's shape, 8 experts top-2: the device's ids are Form's mm-route-ids ([2 6]), byte for byte
+;    4  the tie: four experts share the maximum; the device chooses the two EARLIEST (strict `>`), and each
+;       weight is exactly 0.5, renormalized from 0.25 — the bytes Form's mm-route-weights give
+;    8  the radius is live: ne = 65, and separately nsel = 9, leave a sentinel untouched
+;   16  the F16 router gate (8 x 64, small integers) is a Form fold, byte for byte
+;   32  scale SETS: over a sentinel, y = a x lands exactly, so the accumulator needs no memset
+;   64  axpy ACCUMULATES onto it: y + b x, exactly
+;  128  two transcriptions, one meaning: form_moe_route_f32 (ne <= 64, while loops) and
+;       form_moe_route_wide_f32 (ne <= 512, for loops and a pick array), written in different cells on
+;       different days, return the same ids AND the same weight bytes on the separated fixture
+;  256  gate and route chained on the device in ONE command buffer: the gate's logits reach the router
+;       without leaving the GPU, and the ids are Form's routing of Form's own fold of the same gate
+(do
+    ; ---- bytes and buffers
+    (defn mmsd-f32 (x) (md-le32 (md-f32-bits (add x 0.0))))
+    (defn mmsd-f32s (xs) (if (eq (len xs) 0) "" (str_concat (mmsd-f32 (head xs)) (mmsd-f32s (tail xs)))))
+    (defn mmsd-u32s (xs) (if (eq (len xs) 0) "" (str_concat (md-le32 (head xs)) (mmsd-u32s (tail xs)))))
+    (defn mmsd-rep (s n) (if (le n 0) "" (str_concat s (mmsd-rep s (sub n 1)))))
+    (defn mmsd-buf (bytes) (do (let h (metal_buf_alloc (str_len bytes))) (let w (metal_buf_write h 0 bytes)) h))
+    (defn mmsd-sent-id () 3735928559)
+    (defn mmsd-sent-w () (sub 0.0 424242.0))
+    (defn mmsd-ramp (i n) (if (ge i n) (list) (cons (mul (add i 0.0) 0.25) (mmsd-ramp (add i 1) n))))
+
+    ; ---- the sync counter the door reports, so a band can count command buffers
+    (defn mmsd-digits (s i acc)
+        (if (ge i (str_len s)) acc
+            (do (let b (str_byte_at s i))
+                (if (and (ge b 48) (le b 57)) (mmsd-digits s (add i 1) (add (mul acc 10) (sub b 48))) acc))))
+    (defn mmsd-syncs () (do (let st (metal_status)) (let k (str_find st "total_sync=" 0)) (if (lt k 0) (sub 0 1) (mmsd-digits st (add k 11) 0))))
+
+    ; ---- one route dispatch: logits in; ids and weights out over a sentinel; answers (ids-bytes wts-bytes)
+    (defn mmsd-route (p logits ne nsel cap)
+        (do (let lh (mmsd-buf (mmsd-f32s logits)))
+            (let ih (mmsd-buf (mmsd-rep (md-le32 (mmsd-sent-id)) cap)))
+            (let wh (mmsd-buf (mmsd-rep (mmsd-f32 (mmsd-sent-w)) cap)))
+            (let e (metal_enqueue p (md-bind (list lh ih wh) (list ne nsel)) 1))
+            (let s (metal_sync))
+            (list (metal_buf_read ih 0 (mul 4 nsel)) (metal_buf_read wh 0 (mul 4 nsel)))))
+
+    ; ---- the router gate: F16 row-major rows x cols, small integers
+    (defn mmsd-gw (r c) (sub (mod (add (mul r 7) (mul c 5)) 9) 4))
+    (defn mmsd-gx (c) (sub (mod (mul c 3) 5) 2))
+    (defn mmsd-grow (cols r c acc) (if (ge c cols) acc (mmsd-grow cols r (add c 1) (str_concat acc (md-le16 (md-f16-bits (add (mmsd-gw r c) 0.0)))))))
+    (defn mmsd-gmat (rows cols r acc) (if (ge r rows) acc (mmsd-gmat rows cols (add r 1) (str_concat acc (mmsd-grow cols r 0 "")))))
+    (defn mmsd-gxs (cols c) (if (ge c cols) (list) (cons (add (mmsd-gx c) 0.0) (mmsd-gxs cols (add c 1)))))
+    (defn mmsd-gdot (cols r c acc) (if (ge c cols) acc (mmsd-gdot cols r (add c 1) (add acc (mul (add (mmsd-gw r c) 0.0) (add (mmsd-gx c) 0.0))))))
+    (defn mmsd-glogits (rows cols r) (if (ge r rows) (list) (cons (mmsd-gdot cols r 0 0.0) (mmsd-glogits rows cols (add r 1)))))
+    (defn mmsd-gate (p rows cols)
+        (do (let gh (mmsd-buf (mmsd-gmat rows cols 0 "")))
+            (let xh (mmsd-buf (mmsd-f32s (mmsd-gxs cols 0))))
+            (let yh (mmsd-buf (mmsd-rep (mmsd-f32 (mmsd-sent-w)) rows)))
+            (let e (metal_enqueue p (md-bind (list gh xh yh) (list rows cols)) rows))
+            (let s (metal_sync))
+            (metal_buf_read yh 0 (mul 4 rows))))
+
+    ; ---- gate then route, one command buffer; answers (ids-bytes sync-delta)
+    (defn mmsd-chain (pg pr rows cols)
+        (do (let gh (mmsd-buf (mmsd-gmat rows cols 0 "")))
+            (let xh (mmsd-buf (mmsd-f32s (mmsd-gxs cols 0))))
+            (let lh (mmsd-buf (mmsd-rep (mmsd-f32 (mmsd-sent-w)) rows)))
+            (let ih (mmsd-buf (mmsd-rep (md-le32 (mmsd-sent-id)) 2)))
+            (let wh (mmsd-buf (mmsd-rep (mmsd-f32 (mmsd-sent-w)) 2)))
+            (let s0 (mmsd-syncs))
+            (let e1 (metal_enqueue pg (md-bind (list gh xh lh) (list rows cols)) rows))
+            (let e2 (metal_enqueue pr (md-bind (list lh ih wh) (list rows 2)) 1))
+            (let s (metal_sync))
+            (let s1 (mmsd-syncs))
+            (list (metal_buf_read ih 0 8) (sub s1 s0))))
+
+    ; ---- the expert sum's two vectors
+    (defn mmsd-v0s (n i) (if (ge i n) (list) (cons (add (sub (mod (mul i 3) 7) 3) 0.0) (mmsd-v0s n (add i 1)))))
+    (defn mmsd-v1s (n i) (if (ge i n) (list) (cons (add (sub (mod (mul i 5) 9) 4) 0.0) (mmsd-v1s n (add i 1)))))
+    (defn mmsd-sc (a xs) (if (eq (len xs) 0) (list) (cons (mul a (head xs)) (mmsd-sc a (tail xs)))))
+    (defn mmsd-lin (a xs b ys) (if (eq (len xs) 0) (list) (cons (add (mul a (head xs)) (mul b (head ys))) (mmsd-lin a (tail xs) b (tail ys)))))
+
+    ; ================= the unit =================
+    (let unit (str_concat (jte-llama-helpers-floor)
+              (str_concat (q6m-msl-int)
+              (str_concat (q6m-msl-f16)
+              (str_concat (mm-route-msl "form_moe_route_f32")
+              (str_concat (mm-f16mv-msl "form_f16_matvec_f32")
+              (str_concat (mm-scale-msl "form_scale_f32")
+              (str_concat (mm-axpy-msl "form_axpy_f32")
+                          (mrw-route-msl "form_moe_route_wide_f32")))))))))
+    (let p-route (metal_pipeline unit "form_moe_route_f32"))
+    (let p-f16   (metal_pipeline unit "form_f16_matvec_f32"))
+    (let p-scale (metal_pipeline unit "form_scale_f32"))
+    (let p-axpy  (metal_pipeline unit "form_axpy_f32"))
+    (let p-wide  (metal_pipeline unit "form_moe_route_wide_f32"))
+    (let c0 (if (md-door-live?)
+            (if (and (gt p-route 0) (and (gt p-f16 0) (and (gt p-scale 0) (and (gt p-axpy 0) (gt p-wide 0))))) 1 0) 0))
+
+    ; ================= routing =================
+    (let m (sub 0.0 200.0))
+    (let L1 (list 0.75 (sub 0.0 0.5) 2.25 1.0 (sub 0.0 1.25) 0.5 1.75 (sub 0.0 2.0)))
+    (let L2 (list m 0.0 m 0.0 0.0 m 0.0 m))
+
+    (let r1 (mmsd-route p-route L1 8 2 10))
+    (let ids1 (mm-route-ids L1 8 2))
+    (let c1 (if (and (eq (nth ids1 0) 2) (and (eq (nth ids1 1) 6) (str_eq (nth r1 0) (mmsd-u32s ids1)))) 2 0))
+
+    (let r2 (mmsd-route p-route L2 8 2 10))
+    (let ids2 (mm-route-ids L2 8 2))
+    (let w2 (mm-route-weights L2 8 2))
+    (let c2 (if (and (eq (nth ids2 0) 1) (and (eq (nth ids2 1) 3)
+            (and (str_eq (mmsd-f32s w2) (mmsd-f32s (list 0.5 0.5)))
+            (and (str_eq (nth r2 0) (mmsd-u32s ids2)) (str_eq (nth r2 1) (mmsd-f32s w2)))))) 4 0))
+
+    (let r3 (mmsd-route p-route (mmsd-ramp 0 65) 65 2 10))
+    (let r4 (mmsd-route p-route L1 8 9 10))
+    (let c3 (if (and (str_eq (nth r3 0) (mmsd-rep (md-le32 (mmsd-sent-id)) 2))
+            (and (str_eq (nth r3 1) (mmsd-rep (mmsd-f32 (mmsd-sent-w)) 2))
+            (and (str_eq (nth r4 0) (mmsd-rep (md-le32 (mmsd-sent-id)) 9))
+                 (str_eq (nth r4 1) (mmsd-rep (mmsd-f32 (mmsd-sent-w)) 9))))) 8 0))
+
+    ; ================= the router gate =================
+    (let g1 (mmsd-gate p-f16 8 64))
+    (let c4 (if (str_eq g1 (mmsd-f32s (mmsd-glogits 8 64 0))) 16 0))
+
+    ; ================= the expert sum =================
+    (let n 16)
+    (let x0h (mmsd-buf (mmsd-f32s (mmsd-v0s n 0))))
+    (let x1h (mmsd-buf (mmsd-f32s (mmsd-v1s n 0))))
+    (let yh (mmsd-buf (mmsd-rep (mmsd-f32 (mmsd-sent-w)) n)))
+    (let e1 (metal_enqueue p-scale (md-bind (list x0h yh) (list (md-f32-bits 0.5) n)) n))
+    (let s1 (metal_sync))
+    (let ys (metal_buf_read yh 0 (mul 4 n)))
+    (let e2 (metal_enqueue p-axpy (md-bind (list x1h yh) (list (md-f32-bits 0.25) n)) n))
+    (let s2 (metal_sync))
+    (let ya (metal_buf_read yh 0 (mul 4 n)))
+    (let c5 (if (str_eq ys (mmsd-f32s (mmsd-sc 0.5 (mmsd-v0s n 0)))) 32 0))
+    (let c6 (if (str_eq ya (mmsd-f32s (mmsd-lin 0.5 (mmsd-v0s n 0) 0.25 (mmsd-v1s n 0)))) 64 0))
+
+    ; ================= two transcriptions, one meaning =================
+    (let rw (mmsd-route p-wide L1 8 2 10))
+    (let c7 (if (and (str_eq (nth r1 0) (mmsd-u32s ids1))
+            (and (str_eq (nth rw 0) (nth r1 0)) (str_eq (nth rw 1) (nth r1 1)))) 128 0))
+
+    ; ================= gate and route, one command buffer =================
+    (let ch (mmsd-chain p-f16 p-route 8 64))
+    (let c8 (if (and (eq (nth ch 1) 1) (str_eq (nth ch 0) (mmsd-u32s (mm-route-ids (mmsd-glogits 8 64 0) 8 2)))) 256 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 c8)))))))))

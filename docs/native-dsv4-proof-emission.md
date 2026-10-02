@@ -3,10 +3,10 @@
 `observe/dsv4-proof-emission-run.bml` loads the existing Form shader authorities
 in the current `fkwu` process. It emits source and GGUF metadata without a Go
 process, a shell dependency walk, generated Form source, or GPU admission.
-The three DSV4 GPU proof callers (shell and Swift, history at 93154a720) used this
-door for their shader, manifest and compression-ratio inputs; their device
-compilation and numerical checks were separate consumers of those complete inputs.
-`form/form-stdlib/tests/dsv4-proof-emission-band.bml` holds the door today: the
+A GPU proof caller takes its shader, manifest and compression-ratio inputs from this
+door; device compilation and numerical checks are separate consumers of those
+complete inputs, and the physical driver that would be that consumer is not in the
+tree. `form/form-stdlib/tests/dsv4-proof-emission-band.bml` holds the door today: the
 eleven streams, the precision compositions, the refusals, the real model's
 manifest, the compile of every kernel on the device and two emitted kernels run.
 
@@ -87,6 +87,6 @@ than 16 MB, complete framing and unusual paths, 64-bit values, F32/F64 numeric
 boundaries, malformed and truncated files, output refusal and owner settlement.
 
 The north star is one Form source owner, complete RAM requests and outputs,
-dynamic compiler selection and reusable native programs. The remaining GPU
-proof scripts still own device compilation and their existing numerical
-consumers; this emission door does not claim those host responsibilities.
+dynamic compiler selection and reusable native programs. Device compilation and
+the numerical comparison of a stack remain a consumer's work; this emission door
+does not claim those host responsibilities.
