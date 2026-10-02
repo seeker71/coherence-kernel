@@ -1,0 +1,135 @@
+; dsv4-lease-band.bml -- the bytes a DeepSeek-V4 session asks the memory governor for, derived from the GGUF header: the two real files' 8 MB header windows, the fixture, the architecture key, and Qwen's path unchanged.
+;
+; WHAT THIS PINS. form-stdlib/dsv4-lease.fk answers, for a DeepSeek-V4 file, shared = dense bytes + an expert cache of C = 64 experts a layer + the KV cache, DERIVED FROM THE HEADER AND NOT MEASURED on a running model
+; (the header comment names every term). The session door leases it (fcms-weights-bytes) and model-admission.bml asks the governor for it (adm-admit); for every other file both still charge file_size. This band reads
+; the IQ2XXS and reap25 files' first 8,388,608 bytes (no tensor mapped, no weight read; the Qwen file only its first 64 KiB, for the architecture key), writes the fixture under temp_dir, and reads the two doors' sources.
+;
+; Verdict 255 when every claim lands:
+;   1     the IQ2XXS file (86,720,111,488 B): the driver's plan 86,263,310,172 B, its expert stacks 77,913,391,104, token_embd 1,059,061,760, so dense 7,290,857,308; ONE expert is 7,077,888 B by the header's own
+;         dimensions (gate and up IQ2_XXS [4096 x 2048] at 66 B a 256-block: 2,162,688 each; down Q2_K [2048 x 4096] at 84 B a block: 2,752,512), the cache of 64 a layer over 43 layers 19,478,347,776 = 64 x 7,077,888 x 43,
+;         the KV at 8,192 positions 824,068,096, the shared figure 27,593,273,180 B (25.7 GiB)
+;   2     the reap25 file (91,321,404,640 B): plan 79,849,072,476, stacks 71,693,238,272, dense 7,096,772,444, the cache 23,139,975,168 (layers 0 to 2 store 256 experts, layers 3 to 42 store 192: 64 of each, over
+;         the mixed expert types), KV 824,068,096, shared 31,060,815,708 B (28.9 GiB)
+;   4     both under the governor's wired cap: with the 8 GiB private margin each is under 60 percent of 128 GiB (82,463,372,040 B), while each FILE is over it (80.8 and 85.0 GiB); on a scripted empty machine
+;         (128 GiB, 4 GiB wired) the governor grants the derived ask and holds the file_size ask with reason wired-cap
+;   8     the fixture (1,515,232 B, three blocks, four experts a layer so the cache holds them all): dense equals the generator's own priced bytes of every non-expert, non-embedding tensor, the cache the experts'
+;         bytes, the shared figure their sum with the KV at 8 positions (34,816), each derived by the generator's offsets and not by the lease's reader
+;   16    the architecture key: the IQ2XXS, reap25 and fixture files read deepseek4, the Qwen Q8_0 file qwen35 (first 64 KiB only), a text file, a missing path and an empty answer read ""; dls-weights-bytes answers the
+;         derived figure for the three DeepSeek files and EXACTLY file_size for the Qwen file (29,047,086,048) and a text file, and 0 for a missing path (as fcms-weights-bytes answered before)
+;   32    the doors read it: form-cli-model-session.fk defines fcms-weights-bytes as dls-weights-bytes and still leases with the text memory-governor-band pins (mg-lease("model session " ++ path, path,
+;         fcms-weights-bytes(path), mg-kv-margin()), three mg-release() and no mg-ask), model-admission.bml asks for dls-weights-bytes(path) and no longer for file_size, and the session lease at a larger capacity
+;         grows by exactly the KV difference (dls-weights-bytes-at at 16,384 minus at 8,192 is dvl-kv-total's)
+;   64    the figures are the formula's and move with it: changing the cache from 64 to 128 experts moves the IQ2XXS cache by exactly 19,478,347,776 and nothing else; a layout read from a 2.5 MB window (the table
+;         ends past 5.3 MB) gives no plausible figure: the read stops (a backtrack point the band catches, the walker's own 'eval too deep' note appears in the output) or the layout reads inconsistent; the dense figure does not contain the expert stacks (dense + stacks + token_embd = the plan)
+;   128   header only: each real window is 8,388,608 bytes of an 80 or 85 GB file; no model opened, nothing mapped
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- bits 1 to 4, 16 and 128 read host-local model files' headers (paths outside the tree), and the fixture goes through write_file and read_file_slice. No weight byte is read and no
+; model is opened. The band writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk form-stdlib/dsv4-lease.fk form-stdlib/bml/memory-governor.bml
+section [form.bml] {
+ class Dsv4LeaseBand {
+  def dlsb-bit(held, bit) = held ? bit : 0;
+  def dlsb-iq2() = "/Users/ursmuff/models/ds4-engine/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf";
+  def dlsb-reap() = "/Users/ursmuff/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf";
+  def dlsb-qwen() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def dlsb-gib(n) = n * 1073741824;
+  def dlsb-cap() = mg-wired-cap-of(dlsb-gib(128));
+  def dlsb-src(path) = read_file(path) ?? "";
+
+  // ---- 1 and 2: the real files' figures --------------------------------------------------------------------------------
+  def dlsb-iq2-figures(m) = dls-plan-bytes(m) == 86263310172 && dls-stacks(m) == 77913391104 && dls-embd(m) == 1059061760 && dls-dense(m) == 7290857308
+   && dls-plan-bytes(m) - dls-stacks(m) - dls-embd(m) == dls-dense(m)
+   && dls-layer-expert(m, 0) == 7077888 && dls-layer-expert(m, 20) == 7077888 && dls-layer-expert(m, 42) == 7077888
+   && dlsb-expert-by-dims() == 7077888
+   && dls-cache(m, 64) == 64 * 7077888 * 43 && dls-cache(m, 64) == 19478347776
+   && dvl-kv-total(m, 8192) == 824068096 && dls-shared(m, 64, 8192) == 27593273180;
+  // one IQ2XXS expert from the header's own dimensions: gate and up [4096 x 2048] IQ2_XXS (256-block of 66 B), down [2048 x 4096] Q2_K (256-block of 84 B)
+  def dlsb-expert-by-dims() = (2048 * 4096 / 256 * 66) * 2 + (4096 * 2048 / 256 * 84);
+  def dlsb-reap-figures(m) = dls-plan-bytes(m) == 79849072476 && dls-stacks(m) == 71693238272 && dls-embd(m) == 1059061760 && dls-dense(m) == 7096772444
+   && dvl-l(m, 0, "nexp") == 256 && dvl-l(m, 2, "nexp") == 256 && dvl-l(m, 3, "nexp") == 192 && dvl-l(m, 42, "nexp") == 192
+   && dls-cache(m, 64) == 23139975168 && dls-cache(m, 64) == dlsb-cache-by-layers(m, 0, 0)
+   && dvl-kv-total(m, 8192) == 824068096 && dls-shared(m, 64, 8192) == 31060815708;
+  // the cache again, by walking the layers and capping at the stored experts (an independent sum of the same rule)
+  def dlsb-cache-by-layers(m, il, acc) = il == 43 ? acc : dlsb-cache-by-layers(m, il + 1, acc + (dvl-l(m, il, "nexp") < 64 ? dvl-l(m, il, "nexp") : 64) * (dls-layer-stacks(m, il) / dvl-l(m, il, "nexp")));
+
+  // ---- 4: the cap and the governor -------------------------------------------------------------------------------------------------
+  def dlsb-pages(gib) = dlsb-gib(gib) / 16384;
+  // [page, mem, free, active, inactive, wired, speculative, purgeable, compressor, pageins, pageouts, compressions, decompressions, swapins, swapouts, external, internal]
+  def dlsb-vm() = [16384, dlsb-gib(128), dlsb-pages(110), 0, 0, dlsb-pages(4), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  def dlsb-under-cap(shared) = shared + mg-kv-margin() < dlsb-cap() && shared + mg-kv-margin() + dlsb-gib(4) < dlsb-cap();
+  def dlsb-governor(sharedIq2) {
+   let derived = mg-verdict(dlsb-vm(), sharedIq2 + mg-kv-margin());
+   let byFile = mg-verdict(dlsb-vm(), file_size(dlsb-iq2()) + mg-kv-margin());
+   let said = print_str("  governor: derived ask " ++ (sharedIq2 + mg-kv-margin()).str() ++ " " ++ derived[1].str() ++ "; file_size ask " ++ (file_size(dlsb-iq2()) + mg-kv-margin()).str() ++ " " ++ byFile[1].str() ++ " (cap " ++ dlsb-cap().str() ++ ")");
+   mg-granted?(derived) && derived[1] == "room" && !mg-granted?(byFile) && byFile[1] == "wired-cap";
+  }
+
+  // ---- 8: the fixture ------------------------------------------------------------------------------------------------------------------
+  def dlsb-spec-expert?(s) = str_find(s[0], "_exps.", 0) >= 0;
+  def dlsb-spec-embd?(s) = s[0] == "token_embd.weight";
+  def dlsb-spec-bytes(s) = dfx-tbytes(s[1], s[2]);
+  def dlsb-sum-specs(specs, keep) = len(specs) == 0 ? 0 : (keep(specs[0]) ? dlsb-spec-bytes(specs[0]) : 0) + dlsb-sum-specs(specs[1:], keep);
+  def dlsb-dense-spec?(s) = !dlsb-spec-expert?(s) && !dlsb-spec-embd?(s);
+  def dlsb-fixture(path) {
+   let specs = dfx-specs();
+   let m = dvl-open(eqr-of-file(path, 0, file_size(path)));
+   let dense = dlsb-sum-specs(specs, dlsb-dense-spec?);
+   let experts = dlsb-sum-specs(specs, dlsb-spec-expert?);
+   let said = print_str("  fixture dense " ++ dls-dense(m).str() ++ "/" ++ dense.str() ++ " cache " ++ dls-cache(m, 64).str() ++ "/" ++ experts.str() ++ " shared " ++ dls-shared(m, 64, 8).str());
+   dls-dense(m) == dense && dls-cache(m, 64) == experts && dls-stacks(m) == experts && dvl-kv-total(m, 8) == 34816 && dls-shared(m, 64, 8) == dense + experts + 34816 && dvl-consistent?(m);
+  }
+
+  // ---- 16: the architecture key and the Qwen file's own figure ---------------------------------------------------------------------------
+  def dlsb-arch(iq2, reap, fix, qwenPath, textPath, missing) {
+   let a = [dls-arch-of(iq2), dls-arch-of(reap), dls-arch-of(fix), dls-arch-of(qwenPath), dls-arch-of(textPath), dls-arch-of(missing)];
+   let said = print_str("  arch " ++ a[0] ++ " " ++ a[1] ++ " " ++ a[2] ++ " " ++ a[3] ++ " [" ++ a[4] ++ "] [" ++ a[5] ++ "]");
+   a[0] == "deepseek4" && a[1] == "deepseek4" && a[2] == "deepseek4" && a[3] == "qwen35" && a[4] == "" && a[5] == "";
+  }
+  def dlsb-bytes(iq2, reap, fix, qwenPath, textPath, missing) {
+   let b = [dls-weights-bytes(iq2), dls-weights-bytes(reap), dls-weights-bytes(fix), dls-weights-bytes(qwenPath), dls-weights-bytes(textPath), dls-weights-bytes(missing)];
+   let said = print_str("  weights bytes " ++ b[0].str() ++ " " ++ b[1].str() ++ " " ++ b[2].str() ++ " " ++ b[3].str() ++ " " ++ b[4].str() ++ " " ++ b[5].str());
+   b[0] == 27593273180 && b[1] == 31060815708 && b[2] != file_size(fix) && b[2] > 0 && b[3] == 29047086048 && b[3] == file_size(qwenPath) && b[4] == file_size(textPath) && b[5] == 0;
+  }
+
+  // ---- 32: the doors' sources -----------------------------------------------------------------------------------------------------------------
+  def dlsb-count(s, part) = dlsb-count-from(s, part, 0, 0);
+  def dlsb-count-from(s, part, from, n) = str_find(s, part, from) < 0 ? n : dlsb-count-from(s, part, str_find(s, part, from) + len(part), n + 1);
+  def dlsb-has?(s, part) = str_find(s, part, 0) >= 0;
+  def dlsb-doors() {
+   let session = dlsb-src("form/form-stdlib/form-cli-model-session.fk");
+   let admission = dlsb-src("form/form-stdlib/bml/model-admission.bml");
+   len(session) > 0 && dlsb-has?(session, "def fcms-weights-bytes(path) = dls-weights-bytes(path);")
+    && dlsb-has?(session, "mg-lease(\"model session \" ++ path, path, fcms-weights-bytes(path), mg-kv-margin())") && dlsb-count(session, "mg-release()") == 3 && !dlsb-has?(session, "mg-ask(")
+    && dlsb-has?(admission, "let bytes = dls-weights-bytes(path);") && !dlsb-has?(admission, "let bytes = file_size(path);");
+  }
+  def dlsb-capacity(iq2) = dls-weights-bytes-at(iq2, 16384) - dls-weights-bytes-at(iq2, 8192) == dvl-kv-total(dvl-open(dvl-src(iq2)), 16384) - dvl-kv-total(dvl-open(dvl-src(iq2)), 8192) && dls-weights-bytes-at(iq2, 8192) == dls-weights-bytes(iq2);
+
+  // ---- 64: the figures move with the formula --------------------------------------------------------------------------------------------------
+  def dlsb-moves(m) = dls-cache(m, 128) - dls-cache(m, 64) == 19478347776 && dls-shared(m, 128, 8192) - dls-shared(m, 64, 8192) == 19478347776 && dls-dense(m) + dls-stacks(m) + dls-embd(m) == dls-plan-bytes(m);
+  def dlsb-short(path) = try !dvl-consistent?(dvl-open(eqr-of-file(path, 0, 2500000))) catch true;
+ }
+ let iq2 = dlsb-iq2();
+ let reap = dlsb-reap();
+ let root = temp_dir() ++ "/dsv4-lease-band-" ++ now_unix_ms().str();
+ let fixPath = root ++ ".gguf";
+ let textPath = root ++ ".txt";
+ let wrote = dfx-write(fixPath);
+ let textWrote = write_file_text(textPath, "this is not a gguf file, it is a line of text kept to prove the architecture key reads nothing from it");
+ let iq2Src = dvl-src(iq2);
+ let reapSrc = dvl-src(reap);
+ let mIq2 = dvl-open(iq2Src);
+ let mReap = dvl-open(reapSrc);
+ let c1 = dlsb-bit(try dlsb-iq2-figures(mIq2) catch false, 1);
+ let c2 = dlsb-bit(try dlsb-reap-figures(mReap) catch false, 2);
+ let sharedIq2 = dls-shared(mIq2, 64, 8192);
+ let sharedReap = dls-shared(mReap, 64, 8192);
+ let c4 = dlsb-bit(try dlsb-under-cap(sharedIq2) && dlsb-under-cap(sharedReap) && file_size(iq2) > dlsb-cap() && file_size(reap) > dlsb-cap() && dlsb-governor(sharedIq2) catch false, 4);
+ let c8 = dlsb-bit(try wrote == 1515232 && dlsb-fixture(fixPath) catch false, 8);
+ let c16 = dlsb-bit(try dlsb-arch(iq2, reap, fixPath, dlsb-qwen(), textPath, root ++ "-missing.gguf") && dlsb-bytes(iq2, reap, fixPath, dlsb-qwen(), textPath, root ++ "-missing.gguf") catch false, 16);
+ let c32 = dlsb-bit(try dlsb-doors() && dlsb-capacity(iq2) catch false, 32);
+ let c64 = dlsb-bit(try dlsb-moves(mIq2) && dlsb-short(iq2) catch false, 64);
+ let c128 = dlsb-bit(try str_len(iq2Src) == 8388608 && str_len(reapSrc) == 8388608 && file_size(iq2) > 80000000000 && file_size(reap) > 90000000000 catch false, 128);
+ let removed = host_path_remove(fixPath) + host_path_remove(textPath);
+ print_str("dsv4-lease-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " shared " ++ sharedIq2.str() ++ "/" ++ sharedReap.str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
+}

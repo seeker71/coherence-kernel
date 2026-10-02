@@ -1,0 +1,127 @@
+// form-cli-model-ds4.fk -- DeepSeek-V4's seat at the generate and session doors: the lane switch, the prompt hook, the one-shot run and the session open, all over the Form-native Metal driver.
+//
+// THE ONE SWITCH. fcds-lane-wired? is 0. While it reads 0 every door refuses a deepseek4 file with the words it refused with before (generate: fcmg-arch-door; session: lane-unwired:ds4-query:deepseek4), and
+// every Qwen door is what it was: fcds-route answers "qwen35" for a qwen35 file whatever the flag says. The registry's own row for the arch (model-registry.bml mr-lane-rows: deepseek4, ds4-query, 0)
+// stays, and a band holds the two equal (this file cannot import the registry, which imports generate). BOTH flip together, after the physical validation window (observe/dsv4-validate-run.bml) has run
+// the real file through this driver and read its receipt; nothing here has opened a real file.
+//
+// THE PROMPT HOOK. The arch's tokenizer is dsv4-tokenizer.fk, read from the file's own header (the gpt2 byte-level BPE of the joyai-llm split; ds4's own ids for "The capital of France is" are
+// 671 6102 294 8760 344, witnessed by dsv4-tokenizer-native-band and the recorded references). fcds-prompt-ids encodes the prompt RAW: no chat template, no begin token, the shape the recorded stream
+// (24 tokens for those five ids) was taken with. The stop ids are the header's tokenizer.ggml.eos_token_id.
+//
+// THE RUN AND THE SESSION. fcds-run is the one-shot (generate door): encode, open the driver at capacity prompt + n + 1, write the rope tables, make the state, prefill (the head asked once, at the last
+// prompt token), n greedy steps, close in synced rounds, decode the text. fcds-open-parts is the session open: the memory lease first (shared bytes from dsv4-lease.fk at the session's own capacity, the
+// KV margin private, exactly the call the Qwen door makes), then the same open, state and prefill, answered as the parts form-cli-model-session.fk builds its session record from. A refusal before the
+// context exists gives the lease back here; a refusal after leaves the context and state in the record for the session's own release (fcms-release-ok?), as the Qwen door does.
+// fcds-forward is the session's one step (the next id, or -1 as q38-forward answers it).
+//
+// WHAT IS NOT WIRED (named): the observation crossing (typed Form observations enter Qwen's ChatML; DeepSeek has no template here and the session refuses an observation on a DeepSeek session), the
+// sampler (greedy only), a chat template, the draft and adapter lanes. The logits are at bs[28], where the sampler reads them, so the sampler needs only its geometry arguments.
+//
+// Proven by: form-stdlib/tests/dsv4-door-band.bml (the dispatch, the refusals as before, the prompt hook, the registry's row, the sidecar rule), form-stdlib/tests/dsv4-lease-band.bml (the lease figures);
+// the run and the open on the fixture are native/metal/tests/dsv4-end-to-end-band.bml's walk (prefill, decode, generate, close) composed here, and have not been run through this file on a device.
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/equireach.fk;
+import form-stdlib/gguf-meta.fk;
+import form-stdlib/dsv4-tokenizer.fk;
+import form-stdlib/dsv4-lease.fk;
+import form-stdlib/bml/memory-governor.bml;
+import native/metal/dsv4-token-handle.fk;
+section [form.bml] {
+    // ---- the switch and the route ----------------------------------------------------------------------------------
+    def fcds-lane-wired?() = 0;
+    // "qwen35" for a qwen35 file whatever the flag says; "deepseek4" only when the flag says wired; every other case refuses with the door's own words
+    def fcds-route(arch, wired) = (String) arch == "qwen35" ? "qwen35" : ((String) arch == "deepseek4" && (Comparable) wired == 1) ? "deepseek4" : "refuse";
+    def fcds-lane-route(arch) = fcds-route(arch, fcds-lane-wired?());
+    def fcds-lane?(arch) = (String) fcds-lane-route(arch) == "deepseek4" ? 1 : 0;
+
+    // ---- the prompt hook ----------------------------------------------------------------------------------------------
+    def fcds-prompt-ids(src, prompt) = tkz-encode(src, prompt);
+    def fcds-text(src, ids) = tkz-decode-text(src, ids);
+    def fcds-stops(src) {
+        let e = gmt-u32(src, "tokenizer.ggml.eos_token_id");
+        e == gmt-absent() ? [] : [e];
+    }
+    def fcds-context-length(src) = gmt-u32(src, "deepseek4.context_length");
+    def fcds-over-context?(src, maxpos) {
+        let limit = fcds-context-length(src);
+        limit != gmt-absent() && maxpos > limit;
+    }
+
+    // ---- the one step the session takes -------------------------------------------------------------------------------
+    // the next id, or -1 (q38-forward's own word for a step that did not arrive)
+    def fcds-forward(ctx, sts, id, pos) {
+        let nid = dsv4-decode(ctx, sts, id, pos);
+        nothing?(nid) ? 0 - 1 : nid;
+    }
+
+    // ---- the session open: [status, reason, ctx, sts, maxpos, pos, pending, prompt-count] --------------------------------------
+    def fcds-parts-none(reason) = ["nothing", reason, [], [], 0, 0, 0 - 1, 0];
+    def fcds-open-parts(path, src, prompt, requested-maxpos, reserve) {
+        let ids = fcds-prompt-ids(src, prompt);
+        let count = len(ids);
+        let maxpos = reserve > 0 ? count + reserve : requested-maxpos;
+        count <= 0 ? fcds-parts-none("initial-turn-encoded-no-ids") : (maxpos <= count || fcds-over-context?(src, maxpos)) ? fcds-parts-none("session-context-window-refused") : fcds-open-leased(path, ids, maxpos);
+    }
+    def fcds-open-leased(path, ids, maxpos) {
+        let shared = dls-weights-bytes-at(path, maxpos);
+        let granted = mg-lease("model session " ++ path, path, shared, mg-kv-margin());
+        mg-granted?(granted) ? fcds-open-context(path, ids, maxpos) : fcds-held(path, shared, granted);
+    }
+    def fcds-held(path, shared, v) {
+        let said = print_str(mg-line("model session " ++ path, mg-need-of(v, shared + mg-kv-margin()), v));
+        fcds-parts-none("host-memory-held:" ++ v[1]);
+    }
+    def fcds-open-context(path, ids, maxpos) {
+        let ctx = dsv4-open-span(path, maxpos, 1);
+        len(ctx) != 13 ? fcds-unleased("model-context-open-refused") : fcds-open-state(ids, maxpos, ctx);
+    }
+    def fcds-unleased(reason) {
+        let unleased = mg-release();
+        fcds-parts-none(reason);
+    }
+    def fcds-open-state(ids, maxpos, ctx) {
+        let prepared = dsv4-prepare(ctx);
+        let sts = prepared == 1 ? dsv4-new-state(ctx[2], ctx[0], maxpos) : nothing();
+        nothing?(sts) ? fcds-close-unleased(ctx, "model-stream-state-refused") : fcds-prefill(ids, ctx, sts, maxpos);
+    }
+    def fcds-close-unleased(ctx, reason) {
+        let left = dsv4-close(ctx, []);
+        fcds-unleased(reason);
+    }
+    def fcds-prefill(ids, ctx, sts, maxpos) {
+        let pf = dsv4-prefill-span-sliced(ctx, sts, ids, 0);
+        nothing?(pf) ? ["nothing", "model-prefill-refused", ctx, sts, maxpos, 0, 0 - 1, len(ids)] : ["live", "opened-ds4-driver", ctx, sts, maxpos, pf[1], pf[0], len(ids)];
+    }
+
+    // ---- the one-shot (generate door): ["ok", prompt-count, ids, text] or ["refused", reason] -----------------------------------------------
+    // `loaded` is called once the driver is open (the admission queue's load slot frees then, as the Qwen door frees it)
+    def fcds-run(path, prompt, n, loaded) {
+        let src = tkz-src(path);
+        let ids = fcds-prompt-ids(src, prompt);
+        let cap = len(ids) + n + 1;
+        len(ids) == 0 ? ["refused", "tokenizer produced no prompt tokens"] : (n <= 0 || fcds-over-context?(src, cap)) ? ["refused", "requested context exceeds the model limit or asks for no tokens"] : fcds-run-open(path, src, ids, n, cap, loaded);
+    }
+    def fcds-run-open(path, src, ids, n, cap, loaded) {
+        let ctx = dsv4-open-span(path, cap, 1);
+        let freed = loaded();
+        len(ctx) != 13 ? ["refused", "model context did not open"] : fcds-run-state(src, ids, n, cap, ctx);
+    }
+    def fcds-run-state(src, ids, n, cap, ctx) {
+        let prepared = dsv4-prepare(ctx);
+        let sts = prepared == 1 ? dsv4-new-state(ctx[2], ctx[0], cap) : nothing();
+        nothing?(sts) ? fcds-run-closed(dsv4-close(ctx, []), ["refused", "model stream state did not open"]) : fcds-run-walk(src, ids, n, ctx, sts);
+    }
+    def fcds-run-walk(src, ids, n, ctx, sts) {
+        let stops = fcds-stops(src);
+        let pf = dsv4-prefill-span-sliced(ctx, sts, ids, 0);
+        let first = nothing?(pf) ? nothing() : pf[0];
+        let out = nothing?(pf) ? [] : ((len(stops) > 0 && first == stops[0]) ? [] : cons(first, dsv4-generate(ctx, sts, first, pf[1], n - 1, stops, [])));
+        let result = nothing?(pf) ? ["refused", "model prefill refused"] : ["ok", len(ids), out, fcds-text(src, out)];
+        fcds-run-closed(dsv4-close(ctx, sts), result);
+    }
+    // a run that did not release every handle is refused, never hidden
+    def fcds-run-closed(left, result) = len(left) == 0 ? result : ["refused", "model handle close mismatch; " ++ left.str()];
+    0;
+}

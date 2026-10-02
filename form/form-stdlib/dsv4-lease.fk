@@ -1,0 +1,74 @@
+// dsv4-lease.fk -- the bytes a DeepSeek-V4 session asks the memory governor for, derived from the GGUF header and nothing else. DERIVED, NOT MEASURED.
+//
+// WHY THIS IS NOT file_size. The session door leases file_size(path) as the weights' SHARED bytes and model-admission.bml charges the same figure to the governor's ask. For Qwen that is the
+// right number: the file is mapped and a token touches it all. For a DeepSeek-V4 file it is not. The IQ2XXS file is 86,720,111,488 bytes (80.8 GiB) and the reap25 file 91,321,404,640 bytes (85.0 GiB), both over
+// the governor's wired cap on an empty 128 GiB machine (60 percent = 76.8 GiB = 82,463,372,083 bytes), yet the driver MAPS the weights (dsv4-bind.fk: one no-copy view a tensor, demand-paged) and only the pages the
+// GPU touches are wired. A token touches the dense tensors (attention, shared expert, routers, hyper-connection matrices, the output head) and SIX of each layer's 256 routed experts. So the working set the
+// lease must promise is:
+//
+//   shared  =  dense bytes  +  expert cache  +  KV cache
+//     dense bytes   the sum of the priced bytes of every tensor the driver binds (dsv4-layout.fk dvl-driver-names: 1,202 tensors on the 43-layer files) MINUS the routed expert stacks (ffn_gate_exps, ffn_up_exps,
+//                   ffn_down_exps of every layer) MINUS token_embd.weight (a token reads one row of it, dvl-row, not the matrix). The 126 indexer tensors and the draft layers are in the file and not in the
+//                   driver's plan, so they are not in the sum.
+//     expert cache  C x (the bytes of ONE expert's gate, up and down) summed over the layers, with C = 64 (dls-cache-experts) capped at a layer's stored experts. The bytes of one expert are its three stacks'
+//                   bytes divided by the layer's stored expert count (7,077,888 on the IQ2XXS file: 2 x 2,162,688 for gate and up + 2,752,512 for the Q2_K down). 64 is the cache the validation window is
+//                   to measure against: distinct experts a layer meets over 24 tokens (driver design, section 5), so it is a PARAMETER with a name, not a fact.
+//     KV cache      dvl-kv-total(layout, cap): 88,064 bytes a token over 43 layers plus the compressors' state and rows (dsv4-layout.fk). cap is the position capacity the session opens for;
+//                   the admission ask, made before the prompt is counted, uses dls-default-cap (8,192).
+//   private stays what the session door already passes: mg-kv-margin() (8 GiB) for the process's own scratch and KV states.
+//
+// THE FIGURES THEMSELVES are pinned by form-stdlib/tests/dsv4-lease-band.bml, which reads both real headers (8 MB windows, no weight byte): IQ2XXS dense 7,290,857,308 + cache 19,478,347,776 + KV 824,068,096 =
+// 27,593,273,180 B (25.7 GiB); reap25 7,096,772,444 + 23,139,975,168 + 824,068,096 = 31,060,815,708 B (28.9 GiB); the wired cap on a 128 GiB machine is 82,463,372,040 B.
+// NOTHING HERE WAS MEASURED ON A RUNNING MODEL. The first physical window (observe/dsv4-validate-run.bml) reads wired memory stage by stage against these estimates and aborts at twice them.
+//
+// THE ARCH KEY. dls-weights-bytes(path) answers file_size(path) for every file that does not read architecture deepseek4 (so Qwen's lease and ask are byte for byte what they were) and the derived bytes for
+// one that does. The architecture is read from the first 64 KiB of the file (general.architecture is the first key of a GGUF); a file that cannot be read, or is not a GGUF, answers "" and is charged its size.
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/equireach.fk;
+import form-stdlib/gguf-meta.fk;
+import form-stdlib/dsv4-layout.fk;
+section [form.bml] {
+    // ---- the named parameters ------------------------------------------------------------------------------
+    def dls-cache-experts() = 64;
+    def dls-default-cap() = 8192;
+    def dls-probe-window() = 65536;
+    def dls-min(a, b) = a < b ? a : b;
+
+    // ---- the architecture, from the first 64 KiB ---------------------------------------------------------------
+    def dls-arch-read(path) {
+        let n = file_size(path);
+        let src = eqr-of-file(path, 0, dls-min(n, dls-probe-window()));
+        egg-magic-ok?(src) == 1 ? gmt-str(src, "general.architecture") : "";
+    }
+    def dls-arch-of(path) = file_size(path) < 64 ? "" : (try dls-arch-read(path) catch "");
+    def dls-ds4?(path) = dls-arch-of(path) == "deepseek4";
+
+    // ---- the figures, from the layout ---------------------------------------------------------------------------
+    def dls-stack-names(il) = [dvl-prefix(il) ++ "ffn_gate_exps.weight", dvl-prefix(il) ++ "ffn_up_exps.weight", dvl-prefix(il) ++ "ffn_down_exps.weight"];
+    def dls-names-bytes(ix, names) = len(names) == 0 ? 0 : (dvl-has?(ix, names[0]) ? dvl-r-bytes(dvl-row-of(ix, names[0])) : 0) + dls-names-bytes(ix, names[1:]);
+    // one layer's three expert stacks, and the bytes of ONE of its experts (gate + up + down)
+    def dls-layer-stacks(m, il) = dls-names-bytes(record_get(m, "index"), dls-stack-names(il));
+    def dls-layer-expert(m, il) = dls-layer-stacks(m, il) / dvl-l(m, il, "nexp");
+    def dls-stacks-go(m, il, n) = il == n ? 0 : dls-layer-stacks(m, il) + dls-stacks-go(m, il + 1, n);
+    def dls-stacks(m) = dls-stacks-go(m, 0, record_get(m, "layers-n"));
+    // the driver's tensors, whole
+    def dls-plan-bytes(m) = dls-names-bytes(record_get(m, "index"), dvl-driver-names(m));
+    def dls-embd(m) = dls-names-bytes(record_get(m, "index"), ["token_embd.weight"]);
+    // dense bytes: the plan less the routed stacks less the embedding matrix
+    def dls-dense(m) = dls-plan-bytes(m) - dls-stacks(m) - dls-embd(m);
+    // the expert cache: C experts a layer (capped at the layer's stored experts), every layer
+    def dls-cache-go(m, il, n, c) = il == n ? 0 : dls-min(c, dvl-l(m, il, "nexp")) * dls-layer-expert(m, il) + dls-cache-go(m, il + 1, n, c);
+    def dls-cache(m, c) = dls-cache-go(m, 0, record_get(m, "layers-n"), c);
+    // the whole shared figure for a layout, a cache of c experts a layer and a capacity of cap positions
+    def dls-shared(m, c, cap) = dls-dense(m) + dls-cache(m, c) + dvl-kv-total(m, cap);
+
+    // ---- from a header source and from a path -------------------------------------------------------------------------
+    def dls-shared-src(src, c, cap) = dls-shared(dvl-open(src), c, cap);
+    def dls-shared-path-cap(path, cap) = dls-shared-src(dvl-src(path), dls-cache-experts(), cap);
+    // what the weights are charged as shared bytes: the file's size for any file that is not a DeepSeek-V4 GGUF (a negative size is no bytes, as before)
+    def dls-weights-bytes(path) = file_size(path) < 0 ? 0 : (dls-ds4?(path) ? dls-shared-path-cap(path, dls-default-cap()) : file_size(path));
+    // the same at a session's own capacity
+    def dls-weights-bytes-at(path, cap) = file_size(path) < 0 ? 0 : (dls-ds4?(path) ? dls-shared-path-cap(path, cap) : file_size(path));
+    0;
+}
