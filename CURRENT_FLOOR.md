@@ -288,7 +288,7 @@ defined-correctness number, re-earned only through that sealed door. Its consent
 (`.form-knowledge-qwen-heldout-v3-consent`) is a per-run local act that git ignores. The model route is
 a Form data table, and the DS4 engine is found at runtime through its directory with its header
 verified. One sealed row names a source that is gone: v1 row h11 (family `proof`) pins
-`proof/four-way-run-recipe42.fk`, which left with the four-way lane. Its replacement and the dataset
+`proof/four-way-run-recipe42.fk`, which no longer exists. Its replacement and the dataset
 re-seal belong to the sealed door, after its fact is read; the v3 band reads 65511 before and after.
 
 ## The Form-native DeepSeek V4 chain
