@@ -331,19 +331,53 @@ executable recipes lead. An observed native answer takes precedence over model
 prose; local models contribute what the substrate cannot yet complete. Form
 owns tools, choices, care, original checks, checkpoints and release throughout.
 
-Every rented contribution is a local reproduction target, including planning,
-source selection, request authoring, diagnosis, implementation, measurement,
-review and landing. Required assistance leaves an owned local capability gap
-with its intent, inputs, sources, checks, findings and completed effects. Improve
-the local prompt, tool, harness or model choice and replay that task locally.
-Ground guidance in the current enquiry and relevant source; retained observations
-keep their task and source scope. Aggregate counters guide attention, while the
-particular task's checks and observed behavior establish its completion.
+The north star is one Form-owned task from the original enquiry through useful
+completion. Its checkpoint holds intent, allowed resources, source identities,
+acceptance, observations and completed effects. Native organs supply facts and
+execute actions. The selected model supplies the next plan, tool request,
+implementation, review or repair. Local and remote models meet the same role
+and result contract; changing the resource preserves the task. A rented model
+must not remain the supervisor that assembles packets, diagnoses failures,
+chooses retries and publishes work for a local model doing only fragments.
 
-The [current local guidance receipt](../receipts/native-local-guidance.json)
-retains source-backed local reasoning, actual usage and a checked retained
-answer. Its scoped guidance result does not establish complete independence of
-request assembly, source selection, coding or landing.
+Hermes' [model configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuring-models/)
+and [conversation loop](https://github.com/NousResearch/hermes-agent/blob/46904a3b467f62616f5b3ee247adce30b1b277a0/agent/conversation_loop.py)
+place the selected main model inside the message/tool/retry loop; auxiliary
+model choices are separate configuration. OpenClaw's
+[generic loop](https://github.com/openclaw/openclaw/blob/c776d798b766ef0955840a5c2bec07f6fc8ebc8e/packages/agent-core/src/agent-loop.ts)
+similarly separates model streaming from tools, steering and retained events.
+Their local routes demonstrate this ownership pattern. Reference source is
+input to Form's design, not a foreign runtime dependency or evidence that every
+model meets every task's quality requirements.
+
+The present native coding loop owns staged planning, tools, source checks,
+same-model review, repair, context renewal, checkpoints and release. Its model
+admission is Qwen-specific. Callers still assemble the source/check contract
+and own filesystem publication. General enquiry intake, a common driver for
+other admitted models, and native ownership of the complete work are remaining
+implementation boundaries. A larger context or more retries alone does not
+establish these capabilities.
+
+Follow the actual missing fact or failed outcome. Retain relevant source
+observations across choices; a renewed decoder must not restart discovery.
+Use a local guide to diagnose stalled action, enable useful reasoning, change
+the prompt or select another compatible local model. Re-observe the original
+acceptance after each changed candidate. Await native completion events rather
+than making a rented coordinator poll and reconstruct the task. Every required
+rented contribution, including intake, measurement and landing, remains a
+local reproduction target with its original contract and effects.
+
+The native `wait-until(ready,nothing(),every)` accepts an owned readiness
+predicate without a wall-time limit; integer deadlines retain their existing
+behavior. Its polling stays in Form. Include the owner's stopped state in the
+predicate and inspect the actual outcome and release before another admission.
+This readiness wait does not claim a filesystem event subscription.
+
+The [rented harness audit](../receipts/rented-harness-audit.json) reconciles
+actual transcript usage and tool calls for its stated interval. Overlapping
+action patterns guide attention; they do not assign tokens to individual tools.
+The [local guidance receipt](../receipts/native-local-guidance.json) establishes
+its scoped guidance result, not independence of the whole work.
 
 Local tokens never have a penalty. Encourage useful local guidance, review,
 repair, prompt A/B on the same tasks and checks, multiple perspectives and
