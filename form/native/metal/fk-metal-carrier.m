@@ -1231,7 +1231,7 @@ long long fk_metal_buf_write_external(long long h, long long off, const char *by
 // THE FILL DOOR. The bytes of a file's span go into an allocated buffer's own memory by pread, the host writing straight into the shared pages: no Form string is made (a 2 MB
 // string costs 4 to 5 ms in the interner), no mapping and no GPU copy (a no-copy view of the span read by a copy kernel runs at about 3 GB/s: the device faults the file's pages in one by one).
 // It is the arena's miss (native/metal/dsv4-arena.fk): an expert's bytes into its slot. EVERY REFUSAL ANSWERS -1 AND WRITES NOTHING: a bad handle; a negative offset or length; a buffer
-// that is a mapped file (a model's pages are never written through this door); a destination past the buffer's own view; a path that does not open; a span the file does not contain (the
+// that is a mapped file (a model's pages are never written through this door); a destination past the buffer's own view; a path that holds a NUL byte or does not open; a span the file does not contain (the
 // file is measured first, so a truncated file never leaves a half-written slot); a read that comes up short. Work that names the buffer settles first, as for every host write.
 long long fk_metal_buf_fill_external(long long h, long long boff, const char *path, long long path_len,
                                      long long foff, long long len) {
@@ -1252,6 +1252,8 @@ long long fk_metal_buf_fill_external(long long h, long long boff, const char *pa
         }
         memcpy(p, path, (size_t)path_len);
         p[path_len] = 0;
+        // a NUL inside the path would end it early at open(): the file opened would not be the file named. Refused, as every other path that does not name what it was given.
+        if (strlen(p) != (size_t)path_len) { fk_err(@"buf_fill: the path holds a NUL byte"); return -1; }
         if (fk_buffer_settle(h) < 0) { return -1; }
         int fd = open(p, O_RDONLY);
         if (fd < 0) { fk_err([NSString stringWithFormat:@"buf_fill: cannot open %s", p]); return -1; }
