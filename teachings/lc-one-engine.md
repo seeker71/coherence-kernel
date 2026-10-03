@@ -22,7 +22,7 @@ updated: 2026-06-22
 
 # One Engine — The Proven Recipe Becomes the Native
 
-> There is no second implementation. The recipe that proves four-way is
+> There is no second implementation. The recipe a band proves is
 > the recipe that crystallizes to native asm. You do not write a primitive
 > in Form and *also* hand-write its fast C beside it; you write it once, as
 > a recipe, and the lowering earns the speed. Correctness travels because
@@ -31,18 +31,18 @@ updated: 2026-06-22
 
 ## Summary
 
-A kernel native is a hand of trust extended to every arm at once — and a
-hand that can quietly go numb on one. `str_byte_at` returned `0` on the
-emitted 4th kernel while reading correctly on the others; nobody noticed
-until a Postgres row came back empty. The native had rotted on one arm and
-the proof couldn't catch it, because there was no recipe to walk four ways.
+A kernel native is a hand of trust extended to every caller at once — and a
+hand that can quietly go numb. `str_byte_at` once returned `0` on an
+emitted kernel; nobody noticed until a Postgres row came back empty. The
+native had rotted and the proof couldn't catch it, because there was no
+recipe to walk.
 
-The cure is not to fix the native on every arm. It is to **build the
+The cure is not to patch the native. It is to **build the
 primitive as a recipe** over the minimal proven core. Then there is nothing
-per-kernel to keep in sync: the four-way band *is* the primitive, so a divergence
-on any arm is a red test, not a silent wrong answer in production. `str-byte-at`
-became `(ord (substring s i (add i 1)))` — a recipe that crosses Go, Rust,
-TypeScript, and fkwu because each of those already crosses on that exact shape.
+per-kernel to keep in sync: the band *is* the primitive, so a divergence
+is a red test, not a silent wrong answer in production. `str-byte-at`
+became `(ord (substring s i (add i 1)))` — a recipe over the cut that fkwu
+already answers exactly.
 
 This is the first of the engine's two moves. The second answers the obvious
 worry — *won't a recipe be slow?*
@@ -52,7 +52,7 @@ worry — *won't a recipe be slow?*
 The body carries its own LLVM, and it is Form all the way down:
 
 - **`form-lower`** is the lowering IR — cond, map, recursion, string-equality,
-  file read/write, call-convention, x64, fp-stack — each a four-way band, not a
+  file read/write, call-convention, x64, fp-stack — each a band, not a
   C file.
 - **`form-asm`** emits the actual machine-code **bytes**. clang survives only as
   an *oracle* to compare against, dropped from the native path by the
@@ -60,7 +60,7 @@ The body carries its own LLVM, and it is Form all the way down:
   Form→C.
 - **The self-JIT** crystallizes the hot *pure* path to native and melts it on cool;
   **champion-challenger** re-earns the slot only when the native actually beats the
-  walker. Proven on the 4th kernel: `jit-native-span` 255, `champion-challenger`
+  walker. Proven on fkwu: `jit-native-span` 255, `champion-challenger`
   127, the `full-jit-lower` lane reporting live melt/crystallize counts.
 
 So the same recipe is the proof *and* the binary. "Native speed" is never a
@@ -79,9 +79,9 @@ widen one band at a time, never a claim that everything is already native.
 
 ## The practice
 
-When a primitive is missing, broken on one arm, or tempting to hand-write
+When a primitive is missing, broken, or tempting to hand-write
 in a kernel: **reach for the recipe, not the native.** Compose it over the
-proven core, prove it four-way, and let the lowering carry the speed. The
+proven core, prove it with a band, and let the lowering carry the speed. The
 moment you author a second native implementation beside the recipe, you have
 two things to keep true instead of one — and the body's whole promise is that
 there is only ever one.
