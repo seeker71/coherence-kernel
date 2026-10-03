@@ -240,7 +240,12 @@ perception-rows-band     -> 65535   a perceived day folded into trainable rows; 
                                     from a frame naming its speaker and an organ of this body
 own-word-band            -> 65535   a sentence about the room stands only when the record backs every
                                     claim and it makes at least one
-voice-say-band           -> 16383   one mouth per tongue the ear renders, the map proven in silence
+voice-say-band           -> 131071  one mouth per tongue the ear renders, the map proven in silence; the native
+                                    mouth is the only mouth (a tongue without tables says "no native mouth yet")
+voice-g2p-band           -> 32767   letters to phonemes from the body's tables: taught line, taught words,
+                                    model-bridged words, else nothing
+voice-g2p-bridge-band    -> pending the model's IPA spoken in the voice's symbols, learned from the taught pairs
+                                    and measured on held-out words (the band pins both the made-up truth and the real numbers)
 host-doors-band          -> 131071  host_spawn_at, host_alive and fs_mkfifo: the ear's lanes stand
                                     with no shell
 ```

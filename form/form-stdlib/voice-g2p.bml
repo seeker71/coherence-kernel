@@ -1,29 +1,29 @@
 //////////////////////////////////////////////////////////////////////
 // voice-g2p.bml — letters to phonemes, at home.
 //
-// The mouth (voice-say.bml) was native from phoneme ids to samples, and the one step before it —
-// letters to phonemes — left through a Python process running espeak-ng. This cell is the body's
-// own reading of that step, with no process and no foreign library in the path.
+// The mouth (voice-say.bml) is native from phoneme ids to samples, and the one step before it —
+// letters to phonemes — is this cell: the body's own reading, with no process and no foreign library
+// in the path.
 //
-// What the body holds is two tables per tongue under form/form-stdlib/data, one row to a line,
-// the key and the phonemes divided by a tab, the phonemes divided by byte 31:
+// What the body holds is three tables per tongue under form/form-stdlib/data, one row to a line, the key
+// and the phonemes divided by a tab, the phonemes divided by byte 31:
 //
 //   g2p-<tongue>-line.tsv   a whole line of text -> the phonemes its pronunciation was taught as.
 //                           Exact, and sentence-level: stress, liaison and the rise at a comma are
 //                           already in it, because the teacher heard the whole line.
-//   g2p-<tongue>-word.tsv   one word -> its phonemes. The walk for a line the body has not been
+//   g2p-<tongue>-word.tsv   one word -> its phonemes, as taught. The walk for a line the body has not been
 //                           taught: each word is looked up, the punctuation the voice's table holds
 //                           (, . ? ! : ; - ' ( )) is kept as a phoneme, a space stands between words.
+//   g2p-<tongue>-model.tsv  one word -> the phonemes the body's own T5 model (native-t5.bml) answered, put
+//                           through the learned bridge (voice-g2p-bridge.bml) into the voice's symbols. Written
+//                           by observe/voice-g2p-grow-run.fk, read here by table lookup alone: when the body
+//                           speaks no model runs. A taught word is never overridden by a model word.
 //
-// A line with neither a taught row nor every word known answers NOTHING — never a guess and never a
-// crossing. "No walk to sounds here yet" is a true answer, and the teaching door
-// (observe/voice-g2p-teach-run.fk) is how a tongue grows one: the oracle (espeak, named as such in
-// voice-say.bml) is asked ONCE per line and word, its answers are written into these tables, and
-// from then on the body does not ask again. The oracle is a teacher, as the oracle catalog says of
-// every teacher; the rows it leaves are the body's.
-//
-// What is still open, honestly: a word the tables do not hold. The open grapheme-to-phoneme model
-// that would cover it is a download Urs has agreed to in principle and not yet fetched.
+// The chain is taught line, then taught words, then model-bridged words, then NOTHING — never a guess and
+// never a crossing. "No walk to sounds here yet" is a true answer. A word the tables do not hold grows into
+// g2p-<tongue>-model.tsv the first time a text carrying it is grown, and from then on it is a lookup. The model's
+// answers sit further from the taught ones than the taught ones sit from each other; voice-g2p-bridge.bml and its
+// band carry the measured distance.
 //////////////////////////////////////////////////////////////////////
 import form/form-stdlib/line-grammar.fk;
 section [form.bml] {
@@ -61,31 +61,35 @@ section [form.bml] {
         def vg-trail-n(tok, i, lo) = if (i <= lo) then lo else if ((Comparable) vg-mark-before(vg-punct(), tok, i) == 0) then i else vg-trail-n(tok, (i - vg-mark-before(vg-punct(), tok, i)), lo);
         def vg-marks(s, i) = if (i >= len(s)) then [] else if ((Comparable) vg-mark-at(vg-punct(), s, i) == 0) then vg-marks(s, (i + 1)) else cons(vg-punct-phoneme(substring(s, i, (i + vg-mark-at(vg-punct(), s, i)))), vg-marks(s, (i + vg-mark-at(vg-punct(), s, i))));
         // a token's phonemes from the word table; nothing when its word is not taught
-        def vg-token(wtab, tok) {
+        // a word is read from the taught word table first, then from the model table (the native T5's answer, put through
+        // the bridge into the voice's own symbols: observe/voice-g2p-grow-run.fk writes it); an answer is a taught or a
+        // bridged phoneme string, never both asked at once
+        def vg-word-got(wtab, mtab, core) = if ((Comparable) vg-has?(vg-taught(wtab, core)) == 1) then vg-taught(wtab, core) else vg-taught(mtab, core);
+        def vg-token(wtab, mtab, tok) {
             let a = vg-lead-n(tok, 0);
             let b = vg-trail-n(tok, len(tok), a);
             let core = substring(tok, a, b);
-            let got = if ((Comparable) len(core) == 0) then "" else vg-taught(wtab, core);
+            let got = if ((Comparable) len(core) == 0) then "" else vg-word-got(wtab, mtab, core);
             if ((Comparable) len(core) == 0) then append(vg-marks(substring(tok, 0, a), 0), vg-marks(substring(tok, b, len(tok)), 0))
                 else if ((Comparable) vg-has?(got) == 0) then nothing()
                 else append(vg-marks(substring(tok, 0, a), 0), append(vg-phs-of(got), vg-marks(substring(tok, b, len(tok)), 0)));
         }
         // the whole line from the word table: tokens joined by the space phoneme, nothing if any word is unknown
-        def vg-words-go(wtab, toks, acc, first) {
+        def vg-words-go(wtab, mtab, toks, acc, first) {
             if ((Comparable) len(toks) == 0) then acc
-                else vg-words-step(wtab, toks, acc, first, vg-token(wtab, toks[0]));
+                else vg-words-step(wtab, mtab, toks, acc, first, vg-token(wtab, mtab, toks[0]));
         }
-        def vg-words-step(wtab, toks, acc, first, ph) {
+        def vg-words-step(wtab, mtab, toks, acc, first, ph) {
             if (nothing?(ph)) then nothing()
-                else vg-words-go(wtab, toks[1:], append(acc, if ((Comparable) first == 1) then ph else cons(" ", ph)), 0);
+                else vg-words-go(wtab, mtab, toks[1:], append(acc, if ((Comparable) first == 1) then ph else cons(" ", ph)), 0);
         }
-        def vg-from-words(wtab, text) = vg-words-go(wtab, vg-drop-empty(split-on(text, " ")), [], 1);
+        def vg-from-words(wtab, mtab, text) = vg-words-go(wtab, mtab, vg-drop-empty(split-on(text, " ")), [], 1);
         def vg-drop-empty(xs) = if ((Comparable) len(xs) == 0) then [] else if ((Comparable) len(xs[0]) == 0) then vg-drop-empty(xs[1:]) else cons(xs[0], vg-drop-empty(xs[1:]));
-        // ---- the door: a taught line first, then the walk through taught words, else nothing ----
-        // (ltab, wtab) are the two loaded tables; load them once per tongue, never per line
-        def vg-phonemes(ltab, wtab, text) {
+        // ---- the door: a taught line first, then the walk through taught words, then model-bridged words, else nothing ----
+        // (ltab, wtab, mtab) are the three loaded tables; load them once per tongue, never per line
+        def vg-phonemes(ltab, wtab, mtab, text) {
             let line = vg-taught(ltab, text);
-            if ((Comparable) vg-has?(line) == 1) then vg-phs-of(line) else vg-from-words(wtab, text);
+            if ((Comparable) vg-has?(line) == 1) then vg-phs-of(line) else vg-from-words(wtab, mtab, text);
         }
         // how much of a tongue the body holds, as numbers a band can pin
         def vg-count(tab) = len(record_keys(tab));

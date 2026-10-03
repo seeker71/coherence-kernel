@@ -1,0 +1,35 @@
+//////////////////////////////////////////////////////////////////////
+// voice-g2p-t5.bml — the way charsiu's G2P model is asked, in the model's own convention.
+//
+// native-t5.bml runs the ByT5 and its `nt5-run` appends the end-of-sequence token (id 1) to every input, the way a
+// ByT5 tokenizer does by default. charsiu's G2P is NOT asked that way: its own inference feeds the bytes of
+// `<tag>: word` with NO special tokens. The model, taught on inputs that end at the last letter, takes the end token
+// for one more letter and writes one more phoneme for it — a spurious final consonant (mˈula͡ɪt for mulai, lˈɛts for
+// let, kˈitap for kita: measured 2026-10-03 on all four tongues; the answers without it are mˈula͡ɪ, lˈɛt, kˈita).
+// The first measurement of the model against the taught tables (56% English, 10% Indonesian exact) carried that
+// artefact, and a learned bridge was spending most of its rules deleting it.
+//
+// `vgt5-run` is the same encoder, the same decoder, the same kernels as nt5-run with the one token left off. The
+// input is T = len(text) bytes, the decoder's cross-attention reads T, and nothing else changes. (native-t5-band pins
+// nt5-run against torch WITH the end token; that stays true and stays the band's business.)
+//////////////////////////////////////////////////////////////////////
+import form/form-stdlib/native-t5.bml;
+section [form.bml] {
+    class FormVoiceG2PT5 {
+        def vgt5-ids(text, i) = i >= len(text) ? "" : (md-le32(str_byte_at(text, i) + 3) + vgt5-ids(text, i + 1));
+        // the encoder over the bytes alone; answers T (how many positions the decoder attends to)
+        def vgt5-encode(m, text) {
+            let P = m[5];
+            let T = len(text);
+            let w = nam-write(nt5-S(m, 0), vgt5-ids(text, 0));
+            let a = nt5-seq(w, nt5-embed(P, m[0][0], nt5-S(m, 0), nt5-S(m, 2), 1472, T));
+            let b = nt5-seq(a, nt5-enc-layers-run(m, P, m[1], T));
+            let c = nt5-seq(b, nt5-rms(P, nt5-S(m, 2), m[0][2], nt5-S(m, 11), nt5-S(m, 15), 1472, T));
+            let d = nt5-seq(c, nt5-cross(m, P, m[2], m[4], T));
+            nt5-seq(d, T);
+        }
+        // text = "<eng-uk>: hello" -> the phoneme string, or nothing when it could not be read
+        def vgt5-run(m, text) = (len(text) < 1 || len(text) + 1 > 128) ? nothing() : nt5-decode(m, 0, 0, vgt5-encode(m, text), "");
+    }
+    0;
+}

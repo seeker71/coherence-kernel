@@ -1,0 +1,75 @@
+// voice-render-run.fk — render a file of sentences with the body's own mouth, one WAV a sentence, for the body's own ear.
+//
+//   printf '<tongue>\n<sentences file>\n<output dir>\n[chain|model-only]\n' | ./fkwu observe/voice-render-run.fk
+//
+// Every line of the sentences file is one piece. Its phonemes come from the body's tables (voice-g2p.bml): taught
+// line, taught words, model-bridged words. In `model-only` mode the taught tables are NOT consulted: every word is the
+// model's raw answer (g2p-<tongue>-raw.tsv, the ledger) put through the bridge — the distance between the two modes
+// is what the teacher's rows are worth. Ids come from the voice's own table, the whole VITS runs on this Mac's metal
+// at the track's own length scale (voice-track.bml `vtr-scale`), and the samples are wrapped as <output dir>/NNNN.wav
+// (NNNN = 1000 + the line's index, the name observe/voice-score-run.fk reads) at the voice's own rate.
+// A line whose words the tables do not all hold gets NNNN.untaught holding its text, never a guess. One process
+// renders a bounded set of lines (a render leaks device memory after ~160 in one process; stay under 100).
+//
+// GPU etiquette: take .hearth/gpu.lock (mkdir) before, rmdir after.
+// preflight-exec: forbidden
+import form/form-stdlib/voice-track.bml;
+import form/form-stdlib/voice-g2p-bridge.bml;
+section [form.bml] {
+    def vrr-line() = {
+        let value = read_line();
+        nothing?(value) ? "" : trim(value);
+    };
+    def vrr-lines(path) = file_size(path) > 0 ? vg-drop-empty(split-on(read_file(path), vg-nl())) : [];
+    def vrr-core(tok) {
+        let a = vg-lead-n(tok, 0);
+        let b = vg-trail-n(tok, len(tok), a);
+        substring(tok, a, b);
+    }
+    // the model's raw answer for every word of the lines, bridged, as a word table (words with no raw answer are absent)
+    def vrr-bridge-words(btab, valid, raw, words, tab) = nil?(words) ? tab : vrr-bridge-one(btab, valid, raw, words, tab, words[0]);
+    def vrr-bridge-one(btab, valid, raw, words, tab, w) {
+        (len(w) == 0 || (vg-has?(record_get(raw, w)) == 0)) ? vrr-bridge-words(btab, valid, raw, words[1:], tab) : vrr-bridge-words(btab, valid, raw, words[1:], record_set(tab, w, vgb-join-sep(vgb-map(btab, valid, record_get(raw, w))[0])));
+    }
+    def vrr-words(lines, acc) = nil?(lines) ? acc : vrr-words(lines[1:], append(acc, map(vrr-core, vg-drop-empty(split-on(lines[0], " ")))));
+    def vrr-piece(st, cfg, scale, outdir, ltab, wtab, mtab, i, text, code) {
+        let heard = vg-phonemes(ltab, wtab, mtab, text);
+        let ids = nothing?(heard) ? [] : (len(heard) == 0 ? [] : vp-ids(cfg, heard));
+        len(ids) == 0 ? vrr-untaught(outdir, i, text) : vrr-sound(st, cfg, scale, outdir, i, ids);
+    }
+    def vrr-untaught(outdir, i, text) {
+        let w = write_file(outdir + "/" + (1000 + i).str() + ".untaught", text);
+        print_str(i.str() + " untaught");
+        0;
+    }
+    def vrr-sound(st, cfg, scale, outdir, i, ids) {
+        let pcm = vv-pcm(st, vv-render(st, ids, scale));
+        len(pcm) == 0 ? print_str(i.str() + " rendered no samples") : vrr-write(cfg, outdir, i, pcm);
+    }
+    def vrr-write(cfg, outdir, i, pcm) {
+        let w = write_file(outdir + "/" + (1000 + i).str() + ".wav", vmm-wav-header(vp-sample-rate(cfg), len(pcm) / 2) + pcm);
+        print_str(i.str() + " " + len(pcm).str());
+        1;
+    }
+    def vrr-walk(st, cfg, scale, outdir, ltab, wtab, mtab, lines, i, done, code) {
+        nil?(lines) ? done : vrr-walk(st, cfg, scale, outdir, ltab, wtab, mtab, lines[1:], i + 1, done + vrr-piece(st, cfg, scale, outdir, ltab, wtab, mtab, i, lines[0], code), code);
+    }
+    let code = vrr-line();
+    let src = vrr-line();
+    let outdir = vrr-line();
+    let mode = vrr-line();
+    (len(code) == 0 || len(src) == 0 || len(outdir) == 0) ? form_error("usage: <tongue> / <sentences file> / <output dir> / [chain|model-only] on stdin") : 0;
+    let made = fs-mkdir(outdir);
+    let lines = vrr-lines(src);
+    let modelonly = (String) mode == "model-only";
+    let name = vs-voice(code);
+    let cfg = vp-cfg(name);
+    let ltab = modelonly ? record_new(0) : vg-load(code, "line");
+    let wtab = modelonly ? record_new(0) : vg-load(code, "word");
+    let mtab = modelonly ? vrr-bridge-words(vgb-load(code), vgb-valid-of(cfg), vgb-raw-load(code), vrr-words(lines, []), record_new(0)) : vg-load(code, "model");
+    let st = vv-open(vp-model-path(name));
+    (vv-open-ok?(st) == 0) ? form_error("voice does not open natively: " + vv-open-why(st)) : 0;
+    let n = vrr-walk(st, cfg, vtr-scale(code), outdir, ltab, wtab, mtab, lines, 0, 0, code);
+    print_str("tongue=" + code + " mode=" + (modelonly ? "model-only" : "chain") + " lines=" + len(lines).str() + " rendered=" + n.str() + " dir=" + outdir);
+    0;
+}

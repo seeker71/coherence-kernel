@@ -3,12 +3,12 @@
 //
 // macOS carries 186 voices and not one of them speaks Persian, and the
 // ones it does carry are the old formant kind. So the body keeps its own:
-// neural voices that run here (piper, ONNX on the CPU), one per tongue,
-// under ~/.local/share/piper-voices.
+// neural voices that run here, one per tongue, under ~/.local/share/piper-voices
+// (the open VITS models, read straight off their files).
 //
 // The ear detects a tongue and the tongue lane renders 32 of them. This
-// map now holds a mouth for 29 of those 32. Malay, Tagalog and Tamil have
-// no piper voice at all — no model exists to fetch — so they stay absent
+// map holds a mouth for 29 of those 32. Malay, Tagalog and Tamil have
+// no voice model at all — none exists to fetch — so they stay absent
 // and say so, rather than being spoken in a mouth that is not theirs.
 //
 // Each voice was chosen by listening, not by reading a name: the mouth
@@ -16,33 +16,19 @@
 // down what it heard. The voice whose line came back whole won its tongue.
 // Where a high-quality model existed and was heard whole, it was preferred.
 //
-// There used to be TWO crossings, and the second one was the quiet one. The
-// rendering left through piper and the SOUNDING left through afplay, so a host
-// process stood in the middle of the body's own voice at its very last step:
-// the body could hear a room and had no door that made a sound. Since
-// 2026-09-08 it has one — `sense_speaker_play_at`, the twin of the `sense_mic_*`
-// ears, on this Mac's own AudioQueue — and `vs-play` below reads the wav's own
-// chunks, takes the rate off its `fmt ` header rather than assuming the ear's
-// 16 kHz (these voices render at 22050), and hands the samples straight to it.
-// That crossing is gone. The air is the body's.
+// EVERY STEP OF A LINE IS THE BODY'S OWN, AND NO PROCESS STANDS IN THE PATH. Letters to phonemes is
+// `voice-g2p.bml`: the tables the body holds (taught lines, taught words, and the words its own T5 model answered,
+// put through the learned bridge — `voice-g2p-bridge.bml`). Phonemes to ids is `voice-phoneme.bml`, which reads the
+// voice's own `.onnx.json` and builds the exact int64 row. The whole VITS — text encoder, stochastic duration predictor,
+// flow and HiFi-GAN vocoder — runs on this Mac's own metal (`voice-pass.bml`, answering the same samples
+// onnxruntime answers to six decimals, `tests/voice-pass-band.fk`). The samples turn to signed 16-bit on that
+// device and sound through `sense_speaker_play_at`, the twin of the `sense_mic_*` ears, on this Mac's own AudioQueue at
+// the voice's OWN rate.
 //
-// The one that is left is named, and since 2026-09-09 it is ONE STEP rather than four.
-// Inside piper a line travels four: letters to phonemes, phonemes to ids, ids through
-// the VITS graph, spectrogram to samples. Three of them are home. `voice-phoneme.bml`
-// reads the voice's own `.onnx.json` and builds the exact int64 row piper builds;
-// `voice-onnx.bml` reads the model itself straight off the file with no protobuf
-// library; and `voice-pass.bml` runs the whole VITS — text encoder, stochastic duration
-// predictor, flow and HiFi-GAN vocoder — on this Mac's own metal, answering the same
-// samples onnxruntime answers, to six decimals, on medium voices and high ones alike
-// (`tests/voice-pass-band.fk`, 4095).
-//
-// WHAT STILL CROSSES IS LETTERS TO PHONEMES, and it crosses differently by tongue.
-// Twenty-five of these twenty-nine are `phoneme_type: espeak`, and for those the crossing
-// is now a phoneme LIST and nothing else — espeak-ng is a rule engine and a dictionary per
-// tongue and has no native twin here yet. Four carry their own engine besides (zh pinyin,
-// ja, th, he); for those the whole rendering still leaves through piper, because the body
-// cannot yet produce their phonemes at all. `vs-native?` answers which is which, and
-// `vs-say` takes the native path when it can and the standing crossing when it cannot.
+// A tongue has a NATIVE mouth when its voice is on disk, the voice reads espeak-style phonemes, and the body holds
+// tables for it (`vs-native?`). A tongue with a voice and no native route — the four whose phonemes the body cannot
+// produce at all (zh pinyin, ja, th, he), and every tongue the body has no tables for yet — answers "no native mouth
+// for X yet". It is never spoken through anything else.
 import form/form-stdlib/form-fs.fk;
 import form/form-stdlib/line-grammar.fk;
 import form/form-stdlib/spool-bell-transport.fk;
@@ -52,7 +38,6 @@ import form/form-stdlib/voice-g2p.bml;
 section [form.bml] {
     class FormVoiceSay {
         field VSRoot = "/Users/ursmuff/.local/share/piper-voices";
-        field VSPiper = "/Users/ursmuff/.mlx-venv/bin/piper";
         def vs-cat(xs) = if ((Comparable) len(xs) == 0) then "" else ((String) xs[0] + vs-cat(xs[1:]));
         // the voice each tongue speaks with; a tongue absent here has no mouth yet
         def vs-voices-1() = [["en", "en_GB-cori-high"], ["pt", "pt_BR-cadu-medium"], ["fa", "fa_IR-amir-medium"], ["id", "id_ID-news_tts-medium"], ["de", "de_DE-thorsten-high"], ["fr", "fr_FR-tom-medium"], ["zh", "zh_CN-xiao_ya-medium"], ["es", "es_AR-daniela-high"], ["ru", "ru_RU-ruslan-medium"], ["it", "it_IT-serena-high"]];
@@ -71,37 +56,6 @@ section [form.bml] {
         // the mouths the body holds, one to a line: tongue, voice, and whether the model is here
         def vs-mouths-go(rows) = if ((Comparable) len(rows) == 0) then "" else vs-cat([rows[0][0], "  ", rows[0][1], if ((Comparable) vs-has-voice?(rows[0][0]) == 1) then "" else "  (model not on disk)", "\n", vs-mouths-go(rows[1:])]);
         def vs-mouths() = vs-mouths-go(vs-voices());
-        // ONE crossing now, and it is named: the text on piper's stdin, a wav out. The
-        // SOUNDING used to be a second crossing on the same line — `afplay "$W"` — and it
-        // is gone. The body has its own mouth since 2026-09-08 (sense_speaker_play_at, the
-        // twin of the sense_mic_* ears), so what leaves this cell is a rendering, and the
-        // air is the seed's own.
-        def vs-wav(code) = vs-cat([".hearth/voice-", code, ".wav"]);
-        // piper runs with the voice store as its working directory, because the Chinese
-        // pinyin lane looks for its lookup tables in ./g2pW and they live beside the voices;
-        // the wav still lands in the body's own .hearth, named absolutely before the cd.
-        // A line travels to the shell as ONE single-quoted word. It used to ride inside double quotes, and a
-        // line that carried a quote ("Hey, I have just had this encounter...") ended the word where the quote
-        // stood: the phonemizer heard half a sentence and the mouth said half a sentence (found 2026-10-02 on
-        // the sleep track: two lines of forty words came back as seven). Inside single quotes only the single
-        // quote itself is special, and it is closed, escaped and reopened.
-        def vs-join(xs, sep) = if ((Comparable) len(xs) == 0) then "" else if ((Comparable) len(xs) == 1) then xs[0] else vs-cat([xs[0], sep, vs-join(xs[1:], sep)]);
-        def vs-shq(s) = vs-cat(["'", vs-join(split-on(s, "'"), "'\\''"), "'"]);
-        def vs-command(code, text) = vs-cat(["mkdir -p \"$PWD/.hearth\" && W=\"$PWD/", vs-wav(code), "\" && cd ", VSRoot(), " && printf '%s' ", vs-shq(text), " | ", VSPiper(), " -m ", vs-model(code), " -f \"$W\" >/dev/null 2>&1 && echo rendered"]);
-        // ── the wav, read by the body and sounded by the body ────────────────────────────
-        // The rate is READ, never assumed. These voices render at 22050 Hz, not at the
-        // ear's 16 kHz, and a 22050 Hz voice through a 16 kHz queue comes back a fourth
-        // low and 1.38x slow — measured on .hearth/voice-en.wav the day this door opened.
-        // The chunks are walked rather than counted from 44, so a voice model that one day
-        // writes a LIST chunk is still heard instead of being played from the wrong offset.
-        def vs-u16(s, i) = (str_byte_at(s, i) + (256 * str_byte_at(s, (i + 1))));
-        def vs-u32(s, i) = (vs-u16(s, i) + (65536 * vs-u16(s, (i + 2))));
-        def vs-even(n) = if ((Comparable) (n % 2) == 0) then n else (n + 1);
-        def vs-chunk(s, i, tag) = if ((i + 8) >= len(s)) then -1 else if ((String) substring(s, i, (i + 4)) == tag) then i else vs-chunk(s, ((i + 8) + vs-even(vs-u32(s, (i + 4)))), tag);
-        def vs-play(p) = vs-play-h(p, read_file_slice(p, 0, 4096));
-        def vs-play-h(p, h) = if (len(h) < 44) then -4 else vs-play-at(p, h, vs-chunk(h, 12, "fmt "), vs-chunk(h, 12, "data"));
-        // mono 16-bit is what this mouth holds; anything else is named, not played wrong
-        def vs-play-at(p, h, f, d) = if ((f < 0) || (d < 0)) then -4 else if (((Comparable) vs-u16(h, (f + 10)) != 1) || ((Comparable) vs-u16(h, (f + 22)) != 16)) then -4 else sense_speaker_play_at(read_file_slice(p, (d + 8), vs-u32(h, (d + 4))), vs-u32(h, (f + 12)));
         // The mouth signs what it says. Nothing the ear writes names a speaker — `kind=said` is the
         // tongue lane's word for its own rendering, not a claim about a voice — so a line the body
         // spoke and then heard is indistinguishable from a line the room spoke, and the perception
@@ -114,56 +68,20 @@ section [form.bml] {
             let frame = vs-cat(["<|ear:frame|>", vs-nl(), vs-kv("t", now_unix_ms().str()), vs-kv("kind", "spoke"), vs-kv("who", "sema"), vs-kv("src", "voice-say"), vs-kv("lang", code), vs-kv("heard", text), vs-kv("line", text), vs-kv("db", "0"), vs-kv("nsp", "0"), "<|/ear:frame|>", vs-nl()]);
             sbt-append(".hearth/ear.spool", frame);
         }
-        // the speaking path proper — reached only once a mouth and a line are both here.
-        // Two steps now, and they fail apart: the rendering can refuse (piper, the one
-        // crossing left) and the sounding can refuse (the body's own door), and a caller
-        // is told which. A line only signs itself once it has actually sounded.
-        def vs-speak(code, text) {
-            let made = fs-mkdir(".hearth");
-            let rendered = host-exec(vs-command(code, text), "");
-            let played = if nothing?(rendered) then -1 else vs-play(vs-wav(code));
-            let signed = if (played > 0) then vs-sign(code, text) else 0;
-            if nothing?(rendered) then "the voice refused"
-                else if ((Comparable) played == -4) then "rendered, but that wav is not a shape this mouth holds"
-                else if (played < 0) then vs-cat(["rendered, but no mouth sounded it (", played.str(), ")"])
-                else vs-cat(["spoke in ", code, " — ", played.str(), " samples"]);
-        }
 
-        // ── the native mouth: the crossing shrunk to letters->phonemes ───────────────────
-        // The espeak crossing hands back one phoneme a line and nothing else — no wav, no
-        // model, no rate, no samples. Everything after it is this seed's: the id row from the
-        // voice's own table, the whole VITS on this Mac's metal, the samples turned to signed
-        // 16-bit on the same device, and the air through the seed's own mouth at the voice's
-        // OWN rate. A tongue whose phonemes the body cannot produce at all takes the standing
-        // path instead, and says which it took.
-        field VSPy = "/Users/ursmuff/.mlx-venv/bin/python";
-        def vs-espeak-code(code) = vp-espeak-voice(vp-cfg(vs-voice(code)));
-        def vs-native?(code) = if ((Comparable) vs-has-voice?(code) == 0) then 0 else if ((String) vp-phoneme-type(vp-cfg(vs-voice(code))) == "espeak") then 1 else 0;
-        def vs-phon-command(code, text) = vs-cat([VSPy(), " -c \"from piper.phonemize_espeak import EspeakPhonemizer;import sys;[print(ph) for s in EspeakPhonemizer().phonemize(sys.argv[1],sys.argv[2]) for ph in s]\" \"", vs-espeak-code(code), "\" ", vs-shq(text)]);
-        // THE ORACLE — espeak-ng through a Python process, the one crossing this cell still names. It is the
-        // body's TEACHER for letters->phonemes (observe/voice-g2p-teach-run.fk asks it once per line and word and
-        // writes the answers into the body's own tables); a speaking path never reaches it unless VSOracle is 1.
-        field VSOracle = 0;
-        def vs-phonemes-oracle(code, text) {
-            let out = host-exec(vs-phon-command(code, text), "");
-            if nothing?(out) then [] else vp-lines-of(out);
-        }
-        // many lines, one process: each line's phonemes end at a line holding byte 31
-        def vs-shq-all(xs) = if ((Comparable) len(xs) == 0) then "" else vs-cat([" ", vs-shq(xs[0]), vs-shq-all(xs[1:])]);
-        def vs-phon-batch-command(code, texts) = vs-cat([VSPy(), " -c \"from piper.phonemize_espeak import EspeakPhonemizer;import sys;P=EspeakPhonemizer();[([print(ph) for s in P.phonemize(sys.argv[1],t) for ph in s],print(chr(31))) for t in sys.argv[2:]]\" \"", vs-espeak-code(code), "\"", vs-shq-all(texts)]);
-        def vs-group-go(lines, cur, acc) = if ((Comparable) len(lines) == 0) then reverse(acc) else if ((String) lines[0] == byte_to_str(31)) then vs-group-go(lines[1:], [], cons(reverse(cur), acc)) else vs-group-go(lines[1:], cons(lines[0], cur), acc);
-        def vs-phonemes-oracle-batch(code, texts) {
-            let out = host-exec(vs-phon-batch-command(code, texts), "");
-            if nothing?(out) then [] else vs-group-go(split-on(out, byte_to_str(10)), [], []);
-        }
-        // AT HOME: the body's own tables first (voice-g2p.bml); with two tables loaded once per tongue
-        def vs-phonemes-with(ltab, wtab, text) = vg-phonemes(ltab, wtab, text);
-        def vs-phonemes-home(code, text) = vg-phonemes(vg-load(code, "line"), vg-load(code, "word"), text);
-        // what the speaking path calls: home first; nothing() is an honest answer when the body has not been taught
-        def vs-phonemes(code, text) {
-            let home = vs-phonemes-home(code, text);
-            if (!nothing?(home)) then home else if ((Comparable) VSOracle() == 1) then vs-phonemes-oracle(code, text) else nothing();
-        }
+        // ── the native mouth ─────────────────────────────────────────────────────────────
+        // A voice whose phonemes are espeak's, and for which the body holds tables, is spoken whole in the body: the id
+        // row from the voice's own table, the whole VITS on this Mac's metal, the samples turned to signed 16-bit on the
+        // same device, and the air through the seed's own mouth at the voice's OWN rate.
+        def vs-has-tables?(code) = if (file_size(vg-path(code, "word")) > 0) then 1 else if (file_size(vg-path(code, "line")) > 0) then 1 else 0;
+        def vs-native?(code) = if ((Comparable) vs-has-voice?(code) == 0) then 0 else if ((String) vp-phoneme-type(vp-cfg(vs-voice(code))) != "espeak") then 0 else vs-has-tables?(code);
+        // the body's tables, loaded for the tongue, then the chain: taught line, taught words, model-bridged words
+        def vs-phonemes-with(ltab, wtab, mtab, text) = vg-phonemes(ltab, wtab, mtab, text);
+        def vs-phonemes-home(code, text) = vg-phonemes(vg-load(code, "line"), vg-load(code, "word"), vg-load(code, "model"), text);
+        // what the speaking path calls: the body's tables; nothing() is an honest answer when a word is not held
+        def vs-phonemes(code, text) = vs-phonemes-home(code, text);
+        // why a tongue has no native mouth, in the body's own words
+        def vs-no-route(code) = if ((String) vp-phoneme-type(vp-cfg(vs-voice(code))) != "espeak") then vs-cat(["no native mouth for ", code, " yet — its voice reads ", vp-phoneme-type(vp-cfg(vs-voice(code))), " phonemes, which the body cannot produce"]) else vs-cat(["no native mouth for ", code, " yet — the body holds no tables that read its letters to sounds"]);
         // the whole line, rendered and sounded by the body — (played, samples)
         def vs-native-speak(code, text) {
             let cfg = vp-cfg(vs-voice(code));
@@ -181,17 +99,17 @@ section [form.bml] {
             // away and say "refused", so a voice whose model is present, mapped and 63 MB looked
             // like a wall (corpus rows 1415 heldno, 1416 heardshort). Form native heals and
             // integrates, or releases: the wound is carried with its own name attached.
-            if ((Comparable) len(phs) == 0) then vs-cat(["no phonemes for ", code, " yet — its letters have no walk to sounds here"])
+            if ((Comparable) len(phs) == 0) then vs-cat(["no phonemes for this line in ", code, " yet — a word its tables do not hold (observe/voice-g2p-grow-run.fk grows them)"])
                 else if ((Comparable) ok == 0) then vs-cat(["unhealed native voice for ", code, ": ", vv-open-why(st)])
                 else if (played < 0) then vs-cat(["rendered natively, but no mouth sounded it (", played.str(), ")"])
                 else vs-cat(["spoke in ", code, " natively — ", played.str(), " samples from ", len(ids).str(), " ids"]);
         }
-        def vs-say(code, text) = if ((Comparable) vs-has-voice?(code) == 0) then vs-cat(["no mouth for ", code, " yet — the tongues that speak are ", vs-tongues-text()]) else if ((Comparable) len(trim(text)) == 0) then "nothing to say" else if ((Comparable) vs-native?(code) == 1) then vs-native-speak(code, text) else vs-speak(code, text);
-        // which tongues the body renders itself, and which still leave whole
+        def vs-say(code, text) = if ((Comparable) vs-has-voice?(code) == 0) then vs-cat(["no mouth for ", code, " yet — the tongues that speak are ", vs-tongues-text()]) else if ((Comparable) len(trim(text)) == 0) then "nothing to say" else if ((Comparable) vs-native?(code) == 1) then vs-native-speak(code, text) else vs-no-route(code);
+        // which tongues the body renders itself, and which have a voice and no native route yet
         def vs-native-codes-go(rows) = if ((Comparable) len(rows) == 0) then [] else if ((Comparable) vs-native?(rows[0][0]) == 1) then cons(rows[0][0], vs-native-codes-go(rows[1:])) else vs-native-codes-go(rows[1:]);
-        def vs-crossing-codes-go(rows) = if ((Comparable) len(rows) == 0) then [] else if ((Comparable) vs-native?(rows[0][0]) == 1) then vs-crossing-codes-go(rows[1:]) else cons(rows[0][0], vs-crossing-codes-go(rows[1:]));
+        def vs-no-route-codes-go(rows) = if ((Comparable) len(rows) == 0) then [] else if ((Comparable) vs-has-voice?(rows[0][0]) == 0) then vs-no-route-codes-go(rows[1:]) else if ((Comparable) vs-native?(rows[0][0]) == 1) then vs-no-route-codes-go(rows[1:]) else cons(rows[0][0], vs-no-route-codes-go(rows[1:]));
         def vs-native-codes() = vs-native-codes-go(vs-voices());
-        def vs-crossing-codes() = vs-crossing-codes-go(vs-voices());
+        def vs-no-route-codes() = vs-no-route-codes-go(vs-voices());
         def vs-native-count() = len(vs-native-codes());
         // the same line in several tongues, one after the other
         def vs-say-many-go(codes, text, acc) = if ((Comparable) len(codes) == 0) then acc else vs-say-many-go(codes[1:], text, vs-cat([acc, if ((Comparable) len(acc) == 0) then "" else "; ", vs-say(codes[0], text)]));
