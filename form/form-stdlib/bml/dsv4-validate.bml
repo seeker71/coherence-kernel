@@ -5,7 +5,8 @@
 // (the one ds4 recorded its references on) through the driver ONCE, ALONE, staged so the machine is read at each step and the run stops the moment a reading says it must.
 //
 // WHY STAGED. A model door piled on a model door restarted this Mac three times on 2026-10-02. The driver maps 1,202 tensors of an 80 GiB file and the GPU wires only what it touches, so
-// the window walks the residency in steps and reads host_vm_stat after each: compile, map, state, wirespan probe, the head and its argmax, the recorded-logits prompt, the recorded stream
+// the window walks the residency in steps and reads host_vm_stat after each: compile, map (the dense tensors only: the routed expert stacks are NOT mapped), the arena (arena_slots experts a layer, 64: the lease's term, in
+// buffers allocated once; arena_slots 0 maps the stacks whole, the control), state, wirespan probe (one expert's span filled into its slot), the head and its argmax, the recorded-logits prompt, the recorded stream
 // (twice, for bit equality). Each stage is preceded by the governor's ask for the stage's estimate (mg-ask) and followed by metal_sync, mg-low? and the wired reading.
 // THE LAYERS ARE NOT STAGED HERE. A sync and a machine reading after each layer is a PROBE protocol (window 2 ran it over 16 layers and ended on a denial), not the token path: the token path is MEASURED AS IT RUNS by
 // observe/dsv4-token-run.bml (form-stdlib/bml/dsv4-token-run.bml), one row of the landed op ledger a token and the wired memory read after every layer of the first tokens without a sync. This door keeps what only a staged
@@ -82,6 +83,9 @@ section [form.bml] {
   // ---- options (one JSON line on stdin) -------------------------------------------------------------------------------------
   def dvr-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
   def dvr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  // THE ARENA IS THE DEFAULT (one authority for both doors that open the driver, this one and observe/dsv4-token-run.bml): arena_slots experts a layer (the lease's term, dls-cache-experts: 64) read through a slot arena;
+  // arena_slots 0 maps the routed stacks whole, the control (a cold token over whole stacks read the whole 80 GiB file: 2026-10-03 19:04 WITA, 5,241,090 pageins and 27.7 GiB of other processes' memory pushed to swap)
+  def dvr-arena-slots(doc) = dvr-int(doc, "arena_slots", dls-cache-experts());
   def dvr-ints(doc, key) = json-object-has?(doc, key) ? map(n => json-int-value(n), json-array-elements(json-object-get(doc, key))) : [];
   def dvr-options() {
    let line = trim(stdin-text());
@@ -235,13 +239,15 @@ section [form.bml] {
   def dvr-stages(m, opts) {
    let cap = dvr-int(opts, "cap", dvr-default-cap());
    let c = dvr-int(opts, "cache_experts", dls-cache-experts());
-   [["compile", dvr-bound(), "the seven graph units' kernels compile (the carrier keys a pipeline by its source)"],
-    ["map", dvr-est-map(m, cap), "dsv4-open-span maps the driver's 1,202 tensors (no copy, demand-paged) and allocates the scratch"],
-    ["state", dvl-kv-total(m, cap), "the KV arenas and the compressors' state for the capacity"],
-    ["wirespan", dvr-slice(m), "ONE dispatch reading ONE expert slice of layer 0's gate stack: wired grows by the slice or by the stack"],
+   let slots = dvr-arena-slots(opts);
+   append([["compile", dvr-bound(), "the seven graph units' kernels compile (the carrier keys a pipeline by its source)"],
+    ["map", dvr-est-map(m, cap), slots > 0 ? "dsv4-open-span-mode maps the driver's dense tensors (no copy, demand-paged; the routed expert stacks are NOT mapped) and allocates the scratch" : "dsv4-open-span maps the driver's 1,202 tensors, the routed stacks whole (no copy, demand-paged: the control) and allocates the scratch"]],
+    append(slots > 0 ? [["arena", dls-cache(m, slots), "the slot arena: " ++ slots.str() ++ " experts a layer in buffers allocated once (the lease's expert term); a missing expert is copied from the file by its own span"]] : [],
+   [["state", dvl-kv-total(m, cap), "the KV arenas and the compressors' state for the capacity"],
+    ["wirespan", dvr-slice(m), slots > 0 ? "ONE fill of ONE expert's span (layer 0's gate stack, expert 137) into its slot: wired grows by the span or by the stack" : "ONE dispatch reading ONE expert slice of layer 0's gate stack: wired grows by the slice or by the stack"],
     ["head", dvr-est-head(m), "the embedding of token 1, the output head over it and the device argmax (the head's kernels and the NaN scan answer; the layers are the token door's)"],
     ["logits", dls-cache(m, c), "the recorded-logits prompt through prefill (the expert cache is the bound on what stays wired: layers wire about their whole stacks and give them back), compared by r, top-10 overlap and the tie budget"],
-    ["stream", dls-cache(m, c), "the raw prompt ids, 24 greedy ids against the recorded stream (every new expert it meets grows wired memory, up to the expert cache: that is its estimate, not 0), then once more from a fresh state for bit equality"]];
+    ["stream", dls-cache(m, c), "the raw prompt ids, 24 greedy ids against the recorded stream (every new expert it meets grows wired memory, up to the expert cache: that is its estimate, not 0), then once more from a fresh state for bit equality"]]));
   }
 
   // ---- what the driver cannot run yet, from the header alone ------------------------------------------------------------------------
@@ -398,7 +404,7 @@ section [form.bml] {
   def dvr-receipt-row(date, at, r) = "{" ++ dvr-join([
    dvr-kv("schema", dvr-q("dsv4-validation-v1")), dvr-kv("at_unix_ms", at.str()), dvr-kv("date", dvr-q(date)), dvr-kv("status", dvr-q(record_get(r, "status"))), dvr-kv("reason", dvr-q(record_get(r, "reason"))),
    dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("file_bytes", record_get(r, "bytes").str()), dvr-kv("lease_shared", record_get(r, "shared").str()), dvr-kv("lease_private", mg-kv-margin().str()),
-   dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("cache_experts", record_get(r, "cache").str()), dvr-kv("organs", record_get(r, "organs")), dvr-kv("moved", record_get(r, "moved")), dvr-kv("denied", record_get(r, "denied")), dvr-kv("vm_window", record_get(r, "vmwin")),
+   dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("cache_experts", record_get(r, "cache").str()), dvr-kv("arena_slots", record_get(r, "arena").str()), dvr-kv("organs", record_get(r, "organs")), dvr-kv("moved", record_get(r, "moved")), dvr-kv("denied", record_get(r, "denied")), dvr-kv("vm_window", record_get(r, "vmwin")),
    dvr-kv("stages", "[" ++ dvr-join(map(s => dvr-stage-json(s), record_get(r, "stages")), ",") ++ "]"),
    dvr-kv("wirespan", "{" ++ dvr-join([dvr-kv("delta", record_get(r, "ws-delta").str()), dvr-kv("slice", record_get(r, "ws-slice").str()), dvr-kv("stack", record_get(r, "ws-stack").str()), dvr-kv("kind", dvr-q(record_get(r, "ws-kind")))], ",") ++ "}"),
    dvr-kv("stream_matched", record_get(r, "matched").str()), dvr-kv("stream_of", "24"), dvr-kv("ids", dvr-ids-json(record_get(r, "ids"))),
@@ -413,7 +419,7 @@ section [form.bml] {
   // ---- the run (the window; never run by a band) --------------------------------------------------------------------------------------------------
   def dvr-said(lines) = len(lines) == 0 ? 0 : dvr-said-next(print_str(lines[0]), lines[1:]);
   def dvr-said-next(said, rest) = dvr-said(rest);
-  def dvr-env(file, m, size, shared, cap, cache, base, lease) = record_new(0, "file", file, "m", m, "bytes", size, "shared", shared, "cap", cap, "cache", cache, "base", base, "lease", lease, "prev", base, "organs", "[]", "moved", "[]", "t0", host_monotonic_ms(),
+  def dvr-env(file, m, size, shared, cap, cache, base, lease) = record_new(0, "file", file, "m", m, "bytes", size, "shared", shared, "cap", cap, "cache", cache, "base", base, "lease", lease, "prev", base, "arena", 0, "organs", "[]", "moved", "[]", "t0", host_monotonic_ms(),
     "vm0", [], "denied", "{}", "log", [], "ctx", [], "sts", [], "reason", "", "ws-delta", 0, "ws-slice", 0, "ws-stack", 0, "ws-kind", "none", "matched", 0, "ids", [], "margins", [], "rgaps", [], "deterministic", 0, "logits", "{\"waits\":\"no logits_prompt_ids supplied\"}", "extra", []);
   def dvr-elapsed(env) = host_monotonic_ms() - record_get(env, "t0");
   def dvr-note(env, key, v) = record_set(env, key, v);
@@ -464,17 +470,31 @@ section [form.bml] {
   def dvr-sts(env) = record_get(env, "sts");
 
   def dvr-do-compile(env) { let ps = dkr-open-pipes(dkr-graph-units()); record_set(env, "ps", ps); 1; }
+  // the map opens the dense tensors only when the arena is asked for (env "arena" = the slots: the routed stacks keep their rows and have no handle), else every tensor with the stacks whole (the control)
   def dvr-do-map(env) {
-   let ctx = dsv4-open-span(record_get(env, "file"), record_get(env, "cap"), 1);
+   let ctx = record_get(env, "arena") > 0 ? dsv4-open-span-mode(record_get(env, "file"), record_get(env, "cap"), 1, dkr-graph-units(), "arena") : dsv4-open-span(record_get(env, "file"), record_get(env, "cap"), 1);
    len(ctx) == 13 ? { let k = record_set(env, "ctx", ctx); let p = dsv4-prepare(ctx); p == 1 ? 1 : nothing(); } : nothing();
   }
+  // the arena's buffers, allocated once over the mapped context (the lease's expert term at env "arena" slots)
+  def dvr-do-arena(env) { let ar = dxa-open(dvr-ctx(env), record_get(env, "arena")); nothing?(ar) ? nothing() : 1; }
   def dvr-do-state(env) {
    let ctx = dvr-ctx(env);
    let sts = dsv4-new-state(ctx[2], ctx[0], record_get(env, "cap"));
    nothing?(sts) ? nothing() : { let k = record_set(env, "sts", sts); 1; };
   }
-  // one dispatch over one expert slice of layer 0's gate stack
-  def dvr-do-wirespan(env) {
+  // the probe: in the arena mode ONE fill of expert 137's span of layer 0's gate stack into slot 0 (the view, the copy, the wait that settles it, the view freed); in the control one dispatch over one expert slice of the whole stack
+  def dvr-do-wirespan(env) = record_get(env, "arena") > 0 ? dvr-do-wirespan-arena(env) : dvr-do-wirespan-whole(env);
+  def dvr-do-wirespan-arena(env) {
+   let ctx = dvr-ctx(env);
+   let m = record_get(env, "m");
+   let n = dxa-fill-one(ctx, dxa-of(ctx), 0, 0, 0, 137 % dvl-l(m, 0, "nexp"));
+   let s = dkr-hz-sync();
+   let f = dxa-settle(ctx);
+   let k1 = record_set(env, "ws-slice", dvr-slice(m));
+   let k2 = record_set(env, "ws-stack", dvr-stack(m));
+   n == 1 ? 1 : nothing();
+  }
+  def dvr-do-wirespan-whole(env) {
    let ctx = dvr-ctx(env);
    let m = record_get(env, "m");
    let ids = metal_buf_write(dso-buf(ctx, "expert-ids"), 0, dkr-u32-bytes([137]));
@@ -555,14 +575,16 @@ section [form.bml] {
   }
   def dvr-steps(env, m, opts) {
    let ids = dvr-logits-ids(opts);
+   let slots = dvr-arena-slots(opts);
    append([() => dvr-stage(env, "compile", dvr-bound(), () => dvr-do-compile(env)),
-           () => dvr-stage(env, "map", dvr-est-map(m, record_get(env, "cap")), () => dvr-do-map(env)),
-           () => dvr-stage(env, "state", dvl-kv-total(m, record_get(env, "cap")), () => dvr-do-state(env)),
-           () => dvr-stage(env, "wirespan", dvr-slice(m), () => dvr-do-wirespan(env)),
-           () => dvr-judge-wirespan(env),
-           () => dvr-stage(env, "head", dvr-est-head(m), () => dvr-do-head(env))],
+           () => dvr-stage(env, "map", dvr-est-map(m, record_get(env, "cap")), () => dvr-do-map(env))],
+    append(slots > 0 ? [() => dvr-stage(env, "arena", dls-cache(m, slots), () => dvr-do-arena(env))] : [],
+     append([() => dvr-stage(env, "state", dvl-kv-total(m, record_get(env, "cap")), () => dvr-do-state(env)),
+             () => dvr-stage(env, "wirespan", dvr-slice(m), () => dvr-do-wirespan(env)),
+             () => dvr-judge-wirespan(env),
+             () => dvr-stage(env, "head", dvr-est-head(m), () => dvr-do-head(env))],
       append(len(ids) > 0 ? [() => dvr-stage(env, "logits", dls-cache(m, record_get(env, "cache")), () => dvr-do-logits(env, ids))] : [() => dvr-waits(env, "logits")],
-       [() => dvr-stage(env, "stream", dls-cache(m, record_get(env, "cache")), () => dvr-do-stream(env))]));
+       [() => dvr-stage(env, "stream", dls-cache(m, record_get(env, "cache")), () => dvr-do-stream(env))]))));
   }
   // a leg that waits for what the caller has not supplied: named in the log and the output, no estimate, no run, no abort
   def dvr-waits(env, label) {
@@ -579,7 +601,7 @@ section [form.bml] {
    len(left);
   }
   def dvr-record(env, status, reason, held) = record_new(0, "status", status, "reason", reason, "file", record_get(env, "file"), "bytes", record_get(env, "bytes"), "shared", record_get(env, "shared"), "cap", record_get(env, "cap"),
-    "cache", record_get(env, "cache"), "organs", record_get(env, "organs"), "moved", record_get(env, "moved"), "denied", record_get(env, "denied"), "vmwin", dvr-window-vm-json(mg-sense(), record_get(env, "vm0"), dvr-stored-pages()),
+    "cache", record_get(env, "cache"), "arena", record_get(env, "arena"), "organs", record_get(env, "organs"), "moved", record_get(env, "moved"), "denied", record_get(env, "denied"), "vmwin", dvr-window-vm-json(mg-sense(), record_get(env, "vm0"), dvr-stored-pages()),
     "stages", record_get(env, "log"), "ws-delta", record_get(env, "ws-delta"), "ws-slice", record_get(env, "ws-slice"), "ws-stack", record_get(env, "ws-stack"), "ws-kind", record_get(env, "ws-kind"),
     "matched", record_get(env, "matched"), "ids", record_get(env, "ids"), "margins", record_get(env, "margins"), "rgaps", record_get(env, "rgaps"), "deterministic", record_get(env, "deterministic"), "logits", record_get(env, "logits"),
     "gaps", dvr-gaps(record_get(env, "m")), "elapsed", dvr-elapsed(env), "held", held);
@@ -618,6 +640,7 @@ section [form.bml] {
    let env = dvr-env(file, m, size, shared, cap, cache, mg-wired(vm0), shared + mg-kv-margin());
    let noted = record_set(env, "organs", dvr-organs-json(organs));
    let more = record_set(env, "vm0", vm0);
+   let slots = record_set(env, "arena", dvr-arena-slots(opts));
    let said = print_str(dvr-organs-line(organs));
    // a stop inside a stage is a backtrack point, not the end of the window: it reads as an abort, and the handles, the lease and the receipt follow
    let why = try dvr-seq(dvr-steps(env, m, opts)) catch "walker-stop";
