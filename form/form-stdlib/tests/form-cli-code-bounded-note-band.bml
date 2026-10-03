@@ -18,16 +18,15 @@
 ;        fcac-observation-budget(next), the state is the stepped state unchanged, and nothing is bounded
 ;   2    a tool result over the cap (the day's 38 KB read, a fifth of the window being 3276 IDs) does not enter the
 ;        decoder whole though it would fit: the port is handed the bounded state's observation, which is under the cap and
-;        carries cause observation-exceeds-note-cap, the exit, byte and line counts and sha256 of the read, its first
-;        12 and last 6 lines, and the sed window to read next; the stage, turns and repair count are not moved (a read
+;        carries cause observation-exceeds-note-cap, exact source stdout, byte coordinates, resident identity
+;        and an executable continuation; the stage, turns and repair count are not moved (a read
 ;        that worked is no failure); a 30 KB read that the unmodified path takes whole (over 8000 IDs spent) costs the
 ;        bounded note under 2000
 ;   4    nothing is lost: the private evidence the note names holds the exact observation that was bounded, and no
 ;        checkpoint holds the whole read: what a managed lane saves after the capped turn, read back, carries the bounded
 ;        note, a tool history whose stdout is its sha256 and byte count, and no failure evidence or pending row that
 ;        repeats the read (the document itself stays whole in the checkpoint's documents)
-;   8    any window is one native read away: the windows read_window names, run through the real sed tool, reassemble the
-;        document byte for byte, each under the cap
+;   8    continuations executed through the real native read reassemble the document byte for byte
 ;   16   the sibling's window refusal (afe428075) stands and carries the excerpt: a read that cannot fit the room is
 ;        refused as capacity before KV changes, the focus note is taken instead, the stage is repair with one repair, and a
 ;        second identical read invites the new plan (replan_required)
@@ -160,11 +159,9 @@ section [form.bml] {
    let shown = fcac-observation-budget(st, 24);
    let detail = bnb-detail(st);
    let ex = json-object-get(detail, "observation_excerpt");
-   let head = node_children(json-object-get(ex, "head"));
-   let tail = node_children(json-object-get(ex, "tail"));
-   let lines = split-on(doc, "\n");
+   let stdout=bnb-field(ex,"stdout");
    let kept = bnb-field(detail, "private_observation_evidence");
-   let c2 = (fcac-observation-over-cap?(session, next) == 1) && ((String) fcms-reason(turn[1][0]) == "seen:" ++ bnb-sha(shown)) && (len(shown) < fcac-observation-cap-bytes(session)) && (bnb-ids(len(shown)) < fcac-observation-cap-ids(session)) && ((String) bnb-field(detail, "cause") == "observation-exceeds-note-cap") && (bnb-field(ex, "stdout_bytes") == len(doc)) && (bnb-field(ex, "stdout_lines") == bnb-day-lines()) && ((String) bnb-field(ex, "stdout_sha256") == bnb-sha(doc)) && (len(head) == 12) && ((String) node_value(head[0]) == lines[0]) && (len(tail) == 6) && ((String) node_value(tail[5]) == lines[bnb-day-lines() - 1]) && (bnb-field(ex, "tail_from_line") == bnb-day-lines() - 5) && ((String) bnb-field(json-object-get(ex, "read_window"), "tool") == "sed") && (fcap-stage(st) == fcap-stage(next)) && (fcap-turns(st) == fcap-turns(next)) && (fcap-failures(st) == fcap-failures(next));
+   let c2 = (fcac-observation-over-cap?(session, next) == 1) && ((String) fcms-reason(turn[1][0]) == "seen:" ++ bnb-sha(shown)) && (len(shown) < fcac-observation-cap-bytes(session)) && (bnb-ids(len(shown)) < fcac-observation-cap-ids(session)) && ((String) bnb-field(detail, "cause") == "observation-exceeds-note-cap") && bnb-field(ex,"source_bytes")==len(doc) && bnb-field(ex,"resident_sha256")==bnb-sha(doc) && bnb-field(ex,"start_byte")==0 && bnb-field(ex,"end_byte")==len(stdout) && stdout==substring(doc,0,len(stdout)) && bnb-field(json-object-get(ex,"next"),"tool")=="read" && (fcap-stage(st) == fcap-stage(next)) && (fcap-turns(st) == fcap-turns(next)) && (fcap-failures(st) == fcap-failures(next));
    let c4 = ((read_file(kept) ?? "") == fcac-observation-budget(next, 24)) && (len(kept) > 0);
    let whole = bnb-fits-whole();
    let c8 = json-object-has?(detail, "observation_excerpt") ? bnb-reach(ex, doc, session) : 0;
@@ -203,13 +200,17 @@ section [form.bml] {
    let removed = bnb-gone(kept);
    fcms-live?(taken) && (fcms-injected-ids(taken) > 8000) && fcms-live?(bounded[1][0]) && (fcms-injected-ids(bounded[1][0]) < 2000) && (fcac-observation-over-cap?(session, near) == 1);
   }
-  // every window the note names, run through the real sed tool, in order
-  def bnb-windows(docs, path, from, count, w, acc) = from > count ? acc : bnb-windows(docs, path, from + w, count, w, append(acc, [fat-out(fat-call(docs, "sed", ["-n", from.str() ++ "," ++ fat-min(count, from + w - 1).str() ++ "p", path], ""))]));
+  // Execute each exact continuation through the native tool, preserving bytes.
+  def bnb-pages(ex,docs,cap,acc) {
+   let held=acc + bnb-field(ex,"stdout"); let next=json-object-get(ex,"next");
+   if faj-type(next)=="null" then held else {
+    let result=fat-call(docs,bnb-field(next,"tool"),node_children(json-object-get(next,"arguments")) |> map(arg=>node_value(arg)),"");
+    let span=[fat-find-doc(docs,bnb-field(ex,"path")),bnb-field(ex,"end_byte"),bnb-field(ex,"requested_end_byte")];
+    fat-exit(result)!=0 || span[1]<=bnb-field(ex,"start_byte") ? "invalid continuation" : bnb-pages(fcap-source-page(span,json-node-object([json-node-pair("exit",json-node-int(0)),json-node-pair("stdout",json-node-string(fat-out(result)))]),cap),docs,cap,held);
+   };
+  }
   def bnb-reach(ex, doc, session) {
-   let window = bnb-field(ex, "window_lines");
-   let args = node_children(json-object-get(json-object-get(ex, "read_window"), "arguments"));
-   let outs = bnb-windows(bnb-docs(doc), bnb-path(), 1, bnb-field(ex, "stdout_lines"), window, []);
-   (window > 0) && ((String) node_value(args[0]) == "-n") && ((String) node_value(args[2]) == bnb-path()) && ((String) str-join(outs) == doc) && (len(filter(o => len(o) > fcac-observation-cap-bytes(session), outs)) == 0) && (len(outs) < 60);
+   bnb-pages(ex,bnb-docs(doc),fcac-observation-cap-bytes(session) / 2,"")==doc;
   }
   // ── 16 ──
   // The cap does not meet this read (under it), the room does: a context with 3000 positions left is refused a read of about
@@ -381,9 +382,15 @@ section [form.bml] {
    let elsewhere = bnb-queried("read", ["other.md"], out);
    let head = bnb-queried("head", [bnb-path()], out);
    let narrow = (!json-object-has?(bnb-excerpt-of(head), "read_window")) && bnb-has?(fcap-note(head[1]), "narrower query") &&(fcac-observation-over-cap?(session, rg[0]) == 1) && (!json-object-has?(bnb-excerpt-of(rg), "read_window")) && json-object-has?(bnb-excerpt-of(rg), "find") && ((String) bnb-field(bnb-excerpt-of(rg), "path") == bnb-path()) && (bnb-field(bnb-excerpt-of(rg), "stdout_lines") == 700) && bnb-has?(fcap-note(rg[1]), "narrower query") && (!json-object-has?(bnb-excerpt-of(sed), "read_window")) && bnb-has?(fcap-note(sed[1]), "narrower query");
-   let whole = json-object-has?(bnb-excerpt-of(cat), "read_window") && json-object-has?(bnb-excerpt-of(read), "read_window") && (!bnb-has?(fcap-note(cat[1]), "narrower query")) && (!bnb-has?(fcap-note(read[1]), "narrower query"));
+   // A mismatched result is not source, even when the call spells read/cat.
+   let whole = !json-object-has?(bnb-excerpt-of(cat),"next") && !json-object-has?(bnb-excerpt-of(read),"next") && !json-object-has?(bnb-excerpt-of(cat),"read_window") && !json-object-has?(bnb-excerpt-of(read),"read_window");
    let none = (!json-object-has?(bnb-excerpt-of(elsewhere), "read_window")) && (!json-object-has?(bnb-excerpt-of(elsewhere), "path"));
-   bnb-bit(narrow && whole && none, 32768);
+   let doc=bnb-doc(bnb-small-lines());
+   let identity=bnb-docs(doc)[0][0];
+   let page=fcap-observation-excerpt(fcap-tool-ready(bnb-open(doc),"read",[identity,"2","3"],""),fcac-observation-cap-bytes(session));
+   let range=fcap-observation-excerpt(fcap-tool-ready(bnb-open(doc),"sed",["-n","2,4p",bnb-path()],""),fcac-observation-cap-bytes(session));
+   let exact=bnb-field(page,"stdout")==fat-line-window(doc,1,3) && bnb-field(range,"stdout")==bnb-field(page,"stdout") && bnb-field(page,"start_byte")==len(fat-line-window(doc,0,1)) && bnb-field(page,"path")==bnb-path();
+   bnb-bit(narrow && whole && none && exact, 32768);
   }
   // ── 65536 ──
   def bnb-big-read(state, out) = fcap-tool-observed(state, "read", [bnb-path()], "", fat-result(0, out, "", fcap-docs(state)));
