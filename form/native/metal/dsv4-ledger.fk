@@ -127,5 +127,130 @@ section [form.bml] {
         let stopped = dkr-hz-put("observe", 0);
         [seen[0], seen[1], reverse(dll-stages-go(ctx, dkr-hz-get("stages")))];
     }
+
+    // ---- THE ATTRIBUTION ROW: which kernels keep the device busy ---------------------------------------------------------------------------------------------
+    // A production token's gpu_us is the sum over its ~65 command buffers of the span the device reports for each; it says how long the device was busy, not with what. This row answers with what: ONE decode token run in
+    // the attribution mode (dsv4-kernels.fk dkr-attr-begin: every dispatch its own command buffer, enqueued, synced, read; the token's wall clock is not a measurement and the mode is never production's), each
+    // dispatch's device microseconds kept with its pipeline, its first buffer (the weight of a matvec, the arena's buffer of an expert stack) and its stage ("layer-a:17": the attention half and the FFN's first half of block 17;
+    // "layer-b:17": the experts, the shared expert, the slot sum and hc_post; "embed", "head", "scan"). The rows are tallied by FAMILY (what the dispatch is), by KERNEL (its pipeline's name) and by BLOCK, and
+    // THE SUM OF EACH TALLY IS THE TOKEN'S DEVICE TIME EXACTLY (the rows are the growth of metal_live word 11 between dispatches, so the sum telescopes, and the band holds it equal to the word's growth over the token read
+    // independently). Each dispatch carries the per-command-buffer launch the device charges any buffer, so `floor` (the smallest span any dispatch read) is reported and the family table prints its share beside the raw sum.
+    // THE FAMILIES: a matvec is placed by the tensor its first buffer is (the loop that names a leaf: attn_q_a, attn_kv, attn_q_b and attn_output_a/b are "dense matvecs (attention)"; attn_compressor_* "compressor";
+    // ffn_gate_inp "router"; ffn_gate_exps and ffn_up_exps "experts gate/up", ffn_down_exps "experts down", whether the stack's own view or a layer's arena buffer; *_shexp "shared expert"; hc_*_fn "hyper-connection"),
+    // every other dispatch by its pipeline's name (the MLA kernels, the rope, the KV round and append "attention (MLA)"; the compressor's own kernels "compressor"; the top-k and hash routing "router"; the id-weighted
+    // SwiGLU "experts gate/up"; the plain SwiGLU and the slot sum "shared expert"; the hyper-connection kernels "hyper-connection"; the weighted norms "norms"; a view fill's copy "fills (copy kernels)"), and the stages
+    // "head" and "scan" claim every dispatch they run ("head") and "embed" ("embedding"). The compressor's emit shares the norm, the rope, the KV round and the append kernels with the attention and those dispatches are counted
+    // under their kernel's family, not the compressor's: the family "compressor" is the compressor's own projections and kernels.
+    def dll-has?(s, part) = str_find(s, part, 0) >= 0;
+    def dll-leaf-of(name) = str_find(name, "blk.", 0) == 0 ? substring(name, str_find(name, ".", 4) + 1, str_len(name)) : name;
+    def dll-stage-tag(stage) = substring(stage, 0, str_find(stage, ":", 0));
+    def dll-stage-block(stage) = str_to_int(substring(stage, str_find(stage, ":", 0) + 1, str_len(stage)));
+    // the rules are ordered lists, the first that matches wins: the tensor's leaf first (a matvec is what its weight is), then the pipeline's name; "hc_attn_fn" and "attn_compressor" come before "attn_"
+    def dll-leaf-rules() = [["_shexp", "shared expert"], ["ffn_gate_exps", "experts gate/up"], ["ffn_up_exps", "experts gate/up"], ["ffn_down_exps", "experts down"], ["attn_compressor", "compressor"], ["ffn_gate_inp", "router"],
+        ["hc_attn_fn", "hyper-connection"], ["hc_ffn_fn", "hyper-connection"], ["attn_", "dense matvecs (attention)"]];
+    def dll-kernel-rules() = [["form_hc_", "hyper-connection"], ["form_dsv4_hc_post", "hyper-connection"], ["form_mla_attend", "attention (MLA)"], ["form_mla_headrms", "attention (MLA)"], ["form_dsv4_rope", "attention (MLA)"],
+        ["form_dsv4_kv_fp8", "attention (MLA)"], ["form_dkv_append", "attention (MLA)"], ["form_dsv4_comp_", "compressor"], ["form_dsv4_topk", "router"], ["form_dsv4_hash", "router"], ["form_dsv4_swiglu_id", "experts gate/up"],
+        ["form_dsv4_swiglu_f32", "shared expert"], ["form_dsv4_sum_slots", "shared expert"], ["rmsnorm", "norms"], ["form_dsv4_copy", "fills (copy kernels)"]];
+    def dll-first-rule(rules, s, d) = len(rules) == 0 ? d : (dll-has?(s, rules[0][0]) ? rules[0][1] : dll-first-rule(rules[1:], s, d));
+    def dll-family(tag, kname, leaf) = (tag == "head" || tag == "scan") ? "head" : (tag == "embed" ? "embedding" : dll-first-rule(dll-leaf-rules(), leaf, dll-first-rule(dll-kernel-rules(), kname, "other")));
+    // handle -> name tables, built once from the context (not per dispatch): the pipelines' names, and the leaf of every tensor the driver binds plus the arena's buffers
+    def dll-pipe-names-go(ctx, names, rec) = len(names) == 0 ? rec : { let h = dso-pipe(ctx, names[0]); let k = h > 0 ? record_set(rec, h.str(), names[0]) : 0; dll-pipe-names-go(ctx, names[1:], rec); };
+    def dll-pipe-names(ctx) = dll-pipe-names-go(ctx, dkr-all-names(dkr-graph-units()), record_new(0));
+    def dll-leaves-go(ctx, names, rec) = len(names) == 0 ? rec : { let h = dso-handle(ctx, names[0]); let k = h > 0 ? record_set(rec, h.str(), dll-leaf-of(names[0])) : 0; dll-leaves-go(ctx, names[1:], rec); };
+    def dll-arena-leaves-go(ctx, il, n, rec) = il == n ? rec : {
+        let a = record_set(rec, dxa-bufs(ctx, il)[0].str(), "ffn_gate_exps.weight");
+        let b = record_set(rec, dxa-bufs(ctx, il)[1].str(), "ffn_up_exps.weight");
+        let c = record_set(rec, dxa-bufs(ctx, il)[2].str(), "ffn_down_exps.weight");
+        dll-arena-leaves-go(ctx, il + 1, n, rec);
+    };
+    def dll-leaf-names(ctx) {
+        let rec = dll-leaves-go(ctx, dvl-driver-names(dso-geo(ctx)), record_new(0));
+        dxa-on?(ctx) ? dll-arena-leaves-go(ctx, 0, record_get(dso-geo(ctx), "layers-n"), rec) : rec;
+    }
+    def dll-lookup(rec, h, d) = record_has(rec, h.str()) ? record_get(rec, h.str()) : d;
+    // one raw row [pipeline, first buffer, device us, stage] -> [family, kernel, stage, us]
+    def dll-classify-row(pn, ln, r) {
+        let kname = dll-lookup(pn, r[0], "?");
+        let leaf = dll-lookup(ln, r[1], "");
+        [dll-family(dll-stage-tag(r[3]), kname, leaf), kname, r[3], r[2]];
+    }
+    def dll-classify(pn, ln, rows) = len(rows) == 0 ? [] : cons(dll-classify-row(pn, ln, rows[0]), dll-classify(pn, ln, rows[1:]));
+    // a tally of [key, us] items: [[key, count, us]] in the order the keys first appear
+    def dll-tally-go(items, rec) {
+        len(items) == 0 ? 0 : {
+            let k = items[0][0];
+            let held = record_has(rec, k) ? record_get(rec, k) : [0, 0];
+            let a = record_set(rec, k, [held[0] + 1, held[1] + items[0][1]]);
+            let b = record_has(rec, k) && held[0] > 0 ? 0 : record_set(rec, "~keys", append(record_get(rec, "~keys"), [k]));
+            dll-tally-go(items[1:], rec);
+        };
+    }
+    def dll-tally-rows(rec, keys) = len(keys) == 0 ? [] : cons([keys[0], record_get(rec, keys[0])[0], record_get(rec, keys[0])[1]], dll-tally-rows(rec, keys[1:]));
+    def dll-tally(items) { let rec = record_new(0, "~keys", []); let done = dll-tally-go(items, rec); dll-tally-rows(rec, record_get(rec, "~keys")); }
+    def dll-pick(cls, i) = len(cls) == 0 ? [] : cons([cls[0][i], cls[0][3]], dll-pick(cls[1:], i));
+    def dll-sum-us(items) = len(items) == 0 ? 0 : items[0][1] + dll-sum-us(items[1:]);
+    def dll-min-us(cls, best) = len(cls) == 0 ? best : dll-min-us(cls[1:], cls[0][3] < best ? cls[0][3] : best);
+    // the tally's third column summed
+    def dll-tally-total(t) = len(t) == 0 ? 0 : t[0][2] + dll-tally-total(t[1:]);
+    def dll-tally-count(t) = len(t) == 0 ? 0 : t[0][1] + dll-tally-count(t[1:]);
+    // the blocks: [block, half-a us, half-b us], ascending; a whole-stack block (one stage "layer") reports its time as half a and 0 as half b
+    def dll-stage-us(stages, key) = len(stages) == 0 ? 0 : (stages[0][0] == key ? stages[0][2] : dll-stage-us(stages[1:], key));
+    def dll-blocks-go(stages, il, n) = il == n ? [] : cons([il, dll-stage-us(stages, "layer-a:" ++ il.str()) + dll-stage-us(stages, "layer:" ++ il.str()), dll-stage-us(stages, "layer-b:" ++ il.str())], dll-blocks-go(stages, il + 1, n));
+    // the row: dispatches, us (the rows' sum), gpu_us (the word's growth over the token, read independently), floor (the smallest span read), families, kernels, stages (every stage key), blocks, wall_ms, fill_ms (the arena's host preads)
+    def dll-attribution(ctx, rows, gpu, wall, fillms) {
+        let cls = dll-classify(dll-pipe-names(ctx), dll-leaf-names(ctx), rows);
+        let fam = dll-tally(dll-pick(cls, 0));
+        let ker = dll-tally(dll-pick(cls, 1));
+        let stg = dll-tally(dll-pick(cls, 2));
+        record_new(0, "dispatches", len(cls), "us", dll-tally-total(fam), "gpu_us", gpu, "floor", len(cls) == 0 ? 0 : dll-min-us(cls, 1000000000), "families", fam, "kernels", ker, "stages", stg,
+            "blocks", dll-blocks-go(stg, 0, record_get(dso-geo(ctx), "layers-n")), "wall_ms", wall, "fill_ms", fillms);
+    }
+    // THE OBSERVATION: one decode token in the attribution mode; [next id, the attribution row]. The device's word is read before and after on its own (after a sync), the fills' host milliseconds are the growth of the arena's counter.
+    def dll-fill-ms(ctx) = dxa-on?(ctx) ? dxa-get(ctx, "ms-fill") : 0;
+    def dll-attribute-decode(ctx, sts, id, pos) {
+        let s0 = metal_sync();
+        let g0 = metal_live()[11];
+        let f0 = dll-fill-ms(ctx);
+        let t0 = host_monotonic_ms();
+        let begun = dkr-attr-begin();
+        let nid = dsv4-decode(ctx, sts, id, pos);
+        let rows = dkr-attr-end();
+        let t1 = host_monotonic_ms();
+        let s1 = metal_sync();
+        let g1 = metal_live()[11];
+        [nid, dll-attribution(ctx, rows, g1 - g0, t1 - t0, dll-fill-ms(ctx) - f0)];
+    }
+    // the row's sums are the token's device time: every tally's total is the rows' sum, the rows' sum is the word's growth, the count of dispatches is every tally's count
+    def dll-attr-sums-ok?(a) = record_get(a, "us") == record_get(a, "gpu_us") && dll-tally-total(record_get(a, "families")) == record_get(a, "us") && dll-tally-total(record_get(a, "kernels")) == record_get(a, "us")
+        && dll-tally-total(record_get(a, "stages")) == record_get(a, "us") && dll-tally-count(record_get(a, "families")) == record_get(a, "dispatches") && dll-tally-count(record_get(a, "kernels")) == record_get(a, "dispatches")
+        && dll-tally-count(record_get(a, "stages")) == record_get(a, "dispatches") && dll-blocks-total(record_get(a, "blocks")) + dll-non-block-us(record_get(a, "stages")) == record_get(a, "us");
+    def dll-blocks-total(bs) = len(bs) == 0 ? 0 : bs[0][1] + bs[0][2] + dll-blocks-total(bs[1:]);
+    def dll-non-block-us(stages) = len(stages) == 0 ? 0 : ((dll-stage-tag(stages[0][0]) == "embed" || dll-stage-tag(stages[0][0]) == "head" || dll-stage-tag(stages[0][0]) == "scan") ? stages[0][2] : 0) + dll-non-block-us(stages[1:]);
+    // ---- the row as lines and as JSON (the token door prints and keeps them) ---------------------------------------------------------------------------------
+    def dll-pct10(us, total) = total <= 0 ? 0 : (us * 1000) / total;
+    def dll-pct-text(p) = (p / 10).str() ++ "." ++ (p % 10).str();
+    def dll-fam-line(f, total, floor) = "  " ++ f[0] ++ ": " ++ f[1].str() ++ " dispatches, " ++ f[2].str() ++ " us (" ++ dll-pct-text(dll-pct10(f[2], total)) ++ " percent), " ++ (f[1] == 0 ? 0 : f[2] / f[1]).str() ++ " us a dispatch, " ++ (f[2] - f[1] * floor).str() ++ " us over the per-buffer floor";
+    def dll-fam-lines(fs, total, floor) = len(fs) == 0 ? [] : cons(dll-fam-line(fs[0], total, floor), dll-fam-lines(fs[1:], total, floor));
+    // the n heaviest of a tally, by us (selection, no sort primitive needed)
+    def dll-heaviest(t, n) = n == 0 || len(t) == 0 ? [] : { let b = dll-max-of(t, t[0]); cons(b, dll-heaviest(dll-without(t, b), n - 1)); };
+    def dll-max-of(t, best) = len(t) == 0 ? best : dll-max-of(t[1:], t[0][2] > best[2] ? t[0] : best);
+    def dll-without(t, x) = len(t) == 0 ? [] : (t[0][0] == x[0] ? t[1:] : cons(t[0], dll-without(t[1:], x)));
+    def dll-attr-lines(a) {
+        let total = record_get(a, "us");
+        let floor = record_get(a, "floor");
+        append(["[dsv4-attribution] one decode token, every dispatch its own command buffer: " ++ record_get(a, "dispatches").str() ++ " dispatches, device " ++ total.str() ++ " us (the word's growth over the token: " ++ record_get(a, "gpu_us").str() ++ "), the smallest span read " ++ floor.str()
+            ++ " us, wall " ++ record_get(a, "wall_ms").str() ++ " ms (a measurement of nothing: 1,900 waits), the fills' host preads " ++ record_get(a, "fill_ms").str() ++ " ms"],
+         append(dll-fam-lines(dll-heaviest(record_get(a, "families"), 12), total, floor),
+          cons("[dsv4-attribution] the heaviest kernels:", dll-fam-lines(dll-heaviest(record_get(a, "kernels"), 12), total, floor))));
+    }
+    def dll-q(s) = "\"" ++ s ++ "\"";
+    def dll-kv(k, v) = dll-q(k) ++ ":" ++ v;
+    def dll-obj(xs) = byte_to_str(123) ++ dll-join(xs, ",") ++ byte_to_str(125);
+    def dll-tally-json(t) = "[" ++ dll-join(map(x => dll-obj([dll-kv("key", dll-q(x[0])), dll-kv("n", x[1].str()), dll-kv("us", x[2].str())]), t), ",") ++ "]";
+    def dll-join(xs, sep) = len(xs) == 0 ? "" : (len(xs) == 1 ? xs[0] : xs[0] ++ sep ++ dll-join(xs[1:], sep));
+    def dll-blocks-json(bs) = "[" ++ dll-join(map(b => "[" ++ b[0].str() ++ "," ++ b[1].str() ++ "," ++ b[2].str() ++ "]", bs), ",") ++ "]";
+    def dll-attr-json(a) = dll-obj([dll-kv("dispatches", record_get(a, "dispatches").str()), dll-kv("us", record_get(a, "us").str()), dll-kv("gpu_us", record_get(a, "gpu_us").str()), dll-kv("floor_us", record_get(a, "floor").str()),
+        dll-kv("wall_ms", record_get(a, "wall_ms").str()), dll-kv("fill_ms", record_get(a, "fill_ms").str()), dll-kv("families", dll-tally-json(record_get(a, "families"))), dll-kv("kernels", dll-tally-json(record_get(a, "kernels"))),
+        dll-kv("blocks_a_b_us", dll-blocks-json(record_get(a, "blocks")))]);
     0;
 }

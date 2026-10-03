@@ -159,7 +159,7 @@ section [form.bml] {
     // sides of it). The first dispatch of every plan carries a barrier (what ran before it is another plan's), and a plan that runs short is a conservative barrier and counted (miss).
     // The state is one record, "mode": 0 serial (dkr-go as it always was), 1 planning (no enqueue), 2 replaying (a concurrent batch is open, every dispatch carries its bit); "enabled" the standing switch;
     // "armed" 1 only between dkr-hz-token-begin and the next sync.
-    let dkr-hz = record_new(0, "mode", 0, "enabled", 1, "armed", 0, "plan", [], "rec", [], "w", [], "r", [], "miss", 0, "bar", 0, "cbs", 0, "plans", record_new(0), "observe", 0, "stages", [], "reads", 0, "tap", [], "fills", 0, "fdisp", 0, "fmiss", 0, "fhit", 0, "fbytes", 0);
+    let dkr-hz = record_new(0, "mode", 0, "enabled", 1, "armed", 0, "plan", [], "rec", [], "w", [], "r", [], "miss", 0, "bar", 0, "cbs", 0, "plans", record_new(0), "observe", 0, "stages", [], "reads", 0, "tap", [], "fills", 0, "fdisp", 0, "fmiss", 0, "fhit", 0, "fbytes", 0, "attr-rows", [], "attr-us", 0, "attr-stage", "", "attr-en", 1);
     let dkr-hz-outs = record_new(0);
     def dkr-hz-get(k) = record_get(dkr-hz, k);
     def dkr-hz-put(k, v) { let held = record_set(dkr-hz, k, v); v; }
@@ -319,7 +319,39 @@ section [form.bml] {
         let mode = dkr-hz-get("mode");
         mode == 1 ? { let bit = dkr-hz-judge(pipe, bufs); let held = dkr-hz-put("rec", cons(bit, dkr-hz-get("rec"))); 1; }
             : (mode == 2 ? metal_enqueue(pipe, dkr-bind16(bufs, consts, tpg, 0, dmode, dkr-hz-next()), threads)
-                : ((tpg == 0 && dmode == 0) ? metal_enqueue(pipe, dkr-bind(bufs, consts), threads) : metal_enqueue(pipe, dkr-bind16(bufs, consts, tpg, 0, dmode, 0), threads)));
+                : (mode == 3 ? dkr-go-attr(pipe, bufs, consts, threads, tpg, dmode)
+                    : ((tpg == 0 && dmode == 0) ? metal_enqueue(pipe, dkr-bind(bufs, consts), threads) : metal_enqueue(pipe, dkr-bind16(bufs, consts, tpg, 0, dmode, 0), threads))));
+    }
+    // ---- the attribution mode (mode 3): a dispatch is its own command buffer, ENQUEUED, SYNCED and READ -------------------------------------------------------------
+    // THE DEVICE'S BUSY TIME IS A SUM OVER COMMAND BUFFERS (metal_live word 11: the carrier adds MTLCommandBuffer.GPUEndTime - GPUStartTime when a buffer settles), so a production token's 65 buffers say how long the
+    // device was busy and not WHICH kernel kept it busy. This mode is the observation that says it: every dispatch is enqueued serially, synced, and the growth of word 11 is that dispatch's own device span, kept with
+    // the pipeline, the first buffer it names (the weight, for a matvec) and the stage it ran in. It runs ONE token at a time, on purpose and never in production (serial, 1,900 waits a token: the token's wall clock is
+    // not a measurement); the rows' sum is the word's growth over the token exactly (each reading is the cumulative word, so truncation cancels). Mode 0 and the planned modes never reach this arm.
+    // attr-rows: [[pipeline handle, first buffer handle, device us, stage key]] newest first; attr-us: the word at the last dispatch; attr-stage: "tag:block" of the stage running (dth-stage sets it)
+    def dkr-go-attr(pipe, bufs, consts, threads, tpg, dmode) {
+        let r = (tpg == 0 && dmode == 0) ? metal_enqueue(pipe, dkr-bind(bufs, consts), threads) : metal_enqueue(pipe, dkr-bind16(bufs, consts, tpg, 0, dmode, 0), threads);
+        let s = metal_sync();
+        let g = metal_live()[11];
+        let held = dkr-hz-put("attr-rows", cons([pipe, bufs[0], g - dkr-hz-get("attr-us"), dkr-hz-get("attr-stage")], dkr-hz-get("attr-rows")));
+        let up = dkr-hz-put("attr-us", g);
+        r;
+    }
+    // the mode is entered with the standing switch off (no batch is armed, no stage is planned) and the word read; the rows, oldest first, are what leaving it answers
+    def dkr-attr-begin() {
+        let a = dkr-hz-put("attr-rows", []);
+        let b = dkr-hz-put("attr-stage", "");
+        let c0 = dkr-hz-put("attr-en", dkr-hz-get("enabled"));
+        let c = dkr-hz-put("enabled", 0);
+        let d = dkr-hz-put("armed", 0);
+        let e = dkr-hz-put("attr-us", metal_live()[11]);
+        dkr-hz-put("mode", 3);
+    }
+    def dkr-attr-end() {
+        let rows = reverse(dkr-hz-get("attr-rows"));
+        let a = dkr-hz-put("mode", 0);
+        let b = dkr-hz-put("enabled", dkr-hz-get("attr-en"));
+        let c = dkr-hz-put("attr-rows", []);
+        rows;
     }
     // threads is the total thread count (dispatchThreads), the carrier picks the group
     def dkr-go(pipe, bufs, consts, threads) = dkr-go-hz(pipe, bufs, consts, threads, 0, 0);

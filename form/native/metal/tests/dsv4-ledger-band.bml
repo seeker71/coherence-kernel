@@ -4,7 +4,7 @@
 ; handed to the queue, host reads, plans that ran short), and ONE row per block (its enqueue count, the weight bytes it reads). The Swift reference runner (history 93154a720) was held to such a count every run; this lane is a
 ; Form cell, where a dispatch costs about 20 us of host, so the count is the thing to hold: a token that grows an op, a wait, an allocation or a barrier past its ceiling fails here.
 ;
-; Verdict 1023 when every claim lands:
+; Verdict 2047 when every claim lands:
 ;   1     the dispatch count is the layout's own formula (dll-token-count: 22 + the compressor's 3 + 5 or 6 at a window boundary, 18 or 19 for the FFN, embed 2, head and NaN scan 8) at every one of eight decode steps,
 ;         on the MXFP fixture and on the real-types fixture (Q8_0 dense, IQ2_XXS gate and up, Q2_K down), serial and concurrent
 ;   2     one wait a token (the head's argmax, the NaN scan and the logits settle in ONE sync), no buffer made or freed (allocs 0), two host reads (the count and the id), and the command buffers are floor(layers / 2) + 1 when
@@ -27,6 +27,11 @@
 ;         dll-arena-ceil: dispatches the formula's plus the copies (fills = 3 x the experts missed, and the lookups of a row are blocks x used), syncs = blocks + 1, host reads = blocks + 2 (one id read a block, the head's two),
 ;         command buffers = blocks + blocks / 2 + 1, no buffer made, no plan short or long; the road the fills took is named by the ledger (dll-road: door, view or none; the door's fills are fills - fdisp) and agrees with the row's copy dispatches; the walk's ids and every logit's bits equal the whole-stack walk's; the stage rows sum to the token; and three plants put into the
 ;         token's path through the counted doors fail the arena ceilings (a dkr-hz-sync after block 0: one sync more; one more dkr-read-u32: one read more; a buffer made: allocs 1) while the control passes
+;   1024  the ATTRIBUTION ROW (dkr-attr-begin, dll-attribute-decode: one decode token, every dispatch its own command buffer, enqueued, synced and read; the device's microseconds kept with the dispatch's pipeline, first buffer and
+;         stage): on both fixtures, whole-stack and arena, the token's id and its logits' bits equal a plain decode's from the same prefill; the rows' sum, the sum of the family tally, of the kernel tally and of the stage tally
+;         EQUAL the growth of metal_live word 11 over the token read on its own (no device work escapes the attribution), and each tally counts every dispatch; the dispatches are the layout's formula plus the fills' copy
+;         dispatches; the families count what the graph runs (experts gate/up 3 a block, experts down 1, shared expert 5, head 8 with the scan, embedding 2, every family named present); the blocks are one per layer with
+;         the arena's two halves both nonzero; the driver is left as it was (mode 0, armed 0, the standing switch, no rows) and a plain decode runs after it; and a row one microsecond short of the device's growth fails the sum check
 ;
 ; REQUIRES: a live Metal device -- needs one behind the handle door; plain fkwu answers 0 (bit 1 needs a context). Light GPU: two 1.5 MB fixtures, twelve positions each, four walks. Writes only under temp_dir.
 // preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk native/metal/dsv4-ledger.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk
@@ -159,6 +164,47 @@ section [form.bml] {
    !nothing?(ctl) && !nothing?(p1) && !nothing?(p2) && !nothing?(p3) && dlb-arena-row-ok?(m, ctl, pf[1]) && !dlb-arena-row-ok?(m, p1, pf[1] + 1) && !dlb-arena-row-ok?(m, p2, pf[1] + 2) && !dlb-arena-row-ok?(m, p3, pf[1] + 3)
     && dlb-field(p1, "syncs") == dll-arena-syncs(m) + 1 && dlb-field(p2, "readbacks") == dll-arena-reads(m, true) + 1 && dlb-field(p3, "allocs") == 1 && len(left) == 0;
   }
+  // ---- claim 1024: the ATTRIBUTION ROW (dsv4-ledger.fk dll-attribute-decode): one decode token, every dispatch its own command buffer, the device's microseconds kept per dispatch --------------------------------
+  def dlb-count-of(t, key) = len(t) == 0 ? 0 : (t[0][0] == key ? t[0][1] : dlb-count-of(t[1:], key));
+  def dlb-us-of(t, key) = len(t) == 0 ? 0 : (t[0][0] == key ? t[0][2] : dlb-us-of(t[1:], key));
+  def dlb-has-key?(t, key) = len(t) == 0 ? false : (t[0][0] == key || dlb-has-key?(t[1:], key));
+  def dlb-all-positive?(t, keys) = len(keys) == 0 ? true : (dlb-count-of(t, keys[0]) > 0 && dlb-us-of(t, keys[0]) >= 0 && dlb-all-positive?(t, keys[1:]));
+  def dlb-families() = ["attention (MLA)", "dense matvecs (attention)", "compressor", "router", "experts gate/up", "experts down", "shared expert", "hyper-connection", "norms", "head", "embedding"];
+  def dlb-blocks-ok?(bs, arena) = len(bs) == 0 ? true : (bs[0][1] > 0 && (arena ? bs[0][2] > 0 : bs[0][2] == 0) && dlb-blocks-ok?(bs[1:], arena));
+  // the token run twice from the same prefill on two states of ONE context: plainly (the control) and in the attribution mode; the same id and the same logits' bits, the row's sums, its counts, its blocks, and the mode left as it was
+  def dlb-attr-claim(ctx, label, arena) {
+   let m = dso-geo(ctx);
+   let n = record_get(m, "layers-n");
+   let sC = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let sO = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let pC = dsv4-prefill-span-sliced(ctx, sC, dlb-prompt(), 0);
+   let pO = dsv4-prefill-span-sliced(ctx, sO, dlb-prompt(), 0);
+   let idC = (nothing?(pC) || nothing?(pO)) ? nothing() : dsv4-decode(ctx, sC, pC[0], pC[1]);
+   let bitsC = nothing?(idC) ? [] : dlb-bits(dsv4-logits(ctx));
+   let fd0 = dkr-hz-get("fdisp");
+   let seen = nothing?(idC) ? [nothing(), record_new(0)] : dll-attribute-decode(ctx, sO, pO[0], pO[1]);
+   let fd = dkr-hz-get("fdisp") - fd0;
+   let bitsO = nothing?(seen[0]) ? [] : dlb-bits(dsv4-logits(ctx));
+   let a = seen[1];
+   let lines = nothing?(seen[0]) ? 0 : print_str(dlb-join-lines(dll-attr-lines(a)));
+   let sumsOk = !nothing?(seen[0]) && dll-attr-sums-ok?(a);
+   let fam = nothing?(seen[0]) ? [] : record_get(a, "families");
+   let counts = !nothing?(seen[0]) && record_get(a, "dispatches") == dll-token-count-m(m, pO[1]) + fd && dlb-all-positive?(fam, dlb-families()) && dlb-count-of(fam, "experts gate/up") == 3 * n && dlb-count-of(fam, "experts down") == n
+    && dlb-count-of(fam, "head") == 8 && dlb-count-of(fam, "embedding") == 2 && dlb-count-of(fam, "shared expert") == 5 * n && dlb-count-of(fam, "hyper-connection") > 8 * n && dlb-count-of(fam, "norms") >= 2 * n;
+   let blocks = !nothing?(seen[0]) && len(record_get(a, "blocks")) == n && dlb-blocks-ok?(record_get(a, "blocks"), arena)
+    && dlb-has-key?(record_get(a, "stages"), arena ? "layer-a:0" : "layer:0") && dlb-has-key?(record_get(a, "stages"), "embed:0") && dlb-has-key?(record_get(a, "stages"), "head:0") && dlb-has-key?(record_get(a, "stages"), "scan:0");
+   let same = !nothing?(idC) && !nothing?(seen[0]) && idC == seen[0] && bitsC == bitsO && len(bitsC) > 0;
+   let restored = dkr-hz-get("mode") == 0 && dkr-hz-get("enabled") == 1 && len(dkr-hz-get("attr-rows")) == 0 && dkr-hz-get("armed") == 0;
+   let after = nothing?(idC) ? nothing() : dsv4-decode(ctx, sC, idC, pC[1] + 1);
+   // the plants: a row whose sum is one short of the device's growth fails the sum check, and a tally that lost a family fails the counts
+   let planted = !nothing?(seen[0]) ? record_set(a, "us", record_get(a, "us") + 1) : 0;
+   let plantedFails = !nothing?(seen[0]) && !dll-attr-sums-ok?(a);
+   let unplant = !nothing?(seen[0]) ? record_set(a, "us", record_get(a, "us") - 1) : 0;
+   let said = print_str("  attribution " ++ label ++ ": id " ++ (nothing?(idC) ? "none" : idC.str()) ++ "/" ++ (nothing?(seen[0]) ? "none" : seen[0].str()) ++ " bits equal " ++ same.str() ++ ", sums " ++ sumsOk.str() ++ ", counts " ++ counts.str() ++ ", blocks " ++ blocks.str() ++ ", mode restored " ++ restored.str() ++ ", a decode after it " ++ (nothing?(after) ? "none" : "ran") ++ ", the one-short plant fails " ++ plantedFails.str());
+   let left = dsv4-free-state(append(sC, sO));
+   same && sumsOk && counts && blocks && restored && !nothing?(after) && plantedFails && len(left) == 0;
+  }
+  def dlb-join-lines(ls) = len(ls) == 0 ? "" : (len(ls) == 1 ? ls[0] : ls[0] ++ "\n" ++ dlb-join-lines(ls[1:]));
   def dlb-arena-ok?(ctx, arena, whole) {
    let m = dso-geo(ctx);
    let steps = arena[0];
@@ -240,6 +286,11 @@ section [form.bml] {
  let doorB = try okAB && dlb-road?(walkAB[0], false) catch false;
  let said9 = print_str("arena claims: walk MX " ++ okAA.str() ++ " V " ++ okAB.str() ++ ", plants MX " ++ plAA.str() ++ " V " ++ plAB.str() ++ "; the fill door took no copy dispatch " ++ [doorA, doorB].str() ++ "; the view road walks " ++ [okVA, okVB].str() ++ " (copy dispatches " ++ (len(arenaVA) == 13 ? dxa-get(arenaVA, "fills").str() : "none") ++ " fills)");
  let r512 = try r1 && okAA && okAB && plAA && plAB && okVA && okVB && doorA && doorB catch false;
+ let attrA = try openedA && dlb-attr-claim(ctxA, "MX whole-stack", false) catch false;
+ let attrB = try openedB && dlb-attr-claim(ctxB, "V whole-stack", false) catch false;
+ let attrAA = try openedAA && dlb-attr-claim(arenaA, "MX arena", true) catch false;
+ let attrAB = try openedAB && dlb-attr-claim(arenaB, "V arena", true) catch false;
+ let r1024 = try r1 && attrA && attrB && attrAA && attrAB catch false;
  let leftVA = len(arenaVA) == 13 ? dsv4-close(arenaVA, []) : [0];
  let leftVB = len(arenaVB) == 13 ? dsv4-close(arenaVB, []) : [0];
  let leftAA = openedAA ? dsv4-close(arenaA, []) : [0];
@@ -248,6 +299,6 @@ section [form.bml] {
  let leftB = openedB ? dsv4-close(ctxB, []) : [0];
  let c128 = dlb-bit(try openedA && openedB && len(leftA) == 0 && len(leftB) == 0 && len(leftAA) == 0 && len(leftAB) == 0 && len(leftVA) == 0 && len(leftVB) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
  let removed = host_path_remove(pathA) + host_path_remove(pathB);
- print_str("dsv4-ledger-band claims " ++ dlb-bit(r1, 1).str() ++ " " ++ dlb-bit(r2, 2).str() ++ " " ++ dlb-bit(r4, 4).str() ++ " " ++ dlb-bit(r8, 8).str() ++ " " ++ dlb-bit(r16, 16).str() ++ " " ++ dlb-bit(r32, 32).str() ++ " " ++ dlb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " " ++ dlb-bit(r256, 256).str() ++ " " ++ dlb-bit(r512, 512).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
- dlb-bit(r1, 1) + dlb-bit(r2, 2) + dlb-bit(r4, 4) + dlb-bit(r8, 8) + dlb-bit(r16, 16) + dlb-bit(r32, 32) + dlb-bit(r64, 64) + c128 + dlb-bit(r256, 256) + dlb-bit(r512, 512);
+ print_str("dsv4-ledger-band claims " ++ dlb-bit(r1, 1).str() ++ " " ++ dlb-bit(r2, 2).str() ++ " " ++ dlb-bit(r4, 4).str() ++ " " ++ dlb-bit(r8, 8).str() ++ " " ++ dlb-bit(r16, 16).str() ++ " " ++ dlb-bit(r32, 32).str() ++ " " ++ dlb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " " ++ dlb-bit(r256, 256).str() ++ " " ++ dlb-bit(r512, 512).str() ++ " " ++ dlb-bit(r1024, 1024).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ dlb-bit(r1, 1) + dlb-bit(r2, 2) + dlb-bit(r4, 4) + dlb-bit(r8, 8) + dlb-bit(r16, 16) + dlb-bit(r32, 32) + dlb-bit(r64, 64) + c128 + dlb-bit(r256, 256) + dlb-bit(r512, 512) + dlb-bit(r1024, 1024);
 }
