@@ -74,6 +74,16 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 ```text
 ./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (15 rows; a row whose ground did not
                                             move since origin/main sits out and leaves the fold)
+./fkwu gate/band-sweep-run.bml           -> every band the body keeps (381 workloads) on fkwu, one line each in order, then the summary;
+                                            the exit is an error when a workload failed, a gate refused or the tree moved while it ran.
+                                            stdin is one JSON object: {"list":1} names the workloads with staging, pin and row (1 s),
+                                            {"match":"a|b"}, {"files":[..]}, {"jobs":8}, {"ceiling_s":1800}. A leg is `env TMPDIR=<scratch>
+                                            ./fkwu <unit>` with stdin /dev/null, a deadline of its own and its fifos released; a failing
+                                            workload's legs stand under .hearth/ as its evidence (2026-10-04: 20 bands in 48 s on 4 legs)
+form/form-stdlib/tests/band-sweep-band   -> 65535  (enumeration against the tree, the heads read in process, the judgment order, the
+                                            content-keyed unit, a pool of six fixtures printing in order though the hang ends last, the
+                                            deadline, six naps in parallel in under five seconds, a reader left on a fifo that the sweep
+                                            releases, the list, the summary, the seal, the door as a child; plants for the pin and the deadline)
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v4 [7, 0, 1, 0, 0, 6] then 1
                                             (total/unclassified/carrier/oracle/fixture/tooling)
 gate/tests/structural-gate-band          -> 8191
