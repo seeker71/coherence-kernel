@@ -31,16 +31,18 @@ appear beside each source on its first run, and `./fkwu gate/form-cli-build-run.
 
 fkwu is the only runtime and every band answers its pin on it. Nothing in this tree builds, runs or
 gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc` and
-`./fkwu` (the digests are the body's own SHA-256, the HMAC Form's). No shell, python or node script stands in
-this tree outside two declared carriers (`form-run`, the output-compaction wrapper whose Form classifier is
-pending, and the three lines of `Sema Ear.app`'s bundle executable), and no Form door calls sed, awk, perl or
-python: the band sweep (`./fkwu gate/band-sweep-run.bml`, `form/form-stdlib/bml/band-sweep.bml`) reads what a band's head and
+`./fkwu` (the digests are the body's own SHA-256, the HMAC Form's). The tree holds only kinds the body names
+(Form, the C seed, documents and data: the structural gate is an allowlist, so any other file, whatever its
+extension or its case, is foreign) and no foreign file stands outside two declared carriers (`form-run`, the
+output-compaction wrapper whose Form classifier is pending, and the three lines of `Sema Ear.app`'s bundle
+executable), and no Form door calls sed, awk, perl or python: the band sweep (`./fkwu gate/band-sweep-run.bml`, `form/form-stdlib/bml/band-sweep.bml`) reads what a band's head and
 the verdict manifest say in process (`observe/band-head.bml`, band `observe/tests/band-head-band`, 2047), so
-`{"list":1}` names all 381 workloads with each one's staging, pin and row in about a second (the shell took 4 s,
+`{"list":1}` names all 388 workloads with each one's staging, pin and row in about a second (the shell took 4 s,
 2026-10-04: the same columns, line for line). `hearth.bml`, `rumi-glass.bml` and `observe/hearth-glass-live.fk` read the
 `ps` listing in Form (`hearth-band`, 131071) and `source-of.fk` reads grep's rows in Form
 (`source-of-band`, 15). A child that must end by a deadline is begun through `host-child.bml` (`hch-by`,
-`hch-stop`); a bell's offer is `observe/channel-offer-run.bml` (`observe/tests/channel-offer-band`, 31).
+`hch-stop`); a bell's offer is `observe/channel-offer-run.bml` (`observe/tests/channel-offer-band`, 127; its request is
+emitted by `cc-offer-json` with the body's JSON emitter and read strictly).
 
 What the tree still says of the retired kernels, by class, and why it stays:
 - History: `receipts/`, `learn/` corpus rows and `local-requests.jsonl` are dated evidence, not claims.
@@ -76,48 +78,77 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 ```text
 ./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (15 rows; a row whose ground did not
                                             move since origin/main sits out and leaves the fold)
-./fkwu gate/band-sweep-run.bml           -> every band the body keeps (381 workloads) on fkwu, one line each in order, then the summary;
+./fkwu gate/band-sweep-run.bml           -> every band the body keeps (388 workloads) on fkwu, one line each in order, then the summary;
                                             the exit is an error when a workload failed, a gate refused or the tree moved while it ran.
                                             stdin is one JSON object: {"list":1} names the workloads with staging, pin and row (1 s),
                                             {"match":"a|b"}, {"files":[..]}, {"jobs":8}, {"ceiling_s":1800}. A leg is `env TMPDIR=<scratch>
                                             ./fkwu <unit>` with stdin /dev/null, a deadline of its own and its fifos released; a failing
                                             workload's legs stand under .hearth/ as its evidence (2026-10-04: 20 bands in 48 s on 4 legs)
-form/form-stdlib/tests/band-sweep-band   -> 65535  (enumeration against the tree, the heads read in process, the judgment order, the
+                                            A request that does not read (malformed JSON, another JSON value, an unknown key, a key of the
+                                            wrong kind or given twice: `form/form-stdlib/bml/door-options.bml`), a `match` that selects no
+                                            workload, and a form/band-verdicts.txt or band file that does not read or is empty each end in a
+                                            named refusal and exit 1, never the default sweep or "answered every pin"
+form/form-stdlib/tests/band-sweep-band   -> 1048575  (enumeration against the tree, the heads read in process, the judgment order, the
                                             content-keyed unit, a pool of six fixtures printing in order though the hang ends last, the
                                             deadline, six naps in parallel in under five seconds, a reader left on a fifo that the sweep
-                                            releases, the list, the summary, the seal, the door as a child; plants for the pin and the deadline)
-./fkwu gate/structural-gate-run.fk       -> structural-gate-v5 [2, 0, 2, 0] then 1: "2 declared carrier(s) and 0 fixture(s) stand; no
-                                            other script" (total/unclassified/carrier/fixture). A script of any language (shell, python,
-                                            node, ruby, perl, a command file, any extensionless file that opens with #!) with no declared
-                                            role refuses landing: a planted tools/x.sh and a planted extensionless #! file read
-                                            [4, 2, 2, 0] and 0 (2026-10-04). The carriers are named by exact path with their reasons
-                                            in gate/structural-gate.fk; fixtures are evidence. `gpu/fptx-matvec.ptx` is data, not a
-                                            script: the Form-emitted PTX (sm_80 floor) the seed's CUDA lane opens
-gate/tests/structural-gate-band          -> 16383
+                                            releases, the list, the summary, the seal, the door as a child; the strict request, the unread
+                                            manifest (absent, empty, mode 000) and band, the sort of ended and kept legs over sixty rounds of
+                                            children that stop while it asks; plants for the pin, the deadline and the readable case. The
+                                            sort was a real loss: each leg was asked twice whether it was done, and one that stopped between
+                                            the questions was in neither list, so a sweep of six read `3 ok, 0 failed`; it is asked once, the
+                                            results are threaded, and a sweep whose results did not all arrive ends in an error)
+form/form-stdlib/tests/door-options-band -> 1023  (door-options.bml: empty and {} read; malformed JSON, trailing text, another JSON value,
+                                            an unknown key (named, with the keys the door has), a key of the wrong kind (a string for an
+                                            integer, a float, null, a bool, an object), a key given twice are each refused; the reading alone
+                                            and a scratch door that ends in exit 1 and prints `<door>: <why>` before its next statement)
+./fkwu gate/structural-gate-run.fk       -> structural-gate-v6 [2, 0, 2, 0] then 1: "2 declared carrier(s) and 0 fixture(s) stand; no
+                                            other foreign file" (total/unclassified/carrier/fixture). The gate is an ALLOWLIST: Form (.fk
+                                            .bml .form .bmf), the C seed (.c .h .m .metal), documents and data (.md .mdc .txt .json .jsonl
+                                            .tsv .rows .dat .html .svg .png .wav .bin .f32 .safetensors .lora .tiktoken .plist .out .example
+                                            .ptx) and a few extensionless names (.gitignore, .gitattributes, LICENSE, copied-at, the
+                                            bundle's signature files) may stand; any other file (.awk .fish .tcl .R .jl .groovy .cs .dart
+                                            .ex .nim, an uppercase .SH, an extension of its own, none) is foreign and refuses landing without
+                                            a declared role, and so does a Form or C file that opens with #! (a document or data file may open
+                                            with #! as text). It reads the tree git holds (tracked, and untracked that git does not ignore,
+                                            never .git or .claude) in one listing; a live plant of .awk, .SH, a .fk opening with #! and a
+                                            .cfg read [6, 4, 2, 0] and 0, a .txt opening with #! stood (2026-10-04). The carriers are named
+                                            by exact path with their reasons in gate/structural-gate.fk; fixtures are evidence.
+                                            `gpu/fptx-matvec.ptx` is data, not a script: the Form-emitted PTX (sm_80 floor) the seed's CUDA
+                                            lane opens
+gate/tests/structural-gate-band          -> 262143  (every closed kind and the uppercase forms, #! in every kind, a scratch git repository
+                                            with tracked, untracked, ignored, gone-from-disk and .claude files and a plain directory read by
+                                            find, and the old list-of-scripts reading as the plant)
 gate/tests/structural-heal-carrier-band  -> 127
-form/form-stdlib/tests/form-cli-build-band -> 4095  (the native form-cli's identity folds against independent SHA-256 answers, the
+form/form-stdlib/tests/form-cli-build-band -> 16383  (a request that does not read (`{bad json`, a typo'd key, a key of the wrong kind, an
+                                            array) is refused by name with exit 1 before any flow, never the default install, which
+                                            regenerates for minutes; the native form-cli's identity folds against independent SHA-256 answers, the
                                             closure door's seal agreeing with the fold, every way an attestation can be wrong, the
                                             publication lock's refusals, the platform name, the proof's helpers, the roots list; the build
                                             itself is the drift gate's form-cli-build row, `printf '{"out":"<path>"}' | ./fkwu
                                             gate/form-cli-build-run.bml`, and `{"prove":"<path>"}` is the executable's behavioral proof:
                                             identity, exact answer bytes, stale rows refused, embeds and their cap, a 1546-row index, a
                                             request-bound dual HMAC receipt and its one-use replay)
-observe/tests/review-panel-band          -> 31  (observe/review-panel-run.bml, the reviewer panel as a Form door: no reviewer is asked by
-                                            the band, a closed or missing door is skipped with its row)
-./fkwu observe/door-link-health-run.bml  -> docs=41 claims=913 broken=0 (each broken claim named on its own line; 2026-10-04)
+observe/tests/review-panel-band          -> 127  (observe/review-panel-run.bml, the reviewer panel as a Form door: no reviewer is asked by
+                                            the band, a closed or missing door is skipped with its row, a door name the table does not hold
+                                            (`env` stands on PATH and would have printed the environment as its answer) and a request that
+                                            does not read are refused by name with exit 1)
+./fkwu observe/door-link-health-run.bml  -> docs=41 claims=924 broken=0 (each broken claim named on its own line; 2026-10-04)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=378 readable=200 unreadable=178 absent=0 seen=1 flaws=0, exit 0
+./fkwu observe/band-truth-run.bml        -> bands=384 readable=207 unreadable=177 absent=0 seen=1 flaws=0, exit 0
                                             (each band's declared full read against the most its claims sum to, and
                                             the queue and manifest copies of a full against the head pin, with no
                                             band run, in about 0.3 s; a decimal or count fold that stands on purpose
                                             says `; FOLD: decimal|count` on a head line; a sweep that lists no band
                                             is a flaw too; 2026-10-03)
 form/form-stdlib/tests/band-truth-band   -> 1048575
-form-stdlib/tests/spawn-guard-band       -> 16383  (form-stdlib/bml/spawn-guard.bml: every door of the body that begins a child from an argv or
+form-stdlib/tests/spawn-guard-band       -> 131071  (form-stdlib/bml/spawn-guard.bml: every door of the body that begins a child from an argv or
                                             a shell line another cell or an agent supplied reads it first, in process, with no child to read it:
                                             ["sed",..] by its first element, through the wrappers command-words knows, `sh -c` by the line it
-                                            carries, a shell given a script file by the file's text, a bare shell by its input. A refusal is a
+                                            carries (sh, bash, zsh, dash, ksh, ash, csh, tcsh, fish), a shell given a script file by the file's
+                                            text, a bare shell by its input, also behind a wrapper or by `-` and `-s` (`["env","bash"]` fed
+                                            `sed p f` is refused), pythonw as python; the census classes are read too: no file called `fixed`
+                                            holds a forbidden tool as a quoted command word. A refusal is a
                                             named ending: hch-run-with answers [nothing(), "", "birth refused: forbidden-tool sed: not used
                                             here; <way>"], the control language answers nothing=forbidden-tool:sed (use the edit door,
                                             read_file, ./fkwu cells and BML), the pid natives -5, host_capture and host-exec nothing(). A warm
@@ -132,15 +163,22 @@ form-stdlib/tests/spawn-guard-band       -> 16383  (form-stdlib/bml/spawn-guard.
 ./fkwu observe/forbidden-tools-audit-run.bml -> the commands agents ran in their own Bash and Monitor calls, read from their transcripts
                                             (~/.claude/projects/<project>/<session>.jsonl and <session>/subagents/*.jsonl): per session and
                                             agent the commands counted, the flagged ones and their first 160 bytes newest first, then a totals
-                                            line and `note: forbidden-tool commands since last breath: N`; the last line is the lens reading
-                                            (flagged + 1). stdin `{"since_hours":N,"session":"<id>","scope":"all","top":N}`. Read in chunks by
+                                            line and a note; the last line is the lens reading (flagged + 1). stdin
+                                            `{"breath":1,"since_hours":N,"session":"<id>","scope":"all","top":N}`, every key optional and a
+                                            request that does not read refused by name (exit 1). `{"breath":1}` is the land cadence's lens: it
+                                            reads the window from the stamp the last breath left (`.hearth/forbidden-breath`; the first breath
+                                            reads six hours), opening only files written inside it, and says `forbidden-tool commands since
+                                            last breath: N (<from> to <to>)`; 2 s a breath where the whole read costs 94 s and grows, and
+                                            deleting old transcripts does not move it; the total is `{}` on demand. Read in chunks by
                                             str_find over the bytes with the command string read in place (no row parsed into nodes); a tool_use
                                             id counts once across transcripts. 2026-10-04: this session's 130 MB transcript with its 44
                                             subagents in 8 s (3839 commands in the main transcript, 314 flagged), every transcript of this
                                             repo's checkouts (404 sessions and agents, 70136 commands, 19194 flagged) in 80 s. It is the fourth
                                             lens of the land cadence's readings beside the gates (`reading forbidden=<flagged+1> moved|steady`
                                             with the note under it)
-form-stdlib/tests/forbidden-tools-audit-band -> 8191  (a synthetic tree of two projects, three sessions and one subagent: eleven
+form-stdlib/tests/forbidden-tools-audit-band -> 65535  (the breath window opened at a stamp or six hours back, files older than the window not
+                                            opened, the door as a child with a scratch stamp (first breath, second breath, only a breath moves
+                                            it), refused requests that leave the stamp as it was; a synthetic tree of two projects, three sessions and one subagent: eleven
                                             distinct commands, seven flagged, with a duplicated tool_use id counted once, the Read tool's row and a
                                             tool_result quoting a Bash call as escaped text adding nothing, a command whose key is not first, an
                                             escaped quote, a window on the row's own time, scope and session filters, 4096-byte and 100-byte
@@ -820,9 +858,22 @@ blueprint-authority-band 8191
 
 What answered red, died, or was not witnessed today, so no one leans on it:
 
-- The guard's refusal inside a live Claude Code session is read from the hook contract and from the door
-  run by hand and by `sh -c` with the registered line (2026-10-03); a subagent's Bash call passing through
-  the project hook, and a deny under `bypassPermissions`, were not witnessed here.
+- A Claude Code Bash or Monitor call is refused by nothing but the agent's own compliance. No hook stands
+  (Urs's direction: no hook, no non-Form tool). The rule is enforced at the body's own spawn doors
+  (`spawn-guard.bml`: every door of the body that begins a child asks it) and observed afterward in the audit
+  lens (`forbidden-tools-audit-run.bml`, the land cadence's fourth reading): a slip by an agent's own Bash call
+  is counted in its transcript, not stopped.
+
+- The double-click and hot-key launcher of the live ear glass is gone. `Sema Ear Glass.command` was a
+  shell file that opened a full-screen terminal on `observe/ear-glass-live.fk`, and a Shortcut could be bound
+  to it; the structural gate refuses a script, so it left. What Urs can do now: the documented door line in a
+  terminal (`printf '600\n\n' | ./fkwu observe/ear-glass-live.fk`, 600 s of the room in three tongues), or
+  `open -n "Sema Ear.app"` for the microphone's principal (that bundle runs the speech-to-text door on a request
+  file and writes its answer under `.hearth/`; it is not the glass). `Sema Ear.app`'s executable is itself
+  three lines of `sh`, a declared carrier. No native (non-script) launcher bundle exists. The smallest next
+  step: emit the launcher as a Mach-O from a Form door the way `form-cli` is emitted (a Unix executable that Finder
+  opens in Terminal, that prints the alternate-screen escape and runs the glass door), and make the bundle's
+  executable the same kind of file, which retires the last carrier script but `form-run`.
 
 - `form-source-lift` over a mixed module whose first plain form carries a `; preludes:` header writes the
   lifted `import` inside the first section, and its own verification compile stops: `the cursor does not

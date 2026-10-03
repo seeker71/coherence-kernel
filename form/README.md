@@ -24,10 +24,11 @@ scannerless grammar parse and lowering to the current top-level Form floor.
 
 ## Proof
 
+From the repository root (the doors read their paths from there; from `form/` they refuse):
+
 ```sh
-cd form
-../fkwu form-stdlib/tests/source-compiler-grammar-bridge-band.fk        # fkwu reads 32767, 2026-09-29
-printf '{"files":["form-stdlib/tests/source-compiler-grammar-bridge-band.fk"]}' | ../fkwu ../gate/band-sweep-run.bml   # fkwu answers its head pin
+./fkwu form/form-stdlib/tests/source-compiler-grammar-bridge-band.fk        # fkwu reads 32767, 2026-09-29
+printf '{"files":["form-stdlib/tests/source-compiler-grammar-bridge-band.fk"]}' | ./fkwu gate/band-sweep-run.bml   # fkwu answers its head pin
 ```
 
 A band is named alone: fkwu resolves its `; preludes:` closure, so a hand-typed file
