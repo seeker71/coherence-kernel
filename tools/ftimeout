@@ -1,17 +1,27 @@
-#!/usr/bin/env perl
+#!/usr/bin/env bash
 # ftimeout SECONDS command [args...] — portable timeout for macOS (no GNU coreutils).
 # Kills the command after SECONDS; exits 124 on timeout (like GNU timeout), else the
 # command's own exit code. Provided because macOS lacks `timeout` and we hit it constantly.
-# (Perl is the portable carrier here; a form-native seed primitive — fk_host_exec with a
-# fork+alarm — is the hardening, tracked separately.)
-use strict; use warnings;
-my $secs = shift @ARGV or die "usage: ftimeout SECONDS command [args...]\n";
-die "ftimeout: first arg must be seconds\n" unless $secs =~ /^\d+$/;
-my $pid = fork();
-die "ftimeout: fork failed: $!\n" unless defined $pid;
-if ($pid == 0) { exec @ARGV or die "ftimeout: exec failed: $!\n"; }
-local $SIG{ALRM} = sub { kill 'KILL', $pid; waitpid($pid, 0); exit 124; };
-alarm $secs;
-waitpid($pid, 0);
-alarm 0;
-exit($? >> 8);
+# Plain shell: the command runs as a child with this process's stdin, and a tenth-of-a-second
+# watch on it ends it with KILL once the seconds are spent. (A form-native seed primitive —
+# fk_host_exec with a deadline — is the hardening, tracked separately.)
+secs="${1:-}"
+if [[ -z "$secs" ]]; then echo "usage: ftimeout SECONDS command [args...]" >&2; exit 2; fi
+if ! [[ "$secs" =~ ^[0-9]+$ ]]; then echo "ftimeout: first arg must be seconds" >&2; exit 2; fi
+shift
+if [[ $# -eq 0 ]]; then echo "usage: ftimeout SECONDS command [args...]" >&2; exit 2; fi
+"$@" <&0 &
+pid=$!
+ticks=0
+limit=$((secs * 10))
+while kill -0 "$pid" 2>/dev/null; do
+    if [[ $ticks -ge $limit ]]; then
+        kill -KILL "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        exit 124
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+done
+wait "$pid"
+exit $?

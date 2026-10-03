@@ -42,7 +42,17 @@ set -uo pipefail
 SCRATCH_ROOT="${REVIEW_PANEL_ROOT:-${TMPDIR:-/tmp}/review-panel}"
 DEFAULT_PANEL="grok,claude,codex,cursor"
 
-usage() { sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() {
+    local n=0 line
+    while IFS= read -r line; do
+        n=$((n + 1))
+        [[ $n -lt 2 ]] && continue
+        [[ $n -gt 50 ]] && break
+        if [[ "$line" == "# "* ]]; then line="${line#\# }"; elif [[ "$line" == "#"* ]]; then line="${line#\#}"; fi
+        printf '%s\n' "$line"
+    done < "$0"
+    exit "${1:-0}"
+}
 
 # --- door table: name -> how to invoke it with a prompt on argv -----------
 run_door() {
