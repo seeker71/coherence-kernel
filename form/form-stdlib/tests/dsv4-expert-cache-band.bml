@@ -1,0 +1,192 @@
+; dsv4-expert-cache-band.bml -- which expert a layer's arena slot holds: the least-recently-used cache of form-stdlib/bml/dsv4-expert-cache.bml, plain Form data, no device and no file.
+;
+; WHAT THIS PINS. native/metal/dsv4-arena.fk gives every layer an arena of S slots and copies an expert's bytes into a slot when the router asks for an expert the arena does not hold. The cache
+; decides which slot answers each id of a top-k, which (slot, expert) pairs are misses to copy, and who is evicted. This band runs it on its own: the first fill, the hits (the same top-k, a permuted one), the empty
+; slot taken before any eviction (lowest index first), the least recently used slot evicted (a hand-worked sequence, then random sequences judged against a second model of recency that keeps no slots at all), an id
+; twice in one top-k, the refusals (a capacity under the distinct ids, an id out of range, an empty top-k, a layer that is not there) and that a refused step changes nothing, a hit pinned against a miss of the same
+; step, two layers holding the same expert id separately, and a slot index that is not an expert id.
+;
+; Verdict 4095 when every claim lands:
+;   1     the first fill: an empty table of 4 slots and the top-k [5, 2, 9] answers slots [0, 1, 2], the misses [[0, 5], [1, 2], [2, 9]] in the order placed, 0 hits, 0 evictions, keys [5, 2, 9, -1], 3 resident
+;   2     hits: the same top-k answers the same slots and no miss (3 hits); [9, 5, 2] answers [2, 0, 1] (slots follow the ids, whatever their order); the table is the same set after it
+;   4     an empty slot before any eviction, the lowest index first: [7] lands in slot 3 (the last empty), and a table that has an empty slot never evicts (evictions 0 through the fill of all 4)
+;   8     the least recently used is evicted: 3 slots, [1, 2, 3], [1], [4] evicts 2 (slot 1) and answers the miss [[1, 4]]; [2] then evicts 3 (slot 2); [3] then evicts 1 (slot 0); each step's evictions are 1
+;   16    an id twice in one top-k is one expert: [3, 3, 4] on a table of 2 slots answers [a, a, b] (the same slot twice), misses [[a, 3], [b, 4]] (3 is placed once), 1 hit (its second appearance), and no expert holds
+;         two slots; [3, 4, 3] on the warm table answers the same slots with 3 hits
+;   32    the refusals answer nothing: 3 distinct ids on 2 slots (the capacity is under the top-k; no choice is made for the caller), an id equal to nexp, a negative id, an empty top-k, a table of 0 slots;
+;         the same top-k with a duplicate ([1, 2, 2] on 2 slots) is NOT refused (two distinct ids)
+;   64    a hit is pinned against a miss of the same step: 3 slots holding [A, B, C] with A the oldest, [D, A] places D on B's slot (the least recent of the unpinned B and C), A keeps its slot, and the slots answered
+;         read A and D where the table holds them; a miss never evicts a slot a later id of its own top-k reads, whatever the stamps
+;   128   the key is (layer, expert): two layers asked the same top-k [5, 6] are two sets of misses (layer 1 does not hit on layer 0's experts), the tables are two values, the counters are the sums; dxc-lkey
+;         names a layer and two layers never share a key
+;   256   random sequences against a second model: five tables (2, 3, 4, 6 and 8 slots, over 8 to 32 experts, a top-k of 1 to 6), 60 steps each, every step's hits, misses, evictions and the SET of evicted experts equal
+;         the recency-list model's (a list from least to most recent that holds no slots), the resident set equal to the model's, no expert in two slots, every slot answered holding its id, never more resident than slots
+;   512   a refused step changes nothing: through the keeper (dxc-take) the table and the hits, misses, evictions and steps counters read what they did before; only the refused counter moves; the same inputs
+;         twice answer the same (the step is a value)
+;   1024  a slot index is not an expert id: on 4 slots the top-k [3, 0, 2, 1] answers slots [0, 1, 2, 3] (not the ids), and each slot answered holds its own id in the table (dxc-agrees?); [1, 3] on the
+;         warm table answers [3, 0]
+;   2048  a forgotten slot is empty: after [4, 5, 6] on 3 slots, dxc-forget of slot 1 reads keys [4, -1, 6] (2 resident), the next miss [7] takes slot 1 first with no eviction, and the forgotten
+;         expert 5 is a MISS when asked for again (the arena forgets a slot whose bytes a refused fill never copied: no hit may read them)
+;
+; PROOF LEVEL: every arm -- integers and lists only; no file, no host door, no device.
+// preludes: form-stdlib/core.fk form-stdlib/bml/dsv4-expert-cache.bml
+section [form.bml] {
+ class Dsv4ExpertCacheBand {
+  def dxb-bit(held, bit) = held ? bit : 0;
+  def dxb-step(st, ids, nexp) = dxc-step(st, ids, nexp);
+
+  // ---- 1: the first fill -----------------------------------------------------------------------------------------------------
+  def dxb-first() {
+   let r = dxb-step(dxc-new(4), [5, 2, 9], 16);
+   !nothing?(r) && r[1] == [0, 1, 2] && r[2] == [[0, 5], [1, 2], [2, 9]] && r[3] == 0 && r[4] == 0 && dxc-keys(r[0]) == [5, 2, 9, 0 - 1] && dxc-resident(r[0]) == 3 && dxc-sound?(r[0]);
+  }
+  // ---- 2: hits ---------------------------------------------------------------------------------------------------------------
+  def dxb-hits() {
+   let a = dxb-step(dxc-new(4), [5, 2, 9], 16);
+   let b = dxb-step(a[0], [5, 2, 9], 16);
+   let c = dxb-step(b[0], [9, 5, 2], 16);
+   b[1] == [0, 1, 2] && len(b[2]) == 0 && b[3] == 3 && b[4] == 0 && c[1] == [2, 0, 1] && len(c[2]) == 0 && c[3] == 3 && dxc-keys(c[0]) == dxc-keys(a[0]);
+  }
+  // ---- 4: empty slots before evictions ----------------------------------------------------------------------------------------------
+  def dxb-empty() {
+   let a = dxb-step(dxc-new(4), [5, 2, 9], 16);
+   let b = dxb-step(a[0], [7], 16);
+   let c = dxb-step(b[0], [5, 2], 16);
+   b[1] == [3] && b[2] == [[3, 7]] && b[4] == 0 && dxc-resident(b[0]) == 4 && c[4] == 0 && c[3] == 2;
+  }
+  // ---- 8: the least recently used goes -------------------------------------------------------------------------------------------------
+  def dxb-lru() {
+   let a = dxb-step(dxc-new(3), [1, 2, 3], 16);
+   let b = dxb-step(a[0], [1], 16);
+   let c = dxb-step(b[0], [4], 16);
+   let d = dxb-step(c[0], [2], 16);
+   let e = dxb-step(d[0], [3], 16);
+   c[2] == [[1, 4]] && c[4] == 1 && c[1] == [1] && d[2] == [[2, 2]] && d[4] == 1 && e[2] == [[0, 3]] && e[4] == 1 && dxc-keys(e[0]) == [3, 4, 2];
+  }
+  // ---- 16: an id twice ----------------------------------------------------------------------------------------------------------------
+  def dxb-dup() {
+   let a = dxb-step(dxc-new(2), [3, 3, 4], 16);
+   let b = dxb-step(a[0], [3, 4, 3], 16);
+   !nothing?(a) && a[1][0] == a[1][1] && a[1][0] != a[1][2] && a[2] == [[a[1][0], 3], [a[1][2], 4]] && a[3] == 1 && dxc-sound?(a[0]) && dxc-agrees?(a[0], [3, 3, 4], a[1])
+    && !nothing?(b) && b[1] == [a[1][0], a[1][2], a[1][0]] && len(b[2]) == 0 && b[3] == 3;
+  }
+  // ---- 32: the refusals --------------------------------------------------------------------------------------------------------------------
+  def dxb-refused() {
+   let st = dxc-new(2);
+   nothing?(dxb-step(st, [1, 2, 3], 8)) && nothing?(dxb-step(st, [1, 8], 8)) && nothing?(dxb-step(st, [0 - 1, 2], 8)) && nothing?(dxb-step(st, [], 8)) && nothing?(dxc-new(0))
+    && nothing?(dxb-step(dxc-new(0), [1], 8)) && !nothing?(dxb-step(st, [1, 2, 2], 8)) && !nothing?(dxb-step(st, [1, 2], 8));
+  }
+  // ---- 64: a hit is pinned ---------------------------------------------------------------------------------------------------------------------
+  def dxb-pinned() {
+   // slots 0, 1, 2 hold 10 (oldest), 11, 12; the top-k [13, 10] must place 13 on 11's slot
+   let a = dxb-step(dxc-new(3), [10, 11, 12], 32);
+   let b = dxb-step(a[0], [13, 10], 32);
+   let c = dxb-step(a[0], [13, 10, 11], 32);
+   !nothing?(b) && b[1] == [1, 0] && b[2] == [[1, 13]] && dxc-keys(b[0]) == [10, 13, 12] && dxc-agrees?(b[0], [13, 10], b[1])
+    && !nothing?(c) && c[1] == [2, 0, 1] && c[2] == [[2, 13]] && dxc-keys(c[0]) == [10, 11, 13] && dxc-agrees?(c[0], [13, 10, 11], c[1]);
+  }
+  // ---- 128: the key is (layer, expert) ----------------------------------------------------------------------------------------------------------
+  def dxb-layers() {
+   let c = dxc-open(2, 3);
+   let p0 = dxc-take(c, 0, [5, 6], 16);
+   let p1 = dxc-take(c, 1, [5, 6], 16);
+   let p0b = dxc-take(c, 0, [5, 6], 16);
+   !nothing?(p0) && !nothing?(p1) && p0[1] == [[0, 5], [1, 6]] && p1[1] == [[0, 5], [1, 6]] && len(p0b[1]) == 0 && dxc-count(c, "misses") == 4 && dxc-count(c, "hits") == 2 && dxc-count(c, "steps") == 3
+    && dxc-keys(dxc-table(c, 0)) == [5, 6, 0 - 1] && dxc-keys(dxc-table(c, 1)) == [5, 6, 0 - 1] && dxc-lkey(0) != dxc-lkey(1) && dxc-lkey(1) != dxc-lkey(11);
+  }
+  // ---- 256: random sequences against a second model of recency -------------------------------------------------------------------------------------
+  // the model: a list of resident experts from least to most recently used, no slots
+  def dxb-next(x) = (x * 48271) % 2147483647;
+  def dxb-member?(xs, v) = len(xs) == 0 ? false : (xs[0] == v || dxb-member?(xs[1:], v));
+  def dxb-topk(x, k, nexp, acc) = len(acc) == k ? [x, acc] : dxb-topk-one(dxb-next(x), k, nexp, acc);
+  def dxb-topk-one(x, k, nexp, acc) = dxb-member?(acc, x % nexp) ? dxb-topk(x, k, nexp, acc) : dxb-topk(x, k, nexp, append(acc, [x % nexp]));
+  def dxb-without(xs, v) = len(xs) == 0 ? [] : (xs[0] == v ? xs[1:] : cons(xs[0], dxb-without(xs[1:], v)));
+  def dxb-first-not-in(rec, ids) = len(rec) == 0 ? 0 - 1 : (dxb-member?(ids, rec[0]) ? dxb-first-not-in(rec[1:], ids) : rec[0]);
+  // the model's step over the ids in order: [rec', hits, misses, evicted experts]
+  def dxb-mstep(rec, cap, ids, hits, misses, ev) = len(ids) == 0 ? [rec, hits, misses, ev]
+   : (dxb-member?(rec, ids[0]) ? dxb-mstep(append(dxb-without(rec, ids[0]), [ids[0]]), cap, ids[1:], hits + 1, misses, ev)
+     : (len(rec) < cap ? dxb-mstep(append(rec, [ids[0]]), cap, ids[1:], hits, misses + 1, ev)
+       : dxb-mstep(append(dxb-without(rec, dxb-first-not-in(rec, ids)), [ids[0]]), cap, ids[1:], hits, misses + 1, append(ev, [dxb-first-not-in(rec, ids)]))));
+  def dxb-subset?(xs, ys) = len(xs) == 0 ? true : (dxb-member?(ys, xs[0]) && dxb-subset?(xs[1:], ys));
+  def dxb-same-set?(xs, ys) = len(xs) == len(ys) && dxb-subset?(xs, ys) && dxb-subset?(ys, xs);
+  def dxb-held(keys) = len(keys) == 0 ? [] : (keys[0] >= 0 ? cons(keys[0], dxb-held(keys[1:])) : dxb-held(keys[1:]));
+  // the experts held before and not after a step
+  def dxb-gone(before, after) = len(before) == 0 ? [] : (dxb-member?(after, before[0]) ? dxb-gone(before[1:], after) : cons(before[0], dxb-gone(before[1:], after)));
+  def dxb-one-step(st, rec, cap, ids, nexp) {
+   let r = dxb-step(st, ids, nexp);
+   let m = dxb-mstep(rec, cap, ids, 0, 0, []);
+   !nothing?(r) && r[3] == m[1] && len(r[2]) == m[2] && r[4] == len(m[3]) && dxb-same-set?(dxb-gone(dxb-held(dxc-keys(st)), dxb-held(dxc-keys(r[0]))), m[3])
+    && dxb-same-set?(dxb-held(dxc-keys(r[0])), m[0]) && dxc-sound?(r[0]) && dxc-agrees?(r[0], ids, r[1]) && dxc-resident(r[0]) <= cap && dxc-resident(r[0]) == len(m[0]);
+  }
+  // one sequence: n steps from the seed; true when every step agrees
+  def dxb-seq(st, rec, cap, nexp, kmax, x, n) {
+   n == 0 ? true : {
+    let k0 = dxb-next(x);
+    let k = 1 + (k0 % (kmax < cap ? kmax : cap));
+    let t = dxb-topk(k0, k, nexp, []);
+    let ids = t[1];
+    let r = dxb-step(st, ids, nexp);
+    let m = dxb-mstep(rec, cap, ids, 0, 0, []);
+    dxb-one-step(st, rec, cap, ids, nexp) && dxb-seq(r[0], m[0], cap, nexp, kmax, t[0], n - 1);
+   };
+  }
+  def dxb-random() = dxb-seq(dxc-new(2), [], 2, 8, 2, 1, 60) && dxb-seq(dxc-new(3), [], 3, 12, 3, 7, 60) && dxb-seq(dxc-new(4), [], 4, 16, 4, 13, 60)
+   && dxb-seq(dxc-new(6), [], 6, 24, 6, 29, 60) && dxb-seq(dxc-new(8), [], 8, 32, 6, 101, 60);
+  // ---- 512: a refused step changes nothing -----------------------------------------------------------------------------------------------------------
+  def dxb-nochange() {
+   let c = dxc-open(1, 2);
+   let ok = dxc-take(c, 0, [4, 5], 8);
+   let before = dxc-table(c, 0);
+   let bad1 = dxc-take(c, 0, [4, 5, 6], 8);
+   let bad2 = dxc-take(c, 0, [4, 9], 8);
+   let bad3 = dxc-take(c, 0, [], 8);
+   let same1 = dxb-step(dxc-new(3), [2, 7, 4], 8);
+   let same2 = dxb-step(dxc-new(3), [2, 7, 4], 8);
+   !nothing?(ok) && nothing?(bad1) && nothing?(bad2) && nothing?(bad3) && dxc-table(c, 0) == before && dxc-count(c, "misses") == 2 && dxc-count(c, "hits") == 0 && dxc-count(c, "evicts") == 0
+    && dxc-count(c, "steps") == 1 && dxc-count(c, "refused") == 3 && same1 == same2;
+  }
+  // ---- 1024: a slot is not an id -------------------------------------------------------------------------------------------------------------------------
+  def dxb-slot-id() {
+   let a = dxb-step(dxc-new(4), [3, 0, 2, 1], 8);
+   let b = dxb-step(a[0], [1, 3], 8);
+   !nothing?(a) && a[1] == [0, 1, 2, 3] && a[1] != [3, 0, 2, 1] && dxc-keys(a[0]) == [3, 0, 2, 1] && dxc-agrees?(a[0], [3, 0, 2, 1], a[1]) && b[1] == [3, 0] && dxc-agrees?(b[0], [1, 3], b[1]);
+  }
+  // ---- 2048: a forgotten slot is empty ------------------------------------------------------------------------------------------
+  def dxb-forgot() {
+   let c = dxc-open(1, 3);
+   let a = dxc-take(c, 0, [4, 5, 6], 8);
+   let f = dxc-forget(c, 0, 1);
+   let held = dxc-keys(dxc-table(c, 0));
+   let res = dxc-resident(dxc-table(c, 0));
+   let b = dxc-take(c, 0, [7], 8);
+   let d = dxc-take(c, 0, [5], 8);
+   !nothing?(a) && held == [4, 0 - 1, 6] && res == 2 && !nothing?(b) && b[1] == [[1, 7]] && !nothing?(d) && d[1][0][1] == 5 && dxc-count(c, "evicts") == 1;
+  }
+ }
+ let h1 = try dxb-first() catch false;
+ let h2 = try dxb-hits() catch false;
+ let h4 = try dxb-empty() catch false;
+ let h8 = try dxb-lru() catch false;
+ let h16 = try dxb-dup() catch false;
+ let h32 = try dxb-refused() catch false;
+ let h64 = try dxb-pinned() catch false;
+ let h128 = try dxb-layers() catch false;
+ let h256 = try dxb-random() catch false;
+ let h512 = try dxb-nochange() catch false;
+ let h1024 = try dxb-slot-id() catch false;
+ let h2048 = try dxb-forgot() catch false;
+ let c1 = dxb-bit(h1, 1);
+ let c2 = dxb-bit(h2, 2);
+ let c4 = dxb-bit(h4, 4);
+ let c8 = dxb-bit(h8, 8);
+ let c16 = dxb-bit(h16, 16);
+ let c32 = dxb-bit(h32, 32);
+ let c64 = dxb-bit(h64, 64);
+ let c128 = dxb-bit(h128, 128);
+ let c256 = dxb-bit(h256, 256);
+ let c512 = dxb-bit(h512, 512);
+ let c1024 = dxb-bit(h1024, 1024);
+ let c2048 = dxb-bit(h2048, 2048);
+ print_str("dsv4-expert-cache-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048;
+}

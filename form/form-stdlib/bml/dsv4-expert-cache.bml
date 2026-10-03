@@ -1,0 +1,94 @@
+//////////////////////////////////////////////////////////////////////
+// dsv4-expert-cache.bml -- which routed experts a layer's arena holds, and in which slot: a least-recently-used cache as plain Form data, the same on every arm and with no device behind it.
+//
+// WHAT IT DECIDES. native/metal/dsv4-arena.fk gives every layer an arena of S slots (S experts' gate, up and down row blocks, one buffer a stack) and the expert kernels read an expert by an index into the
+// stack they are given. This cell is the book-keeping between the router and that index: the router answers a top-k of expert ids, `dxc-step` answers for each id the SLOT its bytes are in, and the list of
+// [slot, expert] pairs whose bytes are NOT there yet (the misses), which the arena then copies from the file. Slot s of a layer holds the same expert in all three stacks, so one table serves them.
+//
+// THE KEY IS (layer, expert). A layer's table is its own value (dxc-new: S keys, S stamps, a tick); the keeper (dxc-open) holds one under the layer's key (dxc-lkey), so expert 5 of layer 1 and expert 5 of
+// layer 2 are two entries and never one. A slot index is NOT an expert id: ids come in, slots go out, and the arena is indexed by the slot.
+//
+// THE RULES (the band holds each, and plants the break of each):
+//   a hit keeps its slot and is stamped now; a miss takes an EMPTY slot (lowest index first), else the least recently stamped slot that this step does not use, ties to the lowest index
+//   every expert this step finds already cached is PINNED before any miss is placed, so a miss can never evict a slot a later id of the same top-k reads
+//   an id that appears twice in one top-k is one expert: its second appearance reads the slot its first took (a hit, or the slot the first miss was given); no expert holds two slots
+//   a capacity under the number of DISTINCT ids the top-k holds is refused (nothing): there is no slot to give, and no choice is made for the caller; so is an id outside [0, nexp) and an empty top-k
+//   a refused step changes nothing: the table the caller holds is the table it passed
+//   a slot whose bytes were not copied (the arena's fill was refused) is FORGOTTEN (dxc-forget): its key reads empty and its stamp 0, so the next miss takes it first and no hit ever reads bytes that were never copied
+//
+// dxc-step is pure: it takes a table and answers [table', slots, misses, hits, evicts] or nothing. dxc-take is its keeper form over a dxc-open record (the table stored, the counters added).
+// Proven by: form-stdlib/tests/dsv4-expert-cache-band.bml.
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+ class Dsv4ExpertCache {
+  // ---- a layer's table: [tick, keys, stamps] -----------------------------------------------------------------------------
+  // keys: the expert held in each slot, -1 for an empty slot; stamps: the tick each slot was last used (0 for an empty one; ticks start at 1)
+  def dxc-fill(n, v) = n == 0 ? [] : cons(v, dxc-fill(n - 1, v));
+  def dxc-new(slots) = slots < 1 ? nothing() : [0, dxc-fill(slots, 0 - 1), dxc-fill(slots, 0)];
+  def dxc-tick(st) = st[0];
+  def dxc-keys(st) = st[1];
+  def dxc-stamps(st) = st[2];
+  def dxc-slots(st) = len(st[1]);
+  // ---- lists ------------------------------------------------------------------------------------------------------------
+  def dxc-find(xs, v, i) = i == len(xs) ? 0 - 1 : (xs[i] == v ? i : dxc-find(xs, v, i + 1));
+  def dxc-member?(xs, v) = len(xs) == 0 ? false : (xs[0] == v || dxc-member?(xs[1:], v));
+  def dxc-set-at(xs, i, v) = i == 0 ? cons(v, xs[1:]) : cons(xs[0], dxc-set-at(xs[1:], i - 1, v));
+  def dxc-distinct(ids) = len(ids) == 0 ? 0 : (dxc-member?(ids[1:], ids[0]) ? 0 : 1) + dxc-distinct(ids[1:]);
+  def dxc-ids-in-range?(ids, nexp) = len(ids) == 0 ? true : (ids[0] >= 0 && ids[0] < nexp && dxc-ids-in-range?(ids[1:], nexp));
+  // ---- the step -----------------------------------------------------------------------------------------------------------
+  // the slots of the ids this step finds already cached (the pinned set)
+  def dxc-pin(keys, ids) = len(ids) == 0 ? [] : (dxc-find(keys, ids[0], 0) >= 0 ? cons(dxc-find(keys, ids[0], 0), dxc-pin(keys, ids[1:])) : dxc-pin(keys, ids[1:]));
+  // the victim: the unpinned slot with the smallest stamp, the lowest index among equals; -1 when every slot is pinned
+  def dxc-victim-go(stamps, pinned, i, best, bi) = i == len(stamps) ? bi
+   : ((dxc-member?(pinned, i) || (bi >= 0 && stamps[i] >= best)) ? dxc-victim-go(stamps, pinned, i + 1, best, bi) : dxc-victim-go(stamps, pinned, i + 1, stamps[i], i));
+  def dxc-victim(stamps, pinned) = dxc-victim-go(stamps, pinned, 0, 0, 0 - 1);
+  // one id: a hit is stamped, a miss takes the victim and is told (slot, expert); the accumulator is [tick, keys, stamps, pinned, slots, misses, hits, evicts]
+  def dxc-place(a, e) {
+   let v = dxc-victim(a[2], a[3]);
+   v < 0 ? nothing() : [a[0] + 1, dxc-set-at(a[1], v, e), dxc-set-at(a[2], v, a[0] + 1), cons(v, a[3]), cons(v, a[4]), cons([v, e], a[5]), a[6], a[1][v] >= 0 ? a[7] + 1 : a[7]];
+  }
+  def dxc-one(a, e) {
+   let s = dxc-find(a[1], e, 0);
+   s >= 0 ? [a[0] + 1, a[1], dxc-set-at(a[2], s, a[0] + 1), a[3], cons(s, a[4]), a[5], a[6] + 1, a[7]] : dxc-place(a, e);
+  }
+  def dxc-go(a, ids) = len(ids) == 0 ? a : { let b = dxc-one(a, ids[0]); nothing?(b) ? nothing() : dxc-go(b, ids[1:]); };
+  def dxc-done(b) = nothing?(b) ? nothing() : [[b[0], b[1], b[2]], reverse(b[4]), reverse(b[5]), b[6], b[7]];  // [table', slots (one a top-k id, in order), misses ([slot, expert], in the order placed), hits, evicts], or nothing
+  def dxc-admit?(st, ids, nexp) = !nothing?(st) && len(ids) > 0 && dxc-ids-in-range?(ids, nexp) && dxc-distinct(ids) <= dxc-slots(st);
+  def dxc-step(st, ids, nexp) = dxc-admit?(st, ids, nexp) ? dxc-done(dxc-go([st[0], st[1], st[2], dxc-pin(st[1], ids), [], [], 0, 0], ids)) : nothing();
+  // ---- the keeper: one table a layer, and the counters -------------------------------------------------------------------------
+  def dxc-lkey(il) = "L" ++ il.str();
+  def dxc-open-go(c, il, n, slots) = il == n ? c : { record_set(c, dxc-lkey(il), dxc-new(slots)); dxc-open-go(c, il + 1, n, slots); };
+  def dxc-open(layers, slots) = dxc-open-go(record_new(0, "hits", 0, "misses", 0, "evicts", 0, "steps", 0, "refused", 0), 0, layers, slots);
+  def dxc-table(c, il) = record_get(c, dxc-lkey(il));
+  def dxc-count(c, key) = record_get(c, key);
+  // the plan of one layer's top-k: [slots, misses], or nothing (refused: the table and the counters stay)
+  def dxc-took(c, il, r) {
+   nothing?(r) ? { record_set(c, "refused", record_get(c, "refused") + 1); nothing(); } : {
+    record_set(c, dxc-lkey(il), r[0]);
+    record_set(c, "hits", record_get(c, "hits") + r[3]);
+    record_set(c, "misses", record_get(c, "misses") + len(r[2]));
+    record_set(c, "evicts", record_get(c, "evicts") + r[4]);
+    record_set(c, "steps", record_get(c, "steps") + 1);
+    [r[1], r[2]];
+  };
+  }
+  def dxc-take(c, il, ids, nexp) = dxc-took(c, il, dxc-step(dxc-table(c, il), ids, nexp));
+  // a slot whose bytes were NOT copied (a refused fill) holds no expert: its key is empty and its stamp 0, so the next miss takes it first and no hit ever reads it
+  def dxc-forget(c, il, slot) {
+   let st = dxc-table(c, il);
+   record_set(c, dxc-lkey(il), [st[0], dxc-set-at(st[1], slot, 0 - 1), dxc-set-at(st[2], slot, 0)]);
+  }
+  // ---- what a table holds (the band reads these) ------------------------------------------------------------------------------
+  def dxc-resident-go(keys, n) = len(keys) == 0 ? n : dxc-resident-go(keys[1:], keys[0] >= 0 ? n + 1 : n);
+  def dxc-resident(st) = dxc-resident-go(st[1], 0);
+  // no expert holds two slots
+  def dxc-sound-go(keys) = len(keys) < 2 ? true : ((keys[0] < 0 || !dxc-member?(keys[1:], keys[0])) && dxc-sound-go(keys[1:]));
+  def dxc-sound?(st) = dxc-sound-go(st[1]);
+  // the slots answered for a top-k agree with it: equal ids read one slot, unequal ids two, and each slot holds its id in the table after the step
+  def dxc-pairs?(ids, slots, i, j) = j == len(ids) ? true : (((ids[i] == ids[j]) == (slots[i] == slots[j])) && dxc-pairs?(ids, slots, i, j + 1));
+  def dxc-agrees-go(keys, ids, slots, i) = i == len(ids) ? true : (keys[slots[i]] == ids[i] && dxc-pairs?(ids, slots, i, i + 1) && dxc-agrees-go(keys, ids, slots, i + 1));
+  def dxc-agrees?(st, ids, slots) = len(ids) == len(slots) && dxc-agrees-go(st[1], ids, slots, 0);
+ }
+ 0;
+}
