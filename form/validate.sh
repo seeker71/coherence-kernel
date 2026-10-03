@@ -89,13 +89,60 @@ suite_enumerate() {
 # What a band's head and the verdict manifest say is read by the Form door observe/band-head.bml
 # (observe/band-head-run.bml answers one line: `<question> <path> [<stem>]`); the shell only
 # carries the question to fkwu, run from the repository root with absolute paths.
+#
+# A reader that is absent or fails is NEVER the same as "no pin": it prints a ✗ line, leaves a
+# marker file, and the run ends non-zero (see bh_report_failures). The question is sent field by
+# field, never as "$*": the sweep worker runs under IFS=$'\x1f', and a joined question would
+# arrive as one unknown word and be answered with nothing.
+BH_FAIL_FILE="${TMPDIR:-/tmp}/form-validate-reader-fail.$$"
+rm -f "$BH_FAIL_FILE"
+bh_fail() {
+    printf '  ✗  band-head reader: %s\n' "$*" >&2
+    : > "$BH_FAIL_FILE"
+}
+bh_report_failures() {
+    if [[ -e "$BH_FAIL_FILE" ]]; then
+        rm -f "$BH_FAIL_FILE"
+        echo "  ✗  the band-head reader failed above: a pin, a staged carrier or a manifest row was read as nothing for want of it." >&2
+        return 1
+    fi
+    return 0
+}
 bh_abs() {
     case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$PWD/$1" ;; esac
 }
+# the fkwu the reader asks: the run's own, else the checkout's, always an absolute path
+bh_fkwu() {
+    local k="${FORM_SOURCE_FKWU:-../fkwu}"
+    case "$k" in /*) printf '%s' "$k" ;; *) printf '%s' "$PWD/$k" ;; esac
+}
+# one question: <question> <path-or-manifest> [<stem>] -> its answer on one line (empty is an answer)
 bh_ask() {
-    local k="${FORM_SOURCE_FKWU:-$PWD/../fkwu}" root="$PWD/.."
-    [[ -x "$k" ]] || return 0
-    (cd "$root" && printf '%s\n' "$*" | "$k" observe/band-head-run.bml 2>/dev/null) || true
+    local IFS=' ' k root="$PWD/.." out rc arg
+    k="$(bh_fkwu)"
+    if [[ ! -x "$k" ]]; then bh_fail "no fkwu to read with ($k)"; return 0; fi
+    for arg in "$@"; do
+        case "$arg" in *[[:space:]]*) bh_fail "a path or stem holding a space cannot be asked: $arg"; return 0 ;; esac
+    done
+    out="$(cd "$root" && printf '%s %s %s\n' "${1:-}" "${2:-}" "${3:-}" | "$k" observe/band-head-run.bml 2>/dev/null)"
+    rc=$?
+    if [[ $rc -ne 0 ]]; then bh_fail "the door exited $rc for: ${1:-} ${2:-} ${3:-}"; return 0; fi
+    case "$out" in "?"*) bh_fail "$out"; return 0 ;; esac
+    printf '%s\n' "$out"
+}
+# many questions, one per line in the file $1, ONE fkwu run: the answers land one per line, in order,
+# in the file $2 (a file, so an empty last answer is not lost to a command substitution)
+bh_ask_many() {
+    local IFS=' ' k root="$PWD/.." rc want got asks="$1" answers="$2"
+    k="$(bh_fkwu)"
+    want="$(grep -c '' "$asks")"
+    if [[ ! -x "$k" ]]; then bh_fail "no fkwu to read with ($k)"; return 1; fi
+    (cd "$root" && "$k" observe/band-head-run.bml < "$asks" > "$answers" 2>/dev/null)
+    rc=$?
+    if [[ $rc -ne 0 ]]; then bh_fail "the door exited $rc for a batch of $want questions"; return 1; fi
+    got="$(grep -c '' "$answers")"
+    if [[ "$got" -ne "$want" ]]; then bh_fail "the door answered $got lines to $want questions"; return 1; fi
+    return 0
 }
 fk_band_proof_level() {
     bh_ask level "$(bh_abs "$1")"
@@ -141,22 +188,72 @@ band_stem() {
 
 # `./validate.sh --list` names each workload, whether its head stages a carrier, its head pin and
 # its manifest row. A band with neither pin is swept but judged by its exit alone.
+# The reader as the sweep worker asks it: under the worker's IFS (a 0x1f byte), the pin of one band.
+# observe/tests/validate-reader-band.fk runs this and holds the answer.
+if [[ "${1:-}" == "--selftest-reader" ]]; then
+    selftest_band="${2:-../observe/tests/band-head-band.fk}"
+    ( IFS=$'\x1f'; fk_band_declared_verdict "$selftest_band" )
+    selftest_rc=0
+    bh_report_failures || selftest_rc=1
+    exit $selftest_rc
+fi
+
+# The list asks the reader twice in all, each time with every question at once: one fkwu run
+# answers each band's proof level, head pin and candidate stems, a second the registered verdicts.
 if [[ "${1:-}" == "--list" ]]; then
     suite_enumerate
+    list_total=${#wl_labels[@]}
+    list_dir="$(mktemp -d "${TMPDIR:-/tmp}/form-validate-list.XXXXXX")"
+    list_manifest="$(bh_abs "$BAND_MANIFEST")"
+    : > "$list_dir/asks1"
     i=0
-    while [[ $i -lt ${#wl_labels[@]} ]]; do
+    while [[ $i -lt $list_total ]]; do
         list_files="$(printf '%s' "${wl_args[$i]}" | tr '\037' ' ')"
         list_files="${list_files% }"
+        list_file_of[$i]="$list_files"
         list_band="${list_files##* }"
-        list_level="$(fk_band_proof_level "$list_band")"
-        list_pin="$(fk_band_declared_verdict "$list_band")"
-        list_stem="$(band_stem "$list_band" || true)"
-        list_row=""
-        if [[ -n "$list_stem" ]]; then list_row="$(bh_ask row-pin "$(bh_abs "$BAND_MANIFEST")" "$list_stem")"; fi
-        printf '%s\t%s\tstaged=%s\tpin=%s\trow=%s\n' "${wl_labels[$i]}" "$list_files" \
+        list_abs="$(bh_abs "$list_band")"
+        list_s1="-"
+        list_s2="-"
+        if [[ "$list_band" == form-stdlib/tests/* || "$list_band" == */form-stdlib/tests/* ]]; then
+            list_s1="$(basename "$list_band")"
+            list_s1="${list_s1%.fk}"
+            list_s1="${list_s1%.bml}"
+            list_s2="${list_s1%-band}"
+        fi
+        case "$list_abs$list_manifest$list_s1" in
+            *[[:space:]]*) bh_fail "a path or stem holding a space cannot be asked: $list_abs"; bh_report_failures; rm -rf "$list_dir"; exit 1 ;;
+        esac
+        printf 'level %s\npin %s\nrow-name %s %s\nrow-name %s %s\n' \
+            "$list_abs" "$list_abs" "$list_manifest" "$list_s1" "$list_manifest" "$list_s2" >> "$list_dir/asks1"
+        i=$((i + 1))
+    done
+    if ! bh_ask_many "$list_dir/asks1" "$list_dir/answers1"; then bh_report_failures; rm -rf "$list_dir"; exit 1; fi
+    n=0
+    while IFS= read -r line; do list_ans1[$n]="$line"; n=$((n + 1)); done < "$list_dir/answers1"
+    : > "$list_dir/asks2"
+    i=0
+    while [[ $i -lt $list_total ]]; do
+        list_stem="${list_ans1[$((i * 4 + 2))]}"
+        [[ -n "$list_stem" ]] || list_stem="${list_ans1[$((i * 4 + 3))]}"
+        list_stem_of[$i]="$list_stem"
+        printf 'row-pin %s %s\n' "$list_manifest" "${list_stem:--}" >> "$list_dir/asks2"
+        i=$((i + 1))
+    done
+    if ! bh_ask_many "$list_dir/asks2" "$list_dir/answers2"; then bh_report_failures; rm -rf "$list_dir"; exit 1; fi
+    n=0
+    while IFS= read -r line; do list_ans2[$n]="$line"; n=$((n + 1)); done < "$list_dir/answers2"
+    i=0
+    while [[ $i -lt $list_total ]]; do
+        list_level="${list_ans1[$((i * 4))]}"
+        list_pin="${list_ans1[$((i * 4 + 1))]}"
+        list_row="${list_ans2[$i]}"
+        printf '%s\t%s\tstaged=%s\tpin=%s\trow=%s\n' "${wl_labels[$i]}" "${list_file_of[$i]}" \
             "$([[ "$list_level" == "FKWU-STAGED" ]] && echo yes || echo no)" "${list_pin:--}" "${list_row:--}"
         i=$((i + 1))
     done
+    rm -rf "$list_dir"
+    bh_report_failures || exit 1
     exit 0
 fi
 
@@ -605,10 +702,12 @@ fi
 if [[ -n "$deadlines" ]]; then
     echo "  deadlines met: $deadlines — each leg named was ended with its process tree; its streams are kept"
 fi
-if [[ $fail -eq 0 ]]; then
+reader_failed=0
+bh_report_failures || reader_failed=1
+if [[ $fail -eq 0 && $reader_failed -eq 0 ]]; then
     echo "  $ok ok, 0 failed — fkwu answered every pin it was asked."
     exit 0
 else
-    echo "  $ok ok, $fail failed — inspect exit statuses and retained streams."
+    echo "  $ok ok, $fail failed, reader failures: $reader_failed — inspect exit statuses and retained streams."
     exit 1
 fi
