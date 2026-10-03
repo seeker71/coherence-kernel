@@ -136,7 +136,7 @@ named without a path · two teachings before the question fail.
   and held to `dcc-reply-lands?` on fkwu; two blind readings by a rented mind chose the counsel
   reply on every criterion and named the residue that grew the one-teaching floor. No real
   person has yet answered these replies; their resonance is theirs, and it is the next witness.
-- The band is fkwu-witnessed: `fs_exists`, `str_find`, and `print_str` bind on go, rust, and
-  fkwu (`pf-arm-mask` 11, probed 2026-09-18), not on the TypeScript walker.
+- The band is fkwu-witnessed: `fs_exists`, `str_find`, and `print_str` bind on fkwu
+  (`pf-has?`).
 
 ; witnessed: 2026-09-29 -> band 1111111111 (fkwu)
