@@ -327,8 +327,9 @@ driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/
                dsv4-lease-band.bml 511 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 16383
 driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 1023 · native/metal/tests/dsv4-layer-q8q2-band.bml 4095
                native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 104 kernels, dsv4-open-band 1023 with 75 in the graph)
-driver stage 5 native/metal/tests/dsv4-ledger-band.bml 511 · native/metal/tests/dsv4-door-run-band.bml 127   (the op ledger of a token, the flow through the door's functions)
-               native/metal/tests/dsv4-token-run-band.bml 255 · form-stdlib/tests/dsv4-token-run-plan-band.bml 31   (the token door's rows from the ledger, the tap, the plan from the header)
+driver stage 5 native/metal/tests/dsv4-ledger-band.bml 1023 · native/metal/tests/dsv4-door-run-band.bml 127   (the op ledger of a token, whole-stack and arena ceilings, the flow through the door's functions)
+               native/metal/tests/dsv4-token-run-band.bml 1023 · form-stdlib/tests/dsv4-token-run-plan-band.bml 63   (the token door's rows from the ledger, the tap, the plan from the header, the arena mode)
+               native/metal/tests/dsv4-arena-band.bml 511 · form-stdlib/tests/dsv4-expert-cache-band.bml 4095   (the slot arena against the whole-stack control, the least-recently-used cache)
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -451,8 +452,8 @@ vm_stat's ('Pages stored in compressor', 27.9 GiB then), read by `dvr-stored-pag
 doubling to 60 s, 5 minutes an ask at most, never past the window's 20) before the run ends (`dsv4-validate-band.bml` bit 4096). Wired memory followed the weights a layer's dispatches touch and returned them (layer 0 +3,207,380,992 B,
 layer 1 -1,368,260,608 B, layer 14 -2,233,942,016 B; net +2.55 GB over 16 layers), so a layer is priced at the bytes of the tensors its dispatches can touch, whole stacks included: layer 0 3,018,191,320 B (the largest), layer 1
 1,959,129,560 B, the 43 summing 85.7 GB, which is why they are asked one at a time and never summed (bit 8192). The validation window no longer stages the layers (a sync and a machine reading a layer is a probe protocol, not the
-token path); it keeps compile, map, state, wirespan, the head and its argmax, and the recorded references. The token path is measured by `observe/dsv4-token-run.bml` (`form-stdlib/bml/dsv4-token-run.bml`, written and not run on the
-real file; dry by default, `{"go":1}` runs): one row a token read from the landed ledger (`dll-line`: dispatches, barriers, command buffers, waits, host reads, buffers made, bytes, device busy, ms) with the machine's wired growth, pageins and
+token path); it keeps compile, map, the arena, state, wirespan, the head and its argmax, and the recorded references. The token path is measured by `observe/dsv4-token-run.bml` (`form-stdlib/bml/dsv4-token-run.bml`;
+dry by default, `{"go":1}` runs; run once on the real file with whole mapped stacks, 2026-10-03 19:04:25 to 19:05:21 WITA, below): one row a token read from the landed ledger (`dll-line`: dispatches, barriers, command buffers, waits, host reads, buffers made, bytes, device busy, ms) with the machine's wired growth, pageins and
 the device's own bytes, the plan priced from the bare header by the ledger's own formulas (`dll-token-count-m`, `dll-token-bytes-m`: 1,856 dispatches at the quietest position and 2,082 at the loudest, 22 command buffers), and wired
 memory read after EVERY LAYER of the first three tokens without a sync, through the one function the token handle calls at its seams (`dkr-hz-tap-set`; no tap is installed in production), stopping the token before the machine is at
 risk (host-memory-low, wired above 60 percent of memory, available under the reserve, 20 minutes) with the curve in the receipt (`native/metal/tests/dsv4-token-run-band.bml`, `form-stdlib/tests/dsv4-token-run-plan-band.bml`).
@@ -466,7 +467,20 @@ eleven sources, 75 in the graph). `form/native/metal/dsv4-ledger.fk` reads one r
 111, 116 or 121 barriers (81%), 2 command buffers, 1 wait, 2 host reads, 0 buffers made; the serial walk and the concurrent walk are bit-equal in ids and logits; the best of six host encodes is 3.3 to 3.5 ms for 137 dispatches (24 to 26 us a dispatch, 2.7 to 3 times
 under the 66 to 76; 17 to 20 us at a quieter hour). Derived for the real file, not run: 1,856 dispatches a token, about 1,500 barriers, 22 command buffers, a host floor of 45 to 50 ms (33 to 37 at the quieter figure) overlapped with the device. Not witnessed: any real-file number, any wall-clock gain at real dimensions, the Swift runner's rate on
 this Mac today. The session's open and step and the generate door's one-shot run on the fixture through the door's own functions (`dsv4-door-run-band.bml`, the lane flag untouched and 0; the fixture has no vocabulary, so `fcds-text` now renders none instead of reading pieces
-at offsets a missing array gives). The arena builder's per-layer host sync (43 a token) is what Swift deleted ("the flush that outlived its reason"): the two exclude each other until the arena's sync becomes a plan boundary.
+at offsets a missing array gives).
+
+THE REAL FILE'S FIRST TOKEN, over whole mapped stacks (the token door, 2026-10-03 19:04:25 to 19:05:21 WITA, memory read each stage; the lead's run, the receipt and stdout in the land-int checkout): prefill position 0 read 1,848 dispatches, 1,461
+barriers, 22 command buffers, 1 wait, 0 host reads, 0 buffers made, 8,544,878,408 B of weight to read and the device busy 167,726 us (the compute is hardware-class) in 49,272 ms of wall clock: pageins +5,241,090 pages (16 KiB each: the WHOLE 80
+GiB file read in one token), wired only +2.2 GiB, and 1,816,908 pages (27.7 GiB) of other processes' memory pushed to swap; the door held at token 1 on host-memory-low, as it must. Binding a whole 0.55 GB expert stack makes the device read every page
+of it a dispatch names (read, not wire), so a cold token costs the file and the machine, the pattern that restarted the OS before. THE ROUTED EXPERTS ARE THEREFORE READ THROUGH A SLOT ARENA (`native/metal/dsv4-arena.fk`, the door's default,
+`arena_slots` 64; 0 is the whole-stack control): the routed stacks are not mapped; each layer holds a bounded set of experts in buffers allocated once (the lease's expert term to the byte: 19,478,347,776 B on the IQ2XXS file) and an
+expert the router picked and the cache (`dsv4-expert-cache.bml`: least recently used, keyed by layer and expert) does not hold is filled from the file by its own span (a no-copy view of exactly its bytes and a copy kernel into its slot: no host
+byte crosses; measured 2026-10-03 on a Qwen file's 2 MB spans, 726 us a fill = 3 GB/s with the pages cached, against 4.2 to 5.0 ms through any host route that makes a Form string, 31 us for the view alone), and the SAME expert kernels read
+slots by slot number, bit-equal to the whole-stack control stage by stage and end to end on both fixtures (`dsv4-arena-band.bml` 511). A block is two planned stages with ONE sync between them, a plan boundary of the token's concurrent batch (`dxa-boundary`:
+`dkr-hz-sync`, one counted read of the router's ids, the cache's slots, a batch armed again, the fills): a token waits blocks + 1 times, reads blocks + 2, commits blocks + blocks / 2 + 1 command buffers, makes no buffer, and its row carries the copies, the
+experts hit and missed and the bytes filled; the ledger pins both modes' ceilings (`dsv4-ledger-band.bml` bit 512: `dll-arena-ceil`). The plan prices them from the header: the device reads 9,107,652,444 B a token (16.6 ms at the stated 546 GB/s) hit or
+miss alike, and the file gives the dense tensors once (7,281,557,340 B at the open), at most 1,826,095,104 B for a cold decode token, at most 19,478,347,776 B for the 14-id prefill (a layer holds no more than min(positions x used, slots) distinct experts) and
+only the missed experts warm (7,077,888 B for one at layer 0). Not witnessed: the arena on the real file (fixtures only), the cache's hit rate over real routing, the fill's rate from a cold disk.
 
 Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
 (rust and ts hand back a different file there); `./validate.sh --list` prints which. The restored emitters, the
