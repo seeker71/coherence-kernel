@@ -33,6 +33,19 @@ fkwu is the only runtime and every band answers its pin on it. Nothing in this t
 gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc`,
 `./fkwu`, `shasum` and `openssl`.
 
+What the tree still says of the retired kernels, by class, and why it stays:
+- History: `receipts/`, `learn/` corpus rows and `local-requests.jsonl` are dated evidence, not claims.
+- Pinned provenance: `gate/canonical-conformance.bml`, its band and the vectors file say the values are
+  what the Go, Rust and TypeScript kernels agreed on when last asked; that is where the pins come from.
+- The seed: `runtime/fkwu-uni.c` names a retired kernel only where its history explains why a behaviour is
+  what it is (its preprocessed output is byte-identical to before the rewording).
+- Organ names: `fourth-shim.fk` and the Hati-OS "fourth kernel" keep their names; their text says fkwu.
+- Fixtures and catalogs: the belief-stamp parser's legacy-shape fixture, band fixtures that quote old
+  header text as data, the language packs that read Go, Rust, TypeScript and Python source as tongues,
+  the oracle catalog's optional borrowed binaries, and `node_modules` as a generic walk exclusion.
+- Other senses of a word: "siblings" for other agents, sessions and records, "kernels" for Metal compute
+  kernels, "arm" for a branch.
+
 `runtime/fkwu-uni.c` is the seed (`wc -l` and `git log -1` read its size and its last change), and it
 shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R51–R56).
 
@@ -276,9 +289,8 @@ machine.
 ```text
 form-knowledge-integration-census-band     -> 1048575
 form-knowledge-source-search-band          -> 262143
-form-knowledge-qwen-heldout-v3-eval-band   -> 65511   (declares 65535; bits 8 and 16 open: every
-                                                       row current against its source sha, and the
-                                                       dataset sha equal to its seal)
+form-knowledge-qwen-heldout-v3-eval-band   -> 65535   (every row current against its source sha, and
+                                                       the dataset sha equal to its seal)
 native-model-route-table-band 255 · ds4-blob-select-band 31 · nl-lexicon-grow-band 127
 pivot-coverage-band 65535 · cognition/tests/error-absorption-kernel-band 4095
 ```
@@ -287,9 +299,17 @@ The sealed v3 held-out lane (30 rows, every family twice, whole-normalized answe
 defined-correctness number, re-earned only through that sealed door. Its consent file
 (`.form-knowledge-qwen-heldout-v3-consent`) is a per-run local act that git ignores. The model route is
 a Form data table, and the DS4 engine is found at runtime through its directory with its header
-verified. One sealed row names a source that is gone: v1 row h11 (family `proof`) pins
-`proof/four-way-run-recipe42.fk`, which no longer exists. Its replacement and the dataset
-re-seal belong to the sealed door, after its fact is read; the v3 band reads 65511 before and after.
+verified.
+
+The sealed rows pin their sources by sha and were re-sealed after each fact was read against its source:
+v1 15 rows and v3 30 rows are all current, the v1 dataset reads valid and the v3 band reads its full. Two
+rows lost the source they pinned with the four-way lane and ask the same kind of question of what
+stands: v1 `h11` (was the four-way verdict `0` when all four walkers agree) now pins
+`gate/canonical-conformance.bml` and asks what `./fkwu gate/canonical-conformance-run.bml` answers when
+every pinned observation passes (`1`); v3 `v322` (was `proof/recipe42.fk`, `42`) now pins
+`form/conformance/canonical-s-expression-vectors.json` and asks what its first canonical expression,
+`(add 20 22)`, renders to (`42`). v3 `v329` pinned a count its document no longer states; it now asks how
+many questions `docs/native-model-control-plane.md` says the corpus asks twice (`sixteen`).
 
 ## The Form-native DeepSeek V4 chain
 
