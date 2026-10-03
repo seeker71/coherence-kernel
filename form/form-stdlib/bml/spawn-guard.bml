@@ -1,0 +1,88 @@
+// spawn-guard.bml — the body's doors that start a child read what they are asked to run, and a forbidden tool is refused.
+//
+// The repo does not use sed, awk, perl or python (CLAUDE.md, AGENTS.md). The body holds that itself: a door that starts a
+// child from an argv or a shell line another cell or an agent supplied asks this organ first, and a command that runs one
+// of them is refused with a named ending the caller reads, and the way forward. The reading is
+// form-stdlib/bml/command-words.bml (what a command string runs, read without running it); this organ adds the argv form and
+// the door shapes. No process is started to read: a check is a few microseconds on a plain argv.
+//
+// What is refused, and how the caller sees it
+//   an argv      ["sed","-n",...] by its first element, through the wrappers command-words knows (["env","sed",..],
+//                ["timeout","5","awk",..]); ["sh","-c","ls | sed p"] by the shell line it carries; a shell given a script
+//                file ["/bin/sh", path] by the file's text (read in place, at most sg-cap bytes); a shell that reads its
+//                commands from stdin (["sh"] with an input) by the input text
+//   a shell line host-exec(cmd, input): the words the line runs, as command-words reads them; a bare shell reads its input
+//   pids         host_spawn, host_spawn_quiet, host_spawn_at answer a pid, and a refusal answers sg-refused-pid() (-5), beside
+//                the host's own -1 argv, -2 redirect, -3 fork, -4 exec; a door that has room for a named reason
+//                (hch-run-with, the control language's doors) answers the ending itself
+//   readings     host_capture and host-exec answer nothing(): no text arrived, which is what a child that never ran says
+//   the ending   sg-ending(names): "forbidden-tool <names>: not used here; <way forward>", one line a caller can show
+// A reading that did not arrive passes: a value that is no string or list of strings, a line over sg-cap bytes. The guard
+// refuses what it reads; it never blocks work on its own failure.
+//
+// What it cannot see (command-words says the rest): an alias, a variable that holds the tool, a script a shell is handed
+// through a wrapper, a runner that starts the tool (uv run python, npx), and a cell that calls the host natives directly
+// without asking here: form-stdlib/tests/spawn-guard-band.bml lists the doors that ask and the doors whose command is only
+// fixed words, and a native call in any other file fails that band.
+//
+// PROOF: form-stdlib/tests/spawn-guard-band.bml.
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/bml/command-words.bml
+section [form.bml] {
+ class SpawnGuard {
+  def sg-cap() = 200000;
+  def sg-refused-pid() = -5;
+  def sg-str?(x) = (String) value_kind(x) == "string";
+  def sg-list?(x) = (String) value_kind(x) == "list";
+  def sg-strings?(xs) = sg-list?(xs) && all?(x => sg-str?(x), xs);
+  // a shell line, read: the forbidden words it runs ([] when it is no string or is longer than sg-cap)
+  def sg-line-names(cmd) = sg-str?(cmd) && len(cmd) <= sg-cap() ? cw-forbidden(cw-words(cmd)) : [];
+  // a shell with no script file and no -c reads its commands from stdin: what it is fed is a command stream
+  def sg-opt?(w) = len(w) > 1 && str_byte_at(w, 0) == 45;
+  def sg-script-of(rest) = nil?(rest) ? nothing() : sg-opt?(rest[0]) ? sg-script-of(rest[1:]) : rest[0];
+  def sg-shell?(argv) = !nil?(argv) && cw-in?(cw-shells(), cw-base(argv[0], [[], 0])) && nothing?(cw-shell-script(argv[1:], false));
+  def sg-stdin-shell?(argv) = sg-shell?(argv) && nothing?(sg-script-of(argv[1:]));
+  def sg-fed-names(argv, input) = sg-str?(input) && len(input) > 0 && sg-stdin-shell?(argv) ? sg-line-names(input) : [];
+  // a shell given a script file runs the file's text: the first argument that is no option
+  def sg-script-names(argv) {
+   let path = sg-shell?(argv) ? sg-script-of(argv[1:]) : nothing();
+   nothing?(path) || file_size(path) < 0 || file_size(path) > sg-cap() ? [] : sg-line-names(read_file(path) ?? "");
+  }
+  // the argv is one simple command; the words it runs come out of command-words' own reading of it
+  def sg-argv-names(argv, input) {
+   sg-strings?(argv) && !nil?(argv) ? append(append(cw-forbidden(cw-resolve(argv, [], [[], 0])), sg-script-names(argv)), sg-fed-names(argv, input)) : [];
+  }
+  // ---- the ending
+  def sg-uniq(xs, acc) = nil?(xs) ? reverse(acc) : cw-in?(acc, xs[0]) ? sg-uniq(xs[1:], acc) : sg-uniq(xs[1:], cons(xs[0], acc));
+  def sg-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ sg-join(xs[1:], sep);
+  def sg-way() = "edit with the edit door, read with read_file, list with fs_list, search and count with ./fkwu cells and BML (docs/form-native-agent-tools.md); a missing internal tool is written into the body, not borrowed";
+  def sg-ending(names) = nil?(names) ? "" : "forbidden-tool " ++ sg-join(sg-uniq(names, []), ", ") ++ ": not used here; " ++ sg-way();
+  // "" when the command may run, else the ending
+  def sg-argv-reason(argv, input) = sg-ending(sg-argv-names(argv, input));
+  // host-exec runs the line through /bin/sh and its input reaches the line's stdin: a command stream only when the line is
+  // itself a shell with no script ("sh", "bash -s")
+  def sg-split(cmd) = filter(w => len(w) > 0, split-on(cmd, " "));
+  def sg-line-fed-names(cmd, input) = sg-str?(cmd) && sg-str?(input) && len(input) > 0 && sg-stdin-shell?(sg-split(cmd)) ? sg-line-names(input) : [];
+  def sg-line-reason(cmd, input) = sg-ending(append(sg-line-names(cmd), sg-line-fed-names(cmd, input)));
+  // the stdin file of a spawn (a path; /dev/null is none), read only when the child is a shell that would run it
+  def sg-stdin-text(argv, path) = sg-strings?(argv) && sg-str?(path) && sg-stdin-shell?(argv) && file_size(path) > 0 && file_size(path) <= sg-cap() ? (read_file(path) ?? "") : "";
+  // ---- the doors, by their native names: vals is the argument list a door is called with
+  def sg-door-names() = ["host_spawn", "host_spawn_quiet", "host_spawn_at", "host_capture", "host-exec"];
+  def sg-door?(name) = cw-in?(sg-door-names(), name);
+  def sg-door-forbidden(name, vals) {
+   let ok = sg-list?(vals) && !nil?(vals);
+   !ok || !sg-door?(name) ? []
+   : (String) name == "host-exec" ? append(sg-line-names(vals[0]), sg-line-fed-names(vals[0], len(vals) > 1 ? vals[1] : ""))
+   : (String) name == "host_spawn_at" && len(vals) > 1 && sg-list?(vals[1]) && !nil?(vals[1]) ? sg-argv-names(vals[0], sg-stdin-text(vals[0], vals[1][0]))
+   : sg-argv-names(vals[0], "");
+  }
+  def sg-door-reason(name, vals) = sg-ending(sg-door-forbidden(name, vals));
+  // the short ending a control language answers (nothing=forbidden-tool:sed,awk (use the edit door, read_file, ./fkwu cells and BML);)
+  def sg-token(names) = "forbidden-tool:" ++ sg-join(sg-uniq(names, []), ",") ++ " (use the edit door, read_file, ./fkwu cells and BML)";
+  // ---- the guarded doors: the natives, asked first
+  def sg-spawn-at(argv, streams) = (String) sg-door-reason("host_spawn_at", [argv, streams]) != "" ? sg-refused-pid() : host_spawn_at(argv, streams);
+  def sg-spawn-quiet(argv) = (String) sg-argv-reason(argv, "") != "" ? sg-refused-pid() : host_spawn_quiet(argv);
+  def sg-spawn(argv) = (String) sg-argv-reason(argv, "") != "" ? sg-refused-pid() : host_spawn(argv);
+  def sg-capture(argv) = (String) sg-argv-reason(argv, "") != "" ? nothing() : host_capture(argv);
+  def sg-exec(cmd, input) = (String) sg-line-reason(cmd, input) != "" ? nothing() : host-exec(cmd, input);
+ }
+}
