@@ -111,11 +111,13 @@ local choices and observed learning should make repeated instructions unnecessar
 Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
 and BML. A missing internal tool belongs in that body, with its behavior observed
 in the same movement. Shell carries OS operations; perl, python, sed, awk and jq
-do not become implementation or analysis detours. The door holds this for sed, awk,
-perl and python: `.claude/settings.json` registers `observe/forbidden-tools-guard.bml` as
-a PreToolUse hook on every Bash and Monitor call, and a call that runs one is refused with a line that
-begins `sed/awk/perl/python is not used here`, names the word it read and says what to use
-instead (the reading and what it cannot see: `form/form-stdlib/bml/command-words.bml`).
+do not become implementation or analysis detours. The body holds this for sed, awk,
+perl and python itself: every door that begins a child (the walk's `hch-run`, the control language's doors, the heal
+and findings doors) reads the argv or shell line first through `form/form-stdlib/bml/spawn-guard.bml`, and a command
+that runs one gets a named ending (`forbidden-tool <names>: not used here; <what to use>`) and is never begun. What
+an agent ran in its own Bash calls shows in its transcript: `./fkwu observe/forbidden-tools-audit-run.bml` reads
+every transcript of this repo's checkouts and tallies the slips, and the land cadence prints that tally as a lens
+beside the gates each breath. The reading and what it cannot see: `form/form-stdlib/bml/command-words.bml`.
 
 ### Enrich the response with Form
 

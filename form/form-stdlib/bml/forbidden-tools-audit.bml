@@ -1,0 +1,204 @@
+// forbidden-tools-audit.bml — the commands agents ran, read from their transcripts, and which of them ran sed, awk, perl or python.
+//
+// The body refuses a forbidden tool at its own doors (spawn-guard.bml). An agent that works in this repo through a Bash or
+// Monitor tool call begins its children in its own host, outside those doors; its transcript is where that shows. This organ
+// reads the transcripts Claude Code keeps (<home>/.claude/projects/<project>/<session>.jsonl and, beside each,
+// <session>/subagents/*.jsonl), takes every Bash and Monitor tool_use command, and reads each with command-words.bml, the
+// reader the spawn guard asks. The tally is observed by the body each breath (observe/forbidden-tools-audit-run.bml is a
+// lens of the land cadence's readings); no one keeps it by hand.
+//
+// How a transcript is read: in chunks (read_file_slice, up to the last whole row of each), each chunk once per tool name by
+// str_find over the bytes, then the command string of each tool_use read in place (json-in-place.bml). No row is parsed into
+// nodes and no list is indexed: the cost is linear in the bytes read and in the commands found. A tool_use is counted once
+// by its id however many transcripts carry it (a resumed session copies the history of the one before it). A row's
+// timestamp is read where it stands, so since_hours reads the command's own time, not the file's.
+//
+// What it counts, and what it cannot see (command-words says the rest): a command is flagged when command-words reads sed, awk,
+// perl or python among the commands it runs; a command over fta-cap bytes counts and is not read; a tool_use whose command
+// string never closes or is no string is not counted. A tool that runs a forbidden program inside a script file is not seen.
+// A reading that did not arrive (no home, no transcripts, an unreadable file) is an empty tally, never a stop.
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/bml/command-words.bml form-stdlib/bml/json-in-place.bml form-stdlib/bml/order.bml form-stdlib/bml/parse.bml form-stdlib/bml/string-join.bml form-stdlib/bml/host-child.bml form-stdlib/hearth.bml
+section [form.bml] {
+ class ForbiddenToolsAudit {
+  def fta-marks() = ["\"name\":\"Bash\",\"input\":{", "\"name\":\"Monitor\",\"input\":{"];
+  def fta-chunk() = 8388608;
+  def fta-cap() = 200000;
+  def fta-shown() = 160;
+  // ---- time: "2026-10-04T00:24:11.123Z" to ms since the epoch (UTC); nothing when it does not read
+  def fta-num(s, from, k) = parse-int(substring(s, from, from + k));
+  def fta-days(y, m, d) {
+   let yy = m <= 2 ? y - 1 : y;
+   let era = yy / 400;
+   let yoe = yy - era * 400;
+   let doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+   era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+  }
+  def fta-ms(t) {
+   let ok = len(t) >= 19 && str_byte_at(t, 4) == 45 && str_byte_at(t, 10) == 84;
+   let y = ok ? fta-num(t, 0, 4) : nothing();
+   let mo = ok ? fta-num(t, 5, 2) : nothing();
+   let d = ok ? fta-num(t, 8, 2) : nothing();
+   let h = ok ? fta-num(t, 11, 2) : nothing();
+   let mi = ok ? fta-num(t, 14, 2) : nothing();
+   let s = ok ? fta-num(t, 17, 2) : nothing();
+   nothing?(y) || nothing?(mo) || nothing?(d) || nothing?(h) || nothing?(mi) || nothing?(s) ? nothing() : (((fta-days(y, mo, d) * 24 + h) * 60 + mi) * 60 + s) * 1000;
+  }
+  def fta-iso(ms) = nothing?(ms) ? "" : fta-iso-of(ms / 1000);
+  def fta-pad(n, w) = len(n.str()) >= w ? n.str() : "0" ++ fta-pad2(n, w - 1);
+  def fta-pad2(n, w) = len(n.str()) >= w ? n.str() : "0" ++ fta-pad2(n, w - 1);
+  // civil date of a day number (days since 1970-01-01), then the clock
+  def fta-iso-of(secs) {
+   let days = secs / 86400;
+   let rest = secs - days * 86400;
+   let z = days + 719468;
+   let era = z / 146097;
+   let doe = z - era * 146097;
+   let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+   let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+   let mp = (5 * doy + 2) / 153;
+   let d = doy - (153 * mp + 2) / 5 + 1;
+   let m = mp < 10 ? mp + 3 : mp - 9;
+   let y = yoe + era * 400 + (m <= 2 ? 1 : 0);
+   y.str() ++ "-" ++ fta-pad(m, 2) ++ "-" ++ fta-pad(d, 2) ++ "T" ++ fta-pad(rest / 3600, 2) ++ ":" ++ fta-pad((rest % 3600) / 60, 2) ++ ":" ++ fta-pad(rest % 60, 2) ++ "Z";
+  }
+  // ---- one chunk: the tool_use commands of the rows it holds whole
+  // the tool_use id just before the mark: `"id":"toolu_..","name":"Bash"` (empty when none stands in the 120 bytes before)
+  def fta-last-in(s, needle, from, best) {
+   let at = str_find(s, needle, from);
+   at < 0 ? best : fta-last-in(s, needle, at + 1, at);
+  }
+  def fta-id(text, at) {
+   let lo = at > 120 ? at - 120 : 0;
+   let slice = substring(text, lo, at);
+   let k = fta-last-in(slice, "\"id\":\"", 0, -1);
+   let e = k < 0 ? -1 : str_find(slice, "\"", k + 6);
+   k < 0 || e < 0 ? "" : substring(slice, k + 6, e);
+  }
+  def fta-time(text, n, at) {
+   let ts = str_find(text, "\"timestamp\":\"", at);
+   let row = str_find(text, "\n", at);
+   ts < 0 || (row >= 0 && ts > row) ? nothing() : fta-ms(substring(text, ts + 13, ts + 32));
+  }
+  // an entry: [absolute position, tool_use id, the command or nothing, the row's time in ms or nothing]
+  def fta-entry(text, n, off, at, mark) = [off + at, fta-id(text, at), jip-field(text, n, at + len(mark) - 1, "command"), fta-time(text, n, at)];
+  def fta-pass(text, n, off, mark, from, acc) {
+   let at = str_find(text, mark, from);
+   at < 0 ? acc : fta-pass(text, n, off, mark, at + len(mark), cons(fta-entry(text, n, off, at, mark), acc));
+  }
+  def fta-scan(text, off) {
+   let n = len(text);
+   append(fta-pass(text, n, off, fta-marks()[0], 0, []), fta-pass(text, n, off, fta-marks()[1], 0, []));
+  }
+  // ---- reading a command
+  def fta-names(cmd) = len(cmd) > fta-cap() ? [] : cw-forbidden(cw-words(cmd));
+  def fta-uniq(xs, acc) = nil?(xs) ? reverse(acc) : cw-in?(acc, xs[0]) ? fta-uniq(xs[1:], acc) : fta-uniq(xs[1:], cons(xs[0], acc));
+  // the command as one line, its first fta-shown bytes: line breaks read as " ; "
+  def fta-one-line(cmd) = fta-join(split-on(substring(trim(cmd), 0, len(trim(cmd)) < fta-shown() ? len(trim(cmd)) : fta-shown()), "\n"), " ; ");
+  def fta-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ fta-join(xs[1:], sep);
+  // ---- a file: [commands counted, flagged: [[position, id, command, time, names]...]]
+  def fta-last-nl(s, i) = i < 0 ? -1 : str_byte_at(s, i) == 10 ? i : fta-last-nl(s, i - 1);
+  def fta-in-window?(e, since) = since <= 0 || nothing?(e[3]) || e[3] >= since;
+  def fta-fresh?(e, seen) = (String) e[1] == "" || !record_has(seen, e[1]);
+  def fta-flag-of(e) = [e[0], e[1], e[2], e[3], fta-names(e[2])];
+  // fold the entries of a chunk into [count, flagged]; an id is marked seen as it is counted
+  def fta-take(entries, since, seen, acc) {
+   nil?(entries) ? acc : fta-take(entries[1:], since, seen, fta-one(entries[0], since, seen, acc));
+  }
+  def fta-one(e, since, seen, acc) {
+   let counted = !nothing?(e[2]) && fta-in-window?(e, since) && fta-fresh?(e, seen);
+   let marked = counted && (String) e[1] != "" ? record_set(seen, e[1], 1) : 0;
+   counted ? [acc[0] + 1, fta-keep(fta-flag-of(e), acc[1])] : acc;
+  }
+  def fta-keep(flag, flagged) = nil?(flag[4]) ? flagged : cons(flag, flagged);
+  def fta-file(path, since, seen) = fta-file-go(path, file_size(path), 0, fta-chunk(), since, seen, [0, []]);
+  def fta-file-go(path, size, off, chunk, since, seen, acc) {
+   let want = size - off < chunk ? size - off : chunk;
+   let slice = want <= 0 ? "" : (read_file_slice(path, off, want) ?? "");
+   let last = off + len(slice) >= size;
+   let cut = last ? len(slice) : fta-last-nl(slice, len(slice) - 1) + 1;
+   want <= 0 || len(slice) == 0 ? acc
+   : cut <= 0 ? fta-file-go(path, size, off, chunk * 2, since, seen, acc)
+   : fta-file-go(path, size, off + cut, chunk, since, seen, fta-take(fta-scan(cut == len(slice) ? slice : substring(slice, 0, cut), off), since, seen, acc));
+  }
+  // ---- where the transcripts are
+  def fta-jsonl?(name) = len(name) > 6 && (String) substring(name, len(name) - 6, len(name)) == ".jsonl";
+  def fta-stem(name) = substring(name, 0, len(name) - 6);
+  def fta-slug(path) = str-join-with(split-on(str-join-with(split-on(path, "/"), "-"), "."), "-");
+  // the repo's checkouts share one prefix: the slug of the main checkout (git's common directory, which every worktree names),
+  // else of the working directory up to --claude-worktrees-
+  def fta-main-checkout() {
+   let common = hch-read(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+   len(common) > 5 && (String) substring(common, len(common) - 5, len(common)) == "/.git" ? substring(common, 0, len(common) - 5) : host_cwd();
+  }
+  def fta-prefix() {
+   let slug = fta-slug(fta-main-checkout());
+   let cut = str_find(slug, "--claude-worktrees-", 0);
+   cut < 0 ? slug : substring(slug, 0, cut);
+  }
+  def fta-project-of(dirname) {
+   let cut = str_find(dirname, "--claude-worktrees-", 0);
+   cut < 0 ? "main" : substring(dirname, cut + 19, len(dirname));
+  }
+  def fta-root() = nothing?(hearth-person-home()) ? nothing() : hearth-person-home() ++ "/.claude/projects";
+  def fta-dirs(scope) = fta-dirs-of(fta-root(), scope, (String) scope == "all" ? "" : fta-prefix());
+  def fta-dirs-of(root, scope, prefix) = nothing?(root) ? [] : (fs_list(root) ?? []) |> filter(name => (Comparable) fs_is_dir(root ++ "/" ++ name) == 1 && ((String) scope == "all" || starts-with?(name, prefix))) |> map(name => [name, root ++ "/" ++ name]);
+  // sources: [kind, label, project, path] for every transcript of a project directory: the sessions and their subagents
+  def fta-sources-of(dir) {
+   let names = fs_list(dir[1]) ?? [];
+   let mains = names |> filter(name => fta-jsonl?(name)) |> map(name => ["session", fta-stem(name), fta-project-of(dir[0]), dir[1] ++ "/" ++ name]);
+   let subs = names |> filter(name => (Comparable) fs_is_dir(dir[1] ++ "/" ++ name) == 1) |> map(name => fta-subagents(dir, name));
+   append(mains, foldl((acc, xs) => append(acc, xs), [], subs));
+  }
+  def fta-subagents(dir, sid) {
+   let at = dir[1] ++ "/" ++ sid ++ "/subagents";
+   (Comparable) fs_is_dir(at) != 1 ? [] : (fs_list(at) ?? []) |> filter(name => fta-jsonl?(name)) |> map(name => ["agent", sid ++ "/" ++ fta-stem(name), fta-project-of(dir[0]), at ++ "/" ++ name]);
+  }
+  def fta-sources(scope, session) = fta-sources-in(fta-dirs(scope), session);
+  def fta-sources-in(dirs, session) {
+   let all = foldl((acc, d) => append(acc, fta-sources-of(d)), [], dirs);
+   (String) session == "" ? all : filter(s => str_find(s[1], session, 0) >= 0, all);
+  }
+  // newest first by the file's last write
+  def fta-key(s) = fta-pad(file_mtime(s[3]) ?? 0, 12);
+  def fta-newest-first(sources) = reverse(sort-keyed(sources |> map(s => [fta-key(s), s]))) |> map(r => r[1]);
+  // ---- the audit: one row per source with commands: [source, count, flagged]
+  def fta-audit(sources, since, seen) = nil?(sources) ? [] : fta-audit-row(sources[0], fta-file(sources[0][3], since, seen), fta-audit(sources[1:], since, seen));
+  def fta-audit-row(s, got, rest) = got[0] == 0 ? rest : cons([s, got[0], got[1]], rest);
+  def fta-run(scope, session, since) = fta-run-dirs(fta-dirs(scope), session, since);
+  // the same over named project directories ([name, path] rows), which is how a band stands a scratch root in for <home>/.claude/projects
+  def fta-run-dirs(dirs, session, since) = fta-audit(fta-newest-first(fta-sources-in(dirs, session)), since, record_new(0));
+  // ---- the report
+  def fta-count(rows) = foldl((t, r) => t + r[1], 0, rows);
+  def fta-flagged(rows) = foldl((t, r) => t + len(r[2]), 0, rows);
+  def fta-with-slips(rows) = len(filter(r => !nil?(r[2]), rows));
+  def fta-newest(flag) = fta-iso(flag[3]);
+  def fta-flag-line(flag) = "    " ++ fta-newest(flag) ++ " [" ++ fta-join(fta-uniq(flag[4], []), ",") ++ "] " ++ fta-one-line(flag[2]);
+  def fta-row-lines(row) {
+   let s = row[0];
+   cons(s[0] ++ " " ++ s[1] ++ " (" ++ s[2] ++ ") commands=" ++ row[1].str() ++ " flagged=" ++ len(row[2]).str(), map(f => fta-flag-line(f), sort-flags(row[2])));
+  }
+  // newest first within a row: by position, which is the order of the transcript
+  def sort-flags(flags) = reverse(sort-keyed(flags |> map(f => [fta-pad(f[0], 12), f])) |> map(r => r[1]));
+  def fta-top(rows, top) = top <= 0 ? rows : take(top, rows);
+  def fta-lines(rows, top) = foldl((acc, r) => append(acc, fta-row-lines(r)), [], fta-top(rows, top));
+  def fta-totals(rows) = "forbidden-tools-audit totals sessions=" ++ len(rows).str() ++ " commands=" ++ fta-count(rows).str() ++ " flagged=" ++ fta-flagged(rows).str() ++ " sessions-with-slips=" ++ fta-with-slips(rows).str();
+  // ---- the lens beside the gates: the reading is flagged + 1 (0 is the lens's own word for no reading), and the note says how
+  // many commands the last breath had not seen
+  def fta-code(rows) = fta-flagged(rows) + 1;
+  def fta-prev-code(prevText) = nothing?(prevText) ? nothing() : parse-int(fta-prev-value(prevText));
+  def fta-prev-value(text) {
+   let at = str_find("\n" ++ text, "\nforbidden=", 0);
+   at < 0 ? "" : fta-line-from(substring("\n" ++ text, at + 11, len("\n" ++ text)));
+  }
+  def fta-line-from(s) {
+   let nl = str_find(s, "\n", 0);
+   nl < 0 ? s : substring(s, 0, nl);
+  }
+  def fta-since-note(rows, prevText) {
+   let prev = fta-prev-code(prevText);
+   let now = fta-flagged(rows);
+   nothing?(prev) ? "note: forbidden-tool commands since last breath: " ++ now.str() ++ " in all transcripts read (the first reading)"
+   : "note: forbidden-tool commands since last breath: " ++ (now - (prev - 1) < 0 ? 0 : now - (prev - 1)).str() ++ " (" ++ now.str() ++ " in all transcripts read)";
+  }
+ }
+}

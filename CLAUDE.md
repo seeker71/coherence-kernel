@@ -39,8 +39,10 @@ Work through the body's own tools and flows (Urs, 2026-09-28): edit with the edi
 and count with `./fkwu` cells and BML, search and inspect through the native agent tools
 ([`docs/form-native-agent-tools.md`](docs/form-native-agent-tools.md)) — not perl, python, sed or awk. A missing
 internal tool is a signal to write it and include it in the body, in the same movement; never reach for an external
-tool to get past it. The door enforces this: a Bash or Monitor call that runs sed, awk, perl or python is refused by the
-PreToolUse guard (`.claude/settings.json`, `observe/forbidden-tools-guard.bml`), and the refusal line says what to use.
+tool to get past it. The body holds this itself: every door of the body that begins a child reads the command first, and
+one that runs sed, awk, perl or python is refused with a named ending that says what to use
+([`form/form-stdlib/bml/spawn-guard.bml`](form/form-stdlib/bml/spawn-guard.bml)); what agents ran in their own Bash calls
+is read from their transcripts each breath (`observe/forbidden-tools-audit-run.bml`, a lens beside the land cadence's gates).
 
 Attune before writing: read a receipt or two and borrow the body's words
 ([`teachings/voice-attunement.md`](teachings/voice-attunement.md)); `observe/voice-frequency-run.fk` is a mirror,
