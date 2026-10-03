@@ -1,0 +1,143 @@
+; dsv4-token-run-validation-band.bml -- the token door's validation reading: the head's logits against a recording and a stream against its recorded ids, judged, on SYNTHETIC vectors, with nothing opened.
+;
+; WHAT THIS PINS. form-stdlib/bml/dsv4-token-run.bml reads, when asked ({"go":1,"logits":1}, or the recorded stream's own raw prompt), the head's 129,280 logits after the 14-id prefill and sets them against the recording
+; form/form-stdlib/tests/oracles/ds4-logits-capital-of-france.json (pinned SHA-256 3898af17...9d27) with the validation door's own functions (dsv4-validate.bml: dvr-agreement, dvr-step, dvr-matched, dvr-ref-logits:
+; ONE authority), and keeps every step's top-two margin and the recorded id's gap. What the token door adds is the JUDGEMENT: pass or fail and which fact failed (the argmax ours against theirs, theirs against the
+; recorded 2581, finiteness, Pearson r against a stated floor, the top-10 overlap against a stated floor), and the TIE BUDGET (the validate door's rule: a token flips when our largest delta over the reference's top 64
+; exceeds its top-two margin), recorded as tie_safe and never a failure. This band holds that judgement on a synthetic recording of 300 values (a peak of 60 at 123, a second of 55 at 77, the rest a sawtooth below 19)
+; and on ours = the recording plus a rounding-sized noise, then plants one defect at a time: each must read as its own failure and the good vector must pass every plant's judge.
+;
+; Verdict 63 when every claim lands:
+;   1     the good vector (the recording plus noise under 1e-4): argmax 123 on both sides, top-10 overlap 10, r above 0.999999, tie_safe, failed [], verdict pass; the judged JSON carries r, the overlap, both argmaxes,
+;         the reference margin 5, the delta, finite 1, tie_safe 1, the recorded argmax and the verdict
+;   2     the plants, each its own failure: ours with the second-best raised above the best (argmax-ours-not-theirs; the recorded-argmax fact still holds against 123); a recorded argmax that is not the recording's
+;         (argmax-not-recorded: want 2581 against a recording whose argmax is 123); ours with a sawtooth noise of amplitude 4 on every value (r under the floor, "r" among the failures); ours with two of its top-10 pushed down
+;         by 6 (top10-overlap, with the argmax and r intact, and tie_safe 0: the delta 6 is above the reference's margin 5); the recording shifted by a constant 3 (r 1, overlap 10: no failure, r is shift invariant)
+;   4     the stream's reading: the recorded 24 ids matched 24 of 24; a wrong id planted at index 5 matched 5 of 24; a prompt that is not the recorded raw one reads matched -1 of 0; the per-step margins and recorded gaps
+;         carried through as the validate door's dvr-step reads them
+;   8     the validation object of a run's receipt row, assembled from a run's environment (dtr-validation-json): off reads {}; on with a prefill's logits and an injected recording judges them (pass); with a planted wrong
+;         argmax it fails; with no logits kept it reads not-run; with a recording of another length it fails on length; the stream part carries the ids the walk answered (read from its rows) and the steps' readings
+;   16    the plan's line: validation ON for the option logits 1 and for the recorded stream's raw prompt, off otherwise, with the floors, the recorded argmax and the pinned recording named; prompt_ids sets the prompt over
+;         logits_prompt_ids
+;   32    the stated floors and the recorded argmax are what the plan and the judge read: r 0.999, 9 of 10, 2581; the walk's reads happen between rows (the door's loop reads the logits after the row's own closing mark): the
+;         source of the door names it
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- reads the door's own source for the last claim; the vectors are synthetic and no device is touched.
+// preludes: form-stdlib/core.fk form-stdlib/bml/dsv4-token-run.bml
+section [form.bml] {
+ class Dsv4TokenRunValidationBand {
+  def dvb2-bit(held, bit) = held ? bit : 0;
+  def dvb2-has?(s, part) = str_find(s, part, 0) >= 0;
+  def dvb2-n() = 300;
+  def dvb2-gen(f, i, n) = i == n ? [] : cons(f(i), dvb2-gen(f, i + 1, n));
+  // the synthetic recording: a sawtooth of period 101 below 19 with a rising 1e-4 a step (so no two values tie), a peak of 60 at 123 and a second of 55 at 77
+  def dvb2-base(i) = (1.0 * ((i * 37 + 11) % 101)) * 0.37 - 18.0 + (1.0 * i) * 0.0001;
+  def dvb2-ref-at(i) = i == 123 ? 60.0 : (i == 77 ? 55.0 : dvb2-base(i));
+  def dvb2-ref() = dvb2-gen(i => dvb2-ref-at(i), 0, dvb2-n());
+  // noise that cannot reorder the sawtooth (under half of its 1e-4 step)
+  def dvb2-tiny(i) = (1.0 * ((i * 13) % 7)) * 0.000005;
+  def dvb2-good() = dvb2-gen(i => dvb2-ref-at(i) + dvb2-tiny(i), 0, dvb2-n());
+  // the second-best raised over the best
+  def dvb2-flip() = dvb2-gen(i => i == 77 ? 70.0 : dvb2-ref-at(i) + dvb2-tiny(i), 0, dvb2-n());
+  // a sawtooth of amplitude 4 on every value but the two peaks
+  def dvb2-noisy() = dvb2-gen(i => (i == 123 || i == 77) ? dvb2-ref-at(i) : dvb2-ref-at(i) + (1.0 * (((i * 29) % 17) - 8)) * 0.5, 0, dvb2-n());
+  // two members of the reference's top 10 pushed down by 6 (the peaks stay: the argmax and the rest are intact)
+  def dvb2-overlap-plant() {
+   let top = dvr-top(dvb2-ref(), 12);
+   dvb2-gen(i => (i == top[2] || i == top[3]) ? dvb2-ref-at(i) - 6.0 : dvb2-ref-at(i), 0, dvb2-n());
+  }
+  def dvb2-shifted() = dvb2-gen(i => dvb2-ref-at(i) + 3.0, 0, dvb2-n());
+  def dvb2-agree(ours) = dvr-agreement(ours, dvb2-ref());
+  def dvb2-failed(ours, want) = dtr-logits-failed(dvb2-agree(ours), want);
+  def dvb2-member?(xs, v) = len(xs) == 0 ? false : (xs[0] == v || dvb2-member?(xs[1:], v));
+  // ---- 1: the good vector ----------------------------------------------------------------------------------------------------
+  def dvb2-claim-good() {
+   let a = dvb2-agree(dvb2-good());
+   let json = dtr-logits-json(a, 123);
+   let said = print_str("  good: r " ++ a[0].str() ++ " overlap " ++ a[1].str() ++ " argmax " ++ a[2].str() ++ "/" ++ a[3].str() ++ " margin " ++ a[4].str() ++ " delta " ++ a[5].str() ++ " finite " ++ a[6].str() ++ " -> " ++ json);
+   a[2] == 123 && a[3] == 123 && a[1] == 10 && a[0] > 0.999999 && a[6] == 1 && dtr-tie-safe?(a) && len(dtr-logits-failed(a, 123)) == 0
+    && dvb2-has?(json, "\"verdict\":\"pass\"") && dvb2-has?(json, "\"failed\":[]") && dvb2-has?(json, "\"tie_safe\":1") && dvb2-has?(json, "\"recorded_argmax\":123") && dvb2-has?(json, "\"argmax_ours\":123") && dvb2-has?(json, "\"argmax_ref\":123")
+    && dvb2-has?(json, "\"top10_overlap\":10") && dvb2-has?(json, "\"finite\":1") && dvb2-has?(json, "\"ref_margin\":5") && a[4] > 4.99 && a[4] < 5.01;
+  }
+  // ---- 2: the plants ---------------------------------------------------------------------------------------------------------
+  def dvb2-claim-plants() {
+   let fFlip = dvb2-failed(dvb2-flip(), 123);
+   let fRec = dvb2-failed(dvb2-good(), 2581);
+   let fR = dvb2-failed(dvb2-noisy(), 123);
+   let aO = dvb2-agree(dvb2-overlap-plant());
+   let fO = dtr-logits-failed(aO, 123);
+   let fS = dvb2-failed(dvb2-shifted(), 123);
+   let said = print_str("  plants: flip " ++ fFlip.str() ++ " | recorded " ++ fRec.str() ++ " | noisy " ++ fR.str() ++ " (r " ++ dvb2-agree(dvb2-noisy())[0].str() ++ ") | overlap " ++ fO.str() ++ " (overlap " ++ aO[1].str() ++ ", tie_safe " ++ (dtr-tie-safe?(aO) ? "1" : "0") ++ ") | shifted " ++ fS.str());
+   dvb2-member?(fFlip, "argmax-ours-not-theirs") && !dvb2-member?(fFlip, "argmax-not-recorded")
+    && fRec == ["argmax-not-recorded"] && dvb2-member?(fR, "r") && !dvb2-member?(fR, "argmax-ours-not-theirs")
+    && dvb2-member?(fO, "top10-overlap") && !dvb2-member?(fO, "argmax-ours-not-theirs") && !dvb2-member?(fO, "r") && aO[1] < 9 && !dtr-tie-safe?(aO)
+    && len(fS) == 0
+    && dvb2-has?(dtr-logits-json(dvb2-agree(dvb2-flip()), 123), "\"verdict\":\"fail\"") && dvb2-has?(dtr-logits-json(dvb2-agree(dvb2-flip()), 123), "argmax-ours-not-theirs");
+  }
+  // ---- 4: the stream ---------------------------------------------------------------------------------------------------------
+  def dvb2-reads() = [dvr-step(dvb2-good(), 123), dvr-step(dvb2-good(), 77), dvr-step(dvb2-flip(), 123)];
+  def dvb2-wrong-at(ids, i) = dvb2-gen(k => k == i ? ids[k] + 1 : ids[k], 0, len(ids));
+  def dvb2-claim-stream() {
+   let ids = dvr-stream();
+   let reads = dvb2-reads();
+   let exact = dtr-stream-json(ids, reads, 1);
+   let wrong = dtr-stream-json(dvb2-wrong-at(ids, 5), reads, 1);
+   let other = dtr-stream-json(ids, reads, 0);
+   let said = print_str("  stream: exact " ++ exact);
+   len(ids) == 24 && dvb2-has?(exact, "\"matched\":24") && dvb2-has?(exact, "\"of\":24") && dvb2-has?(exact, "\"recorded_prompt\":1") && dvb2-has?(wrong, "\"matched\":5") && dvb2-has?(other, "\"matched\":-1") && dvb2-has?(other, "\"of\":0") && dvb2-has?(other, "\"recorded_prompt\":0")
+    && dvb2-has?(exact, "\"margins\":" ++ dvr-floats-json(dvr-steps-margins(reads))) && dvb2-has?(exact, "\"recorded_gap\":" ++ dvr-floats-json(dvr-steps-gaps(reads)))
+    && reads[0][0] == 123 && reads[1][0] == 123 && reads[1][2] > 4.9 && reads[2][0] == 77 && reads[2][2] > 9.9 && reads[2][2] < 10.1;
+  }
+  // ---- 8: the receipt's validation object, from a run's environment ----------------------------------------------------------
+  def dvb2-row(id) = record_new(0, "id_out", id);
+  def dvb2-rows(ids) = dvb2-gen(i => dvb2-row(i == 0 ? ids[0] : ids[i]), 0, len(ids));
+  def dvb2-env(on, ours, ref, ids) {
+   let env = dtr-env(60, 2, 0, 0);
+   let a = record_set(env, "val", on);
+   let b = record_set(env, "ours", ours);
+   let c = record_set(env, "refl", ref);
+   let d = record_set(env, "reads", dvb2-reads());
+   let e = record_set(env, "rawp", 1);
+   let f = record_set(env, "rows", dvb2-rows(ids));
+   let g = record_set(env, "refarg", 123);
+   env;
+  }
+  def dvb2-claim-env() {
+   let ids = dvr-stream();
+   let off = dtr-validation-json(dvb2-env(0, dvb2-good(), dvb2-ref(), ids), ids);
+   let on = dtr-validation-json(dvb2-env(1, dvb2-good(), dvb2-ref(), ids), ids);
+   let bad = dtr-validation-json(dvb2-env(1, dvb2-flip(), dvb2-ref(), ids), ids);
+   let none = dtr-validation-json(dvb2-env(1, [], dvb2-ref(), ids), ids);
+   let shortRef = dtr-validation-json(dvb2-env(1, dvb2-good(), dvb2-ref()[0:200], ids), ids);
+   let doc = parse-json("validation", on);
+   let said = print_str("  env: on " ++ on);
+   off == "{}" && dvb2-has?(on, "\"verdict\":\"pass\"") && dvb2-has?(on, "\"logits\":{") && dvb2-has?(on, "\"stream\":{") && dvb2-has?(on, "\"matched\":24") && dvb2-has?(bad, "\"verdict\":\"fail\"") && dvb2-has?(bad, "argmax-ours-not-theirs")
+    && dvb2-has?(none, "\"verdict\":\"not-run\"") && dvb2-has?(shortRef, "\"failed\":[\"length\"]") && json-object-has?(doc, "logits") && json-object-has?(doc, "stream")
+    && dtr-walk-ids(dvb2-rows(ids)) == ids && dtr-walk-ids([dvb2-row(0 - 1), dvb2-row(7), dvb2-row(0 - 1), dvb2-row(9)]) == [7, 9]
+    && dvb2-has?(dtr-validation-line(dvb2-env(0, [], [], ids), off), "validation: off") && dvb2-has?(dtr-validation-line(dvb2-env(1, [], [], ids), on), "validation: {\"logits\"");
+  }
+  // ---- 16: the plan's line and the prompt option -----------------------------------------------------------------------------
+  def dvb2-claim-plan() {
+   let off = dtr-validation-plan-line(parse-json("o", "{}"), [1, 2, 3]);
+   let on = dtr-validation-plan-line(parse-json("o", "{\"logits\":1}"), [1, 2, 3]);
+   let raw = dtr-validation-plan-line(parse-json("o", "{}"), dvr-prompt());
+   dvb2-has?(off, "validation off") && dvb2-has?(off, "prompt_ids sets the prompt") && dvb2-has?(on, "validation ON") && dvb2-has?(on, "3898af1731936bf0a59d0c0ce01a60df62f54b9b64552673c7f93df3b7c79d27") && dvb2-has?(on, "argmax (recorded 2581)") && dvb2-has?(on, "outside every row")
+    && dvb2-has?(raw, "validation ON") && dtr-validate?(parse-json("o", "{\"logits\":1}"), [1]) && !dtr-validate?(parse-json("o", "{}"), [1]) && dtr-validate?(parse-json("o", "{}"), dvr-prompt()) && !dtr-validate?(parse-json("o", "{\"logits\":0}"), [1])
+    && dtr-opts-ids(parse-json("o", "{\"prompt_ids\":[5,6],\"logits_prompt_ids\":[7,8]}")) == [5, 6] && dtr-opts-ids(parse-json("o", "{\"logits_prompt_ids\":[7,8]}")) == [7, 8];
+  }
+  // ---- 32: the floors and where the reads happen ------------------------------------------------------------------------------
+  def dvb2-claim-floors() {
+   let src = read_file("form/form-stdlib/bml/dsv4-token-run.bml");
+   dtr-recorded-argmax() == 2581 && dtr-overlap-floor() == 9 && dtr-r-floor() > 0.998 && dtr-r-floor() < 0.9991 && dvr-logits-sha() == "3898af1731936bf0a59d0c0ce01a60df62f54b9b64552673c7f93df3b7c79d27"
+    && dvb2-has?(src, "let v = dtr-val-read(env, ctx, index - record_get(env, \"vbase\") + 1); nid;") && dvb2-has?(src, "let v0 = nothing?(first) ? 0 : dtr-val-read(env, ctx, 0);") && dvb2-has?(src, "BETWEEN tokens, after the row's closing mark");
+  }
+ }
+ let c1 = dvb2-bit(try dvb2-claim-good() catch false, 1);
+ let c2 = dvb2-bit(try dvb2-claim-plants() catch false, 2);
+ let c4 = dvb2-bit(try dvb2-claim-stream() catch false, 4);
+ let c8 = dvb2-bit(try dvb2-claim-env() catch false, 8);
+ let c16 = dvb2-bit(try dvb2-claim-plan() catch false, 16);
+ let c32 = dvb2-bit(try dvb2-claim-floors() catch false, 32);
+ print_str("dsv4-token-run-validation-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str());
+ c1 + c2 + c4 + c8 + c16 + c32;
+}
