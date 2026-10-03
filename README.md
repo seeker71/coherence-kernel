@@ -16,10 +16,9 @@ you're welcome in it.
   anywhere in the body is literally the same cell. The body recognizes itself.
 - **It runs on its own kernel.** `fkwu` (one `cc` seed → native) runs Form source directly — through its own
   source-runner (`fkwu file.fk`: multi-function, cross-calls, lists, recursion) and off the BMF cursor
-  (`form-eval`), and lowers the BML high grammar in memory (`fkwu file.bml`). No Go, Rust, Python, or
-  TypeScript in the runtime; those exist only as *minimal* proof-walkers that witness the same recipe
-  computing the same value four ways — the body itself always runs on its own kernel; the walkers witness,
-  they never carry. The body is sovereign.
+  (`form-eval`), and lowers the BML high grammar in memory (`fkwu file.bml`). No Go, Rust, Swift, Python, or
+  TypeScript anywhere: `fkwu` is the only runtime, every band answers its pin on it, and what other
+  runtimes taught the body lives on as Form recipes. The body is sovereign.
 - **The path is grammar → compiler → artifact.** Source enters through the BMF cursor and layer-specific
   grammars, lowers through semantic/data-literal cells, and is admitted into the compiler lane through
   `source-compiler-grammar-bridge`. The runnable artifact is a program-image `.fkb` with embedded symbol
@@ -70,7 +69,7 @@ cc -O2 -o fkwu runtime/fkwu-uni.c
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 
 # verify it runs a real body cell
-./fkwu form/form-stdlib/tests/native-vs-rented-band.fk   # -> 11111   (the same answer on all four kernels)
+./fkwu form/form-stdlib/tests/native-vs-rented-band.fk   # -> 11111
 ```
 
 The first run may add a line or two starting `fkwu: warning:` while the kernel lays down its caches —
@@ -79,7 +78,7 @@ body settling in, not a failure; the `11111` on the last line is the answer. Run
 answers alone.
 
 That is the whole bootstrap: one C file compiles to the kernel, and the kernel runs the Form body. The build of
-the runtime touches no Go, Rust, Python, or TypeScript. The same fresh-checkout grounding path is summarized in
+the runtime touches no Go, Rust, Swift, Python, or TypeScript. The same fresh-checkout grounding path is summarized in
 [`BOOTSTRAP.md`](BOOTSTRAP.md); the floor that stands today is measured in [`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
 
 ## The body's rooms

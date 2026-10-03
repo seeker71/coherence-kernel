@@ -18,8 +18,6 @@ sits. Where the body is going lives in [`NORTH_STAR.md`](NORTH_STAR.md); what st
 - `form-cli` — the agent surface.
 - The **Form-native recipes** (`.fk`) and the **BML high grammar** (`.bml`). New meaning is authored in BML or
   higher; `.fk` is a lowering.
-- The **four-way proof surface**: the minimal Go/Rust/TS walkers under `walkers/`, the full sibling kernels
-  `form/form-kernel-go|rust|ts`, and the proof entry `proof/`. They witness; the body runs on `fkwu`.
 - The **knowledge body** the kernel reasons and builds from: the grammar specs (BMF — `form/form-stdlib/bmf-core.fk`,
   `bmf-grammar.fk`, `shell-grammar.fk`, `grammar-loader.fk`; BML — `grammars/bml-native-north-star.form`) and the
   scoped teachings (`teachings/`).
@@ -52,16 +50,14 @@ lowers the high grammar in memory through the body's own compiler. The artifacts
 caches beside a source, and a `.dylib` where a native carrier sits: the Metal carrier
 (`form/native/metal/fk-metal-carrier.m`) builds into a dylib `fkwu` loads in its own process.
 
-**The walkers witness; fkwu carries.** Each walker is an independent lexer and evaluator, doing the minimum needed to
-witness four-way agreement on the pure-recipe surface. Everything natively owned lives in or derives from `fkwu`:
-the JIT (crystallize on heat; the route is `docs/native-jit-routing.md`), the host-OS surface, the Form→asm
-lowering, and Metal. Build out fkwu; keep the walkers thin.
+**fkwu carries.** Everything natively owned lives in or derives from `fkwu`: the JIT (crystallize on heat; the
+route is `docs/native-jit-routing.md`), the host-OS surface, the Form→asm lowering, and Metal. Build out fkwu.
 
 **Core recipes in BML.** Core recipes move out of the C seed into BML and reach each platform through the JIT; the
 seed lowers into its Form organs, and its size (`wc -l runtime/fkwu-uni.c`) is the reading of that walk
 (`form/form-stdlib/release-ledger.bml`, family R13). The native op surface is one manifest,
 `form/form-stdlib/native-op-manifest.fk`; `flatten/` generates `runtime/fkwu-optable.h` from its rows, and
-`./fkwu gate/op-manifest.bml` reads the manifest, the table, the seed and the sibling kernels in agreement. The
+`./fkwu gate/op-manifest.bml` reads the manifest, the table and the seed in agreement. The
 shell carriers that still build and regenerate emitted artifacts (`form/build-form-cli.sh`, `form/scripts/`) are
 on their way to Form doors (R59).
 
@@ -72,22 +68,16 @@ minimal surface and the recipe body. What is being released, reunited or lowered
 
 ## Proof
 
-Every recipe on the pure-recipe surface is proven **four-way** (`Go = Rust = TS = fkwu`) and executed on `fkwu`. The
-kernel proves this itself:
-
-```sh
-./fkwu proof/four-way-run-recipe42.fk    # -> 0  FOUR-WAY once the three walkers are built (2 WALKER-SUSPECT while they are not)
-```
-
-`form/form-stdlib/four-way-run.fk` host-execs the three walkers and fkwu on a recipe, and
-`form/form-stdlib/four-way-verdict.fk` reads their agreement. Organs that use fkwu-only natives (content-addressing,
-host-io, floats, Metal) are **fkwu-witnessed** by their own bands and named as such. A band's `; PROOF LEVEL:` line
-is probed, not inferred (`observe/preflight.fk`, `pf-arm-mask`).
+Every band runs on `fkwu`, the one runtime, and answers its pin there (`form/validate.sh`; the registered verdicts
+are `form/band-verdicts.txt`). `./fkwu bootstrap/ground.fk` answers 42, and `gate/canonical-conformance.bml` holds
+fkwu and the Form codec to the pinned canonical expressions, the FORMBIN2 artifact and the malformed artifacts. A band
+that needs a host carrier (Metal) names it with `; PROOF LEVEL: FKWU-STAGED` and `; STAGED CARRIER:`, and reads
+pending, never green, while the carrier is absent.
 
 ## Meaning lives in Form
 
 The runtime and the semantic body carry their meaning in Form. A shell or Python file in this tree stands at a named
-boundary — carrier, oracle, fixture, proof sibling, or tooling — and the structural census reads them live:
+boundary — carrier, oracle, fixture, or tooling — and the structural census reads them live:
 
 ```sh
 ./fkwu gate/structural-gate-run.fk    # the seven-slot census, then 1 while its unclassified slot reads 0
@@ -123,9 +113,6 @@ cell drives the device and the device agrees with Form's own arithmetic.
 - **`runtime/`** — the C seed and the two headers Form generates for it.
 - **`bootstrap/`** — the grounding cells (`ground.fk` → 42, `ground-recursive.fk` → 55,
   `ground-numeric-list.fk` → `[1, 2.5, [3, 4]]`).
-- **`proof/`** — the four-way entry (`four-way-run-recipe42.fk` over `recipe42.fk`; 0 = all agree).
-- **`walkers/`** — the minimal Go/Rust/TS witnesses. Their string floor is the narrow waist (`str_len` /
-  `str_byte_at` / `byte_to_str` / `str_concat`); everything above it is shared Form.
 - **`flatten/`** — the op rows (`flt-ops` in `form-flatten.fk`) and the generators of `runtime/fkwu-optable.h`.
 - **`gate/`** — the structural census and the drift lenses, run together by `gate/drift-gates-run.bml`.
 

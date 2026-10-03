@@ -141,7 +141,7 @@ else
         printf '%s\n' 'build: native CLI admits host capabilities dynamically; linked extensions are outside this build identity' >&2; exit 1;
     }
     command -v "$CC_BIN" >/dev/null || { printf 'build: compiler required for native startup: %s\n' "$CC_BIN" >&2; exit 1; }
-    runner="${FORM_FOURTH_SOURCE_FKWU:-$BODY/fkwu}"
+    runner="${FORM_SOURCE_FKWU:-$BODY/fkwu}"
     [[ -f "$runner" && -x "$runner" && ! -L "$runner" ]] || { printf 'build: native source runner required: %s\n' "$runner" >&2; exit 1; }
     regular_copy "$runner" "$W/source-fkwu"
     if [[ -n "${FORM_CLI_NATIVE_SOURCE_SNAPSHOT:-}${FORM_CLI_NATIVE_SOURCE_SEAL:-}${FORM_CLI_NATIVE_SOURCE_SEAL_SHA256:-}" ]]; then

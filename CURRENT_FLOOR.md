@@ -25,11 +25,13 @@ appear beside each source on its first run, and `form/build-form-cli.sh` regener
 ./fkwu form/form-stdlib/tests/binary-freshness-band.fk    -> 31
 ./fkwu bootstrap/ground-numeric-list.fk                   -> [1, 2.5, [3, 4]]
 ./fkwu form/form-stdlib/tests/native-vs-rented-band.fk    -> 11111
-./fkwu proof/four-way-run-recipe42.fk                     -> 0 FOUR-WAY with the walkers built, 2 WALKER-SUSPECT while they are not
+./fkwu gate/canonical-conformance-run.bml                 -> 1   (13 canonical expressions on fkwu, the pinned FORMBIN2
+                                                                 artifact, 12 malformed artifacts; band 511)
 ```
 
-The four-way cell host-execs the three minimal proof walkers, which `walkers/README.md`'s own lines
-build; a fresh checkout holds them unbuilt and reads 2 (re-run 2026-10-01 on such a checkout).
+fkwu is the only runtime and every band answers its pin on it. Nothing in this tree builds, runs or
+gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc`,
+`./fkwu`, `shasum` and `openssl`.
 
 `runtime/fkwu-uni.c` is the seed (`wc -l` and `git log -1` read its size and its last change), and it
 shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R51–R56).
@@ -37,13 +39,11 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (18 rows; a row whose ground did not
-                                            move since origin/main sits out and leaves the fold; 2026-10-02 with the
-                                            kernel-laws row: 7 of 18 rows ran, pass=127 full=127 refused=0)
-./fkwu gate/structural-gate-run.fk       -> structural-gate-v3 [8, 0, 1, 0, 0, 0, 7] then 1
-                                            (total/unclassified/carrier/oracle/fixture/
-                                            proof-sibling/tooling)
-gate/tests/structural-gate-band          -> 16383
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (15 rows; a row whose ground did not
+                                            move since origin/main sits out and leaves the fold)
+./fkwu gate/structural-gate-run.fk       -> structural-gate-v4 [7, 0, 1, 0, 0, 6] then 1
+                                            (total/unclassified/carrier/oracle/fixture/tooling)
+gate/tests/structural-gate-band          -> 8191
 ./fkwu observe/door-link-health-run.bml  -> docs=41 claims=878 broken=0 (each broken claim named on its own line; 2026-10-03)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
@@ -84,7 +84,7 @@ form/form-stdlib/tests/forbidden-tools-guard-band -> 4095  (the deny line parses
                                             and fails open on a missing project, door or fkwu)
 ./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=22 moving=0, then 22000000 (2026-10-01)
+./fkwu form/form-stdlib/release-ledger.bml -> open=19 moving=0, then 19000000 (2026-10-03)
 learn/tests/homecoming-distillation-corpus-band -> 32767
 value-eq-arena-band 31 · import-carry-band 255 · form-cli-author-high-band 4095
 closure-lines-band 31 · sort-band 31   (the queue's two gaps, written by the local lane; 2026-10-01)
@@ -128,10 +128,9 @@ form-cli-landing-band 262143  (the landing and the walk read every child's exit 
 host-os-membrane-band 8191 · bidirectional-framebuffer-channel-band final field 1
 grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
 pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · offer-ack-core-band 32767
-control/tests/attempt-band 4095 · file-bytes-band 127   (no PROOF LEVEL line: four-way when the siblings run)
-form-bml-cursor-full-band 105   (four-way: it declares no PROOF LEVEL, and Go, Rust, TypeScript and fkwu agree)
+control/tests/attempt-band 4095 · file-bytes-band 127
+form-bml-cursor-full-band 105
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
-form/form-stdlib/tests/primitive-registry-band.fk 47   (2026-10-01, rc 0)
 form/form-stdlib/tests/form-agent-tools-band.bml 524287 (2026-10-01: the resident agent tools over their JSON wire)
 form/form-stdlib/tests/findings-requests-band.bml 1048575 · form/form-stdlib/tests/form-cli-local-plan-band.bml 33554431
                                             (2026-10-02, rc 0: the feeder reads whether the code a request cites moved since its
@@ -184,7 +183,7 @@ bml-float-literal-band 2047 · bml-form-size-band 127 · cell-channel-band 4095
 json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band.bml 4294967295
-language-packs-fourth-band 31 (2026-10-01) · bml-bmf-control-curriculum-band 1048575
+language-packs-band 31 (2026-10-01) · bml-bmf-control-curriculum-band 1048575
 bml-bmf-stream-curriculum-band 16777215 · form-cli-lens-mint-band 1023
 ```
 
@@ -342,8 +341,8 @@ view per tensor and maps, reads, clips and releases the fixture's 86, while the 
 their headers and map nothing. The reap25 header settles its layer count: `deepseek4.block_count` reads 43, blk.0 to
 blk.42 are the layers, and 3 draft layers (`dspark.0` to `dspark.2`) follow in the table, so the control plane's 46
 is 43 plus 3 (the comment beside the control-plane row is left as it stands). The fixture, layout and bind bands
-declare `PROOF LEVEL: FOURTH-ARM ONLY` (binary fixture, host-local headers, a live Metal device) and are not rowed in
-`form/fourth-arm-bands.txt`. The driver's kernels must emit `#pragma clang fp reassociate(off)` and `contract(off)`
+need a binary fixture, host-local headers and a live Metal device, and are not rowed in
+`form/band-verdicts.txt`. The driver's kernels must emit `#pragma clang fp reassociate(off)` and `contract(off)`
 (each of the three cells says so in its header). Still ahead after stage 4: the physical window.
 
 Driver stage 2 (read 2026-10-03 WITA on this Mac's GPU, each band alone, memory room and no model door resident before
@@ -458,7 +457,7 @@ the device's own bytes, the plan priced from the bare header by the ledger's own
 memory read after EVERY LAYER of the first three tokens without a sync, through the one function the token handle calls at its seams (`dkr-hz-tap-set`; no tap is installed in production), stopping the token before the machine is at
 risk (host-memory-low, wired above 60 percent of memory, available under the reserve, 20 minutes) with the curve in the receipt (`native/metal/tests/dsv4-token-run-band.bml`, `form-stdlib/tests/dsv4-token-run-plan-band.bml`).
 
-Driver stage 5, the flow held to the Swift runner's op ledger (read 2026-10-03 WITA 09:30 to 10:50, each band alone, memory room before each run; `docs/dsv4-flow-history.md` is the map of where the
+Driver stage 5, the flow held to the op ledger of the Swift reference runner it was learned from (git history 93154a720; a lesson, not a dependency; read 2026-10-03 WITA 09:30 to 10:50, each band alone, memory room before each run; `docs/dsv4-flow-history.md` is the map of where the
 whole flow stood: the Form cell of 08-10 held the stream at 226 ms a token warm, the Swift runner's 34 to 38 ms was never a Form number, and neither was ever in main). Measured on the fixture before this change (a machine at load average 33 to 43, best of six reps of 16 tokens): the 137
 dispatches of a token cost 9 to 10 ms of host, 66 to 76 us a dispatch, where Swift pays 1.1 us: `md-bind` built an eight-word binding in 36 us, `dkl-supported?` ran 700 us a block three times a block a token, `dkl-clamp` scanned the header 230 us twice a block, and the NaN scan made a buffer,
 three syncs and a free a token. Now: `dkr-bind` (4 us, the same bytes), the admission read once a context (`dsv4-admitted-once?`), the clamp once a block, the scan in the token's own batch behind one sync, and `dkr-hz` in `dsv4-kernels.fk`: a concurrent batch whose
@@ -488,8 +487,8 @@ theory, which the lease does not price: it leaves token_embd out as one row), at
 worst case, which the slots do not bound; the arena is a separate 19,478,347,776 B) and only the missed experts warm (7,077,888 B for one at layer 0). A checkout takes the fill door by rebuilding fkwu (`cc -O2 -o fkwu runtime/fkwu-uni.c`) and the carrier (the dylib line in AGENTS.md): a file that names `metal_buf_fill` needs the new fkwu, and a carrier built before the door still loads (the door
 is an optional symbol) and runs the view road. Not witnessed: the arena on the real file (fixtures only), the cache's hit rate over real routing, the fill's rate from the real file's disk.
 
-Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
-(rust and ts hand back a different file there); `./validate.sh --list` prints which. The restored emitters, the
+Bands that read a binary fixture through `read_file_slice` or a host door run on fkwu like every band;
+`./validate.sh --list` prints each band's staging and pins. The restored emitters, the
 `*-real.fk` cells, `dsv4-token.fk` and the windowed residency emitter say in their own headers whether a band proves
 them or they are restored for the spec and not run physically. The reference evidence
 `docs/evidence/fkwu/dsv4-oracle.json` is the reading of 2026-09-11 and is left as observed; the sidecar
@@ -572,12 +571,12 @@ load. The reading that counts is one taken on a quiet machine.
 `""` when that range is empty or reversed, or when `s` is not a string. `str_find(h, n, from)` answers
 the byte index of the first occurrence of `n` at or after `max(from, 0)`, or -1; an empty needle
 answers `max(from, 0)`; a start past `str_len(h)` answers -1. Both always answer, neither moves an
-offset to a character start, and both are natives on all four arms with their recipes kept in `core.fk` as the body's statement of
+offset to a character start, and both are natives with their recipes kept in `core.fk` as the body's statement of
 what they mean ([`docs/str-find-one-meaning.md`](docs/str-find-one-meaning.md)).
 
 ```text
 substring-one-meaning-band 4095 · str-find-one-meaning-band 8191     (both drift-gate rows)
-kernel-laws-band 2147483647     laws 1-9 of docs/kernel-interface.md, four-way (a drift-gate row)
+kernel-laws-band 2147483647     laws 1-9 of docs/kernel-interface.md (a drift-gate row)
 core-substring-equivalence-band 2047 · substring-native-band 511
 line-grammar-search-equivalence-band 8191 · core-str-find-equivalence-band 2047
 meaning-codes-table-band 255
@@ -647,10 +646,10 @@ carries a witness.
 ```text
 bearing-census-band 32767   form/form-stdlib/bearing-census.bml    (steps, not milliseconds)
 twin-census-band 65535      form/form-stdlib/twin-census.bml
-mirror-census-band 65535    form/form-stdlib/mirror-census.bml
+mirror-census-band 16383    form/form-stdlib/mirror-census.bml
 copy-census-band 63         form/form-stdlib/bml/copy-census.bml
 wall-census-band 63         form/form-stdlib/bml/wall-census.bml
-observe/tests/voice-frequency-band 255 · number-band 255 · float-printer-fourway-band 31
+observe/tests/voice-frequency-band 255 · number-band 255 · float-printer-band 31
 ```
 
 ## The JIT
@@ -663,7 +662,7 @@ carries runtime strings through the two-slot `fk_inram_args` convention.
 jit-lens-band 16383 · jit-heat-gate-band 4095 · observe/tests/jit-evaluator-heat-band 4095
 form-lower-string-band 63 · form-lower-string-runtime-band 255 · form-lower-string-both-runtime-band 511
 float-natives-band 28 · persistence-band 7 · channel-breath-band 500 · eq-shape-band 524287
-blueprint-authority-band 65535
+blueprint-authority-band 8191
 ```
 
 ## Not standing today
@@ -680,9 +679,7 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   lifted carry their imports above the section by hand; `form-source-lift-band` holds no such case yet.
 - `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` reach the Metal
   door and were not re-run in the gates pass (it held no GPU). The integrated review's sweep
-  (2026-10-01) read form-cli-allowance 2047 on all four arms, and form-cli-live 255 and
-  native-tensor-lifecycle 1023 on fkwu; those two now declare FOURTH-ARM ONLY, since no sibling carries
-  a `metal_*` door.
+  (2026-10-01) read form-cli-allowance 2047, form-cli-live 255 and native-tensor-lifecycle 1023 on fkwu.
 - `form-glass-wait-band` read 246 of 255 on the fkwu-only lane (2026-10-01, several sweeps loading the
   host): it landed 12 of 20 rests inside half a millisecond and its watched frame did not wake it. A
   quiet machine is the reading that counts.

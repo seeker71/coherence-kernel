@@ -281,8 +281,8 @@ is a **temporary seed and a shrink target**, not the destination.
 New runtime meaning belongs in Form/native-walker cells proven on `fkwu`; C exists only to keep the current
 checkout witness reachable while the seed is reduced toward zero.
 
-The C-bootstrap is sufficient to run Form. A session or check that asks for Node, npm, Go, Rust, Python or a
-second model server has a dependency to repair at its source.
+The C-bootstrap is sufficient to run Form. fkwu is the only runtime. A session or check that asks for Node, npm,
+Go, Rust, Swift, Python or a second model server has a dependency to repair at its source.
 Model weights are input data. The optional Metal adapter binds the host's
 system frameworks inside the same process; it adds no separate language
 runtime or model server.
@@ -329,20 +329,16 @@ form-cli is a recipe this same `fkwu` loads (`.dylib` when emission sits, `.fkb`
 Then verify it runs the body — a **real cell**, native:
 
 ```sh
-./fkwu form/form-stdlib/tests/native-vs-rented-band.fk   # -> 11111   (the same answer on all four kernels)
+./fkwu form/form-stdlib/tests/native-vs-rented-band.fk   # -> 11111
 ```
 
 `fkwu <file.fk>` runs Form source straight through the kernel's own source-runner (multi-function,
 cross-calls, lists, recursion). The direction of travel is the native walker proven on `fkwu`, with the C seed
-made smaller until it disappears. The Go/Rust/TS kernels under `form/form-kernel-{go,rust,ts}/` are **four-way proof
-siblings only** — never the runtime; you never run the body on them. They validate a kernel change and nothing else:
-`form/validate.sh` and the landing checks ask `gate/kernel-change.bml` whether a kernel source (`runtime/`, `walkers/`,
-`form/form-kernel-{go,rust,ts}/`) moved since origin/main, and only then builds and runs them; otherwise every
-band answers its pin on fkwu alone. Their speed is no goal. The minimal walkers under `walkers/` are the recipe
-witnesses `proof/four-way-run-recipe42.fk` host-execs. Most work lands in BML and Form, not in any kernel.
-The landing report excludes the sibling conformance row when no kernel moved;
-its fold covers only the checks actually run. Missing proof-tool dependencies
-do not become Form runtime dependencies.
+made smaller until it disappears. Every band runs on fkwu and answers its pin there: `form/validate.sh` walks the
+sweep through the one runtime, and `gate/canonical-conformance.bml` holds fkwu and the Form codec to the pinned
+canonical expressions, the FORMBIN2 artifact and the malformed artifacts. Most work lands in BML and Form, not in
+any kernel. What other languages' runtimes taught the body (the DeepSeek op graph read from a Swift runner, the
+Qwen graph from its references) is carried as Form recipes under `form/native/metal/`; none of them is a dependency.
 
 A patch that grows `runtime/fkwu-uni.c` carries its shrink path, or it belongs in the native walker/Form body.
 
@@ -697,8 +693,8 @@ plainly once, and give the conversation your attention.
    their owned execution. Runner exit 0 means the chain's verdict is readable;
    a preserved effectful cell still needs that real execution. Lane details live
    in [`preflight-source.bml`](form/form-stdlib/bml/preflight-source.bml).
-   Probe an uncertain binding with `(pf-arm-mask "host-exec")` before naming its
-   proof lane. `observe/tree-heal.fk` offers delimiter repairs and keeps one only
+   Probe an uncertain binding with `(pf-has? "host-exec")` before writing a claim
+   about it. `observe/tree-heal.fk` offers delimiter repairs and keeps one only
    after clean diagnostics, exit and any existing band confirm it.
 
 10. **Land on origin when a movement is ready.** A sibling fetches

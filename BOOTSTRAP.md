@@ -101,10 +101,10 @@ The path arrives on stdin, so parallel agents never replace one another's target
 
 Preflight forces a fresh compile — a warm cache replaces the error with a tally
 that has no name and no line — checks paren balance without running anything,
-and classifies each unresolved name by offering it to all four kernels and
+and classifies each unresolved name by asking fkwu and
 searching the tree for its definition: a TYPO (nobody has it), UNPRELUDED (a unit
-defines it and the chain does not load that unit), or a LANE SEAM (another kernel
-does). `AGENTS.md` item 9 carries the practice.
+defines it and the chain does not load that unit), or a missing prelude (fkwu
+resolves it under the core prelude). `AGENTS.md` item 9 carries the practice.
 
 ## Verify Real Grounding
 
