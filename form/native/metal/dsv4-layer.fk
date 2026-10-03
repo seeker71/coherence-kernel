@@ -1,7 +1,8 @@
 // dsv4-layer.fk -- ONE DeepSeek-V4 layer's forward as Metal dispatches, held in Form: hc_pre, the MLA attention half (with the compressor), hc_post, then the FFN half.
 //
 // WHAT RUNS. The dispatch graph of one block at one position, in the order the oracle computes it, as enqueues over the handles dsv4-open.fk opened and the pipelines dsv4-kernels.fk compiled
-// (the carrier runs enqueues in order, so no barrier is set; nothing here syncs: the caller syncs and reads). The residual is the four hyper-connection streams, hc x n_embd f32, in the scratch
+// (called directly, the carrier runs enqueues in order and no barrier is set; inside an armed token the dispatches carry the barrier bits dkr-hz planned from their kernels' reads and writes, dsv4-token-handle.fk; nothing here syncs:
+// the caller syncs and reads). The residual is the four hyper-connection streams, hc x n_embd f32, in the scratch
 // buffer `resid`; a block reads it and leaves its output in `resid` (the attention half writes `resid-next`, the FFN half reads it and writes `resid` back).
 //   attention half (dsv4-layer-attn):
 //     hc_pre      rmsnorm of the 4 streams (no weight, one group of 256), the F16 fn matvec [hc x e to 24] (compensated, one thread a row), the Sinkhorn split (n_hc 4, 20 iterations, fixture or
@@ -16,7 +17,7 @@
 //     router      the F16 gate_inp matvec; the probabilities by form_dsv4_hash_probs_s / form_dsv4_topk_probs_s (softplus as max(z, 0) + log1p(exp(-|z|)): the restored ln(1 + exp(z)) lost digits
 //                 for negative z, 1.1e-4 off at z = -9); layer routes by the hash table (blk.N.ffn_gate_tid2eid: token row of I32 ids, weights sqrt(softplus) of the logits, normalised over the chosen) or by the
 //                 biased top-k (selection by prob + exp_probs_b, weight the UNBIASED prob; a -1e30 bias refuses an expert), both scaled by deepseek4.expert_weights_scale over the 2^-14 floor
-//     experts     gate and up by the device ids (MXFP4, IQ2_XXS or Q2_K by the stack's own type), the clamped SwiGLU times the router weight with the block's own clamp from
+//     experts     gate and up by the device ids (MXFP4, IQ2_XXS or Q2_K by the stack's own type; the real file's IQ2_XXS and Q2_K stacks on the four-row lane kernels, dkl-expert-mv), the clamped SwiGLU times the router weight with the block's own clamp from
 //                 deepseek4.swiglu_clamp_exp, the down by ids with one input a slot; the slot sum; the shared expert (three dense matvecs, MXFP8 or Q8_0 by the tensor's type, and the unweighted clamped SwiGLU) added
 //     hc_post     as above, into `resid`
 //
@@ -60,10 +61,16 @@ section [form.bml] {
     def dkl-cols(v) = v[3][0];
     def dkl-type(v) = v[2];
     // the block's SwiGLU clamp: element il of the f32 array deepseek4.swiglu_clamp_exp in the header
-    def dkl-clamp(ctx, il) {
+    // READ FROM THE HEADER ONCE A CONTEXT: gmt-find scans the key-value table for the name (230 us on the fixture's small header, and the real file's header holds the tokenizer's 129,280 tokens), and
+    // the FFN asked it twice a block, every token. The value is a fact of the file, held in the context's own view record beside the views (key "~clamp:<block>").
+    def dkl-clamp-read(ctx, il) {
         let src = ctx[7];
         let off = gmt-find(src, "deepseek4.swiglu_clamp_exp");
         off == gmt-absent() ? 0.0 : ln-f32-decode(eqr-le(src, gm-arr-elem-off(src, off, il), 4));
+    }
+    def dkl-clamp(ctx, il) {
+        let key = "~clamp:" ++ il.str();
+        record_has(dso-vx(ctx), key) ? record_get(dso-vx(ctx), key) : { let v = dkl-clamp-read(ctx, il); let held = record_set(dso-vx(ctx), key, v); v; };
     }
 
     // ---- admission ------------------------------------------------------------------------------------------
@@ -121,7 +128,10 @@ section [form.bml] {
     // an MXFP8 matvec of the weight view v: y = W x
     def dkl-mx8(ctx, v, x, y) = dkr-go(dkl-p(ctx, "form_dsv4_mx8_matvec"), [v[1], dkl-b(ctx, x), dkl-b(ctx, y)], [dkl-rows(v), dkl-cols(v), dkl-rows(v) * dkl-cols(v)], dkl-rows(v) * 32);
     // a Q8_0 matvec of the weight view v (blocks of an f16 scale and 32 signed bytes, one simdgroup a row): y = W x
-    def dkl-q80(ctx, v, x, y) = dkr-go(dkl-p(ctx, "form_dsv4_q80_matvec_lane"), [v[1], dkl-b(ctx, x), dkl-b(ctx, y)], [dkl-rows(v), dkl-cols(v)], dkl-rows(v) * 32);
+    // ds4's own Metal Q8_0 matvec (dkr-unit-lanes: 128 threads a row, two rows a group of 256, the activation kept f32, the group's simdgroups sharing a row's blocks): Swift read 55 ms a token against 59 for the lane form
+    // below, and it is the more accurate of the two arms (its notes: the lane form's reference quantises the activation to int8, this one does not). The lane kernel (one simdgroup a row) stays in the unit for the
+    // bands that read the Q8_0 arithmetic.
+    def dkl-q80(ctx, v, x, y) = dkr-go-w(dkl-p(ctx, "form_dsv4_q80_matvec_ds4"), [v[1], dkl-b(ctx, x), dkl-b(ctx, y)], [dkl-rows(v), dkl-cols(v)], ((dkl-rows(v) + 1) / 2) * 256, 256);
     // THE DENSE MATVEC BY THE TENSOR'S OWN TYPE (the view's slot 2, read from the file's table): MXFP8 (41) or Q8_0 (8). A type no kernel reads answers 0, and the block refuses (nothing) before it reads a plausible wrong layer.
     def dkl-dense(ctx, v, x, y) = dkl-type(v) == 41 ? dkl-mx8(ctx, v, x, y) : (dkl-type(v) == 8 ? dkl-q80(ctx, v, x, y) : 0);
     // the grouped output factor by the tensor's type: row r reads the activation group r / rank (rank = rows / ng); the two grouped kernels share their constants
@@ -245,11 +255,20 @@ section [form.bml] {
         let uk = dkl-expert-kernel(dkl-type(dkl-view(ctx, il, "ffn_up_exps.weight")));
         let dk = dkl-expert-kernel(dkl-type(dkl-view(ctx, il, "ffn_down_exps.weight")));
         (nothing?(gk) || nothing?(uk) || nothing?(dk)) ? [0] : [
-         dkr-go(dkl-p(ctx, gk), [dkl-w(ctx, il, "ffn_gate_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xgate"), dkl-b(ctx, "expert-ids")], [hidden, e, used, 0], used * hidden * 32),
-         dkr-go(dkl-p(ctx, uk), [dkl-w(ctx, il, "ffn_up_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-ids")], [hidden, e, used, 0], used * hidden * 32),
+         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_gate_exps.weight"), dkl-w(ctx, il, "ffn_gate_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xgate"), dkl-b(ctx, "expert-ids"), hidden, e, used, 0),
+         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_up_exps.weight"), dkl-w(ctx, il, "ffn_up_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-ids"), hidden, e, used, 0),
          dkr-go(dkl-p(ctx, "form_dsv4_swiglu_id"), [dkl-b(ctx, "xgate"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-weights"), dkl-b(ctx, "xmid")], [hidden, used, lim], used * hidden),
-         dkr-go(dkl-p(ctx, dk), [dkl-w(ctx, il, "ffn_down_exps.weight"), dkl-b(ctx, "xmid"), dkl-b(ctx, "xdown"), dkl-b(ctx, "expert-ids")], [e, hidden, used, hidden], used * e * 32)];
+         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_down_exps.weight"), dkl-w(ctx, il, "ffn_down_exps.weight"), dkl-b(ctx, "xmid"), dkl-b(ctx, "xdown"), dkl-b(ctx, "expert-ids"), e, hidden, used, hidden)];
     }
+    // THE ROUTED EXPERT MATVEC. The real file's stacks (gate and up IQ2_XXS, down Q2_K) run the four-row lanes Swift settled on (dsv4-kernels.fk dkr-unit-lanes): a simdgroup owns four output rows and the
+    // slot's expert is read from ids[slot] x stride on the device, the stride the view's own bytes over its expert count. Each lane kernel reads its input one way: the IQ2 form one shared activation (gate and up:
+    // xstride 0), the Q2_K form one activation a slot (the down: xstride = cols), so each is taken only for the stack that feeds it that way and whose rows the four tile (rows % 4, cols % 256). Every other
+    // stack (MXFP4, a Q2_K carried as gate or up, a shape the four-row kernels do not tile) runs the generic id kernel as before. Threadgroups of 64: Swift's tgFree, the width that left cores to the shared expert beside it.
+    def dkl-expert-stride(v) = dvb-v-bytes(v) / dvb-d2(v);
+    def dkl-lane-expert?(ty, rows, cols, xstride) = (rows % 4) == 0 && (cols % 256) == 0 && ((ty == 16 && xstride == 0) || (ty == 10 && xstride == cols));
+    def dkl-expert-mv(ctx, v, w, x, y, ids, rows, cols, used, xstride) = dkl-lane-expert?(dkl-type(v), rows, cols, xstride)
+        ? dkr-go-w(dkl-p(ctx, dkl-type(v) == 16 ? "form_dsv4_iq2_matvec_experts4_fast" : "form_dsv4_q2k_matvec_experts4_fast"), [w, x, y, ids], [rows, cols, dkl-expert-stride(v), used], used * (rows / 4) * 32, 64)
+        : dkr-go(dkl-p(ctx, dkl-expert-kernel(dkl-type(v))), [w, x, y, ids], [rows, cols, used, xstride], used * rows * 32);
     def dkl-shared(ctx, il) {
         let m = dkl-m(ctx);
         let sh = record_get(m, "sh");
@@ -281,6 +300,13 @@ section [form.bml] {
     def dsv4-layer(ctx, sts, il, pos, token, cap) {
         let a = dsv4-layer-attn(ctx, sts, il, pos, cap);
         nothing?(a) ? nothing() : { let f = dsv4-layer-ffn(ctx, il, token); nothing?(f) ? nothing() : a + f; };
+    }
+    // THE DRIVER'S ENTRY, admission already read. dsv4-layer re-reads dkl-supported? for each half (700 us a call on the fixture's block, measured 2026-10-03: two reads a block, 43 blocks, a token, before
+    // its first dispatch); the token loop reads the context's admission ONCE (dsv4-admitted-once?, dsv4-token-handle.fk) and the position once (dsv4-position-ok?, which holds the capacity and the ratio-4
+    // limit this entry's guards would), so the block runs straight into its dispatches. The full-check dsv4-layer stays what the layer band holds.
+    def dsv4-layer-go(ctx, sts, il, pos, token, cap) {
+        let a = dkl-attn-go(ctx, sts, il, pos, cap);
+        nothing?(a) ? nothing() : { let f = dkl-ffn-go(ctx, il, token); nothing?(f) ? nothing() : a + f; };
     }
     0;
 }

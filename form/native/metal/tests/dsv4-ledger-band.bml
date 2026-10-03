@@ -1,0 +1,122 @@
+; dsv4-ledger-band.bml -- the DeepSeek-V4 driver's op ledger, held as ceilings: what a token costs in dispatches, barriers, command buffers, waits, host reads and buffers, on both fixtures, serial and concurrent.
+;
+; WHAT THIS PINS. native/metal/dsv4-ledger.fk reads ONE row per decode token from the carrier's own counters (metal_live: dispatches, waits, standing buffers, device busy) and the driver's plan (barriers placed, batches
+; handed to the queue, host reads, plans that ran short), and ONE row per block (its enqueue count, the weight bytes it reads). The Swift reference runner (history 93154a720) was held to such a count every run; this lane is a
+; Form cell, where a dispatch costs about 20 us of host, so the count is the thing to hold: a token that grows an op, a wait, an allocation or a barrier past its ceiling fails here.
+;
+; Verdict 255 when every claim lands:
+;   1     the dispatch count is the layout's own formula (dll-token-count: 22 + the compressor's 3 + 5 or 6 at a window boundary, 18 or 19 for the FFN, embed 2, head and NaN scan 8) at every one of eight decode steps,
+;         on the MXFP fixture and on the real-types fixture (Q8_0 dense, IQ2_XXS gate and up, Q2_K down), serial and concurrent
+;   2     one wait a token (the head's argmax, the NaN scan and the logits settle in ONE sync), no buffer made or freed (allocs 0), two host reads (the count and the id), and the command buffers are floor(layers / 2) + 1 when
+;         concurrent (a batch handed to the queue every second block, then the one the wait drains) and 1 when serial
+;   4     the barrier plan: concurrent rows carry barriers (at least one a block and a stage, below the dispatch count: the plan overlaps some work and holds the rest), no plan ran short or long (miss 0), and a serial row
+;         carries none
+;   8     the concurrent walk is the serial walk: the eight ids and every logit's bits equal, on both fixtures (an overlap that moved a value would show here and in the oracle bands)
+;   16    the stage rows: one per block in ascending order, their dispatches plus the embedding's 2 and the head's 8 equal the token's, their bytes plus the embedding row and the head equal dll-token-bytes
+;   32    the ceilings: every concurrent row on each fixture is within the pinned ceilings (dispatches, barriers, command buffers, waits, reads, allocs, bytes), and the checks can fail: a ceiling one below the first row's
+;         dispatches is breached, a serial row is below the barrier floor, and a row with an extra wait is over the sync ceiling
+;   64    the real-file lanes: on the real-types fixture the gate and up stacks take the four-row IQ2_XXS kernel and the down stack the four-row Q2_K one (dkl-lane-expert?), the dense Q8_0 tensors read the Metal-order matvec,
+;         and the MXFP4 stacks of the other fixture keep the id kernels
+;   128   release: dsv4-close in synced rounds leaves no handle on either context and metal_live reads what it read before the opens
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- needs a live Metal device behind the handle door; plain fkwu answers 0 (bit 1 needs a context). Light GPU: two 1.5 MB fixtures, twelve positions each, four walks. Writes only under temp_dir.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk native/metal/dsv4-ledger.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk
+section [form.bml] {
+ class Dsv4LedgerBand {
+  def dlb-bit(held, bit) = held ? bit : 0;
+  def dlb-prompt() = [5, 17, 3, 22];
+  def dlb-cap() = 16;
+  def dlb-steps() = 8;
+  def dlb-layers(ctx) = record_get(dso-geo(ctx), "layers-n");
+  // one walk: the prefill's id, then eight decode steps' [id, row, stages, logits bits]
+  def dlb-more(ctx, sts, id, pos, left, acc) {
+   left == 0 ? acc : {
+    let s = dsv4-decode-staged(ctx, sts, id, pos);
+    let logits = dsv4-logits(ctx);
+    nothing?(s[0]) ? acc : dlb-more(ctx, sts, s[0], pos + 1, left - 1, append(acc, [[s[0], s[1], s[2], dlb-bits(logits), pos]]));
+   };
+  }
+  def dlb-bits(xs) = len(xs) == 0 ? [] : cons(md-f32-bits(xs[0]), dlb-bits(xs[1:]));
+  def dlb-walk(ctx) {
+   let sts = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let pf = dsv4-prefill-span-sliced(ctx, sts, dlb-prompt(), 0);
+   let steps = nothing?(pf) ? [] : dlb-more(ctx, sts, pf[0], pf[1], dlb-steps(), []);
+   let left = dsv4-free-state(sts);
+   [steps, len(left) == 0, nothing?(pf) ? 0 - 1 : pf[0]];
+  }
+  def dlb-ids(steps) = len(steps) == 0 ? [] : cons(steps[0][0], dlb-ids(steps[1:]));
+  def dlb-rows(steps) = len(steps) == 0 ? [] : cons(steps[0][1], dlb-rows(steps[1:]));
+  def dlb-bitrows(steps) = len(steps) == 0 ? [] : cons(steps[0][3], dlb-bitrows(steps[1:]));
+  def dlb-all(xs) = len(xs) == 0 ? true : (xs[0] && dlb-all(xs[1:]));
+  def dlb-field(row, k) = record_get(row, k);
+  // claim 1: every row's dispatches are the formula at its position
+  def dlb-count-ok?(ctx, steps) = len(steps) == 0 ? true : (dlb-field(steps[0][1], "dispatches") == dll-token-count(ctx, steps[0][4]) && dlb-count-ok?(ctx, steps[1:]));
+  // claim 2: waits, allocations, reads, command buffers
+  def dlb-cbs-want(ctx, concurrent) = concurrent ? (dlb-layers(ctx) / 2) + 1 : 1;
+  def dlb-cost-ok?(ctx, steps, concurrent) = len(steps) == 0 ? true : (dlb-field(steps[0][1], "syncs") == 1 && dlb-field(steps[0][1], "allocs") == 0 && dlb-field(steps[0][1], "readbacks") == 2 && dlb-field(steps[0][1], "cbs") == dlb-cbs-want(ctx, concurrent) && dlb-cost-ok?(ctx, steps[1:], concurrent));
+  // claim 4: the barrier plan
+  def dlb-plan-ok?(ctx, steps, concurrent) = len(steps) == 0 ? true : (concurrent
+    ? (dlb-field(steps[0][1], "barriers") >= dlb-layers(ctx) + 2 && dlb-field(steps[0][1], "barriers") < dlb-field(steps[0][1], "dispatches") && dlb-field(steps[0][1], "miss") == 0)
+    : (dlb-field(steps[0][1], "barriers") == 0)) && dlb-plan-ok?(ctx, steps[1:], concurrent);
+  // claim 16: the stage rows
+  def dlb-sum-disp(stages) = len(stages) == 0 ? 0 : stages[0][1] + dlb-sum-disp(stages[1:]);
+  def dlb-sum-bytes(stages) = len(stages) == 0 ? 0 : stages[0][2] + dlb-sum-bytes(stages[1:]);
+  def dlb-asc?(stages, i) = len(stages) == 0 ? true : (stages[0][0] == i && dlb-asc?(stages[1:], i + 1));
+  def dlb-stages-ok?(ctx, steps) = len(steps) == 0 ? true : (len(steps[0][2]) == dlb-layers(ctx) && dlb-asc?(steps[0][2], 0)
+    && dlb-sum-disp(steps[0][2]) + 10 == dlb-field(steps[0][1], "dispatches") && dlb-sum-bytes(steps[0][2]) + 2 * record_get(dso-geo(ctx), "e") + dll-head-bytes(ctx) == dlb-field(steps[0][1], "bytes")
+    && dlb-stages-ok?(ctx, steps[1:]));
+  // claim 32: ceilings (the pinned figures are the fixtures' measured rows, rounded up to the formula's largest step)
+  def dlb-ceil(d, b, c, by) = record_new(0, "dispatches", d, "barriers", b, "cbs", c, "syncs", 1, "readbacks", 2, "allocs", 0, "bytes", by, "miss", 0);
+  def dlb-within-all?(steps, ceil) = len(steps) == 0 ? true : (dll-within?(steps[0][1], ceil) && dlb-within-all?(steps[1:], ceil));
+  def dlb-max-field(steps, k) = len(steps) == 0 ? 0 : (dlb-field(steps[0][1], k) > dlb-max-field(steps[1:], k) ? dlb-field(steps[0][1], k) : dlb-max-field(steps[1:], k));
+  def dlb-str-rows(steps) = len(steps) == 0 ? "" : (dll-line("pos " ++ steps[0][4].str(), steps[0][1]) ++ " | " ++ dlb-str-rows(steps[1:]));
+  // claim 64: the lanes
+  def dlb-lane-gate?(ctx, il) = dkl-lane-expert?(dkl-type(dkl-view(ctx, il, "ffn_gate_exps.weight")), dkl-l(ctx, il, "hidden"), record_get(dso-geo(ctx), "e"), 0);
+  def dlb-lane-down?(ctx, il) = dkl-lane-expert?(dkl-type(dkl-view(ctx, il, "ffn_down_exps.weight")), record_get(dso-geo(ctx), "e"), dkl-l(ctx, il, "hidden"), dkl-l(ctx, il, "hidden"));
+  def dlb-any-lane?(ctx, il, n, gate) = il == n ? false : ((gate ? dlb-lane-gate?(ctx, il) : dlb-lane-down?(ctx, il)) || dlb-any-lane?(ctx, il + 1, n, gate));
+  def dlb-dense-q8?(ctx) = dkl-type(dkl-view(ctx, 0, "attn_q_a.weight")) == 8 && dkr-pipe(ctx[0], "form_dsv4_q80_matvec_ds4") > 0;
+ }
+ let root = temp_dir() ++ "/dsv4-ledger-band-" ++ now_unix_ms().str();
+ let pathA = root ++ "-mx.gguf";
+ let pathB = root ++ "-v.gguf";
+ let wroteA = dfx-write(pathA);
+ let wroteB = dfx-v-write(pathB);
+ let live0 = dvb-live();
+ let mapped0 = dvb-mapped();
+ let ctxA = dsv4-open-span(pathA, 16, 1);
+ let ctxB = dsv4-open-span(pathB, 16, 1);
+ let openedA = len(ctxA) == 13;
+ let openedB = len(ctxB) == 13;
+ let prepA = openedA ? dsv4-prepare(ctxA) : 0;
+ let prepB = openedB ? dsv4-prepare(ctxB) : 0;
+ let onA = dkr-hz-enable(true);
+ let concA = openedA ? dlb-walk(ctxA) : [[], false, 0 - 1];
+ let concB = openedB ? dlb-walk(ctxB) : [[], false, 0 - 1];
+ let offA = dkr-hz-enable(false);
+ let serA = openedA ? dlb-walk(ctxA) : [[], false, 0 - 1];
+ let serB = openedB ? dlb-walk(ctxB) : [[], false, 0 - 1];
+ let backOn = dkr-hz-enable(true);
+ let said1 = print_str("concurrent MX: " ++ dlb-str-rows(concA[0]));
+ let said2 = print_str("concurrent V: " ++ dlb-str-rows(concB[0]));
+ let said3 = print_str("serial MX first: " ++ (len(serA[0]) > 0 ? dll-line("serial", serA[0][0][1]) : "none"));
+ let said4 = print_str("ids MX " ++ dlb-ids(concA[0]).str() ++ " V " ++ dlb-ids(concB[0]).str());
+ let r1 = try openedA && openedB && len(concA[0]) == 8 && len(concB[0]) == 8 && len(serA[0]) == 8 && len(serB[0]) == 8 && dlb-count-ok?(ctxA, concA[0]) && dlb-count-ok?(ctxB, concB[0]) && dlb-count-ok?(ctxA, serA[0]) && dlb-count-ok?(ctxB, serB[0]) catch false;
+ let r2 = try r1 && dlb-cost-ok?(ctxA, concA[0], true) && dlb-cost-ok?(ctxB, concB[0], true) && dlb-cost-ok?(ctxA, serA[0], false) && dlb-cost-ok?(ctxB, serB[0], false) catch false;
+ let r4 = try r1 && dlb-plan-ok?(ctxA, concA[0], true) && dlb-plan-ok?(ctxB, concB[0], true) && dlb-plan-ok?(ctxA, serA[0], false) && dlb-plan-ok?(ctxB, serB[0], false) catch false;
+ let r8 = try r1 && dlb-ids(concA[0]) == dlb-ids(serA[0]) && dlb-bitrows(concA[0]) == dlb-bitrows(serA[0]) && dlb-ids(concB[0]) == dlb-ids(serB[0]) && dlb-bitrows(concB[0]) == dlb-bitrows(serB[0]) catch false;
+ let r16 = try r1 && dlb-stages-ok?(ctxA, concA[0]) && dlb-stages-ok?(ctxB, concB[0]) && dlb-stages-ok?(ctxA, serA[0]) catch false;
+ // the fixtures' measured maxima over the eight steps (2026-10-03): 148 dispatches (137, 142 or 148 by the window boundaries of the ratio-4 and ratio-2 blocks), 121 barriers, 2 command buffers; 1,285,844 bytes of
+ // weight a token on the MXFP fixture and 1,422,804 on the real-types one
+ let ceilA = dlb-ceil(148, 121, 2, 1285844);
+ let ceilB = dlb-ceil(148, 121, 2, 1422804);
+ let tooLow = dlb-ceil(dlb-field(concA[0][0][1], "dispatches") - 1, 121, 2, 1285844);
+ let extraWait = record_new(0, "dispatches", 0, "syncs", 2);
+ let r32 = try r1 && dlb-within-all?(concA[0], ceilA) && dlb-within-all?(concB[0], ceilB) && !dll-within?(concA[0][0][1], tooLow) && dlb-field(serA[0][0][1], "barriers") < dlb-max-field(concA[0], "barriers") && !dll-within?(extraWait, record_new(0, "syncs", 1)) catch false;
+ let r64 = try r1 && dlb-any-lane?(ctxB, 0, 3, true) && dlb-any-lane?(ctxB, 0, 3, false) && dlb-dense-q8?(ctxB) && !dlb-any-lane?(ctxA, 1, 3, true) && !dlb-any-lane?(ctxA, 1, 3, false) catch false;
+ let leftA = openedA ? dsv4-close(ctxA, []) : [0];
+ let leftB = openedB ? dsv4-close(ctxB, []) : [0];
+ let c128 = dlb-bit(try openedA && openedB && len(leftA) == 0 && len(leftB) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
+ let removed = host_path_remove(pathA) + host_path_remove(pathB);
+ print_str("dsv4-ledger-band claims " ++ dlb-bit(r1, 1).str() ++ " " ++ dlb-bit(r2, 2).str() ++ " " ++ dlb-bit(r4, 4).str() ++ " " ++ dlb-bit(r8, 8).str() ++ " " ++ dlb-bit(r16, 16).str() ++ " " ++ dlb-bit(r32, 32).str() ++ " " ++ dlb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ dlb-bit(r1, 1) + dlb-bit(r2, 2) + dlb-bit(r4, 4) + dlb-bit(r8, 8) + dlb-bit(r16, 16) + dlb-bit(r32, 32) + dlb-bit(r64, 64) + c128;
+}

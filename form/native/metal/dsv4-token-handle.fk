@@ -16,15 +16,19 @@
 // buffers argmax-idx and argmax-val (dsv4-open.fk extras). The index buffer is written 0xFFFFFFFF before every head, so a head that did not run, or an all-NaN vector (the kernel answers
 // 0xFFFFFFFF), is read as NOTHING and never as a plausible token 0; an id at or past the vocabulary is nothing too.
 //
-// THE ORDER IS THE CARRIER'S. Enqueues run in the order they are made (no barrier is set anywhere), so the host syncs once a token (prefill, after every position's blocks; decode, after the head) and then reads. Nothing here
-// writes a buffer from the host between enqueues: the rope tables were written once by dsv4-prepare, and the hash table of a hashed block is read on the device by the token id carried as a constant.
+// THE TOKEN IS ONE CONCURRENT BATCH WITH PLANNED BARRIERS (dkr-hz, dsv4-kernels.fk). dth-state-go arms a concurrent batch before the embedding's first enqueue; every stage (embedding, block, head, NaN scan) runs through dth-stage, which plans the
+// stage's barriers the first time (a dry run: nothing reaches the device) and replays the plan; the batch is handed to the queue every second block (dkr-hz-submit) so the device runs block n while the host encodes block n + 1; and the host waits ONCE a
+// token (prefill, after every position's blocks; decode, in dsv4-argmax, where the argmax, the NaN scan and the logits settle together) and then reads. Outside an armed batch (a band that calls dsv4-layer or dkr-go directly) a dispatch is the carrier's
+// serial one and no barrier is set. dkr-hz-enable(false) puts every token back there (the A/B the ledger band holds bit-equal). The admission is read ONCE a context (dsv4-admitted-once?), not once a token. Nothing here
+// writes a buffer from the host between enqueues but the sentinels written before the head: the rope tables were written once by dsv4-prepare, and the hash table of a hashed block is read on the device by the token id carried as a constant.
 //
 // WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong token: a context whose blocks are not all supported (dsv4-layer.fk dkl-supported?), whose head tensors are not what the head kernels read
 // (output_hc_fn F16 [hc x e, hc]; scale and base F32; output_norm F32 [e]; token_embd F16 [e, vocab]; output.weight MXFP8 or Q8_0 [e, vocab], its columns tiled by the block), a position at or past the capacity the context was opened for, a ratio-4
 // block at position 2048 or later (dsv4-layer.fk), an id outside the vocabulary, an empty span. Admission is checked before the first enqueue, so a refusal touches no buffer and advances no cache.
 // The head uses `eps` for the stream rms and `hyper_connection.epsilon` for the gates, as the layer's hc_pre does; the fixture holds the two equal (1e-6), so a file where they differ is not witnessed here.
 //
-// Proven by: native/metal/tests/dsv4-token-band.bml (the head against the oracle's own head arithmetic on the fixture, prefill and decode, the loop, the refusals, release).
+// Proven by: native/metal/tests/dsv4-token-band.bml (the head against the oracle's own head arithmetic on the fixture, prefill and decode, the loop, the refusals, release); native/metal/tests/dsv4-ledger-band.bml (the op ledger of a
+// token held as ceilings, the concurrent walk against the serial one); native/metal/tests/dsv4-door-run-band.bml (the session's open and step and the generate door's one-shot over the fixture).
 import form-stdlib/core.fk;
 import form-stdlib/str-byte-at.fk;
 import form-stdlib/equireach.fk;
@@ -58,12 +62,56 @@ section [form.bml] {
     // no ratio-4 block runs at position 2048 or later (the indexer stops being inert: dsv4-layer.fk)
     def dth-pos-ok?(ctx, il, pos) = il == record_get(dso-geo(ctx), "layers-n") ? true : (!(dkl-l(ctx, il, "ratio") == 4 && pos >= 2048) && dth-pos-ok?(ctx, il + 1, pos));
     def dsv4-admitted?(ctx) = len(ctx) == 13 && record_has(dso-geo(ctx), "cap") && dth-head-ok?(ctx) && dth-blocks-ok?(ctx, 0);
+    // THE ADMISSION IS READ ONCE A CONTEXT, NOT ONCE A TOKEN. dsv4-admitted? walks every tensor of every block (dkl-supported? is 700 us a block on the fixture), and the token loop asked it before every
+    // position. The answer is a fact of the opened views, which do not change after the open, so it is held in the context's own view record (key "~admitted": 1 or 0), beside the views it was read from:
+    // a context built over another view record (the band's retyped copies) reads its own admission afresh.
+    def dth-admit-held?(ctx) = record_has(dso-vx(ctx), "~admitted");
+    def dsv4-admitted-once?(ctx) {
+        len(ctx) != 13 ? false : (dth-admit-held?(ctx) ? record_get(dso-vx(ctx), "~admitted") == 1 : {
+            let verdict = dsv4-admitted?(ctx);
+            let held = record_set(dso-vx(ctx), "~admitted", verdict ? 1 : 0);
+            verdict;
+        });
+    }
     def dsv4-position-ok?(ctx, pos) = pos >= 0 && pos < dso-cap(ctx) && dth-pos-ok?(ctx, 0, pos);
     def dsv4-id-ok?(ctx, id) = id >= 0 && id < record_get(dso-geo(ctx), "vocab");
 
+    // ---- the stages, planned once and replayed ----------------------------------------------------------------------
+    // WHEN THE TOKEN RUNS IN A CONCURRENT BATCH (dkr-hz-live?: dkr-hz-token-begin armed one), each stage (the embedding, a block, the head, the NaN scan) runs through here: the first time its key is met it is run
+    // in planning mode (no dispatch reaches the device: dkr-go records the barrier bit each dispatch needs from its own reads and writes), and every run, that one included, replays the planned bits.
+    // A block's key is the context, the block and the position class that changes the dispatch list: a compressing block at a window boundary or past its first window runs other dispatches than the same block
+    // between boundaries. Outside a live batch a stage is its plain go-function, exactly as before.
+    def dth-ctx-key(ctx) = dkl-b(ctx, "resid").str();
+    def dth-layer-key(ctx, il, pos) {
+        let ratio = dkl-l(ctx, il, "ratio");
+        ratio == 0 ? (dth-ctx-key(ctx) ++ ":L" ++ il.str()) : (dth-ctx-key(ctx) ++ ":L" ++ il.str() ++ (((pos + 1) % ratio) == 0 ? "b" : "n") ++ (((pos + 1) / ratio) > 0 ? "c" : "z"));
+    }
+    def dth-stage-key(ctx, tag, il, pos) = tag == "layer" ? dth-layer-key(ctx, il, pos) : (dth-ctx-key(ctx) ++ ":" ++ tag);
+    // tag: "embed" (a = the id), "layer" (a = the states, b = the block, c = the position, d = the id, e = the capacity), "head", "scan"
+    def dth-stage-go(ctx, tag, a, b, c, d, e) = tag == "embed" ? dth-embed-go(ctx, a) : (tag == "layer" ? dsv4-layer-go(ctx, a, b, c, d, e) : (tag == "head" ? dth-head-go(ctx) : (tag == "scan" ? dth-scan-go(ctx) : nothing())));
+    def dth-stage-plan(ctx, tag, a, b, c, d, e, key) {
+        let began = dkr-hz-plan-begin();
+        let r = dth-stage-go(ctx, tag, a, b, c, d, e);
+        let ended = dkr-hz-plan-end(key);
+        r;
+    }
+    def dth-stage-replay(ctx, tag, a, b, c, d, e, key) {
+        let began = dkr-hz-replay-begin(key);
+        let r = dth-stage-go(ctx, tag, a, b, c, d, e);
+        let ended = dkr-hz-replay-end();
+        r;
+    }
+    def dth-stage-planned(ctx, tag, a, b, c, d, e) {
+        let key = dth-stage-key(ctx, tag, b, c);
+        let dry = dkr-hz-plan-known?(key) ? 1 : dth-stage-plan(ctx, tag, a, b, c, d, e, key);
+        nothing?(dry) ? nothing() : dth-stage-replay(ctx, tag, a, b, c, d, e, key);
+    }
+    def dth-stage(ctx, tag, a, b, c, d, e) = dkr-hz-live?() ? dth-stage-planned(ctx, tag, a, b, c, d, e) : dth-stage-go(ctx, tag, a, b, c, d, e);
+
     // ---- the embedding ---------------------------------------------------------------------------------------
     // the token's row into hc-cur, then to the four streams in `resid`: the count of enqueues, or nothing
-    def dsv4-embed(ctx, id) {
+    def dsv4-embed(ctx, id) = dth-stage(ctx, "embed", id, 0, 0, 0, 0);
+    def dth-embed-go(ctx, id) {
         let m = dso-geo(ctx);
         let e = record_get(m, "e");
         let hc = record_get(m, "hc");
@@ -94,42 +142,53 @@ section [form.bml] {
         (w0 >= 0 && r1 == 1 && r2 == 1 && r3 == 1 && r4 == 1 && r5 == 1 && r6 == 1 && r7 == 1) ? 7 : nothing();
     }
     // the head over the residual `resid`: the count of enqueues (7), or nothing
-    def dsv4-head(ctx) = dth-head-ok?(ctx) ? dth-head-go(ctx) : nothing();
+    def dsv4-head(ctx) = dth-head-ok?(ctx) ? dth-stage(ctx, "head", 0, 0, 0, 0, 0) : nothing();
     // the argmax the head left, once the work is synced: an id, or nothing (the sentinel stayed, the id is outside the vocabulary, or the logits are not clean). The device argmax skips one NaN among
     // numbers, so a bad dequant that poisons a few logits would be argmaxed silently: dkr-logits-clean? (dsv4-kernels.fk) scans the logits buffer for non-finite words by their bits FIRST, and a
     // scan that did not run or found one is not clean.
+    // THE SCAN RIDES THE TOKEN'S OWN BATCH. It used to allocate a four-byte buffer, enqueue, sync, read and free in synced rounds for every token (a buffer, three syncs and a free a token: the
+    // fixture read 190 syncs for 100 positions). The count buffer is the context's own ("nan-count", made at the open), written with 0xFFFFFFFF here (a scan that did not run is not clean), the scan
+    // enqueued behind the head's argmax, and ONE sync settles the argmax, the scan and the logits; the two four-byte reads follow.
+    def dth-scan-go(ctx) = dkr-go-tg(dkl-p(ctx, "form_dsv4_nan_count"), [dkl-b(ctx, "logits"), dkl-b(ctx, "nan-count")], [record_get(dso-geo(ctx), "vocab")], 1, 256);
     def dsv4-argmax(ctx) {
-        let s = metal_sync();
         let vocab = record_get(dso-geo(ctx), "vocab");
-        let clean = dkr-logits-clean?(dso-pipe(ctx, "form_dsv4_nan_count"), dkl-b(ctx, "logits"), vocab);
+        let w = metal_buf_write(dkl-b(ctx, "nan-count"), 0, dkr-u32(4294967295));
+        let e = dth-stage(ctx, "scan", 0, 0, 0, 0, 0);
+        let s = dkr-hz-sync();
+        let counted = dkr-hz-put("reads", dkr-hz-get("reads") + 2);
+        let count = dkr-read-u32(dkl-b(ctx, "nan-count"), 1)[0];
         let idx = dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1)[0];
-        (s >= 0 && clean && idx < vocab) ? idx : nothing();
+        (w >= 0 && e == 1 && s >= 0 && count == 0 && idx < vocab) ? idx : nothing();
     }
     // the logits the head left (synced first): vocab f32
     def dsv4-logits(ctx) {
-        let s = metal_sync();
+        let s = dkr-hz-sync();
         dkr-read(dkl-b(ctx, "logits"), record_get(dso-geo(ctx), "vocab"));
     }
 
     // ---- the state half: embed and every block at one position ----------------------------------------------------
+    // the batch goes to the queue every second block (Swift's submitEvery = 2): the device runs block n while the host encodes block n + 1
     def dth-layers(ctx, sts, il, n, id, pos, cap) {
         il == n ? 1 : {
-            let r = dsv4-layer(ctx, sts, il, pos, id, cap);
+            let r = dth-stage(ctx, "layer", sts, il, pos, id, cap);
+            let handed = (il % 2) == 1 ? dkr-hz-submit() : 0;
+            let noted = dkr-hz-get("observe") == 1 ? dkr-hz-put("stages", cons([il, r], dkr-hz-get("stages"))) : 0;
             nothing?(r) ? nothing() : dth-layers(ctx, sts, il + 1, n, id, pos, cap);
         };
     }
     def dth-state-go(ctx, sts, id, pos) {
+        let armed = dkr-hz-token-begin();
         let emb = dsv4-embed(ctx, id);
         nothing?(emb) ? nothing() : dth-layers(ctx, sts, 0, record_get(dso-geo(ctx), "layers-n"), id, pos, dso-cap(ctx));
     }
     // enqueues the embedding and every block at pos (no sync, no head): 1, or nothing before any enqueue when the context, the position or the id is refused
-    def dsv4-forward-state(ctx, sts, id, pos) = (dsv4-admitted?(ctx) && len(sts) == record_get(dso-geo(ctx), "layers-n") && dsv4-position-ok?(ctx, pos) && dsv4-id-ok?(ctx, id)) ? dth-state-go(ctx, sts, id, pos) : nothing();
+    def dsv4-forward-state(ctx, sts, id, pos) = (dsv4-admitted-once?(ctx) && len(sts) == record_get(dso-geo(ctx), "layers-n") && dsv4-position-ok?(ctx, pos) && dsv4-id-ok?(ctx, id)) ? dth-state-go(ctx, sts, id, pos) : nothing();
 
     // ---- prefill, token-major, the head read at the last token only ------------------------------------------------------
     def dth-prefill-go(ctx, sts, ids, i, pos0) {
         let n = len(ids);
         let st = dsv4-forward-state(ctx, sts, ids[i], pos0 + i);
-        nothing?(st) ? nothing() : (i == n - 1 ? dth-prefill-last(ctx) : { let s = metal_sync(); s >= 0 ? dth-prefill-go(ctx, sts, ids, i + 1, pos0) : nothing(); });
+        nothing?(st) ? nothing() : (i == n - 1 ? dth-prefill-last(ctx) : { let s = dkr-hz-sync(); s >= 0 ? dth-prefill-go(ctx, sts, ids, i + 1, pos0) : nothing(); });
     }
     def dth-prefill-last(ctx) {
         let h = dsv4-head(ctx);
