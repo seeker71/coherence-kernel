@@ -54,24 +54,34 @@ gate/tests/structural-gate-band          -> 16383
                                             says `; FOLD: decimal|count` on a head line; a sweep that lists no band
                                             is a flaw too; 2026-10-03)
 form/form-stdlib/tests/band-truth-band   -> 1048575
-./fkwu observe/forbidden-tools-guard.bml -> the PreToolUse door that `.claude/settings.json` registers for every Bash call: the hook's JSON
-                                            on stdin; a command that runs sed, awk, perl or python gets one line of deny JSON naming the
-                                            word and what to use, anything else (another tool, a reading that did not arrive) gets no byte;
-                                            exit 0 both ways, and the registered one-liner ends 0 and prints nothing when fkwu or the door is
-                                            absent (2026-10-03, load average 13: a warm run 25-30 ms, the first run of a checkout 2.4 s while
-                                            the .fkb cache is made; to switch it off delete the entry in .claude/settings.json)
-form/form-stdlib/tests/command-words-band -> 4194303  (form/form-stdlib/bml/command-words.bml reads which commands a shell string runs, with
+./fkwu observe/forbidden-tools-guard.bml -> the PreToolUse door that `.claude/settings.json` registers for every Bash and Monitor call (the two
+                                            tools whose input carries a shell command in `command`): the hook's JSON on stdin; a command
+                                            that runs sed, awk, perl or python gets one line of deny JSON naming the word and what to use,
+                                            anything else (another tool, a reading that did not arrive, a command over 200000 bytes) gets no
+                                            byte; exit 0 both ways. The registered one-liner ends 0, passes a line on only when it opens as
+                                            the deny JSON, and prints nothing when fkwu or the door is absent (2026-10-03, load average 8: a
+                                            warm run 20-25 ms, the registered line 28 ms, the first run of a checkout 2.4 s while the .fkb
+                                            cache is made; to switch it off delete the entry in .claude/settings.json). On a read-only checkout
+                                            the cache cannot be written: the review saw the door exit 1 with a stale-cache warning on stderr
+                                            each call, which the line turns into silence, so nothing is refused there
+form/form-stdlib/tests/command-words-band -> 2147483647  (form/form-stdlib/bml/command-words.bml reads which commands a shell string runs, with
                                             no shell: quotes, separators, redirections, heredoc bodies, wrappers, sh -c / eval / trap / find
-                                            -exec, substitutions. Against the 3813 distinct Bash commands of one session's transcript:
-                                            318 read as running sed or awk, each confirmed by reading it, and 3495 read clean, of which 12
-                                            name a tool only as data and 1 writes a script that runs sed later. Five plants (no quotes, no
-                                            wrappers, no heredoc skipping, no -c recursion, no basenames) each drop their claim. It cannot see
-                                            an alias, a variable that holds the tool (`$T file` reads <unknown>, never refused: `$cmd x` is
-                                            an ordinary zsh form here), a script file that runs sed inside, a runner such as uv run python,
-                                            the substitutions in an unquoted heredoc body, or a case pattern)
-form/form-stdlib/tests/forbidden-tools-guard-band -> 511  (the deny line parses as JSON with its keys; silence on allow, on malformed
-                                            or cut-off stdin and on another tool; the registered line from another directory denies sed and
-                                            fails open on a missing project, door or fkwu)
+                                            -exec, substitutions, case arms, [[ ]] and (( )), function bodies, ANSI-C escapes, and the
+                                            stream a shell is fed (bash <<'EOF', bash <<< "..", echo ".." | bash, source <(..)). Against the
+                                            3813 distinct Bash commands of one session's transcript, read again after the streams, case,
+                                            condition and function work: 318 read as running sed or awk, each confirmed by reading it, the
+                                            same 318, and 3495 read clean, of which 12 name a tool only as data and 1 writes a script that
+                                            runs sed later; four commands that read `<unknown>` (arithmetic and [[ ]] words) now read clean.
+                                            Eight plants (no quotes, wrappers, heredoc skipping, -c recursion, basenames, streams, case
+                                            patterns, conditions) each drop their claim. It cannot see an alias, a variable that holds the
+                                            tool (`$T file` reads <unknown>, never refused: `$cmd x` is an ordinary zsh form here), a script
+                                            file that runs sed inside, a runner such as uv run python, a pipe from a producer that is no
+                                            literal (cat f | bash), the substitutions in an unquoted heredoc body, or a wrapper its list lacks;
+                                            a reading nests at most 256 levels and then answers <too-deep>)
+form/form-stdlib/tests/forbidden-tools-guard-band -> 4095  (the deny line parses as JSON with its keys; silence on allow, on malformed
+                                            or cut-off stdin, on another tool, on a 240 KB command and on 300 nested substitutions; Monitor is
+                                            read like Bash; the registered line from another directory denies sed, passes only the deny JSON
+                                            and fails open on a missing project, door or fkwu)
 ./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
 ./fkwu form/form-stdlib/release-ledger.bml -> open=22 moving=0, then 22000000 (2026-10-01)

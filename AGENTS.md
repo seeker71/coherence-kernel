@@ -113,7 +113,7 @@ and BML. A missing internal tool belongs in that body, with its behavior observe
 in the same movement. Shell carries OS operations; perl, python, sed, awk and jq
 do not become implementation or analysis detours. The door holds this for sed, awk,
 perl and python: `.claude/settings.json` registers `observe/forbidden-tools-guard.bml` as
-a PreToolUse hook on every Bash call, and a call that runs one is refused with a line that
+a PreToolUse hook on every Bash and Monitor call, and a call that runs one is refused with a line that
 begins `sed/awk/perl/python is not used here`, names the word it read and says what to use
 instead (the reading and what it cannot see: `form/form-stdlib/bml/command-words.bml`).
 
