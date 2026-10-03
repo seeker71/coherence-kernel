@@ -31,9 +31,16 @@ appear beside each source on its first run, and `form/build-form-cli.sh` regener
 
 fkwu is the only runtime and every band answers its pin on it. Nothing in this tree builds, runs or
 gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc`,
-`./fkwu`, `shasum` and `openssl`. No tracked script calls sed, awk, perl or python: what a band's head
-and the verdict manifest say is read by `observe/band-head-run.bml` (band `observe/tests/band-head-band`,
-255), and `tools/ftimeout` is plain shell.
+`./fkwu`, `shasum` and `openssl`. No tracked script and no Form door calls sed, awk, perl or python:
+what a band's head and the verdict manifest say is read by `observe/band-head-run.bml`, which answers one
+line to each line it is sent, so `validate.sh --list` asks once for every band and once for every row
+(band `observe/tests/band-head-band`, 2047). `validate.sh` sends the reader its fields one by one, so
+the sweep worker's IFS cannot join them, and a reader that is absent or fails is a loud ✗ line and a
+non-zero verdict, never "no pin" (`observe/tests/validate-reader-band`, 15, holds both, and drops to 14
+when the joining is put back). `hearth.bml`, `rumi-glass.bml` and `observe/hearth-glass-live.fk` read the
+`ps` listing in Form (`hearth-band`, 131071) and `source-of.fk` reads grep's rows in Form
+(`source-of-band`, 15). `tools/ftimeout` is plain shell: 124 on the deadline, else the child's status,
+128+n for a signal.
 
 What the tree still says of the retired kernels, by class, and why it stays:
 - History: `receipts/`, `learn/` corpus rows and `local-requests.jsonl` are dated evidence, not claims.
@@ -245,7 +252,7 @@ form-cli-peer-direct-answer-action-band    -> 8191
 form-cli-peer-stream-ingress-band          -> 2097151
 form-cli-peer-contribution-turnwheel-band  -> 33554431
 observed-auto-learning-band                -> 32767
-hearth-band                                -> 32767
+hearth-band                                -> 131071
 receipt-texture-band                       -> 16383
 lora-backward-band 511 · lora-step-live-band 511 · lora-adapter-band 31 · symbol-voice-band 63
 ```
