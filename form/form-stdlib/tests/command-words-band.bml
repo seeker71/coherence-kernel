@@ -1,0 +1,308 @@
+; command-words-band.bml — the shell reading behind the forbidden-tools guard: which commands a command string runs, and which
+; words that look like them are only data. Every case is a command string and the words (or the forbidden names) it must read as.
+;
+; Verdict 4194303 when every claim lands:
+;   1        basics: sed, awk, perl, python, python3, gsed gawk mawk nawk are read; the literal no-op `sed -i.bak 's/x/x/' /dev/null` is flagged
+;   2        names: python2.7 python3.11 perl5.38.0 are the tools; ruby, pythonic, perlbrew, sedate, awkward, pythonw are not
+;   4        quotes: single, double, $'..' and backslash keep `; sed p` as data; `"$(sed p f)"` still runs (and `'$(sed p f)'` does not)
+;   8        separators: ; & && || | |& newline ( ) { } $( ` then/do/! and case arms each start a command
+;   16       assignments and redirections are skipped: A=b sed, >out sed, 2>&1, a target named sed, an array literal, &>
+;   32       heredoc bodies are data (<<EOF, <<'EOF', <<"EOF", <<-EOF, two on a line, unterminated), the command after one is read
+;   64       a path reads as its basename (/usr/bin/sed, "$D"/awk, $HOME/bin/awk) and a basename still being expanded is <unknown>
+;   128      wrappers are looked through: command builtin env exec nohup time sudo xargs nice stdbuf timeout form-run setsid caffeinate
+;            (command -v is a lookup and runs nothing; a wrapper's arguments that name a tool are data)
+;   256      strings are recursed: sh|bash|zsh -c, eval, trap, find -exec; nested twice too
+;   512      substitutions run: $( ), backticks, <( ), ${X:-$(..)}, $(( $(..) )); ${#X} ${pipestatus[1]} $((1+2)) do not
+;   1024     data is never a command: file names, git log -S"sed", grep -F "sed -i", printf 'awk', which sed, a comment, a commit message
+;   2048     functions of the same text: `sed() {..}` and `function sed` are names of the text's own; a call to one is not reported, its body is
+;   4096     a variable that holds the tool ($T file) reads <unknown> and is not flagged; $S/bin/sed still reads sed
+;   8192     the repo's ordinary commands read as the exact words they run (./fkwu, cd && fkwu | tail | cut; echo "rc=${pipestatus[1]}", rg)
+;   16384    order: an inner substitution comes before the command that holds it; wrappers drop out; a shell is followed by its -c commands
+;   32768    the fixture (tests/command-words-fixture.txt: real commands, trimmed) reads as marked: every F row flags, every C row is clean
+;   65536    plant: with quote-awareness removed, the quotes claim loses a case
+;   131072   plant: with wrapper looking-through removed, the wrappers claim loses a case
+;   262144   plant: with heredoc skipping removed, the heredoc claim loses a case
+;   524288   plant: with -c recursion removed, the recursion claim loses a case
+;   1048576  plant: with basename resolution removed, the basename claim loses a case
+;   2097152  scale: a 3000-word command, a 3000-line heredoc and a 30 KB quoted string read in one pass and answer exactly
+;
+; The plants are the reader itself with one feature switched off (cw-words-off): the claim that depends on the feature must lose a case.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- the fixture is read by a path from the body root, where fkwu runs and the siblings (which run from
+; form/) do not; the siblings have not been run on this band.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/command-words.bml form-stdlib/bml/forbidden-tools-guard.bml
+section [form.bml] {
+ class CommandWordsBand {
+  // a case: [group, kind, text, expected]; kind f reads the forbidden names, kind w reads every command word
+  def cbw-f(g, t, e) = [g, "f", t, e];
+  def cbw-w(g, t, e) = [g, "w", t, e];
+  def cbw-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ cbw-join(xs[1:], sep);
+  def cbw-got(row, off) {
+   let ws = cw-words-off(row[2], off);
+   (String) row[1] == "f" ? cw-forbidden(ws) : ws;
+  }
+  def cbw-ok?(row, off) = (String) cbw-join(cbw-got(row, off), "|") == cbw-join(row[3], "|");
+  def cbw-in-group(rows, g) = filter(r => (String) r[0] == g, rows);
+  def cbw-fails(rows, g, off) = len(filter(r => !cbw-ok?(r, off), cbw-in-group(rows, g)));
+  def cbw-holds(g) = len(cbw-in-group(cbw-rows(), g)) > 0 && cbw-fails(cbw-rows(), g, []) == 0;
+  def cbw-plant(g, feature) = cbw-fails(cbw-rows(), g, [feature]) > 0 && cbw-fails(cbw-rows(), g, []) == 0;
+  def cbw-tab() = byte_to_str(9);
+
+  def cbw-basics() = [
+   cbw-f("basics", "sed -i.bak 's/x/x/' /dev/null 2>/dev/null", ["sed"]),
+   cbw-f("basics", "python3 --version", ["python3"]),
+   cbw-f("basics", "awk '{print $1}' f", ["awk"]),
+   cbw-f("basics", "perl -pe 1 f", ["perl"]),
+   cbw-f("basics", "python -c 'print(1)'", ["python"]),
+   cbw-f("basics", "gsed p f; gawk 1 f; mawk 1 f; nawk 1 f", ["gsed", "gawk", "mawk", "nawk"]),
+   cbw-f("basics", "sed -n 1,5p f | awk 1 | perl -e 1", ["sed", "awk", "perl"]),
+   cbw-f("basics", "ls -la && echo done", [])
+  ];
+  def cbw-names() = [
+   cbw-f("names", "python2.7 x; python3.11 -V; perl5.38.0 -e 1", ["python2.7", "python3.11", "perl5.38.0"]),
+   cbw-f("names", "ruby -e 1; pythonic x; perlbrew list; sedate; awkward x; pythonw y", []),
+   cbw-f("names", "pythons x; perlish y; seded z; gnu-sed p; sed.exe p", [])
+  ];
+  def cbw-quotes() = [
+   cbw-f("quotes", "echo \"a; sed p\"", []),
+   cbw-f("quotes", "echo 'x && awk 1'", []),
+   cbw-f("quotes", "echo \"it's\"; sed p", ["sed"]),
+   cbw-f("quotes", "echo 'a\\'; sed p", ["sed"]),
+   cbw-f("quotes", "echo \"\\\"; sed p\\\"\"", []),
+   cbw-f("quotes", "echo $'a\\'b; sed p'", []),
+   cbw-f("quotes", "echo \"$(sed p f)\"", ["sed"]),
+   cbw-f("quotes", "echo '$(sed p f)'", []),
+   cbw-f("quotes", "echo \"a\" 'b' \"c\"; awk 1", ["awk"]),
+   cbw-f("quotes", "echo a\\;sed p", []),
+   cbw-f("quotes", "echo \"a | sed p\" | cat", [])
+  ];
+  def cbw-separators() = [
+   cbw-f("separators", "true;sed p", ["sed"]),
+   cbw-f("separators", "true&sed p", ["sed"]),
+   cbw-f("separators", "a && sed p", ["sed"]),
+   cbw-f("separators", "a || awk 1", ["awk"]),
+   cbw-f("separators", "a | sed p", ["sed"]),
+   cbw-f("separators", "a |& sed p", ["sed"]),
+   cbw-f("separators", "echo a\nsed p", ["sed"]),
+   cbw-f("separators", "(sed p f)", ["sed"]),
+   cbw-f("separators", "{ sed p f; }", ["sed"]),
+   cbw-f("separators", "if x; then sed p; fi", ["sed"]),
+   cbw-f("separators", "for f in a; do sed p $f; done", ["sed"]),
+   cbw-f("separators", "while read l; do awk 1; done", ["awk"]),
+   cbw-f("separators", "! sed p f", ["sed"]),
+   cbw-f("separators", "case $x in a) sed p;; esac", ["sed"]),
+   cbw-f("separators", "a; sed p; awk 1 | perl x", ["sed", "awk", "perl"]),
+   cbw-f("separators", "echo a &!\nsed p f", ["sed"]),
+   cbw-f("separators", "a" ++ byte_to_str(13) ++ "\nsed p", ["sed"])
+  ];
+  def cbw-assign() = [
+   cbw-f("assign-redir", "A=b sed p f", ["sed"]),
+   cbw-f("assign-redir", "A=b B=c awk 1", ["awk"]),
+   cbw-f("assign-redir", "A=$(sed p f) true", ["sed"]),
+   cbw-f("assign-redir", ">out sed p f", ["sed"]),
+   cbw-f("assign-redir", "2>&1 sed p f", ["sed"]),
+   cbw-f("assign-redir", "sed p f 2>/dev/null", ["sed"]),
+   cbw-f("assign-redir", "cat < sed.txt", []),
+   cbw-f("assign-redir", "echo > sed", []),
+   cbw-f("assign-redir", "cat <<<sed", []),
+   cbw-f("assign-redir", "x=sed; ls", []),
+   cbw-f("assign-redir", "ls -l &>/dev/null", []),
+   cbw-f("assign-redir", "echo a >sed; awk 1", ["awk"]),
+   cbw-f("assign-redir", "a=(sed awk); ls", []),
+   cbw-f("assign-redir", "FOO=sed env true", []),
+   cbw-f("assign-redir", "cat file >> awk.log 2>&1", []),
+   cbw-f("assign-redir", "echo 2>/dev/null; sed p", ["sed"])
+  ];
+  def cbw-heredoc() = [
+   cbw-f("heredoc", "cat <<EOF\nsed -i x f\nEOF", []),
+   cbw-f("heredoc", "cat <<EOF\nbody\nEOF\nsed p f", ["sed"]),
+   cbw-f("heredoc", "cat <<'EOF' > f\nuse sed here\nEOF", []),
+   cbw-f("heredoc", "cat <<'EOF' > f\nsed p\nEOF", []),
+   cbw-f("heredoc", "cat <<-EOF\n" ++ cbw-tab() ++ "awk 1\n" ++ cbw-tab() ++ "EOF\nawk 2", ["awk"]),
+   cbw-f("heredoc", "cat <<A <<B\nsed\nA\nawk\nB\nls", []),
+   cbw-f("heredoc", "cat <<\"EOF\"\nsed p\nEOF", []),
+   cbw-f("heredoc", "cat <<EOF | sed p\nbody\nEOF", ["sed"]),
+   cbw-f("heredoc", "cat <<EOF\nsed p", []),
+   cbw-f("heredoc", "git commit -m \"$(cat <<'EOF'\ndon't use sed (really)\nEOF\n)\"; awk 1 f", ["awk"]),
+   cbw-f("heredoc", "form-run ./fkwu x.bml <<'EOF'\n{\"a\":\"sed\"}\nEOF", [])
+  ];
+  def cbw-basename() = [
+   cbw-f("basename", "/usr/bin/sed p f", ["sed"]),
+   cbw-f("basename", "\"/usr/bin/perl\" -e 1", ["perl"]),
+   cbw-f("basename", "/usr/local/bin/python3 x", ["python3"]),
+   cbw-f("basename", "~/bin/sed p", ["sed"]),
+   cbw-f("basename", "$HOME/bin/awk 1 f", ["awk"]),
+   cbw-f("basename", "\"$D\"/awk 1", ["awk"]),
+   cbw-f("basename", "./sed p", ["sed"]),
+   cbw-f("basename", "/usr/bin/true", [])
+  ];
+  def cbw-wrappers() = [
+   cbw-f("wrappers", "command sed p f", ["sed"]),
+   cbw-f("wrappers", "command -v sed", []),
+   cbw-f("wrappers", "command -V awk", []),
+   cbw-f("wrappers", "command -pv sed", []),
+   cbw-f("wrappers", "builtin echo sed", []),
+   cbw-f("wrappers", "env sed p f", ["sed"]),
+   cbw-f("wrappers", "env -i A=b awk 1", ["awk"]),
+   cbw-f("wrappers", "env -u X perl -e 1", ["perl"]),
+   cbw-f("wrappers", "exec python3 x", ["python3"]),
+   cbw-f("wrappers", "nohup sed p f &", ["sed"]),
+   cbw-f("wrappers", "time -p awk 1", ["awk"]),
+   cbw-f("wrappers", "sudo -u me sed p", ["sed"]),
+   cbw-f("wrappers", "xargs sed -i x", ["sed"]),
+   cbw-f("wrappers", "xargs -n 1 -I{} awk 1 {}", ["awk"]),
+   cbw-f("wrappers", "nice -n 10 perl x", ["perl"]),
+   cbw-f("wrappers", "stdbuf -oL sed p", ["sed"]),
+   cbw-f("wrappers", "timeout 5 sed p", ["sed"]),
+   cbw-f("wrappers", "timeout -s KILL 5 awk 1", ["awk"]),
+   cbw-f("wrappers", "form-run sed -n 1,5p f", ["sed"]),
+   cbw-f("wrappers", "setsid sed p", ["sed"]),
+   cbw-f("wrappers", "caffeinate -i python3 x", ["python3"]),
+   cbw-f("wrappers", "form-run env A=b timeout 3 sed p", ["sed"]),
+   cbw-f("wrappers", "env FOO=1 awk '{print}' f", ["awk"]),
+   cbw-f("wrappers", "env FOO=sed true", []),
+   cbw-f("wrappers", "xargs echo sed", []),
+   cbw-f("wrappers", "timeout 5 echo sed", []),
+   cbw-f("wrappers", "form-run ./fkwu sed.bml", [])
+  ];
+  def cbw-recursion() = [
+   cbw-f("recursion", "bash -c \"perl -e 1\"", ["perl"]),
+   cbw-f("recursion", "sh -c 'sed p f'", ["sed"]),
+   cbw-f("recursion", "zsh -lc \"awk 1\"", ["awk"]),
+   cbw-f("recursion", "bash -c 'echo sed'", []),
+   cbw-f("recursion", "eval 'sed p f'", ["sed"]),
+   cbw-f("recursion", "eval sed p f", ["sed"]),
+   cbw-f("recursion", "eval \"echo sed\"", []),
+   cbw-f("recursion", "trap 'sed p f' EXIT", ["sed"]),
+   cbw-f("recursion", "bash script.sh", []),
+   cbw-f("recursion", "find . -exec sed -i x {} \\;", ["sed"]),
+   cbw-f("recursion", "find . -name sed -print", []),
+   cbw-f("recursion", "find . -execdir awk 1 {} +", ["awk"]),
+   cbw-f("recursion", "bash -c 'sh -c \"perl x\"'", ["perl"]),
+   cbw-f("recursion", "env bash -c 'python3 x'", ["python3"]),
+   cbw-f("recursion", "bash -c 'echo $(sed p f)'", ["sed"]),
+   cbw-f("recursion", "form-run sh -c \"sed -n '1,9p' f\"", ["sed"])
+  ];
+  def cbw-subst() = [
+   cbw-f("substitution", "echo $(sed p f)", ["sed"]),
+   cbw-f("substitution", "echo `awk 1 f`", ["awk"]),
+   cbw-f("substitution", "diff <(sed p a) b", ["sed"]),
+   cbw-f("substitution", "cat <(awk 1 a)", ["awk"]),
+   cbw-f("substitution", "echo \"$(echo $(sed p f))\"", ["sed"]),
+   cbw-f("substitution", "echo ${X:-$(sed p f)}", ["sed"]),
+   cbw-f("substitution", "echo $(( 1 + $(sed p f) ))", ["sed"]),
+   cbw-f("substitution", "echo ${#X} $((1+2)) ${pipestatus[1]}", []),
+   cbw-f("substitution", "echo \"${X:-sed}\" $(( 2 * 3 ))", [])
+  ];
+  def cbw-data() = [
+   cbw-f("data", "ls sed.txt", []),
+   cbw-f("data", "cat file.py", []),
+   cbw-f("data", "git log -S\"sed\"", []),
+   cbw-f("data", "grep -F \"sed -i\" f", []),
+   cbw-f("data", "printf 'awk'", []),
+   cbw-f("data", "printf '%s' \"sed\" | cut -c1-2", []),
+   cbw-f("data", "git grep -n \"sed -i\" -- docs", []),
+   cbw-f("data", "echo sed_free", []),
+   cbw-f("data", "sed_free 1 2", []),
+   cbw-f("data", "which sed", []),
+   cbw-f("data", "man awk", []),
+   cbw-f("data", "type perl", []),
+   cbw-f("data", "brew install gnu-sed", []),
+   cbw-f("data", "# sed comment, it's one\nls", []),
+   cbw-f("data", "echo a #sed", []),
+   cbw-f("data", "ls ~/.sed", []),
+   cbw-f("data", "git commit -m \"the awk dependency\"", []),
+   cbw-f("data", "rg -n \"sed|awk\" docs | head -3", [])
+  ];
+  def cbw-functions() = [
+   cbw-f("functions", "sed() { command sed \"$@\"; }; sed p f", ["sed"]),
+   cbw-f("functions", "awk() { echo hi; }; awk 1", []),
+   cbw-f("functions", "function sed { echo hi; }; sed", []),
+   cbw-f("functions", "sed_free() { head -n $2 $F | tail -n +$1; } && sed_free 18 75 > f && wc -c f; sed -e 's/a/b/' /dev/null; echo ok", ["sed"]),
+   cbw-f("functions", "name() { sed p; }; name", ["sed"]),
+   cbw-f("functions", "sed_free() { head -n 2 f; }; sed_free", []),
+   cbw-f("functions", "function perl() { :; }; perl x", [])
+  ];
+  def cbw-variables() = [
+   cbw-w("variables", "$T file", ["<unknown>"]),
+   cbw-w("variables", "\"$X\" file", ["<unknown>"]),
+   cbw-w("variables", "${X} a", ["<unknown>"]),
+   cbw-f("variables", "$S/bin/sed p", ["sed"]),
+   cbw-f("variables", "T=sed; $T file", []),
+   cbw-f("variables", "$cmd x", [])
+  ];
+  def cbw-repo() = [
+   cbw-w("repo", "./fkwu observe/x.bml", ["fkwu"]),
+   cbw-w("repo", "cd /path && ./fkwu a </dev/null 2>&1 | tail -3 | cut -c1-200; echo \"rc=${pipestatus[1]}\"", ["cd", "fkwu", "tail", "cut", "echo"]),
+   cbw-w("repo", "git commit -m \"$(cat <<'EOF'\nfix: x\nEOF\n)\"", ["cat", "git"]),
+   cbw-w("repo", "rg -n \"sed|awk\" docs | head -3", ["rg", "head"]),
+   cbw-w("repo", "S=/x; cd $S; ls | wc -l", ["cd", "ls", "wc"]),
+   cbw-w("repo", "form-run ./fkwu observe/hearth-ask-file-run.bml <<'FORM_ASK'\n{\"body_path\":\"x\"}\nFORM_ASK", ["fkwu"]),
+   cbw-w("repo", "for k in a b; do echo $k; done", ["for", "echo"])
+  ];
+  def cbw-order() = [
+   cbw-w("order", "echo $(sed p f)", ["sed", "echo"]),
+   cbw-w("order", "a && b | c; d", ["a", "b", "c", "d"]),
+   cbw-w("order", "form-run sed -n 1p f", ["sed"]),
+   cbw-w("order", "bash -c \"perl -e 1\"", ["bash", "perl"]),
+   cbw-w("order", "find . -exec sed p {} \\;", ["find", "sed"]),
+   cbw-w("order", "X=1 Y=2", []),
+   cbw-w("order", "f() { a; }; f; b", ["a", "b"]),
+   cbw-w("order", "( a; b ) | c", ["a", "b", "c"]),
+   cbw-w("order", "a & b", ["a", "b"]),
+   cbw-w("order", "", [])
+  ];
+  def cbw-rows() = append(append(append(append(cbw-basics(), cbw-names()), append(cbw-quotes(), cbw-separators())), append(append(cbw-assign(), cbw-heredoc()), append(cbw-basename(), cbw-wrappers()))), append(append(append(cbw-recursion(), cbw-subst()), append(cbw-data(), cbw-functions())), append(cbw-variables(), append(cbw-repo(), cbw-order()))));
+
+  // ---- the fixture: `F text` or `C text`, text in JSON escapes
+  def cbw-fixture-path() = "form/form-stdlib/tests/command-words-fixture.txt";
+  def cbw-fixture-rows(text, i, n, acc) {
+   let e = scan_run(text, i, 5);
+   let line = substring(text, i, e);
+   let mark = len(line) > 2 ? str_byte_at(line, 0) : 0;
+   let row = mark == 70 || mark == 67 ? [mark == 70, hkg-unescape(substring(line, 2, len(line)))] : nothing();
+   e >= n ? reverse(nothing?(row) ? acc : cons(row, acc)) : cbw-fixture-rows(text, e + 1, n, nothing?(row) ? acc : cons(row, acc));
+  }
+  def cbw-fixture() {
+   let text = read_file(cbw-fixture-path()) ?? "";
+   cbw-fixture-rows(text, 0, len(text), []);
+  }
+  def cbw-row-reads?(row) = (nil?(cw-forbidden(cw-words(row[1]))) ? false : true) == row[0];
+  def cbw-fixture-held() {
+   let rows = cbw-fixture();
+   len(filter(r => r[0], rows)) >= 10 && len(filter(r => !r[0], rows)) >= 10 && len(filter(r => !cbw-row-reads?(r), rows)) == 0 && len(rows) <= 40;
+  }
+
+  // ---- scale
+  def cbw-rep(s, k) = k <= 0 ? "" : s ++ cbw-rep(s, k - 1);
+  def cbw-big-words() = cw-words("echo " ++ cbw-rep("word ", 3000) ++ "; sed p") ;
+  def cbw-big-heredoc() = cw-words("cat <<EOF\n" ++ cbw-rep("line with sed and 'quote and $(awk 1) inside\n", 3000) ++ "EOF\nawk x");
+  def cbw-big-quote() = cw-words("echo \"" ++ cbw-rep("0123456789 sed; awk |&\n", 1300) ++ "\" | perl -e 1");
+  def cbw-same(got, want) = (String) cbw-join(got, "|") == cbw-join(want, "|");
+  def cbw-scale() = cbw-same(cbw-big-words(), ["echo", "sed"]) && cbw-same(cbw-big-heredoc(), ["cat", "awk"]) && cbw-same(cbw-big-quote(), ["echo", "perl"]);
+
+  def cbw-c-basics(ctx) = cbw-holds("basics");
+  def cbw-c-names(ctx) = cbw-holds("names");
+  def cbw-c-quotes(ctx) = cbw-holds("quotes");
+  def cbw-c-separators(ctx) = cbw-holds("separators");
+  def cbw-c-assign(ctx) = cbw-holds("assign-redir");
+  def cbw-c-heredoc(ctx) = cbw-holds("heredoc");
+  def cbw-c-basename(ctx) = cbw-holds("basename");
+  def cbw-c-wrappers(ctx) = cbw-holds("wrappers");
+  def cbw-c-recursion(ctx) = cbw-holds("recursion");
+  def cbw-c-subst(ctx) = cbw-holds("substitution");
+  def cbw-c-data(ctx) = cbw-holds("data");
+  def cbw-c-functions(ctx) = cbw-holds("functions");
+  def cbw-c-variables(ctx) = cbw-holds("variables");
+  def cbw-c-repo(ctx) = cbw-holds("repo");
+  def cbw-c-order(ctx) = cbw-holds("order");
+  def cbw-c-fixture(ctx) = cbw-fixture-held();
+  def cbw-c-p-quotes(ctx) = cbw-plant("quotes", "quotes");
+  def cbw-c-p-wrappers(ctx) = cbw-plant("wrappers", "wrappers");
+  def cbw-c-p-heredoc(ctx) = cbw-plant("heredoc", "heredoc");
+  def cbw-c-p-dashc(ctx) = cbw-plant("recursion", "dash-c");
+  def cbw-c-p-basename(ctx) = cbw-plant("basename", "basename");
+  def cbw-c-scale(ctx) = cbw-scale();
+ }
+ live-claims("command-words-band", 0, [["basics", 1, 1, cbw-c-basics], ["names", 2, 1, cbw-c-names], ["quotes", 4, 1, cbw-c-quotes], ["separators", 8, 1, cbw-c-separators], ["assign-redir", 16, 1, cbw-c-assign], ["heredoc", 32, 1, cbw-c-heredoc], ["basename", 64, 1, cbw-c-basename], ["wrappers", 128, 1, cbw-c-wrappers], ["recursion", 256, 1, cbw-c-recursion], ["substitution", 512, 1, cbw-c-subst], ["data", 1024, 1, cbw-c-data], ["functions", 2048, 1, cbw-c-functions], ["variables", 4096, 1, cbw-c-variables], ["repo", 8192, 1, cbw-c-repo], ["order", 16384, 1, cbw-c-order], ["fixture", 32768, 1, cbw-c-fixture], ["plant-quotes", 65536, 1, cbw-c-p-quotes], ["plant-wrappers", 131072, 1, cbw-c-p-wrappers], ["plant-heredoc", 262144, 1, cbw-c-p-heredoc], ["plant-dash-c", 524288, 1, cbw-c-p-dashc], ["plant-basename", 1048576, 1, cbw-c-p-basename], ["scale", 2097152, 1, cbw-c-scale]]);
+}
