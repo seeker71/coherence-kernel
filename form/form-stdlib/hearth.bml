@@ -110,9 +110,67 @@ section [form.bml] {
         // feeder PID on the board. The process image is the identity here:
         // argv[0] must itself be fkwu and argv[1] the resident entry. This is
         // a present host observation, not a guessed parent/child relation.
-        def hearth-resident-pids-command() = "ps -axo pid=,command= | awk '$2 ~ /(^|\\/)fkwu$/ && $3 ~ /form-cli-peer-contribution-live\\.fk$/ { print $1 }'";
-        def hearth-resident-pid-command() = hearth-resident-pids-command() + " | head -1";
-        def hearth-resident-pid() = fmv-last-int(host-exec(hearth-resident-pid-command(), ""));
+        // The listing is `ps` output read here, field by field: a line is a resident when its second
+        // field (argv[0]) is fkwu, bare or by a path, and its third (argv[1]) ends in the resident entry.
+        def hearth-ps-text() {
+            let t = host-exec("ps -axo pid=,command=", "");
+            nothing?(t) ? "" : t;
+        }
+        def hearth-ws?(l, i) = i >= len(l) ? 0 : ((Comparable) ord(char_at(l, i)) == 32 || (Comparable) ord(char_at(l, i)) == 9) ? 1 : 0;
+        def hearth-skip-ws(l, i) = i >= len(l) ? i : (Comparable) hearth-ws?(l, i) == 1 ? hearth-skip-ws(l, i + 1) : i;
+        def hearth-word-end(l, i) = i >= len(l) ? i : (Comparable) hearth-ws?(l, i) == 1 ? i : hearth-word-end(l, i + 1);
+        def hearth-field-from(l, i, n) {
+            let a = hearth-skip-ws(l, i);
+            a >= len(l) ? ""
+            : (Comparable) n == 1 ? substring(l, a, hearth-word-end(l, a))
+            : hearth-field-from(l, hearth-word-end(l, a), n - 1);
+        }
+        def hearth-field(l, n) = hearth-field-from(l, 0, n);
+        def hearth-ends-with?(s, tail) = (Comparable) len(s) >= len(tail) && (String) substring(s, len(s) - len(tail), len(s)) == tail;
+        def hearth-fkwu-word?(w) = (Comparable) hearth-ends-with?(w, "fkwu") && ((Comparable) len(w) == 4 || (String) substring(w, len(w) - 5, len(w) - 4) == "/");
+        def hearth-resident-line?(l) = (Comparable) hearth-fkwu-word?(hearth-field(l, 2)) && (Comparable) hearth-ends-with?(hearth-field(l, 3), "form-cli-peer-contribution-live.fk");
+        def hearth-ps-lines(text, from, acc) {
+            let nl = str_find(text, "\n", from);
+            nl < 0 ? ((Comparable) from < len(text) ? cons(substring(text, from, len(text)), acc) : acc)
+            : hearth-ps-lines(text, nl + 1, cons(substring(text, from, nl), acc));
+        }
+        def hearth-resident-pids-go(ls, acc) = (Comparable) len(ls) == 0 ? acc : (Comparable) hearth-resident-line?(ls[0]) == 1 ? hearth-resident-pids-go(ls[1:], cons(hearth-field(ls[0], 1), acc)) : hearth-resident-pids-go(ls[1:], acc);
+        // the pids in listing order
+        def hearth-resident-pids-of(text) = reverse(hearth-resident-pids-go(reverse(hearth-ps-lines(text, 0, [])), []));
+        def hearth-resident-pids() = hearth-resident-pids-of(hearth-ps-text());
+        def hearth-resident-pid-of(text) {
+            let pids = hearth-resident-pids-of(text);
+            (Comparable) len(pids) == 0 ? 0 : str_to_int(pids[0]);
+        }
+        def hearth-resident-pid() = hearth-resident-pid-of(hearth-ps-text());
+        def hearth-resident-count() = len(hearth-resident-pids());
+        // How many fkwu processes run one of these entries: `ps` command text, a line counting when its
+        // first word is fkwu (bare or by a path) and its second word holds one of the entry names.
+        def hearth-ps-commands() {
+            let t = host-exec("ps -axo command=", "");
+            nothing?(t) ? "" : t;
+        }
+        def hearth-has-any?(s, names) = (Comparable) len(names) == 0 ? 0 : str_find(s, names[0], 0) >= 0 ? 1 : hearth-has-any?(s, names[1:]);
+        def hearth-fkwu-entry-line?(l, names) = (Comparable) hearth-fkwu-word?(hearth-field(l, 1)) && (Comparable) hearth-has-any?(hearth-field(l, 2), names) == 1;
+        def hearth-fkwu-count-go(ls, names, n) = (Comparable) len(ls) == 0 ? n : hearth-fkwu-count-go(ls[1:], names, (Comparable) hearth-fkwu-entry-line?(ls[0], names) == 1 ? n + 1 : n);
+        def hearth-fkwu-count-of(text, names) = hearth-fkwu-count-go(hearth-ps-lines(text, 0, []), names, 0);
+        def hearth-fkwu-count(names) = hearth-fkwu-count-of(hearth-ps-commands(), names);
+        // The census of running fkwu: `pid+etime lastword; ` for each process whose argv[0] is fkwu, from
+        // `ps -axo pid=,etime=,command=`, cut to the first 190 bytes (the board's width).
+        def hearth-rstrip-end(l, n) = (Comparable) n <= 0 ? 0 : (Comparable) hearth-ws?(l, n - 1) == 1 ? hearth-rstrip-end(l, n - 1) : n;
+        def hearth-last-start(l, e) = (Comparable) e <= 0 ? 0 : (Comparable) hearth-ws?(l, e - 1) == 1 ? e : hearth-last-start(l, e - 1);
+        def hearth-last-field(l) {
+            let e = hearth-rstrip-end(l, len(l));
+            substring(l, hearth-last-start(l, e), e);
+        }
+        def hearth-ps-times() {
+            let t = host-exec("ps -axo pid=,etime=,command=", "");
+            nothing?(t) ? "" : t;
+        }
+        def hearth-census-go(ls, acc) = (Comparable) len(ls) == 0 ? acc : (Comparable) hearth-fkwu-word?(hearth-field(ls[0], 3)) == 1 ? hearth-census-go(ls[1:], acc ++ hearth-field(ls[0], 1) ++ "+" ++ hearth-field(ls[0], 2) ++ " " ++ hearth-last-field(ls[0]) ++ "; ") : hearth-census-go(ls[1:], acc);
+        def hearth-census-cut(s) = (Comparable) len(s) > 190 ? substring(s, 0, 190) : s;
+        def hearth-fkwu-census-of(text) = hearth-census-cut(hearth-census-go(reverse(hearth-ps-lines(text, 0, [])), ""));
+        def hearth-fkwu-census() = hearth-fkwu-census-of(hearth-ps-times());
         def hearth-board-mend-needed?(listed, resident) = resident > 0 ? ((Comparable) listed == resident ? 0 : 1) : 0;
         def hearth-resident-model-cmd(pid) = "lsof -p " + (pid.str() + " 2>/dev/null | grep -o '[^ /]*.gguf' | head -1");
         def hearth-chomp-end(s, i) = i >= len(s) ? i : (Comparable) ord(char_at(s, i)) == 10 ? i : hearth-chomp-end(s, i + 1);
