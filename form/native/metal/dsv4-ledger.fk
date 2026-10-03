@@ -7,8 +7,9 @@
 //
 // A ROW is a record: dispatches, barriers, cbs (command buffers: the batches handed to the queue, plus the one the final wait drains), syncs, readbacks (host reads of device buffers), allocs (the buffers standing rose by this:
 // zero for a token), gpu_us (the device's busy time over the row's waits), wall_ms, miss (plans that ran short or long: zero), bytes (the weight bytes the token's dispatches must read: dll-token-bytes), and the arena's own
-// counts (all 0 of a whole-stack token): fills (the copy dispatches of the expert fills, among the dispatches), emiss and ehit (experts the layers missed and hit in the arena's cache), ebytes (the bytes the fills carry). The
-// arena mode has its own ceilings (dll-arena-ceil: a sync a block and one at the close, one id read a block, dispatches plus the fills) and the whole-stack mode keeps its own.
+// counts (all 0 of a whole-stack token): fills (the span fills of the experts the layers missed), fdisp (their copy dispatches, among the dispatches: none when the fill door preads the span), emiss and ehit (experts the layers
+// missed and hit in the arena's cache), ebytes (the bytes the fills carry). The arena mode has its own ceilings (dll-arena-ceil: a sync a block and one at the close, one id read a block, dispatches plus the copy dispatches)
+// and the whole-stack mode keeps its own.
 // A STAGE row is [block, dispatches, bytes]: the block's enqueue count as the layer answered it and the bytes it reads (dll-layer-bytes: every dense tensor whole, the router and the compressor whole, each routed stack at
 // used experts of its stride; the KV traffic is position-dependent and left out).
 //
@@ -22,16 +23,17 @@ import native/metal/dsv4-layer.fk;
 import native/metal/dsv4-token-handle.fk;
 section [form.bml] {
     // ---- the mark: the counters now ---------------------------------------------------------------------------------------
-    // [dispatches, syncs, gpu_us, buffers standing, wall_ms, barriers, command buffers, plan misses, host reads, fill copies, experts missed, experts hit, bytes the fills carry]
+    // [dispatches, syncs, gpu_us, buffers standing, wall_ms, barriers, command buffers, plan misses, host reads, span fills, experts missed, experts hit, bytes the fills carry, copy dispatches of the fills]
     def dll-mark() {
         let l = metal_live();
-        [l[7], l[8], l[11], l[2], now_unix_ms(), dkr-hz-get("bar"), dkr-hz-get("cbs"), dkr-hz-get("miss"), dkr-hz-get("reads"), dkr-hz-get("fills"), dkr-hz-get("fmiss"), dkr-hz-get("fhit"), dkr-hz-get("fbytes")];
+        [l[7], l[8], l[11], l[2], now_unix_ms(), dkr-hz-get("bar"), dkr-hz-get("cbs"), dkr-hz-get("miss"), dkr-hz-get("reads"), dkr-hz-get("fills"), dkr-hz-get("fmiss"), dkr-hz-get("fhit"), dkr-hz-get("fbytes"), dkr-hz-get("fdisp")];
     }
     // the row between two marks: the batches handed to the queue are counted (and, in the arena mode, each layer's drained batch), and the batch the last wait drained is one more. The arena's own counts ride in the row:
-    // fills (the copy dispatches, three a missed expert: they are among the dispatches), emiss and ehit (experts missed and hit, over the layers the row ran), ebytes (the bytes the copies carry); all 0 of a whole-stack token
+    // fills (the span fills, three a missed expert), fdisp (the fills' copy dispatches, among the dispatches: 0 when the fill door preads the span, one a fill on the view road), emiss and ehit (experts missed and hit, over the
+    // layers the row ran), ebytes (the bytes the fills carry); all 0 of a whole-stack token
     def dll-row(a, b, bytes) = record_new(0, "dispatches", b[0] - a[0], "syncs", b[1] - a[1], "gpu_us", b[2] - a[2], "allocs", b[3] - a[3], "wall_ms", b[4] - a[4],
-        "barriers", b[5] - a[5], "cbs", (b[6] - a[6]) + 1, "miss", b[7] - a[7], "readbacks", b[8] - a[8], "bytes", bytes, "fills", b[9] - a[9], "emiss", b[10] - a[10], "ehit", b[11] - a[11], "ebytes", b[12] - a[12]);
-    def dll-keys() = ["dispatches", "barriers", "cbs", "syncs", "readbacks", "allocs", "bytes", "gpu_us", "wall_ms", "miss", "fills", "emiss", "ehit", "ebytes"];
+        "barriers", b[5] - a[5], "cbs", (b[6] - a[6]) + 1, "miss", b[7] - a[7], "readbacks", b[8] - a[8], "bytes", bytes, "fills", b[9] - a[9], "emiss", b[10] - a[10], "ehit", b[11] - a[11], "ebytes", b[12] - a[12], "fdisp", b[13] - a[13]);
+    def dll-keys() = ["dispatches", "barriers", "cbs", "syncs", "readbacks", "allocs", "bytes", "gpu_us", "wall_ms", "miss", "fills", "fdisp", "emiss", "ehit", "ebytes"];
     def dll-field-go(row, ks) = nil?(ks) ? "" : (" " ++ ks[0] ++ "=" ++ record_get(row, ks[0]).str() ++ dll-field-go(row, ks[1:]));
     // one line, key=value, that a receipt can quote and a band can parse: `ledger <label> dispatches=.. barriers=.. ...`
     def dll-line(label, row) = "ledger " ++ label ++ dll-field-go(row, dll-keys());
@@ -61,15 +63,15 @@ section [form.bml] {
 
     // ---- THE ARENA MODE'S COUNTS (dsv4-arena.fk, dsv4-token-handle.fk dth-layer-arena): a block syncs ONCE, between its first half and the experts, to read the router's ids ----------------------------------------------
     // syncs: one a block and the wait that closes the token (or the prefill position); host reads: ONE a block (the ids: used words in one dkr-rd) and, at a head, the two the argmax makes; command buffers: each block's drained
-    // batch, the batch handed to the queue after every odd block, and the one the closing wait drains; dispatches: the formula's plus the copies the fills enqueued (three a missed expert), counted in the row's own `fills`;
-    // buffers made: none (the span views a fill names are freed at the wait that closes the token); plans short or long: none
+    // batch, the batch handed to the queue after every odd block, and the one the closing wait drains; dispatches: the formula's plus the copy dispatches of the fills that took the view road (the row's own `fdisp`; the fill
+    // door makes none); span fills: three a missed expert (the row's `fills`); buffers made: none (the span views a fill names are freed at the wait that closes the token); plans short or long: none
     def dll-layers-n(m) = record_get(m, "layers-n");
     def dll-arena-syncs(m) = dll-layers-n(m) + 1;
     def dll-arena-reads(m, headed) = dll-layers-n(m) + (headed ? 2 : 0);
     def dll-arena-cbs(m) = dll-layers-n(m) + (dll-layers-n(m) / 2) + 1;
-    // the ceilings of a row that ran `fills` copies (3 x the experts it missed) at position pos, with or without its head, reading `bytes`; barriers are bounded by the dispatches
-    def dll-arena-ceil(m, pos, headed, fills, bytes) {
-        let d = dll-token-count-m(m, pos) - (headed ? 0 : 8) + fills;
+    // the ceilings of a row whose fills made `fdisp` copy dispatches at position pos, with or without its head, reading `bytes`; barriers are bounded by the dispatches
+    def dll-arena-ceil(m, pos, headed, fdisp, bytes) {
+        let d = dll-token-count-m(m, pos) - (headed ? 0 : 8) + fdisp;
         record_new(0, "dispatches", d, "barriers", d, "cbs", dll-arena-cbs(m), "syncs", dll-arena-syncs(m), "readbacks", dll-arena-reads(m, headed), "allocs", 0, "bytes", bytes, "miss", 0);
     }
 
