@@ -1,0 +1,98 @@
+; dsv4-door-run-band.bml -- the whole DeepSeek-V4 flow on the fixture, through the door's own functions as Qwen's flow is exercised: the session open past the lease (open, state, prefill), the session's one step, the generate door's one-shot, the close.
+;
+; WHAT THIS PINS. form-stdlib/form-cli-model-ds4.fk holds DeepSeek's seat at the two doors (the lane flag fcds-lane-wired? stays 0: this band does not flip it and does not go through the registry or the Qwen seal). Qwen's session
+; open is fcms-open-context: the memory lease first, then q38-open-span, q38-new-state, the prefill. DeepSeek's is fcds-open-leased: the lease, dsv4-open-span, dsv4-prepare, dsv4-new-state, dsv4-prefill-span-sliced, answered as
+; the parts form-cli-model-session.fk builds its record from. The session's step is fcds-forward (q38-forward's answer: the next id or -1); the generate door's one-shot is fcds-run-open (open, prepare, state, prefill, greedy
+; steps, close in synced rounds, the result ["ok", count, ids, text]). The fixture carries no vocabulary, so the prompt hook (the tokenizer) is the door band's against the real file's header and the ids here are given: what this band
+; walks is everything AFTER the prompt is encoded, on the device, through the functions the doors call.
+;
+; Verdict 127 when every claim lands:
+;   1     the session open past the lease: fcds-open-context on the MX fixture (capacity 16, the prompt [5 17 3 22]; fcds-open-leased is this after mg-lease, and the lease's grant depends on the whole machine's memory at the
+;         moment, which a band does not control: the lease figures are dsv4-lease-band's and the held answer is dsv4-door-band's) answers a LIVE parts record: status live, reason opened-ds4-driver, the 13-slot context,
+;         three state rows, the capacity, the position 4, a pending id inside the vocabulary and the prompt count 4, and the lease figure for the fixture reads positive
+;   2     the session's steps: seven fcds-forward steps from the pending id at position 4 answer ids inside the vocabulary and equal the ids a plain driver walk (a fresh state on the same context, dsv4-prefill-span-sliced
+;         then dsv4-decode) answers, and one step past the capacity answers -1 (q38-forward's word for a step that did not arrive)
+;   4     the generate door's one-shot: fcds-run-open on the same file answers ["ok", 4, ids, text] with eight ids equal to the session's (the pending id first, then the seven steps) and an empty text (the fixture's header
+;         carries no vocabulary: fcds-text renders none rather than read pieces at offsets the missing array would give), calls its `loaded` callback once (the
+;         admission queue's load slot frees when the driver is open), and leaves no handle (fcds-run-closed read the empty list)
+;   8     the one-shot refusals, word for word: an empty id list opens, finds nothing to prefill and answers ["refused", "model prefill refused"] with every handle released (live buffers as before), and a file
+;         that is not a DeepSeek-V4 GGUF answers ["refused", "model context did not open"] with the counters unmoved; the callback is called once for each (the load slot frees when the open ends, however it ends)
+;   16    the session releases: dsv4-close with the session's state leaves no handle, metal_live reads what it read before the opens, and no lease file of this process stands after mg-release
+;   32    the flow is the ledger's flow: the one-shot's eight ids and the session's walk were taken in concurrent batches (the plan counted barriers and no plan ran short), and the door's refusal at the lane flag stands (fcds-lane-wired?
+;         reads 0, fcds-lane-route for deepseek4 refuses)
+;   64    the checks can fail: a pending id taken from the wrong prompt (the prefill of [5 17 3 21]) walks to other ids than the session's, and a step from the wrong position is not the session's step
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- needs a live Metal device behind the handle door; plain fkwu reads 0. It takes no lease (mg-release at the end is the belt for a lease this process might hold). Light GPU: the 1.5 MB fixture, a few dozen positions.
+; Writes only under temp_dir (the fixture and a text file) and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk form-stdlib/dsv4-lease.fk form-stdlib/dsv4-tokenizer.fk form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-ds4.fk
+section [form.bml] {
+ class Dsv4DoorRun {
+  def ddr-bit(held, bit) = held ? bit : 0;
+  def ddr-ids() = [5, 17, 3, 22];
+  def ddr-cap() = 16;
+  def ddr-lease-path() = mg-lease-path(mg-lease-dir(), host_pid());
+  def ddr-lease-held?() = file_size(ddr-lease-path()) > 0;
+  def ddr-in-vocab?(ids) = len(ids) == 0 ? true : (ids[0] >= 0 && ids[0] < 32 && ddr-in-vocab?(ids[1:]));
+  // the session's steps through the door's own step: the ids, in order, stopping at the first -1
+  def ddr-steps(ctx, sts, id, pos, n, acc) = n == 0 ? acc : { let nid = fcds-forward(ctx, sts, id, pos); nid < 0 ? append(acc, [nid]) : ddr-steps(ctx, sts, nid, pos + 1, n - 1, append(acc, [nid])); };
+  // the plain driver walk on a fresh state of the same context: the prefill's id then seven decode steps
+  def ddr-walk(ctx, ids, n) {
+   let sts = dsv4-new-state(ctx[2], ctx[0], ddr-cap());
+   let pf = dsv4-prefill-span-sliced(ctx, sts, ids, 0);
+   let more = nothing?(pf) ? [] : dsv4-generate(ctx, sts, pf[0], pf[1], n - 1, [], []);
+   let left = dsv4-free-state(sts);
+   nothing?(pf) ? [] : cons(pf[0], more);
+  }
+ }
+ let root = temp_dir() ++ "/dsv4-door-run-band-" ++ now_unix_ms().str();
+ let path = root ++ ".gguf";
+ let notgguf = root ++ ".txt";
+ let wrote = dfx-write(path);
+ let wroteText = write_file(notgguf, "not a model");
+ let live0 = dvb-live();
+ let mapped0 = dvb-mapped();
+ // 1: the session open, through the door
+ let parts = fcds-open-context(path, ddr-ids(), ddr-cap());
+ let ctx = (String) parts[0] == "live" ? parts[2] : [];
+ let sts = (String) parts[0] == "live" ? parts[3] : [];
+ let said1 = print_str("session parts: status " ++ (String) parts[0] ++ " reason " ++ (String) parts[1] ++ " pos " ++ parts[5].str() ++ " pending " ++ parts[6].str() ++ " count " ++ parts[7].str());
+ let r1 = try (String) parts[0] == "live" && (String) parts[1] == "opened-ds4-driver" && len(ctx) == 13 && len(sts) == 3 && parts[4] == 16 && parts[5] == 4 && parts[6] >= 0 && parts[6] < 32 && parts[7] == 4 && dls-weights-bytes-at(path, ddr-cap()) > 0 catch false;
+ // 2: the steps
+ let bar0 = dkr-hz-get("bar");
+ let miss0 = dkr-hz-get("miss");
+ let sessionIds = r1 ? ddr-steps(ctx, sts, parts[6], parts[5], 7, []) : [];
+ let walkIds = r1 ? ddr-walk(ctx, ddr-ids(), 8) : [];
+ let past = r1 ? fcds-forward(ctx, sts, sessionIds[6], 16) : 0;
+ let said2 = print_str("session ids " ++ cons(parts[6], sessionIds).str() ++ " plain walk " ++ walkIds.str() ++ " step past the capacity " ++ past.str());
+ let r2 = try r1 && len(sessionIds) == 7 && ddr-in-vocab?(sessionIds) && cons(parts[6], sessionIds) == walkIds && past == 0 - 1 catch false;
+ // 4: the one-shot
+ let called = record_new(0, "n", 0);
+ let runSrc = tkz-src(path);
+ let run = r1 ? fcds-run-open(path, runSrc, ddr-ids(), 8, 16, () => record_set(called, "n", record_get(called, "n") + 1)) : ["refused", "not opened"];
+ let said3 = print_str("one-shot: " ++ (String) run[0] ++ (len(run) > 2 ? " ids " ++ run[2].str() : (len(run) > 1 ? " " ++ (String) run[1] : "")));
+ let r4 = try r1 && (String) run[0] == "ok" && run[1] == 4 && run[2] == walkIds && (String) run[3] == "" && record_get(called, "n") == 1 catch false;
+ // 8: the one-shot's refusals
+ let called2 = record_new(0, "n", 0);
+ let live1 = dvb-live();
+ let emptyRun = r1 ? fcds-run-open(path, runSrc, [], 8, 16, () => record_set(called2, "n", record_get(called2, "n") + 1)) : [];
+ let live2 = dvb-live();
+ let textRun = fcds-run-open(notgguf, "", ddr-ids(), 8, 16, () => record_set(called2, "n", record_get(called2, "n") + 1));
+ let said4 = print_str("refusals: no prompt ids " ++ emptyRun.str() ++ " text file " ++ textRun.str() ++ " callbacks " ++ record_get(called2, "n").str());
+ let r8 = try r1 && (String) emptyRun[0] == "refused" && (String) emptyRun[1] == "model prefill refused" && live2 == live1 && (String) textRun[0] == "refused" && (String) textRun[1] == "model context did not open" && dvb-live() == live2 && record_get(called2, "n") == 2 catch false;
+ // 32: the flow was concurrent and planned
+ let barBy = dkr-hz-get("bar") - bar0;
+ let missBy = dkr-hz-get("miss") - miss0;
+ let r32 = try r1 && barBy > 0 && missBy == 0 && fcds-lane-wired?() == 0 && fcds-lane-route("deepseek4") == "refuse" && fcds-lane-route("qwen35") == "qwen35" catch false;
+ // 64: the checks can fail
+ let wrongPf = r1 ? ddr-walk(ctx, [5, 17, 3, 21], 8) : [];
+ let wrongSts = r1 ? dsv4-new-state(ctx[2], ctx[0], ddr-cap()) : [];
+ let wrongStep = r1 ? fcds-forward(ctx, wrongSts, parts[6], 9) : 0;
+ let wrongFreed = r1 ? dsv4-free-state(wrongSts) : [0];
+ let r64 = try r1 && len(wrongPf) == 8 && wrongPf != walkIds && wrongStep != sessionIds[0] && len(wrongFreed) == 0 catch false;
+ // 16: release
+ let left = r1 ? dsv4-close(ctx, sts) : [0];
+ let freed = mg-release();
+ let c16 = ddr-bit(try r1 && len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 && !ddr-lease-held?() catch false, 16); let removed = host_path_remove(path) + host_path_remove(notgguf);
+ print_str("dsv4-door-run-band claims " ++ ddr-bit(r1, 1).str() ++ " " ++ ddr-bit(r2, 2).str() ++ " " ++ ddr-bit(r4, 4).str() ++ " " ++ ddr-bit(r8, 8).str() ++ " " ++ c16.str() ++ " " ++ ddr-bit(r32, 32).str() ++ " " ++ ddr-bit(r64, 64).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ ddr-bit(r1, 1) + ddr-bit(r2, 2) + ddr-bit(r4, 4) + ddr-bit(r8, 8) + c16 + ddr-bit(r32, 32) + ddr-bit(r64, 64);
+}

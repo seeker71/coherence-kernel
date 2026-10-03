@@ -7,7 +7,7 @@
 ; holds it to the oracle's own reading of the SAME bytes (dsv4-oracle-reference.bml dfo-mx8, dfo-out-a and dfo-expert-matrix, each keyed on the tensor's own type), which the fixture band holds to the
 ; carvers. The gate is the oracle harness's floor: nd = max|gpu - ref| / max|ref| below 3e-5 for a kernel alone.
 ;
-; Verdict 511 when every claim lands:
+; Verdict 1023 when every claim lands:
 ;   1     text and device: the graph's units now carry the Q8_0 kernels and form_dsv4_q2k_matvec_id, every one of them opens with the pragma pair, no kernel name repeats in the graph, and every pipeline of the
 ;         graph (the catalogue read from the sources) compiles to a positive handle and a second open returns the same handles
 ;   2     Q8_0 dense, each form on the variant's own tensors: the lane matvec on blk.0.attn_q_a (64 x 256), blk.1.attn_kv (128 x 256), output.weight (32 x 256) and blk.2.ffn_down_shexp (256 x 32, one block a
@@ -23,6 +23,9 @@
 ;   128   a kernel that never ran reads as the sentinel: an output buffer left untouched by a dispatch of zero threads is 1.5e16 and reads far from the oracle; and the band's own gate refuses a short read
 ;   256   rows of SEVERAL blocks: a third file (the second fixture's census with four expert stacks given wider columns over the same cells; the second fixture and its digest are not touched) holds Q2_K down
 ;         stacks and IQ2_XXS gate stacks at 4 blocks a row (1024 columns) and 8 (2048), each against the oracle with the shared input and with one input a slot, eight readings (the real file's rows are 8 and 16 blocks)
+;   512   the lane kernels the driver's graph dispatches for the real file (dkr-unit-lanes: the four-row IQ2_XXS gate/up and Q2_K down expert matvecs and ds4's Metal-order Q8_0 matvec), each run the way dsv4-layer.fk binds
+;         it (the stride the view's bytes over its expert count, 64 threads a group; ((rows + 1) / 2) x 256 threads in groups of 256) against the same oracle readings: the Q8_0 matvec on four tensors, the IQ2_XXS gate and up
+;         at one block a row, and on the third file the Q2_K down at 4 and 8 blocks a row (one input a slot) and the IQ2_XXS gate at 4 and 8 (the shared input)
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind metal_pipeline and the handle door, and the fixture is written and read as a binary file (write_file, read_file_slice).
 ; Light GPU: kernels of a few hundred threads over a 1.8 MB fixture. Never maps a model; writes only under temp_dir and removes what it made.
@@ -65,7 +68,7 @@ section [form.bml] {
    let b = dqk-hs(again, names);
    let said = print_str("  graph units " ++ len(us).str() ++ ", kernels " ++ len(names).str());
    dqk-all-pragma?(us) && !dkr-dup?(names) && dqk-has?(dkr-unit-experts(), "form_dsv4_q2k_matvec_id") && dqk-has?(dkr-unit-q8(), "form_dsv4_q80_matvec_lane") && dqk-has?(dkr-unit-q8(), "form_dsv4_q80_matvec_grouped")
-    && len(names) == 72 && len(a) == len(names) && dqk-positive?(a) && a == b;
+    && len(names) == 75 && len(a) == len(names) && dqk-positive?(a) && a == b;
   }
 
   // ---- 2: Q8_0 dense
@@ -216,6 +219,49 @@ section [form.bml] {
     && dqk-expert-one(c, "iq2_xxs 8 blocks a row, shared input: blk.2 gate [2,1]", "form_dsv4_iq2_matvec_id", "blk.2.ffn_gate_exps.weight", [2, 1], x8, 0);
   }
 
+  // ---- 512: the LANE kernels the driver's graph dispatches for the real file (dkr-unit-lanes), kernel by kernel against the same oracle readings
+  // The four-row IQ2_XXS gate/up kernel (shared input), the four-row Q2_K down kernel (one input a slot) and ds4's Metal-order Q8_0 matvec, each run the way dsv4-layer.fk binds them (dkl-expert-mv, dkl-q80):
+  // the experts' stride is the view's bytes over its expert count, a simdgroup owns four rows, 64 threads a group; the Q8_0 matvec is ((rows + 1) / 2) x 256 threads in groups of 256. The multi-block rows run on
+  // the third file (cW), where the rows are four and eight blocks wide (the real file's are eight and sixteen).
+  def dqk-view-of(c, key) = record_get(dqk-g(c, "ix"), key);
+  def dqk-lane-run(c, kernel, key, ids, x, xs, rows, cols) {
+   let reg = dqk-g(c, "reg");
+   let v = dqk-view-of(c, key);
+   let ib = dkr-buf-u32(reg, ids);
+   let xb = dkr-buf-f32(reg, x);
+   let out = dkr-buf-empty(reg, len(ids) * rows);
+   let e = dkr-go-w(dqk-p(c, kernel), [v[1], xb, out, ib], [rows, cols, v[5] / v[3][2], len(ids)], len(ids) * (rows / 4) * 32, 64);
+   e == 1 ? dkr-read(out, len(ids) * rows) : [];
+  }
+  def dqk-lane-expert(c, label, kernel, key, ids, x, xs) {
+   let rows = dqk-rows(c, key);
+   let cols = dqk-cols(c, key);
+   dqk-chk(label, dqk-lane-run(c, kernel, key, ids, x, xs, rows, cols), dqk-expert-ref(c, key, ids, x, xs, 0));
+  }
+  def dqk-lane-q80(c, key, seed) {
+   let reg = dqk-g(c, "reg");
+   let rows = dqk-rows(c, key);
+   let cols = dqk-cols(c, key);
+   let x = dqk-x(seed, cols, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let o = dkr-buf-empty(reg, rows);
+   let e = dkr-go-w(dqk-p(c, "form_dsv4_q80_matvec_ds4"), [dqk-vh(c, key), xb, o], [rows, cols], ((rows + 1) / 2) * 256, 256);
+   e == 1 && dqk-chk("q8_0 ds4 Metal order " ++ key ++ " " ++ rows.str() ++ "x" ++ cols.str(), dkr-read(o, rows), dfo-mx8(dqk-g(c, "r"), key, x));
+  }
+  def dqk-lanes-dense(c) = dqk-lane-q80(c, "blk.0.attn_q_a.weight", 12) && dqk-lane-q80(c, "blk.1.attn_kv.weight", 13) && dqk-lane-q80(c, "output.weight", 14) && dqk-lane-q80(c, "blk.2.ffn_down_shexp.weight", 15);
+  def dqk-lanes-experts(cW) {
+   let x4 = dqk-x(61, 1024, 2.0);
+   let x8 = dqk-x(62, 2048, 2.0);
+   let s4 = dqk-x(63, 2048, 2.0);
+   let s8 = dqk-x(64, 4096, 2.0);
+   dqk-lane-expert(cW, "lane q2_k 4 blocks a row, one input a slot: blk.1 down [2,0]", "form_dsv4_q2k_matvec_experts4_fast", "blk.1.ffn_down_exps.weight", [2, 0], s4, 1024)
+    && dqk-lane-expert(cW, "lane q2_k 8 blocks a row, one input a slot: blk.2 down [0,2]", "form_dsv4_q2k_matvec_experts4_fast", "blk.2.ffn_down_exps.weight", [0, 2], s8, 2048)
+    && dqk-lane-expert(cW, "lane iq2_xxs 4 blocks a row, shared input: blk.1 gate [1,3]", "form_dsv4_iq2_matvec_experts4_fast", "blk.1.ffn_gate_exps.weight", [1, 3], x4, 0)
+    && dqk-lane-expert(cW, "lane iq2_xxs 8 blocks a row, shared input: blk.2 gate [2,1]", "form_dsv4_iq2_matvec_experts4_fast", "blk.2.ffn_gate_exps.weight", [2, 1], x8, 0);
+  }
+  def dqk-lanes-one-block(c) = dqk-lane-expert(c, "lane iq2_xxs gate by ids [0,2] blk.2 (shared input)", "form_dsv4_iq2_matvec_experts4_fast", "blk.2.ffn_gate_exps.weight", [0, 2], dqk-x(52, 256, 2.0), 0)
+   && dqk-lane-expert(c, "lane iq2_xxs up by ids [3,1] blk.1 (shared input)", "form_dsv4_iq2_matvec_experts4_fast", "blk.1.ffn_up_exps.weight", [3, 1], dqk-x(52, 256, 2.0), 0);
+
   // ---- 128: a kernel that never ran reads as the sentinel
   def dqk-sentinel(c) {
    let reg = dqk-g(c, "reg");
@@ -255,10 +301,11 @@ section [form.bml] {
  let viewsW = dvb-open(widePath, dvb-plan-all(mW));
  let cW = record_new(0, "r", rW, "m", mW, "ix", dvb-index(viewsW), "ps", all, "reg", reg);
  let c256 = dqk-bit(try dqk-multiblock(cW) catch false, 256);
+ let c512 = dqk-bit(try dqk-lanes-dense(c) && dqk-lanes-one-block(c) && dqk-lanes-experts(cW) catch false, 512);
  let leftBufs = dkr-reg-free(reg);
  let leftViews = nothing?(views) ? [] : dvb-close(views);
  let leftWide = nothing?(viewsW) ? [] : dvb-close(viewsW);
  let removed = host_path_remove(path) + host_path_remove(widePath);
- print_str("dsv4-kernels-q8q2-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " wrote " ++ wrote.str() ++ "/" ++ wroteWide.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ "/" ++ len(leftWide).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256;
+ print_str("dsv4-kernels-q8q2-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " wrote " ++ wrote.str() ++ "/" ++ wroteWide.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ "/" ++ len(leftWide).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512;
 }

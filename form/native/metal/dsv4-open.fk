@@ -3,10 +3,10 @@
 // THE SAME CONTEXT SHAPE, so Qwen's closers apply. qwen35-dense-token-handle.fk returns ctx = [ps, bs, geo, lays, embTv, onormTv, projTv, src, base, path, span] and its q38-context-ok?,
 // q38-close, q38-close-expected and q38-free-state read slots 1 (a list of scratch handles), 3 (per layer a list of tensor views [handle, rows, cols, type]), 4 to 6 (three tensor views)
 // and a state list of rows [a, b, c, d] of handles (0 where a layer holds none). DeepSeek's ctx is those eleven slots with the same meanings, and two more that only this lane reads:
-//   0 ps       the pipelines, one record name -> handle for every kernel of the seven units the graph dispatches (dsv4-kernels.fk: dkr-open-pipes, compiled once)
+//   0 ps       the pipelines, one record name -> handle for every kernel of the eight units the graph dispatches (dsv4-kernels.fk: dkr-open-pipes, compiled once)
 //   1 bs       the scratch handles, in the order of dso-scratch-plan: the layout's buffers (dsv4-layout.fk dvl-buffers, with the head's gate buffer "head-w" placed before "logits" so the logits are bs[28], the
 //              seat Qwen's sampler reads) then the extras this lane adds (attention scores, the router's selection scores, the id buffers sized for all used experts,
-//              the layer stages the layout's list does not name, the rope tables, the argmax answer)
+//              the layer stages the layout's list does not name, the rope tables, the argmax answer, the NaN scan's count: nothing is made a token)
 //   2 geo      the layout record (dvl-open: widths, per-layer ratio / routing regime / expert count / types, the tensor table)
 //   3 lays     one list of tensor views per block, in dvl-l(m, il, "names") order (the 23 tensors every layer carries, the compressor's four when its ratio is nonzero, its one routing tensor),
 //              then ONE MORE list: the output head's three small tensors (output_hc_fn, output_hc_scale, output_hc_base). DeepSeek's head has six global tensors where Qwen's has three; the
@@ -48,7 +48,7 @@ section [form.bml] {
     def dso-max-comp(m, cap) = dso-max-comp-go(m, 0, cap, 0);
     def dso-attn-rows(m, cap) = cap + dso-max-comp(m, cap);
     // what the layout's list does not name: the stages between its buffers, the expert buffers for ALL used experts (the id kernels run every used expert in one dispatch), the attention score
-    // and exponent scratch, the two rope tables (plain and compressed base), the argmax answer
+    // and exponent scratch, the two rope tables (plain and compressed base), the argmax answer, the NaN scan's count
     def dso-extras(m, cap) {
         let e = record_get(m, "e");
         let hd = record_get(m, "hd");
@@ -61,7 +61,8 @@ section [form.bml] {
          ["comp-pool", hd * 4], ["comp-normed", hd * 4], ["comp-q", hd * 4], ["ffn-out", e * 4],
          ["att-score", nh * rows * 4], ["att-exp", nh * rows * 4], ["att-inv", nh * 4],
          ["xgate", used * hidden * 4], ["xup", used * hidden * 4], ["xmid", used * hidden * 4], ["xdown", used * e * 4],
-         ["rope-plain", (record_get(m, "nrot") / 2) * 4], ["rope-comp", (record_get(m, "nrot") / 2) * 4], ["argmax-idx", 4], ["argmax-val", 4]];
+         ["rope-plain", (record_get(m, "nrot") / 2) * 4], ["rope-comp", (record_get(m, "nrot") / 2) * 4], ["argmax-idx", 4], ["argmax-val", 4],
+         ["nan-count", 4]];
     }
     // LOGITS SIT WHERE QWEN'S DO. The session's sampler reads the logits buffer at bs[28] (form-cli-model-session.fk: fcms-ctx(s)[1][28], the seat q38-head fills), so the plan puts the layout's
     // 27 buffers before "logits", then the head's own weights buffer (the n_hc gates of the output head), and the logits are the 29th buffer, index 28.

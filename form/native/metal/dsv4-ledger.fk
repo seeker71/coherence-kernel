@@ -1,0 +1,90 @@
+// dsv4-ledger.fk -- the DeepSeek-V4 driver's op ledger: ONE observation row per token and per stage, read from the carrier's own counters, that a band can pin as a ceiling.
+//
+// WHY A LEDGER. The Swift reference runner (metal_dsv4_stack.sh, history 93154a720) was held to a count it printed every run: dispatches a token, barriers a token, command buffers, host waits, the bytes of weight a token must read.
+// This lane is a Form cell driving the same device, and its cost is those counts times what one of each costs THIS lane (a dispatch is about 20 us of host here, 1.1 us in Swift): so the counts are the thing to hold.
+// A row is read, not estimated: the carrier counts every enqueue and every wait (metal_live words 7 and 8), the buffers standing (word 2), the device's own busy microseconds (word 11); the plan counts the barriers it
+// placed, the batches it handed to the queue, the host reads the loop made, and the plans that ran short (dsv4-kernels.fk dkr-hz). A band that runs a token and compares the row to a ceiling fails when an op count regresses.
+//
+// A ROW is a record: dispatches, barriers, cbs (command buffers: the batches handed to the queue, plus the one the final wait drains), syncs, readbacks (host reads of device buffers), allocs (the buffers standing rose by this:
+// zero for a token), gpu_us (the device's busy time over the row's waits), wall_ms, miss (plans that ran short or long: zero), bytes (the weight bytes the token's dispatches must read: dll-token-bytes).
+// A STAGE row is [block, dispatches, bytes]: the block's enqueue count as the layer answered it and the bytes it reads (dll-layer-bytes: every dense tensor whole, the router and the compressor whole, each routed stack at
+// used experts of its stride; the KV traffic is position-dependent and left out).
+//
+// Proven by: native/metal/tests/dsv4-ledger-band.bml (the rows of a prefill and of decode steps on the fixtures, against the ceilings pinned there, the serial run against the concurrent one).
+import form-stdlib/core.fk;
+import form-stdlib/dsv4-layout.fk;
+import form-stdlib/dsv4-kernels.fk;
+import native/metal/dsv4-bind.fk;
+import native/metal/dsv4-open.fk;
+import native/metal/dsv4-layer.fk;
+import native/metal/dsv4-token-handle.fk;
+section [form.bml] {
+    // ---- the mark: the counters now ---------------------------------------------------------------------------------------
+    // [dispatches, syncs, gpu_us, buffers standing, wall_ms, barriers, command buffers, plan misses, host reads]
+    def dll-mark() {
+        let l = metal_live();
+        [l[7], l[8], l[11], l[2], now_unix_ms(), dkr-hz-get("bar"), dkr-hz-get("cbs"), dkr-hz-get("miss"), dkr-hz-get("reads")];
+    }
+    // the row between two marks: the batches handed to the queue are counted, and the batch the last wait drained is one more
+    def dll-row(a, b, bytes) = record_new(0, "dispatches", b[0] - a[0], "syncs", b[1] - a[1], "gpu_us", b[2] - a[2], "allocs", b[3] - a[3], "wall_ms", b[4] - a[4],
+        "barriers", b[5] - a[5], "cbs", (b[6] - a[6]) + 1, "miss", b[7] - a[7], "readbacks", b[8] - a[8], "bytes", bytes);
+    def dll-keys() = ["dispatches", "barriers", "cbs", "syncs", "readbacks", "allocs", "bytes", "gpu_us", "wall_ms", "miss"];
+    def dll-field-go(row, ks) = nil?(ks) ? "" : (" " ++ ks[0] ++ "=" ++ record_get(row, ks[0]).str() ++ dll-field-go(row, ks[1:]));
+    // one line, key=value, that a receipt can quote and a band can parse: `ledger <label> dispatches=.. barriers=.. ...`
+    def dll-line(label, row) = "ledger " ++ label ++ dll-field-go(row, dll-keys());
+
+    // ---- the ceilings: a row is within them when no count passed its ceiling (gpu_us and wall_ms are readings, not ceilings, and are not held) ----------------------------
+    def dll-held-keys() = ["dispatches", "barriers", "cbs", "syncs", "readbacks", "allocs", "bytes", "miss"];
+    def dll-within-go(row, ceil, ks) = nil?(ks) ? true : ((!record_has(ceil, ks[0]) || record_get(row, ks[0]) <= record_get(ceil, ks[0])) && dll-within-go(row, ceil, ks[1:]));
+    def dll-within?(row, ceil) = dll-within-go(row, ceil, dll-held-keys());
+    // the keys a row passed its ceiling by (what a failing band prints)
+    def dll-over-go(row, ceil, ks) = nil?(ks) ? "" : (((record_has(ceil, ks[0]) && record_get(row, ks[0]) > record_get(ceil, ks[0])) ? (" " ++ ks[0] ++ " " ++ record_get(row, ks[0]).str() ++ ">" ++ record_get(ceil, ks[0]).str()) : "") ++ dll-over-go(row, ceil, ks[1:]));
+    def dll-over(row, ceil) = dll-over-go(row, ceil, dll-held-keys());
+
+    // ---- the dispatches a block enqueues, from the layout alone (the formula the row is held to) -------------------------------------------------------------------------
+    // attention half: hc_pre 4, norm 1, q_a and kv 2, then norms, q_b, head norm, two ropes, the kv round and append, the three attention stages, the inverse rope, the grouped output, output_b: 14, hc_post 1 = 22; a
+    // compressing block adds the two projections and the state write (3) and, at a window boundary, the pool, the shift (ratio 4), the norm, the rope, the round and the append (6 at ratio 4, 5 otherwise).
+    // FFN half: hc_pre 4, norm 1, router 1, routing 3 (hashed) or 2, experts 4, shared 4, slot sum 1, hc_post 1 = 19 or 18.
+    def dll-attn-count(ratio, pos) = 22 + (ratio == 0 ? 0 : 3 + ((((pos + 1) % ratio) == 0) ? (ratio == 4 ? 6 : 5) : 0));
+    def dll-ffn-count(hashed) = hashed ? 19 : 18;
+    def dll-block-count(ctx, il, pos) = dll-attn-count(dkl-l(ctx, il, "ratio"), pos) + dll-ffn-count(dkl-l(ctx, il, "hashed"));
+    def dll-blocks-count(ctx, il, n, pos) = il == n ? 0 : dll-block-count(ctx, il, pos) + dll-blocks-count(ctx, il + 1, n, pos);
+    // a decode step: embed 2, the blocks, the head 7 and its NaN scan 1
+    def dll-token-count(ctx, pos) = 2 + dll-blocks-count(ctx, 0, record_get(dso-geo(ctx), "layers-n"), pos) + 8;
+
+    // ---- the bytes a token must read ---------------------------------------------------------------------------------------------------------------------------------------
+    def dll-expert-stack?(n) = n == "ffn_gate_exps.weight" || n == "ffn_up_exps.weight" || n == "ffn_down_exps.weight";
+    def dll-view-bytes(ctx, il, leaf) {
+        let v = dkl-view(ctx, il, leaf);
+        let used = record_get(dso-geo(ctx), "used");
+        dll-expert-stack?(leaf) ? used * (dvb-v-bytes(v) / dvb-d2(v)) : dvb-v-bytes(v);
+    }
+    // the leaves of a block's name list (the part after "blk.<il>.")
+    def dll-leaf(il, name) = substring(name, str_len(dkl-name(il, "")), str_len(name));
+    def dll-hash-leaf?(leaf) = leaf == "ffn_gate_tid2eid.weight";
+    def dll-names-bytes(ctx, il, names) = nil?(names) ? 0 : ((dll-hash-leaf?(dll-leaf(il, names[0])) ? 0 : dll-view-bytes(ctx, il, dll-leaf(il, names[0]))) + dll-names-bytes(ctx, il, names[1:]));
+    def dll-layer-bytes(ctx, il) = dll-names-bytes(ctx, il, dvl-l(dso-geo(ctx), il, "names"));
+    def dll-layers-bytes(ctx, il, n) = il == n ? 0 : dll-layer-bytes(ctx, il) + dll-layers-bytes(ctx, il + 1, n);
+    // the embedding row (one F16 row of token_embd) and the head (the three small tensors, the norm, the output matrix whole)
+    def dll-head-bytes(ctx) = dvb-v-bytes(dso-view(ctx, "output_hc_fn.weight")) + dvb-v-bytes(dso-view(ctx, "output_hc_scale.weight")) + dvb-v-bytes(dso-view(ctx, "output_hc_base.weight"))
+        + dvb-v-bytes(dso-view(ctx, "output_norm.weight")) + dvb-v-bytes(dso-view(ctx, "output.weight"));
+    def dll-token-bytes(ctx) = 2 * record_get(dso-geo(ctx), "e") + dll-layers-bytes(ctx, 0, record_get(dso-geo(ctx), "layers-n")) + dll-head-bytes(ctx);
+
+    // ---- one observed decode step: [next id, row] --------------------------------------------------------------------------------------------------------------------
+    def dsv4-decode-observed(ctx, sts, id, pos) {
+        let a = dll-mark();
+        let nid = dsv4-decode(ctx, sts, id, pos);
+        let b = dll-mark();
+        [nid, dll-row(a, b, dll-token-bytes(ctx))];
+    }
+    // the stage rows of the last observed token: [block, dispatches, bytes], ascending (the loop notes each block's enqueue count while "observe" reads 1)
+    def dll-stages-go(ctx, noted) = nil?(noted) ? [] : cons([noted[0][0], noted[0][1], dll-layer-bytes(ctx, noted[0][0])], dll-stages-go(ctx, noted[1:]));
+    def dsv4-decode-staged(ctx, sts, id, pos) {
+        let o = dkr-hz-put("observe", 1);
+        let cleared = dkr-hz-put("stages", []);
+        let seen = dsv4-decode-observed(ctx, sts, id, pos);
+        let stopped = dkr-hz-put("observe", 0);
+        [seen[0], seen[1], reverse(dll-stages-go(ctx, dkr-hz-get("stages")))];
+    }
+    0;
+}
