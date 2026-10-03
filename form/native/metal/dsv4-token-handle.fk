@@ -86,9 +86,10 @@ section [form.bml] {
         let ratio = dkl-l(ctx, il, "ratio");
         ratio == 0 ? (dth-ctx-key(ctx) ++ ":L" ++ il.str()) : (dth-ctx-key(ctx) ++ ":L" ++ il.str() ++ (((pos + 1) % ratio) == 0 ? "b" : "n"));
     }
-    def dth-stage-key(ctx, tag, il, pos) = tag == "layer" ? dth-layer-key(ctx, il, pos) : (dth-ctx-key(ctx) ++ ":" ++ tag);
-    // tag: "embed" (a = the id), "layer" (a = the states, b = the block, c = the position, d = the id, e = the capacity), "head", "scan"
-    def dth-stage-go(ctx, tag, a, b, c, d, e) = tag == "embed" ? dth-embed-go(ctx, a) : (tag == "layer" ? dsv4-layer-go(ctx, a, b, c, d, e) : (tag == "head" ? dth-head-go(ctx) : (tag == "scan" ? dth-scan-go(ctx) : nothing())));
+    def dth-stage-key(ctx, tag, il, pos) = tag == "layer" ? dth-layer-key(ctx, il, pos) : (tag == "layer-a" ? dth-layer-key(ctx, il, pos) ++ ":a" : (tag == "layer-b" ? dth-layer-key(ctx, il, pos) ++ ":b" : (dth-ctx-key(ctx) ++ ":" ++ tag)));
+    // tag: "embed" (a = the id), "layer" (a = the states, b = the block, c = the position, d = the id, e = the capacity), "layer-a" and "layer-b" (the arena's two halves of a block, the same arguments), "head", "scan"
+    def dth-stage-go(ctx, tag, a, b, c, d, e) = tag == "embed" ? dth-embed-go(ctx, a) : (tag == "layer" ? dsv4-layer-go(ctx, a, b, c, d, e) : (tag == "layer-a" ? dsv4-layer-a-go(ctx, a, b, c, d, e) : (tag == "layer-b" ? dsv4-layer-b-go(ctx, b)
+        : (tag == "head" ? dth-head-go(ctx) : (tag == "scan" ? dth-scan-go(ctx) : nothing())))));
     def dth-stage-plan(ctx, tag, a, b, c, d, e, key) {
         let began = dkr-hz-plan-begin();
         let r = dth-stage-go(ctx, tag, a, b, c, d, e);
@@ -177,9 +178,18 @@ section [form.bml] {
 
     // ---- the state half: embed and every block at one position ----------------------------------------------------
     // the batch goes to the queue every second block (Swift's submitEvery = 2): the device runs block n while the host encodes block n + 1
+    // A BLOCK OF THE ARENA CONTEXT (dsv4-arena.fk) is two planned stages with the layer's one sync between them: the attention half and the FFN's first half (through the routing); the boundary (dxa-boundary: sync, the
+    // ids, the slots, the fills, a concurrent batch armed again); then the experts over the arena and the rest. The whole-stack context runs the block as one stage, as it always did.
+    def dth-layer-arena(ctx, sts, il, pos, id, cap) {
+        let a = dth-stage(ctx, "layer-a", sts, il, pos, id, cap);
+        let p = nothing?(a) ? nothing() : dxa-boundary(ctx, il);
+        let b = nothing?(p) ? nothing() : dth-stage(ctx, "layer-b", sts, il, pos, id, cap);
+        nothing?(b) ? nothing() : a + p + b;
+    }
+    def dth-layer(ctx, sts, il, pos, id, cap) = dxa-on?(ctx) ? dth-layer-arena(ctx, sts, il, pos, id, cap) : dth-stage(ctx, "layer", sts, il, pos, id, cap);
     def dth-layers(ctx, sts, il, n, id, pos, cap) {
         il == n ? 1 : {
-            let r = dth-stage(ctx, "layer", sts, il, pos, id, cap);
+            let r = dth-layer(ctx, sts, il, pos, id, cap);
             let handed = (il % 2) == 1 ? dkr-hz-submit() : 0;
             let noted = dkr-hz-get("observe") == 1 ? dkr-hz-put("stages", cons([il, r], dkr-hz-get("stages"))) : 0;
             let tapped = nothing?(r) ? "" : dth-tap("layer", il);
@@ -189,12 +199,12 @@ section [form.bml] {
     // A TOKEN THAT DOES NOT ARRIVE CLOSES ITS BATCH. A block that answers nothing (a refused dispatch) used to return with the concurrent batch still open: the next token's metal_batch_concurrent was refused, `armed` read 0,
     // and its dispatches went as serial bindings into the still-open concurrent encoder with no barriers (found in review, 2026-10-03). Every nothing-return of the token (here, and the head's in dth-prefill-last) syncs, which
     // drains the batch and clears the arming; the next token arms its own.
-    def dth-token-fail() { let drained = dkr-hz-sync(); nothing(); }
+    def dth-token-fail(ctx) { let drained = dkr-hz-sync(); let settled = dxa-settle(ctx); nothing(); }
     def dth-state-go(ctx, sts, id, pos) {
         let armed = dkr-hz-token-begin();
         let emb = dsv4-embed(ctx, id);
         let done = nothing?(emb) ? nothing() : dth-layers(ctx, sts, 0, record_get(dso-geo(ctx), "layers-n"), id, pos, dso-cap(ctx));
-        nothing?(done) ? dth-token-fail() : done;
+        nothing?(done) ? dth-token-fail(ctx) : done;
     }
     // enqueues the embedding and every block at pos (no sync, no head): 1, or nothing before any enqueue when the context, the position or the id is refused
     def dsv4-forward-state(ctx, sts, id, pos) = (dsv4-admitted-once?(ctx) && len(sts) == record_get(dso-geo(ctx), "layers-n") && dsv4-position-ok?(ctx, pos) && dsv4-id-ok?(ctx, id)) ? dth-state-go(ctx, sts, id, pos) : nothing();
@@ -204,11 +214,12 @@ section [form.bml] {
         let n = len(ids);
         let tapped = dth-tap("pos", i);
         let st = tapped != "" ? nothing() : dsv4-forward-state(ctx, sts, ids[i], pos0 + i);
-        nothing?(st) ? dth-token-fail() : (i == n - 1 ? dth-prefill-last(ctx) : { let s = dkr-hz-sync(); s >= 0 ? dth-prefill-go(ctx, sts, ids, i + 1, pos0) : nothing(); });
+        nothing?(st) ? dth-token-fail(ctx) : (i == n - 1 ? dth-prefill-last(ctx) : { let s = dkr-hz-sync(); let settled = dxa-settle(ctx); s >= 0 ? dth-prefill-go(ctx, sts, ids, i + 1, pos0) : nothing(); });
     }
+    // the wait that closes a token also settles the span views the arena's fills named (dxa-settle: the buffers standing at the end are the ones it began with)
     def dth-prefill-last(ctx) {
         let h = dsv4-head(ctx);
-        nothing?(h) ? dth-token-fail() : dsv4-argmax(ctx);
+        nothing?(h) ? dth-token-fail(ctx) : { let nid = dsv4-argmax(ctx); let settled = dxa-settle(ctx); nid; };
     }
     def dth-ids-ok?(ctx, ids) = len(ids) == 0 ? true : (dsv4-id-ok?(ctx, ids[0]) && dth-ids-ok?(ctx, ids[1:]));
     // the ids at positions pos0 ...: [the next id, the next position], or nothing (a refusal before any enqueue leaves every cache as it was)
