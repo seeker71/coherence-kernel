@@ -47,10 +47,14 @@ section [form.bml] {
     // FFN half: hc_pre 4, norm 1, router 1, routing 3 (hashed) or 2, experts 4, shared 4, slot sum 1, hc_post 1 = 19 or 18.
     def dll-attn-count(ratio, pos) = 22 + (ratio == 0 ? 0 : 3 + ((((pos + 1) % ratio) == 0) ? (ratio == 4 ? 6 : 5) : 0));
     def dll-ffn-count(hashed) = hashed ? 19 : 18;
-    def dll-block-count(ctx, il, pos) = dll-attn-count(dkl-l(ctx, il, "ratio"), pos) + dll-ffn-count(dkl-l(ctx, il, "hashed"));
-    def dll-blocks-count(ctx, il, n, pos) = il == n ? 0 : dll-block-count(ctx, il, pos) + dll-blocks-count(ctx, il + 1, n, pos);
+    // THE MODEL IS ALL THE FORMULA READS: dvl-open's layout record of a bare header (observe/dsv4-token-run.bml's dry plan prices the real file from it) and a context's dso-geo are the same record, so the plan and the row
+    // are one arithmetic (the -m forms take the model, the plain forms a context)
+    def dll-block-count-m(m, il, pos) = dll-attn-count(dvl-l(m, il, "ratio"), pos) + dll-ffn-count(dvl-l(m, il, "hashed"));
+    def dll-blocks-count-m(m, il, n, pos) = il == n ? 0 : dll-block-count-m(m, il, pos) + dll-blocks-count-m(m, il + 1, n, pos);
+    def dll-token-count-m(m, pos) = 2 + dll-blocks-count-m(m, 0, record_get(m, "layers-n"), pos) + 8;
+    def dll-block-count(ctx, il, pos) = dll-block-count-m(dso-geo(ctx), il, pos);
     // a decode step: embed 2, the blocks, the head 7 and its NaN scan 1
-    def dll-token-count(ctx, pos) = 2 + dll-blocks-count(ctx, 0, record_get(dso-geo(ctx), "layers-n"), pos) + 8;
+    def dll-token-count(ctx, pos) = dll-token-count-m(dso-geo(ctx), pos);
 
     // ---- the bytes a token must read ---------------------------------------------------------------------------------------------------------------------------------------
     def dll-expert-stack?(n) = n == "ffn_gate_exps.weight" || n == "ffn_up_exps.weight" || n == "ffn_down_exps.weight";
@@ -62,13 +66,27 @@ section [form.bml] {
     // the leaves of a block's name list (the part after "blk.<il>.")
     def dll-leaf(il, name) = substring(name, str_len(dkl-name(il, "")), str_len(name));
     def dll-hash-leaf?(leaf) = leaf == "ffn_gate_tid2eid.weight";
-    def dll-names-bytes(ctx, il, names) = nil?(names) ? 0 : ((dll-hash-leaf?(dll-leaf(il, names[0])) ? 0 : dll-view-bytes(ctx, il, dll-leaf(il, names[0]))) + dll-names-bytes(ctx, il, names[1:]));
-    def dll-layer-bytes(ctx, il) = dll-names-bytes(ctx, il, dvl-l(dso-geo(ctx), il, "names"));
+    // ONE SUM, TWO READERS OF A LEAF: `of` answers the bytes of one leaf, from the opened views (a context) or from the header's layout rows (a bare model: the dry plan); the hash table of a hashed block is read on
+    // the device by the token id carried as a constant and is not weight a token reads
+    def dll-names-bytes-with(of, il, names) = nil?(names) ? 0 : ((dll-hash-leaf?(dll-leaf(il, names[0])) ? 0 : of(dll-leaf(il, names[0]))) + dll-names-bytes-with(of, il, names[1:]));
+    def dll-layer-bytes(ctx, il) = dll-names-bytes-with(leaf => dll-view-bytes(ctx, il, leaf), il, dvl-l(dso-geo(ctx), il, "names"));
     def dll-layers-bytes(ctx, il, n) = il == n ? 0 : dll-layer-bytes(ctx, il) + dll-layers-bytes(ctx, il + 1, n);
+    // the header's reading of a leaf: its layout row's bytes, a routed stack at the experts used of its stride (nexp of its layer)
+    def dll-row-bytes(m, il, leaf) {
+        let ix = record_get(m, "index");
+        let name = dkl-name(il, leaf);
+        let b = dvl-has?(ix, name) ? dvl-r-bytes(dvl-row-of(ix, name)) : 0;
+        dll-expert-stack?(leaf) ? record_get(m, "used") * (b / dvl-l(m, il, "nexp")) : b;
+    }
+    def dll-layer-bytes-m(m, il) = dll-names-bytes-with(leaf => dll-row-bytes(m, il, leaf), il, dvl-l(m, il, "names"));
+    def dll-layers-bytes-m(m, il, n) = il == n ? 0 : dll-layer-bytes-m(m, il) + dll-layers-bytes-m(m, il + 1, n);
     // the embedding row (one F16 row of token_embd) and the head (the three small tensors, the norm, the output matrix whole)
-    def dll-head-bytes(ctx) = dvb-v-bytes(dso-view(ctx, "output_hc_fn.weight")) + dvb-v-bytes(dso-view(ctx, "output_hc_scale.weight")) + dvb-v-bytes(dso-view(ctx, "output_hc_base.weight"))
-        + dvb-v-bytes(dso-view(ctx, "output_norm.weight")) + dvb-v-bytes(dso-view(ctx, "output.weight"));
+    def dll-head-names() = ["output_hc_fn.weight", "output_hc_scale.weight", "output_hc_base.weight", "output_norm.weight", "output.weight"];
+    def dll-names-sum(of, names) = nil?(names) ? 0 : of(names[0]) + dll-names-sum(of, names[1:]);
+    def dll-head-bytes(ctx) = dll-names-sum(name => dvb-v-bytes(dso-view(ctx, name)), dll-head-names());
+    def dll-head-bytes-m(m) = dll-names-sum(name => (dvl-has?(record_get(m, "index"), name) ? dvl-r-bytes(dvl-row-of(record_get(m, "index"), name)) : 0), dll-head-names());
     def dll-token-bytes(ctx) = 2 * record_get(dso-geo(ctx), "e") + dll-layers-bytes(ctx, 0, record_get(dso-geo(ctx), "layers-n")) + dll-head-bytes(ctx);
+    def dll-token-bytes-m(m) = 2 * record_get(m, "e") + dll-layers-bytes-m(m, 0, record_get(m, "layers-n")) + dll-head-bytes-m(m);
 
     // ---- one observed decode step: [next id, row] --------------------------------------------------------------------------------------------------------------------
     def dsv4-decode-observed(ctx, sts, id, pos) {

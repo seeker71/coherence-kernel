@@ -165,6 +165,16 @@ section [form.bml] {
         dkr-read(dkl-b(ctx, "logits"), record_get(dso-geo(ctx), "vocab"));
     }
 
+    // ---- the tap: a reading the host takes between the token's enqueues, never a wait ------------------------------------------------------
+    // A caller that measures the token as it runs (observe/dsv4-token-run.bml: the machine's wired memory after every block) installs ONE function in the plan's state (dkr-hz-tap-set) and the token calls it at its seams:
+    // ("layer", il) after block il was enqueued (and handed to the queue when it is the second of its pair), ("pos", i) before position i of a prefill. It answers "" to go on, or the reason the token must stop: the
+    // token then answers nothing, and the drain every nothing-return makes (dth-token-fail) syncs what was enqueued. No tap is installed in production, and an installed one that reads the machine adds no
+    // dispatch, wait or buffer: the ledger's rows (dsv4-ledger.fk) read the same counts with it as without.
+    def dkr-hz-tap-set(f) = dkr-hz-put("tap", [f]);
+    def dkr-hz-tap-clear() = dkr-hz-put("tap", []);
+    def dth-tap-call(t, kind, a) { let f = t[0]; f(kind, a); }
+    def dth-tap(kind, a) { let t = dkr-hz-get("tap"); nil?(t) ? "" : dth-tap-call(t, kind, a); }
+
     // ---- the state half: embed and every block at one position ----------------------------------------------------
     // the batch goes to the queue every second block (Swift's submitEvery = 2): the device runs block n while the host encodes block n + 1
     def dth-layers(ctx, sts, il, n, id, pos, cap) {
@@ -172,7 +182,8 @@ section [form.bml] {
             let r = dth-stage(ctx, "layer", sts, il, pos, id, cap);
             let handed = (il % 2) == 1 ? dkr-hz-submit() : 0;
             let noted = dkr-hz-get("observe") == 1 ? dkr-hz-put("stages", cons([il, r], dkr-hz-get("stages"))) : 0;
-            nothing?(r) ? nothing() : dth-layers(ctx, sts, il + 1, n, id, pos, cap);
+            let tapped = nothing?(r) ? "" : dth-tap("layer", il);
+            (nothing?(r) || tapped != "") ? nothing() : dth-layers(ctx, sts, il + 1, n, id, pos, cap);
         };
     }
     // A TOKEN THAT DOES NOT ARRIVE CLOSES ITS BATCH. A block that answers nothing (a refused dispatch) used to return with the concurrent batch still open: the next token's metal_batch_concurrent was refused, `armed` read 0,
@@ -191,8 +202,9 @@ section [form.bml] {
     // ---- prefill, token-major, the head read at the last token only ------------------------------------------------------
     def dth-prefill-go(ctx, sts, ids, i, pos0) {
         let n = len(ids);
-        let st = dsv4-forward-state(ctx, sts, ids[i], pos0 + i);
-        nothing?(st) ? nothing() : (i == n - 1 ? dth-prefill-last(ctx) : { let s = dkr-hz-sync(); s >= 0 ? dth-prefill-go(ctx, sts, ids, i + 1, pos0) : nothing(); });
+        let tapped = dth-tap("pos", i);
+        let st = tapped != "" ? nothing() : dsv4-forward-state(ctx, sts, ids[i], pos0 + i);
+        nothing?(st) ? dth-token-fail() : (i == n - 1 ? dth-prefill-last(ctx) : { let s = dkr-hz-sync(); s >= 0 ? dth-prefill-go(ctx, sts, ids, i + 1, pos0) : nothing(); });
     }
     def dth-prefill-last(ctx) {
         let h = dsv4-head(ctx);
