@@ -12,11 +12,12 @@
 //   the dense tensors stay one no-copy view each (dsv4-bind.fk, the arena mode leaves only the routed stacks unmapped); token_embd one view; the arena's bytes are the lease's expert term to the byte (dxa-bytes)
 //   the cache is dsv4-expert-cache.bml's: one table a layer keyed by (layer, expert), least recently used, a hit pinned against a miss of its own top-k; the table's slot number is the buffer's slot number
 //
-// WHAT A LAYER'S FFN DOES (dsv4-layer.fk dkl-ffn-arena): hc_pre, norm, router and routing are enqueued; ONE SYNC; the host reads the picked ids (`expert-ids`), the cache answers slots and misses, the slots are
-// written to `ids`, and each miss enqueues three copies: a no-copy view of exactly that expert's span of the file (metal_buf_from_file at stack offset + e x stride, stride bytes) into the slot of its arena by a copy kernel
-// (form_dsv4_copy_u4, 16 bytes a thread; form_dsv4_copy_u1 for a stride that is not a multiple of 16), with no host byte crossing; then the experts, the shared expert, the slot sum and hc_post are enqueued over the arena. The
-// views a fill made are freed after the NEXT sync (the carrier refuses to free a buffer work still names: dvb-free-once), so the pending list is at most one layer's misses. The carrier runs enqueues in order, so the copy
-// is complete before the expert kernels that read its slot. One sync a layer, and the token's own after the head.
+// WHAT A LAYER'S FFN DOES (dsv4-layer.fk dkl-ffn-arena, dsv4-token-handle.fk dth-layer-arena): hc_pre, norm, router and routing are enqueued; ONE SYNC (dxa-boundary, a plan boundary of the token's concurrent batch); the host
+// reads the picked ids (`expert-ids`), the cache answers slots and misses, the slots are written to `ids`, and each miss's three spans (gate, up, down: the file's bytes of expert e at stack offset + e x stride, stride bytes)
+// are filled into its slot, by the FILL DOOR (metal_buf_fill: the host preads the span straight into the slot, no Form string, no view, no copy kernel, no dispatch) or, when the door answers -1, by the VIEW ROAD: a no-copy
+// view of exactly that span (metal_buf_from_file) and a copy kernel into the slot (form_dsv4_copy_u4, 16 bytes a thread; form_dsv4_copy_u1 for a stride that is not a multiple of 16), enqueued into the batch armed again;
+// then the experts, the shared expert, the slot sum and hc_post are enqueued over the arena (their first dispatch carries a barrier, so a copy is complete before the kernels that read its slot). The views of the view road
+// are freed once the work that named them has settled (the carrier refuses to free a buffer work still names: dvb-free-once; dxa-settle at the token's close). One sync a layer, and the token's own after the head.
 //
 // WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong layer: an arena over a context that has one already, fewer slots than the top-k (used), a layer whose stack bytes are not a whole number of experts or
 // whose three stacks disagree about the expert count, a refused allocation (everything allocated is freed, the context stays open), a top-k the cache refuses (an id outside the layer's experts), a span view or a copy the
@@ -89,7 +90,7 @@ section [form.bml] {
         let n = record_get(m, "layers-n");
         let ebs = dxa-ebs-go(ctx, 0, n);
         record_new(0, "path", ctx[9], "slots", slots, "layers", n, "bufs", bufs, "eb", ebs, "off", dxa-offs-go(ctx, 0, n), "ids", ids, "pipe4", p4, "pipe1", p1,
-         "cache", dxc-open(n, slots), "pending", [], "handles", append(dxa-flat(bufs), [ids]), "bytes", 0, "fills", 0, "syncs", 0, "ms-sync", 0, "ms-plan", 0, "ms-fill", 0, "price", dxa-bytes-go(m, ebs, 0, n, slots));
+         "cache", dxc-open(n, slots), "native", 1, "pending", [], "handles", append(dxa-flat(bufs), [ids]), "bytes", 0, "fills", 0, "syncs", 0, "ms-sync", 0, "ms-plan", 0, "ms-fill", 0, "price", dxa-bytes-go(m, ebs, 0, n, slots));
     }
     // the cache's slot count per layer follows the layer's stored experts: dxc-open gives every layer `slots`, and dxc-step admits only ids under the layer's nexp, so a layer of fewer experts than slots never fills the rest;
     // the buffer holds only min(slots, nexp) slots, so the cache's table is the buffer's size: dxa-tables re-seats each layer's table at its own size
@@ -139,16 +140,30 @@ section [form.bml] {
         let nexp = dvl-l(dso-geo(ctx), il, "nexp");
         slot >= 0 && slot < dxa-slots-of(record_get(ar, "slots"), nexp) && e >= 0 && e < nexp;
     }
+    // THE FILL, TWO ROADS TO THE SAME BYTES. The fill door (metal_buf_fill, the carrier's fk_metal_buf_fill_external) preads the span straight into the slot: one host write, no view, no copy kernel, no dispatch, nothing pending
+    // (measured on a Qwen file's 2 MB spans: the view-and-copy road runs at 0.73 ms a span = 3 GB/s with the pages cached, the device faulting the file's pages in one by one; any road through a Form string costs 4 to 5 ms). When the
+    // door answers -1 (a carrier built before it, or a refusal the view road would meet too) the SAME span is taken by a no-copy view and a copy kernel, which the band holds bit-equal. The record's "native" says which road
+    // is taken first (1: the door; a band sets 0 to hold the view road to the control).
+    def dxa-fill-native?(ar) = record_get(ar, "native") == 1;
     def dxa-fill-one(ctx, ar, il, k, slot, e) {
         let eb = record_get(ar, "eb")[il][k];
-        let v = dxa-fill-in-range?(ctx, ar, il, slot, e) ? metal_buf_from_file(record_get(ar, "path"), record_get(ar, "off")[il][k] + e * eb, eb) : 0;
+        dxa-fill-in-range?(ctx, ar, il, slot, e) ? (dxa-fill-native?(ar) ? dxa-fill-door(ar, il, k, slot, e, eb) : dxa-fill-view(ar, il, k, slot, e, eb)) : 0;
+    }
+    def dxa-fill-door(ar, il, k, slot, e, eb) {
+        let n = metal_buf_fill(record_get(ar, "bufs")[il][k], slot * eb, [record_get(ar, "path"), record_get(ar, "off")[il][k] + e * eb, eb]);
+        n == eb ? 1 : dxa-fill-view(ar, il, k, slot, e, eb);
+    }
+    def dxa-fill-view(ar, il, k, slot, e, eb) {
+        let v = metal_buf_from_file(record_get(ar, "path"), record_get(ar, "off")[il][k] + e * eb, eb);
         v > 0 ? dxa-fill-copy(ar, il, k, slot, eb, v) : 0;
     }
+    // the view road's copy: one dispatch, counted in the plan record (fdisp) beside the ledger's dispatches
     def dxa-fill-copy(ar, il, k, slot, eb, v) {
         let dst = record_get(ar, "bufs")[il][k];
         let wide = (eb % 16) == 0;
         let r = wide ? dkr-go(record_get(ar, "pipe4"), [v, dst], [(slot * eb) / 16, eb / 16], eb / 16) : dkr-go(record_get(ar, "pipe1"), [v, dst], [slot * eb, eb], eb);
         let k1 = record_set(ar, "pending", cons(v, record_get(ar, "pending")));
+        let k2 = r == 1 ? dkr-hz-put("fdisp", dkr-hz-get("fdisp") + 1) : 0;
         r == 1 ? 1 : 0;
     }
     // the three stacks of one miss
@@ -158,9 +173,10 @@ section [form.bml] {
     def dxa-expert-all(ar, il) = record_get(ar, "eb")[il][0] + record_get(ar, "eb")[il][1] + record_get(ar, "eb")[il][2];
     // THE LAYER'S BOUNDARY, a plan boundary of the token's concurrent batch (dkr-hz, dsv4-kernels.fk): layer il's first half (attention, hc_pre, norm, router, routing) has been enqueued, and the boundary SYNCS (dkr-hz-sync:
     // the batch is drained and the arming is gone; the drained batch is one command buffer, counted), reads the ids the router picked (ONE counted host read, dkr-rd), takes the slots from the cache, writes the slot numbers,
-    // RE-ARMS a concurrent batch when one was open (dkr-hz-token-begin) and enqueues the fills into it: a miss is three span copies, enqueued before the second half, whose first dispatch carries the barrier every plan's first
-    // dispatch carries (so the copies are complete before the expert kernels read them). Answers the number of copies enqueued (3 a miss), or nothing (the sync failed, the cache refused the top-k, the slot numbers
-    // were not written, a fill was refused: the slots a refused fill was to write are forgotten). The fills' own counts go into the plan record the ledger marks (fills, fmiss, fhit, fbytes).
+    // RE-ARMS a concurrent batch when one was open (dkr-hz-token-begin) and fills the misses: a miss is three span fills (the fill door preads each into its slot; on the view road each is a copy dispatch enqueued into the
+    // batch, before the second half, whose first dispatch carries the barrier every plan's first dispatch carries, so the copies are complete before the expert kernels read them). Answers the copy dispatches enqueued
+    // (none through the fill door), or nothing (the sync failed, the cache refused the top-k, the slot numbers were not written, a fill was refused: the slots a refused fill was to write are forgotten). The fills' own
+    // counts go into the plan record the ledger marks (fills, fdisp, fmiss, fhit, fbytes).
     def dxa-boundary(ctx, il) {
         let ar = dxa-of(ctx);
         let m = dso-geo(ctx);
@@ -178,16 +194,19 @@ section [form.bml] {
         let t2 = host_monotonic_ms();
         let ok = !nothing?(plan) && w == 4 * used;
         let rearmed = (ok && live) ? dkr-hz-token-begin() : 0;
+        let d0 = dkr-hz-get("fdisp");
         let filled = ok ? dxa-fill-all(ctx, ar, il, plan[1]) : 0 - 1;
+        let dn = dkr-hz-get("fdisp") - d0;
         let t3 = host_monotonic_ms();
         let c1 = dxa-count(ar, "syncs", 1);
         let c2 = dxa-count(ar, "ms-sync", t1 - t0);
         let c3 = dxa-count(ar, "ms-plan", t2 - t1);
         let c4 = dxa-count(ar, "ms-fill", t3 - t2);
-        ok ? dxa-planned(ar, il, plan, filled, dxa-hits(ctx) - h0) : nothing();
+        ok ? dxa-planned(ar, il, plan, filled, dxa-hits(ctx) - h0, dn) : nothing();
     }
-    def dxa-planned(ar, il, plan, filled, hits) {
-        filled == 3 * len(plan[1]) ? { let c = dxa-count(ar, "bytes", len(plan[1]) * dxa-expert-all(ar, il)); let f = dxa-count(ar, "fills", filled); let n = dxa-note(filled, len(plan[1]), hits, len(plan[1]) * dxa-expert-all(ar, il)); filled; }
+    // answers the copy dispatches the fills made (dn: none through the fill door), which the block's stage count carries
+    def dxa-planned(ar, il, plan, filled, hits, dn) {
+        filled == 3 * len(plan[1]) ? { let c = dxa-count(ar, "bytes", len(plan[1]) * dxa-expert-all(ar, il)); let f = dxa-count(ar, "fills", filled); let n = dxa-note(filled, len(plan[1]), hits, len(plan[1]) * dxa-expert-all(ar, il)); dn; }
             : { let forgot = dxa-forget-all(ar, il, plan[1]); nothing(); };
     }
     // the plan record's counters the ledger marks: the copies enqueued, the experts missed and hit, the bytes the copies carry

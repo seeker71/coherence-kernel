@@ -117,13 +117,15 @@ section [form.bml] {
   def dlb-dense-q8?(ctx) = dkl-type(dkl-view(ctx, 0, "attn_q_a.weight")) == 8 && dkr-pipe(ctx[0], "form_dsv4_q80_matvec_ds4") > 0;
   // ---- claim 512: the ARENA MODE's rows (dsv4-arena.fk: routed experts read through a slot arena, a sync a block) held to dll-arena-ceil, and equal to the whole-stack walk -----------------------------------------------------
   def dlb-arena-slots() = 3;
-  // one decode row of an arena walk against its own ceilings: the copies are three a missed expert, the dispatches are the formula's plus the copies, one wait a block and one at the close, one id read a block and the head's two,
-  // the derived command buffers, no buffer made, no plan short or long
-  def dlb-arena-row-ok?(m, row, pos) = dlb-field(row, "fills") == 3 * dlb-field(row, "emiss") && dlb-field(row, "dispatches") == dll-token-count-m(m, pos) + dlb-field(row, "fills")
+  // one decode row of an arena walk against its own ceilings: the span fills are three a missed expert, the dispatches are the formula's plus the fills' copy dispatches (none through the fill door, at most one a fill),
+  // one wait a block and one at the close, one id read a block and the head's two, the derived command buffers, no buffer made, no plan short or long
+  def dlb-arena-row-ok?(m, row, pos) = dlb-field(row, "fills") == 3 * dlb-field(row, "emiss") && dlb-field(row, "fdisp") >= 0 && dlb-field(row, "fdisp") <= dlb-field(row, "fills") && dlb-field(row, "dispatches") == dll-token-count-m(m, pos) + dlb-field(row, "fdisp")
    && dlb-field(row, "syncs") == dll-arena-syncs(m) && dlb-field(row, "readbacks") == dll-arena-reads(m, true) && dlb-field(row, "cbs") == dll-arena-cbs(m) && dlb-field(row, "allocs") == 0 && dlb-field(row, "miss") == 0
-   && dll-within?(row, dll-arena-ceil(m, pos, true, dlb-field(row, "fills"), dll-token-bytes-m(m)));
+   && dll-within?(row, dll-arena-ceil(m, pos, true, dlb-field(row, "fdisp"), dll-token-bytes-m(m)));
   def dlb-arena-rows-ok?(m, steps) = len(steps) == 0 ? true : (dlb-arena-row-ok?(m, steps[0][1], steps[0][4]) && dlb-arena-rows-ok?(m, steps[1:]));
   // the lookups of a row are the layers x the experts a layer uses: hits + misses
+  // the road a walk's fills took: the view road (true) makes one copy dispatch a fill, the fill door (false) none
+  def dlb-road?(steps, view) = len(steps) == 0 ? true : ((view ? dlb-field(steps[0][1], "fdisp") == dlb-field(steps[0][1], "fills") : dlb-field(steps[0][1], "fdisp") == 0) && dlb-road?(steps[1:], view));
   def dlb-arena-lookups-ok?(m, steps) = len(steps) == 0 ? true : (dlb-field(steps[0][1], "emiss") + dlb-field(steps[0][1], "ehit") == dll-layers-n(m) * record_get(m, "used") && dlb-arena-lookups-ok?(m, steps[1:]));
   // the plants through the counted doors: the control row passes the arena ceilings, and a tap that syncs once, one that reads the device once more, and one that makes a buffer each fail them
   def dlb-arena-plant-at(ctx, plant, il, box) {
@@ -221,13 +223,28 @@ section [form.bml] {
  let okAB = try openedAB && dlb-arena-ok?(arenaB, walkAB, concB) catch false;
  let plAA = try okAA && dlb-arena-plants(arenaA) catch false;
  let plAB = try okAB && dlb-arena-plants(arenaB) catch false;
- let said9 = print_str("arena claims: walk MX " ++ okAA.str() ++ " V " ++ okAB.str() ++ ", plants MX " ++ plAA.str() ++ " V " ++ plAB.str());
- let r512 = try r1 && okAA && okAB && plAA && plAB catch false;
+ // the VIEW ROAD of the fill (a no-copy view of the span and a copy kernel: what a carrier without the fill door takes): the same walks on contexts whose arena takes it first, held to the same ceilings and to the control's ids and bits
+ let arenaVA = openedA ? dsv4-open-arena(pathA, 16, 1, dlb-arena-slots()) : [];
+ let arenaVB = openedB ? dsv4-open-arena(pathB, 16, 1, dlb-arena-slots()) : [];
+ let roadA = len(arenaVA) == 13 ? record_set(dxa-of(arenaVA), "native", 0) : 0;
+ let roadB = len(arenaVB) == 13 ? record_set(dxa-of(arenaVB), "native", 0) : 0;
+ let prepVA = len(arenaVA) == 13 ? dsv4-prepare(arenaVA) : 0;
+ let prepVB = len(arenaVB) == 13 ? dsv4-prepare(arenaVB) : 0;
+ let walkVA = len(arenaVA) == 13 ? dlb-walk(arenaVA) : [[], false, nothing()];
+ let walkVB = len(arenaVB) == 13 ? dlb-walk(arenaVB) : [[], false, nothing()];
+ let okVA = try len(arenaVA) == 13 && dlb-arena-ok?(arenaVA, walkVA, concA) && dlb-road?(walkVA[0], true) catch false;
+ let okVB = try len(arenaVB) == 13 && dlb-arena-ok?(arenaVB, walkVB, concB) && dlb-road?(walkVB[0], true) catch false;
+ let doorA = try okAA && dlb-road?(walkAA[0], false) catch false;
+ let doorB = try okAB && dlb-road?(walkAB[0], false) catch false;
+ let said9 = print_str("arena claims: walk MX " ++ okAA.str() ++ " V " ++ okAB.str() ++ ", plants MX " ++ plAA.str() ++ " V " ++ plAB.str() ++ "; the fill door took no copy dispatch " ++ [doorA, doorB].str() ++ "; the view road walks " ++ [okVA, okVB].str() ++ " (copy dispatches " ++ (len(arenaVA) == 13 ? dxa-get(arenaVA, "fills").str() : "none") ++ " fills)");
+ let r512 = try r1 && okAA && okAB && plAA && plAB && okVA && okVB && doorA && doorB catch false;
+ let leftVA = len(arenaVA) == 13 ? dsv4-close(arenaVA, []) : [0];
+ let leftVB = len(arenaVB) == 13 ? dsv4-close(arenaVB, []) : [0];
  let leftAA = openedAA ? dsv4-close(arenaA, []) : [0];
  let leftAB = openedAB ? dsv4-close(arenaB, []) : [0];
  let leftA = openedA ? dsv4-close(ctxA, []) : [0];
  let leftB = openedB ? dsv4-close(ctxB, []) : [0];
- let c128 = dlb-bit(try openedA && openedB && len(leftA) == 0 && len(leftB) == 0 && len(leftAA) == 0 && len(leftAB) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
+ let c128 = dlb-bit(try openedA && openedB && len(leftA) == 0 && len(leftB) == 0 && len(leftAA) == 0 && len(leftAB) == 0 && len(leftVA) == 0 && len(leftVB) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
  let removed = host_path_remove(pathA) + host_path_remove(pathB);
  print_str("dsv4-ledger-band claims " ++ dlb-bit(r1, 1).str() ++ " " ++ dlb-bit(r2, 2).str() ++ " " ++ dlb-bit(r4, 4).str() ++ " " ++ dlb-bit(r8, 8).str() ++ " " ++ dlb-bit(r16, 16).str() ++ " " ++ dlb-bit(r32, 32).str() ++ " " ++ dlb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " " ++ dlb-bit(r256, 256).str() ++ " " ++ dlb-bit(r512, 512).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
  dlb-bit(r1, 1) + dlb-bit(r2, 2) + dlb-bit(r4, 4) + dlb-bit(r8, 8) + dlb-bit(r16, 16) + dlb-bit(r32, 32) + dlb-bit(r64, 64) + c128 + dlb-bit(r256, 256) + dlb-bit(r512, 512);
