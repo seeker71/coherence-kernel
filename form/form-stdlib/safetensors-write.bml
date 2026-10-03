@@ -1,0 +1,282 @@
+//////////////////////////////////////////////////////////////////////
+// safetensors-write.bml — the body writes a weights file in its own hands: a safetensors file built on the
+// device from tensor ranges that already sit in other files, read back once and written once.
+//
+// WHY. A model that arrives as a foreign container (a PyTorch zip around a pickle) is read by the body once
+// (torch-bin.bml) and then HELD in the body's own weight format: safetensors, which the body already indexes and
+// maps (safetensors-index.bml, metal_buf_from_file). After one conversion nothing in the product path needs the
+// pickle, torch or a python process; the source file stays only as the provenance it is.
+//
+// THE FORMAT (the standard layout, so any safetensors reader opens it):
+//     u64 little-endian N | N bytes of JSON header, padded with spaces to a multiple of 8 | the tensor bytes
+//     header = {"__metadata__": {string: string}, "name": {"dtype": "F32", "shape": [..], "data_offsets": [b, e]}}
+//     data_offsets are relative to the byte after the header; tensors are packed with no holes. To keep every
+//     tensor naturally aligned the entries are ordered by element width, widest first, each width in the order
+//     given (a header of F32 tensors keeps the checkpoint's order).
+//
+// THE SHAPE OF THE WORK. A 1.2 GB file is never a join and never a per-byte loop in Form:
+//   * the file is laid out in Form (names, shapes, offsets: tens of kilobytes of text),
+//   * the output is ONE device buffer; the header string is written into it, each tensor's source range is
+//     mapped off its file (metal_buf_from_file, no copy) and a small copy kernel gathers it into place,
+//   * the buffer is read back as ONE string and written with ONE write_file. Nothing is appended, so nothing
+//     can be quadratic. Dispatches are chained in batches: each answer is consumed by the next link, because a
+//     recipe that runs many times drops a side-effecting call whose answer nothing reads.
+//
+// REFUSALS ARE ANSWERS. ["refused", reason] for a dtype the format does not carry here, a duplicate or empty or
+// reserved name, a name with a control byte, a size that is not shape x width, a dimension of zero, a dropped
+// name that is not an alias of a kept tensor. An absent source range is a refusal too, never a short file.
+//
+// ALIASES. Tied weights (a T5's shared.weight, encoder.embed_tokens.weight, decoder.embed_tokens.weight) are
+// one storage under several names. A caller names the aliases to drop (sw-drop); each must be a true alias — the
+// very same source range, dtype and size as a tensor that stays — or it is refused. The file keeps one copy.
+//
+// READING IT BACK. sw-verify opens the written file through safetensors-index.bml's own reader and compares,
+// on the device, every byte of every tensor against its source range (sw-compare: a kernel counts the words
+// that differ). Zero is the only passing number; the same comparison is what the band uses to show a flipped
+// byte is seen.
+//
+// Proven by: form/form-stdlib/tests/safetensors-write-band.fk  ·  run it: observe/torch-bin-convert-run.fk
+// preflight-exec: forbidden
+import form/form-stdlib/core.fk;
+import form/form-stdlib/metal-door.fk;
+import form/form-stdlib/safetensors-index.bml;
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+ class FormSafetensorsWrite {
+  def sw-refuse(msg) = ["refused", msg];
+  def sw-done(v) = ["ok", v];
+  def sw-ok?(r) = (String) r[0] == "ok";
+  def sw-why(r) = r[1];
+
+  // ---- an entry: [name dtype shape path offset bytes] — a tensor whose bytes sit at path[offset, offset+bytes) ----
+  def sw-entry(name, dtype, shape, path, off, bytes) = [name, dtype, shape, path, off, bytes];
+  def sw-name(e) = e[0];
+  def sw-dtype(e) = e[1];
+  def sw-shape(e) = e[2];
+  def sw-path(e) = e[3];
+  def sw-off(e) = e[4];
+  def sw-bytes(e) = e[5];
+  // torch-bin rows (name dtype shape key offset bytes) over one checkpoint path
+  def sw-from-torch(path, rows) = nil?(rows) ? [] : cons(sw-entry(rows[0][0], rows[0][1], rows[0][2], path, rows[0][4], rows[0][5]), sw-from-torch(path, rows[1:]));
+
+  // ---- dtypes the format carries (element width in bytes; 0 = not carried) ----
+  def sw-dtypes() = [["F64", 8], ["I64", 8], ["U64", 8], ["F32", 4], ["I32", 4], ["U32", 4], ["F16", 2], ["BF16", 2], ["I16", 2], ["U16", 2], ["I8", 1], ["U8", 1], ["BOOL", 1]];
+  def sw-width-in(rows, dtype) = nil?(rows) ? 0 : ((String) rows[0][0] == (String) dtype ? rows[0][1] : sw-width-in(rows[1:], dtype));
+  def sw-width(dtype) = (String) value_kind(dtype) == "string" ? sw-width-in(sw-dtypes(), dtype) : 0;
+  def sw-product(xs) = nil?(xs) ? 1 : (xs[0] * sw-product(xs[1:]));
+  def sw-ints?(xs) = nil?(xs) ? 1 : ((String) value_kind(xs[0]) == "int" ? sw-ints?(xs[1:]) : 0);
+  def sw-positive?(xs) = nil?(xs) ? 1 : (xs[0] > 0 ? sw-positive?(xs[1:]) : 0);
+
+  // ---- text that goes into the JSON header ----
+  // a control byte has no honest spelling in a name; refuse it
+  def sw-clean?(s, i) = i >= len(s) ? 1 : (str_byte_at(s, i) < 32 ? 0 : sw-clean?(s, i + 1));
+  def sw-dq() = byte_to_str(34);
+  def sw-bs() = byte_to_str(92);
+  def sw-esc-go(s, i, acc) = i >= len(s) ? acc : sw-esc-go(s, i + 1, acc + (str_byte_at(s, i) == 34 ? sw-bs() + sw-dq() : (str_byte_at(s, i) == 92 ? sw-bs() + sw-bs() : substring(s, i, i + 1))));
+  def sw-esc(s) = sw-esc-go(s, 0, "");
+  def sw-q(s) = sw-dq() + (sw-esc(s) + sw-dq());
+  def sw-join(parts, sep) = nil?(parts) ? "" : (nil?(parts[1:]) ? parts[0] : parts[0] + (sep + sw-join(parts[1:], sep)));
+  def sw-ints-text(xs) = sw-join(sw-ints-strs(xs), ",");
+  def sw-ints-strs(xs) = nil?(xs) ? [] : cons(xs[0].str(), sw-ints-strs(xs[1:]));
+  def sw-spaces(n) = n <= 0 ? "" : " " + sw-spaces(n - 1);
+
+  // ---- the first reason a table cannot be a file, or "" ----
+  def sw-has-name?(es, name) = nil?(es) ? 0 : ((String) es[0][0] == name ? 1 : sw-has-name?(es[1:], name));
+  def sw-fault-one(e, rest) = len(e[0]) == 0 ? "a tensor has an empty name" : ((String) e[0] == "__metadata__" ? "'__metadata__' is the header's own key, not a tensor name" : (sw-clean?(e[0], 0) == 0 ? "a tensor name carries a control byte: " + sw-esc(e[0]) : (sw-has-name?(rest, e[0]) == 1 ? "duplicate tensor name: " + e[0] : (sw-width(e[1]) == 0 ? "tensor " + e[0] + " has dtype " + sw-esc((String) e[1]) + ", which this writer does not carry" : sw-fault-shape(e)))));
+  def sw-fault-shape(e) = (String) value_kind(e[2]) != "list" ? "tensor " + e[0] + " has no shape list" : (sw-ints?(e[2]) == 0 ? "tensor " + e[0] + " has a shape that is not integers" : (sw-positive?(e[2]) == 0 ? "tensor " + e[0] + " has a dimension of zero or less" : sw-fault-size(e)));
+  def sw-fault-size(e) = e[5] != (sw-product(e[2]) * sw-width(e[1])) ? "tensor " + e[0] + " is " + e[5].str() + " bytes, not shape x width = " + (sw-product(e[2]) * sw-width(e[1])).str() : (e[4] < 0 ? "tensor " + e[0] + " has a negative source offset" : (len(e[3]) == 0 ? "tensor " + e[0] + " has no source path" : ""));
+  def sw-fault-all(es) = nil?(es) ? "" : sw-fault-then(es, sw-fault-one(es[0], es[1:]));
+  def sw-fault-then(es, f) = (String) f == "" ? sw-fault-all(es[1:]) : f;
+  def sw-check(es) {
+   let f = sw-fault-all(es);
+   (String) f == "" ? sw-done(len(es)) : sw-refuse(f);
+  }
+
+  // ---- aliases: a dropped name must be the same source bytes as a tensor that stays ----
+  def sw-in?(names, name) = nil?(names) ? 0 : ((String) names[0] == name ? 1 : sw-in?(names[1:], name));
+  def sw-find(es, name) = nil?(es) ? [] : ((String) es[0][0] == name ? es[0] : sw-find(es[1:], name));
+  def sw-same-bytes?(a, b) = ((String) a[3] == (String) b[3]) && ((a[4] == b[4]) && ((a[5] == b[5]) && ((String) a[1] == (String) b[1])));
+  // some kept entry (not itself dropped) holds the very same source range
+  def sw-twin?(es, drops, e) = nil?(es) ? 0 : ((sw-in?(drops, es[0][0]) == 0) && (sw-same-bytes?(es[0], e)) ? 1 : sw-twin?(es[1:], drops, e));
+  def sw-drop-fault(es, drops, rest) = nil?(rest) ? "" : sw-drop-fault-one(es, drops, rest, sw-find(es, rest[0]));
+  def sw-drop-fault-one(es, drops, rest, e) = nil?(e) ? "cannot drop " + rest[0] + ": the table has no such tensor" : (sw-twin?(es, drops, e) == 0 ? "cannot drop " + rest[0] + ": it is not an alias of a tensor that stays (no kept tensor has its source range)" : sw-drop-fault(es, drops, rest[1:]));
+  def sw-keep(es, drops) = nil?(es) ? [] : (sw-in?(drops, es[0][0]) == 1 ? sw-keep(es[1:], drops) : cons(es[0], sw-keep(es[1:], drops)));
+  // ["ok", the table without its aliases] | ["refused", why]
+  def sw-drop(es, drops) {
+   let f = sw-drop-fault(es, drops, drops);
+   (String) f == "" ? sw-done(sw-keep(es, drops)) : sw-refuse(f);
+  }
+
+  // ---- the order: widest element first, each width in the order given (every tensor lands aligned) ----
+  def sw-of-width(es, w) = nil?(es) ? [] : (sw-width(es[0][1]) == w ? cons(es[0], sw-of-width(es[1:], w)) : sw-of-width(es[1:], w));
+  def sw-cat(a, b) = nil?(a) ? b : cons(a[0], sw-cat(a[1:], b));
+  def sw-order(es) = sw-cat(sw-of-width(es, 8), sw-cat(sw-of-width(es, 4), sw-cat(sw-of-width(es, 2), sw-of-width(es, 1))));
+
+  // ---- the layout: [entry begin end], offsets relative to the data region ----
+  def sw-lay-go(es, at) = nil?(es) ? [] : cons([es[0], at, at + es[0][5]], sw-lay-go(es[1:], at + es[0][5]));
+  def sw-lay(es) = sw-lay-go(sw-order(es), 0);
+  def sw-data-bytes(es) = nil?(es) ? 0 : es[0][5] + sw-data-bytes(es[1:]);
+
+  // ---- the header text ----
+  def sw-meta-one(kv) = sw-q(kv[0]) + (":" + sw-q(kv[1]));
+  def sw-meta-all(kvs) = nil?(kvs) ? [] : cons(sw-meta-one(kvs[0]), sw-meta-all(kvs[1:]));
+  def sw-meta-text(kvs) = sw-q("__metadata__") + (":{" + (sw-join(sw-meta-all(kvs), ",") + "}"));
+  def sw-tensor-text(l) = sw-q(l[0][0]) + (":{" + (sw-q("dtype") + (":" + (sw-q((String) l[0][1]) + ("," + (sw-q("shape") + (":[" + (sw-ints-text(l[0][2]) + ("]," + (sw-q("data_offsets") + (":[" + (l[1].str() + ("," + (l[2].str() + "]}"))))))))))))));
+  def sw-tensors-all(ls) = nil?(ls) ? [] : cons(sw-tensor-text(ls[0]), sw-tensors-all(ls[1:]));
+  def sw-json(ls, kvs) = "{" + (sw-join(nil?(kvs) ? sw-tensors-all(ls) : cons(sw-meta-text(kvs), sw-tensors-all(ls)), ",") + "}");
+  def sw-pad(j) = j + sw-spaces((8 - (len(j) % 8)) % 8);
+  def sw-u64(v) = md-le32(v % 4294967296) + md-le32(v / 4294967296);
+  // [header-blob (u64 + padded json), data-start, layout, total-bytes]
+  def sw-plan-of(ls, kvs, es) {
+   let j = sw-pad(sw-json(ls, kvs));
+   let start = 8 + len(j);
+   [sw-u64(len(j)) + j, start, ls, start + sw-data-bytes(es)];
+  }
+  // the pure half: the table and its metadata become a header, a layout and a size — no device, no file.
+  // ["ok", plan] | ["refused", why]
+  def sw-plan(es, kvs) {
+   let c = sw-check(es);
+   let m = sw-meta-check(kvs);
+   sw-ok?(c) ? (sw-ok?(m) ? sw-done(sw-plan-of(sw-lay(es), kvs, es)) : m) : c;
+  }
+  def sw-meta-fault(kvs) = nil?(kvs) ? "" : ((String) value_kind(kvs[0][1]) != "string" ? "metadata " + kvs[0][0] + " is not a string (the format wants strings)" : (sw-clean?(kvs[0][0], 0) == 0 ? "a metadata key carries a control byte" : (sw-clean?(kvs[0][1], 0) == 0 ? "metadata " + kvs[0][0] + " carries a control byte" : sw-meta-fault(kvs[1:]))));
+  def sw-meta-check(kvs) {
+   let f = sw-meta-fault(kvs);
+   (String) f == "" ? sw-done(len(kvs)) : sw-refuse(f);
+  }
+  def sw-plan-header(p) = p[0];
+  def sw-plan-start(p) = p[1];
+  def sw-plan-layout(p) = p[2];
+  def sw-plan-total(p) = p[3];
+
+  // ---- the device ----
+  // one copy kernel per access width: words when everything is word-aligned, bytes otherwise
+  def sw-msl() = "#include <metal_stdlib>\nkernel void sfw_copy4(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]], constant uint& w0 [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; dst[(ulong)w0 + i] = src[i]; }\nkernel void sfw_copy1(device const uchar* src [[buffer(0)]], device uchar* dst [[buffer(1)]], constant uint& lo [[buffer(2)]], constant uint& hi [[buffer(3)]], constant uint& n [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; dst[(((ulong)hi << 32) | (ulong)lo) + (ulong)i] = src[i]; }\nkernel void sfw_diff4(device const uint* a [[buffer(0)]], device const uint* b [[buffer(1)]], device metal::atomic_uint* out [[buffer(2)]], constant uint& slot [[buffer(3)]], constant uint& n [[buffer(4)]], uint t [[thread_position_in_grid]]) { ulong lo = (ulong)t * 64ul; if (lo >= (ulong)n) return; ulong hi = metal::min((ulong)n, lo + 64ul); uint d = 0u; for (ulong i = lo; i < hi; i++) { d += (a[i] != b[i]) ? 1u : 0u; } if (d != 0u) { metal::atomic_fetch_add_explicit(out + slot, d, metal::memory_order_relaxed); } }\nkernel void sfw_diff1(device const uchar* a [[buffer(0)]], device const uchar* b [[buffer(1)]], device metal::atomic_uint* out [[buffer(2)]], constant uint& slot [[buffer(3)]], constant uint& n [[buffer(4)]], uint t [[thread_position_in_grid]]) { ulong lo = (ulong)t * 256ul; if (lo >= (ulong)n) return; ulong hi = metal::min((ulong)n, lo + 256ul); uint d = 0u; for (ulong i = lo; i < hi; i++) { d += (a[i] != b[i]) ? 1u : 0u; } if (d != 0u) { metal::atomic_fetch_add_explicit(out + slot, d, metal::memory_order_relaxed); } }\n";
+  def sw-pi-copy4() = 0;
+  def sw-pi-copy1() = 1;
+  def sw-pi-diff4() = 2;
+  def sw-pi-diff1() = 3;
+  def sw-names() = ["sfw_copy4", "sfw_copy1", "sfw_diff4", "sfw_diff1"];
+  def sw-pipes-go(msl, names) = nil?(names) ? [] : cons(metal_pipeline(msl, names[0]), sw-pipes-go(msl, names[1:]));
+  def sw-pipes-ok?(ps) = nil?(ps) ? true : (ps[0] > 0 ? sw-pipes-ok?(ps[1:]) : false);
+  // the four pipelines, or a refusal that says why (a carrier that is not admitted answers 0 to everything)
+  def sw-open() {
+   let live = md-door-live?();
+   let ps = live ? sw-pipes-go(sw-msl(), sw-names()) : [];
+   live ? (sw-pipes-ok?(ps) ? sw-done(ps) : sw-refuse("a kernel did not compile: " + metal_status())) : sw-refuse("the Metal carrier is not admitted: " + metal_status());
+  }
+  def sw-free-all(hs) = nil?(hs) ? 1 : sw-free-next(metal_buf_free(hs[0]), hs[1:]);
+  def sw-free-next(rc, rest) = rc < 0 ? 0 - 1 : sw-free-all(rest);
+  // drain the device, then release what the batch mapped; the answer is the empty batch
+  def sw-flush(held) = sw-flush-free(metal_sync(), held);
+  def sw-flush-free(rc, held) = rc < 0 ? form_error("safetensors-write: the device did not finish") : (sw-free-all(held) < 0 ? form_error("safetensors-write: a mapped range could not be released") : []);
+
+  // map one source range and enqueue its copy into out at dst; the answer is the mapped handle, or 0 - 1 (map refused), 0 - 2 (dispatch refused)
+  def sw-copy-one(ps, out, e, dst) {
+   let h = metal_buf_from_file(e[3], e[4], e[5]);
+   h <= 0 ? 0 - 1 : sw-copy-go(ps, out, e, dst, h);
+  }
+  def sw-copy-go(ps, out, e, dst, h) {
+   let word = ((dst % 4) == 0) && (((e[5] % 4) == 0) && ((dst / 4) < 4294967296));
+   let rc = word ? metal_enqueue(ps[sw-pi-copy4()], md-bind([h, out], [dst / 4, e[5] / 4]), e[5] / 4) : metal_enqueue(ps[sw-pi-copy1()], md-bind([h, out], [dst % 4294967296, dst / 4294967296, e[5]]), e[5]);
+   rc < 0 ? 0 - 2 : h;
+  }
+  // every layout row, in batches of 32 mapped ranges; each link consumes the one before it
+  def sw-copy-all(ps, out, ls, base, held, k) {
+   nil?(ls) ? sw-flush(held) : sw-copy-next(ps, out, ls, base, held, k, sw-copy-one(ps, out, ls[0][0], base + ls[0][1]));
+  }
+  def sw-copy-next(ps, out, ls, base, held, k, r) {
+   r <= 0 ? sw-copy-stop(held, ls[0][0][0], r) : (k >= 31 ? sw-copy-all(ps, out, ls[1:], base, sw-flush(cons(r, held)), 0) : sw-copy-all(ps, out, ls[1:], base, cons(r, held), k + 1));
+  }
+  def sw-copy-stop(held, name, r) = sw-copy-stopped(sw-flush(held), name, r);
+  def sw-copy-stopped(f, name, r) = form_error("safetensors-write: " + (r == 0 - 1 ? "the source range of " + name + " could not be mapped" : "the copy of " + name + " was refused by the device"));
+
+  // `gathered` is the answer of the gathering chain: reading it here is what makes the dispatches part of the value
+  def sw-emit(out, total, path, gathered) {
+   let s = (!nil?(gathered)) ? nothing() : metal_buf_read(out, 0, total);
+   nothing?(s) ? sw-refuse("the device buffer could not be read back") : sw-emit-write(path, total, write_file(path, s));
+  }
+  def sw-emit-write(path, total, w) = w < 0 ? sw-refuse("could not write " + path) : (file_size(path) != total ? sw-refuse("wrote " + file_size(path).str() + " bytes to " + path + ", not " + total.str()) : sw-done(total));
+
+  // a plan on the device: header written, tensors gathered, buffer read once and the file written once
+  def sw-write-plan(ps, p, path) {
+   let out = metal_buf_alloc(sw-plan-total(p));
+   out <= 0 ? sw-refuse("the device could not hold " + sw-plan-total(p).str() + " bytes") : sw-write-built(ps, p, path, out);
+  }
+  def sw-write-built(ps, p, path, out) {
+   let h = metal_buf_write(out, 0, sw-plan-header(p));
+   let c = h < 0 ? form_error("safetensors-write: the header could not be written to the device") : sw-copy-all(ps, out, sw-plan-layout(p), sw-plan-start(p), [], 0);
+   let r = sw-emit(out, sw-plan-total(p), path, c);
+   let f = metal_buf_free(out);
+   r;
+  }
+  // the one door: ["ok", [bytes written, tensors, data start]] | ["refused", why]
+  def sw-write(path, es, kvs) {
+   let p = sw-plan(es, kvs);
+   let ps = sw-ok?(p) ? sw-open() : p;
+   !sw-ok?(p) ? p : (!sw-ok?(ps) ? ps : sw-write-done(sw-write-plan(sw-why(ps), sw-why(p), path), sw-why(p), es));
+  }
+  def sw-write-done(r, p, es) = sw-ok?(r) ? sw-done([sw-why(r), len(es), sw-plan-start(p)]) : r;
+
+  // ---- reading it back ----
+  // ranges: [pathA offA pathB offB bytes]. The answer is one count per range: the words (bytes, when the size is not a
+  // multiple of four) that differ. Zero is the only passing number. Mapped ranges are held per batch of 32.
+  def sw-zeros(n) = n <= 0 ? "" : md-le32(0) + sw-zeros(n - 1);
+  // a pair answers [1 a b] when both ranges are mapped and the comparison is dispatched, [0 a b] otherwise (a handle is 0 when absent)
+  def sw-cmp-pair(ps, out, slot, rg) {
+   let a = metal_buf_from_file(rg[0], rg[1], rg[4]);
+   a <= 0 ? [0, 0, 0] : sw-cmp-pair-b(ps, out, slot, rg, a, metal_buf_from_file(rg[2], rg[3], rg[4]));
+  }
+  def sw-cmp-pair-b(ps, out, slot, rg, a, b) {
+   b <= 0 ? [0, a, 0] : sw-cmp-pair-go(ps, out, slot, rg, a, b);
+  }
+  def sw-cmp-pair-go(ps, out, slot, rg, a, b) {
+   let word = (rg[4] % 4) == 0;
+   let rc = word ? metal_enqueue(ps[sw-pi-diff4()], md-bind([a, b, out], [slot, rg[4] / 4]), ((rg[4] / 4) + 63) / 64) : metal_enqueue(ps[sw-pi-diff1()], md-bind([a, b, out], [slot, rg[4]]), (rg[4] + 255) / 256);
+   rc < 0 ? [0, a, b] : [1, a, b];
+  }
+  def sw-cmp-all(ps, out, rgs, slot, held, k) {
+   nil?(rgs) ? sw-flush(held) : sw-cmp-next(ps, out, rgs, slot, held, k, sw-cmp-pair(ps, out, slot, rgs[0]));
+  }
+  def sw-cmp-next(ps, out, rgs, slot, held, k, pr) {
+   pr[0] != 1 ? sw-cmp-stop(held, pr, slot) : (k >= 15 ? sw-cmp-all(ps, out, rgs[1:], slot + 1, sw-flush(cons(pr[1], cons(pr[2], held))), 0) : sw-cmp-all(ps, out, rgs[1:], slot + 1, cons(pr[1], cons(pr[2], held)), k + 1));
+  }
+  def sw-cmp-stop(held, pr, slot) = sw-cmp-stopped(sw-flush(sw-cat(sw-handles(pr[1:]), held)), slot);
+  def sw-handles(pr) = nil?(pr) ? [] : (pr[0] > 0 ? cons(pr[0], sw-handles(pr[1:])) : sw-handles(pr[1:]));
+  def sw-cmp-stopped(f, slot) = form_error("safetensors-write: range " + slot.str() + " could not be mapped or dispatched for comparison");
+  def sw-le32(s, i) = str_byte_at(s, i) + (256 * (str_byte_at(s, i + 1) + (256 * (str_byte_at(s, i + 2) + (256 * str_byte_at(s, i + 3))))));
+  def sw-counts(s, i, n) = i >= n ? [] : cons(sw-le32(s, 4 * i), sw-counts(s, i + 1, n));
+  def sw-compare(ps, rgs) {
+   let n = len(rgs);
+   let out = metal_buf_alloc(4 * (n + 1));
+   out <= 0 ? form_error("safetensors-write: the comparison counters could not be allocated") : sw-compare-run(ps, rgs, n, out);
+  }
+  def sw-compare-run(ps, rgs, n, out) {
+   let z = metal_buf_write(out, 0, sw-zeros(n + 1));
+   let c = z < 0 ? form_error("safetensors-write: the counters could not be zeroed") : sw-cmp-all(ps, out, rgs, 0, [], 0);
+   let s = (!nil?(c)) ? nothing() : metal_buf_read(out, 0, 4 * n);
+   let f = metal_buf_free(out);
+   nothing?(s) ? form_error("safetensors-write: the counters could not be read") : sw-counts(s, 0, n);
+  }
+  def sw-total(xs) = nil?(xs) ? 0 : xs[0] + sw-total(xs[1:]);
+
+  // the written file against its entries: every name present with the same shape and dtype, no tensor the table
+  // does not hold, the data region exactly covered, and every byte equal on the device.
+  // ["ok", [tensors, bytes]] | ["refused", first reason]
+  def sw-rg(ix, e, row) = [e[3], e[4], ix[0], row[3], e[5]];
+  def sw-find-row(ix, name) = sti-find(ix, name);
+  def sw-shape-same?(a, b) = len(a) != len(b) ? 0 : (nil?(a) ? 1 : (a[0] == b[0] ? sw-shape-same?(a[1:], b[1:]) : 0));
+  def sw-row-fault(es, row) = nil?(row) ? "the file does not hold " + es[0][0] : ((String) row[1] != (String) es[0][1] ? es[0][0] + " is " + row[1] + " in the file, " + es[0][1] + " in the table" : (sw-shape-same?(row[2], es[0][2]) == 0 ? es[0][0] + " has another shape in the file" : (row[4] != es[0][5] ? es[0][0] + " has another extent in the file" : "")));
+  def sw-fault-rows(ix, es) = nil?(es) ? "" : sw-fault-rows-then(ix, es, sw-row-fault(es, sw-find-row(ix, es[0][0])));
+  def sw-fault-rows-then(ix, es, f) = (String) f == "" ? sw-fault-rows(ix, es[1:]) : f;
+  def sw-ranges(ix, es) = nil?(es) ? [] : cons(sw-rg(ix, es[0], sw-find-row(ix, es[0][0])), sw-ranges(ix, es[1:]));
+  def sw-rows-bytes(rows) = nil?(rows) ? 0 : rows[0][4] + sw-rows-bytes(rows[1:]);
+  def sw-verify(ps, path, es) {
+   let ix = sti-open(path);
+   let f = sw-fault-rows(ix, es);
+   (String) f != "" ? sw-refuse(f) : (len(ix[2]) != len(es) ? sw-refuse("the file holds " + len(ix[2]).str() + " tensors, the table " + len(es).str()) : (sw-rows-bytes(ix[2]) != (file_size(path) - ix[1]) ? sw-refuse("the tensors do not cover the file's data region") : sw-verify-bytes(sw-compare(ps, sw-ranges(ix, es)), es)));
+  }
+  def sw-verify-bytes(counts, es) = sw-total(counts) == 0 ? sw-done([len(es), sw-data-bytes(es)]) : sw-refuse(sw-total(counts).str() + " words differ from the source");
+ }
+ 0;
+}
