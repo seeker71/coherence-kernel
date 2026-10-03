@@ -11,10 +11,13 @@ form_cli_bind_carrier() {
 }
 
 form_cli_sha256_stream() {
+    local digest
     if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 | awk '{print $1}'
+        digest="$(shasum -a 256)"
+        printf '%s\n' "${digest%% *}"
     elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum | awk '{print $1}'
+        digest="$(sha256sum)"
+        printf '%s\n' "${digest%% *}"
     else
         echo "form-cli bootstrap: SHA-256 tool unavailable" >&2
         return 1
@@ -82,11 +85,13 @@ form_cli_verify_binary_identity() {
 }
 
 form_cli_sha256_file() {
-    local file_path="$1"
+    local file_path="$1" digest
     if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$file_path" | awk '{print $1}'
+        digest="$(shasum -a 256 "$file_path")"
+        printf '%s\n' "${digest%% *}"
     elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file_path" | awk '{print $1}'
+        digest="$(sha256sum "$file_path")"
+        printf '%s\n' "${digest%% *}"
     else
         echo "form-cli bootstrap: SHA-256 tool unavailable" >&2
         return 1
@@ -95,14 +100,14 @@ form_cli_sha256_file() {
 
 form_cli_hmac_sha256_hex() {
     local key_hex="$1"
-    local message="$2"
+    local message="$2" digest
     command -v openssl >/dev/null 2>&1 || {
         echo "form-cli bootstrap: openssl is required for behavioral HMAC proof" >&2
         return 1
     }
-    printf '%s' "$message" \
-        | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${key_hex}" \
-        | awk '{print $NF}'
+    digest="$(printf '%s' "$message" \
+        | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${key_hex}")"
+    printf '%s\n' "${digest##* }"
 }
 
 form_cli_assert_file_eq() {
@@ -222,8 +227,9 @@ form_cli_behavioral_proof() (
     }
 
     # A stale v1 row is absent rather than weakly grounded.
-    sed 's/"schema":"nodeid-rag-v2"/"schema":"nodeid-rag-v1"/' \
-        "$index_file" > "$root/index-v1.jsonl"
+    index_text="$(<"$index_file")"
+    printf '%s\n' "${index_text//\"schema\":\"nodeid-rag-v2\"/\"schema\":\"nodeid-rag-v1\"}" \
+        > "$root/index-v1.jsonl"
     mv "$root/index-v1.jsonl" "$index_file"
     (cd "$root" && printf 'grounded %s\nquit\n' "$query" | "$binary") > "$root/v1.out"
     printf 'grounded:miss\n' > "$root/v1.expected"

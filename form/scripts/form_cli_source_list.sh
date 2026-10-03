@@ -396,15 +396,17 @@ form_cli_publish_lock_release() {
 
 # Every artifact identity below is SHA-256 over one regular file.
 form_cli_generation_sha256_file() {
-    local file_path="$1"
+    local file_path="$1" attest_digest
     [[ -f "$file_path" && ! -L "$file_path" ]] || {
         printf 'form-cli generation attestation: regular file required: %s\n' "$file_path" >&2
         return 1
     }
     if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$file_path" | awk '{print $1}'
+        attest_digest="$(shasum -a 256 "$file_path")"
+        printf '%s\n' "${attest_digest%% *}"
     elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file_path" | awk '{print $1}'
+        attest_digest="$(sha256sum "$file_path")"
+        printf '%s\n' "${attest_digest%% *}"
     else
         printf '%s\n' 'form-cli generation attestation: SHA-256 tool unavailable' >&2
         return 1

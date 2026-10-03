@@ -86,23 +86,34 @@ suite_enumerate() {
 #     names it (`; STAGED CARRIER: <path from the repo root>`) runs whenever that
 #     carrier stands; otherwise it is reported ⧗ pending — visible every run,
 #     never green. Every other band runs.
+# What a band's head and the verdict manifest say is read by the Form door observe/band-head.bml
+# (observe/band-head-run.bml answers one line: `<question> <path> [<stem>]`); the shell only
+# carries the question to fkwu, run from the repository root with absolute paths.
+bh_abs() {
+    case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$PWD/$1" ;; esac
+}
+bh_ask() {
+    local k="${FORM_SOURCE_FKWU:-$PWD/../fkwu}" root="$PWD/.."
+    [[ -x "$k" ]] || return 0
+    (cd "$root" && printf '%s\n' "$*" | "$k" observe/band-head-run.bml 2>/dev/null) || true
+}
 fk_band_proof_level() {
-    sed -n 's/^; PROOF LEVEL: \([A-Z-]*\).*/\1/p' "$1" 2>/dev/null | head -1
+    bh_ask level "$(bh_abs "$1")"
 }
 fk_band_staged_carrier() {
-    sed -n 's/^; STAGED CARRIER: \([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1
+    bh_ask carrier "$(bh_abs "$1")"
 }
 # the door that builds a staged band's carrier (`; STAGED CARRIER DOOR: <command>`), named
 # in the pending line so the next reader knows how to make the carrier present
 fk_band_staged_door() {
-    sed -n 's/^; STAGED CARRIER DOOR: \(.*\)$/\1/p' "$1" 2>/dev/null | head -1
+    bh_ask door "$(bh_abs "$1")"
 }
 # The head pin: the first `Verdict <n>` on a `; ` line of the band's comment head, which ends at
 # its first code line. One spelling, so a head reads one way: `Verdict: 131 (P1) + 12*42 (P2) =
 # 635` (form-eval-full-band) is prose about a sum, and a reader that took the colon spelling too
 # would pin it 131 against its registered 635.
 fk_band_declared_verdict() {
-    awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
+    bh_ask pin "$(bh_abs "$1")"
 }
 
 # band_stem — manifest stem for a band file path, or empty. A registered verdict only applies to a
@@ -122,10 +133,10 @@ band_stem() {
     [[ -f "$BAND_MANIFEST" ]] || return 0
     # Exact name first, then the name without -band: a row may name the file
     # whole (tests/<stem>.fk) or the band it proves (tests/<stem>-band.fk).
-    hit="$(awk -v b="$stem" '$1==b{print $1; exit}' "$BAND_MANIFEST")"
+    hit="$(bh_ask row-name "$(bh_abs "$BAND_MANIFEST")" "$stem")"
     if [[ -n "$hit" ]]; then printf '%s\n' "$hit"; return 0; fi
     stem="${stem%-band}"
-    awk -v b="$stem" '$1==b{print $1; exit}' "$BAND_MANIFEST"
+    bh_ask row-name "$(bh_abs "$BAND_MANIFEST")" "$stem"
 }
 
 # `./validate.sh --list` names each workload, whether its head stages a carrier, its head pin and
@@ -141,7 +152,7 @@ if [[ "${1:-}" == "--list" ]]; then
         list_pin="$(fk_band_declared_verdict "$list_band")"
         list_stem="$(band_stem "$list_band" || true)"
         list_row=""
-        if [[ -n "$list_stem" ]]; then list_row="$(awk -v b="$list_stem" '!/^#/ && $1==b{print $3; exit}' "$BAND_MANIFEST")"; fi
+        if [[ -n "$list_stem" ]]; then list_row="$(bh_ask row-pin "$(bh_abs "$BAND_MANIFEST")" "$list_stem")"; fi
         printf '%s\t%s\tstaged=%s\tpin=%s\trow=%s\n' "${wl_labels[$i]}" "$list_files" \
             "$([[ "$list_level" == "FKWU-STAGED" ]] && echo yes || echo no)" "${list_pin:--}" "${list_row:--}"
         i=$((i + 1))
@@ -456,7 +467,7 @@ run_band() {
     head_pin="$(fk_band_declared_verdict "$band")"
     stem="$(band_stem "$band" || true)"
     reg_pin=""
-    if [[ -n "$stem" ]]; then reg_pin="$(awk -v b="$stem" '!/^#/ && $1==b{print $3; exit}' "$BAND_MANIFEST")"; fi
+    if [[ -n "$stem" ]]; then reg_pin="$(bh_ask row-pin "$(bh_abs "$BAND_MANIFEST")" "$stem")"; fi
     [[ "$reg_pin" =~ ^[0-9]+$ ]] || reg_pin=""
     if [[ -n "$over" ]]; then why="ended at the deadline: $(cat "$legs/fk.deadline" 2>/dev/null)"
     elif [[ "$rc" != 0 ]]; then why="exit $rc"
