@@ -3,19 +3,20 @@
 // WHY THIS IS NOT file_size. The session door leases file_size(path) as the weights' SHARED bytes and model-admission.bml charges the same figure to the governor's ask. For Qwen that is the
 // right number: the file is mapped and a token touches it all. For a DeepSeek-V4 file it is not. The IQ2XXS file is 86,720,111,488 bytes (80.8 GiB) and the reap25 file 91,321,404,640 bytes (85.0 GiB), both over
 // the governor's wired cap on an empty 128 GiB machine (60 percent = 76.8 GiB = 82,463,372,040 bytes: mg-pct is (mem / 100) x 60), yet the driver MAPS the weights (dsv4-bind.fk: one no-copy view a tensor,
-// demand-paged). THE BELIEF BEHIND THE FIGURE, DERIVED AND NOT WITNESSED: that only the pages the GPU touches are wired, so that a token's working set is the dense tensors (attention, shared expert,
-// routers, hyper-connection matrices, the output head) and SIX of each layer's 256 routed experts, and a 64-expert cache a layer holds the set over a stream. The only witness of the cache is ds4's
-// 24-token recording; no run here has read wired memory. If the GPU wires WHOLE expert stacks (a stack is 553 MB on the IQ2XXS file's gate), the touched set approaches the file (about 85 GB) and sits above
-// the 82.46 GB cap: the lease would then be wrong by 3x, and the witness is the validation window's wirespan probe and its stage-delta abort (observe/dsv4-validate-run.bml), not this file.
-// On that belief the working set the lease promises is:
+// demand-paged). THE WORKING SET THE LEASE PROMISES is the dense tensors (attention, shared expert, routers, hyper-connection matrices, the output head), SIX of each layer's 256 routed experts a token and a bounded set of them
+// held over a stream: the driver opens the routed experts through a SLOT ARENA (native/metal/dsv4-arena.fk): the routed stacks are not mapped, each layer holds C experts in buffers allocated once and a missing expert is
+// copied from the file by its own span, so the expert term below IS the arena's allocation to the byte (the arena band holds dxa-bytes equal to dls-cache at the same slot count). A whole-stack map (arena_slots 0,
+// the control) binds a stack of 553 MB (the IQ2XXS file's gate) per dispatch and the device reads every page of it: on 2026-10-03 19:04 WITA the first real token over whole stacks read the whole 80 GiB file (5,241,090
+// pageins) and pushed 27.7 GiB of other processes' memory to swap. The witness of wired memory is the token door's wired-per-layer curve (observe/dsv4-token-run.bml: it reads wired memory after every layer of the first
+// tokens and stops before the machine is at risk), not this file. The working set the lease promises is:
 //
 //   shared  =  dense bytes  +  expert cache  +  KV cache
 //     dense bytes   the sum of the priced bytes of every tensor the driver binds (dsv4-layout.fk dvl-driver-names: 1,202 tensors on the 43-layer files) MINUS the routed expert stacks (ffn_gate_exps, ffn_up_exps,
 //                   ffn_down_exps of every layer) MINUS token_embd.weight (a token reads one row of it, dvl-row, not the matrix). The 126 indexer tensors and the draft layers are in the file and not in the
 //                   driver's plan, so they are not in the sum.
 //     expert cache  C x (the bytes of ONE expert's gate, up and down) summed over the layers, with C = 64 (dls-cache-experts) capped at a layer's stored experts. The bytes of one expert are its three stacks'
-//                   bytes divided by the layer's stored expert count (7,077,888 on the IQ2XXS file: 2 x 2,162,688 for gate and up + 2,752,512 for the Q2_K down). 64 is the cache the validation window is
-//                   to measure against: distinct experts a layer meets over 24 tokens (driver design, section 5), so it is a PARAMETER with a name, not a fact.
+//                   bytes divided by the layer's stored expert count (7,077,888 on the IQ2XXS file: 2 x 2,162,688 for gate and up + 2,752,512 for the Q2_K down). 64 is a PARAMETER with a name, not a fact:
+//                   the validation window's cache_experts sets it, and it is the arena's size when the arena is used.
 //     KV cache      dvl-kv-total(layout, cap): 88,064 bytes a token over 43 layers plus the compressors' state and rows (dsv4-layout.fk). cap is the position capacity the session opens for;
 //                   the admission ask, made before the prompt is counted, uses dls-default-cap (8,192). Its three terms: raw arenas and compressed rows (they grow with cap) and the compressors' state and
 //                   score (11,862,016 B on the IQ2XXS file at any cap, which is most of the 18,270,208 B at 64 positions).
@@ -23,7 +24,8 @@
 //
 // THE FIGURES THEMSELVES are pinned by form-stdlib/tests/dsv4-lease-band.bml, which reads both real headers (8 MB windows, no weight byte): IQ2XXS dense 7,290,857,308 + cache 19,478,347,776 + KV 824,068,096 =
 // 27,593,273,180 B (25.7 GiB); reap25 7,096,772,444 + 23,139,975,168 + 824,068,096 = 31,060,815,708 B (28.9 GiB); the wired cap on a 128 GiB machine is 82,463,372,040 B.
-// NOTHING HERE WAS MEASURED ON A RUNNING MODEL. The first physical window (observe/dsv4-validate-run.bml) reads wired memory stage by stage against these estimates and aborts at twice them.
+// THE FIGURES ARE DERIVED FROM THE HEADER AND ARE NOT A READING OF A RUNNING MODEL. The token-run door (observe/dsv4-token-run.bml) reads wired memory after every layer of the first tokens against the machine's wired cap,
+// and the validation window (observe/dsv4-validate-run.bml) reads it stage by stage against the lease it holds.
 //
 // THE ARCH KEY. dls-weights-bytes(path) answers file_size(path) for every file that does not read architecture deepseek4 (so Qwen's lease and ask are byte for byte what they were) and the derived bytes for
 // one that does. The architecture is read from the first 64 KiB of the file (general.architecture is the first key of a GGUF); a file that cannot be read, or is not a GGUF, answers "" and is charged its size.
