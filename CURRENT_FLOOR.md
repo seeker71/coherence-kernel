@@ -292,8 +292,9 @@ driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 1023 · na
 driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 1023 · native/metal/tests/dsv4-layer-band.bml 2047
 driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/dsv4-end-to-end-band.bml 511
                dsv4-lease-band.bml 511 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 4095
-driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 511 · native/metal/tests/dsv4-layer-q8q2-band.bml 4095
-               native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 101 kernels, dsv4-open-band 1023 with 72 in the graph)
+driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 1023 · native/metal/tests/dsv4-layer-q8q2-band.bml 4095
+               native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 104 kernels, dsv4-open-band 1023 with 75 in the graph)
+driver stage 5 native/metal/tests/dsv4-ledger-band.bml 255 · native/metal/tests/dsv4-door-run-band.bml 127   (the op ledger of a token, the flow through the door's functions)
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -409,6 +410,17 @@ is judged by its wired growth less that movement (`dvr-own-delta`; with no movem
 reading before the run ends, the wirespan probe reads 'stack' only past half a stack once the movement is taken from the delta and 'between' where the movement hides which, and every stage line and receipt row carries the
 device's own bytes (`own_delta`) beside the wired growth, with the movement named (`wired_noise`): `dsv4-validate-band.bml` bit 2048, a window that ignores the movement reads 2047. The compile and map estimates are bounds
 (512 MiB, and 512 MiB plus the scratch plan), not readings: the window's +309,854,208 B and +43,286,528 B are the first measurements of them, taken through the same noisy sensor.
+
+Driver stage 5, the flow held to the Swift runner's op ledger (read 2026-10-03 WITA 09:30 to 10:50, each band alone, memory room before each run; `docs/dsv4-flow-history.md` is the map of where the
+whole flow stood: the Form cell of 08-10 held the stream at 226 ms a token warm, the Swift runner's 34 to 38 ms was never a Form number, and neither was ever in main). Measured on the fixture before this change (a machine at load average 33 to 43, best of six reps of 16 tokens): the 137
+dispatches of a token cost 9 to 10 ms of host, 66 to 76 us a dispatch, where Swift pays 1.1 us: `md-bind` built an eight-word binding in 36 us, `dkl-supported?` ran 700 us a block three times a block a token, `dkl-clamp` scanned the header 230 us twice a block, and the NaN scan made a buffer,
+three syncs and a free a token. Now: `dkr-bind` (4 us, the same bytes), the admission read once a context (`dsv4-admitted-once?`), the clamp once a block, the scan in the token's own batch behind one sync, and `dkr-hz` in `dsv4-kernels.fk`: a concurrent batch whose
+barriers are planned once a block from the reads and writes each kernel's own MSL signature declares and replayed, a batch handed to the queue every second block, the real file's four-row IQ2_XXS and Q2_K expert kernels and ds4's Metal-order Q8_0 matvec (`dkr-unit-lanes`: 104 kernels over
+eleven sources, 75 in the graph). `form/native/metal/dsv4-ledger.fk` reads one row a token and a row a block from the carrier's counters. On both fixtures a decode token reads 137, 142 or 148 dispatches (the layout's formula, held at every step),
+111, 116 or 121 barriers (81%), 2 command buffers, 1 wait, 2 host reads, 0 buffers made; the serial walk and the concurrent walk are bit-equal in ids and logits; the best of six host encodes is 3.3 to 3.5 ms for 137 dispatches (24 to 26 us a dispatch, 2.7 to 3 times
+under the 66 to 76; 17 to 20 us at a quieter hour). Derived for the real file, not run: 1,856 dispatches a token, about 1,500 barriers, 22 command buffers, a host floor of 45 to 50 ms (33 to 37 at the quieter figure) overlapped with the device. Not witnessed: any real-file number, any wall-clock gain at real dimensions, the Swift runner's rate on
+this Mac today. The session's open and step and the generate door's one-shot run on the fixture through the door's own functions (`dsv4-door-run-band.bml`, the lane flag untouched and 0; the fixture has no vocabulary, so `fcds-text` now renders none instead of reading pieces
+at offsets a missing array gives). The arena builder's per-layer host sync (43 a token) is what Swift deleted ("the flush that outlived its reason"): the two exclude each other until the arena's sync becomes a plan boundary.
 
 Bands that read a binary fixture through `read_file_slice` or a host door declare `PROOF LEVEL: FOURTH-ARM ONLY`
 (rust and ts hand back a different file there); `./validate.sh --list` prints which. The restored emitters, the
