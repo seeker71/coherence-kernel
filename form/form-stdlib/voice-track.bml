@@ -24,7 +24,7 @@ section [form.bml] {
         field VTRIdleMs = 150000;
         field VTRPollMs = 10000;
         field VTRTries = 60;
-        field VTRBatch = 100;
+        field VTRBatch = 100000;
         def vtr-pcm-dir(code) = vg-cat([VTRDir(), "/pcm-", code]);
         def vtr-stem(code, i) = vg-cat([vtr-pcm-dir(code), "/", (1000 + i).str()]);
         def vtr-chunks(code) = vg-drop-empty(split-on(read_file(vg-cat([VTRDir(), "/", code, "-chunks.txt"])), vg-nl()));
@@ -41,16 +41,19 @@ section [form.bml] {
             print_str(vg-cat([code, " ", i.str(), " untaught"]));
             0;
         }
-        // A render allocates its intermediate tensors on the device and the pass frees none of them (the carrier's
-        // handles carry a generation, so a numeric range is no ledger: found 2026-10-03). After ~160 renders in one
-        // process the allocations answer empty and a render reads as zero samples — silently, and the first track
-        // wrote those as empty files and called them done. So: a worker renders at most VTRBatch pieces and exits
-        // (its memory goes with it), the supervisor spawns it again, and an empty rendering is never written down.
+        // A render allocates its intermediate tensors on the device; the pass entered every one in its ledger and
+        // vv-release gives them back once the samples are read, so the carrier's count of live buffers is the same
+        // after piece 1 and piece 1000 (voice-pass-leak-band.fk). Before the ledger the pass freed none, and after
+        // ~160 renders in one process the allocations answered empty and a render read as zero samples — silently,
+        // and the first track wrote those as empty files and called them done (found 2026-10-03). The batch cap and
+        // the exit-and-respawn stay as a safety net, and an empty rendering is still never written down.
         def vtr-sound(st, code, i, ids) {
             let o = vv-render(st, ids, vtr-scale(code));
             let pcm = vv-pcm(st, o);
-            if ((Comparable) len(pcm) == 0) then vtr-silent(code, i) else vtr-write(code, i, pcm);
+            vtr-landed-after(vv-release(st), code, i, pcm);
         }
+        // the release's answer is read here, never dropped: a piece is written only after its buffers are given back
+        def vtr-landed-after(left, code, i, pcm) = if (left < 0) then form_error("voice-track: the release answered a refusal") else if ((Comparable) len(pcm) == 0) then vtr-silent(code, i) else vtr-write(code, i, pcm);
         def vtr-silent(code, i) {
             print_str(vg-cat([code, " ", i.str(), " rendered no samples"]));
             0;

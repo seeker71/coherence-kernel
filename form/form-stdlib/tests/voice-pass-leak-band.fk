@@ -1,0 +1,79 @@
+; voice-pass-leak-band.fk — a render gives back every buffer it took, so one process can render without end.
+;
+; THE WOUND. The pass allocated ~390 device buffers per render and freed none. After roughly 160 renders in one
+; process the carrier's allocations answered empty and a render read as ZERO samples, silently (found 2026-10-03:
+; pieces 167+ of a Portuguese track and 160+ of a Persian one were written as empty files). The worker contained
+; it by lifetime — render a hundred pieces, exit, be respawned.
+; THE HEAL. Every buffer the pass allocates is entered in a ledger the state carries (a record made at vv-open, a
+; LIST of handles because a handle carries a generation and a numeric range is no ledger); vv-release settles the
+; device and frees them, re-sweeping what a first round refused (a refused free reads as success).
+;
+; This band renders 40 lines of four different lengths (the first 15, 33 and 65 ids of the band's row, and that row
+; twice) in ONE process and reads metal_live()[2], the carrier's own count of live buffers, after each:
+;
+;   1    the door opens and every scalar resolves
+;   2    BEFORE a release the count stands above the open's baseline (the ledger holds real buffers: the band is not
+;        measuring nothing), and a release brings it back to the baseline exactly
+;   4    after each of the 40 renders and releases the count is exactly the baseline
+;   8    no render is empty, and the 65-id line is 64000 bytes of samples every time
+;   16   the same line rendered first and last answers the same samples, byte for byte
+;   32   every release answers 0: nothing it could not free
+;   64   vv-close gives back the weights too: the count returns to what it was before the voice was opened
+;
+; Expected: 127
+; Verdict 127
+; PROOF LEVEL: FOURTH-ARM ONLY (Metal dispatches and host file reads over the voice store)
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/voice-pass.bml form/form-stdlib/voice-say.bml
+(do
+    (defn lb-bit (ok v) (if ok v 0))
+    (defn lb-ids () (list 1 0 41 0 59 0 3 0 15 0 120 0 52 0 17 0 74 0 119 0 3 0 74 0 38 0 3 0 24 0 120 0 62 0 122 0 26 0 74 0 44 0 3 0 32 0 59 0 3 0 31 0 28 0 120 0 21 0 122 0 23 0 10 0 2))
+    (defn lb-take (xs n) (if (le n 0) (list) (if (eq (len xs) 0) (list) (cons (head xs) (lb-take (tail xs) (sub n 1))))))
+    ; the lengths a worker meets: short, medium, the band's row, and a long one
+    (defn lb-row (k)
+        (if (eq (mod k 4) 0) (lb-take (lb-ids) 15)
+            (if (eq (mod k 4) 1) (lb-take (lb-ids) 33)
+                (if (eq (mod k 4) 2) (lb-ids) (append (lb-ids) (lb-ids))))))
+    ; one render of line k: answers (live-after-release samples-length release-left pcm)
+    (defn lb-once (st k)
+        (do
+            (let o (vv-render st (lb-row k) 1.0))
+            (let pcm (vv-pcm st o))
+            (let left (vv-release st))
+            (list (vv-live) (str_len pcm) left pcm)))
+    ; the run: every link's answer feeds the next, so nothing is a call whose result no one reads
+    ; (live-exact bad-empty bad-length bad-left first-pcm last-pcm)
+    (defn lb-go (st k n base acc)
+        (if (ge k n) acc
+            (lb-step st k n base acc (lb-once st k))))
+    (defn lb-step (st k n base acc r)
+        (lb-go st (add k 1) n base
+            (list (add (nth acc 0) (if (eq (nth r 0) base) 0 1))
+                  (add (nth acc 1) (if (gt (nth r 1) 0) 0 1))
+                  (add (nth acc 2) (if (eq (mod k 4) 2) (if (eq (nth r 1) 64000) 0 1) 0))
+                  (add (nth acc 3) (nth r 2))
+                  (if (eq k 2) (nth r 3) (nth acc 4))
+                  (if (eq (mod k 4) 2) (nth r 3) (nth acc 5)))))
+
+    (let live0 (vv-live))
+    (let mp (vp-model-path "en_GB-jenny_dioco-medium"))
+    (let st (vv-open mp))
+    (let b1 (lb-bit (eq (vv-open-ok? st) 1) 1))
+    (let base (vv-live))
+
+    ; a render left unreleased holds buffers; the release gives exactly them back
+    (let o (vv-render st (lb-ids) 1.0))
+    (let held (vv-live))
+    (let left0 (vv-release st))
+    (let b2 (lb-bit (if (gt held base) (if (eq left0 0) (eq (vv-live) base) 0) 0) 2))
+
+    (let r (lb-go st 0 40 base (list 0 0 0 0 "" "")))
+    (let b4 (lb-bit (eq (nth r 0) 0) 4))
+    (let b8 (lb-bit (if (eq (nth r 1) 0) (eq (nth r 2) 0) 0) 8))
+    (let b16 (lb-bit (str_eq (nth r 4) (nth r 5)) 16))
+    (let b32 (lb-bit (eq (nth r 3) 0) 32))
+    (let closed (vv-close st))
+    (let b64 (lb-bit (if (eq closed 0) (eq (vv-live) live0) 0) 64))
+
+    (add b1 (add b2 (add b4 (add b8 (add b16 (add b32 b64))))))
+)
