@@ -159,6 +159,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -1223,6 +1224,55 @@ long long fk_metal_buf_write_external(long long h, long long off, const char *by
                 fk_err(@"buf_write: shared file flush failed"); return -1;
             }
         }
+        return len;
+    }
+}
+
+// THE FILL DOOR. The bytes of a file's span go into an allocated buffer's own memory by pread, the host writing straight into the shared pages: no Form string is made (a 2 MB
+// string costs 4 to 5 ms in the interner), no mapping and no GPU copy (a no-copy view of the span read by a copy kernel runs at about 3 GB/s: the device faults the file's pages in one by one).
+// It is the arena's miss (native/metal/dsv4-arena.fk): an expert's bytes into its slot. EVERY REFUSAL ANSWERS -1 AND WRITES NOTHING: a bad handle; a negative offset or length; a buffer
+// that is a mapped file (a model's pages are never written through this door); a destination past the buffer's own view; a path that does not open; a span the file does not contain (the
+// file is measured first, so a truncated file never leaves a half-written slot); a read that comes up short. Work that names the buffer settles first, as for every host write.
+long long fk_metal_buf_fill_external(long long h, long long boff, const char *path, long long path_len,
+                                     long long foff, long long len) {
+    @autoreleasepool {
+        long long slot = fk_buf_slot(h);
+        if (slot == 0) { fk_err([NSString stringWithFormat:@"buf_fill: bad handle %lld", h]); return -1; }
+        if (boff < 0 || foff < 0 || len < 0) { fk_err(@"buf_fill: negative offset or length"); return -1; }
+        fk_bufmeta *m = &fk_buf_meta[slot - 1];
+        if (m->nocopy != 0) { fk_err(@"buf_fill: a mapped file is never written through this door"); return -1; }
+        if ((unsigned long long)boff > m->view_len ||
+            (unsigned long long)len > m->view_len - (unsigned long long)boff) {
+            fk_err([NSString stringWithFormat:@"buf_fill: off=%lld len=%lld past view_len %llu", boff, len, m->view_len]);
+            return -1;
+        }
+        char p[4096];
+        if (path == NULL || path_len <= 0 || path_len >= (long long)sizeof(p)) {
+            fk_err(@"buf_fill: path length out of range"); return -1;
+        }
+        memcpy(p, path, (size_t)path_len);
+        p[path_len] = 0;
+        if (fk_buffer_settle(h) < 0) { return -1; }
+        int fd = open(p, O_RDONLY);
+        if (fd < 0) { fk_err([NSString stringWithFormat:@"buf_fill: cannot open %s", p]); return -1; }
+        struct stat st;
+        if (fstat(fd, &st) != 0) { close(fd); fk_err(@"buf_fill: fstat failed"); return -1; }
+        if (foff + len > (long long)st.st_size) {
+            close(fd);
+            fk_err([NSString stringWithFormat:@"buf_fill: file is %lld bytes, asked for [%lld,%lld)", (long long)st.st_size, foff, foff + len]);
+            return -1;
+        }
+        id<MTLBuffer> b = fk_buf_objs[(NSUInteger)(slot - 1)];
+        char *dst = (char *)[b contents] + m->view_off + boff;
+        long long done = 0;
+        while (done < len) {
+            ssize_t r = pread(fd, dst + done, (size_t)(len - done), (off_t)(foff + done));
+            if (r < 0 && errno == EINTR) { continue; }
+            if (r <= 0) { break; }
+            done += (long long)r;
+        }
+        close(fd);
+        if (done != len) { fk_err(@"buf_fill: the file gave fewer bytes than it measured"); return -1; }
         return len;
     }
 }

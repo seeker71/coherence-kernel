@@ -270,6 +270,7 @@ static const struct fk_rwtab_row fk_rwtab[] = {
   { "write_file_bytes", 2, 12, { 1,27,0,0,0,1,2,19,2,2,201,2,} },
   { "attempt", 1, 7, { 1,28,0,0,2,201,2,} },
   { "abs", 1, 19, { 1,0,0,0,2,5,2,0,0,1,0,0,0,2,4,2,2,6,3,} },
+  { "metal_buf_fill", 3, 14, { 1,33,0,0,0,1,0,2,2,19,2,2,201,3,} },
 
 };
 static const long long fk_rwtab_n = sizeof(fk_rwtab)/sizeof(fk_rwtab[0]);
