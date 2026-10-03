@@ -103,7 +103,7 @@ section [form.bml] {
         r;
     }
     def dth-stage-replay(ctx, tag, a, b, c, d, e, key) {
-        let began = dkr-hz-replay-begin(key);
+        let began = dkr-hz-replay-begin(key, ctx[0]);
         let r = dth-stage-go(ctx, tag, a, b, c, d, e);
         let ended = dkr-hz-replay-end();
         r;
@@ -113,7 +113,13 @@ section [form.bml] {
         let dry = dkr-hz-plan-known?(key) ? 1 : dth-stage-plan(ctx, tag, a, b, c, d, e, key);
         nothing?(dry) ? nothing() : dth-stage-replay(ctx, tag, a, b, c, d, e, key);
     }
-    def dth-stage(ctx, tag, a, b, c, d, e) = dkr-hz-live?() ? dth-stage-planned(ctx, tag, a, b, c, d, e) : dth-stage-serial(ctx, tag, a, b, c, d, e);
+    // the stage's encoding is timed in the process's CPU microseconds (the ledger's enc_us: the host's work to build and enqueue the stage's dispatches, the planning dry run of a stage's first meeting included)
+    def dth-stage(ctx, tag, a, b, c, d, e) {
+        let c0 = host_cpu_us();
+        let r = dkr-hz-live?() ? dth-stage-planned(ctx, tag, a, b, c, d, e) : dth-stage-serial(ctx, tag, a, b, c, d, e);
+        let held = dkr-tm-add("tm-enc", host_cpu_us() - c0);
+        r;
+    }
     // a stage outside a live batch runs its plain go-function; in the ATTRIBUTION mode (dkr-attr-begin: mode 3, dsv4-kernels.fk) it first says which stage it is, "tag:block", so the dispatches read after it are the stage's
     def dth-stage-serial(ctx, tag, a, b, c, d, e) {
         let noted = dkr-hz-get("mode") == 3 ? dkr-hz-put("attr-stage", tag ++ ":" ++ b.str()) : 0;
@@ -188,7 +194,8 @@ section [form.bml] {
     def dth-tap(kind, a) { let t = dkr-hz-get("tap"); nil?(t) ? "" : dth-tap-call(t, kind, a); }
 
     // ---- the state half: embed and every block at one position ----------------------------------------------------
-    // the batch goes to the queue every second block (Swift's submitEvery = 2): the device runs block n while the host encodes block n + 1
+    // the batch goes to the queue every `every` blocks (dkr-every: Swift's submitEvery = 2 by default; 1 hands it over after EVERY block, so the device runs block n while the host encodes block n + 1 at even blocks
+    // too: the arena's boundary drains the first half's batch each block, so with 2 the second half of an even block waits in the open batch while the host encodes the next block's first half): the device runs block n while the host encodes block n + 1
     // A BLOCK OF THE ARENA CONTEXT (dsv4-arena.fk) is two planned stages with the layer's one sync between them: the attention half and the FFN's first half (through the routing); the boundary (dxa-boundary: sync, the
     // ids, the slots, the fills, a concurrent batch armed again); then the experts over the arena and the rest. The whole-stack context runs the block as one stage, as it always did.
     def dth-layer-arena(ctx, sts, il, pos, id, cap) {
@@ -201,7 +208,7 @@ section [form.bml] {
     def dth-layers(ctx, sts, il, n, id, pos, cap) {
         il == n ? 1 : {
             let r = dth-layer(ctx, sts, il, pos, id, cap);
-            let handed = (il % 2) == 1 ? dkr-hz-submit() : 0;
+            let handed = ((il + 1) % dkr-every()) == 0 ? dkr-hz-submit() : 0;
             let noted = dkr-hz-get("observe") == 1 ? dkr-hz-put("stages", cons([il, r], dkr-hz-get("stages"))) : 0;
             let tapped = nothing?(r) ? "" : dth-tap("layer", il);
             (nothing?(r) || tapped != "") ? nothing() : dth-layers(ctx, sts, il + 1, n, id, pos, cap);
