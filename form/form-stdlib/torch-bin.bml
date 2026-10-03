@@ -1,0 +1,320 @@
+//////////////////////////////////////////////////////////////////////
+// torch-bin.bml — a PyTorch checkpoint read, natively: the tensor table of a
+// `pytorch_model.bin` so that each weight becomes a metal buffer mapped straight
+// off the file — no torch, no pickle module, no python, no copy.
+//
+// A torch .bin is a ZIP archive of STORED members (no inflate anywhere):
+//   <archive>/data.pkl      a Python pickle (protocol 2) of the state_dict
+//   <archive>/data/<key>    one raw tensor storage per key, 64-byte aligned
+//   <archive>/version, byteorder ...
+// The pickle is DATA, never code. This door runs a pickle MACHINE over it — a stack
+// and a memo and the twenty-five opcodes torch writes — and executes nothing: a GLOBAL
+// only becomes a tag (collections.OrderedDict, torch._utils._rebuild_tensor_v2, the
+// torch.*Storage classes), a REDUCE only builds a table row from those tags. An opcode
+// or a global it does not know is REFUSED, loudly, with the byte it stopped at. A
+// refusal is an answer of the shape ["refused", reason], never a stop in the middle
+// and never a plausible empty table; tb-tensors turns it into a form_error.
+//
+// The zip reading is ear-npz's own (en-u16, en-u32, en-ce-*, en-member-data): this is
+// its second reader, not a second zip. A row is
+//     (name dtype shape key offset bytes)
+// name the state_dict key; dtype F32 / F16 / BF16 / F64 / I64 / I32 / I16 / I8 / U8 /
+// BOOL; shape a list of ints; key the storage member's name under <archive>/data/;
+// offset the tensor's first byte IN THE FILE (storage data offset + storage_offset *
+// width) and bytes its extent. So a tensor is `metal_buf_from_file(path, offset, bytes)`
+// and fp32 stays fp32 (tb-map).
+//
+// What it will not read, it says: a deflated member, a zip64 archive, a tensor whose
+// strides are not the contiguous ones, a storage that is shorter than its tensor.
+//
+// THE T5 NAME TABLE (tb-t5-*). charsiu/g2p_multilingual_byT5_small_100 is a T5. The
+// config.json gives d_model, d_kv, heads, d_ff, layers, vocab and buckets; from those
+// alone tb-t5-expected writes the (name, shape) of every tensor a T5ForConditionalGeneration
+// must carry, and tb-t5-problems compares a checkpoint's table to it: [] means every name
+// is present with its config shape and nothing else is.
+import form/form-stdlib/core.fk;
+import form/form-stdlib/ear-npz.fk;
+import form/form-stdlib/json.fk;
+import form/form-stdlib/format-arith.fk;
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormTorchBin {
+        // ---- the shape of an answer ----
+        def tb-refuse(msg) = ["refused", msg];
+        def tb-done(v) = ["ok", v];
+        def tb-ok?(r) = (String) r[0] == "ok";
+        def tb-why(r) = r[1];
+
+        // ---- bytes as integers ----
+        def tb-le(s, i, n) = n <= 0 ? 0 : (str_byte_at(s, i) + (256 * tb-le(s, i + 1, n - 1)));
+        def tb-pow256(n) = n <= 0 ? 1 : (256 * tb-pow256(n - 1));
+        def tb-sle(s, i, n) {
+            let u = tb-le(s, i, n);
+            n <= 0 ? 0 : (str_byte_at(s, i + (n - 1)) >= 128 ? u - tb-pow256(n) : u);
+        }
+        def tb-product(xs) = nil?(xs) ? 1 : (xs[0] * tb-product(xs[1:]));
+
+        // ---- dtype by the storage class torch names ----
+        def tb-dt(cls) = (String) cls == "FloatStorage" ? ["F32", 4] : ((String) cls == "HalfStorage" ? ["F16", 2] : ((String) cls == "BFloat16Storage" ? ["BF16", 2] : ((String) cls == "DoubleStorage" ? ["F64", 8] : ((String) cls == "LongStorage" ? ["I64", 8] : ((String) cls == "IntStorage" ? ["I32", 4] : ((String) cls == "ShortStorage" ? ["I16", 2] : ((String) cls == "CharStorage" ? ["I8", 1] : ((String) cls == "ByteStorage" ? ["U8", 1] : ((String) cls == "BoolStorage" ? ["BOOL", 1] : [])))))))));
+        // the only three places a GLOBAL may point
+        def tb-global-ok?(m, n) = (String) m == "collections" ? ((String) n == "OrderedDict" ? 1 : 0) : ((String) m == "torch._utils" ? ((String) n == "_rebuild_tensor_v2" ? 1 : 0) : ((String) m == "torch" ? (len(tb-dt(n)) == 0 ? 0 : 1) : 0));
+
+        // ---- the machine's state: m = (stack marks memo memo-count), stack top first ----
+        // MARK parks the stack in `marks` and opens an empty one, so a frame is exactly what
+        // the pickle pushed since the mark.
+        def tb-st(m) = m[0];
+        def tb-mk(m) = m[1];
+        def tb-memo(m) = m[2];
+        def tb-mn(m) = m[3];
+        def tb-with-st(m, st) = [st, m[1], m[2], m[3]];
+        def tb-push(m, v) = [cons(v, m[0]), m[1], m[2], m[3]];
+        def tb-memo-get(memo, k) = nil?(memo) ? [] : (memo[0][0] == k ? memo[0][1] : tb-memo-get(memo[1:], k));
+        def tb-bad-at(i, what) = tb-refuse(what + " at byte " + i.str());
+
+        // the loop: one opcode per turn, tail-recursive
+        def tb-go(s, sn, i, m) = i >= sn ? tb-bad-at(i, "pickle ended without STOP") : tb-op(s, sn, i, m, str_byte_at(s, i));
+
+        // ---- the opcodes torch writes ----
+        def tb-op(s, sn, i, m, op) = op == 128 ? tb-o-proto(s, sn, i, m) : (op == 149 ? tb-o-frame(s, sn, i, m) : (op == 99 ? tb-o-global(s, sn, i, m) : (op == 147 ? tb-o-stackglobal(s, sn, i, m) : (op == 88 ? tb-o-binunicode(s, sn, i, m) : (op == 140 ? tb-o-shortunicode(s, sn, i, m) : (op == 75 ? tb-o-int(s, sn, i, m, 1, 0) : (op == 77 ? tb-o-int(s, sn, i, m, 2, 0) : (op == 74 ? tb-o-int(s, sn, i, m, 4, 1) : (op == 138 ? tb-o-long1(s, sn, i, m) : tb-op2(s, sn, i, m, op))))))))));
+        def tb-op2(s, sn, i, m, op) = op == 78 ? tb-go(s, sn, i + 1, tb-push(m, ["n"])) : (op == 136 ? tb-go(s, sn, i + 1, tb-push(m, ["b", 1])) : (op == 137 ? tb-go(s, sn, i + 1, tb-push(m, ["b", 0])) : (op == 40 ? tb-go(s, sn, i + 1, [[], cons(tb-st(m), tb-mk(m)), tb-memo(m), tb-mn(m)]) : (op == 41 ? tb-go(s, sn, i + 1, tb-push(m, ["T", []])) : (op == 116 ? tb-o-tuple(s, sn, i, m) : (op == 133 ? tb-o-tuplen(s, sn, i, m, 1) : (op == 134 ? tb-o-tuplen(s, sn, i, m, 2) : (op == 135 ? tb-o-tuplen(s, sn, i, m, 3) : tb-op3(s, sn, i, m, op)))))))));
+        def tb-op3(s, sn, i, m, op) = op == 125 ? tb-go(s, sn, i + 1, tb-push(m, ["d", []])) : (op == 117 ? tb-o-setitems(s, sn, i, m) : (op == 115 ? tb-o-setitem(s, sn, i, m) : (op == 82 ? tb-o-reduce(s, sn, i, m) : (op == 98 ? tb-o-build(s, sn, i, m) : (op == 81 ? tb-o-persid(s, sn, i, m) : (op == 113 ? tb-o-put(s, sn, i, m, 1) : (op == 114 ? tb-o-put(s, sn, i, m, 4) : (op == 148 ? tb-o-memoize(s, sn, i, m) : (op == 104 ? tb-o-get(s, sn, i, m, 1) : (op == 106 ? tb-o-get(s, sn, i, m, 4) : (op == 46 ? tb-o-stop(s, sn, i, m) : tb-bad-at(i, "unknown pickle opcode " + op.str() + " (" + byte_to_str(op) + ")"))))))))))));
+
+        def tb-o-proto(s, sn, i, m) = i + 2 > sn ? tb-bad-at(i, "PROTO cut short") : (str_byte_at(s, i + 1) < 2 ? tb-bad-at(i, "pickle protocol below 2") : (str_byte_at(s, i + 1) > 5 ? tb-bad-at(i, "pickle protocol above 5") : tb-go(s, sn, i + 2, m)));
+        def tb-o-frame(s, sn, i, m) = i + 9 > sn ? tb-bad-at(i, "FRAME cut short") : tb-go(s, sn, i + 9, m);
+
+        // GLOBAL: "module\nname\n"; STACK_GLOBAL takes them from the stack as two strings
+        def tb-o-global(s, sn, i, m) {
+            let e1 = str_find(s, "\n", i + 1);
+            let e2 = e1 < 0 ? 0 - 1 : str_find(s, "\n", e1 + 1);
+            e2 < 0 ? tb-bad-at(i, "GLOBAL without its two lines") : tb-take-global(s, sn, i, m, substring(s, i + 1, e1), substring(s, e1 + 1, e2), e2 + 1);
+        }
+        def tb-take-global(s, sn, i, m, mod, name, next) = tb-global-ok?(mod, name) == 1 ? tb-go(s, sn, next, tb-push(m, ["g", mod, name])) : tb-bad-at(i, "global " + mod + "." + name + " is not one this reader will name");
+        def tb-o-stackglobal(s, sn, i, m) = len(tb-st(m)) < 2 ? tb-bad-at(i, "STACK_GLOBAL needs two strings") : tb-stackglobal-of(s, sn, i, m, tb-st(m)[1], tb-st(m)[0]);
+        def tb-stackglobal-of(s, sn, i, m, a, b) = (String) a[0] == "u" ? ((String) b[0] == "u" ? tb-take-global-pop(s, sn, i, m, a[1], b[1]) : tb-bad-at(i, "STACK_GLOBAL name is not a string")) : tb-bad-at(i, "STACK_GLOBAL module is not a string");
+        def tb-take-global-pop(s, sn, i, m, mod, name) = tb-global-ok?(mod, name) == 1 ? tb-go(s, sn, i + 1, tb-push(tb-with-st(m, tb-st(m)[2:]), ["g", mod, name])) : tb-bad-at(i, "global " + mod + "." + name + " is not one this reader will name");
+
+        def tb-o-binunicode(s, sn, i, m) = i + 5 > sn ? tb-bad-at(i, "BINUNICODE cut short") : tb-take-unicode(s, sn, i, m, i + 5, tb-le(s, i + 1, 4));
+        def tb-o-shortunicode(s, sn, i, m) = i + 2 > sn ? tb-bad-at(i, "SHORT_BINUNICODE cut short") : tb-take-unicode(s, sn, i, m, i + 2, str_byte_at(s, i + 1));
+        def tb-take-unicode(s, sn, i, m, at, n) = at + n > sn ? tb-bad-at(i, "unicode runs past the pickle") : tb-go(s, sn, at + n, tb-push(m, ["u", substring(s, at, at + n)]));
+
+        // BININT1 / BININT2 / BININT (signed 4)
+        def tb-o-int(s, sn, i, m, w, signed) = i + 1 + w > sn ? tb-bad-at(i, "integer cut short") : tb-go(s, sn, i + 1 + w, tb-push(m, ["i", signed == 1 ? tb-sle(s, i + 1, w) : tb-le(s, i + 1, w)]));
+        def tb-o-long1(s, sn, i, m) = i + 2 > sn ? tb-bad-at(i, "LONG1 cut short") : tb-take-long1(s, sn, i, m, str_byte_at(s, i + 1));
+        def tb-take-long1(s, sn, i, m, n) = i + 2 + n > sn ? tb-bad-at(i, "LONG1 runs past the pickle") : tb-go(s, sn, i + 2 + n, tb-push(m, ["i", tb-sle(s, i + 2, n)]));
+
+        // TUPLE closes the frame the last MARK opened; TUPLE1..3 take from the top
+        def tb-o-tuple(s, sn, i, m) = nil?(tb-mk(m)) ? tb-bad-at(i, "TUPLE without a MARK") : tb-go(s, sn, i + 1, [cons(["T", reverse(tb-st(m))], tb-mk(m)[0]), tb-mk(m)[1:], tb-memo(m), tb-mn(m)]);
+        def tb-o-tuplen(s, sn, i, m, n) = len(tb-st(m)) < n ? tb-bad-at(i, "TUPLE" + n.str() + " needs " + n.str() + " items") : tb-go(s, sn, i + 1, tb-push(tb-with-st(m, tb-st(m)[n:]), ["T", reverse(tb-take-n(tb-st(m), n))]));
+        def tb-take-n(xs, n) = n <= 0 ? [] : cons(xs[0], tb-take-n(xs[1:], n - 1));
+
+        // dict / OrderedDict: pairs kept newest first
+        def tb-mapping?(v) = (String) v[0] == "d" ? 1 : ((String) v[0] == "od" ? 1 : 0);
+        def tb-add-pairs(items, acc) = nil?(items) ? acc : tb-add-pairs(items[2:], cons([items[0], items[1]], acc));
+        def tb-o-setitems(s, sn, i, m) = nil?(tb-mk(m)) ? tb-bad-at(i, "SETITEMS without a MARK") : tb-setitems-in(s, sn, i, m, reverse(tb-st(m)), tb-mk(m)[0]);
+        def tb-setitems-in(s, sn, i, m, items, outer) = nil?(outer) ? tb-bad-at(i, "SETITEMS without a dict") : (tb-mapping?(outer[0]) == 0 ? tb-bad-at(i, "SETITEMS onto a " + outer[0][0]) : (len(items) % 2 == 1 ? tb-bad-at(i, "SETITEMS with an odd item count") : tb-go(s, sn, i + 1, [cons([outer[0][0], tb-add-pairs(items, outer[0][1])], outer[1:]), tb-mk(m)[1:], tb-memo(m), tb-mn(m)])));
+        def tb-o-setitem(s, sn, i, m) = len(tb-st(m)) < 3 ? tb-bad-at(i, "SETITEM needs a dict, a key and a value") : (tb-mapping?(tb-st(m)[2]) == 0 ? tb-bad-at(i, "SETITEM onto a " + tb-st(m)[2][0]) : tb-go(s, sn, i + 1, tb-push(tb-with-st(m, tb-st(m)[3:]), [tb-st(m)[2][0], cons([tb-st(m)[1], tb-st(m)[0]], tb-st(m)[2][1])])));
+        // BUILD sets attributes (an OrderedDict's _metadata): the state is read and set aside
+        def tb-o-build(s, sn, i, m) = len(tb-st(m)) < 2 ? tb-bad-at(i, "BUILD needs an object and a state") : (tb-mapping?(tb-st(m)[1]) == 0 ? tb-bad-at(i, "BUILD onto a " + tb-st(m)[1][0]) : (tb-mapping?(tb-st(m)[0]) == 0 ? tb-bad-at(i, "BUILD with a " + tb-st(m)[0][0] + " state") : tb-go(s, sn, i + 1, tb-with-st(m, tb-st(m)[1:]))));
+
+        // REDUCE: a tag becomes a table entry, nothing runs
+        def tb-o-reduce(s, sn, i, m) = len(tb-st(m)) < 2 ? tb-bad-at(i, "REDUCE needs a callable and its arguments") : tb-reduce-of(s, sn, i, m, tb-st(m)[1], tb-st(m)[0], tb-st(m)[2:]);
+        def tb-reduce-of(s, sn, i, m, f, args, rest) = (String) f[0] != "g" ? tb-bad-at(i, "REDUCE of a " + f[0]) : ((String) args[0] != "T" ? tb-bad-at(i, "REDUCE arguments are a " + args[0]) : tb-reduce-global(s, sn, i, m, f[1], f[2], args[1], rest));
+        def tb-reduce-global(s, sn, i, m, mod, name, items, rest) = (String) name == "OrderedDict" ? (nil?(items) ? tb-go(s, sn, i + 1, [cons(["od", []], rest), tb-mk(m), tb-memo(m), tb-mn(m)]) : tb-bad-at(i, "OrderedDict() called with arguments")) : ((String) name == "_rebuild_tensor_v2" ? tb-rebuild(s, sn, i, m, items, rest) : tb-bad-at(i, "REDUCE of " + mod + "." + name));
+        def tb-ints-of(items) = nil?(items) ? [] : cons(items[0][1], tb-ints-of(items[1:]));
+        def tb-all-ints?(items) = nil?(items) ? 1 : ((String) items[0][0] == "i" ? tb-all-ints?(items[1:]) : 0);
+        // _rebuild_tensor_v2(storage, storage_offset, size, stride, requires_grad, backward_hooks[, metadata])
+        def tb-rebuild(s, sn, i, m, a, rest) = len(a) < 6 ? tb-bad-at(i, "_rebuild_tensor_v2 with fewer than six arguments") : (len(a) > 7 ? tb-bad-at(i, "_rebuild_tensor_v2 with more than seven arguments") : tb-rebuild-typed(s, sn, i, m, a, rest));
+        def tb-rebuild-typed(s, sn, i, m, a, rest) = (String) a[0][0] != "s" ? tb-bad-at(i, "tensor storage is a " + a[0][0]) : ((String) a[1][0] != "i" ? tb-bad-at(i, "storage_offset is a " + a[1][0]) : ((String) a[2][0] != "T" ? tb-bad-at(i, "size is a " + a[2][0]) : ((String) a[3][0] != "T" ? tb-bad-at(i, "stride is a " + a[3][0]) : tb-rebuild-ints(s, sn, i, m, a, rest))));
+        def tb-rebuild-ints(s, sn, i, m, a, rest) = tb-all-ints?(a[2][1]) == 0 ? tb-bad-at(i, "size holds a non-integer") : (tb-all-ints?(a[3][1]) == 0 ? tb-bad-at(i, "stride holds a non-integer") : tb-go(s, sn, i + 1, [cons(["t", a[0], a[1][1], tb-ints-of(a[2][1]), tb-ints-of(a[3][1])], rest), tb-mk(m), tb-memo(m), tb-mn(m)]));
+
+        // BINPERSID: ('storage', torch.FloatStorage, '<key>', 'cpu', numel) becomes a storage tag
+        def tb-o-persid(s, sn, i, m) = nil?(tb-st(m)) ? tb-bad-at(i, "BINPERSID needs a tuple") : tb-persid-of(s, sn, i, m, tb-st(m)[0], tb-st(m)[1:]);
+        def tb-persid-of(s, sn, i, m, p, rest) = (String) p[0] != "T" ? tb-bad-at(i, "persistent id is a " + p[0]) : (len(p[1]) != 5 ? tb-bad-at(i, "persistent id is not the five-part storage tuple") : tb-persid-parts(s, sn, i, m, p[1], rest));
+        def tb-persid-parts(s, sn, i, m, q, rest) = (String) q[0][0] != "u" ? tb-bad-at(i, "persistent id tag is a " + q[0][0]) : ((String) q[0][1] != "storage" ? tb-bad-at(i, "persistent id '" + q[0][1] + "' is not 'storage'") : ((String) q[1][0] != "g" ? tb-bad-at(i, "storage class is a " + q[1][0]) : ((String) q[2][0] != "u" ? tb-bad-at(i, "storage key is a " + q[2][0]) : ((String) q[3][0] != "u" ? tb-bad-at(i, "storage location is a " + q[3][0]) : ((String) q[4][0] != "i" ? tb-bad-at(i, "storage numel is a " + q[4][0]) : tb-persid-go(s, sn, i, m, q, rest))))));
+        // the location is where the tensor lived when it was saved ('cpu', or 'cuda:0' for a model trained on a GPU —
+        // charsiu's is); the bytes in the archive are the same raw storage either way, so it is read and not obeyed
+        def tb-persid-go(s, sn, i, m, q, rest) = len(q[3][1]) == 0 ? tb-bad-at(i, "storage location is empty") : (len(tb-dt(q[1][2])) == 0 ?tb-bad-at(i, "storage class " + q[1][2] + " has no dtype here") : tb-go(s, sn, i + 1, [cons(["s", tb-dt(q[1][2])[0], tb-dt(q[1][2])[1], q[2][1], q[4][1]], rest), tb-mk(m), tb-memo(m), tb-mn(m)]));
+
+        // the memo: BINPUT / LONG_BINPUT index it, MEMOIZE numbers it, BINGET / LONG_BINGET read it
+        def tb-o-put(s, sn, i, m, w) = nil?(tb-st(m)) ? tb-bad-at(i, "PUT with an empty stack") : (i + 1 + w > sn ? tb-bad-at(i, "PUT cut short") : tb-go(s, sn, i + 1 + w, [tb-st(m), tb-mk(m), cons([tb-le(s, i + 1, w), tb-st(m)[0]], tb-memo(m)), tb-mn(m)]));
+        def tb-o-memoize(s, sn, i, m) = nil?(tb-st(m)) ? tb-bad-at(i, "MEMOIZE with an empty stack") : tb-go(s, sn, i + 1, [tb-st(m), tb-mk(m), cons([tb-mn(m), tb-st(m)[0]], tb-memo(m)), tb-mn(m) + 1]);
+        def tb-o-get(s, sn, i, m, w) = i + 1 + w > sn ? tb-bad-at(i, "GET cut short") : tb-get-of(s, sn, i, m, w, tb-memo-get(tb-memo(m), tb-le(s, i + 1, w)));
+        def tb-get-of(s, sn, i, m, w, v) = nil?(v) ? tb-bad-at(i, "GET of a memo slot never put") : tb-go(s, sn, i + 1 + w, tb-push(m, v));
+        def tb-o-stop(s, sn, i, m) = nil?(tb-st(m)) ? tb-bad-at(i, "STOP with an empty stack") : tb-done(tb-st(m)[0]);
+
+        // the pickle bytes -> ["ok", value] | ["refused", reason]
+        def tb-pickle(s) = tb-go(s, len(s), 0, [[], [], [], 0]);
+
+        // ---- the zip: ear-npz's central directory reader, row by row ----
+        // a member: (name method size data-offset); method 0 is stored
+        def tb-sig() = byte_to_str(80) + (byte_to_str(75) + (byte_to_str(5) + byte_to_str(6)));
+        def tb-eocd-scan-go(t, from, last) {
+            let at = str_find(t, tb-sig(), from);
+            at < 0 ? last : tb-eocd-scan-go(t, at + 1, at);
+        }
+        def tb-eocd-in(t) {
+            let at = tb-eocd-scan-go(t, 0, 0 - 1);
+            at < 0 ? "" : (at + 22 > len(t) ? "" : substring(t, at, at + 22));
+        }
+        // the record is the last 22 bytes unless the archive carries a comment; then it is the last signature in the tail
+        def tb-eocd(path) {
+            let e = en-eocd(path);
+            let size = file_size(path);
+            let want = size < 70000 ? size : 70000;
+            en-zip?(e) == 1 ? e : tb-eocd-in(en-slice(path, size - want, want));
+        }
+        def tb-members-go(path, cd, e, n, acc) = n <= 0 ? reverse(acc) : tb-members-go(path, cd, en-ce-next(cd, e), n - 1, cons([en-ce-name(cd, e), en-ce-method(cd, e), en-ce-csize(cd, e), en-member-data(path, en-ce-lho(cd, e))], acc));
+        // the members of the archive, or nothing when the file is not a zip
+        def tb-members(path) {
+            let e = tb-eocd(path);
+            (String) e == "" ? nothing() : tb-members-of(path, e);
+        }
+        def tb-members-of(path, e) = en-cd-count(e) == 65535 ? nothing() : (en-cd-off(e) == 4294967295 ? nothing() : tb-members-go(path, en-slice(path, en-cd-off(e), en-cd-size(e)), 0, en-cd-count(e), []));
+        def tb-m-name(r) = r[0];
+        def tb-m-method(r) = r[1];
+        def tb-m-size(r) = r[2];
+        def tb-m-data(r) = r[3];
+        def tb-m-find(ms, name) = nil?(ms) ? [] : ((String) ms[0][0] == name ? ms[0] : tb-m-find(ms[1:], name));
+        def tb-m-pkl(ms) = nil?(ms) ? [] : (tb-ends?(ms[0][0], "data.pkl") == 1 ? ms[0] : tb-m-pkl(ms[1:]));
+        def tb-ends?(s, tail) = len(s) < len(tail) ? 0 : ((String) substring(s, len(s) - len(tail), len(s)) == tail ? 1 : 0);
+        // how many members are not stored (a torch checkpoint should answer 0)
+        def tb-deflated(ms) = nil?(ms) ? 0 : (tb-m-method(ms[0]) == 0 ? 0 : 1) + tb-deflated(ms[1:]);
+
+        // ---- the table ----
+        // expected strides of a contiguous tensor; a dimension of 1 may carry any stride
+        def tb-exp-strides(shape) = nil?(shape) ? [] : cons(tb-product(shape[1:]), tb-exp-strides(shape[1:]));
+        def tb-strides-ok?(shape, exp, got) = nil?(shape) ? 1 : (shape[0] == 1 ? tb-strides-ok?(shape[1:], exp[1:], got[1:]) : (exp[0] == got[0] ? tb-strides-ok?(shape[1:], exp[1:], got[1:]) : 0));
+        // the first reason a pair cannot become a row, or "" when it can
+        def tb-fault(prefix, ms, k, t) = (String) k[0] != "u" ? "a state_dict key is a " + k[0] : ((String) t[0] != "t" ? "'" + k[1] + "' is a " + t[0] + ", not a tensor" : tb-fault-store(prefix, k[1], t, tb-m-find(ms, prefix + "data/" + t[1][3])));
+        def tb-fault-store(prefix, name, t, mem) = nil?(mem) ? "'" + name + "' names storage " + prefix + "data/" + t[1][3] + " which the archive does not hold" : (tb-m-method(mem) != 0 ? "storage " + tb-m-name(mem) + " is deflated (method " + tb-m-method(mem).str() + "): the stored-range reader refuses it" : tb-fault-extent(name, t, mem));
+        def tb-fault-extent(name, t, mem) = len(t[3]) != len(t[4]) ? "'" + name + "' has " + len(t[3]).str() + " dims and " + len(t[4]).str() + " strides" : (tb-strides-ok?(t[3], tb-exp-strides(t[3]), t[4]) == 0 ? "'" + name + "' is not contiguous" : (t[2] < 0 ? "'" + name + "' has a negative storage offset" : ((t[2] + tb-product(t[3])) * t[1][2] > tb-m-size(mem) ? "'" + name + "' runs past its storage" : "")));
+        def tb-fault-all(prefix, ms, pairs) = nil?(pairs) ? "" : tb-fault-then(prefix, ms, pairs, tb-fault(prefix, ms, pairs[0][0], pairs[0][1]));
+        def tb-fault-then(prefix, ms, pairs, f) = (String) f == "" ? tb-fault-all(prefix, ms, pairs[1:]) : f;
+        def tb-row(prefix, ms, k, t) {
+            let mem = tb-m-find(ms, prefix + "data/" + t[1][3]);
+            [k[1], t[1][1], t[3], t[1][3], tb-m-data(mem) + (t[2] * t[1][2]), tb-product(t[3]) * t[1][2]];
+        }
+        def tb-rows-go(prefix, ms, pairs, acc) = nil?(pairs) ? reverse(acc) : tb-rows-go(prefix, ms, pairs[1:], cons(tb-row(prefix, ms, pairs[0][0], pairs[0][1]), acc));
+
+        // the archive -> ["ok", rows] | ["refused", reason]
+        def tb-load(path) {
+            let ms = tb-members(path);
+            nothing?(ms) ? tb-refuse("not a zip archive this reader can walk (no end record, or zip64): " + path) : tb-load-members(path, ms);
+        }
+        def tb-load-members(path, ms) {
+            let pk = tb-m-pkl(ms);
+            nil?(pk) ? tb-refuse("the archive holds no data.pkl: this is not a torch checkpoint") : tb-load-pickle(path, ms, pk);
+        }
+        def tb-load-pickle(path, ms, pk) {
+            let name = tb-m-name(pk);
+            tb-m-method(pk) != 0 ? tb-refuse("data.pkl is deflated (method " + tb-m-method(pk).str() + "): the stored-range reader refuses it") : tb-load-read(path, ms, substring(name, 0, len(name) - 8), read_file_slice(path, tb-m-data(pk), tb-m-size(pk)));
+        }
+        def tb-load-read(path, ms, prefix, bytes) {
+            let r = nothing?(bytes) ? tb-refuse("data.pkl bytes did not arrive") : tb-pickle(bytes);
+            tb-ok?(r) ? tb-load-root(prefix, ms, tb-why(r)) : r;
+        }
+        def tb-load-root(prefix, ms, root) = tb-mapping?(root) == 0 ? tb-refuse("the pickle's root is a " + root[0] + ", not a state_dict") : tb-load-pairs(prefix, ms, reverse(root[1]));
+        def tb-load-pairs(prefix, ms, pairs) {
+            let f = tb-fault-all(prefix, ms, pairs);
+            (String) f == "" ? tb-done(tb-rows-go(prefix, ms, pairs, [])) : tb-refuse(f);
+        }
+
+        // the table of a checkpoint; a refusal is a form_error with the reason
+        def tb-tensors(path) {
+            let r = tb-load(path);
+            tb-ok?(r) ? tb-why(r) : form_error("torch-bin refused: " + tb-why(r));
+        }
+        def tb-name(r) = r[0];
+        def tb-dtype(r) = r[1];
+        def tb-shape(r) = r[2];
+        def tb-key(r) = r[3];
+        def tb-off(r) = r[4];
+        def tb-bytes(r) = r[5];
+        def tb-numel(r) = tb-product(r[2]);
+        def tb-find(rows, name) = nil?(rows) ? [] : ((String) rows[0][0] == name ? rows[0] : tb-find(rows[1:], name));
+        def tb-params(rows) = nil?(rows) ? 0 : tb-numel(rows[0]) + tb-params(rows[1:]);
+        // the same parameters with each shared storage view counted once (tied embeddings name one storage three times)
+        def tb-seen?(rows, r) = nil?(rows) ? 0 : (((String) tb-key(rows[0]) == tb-key(r)) && (tb-off(rows[0]) == tb-off(r)) ? 1 : tb-seen?(rows[1:], r));
+        def tb-params-unique-go(rows, seen) = nil?(rows) ? 0 : (tb-seen?(seen, rows[0]) == 1 ? 0 : tb-numel(rows[0])) + tb-params-unique-go(rows[1:], cons(rows[0], seen));
+        def tb-params-unique(rows) = tb-params-unique-go(rows, []);
+        def tb-total-bytes(rows) = nil?(rows) ? 0 : tb-bytes(rows[0]) + tb-total-bytes(rows[1:]);
+
+        // ---- the tensor, mapped off the file: [handle, shape, dtype] (the safetensors index's own shape) ----
+        def tb-buf(path, row) = metal_buf_from_file(path, tb-off(row), tb-bytes(row));
+        def tb-map(path, rows, name) = tb-map-row(path, tb-find(rows, name), name);
+        def tb-map-row(path, row, name) = nil?(row) ? form_error("torch-bin tensor absent: " + name) : tb-map-held(tb-buf(path, row), row);
+        def tb-map-held(handle, row) = handle <= 0 ? form_error("torch-bin mapping refused: " + tb-name(row)) : [handle, tb-shape(row), tb-dtype(row)];
+        // the same, for a pass that wants floats and nothing else
+        def tb-map-f32(path, rows, name) = tb-map-f32-row(path, tb-find(rows, name), name);
+        def tb-map-f32-row(path, row, name) = nil?(row) ? form_error("torch-bin tensor absent: " + name) : ((String) tb-dtype(row) != "F32" ? form_error("torch-bin tensor " + name + " is " + tb-dtype(row) + ", not F32") : tb-map(path, [row], name));
+
+        // ---- one float, for looking (the pass reads whole tensors on the GPU) ----
+        def tb-f32-of(w) {
+            let e = (w / 8388608) % 256;
+            let m = w % 8388608;
+            let v = e == 0 ? (m * 1.0) * fq-pow2(0 - 149) : (1.0 + (m / 8388608.0)) * fq-pow2(e - 127);
+            w >= 2147483648 ? 0.0 - v : v;
+        }
+        def tb-f32-at(path, row, k) = tb-f32-of(tb-le(read_file_slice(path, tb-off(row) + (4 * k), 4), 0, 4));
+        def tb-f32-words(path, row, k, n) = n <= 0 ? [] : cons(tb-le(read_file_slice(path, tb-off(row) + (4 * k), 4), 0, 4), tb-f32-words(path, row, k + 1, n - 1));
+
+        // ---- the T5 name table ----
+        // cfg = (d_model d_kv heads d_ff encoder-layers decoder-layers vocab buckets)
+        def tb-cfg-int(obj, key) = node_value(json-object-get(obj, key));
+        def tb-t5-config(path) {
+            let obj = parse-json(path, read_file(path));
+            [tb-cfg-int(obj, "d_model"), tb-cfg-int(obj, "d_kv"), tb-cfg-int(obj, "num_heads"), tb-cfg-int(obj, "d_ff"), tb-cfg-int(obj, "num_layers"), tb-cfg-int(obj, "num_decoder_layers"), tb-cfg-int(obj, "vocab_size"), tb-cfg-int(obj, "relative_attention_num_buckets")];
+        }
+        def tb-cd(c) = c[0];
+        def tb-cinner(c) = c[1] * c[2];
+        def tb-cheads(c) = c[2];
+        def tb-cff(c) = c[3];
+        def tb-cenc(c) = c[4];
+        def tb-cdec(c) = c[5];
+        def tb-cvocab(c) = c[6];
+        def tb-cbuckets(c) = c[7];
+        def tb-ent(name, shape) = [name, shape];
+        // an attention: q k v project d -> inner, o back; block 0 also owns the relative bias
+        def tb-t5-attn(c, pre, bias) = bias == 1 ? [tb-ent(pre + ".q.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".k.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".v.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".o.weight", [tb-cd(c), tb-cinner(c)]), tb-ent(pre + ".relative_attention_bias.weight", [tb-cbuckets(c), tb-cheads(c)])] : [tb-ent(pre + ".q.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".k.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".v.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".o.weight", [tb-cd(c), tb-cinner(c)])];
+        def tb-t5-ffn(c, pre) = [tb-ent(pre + ".wi_0.weight", [tb-cff(c), tb-cd(c)]), tb-ent(pre + ".wi_1.weight", [tb-cff(c), tb-cd(c)]), tb-ent(pre + ".wo.weight", [tb-cd(c), tb-cff(c)])];
+        def tb-t5-norm(c, pre) = [tb-ent(pre + ".layer_norm.weight", [tb-cd(c)])];
+        def tb-t5-enc-block(c, n) {
+            let p = "encoder.block." + n.str();
+            tb-cat4(tb-t5-attn(c, p + ".layer.0.SelfAttention", n == 0 ? 1 : 0), tb-t5-norm(c, p + ".layer.0"), tb-t5-ffn(c, p + ".layer.1.DenseReluDense"), tb-t5-norm(c, p + ".layer.1"));
+        }
+        def tb-t5-dec-block(c, n) {
+            let p = "decoder.block." + n.str();
+            tb-cat6(tb-t5-attn(c, p + ".layer.0.SelfAttention", n == 0 ? 1 : 0), tb-t5-norm(c, p + ".layer.0"), tb-t5-attn(c, p + ".layer.1.EncDecAttention", 0), tb-t5-norm(c, p + ".layer.1"), tb-t5-ffn(c, p + ".layer.2.DenseReluDense"), tb-t5-norm(c, p + ".layer.2"));
+        }
+        def tb-cat(a, b) = nil?(a) ? b : cons(a[0], tb-cat(a[1:], b));
+        def tb-cat4(a, b, c, d) = tb-cat(a, tb-cat(b, tb-cat(c, d)));
+        def tb-cat6(a, b, c, d, e, f) = tb-cat(a, tb-cat(b, tb-cat(c, tb-cat(d, tb-cat(e, f)))));
+        def tb-t5-enc-all(c, n) = n >= tb-cenc(c) ? [] : tb-cat(tb-t5-enc-block(c, n), tb-t5-enc-all(c, n + 1));
+        def tb-t5-dec-all(c, n) = n >= tb-cdec(c) ? [] : tb-cat(tb-t5-dec-block(c, n), tb-t5-dec-all(c, n + 1));
+        // every (name shape) a T5ForConditionalGeneration with this config must carry
+        def tb-t5-expected(c) = tb-cat6([tb-ent("shared.weight", [tb-cvocab(c), tb-cd(c)])], tb-t5-enc-all(c, 0), [tb-ent("encoder.final_layer_norm.weight", [tb-cd(c)])], tb-t5-dec-all(c, 0), [tb-ent("decoder.final_layer_norm.weight", [tb-cd(c)])], [tb-ent("lm_head.weight", [tb-cvocab(c), tb-cd(c)])]);
+        // the two tied embedding views a state_dict may also carry
+        def tb-t5-optional(c) = [tb-ent("encoder.embed_tokens.weight", [tb-cvocab(c), tb-cd(c)]), tb-ent("decoder.embed_tokens.weight", [tb-cvocab(c), tb-cd(c)])];
+        def tb-shape-text(xs) = en-shape-text(xs);
+        def tb-same?(a, b) = len(a) != len(b) ? 0 : (nil?(a) ? 1 : (a[0] == b[0] ? tb-same?(a[1:], b[1:]) : 0));
+        def tb-t5-check-one(rows, e) {
+            let r = tb-find(rows, e[0]);
+            nil?(r) ? ["missing " + e[0]] : (tb-same?(tb-shape(r), e[1]) == 1 ?((String) tb-dtype(r) == "F32" ? [] : [e[0] + " is " + tb-dtype(r) + ", not F32"]) : [e[0] + " is " + tb-shape-text(tb-shape(r)) + ", config says " + tb-shape-text(e[1])]);
+        }
+        def tb-t5-check-all(rows, es) = nil?(es) ? [] : tb-cat(tb-t5-check-one(rows, es[0]), tb-t5-check-all(rows, es[1:]));
+        def tb-t5-known?(es, name) = nil?(es) ? 0 : ((String) es[0][0] == name ? 1 : tb-t5-known?(es[1:], name));
+        def tb-ent-find(es, name) = nil?(es) ? [] : ((String) es[0][0] == name ? es[0] : tb-ent-find(es[1:], name));
+        // a row the expected table does not hold: one of the two tied embedding views (shape-checked) or unexpected
+        def tb-t5-extra-one(r, es, opt) = tb-t5-known?(es, tb-name(r)) == 1 ? [] : (tb-t5-known?(opt, tb-name(r)) == 1 ? tb-t5-check-one([r], tb-ent-find(opt, tb-name(r))) : ["unexpected " + tb-name(r)]);
+        def tb-t5-extras(rows, es, opt) = nil?(rows) ? [] : tb-cat(tb-t5-extra-one(rows[0], es, opt), tb-t5-extras(rows[1:], es, opt));
+        // [] when the checkpoint is exactly the T5 the config describes; otherwise one line per disagreement
+        def tb-t5-problems(rows, c) = tb-cat(tb-t5-check-all(rows, tb-t5-expected(c)), tb-t5-extras(rows, tb-t5-expected(c), tb-t5-optional(c)));
+        // the parameters the config's T5 carries, counted from its own expected table
+        def tb-t5-params(c) = tb-t5-params-go(tb-t5-expected(c));
+        def tb-t5-params-go(es) = nil?(es) ? 0 : tb-product(es[0][1]) + tb-t5-params-go(es[1:]);
+
+        // ---- the table, as text for a door ----
+        def tb-row-text(r) = tb-name(r) + "  " + tb-dtype(r) + "  " + tb-shape-text(tb-shape(r)) + "  key=" + tb-key(r) + "  @" + tb-off(r).str() + "  +" + tb-bytes(r).str();
+    }
+    0;
+}
