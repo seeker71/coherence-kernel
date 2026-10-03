@@ -5,37 +5,42 @@
 // (the one ds4 recorded its references on) through the driver ONCE, ALONE, staged so the machine is read at each step and the run stops the moment a reading says it must.
 //
 // WHY STAGED. A model door piled on a model door restarted this Mac three times on 2026-10-02. The driver maps 1,202 tensors of an 80 GiB file and the GPU wires only what it touches, so
-// the window walks the residency in steps and reads host_vm_stat after each: compile, map, state, wirespan probe, token 1 layer by layer, the head, the recorded-logits prompt, the recorded stream
+// the window walks the residency in steps and reads host_vm_stat after each: compile, map, state, wirespan probe, the head and its argmax, the recorded-logits prompt, the recorded stream
 // (twice, for bit equality). Each stage is preceded by the governor's ask for the stage's estimate (mg-ask) and followed by metal_sync, mg-low? and the wired reading.
+// THE LAYERS ARE NOT STAGED HERE. A sync and a machine reading after each layer is a PROBE protocol (window 2 ran it over 16 layers and ended on a denial), not the token path: the token path is MEASURED AS IT RUNS by
+// observe/dsv4-token-run.bml (form-stdlib/bml/dsv4-token-run.bml), one row of the landed op ledger a token and the wired memory read after every layer of the first tokens without a sync. This door keeps what only a staged
+// window can say: that the kernels compile, what the map and the state wire, what one expert slice wires, that the head and the argmax answer, and (once the token door's curve is clean) the recorded references.
 //
 // THE ABORT RULES (dvr-abort-reason, dvr-ask-reason), in this order, and the first that holds ends the run:
-//   a denied ask       the governor will not grant the stage's estimate (reason named)
+//   a denied ask       the governor will not grant the stage's estimate (reason named, the reading that denied whole in the receipt's denied row). A denial for reserve or compressor is WAITED OUT first
+//                      (see "a denied ask is a reading" below); wired-cap and an unreadable machine end the run at once
 //   host-memory-low    mg-low?: available under half the reserve, wired over 80 percent, or the compressor over 40 percent
 //   wired-above-lease  wired grew past the lease the window holds (shared + private bytes, dls-shared of the header + the KV margin) since the baseline
-//   stage-delta        a stage's wired growth, less the movement the machine makes by itself (dvr-ambient, read before the window), is over twice its estimate (a floor of 64 MiB, so a small estimate is not a hair trigger)
 //   budget             20 minutes of the 30 the window is given have passed
 //   stage-refused      the driver answered nothing for the stage (a block it does not support, a refused open)
-//   wirespan           the one-expert probe grew wired memory by half the expert STACK or more (read by the probe's own limit, below): the working-set estimate (a slice, not a stack) is wrong, and the lease with it
+// A stage's wired growth against its price is READ and printed (and the organs of ours that moved are named beside it), never an abort of its own: the machine's wired count is every process's, and a rule that
+// judged a growth of 198 MB against a price of 18 MB ended window 1 on a movement our own resident organs make. The rule that guards is the lease: wired above what the window holds, past the baseline.
+// The wirespan probe's kind (slice, between or stack) is RECORDED, not an abort: window 2 showed whole stacks wire and return, and a 'stack' reading is that price observed.
 // On an abort: metal_sync, free every handle (dsv4-close in synced rounds), mg-release, a receipt row with status aborted and the reason, the exit says aborted. Nothing is retried.
 //
 // REFUSED BEFORE ANYTHING OPENS: another model door resident (the same process rows flp-gpu-holders reads, plus a ds4 process and another copy of this door), a lease another process holds, the
 // governor holding the window's lease, the recorded logits file not the one pinned (SHA-256), the file not a deepseek4 GGUF whose layout is consistent.
 //
-// THE ESTIMATES ARE DERIVED FROM THE HEADER, NOT MEASURED (the window is what measures them): a layer's token-1 step touches that layer's dense tensors and six experts' slices; the map and
-// compile stages are bounds (512 MiB); the wirespan probe expects one expert slice (2,162,688 B on the IQ2XXS file's layer 0 gate stack of 553,648,128 B).
+// THE ESTIMATES ARE DERIVED FROM THE HEADER, NOT MEASURED (the window is what measures them): a layer is priced on every tensor its dispatches can touch (dense and the three whole expert stacks, token_embd for layer 0:
+// window 2 wired them and gave them back; dvr-est-layer, the token door's expected curve); the map and compile stages are bounds (512 MiB); the wirespan probe expects one expert slice (2,162,688 B on the IQ2XXS
+// file's layer 0 gate stack of 553,648,128 B).
 //
 // THE WINDOW IS NEVER THE DEFAULT: empty stdin, {} and {"dry":1} print the plan; only {"go":1} runs it. And with a gap below present, {"go":1} still maps nothing: it writes a receipt row naming the gaps
 // (status refused, reason driver-gaps), gives back any lease this process holds, and stops. A stop inside a stage reads as an abort (try/catch), so the handles, the lease and the receipt always follow.
-// THE WIRESPAN PROBE is judged by its own limit (twice the stack, dvr-wirespan-limit), not by twice the slice: half a stack (277 MB on the IQ2XXS file) is over the slice's 128 MiB floor, and the
-// generic delta rule would have ended the run as stage-delta before the probe could say 'stack'.
-// THE MACHINE MOVES BY ITSELF. host_vm_stat's wired count is every process's. The first window (2026-10-03 06:47 WITA) ended at the state stage on wired +198,148,096 B against a price of 18,270,208 B that is exact
-// (the device's own ledger reads it within a page: native/metal/tests/dsv4-open-band.bml): on this Mac a sibling process moves wired memory by 306 to 328 MB every second or so, up and down (7 steps over 16 MiB in 900
-// readings 10 ms apart, 2026-10-03 06:55 WITA). So the door reads that movement before the window (dvr-ambient: the spread of 120 readings 25 ms apart, 3 s, which holds more than one up step and one down step)
-// and judges each stage by its wired growth LESS that movement (dvr-own-delta: what the window itself wired, at least), the wirespan probe's kind the same way (dvr-wirespan-kind-noisy: 'stack' only when the delta
-// less the movement is half the stack, 'slice' only when the delta plus the movement is still a slice, 'between' when the machine's own motion hides which), and every stage row carries the device's own bytes
-// (metal_live word 18, which no other process moves) beside the wired reading, so the next reading tells the window's allocation from the machine's. The receipt names the movement (wired_noise) and each stage's own_delta.
-// The movement is bursty (19.8 MB over one 3 s reading, 331.9 MB over the next), so a stage-delta is met with a second 3 s reading before the run ends (dvr-reread): the larger of the two readings is the one taken from
-// the delta. The guard is not widened by a guess: with no movement the rule is the rule it was, and a growth past twice the estimate plus the movement still ends the run.
+// THE ORGANS OF OURS ARE NAMED, NOT SUBTRACTED. host_vm_stat's wired count is every process's, and nothing on this machine is 'other': every process is ours (the lead, its siblings, our live organs: the fkwu
+// processes, a ds4), so a movement of memory is one of ours, to be found and healed, not a number to take off. (The first window, 2026-10-03 06:47 WITA, ended at the state stage on wired +198,148,096 B against
+// an exact price of 18,270,208 B: wired memory moves by hundreds of MB on this Mac by itself, and the movement is one of ours to name.) The door reads the process list through the body's door
+// (host_processes: pid, resident bytes, cpu, age, nice, parent) before the window and at every stage, NAMES the organs of ours that are resident (pid, command, resident bytes: dvr-organs, dvr-organs-line) and
+// the ones whose resident bytes moved during the stage (dvr-organs-moved, the receipt's `moved` row). Every stage row also carries the device's own bytes (metal_live word 18, which no other process moves)
+// beside the wired reading, and the machine's paging counters since the window began.
+// A DENIED ASK IS A READING, NOT ONLY A VERDICT. Window 2 (2026-10-03 07:30 WITA) ended at layer 16 on ask-denied:compressor and threw away the numbers that denied; 13 s later the compressor read 6.3 GiB against a
+// cap of 32. The receipt carries the reading that denied (dvr-denied-json), and a denial for a TRANSIENT reason (reserve, compressor: the machine is busy, not full) backs off with the governor's own naps
+// (mg-nap-first doubling to mg-nap-most), printing each reading, for at most dvr-ask-wait-ms (5 minutes) and never past the window's 20; wired-cap and an unreadable machine are not waited for.
 // The stream stage's estimate is the expert cache (every new expert the 24 ids meet grows wired memory), and a logits leg whose prompt ids hold nowhere (none supplied, the pinned row missing or failing its check) is a named 'waits' row in the log and no run.
 //
 // WHAT THE DRIVER CANNOT RUN YET (dvr-gaps = dsv4-layout.fk dvl-driver-gaps, read from the header, printed by the dry plan): every tensor of the header whose type its role has no kernel for, from the layout's one
@@ -70,8 +75,7 @@ section [form.bml] {
   def dvr-mib() = 1048576;
   def dvr-floor() = 64 * 1048576;
   def dvr-bound() = 512 * 1048576;
-  def dvr-ambient-samples() = 120;
-  def dvr-ambient-nap-ms() = 25;
+  def dvr-organs-shown() = 6;
   def dvr-default-cap() = 64;
   def dvr-token-1() = 671;
 
@@ -106,42 +110,121 @@ section [form.bml] {
    mg-granted?(v) ? "" : "ask-denied:" ++ v[1];
   }
   // after a stage: the first rule that holds, in the documented order; vm the reading after the stage, base the wired bytes at the baseline,
-  // lease the shared + private bytes the window holds, est the stage's estimate, delta its wired growth, elapsed the window's age
-  def dvr-abort-reason(vm, base, lease, est, delta, elapsed) =
-   !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : (mg-wired(vm) - base) > lease ? "wired-above-lease" : delta > 2 * (est > dvr-floor() ? est : dvr-floor()) ? "stage-delta" : elapsed > dvr-abort-ms() ? "budget" : "";
-  // the machine's own movement: the spread (largest minus smallest) of wired readings; nothing and one reading read 0
-  def dvr-spread-go(ws, lo, hi) = len(ws) == 0 ? hi - lo : dvr-spread-go(ws[1:], ws[0] < lo ? ws[0] : lo, ws[0] > hi ? ws[0] : hi);
-  def dvr-spread(ws) = len(ws) == 0 ? 0 : dvr-spread-go(ws[1:], ws[0], ws[0]);
-  // read live: the spread of dvr-ambient-samples readings dvr-ambient-nap-ms apart (3 s); an unreadable machine reads 0 and the memory-unreadable rule is the one that speaks
-  def dvr-ambient-read(n, lo, hi, nap, vm) = !mg-vm-ok?(vm) ? dvr-ambient-go(n - 1, lo, hi) : dvr-ambient-go(n - 1, mg-wired(vm) < lo ? mg-wired(vm) : lo, mg-wired(vm) > hi ? mg-wired(vm) : hi);
-  def dvr-ambient-go(n, lo, hi) = n == 0 ? hi - lo : dvr-ambient-read(n, lo, hi, host_sleep_ms(dvr-ambient-nap-ms()), mg-sense());
-  def dvr-ambient() {
-   let vm = mg-sense();
-   mg-vm-ok?(vm) ? dvr-ambient-go(dvr-ambient-samples(), mg-wired(vm), mg-wired(vm)) : 0;
-  }
-  // what a stage's wired growth says about the window itself: the growth less the machine's own movement, never below 0 (an up step of the machine reads as nothing; a growth past it is the window's, at least)
-  def dvr-own-delta(delta, noise) = delta > noise ? delta - noise : 0;
+  // lease the shared + private bytes the window holds, elapsed the window's age. A stage's growth against its price is read, not judged (see the header).
+  def dvr-abort-reason(vm, base, lease, elapsed) =
+   !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : (mg-wired(vm) - base) > lease ? "wired-above-lease" : elapsed > dvr-abort-ms() ? "budget" : "";
   // the device's own bytes for this process (metal_live word 18, currentAllocatedSize), 0 while Metal is not up
   def dvr-own() = len(metal_live()) > 18 ? metal_live()[18] : 0;
   // the wirespan probe: the delta against the slice and the stack it was read from: "slice" (the working-set estimate holds), "stack" (it does not), "between"
   def dvr-wirespan-kind(delta, slice, stack) = delta >= stack / 2 ? "stack" : delta <= slice * 2 + dvr-floor() ? "slice" : "between";
-  // the same with the machine's own movement: 'stack' only when the delta less the movement reaches half the stack, 'slice' only when the delta plus the movement is still within a slice (no movement: the kind above)
-  def dvr-wirespan-kind-noisy(delta, noise, slice, stack) = (delta - noise) >= stack / 2 ? "stack" : (delta + noise) <= slice * 2 + dvr-floor() ? "slice" : "between";
-  // The probe's stage is asked for the slice but JUDGED against the stack: a delta of half the stack (277 MB on the IQ2XXS file) is over twice the slice's estimate, so the generic delta rule
-  // would end the run as stage-delta before the probe could name what it found. The probe's own limit is twice the stack; dvr-judge-wirespan reads the kind and ends the run on 'stack'.
-  def dvr-wirespan-limit(m) = dvr-stack(m);
+
+  // ---- a denied ask is a reading, not only a verdict; a transient denial is waited out ---------------------------------------------------------
+  // The receipt carries the reading that denied (dvr-denied-json: reason, available, wired, compressor, the cap, the pages the compressor STORES, the need, the time waited), and every stage line carries the machine's
+  // reading and the paging counters since the window began. An ask denied for a TRANSIENT reason (reserve, compressor: the machine is busy, not full) backs off with the governor's own naps (mg-nap-first doubling to
+  // mg-nap-most), printing each reading, for at most dvr-ask-wait-ms (5 min) and never past the window's own 20 minutes; wired-cap and memory-unreadable are not waited for, nor is a stage the driver refuses. While it waits
+  // the window is idle: nothing is enqueued, the mapped weights are file-backed pages the system may evict, the scratch and state buffers are live (what the lease's private bytes cover), and the lease taken at the start
+  // stays as it was (a wait asks, it does not lease). Only a denial that outlasts the wait ends the run, with the full record.
+  def dvr-ask-wait-ms() = 300000;
+  def dvr-transient?(why) = why == "reserve" || why == "compressor";
+  // when an ask's wait ends: its own 5 minutes, or the window's abort time, whichever is first
+  def dvr-wait-until(now, t0) = (now + dvr-ask-wait-ms()) < (t0 + dvr-abort-ms()) ? now + dvr-ask-wait-ms() : t0 + dvr-abort-ms();
+  def dvr-nap-next(nap) = (nap * 2) > mg-nap-most() ? mg-nap-most() : nap * 2;
+  def dvr-comp-of(vm) = mg-vm-ok?(vm) ? mg-compressor(vm) : 0;
+  // one reading of an ask, as a line
+  def dvr-ask-line(est, v, vm, waited, n) = "[dsv4-validate] ask " ++ n.str() ++ " for " ++ dvr-gib(est) ++ " (" ++ est.str() ++ " B): " ++ (mg-granted?(v) ? "room" : v[1]) ++ "; available " ++ dvr-gib(v[2]) ++ ", wired " ++ dvr-gib(v[3]) ++ ", compressor occupied "
+   ++ dvr-gib(dvr-comp-of(vm)) ++ " (cap " ++ dvr-gib(mg-compressor-cap-of(v[4])) ++ ")" ++ (waited > 0 ? ", " ++ (waited / 1000).str() ++ " s waited" : "") ++ ((!mg-granted?(v)) && dvr-transient?(v[1]) ? "; the window is idle and backs off" : "");
+  // the wait: io is [sense, sleep, now, say] (a band scripts all four); answers [verdict, reading, ms waited, asks]. A first ask that is granted says nothing.
+  def dvr-wait-go(est, until, io, nap, waited, asks) {
+   let sense = io[0];
+   let now = io[2];
+   let say = io[3];
+   let vm = sense();
+   let v = mg-verdict(vm, est);
+   let told = (mg-granted?(v) && asks == 0) ? 0 : say(dvr-ask-line(est, v, vm, waited, asks + 1));
+   (mg-granted?(v) || !dvr-transient?(v[1]) || now() >= until) ? [v, vm, waited, asks + 1] : dvr-wait-rest(est, until, io, nap, waited, asks + 1);
+  }
+  def dvr-wait-rest(est, until, io, nap, waited, asks) {
+   let sleep = io[1];
+   let rested = sleep(nap);
+   dvr-wait-go(est, until, io, dvr-nap-next(nap), waited + nap, asks);
+  }
+  def dvr-wait-live(est, t0) = dvr-wait-go(est, dvr-wait-until(host_monotonic_ms(), t0), [() => mg-sense(), ms => mg-rest(ms), () => mg-now(), s => print_str(s)], mg-nap-first(), 0, 0);
+  // vm_stat's own text: the count after a name ("Pages stored in compressor:   1824749."), or -1
+  def dvr-digits-from(s, i, acc) = (i < len(s) && str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57) ? dvr-digits-from(s, i + 1, acc * 10 + (str_byte_at(s, i) - 48)) : acc;
+  def dvr-skip-to-digit(s, i) = (i < len(s) && !(str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57)) ? dvr-skip-to-digit(s, i + 1) : i;
+  def dvr-vmstat-field(text, name) {
+   let at = str_find(text, name, 0);
+   at < 0 ? 0 - 1 : dvr-digits-from(text, dvr-skip-to-digit(text, at + len(name)), 0);
+  }
+  // host_vm_stat's field 8 is vm_statistics64.compressor_page_count: the pages the compressor OCCUPIES ("Pages occupied by compressor"), physical memory it holds. The pages it STORES
+  // ("Pages stored in compressor", total_uncompressed_pages_in_compressor) are not in host_vm_stat's 17 words; vm_stat says them.
+  def dvr-stored-pages() = dvr-vmstat-field(host-exec("vm_stat", "") ?? "", "Pages stored in compressor");
+  // the paging counters since the window began, with the machine's reading: [available, wired, compressor occupied, pageins, pageouts, swapins, swapouts]
+  def dvr-vmrec(vm, vm0) = (mg-vm-ok?(vm) && mg-vm-ok?(vm0)) ? [mg-available(vm), mg-wired(vm), mg-compressor(vm), vm[9] - vm0[9], vm[10] - vm0[10], vm[13] - vm0[13], vm[14] - vm0[14]] : [0, 0, 0, 0, 0, 0, 0];
+  def dvr-vm-said(r) = "; machine: available " ++ dvr-gib(r[0]) ++ ", wired " ++ dvr-gib(r[1]) ++ ", compressor occupied " ++ dvr-gib(r[2]) ++ "; since the window began pageins +" ++ r[3].str() ++ ", pageouts +" ++ r[4].str() ++ ", swapins +" ++ r[5].str() ++ ", swapouts +" ++ r[6].str();
+  def dvr-vm-json(r) = "{" ++ dvr-join([dvr-kv("available", r[0].str()), dvr-kv("wired", r[1].str()), dvr-kv("compressor", r[2].str()), dvr-kv("pageins", r[3].str()), dvr-kv("pageouts", r[4].str()), dvr-kv("swapins", r[5].str()), dvr-kv("swapouts", r[6].str())], ",") ++ "}";
+  // the window's whole paging account at its end: the counters since its beginning, the compressor's compressions and decompressions, and the pages it occupies and stores
+  def dvr-window-vm-json(vm, vm0, stored) = (mg-vm-ok?(vm) && mg-vm-ok?(vm0)) ? "{" ++ dvr-join([dvr-kv("pageins", (vm[9] - vm0[9]).str()), dvr-kv("pageouts", (vm[10] - vm0[10]).str()), dvr-kv("swapins", (vm[13] - vm0[13]).str()), dvr-kv("swapouts", (vm[14] - vm0[14]).str()),
+    dvr-kv("compressions", (vm[11] - vm0[11]).str()), dvr-kv("decompressions", (vm[12] - vm0[12]).str()), dvr-kv("compressor_pages_occupied", vm[8].str()), dvr-kv("compressor_pages_stored", stored.str())], ",") ++ "}" : "{}";
+  // the record of a denial: the reading that denied, whole
+  def dvr-denied-json(g, est, stored) = "{" ++ dvr-join([dvr-kv("reason", dvr-q(g[0][1])), dvr-kv("available", g[0][2].str()), dvr-kv("wired", g[0][3].str()), dvr-kv("compressor", dvr-comp-of(g[1]).str()), dvr-kv("compressor_cap", mg-compressor-cap-of(g[0][4]).str()),
+    dvr-kv("compressor_pages_stored", stored.str()), dvr-kv("need", est.str()), dvr-kv("mem", g[0][4].str()), dvr-kv("waited_ms", g[2].str()), dvr-kv("asks", g[3].str())], ",") ++ "}";
+
+  // ---- the organs of ours, named (the process list through the body's door) ----------------------------------------------------------------------------
+  // host_processes(name) answers rows [pid, resident bytes, cpu us, age s, nice, ppid] for the processes of that name (a field the host did not tell is nothing); host_process(pid) the row whose slot 4 is argv.
+  // An organ is [pid, resident bytes, command]; the window itself is not among them.
+  def dvr-organ-names() = ["fkwu*", "ds4*"];
+  def dvr-proc-rows(name) { let rows = host_processes(name); (String) value_kind(rows) == "list" ? rows : []; }
+  def dvr-organ-row?(row, me) = (String) value_kind(row) == "list" && len(row) >= 2 && (String) value_kind(row[1]) == "int" && row[0] != me;
+  def dvr-organ-rows(names, me) = len(names) == 0 ? [] : append(filter(r => dvr-organ-row?(r, me), dvr-proc-rows(names[0])), dvr-organ-rows(names[1:], me));
+  // a command as the line names it: the first words of argv, with nothing in it a JSON string cannot hold
+  def dvr-safe-byte(b) = (b == 34 || b == 92 || b < 32 || b > 126) ? 95 : b;
+  def dvr-safe-go(s, i, acc) = i == len(s) ? acc : dvr-safe-go(s, i + 1, acc ++ byte_to_str(dvr-safe-byte(str_byte_at(s, i))));
+  def dvr-safe(s) = dvr-safe-go(substring(s, 0, len(s) < 100 ? len(s) : 100), 0, "");
+  def dvr-command-of(row, pid) = ((String) value_kind(row) == "list" && len(row) >= 5 && (String) value_kind(row[4]) == "list" && len(row[4]) > 0) ? dvr-safe(flp-join(row[4][0:(len(row[4]) < 3 ? len(row[4]) : 3)], " ")) : "pid " ++ pid.str();
+  def dvr-label-of(pid) = dvr-command-of(host_process(pid), pid);
+  // largest resident first
+  def dvr-organ-ins(row, sorted) = len(sorted) == 0 ? [row] : (row[1] >= sorted[0][1] ? cons(row, sorted) : cons(sorted[0], dvr-organ-ins(row, sorted[1:])));
+  def dvr-organ-sort(rows) = len(rows) == 0 ? [] : dvr-organ-ins(rows[0], dvr-organ-sort(rows[1:]));
+  def dvr-organs() = dvr-organ-sort(map(r => [r[0], r[1], dvr-label-of(r[0])], dvr-organ-rows(dvr-organ-names(), host_pid())));
+  def dvr-organs-total(organs) = len(organs) == 0 ? 0 : organs[0][1] + dvr-organs-total(organs[1:]);
+  def dvr-organ-text(o) = "pid " ++ o[0].str() ++ " " ++ o[2] ++ " (" ++ dvr-gib(o[1]) ++ ")";
+  def dvr-organ-texts(organs, n) = n == 0 || len(organs) == 0 ? [] : cons(dvr-organ-text(organs[0]), dvr-organ-texts(organs[1:], n - 1));
+  // the line a window prints: how many, how much they hold, and the largest by name
+  def dvr-organs-text(organs) = "organs of ours resident: " ++ len(organs).str() ++ " holding " ++ dvr-gib(dvr-organs-total(organs)) ++ " (" ++ dvr-organs-total(organs).str() ++ " B)"
+   ++ (len(organs) == 0 ? "" : ": " ++ flp-join(dvr-organ-texts(organs, dvr-organs-shown()), "; ") ++ (len(organs) > dvr-organs-shown() ? "; and " ++ (len(organs) - dvr-organs-shown()).str() ++ " more" : ""));
+  def dvr-organs-line(organs) = "[dsv4-validate] " ++ dvr-organs-text(organs);
+  // what moved between two readings: [pid, change in resident bytes, command] for every organ whose resident bytes changed by at least the floor (64 MiB), a new organ by what it holds and one that is gone by what it held
+  def dvr-organ-in(organs, pid) = len(organs) == 0 ? 0 - 1 : (organs[0][0] == pid ? organs[0][1] : dvr-organ-in(organs[1:], pid));
+  def dvr-big?(d) = d >= dvr-floor() || (0 - d) >= dvr-floor();
+  def dvr-base-of(before, pid) = dvr-organ-in(before, pid) < 0 ? 0 : dvr-organ-in(before, pid);
+  def dvr-moved-one(a, before) = [a[0], a[1] - dvr-base-of(before, a[0]), a[2]];
+  def dvr-moved-after(after, before) = len(after) == 0 ? [] : (dvr-big?(dvr-moved-one(after[0], before)[1]) ? cons(dvr-moved-one(after[0], before), dvr-moved-after(after[1:], before)) : dvr-moved-after(after[1:], before));
+  def dvr-moved-gone(before, after) = len(before) == 0 ? [] : ((dvr-organ-in(after, before[0][0]) < 0 && dvr-big?(before[0][1])) ? cons([before[0][0], 0 - before[0][1], before[0][2]], dvr-moved-gone(before[1:], after)) : dvr-moved-gone(before[1:], after));
+  def dvr-iabs(v) = v < 0 ? 0 - v : v;
+  def dvr-moved-ins(row, sorted) = len(sorted) == 0 ? [row] : (dvr-iabs(row[1]) >= dvr-iabs(sorted[0][1]) ? cons(row, sorted) : cons(sorted[0], dvr-moved-ins(row, sorted[1:])));
+  def dvr-moved-sort(rows) = len(rows) == 0 ? [] : dvr-moved-ins(rows[0], dvr-moved-sort(rows[1:]));
+  def dvr-organs-moved(before, after) = dvr-moved-sort(append(dvr-moved-after(after, before), dvr-moved-gone(before, after)));
+  def dvr-moved-text(r) = "pid " ++ r[0].str() ++ " " ++ r[2] ++ " " ++ (r[1] >= 0 ? "+" : "-") ++ dvr-gib(dvr-iabs(r[1]));
+  def dvr-moved-line(moved) = len(moved) == 0 ? "no organ of ours moved its resident bytes by 64 MiB or more" : "organs of ours that moved: " ++ flp-join(map(r => dvr-moved-text(r), moved), "; ");
 
   // ---- the layout's figures, from the header ------------------------------------------------------------------------------------
   def dvr-sum-bytes(ix, names) = len(names) == 0 ? 0 : (dvl-has?(ix, names[0]) ? dvl-r-bytes(dvl-row-of(ix, names[0])) : 0) + dvr-sum-bytes(ix, names[1:]);
   def dvr-layer-dense(m, il) = dvr-sum-bytes(record_get(m, "index"), dvl-l(m, il, "names")) - dls-layer-stacks(m, il);
-  // what token 1 touches in a layer: its dense tensors and `used` experts' slices (used = 6 on both real files)
-  def dvr-est-layer(m, il) = dvr-layer-dense(m, il) + record_get(m, "used") * dls-layer-expert(m, il);
+  // THE LAYER'S PRICE IS THE BYTES OF THE TENSORS ITS DISPATCHES CAN TOUCH, read from the header: the layer's dense tensors (its compressor's among them) and its three whole expert stacks, and for the layer
+  // that embeds (layer 0) token_embd; not the KV and scratch (the state stage prices those), and not the indexer tensors (present in the file, unrouted below position 2048). DERIVED FROM WINDOW 2 (2026-10-03 07:29-07:30 WITA,
+  // layers 0 to 15 on the real file): the price of the dense tensors and six experts' slices (189,657,560 B at layer 0) read 17 and 11 times under what the layers wired (+3,207,380,992 B at layer 0, +2,288,304,128 B at
+  // layer 2); wired memory followed the weights a layer's dispatches touch (layer 0: stacks 1,811,939,328 + dense 147,190,232 + token_embd 1,059,061,760 = 3,018,191,320 B) and gave them back later (layer 1 -1,368,260,608 B,
+  // layer 14 -2,233,942,016 B; the net after 16 layers was +2.55 GB). The prices are never summed: the token door reads wired after every layer of the first tokens against them (the expected curve), and the guard is the lease.
+  def dvr-layer-touched(m, il) = dvr-sum-bytes(record_get(m, "index"), dvl-l(m, il, "names"));
+  def dvr-est-layer(m, il) = dvr-layer-touched(m, il) + (il == 0 ? dls-embd(m) : 0);
   def dvr-est-layers-go(m, il, n) = il == n ? [] : cons(dvr-est-layer(m, il), dvr-est-layers-go(m, il + 1, n));
   def dvr-est-layers(m) = dvr-est-layers-go(m, 0, record_get(m, "layers-n"));
   def dvr-sum(xs) = len(xs) == 0 ? 0 : xs[0] + dvr-sum(xs[1:]);
   // one pass each: a fold with the best so far (a recursion that called itself twice a level would take 2^n steps over 43 layers)
   def dvr-min-go(xs, best) = len(xs) == 0 ? best : dvr-min-go(xs[1:], xs[0] < best ? xs[0] : best);
   def dvr-max-go(xs, best) = len(xs) == 0 ? best : dvr-max-go(xs[1:], xs[0] > best ? xs[0] : best);
+  def dvr-index-of(xs, v, i) = len(xs) == 0 ? 0 - 1 : (xs[0] == v ? i : dvr-index-of(xs[1:], v, i + 1));
   def dvr-min(xs) = dvr-min-go(xs[1:], xs[0]);
   def dvr-max(xs) = dvr-max-go(xs[1:], xs[0]);
   def dvr-est-head(m) = dvr-sum-bytes(record_get(m, "index"), ["output.weight", "output_hc_fn.weight", "output_hc_scale.weight", "output_hc_base.weight", "output_norm.weight"]);
@@ -156,9 +239,8 @@ section [form.bml] {
     ["map", dvr-est-map(m, cap), "dsv4-open-span maps the driver's 1,202 tensors (no copy, demand-paged) and allocates the scratch"],
     ["state", dvl-kv-total(m, cap), "the KV arenas and the compressors' state for the capacity"],
     ["wirespan", dvr-slice(m), "ONE dispatch reading ONE expert slice of layer 0's gate stack: wired grows by the slice or by the stack"],
-    ["layers", dvr-sum(dvr-est-layers(m)), "token 1 through every block, one stage a block, the machine read after each"],
-    ["head", dvr-est-head(m), "the output head and the first greedy id (the cold token's clock stops here)"],
-    ["logits", dls-cache(m, c), "the recorded-logits prompt through prefill (the expert cache is the bound), compared by r, top-10 overlap and the tie budget"],
+    ["head", dvr-est-head(m), "the embedding of token 1, the output head over it and the device argmax (the head's kernels and the NaN scan answer; the layers are the token door's)"],
+    ["logits", dls-cache(m, c), "the recorded-logits prompt through prefill (the expert cache is the bound on what stays wired: layers wire about their whole stacks and give them back), compared by r, top-10 overlap and the tie budget"],
     ["stream", dls-cache(m, c), "the raw prompt ids, 24 greedy ids against the recorded stream (every new expert it meets grows wired memory, up to the expert cache: that is its estimate, not 0), then once more from a fresh state for bit equality"]];
   }
 
@@ -217,15 +299,20 @@ section [form.bml] {
     : (from == "pinned" ? "will run on the " ++ len(ids).str() ++ " chat-templated prompt ids " ++ dvr-ids-json(ids) ++ " pinned beside the recording (" ++ dvr-logits-prompt-path() ++ ": BOS, system, User, prompt, Assistant, <think>; a supplied logits_prompt_ids replaces them), " ++ dvr-ask-text(ask)
     : "WAITS: no logits_prompt_ids supplied and the row " ++ dvr-logits-prompt-path() ++ " is missing or fails its check (14 ids that are its own parts in order); supply them as logits_prompt_ids");
   }
-  // the movement the machine makes by itself, read before anything of the window runs (the dry plan reads it too: it is the machine's, not the window's)
-  def dvr-ambient-line(noise) = "[dsv4-validate] ambient: wired memory moved by " ++ dvr-gib(noise) ++ " (" ++ noise.str() ++ " B) over " ++ ((dvr-ambient-samples() * dvr-ambient-nap-ms()) / 1000).str() ++ " s of readings " ++ dvr-ambient-nap-ms().str()
-   ++ " ms apart on this machine with nothing of ours running; the stage-delta rule judges a stage's wired growth less that movement, and the stage lines print the device's own bytes beside it";
-  def dvr-plan-lines(m, size, opts, facts, noise) {
+  // the back-off rule, as a line (the dry plan prints it)
+  def dvr-backoff-line() = "[dsv4-validate] back off: an ask denied for reserve or compressor (the machine is busy, not full) waits with the governor's naps (" ++ (mg-nap-first() / 1000).str() ++ " s doubling to " ++ (mg-nap-most() / 1000).str() ++ " s), printing each reading, for at most "
+   ++ (dvr-ask-wait-ms() / 60000).str() ++ " min an ask and never past the window's " ++ (dvr-abort-ms() / 60000).str() ++ "; wired-cap and an unreadable machine end the run at once; the idle window holds its mapped weights (file-backed, evictable), its scratch and state buffers and the lease it took, and enqueues nothing";
+  // the layer prices, as the token door reads them (the expected wired curve of the first token): never summed
+  def dvr-layers-line(m) {
+   let layers = dvr-est-layers(m);
+   "[dsv4-validate] layer prices (the token door's expected curve; no layer is staged here): " ++ len(layers).str() ++ " layers, each the bytes of the tensors its dispatches can touch, whole stacks included: the largest " ++ dvr-max(layers).str() ++ " B (" ++ dvr-gib(dvr-max(layers)) ++ ", layer "
+    ++ dvr-index-of(layers, dvr-max(layers), 0).str() ++ "), the smallest " ++ dvr-min(layers).str() ++ " B (layer " ++ dvr-index-of(layers, dvr-min(layers), 0).str() ++ "), layer 0 with token_embd " ++ layers[0].str() ++ " B, the last " ++ layers[len(layers) - 1].str() ++ " B";
+  }
+  def dvr-plan-lines(m, size, opts, facts, organs) {
    let cap = dvr-int(opts, "cap", dvr-default-cap());
    let c = dvr-int(opts, "cache_experts", dls-cache-experts());
    let shared = dls-shared(m, c, cap);
    let lease = shared + mg-kv-margin();
-   let layers = dvr-est-layers(m);
    let gaps = dvr-gaps(m);
    let logitsIds = dvr-logits-ids(opts);
    append(["[dsv4-validate] DRY: the plan below is what the window WILL do; nothing is opened, nothing mapped, no lease taken, no row written, no kernel compiled",
@@ -234,9 +321,10 @@ section [form.bml] {
     "[dsv4-validate] the window asks the governor for " ++ dvr-gib(lease) ++ " against a wired cap of " ++ dvr-gib(mg-wired-cap-of(mg-mem(facts[2]))) ++ " on this machine (the file itself is " ++ dvr-gib(size) ++ ")"],
     append(dvr-facts-lines(facts),
      append(map(row => dvr-stage-line(row), dvr-stages(m, opts)),
-      ["[dsv4-validate] layers: " ++ len(layers).str() ++ " stages, ask " ++ (dvr-min(layers) / dvr-mib()).str() ++ " MiB to " ++ (dvr-max(layers) / dvr-mib()).str() ++ " MiB (first " ++ layers[0].str() ++ " B, last " ++ layers[len(layers) - 1].str() ++ " B), together " ++ dvr-gib(dvr-sum(layers)),
-       dvr-ambient-line(noise),
-       "[dsv4-validate] abort on: a denied ask, host-memory-low, wired above the lease (" ++ dvr-gib(lease) ++ " past the baseline), a stage delta over twice its estimate (floor 64 MiB) once that movement is taken from it, 20 minutes of 30, a stage the driver refuses, a wirespan probe that wires half the stack or more once that movement is taken from it",
+      [dvr-layers-line(m),
+       dvr-organs-line(organs),
+       dvr-backoff-line(),
+       "[dsv4-validate] abort on: a denied ask (reserve and compressor only after the wait above), host-memory-low, wired above the lease (" ++ dvr-gib(lease) ++ " past the baseline), 20 minutes of 30, a stage the driver refuses; a stage's wired growth against its price and the wirespan probe's kind (slice, between or stack) are read and recorded, not aborts, and the organs of ours resident are named at every stage",
        "[dsv4-validate] on an abort: metal_sync, free every handle in synced rounds, mg-release, a receipt row with the reason; nothing is retried",
        "[dsv4-validate] references: recorded logits " ++ dvr-logits-path() ++ " (" ++ dvr-logits-bytes().str() ++ " B, SHA-256 " ++ dvr-logits-sha() ++ "); the stream " ++ dvr-ids-json(dvr-stream()) ++ " for the raw prompt " ++ dvr-ids-json(dvr-prompt()),
        "[dsv4-validate] logits leg: " ++ dvr-logits-line(opts, logitsIds, dls-cache(m, c)),
@@ -244,7 +332,7 @@ section [form.bml] {
        "[dsv4-validate] ordering: " ++ (len(dvr-notes(m)) == 0 ? "the file holds no Q8_0 output or Q2_K down tensor, so ds4's own order is not in question" : dvr-notes(m)[0]),
        "[dsv4-validate] receipt: one dated row appended to " ++ dvr-text(opts, "receipt", dvr-receipt-path()),
        "[dsv4-validate] budget " ++ (dvr-budget-ms() / 60000).str() ++ " minutes, abort at " ++ (dvr-abort-ms() / 60000).str(),
-       "[dsv4-validate] DRY ends: " ++ (len(dvr-stages(m, opts)) + len(layers) - 1).str() ++ " stages would run"])));
+       "[dsv4-validate] DRY ends: " ++ len(dvr-stages(m, opts)).str() ++ " stages would run"])));
   }
 
   // ---- the references' arithmetic ------------------------------------------------------------------------------------------------------------
@@ -301,15 +389,19 @@ section [form.bml] {
   def dvr-join(xs, sep) = len(xs) == 0 ? "" : (len(xs) == 1 ? xs[0] : xs[0] ++ sep ++ dvr-join(xs[1:], sep));
   def dvr-ids-json(xs) = "[" ++ dvr-join(map(x => x.str(), xs), ",") ++ "]";
   def dvr-floats-json(xs) = "[" ++ dvr-join(map(x => x.str(), xs), ",") ++ "]";
-  def dvr-stage-json(s) = "{" ++ dvr-join([dvr-kv("stage", dvr-q(s[0])), dvr-kv("estimate", s[1].str()), dvr-kv("wired_delta", s[2].str()), dvr-kv("ms", s[3].str()), dvr-kv("own_delta", s[4].str())], ",") ++ "}";
-  // r: the run's record: status reason file bytes lease cap cache stages(list of [label est delta ms]) wirespan(delta slice stack kind) cold_ms matched ids deterministic agreement gaps
+  def dvr-stage-json(s) = "{" ++ dvr-join([dvr-kv("stage", dvr-q(s[0])), dvr-kv("estimate", s[1].str()), dvr-kv("wired_delta", s[2].str()), dvr-kv("ms", s[3].str()), dvr-kv("own_delta", s[4].str()), dvr-kv("vm", dvr-vm-json(s[5]))], ",") ++ "}";
+  // the organs of ours as the row holds them: [pid, resident bytes, command] as objects, the largest dvr-organs-shown first
+  def dvr-organ-json(o) = "{" ++ dvr-join([dvr-kv("pid", o[0].str()), dvr-kv("resident", o[1].str()), dvr-kv("command", dvr-q(o[2]))], ",") ++ "}";
+  def dvr-organs-json(organs) = "[" ++ dvr-join(map(o => dvr-organ-json(o), organs[0:(len(organs) < dvr-organs-shown() ? len(organs) : dvr-organs-shown())]), ",") ++ "]";
+  def dvr-moved-json(moved) = "[" ++ dvr-join(map(r => "{" ++ dvr-join([dvr-kv("pid", r[0].str()), dvr-kv("change", r[1].str()), dvr-kv("command", dvr-q(r[2]))], ",") ++ "}", moved), ",") ++ "]";
+  // r: the run's record: status reason file bytes lease cap cache organs moved denied vmwin stages(list of [label est delta ms own vm]) wirespan(delta slice stack kind) cold_ms matched ids deterministic agreement gaps
   def dvr-receipt-row(date, at, r) = "{" ++ dvr-join([
    dvr-kv("schema", dvr-q("dsv4-validation-v1")), dvr-kv("at_unix_ms", at.str()), dvr-kv("date", dvr-q(date)), dvr-kv("status", dvr-q(record_get(r, "status"))), dvr-kv("reason", dvr-q(record_get(r, "reason"))),
    dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("file_bytes", record_get(r, "bytes").str()), dvr-kv("lease_shared", record_get(r, "shared").str()), dvr-kv("lease_private", mg-kv-margin().str()),
-   dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("cache_experts", record_get(r, "cache").str()), dvr-kv("wired_noise", record_get(r, "noise").str()),
+   dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("cache_experts", record_get(r, "cache").str()), dvr-kv("organs", record_get(r, "organs")), dvr-kv("moved", record_get(r, "moved")), dvr-kv("denied", record_get(r, "denied")), dvr-kv("vm_window", record_get(r, "vmwin")),
    dvr-kv("stages", "[" ++ dvr-join(map(s => dvr-stage-json(s), record_get(r, "stages")), ",") ++ "]"),
    dvr-kv("wirespan", "{" ++ dvr-join([dvr-kv("delta", record_get(r, "ws-delta").str()), dvr-kv("slice", record_get(r, "ws-slice").str()), dvr-kv("stack", record_get(r, "ws-stack").str()), dvr-kv("kind", dvr-q(record_get(r, "ws-kind")))], ",") ++ "}"),
-   dvr-kv("cold_token_ms", record_get(r, "cold-ms").str()), dvr-kv("stream_matched", record_get(r, "matched").str()), dvr-kv("stream_of", "24"), dvr-kv("ids", dvr-ids-json(record_get(r, "ids"))),
+   dvr-kv("stream_matched", record_get(r, "matched").str()), dvr-kv("stream_of", "24"), dvr-kv("ids", dvr-ids-json(record_get(r, "ids"))),
    dvr-kv("stream_margins", dvr-floats-json(record_get(r, "margins"))), dvr-kv("stream_recorded_gap", dvr-floats-json(record_get(r, "rgaps"))),
    dvr-kv("deterministic", record_get(r, "deterministic").str()),
    dvr-kv("logits", record_get(r, "logits")), dvr-kv("driver_gaps", "[" ++ dvr-join(map(g => dvr-q(g), record_get(r, "gaps")), ",") ++ "]"),
@@ -321,47 +413,46 @@ section [form.bml] {
   // ---- the run (the window; never run by a band) --------------------------------------------------------------------------------------------------
   def dvr-said(lines) = len(lines) == 0 ? 0 : dvr-said-next(print_str(lines[0]), lines[1:]);
   def dvr-said-next(said, rest) = dvr-said(rest);
-  def dvr-env(file, m, size, shared, cap, cache, base, lease) = record_new(0, "file", file, "m", m, "bytes", size, "shared", shared, "cap", cap, "cache", cache, "base", base, "lease", lease, "prev", base, "noise", 0, "t0", host_monotonic_ms(),
-    "log", [], "ctx", [], "sts", [], "reason", "", "ws-delta", 0, "ws-slice", 0, "ws-stack", 0, "ws-kind", "none", "cold-ms", 0, "matched", 0, "ids", [], "margins", [], "rgaps", [], "deterministic", 0, "logits", "{\"waits\":\"no logits_prompt_ids supplied\"}", "extra", []);
+  def dvr-env(file, m, size, shared, cap, cache, base, lease) = record_new(0, "file", file, "m", m, "bytes", size, "shared", shared, "cap", cap, "cache", cache, "base", base, "lease", lease, "prev", base, "organs", "[]", "moved", "[]", "t0", host_monotonic_ms(),
+    "vm0", [], "denied", "{}", "log", [], "ctx", [], "sts", [], "reason", "", "ws-delta", 0, "ws-slice", 0, "ws-stack", 0, "ws-kind", "none", "matched", 0, "ids", [], "margins", [], "rgaps", [], "deterministic", 0, "logits", "{\"waits\":\"no logits_prompt_ids supplied\"}", "extra", []);
   def dvr-elapsed(env) = host_monotonic_ms() - record_get(env, "t0");
   def dvr-note(env, key, v) = record_set(env, key, v);
   def dvr-log-add(env, row) = record_set(env, "log", append(record_get(env, "log"), [row]));
   // one stage: ask, run, sync, read, judge. Answers "" when it held, or the reason the run ends.
-  def dvr-stage(env, label, est, run) = dvr-stage-with(env, label, est, est, run);
-  // est is what the governor is asked for; limit is what the stage-delta rule is held to (the same, but for the wirespan probe)
-  def dvr-stage-with(env, label, est, limit, run) {
-   let before = mg-sense();
-   let why = dvr-ask-reason(before, est);
-   why != "" ? dvr-stop(env, label, why) : dvr-stage-run(env, label, est, limit, run);
+  def dvr-stage(env, label, est, run) {
+   let g = dvr-wait-live(est, record_get(env, "t0"));
+   mg-granted?(g[0]) ? dvr-stage-run(env, label, est, run) : dvr-stop-denied(env, label, est, g);
   }
-  // the stage's line: its wired growth, the machine's own movement it is judged less, and the device's own bytes the stage took
-  def dvr-stage-said(label, delta, est, noise, own, ms) = "[dsv4-validate] stage " ++ label ++ ": wired " ++ (delta >= 0 ? "+" : "-") ++ dvr-gib(delta >= 0 ? delta : 0 - delta) ++ " against an estimate of " ++ dvr-gib(est)
-   ++ " (the machine moved by up to " ++ dvr-gib(noise) ++ " by itself), own device bytes " ++ (own >= 0 ? "+" : "-") ++ (own >= 0 ? own : 0 - own).str() ++ ", " ++ ms.str() ++ " ms";
-  def dvr-stage-run(env, label, est, limit, run) {
+  // the ask was denied and stayed denied past its wait (or was never one to wait for): the receipt carries the reading that denied
+  def dvr-stop-denied(env, label, est, g) {
+   let noted = record_set(env, "denied", dvr-denied-json(g, est, dvr-stored-pages()));
+   dvr-stop(env, label, "ask-denied:" ++ g[0][1]);
+  }
+  // a stage's growth over twice its price (a floor of 64 MiB) is told in its line, never an abort
+  def dvr-over-price?(delta, est) = delta > 2 * (est > dvr-floor() ? est : dvr-floor());
+  // the stage's line: its wired growth against its price, the device's own bytes the stage took, the time, and (appended) the machine's reading and the organs of ours
+  def dvr-stage-said(label, delta, est, own, ms) = "[dsv4-validate] stage " ++ label ++ ": wired " ++ (delta >= 0 ? "+" : "-") ++ dvr-gib(delta >= 0 ? delta : 0 - delta) ++ " against an estimate of " ++ dvr-gib(est)
+   ++ (dvr-over-price?(delta, est) ? " (OVER twice its price: read, not an abort; the organs that moved are named below)" : "") ++ ", own device bytes " ++ (own >= 0 ? "+" : "-") ++ (own >= 0 ? own : 0 - own).str() ++ ", " ++ ms.str() ++ " ms";
+  def dvr-organs-said(organs, moved) = "; organs of ours resident " ++ len(organs).str() ++ " holding " ++ dvr-gib(dvr-organs-total(organs)) ++ "; " ++ dvr-moved-line(moved);
+  def dvr-stage-run(env, label, est, run) {
    let t = host_monotonic_ms();
    let own0 = dvr-own();
+   let org0 = dvr-organs();
    let r = run();
    let s = metal_sync();
    let vm = mg-sense();
+   let org1 = dvr-organs();
+   let moved = dvr-organs-moved(org0, org1);
    let delta = mg-wired(vm) - record_get(env, "prev");
    let own = dvr-own() - own0;
    let noted = record_set(env, "prev", mg-wired(vm));
-   let logged = dvr-log-add(env, [label, est, delta, host_monotonic_ms() - t, own]);
-   let said = print_str(dvr-stage-said(label, delta, est, record_get(env, "noise"), own, host_monotonic_ms() - t));
-   let first = nothing?(r) ? "stage-refused" : dvr-abort-reason(vm, record_get(env, "base"), record_get(env, "lease"), limit, dvr-own-delta(delta, record_get(env, "noise")), dvr-elapsed(env));
-   let why = first == "stage-delta" ? dvr-reread(env, vm, limit, delta) : first;
+   let rec = dvr-vmrec(vm, record_get(env, "vm0"));
+   let logged = dvr-log-add(env, [label, est, delta, host_monotonic_ms() - t, own, rec]);
+   let seen = record_set(env, "organs", dvr-organs-json(org1));
+   let seenMoved = record_set(env, "moved", dvr-moved-json(moved));
+   let said = print_str(dvr-stage-said(label, delta, est, own, host_monotonic_ms() - t) ++ dvr-vm-said(rec) ++ dvr-organs-said(org1, moved));
+   let why = nothing?(r) ? "stage-refused" : dvr-abort-reason(vm, record_get(env, "base"), record_get(env, "lease"), dvr-elapsed(env));
    why == "" ? "" : dvr-stop(env, label, why);
-  }
-  // THE MACHINE'S MOVEMENT IS BURSTY (19.8 MB over one 3 s reading, 331.9 MB over the next, on 2026-10-03), so a calibration taken in a lull can be below what comes after. A stage-delta is therefore met with a
-  // second reading before the run ends: the machine is read again over 3 s, the movement the rule takes from the delta is the larger of the two readings, and the rule is asked again of the same delta. A growth
-  // the machine's own movement does not cover (a persistent shift the re-read does not see move) still ends the run.
-  def dvr-reread-reason(vm, base, lease, limit, delta, before, now, elapsed) = dvr-abort-reason(vm, base, lease, limit, dvr-own-delta(delta, before > now ? before : now), elapsed);
-  def dvr-reread(env, vm, limit, delta) {
-   let now = dvr-ambient();
-   let before = record_get(env, "noise");
-   let widened = record_set(env, "noise", before > now ? before : now);
-   let said = print_str("[dsv4-validate] stage-delta met on a wired growth of " ++ delta.str() ++ " B: the machine read again over 3 s moved by " ++ now.str() ++ " B (" ++ before.str() ++ " B before the window); the rule is asked again with the larger");
-   dvr-reread-reason(vm, record_get(env, "base"), record_get(env, "lease"), limit, delta, before, now, dvr-elapsed(env));
   }
   def dvr-stop(env, label, why) {
    let said = print_str("[dsv4-validate] ABORT at " ++ label ++ ": " ++ why);
@@ -394,28 +485,22 @@ section [form.bml] {
    let k2 = record_set(env, "ws-stack", dvr-stack(m));
    r == 1 ? 1 : nothing();
   }
-  // after the wirespan stage: judge the probe from the delta that stage logged
+  // after the wirespan stage: read the probe's kind from the delta that stage logged and record it (the kind is a reading, never an abort)
   def dvr-judge-wirespan(env) {
    let row = dvr-log-last(record_get(env, "log"));
-   let kind = dvr-wirespan-kind-noisy(row[2], record_get(env, "noise"), record_get(env, "ws-slice"), record_get(env, "ws-stack"));
+   let kind = dvr-wirespan-kind(row[2], record_get(env, "ws-slice"), record_get(env, "ws-stack"));
    let k1 = record_set(env, "ws-delta", row[2]);
    let k2 = record_set(env, "ws-kind", kind);
-   let said = print_str("[dsv4-validate] wirespan: one expert slice of " ++ record_get(env, "ws-slice").str() ++ " B read from a stack of " ++ record_get(env, "ws-stack").str() ++ " B grew wired memory by " ++ row[2].str() ++ " B: " ++ kind);
-   kind == "stack" ? dvr-stop(env, "wirespan", "wirespan-whole-stack") : "";
+   let said = print_str("[dsv4-validate] wirespan: one expert slice of " ++ record_get(env, "ws-slice").str() ++ " B read from a stack of " ++ record_get(env, "ws-stack").str() ++ " B grew wired memory by " ++ row[2].str() ++ " B: " ++ kind ++ " (recorded; the layer prices assume whole stacks)");
+   "";
   }
   def dvr-log-last(log) = log[len(log) - 1];
-  def dvr-do-layer(env, il) {
-   let ctx = dvr-ctx(env);
-   let emb = il == 0 ? dsv4-embed(ctx, dvr-token-1()) : 2;
-   let r = nothing?(emb) ? nothing() : dsv4-layer(ctx, dvr-sts(env), il, 0, dvr-token-1(), record_get(env, "cap"));
-   nothing?(r) ? nothing() : 1;
-  }
-  def dvr-layer-steps(env, m, il) = il == record_get(m, "layers-n") ? [] : cons(() => dvr-stage(env, "layer-" ++ il.str(), dvr-est-layer(m, il), () => dvr-do-layer(env, il)), dvr-layer-steps(env, m, il + 1));
+  // the head's kernels and the argmax over the embedding of token 1: the embedding, the head's seven enqueues, the NaN scan and the one sync the argmax settles on
   def dvr-do-head(env) {
    let ctx = dvr-ctx(env);
-   let h = dsv4-head(ctx);
+   let emb = dsv4-embed(ctx, dvr-token-1());
+   let h = nothing?(emb) ? nothing() : dsv4-head(ctx);
    let id = nothing?(h) ? nothing() : dsv4-argmax(ctx);
-   let k = record_set(env, "cold-ms", dvr-elapsed(env));
    nothing?(id) ? nothing() : 1;
   }
   // a fresh state for a new walk: the old one is freed (synced rounds) first
@@ -473,16 +558,15 @@ section [form.bml] {
    append([() => dvr-stage(env, "compile", dvr-bound(), () => dvr-do-compile(env)),
            () => dvr-stage(env, "map", dvr-est-map(m, record_get(env, "cap")), () => dvr-do-map(env)),
            () => dvr-stage(env, "state", dvl-kv-total(m, record_get(env, "cap")), () => dvr-do-state(env)),
-           () => dvr-stage-with(env, "wirespan", dvr-slice(m), dvr-wirespan-limit(m), () => dvr-do-wirespan(env)),
-           () => dvr-judge-wirespan(env)],
-     append(dvr-layer-steps(env, m, 0),
-      append([() => dvr-stage(env, "head", dvr-est-head(m), () => dvr-do-head(env))],
-       append(len(ids) > 0 ? [() => dvr-stage(env, "logits", dls-cache(m, record_get(env, "cache")), () => dvr-do-logits(env, ids))] : [() => dvr-waits(env, "logits")],
-        [() => dvr-stage(env, "stream", dls-cache(m, record_get(env, "cache")), () => dvr-do-stream(env))]))));
+           () => dvr-stage(env, "wirespan", dvr-slice(m), () => dvr-do-wirespan(env)),
+           () => dvr-judge-wirespan(env),
+           () => dvr-stage(env, "head", dvr-est-head(m), () => dvr-do-head(env))],
+      append(len(ids) > 0 ? [() => dvr-stage(env, "logits", dls-cache(m, record_get(env, "cache")), () => dvr-do-logits(env, ids))] : [() => dvr-waits(env, "logits")],
+       [() => dvr-stage(env, "stream", dls-cache(m, record_get(env, "cache")), () => dvr-do-stream(env))]));
   }
   // a leg that waits for what the caller has not supplied: named in the log and the output, no estimate, no run, no abort
   def dvr-waits(env, label) {
-   let logged = dvr-log-add(env, [label ++ "-waits-for-prompt-ids", 0, 0, 0, 0]);
+   let logged = dvr-log-add(env, [label ++ "-waits-for-prompt-ids", 0, 0, 0, 0, [0, 0, 0, 0, 0, 0, 0]]);
    let said = print_str("[dsv4-validate] stage " ++ label ++ ": waits for logits_prompt_ids (none supplied and the pinned row does not hold); not run");
    "";
   }
@@ -495,8 +579,9 @@ section [form.bml] {
    len(left);
   }
   def dvr-record(env, status, reason, held) = record_new(0, "status", status, "reason", reason, "file", record_get(env, "file"), "bytes", record_get(env, "bytes"), "shared", record_get(env, "shared"), "cap", record_get(env, "cap"),
-    "cache", record_get(env, "cache"), "noise", record_get(env, "noise"), "stages", record_get(env, "log"), "ws-delta", record_get(env, "ws-delta"), "ws-slice", record_get(env, "ws-slice"), "ws-stack", record_get(env, "ws-stack"), "ws-kind", record_get(env, "ws-kind"),
-    "cold-ms", record_get(env, "cold-ms"), "matched", record_get(env, "matched"), "ids", record_get(env, "ids"), "margins", record_get(env, "margins"), "rgaps", record_get(env, "rgaps"), "deterministic", record_get(env, "deterministic"), "logits", record_get(env, "logits"),
+    "cache", record_get(env, "cache"), "organs", record_get(env, "organs"), "moved", record_get(env, "moved"), "denied", record_get(env, "denied"), "vmwin", dvr-window-vm-json(mg-sense(), record_get(env, "vm0"), dvr-stored-pages()),
+    "stages", record_get(env, "log"), "ws-delta", record_get(env, "ws-delta"), "ws-slice", record_get(env, "ws-slice"), "ws-stack", record_get(env, "ws-stack"), "ws-kind", record_get(env, "ws-kind"),
+    "matched", record_get(env, "matched"), "ids", record_get(env, "ids"), "margins", record_get(env, "margins"), "rgaps", record_get(env, "rgaps"), "deterministic", record_get(env, "deterministic"), "logits", record_get(env, "logits"),
     "gaps", dvr-gaps(record_get(env, "m")), "elapsed", dvr-elapsed(env), "held", held);
   def dvr-finish(env, opts, why) {
    let held = dvr-release(env);
@@ -528,11 +613,12 @@ section [form.bml] {
    !mg-granted?(granted) ? dvr-refuse(mg-line("dsv4 validation window", shared + mg-kv-margin(), granted), file) : dvr-window-run(opts, file, size, m, shared, cap, cache);
   }
   def dvr-window-run(opts, file, size, m, shared, cap, cache) {
-   let noise = dvr-ambient();
+   let organs = dvr-organs();
    let vm0 = mg-sense();
    let env = dvr-env(file, m, size, shared, cap, cache, mg-wired(vm0), shared + mg-kv-margin());
-   let noted = record_set(env, "noise", noise);
-   let said = print_str(dvr-ambient-line(noise));
+   let noted = record_set(env, "organs", dvr-organs-json(organs));
+   let more = record_set(env, "vm0", vm0);
+   let said = print_str(dvr-organs-line(organs));
    // a stop inside a stage is a backtrack point, not the end of the window: it reads as an abort, and the handles, the lease and the receipt follow
    let why = try dvr-seq(dvr-steps(env, m, opts)) catch "walker-stop";
    dvr-finish(env, opts, why);
@@ -558,7 +644,7 @@ section [form.bml] {
    let size = file_size(file);
    let src = size > 24 ? dvl-src(file) : "";
    let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
-   nothing?(m) ? dvr-refuse("dry: the file is not a deepseek4 GGUF (or is absent): " ++ file, file) : dvr-said(dvr-plan-lines(m, size, opts, dvr-facts(), dvr-ambient()));
+   nothing?(m) ? dvr-refuse("dry: the file is not a deepseek4 GGUF (or is absent): " ++ file, file) : dvr-said(dvr-plan-lines(m, size, opts, dvr-facts(), dvr-organs()));
   }
  }
  0;
