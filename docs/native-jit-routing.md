@@ -17,7 +17,7 @@ two inputs through the physical carrier, and checks malformed-image refusal.
 routes. Tensor programs run through `form/form-stdlib/native-tensor.bml`. Device
 drivers admit Form-emitted programs.
 
-The Go, Rust and TypeScript kernels are proof interpreters. Physical MAP_JIT
+fkwu is the interpreter and the JIT host. Physical MAP_JIT
 and library loaders carry Form-emitted images. `register_jit` binds an existing
 native alias; its witness is the alias registry sample. Compilation uses fkwu.
 
@@ -34,5 +34,6 @@ Recursion, list, helper-call and IEEE/string/vector bands prove results. The
 independent leaf witness proves Form emission and execution; each function's
 machine-code entry requires its own observation.
 
-The proof validator retains each carrier's streams and status under
-`.hearth/validation-*`. It compares stdout and requires successful exits.
+The validator (`form/validate.sh`) runs each band on fkwu and judges it by its
+exit, its stderr and its pinned verdict; each run's legs directory retains its
+stream, exit and wall time.

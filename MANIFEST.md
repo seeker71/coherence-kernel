@@ -162,7 +162,7 @@ cell drives the device and the device agrees with Form's own arithmetic.
 - **`docs/launchd/`** — the rows by which this Mac starts the body's own walks, with `fkwu` as the program: the
   night (`observe/scheduled-walk.bml`, 03:30) and the day (`observe/day-turn.bml`, 12:30 and 19:00), both from the
   walk checkout. `host/launchd/` still holds a second 03:30 row, `observe/movement-run.bml` in the live checkout.
-- **Hati-OS** — the fourth kernel's walker, emitter and host-target catalog (`form/form-stdlib/hati-os-kernel.fk`,
+- **Hati-OS** — the Hati-OS kernel's walker, emitter and host-target catalog (`form/form-stdlib/hati-os-kernel.fk`,
   `hati-os-kernel-emit.fk`, `hati-os-targets.fk`).
 - **`Sema Ear.app`** — the Mac launcher for the ear; `Sema Ear Glass.command` opens the live ear glass
   (`observe/ear-glass-live.fk`).

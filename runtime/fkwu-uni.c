@@ -21,7 +21,7 @@ unsigned int arc4random(void) {
 }
 /* POSIX dlopen/dlsym (used only by the optional libcrypto/TLS lane) → Win32 loader. The seed's
  * hard-coded .dylib/.so paths won't resolve on Windows, so TLS stays unavailable; that lane is not
- * on the source-eval / four-way path this receipt exercises. */
+ * on the source-eval path this receipt exercises. */
 extern void *LoadLibraryA(const char *);
 extern void *GetProcAddress(void *, const char *);
 extern int FreeLibrary(void *);
@@ -521,7 +521,7 @@ static long long fk_import_carried;
 static long long fk_import_refusal;
 /* 1 if the parse met a defect that CANNOT recover into a runnable program: a read
  * of an unbound name (a read has no value to decline with) or a parameter that
- * names a primitive (the sibling kernels do not agree on its arity). fkwu's
+ * names a primitive (a primitive has no single arity to bind). fkwu's
  * standing posture is recover-and-run, and it stays that way for every defeasible
  * diagnostic; these two are not defeasible, and running past them is what let a
  * deliberately broken band answer 255 and what made one variant spin for minutes
@@ -926,8 +926,8 @@ static void fk_pr(long long v) {
 }
 extern int sprintf(char *, const char *, ...);
 extern double strtod(const char *, char **);
-/* fk_fmt_float_js — the ONE float rendering, byte-identical to the Go kernel's
- * core.FormatFloatJS (strconv.FormatFloat(f,'g',-1,64) with NaN/Inf spelled out).
+/* fk_fmt_float_js — the ONE float rendering: the shortest-round-trip rule of the retired Go kernel's
+ * core.FormatFloatJS (strconv.FormatFloat(f,'g',-1,64) with NaN/Inf spelled out), kept as the body's single rule.
  *
  * fkwu used to print floats with printf's %.15g (fk_pv) and %.17g
  * (fk_pv_inline_number). Neither is Go's rule, and the gap is not academic:
@@ -953,7 +953,7 @@ extern double strtod(const char *, char **);
  * PROVEN, not reasoned: 2,000,000 values -- 1.5M uniform-random 64-bit patterns
  * (subnormals, extreme exponents, NaN payloads), 500k near-tie decimal
  * round-trips, plus every boundary at exp -5/-4/5/6, the integral floats, and
- * 0/-0/DBL_MAX/DBL_MIN/inf/nan -- rendered by this code and by the Go kernel's
+ * 0/-0/DBL_MAX/DBL_MIN/inf/nan -- rendered by this code and by the (then live) Go kernel's
  * own FormatFloatJS, compared byte for byte, zero mismatches.
  *
  * No libm: NaN is (f != f) and infinity is a comparison against DBL_MAX, so the
@@ -1749,7 +1749,7 @@ static long long *fk_nsattr;
 #define FK_FB_RING 2048 /* the framebuffer keeps the newest roots: a buffer, not a ledger -- framebuffer-events answers at most this many, oldest first */
 static long long fk_fbroots[FK_FB_RING];
 static long long fk_fbn;
-/* the four framebuffer counters the sibling table-walker lane already defines
+/* the four framebuffer counters the table-walker lane defines
  * (form/form-stdlib/fkc-table-serialize.fk, kernel_stat keys 11..14). The seed
  * recorded roots without ever counting the calls that reached fb_record, so a
  * refused attribution -- a value that was not a live cell handle -- left no
@@ -6085,7 +6085,7 @@ static void fk_path_join(char *out, long long outcap, const char *a, const char 
     }
     out[k + lb] = 0;
 }
-/* Removes a tree as Go's RemoveAll, Rust's remove_dir_all and Node's rmSync do: the walk
+/* Removes a tree as a recursive remove does (the way rm -r does): the walk
  * never follows a symlink (a link is removed as itself), and a directory is read again when
  * its first pass leaves entries a removal mid-readdir skipped. */
 static void fk_rmtree(char *p) {
@@ -6927,7 +6927,7 @@ static long long fk_mesh_detect(void) {
 #endif
 /* ── GPU matvec on a real RTX via the CUDA DRIVER API (nvcuda.dll) — fkwu's OWN host carrier, the
  * CUDA twin of fk_metal_matvec_f32_native. No python, no nvcc, no NVRTC, no CUDA toolkit:
- * LoadLibraryA the driver, JIT the Form-emitted PTX (matvec.ptx = the four-way fptx-matvec) at
+ * LoadLibraryA the driver, JIT the Form-emitted PTX (matvec.ptx = the fptx-matvec) at
  * CU_JIT_OPTIMIZATION_LEVEL(=7)=0 so mul.f32/add.f32 stay UNFUSED (two roundings), dispatch one
  * thread per row, and compare BIT-EXACT to the CPU f32 downward right-fold (volatile blocks the CPU
  * FMA so both sides are two roundings). The driver's built-in PTX JIT is intrinsic to the GPU. */
@@ -8330,7 +8330,7 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
 }
 /* Correctly rounded binary64 sqrt with no libm: the integer root of the
  * mantissa scaled to 106 bits rounds to nearest exactly as IEEE fsqrt does
- * (the JIT's fsqrt and the siblings' sqrt), so walker and JIT agree. */
+ * (the JIT's fsqrt), so walker and JIT agree. */
 static double fk_sqrt_d(double x) {
     unsigned long long b, m, q;
     unsigned __int128 rem, root, one;
@@ -8528,7 +8528,7 @@ static double fk_fmod_d(double x, double y) {
 }
 /* e^x: NaN answers NaN, past 709.78 +Infinity, under -745.13 zero; otherwise x = k ln2 + r with
  * |r| <= ln2/2 (r carried as hi - lo), the rational approximation on r, and 2^k from exponent bits.
- * The method and constants are the ones the Go sibling's math.Exp carries. */
+ * The method and constants are the ones the retired Go kernel's math.Exp carried. */
 static double fk_exp_d(double x) {
     if (x != x) {
         return x;
@@ -8556,7 +8556,7 @@ static double fk_exp_d(double x) {
 }
 /* ln x: NaN and +Infinity answer themselves, a negative x NaN, zero -Infinity; otherwise x = f1 * 2^k
  * from the exponent bits (a subnormal normalised first), f1 in [sqrt2/2, sqrt2), and the series in
- * s = f/(2+f). The method and constants are the ones the Go sibling's math.Log carries. */
+ * s = f/(2+f). The method and constants are the ones the retired Go kernel's math.Log carried. */
 static double fk_log_d(double x) {
     if (x != x) {
         return x;
@@ -8662,7 +8662,7 @@ static double fk_decimal_prefix_word(long long sa, int *ok) {
 /* CPython-compatible round(x, ndigits) for finite binary64 values, ndigits >= 0.
  *
  * Scaling in binary (x * 10^n) changes which side of a decimal half-way point
- * the stored value occupies.  The proof siblings exposed that defect in the
+ * the stored value occupies.  The retired proof siblings exposed that defect in the
  * old tag-52 implementation.  A binary64 has a terminating decimal expansion
  * of at most 1074 fractional places, so the fixed 1074-place rendering is the
  * exact value.  Round that digit string half-to-even, then let strtod choose the
@@ -13126,7 +13126,7 @@ static long long fk_walk(long long i, long long fp) {
          * value in the node's own fields (node[3] 1 once held); every later
          * read returns it. The held value is a melt root -- fk_melt copies
          * it, fk_smelt marks it -- so a let is built once, whatever melts
-         * between its reads, as the Go arm builds it. */
+         * between its reads. */
         if (fk_node[i][3] != 0) {
             return fk_node[i][2];
         }
@@ -13160,7 +13160,7 @@ static long long fk_walk(long long i, long long fp) {
          * lower onto these via fk_rwtab): int/int compares the tagged words
          * exactly (<<1 tagging keeps order), a float on either side forces an
          * IEEE comparison, and only numbers have an order -- an odd word that
-         * is not a float refuses by name, as the Go/Rust/TS lanes do. */
+         * is not a float refuses by name. */
         if ((a5 | b5) & 1) {
             if (!((fk_isf(a5) || (a5 & 1) == 0) && (fk_isf(b5) || (b5 & 1) == 0))) { fk_stop(FK_ORDER_REFUSAL); }
             return (fk_num(a5) <= fk_num(b5)) ? 2 : 0;
@@ -13372,8 +13372,8 @@ static long long fk_walk(long long i, long long fp) {
     }
     /* head, tail, nth — a list is an odd, non-negative word; an int is even and a string or
      * nothing odd-negative, so each door reads the tag bit before it walks, as len does. A
-     * receiver that is not a list, and an element that is not there, answer nothing (go, rust
-     * and ts answer null); the tail of a list is a list. */
+     * receiver that is not a list, and an element that is not there, answer nothing (null);
+     * the tail of a list is a list. */
     if (t == 20) {
         long long v20 = fk_walk(fk_node[i][1], fp);
         long long p = v20 >> 1;
@@ -13394,14 +13394,14 @@ static long long fk_walk(long long i, long long fp) {
         return FK_HT(p);
     }
     if (t == 22) {
-        /* len — a LIST cell's length; a STRING's byte length, as go, rust and
-         * ts answer and as the primitive registry declares ("string bytes").
+        /* len — a LIST cell's length; a STRING's byte length, as
+         * the primitive registry declares ("string bytes").
          * Until 2026-07-31 a string was `poolidx << 1`, the same even word as
          * an int, so the low-bit guard below was all this door could read and
          * (len "abc") answered 0 — a plausible zero over the wrong kind that
          * left tb-any2? silently false over string rows (R70). Strings have
          * carried their own odd-negative band since (fk_sbase); the door reads
-         * it now. Other non-lists answer 0 as the siblings do. The emitted
+         * it now. Other non-lists answer 0. The emitted
          * walker's fk_list_len (fkc-table-serialize.fk) still answers 0 for a
          * string: its words carry no string band to read.
          * nothing is not an empty collection: its length is a stop, as str_len's is. */
@@ -13429,7 +13429,7 @@ static long long fk_walk(long long i, long long fp) {
         long long w23 = fk_walk(fk_node[i][2], fp);
         fk_vsp = fk_vsp - 1;
         /* an index is an int, as str_byte_at's is: a float, a string or nothing read through >> 1 was a
-         * large negative number and answered nothing, where go, rust and ts stop */
+         * large negative number and answered nothing; now it stops */
         if ((w23 & 1) != 0) {
             fk_stop("fkwu: nth: an index is an int -- ask value_kind first");
         }
@@ -13748,7 +13748,7 @@ static long long fk_walk(long long i, long long fp) {
                 return fk_nid[ia102] == fk_nid[ib102] ? 2 : 0;
             }
         }
-        /* Two strings meet by their text, as value_eq and the siblings' eq do. Interning gives one text one word
+        /* Two strings meet by their text, as value_eq does. Interning gives one text one word
          * inside a process, but the shared field keeps its own word for the same text (a composite's category,
          * a node string), so (eq (node_category (intern_node (bp "NIB") kids)) (bp "NIB")) read 0 by identity. */
         if ((ae & be & 1) && ae < 0 && be < 0 && ae != be && fk_is_str(ae) && fk_is_str(be)) {
@@ -15388,7 +15388,7 @@ static int fk_odd_int_d(double y) {
  * meets an infinity; then the fractional part of y through exp(yf*log(x)) and the integer part by
  * repeated squaring of x's significand with its exponent carried apart, scaled once at the end from
  * exponent bits. pow(2,10) is 1024.0 to the bit, pow(2,0.5) is sqrt 2 correctly rounded. The method
- * and its order of cases are the ones the Go sibling's math.Pow carries. */
+ * and its order of cases are the ones the retired Go kernel's math.Pow carried. */
 static double fk_pow_d(double x, double y) {
     double inf = fk_bitsd(FK_D_INF);
     if (y == 0.0 || x == 1.0) { return 1.0; }
@@ -15515,7 +15515,7 @@ static long long fk_float_leaf(long long mode, long long x) {
     if (fi < 0 || fi > fk_fp) { return fk_nothing; }
     return fk_fbox(FK_FV(fi));
 }
-/* ---- the binary form (FORMBIN2) on the fourth arm: modes 4-8 of the leaf door (tag 201) ----
+/* ---- the binary form (FORMBIN2) in fkwu: modes 4-8 of the leaf door (tag 201) ----
  * value_kind (4), recipe_to_bytes (5), bytes_to_recipe (6), read_form_binary (7) and
  * write_form_binary (8, x = (cons path node)) are rewrite rows over the one mode door the
  * float surface already opened -- the AST tag space is full and 150 is the native-surface
@@ -15525,8 +15525,8 @@ static long long fk_float_leaf(long long mode, long long x) {
  * string as u32 BE length + UTF-8 bytes, then the tree -- 0 leaf (pkg level type inst as
  * u32 BE; a trivial string's inst is its local table index), 1 composite (category, u32
  * count, children), 2 float64 (8 bytes LE), 3 int64 (8 bytes LE). The same bounds and the
- * same refusals by name; a FORMBIN1 artifact reads as the siblings read it. On this arm a
- * composite's kid may be a raw word (42, "ab", 3.5) where the siblings only hold NodeIDs;
+ * same refusals by name; a FORMBIN1 artifact reads as the FORMBIN contract reads it. Here a
+ * composite's kid may be a raw word (42, "ab", 3.5) where the contract's trees only hold NodeIDs;
  * the wire has no raw-word lane, so a raw kid crosses as its trivial node and reads back as
  * the interned node (fk_neq compares those by value). A list, a function or a record kid
  * refuses the whole give: recipe_to_bytes answers nothing, write_form_binary -1. */
@@ -15535,7 +15535,7 @@ static long long fk_fb_sn, fk_fb_scap;
 static long long *fk_fb_htab;        /* open addressing over content: index+1, 0 = empty */
 static long long fk_fb_hcap;
 static int fk_fb_refused;
-static const char *fk_fb_err;        /* the last refusal, the siblings' words */
+static const char *fk_fb_err;        /* the last refusal, in the contract's words */
 static unsigned long long fk_fb_hash_bytes(const char *b, long long n) {
     unsigned long long h = 1469598103934665603ULL;
     long long k = 0;
@@ -15588,7 +15588,7 @@ static long long fk_fb_str_index(long long v, int add) {
     fk_fb_sn = fk_fb_sn + 1;
     return fk_fb_sn - 1;
 }
-/* the string table in the siblings' order: category before children, depth first, first visit */
+/* the string table in the contract's order: category before children, depth first, first visit */
 static void fk_fb_collect(long long v) {
     if (fk_is_str(v)) { fk_fb_str_index(v, 1); return; }
     if (v < 0 && (v & 1) && !fk_isf(v) && !fk_is_fnval(v)) {
@@ -15630,8 +15630,8 @@ static void fk_fb_f64le(double d) {
 static void fk_fb_leaf(long long pkg, long long level, long long ty, long long inst) {
     fk_fb_u32(0); fk_fb_u32(pkg); fk_fb_u32(level); fk_fb_u32(ty); fk_fb_u32(inst);
 }
-/* an int as the siblings write it: inside int32 it is a type-1 leaf whose inst IS the value
- * (Go internTrivialInt), beyond int32 it is a tag-3 int64 (the i64 table's value on the wire) */
+/* an int as the contract writes it: inside int32 it is a type-1 leaf whose inst IS the value
+ * (the retired Go kernel's internTrivialInt), beyond int32 it is a tag-3 int64 (the i64 table's value on the wire) */
 static void fk_fb_int(long long n) {
     if (n >= -2147483648LL && n <= 2147483647LL) { fk_fb_leaf(1, 1, 1, (long long)(unsigned int)(int)n); return; }
     fk_fb_u32(3);
@@ -15708,7 +15708,7 @@ static long long fk_fb_serialize(long long root, long long *start, long long *n)
     if (fk_fb_refused) { fk_sbp = *start; return 0; }
     return 1;
 }
-/* ---- the reader: the siblings' bounds and refusals, by their words ---- */
+/* ---- the reader: the contract's bounds and refusals, by its words ---- */
 static const unsigned char *fk_fb_b;
 static long long fk_fb_n, fk_fb_pos, fk_fb_count;
 static long long *fk_fb_tab;         /* the artifact's string table as string words */
@@ -15756,8 +15756,8 @@ static long long fk_fb_string_leaf(long long inst) {
     if (inst < 0 || inst >= fk_fb_tabn) { fk_fb_bad = 1; fk_fb_err = "form binary: bad string index"; return fk_nothing; }
     return fk_intern_str_node(fk_fb_tab[inst]);
 }
-/* a leaf as the siblings read it: a trivial string by its table index, a trivial int32 by its
- * inst (sign-extended, Go trivialValue TrivInt), a trivial bool by inst != 0, a trivial null
+/* a leaf as the contract reads it: a trivial string by its table index, a trivial int32 by its
+ * inst (sign-extended, as the retired Go kernel's trivialValue TrivInt did), a trivial bool by inst != 0, a trivial null
  * as nothing; every other coordinate stays the coordinate it is */
 static long long fk_fb_leaf_node(long long pkg, long long level, long long ty, long long inst, int catpos) {
     if (level == 1 && ty == 2) {
@@ -15899,10 +15899,10 @@ static long long fk_value_kind(long long v) {
     while (k[kn]) { kn = kn + 1; }
     return fk_sbuf(k, kn);
 }
-/* value_str -- mode 25 of the leaf door: a word as text, the way the Go kernel's formValueString
- * writes it and every sibling's value_str answers. A string is its bytes, an int its decimal, a float
+/* value_str -- mode 25 of the leaf door: a word as text, the way the retired Go kernel's formValueString
+ * wrote it, kept as the body's one rendering. A string is its bytes, an int its decimal, a float
  * fk_fmt_float_js, a list "[a, b]" with its items written likewise; nothing is
- * "" on its own and null as a list's item, as Go writes a null item. The kinds are read in
+ * "" on its own and null as a list's item. The kinds are read in
  * fk_value_kind's order. The pg floor's float cells write through it, and core.fk's int_to_str for any word but an
  * integer or nothing. */
 static char *fk_valstr_buf;
@@ -16014,7 +16014,7 @@ static long long fk_substring_word(long long sword, long long a, long long b) {
  * byte doors ask it BEFORE they open the file, so a string, a number, nothing or a list holding a
  * non-int is refused like a failed open (-1) and a refused write leaves the old bytes standing --
  * write_file_bytes once truncated the file first and answered 0 for a string. An int element keeps
- * its low byte (300 writes 44), the meaning all four kernels share. */
+ * its low byte (300 writes 44), the meaning the body settled. */
 static int fk_byte_list_ok(long long xs) {
     if (!(xs == 1 || ((xs & 1) && xs > 0 && FK_POK(xs >> 1)))) {
         return 0;
@@ -16632,7 +16632,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((a11 >> 1) % (b11 >> 1)) << 1;
     }
     if (t == 15) {
-        /* now_unix_ms: milliseconds, matching the Go/Rust/TS siblings' shape */
+        /* now_unix_ms: milliseconds since the Unix epoch */
         return fk_now_ms() << 1;
     }
     if (t == 16) {
@@ -16656,8 +16656,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
              * here dressed a vanished host-exec launch as "empty" (2026-08-27);
              * silent error hides illness. This is the op-238 class of
              * legitimate runtime death (a state the program cannot honestly
-             * continue past), not a bounds check: Go's str_len dies this same
-             * death, and callers name the absence with nothing? before
+             * continue past), not a bounds check: str_len dies this same
+             * death everywhere, and callers name the absence with nothing? before
              * measuring. */
             fk_stop("fkwu: str_len: nothing has no length -- ask nothing? before measuring");
         }
@@ -16670,7 +16670,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 238) {
         /* form_error — the voice of refusal. Inside an attempt it is a stop
          * like any other: voiced, unwound to the recover point, and the
-         * attempt answers nothing, as Go/Rust/TS catch their panic there.
+         * attempt answers nothing.
          * With no attempt standing the program has declared its own
          * cannot-recover: message to fd 2, exit nonzero. */
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
@@ -16697,7 +16697,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long wa26 = fk_walk(fk_node[i][1], fp); fk_vp(wa26); long long sa26 = fk_stri(wa26);
         long long wb26 = fk_walk(fk_node[i][2], fp); long long sb26 = fk_stri(wb26); fk_vsp = fk_vsp - 1;
         /* the axiom-1 absence is a value str_eq may ask about -- it equals only an absence (str-eq-absence-band,
-         * four-way); any other non-string stops, as on the sibling kernels */
+         * band); any other non-string stops (a non-string is not a string) */
         if ((wa26 != fk_nothing && (sa26 < 0 || !FK_SOK(sa26))) || (wb26 != fk_nothing && (sb26 < 0 || !FK_SOK(sb26)))) {
             fk_stop("fkwu: str_eq: only strings and nothing compare as strings -- ask value_kind first, or use value_eq");
         }
@@ -16752,35 +16752,35 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          *
          * THIS ARM IS OLDER THAN ITS NAME. str_find left flt-ops on 2026-07-01
          * with substring/int_to_str/str_to_int and became Form composition in
-         * core.fk. The other three arms went with their rows; THIS one stayed,
+         * core.fk. The other mirrors went with their rows; THIS one stayed,
          * unreachable, together with its fkc-tri2 arm in fkc-table-serialize.fk.
          * On 2026-09-08 the bearing census named `fstr-find-loop` at 35.1M calls
          * and 64.3% of the locale walk with the remedy "mint-a-native", and the
-         * mint was a row: four mirrors, three of them already standing. An
+         * mint was a row: four mirrors, three of them already standing then. An
          * orphaned arm reads exactly like an absent one from the call site, so
          * READ EVERY MIRROR FOR THE NAME BEFORE YOU MINT.
          *
          * THE ONE MEANING -- BYTES, CLAMPED, NEVER DIES.
-         * witnessed: 2026-09-08 -> str-find-one-meaning-band 8191 on all four arms
+         * witnessed: 2026-09-08 -> str-find-one-meaning-band 8191 on every mirror then standing
          *   from < 0                       -> 0 (a search cannot start before the
-         *                                    first byte; go/rust/ts already clamped
-         *                                    and the recipe did not -- the ONE edge
+         *                                    first byte; the clamp was already the
+         *                                    rule and the recipe did not -- the ONE edge
          *                                    that moved when this row came back)
          *   from > str_len(h)              -> -1, the empty needle included
          *   needle empty                   -> from, once clamped into range
          *   needle longer than what is left-> -1
          *   overlapping occurrences        -> the first
-         *   h or needle not a string       -> stops (law 8, all four kernels: an
+         *   h or needle not a string       -> stops (law 8: an
          *                                    absence is not a haystack and not a
          *                                    needle; attempt recovers it, nothing?
          *                                    asks first)
-         *   from not an int (nothing too)  -> stops, as on the siblings: a word
+         *   from not an int (nothing too)  -> stops (a non-int is not an index): a word
          *                                    read as an index it is not was the
          *                                    old clamp's counterfeit start
          * BYTES, NOT CODEPOINTS. Every index in this dialect is a byte offset --
          * str_byte_at indexes bytes, substring cuts bytes, and the locale rows are
          * Persian, Hebrew, Chinese and Japanese. A `from` snapped up to a character
-         * start (which go, rust and ts did until 2026-09-08) skips a needle that
+         * start (which the retired Go, Rust and TS natives did until 2026-09-08) skips a needle that
          * begins on a continuation byte, and no ASCII band can say so.
          *
          * The two byte pointers are hoisted OUT of the scan: FK_SBYTES is a macro
@@ -16882,7 +16882,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_strv(fk_sintern(fk_sbp, 1));
     }
     if (t >= 34 && t <= 41) {
-        /* the bit doors take ints only: a float, a string or nothing stops, as on the siblings,
+        /* the bit doors take ints only: a float, a string or nothing stops (a non-int has no bits),
          * where its tagged word once answered as bits (bxor 1.5 0 read the float box's word) */
         long long ba = fk_walk(fk_node[i][1], fp);
         long long bb = t == 41 ? 0 : fk_walk(fk_node[i][2], fp);
@@ -16990,19 +16990,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 113) {
         /* the leaf's value is source text read through law 7's one grammar; any other kind
-         * stops, as on the siblings (a float is made a leaf by make_float64) */
+         * stops (a float is made a leaf by make_float64) */
         int ok113 = 0;
         double fd113 = fk_decimal_prefix_word(fk_stri(fk_walk(fk_node[i][1], fp)), &ok113);
         if (!ok113) {
             fk_stop("fkwu: intern_trivial_float: only source text reads as a float leaf -- make_float64 takes a number");
         }
-        /* INTERN, as the name says: the Go proof arm (internTrivialFloat64)
-         * dedups by canonical bits -- one quiet NaN, -0.0 folds to +0.0,
-         * equal doubles share one row. This arm minted a fresh node AND a
-         * fresh pool slot per call, the one intern op whose behavior did not
-         * keep its name; the fkwu seed was the diverging arm. Compare by
-         * BITS, not ==, so NaN interns to itself. nid[3] carries the pool
-         * index, mirroring the Go arm's Inst. */
+        /* INTERN, as the name says: it dedups by canonical bits (the rule the
+         * retired Go kernel's internTrivialFloat64 set) -- one quiet NaN, -0.0 folds
+         * to +0.0, equal doubles share one row. This arm once minted a fresh node
+         * AND a fresh pool slot per call, the one intern op whose behavior did not
+         * keep its name. Compare by BITS, not ==, so NaN interns to itself.
+         * nid[3] carries the pool index, as a leaf's Inst does. */
         return fk_intern_float_node(fd113);
     }
     if (t == 50) {
@@ -17073,15 +17072,15 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_fbox(fk_log_d(fk_num_only(fk_walk(fk_node[i][1], fp))));
     }
     if (t == 195) {
-        /* math_pow: the three witnesses answer math.Pow, and fk_pow_d carries its method and its
+        /* math_pow: fk_pow_d answers math.Pow, carrying its method and its
          * special cases; only numbers take part */
         double pb195 = fk_num_only(fk_walk(fk_node[i][1], fp));
         double pe195 = fk_num_only(fk_walk(fk_node[i][2], fp));
         return fk_fbox(fk_pow_d(pb195, pe195));
     }
     if (t == 201) {
-        /* float_leaf mode x -- one door for the float-NodeID surface the siblings
-         * carry as four natives: 0 float_value (read a type-6/7 leaf's IEEE value),
+        /* float_leaf mode x -- one door for the float-NodeID surface
+         * carried as four natives: 0 float_value (read a type-6/7 leaf's IEEE value),
          * 1 make_float32 (intern a type-6 leaf), 2 make_float64 (a type-7 leaf),
          * 3 math_pi. The four names are rewrite rows over this tag (fk_rwtab). */
         long long fm201 = fk_walk(fk_node[i][1], fp);
@@ -17108,8 +17107,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
              *
              * THE ONE MEANING OF THE CUT -- BYTES, CLAMPED, NEVER DIES. It is the recipe's
              * own contract, measured edge by edge before this arm existed, and since
-             * 2026-09-07 it is what all four kernels answer
-             * (form-stdlib/tests/substring-one-meaning-band.fk, 4095 four ways, a
+             * 2026-09-07 it is the meaning the body settled
+             * (form-stdlib/tests/substring-one-meaning-band.fk, 4095, a
              * drift gate):
              *   n = end - start <= 0                 -> ""   (start>end, zero len)
              *   indices outside [0, len)             -> contribute nothing, so the
@@ -17119,14 +17118,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
              *                                           byte_to_str answered "")
              * BYTES, NOT CODEPOINTS. str_byte_at indexes bytes and the locale rows
              * are full of multi-byte tongues; flooring the offsets to character
-             * starts -- which the Go/Rust/TS natives did until that day -- silently
+             * starts -- which the retired Go/Rust/TS natives did until that day -- silently
              * re-cut every Persian, Hebrew, Chinese and Japanese row. (0,1) of "Ω" is
-             * one raw byte 206 here, as it is through the recipe and on the Go arm;
-             * rust and ts cannot HOLD a severed character and answer the absence.
+             * one raw byte 206 here, as it is through the recipe (the retired Rust and TS
+             * kernels could not HOLD a severed character and answered the absence).
              *
-             * An index that is not an int (`nothing` too) stops, as on the siblings:
+             * An index that is not an int (`nothing` too) stops (a non-int is not an index):
              * a `nothing` start once read as nine quintillion below zero and clamped
-             * to 0, a counterfeit slice where every other kernel stops. */
+             * to 0, a counterfeit slice where a stop is the honest answer. */
             long long rn201 = fk_node[i][3];
             if (rn201 == 0 || fk_node[rn201][0] != 19) {
                 /* (float_leaf 9 x) written by hand: the door's own arity is 2, so
@@ -17752,7 +17751,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_sbuf("", 0);
         }
         if (off < 0) {
-            /* no byte sits before the first: nothing, as the siblings answer -- a negative
+            /* no byte sits before the first: nothing -- a negative
              * offset once failed its seek unseen and read the file's head as the slice */
             return fk_nothing;
         }
@@ -17796,9 +17795,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                         (sa63 >= 0 && FK_SOK(sa63)) ? FK_SO(sa63) : -1, fk_sp);
             }
             /* A file that never was answers the axiom-1 nothing, never "" —
-             * "" means the file EXISTS and holds zero bytes. The Go arm's
-             * read_file already answered VNull here (main.go readFileTextNative);
-             * this heals a live cross-arm divergence (2026-08-27). */
+             * "" means the file EXISTS and holds zero bytes. The retired Go
+             * kernel's read_file answered VNull here (main.go readFileTextNative);
+             * the body keeps that meaning (settled 2026-08-27). */
             return fk_nothing;
         }
         fk_sinit();
@@ -17828,7 +17827,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         close(fd);
         if (rerr63 && total == 0) {
             /* Opened but not one byte ever measured (a directory, an unreadable
-             * device): no content was witnessed — nothing, matching the Go arm.
+             * device): no content was witnessed — nothing.
              * A mid-read error after bytes arrived stays a named cousin
              * (partial-as-whole) for its own movement. */
             return fk_nothing;
@@ -17906,8 +17905,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         /* record_has asks whether this value has this field: a value that is no record has none, so it
-         * answers 0, as Rust and TS answer; go still stops there, so kernel-laws-band names the row
-         * among those not yet shared. record_get and record_set keep their stop (bit 268435456) --
+         * answers 0 (kernel-laws-band names the row). record_get and record_set keep their stop (bit 268435456) --
          * they need a record to read or write */
         if (r < 1 || r > fk_rp) {
             return 0;
@@ -18026,8 +18024,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_host_resolve(fkl_p);
         void *fkl_d = opendir(fkl_p);
         if (fkl_d == 0) {
-            /* a directory that is not there, or a path that is no directory, answers nothing, as Go,
-             * Rust and TS answer; an empty directory answers [] (kernel-laws-band bit 67108864). A
+            /* a directory that is not there, or a path that is no directory, answers nothing;
+             * an empty directory answers [] (kernel-laws-band bit 67108864). A
              * caller that may meet a missing path reads the listing as fs_list(d) ?? []: the tail of
              * nothing is nothing, so a nil? walk handed nothing never ends */
             return fk_nothing;
@@ -18464,7 +18462,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 197) {
         /* method_define bp "name" fn -> bp. The third arg must be a FUNCTION
          * VALUE (a bare defn name in value position rides tag 243); anything
-         * else dies loud, matching the sibling walkers' refusal — a method
+         * else dies loud, a non-function refused by name — a method
          * table holding a non-function would dispatch to nonsense later,
          * far from the wound. Re-defining a (blueprint, name) replaces. */
         long long bp197 = fk_walk(fk_node[i][1], fp); fk_vp(bp197);
@@ -18502,7 +18500,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * blueprint; the method's FIRST param binds the receiver (self), the
          * remaining args ride the tag-242 cell chain exactly like tag-241
          * direct calls. A non-record receiver or a missing method dies loud —
-         * the sibling kernels panic here, and a nothing'd dispatch would be a
+         * a panic is the honest answer here, and a nothing'd dispatch would be a
          * numb answer wearing a verdict. */
         long long rv199 = fk_walk(fk_node[i][1], fp);
         if (fk_isrec(rv199) == 0) {
@@ -18612,8 +18610,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 8) {
             return fk_fp << 1;
         }
-        /* 9..14 -- the framebuffer census, in the vocabulary the sibling
-         * table-walker lane already fixed (fkc-table-serialize.fk). The seed
+        /* 9..14 -- the framebuffer census, in the vocabulary the
+         * table-walker lane fixed (fkc-table-serialize.fk). The seed
          * carried fk_fbn all along and simply never said it, so the glass had
          * roots arriving and no count of them; 2026-09-07 named the pair 9/11
          * owed and first on the seam line. Paid here. Note 9 counts roots
@@ -19401,8 +19399,8 @@ static long long fk_attempt(long long node, long long fp) {
 /* Where each piece of the assembled unit came from. fk_src_append_text pushes one row per file
  * or carried unit it appends: the offset its text starts at and the path it was read from. A
  * symbol read back from an image pushes a row with no path. A diagnostic's offset maps back
- * through these rows to a file and the line within it, so fkwu names file:line:col as the proof
- * siblings do; the rows reset whenever the assembled text does. */
+ * through these rows to a file and the line within it, so fkwu names file:line:col;
+ * the rows reset whenever the assembled text does. */
 static long long fk_srcseg_n;
 static long long fk_srcseg_cap;
 static long long *fk_srcseg_off;
@@ -20018,7 +20016,7 @@ static long long fk_rwtab_find(long long s, long long n) {
 /* A RESERVED HEAD: a name this parser answers itself in call position — the four
  * control forms, any rewrite row, any op row. A binding of that spelling (a defn
  * parameter, a let) is reachable in value position only; in call position the
- * primitive wins, on Go, Rust and TS as here. That trap returned a full-pass 255 on
+ * primitive wins. That trap returned a full-pass 255 on
  * a deliberately broken band (the slot-map ship, 2026-07-22, defect 1),
  * so [shadowed-call] below says it out loud. */
 static int fk_reserved_text_head(const char *text, long long n) {
@@ -20292,7 +20290,7 @@ static long long fk_cur_defn_idx = -1;
  * defn's own prologue fills the slot from fk_call_cap_vals on entry and (b) every call site that
  * creates or invokes it knows what to supply. Answers the slot, or -1 when the enclosing frame does
  * not bind the name. A captured name shadows every global of the same name, a defn or a constant,
- * as the three siblings scope it, so the call head and value position both ask here before either
+ * by the body's one scoping rule, so the call head and value position both ask here before either
  * table. A function captures every enclosing name it reads: its capture rows grow on demand. */
 static long long fk_enc_capture(long long s, long long n) {
     if (fk_cur_defn_idx < 0 || fk_enc_count <= 0) {
@@ -20323,8 +20321,8 @@ static void fk_parse_top(void);
 #define FK_TOP_CONST_CAP_INIT 512 /* top-level constant table birth size; doubles on demand */
 /* THE ONCE-HOLD (tag FK_TAG_CONST_HOLD). Witnessed 2026-09-02: a top-level
  * let spliced its initializer NODE into every reference site, so each read
- * re-walked the whole build — call-by-name. The Go arm builds once; the
- * divergence cost 31.6M dispatches in one cold .bml compile. Every
+ * re-walked the whole build — call-by-name. A let builds once; the
+ * re-walk cost 31.6M dispatches in one cold .bml compile. Every
  * reference to a top-level let now shares one hold node per const binding:
  * the first walk computes the value and holds it in the NODE'S OWN free
  * fields (node[2] value, node[3] 1 once held, 0 = empty). The held value
@@ -20660,12 +20658,12 @@ static long long fk_sparse(void) {
 
         /* (let name val): canonical let is TWO-ARG — it binds name for the REST of its (do ...) and
          * evaluates to val (the wav-sense cell: "let is two-arg only; binds for the rest of its
-         * do; a three-arg (let n v body) drops body"; the Go/Rust/TS walkers agree). A well-formed
+         * do; a three-arg (let n v body) drops body"). A well-formed
          * let always opens a do, so it is bound by fk_parse_do, which sees the rest; this fk_sparse
          * path is reached only by a BARE let in a raw value position (no do, hence no rest). The
          * old 3-arg form here — (let name val body), eval body in scope — is the malformed shape
-         * the walkers drop (TS rejects it outright); it survives untouched as a pre-existing,
-         * non-four-way value-position convenience. The actual do-let divergence is fixed entirely
+         * the walkers drop; it survives untouched as a pre-existing
+         * value-position convenience. The actual do-let divergence is fixed entirely
          * in fk_parse_top + fk_parse_do; this path is left as-is to keep every prelude library
          * byte-identical. */
         if (fk_sym_eq(s, hn, "let")) {
@@ -20712,8 +20710,8 @@ static long long fk_sparse(void) {
 
         /* A LIVE BINDING THIS CALL WILL NOT REACH. `(sub x 128)` where `sub` is a name in
          * scope reads as subtraction, not as the binding — the op/rewrite tables are
-         * consulted before the local frame, and Go, Rust and TS answer the same way, so
-         * this is not a divergence and fkwu does not refuse it. It is still the trap that
+         * consulted before the local frame, so
+         * this is by design and fkwu does not refuse it. It is still the trap that
          * cost Stone 13 hours (the slot-map ship, 2026-07-22), so it is said
          * out loud: a WARNING, counted and printed. */
         if (fk_bd_lookup(s, hn) >= 0 && fk_reserved_head(s, hn)) {
@@ -20860,8 +20858,8 @@ static long long fk_sparse(void) {
          * inert.
          *
          * LOCALS SHADOW GLOBALS in call position: the local frame (fk_bd_lookup) is consulted
-         * BEFORE the defn table, matching value position (which already reads bd first) and the
-         * three siblings. Pre-heal the defn table won: (defn oac-offer (cell args) (cell args))
+         * BEFORE the defn table, matching value position (which already reads bd first).
+         * Pre-heal the defn table won: (defn oac-offer (cell args) (cell args))
          * under a loaded (defn cell ...) invoked the GLOBAL constructor instead of the parameter
          * (the cell-shadowing heal, 2026-07-17) — every higher-order
          * param (map's f, filter's pred) was one same-named prelude defn away from silent
@@ -20990,7 +20988,7 @@ static long long fk_sparse(void) {
          * lands here, even when a global defn shares its spelling (locals shadow globals). */
         long long hoff = hshadow;
         /* A unit-level let holding a function value is a computed callee too: the head reads the
-         * let's hold the way a value position reads it, as Go, Rust and TS call a let-bound fn. */
+         * let's hold the way a value position reads it, so a let-bound fn is called. */
         long long hcrow = hoff >= 0 ? -1 : fk_const_lookup(s, hn);
         if (hoff >= 0 || hcrow >= 0) {
             long long head244;
@@ -21091,8 +21089,8 @@ static long long fk_sparse(void) {
         /* Compile-time unresolved head. It CAN recover -- axiom-5: an offer a cell can't answer
          * acks nothing (tag 137), so the parse continues. Per "die only if it cannot recover," we
          * do NOT die here; we RECOVER. But we no longer do it SILENTLY: this witness is the compile
-         * diagnostic that was missing (the ftanh-class bug). Go/Rust/TS hard-error on an unbound
-         * head; fkwu recovers and says so, on every occurrence, unconditionally (no env gate). A
+         * diagnostic that was missing (the ftanh-class bug). A hard error on an unbound
+         * head would end the run; fkwu recovers and says so, on every occurrence, unconditionally (no env gate). A
          * correct program with its preludes present never reaches here. */
         /* Route the pre-existing unresolved-call witness through the collector as
          * an ERROR so it joins the gcc-style count -- but it STILL RECOVERS to
@@ -21947,7 +21945,7 @@ static void fk_parse_top(void) {
             /* the let joins the root sequence through the binding's ONE hold
              * node (the reference-site idiom above), so its value is built at
              * its own textual position exactly once and later references read
-             * the memo -- the Go arm's implicit-do let is eager the same way. */
+             * the memo -- an implicit-do let is eager the same way. */
             long long crow3 = fk_const_lookup(ns3, nlen3);
             if (fk_const_wrapp1[crow3] == 0) {
                 fk_const_wrapp1[crow3] =
@@ -21964,9 +21962,9 @@ static void fk_parse_top(void) {
      * LAST top-level statement ever ran: (print_str "x") followed by 0 printed
      * nothing and answered 0, and a write_file before a trailing value never
      * touched the disk -- every earlier statement was parsed, then dropped.
-     * The Go arm wraps multiple top-level forms in an implicit do
-     * (readRootFromSource) and runs them all; dropping them here was a live
-     * four-way divergence, witnessed 2026-09-02 through a direct .bml whose
+     * Multiple top-level forms are wrapped in an implicit do and all run;
+     * dropping them was a live defect (the retired Go kernel's readRootFromSource
+     * wrapped them), witnessed 2026-09-02 through a direct .bml whose
      * lowering is exactly such a statement sequence. */
     long long stmt = fk_sparse();
     fk_root_append(stmt);
@@ -24160,7 +24158,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         }
         /* ONE hold per binding: a row takes the image's own hold over the initializer it
          * names, so a program that reads the name reads the hold the image's defns read and
-         * the initializer runs once (a printing let printed twice, where Go prints it once) */
+         * the initializer runs once (a printing let printed twice, where once is right) */
         i = 0;
         while (i < const_count) {
             int dup = 0;
