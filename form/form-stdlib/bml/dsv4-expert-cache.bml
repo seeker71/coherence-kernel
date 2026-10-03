@@ -31,17 +31,19 @@ section [form.bml] {
   def dxc-stamps(st) = st[2];
   def dxc-slots(st) = len(st[1]);
   // ---- lists ------------------------------------------------------------------------------------------------------------
-  def dxc-find(xs, v, i) = i == len(xs) ? 0 - 1 : (xs[i] == v ? i : dxc-find(xs, v, i + 1));
-  def dxc-member?(xs, v) = len(xs) == 0 ? false : (xs[0] == v || dxc-member?(xs[1:], v));
+  // EVERY WALK IS ONE PASS: `len` and `xs[i]` of a list are walks of the list, so a loop that asks either at every index is quadratic (a take cost 528 us at 64 slots, 1,208 at 128 and 1,859 at 192, measured on synthetic
+  // top-ks 2026-10-04: ten milliseconds of a real token at 43 layers). These carry the list itself down (nil?, xs[0], xs[1:]) and answer what they answered.
+  def dxc-find(xs, v, i) = nil?(xs) ? 0 - 1 : (xs[0] == v ? i : dxc-find(xs[1:], v, i + 1));
+  def dxc-member?(xs, v) = nil?(xs) ? false : (xs[0] == v || dxc-member?(xs[1:], v));
   def dxc-set-at(xs, i, v) = i == 0 ? cons(v, xs[1:]) : cons(xs[0], dxc-set-at(xs[1:], i - 1, v));
-  def dxc-distinct(ids) = len(ids) == 0 ? 0 : (dxc-member?(ids[1:], ids[0]) ? 0 : 1) + dxc-distinct(ids[1:]);
-  def dxc-ids-in-range?(ids, nexp) = len(ids) == 0 ? true : (ids[0] >= 0 && ids[0] < nexp && dxc-ids-in-range?(ids[1:], nexp));
+  def dxc-distinct(ids) = nil?(ids) ? 0 : (dxc-member?(ids[1:], ids[0]) ? 0 : 1) + dxc-distinct(ids[1:]);
+  def dxc-ids-in-range?(ids, nexp) = nil?(ids) ? true : (ids[0] >= 0 && ids[0] < nexp && dxc-ids-in-range?(ids[1:], nexp));
   // ---- the step -----------------------------------------------------------------------------------------------------------
   // the slots of the ids this step finds already cached (the pinned set)
-  def dxc-pin(keys, ids) = len(ids) == 0 ? [] : (dxc-find(keys, ids[0], 0) >= 0 ? cons(dxc-find(keys, ids[0], 0), dxc-pin(keys, ids[1:])) : dxc-pin(keys, ids[1:]));
+  def dxc-pin(keys, ids) = nil?(ids) ? [] : { let s = dxc-find(keys, ids[0], 0); s >= 0 ? cons(s, dxc-pin(keys, ids[1:])) : dxc-pin(keys, ids[1:]); };
   // the victim: the unpinned slot with the smallest stamp, the lowest index among equals; -1 when every slot is pinned
-  def dxc-victim-go(stamps, pinned, i, best, bi) = i == len(stamps) ? bi
-   : ((dxc-member?(pinned, i) || (bi >= 0 && stamps[i] >= best)) ? dxc-victim-go(stamps, pinned, i + 1, best, bi) : dxc-victim-go(stamps, pinned, i + 1, stamps[i], i));
+  def dxc-victim-go(stamps, pinned, i, best, bi) = nil?(stamps) ? bi
+   : ((dxc-member?(pinned, i) || (bi >= 0 && stamps[0] >= best)) ? dxc-victim-go(stamps[1:], pinned, i + 1, best, bi) : dxc-victim-go(stamps[1:], pinned, i + 1, stamps[0], i));
   def dxc-victim(stamps, pinned) = dxc-victim-go(stamps, pinned, 0, 0, 0 - 1);
   // one id: a hit is stamped, a miss takes the victim and is told (slot, expert); the accumulator is [tick, keys, stamps, pinned, slots, misses, hits, evicts]
   def dxc-place(a, e) {
@@ -52,7 +54,7 @@ section [form.bml] {
    let s = dxc-find(a[1], e, 0);
    s >= 0 ? [a[0] + 1, a[1], dxc-set-at(a[2], s, a[0] + 1), a[3], cons(s, a[4]), a[5], a[6] + 1, a[7]] : dxc-place(a, e);
   }
-  def dxc-go(a, ids) = len(ids) == 0 ? a : { let b = dxc-one(a, ids[0]); nothing?(b) ? nothing() : dxc-go(b, ids[1:]); };
+  def dxc-go(a, ids) = nil?(ids) ? a : { let b = dxc-one(a, ids[0]); nothing?(b) ? nothing() : dxc-go(b, ids[1:]); };
   def dxc-done(b) = nothing?(b) ? nothing() : [[b[0], b[1], b[2]], reverse(b[4]), reverse(b[5]), b[6], b[7]];  // [table', slots (one a top-k id, in order), misses ([slot, expert], in the order placed), hits, evicts], or nothing
   def dxc-admit?(st, ids, nexp) = !nothing?(st) && len(ids) > 0 && dxc-ids-in-range?(ids, nexp) && dxc-distinct(ids) <= dxc-slots(st);
   // `pin` 1 is the rule (every hit is pinned before a miss is placed); 0 is the PLANT the bands break it with (no pin: a miss may take the slot a later id of its own top-k reads), never a mode of the driver
@@ -82,10 +84,10 @@ section [form.bml] {
    record_set(c, dxc-lkey(il), [st[0], dxc-set-at(st[1], slot, 0 - 1), dxc-set-at(st[2], slot, 0)]);
   }
   // ---- what a table holds (the band reads these) ------------------------------------------------------------------------------
-  def dxc-resident-go(keys, n) = len(keys) == 0 ? n : dxc-resident-go(keys[1:], keys[0] >= 0 ? n + 1 : n);
+  def dxc-resident-go(keys, n) = nil?(keys) ? n : dxc-resident-go(keys[1:], keys[0] >= 0 ? n + 1 : n);
   def dxc-resident(st) = dxc-resident-go(st[1], 0);
   // no expert holds two slots
-  def dxc-sound-go(keys) = len(keys) < 2 ? true : ((keys[0] < 0 || !dxc-member?(keys[1:], keys[0])) && dxc-sound-go(keys[1:]));
+  def dxc-sound-go(keys) = (nil?(keys) || nil?(keys[1:])) ? true : ((keys[0] < 0 || !dxc-member?(keys[1:], keys[0])) && dxc-sound-go(keys[1:]));
   def dxc-sound?(st) = dxc-sound-go(st[1]);
   // the slots answered for a top-k agree with it: equal ids read one slot, unequal ids two, and each slot holds its id in the table after the step
   def dxc-pairs?(ids, slots, i, j) = j == len(ids) ? true : (((ids[i] == ids[j]) == (slots[i] == slots[j])) && dxc-pairs?(ids, slots, i, j + 1));
