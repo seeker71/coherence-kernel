@@ -648,7 +648,43 @@ section [form.bml] {
    let p1 = dkr-buf-empty(reg, rows);
    let e3 = dkr-go-tg(wide, [w, xr, p1], [rows, cols], 11, 256);
    let ndP = dkr-nd(dkr-read(p1, rows), a);
-   fixtureOk && ndL < dkr-floor() && ndW < dkr-floor() && ndO < dkr-floor() && e1 == 1 && e2 == 1 && e3 == 1 && ndP > 1.0e9 && tc > 0 && tw > 0 && tw * 10 < tc;
+   // (e) the edges of the f16 range: eight rows of denormals (6e-8, the largest denormal 6.1e-5, both signs), eight of large magnitudes (1e4, 6e4, 65504, both signs), eight mixed with zeros and ones; 64 columns.
+   // Each group is held to a host sum in fp64 of the decoded halves (relative to the group's largest answer), for the wide kernel and for the compensated one, and the two against each other.
+   let edge = dkb-hw-edge(c, reg, comp, wide);
+   let said2 = print_str("  hc F16 matvec at the edges of the f16 range (denormals / 1e4..6e4 / mixed), against a host fp64 sum: wide " ++ edge[0].str() ++ " / " ++ edge[1].str() ++ " / " ++ edge[2].str() ++ ", compensated " ++ edge[3].str() ++ " / " ++ edge[4].str() ++ " / " ++ edge[5].str() ++ ", wide against compensated " ++ edge[6].str());
+   fixtureOk && ndL < dkr-floor() && ndW < dkr-floor() && ndO < dkr-floor() && e1 == 1 && e2 == 1 && e3 == 1 && ndP > 1.0e9 && tc > 0 && tw > 0 && tw * 10 < tc && edge[7] && dkr-maxabs(dkb-take(edge, 7)) < dkr-floor();
+  }
+  // the half patterns of the edge groups (denormal: exponent 0; 28898 = 1e4, 31571 = 6e4, 31743 = 65504; +32768 is the sign) and their decoded values
+  def dkb-edge-set(g) = g == 0 ? [1, 1023, 341, 32769, 33791, 512, 2, 33768] : (g == 1 ? [28898, 31571, 61666, 64339, 31743, 64511, 31571, 61666] : [1, 31571, 0, 15360, 33791, 61666, 15360, 32769, 0, 28898]);
+  def dkb-p2(k) = k == 0 ? 1.0 : (k > 0 ? 2.0 * dkb-p2(k - 1) : 0.5 * dkb-p2(k + 1));
+  def dkb-half-val(b) { let e = (b / 1024) % 32; let m = b % 1024; let v = e == 0 ? (1.0 * m) * dkb-p2(0 - 24) : (1.0 + (1.0 * m) / 1024.0) * dkb-p2(e - 15); b >= 32768 ? 0.0 - v : v; }
+  def dkb-edge-bits(r, c) { let s = dkb-edge-set(r / 8); s[dsv4-pm-at(91, r * 64 + c) % len(s)]; }
+  def dkb-edge-row(r, c) = c == 64 ? [] : cons(dkb-edge-bits(r, c), dkb-edge-row(r, c + 1));
+  def dkb-edge-bytes(bs) = len(bs) == 0 ? "" : byte_to_str(bs[0] % 256) ++ byte_to_str(bs[0] / 256) ++ dkb-edge-bytes(bs[1:]);
+  def dkb-edge-dot(bs, x) = len(bs) == 0 ? 0.0 : dkb-half-val(bs[0]) * x[0] + dkb-edge-dot(bs[1:], x[1:]);
+  def dkb-edge-rows(r) = r == 24 ? [] : cons(dkb-edge-row(r, 0), dkb-edge-rows(r + 1));
+  def dkb-edge-all-bytes(rs) = len(rs) == 0 ? "" : dkb-edge-bytes(rs[0]) ++ dkb-edge-all-bytes(rs[1:]);
+  def dkb-edge-ref(rs, x) = len(rs) == 0 ? [] : cons(dkb-edge-dot(rs[0], x), dkb-edge-ref(rs[1:], x));
+  def dkb-take(xs, k) = k == 0 ? [] : cons(xs[0], dkb-take(xs[1:], k - 1));
+  def dkb-drop(xs, k) = k == 0 ? xs : dkb-drop(xs[1:], k - 1);
+  // [wide nd per group (3), compensated nd per group (3), wide against compensated, every dispatch ran and the groups are not all zero]
+  def dkb-hw-edge(c, reg, comp, wide) {
+   let x = dkb-x(23, 64, 2.0);
+   let rs = dkb-edge-rows(0);
+   let w = dkr-buf-bytes(reg, dkb-edge-all-bytes(rs));
+   let xb = dkr-buf-f32(reg, x);
+   let ref = dkb-edge-ref(rs, x);
+   let o1 = dkr-buf-empty(reg, 24);
+   let o2 = dkr-buf-empty(reg, 24);
+   let e1 = dkr-go(comp, [w, xb, o1], [24, 64], 24);
+   let e2 = dkr-go-tg(wide, [w, xb, o2], [24, 64], 12, 256);
+   let a = dkr-read(o1, 24);
+   let b = dkr-read(o2, 24);
+   let g0 = dkb-take(ref, 8);
+   let g1 = dkb-take(dkb-drop(ref, 8), 8);
+   let g2 = dkb-drop(ref, 16);
+   [dkr-nd(dkb-take(b, 8), g0), dkr-nd(dkb-take(dkb-drop(b, 8), 8), g1), dkr-nd(dkb-drop(b, 16), g2), dkr-nd(dkb-take(a, 8), g0), dkr-nd(dkb-take(dkb-drop(a, 8), 8), g1), dkr-nd(dkb-drop(a, 16), g2), dkr-nd(b, a),
+    e1 == 1 && e2 == 1 && dkr-maxabs(g0) > 0.0 && dkr-maxabs(g1) > 1.0e5 && dkr-maxabs(g2) > 0.0];
   }
   // ---- 32768: the wide hyper-connection matvec reads nothing it did not write: its output buffer, pre-filled with ANYTHING, comes back the same bits ------------------------------------------------------------------
   // A kernel that read its output before writing it (an accumulate, a partial sum left by another dispatch) would answer a function of what an earlier run left in the buffer. The wide kernel on the real shape (24 rows of
@@ -735,6 +771,6 @@ section [form.bml] {
  let leftBufs = dkr-reg-free(reg);
  let leftViews = nothing?(views) ? [] : dvb-close(views);
  let removed = host_path_remove(path);
- print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str() ++ " " ++ c16384.str() ++ " " ++ c32768.str() ++ " wrote" ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str() ++ " " ++ c16384.str() ++ " " ++ c32768.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
  c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096 + c8192 + c16384 + c32768;
 }
