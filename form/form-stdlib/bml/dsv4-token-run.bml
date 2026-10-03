@@ -33,7 +33,7 @@
 // IQ2XXS build by default), cap (64), steps (decode tokens, 24), watch (tokens read after every layer, 3), pct (the wired stop, 60), bw_gbs (the bandwidth the plan prices bytes at, 546: the M4 Max's stated figure, not
 // measured), arena_slots (experts a layer's arena holds, 64; 0 maps the whole routed stacks: the control), logits_prompt_ids and prompt_ids (the prompt; the 14 pinned ids by default), logits (0; 1 reads the head's logits after the prefill against the pinned recording and every step's top-two margin, see the validation reading
 // below), attribute (0; n runs n decode tokens after the walk in the ATTRIBUTION mode: every dispatch its own command buffer, its device microseconds read and tallied by family, kernel and block: which kernels keep the
-// device busy, printed and kept in the receipt row), hc_matvec ("wide", the default, or "narrow": the hyper-connection F16 matvec's kernel, see dtr-hcmv-wide?), teacher (0; 1 FEEDS the recorded ids of the raw prompt, or of teacher_ids, to the decodes and judges every position
+// device busy, printed and kept in the receipt row), hc_matvec ("wide", the default, or "narrow": the hyper-connection F16 matvec's kernel, see dtr-hcmv-wide?), poison (0; 1 fills every scratch buffer with a quiet NaN before every token, 2 with 1e30: the run must read what it reads without), teacher (0; 1 FEEDS the recorded ids of the raw prompt, or of teacher_ids, to the decodes and judges every position
 // of the recording on its own: exact, tie-explained, failed), receipt (receipts/dsv4-token-runs.jsonl).
 //
 // Proven by: native/metal/tests/dsv4-token-run-band.bml (the walk on both fixtures: rows from the ledger, the ceilings and the dispatch formula, the curve and its stop, the plants through the counted doors),
@@ -100,7 +100,7 @@ section [form.bml] {
    !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : mg-wired(vm) > mg-pct(mg-mem(vm), pct) ? "wired-cap" : mg-available(vm) < mg-reserve-of(mg-mem(vm)) ? "reserve" : elapsed > dvr-abort-ms() ? "budget" : "";
   // the walk's own record: the rows, the marks the prefill's seams took, the curve, the stop, the token the tap is reading, and the options it runs under
   def dtr-env(pct, watch, t0, base) = record_new(0, "rows", [], "marks", [], "curve", [], "stop", [], "token", 0, "pct", pct, "watch", watch, "t0", t0, "base", base, "arena", 0,
-    "val", 0, "rawp", 0, "vbase", 0, "ours", [], "reads", [], "refl", [], "refarg", dtr-recorded-argmax(), "attr-n", 0, "next", [], "attr", [], "rec", [], "teacher", 0, "spread", dtr-ds4-spread());
+    "val", 0, "rawp", 0, "vbase", 0, "ours", [], "reads", [], "refl", [], "refarg", dtr-recorded-argmax(), "attr-n", 0, "next", [], "attr", [], "rec", [], "teacher", 0, "spread", dtr-ds4-spread(), "poison", 0, "pctx", []);
   def dtr-stopped(env, token, il, why) {
    let k = record_set(env, "stop", [why, token, il]);
    let said = print_str("[dsv4-token] HOLD at token " ++ token.str() ++ " layer " ++ il.str() ++ ": " ++ why ++ ": the encoding stops here, what is enqueued is drained, the curve and the receipt keep how far it got");
@@ -119,9 +119,16 @@ section [form.bml] {
    let s = dtr-snap();
    let k1 = record_set(env, "marks", append(record_get(env, "marks"), [s]));
    let k2 = record_set(env, "token", i);
+   let pz = dtr-poison(env);
    let why = dtr-hold-reason(s[1], record_get(env, "pct"), dtr-elapsed(env));
    why == "" ? "" : dtr-stopped(env, i, 0 - 1, why);
   }
+  // THE POISON ({"poison":1} a quiet NaN, 2 the word of 1e30): before every token (each prefill position at its seam, each decode before its opening mark) every scratch buffer of the context is filled with the word
+  // (dsv4-open.fk dso-poison), so a kernel that reads a buffer before the token writes it reads poison and the logits show it. A run under poison must read the SAME logits, ids and receipt numbers as the run without it
+  // (the bands hold that on the fixtures with a stale-reading kernel planted; the lead compares the real run's validation line). Off by default: it is a debug option and costs a few ms a token.
+  def dtr-poison(env) = record_get(env, "poison") > 0 ? dso-poison(record_get(env, "pctx"), record_get(env, "poison")) : 0;
+  def dtr-poison-word(opts) = dvr-int(opts, "poison", 0) == 1 ? 2143289344 : (dvr-int(opts, "poison", 0) == 2 ? 1900671690 : 0);
+  def dtr-poison-plan-line(opts) = dtr-poison-word(opts) > 0 ? "[dsv4-token] POISON ON: every scratch buffer is filled with the word " ++ dtr-poison-word(opts).str() ++ " before every token; the logits, ids and validation readings must equal the run without it" : "[dsv4-token] poison off (poison 1 fills the scratch with a quiet NaN before every token, 2 with 1e30: a kernel that reads a buffer before writing it then shows)";
   // the function the token handle calls at its seams
   def dtr-tap(env) = (kind, a) => kind == "layer" ? (record_get(env, "token") < record_get(env, "watch") ? dtr-watch(env, record_get(env, "token"), a) : "") : dtr-seam(env, a);
   // ---- the walk ----------------------------------------------------------------------------------------------------------------------
@@ -155,6 +162,7 @@ section [form.bml] {
   // one decode token through the landed observer: its ledger row with the machine's growth
   def dtr-decode-pos(env, ctx, sts, id, pos, index) {
    let k = record_set(env, "token", index);
+   let pz = dtr-poison(env);
    let a = dtr-snap();
    let seen = dsv4-decode-observed(ctx, sts, id, pos);
    let b = dtr-snap();
@@ -192,6 +200,7 @@ section [form.bml] {
   def dtr-feed(env, nid, i) = (record_get(env, "teacher") == 1 && i < len(record_get(env, "rec"))) ? record_get(env, "rec")[i] : nid;
   // the whole walk over an opened context: the prefill of `ids` then `steps` decodes, with the tap installed for the whole walk and cleared at its end. Answers the reason it ended ("" when every token ran).
   def dtr-walk(env, ctx, sts, ids, steps) {
+   let pctx = record_set(env, "pctx", ctx);
    let tapped = dkr-hz-tap-set(dtr-tap(env));
    let first = dtr-prefill(env, ctx, sts, ids);
    let v0 = nothing?(first) ? 0 : dtr-val-read(env, ctx, 0);
@@ -429,6 +438,7 @@ section [form.bml] {
     dtr-validation-plan-line(opts, ids),
     dtr-attribution-plan-line(opts),
     dtr-hcmv-plan-line(opts),
+    dtr-poison-plan-line(opts),
     arena ? dtr-arena-structure-line(m) : "[dsv4-token] the command structure (landed, dkr-hz): one concurrent batch, barriers planned per block, handed to the queue every " ++ "2" ++ " blocks (" ++ dtr-submits(m).str() ++ " submits and the wait's own commit: " ++ dtr-cbs(m).str() ++ " command buffers a token), ONE wait a decode token, the NaN scan on the same drain",
     "[dsv4-token] dispatches a token (dll-token-count-m, the ledger's formula over the header): " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position, " ++ dtr-max-go(m, 0, 0, 256).str() ++ " at a position where every compressor emits; the embedding 2 and the head and scan 8 included" ++ (arena ? "; the arena adds a copy dispatch for each fill that takes the view road (the fill door makes none)" : ""),
     arena ? dtr-arena-ceil-line(m) : dtr-ceil-line(m),
@@ -480,6 +490,7 @@ section [form.bml] {
    let teach = record_set(wenv, "teacher", (dtr-teacher?(opts) && len(dtr-recording(opts, ids)) > 0) ? 1 : 0);
    let vb = record_set(wenv, "vbase", len(ids));
    let an = record_set(wenv, "attr-n", dtr-opts-attr(opts));
+   let pw = record_set(wenv, "poison", dtr-poison-word(opts));
    let hcmv = dkr-hz-put("hcmv", dtr-hcmv-wide?(opts) ? 1 : 0);
    let before = try dvr-seq(dtr-steps-before(denv, slots)) catch "walker-stop";
    before != "" ? before : (try dtr-walk(wenv, dvr-ctx(denv), dvr-sts(denv), dtr-opts-ids(opts), dtr-opts-steps(opts)) catch "walker-stop");

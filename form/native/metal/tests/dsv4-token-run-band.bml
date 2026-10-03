@@ -307,6 +307,19 @@ section [form.bml] {
    let why = dtr-walk(env, ctx, sts, dtt-prompt(), dtt-steps());
    [env, why];
   }
+  // a walk under POISON (the door's {"poison":n}): every scratch buffer filled with `word` before every token (dso-poison)
+  def dtt-poison-walk(ctx, sts, word) {
+   let vm = mg-sense();
+   let env = dtr-env(60, 2, host_monotonic_ms(), mg-wired(vm));
+   let a = record_set(env, "arena", 1);
+   let b = record_set(env, "val", 1);
+   let c = record_set(env, "vbase", len(dtt-prompt()));
+   let d = record_set(env, "poison", word);
+   let why = dtr-walk(env, ctx, sts, dtt-prompt(), dtt-steps());
+   [env, why];
+  }
+  // a pipeline that does nothing: the shared expert's SwiGLU replaced by it leaves `shared-mid` unwritten, so the shared expert's down projection READS STALE DATA (the previous token's, or poison)
+  def dtt-noop-pipe() = metal_pipeline(dkr-wrap(dkr-inc() ++ "kernel void form_dsv4_swiglu_f32(device float* a [[buffer(0)]], uint i [[thread_position_in_grid]]) { }"), "form_dsv4_swiglu_f32");
   def dtt-fed-ids(rows) = len(rows) == 0 ? [] : (dtt-g(rows[0], "kind") == "decode" ? cons(dtt-g(rows[0], "id_in"), dtt-fed-ids(rows[1:])) : dtt-fed-ids(rows[1:]));
   def dtt-replace-at(xs, i, v) = dtt-gen(k => k == i ? v : xs[k], 0, len(xs));
   def dtt-reads-ids(reads) = len(reads) == 0 ? [] : cons(reads[0][0], dtt-reads-ids(reads[1:]));
@@ -341,6 +354,26 @@ section [form.bml] {
    let s4 = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
    let s5 = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
    let s6 = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
+   // POISON ON A WALK: the same walk with every scratch buffer filled with a quiet NaN, then with 1e30, before every token reads the same ids, the same prefill logits and the same readings as the clean walk (r1);
+   // and a kernel that reads stale data is caught: the shared expert's SwiGLU replaced by a no-op leaves shared-mid unwritten, so its down projection reads what an earlier token left (the planted clean walk: finite,
+   // wrong) or the poison (the planted poisoned walk: refused or different): the two disagree
+   let s7 = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
+   let s8 = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
+   let s9 = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
+   let s10 = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
+   let pN = ok ? dtt-poison-walk(ctx, s7, 2143289344) : [dtr-env(60, 2, 0, 0), "not opened"];
+   let pG = ok ? dtt-poison-walk(ctx, s8, 1900671690) : [dtr-env(60, 2, 0, 0), "not opened"];
+   let savedSw = ok ? record_get(ctx[0], "form_dsv4_swiglu_f32") : 0;
+   let noop = ok ? dtt-noop-pipe() : 0;
+   let swapSw = ok ? record_set(ctx[0], "form_dsv4_swiglu_f32", noop) : 0;
+   let qC = ok ? dtt-poison-walk(ctx, s9, 0) : [dtr-env(60, 2, 0, 0), "not opened"];
+   let qP = ok ? dtt-poison-walk(ctx, s10, 2143289344) : [dtr-env(60, 2, 0, 0), "not opened"];
+   let backSw = ok ? record_set(ctx[0], "form_dsv4_swiglu_f32", savedSw) : 0;
+   let samePoison = ok && pN[1] == "" && pG[1] == "" && dtt-ids(dtt-rows(pN[0])) == ids1 && dtt-ids(dtt-rows(pG[0])) == ids1 && record_get(pN[0], "ours") == ours && record_get(pG[0], "ours") == ours && record_get(pN[0], "reads") == reads1 && record_get(pG[0], "reads") == reads1;
+   let stalePlant = ok && noop > 0 && (qP[1] != "" || record_get(qP[0], "ours") != record_get(qC[0], "ours") || dtt-ids(dtt-rows(qP[0])) != dtt-ids(dtt-rows(qC[0])));
+   let saidP = print_str("  poison on a walk: NaN walk ids " ++ dtt-ids(dtt-rows(pN[0])).str() ++ ", 1e30 walk ids " ++ dtt-ids(dtt-rows(pG[0])).str() ++ " against the clean " ++ ids1.str() ++ " (logits equal " ++ (record_get(pN[0], "ours") == ours && record_get(pG[0], "ours") == ours).str() ++ "); the stale-reading plant: clean " ++ dtt-ids(dtt-rows(qC[0])).str() ++ " (" ++ qC[1] ++ "), poisoned "
+    ++ dtt-ids(dtt-rows(qP[0])).str() ++ " (" ++ qP[1] ++ "): caught " ++ stalePlant.str());
+   let poisonOk = samePoison && stalePlant && dtr-poison-word(parse-json("o", "{\"poison\":1}")) == 2143289344 && dtr-poison-word(parse-json("o", "{\"poison\":2}")) == 1900671690 && dtr-poison-word(parse-json("o", "{}")) == 0;
    let recOwn = ids1;
    let recBad = len(ids1) == 8 ? dtt-replace-at(ids1, 3, (ids1[3] + 1) % record_get(m, "vocab")) : [];
    let t1 = (ok && len(recOwn) == 8) ? dtt-teacher-walk(ctx, s4, recOwn, 0.000000001) : [dtr-env(60, 2, 0, 0), "not opened"];
@@ -367,8 +400,8 @@ section [form.bml] {
    let attrOk = ok && len(attrs) == 1 && dll-attr-sums-ok?(attrs[0]) && record_get(attrs[0], "dispatches") > 0 && len(record_get(r0[0], "rows")) == 11 && dtt-has?(dtr-attribution-json(r0[0]), "\"families\":") && dtt-has?(dtr-attribution-json(r0[0]), "\"kernels\":")
     && json-object-has?(parse-json("attribution", substring(dtr-attribution-json(r0[0]), 1, str_len(dtr-attribution-json(r0[0])) - 1)), "dispatches") && dtt-has?(dtr-attribution-plan-line(parse-json("o", "{\"attribute\":2}")), "attribution ON") && dtt-has?(dtr-attribution-plan-line(parse-json("o", "{}")), "attribution off")
     && dtr-attribution-json(r1[0]) == "[]" && len(record_get(r1[0], "next")) == 2;
-   let left = ok ? dsv4-close(ctx, append(s0, append(s1, append(s2, append(s3, append(s4, append(s5, s6))))))) : [0];
-   ok && attrOk && wideOk && teacherOk && r0[1] == "" && r1[1] == "" && r2[1] == "" && len(record_get(r0[0], "reads")) == 0 && len(record_get(r0[0], "ours")) == 0 && dtr-validation-json(r0[0], dtt-prompt()) == "{}"
+   let left = ok ? dsv4-close(ctx, append(s0, append(s1, append(s2, append(s3, append(s4, append(s5, append(s6, append(s7, append(s8, append(s9, s10)))))))))) ) : [0];
+   ok && attrOk && wideOk && teacherOk && poisonOk && r0[1] == "" && r1[1] == "" && r2[1] == "" && len(record_get(r0[0], "reads")) == 0 && len(record_get(r0[0], "ours")) == 0 && dtr-validation-json(r0[0], dtt-prompt()) == "{}"
     && len(reads1) == 8 && dtt-reads-ids(reads1) == ids1 && len(ids1) == 8 && len(ours) == record_get(m, "vocab") && dtt-margins-ok?(reads1) && rowsOk
     && len(record_get(r2[0], "reads")) == 8 && dtt-has?(judged, "\"verdict\":\"pass\"") && dtt-has?(judged, "\"top10_overlap\":10") && dtt-has?(judged, "\"tie_safe\":1")
     && dtt-has?(planted2, "\"verdict\":\"fail\"") && dtt-has?(planted2, "argmax-ours-not-theirs") && dtt-has?(notRun, "\"verdict\":\"not-run\"") && dtt-has?(notRun, "\"stream\":{") && len(left) == 0;
