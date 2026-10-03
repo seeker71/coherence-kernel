@@ -526,19 +526,43 @@ A dead string's bytes become a hole in the string arena (`fk_hole_add`), the mel
 arena's top never retreats. Before this, a dead string's slot came back and its bytes did not: the glass organs and
 sensors processes held 6.8 and 7.5 GB behind ten thousand live strings, growing 200-300 KB/s, because the supervisor
 starts them once and keeps them for its life. `kernel_stat(64)` reads the top, `kernel_stat(65)` the bytes in holes;
-`string-holes-band` reads 127, and 115 on a build that takes no hole (`-DFK_HOLE_LOOK=0`).
+`string-holes-band` reads 127, and 115 on a build that takes no hole (`-DFK_HOLE_LOOK=0`). A dead string's slot owns
+no bytes, so a stale word naming one reads length 0 where it used to read the old bytes until the slot was reused.
 
 A closure row lives while a root reaches it: the value stack, memory cells, records, nodes, held lets, the method
 table, and the captures of a row that is itself reached. A melt also keeps the rows made since the melt before it
-(`FK_CLO_YOUNG`), copies only what a kept row captured, slides those values down and hands the other rows to
-`fk_clo_free`; a row's index is the fn-value's own word and never changes, and an indirect call holds its callee on
-the value stack while its arguments walk. Before this, every evaluation of a capturing lambda kept what it captured
-for the life of the process: a hermetic glass loop held 4.25 of its 4.36 million surviving pairs in closures, the heap
-doubled to 2^29 pairs in the live glass, and each melt moved gigabytes of the machine's memory; the same loop now
-holds 160 thousand pairs flat in a 1 M-pair heap and 85 MB. `kernel_stat(66)` reads the rows standing,
-`(67)` the rows reclaimed, `(68)` the captured values held; `closure-reclaim-band` reads 127, and 113 on a build
-that keeps every row (`-DFK_CLO_YOUNG=1000000000`). With `FK_MELT_WITNESS 1` in `fkwu.conf` each melt prints which
-root held the pairs it kept (stack, mem, records, nodes, closures, holds) and the string and closure tables.
+(`FK_CLO_YOUNG`: a row survives exactly one melt unrooted), copies only what a kept row captured, slides those values
+down and hands the other rows to `fk_clo_free`; a row's index is the fn-value's own word and never changes, so a row
+handed back and taken again is another closure under the same word. The mark walks what a row captured from an
+explicit worklist, never one C frame per link: a chain of four million closures each capturing the one before is a
+band claim. Before this, every evaluation of a capturing lambda kept what it captured for the life of the process: a
+hermetic glass loop held 4.25 of its 4.36 million surviving pairs in closures, the heap doubled to 2^29 pairs in the
+live glass, and each melt moved gigabytes of the machine's memory; the same loop now holds 125 thousand pairs flat in
+a 1 M-pair heap and 87 MB. `kernel_stat(66)` reads the rows standing, `(67)` the rows reclaimed, `(68)` the captured
+values held, and `kernel_live` word 21 the melt count. `closure-reclaim-band` reads 1023 and `closure-callee-band`
+7; their plants (compile flags) read: `-DFK_PLANT_NOMOVABLE` 895 (eq leaves a closure word on no root),
+`-DFK_PLANT_NOCALLEE` 2 on the callee band, `-DFK_CLO_YOUNG=0` 767, `-DFK_CLO_YOUNG=1000000000` 753,
+`-DFK_PLANT_RECURSIVE_MARK` dies at the first melt of the long chain (rc 138). With `FK_MELT_WITNESS 1` in
+`fkwu.conf` each melt prints which root held the pairs it kept (stack, mem, records, nodes, closures, holds) and the
+string and closure tables.
+
+Because a melt can move a pair, reuse a string slot or hand a closure row back, an evaluator arm that holds a word in a
+C local while it walks something else must have that word on the value stack. What each arm does today
+(`fk_walk` and `fk_walk_body`):
+- on the stack across the walk: `cons` head and tail, `nth` list, `value_eq` both sides, the string arms (`str_eq`,
+  `str_concat`, `str_byte_at`, `str_find`, `substring`), `record_get`, `record_set` (record and key),
+  `method_define` (blueprint and name), `method_has`, `scan`, the indirect call's callee (`tag 244`, both arms),
+  `apply` (`tag 44`), `eq` and `lt` (through `fk_movable`: a pair, a local string slot or a closure word), the
+  two-argument direct call's first argument (`tag 240`, both arms), `intern_composite`'s category (`tag 47`),
+  `fb_record`'s file word (`tag 128`), the metal, cuda, socket and wav doors that take a string or a handle first;
+- in a C local with no root, and why that holds: `add`, `sub`, `le`, `mul`, `div`, `mod`, the bit doors and
+  `round_ndigits` read numbers (a pair, string or closure word stops by name at the next check and is never read
+  through its row), `and` and `or` read the word's truth only, `mem_set` and the page, cell and gift doors hold
+  ints, `method_invoke` holds a record (records never move) and takes its method from the method table, which is a
+  root; the single-walk arms keep nothing across a walk.
+The claims that fail when an arm drops its root: `closure-reclaim-band` 128 (`eq`), `closure-callee-band` 1 (the
+indirect call's callee); the arms under `tag 47` and `tag 128` have no claim yet, and `tag 240` is a node the parser
+never emits (a lowered image carries it), so no source program reaches it.
 
 A kernel started before these doors keeps the old tables until it is restarted, and a binary is replaced by
 building beside it and renaming (`cc -O2 -o fkwu.new runtime/fkwu-uni.c && mv fkwu.new fkwu`; copying over a

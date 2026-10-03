@@ -669,6 +669,11 @@ static long long fk_clo_capvals_top, fk_clo_capvals_cap;
  * index is the fn-value's own word and never changes. fk_clo_born is the melt generation a row was
  * made in, -1 once it is dead. kernel_stat 66 reads the rows standing, 67 the rows reclaimed, 68
  * the captured values held. */
+#ifdef FK_PLANT_NOCALLEE
+#define FK_CLO_CALLEE_ROOT 0   /* the band's plant: an indirect call leaves its callee on no root while its arguments walk */
+#else
+#define FK_CLO_CALLEE_ROOT 1
+#endif
 #ifndef FK_CLO_YOUNG
 #define FK_CLO_YOUNG 1   /* melt generations a closure row is kept without a root naming it; a huge value keeps every row (the band's plant) */
 #endif
@@ -677,6 +682,8 @@ static long long *fk_clo_free;
 static long long fk_clo_free_n;
 static long long fk_clo_reclaimed;
 static unsigned char *fk_cmark;
+static long long *fk_clo_work;       /* rows marked and not yet walked (a melt's worklist; fk_clo_top long) */
+static long long fk_clo_work_n;
 static long long fk_melt_gen;
 static long long fk_clo_inst_of(long long b) {
     if (b >= fk_fnbase || b <= fk_fnval_floor || ((fk_fnbase - b) & 1) == 0) {
@@ -1602,6 +1609,12 @@ static long long fk_movable(long long v) {
     if (v == 1) {
         return 0;                       /* nil */
     }
+#ifndef FK_PLANT_NOMOVABLE   /* the band's plant: a closure word is not rooted by eq and lt */
+    if (v < fk_fnbase && v > fk_fnval_floor && fk_clo_inst_of(v) >= 0) {
+        return 1;                       /* a closure word: its row goes back to fk_clo_free when no root names it (the melt keeps
+                                         * a row only one interval unrooted, so a word waiting in a C local must be on the stack) */
+    }
+#endif
     long long si = fk_stri(v);          /* negative and odd: string, node, float, nothing */
     return (si >= 0 && si < FK_STR_BASE) ? 1 : 0;
 }
@@ -8781,22 +8794,54 @@ static long long fk_nhp;
 /* The melt's two walks go along a list's tail in a loop and into its head by recursion, as fk_smark does: a list
  * of any length costs one frame per level of nesting, never one per cell. Walking the tail by recursion, a live
  * list of a few million cells ran the evaluation thread off its stack in the middle of a melt. */
+/* A closure row reached is marked and put on fk_clo_work; what it captured is walked when fk_mlive drains the work, never
+ * by recursion from the mark, so a chain of closures each capturing the one before costs a stack slot per link in the
+ * work and not a C frame (a chain of four million crashed the recursive mark at the first melt). */
 static long long fk_clo_mark(long long inst);
-static long long fk_mlive(long long b) {
+#ifdef FK_PLANT_RECURSIVE_MARK
+static long long fk_clo_drain(void);
+#endif
+static long long fk_mlive_go(long long b) {
     long long n = 0;
     while ((b & 1) != 0) {
         long long p = b >> 1;
         if (b < fk_fnbase && b > fk_fnval_floor) {
             /* an fn-value: a closure row it names is reached, and keeps what it captured */
             long long ci = fk_clo_inst_of(b);
-            return ci >= 0 ? n + fk_clo_mark(ci) : n;
+            if (ci >= 0) {
+                fk_clo_mark(ci);
+#ifdef FK_PLANT_RECURSIVE_MARK
+                n = n + fk_clo_drain();   /* the band's plant: walk the captures here, one C frame per link */
+#endif
+            }
+            return n;
         }
         if (p >= FK_PAIR_BASE || p < 1 || !FK_POK(p) || fk_fw[p] != 0) { return n; }
         fk_fw[p] = 0 - 1;
-        n = n + 1 + fk_mlive(FK_HH(p));
+        n = n + 1 + fk_mlive_go(FK_HH(p));
         b = FK_HT(p);
     }
     return n;
+}
+/* walk what the marked rows captured until no marked row is left unwalked */
+static long long fk_clo_drain(void) {
+    long long n = 0;
+    while (fk_clo_work_n > 0) {
+        fk_clo_work_n = fk_clo_work_n - 1;
+        long long inst = fk_clo_work[fk_clo_work_n];
+        long long base = fk_clo_capbase[inst];
+        long long cnt = fk_clo_capcount[inst];
+        long long j = 0;
+        while (j < cnt) {
+            n = n + fk_mlive_go(fk_clo_capvals[base + j]);
+            j = j + 1;
+        }
+    }
+    return n;
+}
+static long long fk_mlive(long long b) {
+    long long n = fk_mlive_go(b);
+    return n + fk_clo_drain();
 }
 /* each cell is placed, and its forward set, before its head is copied; its tail slot is filled once the next cell
  * is placed, or with the word itself when the tail is not a pair still to copy */
@@ -8828,19 +8873,13 @@ static long long fk_mcopy(long long b) {
     }
     return (first << 1) | 1;
 }
-/* a closure row reached: its captured values are reached with it */
+/* a closure row reached: marked once, and its captured values are walked when the work drains */
 static long long fk_clo_mark(long long inst) {
     if (fk_cmark == 0 || inst < 0 || inst >= fk_clo_top || fk_clo_born[inst] < 0 || fk_cmark[inst]) { return 0; }
     fk_cmark[inst] = 1;
-    long long n = 0;
-    long long base = fk_clo_capbase[inst];
-    long long cnt = fk_clo_capcount[inst];
-    long long j = 0;
-    while (j < cnt) {
-        n = n + fk_mlive(fk_clo_capvals[base + j]);
-        j = j + 1;
-    }
-    return n;
+    fk_clo_work[fk_clo_work_n] = inst;   /* each row is marked once, and fk_clo_work holds fk_clo_top */
+    fk_clo_work_n = fk_clo_work_n + 1;
+    return 0;
 }
 /* the rows no root names but a melt must keep: the method table's, and the rows made in the last FK_CLO_YOUNG
  * melt generations (fk_melt has already counted this melt in fk_melt_gen) */
@@ -8853,10 +8892,10 @@ static long long fk_clo_live_roots(void) {
     }
     k = 0;
     while (k < fk_clo_top) {
-        if (fk_clo_born[k] >= 0 && fk_clo_born[k] + FK_CLO_YOUNG >= fk_melt_gen) { nlive = nlive + fk_clo_mark(k); }
+        if (fk_clo_born[k] >= 0 && fk_clo_born[k] + FK_CLO_YOUNG >= fk_melt_gen) { fk_clo_mark(k); }
         k = k + 1;
     }
-    return nlive;
+    return nlive + fk_clo_drain();
 }
 /* copy what every kept row captured, slide those values down, and give every other row back */
 static void fk_clo_mcopy_roots(void) {
@@ -8869,21 +8908,9 @@ static void fk_clo_mcopy_roots(void) {
     long long room = total < 256 ? 256 : total + total / 2;
     long long *nv = (long long *)malloc((unsigned long)(room * 8));
     if (nv == 0) {
-        /* no room to slide into: keep every row and its values where they are, as before */
-        k = 0;
-        while (k < fk_clo_top) {
-            if (fk_clo_born[k] >= 0) {
-                long long j = 0;
-                while (j < fk_clo_capcount[k]) {
-                    fk_clo_capvals[fk_clo_capbase[k] + j] = fk_mcopy(fk_clo_capvals[fk_clo_capbase[k] + j]);
-                    j = j + 1;
-                }
-            }
-            k = k + 1;
-        }
-        free(fk_cmark);
-        fk_cmark = 0;
-        return;
+        /* the captures of a row nlive did not count cannot be copied into an arena sized without them, and the
+         * melt has already moved the heap: out of memory is out of memory, as for the arena and the marks */
+        fk_die("fk_clo_mcopy_roots: closure capture pool malloc failed -- the heap is mid-compaction, and returning here would leave the captured values pointing into the old arena. Out of memory is out of memory (same as fk_melt's arena).");
     }
     long long at = 0;
     k = 0;
@@ -8918,6 +8945,9 @@ static void fk_clo_mcopy_roots(void) {
     fk_clo_capvals_cap = room;
     free(fk_cmark);
     fk_cmark = 0;
+    free(fk_clo_work);
+    fk_clo_work = 0;
+    fk_clo_work_n = 0;
 }
 static long long fk_nmelt;
 /* fk_melt_want: a caller about to build a large flat structure (one whose
@@ -9034,7 +9064,9 @@ static void fk_melt(void) {
         fk_die("fk_melt: fw calloc failed -- heap cannot be compacted, and returning here would let the program continue on a full heap as if space were reclaimed. Out of memory is out of memory (same as fk_fbox/fk_sintern).");
     }
     fk_cmark = (unsigned char *)calloc((unsigned long)(fk_clo_top > 0 ? fk_clo_top : 1), 1);
-    if (fk_cmark == 0) {
+    fk_clo_work = (long long *)malloc((unsigned long)((fk_clo_top > 0 ? fk_clo_top : 1) * 8));
+    fk_clo_work_n = 0;
+    if (fk_cmark == 0 || fk_clo_work == 0) {
         free(fk_fw);
         fk_die("fk_melt: closure mark calloc failed -- heap cannot be compacted, and returning here would let the program continue on a full heap as if space were reclaimed.");
     }
@@ -9690,7 +9722,10 @@ static long long fk_walk_body(long long i, long long fp) {
         }
         if (t == 240) {
             long long a0 = fk_walk(fk_node[i][2], fp);
+            fk_vp(a0);   /* the first argument waits on the stack while the second walks: a melt moves a pair, reuses a string slot or a closure row */
             long long a1 = fk_walk(fk_node[i][3], fp);
+            a0 = fk_vs[fk_vsp - 1];
+            fk_vsp = fk_vsp - 1;
             long long c240 = fk_node[i][1];
             if (c240 < 0 || c240 >= fk_fn_count) {
                 fk_vsp = fp;
@@ -9918,7 +9953,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 return fk_nothing;
             }
             long long fi244 = fk_fnval_target(hv244);
-            fk_vp(hv244);   /* the callee is a root while its arguments walk: a melt must not take the closure row it names */
+            if (FK_CLO_CALLEE_ROOT) { fk_vp(hv244); }   /* the callee is a root while its arguments walk: a melt must not take the closure row it names */
             long long base244 = fk_vsp;
             long long cell244 = fk_node[i][2];
             while (cell244 >= 0 && fk_node[cell244][0] == 242) {
@@ -13139,8 +13174,8 @@ static long long fk_walk(long long i, long long fp) {
             return fk_nothing;
         }
         long long a0 = fk_walk(fk_node[i][2], fp);
+        fk_vp(a0);   /* the first argument is a root while the second walks (a melt moves a pair, reuses a string slot or a closure row) */
         long long a1 = fk_walk(fk_node[i][3], fp);
-        fk_vp(a0);
         fk_vp(a1);
         long long b240 = fk_vsp - 2;
         fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
@@ -13205,7 +13240,7 @@ static long long fk_walk(long long i, long long fp) {
             return fk_nothing;
         }
         long long fi244 = fk_fnval_target(hv244);
-        fk_vp(hv244);   /* the callee is a root while its arguments walk: a melt must not take the closure row it names */
+        if (FK_CLO_CALLEE_ROOT) { fk_vp(hv244); }   /* the callee is a root while its arguments walk: a melt must not take the closure row it names */
         long long base244 = fk_vsp;
         long long cell244 = fk_node[i][2];
         while (cell244 >= 0 && fk_node[cell244][0] == 242) {
@@ -13239,7 +13274,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_heat_pulse();
         long long r244 = fk_walk_body(fk_fn[fi244], base244);
         fk_cur_fn = caller244;
-        fk_vsp = base244 - 1;
+        fk_vsp = base244 - FK_CLO_CALLEE_ROOT;
         return fk_offer_ack(fi244, n244, r244);
     }
     if (t == 13) {
@@ -16868,7 +16903,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 47) {
         long long cat47 = fk_walk(fk_node[i][1], fp);
+        fk_vp(cat47);   /* the category is a local string slot: a melt during the kids' walk would hand it to another string */
         long long kids47 = fk_walk(fk_node[i][2], fp);
+        cat47 = fk_vs[fk_vsp - 1];
+        fk_vsp = fk_vsp - 1;
         return fk_intern_composite(cat47, kids47);
     }
     if (t == 91) {
@@ -18761,7 +18799,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 128) {
         long long fr_nv = fk_walk(fk_node[i][1], fp);
         long long fr_fv = fk_walk(fk_node[i][2], fp);
+        fk_vp(fr_fv);   /* the file word is a local string slot while the position walks */
         long long fr_pk = fk_walk(fk_node[i][3], fp) >> 1;
+        fr_fv = fk_vs[fk_vsp - 1];
+        fk_vsp = fk_vsp - 1;
         long long fr_ni = fk_nidx(fr_nv);
         fk_fbentered = fk_fbentered + 1;
         fk_fblastidx = fr_ni;
