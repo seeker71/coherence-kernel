@@ -59,7 +59,42 @@ section [form.bml] {
         def vv-tc(t) = t[1];
         def vv-tl(t) = t[2];
         def vv-tn(t) = (t[1] * t[2]);
-        def vv-new(c, l) = vv-t(metal_buf_alloc((4 * (c * l))), c, l);
+        // EVERY BUFFER A RENDER ALLOCATES IS ENTERED IN THE STATE'S LEDGER, and vv-release gives them back.
+        // The ledger is one record made at vv-open and mutated in place; its "h" is the list of handles the
+        // pass has handed out since the last release. It is a LIST and not a range because the carrier's
+        // handles carry a generation (slot + generation * 65536, freed slots recycled last in first out), so
+        // the numbers between a mark and a top are not the buffers between them (witnessed 2026-10-03).
+        // Before the ledger a render left ~390 buffers behind and, after ~160 renders in one process, the
+        // carrier's allocations answered empty and a render read as zero samples, silently.
+        // Every write to the ledger feeds the handle it answers (vv-keep-seq), never a call whose answer
+        // nobody reads: a recipe run over a thousand times drops side effects nothing reads.
+        def vv-led(st) = st[14];
+        def vv-held(st) = record_get(vv-led(st), "h");
+        def vv-keep-seq(rc, h) = nothing?(rc) ? form_error("voice-pass: the ledger refused a handle") : h;
+        def vv-keep(st, h) = h <= 0 ? h : vv-keep-seq(record_set(vv-led(st), "h", cons(h, vv-held(st))), h);
+        def vv-alloc(st, bytes) = vv-keep(st, metal_buf_alloc(bytes));
+        def vv-new(st, c, l) = vv-t(vv-alloc(st, (4 * (c * l))), c, l);
+
+        // ---- giving the ledger back ----
+        // A free asked while work is unsettled is refused and the carrier reads the refusal as 0, so the
+        // device is settled first and a refused handle stays in the ledger for another round. Whatever four
+        // rounds could not free is left in the ledger (never lost, never freed twice) and its count answered.
+        def vv-free-one(rc, h, left) = rc > 0 ? left : cons(h, left);
+        def vv-free-left(hs, left) = (Comparable) len(hs) == 0 ? left : vv-free-left(hs[1:], vv-free-one(metal_buf_free(hs[0]), hs[0], left));
+        def vv-free-after(rc, hs) = rc < 0 ? form_error("voice-pass: the device did not settle") : vv-free-left(hs, []);
+        def vv-free-rounds(hs, round) = (Comparable) len(hs) == 0 ? hs : (round >= 4 ? hs : vv-free-rounds(vv-free-after(metal_sync(), hs), (round + 1)));
+        def vv-kept-seq(rc, left) = nothing?(rc) ? form_error("voice-pass: the ledger refused its remainder") : len(left);
+        def vv-release-to(st, left) = vv-kept-seq(record_set(vv-led(st), "h", left), left);
+        // every tensor the pass handed out since the last release goes back; answers how many it could not free (0 = clean).
+        // The tensors of the line just rendered are gone after this: read the samples first (vv-pcm), then release.
+        def vv-release(st) = vv-release-to(st, vv-free-rounds(vv-held(st), 0));
+        // what the carrier holds right now (its own count of live buffers), for a caller to prove it flat
+        def vv-live() = metal_live()[2];
+        // closing the voice: the ledger, then the weights, the zero bias and the mapped file, in settled rounds.
+        // Answers how many buffers it could not give back (0 = the carrier holds nothing of this voice).
+        def vv-hs-handles(hs, acc) = (Comparable) len(hs) == 0 ? acc : vv-hs-handles(hs[1:], hs[0][1] > 0 ? cons(hs[0][1], acc) : acc);
+        def vv-close-sum(left, rest) = left + len(rest);
+        def vv-close(st) = vv-close-sum(vv-release(st), vv-free-rounds(cons(vv-zero(st), cons(vv-whole(st), vv-hs-handles(vv-hs(st), []))), 0));
 
         // ---- the state a run carries ----
         def vv-path(st) = st[0];
@@ -293,7 +328,7 @@ section [form.bml] {
             let ea = vv-ea-pair(path, nodes, rows);
             let f0 = vv-cf0-of(ctab, 0, 32, []);
             let sp = if ((Comparable) len(f0) == 0) then [] else vv-spline-of(path, nodes, rows, ctab, f0[0].str());
-            [path, rows, pipes, whole, hs, ctab, zero, eps, sc, fp, latab, dd, ea, sp];
+            [path, rows, pipes, whole, hs, ctab, zero, eps, sc, fp, latab, dd, ea, sp, record_new(0, "h", [])];
         }
         // the ConvFlow indices the file actually carries, newest first — read before the state exists
         def vv-cf0-of(ctab, i, n, acc) = if (i >= n) then acc else vv-cf0-of(ctab, (i + 1), n, if ((Comparable) len(vv-crow-go(ctab, vv-s(["/dp/flows.", i.str(), "/pre/Conv"]))) == 0) then acc else cons(i, acc));
@@ -323,7 +358,7 @@ section [form.bml] {
             let tr = vv-ct(r);
             let Cout = if ((Comparable) tr == 1) then (dims[1] * g) else dims[0];
             let Lout = if ((Comparable) tr == 1) then vv-lout-t(Lin, pb, pe, vv-cd(r), K, vv-cs(r)) else vv-lout(Lin, pb, pe, vv-cd(r), K, vv-cs(r));
-            let y = vv-new(Cout, Lout);
+            let y = vv-new(st, Cout, Lout);
             let bufs = [vv-th(x), vv-h(st, vv-cw(r)), vv-cbias(st, r), vv-th(y)];
             let bind = if ((Comparable) tr == 1) then md-bind(bufs, [vv-tc(x), Cout, Lin, Lout, K, vv-cs(r), pb]) else md-bind(bufs, [vv-tc(x), Cout, Lin, Lout, K, vv-cs(r), pb, vv-cd(r), g]);
             let e = vv-go(st, if ((Comparable) tr == 1) then vm-pi-convt() else vm-pi-conv(), bind, (Cout * Lout));
@@ -331,12 +366,12 @@ section [form.bml] {
         }
 
         def vv-un(st, x, op, abits) {
-            let y = vv-new(vv-tc(x), vv-tl(x));
+            let y = vv-new(st, vv-tc(x), vv-tl(x));
             let e = vv-go(st, vm-pi-unary(), md-bind([vv-th(x), vv-th(y)], [vv-tn(x), op, abits]), vv-tn(x));
             y;
         }
         def vv-bin(st, a, b, op) {
-            let y = vv-new(vv-tc(a), vv-tl(a));
+            let y = vv-new(st, vv-tc(a), vv-tl(a));
             let e = vv-go(st, vm-pi-binary(), md-bind([vv-th(a), vv-th(b), vv-th(y)], [vv-tn(a), op]), vv-tn(a));
             y;
         }
@@ -349,31 +384,31 @@ section [form.bml] {
         def vv-mulc(st, x, a) = vv-un(st, x, 9, md-f32-bits(a));
 
         def vv-ln(st, x, gname, bname) {
-            let y = vv-new(vv-tc(x), vv-tl(x));
+            let y = vv-new(st, vv-tc(x), vv-tl(x));
             let e = vv-go(st, vm-pi-ln(), md-bind([vv-th(x), vv-h(st, gname), vv-h(st, bname), vv-th(y)], [vv-tc(x), vv-tl(x), md-f32-bits(vv-eps(st))]), vv-tl(x));
             y;
         }
         // a contiguous channel range — Split, Concat and the coupling halves are all this
         def vv-chan(st, x, c0, nc) {
-            let y = vv-new(nc, vv-tl(x));
+            let y = vv-new(st, nc, vv-tl(x));
             let n = (nc * vv-tl(x));
             let e = vv-go(st, vm-pi-copyf(), md-bind([vv-th(x), vv-th(y)], [n, (c0 * vv-tl(x)), 0]), n);
             y;
         }
         def vv-cat2(st, a, b) {
-            let y = vv-new((vv-tc(a) + vv-tc(b)), vv-tl(a));
+            let y = vv-new(st, (vv-tc(a) + vv-tc(b)), vv-tl(a));
             let e1 = vv-go(st, vm-pi-copyf(), md-bind([vv-th(a), vv-th(y)], [vv-tn(a), 0, 0]), vv-tn(a));
             let e2 = vv-go(st, vm-pi-copyf(), md-bind([vv-th(b), vv-th(y)], [vv-tn(b), 0, vv-tn(a)]), vv-tn(b));
             y;
         }
         def vv-flip(st, x) {
-            let y = vv-new(vv-tc(x), vv-tl(x));
+            let y = vv-new(st, vv-tc(x), vv-tl(x));
             let e = vv-go(st, vm-pi-flip(), md-bind([vv-th(x), vv-th(y)], [vv-tc(x), vv-tl(x)]), vv-tn(x));
             y;
         }
         def vv-gate(st, x) {
             let c = (vv-tc(x) / 2);
-            let y = vv-new(c, vv-tl(x));
+            let y = vv-new(st, c, vv-tl(x));
             let e = vv-go(st, vm-pi-gate(), md-bind([vv-th(x), vv-th(y)], [c, vv-tl(x)]), (c * vv-tl(x)));
             y;
         }
@@ -387,8 +422,8 @@ section [form.bml] {
         def vv-u32-bytes(xs) = if ((Comparable) len(xs) == 0) then "" else ((String) md-le32(xs[0]) + vv-u32-bytes(xs[1:]));
         def vv-f32s-go(s, i, n, acc) = if (n <= 0) then reverse(acc) else vv-f32s-go(s, (i + 4), (n - 1), cons(vo-f32-at(s, i), acc));
         def vv-read(t, from, n) = vv-f32s-go(metal_buf_read(vv-th(t), (from * 4), (n * 4)), 0, n, []);
-        def vv-upload-f(xs) {
-            let y = vv-new(1, len(xs));
+        def vv-upload-f(st, xs) {
+            let y = vv-new(st, 1, len(xs));
             let w = metal_buf_write(vv-th(y), 0, vv-f32-bytes(xs));
             y;
         }
@@ -405,10 +440,10 @@ section [form.bml] {
             let HD = rkd[2];
             let H = (vv-tc(q) / HD);
             let T = vv-tl(x);
-            let sc = vv-new((H * T), T);
+            let sc = vv-new(st, (H * T), T);
             let e1 = vv-go(st, vm-pi-scores(), md-bind([vv-th(q), vv-th(k), vv-h(st, vv-s([wp, "emb_rel_k"])), vv-th(sc)], [T, H, HD, W]), ((H * T) * T));
             let e2 = vv-go(st, vm-pi-softmax(), md-bind16([vv-th(sc)], [T], 256, 0, 1, 0), (H * T));
-            let o = vv-new(vv-tc(q), T);
+            let o = vv-new(st, vv-tc(q), T);
             let e3 = vv-go(st, vm-pi-attnout(), md-bind([vv-th(sc), vv-th(v), vv-h(st, vv-s([wp, "emb_rel_v"])), vv-th(o)], [T, H, HD, W]), (vv-tc(q) * T));
             vv-conv(st, vv-s([np, "conv_o/Conv"]), o, -1);
         }
@@ -430,9 +465,9 @@ section [form.bml] {
             let e = vo-find(vv-rows(st), "sid");
             let D = vo-dims(e)[1];
             let T = len(ids);
-            let idb = metal_buf_alloc((4 * T));
+            let idb = vv-alloc(st, (4 * T));
             let w = metal_buf_write(idb, 0, vv-u32-bytes(ids));
-            let y = vv-new(D, T);
+            let y = vv-new(st, D, T);
             let d = vv-go(st, vm-pi-embed(), md-bind([idb, vv-h(st, "sid"), vv-th(y)], [T, D, md-f32-bits(vv-escale(st))]), (D * T));
             y;
         }
@@ -543,7 +578,7 @@ section [form.bml] {
         // So the chain that runs is flip, 7, flip, 5, flip, 3, flip, the elementwise affine — and
         // the flows that exist are found by asking which ones have a `pre` convolution.
         def vv-cf-step(st, fi, g, z0, z1) {
-            let x0d = vv-upload-f(z0);
+            let x0d = vv-upload-f(st, z0);
             let hb = vv-cf-params(st, fi, g, x0d);
             let sy = metal_sync();
             let hs = vv-read(hb, 0, vv-tn(hb));
@@ -572,9 +607,9 @@ section [form.bml] {
         def vv-idx-go(ds, t, out) = if ((Comparable) len(ds) == 0) then reverse(out) else vv-idx-go(ds[1:], (t + 1), vv-rep(ds[0], t, out));
         def vv-take-rows(st, x, idx) {
             let Lout = len(idx);
-            let ib = metal_buf_alloc((4 * Lout));
+            let ib = vv-alloc(st, (4 * Lout));
             let w = metal_buf_write(ib, 0, vv-u32-bytes(idx));
-            let y = vv-new(vv-tc(x), Lout);
+            let y = vv-new(st, vv-tc(x), Lout);
             let e = vv-go(st, vm-pi-take(), md-bind([vv-th(x), ib, vv-th(y)], [vv-tc(x), vv-tl(x), Lout]), (vv-tc(x) * Lout));
             y;
         }
@@ -593,7 +628,7 @@ section [form.bml] {
         def vv-wn-go(st, np, i, n, h, out) = if (i >= n) then out else vv-wn-next(st, np, i, n, vv-wn-layer(st, np, i, h, out));
         def vv-wn-next(st, np, i, n, r) = vv-wn-go(st, np, (i + 1), n, r[0], r[1]);
         def vv-wn-n(st, np, i) = if ((Comparable) vv-node?(st, vv-s([np, "in_layers.", i.str(), "/Conv"])) == 0) then i else vv-wn-n(st, np, (i + 1));
-        def vv-wn(st, np, h) = vv-wn-go(st, np, 0, vv-wn-n(st, np, 0), h, vv-new(vv-tc(h), vv-tl(h)));
+        def vv-wn(st, np, h) = vv-wn-go(st, np, 0, vv-wn-n(st, np, 0), h, vv-new(st, vv-tc(h), vv-tl(h)));
         // one residual coupling layer, reversed: the first half conditions, the second is shifted
         def vv-rcl(st, fi, x) {
             let np = vv-s(["/flow/flows.", fi.str(), "/"]);
@@ -665,7 +700,7 @@ section [form.bml] {
         // and the samples as signed 16-bit, in one string, ready for the seed's own mouth
         def vv-pcm(st, o) {
             let n = vv-tn(o);
-            let p = metal_buf_alloc((2 * n));
+            let p = vv-alloc(st, (2 * n));
             let e = vv-go(st, vm-pi-pcm16(), md-bind([vv-th(o), p], [n, md-f32-bits(32767.0)]), n);
             let sy = metal_sync();
             metal_buf_read(p, 0, (2 * n));
