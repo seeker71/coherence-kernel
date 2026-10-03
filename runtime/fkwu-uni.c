@@ -12184,6 +12184,41 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
     long long pn = fk_f64_prog_n, rt = fk_f64_refuse_tag;
     int ln = fk_f64_lit_n, hm = fk_f64_hidden_mask, ns = fk_f64_need_scratch, acc = fk_f64_acc_slot, ad = fk_f64_acc_dir, cs = fk_f64_conses, rsw = fk_f64_reads_strword;
     int cn = fk_f64_call_n, wnn = fk_f64_warm_n, cnr = fk_f64_call_not_ready;
+    int cc0 = fk_f64_calls_c;
+    long long st0 = fk_f64_self_tag;
+    /* An inline substitutes each argument EXPRESSION at the callee's parameter reads (call by name): a parameter the body
+     * never reads drops its argument, a parameter read in one branch runs it only there, a parameter read twice runs it
+     * twice -- every one a changed meaning when the argument calls (a call, a self call, a closure call, an accumulator
+     * write) or is a form the lane cannot admit alone (a native with an effect). The walker evaluates each argument once, in
+     * order, whether the callee reads it or not; an inline holds to that by taking only arguments that are pure expressions
+     * of the frame. An argument with a call, or one that does not admit by itself, leaves the call to the call arm, which
+     * evaluates every argument once. (Found 2026-10-03: a recipe hot past FK_F64_HEAT dropped `(pe-nx (pe-layer ...) ...)`'s
+     * argument because pe-nx never read its first parameter -- the appends inside pe-layer stopped.) */
+    {
+        int effectful = 0, admitted = 1;
+        k = 0;
+        while (k < car && admitted && !effectful) {
+            long long pn0 = fk_f64_prog_n;
+            int an = 0;
+            fk_f64_kind_ok = 1; /* a bare (value_kind x) argument is a compile-time fact, pure: let it stand as the substitution would */
+            int at = fk_f64_admit(args[k], arity, types, &an);
+            fk_f64_kind_ok = 0;
+            if (at == 0) { admitted = 0; }
+            else {
+                long long q = pn0;
+                while (q < fk_f64_prog_n) {
+                    int pk = fk_f64_prog[q].kind;
+                    if (pk == 19 || pk == 20 || pk == 21 || pk == 33 || pk == 38) { effectful = 1; break; } /* a call, an accumulator write, a closure call, a C call */
+                    q = q + 1;
+                }
+            }
+            k = k + 1;
+        }
+        fk_f64_prog_n = pn; fk_f64_refuse_tag = rt; fk_f64_lit_n = ln; fk_f64_hidden_mask = hm; fk_f64_need_scratch = ns;
+        fk_f64_acc_slot = acc; fk_f64_acc_dir = ad; fk_f64_conses = cs; fk_f64_reads_strword = rsw; fk_f64_calls_c = cc0; fk_f64_self_tag = st0;
+        fk_f64_call_n = cn; fk_f64_warm_n = wnn; fk_f64_call_not_ready = cnr; /* the call arm admits the argument again and raises any warm-up signal itself */
+        if (!admitted || effectful) { return 0; }
+    }
     /* the environment slot this inline borrows goes back as it was found: the param arm admits a caller's argument one
      * level down, and an inline inside that argument borrows the same slot the body being inlined still reads from */
     int d = fk_f64_env_depth;
