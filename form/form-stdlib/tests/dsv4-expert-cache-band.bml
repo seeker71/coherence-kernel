@@ -6,7 +6,7 @@
 ; twice in one top-k, the refusals (a capacity under the distinct ids, an id out of range, an empty top-k, a layer that is not there) and that a refused step changes nothing, a hit pinned against a miss of the same
 ; step, two layers holding the same expert id separately, and a slot index that is not an expert id.
 ;
-; Verdict 4095 when every claim lands:
+; Verdict 8191 when every claim lands:
 ;   1     the first fill: an empty table of 4 slots and the top-k [5, 2, 9] answers slots [0, 1, 2], the misses [[0, 5], [1, 2], [2, 9]] in the order placed, 0 hits, 0 evictions, keys [5, 2, 9, -1], 3 resident
 ;   2     hits: the same top-k answers the same slots and no miss (3 hits); [9, 5, 2] answers [2, 0, 1] (slots follow the ids, whatever their order); the table is the same set after it
 ;   4     an empty slot before any eviction, the lowest index first: [7] lands in slot 3 (the last empty), and a table that has an empty slot never evicts (evictions 0 through the fill of all 4)
@@ -27,6 +27,9 @@
 ;         warm table answers [3, 0]
 ;   2048  a forgotten slot is empty: after [4, 5, 6] on 3 slots, dxc-forget of slot 1 reads keys [4, -1, 6] (2 resident), the next miss [7] takes slot 1 first with no eviction, and the forgotten
 ;         expert 5 is a MISS when asked for again (the arena forgets a slot whose bytes a refused fill never copied: no hit may read them)
+;
+;   4096  the one-pass walks: the step no longer asks `len` or `xs[i]` of a list at each index (quadratic in the slot count: 528 us a take at 64 slots, 1,859 at 192); the indexed walks kept here as a REFERENCE answer
+;         the same as the live step over random sequences at 5, 16 and 40 slots (every step's whole answer, refusals included, and the tables equal), and a reference with its victim choice reversed is seen to differ
 ;
 ; PROOF LEVEL: every arm -- integers and lists only; no file, no host door, no device.
 // preludes: form-stdlib/core.fk form-stdlib/bml/dsv4-expert-cache.bml
@@ -162,6 +165,59 @@ section [form.bml] {
    let d = dxc-take(c, 0, [5], 8);
    !nothing?(a) && held == [4, 0 - 1, 6] && res == 2 && !nothing?(b) && b[1] == [[1, 7]] && !nothing?(d) && d[1][0][1] == 5 && dxc-count(c, "evicts") == 1;
   }
+  // ---- 4096: the one-pass walks answer what the indexed ones answered ----------------------------------------------------------------------------------
+  // The step was quadratic in its slot count (a take at 64 slots cost 528 us, at 192 slots 1,859): every loop asked `len` or `xs[i]` of the list at each index. The loops now carry the list down (nil?, xs[0], xs[1:]). This is the
+  // first form kept as a REFERENCE (dxo-: the indexed walks, exactly as they were) and held equal to the live step on random sequences at 5, 16 and 40 slots over 64 experts: every step's whole answer (the table, the slots,
+  // the misses in the order placed, the hits, the evictions) equal, refusals included (a top-k of more distinct ids than slots answers nothing in both), and the two tables equal after every step. The plant: the reference with its
+  // victim choice reversed (the MOST recently used unpinned slot goes) reads a different answer inside the first sequences.
+  def dxo-find(xs, v, i) = i == len(xs) ? 0 - 1 : (xs[i] == v ? i : dxo-find(xs, v, i + 1));
+  def dxo-member?(xs, v) = len(xs) == 0 ? false : (xs[0] == v || dxo-member?(xs[1:], v));
+  def dxo-pin(keys, ids) = len(ids) == 0 ? [] : (dxo-find(keys, ids[0], 0) >= 0 ? cons(dxo-find(keys, ids[0], 0), dxo-pin(keys, ids[1:])) : dxo-pin(keys, ids[1:]));
+  def dxo-victim-go(stamps, pinned, i, best, bi, newest) = i == len(stamps) ? bi
+   : ((dxo-member?(pinned, i) || (bi >= 0 && (newest ? stamps[i] <= best : stamps[i] >= best))) ? dxo-victim-go(stamps, pinned, i + 1, best, bi, newest) : dxo-victim-go(stamps, pinned, i + 1, stamps[i], i, newest));
+  def dxo-place(a, e, newest) {
+   let v = dxo-victim-go(a[2], a[3], 0, 0, 0 - 1, newest);
+   v < 0 ? nothing() : [a[0] + 1, dxc-set-at(a[1], v, e), dxc-set-at(a[2], v, a[0] + 1), cons(v, a[3]), cons(v, a[4]), cons([v, e], a[5]), a[6], a[1][v] >= 0 ? a[7] + 1 : a[7]];
+  }
+  def dxo-one(a, e, newest) {
+   let s = dxo-find(a[1], e, 0);
+   s >= 0 ? [a[0] + 1, a[1], dxc-set-at(a[2], s, a[0] + 1), a[3], cons(s, a[4]), a[5], a[6] + 1, a[7]] : dxo-place(a, e, newest);
+  }
+  def dxo-go(a, ids, newest) = len(ids) == 0 ? a : { let b = dxo-one(a, ids[0], newest); nothing?(b) ? nothing() : dxo-go(b, ids[1:], newest); };
+  def dxo-distinct(ids) = len(ids) == 0 ? 0 : (dxo-member?(ids[1:], ids[0]) ? 0 : 1) + dxo-distinct(ids[1:]);
+  def dxo-in-range?(ids, nexp) = len(ids) == 0 ? true : (ids[0] >= 0 && ids[0] < nexp && dxo-in-range?(ids[1:], nexp));
+  def dxo-step(st, ids, nexp, newest) = (!nothing?(st) && len(ids) > 0 && dxo-in-range?(ids, nexp) && dxo-distinct(ids) <= len(st[1])) ? dxc-done(dxo-go([st[0], st[1], st[2], dxo-pin(st[1], ids), [], [], 0, 0], ids, newest)) : nothing();
+  // a deterministic draw (Park-Miller): the next state, and a top-k of k ids from it
+  def dxb-next(s) = (s * 48271) % 2147483647;
+  def dxb-draw-ids(s, k, nexp) = k == 0 ? [] : cons((dxb-next(s) / 7) % nexp, dxb-draw-ids(dxb-next(s), k - 1, nexp));
+  def dxb-lin-go(s, i, n, a, b, nexp, bad) {
+   i == n ? bad : {
+    let s1 = dxb-next(s);
+    let k = 1 + (s1 / 11) % 6;
+    let ids = dxb-draw-ids(s1, k, nexp);
+    let ra = dxc-step(a, ids, nexp);
+    let rb = dxo-step(b, ids, nexp, false);
+    let same = (nothing?(ra) && nothing?(rb)) || (!nothing?(ra) && !nothing?(rb) && ra == rb);
+    nothing?(ra) || nothing?(rb) ? dxb-lin-go(dxb-next(s1), i + 1, n, a, b, nexp, same ? bad : bad + 1) : dxb-lin-go(dxb-next(s1), i + 1, n, ra[0], rb[0], nexp, same ? bad : bad + 1);
+   };
+  }
+  def dxb-lin-differs-go(s, i, n, a, b, nexp, diffs) {
+   i == n ? diffs : {
+    let s1 = dxb-next(s);
+    let ids = dxb-draw-ids(s1, 1 + (s1 / 11) % 6, nexp);
+    let ra = dxc-step(a, ids, nexp);
+    let rb = dxo-step(b, ids, nexp, true);
+    (nothing?(ra) || nothing?(rb)) ? dxb-lin-differs-go(dxb-next(s1), i + 1, n, a, b, nexp, diffs) : dxb-lin-differs-go(dxb-next(s1), i + 1, n, ra[0], rb[0], nexp, ra == rb ? diffs : diffs + 1);
+   };
+  }
+  def dxb-linear() {
+   let b5 = dxb-lin-go(7, 0, 150, dxc-new(5), dxc-new(5), 64, 0);
+   let b16 = dxb-lin-go(11, 0, 150, dxc-new(16), dxc-new(16), 64, 0);
+   let b40 = dxb-lin-go(13, 0, 150, dxc-new(40), dxc-new(40), 64, 0);
+   let plant = dxb-lin-differs-go(7, 0, 150, dxc-new(5), dxc-new(5), 64, 0);
+   let said = print_str("  one-pass walks against the indexed reference over 150 steps at 5, 16 and 40 slots: steps that differ " ++ b5.str() ++ " " ++ b16.str() ++ " " ++ b40.str() ++ "; the plant (the reference evicting the most recent) differs in " ++ plant.str() ++ " steps");
+   b5 == 0 && b16 == 0 && b40 == 0 && plant > 0;
+  }
  }
  let h1 = try dxb-first() catch false;
  let h2 = try dxb-hits() catch false;
@@ -175,6 +231,7 @@ section [form.bml] {
  let h512 = try dxb-nochange() catch false;
  let h1024 = try dxb-slot-id() catch false;
  let h2048 = try dxb-forgot() catch false;
+ let h4096 = try dxb-linear() catch false;
  let c1 = dxb-bit(h1, 1);
  let c2 = dxb-bit(h2, 2);
  let c4 = dxb-bit(h4, 4);
@@ -187,6 +244,7 @@ section [form.bml] {
  let c512 = dxb-bit(h512, 512);
  let c1024 = dxb-bit(h1024, 1024);
  let c2048 = dxb-bit(h2048, 2048);
- print_str("dsv4-expert-cache-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048;
+ let c4096 = dxb-bit(h4096, 4096);
+ print_str("dsv4-expert-cache-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096;
 }

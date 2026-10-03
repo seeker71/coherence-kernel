@@ -1,0 +1,103 @@
+//////////////////////////////////////////////////////////////////////
+// dsv4-arena-sim.bml -- how big the expert arena should be, from the experts a real run picked: the picks replayed through the cache the arena runs, at other slot counts.
+//
+// WHY. The arena holds `slots` experts a layer (dls-cache-experts: 64 of the file's 256, 18.1 GiB) and the host fills the rest from the file when a layer's router picks an expert it does not hold. The 2026-10-03 23:43 WITA
+// window read, over its 24 decode tokens, 14 to 129 experts missed a token (7.08 MB each): the wall of a token followed the misses (88 ms at 14, 134 at 129: about 0.4 ms an expert, 17 GB/s of page cache) and rose from a
+// fixed 82 ms. A bigger arena misses less; how much less depends on what the router picks, which no header says. Each token row of the token door now carries the picks of its layers (the receipt's rows: "picks",
+// [[layer, [ids]]...]; the door's {"picks":0} turns it off), and this cell replays them through the SAME cache code the arena runs (dsv4-expert-cache.bml: dxc-take, a table a layer re-seated at min(slots, the layer's stored
+// experts) as dsv4-arena.fk does) at any slot count. The router's picks do not depend on the arena's size (a slot holds an expert's exact bytes), so the replay answers what a run at that size would have missed.
+//
+// THE REPORT (das-report-line): for a slot count, the arena's bytes (the lease's expert term, dls-cache), the share of the file's experts it holds, and over the DECODE rows after the first (the warm ones) the hit rate, the
+// mean misses and megabytes filled a token; over the prefill rows the misses and megabytes. The fit (das-fit) reads the receipt's own rows: wall against experts missed over the warm decode rows, the milliseconds an
+// expert's fill costs and the fixed milliseconds without any. dsv4-arena-sim-run.bml's door prints both from a receipt row and the file's header.
+//
+// Proven by: native/metal/tests/dsv4-arena-sim-band.bml (the replay equal to the real arena's counts, row by row, at the slot count of the walk and at others; the receipt's JSON read back; the fit exact on a line).
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/core.fk form-stdlib/bml/dsv4-validate.bml form-stdlib/bml/dsv4-expert-cache.bml
+section [form.bml] {
+ class Dsv4ArenaSim {
+  // ---- the picks of a receipt row ------------------------------------------------------------------------------------------------------
+  def das-pair(p) { let e = json-array-elements(p); [json-int-value(e[0]), map(n => json-int-value(n), json-array-elements(e[1]))]; }
+  def das-row-picks(row) = json-object-has?(row, "picks") ? map(p => das-pair(p), json-array-elements(json-object-get(row, "picks"))) : [];
+  // [kind, picks, wall_ms, experts_missed] of each row of a receipt row
+  def das-row-of(r) = [dvr-text(r, "kind", ""), das-row-picks(r), dvr-int(r, "wall_ms", 0), dvr-int(r, "experts_missed", 0)];
+  def das-rows(doc) = map(r => das-row-of(r), json-array-elements(json-object-get(doc, "rows")));
+  def das-has-picks?(rows) = nil?(rows) ? false : (len(rows[0][1]) > 0 || das-has-picks?(rows[1:]));
+  // ---- the cache, as the arena seats it -------------------------------------------------------------------------------------------------
+  def das-seat(c, m, il, n, slots) = il == n ? c : { let nexp = dvl-l(m, il, "nexp"); record_set(c, dxc-lkey(il), dxc-new(slots < nexp ? slots : nexp)); das-seat(c, m, il + 1, n, slots); };
+  def das-cache(m, slots) = das-seat(dxc-open(record_get(m, "layers-n"), slots), m, 0, record_get(m, "layers-n"), slots);
+  // ---- one row replayed: [hits, misses, bytes missed, refusals] --------------------------------------------------------------------------
+  // a layer's pick: the lookups are its ids, the misses the plan's, each miss the layer's own expert bytes (the three stacks); a pick the cache refuses (more distinct ids than slots) is counted and changes nothing
+  def das-layer(c, m, p) {
+   let plan = dxc-take(c, p[0], p[1], dvl-l(m, p[0], "nexp"));
+   nothing?(plan) ? [0, 0, 0, 1] : [len(p[1]) - len(plan[1]), len(plan[1]), len(plan[1]) * dls-layer-expert(m, p[0]), 0];
+  }
+  def das-add(a, b) = [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]];
+  def das-row-go(c, m, ps, acc) = nil?(ps) ? acc : das-row-go(c, m, ps[1:], das-add(acc, das-layer(c, m, ps[0])));
+  def das-replay-go(c, m, rows) = nil?(rows) ? [] : cons(das-row-go(c, m, rows[0][1], [0, 0, 0, 0]), das-replay-go(c, m, rows[1:]));
+  // the rows' stats, in order, at `slots` experts a layer (a fresh cache, as a window starts)
+  def das-replay(m, rows, slots) = das-replay-go(das-cache(m, slots), m, rows);
+  // ---- the report ------------------------------------------------------------------------------------------------------------------------
+  def das-sum(stats, k) = nil?(stats) ? 0 : stats[0][k] + das-sum(stats[1:], k);
+  def das-kinds(rows, kind) = nil?(rows) ? [] : (rows[0][0] == kind ? cons(0, das-kinds(rows[1:], kind)) : das-kinds(rows[1:], kind));
+  // the stats of the rows of one kind
+  def das-of-kind(rows, stats, kind) = nil?(rows) ? [] : (rows[0][0] == kind ? cons(stats[0], das-of-kind(rows[1:], stats[1:], kind)) : das-of-kind(rows[1:], stats[1:], kind));
+  // the warm decode rows: the decode rows after the first when there are at least three, else all (the door's own rule, dtr-warm-rows)
+  def das-warm(ds) = len(ds) >= 3 ? ds[1:] : ds;
+  def das-pct(h, ms) = (h + ms) == 0 ? 0 : (1000 * h) / (h + ms);
+  def das-tenths(t) = (t / 10).str() ++ "." ++ (t % 10).str();
+  def das-per(total, n) = n == 0 ? 0 : total / n;
+  // one slot count: the arena, the hit rate and the fills of the warm tokens, the prefill's misses
+  def das-report-line(m, rows, slots) {
+   let stats = das-replay(m, rows, slots);
+   let warm = das-warm(das-of-kind(rows, stats, "decode"));
+   let pre = das-of-kind(rows, stats, "prefill");
+   let refused = das-sum(stats, 3);
+   "slots " ++ slots.str() ++ " a layer: arena " ++ dvr-gib(dls-cache(m, slots)) ++ " (" ++ ((100 * slots) / dvl-l(m, 0, "nexp")).str() ++ " percent of the layer's experts); warm decode hit " ++ das-tenths(das-pct(das-sum(warm, 0), das-sum(warm, 1))) ++ " percent, "
+    ++ das-tenths(das-per(10 * das-sum(warm, 1), len(warm))) ++ " experts missed and " ++ (das-per(das-sum(warm, 2), len(warm)) / 1000000).str() ++ " MB filled a token over " ++ len(warm).str() ++ " tokens; the prefill missed " ++ das-sum(pre, 1).str() ++ " experts (" ++ (das-sum(pre, 2) / 1000000).str() ++ " MB)"
+    ++ (refused > 0 ? "; " ++ refused.str() ++ " picks REFUSED (more distinct experts than slots)" : "");
+  }
+  // ---- the fit: the wall of a warm decode token against its misses (least squares, milliseconds) -----------------------------------------------
+  def das-pts(rows) = nil?(rows) ? [] : (rows[0][0] == "decode" ? cons([1.0 * rows[0][3], 1.0 * rows[0][2]], das-pts(rows[1:])) : das-pts(rows[1:]));
+  def das-sx(ps) = nil?(ps) ? 0.0 : ps[0][0] + das-sx(ps[1:]);
+  def das-sy(ps) = nil?(ps) ? 0.0 : ps[0][1] + das-sy(ps[1:]);
+  def das-sxy(ps) = nil?(ps) ? 0.0 : ps[0][0] * ps[0][1] + das-sxy(ps[1:]);
+  def das-sxx(ps) = nil?(ps) ? 0.0 : ps[0][0] * ps[0][0] + das-sxx(ps[1:]);
+  // [ms an expert's fill costs, the fixed ms without any fill] or nothing when the misses do not vary
+  def das-fit(rows) {
+   let ps = das-warm(das-pts(rows));
+   let n = 1.0 * len(ps);
+   let den = n * das-sxx(ps) - das-sx(ps) * das-sx(ps);
+   (len(ps) < 3 || den <= 0.0) ? nothing() : { let slope = (n * das-sxy(ps) - das-sx(ps) * das-sy(ps)) / den; [slope, (das-sy(ps) - slope * das-sx(ps)) / n]; };
+  }
+  def das-fit-line(rows) {
+   let f = das-fit(rows);
+   nothing?(f) ? "fit: the warm decode tokens' misses do not vary (or fewer than three): no fit" : "fit over the warm decode tokens: " ++ (floor(f[0] * 1000.0) / 1000.0).str() ++ " ms of wall for each expert missed on top of " ++ (floor(f[1] * 10.0) / 10.0).str() ++ " ms with none";
+  }
+  def das-slot-list() = [64, 80, 96, 128, 160, 192, 256];
+  def das-report-go(m, rows, ss) = nil?(ss) ? [] : cons(das-report-line(m, rows, ss[0]), das-report-go(m, rows, ss[1:]));
+  def das-report(m, rows) = append([das-fit-line(rows)], das-report-go(m, rows, das-slot-list()));
+  // ---- the door: a receipt row and the file's header, printed ----------------------------------------------------------------------------
+  def das-lines(s, at) { let p = str_find(s, "\n", at); p < 0 ? (at < str_len(s) ? [substring(s, at, str_len(s))] : []) : cons(substring(s, at, p), das-lines(s, p + 1)); }
+  def das-header(file) {
+   let size = file_size(file);
+   let src = size > 24 ? dvl-src(file) : "";
+   (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
+  }
+  def das-main() {
+   let opts = dvr-options();
+   let receipt = dvr-text(opts, "receipt", "receipts/dsv4-token-runs.jsonl");
+   let file = dvr-text(opts, "file", dvr-file());
+   let lines = das-lines(read_file(receipt), 0);
+   let which = dvr-int(opts, "row", len(lines) - 1);
+   let m = das-header(file);
+   (which < 0 || which >= len(lines)) ? print_str("[dsv4-arena-sim] the receipt " ++ receipt ++ " has " ++ len(lines).str() ++ " rows: row " ++ which.str() ++ " is not one") : nothing?(m) ? print_str("[dsv4-arena-sim] the file " ++ file ++ " is not a deepseek4 GGUF (or is absent): the header gives the layers' experts and bytes") : {
+    let doc = parse-json("receipt-row", lines[which]);
+    let rows = das-rows(doc);
+    let head = "[dsv4-arena-sim] row " ++ which.str() ++ " of " ++ receipt ++ " (" ++ dvr-text(doc, "date", "") ++ ", arena_slots " ++ dvr-int(doc, "arena_slots", 0 - 1).str() ++ "): " ++ len(rows).str() ++ " token rows";
+    das-has-picks?(rows) ? print_str(head ++ "\n[dsv4-arena-sim] " ++ dvr-join(map(l => l, das-report(m, rows)), "\n[dsv4-arena-sim] ")) : print_str(head ++ ": no row carries picks (a run of the token door before the picks were recorded; the door records them by default, {\"picks\":0} turns it off): run the door once and read the newest row; " ++ das-fit-line(rows));
+   };
+  }
+ }
+ 0;
+}
