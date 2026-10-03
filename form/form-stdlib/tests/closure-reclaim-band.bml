@@ -1,23 +1,29 @@
-; closure-reclaim-band.bml — a closure nothing names any more gives back what it captured.
+; closure-reclaim-band.bml — a closure nothing names any more gives back what it captured, and one something names stays.
 ;
 ; preludes: form-stdlib/core.fk
-; PROOF LEVEL: FOURTH-ARM ONLY (kernel_stat 66, 67 and 68 read fkwu's closure-instance table; no sibling kernel has one)
+; PROOF LEVEL: FOURTH-ARM ONLY (kernel_stat 66, 67 and 68 and kernel_live word 21 read fkwu's closure table and melt count; no sibling kernel has them)
 ;
 ; Every evaluation of a lambda that captures made a row in fkwu's closure table and appended what it captured
 ; to a pool, and the melt took every captured value for a root forever. A per-frame
 ; `positions |> map(position => samples[position])` kept each frame's whole `samples` list alive: in a hermetic
 ; glass loop on 2026-10-03, 4.25 of the 4.36 million pairs that survived a melt were held by closures, the floor
 ; grew with every melt, the heap doubled to 2^29 pairs (8.6 GB) in the live glass, and each melt moved gigabytes
-; of the machine's memory. A melt now keeps the closure rows a root reaches (and the rows of the last two
-; generations, which a C local may hold), copies only what those captured, and gives the other rows back.
+; of the machine's memory. A melt now keeps the closure rows a root reaches, and the rows made since the melt
+; before it (a word a C local holds is on no root), copies only what those captured, and gives the other rows
+; back for the next closure to take. A row's index is the fn-value's own word, so a row handed back and taken
+; again is a different closure under the same word: every arm that holds a closure word while it walks something
+; else must keep it on the value stack, and the claims below are the ones that fail when one does not.
+; (A call whose callee the call site builds is the same hazard; its claim is closure-callee-band.fk.)
 ;
 ; The plant comes first: three thousand closures kept alive in a list must stand (kernel_stat 66), so the
 ; reading below is a count of rows the instrument can see, not a blindness. Then four thousand turns each build a
 ; lambda that captures a fresh list of three hundred cells, use it once through map and drop it, and five thousand
 ; turns of cons-only garbage run so the melt generations pass. Two closures built before all of it, one that
-; captures another, are asked after it.
+; captures another, are asked after it. The last claims run closures against melts: eq with a heavy right side,
+; the young window counted in melts (kernel_live word 21), and a chain of four million closures each capturing
+; the one before it.
 ;
-; Verdict 127 when every claim lands:
+; Verdict 1023 when every claim lands:
 ;   1     the plant: three thousand kept closures stand as rows (kernel_stat 66)
 ;   2     after the turns and the drain the rows standing are the plant's and under a hundred more
 ;   4     at least 3800 of the four thousand dropped closures were handed back (kernel_stat 67)
@@ -25,6 +31,15 @@
 ;   16    the two closures built before the churn still answer: one captures a list, one captures a closure
 ;   32    the three thousand plant closures still answer what they captured, after every melt in between
 ;   64    the four thousand turns each computed what their lambda captured (a reclaimed row was no live one)
+;   128   eq of a closure and the closure its heavy right side makes after several melts reads 0: two distinct
+;         closures never meet under one word (plant: -DFK_PLANT_NOMOVABLE, eq leaves its left word on no root
+;         and a reused row makes the two equal: this reads 1 there)
+;   256   three hundred closures made and dropped just after a melt stand across the next melt (bar the few the
+;         melt's own interval held) and are handed back by the one after it
+;         (plants: -DFK_CLO_YOUNG=0 hands them back at once, -DFK_CLO_YOUNG=1000000000 never)
+;   512   a chain of four million closures, each capturing the one before, stands across several melts and
+;         its first link answers (plant: -DFK_PLANT_RECURSIVE_MARK, the melt walks a link per C frame and the
+;         kernel dies at the first melt; on a build with a small stack the same chain crashes at a shorter length)
 section [form.bml] {
     class ClosureReclaimBand {
         def crb-bit(ok, bit) = ok ? bit : 0;
@@ -49,6 +64,45 @@ section [form.bml] {
         def crb-junk(n) = n <= 0 ? [] : cons(n, crb-junk(n - 1));
         def crb-drain(n, sum) = n <= 0 ? sum : crb-drain(n - 1, sum + len(crb-junk(1000)));
 
+        // a closure made after the melts its caller is waiting through: the row a melt handed back is taken by it
+        def crb-heavy-closure() {
+            let burn = crb-drain(4000, 0);
+            crb-make(2);
+        }
+        def crb-eq-closures() = eq(crb-make(1), crb-heavy-closure());
+
+        // the young window, counted in melts: word 21 of the kernel's own page is the melt generation
+        def crb-gen() = kernel_live(host_pid())[21];
+        def crb-until(g) = crb-gen() >= g ? 0 : crb-until-step(g, len(crb-junk(300)));
+        def crb-until-step(g, sink) = crb-until(g);
+        def crb-make-drop(n) = n <= 0 ? 0 : crb-make-drop-step(n, crb-ask(crb-make(n), 1));
+        def crb-make-drop-step(n, sink) = crb-make-drop(n - 1);
+        def crb-young() {
+            let g0 = crb-gen();
+            let sync = crb-until(g0 + 1);
+            let rows0 = kernel_stat(66);
+            let g1 = crb-gen();
+            let made = crb-make-drop(300);
+            let one = crb-until(g1 + 1);
+            let rows1 = kernel_stat(66);
+            let two = crb-until(g1 + 2);
+            let rows2 = kernel_stat(66);
+            rows1 >= rows0 + 250 && rows2 < rows0 + 20;
+        }
+
+        // a chain: each link captures the one before it (crb-pick takes the capture as an argument so the lambda holds it)
+        def crb-pick(p, y) = y + 1;
+        def crb-link(prev) = y => crb-pick(prev, y);
+        def crb-build(n, prev) = n <= 0 ? prev : crb-build(n - 1, crb-link(prev));
+        def crb-chain-stands() {
+            let first = crb-make(1);
+            let top = crb-build(4000000, first);
+            let burn = crb-drain(3000, 0);
+            let rows = kernel_stat(66);
+            let alive = value_kind(top) == "closure";
+            rows >= 4000000 && alive && crb-ask(first, 5) == 46;
+        }
+
         def crb-score() {
             let kept = crb-make(7);
             let chain = crb-chain(11);
@@ -60,14 +114,20 @@ section [form.bml] {
             let rows = kernel_stat(66);
             let reclaimed = kernel_stat(67);
             let values = kernel_stat(68);
-            print_str("closure-reclaim rows " + rowsPlant.str() + " -> " + rows.str() + " reclaimed " + reclaimed.str() + " values " + valuesPlant.str() + " -> " + values.str() + " turns " + sum.str());
+            let equal = crb-eq-closures();
+            let young = crb-young();
+            let stands = crb-chain-stands();
+            print_str("closure-reclaim rows " + rowsPlant.str() + " -> " + rows.str() + " reclaimed " + reclaimed.str() + " values " + valuesPlant.str() + " -> " + values.str() + " turns " + sum.str() + " eq " + equal.str() + " young " + young.str() + " chain " + stands.str());
             crb-bit(rowsPlant >= 3000, 1)
               + crb-bit(rows < rowsPlant + 100, 2)
               + crb-bit(reclaimed >= 3800, 4)
               + crb-bit(values < valuesPlant + 200, 8)
               + crb-bit(crb-ask(kept, 1) == 48 && crb-ask(chain, 1) == 53, 16)
               + crb-bit(crb-intact(2999, plant) == 1, 32)
-              + crb-bit(sum == 8000 && drained == 5000000, 64);
+              + crb-bit(sum == 8000 && drained == 5000000, 64)
+              + crb-bit(equal == 0, 128)
+              + crb-bit(young, 256)
+              + crb-bit(stands, 512);
         }
     }
     crb-score();
