@@ -291,10 +291,11 @@ references     ds4-recorded-references-band.bml 8191   (the logits pinned by a S
 driver stage 1 dsv4-fixture-gguf-band.bml 511 · dsv4-layout-band.bml 1023 · native/metal/tests/dsv4-bind-band.bml 511
 driver stage 2 dsv4-kernels-band.bml 16383 · native/metal/tests/dsv4-open-band.bml 1023 · native/metal/tests/dsv4-layer-band.bml 2047
 driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/dsv4-end-to-end-band.bml 511
-               dsv4-lease-band.bml 511 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 4095
+               dsv4-lease-band.bml 511 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 16383
 driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 1023 · native/metal/tests/dsv4-layer-q8q2-band.bml 4095
                native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 104 kernels, dsv4-open-band 1023 with 75 in the graph)
 driver stage 5 native/metal/tests/dsv4-ledger-band.bml 511 · native/metal/tests/dsv4-door-run-band.bml 127   (the op ledger of a token, the flow through the door's functions)
+               native/metal/tests/dsv4-token-run-band.bml 255 · form-stdlib/tests/dsv4-token-run-plan-band.bml 31   (the token door's rows from the ledger, the tap, the plan from the header)
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -405,11 +406,23 @@ state and score (32,768 B twice on the 21, 262,144 B twice on the 20: 11,862,016
 state at 1,024, 8,192 and 65,536 positions grows it within 13,312 B of its price and frees back to the byte, and the first dispatch in a process (the init kernel) moved wired memory by 0. What moved wired memory is the
 machine: it is every process's, and on this Mac a sibling not yet named moves it by 306 to 328 MB every second or so, up and down (900 readings 10 ms apart: 7 steps over 16 MiB, 5 over 128 MiB; spreads over 1 s from 0.7 MB
 to 963 MB; a stage that does no work read +0.6 GiB, and a 3 s reading was 19.8 MB then 331.9 MB: it is bursty). The lease did not move (`dsv4-lease-band.bml` bit 256): shared 26,787,475,292 B and the 8 GiB margin, 35,377,409,884 B at
-64 positions, 805,797,888 B more at 8,192 and only the capacity-bound terms grow. The guard stays and reads truly: `dvr-ambient` reads wired memory for 3 s before the window (the dry plan prints it too), a stage
-is judged by its wired growth less that movement (`dvr-own-delta`; with no movement the rule is the rule it was, and twice the estimate plus the movement plus one still ends the run), a stage-delta is met with a second 3 s
-reading before the run ends, the wirespan probe reads 'stack' only past half a stack once the movement is taken from the delta and 'between' where the movement hides which, and every stage line and receipt row carries the
-device's own bytes (`own_delta`) beside the wired growth, with the movement named (`wired_noise`): `dsv4-validate-band.bml` bit 2048, a window that ignores the movement reads 2047. The compile and map estimates are bounds
-(512 MiB, and 512 MiB plus the scratch plan), not readings: the window's +309,854,208 B and +43,286,528 B are the first measurements of them, taken through the same noisy sensor.
+64 positions, 805,797,888 B more at 8,192 and only the capacity-bound terms grow. The window names the movement and subtracts none of it: every process on this machine is ours, so `dvr-organs` reads the process list through the
+body's door (`host_processes`: pid, resident bytes) and names the organs of ours resident by command (the dry plan prints them, every stage line carries them with the ones whose resident bytes moved by 64 MiB or more, and the receipt
+holds `organs` and `moved`), and the rule that guards is the lease: wired above what the window holds, past the baseline, with host-memory-low and a denied ask (`dsv4-validate-band.bml` bit 2048). A stage's wired growth against its price is
+read and told (OVER twice its price, with the organs that moved), never an abort of its own, and the wirespan probe's kind (slice, between, stack) is recorded. Every stage line and receipt row carries the device's own bytes
+(`own_delta`) beside the wired growth. The compile and map estimates are bounds (512 MiB, and 512 MiB plus the scratch plan), not readings: the window's +309,854,208 B and +43,286,528 B are the first measurements of them.
+
+The second window (receipts/dsv4-validation.jsonl, 2026-10-03 07:29:28 to 07:30:04 WITA) passed compile, map (own device bytes +86,284,566,528: the 80 GiB mapping), state, wirespan ('between') and layers 0 to 15 on the real file and
+ended at layer 16 on ask-denied:compressor with the reading that denied thrown away; 13 s later the compressor read 6.3 GiB against a cap of 32. Field 8 of `host_vm_stat` is the pages the compressor OCCUPIES; the pages it STORES are
+vm_stat's ('Pages stored in compressor', 27.9 GiB then), read by `dvr-stored-pages`. A denial is now a reading carried whole (the receipt's `denied`), and a denial for reserve or compressor is waited out with the governor's naps (10 s
+doubling to 60 s, 5 minutes an ask at most, never past the window's 20) before the run ends (`dsv4-validate-band.bml` bit 4096). Wired memory followed the weights a layer's dispatches touch and returned them (layer 0 +3,207,380,992 B,
+layer 1 -1,368,260,608 B, layer 14 -2,233,942,016 B; net +2.55 GB over 16 layers), so a layer is priced at the bytes of the tensors its dispatches can touch, whole stacks included: layer 0 3,018,191,320 B (the largest), layer 1
+1,959,129,560 B, the 43 summing 85.7 GB, which is why they are asked one at a time and never summed (bit 8192). The validation window no longer stages the layers (a sync and a machine reading a layer is a probe protocol, not the
+token path); it keeps compile, map, state, wirespan, the head and its argmax, and the recorded references. The token path is measured by `observe/dsv4-token-run.bml` (`form-stdlib/bml/dsv4-token-run.bml`, written and not run on the
+real file; dry by default, `{"go":1}` runs): one row a token read from the landed ledger (`dll-line`: dispatches, barriers, command buffers, waits, host reads, buffers made, bytes, device busy, ms) with the machine's wired growth, pageins and
+the device's own bytes, the plan priced from the bare header by the ledger's own formulas (`dll-token-count-m`, `dll-token-bytes-m`: 1,856 dispatches at the quietest position and 2,082 at the loudest, 22 command buffers), and wired
+memory read after EVERY LAYER of the first three tokens without a sync, through the one function the token handle calls at its seams (`dkr-hz-tap-set`; no tap is installed in production), stopping the token before the machine is at
+risk (host-memory-low, wired above 60 percent of memory, available under the reserve, 20 minutes) with the curve in the receipt (`native/metal/tests/dsv4-token-run-band.bml`, `form-stdlib/tests/dsv4-token-run-plan-band.bml`).
 
 Driver stage 5, the flow held to the Swift runner's op ledger (read 2026-10-03 WITA 09:30 to 10:50, each band alone, memory room before each run; `docs/dsv4-flow-history.md` is the map of where the
 whole flow stood: the Form cell of 08-10 held the stream at 226 ms a token warm, the Swift runner's 34 to 38 ms was never a Form number, and neither was ever in main). Measured on the fixture before this change (a machine at load average 33 to 43, best of six reps of 16 tokens): the 137
