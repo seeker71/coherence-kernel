@@ -4,20 +4,25 @@
 ; handed to the queue, host reads, plans that ran short), and ONE row per block (its enqueue count, the weight bytes it reads). The Swift reference runner (history 93154a720) was held to such a count every run; this lane is a
 ; Form cell, where a dispatch costs about 20 us of host, so the count is the thing to hold: a token that grows an op, a wait, an allocation or a barrier past its ceiling fails here.
 ;
-; Verdict 255 when every claim lands:
+; Verdict 511 when every claim lands:
 ;   1     the dispatch count is the layout's own formula (dll-token-count: 22 + the compressor's 3 + 5 or 6 at a window boundary, 18 or 19 for the FFN, embed 2, head and NaN scan 8) at every one of eight decode steps,
 ;         on the MXFP fixture and on the real-types fixture (Q8_0 dense, IQ2_XXS gate and up, Q2_K down), serial and concurrent
 ;   2     one wait a token (the head's argmax, the NaN scan and the logits settle in ONE sync), no buffer made or freed (allocs 0), two host reads (the count and the id), and the command buffers are floor(layers / 2) + 1 when
 ;         concurrent (a batch handed to the queue every second block, then the one the wait drains) and 1 when serial
 ;   4     the barrier plan: concurrent rows carry barriers (at least one a block and a stage, below the dispatch count: the plan overlaps some work and holds the rest), no plan ran short or long (miss 0), and a serial row
 ;         carries none
-;   8     the concurrent walk is the serial walk: the eight ids and every logit's bits equal, on both fixtures (an overlap that moved a value would show here and in the oracle bands)
+;   8     the concurrent walk is the serial walk: the eight ids and every logit's bits equal, on both fixtures (an overlap that moved a value would show here and in the oracle bands). The real-types fixture's greedy
+;         ids are all 3, so its ids cannot tell one walk from another: the LOGITS' bits discriminate, and the claim also requires the logits of consecutive steps to differ (on both fixtures)
 ;   16    the stage rows: one per block in ascending order, their dispatches plus the embedding's 2 and the head's 8 equal the token's, their bytes plus the embedding row and the head equal dll-token-bytes
 ;   32    the ceilings: every concurrent row on each fixture is within the pinned ceilings (dispatches, barriers, command buffers, waits, reads, allocs, bytes), and the checks can fail: a ceiling one below the first row's
-;         dispatches is breached, a serial row is below the barrier floor, and a row with an extra wait is over the sync ceiling
+;         dispatches is breached, a serial row is below the barrier floor, and two plants put into the token's path through the counted doors fail the ceilings: two extra host reads (readbacks 4 over 2: the
+;         count is dkr-rd's, not a constant) and a second dsv4-argmax (a second wait and two more reads)
 ;   64    the real-file lanes: on the real-types fixture the gate and up stacks take the four-row IQ2_XXS kernel and the down stack the four-row Q2_K one (dkl-lane-expert?), the dense Q8_0 tensors read the Metal-order matvec,
 ;         and the MXFP4 stacks of the other fixture keep the id kernels
 ;   128   release: dsv4-close in synced rounds leaves no handle on either context and metal_live reads what it read before the opens
+;   256   a token that does not arrive closes its batch: with the pipeline handle of the FFN's slot sum planted 0 in the context's record, block 0's dispatch is refused and dsv4-decode answers nothing; the carrier then
+;         reads no open batch (metal_live words 15 and 5: none, nothing pending) and the driver is disarmed; with the handle restored the SAME position answers the control's id and its logits' bits, on both fixtures.
+;         (Without the sync in dth-token-fail the batch stays open and the claim reads 0: the review's plant.)
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- needs a live Metal device behind the handle door; plain fkwu answers 0 (bit 1 needs a context). Light GPU: two 1.5 MB fixtures, twelve positions each, four walks. Writes only under temp_dir.
 // preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk native/metal/dsv4-ledger.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk
@@ -42,8 +47,39 @@ section [form.bml] {
    let pf = dsv4-prefill-span-sliced(ctx, sts, dlb-prompt(), 0);
    let steps = nothing?(pf) ? [] : dlb-more(ctx, sts, pf[0], pf[1], dlb-steps(), []);
    let left = dsv4-free-state(sts);
-   [steps, len(left) == 0, nothing?(pf) ? 0 - 1 : pf[0]];
+   [steps, len(left) == 0, nothing?(pf) ? nothing() : pf[0]];
   }
+  // ---- the plants: the same observed token with extra work PUT IN ITS PATH, through the counted doors (a hand-set constant could not be failed) ----
+  // mode "reads": two more host reads of the id buffer after the token's own; mode "argmax": a second dsv4-argmax (a scan enqueue, a sync, two reads)
+  def dlb-extra(ctx, mode) = mode == "reads" ? [dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1), dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1)] : [dsv4-argmax(ctx)];
+  def dlb-observe-extra(ctx, mode) {
+   let sts = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let pf = dsv4-prefill-span-sliced(ctx, sts, dlb-prompt(), 0);
+   let a = dll-mark();
+   let nid = nothing?(pf) ? nothing() : dsv4-decode(ctx, sts, pf[0], pf[1]);
+   let more = mode == "none" ? [] : dlb-extra(ctx, mode);
+   let b = dll-mark();
+   let left = dsv4-free-state(sts);
+   dll-row(a, b, dll-token-bytes(ctx));
+  }
+  // ---- a token whose block is refused, then a good one: the refused token must leave NO batch open, and the good token must be the control's, bit for bit ----
+  // a pipeline handle of 0 in the context's record for the FFN's slot sum (dispatched in block 0, after its attention half and the first of its FFN): the dispatch is refused, the block answers nothing, the token is nothing
+  def dlb-refused-then-good(ctx, control) {
+   let sts = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let pf = dsv4-prefill-span-sliced(ctx, sts, dlb-prompt(), 0);
+   let name = "form_dsv4_sum_slots";
+   let saved = record_get(ctx[0], name);
+   let planted = record_set(ctx[0], name, 0);
+   let failed = dsv4-decode(ctx, sts, pf[0], pf[1]);
+   let live = metal_live();
+   let closed = live[15] == 0 && live[5] == 0 && dkr-hz-get("armed") == 0;
+   let restored = record_set(ctx[0], name, saved);
+   let again = dsv4-decode(ctx, sts, pf[0], pf[1]);
+   let bits = nothing?(again) ? [] : dlb-bits(dsv4-logits(ctx));
+   let left = dsv4-free-state(sts);
+   nothing?(failed) && closed && !nothing?(again) && again == control[0] && bits == control[3] && len(left) == 0;
+  }
+  def dlb-rows-vary?(rows) = len(rows) > 1 && rows[0] != rows[1];
   def dlb-ids(steps) = len(steps) == 0 ? [] : cons(steps[0][0], dlb-ids(steps[1:]));
   def dlb-rows(steps) = len(steps) == 0 ? [] : cons(steps[0][1], dlb-rows(steps[1:]));
   def dlb-bitrows(steps) = len(steps) == 0 ? [] : cons(steps[0][3], dlb-bitrows(steps[1:]));
@@ -90,11 +126,11 @@ section [form.bml] {
  let prepA = openedA ? dsv4-prepare(ctxA) : 0;
  let prepB = openedB ? dsv4-prepare(ctxB) : 0;
  let onA = dkr-hz-enable(true);
- let concA = openedA ? dlb-walk(ctxA) : [[], false, 0 - 1];
- let concB = openedB ? dlb-walk(ctxB) : [[], false, 0 - 1];
+ let concA = openedA ? dlb-walk(ctxA) : [[], false, nothing()];
+ let concB = openedB ? dlb-walk(ctxB) : [[], false, nothing()];
  let offA = dkr-hz-enable(false);
- let serA = openedA ? dlb-walk(ctxA) : [[], false, 0 - 1];
- let serB = openedB ? dlb-walk(ctxB) : [[], false, 0 - 1];
+ let serA = openedA ? dlb-walk(ctxA) : [[], false, nothing()];
+ let serB = openedB ? dlb-walk(ctxB) : [[], false, nothing()];
  let backOn = dkr-hz-enable(true);
  let said1 = print_str("concurrent MX: " ++ dlb-str-rows(concA[0]));
  let said2 = print_str("concurrent V: " ++ dlb-str-rows(concB[0]));
@@ -103,20 +139,25 @@ section [form.bml] {
  let r1 = try openedA && openedB && len(concA[0]) == 8 && len(concB[0]) == 8 && len(serA[0]) == 8 && len(serB[0]) == 8 && dlb-count-ok?(ctxA, concA[0]) && dlb-count-ok?(ctxB, concB[0]) && dlb-count-ok?(ctxA, serA[0]) && dlb-count-ok?(ctxB, serB[0]) catch false;
  let r2 = try r1 && dlb-cost-ok?(ctxA, concA[0], true) && dlb-cost-ok?(ctxB, concB[0], true) && dlb-cost-ok?(ctxA, serA[0], false) && dlb-cost-ok?(ctxB, serB[0], false) catch false;
  let r4 = try r1 && dlb-plan-ok?(ctxA, concA[0], true) && dlb-plan-ok?(ctxB, concB[0], true) && dlb-plan-ok?(ctxA, serA[0], false) && dlb-plan-ok?(ctxB, serB[0], false) catch false;
- let r8 = try r1 && dlb-ids(concA[0]) == dlb-ids(serA[0]) && dlb-bitrows(concA[0]) == dlb-bitrows(serA[0]) && dlb-ids(concB[0]) == dlb-ids(serB[0]) && dlb-bitrows(concB[0]) == dlb-bitrows(serB[0]) catch false;
+ let r8 = try r1 && dlb-ids(concA[0]) == dlb-ids(serA[0]) && dlb-bitrows(concA[0]) == dlb-bitrows(serA[0]) && dlb-ids(concB[0]) == dlb-ids(serB[0]) && dlb-bitrows(concB[0]) == dlb-bitrows(serB[0]) && dlb-rows-vary?(dlb-bitrows(concA[0])) && dlb-rows-vary?(dlb-bitrows(concB[0])) catch false;
  let r16 = try r1 && dlb-stages-ok?(ctxA, concA[0]) && dlb-stages-ok?(ctxB, concB[0]) && dlb-stages-ok?(ctxA, serA[0]) catch false;
  // the fixtures' measured maxima over the eight steps (2026-10-03): 148 dispatches (137, 142 or 148 by the window boundaries of the ratio-4 and ratio-2 blocks), 121 barriers, 2 command buffers; 1,285,844 bytes of
  // weight a token on the MXFP fixture and 1,422,804 on the real-types one
  let ceilA = dlb-ceil(148, 121, 2, 1285844);
  let ceilB = dlb-ceil(148, 121, 2, 1422804);
  let tooLow = dlb-ceil(dlb-field(concA[0][0][1], "dispatches") - 1, 121, 2, 1285844);
- let extraWait = record_new(0, "dispatches", 0, "syncs", 2);
- let r32 = try r1 && dlb-within-all?(concA[0], ceilA) && dlb-within-all?(concB[0], ceilB) && !dll-within?(concA[0][0][1], tooLow) && dlb-field(serA[0][0][1], "barriers") < dlb-max-field(concA[0], "barriers") && !dll-within?(extraWait, record_new(0, "syncs", 1)) catch false;
+ let plantNone = openedA ? dlb-observe-extra(ctxA, "none") : record_new(0);
+ let plantReads = openedA ? dlb-observe-extra(ctxA, "reads") : record_new(0);
+ let plantArgmax = openedA ? dlb-observe-extra(ctxA, "argmax") : record_new(0);
+ let said5 = print_str("plants: control " ++ dll-line("control", plantNone) ++ " | two extra reads " ++ dll-line("reads", plantReads) ++ " | a second argmax " ++ dll-line("argmax", plantArgmax));
+ let r32 = try r1 && dlb-within-all?(concA[0], ceilA) && dlb-within-all?(concB[0], ceilB) && !dll-within?(concA[0][0][1], tooLow) && dlb-field(serA[0][0][1], "barriers") < dlb-max-field(concA[0], "barriers")
+  && dll-within?(plantNone, ceilA) && !dll-within?(plantReads, ceilA) && dlb-field(plantReads, "readbacks") == 4 && !dll-within?(plantArgmax, ceilA) && dlb-field(plantArgmax, "syncs") == 2 catch false;
+ let r256 = try r1 && dlb-refused-then-good(ctxA, concA[0][0]) && dlb-refused-then-good(ctxB, concB[0][0]) catch false;
  let r64 = try r1 && dlb-any-lane?(ctxB, 0, 3, true) && dlb-any-lane?(ctxB, 0, 3, false) && dlb-dense-q8?(ctxB) && !dlb-any-lane?(ctxA, 1, 3, true) && !dlb-any-lane?(ctxA, 1, 3, false) catch false;
  let leftA = openedA ? dsv4-close(ctxA, []) : [0];
  let leftB = openedB ? dsv4-close(ctxB, []) : [0];
  let c128 = dlb-bit(try openedA && openedB && len(leftA) == 0 && len(leftB) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
  let removed = host_path_remove(pathA) + host_path_remove(pathB);
- print_str("dsv4-ledger-band claims " ++ dlb-bit(r1, 1).str() ++ " " ++ dlb-bit(r2, 2).str() ++ " " ++ dlb-bit(r4, 4).str() ++ " " ++ dlb-bit(r8, 8).str() ++ " " ++ dlb-bit(r16, 16).str() ++ " " ++ dlb-bit(r32, 32).str() ++ " " ++ dlb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
- dlb-bit(r1, 1) + dlb-bit(r2, 2) + dlb-bit(r4, 4) + dlb-bit(r8, 8) + dlb-bit(r16, 16) + dlb-bit(r32, 32) + dlb-bit(r64, 64) + c128;
+ print_str("dsv4-ledger-band claims " ++ dlb-bit(r1, 1).str() ++ " " ++ dlb-bit(r2, 2).str() ++ " " ++ dlb-bit(r4, 4).str() ++ " " ++ dlb-bit(r8, 8).str() ++ " " ++ dlb-bit(r16, 16).str() ++ " " ++ dlb-bit(r32, 32).str() ++ " " ++ dlb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " " ++ dlb-bit(r256, 256).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ dlb-bit(r1, 1) + dlb-bit(r2, 2) + dlb-bit(r4, 4) + dlb-bit(r8, 8) + dlb-bit(r16, 16) + dlb-bit(r32, 32) + dlb-bit(r64, 64) + c128 + dlb-bit(r256, 256);
 }

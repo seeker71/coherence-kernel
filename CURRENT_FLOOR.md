@@ -294,7 +294,7 @@ driver stage 3 native/metal/tests/dsv4-token-band.bml 255 · native/metal/tests/
                dsv4-lease-band.bml 511 · dsv4-door-band.bml 511 · dsv4-validate-band.bml 4095
 driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 1023 · native/metal/tests/dsv4-layer-q8q2-band.bml 4095
                native/metal/tests/dsv4-end-to-end-q8q2-band.bml 511   (stage 2 and 3 bands re-read: dsv4-kernels-band 16383 with 104 kernels, dsv4-open-band 1023 with 75 in the graph)
-driver stage 5 native/metal/tests/dsv4-ledger-band.bml 255 · native/metal/tests/dsv4-door-run-band.bml 127   (the op ledger of a token, the flow through the door's functions)
+driver stage 5 native/metal/tests/dsv4-ledger-band.bml 511 · native/metal/tests/dsv4-door-run-band.bml 127   (the op ledger of a token, the flow through the door's functions)
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
