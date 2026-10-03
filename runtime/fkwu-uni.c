@@ -1219,6 +1219,112 @@ static long long fk_str_hash(long long off, long long len) {
     }
     return (long long)(h & (FK_STRING_HASH_BUCKETS - 1));
 }
+/* ── the byte holes a dead string leaves ─────────────────────────────────────
+ * The string melt (fk_smelt) hands a dead string's SLOT back on fk_sfree; its BYTES sat where they were, and a new
+ * string only took them when it was written at the top and fitted them exactly, which no builder that writes at
+ * fk_sbp does. Every other string was appended at the top, so a loop that makes and drops strings grew fk_sb for the
+ * life of the process: the glass organs and sensors processes held 6-7 GB of string bytes behind ten thousand live
+ * strings, growing 200-300 KB/s (vmmap 2026-10-03: the 4 GB reservation of fk_sb filling block by block).
+ * A dead string now cedes its extent here (it owns no bytes after: fk_sl 0), a melt orders the holes by offset and
+ * joins neighbours, and fk_sintern places a new string in a hole that fits, next-fit from where the last one landed
+ * and looking at no more than FK_HOLE_LOOK holes, then discards its scratch. Live strings never move; fk_sbp never
+ * retreats (a builder may hold a start offset across a melt); the arena stops growing once the holes hold the
+ * working set. kernel_stat 64 reads fk_sbp, 65 the bytes standing in holes. */
+#ifndef FK_HOLE_LOOK
+#define FK_HOLE_LOOK 256
+#endif
+static long long *fk_holo;      /* hole offsets, ascending after a melt */
+static long long *fk_holl;      /* hole lengths; 0 = taken whole, dropped at the next melt */
+static long long fk_holn;
+static long long fk_holcap;
+static long long fk_hole_bytes;
+static long long fk_holhint;
+static void fk_hole_add(long long off, long long len) {
+    if (len <= 0) { return; }
+    if (fk_holn >= fk_holcap) {
+        long long nc = fk_holcap == 0 ? 1024 : fk_holcap * 2;
+        long long *no = (long long *)realloc(fk_holo, (unsigned long)(nc * 8));
+        if (no != 0) { fk_holo = no; }
+        long long *nl = (long long *)realloc(fk_holl, (unsigned long)(nc * 8));
+        if (nl != 0) { fk_holl = nl; }
+        if (no == 0 || nl == 0) { return; }     /* a hole not kept is a hole not reused, never a wrong byte */
+        fk_holcap = nc;
+    }
+    fk_holo[fk_holn] = off;
+    fk_holl[fk_holn] = len;
+    fk_holn = fk_holn + 1;
+    fk_hole_bytes = fk_hole_bytes + len;
+}
+static void fk_holes_settle(void) {
+    long long n = 0;
+    long long k = 0;
+    while (k < fk_holn) {
+        /* a hole stands below the top: bytes at or above fk_sbp are the builder's scratch or nothing, never a hole */
+        long long hl = fk_holl[k];
+        if (fk_holo[k] + hl > fk_sbp) { hl = fk_sbp - fk_holo[k]; }
+        if (hl > 0) { fk_holo[n] = fk_holo[k]; fk_holl[n] = hl; n = n + 1; }
+        k = k + 1;
+    }
+    long long gap = n / 2;
+    while (gap > 0) {
+        long long a = gap;
+        while (a < n) {
+            long long ko = fk_holo[a];
+            long long kl = fk_holl[a];
+            long long b = a;
+            while (b >= gap && fk_holo[b - gap] > ko) {
+                fk_holo[b] = fk_holo[b - gap];
+                fk_holl[b] = fk_holl[b - gap];
+                b = b - gap;
+            }
+            fk_holo[b] = ko;
+            fk_holl[b] = kl;
+            a = a + 1;
+        }
+        gap = gap / 2;
+    }
+    long long m = 0;
+    long long total = 0;
+    k = 0;
+    while (k < n) {
+        if (m > 0 && fk_holo[m - 1] + fk_holl[m - 1] == fk_holo[k]) {
+            fk_holl[m - 1] = fk_holl[m - 1] + fk_holl[k];
+        } else {
+            fk_holo[m] = fk_holo[k];
+            fk_holl[m] = fk_holl[k];
+            m = m + 1;
+        }
+        total = total + fk_holl[k];
+        k = k + 1;
+    }
+    fk_holn = m;
+    fk_hole_bytes = total;
+    fk_holhint = 0;
+}
+/* the offset of len bytes carved from a hole that ends at or below limit (the scratch's own start), or -1 when none of
+ * the holes in view fits */
+static long long fk_hole_take(long long len, long long limit) {
+    long long n = fk_holn;
+    if (n <= 0 || len <= 0) { return -1; }
+    long long k = fk_holhint;
+    if (k >= n) { k = 0; }
+    long long look = n < FK_HOLE_LOOK ? n : FK_HOLE_LOOK;
+    long long seen = 0;
+    while (seen < look) {
+        if (fk_holl[k] >= len && fk_holo[k] + len <= limit) {
+            long long at = fk_holo[k];
+            fk_holo[k] = at + len;
+            fk_holl[k] = fk_holl[k] - len;
+            fk_hole_bytes = fk_hole_bytes - len;
+            fk_holhint = k;
+            return at;
+        }
+        k = k + 1;
+        if (k >= n) { k = 0; }
+        seen = seen + 1;
+    }
+    return -1;
+}
 static long long fk_sintern(long long off, long long len) {
     fk_sinit();
     long long bucket = fk_str_hash(off, len);
@@ -1235,18 +1341,24 @@ static long long fk_sintern(long long off, long long len) {
         }
         c = fk_snext[c];
     }
+    /* the bytes are scratch at the top (written at fk_sbp, or appended through it); a hole the string melt left is
+     * where they live when one fits, and the scratch is then discarded */
+    long long place = off;
+    if (len > 0 && fk_holn > 0 && (off == fk_sbp || off + len == fk_sbp)) {
+        long long at = fk_hole_take(len, off);
+        if (at >= 0) {
+            long long j = 0;
+            while (j < len) { fk_sb[at + j] = fk_sb[off + j]; j = j + 1; }
+            place = at;
+            fk_sbp = off;
+        }
+    }
     if (fk_sfree_n > 0) {
-        /* a slot the string melt freed: reuse its index; its old bytes too when the new string fits (the scratch just written at off is then discarded) */
+        /* a slot the string melt freed: reuse its index (its bytes went to the holes when it died) */
         long long r = fk_sfree[fk_sfree_n - 1];
         fk_sfree_n = fk_sfree_n - 1;
-        if (len <= fk_sl[r] && off + len == fk_sbp) {
-            long long j = 0;
-            while (j < len) { fk_sb[fk_so[r] + j] = fk_sb[off + j]; j = j + 1; }
-            fk_sbp = off;
-        } else {
-            fk_so[r] = off;
-            fk_sbp = off + len;
-        }
+        fk_so[r] = place;
+        if (place == off) { fk_sbp = off + len; }
         fk_sl[r] = len;
         fk_sdead[r] = 0;
         fk_snext[r] = fk_shash[bucket];
@@ -1266,12 +1378,12 @@ static long long fk_sintern(long long off, long long len) {
             fk_die("fk_sintern: out of memory growing string table");
         }
     }
-    fk_so[i] = off;
+    fk_so[i] = place;
     fk_sl[i] = len;
     fk_snext[i] = fk_shash[bucket];
     fk_shash[bucket] = i;
     fk_sp = i + 1;
-    fk_sbp = off + len;
+    if (place == off) { fk_sbp = off + len; }
     return i;
 }
 /* stone: a STRING VALUE is its own odd-negative band, minted exactly like the boxed
@@ -8684,7 +8796,8 @@ static long long fk_melt_want = 0;
  * string reachable from the same roots (the value stack, the memory cells,
  * record values and blueprints, value nodes) plus the holders that keep a raw
  * index rather than a word (record keys, the AST's string-literal nodes), then
- * pops entries off the TOP of the table while they are unmarked. Live strings
+ * frees every unmarked slot onto fk_sfree and cedes its bytes to the holes
+ * (see fk_hole_add) that a new string is placed in. Live strings
  * never move -- their indices, offsets and bytes stay where another process
  * may be reading them through the shared store -- so this reclaims the tick's
  * temporaries (born last, dead first) and leaves anything older untouched.
@@ -8760,9 +8873,12 @@ static void fk_smelt(void) {
             fk_sfree[fk_sfree_n] = i;
             fk_sfree_n = fk_sfree_n + 1;
             freed = freed + 1;
+            fk_hole_add(fk_so[i], fk_sl[i]);    /* its bytes are a hole now; a dead slot owns none */
+            fk_sl[i] = 0;
         }
         i = i + 1;
     }
+    fk_holes_settle();
     fk_smelt_reclaimed = fk_smelt_reclaimed + freed;
     free(fk_smk); free(fk_smv); fk_smk = 0; fk_smv = 0;
 }
@@ -8775,15 +8891,19 @@ static void fk_melt(void) {
     }
     long long nlive = 0;
     long long k = 0;
+    /* which root holds the live pairs: each class's count is what it reached that an earlier class had not (the witness line names them) */
+    long long lv_stack = 0, lv_mem = 0, lv_rec = 0, lv_node = 0, lv_clo = 0;
     while (k < fk_vsp) {
         nlive = nlive + fk_mlive(fk_vs[k]);
         k = k + 1;
     }
+    lv_stack = nlive;
     k = 0;
     while (k < fk_mem_cap) {
         nlive = nlive + fk_mlive(fk_mem[k]);
         k = k + 1;
     }
+    lv_mem = nlive - lv_stack;
     /* record VALUES and BLUEPRINTS are ROOTS: a field holding a cons value
      * must survive compaction. Record KEYS are NOT values — fk_rkey holds raw
      * fk_stri string-pool INDEXES, and an odd index read as a value decodes as
@@ -8803,6 +8923,7 @@ static void fk_melt(void) {
         }
         k = k + 1;
     }
+    lv_rec = nlive - lv_stack - lv_mem;
     k = 1;
     while (!fk_field_on && k <= fk_np) {
         nlive = nlive + fk_mlive(fk_ncat[k]);
@@ -8810,7 +8931,9 @@ static void fk_melt(void) {
         nlive = nlive + fk_mlive(fk_nval[k]);
         k = k + 1;
     }
+    lv_node = nlive - lv_stack - lv_mem - lv_rec;
     nlive = nlive + fk_clo_mlive_roots();
+    lv_clo = nlive - lv_stack - lv_mem - lv_rec - lv_node;
     /* the once-holds: a top-level let's held value is a root, so the melt keeps it and no read builds it again */
     k = 0;
     while (k < fk_node_count) {
@@ -8891,8 +9014,9 @@ static void fk_melt(void) {
     fk_smelt();
     fk_live_publish(0);
     if (fk_conf("FK_MELT_WITNESS")) {
-        dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld\n",
-                fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp);
+        dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld, held-by stack=%lld mem=%lld records=%lld nodes=%lld closures=%lld holds=%lld, string-holes=%lld bytes of %lld\n",
+                fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp,
+                lv_stack, lv_mem, lv_rec, lv_node, lv_clo, nlive - lv_stack - lv_mem - lv_rec - lv_node - lv_clo, fk_hole_bytes, fk_sbp);
     }
 }
 /* THE WALL THAT COULD NOT SPEAK. Thirty lines below, fk_walk's host-stack wall
@@ -18456,6 +18580,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return pb62 << 1;
         }
         if (ks_k == 63) { return sizeof(fk_node_id) << 1; }
+        /* the string byte arena: 64 the top (fk_sbp: bytes from the arena's start to the highest string or scratch), 65 the
+         * bytes standing in holes a dead string left and a new string will take (fk_hole_add) */
+        if (ks_k == 64) { return fk_sbp << 1; }
+        if (ks_k == 65) { return fk_hole_bytes << 1; }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
@@ -23366,6 +23494,9 @@ static void fk_string_table_reset(void) {
     fk_sinit();
     fk_sp = 0;
     fk_sbp = 0;
+    fk_holn = 0;
+    fk_hole_bytes = 0;
+    fk_holhint = 0;
     long long k = 0;
     while (k < FK_STRING_HASH_BUCKETS) {
         fk_shash[k] = -1;

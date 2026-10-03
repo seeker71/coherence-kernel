@@ -1,0 +1,75 @@
+; string-holes-band.bml — a string the body drops gives its bytes back.
+;
+; preludes: form-stdlib/core.fk
+; PROOF LEVEL: FOURTH-ARM ONLY (kernel_stat 64 and 65 read fkwu's string byte arena; no sibling kernel has one)
+;
+; Every str_concat, int_to_str and byte_to_str result is interned, and the string melt hands a dead string's
+; slot back when the cons heap compacts. Its BYTES stayed where they were: a new string was appended at the top,
+; so a loop that makes strings and drops them grew the arena for the life of the process. On 2026-10-03 the
+; glass organs and sensors processes held 6.8 and 7.5 GB of string bytes behind ten thousand live strings,
+; growing 200-300 KB/s, and the machine's compressor grew with them. A dead string now cedes its bytes to a
+; hole and a new string is placed in one that fits.
+;
+; This band runs the loop that grew: strings of 40 to 80 pieces built piece by piece (each piece an interned
+; string of its own), thirty-two kept at a time, a thousand cons pairs dropped per turn so the heap melts.
+; The arena's top (kernel_stat 64) is read after a warm-up of two melt cycles and again after three thousand more
+; turns that made six times what the top may grow by. The plant comes first, in a process whose
+; arena has no holes yet: it keeps every string it makes, and the top must rise by what it kept, so a flat
+; reading below means the arena held, not that the instrument could not see it rise.
+;
+; Verdict 127 when every claim lands:
+;   1     the plant: six thousand strings kept alive lift the arena's top by at least half of their bytes
+;   2     the turns made at least 24 MiB of string bytes between the two readings (the pressure ran)
+;   4     the top rose by under 4 MiB across those turns (it held; before the holes it rose with every turn)
+;   8     the warm-up itself stayed under 96 MiB (the top is the working set of a melt cycle, not the run)
+;   16    holes stood between melts: a dead string's bytes were counted back (kernel_stat 65 above zero)
+;   32    the thirty-two kept strings read as they were built, and a string rebuilt with the same bytes is
+;         the same string (a hole took no live byte, and the content index still finds the live one)
+;   64    the six thousand plant strings read as they were built after all the churn (a long-lived string
+;         was never taken for a hole)
+section [form.bml] {
+    class StringHolesBand {
+        def shb-bit(ok, bit) = ok ? bit : 0;
+        // each piece carries k, so no piece of one turn is a piece of another and none is found again in the content index
+        def shb-rep(k, n) = n <= 0 ? "" : ("p" + k.str() + ";" + shb-rep(k, n - 1));
+        def shb-width(k) = 40 + ((k * 7919) - (((k * 7919) / 41) * 41));
+        def shb-string(k) = "k" + k.str() + ":" + shb-rep(k, shb-width(k));
+        // the bytes the pieces of shb-string(k) made: u, 2u, ... wu for the unit u = len("p" + k + ";"), each its own interned string
+        def shb-made(k) = (len(k.str()) + 2) * ((shb-width(k) * (shb-width(k) + 1)) / 2);
+        def shb-junk(n) = n <= 0 ? [] : cons(n, shb-junk(n - 1));
+        def shb-max(a, b) = a > b ? a : b;
+
+        // the plant: every string kept
+        def shb-keep(k, end, all) = k >= end ? all : shb-keep(k + 1, end, cons(shb-string(1000000 + k), all));
+        def shb-kept-bytes(all) = nil?(all) ? 0 : len(all[0]) + shb-kept-bytes(all[1:]);
+        // all[0] is the newest string, built at k = 5999
+        def shb-kept-intact(k, all) = nil?(all) ? 1 : (String) all[0] == shb-string(1000000 + k) ? shb-kept-intact(k - 1, all[1:]) : 0;
+
+        // the turns: thirty-two kept, the rest dropped; state = [held, made, holes]
+        def shb-run(k, end, held, made, holes) = k >= end ? [held, made, holes] : shb-turn(k, end, cons(shb-string(k), take(31, held)), made + shb-made(k), shb-max(holes, kernel_stat(65)), shb-junk(1000));
+        def shb-turn(k, end, held, made, holes, junk) = shb-run(k + 1, end, held, made, holes);
+        def shb-held-intact(k, held) = nil?(held) ? 1 : (String) held[0] == shb-string(k) ? shb-held-intact(k - 1, held[1:]) : 0;
+        def shb-same-string(k) = (String) shb-string(k) == shb-string(k);
+
+        def shb-score() {
+            let plantTop0 = kernel_stat(64);
+            let plant = shb-keep(0, 6000, []);
+            let plantTop1 = kernel_stat(64);
+            let plantBytes = shb-kept-bytes(plant);
+            let warm = shb-run(0, 2000, [], 0, 0);
+            let top0 = kernel_stat(64);
+            let run = shb-run(2000, 5000, warm[0], 0, warm[2]);
+            let top1 = kernel_stat(64);
+            let held = run[0];
+            print_str("string-holes plant " + plantBytes.str() + " lifted " + (plantTop1 - plantTop0).str() + " warm-top " + top0.str() + " rose " + (top1 - top0).str() + " made " + run[1].str() + " holes-max " + run[2].str());
+            shb-bit((plantTop1 - plantTop0) * 2 >= plantBytes, 1)
+              + shb-bit(run[1] >= 25165824, 2)
+              + shb-bit(top1 - top0 < 4194304, 4)
+              + shb-bit(top0 < 100663296, 8)
+              + shb-bit(run[2] > 0, 16)
+              + shb-bit(shb-held-intact(4999, held) == 1 && shb-same-string(4999) && shb-same-string(31), 32)
+              + shb-bit(shb-kept-intact(5999, plant) == 1, 64);
+        }
+    }
+    shb-score();
+}
