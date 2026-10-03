@@ -1,36 +1,31 @@
-// A single owned OS inventory exposes traversal errors and exact NUL-separated
-// paths. Form owns root admission, classification and the resulting audit.
+// The structural gate's reading of a tree: every file that stands in it, by one owned OS inventory with exact NUL-separated paths.
+// Form owns root admission, classification and the resulting audit.
 // fs_list's empty result cannot distinguish a denied directory from an empty one.
-// Git's own reading of what the checkout ignores sets aside every shell or
-// Python path under an ignored directory or named as an ignored file, so a
-// cache such as form/.cache never reaches the audit. A root git cannot read
-// sets nothing aside: nothing git does not ignore is ever skipped.
+// What stands in the tree is what git says it holds: the tracked files and the untracked files git does not ignore
+// (`git ls-files -z --cached --others --exclude-standard`), the files that exist. A cache that git ignores (form/.cache, the built
+// images) is not tree content and is not listed; a new file that is not ignored is listed before it lands. A root git cannot read
+// (not a repository) is listed whole by `find`, nothing set aside: nothing git does not ignore is ever skipped.
+// Two names are never walked: .git (packed history) and .claude (the agents' worktrees: whole sibling checkouts, audited by their own gates).
 import form-stdlib/bml/native-source-inventory.bml;
 section [form.bml] {
  class StructuralSourceReader {
   def sga-root(path) = if ((Comparable) len(path) == 0) then form_error("structural audit root is empty") else if (((String) path == ".") || (((String) substring(path,0,1) == "/") || ((String) substring(path,0,2) == "./"))) then path else ("./" + path);
   def sga-capture(root,skipA,skipB) = nsi-capture(["find","-L",sga-root(root),"(","-name",skipA,"-o","-name",skipB,")","-prune","-o","!","-type","d","-print0"]);
-  def sga-ignored(root) {
-   let captured = nsi-capture(["git","-C",sga-root(root),"ls-files","-z","--others","--ignored","--exclude-standard","--directory"]);
-   if nsi-admitted?(captured) then sga-ignored-entries(split-on(nsi-text(captured),byte_to_str(0)),[]) else [];
-  }
   def sga-ends?(s,suffix) = ((len(s) >= len(suffix)) && ((String) substring(s,(len(s) - len(suffix)),len(s)) == suffix));
-  // the extensions of a script of another language (an executable with no extension is read for its #! line by the gate itself)
-  def sga-script-exts() = [".sh",".bash",".zsh",".py",".pyw",".js",".mjs",".cjs",".ts",".tsx",".rb",".pl",".pm",".ps1",".bat",".cmd",".command",".swift",".go",".rs",".java",".kt",".lua",".php"];
-  def sga-ends-any?(path,exts) = if nil?(exts) then false else if sga-ends?(path,exts[0]) then true else sga-ends-any?(path,exts[1:]);
-  def sga-script?(path) = sga-ends-any?(path,sga-script-exts());
-  def sga-ignored-entry?(entry) = ((len(entry) > 0) && (sga-ends?(entry,"/") || sga-script?(entry)));
-  def sga-ignored-entries(entries,acc) = if nil?(entries) then acc else if sga-ignored-entry?(entries[0]) then sga-ignored-entries(entries[1:],cons(entries[0],acc)) else sga-ignored-entries(entries[1:],acc);
-  // find prints each path with the root in front; git answers relative to the root
-  def sga-relative(root,path) = if ((len(path) > (len(root) + 1)) && ((String) substring(path,0,(len(root) + 1)) == (root + "/"))) then substring(path,(len(root) + 1),len(path)) else path;
-  def sga-under?(rel,entry) = if sga-ends?(entry,"/") then ((len(rel) >= len(entry)) && ((String) substring(rel,0,len(entry)) == entry)) else ((String) rel == entry);
-  def sga-set-aside?(rel,ignored) = if nil?(ignored) then 0 else if sga-under?(rel,ignored[0]) then 1 else sga-set-aside?(rel,ignored[1:]);
-  def sga-keep(paths,root,ignored,acc) = if nil?(paths) then reverse(acc) else if (sga-script?(paths[0]) && sga-set-aside?(sga-relative(root,paths[0]),ignored)) then sga-keep(paths[1:],root,ignored,acc) else sga-keep(paths[1:],root,ignored,cons(paths[0],acc));
-  def sga-read(root,skipA,skipB) {
-   let captured = sga-capture(root,skipA,skipB);
-   if (!((Comparable) fs_is_dir(root) == 1)) then nsi-refuse(captured,"directory-root") else sga-read-complete(nsi-require-nuls(captured),sga-root(root));
+  def sga-starts?(s,prefix) = ((len(s) >= len(prefix)) && ((String) substring(s,0,len(prefix)) == prefix));
+  // a listed entry under a name that is never walked, at any depth
+  def sga-skipped?(entry,skipA,skipB) = (sga-starts?(entry,(skipA + "/")) || (sga-starts?(entry,(skipB + "/")) || ((str_find(entry,("/" + (skipA + "/")),0) >= 0) || (str_find(entry,("/" + (skipB + "/")),0) >= 0))));
+  def sga-joined(root,entry) = if ((String) root == ".") then ("./" + entry) else (root + ("/" + entry));
+  def sga-stands?(root,entry) = ((len(entry) > 0) && ((Comparable) file_size(sga-joined(root,entry)) >= 0));
+  // git's listing of the tree, the paths relative to the root; nothing when git cannot read the root
+  def sga-listing(root) {
+   let captured = nsi-capture(["git","-C",sga-root(root),"ls-files","-z","--cached","--others","--exclude-standard"]);
+   if nsi-admitted?(captured) then split-on(nsi-text(captured),byte_to_str(0)) else nothing();
   }
-  def sga-read-complete(captured,root) = sga-keep(split-on(nsi-text(captured),byte_to_str(0)),root,sga-ignored(root),[]);
+  def sga-from-git(root,entries,skipA,skipB) = map(e => sga-joined(root,e),filter(e => (sga-stands?(root,e) && (!sga-skipped?(e,skipA,skipB))),entries));
+  def sga-read(root,skipA,skipB) = if (!((Comparable) fs_is_dir(root) == 1)) then nsi-refuse(sga-capture(root,skipA,skipB),"directory-root") else sga-read-listed(root,skipA,skipB,sga-listing(root));
+  def sga-read-listed(root,skipA,skipB,listed) = if nothing?(listed) then sga-read-find(root,skipA,skipB) else sga-from-git(root,listed,skipA,skipB);
+  def sga-read-find(root,skipA,skipB) = filter(p => (len(p) > 0),split-on(nsi-text(nsi-require-nuls(sga-capture(root,skipA,skipB))),byte_to_str(0)));
  }
  0;
 }
