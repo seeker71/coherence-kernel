@@ -5,9 +5,11 @@ the task flow. An observed native answer takes precedence over model prose;
 local models contribute where the substrate does not yet carry the task.
 Form's choices, care, checkpoints, original checks and release own both paths.
 
-`code` edits caller-supplied source values through local Qwen and Form tools. Token IDs, KV state and tool observations remain in the native process; filesystem loading/publication belongs to the caller and telemetry uses shared memory. The controller offers no model-selected shell, network or provider call. Metal is admitted dynamically. Source bootstrap still lowers cold BML through a native compiler process; warm images reuse that work.
+`code` edits admitted source values through local Qwen and Form tools. A document with `id` and `path` is read by Form before model admission; an explicit `text`, including an empty string, supplies exact resident bytes. Token IDs, KV state and tool observations remain in the native process. Results retain candidates for guarded publication by their owner, and telemetry uses shared memory. The controller offers no model-selected shell, network or provider call. Metal is admitted dynamically. Source bootstrap lowers cold BML through a native compiler process; warm images reuse that work.
 
 The north star is compact, behavior-preserving native refactoring with retained context, reusable compiled abstractions and locally verified learning. `form-lift.bml` supplies the current engineering guidance at BML admission: lexical lambdas, stdlib reuse, named domain values, explicit ownership and live observations. Classes group APIs; templates describe parameters and members, without implying instance accessors, interface checking or specialization. See [BML admission](native-bml-admission.md#local-lift).
+
+Cache selection belongs to execution. The lowering floor admits its observed compiler closure, and `source-compiler.fk` retains each file's discovery facts in an atomic `.discovery.fkb` cache. Exact source bytes, home context and compiler fingerprints select reuse; timestamps do not establish identity. Imports and absent paths are resolved for each owner. The framebuffer records hits, generation, its cause and elapsed time. [Native observations](../receipts/native-discovery-cache.json) distinguish fresh-process reuse, selective regeneration and damaged data. Whole-unit execution-image assembly remains synchronous; independently reusable compiled cells are the next cache boundary.
 
 An evaluated session LoRA may offer a proposal before Qwen unless the request names a model, selects evaluation or requests review. The original checks decide whether it suffices. The optional learner uses native workers. Explicit `model` and `weight_training: 0` keep ongoing quality assessment on the selected local model with checkpoints and no answer gradients. [Session learning](native-session-learning.md), [healing](form-cli-healing.md), [provider repair](form-response-resource.md) and [provider synthesis](form-response-synthesis.md) describe their separate interfaces; provider paths are not implicit `code` behavior.
 
@@ -62,7 +64,9 @@ Its observation reports source hashes, `changed`, `equivalent` and `checks_run:0
 the caller's execution checks still decide completion. An unchanged result means
 no supported lift remains, so another identical call adds no work.
 
-Use `code <JSON>` or `code @request.json` in the source-backed form-cli. The standalone door is `form-run ./fkwu observe/form-cli-code-run.fk`, with the JSON or `@request.json` on stdin. Use the file form for a large packet: the host line reader admits at most 8,191 bytes per line. Documents are resident values, not filesystem permissions. Results return candidate values; the caller checks stale source and publishes them.
+Use `code <JSON>` or `code @request.json` in the source-backed form-cli. The standalone door is `form-run ./fkwu observe/form-cli-code-run.fk`, with the JSON or `@request.json` on stdin. Use the file form for a large packet: the host line reader admits at most 8,191 bytes per line. Documents become resident snapshots; writable paths scope candidate edits. Results return candidate values, and their owner checks stale source before publication.
+
+The CLI's native tool JSON also admits `{id,path}` file snapshots before executing its tool command. Inline tool requests retain the shared data-only wire's exact response. File admission reports its snapshot count, byte counts and elapsed time separately from the tool's own crossings. `run <relative .fk|.bml>` executes a selected Form unit through the existing native process organ, with progress-aware supervision and no wall-time deadline. Its compact response references retained output, process evidence and observed release. [Observed intake](../receipts/native-cli-source-intake.json) and [tool/execution behavior](../receipts/native-cli-tools.json) retain the current evidence.
 
 ```json
 {"goal":"Enable native coding; preserve provider and remote.","documents":[{"id":"config","path":"config.json","text":"{\"enabled\":false,\"provider\":\"native-qwen\",\"remote\":false}\n"}],"writable":["config.json"],"checks":[{"tool":"jq","arguments":[".enabled","config.json"],"stdout":"true\n"},{"tool":"jq","arguments":["-r",".provider","config.json"],"stdout":"native-qwen\n"},{"tool":"jq","arguments":[".remote","config.json"],"stdout":"false\n"}],"model":"qwen38-q8","code_entry":"direct","weight_training":0,"context":8192,"turns":16}
@@ -75,7 +79,7 @@ Use `code <JSON>` or `code @request.json` in the source-backed form-cli. The sta
 | Field | Contract |
 |---|---|
 | `goal` | Nonempty original task, retained beside refinements |
-| `documents` | `[{id,path,text}]`; supply callers, helpers and ownership contracts |
+| `documents` | `[{id,path,text?}]`; omitted text snapshots the native file; explicit text must be a string. Supply callers, helpers and ownership contracts |
 | `writable` | Paths implementation/repair may change; `[]` for review |
 | `checks` | Nonempty caller-owned source assertions, described below |
 | `mode` | `code` (default) or `review` |
