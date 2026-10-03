@@ -110,6 +110,17 @@ section [form.bml] {
         (a >= 0 && b >= 0) ? 1 : 0;
     }
 
+    // THE HYPER-CONNECTION F16 MATVEC (hc_attn_fn and hc_ffn_fn a block, output_hc_fn at the head: 24 rows of hc x e = 16,384 columns on the real file). It ran as the COMPENSATED kernel, ONE THREAD A ROW: 24 threads,
+    // each walking 16,384 columns through a two-sum loop. Measured 2026-10-03 on synthetic buffers of the real shape (the kernels band, claim 16384): 1,450 us a dispatch, 87 dispatches a token = 127 ms of the 166 ms
+    // the device was busy a token on the real file; the same product through ds4's own wide dispatch (form_dsv4_f16_matvec_wide: two rows to a group of 256 threads, packed half4 loads, simd_sum, the Swift runner's
+    // measured win: "NOT ENCODING IT AT ALL moves the floor 12 ms") reads 10 us, 2e-7 of the compensated sum (f32 reassociation only). WHY IT IS NOT YET THE DEFAULT: the layer band's oracle gate (3e-5 against fp64
+    // and the compressor's twin) does not hold with it on the fixture: block 2's attention heads read 0.73 against the twin with the wide kernel (3e-5 with the lane fold, whose mix is 7e-7 off), because the compressed rows pass a
+    // fp8 rounding and the fixture's ill-conditioned weights amplify a 2e-7 change in the hyper-connection mix into bucket flips; the kernel itself is within 2e-7 of the compensated sum on the real shape (kernels band, claim
+    // 16384). What decides it on the real file is the recording: the token door's logits reading (r, top-10 overlap, argmax 2581, the tie budget) under {"hc_matvec":"wide"}. The standing switch hcmv (dkr-hz: 0 the
+    // compensated kernel, the default and the bands' reference; 1 the wide kernel) is that option's one switch. Either is one dispatch: the ledger's counts do not move.
+    def dkl-hc-mv(ctx, w, x, y, rows, cols) = dkr-hz-get("hcmv") == 1
+        ? dkr-go-tg(dkl-p(ctx, "form_dsv4_f16_matvec_wide"), [w, x, y], [rows, cols], (rows + 1) / 2, 256)
+        : dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec"), [w, x, y], [rows, cols], rows);
     // ---- hyper-connection pre: the streams to one block input --------------------------------------------------------
     // src is the residual buffer name; kind is "attn" or "ffn". Four enqueues.
     def dkl-hc-pre(ctx, il, kind, src) {
@@ -120,7 +131,7 @@ section [form.bml] {
         let hce = hc * e;
         let eps = dkl-f(record_get(m, "eps"));
         let r1 = dkr-go-tg(dkl-p(ctx, "form_hc_rmsnorm_nw_wide_f32"), [dkl-b(ctx, src), dkl-b(ctx, "hc-flat")], [hce, eps], 1, 256);
-        let r2 = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec"), [dkl-w(ctx, il, "hc_" ++ kind ++ "_fn.weight"), dkl-b(ctx, "hc-flat"), dkl-b(ctx, "hc-mix")], [mix, hce], mix);
+        let r2 = dkl-hc-mv(ctx, dkl-w(ctx, il, "hc_" ++ kind ++ "_fn.weight"), dkl-b(ctx, "hc-flat"), dkl-b(ctx, "hc-mix"), mix, hce);
         let r3 = dkr-go(dkl-p(ctx, "form_hc_split_seq4_f32"), [dkl-b(ctx, "hc-mix"), dkl-w(ctx, il, "hc_" ++ kind ++ "_scale.weight"), dkl-w(ctx, il, "hc_" ++ kind ++ "_base.weight"), dkl-b(ctx, "hc-split")], [hc, record_get(m, "iters"), dkl-f(record_get(m, "hc-eps"))], 1);
         let r4 = dkr-go(dkl-p(ctx, "form_hc_wsum_f32"), [dkl-b(ctx, src), dkl-b(ctx, "hc-split"), dkl-b(ctx, "hc-cur")], [hc, e], e);
         [r1, r2, r3, r4];
