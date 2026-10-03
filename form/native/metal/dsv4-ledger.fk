@@ -23,20 +23,27 @@ import native/metal/dsv4-layer.fk;
 import native/metal/dsv4-token-handle.fk;
 section [form.bml] {
     // ---- the mark: the counters now ---------------------------------------------------------------------------------------
-    // [dispatches, syncs, gpu_us, buffers standing, wall_ms, barriers, command buffers, plan misses, host reads, span fills, experts missed, experts hit, bytes the fills carry, copy dispatches of the fills]
+    // [dispatches, syncs, gpu_us, buffers standing, wall_ms, barriers, command buffers, plan misses, host reads, span fills, experts missed, experts hit, bytes the fills carry, copy dispatches of the fills, the process's CPU microseconds, then the host's time columns: encoding CPU, waits ms, plan ms, plan CPU, fills ms, fills CPU, reads CPU]
     def dll-mark() {
         let l = metal_live();
-        [l[7], l[8], l[11], l[2], now_unix_ms(), dkr-hz-get("bar"), dkr-hz-get("cbs"), dkr-hz-get("miss"), dkr-hz-get("reads"), dkr-hz-get("fills"), dkr-hz-get("fmiss"), dkr-hz-get("fhit"), dkr-hz-get("fbytes"), dkr-hz-get("fdisp")];
+        [l[7], l[8], l[11], l[2], now_unix_ms(), dkr-hz-get("bar"), dkr-hz-get("cbs"), dkr-hz-get("miss"), dkr-hz-get("reads"), dkr-hz-get("fills"), dkr-hz-get("fmiss"), dkr-hz-get("fhit"), dkr-hz-get("fbytes"), dkr-hz-get("fdisp"),
+            host_cpu_us(), dkr-hz-get("tm-enc"), dkr-hz-get("tm-sync"), dkr-hz-get("tm-plan"), dkr-hz-get("tm-plan-cpu"), dkr-hz-get("tm-fill"), dkr-hz-get("tm-fill-cpu"), dkr-hz-get("tm-read")];
     }
     // the row between two marks: the batches handed to the queue are counted (and, in the arena mode, each layer's drained batch), and the batch the last wait drained is one more. The arena's own counts ride in the row:
     // fills (the span fills, three a missed expert), fdisp (the fills' copy dispatches, among the dispatches: 0 when the fill door preads the span, one a fill on the view road), emiss and ehit (experts missed and hit, over the
     // layers the row ran), ebytes (the bytes the fills carry); all 0 of a whole-stack token
     def dll-row(a, b, bytes) = record_new(0, "dispatches", b[0] - a[0], "syncs", b[1] - a[1], "gpu_us", b[2] - a[2], "allocs", b[3] - a[3], "wall_ms", b[4] - a[4],
-        "barriers", b[5] - a[5], "cbs", (b[6] - a[6]) + 1, "miss", b[7] - a[7], "readbacks", b[8] - a[8], "bytes", bytes, "fills", b[9] - a[9], "emiss", b[10] - a[10], "ehit", b[11] - a[11], "ebytes", b[12] - a[12], "fdisp", b[13] - a[13]);
-    def dll-keys() = ["dispatches", "barriers", "cbs", "syncs", "readbacks", "allocs", "bytes", "gpu_us", "wall_ms", "miss", "fills", "fdisp", "emiss", "ehit", "ebytes"];
+        "barriers", b[5] - a[5], "cbs", (b[6] - a[6]) + 1, "miss", b[7] - a[7], "readbacks", b[8] - a[8], "bytes", bytes, "fills", b[9] - a[9], "emiss", b[10] - a[10], "ehit", b[11] - a[11], "ebytes", b[12] - a[12], "fdisp", b[13] - a[13],
+        "cpu_us", b[14] - a[14], "enc_us", b[15] - a[15], "sync_ms", b[16] - a[16], "plan_ms", b[17] - a[17], "plan_us", b[18] - a[18], "fill_ms", b[19] - a[19], "fill_us", b[20] - a[20], "read_us", b[21] - a[21]);
+    // THE HOST'S TIME IN COLUMNS (readings, not ceilings; the clocks are dsv4-kernels.fk's tm- keys): wall_ms is the row's wall; gpu_us the device's busy time; sync_ms the wall the host spent in waits (the device running,
+    // the host idle); enc_us the CPU the stages' encoding took (the dispatches built and enqueued); plan_ms and plan_us a layer's id read, cache and slot write (wall, CPU); fill_ms and fill_us the layers' span fills (wall,
+    // CPU: a pread's wait on the disk is wall and not CPU); read_us the host reads; cpu_us the process's CPU over the row (the host's own work all told, wait and disk excluded). `other_ms` is what no column names:
+    // the wall less the waits, the plan, the fills, and the encoding and reads (microseconds to milliseconds). The wall clock reads whole milliseconds, so a row's wall-clock columns are good to a few milliseconds.
+    def dll-other-ms(row) = record_get(row, "wall_ms") - record_get(row, "sync_ms") - record_get(row, "plan_ms") - record_get(row, "fill_ms") - (record_get(row, "enc_us") + record_get(row, "read_us")) / 1000;
+    def dll-keys() = ["dispatches", "barriers", "cbs", "syncs", "readbacks", "allocs", "bytes", "gpu_us", "wall_ms", "miss", "fills", "fdisp", "emiss", "ehit", "ebytes", "cpu_us", "enc_us", "sync_ms", "plan_ms", "plan_us", "fill_ms", "fill_us", "read_us"];
     def dll-field-go(row, ks) = nil?(ks) ? "" : (" " ++ ks[0] ++ "=" ++ record_get(row, ks[0]).str() ++ dll-field-go(row, ks[1:]));
     // one line, key=value, that a receipt can quote and a band can parse: `ledger <label> dispatches=.. barriers=.. ...`
-    def dll-line(label, row) = "ledger " ++ label ++ dll-field-go(row, dll-keys());
+    def dll-line(label, row) = "ledger " ++ label ++ dll-field-go(row, dll-keys()) ++ " other_ms=" ++ dll-other-ms(row).str();
     // THE ROAD A ROW'S FILLS TOOK: the fill door preads a span into its slot and makes no dispatch; the view road makes one copy dispatch a fill (and takes the fill the door refused), so the door's fills are fills - fdisp.
     // "none" when the row filled nothing (every expert a hit, or a whole-stack token), "door" when no fill dispatched, "view" when every fill did, "mixed" between
     def dll-fills-door(row) = record_get(row, "fills") - record_get(row, "fdisp");
@@ -72,7 +79,7 @@ section [form.bml] {
     def dll-layers-n(m) = record_get(m, "layers-n");
     def dll-arena-syncs(m) = dll-layers-n(m) + 1;
     def dll-arena-reads(m, headed) = dll-layers-n(m) + (headed ? 2 : 0);
-    def dll-arena-cbs(m) = dll-layers-n(m) + (dll-layers-n(m) / 2) + 1;
+    def dll-arena-cbs(m) = dll-layers-n(m) + (dll-layers-n(m) / dkr-every()) + 1;
     // the ceilings of a row whose fills made `fdisp` copy dispatches at position pos, with or without its head, reading `bytes`; barriers are bounded by the dispatches
     def dll-arena-ceil(m, pos, headed, fdisp, bytes) {
         let d = dll-token-count-m(m, pos) - (headed ? 0 : 8) + fdisp;

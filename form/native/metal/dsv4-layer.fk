@@ -127,7 +127,7 @@ section [form.bml] {
         : dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec"), [w, x, y], [rows, cols], rows);
     // ---- hyper-connection pre: the streams to one block input --------------------------------------------------------
     // src is the residual buffer name; kind is "attn" or "ffn". Four enqueues.
-    def dkl-hc-pre(ctx, il, kind, src) {
+    def dkl-hc-pre-go(ctx, il, kind, src) {
         let m = dkl-m(ctx);
         let hc = record_get(m, "hc");
         let e = record_get(m, "e");
@@ -140,6 +140,8 @@ section [form.bml] {
         let r4 = dkr-go(dkl-p(ctx, "form_hc_wsum_f32"), [dkl-b(ctx, src), dkl-b(ctx, "hc-split"), dkl-b(ctx, "hc-cur")], [hc, e], e);
         [r1, r2, r3, r4];
     }
+    // (a segment of the replayed stage: dsv4-kernels.fk dkr-seg; the matvec choice is in the name)
+    def dkl-hc-pre(ctx, il, kind, src) = dkr-seg("hcpre:" ++ kind ++ ":" ++ src ++ ":" ++ dkr-hz-get("hcmv").str(), () => dkl-hc-pre-go(ctx, il, kind, src));
     def dkl-hc-post(ctx, block, src, dst) {
         let m = dkl-m(ctx);
         [dkr-go(dkl-p(ctx, "form_dsv4_hc_post_split"), [dkl-b(ctx, block), dkl-b(ctx, src), dkl-b(ctx, "hc-split"), dkl-b(ctx, dst)], [record_get(m, "hc"), record_get(m, "e")], record_get(m, "hc") * record_get(m, "e"))];
@@ -183,8 +185,10 @@ section [form.bml] {
         let gtw = dkl-view(ctx, il, "attn_compressor_gate.weight");
         let skv = sts[il][1];
         let ssc = sts[il][2];
-        let r1 = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [kvw[1], dkl-b(ctx, "xn"), dkl-b(ctx, "comp-kv")], [dkl-rows(kvw), dkl-cols(kvw)], dkl-rows(kvw) * 32);
-        let r2 = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [gtw[1], dkl-b(ctx, "xn"), dkl-b(ctx, "comp-gate")], [dkl-rows(gtw), dkl-cols(gtw)], dkl-rows(gtw) * 32);
+        let mv = dkr-seg("cmv", () => [dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [kvw[1], dkl-b(ctx, "xn"), dkl-b(ctx, "comp-kv")], [dkl-rows(kvw), dkl-cols(kvw)], dkl-rows(kvw) * 32),
+            dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [gtw[1], dkl-b(ctx, "xn"), dkl-b(ctx, "comp-gate")], [dkl-rows(gtw), dkl-cols(gtw)], dkl-rows(gtw) * 32)]);
+        let r1 = mv[0];
+        let r2 = mv[1];
         let r3 = dkr-go(dkl-p(ctx, "form_dsv4_comp_state_f32"), [dkl-b(ctx, "comp-kv"), dkl-b(ctx, "comp-gate"), dkl-w(ctx, il, "attn_compressor_ape.weight"), skv, ssc], [width, row, pos % ratio], width);
         ((pos + 1) % ratio) != 0 ? [r1, r2, r3] : append([r1, r2, r3], dkl-compress-emit(ctx, sts, il, pos, cap, ratio, width));
     }
@@ -218,17 +222,19 @@ section [form.bml] {
         let comp = dkl-l(ctx, il, "compressed");
         let table = ratio == 0 ? "rope-plain" : "rope-comp";
         let pre = dkl-hc-pre(ctx, il, "attn", "resid");
-        let n1 = dkl-norm(ctx, "hc-cur", dkl-w(ctx, il, "attn_norm.weight"), "xn", e);
-        let qa = dkl-dense(ctx, dkl-view(ctx, il, "attn_q_a.weight"), "xn", "q-latent");
-        let kv = dkl-dense(ctx, dkl-view(ctx, il, "attn_kv.weight"), "xn", "kv-raw");
+        // THE RUNS OF DISPATCHES THAT READ THE SAME BUFFERS WITH THE SAME CONSTANTS EVERY TOKEN are segments (dkr-seg: captured once, replayed without the layer code): the first three, the next four, the kv round. The rope, the cache
+        // append and the attention depend on the position and stay outside; so does the compressor's state (the state buffers, the position)
+        let s1 = dkr-seg("a1", () => [dkl-norm(ctx, "hc-cur", dkl-w(ctx, il, "attn_norm.weight"), "xn", e),
+            dkl-dense(ctx, dkl-view(ctx, il, "attn_q_a.weight"), "xn", "q-latent"),
+            dkl-dense(ctx, dkl-view(ctx, il, "attn_kv.weight"), "xn", "kv-raw")]);
         let compl = comp ? dkl-compress(ctx, sts, il, pos, cap) : [];
-        let n2 = dkl-norm(ctx, "q-latent", dkl-w(ctx, il, "attn_q_a_norm.weight"), "q-latn", qr);
-        let n3 = dkl-norm(ctx, "kv-raw", dkl-w(ctx, il, "attn_kv_a_norm.weight"), "kv-n", hd);
-        let qb = dkl-dense(ctx, dkl-view(ctx, il, "attn_q_b.weight"), "q-latn", "q");
-        let hn = dkr-go-tg(dkl-p(ctx, "form_mla_headrms_wide_f32"), [dkl-b(ctx, "q"), dkl-b(ctx, "q-n")], [nh, hd, dkl-f(record_get(m, "eps"))], nh, hd < 256 ? hd : 256);
+        let s2 = dkr-seg("a2", () => [dkl-norm(ctx, "q-latent", dkl-w(ctx, il, "attn_q_a_norm.weight"), "q-latn", qr),
+            dkl-norm(ctx, "kv-raw", dkl-w(ctx, il, "attn_kv_a_norm.weight"), "kv-n", hd),
+            dkl-dense(ctx, dkl-view(ctx, il, "attn_q_b.weight"), "q-latn", "q"),
+            dkr-go-tg(dkl-p(ctx, "form_mla_headrms_wide_f32"), [dkl-b(ctx, "q"), dkl-b(ctx, "q-n")], [nh, hd, dkl-f(record_get(m, "eps"))], nh, hd < 256 ? hd : 256)]);
         let rq = dkl-rope(ctx, "q-n", table, nh, pos, 1.0);
         let rk = dkl-rope(ctx, "kv-n", table, 1, pos, 1.0);
-        let kr = dkr-go-tg(dkl-p(ctx, "form_dsv4_kv_fp8_f16_round_par"), [dkl-b(ctx, "kv-n"), dkl-b(ctx, "kv-q")], [hd, nrot], 1, hd);
+        let s3 = dkr-seg("a3", () => [dkr-go-tg(dkl-p(ctx, "form_dsv4_kv_fp8_f16_round_par"), [dkl-b(ctx, "kv-n"), dkl-b(ctx, "kv-q")], [hd, nrot], 1, hd)]);
         let ap = dkr-go(dkl-p(ctx, "form_dkv_append_f32"), [dkl-b(ctx, "kv-q"), sts[il][0]], [hd, pos, cap], hd);
         let nrows = pos + 1;
         let ncomp = comp ? (pos + 1) / ratio : 0;
@@ -239,11 +245,9 @@ section [form.bml] {
         let a2 = dkr-go(dkl-p(ctx, "form_mla_attend_stats_sg"), [dkl-b(ctx, "att-score"), dkl-w(ctx, il, "attn_sinks.weight"), dkl-b(ctx, "att-exp"), dkl-b(ctx, "att-inv")], [nh, ntot], nh * 32);
         let a3 = dkr-go(dkl-p(ctx, "form_mla_attend_acc"), [sts[il][0], crows, dkl-b(ctx, "att-exp"), dkl-b(ctx, "att-inv"), dkl-b(ctx, "heads")], [nh, hd, nrows, ncomp], nh * hd);
         let ri = dkl-rope(ctx, "heads", table, nh, pos, 0.0 - 1.0);
-        let oa = dkl-view(ctx, il, "attn_output_a.weight");
-        let o1 = dkl-dense-grouped(ctx, oa, "heads", "low");
-        let o2 = dkl-dense(ctx, dkl-view(ctx, il, "attn_output_b.weight"), "low", "attn-out");
-        let post = dkl-hc-post(ctx, "attn-out", "resid", "resid-next");
-        let all = append(pre, append([n1, qa, kv], append(compl, append([n2, n3, qb, hn, rq, rk, kr, ap, a1, a2, a3, ri, o1, o2], post))));
+        let s4 = dkr-seg("a4", () => append([dkl-dense-grouped(ctx, dkl-view(ctx, il, "attn_output_a.weight"), "heads", "low"),
+            dkl-dense(ctx, dkl-view(ctx, il, "attn_output_b.weight"), "low", "attn-out")], dkl-hc-post(ctx, "attn-out", "resid", "resid-next")));
+        let all = append(pre, append(s1, append(compl, append(s2, append([rq, rk], append(s3, append([ap, a1, a2, a3, ri], s4)))))));
         dkl-all?(dkl-ones(all)) ? len(all) : nothing();
     }
     def dkl-ones(xs) = len(xs) == 0 ? [] : cons(xs[0] == 1, dkl-ones(xs[1:]));
@@ -256,14 +260,16 @@ section [form.bml] {
         let used = record_get(m, "used");
         let rows = dkl-l(ctx, il, "router-rows");
         let wscale = dkl-f(record_get(m, "wscale"));
-        dkl-l(ctx, il, "hashed") ? [
-            dkr-go(dkl-p(ctx, "form_dsv4_hash_select"), [dkl-w(ctx, il, "ffn_gate_tid2eid.weight"), dkl-b(ctx, "expert-ids")], [token, used], used),
-            dkr-go(dkl-p(ctx, "form_dsv4_hash_probs_s"), [dkl-b(ctx, "router-logits"), dkl-b(ctx, "router-probs")], [rows], rows),
-            dkr-go(dkl-p(ctx, "form_dsv4_hash_wts"), [dkl-b(ctx, "router-probs"), dkl-b(ctx, "expert-ids"), dkl-b(ctx, "expert-weights")], [used, wscale], 1)
-        ] : [
+        // a hashed block's select carries the TOKEN ID (a constant that changes every token) and stays outside a segment; the two after it, and a biased block's both, do not depend on it
+        dkl-l(ctx, il, "hashed") ? {
+            let sel = dkr-go(dkl-p(ctx, "form_dsv4_hash_select"), [dkl-w(ctx, il, "ffn_gate_tid2eid.weight"), dkl-b(ctx, "expert-ids")], [token, used], used);
+            let rest = dkr-seg("rh", () => [
+                dkr-go(dkl-p(ctx, "form_dsv4_hash_probs_s"), [dkl-b(ctx, "router-logits"), dkl-b(ctx, "router-probs")], [rows], rows),
+                dkr-go(dkl-p(ctx, "form_dsv4_hash_wts"), [dkl-b(ctx, "router-probs"), dkl-b(ctx, "expert-ids"), dkl-b(ctx, "expert-weights")], [used, wscale], 1)]);
+            cons(sel, rest);
+        } : dkr-seg("rt", () => [
             dkr-go(dkl-p(ctx, "form_dsv4_topk_probs_s"), [dkl-b(ctx, "router-logits"), dkl-w(ctx, il, "exp_probs_b.bias"), dkl-b(ctx, "router-probs"), dkl-b(ctx, "router-score")], [rows], rows),
-            dkr-go(dkl-p(ctx, "form_dsv4_topk_select"), [dkl-b(ctx, "router-probs"), dkl-b(ctx, "router-score"), dkl-b(ctx, "expert-ids"), dkl-b(ctx, "expert-weights")], [rows, used, wscale], 1)
-        ];
+            dkr-go(dkl-p(ctx, "form_dsv4_topk_select"), [dkl-b(ctx, "router-probs"), dkl-b(ctx, "router-score"), dkl-b(ctx, "expert-ids"), dkl-b(ctx, "expert-weights")], [rows, used, wscale], 1)]);
     }
     // THE EXPERT KERNELS READ `stack + ids[slot] x stride`: the whole-stack path hands them each stack's own view and the router's expert ids; the arena path (dsv4-arena.fk) hands them the layer's ARENA BUFFER of the stack
     // and the buffer of SLOT numbers the host wrote after the router answered, so the same kernels read the slot's expert (the three handles and the ids buffer are the only difference; the stride is the view's own)
@@ -312,10 +318,10 @@ section [form.bml] {
         let e = record_get(m, "e");
         let rows = dkl-l(ctx, il, "router-rows");
         let pre = dkl-hc-pre(ctx, il, "ffn", "resid-next");
-        let n1 = dkl-norm(ctx, "hc-cur", dkl-w(ctx, il, "ffn_norm.weight"), "xn", e);
-        let rt = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [dkl-w(ctx, il, "ffn_gate_inp.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "router-logits")], [rows, e], rows * 32);
+        let f1 = dkr-seg("f1", () => [dkl-norm(ctx, "hc-cur", dkl-w(ctx, il, "ffn_norm.weight"), "xn", e),
+            dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [dkl-w(ctx, il, "ffn_gate_inp.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "router-logits")], [rows, e], rows * 32)]);
         let route = dkl-route(ctx, il, token);
-        append(pre, append([n1, rt], route));
+        append(pre, append(f1, route));
     }
     def dkl-ffn-rest(ctx, il, ex) {
         let m = dkl-m(ctx);
@@ -328,7 +334,7 @@ section [form.bml] {
     }
     def dkl-ffn-go(ctx, il, token) {
         let first = dkl-ffn-first(ctx, il, token);
-        let all = append(first, dkl-ffn-rest(ctx, il, dkl-experts(ctx, il)));
+        let all = append(first, dkr-seg("bw", () => dkl-ffn-rest(ctx, il, dkl-experts(ctx, il))));
         dkl-all?(dkl-ones(all)) ? len(all) : nothing();
     }
     // THE ARENA'S FFN WHEN NO TOKEN BATCH IS OPEN (a band calling the layer directly): the first half enqueued, then the boundary (dsv4-arena.fk dxa-boundary: the layer's one sync, the ids, the slots, the fills), then the
@@ -339,7 +345,7 @@ section [form.bml] {
         nothing?(plan) ? nothing() : dkl-ffn-arena-rest(ctx, il, first, plan);
     }
     def dkl-ffn-arena-rest(ctx, il, first, filled) {
-        let all = append(first, dkl-ffn-rest(ctx, il, dkl-experts-arena(ctx, il)));
+        let all = append(first, dkr-seg("b", () => dkl-ffn-rest(ctx, il, dkl-experts-arena(ctx, il))));
         dkl-all?(dkl-ones(all)) ? len(all) + filled : nothing();
     }
     // the whole block: attention then FFN
@@ -361,7 +367,8 @@ section [form.bml] {
         nothing?(a) ? nothing() : { let first = dkl-ffn-first(ctx, il, token); dkl-all?(dkl-ones(first)) ? a + len(first) : nothing(); };
     }
     def dsv4-layer-b-go(ctx, il) {
-        let rest = dkl-ffn-rest(ctx, il, dkl-experts-arena(ctx, il));
+        // the whole second half is one segment: the experts over the arena buffers, the shared expert, the slot sum and hc_post read the same buffers with the same constants every token
+        let rest = dkr-seg("b", () => dkl-ffn-rest(ctx, il, dkl-experts-arena(ctx, il)));
         dkl-all?(dkl-ones(rest)) ? len(rest) : nothing();
     }
     0;

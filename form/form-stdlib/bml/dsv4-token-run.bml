@@ -51,7 +51,7 @@ section [form.bml] {
   def dtr-default-bw() = 546;
   // ---- the plan: the ledger's own formulas over the header ---------------------------------------------------------------------------------
   // the batches handed to the queue a token (every second block) and the command buffers a token commits (those and the one the wait drains): dsv4-token-handle.fk dth-layers, dll-row
-  def dtr-submits(m) = record_get(m, "layers-n") / 2;
+  def dtr-submits(m) = record_get(m, "layers-n") / dkr-every();
   def dtr-cbs(m) = dtr-submits(m) + 1;
   // the dispatches a token makes at pos, with its head and scan (headed) or without (a chained prefill position)
   def dtr-dispatches(m, pos, headed) = dll-token-count-m(m, pos) - (headed ? 0 : 8);
@@ -87,6 +87,7 @@ section [form.bml] {
    record_new(0, "token", index, "kind", kind, "pos", pos, "id_in", idin, "id_out", idout, "dispatches", record_get(r, "dispatches"), "barriers", record_get(r, "barriers"), "cbs", record_get(r, "cbs"), "syncs", record_get(r, "syncs"),
     "readbacks", record_get(r, "readbacks"), "allocs", record_get(r, "allocs"), "bytes", record_get(r, "bytes"), "gpu_us", record_get(r, "gpu_us"), "wall_ms", record_get(r, "wall_ms"), "miss", record_get(r, "miss"),
     "fills", record_get(r, "fills"), "fdisp", record_get(r, "fdisp"), "emiss", record_get(r, "emiss"), "ehit", record_get(r, "ehit"), "ebytes", record_get(r, "ebytes"), "arena", arena,
+    "cpu_us", record_get(r, "cpu_us"), "enc_us", record_get(r, "enc_us"), "sync_ms", record_get(r, "sync_ms"), "plan_ms", record_get(r, "plan_ms"), "plan_us", record_get(r, "plan_us"), "fill_ms", record_get(r, "fill_ms"), "fill_us", record_get(r, "fill_us"), "read_us", record_get(r, "read_us"),
     "wired", dtr-wired-of(b[1]) - dtr-wired-of(a[1]), "pageins", dtr-pageins-of(b[1]) - dtr-pageins-of(a[1]), "own", b[2] - a[2], "watched", watched);
   }
   def dtr-g(row, k) = record_get(row, k);
@@ -234,10 +235,21 @@ section [form.bml] {
   // the cold first token: the prefill's own milliseconds, up to and including its one drain
   def dtr-cold-ms(rows) = dtr-sum-col(dtr-rows-of(rows, "prefill"), "wall_ms");
   // the warm decode: the unwatched decode tokens after the first when there are at least three, else all of them: [tokens, ms]
-  def dtr-warm(rows) {
+  def dtr-warm-rows(rows) {
    let d = dtr-unwatched(dtr-rows-of(rows, "decode"));
-   let w = len(d) >= 3 ? d[1:] : d;
+   len(d) >= 3 ? d[1:] : d;
+  }
+  def dtr-warm(rows) {
+   let w = dtr-warm-rows(rows);
    [len(w), dtr-sum-col(w, "wall_ms")];
+  }
+  // WHERE THE WARM TOKEN'S WALL GOES: the mean of each host-time column over the warm tokens, printed in milliseconds to a tenth (wall columns are whole milliseconds a row, so the mean over many tokens is the reading; one token's is good to a few)
+  def dtr-mean-tenths(w, k, per) = len(w) == 0 ? 0 : (dtr-sum-col(w, k) * 10) / (len(w) * per);
+  def dtr-host-line(rows) {
+   let w = dtr-warm-rows(rows);
+   len(w) == 0 ? "" : "; warm token, milliseconds (mean over " ++ len(w).str() ++ "): wall " ++ dtr-tenths-text(dtr-mean-tenths(w, "wall_ms", 1)) ++ " ms = waits " ++ dtr-tenths-text(dtr-mean-tenths(w, "sync_ms", 1)) ++ " (the device busy " ++ dtr-tenths-text(dtr-mean-tenths(w, "gpu_us", 1000))
+    ++ ") + plan " ++ dtr-tenths-text(dtr-mean-tenths(w, "plan_ms", 1)) ++ " + fills " ++ dtr-tenths-text(dtr-mean-tenths(w, "fill_ms", 1)) ++ " + encoding " ++ dtr-tenths-text(dtr-mean-tenths(w, "enc_us", 1000)) ++ " + reads " ++ dtr-tenths-text(dtr-mean-tenths(w, "read_us", 1000))
+    ++ " + other (the rest); the host's CPU " ++ dtr-tenths-text(dtr-mean-tenths(w, "cpu_us", 1000)) ++ " ms (encoding " ++ dtr-tenths-text(dtr-mean-tenths(w, "enc_us", 1000)) ++ ", plan " ++ dtr-tenths-text(dtr-mean-tenths(w, "plan_us", 1000)) ++ ", fills " ++ dtr-tenths-text(dtr-mean-tenths(w, "fill_us", 1000)) ++ ")";
   }
   // tokens a second, in hundredths, from [tokens, ms]
   def dtr-hundredths-per-s(w) = w[1] == 0 ? 0 : (w[0] * 100000) / w[1];
@@ -247,7 +259,7 @@ section [form.bml] {
    "[dsv4-token] summary: " ++ len(rows).str() ++ " tokens (" ++ len(dtr-rows-of(rows, "prefill")).str() ++ " prefill, " ++ len(dtr-rows-of(rows, "decode")).str() ++ " decode); cold first token " ++ dtr-cold-ms(rows).str() ++ " ms; warm decode "
     ++ (w[0] == 0 ? "none" : (w[1] / w[0]).str() ++ " ms a token = " ++ dtr-hundredths-text(dtr-hundredths-per-s(w)) ++ " tokens a second over " ++ w[0].str() ++ " tokens") ++ "; totals: " ++ dtr-sum-col(rows, "dispatches").str() ++ " dispatches, " ++ dtr-sum-col(rows, "barriers").str()
     ++ " barriers, " ++ dtr-sum-col(rows, "syncs").str() ++ " syncs, " ++ dtr-sum-col(rows, "cbs").str() ++ " command buffers, " ++ dtr-sum-col(rows, "readbacks").str() ++ " host reads, device busy " ++ (dtr-sum-col(rows, "gpu_us") / 1000).str() ++ " ms"
-    ++ dtr-arena-summary(rows);
+    ++ dtr-arena-summary(rows) ++ dtr-host-line(rows);
   }
   // the arena's totals over the rows: the experts the layers hit and missed (the hit rate), the bytes the fills copied from the file and the copies they made (empty when no row ran in the arena mode)
   def dtr-hit-pct(h, ms) = (h + ms) == 0 ? 0 : (100 * h) / (h + ms);
@@ -260,6 +272,8 @@ section [form.bml] {
     dvr-kv("dispatches", dtr-g(r, "dispatches").str()), dvr-kv("barriers", dtr-g(r, "barriers").str()), dvr-kv("cbs", dtr-g(r, "cbs").str()), dvr-kv("syncs", dtr-g(r, "syncs").str()), dvr-kv("readbacks", dtr-g(r, "readbacks").str()),
     dvr-kv("allocs", dtr-g(r, "allocs").str()), dvr-kv("bytes", dtr-g(r, "bytes").str()), dvr-kv("gpu_us", dtr-g(r, "gpu_us").str()), dvr-kv("wall_ms", dtr-g(r, "wall_ms").str()), dvr-kv("miss", dtr-g(r, "miss").str()),
     dvr-kv("fills", dtr-g(r, "fills").str()), dvr-kv("copy_dispatches", dtr-g(r, "fdisp").str()), dvr-kv("fill_road", dvr-q(dll-road(r))), dvr-kv("experts_missed", dtr-g(r, "emiss").str()), dvr-kv("experts_hit", dtr-g(r, "ehit").str()), dvr-kv("bytes_filled", dtr-g(r, "ebytes").str()),
+    dvr-kv("cpu_us", dtr-g(r, "cpu_us").str()), dvr-kv("enc_us", dtr-g(r, "enc_us").str()), dvr-kv("sync_ms", dtr-g(r, "sync_ms").str()), dvr-kv("plan_ms", dtr-g(r, "plan_ms").str()), dvr-kv("plan_us", dtr-g(r, "plan_us").str()), dvr-kv("fill_ms", dtr-g(r, "fill_ms").str()), dvr-kv("fill_us", dtr-g(r, "fill_us").str()),
+    dvr-kv("read_us", dtr-g(r, "read_us").str()), dvr-kv("other_ms", dll-other-ms(r).str()),
     dvr-kv("wired_delta", dtr-g(r, "wired").str()), dvr-kv("pageins_delta", dtr-g(r, "pageins").str()), dvr-kv("own_delta", dtr-g(r, "own").str()), dvr-kv("watched", dtr-g(r, "watched").str())], ",") ++ "}";
   def dtr-curve-json(c) = "[" ++ dvr-join(map(p => "[" ++ p[0].str() ++ "," ++ p[1].str() ++ "," ++ p[2].str() ++ "," ++ p[3].str() ++ "]", c), ",") ++ "]";
   def dtr-stop-json(s) = len(s) == 0 ? "{}" : "{" ++ dvr-join([dvr-kv("reason", dvr-q(s[0])), dvr-kv("token", s[1].str()), dvr-kv("layer", s[2].str())], ",") ++ "}";
@@ -269,7 +283,10 @@ section [form.bml] {
     dvr-kv("dispatches", dtr-sum-col(rows, "dispatches").str()), dvr-kv("barriers", dtr-sum-col(rows, "barriers").str()), dvr-kv("syncs", dtr-sum-col(rows, "syncs").str()), dvr-kv("cbs", dtr-sum-col(rows, "cbs").str()),
     dvr-kv("readbacks", dtr-sum-col(rows, "readbacks").str()), dvr-kv("gpu_us", dtr-sum-col(rows, "gpu_us").str()), dvr-kv("experts_hit", dtr-sum-col(rows, "ehit").str()), dvr-kv("experts_missed", dtr-sum-col(rows, "emiss").str()),
     dvr-kv("hit_percent", dtr-hit-pct(dtr-sum-col(rows, "ehit"), dtr-sum-col(rows, "emiss")).str()), dvr-kv("bytes_filled", dtr-sum-col(rows, "ebytes").str()), dvr-kv("fills", dtr-sum-col(rows, "fills").str()),
-    dvr-kv("fills_door", (dtr-sum-col(rows, "fills") - dtr-sum-col(rows, "fdisp")).str()), dvr-kv("fills_view", dtr-sum-col(rows, "fdisp").str())], ",") ++ "}";
+    dvr-kv("fills_door", (dtr-sum-col(rows, "fills") - dtr-sum-col(rows, "fdisp")).str()), dvr-kv("fills_view", dtr-sum-col(rows, "fdisp").str()),
+    dvr-kv("warm_gpu_us", dtr-sum-col(dtr-warm-rows(rows), "gpu_us").str()), dvr-kv("warm_sync_ms", dtr-sum-col(dtr-warm-rows(rows), "sync_ms").str()), dvr-kv("warm_plan_ms", dtr-sum-col(dtr-warm-rows(rows), "plan_ms").str()), dvr-kv("warm_fill_ms", dtr-sum-col(dtr-warm-rows(rows), "fill_ms").str()),
+    dvr-kv("warm_enc_us", dtr-sum-col(dtr-warm-rows(rows), "enc_us").str()), dvr-kv("warm_plan_us", dtr-sum-col(dtr-warm-rows(rows), "plan_us").str()), dvr-kv("warm_fill_us", dtr-sum-col(dtr-warm-rows(rows), "fill_us").str()), dvr-kv("warm_read_us", dtr-sum-col(dtr-warm-rows(rows), "read_us").str()),
+    dvr-kv("warm_cpu_us", dtr-sum-col(dtr-warm-rows(rows), "cpu_us").str())], ",") ++ "}";
   }
   // ---- the validation: the head's logits against the recording, the stream against the recorded ids ------------------------------------------------------------------
   // THE RECORDING IS THE VALIDATION DOOR'S (dsv4-validate.bml, ONE authority: dvr-ref-logits reads the pinned JSON, dvr-logits-pinned? checks its SHA-256, dvr-agreement measures Pearson r, the top-10 overlap, both argmaxes, the
@@ -353,7 +370,7 @@ section [form.bml] {
    ? "[dsv4-token] attribution ON: after the walk " ++ dtr-opts-attr(opts).str() ++ " decode token(s) run in the attribution mode (every dispatch its own command buffer, enqueued, synced and read: the device's microseconds a dispatch, tallied by family, kernel and block; about 1,900 waits a token, so its wall clock is no measurement): the table is printed and kept in the receipt row (attribution)"
    : "[dsv4-token] attribution off (attribute n runs n decode tokens after the walk with the device's time read per dispatch: which kernels keep the device busy)";
   def dtr-receipt-row(date, at, r) = "{" ++ dvr-join([dvr-kv("schema", dvr-q("dsv4-token-run-v1")), dvr-kv("at_unix_ms", at.str()), dvr-kv("date", dvr-q(date)), dvr-kv("status", dvr-q(record_get(r, "status"))), dvr-kv("reason", dvr-q(record_get(r, "reason"))),
-    dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("pct", record_get(r, "pct").str()), dvr-kv("watch", record_get(r, "watch").str()), dvr-kv("arena_slots", record_get(r, "arena").str()), dvr-kv("lease_shared", record_get(r, "shared").str()),
+    dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("pct", record_get(r, "pct").str()), dvr-kv("watch", record_get(r, "watch").str()), dvr-kv("arena_slots", record_get(r, "arena").str()), dvr-kv("submit_every", record_get(r, "every").str()), dvr-kv("segments", record_get(r, "segments").str()), dvr-kv("lease_shared", record_get(r, "shared").str()),
     dvr-kv("organs", record_get(r, "organs")), dvr-kv("moved", record_get(r, "moved")), dvr-kv("denied", record_get(r, "denied")), dvr-kv("vm_window", record_get(r, "vmwin")),
     dvr-kv("stages", "[" ++ dvr-join(map(s => dvr-stage-json(s), record_get(r, "stages")), ",") ++ "]"), dvr-kv("stop", dtr-stop-json(record_get(r, "stop"))), dvr-kv("wired_curve", dtr-curve-json(record_get(r, "curve"))),
     dvr-kv("rows", "[" ++ dvr-join(map(x => dtr-row-json(x), record_get(r, "rows")), ",") ++ "]"), dvr-kv("summary", dtr-summary-json(record_get(r, "rows"))), dvr-kv("validation", value_kind(record_get(r, "validation")) == "string" ? record_get(r, "validation") : "{}"), dvr-kv("attribution", value_kind(record_get(r, "attribution")) == "string" ? record_get(r, "attribution") : "[]"), dvr-kv("elapsed_ms", record_get(r, "elapsed").str())], ",") ++ "}";
@@ -371,6 +388,16 @@ section [form.bml] {
   def dtr-recording(opts, ids) = len(dvr-ints(opts, "teacher_ids")) > 0 ? dvr-ints(opts, "teacher_ids") : (ids == dvr-prompt() ? dvr-stream() : []);
   // the attribution tokens after the walk (0 by default: none)
   def dtr-opts-attr(opts) = dvr-int(opts, "attribute", 0);
+  // THE HAND-OVER CADENCE ({"submit_every":1}): the open batch goes to the queue after every block (default 2, Swift's submitEvery: after every second). In the arena the boundary drains the first half's batch each block, so
+  // with 2 an even block's second half waits in the open batch while the host encodes the next block's first half; with 1 the device runs it meanwhile, at the price of one more command buffer a block (the structure's
+  // count: 87 for 43 blocks against 65). Not measured on the real file: the receipt's rows carry wall, waits and encoding for both settings.
+  // THE SEGMENTS ({"segments":0} turns them off, the control): the runs of a block's dispatches that read the same buffers with the same constants every token are encoded once and replayed (dsv4-kernels.fk dkr-seg);
+  // the same ids, the same logits, the same ledger counts, about half the host's encoding time on the fixture
+  def dtr-host-plan-line(opts) = "[dsv4-token] the host's time (one ledger row a token carries it: wall_ms = sync_ms (waits, the device running) + plan_ms (a layer's id read, cache, slot write) + fill_ms (the span fills) + enc_us and read_us (CPU microseconds) + other_ms; "
+   ++ "cpu_us the process's CPU): the summary's last part reads the warm token's mean of each. Encoding: " ++ (dtr-opts-seg?(opts) ? "SEGMENTS ON (the runs of a block's dispatches that read the same buffers with the same constants every token are encoded once and replayed: about half the encoding time on the fixture; segments 0 is the control)" : "segments OFF (the control: every dispatch built afresh every token)")
+   ++ "; the open batch is handed to the queue after every " ++ dtr-opts-every(opts).str() ++ " block(s) (submit_every 1 or 2)";
+  def dtr-opts-seg?(opts) = dvr-int(opts, "segments", 1) != 0;
+  def dtr-opts-every(opts) = dvr-int(opts, "submit_every", 2) < 1 ? 1 : dvr-int(opts, "submit_every", 2);
   // THE HYPER-CONNECTION F16 MATVEC the run takes: "wide" (the DEFAULT: ds4's own dispatch, 13 us a dispatch on the real file; on the real recording r 0.99813, overlap 9, delta 1.1448, argmax 2581, device 48.4 ms a token, 2026-10-03
   // 23:03 to 23:20 WITA) or "narrow" (the control and the oracle bands' reference: the compensated one-thread-a-row kernel, 1,537 us a dispatch on the real file, 87 a token, 133.8 ms; the same recording read r 0.99742,
   // overlap 8, delta 0.923): see dsv4-layer.fk dkl-hc-mv. "compensated" is read as "narrow".
@@ -404,7 +431,7 @@ section [form.bml] {
   // THE ARENA MODE'S COMMAND STRUCTURE AND CEILINGS, from the header: a block is two planned stages with ONE sync between them (the router's ids are read on the host: one counted read of `used` words), so a token waits once a
   // block and once at its close, reads once a block and twice at its head, and commits each block's drained batch, the batch handed to the queue after every odd block, and the one the close drains
   def dtr-arena-structure-line(m) = "[dsv4-token] the command structure (arena, dsv4-arena.fk): a block is two planned stages (dkr-hz) with ONE sync between them: the router's ids are read on the host (one counted read of " ++ record_get(m, "used").str() ++ " words), the cache answers slots, "
-   ++ "a concurrent batch is armed again and the missing experts' spans are preaded into their slots (the fill door metal_buf_fill; a view and a copy kernel when the carrier lacks it), then the experts, the shared expert and hc_post; handed to the queue after every odd block; a token waits " ++ dll-arena-syncs(m).str() ++ " times (" ++ dll-layers-n(m).str() ++ " blocks and its close), "
+   ++ "a concurrent batch is armed again and the missing experts' spans are preaded into their slots (the fill door metal_buf_fill; a view and a copy kernel when the carrier lacks it), then the experts, the shared expert and hc_post; handed to the queue after every " ++ dkr-every().str() ++ (dkr-every() == 1 ? " block (submit_every 1: the device runs a block's second half while the host encodes the next block's first half, at every block)" : " blocks (submit_every 2, Swift's: 1 hands it over after every block)") ++ "; a token waits " ++ dll-arena-syncs(m).str() ++ " times (" ++ dll-layers-n(m).str() ++ " blocks and its close), "
    ++ "reads the device " ++ dll-arena-reads(m, true).str() ++ " times (a block's ids and the head's two), commits " ++ dll-arena-cbs(m).str() ++ " command buffers";
   def dtr-arena-ceil-line(m) = "[dsv4-token] the arena ceilings a row is held to (the ledger's dll-arena-ceil, the dispatch count equal to the formula plus the fills' copy dispatches, span fills = 3 x the experts missed): dispatches " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " to " ++ dtr-max-go(m, 0, 0, 256).str()
    ++ " plus the copy dispatches (none through the fill door), syncs " ++ dll-arena-syncs(m).str() ++ ", host reads " ++ dll-arena-reads(m, true).str() ++ " at a head (" ++ dll-arena-reads(m, false).str() ++ " without), command buffers " ++ dll-arena-cbs(m).str() ++ ", buffers made 0, plans short or long 0";
@@ -432,6 +459,7 @@ section [form.bml] {
    let n = record_get(m, "layers-n");
    let ids = dtr-opts-ids(opts);
    let arena = dtr-opts-arena(opts) > 0;
+   let every = dkr-set-every(dtr-opts-every(opts));
    [ "[dsv4-token] DRY: the plan and the op ledger arithmetic; nothing is opened, mapped, leased, compiled or written",
     "[dsv4-token] file " ++ dvr-text(opts, "file", dvr-file()) ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), " ++ record_get(m, "arch") ++ ", " ++ n.str() ++ " layers, header read only",
     "[dsv4-token] the run: the prefill of " ++ len(ids).str() ++ " prompt ids " ++ dvr-ids-json(ids) ++ " (a wait between positions, the head and the one drain at the last), then " ++ dtr-opts-steps(opts).str() ++ " greedy decode tokens, one ledger row a token, cap " ++ dvr-int(opts, "cap", dvr-default-cap()).str()
@@ -440,7 +468,8 @@ section [form.bml] {
     dtr-attribution-plan-line(opts),
     dtr-hcmv-plan-line(opts),
     dtr-poison-plan-line(opts),
-    arena ? dtr-arena-structure-line(m) : "[dsv4-token] the command structure (landed, dkr-hz): one concurrent batch, barriers planned per block, handed to the queue every " ++ "2" ++ " blocks (" ++ dtr-submits(m).str() ++ " submits and the wait's own commit: " ++ dtr-cbs(m).str() ++ " command buffers a token), ONE wait a decode token, the NaN scan on the same drain",
+    dtr-host-plan-line(opts),
+    arena ? dtr-arena-structure-line(m) : "[dsv4-token] the command structure (landed, dkr-hz): one concurrent batch, barriers planned per block, handed to the queue every " ++ dkr-every().str() ++ " blocks (" ++ dtr-submits(m).str() ++ " submits and the wait's own commit: " ++ dtr-cbs(m).str() ++ " command buffers a token), ONE wait a decode token, the NaN scan on the same drain",
     "[dsv4-token] dispatches a token (dll-token-count-m, the ledger's formula over the header): " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position, " ++ dtr-max-go(m, 0, 0, 256).str() ++ " at a position where every compressor emits; the embedding 2 and the head and scan 8 included" ++ (arena ? "; the arena adds a copy dispatch for each fill that takes the view road (the fill door makes none)" : ""),
     arena ? dtr-arena-ceil-line(m) : dtr-ceil-line(m),
     arena ? dtr-join-lines(dtr-arena-bytes-lines(m, opts, bw)) : ("[dsv4-token] bytes a token reads (dll-token-bytes-m, the ledger's sum over the header's rows): " ++ bytes.str() ++ " B (" ++ dvr-gib(bytes) ++ "), one embedding row " ++ (record_get(m, "e") * 2).str() ++ " and the head " ++ dll-head-bytes-m(m).str()
@@ -462,7 +491,7 @@ section [form.bml] {
     [() => dvr-stage(env, "state", dvl-kv-total(record_get(env, "m"), record_get(env, "cap")), () => dvr-do-state(env))]));
   def dtr-record(denv, wenv, status, reason, opts) = record_new(0, "status", status, "reason", reason, "file", record_get(denv, "file"), "cap", record_get(denv, "cap"), "pct", record_get(wenv, "pct"), "watch", record_get(wenv, "watch"), "arena", dtr-opts-arena(opts),
     "shared", record_get(denv, "shared"), "organs", record_get(denv, "organs"), "moved", record_get(denv, "moved"), "denied", record_get(denv, "denied"), "vmwin", dvr-window-vm-json(mg-sense(), record_get(denv, "vm0"), dvr-stored-pages()),
-    "stages", record_get(denv, "log"), "stop", record_get(wenv, "stop"), "curve", record_get(wenv, "curve"), "rows", record_get(wenv, "rows"), "elapsed", dvr-elapsed(denv), "validation", "{}", "attribution", "[]");
+    "every", dkr-every(), "segments", dtr-opts-seg?(opts) ? 1 : 0, "stages", record_get(denv, "log"), "stop", record_get(wenv, "stop"), "curve", record_get(wenv, "curve"), "rows", record_get(wenv, "rows"), "elapsed", dvr-elapsed(denv), "validation", "{}", "attribution", "[]");
   def dtr-finish(denv, wenv, opts, why) {
    let cleared = dkr-hz-tap-clear();
    let held = dvr-release(denv);
@@ -493,6 +522,8 @@ section [form.bml] {
    let an = record_set(wenv, "attr-n", dtr-opts-attr(opts));
    let pw = record_set(wenv, "poison", dtr-poison-word(opts));
    let hcmv = dkr-hz-put("hcmv", dtr-hcmv-wide?(opts) ? 1 : 0);
+   let every = dkr-set-every(dtr-opts-every(opts));
+   let segs = dkr-seg-off(!dtr-opts-seg?(opts));
    let before = try dvr-seq(dtr-steps-before(denv, slots)) catch "walker-stop";
    before != "" ? before : (try dtr-walk(wenv, dvr-ctx(denv), dvr-sts(denv), dtr-opts-ids(opts), dtr-opts-steps(opts)) catch "walker-stop");
   }
