@@ -1,15 +1,18 @@
-; channel-offer-band.bml — a bounded offer into a bell (observe/channel-offer-run.bml), the door that took over from the shell's
-; `( ftimeout N sh -c 'printf x > bell' ) &` and `( sleep N; [ -e pid ] && printf timeout > bell ) &`.
+; channel-offer-band.bml — a bounded offer into a bell (observe/channel-offer-run.bml), written by cell-channel.bml (cc-offer).
 ;
-; Verdict 31 when every claim lands:
+; Verdict 127 when every claim lands:
 ;   1     delivered: with a reader waiting on the fifo, the door writes its word and the reader reads exactly that word
 ;   2     bounded: with no reader, the door ends by its deadline (a 2 s window ends within 8 s) and leaves no writer standing
 ;   4     only if: with a file named that is absent, nothing is written and the door ends at once (a reader that was waiting still reads nothing)
 ;   8     patience: with after_ms 1500 and a file that stands, the word arrives no sooner than 1.5 s after the door began
 ;   16    the request file is taken: the door removes the file it was begun on once it has read it
+;   32    a request that does not read (malformed JSON, a typo'd key, a key of the wrong kind) is refused by name with exit 1 and its file is left
+;         where it was written; one that reads is taken as ever
+;   64    the writer and the reader agree: cell-channel's request (cc-offer-json) is emitted by the body's JSON emitter, reads under the door's keys,
+;         and a path or a word holding a quote or a backslash comes back as the same string
 ;
 ; REQUIRES: the built ./fkwu and the body root as the working directory.
-// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/door-options.bml form-stdlib/cell-channel.bml
 section [form.bml] {
  class ChannelOfferBand {
   def cob-fresh() {
@@ -84,10 +87,39 @@ section [form.bml] {
    let ended = door[0] > 0 ? hch-wait(door[0], hch-by(20000)) : nothing();
    !nothing?(ended) && (Comparable) host_path_exists(door[1]) != 1;
   }
+  // ---- 32 a request that does not read is refused by name (exit 1), its file left as evidence; one that reads is taken as ever
+  def cob-run(ctx, name, request) {
+   let req = cob-root(ctx) ++ "/" ++ name ++ ".request";
+   let w = write_file(req, request);
+   let pid = host_spawn_at(["./fkwu", "observe/channel-offer-run.bml"], [req, req ++ ".out", req ++ ".err"]);
+   let status = pid <= 0 ? -1 : host_wait(pid);
+   [status, read_file(req ++ ".out") ?? "", req];
+  }
+  def cob-has(s, part) = str_find(s, part, 0) >= 0;
+  def cob-c-strict(ctx) {
+   let bad = cob-run(ctx, "s-bad", "{bad json");
+   let typo = cob-run(ctx, "s-typo", "{\"bel\":\"x\",\"word\":\"x\"}");
+   let kind = cob-run(ctx, "s-kind", "{\"seconds\":\"2\"}");
+   let ok = cob-run(ctx, "s-ok", "{\"request\":\"" ++ cob-root(ctx) ++ "/s-ok.request\",\"word\":\"x\"}");
+   (Comparable) bad[0] == 1 && cob-has(bad[1], "channel-offer: stdin is not well-formed JSON") && (Comparable) host_path_exists(bad[2]) == 1
+   && (Comparable) typo[0] == 1 && cob-has(typo[1], "channel-offer: unknown key \"bel\"") && (Comparable) kind[0] == 1 && cob-has(kind[1], "channel-offer: key \"seconds\" must be an integer")
+   && (Comparable) ok[0] == 0 && (Comparable) host_path_exists(ok[2]) != 1;
+  }
+  // ---- 64 the writer and the reader agree: cell-channel's request is emitted by the body's JSON emitter, reads under the door's keys, and a path
+  // or a word holding a quote or a backslash comes back as the same string
+  def cob-c-writer(ctx) {
+   let plain = cc-offer-json("/p/a.offer", "/p/bell", "x", 1500, "/p/pid");
+   let odd = cc-offer-json("/p/\"a\\b\".offer", "/p/bell \"q\"", "re\"lease\\", 0, "");
+   let doc = parse-json("writer", odd);
+   (String) dop-refusal("channel-offer", plain, [["request", "str"], ["bell", "str"], ["word", "str"], ["seconds", "int"], ["after_ms", "int"], ["only_if", "str"]]) == ""
+   && (String) dop-refusal("channel-offer", odd, [["request", "str"], ["bell", "str"], ["word", "str"], ["seconds", "int"], ["after_ms", "int"], ["only_if", "str"]]) == ""
+   && (String) json-string-value(json-object-get(doc, "request")) == "/p/\"a\\b\".offer" && (String) json-string-value(json-object-get(doc, "bell")) == "/p/bell \"q\""
+   && (String) json-string-value(json-object-get(doc, "word")) == "re\"lease\\" && (Comparable) json-int-value(json-object-get(doc, "after_ms")) == 0 && (String) json-string-value(json-object-get(doc, "only_if")) == "";
+  }
  }
  let ctx = cob-fresh();
  nothing?(ctx) ? form_error("channel-offer band needs a fresh directory") : 0;
- let verdict = live-claims("channel-offer-band", ctx, [["delivered", 1, 1, cob-c-delivered], ["bounded", 2, 1, cob-c-bounded], ["only-if", 4, 1, cob-c-only-if], ["patience", 8, 1, cob-c-patience], ["request", 16, 1, cob-c-request]]);
+ let verdict = live-claims("channel-offer-band", ctx, [["delivered", 1, 1, cob-c-delivered], ["bounded", 2, 1, cob-c-bounded], ["only-if", 4, 1, cob-c-only-if], ["patience", 8, 1, cob-c-patience], ["request", 16, 1, cob-c-request], ["strict", 32, 1, cob-c-strict], ["writer", 64, 1, cob-c-writer]]);
  host_dir_rmdir(cob-root(ctx));
  verdict;
 }

@@ -37,7 +37,7 @@
 //   `  ✓  <label>  → <answer> (its pin)` | `  ·  <label>  → <answer> (ran clean; no pin to answer)`
 //   `  ✗  <label>  fkwu: <why>` then `      evidence=<legs>` | `  ⧗  <label>  staged — carrier absent ...`
 // then the summary; the door ends in an error when any workload failed.
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/value-operators.bml form-stdlib/bml/order.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/host-walk-sync.bml observe/band-head.bml
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/value-operators.bml form-stdlib/bml/order.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/door-options.bml form-stdlib/bml/host-walk-sync.bml observe/band-head.bml
 section [form.bml] {
  class BandSweep {
   def bsw-manifest() = "form/band-verdicts.txt";
@@ -61,7 +61,8 @@ section [form.bml] {
   def bsw-opt-str(doc, key, fallback) = bsw-opt-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : fallback;
   def bsw-opt-int(doc, key, fallback) = bsw-opt-has?(doc, key) ? (json-int-value(json-object-get(doc, key)) ?? fallback) : fallback;
   def bsw-opt-files(doc) = bsw-opt-has?(doc, "files") ? json-array-elements(json-object-get(doc, "files")) |> map(n => json-string-value(n)) : [];
-  def bsw-doc(text) = len(trim(text)) == 0 ? json-node-object([]) : parse-json("band-sweep-options", text);
+  def bsw-spec() = [["list", "int"], ["match", "str"], ["files", "strs"], ["jobs", "int"], ["ceiling_s", "int"], ["fkwu", "str"]];
+  def bsw-doc(text) = dop-doc("band-sweep", text, bsw-spec());
   // ---- enumeration: a workload is [label, files], every file spelled from the repo root
   def bsw-names(dir) = sort-strings(fs_list(dir) ?? []);
   def bsw-samples() = bsw-names("form/form-samples") |> filter(n => bsw-ends?(n, ".fk")) |> map(n => [n, ["form/form-samples/" ++ n]]);
@@ -92,6 +93,18 @@ section [form.bml] {
   // ---- what a band's head and the manifest say (read in process)
   def bsw-band-of(w) = w[1][len(w[1]) - 1];
   def bsw-text(path) = read_file(path) ?? "";
+  // what must read before any judgment: the registered verdicts and every band file of the workloads. A file that does not read would
+  // be judged as one holding no pin ("answered every pin"), so the door refuses by name instead; "" when all read.
+  def bsw-unread-why(path) = nothing?(read_file(path)) ? path ++ " does not read" : len(trim(read_file(path) ?? "")) == 0 ? path ++ " is empty" : "";
+  def bsw-first-why(whys) = foldl((acc, w) => len(acc) > 0 ? acc : w, "", whys);
+  def bsw-preflight-why(manifest, ws) {
+   let m = bsw-unread-why(manifest);
+   len(m) > 0 ? "the registered verdicts are unreadable, so every pin would be dropped: " ++ m
+   : bsw-first-why(map(w => nothing?(read_file(bsw-band-of(w))) ? "the band " ++ bsw-band-of(w) ++ " does not read" : "", ws));
+  }
+  // a selection that holds no workload is a refusal, never a green sweep of nothing
+  def bsw-selection-why(ws, doc) = nil?(ws) ? "the selection holds no workload (" ++ bsw-describe-selection(doc) ++ "); {\"list\":1} names the workloads that exist" : "";
+  def bsw-describe-selection(doc) = bsw-opt-has?(doc, "match") ? "match \"" ++ bsw-opt-str(doc, "match", "") ++ "\"" : "no band stands in the tree";
   def bsw-level(w) = bh-level(bsw-text(bsw-band-of(w)));
   def bsw-carrier(w) = bh-carrier(bsw-text(bsw-band-of(w)));
   def bsw-door(w) = bh-door(bsw-text(bsw-band-of(w)));
@@ -238,33 +251,44 @@ section [form.bml] {
    let said = print_str(r[1]);
    bsw-flush(results, next + 1, total, bsw-tally(tally, r[0], labels[next], r[1]), labels);
   }
+  // the results record is THREADED: record_set answers the handle to carry forward (a set that grows the table answers a new one, and the
+  // old handle stays behind with fewer rows), so every step answers its results along with its other answer. [pending, running, results]
   def bsw-start-more(pending, running, jobs, fkwu, results) {
-   nil?(pending) || len(running) >= jobs ? [pending, running]
+   nil?(pending) || len(running) >= jobs ? [pending, running, results]
    : bsw-pending?(pending[0][1]) ? bsw-start-pending(pending, running, jobs, fkwu, results)
    : bsw-start-more(pending[1:], cons(bsw-begin(pending[0][1], pending[0][0], fkwu), running), jobs, fkwu, results);
   }
   def bsw-start-pending(pending, running, jobs, fkwu, results) {
    let held = record_set(results, pending[0][0].str(), bsw-pending(pending[0][1]));
-   bsw-start-more(pending[1:], running, jobs, fkwu, results);
+   bsw-start-more(pending[1:], running, jobs, fkwu, held);
+  }
+  // [the legs still running, the results with the ended ones set]
+  // each leg is asked once whether it is done and sorted by that one answer: asked twice (once for the ended, once for the kept) a leg that
+  // stops between the two questions is in neither list, and its band is never judged or counted
+  def bsw-sort(running, ceiling-ms) {
+   let asked = map(j => [j, bsw-done?(j, ceiling-ms)], running);
+   [map(p => p[0], filter(p => p[1], asked)), map(p => p[0], filter(p => !p[1], asked))];
   }
   def bsw-settle(running, ceiling-ms, ceiling-s, results) {
-   let ended = filter(j => bsw-done?(j, ceiling-ms), running);
-   let kept = filter(j => !bsw-done?(j, ceiling-ms), running);
-   let held = foldl((acc, j) => record_set(results, j[0].str(), bsw-finish(j, ceiling-s)), 0, ended);
-   kept;
+   let sorted = bsw-sort(running, ceiling-ms);
+   let ended = sorted[0];
+   let kept = sorted[1];
+   [kept, foldl((acc, j) => record_set(acc, j[0].str(), bsw-finish(j, ceiling-s)), results, ended)];
   }
   def bsw-pool(pending, running, results, next, total, tally, labels, opts) {
    let more = bsw-start-more(pending, running, opts[0], opts[1], results);
-   let kept = bsw-settle(more[1], opts[2] * 1000, opts[2], results);
-   let flushed = bsw-flush(results, next, total, tally, labels);
-   nil?(more[0]) && nil?(kept) ? bsw-flush-end(results, flushed, total, tally, labels)
-   : bsw-pool-again(more[0], kept, results, flushed, total, labels, opts);
+   let settled = bsw-settle(more[1], opts[2] * 1000, opts[2], more[2]);
+   let flushed = bsw-flush(settled[1], next, total, tally, labels);
+   nil?(more[0]) && nil?(settled[0]) ? bsw-flush-end(settled[1], flushed, total, tally, labels)
+   : bsw-pool-again(more[0], settled[0], settled[1], flushed, total, labels, opts);
   }
   def bsw-pool-again(pending, running, results, flushed, total, labels, opts) {
    let rested = host_sleep_ms(bsw-tick-ms());
    bsw-pool(pending, running, results, flushed[0], total, flushed[1], labels, opts);
   }
-  def bsw-flush-end(results, flushed, total, tally, labels) = flushed[1];
+  // the end: every workload's result was printed and tallied, or the sweep ends in an error naming how many never arrived (a result that is
+  // not tallied would be a green sweep that skipped bands)
+  def bsw-flush-end(results, flushed, total, tally, labels) = (Comparable) flushed[0] == total ? flushed[1] : form_error("band-sweep: " ++ (total - flushed[0]).str() ++ " of " ++ total.str() ++ " workload result(s) never arrived");
   def bsw-indexed(ws, i) = nil?(ws) ? [] : cons([i, ws[0]], bsw-indexed(ws[1:], i + 1));
   // run the workloads: the tallies [pinned, unpinned, staged, failed, deadlines]
   def bsw-run(ws, opts) = bsw-pool(bsw-indexed(ws, 0), [], record_new(0), 0, len(ws), bsw-tally-zero(), map(w => w[0], ws), opts);

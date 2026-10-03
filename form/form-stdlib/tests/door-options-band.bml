@@ -1,0 +1,72 @@
+; door-options-band.bml — a door's stdin options, read strictly (form-stdlib/bml/door-options.bml): a request that does not read is refused by name.
+;
+; Verdict 1023 when every claim lands:
+;   1     an empty stdin and `{}` read (the defaults), and a request holding every kind of key reads
+;   2     malformed JSON is refused: `{bad json`, a truncated object, trailing text after the object, a doubled comma
+;   4     a JSON value that is not one object is refused: an array, a string, a number
+;   8     an unknown key (a typo: `lst` for `list`) is refused, and the refusal names the key and lists the keys the door has
+;   16    a key of the wrong kind is refused: a string where an integer stands, a float, an integer where a string stands, a string where an array stands, an array holding an integer
+;   32    a key given twice is refused
+;   64    the reading alone (dop-refusal) answers "" for a request that reads and the reason for one that does not, so a band can ask without ending
+;   128   a door that asks dop-doc ends in exit 1 and prints `<door>: <why>` on a request that does not read (run as a child), and goes on for one that does
+;   256   the refusal happens before anything after it runs: the door's next statement does not print on a refused request
+;   512   a plant: the same refusals hold for a spec of strings only, and a request that reads under one spec is refused under another (the spec decides)
+;
+; REQUIRES: the built ./fkwu and the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/live.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/door-options.bml
+section [form.bml] {
+ class DoorOptionsBand {
+  def dob-spec() = [["list", "int"], ["match", "str"], ["files", "strs"]];
+  def dob-fresh() {
+   let root = temp_dir() ++ "/door-options-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["door-options", root, 0] : nothing();
+  }
+  def dob-root(ctx) = ctx[1];
+  def dob-has(s, part) = str_find(s, part, 0) >= 0;
+  def dob-reads?(text) = (String) dop-refusal("door", text, dob-spec()) == "";
+  def dob-why(text) = dop-refusal("door", text, dob-spec());
+  def dob-c-reads(ctx) = dob-reads?("") && dob-reads?("  \n") && dob-reads?("{}") && dob-reads?(" { } ") && dob-reads?("{\"list\":1,\"match\":\"a|b\",\"files\":[\"x.fk\",\"y.fk\"]}") && dob-reads?("{\"files\":[]}");
+  def dob-c-malformed(ctx) = !dob-reads?("{bad json") && !dob-reads?("{\"list\":1") && !dob-reads?("{\"list\":1} extra") && !dob-reads?("{\"list\":1,,\"match\":\"a\"}") && !dob-reads?("{\"list\":}") && !dob-reads?("{\"list\" 1}")
+   && dob-has(dob-why("{bad json"), "not well-formed JSON");
+  def dob-c-nonobject(ctx) = !dob-reads?("[1]") && !dob-reads?("\"x\"") && !dob-reads?("7") && !dob-reads?("null") && dob-has(dob-why("[1]"), "must be one JSON object");
+  def dob-c-unknown(ctx) {
+   let why = dob-why("{\"lst\":1}");
+   dob-has(why, "unknown key \"lst\"") && dob-has(why, "the keys are: list, match, files") && !dob-reads?("{\"list\":1,\"extra\":2}");
+  }
+  def dob-c-kinds(ctx) = !dob-reads?("{\"list\":\"1\"}") && !dob-reads?("{\"list\":1.5}") && !dob-reads?("{\"match\":1}") && !dob-reads?("{\"files\":\"a\"}") && !dob-reads?("{\"files\":[1]}") && !dob-reads?("{\"list\":null}")
+   && dob-has(dob-why("{\"list\":\"1\"}"), "key \"list\" must be an integer") && dob-has(dob-why("{\"files\":\"a\"}"), "must be an array of strings");
+  def dob-c-twice(ctx) = !dob-reads?("{\"list\":1,\"list\":2}") && dob-has(dob-why("{\"list\":1,\"list\":2}"), "given twice");
+  def dob-c-reading(ctx) = (String) dob-why("{\"list\":1}") == "" && len(dob-why("{x")) > 0 && (String) dop-refusal("door", "", dob-spec()) == "";
+  // a scratch door that asks dop-doc, then prints a word: the word is printed only when the request read
+  def dob-door-path(ctx) = dob-root(ctx) ++ "/door.bml";
+  def dob-door-text() = "// preludes: form-stdlib/core.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml\nsection [form.bml] {\n let doc = dop-doc(\"scratch-door\", stdin-text(), [[\"list\", \"int\"], [\"match\", \"str\"]]);\n let said = print_str(\"went on\");\n 0;\n}\n";
+  def dob-run(ctx, name, request) {
+   let base = dob-root(ctx) ++ "/" ++ name;
+   let w = write_file(base ++ ".in", request) + write_file(dob-door-path(ctx), dob-door-text());
+   let pid = host_spawn_at(["./fkwu", dob-door-path(ctx)], [base ++ ".in", base ++ ".out", base ++ ".err"]);
+   let status = pid <= 0 ? -1 : host_wait(pid);
+   [status, read_file(base ++ ".out") ?? "", read_file(base ++ ".err") ?? ""];
+  }
+  def dob-c-door(ctx) {
+   let bad = dob-run(ctx, "bad", "{bad json");
+   let typo = dob-run(ctx, "typo", "{\"lst\":1}");
+   let good = dob-run(ctx, "good", "{\"list\":1}");
+   let empty = dob-run(ctx, "empty", "");
+   (Comparable) bad[0] == 1 && dob-has(bad[1], "scratch-door: stdin is not well-formed JSON") && (Comparable) typo[0] == 1 && dob-has(typo[1], "scratch-door: unknown key \"lst\"")
+   && (Comparable) good[0] == 0 && dob-has(good[1], "went on") && (Comparable) empty[0] == 0 && dob-has(empty[1], "went on");
+  }
+  def dob-c-before(ctx) {
+   let bad = dob-run(ctx, "bad2", "[1]");
+   (Comparable) bad[0] == 1 && !dob-has(bad[1], "went on");
+  }
+  def dob-c-spec(ctx) {
+   let strings = [["a", "str"], ["b", "str"]];
+   (String) dop-refusal("door", "{\"a\":\"x\"}", strings) == "" && len(dop-refusal("door", "{\"list\":1}", strings)) > 0 && len(dop-refusal("door", "{\"a\":1}", strings)) > 0 && (String) dop-refusal("door", "{\"list\":1}", dob-spec()) == "";
+  }
+ }
+ let ctx = dob-fresh();
+ nothing?(ctx) ? form_error("door-options band needs a fresh directory") : 0;
+ let verdict = live-claims("door-options-band", ctx, [["reads", 1, 1, dob-c-reads], ["malformed", 2, 1, dob-c-malformed], ["nonobject", 4, 1, dob-c-nonobject], ["unknown", 8, 1, dob-c-unknown], ["kinds", 16, 1, dob-c-kinds], ["twice", 32, 1, dob-c-twice], ["reading", 64, 1, dob-c-reading], ["door", 128, 1, dob-c-door], ["before", 256, 1, dob-c-before], ["spec", 512, 1, dob-c-spec]]);
+ host_dir_rmdir(dob-root(ctx));
+ verdict;
+}

@@ -1,13 +1,17 @@
 ; review-panel-band.bml — the reviewer panel (observe/review-panel-run.bml), the Form door that replaced tools/review-panel.sh.
 ; No reviewer is asked: a band must never spend a rented reviewer's tokens, so the claims stay on the doors that are closed or missing.
 ;
-; Verdict 31 when every claim lands:
+; Verdict 127 when every claim lands:
 ;   1     the list names the five doors with their state and invocation: gemini closed with the reason, the others open or missing by `which`
 ;   2     a panel of a closed door reads the artifact, copies it into a scratch work directory, says SKIP for the door, writes DOOR NOT OPEN
 ;         and exit 78 beside it, and prints the table row `gemini   78   14      DOOR NOT OPEN`
-;   4     a door that is not in the table at all is missing the same way (never begun, never an error)
+;   4     a door that is not in the table at all is refused by name before anything is begun (exit 1, `unknown door(s) nosuchreviewer (the doors
+;         are: ...)`, no answers directory), and so is `env`, a name that stands on PATH and would have printed the environment as its answer
 ;   8     the prompt is one text for every door: the question, the instruction to name what is unsupported, the artifact between its marks
 ;   16    an artifact that is absent, or a question that is empty, ends the door in an error naming what it needs
+;   32    a request that does not read is refused by name with exit 1 (malformed JSON, a typo'd key, a key of the wrong kind) and one that does
+;         read runs
+;   64    plant: the table's five names are known, `env`, "" and an unlisted name are not, and an unknown name is never open: claim 4 refuses by the table
 ;
 ; REQUIRES: the built ./fkwu and the body root as the working directory.
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/review-panel.bml
@@ -46,12 +50,29 @@ section [form.bml] {
    r[0] == 0 && rpb-has(r[1], "SKIP gemini (door not open)") && rpb-has(r[1], "gemini   78   14      DOOR NOT OPEN") && rpb-has(r[1], "artifact : " ++ art) && rpb-has(r[1], "panel    : gemini")
    && (String) (read_file(dir ++ "/gemini.out") ?? "") == "DOOR NOT OPEN\n" && (String) (read_file(dir ++ "/gemini.rc") ?? "") == "78\n" && (String) (read_file(dir ++ "/work/artifact.md") ?? "") == "# claim\nthe sky is green\n";
   }
+  // a name the table does not hold is refused by name before anything is begun or written, whether or not it stands on PATH (`env` does:
+  // run as a reviewer it would have printed the environment into its answer)
   def rpb-c-missing(ctx) {
    let art = rpb-root(ctx) ++ "/artifact2.md";
    let w = write_file(art, "x\n");
    let r = rpb-door(ctx, "missing", "{\"artifact\":\"" ++ art ++ "\",\"question\":\"q\",\"panel\":\"nosuchreviewer,gemini\"}");
-   r[0] == 0 && rpb-has(r[1], "SKIP nosuchreviewer (door not open)") && rpb-has(r[1], "SKIP gemini (door not open)") && rpb-has(r[1], "nosuchreviewer 78 ");
+   let env = rpb-door(ctx, "env", "{\"artifact\":\"" ++ art ++ "\",\"question\":\"q\",\"panel\":\"env\"}");
+   (Comparable) r[0] == 1 && rpb-has(r[1], "review-panel: unknown door(s) nosuchreviewer (the doors are: grok,claude,codex,cursor,gemini)") && !rpb-has(r[1], "answers  :") && !rpb-has(r[1], "SKIP")
+   && (Comparable) env[0] == 1 && rpb-has(env[1], "review-panel: unknown door(s) env") && !rpb-has(env[1], "PATH=") && !rpb-has(env[1], "answers  :") && !rpb-has(env[1], "HOME=");
   }
+  // a request that does not read is refused by name (exit 1) and a reading one is not
+  def rpb-c-strict(ctx) {
+   let art = rpb-root(ctx) ++ "/artifact3.md";
+   let w = write_file(art, "x\n");
+   let bad = rpb-door(ctx, "s-bad", "{bad json");
+   let typo = rpb-door(ctx, "s-typo", "{\"artefact\":\"" ++ art ++ "\"}");
+   let kind = rpb-door(ctx, "s-kind", "{\"deadline_s\":\"9\"}");
+   let ok = rpb-door(ctx, "s-ok", "{\"artifact\":\"" ++ art ++ "\",\"question\":\"q\",\"panel\":\"gemini\",\"deadline_s\":9}");
+   (Comparable) bad[0] == 1 && rpb-has(bad[1], "review-panel: stdin is not well-formed JSON") && (Comparable) typo[0] == 1 && rpb-has(typo[1], "review-panel: unknown key \"artefact\"")
+   && (Comparable) kind[0] == 1 && rpb-has(kind[1], "review-panel: key \"deadline_s\" must be an integer") && (Comparable) ok[0] == 0 && rpb-has(ok[1], "SKIP gemini (door not open)");
+  }
+  // plant: the table's own five names are known and an unknown one is not (claim 4 refuses by the table, not always)
+  def rpb-c-plant-known(ctx) = all?(d => rpr-known?(d), rpr-doors()) && !rpr-known?("env") && !rpr-known?("") && !rpr-open?("env") && !rpr-open?("nosuchreviewer") && (String) rpr-unknown-why(["grok", "gemini"]) == "" && len(rpr-unknown-why(["grok", "x"])) > 0;
   def rpb-c-prompt(ctx) {
    let p = "q?\n\nAnswer from the artifact below. Be specific and name what is wrong or\nunsupported; agreement is less useful than a located objection. If a\nclaim is unsupported by the text, say which claim and why.\n\n----- BEGIN ARTIFACT: a.md -----\nbody\n----- END ARTIFACT -----";
    (String) rpr-prompt("q?", "a.md", "body") == p && (String) rpr-base("some/dir/a.md") == "a.md" && (String) rpr-base("a.md") == "a.md";
@@ -64,7 +85,7 @@ section [form.bml] {
  }
  let ctx = rpb-fresh();
  nothing?(ctx) ? form_error("review-panel band needs a fresh directory") : 0;
- let verdict = live-claims("review-panel-band", ctx, [["list", 1, 1, rpb-c-list], ["closed", 2, 1, rpb-c-closed], ["missing", 4, 1, rpb-c-missing], ["prompt", 8, 1, rpb-c-prompt], ["needs", 16, 1, rpb-c-needs]]);
+ let verdict = live-claims("review-panel-band", ctx, [["list", 1, 1, rpb-c-list], ["closed", 2, 1, rpb-c-closed], ["missing", 4, 1, rpb-c-missing], ["prompt", 8, 1, rpb-c-prompt], ["needs", 16, 1, rpb-c-needs], ["strict", 32, 1, rpb-c-strict], ["plant-known", 64, 1, rpb-c-plant-known]]);
  host_dir_rmdir(rpb-root(ctx));
  verdict;
 }
