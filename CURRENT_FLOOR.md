@@ -85,6 +85,11 @@ host-walk-band 1099511627775  (the walk's turn waits for memory within the windo
                                 of any length heals, only a round that comes back with the rebase no further on stops; a file
                                 the body does not know, a river one side deleted, or a page it could not settle aborts the
                                 rebase and names its files;
+                                a walk runs the host-walk parts of its own checkout, so a checkout that stands behind main on a
+                                conflict the landed sync heals cannot heal itself (2026-10-03 12:30: the day turn held every turn
+                                on docs/rent-ladder.html): observe/walk-sync-run.bml runs the landed sync once on a named checkout
+                                ({"dir":"/abs/path"}), leaves a checkout whose walk lock stands alone and names the owner; run on the
+                                walk checkout at 14:30 it printed healed:, redrawn:, sync=0;
                                 host-walk.bml is an aggregator over ten parts `host-walk-<seam>.bml`, each under 12000 bytes so the
                                 local lane reads one whole and can read it twice, and every definition's name (not its body) is pinned
                                 in tests/fixtures/host-walk-defs.txt)
