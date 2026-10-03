@@ -372,6 +372,12 @@ schema into the prompt. Form keeps these mechanisms in its native tool and owned
 checkpoint flow. A valid tool call, exact source page and completed coding task
 remain separate observations; the local task must still edit, check, review and release.
 
+Specialized BML tool contracts are supplied on demand with
+`{"tool":"help","arguments":["lift-bml"],"input":""}` (also `repair-bml` or
+`rehearse-bml`). The guides come from the executing tools' existing native definitions;
+they are omitted from the admission prompt. Discovery preserves tool availability,
+the caller's writable scope and read-only review.
+
 The present native coding loop owns staged planning, tools, source checks,
 same-model review, repair, context renewal, checkpoints and release. Its model
 admission is Qwen-specific. Callers still assemble the source/check contract
