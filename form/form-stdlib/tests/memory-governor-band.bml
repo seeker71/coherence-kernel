@@ -18,14 +18,14 @@
 ;
 ; The leases (cross-process promises; a scripted lease directory under temp_dir, a scripted machine, scripted clocks;
 ; "other live process" is pid 1, "a process that ended" a child that was spawned and waited, as in host-walk-band):
-;   1024  the lease directory reads: a lease written reads back as its row {pid, who, key, shared, private, granted};
+;   1024  the lease directory reads: a lease written reads back as its row {pid, who, key, shared, own, granted};
 ;         the view lists the live lease only (a dead pid's file and a file that reads no lease are not listed) and
 ;         removes nothing; the door's line names who, key, bytes, age and pending or settled
 ;   2048  one key is counted once: a live lease (200 s old) already holds the weights' key, so a second ask of the same
-;         file is charged its private bytes only, an ask of another file its shared bytes too, and key "" counts
-;         everything as private
-;   4096  pending: a lease granted 10 s ago subtracts from room (private + shared when it was the first holder of its
-;         key; a second holder of the key carries private only), so an ask that fit before is held, reason reserve;
+;         file is charged its own bytes only, an ask of another file its shared bytes too, and key "" counts
+;         everything as own
+;   4096  pending: a lease granted 10 s ago subtracts from room (own + shared when it was the first holder of its
+;         key; a second holder of the key carries own only), so an ask that fit before is held, reason reserve;
 ;         a lease granted 200 s ago no longer counts as pending and still holds its key
 ;   8192  two processes ask at the same moment (a second fkwu child, a file redirect, a nap inside the reading between
 ;         the leases read and the lease written) where only one fits: exactly one is granted, one lease file stands
@@ -47,11 +47,11 @@
 ;   2097152 a holder that is only slow is not taken from: a lock stolen after the reading (the owner names another pid
 ;         just before the write) answers lease-lock-busy and writes no lease; a live holder is taken over only once its
 ;         own stamp is a minute old (61 s old: taken at once)
-;   4194304 a lease row outside 0 to 2^50 bytes (a 26-digit private, a negative one, 2^50 + 1) reads as no lease and is
+;   4194304 a lease row outside 0 to 2^50 bytes (a 26-digit own, a negative one, 2^50 + 1) reads as no lease and is
 ;         removed with the torn ones; 2^50 itself reads
 ;   8388608 a renewal adds its second KV state as extra, stamped on its own (the weights keep their stamp: another
 ;         ask is charged the 8 GiB, not the 37 GiB again) and mg-lease-return gives it back (the lease falls to the
-;         weights' own private bytes; a lease with nothing left is removed; one that held none answers -1)
+;         weights' own bytes; a lease with nothing left is removed; one that held none answers -1)
 ;   16777216 the door's verdict counts the leases it lists (a pending lease of 2^49 bytes holds a 1 GiB ask; the same ask over
 ;         an empty directory is granted), read-only
 ;   33554432 a stale <pid>.lease.part is swept (a fresh one is kept), and a take whose owner did not read back never removes a
@@ -137,7 +137,7 @@ section [form.bml] {
    let junk = write_file_text(dir ++ "/999999.lease", "this is not a lease\n");
    let view = mg-lease-view(dir);
    let line = len(view) == 1 ? mg-lease-line(view[0], now) : "";
-   mgb-bit((!nothing?(gone)) && (len(view) == 1) && ((Value) view[0] == [1, "band-holder", "/m/k.gguf", mgb-gib(6), mgb-gib(4), now - 10000, 0, 0]) && mgb-has?(line, "pid 1 band-holder key /m/k.gguf shared 6.0 GiB private 4.0 GiB age 10 s pending") && mgb-there?(mg-lease-path(dir, 1)) && mgb-there?(mg-lease-path(dir, gone)) && mgb-there?(dir ++ "/999999.lease") && (len(mg-lease-lines([], now)) == 0), 1024);
+   mgb-bit((!nothing?(gone)) && (len(view) == 1) && ((Value) view[0] == [1, "band-holder", "/m/k.gguf", mgb-gib(6), mgb-gib(4), now - 10000, 0, 0]) && mgb-has?(line, "pid 1 band-holder key /m/k.gguf shared 6.0 GiB own 4.0 GiB age 10 s pending") && mgb-there?(mg-lease-path(dir, 1)) && mgb-there?(mg-lease-path(dir, gone)) && mgb-there?(dir ++ "/999999.lease") && (len(mg-lease-lines([], now)) == 0), 1024);
   }
   // 2048: one key, counted once
   def mgb-c-once(root) {
@@ -152,7 +152,7 @@ section [form.bml] {
    let same = mgb-ask(a, "/m/k.gguf", mgb-gib(6), mgb-gib(8), vm, now);
    let other = mgb-ask(b, "/m/other.gguf", mgb-gib(6), mgb-gib(8), vm, now);
    let none = mgb-ask(c, "", mgb-gib(6), mgb-gib(8), vm, now);
-   mgb-bit(mg-granted?(same) && (same[5] == mgb-gib(8)) && mgb-has?(read_file(mg-lease-path(a, mgb-self())) ?? "", "\"shared\":6442450944,\"private\":8589934592") && mg-granted?(other) && (other[5] == mgb-gib(14)) && mg-granted?(none) && (none[5] == mgb-gib(14)), 2048);
+   mgb-bit(mg-granted?(same) && (same[5] == mgb-gib(8)) && mgb-has?(read_file(mg-lease-path(a, mgb-self())) ?? "", "\"shared\":6442450944,\"own\":8589934592") && mg-granted?(other) && (other[5] == mgb-gib(14)) && mg-granted?(none) && (none[5] == mgb-gib(14)), 2048);
   }
   // 4096: pending subtracts from room, settled does not and still holds its key
   def mgb-c-pending(root) {
@@ -177,7 +177,7 @@ section [form.bml] {
    mgb-bit(mg-granted?(before) && (!mg-granted?(held)) && ((String) held[1] == "reserve") && (held[5] == mgb-gib(36)) && (held[6] == mgb-gib(28)) && (!mgb-there?(mg-lease-path(fresh, mgb-self()))) && mg-granted?(settled) && (settled[5] == mgb-gib(8)) && (settled[6] == 0) && mgb-there?(mg-lease-path(old, mgb-self())) && mg-granted?(keyed) && (keyed[5] == mgb-gib(8)) && (!mg-granted?(other)) && ((String) other[1] == "reserve") && (other[5] == mgb-gib(28)) && (mg-lease-pending-sum(rows, now) == mgb-gib(36)) && (mg-lease-pending-sum(later, now) == mgb-gib(8)), 4096);
   }
   // 8192: two processes ask at the same moment; one fits
-  def mgb-racer-options(dir, go, hold, release) =json-emit(json-node-object([json-node-pair("dir", json-node-string(dir)), json-node-pair("who", json-node-string("band-child")), json-node-pair("key", json-node-string("")), json-node-pair("shared", json-node-int(0)), json-node-pair("private", json-node-int(mgb-gib(12))), json-node-pair("mem_gib", json-node-int(128)), json-node-pair("free_gib", json-node-int(30)), json-node-pair("wired_gib", json-node-int(20)), json-node-pair("go_at", json-node-int(go)), json-node-pair("hold_ms", json-node-int(hold)), json-node-pair("release", json-node-string(release))])) ++ "\n";
+  def mgb-racer-options(dir, go, hold, release) =json-emit(json-node-object([json-node-pair("dir", json-node-string(dir)), json-node-pair("who", json-node-string("band-child")), json-node-pair("key", json-node-string("")), json-node-pair("shared", json-node-int(0)), json-node-pair("own", json-node-int(mgb-gib(12))), json-node-pair("mem_gib", json-node-int(128)), json-node-pair("free_gib", json-node-int(30)), json-node-pair("wired_gib", json-node-int(20)), json-node-pair("go_at", json-node-int(go)), json-node-pair("hold_ms", json-node-int(hold)), json-node-pair("release", json-node-string(release))])) ++ "\n";
   def mgb-nap-vm(ms) {
    let rested = host_sleep_ms(ms);
    mgb-vm(128, 30, 0, 0, 0, 20, 4);
@@ -306,10 +306,11 @@ section [form.bml] {
    mgb-bit((!mg-granted?(v)) && ((String) v[1] == "lease-lock-busy") && (!mgb-there?(mg-lease-path(dir, mgb-self()))) && left && ((Comparable) taken == 1) && (quick < 250) && ((Comparable) dl-field(dl-owner(lock), "pid=") == mgb-self()), 2097152);
   }
   // 4194304: a lease row outside 0 to 2^50 bytes reads as no lease and is removed like a torn one
-  def mgb-raw(pid, priv, shared) = "{\"pid\":" ++ pid.str() ++ ",\"who\":\"raw\",\"key\":\"\",\"shared\":" ++ shared ++ ",\"private\":" ++ priv ++ ",\"granted_unix_ms\":" ++ (now_unix_ms() - 200000).str() ++ "}\n";
+  def mgb-raw(pid, own, shared) = "{\"pid\":" ++ pid.str() ++ ",\"who\":\"raw\",\"key\":\"\",\"shared\":" ++ shared ++ ",\"own\":" ++ own ++ ",\"granted_unix_ms\":" ++ (now_unix_ms() - 200000).str() ++ "}\n";
+  def mgb-raw-earlier(pid, own, shared) = "{\"pid\":" ++ pid.str() ++ ",\"who\":\"raw\",\"key\":\"\",\"shared\":" ++ shared ++ ",\"private\":" ++ own ++ ",\"granted_unix_ms\":" ++ (now_unix_ms() - 200000).str() ++ "}\n";
   def mgb-c-range(root) {
    let dir = mgb-sub(root, "range");
-   let ok = write_file_text(dir ++ "/ok.lease", mgb-raw(1, "1073741824", "0"));
+   let ok = write_file_text(dir ++ "/ok.lease", mgb-raw-earlier(1, "1073741824", "0"));
    let huge = write_file_text(dir ++ "/huge.lease", mgb-raw(1, "99999999999999999999999999", "0"));
    let neg = write_file_text(dir ++ "/neg.lease", mgb-raw(1, "-1000000000000", "0"));
    let over = write_file_text(dir ++ "/over.lease", mgb-raw(1, "0", "1125899906842625"));
@@ -380,7 +381,7 @@ section [form.bml] {
    let plan = mgb-src("observe/local-plan-run.bml");
    let walk = mgb-src("form/form-stdlib/bml/host-walk-window.bml");
    let whole = mgb-walk-text(fs_list("form/form-stdlib/bml") ?? []);
-   mgb-bit(mgb-has?(session, "mg-lease(\"model session \" ++ path, path, fcms-weights-bytes(path), private)") && (mgb-count(session, "mg-release()") == 3) && (!mgb-has?(session, "mg-ask(")) && mgb-has?(renew, "mg-lease(\"renewal second KV state\",\"\",0,mg-kv-margin())") && (!mgb-has?(renew, "mg-ask(")) && mgb-has?(plan, "mg-lease-wait(\"local planner\", lpr-voice-file(name)") && mgb-has?(walk, "wait(\"walk turn\", hw-turn-need()") && mgb-has?(walk, "(who, need, by) => mg-wait(who, need, by)") && (!mgb-has?(whole, "mg-lease(")) && mgb-has?(whole, "def hw-ready("), 524288);
+   mgb-bit(mgb-has?(session, "mg-lease(\"model session \" ++ path, path, fcms-weights-bytes(path), own)") && (mgb-count(session, "mg-release()") == 3) && (!mgb-has?(session, "mg-ask(")) && mgb-has?(renew, "mg-lease(\"renewal second KV state\",\"\",0,mg-kv-margin())") && (!mgb-has?(renew, "mg-ask(")) && mgb-has?(plan, "mg-lease-wait(\"local planner\", lpr-voice-file(name)") && mgb-has?(walk, "wait(\"walk turn\", hw-turn-need()") && mgb-has?(walk, "(who, need, by) => mg-wait(who, need, by)") && (!mgb-has?(whole, "mg-lease(")) && mgb-has?(whole, "def hw-ready("), 524288);
   }
   // 262144: the door prints the live leases and removes nothing
   def mgb-c-door(root) {
@@ -390,7 +391,7 @@ section [form.bml] {
    let held = mgb-place(dir, 1, "door-holder", "/m/door.gguf", mgb-gib(6), mgb-gib(4), now - 10000);
    let dead = nothing?(gone) ? 0 : mgb-place(dir, gone, "door-dead", "/m/door.gguf", mgb-gib(6), mgb-gib(4), now - 10000);
    let text = host-exec("echo '{\"lease_dir\":\"" ++ dir ++ "\"}' | ./fkwu observe/memory-governor-run.bml 2>&1", "") ?? "";
-   mgb-bit((!nothing?(gone)) && mgb-has?(text, "[memory] machine ") && mgb-has?(text, "[memory] lease pid 1 door-holder key /m/door.gguf shared 6.0 GiB private 4.0 GiB age ") && mgb-has?(text, " s pending") && (!mgb-has?(text, "door-dead")) && mgb-there?(mg-lease-path(dir, gone)) && mgb-there?(mg-lease-path(dir, 1)), 262144);
+   mgb-bit((!nothing?(gone)) && mgb-has?(text, "[memory] machine ") && mgb-has?(text, "[memory] lease pid 1 door-holder key /m/door.gguf shared 6.0 GiB own 4.0 GiB age ") && mgb-has?(text, " s pending") && (!mgb-has?(text, "door-dead")) && mgb-there?(mg-lease-path(dir, gone)) && mgb-there?(mg-lease-path(dir, 1)), 262144);
   }
  }
  let roomy = mgb-roomy();

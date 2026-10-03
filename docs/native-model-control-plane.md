@@ -200,15 +200,15 @@ DeepSeek server and the page cache could each pass their own check and together 
   was and the lane ends with a reason through its checkpoint, the walk takes no turn.
 - **Leases: a promise another process can see before the pages show in the reading.** One reading is not enough (two
   processes that start together can both see room), so a grant is a lease: `/private/tmp/form-memory-leases/<pid>.lease`,
-  one JSON line `{pid, who, key, shared, private, granted_unix_ms, extra, extra_unix_ms}`. `key` names the shared thing
-  (the model file's path, `""` for none), `shared` its bytes (the weights' file size), `private` the bytes only this
-  process owns (KV state, scratch, margin; it includes `extra`, the part granted later than the weights, a renewal's
-  second KV state, stamped on its own). `shared` and `private` read 0 to 2^50 bytes; any other row reads as no lease and
+  one JSON line `{pid, who, key, shared, own, granted_unix_ms, extra, extra_unix_ms}`. `key` names the shared thing
+  (the model file's path, `""` for none), `shared` its bytes (the weights' file size), `own` the bytes this
+  process holds beside them (KV state, scratch, margin; it includes `extra`, the part granted later than the weights, a renewal's
+  second KV state, stamped on its own). `shared` and `own` read 0 to 2^50 bytes; any other row reads as no lease and
   is removed with the torn ones (and a stale `<pid>.lease.part`). `mg-lease` reads the leases and the machine under one
   lock (`dir-lock.bml`: a directory only one maker makes, its owner's pid inside, released in a deferred step so a stop
   releases it too; a dead holder is taken over at once, a live one is waited for until its own stamp is a minute old,
   then the waiter's 10 s patience answers `lease-lock-busy`; the grant reads the lock's owner once more before it
-  writes), removes the file of every dead pid, and judges `private` + `shared` (unless a live lease already holds the
+  writes), removes the file of every dead pid, and judges `own` + `shared` (unless a live lease already holds the
   same key: the weights are one physical copy in the page cache) + the pending bytes of every other lease (its grant for
   180 s, its extra for 180 s from its own stamp, never the whole lease again) through the same policy. Granted writes the
   lease; held writes nothing and names why. When the lease directory itself cannot be made the bare reading's verdict
