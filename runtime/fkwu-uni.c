@@ -932,11 +932,11 @@ extern double strtod(const char *, char **);
  * fkwu used to print floats with printf's %.15g (fk_pv) and %.17g
  * (fk_pv_inline_number). Neither is Go's rule, and the gap is not academic:
  * MEASURED 2026-07-31 on this checkout, the source `1000000.0` answered
- *   bin-go  1e+06
- *   fkwu    1000000
- * -- a four-arm divergence sitting in the top-level VERDICT printer, so any band
- * whose verdict is a float at or past 1e6 (or below 1e-4) disagreed with three
- * siblings while validate.sh compared the other three and called it green.
+ *   shortest-form rule  1e+06
+ *   fkwu (%.15g)        1000000
+ * -- a divergence sitting in the top-level VERDICT printer, so any band whose
+ * verdict is a float at or past 1e6 (or below 1e-4) printed a different
+ * spelling than the one rule the body keeps.
  *
  * Go's shortest 'g' is two decisions. First the DIGITS: the fewest decimal digits
  * that round-trip back to the same float64. printf cannot be asked for that
@@ -15519,11 +15519,9 @@ static long long fk_float_leaf(long long mode, long long x) {
  * value_kind (4), recipe_to_bytes (5), bytes_to_recipe (6), read_form_binary (7) and
  * write_form_binary (8, x = (cons path node)) are rewrite rows over the one mode door the
  * float surface already opened -- the AST tag space is full and 150 is the native-surface
- * probe. A Form recipe could not carry these: Rust's read_file is fs::read_to_string (UTF-8
- * only; a .fkb is not text), and a defn of a sibling native's name overrides that native on
- * Go and Rust (release ledger R80), so a recipe preluded from channel.fk would have replaced
- * the witnesses' own codec on their arms. The wire is the siblings' exactly (form-kernel-go
- * main.go serializeArtifact / deserializeArtifact): "FORMBIN2", u32 BE string count, each
+ * probe. A Form recipe could not carry these without a native read of a .fkb (it is not
+ * text). The wire is the FORMBIN2 contract the Form codec (formbin-codec.bml) holds
+ * and gate/canonical-conformance.bml pins: "FORMBIN2", u32 BE string count, each
  * string as u32 BE length + UTF-8 bytes, then the tree -- 0 leaf (pkg level type inst as
  * u32 BE; a trivial string's inst is its local table index), 1 composite (category, u32
  * count, children), 2 float64 (8 bytes LE), 3 int64 (8 bytes LE). The same bounds and the
@@ -17210,7 +17208,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* fs_truncate path size: set a file's extent, creating it if absent.
          * Answers the resulting extent, or -1 when the host refuses.
          *
-         * The kernel-conformance gate built its oversize malformed artifact by
+         * The conformance gate built its oversize malformed artifact by
          * spawning a shell: printf a header, then head -c sixty-four megabytes
          * of /dev/zero. Every byte of that crossed a pipe to make a file whose
          * whole point is its LENGTH. The seed already calls ftruncate for its
@@ -17412,7 +17410,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* host_processes name: list of list(pid, rss_bytes, cpu_us, elapsed_seconds, nice, ppid) for every process whose name is the argument -- libproc, no ps, no pgrep.
          * Without a '*' the name is exact, as the glass asks for fkwu and for Activity Monitor, and a process whose name or
          * figures the host will not tell is not in the answer.
-         * A name ending in '*' is a prefix: "fkwu*" answers fkwu, fkwu-<stamp> (fourth-arm.sh names its kernels so), fkwu.new
+         * A name ending in '*' is a prefix: "fkwu*" answers fkwu, fkwu-<stamp> (a stamped copy), fkwu.new
          * and any copy whose name begins with fkwu. A prefix read drops nothing the host withholds, because its reader counts
          * what the read did not see: a process of this user whose name proc_name withholds is named by the process table
          * (kinfo_proc's 16-byte command name, which a sandbox that denies other processes' info still answers); a named
@@ -17531,7 +17529,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          *
          * The body used to fork a process and read `pwd` back through
          * host_capture to learn this -- the source-cache witness
-         * and gate/kernel-conformance.bml both did, and a witness that shells
+         * and the conformance gate both did, and a witness that shells
          * out to ask where it is standing is not standing anywhere it can
          * describe. Urs, 2026-09-10: remove the external tools and the
          * non-Form-native flows.
@@ -18989,22 +18987,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return 0;
     }
     if (t == 239) {
-        /* print — the VALUE printer. Mirrors form-kernel-go's registerNative("print")
-         * exactly: each operand rendered by its kind, single space BETWEEN operands,
-         * one newline after, and the call itself answers nothing.
+        /* print — the VALUE printer: each operand rendered by its kind, single space
+         * BETWEEN operands, one newline after, and the call itself answers nothing.
          *
-         * Go writes a.String() per operand (core.Value.String); the kinds a fkwu word
-         * can be map onto it one for one now that the string band exists:
-         *   string  -> the bytes themselves      (Go VStr  -> v.Str)
-         *   float   -> fk_fmt_float_js           (Go VFloat -> FormatFloatJS)
-         *   int     -> decimal                   (Go VInt  -> FormatInt base 10)
-         *   list    -> "[a, b]", elements likewise (Go VList -> "[" + join ", " + "]")
+         * The kinds a fkwu word can be:
+         *   string  -> the bytes themselves
+         *   float   -> fk_fmt_float_js
+         *   int     -> decimal
+         *   list    -> "[a, b]", elements likewise
          * fkwu's `nothing` prints as "nothing" here, which is the word this kernel
-         * already answers for it at the verdict boundary; Go's VNull prints "null"
-         * and the two kernels do not yet agree on that ONE spelling -- named, not
-         * papered over, and reachable only through (nothing), which bin-go cannot
-         * currently evaluate at all (it crashes), so no band can witness the gap
-         * today. Every other kind is byte-for-byte.
+         * already answers for it at the verdict boundary (value_str reads it as
+         * "null"). Every other kind is byte-for-byte.
          *
          * The operands arrive as a real list (the parser folds them through cons),
          * so this walks the heap chain -- already evaluated, already in order. */
@@ -20762,12 +20755,11 @@ static long long fk_sparse(void) {
             if (ar < 0) {
                 /* print (239) folds its operands through cons (19) and hangs the
                  * resulting LIST under one print node, rather than chaining on its
-                 * own tag the way (list ..) does. Two reasons, both measured against
-                 * bin-go: a self-chain makes `(print)` with no operands lower to the
-                 * empty node (tag 18) -- not a print at all, where Go emits the bare
-                 * newline -- and the list shape hands the walker every operand
-                 * already evaluated and in order, which is what Go's variadic
-                 * `for i, a := range args` sees. */
+                 * own tag the way (list ..) does. Two reasons: a self-chain makes
+                 * `(print)` with no operands lower to the empty node (tag 18) -- not
+                 * a print at all, where the bare newline is wanted -- and the list
+                 * shape hands the walker every operand already evaluated and in
+                 * order. */
                 if (tag == 239) {
                     return fk_smknode(239, fk_parse_variadic(19), 0, 0);
                 }
@@ -21276,16 +21268,16 @@ static long long fk_sparse(void) {
      * declined OFFER (that is the tag-137 unresolved-call arm above, which has said so
      * loudly since the ftanh heal); it is a READ of something that was never bound, and
      * a read has no axiom-5 recovery to appeal to. Left silent it does three things,
-     * all measured on 2026-07-22 against form-kernel-go as the oracle:
-     *   - it makes a band agree with itself. Two walkers reading the same free name both
+     * all measured on 2026-07-22:
+     *   - it makes a band agree with itself. Two readers of the same free name both
      *     read 0, both sides match, verdict 255 on deliberately broken code.
-     *   - it makes fkwu and the Go/Rust/TS walkers answer the SAME source differently
-     *     with neither saying so: fkwu's defn frame cannot see an enclosing do-let by
-     *     construction (fk_bd_top = 0 at the defn arm), Go's closure can. fkwu answered
-     *     5 where bin-go answered 15.
+     *   - it makes a source answer differently from the reading its author held, with
+     *     nobody saying so: fkwu's defn frame cannot see an enclosing do-let by
+     *     construction (fk_bd_top = 0 at the defn arm); a source written for a closure
+     *     that can answered 15 where fkwu answered 5.
      *   - it makes fkwu SPIN. A recursion whose base case tests a free name never
      *     reaches it: `(if (eq i n) ..)` with n silently 0 and i starting at 1 ran for
-     *     minutes with no output at all, where bin-go answered in 40 ms.
+     *     minutes with no output at all.
      * So: diagnose, on every occurrence, unconditionally — and still RECOVER to 0, so
      * the rest of the source is parsed and every other offender is reported in the same
      * run. The nonzero exit comes from the error count, exactly like unresolved-call.
@@ -21808,7 +21800,7 @@ static void fk_parse_top(void) {
         long long he = fk_sym_end(p);
         if (fk_sym_eq(p, he - p, "do")) {
             /* A top-level (do ...) is the root form. Leading (defn ...) inner forms register as
-             * named functions so cross-calls resolve (four-way-run.fk is two such defns), and a
+             * named functions so cross-calls resolve (a two-defn root is the common case), and a
              * leading nested (do ...) stays TRANSPARENT — its own defns register and its value
              * becomes the root, exactly as the old loop did (the optable generator wraps its defns
              * in one such nested do). Both keep going through fk_parse_top, which carries defn
@@ -25763,10 +25755,8 @@ static int fk_run_feval(const char *path) {
  * fk_src_len was assigned NOWHERE but its initializer, so the staged-input buffer was
  * always empty and every input_byte returned 0. The form-cli headless front door
  * is exactly `fc-read` over input_byte, so the form-cli chain could not receive a command
- * from this seed at all — its header names the filler as fkwu's argv[3] "or the persistent
- * fkwu-server's per-request buffer (form-kernel-go/fkwu_bridge.go)", and that Go bridge
- * lives in the origin repo, not here. This is roadmap item 4 (MANIFEST.md) at its exact
- * location: the binary RAN Go-free while the way IN was still Go-shaped.
+ * from this seed at all — its header names the filler as fkwu's argv[3]. This is roadmap
+ * item 4 (MANIFEST.md) at its exact location: the way IN had to be the seed's own.
  *
  * This is host plumbing, not runtime meaning: Form cannot reach argv, and the Form-side
  * primitive (input_byte) already exists — only the fill was missing. It does not displace
@@ -26231,8 +26221,8 @@ static int fk_closure_put(int fd, const char *bytes, long long n) {
 }
 /* --closure <unit> <out>: write the plain-Form closure this runner walks --
  * every unit resolved, lowered, home-linked and joined in dependency order,
- * each segment headed by "; unit: <path>". A proof sibling reads exactly
- * this text and lowers nothing itself. Prints the unit count. */
+ * each segment headed by "; unit: <path>". The drift gates read exactly
+ * this text to learn which units a gate loads. Prints the unit count. */
 static int fk_run_closure(const char *path, const char *out) {
     char hash[FK_SRC_HASH_CAP], temporary[FK_PATH_CAP + 32], line[64];
     long long unit_mtime = 0, units = 0, pos = 0;
