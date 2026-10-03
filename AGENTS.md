@@ -110,8 +110,9 @@ local choices and observed learning should make repeated instructions unnecessar
 
 Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
 and BML. A missing internal tool belongs in that body, with its behavior observed
-in the same movement. Shell carries OS operations; perl, python, sed, awk and jq
-do not become implementation or analysis detours. The body holds this for sed, awk,
+in the same movement. OS operations are begun by argv through the body's doors (`host-child.bml`), and no shell,
+python or node script stands in this tree outside two declared carriers (`gate/structural-gate.fk` names them and
+refuses any other); perl, python, sed, awk and jq do not become implementation or analysis detours. The body holds this for sed, awk,
 perl and python itself: every door that begins a child (the walk's `hch-run`, the control language's doors, the heal
 and findings doors) reads the argv or shell line first through `form/form-stdlib/bml/spawn-guard.bml`, and a command
 that runs one gets a named ending (`forbidden-tool <names>: not used here; <what to use>`) and is never begun. What

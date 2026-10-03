@@ -16,7 +16,7 @@ ground is [`axioms/core-axioms.form`](axioms/core-axioms.form), and the directio
 Build lines live in [`AGENTS.md`](AGENTS.md) (`cc -O2 -o fkwu runtime/fkwu-uni.c`, and the Metal
 carrier dylib fkwu admits in the same process). A fresh clone holds no `./fkwu`, no `.fkb`/`.sym`
 caches and no `form/form-cli`: `cc -O2 -o fkwu runtime/fkwu-uni.c` makes the runtime, the caches
-appear beside each source on its first run, and `form/build-form-cli.sh` regenerates
+appear beside each source on its first run, and `./fkwu gate/form-cli-build-run.bml` regenerates
 `form/form-stdlib/bootstrap/` and links the launcher.
 
 ```text
@@ -30,15 +30,17 @@ appear beside each source on its first run, and `form/build-form-cli.sh` regener
 ```
 
 fkwu is the only runtime and every band answers its pin on it. Nothing in this tree builds, runs or
-gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc`,
-`./fkwu`, `shasum` and `openssl`. No tracked script and no Form door calls sed, awk, perl or python:
-the band sweep (`./fkwu gate/band-sweep-run.bml`, `form/form-stdlib/bml/band-sweep.bml`) reads what a band's head and
+gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc` and
+`./fkwu` (the digests are the body's own SHA-256, the HMAC Form's). No shell, python or node script stands in
+this tree outside two declared carriers (`form-run`, the output-compaction wrapper whose Form classifier is
+pending, and the three lines of `Sema Ear.app`'s bundle executable), and no Form door calls sed, awk, perl or
+python: the band sweep (`./fkwu gate/band-sweep-run.bml`, `form/form-stdlib/bml/band-sweep.bml`) reads what a band's head and
 the verdict manifest say in process (`observe/band-head.bml`, band `observe/tests/band-head-band`, 2047), so
 `{"list":1}` names all 381 workloads with each one's staging, pin and row in about a second (the shell took 4 s,
 2026-10-04: the same columns, line for line). `hearth.bml`, `rumi-glass.bml` and `observe/hearth-glass-live.fk` read the
 `ps` listing in Form (`hearth-band`, 131071) and `source-of.fk` reads grep's rows in Form
-(`source-of-band`, 15). `tools/ftimeout` is plain shell: 124 on the deadline, else the child's status,
-128+n for a signal.
+(`source-of-band`, 15). A child that must end by a deadline is begun through `host-child.bml` (`hch-by`,
+`hch-stop`); a bell's offer is `observe/channel-offer-run.bml` (`observe/tests/channel-offer-band`, 31).
 
 What the tree still says of the retired kernels, by class, and why it stays:
 - History: `receipts/`, `learn/` corpus rows and `local-requests.jsonl` are dated evidence, not claims.
@@ -84,9 +86,23 @@ form/form-stdlib/tests/band-sweep-band   -> 65535  (enumeration against the tree
                                             content-keyed unit, a pool of six fixtures printing in order though the hang ends last, the
                                             deadline, six naps in parallel in under five seconds, a reader left on a fifo that the sweep
                                             releases, the list, the summary, the seal, the door as a child; plants for the pin and the deadline)
-./fkwu gate/structural-gate-run.fk       -> structural-gate-v4 [7, 0, 1, 0, 0, 6] then 1
-                                            (total/unclassified/carrier/oracle/fixture/tooling)
-gate/tests/structural-gate-band          -> 8191
+./fkwu gate/structural-gate-run.fk       -> structural-gate-v5 [2, 0, 2, 0] then 1: "2 declared carrier(s) and 0 fixture(s) stand; no
+                                            other script" (total/unclassified/carrier/fixture). A script of any language (shell, python,
+                                            node, ruby, perl, a command file, any extensionless file that opens with #!) with no declared
+                                            role refuses landing: a planted tools/x.sh and a planted extensionless #! file read
+                                            [4, 2, 2, 0] and 0 (2026-10-04). The carriers are named by exact path with their reasons
+                                            in gate/structural-gate.fk; fixtures are evidence
+gate/tests/structural-gate-band          -> 16383
+gate/tests/structural-heal-carrier-band  -> 127
+form/form-stdlib/tests/form-cli-build-band -> 4095  (the native form-cli's identity folds against independent SHA-256 answers, the
+                                            closure door's seal agreeing with the fold, every way an attestation can be wrong, the
+                                            publication lock's refusals, the platform name, the proof's helpers, the roots list; the build
+                                            itself is the drift gate's form-cli-build row, `printf '{"out":"<path>"}' | ./fkwu
+                                            gate/form-cli-build-run.bml`, and `{"prove":"<path>"}` is the executable's behavioral proof:
+                                            identity, exact answer bytes, stale rows refused, embeds and their cap, a 1546-row index, a
+                                            request-bound dual HMAC receipt and its one-use replay)
+observe/tests/review-panel-band          -> 31  (observe/review-panel-run.bml, the reviewer panel as a Form door: no reviewer is asked by
+                                            the band, a closed or missing door is skipped with its row)
 ./fkwu observe/door-link-health-run.bml  -> docs=41 claims=913 broken=0 (each broken claim named on its own line; 2026-10-04)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)

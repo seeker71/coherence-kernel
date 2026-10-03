@@ -1,0 +1,232 @@
+; form-cli-build-band.bml — the native form-cli's source identity, attestations, publication lock, platform name, proof helpers and roots
+; (form-stdlib/bml/form-cli-build.bml, form-cli-build-flow.bml, form-cli-prove.bml; the door gate/form-cli-build-run.bml). The build itself is
+; the drift gate's form-cli-build row (it builds a copy in a private body and proves it by identity); this band holds what that row cannot
+; say by passing: the identity folds against independent answers, every way an attestation can be wrong, the lock's refusals.
+;
+; Verdict 4095 when every claim lands:
+;   1     identity: SHA-256 of "" and "abc" are the standard answers; the source fold of a.txt "alpha\nbeta\n" and b.txt "gamma" is
+;         81740dcdfa544c889373f78411e8b3f68503db024eb19cdc68d8cca182e8dcd9 and the stamp (the first 16 hex over the bytes, CR stripped) is
+;         f3220283d05d1ff2, both answers of an independent SHA-256 over the same bytes (shasum, read once on 2026-10-04); the same files with
+;         CRLF endings fold to the same stamp, a file that is absent folds as `absent:<path>` and moves it
+;   2     the closure door agrees: the seal it writes for the same two files holds a source.sha256 equal to the fold of its manifest and those files
+;   4     attestations hold: a startup attestation and a platform attestation written for real files verify; a startup file, a runtime source,
+;         an executable, an image, a symbol file, a bootstrap attestation, a stamp, a source digest, a slug or an author digest that is not
+;         the one attested each fails verification
+;   8     attestations are well formed: a duplicate key, an empty value, an unknown key, a digest that is not 64 hex, a stamp that is not 16 hex,
+;         a missing key, a key of the other schema, no `=` on a line, a symbolic link in the file's place and an absent file are each no attestation
+;   16    platform: Darwin arm64 is darwin-arm64, Linux x86_64 and amd64 are linux-amd64, aarch64 is arm64, MINGW/MSYS/CYGWIN are windows-, any
+;         other system keeps its own name; this host answers a slug of letters, digits, dots, underscores and hyphens
+;   32    lock: the first publisher holds it; a second is refused 75 naming the owner's pid; a lock with no owner file, one whose owner is no
+;         number and one whose owner has stopped are each refused 75 and never reclaimed; a released lock is held again
+;   64    proof helpers: the expected carrier-id and carrier-challenge lines carry the source identity; the first line with a prefix is found
+;         among others; a slashless name is run from the working directory; a missing executable and one that answers nothing are each named
+;         with the line they should have said; the door's prove of a missing executable ends in an error naming it
+;   128   roots: form-stdlib/form-cli-source-roots.txt lists 150 or more paths, each unique and standing, none a shell or python script, with
+;         the three build organs, the door, the roots file itself and the closure door among them
+;   256   the gate reads the Form door: the drift gates' form-cli-build row runs gate/form-cli-build-run.bml and names no shell script
+;   512   no shell: no tracked file under form/scripts, no form/build-form-cli.sh
+;   1024  plant: folding the CRLF bytes without stripping the CR gives another stamp than the LF bytes: claim 1's invariance is the strip's
+;   2048  plant: an attestation of an executable whose bytes were changed still parses as an attestation (fcb-att-load) and fails verification:
+;         claim 4's refusal is the digest comparison, not the shape
+;
+; REQUIRES: the built ./fkwu and the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/form-cli-build-flow.bml form-stdlib/bml/form-cli-prove.bml
+section [form.bml] {
+ class FormCliBuildBand {
+  def fbb-fresh() {
+   let root = temp_dir() ++ "/form-cli-build-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["build", root, 0] : nothing();
+  }
+  def fbb-root(ctx) = ctx[1];
+  def fbb-h(c) = fcb-has?(c, "");
+  // ---- 1 identity
+  def fbb-two(ctx, name, a, b) {
+   let dir = fbb-root(ctx) ++ "/" ++ name;
+   let made = hch-mkdirs(dir);
+   let w = write_file(dir ++ "/a.txt", a) + write_file(dir ++ "/b.txt", b);
+   dir;
+  }
+  def fbb-c-identity(ctx) {
+   let lf = fbb-two(ctx, "lf", "alpha\nbeta\n", "gamma");
+   let crlf = fbb-two(ctx, "crlf", "alpha\r\nbeta\r\n", "gamma");
+   let gone = fbb-two(ctx, "gone", "alpha\nbeta\n", "gamma");
+   (String) fcb-sha("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" && (String) fcb-sha("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+   && (String) fcb-source-sha(fcb-read-sources(lf, ["a.txt", "b.txt"])) == "81740dcdfa544c889373f78411e8b3f68503db024eb19cdc68d8cca182e8dcd9"
+   && (String) fcb-hash16(lf, ["a.txt", "b.txt"]) == "f3220283d05d1ff2" && (String) fcb-hash16(crlf, ["a.txt", "b.txt"]) == "f3220283d05d1ff2"
+   && (String) fcb-hash16(gone, ["a.txt", "zzz.txt"]) != "f3220283d05d1ff2" && nothing?(fcb-source-sha(fcb-read-sources(gone, ["a.txt", "zzz.txt"])));
+  }
+  // ---- 2 the closure door agrees
+  def fbb-c-closure(ctx) {
+   let dir = fbb-two(ctx, "sealed", "alpha\nbeta\n", "gamma");
+   let seal = fbb-root(ctx) ++ "/seal";
+   let run = fcb-ask(fbb-root(ctx), "closure", "./fkwu", ["FCSC1", dir, seal, "", "a.txt", "b.txt"]);
+   let manifest = read_file(seal ++ "/form-cli.dependencies") ?? "";
+   let rows = [[fcb-manifest-rel(), manifest], ["a.txt", "alpha\nbeta\n"], ["b.txt", "gamma"]];
+   hch-ok?(run) && (String) manifest == "a.txt\nb.txt\n" && (String) fcb-trim-file(seal ++ "/source.sha256") == (String) fcb-source-sha(rows);
+  }
+  // ---- 4 attestations hold
+  def fbb-files(ctx, name) {
+   let dir = fbb-root(ctx) ++ "/" ++ name;
+   let made = hch-mkdirs(dir);
+   let w = write_file(dir ++ "/startup.c", "int main(void){return 0;}\n") + write_file(dir ++ "/runtime.c", "/* runtime */\n") + write_file(dir ++ "/form-cli", "binary one") + write_file(dir ++ "/form-cli.fkb", "image one") + write_file(dir ++ "/form-cli.sym", "symbols one");
+   dir;
+  }
+  def fbb-sha() = "1914bf8333f4ca954e0be72cbfbc84356008db90d98466ff6ff610abf8ba055f";
+  def fbb-stamp() = "60f58dff2f874978";
+  def fbb-author() = "32ace690578d822c402b1e7830fed82328c3fb71c6424f4626123033f492fc59";
+  def fbb-written(ctx, name) {
+   let d = fbb-files(ctx, name);
+   let a = fcb-write-startup(d ++ "/boot.attestation", fbb-sha(), fbb-stamp(), d ++ "/startup.c", fbb-author(), d ++ "/runtime.c");
+   let b = fcb-write-platform(d ++ "/platform.attestation", d ++ "/boot.attestation", "darwin-arm64", d ++ "/form-cli", d ++ "/form-cli.fkb", d ++ "/form-cli.sym");
+   [d, a, b];
+  }
+  def fbb-v-start(d, sha, stamp, author) = fcb-verify-startup(d ++ "/boot.attestation", sha, stamp, d ++ "/startup.c", d ++ "/runtime.c", author);
+  def fbb-v-plat(d, sha, stamp, slug) = fcb-verify-platform(d ++ "/platform.attestation", sha, stamp, d ++ "/boot.attestation", slug, d ++ "/form-cli", d ++ "/form-cli.fkb", d ++ "/form-cli.sym");
+  def fbb-c-attest(ctx) {
+   let w = fbb-written(ctx, "att");
+   let d = w[0];
+   let good = w[1] && w[2] && fbb-v-start(d, fbb-sha(), fbb-stamp(), fbb-author()) && fbb-v-start(d, fbb-sha(), fbb-stamp(), "") && fbb-v-plat(d, fbb-sha(), fbb-stamp(), "darwin-arm64");
+   let wrong = !fbb-v-start(d, fbb-author(), fbb-stamp(), "") && !fbb-v-start(d, fbb-sha(), "0000000000000000", "") && !fbb-v-start(d, fbb-sha(), fbb-stamp(), fbb-sha())
+    && !fbb-v-plat(d, fbb-author(), fbb-stamp(), "darwin-arm64") && !fbb-v-plat(d, fbb-sha(), "0000000000000000", "darwin-arm64") && !fbb-v-plat(d, fbb-sha(), fbb-stamp(), "linux-amd64");
+   let t1 = write_file(d ++ "/startup.c", "int main(void){return 1;}\n");
+   let startup-bad = !fbb-v-start(d, fbb-sha(), fbb-stamp(), "");
+   let t2 = write_file(d ++ "/startup.c", "int main(void){return 0;}\n") + write_file(d ++ "/runtime.c", "/* other */\n");
+   let runtime-bad = !fbb-v-start(d, fbb-sha(), fbb-stamp(), "");
+   let t3 = write_file(d ++ "/runtime.c", "/* runtime */\n") + write_file(d ++ "/form-cli", "binary two");
+   let binary-bad = !fbb-v-plat(d, fbb-sha(), fbb-stamp(), "darwin-arm64");
+   let t4 = write_file(d ++ "/form-cli", "binary one") + write_file(d ++ "/form-cli.fkb", "image two");
+   let image-bad = !fbb-v-plat(d, fbb-sha(), fbb-stamp(), "darwin-arm64");
+   let t5 = write_file(d ++ "/form-cli.fkb", "image one") + write_file(d ++ "/form-cli.sym", "symbols two");
+   let symbols-bad = !fbb-v-plat(d, fbb-sha(), fbb-stamp(), "darwin-arm64");
+   let t6 = write_file(d ++ "/form-cli.sym", "symbols one");
+   let again = fbb-v-plat(d, fbb-sha(), fbb-stamp(), "darwin-arm64");
+   let t7 = write_file(d ++ "/boot.attestation", fcb-att-text(fcb-startup-pairs(fbb-sha(), fbb-stamp(), fcb-sha("int main(void){return 0;}\n"), fbb-author(), fcb-sha("/* runtime */\n"))) ++ "x=y\n");
+   let boot-moved = !fbb-v-plat(d, fbb-sha(), fbb-stamp(), "darwin-arm64");
+   good && wrong && startup-bad && runtime-bad && binary-bad && image-bad && symbols-bad && again && boot-moved;
+  }
+  // ---- 8 well formed
+  def fbb-pairs-text(pairs) = fcb-att-text(pairs);
+  def fbb-load(ctx, name, text) {
+   let path = fbb-root(ctx) ++ "/wf-" ++ name;
+   let w = write_file(path, text);
+   fcb-att-load(path);
+  }
+  def fbb-start-pairs() = fcb-startup-pairs(fbb-sha(), fbb-stamp(), fbb-sha(), fbb-author(), fbb-sha());
+  def fbb-plat-pairs() = fcb-platform-pairs(fbb-sha(), fbb-stamp(), fbb-sha(), "darwin-arm64", fbb-sha(), fbb-sha(), fbb-sha());
+  def fbb-set(pairs, key, value) = map(p => (String) p[0] == key ? [key, value] : p, pairs);
+  def fbb-drop(pairs, key) = filter(p => (String) p[0] != key, pairs);
+  def fbb-c-wellformed(ctx) {
+   !nothing?(fbb-load(ctx, "start-ok", fcb-att-text(fbb-start-pairs()))) && !nothing?(fbb-load(ctx, "plat-ok", fcb-att-text(fbb-plat-pairs())))
+   && nothing?(fbb-load(ctx, "dup", fcb-att-text(append(fbb-start-pairs(), [["source_stamp", fbb-stamp()]]))))
+   && nothing?(fbb-load(ctx, "empty", fcb-att-text(fbb-set(fbb-start-pairs(), "startup_sha256", ""))))
+   && nothing?(fbb-load(ctx, "unknown", fcb-att-text(append(fbb-start-pairs(), [["extra", "x"]]))))
+   && nothing?(fbb-load(ctx, "short", fcb-att-text(fbb-set(fbb-start-pairs(), "startup_sha256", "abc123"))))
+   && nothing?(fbb-load(ctx, "upper", fcb-att-text(fbb-set(fbb-start-pairs(), "startup_sha256", "1914BF8333F4CA954E0BE72CBFBC84356008DB90D98466FF6FF610ABF8BA055F"))))
+   && nothing?(fbb-load(ctx, "stamp", fcb-att-text(fbb-set(fbb-start-pairs(), "source_stamp", "xyz"))))
+   && nothing?(fbb-load(ctx, "missing", fcb-att-text(fbb-drop(fbb-start-pairs(), "runtime_source_sha256"))))
+   && nothing?(fbb-load(ctx, "other-schema", fcb-att-text(append(fbb-set(fbb-start-pairs(), "schema", fcb-schema-platform()), []))))
+   && nothing?(fbb-load(ctx, "plat-start-key", fcb-att-text(append(fbb-plat-pairs(), [["startup_sha256", fbb-sha()]]))))
+   && nothing?(fbb-load(ctx, "plat-slug", fcb-att-text(fbb-set(fbb-plat-pairs(), "platform_slug", "darwin/arm64"))))
+   && nothing?(fbb-load(ctx, "no-equals", "schema=form-cli-native-attestation-v1\nthis line has none\n"))
+   && nothing?(fbb-load(ctx, "empty-file", ""))
+   && nothing?(fcb-att-load(fbb-root(ctx) ++ "/wf-absent")) && fbb-symlink-refused(ctx);
+  }
+  def fbb-symlink-refused(ctx) {
+   let real = fbb-root(ctx) ++ "/wf-real";
+   let link = fbb-root(ctx) ++ "/wf-link";
+   let w = write_file(real, fcb-att-text(fbb-start-pairs()));
+   let made = hch-run-in(fcb-io(), "band-ln", ["/bin/ln", "-s", real, link], "", hch-by(20000));
+   !nothing?(fcb-att-load(real)) && nothing?(fcb-att-load(link));
+  }
+  // ---- 16 platform
+  def fbb-c-platform(ctx) {
+   (String) fcb-slug-of("Darwin", "arm64") == "darwin-arm64" && (String) fcb-slug-of("Linux", "x86_64") == "linux-amd64" && (String) fcb-slug-of("linux", "amd64") == "linux-amd64"
+   && (String) fcb-slug-of("Linux", "aarch64") == "linux-arm64" && (String) fcb-slug-of("MINGW64_NT-10.0", "x86_64") == "windows-amd64" && (String) fcb-slug-of("MSYS_NT", "arm64") == "windows-arm64"
+   && (String) fcb-slug-of("CYGWIN_NT", "x86_64") == "windows-amd64" && (String) fcb-slug-of("FreeBSD", "amd64") == "freebsd-amd64" && fcb-slug-valid?(fcb-platform-slug())
+   && !fcb-slug-valid?("") && !fcb-slug-valid?("a/b") && !fcb-slug-valid?("a b");
+  }
+  // ---- 32 lock
+  def fbb-c-lock(ctx) {
+   let base = fbb-root(ctx) ++ "/locks";
+   let made = hch-mkdirs(base);
+   let held = fcb-lock-acquire(base ++ "/one");
+   let second = fcb-lock-acquire(base ++ "/one");
+   let released = fcb-lock-release(base ++ "/one");
+   let again = fcb-lock-acquire(base ++ "/one");
+   let ownerless = hch-mkdirs(base ++ "/two");
+   let r2 = fcb-lock-acquire(base ++ "/two");
+   let mal = hch-mkdirs(base ++ "/three");
+   let w3 = write_file(base ++ "/three/owner.pid", "not a pid\n");
+   let r3 = fcb-lock-acquire(base ++ "/three");
+   let child = host_spawn_at(["/usr/bin/true"], ["/dev/null", "/dev/null", "/dev/null"]);
+   let waited = host_wait(child);
+   let stopped = hch-mkdirs(base ++ "/four");
+   let w4 = write_file(base ++ "/four/owner.pid", child.str() ++ "\n");
+   let r4 = fcb-lock-acquire(base ++ "/four");
+   held[0] == 0 && second[0] == 75 && fcb-has?(second[1], "another publisher owns") && fcb-has?(second[1], "(pid " ++ host_pid().str() ++ ")") && again[0] == 0
+   && r2[0] == 75 && fcb-has?(r2[1], "initialising or ownerless") && r3[0] == 75 && fcb-has?(r3[1], "malformed owner") && r4[0] == 75 && fcb-has?(r4[1], "names stopped pid " ++ child.str()) && fcb-has?(r4[1], "manual recovery required");
+  }
+  // ---- 64 proof helpers
+  def fbb-c-proof(ctx) {
+   let sha = fbb-sha();
+   let said = "noise\ncarrier-id|form-cli-carrier-v2|" ++ sha ++ "|coherence-kernel-fkwu-native-v2\nmore\n";
+   let nobody = fbb-root(ctx) ++ "/nobody";
+   let none = fcb-verify-identity("/usr/bin/true", sha, fbb-root(ctx));
+   let missing = fcb-verify-identity(nobody, sha, fbb-root(ctx));
+   (String) fcb-expected-id(sha) == "carrier-id|form-cli-carrier-v2|" ++ sha ++ "|coherence-kernel-fkwu-native-v2"
+   && (String) fcb-expected-challenge(sha) == "carrier-challenge-v1|" ++ sha ++ "|000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f|1cb41be978d307c11bf41602cd11bdac834046103d6fc89a6f69cd0c6c4efb21"
+   && (String) fcb-first-with(said, "carrier-id|") == fcb-expected-id(sha) && (String) fcb-first-with(said, "absent|") == ""
+   && (String) fcb-binary-path("form-cli") == "./form-cli" && (String) fcb-binary-path("/x/form-cli") == "/x/form-cli" && (String) fcb-binary-path("sub/form-cli") == "sub/form-cli"
+   && fcb-has?(none, "carrier-id mismatch") && fcb-has?(none, "want=" ++ fcb-expected-id(sha)) && fcb-has?(missing, "binary is missing or not executable")
+   && fbb-door-refuses(ctx);
+  }
+  def fbb-door-refuses(ctx) {
+   let base = fbb-root(ctx) ++ "/door";
+   let w = write_file(base ++ ".in", "{\"prove\":\"" ++ fbb-root(ctx) ++ "/nobody\",\"sha\":\"" ++ fbb-sha() ++ "\"}");
+   let pid = host_spawn_at(["./fkwu", "gate/form-cli-build-run.bml"], [base ++ ".in", base ++ ".out", base ++ ".err"]);
+   let status = pid <= 0 ? -1 : host_wait(pid);
+   (Comparable) status != 0 && fcb-has?(read_file(base ++ ".out") ?? "", "binary is missing or not executable") && fcb-has?(read_file(base ++ ".err") ?? "", "form-cli-build:");
+  }
+  // ---- 128 roots
+  def fbb-roots() = fcb-lines(read_file("form/form-stdlib/form-cli-source-roots.txt") ?? "");
+  def fbb-dup?(xs) = nil?(xs) ? false : cw-in?(xs[1:], xs[0]) || fbb-dup?(xs[1:]);
+  def fbb-c-roots(ctx) {
+   let roots = fbb-roots();
+   len(roots) >= 150 && !fbb-dup?(roots) && all?(r => (Comparable) file_size("form/" ++ r) >= 0, roots)
+   && !any?(r => fcb-ends?(r, ".sh") || fcb-ends?(r, ".py"), roots)
+   && cw-in?(roots, "form-stdlib/bml/form-cli-build.bml") && cw-in?(roots, "form-stdlib/bml/form-cli-build-flow.bml") && cw-in?(roots, "form-stdlib/bml/form-cli-prove.bml")
+   && cw-in?(roots, "../gate/form-cli-build-run.bml") && cw-in?(roots, "form-stdlib/form-cli-source-roots.txt") && cw-in?(roots, "form-stdlib/bml/form-cli-source-closure.bml")
+   && cw-in?(roots, "../runtime/fkwu-uni.c") && cw-in?(roots, "form-stdlib/form-cli-repl.fk");
+  }
+  // ---- 256 the gate
+  def fbb-c-gate(ctx) {
+   let text = read_file("gate/drift-gates.bml") ?? "";
+   let at = str_find(text, "dg-row(\"form-cli-build\"", 0);
+   let line = at < 0 ? "" : substring(text, at, str_find(text, "\n", at));
+   at >= 0 && fcb-has?(line, "gate/form-cli-build-run.bml") && !fcb-has?(line, ".sh");
+  }
+  // ---- 512 no shell
+  def fbb-c-noshell(ctx) {
+   let listed = hch-read(["git", "ls-files", "--", "form/scripts", "form/build-form-cli.sh"]);
+   (String) listed == "" && (Comparable) file_size("form/build-form-cli.sh") < 0;
+  }
+  // ---- plants
+  def fbb-c-plant-cr(ctx) {
+   let lf = fbb-two(ctx, "p-lf", "alpha\nbeta\n", "gamma");
+   let crlf = fbb-two(ctx, "p-crlf", "alpha\r\nbeta\r\n", "gamma");
+   (String) fcb-hash16(lf, ["a.txt", "b.txt"]) == (String) fcb-hash16(crlf, ["a.txt", "b.txt"])
+   && (String) substring(fcb-sha(fcb-fold-bytes(lf, ["a.txt", "b.txt"])), 0, 16) != (String) substring(fcb-sha(fcb-fold-bytes(crlf, ["a.txt", "b.txt"])), 0, 16);
+  }
+  def fbb-c-plant-shape(ctx) {
+   let w = fbb-written(ctx, "shape");
+   let d = w[0];
+   let tampered = write_file(d ++ "/form-cli", "binary changed");
+   !nothing?(fcb-att-load(d ++ "/platform.attestation")) && !fbb-v-plat(d, fbb-sha(), fbb-stamp(), "darwin-arm64") && w[2];
+  }
+ }
+ let ctx = fbb-fresh();
+ nothing?(ctx) ? form_error("form-cli build band needs a fresh directory") : 0;
+ let verdict = live-claims("form-cli-build-band", ctx, [["identity", 1, 1, fbb-c-identity], ["closure", 2, 1, fbb-c-closure], ["attest", 4, 1, fbb-c-attest], ["well-formed", 8, 1, fbb-c-wellformed], ["platform", 16, 1, fbb-c-platform], ["lock", 32, 1, fbb-c-lock], ["proof", 64, 1, fbb-c-proof], ["roots", 128, 1, fbb-c-roots], ["gate", 256, 1, fbb-c-gate], ["no-shell", 512, 1, fbb-c-noshell], ["plant-cr", 1024, 1, fbb-c-plant-cr], ["plant-shape", 2048, 1, fbb-c-plant-shape]]);
+ host_dir_rmdir(fbb-root(ctx));
+ verdict;
+}

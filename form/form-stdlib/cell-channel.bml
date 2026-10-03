@@ -65,6 +65,7 @@ import form/form-stdlib/str-byte-at.fk;
 import form/form-stdlib/sha256.fk;
 import form/form-stdlib/hex.fk;
 import form/form-stdlib/form-glass-telemetry-membrane.bml;
+import form/form-stdlib/bml/host-child.bml;
 import grammars/form-eval.fk;
 //
 // Proven by: form-stdlib/tests/cell-channel-band.fk
@@ -136,31 +137,40 @@ section [form.bml] {
         def cc-peer-cell(root, name, from) = if ((String) from == cc-a(root, name)) then cc-b(root, name) else cc-a(root, name);
 
         // ── the bell: a fifo; ring deferred; wait in the kernel ──
-        def cc-bell-stands?(bell) = if (str_find(cc-host-text(host-exec(cc-cat(["[ -p ", bell, " ] && echo fifo"]), "")), "fifo", 0) >= 0) then 1 else 0;
-        def cc-bell-make(bell) = if ((Comparable) cc-bell-stands?(bell) == 1) then 1 else cc-bell-made(bell, host-exec(cc-cat(["rm -f ", bell, " && mkfifo ", bell]), ""));
+        def cc-io() = ".hearth/channel-io";
+        // a fifo stands when `test -p` says so; the bell is made fresh (a stale file of that name is removed first)
+        def cc-bell-stands?(bell) = if ((Comparable) hch-run-in(cc-io(), "bell-stands", ["/bin/test", "-p", bell], "", hch-by(20000))[0] == 0) then 1 else 0;
+        def cc-bell-make(bell) = if ((Comparable) cc-bell-stands?(bell) == 1) then 1 else cc-bell-made(bell, cc-bell-fresh(bell));
+        def cc-bell-fresh(bell) = cc-bell-mk(bell, host_path_remove(bell));
+        def cc-bell-mk(bell, removed) = hch-run-in(cc-io(), "bell-make", ["/usr/bin/mkfifo", bell], "", hch-by(20000));
         def cc-bell-made(bell, out) = cc-bell-stands?(bell);
         // A ring is an offer with bounded patience (held-offer: spent patience
-        // acks nothing): the background writer waits the hearth's crossing
-        // window for a reader and then leaves, so a ring toward a cell that
+        // acks nothing): a detached Form door (observe/channel-offer-run.bml)
+        // writes the word into the bell, waits the hearth's crossing window for
+        // a reader and then ends the writer, so a ring toward a cell that
         // released never lingers as a blocked process (three did, 2026-09-04).
-        def cc-ring-cmd(bell) = cc-cat(["( tools/ftimeout ", hearth-crossing-window-s().str(), " sh -c 'printf x > ", bell, "' ) >/dev/null 2>&1 &"]);
-        def cc-ring(bell) = if nothing?(host-exec(cc-ring-cmd(bell), "")) then 0 else 1;
-        def cc-release-cmd(bell) = cc-cat(["( tools/ftimeout ", hearth-crossing-window-s().str(), " sh -c 'printf release > ", bell, "' ) >/dev/null 2>&1 &"]);
-        def cc-release(bell) = if nothing?(host-exec(cc-release-cmd(bell), "")) then 0 else 1;
+        // The offer is a request file the door reads and removes.
+        def cc-offer-path(bell) = cc-cat([bell, ".offer-", host_pid().str(), "-", host_monotonic_ms().str()]);
+        def cc-offer-json(path, bell, word, after-ms, only-if) = cc-cat(["{\"request\":\"", path, "\",\"bell\":\"", bell, "\",\"word\":\"", word, "\",\"seconds\":", hearth-crossing-window-s().str(), ",\"after_ms\":", after-ms.str(), ",\"only_if\":\"", only-if, "\"}"]);
+        def cc-offer(bell, word, after-ms, only-if) = cc-offer-begin(cc-offer-path(bell), bell, word, after-ms, only-if);
+        def cc-offer-begin(path, bell, word, after-ms, only-if) = cc-offer-write(path, cc-offer-json(path, bell, word, after-ms, only-if));
+        def cc-offer-write(path, request) = if ((Comparable) write_file_text(path, request) == len(request)) then cc-offer-spawn(path) else 0;
+        def cc-offer-spawn(path) = if ((Comparable) sg-spawn-at(["./fkwu", "observe/channel-offer-run.bml"], [path, "/dev/null", "/dev/null"]) > 0) then 1 else 0;
+        def cc-ring(bell) = cc-offer(bell, "x", 0, "");
+        def cc-release(bell) = cc-offer(bell, "release", 0, "");
         def cc-bell-wait(bell) = sbt-bell-wait(bell);
         // PATIENCE AS DATA: a bounded wait is the caller's deadline handed to a
-        // background sleeper that rings `timeout` only while the cell's pid file
+        // detached offer that rings `timeout` only while the cell's pid file
         // still stands — a cell that already released is never rung by a stale
         // patience, so nothing lingers on a bell nobody reads.
-        def cc-patience-cmd(root, name, cell, secs) = cc-cat(["( sleep ", secs.str(), "; [ -e ", cc-pid-path(root, name, cell), " ] && printf timeout > ", cc-bell(root, name, cell), " ) >/dev/null 2>&1 &"]);
-        def cc-patience(root, name, cell, secs) = if nothing?(host-exec(cc-patience-cmd(root, name, cell, secs), "")) then 0 else 1;
+        def cc-patience(root, name, cell, secs) = cc-offer(cc-bell(root, name, cell), "timeout", secs * 1000, cc-pid-path(root, name, cell));
         def cc-timed-out?(wake) = if nothing?(wake) then 0 else if (str_find(wake, "timeout", 0) >= 0) then 1 else 0;
         def cc-released?(wake) = if nothing?(wake) then 1 else if (str_find(wake, "release", 0) >= 0) then 1 else 0;
         def cc-bells(root, name, cells) = if ((Comparable) len(cells) == 0) then [] else cons(cc-bell(root, name, cells[0]), cc-bells(root, name, cells[1:]));
         def cc-ring-all(bells) = if ((Comparable) len(bells) == 0) then 0 else (cc-ring(bells[0]) + cc-ring-all(bells[1:]));
 
         // ── pids: a process names itself through the shell it is the parent of ──
-        def cc-self-pid() = str_to_int(cc-host-text(host-exec("echo $PPID", "")));
+        def cc-self-pid() = host_pid();
         def cc-pid-write(root, name, cell, pid) = write_file_text(cc-pid-path(root, name, cell), (pid.str() + cc-nl()));
         def cc-pid-clear(root, name, cell) = fs-remove-file(cc-pid-path(root, name, cell));
         def cc-pid-read(root, name, cell) {
@@ -290,7 +300,8 @@ section [form.bml] {
         // leaves standing (witnessed 2026-09-04: nine frames stacked across three
         // band runs); the host removes it whole. Only a labelled name under the
         // given root is ever cleared.
-        def cc-clear(root, name) = if (!((Comparable) cc-label?(name) == 1)) then 0 else if nothing?(host-exec(cc-cat(["rm -rf ", cc-dir(root, name)]), "")) then 0 else if ((Comparable) fs-exists?(cc-dir(root, name)) == 0) then 1 else 0;
+        def cc-clear(root, name) = if (!((Comparable) cc-label?(name) == 1)) then 0 else cc-cleared(cc-dir(root, name), host_dir_rmdir(cc-dir(root, name)));
+        def cc-cleared(dir, removed) = if ((Comparable) fs-exists?(dir) == 0) then 1 else 0;
         def cc-open?(root, name) = if ((Comparable) len(cc-board-value(root, name, "name")) == 0) then 0 else if (!((Comparable) cc-bell-stands?(cc-bell(root, name, cc-a(root, name))) == 1)) then 0 else if (!((Comparable) cc-bell-stands?(cc-bell(root, name, cc-b(root, name))) == 1)) then 0 else cc-bell-stands?(cc-bell(root, name, cc-field-name()));
 
         // ── grammar: the seed plus the field's admits, in field order ──
@@ -376,13 +387,16 @@ section [form.bml] {
         // `cat` with input never returned), and an empty input is the door every
         // other organ already trusts. One writer per file: the cell that hears.
         def cc-eval-path(root, name, cell) = cc-cat([cc-dir(root, name), "/", cell, ".eval"]);
-        def cc-eval-cmd(evalpath, secs) = cc-cat(["tools/ftimeout ", secs.str(), " ./fkwu ", cc-eval-runner(), " < ", evalpath, " 2>/dev/null"]);
+        // the child runs under the caller's patience: host-child's deadline door ends its fkwu lineage when the seconds are spent
+        // (a step of its own per eval file: one writer per file, so concurrent cells never share an output)
+        def cc-step-key(s, i, h) = if (i >= len(s)) then h else cc-step-key(s, i + 1, (h * 31 + str_byte_at(s, i) + 1) % 1000000007);
+        def cc-eval-run(evalpath, secs) = hch-run-quiet-in(cc-io(), cc-cat(["eval-", cc-step-key(evalpath, 0, 7).str()]), ["./fkwu", cc-eval-runner()], cc-host-text(read_file(evalpath)), hch-by(secs * 1000));
         def cc-eval-membrane-read(out) {
             let text = cc-host-text(out);
             let at = cc-field-find(text, "value=");
             if (at < 0) then nothing() else cc-field-at(text, "value=", at);
         }
-        def cc-eval-membrane-go(evalpath, secs, wrote) = cc-eval-membrane-read(host-exec(cc-eval-cmd(evalpath, secs), ""));
+        def cc-eval-membrane-go(evalpath, secs, wrote) = cc-eval-membrane-read(cc-eval-run(evalpath, secs)[1]);
         def cc-eval-membrane(evalpath, grammar, kind, body, secs) = cc-eval-membrane-go(evalpath, secs, write_file_text(evalpath, cc-cat([kind, "\n", cc-program(grammar, body), "\n"])));
         def cc-hear-value(gid, frame, v) = if nothing?(v) then cc-answer("refuse", cc-cat(["to=", cc-frame-turn(frame).str(), " reason=spent grammar=", gid])) else cc-answer("heard", cc-cat(["to=", cc-frame-turn(frame).str(), " value=", v, " grammar=", gid]));
         def cc-hear-membrane(evalpath, grammar, gid, frame, gate, secs) = if (len(gate) > 0) then cc-answer("refuse", cc-cat(["to=", cc-frame-turn(frame).str(), " reason=", gate, " grammar=", gid])) else cc-hear-value(gid, frame, cc-eval-membrane(evalpath, grammar, cc-frame-kind(frame), cc-frame-body(frame), secs));
