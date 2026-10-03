@@ -655,6 +655,39 @@ static long long *fk_clo_target, *fk_clo_capbase, *fk_clo_capcount;
 static long long fk_clo_top, fk_clo_cap;
 static long long *fk_clo_capvals;
 static long long fk_clo_capvals_top, fk_clo_capvals_cap;
+/* ── a closure instance lives while something names it ──────────────────────
+ * Every evaluation of a lambda that captures made a new row here and appended what it captured to
+ * fk_clo_capvals, and the melt took every captured value for a root forever: a per-frame
+ * `positions |> map(p => samples[p])` kept each frame's whole `samples` list alive. Hermetic glass
+ * loop, 2026-10-03: 4.25 of the 4.36 million pairs that survived a melt were held by closures, the
+ * floor grew every melt, the heap doubled to 2^29 pairs (8.6 GB) in the live glass and each melt
+ * moved gigabytes of the machine's memory. A melt now marks the rows a root can reach (the value
+ * stack, memory cells, records, nodes, the held lets, the method table, and the captures of a row
+ * that is itself reached), keeps the rows made since the melt before it (FK_CLO_YOUNG generations: a
+ * word a C local holds is on no root), copies only what a kept row captured, slides those
+ * captures down, and hands every other row back on fk_clo_free for fk_clo_make to reuse. A row's
+ * index is the fn-value's own word and never changes. fk_clo_born is the melt generation a row was
+ * made in, -1 once it is dead. kernel_stat 66 reads the rows standing, 67 the rows reclaimed, 68
+ * the captured values held. */
+#ifndef FK_CLO_YOUNG
+#define FK_CLO_YOUNG 1   /* melt generations a closure row is kept without a root naming it; a huge value keeps every row (the band's plant) */
+#endif
+static long long *fk_clo_born;
+static long long *fk_clo_free;
+static long long fk_clo_free_n;
+static long long fk_clo_reclaimed;
+static unsigned char *fk_cmark;
+static long long fk_melt_gen;
+static long long fk_clo_inst_of(long long b) {
+    if (b >= fk_fnbase || b <= fk_fnval_floor || ((fk_fnbase - b) & 1) == 0) {
+        return -1;
+    }
+    long long fi = ((fk_fnbase - b) - 1) >> 1;
+    if (fi >= FK_CLOSURE_IDX_BASE && fi < FK_CLOSURE_IDX_BASE + fk_clo_top) {
+        return fi - FK_CLOSURE_IDX_BASE;
+    }
+    return -1;
+}
 static long long fk_fnval(long long f) {
     return fk_fnbase - (f << 1) - 1;
 }
@@ -732,7 +765,9 @@ static void fk_clo_reserve(long long needed) {
     fk_clo_target = (long long *)realloc(fk_clo_target, (unsigned long)(nc * 8));
     fk_clo_capbase = (long long *)realloc(fk_clo_capbase, (unsigned long)(nc * 8));
     fk_clo_capcount = (long long *)realloc(fk_clo_capcount, (unsigned long)(nc * 8));
-    if (fk_clo_target == 0 || fk_clo_capbase == 0 || fk_clo_capcount == 0) {
+    fk_clo_born = (long long *)realloc(fk_clo_born, (unsigned long)(nc * 8));
+    fk_clo_free = (long long *)realloc(fk_clo_free, (unsigned long)(nc * 8));
+    if (fk_clo_target == 0 || fk_clo_capbase == 0 || fk_clo_capcount == 0 || fk_clo_born == 0 || fk_clo_free == 0) {
         fk_die("fk_clo_reserve: out of memory growing the closure-instance table");
     }
     fk_clo_cap = nc;
@@ -765,11 +800,18 @@ static long long fk_clo_make(long long target, long long *vals, long long n) {
         j = j + 1;
     }
     fk_clo_capvals_top = base + n;
-    long long inst = fk_clo_top;
+    long long inst;
+    if (fk_clo_free_n > 0) {
+        fk_clo_free_n = fk_clo_free_n - 1;
+        inst = fk_clo_free[fk_clo_free_n];
+    } else {
+        inst = fk_clo_top;
+        fk_clo_top = fk_clo_top + 1;
+    }
     fk_clo_target[inst] = target;
     fk_clo_capbase[inst] = base;
     fk_clo_capcount[inst] = n;
-    fk_clo_top = fk_clo_top + 1;
+    fk_clo_born[inst] = fk_melt_gen;
     return fk_fnval(FK_CLOSURE_IDX_BASE + inst);
 }
 /* Float boxes are ODD words at/below fk_fbase-3: fk_fbase - (fp<<1) - 1. They were
@@ -1226,12 +1268,13 @@ static long long fk_str_hash(long long off, long long len) {
  * life of the process: the glass organs and sensors processes held 6-7 GB of string bytes behind ten thousand live
  * strings, growing 200-300 KB/s (vmmap 2026-10-03: the 4 GB reservation of fk_sb filling block by block).
  * A dead string now cedes its extent here (it owns no bytes after: fk_sl 0), a melt orders the holes by offset and
- * joins neighbours, and fk_sintern places a new string in a hole that fits, next-fit from where the last one landed
- * and looking at no more than FK_HOLE_LOOK holes, then discards its scratch. Live strings never move; fk_sbp never
- * retreats (a builder may hold a start offset across a melt); the arena stops growing once the holes hold the
- * working set. kernel_stat 64 reads fk_sbp, 65 the bytes standing in holes. */
+ * joins neighbours, and fk_sintern places a new string in a hole that fits, next-fit from where the last one landed,
+ * then discards its scratch. Live strings never move; fk_sbp never retreats (a builder may hold a start offset across
+ * a melt); the arena stops growing once the holes hold the working set (a window of 256 holes let it creep: large
+ * strings found none in view and went to the top; hermetic organs ticks, top at tick 300: 9.4 MB in a window of
+ * 256, 6.4 MB and flat looking at every hole). kernel_stat 64 reads fk_sbp, 65 the bytes standing in holes. */
 #ifndef FK_HOLE_LOOK
-#define FK_HOLE_LOOK 256
+#define FK_HOLE_LOOK 1000000000   /* holes looked at per string: all of them; 0 takes none (the band's plant) */
 #endif
 static long long *fk_holo;      /* hole offsets, ascending after a melt */
 static long long *fk_holl;      /* hole lengths; 0 = taken whole, dropped at the next melt */
@@ -1239,6 +1282,7 @@ static long long fk_holn;
 static long long fk_holcap;
 static long long fk_hole_bytes;
 static long long fk_holhint;
+static long long fk_holmax;
 static void fk_hole_add(long long off, long long len) {
     if (len <= 0) { return; }
     if (fk_holn >= fk_holcap) {
@@ -1297,32 +1341,45 @@ static void fk_holes_settle(void) {
         total = total + fk_holl[k];
         k = k + 1;
     }
+    long long longest = 0;
+    k = 0;
+    while (k < m) {
+        if (fk_holl[k] > longest) { longest = fk_holl[k]; }
+        k = k + 1;
+    }
     fk_holn = m;
     fk_hole_bytes = total;
     fk_holhint = 0;
+    fk_holmax = longest;
 }
 /* the offset of len bytes carved from a hole that ends at or below limit (the scratch's own start), or -1 when none of
- * the holes in view fits */
+ * the holes in view fits. fk_holmax bounds the longest hole: a request above it answers at once, and a scan that
+ * finds nothing lowers it to just under the request until the next melt. */
 static long long fk_hole_take(long long len, long long limit) {
     long long n = fk_holn;
-    if (n <= 0 || len <= 0) { return -1; }
+    if (n <= 0 || len <= 0 || len > fk_holmax) { return -1; }
     long long k = fk_holhint;
     if (k >= n) { k = 0; }
     long long look = n < FK_HOLE_LOOK ? n : FK_HOLE_LOOK;
     long long seen = 0;
+    long long cut = 0;
     while (seen < look) {
-        if (fk_holl[k] >= len && fk_holo[k] + len <= limit) {
-            long long at = fk_holo[k];
-            fk_holo[k] = at + len;
-            fk_holl[k] = fk_holl[k] - len;
-            fk_hole_bytes = fk_hole_bytes - len;
-            fk_holhint = k;
-            return at;
+        if (fk_holl[k] >= len) {
+            if (fk_holo[k] + len <= limit) {
+                long long at = fk_holo[k];
+                fk_holo[k] = at + len;
+                fk_holl[k] = fk_holl[k] - len;
+                fk_hole_bytes = fk_hole_bytes - len;
+                fk_holhint = k;
+                return at;
+            }
+            cut = 1;
         }
         k = k + 1;
         if (k >= n) { k = 0; }
         seen = seen + 1;
     }
+    if (look == n && cut == 0) { fk_holmax = len - 1; }
     return -1;
 }
 static long long fk_sintern(long long off, long long len) {
@@ -8724,10 +8781,16 @@ static long long fk_nhp;
 /* The melt's two walks go along a list's tail in a loop and into its head by recursion, as fk_smark does: a list
  * of any length costs one frame per level of nesting, never one per cell. Walking the tail by recursion, a live
  * list of a few million cells ran the evaluation thread off its stack in the middle of a melt. */
+static long long fk_clo_mark(long long inst);
 static long long fk_mlive(long long b) {
     long long n = 0;
     while ((b & 1) != 0) {
         long long p = b >> 1;
+        if (b < fk_fnbase && b > fk_fnval_floor) {
+            /* an fn-value: a closure row it names is reached, and keeps what it captured */
+            long long ci = fk_clo_inst_of(b);
+            return ci >= 0 ? n + fk_clo_mark(ci) : n;
+        }
         if (p >= FK_PAIR_BASE || p < 1 || !FK_POK(p) || fk_fw[p] != 0) { return n; }
         fk_fw[p] = 0 - 1;
         n = n + 1 + fk_mlive(FK_HH(p));
@@ -8765,21 +8828,96 @@ static long long fk_mcopy(long long b) {
     }
     return (first << 1) | 1;
 }
-static long long fk_clo_mlive_roots(void) {
+/* a closure row reached: its captured values are reached with it */
+static long long fk_clo_mark(long long inst) {
+    if (fk_cmark == 0 || inst < 0 || inst >= fk_clo_top || fk_clo_born[inst] < 0 || fk_cmark[inst]) { return 0; }
+    fk_cmark[inst] = 1;
+    long long n = 0;
+    long long base = fk_clo_capbase[inst];
+    long long cnt = fk_clo_capcount[inst];
+    long long j = 0;
+    while (j < cnt) {
+        n = n + fk_mlive(fk_clo_capvals[base + j]);
+        j = j + 1;
+    }
+    return n;
+}
+/* the rows no root names but a melt must keep: the method table's, and the rows made in the last FK_CLO_YOUNG
+ * melt generations (fk_melt has already counted this melt in fk_melt_gen) */
+static long long fk_clo_live_roots(void) {
     long long nlive = 0;
     long long k = 0;
-    while (k < fk_clo_capvals_top) {
-        nlive = nlive + fk_mlive(fk_clo_capvals[k]);
+    while (k < fk_mth_n) {
+        nlive = nlive + fk_mlive(fk_mth_fn[k]);
+        k = k + 1;
+    }
+    k = 0;
+    while (k < fk_clo_top) {
+        if (fk_clo_born[k] >= 0 && fk_clo_born[k] + FK_CLO_YOUNG >= fk_melt_gen) { nlive = nlive + fk_clo_mark(k); }
         k = k + 1;
     }
     return nlive;
 }
+/* copy what every kept row captured, slide those values down, and give every other row back */
 static void fk_clo_mcopy_roots(void) {
+    long long total = 0;
     long long k = 0;
-    while (k < fk_clo_capvals_top) {
-        fk_clo_capvals[k] = fk_mcopy(fk_clo_capvals[k]);
+    while (k < fk_clo_top) {
+        if (fk_clo_born[k] >= 0 && fk_cmark[k]) { total = total + fk_clo_capcount[k]; }
         k = k + 1;
     }
+    long long room = total < 256 ? 256 : total + total / 2;
+    long long *nv = (long long *)malloc((unsigned long)(room * 8));
+    if (nv == 0) {
+        /* no room to slide into: keep every row and its values where they are, as before */
+        k = 0;
+        while (k < fk_clo_top) {
+            if (fk_clo_born[k] >= 0) {
+                long long j = 0;
+                while (j < fk_clo_capcount[k]) {
+                    fk_clo_capvals[fk_clo_capbase[k] + j] = fk_mcopy(fk_clo_capvals[fk_clo_capbase[k] + j]);
+                    j = j + 1;
+                }
+            }
+            k = k + 1;
+        }
+        free(fk_cmark);
+        fk_cmark = 0;
+        return;
+    }
+    long long at = 0;
+    k = 0;
+    while (k < fk_clo_top) {
+        if (fk_clo_born[k] < 0) {
+            k = k + 1;
+            continue;
+        }
+        if (fk_cmark[k]) {
+            long long base = fk_clo_capbase[k];
+            long long cnt = fk_clo_capcount[k];
+            long long j = 0;
+            while (j < cnt) {
+                nv[at + j] = fk_mcopy(fk_clo_capvals[base + j]);
+                j = j + 1;
+            }
+            fk_clo_capbase[k] = at;
+            at = at + cnt;
+        } else {
+            fk_clo_born[k] = -1;
+            fk_clo_capbase[k] = 0;
+            fk_clo_capcount[k] = 0;
+            fk_clo_free[fk_clo_free_n] = k;
+            fk_clo_free_n = fk_clo_free_n + 1;
+            fk_clo_reclaimed = fk_clo_reclaimed + 1;
+        }
+        k = k + 1;
+    }
+    free(fk_clo_capvals);
+    fk_clo_capvals = nv;
+    fk_clo_capvals_top = at;
+    fk_clo_capvals_cap = room;
+    free(fk_cmark);
+    fk_cmark = 0;
 }
 static long long fk_nmelt;
 /* fk_melt_want: a caller about to build a large flat structure (one whose
@@ -8822,8 +8960,14 @@ static void fk_smark(long long v) {
 }
 static void fk_clo_smark_roots(void) {
     long long k = 0;
-    while (k < fk_clo_capvals_top) {
-        fk_smark(fk_clo_capvals[k]);
+    while (k < fk_clo_top) {
+        if (fk_clo_born[k] >= 0) {
+            long long j = 0;
+            while (j < fk_clo_capcount[k]) {
+                fk_smark(fk_clo_capvals[fk_clo_capbase[k] + j]);
+                j = j + 1;
+            }
+        }
         k = k + 1;
     }
 }
@@ -8889,6 +9033,11 @@ static void fk_melt(void) {
     if (fk_fw == 0) {
         fk_die("fk_melt: fw calloc failed -- heap cannot be compacted, and returning here would let the program continue on a full heap as if space were reclaimed. Out of memory is out of memory (same as fk_fbox/fk_sintern).");
     }
+    fk_cmark = (unsigned char *)calloc((unsigned long)(fk_clo_top > 0 ? fk_clo_top : 1), 1);
+    if (fk_cmark == 0) {
+        free(fk_fw);
+        fk_die("fk_melt: closure mark calloc failed -- heap cannot be compacted, and returning here would let the program continue on a full heap as if space were reclaimed.");
+    }
     long long nlive = 0;
     long long k = 0;
     /* which root holds the live pairs: each class's count is what it reached that an earlier class had not (the witness line names them) */
@@ -8932,7 +9081,7 @@ static void fk_melt(void) {
         k = k + 1;
     }
     lv_node = nlive - lv_stack - lv_mem - lv_rec;
-    nlive = nlive + fk_clo_mlive_roots();
+    nlive = nlive + fk_clo_live_roots();
     lv_clo = nlive - lv_stack - lv_mem - lv_rec - lv_node;
     /* the once-holds: a top-level let's held value is a root, so the melt keeps it and no read builds it again */
     k = 0;
@@ -9014,9 +9163,10 @@ static void fk_melt(void) {
     fk_smelt();
     fk_live_publish(0);
     if (fk_conf("FK_MELT_WITNESS")) {
-        dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld, held-by stack=%lld mem=%lld records=%lld nodes=%lld closures=%lld holds=%lld, string-holes=%lld bytes of %lld\n",
+        dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld, held-by stack=%lld mem=%lld records=%lld nodes=%lld closures=%lld holds=%lld, string-holes=%lld bytes of %lld, closure-rows=%lld reclaimed=%lld capvals=%lld\n",
                 fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp,
-                lv_stack, lv_mem, lv_rec, lv_node, lv_clo, nlive - lv_stack - lv_mem - lv_rec - lv_node - lv_clo, fk_hole_bytes, fk_sbp);
+                lv_stack, lv_mem, lv_rec, lv_node, lv_clo, nlive - lv_stack - lv_mem - lv_rec - lv_node - lv_clo, fk_hole_bytes, fk_sbp,
+                fk_clo_top - fk_clo_free_n, fk_clo_reclaimed, fk_clo_capvals_top);
     }
 }
 /* THE WALL THAT COULD NOT SPEAK. Thirty lines below, fk_walk's host-stack wall
@@ -9768,6 +9918,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 return fk_nothing;
             }
             long long fi244 = fk_fnval_target(hv244);
+            fk_vp(hv244);   /* the callee is a root while its arguments walk: a melt must not take the closure row it names */
             long long base244 = fk_vsp;
             long long cell244 = fk_node[i][2];
             while (cell244 >= 0 && fk_node[cell244][0] == 242) {
@@ -13054,6 +13205,7 @@ static long long fk_walk(long long i, long long fp) {
             return fk_nothing;
         }
         long long fi244 = fk_fnval_target(hv244);
+        fk_vp(hv244);   /* the callee is a root while its arguments walk: a melt must not take the closure row it names */
         long long base244 = fk_vsp;
         long long cell244 = fk_node[i][2];
         while (cell244 >= 0 && fk_node[cell244][0] == 242) {
@@ -13087,7 +13239,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_heat_pulse();
         long long r244 = fk_walk_body(fk_fn[fi244], base244);
         fk_cur_fn = caller244;
-        fk_vsp = base244;
+        fk_vsp = base244 - 1;
         return fk_offer_ack(fi244, n244, r244);
     }
     if (t == 13) {
@@ -18584,6 +18736,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * bytes standing in holes a dead string left and a new string will take (fk_hole_add) */
         if (ks_k == 64) { return fk_sbp << 1; }
         if (ks_k == 65) { return fk_hole_bytes << 1; }
+        /* closure instances: 66 the rows standing (made and not yet given back), 67 the rows reclaimed so far, 68 the captured
+         * values held (fk_clo_capvals_top) */
+        if (ks_k == 66) { return (fk_clo_top - fk_clo_free_n) << 1; }
+        if (ks_k == 67) { return fk_clo_reclaimed << 1; }
+        if (ks_k == 68) { return fk_clo_capvals_top << 1; }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
@@ -23497,6 +23654,7 @@ static void fk_string_table_reset(void) {
     fk_holn = 0;
     fk_hole_bytes = 0;
     fk_holhint = 0;
+    fk_holmax = 0;
     long long k = 0;
     while (k < FK_STRING_HASH_BUCKETS) {
         fk_shash[k] = -1;

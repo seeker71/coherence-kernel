@@ -517,6 +517,37 @@ line-grammar-search-equivalence-band 8191 · core-str-find-equivalence-band 2047
 meaning-codes-table-band 255
 ```
 
+## What a melt gives back
+
+fkwu's melt compacts the cons heap and then frees what no root names. It frees two more things than the heap.
+
+A dead string's bytes become a hole in the string arena (`fk_hole_add`), the melt orders and joins the holes, and
+`fk_sintern` places a new string in a hole that fits and discards its scratch. Live strings never move and the
+arena's top never retreats. Before this, a dead string's slot came back and its bytes did not: the glass organs and
+sensors processes held 6.8 and 7.5 GB behind ten thousand live strings, growing 200-300 KB/s, because the supervisor
+starts them once and keeps them for its life. `kernel_stat(64)` reads the top, `kernel_stat(65)` the bytes in holes;
+`string-holes-band` reads 127, and 115 on a build that takes no hole (`-DFK_HOLE_LOOK=0`).
+
+A closure row lives while a root reaches it: the value stack, memory cells, records, nodes, held lets, the method
+table, and the captures of a row that is itself reached. A melt also keeps the rows made since the melt before it
+(`FK_CLO_YOUNG`), copies only what a kept row captured, slides those values down and hands the other rows to
+`fk_clo_free`; a row's index is the fn-value's own word and never changes, and an indirect call holds its callee on
+the value stack while its arguments walk. Before this, every evaluation of a capturing lambda kept what it captured
+for the life of the process: a hermetic glass loop held 4.25 of its 4.36 million surviving pairs in closures, the heap
+doubled to 2^29 pairs in the live glass, and each melt moved gigabytes of the machine's memory; the same loop now
+holds 160 thousand pairs flat in a 1 M-pair heap and 85 MB. `kernel_stat(66)` reads the rows standing,
+`(67)` the rows reclaimed, `(68)` the captured values held; `closure-reclaim-band` reads 127, and 113 on a build
+that keeps every row (`-DFK_CLO_YOUNG=1000000000`). With `FK_MELT_WITNESS 1` in `fkwu.conf` each melt prints which
+root held the pairs it kept (stack, mem, records, nodes, closures, holds) and the string and closure tables.
+
+A kernel started before these doors keeps the old tables until it is restarted, and a binary is replaced by
+building beside it and renaming (`cc -O2 -o fkwu.new runtime/fkwu-uni.c && mv fkwu.new fkwu`; copying over a
+running binary kills it). The glass fleet is no launchd job: `observe/form-glass-run.fk` is a terminal session whose
+supervisor starts the sensors, machine, organs and ear processes once and the live loop under them; ending the
+supervisor (`q` in the glass, or its pid) ends all of them, and `./fkwu observe/form-glass-run.fk` from the same
+checkout starts them again on whichever `./fkwu` that checkout holds. The ear process stands the microphone while
+`.hearth/ear.wanted` stands, so a restart is Urs's to choose.
+
 ## The body's own lenses
 
 The body reads itself: which doors bear the most walking, which door is a private copy of a warm one,
