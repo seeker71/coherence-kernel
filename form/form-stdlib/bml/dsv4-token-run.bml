@@ -1,0 +1,300 @@
+//////////////////////////////////////////////////////////////////////
+// dsv4-token-run.bml -- the measurement door of the DeepSeek-V4 token path: the real prefill and the greedy decode loop through dsv4-token-handle.fk, ONE row a token READ FROM THE LANDED LEDGER, the machine beside the clock.
+//
+// WHAT IT ANSWERS. How fast is the token path itself, and where does a token's time go: the host that encodes the dispatches, the device that runs them, or the waits between. This door runs the path as production runs it and
+// reads it. The ledger is native/metal/dsv4-ledger.fk's (ONE AUTHORITY: dll-mark, dll-row, dll-line, dll-within?, and the formulas dll-token-count-m and dll-token-bytes-m that the dry plan prices the real header with): a row
+// is the carrier's own counts between two marks (dispatches, barriers, command buffers, waits, host reads, buffers made, the device's busy microseconds, the clock), and this door adds only what the ledger does not hold: the
+// machine (wired memory and pageins between the marks) and the device's own allocated bytes. The door keeps no counter of its own.
+//
+// THE COMMAND STRUCTURE UNDER MEASUREMENT (landed, dsv4-kernels.fk dkr-hz): one concurrent batch with barriers planned per block, handed to the queue every second block, ONE wait a decode token (the argmax, the NaN scan and the
+// logits settle together), a wait between prefill positions, two host reads (the count and the id), no buffer made, no pipeline compiled. The ledger band (native/metal/tests/dsv4-ledger-band.bml) pins those ceilings on the fixtures;
+// this door's rows are judged by the same ceilings (dll-within?) and by the same dispatch formula, and a real run prints each row against them.
+//
+// THE WIRED CURVE (the tap). Metal wires the buffers a committed batch names; the first tokens of a whole-stack design may wire stack after stack and keep them. The token handle calls ONE installed function at its seams
+// (dsv4-token-handle.fk dkr-hz-tap-set: ("layer", il) after block il was enqueued, ("pos", i) before position i of a prefill), and this door's function reads the machine there, WITHOUT A SYNC: wired memory and available
+// memory after every layer of the first `watch` tokens (the receipt's curve: [token, layer, wired, available]), and stops the token the moment a hold rule holds, BEFORE the machine is at risk: memory unreadable,
+// host-memory-low, wired above `pct` percent of memory (60), available under the reserve, or the window's 20 minutes. The token then answers nothing, what was enqueued is drained (dth-token-fail), every handle is released in
+// synced rounds, the lease is given back, and the receipt names how far it got. After the watched tokens every token is read at its end by the same rules. The watched tokens' rows carry the host time of those readings
+// (watched=1) and are left out of the warm decode mean.
+//
+// WHAT THE STAGES SAY. compile, map and state run as the validation door runs them (dsv4-validate.bml dvr-stage: the governor's ask with the back-off for a reserve or compressor denial and the reading that denied whole in the
+// receipt, the wired reading, the organs of ours named by process); the layers are not staged: this door IS the layer measurement. The honest rule: wired above the lease past the baseline (the stages), host-memory-low, the
+// token's own hold rules, and back-off asks.
+//
+// ONE ROW A TOKEN (dtr-row-line: the ledger's own line plus the machine's): token index, kind (prefill or decode), position, ids, the ledger fields (dispatches barriers cbs syncs readbacks allocs bytes gpu_us wall_ms miss), wired
+// growth, pageins and the device's own bytes. A prefill position's row is the span between the marks the tap took at its seams; the last position's carries the head and the one drain. The summary: the cold first token (the
+// prefill's own ms), the warm decode's mean ms and tokens a second, and the totals.
+//
+// THE DOOR IS DRY BY DEFAULT: empty stdin, {} and {"dry":1} print the plan and the ledger arithmetic (the landed formulas over the real header) and open nothing; only {"go":1} runs. Options (one JSON line): go, dry, file (the
+// IQ2XXS build by default), cap (64), steps (decode tokens, 24), watch (tokens read after every layer, 3), pct (the wired stop, 60), bw_gbs (the bandwidth the plan prices bytes at, 546: the M4 Max's stated figure, not
+// measured), logits_prompt_ids (the prompt; the 14 pinned ids by default), receipt (receipts/dsv4-token-runs.jsonl).
+//
+// Proven by: native/metal/tests/dsv4-token-run-band.bml (the walk on both fixtures: rows from the ledger, the ceilings and the dispatch formula, the curve and its stop, the plants through the counted doors),
+// form-stdlib/tests/dsv4-token-run-plan-band.bml (the plan on the real headers; nothing opened).
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/bml/dsv4-validate.bml native/metal/dsv4-ledger.fk
+section [form.bml] {
+ class Dsv4TokenRun {
+  // ---- the pins ----------------------------------------------------------------------------------------------------------------
+  def dtr-receipt-path() = "receipts/dsv4-token-runs.jsonl";
+  def dtr-default-steps() = 24;
+  def dtr-default-watch() = 3;
+  def dtr-default-pct() = 60;
+  def dtr-default-bw() = 546;
+  // ---- the plan: the ledger's own formulas over the header ---------------------------------------------------------------------------------
+  // the batches handed to the queue a token (every second block) and the command buffers a token commits (those and the one the wait drains): dsv4-token-handle.fk dth-layers, dll-row
+  def dtr-submits(m) = record_get(m, "layers-n") / 2;
+  def dtr-cbs(m) = dtr-submits(m) + 1;
+  // the dispatches a token makes at pos, with its head and scan (headed) or without (a chained prefill position)
+  def dtr-dispatches(m, pos, headed) = dll-token-count-m(m, pos) - (headed ? 0 : 8);
+  // the smallest and largest decode token over positions from..last (the compressors' boundary positions: one period of every ratio is enough for a header whose ratios divide 128)
+  def dtr-min-go(m, pos, best, last) = pos == last ? best : dtr-min-go(m, pos + 1, dll-token-count-m(m, pos) < best ? dll-token-count-m(m, pos) : best, last);
+  def dtr-max-go(m, pos, best, last) = pos == last ? best : dtr-max-go(m, pos + 1, dll-token-count-m(m, pos) > best ? dll-token-count-m(m, pos) : best, last);
+  // the bytes a token reads (the ledger's), with the head's tensors or without
+  def dtr-bytes(m, headed) = dll-token-bytes-m(m) - (headed ? 0 : dll-head-bytes-m(m));
+  // milliseconds in tenths for `bytes` at `bw` GB/s (decimal gigabytes)
+  def dtr-tenths-ms(bytes, bw) = (bytes * 10) / (bw * 1000000);
+  def dtr-tenths-text(t) = (t / 10).str() ++ "." ++ (t % 10).str();
+  // the ceilings a row is held to (dll-within?): one wait a decode token and one a prefill position, the command buffers the structure commits, two host reads at a head and none without, nothing made, no plan short or long;
+  // barriers are not derivable from a header (the plan counts them as it plans), so the ceiling is the honest bound: no more than the dispatches
+  def dtr-ceil(m, pos, headed) = record_new(0, "dispatches", dtr-dispatches(m, pos, headed), "barriers", dtr-dispatches(m, pos, headed), "cbs", dtr-cbs(m), "syncs", 1, "readbacks", headed ? 2 : 0, "allocs", 0, "bytes", dtr-bytes(m, headed), "miss", 0);
+  // a row is judged by the ceilings and by the formula's own count (equal: a missing dispatch is a defect as much as an extra one)
+  def dtr-row-ok?(m, row, pos, headed) = record_get(row, "dispatches") == dtr-dispatches(m, pos, headed) && dll-within?(row, dtr-ceil(m, pos, headed)) && record_get(row, "syncs") == 1;
+  def dtr-row-over(m, row, pos, headed) = dll-over(row, dtr-ceil(m, pos, headed)) ++ (record_get(row, "dispatches") == dtr-dispatches(m, pos, headed) ? "" : " dispatches " ++ record_get(row, "dispatches").str() ++ "!=" ++ dtr-dispatches(m, pos, headed).str());
+  // ---- the machine, as one reading --------------------------------------------------------------------------------------------------------
+  def dtr-wired-of(vm) = mg-vm-ok?(vm) ? mg-wired(vm) : 0;
+  def dtr-pageins-of(vm) = mg-vm-ok?(vm) ? vm[9] : 0;
+  // [the ledger mark, the machine's reading, the device's own allocated bytes]
+  def dtr-snap() = [dll-mark(), mg-sense(), dvr-own()];
+  // a row: the ledger's (r: a decode token's from dsv4-decode-observed, a prefill position's dll-row between the marks of its seams) with the machine's growth and the device's own bytes between the snaps a and b
+  def dtr-row(index, kind, pos, idin, idout, r, a, b, watched) {
+   record_new(0, "token", index, "kind", kind, "pos", pos, "id_in", idin, "id_out", idout, "dispatches", record_get(r, "dispatches"), "barriers", record_get(r, "barriers"), "cbs", record_get(r, "cbs"), "syncs", record_get(r, "syncs"),
+    "readbacks", record_get(r, "readbacks"), "allocs", record_get(r, "allocs"), "bytes", record_get(r, "bytes"), "gpu_us", record_get(r, "gpu_us"), "wall_ms", record_get(r, "wall_ms"), "miss", record_get(r, "miss"),
+    "wired", dtr-wired-of(b[1]) - dtr-wired-of(a[1]), "pageins", dtr-pageins-of(b[1]) - dtr-pageins-of(a[1]), "own", b[2] - a[2], "watched", watched);
+  }
+  def dtr-g(row, k) = record_get(row, k);
+  def dtr-signed(n) = (n >= 0 ? "+" : "-") ++ (n >= 0 ? n : 0 - n).str();
+  def dtr-signed-gib(b) = (b >= 0 ? "+" : "-") ++ dvr-gib(b >= 0 ? b : 0 - b);
+  // the ledger's own line (dll-line) with the machine's fields after it
+  def dtr-row-line(row) = "[dsv4-token] " ++ dll-line("token " ++ dtr-g(row, "token").str() ++ " " ++ dtr-g(row, "kind") ++ " pos " ++ dtr-g(row, "pos").str(), row) ++ " wired=" ++ dtr-signed-gib(dtr-g(row, "wired")) ++ " pageins=" ++ dtr-signed(dtr-g(row, "pageins"))
+   ++ " own=" ++ dtr-signed(dtr-g(row, "own")) ++ " id=" ++ dtr-g(row, "id_in").str() ++ "->" ++ (dtr-g(row, "id_out") < 0 ? "none" : dtr-g(row, "id_out").str()) ++ (dtr-g(row, "watched") == 1 ? " (watched: the wired readings after every layer are in this row's ms)" : "");
+  // ---- the hold rules: the machine read between enqueues ----------------------------------------------------------------------------------
+  // the first that holds ends the encoding: memory unreadable, low (available under half the reserve, wired over 80 percent, compressor over 40), wired past pct percent of memory, available under the reserve, the 20 minutes
+  def dtr-hold-reason(vm, pct, elapsed) =
+   !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : mg-wired(vm) > mg-pct(mg-mem(vm), pct) ? "wired-cap" : mg-available(vm) < mg-reserve-of(mg-mem(vm)) ? "reserve" : elapsed > dvr-abort-ms() ? "budget" : "";
+  // the walk's own record: the rows, the marks the prefill's seams took, the curve, the stop, the token the tap is reading, and the options it runs under
+  def dtr-env(pct, watch, t0, base) = record_new(0, "rows", [], "marks", [], "curve", [], "stop", [], "token", 0, "pct", pct, "watch", watch, "t0", t0, "base", base);
+  def dtr-stopped(env, token, il, why) {
+   let k = record_set(env, "stop", [why, token, il]);
+   let said = print_str("[dsv4-token] HOLD at token " ++ token.str() ++ " layer " ++ il.str() ++ ": " ++ why ++ ": the encoding stops here, what is enqueued is drained, the curve and the receipt keep how far it got");
+   why;
+  }
+  def dtr-elapsed(env) = host_monotonic_ms() - record_get(env, "t0");
+  // after layer il of the token the tap is reading: the machine is read (no sync, nothing waited for), the curve grows, a hold rule that holds stops the token
+  def dtr-watch(env, token, il) {
+   let vm = mg-sense();
+   let k = record_set(env, "curve", append(record_get(env, "curve"), [[token, il, dtr-wired-of(vm), mg-vm-ok?(vm) ? mg-available(vm) : 0]]));
+   let why = dtr-hold-reason(vm, record_get(env, "pct"), dtr-elapsed(env));
+   why == "" ? "" : dtr-stopped(env, token, il, why);
+  }
+  // before position i of a prefill: the mark that opens its row, and the hold rules read at the seam
+  def dtr-seam(env, i) {
+   let s = dtr-snap();
+   let k1 = record_set(env, "marks", append(record_get(env, "marks"), [s]));
+   let k2 = record_set(env, "token", i);
+   let why = dtr-hold-reason(s[1], record_get(env, "pct"), dtr-elapsed(env));
+   why == "" ? "" : dtr-stopped(env, i, 0 - 1, why);
+  }
+  // the function the token handle calls at its seams
+  def dtr-tap(env) = (kind, a) => kind == "layer" ? (record_get(env, "token") < record_get(env, "watch") ? dtr-watch(env, record_get(env, "token"), a) : "") : dtr-seam(env, a);
+  // ---- the walk ----------------------------------------------------------------------------------------------------------------------
+  def dtr-add-row(env, row) {
+   let k = record_set(env, "rows", append(record_get(env, "rows"), [row]));
+   let said = print_str(dtr-row-line(row));
+   row;
+  }
+  // the prefill's rows from the marks its seams took: position k is the span from mark k to mark k + 1; the last position's span ends at `fin` (the mark after the call) and carries the head and the id
+  def dtr-prefill-rows(env, m, ids, marks, k, done, nid) {
+   k == done ? [] : {
+    let last = k == len(ids) - 1;
+    let b = k + 1 < len(marks) ? marks[k + 1] : nothing();
+    nothing?(b) ? [] : {
+     let row = dtr-add-row(env, dtr-row(k, "prefill", k, ids[k], last ? nid : 0 - 1, dll-row(marks[k][0], b[0], dtr-bytes(m, last)), marks[k], b, k < record_get(env, "watch") ? 1 : 0));
+     cons(row, dtr-prefill-rows(env, m, ids, marks, k + 1, done, nid));
+    };
+   };
+  }
+  // the prefill of ids from position 0 through the landed path; answers [next id, next position], or nothing (stopped or refused)
+  def dtr-prefill(env, ctx, sts, ids) {
+   let m = dso-geo(ctx);
+   let pf = dsv4-prefill-span-sliced(ctx, sts, ids, 0);
+   let fin = dtr-snap();
+   let marks = nothing?(pf) ? record_get(env, "marks") : append(record_get(env, "marks"), [fin]);
+   let done = nothing?(pf) ? len(marks) - 1 : len(ids);
+   let rows = dtr-prefill-rows(env, m, ids, marks, 0, done, nothing?(pf) ? 0 - 1 : pf[0]);
+   pf;
+  }
+  // one decode token through the landed observer: its ledger row with the machine's growth
+  def dtr-decode-pos(env, ctx, sts, id, pos, index) {
+   let k = record_set(env, "token", index);
+   let a = dtr-snap();
+   let seen = dsv4-decode-observed(ctx, sts, id, pos);
+   let b = dtr-snap();
+   let nid = seen[0];
+   nothing?(nid) ? nothing() : { let row = dtr-add-row(env, dtr-row(index, "decode", pos, id, nid, seen[1], a, b, index < record_get(env, "watch") ? 1 : 0)); nid; };
+  }
+  def dtr-end-check(env, index) {
+   let why = dtr-hold-reason(mg-sense(), record_get(env, "pct"), dtr-elapsed(env));
+   why == "" ? "" : dtr-stopped(env, index, 0 - 1, why);
+  }
+  def dtr-stop-reason(env) = len(record_get(env, "stop")) > 0 ? record_get(env, "stop")[0] : "token-refused";
+  // the loop: steps decode tokens from `id` at `pos`; the reason it ended ("" when it ran its steps)
+  def dtr-decode(env, ctx, sts, id, pos, index, left) {
+   left == 0 ? "" : {
+    let nid = dtr-decode-pos(env, ctx, sts, id, pos, index);
+    let why = nothing?(nid) ? dtr-stop-reason(env) : dtr-end-check(env, index);
+    why == "" ? dtr-decode(env, ctx, sts, nid, pos + 1, index + 1, left - 1) : why;
+   };
+  }
+  // the whole walk over an opened context: the prefill of `ids` then `steps` decodes, with the tap installed for the whole walk and cleared at its end. Answers the reason it ended ("" when every token ran).
+  def dtr-walk(env, ctx, sts, ids, steps) {
+   let tapped = dkr-hz-tap-set(dtr-tap(env));
+   let first = dtr-prefill(env, ctx, sts, ids);
+   let why = nothing?(first) ? dtr-stop-reason(env) : dtr-decode(env, ctx, sts, first[0], first[1], len(ids), steps);
+   let cleared = dkr-hz-tap-clear();
+   let drained = metal_sync();
+   why;
+  }
+  // ---- the summary ------------------------------------------------------------------------------------------------------------------------
+  def dtr-rows-of(rows, kind) = len(rows) == 0 ? [] : (dtr-g(rows[0], "kind") == kind ? cons(rows[0], dtr-rows-of(rows[1:], kind)) : dtr-rows-of(rows[1:], kind));
+  def dtr-sum-col(rows, k) = len(rows) == 0 ? 0 : dtr-g(rows[0], k) + dtr-sum-col(rows[1:], k);
+  def dtr-unwatched(rows) = len(rows) == 0 ? [] : (dtr-g(rows[0], "watched") == 0 ? cons(rows[0], dtr-unwatched(rows[1:])) : dtr-unwatched(rows[1:]));
+  // the cold first token: the prefill's own milliseconds, up to and including its one drain
+  def dtr-cold-ms(rows) = dtr-sum-col(dtr-rows-of(rows, "prefill"), "wall_ms");
+  // the warm decode: the unwatched decode tokens after the first when there are at least three, else all of them: [tokens, ms]
+  def dtr-warm(rows) {
+   let d = dtr-unwatched(dtr-rows-of(rows, "decode"));
+   let w = len(d) >= 3 ? d[1:] : d;
+   [len(w), dtr-sum-col(w, "wall_ms")];
+  }
+  // tokens a second, in hundredths, from [tokens, ms]
+  def dtr-hundredths-per-s(w) = w[1] == 0 ? 0 : (w[0] * 100000) / w[1];
+  def dtr-hundredths-text(h) = (h / 100).str() ++ "." ++ ((h % 100) < 10 ? "0" : "") ++ (h % 100).str();
+  def dtr-summary-line(rows) {
+   let w = dtr-warm(rows);
+   "[dsv4-token] summary: " ++ len(rows).str() ++ " tokens (" ++ len(dtr-rows-of(rows, "prefill")).str() ++ " prefill, " ++ len(dtr-rows-of(rows, "decode")).str() ++ " decode); cold first token " ++ dtr-cold-ms(rows).str() ++ " ms; warm decode "
+    ++ (w[0] == 0 ? "none" : (w[1] / w[0]).str() ++ " ms a token = " ++ dtr-hundredths-text(dtr-hundredths-per-s(w)) ++ " tokens a second over " ++ w[0].str() ++ " tokens") ++ "; totals: " ++ dtr-sum-col(rows, "dispatches").str() ++ " dispatches, " ++ dtr-sum-col(rows, "barriers").str()
+    ++ " barriers, " ++ dtr-sum-col(rows, "syncs").str() ++ " syncs, " ++ dtr-sum-col(rows, "cbs").str() ++ " command buffers, " ++ dtr-sum-col(rows, "readbacks").str() ++ " host reads, device busy " ++ (dtr-sum-col(rows, "gpu_us") / 1000).str() ++ " ms";
+  }
+  // ---- the receipt row ----------------------------------------------------------------------------------------------------------------------
+  def dtr-row-json(r) = "{" ++ dvr-join([dvr-kv("token", dtr-g(r, "token").str()), dvr-kv("kind", dvr-q(dtr-g(r, "kind"))), dvr-kv("pos", dtr-g(r, "pos").str()), dvr-kv("id_in", dtr-g(r, "id_in").str()), dvr-kv("id_out", dtr-g(r, "id_out").str()),
+    dvr-kv("dispatches", dtr-g(r, "dispatches").str()), dvr-kv("barriers", dtr-g(r, "barriers").str()), dvr-kv("cbs", dtr-g(r, "cbs").str()), dvr-kv("syncs", dtr-g(r, "syncs").str()), dvr-kv("readbacks", dtr-g(r, "readbacks").str()),
+    dvr-kv("allocs", dtr-g(r, "allocs").str()), dvr-kv("bytes", dtr-g(r, "bytes").str()), dvr-kv("gpu_us", dtr-g(r, "gpu_us").str()), dvr-kv("wall_ms", dtr-g(r, "wall_ms").str()), dvr-kv("miss", dtr-g(r, "miss").str()),
+    dvr-kv("wired_delta", dtr-g(r, "wired").str()), dvr-kv("pageins_delta", dtr-g(r, "pageins").str()), dvr-kv("own_delta", dtr-g(r, "own").str()), dvr-kv("watched", dtr-g(r, "watched").str())], ",") ++ "}";
+  def dtr-curve-json(c) = "[" ++ dvr-join(map(p => "[" ++ p[0].str() ++ "," ++ p[1].str() ++ "," ++ p[2].str() ++ "," ++ p[3].str() ++ "]", c), ",") ++ "]";
+  def dtr-stop-json(s) = len(s) == 0 ? "{}" : "{" ++ dvr-join([dvr-kv("reason", dvr-q(s[0])), dvr-kv("token", s[1].str()), dvr-kv("layer", s[2].str())], ",") ++ "}";
+  def dtr-summary-json(rows) {
+   let w = dtr-warm(rows);
+   "{" ++ dvr-join([dvr-kv("tokens", len(rows).str()), dvr-kv("cold_first_token_ms", dtr-cold-ms(rows).str()), dvr-kv("warm_tokens", w[0].str()), dvr-kv("warm_ms", w[1].str()), dvr-kv("warm_hundredths_tokens_per_s", dtr-hundredths-per-s(w).str()),
+    dvr-kv("dispatches", dtr-sum-col(rows, "dispatches").str()), dvr-kv("barriers", dtr-sum-col(rows, "barriers").str()), dvr-kv("syncs", dtr-sum-col(rows, "syncs").str()), dvr-kv("cbs", dtr-sum-col(rows, "cbs").str()),
+    dvr-kv("readbacks", dtr-sum-col(rows, "readbacks").str()), dvr-kv("gpu_us", dtr-sum-col(rows, "gpu_us").str())], ",") ++ "}";
+  }
+  def dtr-receipt-row(date, at, r) = "{" ++ dvr-join([dvr-kv("schema", dvr-q("dsv4-token-run-v1")), dvr-kv("at_unix_ms", at.str()), dvr-kv("date", dvr-q(date)), dvr-kv("status", dvr-q(record_get(r, "status"))), dvr-kv("reason", dvr-q(record_get(r, "reason"))),
+    dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("pct", record_get(r, "pct").str()), dvr-kv("watch", record_get(r, "watch").str()), dvr-kv("lease_shared", record_get(r, "shared").str()),
+    dvr-kv("organs", record_get(r, "organs")), dvr-kv("moved", record_get(r, "moved")), dvr-kv("denied", record_get(r, "denied")), dvr-kv("vm_window", record_get(r, "vmwin")),
+    dvr-kv("stages", "[" ++ dvr-join(map(s => dvr-stage-json(s), record_get(r, "stages")), ",") ++ "]"), dvr-kv("stop", dtr-stop-json(record_get(r, "stop"))), dvr-kv("wired_curve", dtr-curve-json(record_get(r, "curve"))),
+    dvr-kv("rows", "[" ++ dvr-join(map(x => dtr-row-json(x), record_get(r, "rows")), ",") ++ "]"), dvr-kv("summary", dtr-summary-json(record_get(r, "rows"))), dvr-kv("elapsed_ms", record_get(r, "elapsed").str())], ",") ++ "}";
+  // ---- the plan (the dry door) -------------------------------------------------------------------------------------------------------------
+  def dtr-opts-steps(opts) = dvr-int(opts, "steps", dtr-default-steps());
+  def dtr-opts-watch(opts) = dvr-int(opts, "watch", dtr-default-watch());
+  def dtr-opts-pct(opts) = dvr-int(opts, "pct", dtr-default-pct());
+  def dtr-opts-bw(opts) = dvr-int(opts, "bw_gbs", dtr-default-bw());
+  def dtr-opts-ids(opts) = len(dvr-logits-ids(opts)) > 0 ? dvr-logits-ids(opts) : dvr-prompt();
+  def dtr-ceil-line(m) = "[dsv4-token] the ceilings a row is held to (the landed ledger's dll-within?, the dispatch count equal to the formula): dispatches " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position to " ++ dtr-max-go(m, 0, 0, 256).str()
+   ++ " where every compressor emits (a chained prefill position 8 fewer: no head, no scan), barriers no more than the dispatches (the plan places them as it plans; Swift's reference ~1,510), command buffers " ++ dtr-cbs(m).str() ++ ", syncs 1, host reads 2 at a head and 0 without, buffers made 0, plans short or long 0";
+  def dtr-plan-lines(m, size, opts, organs) {
+   let bw = dtr-opts-bw(opts);
+   let bytes = dtr-bytes(m, true);
+   let n = record_get(m, "layers-n");
+   let ids = dtr-opts-ids(opts);
+   [ "[dsv4-token] DRY: the plan and the op ledger arithmetic; nothing is opened, mapped, leased, compiled or written",
+    "[dsv4-token] file " ++ dvr-text(opts, "file", dvr-file()) ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), " ++ record_get(m, "arch") ++ ", " ++ n.str() ++ " layers, header read only",
+    "[dsv4-token] the run: the prefill of " ++ len(ids).str() ++ " prompt ids " ++ dvr-ids-json(ids) ++ " (a wait between positions, the head and the one drain at the last), then " ++ dtr-opts-steps(opts).str() ++ " greedy decode tokens, one ledger row a token, cap " ++ dvr-int(opts, "cap", dvr-default-cap()).str()
+     ++ ", whole mapped stacks, expert ids read on the device",
+    "[dsv4-token] the command structure (landed, dkr-hz): one concurrent batch, barriers planned per block, handed to the queue every " ++ "2" ++ " blocks (" ++ dtr-submits(m).str() ++ " submits and the wait's own commit: " ++ dtr-cbs(m).str() ++ " command buffers a token), ONE wait a decode token, the NaN scan on the same drain",
+    "[dsv4-token] dispatches a token (dll-token-count-m, the ledger's formula over the header): " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position, " ++ dtr-max-go(m, 0, 0, 256).str() ++ " at a position where every compressor emits; the embedding 2 and the head and scan 8 included",
+    dtr-ceil-line(m),
+    "[dsv4-token] bytes a token reads (dll-token-bytes-m, the ledger's sum over the header's rows): " ++ bytes.str() ++ " B (" ++ dvr-gib(bytes) ++ "), one embedding row " ++ (record_get(m, "e") * 2).str() ++ " and the head " ++ dll-head-bytes-m(m).str()
+     ++ "; at " ++ bw.str() ++ " GB/s (stated, not measured) that is " ++ dtr-tenths-text(dtr-tenths-ms(bytes, bw)) ++ " ms a token",
+    "[dsv4-token] the Swift runner's reference (history metal_dsv4_stack.sh, receipts): 38.17 ms a token, about 1,510 barriers, 28 tokens a second warm; this row set is what the Form path reads against it",
+    "[dsv4-token] the wired curve: wired memory is read after every layer of the first " ++ dtr-opts-watch(opts).str() ++ " tokens (the tap, no sync) and the encoding stops before the machine is at risk: memory unreadable, host-memory-low, wired above " ++ dtr-opts-pct(opts).str()
+     ++ " percent of memory (" ++ dvr-gib(mg-pct(128 * mg-gib(), dtr-opts-pct(opts))) ++ " on 128 GiB), available under the reserve, 20 minutes; the receipt keeps the curve and where it stopped",
+    dvr-layers-line(m),
+    "[dsv4-token] " ++ dvr-organs-text(organs),
+    dvr-backoff-line(),
+    "[dsv4-token] receipt: one dated row appended to " ++ dvr-text(opts, "receipt", dtr-receipt-path()),
+    "[dsv4-token] DRY ends"];
+  }
+  // ---- the run (the door; never run by a band) -------------------------------------------------------------------------------------------------
+  def dtr-steps-before(env) = [() => dvr-stage(env, "compile", dvr-bound(), () => dvr-do-compile(env)),
+   () => dvr-stage(env, "map", dvr-est-map(record_get(env, "m"), record_get(env, "cap")), () => dvr-do-map(env)),
+   () => dvr-stage(env, "state", dvl-kv-total(record_get(env, "m"), record_get(env, "cap")), () => dvr-do-state(env))];
+  def dtr-record(denv, wenv, status, reason, opts) = record_new(0, "status", status, "reason", reason, "file", record_get(denv, "file"), "cap", record_get(denv, "cap"), "pct", record_get(wenv, "pct"), "watch", record_get(wenv, "watch"),
+    "shared", record_get(denv, "shared"), "organs", record_get(denv, "organs"), "moved", record_get(denv, "moved"), "denied", record_get(denv, "denied"), "vmwin", dvr-window-vm-json(mg-sense(), record_get(denv, "vm0"), dvr-stored-pages()),
+    "stages", record_get(denv, "log"), "stop", record_get(wenv, "stop"), "curve", record_get(wenv, "curve"), "rows", record_get(wenv, "rows"), "elapsed", dvr-elapsed(denv));
+  def dtr-finish(denv, wenv, opts, why) {
+   let cleared = dkr-hz-tap-clear();
+   let held = dvr-release(denv);
+   let status = why == "" ? "completed" : "held";
+   let r = dtr-record(denv, wenv, status, why == "" ? (held == 0 ? "released" : "handles-held") : why, opts);
+   let wrote = dvr-append(dvr-text(opts, "receipt", dtr-receipt-path()), dtr-receipt-row(dvr-date(), now_unix_ms(), r));
+   let said1 = print_str(dtr-summary-line(record_get(wenv, "rows")));
+   let said2 = print_str("[dsv4-token] " ++ status ++ ": " ++ record_get(r, "reason") ++ "; handles still held " ++ held.str() ++ "; wired curve of " ++ len(record_get(wenv, "curve")).str() ++ " readings; receipt row " ++ (wrote >= 0 ? "written" : "NOT written"));
+   status == "completed" && held == 0 ? 0 : 1;
+  }
+  // the stages as the validation door runs them, then the walk
+  def dtr-go-walk(denv, wenv, opts) {
+   let before = try dvr-seq(dtr-steps-before(denv)) catch "walker-stop";
+   before != "" ? before : (try dtr-walk(wenv, dvr-ctx(denv), dvr-sts(denv), dtr-opts-ids(opts), dtr-opts-steps(opts)) catch "walker-stop");
+  }
+  def dtr-window-run(opts, file, size, m, shared, cap) {
+   let organs = dvr-organs();
+   let vm0 = mg-sense();
+   let denv = dvr-env(file, m, size, shared, cap, dls-cache-experts(), mg-wired(vm0), shared + mg-kv-margin());
+   let noted = record_set(denv, "organs", dvr-organs-json(organs));
+   let more = record_set(denv, "vm0", vm0);
+   let wenv = dtr-env(dtr-opts-pct(opts), dtr-opts-watch(opts), host_monotonic_ms(), mg-wired(vm0));
+   let said = print_str("[dsv4-token] " ++ dvr-organs-text(organs));
+   // a stop inside a stage is a backtrack point, not the end of the door: it reads as a hold, and the handles, the lease and the receipt follow
+   let why = dtr-go-walk(denv, wenv, opts);
+   dtr-finish(denv, wenv, opts, why);
+  }
+  def dtr-window-leased(opts, file, size, m) {
+   let cap = dvr-int(opts, "cap", dvr-default-cap());
+   let shared = dls-shared(m, dls-cache-experts(), cap);
+   let granted = mg-lease("dsv4 token run", file, shared, mg-kv-margin());
+   !mg-granted?(granted) ? dvr-refuse(mg-line("dsv4 token run", shared + mg-kv-margin(), granted), file) : dtr-window-run(opts, file, size, m, shared, cap);
+  }
+  def dtr-window(opts) {
+   let file = dvr-text(opts, "file", dvr-file());
+   let size = file_size(file);
+   let src = size > 24 ? dvl-src(file) : "";
+   let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
+   let facts = dvr-facts();
+   !(!nothing?(m) && dvl-consistent?(m)) ? dvr-refuse("the file is not a deepseek4 GGUF with a consistent layout", file) : !dvr-facts-clear?(facts) ? dvr-refuse(flp-join(dvr-facts-lines(facts), " | "), file) : len(dvr-gaps(m)) > 0 ? dvr-refuse("the driver cannot run this header: " ++ flp-join(dvr-gaps(m), "; "), file) : dtr-window-leased(opts, file, size, m);
+  }
+  def dtr-dry(opts) {
+   let file = dvr-text(opts, "file", dvr-file());
+   let size = file_size(file);
+   let src = size > 24 ? dvl-src(file) : "";
+   let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
+   nothing?(m) ? dvr-refuse("dry: the file is not a deepseek4 GGUF (or is absent): " ++ file, file) : dvr-said(dtr-plan-lines(m, size, opts, dvr-organs()));
+  }
+  // the door: the dry plan, or the run
+  def dtr-main() {
+   let opts = dvr-options();
+   dvr-dry?(opts) ? dtr-dry(opts) : dtr-window(opts);
+  }
+ }
+ 0;
+}
