@@ -1,0 +1,167 @@
+; anf-lower-band.fk -- the argument-order contract, written in Form: a defn's own nodes in ordered single-assignment rows,
+; and an interpreter over those rows that runs each effect exactly as the cold walker does.
+;
+; Found 2026-10-03 (hot-recipe-effects-band): the C loop lane inlined a callee by substituting argument expressions and
+; dropped an argument the callee ignores -- call-by-name inside a call-by-value language. Every Form lane declined such
+; programs by vocabulary, not by contract: no lane had an IR in which "evaluate each argument once, in order, before the
+; call" was a statement. anf-lower.bml is that IR (kernel_ast defn -> rows; every call's arguments bound to temporaries
+; before the call row; an if keeps its arms as nested blocks), and anf-eval is the contract as an interpreter.
+;
+; An effect here is one append of a distinct byte to a scratch file (host_file_append_bytes), read back with
+; host_file_read_text. The shapes live in tests/arg-order-shapes-fixture.bml. Each runs through the cold walker (N=50,
+; under the C lane's heat of 1024) and through anf-eval at N=50 and N=2500 in this one process. The byte SEQUENCE must
+; match, not just its length. Nothing here runs a shape past the walker's heat: the verdict is the same on any binary.
+;
+;   1    native-t5 pair: a mutually recursive pair, the next ignoring its first parameter, whose argument is a call
+;        carrying two appends -- anf-eval at 5 rounds equals the walker; at 250 rounds equals the contract sequence
+;   2    a loop passing an effectful call to a callee that never reads it
+;   4    a callee that reads the parameter twice: the argument runs once
+;   8    a callee that reads the parameter only in a branch never taken: the argument still runs
+;   16   an unread let bound to an effect
+;   32   nested pairs of effectful arguments: left to right, depth first, answers the walker's number
+;   64   pure arguments: the sum is exact and the defn lowers
+;   128  the rows themselves: the effectful argument's row precedes the call row that takes it, in order
+;   256  an arm not taken runs nothing: its effect lives in the arm's block, run only when the arm is taken
+;   512  declines: a closure, an unsupported primitive, an unknown callee, an effect before an unknown node -- each
+;        answers nothing(), never rows, and anf-why names the node
+;   1024 three effectful arguments, the callee reading only the middle one: all three run, in order, each iteration
+;
+; Verdict 2047 when every claim lands.
+; PROOF LEVEL: FKWU-STAGED (kernel_ast reads fkwu's own program; the host file doors answer here)
+; preflight-exec: forbidden
+import form-stdlib/bml/anf-lower.bml;
+import form-stdlib/tests/arg-order-shapes-fixture.bml;
+section [form.bml] {
+    def alb-anf-run(name, args) {
+        let prog = anf-program(name);
+        nothing?(prog) ? nothing() : anf-eval(prog, anf-idx-of(name), args);
+    }
+    // the first top-level row that calls idx at or after k, or -1
+    def alb-find-call(rows, idx, k) = k >= len(rows) ? -1 : (String) rows[k][0] == "call" && (Comparable) rows[k][2] == idx ? k : alb-find-call(rows, idx, k + 1);
+    def alb-has-temp?(temps, t) = nil?(temps) ? 0 : (Comparable) temps[0] == t ? 1 : alb-has-temp?(temps[1:], t);
+
+    let p1 = alb-path("s1.txt");
+    let p2 = alb-slot("s2.txt");
+    let p3 = alb-slot("s3.txt");
+    let p4 = alb-slot("s4.txt");
+    let p5 = alb-slot("s5.txt");
+    let p6 = alb-slot("s6.txt");
+    let p8 = alb-slot("s8.txt");
+    let p9 = alb-slot("s9.txt");
+    let p1a = alb-path("s1a.txt");
+    let p2a = alb-slot("s2a.txt");
+    let p3a = alb-slot("s3a.txt");
+    let p4a = alb-slot("s4a.txt");
+    let p5a = alb-slot("s5a.txt");
+    let p6a = alb-slot("s6a.txt");
+    let p9a = alb-slot("s9a.txt");
+    let z0 = [alb-reset(p1), alb-reset(p2), alb-reset(p3), alb-reset(p4), alb-reset(p5), alb-reset(p6), alb-reset(p8), alb-reset(p9), alb-reset(p1a), alb-reset(p2a), alb-reset(p3a), alb-reset(p4a), alb-reset(p5a), alb-reset(p6a), alb-reset(p9a)];
+    let ls12 = alb-layers(1, []);
+
+    // the cold walker, N=50 (5 rounds for the pair)
+    let w1 = s1-outer([p1, ls12], 0, 5);
+    let w2 = s2-go(p2, 0, 50);
+    let w3 = s3-go(p3, 0, 50);
+    let w4 = s4-go(p4, 0, 50);
+    let w5 = s5-go(p5, 0, 50);
+    let w6 = s6-go(p6, 0, 50, 0);
+    let w7 = s7-go(0, 50, 0);
+    let w9 = s9-pick(0, 0, 0, p9, 0, 50, 0);
+    let wb1 = alb-read(p1);
+    let wb2 = alb-read(p2);
+    let wb3 = alb-read(p3);
+    let wb4 = alb-read(p4);
+    let wb5 = alb-read(p5);
+    let wb6 = alb-read(p6);
+    let wb9 = alb-read(p9);
+
+    // anf-eval, N=50, into the second set of files
+    let a1 = alb-anf-run("s1-outer", [[p1a, ls12], 0, 5]);
+    let a2 = alb-anf-run("s2-go", [p2a, 0, 50]);
+    let a3 = alb-anf-run("s3-go", [p3a, 0, 50]);
+    let a4 = alb-anf-run("s4-go", [p4a, 0, 50]);
+    let a5 = alb-anf-run("s5-go", [p5a, 0, 50]);
+    let a6 = alb-anf-run("s6-go", [p6a, 0, 50, 0]);
+    let a7 = alb-anf-run("s7-go", [0, 50, 0]);
+    let a9 = alb-anf-run("s9-pick", [0, 0, 0, p9a, 0, 50, 0]);
+    let ab1 = alb-read(p1a);
+    let ab2 = alb-read(p2a);
+    let ab3 = alb-read(p3a);
+    let ab4 = alb-read(p4a);
+    let ab5 = alb-read(p5a);
+    let ab6 = alb-read(p6a);
+    let ab9 = alb-read(p9a);
+
+    // anf-eval, N=2500 (250 rounds for the pair), into fresh files
+    let z1 = [alb-reset(p1a), alb-reset(p2a), alb-reset(p3a), alb-reset(p4a), alb-reset(p5a), alb-reset(p6a), alb-reset(p9a)];
+    let h1 = alb-anf-run("s1-outer", [[p1a, ls12], 0, 250]);
+    let h2 = alb-anf-run("s2-go", [p2a, 0, 2500]);
+    let h3 = alb-anf-run("s3-go", [p3a, 0, 2500]);
+    let h4 = alb-anf-run("s4-go", [p4a, 0, 2500]);
+    let h5 = alb-anf-run("s5-go", [p5a, 0, 2500]);
+    let h6 = alb-anf-run("s6-go", [p6a, 0, 2500, 0]);
+    let h7 = alb-anf-run("s7-go", [0, 2500, 0]);
+    let h9 = alb-anf-run("s9-pick", [0, 0, 0, p9a, 0, 2500, 0]);
+    let hb1 = alb-read(p1a);
+    let hb2 = alb-read(p2a);
+    let hb3 = alb-read(p3a);
+    let hb4 = alb-read(p4a);
+    let hb5 = alb-read(p5a);
+    let hb6 = alb-read(p6a);
+    let hb9 = alb-read(p9a);
+    let e50 = alb-two-seq(0, 50, []);
+    let e2500 = alb-two-seq(0, 2500, []);
+    let e1 = alb-rounds(0, 250, []);
+    let e6 = alb-repeat("CDE", 2500, []);
+    let e9 = alb-repeat("ABC", 2500, []);
+    let e9c = alb-repeat("ABC", 50, []);
+
+    let shown = print(["anf-lower", "bytes walker/anf at 50", [len(wb1), len(ab1), len(wb2), len(ab2), len(wb6), len(ab6), len(wb9), len(ab9)], "anf at 2500", [len(hb1), len(hb2), len(hb3), len(hb4), len(hb5), len(hb6), len(hb9)], "values", [w1, a1, w6, a6, h6, w7, a7, h7, w9, a9, h9]]);
+
+    // the rows themselves: s2-go holds an if whose else arm calls alb-two before it calls s2-ign, passing its answer
+    let f2 = anf-lower("s2-go");
+    let two-idx = anf-idx-of("alb-two");
+    let ign-idx = anf-idx-of("s2-ign");
+    let els = nothing?(f2) ? [[], 0] : f2[3][len(f2[3]) - 1][4];
+    let k-two = alb-find-call(els[0], two-idx, 0);
+    let k-ign = alb-find-call(els[0], ign-idx, 0);
+    let two-temp = k-two < 0 ? -1 : els[0][k-two][1];
+    let rows-ok = (k-two >= 0) && ((k-ign > k-two) && alb-has-temp?(els[0][k-ign][3], two-temp));
+    let shown2 = print(["anf-lower", "s2-go rows", nothing?(f2) ? "nothing" : anf-show(f2)]);
+
+    // an arm not taken runs nothing: s8-arm's effect row sits inside the then block
+    let q0 = alb-reset(p8);
+    let arm = alb-anf-run("s8-arm", [1, p8]);
+    let after-untaken = len(alb-read(p8));
+    let arm2 = alb-anf-run("s8-arm", [5, p8]);
+    let after-taken = len(alb-read(p8));
+    let walker-untaken = s8-arm(1, p8);
+    let after-walker = len(alb-read(p8));
+    let f8 = anf-lower("s8-arm");
+    let top-has-eff = nothing?(f8) ? 1 : (alb-find-call(f8[3], anf-idx-of("alb-eff"), 0) >= 0 ? 1 : 0);
+    let z2 = alb-reset(p8);
+
+    // declines
+    let c1 = anf-lower("d1-closure");
+    let c2 = anf-lower("d2-sqrt");
+    let c3 = anf-lower("d3-before");
+    let c4 = anf-lower("d4-native");
+    let c5 = anf-lower("no-such-defn-here");
+    let prog3 = anf-program("d3-before");
+    let shown3 = print(["anf-lower", "declines", [anf-why("d1-closure"), anf-why("d2-sqrt"), anf-why("d3-before"), anf-why("d4-native"), anf-why("no-such-defn-here")]]);
+
+    let z3 = [alb-reset(p1), alb-reset(p2), alb-reset(p3), alb-reset(p4), alb-reset(p5), alb-reset(p6), alb-reset(p9), alb-reset(p1a), alb-reset(p2a), alb-reset(p3a), alb-reset(p4a), alb-reset(p5a), alb-reset(p6a), alb-reset(p9a)];
+    let verdict = alb-bit(((Comparable) wb1 == ab1) && (((Comparable) len(wb1) == 130) && (((Comparable) hb1 == e1) && ((Comparable) w1 == a1))), 1)
+        + alb-bit(((Comparable) wb2 == ab2) && (((Comparable) ab2 == e50) && ((Comparable) hb2 == e2500)), 2)
+        + alb-bit(((Comparable) wb3 == ab3) && (((Comparable) ab3 == e50) && ((Comparable) hb3 == e2500)), 4)
+        + alb-bit(((Comparable) wb4 == ab4) && (((Comparable) ab4 == e50) && ((Comparable) hb4 == e2500)), 8)
+        + alb-bit(((Comparable) wb5 == ab5) && (((Comparable) ab5 == e50) && ((Comparable) hb5 == e2500)), 16)
+        + alb-bit(((Comparable) wb6 == ab6) && (((Comparable) hb6 == e6) && (((Comparable) w6 == a6) && ((Comparable) h6 == 2500 * 67068069))), 32)
+        + alb-bit(((Comparable) w7 == a7) && (((Comparable) h7 == 3126250) && (!nothing?(anf-lower("s7-go")))), 64)
+        + alb-bit(rows-ok, 128)
+        + alb-bit(((Comparable) after-untaken == 0) && (((Comparable) after-taken == 1) && (((Comparable) after-walker == 1) && ((Comparable) top-has-eff == 0))), 256)
+        + alb-bit(nothing?(c1) && (nothing?(c2) && (nothing?(c3) && (nothing?(c4) && (nothing?(c5) && nothing?(prog3))))), 512)
+        + alb-bit(((Comparable) wb9 == ab9) && (((Comparable) ab9 == e9c) && (((Comparable) hb9 == e9) && (((Comparable) w9 == a9) && ((Comparable) h9 == 66 * 2499)))), 1024);
+    let end = print(["anf-lower-band", "verdict", verdict]);
+    verdict;
+}

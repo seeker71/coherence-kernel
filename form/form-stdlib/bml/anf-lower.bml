@@ -1,0 +1,215 @@
+// anf-lower.bml — a Form body's own nodes in ordered single-assignment form, in Form.
+// The front end every other lane can stand on. It reads a defn through kernel_ast exactly as gpu-lower does
+// (its row, its body node, each node's four words, a literal's text) and answers rows in which every call's
+// arguments are bound to temporaries IN ORDER BEFORE the call row. "An argument is evaluated once, in order,
+// before the call, whether or not the callee reads it" is a property of these rows, not of any lowering:
+// a lowering that wants to drop an argument has no expression to substitute, only a temporary already bound.
+//
+//   a defn is  ["anf", idx, arity, rows, result]   temporaries 0 .. arity-1 are the parameters
+//   a row is   ["int" t v] ["flt" t text] ["str" t text] ["nil" t]       a constant
+//              ["let" t slot src]                                       a let binds its value's temporary
+//              ["prim" t op [temps]]                                    a pure or effectful primitive
+//              ["call" t callee-idx [temps]]                            a call to another defn
+//              ["if" t cond then else]                                  then, else: [rows result], nested blocks
+// An argument inside an untaken arm is not evaluated because its rows live in the arm. An unknown node, a
+// closure, a short-circuit operator, a native the rows do not name: the whole defn answers nothing(), never a
+// partial program and never an empty one. anf-why says which node and why, in gpu-lower's wording.
+//
+// anf-eval is the contract written as an interpreter over the rows: pure Form, one pass, each row once.
+// It is the reference the lanes are compared against (tests/anf-lower-band.fk, tests/arg-order-lane-parity-band.fk).
+import form-stdlib/core.fk;
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+    class AnfLower {
+        // ---- the door to this process's program (gpu-lower's, kept the same) ----
+        def anf-pid() = host_pid();
+        def anf-node(k) = kernel_ast(anf-pid(), k);
+        // a node word that names no node: nothing, or kernel_ast's own negative word for an absent child
+        def anf-absent?(k) = nothing?(k) ? 1 : (k < 0);
+        def anf-tag(k) = anf-absent?(k) ? nothing() : anf-node(k)[0];
+        def anf-a(k) = anf-node(k)[1];
+        def anf-b(k) = anf-node(k)[2];
+        def anf-c(k) = anf-node(k)[3];
+        def anf-str(k) = kernel_ast(anf-pid(), ["str", k]);
+        def anf-fn-count() = kernel_ast(anf-pid(), -1)[2];
+        def anf-row(j) = kernel_ast(anf-pid(), ["defn", j]);
+        def anf-row-name(row) = kernel_ast(anf-pid(), ["src", row[0], row[1]]);
+        def anf-row-idx(row) = row[2];
+        def anf-row-body(row) = row[3];
+        def anf-find-onto(name, j, n) = j >= n ? nothing() : anf-find-at(name, j, n, anf-row(j));
+        def anf-find-at(name, j, n, row) = nothing?(row) ? anf-find-onto(name, j + 1, n) : (String) anf-row-name(row) == name ? row : anf-find-onto(name, j + 1, n);
+        def anf-find(name) = anf-find-onto(name, 0, anf-fn-count());
+        def anf-callee-row(idx) = anf-callee-onto(idx, 0, anf-fn-count());
+        def anf-callee-onto(idx, j, n) = j >= n ? nothing() : anf-callee-at(idx, j, n, anf-row(j));
+        def anf-callee-at(idx, j, n, row) = nothing?(row) ? anf-callee-onto(idx, j + 1, n) : (Comparable) anf-row-idx(row) == idx ? row : anf-callee-onto(idx, j + 1, n);
+        def anf-name-of(idx) {
+            let row = anf-callee-row(idx);
+            nothing?(row) ? "" : anf-row-name(row);
+        }
+        def anf-param?(k) = (Comparable) anf-tag(k) == 110;
+        def anf-slot(k) = anf-a(anf-a(k));
+        def anf-args-onto(cell, acc) = anf-absent?(cell) ? reverse(acc) : anf-args-onto(anf-b(cell), cons(anf-a(cell), acc));
+        // the argument nodes of a call: tag 12 holds one, tag 241 a chain of cells
+        def anf-args(k) = (Comparable) anf-tag(k) == 12 ? [anf-b(k)] : anf-args-onto(anf-b(k), []);
+
+        // ---- the parameter count, read off the defn's own nodes (the source text is not there once an image is cached) ----
+        // A body that binds or counts locals sits under a wrapper (tag 111) whose first word names its highest slot;
+        // parameters take slots 0 .. n-1 and lets the slots after them, so the first let's slot IS the count, and a body
+        // with no let has maxslot + 1. A body with no wrapper has only the parameters it reads.
+        def anf-arity(row) {
+            let body = anf-row-body(row);
+            let lets = anf-min-let-slot(body, nothing());
+            nothing?(lets) ? anf-frame-arity(body) : lets;
+        }
+        def anf-frame-arity(body) = (Comparable) anf-tag(body) == 111 ? anf-a(anf-a(body)) + 1 : anf-slot-span(body);
+        // the child nodes of a node by tag: literals and parameters carry values, not children
+        def anf-kids(k) {
+            let t = anf-tag(k);
+            ((Comparable) t == 109) ? [anf-b(k), anf-c(k)] : ((Comparable) t == 111) || ((Comparable) t == 194) ? [anf-b(k)] : (Comparable) t == 6 ? [anf-a(k), anf-b(k), anf-c(k)] : ((Comparable) t == 241) || ((Comparable) t == 12) ? anf-args(k) : nothing?(t) ? [] : nothing?(anf-prim-name(t)) ? [] : anf-prim-args(t, k);
+        }
+        def anf-min-let-slot(k, best) = anf-absent?(k) ? best : anf-min-let-kids(anf-kids(k), (Comparable) anf-tag(k) == 109 ? anf-lower-of(best, anf-a(anf-a(k))) : best);
+        def anf-min-let-kids(ks, best) = nil?(ks) ? best : anf-min-let-kids(ks[1:], anf-min-let-slot(ks[0], best));
+        def anf-lower-of(best, s) = nothing?(best) ? s : (s < best ? s : best);
+        def anf-slot-span(k) = anf-absent?(k) ? 0 : anf-param?(k) ? (anf-slot(k) + 1) : anf-slot-span-kids(anf-kids(k), 0);
+        def anf-slot-span-kids(ks, m) = nil?(ks) ? m : anf-slot-span-kids(ks[1:], anf-larger(anf-slot-span(ks[0]), m));
+        def anf-larger(a, b) = a > b ? a : b;
+
+        // ---- results: list(1, value) or list(0, reason) ----
+        def anf-ok(v) = [1, v];
+        def anf-no(why) = [0, why];
+        def anf-ok?(r) = (Comparable) r[0] == 1;
+        def anf-val(r) = r[1];
+
+        // ---- the environment: slot -> temporary ----
+        def anf-env-get(env, slot) = nil?(env) ? nothing() : (Comparable) env[0][0] == slot ? env[0][1] : anf-env-get(env[1:], slot);
+        def anf-param-env(arity, k, env) = k >= arity ? env : anf-param-env(arity, k + 1, cons([k, k], env));
+
+        // ---- the vocabulary: node tags that have a row, and the arity of each ----
+        def anf-prim-name(t) = (Comparable) t == 3 ? "add" : (Comparable) t == 4 ? "sub" : (Comparable) t == 42 ? "mul" : (Comparable) t == 10 ? "div" : (Comparable) t == 11 ? "mod" : (Comparable) t == 5 ? "le" : (Comparable) t == 102 ? "eq" : (Comparable) t == 103 ? "lt" : (Comparable) t == 19 ? "cons" : (Comparable) t == 27 ? "concat" : (Comparable) t == 61 ? "append-bytes" : (Comparable) t == 20 ? "head" : (Comparable) t == 21 ? "tail" : (Comparable) t == 22 ? "len" : (Comparable) t == 72 ? "not" : nothing();
+        def anf-unary?(name) = ((String) name == "head") || (((String) name == "tail") || (((String) name == "len") || (((String) name == "not") || ((String) name == "nil?"))));
+        // the operator providers every BML operator calls: their rows are the primitive they specialise to
+        def anf-provider(name) = (String) name == "nil?" ? "nil?" : (String) name == "bml-value-first" ? "head" : (String) name == "bml-value-tail" ? "tail" : (String) name == "bml-value-index" ? "index" : (String) name == "bml-value-add" ? "add" : (String) name == "bml-value-equal" ? "eq" : nothing();
+
+        // ---- expressions: list(1, [rows, temp, next-temp]) or list(0, reason) ----
+        def anf-leaf(row, n) = anf-ok([[row], n, n + 1]);
+        def anf-expr(k, env, n) {
+            let t = anf-tag(k);
+            nothing?(t) ? anf-no("no node where an expression stands") : (Comparable) t == 1 ? anf-leaf(["int", n, anf-a(k)], n) : (Comparable) t == 53 ? anf-leaf(["flt", n, anf-str(anf-a(k))], n) : (Comparable) t == 24 ? anf-leaf(["str", n, anf-str(k)], n) : (Comparable) t == 18 ? anf-leaf(["nil", n], n) : (Comparable) t == 110 ? anf-param(k, env, n) : ((Comparable) t == 111) || ((Comparable) t == 194) ? anf-expr(anf-b(k), env, n) : (Comparable) t == 109 ? anf-let(k, env, n) : (Comparable) t == 6 ? anf-if(k, env, n) : ((Comparable) t == 241) || ((Comparable) t == 12) ? anf-call(k, env, n) : nothing?(anf-prim-name(t)) ? anf-no("no row for node tag " + t.str()) : anf-prim(anf-prim-name(t), anf-prim-args(t, k), env, n);
+        }
+        def anf-prim-args(t, k) = anf-unary?(anf-prim-name(t)) ? [anf-a(k)] : [anf-a(k), anf-b(k)];
+        def anf-param(k, env, n) {
+            let s = anf-env-get(env, anf-slot(k));
+            nothing?(s) ? anf-no("a parameter slot the defn does not bind: " + anf-slot(k).str()) : anf-ok([[], s, n]);
+        }
+        // a let binds its value's temporary to its slot; the value's rows come first, in order
+        def anf-let(k, env, n) {
+            let v = anf-expr(anf-b(k), env, n);
+            let slot = anf-a(anf-a(k));
+            let m = anf-ok?(v) ? anf-val(v)[2] : n;
+            let body = anf-ok?(v) ? anf-expr(anf-c(k), cons([slot, m], env), m + 1) : v;
+            anf-ok?(body) ? anf-ok([append(append(anf-val(v)[0], [["let", m, slot, anf-val(v)[1]]]), anf-val(body)[0]), anf-val(body)[1], anf-val(body)[2]]) : body;
+        }
+        // the condition's rows, then an if whose arms are blocks: what an arm holds runs only when the arm is taken
+        def anf-if(k, env, n) {
+            let c = anf-expr(anf-a(k), env, n);
+            let th = anf-ok?(c) ? anf-expr(anf-b(k), env, anf-val(c)[2]) : c;
+            let el = anf-ok?(th) ? anf-expr(anf-c(k), env, anf-val(th)[2]) : th;
+            anf-ok?(el) ? anf-if-join(anf-val(c), anf-val(th), anf-val(el)) : el;
+        }
+        def anf-if-join(c, th, el) = anf-ok([append(c[0], [["if", el[2], c[1], [th[0], th[1]], [el[0], el[1]]]]), el[2], el[2] + 1]);
+        // every argument bound to a temporary, left to right, before the row that uses them
+        def anf-exprs(ks, env, n, rows, temps) = nil?(ks) ? anf-ok([rows, reverse(temps), n]) : anf-exprs-at(ks, env, rows, temps, anf-expr(ks[0], env, n));
+        def anf-exprs-at(ks, env, rows, temps, r) = anf-ok?(r) ? anf-exprs(ks[1:], env, anf-val(r)[2], append(rows, anf-val(r)[0]), cons(anf-val(r)[1], temps)) : r;
+        def anf-prim(op, argnodes, env, n) {
+            let a = anf-exprs(argnodes, env, n, [], []);
+            anf-ok?(a) ? anf-ok([append(anf-val(a)[0], [["prim", anf-val(a)[2], op, anf-val(a)[1]]]), anf-val(a)[2], anf-val(a)[2] + 1]) : a;
+        }
+        def anf-call(k, env, n) {
+            let idx = anf-a(k);
+            let name = anf-name-of(idx);
+            let op = anf-provider(name);
+            let args = anf-args(k);
+            let a = anf-exprs(args, env, n, [], []);
+            nothing?(anf-callee-row(idx)) ? anf-no("a call to something that is not a defn, callee " + idx.str()) : anf-ok?(a) ? anf-ok([append(anf-val(a)[0], [nothing?(op) ? ["call", anf-val(a)[2], idx, anf-val(a)[1]] : ["prim", anf-val(a)[2], op, anf-val(a)[1]]]), anf-val(a)[2], anf-val(a)[2] + 1]) : a;
+        }
+
+        // ---- lowering a named defn: list(1, anf) or list(0, reason) ----
+        def anf-unwrap(k) = ((Comparable) anf-tag(k) == 111) || ((Comparable) anf-tag(k) == 194) ? anf-unwrap(anf-b(k)) : k;
+        def anf-lower-row(row) {
+            let arity = anf-arity(row);
+            let r = anf-expr(anf-unwrap(anf-row-body(row)), anf-param-env(arity, 0, []), arity);
+            anf-ok?(r) ? anf-ok(["anf", anf-row-idx(row), arity, anf-val(r)[0], anf-val(r)[1]]) : r;
+        }
+        def anf-lower-named(name) {
+            let row = anf-find(name);
+            nothing?(row) ? anf-no("no defn named " + name) : anf-lower-row(row);
+        }
+        // the public doors: a defn's rows, or nothing(); and when nothing(), why
+        def anf-lower(name) {
+            let r = anf-lower-named(name);
+            anf-ok?(r) ? anf-val(r) : nothing();
+        }
+        def anf-why(name) {
+            let r = anf-lower-named(name);
+            anf-ok?(r) ? "" : anf-val(r);
+        }
+
+        // ---- the program: a defn and every defn it calls, each lowered once ----
+        def anf-callees-of(rows, acc) = nil?(rows) ? acc : anf-callees-of(rows[1:], anf-row-callees(rows[0], acc));
+        def anf-row-callees(row, acc) = (String) row[0] == "call" ? cons(row[2], acc) : (String) row[0] == "if" ? anf-callees-of(row[4][0], anf-callees-of(row[3][0], acc)) : acc;
+        def anf-done?(done, idx) = nil?(done) ? 0 : (Comparable) done[0][1] == idx ? 1 : anf-done?(done[1:], idx);
+        def anf-program-go(todo, done) {
+            nil?(todo) ? anf-ok(done) : anf-done?(done, todo[0]) ? anf-program-go(todo[1:], done) : anf-program-step(todo, done, anf-callee-row(todo[0]));
+        }
+        def anf-program-step(todo, done, row) {
+            nothing?(row) ? anf-no("a call to something that is not a defn, callee " + todo[0].str()) : anf-program-next(todo, done, anf-lower-row(row));
+        }
+        def anf-program-next(todo, done, r) = anf-ok?(r) ? anf-program-go(append(todo[1:], anf-callees-of(anf-val(r)[3], [])), cons(anf-val(r), done)) : r;
+        def anf-program-named(name) {
+            let row = anf-find(name);
+            nothing?(row) ? anf-no("no defn named " + name) : anf-program-go([anf-row-idx(row)], []);
+        }
+        def anf-program(name) {
+            let r = anf-program-named(name);
+            anf-ok?(r) ? anf-val(r) : nothing();
+        }
+        def anf-program-why(name) {
+            let r = anf-program-named(name);
+            anf-ok?(r) ? "" : anf-val(r);
+        }
+        def anf-idx-of(name) {
+            let row = anf-find(name);
+            nothing?(row) ? nothing() : anf-row-idx(row);
+        }
+        def anf-prog-find(prog, idx) = nil?(prog) ? nothing() : (Comparable) prog[0][1] == idx ? prog[0] : anf-prog-find(prog[1:], idx);
+
+        // ---- the interpreter: each row once, in order; an if runs only the arm it takes ----
+        // env: pairs (temp value), newest first. A callee runs in a fresh env holding only its arguments.
+        def anf-eval(prog, idx, args) {
+            let f = anf-prog-find(prog, idx);
+            nothing?(f) ? nothing() : anf-run-block(prog, f[3], f[4], anf-args-env(args, 0, f[2], []));
+        }
+        // the first `arity` arguments are the parameters; a trailing parameter the body never reads is not counted
+        def anf-args-env(args, k, arity, env) = nil?(args) ? env : k >= arity ? env : anf-args-env(args[1:], k + 1, arity, cons([k, args[0]], env));
+        def anf-run-block(prog, rows, res, env) = anf-env-get(anf-run-rows(prog, rows, env), res);
+        def anf-run-rows(prog, rows, env) = nil?(rows) ? env : anf-run-rows(prog, rows[1:], anf-step(prog, rows[0], env));
+        def anf-get-all(temps, env) = nil?(temps) ? [] : cons(anf-env-get(env, temps[0]), anf-get-all(temps[1:], env));
+        def anf-bind(env, t, v) = cons([t, v], env);
+        def anf-step(prog, row, env) {
+            let op = row[0];
+            (String) op == "int" ? anf-bind(env, row[1], row[2]) : (String) op == "flt" ? anf-bind(env, row[1], str_to_float(row[2])) : (String) op == "str" ? anf-bind(env, row[1], row[2]) : (String) op == "nil" ? anf-bind(env, row[1], []) : (String) op == "let" ? anf-bind(env, row[1], anf-env-get(env, row[3])) : (String) op == "prim" ? anf-bind(env, row[1], anf-prim-eval(row[2], anf-get-all(row[3], env))) : (String) op == "call" ? anf-bind(env, row[1], anf-eval(prog, row[2], anf-get-all(row[3], env))) : (String) op == "if" ? anf-bind(env, row[1], anf-run-arm(prog, anf-env-get(env, row[2]), row[3], row[4], env)) : env;
+        }
+        def anf-run-arm(prog, cond, th, el, env) = (Comparable) cond == 0 ? anf-run-block(prog, el[0], el[1], env) : anf-run-block(prog, th[0], th[1], env);
+        def anf-bool(b) = b ? 1 : 0;
+        // the primitives, each the operator the walker applies to the same values
+        def anf-prim-eval(op, v) {
+            (String) op == "add" ? v[0] + v[1] : (String) op == "sub" ? v[0] - v[1] : (String) op == "mul" ? v[0] * v[1] : (String) op == "div" ? v[0] / v[1] : (String) op == "mod" ? v[0] % v[1] : (String) op == "le" ? anf-bool((Comparable) v[0] <= v[1]) : (String) op == "lt" ? anf-bool((Comparable) v[0] < v[1]) : (String) op == "eq" ? anf-bool(v[0] == v[1]) : (String) op == "cons" ? cons(v[0], v[1]) : (String) op == "concat" ? str_concat(v[0], v[1]) : (String) op == "append-bytes" ? host_file_append_bytes(v[0], v[1]) : (String) op == "head" ? head(v[0]) : (String) op == "tail" ? tail(v[0]) : (String) op == "len" ? len(v[0]) : (String) op == "not" ? anf-bool((Comparable) v[0] == 0) : (String) op == "nil?" ? anf-bool(nil?(v[0])) : (String) op == "index" ? nth(v[0], v[1]) : nothing();
+        }
+
+        // ---- the rows as text, nested blocks indented ----
+        def anf-show(f) = str-join-with(anf-show-rows(f[3], "  "), byte_to_str(10)) + (byte_to_str(10) + ("  result t" + f[4].str()));
+        def anf-show-rows(rows, ind) = nil?(rows) ? [] : append(anf-show-row(rows[0], ind), anf-show-rows(rows[1:], ind));
+        def anf-show-row(row, ind) = (String) row[0] == "if" ? append([ind + ("t" + (row[1].str() + (" = if t" + (row[2].str() + ":")))), ind + "  then"], append(anf-show-rows(row[3][0], ind + "    "), append([ind + ("    -> t" + row[3][1].str()), ind + "  else"], append(anf-show-rows(row[4][0], ind + "    "), [ind + ("    -> t" + row[4][1].str())])))) : [ind + ("t" + (row[1].str() + (" = " + anf-row-text(row))))];
+        def anf-row-text(row) = (String) row[0] == "int" ? row[2].str() : (String) row[0] == "flt" ? row[2] : (String) row[0] == "str" ? (byte_to_str(34) + (row[2] + byte_to_str(34))) : (String) row[0] == "nil" ? "[]" : (String) row[0] == "let" ? ("let s" + (row[2].str() + (" := t" + row[3].str()))) : (String) row[0] == "prim" ? (row[2] + (" " + row[3].str())) : (String) row[0] == "call" ? ("call #" + (row[2].str() + (" " + row[3].str()))) : "?";
+    }
+}

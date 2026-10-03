@@ -29,7 +29,10 @@ import form-stdlib/form-asm.fk;
 import form-stdlib/f64-bytes.fk;
 section [form.bml] {
     def lo-nil?(xs) = (Comparable) len(xs) == 0;
-    def lo-app(xs, ys) = lo-nil?(xs) ? ys : cons(xs[0], lo-app(xs[1:], ys));
+    // A piece that did not lower is nothing(), and nothing() is carried, never emptied: an image with a node's
+    // bytes missing computes another function and answers it with full confidence ("native answers 10 for arg 5").
+    def lo-app(xs, ys) = nothing?(xs) ? nothing() : nothing?(ys) ? nothing() : lo-nil?(xs) ? ys : lo-app-go(xs, ys);
+    def lo-app-go(xs, ys) = lo-nil?(xs) ? ys : cons(xs[0], lo-app-go(xs[1:], ys));
     def lo-row(prog, i) = (Comparable) i == 0 ? prog[0] : lo-row(prog[1:], i - 1);
     def lo-tag(prog, i) = lo-row(prog, i)[0];
     def lo-val(prog, i) = lo-row(prog, i)[1];
@@ -65,7 +68,7 @@ section [form.bml] {
     // The dispatch is OPERAND-AWARE instruction selection — ARG-operand forms pick
     // the register instruction directly (sub w0,w<argr>,#i), both for size and
     // because the naive lower-then-fold would clobber w0 (correctness, not elegance).
-    def lo-node(prog, i, argr) = (Comparable) lo-tag(prog, i) == 1 ? fa-movz(0, lo-val(prog, i)) : (Comparable) lo-tag(prog, i) == 2 ? fa-mov(0, lo-argr(prog, i, argr)) : (Comparable) lo-tag(prog, i) == 3 ? lo-add(prog, i, argr) : (Comparable) lo-tag(prog, i) == 4 ? lo-sub(prog, i, argr) : (Comparable) lo-tag(prog, i) == 5 ? lo-mul(prog, i, argr) : (Comparable) lo-tag(prog, i) == 8 ? lo-div(prog, i, argr) : (Comparable) lo-tag(prog, i) == 6 ? lo-cond(prog, i, argr) : (Comparable) lo-tag(prog, i) == 9 ? lo-streq() : (Comparable) lo-tag(prog, i) == 10 ? lo-readfile() : (Comparable) lo-tag(prog, i) == 11 ? lo-writefile() : [];
+    def lo-node(prog, i, argr) = (Comparable) lo-tag(prog, i) == 1 ? fa-movz(0, lo-val(prog, i)) : (Comparable) lo-tag(prog, i) == 2 ? fa-mov(0, lo-argr(prog, i, argr)) : (Comparable) lo-tag(prog, i) == 3 ? lo-add(prog, i, argr) : (Comparable) lo-tag(prog, i) == 4 ? lo-sub(prog, i, argr) : (Comparable) lo-tag(prog, i) == 5 ? lo-mul(prog, i, argr) : (Comparable) lo-tag(prog, i) == 8 ? lo-div(prog, i, argr) : (Comparable) lo-tag(prog, i) == 6 ? lo-cond(prog, i, argr) : (Comparable) lo-tag(prog, i) == 9 ? lo-streq() : (Comparable) lo-tag(prog, i) == 10 ? lo-readfile() : (Comparable) lo-tag(prog, i) == 11 ? lo-writefile() : nothing();
     // ADD: (x, LIT i) -> lower(x); add w0,w0,#i · (ARG, x) -> lower(x); add w0,w<argr>,w0 ·
     // else (two subtrees) -> lo-tree. The (ARG, x) fast path needs c1=ARG; without that
     // guard the general case would silently add w<argr> in place of the left subtree.
@@ -78,12 +81,14 @@ section [form.bml] {
     // (x, ARG) -> lower the non-ARG operand into w0, mul w0,w0,w<argr> (the banked n is
     // never clobbered). (x, LIT i) -> lower x; movz w2,#i; mul w0,w0,w2 (the LIT lands in
     // scratch w2 AFTER x is fully in w0). Two non-trivial subtrees is the multi-register
-    // frontier (would need allocation) — left as the empty tail, never a wrong answer.
+    // frontier (would need allocation) — answered by lo-tree, whose unknown operator is nothing(), never an empty image.
     def lo-mul(prog, i, argr) = lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-node(prog, lo-c2(prog, i), argr), fa-mul(0, 0, lo-argr(prog, lo-c1(prog, i), argr))) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-node(prog, lo-c1(prog, i), argr), fa-mul(0, 0, lo-argr(prog, lo-c2(prog, i), argr))) : lo-lit?(prog, lo-c2(prog, i)) ? lo-app(lo-app(lo-node(prog, lo-c1(prog, i), argr), fa-movz(2, lo-imm(prog, i))), fa-mul(0, 0, 2)) : lo-lit?(prog, lo-c1(prog, i)) ? lo-app(lo-app(lo-node(prog, lo-c2(prog, i), argr), fa-movz(2, lo-val(prog, lo-c1(prog, i)))), fa-mul(0, 0, 2)) : lo-tree(prog, i, argr, 0);
     // DIV: like MUL but NON-commutative — numerator is Rn, denominator Rm, order kept.
-    // (ARG, x) -> n/x: lower x->w0; udiv w0,w<argr>,w0 · (x, ARG) -> x/n: lower x->w0; udiv w0,w0,w<argr>
-    // (x, LIT i) -> x/i: lower x->w0; movz w2,#i; udiv w0,w0,w2 · (LIT a, x) -> a/x: lower x->w0; movz w2,#a; udiv w0,w2,w0
-    def lo-div(prog, i, argr) = lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-node(prog, lo-c2(prog, i), argr), fa-udiv(0, lo-argr(prog, lo-c1(prog, i), argr), 0)) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-node(prog, lo-c1(prog, i), argr), fa-udiv(0, 0, lo-argr(prog, lo-c2(prog, i), argr))) : lo-lit?(prog, lo-c2(prog, i)) ? lo-app(lo-app(lo-node(prog, lo-c1(prog, i), argr), fa-movz(2, lo-imm(prog, i))), fa-udiv(0, 0, 2)) : lo-lit?(prog, lo-c1(prog, i)) ? lo-app(lo-app(lo-node(prog, lo-c2(prog, i), argr), fa-movz(2, lo-val(prog, lo-c1(prog, i)))), fa-udiv(0, 2, 0)) : lo-tree(prog, i, argr, 0);
+    // (ARG, x) -> n/x: lower x->w0; sdiv w0,w<argr>,w0 · (x, ARG) -> x/n: lower x->w0; sdiv w0,w0,w<argr>
+    // (x, LIT i) -> x/i: lower x->w0; movz w2,#i; sdiv w0,w0,w2 · (LIT a, x) -> a/x: lower x->w0; movz w2,#a; sdiv w0,w2,w0
+    // SIGNED: the walker's / truncates toward zero on negative operands (-7/2 is -3), and so does sdiv. The unsigned
+    // divide read the same bits as 4294967289/2 and answered 2147483644.
+    def lo-div(prog, i, argr) = lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-node(prog, lo-c2(prog, i), argr), fa-sdiv(0, lo-argr(prog, lo-c1(prog, i), argr), 0)) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-node(prog, lo-c1(prog, i), argr), fa-sdiv(0, 0, lo-argr(prog, lo-c2(prog, i), argr))) : lo-lit?(prog, lo-c2(prog, i)) ? lo-app(lo-app(lo-node(prog, lo-c1(prog, i), argr), fa-movz(2, lo-imm(prog, i))), fa-sdiv(0, 0, 2)) : lo-lit?(prog, lo-c1(prog, i)) ? lo-app(lo-app(lo-node(prog, lo-c2(prog, i), argr), fa-movz(2, lo-val(prog, lo-c1(prog, i)))), fa-sdiv(0, 2, 0)) : lo-tree(prog, i, argr, 0);
     // lo-tree — the GENERAL register-stack lowering for arbitrary expression trees, the
     // fallback when neither operand of an op is ARG/LIT (the case the single-accumulator
     // scheme can't reach). It spills each level's LEFT result to w(9+depth) and lowers the
@@ -91,7 +96,7 @@ section [form.bml] {
     // above the parent's save slot — nesting never clobbers. Order is preserved (left=Rn,
     // right=Rm), so non-commutative SUB/DIV stay correct. w9..w15 are caller-saved temps
     // (7 levels of right-depth); deeper would need a frame — the named next.
-    def lo-tree-op(tag, sr) = (Comparable) tag == 3 ? fa-add-r(0, sr, 0) : (Comparable) tag == 4 ? fa-sub-r(0, sr, 0) : (Comparable) tag == 5 ? fa-mul(0, sr, 0) : (Comparable) tag == 8 ? fa-udiv(0, sr, 0) : [];
+    def lo-tree-op(tag, sr) = (Comparable) tag == 3 ? fa-add-r(0, sr, 0) : (Comparable) tag == 4 ? fa-sub-r(0, sr, 0) : (Comparable) tag == 5 ? fa-mul(0, sr, 0) : (Comparable) tag == 8 ? fa-sdiv(0, sr, 0) : nothing();
     def lo-tree-bin(prog, i, argr, depth, sr) = lo-app(lo-app(lo-app(lo-tree(prog, lo-c1(prog, i), argr, depth), fa-mov(sr, 0)), lo-tree(prog, lo-c2(prog, i), argr, depth + 1)), lo-tree-op(lo-tag(prog, i), sr));
     def lo-tree(prog, i, argr, depth) = lo-lit?(prog, i) ? fa-movz(0, lo-val(prog, i)) : lo-arg?(prog, i) ? fa-mov(0, lo-argr(prog, i, argr)) : lo-tree-bin(prog, i, argr, depth, 9 + depth);
     // COND(CMP(ARG, LIT i), then, else) — the control-flow scheme with computed
@@ -109,7 +114,8 @@ section [form.bml] {
     // branches are lowered by the caller's lane (lo-node -> w0, lo-fnode -> d0), so the same
     // frame serves an integer-result COND and a float-result COND. fa-bcond with the LE-skip
     // (12) and a positive offset is byte-identical to the old fa-bgt — the LE bands re-cross.
-    def lo-cond-frame(prog, i, cargr, tcode, ecode) = lo-cat([fa-cmp(lo-argr(prog, lo-c1(prog, lo-c1(prog, i)), cargr), lo-val(prog, lo-c2(prog, lo-c1(prog, i)))),     // cmp w<arg>,#LIT
+    def lo-cond-frame(prog, i, cargr, tcode, ecode) = nothing?(tcode) ? nothing() : nothing?(ecode) ? nothing() : lo-cond-frame-go(prog, i, cargr, tcode, ecode);
+    def lo-cond-frame-go(prog, i, cargr, tcode, ecode) = lo-cat([fa-cmp(lo-argr(prog, lo-c1(prog, lo-c1(prog, i)), cargr), lo-val(prog, lo-c2(prog, lo-c1(prog, i)))),     // cmp w<arg>,#LIT
 fa-bcond(lo-cmp-skip(lo-tag(prog, lo-c1(prog, i))), len(tcode) / 4 + 2), tcode, fa-b(len(ecode) / 4 + 1), ecode]);
     // integer-result COND: both arg-compare and branches share argr (the w-register lane).
     def lo-cond(prog, i, argr) = lo-cond-frame(prog, i, argr, lo-node(prog, lo-c2(prog, i), argr), lo-node(prog, lo-c3(prog, i), argr));
@@ -188,8 +194,22 @@ lo-app(lo-marshal(srcs, 0),     // args -> w0..w<len-1> (the convention)
 lo-app(fa-bl(off),     // bl target
 fa-add-x-imm(31, 31, n))));
     // ll-free(n): close the frame
+    // ── coverage: what an entry point may lower ──────────────────────────────
+    // Lowering starts at the root and lowers what the root reaches. A host-effect row (10 read, 11 write) that stands
+    // in the program but is not under the root is never lowered, so its effect never happens and nothing says so.
+    // lo-effects-bound? is 1 when every effect row is reached; every entry below answers nothing() otherwise. A tag
+    // the dispatch does not cover answers nothing() at the node, and lo-app carries it up to the entry.
+    def lo-member?(xs, x) = lo-nil?(xs) ? 0 : (Comparable) xs[0] == x ? 1 : lo-member?(xs[1:], x);
+    def lo-binary-tag?(t) = ((Comparable) t == 3) || (((Comparable) t == 4) || (((Comparable) t == 5) || (((Comparable) t == 8) || (((Comparable) t == 14) || (((Comparable) t == 15) || (((Comparable) t == 16) || (((Comparable) t == 17) || ((Comparable) t == 18))))))));
+    def lo-kids(prog, i) = (Comparable) lo-tag(prog, i) == 6 ? [lo-c1(prog, i), lo-c2(prog, i), lo-c3(prog, i)] : lo-binary-tag?(lo-tag(prog, i)) ? [lo-c1(prog, i), lo-c2(prog, i)] : ((Comparable) lo-tag(prog, i) == 12) || ((Comparable) lo-tag(prog, i) == 13) ? [lo-c1(prog, i)] : [];
+    def lo-reach(prog, i, seen) = (Comparable) lo-member?(seen, i) == 1 ? seen : lo-reach-kids(prog, lo-kids(prog, i), cons(i, seen));
+    def lo-reach-kids(prog, ks, seen) = lo-nil?(ks) ? seen : lo-reach-kids(prog, ks[1:], lo-reach(prog, ks[0], seen));
+    def lo-effect-tag?(t) = ((Comparable) t == 10) || ((Comparable) t == 11);
+    def lo-dead-effect?(prog, j, seen) = lo-effect-tag?(lo-tag(prog, j)) && ((Comparable) lo-member?(seen, j) == 0);
+    def lo-dead-effects(prog, j, n, seen) = j >= n ? 0 : lo-dead-effect?(prog, j, seen) ? 1 : lo-dead-effects(prog, j + 1, n, seen);
+    def lo-effects-bound?(prog, root) = (Comparable) lo-dead-effects(prog, 0, len(prog), lo-reach(prog, root, [])) == 0 ? 1 : 0;
     // compile a whole function: lower the root, then return
-    def lo-compile(prog, root) = lo-app(lo-node(prog, root, 1), fa-ret());
+    def lo-compile(prog, root) = (Comparable) lo-effects-bound?(prog, root) == 1 ? lo-app(lo-node(prog, root, 1), fa-ret()) : nothing();
     // compile a function OF n: the preamble banks argc (arriving in w0) into w1
     def lo-compile-fn(prog, root) = lo-app(fa-mov(1, 0), lo-compile(prog, root));
     // compile a function OF n ARGS (the AAPCS64 calling convention, the generalization
@@ -208,7 +228,8 @@ fa-add-x-imm(31, 31, n))));
     // epilogue returns them, so the image is honest to any caller. Four
     // banked args fit the frame; a fifth needs the next pair AND a wider
     // frame — extend the frame, never silently bank past x22.
-    def lo-compile-fn-n(prog, root, n) = lo-app(fa-stp-pre(), lo-app(fa-stp-x21x22(), lo-app(lo-bank-args(0, n), lo-app(lo-node(prog, root, 19), lo-app(fa-ldp-x21x22(), lo-app(fa-ldp-post(), fa-ret()))))));
+    def lo-compile-fn-n(prog, root, n) = (Comparable) lo-effects-bound?(prog, root) == 0 ? nothing() : lo-compile-fn-n-go(prog, root, n);
+    def lo-compile-fn-n-go(prog, root, n) = lo-app(fa-stp-pre(),lo-app(fa-stp-x21x22(), lo-app(lo-bank-args(0, n), lo-app(lo-node(prog, root, 19), lo-app(fa-ldp-x21x22(), lo-app(fa-ldp-post(), fa-ret()))))));
     // ── the FLOAT lowering twin — lower a float-op tree to arm64 scalar-double bytes ──
     // The integer lane above lowers to w-registers; this lowers the SAME op-tagged tree to
     // the FP tier (form-asm.fk's fa-f* — the byte-proven encodings of gap #12). Convention
@@ -218,7 +239,7 @@ fa-add-x-imm(31, 31, n))));
     // arg. This is the clang-free FLOAT native path the self-JIT targets (JIT_GAP_LEDGER #11):
     // the SAME f64 ops the walk runs, emitted as BYTES — bit-identical by construction.
     // Two non-ARG float subtrees is the FP-register-stack frontier (named next, via the
-    // fa-ldr-d/fa-str-d spill that gap #12 landed) — left as the empty tail, never a wrong answer.
+    // fa-ldr-d/fa-str-d spill that gap #12 landed) — answered nothing(), never an empty tail an image would swallow.
     // FLIT (tag 1 in the float lane): materialize the f64 constant — its IEEE754
     // bits via movz + 3·movk into scratch x8, then reinterpret d0 <- x8
     // (fa-fmov-d-x). The trig lane's own constant idiom (fam-exp-reduce's shape)
@@ -231,16 +252,16 @@ fa-add-x-imm(31, 31, n))));
 (Comparable) lo-tag(prog, i) == 3 ? lo-fadd(prog, i, argr) : (Comparable) lo-tag(prog, i) == 4 ? lo-fsub(prog, i, argr) : (Comparable) lo-tag(prog, i) == 5 ? lo-fmul(prog, i, argr) : (Comparable) lo-tag(prog, i) == 8 ? lo-fdiv(prog, i, argr) : (Comparable) lo-tag(prog, i) == 12 ? lo-i2f(prog, i) :     // I2F: int->f64 (scvtf) — the int->float boundary
 (Comparable) lo-tag(prog, i) == 13 ? lo-f2i(prog, i, argr) :     // F2I: f64->int trunc (fcvtzs) — the float->int boundary
 (Comparable) lo-tag(prog, i) == 6 ? lo-fcond(prog, i, argr) :     // COND with float-producing branches (fd-mag's shape)
-[];
+nothing();
     // FADD/FMUL commute: ARG on both sides folds to one register-form instruction; ARG on
     // one side lowers the other subtree into d0, then the op against the banked arg.
-    def lo-fadd(prog, i, argr) = (lo-arg?(prog, lo-c1(prog, i)) ? lo-arg?(prog, lo-c2(prog, i)) : 0) ? fa-fadd(0, argr, argr) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fadd(0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-fnode(prog, lo-c2(prog, i), argr), fa-fadd(0, 0, argr)) : [];
-    def lo-fmul(prog, i, argr) = (lo-arg?(prog, lo-c1(prog, i)) ? lo-arg?(prog, lo-c2(prog, i)) : 0) ? fa-fmul(0, argr, argr) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fmul(0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-fnode(prog, lo-c2(prog, i), argr), fa-fmul(0, 0, argr)) : [];
+    def lo-fadd(prog, i, argr) = (lo-arg?(prog, lo-c1(prog, i)) ? lo-arg?(prog, lo-c2(prog, i)) : 0) ? fa-fadd(0, argr, argr) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fadd(0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-fnode(prog, lo-c2(prog, i), argr), fa-fadd(0, 0, argr)) : nothing();
+    def lo-fmul(prog, i, argr) = (lo-arg?(prog, lo-c1(prog, i)) ? lo-arg?(prog, lo-c2(prog, i)) : 0) ? fa-fmul(0, argr, argr) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fmul(0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-fnode(prog, lo-c2(prog, i), argr), fa-fmul(0, 0, argr)) : nothing();
     // FSUB/FDIV do NOT commute — order kept (d0 = left OP right):
     //   (x, ARG) -> lower x->d0 ; op d0,d0,d<argr>   (the banked arg is the right operand)
     //   (ARG, x) -> lower x->d0 ; op d0,d<argr>,d0   (the banked arg is the left operand)
-    def lo-fsub(prog, i, argr) = lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fsub(0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-fnode(prog, lo-c2(prog, i), argr), fa-fsub(0, argr, 0)) : [];
-    def lo-fdiv(prog, i, argr) = lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fdiv(0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-fnode(prog, lo-c2(prog, i), argr), fa-fdiv(0, argr, 0)) : [];
+    def lo-fsub(prog, i, argr) = lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fsub(0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-fnode(prog, lo-c2(prog, i), argr), fa-fsub(0, argr, 0)) : nothing();
+    def lo-fdiv(prog, i, argr) = lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fdiv(0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-fnode(prog, lo-c2(prog, i), argr), fa-fdiv(0, argr, 0)) : nothing();
     // ── the int↔float BOUNDARY — the lane crossing every real-model recipe makes ──
     // A real model's weights enter as integer bit-fields (q4k unpack, f16 mantissa/exponent)
     // and rebuild as f64 (fd-frac's (mul 1.0 (fd-mant ...))); the verdict casts back to int
@@ -259,7 +280,7 @@ fa-add-x-imm(31, 31, n))));
     // on top of any proven FP subtree (e.g. trunc(d*d)).
     def lo-f2i(prog, i, argr) = lo-app(lo-fnode(prog, lo-c1(prog, i), argr), fa-fcvtzs(0, 0));
     // compile a float function OF one float arg: bank d0 -> d1, lower the body, ret.
-    def lo-fcompile(prog, root) = lo-app(lo-fnode(prog, root, 1), fa-ret());
+    def lo-fcompile(prog, root) = (Comparable) lo-effects-bound?(prog, root) == 1 ? lo-app(lo-fnode(prog, root, 1), fa-ret()) : nothing();
     def lo-fcompile-fn(prog, root) = lo-app(fa-fmov(1, 0), lo-fcompile(prog, root));
     // ── the FP register stack — float lowering as ABSTRACT instrs, validated by fsim semantic parity ──
     // lo-ftree mirrors lo-fnode's ARG-folding AND adds the TWO non-ARG subtree case (the frontier
@@ -270,14 +291,14 @@ fa-add-x-imm(31, 31, n))));
     // still encodes byte-for-byte through fa-fencode. d16..d31 = 16 levels of caller-saved FP temps.
     // An abstract instr is (op rd rn rm): op 0 = fmov(rd<-rn); 3/4/5/8 = f{add,sub,mul,div} rd = rn OP rm.
     def lo-fi(op, rd, rn, rm) = cons([op, rd, rn, rm], []);
-    def fa-fencode(ins) = (Comparable) ins[0] == 0 ? fa-fmov(ins[1], ins[2]) : (Comparable) ins[0] == 3 ? fa-fadd(ins[1], ins[2], ins[3]) : (Comparable) ins[0] == 4 ? fa-fsub(ins[1], ins[2], ins[3]) : (Comparable) ins[0] == 5 ? fa-fmul(ins[1], ins[2], ins[3]) : (Comparable) ins[0] == 8 ? fa-fdiv(ins[1], ins[2], ins[3]) : [];
+    def fa-fencode(ins) = (Comparable) ins[0] == 0 ? fa-fmov(ins[1], ins[2]) : (Comparable) ins[0] == 3 ? fa-fadd(ins[1], ins[2], ins[3]) : (Comparable) ins[0] == 4 ? fa-fsub(ins[1], ins[2], ins[3]) : (Comparable) ins[0] == 5 ? fa-fmul(ins[1], ins[2], ins[3]) : (Comparable) ins[0] == 8 ? fa-fdiv(ins[1], ins[2], ins[3]) : nothing();
     def lo-fencode-prog(instrs) = (Comparable) len(instrs) == 0 ? [] : lo-app(fa-fencode(instrs[0]), lo-fencode-prog(instrs[1:]));
     def lo-ft2(prog, i, argr, depth, op) = lo-app(lo-app(lo-app(lo-ftree(prog, lo-c1(prog, i), argr, depth), lo-fi(0, 16 + depth, 0, 0)), lo-ftree(prog, lo-c2(prog, i), argr, depth + 1)), lo-fi(op, 0, 16 + depth, 0));
     def lo-ftadd(prog, i, argr, depth) = (lo-arg?(prog, lo-c1(prog, i)) ? lo-arg?(prog, lo-c2(prog, i)) : 0) ? lo-fi(3, 0, argr, argr) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-ftree(prog, lo-c1(prog, i), argr, depth), lo-fi(3, 0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-ftree(prog, lo-c2(prog, i), argr, depth), lo-fi(3, 0, 0, argr)) : lo-ft2(prog, i, argr, depth, 3);
     def lo-ftmul(prog, i, argr, depth) = (lo-arg?(prog, lo-c1(prog, i)) ? lo-arg?(prog, lo-c2(prog, i)) : 0) ? lo-fi(5, 0, argr, argr) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-ftree(prog, lo-c1(prog, i), argr, depth), lo-fi(5, 0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-ftree(prog, lo-c2(prog, i), argr, depth), lo-fi(5, 0, 0, argr)) : lo-ft2(prog, i, argr, depth, 5);
     def lo-ftsub(prog, i, argr, depth) = lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-ftree(prog, lo-c1(prog, i), argr, depth), lo-fi(4, 0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-ftree(prog, lo-c2(prog, i), argr, depth), lo-fi(4, 0, argr, 0)) : lo-ft2(prog, i, argr, depth, 4);
     def lo-ftdiv(prog, i, argr, depth) = lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-ftree(prog, lo-c1(prog, i), argr, depth), lo-fi(8, 0, 0, argr)) : lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-ftree(prog, lo-c2(prog, i), argr, depth), lo-fi(8, 0, argr, 0)) : lo-ft2(prog, i, argr, depth, 8);
-    def lo-ftree(prog, i, argr, depth) = lo-arg?(prog, i) ? lo-fi(0, 0, argr, 0) : (Comparable) lo-tag(prog, i) == 3 ? lo-ftadd(prog, i, argr, depth) : (Comparable) lo-tag(prog, i) == 4 ? lo-ftsub(prog, i, argr, depth) : (Comparable) lo-tag(prog, i) == 5 ? lo-ftmul(prog, i, argr, depth) : (Comparable) lo-tag(prog, i) == 8 ? lo-ftdiv(prog, i, argr, depth) : [];
+    def lo-ftree(prog, i, argr, depth) = lo-arg?(prog, i) ? lo-fi(0, 0, argr, 0) : (Comparable) lo-tag(prog, i) == 3 ? lo-ftadd(prog, i, argr, depth) : (Comparable) lo-tag(prog, i) == 4 ? lo-ftsub(prog, i, argr, depth) : (Comparable) lo-tag(prog, i) == 5 ? lo-ftmul(prog, i, argr, depth) : (Comparable) lo-tag(prog, i) == 8 ? lo-ftdiv(prog, i, argr, depth) : nothing();
     // the abstract program for a one-float-arg function: bank d0->d1, then the body's abstract instrs.
     def lo-fcompile-abstract(prog, root) = cons([0, 1, 0, 0], lo-ftree(prog, root, 1, 0));
     // ── the SOURCE MAP: one owning node per instruction ──────────────────
@@ -294,7 +315,7 @@ fa-add-x-imm(31, 31, n))));
     // MUL mirror: ARG-operand forms emit one mul (one i); LIT-operand forms emit movz+mul
     // (two i's), both owned by the MUL node — exactly lo-mul's instruction order.
     def lo-map-mul(prog, i) = lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-map(prog, lo-c2(prog, i)), [i]) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-map(prog, lo-c1(prog, i)), [i]) : lo-lit?(prog, lo-c2(prog, i)) ? lo-app(lo-map(prog, lo-c1(prog, i)), [i, i]) : lo-lit?(prog, lo-c1(prog, i)) ? lo-app(lo-map(prog, lo-c2(prog, i)), [i, i]) : lo-map-tree(prog, i);
-    // DIV mirror: same operand-shape as MUL (one udiv, or movz+udiv for a LIT operand).
+    // DIV mirror: same operand-shape as MUL (one sdiv, or movz+sdiv for a LIT operand).
     def lo-map-div(prog, i) = lo-arg?(prog, lo-c1(prog, i)) ? lo-app(lo-map(prog, lo-c2(prog, i)), [i]) : lo-arg?(prog, lo-c2(prog, i)) ? lo-app(lo-map(prog, lo-c1(prog, i)), [i]) : lo-lit?(prog, lo-c2(prog, i)) ? lo-app(lo-map(prog, lo-c1(prog, i)), [i, i]) : lo-lit?(prog, lo-c1(prog, i)) ? lo-app(lo-map(prog, lo-c2(prog, i)), [i, i]) : lo-map-tree(prog, i);
     // lo-tree mirror: each binary node owns its left-save (mov) and its combine op; the
     // subtrees own their own instructions. Depth doesn't change ownership, only registers.
@@ -320,7 +341,8 @@ fa-add-x-imm(31, 31, n))));
 lo-node(prog, lo-c1(prog, lo-c1(prog, lo-c3(prog, root))), 19),     // e1 = CALL_1's child (argr=19)
 lo-node(prog, lo-c1(prog, lo-c2(prog, lo-c3(prog, root))), 19));
     // e2 = CALL_2's child (argr=19)
-    def lo-rec2(prog, root, base, e1, e2) = lo-cat([fa-b(1),     // _main: b _fib (tail call, lr preserved)
+    def lo-rec2(prog, root, base, e1, e2) = nothing?(base) ? nothing() : nothing?(e1) ? nothing() : nothing?(e2) ? nothing() : lo-rec2-go(prog, root, base, e1, e2);
+    def lo-rec2-go(prog, root, base, e1, e2) = lo-cat([fa-b(1),     // _main: b _fib (tail call, lr preserved)
 fa-cmp(0, lo-val(prog, lo-c2(prog, lo-c1(prog, root)))),     // _fib: leaf check on w0
 fa-bgt(len(base) / 4 + 2), base, fa-ret(), fa-stp-pre(), fa-stp-fp(), fa-mov(19, 0),     // frame + bank n -> w19
 e1, fa-bl(lo-bl-off(len(base), len(e1), 0)),     // fib(e1)
