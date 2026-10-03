@@ -37,15 +37,19 @@ Complete JSON syntax admission precedes parsing, and duplicate keys retain
 their last value. `json-wire-admission.bml` reuses the shared lexical rules
 with container continuations in data, without imposing a nesting ceiling.
 
-The live conformance gate runs 13 expressions on the real Go, Rust and
-TypeScript proof kernels, executes a distinct Form-produced artifact on each
-kernel, reconstructs each sibling artifact byte-for-byte in Form, and checks
-all 12 malformed vectors (`form/conformance/formbin2-malformed-vectors.json`)
-against Form and every sibling. Missing arms prevent a passing verdict. The
-complete conformance witness is **511**:
+The live conformance gate (`gate/canonical-conformance.bml`, door
+`gate/canonical-conformance-run.bml`) runs 13 canonical expressions on fkwu and
+holds each to its pinned rendering (`form/conformance/canonical-s-expression-vectors.json`).
+It pins the 119 FORMBIN2 bytes (and their SHA-256) that every kernel emitted for
+`(list "fkb-interop" 42 2147483648 3.5)` while the Go, Rust and TypeScript kernels
+were still asked: the Form codec decodes them to the rendering fkwu computes from
+that source and re-encodes them byte for byte, and the codec's own artifact equals
+its pinned bytes. All 12 malformed vectors
+(`form/conformance/formbin2-malformed-vectors.json`) are refused by the Form
+codec with their expected words. The complete conformance witness is **511**:
 
 ```sh
-form-run ./fkwu gate/tests/kernel-conformance-band.fk
+form-run ./fkwu gate/tests/canonical-conformance-band.fk
 ```
 
 That observation includes raw numeric extrema, malformed payloads and UTF-8,

@@ -95,7 +95,7 @@ boundary — carrier, oracle, fixture, proof sibling, or tooling — and the str
 
 The body decides what its interface carries (axiom 4): a script the census cannot name is not admitted.
 `form/validate.sh` carries the census's answer into its exit, and `./fkwu gate/drift-gates-run.bml` runs it with the
-drift lenses (`op-manifest`, `native-surface`, `reserved-heads`, `kernel-conformance`, ...).
+drift lenses (`op-manifest`, `native-surface`, `reserved-heads`, `canonical-conformance`, ...).
 
 ## Ground from a fresh checkout
 

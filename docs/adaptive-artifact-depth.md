@@ -57,7 +57,7 @@ GC count alone is insufficient evidence for shrinking work.
 The traversal cell is `form/form-stdlib/bml/formbin-depth.bml`; the native
 decode door is `observe/formbin-depth-native-run.fk` over
 `observe/formbin-depth-native.bml`, and
-`gate/tests/kernel-conformance-band.fk` (511) reads every sibling artifact
+`gate/tests/canonical-conformance-band.fk` (511) reads the pinned kernel artifact
 through the Form codec.
 
 Where it is going: the codec already lives in Form, so the Go reader's part
