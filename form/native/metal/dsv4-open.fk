@@ -22,6 +22,8 @@
 // counters where they were. Past admission: the kernels compile once (the carrier keys a pipeline by its source) and EVERY pipeline handle must be positive, checked before anything is mapped (a kernel
 // the device refuses makes the open answer [] with the counters unmoved; dsv4-open-span-with names the units, so the band can hand it a source that does not compile), the views map (dsv4-bind.fk: dvb-open frees what it had mapped when one refuses),
 // the scratch allocates (and frees itself, with the views, when one allocation refuses). The scratch is allocated once and does not scale with span: DeepSeek's prefill is token-major.
+// TWO MODES (dsv4-open-span-mode): "whole" (dsv4-open-span, the control) maps every planned tensor, each routed expert stack one view over the whole stack; "arena" maps all but the routed stacks (their rows stay in the
+// view table with handle 0: the layer reads their type, the arena their offset and size) and dsv4-arena.fk's dxa-open then gives each layer a bounded arena of experts, which the layer's FFN fills from the file by span.
 //
 // THE STATE is dsv4-new-state: per block a row [kv, comp state, comp score, comp rows], the four handles q38-state-row-ok? counts. kv is the raw arena (cap rows of key_length f32, never
 // evicted: dsv4-kv-cache.fk), a compressing layer adds its compressor state and score ((coff x ratio) rows of (coff x key_length) f32 each) and its compressed rows (cap/ratio + 1 of key_length);
@@ -108,15 +110,18 @@ section [form.bml] {
     // open whose pipeline is refused answers [] and moves no counter
     def dso-pipes-ok?(ps, names) = len(names) == 0 ? true : (record_get(ps, names[0]) > 0 && dso-pipes-ok?(ps, names[1:]));
     def dso-units-names(units) = len(units) == 0 ? [] : append(dkr-kernel-names(units[0][1]), dso-units-names(units[1:]));
-    def dsv4-open-span-with(path, maxpos, span, units) {
+    def dsv4-open-span-with(path, maxpos, span, units) = dsv4-open-span-mode(path, maxpos, span, units, "whole");
+    // THE MODE says what the open maps: "whole" maps every tensor of the plan, the three routed expert stacks of every layer among them (each one view over its whole stack: the control path); "arena" maps all
+    // but those stacks (their rows stay in the view table with handle 0) and the arena (dsv4-arena.fk, dxa-open) is what the expert kernels read instead
+    def dsv4-open-span-mode(path, maxpos, span, units, mode) {
         let src = file_size(path) > 24 ? dso-window-src(path) : "";
         let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
         let plan = nothing?(m) ? nothing() : dvb-plan-driver(m);
-        (nothing?(m) || maxpos < 1 || !dso-admitted?(path, m, plan)) ? [] : dso-open-piped(path, maxpos, span, src, m, plan, dkr-open-pipes(units), units);
+        (nothing?(m) || maxpos < 1 || !dso-admitted?(path, m, plan)) ? [] : dso-open-piped(path, maxpos, span, src, m, plan, dkr-open-pipes(units), units, mode);
     }
-    def dso-open-piped(path, maxpos, span, src, m, plan, ps, units) = dso-pipes-ok?(ps, dso-units-names(units)) ? dso-open-admitted(path, maxpos, span, src, m, plan, ps) : [];
-    def dso-open-admitted(path, maxpos, span, src, m, plan, ps) {
-        let views = dvb-open(path, plan);
+    def dso-open-piped(path, maxpos, span, src, m, plan, ps, units, mode) = dso-pipes-ok?(ps, dso-units-names(units)) ? dso-open-admitted(path, maxpos, span, src, m, plan, ps, mode) : [];
+    def dso-open-admitted(path, maxpos, span, src, m, plan, ps, mode) {
+        let views = dvb-open-mode(path, plan, mode);
         nothing?(views) ? [] : dso-open-views(path, maxpos, span, src, m, views, ps);
     }
     def dso-open-views(path, maxpos, span, src, m, views, ps) {
@@ -179,8 +184,13 @@ section [form.bml] {
     // ---- close ------------------------------------------------------------------------------------------------------------
     def dso-tv-handles(tvs) = len(tvs) == 0 ? [] : cons(tvs[0][0], dso-tv-handles(tvs[1:]));
     def dso-lay-handles(lays) = len(lays) == 0 ? [] : append(dso-tv-handles(lays[0]), dso-lay-handles(lays[1:]));
-    // every handle the ctx holds: scratch, layer views, the three tensor views (the head's other three are in the last layer list)
-    def dsv4-ctx-handles(ctx) = append(ctx[1], append(dso-lay-handles(ctx[3]), [ctx[4][0], ctx[5][0], ctx[6][0]]));
+    // the arena the open carries (dsv4-arena.fk dxa-open keeps it in the layout record under "arena"), or nothing; its handles are the expert buffers and the slot-id buffer, and the span views a fill still has pending
+    def dso-arena(ctx) = record_has(ctx[2], "arena") ? record_get(ctx[2], "arena") : nothing();
+    def dso-arena-handles(ctx) = nothing?(dso-arena(ctx)) ? [] : append(record_get(dso-arena(ctx), "handles"), record_get(dso-arena(ctx), "pending"));
+    // the NaN scan's four-byte count (dsv4-token-handle.fk allocates it with the first head and keeps it in the layout record under "scan")
+    def dso-scan-handles(ctx) = record_has(ctx[2], "scan") ? [record_get(ctx[2], "scan")] : [];
+    // every handle the ctx holds: scratch, layer views, the three tensor views (the head's other three are in the last layer list), the arena's and the scan's
+    def dsv4-ctx-handles(ctx) = append(ctx[1], append(dso-lay-handles(ctx[3]), append([ctx[4][0], ctx[5][0], ctx[6][0]], append(dso-arena-handles(ctx), dso-scan-handles(ctx)))));
     def dsv4-close(ctx, sts) {
         let s0 = metal_sync();
         dvb-free-rounds(append(dsv4-ctx-handles(ctx), dsv4-state-handles(sts)), 4);
