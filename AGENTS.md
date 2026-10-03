@@ -110,15 +110,21 @@ local choices and observed learning should make repeated instructions unnecessar
 
 Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
 and BML. A missing internal tool belongs in that body, with its behavior observed
-in the same movement. OS operations are begun by argv through the body's doors (`host-child.bml`), and no shell,
-python or node script stands in this tree outside two declared carriers (`gate/structural-gate.fk` names them and
-refuses any other); perl, python, sed, awk and jq do not become implementation or analysis detours. The body holds this for sed, awk,
-perl and python itself: every door that begins a child (the walk's `hch-run`, the control language's doors, the heal
-and findings doors) reads the argv or shell line first through `form/form-stdlib/bml/spawn-guard.bml`, and a command
-that runs one gets a named ending (`forbidden-tool <names>: not used here; <what to use>`) and is never begun. What
-an agent ran in its own Bash calls shows in its transcript: `./fkwu observe/forbidden-tools-audit-run.bml` reads
-every transcript of this repo's checkouts and tallies the slips, and the land cadence prints that tally as a lens
-beside the gates each breath. The reading and what it cannot see: `form/form-stdlib/bml/command-words.bml`.
+in the same movement. OS operations are begun by argv through the body's doors (`host-child.bml`), and the tree holds
+only kinds the body names (Form, the C seed, documents and data: `gate/structural-gate.fk` is an allowlist and refuses
+any other file, a script of any language included, outside its declared carriers); perl, python, sed, awk and jq do not
+become implementation or analysis detours. The body holds this for sed, awk, perl and python at its own doors:
+every door that begins a child (the walk's `hch-run`, the control language's doors, the heal and findings doors)
+reads the argv or shell line first through `form/form-stdlib/bml/spawn-guard.bml`, and a command that runs one gets a
+named ending (`forbidden-tool <names>: not used here; <what to use>`) and is never begun. What an agent ran in its own
+Bash calls shows in its transcript: `./fkwu observe/forbidden-tools-audit-run.bml` reads the transcripts of this repo's
+checkouts and tallies the slips, and the land cadence prints the tally of its own window as a lens beside the gates each
+breath. The reading and what it cannot see: `form/form-stdlib/bml/command-words.bml`.
+
+**Said plainly, so no one leans on more than stands:** the rule is enforced at the body's spawn doors and observed in
+the audit lens. A Claude Code Bash or Monitor call is refused by nothing but the agent's own compliance: there is no
+hook, and none will be added; Urs chose that direction (no hook, no tool outside Form). A slip in an agent's own Bash
+call is counted afterward in its transcript, never stopped, so keeping it rests with whoever holds the call.
 
 ### Enrich the response with Form
 

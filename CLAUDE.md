@@ -43,6 +43,9 @@ tool to get past it. The body holds this itself: every door of the body that beg
 one that runs sed, awk, perl or python is refused with a named ending that says what to use
 ([`form/form-stdlib/bml/spawn-guard.bml`](form/form-stdlib/bml/spawn-guard.bml)); what agents ran in their own Bash calls
 is read from their transcripts each breath (`observe/forbidden-tools-audit-run.bml`, a lens beside the land cadence's gates).
+Said plainly: the rule is enforced at the body's spawn doors and observed in that audit lens, and a Claude Code Bash call is
+refused by nothing but your own compliance. There is no hook (Urs's direction: no hook, no tool outside Form), so a slip is
+counted afterward, never stopped: you hold it.
 
 Attune before writing: read a receipt or two and borrow the body's words
 ([`teachings/voice-attunement.md`](teachings/voice-attunement.md)); `observe/voice-frequency-run.fk` is a mirror,

@@ -166,7 +166,8 @@ cell drives the device and the device agrees with Form's own arithmetic.
   `hati-os-kernel-emit.fk`, `hati-os-targets.fk`).
 - **`Sema Ear.app`** — the Mac launcher for the ear: a bundle's executable is a program, and macOS binds the microphone
   grant to the bundle; its few lines are a declared carrier (`gate/structural-gate.fk`). The live ear glass is
-  `printf '600\n\n' | ./fkwu observe/ear-glass-live.fk` in a terminal (`observe/ear-glass-live.fk`).
+  `printf '600\n\n' | ./fkwu observe/ear-glass-live.fk` in a terminal (`observe/ear-glass-live.fk`); the double-click and hot-key
+  launcher that was a shell file is gone, and CURRENT_FLOOR.md ("Not standing today") names the loss and the smallest next step.
 - **`teachings/`** — the scoped core teachings ([one-engine](teachings/lc-one-engine.md),
   [form-first-reasoning](teachings/form-first-reasoning.form),
   [voice-attunement](teachings/voice-attunement.md),

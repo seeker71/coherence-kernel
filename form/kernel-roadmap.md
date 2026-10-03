@@ -98,12 +98,14 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
 
 ## Run the kernel
 
-```bash
-../fkwu ../gate/band-sweep-run.bml </dev/null
-printf '{"files":["form-samples/fact.fk"]}' | ../fkwu ../gate/band-sweep-run.bml
-../fkwu ../observe/native-jit-witness-run.fk
+From the repository root (the doors read their paths from there; from `form/` they refuse):
 
-../fkwu form-samples/fact.fk                                                  # → 3628800
+```bash
+./fkwu gate/band-sweep-run.bml </dev/null
+printf '{"files":["form-samples/fact.fk"]}' | ./fkwu gate/band-sweep-run.bml
+./fkwu observe/native-jit-witness-run.fk
+
+./fkwu form/form-samples/fact.fk                                              # → 3628800
 ```
 
 The runtime is built from the C seed (`cc -O2 -o fkwu runtime/fkwu-uni.c`);
