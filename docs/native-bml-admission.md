@@ -449,17 +449,17 @@ nested inside another.
 ## Bands pin with `; Verdict`
 
 A band pins the number `./fkwu` must answer with `; Verdict <n>` in its head
-comment. `; Expected: <n>` is prose: `validate.sh` reads only the first
+comment. `; Expected: <n>` is prose: the band sweep reads only the first
 `Verdict`. `observe/band-pin-run.bml` reads a band's own direct answer and
 writes the pin (`check` reads, `apply` writes). A band ends with its answer as
 the final value; `(print x)` inside a `do` prints and then answers 0. Both
-`./fkwu` and `validate.sh` refuse a stray `)` with `[unbalanced-source]` (rc 1),
+`./fkwu` and the band sweep refuse a stray `)` with `[unbalanced-source]` (rc 1),
 so count closers after any ending edit.
 
 A band's answer must not depend on where the checkout lives. Roster names in
 shared memory are bounded at 119 bytes; a longer `root|publisher` name folds
 its root to `ggf-name(root)` (`fgtm-space`), so a long `TMPDIR` under
-`validate.sh` reads the same as `/tmp`.
+the band sweep reads the same as `/tmp`.
 
 ## Local lift
 

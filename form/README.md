@@ -11,7 +11,7 @@ commands should use this address directly.
 - `form-samples/` - small runnable Form workloads.
 - `native/` - the Metal carrier and the Form recipes that drive it.
 - `conformance/` - the pinned canonical expressions and malformed FORMBIN2 artifacts `gate/canonical-conformance.bml` holds fkwu to.
-- `validate.sh` - runs every band on fkwu and judges it against its pins (`band-verdicts.txt`).
+- `band-verdicts.txt` - the registered verdicts; the band sweep (`../gate/band-sweep-run.bml`) runs every band on fkwu and judges it against its pins.
 - `kernel-roadmap.md` - current runtime roadmap.
 
 ## Current Compiler Path
@@ -27,7 +27,7 @@ scannerless grammar parse and lowering to the current top-level Form floor.
 ```sh
 cd form
 ../fkwu form-stdlib/tests/source-compiler-grammar-bridge-band.fk        # fkwu reads 32767, 2026-09-29
-./validate.sh form-stdlib/tests/source-compiler-grammar-bridge-band.fk  # fkwu answers its head pin
+printf '{"files":["form-stdlib/tests/source-compiler-grammar-bridge-band.fk"]}' | ../fkwu ../gate/band-sweep-run.bml   # fkwu answers its head pin
 ```
 
 A band is named alone: fkwu resolves its `; preludes:` closure, so a hand-typed file

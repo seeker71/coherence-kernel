@@ -336,8 +336,8 @@ Then verify it runs the body — a **real cell**, native:
 
 `fkwu <file.fk>` runs Form source straight through the kernel's own source-runner (multi-function,
 cross-calls, lists, recursion). The direction of travel is the native walker proven on `fkwu`, with the C seed
-made smaller until it disappears. Every band runs on fkwu and answers its pin there: `form/validate.sh` walks the
-sweep through the one runtime, and `gate/canonical-conformance.bml` holds fkwu and the Form codec to the pinned
+made smaller until it disappears. Every band runs on fkwu and answers its pin there: `./fkwu gate/band-sweep-run.bml`
+walks the sweep through the one runtime, and `gate/canonical-conformance.bml` holds fkwu and the Form codec to the pinned
 canonical expressions, the FORMBIN2 artifact and the malformed artifacts. Most work lands in BML and Form, not in
 any kernel. What other languages' runtimes taught the body (the DeepSeek op graph read from a Swift runner, the
 Qwen graph from its references) is carried as Form recipes under `form/native/metal/`; none of them is a dependency.

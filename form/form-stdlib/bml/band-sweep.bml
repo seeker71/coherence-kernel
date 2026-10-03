@@ -1,0 +1,283 @@
+// band-sweep.bml — every Form band answers on fkwu, the one runtime: enumerated, run in a pool with a deadline each, judged.
+//
+// A band runs by its own path through the repo-root fkwu and is judged by its exit, its stderr, the first `Verdict n` its
+// head declares and its row in form/band-verdicts.txt. The workloads, in this order:
+//   form/form-samples/*.fk                      each a self-contained file;
+//   form/form-stdlib/tests/*.fk and *-band.bml  core.fk, then the band; a band named after a module (tests/line-grammar.fk
+//                                               has form-stdlib/line-grammar.fk) loads that module between them. A -child,
+//                                               -fixture or -run file is a door its band spawns or reads: its band carries it
+//                                               and it is never swept alone;
+//   every tracked or new */tests/*-band.fk and *-band.bml of another home (observe, cognition, control, gate, grammars,
+//   learn, model, plugin, form/native/metal), run alone by its own path; a path that starts with `.` is not swept.
+// A workload of several files runs through a root: one `; preludes:` line naming them in order, each spelled from the repo
+// root, written once under form/form-stdlib/.cache/workloads/ by a name of the text's hash (the text is compared on every
+// use, so a collision rewrites the root and never lends another workload's), so fkwu's .fkb identity check beside it reuses
+// the image across runs and rebuilds when a closure file moves.
+//
+// A leg is one band's child: ./fkwu <unit> with stdin /dev/null (a verdict never depends on what a terminal types), stdout in
+// <legs>/fk, stderr in <legs>/fk.err and its own TMPDIR (`env TMPDIR=<scratch>`), so concurrent legs never share a path. A
+// leg that outlives the ceiling (1800 s) is ended with its fkwu lineage (host-child's hch-stop), its band fails naming the
+// band, and the sweep moves on. When a leg ends, every fifo in its scratch is opened for writing for an instant by a child
+// (that open meets a reader waiting in open() and lets it read end of file) and removed, so no band leaves an orphan of the
+// run; the scratch moves into <legs>/tmp-fk. A passing workload removes its legs; a failing one moves them to .hearth/ and
+// that path is the evidence it prints.
+//
+// The judgment of one band: the deadline, a nonzero exit, a diagnostic line on stderr (unresolved-call, error:, compiled
+// with errors), the head pin, the registered verdict, each in that order, and the first that holds is the reason it failed.
+// What a band's head and the manifest say is read in process by observe/band-head.bml. A band whose head says
+// `; PROOF LEVEL: FKWU-STAGED` and `; STAGED CARRIER: <path>` runs when that carrier stands, else it is pending, named every
+// run and never green. A band with neither pin runs clean or fails; its answer is shown, not judged.
+//
+// THE SEAL: a verdict belongs to the tree it was read from. The run stamps the tree (HEAD and git's status) when it starts
+// and again when it ends, and a stamp that moved voids the reading: it prints `band-sweep: VOID READING` with both stamps and
+// ends in an error, neither a pass nor a failure. Its radius, said plainly: a tree that moved and moved back passes unseen.
+//
+// Output lines, one per workload in enumeration order as soon as every earlier one has printed:
+//   `  ✓  <label>  → <answer> (its pin)` | `  ·  <label>  → <answer> (ran clean; no pin to answer)`
+//   `  ✗  <label>  fkwu: <why>` then `      evidence=<legs>` | `  ⧗  <label>  staged — carrier absent ...`
+// then the summary; the door ends in an error when any workload failed.
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/value-operators.bml form-stdlib/bml/order.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/host-walk-sync.bml observe/band-head.bml
+section [form.bml] {
+ class BandSweep {
+  def bsw-manifest() = "form/band-verdicts.txt";
+  def bsw-cache() = "form/form-stdlib/.cache/workloads";
+  def bsw-ceiling-s() = 1800;
+  def bsw-jobs() = 8;
+  def bsw-tick-ms() = 100;
+  def bsw-ends?(s, suffix) = len(s) >= len(suffix) && (String) substring(s, len(s) - len(suffix), len(s)) == suffix;
+  def bsw-starts?(s, prefix) = len(s) >= len(prefix) && (String) substring(s, 0, len(prefix)) == prefix;
+  def bsw-has?(s, part) = str_find(s, part, 0) >= 0;
+  def bsw-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ bsw-join(xs[1:], sep);
+  def bsw-base(path) = nil?(split-on(path, "/")) ? path : split-on(path, "/")[len(split-on(path, "/")) - 1];
+  def bsw-stem(path) = bsw-ends?(bsw-base(path), ".fk") ? substring(bsw-base(path), 0, len(bsw-base(path)) - 3) : bsw-ends?(bsw-base(path), ".bml") ? substring(bsw-base(path), 0, len(bsw-base(path)) - 4) : bsw-base(path);
+  def bsw-pad(s, w) = len(s) >= w ? s : s ++ bsw-pad-spaces(w - len(s));
+  def bsw-pad-spaces(k) = k <= 0 ? "" : " " ++ bsw-pad-spaces(k - 1);
+  // ---- the options: stdin is one JSON object, every key optional
+  //   {"list":1}  name the workloads, run nothing     {"match":"glass|landing"}  the workloads whose label holds any alternative
+  //   {"files":["form-stdlib/core.fk","x.fk"]}  one workload of exactly these files (a path as given, else under form/)
+  //   {"jobs":8} the pool's width   {"ceiling_s":1800} a leg's deadline   {"fkwu":"./fkwu"} the runtime that walks the bands
+  def bsw-opt-has?(doc, key) = json-object-has?(doc, key);
+  def bsw-opt-str(doc, key, fallback) = bsw-opt-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : fallback;
+  def bsw-opt-int(doc, key, fallback) = bsw-opt-has?(doc, key) ? (json-int-value(json-object-get(doc, key)) ?? fallback) : fallback;
+  def bsw-opt-files(doc) = bsw-opt-has?(doc, "files") ? json-array-elements(json-object-get(doc, "files")) |> map(n => json-string-value(n)) : [];
+  def bsw-doc(text) = len(trim(text)) == 0 ? json-node-object([]) : parse-json("band-sweep-options", text);
+  // ---- enumeration: a workload is [label, files], every file spelled from the repo root
+  def bsw-names(dir) = sort-strings(fs_list(dir) ?? []);
+  def bsw-samples() = bsw-names("form/form-samples") |> filter(n => bsw-ends?(n, ".fk")) |> map(n => [n, ["form/form-samples/" ++ n]]);
+  def bsw-door-stem?(stem) = bsw-ends?(stem, "-child") || bsw-ends?(stem, "-fixture") || bsw-ends?(stem, "-run");
+  def bsw-stdlib-band?(n) = bsw-ends?(n, ".fk") || bsw-ends?(n, "-band.bml");
+  def bsw-stdlib-names() {
+   let names = bsw-names("form/form-stdlib/tests");
+   append(filter(n => bsw-ends?(n, ".fk"), names), filter(n => bsw-ends?(n, "-band.bml"), names));
+  }
+  def bsw-stdlib-one(n) {
+   let f = "form/form-stdlib/tests/" ++ n;
+   let module = "form/form-stdlib/" ++ bsw-stem(n) ++ ".fk";
+   (Comparable) file_size(module) >= 0 && (String) module != f ? ["stdlib/" ++ n, ["form/form-stdlib/core.fk", module, f]] : ["stdlib/" ++ n, ["form/form-stdlib/core.fk", f]];
+  }
+  def bsw-stdlib() = bsw-stdlib-names() |> filter(n => !bsw-door-stem?(bsw-stem(n))) |> map(n => bsw-stdlib-one(n));
+  // a tracked band deleted in the working tree is skipped, never a stop
+  def bsw-other?(p) = len(p) > 0 && str_byte_at(p, 0) != 46 && !bsw-starts?(p, "form/form-stdlib/tests/") && (Comparable) file_size(p) >= 0;
+  def bsw-others() = sort-strings(split-on(hch-read(["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "*/tests/*-band.fk", "*/tests/*-band.bml"]), "\n") |> filter(p => bsw-other?(p))) |> map(p => [p, [p]]);
+  def bsw-uniq(xs, acc) = nil?(xs) ? reverse(acc) : cw-in?(acc, xs[0]) ? bsw-uniq(xs[1:], acc) : bsw-uniq(xs[1:], cons(xs[0], acc));
+  def bsw-all() = append(bsw-samples(), append(bsw-stdlib(), bsw-others()));
+  def bsw-alt-match?(label, alts) = nil?(alts) ? false : (len(alts[0]) > 0 && bsw-has?(label, alts[0])) || bsw-alt-match?(label, alts[1:]);
+  def bsw-select(all, match) = len(match) == 0 ? all : filter(w => bsw-alt-match?(w[0], split-on(match, "|")), all);
+  // one explicit workload, every file spelled from the repo root: a path under form/ (as the sweep always took them, and as the
+  // file doors read a bare name) becomes form/<path>, any other stands as given
+  def bsw-root-path(p) = !bsw-starts?(p, "form/") && (Comparable) file_size("form/" ++ p) >= 0 ? "form/" ++ p : p;
+  def bsw-explicit(files) = [bsw-join(map(f => bsw-base(f), files), "+"), map(f => bsw-root-path(f), files)];
+  def bsw-missing(files) = filter(f => (Comparable) file_size(bsw-root-path(f)) < 0, files);
+  // ---- what a band's head and the manifest say (read in process)
+  def bsw-band-of(w) = w[1][len(w[1]) - 1];
+  def bsw-text(path) = read_file(path) ?? "";
+  def bsw-level(w) = bh-level(bsw-text(bsw-band-of(w)));
+  def bsw-carrier(w) = bh-carrier(bsw-text(bsw-band-of(w)));
+  def bsw-door(w) = bh-door(bsw-text(bsw-band-of(w)));
+  def bsw-head-pin(w) = bh-pin(bsw-text(bsw-band-of(w)));
+  // a registered verdict applies to a canonical band only: the workload's last file under form-stdlib/tests/
+  def bsw-canonical?(w) = bsw-starts?(bsw-band-of(w), "form/form-stdlib/tests/");
+  def bsw-stem-of(w) {
+   let stem = bsw-stem(bsw-band-of(w));
+   let manifest = bsw-text(bsw-manifest());
+   !bsw-canonical?(w) || len(manifest) == 0 ? "" : len(bh-row-name(manifest, stem)) > 0 ? stem : (bsw-ends?(stem, "-band") ? (len(bh-row-name(manifest, substring(stem, 0, len(stem) - 5))) > 0 ? substring(stem, 0, len(stem) - 5) : "") : "");
+  }
+  def bsw-digits?(s) = len(s) > 0 && scan_run(s, 0, 1) == len(s);
+  def bsw-reg-pin(w) {
+   let stem = bsw-stem-of(w);
+   let pin = len(stem) == 0 ? "" : bh-row-pin(bsw-text(bsw-manifest()), stem);
+   bsw-digits?(pin) ? pin : "";
+  }
+  // ---- the list: label, files, staged, pin, row
+  def bsw-list-line(w) = w[0] ++ "\t" ++ bsw-join(w[1], " ") ++ "\tstaged=" ++ ((String) bsw-level(w) == "FKWU-STAGED" ? "yes" : "no") ++ "\tpin=" ++ (len(bsw-head-pin(w)) > 0 ? bsw-head-pin(w) : "-") ++ "\trow=" ++ (len(bsw-reg-pin(w)) > 0 ? bsw-reg-pin(w) : "-");
+  // ---- the unit one workload runs: a single file as itself, several through a content-keyed root
+  def bsw-root-text(files) = "; preludes: " ++ bsw-join(files, " ");
+  def bsw-hash(text, i, h, m, k) = i >= len(text) ? h : bsw-hash(text, i + 1, (h * k + str_byte_at(text, i) + 1) % m, m, k);
+  def bsw-key(text) = bsw-hash(text, 0, 7, 1000000007, 31).str() ++ "-" ++ bsw-hash(text, 0, 11, 998244353, 131).str();
+  def bsw-unit(w) {
+   let files = w[1];
+   let text = bsw-root-text(files);
+   let path = bsw-cache() ++ "/" ++ bsw-key(text) ++ "-" ++ bsw-stem(files[len(files) - 1]) ++ ".fk";
+   nil?(files[1:]) ? files[0] : bsw-root-held(path, text);
+  }
+  def bsw-root-held(path, text) {
+   let made = hch-mkdirs(bsw-cache());
+   let held = (String) (read_file(path) ?? "") == text ++ "\n";
+   let wrote = held ? 0 : write_file(path, text ++ "\n");
+   path;
+  }
+  // ---- a leg: begun, watched, ended
+  def bsw-hearth() = ".hearth";
+  def bsw-legs-path(idx) = temp_dir() ++ "/validation-legs." ++ host_pid().str() ++ "." ++ idx.str();
+  def bsw-scratch-path(idx) = temp_dir() ++ "/validation-fk." ++ host_pid().str() ++ "." ++ idx.str();
+  // a job: [index, pid, begun ms, legs, scratch, workload, unit]
+  def bsw-begin(w, idx, fkwu) {
+   let legs = bsw-legs-path(idx);
+   let scratch = bsw-scratch-path(idx);
+   let cleared = host_dir_rmdir(legs) + host_dir_rmdir(scratch);
+   let made = hch-mkdirs(legs) + hch-mkdirs(scratch);
+   let unit = bsw-unit(w);
+   let pid = sg-spawn-at(["/usr/bin/env", "TMPDIR=" ++ scratch, fkwu, unit], ["/dev/null", legs ++ "/fk", legs ++ "/fk.err"]);
+   [idx, pid, host_monotonic_ms(), legs, scratch, w, unit];
+  }
+  def bsw-alive?(job) = job[1] > 0 && (Comparable) host_alive(job[1]) == 1;
+  def bsw-late?(job, ceiling-ms) = host_monotonic_ms() - job[2] >= ceiling-ms;
+  def bsw-done?(job, ceiling-ms) = !bsw-alive?(job) || bsw-late?(job, ceiling-ms);
+  // a leg past its ceiling: what it outlived is written beside its streams and its lineage is ended
+  def bsw-end(job, ceiling-s) {
+   let said = write_file(job[3] ++ "/fk.deadline", "ended after " ++ ((host_monotonic_ms() - job[2]) / 1000).str() ++ "s: deadline " ++ ceiling-s.str() ++ "s (the ceiling)\n");
+   let stopped = hch-stop(job[1]);
+   stopped[1];
+  }
+  // the exit of a leg that ended by itself; a leg never born reads nothing
+  def bsw-exit(job) = job[1] <= 0 ? nothing() : host_wait(job[1]);
+  // every fifo of the scratch is opened for writing for an instant (a reader waiting in open() reads end of file) and removed
+  def bsw-fifos(scratch) = split-on(hch-read(["/usr/bin/find", scratch, "-type", "p"]), "\n") |> filter(p => len(p) > 0);
+  def bsw-release-one(fifo) {
+   let pid = sg-spawn-at(["/usr/bin/true"], ["/dev/null", fifo, "/dev/null"]);
+   let waited = pid > 0 ? bsw-wait-brief(pid, host_monotonic_ms() + 2000) : 0;
+   host_path_remove(fifo);
+  }
+  def bsw-wait-brief(pid, until) = (Comparable) host_alive(pid) != 1 ? host_wait(pid) : host_monotonic_ms() >= until ? bsw-kill-brief(pid) : bsw-nap-brief(pid, until);
+  def bsw-nap-brief(pid, until) {
+   let rested = host_sleep_ms(20);
+   bsw-wait-brief(pid, until);
+  }
+  def bsw-kill-brief(pid) {
+   let asked = host_kill(pid);
+   host_wait(pid);
+  }
+  def bsw-release(job) {
+   let freed = foldl((acc, f) => bsw-release-one(f), 0, bsw-fifos(job[4]));
+   (Comparable) host_path_exists(job[4]) == 1 ? host_path_rename(job[4], job[3] ++ "/tmp-fk") : 0;
+  }
+  // ---- judgment: [kind, text] with kind ok-pinned, ok-unpinned, staged, fail or fail-deadline
+  def bsw-diag-line?(l) = bsw-has?(l, "unresolved-call") || bsw-has?(l, "error:") || bsw-has?(l, "compiled with errors");
+  def bsw-diags(err) = len(filter(l => bsw-diag-line?(l), split-on(err, "\n")));
+  def bsw-answer(out) = hch-tail-line(out);
+  def bsw-why(over, rc, diags, answered, head-pin, reg-pin, deadline) {
+   over ? "ended at the deadline: " ++ deadline
+   : nothing?(rc) ? "birth refused: no exit arrived"
+   : (Comparable) rc != 0 ? "exit " ++ rc.str()
+   : diags > 0 ? diags.str() ++ " diagnostic line(s) on stderr"
+   : len(head-pin) > 0 && (String) answered != head-pin ? "answered " ++ (len(answered) > 0 ? answered : "<nothing>") ++ ", its head pins " ++ head-pin
+   : len(reg-pin) > 0 && (String) answered != reg-pin ? "answered " ++ (len(answered) > 0 ? answered : "<nothing>") ++ ", the manifest registers " ++ reg-pin
+   : "";
+  }
+  // the evidence of a failing workload moves out of the temp root into .hearth/; the path it stands at is what is printed
+  def bsw-keep(legs) {
+   let made = hch-mkdirs(bsw-hearth());
+   let dest = bsw-hearth() ++ "/" ++ bsw-base(legs);
+   let gone = host_dir_rmdir(dest);
+   (Comparable) host_path_rename(legs, dest) == 0 ? dest : legs;
+  }
+  def bsw-judge(job, over, rc, ceiling-s) {
+   let w = job[5];
+   let answered = bsw-answer(read_file(job[3] ++ "/fk") ?? "");
+   let why = bsw-why(over, rc, bsw-diags(read_file(job[3] ++ "/fk.err") ?? ""), answered, bsw-head-pin(w), bsw-reg-pin(w), trim(read_file(job[3] ++ "/fk.deadline") ?? ""));
+   len(why) > 0 ? bsw-failed(job, why, over) : bsw-passed(job, answered, len(bsw-head-pin(w)) > 0 || len(bsw-reg-pin(w)) > 0);
+  }
+  def bsw-failed(job, why, over) {
+   let legs = bsw-keep(job[3]);
+   [over ? "fail-deadline" : "fail", "  ✗  " ++ bsw-pad(job[5][0], 30) ++ "  fkwu: " ++ why ++ "\n      evidence=" ++ legs];
+  }
+  def bsw-passed(job, answered, pinned) {
+   let cleaned = host_dir_rmdir(job[3]);
+   pinned ? ["ok-pinned", "  ✓  " ++ bsw-pad(job[5][0], 30) ++ "  → " ++ answered ++ " (its pin)"]
+   : ["ok-unpinned", "  ·  " ++ bsw-pad(job[5][0], 30) ++ "  → " ++ (len(answered) > 0 ? answered : "<nothing>") ++ " (ran clean; no pin to answer)"];
+  }
+  // a leg that ended: released, then judged (by its exit, or by the deadline it outlived)
+  def bsw-finish(job, ceiling-s) {
+   let over = bsw-alive?(job);
+   let note = over ? bsw-end(job, ceiling-s) : "";
+   let rc = over ? nothing() : bsw-exit(job);
+   let released = bsw-release(job);
+   bsw-judge(job, over, rc, ceiling-s);
+  }
+  // a staged band whose carrier is absent is pending, never green, and begins no leg
+  def bsw-pending?(w) = (String) bsw-level(w) == "FKWU-STAGED" && (len(bsw-carrier(w)) == 0 || (Comparable) file_size(bsw-carrier(w)) < 0);
+  def bsw-pending(w) {
+   let door = bsw-door(w);
+   ["staged", "  ⧗  " ++ bsw-pad(w[0], 30) ++ "  staged — carrier absent in this checkout" ++ (len(door) > 0 ? " (" ++ door ++ " builds it)" : "") ++ "; pending, not witnessed"];
+  }
+  // ---- the pool: workloads in a queue, up to `jobs` legs at once, results printed in order
+  // state: pending [[idx, workload]...], running [job...], results record idx -> [kind, text], next index to print, tallies
+  // tallies: [pinned, unpinned, staged, failed, the labels that met the deadline, the printed blocks newest first]
+  def bsw-tally-zero() = [0, 0, 0, 0, "", []];
+  def bsw-tally(t, kind, label, text) = (String) kind == "ok-pinned" ? [t[0] + 1, t[1], t[2], t[3], t[4], cons(text, t[5])]
+   : (String) kind == "ok-unpinned" ? [t[0], t[1] + 1, t[2], t[3], t[4], cons(text, t[5])]
+   : (String) kind == "staged" ? [t[0], t[1], t[2] + 1, t[3], t[4], cons(text, t[5])]
+   : (String) kind == "fail-deadline" ? [t[0], t[1], t[2], t[3] + 1, len(t[4]) > 0 ? t[4] ++ " " ++ label : label, cons(text, t[5])]
+   : [t[0], t[1], t[2], t[3] + 1, t[4], cons(text, t[5])];
+  // print every result that is next in order; answers [next index, tallies]
+  def bsw-flush(results, next, total, tally, labels) {
+   next >= total || !record_has(results, next.str()) ? [next, tally] : bsw-flush-one(results, next, total, tally, labels, record_get(results, next.str()));
+  }
+  def bsw-flush-one(results, next, total, tally, labels, r) {
+   let said = print_str(r[1]);
+   bsw-flush(results, next + 1, total, bsw-tally(tally, r[0], labels[next], r[1]), labels);
+  }
+  def bsw-start-more(pending, running, jobs, fkwu, results) {
+   nil?(pending) || len(running) >= jobs ? [pending, running]
+   : bsw-pending?(pending[0][1]) ? bsw-start-pending(pending, running, jobs, fkwu, results)
+   : bsw-start-more(pending[1:], cons(bsw-begin(pending[0][1], pending[0][0], fkwu), running), jobs, fkwu, results);
+  }
+  def bsw-start-pending(pending, running, jobs, fkwu, results) {
+   let held = record_set(results, pending[0][0].str(), bsw-pending(pending[0][1]));
+   bsw-start-more(pending[1:], running, jobs, fkwu, results);
+  }
+  def bsw-settle(running, ceiling-ms, ceiling-s, results) {
+   let ended = filter(j => bsw-done?(j, ceiling-ms), running);
+   let kept = filter(j => !bsw-done?(j, ceiling-ms), running);
+   let held = foldl((acc, j) => record_set(results, j[0].str(), bsw-finish(j, ceiling-s)), 0, ended);
+   kept;
+  }
+  def bsw-pool(pending, running, results, next, total, tally, labels, opts) {
+   let more = bsw-start-more(pending, running, opts[0], opts[1], results);
+   let kept = bsw-settle(more[1], opts[2] * 1000, opts[2], results);
+   let flushed = bsw-flush(results, next, total, tally, labels);
+   nil?(more[0]) && nil?(kept) ? bsw-flush-end(results, flushed, total, tally, labels)
+   : bsw-pool-again(more[0], kept, results, flushed, total, labels, opts);
+  }
+  def bsw-pool-again(pending, running, results, flushed, total, labels, opts) {
+   let rested = host_sleep_ms(bsw-tick-ms());
+   bsw-pool(pending, running, results, flushed[0], total, flushed[1], labels, opts);
+  }
+  def bsw-flush-end(results, flushed, total, tally, labels) = flushed[1];
+  def bsw-indexed(ws, i) = nil?(ws) ? [] : cons([i, ws[0]], bsw-indexed(ws[1:], i + 1));
+  // run the workloads: the tallies [pinned, unpinned, staged, failed, deadlines]
+  def bsw-run(ws, opts) = bsw-pool(bsw-indexed(ws, 0), [], record_new(0), 0, len(ws), bsw-tally-zero(), map(w => w[0], ws), opts);
+  // ---- the seal
+  def bsw-stamp() = hch-read(["git", "rev-parse", "HEAD"]) ++ ":" ++ hch-read(["git", "status", "--porcelain=v1"]);
+  def bsw-void-lines(start, end) = ["band-sweep: VOID READING — the tree moved while this run was in flight.", "              start " ++ start, "              end   " ++ end, "              This run's verdict describes a tree that is no longer here. It is neither a pass nor a failure. Re-run on the settled tree."];
+  // ---- the summary
+  def bsw-summary(t) {
+   let ok = t[0] + t[1];
+   let staged = t[2] > 0 ? ["  staged lanes pending: " ++ t[2].str() ++ " band(s) need an absent host carrier — not witnessed"] : [];
+   let deadlines = len(t[4]) > 0 ? ["  deadlines met: " ++ t[4] ++ " — each leg named was ended with its process tree; its streams are kept"] : [];
+   let last = t[3] == 0 ? ["  " ++ ok.str() ++ " ok, 0 failed — fkwu answered every pin it was asked."] : ["  " ++ ok.str() ++ " ok, " ++ t[3].str() ++ " failed — inspect exit statuses and retained streams."];
+   append(["", "  fkwu: " ++ t[0].str() ++ " band(s) answered their pins; " ++ t[1].str() ++ " ran clean with no pin to answer"], append(staged, append(deadlines, last)));
+  }
+  def bsw-print(lines) = foldl((acc, l) => print_str(l), 0, lines);
+ }
+}

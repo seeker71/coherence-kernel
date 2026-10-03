@@ -5,7 +5,7 @@ From there, **everything else lives in Form itself**.
 
 ## The validation discipline
 
-**Every band runs on fkwu.** [`validate.sh`](validate.sh) is the pre-merge check, the
+**Every band runs on fkwu.** The band sweep ([`../gate/band-sweep-run.bml`](../gate/band-sweep-run.bml)) is the pre-merge check, the
 rapid feedback loop, the safety net: it fails when a band exits nonzero, speaks a
 diagnostic, or answers other than the verdict its head pins. It runs the structural
 gate first, walks `form-stdlib/tests/*.fk` with `form-stdlib/core.fk` as prelude, and
@@ -15,13 +15,13 @@ reports pending until the carrier stands).
 fkwu resolves a band's closure — `; preludes:` (recursive, deduplicated, honoring the
 `none` sentinel), `import` in every spelling, and the names `form-stdlib/home-index.txt`
 lists — and lowers every `.bml` and section-bearing `.fk` in it through its own memo'd
-floor. So `./validate.sh band.fk` is the whole invocation; no hand-typed closure
+floor. So `./fkwu band.fk` is the whole invocation; no hand-typed closure
 ([`../docs/kernel-interface.md`](../docs/kernel-interface.md)).
 
 ```bash
-./validate.sh             # all samples
-./validate.sh path.fk     # one
-./validate.sh --bench     # native Form emission and execution witness
+./fkwu gate/band-sweep-run.bml </dev/null                                  # every band the body keeps
+printf '{"files":["path.fk"]}' | ./fkwu gate/band-sweep-run.bml            # one
+./fkwu observe/native-jit-witness-run.fk                                   # native Form emission and execution witness
 ```
 
 ## What "all of Form in Form" means
@@ -99,15 +99,15 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
 ## Run the kernel
 
 ```bash
-./validate.sh
-./validate.sh form-samples/fact.fk
-./validate.sh --bench
+../fkwu ../gate/band-sweep-run.bml </dev/null
+printf '{"files":["form-samples/fact.fk"]}' | ../fkwu ../gate/band-sweep-run.bml
+../fkwu ../observe/native-jit-witness-run.fk
 
 ../fkwu form-samples/fact.fk                                                  # → 3628800
 ```
 
 The runtime is built from the C seed (`cc -O2 -o fkwu runtime/fkwu-uni.c`);
-`validate.sh` rebuilds it when the seed is newer.
+the band sweep rebuilds it when the seed is newer.
 
 When in doubt about whether to grow a kernel, the test is *"can this be expressed
 using kernel primitives Form already has?"* If yes, it is a Form breath. If no, the

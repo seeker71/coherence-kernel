@@ -243,13 +243,12 @@ Two carriers meet their surprises the same way outside `live.bml`:
   `held: the witness refused (exit N)` (`form-cli-landing-band` 262143). The walk
   reads its own children the same way: a turn, plan, review or gate has an exit
   from `host_wait` or reads nothing with its reason (`[host-child] deadline: ...`).
-- The sweep (`form/validate.sh`): every leg runs beside a watch that bounds it. A
-  sibling's deadline is fkwu's own wall time on that band times a factor, between a
-  floor and a ceiling; a leg past it is ended with its whole process tree, its band
-  fails naming the kernel, its streams are kept, and the sweep moves on. Legs run
-  under the host's temp root, so a walk of the checkout never meets a vanishing
-  legs dir; a failing workload's legs move to `.hearth` as its evidence, and every
-  fifo a leg left is released, removed and named in the evidence.
+- The sweep (`./fkwu gate/band-sweep-run.bml`, `form-stdlib/bml/band-sweep.bml`):
+  every leg is a child with a deadline of its own (1800 s, `ceiling_s`); a leg past it
+  is ended with its fkwu lineage, its band fails naming itself, its streams are
+  kept, and the sweep moves on. Legs run under the host's temp root, so a walk of
+  the checkout never meets a vanishing legs dir; a failing workload's legs move to
+  `.hearth` as its evidence, and every fifo a leg left is released and removed.
 
 ## Kernel protocol witness
 

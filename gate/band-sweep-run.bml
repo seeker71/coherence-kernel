@@ -1,0 +1,86 @@
+// band-sweep-run.bml — every Form band answers on fkwu, the one runtime: the sweep.
+//
+//   ./fkwu gate/band-sweep-run.bml </dev/null                                        every band the body keeps
+//   printf '{"list":1}' | ./fkwu gate/band-sweep-run.bml                              name the workloads, run nothing
+//   printf '{"match":"glass|landing"}' | ./fkwu gate/band-sweep-run.bml               the workloads whose label holds either word
+//   printf '{"files":["form-stdlib/tests/boot-band.fk"]}' | ./fkwu gate/band-sweep-run.bml   one workload of exactly these files
+//
+// stdin is one JSON object, every key optional: list (1 names the workloads, with each one's staging, head pin and manifest
+// row, and runs nothing), match (alternatives separated by |, each a substring of a workload's label), files (one workload of
+// these files, in order: a path as given, else under form/), jobs (the pool's width, 8), ceiling_s (a leg's deadline, 1800),
+// fkwu (the runtime that walks the bands, ./fkwu). Run from the repository root. The enumeration, the legs, the judgment and
+// the seal are form-stdlib/bml/band-sweep.bml.
+//
+// Before the first leg the sweep (not the list) runs two gates and builds what is stale: the structural gate
+// (gate/structural-gate-run.fk) must end 1, then gate/validation-start-run.fk must end 1, then the seed (runtime/fkwu-uni.c)
+// and, on Darwin, the Metal carrier (form/native/metal/fk-metal-carrier.m) are built by `cc` when they are newer than their
+// products: the C compiler is the one external tool the seed needs to be BUILT, begun here through host-child's argv door as
+// the walk's own build is (the product is made beside itself and renamed over, never written into the live binary).
+//
+// Output: one line per workload in enumeration order, then the summary. The exit is 0 only when every workload held; a failed
+// workload, a refused gate or a void reading (the tree moved while the sweep ran) ends in an error naming it.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/band-sweep.bml
+section [form.bml] {
+ class BandSweepRun {
+  def bsr-last-line(out) = hch-tail-line(out);
+  // a gate door: its words are printed, and it holds when it exits 0 and its last line is 1
+  def bsr-gate(step, argv, fkwu) {
+   let run = hch-run-in(".hearth/validation", step, argv, "", hch-by(1800000));
+   let said = print_str(trim(run[1]));
+   hch-ok?(run) && (String) bsr-last-line(run[1]) == "1" ? 1 : 0;
+  }
+  def bsr-gates(fkwu) {
+   let structural = bsr-gate("structural-gate", [fkwu, "gate/structural-gate-run.fk"], fkwu);
+   structural != 1 ? form_error("band-sweep: the structural gate refused an unclassified shell, python or other non-Form file") : bsr-start-gate(fkwu);
+  }
+  def bsr-start-gate(fkwu) = bsr-gate("validation-start", [fkwu, "gate/validation-start-run.fk"], fkwu) != 1 ? form_error("band-sweep: native validation-start needs attention") : 1;
+  // the seed and the carrier, built when stale; "build=fresh", "build=0" (built), or the compiler's exit
+  def bsr-darwin?() = (String) hch-read(["uname", "-s"]) == "Darwin";
+  def bsr-built?(word) = bsw-ends?(word, "=fresh") || bsw-ends?(word, "=0");
+  def bsr-seed() {
+   let built = hw-build();
+   let said = print_str("  runtime fkwu: " ++ built);
+   bsr-built?(built) ? 1 : form_error("band-sweep: the seed did not build (" ++ built ++ "): cc -O2 -o fkwu runtime/fkwu-uni.c");
+  }
+  def bsr-carrier() {
+   let wanted = bsr-darwin?() && (Comparable) file_size("form/native/metal/fk-metal-carrier.m") >= 0;
+   let built = wanted ? hw-carrier() : "carrier=absent";
+   let said = wanted ? print_str("  metal carrier: " ++ built) : 0;
+   !wanted || bsr-built?(built) ? 1 : form_error("band-sweep: the carrier did not build (" ++ built ++ ")");
+  }
+  def bsr-void(start, end) {
+   let shown = bsw-print(bsw-void-lines(start, end));
+   form_error("band-sweep: void reading");
+  }
+  def bsr-fkwu-present(fkwu) = (Comparable) file_size(fkwu) >= 0 ? 1 : form_error("band-sweep: the runtime fkwu is ABSENT, it walks every workload so no band can run. Build it: cc -O2 -o fkwu runtime/fkwu-uni.c (from the repo root)");
+  def bsr-missing-files(missing) {
+   let a = print_str("  ✗  input file(s) not found — this is a missing file, not a failing band.");
+   let b = print_str("      input paths are read as given, else under form/ (e.g. form-stdlib/core.fk):");
+   let c = foldl((acc, f) => print_str("        " ++ f), 0, missing);
+   form_error("band-sweep: input file(s) not found");
+  }
+  def bsr-workloads(doc) {
+   let files = bsw-opt-files(doc);
+   nil?(files) ? bsw-select(bsw-all(), bsw-opt-str(doc, "match", "")) : [bsw-explicit(files)];
+  }
+  def bsr-list(ws) = foldl((acc, w) => print_str(bsw-list-line(w)), 0, ws);
+  def bsr-sweep(doc, ws) {
+   let fkwu = bsw-opt-str(doc, "fkwu", "./fkwu");
+   let opts = [bsw-opt-int(doc, "jobs", bsw-jobs()), fkwu, bsw-opt-int(doc, "ceiling_s", bsw-ceiling-s())];
+   let present = bsr-fkwu-present(fkwu);
+   let gated = bsr-gates(fkwu);
+   let seeded = bsr-seed();
+   let carried = bsr-carrier();
+   let start = bsw-stamp();
+   let tally = bsw-run(ws, opts);
+   let end = bsw-stamp();
+   let shown = bsw-print(bsw-summary(tally));
+   (String) start != (String) end ? bsr-void(start, end) : tally[3] > 0 ? form_error("band-sweep: " ++ tally[3].str() ++ " workload(s) failed") : 0;
+  }
+ }
+ let doc = bsw-doc(stdin-text());
+ let files = bsw-opt-files(doc);
+ let missing = bsw-missing(files);
+ !nil?(missing) ? bsr-missing-files(missing) : bsw-opt-int(doc, "list", 0) == 1 ? bsr-list(bsr-workloads(doc)) : bsr-sweep(doc, bsr-workloads(doc));
+}

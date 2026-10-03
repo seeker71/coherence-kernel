@@ -32,12 +32,10 @@ appear beside each source on its first run, and `form/build-form-cli.sh` regener
 fkwu is the only runtime and every band answers its pin on it. Nothing in this tree builds, runs or
 gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc`,
 `./fkwu`, `shasum` and `openssl`. No tracked script and no Form door calls sed, awk, perl or python:
-what a band's head and the verdict manifest say is read by `observe/band-head-run.bml`, which answers one
-line to each line it is sent, so `validate.sh --list` asks once for every band and once for every row
-(band `observe/tests/band-head-band`, 2047). `validate.sh` sends the reader its fields one by one, so
-the sweep worker's IFS cannot join them, and a reader that is absent or fails is a loud ✗ line and a
-non-zero verdict, never "no pin" (`observe/tests/validate-reader-band`, 15, holds both, and drops to 14
-when the joining is put back). `hearth.bml`, `rumi-glass.bml` and `observe/hearth-glass-live.fk` read the
+the band sweep (`./fkwu gate/band-sweep-run.bml`, `form/form-stdlib/bml/band-sweep.bml`) reads what a band's head and
+the verdict manifest say in process (`observe/band-head.bml`, band `observe/tests/band-head-band`, 2047), so
+`{"list":1}` names all 381 workloads with each one's staging, pin and row in about a second (the shell took 4 s,
+2026-10-04: the same columns, line for line). `hearth.bml`, `rumi-glass.bml` and `observe/hearth-glass-live.fk` read the
 `ps` listing in Form (`hearth-band`, 131071) and `source-of.fk` reads grep's rows in Form
 (`source-of-band`, 15). `tools/ftimeout` is plain shell: 124 on the deadline, else the child's status,
 128+n for a signal.
@@ -614,7 +612,7 @@ TWO FITS of wall against experts missed, both kept: 0.397 ms an expert on 94.6 m
 moves five pins), patching the position-dependent constants of the rope, the append and the attention into segments (about 9 percent of the encoding left), the shared expert's early hand-over to overlap the fills (at most about 4 ms: its 4 dispatches read about 27 MB a layer). The device's 43 ms is bandwidth: the Q8_0 matvec 302 dispatches 18.3 ms at 60 us (the attribution above), not host time.
 
 Bands that read a binary fixture through `read_file_slice` or a host door run on fkwu like every band;
-`./validate.sh --list` prints each band's staging and pins. The restored emitters, the
+`printf '{"list":1}' | ./fkwu gate/band-sweep-run.bml` prints each band's staging and pins. The restored emitters, the
 `*-real.fk` cells, `dsv4-token.fk` and the windowed residency emitter say in their own headers whether a band proves
 them or they are restored for the spec and not run physically. The reference evidence
 `docs/evidence/fkwu/dsv4-oracle.json` is the reading of 2026-09-11 and is left as observed; the sidecar
