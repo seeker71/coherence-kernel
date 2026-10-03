@@ -176,7 +176,7 @@ answering each closed control (`receipts/form-token-eval.jsonl`, the row at 1790
 
 On 2026-10-02 the host restarted three times while model doors ran. Every check the body had looked at one process
 (`nlg-room` reads this process's Metal bytes against the device's recommended working set), so several kernels, a
-DeepSeek server and the page cache could each pass their own check and together pass the machine.
+external model server and the page cache could each pass their own check and together pass the machine.
 
 - **Weights are shared.** `metal_buf_from_file` (`form/native/metal/fk-metal-carrier.m`) maps each tensor of the
   GGUF `MAP_PRIVATE` from the file and wraps the pages without a copy, and the Qwen open binds every tensor that
@@ -184,7 +184,7 @@ DeepSeek server and the page cache could each pass their own check and together 
   process that maps the same file. Measured on 2026-10-02 with two kernels mapping one 6 GiB model file and the GPU
   reading every page: the file-backed page count rose 6.2 GiB for the first and 0.0 GiB for the second.
 - **What a process still owns** is its KV state, its scratch buffers and a 40 MB header read; another engine's
-  weights (the DeepSeek server `ds4` holds about 24 GiB of its own plus an expert cache) are not ours to share.
+  weights would not be ours to share, and the body runs none: DeepSeek-V4 runs in the session's own process through its own expert arena (`dsv4-lease.fk`: dense tensors, 64 experts a layer and the KV, derived from the header).
 - **Wired memory is not steady.** Metal wires a buffer's pages while the GPU uses them; the machine's wired count read
   35.8, 7.3 and 35.1 GiB within 40 seconds as other sessions' model work came and went, so one reading can pass
   two processes that start together.

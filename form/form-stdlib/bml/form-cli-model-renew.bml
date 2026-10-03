@@ -19,9 +19,17 @@ section [form.bml] {
    else if (!((String) value_kind(ids) == "list")) then "prompt-ids-need-list"
    else if nil?(ids) then "empty-prompt"
    else if (len(ids) >= fcms-maxpos(session)) then "prompt-context-window-refused"
-   else if (!fcmr-ids-valid(ids,fcms-ctx(session)[2][19])) then "prompt-token-id-refused"
+   else if (!fcmr-ids-valid(ids,fcmr-vocab(session))) then "prompt-token-id-refused"
    else "";
   }
+  // A DeepSeek-V4 session renews as a Qwen one does, over the same weights (and, for DeepSeek, the same expert arena): the vocabulary is the layout record's, the second state and its prefill are the driver's
+  // (form-cli-model-ds4.fk fcds-fresh-state, fcds-fresh-prefill, fcds-state-release), and the renewed stream starts again at position 0, so its window is the whole position limit again.
+  def fcmr-vocab(session) = if fcms-ds4?(session) then fcds-vocab-of(fcms-ctx(session)) else fcms-ctx(session)[2][19];
+  def fcmr-fresh-state(session) = if fcms-ds4?(session) then fcds-fresh-state(fcms-ctx(session)) else q38-new-state(fcms-ctx(session)[2]);
+  def fcmr-fresh-complete?(session,fresh) = if fcms-ds4?(session) then ((!nothing?(fresh)) && (fcds-state-count(fresh) > 0)) else fcmr-state-complete?(fresh,fcms-ctx(session)[2]);
+  def fcmr-state-count(session,state) = if fcms-ds4?(session) then fcds-state-count(state) else q38-state-handle-count(state);
+  // the handles released (Qwen's q38-free-state answers the count it freed; the driver's release answers the handles still held, so the count freed is what the state held less those)
+  def fcmr-state-free(session,state) = if fcms-ds4?(session) then (fcds-state-count(state) - len(fcds-state-release(state))) else q38-free-state(state);
   def fcmr-new-session(previous,state,prefill,count) = fcmd-inherit(previous,fcms-session("live","fresh-stream-same-weights",fcms-path(previous),fcms-src(previous),fcms-ctx(previous),state,fcms-maxpos(previous),prefill[1],prefill[0],0,count,0,0,0));
   def fcmr-reading(flow,reason,good,expected,observed) = oh-reading("model-session",flow,"independent-stream",expected,observed,json-node-int(good),if good then [] else [oh-need(reason,json-node-null())],["replace-stream","retain-session","inspect-state-release"],json-node-null());
   def fcmr-observed(flow,result,expected,observed) {
@@ -56,19 +64,23 @@ section [form.bml] {
   // is given back (mg-lease-return) when a stream is retired: the old one on success, the new one when it is discarded.
   // A held answer leaves the caller's owner as it was and names host-memory-held,
   // so the lane ends with a reason through its checkpoint, not a crash.
-  def fcmr-granted(flow,session,ids,reading,v) = mg-granted?(v) ? fcmr-allocated(flow,session,ids,reading,q38-new-state(fcms-ctx(session)[2])) : fcmr-observed(flow,fcmr-result(0,"host-memory-held:" ++ v[1],session),json-node-string("room for a second KV state"),json-node-string(v[1]));
+  def fcmr-granted(flow,session,ids,reading,v) = mg-granted?(v) ? fcmr-allocated(flow,session,ids,reading,fcmr-fresh-state(session)) : fcmr-observed(flow,fcmr-result(0,"host-memory-held:" ++ v[1],session),json-node-string("room for a second KV state"),json-node-string(v[1]));
   def fcmr-allocated(flow,session,ids,reading,fresh) {
-   let good = fcmr-state-complete?(fresh,fcms-ctx(session)[2]);
+   let good = fcmr-fresh-complete?(session,fresh);
    if (!good) then fcmr-discard(flow,session,fresh,"new-stream-allocation-refused")
-   else fcmr-prefilled(flow,session,ids,reading,fresh,fcmr-prefill(fcms-ctx(session),fresh,ids));
+   else fcmr-prefilled(flow,session,ids,reading,fresh,fcmr-prefill-of(session,fresh,ids));
   }
+  // the prefill of the new prompt into the second state: Qwen's walk, or the driver's (nothing there is the refused shape)
+  // A stop inside a DeepSeek prefill is the refused-prefill shape, so the renewal ends through its own discard: the second state is freed and its lease returned, the owner is as it was (the Qwen prefill is as it was).
+  def fcmr-prefill-of(session,fresh,ids) = if fcms-ds4?(session) then fcmr-ds4-shape(try fcds-fresh-prefill(fcms-ctx(session),fresh,ids) catch nothing()) else fcmr-prefill(fcms-ctx(session),fresh,ids);
+  def fcmr-ds4-shape(pf) = if nothing?(pf) then [-1,0] else pf;
   def fcmr-state-complete?(state,geo) = (((Comparable) len(state) == geo[21]) && (((Comparable) q38-state-handle-count(state) == (2 * geo[21])) && q38-state-ok?(state)));
   def fcmr-span(ctx,count) = if (q38-ctx-span(ctx) < fcma-span(count)) then q38-ctx-span(ctx) else fcma-span(count);
   def fcmr-prefill(ctx,state,ids) = fcmo-walk(fcmo-native-step,ctx,state,ids,0,fcmr-span(ctx,len(ids)));
   def fcmr-discard(flow,session,fresh,reason) {
    let settled = metal_sync();
-   let expected = q38-state-handle-count(fresh);
-   let released = q38-free-state(fresh);
+   let expected = fcmr-state-count(session,fresh);
+   let released = fcmr-state-free(session,fresh);
    let returned = mg-lease-return(mg-kv-margin());
    fcmr-observed(flow,fcmr-result(0,if ((Comparable) expected == released) then reason else "candidate-stream-release-incomplete",session),json-node-int(expected),json-node-int(released));
   }
@@ -78,8 +90,8 @@ section [form.bml] {
   }
   def fcmr-retire(flow,session,ids,reading,fresh,prefill) {
    let settled = metal_sync();
-   let expected = q38-state-handle-count(fcms-sts(session));
-   let released = q38-free-state(fcms-sts(session));
+   let expected = fcmr-state-count(session,fcms-sts(session));
+   let released = fcmr-state-free(session,fcms-sts(session));
    let returned = mg-lease-return(mg-kv-margin());
    let next = fcms-refresh-head(fcmr-new-session(session,fresh,prefill,len(ids)));
    let applied = oh-voice(oh-applied(reading,"replace-stream",json-node-object([oh-n("prompt_ids",len(ids)),oh-n("old_state_handles_expected",expected),oh-n("old_state_handles_released",released),oh-n("weight_admissions",0)])));
@@ -89,6 +101,7 @@ section [form.bml] {
   def fcmr-replace-with-profile-checked(session,prompt,profile,check,contract) {
    if (!fcms-resident?(session)) then fcmr-result(0,"no-resident-context",session)
    else if (!fcms-live?(session)) then fcmr-result(0,"session-not-live",session)
+   else if fcms-ds4?(session) then fcmr-replace-ids-checked(session,fcds-prompt-ids(fcms-src(session),prompt),check,contract)
    else fcmr-encode-checked(session,prompt,profile,qsx-load(fcms-path(session)),check,contract);
   }
   def fcmr-encode(session,prompt,profile,crystal) = fcmr-encode-checked(session,prompt,profile,crystal,fcmr-any-prompt,0);

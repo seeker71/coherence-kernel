@@ -1,0 +1,178 @@
+; model-seal-band.bml -- the seal door (form-stdlib/bml/model-seal.bml, observe/model-seal-run.bml) writes the line the session and generate doors verify a model against.
+;
+; WHAT THIS PINS. ms-seal hashes a file with the body's SHA-256 organ and writes <file>.form-seal as "qaf-seal1:<size>:<hex>"; the doors' own verdict (qaf-seal-verdict) reads 1 on it. The file under test is the three bytes
+; "abc", whose SHA-256 is the published ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad, so the hex is checked against a value this body did not compute.
+;
+; THE DIGEST IS CHUNKED (native/metal/sha256-arm64-jit.fk saj-file-prefix-state-chunked): one no-copy buffer over a file past the device's maxBufferLength (86,586,540,032 B) cannot be made, which is what the 86.7 GB IQ2XXS build
+; read as an empty digest; the file is walked in chunks (a multiple of 64, 4 GiB by default), each its own handle compressed from the state the chunk before left. The independent witnesses: the published FIPS 180 vector
+; for one million 'a' (and "abc" above), and form-stdlib/sha256.fk, a pure-Form SHA-256 that shares no code with the arm64 organ; no outside program is used.
+;
+; Verdict 2047 when every claim lands:
+;   1     ms-seal on the file answers [1, sealed] and the sidecar holds exactly qaf-seal1:3:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad, and the note the doors keep after a full pass stands beside it (the first open does not read the file again)
+;   2     the doors' verdict on the sealed file is 1 (qaf-seal-verdict), and a file whose bytes then change reads 0 against the same seal
+;   4     a seal that stands is never overwritten: a second ms-seal answers [1, seal-already-standing] and the sidecar's bytes are as they were, even after the file changed
+;   8     the refusals: a path with no file answers [0, no-file] and writes no sidecar; the dry plan (ms-plan) names the seal as absent before and as standing after, and reads no byte of the file
+;   16    the checks can fail: a seal line with another size or another digest is not the sealed one and reads 0 against the file, and the empty-file case writes no seal
+;   32    a file of one million 'a' reads the published digest cdc76e5c...2cd0 at every chunk size: 4 GiB (one chunk), 64 KiB, 4096 B, 100,032 B (which does not divide the file) and 192 B
+;   64    a 1 MiB deterministic synthetic file (a prime-period pattern over all 256 byte values) reads one digest at those five chunk sizes, and a 32,771 B file (not a multiple of 64) reads the pure-Form SHA-256's
+;         at 4 GiB, 4096, 16384, 64 and 960 B
+;   128   the tail shapes 0 to 63 (files of 192 + t bytes, chunk 64: three seams, the 56 to 63 two-block padding case included) read the pure-Form SHA-256's through saj-file-digest-any-tail, and the strict
+;         saj-file-digest agrees for tails under 56 and answers nothing for 56 to 63
+;   256   the plants fail: a chunk walk that restarts from the initial state at every chunk and one whose offset is a block early read other digests over 16 chunks, and both read the true digest over one
+;         chunk (so each differs from the walk only by its defect)
+;   512   the Qwen path is unchanged: the default chunk is 4 GiB (a multiple of 64 and of the 16 KiB page, under the device's maxBufferLength), the default prefix state equals the walk at that chunk, the
+;         strict digest of the 1 MiB file is the one the chunk sizes read, a chunk that is no multiple of 64 is refused, and the seal door above still seals
+;   1024  the file's identity (size, mtime, inode) is read before the pass and after it and a seal is written only when they agree: a reader that answers another identity the second time (a same-size edit
+;         during the pass, which a band cannot race) gets [0, file-moved-while-hashed] with no sidecar and no verified note, a steady reader and the real one seal; the check as it was (size alone) seals the
+;         moved file, which is the defect
+;
+; REQUIRES: nothing outside the tree. Writes only under temp_dir (the file, its seal, the verified note the verdict leaves beside it) and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/qwen35-artifact-seal-reader.fk form-stdlib/bml/model-seal.bml
+section [form.bml] {
+ class ModelSealBand {
+  def msb-bit(held, bit) = held ? bit : 0;
+  def msb-abc() = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+  // the published FIPS 180 vector for one million 'a'
+  def msb-million-a() = "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0";
+  def msb-has?(s, part) = str_find(s, part, 0) >= 0;
+  def msb-clean(path) = host_path_remove(path) + host_path_remove(qaf-seal-path-for(path)) + host_path_remove(qaf-verified-path-for(path));
+  // ---- the chunked digest ------------------------------------------------------------------------------------------------------------------------
+  // a deterministic pattern whose bytes run over the whole 0..255 range and whose period (4093, a prime) divides no chunk size; a constant block; both written through the body's own bulk byte door
+  def msb-pat(lo, n) = n <= 1 ? [((lo * 7) + (lo / 251)) % 256] : append(msb-pat(lo, n / 2), msb-pat(lo + n / 2, n - n / 2));
+  def msb-const(b, n) = n <= 1 ? [b] : append(msb-const(b, n / 2), msb-const(b, n - n / 2));
+  def msb-fill(path, block, k) = k == 0 ? 0 : { let w = file_append_bytes(path, block); msb-fill(path, block, k - 1); };
+  def msb-write-pattern(path, total) {
+   let gone = host_path_remove(path);
+   let block = msb-pat(0, 4093);
+   let full = msb-fill(path, block, total / 4093);
+   let rest = total % 4093;
+   let tail = rest > 0 ? file_append_bytes(path, block[0:rest]) : 0;
+   file_size(path);
+  }
+  def msb-write-const(path, b, total) {
+   let gone = host_path_remove(path);
+   let full = msb-fill(path, msb-const(b, 10000), total / 10000);
+   let rest = total % 10000;
+   let tail = rest > 0 ? file_append_bytes(path, msb-const(b, rest)) : 0;
+   file_size(path);
+  }
+  def msb-hex(path, total, chunk) = qaf-string-hex(saj-file-digest-any-tail-chunked(path, total, chunk));
+  def msb-chunks() = [4294967296, 65536, 4096, 100032, 192];
+  def msb-all-equal(path, total, chunks, want) = len(chunks) == 0 ? true : (msb-hex(path, total, chunks[0]) == want && msb-all-equal(path, total, chunks[1:], want));
+  def msb-hex-of-list(bs) = len(bs) == 0 ? "" : qaf-hex-byte(bs[0]) ++ msb-hex-of-list(bs[1:]);
+  // the tail shapes 0..63 of a three-block-and-a-bit file against the pure-Form SHA-256 (form-stdlib/sha256.fk: a second implementation that shares no code with the arm64 organ), chunk 64 so the three blocks cross three seams
+  def msb-tail-ok?(path, t) {
+   let n = 192 + t;
+   let w = msb-write-pattern(path, n);
+   let want = msb-hex-of-list(sha256(msb-pat-bytes(n)));
+   let got = msb-hex(path, n, 64);
+   let strict = saj-file-digest-chunked(path, n, 64);
+   w == n && got == want && (t >= 56 ? len(strict) == 0 : qaf-string-hex(strict) == want);
+  }
+  // the first n bytes of the file msb-write-pattern writes: the pattern repeated
+  def msb-pat-bytes(n) = n <= 4093 ? msb-pat(0, 4093)[0:n] : append(msb-pat(0, 4093), msb-pat-bytes(n - 4093));
+  def msb-tails-ok?(path, t) = t == 64 ? true : (msb-tail-ok?(path, t) && msb-tails-ok?(path, t + 1));
+  // ---- the identity readings: a reader that answers another identity the second time it is asked (a file that moved during the pass), and one that never changes -------------------------------
+  def msb-tick(c) {
+   let n = record_get(c, "n");
+   let k = record_set(c, "n", n + 1);
+   n == 0 ? "id-a" : "id-b";
+  }
+  def msb-moving(c) = p => msb-tick(c);
+  def msb-steady() = p => "id-same";
+  // the check as it was: the size alone (a same-size edit during the pass is sealed and stamped)
+  def msb-size-only(path) {
+   let size = file_size(path);
+   let digest = saj-file-digest(path, size);
+   file_size(path) != size || len(digest) == 0 ? [0, "refused"] : ms-written(path, size, qaf-string-hex(digest));
+  }
+  // ---- the plants: a walk that drops the carried state, and one whose offset is a block early ---------------------------------------------------------------
+  def msb-plant-state(path, total, chunk, off, st, mode) = off >= total ? st : msb-plant-step(path, total, chunk, off, st, mode, (total - off) < chunk ? (total - off) : chunk);
+  def msb-plant-step(path, total, chunk, off, st, mode, span) {
+   let o = (String) mode == "shift" && off > 0 ? off - 64 : off;
+   let start = (String) mode == "restart" ? saj-initial-state-bytes() : st;
+   let message = metal_buf_from_file(path, o, span);
+   let raw = saj-compress-handle-state(message, start, span / 64);
+   let freed = metal_buf_free(message);
+   msb-plant-state(path, total, chunk, off + span, raw, mode);
+  }
+  def msb-plant-hex(path, total, chunk, mode) {
+   let prefix = total - (total % 64);
+   qaf-string-hex(saj-final-tail-digest(msb-plant-state(path, prefix, chunk, 0, saj-initial-state-bytes(), mode), read_file_slice(path, prefix, total % 64), total));
+  }
+ }
+ let path = temp_dir() ++ "/model-seal-band-" ++ now_unix_ms().str() ++ ".bin";
+ let empty = temp_dir() ++ "/model-seal-band-empty-" ++ now_unix_ms().str() ++ ".bin";
+ let missing = temp_dir() ++ "/model-seal-band-missing-" ++ now_unix_ms().str() ++ ".bin";
+ let wrote = write_file(path, "abc");
+ let wroteEmpty = write_file(empty, "");
+ let planBefore = ms-plan(path);
+ let sealed = ms-seal(path);
+ let noteAfterSeal = file_size(qaf-verified-path-for(path)) > 0;
+ let sidecar = read_file(qaf-seal-path-for(path)) ?? "";
+ let planAfter = ms-plan(path);
+ let verdictSealed = qaf-seal-verdict(path);
+ let again = ms-seal(path);
+ let sidecarAgain = read_file(qaf-seal-path-for(path)) ?? "";
+ let dropNote = host_path_remove(qaf-verified-path-for(path));
+ let moved = write_file(path, "abd");
+ let verdictMoved = qaf-seal-verdict(path);
+ let overwriteTry = ms-seal(path);
+ let sidecarMoved = read_file(qaf-seal-path-for(path)) ?? "";
+ let gone = ms-seal(missing);
+ let emptyTry = ms-seal(empty);
+ let forged = write_file_text(qaf-seal-path-for(path), ms-line(4, msb-abc()));
+ let verdictForged = qaf-seal-verdict(path);
+ let forged2 = write_file_text(qaf-seal-path-for(path), ms-line(3, "0000000000000000000000000000000000000000000000000000000000000000"));
+ let verdictForged2 = qaf-seal-verdict(path);
+ let said = print_str("seal: " ++ sealed.str() ++ " sidecar [" ++ sidecar ++ "] verdicts sealed " ++ verdictSealed.str() ++ " moved " ++ verdictMoved.str() ++ " forged " ++ verdictForged.str() ++ "/" ++ verdictForged2.str() ++ " again " ++ again.str() ++ " missing " ++ gone.str() ++ " empty " ++ emptyTry.str());
+ let r1 = try sealed[0] == 1 && (String) sealed[1] == "sealed" && (String) sidecar == ("qaf-seal1:3:" ++ msb-abc()) && noteAfterSeal catch false;
+ let r2 = try verdictSealed == 1 && verdictMoved == 0 catch false;
+ let r4 = try again[0] == 1 && (String) again[1] == "seal-already-standing" && (String) sidecarAgain == (String) sidecar && overwriteTry[0] == 1 && (String) overwriteTry[1] == "seal-already-standing" && (String) sidecarMoved == (String) sidecar catch false;
+ let r8 = try gone[0] == 0 && (String) gone[1] == "no-file" && file_size(qaf-seal-path-for(missing)) < 1 && msb-has?(planBefore, "is absent") && msb-has?(planAfter, "STANDS") && msb-has?(planBefore, "no byte of the file was read") catch false;
+ let r16 = try verdictForged == 0 && verdictForged2 == 0 && emptyTry[0] == 0 && file_size(qaf-seal-path-for(empty)) < 1 && (String) ms-line(3, msb-abc()) != (String) ms-line(4, msb-abc()) catch false;
+ // 32 to 512: the chunked digest
+ let big = temp_dir() ++ "/model-seal-band-big-" ++ now_unix_ms().str() ++ ".bin";
+ let pat = temp_dir() ++ "/model-seal-band-pat-" ++ now_unix_ms().str() ++ ".bin";
+ let small = temp_dir() ++ "/model-seal-band-small-" ++ now_unix_ms().str() ++ ".bin";
+ let wroteBig = msb-write-const(big, 97, 1000000);
+ let millionA = msb-hex(big, wroteBig, 4294967296);
+ let millionOk = msb-all-equal(big, wroteBig, msb-chunks(), msb-million-a());
+ let said1 = print_str("million a: " ++ millionA ++ " all chunk sizes published: " ++ (millionOk ? "1" : "0"));
+ let wrotePat = msb-write-pattern(pat, 1048576);
+ let patWhole = msb-hex(pat, wrotePat, 4294967296);
+ let patOk = msb-all-equal(pat, wrotePat, msb-chunks(), patWhole);
+ let wroteSmall = msb-write-pattern(small, 32771);
+ let smallWant = msb-hex-of-list(sha256(msb-pat-bytes(32771)));
+ let smallOk = msb-all-equal(small, wroteSmall, [4294967296, 4096, 16384, 64, 960], smallWant);
+ let said2 = print_str("1 MiB pattern " ++ patWhole ++ " equal across chunk sizes: " ++ (patOk ? "1" : "0") ++ "; 32,771 B against the pure-Form SHA-256: " ++ (smallOk ? "1" : "0"));
+ let tailsOk = msb-tails-ok?(small, 0);
+ let said3 = print_str("tail shapes 0 to 63 against the pure-Form SHA-256: " ++ (tailsOk ? "1" : "0"));
+ let plantRestart = msb-plant-hex(pat, wrotePat, 65536, "restart");
+ let plantShift = msb-plant-hex(pat, wrotePat, 65536, "shift");
+ let plantRestartOne = msb-plant-hex(pat, wrotePat, 4294967296, "restart");
+ let plantShiftOne = msb-plant-hex(pat, wrotePat, 4294967296, "shift");
+ let said4 = print_str("plants over 16 chunks: restart " ++ plantRestart ++ " shift " ++ plantShift ++ "; over one chunk both read the true digest: " ++ (plantRestartOne == patWhole && plantShiftOne == patWhole ? "1" : "0"));
+ let r32 = try wroteBig == 1000000 && millionA == msb-million-a() && millionOk catch false;
+ let r64 = try wrotePat == 1048576 && len(patWhole) == 64 && patOk && wroteSmall == 32771 && smallOk catch false;
+ let r128 = try tailsOk catch false;
+ let r256 = try plantRestart != patWhole && plantShift != patWhole && len(plantRestart) == 64 && len(plantShift) == 64 && plantRestartOne == patWhole && plantShiftOne == patWhole catch false;
+ let r512 = try saj-chunk-bytes() == 4294967296 && (saj-chunk-bytes() % 64) == 0 && (saj-chunk-bytes() % 16384) == 0 && saj-chunk-bytes() < 86586540032 && !saj-chunk-ok?(100) && !saj-chunk-ok?(0) && len(saj-file-prefix-state-chunked(pat, 1048576, 100)) == 0
+  && saj-file-prefix-state(pat, 1048576) == saj-file-prefix-state-chunked(pat, 1048576, saj-chunk-bytes()) && qaf-string-hex(saj-file-digest(pat, 1048576)) == patWhole && sealed[0] == 1 catch false;
+ // 1024: the identity before and after the pass
+ let idA = temp_dir() ++ "/model-seal-band-id-a-" ++ now_unix_ms().str() ++ ".bin";
+ let idB = temp_dir() ++ "/model-seal-band-id-b-" ++ now_unix_ms().str() ++ ".bin";
+ let idC = temp_dir() ++ "/model-seal-band-id-c-" ++ now_unix_ms().str() ++ ".bin";
+ let wroteIds = write_file(idA, "abc") + write_file(idB, "abc") + write_file(idC, "abc");
+ let movedSeal = ms-seal-with(idA, msb-moving(record_new(0, "n", 0)));
+ let movedStood = file_size(qaf-seal-path-for(idA)) > 0;
+ let movedNote = file_size(qaf-verified-path-for(idA)) > 0;
+ let steadySeal = ms-seal-with(idB, msb-steady());
+ let realIdSeal = ms-seal(idC);
+ let plantSeal = msb-size-only(idA);
+ let said5 = print_str("identity: moving " ++ movedSeal.str() ++ " steady " ++ steadySeal.str() ++ " real reader " ++ realIdSeal.str() ++ "; the size-only check seals the moved file: " ++ plantSeal.str());
+ let r1024 = try movedSeal[0] == 0 && (String) movedSeal[1] == "file-moved-while-hashed" && !movedStood && !movedNote && steadySeal[0] == 1 && (String) steadySeal[1] == "sealed" && realIdSeal[0] == 1 && plantSeal[0] == 1 && (String) plantSeal[1] == "sealed" catch false;
+ let removed = msb-clean(path) + msb-clean(empty) + msb-clean(missing) + host_path_remove(big) + host_path_remove(pat) + host_path_remove(small) + msb-clean(idA) + msb-clean(idB) + msb-clean(idC);
+ print_str("model-seal-band claims " ++ msb-bit(r1, 1).str() ++ " " ++ msb-bit(r2, 2).str() ++ " " ++ msb-bit(r4, 4).str() ++ " " ++ msb-bit(r8, 8).str() ++ " " ++ msb-bit(r16, 16).str() ++ " " ++ msb-bit(r32, 32).str() ++ " " ++ msb-bit(r64, 64).str() ++ " " ++ msb-bit(r128, 128).str() ++ " " ++ msb-bit(r256, 256).str() ++ " " ++ msb-bit(r512, 512).str() ++ " " ++ msb-bit(r1024, 1024).str());
+ msb-bit(r1, 1) + msb-bit(r2, 2) + msb-bit(r4, 4) + msb-bit(r8, 8) + msb-bit(r16, 16) + msb-bit(r32, 32) + msb-bit(r64, 64) + msb-bit(r128, 128) + msb-bit(r256, 256) + msb-bit(r512, 512) + msb-bit(r1024, 1024);
+}

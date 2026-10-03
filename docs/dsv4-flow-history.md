@@ -33,10 +33,10 @@ The flow: session door -> memory lease -> open (header once, pipelines once, vie
 
 | step | Qwen (`form-cli-model-session.fk`, `qwen35-dense-token-handle.fk`) | DeepSeek (`form-cli-model-ds4.fk`, `dsv4-open/-layer/-token-handle.fk`) |
 |---|---|---|
-| door dispatch | `fcmg` and `fcms-open-body` gate on `mr-wired?` (registry row `qwen35 q38 1`); generate `~:598` arch gate | `fcds-route` behind `fcds-lane-wired?` (0) and the registry row `deepseek4 ds4-query 0`; they flip together after the window (`dsv4-door-band` fails when they differ) |
-| seal and crystal | `qaf-seal-verdict`, `qsx-load` | the seal verdict first (same door); the tokenizer is read from the file's own header (`dsv4-tokenizer.fk`: gpt2 byte-level BPE, 129,280 tokens), raw ids, no template, no begin token |
-| lease | `mg-lease(file size, kv margin)` | `mg-lease(derived working set at the session's capacity, kv margin)` (`dsv4-lease.fk`): the 80 GB file is touched in part |
-| context | `q38-open-span`: 11 slots | `dsv4-open-span`: the same 11 slots plus two (the scratch record, the view record), so `q38-context-ok?`, `q38-close`, `q38-free-state` apply |
+| door dispatch | `fcmg` and `fcms-open-body` gate on `mr-wired?` (registry row `qwen35 q38 1`); generate `~:598` arch gate | `fcds-route` behind `fcds-lane-wired?` (1) and the registry row `deepseek4 dsv4 1`: twins, held equal by `dsv4-door-band` |
+| seal and crystal | `qaf-seal-verdict`, `qsx-load` | the seal verdict first (same door); the tokenizer is read from the file's own header (`dsv4-tokenizer.fk`: gpt2 byte-level BPE, 129,280 tokens) and the prompt wrapped in the chat template (`dsv4-chat-template.bml`: BOS, system, User, prompt, Assistant, `<think>`: 14 ids for the recorded prompt) |
+| lease | `mg-lease(file size, kv margin)` | `mg-lease(derived working set at the session's capacity, kv margin)` (`dsv4-lease.fk`): the 80 GB file is touched in part; the capacity is cut to the 2,048 positions the driver serves |
+| context | `q38-open-span`: 11 slots | `dsv4-open-arena`: the same 11 slots plus two (the scratch record, the view record) and the experts' slot arena, so `q38-context-ok?` and `q38-free-state` apply; the session releases through `dsv4-close` (`fcds-release`), which reaches the arena |
 | weights | one no-copy mapping a tensor (`kth-tv-at`) | the same, per tensor, from a plan computed from the header (`dsv4-bind.fk`): 1,202 views under the 65,535 handle wall; a stack up to 1.14 GB is one view the kernels index by expert |
 | per-layer state | KV rows and the DeltaNet recurrence | raw KV arena, the compressor's state and score (ratio 4: two-lane overlap, coff 2), the compressed rows |
 | block | the layers of GQA attention and gated delta net | 43 layers of: four hyper-connection streams with a Sinkhorn split, MLA with a second cache, router by hash (layers 0 to 2) or biased top-6, six routed experts plus one shared, hc_post |

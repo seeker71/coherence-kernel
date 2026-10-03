@@ -1,0 +1,93 @@
+//////////////////////////////////////////////////////////////////////
+// dsv4-session-ask.bml -- ask a Form-native DeepSeek-V4 session: open it through the session door, generate, say how the walk ended, release it. The door of observe/dsv4-session-run.bml.
+//
+// WHAT IT IS. The DeepSeek-V4 lane is one lane of the model session door (form-cli-model-session.fk): the same fcms-open-reserved, fcms-generate and fcms-release-ok? a Qwen session is asked through, with the arch's seat
+// (form-cli-model-ds4.fk) behind them. dsa-ask is those three calls in order and nothing else: the machine's admission queue and the seal first, the governor's lease for the derived working set (dsv4-lease.fk), the chat
+// template's ids from the file's own tokenizer, the routed-arena open and prefill (the functions observe/dsv4-token-run.bml drives), the greedy walk to a NAMED ending (eos, max-tokens, context-limit, step-refused), the
+// text, the release of every handle and the lease. The usage line names the ending and the last position the driver serves (2047: a ratio-4 block refuses at position 2048, where the indexer stops being inert).
+//
+// THE DOOR. observe/dsv4-session-run.bml reads one JSON line on stdin: file (the IQ2XXS build by default), prompt ("The capital of France is"), tokens (24), receipt (receipts/dsv4-session-runs.jsonl), go, dry.
+//   {} or {"dry":1}   the plan from the header alone (nothing is opened, mapped, leased or written): the prompt's ids, the capacity and the position limit, the lease the open would ask, the seal sidecar, the gaps, the machine
+//   {"go":1}          THE ASK. Not run by a band: the lead's go. It refuses before anything opens when another model door is resident, another process holds a lease, the machine reads low, the header names a tensor the driver
+//                     cannot run, or the file has no seal sidecar (the open hashes the whole file against it: one full pass the first time, then the note beside the model stands for a day).
+// Exit 0 for an answered ask with every handle released, 1 otherwise.
+//
+// Proven by: native/metal/tests/dsv4-lane-band.bml (dsa-ask on a fixture with a vocabulary, equal to the token walk), form-stdlib/tests/dsv4-session-plan-band.bml (the plan on the real header; nothing opened).
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/bml/dsv4-validate.bml form-stdlib/form-cli-model-session.fk form-stdlib/model-registry.bml form-stdlib/qwen35-artifact-seal-reader.fk
+section [form.bml] {
+ class Dsv4SessionAsk {
+  def dsa-receipt-path() = "receipts/dsv4-session-runs.jsonl";
+  def dsa-default-tokens() = 24;
+  def dsa-default-prompt() = "The capital of France is";
+  // ---- the ask: [status, reason, ids, text, ending, usage line, released, prompt count, position] ------------------------------------------------
+  def dsa-none(reason) = ["refused", reason, [], "", "", "", 0, 0, 0];
+  def dsa-ask(path, prompt, n) = n <= 0 ? dsa-none("asks-for-no-tokens") : dsa-asked(fcms-open-reserved(path, prompt, n, "full"), n);
+  def dsa-asked(s, n) {
+   let live = fcms-live?(s);
+   let g = live ? fcms-generate(s, n) : fcms-generation("", [], s);
+   let next = fcms-generation-session(g);
+   let usage = live ? fcms-usage-line-ds4(next) : "";
+   let ending = live ? fcms-ending(next) : "";
+   let released = fcms-release-ok?(next);
+   [live ? "ok" : "refused", live ? "answered" : fcms-reason(next), fcms-generation-ids(g), fcms-generation-text(g), ending, usage, released, fcms-prompt-ids(next), fcms-pos(next)];
+  }
+  // ---- the plan, from the header alone ---------------------------------------------------------------------------------------------------------------
+  def dsa-file(opts) = dvr-text(opts, "file", dvr-file());
+  def dsa-prompt(opts) = dvr-text(opts, "prompt", dsa-default-prompt());
+  def dsa-tokens(opts) = dvr-int(opts, "tokens", dsa-default-tokens());
+  def dsa-sealed?(file) = file_size(qaf-seal-path-for(file)) > 0;
+  def dsa-plan-lines(file, size, opts) {
+   let src = tkz-src(file);
+   let ids = fcds-prompt-ids(src, dsa-prompt(opts));
+   let n = dsa-tokens(opts);
+   let wanted = len(ids) + n;
+   let cap = fcds-capacity(src, wanted);
+   let shared = dls-weights-bytes-at(file, cap);
+   let gap = fcds-first-gap(file);
+   [ "[dsv4-session] DRY: the plan; nothing is opened, mapped, leased or written",
+    "[dsv4-session] file " ++ file ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), architecture " ++ dls-arch-of(file) ++ ", lane " ++ mr-lane-for(dls-arch-of(file)) ++ (mr-wired?(dls-arch-of(file)) == 1 ? " (wired)" : " (NOT wired)"),
+    "[dsv4-session] seal sidecar " ++ qaf-seal-path-for(file) ++ ": " ++ (dsa-sealed?(file) ? "present (the open hashes the whole file against it: a full pass the first time, then the note beside the model stands for a day)" : "ABSENT: the session door refuses a file with no seal, and {\"go\":1} refuses first"),
+    "[dsv4-session] the prompt: " ++ len(ids).str() ++ " ids from the chat template (BOS, the system text, User, the prompt, Assistant, <think>) " ++ dvr-ids-json(ids) ++ "; " ++ n.str() ++ " tokens asked; stop id " ++ fcds-stops(src).str() ++ " (the header's eos)",
+    "[dsv4-session] capacity " ++ cap.str() ++ " positions (asked " ++ wanted.str() ++ ", the driver serves positions 0 through " ++ (fcds-served-positions(src) - 1).str() ++ "): a walk ends as eos, max-tokens, context-limit or step-refused, and the usage line names which, with position_limit",
+    "[dsv4-session] the lease the open asks of the governor: shared " ++ dvr-gib(shared) ++ " (" ++ shared.str() ++ " B: the dense tensors, an arena of " ++ dls-cache-experts().str() ++ " experts a layer, the KV at that capacity) + private " ++ dvr-gib(mg-kv-margin()) ++ ", keyed by the file; a held answer reads host-memory-held:<reason> and opens nothing",
+    "[dsv4-session] the driver's gaps: " ++ ((String) gap == "" ? "none" : gap),
+    "[dsv4-session] " ++ mg-status-line(mg-sense()),
+    "[dsv4-session] DRY ends"];
+  }
+  def dsa-dry(opts) {
+   let file = dsa-file(opts);
+   let size = file_size(file);
+   dls-ds4?(file) ? dvr-said(dsa-plan-lines(file, size, opts)) : dvr-refuse("dry: the file is not a deepseek4 GGUF (or is absent): " ++ file, file);
+  }
+  // ---- the receipt row (json-emit escapes the text) ----------------------------------------------------------------------------------------------------
+  def dsa-row(date, at, file, tokens, r, wall-ms) = json-emit(json-node-object([json-node-pair("schema", json-node-string("dsv4-session-run-v1")), json-node-pair("at_unix_ms", json-node-int(at)), json-node-pair("date", json-node-string(date)),
+   json-node-pair("status", json-node-string(r[0])), json-node-pair("reason", json-node-string(r[1])), json-node-pair("file", json-node-string(file)), json-node-pair("tokens_asked", json-node-int(tokens)),
+   json-node-pair("prompt_tokens", json-node-int(r[7])), json-node-pair("generated_tokens", json-node-int(len(r[2]))), json-node-pair("ending", json-node-string(r[4])), json-node-pair("released", json-node-int(r[6])),
+   json-node-pair("position", json-node-int(r[8])), json-node-pair("wall_ms", json-node-int(wall-ms)), json-node-pair("ids", json-node-array(map(i => json-node-int(i), r[2]))), json-node-pair("text", json-node-string(r[3]))]));
+  // ---- the go --------------------------------------------------------------------------------------------------------------------------------------------
+  def dsa-go(opts) {
+   let file = dsa-file(opts);
+   let size = file_size(file);
+   let src = size > 24 ? dvl-src(file) : "";
+   let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
+   let facts = dvr-facts();
+   !(!nothing?(m) && dvl-consistent?(m)) ? dvr-refuse("the file is not a deepseek4 GGUF with a consistent layout", file) : !dvr-facts-clear?(facts) ? dvr-refuse(flp-join(dvr-facts-lines(facts), " | "), file)
+    : len(dvr-gaps(m)) > 0 ? dvr-refuse("the driver cannot run this header: " ++ flp-join(dvr-gaps(m), "; "), file) : !dsa-sealed?(file) ? dvr-refuse("no seal sidecar " ++ qaf-seal-path-for(file) ++ ": the session door refuses an unsealed file", file) : dsa-run(opts, file);
+  }
+  def dsa-run(opts, file) {
+   let started = host_monotonic_ms();
+   let r = dsa-ask(file, dsa-prompt(opts), dsa-tokens(opts));
+   let wall = host_monotonic_ms() - started;
+   let said = print_str("[dsv4-session] " ++ (String) r[0] ++ ": " ++ (String) r[1] ++ "; " ++ (String) r[5] ++ "; released " ++ r[6].str() ++ "; " ++ wall.str() ++ " ms\ntext:\n" ++ (String) r[3] ++ "\n");
+   let wrote = dvr-append(dvr-text(opts, "receipt", dsa-receipt-path()), dsa-row(dvr-date(), now_unix_ms(), file, dsa-tokens(opts), r, wall));
+   (String) r[0] == "ok" && r[6] == 1 ? 0 : 1;
+  }
+  // the door: the dry plan, or the ask
+  def dsa-main() {
+   let opts = dvr-options();
+   dvr-dry?(opts) ? dsa-dry(opts) : dsa-go(opts);
+  }
+ }
+ 0;
+}
