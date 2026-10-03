@@ -1,0 +1,353 @@
+// command-words.bml — which commands a shell command string would run, read without running it.
+//
+// cw-words(text) answers the command words of a shell command string, in the order the shell would reach them:
+// the first word of every simple command, each resolved to the command that really runs. cw-forbidden(words) picks
+// from them the names the repo does not use (sed gsed awk gawk mawk nawk perl python python2 python3 python3.11 ...:
+// perl[0-9.]* and python[0-9.]*; ruby is not among them). The door that asks is observe/forbidden-tools-guard.bml.
+//
+// What the reader knows how to read
+//   quotes       'single', "double" (with $( ), ${ } and backticks live inside them) and $'ansi' keep their text as data;
+//                a backslash makes the next byte data; a # that opens a word makes the rest of its line a comment
+//   separators   ; ;; & && || | |& newline, and the openers ( ) $( ` of a subshell, a substitution or a group;
+//                a lone { or } opens or closes a group and is no command
+//   skipped      leading NAME=value assignments, redirections (>, >>, 2>&1, &>, <, <<<, with their target word) and
+//                heredoc bodies (<<EOF, <<'EOF', <<-EOF, until the delimiter line; data, never read)
+//   resolved     a path to its basename (/usr/bin/sed gives sed; a word whose basename is still being expanded, $X or
+//                "$X"/.., gives <unknown>); wrappers are looked through to the real command: command (command -v is a
+//                lookup and runs nothing), builtin, env [-i -u NAME] [A=b], exec, nohup, time, sudo, doas, xargs [opts],
+//                nice, stdbuf, timeout, gtimeout, form-run, setsid, caffeinate, arch, ionice
+//   recursed     sh|bash|zsh|dash|ksh|ash -c '<string>', eval <words>, trap '<string>' SIG, find ... -exec|-execdir|-ok|-okdir
+//                <command> ;, and the body of $( ), `` ` ``, <( ) and >( ); a shell, eval, trap or find is itself a command
+//                word and its inner commands follow it; an inner substitution is reached before the command that holds it
+//   data         a word that is only an argument, a quoted string, a heredoc body or a filename (sed.txt, sed_free,
+//                git log -S"sed", grep -F "sed -i" f, printf 'awk') is never a command word; a function defined in the
+//                same text (name() { ..., function name) is a name of the text's own and is not reported
+//
+// What it cannot see (said plainly, not guessed)
+//   an alias; a variable that holds the tool ($T file after T=sed in an earlier command: it reads <unknown>, which the
+//   guard reports only where its band shows the repo's ordinary commands never read so); a script file that runs sed
+//   inside (bash script.sh, ./tool.sh, make); a runner that starts the tool (uv run python, npx, docker run, ssh host);
+//   the commands in an unquoted heredoc body that the shell would substitute ($(..) inside <<EOF); a case pattern is read
+//   as an argument; the shell's own arithmetic ((( 1 << 2 ))) reads as a heredoc. The reading is of the text the shell
+//   is handed, not of what the shell then does with it.
+//
+// Plants: cw-words-off(text, off) reads with the named features switched off (quotes, wrappers, heredoc, dash-c,
+// basename), so a band can show what each claim would lose without its feature.
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+ class CommandWords {
+  // ---- bytes
+  def cw-b(s, n, i) = i >= 0 && i < n ? str_byte_at(s, i) : -1;
+  def cw-ph() = byte_to_str(1);
+  def cw-unknown() = "<unknown>";
+  def cw-alpha?(b) = (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95;
+  def cw-alnum?(b) = cw-alpha?(b) || (b >= 48 && b <= 57);
+  def cw-plain?(b) = b != 32 && b != 9 && b != 10 && b != 13 && b != 59 && b != 38 && b != 124 && b != 40 && b != 41 && b != 60 && b != 62 && b != 96 && b != 39 && b != 34 && b != 92 && b != 36;
+  def cw-dqplain?(b) = b != 34 && b != 92 && b != 36 && b != 96;
+  def cw-plain-end(s, n, i) {
+   let j = scan_run(s, i, 3);
+   j < n && cw-plain?(str_byte_at(s, j)) ? cw-plain-end(s, n, j + 1) : j;
+  }
+  def cw-dq-end(s, n, i) = i < n && cw-dqplain?(str_byte_at(s, i)) ? cw-dq-end(s, n, i + 1) : i;
+  def cw-name-end(s, n, i) = i < n && cw-alnum?(str_byte_at(s, i)) ? cw-name-end(s, n, i + 1) : i;
+  def cw-find(s, n, i, b) = i >= n ? -1 : str_byte_at(s, i) == b ? i : cw-find(s, n, i + 1, b);
+  def cw-ansi-end(s, n, i) = i >= n ? n : str_byte_at(s, i) == 92 ? cw-ansi-end(s, n, i + 2) : str_byte_at(s, i) == 39 ? i : cw-ansi-end(s, n, i + 1);
+  def cw-skip-sp(s, n, i) = i < n && (str_byte_at(s, i) == 32 || str_byte_at(s, i) == 9) ? cw-skip-sp(s, n, i + 1) : i;
+  def cw-in?(xs, w) = nil?(xs) ? false : (String) xs[0] == w ? true : cw-in?(xs[1:], w);
+  def cw-drop1(xs) = nil?(xs) ? [] : xs[1:];
+  def cw-join(ws) = nil?(ws) ? "" : nil?(ws[1:]) ? ws[0] : ws[0] ++ " " ++ cw-join(ws[1:]);
+  def cw-digits?(w) = len(w) > 0 && scan_run(w, 0, 1) == len(w);
+
+  // ---- the state: [out, cmd, word, has, redir, here, funcs, pd, off]
+  //   out    the command words found, newest first          cmd   the words of the simple command, newest first
+  //   word   the word in progress, has: whether one is open (a quoted "" is a word)
+  //   redir  0 none, 1 the next word is a redirect target, 2 and 3 the next word is a heredoc delimiter (3: <<-)
+  //   here   heredoc delimiters waiting for the next newline    funcs  names this text defines
+  //   pd     open subshell parentheses inside a $( )            off    features switched off (plants)
+  def cw-st(out, cmd, w, has, r, here, funcs, pd, off) = [out, cmd, w, has, r, here, funcs, pd, off];
+  def cw-fresh(funcs, off) = cw-st([], [], "", false, 0, [], funcs, 0, off);
+  def cw-off?(st, f) = cw-in?(st[8], f);
+  def cw-with-out(st, out) = cw-st(out, st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8]);
+  def cw-with-word(st, w) = cw-st(st[0], st[1], w, true, st[4], st[5], st[6], st[7], st[8]);
+  def cw-with-redir(st, r) = cw-st(st[0], st[1], st[2], st[3], r, st[5], st[6], st[7], st[8]);
+  def cw-with-here(st, here) = cw-st(st[0], st[1], st[2], st[3], st[4], here, st[6], st[7], st[8]);
+  def cw-with-funcs(st, funcs) = cw-st(st[0], st[1], st[2], st[3], st[4], st[5], funcs, st[7], st[8]);
+  def cw-with-cmd(st, cmd) = cw-st(st[0], cmd, st[2], st[3], st[4], st[5], st[6], st[7], st[8]);
+  def cw-with-pd(st, pd) = cw-st(st[0], st[1], st[2], st[3], st[4], st[5], st[6], pd, st[8]);
+  def cw-addword(st, t) = cw-with-word(st, st[2] ++ t);
+  def cw-hasword(st) = cw-with-word(st, st[2]);
+
+  // a finished word joins the command, or is the target of the redirect that was waiting for it
+  def cw-endword(st) = st[3] ? cw-takeword(st) : st;
+  def cw-takeword(st) {
+   let w = st[2];
+   let r = st[4];
+   r == 0 ? cw-st(st[0], cons(w, st[1]), "", false, 0, st[5], st[6], st[7], st[8])
+   : r == 1 ? cw-st(st[0], st[1], "", false, 0, st[5], st[6], st[7], st[8])
+   : cw-st(st[0], st[1], "", false, 0, append(st[5], [[w, r == 3]]), st[6], st[7], st[8]);
+  }
+  // a command ends: resolve it (a `function name` line only names a function)
+  def cw-endcmd(st) {
+   let a = cw-endword(st);
+   let ws = reverse(a[1]);
+   let dead = cw-st(a[0], [], "", false, 0, a[5], a[6], a[7], a[8]);
+   nil?(ws) ? dead : cw-flush(dead, ws);
+  }
+  def cw-flush(st, ws) = (String) ws[0] == "function" && !nil?(ws[1:]) ? cw-with-funcs(st, cons(ws[1], st[6])) : cw-with-out(st, reverse-onto(cw-resolve(ws, st[6], st[8]), st[0]));
+
+  // ---- heredoc bodies are data: lines up to the delimiter line
+  def cw-tabs-end(s, i) = i < len(s) && str_byte_at(s, i) == 9 ? cw-tabs-end(s, i + 1) : i;
+  def cw-untab(line) = substring(line, cw-tabs-end(line, 0), len(line));
+  def cw-hbody(s, n, i, delim, strip) {
+   let e = scan_run(s, i, 5);
+   let line = substring(s, i, e);
+   let cmp = strip ? cw-untab(line) : line;
+   i >= n ? n : (String) cmp == delim ? (e < n ? e + 1 : n) : e >= n ? n : cw-hbody(s, n, e + 1, delim, strip);
+  }
+  def cw-heredocs(s, n, i, here) = nil?(here) ? i : cw-heredocs(s, n, cw-hbody(s, n, i, here[0][0], here[0][1]), here[1:]);
+
+  // ---- the walk: [state, index after]; mode 0 the text, 1 inside $( ) or <( ), 3 inside backticks
+  def cw-go(s, n, mode, r) = cw-step(s, n, r[1], mode, r[0]);
+  def cw-step(s, n, i, mode, st) {
+   let b = cw-b(s, n, i);
+   b < 0 ? [cw-endcmd(st), n]
+   : b == 32 || b == 9 || b == 13 ? cw-step(s, n, i + 1, mode, cw-endword(st))
+   : b == 10 ? cw-newline(s, n, i, mode, st)
+   : b == 92 ? cw-back(s, n, i, mode, st)
+   : b == 39 || b == 34 ? cw-quote(s, n, i, mode, st, b)
+   : b == 36 ? cw-go(s, n, mode, cw-dollar(s, n, i, st, false))
+   : b == 96 ? (mode == 3 ? [cw-endcmd(st), i + 1] : cw-go(s, n, mode, cw-nest(s, n, i + 1, 3, st)))
+   : b == 59 ? cw-step(s, n, cw-b(s, n, i + 1) == 59 ? i + 2 : i + 1, mode, cw-endcmd(st))
+   : b == 38 ? cw-amp(s, n, i, mode, st)
+   : b == 124 ? cw-step(s, n, cw-b(s, n, i + 1) == 124 || cw-b(s, n, i + 1) == 38 ? i + 2 : i + 1, mode, cw-endcmd(st))
+   : b == 40 ? cw-open(s, n, i, mode, st)
+   : b == 41 ? cw-close(s, n, i, mode, st)
+   : b == 60 || b == 62 ? cw-redir(s, n, i, mode, st, b)
+   : b == 35 && !st[3] ? cw-step(s, n, scan_run(s, i, 5), mode, st)
+   : cw-plain-run(s, n, i, mode, st);
+  }
+  def cw-plain-run(s, n, i, mode, st) {
+   let j = cw-plain-end(s, n, i);
+   cw-step(s, n, j, mode, cw-addword(st, substring(s, i, j)));
+  }
+  def cw-newline(s, n, i, mode, st) {
+   let a = cw-endcmd(st);
+   nil?(a[5]) ? cw-step(s, n, i + 1, mode, a) : cw-step(s, n, cw-heredocs(s, n, i + 1, a[5]), mode, cw-with-here(a, []));
+  }
+  def cw-back(s, n, i, mode, st) {
+   let c = cw-b(s, n, i + 1);
+   c < 0 ? cw-step(s, n, n, mode, cw-addword(st, "\\"))
+   : c == 10 ? cw-step(s, n, i + 2, mode, st)
+   : cw-step(s, n, i + 2, mode, cw-addword(st, substring(s, i + 1, i + 2)));
+  }
+  def cw-quote(s, n, i, mode, st, b) {
+   cw-off?(st, "quotes") ? cw-step(s, n, i + 1, mode, cw-addword(st, substring(s, i, i + 1)))
+   : b == 39 ? cw-squote(s, n, i, mode, st)
+   : cw-go(s, n, mode, cw-dq(s, n, i + 1, cw-hasword(st)));
+  }
+  def cw-squote(s, n, i, mode, st) {
+   let e = cw-find(s, n, i + 1, 39);
+   e < 0 ? cw-step(s, n, n, mode, cw-addword(st, substring(s, i + 1, n))) : cw-step(s, n, e + 1, mode, cw-addword(st, substring(s, i + 1, e)));
+  }
+  def cw-amp(s, n, i, mode, st) {
+   let c = cw-b(s, n, i + 1);
+   c == 38 ? cw-step(s, n, i + 2, mode, cw-endcmd(st))
+   : c == 62 ? cw-step(s, n, cw-b(s, n, i + 2) == 62 ? i + 3 : i + 2, mode, cw-with-redir(cw-endword(st), 1))
+   : cw-step(s, n, i + 1, mode, cw-endcmd(st));
+  }
+  def cw-close(s, n, i, mode, st) = mode == 1 && st[7] == 0 ? [cw-endcmd(st), i + 1] : cw-step(s, n, i + 1, mode, cw-with-pd(cw-endcmd(st), st[7] > 0 ? st[7] - 1 : 0));
+  // ( opens an array literal after NAME=, a function body after name ( ), or a subshell
+  def cw-open(s, n, i, mode, st) = st[3] && cw-ends-eq?(st[2]) ? cw-array(s, n, i, mode, st) : cw-open-paren(s, n, i, mode, st);
+  def cw-ends-eq?(w) = len(w) > 0 && str_byte_at(w, len(w) - 1) == 61;
+  def cw-array(s, n, i, mode, st) {
+   let r = cw-data(s, n, i + 1, 41, 0, st);
+   cw-step(s, n, r[1], mode, cw-addword(r[0], cw-ph()));
+  }
+  def cw-open-paren(s, n, i, mode, st) {
+   let a = cw-endword(st);
+   let k = cw-skip-sp(s, n, i + 1);
+   let paren = cw-b(s, n, k) == 41;
+   let ws = a[1];
+   let words = len(ws);
+   paren && words == 1 ? cw-step(s, n, k + 1, mode, cw-with-funcs(cw-with-cmd(a, []), cons(ws[0], a[6])))
+   : paren && words == 2 && (String) ws[1] == "function" ? cw-step(s, n, k + 1, mode, cw-with-funcs(cw-with-cmd(a, []), cons(ws[0], a[6])))
+   : cw-step(s, n, i + 1, mode, cw-with-pd(cw-endcmd(a), a[7] + 1));
+  }
+  // < and >: a process substitution is a word; everything else is a redirect and its target word
+  def cw-fd(st) = st[3] && cw-digits?(st[2]) ? cw-st(st[0], st[1], "", false, st[4], st[5], st[6], st[7], st[8]) : cw-endword(st);
+  def cw-redir(s, n, i, mode, st, b) {
+   let c = cw-b(s, n, i + 1);
+   c == 40 ? cw-go(s, n, mode, cw-nest(s, n, i + 2, 1, st)) : cw-redir-op(s, n, i, mode, cw-fd(st), b, c);
+  }
+  def cw-redir-op(s, n, i, mode, st, b, c) {
+   b == 60 && c == 60 ? cw-heredoc(s, n, i, mode, st)
+   : (b == 60 && (c == 38 || c == 62)) || (b == 62 && (c == 62 || c == 38 || c == 124)) ? cw-step(s, n, i + 2, mode, cw-with-redir(st, 1))
+   : cw-step(s, n, i + 1, mode, cw-with-redir(st, 1));
+  }
+  def cw-heredoc(s, n, i, mode, st) {
+   let d = cw-b(s, n, i + 2);
+   cw-off?(st, "heredoc") || d == 60 ? cw-step(s, n, d == 60 ? i + 3 : i + 2, mode, cw-with-redir(st, 1))
+   : d == 45 ? cw-step(s, n, i + 3, mode, cw-with-redir(st, 3))
+   : cw-step(s, n, i + 2, mode, cw-with-redir(st, 2));
+  }
+
+  // ---- inside double quotes; [state, index after the closing quote]
+  def cw-dq(s, n, i, st) {
+   let j = cw-dq-end(s, n, i);
+   let a = j > i ? cw-addword(st, substring(s, i, j)) : st;
+   let b = cw-b(s, n, j);
+   b < 0 ? [a, n]
+   : b == 34 ? [a, j + 1]
+   : b == 92 ? cw-dq-back(s, n, j, a)
+   : b == 36 ? cw-dq-go(s, n, cw-dollar(s, n, j, a, true))
+   : cw-dq-go(s, n, cw-nest(s, n, j + 1, 3, a));
+  }
+  def cw-dq-go(s, n, r) = cw-dq(s, n, r[1], r[0]);
+  def cw-dq-back(s, n, j, a) {
+   let c = cw-b(s, n, j + 1);
+   c == 36 || c == 96 || c == 34 || c == 92 ? cw-dq(s, n, j + 2, cw-addword(a, substring(s, j + 1, j + 2)))
+   : c == 10 ? cw-dq(s, n, j + 2, a)
+   : c < 0 ? [cw-addword(a, "\\"), n]
+   : cw-dq(s, n, j + 2, cw-addword(a, substring(s, j, j + 2)));
+  }
+
+  // ---- expansions: $name, ${..}, $(..), $((..)), $'..', $".."; the word gets a placeholder byte for what the shell fills in
+  def cw-dollar(s, n, i, st, indq) {
+   let c = cw-b(s, n, i + 1);
+   c == 40 ? (cw-b(s, n, i + 2) == 40 ? cw-arith(s, n, i + 3, st) : cw-nest(s, n, i + 2, 1, st))
+   : c == 123 ? cw-brace(s, n, i + 2, st)
+   : c == 39 && !indq ? cw-ansi(s, n, i + 2, st)
+   : c == 34 && !indq ? cw-dq(s, n, i + 2, cw-hasword(st))
+   : cw-alpha?(c) ? [cw-addword(st, cw-ph()), cw-name-end(s, n, i + 2)]
+   : (c >= 48 && c <= 57) || c == 64 || c == 42 || c == 63 || c == 35 || c == 36 || c == 33 || c == 45 ? [cw-addword(st, cw-ph()), i + 2]
+   : [cw-addword(st, "$"), i + 1];
+  }
+  // a substitution body is read as commands of its own; its words come out before the command that holds it
+  def cw-nest(s, n, i, kind, st) {
+   let r = cw-step(s, n, i, kind, cw-fresh(st[6], st[8]));
+   let inner = r[0];
+   [cw-addword(cw-with-out(st, append(inner[0], st[0])), cw-ph()), r[1]];
+  }
+  def cw-arith(s, n, i, st) {
+   let r = cw-data(s, n, i, 41, 0, st);
+   let j = r[1];
+   [cw-addword(r[0], cw-ph()), cw-b(s, n, j) == 41 ? j + 1 : j];
+  }
+  def cw-brace(s, n, i, st) {
+   let r = cw-data(s, n, i, 125, 0, st);
+   [cw-addword(r[0], cw-ph()), r[1]];
+  }
+  def cw-ansi(s, n, i, st) {
+   let e = cw-ansi-end(s, n, i);
+   [cw-addword(st, substring(s, i, e)), e < n ? e + 1 : n];
+  }
+  // text that is data up to its closing byte (a ${ } or $(( )) body): only the substitutions inside it run
+  def cw-data(s, n, i, stop, depth, st) {
+   let b = cw-b(s, n, i);
+   b < 0 ? [st, n]
+   : b == stop && depth == 0 ? [st, i + 1]
+   : stop == 41 && b == 40 ? cw-data(s, n, i + 1, stop, depth + 1, st)
+   : stop == 41 && b == 41 ? cw-data(s, n, i + 1, stop, depth - 1, st)
+   : b == 39 ? cw-data-after(s, n, cw-find(s, n, i + 1, 39), stop, depth, st)
+   : b == 34 ? cw-data-go(s, n, cw-dq(s, n, i + 1, st), stop, depth)
+   : b == 92 ? cw-data(s, n, i + 2, stop, depth, st)
+   : b == 36 ? cw-data-go(s, n, cw-dollar(s, n, i, st, false), stop, depth)
+   : b == 96 ? cw-data-go(s, n, cw-nest(s, n, i + 1, 3, st), stop, depth)
+   : cw-data(s, n, i + 1, stop, depth, st);
+  }
+  def cw-data-go(s, n, r, stop, depth) = cw-data(s, n, r[1], stop, depth, r[0]);
+  def cw-data-after(s, n, e, stop, depth, st) = e < 0 ? [st, n] : cw-data(s, n, e + 1, stop, depth, st);
+
+  // ---- from the words of one simple command to the commands that run
+  def cw-reserved?(w) = cw-in?(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}", "esac"], w);
+  def cw-assign?(w) {
+   let n = len(w);
+   let e = cw-name-end(w, n, 0);
+   e > 0 && cw-alpha?(str_byte_at(w, 0)) && (cw-b(w, n, e) == 61 || (cw-b(w, n, e) == 43 && cw-b(w, n, e + 1) == 61) || cw-b(w, n, e) == 91);
+  }
+  def cw-lead(ws) = nil?(ws) ? [] : cw-assign?(ws[0]) || cw-reserved?(ws[0]) ? cw-lead(ws[1:]) : ws;
+  def cw-resolve(ws, funcs, off) {
+   let w = cw-lead(ws);
+   nil?(w) ? [] : cw-cmd(w[0], w[1:], funcs, off);
+  }
+  def cw-rslash(w, i) = i < 0 ? -1 : str_byte_at(w, i) == 47 ? i : cw-rslash(w, i - 1);
+  def cw-base(w, off) {
+   let k = cw-in?(off, "basename") ? -1 : cw-rslash(w, len(w) - 1);
+   let b = k < 0 ? w : substring(w, k + 1, len(w));
+   cw-in?(off, "basename") ? w : str_find(b, cw-ph(), 0) >= 0 ? cw-unknown() : b;
+  }
+  def cw-wrappers() = ["command", "builtin", "env", "exec", "nohup", "time", "sudo", "doas", "xargs", "nice", "stdbuf", "timeout", "gtimeout", "form-run", "setsid", "caffeinate", "arch", "ionice"];
+  def cw-shells() = ["sh", "bash", "zsh", "dash", "ksh", "ash"];
+  def cw-kind(name) = cw-in?(cw-wrappers(), name) ? "wrap" : cw-in?(cw-shells(), name) ? "shell" : (String) name == "eval" ? "eval" : (String) name == "trap" ? "trap" : (String) name == "find" ? "find" : "";
+  def cw-cmd(first, rest, funcs, off) {
+   let name = cw-base(first, off);
+   let kind = cw-kind(name);
+   cw-in?(funcs, name) ? []
+   : (String) name == cw-unknown() ? [name]
+   : (String) kind == "wrap" && !cw-in?(off, "wrappers") ? cw-wrap(name, rest, funcs, off)
+   : (String) kind == "shell" && !cw-in?(off, "dash-c") ? cw-shell(name, rest, funcs, off)
+   : (String) kind == "eval" && !cw-in?(off, "dash-c") ? cons(name, cw-words-in(cw-join(rest), funcs, off))
+   : (String) kind == "trap" && !cw-in?(off, "dash-c") ? cons(name, cw-trap(rest, funcs, off))
+   : (String) kind == "find" && !cw-in?(off, "wrappers") ? cons(name, cw-find-exec(rest, funcs, off))
+   : [name];
+  }
+  // wrappers: skip their options (those that take a value skip it too), then the real command
+  def cw-optarg(name) = (String) name == "env" ? ["-u", "-C", "-S"]
+   : (String) name == "exec" ? ["-a"]
+   : (String) name == "caffeinate" ? ["-t", "-w"]
+   : (String) name == "stdbuf" ? ["-i", "-o", "-e"]
+   : (String) name == "sudo" ? ["-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "-r", "-t"]
+   : (String) name == "doas" ? ["-u", "-C"]
+   : (String) name == "timeout" || (String) name == "gtimeout" ? ["-s", "-k"]
+   : (String) name == "xargs" ? ["-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a", "-R", "-S", "-J"]
+   : (String) name == "nice" ? ["-n"]
+   : (String) name == "ionice" ? ["-c", "-n", "-p"]
+   : [];
+  def cw-opt?(w) = len(w) > 1 && str_byte_at(w, 0) == 45;
+  def cw-skip-opts(ws, optarg) = nil?(ws) ? [] : (String) ws[0] == "--" ? cw-drop1(ws) : cw-opt?(ws[0]) ? cw-skip-opts(cw-in?(optarg, ws[0]) ? cw-drop1(cw-drop1(ws)) : cw-drop1(ws), optarg) : ws;
+  def cw-lookup?(ws) = nil?(ws) ? false : cw-opt?(ws[0]) ? (str_find(ws[0], "v", 0) >= 0 || str_find(ws[0], "V", 0) >= 0 || cw-lookup?(ws[1:])) : false;
+  // only `time` is the shell's own keyword: every other wrapper starts a program, and a program is never a function of this text
+  def cw-wrap(name, rest, funcs, off) {
+   let r = cw-skip-opts(rest, cw-optarg(name));
+   let r2 = (String) name == "timeout" || (String) name == "gtimeout" ? cw-drop1(r) : r;
+   let inner = (String) name == "time" ? funcs : [];
+   (String) name == "command" && cw-lookup?(rest) ? [] : nil?(r2) ? [] : cw-resolve(r2, inner, off);
+  }
+  // sh -c '<string>': the first word after the options, when one of them is a cluster with c
+  def cw-shell-script(ws, hasc) {
+   nil?(ws) ? nothing()
+   : (String) ws[0] == "--" ? (hasc && !nil?(ws[1:]) ? ws[1] : nothing())
+   : cw-in?(["-o", "+o", "-O", "+O"], ws[0]) ? cw-shell-script(cw-drop1(cw-drop1(ws)), hasc)
+   : cw-opt?(ws[0]) ? cw-shell-script(ws[1:], hasc || (str_byte_at(ws[0], 1) != 45 && str_find(ws[0], "c", 1) >= 0))
+   : hasc ? ws[0] : nothing();
+  }
+  def cw-shell(name, rest, funcs, off) {
+   let sc = cw-shell-script(rest, false);
+   nothing?(sc) ? [name] : cons(name, cw-words-in(sc, funcs, off));
+  }
+  def cw-trap(ws, funcs, off) {
+   let r = cw-skip-opts(ws, []);
+   nil?(r) || (String) r[0] == "-" ? [] : cw-words-in(r[0], funcs, off);
+  }
+  def cw-term?(w) = (String) w == ";" || (String) w == "+";
+  def cw-split-term(ws, acc) = nil?(ws) ? [reverse(acc), []] : cw-term?(ws[0]) ? [reverse(acc), ws[1:]] : cw-split-term(ws[1:], cons(ws[0], acc));
+  def cw-find-exec(ws, funcs, off) = nil?(ws) ? [] : cw-in?(["-exec", "-execdir", "-ok", "-okdir"], ws[0]) ? cw-find-run(cw-split-term(ws[1:], []), funcs, off) : cw-find-exec(ws[1:], funcs, off);
+  def cw-find-run(sp, funcs, off) = append(nil?(sp[0]) ? [] : cw-resolve(sp[0], funcs, off), cw-find-exec(sp[1], funcs, off));
+
+  // ---- the public reading
+  def cw-words-in(text, funcs, off) {
+   let n = len(text);
+   let r = cw-step(text, n, 0, 0, cw-fresh(funcs, off));
+   let st = r[0];
+   reverse(st[0]);
+  }
+  def cw-words(text) = cw-words-in(text, [], []);
+  def cw-words-off(text, off) = cw-words-in(text, [], off);
+  def cw-vers-tail?(w, i, n) = i >= n ? true : ((str_byte_at(w, i) == 46 || (str_byte_at(w, i) >= 48 && str_byte_at(w, i) <= 57)) && cw-vers-tail?(w, i + 1, n));
+  def cw-versioned?(w, stem) = len(w) >= len(stem) && ((String) substring(w, 0, len(stem)) == stem) && cw-vers-tail?(w, len(stem), len(w));
+  def cw-bad?(w) = cw-in?(["sed", "gsed", "awk", "gawk", "mawk", "nawk"], w) || cw-versioned?(w, "perl") || cw-versioned?(w, "python");
+  def cw-forbidden(words) = filter(w => cw-bad?(w), words);
+  // the command words the reading could not name (a basename still being expanded)
+  def cw-unknowns(words) = filter(w => (String) w == cw-unknown(), words);
+ }
+}

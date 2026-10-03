@@ -1,0 +1,158 @@
+; forbidden-tools-guard-band.bml — the PreToolUse door: a Bash call that runs sed, awk, perl or python is refused with one line of JSON,
+; every other call (and every reading that did not arrive) passes in silence, and the registered one-liner does the same from any cwd.
+;
+; Verdict 511 when every claim lands:
+;   1     deny: for a Bash command that runs sed, the child door prints exactly one line that parses as JSON with
+;         hookSpecificOutput.hookEventName PreToolUse, permissionDecision deny and a permissionDecisionReason that names the word and the way
+;         forward (the Edit tool, the Read tool, Grep, ./fkwu cells and BML, docs/form-native-agent-tools.md); it exits 0
+;   2     allow: a Bash command that runs none of them prints nothing (zero bytes on stdout) and exits 0
+;   4     fail open: empty stdin, text that is no JSON, a cut-off object, {}, [], null, a command that is a number, a command string
+;         that never closes: each prints nothing and exits 0
+;   8     another tool is never refused: tool_name Read, Edit or Grep with sed in a command field prints nothing
+;   16    the reading is of the JSON, not of its look: the command before tool_name, other fields that hold braces and quotes, pretty-printed
+;         input, \n \" \\ ; inside the command, a command with a thousand lines
+;   32    the reason names each offender once, in the order found (sed twice is one name; sed and awk are two)
+;   64    .claude/settings.json holds a PreToolUse entry with matcher Bash and a command hook, and the registered line, run by sh -c from
+;         another directory with CLAUDE_PROJECT_DIR set, prints the door's own deny line for sed and nothing for ls
+;   128   the registered line fails open: a project directory that is gone, a project with no door, a project with no fkwu (and no git)
+;         each print nothing and exit 0
+;   256   the door answers fast: ten warm runs of the allow path, each under two seconds (a warm run is tens of milliseconds)
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- claims spawn ./fkwu children (host_spawn_at) and read their stdout and exit status; the reference kernels
+; hold no fkwu child to spawn.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/live.bml form-stdlib/bml/command-words.bml form-stdlib/bml/forbidden-tools-guard.bml
+section [form.bml] {
+ class ForbiddenToolsGuardBand {
+  def fgb-has(s, part) = str_find(s, part, 0) >= 0;
+  def fgb-count(s, part, from, k) {
+   let at = str_find(s, part, from);
+   at < 0 ? k : fgb-count(s, part, at + len(part), k + 1);
+  }
+  def fgb-hook(tool, command) = "{\"session_id\":\"s\",\"tool_name\":\"" ++ tool ++ "\",\"tool_input\":{\"command\":\"" ++ json-escape-string(command) ++ "\",\"description\":\"d\"},\"tool_use_id\":\"t\"}";
+  def fgb-bash(command) = fgb-hook("Bash", command);
+  def fgb-fresh() {
+   let root = temp_dir() ++ "/forbidden-tools-guard-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["door", root, 0] : nothing();
+  }
+  def fgb-root(ctx) = ctx[1];
+  // a child run: [exit status, stdout, stderr]; the streams are files under the band's own directory
+  def fgb-spawn(argv, stdin, base) {
+   let pid = host_spawn_at(argv, [stdin, base ++ ".stdout", base ++ ".stderr"]);
+   let status = pid <= 0 ? -1 : host_wait(pid);
+   [status, read_file(base ++ ".stdout") ?? "", read_file(base ++ ".stderr") ?? ""];
+  }
+  def fgb-door(ctx, name, input) {
+   let base = fgb-root(ctx) ++ "/" ++ name;
+   write_file(base ++ ".stdin", input);
+   fgb-spawn(["./fkwu", "observe/forbidden-tools-guard.bml"], base ++ ".stdin", base);
+  }
+  def fgb-silent?(r) = r[0] == 0 && len(r[1]) == 0;
+  def fgb-get(node, key) = json-object-has?(node, key) ? json-object-get(node, key) : nothing();
+  def fgb-text(node) = nothing?(node) ? "" : json-string-value(node);
+
+  def fgb-c-deny(ctx) {
+   let r = fgb-door(ctx, "deny", fgb-bash("sed -i.bak 's/x/x/' /dev/null 2>/dev/null"));
+   let line = r[1];
+   let doc = parse-json("deny", line);
+   let out = fgb-get(doc, "hookSpecificOutput");
+   let reason = fgb-text(fgb-get(out, "permissionDecisionReason"));
+   r[0] == 0 && fgb-count(line, "\n", 0, 0) == 1 && (String) substring(line, len(line) - 1, len(line)) == "\n"
+   && (String) fgb-text(fgb-get(out, "hookEventName")) == "PreToolUse" && (String) fgb-text(fgb-get(out, "permissionDecision")) == "deny"
+   && len(json-object-keys(doc)) == 1 && len(json-object-keys(out)) == 3
+   && fgb-has(reason, "sed") && fgb-has(reason, "Edit tool") && fgb-has(reason, "Read tool") && fgb-has(reason, "Grep")
+   && fgb-has(reason, "./fkwu cells and BML") && fgb-has(reason, "docs/form-native-agent-tools.md");
+  }
+  def fgb-c-allow(ctx) = fgb-silent?(fgb-door(ctx, "allow", fgb-bash("ls -la && ./fkwu observe/x.bml | tail -3; echo \"rc=${pipestatus[1]}\"")));
+  def fgb-c-open(ctx) {
+   fgb-silent?(fgb-door(ctx, "empty", ""))
+   && fgb-silent?(fgb-door(ctx, "prose", "no json here, sed -i x"))
+   && fgb-silent?(fgb-door(ctx, "cut", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sed p"))
+   && fgb-silent?(fgb-door(ctx, "brace", "{}"))
+   && fgb-silent?(fgb-door(ctx, "array", "[]"))
+   && fgb-silent?(fgb-door(ctx, "null", "null"))
+   && fgb-silent?(fgb-door(ctx, "number", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":7}}"))
+   && fgb-silent?(fgb-door(ctx, "never-closes", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sed p f, description: x}}"))
+   && fgb-silent?(fgb-door(ctx, "no-input", "{\"tool_name\":\"Bash\"}"));
+  }
+  def fgb-c-tools(ctx) {
+   fgb-silent?(fgb-door(ctx, "read", fgb-hook("Read", "sed -n 1p f")))
+   && fgb-silent?(fgb-door(ctx, "edit", fgb-hook("Edit", "awk 1 f")))
+   && fgb-silent?(fgb-door(ctx, "grep", fgb-hook("Grep", "perl -e 1")))
+   && fgb-silent?(fgb-door(ctx, "lower", fgb-hook("bash", "sed p f")));
+  }
+  def fgb-denies?(text) = len(hkg-verdict(text)) > 0;
+  def fgb-lines(k) = k <= 0 ? "" : "echo " ++ k.str() ++ "\n" ++ fgb-lines(k - 1);
+  def fgb-c-reading(ctx) {
+   let early = "{\"tool_input\":{\"description\":\"a } and a \\\" and {\",\"command\":\"ls; sed p\"},\"tool_name\":\"Bash\"}";
+   let pretty = "{\n  \"tool_name\": \"Bash\",\n  \"tool_input\": {\n    \"command\": \"awk 1 f\"\n  }\n}\n";
+   let nested = "{\"meta\":{\"a\":[1,2,{\"b\":\"}\"}],\"tool_name\":\"Read\"},\"tool_name\":\"Bash\",\"tool_input\":{\"x\":{\"command\":\"ls\"},\"command\":\"perl -e 1\"}}";
+   fgb-denies?(early) && fgb-denies?(pretty) && fgb-denies?(nested)
+   && fgb-denies?("{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls \\u003b sed p\"}}")
+   && fgb-denies?("{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo a\\nsed p f\"}}")
+   && !fgb-denies?("{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo \\\"a; sed p\\\"\"}}")
+   && !fgb-denies?("{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo a\\\\nsed p f\"}}")
+   && fgb-denies?(fgb-bash(fgb-lines(1000) ++ "sed -n 1p f"))
+   && !fgb-denies?(fgb-bash(fgb-lines(1000) ++ "echo done"));
+  }
+  def fgb-c-names(ctx) {
+   let twice = hkg-verdict(fgb-bash("sed p f | sed q"));
+   let both = hkg-verdict(fgb-bash("cd x && sed p f | awk 1; sed q"));
+   let names = hkg-reason(hkg-uniq(cw-forbidden(cw-words("cd x && sed p f | awk 1; sed q")), []));
+   fgb-count(twice, "(this command runs: sed)", 0, 0) == 1 && fgb-has(both, "(this command runs: sed, awk)") && fgb-has(names, "(this command runs: sed, awk)")
+   && (String) hkg-verdict(fgb-bash("ls")) == "";
+  }
+
+  // ---- the registration
+  def fgb-settings() = parse-json("settings", read_file(".claude/settings.json") ?? "{}");
+  def fgb-entry() {
+   let pre = fgb-get(fgb-get(fgb-settings(), "hooks"), "PreToolUse");
+   nothing?(pre) || nil?(json-array-elements(pre)) ? nothing() : json-array-elements(pre)[0];
+  }
+  def fgb-hook-node() {
+   let e = fgb-entry();
+   let hs = nothing?(e) ? nothing() : fgb-get(e, "hooks");
+   nothing?(hs) || nil?(json-array-elements(hs)) ? nothing() : json-array-elements(hs)[0];
+  }
+  def fgb-line() = fgb-text(fgb-get(fgb-hook-node(), "command"));
+  def fgb-sh(ctx, name, dir, input) {
+   let base = fgb-root(ctx) ++ "/" ++ name;
+   write_file(base ++ ".stdin", input);
+   fgb-spawn(["/usr/bin/env", "CLAUDE_PROJECT_DIR=" ++ dir, "/bin/sh", "-c", fgb-line()], base ++ ".stdin", base);
+  }
+  def fgb-c-register(ctx) {
+   let sed = fgb-bash("cd x && sed -n 1p f");
+   let direct = fgb-door(ctx, "reg-direct", sed);
+   let line = fgb-sh(ctx, "reg-deny", host_cwd(), sed);
+   let quiet = fgb-sh(ctx, "reg-allow", host_cwd(), fgb-bash("ls"));
+   (String) fgb-text(fgb-get(fgb-entry(), "matcher")) == "Bash" && (String) fgb-text(fgb-get(fgb-hook-node(), "type")) == "command"
+   && len(fgb-line()) > 0 && fgb-has(fgb-line(), "observe/forbidden-tools-guard.bml")
+   && line[0] == 0 && len(line[1]) > 0 && (String) line[1] == direct[1] && fgb-has(line[1], "permissionDecision")
+   && fgb-silent?(quiet);
+  }
+  def fgb-c-open-reg(ctx) {
+   let root = fgb-root(ctx);
+   let sed = fgb-bash("sed p f");
+   let nodoor = root ++ "/nodoor";
+   let nofkwu = root ++ "/nofkwu";
+   let made = host_dir_mkdir(nodoor) + host_dir_mkdir(nofkwu) + host_dir_mkdir(nofkwu ++ "/observe");
+   let linked = host_wait(host_spawn_at(["/bin/ln", "-s", host_cwd() ++ "/fkwu", nodoor ++ "/fkwu"], ["/dev/null", root ++ "/ln.stdout", root ++ "/ln.stderr"]));
+   write_file(nofkwu ++ "/observe/forbidden-tools-guard.bml", "section [form.bml] {\n 0;\n}\n");
+   made == 3 && linked == 0 && len(fgb-line()) > 0
+   && fgb-silent?(fgb-sh(ctx, "gone", root ++ "/no/such/dir", sed))
+   && fgb-silent?(fgb-sh(ctx, "nodoor", nodoor, sed))
+   && fgb-silent?(fgb-sh(ctx, "nofkwu", nofkwu, sed));
+  }
+  def fgb-slow?(ctx, k) {
+   let t0 = host_monotonic_ms();
+   let r = fgb-door(ctx, "warm" ++ k.str(), fgb-bash("ls"));
+   !(fgb-silent?(r)) || host_monotonic_ms() - t0 > 2000;
+  }
+  def fgb-all-fast(ctx, k) = k <= 0 ? true : !fgb-slow?(ctx, k) && fgb-all-fast(ctx, k - 1);
+  def fgb-c-fast(ctx) = fgb-all-fast(ctx, 10);
+ }
+ let ctx = fgb-fresh();
+ nothing?(ctx) ? form_error("forbidden-tools-guard band needs a fresh directory") : 0;
+ let verdict = live-claims("forbidden-tools-guard-band", ctx, [["deny", 1, 1, fgb-c-deny], ["allow", 2, 1, fgb-c-allow], ["fail-open", 4, 1, fgb-c-open], ["tools", 8, 1, fgb-c-tools], ["reading", 16, 1, fgb-c-reading], ["names", 32, 1, fgb-c-names], ["register", 64, 1, fgb-c-register], ["registered-open", 128, 1, fgb-c-open-reg], ["fast", 256, 1, fgb-c-fast]]);
+ host_dir_rmdir(fgb-root(ctx));
+ verdict;
+}

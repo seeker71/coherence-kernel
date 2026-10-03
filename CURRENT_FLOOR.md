@@ -44,16 +44,34 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             (total/unclassified/carrier/oracle/fixture/
                                             proof-sibling/tooling)
 gate/tests/structural-gate-band          -> 16383
-./fkwu observe/door-link-health-run.bml  -> docs=39 claims=826 broken=0 (each broken claim named on its own line; 2026-10-03)
+./fkwu observe/door-link-health-run.bml  -> docs=41 claims=878 broken=0 (each broken claim named on its own line; 2026-10-03)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=351 readable=173 unreadable=178 absent=0 seen=1 flaws=0, exit 0
+./fkwu observe/band-truth-run.bml        -> bands=370 readable=191 unreadable=179 absent=0 seen=1 flaws=0, exit 0
                                             (each band's declared full read against the most its claims sum to, and
                                             the queue and manifest copies of a full against the head pin, with no
                                             band run, in about 0.3 s; a decimal or count fold that stands on purpose
                                             says `; FOLD: decimal|count` on a head line; a sweep that lists no band
                                             is a flaw too; 2026-10-03)
 form/form-stdlib/tests/band-truth-band   -> 1048575
+./fkwu observe/forbidden-tools-guard.bml -> the PreToolUse door that `.claude/settings.json` registers for every Bash call: the hook's JSON
+                                            on stdin; a command that runs sed, awk, perl or python gets one line of deny JSON naming the
+                                            word and what to use, anything else (another tool, a reading that did not arrive) gets no byte;
+                                            exit 0 both ways, and the registered one-liner ends 0 and prints nothing when fkwu or the door is
+                                            absent (2026-10-03, load average 13: a warm run 25-30 ms, the first run of a checkout 2.4 s while
+                                            the .fkb cache is made; to switch it off delete the entry in .claude/settings.json)
+form/form-stdlib/tests/command-words-band -> 4194303  (form/form-stdlib/bml/command-words.bml reads which commands a shell string runs, with
+                                            no shell: quotes, separators, redirections, heredoc bodies, wrappers, sh -c / eval / trap / find
+                                            -exec, substitutions. Against the 3813 distinct Bash commands of one session's transcript:
+                                            318 read as running sed or awk, each confirmed by reading it, and 3495 read clean, of which 12
+                                            name a tool only as data and 1 writes a script that runs sed later. Five plants (no quotes, no
+                                            wrappers, no heredoc skipping, no -c recursion, no basenames) each drop their claim. It cannot see
+                                            an alias, a variable that holds the tool (`$T file` reads <unknown>, never refused: `$cmd x` is
+                                            an ordinary zsh form here), a script file that runs sed inside, a runner such as uv run python,
+                                            the substitutions in an unquoted heredoc body, or a case pattern)
+form/form-stdlib/tests/forbidden-tools-guard-band -> 511  (the deny line parses as JSON with its keys; silence on allow, on malformed
+                                            or cut-off stdin and on another tool; the registered line from another directory denies sed and
+                                            fails open on a missing project, door or fkwu)
 ./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
 ./fkwu form/form-stdlib/release-ledger.bml -> open=22 moving=0, then 22000000 (2026-10-01)
@@ -621,6 +639,10 @@ blueprint-authority-band 65535
 ## Not standing today
 
 What answered red, died, or was not witnessed today, so no one leans on it:
+
+- The guard's refusal inside a live Claude Code session is read from the hook contract and from the door
+  run by hand and by `sh -c` with the registered line (2026-10-03); a subagent's Bash call passing through
+  the project hook, and a deny under `bypassPermissions`, were not witnessed here.
 
 - `form-source-lift` over a mixed module whose first plain form carries a `; preludes:` header writes the
   lifted `import` inside the first section, and its own verification compile stops: `the cursor does not
