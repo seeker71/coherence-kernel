@@ -8662,8 +8662,7 @@ static double fk_decimal_prefix_word(long long sa, int *ok) {
 /* CPython-compatible round(x, ndigits) for finite binary64 values, ndigits >= 0.
  *
  * Scaling in binary (x * 10^n) changes which side of a decimal half-way point
- * the stored value occupies.  The retired proof siblings exposed that defect in the
- * old tag-52 implementation.  A binary64 has a terminating decimal expansion
+ * the stored value occupies.  That defect was exposed in the old tag-52 implementation.  A binary64 has a terminating decimal expansion
  * of at most 1074 fractional places, so the fixed 1074-place rendering is the
  * exact value.  Round that digit string half-to-even, then let strtod choose the
  * nearest binary64.  form/form-stdlib/tests/round-ndigits-band.fk is the owning
