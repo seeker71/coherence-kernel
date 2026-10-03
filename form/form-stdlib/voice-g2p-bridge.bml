@@ -1,0 +1,299 @@
+//////////////////////////////////////////////////////////////////////
+// voice-g2p-bridge.bml — the model's IPA, spoken in the voice's symbols.
+//
+// The body runs an open grapheme-to-phoneme model on its own Metal (native-t5.bml: charsiu's ByT5). The model
+// writes Wiktionary-style IPA; the voices were trained on espeak-ng's, and each voice's `phoneme_id_map` is keyed
+// by exactly espeak's symbols, one code point to a symbol (a nasal vowel is the vowel and U+0303, a tie bar and a
+// length mark each stand alone). The two conventions differ in ways a table can learn: ɡ and g are two code points,
+// Portuguese nasals are n-after-vowel in espeak and a combining tilde in the model, stress marks sit in different
+// places, and the model writes some vowels the teacher reduces. (A spurious final consonant the model once seemed to
+// carry was not the model's: it was the end token nt5-run appends and charsiu's own inference does not; see
+// voice-g2p-t5.bml. The bridge is fitted on the answers asked the model's way.)
+//
+// This cell LEARNS that bridge from the pairs the body already holds — the model's answer for every taught word
+// beside the phonemes the teacher gave it — and APPLIES it, with no model and no process, to any model answer.
+//
+// THE SHAPE OF A RULE. The model's code points are walked left to right; each stands in a context (the model's
+// symbol before it, `^` at the start; the model's symbol after it, `#` after the last), and each is answered with a
+// SEQUENCE of voice symbols — one (the usual), none (a deletion: a tie bar) or several
+// (a symbol that the teacher spells as two). A taught symbol that the alignment finds no model symbol for is carried
+// by the model symbol AFTER it, so an insertion is a rule too; the symbols left over after the last model symbol are
+// carried by the pseudo-symbol `$`. A rule is (symbol, left, right) -> answer, where left and right are a code point or
+// `*` for any: four levels of specificity, 0 (*, *) to 3 (left, right). The alignment is a Levenshtein DP with a
+// traceback (a diagonal step wins a tie, then a taught-only symbol, then a model-only one), kept linear in memory by
+// walking a word at a time; words are short.
+//
+// WHICH RULE ANSWERS. Every matching rule of the four levels offers its answer with a confidence (the top answer's
+// count over the rule's total plus one, x1000, so a rule seen twice and always right is 667 and one seen thirty times
+// is 968); the highest confidence answers, a tie goes to the more specific rule. A symbol the training never met passes
+// through itself. A rule is only kept when its context has been seen at least VGBMinSupport times (the level-0 rule
+// always is), and a context rule that gives the answer its backoff would give anyway is left out: the table holds the
+// information, not the counts.
+//
+// NEVER A SYMBOL THE VOICE LACKS. `vgb-map` is given the voice's own symbol set (`vgb-valid-of`), keeps only what is
+// in it and counts what it dropped, as `vp-dropped` does for a phoneme list.
+//
+// THE SHIPPED TABLE, form/form-stdlib/data/g2p-<tongue>-bridge.tsv, one rule a line:
+//   symbol TAB left TAB right TAB confidence TAB support TAB answer (the answer's symbols joined by byte 31; an empty
+//   answer is a line that ends at its last tab)
+// and it belongs to the model tag `vgb-tag` names for the tongue; a table is fitted to ONE model's habits.
+//////////////////////////////////////////////////////////////////////
+import form/form-stdlib/line-grammar.fk;
+import form/form-stdlib/voice-g2p.bml;
+import form/form-stdlib/voice-phoneme.bml;
+section [form.bml] {
+    class FormVoiceG2PBridge {
+        field VGBMinSupport = 2;
+        // the language tag the model answered best for each tongue (measured, see .hearth/g2p-model/agree-*.txt)
+        def vgb-tags() = [["en", "eng-uk"], ["pt", "por-bz"], ["fa", "per"], ["id", "ind"]];
+        def vgb-tag-of(rows, code) = if ((Comparable) len(rows) == 0) then "" else if ((String) rows[0][0] == code) then rows[0][1] else vgb-tag-of(rows[1:], code);
+        def vgb-tag(code) = vgb-tag-of(vgb-tags(), code);
+        def vgb-path(code) = vg-cat([VGRoot(), "/g2p-", code, "-bridge.tsv"]);
+        // ---- code points of a UTF-8 string ----
+        def vgb-cp-len(lead) = if (lead < 128) then 1 else if (lead < 224) then 2 else if (lead < 240) then 3 else 4;
+        def vgb-cps(s, i) = if (i >= len(s)) then [] else cons(substring(s, i, (i + vgb-cp-len(str_byte_at(s, i)))), vgb-cps(s, (i + vgb-cp-len(str_byte_at(s, i)))));
+        def vgb-join(xs) = if (nil?(xs)) then "" else ((String) xs[0] + vgb-join(xs[1:]));
+        def vgb-join-sep(xs) = if (nil?(xs)) then "" else if (nil?(xs[1:])) then xs[0] else ((String) xs[0] + vg-sep() + vgb-join-sep(xs[1:]));
+        // the taught side: its symbols are already the pieces, divided by byte 31
+        def vgb-taught-syms(s) = if ((Comparable) len(s) == 0) then [] else split-on(s, vg-sep());
+        // ---- Levenshtein, one row at a time ----
+        def vgb-min3(a, b, c) = if (a < b) then (if (a < c) then a else c) else (if (b < c) then b else c);
+        def vgb-range(k, n) = if (k > n) then [] else cons(k, vgb-range((k + 1), n));
+        def vgb-row(ai, bs, p, left, acc) = if (nil?(bs)) then reverse(acc) else vgb-cell(ai, bs, p, left, acc, if ((String) ai == bs[0]) then 0 else 1);
+        def vgb-cell(ai, bs, p, left, acc, cost) {
+            let v = vgb-min3((p[1] + 1), (left + 1), (p[0] + cost));
+            vgb-row(ai, bs[1:], p[1:], v, cons(v, acc));
+        }
+        def vgb-last(xs) = if (nil?(xs[1:])) then xs[0] else vgb-last(xs[1:]);
+        // the distance of two symbol lists, two rows of memory
+        def vgb-dist-go(a, b, i, prev) = if (nil?(a)) then vgb-last(prev) else vgb-dist-go(a[1:], b, (i + 1), vgb-row(a[0], b, prev, i, [i]));
+        def vgb-dist(a, b) = vgb-dist-go(a, b, 1, vgb-range(0, len(b)));
+        // ---- the alignment: the matrix kept (last row first), then a traceback ----
+        // The costs are WEIGHTED, and they are learned from the alignments themselves (see vgb-costs-of): a first pass
+        // aligns with flat costs (match 0, substitute 14, one-sided 10); what that pass found often (a tie bar the
+        // teacher never spells, a stress mark the model never writes, ɡ for g) is made cheap, and the pairs are aligned
+        // again, twice. Without it a tie between two equal alignments is broken by the traceback's habit, not by
+        // what the two conventions do.
+        def vgb-cget(cs, key, dflt) {
+            let v = record_get(cs, key);
+            if (value_kind(v) == "int") then (if (v > 0) then (v - 1) else dflt) else dflt;
+        }
+        def vgb-sub-cost(cs, m, t) = if ((String) m == t) then 0 else vgb-cget(cs, vg-cat(["s", vg-tab(), m, vg-tab(), t]), 14);
+        def vgb-del-cost(cs, m) = vgb-cget(cs, vg-cat(["d", vg-tab(), m]), 10);
+        def vgb-ins-cost(cs, t) = vgb-cget(cs, vg-cat(["i", vg-tab(), t]), 10);
+        def vgb-row0(cs, b, run) = cons(run, if (nil?(b)) then [] else vgb-row0(cs, b[1:], (run + vgb-del-cost(cs, b[0]))));
+        def vgb-wrow(cs, ai, bs, p, left, acc) = if (nil?(bs)) then reverse(acc) else vgb-wcell(cs, ai, bs, p, left, acc);
+        def vgb-wcell(cs, ai, bs, p, left, acc) {
+            let v = vgb-min3((p[1] + vgb-ins-cost(cs, ai)), (left + vgb-del-cost(cs, bs[0])), (p[0] + vgb-sub-cost(cs, bs[0], ai)));
+            vgb-wrow(cs, ai, bs[1:], p[1:], v, cons(v, acc));
+        }
+        def vgb-matrix(cs, a, b, i, prev, acc) = if (i > len(a)) then acc else vgb-matrix-next(cs, a, b, i, vgb-wrow(cs, a[i - 1], b, prev, (prev[0] + vgb-ins-cost(cs, a[i - 1])), [(prev[0] + vgb-ins-cost(cs, a[i - 1]))]), acc);
+        def vgb-matrix-next(cs, a, b, i, row, acc) = vgb-matrix(cs, a, b, (i + 1), row, cons(row, acc));
+        def vgb-at(rows, i, j) = rows[len(rows) - 1 - i][j];
+        // events [slot, taught symbol, kind, model symbol] in taught order. A taught symbol aligned to model symbol j-1
+        // ("m") belongs to slot j-1; a taught symbol with no model partner at column j ("t") belongs to slot j (the
+        // model symbol after it, or the end); a model symbol with no taught partner ("x") speaks nothing: slot -1
+        def vgb-back(cs, rows, a, b, i, j, acc) = if ((i == 0) && (j == 0)) then acc else vgb-step(cs, rows, a, b, i, j, acc);
+        def vgb-step(cs, rows, a, b, i, j, acc) {
+            let here = vgb-at(rows, i, j);
+            let take-diag = if ((i > 0) && (j > 0)) then (if ((Comparable) here == (vgb-at(rows, (i - 1), (j - 1)) + vgb-sub-cost(cs, b[j - 1], a[i - 1]))) then 1 else 0) else 0;
+            let take-taught = if (i > 0) then (if ((Comparable) here == (vgb-at(rows, (i - 1), j) + vgb-ins-cost(cs, a[i - 1]))) then 1 else 0) else 0;
+            if ((Comparable) take-diag == 1) then vgb-back(cs, rows, a, b, (i - 1), (j - 1), cons([(j - 1), a[i - 1], "m", b[j - 1]], acc))
+                else if ((Comparable) take-taught == 1) then vgb-back(cs, rows, a, b, (i - 1), j, cons([j, a[i - 1], "t", ""], acc))
+                else vgb-back(cs, rows, a, b, i, (j - 1), cons([-1, "", "x", b[j - 1]], acc));
+        }
+        def vgb-slot-syms(ev, s) = if (nil?(ev)) then [] else if ((Comparable) ev[0][0] == s) then cons(ev[0][1], vgb-slot-syms(ev[1:], s)) else vgb-slot-syms(ev[1:], s);
+        def vgb-slots(ev, s, n) = if (s > n) then [] else cons(vgb-slot-syms(ev, s), vgb-slots(ev, (s + 1), n));
+        // the alignment of a model symbol list b with a taught list a: its events
+        def vgb-events(cs, b, a) = vgb-back(cs, vgb-matrix(cs, a, b, 1, vgb-row0(cs, b, 0), [vgb-row0(cs, b, 0)]), a, b, len(a), len(b), []);
+        // a pair's events, for every pair, under a cost table
+        def vgb-events-all(cs, pairs) = if (nil?(pairs)) then [] else cons(vgb-events(cs, vgb-cps(pairs[0][0], 0), vgb-taught-syms(pairs[0][1])), vgb-events-all(cs, pairs[1:]));
+        // ---- what the alignments found, as costs ----
+        def vgb-inc(rec, key) = record_set(rec, key, (record_get(rec, key) + 1));
+        def vgb-stat-event(st, e) {
+            let k = e[2];
+            if ((String) k == "m") then (if ((String) e[3] == e[1]) then vgb-inc(vgb-inc(st, vg-cat(["T", vg-tab(), e[3]])), vg-cat(["O", vg-tab(), e[1]])) else vgb-inc(vgb-inc(vgb-inc(st, vg-cat(["T", vg-tab(), e[3]])), vg-cat(["O", vg-tab(), e[1]])), vg-cat(["s", vg-tab(), e[3], vg-tab(), e[1]])))
+                else if ((String) k == "t") then vgb-inc(vgb-inc(st, vg-cat(["O", vg-tab(), e[1]])), vg-cat(["i", vg-tab(), e[1]]))
+                else vgb-inc(vgb-inc(st, vg-cat(["T", vg-tab(), e[3]])), vg-cat(["d", vg-tab(), e[3]]));
+        }
+        def vgb-stat-events(st, ev) = if (nil?(ev)) then st else vgb-stat-events(vgb-stat-event(st, ev[0]), ev[1:]);
+        def vgb-stat-all(st, evs) = if (nil?(evs)) then st else vgb-stat-all(vgb-stat-events(st, evs[0]), evs[1:]);
+        // a frequency (per mille of the symbol's own occurrences) becomes a cost: the oftener, the cheaper
+        def vgb-cost-of(kind, per-mille) = if ((String) kind == "s") then (if (per-mille >= 400) then 4 else if (per-mille >= 150) then 8 else if (per-mille >= 50) then 11 else 14)
+            else if ((String) kind == "d") then (if (per-mille >= 400) then 3 else if (per-mille >= 150) then 6 else if (per-mille >= 50) then 8 else 10)
+            else (if (per-mille >= 600) then 3 else if (per-mille >= 300) then 6 else if (per-mille >= 100) then 8 else 10);
+        def vgb-costs-go(st, ks, cs) = if (nil?(ks)) then cs else vgb-costs-go(st, ks[1:], vgb-costs-one(st, ks[0], cs));
+        def vgb-costs-one(st, k, cs) {
+            let kind = vgb-field(k, 0);
+            if (((String) kind == "T") || ((String) kind == "O")) then cs
+                else vgb-costs-put(st, k, cs, kind, if ((String) kind == "s") then record_get(st, vg-cat(["T", vg-tab(), vgb-field(k, 1)])) else if ((String) kind == "d") then record_get(st, vg-cat(["T", vg-tab(), vgb-field(k, 1)])) else record_get(st, vg-cat(["O", vg-tab(), vgb-field(k, 1)])));
+        }
+        def vgb-costs-put(st, k, cs, kind, whole) = if (whole <= 0) then cs else record_set(cs, k, (vgb-cost-of(kind, ((record_get(st, k) * 1000) / whole)) + 1));
+        def vgb-costs-of(evs) {
+            let st = vgb-stat-all(record_new(0), evs);
+            vgb-costs-go(st, record_keys(st), record_new(0));
+        }
+        // the cost table the pairs teach after two passes of re-aligning
+        def vgb-costs-learned(pairs) = vgb-costs-of(vgb-events-all(vgb-costs-of(vgb-events-all(record_new(0), pairs)), pairs));
+        // for a model symbol list b and a taught list a: the answer list of each model symbol, then the end's
+        def vgb-align(cs, b, a) = vgb-slots(vgb-events(cs, b, a), 0, len(b));
+        // ---- counting: one record holds every count; a key is  symbol TAB left TAB right ----
+        def vgb-key(m, l, r) = vg-cat([m, vg-tab(), l, vg-tab(), r]);
+        def vgb-bump(cnt, key, out) {
+            let ck = vg-cat(["c", vg-tab(), key, vg-tab(), out]);
+            let c = (record_get(cnt, ck) + 1);
+            let t = record_set(cnt, ck, c);
+            let t2 = record_set(t, vg-cat(["t", vg-tab(), key]), (record_get(t, vg-cat(["t", vg-tab(), key])) + 1));
+            if (c > record_get(t2, vg-cat(["b", vg-tab(), key]))) then record_set(record_set(t2, vg-cat(["b", vg-tab(), key]), c), vg-cat(["o", vg-tab(), key]), out) else t2;
+        }
+        def vgb-bump6(cnt, m, l, r, f, out) = vgb-bump(vgb-bump(vgb-bump(vgb-bump(vgb-bump(vgb-bump(cnt, vgb-key(m, "*", "*"), out), vgb-key(m, l, "*"), out), vgb-key(m, "*", r), out), vgb-key(m, l, r), out), vgb-key(m, f, "*"), out), vgb-key(m, f, r), out);
+        // ---- the one thing a neighbour cannot say: where in the word a symbol stands ----
+        // A symbol's FEATURE is how many vowels follow it in the word (0, 1, 2 or more) and whether the word ends on a
+        // vowel (V) or a consonant (C), written `@1V`. Stress and vowel quality follow the word's end, not the symbol
+        // beside it; a rule keyed on the feature is how a model that does not mark stress is made to.
+        def vgb-vowels() = ["a", "e", "i", "o", "u", "y", "ɐ", "ɑ", "ɒ", "æ", "ɛ", "ɜ", "ə", "ɪ", "ɨ", "ɔ", "œ", "ø", "ɯ", "ʊ", "ʌ", "ɚ", "ɵ", "ʉ", "ɘ", "ɤ", "ɞ", "ɶ", "ɝ", "ɷ"];
+        def vgb-modifiers() = ["̃", "ʲ", "ː", "͡", "͜", "ˈ", "ˌ", "ʷ", "ʰ"];
+        def vgb-in?(xs, x) = if (nil?(xs)) then 0 else if ((String) xs[0] == x) then 1 else vgb-in?(xs[1:], x);
+        def vgb-vowels-after(bm, i, n) = if (i >= n) then 0 else (vgb-in?(vgb-vowels(), bm[i]) + vgb-vowels-after(bm, (i + 1), n));
+        def vgb-final-class(bm, i) = if (i < 0) then "C" else if ((Comparable) vgb-in?(vgb-modifiers(), bm[i]) == 1) then vgb-final-class(bm, (i - 1)) else if ((Comparable) vgb-in?(vgb-vowels(), bm[i]) == 1) then "V" else "C";
+        def vgb-feature(bm, s, n) = vg-cat(["@", (if (vgb-vowels-after(bm, (s + 1), n) > 2) then 2 else vgb-vowels-after(bm, (s + 1), n)).str(), vgb-final-class(bm, (n - 1))]);
+        // one word: model symbols bm (with the `$` end), their answers, walking s from 0
+        def vgb-count-word(cnt, bm, ans, s, n) {
+            if (s > n) then cnt
+                else vgb-count-word(vgb-bump6(cnt, bm[s], if (s == 0) then "^" else bm[s - 1], if (s == n) then "#" else bm[s + 1], vgb-feature(bm, s, n), vgb-join-sep(ans[s])), bm, ans, (s + 1), n);
+        }
+        def vgb-count-pair(cnt, model, ev) {
+            let b = vgb-cps(model, 0);
+            vgb-count-word(cnt, append(b, ["$"]), vgb-slots(ev, 0, len(b)), 0, len(b));
+        }
+        def vgb-count-events(cnt, pairs, evs) = if (nil?(pairs)) then cnt else vgb-count-events(vgb-count-pair(cnt, pairs[0][0], evs[0]), pairs[1:], evs[1:]);
+        // the count of a pair set: aligned under the costs the set itself teaches
+        def vgb-count-pairs(cnt, pairs) = vgb-count-events(cnt, pairs, vgb-events-all(vgb-costs-learned(pairs), pairs));
+        // ---- the rules a count holds ----
+        def vgb-conf(best, tot) = ((best * 1000) / (tot + 1));
+        def vgb-is-t?(k) = if ((Comparable) len(k) > 2) then (if ((String) substring(k, 0, 2) == vg-cat(["t", vg-tab()])) then 1 else 0) else 0;
+        def vgb-key-of(k) = substring(k, 2, len(k));
+        // a level from the key's wildcards: 0 (*,*) .. 3 (l,r); the key is  m TAB l TAB r
+        def vgb-field(key, n) = vgb-field-go(key, n, 0);
+        def vgb-field-go(key, n, from) {
+            let at = str_find(key, vg-tab(), from);
+            if (n == 0) then (if (at < 0) then substring(key, from, len(key)) else substring(key, from, at))
+                else vgb-field-go(key, (n - 1), (at + 1));
+        }
+        def vgb-feature?(l) = if ((Comparable) len(l) > 1) then (if ((String) substring(l, 0, 1) == "@") then 1 else 0) else 0;
+        def vgb-level(key) = if ((Comparable) vgb-feature?(vgb-field(key, 1)) == 1) then (if ((String) vgb-field(key, 2) == "*") then 4 else 5) else ((if ((String) vgb-field(key, 1) == "*") then 0 else 1) + (if ((String) vgb-field(key, 2) == "*") then 0 else 2));
+        // the candidate rows of a count: [level, key, confidence, support, answer]
+        def vgb-candidates(cnt, ks) = if (nil?(ks)) then [] else if ((Comparable) vgb-is-t?(ks[0]) == 1) then cons(vgb-candidate(cnt, vgb-key-of(ks[0])), vgb-candidates(cnt, ks[1:])) else vgb-candidates(cnt, ks[1:]);
+        def vgb-candidate(cnt, key) {
+            let tot = record_get(cnt, vg-cat(["t", vg-tab(), key]));
+            let best = record_get(cnt, vg-cat(["b", vg-tab(), key]));
+            [vgb-level(key), key, vgb-conf(best, tot), tot, record_get(cnt, vg-cat(["o", vg-tab(), key]))];
+        }
+        // ---- a rule table: key -> answer, "#"+key -> confidence ----
+        def vgb-put(tab, key, conf, out) = record_set(record_set(tab, key, out), vg-cat(["#", key]), conf);
+        // the best offer among a context's four keys, as [confidence, answer]; confidence -1 when no rule speaks
+        def vgb-offer(tab, key, cur) = if ((Comparable) vg-has?(record_get(tab, key)) == 0) then cur else if (record_get(tab, vg-cat(["#", key])) >= cur[0]) then [record_get(tab, vg-cat(["#", key])), record_get(tab, key)] else cur;
+        // the six keys a symbol in its context can match, offered from the least to the most specific; f is "" when no
+        // feature is asked (judging a candidate of the neighbour levels)
+        def vgb-pick(tab, m, l, r, f) = vgb-offer(tab, vgb-key(m, f, r), vgb-offer(tab, vgb-key(m, f, "*"), vgb-offer(tab, vgb-key(m, l, r), vgb-offer(tab, vgb-key(m, "*", r), vgb-offer(tab, vgb-key(m, l, "*"), vgb-offer(tab, vgb-key(m, "*", "*"), [-1, ""]))))));
+        // keep a candidate at its level: seen enough, and different from what the levels below already answer
+        def vgb-keep?(tab, c) {
+            let m = vgb-field(c[1], 0);
+            let l = vgb-field(c[1], 1);
+            let r = vgb-field(c[1], 2);
+            let below = if ((Comparable) vgb-feature?(l) == 1) then vgb-pick(tab, m, "*", r, l) else vgb-pick(tab, m, l, r, "@");
+            if ((Comparable) c[0] == 0) then 1
+                else if (c[3] < VGBMinSupport()) then 0
+                else if ((Comparable) below[0] < 0) then 1
+                else if ((String) below[1] == c[4]) then 0
+                else 1;
+        }
+        def vgb-admit(tab, cs, lvl) = if (nil?(cs)) then tab else vgb-admit(vgb-admit-one(tab, cs[0], lvl), cs[1:], lvl);
+        def vgb-admit-one(tab, c, lvl) = if ((Comparable) c[0] != lvl) then tab else if ((Comparable) vgb-keep?(tab, c) == 1) then vgb-put(tab, c[1], c[2], c[4]) else tab;
+        // the table from a count, level by level so each level is judged against the ones below it
+        def vgb-table-of-count(cnt) {
+            let cs = vgb-candidates(cnt, record_keys(cnt));
+            vgb-admit(vgb-admit(vgb-admit(vgb-admit(vgb-admit(vgb-admit(record_new(0), cs, 0), cs, 1), cs, 2), cs, 3), cs, 4), cs, 5);
+        }
+        // pairs are [model ipa, taught phonemes joined by byte 31]
+        def vgb-learn-table(pairs) = vgb-table-of-count(vgb-count-pairs(record_new(0), pairs));
+        // the table as rows of text, in the shipped format, in a stable order (level, then key)
+        def vgb-rows-of-level(tab, cs, lvl) = if (nil?(cs)) then [] else if (((Comparable) cs[0][0] == lvl) && ((Comparable) vg-has?(record_get(tab, cs[0][1])) == 1)) then cons(vg-cat([cs[0][1], vg-tab(), record_get(tab, vg-cat(["#", cs[0][1]])).str(), vg-tab(), cs[0][3].str(), vg-tab(), record_get(tab, cs[0][1])]), vgb-rows-of-level(tab, cs[1:], lvl)) else vgb-rows-of-level(tab, cs[1:], lvl);
+        def vgb-learn-rows(pairs) {
+            let cnt = vgb-count-pairs(record_new(0), pairs);
+            let tab = vgb-table-of-count(cnt);
+            let cs = vgb-candidates(cnt, record_keys(cnt));
+            append(vgb-rows-of-level(tab, cs, 0), append(vgb-rows-of-level(tab, cs, 1), append(vgb-rows-of-level(tab, cs, 2), append(vgb-rows-of-level(tab, cs, 3), append(vgb-rows-of-level(tab, cs, 4), vgb-rows-of-level(tab, cs, 5))))));
+        }
+        // ---- the table back from its rows ----
+        def vgb-row-add(tab, row) {
+            let p1 = str_find(row, vg-tab(), 0);
+            let p2 = if (p1 < 0) then -1 else str_find(row, vg-tab(), (p1 + 1));
+            let p3 = if (p2 < 0) then -1 else str_find(row, vg-tab(), (p2 + 1));
+            let p4 = if (p3 < 0) then -1 else str_find(row, vg-tab(), (p3 + 1));
+            let p5 = if (p4 < 0) then -1 else str_find(row, vg-tab(), (p4 + 1));
+            if (p5 < 0) then tab else vgb-put(tab, substring(row, 0, p3), str_to_int(substring(row, (p3 + 1), p4)), substring(row, (p5 + 1), len(row)));
+        }
+        def vgb-rows-add(tab, rows) = if (nil?(rows)) then tab else vgb-rows-add(vgb-row-add(tab, rows[0]), rows[1:]);
+        def vgb-load(code) {
+            let p = vgb-path(code);
+            vgb-rows-add(record_new(0), if (file_size(p) > 0) then split-on(read_file(p), vg-nl()) else []);
+        }
+        // ---- applying it ----
+        def vgb-answer(tab, m, l, r, f) {
+            let o = vgb-pick(tab, m, l, r, f);
+            if ((Comparable) o[0] < 0) then [m] else if ((Comparable) len(o[1]) == 0) then [] else split-on(o[1], vg-sep());
+        }
+        def vgb-apply-go(tab, bm, s, n) = if (s > n) then [] else append(vgb-answer(tab, bm[s], if (s == 0) then "^" else bm[s - 1], if (s == n) then "#" else bm[s + 1], vgb-feature(bm, s, n)), vgb-apply-go(tab, bm, (s + 1), n));
+        // the model's IPA as the rule table speaks it, before any voice's symbols are asked
+        def vgb-apply(tab, ipa) {
+            let b = vgb-cps(ipa, 0);
+            vgb-apply-go(tab, append(b, ["$"]), 0, len(b));
+        }
+        // the voice's own symbol set, as a record symbol -> 1
+        def vgb-valid-add(set, keys) = if (nil?(keys)) then set else vgb-valid-add(record_set(set, keys[0], 1), keys[1:]);
+        def vgb-valid-of(cfg) = vgb-valid-add(record_new(0), json-object-keys(vp-map(cfg)));
+        def vgb-keep-valid(valid, phs, acc, dropped) = if (nil?(phs)) then [reverse(acc), dropped] else if ((Comparable) record_get(valid, phs[0]) == 1) then vgb-keep-valid(valid, phs[1:], cons(phs[0], acc), dropped) else vgb-keep-valid(valid, phs[1:], acc, (dropped + 1));
+        // the voice's symbols for a model answer: [symbols, how many the voice's table lacked and were dropped]
+        def vgb-map(tab, valid, ipa) = vgb-keep-valid(valid, vgb-apply(tab, ipa), [], 0);
+        // ---- measuring: [words, exact, edits, taught symbols, dropped] over pairs ----
+        def vgb-eval-go(tab, valid, pairs, st) {
+            if (nil?(pairs)) then st
+                else vgb-eval-one(tab, valid, pairs, st, vgb-map(tab, valid, pairs[0][0]), vgb-taught-syms(pairs[0][1]));
+        }
+        def vgb-eval-one(tab, valid, pairs, st, got, want) {
+            let d = vgb-dist(want, got[0]);
+            vgb-eval-go(tab, valid, pairs[1:], [(st[0] + 1), (st[1] + (if (d == 0) then 1 else 0)), (st[2] + d), (st[3] + len(want)), (st[4] + got[1])]);
+        }
+        def vgb-eval(tab, valid, pairs) = vgb-eval-go(tab, valid, pairs, [0, 0, 0, 0, 0]);
+        // the same measure with no bridge at all: the model's code points, as they came, against the taught symbols
+        def vgb-raw-go(pairs, st) {
+            if (nil?(pairs)) then st
+                else vgb-raw-one(pairs, st, vgb-dist(vgb-taught-syms(pairs[0][1]), vgb-cps(pairs[0][0], 0)), len(vgb-taught-syms(pairs[0][1])));
+        }
+        def vgb-raw-one(pairs, st, d, n) = vgb-raw-go(pairs[1:], [(st[0] + 1), (st[1] + (if (d == 0) then 1 else 0)), (st[2] + d), (st[3] + n), 0]);
+        def vgb-raw(pairs) = vgb-raw-go(pairs, [0, 0, 0, 0, 0]);
+        // ---- the held-out split: a word is held out when its index is a multiple of five ----
+        def vgb-split-go(pairs, i, train, held) = if (nil?(pairs)) then [reverse(train), reverse(held)] else if ((Comparable) (i % 5) == 0) then vgb-split-go(pairs[1:], (i + 1), train, cons(pairs[0], held)) else vgb-split-go(pairs[1:], (i + 1), cons(pairs[0], train), held);
+        def vgb-split(pairs) = vgb-split-go(pairs, 0, [], []);
+        // ---- the pairs a tongue holds: the taught word table beside the model's raw answers ----
+        // g2p-<tongue>-raw.tsv is `word TAB the model's IPA as it came`, for every taught word and every word the grow door
+        // has asked the model about; the bridge is fitted on the words the teacher ALSO taught.
+        def vgb-raw-load(code) = vgb-raw-rows(record_new(0), vgb-lines(vg-path(code, "raw")));
+        def vgb-lines(p) = if (file_size(p) > 0) then split-on(read_file(p), vg-nl()) else [];
+        def vgb-raw-rows(rec, rows) = if (nil?(rows)) then rec else vgb-raw-rows(vgb-raw-row(rec, rows[0]), rows[1:]);
+        def vgb-raw-row(rec, row) {
+            let at = str_find(row, vg-tab(), 0);
+            if (at < 1) then rec else record_set(rec, substring(row, 0, at), substring(row, (at + 1), len(row)));
+        }
+        // [model ipa, taught phonemes, word], each taught word once, in file order, the words the model answered
+        def vgb-pairs-go(rows, raw, seen, acc) = if (nil?(rows)) then reverse(acc) else vgb-pairs-row(rows, raw, seen, acc, str_find(rows[0], vg-tab(), 0));
+        def vgb-pairs-row(rows, raw, seen, acc, at) {
+            let w = if (at < 1) then "" else substring(rows[0], 0, at);
+            if (((Comparable) len(w) == 0) || ((Comparable) record_get(seen, w) == 1) || ((Comparable) vg-has?(record_get(raw, w)) == 0)) then vgb-pairs-go(rows[1:], raw, seen, acc)
+                else vgb-pairs-go(rows[1:], raw, record_set(seen, w, 1), cons([record_get(raw, w), substring(rows[0], (at + 1), len(rows[0])), w], acc));
+        }
+        def vgb-pairs-of(code) = vgb-pairs-go(vgb-lines(vg-path(code, "word")), vgb-raw-load(code), record_new(0), []);
+    }
+    0;
+}
