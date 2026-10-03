@@ -1,26 +1,21 @@
-# form-kernel — all of Form in Form, on top of any sibling kernel
+# form-kernel — all of Form in Form, on top of fkwu
 
-The body holds three sibling kernels (Go, Rust, TypeScript) of the smallest
-substrate-walker host, beside the native `fkwu`. From there, **everything else lives
-in Form itself**. The siblings keep each other honest: every Form source file runs
-through all of them, and a divergence is a bug in exactly one place — one kernel or
-an undocumented spec corner — findable only because several implementations exist.
+The body runs on one kernel, the native `fkwu`, the smallest substrate-walker host.
+From there, **everything else lives in Form itself**.
 
-## The sibling-kernel discipline
+## The validation discipline
 
-**Every Form source file runs through the siblings.** [`validate.sh`](validate.sh)
-diffs their outputs and fails on disagreement — the pre-merge check, the rapid
-feedback loop, the safety net. It runs the structural gate first, walks
-`form-stdlib/tests/*.fk` with `form-stdlib/core.fk` as prelude, and honors a band's
-`; PROOF LEVEL:` line (a fourth-arm-only band runs on its home arm or reports pending).
+**Every band runs on fkwu.** [`validate.sh`](validate.sh) is the pre-merge check, the
+rapid feedback loop, the safety net: it fails when a band exits nonzero, speaks a
+diagnostic, or answers other than the verdict its head pins. It runs the structural
+gate first, walks `form-stdlib/tests/*.fk` with `form-stdlib/core.fk` as prelude, and
+honors a band's `; PROOF LEVEL: FKWU-STAGED` line (a band that needs a host carrier
+reports pending until the carrier stands).
 
 fkwu resolves a band's closure — `; preludes:` (recursive, deduplicated, honoring the
 `none` sentinel), `import` in every spelling, and the names `form-stdlib/home-index.txt`
 lists — and lowers every `.bml` and section-bearing `.fk` in it through its own memo'd
-floor. `./fkwu --closure <unit> <out>`, run from the repo root, writes that closure as
-one plain-Form file. A sibling reads the plain Form files it is handed, in order, and
-nothing else: it follows no directive, opens no index and lowers nothing. So
-`./validate.sh band.fk` is the whole invocation; no hand-typed closure
+floor. So `./validate.sh band.fk` is the whole invocation; no hand-typed closure
 ([`../docs/kernel-interface.md`](../docs/kernel-interface.md)).
 
 ```bash
@@ -72,9 +67,9 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
   grammar registry [`form-stdlib/grammar-loader.fk`](form-stdlib/grammar-loader.fk)
   (a new grammar is one registry row). Production grammars live in
   [`form-stdlib/grammars/`](form-stdlib/grammars/) — Python via BMF objects
-  ([`python-bmf.fk`](form-stdlib/grammars/python-bmf.fk)), and siblings for Go, Rust,
+  ([`python-bmf.fk`](form-stdlib/grammars/python-bmf.fk)), and grammars that read Go, Rust,
   TypeScript, Prolog, BML, Form-in-BML, Form-lift, the living equation and Sanskrit
-  roots.
+  roots as input.
 - **The persistence bridge** — [`form-stdlib/persistence.fk`](form-stdlib/persistence.fk):
   `cell-put` / `lookup-cell` / `store-cells` over `write_form_binary` /
   `read_form_binary`; a CELL recipe carries `(name, domain, blueprint, ctor)` with
@@ -88,9 +83,8 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
 
 ## The breaths still ahead
 
-- **Six-way cross-validation.** Same source × same registry × two engines
-  (character + BMF) × the sibling kernels in one validation pass, any disagreement
-  a single bug locus.
+- **Cross-validation of engines.** Same source × same registry × two engines
+  (character + BMF) in one validation pass, any disagreement a single bug locus.
 - **Registry persistence.** The grammar registry materializes per session from
   source; its substrate cells could persist directly so a fresh kernel boot loads
   the registry from the lattice.
@@ -102,20 +96,18 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
   one interface, not yet a single lattice on disk; the parent consumes this kernel
   through the consumer submodule ([`README.md`](README.md)).
 
-## Run the kernels
+## Run the kernel
 
 ```bash
 ./validate.sh
 ./validate.sh form-samples/fact.fk
 ./validate.sh --bench
 
-form-kernel-go/bin-go      form-samples/fact.fk                              # → 3628800
-form-kernel-rust/target/release/form-kernel-rust  form-samples/fact.fk      # → 3628800
-node --experimental-strip-types form-kernel-ts/src/main.ts form-samples/fact.fk   # → 3628800
+../fkwu form-samples/fact.fk                                                  # → 3628800
 ```
 
-The Go and Rust binaries are build artifacts (`validate.sh` builds them when
-stale); the TS kernel runs from source under Node's strip-types.
+The runtime is built from the C seed (`cc -O2 -o fkwu runtime/fkwu-uni.c`);
+`validate.sh` rebuilds it when the seed is newer.
 
 When in doubt about whether to grow a kernel, the test is *"can this be expressed
 using kernel primitives Form already has?"* If yes, it is a Form breath. If no, the

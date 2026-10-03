@@ -1,10 +1,9 @@
 # The kernel interface
 
-One interface every kernel carries — fkwu (the only runtime), and the Go, Rust and
-TypeScript proof siblings — and nothing outside it. A name a kernel carries off the
-interface is released; a meaning that differs between kernels is a defect in exactly
-one place. This page says what stands and where the interface is going; history lives
-in git.
+The interface fkwu, the only runtime, carries — and nothing outside it. A name fkwu
+carries off the interface is released; a meaning that differs between two readings of
+one name is a defect in exactly one place. This page says what stands and where the
+interface is going; history lives in git.
 
 ## Source: one reader, one lowering
 
@@ -12,17 +11,14 @@ in git.
 in every spelling, `home-index.txt` names — and lowers every `.bml` and section-bearing
 `.fk` through its own memo'd floor (`bml-floor-compile.fk`, `<unit>.lowfk`).
 `./fkwu --closure <unit> <out>`, run from the repo root, writes that closure as one
-plain-Form file: each unit's text in dependency order under a `; unit: <path>` line.
-
-A sibling reads the plain Form files named on argv, in order, joins them with one
-newline, walks the result and prints its value. It follows no directive, opens no
-index, lowers nothing and keeps no source cache. `validate.sh` hands the siblings the
-closure fkwu walks, so four arms agreeing means four arms agreed over one input.
+plain-Form file: each unit's text in dependency order under a `; unit: <path>` line;
+the drift gates read it to learn which units a gate loads.
 
 ## Pure core
 
-Native on every kernel, one meaning, generated from one table (the op table that
-generates `runtime/fkwu-optable.h` and the reserved-head lists):
+Native in fkwu, one meaning, generated from one table (the op table that
+generates `runtime/fkwu-optable.h` and the reserved-head list,
+`form/form-stdlib/fkwu-op-arity.fk`):
 
 | family | names |
 |---|---|
@@ -41,19 +37,18 @@ A measured native (`substring str_find scan_run value_str round_ndigits rotr_u32
 add_u32 bnot_u32 method_define method_has method_invoke recipe_to_bytes
 bytes_to_recipe`) stays native until a warm BML home matches it; then it becomes one
 `home-index.txt` row. Everything else lives in a Form or BML home that fkwu links by
-name and hands the siblings inside the closure. A sibling native that shadows a home
-(`char_at ord int_to_str str_to_int sum abs range intern_node_at …`) is released,
-so every kernel runs the body's own meaning. `bp` is the one shadow still native on
-Go, Rust and TS (law 10).
+name. A native that shadows a home (`char_at ord int_to_str str_to_int sum abs range
+intern_node_at …`) is released, so fkwu runs the body's own meaning. `bp` is the one
+name whose native and BML meanings differ (law 10).
 
 ### Laws the core pins
 
-1. Integers are 63-bit two's complement, `[-2^62, 2^62)`, on every kernel, and in a
+1. Integers are 63-bit two's complement, `[-2^62, 2^62)`, and in a
    defn the JIT has taken as in one it has not.
 2. Integer `div`/`mod` by zero stops; `attempt` recovers it to `nothing`.
 3. An order refusal (`lt` on a non-number) stops; `attempt` recovers it.
-4. `math_sqrt` is correctly rounded (IEEE `fsqrt`): the walker, the JIT and the
-   siblings agree to the bit.
+4. `math_sqrt` is correctly rounded (IEEE `fsqrt`): the walker and the JIT agree to
+   the bit.
 5. Float `mod` truncates, like integer `mod`.
 6. `float_to_int` on NaN, out-of-range or a non-number stops.
 7. `str_to_float` reads one grammar: leading whitespace, the longest decimal prefix,
@@ -63,48 +58,44 @@ Go, Rust and TS (law 10).
 9. A value renders one way everywhere (`value_str`), records included.
 10. `bp` has one meaning: the BML resolution in `form-ontology-bp.fk`.
 
-`form/form-stdlib/tests/kernel-laws-band.fk` asks laws 1–9 of all four arms, each row
+`form/form-stdlib/tests/kernel-laws-band.fk` asks laws 1–9 of fkwu, each row
 under `attempt`, prelude-free; its head names every bit. Read with
-`cd form && FORM_VALIDATE_SIBLINGS=1 ./validate.sh form-stdlib/tests/kernel-laws-band.fk`
-(2026-10-01: `2147483647` on fkwu, Go, Rust and TS). The drift gates' `kernel-laws` row
-(`gate/drift-gates.bml`) reads fkwu's answer at every landing that moves a kernel:
+`./fkwu form/form-stdlib/tests/kernel-laws-band.fk` (`2147483647`). The drift gates'
+`kernel-laws` row (`gate/drift-gates.bml`) reads fkwu's answer at every landing that
+moves a kernel:
 
 | law | stands | band bits |
 |---|---|---|
-| 1 | four-way; on fkwu cold and hot, since the JIT's int lane wraps every add, sub, mul, div and mod to 63 bits | 1, 2, 134217728 |
-| 2 | four-way; on fkwu cold and hot | 4, 8 |
-| 3, 4, 5 | four-way | 16; 32; 64, 128, 256 |
-| 6 | four-way; on fkwu cold and hot, over ints and over floats | 512–4096, 33554432 |
-| 7 | four-way on the band's rows | 8192–65536 |
-| 8 | four-way | 131072, 262144, 524288 |
-| 9 | four-way: `value_str` and `print` give `<record>` for a record and `<closure>` for a closure | 1073741824 |
-| 10 | open: fkwu's tag 45 answers its own argument, a string; Go, Rust and TS carry a native `bp` that answers a NodeID and stops on an unknown name; no arm runs the BML `bp` | — |
+| 1 | on fkwu cold and hot, since the JIT's int lane wraps every add, sub, mul, div and mod to 63 bits | 1, 2, 134217728 |
+| 2 | on fkwu cold and hot | 4, 8 |
+| 3, 4, 5 | pinned | 16; 32; 64, 128, 256 |
+| 6 | on fkwu cold and hot, over ints and over floats | 512–4096, 33554432 |
+| 7 | on the band's rows | 8192–65536 |
+| 8 | pinned | 131072, 262144, 524288 |
+| 9 | `value_str` and `print` give `<record>` for a record and `<closure>` for a closure | 1073741824 |
+| 10 | open: fkwu's tag 45 answers its own argument, a string, while the BML resolution in `form-ontology-bp.fk` answers a NodeID and stops on an unknown name; no arm runs the BML `bp` | — |
 
 The band also pins `fs_list` and `host_dir_list` (a path that is no directory answers
 `nothing`, an empty directory `[]`), `record_has` of a record, `record_get` and
 `record_set` stopping on a value that is no record, `read_file_slice` at a negative
 offset answering `nothing`, and `make_nodeid` stopping outside its layout.
 
-Rows the kernels do not yet share stay out of the verdict, and the band's head names
-each one with every arm's answer: `record_has` of a value that is no record (Go stops,
-the others answer 0); a 1.1.1 int past int32 (fkwu keeps it on the 1.1.1 lane, the
-siblings make an INT64 node); `write_file_bytes` of something that is no byte list;
-`round_ndigits` with ndigits below 0 (TS answers CPython's value, the others stop);
-`str_to_float` of `"5.e3"` (Rust reads 5, the others 5000); `math_pow` of -1 to an
-infinity (TS NaN, the others 1); `cons` onto a non-list; and `math_exp`, `math_log` and
-`math_pow` off their exact cases, where the arms part by an ulp on some rows.
+Rows the band does not pin stay out of the verdict, and the band's head names each one:
+`record_has` of a value that is no record; a 1.1.1 int past int32; `write_file_bytes`
+of something that is no byte list; `round_ndigits` with ndigits below 0; `str_to_float`
+of `"5.e3"`; `math_pow` of -1 to an infinity; `cons` onto a non-list; and `math_exp`,
+`math_log` and `math_pow` off their exact cases, where the last bit is the libm's.
 
-On every arm `print` renders a `nothing` inside a list as `nothing`, and `value_str`
-renders it as `null`.
+`print` renders a `nothing` inside a list as `nothing`, and `value_str` renders it as
+`null`.
 
 ## Host doors
 
-One BML table of host doors replaces the five mirrors that disagree today
-(`native-op-manifest.fk`, `host-effect-grammar.fk`, `bml/host-io.bml`,
-`primitive-registry.fk`, the TS `KernelHost` field list). Each row names the verb, its
-family, arity, direction, the handle it opens or closes, whether it may block, and its
-refusal words. The fkwu op rows, the siblings' registration check and the live-page
-row index are read from it.
+One BML table of host doors replaces the mirrors that disagree today
+(`native-op-manifest.fk`, `host-effect-grammar.fk`, `bml/host-io.bml`). Each row names
+the verb, its family, arity, direction, the handle it opens or closes, whether it may
+block, and its refusal words. The fkwu op rows and the live-page row index are read
+from it.
 
 | family | verbs |
 |---|---|
@@ -127,11 +118,11 @@ names `0.0.0.0` because its container is reached over the Docker network.
 the caller reads with `host_why(verb)`. No negative codes, no `""` or `[]` standing
 for absence, no `0` standing for refusal, and no door that ends the process: callers
 backtrack with `??`, `attempt` or `oac-choice`. Today's `fs_list` and `host_dir_list`
-keep this on all four arms: a path that is no directory answers `nothing`, an empty
+keep this: a path that is no directory answers `nothing`, an empty
 directory `[]`. A lister reads them as `fs_list(d) ?? []`, since a `nil?` walk handed
 `nothing` never ends; the stdlib word `fs-list` (`form-fs.fk`) is that reading.
 
-**Handles.** One table per kernel; a handle is an index and a generation, so a stale
+**Handles.** One table; a handle is an index and a generation, so a stale
 handle answers `nothing` and can never reach another resource. Close is idempotent; a
 BML `using h = stream_open(…) { … }` closes at scope end and on stop or backtrack.
 Raw descriptors never cross into Form. Children are reaped by the kernel, and
@@ -139,7 +130,7 @@ Raw descriptors never cross into Form. Children are reaped by the kernel, and
 
 ## Vitality
 
-**The ring.** Every kernel on the host appends its stage opens and closes to one
+**The ring.** Every fkwu on the host appends its stage opens and closes to one
 shared-memory ring, `/fg-bus1` (`runtime/fkwu-uni.c`, the stage bus: 65536 slots and an
 interned name table). `float_leaf` 29 opens a stage and 30 closes it; 31 reads rows from
 a cursor and 32 answers the text of an interned id. A row is 13 ints: `idx pid t_us
@@ -175,18 +166,18 @@ stamps into that surface's own rhythm and publishes the `vitals` frame.
 
 ## Order
 
-1. Release kernel-side lowering; siblings read fkwu's closure. *(stands)*
+1. fkwu resolves and lowers every closure; no second reader stands. *(stands)*
 2. fkwu defects that broke a law: `math_sqrt`, order and divide-by-zero stops,
    `kernel_stat`'s unknown key. *(stands)*
 3. The stage ring, its phases, the vitality fold and its text door. *(stand)* The
    coding lane speaks on the ring *(stands)*; the other flows and the glass view of the
    findings are open.
-4. Release sibling natives that shadow homes or have no caller *(stands, except
+4. Release natives that shadow homes or have no caller *(stands, except
    `bp`)*; one op table generates every name list.
 5. The host door table; migrate callers family by family; release the off-table
    names. Every door call timed and counted per verb on the live page (calls,
    nothings, bytes in and out, open handles, a log2 *dwell* histogram of time spent in
    the world) is not built yet.
-6. One four-way law band, `kernel-laws-band.fk`, pinning laws 1–9, laws 1, 2 and 6
-   hot as cold. *(stands)* Law 10 is open: every arm runs the BML `bp`. The rows the
-   band's head names as not yet shared each come to one meaning.
+6. One law band, `kernel-laws-band.fk`, pinning laws 1–9, laws 1, 2 and 6
+   hot as cold. *(stands)* Law 10 is open: `bp` runs the BML resolution. The rows the
+   band's head names as not pinned each come to one meaning.

@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
-# validate.sh — every Form band answers on fkwu, the runtime. When a kernel
-# source moved since origin/main (gate/kernel-change.bml), the sibling kernels
-# (Go, Rust, TypeScript) run it too and every output must be identical: they
-# validate the kernel change, they are not a runtime, and their speed is no
-# goal. Otherwise each band answers its pin on fkwu alone and no sibling is
-# built or started; FORM_VALIDATE_SIBLINGS=1 asks them anyway. Any divergence
-# is a bug in one of them or a spec corner nobody documented — worth knowing.
-#
-# One input for every arm: a workload is a root naming its files, fkwu walks
-# that root, and `fkwu --closure` writes the same closure as one plain-Form file
-# the siblings read. fkwu alone resolves and lowers; the siblings only walk.
-# Every leg ends: a watch beside the legs bounds each one (Deadlines, below).
+# validate.sh — every Form band answers on fkwu, the one runtime. A band runs by
+# its own path through the repo-root fkwu and is judged by its exit, its stderr,
+# the first Verdict its head declares and its manifest row (band-verdicts.txt).
+# Nothing else is built or started: the C seed and the optional Metal carrier are
+# the only compilers this script may call, and only when they are stale.
 #
 # Run from form/.
 #   ./validate.sh            # validate every band the body keeps (the sweep)
@@ -18,8 +11,6 @@
 #   VALIDATE_MATCH='glass|landing' ./validate.sh  # the sweep's workloads whose label matches
 #   ./validate.sh path.fk    # validate one file
 #   ./validate.sh prelude.fk test.fk  # validate one workload
-#   ./validate.sh --binary  # compile every workload, execute artifacts
-#   ./validate.sh --binary prelude.fk test.fk  # compile once, execute artifact
 #   ./validate.sh --bench    # native Form JIT witness
 
 set -euo pipefail
@@ -32,6 +23,8 @@ if [[ "${1:-}" == "--bench" ]]; then
     cd ..
     exec ./fkwu observe/native-jit-witness-run.fk
 fi
+
+BAND_MANIFEST="band-verdicts.txt"
 
 # --- the sweep's workloads ---------------------------------------------------
 # Every band the body keeps, enumerated in one place (`./validate.sh --list`
@@ -88,19 +81,11 @@ suite_enumerate() {
     return 0
 }
 
-# A band may declare its proof level in its comment head:
-#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs alone by its own path on the runtime
-#     fkwu (the source door) and is judged as the fkwu lane judges every band:
-#     its exit, its stderr, the first Verdict its head declares and its
-#     manifest row. Loud pass/fail — a wrong home-arm answer is a real failure,
-#     never skipped. A band whose closure calls a door no sibling kernel carries
-#     (host_spawn, host-exec, a kernel_stat key only fkwu counts) declares it and
-#     names that door, or every kernel-change run reads it as a divergence.
+# A band may declare a staged carrier in its comment head:
 #   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier. A band that
-#     names it (`; STAGED CARRIER: <path from the repo root>`) runs on the
-#     fkwu-only lane, verdict and diagnostics held as above, whenever that
+#     names it (`; STAGED CARRIER: <path from the repo root>`) runs whenever that
 #     carrier stands; otherwise it is reported ⧗ pending — visible every run,
-#     never green.
+#     never green. Every other band runs.
 fk_band_proof_level() {
     sed -n 's/^; PROOF LEVEL: \([A-Z-]*\).*/\1/p' "$1" 2>/dev/null | head -1
 }
@@ -120,12 +105,32 @@ fk_band_declared_verdict() {
     awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
 }
 
-# `./validate.sh --list` names each workload, its files, the proof level its head declares
-# (four-way when it declares none: the lane a kernel change asks of it), its head pin and its
-# manifest row. A band with neither pin is swept but judged by its exit alone.
+# band_stem — manifest stem for a band file path, or empty. A registered verdict only applies to a
+# CANONICAL band — the workload's last file living under form-stdlib/tests/. A same-named sample
+# elsewhere (e.g. a cross-modal demo whose basename collides with a manifest stem) never resolves,
+# because the registered band is form-stdlib/tests/<stem>-band.fk and the sample's own output
+# would be compared against it. Anchoring to the tests/ path keeps the stem the contract for the
+# real band only.
+band_stem() {
+    local band="$1" stem hit
+    if [[ "$band" != form-stdlib/tests/* && "$band" != */form-stdlib/tests/* ]]; then
+        return 0
+    fi
+    stem="$(basename "$band")"
+    stem="${stem%.fk}"
+    stem="${stem%.bml}"
+    [[ -f "$BAND_MANIFEST" ]] || return 0
+    # Exact name first, then the name without -band: a row may name the file
+    # whole (tests/<stem>.fk) or the band it proves (tests/<stem>-band.fk).
+    hit="$(awk -v b="$stem" '$1==b{print $1; exit}' "$BAND_MANIFEST")"
+    if [[ -n "$hit" ]]; then printf '%s\n' "$hit"; return 0; fi
+    stem="${stem%-band}"
+    awk -v b="$stem" '$1==b{print $1; exit}' "$BAND_MANIFEST"
+}
+
+# `./validate.sh --list` names each workload, whether its head stages a carrier, its head pin and
+# its manifest row. A band with neither pin is swept but judged by its exit alone.
 if [[ "${1:-}" == "--list" ]]; then
-    # shellcheck source=scripts/fourth-arm.sh
-    source scripts/fourth-arm.sh
     suite_enumerate
     i=0
     while [[ $i -lt ${#wl_labels[@]} ]]; do
@@ -133,17 +138,12 @@ if [[ "${1:-}" == "--list" ]]; then
         list_files="${list_files% }"
         list_band="${list_files##* }"
         list_level="$(fk_band_proof_level "$list_band")"
-        # a level this script does not read runs four-way, whatever its head says: the list says so
-        case "$list_level" in
-            ""|FOURTH-ARM|FKWU-STAGED|FOUR-WAY) ;;
-            *) list_level="four-way(unread:$list_level)" ;;
-        esac
         list_pin="$(fk_band_declared_verdict "$list_band")"
-        list_stem="$(fourth_band_stem "$list_band" || true)"
+        list_stem="$(band_stem "$list_band" || true)"
         list_row=""
-        if [[ -n "$list_stem" ]]; then list_row="$(awk -v b="$list_stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"; fi
-        printf '%s\t%s\tlevel=%s\tpin=%s\trow=%s\n' "${wl_labels[$i]}" "$list_files" \
-            "${list_level:-four-way}" "${list_pin:--}" "${list_row:--}"
+        if [[ -n "$list_stem" ]]; then list_row="$(awk -v b="$list_stem" '!/^#/ && $1==b{print $3; exit}' "$BAND_MANIFEST")"; fi
+        printf '%s\t%s\tstaged=%s\tpin=%s\trow=%s\n' "${wl_labels[$i]}" "$list_files" \
+            "$([[ "$list_level" == "FKWU-STAGED" ]] && echo yes || echo no)" "${list_pin:--}" "${list_row:--}"
         i=$((i + 1))
     done
     exit 0
@@ -204,13 +204,6 @@ if [[ "$STRUCTURAL_GATE_FKWU_RC" -ne 0 || "$STRUCTURAL_GATE_STATUS" != "1" ]]; t
     exit 1
 fi
 
-# Keep package-manager advisory text out of sibling-kernel output comparison.
-# The TypeScript arm may invoke npm/npx when tsx is not locally installed; an
-# update notice on stdout makes identical kernel results look divergent.
-export NO_UPDATE_NOTIFIER=1
-export NPM_CONFIG_UPDATE_NOTIFIER=false
-export npm_config_update_notifier=false
-
 # Form owns the phase-zero check list and its verdict. This carrier maps the
 # observed native value and process status into the existing validation flow.
 if native_result="$(cd .. && ./fkwu gate/validation-start-run.fk)"; then
@@ -223,12 +216,6 @@ if [[ "$native_rc" -ne 0 || "${native_result##*$'\n'}" != "1" ]]; then
     printf '%s\n' 'validate.sh: native validation-start needs attention.' >&2
     exit 1
 fi
-
-GO_DIR="form-kernel-go"
-RS_DIR="form-kernel-rust"
-TS_DIR="form-kernel-ts"
-GO_BIN="$GO_DIR/bin-go"
-RS_BIN="$RS_DIR/target/release/form-kernel-rust"
 
 # The cache key of the text on stdin.
 form_hash16() {
@@ -246,62 +233,7 @@ form_hash16() {
     fi
 }
 
-# --- build compiled sibling kernels if stale -----------------------------
-build_go() {
-    if [[ ! -x "$GO_BIN" ]] || find "$GO_DIR" -name '*.go' -newer "$GO_BIN" -print -quit | grep -q .; then
-        echo "  building go kernel..." >&2
-        (cd "$GO_DIR" && GOPROXY=off go build -o bin-go .)
-    fi
-}
-build_rs() {
-    if [[ ! -x "$RS_BIN" ]] || find "$RS_DIR/src" -name '*.rs' -newer "$RS_BIN" -print -quit | grep -q .; then
-        echo "  building rust kernel..." >&2
-        (cd "$RS_DIR" && cargo build --release --offline --quiet)
-    fi
-}
-
-build_ts() {
-    # Bundle the TS kernel once (esbuild, cached by source mtimes) so each band
-    # runs via plain `node` (~60ms) instead of npx tsx (~1.5s). Over the sweep's
-    # few hundred workloads (`./validate.sh --list | wc -l`) that is seconds
-    # against minutes of startup tax.
-    local bundle="$TS_DIR/dist/main.mjs"
-    local stale=0
-    if [[ ! -f "$bundle" ]]; then stale=1; else
-        local f
-        for f in "$TS_DIR"/src/*.ts; do
-            [[ "$f" -nt "$bundle" ]] && { stale=1; break; }
-        done
-    fi
-    if [[ "$stale" == "1" ]]; then
-        if [[ -x "$TS_DIR/node_modules/.bin/esbuild" ]]; then
-            echo "  bundling ts kernel..." >&2
-            "$TS_DIR/node_modules/.bin/esbuild" "$TS_DIR/src/main.ts" --bundle --platform=node \
-                --format=esm --outfile="$bundle" --log-level=warning >&2
-        fi
-    fi
-}
-
-# The sibling kernels validate a kernel change. gate/kernel-change.bml answers
-# whether a kernel source moved since origin/main; when none did, no sibling is
-# built or started and every band runs on fkwu against its pin (run_fkwu_lane).
-# FORM_VALIDATE_SIBLINGS=1 asks the siblings anyway; --binary always does.
-SIBLINGS=1
-if [[ "${FORM_VALIDATE_SIBLINGS:-0}" != 1 && "${1:-}" != "--binary" ]]; then
-    kernel_change="$(cd .. && ./fkwu gate/kernel-change-run.fk 2>/dev/null)" || kernel_change=""
-    if [[ -n "$kernel_change" ]]; then printf '%s\n' "$kernel_change" | sed -e '$d' -e '/^$/d' -e 's/^/  /'; fi
-    if [[ "${kernel_change##*$'\n'}" == "0" ]]; then SIBLINGS=0; fi
-fi
-if [[ $SIBLINGS -eq 1 ]]; then
-    build_go &
-    build_rs &
-    build_ts &
-    wait
-fi
-
-# The runtime (repo-root fkwu, runtime/fkwu-uni.c) is the one reader of every
-# workload: it resolves and lowers the closure, walks it as the fourth arm and
-# the fkwu lanes, and writes it as plain Form for the siblings.
+# The runtime (repo-root fkwu, runtime/fkwu-uni.c) is the one reader of every workload.
 FKWU_SRC=""
 build_fkwu_src() {
     local src="../runtime/fkwu-uni.c" bin="../fkwu"
@@ -329,89 +261,37 @@ build_fkwu_src || exit 1
 fk_diag_count() {
     grep -c 'unresolved-call\|error:\|compiled with errors' "$1" 2>/dev/null || true
 }
-# A voiced organ-health row carries its speaker's identity: its id and the id of the
-# reading it cares for (care_of), its flow (the pid), its clock stamps and a care supply's
-# duration, and any pid in its evidence. Its evidence reference (oh-reference,
-# form-stdlib/organ-health.bml) names where the reading was taken: a path under the leg's own
-# TMPDIR, whose directory carries the leg's pid and clock, and the moment it was read
-# (observed_unix_ms). A peer's stage line (`form-peer stage ... stamp-ms=<n>`) carries the clock
-# its stage was read at, the same kind of word. The kernels agree on what an organ said, never on
-# which process said it or where and when, so the legs compare the reading and not the speaker.
-organ_steady() {
-    sed -E -e '/^form-organ health \{/{s/"id":"[^"]*",//;s/"flow":"[^"]*",//;s/,"observed_at_ms":[0-9]+//;s/,"at_ms":[0-9]+//;s/,"observed_unix_ms":[0-9]+//g;s/"evidence":\{"path":"[^"]*",?/"evidence":{/;s/,"care_of":"[^"]*"//g;s/,"supply_elapsed_ms":[0-9]+//g;s/"pid":[0-9]+,?//g;}' \
-        -e '/^form-peer stage /s/ stamp-ms=[0-9]+//g' "$1" 2>/dev/null || true
-}
 
-# The fourth sibling is the repo-root fkwu source/JIT door. It walks the
-# workload root directly; hot CPU/Metal/MLX recipes may crystallize on demand.
-# Held absolute: it runs from the repo root.
-FORM_FOURTH_SOURCE_FKWU="${FORM_FOURTH_SOURCE_FKWU:-$FKWU_SRC}"
-case "$FORM_FOURTH_SOURCE_FKWU" in
+# The runtime, held absolute: it runs from the repo root.
+FORM_SOURCE_FKWU="${FORM_SOURCE_FKWU:-$FKWU_SRC}"
+case "$FORM_SOURCE_FKWU" in
     ""|/*|[A-Za-z]:*) ;;
-    *) FORM_FOURTH_SOURCE_FKWU="$PWD/$FORM_FOURTH_SOURCE_FKWU" ;;
+    *) FORM_SOURCE_FKWU="$PWD/$FORM_SOURCE_FKWU" ;;
 esac
-# shellcheck source=scripts/fourth-arm.sh
-source scripts/fourth-arm.sh
-build_fourth
 
 # AXIOM-4: "passage not through the offered interface is breach, and breach is
-# observable." fkwu writes the closure every sibling reads, so without it no arm
-# has an input: the run refuses here rather than fail every band one by one.
-if ! fourth_available; then
-    echo "validate.sh: the runtime fkwu is ABSENT — it walks every workload and writes the" >&2
-    echo "  closure the siblings read, so no arm can run. See the reason build_fourth printed above." >&2
+# observable." Without the runtime no band has an input: the run refuses here
+# rather than fail every band one by one.
+if [[ -z "$FORM_SOURCE_FKWU" || ! -x "$FORM_SOURCE_FKWU" ]]; then
+    echo "validate.sh: the runtime fkwu is ABSENT — it walks every workload, so no band can run." >&2
+    echo "  Build it: cc -O2 -o fkwu runtime/fkwu-uni.c (from the repo root)." >&2
     exit 1
 fi
 
-# The TS kernel carries its deep Form recursion on a worker thread whose V8
-# limit MATCHES its real stack (main.ts deep-stack door; FORM_KERNEL_STACK_MB
-# passes through the environment, same name as the emitted C walker's door).
-# Never re-add a node --stack_size flag here: it cannot grow the fixed OS
-# main-thread stack, it only lifts V8's overflow check past it — turning deep
-# recursion into a SILENT SIGSEGV with zero output (the aphonia family).
-run_ts() {
-    local bundle="$TS_DIR/dist/main.mjs"
-    local loader="$PWD/$TS_DIR/node_modules/tsx/dist/loader.mjs"
-    local current=1 f
-    if [[ ! -f "$bundle" ]]; then
-        current=0
-    else
-        for f in "$TS_DIR"/src/*.ts; do
-            [[ "$f" -nt "$bundle" ]] && { current=0; break; }
-        done
-    fi
-    if [[ "$current" == "1" ]]; then
-        node "$bundle" "$@"
-    elif node --experimental-strip-types --version >/dev/null 2>&1; then
-        node --experimental-strip-types "$TS_DIR/src/main.ts" "$@"
-    elif [[ -x "$TS_DIR/node_modules/.bin/tsx" ]]; then
-        node --import "$loader" "$TS_DIR/src/main.ts" "$@"
-    else
-        echo "validate.sh: TypeScript arm needs Node strip-types or a local tsx install" >&2
-        return 1
-    fi
-}
-
 WORKLOAD_DIR="form-stdlib/.cache/workloads"
-# A workload's legs dir (the closure, every leg's streams, exit, wall time and scratch) lives
-# under the host's temp root while it runs, outside the checkout: a tree walk of the checkout
-# (the structural gate's source inventory, a recursive grep) never meets a dir that vanishes
-# under it or a fifo a leg left open. A passing workload removes its legs; a failing one moves
-# them to the repo root's .hearth, and that path is the evidence it prints.
+# A workload's legs dir (its stream, exit, wall time and scratch) lives under the host's temp root
+# while it runs, outside the checkout: a tree walk of the checkout (the structural gate's source
+# inventory, a recursive grep) never meets a dir that vanishes under it or a fifo a leg left open.
+# A passing workload removes its legs; a failing one moves them to the repo root's .hearth, and
+# that path is the evidence it prints.
 HEARTH="${PWD%/*}/.hearth"
 LEGS_ROOT="${TMPDIR:-/tmp}"
 LEGS_ROOT="${LEGS_ROOT%/}"
 
-# Deadlines. Every leg ends: a leg that outlives its deadline is ended with its whole process
-# tree, its band fails naming the band and the kernel, its streams are kept, and the sweep
-# moves on. A leg's wall time is bounded by FORM_VALIDATE_LEG_CEILING_S (default 1800 s). A
-# sibling's deadline, once fkwu has answered in W seconds, is FORM_VALIDATE_SIBLING_FACTOR × W
-# (default 10), never under FORM_VALIDATE_SIBLING_FLOOR_S (default 300 s) and never over the
-# ceiling: the siblings validate, their speed is no goal, and one leg spinning for an hour
-# after fkwu answered held a whole four-way sweep for that hour.
+# Deadline. Every leg ends: a leg that outlives FORM_VALIDATE_LEG_CEILING_S (default 1800 s) is
+# ended with its whole process tree, its band fails naming the band, its streams are kept, and
+# the sweep moves on.
 LEG_CEILING_S="${FORM_VALIDATE_LEG_CEILING_S:-1800}"
-SIBLING_FLOOR_S="${FORM_VALIDATE_SIBLING_FLOOR_S:-300}"
-SIBLING_FACTOR="${FORM_VALIDATE_SIBLING_FACTOR:-10}"
 
 # fk_legs_new KIND — a fresh legs dir under the host's temp root.
 fk_legs_new() {
@@ -424,17 +304,6 @@ fk_legs_keep() {
     mkdir -p "$HEARTH"
     dest="$HEARTH/$(basename "$1")"
     if mv "$1" "$dest" 2>/dev/null; then printf '%s\n' "$dest"; else printf '%s\n' "$1"; fi
-}
-
-# fk_kernel_name LEG — the kernel a leg names.
-fk_kernel_name() {
-    case "$1" in
-        go) printf 'go' ;;
-        rs) printf 'rust' ;;
-        ts) printf 'typescript' ;;
-        fk) printf 'fkwu' ;;
-        *)  printf '%s' "$1" ;;
-    esac
 }
 
 # fk_unit FILE — one workload file spelled from the repo root, where fkwu runs.
@@ -474,22 +343,6 @@ fk_workload_root() {
     workload_unit="form/$workload_root"
 }
 
-# fk_workload_closure LEGS LABEL — fkwu writes the root's closure to LEGS/closure.fk from the
-# repo root. A refusal prints the door's own words and the band fails: no sibling reads anything
-# fkwu did not hand over.
-fk_workload_closure() {
-    local legs="$1" label="$2" rc=0 line
-    ( cd .. && "$FOURTH_SOURCE_FKWU" --closure "$workload_unit" "$legs/closure.fk" ) \
-        > "$legs/closure.out" 2> "$legs/closure.err" || rc=$?
-    [[ $rc -eq 0 && -s "$legs/closure.fk" ]] && return 0
-    printf "  ✗  %-30s  fkwu --closure refused %s (exit %s)\n" "$label" "$workload_unit" "$rc"
-    while IFS= read -r line; do printf '      %s\n' "$line"; done < <(head -n 20 "$legs/closure.err")
-    printf '      evidence=%s\n' "$(fk_legs_keep "$legs")"
-    fail=$((fail + 1))
-    if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-    return 1
-}
-
 # fk_release_fifos DIR [RECORD] — a leg's scratch is the band's to the end of the leg, and no
 # longer. A band may leave a reader waiting in open() on a fifo there, for a writer it deferred
 # (the cell-channel band's bell: `cat b.bell &`, then a ring through tools/ftimeout). Once the
@@ -507,32 +360,32 @@ fk_release_fifos() (
     exit 0
 )
 
-# fk_run_leg LEGS LEG DIR COMMAND... — one leg: COMMAND runs from DIR with its own TMPDIR, the
+# fk_run_leg LEGS DIR COMMAND... — the band's leg: COMMAND runs from DIR with its own TMPDIR, the
 # scratch bands reach through the `temp_dir` native, a short private dir under the host's temp
-# root (a band that opens a Unix socket there, tsx's IPC pipe in kernel-conformance or a glass
-# frame socket, needs a path inside the host's 104-byte socket limit), so concurrent legs never
-# share a path. Its streams land in LEGS/LEG and LEGS/LEG.err, the pid the deadline ends in
-# LEGS/LEG.pid, its wall seconds in LEGS/LEG.wall. When it ends its fifos are released and
-# removed (LEGS/LEG.fifos names them), its scratch moves into LEGS as tmp-LEG, and its exit is
-# written last, to LEGS/LEG.rc: the watch reads that file as "this leg is over". It is always
-# started with `&` (its brace body then runs in that job's own process); bash's word that a
-# killed child died is kept off the streams, since the deadline file already says it.
+# root (a band that opens a Unix socket there, a glass frame socket, needs a path inside the
+# host's 104-byte socket limit), so concurrent legs never share a path. Its streams land in
+# LEGS/fk and LEGS/fk.err, the pid the deadline ends in LEGS/fk.pid, its wall seconds in
+# LEGS/fk.wall. When it ends its fifos are released and removed (LEGS/fk.fifos names them), its
+# scratch moves into LEGS as tmp-fk, and its exit is written last, to LEGS/fk.rc: the watch reads
+# that file as "this leg is over". It is always started with `&` (its brace body then runs in
+# that job's own process); bash's word that a killed child died is kept off the streams, since
+# the deadline file already says it.
 fk_run_leg() {
     set +e
-    local legs="$1" leg="$2" dir="$3" tmp began pid rc
-    shift 3
-    tmp="$(mktemp -d "$LEGS_ROOT/validation-$leg.XXXXXX")" || tmp="$legs/tmp-$leg"
+    local legs="$1" dir="$2" tmp began pid rc
+    shift 2
+    tmp="$(mktemp -d "$LEGS_ROOT/validation-fk.XXXXXX")" || tmp="$legs/tmp-fk"
     mkdir -p "$tmp"
     began=$SECONDS
-    ( cd "$dir" && export TMPDIR="$tmp" && "$@" ) > "$legs/$leg" 2> "$legs/$leg.err" &
+    ( cd "$dir" && export TMPDIR="$tmp" && "$@" ) > "$legs/fk" 2> "$legs/fk.err" &
     pid=$!
-    printf '%s\n' "$pid" > "$legs/$leg.pid"
+    printf '%s\n' "$pid" > "$legs/fk.pid"
     wait "$pid" 2>/dev/null
     rc=$?
-    printf '%s\n' "$((SECONDS - began))" > "$legs/$leg.wall"
-    fk_release_fifos "$tmp" "$legs/$leg.fifos"
-    if [[ "$tmp" != "$legs/tmp-$leg" ]]; then mv "$tmp" "$legs/tmp-$leg" 2>/dev/null || rm -rf "$tmp"; fi
-    printf '%s\n' "$rc" > "$legs/$leg.rc"
+    printf '%s\n' "$((SECONDS - began))" > "$legs/fk.wall"
+    fk_release_fifos "$tmp" "$legs/fk.fifos"
+    if [[ "$tmp" != "$legs/tmp-fk" ]]; then mv "$tmp" "$legs/tmp-fk" 2>/dev/null || rm -rf "$tmp"; fi
+    printf '%s\n' "$rc" > "$legs/fk.rc"
 }
 
 # fk_kill_tree PID — ends PID and every process under it. Each is stopped before its children
@@ -545,260 +398,67 @@ fk_kill_tree() {
     kill -KILL "$pid" 2>/dev/null || true
 }
 
-# fk_watch_legs LEGS LEG... — the deadline of the named legs, run beside them. Every leg is bounded
-# by the ceiling; once fkwu's leg (fk) has answered, a sibling's deadline is fkwu's wall time
-# times the factor, held between the floor and the ceiling. A leg past its deadline gets
-# LEGS/LEG.deadline (what it outlived) and its process tree is ended; the leg then writes its exit
-# as any leg does. The watch ends when every named leg has written its exit, or its legs dir is
-# gone. It is always started with `&`, and its body is a brace group, not a subshell: the pid `$!`
-# names is then the watch itself, so fk_end_watch ends the watch and not a parent that would leave
-# the loop running as an orphan.
-fk_watch_legs() {
+# fk_watch_leg LEGS — the deadline of the band's leg, run beside it. A leg past the ceiling gets
+# LEGS/fk.deadline (what it outlived) and its process tree is ended; the leg then writes its exit
+# as any leg does. The watch ends when the leg has written its exit, or its legs dir is gone. It
+# is always started with `&`, and its body is a brace group, not a subshell: the pid `$!` names
+# is then the watch itself, so fk_end_watch ends the watch and not a parent that would leave the
+# loop running as an orphan.
+fk_watch_leg() {
     set +e
-    # the suite's workers hold IFS at the unit separator (run_one_indexed); the pending legs split on spaces
-    local IFS=$' \t\n'
-    local legs="$1"
-    shift
-    local began=$SECONDS deadline="$LEG_CEILING_S" fk_wall="" nap=0.1 pending leg pid age
+    local legs="$1" began=$SECONDS nap=0.1 pid age
     while :; do
         [[ -d "$legs" ]] || exit 0
-        pending=""
-        for leg in "$@"; do
-            [[ -f "$legs/$leg.rc" ]] || pending="$pending $leg"
-        done
-        [[ -n "$pending" ]] || exit 0
-        if [[ -z "$fk_wall" && -f "$legs/fk.rc" ]]; then
-            fk_wall="$(cat "$legs/fk.wall" 2>/dev/null || echo 0)"
-            deadline=$((fk_wall * SIBLING_FACTOR))
-            if [[ $deadline -lt $SIBLING_FLOOR_S ]]; then deadline=$SIBLING_FLOOR_S; fi
-            if [[ $deadline -gt $LEG_CEILING_S ]]; then deadline=$LEG_CEILING_S; fi
-        fi
+        [[ -f "$legs/fk.rc" ]] && exit 0
         age=$((SECONDS - began))
-        if [[ $age -ge $deadline ]]; then
-            for leg in $pending; do
-                [[ -f "$legs/$leg.deadline" ]] && continue
-                pid="$(cat "$legs/$leg.pid" 2>/dev/null || true)"
-                [[ -n "$pid" ]] || continue
-                if [[ -n "$fk_wall" ]]; then
-                    printf 'ended after %ss: deadline %ss (fkwu answered in %ss; factor %s, floor %ss, ceiling %ss)\n' \
-                        "$age" "$deadline" "$fk_wall" "$SIBLING_FACTOR" "$SIBLING_FLOOR_S" "$LEG_CEILING_S" > "$legs/$leg.deadline"
-                else
-                    printf 'ended after %ss: deadline %ss (the ceiling)\n' "$age" "$deadline" > "$legs/$leg.deadline"
-                fi
+        if [[ $age -ge $LEG_CEILING_S && ! -f "$legs/fk.deadline" ]]; then
+            pid="$(cat "$legs/fk.pid" 2>/dev/null || true)"
+            if [[ -n "$pid" ]]; then
+                printf 'ended after %ss: deadline %ss (the ceiling)\n' "$age" "$LEG_CEILING_S" > "$legs/fk.deadline"
                 fk_kill_tree "$pid"
-            done
+            fi
         fi
         if [[ $age -ge 3 ]]; then nap=1; fi
         sleep "$nap"
     done
 }
 
-# fk_legs_over LEGS LEG... — the kernels whose legs met their deadline, comma-joined; empty when none.
-fk_legs_over() {
-    local legs="$1" leg over=""
-    shift
-    for leg in "$@"; do
-        if [[ -f "$legs/$leg.deadline" ]]; then over="${over:+$over,}$(fk_kernel_name "$leg")"; fi
-    done
-    printf '%s' "$over"
-}
-
-# fk_end_watch PID — every leg has written its exit; the watch beside them ends. Each caller
-# starts its legs with fk_run_leg in the background, the watch beside them, waits for the legs,
-# then ends the watch here.
+# fk_end_watch PID — the leg has written its exit; the watch beside it ends.
 fk_end_watch() {
     kill "$1" 2>/dev/null || true
     wait "$1" 2>/dev/null || true
 }
 
-binary_mode=0
-if [[ "${1:-}" == "--binary" ]]; then
-    binary_mode=1
-    shift
-fi
-
-# --- run_siblings: feed one Form workload through all kernels, compare ---
-# A workload is one or more files (e.g. core.fk then a band). Every sibling
-# reads the one closure fkwu hands over, and fkwu walks the root itself: the
-# only runtime is a leg of every comparison. A manifest row adds its registered
-# verdict to the band it names.
-run_siblings() {
+# --- run_band: fkwu walks the workload, and the band's last line answers its pins ----------------
+# The band's last line answers the Verdict its head declares and its band-verdicts.txt row,
+# whichever it carries. A band with neither runs clean or fails; its answer is shown, not judged.
+# A nonzero exit or a diagnostic on stderr fails the band even when the last line matches its pin
+# (an answer printed before a stop is no verdict), and a failure keeps its streams. The leg is
+# bounded by the ceiling (fk_watch_leg): a band that has not answered by then is ended and fails
+# with its streams kept.
+run_band() {
     local label="$1"; shift
-    local go_out rs_out ts_out go_rc rs_rc ts_rc legs over
-    local go_pid rs_pid ts_pid fk_pid watch_pid
-    # A nonzero exit or source diagnostic is a failed fourth witness even when
-    # the last printed scalar happens to match (verdict-parity numbness).
-    local fourth_stem fk_out="" fk_rc=0 fk_diags=0 reg_want="" reg_have
-    fourth_stem="$(fourth_band_stem "${*: -1}" || true)"
-    fk_workload_root "$@"
-    legs="$(fk_legs_new legs)"
-    fk_workload_closure "$legs" "$label" || return 0
-    # The legs run CONCURRENTLY: a band's wall time is max(leg), not sum, and the watch
-    # beside them bounds every leg by its deadline. Compare result stdout. Stderr is a
-    # distinct diagnostic channel: timing and resource receipts belong to each physical carrier.
-    fk_run_leg "$legs" go . "$GO_BIN" "$legs/closure.fk" &
-    go_pid=$!
-    fk_run_leg "$legs" rs . "$RS_BIN" "$legs/closure.fk" &
-    rs_pid=$!
-    fk_run_leg "$legs" ts . run_ts "$legs/closure.fk" &
-    ts_pid=$!
-    fk_run_leg "$legs" fk .. "$FOURTH_SOURCE_FKWU" "$workload_unit" &
-    fk_pid=$!
-    fk_watch_legs "$legs" go rs ts fk &
-    watch_pid=$!
-    wait "$go_pid" "$rs_pid" "$ts_pid" "$fk_pid" || true
-    fk_end_watch "$watch_pid"
-    over="$(fk_legs_over "$legs" go rs ts fk)"
-    if [[ -n "$over" ]]; then
-        legs="$(fk_legs_keep "$legs")"
-        printf "  ✗  %-30s  ended at the deadline: %s; %s\n      evidence=%s exits go=%s rust=%s typescript=%s fkwu=%s\n" \
-            "$label" "$over" "$(cat "$legs"/*.deadline 2>/dev/null | head -n 1)" "$legs" \
-            "$(cat "$legs/go.rc" 2>/dev/null)" "$(cat "$legs/rs.rc" 2>/dev/null)" \
-            "$(cat "$legs/ts.rc" 2>/dev/null)" "$(cat "$legs/fk.rc" 2>/dev/null)"
-        fail=$((fail + 1))
-        deadlines="${deadlines:+$deadlines }$label($over)"
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail deadline $label($over)" > "$SUITE_STATUS_FILE"; fi
-        return 0
-    fi
-    go_out=$(organ_steady "$legs/go"); rs_out=$(organ_steady "$legs/rs"); ts_out=$(organ_steady "$legs/ts")
-    go_rc=$(cat "$legs/go.rc" 2>/dev/null || echo 1)
-    rs_rc=$(cat "$legs/rs.rc" 2>/dev/null || echo 1)
-    ts_rc=$(cat "$legs/ts.rc" 2>/dev/null || echo 1)
-    fk_out=$(organ_steady "$legs/fk")
-    fk_rc=$(cat "$legs/fk.rc" 2>/dev/null || echo 1)
-    fk_diags=$(fk_diag_count "$legs/fk.err")
-    # REGISTERED-VERDICT GATE. fourth-arm-bands.txt column 3 is the band's
-    # registered verdict. The four arms agreeing proves agreement and
-    # nothing more, so an agreed verdict that differs from the registered
-    # one is a failure with its own word: a band cannot change what it
-    # certifies without the change being seen. The verdict compared is the
-    # LAST line of the agreed output, and only when the column is numeric.
-    if [[ -n "$fourth_stem" ]]; then
-        reg_want="$(awk -v b="$fourth_stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"
-    fi
-    if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
-        && [[ "$fk_rc" == 0 && "$fk_diags" == 0 && "$fk_out" == "$go_out" ]]; then
-        reg_have="${go_out##*$'\n'}"
-        if [[ "$reg_want" =~ ^[0-9]+$ && "$reg_have" != "$reg_want" ]]; then
-            legs="$(fk_legs_keep "$legs")"
-            printf "  ✗  %-30s  → %s agreed on every arm, but the manifest registers %s — REGISTERED-VERDICT DRIFT\n      evidence=%s\n" \
-                "$label" "$reg_have" "$reg_want" "$legs"
-            fail=$((fail + 1))
-            if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-            return 0
-        fi
-        local head_pin
-        head_pin="$(fk_band_declared_verdict "${*: -1}")"
-        if [[ -n "$head_pin" && "$reg_have" != "$head_pin" ]]; then
-            legs="$(fk_legs_keep "$legs")"
-            printf "  ✗  %-30s  → %s agreed on every arm, but its head pins Verdict %s — DECLARED-VERDICT DRIFT\n      evidence=%s\n" \
-                "$label" "$reg_have" "$head_pin" "$legs"
-            fail=$((fail + 1))
-            if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-            return 0
-        fi
-        rm -rf "$legs"
-        printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
-        ok=$((ok + 1))
-        fourth_ok=$((fourth_ok + 1))
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fourth" > "$SUITE_STATUS_FILE"; fi
-        return 0
-    fi
-    legs="$(fk_legs_keep "$legs")"
-    printf '  evidence=%s exits go=%s rust=%s typescript=%s fkwu=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc" "$fk_rc"
-    printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n      fkwu       = %s\n      fkwu-rc    = %s  diagnostics=%s\n" \
-        "$label" "$go_out" "$rs_out" "$ts_out" "$fk_out" "$fk_rc" "$fk_diags"
-    fail=$((fail + 1))
-    if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-}
-
-# --- run_siblings_binary: Go emits the closure as one binary artifact, and
-# all three siblings execute that artifact.
-run_siblings_binary() {
-    local label="$1"; shift
-    local go_out rs_out ts_out go_rc rs_rc ts_rc legs over go_pid rs_pid ts_pid watch_pid
-    fk_workload_root "$@"
-    legs="$(fk_legs_new binary)"
-    fk_workload_closure "$legs" "$label" || return 0
-    if ! "$GO_BIN" --emit-binary "$legs/artifact" "$legs/closure.fk" > "$legs/emit" 2> "$legs/emit.err"; then
-        printf "  ✗  %-30s  go --emit-binary refused the closure\n      evidence=%s\n" "$label" "$(fk_legs_keep "$legs")"
-        fail=$((fail + 1))
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-        return 0
-    fi
-    # No fkwu leg runs here, so each sibling is bounded by the ceiling.
-    fk_run_leg "$legs" go . "$GO_BIN" --binary "$legs/artifact" &
-    go_pid=$!
-    fk_run_leg "$legs" rs . "$RS_BIN" --binary "$legs/artifact" &
-    rs_pid=$!
-    fk_run_leg "$legs" ts . run_ts --binary "$legs/artifact" &
-    ts_pid=$!
-    fk_watch_legs "$legs" go rs ts &
-    watch_pid=$!
-    wait "$go_pid" "$rs_pid" "$ts_pid" || true
-    fk_end_watch "$watch_pid"
-    over="$(fk_legs_over "$legs" go rs ts)"
-    if [[ -n "$over" ]]; then
-        legs="$(fk_legs_keep "$legs")"
-        printf "  ✗  %-30s  ended at the deadline: %s; %s\n      evidence=%s\n" \
-            "$label" "$over" "$(cat "$legs"/*.deadline 2>/dev/null | head -n 1)" "$legs"
-        fail=$((fail + 1))
-        deadlines="${deadlines:+$deadlines }$label($over)"
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail deadline $label($over)" > "$SUITE_STATUS_FILE"; fi
-        return 0
-    fi
-    go_out=$(organ_steady "$legs/go"); rs_out=$(organ_steady "$legs/rs"); ts_out=$(organ_steady "$legs/ts")
-    go_rc=$(cat "$legs/go.rc" 2>/dev/null || echo 1)
-    rs_rc=$(cat "$legs/rs.rc" 2>/dev/null || echo 1)
-    ts_rc=$(cat "$legs/ts.rc" 2>/dev/null || echo 1)
-    if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]]; then
-        rm -rf "$legs"
-        printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
-        ok=$((ok + 1))
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok" > "$SUITE_STATUS_FILE"; fi
-    else
-        legs="$(fk_legs_keep "$legs")"
-        printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
-        printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n" \
-            "$label" "$go_out" "$rs_out" "$ts_out"
-        fail=$((fail + 1))
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-    fi
-}
-
-# --- run_fkwu_lane: fkwu alone answers -------------------------------------
-# Taken when no kernel source moved (no sibling is asked), and by a band that
-# declares FOURTH-ARM ONLY (lane "fourth": the band runs alone, by its own path).
-# fkwu walks the workload, and the band's last line answers its pins: the
-# Verdict its head declares and its fourth-arm-bands.txt row, whichever it
-# carries. A band with neither runs clean or fails; its answer is shown, not
-# judged. A nonzero exit or a diagnostic on stderr fails the band as it fails
-# the fourth leg, even when the last line matches its pin (an answer printed
-# before a stop is no verdict), and a failure keeps its streams. The leg is
-# bounded by the ceiling (fk_watch_legs): a band that has not answered by then
-# is ended and fails with its streams kept.
-run_fkwu_lane() {
-    local label="$1" lane="$2"; shift 2
     local band="${*: -1}" legs rc diags answered head_pin reg_pin stem why="" over fk_pid watch_pid
     fk_workload_root "$@"
     legs="$(fk_legs_new legs)"
-    fk_run_leg "$legs" fk .. "$FOURTH_SOURCE_FKWU" "$workload_unit" &
+    fk_run_leg "$legs" .. "$FORM_SOURCE_FKWU" "$workload_unit" &
     fk_pid=$!
-    fk_watch_legs "$legs" fk &
+    fk_watch_leg "$legs" &
     watch_pid=$!
     wait "$fk_pid" || true
     fk_end_watch "$watch_pid"
-    over="$(fk_legs_over "$legs" fk)"
+    over=""
+    [[ -f "$legs/fk.deadline" ]] && over="fkwu"
     rc="$(cat "$legs/fk.rc" 2>/dev/null || echo 1)"
     diags="$(fk_diag_count "$legs/fk.err")"
-    answered="$(organ_steady "$legs/fk")"
+    answered="$(cat "$legs/fk" 2>/dev/null || true)"
     answered="${answered##*$'\n'}"
     head_pin="$(fk_band_declared_verdict "$band")"
-    stem="$(fourth_band_stem "$band" || true)"
+    stem="$(band_stem "$band" || true)"
     reg_pin=""
-    if [[ -n "$stem" ]]; then reg_pin="$(awk -v b="$stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"; fi
+    if [[ -n "$stem" ]]; then reg_pin="$(awk -v b="$stem" '!/^#/ && $1==b{print $3; exit}' "$BAND_MANIFEST")"; fi
     [[ "$reg_pin" =~ ^[0-9]+$ ]] || reg_pin=""
-    if [[ -n "$over" ]]; then why="ended at the deadline: fkwu; $(cat "$legs/fk.deadline" 2>/dev/null)"
+    if [[ -n "$over" ]]; then why="ended at the deadline: $(cat "$legs/fk.deadline" 2>/dev/null)"
     elif [[ "$rc" != 0 ]]; then why="exit $rc"
     elif [[ "${diags:-0}" -gt 0 ]]; then why="$diags diagnostic line(s) on stderr"
     elif [[ -n "$head_pin" && "$answered" != "$head_pin" ]]; then why="answered ${answered:-<nothing>}, its head pins $head_pin"
@@ -806,29 +466,21 @@ run_fkwu_lane() {
     fi
     if [[ -n "$why" ]]; then
         legs="$(fk_legs_keep "$legs")"
-        if [[ "$lane" == fourth ]]; then
-            printf "  ✗  %-30s  fkwu-only lane: %s\n      evidence=%s\n" "$label" "$why" "$legs"
-        else
-            printf "  ✗  %-30s  fkwu lane: %s\n      evidence=%s\n" "$label" "$why" "$legs"
-        fi
+        printf "  ✗  %-30s  fkwu: %s\n      evidence=%s\n" "$label" "$why" "$legs"
         if [[ -n "$over" ]]; then
-            deadlines="${deadlines:+$deadlines }$label($over)"
-            if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail deadline $label($over)" > "$SUITE_STATUS_FILE"; fi
+            deadlines="${deadlines:+$deadlines }$label"
+            if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail deadline $label" > "$SUITE_STATUS_FILE"; fi
         elif [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
         fail=$((fail + 1))
         return
     fi
     rm -rf "$legs"
-    if [[ "$lane" == fourth ]]; then
-        printf "  ✓  %-30s  → %s (fkwu-only lane)\n" "$label" "$answered"
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fkwu-only" > "$SUITE_STATUS_FILE"; fi
-        ok=$((ok + 1)); fkwu_only=$((fkwu_only + 1))
-    elif [[ -n "$head_pin" || -n "$reg_pin" ]]; then
-        printf "  ✓  %-30s  → %s (fkwu, its pin)\n" "$label" "$answered"
-        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fkwu-lane" > "$SUITE_STATUS_FILE"; fi
-        ok=$((ok + 1)); fkwu_lane=$((fkwu_lane + 1))
+    if [[ -n "$head_pin" || -n "$reg_pin" ]]; then
+        printf "  ✓  %-30s  → %s (its pin)\n" "$label" "$answered"
+        if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok pinned" > "$SUITE_STATUS_FILE"; fi
+        ok=$((ok + 1)); pinned=$((pinned + 1))
     else
-        printf "  ·  %-30s  → %s (fkwu, ran clean; no pin to answer)\n" "$label" "${answered:-<nothing>}"
+        printf "  ·  %-30s  → %s (ran clean; no pin to answer)\n" "$label" "${answered:-<nothing>}"
         if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok unpinned" > "$SUITE_STATUS_FILE"; fi
         ok=$((ok + 1)); unpinned=$((unpinned + 1))
     fi
@@ -836,60 +488,29 @@ run_fkwu_lane() {
 
 run_workload() {
     local label="$1"; shift
-    if [[ $binary_mode -eq 0 ]]; then
-        local band="${*: -1}" level declared
-        level="$(fk_band_proof_level "$band")"
-        if [[ "$level" == "FKWU-STAGED" ]]; then
-            local carrier
-            carrier="$(fk_band_staged_carrier "$band")"
-            if [[ -n "$carrier" && -x "../$carrier" ]]; then
-                level="FOURTH-ARM"
-            fi
-        fi
-        if [[ "$level" == "FOURTH-ARM" ]]; then
-            declared="$(fk_band_declared_verdict "$band")"
-            if [[ -z "$declared" ]]; then
-                printf "  ✗  %-30s  declares FOURTH-ARM ONLY but pins no Verdict in its head\n" "$label"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-                fail=$((fail + 1))
-                return
-            fi
-            # Verdict equality alone cannot witness: an image with numb
-            # unresolved calls can answer the right number (verdict-parity
-            # numbness — nothing==nothing stays green), and a band can print
-            # its verdict and then stop. The lane demands exit 0, zero axiom-5
-            # diagnostics on stderr, and the verdict against both pins.
-            run_fkwu_lane "$label" fourth "$band"
-            return
-        elif [[ "$level" == "FKWU-STAGED" ]]; then
-            local door
+    local band="${*: -1}" level
+    level="$(fk_band_proof_level "$band")"
+    if [[ "$level" == "FKWU-STAGED" ]]; then
+        local carrier door
+        carrier="$(fk_band_staged_carrier "$band")"
+        if [[ -z "$carrier" || ! -x "../$carrier" ]]; then
             door="$(fk_band_staged_door "$band")"
             if [[ -n "$door" ]]; then
-                printf "  ⧗  %-30s  staged fkwu lane — carrier absent in this checkout (%s builds it); pending, not witnessed\n" "$label" "$door"
+                printf "  ⧗  %-30s  staged — carrier absent in this checkout (%s builds it); pending, not witnessed\n" "$label" "$door"
             else
-                printf "  ⧗  %-30s  staged fkwu lane — carrier absent in this checkout; pending, not witnessed\n" "$label"
+                printf "  ⧗  %-30s  staged — carrier absent in this checkout; pending, not witnessed\n" "$label"
             fi
             if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "staged" > "$SUITE_STATUS_FILE"; fi
             staged=$((staged + 1))
             return
         fi
-        if [[ $SIBLINGS -eq 0 ]]; then
-            run_fkwu_lane "$label" pin "$@"
-            return
-        fi
     fi
-    if [[ $binary_mode -eq 1 ]]; then
-        run_siblings_binary "binary/$label" "$@"
-    else
-        run_siblings "$label" "$@"
-    fi
+    run_band "$label" "$@"
 }
 
 ok=0
 fail=0
-fourth_ok=0
-fkwu_only=0
-fkwu_lane=0
+pinned=0
 unpinned=0
 staged=0
 deadlines=""
@@ -898,16 +519,15 @@ deadlines=""
 if [[ $# -gt 0 ]]; then
     # The root names exactly the files typed; fkwu resolves each one's closure.
     explicit_args=("$@")
-    # A missing input file is not a kernel divergence: name the absent path
-    # plainly (running a band by a shortened name when its file carries a
-    # longer one is the usual cause) instead of failing the band.
+    # A missing input file is not a failing band: name the absent path plainly (running a band
+    # by a shortened name when its file carries a longer one is the usual cause).
     missing=()
     for f in "${explicit_args[@]}"; do
         [[ -f "$f" ]] || missing+=("$f")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
-        printf "  ✗  input file(s) not found — this is a missing file, not a kernel divergence.\n" >&2
-        printf "      kernel input paths resolve relative to the form/ directory (e.g. form-stdlib/core.fk):\n" >&2
+        printf "  ✗  input file(s) not found — this is a missing file, not a failing band.\n" >&2
+        printf "      input paths resolve relative to the form/ directory (e.g. form-stdlib/core.fk):\n" >&2
         for f in "${missing[@]}"; do printf "        %s\n" "$f" >&2; done
         exit 2
     fi
@@ -925,11 +545,10 @@ else
     # The suite fans out ACROSS bands: each workload is one job in a pool
     # (VALIDATE_JOBS wide, default 8), writing an ordered result block plus
     # a status file; the aggregation prints blocks in collection order and
-    # counts from the status files. A band's legs were already concurrent;
-    # this makes the bands themselves concurrent — the suite's wall time is
-    # sum(bands)/jobs instead of sum(bands). The fan-out shares nothing it
-    # writes: workload roots are content-keyed and land by mv, every band owns
-    # its legs dir and every leg a private TMPDIR.
+    # counts from the status files. The suite's wall time is sum(bands)/jobs
+    # instead of sum(bands). The fan-out shares nothing it writes: workload
+    # roots are content-keyed and land by mv, every band owns its legs dir
+    # and every leg a private TMPDIR.
     SUITE_PAR="${VALIDATE_JOBS:-8}"
     suite_dir="$(mktemp -d "${TMPDIR:-/tmp}/form-suite.XXXXXX")"
     suite_enumerate
@@ -953,11 +572,8 @@ else
     while [[ $i -lt $total ]]; do
         cat "$suite_dir/$i.out" 2>/dev/null || true
         case "$(cat "$suite_dir/$i.status" 2>/dev/null || echo fail)" in
-            "ok fourth")    ok=$((ok + 1)); fourth_ok=$((fourth_ok + 1)) ;;
-            "ok fkwu-only") ok=$((ok + 1)); fkwu_only=$((fkwu_only + 1)) ;;
-            "ok fkwu-lane") ok=$((ok + 1)); fkwu_lane=$((fkwu_lane + 1)) ;;
+            "ok pinned")    ok=$((ok + 1)); pinned=$((pinned + 1)) ;;
             "ok unpinned")  ok=$((ok + 1)); unpinned=$((unpinned + 1)) ;;
-            ok)             ok=$((ok + 1)) ;;
             staged)         staged=$((staged + 1)) ;;
             "fail deadline "*)
                 fail=$((fail + 1))
@@ -971,17 +587,7 @@ else
 fi
 
 echo ""
-if [[ $SIBLINGS -eq 0 ]]; then
-    echo "  sibling kernels: not asked — no kernel source moved (FORM_VALIDATE_SIBLINGS=1 asks them)"
-    echo "  fkwu lane: $fkwu_lane band(s) answered their pins; $unpinned ran clean with no pin to answer"
-elif [[ $binary_mode -eq 1 ]]; then
-    echo "  binary mode: three siblings over Go's artifact of each closure; fkwu walks no root here"
-elif [[ $fourth_ok -gt 0 ]]; then
-    echo "  fourth arm: $fourth_ok band(s) four-way (runtime fkwu source/JIT)"
-fi
-if [[ $fkwu_only -gt 0 ]]; then
-    echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu)"
-fi
+echo "  fkwu: $pinned band(s) answered their pins; $unpinned ran clean with no pin to answer"
 if [[ $staged -gt 0 ]]; then
     echo "  staged lanes pending: $staged band(s) need an absent host carrier — not witnessed"
 fi
@@ -989,15 +595,9 @@ if [[ -n "$deadlines" ]]; then
     echo "  deadlines met: $deadlines — each leg named was ended with its process tree; its streams are kept"
 fi
 if [[ $fail -eq 0 ]]; then
-    if [[ $binary_mode -eq 1 ]]; then
-        echo "  $ok ok, 0 divergent — kernels agree on every binary artifact."
-    elif [[ $SIBLINGS -eq 0 ]]; then
-        echo "  $ok ok, 0 failed — fkwu answered every pin it was asked."
-    else
-        echo "  $ok ok, 0 divergent — kernels agree on every sample."
-    fi
+    echo "  $ok ok, 0 failed — fkwu answered every pin it was asked."
     exit 0
 else
-    echo "  $ok ok, $fail failed or divergent — inspect exit statuses and retained streams."
+    echo "  $ok ok, $fail failed — inspect exit statuses and retained streams."
     exit 1
 fi

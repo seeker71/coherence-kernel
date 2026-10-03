@@ -54,21 +54,21 @@ work_dir="$(mktemp -d)"
 
 # The recorded author identity is the exact compiler executable used below,
 # not a mutable ignored path that could change between hashing and emission.
-source_fkwu="${FORM_FOURTH_SOURCE_FKWU:-$FORM/../fkwu}"
+source_fkwu="${FORM_SOURCE_FKWU:-$FORM/../fkwu}"
 [[ -f "$source_fkwu" && -x "$source_fkwu" && ! -L "$source_fkwu" ]] || {
     printf 'regen: native source runner is missing or not a regular executable: %s\n' "$source_fkwu" >&2
     exit 1
 }
-FOURTH_SOURCE_FKWU="$work_dir/fkwu-source"
-cp "$source_fkwu" "$FOURTH_SOURCE_FKWU"
-chmod 700 "$FOURTH_SOURCE_FKWU"
-bml_compiler_sha256="$(form_cli_generation_sha256_file "$FOURTH_SOURCE_FKWU")"
+SOURCE_FKWU="$work_dir/fkwu-source"
+cp "$source_fkwu" "$SOURCE_FKWU"
+chmod 700 "$SOURCE_FKWU"
+bml_compiler_sha256="$(form_cli_generation_sha256_file "$SOURCE_FKWU")"
 
 # Form derives the manifest, digest and admitted carrier from the same held
 # bytes. Checked private files, not stdout, acknowledge complete publication.
 seal_dir="$work_dir/source-seal"
 { printf '%s\n' FCSC1 "$FORM" "$seal_dir" ""; form_cli_source_roots; } > "$work_dir/source-roots"
-if ! (cd "$FORM/.." && "$FOURTH_SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
+if ! (cd "$FORM/.." && "$SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
         < "$work_dir/source-roots" > "$work_dir/source-closure.log" 2> "$work_dir/source-closure.err"; then
     printf '%s\n' 'regen: native source dependency closure refused' >&2
     cat "$work_dir/source-closure.err" >&2
@@ -82,7 +82,7 @@ source_seal="$seal_dir/sources.json"
 source_seal_sha256="$(cat "$seal_dir/ready")"
 form_cli_generation_hash_valid "$source_seal_sha256"
 printf '%s\n' FCSI1 "$source_seal" "$source_seal_sha256" END > "$work_dir/source-install.request"
-if ! (cd "$FORM/.." && "$FOURTH_SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
+if ! (cd "$FORM/.." && "$SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
         < "$work_dir/source-install.request" > "$work_dir/source-install.log" 2> "$work_dir/source-install.err"; then
     printf '%s\n' 'regen: checked source manifest publication refused' >&2
     cat "$work_dir/source-install.err" >&2
@@ -95,7 +95,7 @@ want_source_sha256="$(cat "$seal_dir/source.sha256")"
 form_cli_generation_hash_valid "$want_source_sha256"
 source_identity_still_current() {
     printf '%s\n' FCSV1 "$source_seal" "$source_seal_sha256" END > "$work_dir/source-verify.request"
-    if ! (cd "$FORM/.." && "$FOURTH_SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
+    if ! (cd "$FORM/.." && "$SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
             < "$work_dir/source-verify.request" > "$work_dir/source-verify.log" 2> "$work_dir/source-verify.err"; then
         cat "$work_dir/source-verify.err" >&2
         return 1
@@ -107,7 +107,7 @@ source_identity_still_current() {
 # from the sealed snapshot. The normal builder admits the companion recipe.
 emission_dir="$work_dir/native-entry"
 printf '%s\n' FCSE1 "$source_seal" "$source_seal_sha256" "$emission_dir" END > "$work_dir/emission.request"
-if ! (cd "$FORM/.." && "$FOURTH_SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
+if ! (cd "$FORM/.." && "$SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
         < "$work_dir/emission.request" > "$work_dir/emission.log" 2> "$work_dir/emission.err"; then
     printf '%s\n' 'regen: sealed native startup emission refused' >&2
     cat "$work_dir/emission.err" >&2
@@ -123,7 +123,7 @@ emission_sha256="$(cat "$emission_dir/ready")"
 form_cli_generation_hash_valid "$emission_sha256"
 emitted_source_check() {
     printf '%s\n' "$1" "$emission_dir/emission.json" "$emission_sha256" "$candidate_bootstrap/form-cli-native.c" END > "$work_dir/emission-check.request"
-    if ! (cd "$FORM/.." && "$FOURTH_SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
+    if ! (cd "$FORM/.." && "$SOURCE_FKWU" form/form-stdlib/bml/form-cli-source-closure.bml) \
             < "$work_dir/emission-check.request" > "$work_dir/emission-check.log" 2> "$work_dir/emission-check.err"; then
         cat "$work_dir/emission-check.err" >&2
         return 1
@@ -144,7 +144,7 @@ source_identity_still_current || {
 # stay within the snapshot; no root expression executes during compilation.
 FORM_CLI_NATIVE_BOOTSTRAP_DIR="$candidate_bootstrap" \
 FORM_CLI_FORCE_LINK=1 \
-FORM_FOURTH_SOURCE_FKWU="$FOURTH_SOURCE_FKWU" \
+FORM_SOURCE_FKWU="$SOURCE_FKWU" \
 FORM_CLI_NATIVE_EMISSION_DIR="$emission_dir" \
 FORM_CLI_NATIVE_SOURCE_SNAPSHOT="$seal_dir/body" \
 FORM_CLI_NATIVE_SOURCE_SEAL="$source_seal" \
