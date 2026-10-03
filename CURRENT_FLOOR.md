@@ -26,12 +26,14 @@ appear beside each source on its first run, and `form/build-form-cli.sh` regener
 ./fkwu bootstrap/ground-numeric-list.fk                   -> [1, 2.5, [3, 4]]
 ./fkwu form/form-stdlib/tests/native-vs-rented-band.fk    -> 11111
 ./fkwu gate/canonical-conformance-run.bml                 -> 1   (13 canonical expressions on fkwu, the pinned FORMBIN2
-                                                                 artifact, 12 malformed artifacts; band 511)
+                                                                 artifact, 12 malformed artifacts, no scratch left behind; band 1023)
 ```
 
 fkwu is the only runtime and every band answers its pin on it. Nothing in this tree builds, runs or
 gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc`,
-`./fkwu`, `shasum` and `openssl`.
+`./fkwu`, `shasum` and `openssl`. No tracked script calls sed, awk, perl or python: what a band's head
+and the verdict manifest say is read by `observe/band-head-run.bml` (band `observe/tests/band-head-band`,
+255), and `tools/ftimeout` is plain shell.
 
 What the tree still says of the retired kernels, by class, and why it stays:
 - History: `receipts/`, `learn/` corpus rows and `local-requests.jsonl` are dated evidence, not claims.
@@ -43,8 +45,21 @@ What the tree still says of the retired kernels, by class, and why it stays:
 - Fixtures and catalogs: the belief-stamp parser's legacy-shape fixture, band fixtures that quote old
   header text as data, the language packs that read Go, Rust, TypeScript and Python source as tongues,
   the oracle catalog's optional borrowed binaries, and `node_modules` as a generic walk exclusion.
+- Lessons from another runtime: the DeepSeek op graph was read from a Swift runner, and
+  `docs/dsv4-flow-history.md`, the dsv4 kernel comments and `llama-token-handle.fk` keep that as dated
+  provenance; no Swift file or toolchain is tracked or needed.
 - Other senses of a word: "siblings" for other agents, sessions and records, "kernels" for Metal compute
   kernels, "arm" for a branch.
+
+What the single runtime no longer proves, as it stands. The three kernels were independent producers:
+two readers of the same expression, or of the same FORMBIN2 bytes, could disagree and say so. fkwu
+alone has no such witness for a new expression or a new artifact; the conformance band holds a frozen
+2026 snapshot of what they agreed on (13 expressions, the 119-byte artifact, 12 malformed ones), and a
+value fkwu gets wrong in a way that snapshot does not contain has no second reader. The ontology and
+category-contract gates compared the kernels' blueprint and category tables with each other, so
+they are gone with the kernels they compared. The primitive-registry gate's property that fkwu answers
+every row of the native table is kept: `form/form-stdlib/primitive-registry.fk` and its band
+(`primitive-registry-band`, 47) run every lane-1 probe on fkwu and refuse a row claiming a wrong outside.
 
 `runtime/fkwu-uni.c` is the seed (`wc -l` and `git log -1` read its size and its last change), and it
 shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R51–R56).
@@ -295,21 +310,22 @@ native-model-route-table-band 255 · ds4-blob-select-band 31 · nl-lexicon-grow-
 pivot-coverage-band 65535 · cognition/tests/error-absorption-kernel-band 4095
 ```
 
-The sealed v3 held-out lane (30 rows, every family twice, whole-normalized answers) is the body's
-defined-correctness number, re-earned only through that sealed door. Its consent file
-(`.form-knowledge-qwen-heldout-v3-consent`) is a per-run local act that git ignores. The model route is
-a Form data table, and the DS4 engine is found at runtime through its directory with its header
-verified.
+The v3 held-out lane (30 rows, every family twice, whole-normalized answers) is the body's
+defined-correctness number. Its consent file (`.form-knowledge-qwen-heldout-v3-consent`) is a per-run
+local act that git ignores. The model route is a Form data table, and the DS4 engine is found at
+runtime through its directory with its header verified.
 
-The sealed rows pin their sources by sha and were re-sealed after each fact was read against its source:
-v1 15 rows and v3 30 rows are all current, the v1 dataset reads valid and the v3 band reads its full. Two
-rows lost the source they pinned with the four-way lane and ask the same kind of question of what
-stands: v1 `h11` (was the four-way verdict `0` when all four walkers agree) now pins
-`gate/canonical-conformance.bml` and asks what `./fkwu gate/canonical-conformance-run.bml` answers when
-every pinned observation passes (`1`); v3 `v322` (was `proof/recipe42.fk`, `42`) now pins
-`form/conformance/canonical-s-expression-vectors.json` and asks what its first canonical expression,
-`(add 20 22)`, renders to (`42`). v3 `v329` pinned a count its document no longer states; it now asks how
-many questions `docs/native-model-control-plane.md` says the corpus asks twice (`sixteen`).
+There is no sealing door. Each row's source sha, and each dataset's seal, are literals typed into
+`form-knowledge-qwen-heldout-eval.fk` (v1, 15 rows) and `form-knowledge-qwen-heldout-v3-eval.fk` (v3);
+the v3 band recomputes the source shas and the dataset sha and checks them. On 2026-10-03 every row
+whose source had drifted was re-pinned AFTER its fact was read against the source, so those rows are
+not blind any more: v1 `h01 h03-h07 h10 h12-h15` and v3 `v301 v302 v305-v316 v319-v321 v323-v328 v330`
+keep their question and answer under a new source sha; the blindness claim now holds only for v1 `h02
+h08 h09` and v3 `v303 v304 v317 v318`. Three rows had lost their sources and were replaced by rows read
+from sources that stand: v1 `h11` (the four-way verdict) pins the conformance gate, v3 `v322` (the
+deleted recipe's value) pins the conformance vectors, v3 `v329` (a count its document no longer
+states) pins the same document's present count. The v1 dataset reads valid and the v3 band reads its
+full, 65535; the dataset headers say so.
 
 ## The Form-native DeepSeek V4 chain
 
