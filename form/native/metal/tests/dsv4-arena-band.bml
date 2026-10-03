@@ -8,7 +8,7 @@
 ;
 ; THE KERNELS ARE THE SAME, so the arena's results are held BIT-EQUAL to the control's, not to a tolerance: a kernel indexes `stack + id x stride` and the arena's slot holds the expert's bytes at that stride.
 ;
-; Verdict 255 when every claim lands (each at both fixtures):
+; Verdict 511 when every claim lands (each at both fixtures):
 ;   1     the open: the arena-mode open maps nine views fewer than the whole open (three stacks a layer over three layers, handle 0 in their rows) and everything else the same; the arena's allocation is the lease's expert term to the
 ;         byte (dxa-bytes equals dls-cache of the layout at the same slot count, and the arena record's price) and the device's own ledger (metal_live word 18) moved within twelve 16 KiB pages of it; its handles are the 9 buffers and the slot-number buffer
 ;   2     the span of a miss: after the walks, EVERY resident slot of EVERY layer holds, in all three stacks, exactly the bytes the file holds that expert in (read_file_slice of stack offset + e x stride against the slot read back)
@@ -22,6 +22,9 @@
 ;         dsv4-open-arena with one slot answers [] with the context it opened closed again: handles and mappings as they were); a fill the device refuses
 ;         (the file path made unreadable) answers nothing for the layer and the cache FORGETS the slots it was to write (their keys read empty), and the same layer then runs from the restored path
 ;   128   release: dsv4-close on every context in synced rounds leaves no handle held, metal_live reads what it read before the first open, and no span view is left pending
+;   256   a fill never leaves its slot and never reads another expert's bytes: a real fill (expert 2 into slot 1 of layer 1) enqueues its three copies, the slot holds exactly the file's bytes in all three stacks and every other
+;         slot of the layer's three buffers is as it was; a slot past the layer's buffer, an expert past the layer's stored experts, a negative expert and a negative slot are each refused (nothing enqueued, no buffer made,
+;         the layer's buffers unchanged); no view is left pending and the handle count returns to what it was
 ;
 ; THE TIMING IT PRINTS (the fixture's, a witness of the instrumentation and not of the real file's speed): per walk the milliseconds of the control and of the arena (cold and warm), the arena's counters (lookups, hit percent, bytes
 ; copied on misses, syncs and what they waited), so a real-file run can be read against the same line. What a fixture cannot show: its experts are 8,704 to 21,504 B, so a fill is overhead and not bandwidth; a layer's sync is
@@ -202,9 +205,48 @@ section [form.bml] {
    let pend = (ok && !nothing?(ar)) ? dxa-pending-n(ctxA) : 0;
    let left = append(ok ? dsv4-close(ctxW, append(stsW, append(stsW2, stsW3))) : [0], append(ok ? dsv4-close(ctxA, append(stsA, append(stsB, append(stsA2, stsA3)))) : [0], append(len(ctxT) == 13 ? dsv4-close(ctxT, stsT) : [0], append(len(ctxO) == 13 ? dsv4-close(ctxO, stsO) : [0], len(ctxF) == 13 ? dsv4-close(ctxF, stsF) : [0]))));
    let c128 = len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 && pend <= 18;
-   [c1, c2, c4, c8, c16, c32, c64, c128];
+   let c256 = dab-fills(path);
+   [c1, c2, c4, c8, c16, c32, c64, c128, c256];
   }
   def dab-all-empty?(keys) = len(keys) == 0 ? true : (keys[0] < 0 && dab-all-empty?(keys[1:]));
+  // ---- claim 256: a fill never leaves its slot and never reads another expert's bytes ----------------------------------------------------------------------
+  // a layer's three stacks read whole, as the strings the carrier gives
+  def dab-bufs-read(ctx, il) = [metal_buf_read(dxa-bufs(ctx, il)[0], 0, dab-buf-len(ctx, il, 0)), metal_buf_read(dxa-bufs(ctx, il)[1], 0, dab-buf-len(ctx, il, 1)), metal_buf_read(dxa-bufs(ctx, il)[2], 0, dab-buf-len(ctx, il, 2))];
+  def dab-buf-len(ctx, il, k) = record_get(dxa-of(ctx), "eb")[il][k] * dxa-slots-of(record_get(dxa-of(ctx), "slots"), dvl-l(dso-geo(ctx), il, "nexp"));
+  // the bytes of slot s of stack k in a whole read
+  def dab-slot-bytes(whole, eb, s) = substring(whole, s * eb, (s + 1) * eb);
+  // fill expert e of the file into slot s of every stack of layer il, settle it, and answer [every copy enqueued, the layer's buffers before, the layer's buffers after]
+  def dab-fill-slot(ctx, il, s, e) {
+   let before = dab-bufs-read(ctx, il);
+   let ar = dxa-of(ctx);
+   let n = dxa-fill-one(ctx, ar, il, 0, s, e) + dxa-fill-one(ctx, ar, il, 1, s, e) + dxa-fill-one(ctx, ar, il, 2, s, e);
+   let sy = dkr-hz-sync();
+   let fr = dxa-free-pending(ar);
+   [n, before, dab-bufs-read(ctx, il)];
+  }
+  def dab-neighbours-same?(ctx, il, s, before, after, k) = k == 3 ? true : (dab-slots-same-go(before[k], after[k], record_get(dxa-of(ctx), "eb")[il][k], dxa-slots-of(record_get(dxa-of(ctx), "slots"), dvl-l(dso-geo(ctx), il, "nexp")), s, 0) && dab-neighbours-same?(ctx, il, s, before, after, k + 1));
+  def dab-slots-same-go(b, a, eb, slots, s, i) = i == slots ? true : ((i == s || str_eq(dab-slot-bytes(b, eb, i), dab-slot-bytes(a, eb, i))) && dab-slots-same-go(b, a, eb, slots, s, i + 1));
+  def dab-fills(path) {
+   let live0 = dvb-live();
+   let ctx = dsv4-open-arena(path, dab-cap(), 1, 3);
+   let ok = len(ctx) == 13 && dxa-on?(ctx);
+   // a real fill: expert 2 into slot 1 of layer 1: the slot holds the file's bytes in all three stacks and the other slots are as they were
+   let f = ok ? dab-fill-slot(ctx, 1, 1, 2) : [0, [], []];
+   let ar = ok ? dxa-of(ctx) : record_new(0);
+   let spans = ok && f[0] == 3 && dab-slot-ok?(ctx, path, 1, 0, 1, 2) && dab-slot-ok?(ctx, path, 1, 1, 1, 2) && dab-slot-ok?(ctx, path, 1, 2, 1, 2);
+   let same = ok && f[0] == 3 && dab-neighbours-same?(ctx, 1, 1, f[1], f[2], 0);
+   // a slot past the layer's buffer, an expert past its stored experts and a negative expert: refused, nothing enqueued, nothing made, the buffers as they were
+   let liveA = dvb-live();
+   let past = ok ? dab-fill-slot(ctx, 1, 3, 2) : [1, [], []];
+   let wild = ok ? dab-fill-slot(ctx, 1, 0, dvl-l(dso-geo(ctx), 1, "nexp")) : [1, [], []];
+   let neg = ok ? dab-fill-slot(ctx, 1, 0, 0 - 1) : [1, [], []];
+   let negSlot = ok ? dab-fill-slot(ctx, 1, 0 - 1, 0) : [1, [], []];
+   let refused = ok && past[0] == 0 && wild[0] == 0 && neg[0] == 0 && negSlot[0] == 0 && dvb-live() == liveA && dab-all-eq?(past[1], past[2]) && dab-all-eq?(wild[1], wild[2]) && dab-all-eq?(neg[1], neg[2]) && dab-all-eq?(negSlot[1], negSlot[2]);
+   let pend = ok ? dxa-pending-n(ctx) : 1;
+   let left = ok ? dsv4-close(ctx, []) : [0];
+   let said = print_str("  fills: a real fill (expert 2 into slot 1 of layer 1) enqueued " ++ f[0].str() ++ " copies, spans " ++ spans.str() ++ ", the other slots " ++ (same ? "untouched" : "CHANGED") ++ "; refused: " ++ [past[0], wild[0], neg[0], negSlot[0]].str() ++ "; handles " ++ live0.str() ++ " -> " ++ dvb-live().str());
+   spans && same && refused && pend == 0 && len(left) == 0 && dvb-live() == live0;
+  }
   def dab-sum(xs) = len(xs) == 0 ? 0 : (xs[0] ? 1 : 0) + dab-sum(xs[1:]);
  }
  let root = temp_dir() ++ "/dsv4-arena-band-" ++ now_unix_ms().str();
@@ -212,9 +254,9 @@ section [form.bml] {
  let path2 = root ++ "-b.gguf";
  let wrote1 = dfx-write(path1);
  let wrote2 = dfx-v-write(path2);
- let fx1 = try dab-fixture(path1, "fixture 1 (MXFP8, MXFP4, IQ2_XXS)") catch [false, false, false, false, false, false, false, false];
- let fx2 = try dab-fixture(path2, "fixture 2 (Q8_0, IQ2_XXS, Q2_K)") catch [false, false, false, false, false, false, false, false];
- let both = len(fx1) == 8 && len(fx2) == 8;
+ let fx1 = try dab-fixture(path1, "fixture 1 (MXFP8, MXFP4, IQ2_XXS)") catch [false, false, false, false, false, false, false, false, false];
+ let fx2 = try dab-fixture(path2, "fixture 2 (Q8_0, IQ2_XXS, Q2_K)") catch [false, false, false, false, false, false, false, false, false];
+ let both = len(fx1) == 9 && len(fx2) == 9;
  let b1 = dab-bit(both && fx1[0] && fx2[0], 1);
  let b2 = dab-bit(both && fx1[1] && fx2[1], 2);
  let b4 = dab-bit(both && fx1[2] && fx2[2], 4);
@@ -223,7 +265,8 @@ section [form.bml] {
  let b32 = dab-bit(both && fx1[5] && fx2[5], 32);
  let b64 = dab-bit(both && fx1[6] && fx2[6], 64);
  let b128 = dab-bit(both && fx1[7] && fx2[7], 128);
+ let b256 = dab-bit(both && fx1[8] && fx2[8], 256);
  let removed = host_path_remove(path1) + host_path_remove(path2);
- print_str("dsv4-arena-band claims " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ " " ++ b128.str() ++ " fixture1 " ++ fx1.str() ++ " fixture2 " ++ fx2.str() ++ " removed " ++ removed.str());
- b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+ print_str("dsv4-arena-band claims " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ " " ++ b128.str() ++ " " ++ b256.str() ++ " fixture1 " ++ fx1.str() ++ " fixture2 " ++ fx2.str() ++ " removed " ++ removed.str());
+ b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256;
 }
