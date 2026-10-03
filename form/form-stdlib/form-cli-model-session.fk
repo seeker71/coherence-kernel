@@ -109,14 +109,25 @@ section [form.bml] {
     // The shared bytes the lease promises: the file's size for every file but a DeepSeek-V4 GGUF (dsv4-lease.fk: that file is mapped and touched in part, so its figure is the derived working
     // set, derived and not measured). The call below keeps its text; what it is asked changes only for a deepseek4 file.
     def fcms-weights-bytes(path) = dls-weights-bytes(path);
+    // The bytes this Qwen open allocates besides the mapped file. An unreadable
+    // geometry keeps the unread margin, so a missing header never asks for less.
+    def fcms-qwen-private(src, maxpos) = {
+        let geo = q38-geo(src, maxpos);
+        geo[0] <= 0 || geo[21] <= 0 ? mg-kv-margin() : q38-private-bytes(geo, fcma-span(maxpos));
+    };
+    def fcms-admit-private(path, maxpos) = maxpos <= 0 ? mg-kv-margin() : {
+        let src = fcmg-src(path);
+        (String) fcmg-arch(src) == "" || (String) fcmg-arch(src) == "deepseek4" ? mg-kv-margin() : fcms-qwen-private(src, maxpos);
+    };
     def fcms-memory-need(path) = fcms-weights-bytes(path) + mg-kv-margin();
-    def fcms-memory-held(path, v) = {
-        let said = print_str(mg-line("model session " ++ path, mg-need-of(v, fcms-memory-need(path)), v));
+    def fcms-memory-held(path, v, need) = {
+        let said = print_str(mg-line("model session " ++ path, mg-need-of(v, need), v));
         fcms-none("host-memory-held:" ++ v[1]);
     };
     def fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) = {
-        let granted = mg-lease("model session " ++ path, path, fcms-weights-bytes(path), mg-kv-margin());
-        mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) : fcms-memory-held(path, granted);
+        let private = fcms-qwen-private(src, maxpos);
+        let granted = mg-lease("model session " ++ path, path, fcms-weights-bytes(path), private);
+        mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) : fcms-memory-held(path, granted, fcms-weights-bytes(path) + private);
     };
     // A DeepSeek-V4 file, reached only past the lane gate below (mr-wired? reads the registry's row for the arch, 0 until the validation window has run): the DeepSeek tokenizer's raw ids, the lease
     // for the derived working set at this session's capacity, the driver's open, state and prefill (form-cli-model-ds4.fk). A refusal before the context exists gave the lease back there; after it, the
@@ -172,7 +183,7 @@ section [form.bml] {
     // prompt lookup and every probe share one queue: oldest first, admitted when the OS has headroom for what the load adds
     // (a file a live process already holds is shared, not loaded again). The load slot frees when the open completes; the
     // residency note stays until the session is closed (fcms-release-ok?). Not admitted within the wait: a typed refusal.
-    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, adm-admit("fcms-open", path, adm-wait-ms()));
+    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, adm-admit-for("fcms-open", path, adm-wait-ms(), fcms-admit-private(path, requested-maxpos)));
     def fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, claim) = (Comparable) claim[0] == 1 ? fcms-open-held(path, prompt, requested-maxpos, profile, reserve, claim[2]) : fcms-none(("model-queued: " + claim[1]));
     def fcms-open-held(path, prompt, requested-maxpos, profile, reserve, ticket) = {
         let opened = fcms-open-body(path, prompt, requested-maxpos, profile, reserve);

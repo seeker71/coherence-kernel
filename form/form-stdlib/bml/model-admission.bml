@@ -96,8 +96,10 @@ section [form.bml] {
   // ---- the decision ----------------------------------------------------------------------------------------------------------
   // What a load takes beyond the page cache: the weights are one physical copy however many processes map them (measured
   // 2026-10-02, a second mapper of a 6 GiB file added 0.0 GiB), so a file a live process already holds costs only the
-  // session's own KV state and scratch (mg-kv-margin); a file nobody holds costs its bytes too.
-  def adm-need(bytes, held) = (held ? 0 : bytes) + mg-kv-margin();
+  // session's own KV state and scratch. A caller that has read the geometry passes
+  // those bytes; everyone else is asked the unread margin.
+  def adm-need(bytes, held) = adm-need-for(bytes, held, 0);
+  def adm-need-for(bytes, held, private) = (held ? 0 : bytes) + (private > 0 ? private : mg-kv-margin());
   // [1, line] admitted: first in line and the machine has room (the memory governor, memory-governor.bml, is the one
   // authority on room: it reads every process's pages); [0, line] still waiting, with the reason
   def adm-try-at(root, ticket, door, pid, path, bytes, granted, reason, held) {
@@ -120,18 +122,18 @@ section [form.bml] {
   def adm-held-elsewhere?(root, pid, path) = (adm-residents(root) |> any?(r => (r[0] != pid) && (r[1] |> any?(line => trim(line) == path)))) || !nil?(adm-peers(path, pid));
 
   // ---- the process's own turn in the queue -----------------------------------------------------------------------------------
-  def adm-wait-at(root, ticket, door, pid, path, bytes, deadline) {
+  def adm-wait-at(root, ticket, door, pid, path, bytes, deadline, private) {
    let held = adm-peer-resident?(root, pid, path) || !nil?(adm-peers(path, pid));
-   let verdict = mg-ask(adm-need(bytes, held));
+   let verdict = mg-ask(adm-need-for(bytes, held, private));
    let tried = adm-try-at(root, ticket, door, pid, path, bytes, mg-granted?(verdict), verdict[1], held);
-   tried[0] == 1 ? tried : (now_unix_ms() >= deadline ? tried : adm-pause(root, ticket, door, pid, path, bytes, deadline));
+   tried[0] == 1 ? tried : (now_unix_ms() >= deadline ? tried : adm-pause(root, ticket, door, pid, path, bytes, deadline, private));
   }
   // for the open's own governor ask: the weights cost nothing when another process holds the file, or this process
   // already holds it for an earlier session; this open's own note is one line, so two lines mean an earlier holder
   def adm-held-already?(path) = adm-held-elsewhere?(adm-root(), host_pid(), path) || (len(adm-note-lines(adm-root(), host_pid()) |> filter(line => trim(line) == path)) >= 2);
-  def adm-pause(root, ticket, door, pid, path, bytes, deadline) {
+  def adm-pause(root, ticket, door, pid, path, bytes, deadline, private) {
    let slept = host_sleep_ms(2000);
-   adm-wait-at(root, ticket, door, pid, path, bytes, deadline);
+   adm-wait-at(root, ticket, door, pid, path, bytes, deadline, private);
   }
   // how long an open waits its turn: FORM_MODEL_ADMISSION_WAIT_MS, ten minutes when unset; 0 asks once
   def adm-wait-ms() = parse-int(trim(host-exec("printenv FORM_MODEL_ADMISSION_WAIT_MS", ""))) ?? 600000;
@@ -139,15 +141,18 @@ section [form.bml] {
   // A file that is not there has no weights to admit; the open that follows says so itself.
   // The bytes asked for are dls-weights-bytes(path) (dsv4-lease.fk): the file's size for every file but a DeepSeek-V4 GGUF, whose weights are mapped and
   // touched in part, so its ask is the derived working set (dense tensors + an expert cache + KV), derived and not measured, and not its 80 GiB.
-  def adm-admit(door, path, wait_ms) {
+  def adm-admit(door, path, wait_ms) = adm-admit-for(door, path, wait_ms, 0);
+  // private is the session's own scratch and KV when the caller has derived it.
+  // Zero keeps the unread margin.
+  def adm-admit-for(door, path, wait_ms, private) {
    let root = adm-root();
    let pid = host_pid();
    let bytes = dls-weights-bytes(path);
    bytes <= 0 ? [1, door ++ " has no weights file to admit", ""] :
-   adm-note-lines(root, pid) |> any?(line => trim(line) == path) ? [1, door ++ " shares weights this process already holds", ""] : adm-queued(root, door, pid, path, bytes, wait_ms, adm-enter-at(root, pid, now_unix_ms()));
+   adm-note-lines(root, pid) |> any?(line => trim(line) == path) ? [1, door ++ " shares weights this process already holds", ""] : adm-queued(root, door, pid, path, bytes, wait_ms, private, adm-enter-at(root, pid, now_unix_ms()));
   }
-  def adm-queued(root, door, pid, path, bytes, wait_ms, ticket) {
-   let verdict = adm-wait-at(root, ticket, door, pid, path, bytes, now_unix_ms() + wait_ms);
+  def adm-queued(root, door, pid, path, bytes, wait_ms, private, ticket) {
+   let verdict = adm-wait-at(root, ticket, door, pid, path, bytes, now_unix_ms() + wait_ms, private);
    verdict[0] == 1 ? [1, verdict[1], ticket] : adm-declined(root, ticket, verdict);
   }
   def adm-declined(root, ticket, verdict) {
