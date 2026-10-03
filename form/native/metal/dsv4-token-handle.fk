@@ -84,7 +84,7 @@ section [form.bml] {
     def dth-ctx-key(ctx) = dkl-b(ctx, "resid").str();
     def dth-layer-key(ctx, il, pos) {
         let ratio = dkl-l(ctx, il, "ratio");
-        ratio == 0 ? (dth-ctx-key(ctx) ++ ":L" ++ il.str()) : (dth-ctx-key(ctx) ++ ":L" ++ il.str() ++ (((pos + 1) % ratio) == 0 ? "b" : "n") ++ (((pos + 1) / ratio) > 0 ? "c" : "z"));
+        ratio == 0 ? (dth-ctx-key(ctx) ++ ":L" ++ il.str()) : (dth-ctx-key(ctx) ++ ":L" ++ il.str() ++ (((pos + 1) % ratio) == 0 ? "b" : "n"));
     }
     def dth-stage-key(ctx, tag, il, pos) = tag == "layer" ? dth-layer-key(ctx, il, pos) : (dth-ctx-key(ctx) ++ ":" ++ tag);
     // tag: "embed" (a = the id), "layer" (a = the states, b = the block, c = the position, d = the id, e = the capacity), "head", "scan"
@@ -92,7 +92,7 @@ section [form.bml] {
     def dth-stage-plan(ctx, tag, a, b, c, d, e, key) {
         let began = dkr-hz-plan-begin();
         let r = dth-stage-go(ctx, tag, a, b, c, d, e);
-        let ended = dkr-hz-plan-end(key);
+        let ended = nothing?(r) ? dkr-hz-plan-abort() : dkr-hz-plan-end(key);
         r;
     }
     def dth-stage-replay(ctx, tag, a, b, c, d, e, key) {
@@ -144,8 +144,8 @@ section [form.bml] {
     // the head over the residual `resid`: the count of enqueues (7), or nothing
     def dsv4-head(ctx) = dth-head-ok?(ctx) ? dth-stage(ctx, "head", 0, 0, 0, 0, 0) : nothing();
     // the argmax the head left, once the work is synced: an id, or nothing (the sentinel stayed, the id is outside the vocabulary, or the logits are not clean). The device argmax skips one NaN among
-    // numbers, so a bad dequant that poisons a few logits would be argmaxed silently: dkr-logits-clean? (dsv4-kernels.fk) scans the logits buffer for non-finite words by their bits FIRST, and a
-    // scan that did not run or found one is not clean.
+    // numbers, so a bad dequant that poisons a few logits would be argmaxed silently: the NaN scan (form_dsv4_nan_count, enqueued below behind the head into the context's "nan-count") counts the logits' non-finite words by their bits, and
+    // a scan that did not run (the sentinel stayed) or found one is not clean. dkr-logits-clean? (dsv4-kernels.fk) is the same scan standing alone, for the bands that hold the kernel; the token does not call it.
     // THE SCAN RIDES THE TOKEN'S OWN BATCH. It used to allocate a four-byte buffer, enqueue, sync, read and free in synced rounds for every token (a buffer, three syncs and a free a token: the
     // fixture read 190 syncs for 100 positions). The count buffer is the context's own ("nan-count", made at the open), written with 0xFFFFFFFF here (a scan that did not run is not clean), the scan
     // enqueued behind the head's argmax, and ONE sync settles the argmax, the scan and the logits; the two four-byte reads follow.
@@ -155,7 +155,6 @@ section [form.bml] {
         let w = metal_buf_write(dkl-b(ctx, "nan-count"), 0, dkr-u32(4294967295));
         let e = dth-stage(ctx, "scan", 0, 0, 0, 0, 0);
         let s = dkr-hz-sync();
-        let counted = dkr-hz-put("reads", dkr-hz-get("reads") + 2);
         let count = dkr-read-u32(dkl-b(ctx, "nan-count"), 1)[0];
         let idx = dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1)[0];
         (w >= 0 && e == 1 && s >= 0 && count == 0 && idx < vocab) ? idx : nothing();
@@ -176,10 +175,15 @@ section [form.bml] {
             nothing?(r) ? nothing() : dth-layers(ctx, sts, il + 1, n, id, pos, cap);
         };
     }
+    // A TOKEN THAT DOES NOT ARRIVE CLOSES ITS BATCH. A block that answers nothing (a refused dispatch) used to return with the concurrent batch still open: the next token's metal_batch_concurrent was refused, `armed` read 0,
+    // and its dispatches went as serial bindings into the still-open concurrent encoder with no barriers (found in review, 2026-10-03). Every nothing-return of the token (here, and the head's in dth-prefill-last) syncs, which
+    // drains the batch and clears the arming; the next token arms its own.
+    def dth-token-fail() { let drained = dkr-hz-sync(); nothing(); }
     def dth-state-go(ctx, sts, id, pos) {
         let armed = dkr-hz-token-begin();
         let emb = dsv4-embed(ctx, id);
-        nothing?(emb) ? nothing() : dth-layers(ctx, sts, 0, record_get(dso-geo(ctx), "layers-n"), id, pos, dso-cap(ctx));
+        let done = nothing?(emb) ? nothing() : dth-layers(ctx, sts, 0, record_get(dso-geo(ctx), "layers-n"), id, pos, dso-cap(ctx));
+        nothing?(done) ? dth-token-fail() : done;
     }
     // enqueues the embedding and every block at pos (no sync, no head): 1, or nothing before any enqueue when the context, the position or the id is refused
     def dsv4-forward-state(ctx, sts, id, pos) = (dsv4-admitted-once?(ctx) && len(sts) == record_get(dso-geo(ctx), "layers-n") && dsv4-position-ok?(ctx, pos) && dsv4-id-ok?(ctx, id)) ? dth-state-go(ctx, sts, id, pos) : nothing();
@@ -192,7 +196,7 @@ section [form.bml] {
     }
     def dth-prefill-last(ctx) {
         let h = dsv4-head(ctx);
-        nothing?(h) ? nothing() : dsv4-argmax(ctx);
+        nothing?(h) ? dth-token-fail() : dsv4-argmax(ctx);
     }
     def dth-ids-ok?(ctx, ids) = len(ids) == 0 ? true : (dsv4-id-ok?(ctx, ids[0]) && dth-ids-ok?(ctx, ids[1:]));
     // the ids at positions pos0 ...: [the next id, the next position], or nothing (a refusal before any enqueue leaves every cache as it was)

@@ -58,7 +58,7 @@ One row a token. Swift from metal_dsv4_stack.sh (history) and its receipts; the 
 | barriers | ~1,510 (hazard tracker) | by hand, per call site | 0 (serial encoder: every dispatch a full barrier) | 111 of 137 on the fixture (81%); derived ~1,500 of 1,856, the Swift count |
 | command buffers | ~22 (submit every 2 layers) | 1 | 1 | floor(layers / 2) + 1: 2 on the fixture, 22 derived |
 | host waits | 1 | 1 | 2 or 3 (argmax sync, the NaN scan's own sync, its buffer's free) | 1 |
-| host reads | 1 | 1 | 2 | 2 (the count and the id) |
+| host reads | 1 | 1 | 2 | 2 (the count and the id), counted at the read door (`dkr-rd`), not set by hand: the band's plant of two more reads reads 4 |
 | buffers made a token | 0 after the first pass (pool) | 0 | 1 (the scan's four-byte buffer, freed in synced rounds) | 0 |
 | expert ids | on the device (the per-layer flush "outlived its reason") | on the device | on the device | on the device |
 | weight bytes | 9.56 GB (7.73 dense, 1.83 experts at 6 of 256) | the same | the same | the same: `dll-token-bytes` reads it per token and per block (1,285,844 on the fixture) |
