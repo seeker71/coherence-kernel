@@ -7,59 +7,29 @@ little-endian bytes (every int64, signed zero, infinities and NaN payloads), and
 composite continuations and decoded ownership live in Form data, independent of
 host stack depth. The body runs on fkwu throughout.
 
-The Go proof kernel reads FORMBIN2 by handing the decode to a resident fkwu
-process, `./fkwu observe/formbin-depth-native-run.fk`. Go carries bytes and
-postorder node rows, interns physical NodeIDs and reports its measured time and
-memory activity; the traversal decisions are Form's.
-
 Depth is an observation. A linked continuation holds open composites, including
-their remaining children. Both descent and completion can yield between slices.
-A deeper valid artifact advances the attention watermark; it is never rejected
-because it crossed a depth number. Byte, node and child-count format checks
-still reject malformed or oversized input.
+their remaining children. Both descent and completion can yield between slices
+(`fbd-slice`). A deeper valid artifact advances the attention watermark; it is
+never rejected because it crossed a depth number. Byte, node and child-count
+format checks still reject malformed or oversized input.
 
-The initial native policy offers 256 operations, a depth watermark of 32 and a
-50 ms attention target. These are starting observations, not depth limits or a
-total-work budget. A slow slice halves the next quantum and yields; a slice
-below one quarter of the target doubles it; otherwise it continues. Actual GC
-activity requests attention, but only measured delay requests smaller slices.
+The initial policy (`fbd-initial-attention`) offers 256 operations, a depth
+watermark of 32 and a 50 ms attention target. These are starting observations,
+not depth limits or a total-work budget. `fbd-attend` reads a slice's peak depth,
+elapsed time and collections: a slow slice halves the next quantum and yields; a
+slice below one quarter of the target doubles it; otherwise it continues. Actual
+GC activity requests attention, but only measured delay requests smaller slices.
 The continuation survives each choice. There is no aggregate duration timeout.
 
-A decode that does not complete keeps its `formbin-depth-*.jsonl` trace and names
-it on stderr; a completed decode removes it. Every slice row carries cursor, node
-count, current/peak depth, native PID, native slice milliseconds, carrier elapsed
-time, control microseconds, offered and selected actions, next quantum/watermark,
-and whether the action was applied. An initial lifecycle row makes startup visible
-before admission. The first slice includes setup and temporary-input preparation
-time; the kept trace ends with a lifecycle row naming the error, or `interrupted`
-when the decode stopped without one. The framebuffer exchange correlates the
-outgoing observation with native control; JSON rows retain every round even when
-attributed framebuffer nodes share an identity.
+The seed's own FORMBIN reader (`runtime/fkwu-uni.c`) still refuses an artifact
+nested deeper than 256 with `form binary: maximum node depth exceeded`; the Form
+codec has no such ceiling. A repair of that refusal follows the real artifact:
+read the Form codec's depth and node count for it (`fbc-decode`), preserve the
+continuation, then witness the chosen path.
 
-Memory and GC fields prefixed `carrier_` measure the Go process only. They do
-not claim native heap coverage or system memory headroom. `elapsed_ms` covers
-waiting for native rows and materializing them; `native_slice_ms` measures the
-native traversal itself, so those intervals overlap and must not be added.
-`control_us` includes the pipe exchange. `round_before_trace_us` excludes the
-JSON write. An `elapsed_ms` that spans a whole child execution includes
-evaluation after decoding; it is not decoder time. No model or LoRA
-is involved in this decoder, and these timings do not establish a hardware floor.
-
-The native process and its temporary input belong to the invocation. On return,
-the carrier closes/reaps its process and removes the temporary input. Native
-compiler/image freshness remains fkwu's responsibility.
-
-`heal guide|form binary: maximum node depth exceeded` names this implementation
-and this reference. A repair follows the real trace: find the last cursor/mode, compare elapsed time and selected quantum
-in consecutive rows, preserve the continuation, then witness the chosen path.
-GC count alone is insufficient evidence for shrinking work.
-
-The traversal cell is `form/form-stdlib/bml/formbin-depth.bml`; the native
-decode door is `observe/formbin-depth-native-run.fk` over
-`observe/formbin-depth-native.bml`, and
+The traversal cell is `form/form-stdlib/bml/formbin-depth.bml`;
 `gate/tests/canonical-conformance-band.fk` (511) reads the pinned kernel artifact
 through the Form codec.
 
-Where it is going: the codec already lives in Form, so the Go reader's part
-shrinks toward carrying bytes for its own witness, and every reader of FORMBIN2
-meets the same Form traversal.
+Where it is going: every reader of FORMBIN2 meets the same Form traversal, and the
+seed's depth refusal lowers into it.
