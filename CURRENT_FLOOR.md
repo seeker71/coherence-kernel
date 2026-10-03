@@ -89,16 +89,38 @@ gate/tests/structural-gate-band          -> 8191
                                             says `; FOLD: decimal|count` on a head line; a sweep that lists no band
                                             is a flaw too; 2026-10-03)
 form/form-stdlib/tests/band-truth-band   -> 1048575
-./fkwu observe/forbidden-tools-guard.bml -> the PreToolUse door that `.claude/settings.json` registers for every Bash and Monitor call (the two
-                                            tools whose input carries a shell command in `command`): the hook's JSON on stdin; a command
-                                            that runs sed, awk, perl or python gets one line of deny JSON naming the word and what to use,
-                                            anything else (another tool, a reading that did not arrive, a command over 200000 bytes) gets no
-                                            byte; exit 0 both ways. The registered one-liner ends 0, passes a line on only when it opens as
-                                            the deny JSON, and prints nothing when fkwu or the door is absent (2026-10-03, load average 8: a
-                                            warm run 20-25 ms, the registered line 28 ms, the first run of a checkout 2.4 s while the .fkb
-                                            cache is made; to switch it off delete the entry in .claude/settings.json). On a read-only checkout
-                                            the cache cannot be written: the review saw the door exit 1 with a stale-cache warning on stderr
-                                            each call, which the line turns into silence, so nothing is refused there
+form-stdlib/tests/spawn-guard-band       -> 16383  (form-stdlib/bml/spawn-guard.bml: every door of the body that begins a child from an argv or
+                                            a shell line another cell or an agent supplied reads it first, in process, with no child to read it:
+                                            ["sed",..] by its first element, through the wrappers command-words knows, `sh -c` by the line it
+                                            carries, a shell given a script file by the file's text, a bare shell by its input. A refusal is a
+                                            named ending: hch-run-with answers [nothing(), "", "birth refused: forbidden-tool sed: not used
+                                            here; <way>"], the control language answers nothing=forbidden-tool:sed (use the edit door,
+                                            read_file, ./fkwu cells and BML), the pid natives -5, host_capture and host-exec nothing(). A warm
+                                            argv reading is about 6 us (5000 in 32 ms), a `sh -c` line about 90 us (500 in 46 ms; 2026-10-04,
+                                            this Mac). Doors that ask: host-child, form-token-verbs, form-cli-heal-native-io and -process,
+                                            findings-requests, form-cli-code-circle, native-source-inventory, native-pipe-darwin, metal-ask,
+                                            crossing-record; tests/fixtures/spawn-doors.txt names every other cell that calls a host native
+                                            that starts a child and says why its command is fixed words (class fixed, table, seed, rented), and
+                                            the band computes the same set from the tree so a door that asks nothing and is in no row fails it;
+                                            plants: the reading with wrappers or basenames off, an unclassified door, an ask removed from its
+                                            source)
+./fkwu observe/forbidden-tools-audit-run.bml -> the commands agents ran in their own Bash and Monitor calls, read from their transcripts
+                                            (~/.claude/projects/<project>/<session>.jsonl and <session>/subagents/*.jsonl): per session and
+                                            agent the commands counted, the flagged ones and their first 160 bytes newest first, then a totals
+                                            line and `note: forbidden-tool commands since last breath: N`; the last line is the lens reading
+                                            (flagged + 1). stdin `{"since_hours":N,"session":"<id>","scope":"all","top":N}`. Read in chunks by
+                                            str_find over the bytes with the command string read in place (no row parsed into nodes); a tool_use
+                                            id counts once across transcripts. 2026-10-04: this session's 130 MB transcript with its 44
+                                            subagents in 8 s (3839 commands in the main transcript, 314 flagged), every transcript of this
+                                            repo's checkouts (404 sessions and agents, 70136 commands, 19194 flagged) in 80 s. It is the fourth
+                                            lens of the land cadence's readings beside the gates (`reading forbidden=<flagged+1> moved|steady`
+                                            with the note under it)
+form-stdlib/tests/forbidden-tools-audit-band -> 8191  (a synthetic tree of two projects, three sessions and one subagent: eleven
+                                            distinct commands, seven flagged, with a duplicated tool_use id counted once, the Read tool's row and a
+                                            tool_result quoting a Bash call as escaped text adding nothing, a command whose key is not first, an
+                                            escaped quote, a window on the row's own time, scope and session filters, 4096-byte and 100-byte
+                                            chunks reading what one read reads, a 20 MB transcript with 600 commands, the door as a child, and
+                                            two plants (no dedupe, no window))
 form/form-stdlib/tests/command-words-band -> 2147483647  (form/form-stdlib/bml/command-words.bml reads which commands a shell string runs, with
                                             no shell: quotes, separators, redirections, heredoc bodies, wrappers, sh -c / eval / trap / find
                                             -exec, substitutions, case arms, [[ ]] and (( )), function bodies, ANSI-C escapes, and the
@@ -113,10 +135,6 @@ form/form-stdlib/tests/command-words-band -> 2147483647  (form/form-stdlib/bml/c
                                             file that runs sed inside, a runner such as uv run python, a pipe from a producer that is no
                                             literal (cat f | bash), the substitutions in an unquoted heredoc body, or a wrapper its list lacks;
                                             a reading nests at most 256 levels and then answers <too-deep>)
-form/form-stdlib/tests/forbidden-tools-guard-band -> 4095  (the deny line parses as JSON with its keys; silence on allow, on malformed
-                                            or cut-off stdin, on another tool, on a 240 KB command and on 300 nested substitutions; Monitor is
-                                            read like Bash; the registered line from another directory denies sed, passes only the deny JSON
-                                            and fails open on a missing project, door or fkwu)
 ./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
 ./fkwu form/form-stdlib/release-ledger.bml -> open=19 moving=0, then 19000000 (2026-10-03)

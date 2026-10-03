@@ -1,0 +1,83 @@
+// json-in-place.bml — a field of a JSON text, read where it stands, by bytes.
+//
+// parse-json mints a node into the shared field for every value it reads, which is the wrong cost for a text that is
+// megabytes of rows and is read for one string in each (a Claude Code transcript row's tool_use command; a fixture row).
+// This reads in place: jip-get(text, n, i, key) takes the index i of an object's opening brace and answers the index of
+// the first byte of the value of `key`, or -1; a value is skipped by its shape (a string to its closing quote, an object
+// or array to its closing bracket, a scalar to its delimiter), so the walk of one object is linear in its own bytes and a
+// nested object is entered only when asked for. jip-text(text, n, v) unescapes the string value that starts at v
+// (\n \t \r \b \f \" \\ \/ and \uXXXX; a code point above 127 reads as ?) or answers nothing(). jip-field(text, n, i, key)
+// is the two together. A reading that did not arrive (no such key, a cut-off text, a value that is no string) is -1 or
+// nothing(), never a stop. n is the length of text, read once by the caller.
+// preludes: form-stdlib/core.fk form-stdlib/bml/value-operators.bml
+section [form.bml] {
+ class JsonInPlace {
+  def jip-b(s, n, i) = i >= 0 && i < n ? str_byte_at(s, i) : -1;
+  def jip-ws(s, i) = scan_run(s, i, 0);
+  // the closing quote of the string whose first byte is at i, or -1 when the text ends first
+  def jip-qend(s, n, i) {
+   let j = scan_run(s, i, 4);
+   j >= n ? -1 : str_byte_at(s, j) == 34 ? j : jip-qend(s, n, j + 2);
+  }
+  def jip-after(e) = e < 0 ? -1 : e + 1;
+  def jip-delim?(b) = b == 44 || b == 125 || b == 93 || b == 32 || b == 10 || b == 13 || b == 9;
+  def jip-scalar(s, n, i) = i >= n ? n : jip-delim?(str_byte_at(s, i)) ? i : jip-scalar(s, n, i + 1);
+  def jip-nest-q(s, n, e, d) = e < 0 ? -1 : jip-nest(s, n, e + 1, d);
+  def jip-nest(s, n, i, d) {
+   let b = jip-b(s, n, i);
+   b < 0 ? -1
+   : b == 34 ? jip-nest-q(s, n, jip-qend(s, n, i + 1), d)
+   : b == 123 || b == 91 ? jip-nest(s, n, i + 1, d + 1)
+   : b == 125 || b == 93 ? (d == 1 ? i + 1 : jip-nest(s, n, i + 1, d - 1))
+   : jip-nest(s, n, i + 1, d);
+  }
+  // the index just past the value that starts at i, or -1
+  def jip-skip(s, n, i) {
+   let b = jip-b(s, n, i);
+   b == 34 ? jip-after(jip-qend(s, n, i + 1))
+   : b == 123 || b == 91 ? jip-nest(s, n, i + 1, 1)
+   : b < 0 ? -1
+   : jip-scalar(s, n, i);
+  }
+  // the first byte of the value of `key` in the object that opens at i, or -1
+  def jip-get(s, n, i, key) {
+   let j = jip-ws(s, i);
+   jip-b(s, n, j) == 123 ? jip-pairs(s, n, jip-ws(s, j + 1), key) : -1;
+  }
+  def jip-pairs(s, n, i, key) {
+   let e = jip-b(s, n, i) == 34 ? jip-qend(s, n, i + 1) : -1;
+   let c = e < 0 ? -1 : jip-ws(s, e + 1);
+   let v = c >= 0 && jip-b(s, n, c) == 58 ? jip-ws(s, c + 1) : -1;
+   v < 0 ? -1 : (String) substring(s, i + 1, e) == key ? v : jip-next(s, n, jip-skip(s, n, v), key);
+  }
+  def jip-next(s, n, after, key) {
+   let d = after < 0 ? -1 : jip-ws(s, after);
+   d >= 0 && jip-b(s, n, d) == 44 ? jip-pairs(s, n, jip-ws(s, d + 1), key) : -1;
+  }
+  // a string value, unescaped, or nothing
+  def jip-hexv(b) = b >= 48 && b <= 57 ? b - 48 : b >= 97 && b <= 102 ? b - 87 : b >= 65 && b <= 70 ? b - 55 : 0;
+  def jip-hex4(t, i) = jip-hexv(str_byte_at(t, i)) * 4096 + jip-hexv(str_byte_at(t, i + 1)) * 256 + jip-hexv(str_byte_at(t, i + 2)) * 16 + jip-hexv(str_byte_at(t, i + 3));
+  def jip-esc(c) = c == 110 ? byte_to_str(10) : c == 116 ? byte_to_str(9) : c == 114 ? byte_to_str(13) : c == 98 ? byte_to_str(8) : c == 102 ? byte_to_str(12) : byte_to_str(c);
+  def jip-cp(cp) = cp < 128 ? byte_to_str(cp) : "?";
+  def jip-unescape(t) = jip-unesc(t, 0, len(t), []);
+  def jip-unesc(t, i, n, acc) {
+   let j = scan_run(t, i, 4);
+   let a = j > i ? cons(substring(t, i, j), acc) : acc;
+   j >= n ? str-spans(reverse(a)) : jip-escape(t, j, n, a);
+  }
+  def jip-escape(t, j, n, a) {
+   let c = jip-b(t, n, j + 1);
+   c == 117 && j + 6 <= n ? jip-unesc(t, j + 6, n, cons(jip-cp(jip-hex4(t, j + 2)), a))
+   : c < 0 ? str-spans(reverse(cons("\\", a)))
+   : jip-unesc(t, j + 2, n, cons(jip-esc(c), a));
+  }
+  def jip-text(s, n, v) {
+   let e = jip-b(s, n, v) == 34 ? jip-qend(s, n, v + 1) : -1;
+   e < 0 ? nothing() : jip-unescape(substring(s, v + 1, e));
+  }
+  def jip-field(s, n, i, key) {
+   let v = jip-get(s, n, i, key);
+   v < 0 ? nothing() : jip-text(s, n, v);
+  }
+ }
+}
