@@ -8,7 +8,7 @@
 ;
 ; THE KERNELS ARE THE SAME, so the arena's results are held BIT-EQUAL to the control's, not to a tolerance: a kernel indexes `stack + id x stride` and the arena's slot holds the expert's bytes at that stride.
 ;
-; Verdict 511 when every claim lands (each at both fixtures):
+; Verdict 2047 when every claim lands (each at both fixtures):
 ;   1     the open: the arena-mode open maps nine views fewer than the whole open (three stacks a layer over three layers, handle 0 in their rows) and everything else the same; the arena's allocation is the lease's expert term to the
 ;         byte (dxa-bytes equals dls-cache of the layout at the same slot count, and the arena record's price) and the device's own ledger (metal_live word 18) moved within twelve 16 KiB pages of it; its handles are the 9 buffers and the slot-number buffer
 ;   2     the span of a miss: after the walks, EVERY resident slot of EVERY layer holds, in all three stacks, exactly the bytes the file holds that expert in (read_file_slice of stack offset + e x stride against the slot read back)
@@ -25,6 +25,13 @@
 ;   256   a fill never leaves its slot and never reads another expert's bytes: a real fill (expert 2 into slot 1 of layer 1) enqueues its three copies, the slot holds exactly the file's bytes in all three stacks and every other
 ;         slot of the layer's three buffers is as it was; a slot past the layer's buffer, an expert past the layer's stored experts, a negative expert and a negative slot are each refused (nothing enqueued, no buffer made,
 ;         the layer's buffers unchanged); no view is left pending and the handle count returns to what it was
+;   512   A SLOT IS VALID ONLY AFTER ITS FILL SUCCEEDED: the cache takes its plan before the slot numbers are written and the fills run, so every failure after the plan must forget the slots the plan placed. Three plants, each on a
+;         fresh arena: the slot numbers cannot be written (the ids buffer is not a buffer), the fills' file is absent, the fills' file is shorter than the first span (both fill roads refuse it). In each the layer answers nothing and
+;         layer 0's slots read empty; the cause mended, a fresh walk on the SAME cache (nothing else reset) is bit-equal to the control's and every resident slot holds its expert's bytes. The defect itself, planted (the plan left
+;         standing: keys [0 1 2] over three empty slots), makes the same walk differ from the control's
+;   1024  the pin rule holds end to end: on a two-slot arena (every miss evicts, every hit is pinned) the walk's routing is logged as it runs (a tap after each block reads the router's ids) and the pure cache model over that routing
+;         (dxc-step-with, pin 1) reads the arena's hits, misses, evictions and every layer's keys exactly, and the walk equals the control's; that routing is one where the pin rule matters (the model with no pins reads other counts);
+;         the PLANT, a victim rule that ignores pins (the cache record's "pin" 0), runs the same walk and its counters and keys differ from the pinned model's, so the claim drops
 ;
 ; THE TIMING IT PRINTS (the fixture's, a witness of the instrumentation and not of the real file's speed): per walk the milliseconds of the control and of the arena (cold and warm), the arena's counters (lookups, hit percent, bytes
 ; copied on misses, syncs and what they waited), so a real-file run can be read against the same line. What a fixture cannot show: its experts are 8,704 to 21,504 B, so a fill is overhead and not bandwidth; a layer's sync is
@@ -206,7 +213,9 @@ section [form.bml] {
    let left = append(ok ? dsv4-close(ctxW, append(stsW, append(stsW2, stsW3))) : [0], append(ok ? dsv4-close(ctxA, append(stsA, append(stsB, append(stsA2, stsA3)))) : [0], append(len(ctxT) == 13 ? dsv4-close(ctxT, stsT) : [0], append(len(ctxO) == 13 ? dsv4-close(ctxO, stsO) : [0], len(ctxF) == 13 ? dsv4-close(ctxF, stsF) : [0]))));
    let c128 = len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 && pend <= 18;
    let c256 = dab-fills(path, 1) && dab-fills(path, 0);
-   [c1, c2, c4, c8, c16, c32, c64, c128, c256];
+   let c512 = ok ? dab-heals(path, wW) : false;
+   let c1024 = ok ? dab-pin-claim(path, wW) : false;
+   [c1, c2, c4, c8, c16, c32, c64, c128, c256, c512, c1024];
   }
   def dab-all-empty?(keys) = len(keys) == 0 ? true : (keys[0] < 0 && dab-all-empty?(keys[1:]));
   // ---- claim 256: a fill never leaves its slot and never reads another expert's bytes ----------------------------------------------------------------------
@@ -250,15 +259,103 @@ section [form.bml] {
    spans && same && refused && pend == 0 && len(left) == 0 && dvb-live() == live0;
   }
   def dab-sum(xs) = len(xs) == 0 ? 0 : (xs[0] ? 1 : 0) + dab-sum(xs[1:]);
+  // ---- claim 512: A SLOT IS VALID ONLY AFTER ITS FILL SUCCEEDED ---------------------------------------------------------------------------------------------------
+  // `plant` 1: the slot numbers are not written (the arena's ids buffer is not a buffer); 2: the file the fills read is absent; 3: it is shorter than the first span; each makes layer 0's first half run, the cache take its plan and
+  // the boundary fail AFTER the plan: the layer answers nothing and every slot the plan placed reads empty. Then the cause is mended and a fresh walk on the SAME context (same cache) is held bit-equal to the control's.
+  // `plant` 4 is the defect itself: the plan left standing with nothing behind it (keys [0 1 2] over three empty slots, the table the boundary used to leave): the same walk must NOT equal the control's.
+  def dab-heal(path, plant, ctl) {
+   let ctx = dsv4-open-arena(path, dab-cap(), 1, 3);
+   let ok = len(ctx) == 13 && dxa-on?(ctx);
+   let m = ok ? dso-geo(ctx) : nothing();
+   let p = ok ? dsv4-prepare(ctx) : 0;
+   let st = ok ? dsv4-new-state(m, ctx[0], dab-cap()) : nothing();
+   let e = ok ? dsv4-embed(ctx, 5) : nothing();
+   let ar = ok ? dxa-of(ctx) : record_new(0);
+   let goodIds = ok ? record_get(ar, "ids") : 0;
+   let goodPath = ok ? record_get(ar, "path") : "";
+   let shortPath = path ++ ".short";
+   let wrote = (ok && plant == 3) ? write_file(shortPath, read_file_slice(path, 0, record_get(ar, "off")[0][0] + record_get(ar, "eb")[0][0] / 2)) : 0;
+   let broke = !ok ? 0 : (plant == 1 ? record_set(ar, "ids", 0) : (plant == 2 ? record_set(ar, "path", path ++ ".absent") : (plant == 3 ? record_set(ar, "path", shortPath) : 0)));
+   let bad = (ok && plant != 4) ? dsv4-layer(ctx, st, 0, 0, 5, dab-cap()) : nothing();
+   let keys = ok ? dxc-keys(dxc-table(dxa-get(ctx, "cache"), 0)) : [0];
+   let mended = !ok ? 0 : (plant == 1 ? record_set(ar, "ids", goodIds) : (plant == 4 ? record_set(dxa-get(ctx, "cache"), dxc-lkey(0), [3, [0, 1, 2], [1, 2, 3]]) : record_set(ar, "path", goodPath)));
+   let st2 = ok ? dsv4-new-state(m, ctx[0], dab-cap()) : nothing();
+   let w = ok ? dab-walk(ctx, st2) : [[], []];
+   let same = dab-same-walk?(ctl, w);
+   let spans = ok ? dab-spans-go(ctx, path, 0) : 100000;
+   let left = ok ? dsv4-close(ctx, append(st, st2)) : [0];
+   let removed = plant == 3 ? host_path_remove(shortPath) : 0;
+   let said = print_str("  plan failure " ++ plant.str() ++ ": layer " ++ (plant == 4 ? "not run (the stale plan is installed instead)" : (nothing?(bad) ? "answers nothing" : "ran")) ++ ", its slots read " ++ keys.str() ++ ", the mended walk is " ++ (same ? "bit-equal to the control" : "DIFFERENT from the control") ++ ", resident spans " ++ spans.str());
+   plant == 4 ? (ok && !same && len(left) == 0) : (ok && nothing?(bad) && dab-all-empty?(keys) && same && spans < 100000 && len(left) == 0);
+  }
+  def dab-heals(path, ctl) = dab-heal(path, 1, ctl) && dab-heal(path, 2, ctl) && dab-heal(path, 3, ctl) && dab-heal(path, 4, ctl);
+  // ---- claim 1024: the pin rule holds end to end ----------------------------------------------------------------------------------------------------------------
+  // the ids each block routed, as the walk runs: a tap after block il reads the expert-ids buffer (the router's picks, still standing) into [[il, ids] ...]
+  def dab-log-at(ctx, box, il) {
+   let ids = dkr-read-u32(dso-buf(ctx, "expert-ids"), record_get(dso-geo(ctx), "used"));
+   record_set(box, "log", append(record_get(box, "log"), [[il, ids]]));
+   "";
+  }
+  def dab-walk-logged(ctx, sts, box) {
+   let set = dkr-hz-tap-set((kind, a) => kind == "layer" ? dab-log-at(ctx, box, a) : "");
+   let w = dab-walk(ctx, sts);
+   let cleared = dkr-hz-tap-clear();
+   w;
+  }
+  // the pure model of the same routing: one cache table a layer, the cache's own step (dxc-step-with), pin 1 the rule and 0 the plant; [hits, misses, evicts, the keys of every layer]
+  def dab-tabs(m, slots, il) = il == dab-layers() ? [] : cons(dxc-new(dxa-slots-of(slots, dvl-l(m, il, "nexp"))), dab-tabs(m, slots, il + 1));
+  def dab-keys-of(tabs) = len(tabs) == 0 ? [] : cons(dxc-keys(tabs[0]), dab-keys-of(tabs[1:]));
+  def dab-replay(m, log, tabs, pin, i, hits, misses, evicts) {
+   i == len(log) ? [hits, misses, evicts, dab-keys-of(tabs)] : {
+    let il = log[i][0];
+    let r = dxc-step-with(tabs[il], log[i][1], dvl-l(m, il, "nexp"), pin);
+    nothing?(r) ? nothing() : dab-replay(m, log, dxc-set-at(tabs, il, r[0]), pin, i + 1, hits + r[3], misses + len(r[2]), evicts + r[4]);
+   };
+  }
+  def dab-arena-keys(ctx, il) = il == dab-layers() ? [] : cons(dxc-keys(dxc-table(dxa-get(ctx, "cache"), il)), dab-arena-keys(ctx, il + 1));
+  // the arena's counters and tables read exactly what the pinned rule gives over the routing it saw (a slot a pinned hit holds is never the victim of a miss of the same top-k)
+  def dab-pin-ok?(ctx, log, slots) {
+   let m = dso-geo(ctx);
+   let r = dab-replay(m, log, dab-tabs(m, slots, 0), 1, 0, 0, 0, 0);
+   !nothing?(r) && len(log) == 33 && r[0] == dxa-hits(ctx) && r[1] == dxa-misses(ctx) && r[2] == dxa-evicts(ctx) && r[3] == dab-arena-keys(ctx, 0);
+  }
+  // a walk on a fresh two-slot arena (the top-k: every hit is pinned, every miss evicts), its routing logged; `pin` 0 sets the PLANT (a victim rule that ignores pins) in the cache's record. [ctx, states, walk, log]
+  def dab-pinned-walk(path, pin) {
+   let ctx = dsv4-open-arena(path, dab-cap(), 1, 2);
+   let ok = len(ctx) == 13 && dxa-on?(ctx);
+   let m = ok ? dso-geo(ctx) : nothing();
+   let p = ok ? dsv4-prepare(ctx) : 0;
+   let set = (ok && pin == 0) ? record_set(dxa-get(ctx, "cache"), "pin", 0) : 0;
+   let st = ok ? dsv4-new-state(m, ctx[0], dab-cap()) : nothing();
+   let box = record_new(0, "log", []);
+   let w = ok ? dab-walk-logged(ctx, st, box) : [[], []];
+   [ctx, st, w, record_get(box, "log")];
+  }
+  def dab-pin-claim(path, ctl) {
+   let a = dab-pinned-walk(path, 1);
+   let b = dab-pinned-walk(path, 0);
+   let okA = len(a[0]) == 13 && dab-pin-ok?(a[0], a[3], 2);
+   let okB = len(b[0]) == 13 && dab-pin-ok?(b[0], b[3], 2);
+   let m = len(a[0]) == 13 ? dso-geo(a[0]) : nothing();
+   let r1 = len(a[0]) == 13 ? dab-replay(m, a[3], dab-tabs(m, 2, 0), 1, 0, 0, 0, 0) : nothing();
+   let r0 = len(a[0]) == 13 ? dab-replay(m, a[3], dab-tabs(m, 2, 0), 0, 0, 0, 0, 0) : nothing();
+   let sameA = dab-same-walk?(ctl, a[2]);
+   let sameB = dab-same-walk?(ctl, b[2]);
+   let said = print_str("  pin rule end to end at 2 slots: routing " ++ len(a[3]).str() ++ " block steps; pinned rule hits/misses/evictions " ++ (nothing?(r1) ? "none" : [r1[0], r1[1], r1[2]].str()) ++ " against the arena " ++ [dxa-hits(a[0]), dxa-misses(a[0]), dxa-evicts(a[0])].str()
+    ++ "; a victim rule that ignores pins would read " ++ (nothing?(r0) ? "none" : [r0[0], r0[1], r0[2]].str()) ++ " and the planted arena reads " ++ [dxa-hits(b[0]), dxa-misses(b[0]), dxa-evicts(b[0])].str() ++ "; walks bit-equal " ++ sameA.str() ++ " / planted " ++ sameB.str());
+   let leftA = len(a[0]) == 13 ? dsv4-close(a[0], a[1]) : [0];
+   let leftB = len(b[0]) == 13 ? dsv4-close(b[0], b[1]) : [0];
+   okA && !okB && !nothing?(r1) && !nothing?(r0) && !(r1 == r0) && sameA && len(leftA) == 0 && len(leftB) == 0;
+  }
  }
  let root = temp_dir() ++ "/dsv4-arena-band-" ++ now_unix_ms().str();
  let path1 = root ++ "-a.gguf";
  let path2 = root ++ "-b.gguf";
  let wrote1 = dfx-write(path1);
  let wrote2 = dfx-v-write(path2);
- let fx1 = try dab-fixture(path1, "fixture 1 (MXFP8, MXFP4, IQ2_XXS)") catch [false, false, false, false, false, false, false, false, false];
- let fx2 = try dab-fixture(path2, "fixture 2 (Q8_0, IQ2_XXS, Q2_K)") catch [false, false, false, false, false, false, false, false, false];
- let both = len(fx1) == 9 && len(fx2) == 9;
+ let fx1 = try dab-fixture(path1, "fixture 1 (MXFP8, MXFP4, IQ2_XXS)") catch [false, false, false, false, false, false, false, false, false, false, false];
+ let fx2 = try dab-fixture(path2, "fixture 2 (Q8_0, IQ2_XXS, Q2_K)") catch [false, false, false, false, false, false, false, false, false, false, false];
+ let both = len(fx1) == 11 && len(fx2) == 11;
  let b1 = dab-bit(both && fx1[0] && fx2[0], 1);
  let b2 = dab-bit(both && fx1[1] && fx2[1], 2);
  let b4 = dab-bit(both && fx1[2] && fx2[2], 4);
@@ -268,7 +365,9 @@ section [form.bml] {
  let b64 = dab-bit(both && fx1[6] && fx2[6], 64);
  let b128 = dab-bit(both && fx1[7] && fx2[7], 128);
  let b256 = dab-bit(both && fx1[8] && fx2[8], 256);
+ let b512 = dab-bit(both && fx1[9] && fx2[9], 512);
+ let b1024 = dab-bit(both && fx1[10] && fx2[10], 1024);
  let removed = host_path_remove(path1) + host_path_remove(path2);
- print_str("dsv4-arena-band claims " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ " " ++ b128.str() ++ " " ++ b256.str() ++ " fixture1 " ++ fx1.str() ++ " fixture2 " ++ fx2.str() ++ " removed " ++ removed.str());
- b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256;
+ print_str("dsv4-arena-band claims " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ " " ++ b128.str() ++ " " ++ b256.str() ++ " " ++ b512.str() ++ " " ++ b1024.str() ++ " fixture1 " ++ fx1.str() ++ " fixture2 " ++ fx2.str() ++ " removed " ++ removed.str());
+ b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024;
 }
