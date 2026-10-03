@@ -1,0 +1,146 @@
+// form-cli-prove.bml — the behavioral proof of a built native form-cli.
+//
+// fcp-prove(binary, source-sha) exercises the executable itself from an otherwise empty temporary working directory. It is broader than
+// the recipe bands: it crosses native read_file, rename, remove and time, the recipe image beside the executable, the REPL's framing,
+// the production-sized streaming ranker and the request-bound HMAC verification. It answers "" when every step held and the first
+// step's reason when one did not. The steps, in order:
+//   identity     the executable answers carrier-id and carrier-challenge with the source identity it was built from
+//   exact bytes  `grounded grounding` answers framing around the answer's exact bytes: no terminator, one and two terminal LF, an
+//                embedded metadata-looking marker with UTF-8 and a NUL, each with one REPL framing LF
+//   ask-request  a request file named direct finds the valid v2 row
+//   stale rows   a v1 row is absent rather than weakly grounded (`grounded:miss`)
+//   embeds       canonical semantic-v2 authoring of one id, a batch of 1546 ids, and the hard 16 MiB gate (`input-too-large`)
+//   rank         a 1546-row, over-5-million-byte index answers the target (bounded-memory rank, no list of all rows)
+//   receipt      a one-use, request-bound dual HMAC attestation produces the complete native trust row; a replay is rejected because
+//                rename-to-consuming and removal is the state transition, not because the caller promises uniqueness
+// Answers are compared as bytes (read_file_bytes), never as strings: one fixture holds a NUL.
+// preludes: form-stdlib/bml/form-cli-build.bml
+section [form.bml] {
+ class FormCliProve {
+  def fcp-node() = "@1.1.9.41";
+  def fcp-content() = "@8.4.4.12";
+  def fcp-source-path() = "docs/grounding.form";
+  def fcp-query() = "grounding";
+  def fcp-vec() = "[753942,1030707]";
+  def fcp-key-hex() = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  def fcp-bytes(s) = map(i => str_byte_at(s, i), range(0, len(s)));
+  def fcp-hex(bytes) = hex-encode(bytes);
+  def fcp-sha-hex(bytes) = hex-encode(sha256(bytes));
+  def fcp-text-of(bytes) = str-spans(map(b => byte_to_str(b), bytes));
+  def fcp-run(root, step, binary, input) {
+   let run = hch-run-in(root ++ "/io", step, ["/usr/bin/env", "-C", root, binary], input, hch-by(600000));
+   read_file_bytes(root ++ "/io/" ++ step ++ ".out") ?? [];
+  }
+  def fcp-run-text(root, step, binary, input) = fcp-text-of(fcp-run(root, step, binary, input));
+  def fcp-index-row(persisted, answer-key, answer-hex) = "{\"id\":\"" ++ fcp-node() ++ "\",\"node_id\":\"" ++ fcp-node() ++ "\",\"content_node_id\":\"" ++ fcp-content() ++ "\",\"source_path\":\"" ++ fcp-source-path() ++ "\",\"kind\":\"cell\",\"key\":\"" ++ persisted ++ "\",\"persisted_source_sha256\":\"" ++ persisted ++ "\",\"schema\":\"nodeid-rag-v2\",\"embedding_kind\":\"form-semantic-v2\",\"snippet\":\"grounding\",\"answer_key\":\"" ++ answer-key ++ "\",\"answer_hex\":\"" ++ answer-hex ++ "\",\"vec\":" ++ fcp-vec() ++ "}\n";
+  def fcp-decoy-row(i, persisted, pad, answer-key) {
+   let index = 1000 + i;
+   let content = 4000 + i;
+   "{\"id\":\"@1.1.9." ++ index.str() ++ "\",\"node_id\":\"@1.1.9." ++ index.str() ++ "\",\"content_node_id\":\"@8.4.4." ++ content.str() ++ "\",\"source_path\":\"" ++ fcp-source-path() ++ "\",\"kind\":\"cell\",\"key\":\"" ++ persisted ++ "\",\"persisted_source_sha256\":\"" ++ persisted ++ "\",\"schema\":\"nodeid-rag-v2\",\"embedding_kind\":\"form-semantic-v2\",\"snippet\":\"" ++ pad ++ "\",\"answer_key\":\"" ++ answer-key ++ "\",\"answer_hex\":\"41\",\"vec\":[1,1000003]}\n";
+  }
+  def fcp-rep(s, k) = k <= 0 ? "" : k == 1 ? s : (k % 2 == 1 ? s : "") ++ fcp-rep(s ++ s, k / 2);
+  // the REPL's framing of a grounded answer: the retrieval words, then the answer's exact bytes and one LF
+  def fcp-framing(persisted, answer-key, answer) {
+   let head = "grounded:" ++ fcp-node() ++ "\ncontent-node:" ++ fcp-content() ++ "\nsource-path:" ++ fcp-source-path() ++ "\nsource-key:" ++ persisted ++ "\nanswer-key:" ++ answer-key
+    ++ "\nretrieval-score:2\nretrieval-runner-score:0\nretrieval-query-total:2\nretrieval-threshold:2\nretrieval-confidence:100\nlocal-lane:fkwu-rag-grounded\nsynthesis-lane:fkwu-rag-grounded\nanswer-byte-length:" ++ len(answer).str() ++ "\nanswer:";
+   append(fcp-bytes(head), append(answer, [10]));
+  }
+  // one answer: the index holds it, `grounded` answers its framing byte for byte
+  def fcp-round-trip(root, binary, label, answer, persisted) {
+   let key = fcp-sha-hex(answer);
+   let wrote = write_file(root ++ "/.coherence-network/rag-index/index.jsonl", fcp-index-row(persisted, key, fcp-hex(answer)));
+   let got = fcp-run(root, "rt-" ++ label, binary, "grounded " ++ fcp-query() ++ "\nquit\n");
+   (String) fcp-hex(got) == fcp-hex(fcp-framing(persisted, key, answer)) ? "" : "behavioral proof failed: answer framing: " ++ label;
+  }
+  def fcp-answers() = [["plain", fcp-bytes("plain")], ["one-lf", fcp-bytes("line\n")], ["two-lf", fcp-bytes("line\n\n")], ["binary", append(fcp-bytes("before\nanswer:inside "), [194, 183, 32, 206, 187, 0, 97, 102, 116, 101, 114])]];
+  def fcp-first-reason(reasons) = nil?(reasons) ? "" : (String) reasons[0] != "" ? reasons[0] : fcp-first-reason(reasons[1:]);
+  def fcp-prove(binary, source-sha) {
+   let root = temp_dir() ++ "/form-cli-behavior." ++ host_pid().str() ++ "." ++ now_unix_ms().str();
+   let made = hch-mkdirs(root ++ "/io");
+   let why = fcp-prove-in(root, fcb-absolute(fcb-binary-path(binary)), source-sha);
+   let gone = host_dir_rmdir(root);
+   why;
+  }
+  def fcp-prove-in(root, binary, source-sha) {
+   let check = fcb-check-dir(root);
+   let identity = fcb-verify-identity(binary, source-sha, check);
+   let dirs = hch-mkdirs(root ++ "/.coherence-network/rag-requests") + hch-mkdirs(root ++ "/.coherence-network/rag-index") + hch-mkdirs(root ++ "/docs") + hch-mkdirs(root ++ "/.coherence-network/attestation");
+   let source = write_file(root ++ "/" ++ fcp-source-path(), "grounding source fixture v2");
+   (String) identity != "" ? identity : fcp-steps(root, binary, fcb-sha("grounding source fixture v2"));
+  }
+  def fcp-steps(root, binary, persisted) {
+   let rts = map(a => fcp-round-trip(root, binary, a[0], a[1], persisted), fcp-answers());
+   let a-key = fcp-sha-hex(fcp-bytes("A"));
+   let restored = write_file(root ++ "/.coherence-network/rag-index/index.jsonl", fcp-index-row(persisted, a-key, fcp-hex(fcp-bytes("A"))));
+   fcp-first-reason(append(rts, [fcp-direct(root, binary), fcp-stale(root, binary, persisted, a-key), fcp-embeds(root, binary), fcp-large(root, binary, persisted, a-key), fcp-receipt(root, binary, persisted, a-key)]));
+  }
+  def fcp-direct(root, binary) {
+   let wrote = write_file(root ++ "/.coherence-network/rag-requests/direct.query", fcp-query());
+   fcb-has?(fcp-run-text(root, "direct", binary, "ask-request direct\nquit\n"), "grounded:" ++ fcp-node()) ? "" : "ask-request missed valid v2 row";
+  }
+  def fcp-stale(root, binary, persisted, a-key) {
+   let row = fcp-index-row(persisted, a-key, fcp-hex(fcp-bytes("A")));
+   let v1 = fcb-join(split-on(row, "\"schema\":\"nodeid-rag-v2\""), "\"schema\":\"nodeid-rag-v1\"");
+   let wrote = write_file(root ++ "/.coherence-network/rag-index/index.jsonl", v1);
+   let out = fcp-run-text(root, "stale", binary, "grounded " ++ fcp-query() ++ "\nquit\n");
+   let restored = write_file(root ++ "/.coherence-network/rag-index/index.jsonl", row);
+   (String) out == "grounded:miss\n" ? "" : "behavioral proof failed: stale v1 rejection";
+  }
+  def fcp-embeds(root, binary) {
+   let dir = root ++ "/.coherence-network/rag-requests";
+   let one = write_file(dir ++ "/embed-one.embed", "31|67726f756e64696e67\n");
+   let o1 = fcp-run-text(root, "embed-one", binary, "embed-request embed-one\nquit\n");
+   let ids = map(i => fcp-id-line(i), range(1, 1547));
+   let batch = write_file(dir ++ "/embed-batch.embed", fcb-join(ids, "\n") ++ "\n");
+   let o2 = fcp-run-text(root, "embed-batch", binary, "embed-request embed-batch\nquit\n");
+   let big = hch-run-in(root ++ "/io", "dd", ["/bin/dd", "if=/dev/zero", "of=" ++ dir ++ "/embed-too-large.embed", "bs=1048576", "count=17"], "", hch-by(120000));
+   let o3 = fcp-run-text(root, "embed-large", binary, "embed-request embed-too-large\nquit\n");
+   (String) o1 != "{\"id_hex\":\"31\",\"embedding_kind\":\"form-semantic-v2\",\"vec\":[753942,1030707]}\n" ? "behavioral proof failed: embed-request canonical vector"
+   : len(fcb-lines(o2)) != 1546 ? "embed-request batch row count mismatch"
+   : (String) o3 != "embed-request:error:input-too-large\n" ? "behavioral proof failed: embed-request size cap"
+   : "";
+  }
+  def fcp-id-line(i) {
+   let h = fcp-hex-int(i);
+   (len(h) % 2 == 0 ? h : "0" ++ h) ++ "|67726f756e64696e67";
+  }
+  def fcp-hex-int(n) = n < 16 ? byte_to_str(n < 10 ? 48 + n : 87 + n) : fcp-hex-int(n / 16) ++ byte_to_str((n % 16) < 10 ? 48 + n % 16 : 87 + n % 16);
+  // production row count and approximate byte volume exercise bounded-memory rank
+  def fcp-large(root, binary, persisted, a-key) {
+   let pad = fcp-rep("x", 3200);
+   let target = fcp-index-row(persisted, a-key, fcp-hex(fcp-bytes("A")));
+   let decoys = map(i => fcp-decoy-row(i, persisted, pad, a-key), range(1, 1546));
+   let text = target ++ str-spans(decoys);
+   let wrote = write_file(root ++ "/.coherence-network/rag-index/index.jsonl", text);
+   let out = fcp-run-text(root, "large", binary, "grounded " ++ fcp-query() ++ "\nquit\n");
+   let restored = write_file(root ++ "/.coherence-network/rag-index/index.jsonl", target);
+   len(fcb-lines(text)) != 1546 || len(text) <= 5000000 ? "behavioral proof failed: the production-sized index is not production sized"
+   : fcb-has?(out, "grounded:" ++ fcp-node()) ? "" : "production-sized index missed target";
+  }
+  def fcp-mac(message) = hex-encode(hmac-sha256(hex-decode(fcp-key-hex()), fcp-bytes(message)));
+  def fcp-receipt(root, binary, persisted, a-key) {
+   let rid = "signed";
+   let dir = root ++ "/.coherence-network/rag-requests";
+   let keyed = write_file(root ++ "/.coherence-network/attestation/grounding-v1.key", fcp-key-hex() ++ "\n");
+   let mode = hch-run-in(root ++ "/io", "chmod-key", ["/bin/chmod", "600", root ++ "/.coherence-network/attestation/grounding-v1.key"], "", hch-by(60000));
+   let query = write_file(dir ++ "/" ++ rid ++ ".query", fcp-query());
+   let query-sha = fcb-sha(fcp-query());
+   let issued = now_unix_ms() / 1000;
+   let expires = issued + 300;
+   let nl = "\n";
+   let g-fields = fcp-node() ++ "|" ++ fcp-content() ++ "|" ++ persisted ++ "|" ++ fcp-source-path() ++ "|" ++ a-key ++ "|" ++ persisted ++ "|" ++ query-sha ++ "|" ++ issued.str() ++ "|" ++ expires.str();
+   let g-canon = "grounding-attestation-v2" ++ nl ++ rid ++ nl ++ fcp-node() ++ nl ++ fcp-content() ++ nl ++ persisted ++ nl ++ fcp-source-path() ++ nl ++ a-key ++ nl ++ persisted ++ nl ++ query-sha ++ nl ++ issued.str() ++ nl ++ expires.str();
+   let f-evidence = fcb-sha("frequency-cert-v1" ++ nl ++ fcp-node() ++ nl ++ fcp-content() ++ nl ++ a-key ++ nl ++ "success");
+   let f-fields = fcp-node() ++ "|" ++ fcp-content() ++ "|" ++ a-key ++ "|" ++ f-evidence ++ "|" ++ issued.str() ++ "|" ++ expires.str() ++ "|success";
+   let f-canon = "frequency-attestation-v2" ++ nl ++ rid ++ nl ++ fcp-node() ++ nl ++ fcp-content() ++ nl ++ a-key ++ nl ++ f-evidence ++ nl ++ issued.str() ++ nl ++ expires.str() ++ nl ++ "success";
+   let receipt = g-fields ++ "|" ++ fcp-mac(g-canon) ++ "|" ++ f-fields ++ "|" ++ fcp-mac(f-canon);
+   let wrote = write_file(dir ++ "/" ++ rid ++ ".receipt", receipt ++ "\n");
+   let out = fcp-run-text(root, "signed", binary, "ask-request-trace " ++ rid ++ "\nquit\n");
+   let replay = fcp-run-text(root, "replay", binary, "ask-request-trace " ++ rid ++ "\nquit\n");
+   let missing = filter(s => !fcb-has?(out, s), ["path:native", "grounded:yes", "freq:yes", "suffic:yes", "observed:yes", "grounded:" ++ fcp-node()]);
+   !nil?(missing) ? "signed trace missing " ++ missing[0]
+   : (String) replay != "ask-request-trace:error:missing-receipt\n" ? "behavioral proof failed: receipt replay rejection"
+   : "";
+  }
+ }
+}

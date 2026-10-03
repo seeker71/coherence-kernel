@@ -1,0 +1,70 @@
+; review-panel-band.bml — the reviewer panel (observe/review-panel-run.bml), the Form door that replaced tools/review-panel.sh.
+; No reviewer is asked: a band must never spend a rented reviewer's tokens, so the claims stay on the doors that are closed or missing.
+;
+; Verdict 31 when every claim lands:
+;   1     the list names the five doors with their state and invocation: gemini closed with the reason, the others open or missing by `which`
+;   2     a panel of a closed door reads the artifact, copies it into a scratch work directory, says SKIP for the door, writes DOOR NOT OPEN
+;         and exit 78 beside it, and prints the table row `gemini   78   14      DOOR NOT OPEN`
+;   3     a door that is not in the table at all is missing the same way (never begun, never an error)
+;   4     the prompt is one text for every door: the question, the instruction to name what is unsupported, the artifact between its marks
+;   5     an artifact that is absent, or a question that is empty, ends the door in an error naming what it needs
+;
+; REQUIRES: the built ./fkwu and the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/review-panel.bml
+section [form.bml] {
+ class ReviewPanelBand {
+  def rpb-fresh() {
+   let root = temp_dir() ++ "/review-panel-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["panel", root, 0] : nothing();
+  }
+  def rpb-root(ctx) = ctx[1];
+  def rpb-has(s, part) = str_find(s, part, 0) >= 0;
+  // the door as a child on a request: [exit, stdout, stderr]
+  def rpb-door(ctx, name, request) {
+   let base = rpb-root(ctx) ++ "/" ++ name;
+   let w = write_file(base ++ ".in", request);
+   let pid = host_spawn_at(["./fkwu", "observe/review-panel-run.bml"], [base ++ ".in", base ++ ".out", base ++ ".err"]);
+   let status = pid <= 0 ? -1 : host_wait(pid);
+   [status, read_file(base ++ ".out") ?? "", read_file(base ++ ".err") ?? ""];
+  }
+  def rpb-answers-dir(out) {
+   let at = str_find(out, "answers  : ", 0);
+   at < 0 ? "" : substring(out, at + 11, str_find(out, "\n", at));
+  }
+  def rpb-c-list(ctx) {
+   let r = rpb-door(ctx, "list", "{\"list\":1}");
+   let lines = split-on(trim(r[1]), "\n");
+   r[0] == 0 && rpb-has(lines[0], "DOOR     STATE      INVOCATION") && rpb-has(lines[1], "grok     ") && rpb-has(lines[1], "grok -p \"<prompt>\"") && rpb-has(lines[2], "claude   ")
+   && rpb-has(lines[3], "codex    ") && rpb-has(lines[3], "codex exec --skip-git-repo-check \"<prompt>\"") && rpb-has(lines[4], "cursor   ") && rpb-has(lines[4], "cursor-agent -p --trust \"<prompt>\"")
+   && rpb-has(lines[5], "gemini   closed     no headless door on this host (see header)");
+  }
+  def rpb-c-closed(ctx) {
+   let art = rpb-root(ctx) ++ "/artifact.md";
+   let w = write_file(art, "# claim\nthe sky is green\n");
+   let r = rpb-door(ctx, "closed", "{\"artifact\":\"" ++ art ++ "\",\"question\":\"what is unsupported?\",\"panel\":\"gemini\"}");
+   let dir = rpb-answers-dir(r[1]);
+   r[0] == 0 && rpb-has(r[1], "SKIP gemini (door not open)") && rpb-has(r[1], "gemini   78   14      DOOR NOT OPEN") && rpb-has(r[1], "artifact : " ++ art) && rpb-has(r[1], "panel    : gemini")
+   && (String) (read_file(dir ++ "/gemini.out") ?? "") == "DOOR NOT OPEN\n" && (String) (read_file(dir ++ "/gemini.rc") ?? "") == "78\n" && (String) (read_file(dir ++ "/work/artifact.md") ?? "") == "# claim\nthe sky is green\n";
+  }
+  def rpb-c-missing(ctx) {
+   let art = rpb-root(ctx) ++ "/artifact2.md";
+   let w = write_file(art, "x\n");
+   let r = rpb-door(ctx, "missing", "{\"artifact\":\"" ++ art ++ "\",\"question\":\"q\",\"panel\":\"nosuchreviewer,gemini\"}");
+   r[0] == 0 && rpb-has(r[1], "SKIP nosuchreviewer (door not open)") && rpb-has(r[1], "SKIP gemini (door not open)") && rpb-has(r[1], "nosuchreviewer 78 ");
+  }
+  def rpb-c-prompt(ctx) {
+   let p = "q?\n\nAnswer from the artifact below. Be specific and name what is wrong or\nunsupported; agreement is less useful than a located objection. If a\nclaim is unsupported by the text, say which claim and why.\n\n----- BEGIN ARTIFACT: a.md -----\nbody\n----- END ARTIFACT -----";
+   (String) rpr-prompt("q?", "a.md", "body") == p && (String) rpr-base("some/dir/a.md") == "a.md" && (String) rpr-base("a.md") == "a.md";
+  }
+  def rpb-c-needs(ctx) {
+   let none = rpb-door(ctx, "none", "{\"artifact\":\"" ++ rpb-root(ctx) ++ "/nope.md\",\"question\":\"q\"}");
+   let empty = rpb-door(ctx, "empty", "{\"artifact\":\"" ++ rpb-root(ctx) ++ "/artifact.md\",\"question\":\"\"}");
+   (Comparable) none[0] != 0 && rpb-has(none[2], "review-panel: needs an artifact that stands and a question") && (Comparable) empty[0] != 0 && rpb-has(empty[2], "review-panel: needs an artifact that stands and a question");
+  }
+ }
+ let ctx = rpb-fresh();
+ nothing?(ctx) ? form_error("review-panel band needs a fresh directory") : 0;
+ let verdict = live-claims("review-panel-band", ctx, [["list", 1, 1, rpb-c-list], ["closed", 2, 1, rpb-c-closed], ["missing", 4, 1, rpb-c-missing], ["prompt", 8, 1, rpb-c-prompt], ["needs", 16, 1, rpb-c-needs]]);
+ host_dir_rmdir(rpb-root(ctx));
+ verdict;
+}

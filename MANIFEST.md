@@ -58,8 +58,8 @@ seed lowers into its Form organs, and its size (`wc -l runtime/fkwu-uni.c`) is t
 (`form/form-stdlib/release-ledger.bml`, family R13). The native op surface is one manifest,
 `form/form-stdlib/native-op-manifest.fk`; `flatten/` generates `runtime/fkwu-optable.h` from its rows, and
 `./fkwu gate/op-manifest.bml` reads the manifest, the table and the seed in agreement. The
-shell carriers that still build and regenerate emitted artifacts (`form/build-form-cli.sh`, `form/scripts/`) are
-on their way to Form doors (R59).
+native form-cli is built, regenerated, installed and proven by one Form door (`gate/form-cli-build-run.bml`,
+`form/form-stdlib/bml/form-cli-build.bml`); `cc` on the seed is the one external tool.
 
 **One home per organ.** Recipes are content-addressed: the same `.fk` interns to the same NodeID on every kernel, so
 the body is shareable as long as no second copy diverges. This repo is the canonical home for the kernel, the
@@ -126,7 +126,7 @@ cell drives the device and the device agrees with Form's own arithmetic.
   answer model in the fkwu session. Where two engines still do one job — `source-compiler.fk`'s hand scanner
   beside `bml.fk`, `form-parse`/`grammar-chars` beside `bmf-grammar` — the stdlib converges on the one engine
   and releases the other.
-- **`form/form-cli`** — the native agent binary, built by `form/build-form-cli.sh` and not tracked.
+- **`form/form-cli`** — the native agent binary, built by `./fkwu gate/form-cli-build-run.bml` and not tracked.
   `form/form-stdlib/bml/native-cli-startup.bml` emits its startup C from the runtime seed, one `cc` links it, and it
   runs `form/form-stdlib/form-cli-repl.fk` as its compiled image.
 
@@ -164,8 +164,9 @@ cell drives the device and the device agrees with Form's own arithmetic.
   walk checkout. `host/launchd/` still holds a second 03:30 row, `observe/movement-run.bml` in the live checkout.
 - **Hati-OS** — the Hati-OS kernel's walker, emitter and host-target catalog (`form/form-stdlib/hati-os-kernel.fk`,
   `hati-os-kernel-emit.fk`, `hati-os-targets.fk`).
-- **`Sema Ear.app`** — the Mac launcher for the ear; `Sema Ear Glass.command` opens the live ear glass
-  (`observe/ear-glass-live.fk`).
+- **`Sema Ear.app`** — the Mac launcher for the ear: a bundle's executable is a program, and macOS binds the microphone
+  grant to the bundle; its few lines are a declared carrier (`gate/structural-gate.fk`). The live ear glass is
+  `printf '600\n\n' | ./fkwu observe/ear-glass-live.fk` in a terminal (`observe/ear-glass-live.fk`).
 - **`teachings/`** — the scoped core teachings ([one-engine](teachings/lc-one-engine.md),
   [form-first-reasoning](teachings/form-first-reasoning.form),
   [voice-attunement](teachings/voice-attunement.md),

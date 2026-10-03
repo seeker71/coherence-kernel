@@ -1,0 +1,349 @@
+// form-cli-build-flow.bml — the native form-cli's regeneration, build, install and proof, as flows over form-cli-build.bml.
+//
+// fcb-regen(opts)   publish the sealed source identity and this host's native platform bundle (the executable, its .fkb and .sym) from
+//                   one witnessed candidate: the source closure is sealed, the startup C is emitted from the seal, the build runs over
+//                   those exact originals, and the files land first (each by a same-directory rename) with the stamps last.
+// fcb-build(opts)   install, copy or build the native form-cli: with no out, form/form-cli becomes the link to this host's published,
+//                   verified bundle in form-stdlib/bootstrap; an out names a copy. A checkout that holds no current generation
+//                   regenerates (an install) or builds the copy inside a private copy of the body and leaves its own bundle alone.
+// fcb-prove(binary, sha)  the behavioral proof of an executable: identity, then its REPL from an empty directory.
+// Every flow answers "" when it held and its reason when it did not; nothing is retried blind, and a failed candidate keeps its work
+// directory when opts say retain. opts is a record: out, explicit, bootstrap_dir, regenerated, private, force_link, runner,
+// emission_dir, snapshot, seal, seal_sha, retain, cc, out_dir.
+// preludes: form-stdlib/bml/form-cli-build.bml
+section [form.bml] {
+ class FormCliBuildFlow {
+  def fcb-opt(opts, key, dflt) = record_has(opts, key) ? record_get(opts, key) : dflt;
+  def fcb-roots-path() = "form/form-stdlib/form-cli-source-roots.txt";
+  def fcb-roots-text() = read_file(fcb-roots-path()) ?? "";
+  // the manifest of the sources a generation names, read from form/: its own path first, then every source it lists
+  def fcb-manifest-rel() = "form-stdlib/bootstrap/form-cli.dependencies";
+  def fcb-source-paths(form) {
+   let manifest = fs-path-join(form, fcb-manifest-rel());
+   fcb-regular?(manifest) && (Comparable) file_size(manifest) > 0 ? cons(fcb-manifest-rel(), fcb-lines(read_file(manifest) ?? "")) : nothing();
+  }
+  def fcb-work(kind) {
+   let dir = temp_dir() ++ "/form-cli-" ++ kind ++ "." ++ host_pid().str() ++ "." ++ now_unix_ms().str();
+   let made = hch-mkdirs(dir);
+   dir;
+  }
+  def fcb-rm(dir) = host_dir_rmdir(dir);
+  def fcb-then(why, next) = (String) why != "" ? why : next();
+  // OS operations by argv: a regular file copied whole (the mode rides along), a mode set, a link made
+  def fcb-copy(from, to) = fcb-regular?(from) && (Comparable) hch-run-in(fcb-io(), "copy", ["/bin/cp", from, to], "", hch-by(600000))[0] == 0;
+  def fcb-chmod(mode, path) = (Comparable) hch-run-in(fcb-io(), "chmod", ["/bin/chmod", mode, path], "", hch-by(60000))[0] == 0;
+  def fcb-publish(from, to) {
+   let stage = to ++ ".writing-" ++ host_pid().str();
+   fcb-copy(from, stage) && (Comparable) host_path_rename(stage, to) == 0;
+  }
+  def fcb-trim-file(path) = trim(read_file(path) ?? "");
+  // ---- the closure door: a request on its stdin, a checked reading of what it left
+  def fcb-door() = "form/form-stdlib/bml/form-cli-source-closure.bml";
+  def fcb-ask(io, step, runner, lines) = hch-run-in(io, step, fcb-with-carrier([runner, fcb-door()]), fcb-join(lines, "\n") ++ "\n", hch-by(7200000));
+  def fcb-ask-why(run, what) = hch-ok?(run) ? "" : what ++ ": " ++ trim(run[1]);
+  def fcb-roots-lines() = fcb-lines(fcb-roots-text());
+  // ---- the source identity still current: the seal verified, and the files on disk fold to the stamp and digest it was sealed with
+  def fcb-identity-current(io, runner, form, seal, seal-sha, paths, want-stamp, want-sha) {
+   let run = fcb-ask(io, "source-verify", runner, ["FCSV1", seal, seal-sha, "END"]);
+   !hch-ok?(run) ? "source verification refused: " ++ trim(run[1])
+   : (String) fcb-hash16(form, paths) != want-stamp || (String) (fcb-source-sha(fcb-read-sources(form, paths)) ?? "") != want-sha ? "canonical source identity changed"
+   : "";
+  }
+  // ---- regeneration
+  def fcb-regen(opts) {
+   let form = fcb-form();
+   let out = fcb-opt(opts, "out_dir", fcb-boot-default());
+   let made = hch-mkdirs(out);
+   let lock = fcb-lock-acquire(out ++ "/.form-cli-publish.lock");
+   (Comparable) lock[0] != 0 ? lock[1] : fcb-regen-held(opts, form, out);
+  }
+  def fcb-boot-default() = fcb-form() ++ "/form-stdlib/bootstrap";
+  def fcb-regen-held(opts, form, out) {
+   let work = fcb-work("regen");
+   let why = fcb-regen-run(opts, form, out, work);
+   let kept = (String) why != "" && (Comparable) fcb-opt(opts, "retain", 0) == 1;
+   let say = kept ? print_str("regen: retained failed work dir " ++ work) : fcb-rm(work);
+   let released = fcb-lock-release(out ++ "/.form-cli-publish.lock");
+   why;
+  }
+  def fcb-regen-run(opts, form, out, work) {
+   let runner = fcb-opt(opts, "runner", host_cwd() ++ "/fkwu");
+   let held = work ++ "/fkwu-source";
+   fcb-regular?(runner) ? fcb-regen-copy(opts, form, out, work, runner, held) : "regen: native source runner is missing or not a regular executable: " ++ runner;
+  }
+  def fcb-regen-copy(opts, form, out, work, runner, held) {
+   let ok = fcb-copy(runner, held) && fcb-chmod("700", held);
+   ok ? fcb-regen-seal(opts, form, out, work, held, fcb-sha-file(held)) : "regen: the native source runner could not be held";
+  }
+  def fcb-regen-seal(opts, form, out, work, runner, author-sha) {
+   let seal-dir = work ++ "/source-seal";
+   let run = fcb-ask(work, "source-closure", runner, append(["FCSC1", form, seal-dir, ""], fcb-roots-lines()));
+   let ready = fcb-trim-file(seal-dir ++ "/ready");
+   !hch-ok?(run) ? "regen: native source dependency closure refused: " ++ trim(run[1])
+   : !(fcb-nonempty?(seal-dir ++ "/ready") && fcb-nonempty?(seal-dir ++ "/sources.json") && fcb-nonempty?(seal-dir ++ "/source.sha256")) ? "regen: native source seal completion is absent"
+   : !fcb-hash-valid?(ready) ? "regen: native source seal identity is no digest"
+   : fcb-regen-install(opts, form, out, work, runner, author-sha, seal-dir, seal-dir ++ "/sources.json", ready);
+  }
+  def fcb-nonempty?(path) = (Comparable) file_size(path) > 0;
+  def fcb-regen-install(opts, form, out, work, runner, author-sha, seal-dir, seal, seal-sha) {
+   let run = fcb-ask(work, "source-install", runner, ["FCSI1", seal, seal-sha, "END"]);
+   let paths = fcb-source-paths(form);
+   let want-stamp = substring(fcb-sha(fcb-strip-cr(read_file(seal-dir ++ "/stamp.bytes") ?? "")), 0, 16);
+   let want-sha = fcb-trim-file(seal-dir ++ "/source.sha256");
+   !hch-ok?(run) ? "regen: checked source manifest publication refused: " ++ trim(run[1])
+   : nothing?(paths) ? "regen: the installed source manifest is absent"
+   : !fcb-hash-valid?(want-sha) ? "regen: sealed source identity is no digest"
+   : fcb-regen-emit(opts, form, out, work, runner, author-sha, seal-dir, seal, seal-sha, paths, want-stamp, want-sha);
+  }
+  def fcb-regen-emit(opts, form, out, work, runner, author-sha, seal-dir, seal, seal-sha, paths, want-stamp, want-sha) {
+   let emission = work ++ "/native-entry";
+   let still = fcb-identity-current(work, runner, form, seal, seal-sha, paths, want-stamp, want-sha);
+   let run = fcb-ask(work, "emission", runner, ["FCSE1", seal, seal-sha, emission, "END"]);
+   let esha = fcb-trim-file(emission ++ "/ready");
+   (String) still != "" ? still
+   : !hch-ok?(run) ? "regen: sealed native startup emission refused: " ++ trim(run[1])
+   : !(fcb-nonempty?(emission ++ "/ready") && fcb-nonempty?(emission ++ "/form-cli-native.c") && fcb-nonempty?(emission ++ "/runtime-source.c")) ? "regen: native startup completion is absent"
+   : !fcb-hash-valid?(esha) ? "regen: native startup identity is no digest"
+   : fcb-regen-candidate(opts, form, out, work, runner, author-sha, seal-dir, seal, seal-sha, paths, want-stamp, want-sha, emission, esha);
+  }
+  def fcb-emitted-check(work, runner, mode, emission, esha, target) {
+   let run = fcb-ask(work, "emission-check-" ++ mode, runner, [mode, emission ++ "/emission.json", esha, target, "END"]);
+   hch-ok?(run) ? "" : "emitted source check " ++ mode ++ " refused: " ++ trim(run[1]);
+  }
+  def fcb-regen-candidate(opts, form, out, work, runner, author-sha, seal-dir, seal, seal-sha, paths, want-stamp, want-sha, emission, esha) {
+   let boot = work ++ "/bootstrap";
+   let made = hch-mkdirs(boot);
+   let startup = boot ++ "/form-cli-native.c";
+   let check = fcb-emitted-check(work, runner, "FCEP1", emission, esha, startup);
+   let sha-copied = fcb-copy(seal-dir ++ "/source.sha256", boot ++ "/form-cli.source.sha256");
+   let stamped = write_file(boot ++ "/form-cli.stamp", want-stamp ++ "\n");
+   let attested = fcb-write-startup(boot ++ "/form-cli.native.attestation", want-sha, want-stamp, startup, author-sha, emission ++ "/runtime-source.c");
+   (String) check != "" ? check
+   : !attested ? "regen: the startup attestation could not be written and verified"
+   : fcb-then(fcb-identity-current(work, runner, form, seal, seal-sha, paths, want-stamp, want-sha), () => fcb-regen-build(opts, form, out, work, runner, author-sha, seal-dir, seal, seal-sha, paths, want-stamp, want-sha, emission, esha, boot));
+  }
+  def fcb-regen-build(opts, form, out, work, runner, author-sha, seal-dir, seal, seal-sha, paths, want-stamp, want-sha, emission, esha, boot) {
+   let inner = record_new(0, "out", work ++ "/form-cli", "explicit", 1, "bootstrap_dir", boot, "force_link", 1, "runner", runner, "emission_dir", emission, "snapshot", seal-dir ++ "/body", "seal", seal, "seal_sha", seal-sha, "retain", fcb-opt(opts, "retain", 0), "cc", fcb-opt(opts, "cc", "cc"));
+   let why = fcb-build-main(inner);
+   (String) why != "" ? why : fcb-regen-verify(opts, form, out, work, runner, author-sha, seal, seal-sha, paths, want-stamp, want-sha, emission, esha, boot);
+  }
+  def fcb-regen-verify(opts, form, out, work, runner, author-sha, seal, seal-sha, paths, want-stamp, want-sha, emission, esha, boot) {
+   let slug = fcb-platform-slug();
+   let platform-ok = fcb-verify-platform(work ++ "/form-cli.native.attestation", want-sha, want-stamp, boot ++ "/form-cli.native.attestation", slug, work ++ "/form-cli", work ++ "/form-cli.fkb", work ++ "/form-cli.sym");
+   let check = fcb-emitted-check(work, runner, "FCEV1", emission, esha, boot ++ "/form-cli-native.c");
+   let startup-ok = fcb-verify-startup(boot ++ "/form-cli.native.attestation", want-sha, want-stamp, boot ++ "/form-cli-native.c", emission ++ "/runtime-source.c", author-sha);
+   !platform-ok ? "regen: the built platform bundle refused its attestation"
+   : (String) check != "" ? check
+   : !startup-ok ? "regen: the startup attestation no longer holds"
+   : fcb-then(fcb-identity-current(work, runner, form, seal, seal-sha, paths, want-stamp, want-sha), () => fcb-regen-publish(form, out, work, boot, slug, want-stamp, want-sha));
+  }
+  // the witnessed candidate IS the platform bundle; nothing is rebuilt. Files land first, each by a same-directory rename; the stamps last.
+  def fcb-regen-publish(form, out, work, boot, slug, want-stamp, want-sha) {
+   let target = out ++ "/form-cli-" ++ slug;
+   let stamped = write_file(work ++ "/platform.stamp", want-stamp ++ "\n");
+   let landed = fcb-publish(work ++ "/form-cli.fkb", target ++ ".fkb") && fcb-publish(work ++ "/form-cli.sym", target ++ ".sym") && fcb-publish(work ++ "/form-cli.native.attestation", target ++ ".native.attestation")
+    && fcb-publish(work ++ "/form-cli", target) && fcb-publish(boot ++ "/form-cli.source.sha256", out ++ "/form-cli.source.sha256") && fcb-publish(boot ++ "/form-cli.native.attestation", out ++ "/form-cli.native.attestation");
+   let own = landed && fcb-verify-platform(target ++ ".native.attestation", want-sha, want-stamp, out ++ "/form-cli.native.attestation", slug, target, target ++ ".fkb", target ++ ".sym");
+   let done = own && fcb-publish(work ++ "/platform.stamp", target ++ ".stamp") && fcb-publish(boot ++ "/form-cli.stamp", out ++ "/form-cli.stamp");
+   !landed ? "regen: a published file could not land"
+   : !own ? "regen: published platform bundle refused its own attestation"
+   : !done ? "regen: the stamps could not land"
+   : fcb-regen-said(out, slug, want-sha, want-stamp);
+  }
+  def fcb-regen-said(out, slug, want-sha, want-stamp) {
+   let said = print_str("regen: native startup, sealed recipe and form-cli-" ++ slug ++ " bundle accepted into " ++ out ++ "; source=" ++ want-sha ++ " stamp=" ++ want-stamp);
+   "";
+  }
+  // ---- the build
+  // a generation is current when the files a regeneration publishes stand and its stamp and digest answer for the sources the manifest lists
+  def fcb-bootstrap-files() = ["form-cli.dependencies", "form-cli.stamp", "form-cli.source.sha256", "form-cli.native.attestation"];
+  def fcb-current?(form) {
+   let boot = fs-path-join(form, "form-stdlib/bootstrap");
+   let paths = fcb-source-paths(form);
+   all?(f => fcb-nonempty?(boot ++ "/" ++ f) && fcb-regular?(boot ++ "/" ++ f), fcb-bootstrap-files()) && !nothing?(paths)
+   && (String) fcb-trim-file(boot ++ "/form-cli.source.sha256") == (fcb-source-sha(fcb-read-sources(form, paths)) ?? "") && (String) fcb-trim-file(boot ++ "/form-cli.stamp") == fcb-hash16(form, paths);
+  }
+  def fcb-build(opts) {
+   let form = fcb-form();
+   let verified = hch-run-in(fcb-io(), "native-node-word", ["./fkwu", "observe/native-node-word-verify.bml"], "", hch-by(1800000));
+   !hch-ok?(verified) ? "build: native node word verification refused: " ++ trim(verified[1])
+   : (String) fcb-opt(opts, "bootstrap_dir", "") == "" && (Comparable) fcb-opt(opts, "regenerated", 0) != 1 && !fcb-current?(form) ? fcb-build-stale(opts, form)
+   : fcb-build-main(opts);
+  }
+  def fcb-build-stale(opts, form) {
+   (Comparable) fcb-opt(opts, "explicit", 0) == 1 && (Comparable) fcb-opt(opts, "private", 0) != 1 ? fcb-build-private(opts, form)
+   : fcb-build-regen(opts, form);
+  }
+  def fcb-build-regen(opts, form) {
+   let said = print_str("build: no current native bootstrap in this checkout; regenerating it from source");
+   let why = fcb-regen(opts);
+   let held = record_set(opts, "regenerated", 1);
+   (String) why != "" ? why : fcb-build-main(opts);
+  }
+  // a copy build for a checkout with no current generation: the body's tracked and new files and its runtime are copied into a private
+  // directory with its own lookup boundary, the build runs there (regenerating that copy's bootstrap), only the out is written
+  def fcb-build-private(opts, form) {
+   let said = print_str("build: no current native bootstrap in this checkout; building the copy in a private body, leaving this checkout's bundle untouched");
+   let body = fcb-work("private");
+   let why = fcb-private-run(opts, body);
+   let gone = fcb-rm(body);
+   why;
+  }
+  def fcb-private-run(opts, body) {
+   let listed = hch-read(["git", "ls-files", "--cached", "--others", "--exclude-standard"]);
+   let names = filter(n => len(n) > 0 && (Comparable) host_path_exists(host_cwd() ++ "/" ++ n) == 1, split-on(listed, "\n"));
+   let list-file = body ++ ".files";
+   let archive = body ++ ".tar";
+   let wrote = write_file(list-file, fcb-join(names, "\n") ++ "\n");
+   let packed = hch-run-in(fcb-io(), "private-tar", ["/usr/bin/tar", "-c", "-f", archive, "-C", host_cwd(), "-T", list-file], "", hch-by(1800000));
+   let unpacked = hch-ok?(packed) ? hch-run-in(fcb-io(), "private-untar", ["/usr/bin/tar", "-x", "-p", "-f", archive, "-C", body], "", hch-by(1800000)) : packed;
+   let tidy = host_path_remove(list-file) + host_path_remove(archive);
+   !hch-ok?(unpacked) ? "build: the private copy of the body could not be made: " ++ trim(unpacked[1])
+   : fcb-private-built(opts, body);
+  }
+  def fcb-private-built(opts, body) {
+   let held = fcb-copy(host_cwd() ++ "/fkwu", body ++ "/fkwu") && (Comparable) write_file(body ++ "/.git", "private body lookup boundary\n") > 0;
+   let out = fcb-out-path(opts);
+   let request = "{\"out\":\"" ++ out ++ "\",\"explicit\":1,\"private\":1,\"retain\":" ++ fcb-opt(opts, "retain", 0).str() ++ "}";
+   let run = held ? hch-run-in(fcb-io(), "private-build", fcb-with-carrier-in(body, ["./fkwu", "gate/form-cli-build-run.bml"]), request, hch-by(7200000)) : [nothing(), "", "not held"];
+   let said = held ? print_str(trim(run[1])) : 0;
+   !held ? "build: the private body could not be held" : !hch-ok?(run) ? "build: the build inside the private body failed" : "";
+  }
+  def fcb-out-path(opts) {
+   let out = fcb-opt(opts, "out", "form-cli");
+   fcb-starts?(out, "/") ? out : fcb-form() ++ "/" ++ out;
+  }
+  // the main build, over a current bootstrap
+  def fcb-build-main(opts) {
+   let form = fcb-form();
+   let paths = fcb-source-paths(form);
+   let boot = (String) fcb-opt(opts, "bootstrap_dir", "") == "" ? fcb-boot-default() : fcb-opt(opts, "bootstrap_dir", "");
+   let work = fcb-work("build");
+   let why = nothing?(paths) ? "form-cli source dependency manifest missing" : fcb-build-held(opts, form, paths, boot, work);
+   let kept = (String) why != "" && (Comparable) fcb-opt(opts, "retain", 0) == 1;
+   let say = kept ? print_str("build: retained failed native CLI work directory " ++ work) : fcb-rm(work);
+   why;
+  }
+  def fcb-build-held(opts, form, paths, boot, work) {
+   let slug = fcb-platform-slug();
+   let want-stamp = fcb-hash16(form, paths);
+   let want-sha = fcb-source-sha(fcb-read-sources(form, paths));
+   let body = host_cwd();
+   let copies = fcb-copy(boot ++ "/form-cli.native.attestation", work ++ "/bootstrap.attestation") && fcb-copy(body ++ "/runtime/fkwu-uni.c", work ++ "/runtime-source.c") && fcb-copy(body ++ "/runtime/fkwu-optable.h", work ++ "/fkwu-optable.h") && fcb-copy(body ++ "/runtime/fkwu-node-word.h", work ++ "/fkwu-node-word.h");
+   !copies ? "build: a regular artifact is missing"
+   : nothing?(want-sha) ? "build: a listed source is absent"
+   : (String) fcb-trim-file(boot ++ "/form-cli.source.sha256") != want-sha || (String) fcb-trim-file(boot ++ "/form-cli.stamp") != want-stamp ? "build: native CLI source generation is stale; regenerate with {\"regen\":1}"
+   : fcb-build-platform(opts, form, paths, boot, work, slug, want-stamp, want-sha);
+  }
+  def fcb-build-platform(opts, form, paths, boot, work, slug, want-stamp, want-sha) {
+   let candidate = work ++ "/form-cli";
+   let platform = fs-path-join(form, "form-stdlib/bootstrap/form-cli-" ++ slug);
+   let published = (Comparable) fcb-opt(opts, "force_link", 0) != 1 && (Comparable) file_size(platform ++ ".native.attestation") >= 0;
+   published ? fcb-copy-platform(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, platform) : fcb-build-native(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate);
+  }
+  def fcb-copy-platform(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, platform) {
+   let held = fcb-copy(platform, candidate) && fcb-copy(platform ++ ".fkb", candidate ++ ".fkb") && fcb-copy(platform ++ ".sym", candidate ++ ".sym") && fcb-copy(platform ++ ".native.attestation", work ++ "/platform.attestation")
+    && fcb-verify-platform(work ++ "/platform.attestation", want-sha, want-stamp, work ++ "/bootstrap.attestation", slug, candidate, candidate ++ ".fkb", candidate ++ ".sym");
+   !held ? "build: published native CLI bundle refused; explicit regeneration is required" : fcb-build-publish(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, 1);
+  }
+  def fcb-build-native(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate) {
+   let cc = fcb-opt(opts, "cc", "cc");
+   let runner = fcb-opt(opts, "runner", host_cwd() ++ "/fkwu");
+   let compiler = hch-run-in(fcb-io(), "cc-present", [cc, "--version"], "", hch-by(60000));
+   !hch-ok?(compiler) ? "build: compiler required for native startup: " ++ cc
+   : !fcb-regular?(runner) ? "build: native source runner required: " ++ runner
+   : !fcb-copy(runner, work ++ "/source-fkwu") ? "build: native source runner could not be held"
+   : fcb-build-seal(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, cc);
+  }
+  // the sealed snapshot: handed in by a regeneration, else sealed here from the roots
+  def fcb-build-seal(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, cc) {
+   let runner = work ++ "/source-fkwu";
+   let given = len(fcb-opt(opts, "seal", "")) > 0;
+   let sealed = given ? [fcb-opt(opts, "seal", ""), fcb-opt(opts, "snapshot", ""), fcb-opt(opts, "seal_sha", "")] : fcb-seal-here(work, runner, form);
+   let seal = sealed[0];
+   let snapshot = sealed[1];
+   let seal-sha = sealed[2];
+   (String) seal == "" ? "build: " ++ snapshot
+   : (String) snapshot != fs-path-dirname(seal) ++ "/body" ? "build: snapshot path disagrees with source seal owner"
+   : !fcb-hash-valid?(seal-sha) ? "build: source snapshot completion absent"
+   : (String) fcb-trim-file(fs-path-dirname(seal) ++ "/source.sha256") != want-sha ? "build: held source snapshot identity changed"
+   : fcb-build-emit(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, cc, runner, seal, snapshot, seal-sha);
+  }
+  def fcb-seal-here(work, runner, form) {
+   let dir = work ++ "/sources";
+   let run = fcb-ask(work, "source-closure", runner, append(["FCSC1", form, dir, ""], fcb-roots-lines()));
+   hch-ok?(run) ? [dir ++ "/sources.json", dir ++ "/body", fcb-trim-file(dir ++ "/ready")] : ["", "the source closure refused: " ++ trim(run[1]), ""];
+  }
+  def fcb-build-emit(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, cc, runner, seal, snapshot, seal-sha) {
+   let before = fcb-ask(work, "verify-before", runner, ["FCSV1", seal, seal-sha, "END"]);
+   let same-table = (String) (read_file(work ++ "/fkwu-optable.h") ?? "") == (read_file(snapshot ++ "/runtime/fkwu-optable.h") ?? "x") && (String) (read_file(work ++ "/fkwu-node-word.h") ?? "") == (read_file(snapshot ++ "/runtime/fkwu-node-word.h") ?? "x");
+   let given = len(fcb-opt(opts, "emission_dir", "")) > 0;
+   let emission = given ? fcb-opt(opts, "emission_dir", "") : work ++ "/native-entry";
+   let made = given ? nothing() : fcb-ask(work, "emission", runner, ["FCSE1", seal, seal-sha, emission, "END"]);
+   let esha = fcb-trim-file(emission ++ "/ready");
+   !hch-ok?(before) ? "build: source snapshot verification refused: " ++ trim(before[1])
+   : !same-table ? "build: the runtime tables differ from the sealed snapshot"
+   : !given && !hch-ok?(made) ? "build: native startup emission refused: " ++ trim(made[1])
+   : !fcb-hash-valid?(esha) ? "build: native startup completion absent"
+   : fcb-then(fcb-emitted-check(work, runner, "FCEP1", emission, esha, work ++ "/startup.c"), () => fcb-build-compile(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, cc, runner, seal, snapshot, seal-sha));
+  }
+  def fcb-build-compile(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, cc, runner, seal, snapshot, seal-sha) {
+   let identity = fcb-verify-startup(work ++ "/bootstrap.attestation", want-sha, want-stamp, work ++ "/startup.c", work ++ "/runtime-source.c", "");
+   let windows = fcb-starts?(slug, "windows-");
+   let argv = append([cc, "-O2", "-I", work, "-o", candidate, work ++ "/startup.c"], windows ? ["-lws2_32", "-lwinmm", "-lavicap32", "-luser32", "-lwlanapi", "-lbthprops", "-lwinhttp"] : []);
+   let compiled = identity ? hch-run-in(fcb-io(), "cc-startup", argv, "", hch-by(7200000)) : [nothing(), "", ""];
+   !identity ? "build: native startup identity refused"
+   : !hch-ok?(compiled) ? "build: the native startup did not compile: " ++ trim(compiled[1])
+   : fcb-build-recipe(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, runner, seal, snapshot, seal-sha);
+  }
+  def fcb-build-recipe(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, runner, seal, snapshot, seal-sha) {
+   let recipe = snapshot ++ "/form/form-stdlib/form-cli-repl.fk";
+   let run = hch-run-in(fcb-io(), "compile-source", fcb-with-carrier-in(snapshot, [candidate, "--compile-source", recipe]), "", hch-by(7200000));
+   let said = print_str(trim(run[1]));
+   !hch-ok?(run) ? "build: native recipe compilation refused"
+   : !(fcb-copy(recipe ++ ".fkb", candidate ++ ".fkb") && fcb-copy(recipe ++ ".sym", candidate ++ ".sym")) ? "build: the recipe image or its symbols are missing"
+   : fcb-then(fcb-verify-after(work, runner, seal, seal-sha), () => fcb-build-attest(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate));
+  }
+  def fcb-verify-after(work, runner, seal, seal-sha) {
+   let run = fcb-ask(work, "verify-after", runner, ["FCSV1", seal, seal-sha, "END"]);
+   hch-ok?(run) ? "" : "build: source snapshot changed during compilation: " ++ trim(run[1]);
+  }
+  def fcb-build-attest(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate) {
+   let wrote = fcb-write-platform(work ++ "/platform.attestation", work ++ "/bootstrap.attestation", slug, candidate, candidate ++ ".fkb", candidate ++ ".sym");
+   wrote ? fcb-build-publish(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, 0) : "build: the platform attestation could not be written and verified";
+  }
+  // checks, then publication: the install is one relative link swapped in whole; a copy is published executable last
+  def fcb-build-publish(opts, form, paths, boot, work, slug, want-stamp, want-sha, candidate, platform-verified) {
+   let check = fcb-check-dir(work ++ "/check");
+   let identity = fcb-verify-identity(candidate, want-sha, check);
+   let attested = fcb-verify-platform(work ++ "/platform.attestation", want-sha, want-stamp, work ++ "/bootstrap.attestation", slug, candidate, candidate ++ ".fkb", candidate ++ ".sym");
+   let current = (String) fcb-hash16(form, paths) == want-stamp && (String) (fcb-source-sha(fcb-read-sources(form, paths)) ?? "") == want-sha;
+   (String) identity != "" ? identity
+   : !attested ? "build: the platform attestation no longer holds"
+   : !current ? "build: source generation changed before publication"
+   : fcb-publish-out(opts, form, work, slug, want-sha, candidate, platform-verified, check);
+  }
+  def fcb-publish-out(opts, form, work, slug, want-sha, candidate, platform-verified, check) {
+   let out = fcb-out-path(opts);
+   let made = hch-mkdirs(fs-path-dirname(out));
+   let link = (Comparable) fcb-opt(opts, "explicit", 0) != 1 && (Comparable) platform-verified == 1 && (String) fcb-opt(opts, "bootstrap_dir", "") == "";
+   link ? fcb-link-out(out, slug, want-sha, check) : fcb-copy-out(out, work, candidate, want-sha);
+  }
+  def fcb-link-out(out, slug, want-sha, check) {
+   let stage = out ++ ".linking-" ++ host_pid().str();
+   let linked = (Comparable) hch-run-in(fcb-io(), "link", ["/bin/ln", "-s", "form-stdlib/bootstrap/form-cli-" ++ slug, stage], "", hch-by(60000))[0] == 0 && (Comparable) host_path_rename(stage, out) == 0;
+   let identity = linked ? fcb-verify-identity(out, want-sha, check) : "build: the link could not be made";
+   (String) identity != "" ? identity : fcb-say("linked " ++ out ++ " -> form-stdlib/bootstrap/form-cli-" ++ slug ++ "; source=" ++ want-sha);
+  }
+  def fcb-copy-out(out, work, candidate, want-sha) {
+   let pid = host_pid().str();
+   let staged = fcb-copy(candidate ++ ".fkb", out ++ ".fkb.writing-" ++ pid) && fcb-copy(candidate ++ ".sym", out ++ ".sym.writing-" ++ pid) && fcb-copy(work ++ "/platform.attestation", out ++ ".native.attestation.writing-" ++ pid) && fcb-copy(candidate, out ++ ".writing-" ++ pid) && fcb-chmod("+x", out ++ ".writing-" ++ pid);
+   let landed = staged && (Comparable) host_path_rename(out ++ ".fkb.writing-" ++ pid, out ++ ".fkb") == 0 && (Comparable) host_path_rename(out ++ ".sym.writing-" ++ pid, out ++ ".sym") == 0 && (Comparable) host_path_rename(out ++ ".native.attestation.writing-" ++ pid, out ++ ".native.attestation") == 0 && (Comparable) host_path_rename(out ++ ".writing-" ++ pid, out) == 0;
+   !landed ? "build: the executable could not be published" : fcb-say("built " ++ out ++ " with native Form image and symbols; source=" ++ want-sha);
+  }
+  def fcb-say(line) {
+   let said = print_str(line);
+   "";
+  }
+ }
+}

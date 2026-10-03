@@ -23401,9 +23401,9 @@ extern int kill(int, int);
 #define ESRCH 3
 #endif
 /* Orphan sweep for the pid-temp writer below: a writer killed between open()
- * and rename() (SIGKILL from tools/ftimeout, a crash, a ^C) leaves its
+ * and rename() (SIGKILL from a deadline, a crash, a ^C) leaves its
  * .w<pid> temp behind with no process left responsible for it -- a band
- * sweep under ftimeout orphaned 793 of them in one afternoon (witnessed
+ * sweep under a shell deadline orphaned 793 of them in one afternoon (witnessed
  * 2026-07-17), and `git add -A` swept 783 into a commit. Before staging its
  * own temps, a writer clears its artifact's directory of every
  * *.fkb.w<pid> / *.sym.w<pid> whose writer is DEAD (kill(pid,0) -> ESRCH).

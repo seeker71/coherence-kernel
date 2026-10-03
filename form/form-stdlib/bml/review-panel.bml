@@ -1,0 +1,73 @@
+// review-panel.bml — the reviewer panel: doors to the installed reviewer CLIs, one prompt for all, answers collected as files.
+// The door is observe/review-panel-run.bml (its header carries the doors' table and the isolation rule); the band is
+// observe/tests/review-panel-band.bml. A reviewer is a rented program: it is begun by argv through spawn-guard (from a scratch
+// directory holding only a copy of the artifact), waited on by host-child's deadline, and read back as a file.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml
+section [form.bml] {
+ class ReviewPanel {
+  def rpr-default() = "grok,claude,codex,cursor";
+  def rpr-doors() = ["grok", "claude", "codex", "cursor", "gemini"];
+  def rpr-doc(text) = len(trim(text)) == 0 ? json-node-object([]) : parse-json("review-panel-options", text);
+  def rpr-str(doc, key, fallback) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : fallback;
+  def rpr-int(doc, key, fallback) = json-object-has?(doc, key) ? (json-int-value(json-object-get(doc, key)) ?? fallback) : fallback;
+  def rpr-binary(name) = (String) name == "cursor" ? "cursor-agent" : name;
+  def rpr-open?(name) = (String) name == "gemini" ? false : (Comparable) hch-run-in(".hearth/review-panel", "which-" ++ name, ["/usr/bin/which", rpr-binary(name)], "", hch-by(20000))[0] == 0;
+  // the invocation of a door with a prompt on argv
+  def rpr-argv(name, prompt) = (String) name == "grok" ? ["grok", "-p", prompt]
+   : (String) name == "claude" ? ["claude", "-p", prompt]
+   : (String) name == "codex" ? ["codex", "exec", "--skip-git-repo-check", prompt]
+   : (String) name == "cursor" ? ["cursor-agent", "-p", "--trust", prompt]
+   : [];
+  def rpr-pad(s, w) = len(s) >= w ? s : s ++ rpr-spaces(w - len(s));
+  def rpr-spaces(k) = k <= 0 ? "" : " " ++ rpr-spaces(k - 1);
+  def rpr-state(name) = (String) name == "gemini" ? "closed" : rpr-open?(name) ? "open" : "missing";
+  def rpr-invocation(name) = (String) name == "gemini" ? "no headless door on this host (see header)" : (String) name == "grok" ? "grok -p \"<prompt>\"" : (String) name == "claude" ? "claude -p \"<prompt>\"" : (String) name == "codex" ? "codex exec --skip-git-repo-check \"<prompt>\"" : "cursor-agent -p --trust \"<prompt>\"";
+  def rpr-list() {
+   let head = print_str(rpr-pad("DOOR", 8) ++ " " ++ rpr-pad("STATE", 10) ++ " INVOCATION");
+   foldl((acc, d) => print_str(rpr-pad(d, 8) ++ " " ++ rpr-pad(rpr-state(d), 10) ++ " " ++ rpr-invocation(d)), 0, rpr-doors());
+  }
+  // one prompt, identical for every door, so the answers are comparable
+  def rpr-prompt(question, artifact, text) = question ++ "\n\nAnswer from the artifact below. Be specific and name what is wrong or\nunsupported; agreement is less useful than a located objection. If a\nclaim is unsupported by the text, say which claim and why.\n\n----- BEGIN ARTIFACT: " ++ artifact ++ " -----\n" ++ text ++ "\n----- END ARTIFACT -----";
+  def rpr-base(path) = nil?(split-on(path, "/")) ? path : split-on(path, "/")[len(split-on(path, "/")) - 1];
+  // a door begun with its stdout and stderr in files, from the scratch work directory; [door, pid, out]
+  def rpr-begin(door, prompt, outdir) {
+   let argv = append(["/usr/bin/env", "-C", outdir ++ "/work"], rpr-argv(door, prompt));
+   let pid = rpr-open?(door) ? sg-spawn-at(argv, ["/dev/null", outdir ++ "/" ++ door ++ ".out", outdir ++ "/" ++ door ++ ".err"]) : nothing();
+   let skipped = nothing?(pid) ? write_file(outdir ++ "/" ++ door ++ ".out", "DOOR NOT OPEN\n") + write_file(outdir ++ "/" ++ door ++ ".rc", "78\n") + print_str("SKIP " ++ door ++ " (door not open)") : 0;
+   [door, pid, outdir];
+  }
+  def rpr-end(job, until) {
+   let rc = nothing?(job[1]) ? 78 : (job[1] <= 0 ? 127 : hch-wait(job[1], until)[0]);
+   let said = nothing?(job[1]) ? 0 : write_file(job[2] ++ "/" ++ job[0] ++ ".rc", (nothing?(rc) ? "none" : rc.str()) ++ "\n");
+   rc;
+  }
+  def rpr-line(door, outdir) {
+   let out = read_file(outdir ++ "/" ++ door ++ ".out") ?? "";
+   let rc = trim(read_file(outdir ++ "/" ++ door ++ ".rc") ?? "?");
+   let first = nil?(filter(l => len(trim(l)) > 0, split-on(out, "\n"))) ? "" : filter(l => len(trim(l)) > 0, split-on(out, "\n"))[0];
+   print_str(rpr-pad(door, 8) ++ " " ++ rpr-pad(rc, 4) ++ " " ++ rpr-pad(len(out).str(), 7) ++ " " ++ substring(first, 0, len(first) < 72 ? len(first) : 72));
+  }
+  def rpr-run(doc) {
+   let artifact = rpr-str(doc, "artifact", "");
+   let question = rpr-str(doc, "question", "");
+   let panel = split-on(rpr-str(doc, "panel", rpr-default()), ",");
+   let text = len(artifact) > 0 ? read_file(artifact) : nothing();
+   nothing?(text) || len(question) == 0 ? form_error("review-panel: needs an artifact that stands and a question")
+   : rpr-panel(panel, artifact, question, text, rpr-int(doc, "deadline_s", 1800));
+  }
+  def rpr-panel(panel, artifact, question, text, deadline-s) {
+   let outdir = temp_dir() ++ "/review-panel/" ++ now_unix_ms().str();
+   let made = hch-mkdirs(outdir ++ "/work");
+   let copied = write_file(outdir ++ "/work/" ++ rpr-base(artifact), text);
+   let said = print_str("artifact : " ++ artifact) + print_str("panel    : " ++ rpr-join-list(panel)) + print_str("answers  : " ++ outdir);
+   let prompt = rpr-prompt(question, rpr-base(artifact), text);
+   let jobs = map(d => rpr-begin(d, prompt, outdir), panel);
+   let until = hch-by(deadline-s * 1000);
+   let ended = map(j => rpr-end(j, until), jobs);
+   let table = print_str("") + print_str(rpr-pad("DOOR", 8) ++ " " ++ rpr-pad("RC", 4) ++ " " ++ rpr-pad("BYTES", 7) ++ " FIRST-LINE");
+   let rows = map(d => rpr-line(d, outdir), panel);
+   print_str("full answers: " ++ outdir ++ "/<door>.out");
+  }
+  def rpr-join-list(xs) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ "," ++ rpr-join-list(xs[1:]);
+ }
+}

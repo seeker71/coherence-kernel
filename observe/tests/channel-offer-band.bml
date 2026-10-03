@@ -1,0 +1,93 @@
+; channel-offer-band.bml — a bounded offer into a bell (observe/channel-offer-run.bml), the door that took over from the shell's
+; `( ftimeout N sh -c 'printf x > bell' ) &` and `( sleep N; [ -e pid ] && printf timeout > bell ) &`.
+;
+; Verdict 31 when every claim lands:
+;   1     delivered: with a reader waiting on the fifo, the door writes its word and the reader reads exactly that word
+;   2     bounded: with no reader, the door ends by its deadline (a 2 s window ends within 8 s) and leaves no writer standing
+;   4     only if: with a file named that is absent, nothing is written and the door ends at once (a reader that was waiting still reads nothing)
+;   8     patience: with after_ms 1500 and a file that stands, the word arrives no sooner than 1.5 s after the door began
+;   16    the request file is taken: the door removes the file it was begun on once it has read it
+;
+; REQUIRES: the built ./fkwu and the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml
+section [form.bml] {
+ class ChannelOfferBand {
+  def cob-fresh() {
+   let root = temp_dir() ++ "/channel-offer-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["offer", root, 0] : nothing();
+  }
+  def cob-root(ctx) = ctx[1];
+  def cob-quiet() = ["/dev/null", "/dev/null", "/dev/null"];
+  def cob-fifo(ctx, name) {
+   let path = cob-root(ctx) ++ "/" ++ name ++ ".bell";
+   let made = hch-run-in(cob-root(ctx) ++ "/io", "mk-" ++ name, ["/usr/bin/mkfifo", path], "", hch-by(20000));
+   path;
+  }
+  // a reader: cat on the fifo, its output a file; [pid, file]
+  def cob-reader(ctx, name, fifo) {
+   let out = cob-root(ctx) ++ "/" ++ name ++ ".read";
+   [host_spawn_at(["/bin/cat", fifo], ["/dev/null", out, "/dev/null"]), out];
+  }
+  // the door begun on a request it removes; its pid
+  def cob-door(ctx, name, bell, word, seconds, after-ms, only-if) {
+   let req = cob-root(ctx) ++ "/" ++ name ++ ".request";
+   let w = write_file(req, "{\"request\":\"" ++ req ++ "\",\"bell\":\"" ++ bell ++ "\",\"word\":\"" ++ word ++ "\",\"seconds\":" ++ seconds.str() ++ ",\"after_ms\":" ++ after-ms.str() ++ ",\"only_if\":\"" ++ only-if ++ "\"}");
+   [host_spawn_at(["./fkwu", "observe/channel-offer-run.bml"], [req, "/dev/null", "/dev/null"]), req];
+  }
+  // free a reader that no writer came to: opening the fifo for writing for an instant lets it read end of file
+  def cob-release(fifo) {
+   let pid = host_spawn_at(["/usr/bin/true"], ["/dev/null", fifo, "/dev/null"]);
+   pid > 0 ? hch-wait(pid, hch-by(5000)) : 0;
+  }
+  def cob-written?(path) = file_size(path) > 0;
+  def cob-printf-alive?() = !nil?(host_processes("printf*") ?? []);
+  def cob-c-delivered(ctx) {
+   let fifo = cob-fifo(ctx, "one");
+   let rd = cob-reader(ctx, "one", fifo);
+   let door = cob-door(ctx, "one", fifo, "ring", 5, 0, "");
+   let got = door[0] > 0 && rd[0] > 0 ? [hch-wait(door[0], hch-by(20000)), hch-wait(rd[0], hch-by(20000))] : nothing();
+   !nothing?(got) && (String) (read_file(rd[1]) ?? "") == "ring";
+  }
+  def cob-c-bounded(ctx) {
+   let fifo = cob-fifo(ctx, "two");
+   let t0 = host_monotonic_ms();
+   let door = cob-door(ctx, "two", fifo, "x", 2, 0, "");
+   let ended = door[0] > 0 ? hch-wait(door[0], hch-by(30000)) : nothing();
+   let took = host_monotonic_ms() - t0;
+   !nothing?(ended) && took >= 1500 && took < 8000 && !cob-printf-alive?();
+  }
+  def cob-c-only-if(ctx) {
+   let fifo = cob-fifo(ctx, "three");
+   let rd = cob-reader(ctx, "three", fifo);
+   let t0 = host_monotonic_ms();
+   let door = cob-door(ctx, "three", fifo, "never", 5, 0, cob-root(ctx) ++ "/no-such-pid-file");
+   let ended = door[0] > 0 ? hch-wait(door[0], hch-by(20000)) : nothing();
+   let took = host_monotonic_ms() - t0;
+   let freed = cob-release(fifo);
+   let done = rd[0] > 0 ? hch-wait(rd[0], hch-by(20000)) : nothing();
+   !nothing?(ended) && took < 4000 && !cob-printf-alive?() && !cob-written?(rd[1]);
+  }
+  def cob-c-patience(ctx) {
+   let fifo = cob-fifo(ctx, "four");
+   let pidfile = cob-root(ctx) ++ "/standing";
+   let w = write_file(pidfile, "1\n");
+   let rd = cob-reader(ctx, "four", fifo);
+   let t0 = host_monotonic_ms();
+   let door = cob-door(ctx, "four", fifo, "timeout", 5, 1500, pidfile);
+   let done = door[0] > 0 && rd[0] > 0 ? [hch-wait(rd[0], hch-by(30000)), hch-wait(door[0], hch-by(30000))] : nothing();
+   let took = host_monotonic_ms() - t0;
+   !nothing?(done) && (String) (read_file(rd[1]) ?? "") == "timeout" && took >= 1500;
+  }
+  def cob-c-request(ctx) {
+   let fifo = cob-fifo(ctx, "five");
+   let door = cob-door(ctx, "five", fifo, "x", 1, 0, cob-root(ctx) ++ "/absent");
+   let ended = door[0] > 0 ? hch-wait(door[0], hch-by(20000)) : nothing();
+   !nothing?(ended) && (Comparable) host_path_exists(door[1]) != 1;
+  }
+ }
+ let ctx = cob-fresh();
+ nothing?(ctx) ? form_error("channel-offer band needs a fresh directory") : 0;
+ let verdict = live-claims("channel-offer-band", ctx, [["delivered", 1, 1, cob-c-delivered], ["bounded", 2, 1, cob-c-bounded], ["only-if", 4, 1, cob-c-only-if], ["patience", 8, 1, cob-c-patience], ["request", 16, 1, cob-c-request]]);
+ host_dir_rmdir(cob-root(ctx));
+ verdict;
+}

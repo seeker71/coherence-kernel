@@ -1,0 +1,217 @@
+// form-cli-build.bml — the native form-cli: its source identity, its sealed bootstrap, its build, its install and its behavioral proof.
+//
+// The native form-cli is an executable whose startup C Form emits from a sealed snapshot of its own sources, which `cc` compiles
+// once (the C compiler is the one external tool the seed needs to be BUILT; it is begun through host-child's argv door, as the
+// walk's own build is), and which then compiles its recipe image. Form owns the source closure, the checked snapshots, the startup
+// emission and the compilation (form-stdlib/bml/form-cli-source-closure.bml, a door this organ asks through requests on its
+// stdin); this organ owns what stands around them: the source identity, the attestations that bind every artifact of a
+// generation by its SHA-256, the publication lock and its ordering, the host link and the proof of the built executable.
+//
+//   source identity   fcb-source-sha(paths): SHA-256 over, for each source in order, `path:<path>\nbytes:<n>\n<bytes>\n` (the manifest
+//                     first); fcb-hash16(paths): the first 16 hex of SHA-256 over the sources' bytes with CR stripped (a source that
+//                     is absent folds as `absent:<path>\n`), the stamp. Both are ntss-hash, the body's own SHA-256 (the Form-emitted
+//                     CPU door when it is ready, else Form's own), over the bytes the closure door framed the same way.
+//   attestations      key=value lines: form-cli-native-attestation-v1 (the startup, the author's fkwu, the runtime source) and
+//                     form-cli-native-platform-attestation-v1 (the executable, its .fkb, its .sym and the bootstrap attestation it
+//                     was built from). A duplicate key, an empty value, an unknown key or a hash that is no 64 hex is no attestation.
+//   publication       one publisher owns the output directory (a lock directory with its owner's pid; a living or unreadable owner
+//                     is busy, a stopped one needs a maintainer); files land first, each by a same-directory rename, the stamps last.
+//   proof             fcb-identity-line / fcb-challenge-line: the executable answers carrier-id and carrier-challenge with the source
+//                     identity it was built from; fcb-prove runs the executable from an empty directory through its REPL (grounded
+//                     answers with exact bytes, stale v1 rows refused, ask-request, embed batches and their cap, a 1546-row index,
+//                     a request-bound dual HMAC receipt and its one-use replay).
+// No sed, awk, perl, python, shasum or openssl stands in this organ; ./fkwu, cc, env, tar, ln, chmod, cp and uname are OS tools begun by argv.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/form-fs.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk form-stdlib/bml/value-operators.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/parse.bml form-stdlib/bml/native-table-source-seal.bml
+section [form.bml] {
+ class FormCliBuild {
+  // the body is the working directory (a door is run from the repository root); form/ is its Form home
+  def fcb-form() = host_cwd() ++ "/form";
+  // The dynamic host carrier: a relocated build (a private copy of the body, which holds no built carrier) keeps the caller's
+  // selected one, so the Form-emitted CPU SHA the closure door hashes with stays ready (without it the same hashing runs in
+  // Form's own bytes, about 200 KB/s, and a build takes three times as long). The environment's FKWU_METAL_CARRIER first, else this
+  // body's own dylib when it stands, else none.
+  def fcb-own-carrier() = fcb-form() ++ "/native/metal/fk-metal-carrier.dylib";
+  def fcb-carrier-path() {
+   let set = trim(hch-read(["/usr/bin/printenv", "FKWU_METAL_CARRIER"]));
+   len(set) > 0 ? set : (Comparable) file_size(fcb-own-carrier()) >= 0 ? fcb-own-carrier() : "";
+  }
+  // an argv run with that carrier named: `env [-C dir] FKWU_METAL_CARRIER=<path> command ...` (options before assignments)
+  def fcb-with-carrier(argv) {
+   let path = fcb-carrier-path();
+   len(path) == 0 ? argv : append(["/usr/bin/env", "FKWU_METAL_CARRIER=" ++ path], argv);
+  }
+  def fcb-with-carrier-in(cwd, argv) {
+   let path = fcb-carrier-path();
+   len(path) == 0 ? append(["/usr/bin/env", "-C", cwd], argv) : append(["/usr/bin/env", "-C", cwd, "FKWU_METAL_CARRIER=" ++ path], argv);
+  }
+  // ---- small readers
+  def fcb-has?(s, part) = str_find(s, part, 0) >= 0;
+  def fcb-starts?(s, p) = len(s) >= len(p) && (String) substring(s, 0, len(p)) == p;
+  def fcb-ends?(s, p) = len(s) >= len(p) && (String) substring(s, len(s) - len(p), len(s)) == p;
+  def fcb-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ fcb-join(xs[1:], sep);
+  def fcb-lines(text) = filter(l => len(l) > 0, split-on(text, "\n"));
+  def fcb-hex-char?(b) = (b >= 48 && b <= 57) || (b >= 97 && b <= 102);
+  def fcb-hex-run?(s, i, n) = i >= n ? true : fcb-hex-char?(str_byte_at(s, i)) && fcb-hex-run?(s, i + 1, n);
+  def fcb-hash-valid?(h) = (String) value_kind(h) == "string" && len(h) == 64 && fcb-hex-run?(h, 0, 64);
+  def fcb-stamp-valid?(s) = (String) value_kind(s) == "string" && len(s) == 16 && fcb-hex-run?(s, 0, 16);
+  def fcb-slug-char?(b) = (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 46 || b == 95 || b == 45;
+  def fcb-slug-run?(s, i) = i >= len(s) ? true : fcb-slug-char?(str_byte_at(s, i)) && fcb-slug-run?(s, i + 1);
+  def fcb-slug-valid?(s) = len(s) > 0 && fcb-slug-run?(s, 0);
+  def fcb-strip-cr(s) = fcb-join(split-on(s, byte_to_str(13)), "");
+  def fcb-nl() = byte_to_str(10);
+  // ---- identity: the body's own SHA-256
+  def fcb-sha(text) = ntss-hash(text);
+  def fcb-regular?(path) = (Comparable) file_size(path) >= 0 && (Comparable) host_path_is_dir(path) != 1 && !fcb-symlink?(path);
+  def fcb-symlink?(path) = (Comparable) hch-run-in(fcb-io(), "symlink", ["/bin/test", "-L", path], "", hch-by(20000))[0] == 0;
+  def fcb-io() = ".hearth/form-cli-build";
+  // the digest of one regular file; nothing when it is not one
+  def fcb-sha-file(path) = fcb-regular?(path) ? fcb-sha(read_file(path) ?? "") : nothing();
+  def fcb-frame(path, bytes) = "path:" ++ path ++ "\nbytes:" ++ len(bytes).str() ++ "\n" ++ bytes ++ "\n";
+  // the sources, as [path, bytes] in order (a path is read from form/); nothing when one is absent
+  def fcb-read-sources(form, paths) {
+   let rows = map(p => [p, read_file(fs-path-join(form, p))], paths);
+   any?(r => nothing?(r[1]), rows) ? nothing() : rows;
+  }
+  def fcb-source-sha(rows) = nothing?(rows) ? nothing() : fcb-sha(str-spans(map(r => fcb-frame(r[0], r[1]), rows)));
+  def fcb-fold-bytes(form, paths) = str-spans(map(p => (read_file(fs-path-join(form, p)) ?? "absent:" ++ p ++ "\n"), paths));
+  def fcb-hash16(form, paths) = substring(fcb-sha(fcb-strip-cr(fcb-fold-bytes(form, paths))), 0, 16);
+  // ---- the attestations
+  def fcb-pair(line) {
+   let at = str_find(line, "=", 0);
+   at < 0 ? nothing() : [substring(line, 0, at), substring(line, at + 1, len(line))];
+  }
+  def fcb-pairs(text) = map(l => fcb-pair(l), fcb-lines(text));
+  def fcb-keys(pairs) = map(p => p[0], pairs);
+  def fcb-dup?(ks) = nil?(ks) ? false : cw-in?(ks[1:], ks[0]) || fcb-dup?(ks[1:]);
+  def fcb-get(pairs, key) = nil?(filter(p => (String) p[0] == key, pairs)) ? "" : filter(p => (String) p[0] == key, pairs)[0][1];
+  def fcb-att-keys() = ["schema", "source_sha256", "source_stamp", "startup_sha256", "author_binary_sha256", "runtime_source_sha256", "bootstrap_attestation_sha256", "platform_slug", "binary_sha256", "image_sha256", "symbols_sha256"];
+  def fcb-pairs-ok?(pairs) = !any?(p => nothing?(p), pairs) && !fcb-dup?(fcb-keys(pairs)) && all?(p => len(p[1]) > 0 && cw-in?(fcb-att-keys(), p[0]), pairs);
+  def fcb-has-only?(pairs, keys) = all?(p => cw-in?(keys, p[0]), pairs) && all?(k => !(len(fcb-get(pairs, k)) == 0), keys);
+  def fcb-schema-startup() = "form-cli-native-attestation-v1";
+  def fcb-schema-platform() = "form-cli-native-platform-attestation-v1";
+  def fcb-startup-keys() = ["schema", "source_sha256", "source_stamp", "startup_sha256", "author_binary_sha256", "runtime_source_sha256"];
+  def fcb-platform-keys() = ["schema", "source_sha256", "source_stamp", "bootstrap_attestation_sha256", "platform_slug", "binary_sha256", "image_sha256", "symbols_sha256"];
+  // the attestation at a path as pairs, or nothing when it is not a well formed one of either schema
+  def fcb-att-load(path) {
+   let text = fcb-regular?(path) ? (read_file(path) ?? "") : "";
+   let pairs = fcb-pairs(text);
+   len(text) > 0 && fcb-pairs-ok?(pairs) && fcb-att-schema-ok?(pairs) ? pairs : nothing();
+  }
+  def fcb-att-schema-ok?(pairs) {
+   let schema = fcb-get(pairs, "schema");
+   fcb-hash-valid?(fcb-get(pairs, "source_sha256")) && fcb-stamp-valid?(fcb-get(pairs, "source_stamp"))
+   && ((String) schema == fcb-schema-startup() ? (len(pairs) == len(fcb-startup-keys()) && fcb-has-only?(pairs, fcb-startup-keys()) && fcb-hash-valid?(fcb-get(pairs, "startup_sha256")) && fcb-hash-valid?(fcb-get(pairs, "author_binary_sha256")) && fcb-hash-valid?(fcb-get(pairs, "runtime_source_sha256")))
+    : (String) schema == fcb-schema-platform() ? (len(pairs) == len(fcb-platform-keys()) && fcb-has-only?(pairs, fcb-platform-keys()) && fcb-hash-valid?(fcb-get(pairs, "bootstrap_attestation_sha256")) && fcb-slug-valid?(fcb-get(pairs, "platform_slug")) && fcb-hash-valid?(fcb-get(pairs, "binary_sha256")) && fcb-hash-valid?(fcb-get(pairs, "image_sha256")) && fcb-hash-valid?(fcb-get(pairs, "symbols_sha256")))
+    : false);
+  }
+  def fcb-att-text(pairs) = str-spans(map(p => p[0] ++ "=" ++ p[1] ++ "\n", pairs));
+  // the startup attestation of a candidate: identity, stamp, the startup C, the author's fkwu and the runtime source it held
+  def fcb-startup-pairs(source-sha, stamp, startup-sha, author-sha, runtime-sha) = [["schema", fcb-schema-startup()], ["source_sha256", source-sha], ["source_stamp", stamp], ["startup_sha256", startup-sha], ["author_binary_sha256", author-sha], ["runtime_source_sha256", runtime-sha]];
+  def fcb-platform-pairs(source-sha, stamp, bootstrap-sha, slug, binary-sha, image-sha, symbols-sha) = [["schema", fcb-schema-platform()], ["source_sha256", source-sha], ["source_stamp", stamp], ["bootstrap_attestation_sha256", bootstrap-sha], ["platform_slug", slug], ["binary_sha256", binary-sha], ["image_sha256", image-sha], ["symbols_sha256", symbols-sha]];
+  // a startup attestation holds for a startup, a runtime source and (when named) an author binary
+  def fcb-verify-startup(path, source-sha, stamp, startup, runtime-source, author-sha) {
+   let pairs = fcb-att-load(path);
+   !nothing?(pairs) && (String) fcb-get(pairs, "schema") == fcb-schema-startup()
+   && (String) fcb-get(pairs, "source_sha256") == source-sha && (String) fcb-get(pairs, "source_stamp") == stamp
+   && (String) fcb-get(pairs, "startup_sha256") == (fcb-sha-file(startup) ?? "") && (String) fcb-get(pairs, "runtime_source_sha256") == (fcb-sha-file(runtime-source) ?? "")
+   && (len(author-sha) == 0 || (String) fcb-get(pairs, "author_binary_sha256") == author-sha);
+  }
+  def fcb-write-startup(path, source-sha, stamp, startup, author-sha, runtime-source) {
+   let startup-sha = fcb-sha-file(startup);
+   let runtime-sha = fcb-sha-file(runtime-source);
+   !fcb-hash-valid?(source-sha) || !fcb-stamp-valid?(stamp) || !fcb-hash-valid?(author-sha) || nothing?(startup-sha) || nothing?(runtime-sha) ? false : fcb-write-startup-held(path, source-sha, stamp, startup, author-sha, runtime-source, startup-sha, runtime-sha);
+  }
+  def fcb-write-startup-held(path, source-sha, stamp, startup, author-sha, runtime-source, startup-sha, runtime-sha) {
+   let text = fcb-att-text(fcb-startup-pairs(source-sha, stamp, startup-sha, author-sha, runtime-sha));
+   let wrote = write_file(path, text);
+   (Comparable) wrote == len(text) && fcb-verify-startup(path, source-sha, stamp, startup, runtime-source, author-sha);
+  }
+  def fcb-verify-platform(path, source-sha, stamp, bootstrap, slug, binary, image, symbols) {
+   let pairs = fcb-att-load(path);
+   !nothing?(pairs) && (String) fcb-get(pairs, "schema") == fcb-schema-platform()
+   && (String) fcb-get(pairs, "source_sha256") == source-sha && (String) fcb-get(pairs, "source_stamp") == stamp && (String) fcb-get(pairs, "platform_slug") == slug
+   && (String) fcb-get(pairs, "bootstrap_attestation_sha256") == (fcb-sha-file(bootstrap) ?? "")
+   && (String) fcb-get(pairs, "binary_sha256") == (fcb-sha-file(binary) ?? "") && (String) fcb-get(pairs, "image_sha256") == (fcb-sha-file(image) ?? "") && (String) fcb-get(pairs, "symbols_sha256") == (fcb-sha-file(symbols) ?? "");
+  }
+  def fcb-write-platform(path, bootstrap, slug, binary, image, symbols) {
+   let boot = fcb-att-load(bootstrap);
+   !nothing?(boot) && (String) fcb-get(boot, "schema") == fcb-schema-startup() && fcb-slug-valid?(slug) ? fcb-write-platform-held(path, boot, bootstrap, slug, binary, image, symbols) : false;
+  }
+  def fcb-write-platform-held(path, boot, bootstrap, slug, binary, image, symbols) {
+   let sha = fcb-get(boot, "source_sha256");
+   let stamp = fcb-get(boot, "source_stamp");
+   let parts = [fcb-sha-file(bootstrap), fcb-sha-file(binary), fcb-sha-file(image), fcb-sha-file(symbols)];
+   any?(p => nothing?(p), parts) ? false : fcb-write-platform-text(path, sha, stamp, bootstrap, slug, binary, image, symbols, parts);
+  }
+  def fcb-write-platform-text(path, sha, stamp, bootstrap, slug, binary, image, symbols, parts) {
+   let text = fcb-att-text(fcb-platform-pairs(sha, stamp, parts[0], slug, parts[1], parts[2], parts[3]));
+   let wrote = write_file(path, text);
+   (Comparable) wrote == len(text) && fcb-verify-platform(path, sha, stamp, bootstrap, slug, binary, image, symbols);
+  }
+  // ---- the platform: the published bundle is form-cli-<slug>
+  def fcb-arch(raw) = (String) raw == "x86_64" || (String) raw == "amd64" ? "amd64" : (String) raw == "aarch64" || (String) raw == "arm64" ? "arm64" : raw;
+  def fcb-slug-of(os, arch) {
+   let o = fcb-lowered(os);
+   let a = fcb-arch(arch);
+   (String) o == "darwin" ? "darwin-" ++ a : (String) o == "linux" ? "linux-" ++ a : (fcb-starts?(o, "mingw") || fcb-starts?(o, "msys") || fcb-starts?(o, "cygwin")) ? "windows-" ++ a : o ++ "-" ++ a;
+  }
+  def fcb-lowered(s) = str-spans(map(i => fcb-lower-byte(str_byte_at(s, i)), range(0, len(s))));
+  def fcb-lower-byte(b) = byte_to_str(b >= 65 && b <= 90 ? b + 32 : b);
+  def fcb-platform-slug() = fcb-slug-of(hch-read(["uname", "-s"]), hch-read(["uname", "-m"]));
+  // ---- the publication lock: one publisher owns the output directory through its final stamps
+  // answers [0, ""] when held, else [75, why]: a lock that is initialising, ownerless, malformed, living or stopped is never reclaimed here
+  def fcb-lock-acquire(dir) {
+   let owner = dir ++ "/owner.pid";
+   (Comparable) host_dir_mkdir(dir) == 1 ? fcb-lock-own(dir, owner) : fcb-lock-busy(dir, owner);
+  }
+  def fcb-lock-own(dir, owner) {
+   let wrote = write_file(owner, host_pid().str() ++ "\n");
+   (Comparable) wrote > 0 ? [0, ""] : fcb-lock-uninit(dir, owner);
+  }
+  def fcb-lock-uninit(dir, owner) {
+   let removed = host_path_remove(owner) + host_dir_rmdir(dir);
+   [75, "form-cli publish: cannot initialise lock " ++ dir];
+  }
+  def fcb-lock-busy(dir, owner) {
+   let text = trim(read_file(owner) ?? "");
+   let pid = len(text) > 0 && scan_run(text, 0, 1) == len(text) ? parse-int(text) : nothing();
+   nothing?(read_file(owner)) ? [75, "form-cli publish: lock " ++ dir ++ " is initialising or ownerless; refusing concurrent reclaim"]
+   : nothing?(pid) ? [75, "form-cli publish: lock " ++ dir ++ " has malformed owner; refusing concurrent reclaim"]
+   : (Comparable) host_alive(pid) == 1 ? [75, "form-cli publish: another publisher owns " ++ dir ++ " (pid " ++ pid.str() ++ ")"]
+   : [75, "form-cli publish: lock " ++ dir ++ " names stopped pid " ++ pid.str() ++ "; manual recovery required"];
+  }
+  def fcb-lock-release(dir) {
+   let removed = host_path_remove(dir ++ "/owner.pid");
+   host_dir_rmdir(dir);
+  }
+  // ---- the proof of the built executable: it answers with the source identity it was built from
+  def fcb-nonce() = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  def fcb-known-digest() = "1cb41be978d307c11bf41602cd11bdac834046103d6fc89a6f69cd0c6c4efb21";
+  def fcb-expected-id(source-sha) = "carrier-id|form-cli-carrier-v2|" ++ source-sha ++ "|coherence-kernel-fkwu-native-v2";
+  def fcb-expected-challenge(source-sha) = "carrier-challenge-v1|" ++ source-sha ++ "|" ++ fcb-nonce() ++ "|" ++ fcb-known-digest();
+  def fcb-first-with(text, prefix) = nil?(filter(l => fcb-starts?(l, prefix), split-on(text, "\n"))) ? "" : filter(l => fcb-starts?(l, prefix), split-on(text, "\n"))[0];
+  // a slashless name would be resolved through PATH: it stands in the working directory
+  def fcb-binary-path(binary) = fcb-has?(binary, "/") ? binary : "./" ++ binary;
+  // the executable run from `cwd` (an empty directory), fed `input`, with its deadline: [exit, stdout-and-stderr]
+  def fcb-run-in(cwd, step, binary, input) {
+   let run = hch-run-in(fcb-io(), step, ["/usr/bin/env", "-C", cwd, binary], input, hch-by(600000));
+   [run[0], run[1]];
+  }
+  def fcb-check-dir(base) {
+   let made = hch-mkdirs(base ++ "/.hearth/session-learning");
+   let paused = write_file(base ++ "/.hearth/session-learning/paused", "1\n");
+   base;
+  }
+  // "" when the executable answers carrier-id and carrier-challenge as its source identity says, else the reason
+  def fcb-verify-identity(binary, source-sha, check-dir) {
+   let bin = fcb-absolute(fcb-binary-path(binary));
+   let id = fcb-run-in(check-dir, "identity", bin, "carrier-id\n");
+   let ch = fcb-run-in(check-dir, "challenge", bin, "carrier-challenge " ++ fcb-nonce() ++ "\n");
+   (Comparable) file_size(bin) < 0 ? "form-cli bootstrap: binary is missing or not executable: " ++ binary
+   : (String) fcb-first-with(id[1], "carrier-id|") != fcb-expected-id(source-sha) ? "form-cli bootstrap: carrier-id mismatch have=" ++ fcb-first-with(id[1], "carrier-id|") ++ " want=" ++ fcb-expected-id(source-sha)
+   : (String) fcb-first-with(ch[1], "carrier-challenge-v1|") != fcb-expected-challenge(source-sha) ? "form-cli bootstrap: carrier-challenge mismatch have=" ++ fcb-first-with(ch[1], "carrier-challenge-v1|") ++ " want=" ++ fcb-expected-challenge(source-sha)
+   : "";
+  }
+  def fcb-absolute(path) = fcb-starts?(path, "/") ? path : host_cwd() ++ "/" ++ (fcb-starts?(path, "./") ? substring(path, 2, len(path)) : path);
+ }
+}
