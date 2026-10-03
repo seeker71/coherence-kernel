@@ -1,0 +1,61 @@
+//////////////////////////////////////////////////////////////////////
+// model-seal.bml -- write the seal a model file is admitted by: <file>.form-seal holds "qaf-seal1:<size>:<SHA-256 hex>", the line the session and generate doors read (qwen35-artifact-seal-reader.fk).
+//
+// WHY IT IS HERE. The doors verify a model against its seal and refuse a file that has none; the fetch organ writes the seal when it moves a file in. A file that arrived another way (the 80 GiB DeepSeek-V4 IQ2XXS build was
+// copied in, and its seal was never written) needs the same line made by the same digest the doors check it against: the body's own SHA-256 organ (saj-file-digest), a full read of the file in 4 GiB chunks (each a no-copy view released before the next: one buffer over a file past maxBufferLength cannot be made), the pass the first open
+// of any model pays anyway. The door never overwrites a seal that stands (a seal is the file's identity, and a file that no longer matches it is the doors' to refuse, not this one's to repair), and it never writes a seal
+// for a file that moved while it was read.
+//
+// THE DOOR. observe/model-seal-run.bml reads one JSON line on stdin: file, go. {} and {"dry":1} name the file, its size and whether a seal stands, and read no byte of it; {"go":1} hashes and writes. Exit 0 for a seal written
+// (or already standing), 1 otherwise.
+//
+// Proven by: form-stdlib/tests/model-seal-band.bml (the SHA-256 of "abc" as the seal, the doors' own verdict on it, no overwrite, the refusals).
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/qwen35-artifact-seal-reader.fk
+section [form.bml] {
+ class ModelSeal {
+  // the line a seal holds
+  def ms-line(size, hex) = "qaf-seal1:" ++ int_to_str(size) ++ ":" ++ hex;
+  // [1, reason] a seal now stands for the file as it was read, [0, reason] nothing was written
+  // The file's identity (size, mtime, inode: qaf-identity, the one the doors' note is made of) is read before the pass and after it, and a seal is written only when the two readings are the same: a same-size edit
+  // during the pass would otherwise be sealed and stamped verified. `reader` is the identity reader, the seam a band hands two different readings.
+  def ms-seal(path) = ms-seal-with(path, p => qaf-identity(p));
+  def ms-seal-with(path, reader) = file_size(path) < 1 ? [0, "no-file"] : (file_size(qaf-seal-path-for(path)) > 0 ? [1, "seal-already-standing"] : ms-hashed(path, file_size(path), reader, reader(path)));
+  def ms-hashed(path, size, reader, before) {
+   let digest = saj-file-digest(path, size);
+   len(digest) == 0 ? [0, "digest-engine-did-not-answer"] : ((file_size(path) != size || (String) reader(path) != (String) before) ? [0, "file-moved-while-hashed"] : ms-written(path, size, qaf-string-hex(digest)));
+  }
+  def ms-written(path, size, hex) {
+   let wrote = write_file_text(qaf-seal-path-for(path), ms-line(size, hex));
+   let stood = wrote >= 0 && file_size(qaf-seal-path-for(path)) == len(ms-line(size, hex));
+   // the pass that made the seal is a full pass that agrees with it: the note the doors keep after one (the file's identity, the seal's digest, the time) is kept here, so the first open does not read the file a second time
+   let noted = ms-keep(path, hex, stood);
+   stood && noted == 1 ? [1, "sealed"] : [0, "seal-not-written"];
+  }
+  // a conditional effect is a named recipe (a let that holds an `if` is substituted where it is read, and never run if nothing reads it)
+  def ms-keep(path, hex, stood) = stood ? qaf-verified-keep(path, hex, now_unix_ms() / 1000, 1) : 0;
+  // ---- the door ------------------------------------------------------------------------------------------------------------------------------------
+  def ms-options() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("model-seal-options", line) : json-node-object([]);
+  }
+  def ms-text(doc, key) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : "";
+  def ms-int(doc, key) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : 0;
+  def ms-go?(opts) = ms-int(opts, "go") == 1 && ms-int(opts, "dry") != 1;
+  def ms-plan(path) = "[model-seal] DRY: file " ++ path ++ " " ++ file_size(path).str() ++ " B; seal " ++ qaf-seal-path-for(path) ++ ((file_size(qaf-seal-path-for(path)) > 0) ? " STANDS (nothing would be written)" : " is absent: {\"go\":1} hashes the whole file with the body's SHA-256 organ (a full read in 4 GiB chunks) and writes it, with the note that spares the first open a second pass") ++ "; no byte of the file was read";
+  def ms-main() {
+   let opts = ms-options();
+   let path = ms-text(opts, "file");
+   len(path) == 0 ? ms-said("[model-seal] usage: {\"file\":\"<path>\",\"go\":1}; {} or {\"dry\":1} reads nothing", 1) : (ms-go?(opts) ? ms-go(path) : ms-said(ms-plan(path), 0));
+  }
+  def ms-said(line, rc) {
+   let said = print_str(line);
+   rc;
+  }
+  def ms-go(path) {
+   let r = ms-seal(path);
+   ms-said("[model-seal] " ++ (String) r[1] ++ ": " ++ qaf-seal-path-for(path), r[0] == 1 ? 0 : 1);
+  }
+ }
+ 0;
+}

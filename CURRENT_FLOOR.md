@@ -79,10 +79,10 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v4 [7, 0, 1, 0, 0, 6] then 1
                                             (total/unclassified/carrier/oracle/fixture/tooling)
 gate/tests/structural-gate-band          -> 8191
-./fkwu observe/door-link-health-run.bml  -> docs=41 claims=901 broken=0 (each broken claim named on its own line; 2026-10-03)
+./fkwu observe/door-link-health-run.bml  -> docs=41 claims=913 broken=0 (each broken claim named on its own line; 2026-10-04)
                                             then prelude-reach missing=0 untracked=0 shadow=0
                                             (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=375 readable=197 unreadable=178 absent=0 seen=1 flaws=0, exit 0
+./fkwu observe/band-truth-run.bml        -> bands=378 readable=200 unreadable=178 absent=0 seen=1 flaws=0, exit 0
                                             (each band's declared full read against the most its claims sum to, and
                                             the queue and manifest copies of a full against the head pin, with no
                                             band run, in about 0.3 s; a decimal or count fold that stands on purpose
@@ -313,14 +313,14 @@ form-knowledge-integration-census-band     -> 1048575
 form-knowledge-source-search-band          -> 262143
 form-knowledge-qwen-heldout-v3-eval-band   -> 65535   (every row current against its source sha, and
                                                        the dataset sha equal to its seal)
-native-model-route-table-band 255 · ds4-blob-select-band 31 · nl-lexicon-grow-band 127
+native-model-route-table-band 255 · nl-lexicon-grow-band 127
 pivot-coverage-band 65535 · cognition/tests/error-absorption-kernel-band 4095
 ```
 
 The v3 held-out lane (30 rows, every family twice, whole-normalized answers) is the body's
 defined-correctness number. Its consent file (`.form-knowledge-qwen-heldout-v3-consent`) is a per-run
-local act that git ignores. The model route is a Form data table, and the DS4 engine is found at
-runtime through its directory with its header verified.
+local act that git ignores. The model route is a Form data table, and a model file is found at
+runtime by the `models <directory>` listing (`model-discovery.fk`), each file's own header read.
 
 There is no sealing door. Each row's source sha, and each dataset's seal, are literals typed into
 `form-knowledge-qwen-heldout-eval.fk` (v1, 15 rows) and `form-knowledge-qwen-heldout-v3-eval.fk` (v3);
@@ -336,19 +336,47 @@ full, 65535; the dataset headers say so.
 
 ## The Form-native DeepSeek V4 chain
 
-Read on 2026-10-02 (WITA) through `./fkwu form/form-stdlib/tests/<band> </dev/null`, the memory governor
-reading room before each run, every exit 0. No band maps the model: the ones that read the registry's file
-(the reap25 build) read its header, an 8 MB window, and the recorded logits are 1.5 MB. What stands is the chain
-restored model-free: the tokenizer, the quant and tensor readers, the emitters, the reference arithmetic and the
-emission door, and the driver (driver stages 1 to 4, below: the fixture, layout and bind on the CPU; the kernel set, the
-open, one layer, the head, prefill and the greedy loop, the whole fixture model end to end on the device, all on the
-Form-built fixtures, the second in the tensor types of the real IQ2XXS file; the session and generate doors, the derived
-memory lease and the validation window written with the lane off). What does not stand: the driver over a real file's
-mapped weights (every type of the IQ2XXS file is wired and proven on a fixture in those types, and its header reads no
-gap through the validation door; no band maps the real file); the Form-native lane is not wired (`model-registry.bml` keeps the
-`deepseek4` lane row at `ds4-query`, off, and `fcds-lane-wired?` in `form-cli-model-ds4.fk` is its twin, 0); the
-control-plane rows `challenger.deepseek-ds4-metal` and `oracle.deepseek-ds4-imatrix` are unchanged; and the validation
-window has not run: one window, alone, governor-checked, against the recorded references earned on the IQ2XXS file.
+The chain is whole and it runs on the real file. Bands hold it model-free (`./fkwu form/form-stdlib/tests/<band> </dev/null`, the memory governor
+reading room before each run, every exit 0; no band maps the model: the ones that read a real file read its header, an 8 MB window, and the recorded
+logits are 1.5 MB): the tokenizer, the quant and tensor readers, the emitters, the reference arithmetic and the emission door, and the driver (driver
+stages 1 to 6, below: the fixture, layout and bind on the CPU; the kernel set, the open, one layer, the head, prefill and the greedy loop, the whole
+fixture model end to end on the device on the Form-built fixtures, the second in the tensor types of the real IQ2XXS file; the routed-expert arena; the
+session and generate doors on a fixture with a vocabulary). The physical witness is the real run of 2026-10-03/04 on the 80 GiB IQ2XXS file
+(`receipts/dsv4-token-runs.jsonl`, `docs/evidence/fkwu/dsv4-token-run-*.txt`): the routed-arena flow read the recorded logits at r 0.99813 with the
+recorded argmax 2581 (our largest delta 1.145, inside the reference engine's own spread of 2.16), the teacher-forced raw-id stream at 23 exact, 1
+tie-explained and 0 failed of 24, a cold first token of 2.6 s and a warm decode near 100 ms a token, no swap. THE LANE IS WIRED: `model-registry.bml`'s
+`deepseek4` row reads `dsv4`, on, and `fcds-lane-wired?` in `form-cli-model-ds4.fk` is its twin, 1; `dsv4-door-band` fails when they differ. NO EXTERNAL
+ENGINE IS PART OF THE BODY: the body spawns and queries none, its control-plane row for the lane is `challenger.deepseek-v4-metal` (the IQ2XXS build,
+witnessed 2026-10-04) and the ask route (`ask-lane-router.fk`) carries it by `form-cli-model-ds4.fk`. What stays of `ds4` is the reference record the
+validation was judged against (`ds4-logits-capital-of-france.json`, its prompt row, `ds4-recorded-references-band`, the notes on the order the reference
+engine summed in) and the family tag in file and module names (`ds4flash`, `dsv4-*`).
+
+THE LANE THROUGH THE DOORS (`native/metal/tests/dsv4-lane-band.bml` 4095 on a fixture with a vocabulary, `dsv4-session-plan-band` 31 on the real header;
+no real file read or mapped by a band; the Metal bands need the carrier `form/native/metal/fk-metal-carrier.dylib` to exist in the checkout, built beside by the carrier line of AGENTS.md and never copied
+over a live one: without it a fresh worktree reads `dsv4-door-band` 479 and `model-seal-band` 0). The session door (`fcms-open-reserved`, `fcms-generate`, `fcms-release-ok?`: the calls a Qwen session is asked
+through) takes a deepseek4 file in this order: the admission queue, the seal (`<file>.form-seal`; the IQ2XXS file has none today and
+`observe/model-seal-run.bml` writes it; the SHA-256 organ walks the file in 4 GiB chunks, each a no-copy view released before the next, because one buffer over a file past the device's maxBufferLength of 86,586,540,032 B cannot be made and the 86.7 GB build read an empty digest; the rate is 1.6 to 2.1 GB/s from a warm page cache, the compression being sequential on one core), the registry's lane gate, the chat template's ids from the file's own tokenizer (an empty prompt is no turn), the window check
+(a window is cut to the limit, refused past the header's context_length or when it is no larger than the prompt), the driver's gap check from the header
+(`model-driver-gap:<tensor>`), the governor's lease for the derived working set at the capacity (24.9 GiB shared: the dense tensors, an arena of 64
+experts a layer, the KV; 8 GiB private; a denied ask reads `host-memory-held:<reason>` and opens nothing), the
+routed-arena open (`dsv4-open-arena`: never whole stacks, which read the whole file in one token), prefill, then the greedy walk to a NAMED ending:
+`eos` (the header's eos id), `max-tokens`, `context-limit`, `step-refused`. THE DRIVER SERVES POSITIONS 0 THROUGH 2047: a ratio-4 block refuses at position
+2048 and later, where the indexer stops being inert and the file's 126 indexer tensors are unrouted. A window asked for is cut to 2,048 and refused past the
+header's context_length; a walk that consumes position 2047 stops `context-limit` and its usage line says so (`usage: prompt_tokens=N generated_tokens=N
+ending=E position=P capacity=C position_limit=2047`: the last position consumed, the capacity the session holds, and the driver's own limit apart), it
+never runs into the refusal. A renewal (`fcmr-replace-with-profile-checked`) is Qwen's move over the same weights and
+the same arena: a second KV state, the new prompt prefilled from position 0, the old state released, so a renewed stream has the whole limit again; a
+prompt past the window is refused and the session stays as it was; a second state the driver refuses (`new-stream-allocation-refused`) or a prefill
+that stops (`new-stream-prefill-refused`) ends the renewal by name with the first stream intact and the second freed. THE UNWIND: a stop inside a
+DeepSeek walk (`fcms-generate-ds4-with`, offered under `try`) releases the context, the arena and the state and gives the lease back where they are owned,
+and answers a session that is not resident, named `walk-stopped`. The release is the driver's own close (`fcds-release`, `dsv4-close`: the arena
+included, in synced rounds) and the lease goes back. The generate door (`fcmg-ds4-door-with?`, the CLI's `generate`) is the same run in one shot and
+reports `backend`, `mode` (`dsv4-native-generate`), `prompt_tokens`, `generated_tokens`, `ending`, `capacity`, `position_limit` and the text after `text:`. Not wired:
+observations (`ds4-observation-not-wired`), the sampler, the draft and adapter lanes, the positions from 2048; the text holds whole characters (an
+incomplete UTF-8 tail at the end of a walk is written `\xNN`) and the ids are the exact record. WHAT THE REAL SESSION RUN MUST READ (`observe/dsv4-session-run.bml` `{"go":1}`, the lead's run, after the seal): status `ok`, reason
+`answered`, `prompt_tokens=14`, the first generated id 2581 (the recording's argmax for the 14 template ids), `generated_tokens=24` and `ending=max-tokens`
+at `tokens` 24, `position=37 capacity=38 position_limit=2047`, released 1, the lease file gone, no swap and no pagein storm in the machine's reading, and one row appended to
+the door's receipt file (named in the door's own head).
 
 ```text
 tokenizer      dsv4-tokenizer-band 8191 · dsv4-tokenizer-native-band 15 · dsv4-token-recipe-swap-band 65535
@@ -374,6 +402,8 @@ driver stage 4 dsv4-fixture-q8q2-band.bml 255 · dsv4-kernels-q8q2-band.bml 1023
 driver stage 5 native/metal/tests/dsv4-ledger-band.bml 2047 · native/metal/tests/dsv4-door-run-band.bml 127   (the op ledger of a token, whole-stack and arena ceilings, the attribution row, the flow through the door's functions)
                native/metal/tests/dsv4-token-run-band.bml 16383 · form-stdlib/tests/dsv4-token-run-plan-band.bml 127 · form-stdlib/tests/dsv4-token-run-validation-band.bml 255   (the token door's rows from the ledger, the tap, the plan from the header, the arena mode; the validation, teacher-forced and poison readings; the host's time columns, the segments, the hand-over cadence; the knobs and the arena's size in the plan)
                native/metal/tests/dsv4-arena-band.bml 2047 · form-stdlib/tests/dsv4-expert-cache-band.bml 16383 · form-stdlib/tests/metal-buf-fill-band.bml 31 · native/metal/tests/dsv4-arena-sim-band.bml 31   (the slot arena against the whole-stack control, the least-recently-used cache and its one-pass walks, the fill door, the picks replayed at other arena sizes equal to real walks)
+driver stage 6 native/metal/tests/dsv4-lane-band.bml 4095 · form-stdlib/tests/dsv4-session-plan-band.bml 31 · form-stdlib/tests/model-seal-band.bml 2047   (the lane through the session and generate doors on a fixture with a vocabulary; the dry plan on the
+               real header; the seal door)
 ```
 
 Driver stage 1 (read 2026-10-03 WITA, each band alone, memory room before each run, every exit 0; each band's planted
@@ -388,7 +418,7 @@ blk.42 are the layers, and 3 draft layers (`dspark.0` to `dspark.2`) follow in t
 is 43 plus 3 (the comment beside the control-plane row is left as it stands). The fixture, layout and bind bands
 need a binary fixture, host-local headers and a live Metal device, and are not rowed in
 `form/band-verdicts.txt`. The driver's kernels must emit `#pragma clang fp reassociate(off)` and `contract(off)`
-(each of the three cells says so in its header). Still ahead after stage 4: the physical window.
+(each of the three cells says so in its header).
 
 Driver stage 2 (read 2026-10-03 WITA on this Mac's GPU, each band alone, memory room and no model door resident before
 each run, every exit 0; each band's planted defects dropped its reading and were restored): `form/form-stdlib/dsv4-kernels.fk`
@@ -435,9 +465,9 @@ twin), the fixture's own clamp values, and the head's choice of epsilon (the fix
 + KV; derived, not measured): 27,593,273,180 B for the IQ2XXS file and 31,060,815,708 B for reap25 at 8,192 positions, against a wired cap of
 82,463,372,040 B that the files themselves (86.7 and 91.3 GB) exceed; `fcms-weights-bytes` and `adm-admit` charge it for a deepseek4
 file and file_size for every other (the Qwen file reads 29,047,086,048 exactly). `form/form-stdlib/form-cli-model-ds4.fk` seats DeepSeek
-at the generate and session doors (the DeepSeek tokenizer's raw ids, the lease, the driver's open, prefill, greedy steps and close); the lane
-switch reads 0, today's refusals read word for word, a DeepSeek session refuses observations, and nothing here has run on a device.
-`observe/dsv4-validate-run.bml` is the validation window, written and not run: its default (empty stdin, `{}`, `{"dry":1}`) prints its plan
+at the generate and session doors (the chat template's ids from the file's own tokenizer, the lease, the arena open, prefill, greedy steps to a named
+ending and close: see the lane paragraph above); a DeepSeek session refuses observations.
+`observe/dsv4-validate-run.bml` is the validation window: its default (empty stdin, `{}`, `{"dry":1}`) prints its plan
 (24.9 GiB lease, the stages and asks, the abort rules, the references) and opens nothing; only `{"go":1}` runs it, and while the header names
 tensors the driver cannot run it maps nothing and writes a refusal row. (At stage 3 the plan printed eleven gaps for the IQ2XXS file: the
 Q8_0 dense tensors, the Q8_0 `output.weight`, the Q2_K down experts and the ds4 order-match units; stage 4 below closes the first three and
@@ -468,8 +498,8 @@ a printed note and not a gap: ds4 quantises a Q8_0 matvec's activation to int8 p
 ids and now records, per step, OUR top-two logit margin and how far the recorded id's logit sits below our top (`stream_margins`, `stream_recorded_gap` in the
 receipt), so a flip is told from a near tie; the reference's own tie budget (its top-two margin against our largest delta over its top 64) belongs to the LOGITS leg,
 which runs on the recording's 14 chat-templated prompt ids (pinned in the row beside the recording, below; a request's `logits_prompt_ids` replaces them, and the leg waits only when neither holds). The `ds4q8` and `ds4q2k` units are what to wire if the
-readings say so. An expert type no kernel reads is an explicit refusal (`dkl-expert-kernel` reads nothing; the FFN answers [0] before any dispatch). What still blocks the
-physical window: the window itself (one run, alone, governor-checked, the door dry by default and `{"go":1}` explicit), for positions below 2048 only: the 126 indexer
+readings say so. An expert type no kernel reads is an explicit refusal (`dkl-expert-kernel` reads nothing; the FFN answers [0] before any dispatch). What bounds the
+driver today, the physical window having run (below): positions below 2048 only. The 126 indexer
 tensors (`indexer.attn_q_b`, `indexer.proj`, `indexer_compressor_{kv,gate,ape,norm}`, on the 21 ratio-4 layers) are present in the file and unrouted, and a ratio-4 block
 refuses at position 2048 or later (the indexer stops being inert there). The kernels' multi-block rows (4 and 8 blocks a row of Q2_K and IQ2_XXS, shared and per-slot
 input) read 1.2e-7 to 2.6e-7 against the oracle on a third file, the second fixture's rows being one block; the Q8_0 and Q2_K plants split into a wrong number (Q2_K scale as the
@@ -510,8 +540,8 @@ barriers are planned once a block from the reads and writes each kernel's own MS
 eleven sources, 76 in the graph, the wide hyper-connection matvec among them). `form/native/metal/dsv4-ledger.fk` reads one row a token and a row a block from the carrier's counters. On both fixtures a decode token reads 137, 142 or 148 dispatches (the layout's formula, held at every step),
 111, 116 or 121 barriers (81%), 2 command buffers, 1 wait, 2 host reads, 0 buffers made; the serial walk and the concurrent walk are bit-equal in ids and logits; the best of six host encodes is 3.3 to 3.5 ms for 137 dispatches (24 to 26 us a dispatch, 2.7 to 3 times
 under the 66 to 76; 17 to 20 us at a quieter hour). Derived for the real file, not run: 1,856 dispatches a token, about 1,500 barriers, 22 command buffers, a host floor of 45 to 50 ms (33 to 37 at the quieter figure) overlapped with the device. Not witnessed: any real-file number, any wall-clock gain at real dimensions, the Swift runner's rate on
-this Mac today. The session's open and step and the generate door's one-shot run on the fixture through the door's own functions (`dsv4-door-run-band.bml`, the lane flag untouched and 0; the fixture has no vocabulary, so `fcds-text` now renders none instead of reading pieces
-at offsets a missing array gives).
+this Mac today. The session's open and step and the generate door's one-shot run on the fixture through the door's own functions (`dsv4-door-run-band.bml`; the fixture has no vocabulary, so `fcds-text` renders none instead of reading pieces
+at offsets a missing array gives; the whole door with a vocabulary is `dsv4-lane-band.bml`).
 
 THE REAL FILE'S FIRST TOKEN, over whole mapped stacks (the token door, 2026-10-03 19:04:25 to 19:05:21 WITA, memory read each stage; the lead's run, the receipt and stdout in the land-int checkout): prefill position 0 read 1,848 dispatches, 1,461
 barriers, 22 command buffers, 1 wait, 0 host reads, 0 buffers made, 8,544,878,408 B of weight to read and the device busy 167,726 us (the compute is hardware-class) in 49,272 ms of wall clock: pageins +5,241,090 pages (16 KiB each: the WHOLE 80
@@ -574,8 +604,8 @@ them or they are restored for the spec and not run physically. The reference evi
 
 The recorded references are `form/form-stdlib/tests/oracles/ds4-logits-capital-of-france.json` (129,280 logits, argmax
 2581 "We" at 36.7579117) and the 24-token stream for the raw prompt ids [671 6102 294 8760 344] (a period-7 cycle,
-" Paris. The capital of France is"). They were earned on the IQ2XXS file, which ds4 can read; the registry's `ds4flash`
-row names the reap25 file, which it cannot, so they judge a native lane on the IQ2XXS file and a reap25 lane is judged by
+" Paris. The capital of France is"). They were earned on the IQ2XXS file by the reference engine, which could read it; the registry's `ds4flash`
+row names the reap25 file, which that engine could not, so they judge a native lane on the IQ2XXS file and a reap25 lane is judged by
 the Form reference. The radius is one prompt, a cycle, never past position 127. The logits' own prompt ids are the row
 `form/form-stdlib/tests/oracles/ds4-logits-capital-of-france-prompt.json` (read 2026-10-03 WITA through `./fkwu form/form-stdlib/tests/ds4-recorded-references-band.bml </dev/null`
 -> 8191 and `dsv4-validate-band.bml` (then 2047), the governor reading room before each run, every exit 0): the 14 ids [0 3476 477 260 11502 22896 128803 671 6102 294 8760 344 128804 128821],

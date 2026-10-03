@@ -129,9 +129,16 @@ section [form.bml] {
         let granted = mg-lease("model session " ++ path, path, fcms-weights-bytes(path), own);
         mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) : fcms-memory-held(path, granted, fcms-weights-bytes(path) + own);
     };
-    // A DeepSeek-V4 file, reached only past the lane gate below (mr-wired? reads the registry's row for the arch, 0 until the validation window has run): the DeepSeek tokenizer's raw ids, the lease
-    // for the derived working set at this session's capacity, the driver's open, state and prefill (form-cli-model-ds4.fk). A refusal before the context exists gave the lease back there; after it, the
-    // context and state stay in the record for fcms-release-ok?, as the Qwen door leaves them.
+    // A DeepSeek-V4 file, reached past the lane gate below (mr-wired? reads the registry's row for the arch: deepseek4 dsv4, wired): the chat template's ids from the file's own tokenizer, the lease
+    // for the derived working set at this session's capacity (cut to the positions the driver serves), the driver's arena open, state and prefill (form-cli-model-ds4.fk). A refusal before the context exists
+    // gave the lease back there; after it, the context and state stay in the record for fcms-release-ok?, as the Qwen door leaves them.
+    // The open is announced as the Qwen open is (the same two progress stages around the lease, the open and the prefill: print_str lines and framebuffer records, no prompt or path in them).
+    def fcms-open-ds4-staged(path, src, prompt, requested-maxpos, reserve) = {
+        let _admit-begin = fcmg-live-stage("model-session-open-prefill-begin", 8388611);
+        let opened = fcms-open-ds4(path, src, prompt, requested-maxpos, reserve);
+        let _admit-complete = fcmg-live-stage("model-session-open-prefill-complete", 8388612);
+        opened;
+    };
     def fcms-open-ds4(path, src, prompt, requested-maxpos, reserve) = fcms-ds4-session(path, src, fcds-open-parts(path, src, prompt, requested-maxpos, reserve));
     def fcms-ds4-session(path, src, parts) = (String) parts[0] == "live" ? fcms-session("live", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : len(parts[2]) > 0 ? fcms-session("nothing", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : fcms-none(parts[1]);
     def fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) = {
@@ -206,7 +213,7 @@ section [form.bml] {
             // admission by the lane table, never a literal: an arch
             // whose lane is not yet wired into this door refuses
             // TYPED, naming the lane that would serve it.
-            !((Comparable) mr-wired?(arch) == 1) ? fcms-none(("lane-unwired:" + (mr-lane-for(arch) + (":" + arch)))) : (String) arch == "deepseek4" ? fcms-open-ds4(path, src, prompt, requested-maxpos, reserve) : {
+            !((Comparable) mr-wired?(arch) == 1) ? fcms-none(("lane-unwired:" + (mr-lane-for(arch) + (":" + arch)))) : (String) arch == "deepseek4" ? fcms-open-ds4-staged(path, src, prompt, requested-maxpos, reserve) : {
                 let _crystal-begin = fcmg-live-stage("model-session-tokenizer-crystal-begin", 8388616);
                 let x = qsx-load(path);
                 let _crystal-complete = fcmg-live-stage("model-session-tokenizer-crystal-complete", 8388617);
@@ -288,12 +295,33 @@ section [form.bml] {
         fcms-generation(ftdb-text(fcms-src(s), ids), ids, next);
     };
     // The DeepSeek-V4 walk: the same walk (fcms-walk takes the session's own step, which is the driver's decode), the header's own stop ids, the DeepSeek tokenizer's decode. Greedy: the sampler is not wired here.
-    def fcms-generate-ds4(s, n) = {
-        let walked = fcms-walk(s, fcms-pending(s), fcms-pos(s), n, fcds-stops(fcms-src(s)), [], 1, 1, 0);
+    // A walk ends with a NAMED ending (form-cli-model-ds4.fk fcds-ending-of: eos, max-tokens, context-limit, step-refused) and the session keeps it as its reason (fcms-ending): the driver serves positions 0 through 2047,
+    // so a long walk stops at the limit and says so. A session whose last walk already ended (no pending id) answers nothing new and keeps its ending.
+    def fcms-generate-ds4(s, n) = fcms-pending(s) < 0 ? fcms-generation("", [], s) : fcms-generate-ds4-with(fcms-forward, s, n);
+    // THE UNWIND. A stop inside the walk (a step that raises, a text that cannot render) is a surprise with live resources: the walk is offered once under try, and when it answers nothing the session's context, expert
+    // arena and state are released in synced rounds and its lease given back, here, where they are owned, before anything else runs; the session that comes back is a named ending (walk-stopped), not resident, and its
+    // own release has nothing left to free. The Qwen walk is as it was. `step` is the session's step (fcms-forward), the seam a band hands a step that raises.
+    def fcms-generate-ds4-with(step, s, n) = {
+        let g = try fcms-generate-ds4-by(step, s, n) catch nothing();
+        nothing?(g) ? fcms-ds4-unwind(s, "walk-stopped") : g;
+    };
+    def fcms-generate-ds4-by(step, s, n) = fcms-generate-ds4-walk(step, s, n, fcds-stops(fcms-src(s)));
+    def fcms-generate-ds4-walk(step, s, n, stops) = fcms-generate-ds4-done(s, stops, fcms-walk-by(step, s, fcms-pending(s), fcms-pos(s), n, stops, [], 1, 1, 0));
+    def fcms-ds4-unwind(s, why) = {
+        let left = fcds-release(fcms-ctx(s), fcms-sts(s));
+        fcms-generation("", [], fcms-ds4-unwound(s, left == 0 ? why : why ++ "-release-incomplete"));
+    };
+    def fcms-ds4-unwound(s, reason) = fcmd-inherit(s, fcms-session("nothing", reason, fcms-path(s), fcms-src(s), [], [], fcms-maxpos(s), fcms-pos(s), 0 - 1, 1, fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-generate-ds4-done(s, stops, walked) = {
         let ids = walked[0];
         let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
-        fcms-generation(fcds-text(fcms-src(s), ids), ids, next);
+        fcms-generation(fcds-text(fcms-src(s), ids), ids, fcms-ends(next, fcds-ending-of(fcms-ctx(s), stops, walked)));
     };
+    // The session with its ending named: the status stays what it was (a session at its limit is live and finished, not refused).
+    def fcms-ends(s, ending) = fcmd-inherit(s, fcms-session(fcms-status(s), ending, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-ending(s) = fcms-reason(s);
+    // the line a DeepSeek session reports its usage in: the prompt, what it generated, how its last walk ended and the last position the driver serves for it
+    def fcms-usage-line-ds4(s) = fcds-usage-line(fcms-prompt-ids(s), fcms-generated-ids(s), fcms-ending(s), fcds-consumed(fcms-pos(s), fcms-maxpos(s)), fcms-maxpos(s), fcds-driver-limit(fcms-src(s)));
     def fcms-generate-sampled(s, n) = {
         let walked = fcsam-run(s, fcsam-owner(s), fcms-ctx(s)[1][28], fcms-forward, fcms-decode-pulse, fcms-pos(s), n, fcmo-stops(s));
         let ids = walked[0];
@@ -379,6 +407,13 @@ fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stre
     // Grammar/execution rejection enters at the pending token's exact position.
     // The rejected prediction is not included in ids and never reaches q38-forward.
     def fcms-observe-rejection(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-rejection-observation-ids(s, text), "rejection-observation-context-window-refused");
+    // A DeepSeek session's handles go through the driver's own close (dsv4-close: the work is settled first, every handle of the context and its expert arena and of the state is freed in synced rounds, and the
+    // handles still held are answered): the carrier refuses metal_buf_free while work naming the buffer is unsettled and the native wrapper reads that refusal as 0, and Qwen's closer does not reach the arena's buffers.
+    // Released is every handle freed; the lease goes back either way.
+    def fcms-release-ds4(s, ok) = {
+        let left = fcds-release(fcms-ctx(s), fcms-sts(s));
+        ok && left == 0 ? 1 : 0;
+    };
     def fcms-release-ok?(s) = {
         let dropped = adm-drop(fcms-path(s));
         let cursor-released = fcmo-release-index(s);
@@ -394,9 +429,7 @@ fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stre
         let draft-expected = fcmdr-owned(fcmdr-owner(s));
         let draft-closed = fcmdr-close(fcmdr-owner(s));
         let draft-ok = adapter-ok && (Comparable) draft-closed == draft-expected;
-        (Comparable) fcms-resident?(s) == 0 ? draft-ok : {
-            // A DeepSeek session's work is settled before its handles go: the carrier refuses metal_buf_free while work naming the buffer is unsettled, and the native wrapper reads that refusal as 0.
-            let settled = fcms-ds4?(s) ? metal_sync() : 0;
+        (Comparable) fcms-resident?(s) == 0 ? draft-ok : fcms-ds4?(s) ? fcms-release-ds4(s, draft-ok) : {
             let state-expected = q38-state-handle-count(fcms-sts(s));
             let state-closed = q38-free-state(fcms-sts(s));
             let context-expected = q38-close-expected(fcms-ctx(s), []);

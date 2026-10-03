@@ -198,6 +198,7 @@ The north star is one Form-owned numerical graph with resident activations,
 explicit concurrent leases and replaceable CPU/device programs. Comparison
 captures the same input once, retains each selected version until completion,
 and observes numerical behavior, resource footprint and execution cost together.
-The Form-native lane is not wired: `model-registry.bml` keeps the `deepseek4` lane
-row at `ds4-query`, off, and the control-plane rows for the challenger and the
-oracle are unchanged until the validation window.
+The Form-native lane is wired: `model-registry.bml`'s `deepseek4` lane row reads
+`dsv4`, on, and `fcds-lane-wired?` (`form-cli-model-ds4.fk`) is its twin. The
+control-plane row `challenger.deepseek-v4-metal` carries the real-file validation
+of 2026-10-03/04; no external engine is part of the body.

@@ -89,12 +89,21 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
             (Comparable) len(raw) == 32 && ((Comparable) f0 == 1 && (Comparable) f1 == 1) ? raw : "";
         };
     };
-    def saj-file-prefix-state(path, byte-count) = byte-count < 0 || !((Comparable) (byte-count % 64) == 0) ? "" : (Comparable) byte-count == 0 ? saj-initial-state-bytes() : {
-        let message = metal_buf_from_file(path, 0, byte-count);
+    // THE FILE IS HASHED IN CHUNKS. One no-copy buffer over a whole file cannot be made once the file passes the device's maxBufferLength (86,586,540,032 B on the M4 Max): the 86,720,111,488 B DeepSeek-V4 IQ2XXS
+    // build read an empty digest through a single buffer, where the 29 GB Qwen file fits. SHA-256 is sequential, so the file is walked in order: each chunk is its own no-copy handle, compressed from the 32-byte state
+    // the chunk before left (saj-compress-handle-state carries it), and freed before the next is made; the state after the last chunk is the state a single buffer would have left, bit for bit. The chunk is a
+    // multiple of 64 (a block) and of the 16 KiB page, and far under maxBufferLength; a band hands a tiny chunk to the same walk (saj-file-prefix-state-chunked) so a small synthetic file crosses many chunk seams.
+    def saj-chunk-bytes() = 4294967296;
+    def saj-chunk-ok?(chunk) = chunk > 0 && (chunk % 64) == 0;
+    def saj-file-prefix-state(path, byte-count) = saj-file-prefix-state-chunked(path, byte-count, saj-chunk-bytes());
+    def saj-file-prefix-state-chunked(path, byte-count, chunk) = byte-count < 0 || !((Comparable) (byte-count % 64) == 0) || !saj-chunk-ok?(chunk) ? "" : (Comparable) byte-count == 0 ? saj-initial-state-bytes() : saj-chunk-walk(path, byte-count, chunk, 0, saj-initial-state-bytes());
+    def saj-chunk-walk(path, byte-count, chunk, off, state-raw) = off >= byte-count ? state-raw : !((Comparable) len(state-raw) == 32) ? "" : saj-chunk-step(path, byte-count, chunk, off, state-raw, (byte-count - off) < chunk ? (byte-count - off) : chunk);
+    def saj-chunk-step(path, byte-count, chunk, off, state-raw, span) = {
+        let message = metal_buf_from_file(path, off, span);
         message <= 0 ? "" : {
-            let raw = saj-compress-handle-state(message, saj-initial-state-bytes(), byte-count / 64);
+            let raw = saj-compress-handle-state(message, state-raw, span / 64);
             let freed = metal_buf_free(message);
-            (Comparable) freed == 1 ? raw : "";
+            (Comparable) freed == 1 ? saj-chunk-walk(path, byte-count, chunk, off + span, raw) : "";
         };
     };
     // Same law as saj-dispatch above: the conditional is a recipe, so the let that
@@ -191,10 +200,11 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
         let made = host_dir_mkdir(path);
         (Comparable) made == 1 ? path : saj-bulk-claim-dir(scope, stamp, byte-count, (Number) attempt + (Number) 1);
     };
-    def saj-file-digest-any-tail(path, total-bytes) = total-bytes < 0 ? "" : {
+    def saj-file-digest-any-tail(path, total-bytes) = saj-file-digest-any-tail-chunked(path, total-bytes, saj-chunk-bytes());
+    def saj-file-digest-any-tail-chunked(path, total-bytes, chunk) = total-bytes < 0 ? "" : {
         let tail-size = total-bytes % 64;
         let prefix-size = total-bytes - tail-size;
-        let state-raw = saj-file-prefix-state(path, prefix-size);
+        let state-raw = saj-file-prefix-state-chunked(path, prefix-size, chunk);
         let tail = read_file_slice(path, prefix-size, tail-size);
         saj-final-tail-digest(state-raw, tail, total-bytes);
     };
@@ -233,10 +243,11 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
     };
     // Returns canonical 32 digest bytes, or an empty string on any admission
     // failure.  The caller compares it with artifact manifest data.
-    def saj-file-digest(path, total-bytes) = total-bytes <= 0 || total-bytes % 64 >= 56 ? "" : {
+    def saj-file-digest(path, total-bytes) = saj-file-digest-chunked(path, total-bytes, saj-chunk-bytes());
+    def saj-file-digest-chunked(path, total-bytes, chunk) = total-bytes <= 0 || total-bytes % 64 >= 56 ? "" : {
         let tail-size = total-bytes % 64;
         let prefix-size = total-bytes - tail-size;
-        let state-raw = saj-file-prefix-state(path, prefix-size);
+        let state-raw = saj-file-prefix-state-chunked(path, prefix-size, chunk);
         let tail = read_file_slice(path, prefix-size, tail-size);
         saj-final-digest-from-state(state-raw, tail, total-bytes);
     };
