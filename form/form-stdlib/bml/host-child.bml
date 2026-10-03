@@ -40,6 +40,7 @@
 //
 // PROOF: form-stdlib/tests/host-walk-band.bml (claim "spawn").
 import form-stdlib/line-grammar.fk;
+import form-stdlib/bml/spawn-guard.bml;
 section [form.bml] {
  class HostChild {
   def hch-dir() = ".hearth/walk-io";
@@ -65,7 +66,7 @@ section [form.bml] {
    let put = (String) (input ?? "") == "" ? host_path_remove(path) : write_file_text(path, input);
    (String) (input ?? "") == "" ? "/dev/null" : path;
   }
-  def hch-birth-why(pid) = nothing?(pid) ? "birth refused: no pid arrived" : pid == -1 ? "birth refused: the argv cannot be run (-1)" : pid == -2 ? "birth refused: a redirect would not open (-2)" : pid == -3 ? "birth refused: the host refused to fork (-3)" : pid == -4 ? "birth refused: the binary did not exec (-4)" : "birth refused: host_spawn_at answered " ++ pid.str();
+  def hch-birth-why(pid) = nothing?(pid) ? "birth refused: no pid arrived" : pid == -1 ? "birth refused: the argv cannot be run (-1)" : pid == -2 ? "birth refused: a redirect would not open (-2)" : pid == -3 ? "birth refused: the host refused to fork (-3)" : pid == -4 ? "birth refused: the binary did not exec (-4)" : pid == -5 ? "birth refused: forbidden-tool (-5)" : "birth refused: host_spawn_at answered " ++ pid.str();
   def hch-reaped(status) = (Comparable) status < 0 ? [nothing(), "no exit: host_wait answered " ++ status.str()] : [status, ""];
   def hch-wait(pid, until) = nothing?(until) ? hch-reaped(host_wait(pid)) : hch-poll(pid, until, hch-poll-first-ms());
   def hch-poll(pid, until, nap) = (Comparable) host_alive(pid) != 1 ? hch-reaped(host_wait(pid)) : host_monotonic_ms() >= until ? hch-stop(pid) : hch-rest(pid, until, nap);
@@ -111,8 +112,8 @@ section [form.bml] {
    [waited[0], text, waited[1]];
   }
   // a child never born leaves its reason where its output would have stood
-  def hch-unborn(io, step, out, pid) {
-   let why = hch-birth-why(pid);
+  def hch-unborn(io, step, out, pid) = hch-unborn-why(io, step, out, hch-birth-why(pid));
+  def hch-unborn-why(io, step, out, why) {
    let noted = write_file_text(out, "[host-child] " ++ why ++ "\n");
    let marked = write_file_text(hch-exit-path(io, step), "none " ++ why ++ "\n");
    [nothing(), "", why];
@@ -129,11 +130,17 @@ section [form.bml] {
    hch-carry(io, step, ".exit");
   }
   // err: "" shares the out file; any other path takes stderr there
+  // A command that runs a forbidden tool (sed, awk, perl, python: spawn-guard.bml) is never begun: its ending is the
+  // step's [nothing(), "", "birth refused: forbidden-tool <names>: ..."], written beside the step like any refusal at birth.
   def hch-run-with(io, step, argv, input, until, err) {
    let made = hch-mkdirs(io);
    let rotated = hch-rotate(io, step);
    let out = hch-out-path(io, step);
    let cleared = host_path_remove(out);
+   let refused = sg-argv-reason(argv, (String) (input ?? ""));
+   (String) refused != "" ? hch-unborn-why(io, step, out, "birth refused: " ++ refused) : hch-run-born(io, step, argv, input, until, err, out);
+  }
+  def hch-run-born(io, step, argv, input, until, err, out) {
    let from = hch-input(io, step, input);
    let pid = host_spawn_at(argv, [from, out, (String) err == "" ? out : err]);
    nothing?(pid) || pid <= 0 ? hch-unborn(io, step, out, pid) : hch-answer(io, step, out, hch-wait(pid, until));
@@ -152,7 +159,7 @@ section [form.bml] {
   def hch-said(run) = nothing?(run[0]) && (String) run[2] != "" ? (String) run[1] ++ ((String) run[1] == "" || hch-ends-nl?(run[1]) ? "" : "\n") ++ "[host-child] " ++ run[2] : run[1];
   def hch-ends-nl?(s) = len(s) > 0 && (Comparable) str_byte_at(s, len(s) - 1) == 10;
   // a one-line read: stdout of an argv child, trimmed; "" when it printed nothing or was not born
-  def hch-read(argv) = trim(host_capture(argv) ?? "");
+  def hch-read(argv) = trim(sg-capture(argv) ?? "");
   // ── the readers that replace `grep -F ... | tail -1` and `grep -F -e ... -e ...` ──
   def hch-lines(text) = split-on(text ?? "", "\n");
   def hch-any-in?(line, needles) = nil?(needles) ? false : str_find(line, needles[0], 0) >= 0 ? true : hch-any-in?(line, needles[1:]);

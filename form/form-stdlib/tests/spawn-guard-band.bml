@@ -1,0 +1,203 @@
+; spawn-guard-band.bml — the body's doors that start a child refuse sed, awk, perl and python with a named ending, the way a Claude
+; Code hook once did from outside: here every door reads the command before it begins one, in process, with no child to read it.
+;
+; Verdict 16383 when every claim lands:
+;   1     argv: ["sed",..], ["/usr/bin/awk",..], ["env","A=1","sed",..], ["timeout","5","perl",..], ["python3.11",..], ["nice","-n","5","gawk",..]
+;         are read by the tool they run; ["./fkwu",..], ["git","log","-S","sed"], ["grep","-F","sed -i",..], ["ruby",..], ["sedate"] are clean
+;   2     lines: `sh -c 'ls | sed p'` and `bash -lc` are read by the line they carry, `bash <<< "awk 1"` by its stream; `ls | grep sed` is clean
+;   4     scripts and streams: a shell given a script file runs its text (sed inside refuses, a clean script passes); a bare shell with an
+;         input runs the input as commands; a shell with -c ignores the input; cat fed the same text is clean
+;   8     doors: host_spawn host_spawn_quiet host_spawn_at host_capture host-exec each refuse a forbidden command and pass a clean one by the
+;         shape their native takes; another door name, an argument that is no list, an empty list and a number pass (the guard fails open)
+;   16    the guarded natives: sg-spawn-at, sg-spawn-quiet and sg-spawn answer -5 with no child begun; sg-capture and sg-exec answer nothing();
+;         a clean command runs as the native runs it (an echo's bytes, a true's exit 0)
+;   32    host-child: hch-run-in answers [nothing(), "", "birth refused: forbidden-tool sed: ..."] and writes the step's .out and .exit beside it;
+;         a clean child runs ([0, "ok\n", ""]); a bare shell fed `sed p` is refused and fed `echo hi` runs; hch-read of awk reads "" and of echo reads its word
+;   64    the control language: host_capture([\"sed\"..]), host-exec(\"ls | awk 1\"), host_spawn_at([\"perl\"..]), host_spawn_quiet and host_spawn
+;         each answer nothing=forbidden-tool:<name> (use the edit door, read_file, ./fkwu cells and BML); a clean host_capture answers its value
+;   128   the heal doors: fhn-command of sed reads 127 and of true reads 0, fhn-capture of awk reads "" and of echo its word, nsi-command of sed reads -1 and of true 0
+;   256   census: the cells that call a host native which starts a child (git grep over the tracked tree, outside tests/) are the rows of
+;         tests/fixtures/spawn-doors.txt: none missing, none stale, every guarded row imports spawn-guard, every fixed row does not call it
+;   512   asks: each guarded door's source holds its ask (the sg- call at the place that begins the child) and imports the organ
+;   1024  cost: 3000 argv readings and 300 `sh -c` readings, in process, each under a hundredth of a second (a warm argv reading is about 6 us)
+;   2048  plant: with wrapper looking-through or basename resolution switched off in the reading, claim 1 loses a case
+;   4096  plant: the census over a tree with one more cell that calls host-exec and is in no row reports it; a guarded row whose file does not
+;         ask, a stale row and a fixed row that imports the guard are each reported
+;   8192  plant: with each ask removed from its source, the asks reading loses that door
+;
+; REQUIRES: the body root as the working directory and a git checkout (the census lists files by git grep).
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/host-child.bml form-stdlib/bml/form-token-verbs.bml form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/bml/native-source-inventory.bml
+section [form.bml] {
+ class SpawnGuardBand {
+  def sgb-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ sgb-join(xs[1:], sep);
+  def sgb-has(s, part) = str_find(s, part, 0) >= 0;
+  def sgb-fresh() {
+   let root = temp_dir() ++ "/spawn-guard-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["door", root, 0] : nothing();
+  }
+  def sgb-root(ctx) = ctx[1];
+  // ---- 1 argv
+  def sgb-bad() = [[["sed", "-n", "1p", "f"], "sed"], [["/usr/bin/awk", "1"], "awk"], [["env", "A=1", "sed", "p"], "sed"], [["timeout", "5", "perl", "-e", "1"], "perl"], [["python3.11", "-c", "1"], "python3.11"], [["nice", "-n", "5", "gawk", "1"], "gawk"]];
+  def sgb-clean() = [["./fkwu", "observe/x.bml"], ["git", "log", "-S", "sed"], ["grep", "-F", "sed -i", "f"], ["ruby", "-e", "1"], ["sedate"], ["/bin/echo", "awk"]];
+  def sgb-names-off(argv, off) = cw-forbidden(cw-resolve(argv, [], [off, 0]));
+  def sgb-bad-ok?(off, row) = (String) sgb-join(sgb-names-off(row[0], off), "|") == row[1];
+  def sgb-clean-ok?(off, argv) = nil?(sgb-names-off(argv, off));
+  def sgb-argv-claim(off) = all?(r => sgb-bad-ok?(off, r), sgb-bad()) && all?(a => sgb-clean-ok?(off, a), sgb-clean());
+  def sgb-c-argv(ctx) = sgb-argv-claim([]) && all?(r => (String) sgb-join(sg-argv-names(r[0], ""), "|") == r[1], sgb-bad()) && all?(a => nil?(sg-argv-names(a, "")), sgb-clean());
+  // ---- 2 lines
+  def sgb-c-lines(ctx) {
+   (String) sgb-join(sg-argv-names(["sh", "-c", "ls | sed p"], ""), "|") == "sed"
+   && (String) sgb-join(sg-argv-names(["bash", "-lc", "cd x && awk 1 f"], ""), "|") == "awk"
+   && (String) sgb-join(sg-line-names("bash <<< \"awk 1\""), "|") == "awk"
+   && (String) sgb-join(sg-line-names("cd x && ls | sed -n 1p"), "|") == "sed"
+   && nil?(sg-line-names("ls | grep sed")) && nil?(sg-line-names("echo hi")) && nil?(sg-argv-names(["sh", "-c", "ls | grep sed"], ""));
+  }
+  // ---- 4 scripts and streams
+  def sgb-c-scripts(ctx) {
+   let dirty = sgb-root(ctx) ++ "/dirty.sh";
+   let tidy = sgb-root(ctx) ++ "/tidy.sh";
+   let a = write_file(dirty, "echo a\nsed -i p f\n");
+   let b = write_file(tidy, "echo a\nls | grep x\n");
+   (String) sgb-join(sg-argv-names(["/bin/sh", dirty], ""), "|") == "sed"
+   && nil?(sg-argv-names(["/bin/sh", tidy], ""))
+   && (String) sgb-join(sg-argv-names(["sh"], "echo hi\nawk 1 f\n"), "|") == "awk"
+   && nil?(sg-argv-names(["sh"], "echo hi\n"))
+   && nil?(sg-argv-names(["sh", "-c", "echo hi"], "awk 1 f"))
+   && nil?(sg-argv-names(["cat"], "sed p f"))
+   && !nil?(sg-line-reason("sh", "sed p f")) && (String) sg-line-reason("cat", "sed p f") == "";
+  }
+  // ---- 8 doors
+  def sgb-c-doors(ctx) {
+   let bad = ["sed", "p"];
+   let good = ["/bin/echo", "hi"];
+   let streams = ["/dev/null", "/dev/null", "/dev/null"];
+   !nil?(sg-door-forbidden("host_spawn", [bad])) && nil?(sg-door-forbidden("host_spawn", [good]))
+   && !nil?(sg-door-forbidden("host_spawn_quiet", [["awk", "1"]])) && nil?(sg-door-forbidden("host_spawn_quiet", [good]))
+   && !nil?(sg-door-forbidden("host_spawn_at", [["perl", "-e", "1"], streams])) && nil?(sg-door-forbidden("host_spawn_at", [good, streams]))
+   && !nil?(sg-door-forbidden("host_capture", [["python3", "-c", "1"]])) && nil?(sg-door-forbidden("host_capture", [good]))
+   && !nil?(sg-door-forbidden("host-exec", ["cd x && sed p f", ""])) && nil?(sg-door-forbidden("host-exec", ["ls | grep x", ""]))
+   && !nil?(sg-door-forbidden("host-exec", ["sh", "awk 1 f"])) && nil?(sg-door-forbidden("host-exec", ["cat", "awk 1 f"]))
+   && nil?(sg-door-forbidden("host_wait", [bad])) && nil?(sg-door-forbidden("host_spawn", [])) && nil?(sg-door-forbidden("host_spawn", [7]))
+   && nil?(sg-door-forbidden("host_spawn", [[7, 8]])) && nil?(sg-door-forbidden("host_capture", ["sed p"])) && nil?(sg-door-forbidden("host-exec", [7, ""]))
+   && (String) sg-door-reason("host_spawn", [good]) == "" && !nil?(sg-door-reason("host_spawn", [bad]));
+  }
+  // ---- 16 the guarded natives
+  def sgb-c-natives(ctx) {
+   let streams = ["/dev/null", "/dev/null", "/dev/null"];
+   let ran = sg-capture(["/bin/echo", "hi"]);
+   let q = sg-spawn-quiet(["/usr/bin/true"]);
+   let at = sg-spawn-at(["/usr/bin/true"], streams);
+   sg-spawn-at(["sed", "p"], streams) == -5 && sg-spawn-quiet(["awk", "1"]) == -5 && sg-spawn(["perl", "-e", "1"]) == -5
+   && nothing?(sg-capture(["sed", "p"])) && nothing?(sg-exec("cd x && awk 1 f", ""))
+   && (String) ran == "hi\n" && q > 0 && host_wait(q) == 0 && at > 0 && host_wait(at) == 0
+   && (String) sg-exec("printf form", "") == "form";
+  }
+  // ---- 32 host-child
+  def sgb-c-child(ctx) {
+   let io = sgb-root(ctx) ++ "/walk-io";
+   let refused = hch-run-in(io, "sed-step", ["sed", "p"], "", nothing());
+   let ok = hch-run-in(io, "ok-step", ["/bin/echo", "ok"], "", hch-by(20000));
+   let shell = hch-run-in(io, "sh-sed", ["/bin/sh"], "sed p f\n", hch-by(20000));
+   let shell2 = hch-run-in(io, "sh-ok", ["/bin/sh"], "echo hi\n", hch-by(20000));
+   nothing?(refused[0]) && (String) refused[1] == "" && sgb-has(refused[2], "birth refused: forbidden-tool sed: not used here;")
+   && sgb-has(read_file(io ++ "/sed-step.exit") ?? "", "none birth refused: forbidden-tool sed") && sgb-has(read_file(io ++ "/sed-step.out") ?? "", "[host-child] birth refused: forbidden-tool sed")
+   && ok[0] == 0 && (String) ok[1] == "ok\n" && (String) ok[2] == ""
+   && nothing?(shell[0]) && sgb-has(shell[2], "forbidden-tool sed") && shell2[0] == 0 && (String) shell2[1] == "hi\n"
+   && (String) hch-read(["awk", "1"]) == "" && (String) hch-read(["/bin/echo", "x"]) == "x";
+  }
+  // ---- 64 the control language
+  def sgb-want() = " (use the edit door, read_file, ./fkwu cells and BML);";
+  def sgb-c-control(ctx) {
+   let s = ftv-session();
+   (String) ftv-eval(s, "host_capture([\"sed\", \"p\"])") == "nothing=forbidden-tool:sed" ++ sgb-want()
+   && (String) ftv-eval(s, "host-exec(\"ls | awk 1\", \"\")") == "nothing=forbidden-tool:awk" ++ sgb-want()
+   && (String) ftv-eval(s, "host_spawn_at([\"perl\", \"-e\", \"1\"], [\"\", \"\", \"\"])") == "nothing=forbidden-tool:perl" ++ sgb-want()
+   && (String) ftv-eval(s, "host_spawn_quiet([\"python3\", \"-c\", \"1\"])") == "nothing=forbidden-tool:python3" ++ sgb-want()
+   && (String) ftv-eval(s, "host_spawn([\"gsed\", \"p\"])") == "nothing=forbidden-tool:gsed" ++ sgb-want()
+   && (String) ftv-eval(s, "host_capture([\"/bin/echo\", \"hi\"])") == "value=hi\n;";
+  }
+  // ---- 128 the heal doors
+  def sgb-c-heal(ctx) {
+   fhn-command(["sed", "p"]) == 127 && fhn-command(["/usr/bin/true"]) == 0 && (String) fhn-capture(["awk", "1"]) == "" && (String) fhn-capture(["/bin/echo", "w"]) == "w"
+   && nsi-command(["sed", "p"]) == -1 && nsi-command(["/usr/bin/true"]) == 0;
+  }
+  // ---- 256 census
+  // the real calls of a text: a line that is no comment and holds a native's name followed by (
+  def sgb-natives() = ["host_spawn_at", "host_spawn_quiet", "host_spawn", "host_capture", "host-exec"];
+  def sgb-trim-lead(l) = trim(l);
+  def sgb-comment?(l) = (String) substring(l, 0, 2) == "//" || (String) substring(l, 0, 1) == ";";
+  def sgb-call-in?(l, name) = sgb-has(l, name ++ "(") || sgb-has(l, name ++ " (");
+  def sgb-line-calls?(l) = !sgb-comment?(sgb-trim-lead(l)) && any?(n => sgb-call-in?(l, n), sgb-natives());
+  def sgb-calls?(text) = any?(l => sgb-line-calls?(l), split-on(text, "\n"));
+  def sgb-imports?(text) = sgb-has(text, "form-stdlib/bml/spawn-guard.bml");
+  def sgb-asks?(text) = sgb-has(text, "sg-");
+  def sgb-rows(text) = filter(r => !nil?(r), map(l => sgb-row(l), split-on(text, "\n")));
+  def sgb-row(l) {
+   let t = trim(l);
+   len(t) == 0 || (String) substring(t, 0, 1) == "#" ? [] : map(p => trim(p), split-on(t, "|"));
+  }
+  // problems over [path, text] pairs of the tree's candidate cells and the fixture rows [path, class, why]
+  def sgb-row-of(rows, path) = filter(r => (String) r[0] == path, rows);
+  def sgb-text-of(pairs, path) = nil?(filter(p => (String) p[0] == path, pairs)) ? nothing() : filter(p => (String) p[0] == path, pairs)[0][1];
+  def sgb-missing(pairs, rows) = filter(p => nil?(sgb-row-of(rows, p[0])) && sgb-calls?(p[1]), pairs) |> map(p => "unclassified " ++ p[0]);
+  def sgb-stale(pairs, rows) = filter(r => nothing?(sgb-text-of(pairs, r[0])) || !sgb-calls?(sgb-text-of(pairs, r[0])) && !((String) r[1] == "guarded" && sgb-imports?(sgb-text-of(pairs, r[0]))), rows) |> map(r => "stale " ++ r[0]);
+  def sgb-lying(pairs, rows) = filter(r => !nothing?(sgb-text-of(pairs, r[0])) && ((String) r[1] == "guarded" ? !(sgb-imports?(sgb-text-of(pairs, r[0])) && sgb-asks?(sgb-text-of(pairs, r[0]))) : sgb-imports?(sgb-text-of(pairs, r[0]))), rows) |> map(r => "wrong-class " ++ r[0]);
+  def sgb-problems(pairs, rows) = append(sgb-missing(pairs, rows), append(sgb-stale(pairs, rows), sgb-lying(pairs, rows)));
+  def sgb-tests-path?(p) = sgb-has(p, "/tests/") || sgb-has(p, "-band.");
+  def sgb-grep(pattern) = split-on(hch-read(["git", "grep", "-l", "-E", pattern, "--", "*.bml", "*.fk"]), "\n") |> filter(p => len(p) > 0 && !sgb-tests-path?(p));
+  def sgb-candidates() = sgb-uniq(append(sgb-grep("(host_spawn_at|host_spawn_quiet|host_spawn|host_capture|host-exec)[ ]*[(]"), sgb-grep("form-stdlib/bml/spawn-guard.bml")), []);
+  def sgb-uniq(xs, acc) = nil?(xs) ? reverse(acc) : cw-in?(acc, xs[0]) ? sgb-uniq(xs[1:], acc) : sgb-uniq(xs[1:], cons(xs[0], acc));
+  def sgb-pairs() = sgb-candidates() |> map(p => [p, read_file(p) ?? ""]);
+  def sgb-fixture() = sgb-rows(read_file("form/form-stdlib/tests/fixtures/spawn-doors.txt") ?? "");
+  def sgb-c-census(ctx) {
+   let pairs = sgb-pairs();
+   let rows = sgb-fixture();
+   let found = sgb-problems(pairs, rows);
+   len(rows) > 40 && len(pairs) > 40 && nil?(found);
+  }
+  // ---- 512 asks
+  def sgb-asks-list() = [
+   ["form/form-stdlib/bml/host-child.bml", "sg-argv-reason(argv, (String) (input ?? \"\"))"], ["form/form-stdlib/bml/host-child.bml", "sg-capture(argv)"],
+   ["form/form-stdlib/bml/form-token-verbs.bml", "!nil?(sg-door-forbidden(name, vals))"],
+   ["form/form-stdlib/bml/form-cli-heal-native-io.bml", "sg-spawn-quiet(argv)"], ["form/form-stdlib/bml/form-cli-heal-native-io.bml", "sg-capture(argv)"],
+   ["form/form-stdlib/bml/form-cli-heal-native-process.bml", "sg-spawn-quiet([\"/bin/sh\", script])"],
+   ["form/form-stdlib/bml/findings-requests.bml", "sg-spawn-at(argv"], ["form/form-stdlib/bml/form-cli-code-circle.bml", "sg-spawn-at(argv"],
+   ["form/form-stdlib/bml/native-source-inventory.bml", "sg-spawn-quiet(argv)"], ["form/form-stdlib/bml/native-source-inventory.bml", "sg-spawn-at(argv"],
+   ["form/form-stdlib/bml/native-pipe-darwin.bml", "sg-spawn-at(argv"], ["form/form-stdlib/bml/metal-ask.bml", "sg-spawn-quiet(argv)"],
+   ["observe/crossing-record.fk", "sg-exec(cmd, input)"]];
+  def sgb-strip(text, mark) = sgb-join(split-on(text, mark), "");
+  def sgb-ask-held?(row, text) = sgb-has(text, row[1]) && sgb-imports?(text);
+  def sgb-asks-lost(drop) = filter(row => !sgb-ask-held?(row, drop ? sgb-strip(read_file(row[0]) ?? "", row[1]) : (read_file(row[0]) ?? "")), sgb-asks-list());
+  def sgb-c-asks(ctx) = nil?(sgb-asks-lost(false));
+  // ---- 1024 cost
+  def sgb-loop-argv(k, argv) = k <= 0 ? 0 : len(sg-argv-names(argv, "")) + sgb-loop-argv(k - 1, argv);
+  def sgb-c-cost(ctx) {
+   let t0 = host_monotonic_ms();
+   let a = sgb-loop-argv(3000, ["./fkwu", "observe/native-turn-run.bml"]);
+   let t1 = host_monotonic_ms();
+   let b = sgb-loop-argv(300, ["/bin/sh", "-c", "cd x && ls | grep y"]);
+   let t2 = host_monotonic_ms();
+   a == 0 && b == 0 && t1 - t0 < 30000 && t2 - t1 < 3000;
+  }
+  // ---- the plants
+  def sgb-c-plant-reader(ctx) = !sgb-argv-claim(["wrappers"]) && !sgb-argv-claim(["basename"]) && sgb-argv-claim([]);
+  def sgb-c-plant-census(ctx) {
+   let calls = "section [form.bml] {\n def run(c) = host-exec(c, \"\");\n}\n";
+   let asks = "import form-stdlib/bml/spawn-guard.bml;\nsection [form.bml] {\n def run(c) = sg-exec(c, \"\");\n}\n";
+   let pairs = [["a/new.bml", calls], ["a/ok.bml", asks], ["a/fixed.bml", calls], ["a/lying.bml", asks], ["a/lies-guarded.bml", calls]];
+   let rows = [["a/ok.bml", "guarded", "x"], ["a/fixed.bml", "fixed", "x"], ["a/lying.bml", "fixed", "x"], ["a/lies-guarded.bml", "guarded", "x"], ["a/gone.bml", "fixed", "x"]];
+   let found = sgb-problems(pairs, rows);
+   cw-in?(found, "unclassified a/new.bml") && cw-in?(found, "wrong-class a/lying.bml") && cw-in?(found, "wrong-class a/lies-guarded.bml") && cw-in?(found, "stale a/gone.bml")
+   && !cw-in?(found, "unclassified a/ok.bml") && !cw-in?(found, "wrong-class a/ok.bml") && !cw-in?(found, "wrong-class a/fixed.bml") && !cw-in?(found, "stale a/ok.bml") && !cw-in?(found, "stale a/fixed.bml");
+  }
+  def sgb-c-plant-asks(ctx) {
+   let lost = sgb-asks-lost(true);
+   len(lost) == len(sgb-asks-list());
+  }
+ }
+ let ctx = sgb-fresh();
+ nothing?(ctx) ? form_error("spawn-guard band needs a fresh directory") : 0;
+ let verdict = live-claims("spawn-guard-band", ctx, [["argv", 1, 1, sgb-c-argv], ["lines", 2, 1, sgb-c-lines], ["scripts", 4, 1, sgb-c-scripts], ["doors", 8, 1, sgb-c-doors], ["natives", 16, 1, sgb-c-natives], ["child", 32, 1, sgb-c-child], ["control", 64, 1, sgb-c-control], ["heal", 128, 1, sgb-c-heal], ["census", 256, 1, sgb-c-census], ["asks", 512, 1, sgb-c-asks], ["cost", 1024, 1, sgb-c-cost], ["plant-reader", 2048, 1, sgb-c-plant-reader], ["plant-census", 4096, 1, sgb-c-plant-census], ["plant-asks", 8192, 1, sgb-c-plant-asks]]);
+ host_dir_rmdir(sgb-root(ctx));
+ verdict;
+}
