@@ -7,7 +7,7 @@
 ; (dsv4-open-span: mapped stacks, expert ids read on the device), runs the prompt [5 17 3 22] and seven greedy decodes through dtr-walk, and holds every row to the ceilings the header derives (dtr-ceil: the ledger's dispatch
 ; formula over the model, one wait, the command buffers floor(layers / 2) + 1, two host reads at a head, no buffer made, no plan short, barriers no more than the dispatches). The clock fields are READ and PRINTED, never pinned.
 ;
-; Verdict 255 when every claim lands (each at both fixtures):
+; Verdict 511 when every claim lands (each at both fixtures):
 ;   1     the ledger's rows and the header's arithmetic: every row (4 prefill positions, 7 decode tokens) is within its ceilings and its dispatches EQUAL the formula over the model (a chained position without its head: 8 fewer);
 ;         the formula over a BARE HEADER (dvl-open of the file, what the dry plan reads) equals the formula over the opened context at every position, and the header's bytes (dll-token-bytes-m, every layer's dll-layer-bytes-m) equal
 ;         the opened views' (dll-token-bytes, dll-layer-bytes)
@@ -25,6 +25,10 @@
 ;   64    the plants through the counted doors read as violations while the control passes (dtr-row-ok?): a decode token with a SYNC after layer 0 (dkr-hz-sync: syncs 2), one that reads the device twice per layer through the
 ;         counted read door (dkr-read-u32: readbacks past 2) and one that ALLOCATES a buffer (allocs 1)
 ;   128   release: dsv4-close in synced rounds leaves no handle of the context held
+;   256   the ARENA MODE through the door (dsv4-open-arena, three slots a layer; the door's default): the same eleven rows, each marked an arena row and judged by dll-arena-ceil and the formula plus the copies (the dispatches equal
+;         the formula's plus the row's fills; fills = 3 x the experts it missed; its lookups are blocks x used); every row waits blocks + 1 times, a prefill position reads the device once a block and the last position and every decode
+;         token blocks + 2, no row makes a buffer, the command buffers are the derived blocks + blocks / 2 + 1; the ids equal the whole-stack pins; the summary names the experts hit and missed (their sum over the 11 rows is 11 x
+;         blocks x used), the copies (3 x the misses) and the bytes filled; and three plants through the counted doors (a dkr-hz-sync after block 0, one more dkr-read-u32, a buffer made) fail the arena ceilings while the control passes
 ;
 ; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door; the fixtures are written and read as binary files. Light GPU: a few eleven-token walks over two 1.5 MB fixtures; never maps a model;
 ; writes only under temp_dir and removes what it made.
@@ -96,7 +100,7 @@ section [form.bml] {
   def dtt-shape?(rows, env) {
    let w = dtr-warm(rows);
    let doc = parse-json("token-row", dtr-row-json(rows[5]));
-   let rec = record_new(0, "status", "completed", "reason", "released", "file", "/m/x.gguf", "cap", 16, "pct", 60, "watch", 2, "shared", 1, "organs", "[]", "moved", "[]", "denied", "{}", "vmwin", "{}", "stages", [], "stop", [],
+   let rec = record_new(0, "status", "completed", "reason", "released", "file", "/m/x.gguf", "cap", 16, "pct", 60, "watch", 2, "arena", 0, "shared", 1, "organs", "[]", "moved", "[]", "denied", "{}", "vmwin", "{}", "stages", [], "stop", [],
     "curve", record_get(env, "curve"), "rows", rows, "elapsed", 5);
    let row = parse-json("token-run-row", dtr-receipt-row("2026-10-03 09:00:00 WITA", 1790000000000, rec));
    let line = dtr-row-line(rows[5]);
@@ -178,6 +182,65 @@ section [form.bml] {
    !nothing?(ctl) && !nothing?(p1) && !nothing?(p2) && !nothing?(p3) && dtr-row-ok?(m, ctl, pos, true) && !dtr-row-ok?(m, p1, pos + 1, true) && !dtr-row-ok?(m, p2, pos + 2, true) && !dtr-row-ok?(m, p3, pos + 3, true)
     && dtt-g(p1, "syncs") == 2 && dtt-g(p2, "readbacks") > 2 && dtt-g(p3, "allocs") == 1 && nil?(dkr-hz-get("tap"));
   }
+  // ---- claim 256: the ARENA MODE through the door ---------------------------------------------------------------------------------------------------
+  // the same walk with the context opened in the arena mode (three slots a layer): the rows carry the arena's counts and are judged by dll-arena-ceil; the structure is a wait a block and one at the close, one id read a block
+  def dtt-walk-arena(ctx, sts) {
+   let vm = mg-sense();
+   let env = dtr-env(60, 2, host_monotonic_ms(), mg-wired(vm));
+   let marked = record_set(env, "arena", 1);
+   let why = dtr-walk(env, ctx, sts, dtt-prompt(), dtt-steps());
+   [env, why];
+  }
+  def dtt-arena-structure?(m, rows) {
+   let n = record_get(m, "layers-n");
+   let np = len(dtt-prompt());
+   dtt-all-eq?(dtt-col(rows, "syncs"), n + 1) && dtt-col(rows[0:np], "readbacks") == [n, n, n, n + 2] && dtt-all-eq?(dtt-col(rows[np:11], "readbacks"), n + 2) && dtt-all-eq?(dtt-col(rows, "allocs"), 0)
+    && dtt-all-eq?(dtt-col(rows, "cbs"), dll-arena-cbs(m)) && dtt-all-eq?(dtt-col(rows, "miss"), 0) && dtt-all-eq?(dtt-col(rows, "arena"), 1) && dtt-all-eq?(map(i => dtt-g(rows[i], "emiss") + dtt-g(rows[i], "ehit") == n * record_get(m, "used"), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), true)
+    && dtt-col(rows, "fills") == map(x => 3 * x, dtt-col(rows, "emiss"));
+  }
+  // the arena plants: ledger rows of one decode token with a defect put in its path through the counted doors, marked arena rows and judged by dtr-row-ok?
+  def dtt-aplant-at(ctx, plant, il, box) {
+   let s = (plant == 1 && il == 0) ? dkr-hz-sync() : 0;
+   let r = (plant == 2 && il == 0) ? dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1) : 0;
+   let a = (plant == 3 && il == 0) ? record_set(box, "h", metal_buf_alloc(64)) : 0;
+   "";
+  }
+  def dtt-aplant-row(ctx, sts, id, pos, plant) {
+   let box = record_new(0, "h", 0);
+   let set = plant == 0 ? 0 : dkr-hz-tap-set((kind, a) => kind == "layer" ? dtt-aplant-at(ctx, plant, a, box) : "");
+   let seen = dsv4-decode-observed(ctx, sts, id, pos);
+   let cleared = dkr-hz-tap-clear();
+   let freed = record_get(box, "h") > 0 ? metal_buf_free(record_get(box, "h")) : 0;
+   let marked = nothing?(seen[0]) ? 0 : record_set(seen[1], "arena", 1);
+   nothing?(seen[0]) ? nothing() : seen[1];
+  }
+  def dtt-aplants(m, ctx, sts, id, pos) {
+   let ctl = dtt-aplant-row(ctx, sts, id, pos, 0);
+   let p1 = dtt-aplant-row(ctx, sts, id, pos + 1, 1);
+   let p2 = dtt-aplant-row(ctx, sts, id, pos + 2, 2);
+   let p3 = dtt-aplant-row(ctx, sts, id, pos + 3, 3);
+   !nothing?(ctl) && !nothing?(p1) && !nothing?(p2) && !nothing?(p3) && dtr-row-ok?(m, ctl, pos, true) && !dtr-row-ok?(m, p1, pos + 1, true) && !dtr-row-ok?(m, p2, pos + 2, true) && !dtr-row-ok?(m, p3, pos + 3, true)
+    && dtt-has?(dtr-row-over(m, p1, pos + 1, true), "syncs") && dtt-has?(dtr-row-over(m, p2, pos + 2, true), "readbacks") && dtt-has?(dtr-row-over(m, p3, pos + 3, true), "allocs");
+  }
+  def dtt-arena-fixture(path, label, pin) {
+   let ctx = dsv4-open-arena(path, dtt-cap(), 1, 3);
+   let ok = len(ctx) == 13 && dxa-on?(ctx);
+   let m = ok ? dso-geo(ctx) : nothing();
+   let p = ok ? dsv4-prepare(ctx) : 0;
+   let sts = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
+   let r = ok ? dtt-walk-arena(ctx, sts) : [dtr-env(60, 2, 0, 0), "not opened"];
+   let rows = dtt-rows(r[0]);
+   let said = print_str(label ++ ": the arena walk ended '" ++ r[1] ++ "' with " ++ len(rows).str() ++ " rows; ids " ++ dtt-ids(rows).str() ++ "; " ++ dtr-summary-line(rows));
+   let walked = ok && r[1] == "" && len(rows) == 11;
+   let stsP = ok ? dsv4-new-state(m, ctx[0], dtt-cap()) : nothing();
+   let settled = ok ? dsv4-prefill-span-sliced(ctx, stsP, dtt-prompt(), 0) : nothing();
+   let plantsOk = ok && !nothing?(settled) && dtt-aplants(m, ctx, stsP, settled[0], settled[1]);
+   let summary = walked ? parse-json("summary", dtr-summary-json(rows)) : json-node-object([]);
+   let good = walked && dtt-rows-ok?(m, rows) && dtt-arena-structure?(m, rows) && dtt-ids(rows) == pin && dtt-has?(dtr-summary-line(rows), "arena: experts hit") && dtt-has?(dtr-row-line(rows[5]), " fills=") && dtt-has?(dtr-row-line(rows[5]), " ehit=")
+    && dvr-int(summary, "experts_hit", 0 - 1) + dvr-int(summary, "experts_missed", 0 - 1) == 11 * record_get(m, "layers-n") * record_get(m, "used") && dvr-int(summary, "fills", 0 - 1) == 3 * dvr-int(summary, "experts_missed", 0 - 1) && dvr-int(summary, "bytes_filled", 0 - 1) > 0;
+   let left = ok ? dsv4-close(ctx, append(sts, stsP)) : [0];
+   good && plantsOk && len(left) == 0;
+  }
   // ---- one fixture -----------------------------------------------------------------------------------------------------------------------
   def dtt-fixture(path, label, pin) {
    let ctx = dsv4-open-span(path, dtt-cap(), 1);
@@ -207,7 +270,8 @@ section [form.bml] {
    let c64 = plantsOk;
    let left = ok ? dsv4-close(ctx, append(sts, append(stsH, stsP))) : [0];
    let c128 = len(left) == 0;
-   [c1, c2, c4, c8, c16, c32, c64, c128];
+   let c256 = dtt-arena-fixture(path, label, pin);
+   [c1, c2, c4, c8, c16, c32, c64, c128, c256];
   }
  }
  let root = temp_dir() ++ "/dsv4-token-run-band-" ++ now_unix_ms().str();
@@ -215,9 +279,9 @@ section [form.bml] {
  let path2 = root ++ "-b.gguf";
  let wrote1 = dfx-write(path1);
  let wrote2 = dfx-v-write(path2);
- let fx1 = try dtt-fixture(path1, "fixture 1 (MXFP8, MXFP4, IQ2_XXS)", dtt-pin1()) catch [false, false, false, false, false, false, false, false];
- let fx2 = try dtt-fixture(path2, "fixture 2 (Q8_0, IQ2_XXS, Q2_K)", dtt-pin2()) catch [false, false, false, false, false, false, false, false];
- let both = len(fx1) == 8 && len(fx2) == 8;
+ let fx1 = try dtt-fixture(path1, "fixture 1 (MXFP8, MXFP4, IQ2_XXS)", dtt-pin1()) catch [false, false, false, false, false, false, false, false, false];
+ let fx2 = try dtt-fixture(path2, "fixture 2 (Q8_0, IQ2_XXS, Q2_K)", dtt-pin2()) catch [false, false, false, false, false, false, false, false, false];
+ let both = len(fx1) == 9 && len(fx2) == 9;
  let b1 = dtt-bit(both && fx1[0] && fx2[0], 1);
  let b2 = dtt-bit(both && fx1[1] && fx2[1], 2);
  let b4 = dtt-bit(both && fx1[2] && fx2[2], 4);
@@ -226,7 +290,8 @@ section [form.bml] {
  let b32 = dtt-bit(both && fx1[5] && fx2[5], 32);
  let b64 = dtt-bit(both && fx1[6] && fx2[6], 64);
  let b128 = dtt-bit(both && fx1[7] && fx2[7], 128);
+ let b256 = dtt-bit(both && fx1[8] && fx2[8], 256);
  let removed = host_path_remove(path1) + host_path_remove(path2);
- print_str("dsv4-token-run-band claims " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ " " ++ b128.str() ++ " fixture1 " ++ fx1.str() ++ " fixture2 " ++ fx2.str() ++ " removed " ++ removed.str());
- b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+ print_str("dsv4-token-run-band claims " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ " " ++ b128.str() ++ " " ++ b256.str() ++ " fixture1 " ++ fx1.str() ++ " fixture2 " ++ fx2.str() ++ " removed " ++ removed.str());
+ b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256;
 }

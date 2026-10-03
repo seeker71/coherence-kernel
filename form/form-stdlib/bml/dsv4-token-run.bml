@@ -7,8 +7,12 @@
 // machine (wired memory and pageins between the marks) and the device's own allocated bytes. The door keeps no counter of its own.
 //
 // THE COMMAND STRUCTURE UNDER MEASUREMENT (landed, dsv4-kernels.fk dkr-hz): one concurrent batch with barriers planned per block, handed to the queue every second block, ONE wait a decode token (the argmax, the NaN scan and the
-// logits settle together), a wait between prefill positions, two host reads (the count and the id), no buffer made, no pipeline compiled. The ledger band (native/metal/tests/dsv4-ledger-band.bml) pins those ceilings on the fixtures;
-// this door's rows are judged by the same ceilings (dll-within?) and by the same dispatch formula, and a real run prints each row against them.
+// logits settle together), a wait between prefill positions, two host reads (the count and the id), no buffer made, no pipeline compiled. That is the WHOLE-STACK mode (arena_slots 0, the control). THE DEFAULT IS THE ARENA MODE
+// (native/metal/dsv4-arena.fk): the routed expert stacks are not mapped, each layer holds an arena of `arena_slots` experts (64: the lease's term), and a block is two planned stages with one sync between them, where the host
+// reads the router's ids (one counted read), the cache answers slots, and the missing experts' spans are copied from the file: the file gives the dense tensors once and only the experts the cache misses (a whole-stack token
+// made the device read every page of every stack a dispatch bound: on 2026-10-03 19:04 WITA the first real token read the whole 80 GiB file in 49 s and pushed 27.7 GiB of other processes' memory to swap). The ledger band
+// (native/metal/tests/dsv4-ledger-band.bml) pins both modes' ceilings on the fixtures; this door's rows are judged by the same ceilings (dll-within?, dll-arena-ceil) and by the same dispatch formula, and a real run prints each
+// row against them with the experts it hit and missed, the bytes its fills copied and the waits it made.
 //
 // THE WIRED CURVE (the tap). Metal wires the buffers a committed batch names; the first tokens of a whole-stack design may wire stack after stack and keep them. The token handle calls ONE installed function at its seams
 // (dsv4-token-handle.fk dkr-hz-tap-set: ("layer", il) after block il was enqueued, ("pos", i) before position i of a prefill), and this door's function reads the machine there, WITHOUT A SYNC: wired memory and available
@@ -27,7 +31,7 @@
 //
 // THE DOOR IS DRY BY DEFAULT: empty stdin, {} and {"dry":1} print the plan and the ledger arithmetic (the landed formulas over the real header) and open nothing; only {"go":1} runs. Options (one JSON line): go, dry, file (the
 // IQ2XXS build by default), cap (64), steps (decode tokens, 24), watch (tokens read after every layer, 3), pct (the wired stop, 60), bw_gbs (the bandwidth the plan prices bytes at, 546: the M4 Max's stated figure, not
-// measured), logits_prompt_ids (the prompt; the 14 pinned ids by default), receipt (receipts/dsv4-token-runs.jsonl).
+// measured), arena_slots (experts a layer's arena holds, 64; 0 maps the whole routed stacks: the control), logits_prompt_ids (the prompt; the 14 pinned ids by default), receipt (receipts/dsv4-token-runs.jsonl).
 //
 // Proven by: native/metal/tests/dsv4-token-run-band.bml (the walk on both fixtures: rows from the ledger, the ceilings and the dispatch formula, the curve and its stop, the plants through the counted doors),
 // form-stdlib/tests/dsv4-token-run-plan-band.bml (the plan on the real headers; nothing opened).
@@ -58,18 +62,26 @@ section [form.bml] {
   // the ceilings a row is held to (dll-within?): one wait a decode token and one a prefill position, the command buffers the structure commits, two host reads at a head and none without, nothing made, no plan short or long;
   // barriers are not derivable from a header (the plan counts them as it plans), so the ceiling is the honest bound: no more than the dispatches
   def dtr-ceil(m, pos, headed) = record_new(0, "dispatches", dtr-dispatches(m, pos, headed), "barriers", dtr-dispatches(m, pos, headed), "cbs", dtr-cbs(m), "syncs", 1, "readbacks", headed ? 2 : 0, "allocs", 0, "bytes", dtr-bytes(m, headed), "miss", 0);
-  // a row is judged by the ceilings and by the formula's own count (equal: a missing dispatch is a defect as much as an extra one)
-  def dtr-row-ok?(m, row, pos, headed) = record_get(row, "dispatches") == dtr-dispatches(m, pos, headed) && dll-within?(row, dtr-ceil(m, pos, headed)) && record_get(row, "syncs") == 1;
-  def dtr-row-over(m, row, pos, headed) = dll-over(row, dtr-ceil(m, pos, headed)) ++ (record_get(row, "dispatches") == dtr-dispatches(m, pos, headed) ? "" : " dispatches " ++ record_get(row, "dispatches").str() ++ "!=" ++ dtr-dispatches(m, pos, headed).str());
+  // THE ARENA MODE'S ROWS carry their own ceilings (the ledger's dll-arena-ceil: a sync a block and one at the close, one id read a block, the formula's dispatches plus the copies the row's fills made); a row says which it is
+  def dtr-arena?(row) = record_get(row, "arena") == 1;
+  def dtr-fills(row) = record_get(row, "fills");
+  def dtr-ceil-of(m, row, pos, headed) = dtr-arena?(row) ? dll-arena-ceil(m, pos, headed, dtr-fills(row), dtr-bytes(m, headed)) : dtr-ceil(m, pos, headed);
+  def dtr-want-dispatches(m, row, pos, headed) = dtr-dispatches(m, pos, headed) + (dtr-arena?(row) ? dtr-fills(row) : 0);
+  // a row is judged by the ceilings and by the formula's own count (equal: a missing dispatch is a defect as much as an extra one); an arena row's waits and reads are exact (blocks + 1, blocks + the head's) and its copies are three a missed expert
+  def dtr-arena-exact?(m, row, headed) = !dtr-arena?(row) || (record_get(row, "syncs") == dll-arena-syncs(m) && record_get(row, "readbacks") == dll-arena-reads(m, headed) && dtr-fills(row) == 3 * record_get(row, "emiss"));
+  def dtr-row-ok?(m, row, pos, headed) = record_get(row, "dispatches") == dtr-want-dispatches(m, row, pos, headed) && dll-within?(row, dtr-ceil-of(m, row, pos, headed)) && (dtr-arena?(row) || record_get(row, "syncs") == 1) && dtr-arena-exact?(m, row, headed);
+  def dtr-row-over(m, row, pos, headed) = dll-over(row, dtr-ceil-of(m, row, pos, headed)) ++ (record_get(row, "dispatches") == dtr-want-dispatches(m, row, pos, headed) ? "" : " dispatches " ++ record_get(row, "dispatches").str() ++ "!=" ++ dtr-want-dispatches(m, row, pos, headed).str())
+   ++ (dtr-arena-exact?(m, row, headed) ? "" : " arena counts not exact");
   // ---- the machine, as one reading --------------------------------------------------------------------------------------------------------
   def dtr-wired-of(vm) = mg-vm-ok?(vm) ? mg-wired(vm) : 0;
   def dtr-pageins-of(vm) = mg-vm-ok?(vm) ? vm[9] : 0;
   // [the ledger mark, the machine's reading, the device's own allocated bytes]
   def dtr-snap() = [dll-mark(), mg-sense(), dvr-own()];
   // a row: the ledger's (r: a decode token's from dsv4-decode-observed, a prefill position's dll-row between the marks of its seams) with the machine's growth and the device's own bytes between the snaps a and b
-  def dtr-row(index, kind, pos, idin, idout, r, a, b, watched) {
+  def dtr-row(index, kind, pos, idin, idout, r, a, b, watched, arena) {
    record_new(0, "token", index, "kind", kind, "pos", pos, "id_in", idin, "id_out", idout, "dispatches", record_get(r, "dispatches"), "barriers", record_get(r, "barriers"), "cbs", record_get(r, "cbs"), "syncs", record_get(r, "syncs"),
     "readbacks", record_get(r, "readbacks"), "allocs", record_get(r, "allocs"), "bytes", record_get(r, "bytes"), "gpu_us", record_get(r, "gpu_us"), "wall_ms", record_get(r, "wall_ms"), "miss", record_get(r, "miss"),
+    "fills", record_get(r, "fills"), "emiss", record_get(r, "emiss"), "ehit", record_get(r, "ehit"), "ebytes", record_get(r, "ebytes"), "arena", arena,
     "wired", dtr-wired-of(b[1]) - dtr-wired-of(a[1]), "pageins", dtr-pageins-of(b[1]) - dtr-pageins-of(a[1]), "own", b[2] - a[2], "watched", watched);
   }
   def dtr-g(row, k) = record_get(row, k);
@@ -83,7 +95,7 @@ section [form.bml] {
   def dtr-hold-reason(vm, pct, elapsed) =
    !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : mg-wired(vm) > mg-pct(mg-mem(vm), pct) ? "wired-cap" : mg-available(vm) < mg-reserve-of(mg-mem(vm)) ? "reserve" : elapsed > dvr-abort-ms() ? "budget" : "";
   // the walk's own record: the rows, the marks the prefill's seams took, the curve, the stop, the token the tap is reading, and the options it runs under
-  def dtr-env(pct, watch, t0, base) = record_new(0, "rows", [], "marks", [], "curve", [], "stop", [], "token", 0, "pct", pct, "watch", watch, "t0", t0, "base", base);
+  def dtr-env(pct, watch, t0, base) = record_new(0, "rows", [], "marks", [], "curve", [], "stop", [], "token", 0, "pct", pct, "watch", watch, "t0", t0, "base", base, "arena", 0);
   def dtr-stopped(env, token, il, why) {
    let k = record_set(env, "stop", [why, token, il]);
    let said = print_str("[dsv4-token] HOLD at token " ++ token.str() ++ " layer " ++ il.str() ++ ": " ++ why ++ ": the encoding stops here, what is enqueued is drained, the curve and the receipt keep how far it got");
@@ -119,7 +131,7 @@ section [form.bml] {
     let last = k == len(ids) - 1;
     let b = k + 1 < len(marks) ? marks[k + 1] : nothing();
     nothing?(b) ? [] : {
-     let row = dtr-add-row(env, dtr-row(k, "prefill", k, ids[k], last ? nid : 0 - 1, dll-row(marks[k][0], b[0], dtr-bytes(m, last)), marks[k], b, k < record_get(env, "watch") ? 1 : 0));
+     let row = dtr-add-row(env, dtr-row(k, "prefill", k, ids[k], last ? nid : 0 - 1, dll-row(marks[k][0], b[0], dtr-bytes(m, last)), marks[k], b, k < record_get(env, "watch") ? 1 : 0, record_get(env, "arena")));
      cons(row, dtr-prefill-rows(env, m, ids, marks, k + 1, done, nid));
     };
    };
@@ -141,7 +153,7 @@ section [form.bml] {
    let seen = dsv4-decode-observed(ctx, sts, id, pos);
    let b = dtr-snap();
    let nid = seen[0];
-   nothing?(nid) ? nothing() : { let row = dtr-add-row(env, dtr-row(index, "decode", pos, id, nid, seen[1], a, b, index < record_get(env, "watch") ? 1 : 0)); nid; };
+   nothing?(nid) ? nothing() : { let row = dtr-add-row(env, dtr-row(index, "decode", pos, id, nid, seen[1], a, b, index < record_get(env, "watch") ? 1 : 0, record_get(env, "arena"))); nid; };
   }
   def dtr-end-check(env, index) {
    let why = dtr-hold-reason(mg-sense(), record_get(env, "pct"), dtr-elapsed(env));
@@ -184,12 +196,19 @@ section [form.bml] {
    let w = dtr-warm(rows);
    "[dsv4-token] summary: " ++ len(rows).str() ++ " tokens (" ++ len(dtr-rows-of(rows, "prefill")).str() ++ " prefill, " ++ len(dtr-rows-of(rows, "decode")).str() ++ " decode); cold first token " ++ dtr-cold-ms(rows).str() ++ " ms; warm decode "
     ++ (w[0] == 0 ? "none" : (w[1] / w[0]).str() ++ " ms a token = " ++ dtr-hundredths-text(dtr-hundredths-per-s(w)) ++ " tokens a second over " ++ w[0].str() ++ " tokens") ++ "; totals: " ++ dtr-sum-col(rows, "dispatches").str() ++ " dispatches, " ++ dtr-sum-col(rows, "barriers").str()
-    ++ " barriers, " ++ dtr-sum-col(rows, "syncs").str() ++ " syncs, " ++ dtr-sum-col(rows, "cbs").str() ++ " command buffers, " ++ dtr-sum-col(rows, "readbacks").str() ++ " host reads, device busy " ++ (dtr-sum-col(rows, "gpu_us") / 1000).str() ++ " ms";
+    ++ " barriers, " ++ dtr-sum-col(rows, "syncs").str() ++ " syncs, " ++ dtr-sum-col(rows, "cbs").str() ++ " command buffers, " ++ dtr-sum-col(rows, "readbacks").str() ++ " host reads, device busy " ++ (dtr-sum-col(rows, "gpu_us") / 1000).str() ++ " ms"
+    ++ dtr-arena-summary(rows);
   }
+  // the arena's totals over the rows: the experts the layers hit and missed (the hit rate), the bytes the fills copied from the file and the copies they made (empty when no row ran in the arena mode)
+  def dtr-hit-pct(h, ms) = (h + ms) == 0 ? 0 : (100 * h) / (h + ms);
+  def dtr-arena-summary(rows) = (len(rows) > 0 && dtr-arena?(rows[0]))
+   ? "; arena: experts hit " ++ dtr-sum-col(rows, "ehit").str() ++ ", missed " ++ dtr-sum-col(rows, "emiss").str() ++ " (hit " ++ dtr-hit-pct(dtr-sum-col(rows, "ehit"), dtr-sum-col(rows, "emiss")).str() ++ " percent), filled " ++ dtr-sum-col(rows, "ebytes").str() ++ " B in " ++ dtr-sum-col(rows, "fills").str() ++ " copies"
+   : "";
   // ---- the receipt row ----------------------------------------------------------------------------------------------------------------------
   def dtr-row-json(r) = "{" ++ dvr-join([dvr-kv("token", dtr-g(r, "token").str()), dvr-kv("kind", dvr-q(dtr-g(r, "kind"))), dvr-kv("pos", dtr-g(r, "pos").str()), dvr-kv("id_in", dtr-g(r, "id_in").str()), dvr-kv("id_out", dtr-g(r, "id_out").str()),
     dvr-kv("dispatches", dtr-g(r, "dispatches").str()), dvr-kv("barriers", dtr-g(r, "barriers").str()), dvr-kv("cbs", dtr-g(r, "cbs").str()), dvr-kv("syncs", dtr-g(r, "syncs").str()), dvr-kv("readbacks", dtr-g(r, "readbacks").str()),
     dvr-kv("allocs", dtr-g(r, "allocs").str()), dvr-kv("bytes", dtr-g(r, "bytes").str()), dvr-kv("gpu_us", dtr-g(r, "gpu_us").str()), dvr-kv("wall_ms", dtr-g(r, "wall_ms").str()), dvr-kv("miss", dtr-g(r, "miss").str()),
+    dvr-kv("fills", dtr-g(r, "fills").str()), dvr-kv("experts_missed", dtr-g(r, "emiss").str()), dvr-kv("experts_hit", dtr-g(r, "ehit").str()), dvr-kv("bytes_filled", dtr-g(r, "ebytes").str()),
     dvr-kv("wired_delta", dtr-g(r, "wired").str()), dvr-kv("pageins_delta", dtr-g(r, "pageins").str()), dvr-kv("own_delta", dtr-g(r, "own").str()), dvr-kv("watched", dtr-g(r, "watched").str())], ",") ++ "}";
   def dtr-curve-json(c) = "[" ++ dvr-join(map(p => "[" ++ p[0].str() ++ "," ++ p[1].str() ++ "," ++ p[2].str() ++ "," ++ p[3].str() ++ "]", c), ",") ++ "]";
   def dtr-stop-json(s) = len(s) == 0 ? "{}" : "{" ++ dvr-join([dvr-kv("reason", dvr-q(s[0])), dvr-kv("token", s[1].str()), dvr-kv("layer", s[2].str())], ",") ++ "}";
@@ -197,10 +216,11 @@ section [form.bml] {
    let w = dtr-warm(rows);
    "{" ++ dvr-join([dvr-kv("tokens", len(rows).str()), dvr-kv("cold_first_token_ms", dtr-cold-ms(rows).str()), dvr-kv("warm_tokens", w[0].str()), dvr-kv("warm_ms", w[1].str()), dvr-kv("warm_hundredths_tokens_per_s", dtr-hundredths-per-s(w).str()),
     dvr-kv("dispatches", dtr-sum-col(rows, "dispatches").str()), dvr-kv("barriers", dtr-sum-col(rows, "barriers").str()), dvr-kv("syncs", dtr-sum-col(rows, "syncs").str()), dvr-kv("cbs", dtr-sum-col(rows, "cbs").str()),
-    dvr-kv("readbacks", dtr-sum-col(rows, "readbacks").str()), dvr-kv("gpu_us", dtr-sum-col(rows, "gpu_us").str())], ",") ++ "}";
+    dvr-kv("readbacks", dtr-sum-col(rows, "readbacks").str()), dvr-kv("gpu_us", dtr-sum-col(rows, "gpu_us").str()), dvr-kv("experts_hit", dtr-sum-col(rows, "ehit").str()), dvr-kv("experts_missed", dtr-sum-col(rows, "emiss").str()),
+    dvr-kv("hit_percent", dtr-hit-pct(dtr-sum-col(rows, "ehit"), dtr-sum-col(rows, "emiss")).str()), dvr-kv("bytes_filled", dtr-sum-col(rows, "ebytes").str()), dvr-kv("fills", dtr-sum-col(rows, "fills").str())], ",") ++ "}";
   }
   def dtr-receipt-row(date, at, r) = "{" ++ dvr-join([dvr-kv("schema", dvr-q("dsv4-token-run-v1")), dvr-kv("at_unix_ms", at.str()), dvr-kv("date", dvr-q(date)), dvr-kv("status", dvr-q(record_get(r, "status"))), dvr-kv("reason", dvr-q(record_get(r, "reason"))),
-    dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("pct", record_get(r, "pct").str()), dvr-kv("watch", record_get(r, "watch").str()), dvr-kv("lease_shared", record_get(r, "shared").str()),
+    dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("pct", record_get(r, "pct").str()), dvr-kv("watch", record_get(r, "watch").str()), dvr-kv("arena_slots", record_get(r, "arena").str()), dvr-kv("lease_shared", record_get(r, "shared").str()),
     dvr-kv("organs", record_get(r, "organs")), dvr-kv("moved", record_get(r, "moved")), dvr-kv("denied", record_get(r, "denied")), dvr-kv("vm_window", record_get(r, "vmwin")),
     dvr-kv("stages", "[" ++ dvr-join(map(s => dvr-stage-json(s), record_get(r, "stages")), ",") ++ "]"), dvr-kv("stop", dtr-stop-json(record_get(r, "stop"))), dvr-kv("wired_curve", dtr-curve-json(record_get(r, "curve"))),
     dvr-kv("rows", "[" ++ dvr-join(map(x => dtr-row-json(x), record_get(r, "rows")), ",") ++ "]"), dvr-kv("summary", dtr-summary-json(record_get(r, "rows"))), dvr-kv("elapsed_ms", record_get(r, "elapsed").str())], ",") ++ "}";
@@ -210,22 +230,62 @@ section [form.bml] {
   def dtr-opts-pct(opts) = dvr-int(opts, "pct", dtr-default-pct());
   def dtr-opts-bw(opts) = dvr-int(opts, "bw_gbs", dtr-default-bw());
   def dtr-opts-ids(opts) = len(dvr-logits-ids(opts)) > 0 ? dvr-logits-ids(opts) : dvr-prompt();
+  // THE ARENA IS THE DEFAULT: arena_slots experts a layer (the lease's term, dls-cache-experts: 64); arena_slots 0 maps the whole routed stacks (the control: one view over each 0.55 GB stack, which makes the device read every page
+  // of every stack a dispatch binds: on 2026-10-03 19:04 WITA a cold first token read the whole 80 GiB file, 5,241,090 pageins, and pushed 27.7 GiB of other processes' memory to swap)
+  def dtr-opts-arena(opts) = dvr-int(opts, "arena_slots", dls-cache-experts());
+  // ---- the plan's byte arithmetic for the arena mode, from the header ---------------------------------------------------------------------------------
+  // the routed experts a decode token reads: the `used` experts of every layer, three stacks each (the ledger's bytes); the dense bytes are the rest of the token (every dense tensor, the head, one embedding row)
+  def dtr-routed-leaves() = ["ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight"];
+  def dtr-routed-layer(m, il, ls) = len(ls) == 0 ? 0 : dll-row-bytes(m, il, ls[0]) + dtr-routed-layer(m, il, ls[1:]);
+  def dtr-routed-go(m, il, n) = il == n ? 0 : dtr-routed-layer(m, il, dtr-routed-leaves()) + dtr-routed-go(m, il + 1, n);
+  def dtr-routed-bytes(m) = dtr-routed-go(m, 0, record_get(m, "layers-n"));
+  def dtr-dense-bytes(m) = dtr-bytes(m, true) - dtr-routed-bytes(m);
+  // the most experts a layer can hold distinct after `positions` tokens of the prompt: no more than positions x used, the slots, or the layer's stored experts; their bytes summed over the layers
+  def dtr-distinct-cap(m, il, positions, slots) = positions * record_get(m, "used") < slots ? (positions * record_get(m, "used") < dvl-l(m, il, "nexp") ? positions * record_get(m, "used") : dvl-l(m, il, "nexp")) : (slots < dvl-l(m, il, "nexp") ? slots : dvl-l(m, il, "nexp"));
+  def dtr-prefill-fill-go(m, il, n, positions, slots) = il == n ? 0 : dtr-distinct-cap(m, il, positions, slots) * dls-layer-expert(m, il) + dtr-prefill-fill-go(m, il + 1, n, positions, slots);
+  def dtr-prefill-fill-bytes(m, positions, slots) = dtr-prefill-fill-go(m, 0, record_get(m, "layers-n"), positions, slots);
+  // the arena's own allocation (the lease's expert term at this slot count)
+  def dtr-arena-bytes(m, slots) = dls-cache(m, slots);
   def dtr-ceil-line(m) = "[dsv4-token] the ceilings a row is held to (the landed ledger's dll-within?, the dispatch count equal to the formula): dispatches " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position to " ++ dtr-max-go(m, 0, 0, 256).str()
    ++ " where every compressor emits (a chained prefill position 8 fewer: no head, no scan), barriers no more than the dispatches (the plan places them as it plans; Swift's reference ~1,510), command buffers " ++ dtr-cbs(m).str() ++ ", syncs 1, host reads 2 at a head and 0 without, buffers made 0, plans short or long 0";
+  // THE ARENA MODE'S COMMAND STRUCTURE AND CEILINGS, from the header: a block is two planned stages with ONE sync between them (the router's ids are read on the host: one counted read of `used` words), so a token waits once a
+  // block and once at its close, reads once a block and twice at its head, and commits each block's drained batch, the batch handed to the queue after every odd block, and the one the close drains
+  def dtr-arena-structure-line(m) = "[dsv4-token] the command structure (arena, dsv4-arena.fk): a block is two planned stages (dkr-hz) with ONE sync between them: the router's ids are read on the host (one counted read of " ++ record_get(m, "used").str() ++ " words), the cache answers slots, "
+   ++ "a concurrent batch is armed again and the missing experts' spans are copied into their slots, then the experts, the shared expert and hc_post; handed to the queue after every odd block; a token waits " ++ dll-arena-syncs(m).str() ++ " times (" ++ dll-layers-n(m).str() ++ " blocks and its close), "
+   ++ "reads the device " ++ dll-arena-reads(m, true).str() ++ " times (a block's ids and the head's two), commits " ++ dll-arena-cbs(m).str() ++ " command buffers";
+  def dtr-arena-ceil-line(m) = "[dsv4-token] the arena ceilings a row is held to (the ledger's dll-arena-ceil, the dispatch count equal to the formula plus the copies, copies = 3 x the experts missed): dispatches " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " to " ++ dtr-max-go(m, 0, 0, 256).str()
+   ++ " plus the copies, syncs " ++ dll-arena-syncs(m).str() ++ ", host reads " ++ dll-arena-reads(m, true).str() ++ " at a head (" ++ dll-arena-reads(m, false).str() ++ " without), command buffers " ++ dll-arena-cbs(m).str() ++ ", buffers made 0, plans short or long 0";
+  // the bytes, cold and warm: what the device reads a token (the dense tensors, the head, one embedding row and the routed experts it picked, read from the arena) and what the FILE gives: the dense tensors once at the open and
+  // only the experts the cache misses, never the stacks
+  def dtr-arena-bytes-lines(m, opts, bw) {
+   let dense = dtr-dense-bytes(m);
+   let routed = dtr-routed-bytes(m);
+   let slots = dtr-opts-arena(opts);
+   let ids = dtr-opts-ids(opts);
+   let all = dense + routed;
+   [ "[dsv4-token] bytes the DEVICE reads a token (dll-token-bytes-m): " ++ all.str() ++ " B (" ++ dvr-gib(all) ++ ") = dense " ++ dense.str() ++ " (" ++ dvr-gib(dense) ++ ": every dense tensor, the head, one embedding row) + routed " ++ routed.str() ++ " (" ++ dvr-gib(routed) ++ ": the "
+       ++ record_get(m, "used").str() ++ " experts a layer the router picks, from the arena); at " ++ bw.str() ++ " GB/s (stated, not measured) that is " ++ dtr-tenths-text(dtr-tenths-ms(all, bw)) ++ " ms a token, hit or miss alike",
+    "[dsv4-token] bytes the FILE gives, cold: the dense tensors " ++ dense.str() ++ " B once at the open (read once, resident after: pageins on token 2 and on read ~0 for them) and the arena " ++ dtr-arena-bytes(m, slots).str() ++ " B (" ++ dvr-gib(dtr-arena-bytes(m, slots))
+       ++ ", " ++ slots.str() ++ " slots a layer) allocated once and filled by span; the first decode token fills at most " ++ routed.str() ++ " B (" ++ dvr-gib(routed) ++ ": every expert it picks is new); the prefill of " ++ len(ids).str() ++ " prompt ids at most "
+       ++ dtr-prefill-fill-bytes(m, len(ids), slots).str() ++ " B (" ++ dvr-gib(dtr-prefill-fill-bytes(m, len(ids), slots)) ++ ": a layer holds no more than min(positions x used, slots) distinct experts); the whole file is " ++ dvr-gib(file_size(dvr-text(opts, "file", dvr-file()))) ++ " and is not read",
+    "[dsv4-token] bytes the FILE gives, warm: nothing of the dense tensors, and " ++ dls-layer-expert(m, 0).str() ++ " B (layer 0's one expert's three stacks) for each expert the cache misses; a hit costs no byte of the file; the row of every token carries the experts it hit and missed and the bytes its fills copied"];
+  }
+  def dtr-join-lines(ls) = dvr-join(ls, "\n");
   def dtr-plan-lines(m, size, opts, organs) {
    let bw = dtr-opts-bw(opts);
    let bytes = dtr-bytes(m, true);
    let n = record_get(m, "layers-n");
    let ids = dtr-opts-ids(opts);
+   let arena = dtr-opts-arena(opts) > 0;
    [ "[dsv4-token] DRY: the plan and the op ledger arithmetic; nothing is opened, mapped, leased, compiled or written",
     "[dsv4-token] file " ++ dvr-text(opts, "file", dvr-file()) ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), " ++ record_get(m, "arch") ++ ", " ++ n.str() ++ " layers, header read only",
     "[dsv4-token] the run: the prefill of " ++ len(ids).str() ++ " prompt ids " ++ dvr-ids-json(ids) ++ " (a wait between positions, the head and the one drain at the last), then " ++ dtr-opts-steps(opts).str() ++ " greedy decode tokens, one ledger row a token, cap " ++ dvr-int(opts, "cap", dvr-default-cap()).str()
-     ++ ", whole mapped stacks, expert ids read on the device",
-    "[dsv4-token] the command structure (landed, dkr-hz): one concurrent batch, barriers planned per block, handed to the queue every " ++ "2" ++ " blocks (" ++ dtr-submits(m).str() ++ " submits and the wait's own commit: " ++ dtr-cbs(m).str() ++ " command buffers a token), ONE wait a decode token, the NaN scan on the same drain",
-    "[dsv4-token] dispatches a token (dll-token-count-m, the ledger's formula over the header): " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position, " ++ dtr-max-go(m, 0, 0, 256).str() ++ " at a position where every compressor emits; the embedding 2 and the head and scan 8 included",
-    dtr-ceil-line(m),
-    "[dsv4-token] bytes a token reads (dll-token-bytes-m, the ledger's sum over the header's rows): " ++ bytes.str() ++ " B (" ++ dvr-gib(bytes) ++ "), one embedding row " ++ (record_get(m, "e") * 2).str() ++ " and the head " ++ dll-head-bytes-m(m).str()
-     ++ "; at " ++ bw.str() ++ " GB/s (stated, not measured) that is " ++ dtr-tenths-text(dtr-tenths-ms(bytes, bw)) ++ " ms a token",
+     ++ (arena ? ", the routed experts through a slot arena of " ++ dtr-opts-arena(opts).str() ++ " slots a layer (the stacks are not mapped)" : ", WHOLE MAPPED STACKS (the control: arena_slots 0; a cold token reads the whole file)"),
+    arena ? dtr-arena-structure-line(m) : "[dsv4-token] the command structure (landed, dkr-hz): one concurrent batch, barriers planned per block, handed to the queue every " ++ "2" ++ " blocks (" ++ dtr-submits(m).str() ++ " submits and the wait's own commit: " ++ dtr-cbs(m).str() ++ " command buffers a token), ONE wait a decode token, the NaN scan on the same drain",
+    "[dsv4-token] dispatches a token (dll-token-count-m, the ledger's formula over the header): " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position, " ++ dtr-max-go(m, 0, 0, 256).str() ++ " at a position where every compressor emits; the embedding 2 and the head and scan 8 included" ++ (arena ? "; the arena adds the copies of its fills" : ""),
+    arena ? dtr-arena-ceil-line(m) : dtr-ceil-line(m),
+    arena ? dtr-join-lines(dtr-arena-bytes-lines(m, opts, bw)) : ("[dsv4-token] bytes a token reads (dll-token-bytes-m, the ledger's sum over the header's rows): " ++ bytes.str() ++ " B (" ++ dvr-gib(bytes) ++ "), one embedding row " ++ (record_get(m, "e") * 2).str() ++ " and the head " ++ dll-head-bytes-m(m).str()
+     ++ "; at " ++ bw.str() ++ " GB/s (stated, not measured) that is " ++ dtr-tenths-text(dtr-tenths-ms(bytes, bw)) ++ " ms a token"),
     "[dsv4-token] the Swift runner's reference (history metal_dsv4_stack.sh, receipts): 38.17 ms a token, about 1,510 barriers, 28 tokens a second warm; this row set is what the Form path reads against it",
     "[dsv4-token] the wired curve: wired memory is read after every layer of the first " ++ dtr-opts-watch(opts).str() ++ " tokens (the tap, no sync) and the encoding stops before the machine is at risk: memory unreadable, host-memory-low, wired above " ++ dtr-opts-pct(opts).str()
      ++ " percent of memory (" ++ dvr-gib(mg-pct(128 * mg-gib(), dtr-opts-pct(opts))) ++ " on 128 GiB), available under the reserve, 20 minutes; the receipt keeps the curve and where it stopped",
@@ -236,10 +296,17 @@ section [form.bml] {
     "[dsv4-token] DRY ends"];
   }
   // ---- the run (the door; never run by a band) -------------------------------------------------------------------------------------------------
-  def dtr-steps-before(env) = [() => dvr-stage(env, "compile", dvr-bound(), () => dvr-do-compile(env)),
-   () => dvr-stage(env, "map", dvr-est-map(record_get(env, "m"), record_get(env, "cap")), () => dvr-do-map(env)),
-   () => dvr-stage(env, "state", dvl-kv-total(record_get(env, "m"), record_get(env, "cap")), () => dvr-do-state(env))];
-  def dtr-record(denv, wenv, status, reason, opts) = record_new(0, "status", status, "reason", reason, "file", record_get(denv, "file"), "cap", record_get(denv, "cap"), "pct", record_get(wenv, "pct"), "watch", record_get(wenv, "watch"),
+  // the map stage opens the dense tensors only when the arena is asked for (the routed stacks keep their rows and have no handle), and the arena stage allocates the experts' buffers once (the lease's expert term)
+  def dtr-do-map(env, slots) {
+   let ctx = slots > 0 ? dsv4-open-span-mode(record_get(env, "file"), record_get(env, "cap"), 1, dkr-graph-units(), "arena") : dsv4-open-span(record_get(env, "file"), record_get(env, "cap"), 1);
+   len(ctx) == 13 ? { let k = record_set(env, "ctx", ctx); let p = dsv4-prepare(ctx); p == 1 ? 1 : nothing(); } : nothing();
+  }
+  def dtr-do-arena(env, slots) { let ar = dxa-open(dvr-ctx(env), slots); nothing?(ar) ? nothing() : 1; }
+  def dtr-steps-before(env, slots) = append([() => dvr-stage(env, "compile", dvr-bound(), () => dvr-do-compile(env)),
+    () => dvr-stage(env, "map", dvr-est-map(record_get(env, "m"), record_get(env, "cap")), () => dtr-do-map(env, slots))],
+   append(slots > 0 ? [() => dvr-stage(env, "arena", dtr-arena-bytes(record_get(env, "m"), slots), () => dtr-do-arena(env, slots))] : [],
+    [() => dvr-stage(env, "state", dvl-kv-total(record_get(env, "m"), record_get(env, "cap")), () => dvr-do-state(env))]));
+  def dtr-record(denv, wenv, status, reason, opts) = record_new(0, "status", status, "reason", reason, "file", record_get(denv, "file"), "cap", record_get(denv, "cap"), "pct", record_get(wenv, "pct"), "watch", record_get(wenv, "watch"), "arena", dtr-opts-arena(opts),
     "shared", record_get(denv, "shared"), "organs", record_get(denv, "organs"), "moved", record_get(denv, "moved"), "denied", record_get(denv, "denied"), "vmwin", dvr-window-vm-json(mg-sense(), record_get(denv, "vm0"), dvr-stored-pages()),
     "stages", record_get(denv, "log"), "stop", record_get(wenv, "stop"), "curve", record_get(wenv, "curve"), "rows", record_get(wenv, "rows"), "elapsed", dvr-elapsed(denv));
   def dtr-finish(denv, wenv, opts, why) {
@@ -254,7 +321,9 @@ section [form.bml] {
   }
   // the stages as the validation door runs them, then the walk
   def dtr-go-walk(denv, wenv, opts) {
-   let before = try dvr-seq(dtr-steps-before(denv)) catch "walker-stop";
+   let slots = dtr-opts-arena(opts);
+   let marked = record_set(wenv, "arena", slots > 0 ? 1 : 0);
+   let before = try dvr-seq(dtr-steps-before(denv, slots)) catch "walker-stop";
    before != "" ? before : (try dtr-walk(wenv, dvr-ctx(denv), dvr-sts(denv), dtr-opts-ids(opts), dtr-opts-steps(opts)) catch "walker-stop");
   }
   def dtr-window-run(opts, file, size, m, shared, cap) {
