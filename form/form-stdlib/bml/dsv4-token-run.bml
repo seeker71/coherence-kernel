@@ -6,7 +6,7 @@
 // is the carrier's own counts between two marks (dispatches, barriers, command buffers, waits, host reads, buffers made, the device's busy microseconds, the clock), and this door adds only what the ledger does not hold: the
 // machine (wired memory and pageins between the marks) and the device's own allocated bytes. The door keeps no counter of its own.
 //
-// THE COMMAND STRUCTURE UNDER MEASUREMENT (landed, dsv4-kernels.fk dkr-hz): one concurrent batch with barriers planned per block, handed to the queue every second block, ONE wait a decode token (the argmax, the NaN scan and the
+// THE COMMAND STRUCTURE UNDER MEASUREMENT (landed, dsv4-kernels.fk dkr-hz): one concurrent batch with barriers planned per block, handed to the queue every `submit_every` blocks (2 by default: floor(layers / 2) + 1 command buffers a token; 1 hands it over after every block), ONE wait a decode token (the argmax, the NaN scan and the
 // logits settle together), a wait between prefill positions, two host reads (the count and the id), no buffer made, no pipeline compiled. That is the WHOLE-STACK mode (arena_slots 0, the control). THE DEFAULT IS THE ARENA MODE
 // (native/metal/dsv4-arena.fk): the routed expert stacks are not mapped, each layer holds an arena of `arena_slots` experts (64: the lease's term), and a block is two planned stages with one sync between them, where the host
 // reads the router's ids (one counted read), the cache answers slots, and the missing experts' spans are copied from the file: the file gives the dense tensors once and only the experts the cache misses (a whole-stack token
@@ -50,7 +50,7 @@ section [form.bml] {
   def dtr-default-pct() = 60;
   def dtr-default-bw() = 546;
   // ---- the plan: the ledger's own formulas over the header ---------------------------------------------------------------------------------
-  // the batches handed to the queue a token (every second block) and the command buffers a token commits (those and the one the wait drains): dsv4-token-handle.fk dth-layers, dll-row
+  // the batches handed to the queue a token (every `submit_every` blocks, dkr-every: 2 by default, so floor(layers / 2)) and the command buffers a token commits (those and the one the wait drains): dsv4-token-handle.fk dth-layers, dll-row
   def dtr-submits(m) = record_get(m, "layers-n") / dkr-every();
   def dtr-cbs(m) = dtr-submits(m) + 1;
   // the dispatches a token makes at pos, with its head and scan (headed) or without (a chained prefill position)
@@ -249,7 +249,7 @@ section [form.bml] {
    let w = dtr-warm-rows(rows);
    len(w) == 0 ? "" : "; warm token, milliseconds (mean over " ++ len(w).str() ++ "): wall " ++ dtr-tenths-text(dtr-mean-tenths(w, "wall_ms", 1)) ++ " ms = waits " ++ dtr-tenths-text(dtr-mean-tenths(w, "sync_ms", 1)) ++ " (the device busy " ++ dtr-tenths-text(dtr-mean-tenths(w, "gpu_us", 1000))
     ++ ") + plan " ++ dtr-tenths-text(dtr-mean-tenths(w, "plan_ms", 1)) ++ " + fills " ++ dtr-tenths-text(dtr-mean-tenths(w, "fill_ms", 1)) ++ " + encoding " ++ dtr-tenths-text(dtr-mean-tenths(w, "enc_us", 1000)) ++ " + reads " ++ dtr-tenths-text(dtr-mean-tenths(w, "read_us", 1000))
-    ++ " + other (the rest); the host's CPU " ++ dtr-tenths-text(dtr-mean-tenths(w, "cpu_us", 1000)) ++ " ms (encoding " ++ dtr-tenths-text(dtr-mean-tenths(w, "enc_us", 1000)) ++ ", plan " ++ dtr-tenths-text(dtr-mean-tenths(w, "plan_us", 1000)) ++ ", fills " ++ dtr-tenths-text(dtr-mean-tenths(w, "fill_us", 1000)) ++ ")";
+    ++ " + other (wall minus the parts: it may read negative, the parts are partly CPU and the wall is wall); the host's CPU " ++ dtr-tenths-text(dtr-mean-tenths(w, "cpu_us", 1000)) ++ " ms (encoding " ++ dtr-tenths-text(dtr-mean-tenths(w, "enc_us", 1000)) ++ ", plan " ++ dtr-tenths-text(dtr-mean-tenths(w, "plan_us", 1000)) ++ ", fills " ++ dtr-tenths-text(dtr-mean-tenths(w, "fill_us", 1000)) ++ ")";
   }
   // tokens a second, in hundredths, from [tokens, ms]
   def dtr-hundredths-per-s(w) = w[1] == 0 ? 0 : (w[0] * 100000) / w[1];
@@ -395,13 +395,17 @@ section [form.bml] {
   // count: 87 for 43 blocks against 65). Not measured on the real file: the receipt's rows carry wall, waits and encoding for both settings.
   // THE SEGMENTS ({"segments":0} turns them off, the control): the runs of a block's dispatches that read the same buffers with the same constants every token are encoded once and replayed (dsv4-kernels.fk dkr-seg);
   // the same ids, the same logits, the same ledger counts, about half the host's encoding time on the fixture
-  def dtr-host-plan-line(opts) = "[dsv4-token] the host's time (one ledger row a token carries it: wall_ms = sync_ms (waits, the device running) + plan_ms (a layer's id read, cache, slot write) + fill_ms (the span fills) + enc_us and read_us (CPU microseconds) + other_ms; "
+  def dtr-host-plan-line(opts) = "[dsv4-token] the host's time (one ledger row a token carries it: wall_ms = sync_ms (waits, the device running) + plan_ms (a layer's id read, cache, slot write) + fill_ms (the span fills) + enc_us and read_us (CPU microseconds) + other_ms, which is the wall minus the parts and MAY READ NEGATIVE (the parts are partly CPU, the wall is wall); "
    ++ "cpu_us the process's CPU): the summary's last part reads the warm token's mean of each. Encoding: " ++ (dtr-opts-seg?(opts) ? "SEGMENTS ON (the runs of a block's dispatches that read the same buffers with the same constants every token are encoded once and replayed: about half the encoding time on the fixture; segments 0 is the control)" : "segments OFF (the control: every dispatch built afresh every token)")
    ++ "; the open batch is handed to the queue after every " ++ dtr-opts-every(opts).str() ++ " block(s) (submit_every 1 or 2)";
   def dtr-opts-seg?(opts) = dvr-int(opts, "segments", 1) != 0;
   // THE PICKS ({"picks":0} turns them off): each token row carries the experts its layers picked ([[layer, [ids]]...], about 1.3 KB a token), the evidence observe/dsv4-arena-sim.bml replays at other arena sizes. ON by default
   def dtr-opts-picks(opts) = dvr-int(opts, "picks", 1) != 0 ? 1 : 0;
-  def dtr-opts-every(opts) = dvr-int(opts, "submit_every", 2) < 1 ? 1 : dvr-int(opts, "submit_every", 2);
+  // ONLY 1 OR 2 (a value outside them is REFUSED by the door before anything is opened or planned, dtr-option-refusal: a 0 or a 3 read as a clamp would be a run under a cadence nobody asked for); the reading of a refused value is the default
+  def dtr-every-raw(opts) = dvr-int(opts, "submit_every", 2);
+  def dtr-every-ok?(opts) = dtr-every-raw(opts) == 1 || dtr-every-raw(opts) == 2;
+  def dtr-opts-every(opts) = dtr-every-ok?(opts) ? dtr-every-raw(opts) : 2;
+  def dtr-option-refusal(opts) = dtr-every-ok?(opts) ? "" : "submit_every must be 1 (the open batch handed to the queue after every block) or 2 (after every second block, the default); got " ++ dtr-every-raw(opts).str();
   // THE HYPER-CONNECTION F16 MATVEC the run takes: "wide" (the DEFAULT: ds4's own dispatch, 13 us a dispatch on the real file; on the real recording r 0.99813, overlap 9, delta 1.1448, argmax 2581, device 48.4 ms a token, 2026-10-03
   // 23:03 to 23:20 WITA) or "narrow" (the control and the oracle bands' reference: the compensated one-thread-a-row kernel, 1,537 us a dispatch on the real file, 87 a token, 133.8 ms; the same recording read r 0.99742,
   // overlap 8, delta 0.923): see dsv4-layer.fk dkl-hc-mv. "compensated" is read as "narrow".
@@ -433,7 +437,7 @@ section [form.bml] {
   def dtr-ceil-line(m) = "[dsv4-token] the ceilings a row is held to (the landed ledger's dll-within?, the dispatch count equal to the formula): dispatches " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position to " ++ dtr-max-go(m, 0, 0, 256).str()
    ++ " where every compressor emits (a chained prefill position 8 fewer: no head, no scan), barriers no more than the dispatches (the plan places them as it plans; Swift's reference ~1,510), command buffers " ++ dtr-cbs(m).str() ++ ", syncs 1, host reads 2 at a head and 0 without, buffers made 0, plans short or long 0";
   // THE ARENA MODE'S COMMAND STRUCTURE AND CEILINGS, from the header: a block is two planned stages with ONE sync between them (the router's ids are read on the host: one counted read of `used` words), so a token waits once a
-  // block and once at its close, reads once a block and twice at its head, and commits each block's drained batch, the batch handed to the queue after every odd block, and the one the close drains
+  // block and once at its close, reads once a block and twice at its head, and commits each block's drained batch, the batch handed to the queue after every second block (after every block at submit_every 1), and the one the close drains
   def dtr-arena-structure-line(m) = "[dsv4-token] the command structure (arena, dsv4-arena.fk): a block is two planned stages (dkr-hz) with ONE sync between them: the router's ids are read on the host (one counted read of " ++ record_get(m, "used").str() ++ " words), the cache answers slots, "
    ++ "a concurrent batch is armed again and the missing experts' spans are preaded into their slots (the fill door metal_buf_fill; a view and a copy kernel when the carrier lacks it), then the experts, the shared expert and hc_post; handed to the queue after every " ++ dkr-every().str() ++ (dkr-every() == 1 ? " block (submit_every 1: the device runs a block's second half while the host encodes the next block's first half, at every block)" : " blocks (submit_every 2, Swift's: 1 hands it over after every block)") ++ "; a token waits " ++ dll-arena-syncs(m).str() ++ " times (" ++ dll-layers-n(m).str() ++ " blocks and its close), "
    ++ "reads the device " ++ dll-arena-reads(m, true).str() ++ " times (a block's ids and the head's two), commits " ++ dll-arena-cbs(m).str() ++ " command buffers";
@@ -456,24 +460,36 @@ section [form.bml] {
        ++ " slots do not bound it; the arena's size is the separate " ++ dtr-arena-bytes(m, slots).str() ++ " B above); the whole file is " ++ dvr-gib(file_size(dvr-text(opts, "file", dvr-file()))) ++ " and is not read whole",
     "[dsv4-token] bytes the FILE gives, warm: nothing of the dense tensors, and " ++ dls-layer-expert(m, 0).str() ++ " B (layer 0's one expert's three stacks) for each expert the cache misses; a hit costs no byte of the file; the row of every token carries the experts it hit and missed and the bytes its fills copied"];
   }
-  // THE ARENA'S SIZE, THE PLAN'S DECISION. What a size costs, from the header: the arena's bytes (the lease's expert term) at each candidate slot count, the share of a layer's experts it holds. What a miss costs, from the last
-  // real window with decode rows (2026-10-03 23:43 WITA, 24 decode tokens at 64 slots): the wall of a warm token rose 0.397 ms for each expert its layers missed (7.08 MB, about 18 GB/s of page cache) on 94.6 ms with none, and
-  // the misses ran 14 to 129 a token (the mean about 40 of the 258 lookups: hit 85 percent warm). The fills of a warm token therefore cost about 16 ms of its 110. THE DECISION: arena_slots stays 64 (18.1 GiB) UNTIL THE
-  // PICKS ARE IN: the rows now carry the experts each layer picked, and observe/dsv4-arena-sim.bml replays them through the arena's own cache at 80 to 256 slots (proven equal to real walks row by row), so the next window
-  // that runs the door as it stands answers how many misses each size would have saved; raise it (the door's arena_slots, and the lease follows it) when 0.397 ms x the misses saved is worth the bytes. The arena is
-  // wired memory: the hold rule (wired above pct percent of memory, 76.7 GiB on 128 GiB) stops the encoding before the machine is at risk, whatever the size asked.
+  // THE ARENA'S SIZE, THE PLAN'S DECISION. What a size costs, from the header: the arena's bytes at each candidate slot count, the share of a layer's experts it holds, and THE LEASE the window would ask for it (the dense tensors + the
+  // arena + the KV states + the 8 GiB of its own: dls-shared + mg-kv-margin) with the governor's verdict on it against the machine as it reads now (mg-verdict: wired + need within 60 percent of memory, available - need over the
+  // reserve; REFUSED names the rule that fails). What a miss costs, from the two real windows with decode rows: 2026-10-03 23:43 WITA (quiet machine) 0.397 ms of wall for each expert missed on a base of 94.6 ms; 2026-10-04 02:12 WITA
+  // (the host-tip run, row 10: load average about 8, the glass organs contending for the GPU) 0.495 ms an expert on a base of 319 ms: the second is contention-affected and says the slope is not a constant of the machine.
+  // THE DECISION: arena_slots stays 64 (18.1 GiB). Row 10 carries the picks, and observe/dsv4-arena-sim.bml replays them through the arena's own cache: the warm decode token misses 54.1 experts at 64 slots, 50.3 at 80, 49.0 at 96 and 48.9
+  // at every size from 128 to 256: the misses a bigger arena removes are few, because most are COMPULSORY (an expert met for the first time in the window), so 36 to 72 GiB of arena would buy about 5 misses a token. The arena is wired
+  // memory: the hold rule (wired above pct percent of memory, 76.7 GiB on 128 GiB) stops the encoding before the machine is at risk, whatever the size asked.
   def dtr-sizing-slots() = [64, 96, 128, 160, 192, 256];
-  def dtr-sizing-go(m, ss) = nil?(ss) ? "" : ((dtr-arena-bytes(m, ss[0]) > 0 ? "; " ++ ss[0].str() ++ " slots " ++ dvr-gib(dtr-arena-bytes(m, ss[0])) ++ " (" ++ ((100 * ss[0]) / dvl-l(m, 0, "nexp")).str() ++ " percent of the experts)" : "") ++ dtr-sizing-go(m, ss[1:]));
-  def dtr-sizing-line(m, opts) = "[dsv4-token] the arena's size, decided: " ++ dtr-opts-arena(opts).str() ++ " slots a layer (" ++ dvr-gib(dtr-arena-bytes(m, dtr-opts-arena(opts))) ++ ") of the layer's " ++ dvl-l(m, 0, "nexp").str() ++ " experts; what other sizes take" ++ dtr-sizing-go(m, dtr-sizing-slots())
-   ++ ". A miss costs a warm token 0.397 ms (the 2026-10-03 23:43 window's fit: 24 decode tokens, 14 to 129 misses, wall 94.6 ms with none), about 16 of its 110 ms at 64 slots; the size stays 64 until the picks (in every row now, picks 0 turns them off) are replayed by observe/dsv4-arena-sim.bml at 80 to 256 slots: raise arena_slots when the misses it saves are worth the bytes (the lease follows it; the hold rule stops the encoding at wired above " ++ dtr-opts-pct(opts).str() ++ " percent of memory whatever the size)";
+  def dtr-lease-cap(opts) = dvr-int(opts, "cap", dvr-default-cap());
+  def dtr-lease-need(m, slots, opts) = dls-shared(m, slots, dtr-lease-cap(opts)) + mg-kv-margin();
+  def dtr-lease-verdict(vm, need) { let v = mg-verdict(vm, need); mg-granted?(v) ? "granted" : "REFUSED (" ++ v[1] ++ ")"; }
+  def dtr-sizing-go(m, ss, opts, vm) = nil?(ss) ? "" : ((dtr-arena-bytes(m, ss[0]) > 0 ? "; " ++ ss[0].str() ++ " slots " ++ dvr-gib(dtr-arena-bytes(m, ss[0])) ++ " (" ++ ((100 * ss[0]) / dvl-l(m, 0, "nexp")).str() ++ " percent of the experts), lease " ++ dvr-gib(dtr-lease-need(m, ss[0], opts)) ++ " " ++ dtr-lease-verdict(vm, dtr-lease-need(m, ss[0], opts)) : "") ++ dtr-sizing-go(m, ss[1:], opts, vm));
+  def dtr-sizing-line(m, opts, vm) = "[dsv4-token] the arena's size, decided: " ++ dtr-opts-arena(opts).str() ++ " slots a layer (" ++ dvr-gib(dtr-arena-bytes(m, dtr-opts-arena(opts))) ++ ") of the layer's " ++ dvl-l(m, 0, "nexp").str() ++ " experts, the lease it asks " ++ dvr-gib(dtr-lease-need(m, dtr-opts-arena(opts), opts)) ++ " (dense + arena + KV + " ++ dvr-gib(mg-kv-margin()) ++ " of its own): the governor reads it "
+   ++ dtr-lease-verdict(vm, dtr-lease-need(m, dtr-opts-arena(opts), opts)) ++ " on the machine as it is now; what other sizes take" ++ dtr-sizing-go(m, dtr-sizing-slots(), opts, vm)
+   ++ ". A miss costs a warm token 0.397 ms (the 2026-10-03 23:43 window's fit: 24 decode tokens, 14 to 129 misses, wall 94.6 ms with none) or 0.495 ms (row 10, 2026-10-04 02:12: wall 319 ms with none, measured at load average about 8 with GPU contention from the glass organs: contention-affected); about 16 of a quiet 110 ms at 64 slots. THE SIZE STAYS 64: row 10's picks replayed by observe/dsv4-arena-sim.bml read 54.1 experts missed a warm token at 64 slots, 50.3 at 80, 49.0 at 96 and 48.9 flat from 128 to 256, so most misses are compulsory and the other 36 to 72 GiB of arena would buy about 5 misses a token (picks 0 turns the recording off; the hold rule stops the encoding at wired above " ++ dtr-opts-pct(opts).str() ++ " percent of memory whatever the size)";
   def dtr-join-lines(ls) = dvr-join(ls, "\n");
+  // THE PLAN HAS NO SIDE EFFECT ON THE PROCESS: the lines read the hand-over cadence the options ask (dkr-every), so it is set for them and put back when they are built
   def dtr-plan-lines(m, size, opts, organs) {
+   let was = dkr-every();
+   let set = dkr-set-every(dtr-opts-every(opts));
+   let lines = dtr-plan-lines-go(m, size, opts, organs, mg-sense());
+   let back = dkr-set-every(was);
+   lines;
+  }
+  def dtr-plan-lines-go(m, size, opts, organs, vm) {
    let bw = dtr-opts-bw(opts);
    let bytes = dtr-bytes(m, true);
    let n = record_get(m, "layers-n");
    let ids = dtr-opts-ids(opts);
    let arena = dtr-opts-arena(opts) > 0;
-   let every = dkr-set-every(dtr-opts-every(opts));
    [ "[dsv4-token] DRY: the plan and the op ledger arithmetic; nothing is opened, mapped, leased, compiled or written",
     "[dsv4-token] file " ++ dvr-text(opts, "file", dvr-file()) ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), " ++ record_get(m, "arch") ++ ", " ++ n.str() ++ " layers, header read only",
     "[dsv4-token] the run: the prefill of " ++ len(ids).str() ++ " prompt ids " ++ dvr-ids-json(ids) ++ " (a wait between positions, the head and the one drain at the last), then " ++ dtr-opts-steps(opts).str() ++ " greedy decode tokens, one ledger row a token, cap " ++ dvr-int(opts, "cap", dvr-default-cap()).str()
@@ -483,7 +499,7 @@ section [form.bml] {
     dtr-hcmv-plan-line(opts),
     dtr-poison-plan-line(opts),
     dtr-host-plan-line(opts),
-    arena ? dtr-sizing-line(m, opts) : "[dsv4-token] the arena is off (arena_slots 0, the control): no arena to size",
+    arena ? dtr-sizing-line(m, opts, vm) : "[dsv4-token] the arena is off (arena_slots 0, the control): no arena to size",
     arena ? dtr-arena-structure-line(m) : "[dsv4-token] the command structure (landed, dkr-hz): one concurrent batch, barriers planned per block, handed to the queue every " ++ dkr-every().str() ++ " blocks (" ++ dtr-submits(m).str() ++ " submits and the wait's own commit: " ++ dtr-cbs(m).str() ++ " command buffers a token), ONE wait a decode token, the NaN scan on the same drain",
     "[dsv4-token] dispatches a token (dll-token-count-m, the ledger's formula over the header): " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position, " ++ dtr-max-go(m, 0, 0, 256).str() ++ " at a position where every compressor emits; the embedding 2 and the head and scan 8 included" ++ (arena ? "; the arena adds a copy dispatch for each fill that takes the view road (the fill door makes none)" : ""),
     arena ? dtr-arena-ceil-line(m) : dtr-ceil-line(m),
@@ -521,7 +537,17 @@ section [form.bml] {
    let wrote = dvr-append(dvr-text(opts, "receipt", dtr-receipt-path()), dtr-receipt-row(dvr-date(), now_unix_ms(), r));
    let said1 = print_str(dtr-summary-line(record_get(wenv, "rows")));
    let said2 = print_str("[dsv4-token] " ++ status ++ ": " ++ record_get(r, "reason") ++ "; handles still held " ++ held.str() ++ "; wired curve of " ++ len(record_get(wenv, "curve")).str() ++ " readings; receipt row " ++ (wrote >= 0 ? "written" : "NOT written"));
+   let reset = dtr-reset-knobs();
    status == "completed" && held == 0 ? 0 : 1;
+  }
+  // THE DOOR LEAVES THE PROCESS AS IT FOUND IT: the knobs a run set (the cadence, the segments, the picks, the matvec) go back to the driver's standing values when the window ends
+  def dtr-reset-knobs() {
+   let a = dkr-set-every(2);
+   let b = dkr-seg-off(false);
+   let c = dkr-hz-put("picks-on", 0);
+   let d = dkr-hz-put("picks", []);
+   let e = dkr-hz-put("hcmv", 1);
+   dkr-hz-put("poison", 0);
   }
   // the stages as the validation door runs them, then the walk
   def dtr-go-walk(denv, wenv, opts) {
@@ -583,7 +609,7 @@ section [form.bml] {
   // the door: the dry plan, or the run
   def dtr-main() {
    let opts = dvr-options();
-   dvr-dry?(opts) ? dtr-dry(opts) : dtr-window(opts);
+   dtr-option-refusal(opts) != "" ? dvr-refuse(dtr-option-refusal(opts), dvr-text(opts, "file", dvr-file())) : (dvr-dry?(opts) ? dtr-dry(opts) : dtr-window(opts));
   }
  }
  0;
