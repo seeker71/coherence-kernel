@@ -37,9 +37,12 @@
 ;         10.0), and the oracle's own mid equals the clamped one
 ;   2048  the WIDE hyper-connection matvec, the driver's default (hcmv 1: form_dsv4_f16_matvec_wide, chosen on the REAL recording: 2026-10-03 23:03 to 23:20 WITA, the device 182.4 -> 48.4 ms a token, logits r 0.99813 against the
 ;         narrow kernel's 0.99742, top-10 overlap 9 against 8, argmax 2581, delta 1.1448 against 0.923 under ds4's own spread 2.1636) held to a stated looser bound on THIS fixture, where it does not meet the 3e-5 gate on the
-;         compressed legs (the fixture's ill-conditioned weights amplify a 2e-7 change across the compressed rows' fp8 rounding: block 2's heads read 0.73): on blocks 0 and 1 every stage within the strict gate, on block 2
-;         every stage under 2.0 (read 2.6e-4 at most here and 1.78 on the first run with wide from the start of the process: history dependent), the chained pass within the chain gate 1.12e-4; and a BROKEN wide (its text with one product of four dropped, installed under its name) reads outside the strict gate at block 0
-;         position 0 and leaves the chained pass outside its gate
+;         compressed legs of block 2 (heads 2.6e-4, low 8.5e-5; the narrow control reads 3.2e-5 and 2.4e-5 there): on blocks 0 and 1 every stage within the strict gate, on block 2 every stage under 1e-3 (read 2.6e-4 at most), the
+;         chained pass within the chain gate 1.12e-4; a BROKEN wide (its text with one product of four dropped, installed under its name) reads outside the strict gate at block 0 position 0 and leaves the chained pass
+;         outside its gate; and THE READINGS DEPEND ON NO HISTORY: the 24 legs run again on fresh states (after the control legs and the first pass), then with every scratch buffer poisoned with a quiet NaN before each leg
+;         (dso-poison), then with 1e30, and every buffer each leg wrote (the 17 whole attention-half buffers, the compressor's, the scores over the rows the leg ran, the FFN half's: 17 more and the router and expert regions) is
+;         bit-equal to the first pass's. (A first all-wide reading, heads 0.73 at block 2, was the band's own short-circuit: claim 16's chain of && stopped at its first leg outside the strict gate, so block 2's positions 2 and
+;         3 never ran and position 4 read a state without their rows; the legs here are listed, not chained.)
 ;
 ; REQUIRES: a live Metal device -- every bit needs one behind the handle door; the fixture is written and read as a binary file. Light GPU: 24 block runs of a few hundred threads over a 1.5 MB
 ; fixture, one tilted run, a chained pass of 24 more. Never maps a model; writes only under temp_dir and removes what it made.
@@ -145,17 +148,60 @@ section [form.bml] {
    (ratio > 0 && (pos + 1) % ratio == 0) ? record_set(fal, "nc-" ++ il.str() ++ "-" ++ pos.str(), dkr-nd(heads, record_get(dfo-attention-half(record_get(c, "r"), dlb-pre(il), input, record_get(c, "g"), il, pos, lr[6]), "heads"))) : 0;
   }
   // the block il at pos against lr, fed `input` (a list of 1024 f32, or nothing: the embedding path); sts holds that block's caches
+  // ---- the attention half's buffers as bytes, kept per leg: what a second pass of the same legs must read bit for bit ------------------------------------------------------------------------
+  // WHAT THE LEG WROTE, and no more: the buffers every attention half writes whole, then the leg's own regions of the rest (the compressor's projections on a compressing block, its pool, norm and rounded row only
+  // at an emission, the scores and exponents over the nh x (rows + compressed rows) the leg ran, the inverse sums over nh): the unwritten tail of a scratch buffer is no one's memory and is not compared
+  def dlb-dump-spec(ctx, il, pos) {
+   let m = dso-geo(ctx);
+   let nh = record_get(m, "nh");
+   let hd = record_get(m, "hd");
+   let ratio = dvl-l(m, il, "ratio");
+   let ncomp = ratio == 0 ? 0 : (pos + 1) / ratio;
+   let emit = ratio != 0 && ((pos + 1) % ratio) == 0;
+   let whole = ["resid", "hc-flat", "hc-mix", "hc-split", "hc-cur", "xn", "q-latent", "q-latn", "q", "q-n", "kv-raw", "kv-n", "kv-q", "heads", "low", "attn-out", "resid-next"];
+   append(dlb-dump-whole(ctx, whole), append(ratio == 0 ? [] : [["comp-kv", dvl-l(m, il, "coff") * hd * 4], ["comp-gate", dvl-l(m, il, "coff") * hd * 4]], append(emit ? [["comp-pool", hd * 4], ["comp-normed", hd * 4], ["comp-q", hd * 4]] : [],
+    [["att-score", nh * (pos + 1 + ncomp) * 4], ["att-exp", nh * (pos + 1 + ncomp) * 4], ["att-inv", nh * 4]])));
+  }
+  def dlb-dump-whole(ctx, names) = len(names) == 0 ? [] : cons([names[0], dvl-buffer-bytes(dso-scratch-plan(dso-geo(ctx), 8), names[0])], dlb-dump-whole(ctx, names[1:]));
+  def dlb-dump-read(ctx, spec) = len(spec) == 0 ? [] : cons([spec[0][0], metal_buf_read(dso-buf(ctx, spec[0][0]), 0, spec[0][1])], dlb-dump-read(ctx, spec[1:]));
+  def dlb-dump(ctx, sts, il, pos, fal) {
+   record_set(fal, "dump-" ++ il.str() ++ "-" ++ pos.str(), dlb-dump-read(ctx, dlb-dump-spec(ctx, il, pos)));
+  }
+  // the FFN half: its first half's buffers over the rows the router has, the experts' and the shared expert's, the sum, the streams out (the hashed router writes no score buffer)
+  def dlb-dump-ffn-spec(ctx, il) {
+   let m = dso-geo(ctx);
+   let rr = dvl-l(m, il, "router-rows") * 4;
+   let whole = ["hc-flat", "hc-mix", "hc-split", "hc-cur", "xn", "expert-ids", "expert-weights", "xdown", "shared-gate", "shared-up", "shared-mid", "shared-down", "ffn-out", "resid"];
+   let eh = record_get(m, "used") * dvl-l(m, il, "hidden") * 4;
+   append(dlb-dump-whole(ctx, whole), append([["xgate", eh], ["xup", eh], ["xmid", eh], ["router-logits", rr], ["router-probs", rr]], dvl-l(m, il, "hashed") ? [] : [["router-score", rr]]));
+  }
+  def dlb-dump-ffn(ctx, il, pos, fal) = record_set(fal, "dumpf-" ++ il.str() ++ "-" ++ pos.str(), dlb-dump-read(ctx, dlb-dump-ffn-spec(ctx, il)));
+  // the first buffer (by name) whose bytes differ, "" when none does
+  def dlb-first-diff(a, b) = (len(a) == 0 || len(b) == 0) ? "" : (a[0][0] == b[0][0] && str_eq(a[0][1], b[0][1]) ? dlb-first-diff(a[1:], b[1:]) : a[0][0]);
+  def dlb-diff-key(fa, fb, k) = (record_has(fa, k) && record_has(fb, k)) ? dlb-first-diff(record_get(fa, k), record_get(fb, k)) : "(absent)";
+  def dlb-diff-leg(fa, fb, il, pos) {
+   let a = dlb-diff-key(fa, fb, "dump-" ++ il.str() ++ "-" ++ pos.str());
+   a != "" ? a : (dlb-diff-key(fa, fb, "dumpf-" ++ il.str() ++ "-" ++ pos.str()) == "" ? "" : "ffn:" ++ dlb-diff-key(fa, fb, "dumpf-" ++ il.str() ++ "-" ++ pos.str()));
+  }
+  def dlb-diff-leg-clean?(fa, fb, il, pos) = dlb-diff-leg(fa, fb, il, pos) == "";
+  def dlb-diff-legs-clean?(fa, fb, il, pos, n) = pos == n ? true : (dlb-diff-leg-clean?(fa, fb, il, pos) && dlb-diff-legs-clean?(fa, fb, il, pos + 1, n));
+  def dlb-diff-clean?(fa, fb) = dlb-diff-legs-clean?(fa, fb, 0, 0, 8) && dlb-diff-legs-clean?(fa, fb, 1, 0, 8) && dlb-diff-legs-clean?(fa, fb, 2, 0, 8);
+  def dlb-diff-report(fa, fb) = "block 0 pos 0-7 [" ++ dlb-diff-legs(fa, fb, 0, 0, 8) ++ "] block 1 [" ++ dlb-diff-legs(fa, fb, 1, 0, 8) ++ "] block 2 [" ++ dlb-diff-legs(fa, fb, 2, 0, 8) ++ "]";
+  def dlb-diff-legs(fa, fb, il, pos, n) = pos == n ? "" : (dlb-diff-leg(fa, fb, il, pos) ++ "," ++ dlb-diff-legs(fa, fb, il, pos + 1, n));
   def dlb-run(c, label, il, pos, input, lr, sts, fal) {
    let ctx = dlb-ctx(c);
    let token = dlb-tokens()[pos];
+   let pz = dkr-hz-get("poison") > 0 ? dso-poison(ctx, dkr-hz-get("poison")) : 0;
    let fed = nothing?(input) ? dlb-embed-in(ctx, token) : (dlb-write-resid(ctx, input) >= 0);
    let n1 = dsv4-layer-attn(ctx, sts, il, pos, 8);
    let s1 = metal_sync();
+   let dumped = dlb-dump(ctx, sts, il, pos, fal);
    let ta = dlb-attn-triples(ctx, lr[0]);
    let nda = dlb-nds(ta);
    let heads = dlb-rd(ctx, "heads", 256);
    let n2 = dsv4-layer-ffn(ctx, il, token);
    let s2 = metal_sync();
+   let dumpedF = dlb-dump-ffn(ctx, il, pos, fal);
    let tf = dlb-ffn-triples(ctx, lr[1]);
    let ndf = dlb-nds(tf);
    let ids = dlb-read-ids(ctx);
@@ -304,10 +350,9 @@ section [form.bml] {
   // The default of the driver is the WIDE kernel (hcmv 1, form_dsv4_f16_matvec_wide, ds4's own dispatch), chosen on the evidence of the REAL recording, not of this fixture: 2026-10-03 23:03 to 23:20 WITA (the lead's windows,
   // docs/evidence/fkwu/dsv4-token-run-4-wide-attribution-* and -6-wide-logits-attribution-*): the device 182.4 -> 48.4 ms a token, the logits against the pinned ds4 recording r 0.99813 (the narrow kernel 0.99742),
   // top-10 overlap 9 (8), argmax 2581 the recorded one, our largest delta over its top 64 1.1448 (0.923) against ds4's own spread 2.1636, tie budget held. On THIS fixture the wide kernel does not meet the 3e-5 gate
-  // on the compressed legs: the fixture's ill-conditioned weights amplify a 2e-7 change in the hyper-connection mix across the compressed rows' fp8 rounding (block 2's heads read 0.73 against the twin). A kernel
-  // regression in the wide kernel must still be caught here, so this claim states what the wide kernel measured on the fixture and holds it there: on blocks 0 and 1 EVERY stage stays within the strict gate 3e-5 (the
-  // compressed legs of block 1 included: read 1.3e-6 at most), on block 2 (ratio 2, the compressed lane every position) every stage under 2.0 (read 2.6e-4 at most here, heads; 1.78 at most, the 'low' stage, and heads 0.73 on the first run with wide from the start of the process: the block's compressed lane makes the
-  // reading depend on what ran before it, which is itself an open question named in the receipt, so the bound covers both), and the CHAINED pass (the GPU feeding
+  // on block 2's compressed legs (heads 2.6e-4, low 8.5e-5 against the twin; the control reads 3.2e-5 and 2.4e-5: the compressed rows pass a fp8 rounding, which is where a 2e-7 change in the hyper-connection mix can
+  // show). A kernel regression in the wide kernel must still be caught here, so this claim states what the wide kernel measured on the fixture and holds it there: on blocks 0 and 1 EVERY stage stays within the strict
+  // gate 3e-5 (the compressed legs of block 1 included: read 1.3e-6 at most), on block 2 (ratio 2, the compressed lane every position) every stage under 1e-3 (read 2.6e-4 at most), and the CHAINED pass (the GPU feeding
   // itself through the three blocks at eight positions) within the chain gate 1.12e-4 exactly as the control. The plant: the wide kernel's text with one product of its four dropped from the first row of each pair
   // (metal_pipeline over the mutated lanes unit, installed under the wide kernel's name) reads far outside the strict gate at block 0 position 0 and leaves the chained pass outside its gate.
   def dlb-replace(s, from, to) { let p = str_find(s, from, 0); p < 0 ? s : substring(s, 0, p) ++ to ++ substring(s, p + str_len(from), str_len(s)); }
@@ -315,7 +360,7 @@ section [form.bml] {
    dlb-alone(c, ref, 0, 6, sts, fal), dlb-alone(c, ref, 0, 7, sts, fal), dlb-alone(c, ref, 1, 0, sts, fal), dlb-alone(c, ref, 1, 1, sts, fal), dlb-alone(c, ref, 1, 2, sts, fal), dlb-alone(c, ref, 2, 0, sts, fal), dlb-alone(c, ref, 1, 3, sts, fal),
    dlb-alone(c, ref, 2, 1, sts, fal), dlb-alone(c, ref, 2, 2, sts, fal), dlb-alone(c, ref, 2, 3, sts, fal), dlb-alone(c, ref, 1, 4, sts, fal), dlb-alone(c, ref, 1, 5, sts, fal), dlb-alone(c, ref, 1, 6, sts, fal), dlb-alone(c, ref, 1, 7, sts, fal),
    dlb-alone(c, ref, 2, 4, sts, fal), dlb-alone(c, ref, 2, 5, sts, fal), dlb-alone(c, ref, 2, 6, sts, fal), dlb-alone(c, ref, 2, 7, sts, fal)];
-  def dlb-wide-bound-2() = 2.0;
+  def dlb-wide-bound-2() = 0.001;
   def dlb-wide-bounds-ok?(fal) {
    let l = dlb-stage-labels();
    dlb-below(dlb-now(fal, 0, l), dkr-floor()) && dlb-below(dlb-now(fal, 1, l), dkr-floor()) && dlb-below(dlb-now(fal, 2, l), dlb-wide-bound-2());
@@ -328,6 +373,27 @@ section [form.bml] {
    let falW = record_new(0);
    let legs = dlb-alone-all(c, ref, stsW, falW);
    let printedW = print_str("  WIDE hyper-connection matvec on the fixture (the default): " ++ dlb-maxes-line(falW, 0, dlb-stage-labels()) ++ " || block 1 " ++ dlb-maxes-line(falW, 1, dlb-stage-labels()) ++ " || block 2 " ++ dlb-maxes-line(falW, 2, dlb-stage-labels()));
+   // HISTORY AND POISON: the same 24 legs again on fresh states (the control legs and the first pass have run in this process before), then with every scratch buffer poisoned with a quiet NaN before each leg, then
+   // with 1e30: every one of the 25 attention-half buffers of every leg is bit-equal to the first pass's. (A first reading of the all-wide band said block 2's heads read 0.73 here and 2.6e-4 there: that was
+   // the band's own short-circuit, not a hazard: claim 16's chain of && stopped at its first leg outside the strict gate, so block 2's positions 2 and 3 never ran and position 4 read a state without their rows. The
+   // legs here are listed, not chained, so none is skipped, and the dumps prove it.)
+   let stsW2 = dsv4-new-state(m, ctx[0], 8);
+   let falW2 = record_new(0);
+   let legs2 = dlb-alone-all(c, ref, stsW2, falW2);
+   let pn = dkr-hz-put("poison", 2143289344);
+   let stsN = dsv4-new-state(m, ctx[0], 8);
+   let falN = record_new(0);
+   let legsN = dlb-alone-all(c, ref, stsN, falN);
+   let pg = dkr-hz-put("poison", 1900671690);
+   let stsG = dsv4-new-state(m, ctx[0], 8);
+   let falG = record_new(0);
+   let legsG = dlb-alone-all(c, ref, stsG, falG);
+   let p0 = dkr-hz-put("poison", 0);
+   let diffA = dlb-diff-report(falW, falW2);
+   let diffN = dlb-diff-report(falW, falN);
+   let diffG = dlb-diff-report(falW, falG);
+   let said0 = print_str("  first buffer that differs, first wide pass against a second pass: " ++ diffA ++ " | against a NaN-poisoned pass: " ++ diffN ++ " | against a 1e30-poisoned pass: " ++ diffG);
+   let history = dlb-diff-clean?(falW, falW2) && dlb-diff-clean?(falW, falN) && dlb-diff-clean?(falW, falG);
    let bounds = dlb-wide-bounds-ok?(falW);
    let falC = record_new(0);
    let chained = dlb-chain(c, ref, stsC, falC);
@@ -343,8 +409,8 @@ section [form.bml] {
    let restored = record_set(ctx[0], "form_dsv4_f16_matvec_wide", saved);
    let off = dkr-hz-put("hcmv", 0);
    let said = print_str("  planted broken wide: block 0 position 0 alone " ++ (plantAlone ? "within" : "OUTSIDE") ++ " the strict gate (xn " ++ record_get(falP, "max-0-xn").str() ++ ", ffn_cur " ++ record_get(falP, "max-0-ffn_cur").str() ++ "), the chained pass " ++ (plantChain ? "within" : "OUTSIDE") ++ " its gate; chained wide " ++ (chained ? "within" : "OUTSIDE") ++ ", the bounds " ++ bounds.str());
-   let left = dsv4-free-state(append(stsW, append(stsC, append(stsP, stsQ))));
-   broken > 0 && bounds && chained && !plantAlone && !plantChain && len(left) == 0 && dlb-far(falP, "max-0-ffn_cur");
+   let left = dsv4-free-state(append(stsW, append(stsC, append(stsP, append(stsQ, append(stsW2, append(stsN, stsG)))))));
+   broken > 0 && history && bounds && chained && !plantAlone && !plantChain && len(left) == 0 && dlb-far(falP, "max-0-ffn_cur");
   }
   def dlb-clamp-bites(c, ref) {
    let b0 = dlb-bite(c, ref, 0);
@@ -367,6 +433,7 @@ section [form.bml] {
  let prep = opened ? dsv4-prepare(ctx) : 0;
  // the oracle claims run the NARROW control (the compensated hyper-connection matvec the 3e-5 gate was built against); claim 2048 holds the WIDE default to a stated looser bound (see there)
  let narrow = dkr-hz-put("hcmv", 0);
+ let pois = dkr-hz-put("poison", 0);
  let stsA = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
  let stsB = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
  let stsT = opened ? dsv4-new-state(m, ctx[0], 8) : nothing();
