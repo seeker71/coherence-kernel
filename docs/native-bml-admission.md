@@ -398,9 +398,8 @@ With a budget of 2 the walk ends absent with one alternative left
 once the ripened argument reaches 3 at patience 5 and is absent at patience 2.
 A clock-shaped wait
 uses `wait-until` and `retry-first` (see Waiting and retrying). Spots:
-`bml/router-proof-cases.bml` (`rpc-wait-listener`), `bml/router-proof-io.bml`
-(wait for exit, then force the stop), `bml/form-cli-heal-native-io.bml`
-(`retry-first` over a new directory name).
+`bml/form-cli-heal-native-process.bml` (wait for the child's group to empty),
+`bml/form-cli-heal-native-io.bml` (`retry-first` over a new directory name).
 
 **`repeat`, `again` and `retry` ride the event queue.** A pass returns `again(next)`
 to yield to peer work, a value to finish, and `retry(offered, next)` to propose
