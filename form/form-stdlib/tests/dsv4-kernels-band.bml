@@ -9,12 +9,20 @@
 ; ne is the envelope a 1.4e-5 per-layer tilt opens in the reference (metal_dsv4_stack_oracle.sh above cmpOra, history 8a6f123d3^, read 2026-10-03) and a kernel alone is held to the floor 3e-5
 ; (that harness holds its THIS-LAYER-ALONE gates there). Every output buffer is pre-filled with 0x5A bytes (f32 1.5e16, no value of any run) so a kernel that never ran reads as a huge nd.
 ;
-; Verdict 16383 when every claim lands:
+; Verdict 32767 when every claim lands:
 ;   1     text: every one of the ten sources starts with the pragma pair exactly, none uses `using namespace`, no kernel name repeats inside the six graph units, and the catalogue read from
-;         the sources is 104 kernels over eleven sources (the Q2_K expert matvec by ids, form_dsv4_q2k_matvec_id, joined the experts unit at driver stage 4; the Q8_0 unit joined the graph units; the lanes unit,
-;         the real file's four-row expert matvecs and ds4's Metal-order Q8_0 matvec, joined them with the flow restoration, its three kernels held by the Q8_0/Q2_K band's claim 512)
-;   2     device: every kernel of every unit compiles through metal_pipeline (104 handles, all positive); a second open of the same sources returns the same 104 handles (compile once,
+;         the sources is 105 kernels over eleven sources (the Q2_K expert matvec by ids, form_dsv4_q2k_matvec_id, joined the experts unit at driver stage 4; the Q8_0 unit joined the graph units; the lanes unit,
+;         the real file's four-row expert matvecs and ds4's Metal-order Q8_0 matvec, joined them with the flow restoration, its three kernels held by the Q8_0/Q2_K band's claim 512; the wide F16 matvec joined
+;         the lanes unit with claim 16384)
+;   2     device: every kernel of every unit compiles through metal_pipeline (105 handles, all positive); a second open of the same sources returns the same 105 handles (compile once,
 ;         handle kept)
+;   16384 the hyper-connection F16 matvec at the real file's shape. hc_attn_fn, hc_ffn_fn and output_hc_fn are 24 rows of 16,384 columns and ran as the COMPENSATED kernel, one thread a row (24 threads): on
+;         synthetic buffers of that shape, non-periodic, it reads 1,450 us a dispatch on this device, 87 dispatches a token (43 blocks x 2 and the head) = 127 ms of the 166 ms the real token kept the device busy; the lane fold
+;         reads 115 us and ds4's own wide dispatch (form_dsv4_f16_matvec_wide, two rows to a group of 256 threads, the lanes unit) reads 10 us. The claim: the wide kernel on the fixture's blk.1.hc_attn_fn within the oracle's
+;         gate, on the real shape within the floor 3e-5 of the compensated kernel (read 2.3e-7) and the lane fold likewise (7.3e-7), on 23 rows of 1022 columns (the last group's second row absent, the tail loop) within the floor,
+;         at least ten times faster than the compensated kernel, and the check can fail (one group short leaves a row at the sentinel: a disagreement over 1e9). dkl-hc-mv (dsv4-layer.fk) takes the compensated
+;         kernel unless the standing switch hcmv says 1: the layer band's fixture gate does not hold with the wide kernel (an ill-conditioned fixture amplifies its 2e-7 into fp8 bucket flips of the compressed rows),
+;         so the real file's recording decides whether it becomes the default
 ;   4     the pragmas bite on this device: the probe kernel a*b+c on a = b = 1 + 2^-12, c = -1 reads 973078528 (the unfused word) when wrapped by dkr-wrap and 973079552 (the fma word) when the
 ;         same text is compiled without the pragma pair
 ;   8     dense: the F16 embedding row (exact), the F16 matvec in both forms (compensated one thread and the lane fold) on blk.1.hc_attn_fn, the MXFP8 matvec on blk.0.attn_q_a, the grouped MXFP8
@@ -73,7 +81,7 @@ section [form.bml] {
   def dkb-text() {
    let us = dkr-units();
    let names = dkr-all-names(us);
-   len(us) == 11 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 104
+   len(us) == 11 && dkb-all-pragma?(us) && dkb-no-using?(us) && !dkr-dup?(dkr-all-names(dkr-graph-units())) && len(names) == 105
     && dkr-pragmas() == "#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\n";
   }
 
@@ -84,7 +92,7 @@ section [form.bml] {
   def dkb-compiled(first, second, us) {
    let a = dkb-unit-hs(first, us);
    let b = dkb-unit-hs(second, us);
-   len(a) == 104 && dkb-positive?(a) && a == b;
+   len(a) == 105 && dkb-positive?(a) && a == b;
   }
 
   // ---- 4: the contraction probe, compiled with and without the pragma pair
@@ -584,6 +592,61 @@ section [form.bml] {
    s[0][52] > 0.00001 && s[0][44] > 0.0001 && dkr-maxabs(s[0]) > 0.5 && s[0][52] > 100.0 * s[1][52] && s[0][44] > 100.0 * s[1][44];
   }
   def dkb-transposed(comb) = [comb[0], comb[4], comb[8], comb[12], comb[1], comb[5], comb[9], comb[13], comb[2], comb[6], comb[10], comb[14], comb[3], comb[7], comb[11], comb[15]];
+  // ---- 16384: the hyper-connection F16 matvec at the real file's shape: the compensated one-thread-a-row kernel against the lane fold and the wide kernel (ds4's own dispatch) ---------------------------------------------
+  // non-periodic synthetic data (Park-Miller): 256-draw chunks joined as a tree so the recursion stays shallow; finite halves (exponents 8 to 21), f32 inputs rounded to f32
+  def dkb-hw-half(i) { let d = dsv4-pm-at(77, i); let h = (d % 2) * 32768 + (8 + ((d / 2) % 14)) * 1024 + ((d / 64) % 1024); byte_to_str(h % 256) ++ byte_to_str(h / 256); }
+  def dkb-hw-chunk(i, n) = i == n ? "" : dkb-hw-half(i) ++ dkb-hw-chunk(i + 1, n);
+  def dkb-hw-tree(lo, hi) = hi - lo == 1 ? dkb-hw-chunk(lo * 256, lo * 256 + 256) : str_concat(dkb-hw-tree(lo, lo + (hi - lo) / 2), dkb-hw-tree(lo + (hi - lo) / 2, hi));
+  def dkb-hx-tree(lo, hi) = hi - lo == 1 ? dkr-f32-bytes(dkb-x(11 + lo, 256, 2.0)) : str_concat(dkb-hx-tree(lo, lo + (hi - lo) / 2), dkb-hx-tree(lo + (hi - lo) / 2, hi));
+  // one dispatch of a pipeline, synced, and the device microseconds it took (the growth of metal_live word 11)
+  def dkb-us(go) { let s0 = metal_sync(); let g0 = metal_live()[11]; let r = go(); let s1 = metal_sync(); metal_live()[11] - g0; }
+  def dkb-med3(a, b, c) = a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b));
+  def dkb-time3(go) = dkb-med3(dkb-us(go), dkb-us(go), dkb-us(go));
+  def dkb-hc-wide(c) {
+   let reg = dkb-g(c, "reg");
+   let comp = dkb-p(c, "form_dsv4_f16_matvec");
+   let lane = dkb-p(c, "form_dsv4_f16_matvec_lane");
+   let wide = dkb-p(c, "form_dsv4_f16_matvec_wide");
+   // (a) the fixture's own tensor against the oracle's fp64, the same gate every kernel of this band is held to
+   let x = dkb-x(11, 1024, 2.0);
+   let xb = dkr-buf-f32(reg, x);
+   let h = dkb-vh(c, "blk.1.hc_attn_fn.weight");
+   let oF = dkr-buf-empty(reg, 24);
+   let eF = dkr-go-tg(wide, [h, xb, oF], [24, 1024], 12, 256);
+   let ref = dfo-f16-matrix(dkb-g(c, "r"), "blk.1.hc_attn_fn.weight", x);
+   let fixtureOk = eF == 1 && dkb-chk("f16 matvec wide 24x1024", dkr-read(oF, 24), ref);
+   // (b) the real shape, 24 rows of 16384: wide and the lane fold against the compensated kernel (itself within 1e-7 of the exact sum), and the time of each
+   let rows = 24;
+   let cols = 16384;
+   let w = dkr-buf-bytes(reg, dkb-hw-tree(0, rows * cols / 256));
+   let xr = dkr-buf-bytes(reg, dkb-hx-tree(0, cols / 256));
+   let o1 = dkr-buf-empty(reg, rows);
+   let o2 = dkr-buf-empty(reg, rows);
+   let o3 = dkr-buf-empty(reg, rows);
+   let tc = dkb-time3(() => dkr-go(comp, [w, xr, o1], [rows, cols], rows));
+   let tl = dkb-time3(() => dkr-go(lane, [w, xr, o2], [rows, cols], rows * 32));
+   let tw = dkb-time3(() => dkr-go-tg(wide, [w, xr, o3], [rows, cols], (rows + 1) / 2, 256));
+   let a = dkr-read(o1, rows);
+   let ndL = dkr-nd(dkr-read(o2, rows), a);
+   let ndW = dkr-nd(dkr-read(o3, rows), a);
+   let said = print_str("  hc F16 matvec at the real shape (24 x 16384, synthetic): compensated one thread a row " ++ tc.str() ++ " us a dispatch, lane fold " ++ tl.str() ++ " us, wide " ++ tw.str() ++ " us; nd against the compensated: lane " ++ ndL.str() ++ ", wide " ++ ndW.str() ++ "; "
+    ++ (87 * tc).str() ++ " us over the 87 dispatches a token (43 blocks x 2 and the head) against " ++ (87 * tw).str() ++ " us");
+   // (c) odd shapes: 23 rows (the second row of the last group is absent) of 1022 columns (the tail loop: not a multiple of four)
+   let ro = 23;
+   let co = 1022;
+   let wo = dkr-buf-bytes(reg, substring(dkb-hw-tree(0, 92), 0, ro * co * 2));
+   let xo = dkr-buf-bytes(reg, substring(dkb-hx-tree(0, 4), 0, 4 * co));
+   let q1 = dkr-buf-empty(reg, ro);
+   let q2 = dkr-buf-empty(reg, ro);
+   let e1 = dkr-go(comp, [wo, xo, q1], [ro, co], ro);
+   let e2 = dkr-go-tg(wide, [wo, xo, q2], [ro, co], (ro + 1) / 2, 256);
+   let ndO = dkr-nd(dkr-read(q2, ro), dkr-read(q1, ro));
+   // (d) the check can fail: one group short (22 rows written) leaves the last row at the sentinel, which reads as a huge disagreement
+   let p1 = dkr-buf-empty(reg, rows);
+   let e3 = dkr-go-tg(wide, [w, xr, p1], [rows, cols], 11, 256);
+   let ndP = dkr-nd(dkr-read(p1, rows), a);
+   fixtureOk && ndL < dkr-floor() && ndW < dkr-floor() && ndO < dkr-floor() && e1 == 1 && e2 == 1 && e3 == 1 && ndP > 1.0e9 && tc > 0 && tw > 0 && tw * 10 < tc;
+  }
   def dkb-falsifiers(c) {
    let resid = dkb-x(41, 1024, 2.0);
    let mix = dkb-x(43, 24, 2.0);
@@ -624,9 +687,10 @@ section [form.bml] {
  let c2048 = dkb-bit(try dkb-nan-scan(c) catch false, 2048);
  let c4096 = dkb-bit(try dkb-softplus-new(c) catch false, 4096);
  let c8192 = dkb-bit(try dkb-softplus-old(c) catch false, 8192);
+ let c16384 = dkb-bit(try dkb-hc-wide(c) catch false, 16384);
  let leftBufs = dkr-reg-free(reg);
  let leftViews = nothing?(views) ? [] : dvb-close(views);
  let removed = host_path_remove(path);
- print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str() ++ " wrote " ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096 + c8192;
+ print_str("dsv4-kernels-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str() ++ " " ++ c16384.str() ++ " wrote" ++ wrote.str() ++ " bufs " ++ dkr-reg-count(reg).str() ++ " left " ++ len(leftBufs).str() ++ "/" ++ len(leftViews).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096 + c8192 + c16384;
 }
