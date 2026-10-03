@@ -28,7 +28,7 @@ read the Form codec's depth and node count for it (`fbc-decode`), preserve the
 continuation, then witness the chosen path.
 
 The traversal cell is `form/form-stdlib/bml/formbin-depth.bml`;
-`gate/tests/canonical-conformance-band.fk` (511) reads the pinned kernel artifact
+`gate/tests/canonical-conformance-band.fk` (1023) reads the pinned kernel artifact
 through the Form codec.
 
 Where it is going: every reader of FORMBIN2 meets the same Form traversal, and the
