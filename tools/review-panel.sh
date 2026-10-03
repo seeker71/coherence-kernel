@@ -47,7 +47,7 @@ usage() {
     while IFS= read -r line; do
         n=$((n + 1))
         [[ $n -lt 2 ]] && continue
-        [[ $n -gt 50 ]] && break
+        [[ $n -gt 14 ]] && break   # the usage block: lines 2-14 (what it is, the three forms, where answers land)
         if [[ "$line" == "# "* ]]; then line="${line#\# }"; elif [[ "$line" == "#"* ]]; then line="${line#\#}"; fi
         printf '%s\n' "$line"
     done < "$0"
