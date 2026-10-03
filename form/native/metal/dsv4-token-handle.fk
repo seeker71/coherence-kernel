@@ -17,7 +17,7 @@
 // 0xFFFFFFFF), is read as NOTHING and never as a plausible token 0; an id at or past the vocabulary is nothing too.
 //
 // THE TOKEN IS ONE CONCURRENT BATCH WITH PLANNED BARRIERS (dkr-hz, dsv4-kernels.fk). dth-state-go arms a concurrent batch before the embedding's first enqueue; every stage (embedding, block, head, NaN scan) runs through dth-stage, which plans the
-// stage's barriers the first time (a dry run: nothing reaches the device) and replays the plan; the batch is handed to the queue every second block (dkr-hz-submit) so the device runs block n while the host encodes block n + 1; and the host waits ONCE a
+// stage's barriers the first time (a dry run: nothing reaches the device) and replays the plan; the batch is handed to the queue every `submit_every` blocks (dkr-every: 2 by default, 1 after every block; dkr-hz-submit) so the device runs block n while the host encodes block n + 1; and the host waits ONCE a
 // token (prefill, after every position's blocks; decode, in dsv4-argmax, where the argmax, the NaN scan and the logits settle together) and then reads. Outside an armed batch (a band that calls dsv4-layer or dkr-go directly) a dispatch is the carrier's
 // serial one and no barrier is set. dkr-hz-enable(false) puts every token back there (the A/B the ledger band holds bit-equal). The admission is read ONCE a context (dsv4-admitted-once?), not once a token. Nothing here
 // writes a buffer from the host between enqueues but the sentinels written before the head: the rope tables were written once by dsv4-prepare, and the hash table of a hashed block is read on the device by the token id carried as a constant.
@@ -25,7 +25,7 @@
 // THE ARENA CONTEXT'S BLOCK IS TWO STAGES WITH THE BLOCK'S ONE SYNC BETWEEN THEM (dsv4-arena.fk; dth-layer-arena): "layer-a" (the attention half and the FFN's first half through the routing, planned under its own key), then
 // dxa-boundary (dkr-hz-sync, one counted read of the router's ids, the cache's slots, a concurrent batch armed again, the missing experts' spans enqueued as copies), then "layer-b" (the experts over the arena, the shared expert,
 // the slot sum, hc_post, planned under its own key; its first dispatch carries the barrier every plan's first dispatch carries, so the copies are complete before the kernels that read them). The batch is still handed to the
-// queue after every odd block. A token that closes (the wait after the head, a prefill position's wait, a refusal's drain) frees the span views its fills named (dxa-settle), so the buffers standing at its end are the ones
+// queue after every second block (every block at submit_every 1). A token that closes (the wait after the head, a prefill position's wait, a refusal's drain) frees the span views its fills named (dxa-settle), so the buffers standing at its end are the ones
 // it began with. A context without an arena runs the block as one stage, exactly as above.
 //
 // WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong token: a context whose blocks are not all supported (dsv4-layer.fk dkl-supported?), whose head tensors are not what the head kernels read
@@ -87,7 +87,9 @@ section [form.bml] {
     // in planning mode (no dispatch reaches the device: dkr-go records the barrier bit each dispatch needs from its own reads and writes), and every run, that one included, replays the planned bits.
     // A block's key is the context, the block and the position class that changes the dispatch list: a compressing block at a window boundary or past its first window runs other dispatches than the same block
     // between boundaries. Outside a live batch a stage is its plain go-function, exactly as before.
-    def dth-ctx-key(ctx) = dkl-b(ctx, "resid").str();
+    // THE CONTEXT'S IDENTITY IN EVERY PLAN AND SEGMENT KEY: its residual buffer and its argmax index buffer (two buffers the open made for this context alone; a carrier handle is (generation << 16) | slot, so a freed handle is never met again),
+    // so two contexts, or a context closed and another opened, never share a plan or a segment (the token-run band holds that, claim 4096)
+    def dth-ctx-key(ctx) = dkl-b(ctx, "resid").str() ++ "." ++ dkl-b(ctx, "argmax-idx").str();
     def dth-layer-key(ctx, il, pos) {
         let ratio = dkl-l(ctx, il, "ratio");
         ratio == 0 ? (dth-ctx-key(ctx) ++ ":L" ++ il.str()) : (dth-ctx-key(ctx) ++ ":L" ++ il.str() ++ (((pos + 1) % ratio) == 0 ? "b" : "n"));

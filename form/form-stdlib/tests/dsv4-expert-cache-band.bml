@@ -6,7 +6,7 @@
 ; twice in one top-k, the refusals (a capacity under the distinct ids, an id out of range, an empty top-k, a layer that is not there) and that a refused step changes nothing, a hit pinned against a miss of the same
 ; step, two layers holding the same expert id separately, and a slot index that is not an expert id.
 ;
-; Verdict 8191 when every claim lands:
+; Verdict 16383 when every claim lands:
 ;   1     the first fill: an empty table of 4 slots and the top-k [5, 2, 9] answers slots [0, 1, 2], the misses [[0, 5], [1, 2], [2, 9]] in the order placed, 0 hits, 0 evictions, keys [5, 2, 9, -1], 3 resident
 ;   2     hits: the same top-k answers the same slots and no miss (3 hits); [9, 5, 2] answers [2, 0, 1] (slots follow the ids, whatever their order); the table is the same set after it
 ;   4     an empty slot before any eviction, the lowest index first: [7] lands in slot 3 (the last empty), and a table that has an empty slot never evicts (evictions 0 through the fill of all 4)
@@ -30,6 +30,8 @@
 ;
 ;   4096  the one-pass walks: the step no longer asks `len` or `xs[i]` of a list at each index (quadratic in the slot count: 528 us a take at 64 slots, 1,859 at 192); the indexed walks kept here as a REFERENCE answer
 ;         the same as the live step over random sequences at 5, 16 and 40 slots (every step's whole answer, refusals included, and the tables equal), and a reference with its victim choice reversed is seen to differ
+;   8192  the step's COST: a take over six ids costs at most 400 CPU us at 64 slots and 900 at 256 (it reads about 130 and 280), at least 4 times less than the indexed reference at 256 slots, and the reference itself (the
+;         quadratic form) fails the same ceiling: the complexity claim, with the plant
 ;
 ; PROOF LEVEL: every arm -- integers and lists only; no file, no host door, no device.
 // preludes: form-stdlib/core.fk form-stdlib/bml/dsv4-expert-cache.bml
@@ -210,6 +212,33 @@ section [form.bml] {
     (nothing?(ra) || nothing?(rb)) ? dxb-lin-differs-go(dxb-next(s1), i + 1, n, a, b, nexp, diffs) : dxb-lin-differs-go(dxb-next(s1), i + 1, n, ra[0], rb[0], nexp, ra == rb ? diffs : diffs + 1);
    };
   }
+  // ---- 8192: the step's COST is bounded: the complexity claim --------------------------------------------------------------------------------------
+  // A take over six ids at 64 and at 256 slots on synthetic top-ks (mostly misses: the worst the arena meets), CPU microseconds a take over 100 takes after 100 warm-up takes. The live step is held to a ceiling (400 us at 64 slots, 900 at
+  // 256: it read 130 and about 280 on 2026-10-04) and to a ratio against the INDEXED reference at 256 slots (at least 4: it read 8 to 9 at 192), and the plant is the quadratic form itself: the reference, held to the same ceiling at
+  // 256 slots, fails it (it read 1,859 us at 192).
+  def dxb-cost-ids(i) = [(i * 7) % 256, (i * 13 + 1) % 256, (i * 29 + 2) % 256, (i * 31 + 3) % 256, (i * 37 + 4) % 256, (i * 41 + 5) % 256];
+  def dxb-cost-live(c, i, n) = i == n ? 0 : { let r = dxc-take(c, 0, dxb-cost-ids(i), 256); dxb-cost-live(c, i + 1, n); };
+  def dxb-cost-ref(st, i, n) = i == n ? st : { let r = dxo-step(st, dxb-cost-ids(i), 256, false); nothing?(r) ? dxb-cost-ref(st, i + 1, n) : dxb-cost-ref(r[0], i + 1, n); };
+  def dxb-us-live(slots) {
+   let c = dxc-open(1, slots);
+   let w = dxb-cost-live(c, 0, 100);
+   let t0 = host_cpu_us();
+   let r = dxb-cost-live(c, 100, 200);
+   (host_cpu_us() - t0) / 100;
+  }
+  def dxb-us-ref(slots) {
+   let st = dxb-cost-ref(dxc-new(slots), 0, 100);
+   let t0 = host_cpu_us();
+   let r = dxb-cost-ref(st, 100, 200);
+   (host_cpu_us() - t0) / 100;
+  }
+  def dxb-cost() {
+   let l64 = dxb-us-live(64);
+   let l256 = dxb-us-live(256);
+   let r256 = dxb-us-ref(256);
+   let said = print_str("  a take, CPU us: live " ++ l64.str() ++ " at 64 slots, " ++ l256.str() ++ " at 256; the indexed reference " ++ r256.str() ++ " at 256 (ratio " ++ (r256 / (l256 < 1 ? 1 : l256)).str() ++ "); ceilings 400 and 900");
+   l64 <= 400 && l256 <= 900 && r256 >= 4 * (l256 < 1 ? 1 : l256) && !(r256 <= 900);
+  }
   def dxb-linear() {
    let b5 = dxb-lin-go(7, 0, 150, dxc-new(5), dxc-new(5), 64, 0);
    let b16 = dxb-lin-go(11, 0, 150, dxc-new(16), dxc-new(16), 64, 0);
@@ -232,6 +261,7 @@ section [form.bml] {
  let h1024 = try dxb-slot-id() catch false;
  let h2048 = try dxb-forgot() catch false;
  let h4096 = try dxb-linear() catch false;
+ let h8192 = try dxb-cost() catch false;
  let c1 = dxb-bit(h1, 1);
  let c2 = dxb-bit(h2, 2);
  let c4 = dxb-bit(h4, 4);
@@ -245,6 +275,7 @@ section [form.bml] {
  let c1024 = dxb-bit(h1024, 1024);
  let c2048 = dxb-bit(h2048, 2048);
  let c4096 = dxb-bit(h4096, 4096);
- print_str("dsv4-expert-cache-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096;
+ let c8192 = dxb-bit(h8192, 8192);
+ print_str("dsv4-expert-cache-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str());
+ c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096 + c8192;
 }
