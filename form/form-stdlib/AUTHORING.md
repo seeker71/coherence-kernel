@@ -1,7 +1,7 @@
 # Authoring a Form stdlib recipe
 
 A guide for any cell — agent or human — writing a new `.fk` recipe + proof band. It carries the
-conventions and the hard-won traps so you don't rediscover them; `validate.sh` is the check that
+conventions and the hard-won traps so you don't rediscover them; the band sweep (`gate/band-sweep-run.bml`) is the check that
 reads the body, this is the guide that names the way. The recipes here are the body's logic, proven
 by `fkwu` bands — **a band's observed verdict, held to the pin its head declares, is the proof; there
 is no trusted prover.**
@@ -135,11 +135,10 @@ plus `defn · let · do`. (Read `form/form-stdlib/core.fk` — it is the whole v
 
 ## Prove it on fkwu
 
-From the repo's `form/` directory, name the band alone; its `; preludes:` header carries the rest:
+From the repo root, name the band alone; its `; preludes:` header carries the rest:
 
 ```
-cd form
-./validate.sh form-stdlib/tests/<name>-band.fk
+printf '{"files":["form-stdlib/tests/<name>-band.fk"]}' | ./fkwu gate/band-sweep-run.bml
 ```
 
 Success is `✓ ... → <verdict> (its pin)` **and** `1 ok, 0 failed`. Iterate until you see your

@@ -34,6 +34,6 @@ Recursion, list, helper-call and IEEE/string/vector bands prove results. The
 independent leaf witness proves Form emission and execution; each function's
 machine-code entry requires its own observation.
 
-The validator (`form/validate.sh`) runs each band on fkwu and judges it by its
-exit, its stderr and its pinned verdict; each run's legs directory retains its
-stream, exit and wall time.
+The band sweep (`./fkwu gate/band-sweep-run.bml`) runs each band on fkwu and judges it by its
+exit, its stderr and its pinned verdict; a failing run's legs directory retains its
+stream and stderr.

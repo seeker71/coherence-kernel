@@ -19117,7 +19117,7 @@ static long long fk_slen;
  * image is written the applied row follows under the same id.
  *
  * The human lines have readers that count their markers: observe/preflight.fk
- * reads `[unresolved-call] '`, form/validate.sh counts lines holding
+ * reads `[unresolved-call] '`, the band sweep (band-sweep.bml) counts lines holding
  * `unresolved-call`, `error:` or `compiled with errors`. This line never spells
  * them. Kind and name are separate fields, and the string writer \u-escapes the
  * one byte that would complete such a marker inside a value; parsed, the text

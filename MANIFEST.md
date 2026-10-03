@@ -68,7 +68,7 @@ minimal surface and the recipe body. What is being released, reunited or lowered
 
 ## Proof
 
-Every band runs on `fkwu`, the one runtime, and answers its pin there (`form/validate.sh`; the registered verdicts
+Every band runs on `fkwu`, the one runtime, and answers its pin there (`./fkwu gate/band-sweep-run.bml`; the registered verdicts
 are `form/band-verdicts.txt`). `./fkwu bootstrap/ground.fk` answers 42, and `gate/canonical-conformance.bml` holds
 fkwu and the Form codec to the pinned canonical expressions, the FORMBIN2 artifact and the malformed artifacts. A band
 that needs a host carrier (Metal) names it with `; PROOF LEVEL: FKWU-STAGED` and `; STAGED CARRIER:`, and reads
@@ -84,7 +84,7 @@ boundary — carrier, oracle, fixture, or tooling — and the structural census 
 ```
 
 The body decides what its interface carries (axiom 4): a script the census cannot name is not admitted.
-`form/validate.sh` carries the census's answer into its exit, and `./fkwu gate/drift-gates-run.bml` runs it with the
+The band sweep carries the census's answer into its exit, and `./fkwu gate/drift-gates-run.bml` runs it with the
 drift lenses (`op-manifest`, `native-surface`, `reserved-heads`, `canonical-conformance`, ...).
 
 ## Ground from a fresh checkout

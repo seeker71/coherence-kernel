@@ -8,8 +8,8 @@
 // found by that resolver, the SAME Form cell that printed SKIP yesterday dispatches on the GPU.
 //
 // BUILD. fkwu is plain C. This carrier is an optional dynamic artifact loaded by the running
-// process, not a second executable and not a source file linked into the seed. validate.sh builds
-// both artifacts on Darwin. For direct experimentation:
+// process, not a second executable and not a source file linked into the seed. The band sweep
+// (gate/band-sweep-run.bml) builds both artifacts on Darwin when they are stale. For direct experimentation:
 //
 //   cc -O2 -o fkwu runtime/fkwu-uni.c
 //   cc -O2 -dynamiclib -o form/native/metal/fk-metal-carrier.dylib \
