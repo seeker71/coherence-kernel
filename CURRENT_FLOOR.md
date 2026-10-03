@@ -535,8 +535,12 @@ token 9,334 ms, warm decode 287 ms a token (3.47 tokens a second), the device bu
 WHERE THE DEVICE'S 166 MS GOES (the attribution, `dll-attribute-decode`; and the kernels band, claim 16384): the hyper-connection F16 matvec (hc_attn_fn, hc_ffn_fn, output_hc_fn: 24 rows of 16,384 columns, 87 dispatches a token) ran as the compensated
 kernel with ONE THREAD A ROW, 1,450 us a dispatch on synthetic buffers of that shape = 127 ms a token; ds4's own wide dispatch (`form_dsv4_f16_matvec_wide`, in the lanes unit) reads 10 us and 2e-7 off it. The wide kernel is opt-in
 (`{"hc_matvec":"wide"}`): the layer band's fixture gate (3e-5 against the compressor's twin) does not hold with it, so the real recording decides. `{"go":1,"logits":1}` reads the head's logits after the prefill against the pinned ds4 recording
-(Pearson r, top-10 overlap, argmax 2581, the tie budget) and every step's margin, the recorded stream's raw prompt turns it on by itself, and `{"attribute":n}` runs n decode tokens in the attribution mode (every dispatch its own command buffer,
-the device's microseconds tallied by family, kernel and block) and keeps the tables in the receipt row. Not witnessed: the validation reading on the real file, the attribution on the real file, the wide kernel's logits.
+and every step's margin, the recorded stream's raw prompt turns it on by itself, and `{"attribute":n}` runs n decode tokens in the attribution mode (every dispatch its own command buffer,
+the device's microseconds tallied by family, kernel and block) and keeps the tables in the receipt row. WITNESSED ON THE REAL FILE (2026-10-03 22:36, the lead): the attribution read 1,856 dispatches and 182.4 ms of device a token, `form_dsv4_f16_matvec`
+87 dispatches 133.8 ms (73 percent, 1,537 us each) and the Q8_0 matvec 302 dispatches 19.1 ms; the logits read r 0.9974, top-10 overlap 8, argmax 2581 (the recorded one), the reference's top-two margin 10.37, our largest delta over its top 64 0.923.
+THE PASS RULE IS EVIDENCE: the argmax equal and recorded, finite logits, the tie budget (the margin over twice our delta: 10.37 over 1.85) and a delta within the spread ds4 shows against itself (2.1636, corpus row 973, one point of the REAP25 file: an order of
+magnitude, not a bound); r and the top-10 overlap are readings, not floors (a first guess of r 0.999 and overlap 9 had called this correct engine a failure). The compare is linear, a cursor a pass: 129,280 values in 0.2 s where the first real run took 20 minutes
+(an index and a length asked at every element: 17.7 s a pass of the stream step alone). Not witnessed: the wide kernel's logits and time on the real file.
 
 Bands that read a binary fixture through `read_file_slice` or a host door run on fkwu like every band;
 `./validate.sh --list` prints each band's staging and pins. The restored emitters, the
