@@ -1,0 +1,210 @@
+// dsv4-arena.fk -- the DeepSeek-V4 driver's expert slot arena: the routed experts a layer reads are copied into a bounded buffer, not bound whole.
+//
+// WHY. A dispatch that binds a routed expert stack (up to 1.14 GB, a no-copy view over the mapped file) makes the device wire the WHOLE stack: window 2 read +6.8 GiB at the stage after layers 0 to 2, a layer stage
+// 0.8 to 1.0 s cold and 170 to 220 ms warm, and a warm token would wire most of the 80 GiB file, past the governor's wired cap. A token reads six experts of a layer's 256. The arena holds a bounded number of them
+// (the lease's expert term: dsv4-lease.fk, 64 a layer) in buffers allocated once, and copies a missing one from the file in the span of its own bytes.
+//
+// WHAT IS HELD WHERE (the layout the band pins).
+//   per layer il, per stack kind k (0 gate, 1 up, 2 down): ONE arena buffer of S_il slots, S_il = min(S, the layer's stored experts), each slot ONE expert's row block of that stack, byte for byte the span the
+//     file holds it in (expert e of a stack of `nexp` experts and `bytes` bytes sits at stack offset e x (bytes / nexp)); the three kinds' buffers are indexed by the SAME slot, so slot s of layer il holds expert x in all three
+//   the expert kernels (form_dsv4_*_matvec_id) read `qb + ids[slot] x stride` with the stride derived from the shape: fed the ARENA BUFFER as the stack and a buffer of SLOT numbers as the ids they read a slot's expert, and no
+//     kernel changed. The slot-number buffer (`ids`, `used` words) is written by the host after each layer's router has answered; the router's own weights stay on the device in the order the router picked
+//   the dense tensors stay one no-copy view each (dsv4-bind.fk, the arena mode leaves only the routed stacks unmapped); token_embd one view; the arena's bytes are the lease's expert term to the byte (dxa-bytes)
+//   the cache is dsv4-expert-cache.bml's: one table a layer keyed by (layer, expert), least recently used, a hit pinned against a miss of its own top-k; the table's slot number is the buffer's slot number
+//
+// WHAT A LAYER'S FFN DOES (dsv4-layer.fk dkl-ffn-arena): hc_pre, norm, router and routing are enqueued; ONE SYNC; the host reads the picked ids (`expert-ids`), the cache answers slots and misses, the slots are
+// written to `ids`, and each miss enqueues three copies: a no-copy view of exactly that expert's span of the file (metal_buf_from_file at stack offset + e x stride, stride bytes) into the slot of its arena by a copy kernel
+// (form_dsv4_copy_u4, 16 bytes a thread; form_dsv4_copy_u1 for a stride that is not a multiple of 16), with no host byte crossing; then the experts, the shared expert, the slot sum and hc_post are enqueued over the arena. The
+// views a fill made are freed after the NEXT sync (the carrier refuses to free a buffer work still names: dvb-free-once), so the pending list is at most one layer's misses. The carrier runs enqueues in order, so the copy
+// is complete before the expert kernels that read its slot. One sync a layer, and the token's own after the head.
+//
+// WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong layer: an arena over a context that has one already, fewer slots than the top-k (used), a layer whose stack bytes are not a whole number of experts or
+// whose three stacks disagree about the expert count, a refused allocation (everything allocated is freed, the context stays open), a top-k the cache refuses (an id outside the layer's experts), a span view or a copy the
+// device refuses (the slots that fill was to write are forgotten by the cache, so a later hit never reads bytes that were not copied).
+//
+// Proven by: native/metal/tests/dsv4-arena-band.bml (the arena against the whole-stack control on both fixtures, stage by stage and end to end, the span of a miss read back, the refusals, release) and
+// form-stdlib/tests/dsv4-expert-cache-band.bml (the cache).
+import form-stdlib/core.fk;
+import form-stdlib/metal-door.fk;
+import form-stdlib/dsv4-layout.fk;
+import form-stdlib/dsv4-kernels.fk;
+import form-stdlib/bml/dsv4-expert-cache.bml;
+import native/metal/dsv4-bind.fk;
+import native/metal/dsv4-open.fk;
+section [form.bml] {
+    // ---- the copy kernels ------------------------------------------------------------------------------------------------
+    // a span view's bytes into a slot: the destination offset is a constant (the carrier binds a buffer at its own offset only), in units of the thread's width; the pragmas are the first two lines, as in every kernel of the driver
+    def dxa-src() = dkr-pragmas() ++ dkr-inc()
+        ++ "kernel void form_dsv4_copy_u4(device const uint4* src [[buffer(0)]], device uint4* dst [[buffer(1)]], constant uint& doff [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) { if (gid >= n) return; dst[doff + gid] = src[gid]; } "
+        ++ "kernel void form_dsv4_copy_u1(device const uchar* src [[buffer(0)]], device uchar* dst [[buffer(1)]], constant uint& doff [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) { if (gid >= n) return; dst[doff + gid] = src[gid]; } ";
+
+    // ---- the stacks and their geometry ---------------------------------------------------------------------------------------------
+    def dxa-leaves() = ["ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight"];
+    def dxa-name(il, k) = dvl-prefix(il) ++ dxa-leaves()[k];
+    // the bytes of ONE expert of layer il's stack k, or 0 when the stack is not a whole number of the layer's experts (or the stack's third dimension is not the expert count)
+    def dxa-expert-bytes(ctx, il, k) {
+        let v = dso-view(ctx, dxa-name(il, k));
+        let nexp = dvl-l(dso-geo(ctx), il, "nexp");
+        (len(v[3]) == 3 && v[3][2] == nexp && nexp > 0 && (v[5] % nexp) == 0) ? v[5] / nexp : 0;
+    }
+    def dxa-eb-of(ctx, il) = [dxa-expert-bytes(ctx, il, 0), dxa-expert-bytes(ctx, il, 1), dxa-expert-bytes(ctx, il, 2)];
+    def dxa-ebs-go(ctx, il, n) = il == n ? [] : cons(dxa-eb-of(ctx, il), dxa-ebs-go(ctx, il + 1, n));
+    def dxa-offs-of(ctx, il) = [dso-view(ctx, dxa-name(il, 0))[4], dso-view(ctx, dxa-name(il, 1))[4], dso-view(ctx, dxa-name(il, 2))[4]];
+    def dxa-offs-go(ctx, il, n) = il == n ? [] : cons(dxa-offs-of(ctx, il), dxa-offs-go(ctx, il + 1, n));
+    // the slots a layer's arena holds: the asked count, capped at the layer's stored experts
+    def dxa-slots-of(slots, nexp) = slots < nexp ? slots : nexp;
+    def dxa-all-positive?(xs) = len(xs) == 0 ? true : (xs[0] > 0 && dxa-all-positive?(xs[1:]));
+    def dxa-ebs-ok?(ebs) = len(ebs) == 0 ? true : (dxa-all-positive?(ebs[0]) && dxa-ebs-ok?(ebs[1:]));
+    // the arena's bytes, from the layout alone: per layer, the slots a layer holds times the bytes of one expert's three stacks, summed over the layers (the lease's expert term, dls-cache, when each expert's bytes are its stacks')
+    def dxa-bytes-go(m, ebs, il, n, slots) = il == n ? 0 : dxa-slots-of(slots, dvl-l(m, il, "nexp")) * (ebs[il][0] + ebs[il][1] + ebs[il][2]) + dxa-bytes-go(m, ebs, il + 1, n, slots);
+    def dxa-bytes(ctx, slots) = dxa-bytes-go(dso-geo(ctx), dxa-ebs-go(ctx, 0, record_get(dso-geo(ctx), "layers-n")), 0, record_get(dso-geo(ctx), "layers-n"), slots);
+
+    // ---- allocation ----------------------------------------------------------------------------------------------------------------
+    // one layer's three arena buffers, or nothing after freeing what this layer allocated (the caller frees the earlier layers')
+    def dxa-alloc-layer(m, il, eb, slots) {
+        let s = dxa-slots-of(slots, dvl-l(m, il, "nexp"));
+        let g = metal_buf_alloc(s * eb[0]);
+        let u = g > 0 ? metal_buf_alloc(s * eb[1]) : 0;
+        let d = (g > 0 && u > 0) ? metal_buf_alloc(s * eb[2]) : 0;
+        (g > 0 && u > 0 && d > 0) ? [g, u, d] : { let held = dvb-free-rounds(dxa-positive([g, u, d]), 4); nothing(); };
+    }
+    def dxa-positive(hs) = len(hs) == 0 ? [] : (hs[0] > 0 ? cons(hs[0], dxa-positive(hs[1:])) : dxa-positive(hs[1:]));
+    def dxa-flat(bufs) = len(bufs) == 0 ? [] : append(bufs[0], dxa-flat(bufs[1:]));
+    def dxa-alloc-go(m, ebs, il, n, slots, acc) {
+        il == n ? reverse(acc) : {
+            let b = dxa-alloc-layer(m, il, ebs[il], slots);
+            nothing?(b) ? { let held = dvb-free-rounds(dxa-flat(acc), 4); nothing(); } : dxa-alloc-go(m, ebs, il + 1, n, slots, cons(b, acc));
+        };
+    }
+
+    // ---- the arena record ------------------------------------------------------------------------------------------------------------
+    def dxa-on?(ctx) = !nothing?(dso-arena(ctx));
+    def dxa-of(ctx) = dso-arena(ctx);
+    def dxa-get(ctx, key) = record_get(dso-arena(ctx), key);
+    def dxa-bufs(ctx, il) = record_get(dso-arena(ctx), "bufs")[il];
+    def dxa-ids(ctx) = record_get(dso-arena(ctx), "ids");
+    // the record, over the buffers: the path, the slots asked, the buffers a layer, the bytes and file offset of an expert of each stack, the slot-number buffer, the copy pipelines, the cache, the views pending free, every handle it holds, and the counters
+    def dxa-record(ctx, slots, bufs, ids, p4, p1) {
+        let m = dso-geo(ctx);
+        let n = record_get(m, "layers-n");
+        let ebs = dxa-ebs-go(ctx, 0, n);
+        record_new(0, "path", ctx[9], "slots", slots, "layers", n, "bufs", bufs, "eb", ebs, "off", dxa-offs-go(ctx, 0, n), "ids", ids, "pipe4", p4, "pipe1", p1,
+         "cache", dxc-open(n, slots), "pending", [], "handles", append(dxa-flat(bufs), [ids]), "bytes", 0, "fills", 0, "syncs", 0, "ms-sync", 0, "ms-plan", 0, "ms-fill", 0, "price", dxa-bytes-go(m, ebs, 0, n, slots));
+    }
+    // the cache's slot count per layer follows the layer's stored experts: dxc-open gives every layer `slots`, and dxc-step admits only ids under the layer's nexp, so a layer of fewer experts than slots never fills the rest;
+    // the buffer holds only min(slots, nexp) slots, so the cache's table is the buffer's size: dxa-tables re-seats each layer's table at its own size
+    def dxa-tables-go(c, m, il, n, slots) = il == n ? c : { record_set(c, dxc-lkey(il), dxc-new(dxa-slots-of(slots, dvl-l(m, il, "nexp")))); dxa-tables-go(c, m, il + 1, n, slots); };
+    // a context opened in the arena mode maps no routed stack: layer 0's gate stack has a view row and no handle. A whole-stack context (its stacks mapped) is not given an arena: its experts are read in place
+    def dxa-arena-mode?(ctx, m) = dso-view(ctx, dxa-name(0, 0))[1] == 0;
+    // open the arena over a context opened in the arena mode (dsv4-open-span-mode ... "arena"): the record, or nothing (a context that is not admitted, one that has an arena, too few slots, a stack that is no whole number of experts, a refused allocation or pipeline)
+    def dxa-open(ctx, slots) {
+        let m = nothing?(ctx) || len(ctx) != 13 ? nothing() : dso-geo(ctx);
+        let ebs = nothing?(m) ? [] : dxa-ebs-go(ctx, 0, record_get(m, "layers-n"));
+        (nothing?(m) || dxa-on?(ctx) || !dxa-arena-mode?(ctx, m) || slots < record_get(m, "used") || !dxa-ebs-ok?(ebs)) ? nothing() : dxa-open-checked(ctx, m, ebs, slots);
+    }
+    def dxa-open-checked(ctx, m, ebs, slots) {
+        let n = record_get(m, "layers-n");
+        let p4 = metal_pipeline(dxa-src(), "form_dsv4_copy_u4");
+        let p1 = metal_pipeline(dxa-src(), "form_dsv4_copy_u1");
+        (p4 > 0 && p1 > 0) ? dxa-open-alloc(ctx, m, ebs, slots, n, p4, p1) : nothing();
+    }
+    def dxa-open-alloc(ctx, m, ebs, slots, n, p4, p1) {
+        let bufs = dxa-alloc-go(m, ebs, 0, n, slots, []);
+        let ids = nothing?(bufs) ? 0 : metal_buf_alloc(4 * record_get(m, "used"));
+        nothing?(bufs) ? nothing() : (ids > 0 ? dxa-attach(ctx, m, slots, bufs, ids, p4, p1) : { let held = dvb-free-rounds(dxa-flat(bufs), 4); nothing(); });
+    }
+    def dxa-attach(ctx, m, slots, bufs, ids, p4, p1) {
+        let ar = dxa-record(ctx, slots, bufs, ids, p4, p1);
+        let seated = dxa-tables-go(record_get(ar, "cache"), m, 0, record_get(m, "layers-n"), slots);
+        let k = record_set(m, "arena", ar);
+        ar;
+    }
+
+    // THE OPEN A SESSION OR A WINDOW TAKES: the context in the arena mode and its arena in one answer: a context (thirteen slots, with the arena in its layout record), or [] with everything released (a refused
+    // open, or an arena the device or the layout refuses: the context is closed in synced rounds first). `slots` is the experts a layer holds (dls-cache-experts, 64, is the lease's term).
+    def dxa-or-close(ctx, ar) = nothing?(ar) ? { let held = dsv4-close(ctx, []); []; } : ctx;
+    def dsv4-open-arena(path, maxpos, span, slots) {
+        let ctx = dsv4-open-span-mode(path, maxpos, span, dkr-graph-units(), "arena");
+        len(ctx) != 13 ? [] : dxa-or-close(ctx, dxa-open(ctx, slots));
+    }
+
+    // ---- a layer's plan: the sync, the ids, the cache, the slot numbers, the fills --------------------------------------------------------------
+    // the views a fill made are free once the work that named them has settled: the handles the carrier did not release stay pending
+    def dxa-free-pending(ar) { let left = dvb-free-once(record_get(ar, "pending")); record_set(ar, "pending", left); len(left); }
+    def dxa-count(ar, key, by) = record_set(ar, key, record_get(ar, key) + by);
+    // one span of an expert into its slot: a view of exactly [stack offset + e x stride, + stride) of the file, a copy kernel over it into the slot of the stack's arena buffer. 1 when enqueued, 0 when the view or the copy was refused
+    def dxa-fill-one(ctx, ar, il, k, slot, e) {
+        let eb = record_get(ar, "eb")[il][k];
+        let v = metal_buf_from_file(record_get(ar, "path"), record_get(ar, "off")[il][k] + e * eb, eb);
+        v > 0 ? dxa-fill-copy(ar, il, k, slot, eb, v) : 0;
+    }
+    def dxa-fill-copy(ar, il, k, slot, eb, v) {
+        let dst = record_get(ar, "bufs")[il][k];
+        let wide = (eb % 16) == 0;
+        let r = wide ? dkr-go(record_get(ar, "pipe4"), [v, dst], [(slot * eb) / 16, eb / 16], eb / 16) : dkr-go(record_get(ar, "pipe1"), [v, dst], [slot * eb, eb], eb);
+        let k1 = record_set(ar, "pending", cons(v, record_get(ar, "pending")));
+        r == 1 ? 1 : 0;
+    }
+    // the three stacks of one miss
+    def dxa-fill-miss(ctx, ar, il, miss) = dxa-fill-one(ctx, ar, il, 0, miss[0], miss[1]) + dxa-fill-one(ctx, ar, il, 1, miss[0], miss[1]) + dxa-fill-one(ctx, ar, il, 2, miss[0], miss[1]);
+    def dxa-fill-all(ctx, ar, il, misses) = len(misses) == 0 ? 0 : dxa-fill-miss(ctx, ar, il, misses[0]) + dxa-fill-all(ctx, ar, il, misses[1:]);
+    def dxa-forget-all(ar, il, misses) = len(misses) == 0 ? 0 : { dxc-forget(record_get(ar, "cache"), il, misses[0][0]); dxa-forget-all(ar, il, misses[1:]); };
+    def dxa-expert-all(ar, il) = record_get(ar, "eb")[il][0] + record_get(ar, "eb")[il][1] + record_get(ar, "eb")[il][2];
+    // THE LAYER'S BOUNDARY, a plan boundary of the token's concurrent batch (dkr-hz, dsv4-kernels.fk): layer il's first half (attention, hc_pre, norm, router, routing) has been enqueued, and the boundary SYNCS (dkr-hz-sync:
+    // the batch is drained and the arming is gone; the drained batch is one command buffer, counted), reads the ids the router picked (ONE counted host read, dkr-rd), takes the slots from the cache, writes the slot numbers,
+    // RE-ARMS a concurrent batch when one was open (dkr-hz-token-begin) and enqueues the fills into it: a miss is three span copies, enqueued before the second half, whose first dispatch carries the barrier every plan's first
+    // dispatch carries (so the copies are complete before the expert kernels read them). Answers the number of copies enqueued (3 a miss), or nothing (the sync failed, the cache refused the top-k, the slot numbers
+    // were not written, a fill was refused: the slots a refused fill was to write are forgotten). The fills' own counts go into the plan record the ledger marks (fills, fmiss, fhit, fbytes).
+    def dxa-boundary(ctx, il) {
+        let ar = dxa-of(ctx);
+        let m = dso-geo(ctx);
+        let used = record_get(m, "used");
+        let live = dkr-hz-live?();
+        let t0 = host_monotonic_ms();
+        let s = dkr-hz-sync();
+        let drained = live ? dkr-hz-put("cbs", dkr-hz-get("cbs") + 1) : 0;
+        let t1 = host_monotonic_ms();
+        let freed = dxa-free-pending(ar);
+        let ids = s >= 0 ? dkr-read-u32(dso-buf(ctx, "expert-ids"), used) : [];
+        let h0 = dxa-hits(ctx);
+        let plan = len(ids) == used ? dxc-take(record_get(ar, "cache"), il, ids, dvl-l(m, il, "nexp")) : nothing();
+        let w = nothing?(plan) ? 0 : metal_buf_write(dxa-ids(ctx), 0, dkr-u32-bytes(plan[0]));
+        let t2 = host_monotonic_ms();
+        let ok = !nothing?(plan) && w == 4 * used;
+        let rearmed = (ok && live) ? dkr-hz-token-begin() : 0;
+        let filled = ok ? dxa-fill-all(ctx, ar, il, plan[1]) : 0 - 1;
+        let t3 = host_monotonic_ms();
+        let c1 = dxa-count(ar, "syncs", 1);
+        let c2 = dxa-count(ar, "ms-sync", t1 - t0);
+        let c3 = dxa-count(ar, "ms-plan", t2 - t1);
+        let c4 = dxa-count(ar, "ms-fill", t3 - t2);
+        ok ? dxa-planned(ar, il, plan, filled, dxa-hits(ctx) - h0) : nothing();
+    }
+    def dxa-planned(ar, il, plan, filled, hits) {
+        filled == 3 * len(plan[1]) ? { let c = dxa-count(ar, "bytes", len(plan[1]) * dxa-expert-all(ar, il)); let f = dxa-count(ar, "fills", filled); let n = dxa-note(filled, len(plan[1]), hits, len(plan[1]) * dxa-expert-all(ar, il)); filled; }
+            : { let forgot = dxa-forget-all(ar, il, plan[1]); nothing(); };
+    }
+    // the plan record's counters the ledger marks: the copies enqueued, the experts missed and hit, the bytes the copies carry
+    def dxa-note(copies, misses, hits, bytes) {
+        let a = dkr-hz-put("fills", dkr-hz-get("fills") + copies);
+        let b = dkr-hz-put("fmiss", dkr-hz-get("fmiss") + misses);
+        let c = dkr-hz-put("fhit", dkr-hz-get("fhit") + hits);
+        dkr-hz-put("fbytes", dkr-hz-get("fbytes") + bytes);
+    }
+    // the views the fills of the layers just run named are free once the token's last wait has settled them (dsv4-token-handle.fk calls this after the wait that closes a token or a prefill position): the buffers
+    // standing at a token's end are the ones it began with, and the ledger reads allocs 0
+    def dxa-settle(ctx) = dxa-on?(ctx) ? dxa-free-pending(dxa-of(ctx)) : 0;
+
+    // ---- the readings ----------------------------------------------------------------------------------------------------------------------
+    def dxa-hits(ctx) = dxc-count(dxa-get(ctx, "cache"), "hits");
+    def dxa-misses(ctx) = dxc-count(dxa-get(ctx, "cache"), "misses");
+    def dxa-evicts(ctx) = dxc-count(dxa-get(ctx, "cache"), "evicts");
+    def dxa-pending-n(ctx) = len(dxa-get(ctx, "pending"));
+    // hits over lookups, in percent (0 before any lookup)
+    def dxa-hit-pct(ctx) = (dxa-hits(ctx) + dxa-misses(ctx)) == 0 ? 0 : (100 * dxa-hits(ctx)) / (dxa-hits(ctx) + dxa-misses(ctx));
+    // the counters as one line a band or a window prints
+    def dxa-stat-line(ctx) = "arena: " ++ dxa-get(ctx, "slots").str() ++ " slots a layer, " ++ dxa-get(ctx, "price").str() ++ " B allocated; lookups " ++ (dxa-hits(ctx) + dxa-misses(ctx)).str() ++ " (hits " ++ dxa-hits(ctx).str()
+        ++ ", misses " ++ dxa-misses(ctx).str() ++ ", evictions " ++ dxa-evicts(ctx).str() ++ ", hit " ++ dxa-hit-pct(ctx).str() ++ " percent); copied on misses " ++ dxa-get(ctx, "bytes").str() ++ " B in " ++ dxa-get(ctx, "fills").str()
+        ++ " span copies; " ++ dxa-get(ctx, "syncs").str() ++ " layer syncs: waiting " ++ dxa-get(ctx, "ms-sync").str() ++ " ms, plan " ++ dxa-get(ctx, "ms-plan").str() ++ " ms, fills enqueued " ++ dxa-get(ctx, "ms-fill").str() ++ " ms";
+    0;
+}

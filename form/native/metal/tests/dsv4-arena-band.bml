@@ -1,0 +1,229 @@
+; dsv4-arena-band.bml -- the expert slot arena against the whole-stack control, on both Form-built fixtures: stage by stage, end to end, the bytes of a slot, the cache working, the refusals and the release.
+;
+; WHAT THIS PINS. native/metal/dsv4-arena.fk keeps a bounded arena of routed experts a layer (S slots, one buffer a stack) and copies a missing expert from the file in the span of its own bytes; the layer's FFN
+; (dsv4-layer.fk dkl-ffn-arena) syncs once after the router, reads the picked ids, takes slots from the cache (form-stdlib/bml/dsv4-expert-cache.bml), fills the misses and runs the SAME expert kernels over the arena
+; buffers and a buffer of slot numbers. The whole-stack path (dsv4-open-span, each stack one view, the router's ids read on the device) is the control: this band opens BOTH on the same file and holds the arena to it.
+; The two fixtures are the ones the stage bands use: the MXFP8 / MXFP4 / IQ2_XXS one (dfx-write, 1,515,232 B) and the Q8_0 / IQ2_XXS / Q2_K one (dfx-v-write). Both have FOUR routed experts a layer and TWO used, so an arena of THREE
+; slots (below the experts a layer stores) evicts and hits in the same walk, and an arena of TWO (the top-k) evicts nearly every step; every comparison below is made at both.
+;
+; THE KERNELS ARE THE SAME, so the arena's results are held BIT-EQUAL to the control's, not to a tolerance: a kernel indexes `stack + id x stride` and the arena's slot holds the expert's bytes at that stride.
+;
+; Verdict 255 when every claim lands (each at both fixtures):
+;   1     the open: the arena-mode open maps nine views fewer than the whole open (three stacks a layer over three layers, handle 0 in their rows) and everything else the same; the arena's allocation is the lease's expert term to the
+;         byte (dxa-bytes equals dls-cache of the layout at the same slot count, and the arena record's price) and the device's own ledger (metal_live word 18) moved within twelve 16 KiB pages of it; its handles are the 9 buffers and the slot-number buffer
+;   2     the span of a miss: after the walks, EVERY resident slot of EVERY layer holds, in all three stacks, exactly the bytes the file holds that expert in (read_file_slice of stack offset + e x stride against the slot read back)
+;   4     stage by stage: at all eleven positions of the walk and all three layers, after the layer the arena context and the control read byte-equal in `resid`, the expert gate, up, mid and down buffers and `ffn-out`
+;   8     end to end: the prompt [5 17 3 22] and seven greedy steps on the arena context (three slots, then two) answer the control's eight ids and the control's eight logit vectors BIT-EQUAL; so does a second
+;         prompt [30 1 18 9] run from fresh states through the warm arena (its routing differs from the first's); so does a context opened through dsv4-open-arena (the open a session takes: the
+;         arena-mode open and the arena in one answer) at three slots
+;   16    two runs on the arena are bit-equal, the first with a cold cache and the second warm (the same ids, the same logits), and the warm run misses less than the cold (the cache was used)
+;   32    the cache works: at three slots the walks make hits, misses AND evictions (all above 0); at two slots evictions too; the counters add up (lookups = hits + misses; span copies = 3 x misses; one sync a layer: syncs = layers x positions)
+;   64    refusals: an arena of fewer slots than the top-k (1 of 2), a second arena on a context that has one, an arena over a whole-stack context (its stacks are mapped), answer nothing and move no counter (and
+;         dsv4-open-arena with one slot answers [] with the context it opened closed again: handles and mappings as they were); a fill the device refuses
+;         (the file path made unreadable) answers nothing for the layer and the cache FORGETS the slots it was to write (their keys read empty), and the same layer then runs from the restored path
+;   128   release: dsv4-close on every context in synced rounds leaves no handle held, metal_live reads what it read before the first open, and no span view is left pending
+;
+; THE TIMING IT PRINTS (the fixture's, a witness of the instrumentation and not of the real file's speed): per walk the milliseconds of the control and of the arena (cold and warm), the arena's counters (lookups, hit percent, bytes
+; copied on misses, syncs and what they waited), so a real-file run can be read against the same line. What a fixture cannot show: its experts are 8,704 to 21,504 B, so a fill is overhead and not bandwidth; a layer's sync is
+; 3 enqueue-to-sync trips of tiny kernels. The real file's bytes a token touches are in the floor's arithmetic (dense about 6.3 GB, routed about 1.7 GB at the hardware's bandwidth).
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- every bit needs a live Metal device behind the handle door; the fixtures are written and read as binary files. Light GPU: a few walks over two 1.5 MB fixtures; never maps a model; writes
+; only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk form-stdlib/dsv4-lease.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk form-stdlib/bml/dsv4-expert-cache.bml native/metal/dsv4-arena.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk
+section [form.bml] {
+ class Dsv4ArenaBand {
+  def dab-bit(held, bit) = held ? bit : 0;
+  def dab-cap() = 16;
+  def dab-prompt() = [5, 17, 3, 22];
+  def dab-layers() = 3;
+  def dab-pages(n) = n * 16384;
+  // ---- reading buffers whole -------------------------------------------------------------------------------------------------
+  def dab-size(ctx, name) = dvl-buffer-bytes(dso-scratch-plan(dso-geo(ctx), dab-cap()), name);
+  def dab-rd(ctx, name) = metal_buf_read(dso-buf(ctx, name), 0, dab-size(ctx, name));
+  def dab-names() = ["resid", "xgate", "xup", "xmid", "xdown", "ffn-out"];
+  def dab-snap(ctx, names) = len(names) == 0 ? [] : cons(dab-rd(ctx, names[0]), dab-snap(ctx, names[1:]));
+  def dab-lg(ctx) = metal_buf_read(dso-buf(ctx, "logits"), 0, 4 * record_get(dso-geo(ctx), "vocab"));
+  def dab-all-eq?(xs, ys) = len(xs) == len(ys) && (len(xs) == 0 || (str_eq(xs[0], ys[0]) && dab-all-eq?(xs[1:], ys[1:])));
+  // ---- a walk: the prefill and seven decodes; [ids, the logits' bytes at each step] -------------------------------------------------------------
+  def dab-more(ctx, sts, id, pos, left, ids, lgs) {
+   left == 0 ? [ids, lgs] : {
+    let nid = dsv4-decode(ctx, sts, id, pos);
+    nothing?(nid) ? [ids, lgs] : dab-more(ctx, sts, nid, pos + 1, left - 1, append(ids, [nid]), append(lgs, [dab-lg(ctx)]));
+   };
+  }
+  def dab-prompt2() = [30, 1, 18, 9];
+  def dab-walk(ctx, sts) = dab-walk-with(ctx, sts, dab-prompt());
+  def dab-walk-with(ctx, sts, prompt) {
+   let pf = dsv4-prefill-span-sliced(ctx, sts, prompt, 0);
+   nothing?(pf) ? [[], []] : dab-more(ctx, sts, pf[0], pf[1], 7, [pf[0]], [dab-lg(ctx)]);
+  }
+  def dab-same-walk?(a, b) = len(a[0]) == 8 && a[0] == b[0] && dab-all-eq?(a[1], b[1]);
+  // ---- the stages: both contexts driven layer by layer over the same tokens ------------------------------------------------------------------------
+  // [ok per layer] for one position: the layer on both, a sync, every named buffer byte-equal
+  def dab-layers-at(cw, ca, sw, sa, token, pos, il, acc) {
+   il == dab-layers() ? acc : {
+    let a = dsv4-layer(cw, sw, il, pos, token, dab-cap());
+    let b = dsv4-layer(ca, sa, il, pos, token, dab-cap());
+    let s = metal_sync();
+    let ok = !nothing?(a) && !nothing?(b) && dab-all-eq?(dab-snap(cw, dab-names()), dab-snap(ca, dab-names()));
+    dab-layers-at(cw, ca, sw, sa, token, pos, il + 1, append(acc, [ok]));
+   };
+  }
+  def dab-at(cw, ca, sw, sa, token, pos) {
+   let e1 = dsv4-embed(cw, token);
+   let e2 = dsv4-embed(ca, token);
+   (nothing?(e1) || nothing?(e2)) ? [false] : dab-layers-at(cw, ca, sw, sa, token, pos, 0, []);
+  }
+  def dab-stage-go(cw, ca, sw, sa, tokens, pos, acc) = pos == len(tokens) ? acc : dab-stage-go(cw, ca, sw, sa, tokens, pos + 1, append(acc, dab-at(cw, ca, sw, sa, tokens[pos], pos)));
+  def dab-all?(xs) = len(xs) == 0 ? true : (xs[0] && dab-all?(xs[1:]));
+  // ---- the span of a slot: every resident slot against the file ------------------------------------------------------------------------------------
+  def dab-slot-ok?(ctx, path, il, k, slot, e) {
+   let ar = dxa-of(ctx);
+   let eb = record_get(ar, "eb")[il][k];
+   let want = read_file_slice(path, record_get(ar, "off")[il][k] + e * eb, eb);
+   let got = metal_buf_read(record_get(ar, "bufs")[il][k], slot * eb, eb);
+   str_eq(want, got);
+  }
+  def dab-slots-go(ctx, path, il, keys, slot) = slot == len(keys) ? 0 : ((keys[slot] < 0 ? 0 : (dab-slot-ok?(ctx, path, il, 0, slot, keys[slot]) && dab-slot-ok?(ctx, path, il, 1, slot, keys[slot]) && dab-slot-ok?(ctx, path, il, 2, slot, keys[slot]) ? 1 : 100000)) + dab-slots-go(ctx, path, il, keys, slot + 1));
+  // the resident slots checked and all fine: a count, or 100000 and up for a bad slot
+  def dab-spans-go(ctx, path, il) = il == dab-layers() ? 0 : dab-slots-go(ctx, path, il, dxc-keys(dxc-table(dxa-get(ctx, "cache"), il)), 0) + dab-spans-go(ctx, path, il + 1);
+  // ---- the lease's term and the counters --------------------------------------------------------------------------------------------------------------------
+  def dab-priced?(ctx, slots, ownDelta) {
+   let m = dso-geo(ctx);
+   dxa-bytes(ctx, slots) == dls-cache(m, slots) && dxa-get(ctx, "price") == dls-cache(m, slots) && ownDelta >= dls-cache(m, slots) && ownDelta <= dls-cache(m, slots) + dab-pages(12);
+  }
+  def dab-counters?(ctx, positions) {
+   dxa-hits(ctx) + dxa-misses(ctx) == positions * dab-layers() * 2 && dxa-get(ctx, "fills") == 3 * dxa-misses(ctx) && dxa-get(ctx, "syncs") == positions * dab-layers();
+  }
+  def dab-ms(label, t0, t1) = label ++ " " ++ (t1 - t0).str() ++ " ms";
+  // ---- one fixture ---------------------------------------------------------------------------------------------------------------------------------------------
+  // everything the claims read, for the file at `path`: [open, spans, stages, e2e, twice, cache, refusals, release]
+  def dab-fixture(path, label) {
+   let live0 = dvb-live();
+   let mapped0 = dvb-mapped();
+   let ctxW = dsv4-open-span(path, dab-cap(), 1);
+   let liveW = dvb-live() - live0;
+   let mappedW = dvb-mapped() - mapped0;
+   let live1 = dvb-live();
+   let mapped1 = dvb-mapped();
+   let ctxA = dsv4-open-span-mode(path, dab-cap(), 1, dkr-graph-units(), "arena");
+   let liveA = dvb-live() - live1;
+   let mappedA = dvb-mapped() - mapped1;
+   let ok = len(ctxW) == 13 && len(ctxA) == 13;
+   let own0 = len(metal_live()) > 18 ? metal_live()[18] : 0;
+   let ar = ok ? dxa-open(ctxA, 3) : nothing();
+   let ownD = (len(metal_live()) > 18 ? metal_live()[18] : 0) - own0;
+   let priced = ok && !nothing?(ar) && dab-priced?(ctxA, 3, ownD);
+   let said1 = print_str(label ++ ": whole open " ++ liveW.str() ++ " handles, " ++ mappedW.str() ++ " mapped; arena-mode open " ++ liveA.str() ++ " handles, " ++ mappedA.str() ++ " mapped; arena " ++ (ok && !nothing?(ar) ? dxa-get(ctxA, "price").str() : "none") ++ " B priced, device +" ++ ownD.str() ++ " B");
+   let c1 = ok && !nothing?(ar) && mappedA == mappedW - 9 && liveA == liveW - 9 && priced && len(dxa-get(ctxA, "handles")) == 10;
+   let m = ok ? dso-geo(ctxW) : nothing();
+   let pW = ok ? dsv4-prepare(ctxW) : 0;
+   let pA = ok ? dsv4-prepare(ctxA) : 0;
+   // the end-to-end walks: the control, the arena cold, the arena warm (same context, a new state)
+   let stsW = ok ? dsv4-new-state(m, ctxW[0], dab-cap()) : nothing();
+   let stsA = ok ? dsv4-new-state(m, ctxA[0], dab-cap()) : nothing();
+   let stsB = ok ? dsv4-new-state(m, ctxA[0], dab-cap()) : nothing();
+   let tw0 = host_monotonic_ms();
+   let wW = (ok && !nothing?(ar)) ? dab-walk(ctxW, stsW) : [[], []];
+   let tw1 = host_monotonic_ms();
+   let wA = (ok && !nothing?(ar)) ? dab-walk(ctxA, stsA) : [[], []];
+   let tw2 = host_monotonic_ms();
+   let missesCold = (ok && !nothing?(ar)) ? dxa-misses(ctxA) : 0;
+   let wB = (ok && !nothing?(ar)) ? dab-walk(ctxA, stsB) : [[], []];
+   let tw3 = host_monotonic_ms();
+   let missesWarm = (ok && !nothing?(ar)) ? dxa-misses(ctxA) - missesCold : 0;
+   let said2 = print_str(label ++ ": walk of 11 positions: " ++ dab-ms("control", tw0, tw1) ++ ", " ++ dab-ms("arena cold", tw1, tw2) ++ ", " ++ dab-ms("arena warm", tw2, tw3) ++ "; ids " ++ wW[0].str() ++ " / " ++ wA[0].str() ++ " / " ++ wB[0].str());
+   let said3 = (ok && !nothing?(ar)) ? print_str(label ++ ": " ++ dxa-stat-line(ctxA)) : 0;
+   let hitsA = (ok && !nothing?(ar)) ? dxa-hits(ctxA) : 0;
+   let evictsA = (ok && !nothing?(ar)) ? dxa-evicts(ctxA) : 0;
+   let counters3 = (ok && !nothing?(ar)) ? dab-counters?(ctxA, 22) : false;
+   let c8a = ok && dab-same-walk?(wW, wA);
+   let c16 = ok && dab-same-walk?(wA, wB) && missesWarm < missesCold && missesCold > 0;
+   // the spans: every resident slot against the file, after the walks
+   let spans = (ok && !nothing?(ar)) ? dab-spans-go(ctxA, path, 0) : 100000;
+   let c2 = spans > 0 && spans < 100000;
+   let said4 = print_str(label ++ ": " ++ spans.str() ++ " resident slots hold exactly their experts' bytes in all three stacks (a count under 100000 is all of them)");
+   // the stages, with fresh states on both, over the prompt and the control's own greedy ids
+   let tokens = len(wW[0]) == 8 ? append(dab-prompt(), wW[0][0:7]) : [];
+   let stsW2 = ok ? dsv4-new-state(m, ctxW[0], dab-cap()) : nothing();
+   let stsA2 = ok ? dsv4-new-state(m, ctxA[0], dab-cap()) : nothing();
+   let stages = (ok && !nothing?(ar) && len(tokens) == 11) ? dab-stage-go(ctxW, ctxA, stsW2, stsA2, tokens, 0, []) : [false];
+   let said5 = print_str(label ++ ": stage runs " ++ len(stages).str() ++ " (positions x layers), all byte-equal to the control " ++ (dab-all?(stages) ? "yes" : "NO"));
+   let c4 = len(stages) == 33 && dab-all?(stages);
+   // another prompt through both, from fresh states (the arena's cache is warm with the first prompt's experts): the routing differs, the results still read equal
+   let stsW3 = ok ? dsv4-new-state(m, ctxW[0], dab-cap()) : nothing();
+   let stsA3 = ok ? dsv4-new-state(m, ctxA[0], dab-cap()) : nothing();
+   let w2W = (ok && !nothing?(ar)) ? dab-walk-with(ctxW, stsW3, dab-prompt2()) : [[], []];
+   let w2A = (ok && !nothing?(ar)) ? dab-walk-with(ctxA, stsA3, dab-prompt2()) : [[], []];
+   let said5b = print_str(label ++ ": a second prompt " ++ dab-prompt2().str() ++ ": control ids " ++ w2W[0].str() ++ ", arena ids " ++ w2A[0].str() ++ ", logits " ++ (dab-same-walk?(w2W, w2A) ? "bit-equal" : "DIFFER"));
+   // a second arena over the control's file at TWO slots (the top-k): evicts nearly every step, still bit-equal
+   let ctxT = dsv4-open-span-mode(path, dab-cap(), 1, dkr-graph-units(), "arena");
+   let arT = len(ctxT) == 13 ? dxa-open(ctxT, 2) : nothing();
+   let pT = (len(ctxT) == 13 && !nothing?(arT)) ? dsv4-prepare(ctxT) : 0;
+   let stsT = (len(ctxT) == 13 && !nothing?(arT)) ? dsv4-new-state(m, ctxT[0], dab-cap()) : nothing();
+   let wT = (len(ctxT) == 13 && !nothing?(arT)) ? dab-walk(ctxT, stsT) : [[], []];
+   let said6 = (len(ctxT) == 13 && !nothing?(arT)) ? print_str(label ++ ": " ++ dxa-stat-line(ctxT)) : 0;
+   // the open a session takes (dsv4-open-arena): the arena-mode context and its arena in one answer, three slots, the same walk
+   let ctxO = dsv4-open-arena(path, dab-cap(), 1, 3);
+   let okO = len(ctxO) == 13 && dxa-on?(ctxO);
+   let pO = okO ? dsv4-prepare(ctxO) : 0;
+   let stsO = okO ? dsv4-new-state(m, ctxO[0], dab-cap()) : nothing();
+   let wO = okO ? dab-walk(ctxO, stsO) : [[], []];
+   let c8 = c8a && dab-same-walk?(wW, wT) && dab-same-walk?(w2W, w2A) && okO && dab-same-walk?(wW, wO);
+   let evictsT = (len(ctxT) == 13 && !nothing?(arT)) ? dxa-evicts(ctxT) : 0;
+   let c32 = counters3 && hitsA > 0 && missesCold > 0 && evictsA > 0 && evictsT > 0;
+   // the refusals: too few slots, a second arena, an arena over a whole-stack context; none moves a counter
+   let liveR = dvb-live();
+   let mappedR = dvb-mapped();
+   let r1 = ok ? dxa-open(ctxW, 3) : [1];
+   let r2 = ok ? dxa-open(ctxA, 3) : [1];
+   let ctxS = dsv4-open-span-mode(path, dab-cap(), 1, dkr-graph-units(), "arena");
+   let liveS = dvb-live();
+   let r3 = len(ctxS) == 13 ? dxa-open(ctxS, 1) : [1];
+   let heldS = len(ctxS) == 13 ? dsv4-close(ctxS, []) : [0];
+   let few = dsv4-open-arena(path, dab-cap(), 1, 1);
+   let refused = nothing?(r1) && nothing?(r2) && nothing?(r3) && len(heldS) == 0 && len(few) == 0 && dvb-live() == liveR && dvb-mapped() == mappedR;
+   // a fill the device refuses: the file made unreadable, one layer's FFN answers nothing and its slots are forgotten; restored, it runs
+   let ctxF = dsv4-open-span-mode(path, dab-cap(), 1, dkr-graph-units(), "arena");
+   let arF = len(ctxF) == 13 ? dxa-open(ctxF, 3) : nothing();
+   let pF = (len(ctxF) == 13 && !nothing?(arF)) ? dsv4-prepare(ctxF) : 0;
+   let stsF = (len(ctxF) == 13 && !nothing?(arF)) ? dsv4-new-state(m, ctxF[0], dab-cap()) : nothing();
+   let eF = (len(ctxF) == 13 && !nothing?(arF)) ? dsv4-embed(ctxF, 5) : nothing();
+   let good = (len(ctxF) == 13 && !nothing?(arF)) ? record_get(arF, "path") : "";
+   let broken = (len(ctxF) == 13 && !nothing?(arF)) ? record_set(arF, "path", path ++ ".absent") : 0;
+   let badRun = (len(ctxF) == 13 && !nothing?(arF)) ? dsv4-layer(ctxF, stsF, 0, 0, 5, dab-cap()) : 1;
+   let forgot = (len(ctxF) == 13 && !nothing?(arF)) ? dxc-keys(dxc-table(dxa-get(ctxF, "cache"), 0)) : [0];
+   let restored = (len(ctxF) == 13 && !nothing?(arF)) ? record_set(arF, "path", good) : 0;
+   let goodRun = (len(ctxF) == 13 && !nothing?(arF)) ? dsv4-layer(ctxF, stsF, 0, 0, 5, dab-cap()) : nothing();
+   let filled = (len(ctxF) == 13 && !nothing?(arF)) ? dxc-keys(dxc-table(dxa-get(ctxF, "cache"), 0)) : [];
+   let said7 = print_str(label ++ ": a fill the device refuses: the layer answers " ++ (nothing?(badRun) ? "nothing" : "a count") ++ ", slots read " ++ forgot.str() ++ " after it and " ++ filled.str() ++ " when the path is restored");
+   let c64 = refused && nothing?(badRun) && dab-all-empty?(forgot) && !nothing?(goodRun) && !dab-all-empty?(filled);
+   // release: every context closed in synced rounds
+   let pend = (ok && !nothing?(ar)) ? dxa-pending-n(ctxA) : 0;
+   let left = append(ok ? dsv4-close(ctxW, append(stsW, append(stsW2, stsW3))) : [0], append(ok ? dsv4-close(ctxA, append(stsA, append(stsB, append(stsA2, stsA3)))) : [0], append(len(ctxT) == 13 ? dsv4-close(ctxT, stsT) : [0], append(len(ctxO) == 13 ? dsv4-close(ctxO, stsO) : [0], len(ctxF) == 13 ? dsv4-close(ctxF, stsF) : [0]))));
+   let c128 = len(left) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 && pend <= 18;
+   [c1, c2, c4, c8, c16, c32, c64, c128];
+  }
+  def dab-all-empty?(keys) = len(keys) == 0 ? true : (keys[0] < 0 && dab-all-empty?(keys[1:]));
+  def dab-sum(xs) = len(xs) == 0 ? 0 : (xs[0] ? 1 : 0) + dab-sum(xs[1:]);
+ }
+ let root = temp_dir() ++ "/dsv4-arena-band-" ++ now_unix_ms().str();
+ let path1 = root ++ "-a.gguf";
+ let path2 = root ++ "-b.gguf";
+ let wrote1 = dfx-write(path1);
+ let wrote2 = dfx-v-write(path2);
+ let fx1 = try dab-fixture(path1, "fixture 1 (MXFP8, MXFP4, IQ2_XXS)") catch [false, false, false, false, false, false, false, false];
+ let fx2 = try dab-fixture(path2, "fixture 2 (Q8_0, IQ2_XXS, Q2_K)") catch [false, false, false, false, false, false, false, false];
+ let both = len(fx1) == 8 && len(fx2) == 8;
+ let b1 = dab-bit(both && fx1[0] && fx2[0], 1);
+ let b2 = dab-bit(both && fx1[1] && fx2[1], 2);
+ let b4 = dab-bit(both && fx1[2] && fx2[2], 4);
+ let b8 = dab-bit(both && fx1[3] && fx2[3], 8);
+ let b16 = dab-bit(both && fx1[4] && fx2[4], 16);
+ let b32 = dab-bit(both && fx1[5] && fx2[5], 32);
+ let b64 = dab-bit(both && fx1[6] && fx2[6], 64);
+ let b128 = dab-bit(both && fx1[7] && fx2[7], 128);
+ let removed = host_path_remove(path1) + host_path_remove(path2);
+ print_str("dsv4-arena-band claims " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ " " ++ b128.str() ++ " fixture1 " ++ fx1.str() ++ " fixture2 " ++ fx2.str() ++ " removed " ++ removed.str());
+ b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+}

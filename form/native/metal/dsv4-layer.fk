@@ -25,6 +25,11 @@
 // projection is MXFP8 (41: the planar matvec and its grouped form) or Q8_0 (8: the 34-byte block lane and its grouped form, the real IQ2XXS file's attention, shared-expert and output tensors), a
 // routed expert stack MXFP4 (40), IQ2_XXS (16) or Q2_K (10: the real file's down stacks), each stack its own, so a file that mixes them (the real one does: gate and up 16, down 10) is run as it is.
 //
+// THE ARENA'S FFN (used when the context was opened in the arena mode and given its arena: dsv4-arena.fk): the FFN's first half (hc_pre, norm, router, routing) is enqueued, the layer syncs ONCE (dxa-boundary), the host
+// reads the ids the router picked, the cache (form-stdlib/bml/dsv4-expert-cache.bml) answers a slot for each and the misses to copy, the slot numbers are written to the arena's ids buffer and each miss enqueues its
+// three span copies; then the SAME expert kernels (dkl-experts-with) run over the layer's arena buffers (as the stacks) and the slot numbers (as the ids), then the shared expert, the slot sum and hc_post. The arena's
+// results are bit-equal to the whole-stack path's (native/metal/tests/dsv4-arena-band.bml). A context without an arena runs the whole-stack FFN exactly as before; its dispatch order is the same list it always was.
+//
 // WHAT IS REFUSED, so a caller reads nothing and not a plausible wrong layer: n_hc other than 4 (the split kernel is the n_hc 4 form), a dense tensor of a type that is neither MXFP8 nor Q8_0, an expert
 // tensor of a type with no ids kernel, a block type whose first dimension its block does not tile (32 for Q8_0, MXFP8 and MXFP4; 256 for IQ2_XXS and Q2_K), a router or hyper-connection matrix that is not F16,
 // a position at or past the capacity, a ratio-4 block past position 2047 (the indexer stops being inert there: dsv4-compressor.fk, ds4.c:12822), a head width the fp8 round or the grouped output cannot tile.
@@ -44,6 +49,7 @@ import form-stdlib/dsv4-layout.fk;
 import form-stdlib/dsv4-kernels.fk;
 import native/metal/dsv4-bind.fk;
 import native/metal/dsv4-open.fk;
+import native/metal/dsv4-arena.fk;
 section [form.bml] {
     // ---- names and handles ----------------------------------------------------------------------------------
     def dkl-name(il, leaf) = "blk." ++ il.str() ++ "." ++ leaf;
@@ -244,7 +250,9 @@ section [form.bml] {
             dkr-go(dkl-p(ctx, "form_dsv4_topk_select"), [dkl-b(ctx, "router-probs"), dkl-b(ctx, "router-score"), dkl-b(ctx, "expert-ids"), dkl-b(ctx, "expert-weights")], [rows, used, wscale], 1)
         ];
     }
-    def dkl-experts(ctx, il) {
+    // THE EXPERT KERNELS READ `stack + ids[slot] x stride`: the whole-stack path hands them each stack's own view and the router's expert ids; the arena path (dsv4-arena.fk) hands them the layer's ARENA BUFFER of the stack
+    // and the buffer of SLOT numbers the host wrote after the router answered, so the same kernels read the slot's expert (the three handles and the ids buffer are the only difference; the stride is the view's own)
+    def dkl-experts-with(ctx, il, hg, hu, hd, idbuf) {
         let m = dkl-m(ctx);
         let used = record_get(m, "used");
         let e = record_get(m, "e");
@@ -255,11 +263,13 @@ section [form.bml] {
         let uk = dkl-expert-kernel(dkl-type(dkl-view(ctx, il, "ffn_up_exps.weight")));
         let dk = dkl-expert-kernel(dkl-type(dkl-view(ctx, il, "ffn_down_exps.weight")));
         (nothing?(gk) || nothing?(uk) || nothing?(dk)) ? [0] : [
-         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_gate_exps.weight"), dkl-w(ctx, il, "ffn_gate_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xgate"), dkl-b(ctx, "expert-ids"), hidden, e, used, 0),
-         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_up_exps.weight"), dkl-w(ctx, il, "ffn_up_exps.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-ids"), hidden, e, used, 0),
+         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_gate_exps.weight"), hg, dkl-b(ctx, "xn"), dkl-b(ctx, "xgate"), idbuf, hidden, e, used, 0),
+         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_up_exps.weight"), hu, dkl-b(ctx, "xn"), dkl-b(ctx, "xup"), idbuf, hidden, e, used, 0),
          dkr-go(dkl-p(ctx, "form_dsv4_swiglu_id"), [dkl-b(ctx, "xgate"), dkl-b(ctx, "xup"), dkl-b(ctx, "expert-weights"), dkl-b(ctx, "xmid")], [hidden, used, lim], used * hidden),
-         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_down_exps.weight"), dkl-w(ctx, il, "ffn_down_exps.weight"), dkl-b(ctx, "xmid"), dkl-b(ctx, "xdown"), dkl-b(ctx, "expert-ids"), e, hidden, used, hidden)];
+         dkl-expert-mv(ctx, dkl-view(ctx, il, "ffn_down_exps.weight"), hd, dkl-b(ctx, "xmid"), dkl-b(ctx, "xdown"), idbuf, e, hidden, used, hidden)];
     }
+    def dkl-experts(ctx, il) = dkl-experts-with(ctx, il, dkl-w(ctx, il, "ffn_gate_exps.weight"), dkl-w(ctx, il, "ffn_up_exps.weight"), dkl-w(ctx, il, "ffn_down_exps.weight"), dkl-b(ctx, "expert-ids"));
+    def dkl-experts-arena(ctx, il) = dkl-experts-with(ctx, il, dxa-bufs(ctx, il)[0], dxa-bufs(ctx, il)[1], dxa-bufs(ctx, il)[2], dxa-ids(ctx));
     // THE ROUTED EXPERT MATVEC. The real file's stacks (gate and up IQ2_XXS, down Q2_K) run the four-row lanes Swift settled on (dsv4-kernels.fk dkr-unit-lanes): a simdgroup owns four output rows and the
     // slot's expert is read from ids[slot] x stride on the device, the stride the view's own bytes over its expert count. Each lane kernel reads its input one way: the IQ2 form one shared activation (gate and up:
     // xstride 0), the Q2_K form one activation a slot (the down: xstride = cols), so each is taken only for the stack that feeds it that way and whose rows the four tile (rows % 4, cols % 256). Every other
@@ -279,22 +289,43 @@ section [form.bml] {
          dkl-dense(ctx, dkl-view(ctx, il, "ffn_down_shexp.weight"), "shared-mid", "shared-down")];
     }
     // reads `resid-next`, leaves the block's output streams in `resid`; token is the id the hash table of a hashed block is read with
-    def dsv4-layer-ffn(ctx, il, token) = dkl-supported?(ctx, il) ? dkl-ffn-go(ctx, il, token) : nothing();
-    def dkl-ffn-go(ctx, il, token) {
+    // a context opened in the arena mode with its arena (dsv4-arena.fk) takes the arena's FFN: the router, one sync, the slots, then the experts over the arena; any other context takes the whole-stack FFN, as it always did
+    def dsv4-layer-ffn(ctx, il, token) = dkl-supported?(ctx, il) ? (dxa-on?(ctx) ? dkl-ffn-arena(ctx, il, token) : dkl-ffn-go(ctx, il, token)) : nothing();
+    // the FFN's two halves: everything up to and including the routing (hc_pre, norm, router, ids and weights), and everything after the experts are chosen (the expert dispatches `ex`, the shared expert, the slot sum, hc_post)
+    def dkl-ffn-first(ctx, il, token) {
         let m = dkl-m(ctx);
         let e = record_get(m, "e");
-        let used = record_get(m, "used");
         let rows = dkl-l(ctx, il, "router-rows");
         let pre = dkl-hc-pre(ctx, il, "ffn", "resid-next");
         let n1 = dkl-norm(ctx, "hc-cur", dkl-w(ctx, il, "ffn_norm.weight"), "xn", e);
         let rt = dkr-go(dkl-p(ctx, "form_dsv4_f16_matvec_lane"), [dkl-w(ctx, il, "ffn_gate_inp.weight"), dkl-b(ctx, "xn"), dkl-b(ctx, "router-logits")], [rows, e], rows * 32);
         let route = dkl-route(ctx, il, token);
-        let ex = dkl-experts(ctx, il);
+        append(pre, append([n1, rt], route));
+    }
+    def dkl-ffn-rest(ctx, il, ex) {
+        let m = dkl-m(ctx);
+        let e = record_get(m, "e");
+        let used = record_get(m, "used");
         let sh = dkl-shared(ctx, il);
         let sm = dkr-go(dkl-p(ctx, "form_dsv4_sum_slots"), [dkl-b(ctx, "xdown"), dkl-b(ctx, "shared-down"), dkl-b(ctx, "ffn-out")], [e, used], e);
         let post = dkl-hc-post(ctx, "ffn-out", "resid-next", "resid");
-        let all = append(pre, append([n1, rt], append(route, append(ex, append(sh, append([sm], post))))));
+        append(ex, append(sh, append([sm], post)));
+    }
+    def dkl-ffn-go(ctx, il, token) {
+        let first = dkl-ffn-first(ctx, il, token);
+        let all = append(first, dkl-ffn-rest(ctx, il, dkl-experts(ctx, il)));
         dkl-all?(dkl-ones(all)) ? len(all) : nothing();
+    }
+    // THE ARENA'S FFN WHEN NO TOKEN BATCH IS OPEN (a band calling the layer directly): the first half enqueued, then the boundary (dsv4-arena.fk dxa-boundary: the layer's one sync, the ids, the slots, the fills), then the
+    // experts over the arena buffers and the rest. The token path runs the same two halves as two planned stages with the boundary between them (dsv4-token-handle.fk dth-layer).
+    def dkl-ffn-arena(ctx, il, token) {
+        let first = dkl-ffn-first(ctx, il, token);
+        let plan = dkl-all?(dkl-ones(first)) ? dxa-boundary(ctx, il) : nothing();
+        nothing?(plan) ? nothing() : dkl-ffn-arena-rest(ctx, il, first, plan);
+    }
+    def dkl-ffn-arena-rest(ctx, il, first, filled) {
+        let all = append(first, dkl-ffn-rest(ctx, il, dkl-experts-arena(ctx, il)));
+        dkl-all?(dkl-ones(all)) ? len(all) + filled : nothing();
     }
     // the whole block: attention then FFN
     def dsv4-layer(ctx, sts, il, pos, token, cap) {
@@ -307,6 +338,16 @@ section [form.bml] {
     def dsv4-layer-go(ctx, sts, il, pos, token, cap) {
         let a = dkl-attn-go(ctx, sts, il, pos, cap);
         nothing?(a) ? nothing() : { let f = dkl-ffn-go(ctx, il, token); nothing?(f) ? nothing() : a + f; };
+    }
+    // THE ARENA TOKEN'S TWO STAGES (dsv4-token-handle.fk plans and replays each under its own key, the layer's one sync between them): the attention half and the FFN's first half; then, after the boundary has
+    // answered the slots and enqueued the fills, the experts over the arena buffers and the rest. A stage answers its dispatch count, or nothing.
+    def dsv4-layer-a-go(ctx, sts, il, pos, token, cap) {
+        let a = dkl-attn-go(ctx, sts, il, pos, cap);
+        nothing?(a) ? nothing() : { let first = dkl-ffn-first(ctx, il, token); dkl-all?(dkl-ones(first)) ? a + len(first) : nothing(); };
+    }
+    def dsv4-layer-b-go(ctx, il) {
+        let rest = dkl-ffn-rest(ctx, il, dkl-experts-arena(ctx, il));
+        dkl-all?(dkl-ones(rest)) ? len(rest) : nothing();
     }
     0;
 }
