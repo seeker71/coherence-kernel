@@ -2275,6 +2275,7 @@ typedef long long (*fk_metal_pipeline_fn)(const char *, long long, const char *,
 typedef long long (*fk_metal_buf_alloc_fn)(long long);
 typedef long long (*fk_metal_buf_from_file_fn)(const char *, long long, long long, long long);
 typedef long long (*fk_metal_buf_write_fn)(long long, long long, const char *, long long);
+typedef long long (*fk_metal_buf_fill_fn)(long long, long long, const char *, long long, long long, long long);
 typedef long long (*fk_metal_enqueue_fn)(long long, const char *, long long, long long);
 typedef long long (*fk_metal_sync_fn)(void);
 typedef long long (*fk_metal_buf_read_fn)(long long, long long, long long, char *, long long);
@@ -2297,6 +2298,7 @@ static fk_metal_pipeline_fn fk_metal_pipeline_p;
 static fk_metal_buf_alloc_fn fk_metal_buf_alloc_p;
 static fk_metal_buf_from_file_fn fk_metal_buf_from_file_p;
 static fk_metal_buf_write_fn fk_metal_buf_write_p;
+static fk_metal_buf_fill_fn fk_metal_buf_fill_p; /* OPTIONAL: a carrier built before the fill door lacks it and the door answers -1 */
 static fk_metal_enqueue_fn fk_metal_enqueue_p;
 static fk_metal_sync_fn fk_metal_sync_p;
 static fk_metal_buf_read_fn fk_metal_buf_read_p;
@@ -2352,6 +2354,8 @@ static int fk_metal_dyn_try_path(const char *path) {
         dlclose(h);
         return 0;
     }
+    /* the fill door is optional (it is not among the required symbols above): an older dylib still loads and the door answers -1 */
+    fk_metal_buf_fill_p = (fk_metal_buf_fill_fn)dlsym(h, "fk_metal_buf_fill_external");
     fk_metal_dyn_handle = h;
     fk_metal_dyn_ready = 1;
     fk_metal_dyn_reason = "loaded";
@@ -2507,6 +2511,13 @@ static long long fk_metal_buf_write_external(long long h, long long off,
         return FK_METAL_HANDLE_UNLOADED;
     }
     return fk_metal_buf_write_p(h, off, bytes, len);
+}
+static long long fk_metal_buf_fill_external(long long h, long long boff, const char *path, long long path_len,
+                                            long long foff, long long len) {
+    if (!fk_metal_dyn_load() || fk_metal_buf_fill_p == 0) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_buf_fill_p(h, boff, path, path_len, foff, len);
 }
 static long long fk_metal_enqueue_external(long long pipe, const char *binding,
                                            long long binding_len, long long threads) {
@@ -2716,6 +2727,33 @@ static long long fk_metal_buf_write_native(long long h, long long off, long long
         return 0;
     }
     return n;
+}
+/* metal_buf_fill(h, boff, [path, foff, len]) -- the FILL DOOR: len bytes of the file at path, from byte foff, preaded straight into buffer h at byte boff (no Form string, no mapping, no GPU).
+ * Answers len, or -1 for EVERY refusal and for a carrier without the door: the spec is not a list of a string and two ints, the buffer is not an allocated one, the destination or the file's
+ * span is out of range, the file does not open or comes up short (the carrier's fk_metal_buf_fill_external names the refusals; nothing is written on any of them). */
+static long long fk_metal_buf_fill_native(long long h, long long boff, long long specv) {
+    const char *path;
+    long long pl, foff, len, p, e;
+    if (!((specv & 1) && specv > 0 && FK_POK(specv >> 1))) { return -1; }
+    p = specv >> 1;
+    e = FK_HH(p);
+    if (fk_srange(e, &path, &pl) == 0) { return -1; }
+    specv = FK_HT(p);
+    if (!((specv & 1) && specv > 0 && FK_POK(specv >> 1))) { return -1; }
+    p = specv >> 1;
+    e = FK_HH(p);
+    if ((e & 1) != 0) { return -1; }
+    foff = e >> 1;
+    specv = FK_HT(p);
+    if (!((specv & 1) && specv > 0 && FK_POK(specv >> 1))) { return -1; }
+    p = specv >> 1;
+    e = FK_HH(p);
+    if ((e & 1) != 0) { return -1; }
+    len = e >> 1;
+    if (FK_HT(p) != 1) { return -1; }
+    long long r = fk_metal_buf_fill_external(h, boff, path, pl, foff, len);
+    if (r == FK_METAL_HANDLE_UNLOADED || r < 0) { return -1; }
+    return r;
 }
 static long long fk_metal_enqueue_native(long long pipe, long long bindv, long long threads) {
     const char *b;
@@ -17119,6 +17157,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * mode 25: value_str -- see fk_value_str; modes 26-27: read_file_bytes,
          * write_file_bytes -- the raw byte file doors, see fk_fb_door; modes 29-32: the stage
          * bus (open, close, tail, name) -- see fk_bus_door; any other mode answers nothing. */
+        if ((fm201 >> 1) == 33) {
+            /* MODE 33 -- metal_buf_fill(buf, boff, [path, foff, len]): the fill door, see fk_metal_buf_fill_native. The rewrite row (native-rewrite-rules.bml) builds
+             *     fk_smknode(201, LIT 33, buf, (cons boff spec))
+             * like substring's: the offset and the spec live in the third child's tag-19 node and are read child by child. Answers len, or -1 for every refusal. */
+            long long rn33 = fk_node[i][3];
+            if (rn33 == 0 || fk_node[rn33][0] != 19) { return fk_nothing; }
+            long long hw33 = fx201; /* the buffer: the door's operand, already walked above */
+            long long ow33 = fk_walk(fk_node[rn33][1], fp);
+            long long sw33 = fk_walk(fk_node[rn33][2], fp);
+            if (((hw33 | ow33) & 1) != 0) { return -2; }
+            return fk_metal_buf_fill_native(hw33 >> 1, ow33 >> 1, sw33) << 1;
+        }
         if ((fm201 >> 1) >= 29 && (fm201 >> 1) <= 32) { return fk_bus_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 26) { return fk_fb_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) == 25) { return fk_value_str(fx201); }

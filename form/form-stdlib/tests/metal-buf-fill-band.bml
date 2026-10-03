@@ -1,0 +1,116 @@
+; metal-buf-fill-band.bml -- the fill door: metal_buf_fill(buf, boff, [path, foff, len]) puts a file's span into an allocated buffer by pread (the carrier's fk_metal_buf_fill_external), with no Form string, no mapping and no GPU in between.
+;
+; WHAT THIS PINS. The routed-expert arena (native/metal/dsv4-arena.fk) fills a missed expert's 2 to 3 MB into its slot; a Form string of that size costs 4 to 5 ms in the interner and a no-copy view read by a copy kernel runs at
+; about 3 GB/s (the device faults the file's pages in one by one), so the host preads the span itself. This band holds the door's two promises: THE BYTES ARE THE FILE'S (a span of a file read back from the buffer equals
+; read_file_slice of the same span, for an odd offset and an odd length and a megabyte-sized span, and the bytes around the span in the buffer are as they were), and EVERY REFUSAL ANSWERS -1 AND WRITES NOTHING (a destination
+; past the buffer by one byte, a span past the file by one byte, a negative offset or length, a file that does not open, a handle that is not a buffer or was freed, a spec that is not [path, int, int], a buffer that is a
+; mapped file: the buffer reads exactly what it read before). A fill of zero bytes answers 0. A span that ends exactly at the end of the file and one that ends exactly at the end of the buffer are filled.
+;
+; Verdict 31 when every claim lands:
+;   1     a megabyte span at an odd file offset (12,345) and an odd length (1,000,003) into an odd buffer offset (777): the answer is the length, the buffer's span equals the file's, and the bytes before and after the span
+;         in the buffer are the sentinel they were
+;   2     the edges: a fill that ends exactly at the end of the file and one that ends exactly at the end of the buffer answer their length and read equal; a fill of zero bytes answers 0 and changes nothing
+;   4     the refusals on the buffer's side: a destination one byte past the buffer, a negative buffer offset, a handle of 0, a freed handle and a mapped-file buffer each answer -1 and leave the buffer's every byte as it was
+;   8     the refusals on the file's side and the spec's: a span one byte past the file's end, a negative file offset, a negative length, a path that does not open, a spec of two items, one of four, a spec that is not a list
+;         and a spec whose offset is a string each answer -1 and leave the buffer as it was (no half-written span of a file that came up short)
+;   16    the plants read as defects: a copy that wrote one byte too many (the buffer's byte after the span changed) and one that skipped the first byte (the first byte reads the sentinel) both differ from the file's span
+;         under the same comparison claim 1 makes
+;
+; PROOF LEVEL: FOURTH-ARM ONLY -- needs a live Metal device behind the handle door (the buffer is allocated through it); writes one 2 MB file under temp_dir and removes it. No model is opened.
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+ class MetalBufFillBand {
+  def mfb-bit(held, bit) = held ? bit : 0;
+  def mfb-size() = 2000000;
+  def mfb-buf-size() = 1200000;
+  // a 127-byte period (a prime, bytes 1 to 127): every offset reads a different byte of the period for any shift under 127, so a span taken from the wrong place reads different
+  def mfb-period-go(i) = i == 127 ? "" : byte_to_str(i + 1) ++ mfb-period-go(i + 1);
+  def mfb-rep(s, n) = n == 0 ? "" : (n == 1 ? s : str_concat(mfb-rep(s, n / 2), mfb-rep(s, n - (n / 2))));
+  def mfb-content() = substring(mfb-rep(mfb-period-go(0), (mfb-size() / 127) + 1), 0, mfb-size());
+  def mfb-sentinel() = substring(mfb-rep(".", mfb-buf-size()), 0, mfb-buf-size());
+  def mfb-read(b) = metal_buf_read(b, 0, mfb-buf-size());
+  def mfb-same?(a, b) = str_eq(a, b);
+  // the buffer, written with the sentinel, and the fill the claim makes
+  def mfb-fresh() { let b = metal_buf_alloc(mfb-buf-size()); let w = metal_buf_write(b, 0, mfb-sentinel()); b; }
+  // claim 1: the megabyte span at odd offsets
+  def mfb-big(path) {
+   let b = mfb-fresh();
+   let r = metal_buf_fill(b, 777, [path, 12345, 1000003]);
+   let got = mfb-read(b);
+   let want = substring(mfb-sentinel(), 0, 777) ++ read_file_slice(path, 12345, 1000003) ++ substring(mfb-sentinel(), 777 + 1000003, mfb-buf-size());
+   let ok = r == 1000003 && mfb-same?(got, want);
+   let f = metal_buf_free(b);
+   ok;
+  }
+  // claim 2: the edges
+  def mfb-edges(path) {
+   let b = mfb-fresh();
+   let tailFile = metal_buf_fill(b, 0, [path, mfb-size() - 1000, 1000]);
+   let afterFile = mfb-read(b);
+   let tailBuf = metal_buf_fill(b, mfb-buf-size() - 500, [path, 40, 500]);
+   let afterBuf = mfb-read(b);
+   let zero = metal_buf_fill(b, 10, [path, 0, 0]);
+   let afterZero = mfb-read(b);
+   let ok = tailFile == 1000 && str_eq(substring(afterFile, 0, 1000), read_file_slice(path, mfb-size() - 1000, 1000)) && tailBuf == 500 && str_eq(substring(afterBuf, mfb-buf-size() - 500, mfb-buf-size()), read_file_slice(path, 40, 500))
+    && zero == 0 && mfb-same?(afterZero, afterBuf);
+   let f = metal_buf_free(b);
+   ok;
+  }
+  // claim 4: the buffer's side
+  def mfb-buffer-side(path) {
+   let b = mfb-fresh();
+   let ref = mfb-read(b);
+   let pastEnd = metal_buf_fill(b, mfb-buf-size() - 99, [path, 0, 100]);
+   let negOff = metal_buf_fill(b, 0 - 1, [path, 0, 10]);
+   let badHandle = metal_buf_fill(0, 0, [path, 0, 10]);
+   let freed = mfb-fresh();
+   let gone = metal_buf_free(freed);
+   let freedFill = metal_buf_fill(freed, 0, [path, 0, 10]);
+   let mapped = metal_buf_from_file(path, 0, 4096);
+   let mappedFill = metal_buf_fill(mapped, 0, [path, 0, 10]);
+   let mappedFree = metal_buf_free(mapped);
+   let same = mfb-same?(mfb-read(b), ref);
+   let f = metal_buf_free(b);
+   pastEnd == 0 - 1 && negOff == 0 - 1 && badHandle == 0 - 1 && freedFill == 0 - 1 && mappedFill == 0 - 1 && same;
+  }
+  // claim 8: the file's side and the spec's
+  def mfb-file-side(path) {
+   let b = mfb-fresh();
+   let ref = mfb-read(b);
+   let pastFile = metal_buf_fill(b, 0, [path, mfb-size() - 99, 100]);
+   let negFoff = metal_buf_fill(b, 0, [path, 0 - 1, 10]);
+   let negLen = metal_buf_fill(b, 0, [path, 0, 0 - 1]);
+   let absent = metal_buf_fill(b, 0, [path ++ ".absent", 0, 10]);
+   let two = metal_buf_fill(b, 0, [path, 0]);
+   let four = metal_buf_fill(b, 0, [path, 0, 10, 5]);
+   let notList = metal_buf_fill(b, 0, 7);
+   let strOff = metal_buf_fill(b, 0, [path, "0", 10]);
+   let same = mfb-same?(mfb-read(b), ref);
+   let f = metal_buf_free(b);
+   pastFile == 0 - 1 && negFoff == 0 - 1 && negLen == 0 - 1 && absent == 0 - 1 && two == 0 - 1 && four == 0 - 1 && notList == 0 - 1 && strOff == 0 - 1 && same;
+  }
+  // claim 16: the plants, as the same comparison claim 1 makes
+  def mfb-plants(path) {
+   let b = mfb-fresh();
+   let r = metal_buf_fill(b, 777, [path, 12345, 1000003]);
+   let good = mfb-read(b);
+   let want = substring(mfb-sentinel(), 0, 777) ++ read_file_slice(path, 12345, 1000003) ++ substring(mfb-sentinel(), 777 + 1000003, mfb-buf-size());
+   let tooMany = substring(good, 0, 777 + 1000003) ++ "X" ++ substring(good, 777 + 1000003 + 1, mfb-buf-size());
+   let skipped = substring(good, 0, 777) ++ "." ++ substring(good, 778, mfb-buf-size());
+   let f = metal_buf_free(b);
+   mfb-same?(good, want) && !mfb-same?(tooMany, want) && !mfb-same?(skipped, want);
+  }
+ }
+ let path = temp_dir() ++ "/metal-buf-fill-band-" ++ now_unix_ms().str() ++ ".bin";
+ let wrote = write_file_text(path, mfb-content());
+ let live0 = len(metal_live()) > 4 ? metal_live()[2] : 0 - 1;
+ let c1 = mfb-bit(try mfb-big(path) catch false, 1);
+ let c2 = mfb-bit(try mfb-edges(path) catch false, 2);
+ let c4 = mfb-bit(try mfb-buffer-side(path) catch false, 4);
+ let c8 = mfb-bit(try mfb-file-side(path) catch false, 8);
+ let c16 = mfb-bit(try mfb-plants(path) catch false, 16);
+ let live1 = len(metal_live()) > 4 ? metal_live()[2] : 0 - 1;
+ let removed = host_path_remove(path);
+ print_str("metal-buf-fill-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " live " ++ live0.str() ++ "/" ++ live1.str() ++ " removed " ++ removed.str());
+ c1 + c2 + c4 + c8 + c16;
+}

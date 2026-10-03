@@ -144,6 +144,7 @@ export const FKWU_RESERVED_HEADS: ReadonlySet<string> = new Set([
   "mesh_serve",
   "metal_batch_concurrent",
   "metal_buf_alloc",
+  "metal_buf_fill",
   "metal_buf_free",
   "metal_buf_from_file",
   "metal_buf_read",
