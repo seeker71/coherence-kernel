@@ -162,7 +162,12 @@ section [form.bml] {
   def fta-key(s) = fta-pad(file_mtime(s[3]) ?? 0, 12);
   def fta-newest-first(sources) = reverse(sort-keyed(sources |> map(s => [fta-key(s), s]))) |> map(r => r[1]);
   // ---- the audit: one row per source with commands: [source, count, flagged]
-  def fta-audit(sources, since, seen) = nil?(sources) ? [] : fta-audit-row(sources[0], fta-file(sources[0][3], since, seen), fta-audit(sources[1:], since, seen));
+  // a window reads only the files written inside it (a transcript's rows are never later than its last write; two minutes of slack for
+  // clocks): the breath pays for the hours since the last breath, not for every transcript there is
+  def fta-slack-ms() = 120000;
+  def fta-recent?(path, since) = since <= 0 || (file_mtime(path) ?? 0) * 1000 + fta-slack-ms() >= since;
+  def fta-file-in(path, since, seen) = fta-recent?(path, since) ? fta-file(path, since, seen) : [0, []];
+  def fta-audit(sources, since, seen) = nil?(sources) ? [] : fta-audit-row(sources[0], fta-file-in(sources[0][3], since, seen), fta-audit(sources[1:], since, seen));
   def fta-audit-row(s, got, rest) = got[0] == 0 ? rest : cons([s, got[0], got[1]], rest);
   def fta-run(scope, session, since) = fta-run-dirs(fta-dirs(scope), session, since);
   // the same over named project directories ([name, path] rows), which is how a band stands a scratch root in for <home>/.claude/projects
@@ -182,23 +187,20 @@ section [form.bml] {
   def fta-top(rows, top) = top <= 0 ? rows : take(top, rows);
   def fta-lines(rows, top) = foldl((acc, r) => append(acc, fta-row-lines(r)), [], fta-top(rows, top));
   def fta-totals(rows) = "forbidden-tools-audit totals sessions=" ++ len(rows).str() ++ " commands=" ++ fta-count(rows).str() ++ " flagged=" ++ fta-flagged(rows).str() ++ " sessions-with-slips=" ++ fta-with-slips(rows).str();
-  // ---- the lens beside the gates: the reading is flagged + 1 (0 is the lens's own word for no reading), and the note says how
-  // many commands the last breath had not seen
+  // ---- the lens beside the gates: the reading is flagged + 1 (0 is the lens's own word for no reading) of the commands in the window
   def fta-code(rows) = fta-flagged(rows) + 1;
-  def fta-prev-code(prevText) = nothing?(prevText) ? nothing() : parse-int(fta-prev-value(prevText));
-  def fta-prev-value(text) {
-   let at = str_find("\n" ++ text, "\nforbidden=", 0);
-   at < 0 ? "" : fta-line-from(substring("\n" ++ text, at + 11, len("\n" ++ text)));
-  }
-  def fta-line-from(s) {
-   let nl = str_find(s, "\n", 0);
-   nl < 0 ? s : substring(s, 0, nl);
-  }
-  def fta-since-note(rows, prevText) {
-   let prev = fta-prev-code(prevText);
-   let now = fta-flagged(rows);
-   nothing?(prev) ? "note: forbidden-tool commands since last breath: " ++ now.str() ++ " in all transcripts read (the first reading)"
-   : "note: forbidden-tool commands since last breath: " ++ (now - (prev - 1) < 0 ? 0 : now - (prev - 1)).str() ++ " (" ++ now.str() ++ " in all transcripts read)";
-  }
+  // The breath's window: from the stamp the last breath left (the time it began reading) to now. The stamp is the door's own file, written
+  // only by a breath ({"breath":1}); with none (the first breath, or a stamp that does not read) the window is the last fta-first-hours
+  // hours. A window is never longer than a year (a stamp from a clock gone wrong is no window).
+  def fta-first-hours() = 6;
+  def fta-year-ms() = 31536000000;
+  def fta-stamp-of(text) = nothing?(text) ? nothing() : parse-int(trim(text));
+  def fta-breath-since(stamp, now) = nothing?(stamp) || stamp <= 0 || stamp > now || now - stamp > fta-year-ms() ? now - fta-first-hours() * 3600000 : stamp;
+  def fta-breath-first?(stamp, now) = nothing?(stamp) || stamp <= 0 || stamp > now || now - stamp > fta-year-ms();
+  // the note a lens prints under its reading: the count of the window, and the window itself; with no window, the total on demand
+  def fta-window-note(rows, mode, since, now, first) = (String) mode == "breath"
+   ? "note: forbidden-tool commands since last breath: " ++ fta-flagged(rows).str() ++ " (" ++ fta-iso(since) ++ " to " ++ fta-iso(now) ++ (first ? ", the first breath: the last " ++ fta-first-hours().str() ++ " hours" : "") ++ ")"
+   : (String) mode == "hours" ? "note: forbidden-tool commands in the window " ++ fta-iso(since) ++ " to " ++ fta-iso(now) ++ ": " ++ fta-flagged(rows).str()
+   : "note: forbidden-tool commands in all transcripts read: " ++ fta-flagged(rows).str();
  }
 }

@@ -2,7 +2,7 @@
 ; enumerates, runs legs in a pool with a deadline each, judges by exit, stderr and pins, releases what a band left, and says what it saw.
 ; The legs here are fixture bands (tests/fixtures/band-sweep/) that answer, fail, hang, rest or leave a reader waiting on a fifo.
 ;
-; Verdict 65535 when every claim lands:
+; Verdict 1048575 when every claim lands:
 ;   1      enumeration: the workloads are samples, then form-stdlib/tests (core.fk, a module of the band's own name between when one
 ;          stands, the band), then every other home's *-band.fk and *-band.bml; no -child, -fixture or -run door is a workload, no
 ;          path starts with `.`, every file stands; a match of alternatives picks by label; one explicit workload names its files
@@ -34,6 +34,15 @@
 ;   8192   plant: judged with the pin ignored, the mismatched answer is no failure: claim 4 holds because the pin is read
 ;   16384  plant: with no ceiling reached (a 600 s ceiling) the hang fixture is still alive after 3 s: claim 64 holds because the deadline ended it
 ;   32768  scale: the real enumeration (over 300 workloads) and every list line (each reads its band's head and the manifest) take under 20 s
+;   65536  strict: the door as a child on `{bad json`, a typo'd key, a key of the wrong kind, and a `match` (with or without list) that selects
+;          no workload ends in exit 1 with a named refusal before any gate or leg runs
+;   131072 unread: the registered verdicts absent, empty or mode 000, and a band file of mode 000, are each a named refusal (`<path> does not
+;          read`, `is empty`, `every pin would be dropped`), never the silent "answered every pin"
+;   262144 plant: with the real manifest and a real workload the preflight is silent and a selection of one is not refused: claims 65536 and
+;          131072 refuse because of what they read, not always
+;   524288 the sort: each leg is asked once whether it is done and lands in the ended list or the kept list, never both and never neither, over sixty
+;          rounds of six children that stop while it asks (asked twice, a leg that stopped between the questions was never judged: a flaky
+;          3-of-6 sweep with `0 failed`, 2026-10-04); a leg never born and a leg past its ceiling are ended, a live one kept
 ;
 ; REQUIRES: the built ./fkwu, the body root as the working directory and a git checkout.
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/parse.bml form-stdlib/bml/band-sweep.bml
@@ -211,7 +220,58 @@ section [form.bml] {
    && (Comparable) gone[0] != 0 && bsw-has?(gone[1], "input file(s) not found") && bsw-has?(gone[1], "no/such.fk") && !bsw-has?(gone[1], "structural-gate-v5")
    && list[0] == 0 && bsw-has?(list[1], "stdlib/adler32-band.fk\tform/form-stdlib/core.fk form/form-stdlib/tests/adler32-band.fk\tstaged=no\tpin=-\trow=5") && !bsw-has?(list[1], "structural-gate-v5");
   }
+  // ---- 65536 strict: a request that does not read, and a selection of nothing, are refused by name before any gate or leg
+  def bsb-refused?(run, word) = (Comparable) run[0] == 1 && bsw-has?(run[1], "band-sweep: " ++ word) && !bsw-has?(run[1], "structural-gate-v5") && !bsw-has?(run[1], "runtime fkwu");
+  def bsb-c-strict(ctx) {
+   let bad = bsb-door(ctx, "s-bad", "{bad json");
+   let typo = bsb-door(ctx, "s-typo", "{\"lst\":1}");
+   let kind = bsb-door(ctx, "s-kind", "{\"jobs\":\"4\"}");
+   let none = bsb-door(ctx, "s-none", "{\"match\":\"no-such-band-anywhere\"}");
+   let nonelist = bsb-door(ctx, "s-nonelist", "{\"list\":1,\"match\":\"no-such-band-anywhere\"}");
+   bsb-refused?(bad, "stdin is not well-formed JSON") && bsb-refused?(typo, "unknown key \"lst\"") && bsb-refused?(kind, "key \"jobs\" must be an integer")
+   && bsb-refused?(none, "the selection holds no workload") && bsb-has-match?(none) && bsb-refused?(nonelist, "the selection holds no workload");
+  }
+  def bsb-has-match?(run) = bsw-has?(run[1], "match \"no-such-band-anywhere\"");
+  // ---- 131072 unread: the registered verdicts or a band that does not read, or is empty, is a named refusal (its pins would be dropped silently)
+  def bsb-chmod(mode, path) = (Comparable) hch-run-in(".hearth/validation", "chmod", ["/bin/chmod", mode, path], "", hch-by(20000))[0] == 0;
+  def bsb-c-unread(ctx) {
+   let absent = ctx[1] ++ "/no-such-manifest.txt";
+   let empty = ctx[1] ++ "/empty-manifest.txt";
+   let closed = ctx[1] ++ "/closed-manifest.txt";
+   let band = ctx[1] ++ "/closed-band.fk";
+   let made = write_file(empty, "") + write_file(closed, "x 1 1\n") + write_file(band, "; Verdict 1\n1\n");
+   let shut = bsb-chmod("000", closed) && bsb-chmod("000", band);
+   let real = [bsb-w("pass-pinned.fk")];
+   let shut-band = [bsw-explicit([band])];
+   let a = bsw-preflight-why(absent, real);
+   let e = bsw-preflight-why(empty, real);
+   let c = bsw-preflight-why(closed, real);
+   let b = bsw-preflight-why(bsw-manifest(), shut-band);
+   let opened = bsb-chmod("600", closed) && bsb-chmod("600", band);
+   shut && bsw-has?(a, "no-such-manifest.txt does not read") && bsw-has?(e, "empty-manifest.txt is empty") && bsw-has?(c, "closed-manifest.txt does not read")
+   && bsw-has?(c, "every pin would be dropped") && bsw-has?(b, "closed-band.fk does not read") && opened;
+  }
+  // ---- 524288 the sort: every leg is in the ended list or the kept list, never both and never neither, though legs stop while it asks
+  def bsb-round(i) {
+   let pids = map(k => host_spawn_at(["/usr/bin/true"], ["/dev/null", "/dev/null", "/dev/null"]), [1, 2, 3, 4, 5, 6]);
+   let jobs = map(k => [k, pids[k], host_monotonic_ms()], [0, 1, 2, 3, 4, 5]);
+   let sorted = bsw-sort(jobs, 3600000);
+   let reaped = map(p => p > 0 ? host_wait(p) : 0, pids);
+   len(sorted[0]) + len(sorted[1]) == 6 && all?(k => any?(j => j[0] == k, sorted[0]) != any?(j => j[0] == k, sorted[1]), [0, 1, 2, 3, 4, 5]);
+  }
+  def bsb-c-sort(ctx) {
+   let never = bsw-sort([[0, 0, host_monotonic_ms()]], 3600000);
+   let late = bsw-sort([[1, host_pid(), host_monotonic_ms() - 7200000]], 3600000);
+   let live = bsw-sort([[2, host_pid(), host_monotonic_ms()]], 3600000);
+   len(never[0]) == 1 && nil?(never[1]) && len(late[0]) == 1 && nil?(late[1]) && nil?(live[0]) && len(live[1]) == 1
+   && all?(i => bsb-round(i), range(0, 60));
+  }
   // ---- the plants
+  def bsb-c-plant-reads(ctx) {
+   let real = [bsb-w("pass-pinned.fk")];
+   (String) bsw-preflight-why(bsw-manifest(), real) == "" && (String) bsw-selection-why(real, json-node-object([])) == "" && len(bsw-selection-why([], json-node-object([]))) > 0
+   && (String) bsw-first-why(["", ""]) == "" && (String) bsw-first-why(["", "a", "b"]) == "a";
+  }
   def bsb-c-plant-pin(ctx) = (String) bsw-why(false, 0, 0, "8", "", "", "") == "" && (String) bsw-why(false, 0, 0, "8", "7", "", "") != "";
   def bsb-c-plant-deadline(ctx) {
    let io = ".hearth/validation";
@@ -237,7 +297,7 @@ section [form.bml] {
  let ctx = ["sweep", temp_dir() ++ "/band-sweep-band-" ++ now_unix_ms().str(), 0];
  let made = host_dir_mkdir(ctx[1]);
  made != 1 ? form_error("band-sweep band needs a fresh directory") : 0;
- let verdict = live-claims("band-sweep-band", ctx, [["enumeration", 1, 1, bsb-c-enum], ["heads", 2, 1, bsb-c-heads], ["judgment", 4, 1, bsb-c-judge], ["unit", 8, 1, bsb-c-unit], ["pool", 16, 1, bsb-c-pool], ["lines", 32, 1, bsb-c-lines], ["deadline", 64, 1, bsb-c-deadline], ["parallel", 128, 1, bsb-c-parallel], ["fifo", 256, 1, bsb-c-fifo], ["list", 512, 1, bsb-c-list], ["summary", 1024, 1, bsb-c-summary], ["seal", 2048, 1, bsb-c-seal], ["door", 4096, 1, bsb-c-door], ["plant-pin", 8192, 1, bsb-c-plant-pin], ["plant-deadline", 16384, 1, bsb-c-plant-deadline], ["scale", 32768, 1, bsb-c-scale]]);
+ let verdict = live-claims("band-sweep-band", ctx, [["enumeration", 1, 1, bsb-c-enum], ["heads", 2, 1, bsb-c-heads], ["judgment", 4, 1, bsb-c-judge], ["unit", 8, 1, bsb-c-unit], ["pool", 16, 1, bsb-c-pool], ["lines", 32, 1, bsb-c-lines], ["deadline", 64, 1, bsb-c-deadline], ["parallel", 128, 1, bsb-c-parallel], ["fifo", 256, 1, bsb-c-fifo], ["list", 512, 1, bsb-c-list], ["summary", 1024, 1, bsb-c-summary], ["seal", 2048, 1, bsb-c-seal], ["door", 4096, 1, bsb-c-door], ["plant-pin", 8192, 1, bsb-c-plant-pin], ["plant-deadline", 16384, 1, bsb-c-plant-deadline], ["scale", 32768, 1, bsb-c-scale], ["strict", 65536, 1, bsb-c-strict], ["unread", 131072, 1, bsb-c-unread], ["plant-reads", 262144, 1, bsb-c-plant-reads], ["sort", 524288, 1, bsb-c-sort]]);
  host_dir_rmdir(ctx[1]);
  verdict;
 }
