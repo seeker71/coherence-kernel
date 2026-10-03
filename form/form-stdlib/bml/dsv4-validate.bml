@@ -52,7 +52,7 @@
 //
 // THE RECORDED REFERENCES (read from the recording, never recomputed): the logits of ds4's dump on its 14-token chat-templated prompt (the JSON is pinned by SHA-256; the recording does not carry
 // the 14 prompt ids; the row beside it pins them: dvr-logits-prompt-path, derived from the IQ2XXS header by bml/dsv4-chat-template.bml, so that leg runs on them unless the caller supplies others as logits_prompt_ids), judged by Pearson r, top-10 overlap and the TIE BUDGET (the reference's top-two margin
-// against our largest delta over its top 64: a token flips when the delta exceeds the margin); and the 24-token greedy stream for the raw prompt ids 671 6102 294 8760 344 (a cycle of 7), matched
+// against our largest delta over its top 64: a flip needs the two top logits to move toward each other by the whole margin, each by at most the delta, so the budget holds when the margin exceeds twice the delta: dvr-tie-safe?); and the 24-token greedy stream for the raw prompt ids 671 6102 294 8760 344 (a cycle of 7), matched
 // token by token, run twice for bit equality of ids and last logits, and read at every step for OUR top-two margin and the recorded id's gap below our top (dvr-step, the receipt's stream_margins and
 // stream_recorded_gap): the stream leg has no reference logits of its own, so its near ties are told from our own margins, and the tie budget proper is the logits leg's.
 //
@@ -342,17 +342,41 @@ section [form.bml] {
   }
 
   // ---- the references' arithmetic ------------------------------------------------------------------------------------------------------------
-  def dvr-sum-f(xs, i, acc) = i == len(xs) ? acc : dvr-sum-f(xs, i + 1, acc + xs[i]);
-  def dvr-pearson-go(a, b, i, ma, mb, num, da, db) = i == len(a) ? num / (math_sqrt(da) * math_sqrt(db)) : dvr-pearson-go(a, b, i + 1, ma, mb, num + (a[i] - ma) * (b[i] - mb), da + (a[i] - ma) * (a[i] - ma), db + (b[i] - mb) * (b[i] - mb));
-  def dvr-pearson(a, b) = dvr-pearson-go(a, b, 0, dvr-sum-f(a, 0, 0.0) / (1.0 * len(a)), dvr-sum-f(b, 0, 0.0) / (1.0 * len(b)), 0.0, 0.0, 0.0);
-  // the k largest indices, largest first (ties keep the earlier index)
-  def dvr-best-excluding(xs, i, best, bi, taken) = i == len(xs) ? bi : ((!dvr-member?(i, taken) && (bi < 0 || xs[i] > best)) ? dvr-best-excluding(xs, i + 1, xs[i], i, taken) : dvr-best-excluding(xs, i + 1, best, bi, taken));
-  def dvr-top-go(xs, k, taken) = k == 0 ? taken : dvr-top-go(xs, k - 1, append(taken, [dvr-best-excluding(xs, 0, 0.0, 0 - 1, taken)]));
-  def dvr-top(xs, k) = dvr-top-go(xs, k, []);
-  def dvr-overlap(a, b) = len(a) == 0 ? 0 : (dvr-member?(a[0], b) ? 1 : 0) + dvr-overlap(a[1:], b);
+  // THE PASSES ARE LINEAR, A CURSOR EACH. A list in Form is cons cells: xs[i] walks i cells and len(xs) walks all of them, so a pass that indexes or asks the length at every element is quadratic, and over the 129,280
+  // logits it was 17.7 s for one pass of dvr-two, 40 s for three passes of dvr-top and 63 s for dvr-pearson (measured 2026-10-03: the first real window's compare ran 20 minutes after the release). Every reduction below
+  // walks its lists by their heads and tails (xs[0], xs[1:], nil?) and carries what it needs (the index, the sums, the best so far): one pass, no index into a list, no length asked inside a loop.
+  def dvr-sum-l(xs, acc) = nil?(xs) ? acc : dvr-sum-l(xs[1:], acc + xs[0]);
+  def dvr-sum-f(xs, i, acc) = dvr-sum-l(xs, acc);
+  def dvr-pearson-l(a, b, ma, mb, num, da, db) = nil?(a) ? num / (math_sqrt(da) * math_sqrt(db)) : dvr-pearson-l(a[1:], b[1:], ma, mb, num + (a[0] - ma) * (b[0] - mb), da + (a[0] - ma) * (a[0] - ma), db + (b[0] - mb) * (b[0] - mb));
+  def dvr-pearson(a, b) = dvr-pearson-l(a, b, dvr-sum-l(a, 0.0) / (1.0 * len(a)), dvr-sum-l(b, 0.0) / (1.0 * len(b)), 0.0, 0.0, 0.0);
+  // the k largest indices, largest first (ties keep the earlier index), in ONE pass that carries the k best so far as [value, index] pairs, largest first, and the value an element must beat to enter (the k-th's: strictly,
+  // so an equal value found later does not displace an earlier index). An element enters by insertion after every pair whose value is at least its own; a full list drops its last.
+  def dvr-ins-pair(top, p) = nil?(top) ? [p] : (top[0][0] >= p[0] ? cons(top[0], dvr-ins-pair(top[1:], p)) : cons(p, top));
+  def dvr-drop-last(top) = nil?(top[1:]) ? [] : cons(top[0], dvr-drop-last(top[1:]));
+  def dvr-last-value(top) = nil?(top[1:]) ? top[0][0] : dvr-last-value(top[1:]);
+  def dvr-topk-go(xs, i, top, cnt, thr, k) {
+   nil?(xs) ? top : ((cnt < k || xs[0] > thr) ? {
+    let grown = dvr-ins-pair(top, [xs[0], i]);
+    let full = cnt + 1 > k;
+    let kept = full ? dvr-drop-last(grown) : grown;
+    let n2 = full ? k : cnt + 1;
+    dvr-topk-go(xs[1:], i + 1, kept, n2, n2 < k ? thr : dvr-last-value(kept), k);
+   } : dvr-topk-go(xs[1:], i + 1, top, cnt, thr, k));
+  }
+  def dvr-pair-idx(top) = nil?(top) ? [] : cons(top[0][1], dvr-pair-idx(top[1:]));
+  def dvr-top(xs, k) = k <= 0 ? [] : dvr-pair-idx(dvr-topk-go(xs, 0, [], 0, 0.0, k));
+  def dvr-overlap(a, b) = nil?(a) ? 0 : (dvr-member?(a[0], b) ? 1 : 0) + dvr-overlap(a[1:], b);
   def dvr-abs(v) = v < 0.0 ? 0.0 - v : v;
-  def dvr-maxdelta-go(ours, ref, idx, best) = len(idx) == 0 ? best : dvr-maxdelta-go(ours, ref, idx[1:], dvr-abs(ours[idx[0]] - ref[idx[0]]) > best ? dvr-abs(ours[idx[0]] - ref[idx[0]]) : best);
-  def dvr-maxdelta(ours, ref, idx) = dvr-maxdelta-go(ours, ref, idx, 0.0);
+  // the largest |ours - ref| over the indices idx (any order, repeats read once): the indices sorted ascending, then ONE lockstep pass over both lists that meets each index as the cursor reaches it
+  def dvr-sort-ins(x, xs) = nil?(xs) ? [x] : (x <= xs[0] ? cons(x, xs) : cons(xs[0], dvr-sort-ins(x, xs[1:])));
+  def dvr-sort-ints(xs) = nil?(xs) ? [] : dvr-sort-ins(xs[0], dvr-sort-ints(xs[1:]));
+  def dvr-skip-same(idx, v) = (nil?(idx) || idx[0] != v) ? idx : dvr-skip-same(idx[1:], v);
+  def dvr-maxdelta-l(ours, ref, i, idx, best) {
+   (nil?(ours) || nil?(ref) || nil?(idx)) ? best : (i == idx[0]
+    ? dvr-maxdelta-l(ours[1:], ref[1:], i + 1, dvr-skip-same(idx[1:], i), dvr-abs(ours[0] - ref[0]) > best ? dvr-abs(ours[0] - ref[0]) : best)
+    : dvr-maxdelta-l(ours[1:], ref[1:], i + 1, idx, best));
+  }
+  def dvr-maxdelta(ours, ref, idx) = dvr-maxdelta-l(ours, ref, 0, dvr-sort-ints(idx), 0.0);
   // [r, top-10 overlap, our argmax, their argmax, their top-two margin, our max |delta| over their top 64, ours finite 1 or 0]
   def dvr-agreement(ours, ref) {
    let k64 = len(ref) < 64 ? len(ref) : 64;
@@ -361,14 +385,16 @@ section [form.bml] {
    let ourTop = dvr-top(ours, k10);
    [dvr-pearson(ours, ref), dvr-overlap(ourTop, top[0:k10]), ourTop[0], top[0], ref[top[0]] - ref[top[1]], dvr-maxdelta(ours, ref, top), dkr-all-finite?(ours) ? 1 : 0];
   }
+  // THE TIE BUDGET of an agreement reading: the reference's top-two margin exceeds twice our largest delta over its top 64 (strictly: an exact tie has no budget)
+  def dvr-tie-safe?(a) = 2.0 * a[5] < a[4];
   // the stream: how many of the recorded ids the walk matched from the start, and the first index it did not
   def dvr-match-go(got, want, i) = (i == len(got) || i == len(want)) ? i : (got[i] == want[i] ? dvr-match-go(got, want, i + 1) : i);
   def dvr-matched(got, want) = dvr-match-go(got, want, 0);
   // ONE STEP OF THE STREAM, read from OUR logits: [our argmax, our top-two margin (top minus second; 0 on a tie), how far the logit of the recorded id `want` sits below our top (0 where it is our top; -1 reads
   // want as no id)]. One pass with the best and second so far (a recursion that called itself twice a level would take 2^n steps over 129,280 values); the strict > keeps the earlier index on a tie, and an equal
   // second reads margin 0.
-  def dvr-two-go(xs, i, bi, bv, sv) = i == len(xs) ? [bi, bv, sv] : (xs[i] > bv ? dvr-two-go(xs, i + 1, i, xs[i], bv) : (xs[i] > sv ? dvr-two-go(xs, i + 1, bi, bv, xs[i]) : dvr-two-go(xs, i + 1, bi, bv, sv)));
-  def dvr-two(xs) = dvr-two-go(xs, 1, 0, xs[0], 0.0 - 1.0e30);
+  def dvr-two-go(xs, i, bi, bv, sv) = nil?(xs) ? [bi, bv, sv] : (xs[0] > bv ? dvr-two-go(xs[1:], i + 1, i, xs[0], bv) : (xs[0] > sv ? dvr-two-go(xs[1:], i + 1, bi, bv, xs[0]) : dvr-two-go(xs[1:], i + 1, bi, bv, sv)));
+  def dvr-two(xs) = dvr-two-go(xs[1:], 1, 0, xs[0], 0.0 - 1.0e30);
   def dvr-step(ours, want) {
    let t = dvr-two(ours);
    [t[0], t[1] - t[2], (want >= 0 && want < len(ours)) ? t[1] - ours[want] : 0.0];
@@ -377,7 +403,7 @@ section [form.bml] {
   def dvr-steps-gaps(readings) = len(readings) == 0 ? [] : cons(readings[0][2], dvr-steps-gaps(readings[1:]));
   // the recorded id of step i, or -1 past the recorded stream
   def dvr-want-at(i) = i < len(dvr-stream()) ? dvr-stream()[i] : 0 - 1;
-  def dvr-bits(xs) = len(xs) == 0 ? [] : cons(md-f32-bits(xs[0]), dvr-bits(xs[1:]));
+  def dvr-bits(xs) = nil?(xs) ? [] : cons(md-f32-bits(xs[0]), dvr-bits(xs[1:]));
   // the recorded logits, read from the pinned file: 129,280 values
   def dvr-ref-logits() {
    let text = read_file_slice(dvr-logits-path(), 0, 1600000);
