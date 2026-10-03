@@ -31,7 +31,8 @@
 //
 // THE DOOR IS DRY BY DEFAULT: empty stdin, {} and {"dry":1} print the plan and the ledger arithmetic (the landed formulas over the real header) and open nothing; only {"go":1} runs. Options (one JSON line): go, dry, file (the
 // IQ2XXS build by default), cap (64), steps (decode tokens, 24), watch (tokens read after every layer, 3), pct (the wired stop, 60), bw_gbs (the bandwidth the plan prices bytes at, 546: the M4 Max's stated figure, not
-// measured), arena_slots (experts a layer's arena holds, 64; 0 maps the whole routed stacks: the control), logits_prompt_ids (the prompt; the 14 pinned ids by default), receipt (receipts/dsv4-token-runs.jsonl).
+// measured), arena_slots (experts a layer's arena holds, 64; 0 maps the whole routed stacks: the control), logits_prompt_ids and prompt_ids (the prompt; the 14 pinned ids by default), logits (0; 1 reads the head's logits after the prefill against the pinned recording and every step's top-two margin, see the validation reading
+// below), receipt (receipts/dsv4-token-runs.jsonl).
 //
 // Proven by: native/metal/tests/dsv4-token-run-band.bml (the walk on both fixtures: rows from the ledger, the ceilings and the dispatch formula, the curve and its stop, the plants through the counted doors),
 // form-stdlib/tests/dsv4-token-run-plan-band.bml (the plan on the real headers; nothing opened).
@@ -96,7 +97,8 @@ section [form.bml] {
   def dtr-hold-reason(vm, pct, elapsed) =
    !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : mg-wired(vm) > mg-pct(mg-mem(vm), pct) ? "wired-cap" : mg-available(vm) < mg-reserve-of(mg-mem(vm)) ? "reserve" : elapsed > dvr-abort-ms() ? "budget" : "";
   // the walk's own record: the rows, the marks the prefill's seams took, the curve, the stop, the token the tap is reading, and the options it runs under
-  def dtr-env(pct, watch, t0, base) = record_new(0, "rows", [], "marks", [], "curve", [], "stop", [], "token", 0, "pct", pct, "watch", watch, "t0", t0, "base", base, "arena", 0);
+  def dtr-env(pct, watch, t0, base) = record_new(0, "rows", [], "marks", [], "curve", [], "stop", [], "token", 0, "pct", pct, "watch", watch, "t0", t0, "base", base, "arena", 0,
+    "val", 0, "rawp", 0, "vbase", 0, "ours", [], "reads", [], "refl", [], "refarg", dtr-recorded-argmax());
   def dtr-stopped(env, token, il, why) {
    let k = record_set(env, "stop", [why, token, il]);
    let said = print_str("[dsv4-token] HOLD at token " ++ token.str() ++ " layer " ++ il.str() ++ ": " ++ why ++ ": the encoding stops here, what is enqueued is drained, the curve and the receipt keep how far it got");
@@ -154,7 +156,18 @@ section [form.bml] {
    let seen = dsv4-decode-observed(ctx, sts, id, pos);
    let b = dtr-snap();
    let nid = seen[0];
-   nothing?(nid) ? nothing() : { let row = dtr-add-row(env, dtr-row(index, "decode", pos, id, nid, seen[1], a, b, index < record_get(env, "watch") ? 1 : 0, record_get(env, "arena"))); nid; };
+   nothing?(nid) ? nothing() : { let row = dtr-add-row(env, dtr-row(index, "decode", pos, id, nid, seen[1], a, b, index < record_get(env, "watch") ? 1 : 0, record_get(env, "arena"))); let v = dtr-val-read(env, ctx, index - record_get(env, "vbase") + 1); nid; };
+  }
+  // ---- THE VALIDATION READING (opt-in: "logits" 1, or the recorded stream's own prompt): the logits the head left, read by the host BETWEEN tokens, after the row's closing mark and before the next row's opening one, so no ledger row
+  // counts the read. Stream index 0 is the prefill's answer, i the i-th decode's. The prefill's logits are kept whole (the compare against the recording is made after the walk, outside every clock); every index keeps
+  // its reading [our argmax, our top-two margin, the recorded id's gap below our top] (the validate door's dvr-step: ONE authority). 1 when read, 0 when the reading is off.
+  def dtr-val-read(env, ctx, i) {
+   record_get(env, "val") != 1 ? 0 : {
+    let lg = dsv4-logits(ctx);
+    let k1 = i == 0 ? record_set(env, "ours", lg) : 0;
+    let k2 = record_set(env, "reads", append(record_get(env, "reads"), [dvr-step(lg, record_get(env, "rawp") == 1 ? dvr-want-at(i) : 0 - 1)]));
+    1;
+   };
   }
   def dtr-end-check(env, index) {
    let why = dtr-hold-reason(mg-sense(), record_get(env, "pct"), dtr-elapsed(env));
@@ -173,6 +186,7 @@ section [form.bml] {
   def dtr-walk(env, ctx, sts, ids, steps) {
    let tapped = dkr-hz-tap-set(dtr-tap(env));
    let first = dtr-prefill(env, ctx, sts, ids);
+   let v0 = nothing?(first) ? 0 : dtr-val-read(env, ctx, 0);
    let why = nothing?(first) ? dtr-stop-reason(env) : dtr-decode(env, ctx, sts, first[0], first[1], len(ids), steps);
    let cleared = dkr-hz-tap-clear();
    let drained = metal_sync();
@@ -222,17 +236,58 @@ section [form.bml] {
     dvr-kv("hit_percent", dtr-hit-pct(dtr-sum-col(rows, "ehit"), dtr-sum-col(rows, "emiss")).str()), dvr-kv("bytes_filled", dtr-sum-col(rows, "ebytes").str()), dvr-kv("fills", dtr-sum-col(rows, "fills").str()),
     dvr-kv("fills_door", (dtr-sum-col(rows, "fills") - dtr-sum-col(rows, "fdisp")).str()), dvr-kv("fills_view", dtr-sum-col(rows, "fdisp").str())], ",") ++ "}";
   }
+  // ---- the validation: the head's logits against the recording, the stream against the recorded ids ------------------------------------------------------------------
+  // THE RECORDING IS THE VALIDATION DOOR'S (dsv4-validate.bml, ONE authority: dvr-ref-logits reads the pinned JSON, dvr-logits-pinned? checks its SHA-256, dvr-agreement measures Pearson r, the top-10 overlap, both argmaxes, the
+  // reference's top-two margin and our largest delta over its top 64, dvr-step reads a step's margin and gap, dvr-matched counts the stream's agreeing prefix); this door adds only the JUDGEMENT of the numbers, so a run's
+  // receipt row says pass or fail and which fact failed. The floors are STATED, not measured (r 0.999, 9 of the top 10): the lead's run reads the real numbers and may move them. The TIE BUDGET is the validate door's rule
+  // (a token flips when our largest delta over the reference's top 64 exceeds the reference's top-two margin): it is MEASURED and recorded (tie_safe), and, as in the validate door, never counted among the failures.
+  def dtr-recorded-argmax() = 2581;
+  def dtr-r-floor() = 0.999;
+  def dtr-overlap-floor() = 9;
+  // [r, top-10 overlap, our argmax, their argmax, their top-two margin, our max delta over their top 64, finite]: dvr-agreement's reading
+  def dtr-logits-failed(a, want) = append(append(append(append(a[2] != a[3] ? ["argmax-ours-not-theirs"] : [], a[3] != want ? ["argmax-not-recorded"] : []), a[6] != 1 ? ["not-finite"] : []),
+   !(a[0] >= dtr-r-floor()) ? ["r"] : []), a[1] < dtr-overlap-floor() ? ["top10-overlap"] : []);
+  def dtr-tie-safe?(a) = a[5] <= a[4];
+  def dtr-quoted-list(xs) = "[" ++ dvr-join(map(x => dvr-q(x), xs), ",") ++ "]";
+  def dtr-logits-json(a, want) {
+   let failed = dtr-logits-failed(a, want);
+   let base = dvr-logits-json(a);
+   substring(base, 0, str_len(base) - 1) ++ "," ++ dvr-join([dvr-kv("tie_safe", dtr-tie-safe?(a) ? "1" : "0"), dvr-kv("recorded_argmax", want.str()), dvr-kv("verdict", dvr-q(len(failed) == 0 ? "pass" : "fail")), dvr-kv("failed", dtr-quoted-list(failed))], ",") ++ "}";
+  }
+  // the stream's reading: the ids the walk answered against the recorded 24 (matched counts only when the prompt is the recorded stream's raw prompt: rawp), and each step's margin and recorded gap
+  def dtr-stream-json(ids, reads, rawp) = "{" ++ dvr-join([dvr-kv("recorded_prompt", rawp == 1 ? "1" : "0"), dvr-kv("matched", (rawp == 1 ? dvr-matched(ids, dvr-stream()) : 0 - 1).str()), dvr-kv("of", (rawp == 1 ? len(dvr-stream()) : 0).str()), dvr-kv("ids", dvr-ids-json(ids)),
+    dvr-kv("margins", dvr-floats-json(dvr-steps-margins(reads))), dvr-kv("recorded_gap", dvr-floats-json(dvr-steps-gaps(reads)))], ",") ++ "}";
+  // the ids a walk answered, from its rows: the prefill's last row answers the first, each decode the next
+  def dtr-walk-ids(rows) = len(rows) == 0 ? [] : (dtr-g(rows[0], "id_out") >= 0 ? cons(dtr-g(rows[0], "id_out"), dtr-walk-ids(rows[1:])) : dtr-walk-ids(rows[1:]));
+  // the recording applies to the logits only after the pinned 14-id prefill; its own file must be the pinned one (an injected reference, a band's, stands in for the file)
+  def dtr-ref-of(env) = len(record_get(env, "refl")) > 0 ? record_get(env, "refl") : (dvr-logits-pinned?() ? dvr-ref-logits() : []);
+  def dtr-logits-applies?(env, ids) = len(record_get(env, "ours")) > 0 && (len(record_get(env, "refl")) > 0 || ids == dvr-pinned-ids());
+  def dtr-logits-part(env, ids) {
+   let ref = dtr-logits-applies?(env, ids) ? dtr-ref-of(env) : [];
+   len(ref) == 0 ? "{\"verdict\":\"not-run\"}" : (len(ref) != len(record_get(env, "ours")) ? "{\"verdict\":\"fail\",\"failed\":[\"length\"]}" : dtr-logits-json(dvr-agreement(record_get(env, "ours"), ref), record_get(env, "refarg")));
+  }
+  // the validation object of the receipt row: "{}" when the reading was off
+  def dtr-validation-json(env, ids) = record_get(env, "val") != 1 ? "{}" : "{" ++ dvr-join([dvr-kv("logits", dtr-logits-part(env, ids)), dvr-kv("stream", dtr-stream-json(dtr-walk-ids(record_get(env, "rows")), record_get(env, "reads"), record_get(env, "rawp")))], ",") ++ "}";
+  // the same reading as the lines a run prints
+  def dtr-validation-line(env, json) = record_get(env, "val") != 1 ? "[dsv4-token] validation: off (set logits 1, or run the recorded stream's raw prompt, to read the logits against the recording)" : "[dsv4-token] validation: " ++ json;
+  def dtr-validation-plan-line(opts, ids) = dtr-validate?(opts, ids)
+   ? "[dsv4-token] validation ON: after the prefill the head's " ++ "129280" ++ " logits are read and set against the recording " ++ dvr-logits-path() ++ " (pinned SHA-256 " ++ dvr-logits-sha() ++ ") when the prompt is its 14 ids: Pearson r (floor " ++ dtr-r-floor().str() ++ "), top-10 overlap (floor "
+     ++ dtr-overlap-floor().str() ++ "), argmax (recorded " ++ dtr-recorded-argmax().str() ++ ") and the tie budget (recorded, not a failure); every step's top-two margin and the recorded id's gap are kept, and the raw prompt " ++ dvr-ids-json(dvr-prompt())
+     ++ " is matched against the recorded " ++ len(dvr-stream()).str() ++ " ids; the host reads happen between tokens, outside every row"
+   : "[dsv4-token] validation off (logits 1 reads the head's logits against the recording after the prefill and every step's margin; the raw prompt " ++ dvr-ids-json(dvr-prompt()) ++ " turns it on by itself); prompt_ids sets the prompt";
   def dtr-receipt-row(date, at, r) = "{" ++ dvr-join([dvr-kv("schema", dvr-q("dsv4-token-run-v1")), dvr-kv("at_unix_ms", at.str()), dvr-kv("date", dvr-q(date)), dvr-kv("status", dvr-q(record_get(r, "status"))), dvr-kv("reason", dvr-q(record_get(r, "reason"))),
     dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("pct", record_get(r, "pct").str()), dvr-kv("watch", record_get(r, "watch").str()), dvr-kv("arena_slots", record_get(r, "arena").str()), dvr-kv("lease_shared", record_get(r, "shared").str()),
     dvr-kv("organs", record_get(r, "organs")), dvr-kv("moved", record_get(r, "moved")), dvr-kv("denied", record_get(r, "denied")), dvr-kv("vm_window", record_get(r, "vmwin")),
     dvr-kv("stages", "[" ++ dvr-join(map(s => dvr-stage-json(s), record_get(r, "stages")), ",") ++ "]"), dvr-kv("stop", dtr-stop-json(record_get(r, "stop"))), dvr-kv("wired_curve", dtr-curve-json(record_get(r, "curve"))),
-    dvr-kv("rows", "[" ++ dvr-join(map(x => dtr-row-json(x), record_get(r, "rows")), ",") ++ "]"), dvr-kv("summary", dtr-summary-json(record_get(r, "rows"))), dvr-kv("elapsed_ms", record_get(r, "elapsed").str())], ",") ++ "}";
+    dvr-kv("rows", "[" ++ dvr-join(map(x => dtr-row-json(x), record_get(r, "rows")), ",") ++ "]"), dvr-kv("summary", dtr-summary-json(record_get(r, "rows"))), dvr-kv("validation", value_kind(record_get(r, "validation")) == "string" ? record_get(r, "validation") : "{}"),dvr-kv("elapsed_ms", record_get(r, "elapsed").str())], ",") ++ "}";
   // ---- the plan (the dry door) -------------------------------------------------------------------------------------------------------------
   def dtr-opts-steps(opts) = dvr-int(opts, "steps", dtr-default-steps());
   def dtr-opts-watch(opts) = dvr-int(opts, "watch", dtr-default-watch());
   def dtr-opts-pct(opts) = dvr-int(opts, "pct", dtr-default-pct());
   def dtr-opts-bw(opts) = dvr-int(opts, "bw_gbs", dtr-default-bw());
-  def dtr-opts-ids(opts) = len(dvr-logits-ids(opts)) > 0 ? dvr-logits-ids(opts) : dvr-prompt();
+  def dtr-opts-ids(opts) = len(dvr-ints(opts, "prompt_ids")) > 0 ? dvr-ints(opts, "prompt_ids") : (len(dvr-logits-ids(opts)) > 0 ? dvr-logits-ids(opts) : dvr-prompt());
+  // the validation reading is OFF unless asked ("logits" 1) or the walk runs the recorded stream's own raw prompt (the stream is then read against its recorded ids with no flag)
+  def dtr-validate?(opts, ids) = dvr-int(opts, "logits", 0) == 1 || ids == dvr-prompt();
   // THE ARENA IS THE DEFAULT (dvr-arena-slots, dsv4-validate.bml: one authority for both doors): arena_slots experts a layer (the lease's term, dls-cache-experts: 64); arena_slots 0 maps the whole routed stacks (the control: one
   // view over each 0.55 GB stack, which makes the device read every page of every stack a dispatch binds: on 2026-10-03 19:04 WITA a cold first token read the whole 80 GiB file, 5,241,090 pageins, and pushed 27.7 GiB of other processes' memory to swap)
   def dtr-opts-arena(opts) = dvr-arena-slots(opts);
@@ -293,6 +348,7 @@ section [form.bml] {
     "[dsv4-token] file " ++ dvr-text(opts, "file", dvr-file()) ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), " ++ record_get(m, "arch") ++ ", " ++ n.str() ++ " layers, header read only",
     "[dsv4-token] the run: the prefill of " ++ len(ids).str() ++ " prompt ids " ++ dvr-ids-json(ids) ++ " (a wait between positions, the head and the one drain at the last), then " ++ dtr-opts-steps(opts).str() ++ " greedy decode tokens, one ledger row a token, cap " ++ dvr-int(opts, "cap", dvr-default-cap()).str()
      ++ (arena ? ", the routed experts through a slot arena of " ++ dtr-opts-arena(opts).str() ++ " slots a layer (the stacks are not mapped)" : ", WHOLE MAPPED STACKS (the control: arena_slots 0; a cold token reads the whole file)"),
+    dtr-validation-plan-line(opts, ids),
     arena ? dtr-arena-structure-line(m) : "[dsv4-token] the command structure (landed, dkr-hz): one concurrent batch, barriers planned per block, handed to the queue every " ++ "2" ++ " blocks (" ++ dtr-submits(m).str() ++ " submits and the wait's own commit: " ++ dtr-cbs(m).str() ++ " command buffers a token), ONE wait a decode token, the NaN scan on the same drain",
     "[dsv4-token] dispatches a token (dll-token-count-m, the ledger's formula over the header): " ++ dtr-min-go(m, 0, 1000000, 256).str() ++ " at the quietest position, " ++ dtr-max-go(m, 0, 0, 256).str() ++ " at a position where every compressor emits; the embedding 2 and the head and scan 8 included" ++ (arena ? "; the arena adds a copy dispatch for each fill that takes the view road (the fill door makes none)" : ""),
     arena ? dtr-arena-ceil-line(m) : dtr-ceil-line(m),
@@ -315,12 +371,16 @@ section [form.bml] {
     [() => dvr-stage(env, "state", dvl-kv-total(record_get(env, "m"), record_get(env, "cap")), () => dvr-do-state(env))]));
   def dtr-record(denv, wenv, status, reason, opts) = record_new(0, "status", status, "reason", reason, "file", record_get(denv, "file"), "cap", record_get(denv, "cap"), "pct", record_get(wenv, "pct"), "watch", record_get(wenv, "watch"), "arena", dtr-opts-arena(opts),
     "shared", record_get(denv, "shared"), "organs", record_get(denv, "organs"), "moved", record_get(denv, "moved"), "denied", record_get(denv, "denied"), "vmwin", dvr-window-vm-json(mg-sense(), record_get(denv, "vm0"), dvr-stored-pages()),
-    "stages", record_get(denv, "log"), "stop", record_get(wenv, "stop"), "curve", record_get(wenv, "curve"), "rows", record_get(wenv, "rows"), "elapsed", dvr-elapsed(denv));
+    "stages", record_get(denv, "log"), "stop", record_get(wenv, "stop"), "curve", record_get(wenv, "curve"), "rows", record_get(wenv, "rows"), "elapsed", dvr-elapsed(denv), "validation", "{}");
   def dtr-finish(denv, wenv, opts, why) {
    let cleared = dkr-hz-tap-clear();
    let held = dvr-release(denv);
    let status = why == "" ? "completed" : "held";
    let r = dtr-record(denv, wenv, status, why == "" ? (held == 0 ? "released" : "handles-held") : why, opts);
+   // the validation is read AFTER the release, from what the walk kept (the prefill's logits, each step's reading): the compare against the recording runs on the host, outside every clock the rows hold
+   let val = try dtr-validation-json(wenv, dtr-opts-ids(opts)) catch "{\"verdict\":\"stopped\"}";
+   let kv = record_set(r, "validation", val);
+   let saidv = print_str(dtr-validation-line(wenv, val));
    let wrote = dvr-append(dvr-text(opts, "receipt", dtr-receipt-path()), dtr-receipt-row(dvr-date(), now_unix_ms(), r));
    let said1 = print_str(dtr-summary-line(record_get(wenv, "rows")));
    let said2 = print_str("[dsv4-token] " ++ status ++ ": " ++ record_get(r, "reason") ++ "; handles still held " ++ held.str() ++ "; wired curve of " ++ len(record_get(wenv, "curve")).str() ++ " readings; receipt row " ++ (wrote >= 0 ? "written" : "NOT written"));
@@ -331,6 +391,10 @@ section [form.bml] {
    let slots = dtr-opts-arena(opts);
    let marked = record_set(wenv, "arena", slots > 0 ? 1 : 0);
    let asked = record_set(denv, "arena", slots);
+   let ids = dtr-opts-ids(opts);
+   let val = record_set(wenv, "val", dtr-validate?(opts, ids) ? 1 : 0);
+   let raw = record_set(wenv, "rawp", ids == dvr-prompt() ? 1 : 0);
+   let vb = record_set(wenv, "vbase", len(ids));
    let before = try dvr-seq(dtr-steps-before(denv, slots)) catch "walker-stop";
    before != "" ? before : (try dtr-walk(wenv, dvr-ctx(denv), dvr-sts(denv), dtr-opts-ids(opts), dtr-opts-steps(opts)) catch "walker-stop");
   }
