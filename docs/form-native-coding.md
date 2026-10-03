@@ -219,13 +219,21 @@ though it would fit: the cap is a fifth of the window, at least 1024 IDs, counte
 of host-walk.bml at the 12:30 day turn, before f-split cut that file, measured 2.84), so 3276 IDs and 9828 bytes at
 16384 positions. The cap counts bytes, not IDs: digit-dense or escaped output just under it can cost near one
 ID per byte, so the window refusal above stays behind it, and a cap on measured IDs waits for the sealed tokenizer's
-count. The stream takes the bounded note instead, through the same focus path as the capacity signal above: the
-result's exit, byte and line counts and sha256, its stderr clipped, its first 12 and last 6 lines, and the way to read
-on. After a whole `read` or `cat` of a lane document the result's lines are the document's, so the note names the window
-to read next, `{"tool":"sed","arguments":["-n","A,Bp",path]}` with at most `window_lines` lines so that one window fits
-under the cap, plus an `rg -n -F` form to find a symbol. After any other call (rg, sed, jq, head, tail) the lines count
-the result, not the document, so the note names no window and says to run a narrower query. A line longer than 200
-bytes is shown by its first 200. The exact observation stays in private evidence (the note says so only when the write
+count. The stream takes a bounded note through the same focus path. An executed source read
+returns an exact page in `observation_excerpt.stdout`, with zero-based `start_byte`,
+exclusive `end_byte`, the original `requested_end_byte`, `resident_sha256` and a ready
+`next` tool call. Whole reads, paged reads and numeric native `sed` ranges get this
+source continuation only after their result reconstructs exactly from resident bytes.
+`read` takes `[path,one-based offset,count,optional unit]`; the default unit is `lines`,
+and `bytes` continues long lines without discarding their interiors. UTF-8 boundaries
+are preserved. The page is fitted to the live observation allowance, leaving room for
+the task and source catalog.
+The generated continuation includes an optional fifth argument with the source hash;
+a changed source returns `read-source-changed` rather than silently continuing another version.
+Following the continuations reassembles the requested source exactly. Query output
+retains exit, counts, SHA-256 and clipped first/last lines; its line numbers describe
+the result and do not imply source coordinates.
+The exact observation stays in private evidence (the note says so only when the write
 landed, else it says the bytes were not retained), the document stays whole in the tools, and a read that worked counts
 no repair and reads as a healthy organ reading with no need (a window refusal is a failure the lane repairs, and
 carries the same excerpt). A verification or check note is never bounded: failed-check evidence stays complete.
@@ -355,6 +363,14 @@ similarly separates model streaming from tools, steering and retained events.
 Their local routes demonstrate this ownership pattern. Reference source is
 input to Form's design, not a foreign runtime dependency or evidence that every
 model meets every task's quality requirements.
+
+Hermes' [paged reads and tool-result spillover](https://hermes-agent.nousresearch.com/docs/user-guide/configuration#tool-result-spillover-budget)
+inform Form's exact source pages and executable continuations. OpenClaw's
+[local-model guidance](https://docs.openclaw.ai/gateway/local-models) separates actual
+transport/tool capability from context fit and exposes tools without loading every
+schema into the prompt. Form keeps these mechanisms in its native tool and owned
+checkpoint flow. A valid tool call, exact source page and completed coding task
+remain separate observations; the local task must still edit, check, review and release.
 
 The present native coding loop owns staged planning, tools, source checks,
 same-model review, repair, context renewal, checkpoints and release. Its model
