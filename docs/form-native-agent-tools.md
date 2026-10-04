@@ -75,9 +75,72 @@ Malformed JSON, missing fields, unsupported command syntax and tool failures
 are ordinary structured results with `stderr`; inspect them and repair the next
 request rather than switching to a host command.
 
-## In-process Form API
+## form-find — the source tree, indexed and resident (the agents' normal lookup)
 
-`fc-tool-call` remains the embedding API for a Form organ. It is not the
+The wire above carries the documents it is handed: at most 512 documents and one MiB, and a cold `./fkwu` for every call. It cannot answer "who
+defines X" over a tree of 2,100 files. `form-find` can. It is a resident service (`observe/form-find-run.fk`, started by launchd as data:
+`docs/launchd/earth.hati.form-find.plist`; the body never starts it) that holds the checkout in memory and answers the same wire JSON:
+
+| command | answer |
+| --- | --- |
+| `find [-i -F -w -x -v -l -c -m N] PATTERN [PATH...]` | indexed search, ERE or `-F`, rows as `rg -n`: `path:line:text` |
+| `defs NAME...` | where NAME is defined (`def` `defn` `class` `field` `thought`): `path:line:text` |
+| `callers NAME` | the lines using NAME as a whole name, definitions left out: `path:line:text` |
+| `bands [NAME]` | the band files (a `; Expected:` or `; Verdict` header) that name NAME: `path expected= verdict= mentions=` |
+| `imports UNIT` | `UNIT -> raw` for what it imports (`import` lines, `preludes:` headers), `UNIT <- path:line:text` for who imports it |
+| `rows FILE [FIELD[=VALUE]]` | a `.jsonl` census or ledger (a `.hearth/*.jsonl` too) as a keyed table: the rows holding FIELD=VALUE, an array field matching any element; with a bare FIELD its values and counts |
+| `status`, `refresh` | the index's counters; a refresh now |
+| `read cat head tail sed wc jq grep rg` | the wire's own tools over the indexed files the command names (`rg` and `grep` over the whole tree are `find`) |
+
+Anything else is a named refusal (`unknown-command`, `form-find-reads-only` for `edit` and `write`, `find-needs-a-literal-or-paths` for a
+search with no case-exact literal to narrow it, `find-context-not-supported`), never a host fallback. A request that carries its own `documents`
+goes to the wire untouched. The answer is the wire's JSON (schema `form-agent-tool-wire-v1`, `crossings` 0); a miss is exit 1, an empty stdout.
+
+**What it holds.** The file table is `source-tree.bml`'s walk (every `.gitignore` honoured); a file's bytes are held when it is at most 2 MiB
+with no NUL (the rest are in the table, not searchable). Over that: a definition index, the import edges, the band headers, and a trigram
+posting set (built the first time a search needs a trigram or a literal and kept; a literal search reads only the files its posting names). There is
+no watcher: every query first stats each file (one `host_file_identity` each, about 15 ms for 2,100) and lists again any directory whose mtime moved,
+so a file that changed is read again and only that one, a new file is classified by the ignore rules in force there, a changed `.gitignore` walks the
+tree again. Postings follow a changed file.
+
+**Measured** (`form/form-stdlib/tests/form-find-band.fk`, 32767 of 32767; one busy machine, 2026-10-04, tree of 2,162 files). Index: 2,145 files held,
+31.8 MB of text, 55,727 definition entries, 5,628 import edges, 371 band files; built in 2.2 to 3.6 s (an independent walk alone is 1.3 to 2.4 s), not
+kept on disk. A quiet refresh costs 11 to 18 ms and reads nothing; a touched file is read once and no other. Each answer equals the answer of the unindexed scan
+on twenty fixed patterns, twenty names for `defs`, `callers` and `bands`, and eight units for `imports`. Five questions, milliseconds (unindexed = the engine over files read afresh;
+first = the first time a fresh index is asked, which builds the postings it needs; warm = the same question again, of which the refresh is most):
+
+| question | unindexed | first | warm |
+| --- | --- | --- | --- |
+| `defs fat-wire-call` | 829 | 15 | 14 |
+| `callers fat-wire-call` | 142 | 48 | 16 |
+| `find -F 'def fat-wire-call'` | 944 | 45 | 12 |
+| `bands fat-wire-call` | 2,496 | 13 | 14 |
+| `imports form-stdlib/bml/form-agent-grep.bml` | 109 | 13 | 13 |
+
+The cold door (no service: an index of its own, then the answer) took 1.9 s in process and 2.5 s as a whole `./fkwu` process; the redirect round trip to a
+standing service measured 45 to 77 ms from zsh (the poll interval and the refresh are most of it). The wire's own cold call, a fresh `./fkwu` loading its closure
+and handed documents, was not measured here.
+
+**The operator starts it once** (the body never does): `launchctl bootstrap gui/$(id -u) docs/launchd/earth.hati.form-find.plist`
+(restart: `launchctl kickstart -k gui/$(id -u)/earth.hati.form-find`; take away: `launchctl bootout gui/$(id -u)/earth.hati.form-find`). The plist names this
+machine's checkout and uid (501); copy it and change `WorkingDirectory` and `FORM_FIND_SPOOL` for another.
+
+**The agent's lookup costs the client no process.** The spool is `/tmp/form-find/$UID`: write `ask.<n>.json` with a plain redirect, read `ans.<n>.json`
+(written whole and renamed, so it is never half an answer; the service removes the ask). In zsh, which the agents' Bash is:
+
+```sh
+SP=/tmp/form-find/$UID; n=$$.$RANDOM; zmodload zsh/zselect
+printf '%s' '{"command":"defs fat-wire-call"}' > $SP/ask.$n.json
+until [ -s $SP/ans.$n.json ]; do zselect -t 2; done; cat $SP/ans.$n.json; rm -f $SP/ans.$n.json
+```
+
+The service looks every 20 ms while asks are coming and every 100 ms after ten quiet seconds. Fallbacks, in order: (1) the service stands (`$SP/status.json`
+exists and is rewritten every 2 s): the index answers, in about twenty milliseconds; (2) no answer in about three seconds, or no `status.json`: the cold
+door, `printf '%s' "$json" | ./fkwu observe/form-find-ask.bml`, which asks the service itself if one beats and otherwise builds an index of its own, answers, and
+ends (seconds, once per call: it is the cost the redirect avoids). Neither falls back to a host `grep`, `find` or `ls`; a polled directory is used, not
+a fifo bell, because a plain redirect into a fifo with no reader blocks the agent's shell.
+
+ for a Form organ. It is not the
 recommended boundary for an agent or external tool caller:
 
 ```lisp
