@@ -193,7 +193,7 @@ form-stdlib/tests/forbidden-tools-audit-band -> 65535  (the breath window opened
                                             a stamp that did not read prints no note and ends 0
 ./fkwu observe/walk-retry.bml </dev/null  -> the retry job's door (see the host-walk-retry-band entry): the schedule's second slot reads
                                             whether the first began and, when it did not, why; stdin `{"door":"scheduled-walk","dry":1,
-                                            "now_ms":N,"zone_ms":N,"stamp":"..","launchctl":"..","reports_dir":"..","record":"..","nap_ms":N}`
+                                            "now_ms":N,"zone_ms":N,"stamp":"..","lock":"..","launchctl":"..","reports_dir":"..","record":"..","nap_ms":N}`
                                             names a slot by hand and reads and classifies without beginning a walk (read-only; it does run
                                             `launchctl print` when no launchctl text is given)
 form/form-stdlib/tests/command-words-band -> 2147483647  (form/form-stdlib/bml/command-words.bml reads which commands a shell string runs, with
@@ -257,35 +257,59 @@ host-walk-band 8796093022207  (a walk door that claims the checkout stamps its s
                                 on docs/rent-ladder.html): observe/walk-sync-run.bml runs the landed sync once on a named checkout
                                 ({"dir":"/abs/path"}), leaves a checkout whose walk lock stands alone and names the owner; run on the
                                 walk checkout at 14:30 it printed healed:, redrawn:, sync=0;
-                                host-walk.bml is an aggregator over fourteen parts `host-walk-<seam>.bml`, each under 12000 bytes so the
+                                host-walk.bml is an aggregator over sixteen parts `host-walk-<seam>.bml`, each under 12000 bytes so the
                                 local lane reads one whole and can read it twice, and every definition's name (not its body) is pinned
                                 in tests/fixtures/host-walk-defs.txt)
-host-walk-retry-band 32767  (the informed retry, observe/walk-retry.bml over host-walk-retry.bml, -evidence.bml and -attempt.bml: each schedule has
-                                a second launchd job, earth.hati.rent-walk-retry at 03:40 and earth.hati.day-turn-retry at 12:40 and
-                                19:10 (sources in docs/launchd), whose door reads the first slot's stamp and, when the slot did not begin,
-                                the evidence of why through read-only argv doors: `launchctl print gui/<uid>/<first label>`, the OS
-                                diagnostic reports of the slot's day under ~/Library/Logs/DiagnosticReports (a report counts when its
-                                process launched between two minutes before the slot and 25 minutes after, for the first job's own
-                                coalition), and the job's stdout log. Classes: begun (nothing to heal), launch-killed (a report with
-                                CODESIGNING, a Launch Constraint Violation, Code Signature Invalid, an unreadable executable path or a
-                                SIGKILL within 100 ms; or launchd's last exit reason naming CODESIGNING), crashed-after-launch (SIGSEGV,
-                                SIGBUS, SIGILL, SIGABRT, SIGTRAP), held (the log's last `[walk-lock] ... does not start` line) and
-                                nothing-found. The change is a named variable the row states and never more than two attempts:
-                                launch-killed begins the walk door as a child of the live retry (a spawn inside a running process, not a
-                                launchd exec) and, if that dies within five seconds, builds a kernel beside (cc fkwu.next, renamed over
-                                fkwu so it keeps its name and the walk's coordinator still climbs to launchd) and begins it there, then
-                                stops as retry-failed naming what each attempt saw; crashed-after-launch begins the walk with `{"safe":1}`
-                                (heal, sync, build, carrier and carry stand; the turns, drafts, page and movement are skipped); held waits
-                                up to 90 minutes for the holder and begins once; nothing-found begins once after a 120 s nap and keeps
-                                the launchctl text and the diagnostics directory's names. Every attempt after the first tells the child
-                                `{"again":1}`. One row per retry lands in `.hearth/walk-retry.jsonl` (slot, class, why, evidence paths,
-                                launchd line, what changed, each attempt with its outcome word and what it saw, the outcome) and the
-                                fifth lens prints the last. Classification, plan, ladder, the child's end, the row and the lens line are
-                                pure and run over synthetic evidence (a copy of the shape `launchctl print` printed, reports of the shape
-                                the OS wrote at 2026-10-04 03:30:04), attempts over stubs in the walk door's place; four plants (a
-                                classifier blind to its evidence, one that ignores that the first slot began, one plan for every class, a
-                                ladder that allows a third attempt) each fail the checks the real ones keep; the repo's plists are read
-                                against the schedule's table)
+host-walk-retry-band 2097151  (the informed retry, observe/walk-retry.bml over host-walk-evidence.bml, -class.bml, -retry.bml, -record.bml
+                                and -attempt.bml: each schedule has a second launchd job, earth.hati.rent-walk-retry at 03:40 and
+                                earth.hati.day-turn-retry at 12:40 and 19:10 (sources in docs/launchd), whose door first reads what became
+                                of the first slot AGAINST THE SLOT'S TIME (a retry may start 5 to 45 minutes after its slot): its row in
+                                `.hearth/walk.began` (no earlier than the slot less two minutes, no later than now) and the lock's owner
+                                file say running (the stamped pid alive), finished (no owner, or another walk's) or crashed (the pid
+                                gone, the lock never released); with no stamp (a first slot running older code) a live owner of the same
+                                door that began no earlier than the slot is running, and launchctl `state = running` or the job's log
+                                written in the slot's window say begun. Running or finished is the class begun (nothing to heal). Else
+                                it reads the evidence of why through read-only argv doors: `launchctl print gui/<uid>/<first label>`, the
+                                OS diagnostic reports of the slot's day under the home's Library/Logs/DiagnosticReports (the home from
+                                the job's plist path, else $HOME; a report counts when its process launched between two minutes before
+                                the slot and 25 minutes after, for the first job's own coalition, and carries a launch time and a signal
+                                or termination), and the job's stdout log. Classes: launch-killed (a report with CODESIGNING, a Launch
+                                Constraint Violation, Code Signature Invalid, an unreadable executable path or a SIGKILL within 100 ms; or
+                                launchd's last exit reason naming CODESIGNING AND its `runs` advanced past the last retry row of that job:
+                                launchctl keeps the reason after a run, so one whose runs did not advance, or that has no row to be
+                                compared with, is stale and no evidence), crashed-after-launch (a stamp whose pid is gone with the lock
+                                unreleased: the walk claimed the checkout and died; or SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGTRAP in a
+                                report), held (the log's last `[walk-lock] ... does not start` line) and nothing-found. The change is a
+                                named variable the row states and never more than two attempts: launch-killed begins the walk door as a
+                                child of the live retry (a spawn inside a running process, not a launchd exec) and, if that dies within
+                                five seconds, builds a kernel beside (cc fkwu.next, the nightly build's argv, renamed over fkwu: a new
+                                inode, no new signature identity claimed; it keeps its name so the walk's coordinator still climbs to
+                                launchd) and begins it there, then stops as retry-failed naming what each attempt saw;
+                                crashed-after-launch begins the walk with `{"again":1,"safe":1}` (heal, sync, build, carrier and carry
+                                stand; the turns, drafts, page and movement are skipped); held waits up to 90 minutes for the holder and
+                                begins once; nothing-found begins once after a 120 s nap and keeps the launchctl text and the diagnostics
+                                directory's names. Every attempt after the first tells the child `{"again":1}`; a child's output is read
+                                from its last 64 KB (the whole stays under `.hearth/walk-io`). Each retry writes an INTENT row to
+                                `.hearth/walk-retry.jsonl` before any child begins (retry_id, slot, class, why, evidence paths, launchd
+                                line and its `runs`, plan) and an OUTCOME row at the end (what changed, each attempt with its outcome word
+                                and what it saw, the outcome), so a crash inside the door or a kill of the retry job leaves what was
+                                understood; the fifth lens prints the last row (an intent row alone reads "in progress or interrupted").
+                                Every number the reading stands on is a named def pinned by the band. The doors read stdin through
+                                hw-stdin: a terminal reads as none, so a hand start without `</dev/null` waits on no one.
+                                Classification, state, plan, ladder, the child's end, the rows and the lens line are pure and run over
+                                synthetic evidence (a copy of the shape `launchctl print` printed, reports of the shape the OS wrote at
+                                2026-10-04 03:30:04), attempts over stubs in the walk door's place, the state over a scratch stamp and
+                                lock; the plants (a classifier blind to its evidence or to the first slot's state or to the job's log, one
+                                that trusts a stale exit reason, a state read against now or blind to the pid's liveness or to the door,
+                                one plan for every class, a ladder that allows a third attempt, an intent written after the child) each
+                                fail the checks the real ones keep; the repo's plists are read against the schedule's table.
+                                ROLLOUT, read precisely: a launchd job runs the door code that stood on disk when it started, so the
+                                first slot after this lands (the walk checkout syncs main only once it is running) runs the OLD door:
+                                no stamp is written. The retry at +10 minutes then sees no stamp and reads the rest: launchctl `state =
+                                running` or a live lock owner of the same door, which is begun (nothing to heal); a first slot that
+                                already ended leaves its log written in the window, which is begun; only a first slot that left neither
+                                is read for why. The walk checkout must hold observe/walk-retry.bml before the retry jobs are loaded
+                                (observe/walk-sync-run.bml {"dir":"..."} on it).)
 form-cli-landing-band 262143  (the landing and the walk read every child's exit from `host_wait` through
                                 `host-child.bml` (`hch-run`), never from a printed mark; a red witness holds the landing; the
                                 reunion after a push behind origin is argv in the checkout it joins and is read end to end in a
