@@ -1,0 +1,73 @@
+// host-walk-class.bml — what became of the first slot, and the class of why it did not begin: pure functions of the evidence.
+//
+// The state of the first slot (hr-stamp-state) is read against the SLOT's time, never against now (a retry may start 5 to 45
+// minutes after its slot): its row in .hearth/walk.began no earlier than the slot less hr-report-slack-ms and no later than
+// now stamps the slot as begun. The lock then says what became of it: the owner file of .hearth/walk.lock naming the stamped
+// pid, alive, is "running"; naming it with the pid gone is "crashed" (the walk claimed the checkout and died before it
+// released it); no owner file, or another walk's, is "finished". With no stamp (an older door, or none begun) a live owner
+// of the same door that began no earlier than the slot is "running" too.
+// The classes (hr-classify), in the order the rules read:
+//   begun                 the first slot is running (the stamp's pid alive, a live owner of its door, or launchctl state =
+//                         running), or stamped its start and ended, or its job wrote its log in the slot's window (an older
+//                         door writes no stamp): nothing to heal
+//   crashed-after-launch  the stamp is there, its pid is gone and its lock was never released; or a report in the window
+//                         with SIGSEGV, SIGBUS, SIGILL, SIGABRT or SIGTRAP that is not a launch kill
+//   launch-killed         a report in the window says CODESIGNING, a Launch Constraint Violation, Code Signature Invalid, an
+//                         executable path the OS could not read (dyld_path_missing, main_executable_path_missing), or a
+//                         SIGKILL within hr-launch-life-ms of launch; or launchd's last exit reason names CODESIGNING AND its
+//                         `runs` has advanced since the last retry row of that job (launchctl keeps the reason after a run, so a
+//                         reason whose runs did not advance, or that has no row to be compared with, is stale and no evidence)
+//   held                  the job's log, touched in the window, ends in a [walk-lock] "does not start" line: another walk
+//                         or day turn held the checkout; the line names who
+//   nothing-found         none of the above: no diagnostic, no log line, an unknown
+// What it needs: host-walk-text.bml, host-walk-lock.bml (hw-owner-door) and host-walk-evidence.bml (the report rows, the launchd
+// readers) and parse.bml (parse-int).
+import form-stdlib/bml/parse.bml;
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-walk-lock.bml;
+import form-stdlib/bml/host-walk-evidence.bml;
+section [form.bml] {
+ class HostWalkClass {
+  // ── the first slot's state, read against the SLOT's time, never against now: [word, the stamp or owner row] ──
+  // the stamp's row (no earlier than the slot less the slack, no later than now) says the slot began
+  def hr-slot-began?(row, slot, now) {
+   let at = hw-field(row, " at=");
+   nothing?(at) ? false : (at >= slot - hr-report-slack-ms()) && (at <= now);
+  }
+  // no stamp (an older door, or none begun): a live owner of the same door that began no earlier than the slot is running
+  def hr-unstamped-state(owner, alive, door, slot) {
+   let at = hw-field(owner, " at=");
+   (String) hw-owner-door(owner) == door && !nothing?(at) && (at >= slot - hr-report-slack-ms()) && alive ? ["running", owner] : ["", ""];
+  }
+  // with a stamp the lock says what became of it: the owner file naming the stamped pid, alive: running; with the pid gone
+  // and the lock never released: crashed; no owner file, or another walk's: finished
+  def hr-stamp-state(row, owner, alive, door, slot, now) {
+   let pid = hw-field(row, "pid=");
+   let opid = hw-field(owner, "pid=");
+   !hr-slot-began?(row, slot, now) ? hr-unstamped-state(owner, alive, door, slot) : nothing?(opid) ? ["finished", row] : nothing?(pid) ? ["finished", row] : (Comparable) opid != pid ? ["finished", row] : alive ? ["running", row] : ["crashed", row];
+  }
+  def hr-running-why(state, launchd) = (String) state[0] == "running" ? "the first slot is running: " ++ state[1] : "launchctl reads the first job running";
+  // launchctl keeps `last exit reason` after a run: it is evidence only when `runs` has advanced past the last retry row's
+  def hr-runs-advanced?(launchd, baseline) {
+   let runs = parse-int(hr-launchd-runs(launchd));
+   !nothing?(runs) && !nothing?(baseline) && runs > baseline;
+  }
+  // ── the class: [class, why, evidence paths] ──
+  def hr-classify(state, launchd, reports, held, logged, baseline) {
+   let killed = hr-first(reports, r => hr-killed?(r));
+   let crashed = hr-first(reports, r => hr-crashed?(r));
+   (String) state[0] == "running" || (String) hr-launchd-state(launchd) == "running" ? ["begun", hr-running-why(state, launchd), []]
+   : (String) state[0] == "finished" ? ["begun", "the first slot stamped its start (" ++ state[1] ++ ") and has ended", []]
+   : (String) state[0] == "crashed" ? ["crashed-after-launch", "the first slot claimed the checkout (" ++ state[1] ++ ") and its pid is gone with the lock never released", nothing?(crashed) ? [] : [hr-row-path(crashed)]]
+   : !nothing?(killed) ? ["launch-killed", "the OS killed the first launch: " ++ hr-report-line(killed), [hr-row-path(killed)]]
+   : hw-has?(hr-launchd-reason(launchd), "CODESIGNING") && hr-runs-advanced?(launchd, baseline) ? ["launch-killed", "launchd reads last exit reason " ++ hr-launchd-reason(launchd) ++ " with runs advanced past " ++ baseline.str() ++ " and no report in the window", []]
+   : !nothing?(crashed) ? ["crashed-after-launch", "the first launch crashed: " ++ hr-report-line(crashed), [hr-row-path(crashed)]]
+   : (String) held != "" ? ["held", held, []]
+   : logged ? ["begun", "the first job wrote its log in the slot's window (an older door writes no stamp)", []]
+   : ["nothing-found", "no stamp, no report in the window, no refusal in the log, launchd reads " ++ hr-launchd-line(launchd), []];
+  }
+  def hr-class(c) = c[0];
+  def hr-why(c) = c[1];
+  def hr-paths(c) = c[2];
+ }
+}

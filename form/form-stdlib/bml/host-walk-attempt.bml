@@ -6,7 +6,7 @@
 // job's own plist path), and the tail of the first job's stdout log when it was touched in the slot's window. And one
 // attempt (hr-attempt): a nap, then by kind: "same" begins the walk door as a child of this live process (hch-run-in: an
 // argv, a stdin file, a deadline of the door's window plus half an hour); "fresh" first builds a kernel beside (the walk's
-// own compiler argv, cc fkwu.next) and renames it over fkwu (a new inode and signature, still named fkwu so the walk's
+// own compiler argv, cc fkwu.next) and renames it over fkwu (a new inode; the same compiler argv as the nightly build, so no new signature identity is claimed, and still named fkwu so the walk's
 // coordinator still climbs to launchd), then begins the child; "safe" gives the child {"safe":1}; "wait" waits for the
 // holder of the checkout to end (up to 90 minutes) and begins once; "capture" is "same" after a longer nap with the
 // diagnostics kept (hr-capture). An attempt after the first tells the child {"again":1}: the first child may have stamped
@@ -16,7 +16,9 @@
 import form-stdlib/bml/host-walk-text.bml;
 import form-stdlib/bml/host-walk-lock.bml;
 import form-stdlib/bml/host-walk-evidence.bml;
+import form-stdlib/bml/host-walk-class.bml;
 import form-stdlib/bml/host-walk-retry.bml;
+import form-stdlib/bml/host-walk-record.bml;
 import form-stdlib/bml/host-walk-sync.bml;
 import form-stdlib/bml/host-child.bml;
 section [form.bml] {
@@ -24,13 +26,24 @@ section [form.bml] {
   // ── the evidence, read through argv doors ──
   def hr-uid() = hch-read(["/usr/bin/id", "-u"]);
   def hr-launchctl(label) = hch-read(["/bin/launchctl", "print", "gui/" ++ hr-uid() ++ "/" ++ label]);
-  def hr-reports-dir(launchd) = hr-launchd-home(launchd) ++ "/Library/Logs/DiagnosticReports";
+  // the home the job's plist stands in; when launchctl did not answer, the home this process was given
+  def hr-home(launchd) = (String) hr-launchd-home(launchd) != "" ? hr-launchd-home(launchd) : hch-read(["/usr/bin/printenv", "HOME"]);
+  def hr-reports-dir(launchd) = hr-home(launchd) ++ "/Library/Logs/DiagnosticReports";
+  def hr-log-slack-ms() = 60000;
+  def hr-log-tail-bytes() = 8000;
   // the reports named for the slot's local day, read as rows that fall in the slot's window and belong to the job
   def hr-report-names(dir, day) = filter(n => hw-starts?(n, "fkwu-" ++ day ++ "-") && hw-ends?(n, ".ips"), fs_list(dir) ?? []);
   def hr-reports(dir, day, label, slot, window) = filter(r => !nothing?(r) && hr-in-window?(r, slot, window) && hr-of-job?(r, label), map(n => hr-report-of(dir ++ "/" ++ n, read_file(dir ++ "/" ++ n) ?? ""), hr-report-names(dir, day)));
   // the job's stdout, when it was touched in the slot's window: its last 8 KB
-  def hr-log-tail(path, slot, window) = (String) path == "" ? "" : hr-touched?(file_mtime(path), slot, window) ? read_file_slice(path, file_size(path) > 8000 ? file_size(path) - 8000 : 0, 8000) ?? "" : "";
-  def hr-touched?(at, slot, window) = (String) value_kind(at) == "int" && at > 0 && (at * 1000 >= slot - 60000) && (at * 1000 <= slot + window);
+  def hr-log-tail(path, slot, window) = (String) path == "" ? "" : hr-touched?(file_mtime(path), slot, window) ? read_file_slice(path, file_size(path) > hr-log-tail-bytes() ? file_size(path) - hr-log-tail-bytes() : 0, hr-log-tail-bytes()) ?? "" : "";
+  def hr-touched?(at, slot, window) = (String) value_kind(at) == "int" && at > 0 && (at * 1000 >= slot - hr-log-slack-ms()) && (at * 1000 <= slot + window);
+  // the first slot's state: its stamp row, the lock's owner file and whether that owner is alive (hw-holds?: a pid the host
+  // handed out again since the stamp is not it), read against the slot's time (host-walk-evidence.bml hr-stamp-state)
+  def hr-state-of(stamp, lock, door, slot, now) {
+   let owner = hw-owner(lock);
+   let opid = hw-field(owner, "pid=");
+   hr-stamp-state(hw-slot-row(stamp, door), owner, !nothing?(opid) && hw-holds?(opid, hw-field(owner, " at=")), door, slot, now);
+  }
   // what is kept beside the row when nothing explained the kill: the launchctl text and the diagnostics directory's names
   def hr-capture(at, launchd, dir) {
    let path = ".hearth/walk-retry-" ++ at.str() ++ ".evidence";
@@ -39,7 +52,9 @@ section [form.bml] {
   }
   // ── the attempt ──
   def hr-door-path(door) = "observe/" ++ door ++ ".bml";
-  def hr-child-fields(k, kind) = append(k > 1 ? ["\"again\":1"] : [], (String) kind == "safe" ? ["\"safe\":1"] : []);
+  // {"again":1} after the first attempt (the first child may have stamped its slot before it died) and with a safe start (its
+  // crashed predecessor's stamp, under the window, would refuse it)
+  def hr-child-fields(k, kind) = append(k > 1 || (String) kind == "safe" ? ["\"again\":1"] : [], (String) kind == "safe" ? ["\"safe\":1"] : []);
   def hr-child-stdin(k, kind) = "{" ++ hch-join(hr-child-fields(k, kind), ",") ++ "}\n";
   def hr-nap-of(ms, over) = nothing?(over) ? ms : over;
   // the fresh kernel: built beside and renamed over fkwu (a new inode; still named fkwu, so the coordinator still reads launchd)
@@ -67,11 +82,23 @@ section [form.bml] {
   def hr-attempt-in(io, slot, spec, k, over, env) {
    let nap = hr-nap-of(spec[1], over);
    let slept = host_sleep_ms(nap);
-   let held = (String) spec[2] == "wait" ? hr-wait-holder(env[2], host_monotonic_ms() + (nothing?(over) ? hr-hold-wait-ms() : over), nothing?(over) ? 60000 : 1) : false;
+   let held = (String) spec[2] == "wait" ? hr-wait-holder(env[2], host_monotonic_ms() + (nothing?(over) ? hr-hold-wait-ms() : over), nothing?(over) ? hr-hold-nap-ms() : 1) : false;
    let built = (String) spec[2] == "fresh" ? hr-built(env, io) : [1, ""];
    let began = host_monotonic_ms();
    held ? hr-attempt-of(spec, nap, "refused", "the holder of the checkout still walks after the wait") : (Comparable) built[0] != 1 ? hr-attempt-of(spec, nap, "died-at-once", built[1]) : hr-ran(spec, nap, hr-run-child(io, slot, spec, k, env[0]), host_monotonic_ms() - began, built[1]);
   }
-  def hr-ran(spec, nap, run, life, note) = hr-attempt-of(spec, nap, hr-child-word(run, life), (String) note == "" ? hr-child-saw(run, life) : note ++ "; " ++ hr-child-saw(run, life));
+  // the child's output is read from its last hr-child-keep-bytes (hch-answer reads the file whole; the whole stays under .hearth/walk-io)
+  def hr-kept(run) = [run[0], hr-tail(run[1], hr-child-keep-bytes()), run[2]];
+  def hr-ran(spec, nap, run, life, note) = hr-ran-kept(spec, nap, hr-kept(run), life, note);
+  def hr-ran-kept(spec, nap, run, life, note) = hr-attempt-of(spec, nap, hr-child-word(run, life), (String) note == "" ? hr-child-saw(run, life) : note ++ "; " ++ hr-child-saw(run, life));
+  // ── one retry's rows: the intent before any child begins, the outcome at the end ──
+  // act: (spec, k) => an attempt row; dry: read and classify, begin no walk
+  def hr-retry(record, id, slot, c, launchd, kept, act, dry) {
+   let intent = hr-record(record, hr-row(id, id, "intent", slot, c, launchd, kept, [], hr-intent-text(hr-class(c))));
+   let seen = dry ? [] : hr-ladder(hr-plan(hr-class(c)), 1, act, []);
+   let outcome = dry ? "dry: " ++ hr-class(c) ++ ", no walk begun" : hr-outcome(hr-class(c), seen);
+   let done = hr-record(record, hr-row(id, now_unix_ms(), "outcome", slot, c, launchd, kept, seen, outcome));
+   outcome;
+  }
  }
 }
