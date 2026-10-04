@@ -22,7 +22,7 @@
 // carries it and opens no model. {"queue":"<path>"} reads and lands in another queue (default
 // learn/native-turn-queue.jsonl).
 // Beside either, optional: "attempts" (6), "voices" (else the registry's plan chain, each voice whose weights are on
-// disk), "context" (16384), "max_reply_tokens" (3072), "deadline_ms" (600000, one band run), "until_ms" (the
+// disk), "context" (optional caller limit; otherwise prompt plus answer reserve), "max_reply_tokens" (3072), "deadline_ms" (600000, one band run), "until_ms" (the
 // caller's window on the host's monotonic clock: no voice opens once the time left cannot hold the median option
 // the ledger measured, and the walk ends held), "dry":1 prints the first packet the voice would read and opens no
 // model. A request an earlier walk left refused resumes from the options its ledger rows keep (their findings and
@@ -120,7 +120,8 @@ section [form.bml] {
   def lpr-spoken(dir, id, packet, name, n, context, limit) {
    let stem = mc-cat([dir, "/", id, "-", n.str(), "-", now_unix_ms().str()]);
    let kept = write_file_text(stem ++ ".packet.txt", packet);
-   let v = fcnv-ask(packet, json-node-object([fhn-s("model", name), fhn-n("context", context), fhn-n("max_reply_tokens", limit)]));
+   let request=json-node-object(append([fhn-s("model",name),fhn-n("max_reply_tokens",limit)],nothing?(context) ? [] : [fhn-n("context",context)]));
+   let v = fcnv-ask(packet, request);
    // Admission may refuse before a session owns the planner's earlier lease.
    // Release that promise only when the voice reports complete release.
    let returned = v[6] == 1 ? mg-release() : 0;
@@ -134,13 +135,25 @@ section [form.bml] {
   // an earlier walk of this request left its refused options in the ledger; the walk resumes from them unless
   // {"fresh":1} asks for a clean start
   def lpr-memory(req, opts) = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then [] else flp-memory-of(flp-queue-rows(flp-dir() ++ "/ledger.jsonl"), flp-req-id(req), p => lpr-read(p));
+  def lpr-focus-guide(req,opts) {
+   let named=any?(name=>str_find(flp-text(req,"needs"),name,0)>=0,flp-source-names(flp-req-files(req)));
+   named || !nil?(flp-guided-focus(req)) || lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor()) ? 0 : {
+    let model=mr-chain-names("triage")[0];
+    let prompt=flp-focus-prompt(req);
+    let answer=fcnv-ask(prompt,json-node-object([fhn-s("model",model),fhn-n("max_reply_tokens",1024)]));
+    let made=flp-mkdirs(flp-dir()+"/focus");
+    let kept=write_file_text(flp-focus-path(req),json-emit(json-node-object([fhn-s("prompt",prompt),fhn-s("model",model),fhn-s("status",answer[0]),fhn-s("text",answer[1]),fhn-n("prompt_ids",answer[2]),fhn-n("generated_ids",answer[3]),fhn-n("complete",answer[5]),fhn-n("released",answer[6]),fhn-s("reason",answer[7]),fhn-s("raw",answer[8])])));
+    print_str("[local-plan:guide] " + json-emit(json-node-object([fhn-s("request",flp-req-id(req)),fhn-s("status",answer[0]),fhn-n("prompt_ids",answer[2]),fhn-n("generated_ids",answer[3]),fhn-s("reason",answer[7]),fhn-s("evidence",flp-focus-path(req))])));
+   };
+  }
   def lpr-walk(req, opts, voices, queue) {
    let made = flp-mkdirs(flp-dir());
+   let focused = lpr-focus-guide(req,opts);
    let attempts = lpr-int(opts, "attempts", flp-attempts());
    let memory = lpr-memory(req, opts);
    let spent = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then 0 else lpr-spent(lpr-tried(attempts), flp-req-id(req));
    let left = lpr-left(attempts, spent);
-   let ctx = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", 16384), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "yield_ms", 7200000), fcgp-num(opts, "until_ms"), lpr-floor()), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
+   let ctx = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "yield_ms", 7200000), fcgp-num(opts, "until_ms"), lpr-floor()), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
    let resumed = if ((spent == 0) && nil?(memory)) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), ": ", spent.str(), " option(s) spent, ", len(memory).str(), " refused row(s) the ledger keeps, ", left.str(), " option(s) left"]));
    let r = flp-walk-from(req, ctx, memory);
    let mooted = if ((String) r[0] == "moot") then print_str(flp-record-moot(req, r, lpr-source(opts))) else 0;
