@@ -7,37 +7,65 @@ Form's choices, care, checkpoints, original checks and release own both paths.
 
 `task <goal mentioning an existing repository file>` admits a task without a
 caller-built source packet, candidate or checks. Form reads the named source and
-discovers its direct callers in the native BML library from current repository files,
-asks its local planner for a verified contract and runs the existing native
+discovers its direct callers in the native BML library from current repository files.
+An explicitly named function selects its callers. For a broad request, the local
+triage model first selects entries from the native function catalog. Its completed,
+released answer is retained under the exact request/catalog fingerprint; only
+existing names are accepted, and source bytes are read again for every proposal.
+This selection guides reading and does not establish behavior. Caller excerpts
+retain complete definitions, their local dependency
+closure and import header, rather than unrelated definitions. The writable source
+remains complete. Form asks its local planner for a verified contract and runs the existing native
 coding walk. A verified reference candidate is reused through guarded publication
 when the original source, band and checks still agree. Failed proposals retain
 their exact feedback for a changed local
 attempt. Available memory guides local model selection; the shared memory lease
 owns admission and native session close owns release. Process names do not
 reserve the GPU for their entire lifetime.
+Without an explicit context allowance, the native voice sizes its session from
+the encoded prompt plus its answer reserve. The model artifact and memory owner
+still decide admission. An explicitly supplied context remains a caller limit.
 
-The existing `turn` command now uses this same task owner; its non-executable
-placeholder has been removed. The standalone entry is `observe/form-cli-task-run.bml`, with the original prompt on
+`turn` uses the same task owner. The standalone entry is `observe/form-cli-task-run.bml`, with the original prompt on
 stdin. `.hearth/tasks/<task>/` retains planner and coding output. `attention`
 names an unfinished task; `returned` only records that the coding child returned,
 so inspect its actual checks and publication before claiming completion.
+`completed` requires an owned publication whose original witness and source
+checks pass on current files. Task admission reads that state before opening a
+planner, and again when a planner returns, so a completed effect is kept even
+when a redundant planner stops.
 
-The planner supplies typed `<cases>` with pure BML calls and expected scalar or
-array values. Form serializes their executable witness, prints each actual
+The planner supplies typed `<cases>` with `function`, `arguments` and `equals`.
+Function names follow their source declarations. Form builds the call syntax:
+objects become JSON nodes, arrays become Form lists and transport `null` becomes
+Form's `nothing()`. Quoted text remains text. Composed expressions can use
+`call` and `equals`; an unbalanced expression returns its exact case and delimiter
+diagnostic before compilation. The Form library namespace in source dependencies
+resolves to its repository path.
+Form serializes the executable witness, prints each actual
 result and verifies the reference against the original source and stubs. The
+definition boundary follows balanced delimiters, quoted text and comments,
+independently of indentation, when extracting references and installing stubs. The
 case owner catches a stopped call, records it as failed and continues observing
 the remaining cases. A stop cannot satisfy an expected absent value. The model
 still writes the implementation; witness generation does not establish
-its syntax, bindings or behavior. Legacy explicit bands remain readable.
+its syntax, bindings or behavior. Explicit bands remain readable.
 Admission refusals return the planner's lease when the voice reports release.
 The planner retains original source snapshots with each verified reference.
 Publication checks those bytes, the witness and source assertions before using
 the candidate. A supplied candidate goes directly to publication and observation.
 Planner executions retain their command, exit, timeout, stdout and stderr under
 `.hearth/local-plans/executions/` before temporary verification trees are removed.
-A missing reading carries the actual exit and output into the next choice.
+A missing reading carries the actual exit and output into the next choice. A
+numeric failed reading also carries the printed actual and expected values;
+returning zero does not hide its diagnostic output from the local repair.
 `reply` on the local-plan door rechecks an already retained local-model proposal
-after native care; it records verification time and no new generation. A queued
+and, on a reference failure, tries compatible retained references from that same
+task. Both parts require an observed local owner and matching writable and
+definition manifests. Each composition re-runs the original witness and checks;
+the ledger and queued plan name its reference file and voice. The planner offers
+this native reuse before asking for another generation. Reuse records verification
+time and no new generation. A queued
 contract must still match, and rechecking does not append a duplicate queue row.
 
 List `.join(separator)` is shared by ordinary BML and decode-stream pure
@@ -49,8 +77,9 @@ creation of absent files and a task-owned Codex guidance request remain open.
 The planner's reference authoring currently changes function definitions; blueprint
 changes and effectful witnesses need their own owned flow. The public `code` path
 already supports source edits, tools and retained repair, but the prompt-only task
-driver does not yet use that path for this planning stage. Its guide quota requires
-local-guide rows the planner does not produce. The existing Codex adapter in
+driver does not yet use that path for this planning stage. The source-selection
+guide has its own retained answer and usage; the escalation quota still requires
+repair-guide rows that this planner does not produce. The existing Codex adapter in
 `heal` is therefore not yet a task-owned continuation from this entry.
 
 `code` edits admitted source values through local Qwen and Form tools. A document with `id` and `path` is read by Form before model admission; an explicit `text`, including an empty string, supplies exact resident bytes. Token IDs, KV state and tool observations remain in the native process. Results retain candidates for guarded publication by their owner, and telemetry uses shared memory. The controller offers no model-selected shell, network or provider call. Metal is admitted dynamically. Source bootstrap lowers cold BML through a native compiler process; warm images reuse that work.
