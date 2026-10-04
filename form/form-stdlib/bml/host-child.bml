@@ -16,7 +16,9 @@
 // Every run answers [status, text, why]:
 //   status  the child's exit (a signal death reads 128 + the signal), or nothing() when no exit arrived: the child
 //           was never born, or it was stopped at its deadline. Never -1 read as an exit.
-//   text    everything the child printed (read from the out file; "" when nothing was printed)
+//   text    everything the child printed (read from the out file; "" when nothing was printed). A child that ended by a signal
+//           has its finding at the text's end (and in <io>/<step>.finding): the signal, the cell and the frames its
+//           fatal-signal row named (fatal-signal.bml), never the bare number.
 //   why     "" when an exit arrived, else the reason, named: "birth refused: ..." for the four refusals host_spawn_at
 //           answers at birth (-1 the argv, -2 a redirect, -3 the fork, -4 the binary), "deadline: ..." when the child
 //           ran past its deadline and was stopped
@@ -42,6 +44,7 @@
 import form-stdlib/line-grammar.fk;
 import form-stdlib/bml/spawn-guard.bml;
 import form-stdlib/bml/cell-said.bml;
+import form-stdlib/bml/fatal-signal.bml;
 section [form.bml] {
  class HostChild {
   def hch-dir() = ".hearth/walk-io";
@@ -114,8 +117,19 @@ section [form.bml] {
   def hch-exit-line(status, why) = nothing?(status) ? "none " ++ why : status.str();
   def hch-answer(io, step, out, waited) {
    let text = read_file(out) ?? "";
+   let found = hch-signal-finding(io, step, waited[0], text);
    let noted = write_file_text(hch-exit-path(io, step), hch-exit-line(waited[0], waited[1]) ++ "\n");
-   [waited[0], text, waited[1]];
+   [waited[0], text ++ found, waited[1]];
+  }
+  // A child that ended by a signal (an exit of 128 + n) is a finding, never the bare number: the fatal-signal row the seed wrote at the moment of
+  // death (fatal-signal.bml) names the signal, the cell and the frames, and is read here and set at the text's end and in <io>/<step>.finding.
+  def hch-signal-finding(io, step, status, text) {
+   let lines = fsg-signalled?(status) ? fsg-leg-finding("[host-child] " ++ step, status, fsg-path(), now_unix_ms()) : [];
+   len(lines) == 0 ? "" : hch-signal-keep(io, step, (len(text) == 0 || hch-ends-nl?(text) ? "" : "\n") ++ hch-join(lines, "\n") ++ "\n");
+  }
+  def hch-signal-keep(io, step, said) {
+   let kept = write_file_text(io ++ "/" ++ step ++ ".finding", said);
+   said;
   }
   // a child never born leaves its reason where its output would have stood
   def hch-unborn(io, step, out, pid) = hch-unborn-why(io, step, out, hch-birth-why(pid));
@@ -160,10 +174,10 @@ section [form.bml] {
   def hch-cell-stop(rec) = hch-cell-field(rec, "stopped");
   def hch-cell-kind(rec) = nothing?(hch-cell-stop(rec)) ? "" : (String) record_get(hch-cell-stop(rec), "kind");
   def hch-cell-message(rec) = nothing?(hch-cell-stop(rec)) ? "" : (String) record_get(hch-cell-stop(rec), "message");
-  def hch-cell-status(rec) = nothing?(rec) ? nothing() : (String) hch-cell-kind(rec) == "" ? ((Comparable) record_get(rec, "errors") > 0 ? 1 : 0) : (String) hch-cell-kind(rec) == "stop" ? 1 : nothing();
+  def hch-cell-status(rec) = nothing?(rec) ? nothing() : (String) hch-cell-kind(rec) == "" ? ((Comparable) record_get(rec, "errors") > 0 ? 1 : 0) : ((String) hch-cell-kind(rec) == "stop" || (String) hch-cell-kind(rec) == "stack-depth") ? 1 : nothing();
   def hch-cell-why(rec) = nothing?(rec) ? "birth refused: this fkwu has no cell_run door; rebuild it from runtime/fkwu-uni.c" : (String) hch-cell-kind(rec) == "deadline" ? "deadline: the cell ran past its deadline and was stopped" : ((String) hch-cell-kind(rec) == "unrunnable" || (String) hch-cell-kind(rec) == "refused") ? "birth refused: " ++ hch-cell-message(rec) : "";
   def hch-cell-printed(rec) = nothing?(rec) ? "" : (String) (record_get(rec, "out") ?? "");
-  def hch-cell-text(rec) = (String) hch-cell-kind(rec) == "stop" ? hch-cell-printed(rec) ++ (hch-ends-nl?(hch-cell-printed(rec)) || (String) hch-cell-printed(rec) == "" ? "" : "\n") ++ "[cell] stopped: " ++ hch-cell-message(rec) ++ "\n" : hch-cell-printed(rec);
+  def hch-cell-text(rec) = (String) hch-cell-kind(rec) == "stop" ? hch-cell-printed(rec) ++ (hch-ends-nl?(hch-cell-printed(rec)) || (String) hch-cell-printed(rec) == "" ? "" : "\n") ++ "[cell] stopped: " ++ hch-cell-message(rec) ++ "\n" : (String) hch-cell-kind(rec) == "stack-depth" ? hch-cell-printed(rec) ++ (hch-ends-nl?(hch-cell-printed(rec)) || (String) hch-cell-printed(rec) == "" ? "" : "\n") ++ hch-join(fsg-stopped-lines("[cell]", hch-cell-stop(rec)), "\n") ++ "\n" : hch-cell-printed(rec);
   def hch-cell-in(io, step, path, input, until) {
    let made = hch-mkdirs(io);
    let rotated = hch-rotate(io, step);
