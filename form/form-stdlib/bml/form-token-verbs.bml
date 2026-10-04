@@ -71,6 +71,7 @@ import form-stdlib/source-compiler.fk;
 import control/offer-ack-core.fk;
 import form-stdlib/bml/form-cli-enrich.bml;
 import form-stdlib/form-recipe-birth-token.fk;
+import form-stdlib/bml/form-source-lift.bml;
 import form-stdlib/form-recipe-exec-token.fk;
 import form-stdlib/bml/native-node-lookup.bml;
 import form-stdlib/bml/value-operators.bml;
@@ -92,6 +93,7 @@ section [form.bml] {
  let FTV-CATEGORY-ROOT = PureCategoryRoot();
  let FTV-BML-RECIPE = make_nodeid(31, 2, 0, 225);
  let FTV-OPENINGS = record_new(0);
+ let FTV-BUILTIN-NAMES = record_new(0);
  class FormTokenVerbs {
   def ftv-max-render() = 1024;
   def ftv-max-row() = 160;
@@ -272,8 +274,8 @@ section [form.bml] {
    if nothing?(f) then 0 else record_set(record_get(session, "recipes"), coord, f);
    f;
   }
-  // the function a recipe tree is: an affine birth, a BML recipe (its source read again), or a
-  // function a control made (its own tree, decoded)
+  // A native closure holds params, body and captured values as a recipe tree.
+  // Source-backed recipes remain readable for addresses already held in the field.
   def ftv-recipe-of(session, node) {
    if value_kind(node) != "node_id" then nothing()
    else if frbt-recipe-shape?(node) == 1 then record_new(0, "ftv", "affine", "node", node)
@@ -286,6 +288,52 @@ section [form.bml] {
   // dependencies (bml-library-recipe-v1, ftv-library-recipe-of)
   def ftv-bml-recipe-of(session, node) = node_value(node_children(node)[0]) == "bml-library-recipe-v1" ? ftv-library-recipe-of(node) : ftv-bml-made(session, node_value(node_children(node)[1]))[1];
   def ftv-function-or-nothing(v) = ftv-function?(v) ? v : nothing();
+  // Direct authoring: the existing compiler recipe constructors supply body.
+  // Captures are ordered [name,value] pairs, under the same lexical contract as eval.
+  def ftv-native-recipe(params,body,captures) {
+   if !ftv-list?(params) || !all?(p=>ftv-str?(p) && ftv-name?(p),params) || !ftv-node?(body) || !ftv-list?(captures)
+    then form_error("native recipe requires named params, a body node and capture pairs")
+   else if !all?(pair=>ftv-list?(pair) && len(pair)==2 && ftv-str?(pair[0]),captures)
+    then form_error("native recipe capture requires [name,value]")
+   else if !all?(pair=>ftv-native-value?(pair[1]),captures)
+    then form_error("native recipe capture has no retained value representation")
+   else ftw-encode(ftv-closure(params,body,captures,""));
+  }
+  def ftv-native-value?(value) {
+   let kind = value_kind(value);
+   kind == "null" || kind == "int" || kind == "float" || kind == "string" || kind == "node_id" ? true
+    : kind == "list" ? all?(ftv-native-value?,value)
+    : kind == "record" ? all?(key=>ftv-native-value?(key) && ftv-native-value?(record_get(value,key)),record_keys(value)) : false;
+  }
+  // Captures travel into the rendering as lexical bindings. The graph remains
+  // authoritative; rendering never changes or re-admits the callable recipe.
+  def ftv-value-recipe(value) {
+   let kind = value_kind(value);
+   if kind == "null" then fsc-rec-call("nothing",[])
+   else if kind == "int" then intern_trivial_int(value)
+   else if kind == "float" then intern_trivial_float(value_str(value))
+   else if kind == "string" then intern_trivial_string(value)
+   else if kind == "list" then fsc-rec-list-of(map(ftv-value-recipe,value))
+   else if kind == "node_id" then fsc-rec-call("make_nodeid",map(v=>intern_trivial_int(v),[node_pkg(value),node_level(value),node_type(value),node_inst(value)]))
+   else if ftv-closure?(value) then {
+    let name = record_get(value,"name"); let params = record_get(value,"params"); let body = ftv-closure-body(value);
+    name == "" ? fsc-rec-call("$bml-lambda",[fsc-rec-do(map(p=>intern_trivial_string(p),params)),body]) : fsc-rec-do([fsc-rec-fndef(name,params,body),fsc-rec-ident(name)]);
+   }
+   else if ftv-function?(value) && record_get(value,"ftv") == "recipe" then fsc-rec-call("recipe",[intern_trivial_string(record_get(value,"address"))])
+   else if ftv-function?(value) && (record_get(value,"ftv") == "wide" || record_get(value,"ftv") == "builtin") then fsc-rec-ident(record_get(value,"name"))
+   else if kind == "record" then fsc-rec-call("record_new",cons(intern_trivial_int(0),foldl((out,key)=>append(out,[ftv-value-recipe(key),ftv-value-recipe(record_get(value,key))]),[],record_keys(value))))
+   else form_error("capture has no BML value expression");
+  }
+  def ftv-closure-body(f) {
+   let params = record_get(f,"params"); let env = filter(pair=>!any?(p=>p==pair[0],params),record_get(f,"env")); let body = record_get(f,"body");
+   nil?(env) ? body : fsc-rec-do(append(map(pair=>fsc-rec-let(pair[0],ftv-value-recipe(pair[1])),reverse(env)),[body]));
+  }
+  def ftv-recipe-bml(node,name) {
+   let f = ftv-function-or-nothing(ftw-decode(node));
+   !ftv-closure?(f) ? form_error("BML expression requires a native closure recipe")
+    : !ftv-name?(name) ? form_error("BML definition requires a function name")
+    : fsl-recipe-definition(name,record_get(f,"params"),ftv-closure-body(f));
+  }
   // an address, a name, or a library export (LIB.EXPORT: the session's import, else the
   // workspace's cell of that name)
   def ftv-recipe-ref(session, ref) {
@@ -702,11 +750,21 @@ section [form.bml] {
   // count, method_define), the operators as functions (foldl(add, 0, xs)), the words a runtime
   // native spells as syntax (print, empty, nothing, record_new, method_invoke) and the data words.
   def ftv-builtins() = ["bml-value-add", "bml-value-equal", "str_concat", "$bml!=", "$bml==", "list", "range", "len", "abs", "min", "max", "pow", "sqrt", "exp", "log", "round", "floor", "value_str", "str", "str_to_int", "int_to_str", "substring", "str_find", "trim", "split-on", "head", "tail", "nth", "cons", "append", "reverse", "take", "drop", "sum", "count", "contains?", "map", "filter", "foldl", "any?", "all?", "nothing?", "nil?", "value_kind", "bml-value-first", "bml-value-index", "bml-value-tail", "bml-value-slice", "node_value", "node_children", "node_category", "node_type", "node_level", "node_eq", "kind", "kids", "recipe", "node-at", "node", "names", "record_new", "print", "empty", "nothing", "method_define", "method_invoke", "add", "sub", "mul", "div", "mod", "lt", "le", "gt", "ge", "eq", "ne", "and", "or", "not"];
-  def ftv-builtin?(name) = any?(b => b == name, ftv-builtins());
+  def ftv-graph-words() = ["syntax","recipe-make","recipe-bml"];
+  def ftv-builtin?(name) = record_has(ftv-builtin-names(),name);
+  def ftv-builtin-names() {
+   let held = ftw-get(FTV-BUILTIN-NAMES,"names");
+   if !nothing?(held) then held else {
+    let names = foldl((table,name)=>record_set(table,name,1),record_new(0),append(ftv-builtins(),ftv-graph-words()));
+    record_set(FTV-BUILTIN-NAMES,"names",names);
+    names;
+   };
+  }
   def ftv-op-words() = ["add", "sub", "mul", "div", "mod", "lt", "le", "gt", "ge", "eq", "ne", "and", "or", "not"];
   def ftv-builtin(ctx, name, vals) {
    let n = len(vals);
-   if any?(b => b == name, ftv-op-words()) then ftv-b-op(ctx, name, vals, n)
+   if any?(b => b == name, ftv-graph-words()) then ftv-b-graph(ctx,name,vals,n)
+   else if any?(b => b == name, ftv-op-words()) then ftv-b-op(ctx, name, vals, n)
    else if any?(b => b == name, ["print", "empty", "nothing", "method_define", "method_invoke"]) then ftv-b-native(ctx, name, vals, n)
    else if any?(b => b == name, ["map", "filter", "foldl", "any?", "all?", "count"]) then ftv-b-high(ctx, name, vals, n)
    else if any?(b => b == name, ["abs", "min", "max", "pow", "sqrt", "exp", "log", "round", "floor"]) then ftv-b-num(ctx, name, vals, n)
@@ -716,6 +774,37 @@ section [form.bml] {
    else ftv-b-list(ctx, name, vals, n);
   }
   // an operator called as a function: and, or and not by truth, the rest as the walk's own
+  // Graph construction and expression run in this stream's process.
+  def ftv-b-graph(ctx,name,vals,n) {
+   if name == "recipe-make" then (n==2 || n==3 ? ftv-native-recipe(vals[0],vals[1],n==3?vals[2]:[]) : ftv-refuse(ctx,"arity:"+name))
+   else if !ftv-arity(ctx,name,n,2) then nothing()
+   else if name == "recipe-bml" then ftv-recipe-bml(vals[0],vals[1])
+   else ftv-syntax(vals[0],vals[1]);
+  }
+  def ftv-syntax(name,children) {
+   if !ftv-str?(name) || !ftv-list?(children) then form_error("syntax requires a name and children") else {
+    let args = map(v=>ftv-node?(v)?v:ftv-value-recipe(v),children);
+    if name == "ident" && len(children)==1 && ftv-str?(children[0]) then fsc-rec-ident(children[0])
+    else if name == "let" && len(children)==2 && ftv-str?(children[0]) then fsc-rec-let(children[0],args[1])
+    else if name == "def" && len(children)==3 && ftv-str?(children[0]) && ftv-list?(children[1]) then fsc-rec-fndef(children[0],children[1],args[2])
+    else if name == "lambda" && len(children)==2 && ftv-list?(children[0]) then fsc-rec-call("$bml-lambda",[fsc-rec-do(map(p=>intern_trivial_string(p),children[0])),args[1]])
+    else if name == "do" then fsc-rec-do(args)
+    else if name == "if" && len(args)==3 then fsc-rec-if3(args[0],args[1],args[2])
+    else if any?(special=>special==name,["ident","let","def","lambda","if"]) then form_error("syntax children do not fit "+name)
+    else ftv-syntax-call(name,args);
+   };
+  }
+  def ftv-syntax-call(name,args) {
+   let operators = filter(row=>row[0]==name,form-bml-operators());
+   if name=="|>" && len(args)==2 then fsc-bml-pipe(args[0],args[1])
+   else if name=="??" && len(args)==2 then fsc-bml-when-nothing("$or",args[0],args[1])
+   else if name=="+" && len(args)==2 then fsc-rec-call("bml-value-add",args)
+   else if name=="==" && len(args)==2 then fsc-rec-call("bml-value-equal",args)
+   else if name=="!=" && len(args)==2 then fsc-rec-form-call("not",[fsc-rec-call("bml-value-equal",args)])
+   else if name=="++" && len(args)==2 then fsc-rec-call("str_concat",args)
+   else if !nil?(operators) && len(args)!=2 then form_error("binary syntax requires two children")
+   else fsc-bml-call(nil?(operators)?name:operators[0][1],args);
+  }
   def ftv-b-op(ctx, name, vals, n) {
    if name == "not" then (ftv-arity(ctx, name, n, 1) ? (ftv-truthy?(vals[0]) ? 0 : 1) : nothing())
    else if !ftv-arity(ctx, name, n, 2) then nothing()
@@ -858,9 +947,9 @@ section [form.bml] {
   // ftv-recipe-apply, so the call is counted; a name answers the function itself
   def ftv-recipe-value(ctx, a) {
    let session = ftv-session-of(ctx);
-   let key = ftv-str?(a) ? trim(a) : "";
+   let key = ftv-str?(a) ? trim(a) : ftv-node?(a) ? ftv-coord(a) : "";
    let mapped = ftv-recipe-address(session, key);
-   let f = ftv-function?(a) ? a : ftv-str?(a) ? ftv-recipe-ref(session, key) : nothing();
+   let f = ftv-function?(a) ? a : ftv-str?(a) || ftv-node?(a) ? ftv-recipe-ref(session, key) : nothing();
    nothing?(f) ? ftv-refuse(ctx, ftv-recipe-miss(session, key)) : ftv-starts?(mapped, "@") ? record_new(0, "ftv", "recipe", "address", mapped) : f;
   }
   // node(address or name): the node itself
@@ -912,8 +1001,9 @@ section [form.bml] {
    let after = eq < 0 ? "" : substring(text, eq + 1, len(text));
    (eq > 0) && ftv-name?(name) && !ftv-starts?(after, "=") && !ftv-starts?(after, ">") ? [name, trim(after)] : ["", text];
   }
-  def ftv-name-byte?(b) = ((b >= 97) && (b <= 122)) || ((b >= 48) && (b <= 57)) || (b == 45) || (b == 95) || (b == 63) || (b == 33);
-  def ftv-name?(t) = (len(t) > 0) && (str_byte_at(t, 0) >= 97) && (str_byte_at(t, 0) <= 122) && all?(b => ftv-name-byte?(b), map(i => str_byte_at(t, i), range(0, len(t))));
+  def ftv-name-start?(b) = ((b >= 97) && (b <= 122)) || ((b >= 65) && (b <= 90)) || b == 95;
+  def ftv-name-byte?(b) = ftv-name-start?(b) || ((b >= 48) && (b <= 57)) || (b == 45) || (b == 63) || (b == 33);
+  def ftv-name?(t) = (len(t) > 0) && ftv-name-start?(str_byte_at(t,0)) && all?(b => ftv-name-byte?(b), map(i => str_byte_at(t, i), range(0, len(t))));
   // an @p.l.t.i outside a quoted text reads as node-at("@p.l.t.i")
   def ftv-at-rewrite(text) = str_find(text, "@", 0) < 0 ? text : str-join(reverse(ftv-at-scan(text, 0, len(text), 0, 0, [])));
   def ftv-at-scan(text, i, n, start, quoted, out) {
@@ -1361,7 +1451,7 @@ section [form.bml] {
    let made = ftv-bml-made(session, source);
    if !ftv-closure?(made[1]) then ftv-nothing(made[0])
    else if len(record_get(made[1], "params")) != 1 then ftv-nothing("recipe-arity")
-   else ftv-recipe-born(session, scope, name, intern_node(FTV-BML-RECIPE, [intern_trivial_string("bml-recipe-v1"), intern_trivial_string(trim(source))]), made[1]);
+   else ftv-recipe-born(session, scope, name, ftw-encode(made[1]), made[1]);
   }
   // [reason, function or nothing]: a BML source walked in the whole environment
   def ftv-bml-made(session, source) {
