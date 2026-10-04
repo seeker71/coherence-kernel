@@ -7,6 +7,8 @@
 import form/form-stdlib/lora-voice.bml;
 import form/form-stdlib/form-glass-telemetry-membrane.bml;
 import form/form-stdlib/hearth.bml;
+import form-stdlib/bml/host-fs.bml;
+import form-stdlib/qwen35-artifact-seal-reader.fk;
 //////////////////////////////////////////////////////////////////////
 section [form.bml] {
     class FormVoiceSchool {
@@ -68,10 +70,10 @@ section [form.bml] {
         def vs-harvest-ready(source,home) {
             let generation = home + ("/generations/" + fs-path-basename(source));
             let made = fs-mkdir(generation);
-            let args = append(["/bin/cp"],append(vs-generation-files(source),[generation]));
-            let pid = host_spawn_at(args,["/dev/null","/dev/null","/dev/null"]);
-            pid <= 0 ? form_error("school generation copy could not launch") : !((Comparable) host_wait(pid) == 0) ? form_error("school generation copy failed") : vs-harvest-copied(source,generation,home);
+            vs-copy-all(vs-generation-files(source),generation) ? vs-harvest-copied(source,generation,home) : form_error("school generation copy failed");
         }
+        // each file lands whole or not at all (hfs-copy stages beside its destination and renames); a file that is not there answers -1
+        def vs-copy-all(files,generation) = nil?(files) ? true : (Comparable) hfs-copy(files[0],generation + ("/" + fs-path-basename(files[0]))) >= 0 ? vs-copy-all(files[1:],generation) : false;
         def vs-generation-files(dir) = [dir + "/adapters.safetensors",dir + "/optimizer.safetensors",dir + "/adapter_config.json",dir + "/complete.json"];
         def vs-copy-sizes(a,b) = nil?(a) ? 1 : (((Comparable) file_size(a[0]) == file_size(b[0])) && vs-copy-sizes(a[1:],b[1:]));
         def vs-harvest-copied(source,generation,home) {
@@ -88,7 +90,12 @@ section [form.bml] {
         def vs-ledger-append(line) = sbt-append(VSLedger(), line);
         def vs-cycles(ledger) = vs-count-rows(split-on(ledger, byte_to_str(10)), 0);
         def vs-count-rows(lines, n) = (Comparable) len(lines) == 0 ? n : vs-count-rows(lines[1:], n + ((Comparable) str_find(lines[0], "| 20", 0) == 0 ? 1 : 0));
-        def vs-sha8(path) = substring(vs-text(host-exec(vs-cat(["shasum -a 256 ", path, " 2>/dev/null"]), "")), 0, 8);
+        // the body's own SHA-256 (saj-file-digest, the digest the model seals are made of) over the file's bytes, as 64 hex digits; "" when the file is not there or the engine did not answer
+        def vs-sha256(path) = (Comparable) file_size(path) < 0 ? "" : qaf-string-hex(saj-file-digest-any-tail(path, file_size(path)));
+        def vs-sha8(path) = vs-first8(vs-sha256(path));
+        def vs-first8(hex) = (Comparable) len(hex) < 8 ? hex : substring(hex, 0, 8);
+        // the host's local minute as YYYY-MM-DD-HH:MM
+        def vs-minute() = hfs-minute(now_unix_ms());
         def vs-rows(data) = len(split-on(vs-text(read_file(data + "/train.jsonl")), byte_to_str(10))) - 1;
         def vs-commit(cycle, grade) = vs-text(host-exec(vs-cat(["git add form/form-stdlib/adapters ", VSLedger(), " && git commit -q -m 'voice school cycle ", cycle.str(), ": held-out base ", grade[1].str(), " adapter ", grade[2].str(), " of ", grade[0].str(), "' && echo committed"]), ""));
     }

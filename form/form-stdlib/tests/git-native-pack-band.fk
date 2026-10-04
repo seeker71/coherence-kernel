@@ -1,0 +1,92 @@
+; git-native-pack-band.fk — whole packs of THIS repository read in Form, every object proved by its own name (the long band: it measures the
+; throughput of inflate + delta resolution + sha1 on real pack data, the "5 MB-class pack" of the brief).
+;
+;   1    the 2 MB pack (the smallest): every one of its objects is read through its index, hashes to the name the index gave it, and the
+;        object counts by pack entry type are taken from the pack's own entry headers (commit, tree, blob, tag, OFS_DELTA, REF_DELTA);
+;        the inflated bytes, the compressed bytes and the seconds are printed (bytes per second of pack, and of inflated output)
+;   2    the pack's recorded checksum (its last 20 bytes) equals the sha1 of the pack, and that pack's idx records the same checksum and
+;        carries a trailing checksum equal to the sha1 of the idx
+;   4    the 30 MB pack: its recorded checksum equals the sha1 of its 30 MB (a sequential SHA-1 over the whole file), and 300 of its
+;        5,023 objects, spread over the index, read and hash to their names
+;   8    every OFS_DELTA entry of the 2 MB pack points at an offset below its own, that holds an entry the index also knows (the chain is
+;        well founded), and every delta result length equals the length its delta stream declares
+;
+; Expected: 15
+; Verdict 15
+; REQUIRES: (read_file_slice and the string natives; a repository with at least one pack)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+section [form.bml] {
+  def gpb-bit(ok, bit) = ok ? bit : 0;
+  def gpb-say(label, v) = print([label, v]);
+  def gpb-eq(a, b) = (String) a == (String) b;
+  def gpb-read-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gs-verify(raw, o[0], o[1]);
+  }
+  // sum of inflated sizes and the count verified, over every object of an index
+  def gpb-all(r, idx, i, n, ok, bytes) {
+    let raw = i >= n ? "" : gs-idx-raw(idx, i);
+    let o = i >= n ? nothing() : gs-read(r, raw);
+    i >= n ? [ok, bytes] : gpb-all(r, idx, i + 1, n, ok && !nothing?(o) && gs-verify(raw, o[0], o[1]), bytes + (nothing?(o) ? 0 : len(o[1])));
+  }
+  // entry types by the pack's own headers at every object's offset: [commit tree blob tag ofs ref]
+  def gpb-types(p, idx, i, n, counts) {
+    let off = i >= n ? 0 : gs-idx-offset(idx, i);
+    let h = i >= n ? "" : read_file_slice(p, off, 8);
+    let t = i >= n ? 0 : band(shr_u32(str_byte_at(h, 0), 4), 7);
+    i >= n ? counts : gpb-types(p, idx, i + 1, n, gpb-bump(counts, t));
+  }
+  def gpb-bump(counts, t) = t == 1 ? [counts[0] + 1, counts[1], counts[2], counts[3], counts[4], counts[5]] : t == 2 ? [counts[0], counts[1] + 1, counts[2], counts[3], counts[4], counts[5]] : t == 3 ? [counts[0], counts[1], counts[2] + 1, counts[3], counts[4], counts[5]] : t == 4 ? [counts[0], counts[1], counts[2], counts[3] + 1, counts[4], counts[5]] : t == 6 ? [counts[0], counts[1], counts[2], counts[3], counts[4] + 1, counts[5]] : [counts[0], counts[1], counts[2], counts[3], counts[4], counts[5] + 1];
+  // every OFS_DELTA base offset is below the entry's own and is an offset the index lists
+  def gpb-ofs-sound(p, idx, i, n, offsets) {
+    let off = i >= n ? 0 : gs-idx-offset(idx, i);
+    let h = i >= n ? "" : read_file_slice(p, off, 64);
+    let hd = i >= n ? nothing() : gs-hdr(h);
+    let isofs = !nothing?(hd) && hd[0] == 6;
+    let ov = isofs ? gs-ofs-start(h, hd[2]) : nothing();
+    i >= n ? true : (!isofs || (ov[0] > 0 && ov[0] <= off && gpb-listed?(offsets, off - ov[0]))) && gpb-ofs-sound(p, idx, i + 1, n, offsets);
+  }
+  def gpb-offsets(idx, i, n, acc) = i >= n ? acc : gpb-offsets(idx, i + 1, n, cons(gs-idx-offset(idx, i), acc));
+  def gpb-listed?(offsets, x) = any?(o => o == x, offsets);
+  def gpb-spread(idx, n, k) = map(i => gs-idx-raw(idx, (i * n) / k), range(0, k));
+  def gpb-run() {
+    let t0 = host_monotonic_ms();
+    let r = git-open(".");
+    let packs = nothing?(r) ? [] : gs-packs(r);
+    let small = foldl((best, p) => nil?(best) || p[3] < best[3] ? p : best, [], packs);
+    let mid = foldl((best, p) => p[3] > 8000000 && p[3] < 100000000 && (nil?(best) || p[3] > best[3]) ? p : best, [], packs);
+    let t1 = host_monotonic_ms();
+    let all = nil?(small) ? [false, 0] : gpb-all(r, small[1], 0, small[2], true, 0);
+    let t2 = host_monotonic_ms();
+    let types = nil?(small) ? [] : gpb-types(small[0], small[1], 0, small[2], [0, 0, 0, 0, 0, 0]);
+    let ms = t2 - t1;
+    let s1 = gpb-say("small pack", [small[2], "objects", small[3], "bytes packed", all[1], "bytes inflated", "ms", ms, "pack bytes/s", ms == 0 ? 0 : (small[3] * 1000) / ms, "inflated bytes/s", ms == 0 ? 0 : (all[1] * 1000) / ms, "types commit tree blob tag ofs ref", types]);
+    let b1 = gpb-bit(!nil?(small) && all[0] && small[2] > 100, 1);
+    let tail = nil?(small) ? "" : read_file_slice(small[0], small[3] - 20, 20);
+    let t3 = host_monotonic_ms();
+    let sha = nil?(small) ? "" : gsha-raw(substring(read_file(small[0]), 0, small[3] - 20));
+    let t4 = host_monotonic_ms();
+    let idx = nil?(small) ? "" : small[1];
+    let s2 = gpb-say("small pack sha1", [small[3], "bytes in ms", t4 - t3]);
+    let b2 = gpb-bit(!nil?(small) && gpb-eq(sha, tail) && gpb-eq(substring(idx, len(idx) - 40, len(idx) - 20), tail) && gpb-eq(gsha-raw(substring(idx, 0, len(idx) - 20)), substring(idx, len(idx) - 20, len(idx))), 2);
+    let t5 = host_monotonic_ms();
+    let mtail = nil?(mid) ? "" : read_file_slice(mid[0], mid[3] - 20, 20);
+    let msha = nil?(mid) ? "" : gsha-raw(substring(read_file(mid[0]), 0, mid[3] - 20));
+    let t6 = host_monotonic_ms();
+    let mids = nil?(mid) ? [] : gpb-spread(mid[1], mid[2], 300);
+    let mok = !nil?(mid) && all?(raw => gpb-read-ok(r, raw), mids);
+    let t7 = host_monotonic_ms();
+    let s3 = gpb-say("mid pack", [nil?(mid) ? 0 : mid[3], "bytes sha1 ms", t6 - t5, "300 sampled objects ms", t7 - t6]);
+    let b4 = gpb-bit(!nil?(mid) && gpb-eq(msha, mtail) && mok, 4);
+    let offs = nil?(small) ? [] : gpb-offsets(small[1], 0, small[2], []);
+    let b8 = gpb-bit(!nil?(small) && gpb-ofs-sound(small[0], small[1], 0, small[2], offs) && types[4] > 0, 8);
+    let verdict = b1 + b2 + b4 + b8;
+    let shown = print(["git-native-pack-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  gpb-run();
+}

@@ -1,0 +1,170 @@
+; git-native-index-band.fk — the index file read in Form (git-index.bml): versions 2, 3 and 4, every field of an entry, the extensions,
+; the trailing checksum, and the sorted-names search. Held against THIS checkout's own index and against index files this band
+; assembles byte by byte (and one written by git-write.bml's gw-index).
+;
+;   1    this checkout's index reads: entries are sorted by (path bytes, stage); every mode is a regular file (100644/100755), a symlink
+;        or a gitlink; the cache-tree root's entry count equals the number of stage-0 entries (when the root is valid: a root
+;        invalidated by a staged change carries -1 and no id); the trailing SHA-1 equals the sha1 of the rest of the file
+;   2    every stage-0 entry's blob exists in the object store (an idx lookup or a loose file for each); and the working tree's own file lists
+;        (fs_list of docs/, axioms/ and observe/) are accounted for: every file listed is tracked by the index, or untracked, or ignored
+;   4    cache-tree nodes are consistent: for 40 spread directories the node's count equals the number of index entries under that
+;        directory, and every valid node's tree id is an object that reads and hashes to its name
+;   8    the sorted-names string: every one of 300 spread index paths is found by gi-has?, 300 paths with one byte changed are not,
+;        and gi-has-under? is true for every cache-tree directory and false for a directory that is not there
+;   16   a v2 index written by gw-index (names of 1..70 bytes across every padding class, a 5000-byte name through the 0xFFF length
+;        escape, three conflict stages of one path) reads back field for field; flipping one byte breaks the checksum
+;   32   a v4 index assembled here, with the path prefix compression (strip counts 0, 5, 7, 0 over paths that share prefixes), reads back
+;        the full paths
+;   64   a v3 index with an extended-flags word (skip-worktree 0x4000, intent-to-add 0x2000) reads back xflags and stays aligned for
+;        the entries after it
+;   128  extensions are skipped by their length: an unknown "ZZZZ" before "TREE" and a "REUC" after it; the hand-assembled TREE (nested
+;        directories, an invalidated node of count -1 with no id, a sibling after it) parses to exactly its rows
+;
+; Expected: 255
+; Verdict 255
+; REQUIRES: (the string natives, read_file, the u32 bit natives)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-write.bml;
+section [form.bml] {
+  def gxb-bit(ok, bit) = ok ? bit : 0;
+  def gxb-say(label, v) = print([label, v]);
+  def gxb-eq(a, b) = (String) a == (String) b;
+  def gxb-be32(n) = gsha-u32-str(n);
+  def gxb-be16(n) = str_concat(byte_to_str((n / 256) % 256), byte_to_str(n % 256));
+  def gxb-sorted?(es) = nil?(es) || nil?(es[1:]) ? true : gxb-before?(es[0], es[1]) && gxb-sorted?(es[1:]);
+  def gxb-before?(a, b) = gr-lt(a[0], b[0]) || (gxb-eq(a[0], b[0]) && a[6] < b[6]);
+  def gxb-mode-ok?(m) = m == 33188 || m == 33261 || m == 40960 || m == 57344;
+  def gxb-spread(xs, n, k) = map(i => xs[(i * n) / k], range(0, k));
+  def gxb-count-under(es, dir) = len(filter(e => e[6] == 0 && gs-starts?(e[0], dir), es));
+  // a fixed part of an entry: ctime mtime dev ino mode uid gid size, id
+  def gxb-fixed(e) = str_concat(gxb-be32(e[8]), str_concat(gxb-be32(e[9]), str_concat(gxb-be32(e[4]), str_concat(gxb-be32(e[5]), str_concat(gxb-be32(e[11]), str_concat(gxb-be32(e[10]), str_concat(gxb-be32(e[1]), str_concat(gxb-be32(1000), str_concat(gxb-be32(20), str_concat(gxb-be32(e[3]), e[2]))))))))));
+  def gxb-row(path, mode, id, size, mtime, stage) = [path, mode, id, size, mtime, (mtime % 1000) * 1000003, stage, 0, mtime - 1, 5, 100 + len(path), 16777220, 0];
+  def gxb-same?(a, b) = gxb-eq(a[0], b[0]) && a[1] == b[1] && gxb-eq(a[2], b[2]) && a[3] == b[3] && a[4] == b[4] && a[5] == b[5] && a[6] == b[6] && a[8] == b[8] && a[9] == b[9] && a[10] == b[10] && a[11] == b[11];
+  def gxb-all-same?(xs, ys) = nil?(xs) ? nil?(ys) : !nil?(ys) && gxb-same?(xs[0], ys[0]) && gxb-all-same?(xs[1:], ys[1:]);
+  def gxb-id(i) = gsha-raw(str_concat("blob-", i.str()));
+  // names of every length 1..70 (all padding classes), a stage trio and a very long path
+  def gxb-synth-rows() {
+    let lens = map(n => gxb-row(gxb-pad("n", n), 33188, gxb-id(n), n * 3, 1700000000 + n, 0), range(1, 71));
+    let trio = [gxb-row("zz-conflict", 33188, gxb-id(900), 4, 1700000900, 1), gxb-row("zz-conflict", 33188, gxb-id(901), 5, 1700000900, 2), gxb-row("zz-conflict", 33261, gxb-id(902), 6, 1700000900, 3)];
+    let longname = gxb-row(str_concat("zzz-", gxb-pad("L", 5000)), 33188, gxb-id(999), 1, 1700000999, 0);
+    append(lens, append(trio, [longname]));
+  }
+  // a distinct name of length n: n bytes, a-z cycled, sortable
+  def gxb-pad(prefix, n) = n <= len(prefix) ? substring(prefix, 0, n) : gxb-pad(str_concat(prefix, byte_to_str(97 + (len(prefix) % 26))), n);
+  def gxb-synth-ok() {
+    let rows0 = gxb-synth-rows();
+    let rows = gxb-sort-rows(rows0);
+    let text = gw-index(rows);
+    let ix = gi-read-text(text);
+    let flipped = str_concat(substring(text, 0, 100), str_concat(byte_to_str((str_byte_at(text, 100) + 1) % 256), substring(text, 101, len(text))));
+    !nothing?(ix) && ix[2] == 2 && len(ix[0]) == len(rows) && gxb-all-same?(rows, ix[0]) && gi-verify(text) && !gi-verify(flipped) && len(ix[0][len(ix[0]) - 1][0]) == 5004;
+  }
+  def gxb-sort-rows(rows) = len(rows) <= 1 ? rows : gxb-merge(gxb-sort-rows(take(len(rows) / 2, rows)), gxb-sort-rows(drop(len(rows) / 2, rows)), []);
+  def gxb-merge(a, b, acc) = nil?(a) ? append(ginf-reverse(acc, []), b) : nil?(b) ? append(ginf-reverse(acc, []), a) : gxb-before?(b[0], a[0]) ? gxb-merge(a, b[1:], cons(b[0], acc)) : gxb-merge(a[1:], b, cons(a[0], acc));
+  // ---- v4: a path is its predecessor minus `strip` bytes plus a suffix ---------------------------------------------------------
+  def gxb-v4-entry(e, strip, suffix) = str_concat(gxb-fixed(e), str_concat(gxb-be16(len(e[0]) < 4095 ? len(e[0]) : 4095), str_concat(byte_to_str(strip), str_concat(suffix, byte_to_str(0)))));
+  def gxb-v4-ok() {
+    let paths = ["src/a/alpha.txt", "src/a/beta.txt", "src/a/sub/deep.txt", "top.txt"];
+    let rows = map(p => gxb-row(p, 33188, gxb-id(len(p)), len(p), 1700001000, 0), paths);
+    let body = str_concat(gxb-v4-entry(rows[0], 0, "src/a/alpha.txt"), str_concat(gxb-v4-entry(rows[1], 9, "beta.txt"), str_concat(gxb-v4-entry(rows[2], 8, "sub/deep.txt"), gxb-v4-entry(rows[3], 18, "top.txt"))));
+    let head = str_concat("DIRC", str_concat(gxb-be32(4), gxb-be32(4)));
+    let whole = str_concat(head, body);
+    let text = str_concat(whole, gsha-raw(whole));
+    let ix = gi-read-text(text);
+    !nothing?(ix) && ix[2] == 4 && len(ix[0]) == 4 && gxb-eq(ix[0][0][0], paths[0]) && gxb-eq(ix[0][1][0], paths[1]) && gxb-eq(ix[0][2][0], paths[2]) && gxb-eq(ix[0][3][0], paths[3]) && ix[0][2][3] == len(paths[2]) && gi-verify(text);
+  }
+  // ---- v3 with extended flags --------------------------------------------------------------------------------------------------
+  def gxb-v3-entry(e, xf, pad) = str_concat(gxb-fixed(e), str_concat(gxb-be16(bor(16384, len(e[0]))), str_concat(gxb-be16(xf), str_concat(e[0], gsha-zeros(pad)))));
+  def gxb-v3-ok() {
+    let a = gxb-row("a.txt", 33188, gxb-id(1), 11, 1700002000, 0);
+    let b = gxb-row("sparse/b.txt", 33188, gxb-id(2), 12, 1700002001, 0);
+    let c = gxb-row("tail.txt", 33261, gxb-id(3), 13, 1700002002, 0);
+    let ea = gxb-v3-entry(a, 16384, 1 + gw-pad8(64 + 5 + 1));
+    let eb = gxb-v3-entry(b, 8192, 1 + gw-pad8(64 + 12 + 1));
+    let ec = str_concat(gxb-fixed(c), str_concat(gxb-be16(len(c[0])), str_concat(c[0], gsha-zeros(1 + gw-pad8(62 + 8 + 1)))));
+    let whole = str_concat("DIRC", str_concat(gxb-be32(3), str_concat(gxb-be32(3), str_concat(ea, str_concat(eb, ec)))));
+    let text = str_concat(whole, gsha-raw(whole));
+    let ix = gi-read-text(text);
+    !nothing?(ix) && ix[2] == 3 && len(ix[0]) == 3 && ix[0][0][7] == 16384 && ix[0][1][7] == 8192 && ix[0][2][7] == 0 && gxb-eq(ix[0][1][0], "sparse/b.txt") && gxb-eq(ix[0][2][0], "tail.txt") && ix[0][2][1] == 33261 && gi-verify(text);
+  }
+  // ---- extensions -------------------------------------------------------------------------------------------------------------------
+  def gxb-ext(sig, data) = str_concat(sig, str_concat(gxb-be32(len(data)), data));
+  // TREE: root (3 entries, 2 subtrees): "" , "d" (count 2), "d/e" (-1, invalidated), then "f" (count 1)
+  def gxb-ct-node(name, count, subs, id) = str_concat(name, str_concat(byte_to_str(0), str_concat(count.str(), str_concat(" ", str_concat(subs.str(), str_concat("\n", count >= 0 ? id : ""))))));
+  def gxb-ct-ok() {
+    let id1 = gsha-raw("root");
+    let id2 = gsha-raw("d");
+    let id3 = gsha-raw("f");
+    let tree = str_concat(gxb-ct-node("", 4, 2, id1), str_concat(gxb-ct-node("d", 2, 1, id2), str_concat(gxb-ct-node("e", 0 - 1, 0, ""), gxb-ct-node("f", 1, 0, id3))));
+    let a = gxb-row("a.txt", 33188, gxb-id(1), 1, 1700003000, 0);
+    let whole = str_concat("DIRC", str_concat(gxb-be32(2), str_concat(gxb-be32(1), str_concat(gw-index-entry(a), str_concat(gxb-ext("ZZZZ", "unknown extension bytes"), str_concat(gxb-ext("TREE", tree), gxb-ext("REUC", "reuc")))))));
+    let text = str_concat(whole, gsha-raw(whole));
+    let ix = gi-read-text(text);
+    let ct = nothing?(ix) ? [] : ix[1];
+    !nothing?(ix) && len(ix[0]) == 1 && len(ct) == 4 && gxb-eq(ct[0][0], "") && ct[0][1] == 4 && gxb-eq(ct[0][2], id1) && gxb-eq(ct[1][0], "d/") && ct[1][1] == 2 && gxb-eq(ct[1][2], id2) && gxb-eq(ct[2][0], "d/e/") && ct[2][1] == 0 - 1 && nothing?(ct[2][2]) && gxb-eq(ct[3][0], "f/") && ct[3][1] == 1 && gxb-eq(ct[3][2], id3);
+  }
+  def names0(es) = gi-names(es);
+  // fs_list of a few directories against the index and the scan: every file the directory lists is exactly one of tracked, untracked, ignored;
+  // and every index entry under the directory is a file that stands (or the stat check says deleted)
+  def gxb-class(names, scan, path) {
+   let tracked = gi-has?(names, path);
+   let untracked = any?(p => str_eq(p, path) || gs-starts?(path, p ++ "/"), scan[0]);
+   let ignored = any?(p => str_eq(p, path) || gs-starts?(path, p), scan[1]);
+   (tracked ? 1 : 0) + (untracked ? 1 : 0) + (ignored ? 1 : 0);
+  }
+  def gxb-dir-ok(r, names, scan, dir) {
+   let listed = filter(n => host_path_is_dir(gs-top(r) ++ "/" ++ dir ++ "/" ++ n) == 0, fs_list(gs-top(r) ++ "/" ++ dir) ?? []);
+   let paths = map(n => dir ++ "/" ++ n, listed);
+   len(paths) > 0 && all?(p => gxb-class(names, scan, p) >= 1, paths);
+  }
+  def gxb-partition-ok(r, names, scan, dirs) = all?(d => gxb-dir-ok(r, names, scan, d), dirs);
+  def gxb-run() {
+    let t0 = host_monotonic_ms();
+    let r = git-open(".");
+    let ix = nothing?(r) ? nothing() : gi-read(r);
+    let es = nothing?(ix) ? [] : ix[0];
+    let ct = nothing?(ix) ? [] : ix[1];
+    let stage0 = filter(e => e[6] == 0, es);
+    let t1 = host_monotonic_ms();
+    let sums = nothing?(ix) ? false : gi-verify(ix[3]);
+    let t2 = host_monotonic_ms();
+    let s1 = gxb-say("index", [nothing?(ix) ? "none" : ix[2], "version", len(es), "entries", len(ct), "cache-tree nodes", "checksum ok", sums, "ms", t2 - t1]);
+    let rootct = nil?(ct) ? nothing() : ct[0];
+    let b1 = gxb-bit(!nothing?(ix) && len(es) > 100 && gxb-sorted?(es) && all?(e => gxb-mode-ok?(e[1]), es) && !nothing?(rootct) && (rootct[1] < 0 || rootct[1] == len(stage0)) && sums, 1);
+    let scan = nothing?(r) ? [[], []] : gst-scan(gs-top(r), "", gx-stack(r), es, "all", 1);
+    let part = gxb-partition-ok(r, names0(es), scan, ["docs", "axioms", "observe"]);
+    let s2 = gxb-say("worktree against index", [len(scan[0]), "untracked files", len(scan[1]), "ignored", "directories partitioned", part]);
+    let b2 = gxb-bit(!nothing?(r) && all?(e => gs-has?(r, e[2]), stage0) && part, 2);
+    let valid = filter(n => n[1] >= 0 && len(n[0]) > 0, ct);
+    let dirs = len(valid) == 0 ? [] : gxb-spread(valid, len(valid), 40);
+    let counts_ok = all?(n => gxb-count-under(es, n[0]) == n[1], dirs);
+    let trees_ok = !nothing?(r) && all?(n => gtb-tree-read-ok(r, n[2]), take(12, dirs)) && (rootct[1] < 0 || gtb-tree-read-ok(r, rootct[2]));
+    let b4 = gxb-bit(counts_ok && trees_ok && len(dirs) >= 10, 4);
+    let names = gi-names(es);
+    let sample = len(es) == 0 ? [] : gxb-spread(es, len(es), 300);
+    let found = all?(e => gi-has?(names, e[0]), sample);
+    let notfound = all?(e => !gi-has?(names, str_concat(e[0], "~")) && !gi-has?(names, substring(e[0], 0, len(e[0]) - 1)), sample);
+    let under = all?(n => gi-has-under?(names, n[0]), dirs) && !gi-has-under?(names, "no-such-directory/");
+    let b8 = gxb-bit(found && notfound && under, 8);
+    let b16 = gxb-bit(gxb-synth-ok(), 16);
+    let b32 = gxb-bit(gxb-v4-ok(), 32);
+    let b64 = gxb-bit(gxb-v3-ok(), 64);
+    let b128 = gxb-bit(gxb-ct-ok(), 128);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+    let shown = print(["git-native-index-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  def gtb-tree-read-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gxb-eq(o[0], "tree") && gs-verify(raw, o[0], o[1]);
+  }
+  gxb-run();
+}

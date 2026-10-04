@@ -1,0 +1,111 @@
+// source-tree.bml — the body's files, walked and searched in Form: no git, no grep, no process.
+//
+// stw-files()            every file under the working directory (the repository root), sorted by path bytes, as `git ls-files
+//                        --cached --others --exclude-standard` lists them: the walk reads fs_list / fs_is_dir, never enters .git, .hearth
+//                        or a directory a .gitignore excludes, and leaves out a file one excludes.
+// tracked-files()        THE SEAM: the set of paths the body treats as tracked. Today it is the walk (the files that are, or travel when
+//                        added). When the native git organ (git-index.bml, `ls-files`) is the reader, this one definition returns the
+//                        index instead and every caller keeps its shape.
+// stw-grep-rows(args, paths)   grep's selected lines of each file, as `git grep -n` prints them: path:line:content, paths in the
+//                        order given, lines in file order. args are grep-text's (form-agent-grep.bml): ["-a","-n","-E",pattern].
+// stw-grep-files(args, paths)  the paths in which grep selects at least one line (`git grep -l`), in the order given.
+// stw-pick(paths, suffixes)    the paths that end with one of the suffixes (the pathspecs "*.fk" "*.bml").
+//
+// .gitignore: every .gitignore met on the way is read, a deeper file over a shallower one and a later line over an earlier one, as
+// gitignore(5) says for the forms in use: blank lines and `#` comments, `!` negation, a trailing `/` (directories only), a leading or
+// inner `/` (anchored to the file's directory), a pattern with no `/` (a name at any depth below), `*` `?` and `[...]` classes that never
+// cross a `/`, and `**` as a whole path segment. A directory an earlier rule excludes is never entered. Refused by name, with a stop
+// that carries the rule and its file: a backslash escape and a negated class (`[!x]`, `[^x]`), because no rule here uses one and a
+// guess would be a quiet wrong tree. The global excludes file and .git/info/exclude are not read (a worktree's .git is a pointer).
+// preludes: form-stdlib/core.fk form-stdlib/sort.fk form-stdlib/bml/form-agent-grep.bml
+import form-stdlib/core.fk;
+import form-stdlib/sort.fk;
+import form-stdlib/bml/form-agent-grep.bml;
+section [form.bml] {
+ class SourceTree {
+  // ---- strings
+  def stw-starts?(s, p) = len(s) >= len(p) && (String) substring(s, 0, len(p)) == p;
+  def stw-ends?(s, t) = len(s) >= len(t) && (String) substring(s, len(s) - len(t), len(s)) == t;
+  def stw-trim-right(s) = len(s) > 0 && (str_byte_at(s, len(s) - 1) == 32 || str_byte_at(s, len(s) - 1) == 13) ? stw-trim-right(substring(s, 0, len(s) - 1)) : s;
+  def stw-path(dir, name) = (String) dir == "" ? name : dir ++ "/" ++ name;
+  // ---- fnmatch for one path segment: * ? [...]
+  def stw-fn(p, pi, s, si) = pi >= len(p) ? si >= len(s) : stw-fn-at(p, pi, s, si, str_byte_at(p, pi));
+  def stw-fn-at(p, pi, s, si, c) = c == 42 ? stw-star(p, pi + 1, s, si)
+   : si >= len(s) ? false
+   : c == 63 ? stw-fn(p, pi + 1, s, si + 1)
+   : c == 91 ? stw-class(p, pi, s, si)
+   : c == str_byte_at(s, si) && stw-fn(p, pi + 1, s, si + 1);
+  def stw-star(p, pi, s, si) = (pi < len(p) && str_byte_at(p, pi) == 42) ? stw-star(p, pi + 1, s, si) : stw-fn(p, pi, s, si) || (si < len(s) && stw-star(p, pi, s, si + 1));
+  // the `]` that closes a class opened at pi (one right after the opener is a member), or -1
+  def stw-class-close(p, j) = j >= len(p) ? 0 - 1 : str_byte_at(p, j) == 93 ? j : stw-class-close(p, j + 1);
+  def stw-class(p, pi, s, si) {
+   let close = stw-class-close(p, pi + 2);
+   close < 0 ? (str_byte_at(s, si) == 91 && stw-fn(p, pi + 1, s, si + 1)) : (stw-member(p, pi + 1, close, str_byte_at(s, si)) && stw-fn(p, close + 1, s, si + 1));
+  }
+  def stw-member(p, j, close, ch) = j >= close ? false
+   : (j + 2 < close && str_byte_at(p, j + 1) == 45) ? ((ch >= str_byte_at(p, j) && ch <= str_byte_at(p, j + 2)) || stw-member(p, j + 3, close, ch))
+   : (str_byte_at(p, j) == ch || stw-member(p, j + 1, close, ch));
+  // ---- segments and `**`
+  def stw-segs(ps, ts) = nil?(ps) ? nil?(ts) : (String) ps[0] == "**" ? stw-dstar(ps, ts) : ((!nil?(ts)) && stw-fn(ps[0], 0, ts[0], 0) && stw-segs(ps[1:], ts[1:]));
+  def stw-dstar(ps, ts) = nil?(ps[1:]) ? !nil?(ts) : (stw-segs(ps[1:], ts) || ((!nil?(ts)) && stw-segs(ps, ts[1:])));
+  // ---- one rule: [base, negated, dir-only, anchored, segments, text, raw line]
+  def stw-parse(base, raw) {
+   let line = stw-trim-right(raw);
+   (len(line) == 0 || str_byte_at(line, 0) == 35) ? nothing() : stw-parse-neg(base, line);
+  }
+  def stw-parse-neg(base, line) {
+   let neg = str_byte_at(line, 0) == 33;
+   stw-parse-body(base, neg, neg ? substring(line, 1, len(line)) : line, line);
+  }
+  def stw-parse-body(base, neg, s1, raw) {
+   let dironly = len(s1) > 1 && str_byte_at(s1, len(s1) - 1) == 47;
+   let s2 = dironly ? substring(s1, 0, len(s1) - 1) : s1;
+   let lead = len(s2) > 0 && str_byte_at(s2, 0) == 47;
+   let s3 = lead ? substring(s2, 1, len(s2)) : s2;
+   let anchored = lead || str_find(s3, "/", 0) >= 0;
+   len(s3) == 0 ? nothing() : [base, neg, dironly, anchored, split-on(s3, "/"), s3, raw];
+  }
+  def stw-refused?(rule) = str_find(rule[6], byte_to_str(92), 0) >= 0 || str_find(rule[6], "[!", 0) >= 0 || str_find(rule[6], "[^", 0) >= 0;
+  def stw-load(base, text) = split-on(text, "\n") |> map(l => stw-parse(base, l)) |> filter(r => !nothing?(r)) |> map(r => stw-admit(r));
+  def stw-admit(rule) = stw-refused?(rule) ? form_error("source-tree: unsupported-ignore-rule: " ++ rule[6] ++ " (in " ++ rule[0] ++ ".gitignore)") : rule;
+  // rules: highest priority first. A directory's file goes in front of the ones above it, its last line first.
+  def stw-push(rules, fresh) = append(reverse(fresh), rules);
+  def stw-with-nested(dir, rules, names) = stw-has?(names, ".gitignore") ? stw-push(rules, stw-load((String) dir == "" ? "" : dir ++ "/", read_file(stw-path(dir, ".gitignore")) ?? "")) : rules;
+  def stw-has?(xs, x) = nil?(xs) ? false : (String) xs[0] == x ? true : stw-has?(xs[1:], x);
+  // ---- deciding: the first rule that hits decides; a negation un-ignores; none leaves the path in
+  def stw-hits?(rule, rel, name, isdir) = (rule[2] && !isdir) ? false
+   : (len(rule[0]) > 0 && !stw-starts?(rel, rule[0])) ? false
+   : rule[3] ? stw-segs(rule[4], split-on(substring(rel, len(rule[0]), len(rel)), "/"))
+   : stw-fn(rule[5], 0, name, 0);
+  def stw-ign(rules, rel, name, isdir) = nil?(rules) ? false : stw-hits?(rules[0], rel, name, isdir) ? !rules[0][1] : stw-ign(rules[1:], rel, name, isdir);
+  // ---- the walk: directories in the order a path sort gives (a directory sorts as its name and a slash)
+  def stw-never() = [".git", ".hearth"];
+  def stw-key(dir, n) = fs_is_dir(stw-path(dir, n)) ? n ++ "/" : n;
+  def stw-walk(dir, rules, depth, acc) {
+   let names = fs_list((String) dir == "" ? "." : dir);
+   (nothing?(names) || depth > 40) ? acc : stw-walk-keys(dir, stw-with-nested(dir, rules, names), depth, acc, sort-strs(names |> map(n => stw-key(dir, n))));
+  }
+  def stw-walk-keys(dir, rules, depth, acc, keys) = nil?(keys) ? acc : stw-walk-keys(dir, rules, depth, stw-walk-entry(dir, rules, depth, acc, keys[0]), keys[1:]);
+  def stw-walk-entry(dir, rules, depth, acc, key) {
+   let isdir = stw-ends?(key, "/");
+   let name = isdir ? substring(key, 0, len(key) - 1) : key;
+   let path = stw-path(dir, name);
+   (stw-has?(stw-never(), name) || stw-ign(rules, path, name, isdir)) ? acc : isdir ? stw-walk(path, rules, depth + 1, acc) : cons(path, acc);
+  }
+  def stw-files() = reverse(stw-walk("", [], 0, []));
+  // SEAM: the tracked set. The walk answers it today; the native `git ls-files` replaces this one line.
+  def tracked-files() = stw-files();
+  // ---- searching: the ONE grep over each file's text
+  def stw-text(path) = read_file(path) ?? "";
+  def stw-suffixed?(path, suffixes) = nil?(suffixes) ? false : (stw-ends?(path, suffixes[0]) || stw-suffixed?(path, suffixes[1:]));
+  def stw-pick(paths, suffixes) = paths |> filter(p => stw-suffixed?(p, suffixes));
+  def stw-flat(xss) = nil?(xss) ? [] : append(xss[0], stw-flat(xss[1:]));
+  def stw-rows-of(args, path) = stw-rows-out(args, path, grep-text(args, stw-text(path)));
+  def stw-rows-out(args, path, r) = (Comparable) r[0] == 2 ? form_error("source-tree: grep: " ++ grep-text-error(args, stw-text(path))) : (Comparable) r[0] == 0 ? (fag-lines(r[1]) |> map(l => path ++ ":" ++ l)) : [];
+  def stw-grep-rows(args, paths) = stw-flat(paths |> map(p => stw-rows-of(args, p)));
+  def stw-selects?(args, path) = stw-selects-out(args, path, grep-text(cons("-q", args), stw-text(path)));
+  def stw-selects-out(args, path, r) = (Comparable) r[0] == 2 ? form_error("source-tree: grep: " ++ grep-text-error(cons("-q", args), stw-text(path))) : (Comparable) r[0] == 0;
+  def stw-grep-files(args, paths) = paths |> filter(p => stw-selects?(args, p));
+ }
+ 0;
+}

@@ -1,0 +1,135 @@
+// git-refs.bml — references and configuration, read in Form: HEAD (symbolic or detached), loose refs, packed-refs (with peeled
+// lines), the pseudo refs (ORIG_HEAD, FETCH_HEAD, MERGE_HEAD, REBASE_HEAD ...), ref listing, and the INI config files.
+//
+// Where a ref lives: the pseudo refs and HEAD are this checkout's own (`gitdir`, which for a linked worktree is a directory under
+// <common>/worktrees/); every other ref is shared (`commondir`), loose file first, then packed-refs. A symbolic ref
+// ("ref: refs/heads/x") is followed up to ten times.
+//
+//   gr-resolve(r, name)        the hex id a full ref name (HEAD, refs/heads/x, ORIG_HEAD ...) names, nothing() when it names none
+//   gr-head(r)                 [kind, value] — ["branch", "refs/heads/x"] on a branch, ["detached", hex], ["unborn", "refs/heads/x"]
+//   gr-list(r, prefix)         [[name, hex] ...] sorted by name — loose and packed refs under a prefix such as "refs/heads/"
+//   gr-peeled(r, name)         the packed-refs peeled id of an annotated tag (nothing() when unpeeled or absent)
+//   gc-get(r, key)             the last value a config key has across the system, global, repository and worktree files
+//   gc-get-all(r, key)         every value, in file order
+//
+// PROOF: form-stdlib/tests/git-native-store-band.fk.
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+section [form.bml] {
+ class GitRefs {
+  // ---- where a ref is kept -------------------------------------------------------------------------------------------------
+  def gr-per-worktree?(name) = !gs-starts?(name, "refs/") || gs-starts?(name, "refs/bisect/") || gs-starts?(name, "refs/worktree/") || gs-starts?(name, "refs/rewritten/");
+  def gr-dir-of(r, name) = gr-per-worktree?(name) ? gs-gitdir(r) : gs-common(r);
+  def gr-loose-text(r, name) {
+   let own = gs-text(gr-dir-of(r, name) ++ "/" ++ name);
+   nothing?(own) && gr-per-worktree?(name) ? gs-text(gs-common(r) ++ "/" ++ name) : own;
+  }
+  def gr-hex40?(s) = len(s) == 40 && gsha-hex?(s);
+  // ---- packed-refs ---------------------------------------------------------------------------------------------------------
+  def gr-packed-text(r) = gs-text-or(gs-common(r) ++ "/packed-refs", "");
+  def gr-packed-find(text, name) {
+   let at = str_find(text, " " ++ name ++ "\n", 0);
+   at >= 40 ? substring(text, at - 40, at) : nothing();
+  }
+  def gr-packed(r, name) = gr-packed-find(gr-packed-text(r), name);
+  // the peeled id recorded under a packed tag: the "^<hex>" line that follows its line
+  def gr-peeled(r, name) {
+   let text = gr-packed-text(r);
+   let at = str_find(text, " " ++ name ++ "\n", 0);
+   let after = at < 0 ? 0 - 1 : at + len(name) + 2;
+   after > 0 && after + 41 <= len(text) && str_byte_at(text, after) == 94 ? substring(text, after + 1, after + 41) : nothing();
+  }
+  // ---- resolving -----------------------------------------------------------------------------------------------------------
+  def gr-sym-target(text) = gs-starts?(text, "ref:") ? gs-trim(gs-ltrim(substring(text, 4, len(text)))) : nothing();
+  def gr-resolve-n(r, name, depth) {
+   let text = depth > 10 ? nothing() : gr-loose-text(r, name);
+   nothing?(text) ? (depth > 10 ? nothing() : gr-packed(r, name)) : gr-resolve-text(r, gs-trim(text), depth);
+  }
+  def gr-resolve-text(r, text, depth) = gr-hex40?(text) ? text : nothing?(gr-sym-target(text)) ? nothing() : gr-resolve-n(r, gr-sym-target(text), depth + 1);
+  def gr-resolve(r, name) = gr-resolve-n(r, name, 0);
+  // [kind, value]
+  def gr-head(r) {
+   let text = gs-trim(gs-text-or(gs-gitdir(r) ++ "/HEAD", ""));
+   let target = gr-sym-target(text);
+   nothing?(target) ? (gr-hex40?(text) ? ["detached", text] : ["unborn", ""]) : (nothing?(gr-resolve(r, target)) ? ["unborn", target] : ["branch", target]);
+  }
+  // HEAD's id, nothing() on an unborn branch
+  def gr-head-id(r) = gr-resolve(r, "HEAD");
+  def gr-short-branch(refname) = gs-starts?(refname, "refs/heads/") ? substring(refname, 11, len(refname)) : refname;
+  // ---- listing -------------------------------------------------------------------------------------------------------------
+  // loose refs under a directory, as [name, hex]; names are relative to the common dir
+  def gr-loose-under(base, rel) {
+   let dir = base ++ "/" ++ rel;
+   let names = host_dir_list(dir) ?? [];
+   gs-flatten(map(n => gs-dir?(dir ++ "/" ++ n) ? gr-loose-under(base, rel ++ "/" ++ n) : gr-loose-row(rel ++ "/" ++ n, gs-text-or(dir ++ "/" ++ n, "")), names));
+  }
+  def gr-loose-row(name, text) = gr-hex40?(gs-trim(text)) ? [[name, gs-trim(text)]] : [];
+  def gr-packed-rows(text, prefix) = filter(row => gs-starts?(row[0], prefix), gr-packed-parse(gs-lines(text), []));
+  def gr-packed-parse(ls, acc) = nil?(ls) ? ginf-reverse(acc, []) : len(ls[0]) > 41 && str_byte_at(ls[0], 40) == 32 && str_byte_at(ls[0], 0) != 94 && str_byte_at(ls[0], 0) != 35 ? gr-packed-parse(ls[1:], cons([substring(ls[0], 41, len(ls[0])), substring(ls[0], 0, 40)], acc)) : gr-packed-parse(ls[1:], acc);
+  // string order by bytes
+  def gr-lt(a, b) = gr-lt-at(a, b, 0);
+  def gr-lt-at(a, b, i) = i >= len(a) ? i < len(b) : i >= len(b) ? false : str_byte_at(a, i) < str_byte_at(b, i) ? true : str_byte_at(a, i) > str_byte_at(b, i) ? false : gr-lt-at(a, b, i + 1);
+  // ascending merge sort on a row's first field
+  def gr-msort(rows) = len(rows) <= 1 ? rows : gr-mmerge(gr-msort(take(len(rows) / 2, rows)), gr-msort(drop(len(rows) / 2, rows)), []);
+  def gr-mmerge(a, b, acc) = nil?(a) ? append(ginf-reverse(acc, []), b) : nil?(b) ? append(ginf-reverse(acc, []), a) : gr-lt(b[0][0], a[0][0]) ? gr-mmerge(a, b[1:], cons(b[0], acc)) : gr-mmerge(a[1:], b, cons(a[0], acc));
+  def gr-uniq-rows(rows, acc) = nil?(rows) ? ginf-reverse(acc, []) : !nil?(acc) && str_eq(acc[0][0], rows[0][0]) ? gr-uniq-rows(rows[1:], acc) : gr-uniq-rows(rows[1:], cons(rows[0], acc));
+  // prefix is "refs/heads/", "refs/remotes/", "refs/tags/" ... (a loose ref hides the packed one of the same name)
+  def gr-list(r, prefix) {
+   let top = gs-starts?(prefix, "refs/") ? substring(prefix, 0, gr-last-slash(prefix)) : "refs";
+   let loose = gr-loose-under(gs-common(r), top);
+   let rows = append(filter(row => gs-starts?(row[0], prefix), loose), gr-packed-rows(gr-packed-text(r), prefix));
+   gr-uniq-rows(gr-msort(rows), []);
+  }
+  def gr-last-slash(p) = gr-last-slash-at(p, len(p) - 1);
+  def gr-last-slash-at(p, i) = i <= 0 ? len(p) : str_byte_at(p, i) == 47 ? i : gr-last-slash-at(p, i - 1);
+  // ---- config --------------------------------------------------------------------------------------------------------------
+  // INI text -> [[full key, value] ...]; the section and key fold to lowercase, a subsection keeps its case
+  def gc-lower(s) = foldl((acc, i) => acc ++ byte_to_str(str_byte_at(s, i) >= 65 && str_byte_at(s, i) <= 90 ? str_byte_at(s, i) + 32 : str_byte_at(s, i)), "", range(0, len(s)));
+  def gc-section-name(line) {
+   let inner = gs-trim(substring(line, 1, gs-index-of(line, 93, 0)));
+   let q = gs-index-of(inner, 34, 0);
+   q < 0 ? gc-section-plain(inner) : gc-lower(gs-trim(substring(inner, 0, q))) ++ "." ++ substring(inner, q + 1, gs-index-of(inner, 34, q + 1));
+  }
+  def gc-section-plain(inner) {
+   let sp = gs-index-of(inner, 32, 0);
+   sp < 0 ? gc-lower(inner) : gc-lower(substring(inner, 0, sp)) ++ "." ++ gs-trim(substring(inner, sp + 1, len(inner)));
+  }
+  def gc-value(raw) {
+   let t = gs-trim(gs-ltrim(raw));
+   gs-starts?(t, "\"") && gs-ends?(t, "\"") && len(t) >= 2 ? substring(t, 1, len(t) - 1) : gc-strip-comment(t);
+  }
+  def gc-strip-comment(t) {
+   let h = gs-index-of(t, 35, 0);
+   let s = gs-index-of(t, 59, 0);
+   let cut = h < 0 ? s : s < 0 ? h : h < s ? h : s;
+   cut < 0 ? t : gs-trim(substring(t, 0, cut));
+  }
+  def gc-parse-lines(ls, section, acc) {
+   let l = nil?(ls) ? "" : gs-trim(gs-ltrim(ls[0]));
+   nil?(ls) ? ginf-reverse(acc, []) : len(l) == 0 || str_byte_at(l, 0) == 35 || str_byte_at(l, 0) == 59 ? gc-parse-lines(ls[1:], section, acc) : str_byte_at(l, 0) == 91 ? gc-parse-lines(ls[1:], gc-section-name(l), acc) : gc-parse-lines(ls[1:], section, cons(gc-pair(section, l), acc));
+  }
+  def gc-pair(section, l) {
+   let eq = gs-index-of(l, 61, 0);
+   eq < 0 ? [section ++ "." ++ gc-lower(l), "true"] : [section ++ "." ++ gc-lower(gs-trim(substring(l, 0, eq))), gc-value(substring(l, eq + 1, len(l)))];
+  }
+  def gc-parse(text) = gc-parse-lines(gs-lines(text), "", []);
+  def gc-files(r) = [gs-text-or("/etc/gitconfig", ""), gs-text-or((host_getenv("HOME") ?? "") ++ "/.config/git/config", ""), gs-text-or((host_getenv("HOME") ?? "") ++ "/.gitconfig", ""), gs-text-or(gs-common(r) ++ "/config", ""), gs-text-or(gs-gitdir(r) ++ "/config.worktree", "")];
+  def gc-all(r) = gs-flatten(map(t => gc-parse(t), gc-files(r)));
+  def gc-get-all(r, key) = map(row => row[1], filter(row => str_eq(row[0], gc-fold-key(key)), gc-all(r)));
+  // section.key folds; section.sub.key keeps the subsection's case
+  def gc-fold-key(key) {
+   let first = gs-index-of(key, 46, 0);
+   let last = gc-last-dot(key, len(key) - 1);
+   first < 0 || first == last ? gc-lower(key) : gc-lower(substring(key, 0, first)) ++ substring(key, first, last) ++ "." ++ gc-lower(substring(key, last + 1, len(key)));
+  }
+  def gc-last-dot(s, i) = i <= 0 ? 0 : str_byte_at(s, i) == 46 ? i : gc-last-dot(s, i - 1);
+  def gc-get(r, key) {
+   let vs = gc-get-all(r, key);
+   nil?(vs) ? nothing() : ginf-reverse(vs, [])[0];
+  }
+ }
+ 0;
+}

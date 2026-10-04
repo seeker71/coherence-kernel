@@ -28,7 +28,8 @@
 // a neutral-rule admission cell balanced, parsed, and died until the closer
 // moved from the `(list ...)` tail to the `(let ...)` it belonged to.
 //
-// REQUIRES: host-exec — the loop compiles through it (tests/tree-heal-band.fk answers 255).
+// The loop asks the kernel by calling the cell in this process (cell_run) and reading whether it ran to its end
+// with no compile error (tests/tree-heal-band.fk answers 255); nothing is begun.
 //
 // USE
 //   (th-heal "path/to/cell.fk")   ; 1 closed, 0 left as it was
@@ -37,36 +38,38 @@
 import form-stdlib/core.fk;
 import observe/tree-balance.fk;
 section [form.bml] {
-    def th-run(cmd) = host-exec((cmd + " 2>&1"), "");
     def th-cat(xs) = (Comparable) len(xs) == 0 ? "" : ((String) xs[0] + th-cat(xs[1:]));
-    def th-sub(s, mark, v) = {
-        let i = str_find(s, mark, 0);
-        i < 0 ? s : (substring(s, 0, i) + ((String) v + substring(s, (Number) i + (Number) len(mark), len(s))));
-    };
     //; ── asking the kernel ───────────────────────────────────────────
-    //; Fresh, always. A warm cache answers with a tally and drops the name, so a
-    //; closer could be kept on the strength of a run that never happened.
-    def th-artifacts(p) = {
-        th-run(th-cat(["rm -f ", th-sub(p, ".fk", ".fkb"), " ", th-sub(p, ".fk", ".sym")]));
-        1;
-    };
+    //; Fresh, always: a cell is read as the bytes stand now (the door compares content, not a cached image), and
+    //; its diagnostics are rows it keeps, so a closer is never kept on the strength of a run that never happened.
+    //; The cell is called in this process (cell_run: no child, no exit to wait for), with a budget instead of a
+    //; kill: a closed form that turns into a loop is a cell that did not read.
+    def th-budget-ms() = 120000;
+    def th-kernel(p) = cell_run(p, 0, th-budget-ms(), nothing());
+    //; exit 0: the cell ran to its end and its compile counted no error
+    def th-exit-zero?(rec) = nothing?(rec) ? 0 : nothing?(record_get(rec, "stopped")) && (Comparable) record_get(rec, "errors") == 0 ? 1 : 0;
+    //; and the kernel said no word of error besides
+    def th-said-error?(rows) = (Comparable) len(rows) == 0 ? 0 : str_find(th-cat([(String) (record_get(rows[0], "detail") ?? ""), (String) (record_get(rows[0], "observed") ?? "")]), "error", 0) >= 0 ? 1 : th-said-error?(rows[1:]);
     def th-compiles?(p) = {
-        th-artifacts(p);
-        let out = th-run(th-cat(["./fkwu ", p, " >/dev/null 2>/tmp/th.err; echo rc=$?; cat /tmp/th.err"]));
-        str_find(out, "rc=0", 0) < 0 ? 0 : str_find(out, "error", 0) >= 0 ? 0 : 1;
+        let rec = th-kernel(p);
+        (Comparable) th-exit-zero?(rec) == 1 ? ((Comparable) th-said-error?(record_get(rec, "diag")) == 1 ? 0 : 1) : 0;
     };
-    //; a cell's band, if it has one: tests/<name>-band.fk beside it
+    //; a cell's band, if it has one: tests/<name>-band.fk beside it ("" when it has none)
+    def th-last-slash(p, i, at) = i >= len(p) ? at : th-last-slash(p, i + 1, (String) substring(p, i, i + 1) == "/" ? i : at);
+    def th-band-name(p) = {
+        let slash = th-last-slash(p, 0, -1);
+        let dir = slash < 0 ? "." : substring(p, 0, slash);
+        let file = substring(p, slash + 1, len(p));
+        let stem = (Comparable) len(file) >= 3 && (String) substring(file, len(file) - 3, len(file)) == ".fk" ? substring(file, 0, len(file) - 3) : file;
+        th-cat([dir, "/tests/", stem, "-band.fk"]);
+    };
     def th-band-path(p) = {
-        let i = str_find(p, "/", 0);
-        th-run(th-cat(["d=$(dirname ", p, "); b=$(basename ", p, " .fk); ", "f=$d/tests/$b-band.fk; [ -f \"$f\" ] && printf %s \"$f\""]));
+        let f = th-band-name(p);
+        (Comparable) fs_exists(f) == 1 ? f : "";
     };
     def th-band-ok?(p) = {
         let b = th-band-path(p);
-        (Comparable) len(b) == 0 ? 1 : {
-            th-artifacts(b);
-            let out = th-run(th-cat(["./fkwu ", b, " >/dev/null 2>&1; echo rc=$?"]));
-            str_find(out, "rc=0", 0) >= 0 ? 1 : 0;
-        };
+        (Comparable) len(b) == 0 ? 1 : th-exit-zero?(th-kernel(b));
     };
     //; The kernel reading the cell is the answer here, never the paren count.
     def th-accepts?(p) = (Comparable) th-compiles?(p) == 1 ? th-band-ok?(p) : 0;

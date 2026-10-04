@@ -1,0 +1,283 @@
+// git-write.bml — the write side of git, in Form: zlib streams (stored blocks), loose objects, trees from an index, commits, pack files
+// with OFS_DELTA entries and their v2 indexes, the index file, and ref updates with reflog lines.
+//
+// Everything here writes under a git directory it is HANDED (a scratch repository, or a repository whose owner asked); nothing in this
+// file chooses the checkout it is run in. A writer builds bytes as a Form string, hashes them with git-sha1.bml, and puts them in
+// place with a temporary name and a rename, so a reader never meets a half-written object, ref or index.
+//
+//   gw-zlib(s)                       a zlib stream of s made of stored blocks (valid zlib; git's reader accepts it)
+//   gw-crc32(s)                      CRC-32 (the pack index records one per entry)
+//   gw-put-loose(gitdir, type, body) writes objects/xx/yyyy... when absent, answers the hex id
+//   gw-tree-body(entries)            a tree object's body from [[mode string, name, raw id] ...] (sorted here in git's order)
+//   gw-write-tree(gitdir, entries)   from index rows: writes the tree objects, answers the root tree's raw id
+//   gw-commit-body(tree, parents, author, committer, message)
+//   gw-pack(entries)                 [pack bytes, rows [raw id, offset, crc]] from entries [type, body] or ["ofs", base index, delta body, type]
+//   gw-idx(rows, packsha)            the v2 index file for a pack
+//   gw-delta(base, pieces)           a delta instruction stream: pieces are ["copy", offset, size] or ["insert", bytes]
+//   gw-index(entries)                an index v2 file from rows as git-index.bml reads them
+//   gw-update-ref(gitdir, name, hex, old, who, message)   moves a ref (loose file, atomic) and appends the reflog line
+//
+// PROOF: form-stdlib/tests/git-native-write-band.fk — every written object is read back through git-store.bml and hashes to its own
+// name; the pack index is read back with its checksums; the index file reads back entry for entry; a scratch repository's graph is
+// closed under fsck-style self-verification.
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml form-stdlib/bml/git-refs.bml form-stdlib/bml/git-index.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+section [form.bml] {
+ class GitWrite {
+  // ---- bytes ---------------------------------------------------------------------------------------------------------------
+  def gw-b(n) = byte_to_str(band(n, 255));
+  def gw-be32(n) = gsha-u32-str(n);
+  def gw-be16(n) = str_concat(gw-b(shr_u32(n, 8)), gw-b(n));
+  def gw-le16(n) = str_concat(gw-b(n), gw-b(shr_u32(n, 8)));
+  def gw-cat(pieces) = ginf-join(ginf-reverse(pieces, []));
+  // ---- zlib, stored ----------------------------------------------------------------------------------------------------------
+  def gw-stored-blocks(s, p, n, acc) {
+   let take = n - p > 65535 ? 65535 : n - p;
+   let last = p + take >= n;
+   let piece = str_concat(gw-b(last ? 1 : 0), str_concat(gw-le16(take), str_concat(gw-le16(65535 - take), substring(s, p, p + take))));
+   last ? cons(piece, acc) : gw-stored-blocks(s, p + take, n, cons(piece, acc));
+  }
+  def gw-zlib(s) = gw-cat(append([str_concat(byte_to_str(120), byte_to_str(1))],append(ginf-reverse(gw-stored-blocks(s, 0, len(s), []), []), [gw-be32(ginf-adler32(s))])));
+  // ---- crc32 ----------------------------------------------------------------------------------------------------------------
+  def gw-crc-bit(c, k) = k == 0 ? c : gw-crc-bit(band(c, 1) == 1 ? bxor(shr_u32(c, 1), 3988292384) : shr_u32(c, 1), k - 1);
+  def gw-crc-table-at(i, acc) = i >= 256 ? gw-cat(acc) : gw-crc-table-at(i + 1, cons(gw-be32(gw-crc-bit(i, 8)), acc));
+  def gw-crc-tab(t, i) = gs-be32(t, 4 * i);
+  def gw-crc-loop(s, t, i, n, c) = i >= n ? bxor(c, 4294967295) : gw-crc-loop(s, t, i + 1, n, bxor(shr_u32(c, 8), gw-crc-tab(t, band(bxor(c, str_byte_at(s, i)), 255))));
+  def gw-crc32(s) = gw-crc-loop(s, gw-crc-table-at(0, []), 0, len(s), 4294967295);
+  // ---- loose objects ----------------------------------------------------------------------------------------------------------
+  def gw-mkdirs(path) {
+   let made = host_dir_mkdir(path);
+   host_path_is_dir(path) == 1 ? 1 : gw-mkdirs-up(path);
+  }
+  def gw-mkdirs-up(path) {
+   let up = gs-parent(path);
+   len(up) < 2 ? 0 : gw-mkdirs-after(path, gw-mkdirs(up));
+  }
+  def gw-mkdirs-after(path, ok) = ok == 1 ? (host_dir_mkdir(path) + host_path_is_dir(path) >= 1 ? 1 : 0) : 0;
+  def gw-tmp-name(dir, tag) = dir ++ "/tmp_" ++ tag ++ "_" ++ host_pid().str() ++ "_" ++ (now_unix_ms() % 1000000).str();
+  // atomically puts bytes at path (a temporary name in the same directory, then a rename); 1 when written
+  def gw-put-file(path, bytes) {
+   let tmp = gw-tmp-name(gs-parent(path), "w");
+   let ok = write_file(tmp, bytes);
+   ok >= 0 && host_path_rename(tmp, path) == 0 ? 1 : gw-put-fail(tmp);
+  }
+  def gw-put-fail(tmp) {
+   let gone = host_path_remove(tmp);
+   0;
+  }
+  def gw-loose-file(gitdir, hex) = gitdir ++ "/objects/" ++ substring(hex, 0, 2) ++ "/" ++ substring(hex, 2, 40);
+  // the hex id of an object; the loose file is written when no copy stands
+  def gw-put-loose(gitdir, type, body) {
+   let raw = gs-hash(type, body);
+   let hex = gsha-hex-of-raw(raw);
+   let path = gw-loose-file(gitdir, hex);
+   host_path_exists(path) == 1 ? hex : gw-put-loose-new(gitdir, type, body, hex, path);
+  }
+  def gw-put-loose-new(gitdir, type, body, hex, path) {
+   let d = gw-mkdirs(gs-parent(path));
+   let ok = d == 1 ? gw-put-file(path, gw-zlib(gs-frame(type, body))) : 0;
+   let mode = ok == 1 ? host_chmod(path, 292) : 0;
+   ok == 1 ? hex : nothing();
+  }
+  // ---- trees -----------------------------------------------------------------------------------------------------------------
+  def gw-mode-str(m) = m == 16384 ? "40000" : gw-oct(m, "");
+  def gw-oct(m, acc) = m == 0 ? (len(acc) == 0 ? "0" : acc) : gw-oct(m / 8, substring("01234567", m % 8, (m % 8) + 1) ++ acc);
+  def gw-tree-key(e) = gs-tree?(e[0]) ? e[1] ++ "/" : e[1];
+  def gw-tree-sort(es) = len(es) <= 1 ? es : gw-tree-merge(gw-tree-sort(take(len(es) / 2, es)), gw-tree-sort(drop(len(es) / 2, es)), []);
+  def gw-tree-merge(a, b, acc) = nil?(a) ? append(ginf-reverse(acc, []), b) : nil?(b) ? append(ginf-reverse(acc, []), a) : gr-lt(gw-tree-key(b[0]), gw-tree-key(a[0])) ? gw-tree-merge(a, b[1:], cons(b[0], acc)) : gw-tree-merge(a[1:], b, cons(a[0], acc));
+  def gw-tree-body(entries) = gw-cat(map(e => str_concat(e[0], str_concat(" ", str_concat(e[1], str_concat(byte_to_str(0), e[2])))), gw-tree-sort(entries)));
+  // index rows (stage 0, sorted by path) under prefix -> the tree's raw id; subtrees are written first
+  // the entries of a sorted list that live under dir (a prefix ending in "/"): [run, rest]
+  def gw-take-run(ents, dir, acc) = nil?(ents) || !gs-starts?(ents[0][0], dir) ? [ginf-reverse(acc, []), ents] : gw-take-run(ents[1:], dir, cons(ents[0], acc));
+  def gw-write-tree(gitdir, ents) = gsha-raw-of-hex(gw-write-tree-at(gitdir, filter(e => e[6] == 0, ents), ""));
+  def gw-write-tree-at(gitdir, ents, prefix) = gw-put-loose(gitdir, "tree", gw-tree-body(gw-tree-entries-for(gitdir, ents, prefix, [])));
+  def gw-tree-entries-for(gitdir, ents, prefix, acc) {
+   nil?(ents) ? ginf-reverse(acc, []) : gw-tree-next(gitdir, ents, prefix, acc, substring(ents[0][0], len(prefix), len(ents[0][0])));
+  }
+  def gw-tree-next(gitdir, ents, prefix, acc, rel) {
+   let sl = gs-index-of(rel, 47, 0);
+   sl < 0 ? gw-tree-entries-for(gitdir, ents[1:], prefix, cons([gw-mode-str(ents[0][1]), rel, ents[0][2]], acc)) : gw-tree-dir(gitdir, ents, prefix, acc, substring(rel, 0, sl));
+  }
+  def gw-tree-dir(gitdir, ents, prefix, acc, name) {
+   let run = gw-take-run(ents, prefix ++ name ++ "/", []);
+   gw-tree-dir2(gitdir, prefix, acc, name, run);
+  }
+  def gw-tree-dir2(gitdir, prefix, acc, name, run) = gw-tree-entries-for(gitdir, run[1], prefix, cons(["40000", name, gsha-raw-of-hex(gw-write-tree-at(gitdir, run[0], prefix ++ name ++ "/"))], acc));
+  // ---- commits ---------------------------------------------------------------------------------------------------------------
+  def gw-person-line(name, email, secs, tz) = name ++ " <" ++ email ++ "> " ++ secs.str() ++ " " ++ tz;
+  def gw-commit-body(tree, parents, author, committer, message) = "tree " ++ tree ++ "\n" ++ ginf-join(ginf-reverse(map(p => "parent " ++ p ++ "\n", parents), [])) ++ "author " ++ author ++ "\ncommitter " ++ committer ++ "\n\n" ++ message;
+  // seconds east of UTC from the host's zone at a unix ms -> "+0800"
+  def gw-tz-text(off) {
+   let a = off < 0 ? 0 - off : off;
+   (off < 0 ? "-" : "+") ++ gw-p2(a / 3600) ++ gw-p2((a % 3600) / 60);
+  }
+  def gw-p2(n) = n < 10 ? "0" ++ n.str() : n.str();
+  def gw-local-tz(ms) = gw-tz-text((host_localtime(ms) ?? [0, 0, 0, 0, 0, 0, 0, 0])[7]);
+  // ---- deltas and packs ------------------------------------------------------------------------------------------------------
+  def gw-varint(n) = n < 128 ? gw-b(n) : str_concat(gw-b(bor(band(n, 127), 128)), gw-varint(n / 128));
+  // the nonzero bytes of v (low first), as [command bits, bytes]: offset takes bits 1 2 4 8 (4 bytes), size 16 32 64 (3 bytes)
+  def gw-fields(v, mask, k, acc) = k <= 0 ? acc : gw-fields(v / 256, mask * 2, k - 1, band(v, 255) == 0 ? acc : [bor(acc[0], mask), str_concat(acc[1], gw-b(v))]);
+  def gw-copy-ins(off, size) {
+   let o = gw-fields(off, 1, 4, [128, ""]);
+   let s = gw-fields(size == 65536 ? 0 : size, 16, 3, o);
+   str_concat(gw-b(s[0]), s[1]);
+  }
+  def gw-delta-piece(p) = str_eq(p[0], "copy") ? gw-copy-ins(p[1], p[2]) : str_concat(gw-b(len(p[1])), p[1]);
+  def gw-delta(base, pieces) {
+   let result = foldl((acc, p) => acc + (str_eq(p[0], "copy") ? p[2] : len(p[1])), 0, pieces);
+   gw-cat(append([gw-varint(len(base)), gw-varint(result)], map(p => gw-delta-piece(p), pieces)));
+  }
+  def gw-type-code(type) = str_eq(type, "commit") ? 1 : str_eq(type, "tree") ? 2 : str_eq(type, "blob") ? 3 : str_eq(type, "tag") ? 4 : 0;
+  def gw-entry-head(code, size) {
+   let first = bor(shl_u32(code, 4), band(size, 15));
+   size < 16 ? gw-b(first) : str_concat(gw-b(bor(first, 128)), gw-size-rest(size / 16));
+  }
+  def gw-size-rest(n) = n < 128 ? gw-b(n) : str_concat(gw-b(bor(band(n, 127), 128)), gw-size-rest(n / 128));
+  // the OFS_DELTA distance: base-128 digits, high first, each but the last with the top bit, with the "minus one" carry
+  def gw-ofs-enc(n) = gw-ofs-go(n / 128, gw-b(band(n, 127)));
+  def gw-ofs-go(n, acc) = n == 0 ? acc : gw-ofs-go((n - 1) / 128, str_concat(gw-b(bor(band(n - 1, 127), 128)), acc));
+  // entries: ["plain", type, body] | ["ofs", index of base entry, delta bytes]; rows [raw id, offset, crc] and the pack
+  def gw-pack(entries) = gw-pack-build(entries, 12, [], [], 0);
+  def gw-pack-build(entries, off, parts, rows, i) {
+   nil?(entries) ? gw-pack-final(parts, rows, ginf-reverse(parts, [])) : gw-pack-one(entries, off, parts, rows, i);
+  }
+  def gw-pack-one(entries, off, parts, rows, i) {
+   let e = entries[0];
+   let bytes = str_eq(e[0], "plain") ? str_concat(gw-entry-head(gw-type-code(e[1]), len(e[2])), gw-zlib(e[2])) : gw-ofs-bytes(e, off, rows);
+   let id = str_eq(e[0], "plain") ? gs-hash(e[1], e[2]) : gw-ofs-id(e, rows);
+   gw-pack-build(entries[1:], off + len(bytes), cons(bytes, parts), cons([id, off, gw-crc32(bytes), str_eq(e[0], "plain") ? e[1] : gw-ofs-type(e, rows), str_eq(e[0], "plain") ? e[2] : gw-ofs-body(e, rows)], rows), i + 1);
+  }
+  // rows are newest first; entry e refers to row index e[1] counted from the oldest
+  def gw-row-of(rows, k) = ginf-reverse(rows, [])[k];
+  def gw-ofs-bytes(e, off, rows) {
+   let base = gw-row-of(rows, e[1]);
+   str_concat(gw-entry-head(6, len(e[2])), str_concat(gw-ofs-enc(off - base[1]), gw-zlib(e[2])));
+  }
+  def gw-ofs-type(e, rows) = gw-row-of(rows, e[1])[3];
+  def gw-ofs-body(e, rows) = gw-apply-delta(gw-row-of(rows, e[1])[4], e[2]);
+  def gw-ofs-id(e, rows) = gs-hash(gw-ofs-type(e, rows), gw-ofs-body(e, rows));
+  def gw-apply-delta(base, delta) = gs-delta-apply(base, delta);
+  def gw-pack-final(parts, rows, ordered) {
+   let body = str_concat("PACK", str_concat(gw-be32(2), str_concat(gw-be32(len(rows)), gw-cat(ordered))));
+   [str_concat(body, gsha-raw(body)), ginf-reverse(rows, [])];
+  }
+  // the v2 index: fanout, names (sorted), crc32s, 31-bit offsets, the pack's checksum, the index's checksum
+  def gw-idx-sort(rows) = len(rows) <= 1 ? rows : gw-idx-merge(gw-idx-sort(take(len(rows) / 2, rows)), gw-idx-sort(drop(len(rows) / 2, rows)), []);
+  def gw-idx-merge(a, b, acc) = nil?(a) ? append(ginf-reverse(acc, []), b) : nil?(b) ? append(ginf-reverse(acc, []), a) : gr-lt(b[0][0], a[0][0]) ? gw-idx-merge(a, b[1:], cons(b[0], acc)) : gw-idx-merge(a[1:], b, cons(a[0], acc));
+  def gw-fan(rows, b) = len(filter(r => str_byte_at(r[0], 0) <= b, rows));
+  def gw-idx(rows, packsha) {
+   let sorted = gw-idx-sort(rows);
+   let head = gw-cat(append([str_concat(byte_to_str(255), "tOc"), gw-be32(2)], map(b => gw-be32(gw-fan(sorted, b)), range(0, 256))));
+   let body = gw-cat([head, gw-cat(map(r => r[0], sorted)), gw-cat(map(r => gw-be32(r[2]), sorted)), gw-cat(map(r => gw-be32(r[1]), sorted)), packsha]);
+   str_concat(body, gsha-raw(body));
+  }
+  // writes pack-<sha>.pack and .idx under gitdir/objects/pack; answers the pack's hex name
+  def gw-put-pack(gitdir, packed) {
+   let sha = substring(packed[0], len(packed[0]) - 20, len(packed[0]));
+   let name = gsha-hex-of-raw(sha);
+   let d = gw-mkdirs(gitdir ++ "/objects/pack");
+   let a = gw-put-file(gitdir ++ "/objects/pack/pack-" ++ name ++ ".pack", packed[0]);
+   let b = gw-put-file(gitdir ++ "/objects/pack/pack-" ++ name ++ ".idx", gw-idx(packed[1], sha));
+   a == 1 && b == 1 ? name : nothing();
+  }
+  // ---- the index file ----------------------------------------------------------------------------------------------------------
+  def gw-pad8(n) = (8 - (n % 8)) % 8;
+  def gw-index-entry(e) {
+   let name = e[0];
+   let flags = bor(shl_u32(band(e[6], 3), 12), len(name) < 4095 ? len(name) : 4095);
+   let fixed = str_concat(gw-be32(e[8]), str_concat(gw-be32(e[9]), str_concat(gw-be32(e[4]), str_concat(gw-be32(e[5]), str_concat(gw-be32(e[11]), str_concat(gw-be32(e[10]), str_concat(gw-be32(e[1]), str_concat(gw-be32(0), str_concat(gw-be32(0), str_concat(gw-be32(e[3]), str_concat(e[2], gw-be16(flags))))))))))));
+   str_concat(fixed, str_concat(name, gw-zeros2(1 + gw-pad8(62 + len(name) + 1))));
+  }
+  def gw-zeros2(k) = gsha-zeros(k);
+  // rows sorted by (path, stage) are written as given; version 2, no extensions
+  def gw-index(entries) {
+   let body = str_concat("DIRC", str_concat(gw-be32(2), str_concat(gw-be32(len(entries)), gw-cat(map(e => gw-index-entry(e), entries)))));
+   str_concat(body, gsha-raw(body));
+  }
+  // ---- a new repository --------------------------------------------------------------------------------------------------------
+  // `git init` in Form: top/.git with HEAD on refs/heads/<branch>, an empty object store and the three ref directories; 1 when made
+  def gw-init(top, branch) {
+   let g = top ++ "/.git";
+   let a = gw-mkdirs(g ++ "/objects/pack");
+   let b = gw-mkdirs(g ++ "/objects/info");
+   let c = gw-mkdirs(g ++ "/refs/heads");
+   let d = gw-mkdirs(g ++ "/refs/tags");
+   let h = gw-put-file(g ++ "/HEAD", "ref: refs/heads/" ++ branch ++ "\n");
+   let cf = gw-put-file(g ++ "/config", "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n");
+   a + b + c + d + h + cf == 6 ? 1 : 0;
+  }
+  // writes a commit object; answers its hex id
+  def gw-commit(gitdir, tree, parents, name, email, secs, tz, message) {
+   let who = gw-person-line(name, email, secs, tz);
+   gw-put-loose(gitdir, "commit", gw-commit-body(tree, parents, who, who, message));
+  }
+  // ---- the demonstration history the bands read ------------------------------------------------------------------------------------
+  // A <- B <- C <- D, B <- E <- F, M = merge(D, F), G on M. Each commit's tree holds f.txt (what the history edits), g.txt (touched by C and D
+  // only) and, from G, h.txt. Times are 1700000000 + 100 * step (E and F out of step order on purpose). Refs: main = G, feat = F,
+  // refs/remotes/origin/main = D with branch.main upstream configured, lightweight tag v1 = B, annotated tag t1 -> D. HEAD is main.
+  // answers [A, B, C, D, E, F, M, G] as hex ids
+  def gw-demo-tree(g, f, gtext, h) {
+   let fb = gw-put-loose(g, "blob", f);
+   let gb = gw-put-loose(g, "blob", gtext);
+   let es = append([["100644", "f.txt", gsha-raw-of-hex(fb)]], append(len(gtext) > 0 ? [["100644", "g.txt", gsha-raw-of-hex(gb)]] : [], len(h) > 0 ? [["100644", "h.txt", gsha-raw-of-hex(gw-put-loose(g, "blob", h))]] : []));
+   gw-put-loose(g, "tree", gw-tree-body(es));
+  }
+  def gw-demo-dag(top) {
+   let m0 = gw-mkdirs(top);
+   let i0 = gw-init(top, "main");
+   let g = top ++ "/.git";
+   let tA = gw-demo-tree(g, "1\n", "", "");
+   let tB = gw-demo-tree(g, "1\n2\n", "", "");
+   let tC = gw-demo-tree(g, "1\n2\n3\n", "g1\n", "");
+   let tD = gw-demo-tree(g, "1\n2\n3\n", "g2\n", "");
+   let tE = gw-demo-tree(g, "1\n2\nE\n", "", "");
+   let tF = gw-demo-tree(g, "1\n2\nE\nF\n", "", "");
+   let tM = gw-demo-tree(g, "1\n2\n3\nE\nF\n", "g2\n", "");
+   let tG = gw-demo-tree(g, "1\n2\n3\nE\nF\n", "g2\n", "h1\n");
+   let cA = gw-commit(g, tA, [], "Ann", "ann@example.test", 1700000100, "+0000", "A: first\n");
+   let cB = gw-commit(g, tB, [cA], "Bob", "bob@example.test", 1700000200, "+0100", "B: second line\n\nThe body of B,\nin two lines.\n");
+   let cC = gw-commit(g, tC, [cB], "Ann", "ann@example.test", 1700000300, "+0000", "C: third line\n");
+   let cD = gw-commit(g, tD, [cC], "Cy", "cy@example.test", 1700000400, "-0500", "D: touches g only\n");
+   let cE = gw-commit(g, tE, [cB], "Bob", "bob@example.test", 1700000250, "+0100", "E: a side line\n");
+   let cF = gw-commit(g, tF, [cE], "Bob", "bob@example.test", 1700000350, "+0100", "F: another side line\n");
+   let cM = gw-commit(g, tM, [cD, cF], "Ann", "ann@example.test", 1700000500, "+0000", "M: merge feat\n");
+   let cG = gw-commit(g, tG, [cM], "Ann", "ann@example.test", 1700000600, "+0000", "G: add h\n");
+   let who = "Ann <ann@example.test>";
+   let r1 = gw-update-ref(g, "refs/heads/main", cG, nothing(), who, "commit: G");
+   let r2 = gw-update-ref(g, "refs/heads/feat", cF, nothing(), who, "branch: feat");
+   let r3 = gw-update-ref(g, "refs/remotes/origin/main", cD, nothing(), who, "fetch");
+   let r4 = gw-update-ref(g, "refs/tags/v1", cB, nothing(), who, "tag");
+   let tag = gw-put-loose(g, "tag", "object " ++ cD ++ "\ntype commit\ntag t1\ntagger Cy <cy@example.test> 1700000450 -0500\n\nannotated\n");
+   let r5 = gw-update-ref(g, "refs/tags/t1", tag, nothing(), who, "tag");
+   let cf = gw-put-file(g ++ "/config", "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n[remote \"origin\"]\n\turl = https://example.test/demo.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n[user]\n\tname = Demo Person\n\temail = demo@example.test\n");
+   [cA, cB, cC, cD, cE, cF, cM, cG];
+  }
+  // ---- refs --------------------------------------------------------------------------------------------------------------------
+  def gw-reflog-line(old, new, who, secs, tz, message) = old ++ " " ++ new ++ " " ++ who ++ " " ++ secs.str() ++ " " ++ tz ++ "\t" ++ message ++ "\n";
+  def gw-append-file(path, text) {
+   let old = read_file(path) ?? "";
+   gw-put-file(path, str_concat(old, text));
+  }
+  // moves a loose ref to hex (old: the hex it must hold now, or nothing() to skip the check); appends to logs/<name>
+  def gw-update-ref(gitdir, name, hex, old, who, message) {
+   let path = gitdir ++ "/" ++ name;
+   let cur = gs-trim(gs-text-or(path, ""));
+   let ok = nothing?(old) || str_eq(cur, old) || (len(cur) == 0 && str_eq(old, "0000000000000000000000000000000000000000"));
+   !ok ? 0 : gw-update-ref-go(gitdir, name, path, hex, len(cur) == 0 ? "0000000000000000000000000000000000000000" : cur, who, message);
+  }
+  def gw-update-ref-go(gitdir, name, path, hex, prev, who, message) {
+   let d = gw-mkdirs(gs-parent(path));
+   let now = now_unix_ms();
+   let w = gw-put-file(path, hex ++ "\n");
+   let ld = gw-mkdirs(gs-parent(gitdir ++ "/logs/" ++ name));
+   let l = gw-append-file(gitdir ++ "/logs/" ++ name, gw-reflog-line(prev, hex, who, now / 1000, gw-local-tz(now), message));
+   w;
+  }
+ }
+ 0;
+}

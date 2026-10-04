@@ -1,0 +1,370 @@
+// git-store.bml — a git repository read in Form: discovery (a worktree's `.git` FILE, `commondir`, alternates), loose objects,
+// pack files and their v2 indexes (fanout, sorted names, 32- and 64-bit offsets, OFS_DELTA and REF_DELTA with the delta
+// instruction stream), and the parsers for tree, commit and tag objects.
+//
+// A repository handle is  [top, gitdir, commondir, objdirs, packs]  (git-open path). `top` is the working tree (the directory
+// holding `.git`), `gitdir` this checkout's private directory (a linked worktree's is under <common>/worktrees/), `commondir` the
+// shared one (objects, packed-refs, refs/heads ...), `objdirs` the object directories (the common one, then any alternates), and
+// `packs` one row [packpath, idx-string, n, packsize] per pack with an index.
+//
+// Ids are held as 20-byte raw strings (`raw`) inside the store and as 40-character hex outside it; gsha-raw-of-hex and
+// gsha-hex-of-raw (git-sha1.bml) are the two doors. An object read answers [type, body] ("commit" | "tree" | "blob" | "tag") or
+// nothing(). Nothing is inflated that was not asked for: a name is found by binary search over the pack index (the 256-entry
+// fanout narrows it), and only that object's compressed bytes are read from the pack with read_file_slice, so a 1.4 GB pack
+// is never held.
+//
+// Self-verification (no oracle): gs-verify(raw, type, body) is true when sha1("<type> <len>\0" ++ body) is the id the object was
+// found under. A pack entry carries no name of its own, so this is the check that the index, the offset, the inflate and the
+// delta resolution all agreed.
+//
+// PROOF: form-stdlib/tests/git-native-store-band.fk (loose and packed objects of this repository, a synthetic repository with a
+// hand-built pack and an OFS_DELTA).
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+section [form.bml] {
+ class GitStore {
+  // ---- bytes and text ------------------------------------------------------------------------------------------------------
+  def gs-be32(s, p) = (str_byte_at(s, p) * 16777216) + (str_byte_at(s, p + 1) * 65536) + (str_byte_at(s, p + 2) * 256) + str_byte_at(s, p + 3);
+  def gs-be16(s, p) = (str_byte_at(s, p) * 256) + str_byte_at(s, p + 1);
+  def gs-be64(s, p) = (gs-be32(s, p) * 4294967296) + gs-be32(s, p + 4);
+  def gs-pre-at(s, p, i) = i >= len(p) ? true : str_byte_at(s, i) == str_byte_at(p, i) && gs-pre-at(s, p, i + 1);
+  def gs-starts?(s, p) = len(s) >= len(p) && gs-pre-at(s, p, 0);
+  def gs-ends?(s, p) = len(s) >= len(p) && str_eq(substring(s, len(s) - len(p), len(s)), p);
+  def gs-rtrim-at(s, n) = n > 0 && str_byte_at(s, n - 1) <= 32 ? gs-rtrim-at(s, n - 1) : n;
+  def gs-trim(s) = substring(s, 0, gs-rtrim-at(s, len(s)));
+  def gs-split-go(s, sep, i, start, n, acc) = i >= n ? ginf-reverse(start < n ? cons(substring(s, start, n), acc) : acc, []) : str_byte_at(s, i) == sep ? gs-split-go(s, sep, i + 1, i + 1, n, cons(substring(s, start, i), acc)) : gs-split-go(s, sep, i + 1, start, n, acc);
+  // the pieces of s between separator bytes; a trailing separator ends the last piece, it does not add an empty one
+  def gs-split(s, sep) = gs-split-go(s, sep, 0, 0, len(s), []);
+  def gs-lines(s) = gs-split(s, 10);
+  def gs-index-of(s, b, i) = i >= len(s) ? 0 - 1 : str_byte_at(s, i) == b ? i : gs-index-of(s, b, i + 1);
+  def gs-text(path) = read_file(path);
+  def gs-text-or(path, d) = read_file(path) ?? d;
+  def gs-dir?(p) = host_path_is_dir(p) == 1;
+  def gs-file?(p) = host_path_exists(p) == 1 && !gs-dir?(p);
+  // ---- discovery -----------------------------------------------------------------------------------------------------------
+  def gs-parent(p) = gs-parent-at(p, len(p) - 1);
+  def gs-parent-at(p, i) = i <= 0 ? "/" : str_byte_at(p, i) == 47 ? substring(p, 0, i) : gs-parent-at(p, i - 1);
+  def gs-abs(base, p) = gs-starts?(p, "/") ? p : base ++ "/" ++ p;
+  // the directory `.git` names: a directory is itself, a file reads `gitdir: <path>` (relative to the directory holding it)
+  def gs-dotgit(top) {
+   let dot = top ++ "/.git";
+   gs-dir?(dot) ? dot : gs-dotgit-file(top, gs-text-or(dot, ""));
+  }
+  def gs-dotgit-file(top, text) = gs-starts?(text, "gitdir:") ? host_realpath(gs-abs(top, gs-trim(gs-ltrim(substring(text, 7, len(text)))))) : nothing();
+  def gs-ltrim(s) = len(s) > 0 && str_byte_at(s, 0) <= 32 ? gs-ltrim(substring(s, 1, len(s))) : s;
+  def gs-has-git?(dir) = host_path_exists(dir ++ "/.git") == 1;
+  def gs-top-of(dir) = gs-has-git?(dir) ? dir : len(dir) <= 1 ? nothing() : gs-top-of(gs-parent(dir));
+  def gs-commondir(gitdir) {
+   let c = gs-text-or(gitdir ++ "/commondir", "");
+   len(gs-trim(c)) == 0 ? gitdir : host_realpath(gs-abs(gitdir, gs-trim(c)));
+  }
+  def gs-alternates(common) = map(l => host_realpath(gs-abs(common ++ "/objects", l)), filter(l => len(l) > 0 && str_byte_at(l, 0) != 35, gs-lines(gs-text-or(common ++ "/objects/info/alternates", ""))));
+  // the pack rows of one object directory
+  def gs-packs-of(objdir) = gs-packs-names(objdir ++ "/pack", filter(n => gs-ends?(n, ".idx"), host_dir_list(objdir ++ "/pack") ?? []));
+  def gs-packs-names(dir, names) = map(n => gs-pack-row(dir ++ "/" ++ substring(n, 0, len(n) - 4) ++ ".pack", read_file(dir ++ "/" ++ n)), filter(n => host_path_exists(dir ++ "/" ++ substring(n, 0, len(n) - 4) ++ ".pack") == 1, names));
+  def gs-pack-row(packpath, idx) = [packpath, idx, gs-be32(idx, 8 + 1020), host_file_size(packpath)];
+  def gs-flatten(xss) = foldl((acc, xs) => append(acc, xs), [], xss);
+  def gs-open-at(top) {
+   let gitdir = gs-dotgit(top);
+   nothing?(gitdir) ? nothing() : gs-open-dirs(top, gitdir, gs-commondir(gitdir));
+  }
+  def gs-open-dirs(top, gitdir, common) {
+   let objdirs = cons(common ++ "/objects", gs-alternates(common));
+   [top, gitdir, common, objdirs, gs-flatten(map(d => gs-packs-of(d), objdirs)), gcg-open(common ++ "/objects/info/commit-graph"), record_new(0)];
+  }
+  // ---- the commit-graph file -------------------------------------------------------------------------------------------------
+  // a commit's tree, parents and commit time from the graph, without inflating the commit: [text, fanout off, oid off, cdat off, edge off, n]
+  def gcg-chunk(s, k, n, id) = k >= n ? 0 - 1 : str_eq(substring(s, 8 + (12 * k), 12 + (12 * k)), id) ? gs-be32(s, 8 + (12 * k) + 8) : gcg-chunk(s, k + 1, n, id);
+  def gcg-open(path) {
+   let s = read_file(path);
+   nothing?(s) || len(s) < 1100 || !str_eq(substring(s, 0, 4), "CGPH") || str_byte_at(s, 4) != 1 || str_byte_at(s, 5) != 1 ? nothing() : gcg-open-chunks(s, str_byte_at(s, 6));
+  }
+  def gcg-open-chunks(s, nc) {
+   let oidf = gcg-chunk(s, 0, nc, "OIDF");
+   let oidl = gcg-chunk(s, 0, nc, "OIDL");
+   let cdat = gcg-chunk(s, 0, nc, "CDAT");
+   let edge = gcg-chunk(s, 0, nc, "EDGE");
+   oidf < 0 || oidl < 0 || cdat < 0 ? nothing() : [s, oidf, oidl, cdat, edge, gs-be32(s, oidf + 1020)];
+  }
+  def gcg-cmp(cg, mid, raw, i) {
+   let a = str_byte_at(raw, i);
+   let b = str_byte_at(cg[0], cg[2] + (20 * mid) + i);
+   i >= 20 ? 0 : a < b ? 0 - 1 : a > b ? 1 : gcg-cmp(cg, mid, raw, i + 1);
+  }
+  def gcg-bsearch(cg, raw, lo, hi) {
+   let mid = (lo + hi) / 2;
+   let c = lo >= hi ? 2 : gcg-cmp(cg, mid, raw, 0);
+   c == 2 ? 0 - 1 : c == 0 ? mid : c < 0 ? gcg-bsearch(cg, raw, lo, mid) : gcg-bsearch(cg, raw, mid + 1, hi);
+  }
+  def gcg-find(cg, raw) {
+   let b = str_byte_at(raw, 0);
+   gcg-bsearch(cg, raw, b == 0 ? 0 : gs-be32(cg[0], cg[1] + (4 * (b - 1))), gs-be32(cg[0], cg[1] + (4 * b)));
+  }
+  def gcg-oid(cg, pos) = substring(cg[0], cg[2] + (20 * pos), cg[2] + (20 * pos) + 20);
+  def gcg-edges(cg, at, acc) {
+   let w = gs-be32(cg[0], at);
+   w >= 2147483648 ? ginf-reverse(cons(gcg-oid(cg, w - 2147483648), acc), []) : gcg-edges(cg, at + 4, cons(gcg-oid(cg, w), acc));
+  }
+  def gcg-parents(cg, c) {
+   let p1 = gs-be32(cg[0], c + 20);
+   let p2 = gs-be32(cg[0], c + 24);
+   append(p1 == 1879048192 ? [] : [gcg-oid(cg, p1)], p2 == 1879048192 ? [] : p2 >= 2147483648 ? gcg-edges(cg, cg[4] + (4 * (p2 - 2147483648)), []) : [gcg-oid(cg, p2)]);
+  }
+  // [parent raws, commit time, tree raw] for a commit the graph holds, else nothing()
+  def gcg-commit(r, raw) {
+   let cg = r[5];
+   let pos = nothing?(cg) ? 0 - 1 : gcg-find(cg, raw);
+   pos < 0 ? nothing() : gcg-commit-at(cg, cg[3] + (36 * pos));
+  }
+  def gcg-commit-at(cg, c) = [gcg-parents(cg, c), (band(gs-be32(cg[0], c + 28), 3) * 4294967296) + gs-be32(cg[0], c + 32), substring(cg[0], c, c + 20)];
+  // open the repository holding `path` (the working tree, or any directory below it); nothing() when there is none
+  def git-open(path) {
+   let real = host_realpath(path);
+   let top = nothing?(real) ? nothing() : gs-top-of(real);
+   nothing?(top) ? nothing() : gs-open-at(top);
+  }
+  def gs-top(r) = r[0];
+  def gs-gitdir(r) = r[1];
+  def gs-common(r) = r[2];
+  def gs-objdirs(r) = r[3];
+  def gs-packs(r) = r[4];
+  // ---- pack indexes --------------------------------------------------------------------------------------------------------
+  def gs-idx-fan(idx, b) = gs-be32(idx, 8 + (4 * b));
+  def gs-idx-name-pos(mid) = 1032 + (20 * mid);
+  // -1 / 0 / 1: the id (raw, 20 bytes) against the name at index position mid
+  def gs-cmp20(idx, mid, raw, i) {
+   let a = str_byte_at(raw, i);
+   let b = str_byte_at(idx, gs-idx-name-pos(mid) + i);
+   i >= 20 ? 0 : a < b ? 0 - 1 : a > b ? 1 : gs-cmp20(idx, mid, raw, i + 1);
+  }
+  def gs-bsearch(idx, raw, lo, hi) {
+   let mid = (lo + hi) / 2;
+   let c = lo >= hi ? 2 : gs-cmp20(idx, mid, raw, 0);
+   c == 2 ? 0 - 1 : c == 0 ? mid : c < 0 ? gs-bsearch(idx, raw, lo, mid) : gs-bsearch(idx, raw, mid + 1, hi);
+  }
+  // the index position of a raw id, or -1
+  def gs-idx-find(idx, raw) {
+   let b = str_byte_at(raw, 0);
+   gs-bsearch(idx, raw, b == 0 ? 0 : gs-idx-fan(idx, b - 1), gs-idx-fan(idx, b));
+  }
+  def gs-idx-n(idx) = gs-idx-fan(idx, 255);
+  def gs-idx-offset(idx, mid) {
+   let n = gs-idx-n(idx);
+   let o = gs-be32(idx, 1032 + (24 * n) + (4 * mid));
+   o < 2147483648 ? o : gs-be64(idx, 1032 + (28 * n) + (8 * (o - 2147483648)));
+  }
+  def gs-idx-raw(idx, mid) = substring(idx, gs-idx-name-pos(mid), gs-idx-name-pos(mid) + 20);
+  // ---- packed objects ------------------------------------------------------------------------------------------------------
+  def gs-type-name(t) = t == 1 ? "commit" : t == 2 ? "tree" : t == 3 ? "blob" : t == 4 ? "tag" : "";
+  // the size varint of a pack entry header: [type, size, next position]
+  def gs-hdr-size(h, p, shift, acc) {
+   let b = str_byte_at(h, p);
+   b >= 128 ? gs-hdr-size(h, p + 1, shift + 7, acc + (band(b, 127) * shl_u32(1, shift))) : [acc + (b * shl_u32(1, shift)), p + 1];
+  }
+  def gs-hdr(h) {
+   let b0 = str_byte_at(h, 0);
+   let r = b0 >= 128 ? gs-hdr-size(h, 1, 4, band(b0, 15)) : [band(b0, 15), 1];
+   [band(shr_u32(b0, 4), 7), r[0], r[1]];
+  }
+  // the OFS_DELTA distance varint: [distance, next position]
+  def gs-ofs-varint(h, p, acc) {
+   let b = str_byte_at(h, p);
+   b >= 128 ? gs-ofs-varint(h, p + 1, ((acc + 1) * 128) + band(b, 127)) : [((acc + 1) * 128) + b, p + 1];
+  }
+  def gs-ofs-start(h, p) {
+   let b = str_byte_at(h, p);
+   b >= 128 ? gs-ofs-varint(h, p + 1, band(b, 127)) : [b, p + 1];
+  }
+  def gs-compressed-bound(size) = size + (size / 512) + 128;
+  // [type, body] of the object at `off` in a pack, resolving deltas; nothing() when it does not inflate whole
+  // an object read at a pack offset is kept (up to 256 KiB): a delta chain's bases are read once, not once per dependent
+  def gs-pack-object(r, packpath, off) = gs-pack-cached(r, packpath, off, packpath ++ "@" ++ off.str());
+  def gs-pack-cached(r, packpath, off, key) = record_has(r[6], key) ? record_get(r[6], key) : gs-remember(r, key, gs-pack-object-raw(r, packpath, off));
+  def gs-pack-object-raw(r, packpath, off) {
+   let h = read_file_slice(packpath, off, 64);
+   let hd = nothing?(h) ? nothing() : gs-hdr(h);
+   nothing?(hd) ? nothing() : gs-pack-by-type(r, packpath, off, h, hd);
+  }
+  def gs-pack-by-type(r, packpath, off, h, hd) {
+   let t = hd[0];
+   t == 6 ? gs-pack-ofs(r, packpath, off, hd, gs-ofs-start(h, hd[2])) : t == 7 ? gs-pack-ref(r, packpath, off, hd, substring(h, hd[2], hd[2] + 20)) : gs-pack-plain(packpath, off + hd[2], t, hd[1]);
+  }
+  def gs-pack-inflate(packpath, pos, size) {
+   let src = read_file_slice(packpath, pos, gs-compressed-bound(size));
+   let z = nothing?(src) ? nothing() : ginf-zlib(src, 0);
+   nothing?(z) ? nothing() : len(z[0]) == size ? z[0] : nothing();
+  }
+  def gs-pack-plain(packpath, pos, t, size) {
+   let body = gs-pack-inflate(packpath, pos, size);
+   nothing?(body) ? nothing() : [gs-type-name(t), body];
+  }
+  def gs-pack-ofs(r, packpath, off, hd, ov) {
+   let base = gs-pack-object(r, packpath, off - ov[0]);
+   let delta = gs-pack-inflate(packpath, off + ov[1], hd[1]);
+   gs-delta-on(base, delta);
+  }
+  def gs-pack-ref(r, packpath, off, hd, baseraw) {
+   let base = gs-read(r, baseraw);
+   let delta = gs-pack-inflate(packpath, off + hd[2] + 20, hd[1]);
+   gs-delta-on(base, delta);
+  }
+  def gs-delta-on(base, delta) {
+   let body = nothing?(base) || nothing?(delta) ? nothing() : gs-delta-apply(base[1], delta);
+   nothing?(body) ? nothing() : [base[0], body];
+  }
+  // ---- the delta instruction stream ----------------------------------------------------------------------------------------
+  def gs-varint(d, p, shift, acc) {
+   let b = str_byte_at(d, p);
+   b >= 128 ? gs-varint(d, p + 1, shift + 7, acc + (band(b, 127) * shl_u32(1, shift))) : [acc + (b * shl_u32(1, shift)), p + 1];
+  }
+  def gs-delta-apply(base, delta) {
+   let a = gs-varint(delta, 0, 0, 0);
+   let b = gs-varint(delta, a[1], 0, 0);
+   a[0] != len(base) ? nothing() : gs-delta-run(base, delta, b[1], len(delta), [], b[0], 0);
+  }
+  def gs-opt(d, p, flag, mask, shift) = band(flag, mask) != 0 ? str_byte_at(d, p) * shl_u32(1, shift) : 0;
+  def gs-opt-n(flag, mask) = band(flag, mask) != 0 ? 1 : 0;
+  def gs-delta-run(base, d, p, dn, acc, want, got) {
+   let c = p < dn ? str_byte_at(d, p) : 0 - 1;
+   p >= dn ? (got == want ? ginf-join(acc) : nothing()) : c >= 128 ? gs-delta-copy(base, d, p, dn, acc, want, got, c) : c == 0 ? nothing() : p + 1 + c > dn ? nothing() : gs-delta-run(base, d, p + 1 + c, dn, cons(substring(d, p + 1, p + 1 + c), acc), want, got + c);
+  }
+  def gs-delta-copy(base, d, p, dn, acc, want, got, c) {
+   let q = p + 1;
+   let o = gs-opt(d, q, c, 1, 0) + gs-opt(d, q + gs-opt-n(c, 1), c, 2, 8) + gs-opt(d, q + gs-opt-n(c, 1) + gs-opt-n(c, 2), c, 4, 16) + gs-opt(d, q + gs-opt-n(c, 1) + gs-opt-n(c, 2) + gs-opt-n(c, 4), c, 8, 24);
+   let qs = q + gs-opt-n(c, 1) + gs-opt-n(c, 2) + gs-opt-n(c, 4) + gs-opt-n(c, 8);
+   let s0 = gs-opt(d, qs, c, 16, 0) + gs-opt(d, qs + gs-opt-n(c, 16), c, 32, 8) + gs-opt(d, qs + gs-opt-n(c, 16) + gs-opt-n(c, 32), c, 64, 16);
+   let s = s0 == 0 ? 65536 : s0;
+   let qe = qs + gs-opt-n(c, 16) + gs-opt-n(c, 32) + gs-opt-n(c, 64);
+   qe > dn || o + s > len(base) ? nothing() : gs-delta-run(base, d, qe, dn, cons(substring(base, o, o + s), acc), want, got + s);
+  }
+  // ---- reading an object ---------------------------------------------------------------------------------------------------
+  def gs-hex2(raw) = gsha-hex-of-raw(substring(raw, 0, 1));
+  def gs-loose-path(objdir, raw) {
+   let hex = gsha-hex-of-raw(raw);
+   objdir ++ "/" ++ substring(hex, 0, 2) ++ "/" ++ substring(hex, 2, 40);
+  }
+  def gs-loose-unframe(z) {
+   let nul = nothing?(z) ? 0 - 1 : gs-index-of(z[0], 0, 0);
+   nul < 0 ? nothing() : gs-loose-parse(z[0], nul);
+  }
+  def gs-loose-parse(s, nul) {
+   let sp = gs-index-of(s, 32, 0);
+   let size = sp < 0 || sp > nul ? 0 - 1 : str_to_int(substring(s, sp + 1, nul));
+   size < 0 || size != len(s) - nul - 1 ? nothing() : [substring(s, 0, sp), substring(s, nul + 1, len(s))];
+  }
+  def gs-loose(objdir, raw) {
+   let src = read_file(gs-loose-path(objdir, raw));
+   nothing?(src) ? nothing() : gs-loose-unframe(ginf-zlib(src, 0));
+  }
+  def gs-read-loose(dirs, raw) = nil?(dirs) ? nothing() : gs-first(gs-loose(dirs[0], raw), dirs[1:], raw);
+  def gs-first(got, dirs, raw) = nothing?(got) ? gs-read-loose(dirs, raw) : got;
+  def gs-read-packs(r, packs, raw) = nil?(packs) ? nothing() : gs-pack-hit(r, packs, raw, gs-idx-find(packs[0][1], raw));
+  def gs-pack-hit(r, packs, raw, mid) = mid < 0 ? gs-read-packs(r, packs[1:], raw) : gs-pack-object(r, packs[0][0], gs-idx-offset(packs[0][1], mid));
+  // [type, body] of the object named by a raw id, from the packs and then the loose directories; nothing() when it is not there
+  def gs-read(r, raw) = gs-read-cached(r, raw, gsha-hex-of-raw(raw));
+  // an object read once in this process is kept (up to 256 KiB each): trees and commits are asked for again and again
+  def gs-read-cached(r, raw, hex) = record_has(r[6], hex) ? record_get(r[6], hex) : gs-remember(r, hex, gs-after-packs(r, gs-read-packs(r, gs-packs(r), raw), raw));
+  def gs-remember(r, hex, o) {
+   let keep = nothing?(o) || len(o[1]) > 262144 ? 0 : record_set(r[6], hex, o);
+   o;
+  }
+  def gs-after-packs(r, got, raw) = nothing?(got) ? gs-read-loose(gs-objdirs(r), raw) : got;
+  def git-read(r, hex) = gsha-hex?(hex) && len(hex) == 40 ? gs-read(r, gsha-raw-of-hex(hex)) : nothing();
+  // whether the object is there, without inflating a pack entry's body
+  def gs-has?(r, raw) = gs-has-pack?(gs-packs(r), raw) || gs-has-loose?(gs-objdirs(r), raw);
+  def gs-has-loose?(dirs, raw) = nil?(dirs) ? false : host_path_exists(gs-loose-path(dirs[0], raw)) == 1 || gs-has-loose?(dirs[1:], raw);
+  def gs-has-pack?(packs, raw) = nil?(packs) ? false : gs-idx-find(packs[0][1], raw) >= 0 ? true : gs-has-pack?(packs[1:], raw);
+  def gs-frame(type, body) = str_concat(type, str_concat(" ", str_concat(len(body).str(), str_concat(byte_to_str(0), body))));
+  // the id an object's bytes hash to
+  def gs-hash(type, body) = gsha-raw(gs-frame(type, body));
+  // true when the object read under `raw` hashes to `raw`
+  def gs-verify(raw, type, body) = str_eq(gs-hash(type, body), raw);
+  // ---- abbreviated names ---------------------------------------------------------------------------------------------------
+  // the raw ids in a pack index whose hex begins with `pre` (lowercase hex, 2..40 characters), in index order
+  def gs-pre-first(pre) = gsha-hexval(str_byte_at(pre, 0)) * 16 + (len(pre) > 1 ? gsha-hexval(str_byte_at(pre, 1)) : 0);
+  def gs-hex-match?(hex, pre) = len(hex) >= len(pre) && gs-pre-at(hex, pre, 0);
+  // the prefix as 20 raw bytes padded with zeros (an odd last character is the high nibble of the last byte)
+  def gs-pre-raw(pre) {
+   let raw = gsha-raw-of-hex(len(pre) % 2 == 1 ? pre ++ "0" : pre);
+   str_concat(raw, gsha-zeros(20 - len(raw)));
+  }
+  // whether the name at index position mid begins with the first `nib` nibbles of preraw
+  def gs-name-has?(idx, mid, preraw, nib, i) {
+   let full = nib / 2;
+   let p = gs-idx-name-pos(mid);
+   i < full ? str_byte_at(idx, p + i) == str_byte_at(preraw, i) && gs-name-has?(idx, mid, preraw, nib, i + 1) : nib % 2 == 0 ? true : shr_u32(str_byte_at(idx, p + full), 4) == shr_u32(str_byte_at(preraw, full), 4);
+  }
+  // first index position whose name is >= raw
+  def gs-lower20(idx, raw, lo, hi) = lo >= hi ? lo : gs-lower20-step(idx, raw, lo, hi, (lo + hi) / 2);
+  def gs-lower20-step(idx, raw, lo, hi, mid) = gs-cmp20(idx, mid, raw, 0) > 0 ? gs-lower20(idx, raw, mid + 1, hi) : gs-lower20(idx, raw, lo, mid);
+  def gs-idx-collect(idx, pos, n, preraw, nib, acc) = pos >= n || !gs-name-has?(idx, pos, preraw, nib, 0) ? acc : gs-idx-collect(idx, pos + 1, n, preraw, nib, cons(gs-idx-raw(idx, pos), acc));
+  def gs-idx-prefix(idx, pre) {
+   let raw = gs-pre-raw(pre);
+   let n = gs-idx-n(idx);
+   gs-idx-collect(idx, gs-lower20(idx, raw, 0, n), n, raw, len(pre), []);
+  }
+  def gs-loose-prefix(objdirs, pre) = len(pre) < 2 ? [] : gs-flatten(map(d => map(f => gsha-raw-of-hex(substring(pre, 0, 2) ++ f), filter(f => len(f) == 38 && gs-hex-match?(substring(pre, 0, 2) ++ f, pre), host_dir_list(d ++ "/" ++ substring(pre, 0, 2)) ?? [])), objdirs));
+  def gs-prefix-all(r, pre) = append(gs-flatten(map(p => gs-idx-prefix(p[1], pre), gs-packs(r))), gs-loose-prefix(gs-objdirs(r), pre));
+  // distinct raw ids
+  def gs-uniq(xs, acc) = nil?(xs) ? ginf-reverse(acc, []) : any?(a => str_eq(a, xs[0]), acc) ? gs-uniq(xs[1:], acc) : gs-uniq(xs[1:], cons(xs[0], acc));
+  // the raw ids that start with a hex prefix
+  def gs-expand(r, pre) = len(pre) >= 4 && (gsha-hex?(pre) || (len(pre) % 2 == 1 && gsha-hex?(pre ++ "0"))) ? gs-uniq(gs-prefix-all(r, pre), []) : [];
+  // ---- tree, commit and tag objects ----------------------------------------------------------------------------------------
+  // tree entries: [mode (string like "100644"), name, raw id]
+  def gs-tree-entries(body) = gs-tree-go(body, 0, len(body), []);
+  def gs-tree-go(b, p, n, acc) {
+   let sp = p >= n ? 0 - 1 : gs-index-of(b, 32, p);
+   let nul = sp < 0 ? 0 - 1 : gs-index-of(b, 0, sp + 1);
+   p >= n ? ginf-reverse(acc, []) : nul < 0 || nul + 21 > n ? nothing() : gs-tree-go(b, nul + 21, n, cons([substring(b, p, sp), substring(b, sp + 1, nul), substring(b, nul + 1, nul + 21)], acc));
+  }
+  def gs-mode-int(m) = foldl((acc, i) => (acc * 8) + (str_byte_at(m, i) - 48), 0, range(0, len(m)));
+  def gs-tree?(mode) = str_eq(mode, "40000");
+  def gs-gitlink?(mode) = str_eq(mode, "160000");
+  // a commit: [tree hex, [parent hex ...], author line, committer line, message, headers] (headers: the other header lines)
+  def gs-commit-split(body) {
+   let blank = gs-find-blank(body, 0);
+   blank < 0 ? [body, ""] : [substring(body, 0, blank), substring(body, blank + 2, len(body))];
+  }
+  def gs-find-blank(b, i) = i >= len(b) - 1 ? 0 - 1 : str_byte_at(b, i) == 10 && str_byte_at(b, i + 1) == 10 ? i : gs-find-blank(b, i + 1);
+  // header lines with their continuation lines (a line that starts with a space belongs to the line before it)
+  def gs-header-lines(text) = gs-fold-cont(gs-lines(text), []);
+  def gs-fold-cont(ls, acc) = nil?(ls) ? ginf-reverse(acc, []) : len(ls[0]) > 0 && str_byte_at(ls[0], 0) == 32 && !nil?(acc) ? gs-fold-cont(ls[1:], cons(acc[0] ++ "\n" ++ substring(ls[0], 1, len(ls[0])), acc[1:])) : gs-fold-cont(ls[1:], cons(ls[0], acc));
+  def gs-header-value(hl, key) {
+   let f = filter(l => gs-starts?(l, key ++ " "), hl);
+   nil?(f) ? nothing() : substring(f[0], len(key) + 1, len(f[0]));
+  }
+  def gs-commit-parse(body) {
+   let sp = gs-commit-split(body);
+   let hl = gs-header-lines(sp[0]);
+   [gs-header-value(hl, "tree"), map(l => substring(l, 7, len(l)), filter(l => gs-starts?(l, "parent "), hl)), gs-header-value(hl, "author"), gs-header-value(hl, "committer"), sp[1], hl];
+  }
+  def gs-commit-tree(c) = c[0];
+  def gs-commit-parents(c) = c[1];
+  def gs-commit-author(c) = c[2];
+  def gs-commit-committer(c) = c[3];
+  def gs-commit-message(c) = c[4];
+  // a person line "Name <email> 1700000000 +0800": [name, email, unix seconds, "+0800"]
+  def gs-person(line) {
+   let lb = gs-index-of(line, 60, 0);
+   let rb = lb < 0 ? 0 - 1 : gs-index-of(line, 62, lb);
+   let rest = rb < 0 ? "" : gs-trim(gs-ltrim(substring(line, rb + 1, len(line))));
+   let sp = gs-index-of(rest, 32, 0);
+   lb < 0 || rb < 0 ? [line, "", 0, "+0000"] : [gs-trim(substring(line, 0, lb)), substring(line, lb + 1, rb), sp < 0 ? str_to_int(rest) : str_to_int(substring(rest, 0, sp)), sp < 0 ? "+0000" : substring(rest, sp + 1, len(rest))];
+  }
+  // a tag: [object hex, type, tag name, tagger line, message]
+  def gs-tag-parse(body) {
+   let sp = gs-commit-split(body);
+   let hl = gs-header-lines(sp[0]);
+   [gs-header-value(hl, "object"), gs-header-value(hl, "type"), gs-header-value(hl, "tag"), gs-header-value(hl, "tagger"), sp[1]];
+  }
+  // the subject line of a message (up to the first blank line, folded to one line)
+  def gs-subject(msg) {
+   let i = gs-find-blank(msg, 0);
+   let para = i < 0 ? gs-trim(msg) : substring(msg, 0, i);
+   foldl((acc, l) => len(acc) == 0 ? gs-trim(l) : acc ++ " " ++ gs-trim(l), "", gs-lines(para));
+  }
+ }
+ 0;
+}

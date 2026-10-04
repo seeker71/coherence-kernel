@@ -1,0 +1,71 @@
+; git-native-speed-band.fk — how long the native git organ takes on THIS repository (a 1.4 GB pack, two smaller packs, a 2,000-file index, a
+; 14,000-file working tree of which most is ignored), measured with host_monotonic_ms in Form and printed, with a generous ceiling on each
+; so a regression to "inflates the world" would fail the band. Each timing is one cold call in this process (the object cache starts empty).
+;
+;   1    git-open (the three pack indexes, the commit-graph, alternates, refs directory) in under 5 s
+;   2    rev-parse HEAD (HEAD, then the loose ref or packed-refs) in under 5 s from a warm handle; the HEAD commit read in under 5 s
+;   4    log --oneline -n 20: twenty commits through the date-ordered walk, commit-graph first, only the twenty commit objects inflated, in under 60 s
+;   8    status --porcelain: the stat check of every index entry, the walk of the working tree against the sorted index, the ignore rules; a clean
+;        index reads one tree (the cache-tree skips the rest), in under 150 s
+;   16   diff --name-only HEAD and rev-list --count origin/main..HEAD and merge-base HEAD origin/main, each in under 60 s
+;   32   the object cache works: reading the same 20 commits again from the object cache costs the second pass under 400 ms on a loaded machine
+;
+; The numbers print on the `speed` line: [open, rev-parse, head commit, log, status, diff, count, merge-base, cached second pass] in ms.
+;
+; Expected: 63
+; Verdict 63
+; REQUIRES: (the doors of git-native-run.bml)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-rev.bml;
+import form-stdlib/bml/git-diff.bml;
+import form-stdlib/bml/git-cmd.bml;
+section [form.bml] {
+  def gsp-bit(ok, bit) = ok ? bit : 0;
+  def gsp-say(label, v) = print([label, v]);
+  def gsp-time(f) = 0;
+  def gsp-run() {
+    let t0 = host_monotonic_ms();
+    let r = git-open(".");
+    let t1 = host_monotonic_ms();
+    let rp = git-run-line(".", "rev-parse HEAD");
+    let t2 = host_monotonic_ms();
+    let hid = gr-head-id(r);
+    let hc = nothing?(hid) ? nothing() : git-read(r, hid);
+    let t3 = host_monotonic_ms();
+    let lg = git-run-line(".", "log --oneline -n 20");
+    let t4 = host_monotonic_ms();
+    let st = git-run-line(".", "status --porcelain");
+    let t5 = host_monotonic_ms();
+    let df = git-run-line(".", "diff --name-only HEAD");
+    let t6 = host_monotonic_ms();
+    let ab = git-run-line(".", "rev-list --count origin/main..HEAD");
+    let mb = git-run-line(".", "merge-base HEAD origin/main");
+    let t7 = host_monotonic_ms();
+    let ids = nothing?(hid) ? [] : map(i => grv-hex(i[0]), grv-walk(r, [gsha-raw-of-hex(hid)], [], [true, false, 20, 0], nothing()));
+    let ta = host_monotonic_ms();
+    let first = map(h => git-read(r, h), ids);
+    let tb = host_monotonic_ms();
+    let second = map(h => git-read(r, h), ids);
+    let tc = host_monotonic_ms();
+    let speed = gsp-say("speed", [t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5, t7 - t6, tc - tb, "ms: open, rev-parse, head commit, log -n 20, status, diff --name-only, count+merge-base, cached second pass", tb - ta]);
+    let lines = gsp-say("shapes", [rp[0], rp[1], len(gs-lines(lg[0])), lg[1], len(gs-lines(st[0])), st[1], len(gs-lines(df[0])), df[1], ab[0], mb[0]]);
+    let b1 = gsp-bit(!nothing?(r) && t1 - t0 < 5000, 1);
+    let b2 = gsp-bit(rp[1] == 0 && len(gs-trim(rp[0])) == 40 && t2 - t1 < 5000 && !nothing?(hc) && t3 - t2 < 5000, 2);
+    let b4 = gsp-bit(lg[1] == 0 && len(gs-lines(lg[0])) == 20 && t4 - t3 < 60000, 4);
+    let b8 = gsp-bit(st[1] == 0 && t5 - t4 < 150000, 8);
+    let b16 = gsp-bit(df[1] == 0 && t6 - t5 < 60000 && ab[1] == 0 && mb[1] == 0 && t7 - t6 < 60000, 16);
+    let b32 = gsp-bit(len(ids) == 20 && tc - tb < 400, 32);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32;
+    let shown = print(["git-native-speed-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  gsp-run();
+}

@@ -1,0 +1,442 @@
+// git-merge.bml — three-way merging in Form: lines (diff3 over Myers edit scripts), trees (the changes of both sides against their base,
+// conflicts kept as index stages and marked working files), and the two commands that ride on it: `merge` and `rebase`.
+//
+//   gm-merge-text(base, ours, theirs, ours-label, theirs-label, union)   [text, number of conflicts]
+//   gm-merge-trees(r, rows, base-tree, ours-tree, theirs-tree, labels)  [new index rows, conflicts [[path, kind] ...], notes]  (writes blobs, files)
+//   git-run-merge(cwd, argv)                                              merge / rebase / the write commands through git-run-all
+//
+// Merge rules, git's: a hunk that only one side changed is taken; both sides making the same change is taken once; overlapping or
+// touching hunks that differ are a conflict, written between `<<<<<<<`, `=======` and `>>>>>>>` lines (with the `union` attribute —
+// check-attr merge — both sides' lines are kept and no marker is written). A file one side deleted and the other changed is a
+// conflict of kind "modify/delete"; a file both sides added differently is an add/add content merge against the empty base.
+//
+// rebase replays upstream..HEAD (merge commits dropped, as git does) one commit at a time on the new base by a three-way tree
+// merge, keeping the commit's author and message; a replay that changes nothing is dropped. State lives in .git/rebase-merge/
+// (head-name, onto, orig-head, git-rebase-todo, done, msgnum, end, stopped-sha, message, author-script), so `--continue`, `--skip` and
+// `--abort` work from files, as git's do. `--autostash` keeps the dirty tracked changes as a commit and applies them after.
+// merge: fast-forward when it can, `--no-ff`, a three-way merge commit otherwise, `--ff-only` refusing with exit 128, `--abort`, a
+// conflicted merge leaving MERGE_HEAD, MERGE_MSG and the index stages for `commit` to finish.
+//
+// Same gate as git-wcmd.bml (a scratch repository, or `-c native.allow-write=true`). Hooks are not run; an editor is never started.
+//
+// PROOF: form-stdlib/tests/git-native-merge-band.fk — texts with hand-computed merges, trees with every conflict kind, a rebase over a
+// diverged history with and without conflicts (continue, skip, abort), autostash, and an fsck of the result.
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml form-stdlib/bml/git-refs.bml form-stdlib/bml/git-index.bml form-stdlib/bml/git-ignore.bml form-stdlib/bml/git-status.bml form-stdlib/bml/git-rev.bml form-stdlib/bml/git-diff.bml form-stdlib/bml/git-cmd.bml form-stdlib/bml/git-write.bml form-stdlib/bml/git-wcmd.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-rev.bml;
+import form-stdlib/bml/git-diff.bml;
+import form-stdlib/bml/git-cmd.bml;
+import form-stdlib/bml/git-write.bml;
+import form-stdlib/bml/git-wcmd.bml;
+section [form.bml] {
+ class GitMerge {
+  // ---- hunks of a text against the base --------------------------------------------------------------------------------------------
+  // [start, end (exclusive), new lines] in base line numbers
+  def gm-hunk(d, h) {
+   let dels = len(filter(e => str_eq(e[0], "-"), h));
+   [h[0][1], h[0][1] + dels, map(e => gdf-nth(d[2], e[2]), filter(e => str_eq(e[0], "+"), h))];
+  }
+  def gm-hunks(base, other) {
+   let d = gdf-lines-diff(base, other);
+   map(h => gm-hunk(d, h), gdf-group(d[0], 0, [], []));
+  }
+  def gm-slice(lines, from, to) = take(to - from, drop(from, lines));
+  // base[from, to) with the hunks (all inside it) applied
+  def gm-apply(lines, from, to, hunks) = gm-apply-go(lines, from, to, hunks, from, []);
+  def gm-apply-go(lines, from, to, hunks, p, acc) = nil?(hunks) ? append(acc, gm-slice(lines, p, to)) : gm-apply-go(lines, from, to, tail(hunks), head(hunks)[1], append(acc, append(gm-slice(lines, p, head(hunks)[0]), head(hunks)[2])));
+  def gm-in-region(hunks, rs, re) = filter(h => h[0] <= re && h[1] >= rs, hunks);
+  def gm-after(hunks, re) = filter(h => h[0] > re, hunks);
+  // the end of the region of overlap that starts with hunk a: grown by every hunk of either side that touches it
+  def gm-grow(ho, ht, rs, re) {
+   let o2 = foldl((m, h) => h[0] <= re && h[1] > m ? h[1] : m, re, ho);
+   let t2 = foldl((m, h) => h[0] <= re && h[1] > m ? h[1] : m, re, ht);
+   let nre = o2 > t2 ? o2 : t2;
+   nre == re ? re : gm-grow(ho, ht, rs, nre);
+  }
+  def gm-text-of(lines) = nil?(lines) ? "" : grv-join(lines, "\n") ++ "\n";
+  def gm-lines-eq(a, b) = nil?(a) ? nil?(b) : !nil?(b) && str_eq(head(a), head(b)) && gm-lines-eq(tail(a), tail(b));
+  // text merge: [merged text, conflicts]
+  def gm-merge-text(base, ours, theirs, olabel, tlabel, union) {
+   let bl = gdf-text-lines(base);
+   let r = gm-go(bl, gm-hunks(base, ours), gm-hunks(base, theirs), 0, [], 0, olabel, tlabel, union);
+   [gm-text-of(r[0]), r[1]];
+  }
+  def gm-go(bl, ho, ht, p, acc, nc, olabel, tlabel, union) {
+   nil?(ho) && nil?(ht) ? [append(acc, gm-slice(bl, p, len(bl))), nc] : gm-step(bl, ho, ht, p, acc, nc, olabel, tlabel, union);
+  }
+  def gm-step(bl, ho, ht, p, acc, nc, olabel, tlabel, union) {
+   let a = nil?(ho) ? nothing() : head(ho);
+   let b = nil?(ht) ? nothing() : head(ht);
+   nothing?(b) || (!nothing?(a) && a[1] < b[0]) ? gm-go(bl, tail(ho), ht, a[1], append(acc, append(gm-slice(bl, p, a[0]), a[2])), nc, olabel, tlabel, union) : nothing?(a) || b[1] < a[0] ? gm-go(bl, ho, tail(ht), b[1], append(acc, append(gm-slice(bl, p, b[0]), b[2])), nc, olabel, tlabel, union) : gm-overlap(bl, ho, ht, p, acc, nc, olabel, tlabel, union, a[0] < b[0] ? a[0] : b[0]);
+  }
+  def gm-overlap(bl, ho, ht, p, acc, nc, olabel, tlabel, union, rs) {
+   let a = head(ho);
+   let b = head(ht);
+   let re = gm-grow(ho, ht, rs, a[1] > b[1] ? a[1] : b[1]);
+   let oh = gm-in-region(ho, rs, re);
+   let th = gm-in-region(ht, rs, re);
+   let base_r = gm-slice(bl, rs, re);
+   let o_r = gm-apply(bl, rs, re, oh);
+   let t_r = gm-apply(bl, rs, re, th);
+   let pre = append(acc, gm-slice(bl, p, rs));
+   gm-region(bl, gm-after(ho, re), gm-after(ht, re), re, pre, nc, olabel, tlabel, union, base_r, o_r, t_r);
+  }
+  def gm-region(bl, ho2, ht2, re, pre, nc, olabel, tlabel, union, base_r, o_r, t_r) =
+   gm-lines-eq(o_r, t_r) ? gm-go(bl, ho2, ht2, re, append(pre, o_r), nc, olabel, tlabel, union)
+   : gm-lines-eq(o_r, base_r) ? gm-go(bl, ho2, ht2, re, append(pre, t_r), nc, olabel, tlabel, union)
+   : gm-lines-eq(t_r, base_r) ? gm-go(bl, ho2, ht2, re, append(pre, o_r), nc, olabel, tlabel, union)
+   : union ? gm-go(bl, ho2, ht2, re, append(pre, append(o_r, t_r)), nc, olabel, tlabel, union)
+   : gm-go(bl, ho2, ht2, re, append(pre, append(["<<<<<<< " ++ olabel], append(o_r, append(["======="], append(t_r, [">>>>>>> " ++ tlabel]))))), nc + 1, olabel, tlabel, union);
+  // ---- trees -----------------------------------------------------------------------------------------------------------------------------
+  def gm-blob-text(r, id) = nothing?(id) ? "" : (gs-read(r, id)[1] ?? "");
+  def gm-row-of(path, mode, id) = [path, mode, id, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  def gm-map-of(rows) {
+   let m = record_new(0);
+   let z = foldl((acc, x) => record_set(m, x[1], x), 0, rows);
+   m;
+  }
+  def gm-look(m, path) = record_has(m, path) ? record_get(m, path) : nothing();
+  def gm-stage-row(path, mode, id, stage) = [path, mode, id, 0, 0, 0, stage, 0, 0, 0, 0, 0, 0];
+  def gm-union?(r, path) = str_eq(gcm-attr-value(gcm-attr-rules(gs-text-or(gs-top(r) ++ "/.gitattributes", "")), "merge", path, "unspecified"), "union");
+  // the outcome of one path changed on both sides: [kind, rows to put in the index, content to write or nothing(), mode]
+  //   kind "ok" (clean), "text" (conflict with markers), "modify/delete", "add/add" (binary)
+  def gm-both(r, path, o, t, olabel, tlabel) {
+   let on = str_eq(o[0], "D") ? nothing() : [o[4], o[5]];
+   let tn = str_eq(t[0], "D") ? nothing() : [t[4], t[5]];
+   nothing?(on) && nothing?(tn) ? ["ok", [], nothing(), 0] : (!nothing?(on) && !nothing?(tn) && o[4] == t[4] && str_eq(o[5], t[5])) ? ["ok", [gm-row-of(path, o[4], o[5])], nothing(), o[4]] : nothing?(on) || nothing?(tn) ? ["modify/delete", gm-conflict-rows(path, o, t), nothing(), 0] : gm-both-text(r, path, o, t, on, tn, olabel, tlabel);
+  }
+  def gm-conflict-rows(path, o, t) {
+   let base = str_eq(o[0], "A") ? [] : [gm-stage-row(path, o[2], o[3], 1)];
+   append(base, append(str_eq(o[0], "D") ? [] : [gm-stage-row(path, o[4], o[5], 2)], str_eq(t[0], "D") ? [] : [gm-stage-row(path, t[4], t[5], 3)]));
+  }
+  def gm-both-text(r, path, o, t, on, tn, olabel, tlabel) {
+   let bt = str_eq(o[0], "A") ? "" : gm-blob-text(r, o[3]);
+   let ot = gm-blob-text(r, on[1]);
+   let tt = gm-blob-text(r, tn[1]);
+   let mode = o[4] != o[2] || str_eq(o[0], "A") ? o[4] : t[4];
+   gdf-binary?(bt) || gdf-binary?(ot) || gdf-binary?(tt) ? ["add/add", gm-conflict-rows(path, o, t), nothing(), mode] : gm-both-merged(r, path, o, t, mode, gm-merge-text(bt, ot, tt, olabel, tlabel, gm-union?(r, path)));
+  }
+  def gm-both-merged(r, path, o, t, mode, m) = m[1] == 0 ? ["ok", [gm-row-of(path, mode, gsha-raw-of-hex(gw-put-loose(gs-gitdir(r), "blob", m[0])))], nothing(), mode] : ["text", gm-conflict-rows(path, o, t), m[0], mode];
+  // merge the changes of `theirs` (against base) into the index state `rows` that already holds the changes of `ours`
+  // answers [new rows, conflicts [[path, kind]], written paths]
+  def gm-merge-trees(r, rows, base, ours, theirs, olabel, tlabel) {
+   let dO = gdf-trees(r, base, ours);
+   let dT = gdf-trees(r, base, theirs);
+   let om = gm-map-of(dO);
+   gm-trees-go(r, rows, dT, om, olabel, tlabel, [], []);
+  }
+  def gm-trees-go(r, rows, dT, om, olabel, tlabel, conflicts, wrote) =
+   nil?(dT) ? [rows, ginf-reverse(conflicts, []), wrote] : gm-one(r, rows, dT, om, olabel, tlabel, conflicts, wrote, head(dT), gm-look(om, head(dT)[1]));
+  def gm-one(r, rows, dT, om, olabel, tlabel, conflicts, wrote, t, o) {
+   let path = t[1];
+   nothing?(o) ? gm-take-theirs(r, rows, dT, om, olabel, tlabel, conflicts, wrote, t) : gm-resolve(r, rows, dT, om, olabel, tlabel, conflicts, wrote, t, o, gm-both(r, path, o, t, olabel, tlabel));
+  }
+  // only theirs changed this path: their new state goes in
+  def gm-take-theirs(r, rows, dT, om, olabel, tlabel, conflicts, wrote, t) {
+   let path = t[1];
+   str_eq(t[0], "D") ? gm-trees-go(r, gwc-without(rows, path), tail(dT), om, olabel, tlabel, conflicts, cons(path, wrote)) : gm-trees-go(r, cons(gm-row-of(path, t[4], t[5]), gwc-without(rows, path)), tail(dT), om, olabel, tlabel, conflicts, cons(path, wrote));
+  }
+  def gm-resolve(r, rows, dT, om, olabel, tlabel, conflicts, wrote, t, o, res) {
+   let path = t[1];
+   let base_rows = gwc-without(rows, path);
+   str_eq(res[0], "ok") ? gm-trees-go(r, append(base_rows, res[1]), tail(dT), om, olabel, tlabel, conflicts, cons(path, wrote)) : gm-conflicted(r, base_rows, dT, om, olabel, tlabel, conflicts, wrote, path, res);
+  }
+  def gm-conflicted(r, base_rows, dT, om, olabel, tlabel, conflicts, wrote, path, res) {
+   let w = nothing?(res[2]) ? 0 : gm-put-file(r, path, res[2], res[3]);
+   gm-trees-go(r, append(base_rows, res[1]), tail(dT), om, olabel, tlabel, cons([path, res[0]], conflicts), cons(path, wrote));
+  }
+  def gm-put-file(r, path, content, mode) {
+   let full = gs-top(r) ++ "/" ++ path;
+   let d = gw-mkdirs(gs-parent(full));
+   let w = write_file(full, content);
+   mode == 33261 ? host_chmod(full, 493) : 0;
+  }
+  // ---- applying a merged state to the working tree ---------------------------------------------------------------------------------------------
+  // rows: the new index; wrote: paths whose file must be (re)written from the index (not conflicted ones); old: the rows before
+  def gm-sync(r, old, rows, wrote, conflicts) {
+   let top = gs-top(r);
+   let confl = map(c => c[0], conflicts);
+   let cleaned = map(p => gm-sync-path(r, rows, p), filter(p => !any?(c => str_eq(c, p), confl), wrote));
+   cleaned;
+  }
+  def gm-sync-path(r, rows, path) {
+   let e = gwc-find(rows, path);
+   nothing?(e) ? gwc-unlink(gs-top(r), path) : gwc-write-out(r, e);
+  }
+  // give written index rows their stat (after the file is on disk)
+  def gm-fresh(r, rows, wrote, confl) = map(e => e[6] == 0 && any?(p => str_eq(p, e[0]), wrote) && !any?(c => str_eq(c, e[0]), confl) ? gwc-fresh-row(r, e) : e, rows);
+  // merge theirs into the current index state, write the files, save the index: [conflicts, notes text]
+  def gm-apply-merge(r, base, ours, theirs, olabel, tlabel) {
+   let rows = gwc-rows(r);
+   let m = gm-merge-trees(r, rows, base, ours, theirs, olabel, tlabel);
+   let confl = map(c => c[0], m[1]);
+   let sy = gm-sync(r, rows, m[0], m[2], m[1]);
+   let fresh = gm-fresh(r, m[0], m[2], confl);
+   let sv = gwc-save(r, fresh);
+   [m[1], gm-notes(m[1])];
+  }
+  def gm-notes(conflicts) = gcm-text(map(c => str_eq(c[1], "text") ? "CONFLICT (content): Merge conflict in " ++ c[0] : str_eq(c[1], "modify/delete") ? "CONFLICT (modify/delete): " ++ c[0] ++ " deleted in one branch and modified in the other." : "CONFLICT (add/add): Merge conflict in " ++ c[0], conflicts));
+  // ---- entry ---------------------------------------------------------------------------------------------------------------------------------
+  def git-run-full-line(cwd, line) = git-run-full(cwd, gcm-words(line));
+  def git-run-full(cwd, argv) {
+   let g = gcm-global(argv, cwd, false, []);
+   len(g[4]) > 0 || nil?(g[2]) ? git-run-all(cwd, argv) : (str_eq(g[2][0], "merge") || str_eq(g[2][0], "rebase") ? gm-with(g, g[2][0], g[2][1:], git-open(g[0])) : git-run-all(cwd, argv));
+  }
+  def gm-with(g, cmd, rest, r) = nothing?(r) ? gcm-not-repo() : !gwc-allowed?(r, g[3]) ? gwc-refused() : str_eq(cmd, "rebase") ? gm-rebase(r, g[3], rest) : gm-merge(r, g[3], rest);
+  def gm-state-dir(r) = gs-gitdir(r) ++ "/rebase-merge";
+  def gm-rebasing?(r) = host_path_exists(gm-state-dir(r) ++ "/head-name") == 1;
+  def gm-sf(r, name, text) = gw-put-file(gm-state-dir(r) ++ "/" ++ name, text);
+  def gm-rf(r, name) = gs-text-or(gm-state-dir(r) ++ "/" ++ name, "");
+  def gm-short(r, raw) = grv-short(r, raw, 7);
+  def gm-label(r, info) = gm-short(r, info[0]) ++ " (" ++ gs-subject(info[4][4]) ++ ")";
+  def gm-tree-of(r, raw) = nothing?(raw) ? nothing() : grv-peel(r, raw, "tree");
+  def gm-dirty?(r) {
+   let ix = gi-read(r);
+   nothing?(ix) ? false : !nil?(gst-unstaged(gs-top(r), ix[0], gst-index-mtime(r), [])) || !nil?(gst-staged(r, ix)) || any?(e => e[6] > 0, ix[0]);
+  }
+  // ---- rebase -----------------------------------------------------------------------------------------------------------------------------
+  def gm-rb-spec() = [["--continue", "flag"], ["--abort", "flag"], ["--skip", "flag"], ["--autostash", "flag"], ["--no-autostash", "flag"], ["-q", "flag"], ["--quiet", "flag"], ["-i", "flag"], ["--onto", "val"], ["-f", "flag"], ["--force-rebase", "flag"], ["--no-verify", "flag"]];
+  def gm-rebase(r, cfg, args) {
+   let p = gcm-parse(args, gm-rb-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("rebase", p[3][0]) : gcm-opt?(o, "-i") ? ["", 129, "native-git: rebase -i (an editor) is refused by name\n"] : gcm-opt?(o, "--onto") ? ["", 129, "native-git: rebase --onto is refused by name\n"] : gcm-opt?(o, "--abort") ? gm-rb-abort(r, cfg) : gcm-opt?(o, "--continue") ? gm-rb-continue(r, cfg, false) : gcm-opt?(o, "--skip") ? gm-rb-continue(r, cfg, true) : gm-rb-start(r, cfg, o, p[1]);
+  }
+  def gm-rb-start(r, cfg, o, pos) {
+   let h = gr-head(r);
+   let up = pos;
+   gm-rebasing?(r) ? gwc-fatal("It seems that there is already a rebase-merge directory (" ++ gm-state-dir(r) ++ "), and I wonder if you are in the middle of another rebase.") : str_eq(h[0], "unborn") ? gwc-fatal("no commits yet") : gm-rb-up(r, cfg, o, h, nil?(pos) ? nothing() : gwc-commit-of(r, pos[0]), nil?(pos) ? nothing() : pos[0]);
+  }
+  def gm-rb-up(r, cfg, o, h, up, upname) {
+   let spec = nothing?(upname) ? "@{u}" : upname;
+   let upraw = nothing?(up) ? (nothing?(upname) ? gwc-commit-of(r, "@{u}") : nothing()) : up;
+   nothing?(upraw) ? gwc-fatal(nothing?(upname) ? "There is no tracking information for the current branch.\nPlease specify which branch you want to rebase against." : "invalid upstream '" ++ upname ++ "'") : gm-rb-plan(r, cfg, o, h, upraw);
+  }
+  def gm-rb-plan(r, cfg, o, h, up) {
+   let head = gsha-raw-of-hex(gr-head-id(r));
+   let mbs = grv-merge-bases(r, head, up);
+   let mb = nil?(mbs) ? nothing() : mbs[0];
+   let autostash = gcm-opt?(o, "--autostash") || str_eq(gwc-cfg-get(r, cfg, "rebase.autoStash") ?? "false", "true");
+   let dirty = gm-dirty?(r);
+   !nothing?(mb) && str_eq(mb, up) ? gwc-note("", "Current branch " ++ (str_eq(h[0], "branch") ? gr-short-branch(h[1]) : "HEAD") ++ " is up to date.\n") : dirty && !autostash ? ["", 1, "error: cannot rebase: You have unstaged changes.\nerror: Please commit or stash them.\n"] : gm-rb-go(r, cfg, o, h, head, up, mb, autostash && dirty);
+  }
+  def gm-rb-go(r, cfg, o, h, head, up, mb, stash) {
+   let stash_id = stash ? gm-autostash(r, cfg, head) : nothing();
+   let ff = !nothing?(mb) && str_eq(mb, head);
+   let replay = ff ? [] : gm-replay-list(r, head, up);
+   gm-rb-begin(r, cfg, o, h, head, up, ff, replay, stash_id);
+  }
+  // the dirty tracked changes as a commit (parent HEAD), then the tree is reset to HEAD
+  def gm-autostash(r, cfg, head) {
+   let rows = gwc-rows(r);
+   let imtime = gst-index-mtime(r);
+   let top = gs-top(r);
+   let dirty = filter(e => e[6] == 0 && !str_eq(gst-state(top, e, imtime), ""), rows);
+   let new_rows = map(e => str_eq(gst-state(top, e, imtime), "D") ? nothing() : gwc-file-row(r, e[0]), dirty);
+   let merged = append(filter(e => !any?(d => str_eq(d[0], e[0]), dirty), rows), filter(x => !nothing?(x), new_rows));
+   let tree = gw-write-tree(gs-gitdir(r), merged);
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let ms = gwc-now-ms();
+   let who = gwc-stamp(id, ms);
+   let hex = gw-put-loose(gs-gitdir(r), "commit", gw-commit-body(gsha-hex-of-raw(tree), [gsha-hex-of-raw(head)], who, who, "autostash\n"));
+   let reset = gwc-hard-to(r, head);
+   hex;
+  }
+  def gm-replay-list(r, head, up) = ginf-reverse(filter(i => len(i[1]) <= 1, grv-walk(r, [head], [up], [false, false, 0 - 1, 0], nothing())), []);
+  def gm-rb-begin(r, cfg, o, h, head, up, ff, replay, stash_id) {
+   let d = gw-mkdirs(gm-state-dir(r));
+   let name = str_eq(h[0], "branch") ? h[1] : "detached HEAD";
+   let todo = gcm-text(map(i => "pick " ++ gsha-hex-of-raw(i[0]) ++ " " ++ gs-subject(grv-full(r, i)[4][4]), replay));
+   let w = gm-sf(r, "head-name", name ++ "\n") + gm-sf(r, "onto", gsha-hex-of-raw(up) ++ "\n") + gm-sf(r, "orig-head", gsha-hex-of-raw(head) ++ "\n") + gm-sf(r, "git-rebase-todo", todo) + gm-sf(r, "done", "") + gm-sf(r, "msgnum", "0\n") + gm-sf(r, "end", len(replay).str() ++ "\n") + gm-sf(r, "quiet", gcm-opt?(o, "-q") ? "t\n" : "\n");
+   let st = nothing?(stash_id) ? 0 : gm-sf(r, "autostash", stash_id ++ "\n");
+   let oh = gw-put-file(gs-gitdir(r) ++ "/ORIG_HEAD", gsha-hex-of-raw(head) ++ "\n");
+   let moved = gwc-move-to(r, up, false);
+   moved[1] != 0 ? gm-rb-fail(r, moved) : gm-rb-detach(r, cfg, up, head, name, replay, ff);
+  }
+  def gm-rb-fail(r, moved) {
+   let rm = host_dir_rmdir(gm-state-dir(r));
+   moved;
+  }
+  def gm-rb-detach(r, cfg, up, head, name, replay, ff) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let w = gw-put-file(gs-gitdir(r) ++ "/HEAD", gsha-hex-of-raw(up) ++ "\n");
+   let l = gwc-log(r, "HEAD", gsha-hex-of-raw(head), gsha-hex-of-raw(up), id, ms, "rebase (start): checkout " ++ gsha-hex-of-raw(up));
+   ff ? gm-rb-finish(r, cfg) : gm-rb-loop(r, cfg);
+  }
+  // pick the next todo line; stops on a conflict
+  def gm-rb-loop(r, cfg) {
+   let todo = gs-lines(gm-rf(r, "git-rebase-todo"));
+   nil?(todo) ? gm-rb-finish(r, cfg) : gm-rb-pick(r, cfg, head(todo), tail(todo));
+  }
+  def gm-todo-id(line) = substring(line, 5, 45);
+  def gm-rb-pick(r, cfg, line, rest) {
+   let cid = gsha-raw-of-hex(gm-todo-id(line));
+   let info = grv-full(r, grv-info(r, cid));
+   let n = str_to_int(gs-trim(gm-rf(r, "msgnum"))) + 1;
+   let a = gm-sf(r, "git-rebase-todo", gcm-text(rest)) + gm-sf(r, "done", gm-rf(r, "done") ++ line ++ "\n") + gm-sf(r, "msgnum", n.str() ++ "\n");
+   gm-rb-apply(r, cfg, info, n);
+  }
+  def gm-rb-apply(r, cfg, info, n) {
+   let tipraw = gsha-raw-of-hex(gr-head-id(r));
+   let ptree = nil?(info[1]) ? nothing() : gm-tree-of(r, info[1][0]);
+   let otree = gm-tree-of(r, tipraw);
+   let res = gm-apply-merge(r, ptree, otree, info[3], "HEAD", gm-label(r, info));
+   nil?(res[0]) ? gm-rb-commit(r, cfg, info, tipraw, otree, true) : gm-rb-stop(r, cfg, info, res);
+  }
+  def gm-rb-stop(r, cfg, info, res) {
+   let w = gm-sf(r, "stopped-sha", gsha-hex-of-raw(info[0]) ++ "\n") + gm-sf(r, "message", info[4][4]) + gm-sf(r, "author-script", gm-author-script(info[4][2]));
+   [res[1], 1, "error: could not apply " ++ gm-label(r, info) ++ "\nhint: Resolve all conflicts manually, mark them as resolved with\nhint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".\nhint: You can instead skip this commit: run \"git rebase --skip\".\nhint: To abort and get back to the state before \"git rebase\", run \"git rebase --abort\".\n"];
+  }
+  def gm-author-script(line) {
+   let p = gs-person(line ?? "");
+   "GIT_AUTHOR_NAME='" ++ p[0] ++ "'\nGIT_AUTHOR_EMAIL='" ++ p[1] ++ "'\nGIT_AUTHOR_DATE='@" ++ p[2].str() ++ " " ++ p[3] ++ "'\n";
+  }
+  // commit the index as the picked commit (its author, its message); an empty result is dropped
+  def gm-rb-commit(r, cfg, info, tipraw, otree, fromloop) {
+   let rows = gwc-rows(r);
+   let tree = gw-write-tree(gs-gitdir(r), rows);
+   str_eq(tree, otree) ? (fromloop ? gm-rb-loop(r, cfg) : gm-rb-loop(r, cfg)) : gm-rb-write(r, cfg, info, tipraw, tree);
+  }
+  def gm-rb-write(r, cfg, info, tipraw, tree) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let body = gw-commit-body(gsha-hex-of-raw(tree), [gsha-hex-of-raw(tipraw)], info[4][2] ?? gwc-stamp(id, ms), gwc-stamp(id, ms), info[4][4]);
+   let hex = gw-put-loose(gs-gitdir(r), "commit", body);
+   let w = gw-put-file(gs-gitdir(r) ++ "/HEAD", hex ++ "\n");
+   let l = gwc-log(r, "HEAD", gsha-hex-of-raw(tipraw), hex, id, ms, "rebase (pick): " ++ gs-subject(info[4][4]));
+   gm-rb-loop(r, cfg);
+  }
+  def gm-rb-finish(r, cfg) {
+   let name = gs-trim(gm-rf(r, "head-name"));
+   let tip = gs-trim(gs-text-or(gs-gitdir(r) ++ "/HEAD", ""));
+   let orig = gs-trim(gm-rf(r, "orig-head"));
+   let onto = gs-trim(gm-rf(r, "onto"));
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let w = gwc-hex40-ok(tip) && gs-starts?(name, "refs/") ? gm-rb-land(r, id, ms, name, tip, orig, onto) : 0;
+   let stash = gs-trim(gm-rf(r, "autostash"));
+   let rm = host_dir_rmdir(gm-state-dir(r));
+   let ap = len(stash) == 40 ? gm-stash-apply(r, stash) : "";
+   gwc-note("", ap ++ "Successfully rebased and updated " ++ name ++ ".\n");
+  }
+  def gwc-hex40-ok(s) = len(s) == 40 && gsha-hex?(s);
+  def gm-rb-land(r, id, ms, name, tip, orig, onto) {
+   let a = gwc-set-ref(r, name, tip);
+   let l1 = gwc-log(r, name, orig, tip, id, ms, "rebase (finish): " ++ name ++ " onto " ++ onto);
+   let h = gw-put-file(gs-gitdir(r) ++ "/HEAD", "ref: " ++ name ++ "\n");
+   let l2 = gwc-log(r, "HEAD", tip, tip, id, ms, "rebase (finish): returning to " ++ name);
+   a;
+  }
+  // apply the stash commit's changes onto the current tree; conflicts are left for the user
+  def gm-stash-apply(r, stash) {
+   let sc = grv-info(r, gsha-raw-of-hex(stash));
+   let base = gm-tree-of(r, sc[1][0]);
+   let ours = gst-head-tree(r);
+   let res = gm-apply-merge(r, base, ours, sc[3], "Updated upstream", "Stashed changes");
+   nil?(res[0]) ? "" : res[1] ++ "Applying autostash resulted in conflicts.\nYour changes are safe in the stash.\n";
+  }
+  def gm-rb-continue(r, cfg, skip) {
+   gm-rebasing?(r) ? gm-rb-resume(r, cfg, skip) : gwc-fatal("No rebase in progress?");
+  }
+  def gm-rb-resume(r, cfg, skip) {
+   let rows = gwc-rows(r);
+   let unmerged = filter(e => e[6] > 0, rows);
+   !skip && !nil?(unmerged) ? ["", 1, "error: Committing is not possible because you have unmerged files.\nhint: Fix them up in the work tree, and then use 'git add/rm <file>'\nhint: as appropriate to mark resolution and make a commit.\n"] : skip ? gm-rb-skip(r, cfg) : gm-rb-continue-commit(r, cfg);
+  }
+  def gm-rb-skip(r, cfg) {
+   let hard = gwc-hard-to(r, gsha-raw-of-hex(gr-head-id(r)));
+   hard[1] != 0 ? hard : gm-rb-loop(r, cfg);
+  }
+  def gm-rb-continue-commit(r, cfg) {
+   let sha = gs-trim(gm-rf(r, "stopped-sha"));
+   let tipraw = gsha-raw-of-hex(gr-head-id(r));
+   len(sha) != 40 ? gm-rb-loop(r, cfg) : gm-rb-commit(r, cfg, grv-full(r, grv-info(r, gsha-raw-of-hex(sha))), tipraw, gm-tree-of(r, tipraw), false);
+  }
+  def gm-rb-abort(r, cfg) {
+   gm-rebasing?(r) ? gm-rb-abort-go(r, cfg) : gwc-fatal("No rebase in progress?");
+  }
+  def gm-rb-abort-go(r, cfg) {
+   let name = gs-trim(gm-rf(r, "head-name"));
+   let orig = gs-trim(gm-rf(r, "orig-head"));
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let hd = gw-put-file(gs-gitdir(r) ++ "/HEAD", gs-starts?(name, "refs/") ? "ref: " ++ name ++ "\n" : orig ++ "\n");
+   let hard = gwc-hard-to(r, gsha-raw-of-hex(orig));
+   let l = gwc-log(r, "HEAD", gs-trim(gs-text-or(gs-gitdir(r) ++ "/HEAD", "")), orig, id, ms, "rebase (abort): returning to " ++ name);
+   let stash = gs-trim(gm-rf(r, "autostash"));
+   let rm = host_dir_rmdir(gm-state-dir(r));
+   let ap = len(stash) == 40 ? gm-stash-apply(r, stash) : "";
+   hard[1] != 0 ? hard : gwc-note("", ap);
+  }
+  // ---- merge ------------------------------------------------------------------------------------------------------------------------------------
+  def gm-mg-spec() = [["--ff-only", "flag"], ["--no-ff", "flag"], ["--ff", "flag"], ["-m", "val"], ["--no-edit", "flag"], ["-q", "flag"], ["--quiet", "flag"], ["--abort", "flag"], ["--squash", "flag"], ["--no-commit", "flag"], ["--edit", "flag"], ["-e", "flag"]];
+  def gm-merge(r, cfg, args) {
+   let p = gcm-parse(args, gm-mg-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("merge", p[3][0]) : gcm-opt?(o, "--squash") || gcm-opt?(o, "--no-commit") ? ["", 129, "native-git: merge --squash / --no-commit are refused by name\n"] : gcm-opt?(o, "--abort") ? gm-mg-abort(r) : nil?(p[1]) ? gwc-fatal("No remote for the current branch.") : gm-mg-start(r, cfg, o, p[1][0]);
+  }
+  def gm-mg-abort(r) {
+   host_path_exists(gs-gitdir(r) ++ "/MERGE_HEAD") == 1 ? gm-mg-abort-go(r) : gwc-fatal("There is no merge to abort (MERGE_HEAD missing).");
+  }
+  def gm-mg-abort-go(r) {
+   let hard = gwc-hard-to(r, gsha-raw-of-hex(gr-head-id(r)));
+   let a = host_path_remove(gs-gitdir(r) ++ "/MERGE_HEAD");
+   let b = host_path_remove(gs-gitdir(r) ++ "/MERGE_MSG");
+   let c = host_path_remove(gs-gitdir(r) ++ "/MERGE_MODE");
+   hard;
+  }
+  def gm-mg-start(r, cfg, o, spec) {
+   let theirs = gwc-commit-of(r, spec);
+   let headid = gr-head-id(r);
+   nothing?(theirs) ? gwc-fatal(spec ++ " - not something we can merge") : nothing?(headid) ? gwc-fatal("no commits yet") : host_path_exists(gs-gitdir(r) ++ "/MERGE_HEAD") == 1 ? gwc-fatal("You have not concluded your merge (MERGE_HEAD exists).") : gm-mg-plan(r, cfg, o, spec, theirs, gsha-raw-of-hex(headid));
+  }
+  def gm-mg-plan(r, cfg, o, spec, theirs, head) {
+   let mbs = grv-merge-bases(r, head, theirs);
+   let mb = nil?(mbs) ? nothing() : mbs[0];
+   !nothing?(mb) && str_eq(mb, theirs) ? gwc-ok("Already up to date.\n") : gm-dirty?(r) ? ["", 1, "error: Your local changes to the following files would be overwritten by merge:\nPlease commit your changes or stash them before you merge.\nAborting\n"] : !nothing?(mb) && str_eq(mb, head) && !gcm-opt?(o, "--no-ff") ? gm-mg-ff(r, cfg, head, theirs) : gcm-opt?(o, "--ff-only") ? ["", 128, "fatal: Not possible to fast-forward, aborting.\n"] : gm-mg-three(r, cfg, o, spec, head, theirs, mb);
+  }
+  def gm-mg-ff(r, cfg, head, theirs) {
+   let moved = gwc-move-to(r, theirs, false);
+   moved[1] != 0 ? moved : gm-mg-ff-ref(r, cfg, head, theirs);
+  }
+  def gm-mg-ff-ref(r, cfg, head, theirs) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let w = gwc-move-head(r, gsha-hex-of-raw(theirs), id, ms, "merge: Fast-forward");
+   gwc-ok("Updating " ++ gm-short(r, head) ++ ".." ++ gm-short(r, theirs) ++ "\nFast-forward\n");
+  }
+  def gm-merge-message(r, spec) = nothing?(gr-resolve(r, "refs/heads/" ++ spec)) ? (nothing?(gr-resolve(r, "refs/remotes/" ++ spec)) ? "Merge commit '" ++ spec ++ "'" : "Merge remote-tracking branch '" ++ spec ++ "'") : "Merge branch '" ++ spec ++ "'";
+  def gm-mg-three(r, cfg, o, spec, head, theirs, mb) {
+   let base = nothing?(mb) ? nothing() : gm-tree-of(r, mb);
+   let hinfo = grv-full(r, grv-info(r, head));
+   let tinfo = grv-full(r, grv-info(r, theirs));
+   let res = gm-apply-merge(r, base, gm-tree-of(r, head), gm-tree-of(r, theirs), "HEAD", spec);
+   let msg = nothing?(gcm-opt-val(o, "-m", nothing())) || len(gcm-opt-val(o, "-m", "")) == 0 ? gm-merge-message(r, spec) ++ "\n" : gwc-clean-message(gcm-opt-val(o, "-m", ""));
+   nil?(res[0]) ? gm-mg-commit(r, cfg, head, theirs, msg) : gm-mg-conflict(r, cfg, head, theirs, msg, res);
+  }
+  def gm-mg-conflict(r, cfg, head, theirs, msg, res) {
+   let w = gw-put-file(gs-gitdir(r) ++ "/MERGE_HEAD", gsha-hex-of-raw(theirs) ++ "\n") + gw-put-file(gs-gitdir(r) ++ "/MERGE_MSG", msg ++ "\n# Conflicts:\n" ++ ginf-join(ginf-reverse(map(c => "#\t" ++ c[0] ++ "\n", res[0]), []))) + gw-put-file(gs-gitdir(r) ++ "/MERGE_MODE", "");
+   [res[1] ++ "Automatic merge failed; fix conflicts and then commit the result.\n", 1, ""];
+  }
+  def gm-mg-commit(r, cfg, head, theirs, msg) {
+   let tree = gw-write-tree(gs-gitdir(r), gwc-rows(r));
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER");
+   nothing?(id) ? gwc-fatal("Committer identity unknown") : gm-mg-write(r, cfg, head, theirs, msg, tree, id, ms);
+  }
+  def gm-mg-write(r, cfg, head, theirs, msg, tree, id, ms) {
+   let who = gwc-stamp(id, ms);
+   let hex = gw-put-loose(gs-gitdir(r), "commit", gw-commit-body(gsha-hex-of-raw(tree), [gsha-hex-of-raw(head), gsha-hex-of-raw(theirs)], who, who, msg));
+   let mv = gwc-move-head(r, hex, id, ms, "merge " ++ gsha-hex-of-raw(theirs) ++ ": Merge made by the 'ort' strategy.");
+   gwc-ok("Merge made by the 'ort' strategy.\n");
+  }
+ }
+ 0;
+}

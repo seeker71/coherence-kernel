@@ -27,94 +27,62 @@
 // existed; this is the join that lets a REQUEST start the chain instead of
 // a prelude line.
 //
+// preludes: form-stdlib/bml/order.bml
 import form-stdlib/core.fk;
 import form-stdlib/keyed-map.fk;
+import form-stdlib/bml/order.bml;
 //
 section [form.bml] {
-    // ── THE SCAN IS THE HOST'S GREP, THE STRUCTURE IS FORM'S ────────────────
-    // Designed under four asks — flexibility, efficiency, scalability,
-    // multi-threaded execution — and one fresh burn: the first draft walked
-    // every file in Form with append-per-row, the quadratic accumulator
-    // taxonomy row one, and timed out on its own body. The host's grep scans
-    // at C speed in ONE spoken-token call and emits file:name rows Form
-    // parses linearly (cons + one reverse, never append-per-row).
+    // ── THE SCAN IS FORM'S ───────────────────────────────────────────────────
+    // A directory is read in Form and no process runs: fs_list names its
+    // entries, the `*.fk` ones (a name that does not begin with a dot, as a
+    // shell glob would not) are taken in byte order, each is read whole, and a
+    // line that is `  (defn name rest` becomes a row [name, dir/file].
     //
-    //   flexibility   the pattern is an argument (sof-grep-pattern); any
-    //                 birth shape — defn, define, optable row — is one
-    //                 pattern away, and dirs are data
-    //   efficiency    one process boundary crossing per shard; O(bytes)
-    //                 scan in C; O(rows) structure in Form
-    //   scalability   shards: each dir (or dir-slice) is an independent
-    //                 grep; nothing shares state but the merged list
-    //   multi-thread  shard greps can run as CONCURRENT background
-    //                 processes writing per-shard spools, merged through
-    //                 the spool transport (the proven floor, #549) — the
-    //                 sequential path below is the same shape at N=1, so
-    //                 going wide changes the driver, never the organ
-    def sof-grep-pattern() = "^ *\\(defn ";
-    // MEASURED THIS SITTING: fk_host_exec truncates stdout at 262,143 bytes
-    // (2^18 - 1), SILENTLY — the silent-partial family with its exact number.
-    // A completion token at the tail of a large output drowns with the rows.
-    // So the rows go to a shard FILE (read_file has no cap; NUL-clean at
-    // 27MB, witnessed) and only the spoken token crosses stdout.
-    //
-    // The first version used one fixed /tmp/sof-shard.txt. That made two
-    // concurrent residents overwrite one another's source evidence. A shard
-    // now receives a one-use host-created lease instead: Form accepts only a
-    // conservative filename alphabet and the known lease prefix, reads that
-    // lease once, then releases that exact path. The source index itself stays
-    // purely computed data; no request can nominate a filename or another
-    // residence's spool.
-    def sof-shard-prefix() = "/tmp/sof-shard.";
-    def sof-shard-done-prefix() = "ZDONE:";
-    def sof-safe-shard-byte?(byte) = byte >= 97 && byte <= 122 ? 1 : byte >= 65 && byte <= 90 ? 1 : byte >= 48 && byte <= 57 ? 1 : (Comparable) byte == 45 ? 1 : (Comparable) byte == 95 ? 1 : (Comparable) byte == 46 ? 1 : (Comparable) byte == 47 ? 1 : 0;
-    def sof-safe-shard-path-at?(path, at) = (Comparable) at == len(path) ? 1 : (Comparable) sof-safe-shard-byte?(str_byte_at(path, at)) == 1 ? sof-safe-shard-path-at?(path, at + 1) : 0;
-    def sof-safe-shard-path?(path) = nothing?(path) || (Comparable) len(path) == 0 ? 0 : !((Comparable) str_find(path, sof-shard-prefix(), 0) == 0) ? 0 : sof-safe-shard-path-at?(path, 0);
-    def sof-shard-path-from-output(out) = nothing?(out) || !((Comparable) str_find(out, sof-shard-done-prefix(), 0) == 0) ? nothing() : {
-        let path = substring(out, len(sof-shard-done-prefix()), len(out));
-        (Comparable) sof-safe-shard-path?(path) == 1 ? path : nothing();
+    //   flexibility   the dirs are data; any birth shape is one prefix away
+    //   efficiency    one read_file per cell; a cell with no `(defn ` in it
+    //                 costs one str_find; rows are consed and reversed once,
+    //                 never appended per row (the quadratic accumulator)
+    //   scalability   each dir is an independent scan; nothing shares state
+    //                 but the merged list
+    //   no residue    the scan makes no file and holds no lease: a request
+    //                 cannot nominate a filename and there is nothing to release
+    def sof-defn-mark() = "(defn ";
+    def sof-fk-name?(name) = (Comparable) len(name) > 3 && !((Comparable) str_byte_at(name, 0) == 46) && (String) substring(name, len(name) - 3, len(name)) == ".fk";
+    // the names of a directory that a `dir/*.fk` glob would match, in byte order
+    def sof-cells(dir) = {
+        let names = fs_list(dir);
+        nothing?(names) ? [] : sort-strings(names |> filter(n => (Comparable) sof-fk-name?(n)));
     };
-    def sof-shard-release(path) =     // `path` is accepted only through sof-shard-path-from-output above,
-    // hence contains no shell punctuation and remains the exact one-use
-    // lease that this scan obtained.
-host-exec(("rm -f -- " + path), "");
-    // the shard holds grep's own rows (`path:  (defn name rest`); Form cuts the name and the path out
-    def sof-shard-command(dir) = ("out=$(mktemp /tmp/sof-shard.XXXXXX) || exit 1; grep -H -E '" + (sof-grep-pattern() + ("' " + (dir + ("/*.fk 2>/dev/null > \"$out\"; printf '" + (sof-shard-done-prefix() + "'%s \"$out\""))))));
-    def sof-shard-scan(dir) = {
-        let out = host-exec(sof-shard-command(dir), "");
-        let path = sof-shard-path-from-output(out);
-        nothing?(path) ? nothing() : {
-            let s = read_file(path);
-            let released = sof-shard-release(path);
-            nothing?(s) ? "" : s;
-        };
-    };
-    // one grep row `path:  (defn name rest` -> [name, path], or [] when it is not one
+    // one line `  (defn name rest` read as [name, path], or [] when it is not one
     def sof-skip-sp(line, i) = i >= len(line) ? i : (Comparable) ord(char_at(line, i)) == 32 ? sof-skip-sp(line, i + 1) : i;
     def sof-name-end(line, i) = i >= len(line) ? i : ((Comparable) ord(char_at(line, i)) == 32 || (Comparable) ord(char_at(line, i)) == 40) ? i : sof-name-end(line, i + 1);
+    def sof-defn-row(line, from, path) = {
+        let p = sof-skip-sp(line, from);
+        !((Comparable) str_find(line, sof-defn-mark(), p) == p) ? [] : {
+            let a = p + 6;
+            let b = sof-name-end(line, a);
+            b > a ? [substring(line, a, b), path] : [];
+        };
+    };
+    // the same, from a `path:  (defn name rest` row (the shape a grep prints)
     def sof-grep-row(line) = {
         let c = str_find(line, ":", 0);
-        c < 0 ? [] : {
-            let p = sof-skip-sp(line, c + 1);
-            !((Comparable) str_find(line, "(defn ", p) == p) ? [] : {
-                let a = p + 6;
-                let b = sof-name-end(line, a);
-                b > a ? [substring(line, a, b), substring(line, 0, c)] : [];
-            };
-        };
+        c < 0 ? [] : sof-defn-row(line, c + 1, substring(line, 0, c));
     };
-    // linear parse: cons rows, reverse once
-    def sof-parse(s, pos, acc) = {
+    // linear parse of one cell's text: cons rows, reverse once
+    def sof-parse(s, path, pos, acc) = pos >= len(s) ? reverse(acc) : {
         let e = str_find(s, "\n", pos);
-        e < 0 ? reverse(acc) : {
-            let row = sof-grep-row(substring(s, pos, e));
-            sof-parse(s, e + 1, (Comparable) len(row) == 0 ? acc : cons(row, acc));
-        };
+        let stop = e < 0 ? len(s) : e;
+        let row = sof-defn-row(substring(s, pos, stop), 0, path);
+        sof-parse(s, path, stop + 1, (Comparable) len(row) == 0 ? acc : cons(row, acc));
     };
-    def sof-index-dir(dir) = {
-        let s = sof-shard-scan(dir);
-        nothing?(s) ? [] : sof-parse(s, 0, []);
+    def sof-cell-rows(path) = {
+        let s = read_file(path);
+        nothing?(s) ? [] : str_find(s, sof-defn-mark(), 0) < 0 ? [] : sof-parse(s, path, 0, []);
     };
+    def sof-dir-go(dir, names, acc) = (Comparable) len(names) == 0 ? reverse(acc) : sof-dir-go(dir, names[1:], sof-cons-all(sof-cell-rows(dir + "/" + names[0]), acc));
+    def sof-index-dir(dir) = sof-dir-go(dir, sof-cells(dir), []);
     def sof-index-go(dirs, acc) = (Comparable) len(dirs) == 0 ? reverse(acc) : sof-index-go(dirs[1:], sof-cons-all(sof-index-dir(dirs[0]), acc));
     def sof-cons-all(rows, acc) = (Comparable) len(rows) == 0 ? acc : sof-cons-all(rows[1:], cons(rows[0], acc));
     def sof-index(dirs) = sof-index-go(dirs, []);
@@ -141,7 +109,7 @@ host-exec(("rm -f -- " + path), "");
     // A snapshot is caller-owned resident data, not a global cache.  Its epoch
     // is supplied by the same live meaning membrane that owns the JIT route.
     // A changed epoch produces `choice` (rebuild is a decision) rather than
-    // silently reusing stale births or spending another host scan in a query.
+    // silently reusing stale births or spending another scan in a query.
     def sof-snapshot-version() = "source-of-snapshot-v2";
     def sof-snapshot(epoch, dirs, index) = [sof-snapshot-version(), epoch, dirs, index, sof-index-map(index)];
     def sof-snapshot?(snapshot) = nothing?(snapshot) ? 0 : !((Comparable) len(snapshot) == 5) ? 0 : (String) snapshot[0] == sof-snapshot-version();

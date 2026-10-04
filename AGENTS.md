@@ -117,7 +117,8 @@ adapting, and observe the resulting behavior before claiming the limit healed.
 
 Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
 and BML. A missing internal tool belongs in that body, with its behavior observed
-in the same movement. OS operations are begun by argv through the body's doors (`host-child.bml`), and the tree holds
+in the same movement. OS operations are begun by argv through the body's doors (`host-child.bml`); the body's own cells are
+not OS operations and are not begun at all: they run in-process and answer a value (item 11, `docs/in-process-cells.md`). The tree holds
 only kinds the body names (Form, the C seed, documents and data: `gate/structural-gate.fk` is an allowlist and refuses
 any other file, a script of any language included, outside its declared carriers); perl, python, sed, awk and jq do not
 become implementation or analysis detours. The body holds this for sed, awk, perl and python at its own doors:
@@ -351,7 +352,8 @@ Then verify it runs the body — a **real cell**, native:
 `fkwu <file.fk>` runs Form source straight through the kernel's own source-runner (multi-function,
 cross-calls, lists, recursion). The direction of travel is the native walker proven on `fkwu`, with the C seed
 made smaller until it disappears. Every band runs on fkwu and answers its pin there: `./fkwu gate/band-sweep-run.bml`
-walks the sweep through the one runtime, and `gate/canonical-conformance.bml` holds fkwu and the Form codec to the pinned
+walks the sweep through the one runtime (one `cell_run` call per band, in this process, shardable by `{"shard":i,"of":n}`:
+`docs/in-process-cells.md`), and `gate/canonical-conformance.bml` holds fkwu and the Form codec to the pinned
 canonical expressions, the FORMBIN2 artifact and the malformed artifacts. Most work lands in BML and Form, not in
 any kernel. What other languages' runtimes taught the body (the DeepSeek op graph read from a Swift runner, the
 Qwen graph from its references) is carried as Form recipes under `form/native/metal/`; none of them is a dependency.
@@ -725,6 +727,14 @@ plainly once, and give the conversation your attention.
     living. Repeating that picture in chat is noise. Recipe:
     [`form/form-stdlib/land-cadence.fk`](form/form-stdlib/land-cadence.fk).
     Door: `./fkwu form/form-stdlib/land-cadence-live.fk`.
+11. **Cells run in-process: take the value.** The body does not begin `./fkwu` to run a cell and parse stdout, stderr and an exit
+    code (Urs, 2026-10-04). A cell is called in the process that needs it, and its value, its printed output, its diagnostics and
+    the name of a stop come back as one record (`cell_run`), with a deadline instead of a kill and a stdin that is a value.
+    Parallelism is sharding (an operator starts the shards), not children; a worker that can wedge in a device wait is a service
+    the host's manager starts, read through the shared field and ended with `host_signal`. What may still begin a program: the `cc`
+    that builds the seed, `git` until Urs decides, and a service the manager starts. What is built, what waits on the seed, and the
+    migration order live in [`docs/in-process-cells.md`](docs/in-process-cells.md). Until the door is in the seed in use, the spawn
+    paths named there stay; add no new one.
 
 ## What this is, and isn't
 

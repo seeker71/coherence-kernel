@@ -1,0 +1,83 @@
+// tar-ustar.bml — a directory written as a ustar archive, in Form, with no program.
+//
+// A proof's inputs are kept as one archive before the directory they came from is removed (dsv4-proof-retention.bml). The body
+// ran `tar -cf - -C dir .` for it and captured the archive from the child's stdout. The format is small and fixed: a 512 byte
+// header per entry (name, mode, size, modification time, a checksum, a type), the file's bytes padded to 512, and two empty
+// blocks at the end. ust-tree writes exactly that, the way `tar -cf - -C dir .` names it: `./` first, then every path under it
+// as `./name` (a directory ends in `/`), each directory's entries in sorted order. Any tar reads it back.
+//
+//   ust-tree(dir)    [why, archive, entries]   why "" when the archive is whole; archive is the bytes; entries counts headers
+//
+// What it carries: regular files (a link to a regular file arrives as the file's bytes) and directories, with their permission
+// bits and modification time (to the second). Owner is root with no names (a restored file is owned by whoever extracts it). A
+// path of more than 100 bytes is split into the ustar prefix (up to 155 bytes) and name at a `/`; a longer one, a link that is not
+// regular file (a link to a directory included) and a file the host will not read each end the archive with a named reason,
+// never with a short archive.
+//
+// PROOF: form-stdlib/tests/tar-ustar-band.bml.
+import form-stdlib/bml/copy-by-names.bml;
+import form-stdlib/bml/order.bml;
+section [form.bml] {
+ class TarUstar {
+  def ust-nul() = byte_to_str(0);
+  def ust-rep(s, k) = k <= 0 ? "" : k == 1 ? s : (k % 2 == 1 ? s : "") ++ ust-rep(s ++ s, k / 2);
+  def ust-nuls(k) = ust-rep(ust-nul(), k);
+  def ust-oct(n) = n < 8 ? byte_to_str(48 + n) : ust-oct(n / 8) ++ byte_to_str(48 + n % 8);
+  def ust-lead(s, width) = len(s) >= width ? s : ust-rep("0", width - len(s)) ++ s;
+  // a numeric field of `width` bytes: width-1 octal digits and a NUL
+  def ust-num(n, width) = ust-lead(ust-oct(n), width - 1) ++ ust-nul();
+  def ust-text(s, width) = s ++ ust-nuls(width - len(s));
+  def ust-sum(h) = foldl((acc, i) => acc + str_byte_at(h, i), 0, range(0, len(h)));
+  // where a long path is cut: the last "/" that leaves a prefix of at most 155 and a name of at most 100 (-1 when none does)
+  def ust-cut(path, at, found) = at >= len(path) ? found : ust-cut(path, at + 1, (Comparable) str_byte_at(path, at) == 47 && at <= 155 && len(path) - at - 1 <= 100 && len(path) - at - 1 > 0 ? at : found);
+  def ust-fits?(path) = len(path) <= 100 || (len(path) <= 256 && ust-cut(path, 0, -1) >= 0);
+  def ust-name-field(path) = len(path) <= 100 ? ust-text(path, 100) : ust-text(substring(path, ust-cut(path, 0, -1) + 1, len(path)), 100);
+  def ust-prefix-field(path) = len(path) <= 100 ? ust-nuls(155) : ust-text(substring(path, 0, ust-cut(path, 0, -1)), 155);
+  // the header of one entry; kind "0" a file, "5" a directory
+  def ust-header(path, bits, size, mtime, kind) {
+   let blank = "        ";
+   let before = ust-name-field(path) ++ ust-num(bits, 8) ++ ust-num(0, 8) ++ ust-num(0, 8) ++ ust-num(size, 12) ++ ust-num(mtime, 12);
+   let after = kind ++ ust-nuls(100) ++ "ustar" ++ ust-nul() ++ "00" ++ ust-nuls(32) ++ ust-nuls(32) ++ ust-num(0, 8) ++ ust-num(0, 8) ++ ust-prefix-field(path) ++ ust-nuls(12);
+   let sum = ust-sum(before ++ blank ++ after);
+   before ++ ust-lead(ust-oct(sum), 6) ++ ust-nul() ++ " " ++ after;
+  }
+  def ust-pad(size) = ust-nuls((512 - size % 512) % 512);
+  // ---- the walk: [why, pieces, entries]
+  def ust-entry-name(rel, dir) = dir ? "./" ++ rel ++ "/" : "./" ++ rel;
+  def ust-tree(dir) {
+   let top = host_file_identity(dir);
+   let bits = host_file_mode(dir);
+   let walked = (Comparable) bits < 0 || nothing?(top) ? ["could not read the directory", [], 0] : ust-walk(dir, "", ["", [ust-header("./", bits % 4096, 0, top[1] / 1000, "5")], 1]);
+   (String) walked[0] != "" ? [walked[0], "", walked[2]] : ["", str-spans(append(reverse(walked[1]), [ust-nuls(1024)])), walked[2]];
+  }
+  // one directory level: rel is "" for the top, else its path under dir; acc is [why, pieces newest first, entries]
+  def ust-walk(dir, rel, acc) {
+   let at = (String) rel == "" ? dir : dir ++ "/" ++ rel;
+   let kids = fs_list(at);
+   nothing?(kids) ? ["could not read the directory: " ++ (String) rel, acc[1], acc[2]] : ust-each(dir, rel, sort-strings(kids), acc);
+  }
+  def ust-each(dir, rel, kids, acc) = nil?(kids) ? acc : (String) acc[0] != "" ? acc : ust-each(dir, rel, kids[1:], ust-one(dir, (String) rel == "" ? kids[0] : rel ++ "/" ++ kids[0], acc));
+  def ust-one(dir, rel, acc) {
+   let src = dir ++ "/" ++ rel;
+   let mode = host_file_mode(src);
+   let isDir = (Comparable) mode >= 0 && (Comparable) (mode / 4096) == 4;
+   (Comparable) mode < 0 ? ["unreadable entry: " ++ rel, acc[1], acc[2]]
+   : !ust-fits?(ust-entry-name(rel, isDir)) ? ["path too long for ustar: " ++ rel, acc[1], acc[2]]
+   : isDir && cbn-symlink?(src) ? ["a linked directory is not carried: " ++ rel, acc[1], acc[2]]
+   : isDir ? ust-dir(dir, rel, mode % 4096, acc)
+   : ust-file(src, rel, mode, acc);
+  }
+  def ust-dir(dir, rel, bits, acc) {
+   let id = host_file_identity(dir ++ "/" ++ rel);
+   let head = ust-header(ust-entry-name(rel, true), bits, 0, nothing?(id) ? 0 : id[1] / 1000, "5");
+   ust-walk(dir, rel, [acc[0], cons(head, acc[1]), acc[2] + 1]);
+  }
+  def ust-file(src, rel, mode, acc) {
+   let id = host_file_identity(src);
+   let bytes = (Comparable) (mode / 4096) == 8 ? read_file(src) : nothing();
+   nothing?(id) || nothing?(bytes) || (Comparable) len(bytes) != id[0] ? ["not a regular file the host will read whole: " ++ rel, acc[1], acc[2]]
+   : ["", cons(ust-pad(len(bytes)), cons(bytes, cons(ust-header(ust-entry-name(rel, false), mode % 4096, len(bytes), id[1] / 1000, "0"), acc[1]))), acc[2] + 1];
+  }
+ }
+ 0;
+}

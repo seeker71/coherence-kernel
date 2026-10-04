@@ -1,6 +1,7 @@
 ; band-sweep-band.bml — the sweep that walks every band on fkwu (form-stdlib/bml/band-sweep.bml, the door gate/band-sweep-run.bml)
-; enumerates, runs legs in a pool with a deadline each, judges by exit, stderr and pins, releases what a band left, and says what it saw.
-; The legs here are fixture bands (tests/fixtures/band-sweep/) that answer, fail, hang, rest or leave a reader waiting on a fifo.
+; enumerates, runs each leg in this process as one cell_run call with a deadline, judges the record by its pins, shares the work out by shard,
+; and says what it saw (docs/in-process-cells.md). The legs here are fixture bands (tests/fixtures/band-sweep/) that answer, fail, stop,
+; fail to compile or spin, and the real voice-chunk-band.
 ;
 ; Verdict 1048575 when every claim lands:
 ;   1      enumeration: the workloads are samples, then form-stdlib/tests (core.fk, a module of the band's own name between when one
@@ -8,51 +9,74 @@
 ;          path starts with `.`, every file stands; a match of alternatives picks by label; one explicit workload names its files
 ;   2      the heads: a band's head pin, its manifest stem (the exact name, else without -band, only under form-stdlib/tests) and its
 ;          registered verdict read as the list shows them; a band with a row and no pin, a pin and no row, neither
-;   4      judgment: the first reason that holds wins, in order: the deadline, a nonzero exit, a diagnostic line on stderr, the head
-;          pin, the registered verdict; no reason when each holds; stderr lines counted by what they say (unresolved-call, error:,
-;          compiled with errors)
+;   4      judgment: the first reason that holds wins, in order: the deadline, a stop or a compile error (what a spawned run showed as
+;          exit 1), a compile or binding diagnostic in the record, the head pin, the registered verdict; no reason when each holds.
+;          Fed synthetic records (no unit run): a value equal to the head pin passes pinned and prints it, another value fails
+;          "answered 7, its head pins 4095", a stopped record and a record with a compile error fail "exit 1", a record stopped by
+;          deadline fails past the deadline naming the ceiling, a unit with no pin that runs clean is shown, not judged, and the answer of a
+;          unit that stopped is the last line it did print; the diagnostics counted are the compile errors and missing bindings of the record
 ;   8      the unit: one file runs as itself, several through a root `; preludes:` line of the files in order, written once by a name
 ;          of the text and rewritten when the file there holds other text
-;   16     the pool: six fixtures (answers its pin, hangs, runs clean unpinned, answers 8 against a pin of 7, stops with an error, names
+;   16     the run: six fixtures (answers its pin, spins, runs clean unpinned, answers 8 against a pin of 7, stops with an error, names
 ;          a carrier that is absent) tally 1 pinned, 1 unpinned, 1 staged, 3 failed, the deadline named, and print in the order given
-;          though the hang ends last
 ;   32     the lines: `  ✓  <label padded to 30>  → 7 (its pin)`, the unpinned `·` line, the `✗` lines with why (`answered 8, its head pins 7`,
-;          `exit 1`, `ended at the deadline: ended after`) and `evidence=` naming a directory that holds the band's stdout, and the staged
-;          `⧗` line naming the door that builds the carrier; a passing workload leaves no legs behind
-;   64     the deadline: a leg that outlives a 3 s ceiling is ended with its lineage (the child is gone) and its band fails naming it
-;   128    parallel: six legs of a second and a half under a pool of six finish in under five seconds, each answers 1, none shares a scratch
-;   256    the fifo: a band that leaves a reader waiting in open() on a fifo of its scratch leaves no reader after the sweep; the same band
-;          run with nothing to release it leaves the reader standing (the plant that shows the release is what ended it); a band that
-;          leaves a fifo with no reader on it never holds the sweep (the release is a child that waits, with a brief deadline, not this door)
+;          `exit 1`, `ended at the deadline: ended after`) and `evidence=` naming a directory that holds what the band printed (fk), what
+;          it said (fk.err, with the stop's message), why (fk.why) and the deadline met (fk.deadline), and the staged `⧗` line naming the
+;          door that builds the carrier; a passing workload leaves no legs behind
+;   64     the deadline: a leg that spins past a 3 s ceiling comes back stopped "deadline" in the budget's time, fails naming it, and the
+;          sweep goes on with the next leg
+;   128    the shards: of 3, the shards of seven workloads are disjoint, together they are every workload and each keeps the order; the
+;          default (shard 0 of 1) is everything; over the real enumeration, of 4, the shards are disjoint and their union is every
+;          workload in order; shard 3 of 3, shard -1 and of 0 are refused by name
+;   256    the stops: a leg that stops with an error fails "exit 1" and its evidence holds the stop's message; a leg that does not
+;          compile (an unresolved name) fails "exit 1" and its evidence holds the compile diagnostic; the sweep goes on after each
 ;   512    the list: `label<TAB>files<TAB>staged=<yes|no><TAB>pin=<n|-><TAB>row=<n|->` for a band with both pins and a band with a row only
 ;   1024   the summary: the pinned and unpinned counts, the staged line only when some are pending, the deadlines line only when some
 ;          were met, `N ok, 0 failed` or `N ok, F failed`
 ;   2048   the seal: a void reading names both stamps and says it is neither a pass nor a failure; the stamp is HEAD then git's status
-;   4096   the door as a child: `{"files":[a passing fixture]}` prints the gates, the build words and a ✓ line and exits 0; a failing one
-;          prints the ✗ line, `1 failed` and exits 1; a missing file names itself and exits 1 before any gate; `{"list":1,"match":...}`
+;   4096   the door as a cell: `{"files":[a passing fixture]}` prints the gates, the build words and a ✓ line and ends clean; a failing one
+;          prints the ✗ line, `1 failed` and stops; a missing file names itself and stops before any gate; `{"list":1,"match":...}`
 ;          lists and runs nothing
 ;   8192   plant: judged with the pin ignored, the mismatched answer is no failure: claim 4 holds because the pin is read
-;   16384  plant: with no ceiling reached (a 600 s ceiling) the hang fixture is still alive after 3 s: claim 64 holds because the deadline ended it
+;   16384  plant: the deadline is the reason: the same record that fails stopped by deadline passes when it did not stop
 ;   32768  scale: the real enumeration (over 300 workloads) and every list line (each reads its band's head and the manifest) take under 20 s
-;   65536  strict: the door as a child on `{bad json`, a typo'd key, a key of the wrong kind, and a `match` (with or without list) that selects
-;          no workload ends in exit 1 with a named refusal before any gate or leg runs
+;   65536  strict: the door as a cell on `{bad json`, a typo'd key, a key of the wrong kind, a `match` (with or without list) that selects
+;          no workload and a shard out of range ends stopped with a named refusal before any gate or leg runs
 ;   131072 unread: the registered verdicts absent, empty or mode 000, and a band file of mode 000, are each a named refusal (`<path> does not
 ;          read`, `is empty`, `every pin would be dropped`), never the silent "answered every pin"
 ;   262144 plant: with the real manifest and a real workload the preflight is silent and a selection of one is not refused: claims 65536 and
 ;          131072 refuse because of what they read, not always
-;   524288 the sort: each leg is asked once whether it is done and lands in the ended list or the kept list, never both and never neither, over sixty
-;          rounds of six children that stop while it asks (asked twice, a leg that stopped between the questions was never judged: a flaky
-;          3-of-6 sweep with `0 failed`, 2026-10-04); a leg never born and a leg past its ceiling are ended, a live one kept
+;   524288 residency: the same unit called twice is loaded once (the second call comes back resident with the same value), and the leg of a
+;          real band answers what the spawned sweep answered for it (voice-chunk-band: 4095, its pin)
 ;
-; REQUIRES: the built ./fkwu, the body root as the working directory and a git checkout.
+; REQUIRES: the built ./fkwu with the cell_run door (docs/in-process-cells.md), the body root as the working directory and a git checkout.
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/parse.bml form-stdlib/bml/band-sweep.bml
 section [form.bml] {
  class BandSweepBand {
   def bsb-fx() = "form/form-stdlib/tests/fixtures/band-sweep/";
   def bsb-w(name) = bsw-explicit([bsb-fx() ++ name]);
-  def bsb-opts(jobs, ceiling) = [jobs, "./fkwu", ceiling];
   def bsb-spaces(k) = k <= 0 ? "" : " " ++ bsb-spaces(k - 1);
   def bsb-label(l) = l ++ bsb-spaces(30 - len(l));
+  def bsb-real() = ["x", ["form/form-stdlib/tests/voice-chunk-band.fk"]];
+  // a synthetic record, as cell_run answers one
+  def bsb-rec(value, out, stopped, errors, diag) {
+   let r0 = record_new(0);
+   let r1 = record_set(r0, "value", value);
+   let r2 = record_set(r1, "out", out);
+   let r3 = record_set(r2, "diag", diag);
+   let r4 = record_set(r3, "stopped", stopped);
+   let r5 = record_set(r4, "errors", errors);
+   let r6 = record_set(r5, "resident", 0);
+   let r7 = record_set(r6, "ms", 12);
+   record_set(r7, "cpu_us", 5);
+  }
+  def bsb-stop(kind) = record_set(record_set(record_set(record_set(record_new(0), "kind", kind), "message", "m"), "recipe", ""), "unit", "u");
+  def bsb-flaw(observed) = record_set(record_set(record_set(record_new(0), "observed", observed), "organ", "fkwu-compiler"), "aspect", "diagnostic");
+  def bsb-judged(value, out, stopped, errors, diag) = bsw-judge(bsb-real(), bsb-rec(value, out, stopped, errors, diag), 9999, 1800);
+  def bsb-evidence-of(line) {
+   let at = str_find(line, "evidence=", 0);
+   at < 0 ? "" : substring(line, at + 9, len(line));
+  }
   // ---- 1 enumeration
   def bsb-c-enum(ctx) {
    let all = bsw-all();
@@ -83,14 +107,32 @@ section [form.bml] {
    && (String) bsw-carrier(bsb-w("staged-absent.fk")) == ".hearth/no-such-carrier" && (String) bsw-door(bsb-w("staged-absent.fk")) == "./fkwu observe/build-no-such-carrier.bml";
   }
   // ---- 4 judgment
-  def bsb-c-judge(ctx) {
+  def bsb-c-why(ctx) {
    (String) bsw-why(true, nothing(), 0, "7", "7", "7", "ended after 3s") == "ended at the deadline: ended after 3s"
    && (String) bsw-why(false, 1, 5, "8", "7", "7", "") == "exit 1" && (String) bsw-why(false, 0, 2, "8", "7", "7", "") == "2 diagnostic line(s) on stderr"
    && (String) bsw-why(false, 0, 0, "8", "7", "9", "") == "answered 8, its head pins 7" && (String) bsw-why(false, 0, 0, "9", "", "7", "") == "answered 9, the manifest registers 7"
    && (String) bsw-why(false, 0, 0, "", "7", "", "") == "answered <nothing>, its head pins 7" && (String) bsw-why(false, 0, 0, "7", "7", "7", "") == ""
-   && (String) bsw-why(false, 0, 0, "3", "", "", "") == "" && (String) bsw-why(false, nothing(), 0, "7", "7", "7", "") == "birth refused: no exit arrived"
-   && bsw-diags("a\nfkwu: x: error: y\nb [unresolved-call] z\ncompiled with errors\n") == 3 && bsw-diags("warning: only\n") == 0 && bsw-diags("") == 0;
+   && (String) bsw-why(false, 0, 0, "3", "", "", "") == "" && (String) bsw-why(false, nothing(), 0, "7", "7", "7", "") == "birth refused: no exit arrived";
   }
+  def bsb-c-judge(ctx) {
+   let ok = bsb-judged(4095, "", nothing(), 0, []);
+   let bad = bsb-judged(7, "", nothing(), 0, []);
+   let stopped = bsb-judged(nothing(), "partial\n", bsb-stop("stop"), 0, []);
+   let errored = bsb-judged(4095, "", nothing(), 1, [bsb-flaw("binding-missing")]);
+   let late = bsb-judged(nothing(), "", bsb-stop("deadline"), 0, []);
+   let free = bsw-judge(["u", ["form/form-stdlib/tests/fixtures/cell-run/seven-cell.fk"]], bsb-rec(7, "", nothing(), 0, []), 9999, 1800);
+   let flawed = bsb-rec(1, "", nothing(), 1, [bsb-flaw("compile-error"), bsb-flaw("binding-missing"), bsb-flaw("warning")]);
+   let cleaned = host_dir_rmdir(bsw-legs-path(9999));
+   (String) ok[0] == "ok-pinned" && bsw-has?(ok[1], "→ 4095 (its pin)")
+   && (String) bad[0] == "fail" && bsw-has?(bad[1], "answered 7, its head pins 4095")
+   && (String) stopped[0] == "fail" && bsw-has?(stopped[1], "exit 1") && (String) errored[0] == "fail" && bsw-has?(errored[1], "exit 1")
+   && (String) late[0] == "fail-deadline" && bsw-has?(late[1], "ended at the deadline") && bsw-has?(late[1], "1800s")
+   && (String) free[0] == "ok-unpinned" && bsw-has?(free[1], "→ 7 (ran clean; no pin to answer)")
+   && (String) bsw-answer(bsb-rec(nothing(), "one\ntwo\n", bsb-stop("stop"), 0, [])) == "two"
+   && bsw-flaws(flawed) == 2 && bsw-flaws(bsb-rec(1, "", nothing(), 0, [])) == 0
+   && (Comparable) host_path_exists(bsw-legs-path(9999)) != 1;
+  }
+  def bsb-c-judgment(ctx) = bsb-c-why(ctx) && bsb-c-judge(ctx);
   // ---- 8 the unit
   def bsb-c-unit(ctx) {
    let one = bsw-unit(["x", ["form/form-stdlib/core.fk"]]);
@@ -102,25 +144,22 @@ section [form.bml] {
    && (String) healed == (String) two && (String) read_file(two) == "; preludes: form/form-stdlib/core.fk form/form-stdlib/tests/adler32-band.fk\n"
    && (String) bsw-unit(["z", ["form/form-stdlib/core.fk", "form/form-stdlib/tests/adler32-band.fk", "form/form-stdlib/tests/text-tokenize-band.fk"]]) != (String) two;
   }
-  // ---- 16 32 64 the pool, the lines, the deadline
+  // ---- 16 32 the run and the lines
   def bsb-six() = [bsb-w("pass-pinned.fk"), bsb-w("hang.fk"), bsb-w("pass-unpinned.fk"), bsb-w("fail-pin.fk"), bsb-w("fail-exit.fk"), bsb-w("staged-absent.fk")];
-  def bsb-run-six(ctx) {
-   let got = bsw-run(bsb-six(), bsb-opts(3, 3));
-   got;
-  }
+  def bsb-run-six(ctx) = bsw-run(bsb-six(), 3);
   def bsb-lines(got) = reverse(got[5]);
-  def bsb-evidence-of(line) {
-   let at = str_find(line, "evidence=", 0);
-   at < 0 ? "" : substring(line, at + 9, len(line));
-  }
-  def bsb-c-pool(ctx) {
+  def bsb-c-run(ctx) {
    let t0 = host_monotonic_ms();
    let got = bsb-run-six(ctx);
    let lines = bsb-lines(got);
+   let ev1 = bsb-evidence-of(lines[1]);
+   let ev3 = bsb-evidence-of(lines[3]);
+   let ev4 = bsb-evidence-of(lines[4]);
+   let cleaned = host_dir_rmdir(ev1) + host_dir_rmdir(ev3) + host_dir_rmdir(ev4);
    len(lines) == 6 && got[0] == 1 && got[1] == 1 && got[2] == 1 && got[3] == 3 && (String) got[4] == "hang.fk"
    && bsw-has?(lines[0], "pass-pinned.fk") && bsw-has?(lines[1], "hang.fk") && bsw-has?(lines[2], "pass-unpinned.fk")
    && bsw-has?(lines[3], "fail-pin.fk") && bsw-has?(lines[4], "fail-exit.fk") && bsw-has?(lines[5], "staged-absent.fk")
-   && host_monotonic_ms() - t0 < 30000;
+   && host_monotonic_ms() - t0 < 60000;
   }
   def bsb-c-lines(ctx) {
    let got = bsb-run-six(ctx);
@@ -135,47 +174,48 @@ section [form.bml] {
     && bsw-starts?(lines[1], "  ✗  " ++ bsb-label("hang.fk") ++ "  fkwu: ended at the deadline: ended after ")
     && (String) lines[5] == "  ⧗  " ++ bsb-label("staged-absent.fk") ++ "  staged — carrier absent in this checkout (./fkwu observe/build-no-such-carrier.bml builds it); pending, not witnessed"
     && (String) read_file(ev3 ++ "/fk") == "8\n" && (Comparable) host_path_exists(ev1 ++ "/fk.deadline") == 1
-    && bsw-has?(read_file(ev4 ++ "/fk.err") ?? "", "planted stop");
+    && bsw-has?(read_file(ev4 ++ "/fk.err") ?? "", "planted stop") && bsw-has?(read_file(ev4 ++ "/fk.why") ?? "", "exit 1");
    let cleaned = host_dir_rmdir(ev1) + host_dir_rmdir(ev3) + host_dir_rmdir(ev4);
-   held && (Comparable) host_path_exists(ev3) != 1 && (Comparable) host_path_exists(bsw-legs-path(0)) != 1 && (Comparable) host_path_exists(bsw-scratch-path(0)) != 1;
+   held && (Comparable) host_path_exists(ev3) != 1 && (Comparable) host_path_exists(bsw-legs-path(0)) != 1;
   }
+  // ---- 64 the deadline
   def bsb-c-deadline(ctx) {
    let t0 = host_monotonic_ms();
-   let got = bsw-run([bsb-w("hang.fk")], bsb-opts(1, 3));
+   let got = bsw-run([bsb-w("hang.fk"), bsb-w("pass-pinned.fk")], 3);
    let took = host_monotonic_ms() - t0;
    let ev = bsb-evidence-of(bsb-lines(got)[0]);
    let said = read_file(ev ++ "/fk.deadline") ?? "";
    let gone = host_dir_rmdir(ev);
-   got[3] == 1 && (String) got[4] == "hang.fk" && took >= 3000 && took < 15000 && bsw-starts?(said, "ended after 3s: deadline 3s (the ceiling)");
+   got[3] == 1 && got[0] == 1 && (String) got[4] == "hang.fk" && took >= 3000 && took < 60000 && bsw-starts?(said, "ended after ") && bsw-has?(said, "s: deadline 3s (the ceiling)");
   }
-  // ---- 128 parallel
-  def bsb-c-parallel(ctx) {
-   let t0 = host_monotonic_ms();
-   let got = bsw-run(map(i => bsb-w("nap.fk"), [1, 2, 3, 4, 5, 6]), bsb-opts(6, 60));
-   got[1] == 6 && got[3] == 0 && host_monotonic_ms() - t0 < 5000 && all?(l => bsw-has?(l, "→ 1 (ran clean"), bsb-lines(got));
+  // ---- 128 the shards
+  def bsb-ws() = [["a", ["a.fk"]], ["b", ["b.fk"]], ["c", ["c.fk"]], ["d", ["d.fk"]], ["e", ["e.fk"]], ["f", ["f.fk"]], ["g", ["g.fk"]]];
+  def bsb-doc(shard, of) = bsw-doc("{\"shard\":" ++ shard.str() ++ ",\"of\":" ++ of.str() ++ "}");
+  def bsb-labels(ws) = bsw-join(map(w => w[0], ws), "");
+  def bsb-no-repeat?(labels) = nil?(labels) ? true : !any?(l => (String) l == (String) labels[0], labels[1:]) && bsb-no-repeat?(labels[1:]);
+  def bsb-in-order?(whole, part) = nil?(part) ? true : nil?(whole) ? false : (String) whole[0] == (String) part[0] ? bsb-in-order?(whole[1:], part[1:]) : bsb-in-order?(whole[1:], part);
+  def bsb-c-shards(ctx) {
+   let s0 = bsb-labels(bsw-mine(bsb-ws(), bsb-doc(0, 3)));
+   let s1 = bsb-labels(bsw-mine(bsb-ws(), bsb-doc(1, 3)));
+   let s2 = bsb-labels(bsw-mine(bsb-ws(), bsb-doc(2, 3)));
+   let whole = bsb-labels(bsw-mine(bsb-ws(), bsw-doc("{}")));
+   let all = map(w => w[0], bsw-all());
+   let parts = map(i => map(w => w[0], bsw-mine(bsw-all(), bsb-doc(i, 4))), [0, 1, 2, 3]);
+   let union = foldl((acc, p) => append(acc, p), [], parts);
+   (String) s0 == "adg" && (String) s1 == "be" && (String) s2 == "cf" && (String) whole == "abcdefg"
+   && len(union) == len(all) && bsb-no-repeat?(union) && all?(l => any?(u => (String) u == (String) l, union), all) && all?(p => bsb-in-order?(all, p), parts)
+   && len(bsw-shard-why(bsb-doc(3, 3))) > 0 && len(bsw-shard-why(bsb-doc(0 - 1, 3))) > 0 && len(bsw-shard-why(bsb-doc(0, 0))) > 0 && len(bsw-shard-why(bsb-doc(2, 3))) == 0;
   }
-  // ---- 256 the fifo
-  def bsb-reader-pid() = parse-int(trim(read_file(".hearth/band-sweep-fifo.pid") ?? ""));
-  def bsb-alive-soon?(pid, until) = (Comparable) host_alive(pid) == 1 && host_monotonic_ms() < until ? bsb-alive-soon-again(pid, until) : (Comparable) host_alive(pid) == 1;
-  def bsb-alive-soon-again(pid, until) {
-   let rested = host_sleep_ms(50);
-   bsb-alive-soon?(pid, until);
-  }
-  def bsb-c-fifo(ctx) {
-   let fx = bsb-fx() ++ "fifo-orphan.bml";
-   let swept = bsw-run([bsw-explicit([fx])], bsb-opts(1, 60));
-   let pid = bsb-reader-pid();
-   let gone = !nothing?(pid) && !bsb-alive-soon?(pid, host_monotonic_ms() + 3000);
-   let bare = hch-run-in(".hearth/validation", "fifo-bare", ["./fkwu", fx], "", hch-by(60000));
-   let pid2 = bsb-reader-pid();
-   let standing = !nothing?(pid2) && (Comparable) host_alive(pid2) == 1;
-   let freed = standing ? host_kill(pid2) : 0;
-   let rested = host_sleep_ms(200);
-   let removed = host_path_remove(temp_dir() ++ "/orphan.fifo");
-   let t0 = host_monotonic_ms();
-   let none = bsw-run([bsw-explicit([bsb-fx() ++ "fifo-bare.bml"])], bsb-opts(1, 60));
-   let waited = host_monotonic_ms() - t0;
-   swept[1] == 1 && gone && hch-ok?(bare) && standing && (Comparable) host_alive(pid2) != 1 && none[1] == 1 && waited < 20000;
+  // ---- 256 the stops
+  def bsb-c-stops(ctx) {
+   let got = bsw-run([bsb-w("fail-exit.fk"), bsb-w("pass-pinned.fk"), bsb-w("fail-unresolved.fk"), bsb-w("pass-pinned.fk")], 30);
+   let lines = bsb-lines(got);
+   let ev0 = bsb-evidence-of(lines[0]);
+   let ev2 = bsb-evidence-of(lines[2]);
+   let held = got[0] == 2 && got[3] == 2 && bsw-has?(lines[0], "fkwu: exit 1") && bsw-has?(lines[2], "fkwu: exit 1") && bsw-has?(lines[1], "pass-pinned.fk") && bsw-has?(lines[3], "pass-pinned.fk")
+    && bsw-has?(read_file(ev0 ++ "/fk.err") ?? "", "planted stop") && bsw-has?(read_file(ev2 ++ "/fk.err") ?? "", "no-such-function-anywhere");
+   let cleaned = host_dir_rmdir(ev0) + host_dir_rmdir(ev2);
+   held;
   }
   // ---- 512 the list
   def bsb-c-list(ctx) {
@@ -191,8 +231,8 @@ section [form.bml] {
    let busy = bsw-summary([3, 2, 1, 2, "hang.fk slow-band.fk", []]);
    len(clean) == 3 && (String) clean[0] == "" && (String) clean[1] == "  fkwu: 3 band(s) answered their pins; 2 ran clean with no pin to answer" && (String) clean[2] == "  5 ok, 0 failed — fkwu answered every pin it was asked."
    && len(busy) == 5 && (String) busy[2] == "  staged lanes pending: 1 band(s) need an absent host carrier — not witnessed"
-   && (String) busy[3] == "  deadlines met: hang.fk slow-band.fk — each leg named was ended with its process tree; its streams are kept"
-   && (String) busy[4] == "  5 ok, 2 failed — inspect exit statuses and retained streams.";
+   && (String) busy[3] == "  deadlines met: hang.fk slow-band.fk — each leg named came back stopped at its deadline; its evidence is kept"
+   && (String) busy[4] == "  5 ok, 2 failed — inspect the stops and retained evidence.";
   }
   // ---- 2048 the seal
   def bsb-c-seal(ctx) {
@@ -201,13 +241,10 @@ section [form.bml] {
    len(void) == 4 && bsw-has?(void[0], "VOID READING") && bsw-has?(void[1], "start abc:x") && bsw-has?(void[2], "end   abc:y") && bsw-has?(void[3], "neither a pass nor a failure")
    && str_byte_at(stamp, 40) == 58 && scan_run(stamp, 0, 6) >= 0 && len(stamp) >= 41;
   }
-  // ---- 4096 the door as a child
+  // ---- 4096 the door as a cell: the sweep is called in this process with its options as the cell's stdin; [stopped?, what it printed, how it stopped]
   def bsb-door(ctx, name, input) {
-   let base = ctx[1] ++ "/" ++ name;
-   let w = write_file(base ++ ".in", input);
-   let pid = host_spawn_at(["./fkwu", "gate/band-sweep-run.bml"], [base ++ ".in", base ++ ".out", base ++ ".err"]);
-   let status = pid <= 0 ? -1 : host_wait(pid);
-   [status, read_file(base ++ ".out") ?? "", read_file(base ++ ".err") ?? ""];
+   let r = cell_run("gate/band-sweep-run.bml", 0, 1200000, [input]);
+   [nothing?(record_get(r, "stopped")) ? 0 : 1, (String) record_get(r, "out"), nothing?(record_get(r, "stopped")) ? "" : bsw-stop-line(r)[0]];
   }
   def bsb-c-door(ctx) {
    let ok = bsb-door(ctx, "ok", "{\"files\":[\"form-stdlib/tests/fixtures/band-sweep/pass-pinned.fk\"]}");
@@ -216,7 +253,7 @@ section [form.bml] {
    let list = bsb-door(ctx, "list", "{\"list\":1,\"match\":\"adler32\"}");
    let kept = host_dir_rmdir(trim(bsb-evidence-of(bad[1])));
    ok[0] == 0 && bsw-has?(ok[1], "structural-gate-v6") && bsw-has?(ok[1], "  runtime fkwu: build=") && bsw-has?(ok[1], "  ✓  pass-pinned.fk") && bsw-has?(ok[1], "  1 ok, 0 failed — fkwu answered every pin it was asked.")
-   && (Comparable) bad[0] != 0 && bsw-has?(bad[1], "  ✗  fail-pin.fk") && bsw-has?(bad[1], "  0 ok, 1 failed — inspect exit statuses and retained streams.") && bsw-has?(bad[2], "band-sweep: 1 workload(s) failed")
+   && (Comparable) bad[0] != 0 && bsw-has?(bad[1], "  ✗  fail-pin.fk") && bsw-has?(bad[1], "  0 ok, 1 failed — inspect the stops and retained evidence.") && bsw-has?(bad[2], "band-sweep: 1 workload(s) failed")
    && (Comparable) gone[0] != 0 && bsw-has?(gone[1], "input file(s) not found") && bsw-has?(gone[1], "no/such.fk") && !bsw-has?(gone[1], "structural-gate-v6")
    && list[0] == 0 && bsw-has?(list[1], "stdlib/adler32-band.fk\tform/form-stdlib/core.fk form/form-stdlib/tests/adler32-band.fk\tstaged=no\tpin=-\trow=5") && !bsw-has?(list[1], "structural-gate-v6");
   }
@@ -225,46 +262,33 @@ section [form.bml] {
   def bsb-c-strict(ctx) {
    let bad = bsb-door(ctx, "s-bad", "{bad json");
    let typo = bsb-door(ctx, "s-typo", "{\"lst\":1}");
-   let kind = bsb-door(ctx, "s-kind", "{\"jobs\":\"4\"}");
+   let kind = bsb-door(ctx, "s-kind", "{\"ceiling_s\":\"4\"}");
    let none = bsb-door(ctx, "s-none", "{\"match\":\"no-such-band-anywhere\"}");
    let nonelist = bsb-door(ctx, "s-nonelist", "{\"list\":1,\"match\":\"no-such-band-anywhere\"}");
-   bsb-refused?(bad, "stdin is not well-formed JSON") && bsb-refused?(typo, "unknown key \"lst\"") && bsb-refused?(kind, "key \"jobs\" must be an integer")
-   && bsb-refused?(none, "the selection holds no workload") && bsb-has-match?(none) && bsb-refused?(nonelist, "the selection holds no workload");
+   let shard = bsb-door(ctx, "s-shard", "{\"shard\":3,\"of\":3}");
+   bsb-refused?(bad, "stdin is not well-formed JSON") && bsb-refused?(typo, "unknown key \"lst\"") && bsb-refused?(kind, "key \"ceiling_s\" must be an integer")
+   && bsb-refused?(none, "the selection holds no workload") && bsb-has-match?(none) && bsb-refused?(nonelist, "the selection holds no workload")
+   && bsb-refused?(shard, "shard is 0 up to (of - 1)");
   }
   def bsb-has-match?(run) = bsw-has?(run[1], "match \"no-such-band-anywhere\"");
   // ---- 131072 unread: the registered verdicts or a band that does not read, or is empty, is a named refusal (its pins would be dropped silently)
-  def bsb-chmod(mode, path) = (Comparable) hch-run-in(".hearth/validation", "chmod", ["/bin/chmod", mode, path], "", hch-by(20000))[0] == 0;
+  def bsb-chmod(mode, path) = (Comparable) host_chmod(path, mode) == 0;
   def bsb-c-unread(ctx) {
    let absent = ctx[1] ++ "/no-such-manifest.txt";
    let empty = ctx[1] ++ "/empty-manifest.txt";
    let closed = ctx[1] ++ "/closed-manifest.txt";
    let band = ctx[1] ++ "/closed-band.fk";
    let made = write_file(empty, "") + write_file(closed, "x 1 1\n") + write_file(band, "; Verdict 1\n1\n");
-   let shut = bsb-chmod("000", closed) && bsb-chmod("000", band);
+   let shut = bsb-chmod(0, closed) && bsb-chmod(0, band);
    let real = [bsb-w("pass-pinned.fk")];
    let shut-band = [bsw-explicit([band])];
    let a = bsw-preflight-why(absent, real);
    let e = bsw-preflight-why(empty, real);
    let c = bsw-preflight-why(closed, real);
    let b = bsw-preflight-why(bsw-manifest(), shut-band);
-   let opened = bsb-chmod("600", closed) && bsb-chmod("600", band);
+   let opened = bsb-chmod(384, closed) && bsb-chmod(384, band);
    shut && bsw-has?(a, "no-such-manifest.txt does not read") && bsw-has?(e, "empty-manifest.txt is empty") && bsw-has?(c, "closed-manifest.txt does not read")
    && bsw-has?(c, "every pin would be dropped") && bsw-has?(b, "closed-band.fk does not read") && opened;
-  }
-  // ---- 524288 the sort: every leg is in the ended list or the kept list, never both and never neither, though legs stop while it asks
-  def bsb-round(i) {
-   let pids = map(k => host_spawn_at(["/usr/bin/true"], ["/dev/null", "/dev/null", "/dev/null"]), [1, 2, 3, 4, 5, 6]);
-   let jobs = map(k => [k, pids[k], host_monotonic_ms()], [0, 1, 2, 3, 4, 5]);
-   let sorted = bsw-sort(jobs, 3600000);
-   let reaped = map(p => p > 0 ? host_wait(p) : 0, pids);
-   len(sorted[0]) + len(sorted[1]) == 6 && all?(k => any?(j => j[0] == k, sorted[0]) != any?(j => j[0] == k, sorted[1]), [0, 1, 2, 3, 4, 5]);
-  }
-  def bsb-c-sort(ctx) {
-   let never = bsw-sort([[0, 0, host_monotonic_ms()]], 3600000);
-   let late = bsw-sort([[1, host_pid(), host_monotonic_ms() - 7200000]], 3600000);
-   let live = bsw-sort([[2, host_pid(), host_monotonic_ms()]], 3600000);
-   len(never[0]) == 1 && nil?(never[1]) && len(late[0]) == 1 && nil?(late[1]) && nil?(live[0]) && len(live[1]) == 1
-   && all?(i => bsb-round(i), range(0, 60));
   }
   // ---- the plants
   def bsb-c-plant-reads(ctx) {
@@ -274,16 +298,10 @@ section [form.bml] {
   }
   def bsb-c-plant-pin(ctx) = (String) bsw-why(false, 0, 0, "8", "", "", "") == "" && (String) bsw-why(false, 0, 0, "8", "7", "", "") != "";
   def bsb-c-plant-deadline(ctx) {
-   let io = ".hearth/validation";
-   let t0 = host_monotonic_ms();
-   let got = bsw-run([bsb-w("nap.fk")], bsb-opts(1, 600));
-   let slow = bsw-begin(bsb-w("hang.fk"), 90, "./fkwu");
-   let rested = host_sleep_ms(3000);
-   let standing = bsw-alive?(slow);
-   let ended = standing ? bsw-end(slow, 3) : "";
-   let released = bsw-release(slow);
-   let cleaned = host_dir_rmdir(slow[3]) + host_dir_rmdir(slow[4]);
-   got[1] == 1 && standing && !bsw-alive?(slow) && bsw-has?(ended, "deadline");
+   let late = bsb-judged(nothing(), "", bsb-stop("deadline"), 0, []);
+   let clean = bsb-judged(4095, "", nothing(), 0, []);
+   let cleaned = host_dir_rmdir(bsw-legs-path(9999));
+   (String) late[0] == "fail-deadline" && (String) clean[0] == "ok-pinned";
   }
   // ---- 32768 scale
   def bsb-c-scale(ctx) {
@@ -293,11 +311,20 @@ section [form.bml] {
    let lines = map(w => bsw-list-line(w), all);
    len(all) > 300 && len(lines) == len(all) && host_monotonic_ms() - t0 < 20000 && took < 20000;
   }
+  // ---- 524288 residency
+  def bsb-c-resident(ctx) {
+   let w = bsb-w("pass-pinned.fk");
+   let a = cell_run(bsw-unit(w), 0, 30000, nothing());
+   let b = cell_run(bsw-unit(w), 0, 30000, nothing());
+   let real = bsw-leg(bsb-real(), 9995, 600);
+   nothing?(record_get(a, "stopped")) && (Comparable) record_get(a, "value") == 7 && (Comparable) record_get(b, "value") == 7 && (Comparable) record_get(b, "resident") == 1
+   && (String) real[0] == "ok-pinned" && bsw-has?(real[1], "→ 4095 (its pin)");
+  }
  }
  let ctx = ["sweep", temp_dir() ++ "/band-sweep-band-" ++ now_unix_ms().str(), 0];
  let made = host_dir_mkdir(ctx[1]);
  made != 1 ? form_error("band-sweep band needs a fresh directory") : 0;
- let verdict = live-claims("band-sweep-band", ctx, [["enumeration", 1, 1, bsb-c-enum], ["heads", 2, 1, bsb-c-heads], ["judgment", 4, 1, bsb-c-judge], ["unit", 8, 1, bsb-c-unit], ["pool", 16, 1, bsb-c-pool], ["lines", 32, 1, bsb-c-lines], ["deadline", 64, 1, bsb-c-deadline], ["parallel", 128, 1, bsb-c-parallel], ["fifo", 256, 1, bsb-c-fifo], ["list", 512, 1, bsb-c-list], ["summary", 1024, 1, bsb-c-summary], ["seal", 2048, 1, bsb-c-seal], ["door", 4096, 1, bsb-c-door], ["plant-pin", 8192, 1, bsb-c-plant-pin], ["plant-deadline", 16384, 1, bsb-c-plant-deadline], ["scale", 32768, 1, bsb-c-scale], ["strict", 65536, 1, bsb-c-strict], ["unread", 131072, 1, bsb-c-unread], ["plant-reads", 262144, 1, bsb-c-plant-reads], ["sort", 524288, 1, bsb-c-sort]]);
+ let verdict = live-claims("band-sweep-band", ctx, [["enumeration", 1, 1, bsb-c-enum], ["heads", 2, 1, bsb-c-heads], ["judgment", 4, 1, bsb-c-judgment], ["unit", 8, 1, bsb-c-unit], ["run", 16, 1, bsb-c-run], ["lines", 32, 1, bsb-c-lines], ["deadline", 64, 1, bsb-c-deadline], ["shards", 128, 1, bsb-c-shards], ["stops", 256, 1, bsb-c-stops], ["list", 512, 1, bsb-c-list], ["summary", 1024, 1, bsb-c-summary], ["seal", 2048, 1, bsb-c-seal], ["door", 4096, 1, bsb-c-door], ["plant-pin", 8192, 1, bsb-c-plant-pin], ["plant-deadline", 16384, 1, bsb-c-plant-deadline], ["scale", 32768, 1, bsb-c-scale], ["strict", 65536, 1, bsb-c-strict], ["unread", 131072, 1, bsb-c-unread], ["plant-reads", 262144, 1, bsb-c-plant-reads], ["resident", 524288, 1, bsb-c-resident]]);
  host_dir_rmdir(ctx[1]);
  verdict;
 }

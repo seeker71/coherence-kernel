@@ -1,0 +1,217 @@
+// git-inflate.bml — zlib / DEFLATE (RFC 1950, RFC 1951) inflate in Form: stored, fixed-Huffman and dynamic-Huffman blocks.
+//
+// The compressed bytes are a string (str_byte_at is O(1)); the decoder is one self-tail-calling loop over a 32-bit bit buffer
+// (the refill keeps bc <= 32, so the u32 primitives carry it). A Huffman code is one string: byte 0 is m (the longest code), then a
+// 256-byte bit-reversal table, then 2^m two-byte entries [sym lo, (sym hi) | len << 1] in canonical (MSB-first) order. The decoder
+// reverses the m peeked bits once and reads the entry at 257 + 2r. No list is indexed in the symbol loop.
+//
+// The output is three strings: `cur` (at most a few dozen bytes: the literal appends copy it), `mid` (up to ~1 KiB), and `segs`, a
+// list of older chunks of at least 1 KiB, newest first. A string append copies the whole string, so appends stay small, and a
+// back-reference (at most 32 KiB back) reaches its source through at most 33 chunks: head/tail natives walk them, then one or two
+// substring cuts. The whole output is joined once at the end by pairwise merging. A match that overlaps itself (length > distance)
+// is the last `distance` bytes repeated.
+//
+// Hot-path rules the profile taught (kernel_page_hot on a running inflate): `xs[0]` and `xs[1:]` lower to bml-value-first and
+// bml-value-tail, a call each, and `==` lowers to bml-value-equal; the loops here use head/tail and `(Comparable) ==`.
+//
+//   ginf-zlib(src, start)          [out, next] — out is the inflated string, next the byte after the adler32; nothing() when the
+//                                  stream is not whole deflate (bad header, bad block, a code that decodes nothing, a distance
+//                                  past the start, input ending early)
+//   ginf-raw(src, start)           [out, next] for a bare DEFLATE stream (next = the byte after the last block)
+//   ginf-zlib-checked(src, start)  the same, and nothing() when the stored adler32 differs from the output's
+//   ginf-adler32(s)                the Adler-32 of a string
+//
+// PROOF: form-stdlib/tests/git-native-inflate-band.fk.
+// preludes: form-stdlib/core.fk
+import form-stdlib/core.fk;
+section [form.bml] {
+ class GitInflate {
+  // ---- small string / list helpers -----------------------------------------------------------------------------------------
+  def ginf-dbl(s, k) = k <= 0 ? s : ginf-dbl(str_concat(s, s), k - 1);
+  def ginf-rev-bits(i, k, acc) = (Comparable) k == 0 ? acc : ginf-rev-bits(shr_u32(i, 1), k - 1, acc * 2 + band(i, 1));
+  def ginf-rev8-at(i, acc) = i >= 256 ? acc : ginf-rev8-at(i + 1, str_concat(acc, byte_to_str(ginf-rev-bits(i, 8, 0))));
+  def ginf-rev8() = ginf-rev8-at(0, "");
+  def ginf-reverse(xs, acc) = nil?(xs) ? acc : ginf-reverse(tail(xs), cons(head(xs), acc));
+  def ginf-pairs(xs, acc) = nil?(xs) ? acc : nil?(tail(xs)) ? cons(head(xs), acc) : ginf-pairs(tail(tail(xs)), cons(str_concat(head(xs), head(tail(xs))), acc));
+  def ginf-merge(xs) = nil?(xs) ? "" : nil?(tail(xs)) ? head(xs) : ginf-merge(ginf-reverse(ginf-pairs(xs, []), []));
+  // newest-first list of strings -> one string
+  def ginf-join(newest) = ginf-merge(ginf-reverse(newest, []));
+  def ginf-pushn(acc, v, n) = n <= 0 ? acc : ginf-pushn(cons(v, acc), v, n - 1);
+  def ginf-take(xs, n, acc) = n <= 0 ? ginf-reverse(acc, []) : ginf-take(tail(xs), n - 1, cons(head(xs), acc));
+  def ginf-drop(xs, n) = n <= 0 ? xs : ginf-drop(tail(xs), n - 1);
+  // ---- Huffman tables --------------------------------------------------------------------------------------------------------
+  def ginf-maxlen(lens, m) = nil?(lens) ? m : ginf-maxlen(tail(lens), head(lens) > m ? head(lens) : m);
+  def ginf-entry(sym, l) = str_concat(byte_to_str(band(sym, 255)), byte_to_str(bor(band(shr_u32(sym, 8), 1), shl_u32(l, 1))));
+  // the runs of length ln: each symbol of that length, its entry repeated 2^(m-ln) times, in symbol order (newest first in acc)
+  def ginf-collect(lens, ln, sym, m, acc) = nil?(lens) ? acc : ginf-collect(tail(lens), ln, sym + 1, m, (Comparable) head(lens) == ln ? cons(ginf-dbl(ginf-entry(sym, ln), m - ln), acc) : acc);
+  def ginf-runs(lens, ln, m, acc) = ln > m ? acc : ginf-runs(lens, ln + 1, m, ginf-collect(lens, ln, 0, m, acc));
+  // lens (a list of code lengths by symbol) -> the table string; nothing() when the lengths over-subscribe the code space
+  def ginf-table(lens) {
+   let m = ginf-maxlen(lens, 0);
+   let mm = m == 0 ? 1 : m;
+   let body = ginf-join(ginf-runs(lens, 1, mm, []));
+   let want = shl_u32(2, mm);
+   len(body) > want ? nothing() : str_concat(byte_to_str(mm), str_concat(ginf-rev8(), str_concat(body, ginf-zeros(want - len(body)))));
+  }
+  def ginf-zeros(k) = k <= 0 ? "" : k == 1 ? byte_to_str(0) : str_concat(ginf-zeros(k / 2), ginf-zeros(k - (k / 2)));
+  // sym + 512 * len of the code at the front of the bit buffer (len 0: no such code)
+  def ginf-look(t, bb) {
+   let m = str_byte_at(t, 0);
+   let pk = band(bb, shl_u32(1, m) - 1);
+   let r = shr_u32(bor(shl_u32(str_byte_at(t, 1 + band(pk, 255)), 8), str_byte_at(t, 1 + shr_u32(pk, 8))), 16 - m);
+   str_byte_at(t, 257 + (2 * r)) + (256 * str_byte_at(t, 258 + (2 * r)));
+  }
+  // ---- the length and distance codes (RFC 1951 3.2.5) -------------------------------------------------------------------------
+  def ginf-len-extra(i) = i < 8 ? 0 : (Comparable) i == 28 ? 0 : (i - 4) / 4;
+  def ginf-len-base(i) = i < 8 ? add(i, 3) : (Comparable) i == 28 ? 258 : add(add(shl_u32(4, (i - 4) / 4), 3), shl_u32((i - 8) % 4, (i - 4) / 4));
+  def ginf-dist-extra(d) = d < 4 ? 0 : (d - 2) / 2;
+  def ginf-dist-base(d) = d < 4 ? add(d, 1) : add(shl_u32(add(2, d % 2), (d - 2) / 2), 1);
+  // ---- the output window ------------------------------------------------------------------------------------------------------
+  // the n bytes that start `dist` back from the end of the output (cur, then mid, then segs); needs n <= dist <= total
+  def ginf-fetch(cur, mid, segs, dist, n) {
+   let cl = len(cur);
+   dist <= cl ? substring(cur, cl - dist, add(cl - dist, n)) : ginf-fetch-mid(cur, mid, segs, dist - cl, n);
+  }
+  def ginf-fetch-mid(cur, mid, segs, d2, n) {
+   let ml = len(mid);
+   d2 <= ml ? ginf-assemble(substring(mid, ml - d2, ml), [], cur, n) : ginf-fetch-old(cur, mid, segs, d2 - ml, n, []);
+  }
+  def ginf-fetch-old(cur, mid, segs, skip, n, passed) {
+   let seg = head(segs);
+   let sl = len(seg);
+   skip <= sl ? ginf-assemble(substring(seg, sl - skip, sl), append1(passed, mid), cur, n) : ginf-fetch-old(cur, mid, tail(segs), skip - sl, n, cons(seg, passed));
+  }
+  def append1(xs, x) = ginf-reverse(cons(x, ginf-reverse(xs, [])), []);
+  // acc is the piece found; passed: the newer chunks still to append (oldest first); then cur
+  def ginf-assemble(acc, passed, cur, n) = len(acc) >= n ? substring(acc, 0, n) : nil?(passed) ? substring(str_concat(acc, cur), 0, n) : ginf-assemble(str_concat(acc, head(passed)), tail(passed), cur, n);
+  // the bytes a match of length n at distance dist adds
+  def ginf-piece(cur, mid, segs, dist, n) = n <= dist ? ginf-fetch(cur, mid, segs, dist, n) : ginf-repeat(ginf-fetch(cur, mid, segs, dist, dist), n);
+  def ginf-repeat(p, n) = len(p) >= n ? substring(p, 0, n) : ginf-repeat(str_concat(p, p), n);
+  // ---- the bit reader (header work; the symbol loop reads its own) -----------------------------------------------------------
+  // [value, sp, bb, bc]; bc is negative when the input ran out
+  def ginf-getbits(src, slen, sp, bb, bc, n) = bc < n && sp < slen ? ginf-getbits(src, slen, sp + 1, bor(bb, shl_u32(str_byte_at(src, sp), bc)), bc + 8, n) : [band(bb, shl_u32(1, n) - 1), sp, shr_u32(bb, n), bc - n];
+  // ---- the symbol loop --------------------------------------------------------------------------------------------------------
+  // ph 0: a literal/length symbol; ph 1: the distance symbol (ml is the match length); ph 2: the distance extra bits (dc is the code)
+  // answers [sp, bb, bc, cur, mid, segs, tot] at end of block, nothing() on a stream that cannot be decoded
+  def ginf-sym(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, ph, ml, dc) {
+   let refill = bc < 25 && sp < slen;
+   let v = (Comparable) ph == 0 && !refill ? ginf-look(ltab, bb) : 0 - 1;
+   let l = v / 512;
+   let s = v - (l * 512);
+   refill ? ginf-sym(src, slen, add(sp, 1), bor(bb, shl_u32(str_byte_at(src, sp), bc)), add(bc, 8), ltab, dtab, cur, mid, segs, tot, ph, ml, dc) : v >= 0 && s < 256 && l > 0 && l <= bc ? ginf-emit(src, slen, sp, shr_u32(bb, l), bc - l, ltab, dtab, cur, mid, segs, tot, byte_to_str(s), 1) : ginf-step(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, ph, ml, dc);
+  }
+  // append `add` (n bytes) to the window, spilling cur into mid and mid into segs when they fill
+  def ginf-emit(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, piece, n) {
+   let c2 = str_concat(cur, piece);
+   len(c2) < 64 ? ginf-sym(src, slen, sp, bb, bc, ltab, dtab, c2, mid, segs, add(tot, n), 0, 0, 0) : ginf-emit-mid(src, slen, sp, bb, bc, ltab, dtab, str_concat(mid, c2), segs, add(tot, n));
+  }
+  def ginf-emit-mid(src, slen, sp, bb, bc, ltab, dtab, m2, segs, tot) = len(m2) < 1024 ? ginf-sym(src, slen, sp, bb, bc, ltab, dtab, "", m2, segs, tot, 0, 0, 0) : ginf-sym(src, slen, sp, bb, bc, ltab, dtab, "", "", cons(m2, segs), tot, 0, 0, 0);
+  def ginf-step(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, ph, ml, dc) {
+   let v = (Comparable) ph == 2 ? 0 : (Comparable) ph == 1 ? ginf-look(dtab, bb) : ginf-look(ltab, bb);
+   let l = v / 512;
+   let s = v % 512;
+   (Comparable) ph == 2 ? ginf-dextra(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, ml, dc) : (Comparable) l == 0 || l > bc ? nothing() : (Comparable) ph == 1 ? ginf-dcode(src, slen, sp, shr_u32(bb, l), bc - l, ltab, dtab, cur, mid, segs, tot, ml, s) : ginf-lcode(src, slen, sp, shr_u32(bb, l), bc - l, ltab, dtab, cur, mid, segs, tot, s);
+  }
+  // a literal/length symbol that is not a literal: end of block, or a length
+  def ginf-lcode(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, s) = (Comparable) s == 256 ? [sp, bb, bc, cur, mid, segs, tot] : s > 285 ? nothing() : ginf-lext(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, s - 257);
+  def ginf-lext(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, idx) {
+   let e = ginf-len-extra(idx);
+   let n = add(ginf-len-base(idx), band(bb, shl_u32(1, e) - 1));
+   bc < e ? nothing() : ginf-sym(src, slen, sp, shr_u32(bb, e), bc - e, ltab, dtab, cur, mid, segs, tot, 1, n, 0);
+  }
+  def ginf-dcode(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, ml, s) = s > 29 ? nothing() : ginf-sym(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, 2, ml, s);
+  def ginf-dextra(src, slen, sp, bb, bc, ltab, dtab, cur, mid, segs, tot, ml, dc) {
+   let e = ginf-dist-extra(dc);
+   let d = add(ginf-dist-base(dc), band(bb, shl_u32(1, e) - 1));
+   bc < e || d > tot ? nothing() : ginf-emit(src, slen, sp, shr_u32(bb, e), bc - e, ltab, dtab, cur, mid, segs, tot, ginf-piece(cur, mid, segs, d, ml), ml);
+  }
+  // ---- the fixed codes --------------------------------------------------------------------------------------------------------
+  def ginf-fixed-lit() = ginf-pushn(ginf-pushn(ginf-pushn(ginf-pushn([], 8, 8), 7, 24), 9, 112), 8, 144);
+  def ginf-fixed-lens() = ginf-fixed-lit();
+  def ginf-fixed-dist() = ginf-pushn([], 5, 30);
+  // ---- the dynamic header -----------------------------------------------------------------------------------------------------
+  def ginf-inv() = [3, 17, 15, 13, 11, 9, 7, 5, 4, 6, 8, 10, 12, 14, 16, 18, 0, 1, 2];
+  // hclen 3-bit values, in the RFC's permuted order, as a string of bytes
+  def ginf-readcl(src, slen, sp, bb, bc, k, acc) {
+   let g = ginf-getbits(src, slen, sp, bb, bc, 3);
+   k <= 0 ? [acc, sp, bb, bc] : g[3] < 0 ? nothing() : ginf-readcl(src, slen, g[1], g[2], g[3], k - 1, str_concat(acc, byte_to_str(g[0])));
+  }
+  def ginf-readlens(src, slen, sp, bb, bc, clt, need, acc) {
+   need <= 0 ? [acc, sp, bb, bc] : bc < 25 && sp < slen ? ginf-readlens(src, slen, sp + 1, bor(bb, shl_u32(str_byte_at(src, sp), bc)), bc + 8, clt, need, acc) : ginf-lenstep(src, slen, sp, bb, bc, clt, need, acc, ginf-look(clt, bb));
+  }
+  def ginf-lenstep(src, slen, sp, bb, bc, clt, need, acc, v) {
+   let l = v / 512;
+   let s = v % 512;
+   let b2 = shr_u32(bb, l);
+   let c2 = bc - l;
+   l == 0 || l > bc ? nothing() : s < 16 ? ginf-readlens(src, slen, sp, b2, c2, clt, need - 1, cons(s, acc)) : ginf-lenrep(src, slen, sp, b2, c2, clt, need, acc, s);
+  }
+  def ginf-lenrep(src, slen, sp, bb, bc, clt, need, acc, s) {
+   let eb = s == 16 ? 2 : s == 17 ? 3 : 7;
+   let rep = band(bb, shl_u32(1, eb) - 1) + (s == 16 ? 3 : s == 17 ? 3 : 11);
+   let val = s == 16 ? (nil?(acc) ? 0 - 1 : head(acc)) : 0;
+   val < 0 || rep > need || bc < eb ? nothing() : ginf-readlens(src, slen, sp, shr_u32(bb, eb), bc - eb, clt, need - rep, ginf-pushn(acc, val, rep));
+  }
+  // ---- blocks -----------------------------------------------------------------------------------------------------------------
+  // answers [out, endpos] after the final block, nothing() on any fault
+  def ginf-blocks(src, slen, sp, bb, bc, cur, mid, segs, tot) {
+   let h = ginf-getbits(src, slen, sp, bb, bc, 3);
+   let fin = band(h[0], 1);
+   let ty = shr_u32(h[0], 1);
+   h[3] < 0 ? nothing() : ty == 0 ? ginf-stored(src, slen, h[1], h[2], h[3], cur, mid, segs, tot, fin) : ty == 1 ? ginf-coded(src, slen, h[1], h[2], h[3], cur, mid, segs, tot, fin, ginf-table(ginf-fixed-lens()), ginf-table(ginf-fixed-dist())) : ty == 2 ? ginf-dynamic(src, slen, h[1], h[2], h[3], cur, mid, segs, tot, fin) : nothing();
+  }
+  def ginf-after(src, slen, sp, bb, bc, cur, mid, segs, tot, fin) = fin == 1 ? ginf-finish(slen, sp, bc, cur, mid, segs) : ginf-blocks(src, slen, sp, bb, bc, cur, mid, segs, tot);
+  def ginf-finish(slen, sp, bc, cur, mid, segs) {
+   let endpos = sp - (bc / 8);
+   endpos > slen ? nothing() : [ginf-join(cons(cur, cons(mid, segs))), endpos];
+  }
+  def ginf-stored(src, slen, sp, bb, bc, cur, mid, segs, tot, fin) {
+   let q = sp - ((bc - (bc % 8)) / 8);
+   let n = q + 4 <= slen ? str_byte_at(src, q) + (256 * str_byte_at(src, q + 1)) : 0 - 1;
+   let nn = q + 4 <= slen ? str_byte_at(src, q + 2) + (256 * str_byte_at(src, q + 3)) : 0 - 1;
+   n < 0 || bxor(n, 65535) != nn || q + 4 + n > slen ? nothing() : ginf-stored-go(src, slen, q + 4 + n, cur, mid, segs, tot, fin, substring(src, q + 4, q + 4 + n));
+  }
+  def ginf-stored-go(src, slen, sp, cur, mid, segs, tot, fin, piece) {
+   let m2 = str_concat(mid, str_concat(cur, piece));
+   len(m2) >= 1024 ? ginf-after(src, slen, sp, 0, 0, "", "", cons(m2, segs), tot + len(piece), fin) : ginf-after(src, slen, sp, 0, 0, "", m2, segs, tot + len(piece), fin);
+  }
+  def ginf-coded(src, slen, sp, bb, bc, cur, mid, segs, tot, fin, lt2, dt2) {
+   nothing?(lt2) || nothing?(dt2) ? nothing() : ginf-coded-go(src, slen, fin, ginf-sym(src, slen, sp, bb, bc, lt2, dt2, cur, mid, segs, tot, 0, 0, 0));
+  }
+  def ginf-coded-go(src, slen, fin, r) = nothing?(r) ? nothing() : ginf-after(src, slen, r[0], r[1], r[2], r[3], r[4], r[5], r[6], fin);
+  def ginf-dynamic(src, slen, sp, bb, bc, cur, mid, segs, tot, fin) {
+   let a = ginf-getbits(src, slen, sp, bb, bc, 14);
+   let hlit = band(a[0], 31) + 257;
+   let hdist = band(shr_u32(a[0], 5), 31) + 1;
+   let hclen = shr_u32(a[0], 10) + 4;
+   a[3] < 0 || hlit > 286 ? nothing() : ginf-dyn-cl(src, slen, cur, mid, segs, tot, fin, hlit, hdist, ginf-readcl(src, slen, a[1], a[2], a[3], hclen, ""), hclen);
+  }
+  def ginf-dyn-cl(src, slen, cur, mid, segs, tot, fin, hlit, hdist, rc, hclen) {
+   nothing?(rc) ? nothing() : ginf-dyn-lens(src, slen, rc[1], rc[2], rc[3], cur, mid, segs, tot, fin, hlit, hdist, ginf-table(map(x => x < hclen ? str_byte_at(rc[0], x) : 0, ginf-inv())));
+  }
+  def ginf-dyn-lens(src, slen, sp, bb, bc, cur, mid, segs, tot, fin, hlit, hdist, clt) {
+   nothing?(clt) ? nothing() : ginf-dyn-tables(src, slen, fin, cur, mid, segs, tot, hlit, hdist, ginf-readlens(src, slen, sp, bb, bc, clt, hlit + hdist, []));
+  }
+  def ginf-dyn-tables(src, slen, fin, cur, mid, segs, tot, hlit, hdist, rl) {
+   let all = nothing?(rl) ? [] : ginf-reverse(rl[0], []);
+   nothing?(rl) ? nothing() : ginf-coded(src, slen, rl[1], rl[2], rl[3], cur, mid, segs, tot, fin, ginf-table(ginf-take(all, hlit, [])), ginf-table(ginf-drop(all, hlit)));
+  }
+  // ---- entry points -----------------------------------------------------------------------------------------------------------
+  def ginf-raw(src, start) = ginf-blocks(src, len(src), start, 0, 0, "", "", [], 0);
+  def ginf-zlib(src, start) {
+   let cmf = start + 2 <= len(src) ? str_byte_at(src, start) : 0 - 1;
+   let flg = start + 2 <= len(src) ? str_byte_at(src, start + 1) : 0 - 1;
+   cmf < 0 || band(cmf, 15) != 8 || ((cmf * 256) + flg) % 31 != 0 || band(flg, 32) != 0 ? nothing() : ginf-zlib-tail(src, ginf-blocks(src, len(src), start + 2, 0, 0, "", "", [], 0));
+  }
+  def ginf-zlib-tail(src, r) = nothing?(r) ? nothing() : r[1] + 4 > len(src) ? nothing() : [r[0], r[1] + 4];
+  def ginf-adler-loop(s, i, n, a, b) {
+   let a2 = (a + str_byte_at(s, i)) % 65521;
+   i >= n ? (b * 65536) + a : ginf-adler-loop(s, i + 1, n, a2, (b + a2) % 65521);
+  }
+  def ginf-adler32(s) = len(s) == 0 ? 1 : ginf-adler-loop(s, 0, len(s), 1, 0);
+  def ginf-be32(s, p) = (str_byte_at(s, p) * 16777216) + (str_byte_at(s, p + 1) * 65536) + (str_byte_at(s, p + 2) * 256) + str_byte_at(s, p + 3);
+  def ginf-zlib-checked(src, start) = ginf-checked(src, ginf-zlib(src, start));
+  def ginf-checked(src, r) = nothing?(r) ? nothing() : ginf-adler32(r[0]) == ginf-be32(src, r[1] - 4) ? r : nothing();
+ }
+ 0;
+}

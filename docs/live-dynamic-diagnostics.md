@@ -244,11 +244,15 @@ Two carriers meet their surprises the same way outside `live.bml`:
   reads its own children the same way: a turn, plan, review or gate has an exit
   from `host_wait` or reads nothing with its reason (`[host-child] deadline: ...`).
 - The sweep (`./fkwu gate/band-sweep-run.bml`, `form-stdlib/bml/band-sweep.bml`):
-  every leg is a child with a deadline of its own (1800 s, `ceiling_s`); a leg past it
-  is ended with its fkwu lineage, its band fails naming itself, its streams are
-  kept, and the sweep moves on. Legs run under the host's temp root, so a walk of
-  the checkout never meets a vanishing legs dir; a failing workload's legs move to
-  `.hearth` as its evidence, and every fifo a leg left is released and removed.
+  every leg is one `cell_run` call in the sweep's own process with a deadline of its own
+  (1800 s, `ceiling_s`); it answers a record, `{value, out, diag, stopped, errors, resident, ms, cpu_us}`
+  (`docs/in-process-cells.md`), so the diagnostics of a leg are the same organ-health rows as
+  values in `diag` (no JSON line is parsed back), a stop is `stopped` with the recipe and the
+  unit, and the deadline is the call's: a leg past it comes back stopped "deadline", its band fails
+  naming itself, what it printed and said is kept as its evidence under `.hearth`, and the sweep
+  moves on. The work is shared by shard (`{"shard":i,"of":n}`), not by children. A parent that reads a child's stderr for
+  `form-organ health` rows, its last stdout line as a number, or its exit, is reading a text
+  protocol the callee could have returned as a value; add no new one.
 
 ## Kernel protocol witness
 

@@ -1,0 +1,109 @@
+; membrane-callers-band.bml -- the callers that borrowed /bin/chmod, /bin/ln, /bin/mkdir, /bin/sync and mktemp reach the seed's own doors, and keep the meaning each program carried.
+;
+; WHAT THIS PINS. native-session-memory.bml published a record with `/bin/ln stage path` (the first publication of a name wins; a second leaves the first bytes standing), native-lora-worker.bml took its
+; lock with `/bin/mkdir` (the call that made the directory holds it), native-lora-checkpoint.bml and the two other writers asked the OS to write back with `/bin/sync`, metal-ask.bml and native-source-inventory.bml made private
+; directories with `/bin/mkdir -m 700`, and metal-ask.bml made its 0600 temporary with `/usr/bin/mktemp`. Each is now a seed door (host_link, fs_mkdir, host_sync, host_mkdir_mode, host_chmod) and this band holds the
+; meaning, not the syntax.
+;
+; Expected: 511
+; Verdict 511 when every claim lands:
+;   1     publish: nsm-record-new makes the first publication of a record path (the file stands with its sealed bytes, the answer is the record directory, one example-retained event is written, no stage file is left behind)
+;   2     publish refused: a second record for the same path with other content stops with "existing evidence preserved" and the first bytes are exactly as they were
+;   4     publish repeated: the same record again answers the directory, changes no byte and writes no second event
+;   8     lock: nlw-lock answers 1 to the call that made the lock and 0 to the next (a young lock is held); a lock older than the launch window (60 s, set back with host_utimes) is reclaimed by the next call (1) and held again after it (0)
+;   16    sync: nlc-sync-host(host_sync()) answers 1 and a failed status stops with a named error
+;   32    private dirs: ma-private-dir makes a missing chain of directories each at mode 0700 exactly (448), answers 1 for one that stands and 0 for a path that is a file; nsi-directory makes its evidence directory at 0700 and a second call makes another
+;   64    private temporary: ma-private-temp answers an empty 0600 file named <path>.native.*, two calls answer two names, the claim directory that made the name unique is released, and a path whose parent is missing answers nothing()
+;   128   the callers hold no program: the sources of the eight files carry none of /bin/chmod, /bin/ln, /bin/mkdir, /bin/sync, /usr/bin/mktemp
+;   256   the private chmod: host_chmod(home, 448) on a directory reads back 448 and on a path that is not there answers -1 (the answer nsm-init refuses on)
+;
+; REQUIRES: nothing outside the tree. Writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/native-session-memory.bml form-stdlib/native-lora-worker.bml form-stdlib/bml/metal-ask.bml form-stdlib/bml/native-source-inventory.bml
+section [form.bml] {
+ class MembraneCallersBand {
+  def mcb-bit(held, bit) = held ? bit : 0;
+  def mcb-mode(path) = (Comparable) host_file_mode(path) < 0 ? -1 : host_file_mode(path) % 4096;
+  def mcb-count(s, part, from, n) = str_find(s, part, from) < 0 ? n : mcb-count(s, part, str_find(s, part, from) + len(part), n + 1);
+  def mcb-record(id) = json-node-object([nsm-s("id", id), nsm-s("session", "s"), nsm-s("route", "r"), nsm-s("outcome", "o"), nsm-s("objective", "supervised-answer")]);
+  def mcb-stage-files(dir) = fs_list(dir) |> filter(n => str_find(n, ".claim-", 0) >= 0);
+  def mcb-clean(text, words) = nil?(words) ? true : (str_find(text, words[0], 0) < 0) && mcb-clean(text, words[1:]);
+  def mcb-run() {
+   let base = temp_dir() ++ "/membrane-callers-band-" ++ host_pid().str();
+   let gone0 = host_dir_rmdir(base);
+   let made = host_dir_mkdir(base);
+
+   // 1 2 4: publish
+   let home = base ++ "/home";
+   let mh = host_dir_mkdir(home);
+   let dir = home ++ "/rec";
+   let md = host_dir_mkdir(dir);
+   let path = dir ++ "/record.json";
+   let first = nsm-record-new(home, dir, path, mcb-record("one"));
+   let bytes1 = read_file(path);
+   let events1 = read_file(home ++ "/events.jsonl") ?? "";
+   let second = try nsm-record-new(home, dir, path, mcb-record("two")) catch "refused";
+   let bytes2 = read_file(path);
+   let third = try nsm-record-new(home, dir, path, mcb-record("one")) catch "refused";
+   let bytes3 = read_file(path);
+   let events3 = read_file(home ++ "/events.jsonl") ?? "";
+   let said1 = print_str("publish: first " ++ (String) first ++ " second " ++ (String) second ++ " third " ++ (String) third ++ " events " ++ mcb-count(events1, "example-retained", 0, 0).str() ++ "/" ++ mcb-count(events3, "example-retained", 0, 0).str());
+   let r1 = try ((String) first == dir) && (len(bytes1) > 0) && (str_find(bytes1, "\"id\":\"one\"", 0) >= 0) && (mcb-count(events1, "example-retained", 0, 0) == 1) && (len(mcb-stage-files(dir)) == 0) catch false;
+   let r2 = try ((String) second == "refused") && ((String) bytes2 == (String) bytes1) catch false;
+   let r4 = try ((String) third == dir) && ((String) bytes3 == (String) bytes1) && (mcb-count(events3, "example-retained", 0, 0) == 1) catch false;
+
+   // 8: lock
+   let ldir = base ++ "/lora";
+   let ml = host_dir_mkdir(ldir);
+   let lockpath = ldir ++ "/.native-training-lock";
+   let l1 = nlw-lock(ldir);
+   let l2 = nlw-lock(ldir);
+   let aged = host_utimes(lockpath, now_unix_ms() - 120000);
+   let l3 = nlw-lock(ldir);
+   let l4 = nlw-lock(ldir);
+   let said2 = print_str("lock: " ++ [l1, l2, aged, l3, l4].str());
+   let r8 = try (l1 == 1) && (l2 == 0) && (aged == 0) && (l3 == 1) && (l4 == 0) catch false;
+
+   // 16: sync
+   let synced = nlc-sync-host(host_sync());
+   let failed = try nlc-sync-host(0 - 1) catch "stopped";
+   let r16 = try (synced == 1) && ((String) failed == "stopped") catch false;
+
+   // 32: private directories
+   let chain = base ++ "/ask/x/y";
+   let made1 = ma-private-dir(chain);
+   let again = ma-private-dir(chain);
+   let afile = base ++ "/afile";
+   let wf = write_file(afile, "x");
+   let onfile = ma-private-dir(afile);
+   let modes = [mcb-mode(base ++ "/ask"), mcb-mode(base ++ "/ask/x"), mcb-mode(chain)];
+   let inv = nsi-directory(base, "inv-", 0);
+   let inv2 = nsi-directory(base, "inv-", 0);
+   let said3 = print_str("private: chain " ++ [made1, again, onfile].str() ++ " modes " ++ modes.str() ++ " inventory " ++ [mcb-mode(inv), mcb-mode(inv2)].str());
+   let r32 = try (made1 == 1) && (again == 1) && (onfile == 0) && (modes[0] == 448) && (modes[1] == 448) && (modes[2] == 448) && (mcb-mode(inv) == 448) && (mcb-mode(inv2) == 448) && ((String) inv != (String) inv2) && fs_is_dir(inv) catch false;
+
+   // 64: private temporary
+   let target = chain ++ "/answer.txt";
+   let t1 = ma-private-temp(target);
+   let t2 = ma-private-temp(target);
+   let lost = ma-private-temp(base ++ "/no-such-parent/answer.txt");
+   let said4 = print_str("temporary: " ++ (nothing?(t1) ? "nothing" : (String) t1) ++ " " ++ (nothing?(t2) ? "nothing" : (String) t2) ++ " lost " ++ (nothing?(lost) ? "nothing" : (String) lost));
+   let r64 = try (!nothing?(t1)) && (!nothing?(t2)) && ((String) t1 != (String) t2) && (str_find(t1, target ++ ".native.", 0) == 0) && (file_size(t1) == 0) && (mcb-mode(t1) == 384) && (mcb-mode(t2) == 384) && (fs_exists(t1 ++ ".claim") == 0) && (fs_exists(t2 ++ ".claim") == 0) && nothing?(lost) catch false;
+
+   // 128 256: no program; the private chmod
+   let words = ["/bin/ch" ++ "mod", "/bin/" ++ "ln", "/bin/mk" ++ "dir", "/bin/" ++ "sync", "/usr/bin/mk" ++ "temp"];
+   let files = ["form/form-stdlib/native-session-memory.bml", "form/form-stdlib/native-lora-worker.bml", "form/form-stdlib/native-lora-checkpoint.bml", "form/form-stdlib/native-lora-train.bml", "form/form-stdlib/native-lora-fuse.bml", "form/form-stdlib/bml/metal-ask.bml", "form/form-stdlib/bml/native-source-inventory.bml"];
+   let r128 = try files |> all?(f => mcb-clean(read_file(f), words)) catch false;
+   let cdir = base ++ "/chmod";
+   let mc = host_dir_mkdir(cdir);
+   let c448 = host_chmod(cdir, 448);
+   let cmode = mcb-mode(cdir);
+   let cmissing = host_chmod(base ++ "/nowhere", 448);
+   let r256 = try (c448 == 0) && (cmode == 448) && (cmissing == (0 - 1)) catch false;
+
+   let removed = host_dir_rmdir(base);
+   print_str("membrane-callers-band claims " ++ mcb-bit(r1, 1).str() ++ " " ++ mcb-bit(r2, 2).str() ++ " " ++ mcb-bit(r4, 4).str() ++ " " ++ mcb-bit(r8, 8).str() ++ " " ++ mcb-bit(r16, 16).str() ++ " " ++ mcb-bit(r32, 32).str() ++ " " ++ mcb-bit(r64, 64).str() ++ " " ++ mcb-bit(r128, 128).str() ++ " " ++ mcb-bit(r256, 256).str());
+   mcb-bit(r1, 1) + mcb-bit(r2, 2) + mcb-bit(r4, 4) + mcb-bit(r8, 8) + mcb-bit(r16, 16) + mcb-bit(r32, 32) + mcb-bit(r64, 64) + mcb-bit(r128, 128) + mcb-bit(r256, 256);
+  }
+ }
+ mcb-run();
+}

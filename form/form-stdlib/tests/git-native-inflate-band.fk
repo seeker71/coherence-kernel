@@ -1,0 +1,150 @@
+; git-native-inflate-band.fk — zlib / DEFLATE inflate in Form (git-inflate.bml): stored, fixed-Huffman and dynamic-Huffman blocks.
+;
+; The streams are hand-made by this band (a small bit writer and a fixed-Huffman encoder written from the RFC 1951 tables, kept here
+; as plain lists so they borrow nothing from the decoder's arithmetic) or are real zlib streams git wrote: this repository's loose
+; objects and its packed objects. A real object proves itself: the inflated bytes, framed, hash to the very name the object was found
+; under, and the stored Adler-32 matches.
+;
+;   1    a stored block: "hello" under 78 01 / 01 05 00 fa ff / hello / adler, byte for byte
+;   2    the fixed-Huffman stream zlib writes for "hello world" (78 9c cb 48 cd c9 c9 57 28 cf 2f ca 49 01 00 1a 0b 04 5d)
+;   4    fixed-Huffman streams this band encodes: literals and matches of every length class (3, 9, 11, 35, 130, 131, 258: extra bits
+;        0..5) at distances with extra bits 0..12 (3, 80, 90, 100, 1025, 8193), and the overlapping matches (258 at distance 1,
+;        9 at distance 3); the expected text is built by the band's own copy loop
+;   8    a three-block stream (stored, fixed, stored+final) inflates to the pieces in order, across the byte alignment
+;   16   twenty-four of this repository's real loose objects (dynamic Huffman among them) inflate, pass the Adler-32 check, and hash to
+;        their own names
+;   32   packed objects of this repository, spread across all its packs (blobs, trees, commits; OFS_DELTA chains resolved), read through
+;        the pack indexes, each hashing to its own name
+;   64   faulty streams answer nothing(), never a wrong answer: a truncated stream, a bad header, block type 3, a stored block with a
+;        bad one's-complement length, a match before any literal, a distance past the start, an over-subscribed code, a wrong adler
+;   128  Adler-32 constants: "" = 1, "abc" = 0x024d0127, "Wikipedia" = 0x11e60398
+;
+; The inflate speed on the largest of the real objects is printed (bytes per second); the 5 MB-class pack read is measured by the
+; store band.
+;
+; Expected: 255
+; Verdict 255
+; REQUIRES: (the string natives and the u32 bit natives of fkwu)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+section [form.bml] {
+  def gib-bit(ok, bit) = ok ? bit : 0;
+  def gib-say(label, v) = print([label, v]);
+  def gib-eq(a, b) = (String) a == (String) b;
+  def gib-bytes(xs) = ginf-join(ginf-reverse(map(b => byte_to_str(b), xs), []));
+  // ---- a bit writer: items [value, nbits] packed LSB-first; a Huffman code goes in most significant bit first ----
+  def gib-rev(v, n, acc) = n == 0 ? acc : gib-rev(v / 2, n - 1, (acc * 2) + (v % 2));
+  def gib-code(v, n) = [gib-rev(v, n, 0), n];
+  def gib-pack(items) = gib-pack-go(items, 0, 0, []);
+  def gib-pack-go(items, acc, n, out) = nil?(items) ? gib-bytes(ginf-reverse(n > 0 ? cons(acc % 256, out) : out, [])) : gib-pack-step(items, acc + ((items[0][0] % shl_u32(1, items[0][1])) * shl_u32(1, n)), n + items[0][1], out);
+  def gib-pack-step(items, acc, n, out) = n >= 8 ? gib-pack-step(items, acc / 256, n - 8, cons(acc % 256, out)) : gib-pack-go(items[1:], acc, n, out);
+  // the fixed literal/length code for a symbol (RFC 1951 3.2.6)
+  def gib-lit(sym) = sym < 144 ? gib-code(48 + sym, 8) : sym < 256 ? gib-code(400 + sym - 144, 9) : sym < 280 ? gib-code(sym - 256, 7) : gib-code(192 + sym - 280, 8);
+  // RFC 1951 3.2.5 as lists
+  def gib-lbase() = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  def gib-lext() = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  def gib-dbase() = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+  def gib-dext() = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  def gib-find(bases, v, i) = i + 1 < len(bases) && bases[i + 1] <= v ? gib-find(bases, v, i + 1) : i;
+  def gib-match(l, dist) {
+    let li = gib-find(gib-lbase(), l, 0);
+    let di = gib-find(gib-dbase(), dist, 0);
+    [gib-lit(257 + li), [l - gib-lbase()[li], gib-lext()[li]], gib-code(di, 5), [dist - gib-dbase()[di], gib-dext()[di]]];
+  }
+  def gib-lits(s, i) = i >= len(s) ? [] : cons(gib-lit(str_byte_at(s, i)), gib-lits(s, i + 1));
+  def gib-items(parts) = gs-flatten(map(p => (String) value_kind(p) == "string" ? gib-lits(p, 0) : gib-match(p[0], p[1]), parts));
+  // the header bits of a block, then its body and end-of-block code
+  def gib-fixed-items(parts, fin) = append([[fin, 1], [1, 2]], append(gib-items(parts), [gib-lit(256)]));
+  def gib-be32(n) = gib-bytes([n / 16777216, (n / 65536) % 256, (n / 256) % 256, n % 256]);
+  def gib-zlib(deflate, plain) = str_concat(gib-bytes([120, 156]), str_concat(deflate, gib-be32(ginf-adler32(plain))));
+  // the text a part list means, by the band's own byte-at-a-time copy
+  def gib-expect(parts) = foldl((acc, p) => (String) value_kind(p) == "string" ? acc ++ p : gib-copy(acc, p[0], p[1]), "", parts);
+  def gib-copy(out, l, dist) = l <= 0 ? out : gib-copy(out ++ substring(out, len(out) - dist, len(out) - dist + 1), l - 1, dist);
+  def gib-ok(src, want) {
+    let r = ginf-zlib-checked(src, 0);
+    !nothing?(r) && gib-eq(r[0], want) && r[1] == len(src);
+  }
+  def gib-rep(s, n) = n <= 0 ? "" : s ++ gib-rep(s, n - 1);
+  def gib-parts-ok(parts) {
+    let want = gib-expect(parts);
+    gib-ok(gib-zlib(gib-pack(gib-fixed-items(parts, 1)), want), want);
+  }
+  // ---- real objects -----------------------------------------------------------------------------------------------------------
+  def gib-names(root, d) = map(f => d ++ f, host_dir_list(root ++ "/" ++ d) ?? []);
+  def gib-path(root, hex) = root ++ "/" ++ substring(hex, 0, 2) ++ "/" ++ substring(hex, 2, 40);
+  def gib-obj(root, hex) {
+    let src = read_file(gib-path(root, hex));
+    let z = nothing?(src) ? nothing() : ginf-zlib-checked(src, 0);
+    !nothing?(z) && gib-eq(gsha-hex(z[0]), hex) && z[1] == len(src);
+  }
+  def gib-all(root, names) = nil?(names) ? true : gib-obj(root, names[0]) && gib-all(root, names[1:]);
+  def gib-packed-ok(r, raws) = nil?(raws) ? true : gib-read-ok(r, raws[0]) && gib-packed-ok(r, raws[1:]);
+  def gib-read-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gs-verify(raw, o[0], o[1]);
+  }
+  def gib-pack-ids(idx, n, k) = map(i => gs-idx-raw(idx, (i * n) / k), range(0, k));
+  // ---- faults ----------------------------------------------------------------------------------------------------------------
+  def gib-nothing?(src) = nothing?(ginf-zlib-checked(src, 0));
+  def gib-faults() {
+    let good = gib-zlib(gib-pack(gib-fixed-items(["hello hello hello"], 1)), "hello hello hello");
+    let trunc = substring(good, 0, len(good) - 6);
+    let badcmf = str_concat(gib-bytes([121, 156]), substring(good, 2, len(good)));
+    let badfcheck = str_concat(gib-bytes([120, 157]), substring(good, 2, len(good)));
+    let type3 = gib-zlib(gib-pack([[1, 1], [3, 2], [0, 5]]), "");
+    let badnlen = gib-bytes([120, 156, 1, 3, 0, 253, 255, 97, 98, 99]);
+    let early = gib-zlib(gib-pack(gib-fixed-items([[3, 1]], 1)), "");
+    let far = gib-zlib(gib-pack(gib-fixed-items(["ab", [3, 5]], 1)), "ababab");
+    let over = gib-zlib(gib-pack([[1, 1], [2, 2], [0, 5], [0, 5], [0, 4], [1, 3], [1, 3], [1, 3], [1, 3], [0, 8]]), "");
+    let badadler = str_concat(substring(good, 0, len(good) - 1), byte_to_str((str_byte_at(good, len(good) - 1) + 1) % 256));
+    gib-nothing?(trunc) && gib-nothing?(badcmf) && gib-nothing?(badfcheck) && gib-nothing?(type3) && gib-nothing?(badnlen) && gib-nothing?(early) && gib-nothing?(far) && gib-nothing?(over) && nothing?(ginf-zlib-checked(badadler, 0)) && !nothing?(ginf-zlib(badadler, 0)) && !nothing?(ginf-zlib-checked(good, 0));
+  }
+  def gib-largest(root, names, best, bestn) = nil?(names) ? [best, bestn] : gib-larger(root, names, best, bestn, host_file_size(gib-path(root, names[0])));
+  def gib-larger(root, names, best, bestn, sz) = sz > bestn ? gib-largest(root, names[1:], names[0], sz) : gib-largest(root, names[1:], best, bestn);
+  def gib-run() {
+    let t0 = host_monotonic_ms();
+    let stored = gib-bytes([120, 1, 1, 5, 0, 250, 255, 104, 101, 108, 108, 111, 6, 44, 2, 21]);
+    let b1 = gib-bit(gib-ok(stored, "hello"), 1);
+    let hw = gib-bytes([120, 156, 203, 72, 205, 201, 201, 87, 40, 207, 47, 202, 73, 1, 0, 26, 11, 4, 93]);
+    let b2 = gib-bit(gib-ok(hw, "hello world"), 2);
+    let base = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_.,;:!?()[]{}<>=+*/%&|^~#@$";
+    let big = gib-rep("0123456789", 1200);
+    let c1 = gib-parts-ok(["abc", [9, 3]]);
+    let c2 = gib-parts-ok(["x", [258, 1]]);
+    let c3 = gib-parts-ok([base, [11, 80], [35, 90], [131, 100], [258, 91], [3, 3], [4, 4]]);
+    let c4 = gib-parts-ok([big, [130, 1025], [258, 8193], [258, 12000], [7, 7], [200, 5000]]);
+    let s4 = gib-say("encoded streams", [c1, c2, c3, c4]);
+    let b4 = gib-bit(c1 && c2 && c3 && c4, 4);
+    let blk1 = str_concat(gib-pack([[0, 1], [0, 2]]), gib-bytes([3, 0, 252, 255, 97, 98, 99]));
+    let blk2 = gib-pack(append(gib-fixed-items(["def"], 0), [[1, 1], [0, 2]]));
+    let blk3 = gib-bytes([3, 0, 252, 255, 103, 104, 105]);
+    let multi = gib-zlib(str_concat(blk1, str_concat(blk2, blk3)), "abcdefghi");
+    let b8 = gib-bit(gib-ok(multi, "abcdefghi"), 8);
+    let r = git-open(".");
+    let objroot = nothing?(r) ? "" : gs-common(r) ++ "/objects";
+    let dirs = ["03", "1a", "2b", "3c", "4d", "5e", "6f", "7a", "8b", "9c", "ad", "be", "cf"];
+    let names = nothing?(r) ? [] : gs-flatten(map(d => take(2, gib-names(objroot, d)), dirs));
+    let b16 = gib-bit(!nothing?(r) && len(names) >= 24 && gib-all(objroot, names), 16);
+    let packs = nothing?(r) ? [] : gs-packs(r);
+    let ids = gs-flatten(map(p => gib-pack-ids(p[1], p[2], p[2] > 4000 ? 8 : 6), packs));
+    let t1 = host_monotonic_ms();
+    let b32 = gib-bit(!nothing?(r) && len(packs) >= 1 && len(ids) >= 12 && gib-packed-ok(r, ids), 32);
+    let t2 = host_monotonic_ms();
+    let s5 = gib-say("packed objects verified", [len(ids), "in ms", t2 - t1]);
+    let b64 = gib-bit(gib-faults(), 64);
+    let b128 = gib-bit(ginf-adler32("") == 1 && ginf-adler32("abc") == 38600999 && ginf-adler32("Wikipedia") == 300286872, 128);
+    let big1 = nothing?(r) ? ["", 0] : gib-largest(objroot, names, "", 0);
+    let src = len(big1[0]) > 0 ? read_file(gib-path(objroot, big1[0])) : "";
+    let t3 = host_monotonic_ms();
+    let z = len(src) > 0 ? ginf-zlib(src, 0) : nothing();
+    let t4 = host_monotonic_ms();
+    let s6 = gib-say("inflate speed", [len(src), "bytes in", nothing?(z) ? 0 : len(z[0]), "bytes out", "ms", t4 - t3, "out bytes/s", nothing?(z) || t4 == t3 ? 0 : (len(z[0]) * 1000) / (t4 - t3)]);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+    let shown = print(["git-native-inflate-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  gib-run();
+}

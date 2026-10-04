@@ -29,9 +29,15 @@ section [form.bml] {
   }
   def fcb-rm(dir) = host_dir_rmdir(dir);
   def fcb-then(why, next) = (String) why != "" ? why : next();
-  // OS operations by argv: a regular file copied whole (the mode rides along), a mode set, a link made
-  def fcb-copy(from, to) = fcb-regular?(from) && (Comparable) hch-run-in(fcb-io(), "copy", ["/bin/cp", from, to], "", hch-by(600000))[0] == 0;
-  def fcb-chmod(mode, path) = (Comparable) hch-run-in(fcb-io(), "chmod", ["/bin/chmod", mode, path], "", hch-by(60000))[0] == 0;
+  // OS operations by seed door: a regular file copied whole (the mode rides along), a mode set. The mode is octal digits ("700") or
+  // "+x", which gives execute wherever read stands (what chmod +x made of 644 and of 600).
+  def fcb-copy(from, to) = fcb-regular?(from) && (Comparable) host_file_copy(from, to) >= 0;
+  def fcb-octal(s) = len(s) == 0 ? -1 : fcb-octal-go(s, 0, 0);
+  def fcb-octal-go(s, i, acc) = i >= len(s) ? acc : (str_byte_at(s, i) < 48 || str_byte_at(s, i) > 55) ? -1 : fcb-octal-go(s, i + 1, acc * 8 + (str_byte_at(s, i) - 48));
+  def fcb-xbit(bits, r, x) = (bits / r) % 2 == 1 && (bits / x) % 2 == 0 ? x : 0;
+  def fcb-with-exec(bits) = bits + fcb-xbit(bits, 256, 64) + fcb-xbit(bits, 32, 8) + fcb-xbit(bits, 4, 1);
+  def fcb-mode-bits(mode, path) = (String) mode == "+x" ? (Comparable) host_file_mode(path) < 0 ? -1 : fcb-with-exec(host_file_mode(path) % 4096) : fcb-octal(mode);
+  def fcb-chmod(mode, path) = (Comparable) fcb-mode-bits(mode, path) >= 0 && (Comparable) host_chmod(path, fcb-mode-bits(mode, path)) == 0;
   def fcb-publish(from, to) {
    let stage = to ++ ".writing-" ++ host_pid().str();
    fcb-copy(from, stage) && (Comparable) host_path_rename(stage, to) == 0;
@@ -192,13 +198,8 @@ section [form.bml] {
   def fcb-private-run(opts, body) {
    let listed = hch-read(["git", "ls-files", "--cached", "--others", "--exclude-standard"]);
    let names = filter(n => len(n) > 0 && (Comparable) host_path_exists(host_cwd() ++ "/" ++ n) == 1, split-on(listed, "\n"));
-   let list-file = body ++ ".files";
-   let archive = body ++ ".tar";
-   let wrote = write_file(list-file, fcb-join(names, "\n") ++ "\n");
-   let packed = hch-run-in(fcb-io(), "private-tar", ["/usr/bin/tar", "-c", "-f", archive, "-C", host_cwd(), "-T", list-file], "", hch-by(1800000));
-   let unpacked = hch-ok?(packed) ? hch-run-in(fcb-io(), "private-untar", ["/usr/bin/tar", "-x", "-p", "-f", archive, "-C", body], "", hch-by(1800000)) : packed;
-   let tidy = host_path_remove(list-file) + host_path_remove(archive);
-   !hch-ok?(unpacked) ? "build: the private copy of the body could not be made: " ++ trim(unpacked[1])
+   let copied = cbn-copy(host_cwd(), names, body);
+   (String) copied != "" ? "build: the private copy of the body could not be made: " ++ copied
    : fcb-private-built(opts, body);
   }
   def fcb-private-built(opts, body) {
@@ -331,7 +332,7 @@ section [form.bml] {
   }
   def fcb-link-out(out, slug, want-sha, check) {
    let stage = out ++ ".linking-" ++ host_pid().str();
-   let linked = (Comparable) hch-run-in(fcb-io(), "link", ["/bin/ln", "-s", "form-stdlib/bootstrap/form-cli-" ++ slug, stage], "", hch-by(60000))[0] == 0 && (Comparable) host_path_rename(stage, out) == 0;
+   let linked = (Comparable) host_symlink("form-stdlib/bootstrap/form-cli-" ++ slug, stage) == 0 && (Comparable) host_path_rename(stage, out) == 0;
    let identity = linked ? fcb-verify-identity(out, want-sha, check) : "build: the link could not be made";
    (String) identity != "" ? identity : fcb-say("linked " ++ out ++ " -> form-stdlib/bootstrap/form-cli-" ++ slug ++ "; source=" ++ want-sha);
   }

@@ -1,0 +1,89 @@
+; model-admission-band.bml — the queue's reads of the host, held against the host itself: the environment and who holds a file open.
+; The queue once ran `printenv HOME`, `printenv FORM_MODEL_ADMISSION_WAIT_MS` and `lsof -t <path>` through a shell; they are the seed's
+; host_getenv and host_file_holders now (host-fs.bml). Nothing foreign runs here, and no model is opened: the file the band holds open is its own scratch file.
+;
+;   1     env: adm-home is the host's HOME (a directory) and the root is its .cache/form-model; adm-wait-ms is ten minutes when
+;         FORM_MODEL_ADMISSION_WAIT_MS is unset and that variable's own value when it is set to a number (the band reads it through host_getenv too)
+;   2     peers, on scripted holders: this process and a pid that cannot exist are held, and only a live pid other than the asker is a peer
+;         ([me, gone] asked by 0 is [me]; asked by me it is []); a nothing() and a non-list are no peers
+;   4     peers, on the host: the band opens its own scratch file with file_open and asks as another pid (1): the band's pid is the peer; asked as
+;         itself there is none; once the file is closed there is none; a path that is not there has none
+;   8     held-elsewhere: with the file open, another asker's ask finds it held, this process's own ask does not (it is the holder), and
+;         after the close no asker finds it held; the residency notes of an empty root name no one
+;
+; The band's scratch directory is made under host_temp_dir() and removed (recursively) at the end, whatever failed.
+; Expected: 15
+; Verdict 15
+; REQUIRES: the host doors host_getenv host_file_holders (Darwin) and file_open (seed doors; the sibling kernels carry no host doors)
+; preflight-exec: forbidden
+; preludes: form-stdlib/bml/model-admission.bml form-stdlib/bml/host-fs.bml
+section [form.bml] {
+ class ModelAdmissionBand {
+  def mab-dir() = host_temp_dir() ++ "/model-admission-band-" ++ host_pid().str();
+  def mab-say(label, v) = print([label, v]);
+  def mab-darwin?() = (String) host_os() == "Darwin";
+  def mab-c-env() {
+   let home = host_getenv("HOME");
+   let wait = host_getenv("FORM_MODEL_ADMISSION_WAIT_MS");
+   let want = nothing?(wait) ? 600000 : (parse-int(wait) ?? 600000);
+   let said = mab-say("env", [home, adm-root(), adm-wait-ms(), nothing?(wait)]);
+   (String) value_kind(home) == "string" && (String) adm-home() == (String) trim(home) && (Comparable) host_path_is_dir(adm-home()) == 1 && (String) adm-root() == adm-home() ++ "/.cache/form-model"
+    && (Comparable) adm-wait-ms() == want && (Comparable) hfs-env-int("MODEL_ADMISSION_BAND_SURELY_UNSET_NAME", 7) == 7;
+  }
+  def mab-c-scripted() {
+   let me = host_pid();
+   let gone = 2147483646;
+   let a = adm-peers-of([me, gone], 0);
+   let b = adm-peers-of([me, gone], me);
+   let c = adm-peers-of(nothing(), me);
+   let d = adm-peers-of(5, me);
+   let e = adm-peers-of([], me);
+   let said = mab-say("scripted peers", [a, b, c, d, e]);
+   len(a) == 1 && a[0] == me && nil?(b) && nil?(c) && nil?(d) && nil?(e);
+  }
+  def mab-c-live() {
+   let dir = mab-dir();
+   let made = host_dir_mkdir(dir);
+   let path = dir ++ "/held";
+   let w = write_file(path, "x");
+   let before = adm-peers(path, 1);
+   let h = file_open(path);
+   let during = adm-peers(path, 1);
+   let own = adm-peers(path, host_pid());
+   let elsewhere = adm-held-elsewhere?(dir ++ "/no-notes", 1, path);
+   let mine = adm-held-elsewhere?(dir ++ "/no-notes", host_pid(), path);
+   let closed = file_close(h);
+   let after = adm-peers(path, 1);
+   let late = adm-held-elsewhere?(dir ++ "/no-notes", 1, path);
+   let none = adm-peers(dir ++ "/no-such-file", 1);
+   let said = mab-say("live peers", [before, during, own, elsewhere, mine, after, late, none]);
+   let cleaned = host_dir_rmdir(dir);
+   mab-darwin?() ? ([before, during, own, after, none] == [[], [host_pid()], [], [], []] && elsewhere && !mine && !late)
+    : (nil?(before) && nil?(during) && nil?(own) && nil?(after));
+  }
+  def mab-c-held() {
+   let dir = mab-dir() ++ "-held";
+   let made = host_dir_mkdir(dir);
+   let path = dir ++ "/f";
+   let w = write_file(path, "x");
+   let h = file_open(path);
+   let theirs = adm-held-elsewhere?(dir ++ "/root", 1, path);
+   let ours = adm-held-elsewhere?(dir ++ "/root", host_pid(), path);
+   let closed = file_close(h);
+   let after = adm-held-elsewhere?(dir ++ "/root", 1, path);
+   let notes = adm-residents(dir ++ "/root");
+   let cleaned = host_dir_rmdir(dir);
+   mab-darwin?() ? (theirs && !ours && !after && nil?(notes)) : (!theirs && !ours && !after && nil?(notes));
+  }
+  def mab-run() {
+   let b1 = mab-c-env() ? 1 : 0;
+   let b2 = mab-c-scripted() ? 2 : 0;
+   let b4 = mab-c-live() ? 4 : 0;
+   let b8 = mab-c-held() ? 8 : 0;
+   let verdict = b1 + b2 + b4 + b8;
+   let shown = print(["model-admission-band", "verdict", verdict]);
+   verdict;
+  }
+ }
+ mab-run();
+}
