@@ -115,7 +115,7 @@ section [form.bml] {
     def q38-linear-span-msl() = (q38-l2norm-span-msl("form_gdn_l2norm_span_f32") + (q38-gates-span-msl("form_gdn_gates_span_f32") + (q38-gnorm-span-msl("form_gdn_norm_gate_span_f32") + (q38-conv-off-msl("form_gdn_conv_off_f32") + (q38-delta-off-msl("form_gdn_delta_off_f32") + ((String) q38-conv-span-msl("form_gdn_conv_span_f32") + q38-delta-span-msl("form_gdn_delta_span_f32")))))));
     def q38-joined-attention-msl() = (q38-qsplit-span-msl("form_qsplit_span_f32") + (q38-headrms-span-msl("form_headrms_span_f32") + (q38-rope-span-msl("form_partial_rope_span_f32") + (q38-cachespan-msl("form_cache_span_f32") + ((String) q38-attn-span-msl("form_gqa_span_f32") + q38-gqa-tg-msl("form_gqa_decode_tg_f32"))))));
     def q38-msl-base() = (kth-msl() + (q80-matvec-wide-body("form_q8_0_matvec_wide_f32") + (qmb-q80-batch() + (q38-copysoff-msl("form_copy_soff_f32") + (q38-rmsspan-msl("form_rmsnorm_span_f32") + (q38-joined-attention-msl() + ((String) q38-linear-span-msl() + q38-lora-rank1-msl())))))));
-    def q38-msl() = (q38-msl-base() + (q38e-msl() + (q38pq-msl() + ((String) q38dq-msl() + q38pa-msl()))));
+    def q38-msl() = (q38-msl-base() + (q38e-msl() + (q38pq-msl() + ((String) q38dq-msl() + (q38pa-msl() + q38-rmspar-msl("form_q38_rmsnorm_par_f32"))))));
     // Order here IS the pipeline order for indices 40..46, and the layout
     // contract names each one. Appending is safe; inserting renumbers a
     // consumer, which is exactly how a merge nearly dispatched gates-span
@@ -128,7 +128,7 @@ section [form.bml] {
         let base = append(kth-pipes(msl), [metal_pipeline(msl, "form_q8_0_matvec_wide_f32"), metal_pipeline(msl, "form_q8_0_dequant_f32"), metal_pipeline(msl, "form_q8_0_matmul_batch_f32"), metal_pipeline(msl, "form_copy_soff_f32"), metal_pipeline(msl, "form_rmsnorm_span_f32"), metal_pipeline(msl, "form_qsplit_span_f32"), metal_pipeline(msl, "form_headrms_span_f32"), metal_pipeline(msl, "form_partial_rope_span_f32"), metal_pipeline(msl, "form_cache_span_f32"), metal_pipeline(msl, "form_gqa_span_f32"), metal_pipeline(msl, "form_gqa_decode_tg_f32"), metal_pipeline(msl, linear[0]), metal_pipeline(msl, linear[1]), metal_pipeline(msl, linear[2]), metal_pipeline(msl, linear[3]), metal_pipeline(msl, linear[4]), metal_pipeline(msl, linear[5]), metal_pipeline(msl, linear[6])]);
         // 47/48 follow the existing 40..46 span lane; appending preserves all
         // established pipeline identities.
-        append(append(append(append(append(base, q38-lora-rank1-pipes(msl)), q38e-pipes(msl)), q38pq-pipes(msl)), q38dq-pipes(msl)), q38pa-pipes(msl));
+        append(append(append(append(append(append(base, q38-lora-rank1-pipes(msl)), q38e-pipes(msl)), q38pq-pipes(msl)), q38dq-pipes(msl)), q38pa-pipes(msl)), [metal_pipeline(msl, "form_q38_rmsnorm_par_f32")]);
     };
     def q38-embed(ps, bs, geo, embTv, id, barrier) = q38e-index(kth-tv-ty(embTv)) < 0 ? -1 : metal_enqueue(nth(ps, q38e-index(kth-tv-ty(embTv))), q38-b16([kth-tv-h(embTv), bs[0]], [id * geo[0], geo[0]], 0, barrier), geo[0]);
     // One exact 256-thread group per output-row pair for Q8_0. Q4_K/Q6_K retain
@@ -139,12 +139,16 @@ section [form.bml] {
     // buffer-scope dependency before this dispatch: independent projections carry 0; their first
     // consumer carries 1.  Nothing about dependency order is left to encoder insertion order.
     def q38-b16(bufs, consts, mode, barrier) = md-bind16(bufs, consts, 256, 0, mode, barrier);
-    // ldm-rmsnorm-tg-msl declares sq[4096]. Qwen3.8's model width is 5120,
-    // so the cooperative twin is available only inside its witnessed radius;
-    // wider rows use the serial attestant at pipeline 5. This choice is data,
-    // not a hardcoded Qwen exception, and the band probes both sides.
-    def q38-rms-cooperative?(n) = n <= 4096;
-    def q38-rms(ps, xh, gtv, yh, n, epsBits, barrier) = q38-rms-cooperative?(n) ? metal_enqueue(ps[6], q38-b16([xh, kth-tv-h(gtv), yh], [n, epsBits], 1, barrier), 1) : metal_enqueue(ps[5], q38-b16([xh, kth-tv-h(gtv), yh], [n, epsBits], 0, barrier), 1);
+    // The decode norm: ONE threadgroup of 256 threads, each summing squares of its strided elements, a simd_sum, eight partials
+    // folded by every thread, the reciprocal root exact (precise sqrt), the row written by the group. The attestant's serial fold
+    // over n elements is ~1 ms a norm at n=5120 (one GPU thread, ~129 norms a token: most of a 197 ms token) and the cooperative
+    // twin's thread-0 fold ~0.4 ms (the dependent adds, ~70 ns an element, and its scratch ends at 4096); this is ~40 us. The sum's
+    // association differs from the attestant's, so a byte match is a reading and no promise: the probe observe/q38-prefill-run.bml
+    // compares the two on the real residual at n=5120 (0 of 5120 words differ, 0 ulp) and the 16 to 32 generated tokens of a
+    // real prompt against the attestant's (identical). Appended last: pipeline 60. Any width (a strided loop).
+    def q38-rmspar-index() = 60;
+    def q38-rmspar-msl(fname) = ("kernel void " + (fname + " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { threadgroup float part[32]; float ss = 0.0f; for (uint j = t; j < n; j += nt) { float xv = x[j]; ss = metal::fma(xv, xv, ss); } float s = metal::simd_sum(ss); if (lane == 0u) { part[sg] = s; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); uint nsg = (nt + 31u) / 32u; float tot = 0.0f; for (uint i = 0u; i < nsg; ++i) { tot = tot + part[i]; } float inv = 1.0f / metal::precise::sqrt(tot / float(n) + eps); for (uint j = t; j < n; j += nt) { y[j] = (x[j] * inv) * g[j]; } }"));
+    def q38-rms(ps, xh, gtv, yh, n, epsBits, barrier) = metal_enqueue(ps[q38-rmspar-index()], q38-b16([xh, kth-tv-h(gtv), yh], [n, epsBits], 1, barrier), 1);
     def q38-mv(ps, tv, xh, yh, barrier) = (Comparable) kth-tv-ty(tv) == 8 ? metal_enqueue(ps[29], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 256, 0, 1, barrier), ((Number) kth-tv-r(tv) + (Number) 1) / 2) : q38dq-index(kth-tv-ty(tv)) >= 0 ? q38dq-enqueue(ps, kth-tv-ty(tv), kth-tv-h(tv), xh, yh, kth-tv-r(tv), kth-tv-c(tv), barrier) : metal_enqueue(ps[27], q38-b16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 0, barrier), kth-tv-r(tv));
     // Adapter = [A-handle B-handle dot-handle width alpha-f32-bits].  Its
     // buffers are independent allocations owned by the adapter, so this is an
