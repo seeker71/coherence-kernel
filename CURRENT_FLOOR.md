@@ -193,7 +193,7 @@ form-stdlib/tests/forbidden-tools-audit-band -> 65535  (the breath window opened
                                             a stamp that did not read prints no note and ends 0
 ./fkwu observe/walk-retry.bml </dev/null  -> the retry job's door (see the host-walk-retry-band entry): the schedule's second slot reads
                                             whether the first began and, when it did not, why; stdin `{"door":"scheduled-walk","dry":1,
-                                            "now_ms":N,"zone_ms":N,"stamp":"..","lock":"..","launchctl":"..","reports_dir":"..","record":"..","nap_ms":N}`
+                                            "now_ms":N,"zone_ms":N,"stamp":"..","lock":"..","launchctl":"..","launchd_log":"..","reports_dir":"..","record":"..","nap_ms":N}`
                                             names a slot by hand and reads and classifies without beginning a walk (read-only; it does run
                                             `launchctl print` when no launchctl text is given)
 form/form-stdlib/tests/command-words-band -> 2147483647  (form/form-stdlib/bml/command-words.bml reads which commands a shell string runs, with
@@ -260,7 +260,7 @@ host-walk-band 8796093022207  (a walk door that claims the checkout stamps its s
                                 host-walk.bml is an aggregator over sixteen parts `host-walk-<seam>.bml`, each under 12000 bytes so the
                                 local lane reads one whole and can read it twice, and every definition's name (not its body) is pinned
                                 in tests/fixtures/host-walk-defs.txt)
-host-walk-retry-band 2097151  (the informed retry, observe/walk-retry.bml over host-walk-evidence.bml, -class.bml, -retry.bml, -record.bml
+host-walk-retry-band 4194303  (the informed retry, observe/walk-retry.bml over host-walk-evidence.bml, -class.bml, -retry.bml, -record.bml
                                 and -attempt.bml: each schedule has a second launchd job, earth.hati.rent-walk-retry at 03:40 and
                                 earth.hati.day-turn-retry at 12:40 and 19:10 (sources in docs/launchd), whose door first reads what became
                                 of the first slot AGAINST THE SLOT'S TIME (a retry may start 5 to 45 minutes after its slot): its row in
@@ -277,7 +277,10 @@ host-walk-retry-band 2097151  (the informed retry, observe/walk-retry.bml over h
                                 Constraint Violation, Code Signature Invalid, an unreadable executable path or a SIGKILL within 100 ms; or
                                 launchd's last exit reason naming CODESIGNING AND its `runs` advanced past the last retry row of that job:
                                 launchctl keeps the reason after a run, so one whose runs did not advance, or that has no row to be
-                                compared with, is stale and no evidence), crashed-after-launch (a stamp whose pid is gone with the lock
+                                compared with, is stale and no evidence; or launchd's own log, `log show` of launchd's lines for the
+                                label over the slot's first minute, saying `service inactive: <label>` when the stamp, the report, the
+                                refusal and the job's log all say the job never spoke: a job that ran goes inactive minutes later, and
+                                the 12:30 day turn of 2026-10-04 died this way leaving no report), crashed-after-launch (a stamp whose pid is gone with the lock
                                 unreleased: the walk claimed the checkout and died; or SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGTRAP in a
                                 report), held (the log's last `[walk-lock] ... does not start` line) and nothing-found. The change is a
                                 named variable the row states and never more than two attempts: launch-killed begins the walk door as a
