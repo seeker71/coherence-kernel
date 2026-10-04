@@ -47,6 +47,7 @@
 // preflight-exec: forbidden
 import form/form-stdlib/core.fk;
 import form/form-stdlib/metal-door.fk;
+import form/form-stdlib/gpu-lease.bml;
 //////////////////////////////////////////////////////////////////////
 section [form.bml] {
  class FormVoiceMaster {
@@ -167,8 +168,20 @@ section [form.bml] {
    let t = L - p[0];
    p[1] + (t * (p[3] + (p[2] * t)));
   }
-  // what sox was given: compand 0.08,0.6 6:-70,-60,-25 -6 -90 0.2
-  def vmm-comp-points() = [[0.0 - 70.0, 0.0 - 70.0], [0.0 - 60.0, 0.0 - 25.0]];
+  // THE COMPRESSION PROFILE is a named choice, because the first one was a reading and not a decision.
+  //   lift    what sox was given: compand 0.08,0.6 6:-70,-60,-25 -6 -90 0.2. Read as sox reads it (an omitted last
+  //           point is (0,0)), the table is an UPWARD compressor: a passage at -50 dBFS leaves at about -27, one at -20
+  //           at about -14 (each with the -6 dB makeup), so quiet speech, breaths and the room's tail are raised toward
+  //           the loud. It is what the delivered tracks carry: loudness range 3.3-3.7 LU, level jumps 5-6 dB.
+  //   gentle  an ordinary downward compressor: identity below -35 dBFS, 2:1 above (0 dBFS leaves at -17.5), so the
+  //           loud end is held down and the quiet end is left alone.
+  // Measured on the English track (2026-10-04): the same -30 LUFS and the same 6.45 dB level jumps, peaks 1.8 dB lower
+  // under `gentle` (-13.3 against -11.6 dBFS) and loudness range 0.3 LU wider (3.9 against 3.6). The numbers do not
+  // decide between them, so the word decides: the brief was a gentle track, and `gentle` is the default. `lift` stays
+  // for anyone who wants the quiet end raised; the door takes the profile as the third word of its target
+  // (`master en lift`).
+  def vmm-comp-points-of(profile) = (String) profile == "gentle" ? [[0.0 - 70.0, 0.0 - 70.0], [0.0 - 35.0, 0.0 - 35.0], [0.0, 0.0 - 17.5]] : [[0.0 - 70.0, 0.0 - 70.0], [0.0 - 60.0, 0.0 - 25.0]];
+  def vmm-comp-points() = vmm-comp-points-of("lift");
   def vmm-comp-makeup() = 0.0 - 6.0;
   def vmm-comp-attack() = 0.08;
   def vmm-comp-decay() = 0.6;
@@ -667,18 +680,15 @@ kernel void vmm_unpack(device const uchar* src [[buffer(0)]], device float* y [[
   }
 
   // ================= one GPU at a time =================
-  // concurrent Metal clients wedge in uninterruptible waits, so a run that touches the device holds a directory
-  // lock: mkdir makes it (1 when this call made it), rmdir lets it go. A held lock is waited for, 20 s at a time.
-  def vmm-lock-path() = ".hearth/gpu.lock";
-  def vmm-gpu-lock(tries) {
-   let got = host_dir_mkdir(vmm-lock-path());
-   (Comparable) got == 1 ? 1 : ((tries <= 0) ? 0 : vmm-gpu-lock-wait(tries));
-  }
-  def vmm-gpu-lock-wait(tries) {
-   let s = host_sleep_ms(20000);
-   vmm-gpu-lock(tries - 1);
-  }
-  def vmm-gpu-unlock() = host_dir_rmdir(vmm-lock-path());
+  // concurrent Metal clients wedge in uninterruptible waits, so a run that touches the device holds the GPU lease
+  // (gpu-lease.bml): a lock with an owner, so a live holder is waited for (20 minutes), a dead one is taken over,
+  // and only the holder gives it back. The take answers data (["held" token] ["waited" ms token]
+  // ["took-over-stale" prev token] ["refused" reason ...]); the give takes that answer and gives back only a lease
+  // this answer holds.
+  def vmm-lock-path() = gpu-lease-path();
+  def vmm-gpu-lock(label) = gpu-lease-take(vmm-lock-path(), label, gpl-wait-ms());
+  def vmm-gpu-held?(lease) = gpu-lease-held?(lease);
+  def vmm-gpu-unlock(lease) = gpu-lease-give(vmm-lock-path(), lease);
 
   // ================= the recipe, end to end =================
   def vmm-tone-blk() = 16384;
@@ -691,7 +701,8 @@ kernel void vmm_unpack(device const uchar* src [[buffer(0)]], device float* y [[
   def vmm-tail-seconds() = 1.5;
   def vmm-now() = host_monotonic_ms();
   // The mastered track. plan comes from vmm-plan; the report is a list of [name, value] rows.
-  def vmm-master(ps, plan, out-path, sr) {
+  def vmm-master(ps, plan, out-path, sr) = vmm-master-profile(ps, plan, out-path, sr, "gentle");
+  def vmm-master-profile(ps, plan, out-path, sr, profile) {
    let t0 = vmm-now();
    let n-asm = vmm-plan-total(plan, sr);
    let delay = vmm-round(sr * vmm-comp-delay());
@@ -705,7 +716,7 @@ kernel void vmm_unpack(device const uchar* src [[buffer(0)]], device float* y [[
    let t1 = vmm-now();
    let tone = vmm-iir(ps, A, B, n, vmm-tone-chain(sr), vmm-tone-blk(), vmm-tone-warm());
    let t2 = vmm-now();
-   let cm = vmm-compress(ps, B, C, A, n, sr, vmm-pieces(vmm-comp-points()), vmm-comp-makeup(), vmm-comp-attack(), vmm-comp-decay(), vmm-comp-initial-db(), vmm-comp-delay());
+   let cm = vmm-compress(ps, B, C, A, n, sr, vmm-pieces(vmm-comp-points-of(profile)), vmm-comp-makeup(), vmm-comp-attack(), vmm-comp-decay(), vmm-comp-initial-db(), vmm-comp-delay());
    let t3 = vmm-now();
    let geom = vmm-room-geometry(sr, 1.0, vmm-room-rt60(), vmm-room-damp(), 1.0);
    let en = vmm-room-energy(ps, geom[0], geom[1], geom[2], sr, vmm-room-rt60());
