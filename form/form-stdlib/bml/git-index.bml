@@ -1,0 +1,135 @@
+// git-index.bml — the index (staging area) file, read in Form: versions 2, 3 and 4 (the v4 path prefix compression), every entry's
+// stat fields, mode, id, flags and path, the extensions skipped by length (the TREE extension, the cache-tree, is parsed), and the
+// trailing SHA-1 checked on request.
+//
+//   gi-read(r)             [entries, cachetree, version, text] for this checkout's index (gitdir/index), nothing() when it is absent or
+//                          is not an index
+//   gi-read-file(path)     the same for an index file at any path
+//   entry row              [path, mode, raw id, size, mtime_s, mtime_ns, stage, xflags, ctime_s, ctime_ns, ino, dev, flags]
+//   cache-tree row         [dir ("" for the root, else "a/b/"), entry count (-1: invalidated), raw id or nothing()]
+//   gi-verify(text)        true when the last 20 bytes are the SHA-1 of the rest
+//   gi-names(entries)      the sorted paths as one "\n"-framed string; gi-has?(names, path) and gi-has-under?(names, "dir/") are
+//                          binary searches over it, no list indexing and no hash map
+//
+// An entry's `mode` is the integer (33188 is 100644, 33261 100755, 40960 120000, 57344 160000); `xflags` holds the v3 extended flags
+// (0x4000 skip-worktree, 0x2000 intent-to-add).
+//
+// PROOF: form-stdlib/tests/git-native-index-band.fk (this checkout's index, and a synthetic v2 and v4 index the band assembles).
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+section [form.bml] {
+ class GitIndex {
+  def gi-m-path(e) = e[0];
+  def gi-m-mode(e) = e[1];
+  def gi-m-id(e) = e[2];
+  def gi-m-size(e) = e[3];
+  def gi-m-mtime-s(e) = e[4];
+  def gi-m-mtime-ns(e) = e[5];
+  def gi-m-stage(e) = e[6];
+  def gi-m-xflags(e) = e[7];
+  // ---- one entry -----------------------------------------------------------------------------------------------------------
+  def gi-nul-at(s, p) = str_byte_at(s, p) == 0 ? p : gi-nul-at(s, p + 1);
+  // the v4 varint for the strip length: [value, next]
+  def gi-v4-strip(s, p, acc) {
+   let b = str_byte_at(s, p);
+   b >= 128 ? gi-v4-strip(s, p + 1, ((acc + 1) * 128) + band(b, 127)) : [((acc + 1) * 128) + b, p + 1];
+  }
+  def gi-v4-first(s, p) {
+   let b = str_byte_at(s, p);
+   b >= 128 ? gi-v4-strip(s, p + 1, band(b, 127)) : [b, p + 1];
+  }
+  // [row, next position]; prev is the previous path (v4 only)
+  def gi-entry(s, p, ver, prev) {
+   let flags = gs-be16(s, p + 60);
+   let xf = ver >= 3 && band(flags, 16384) != 0 ? gs-be16(s, p + 62) : 0;
+   let np = p + 62 + (ver >= 3 && band(flags, 16384) != 0 ? 2 : 0);
+   ver >= 4 ? gi-entry-v4(s, p, flags, xf, np, prev) : gi-entry-v23(s, p, flags, xf, np);
+  }
+  def gi-row(s, p, path, flags, xf) = [path, gs-be32(s, p + 24), substring(s, p + 40, p + 60), gs-be32(s, p + 36), gs-be32(s, p + 8), gs-be32(s, p + 12), band(shr_u32(flags, 12), 3), xf, gs-be32(s, p), gs-be32(s, p + 4), gs-be32(s, p + 20), gs-be32(s, p + 16), flags];
+  def gi-entry-v23(s, p, flags, xf, np) {
+   let nl0 = band(flags, 4095);
+   let nl = nl0 == 4095 ? gi-nul-at(s, np) - np : nl0;
+   let total = ((np - p) + nl + 8) - (((np - p) + nl + 8) % 8);
+   [gi-row(s, p, substring(s, np, np + nl), flags, xf), p + total];
+  }
+  def gi-entry-v4(s, p, flags, xf, np, prev) {
+   let st = gi-v4-first(s, np);
+   let nul = gi-nul-at(s, st[1]);
+   let keep = len(prev) - st[0];
+   [gi-row(s, p, str_concat(substring(prev, 0, keep < 0 ? 0 : keep), substring(s, st[1], nul)), flags, xf), nul + 1];
+  }
+  def gi-entries(s, p, n, ver, prev, acc) {
+   let e = n <= 0 ? nothing() : gi-entry(s, p, ver, prev);
+   n <= 0 ? [ginf-reverse(acc, []), p] : gi-entries(s, e[1], n - 1, ver, e[0][0], cons(e[0], acc));
+  }
+  // ---- the TREE extension --------------------------------------------------------------------------------------------------
+  def gi-ascii-int(s, p, stop) = stop <= p ? 0 : str_to_int(substring(s, p, stop));
+  // a cache-tree node at p: [rows (this node first, then its children), next position]
+  def gi-ct-node(s, p, prefix) {
+   let nul = gi-nul-at(s, p);
+   let sp = gs-index-of(s, 32, nul + 1);
+   let nl = gs-index-of(s, 10, sp + 1);
+   let count = str_byte_at(s, nul + 1) == 45 ? 0 - 1 : gi-ascii-int(s, nul + 1, sp);
+   let subs = gi-ascii-int(s, sp + 1, nl);
+   let dir = len(prefix) == 0 && nul == p ? "" : prefix ++ substring(s, p, nul) ++ "/";
+   let after = count >= 0 ? nl + 1 + 20 : nl + 1;
+   gi-ct-children(s, after, subs, dir, [[dir, count, count >= 0 ? substring(s, nl + 1, nl + 21) : nothing()]]);
+  }
+  def gi-ct-children(s, p, k, dir, acc) {
+   let c = k <= 0 ? nothing() : gi-ct-node(s, p, dir);
+   k <= 0 ? [acc, p] : gi-ct-children(s, c[1], k - 1, dir, append(acc, c[0]));
+  }
+  def gi-ct-parse(s, p, end) = gi-ct-node(s, p, "")[0];
+  // ---- the whole file ------------------------------------------------------------------------------------------------------
+  def gi-extensions(s, p, end, ct) {
+   p + 8 > end ? ct : gi-ext-one(s, p, end, ct, substring(s, p, p + 4), gs-be32(s, p + 4));
+  }
+  def gi-ext-one(s, p, end, ct, sig, size) = p + 8 + size > end ? ct : gi-extensions(s, p + 8 + size, end, str_eq(sig, "TREE") && nil?(ct) ? gi-ct-parse(s, p + 8, p + 8 + size) : ct);
+  def gi-read-text(s) {
+   let ok = len(s) >= 32 && str_eq(substring(s, 0, 4), "DIRC");
+   let ver = ok ? gs-be32(s, 4) : 0;
+   ok && ver >= 2 && ver <= 4 ? gi-read-body(s, ver, gi-entries(s, 12, gs-be32(s, 8), ver, "", [])) : nothing();
+  }
+  def gi-read-body(s, ver, es) = [es[0], gi-extensions(s, es[1], len(s) - 20, []), ver, s];
+  def gi-read-file(path) {
+   let s = read_file(path);
+   nothing?(s) ? nothing() : gi-read-text(s);
+  }
+  def gi-read(r) = gi-read-file(gs-gitdir(r) ++ "/index");
+  def gi-verify(s) = len(s) > 20 && str_eq(gsha-raw(substring(s, 0, len(s) - 20)), substring(s, len(s) - 20, len(s)));
+  def gi-entries-of(ix) = ix[0];
+  def gi-cachetree-of(ix) = ix[1];
+  // ---- the sorted-names string ---------------------------------------------------------------------------------------------
+  def gi-join-names(es) = ginf-join(gi-name-pieces(es, []));
+  def gi-name-pieces(es, acc) = nil?(es) ? acc : gi-name-pieces(es[1:], cons(str_concat(es[0][0], "\n"), acc));
+  def gi-names(es) = str_concat("\n", gi-join-names(es));
+  // the start of the line that holds byte offset i (the byte after the previous newline)
+  def gi-line-start(n, i) = i <= 0 ? 0 : str_byte_at(n, i - 1) == 10 ? i : gi-line-start(n, i - 1);
+  def gi-line-end(n, i) = i >= len(n) || str_byte_at(n, i) == 10 ? i : gi-line-end(n, i + 1);
+  // the line at [a, b) against key: -1 / 0 / 1
+  def gi-cmp-line(n, a, b, key, i) {
+   let kl = len(key);
+   let ca = a + i < b ? str_byte_at(n, a + i) : 0 - 1;
+   let ck = i < kl ? str_byte_at(key, i) : 0 - 1;
+   a + i >= b && i >= kl ? 0 : ca < ck ? 0 - 1 : ca > ck ? 1 : gi-cmp-line(n, a, b, key, i + 1);
+  }
+  // the offset of the first line that is >= key (len(n) when every line is smaller)
+  def gi-lower(n, key, lo, hi) = lo >= hi ? lo : gi-lower-mid(n, key, lo, hi, gi-line-start(n, (lo + hi) / 2));
+  def gi-lower-mid(n, key, lo, hi, a) = gi-lower-step(n, key, lo, hi, a, gi-line-end(n, a));
+  def gi-lower-step(n, key, lo, hi, a, b) = gi-cmp-line(n, a, b, key, 0) < 0 ? gi-lower(n, key, b + 1, hi) : gi-lower(n, key, lo, a);
+  def gi-bound(n, key) = gi-lower(n, key, 1, len(n));
+  def gi-has?(n, path) {
+   let at = gi-bound(n, path);
+   at < len(n) && gi-cmp-line(n, at, gi-line-end(n, at), path, 0) == 0;
+  }
+  // whether any line starts with `dir` (a prefix ending in "/")
+  def gi-has-under?(n, dir) {
+   let at = gi-bound(n, dir);
+   at < len(n) && gs-starts?(substring(n, at, at + len(dir)), dir);
+  }
+ }
+ 0;
+}

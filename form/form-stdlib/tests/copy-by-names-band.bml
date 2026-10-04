@@ -1,0 +1,195 @@
+; copy-by-names-band.bml — a tree copied by a list of names with no archive and no program (form-stdlib/bml/copy-by-names.bml).
+;
+; The body ran `tar -c -T names | tar -x -p` to copy a source tree by a name list (the heal snapshot, the evaluation body, the
+; private build body). cbn-copy makes the directory levels, copies each file's bytes through the host_file_copy door, sets the mode
+; and the modification time, and carries nothing else. This band copies a synthetic tree and compares what arrived against what
+; was sent, then plants the faults a comparison must see.
+;
+; Expected: 32767
+; Verdict 32767 when every claim lands:
+;   1     every named file arrives byte for byte (a text file, a name with a space, a file of all 256 byte values with NULs, an empty
+;         file, a 3 MiB file of varying bytes), nested directories are made level by level, and cbn-copy answers ""
+;   2     modes arrive: an executable (493) stays executable, a read-only file (292) stays read-only, a plain one (420) stays 420
+;   4     modification times arrive to the millisecond (the source was set to 1700000000123)
+;   8     a directory named in the list is copied whole (its files, its nested directory, its empty directory), with its mode
+;   16    a symbolic link to a regular file arrives as that file's bytes; cbn-symlink? is true for the link, false for the file and for
+;         a directory; cbn-link-free? is false for a name that is a link and for a name under a linked directory, true for a clean list
+;   32    refusals are named and nothing is written for them: a name with `..`, an absolute name, an empty component, an empty name,
+;         and a name that is not there each answer a reason and leave no path behind
+;   64    a second copy over the first replaces the files (a changed source arrives; an unchanged one stays equal)
+;   128   a private directory is owner-only (448) and a second ask answers 0; cbn-ensure makes three levels at once
+;   256   plant: a flipped byte in an arrived file is seen by the comparison used for claim 1 (the comparison is not vacuous)
+;   512   plant: a changed mode is seen by the comparison used for claim 2
+;   1024  plant: a changed time is seen by the comparison used for claim 4
+;   2048  the 3 MiB file copies in under 10 s (a Form loop that handed the bytes through a list took 79 s for 4 MiB)
+;   4096  the doors check: cbn-door? is true here
+;   8192  one file as cp -p carried it (cbn-copy-file): bytes, mode (493) and modification time arrive; a read-only file that stands at
+;         the destination is replaced; its directory is made when absent; a directory, a path that is not there and a link to
+;         nothing are each refused with a reason and write nothing
+;   16384 a whole directory as cp -R carried it (cbn-copy-tree): nested files, an empty directory, modes and times arrive under a path
+;         that was not there; a source that is not a directory is refused
+;
+; REQUIRES: the seed doors host_realpath, host_file_identity, host_utimes, host_chmod, host_file_copy, host_file_mode, host_mkdir_mode (runtime/fkwu-uni.c leaf-door modes 35-48) and the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/copy-by-names.bml
+section [form.bml] {
+ class CopyByNamesBand {
+  def cbb-fresh() {
+   let root = temp_dir() ++ "/copy-by-names-band-" ++ host_pid().str() ++ "-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["copy", root, 0] : nothing();
+  }
+  def cbb-root(ctx) = ctx[1];
+  def cbb-rep(s, k) = k <= 0 ? "" : k == 1 ? s : (k % 2 == 1 ? s : "") ++ cbb-rep(s ++ s, k / 2);
+  def cbb-all-bytes() = str-spans(map(i => byte_to_str(i % 256), range(0, 1024)));
+  def cbb-big() = cbb-rep(cbb-all-bytes(), 3072);
+  def cbb-put(path, text, mode) {
+   let made = cbn-ensure(cbn-parent(path), record_new(0));
+   let wrote = write_file(path, text);
+   let moded = host_chmod(path, mode);
+   let timed = host_utimes(path, 1700000000123);
+   (Comparable) wrote == len(text) && (Comparable) moded == 0 && (Comparable) timed == 0;
+  }
+  def cbb-names() = ["a.txt", "bin/tool", "sub/dir/deep.dat", "sub/empty", "odd name.txt", "big.bin", "ro.txt"];
+  def cbb-source(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let a = cbb-put(src ++ "/a.txt", "alpha\nbeta\n", 420);
+   let b = cbb-put(src ++ "/bin/tool", "#!/bin/true\n", 493);
+   let c = cbb-put(src ++ "/sub/dir/deep.dat", cbb-all-bytes(), 420);
+   let d = cbb-put(src ++ "/sub/empty", "", 420);
+   let e = cbb-put(src ++ "/odd name.txt", "a name with a space\n", 420);
+   let f = cbb-put(src ++ "/big.bin", cbb-big(), 420);
+   let g = cbb-put(src ++ "/ro.txt", "read only\n", 292);
+   a && b && c && d && e && f && g ? src : nothing();
+  }
+  def cbb-same-bytes?(src, dst, names) = nil?(names) ? true : (Comparable) file_size(dst ++ "/" ++ names[0]) == file_size(src ++ "/" ++ names[0]) && (String) (read_file(dst ++ "/" ++ names[0]) ?? "x") == (read_file(src ++ "/" ++ names[0]) ?? "y") && cbb-same-bytes?(src, dst, names[1:]);
+  def cbb-same-modes?(src, dst, names) = nil?(names) ? true : (Comparable) (host_file_mode(dst ++ "/" ++ names[0]) % 4096) == (host_file_mode(src ++ "/" ++ names[0]) % 4096) && cbb-same-modes?(src, dst, names[1:]);
+  def cbb-time(path) = host_file_identity(path)[1];
+  def cbb-same-times?(src, dst, names) = nil?(names) ? true : (Comparable) cbb-time(dst ++ "/" ++ names[0]) == cbb-time(src ++ "/" ++ names[0]) && cbb-same-times?(src, dst, names[1:]);
+  // ---- 1 bytes
+  def cbb-c-bytes(ctx) {
+   let src = cbb-source(ctx);
+   let dst = cbb-root(ctx) ++ "/dst";
+   let why = cbn-copy(src, cbb-names(), dst);
+   (String) why == "" && cbb-same-bytes?(src, dst, cbb-names()) && (Comparable) host_file_mode(dst ++ "/sub/dir") / 4096 == 4;
+  }
+  // ---- 2 modes
+  def cbb-c-modes(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst";
+   cbb-same-modes?(src, dst, cbb-names()) && (Comparable) (host_file_mode(dst ++ "/bin/tool") % 4096) == 493 && (Comparable) (host_file_mode(dst ++ "/ro.txt") % 4096) == 292 && (Comparable) (host_file_mode(dst ++ "/a.txt") % 4096) == 420;
+  }
+  // ---- 4 times
+  def cbb-c-times(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst";
+   cbb-same-times?(src, dst, cbb-names()) && (Comparable) cbb-time(dst ++ "/a.txt") == 1700000000123;
+  }
+  // ---- 8 a directory name
+  def cbb-c-directory(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst-dir";
+   let made = cbn-ensure(src ++ "/sub/hollow", record_new(0));
+   let moded = host_chmod(src ++ "/sub/hollow", 488);
+   let why = cbn-copy(src, ["sub"], dst);
+   (String) why == "" && cbb-same-bytes?(src, dst, ["sub/dir/deep.dat", "sub/empty"]) && (Comparable) fs_is_dir(dst ++ "/sub/hollow") == 1 && (Comparable) (host_file_mode(dst ++ "/sub/hollow") % 4096) == 488
+   && (Comparable) len(fs_list(dst ++ "/sub/hollow") ?? ["x"]) == 0 && (Comparable) (host_file_mode(dst ++ "/sub") % 4096) == (host_file_mode(src ++ "/sub") % 4096);
+  }
+  // ---- 16 symbolic links
+  def cbb-c-links(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst-link";
+   let l1 = host_symlink("a.txt", src ++ "/link.txt");
+   let l2 = host_symlink("sub", src ++ "/linked-dir");
+   let why = cbn-copy(src, ["link.txt"], dst);
+   (Comparable) l1 == 0 && (Comparable) l2 == 0 && (String) why == "" && (String) (read_file(dst ++ "/link.txt") ?? "x") == "alpha\nbeta\n" && !cbn-symlink?(dst ++ "/link.txt")
+   && cbn-symlink?(src ++ "/link.txt") && cbn-symlink?(src ++ "/linked-dir") && !cbn-symlink?(src ++ "/a.txt") && !cbn-symlink?(src ++ "/sub") && !cbn-symlink?(src ++ "/missing")
+   && cbn-link-free?(src, cbb-names()) && !cbn-link-free?(src, ["a.txt", "link.txt"]) && !cbn-link-free?(src, ["linked-dir/empty"]) && cbn-link-free?(src, ["sub/dir/deep.dat"]);
+  }
+  // ---- 32 refusals
+  def cbb-refused?(ctx, name) {
+   let dst = cbb-root(ctx) ++ "/dst-refused";
+   let why = cbn-copy(cbb-root(ctx) ++ "/src", [name], dst);
+   (String) why != "" && !((Comparable) host_path_exists(dst ++ "/" ++ name) == 1);
+  }
+  def cbb-c-refusals(ctx) {
+   cbb-refused?(ctx, "../src/a.txt") && cbb-refused?(ctx, "/etc/hosts") && cbb-refused?(ctx, "sub//empty") && cbb-refused?(ctx, "") && cbb-refused?(ctx, "not-there.txt")
+   && cbn-copy(cbb-root(ctx) ++ "/src", ["a.txt", "../x"], cbb-root(ctx) ++ "/dst-refused2") != "" && cbn-copy(cbb-root(ctx) ++ "/src", [], cbb-root(ctx) ++ "/dst-none") == "";
+  }
+  // ---- 64 a second copy replaces
+  def cbb-c-replace(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst";
+   let changed = cbb-put(src ++ "/a.txt", "alpha changed\n", 420);
+   let why = cbn-copy(src, cbb-names(), dst);
+   changed && (String) why == "" && (String) (read_file(dst ++ "/a.txt") ?? "x") == "alpha changed\n" && cbb-same-bytes?(src, dst, cbb-names());
+  }
+  // ---- 128 private directory, levels
+  def cbb-c-private(ctx) {
+   let dir = cbb-root(ctx) ++ "/private-one";
+   let first = cbn-private-dir(dir);
+   let second = cbn-private-dir(dir);
+   let deep = cbb-root(ctx) ++ "/lv1/lv2/lv3";
+   let made = cbn-ensure(deep, record_new(0));
+   (Comparable) first == 1 && (Comparable) second == 0 && (Comparable) (host_file_mode(dir) % 4096) == 448 && made && (Comparable) fs_is_dir(deep) == 1;
+  }
+  // ---- 256 / 512 / 1024 plants: the comparisons see a fault
+  def cbb-c-plant-byte(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst";
+   let kept = read_file(dst ++ "/odd name.txt") ?? "";
+   let flipped = write_file(dst ++ "/odd name.txt", "b" ++ substring(kept, 1, len(kept)));
+   let seen = !cbb-same-bytes?(src, dst, ["odd name.txt"]);
+   let restored = write_file(dst ++ "/odd name.txt", kept);
+   seen && cbb-same-bytes?(src, dst, ["odd name.txt"]);
+  }
+  def cbb-c-plant-mode(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst";
+   let moved = host_chmod(dst ++ "/bin/tool", 420);
+   let seen = !cbb-same-modes?(src, dst, ["bin/tool"]);
+   let restored = host_chmod(dst ++ "/bin/tool", 493);
+   seen && cbb-same-modes?(src, dst, ["bin/tool"]);
+  }
+  def cbb-c-plant-time(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst";
+   let moved = host_utimes(dst ++ "/ro.txt", 1700000000999);
+   let seen = !cbb-same-times?(src, dst, ["ro.txt"]);
+   let restored = host_utimes(dst ++ "/ro.txt", 1700000000123);
+   seen && cbb-same-times?(src, dst, ["ro.txt"]);
+  }
+  // ---- 2048 speed
+  def cbb-c-speed(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/dst-speed";
+   let t0 = host_monotonic_ms();
+   let why = cbn-copy(src, ["big.bin"], dst);
+   (String) why == "" && host_monotonic_ms() - t0 < 10000 && (Comparable) file_size(dst ++ "/big.bin") == 3145728;
+  }
+  def cbb-c-door(ctx) = cbn-door?();
+  // ---- 8192 one file
+  def cbb-c-file(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/file-copy";
+   let one = cbn-copy-file(src ++ "/bin/tool", dst ++ "/deep/tool");
+   let arrived = (String) one == "" && (String) (read_file(dst ++ "/deep/tool") ?? "x") == "#!/bin/true\n" && (Comparable) (host_file_mode(dst ++ "/deep/tool") % 4096) == 493 && (Comparable) cbb-time(dst ++ "/deep/tool") == 1700000000123;
+   let lock = cbb-put(dst ++ "/ro-dst", "old\n", 292);
+   let replaced = (String) cbn-copy-file(src ++ "/a.txt", dst ++ "/ro-dst") == "" && (String) (read_file(dst ++ "/ro-dst") ?? "x") == (read_file(src ++ "/a.txt") ?? "y");
+   let refused = (String) cbn-copy-file(src ++ "/sub", dst ++ "/x") != "" && (String) cbn-copy-file(src ++ "/nobody", dst ++ "/y") != "" && (String) cbn-copy-file(src ++ "/missing-link-target", dst ++ "/z") != ""
+    && !((Comparable) host_path_exists(dst ++ "/x") == 1) && !((Comparable) host_path_exists(dst ++ "/y") == 1);
+   arrived && replaced && refused;
+  }
+  // ---- 16384 one tree
+  def cbb-c-tree(ctx) {
+   let src = cbb-root(ctx) ++ "/src";
+   let dst = cbb-root(ctx) ++ "/tree-copy";
+   let why = cbn-copy-tree(src ++ "/sub", dst);
+   (String) why == "" && (String) (read_file(dst ++ "/dir/deep.dat") ?? "x") == cbb-all-bytes() && (Comparable) file_size(dst ++ "/empty") == 0 && (Comparable) fs_is_dir(dst ++ "/hollow") == 1 && (Comparable) len(fs_list(dst ++ "/hollow") ?? ["x"]) == 0
+   && (Comparable) cbb-time(dst ++ "/dir/deep.dat") == 1700000000123 && (Comparable) (host_file_mode(dst ++ "/hollow") % 4096) == 488 && (String) cbn-copy-tree(src ++ "/a.txt", cbb-root(ctx) ++ "/tree-x") != "" && !((Comparable) host_path_exists(cbb-root(ctx) ++ "/tree-x") == 1);
+  }
+ }
+ let ctx = cbb-fresh();
+ nothing?(ctx) ? form_error("copy-by-names band needs a fresh directory") : 0;
+ let verdict = live-claims("copy-by-names-band", ctx, [["bytes", 1, 1, cbb-c-bytes], ["modes", 2, 1, cbb-c-modes], ["times", 4, 1, cbb-c-times], ["directory", 8, 1, cbb-c-directory], ["links", 16, 1, cbb-c-links], ["refusals", 32, 1, cbb-c-refusals], ["replace", 64, 1, cbb-c-replace], ["private", 128, 1, cbb-c-private], ["plant-byte", 256, 1, cbb-c-plant-byte], ["plant-mode", 512, 1, cbb-c-plant-mode], ["plant-time", 1024, 1, cbb-c-plant-time], ["speed", 2048, 1, cbb-c-speed], ["door", 4096, 1, cbb-c-door], ["file", 8192, 1, cbb-c-file], ["tree", 16384, 1, cbb-c-tree]]);
+ host_dir_rmdir(cbb-root(ctx));
+ verdict;
+}

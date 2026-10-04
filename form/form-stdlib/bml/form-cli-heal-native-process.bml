@@ -1,6 +1,9 @@
 // Form supervises native argv children, streams and correlated choices.
-// The shell script only establishes cwd, file descriptors and a child group.
+// The child is begun by the host_spawn_at door itself: the argv, its three streams (files this organ owns) and its directory are the
+// whole of what a launch script used to say. Its exit comes from host_wait, its lineage from the process table (host_processes names
+// the fkwu kernels and answers each one's parent) and its signals go to each process by number (host_signal): no shell, no ps, no kill.
 import form-stdlib/bml/form-cli-heal-native-io.bml;
+import form-stdlib/bml/host-child.bml;
 import form-stdlib/bml/spawn-guard.bml;
 import form-stdlib/bml/retry.bml;
 import form-stdlib/bml/form-cli-heal-dynamic.bml;
@@ -28,37 +31,81 @@ section [form.bml] {
    (String) saved == "appended" ? "recorded" : saved;
   }
   def fhn-json-rows(lines) = nil?(lines) ? [] : (String) lines[0] == "" ? fhn-json-rows(lines[1:]) : cons(parse-json("retained-metadata", lines[0]), fhn-json-rows(lines[1:]));
-  def fhn-process-state(pid) = fhn-capture(["/bin/ps", "-p", pid.str(), "-o", "stat="]);
-  def fhn-alive(pid) {
-   let state = fhn-process-state(pid);
-   (len(state) > 0) && (!((Comparable) str_byte_at(state, 0) == 90));
+  // ---- the process, read from the host
+  def fhn-alive(pid) = (Comparable) host_alive(pid) == 1;
+  // when a process began (host_process: pid ppid exe cwd argv start-ms withheld): a pid that comes back to a different process
+  // has another start, so a recorded member is signalled only while the process at its pid is still the one that was seen
+  def fhn-start-of(pid) {
+   let row = host_process(pid);
+   (String) value_kind(row) == "list" && (Comparable) len(row) > 5 && (String) value_kind(row[5]) == "int" ? row[5] : 0;
   }
-  def fhn-group(pid) = str_to_int(fhn-capture(["/bin/ps", "-p", pid.str(), "-o", "pgid="]));
-  def fhn-group-members(pid) = fhn-capture(["/bin/ps", "-g", pid.str(), "-o", "pid="]);
-  def fhn-group-empty(pid) = (pid <= 0) || ((String) fhn-group-members(pid) == "");
-  def fhn-nonempty(xs) = nil?(xs) ? [] : (String) fh-trim(xs[0]) == "" ? fhn-nonempty(xs[1:]) : cons(fh-trim(xs[0]), fhn-nonempty(xs[1:]));
-  def fhn-process-tree-rows(lines) = lines |> map(line => fhn-nonempty(split-on(line, " ")));
-  def fhn-process-children(rows, pid) = nil?(rows) ? [] : ((Comparable) len(rows[0]) == 2) && ((Comparable) str_to_int(rows[0][1]) == pid) ? cons(str_to_int(rows[0][0]), fhn-process-children(rows[1:], pid)) : fhn-process-children(rows[1:], pid);
-  def fhn-descendants(rows, pending, found) = nil?(pending) ? found : fhn-descendants(rows, append(pending[1:], fhn-process-children(rows, pending[0])), cons(pending[0], found));
-  def fhn-child-tree(pid) = pid <= 0 ? [] : fhn-descendants(fhn-process-tree-rows(split-on(fhn-capture(["/bin/ps", "-e", "-o", "pid=,ppid="]), "\n")), [pid], []);
+  def fhn-entry(pid) = [pid, fhn-start-of(pid)];
+  def fhn-entry-live?(entry) = fhn-alive(entry[0]) && (Comparable) fhn-start-of(entry[0]) == entry[1];
+  // the child and every descendant that is an fkwu kernel (host_processes names kernels by prefix and answers each one's parent):
+  // deepest first, the child last. A descendant that is not an fkwu kernel is not found. The lineage is read before any signal,
+  // because a stopped parent's children are no longer found through it.
+  def fhn-child-tree(pid) = pid <= 0 ? [] : reverse(hch-lineage(pid));
+  def fhn-entries-of(pid) = pid <= 0 || !fhn-alive(pid) ? [] : fhn-child-tree(pid) |> map(id => fhn-entry(id));
+  // what a stage has been seen to own, kept in a file beside its streams while its child lives, so a child that ends and leaves
+  // a descendant behind does not hide the descendant
+  def fhn-members-path(job, stage) = fhn-stage-path(job, stage, ".members");
+  def fhn-entry-line(entry) = entry[0].str() + " " + entry[1].str() + "\n";
+  def fhn-entry-parse(parts) = (Comparable) len(parts) == 2 ? [[str_to_int(parts[0]), str_to_int(parts[1])]] : [];
+  def fhn-entries-read(text) = foldl((acc, line) => append(acc, fhn-entry-parse(split-on(line, " "))), [], filter(line => len(line) > 0, split-on(text, "\n")));
+  def fhn-entry-in?(entries, pid) = nil?(entries) ? false : (Comparable) entries[0][0] == pid ? true : fhn-entry-in?(entries[1:], pid);
+  def fhn-entries-union(known, more) = nil?(more) ? known : fhn-entry-in?(known, more[0][0]) ? fhn-entries-union(known, more[1:]) : fhn-entries-union(append(known, [more[0]]), more[1:]);
+  def fhn-note-members(job, stage, pid) {
+   let known = fhn-entries-read(fhn-read(fhn-members-path(job, stage)));
+   write_file(fhn-members-path(job, stage), str-spans(fhn-entries-union(known, fhn-entries-of(pid)) |> map(entry => fhn-entry-line(entry))));
+  }
+  // the members that still live: the lineage now and the lineage last noted, each checked against its start
+  def fhn-live-members(job, stage, pid) = pid <= 0 ? [] : filter(entry => fhn-entry-live?(entry), fhn-entries-union(fhn-entries-read(fhn-read(fhn-members-path(job, stage))), fhn-entries-of(pid)));
+  def fhn-group-members(job, stage, pid) = fh-trim(str-spans(fhn-live-members(job, stage, pid) |> map(entry => entry[0].str() + "\n")));
+  def fhn-group-empty(job, stage, pid) = (pid <= 0) || nil?(fhn-live-members(job, stage, pid));
+  // ---- signals, by the host's own numbers (STOP and CONT differ between Darwin and Linux)
+  def fhn-signal-numbers(os) = (String) os == "Darwin" ? [["HUP", 1], ["INT", 2], ["QUIT", 3], ["KILL", 9], ["TERM", 15], ["STOP", 17], ["CONT", 19]] : [["HUP", 1], ["INT", 2], ["QUIT", 3], ["KILL", 9], ["TERM", 15], ["STOP", 19], ["CONT", 18]];
+  def fhn-signal-lookup(rows, name) = nil?(rows) ? 0 : (String) rows[0][0] == name ? rows[0][1] : fhn-signal-lookup(rows[1:], name);
+  def fhn-signal-number(name) = fhn-signal-lookup(fhn-signal-numbers(host_os() ?? ""), name);
+  // 0 when the host took the signal, 1 when it refused (a name this table does not know is refused by the door: number 0)
+  def fhn-send(pid, signal) = (Comparable) host_signal(pid, fhn-signal-number(signal)) < 0 ? 1 : 0;
   def fhn-signal-descendants(job, stage, ids, signal, started) = nil?(ids) ? 0 : fhn-signal-descendant(job, stage, ids[0], ids[1:], signal, started);
   def fhn-signal-descendant(job, stage, pid, rest, signal, started) {
-   let status = fhn-alive(pid) ? fhn-command(["/bin/kill", "-" + signal, pid.str()]) : 0;
+   let status = fhn-alive(pid) ? fhn-send(pid, signal) : 0;
    let observed = fhn-stage-event(job, stage, "process-descendant-signal", host_monotonic_ms() - started, [fhn-n("pid", pid), fhn-s("signal", signal), fhn-n("signal_status", status), fhn-s("ownership_basis", "observed-parent-chain-before-termination")]);
    status + fhn-signal-descendants(job, stage, rest, signal, started);
   }
+  def fhn-signal-all(entries, signal) = nil?(entries) ? 0 : fhn-send(entries[0][0], signal) + fhn-signal-all(entries[1:], signal);
+  // every member the stage still owns, one signal each: the count the host refused
   def fhn-signal(job, stage, pid, signal, started) {
-   let status = fhn-group-empty(pid) ? 0 : fhn-command(["/bin/kill", "-" + signal, "-" + pid.str()]);
+   let status = fhn-signal-all(fhn-live-members(job, stage, pid), signal);
    let recorded = fhn-stage-event(job, stage, "process-signal-observed", host_monotonic_ms() - started, [fhn-s("signal", signal), fhn-n("signal_status", status), fhn-n("group", pid)]);
    status;
   }
-  def fhn-launch-script(job, stage, cwd, input, argv) = fh-cat([
-   "umask 077\ncd ", fh-quote(cwd), " || exit 127\nset -m\n",
-   fh-quote(argv[0]), fh-args(argv[1:]), " < ", fh-quote((String) input == "-" ? "/dev/null" : input),
-   " > ", fh-quote(fhn-stage-path(job, stage, ".out")), " 2> ", fh-quote(fhn-stage-path(job, stage, ".err")), " &\n",
-   "fh_child=$!\nprintf '%s' \"$fh_child\" > ", fh-quote(fhn-stage-path(job, stage, ".pid")), "\n",
-   "wait \"$fh_child\"\nfh_status=$?\nprintf '%s' \"$fh_status\" > ", fh-quote(fhn-stage-path(job, stage, ".raw-status.tmp")), "\n",
-   "mv ", fh-quote(fhn-stage-path(job, stage, ".raw-status.tmp")), " ", fh-quote(fhn-stage-path(job, stage, ".raw-status")), "\n"]);
+  // ---- begin the child: argv, its three streams, and (when it is not the body root) the directory it begins in
+  // A host_spawn_at that ignores the directory element would run the child in the wrong place without a word, so a directory
+  // that is not the working directory is asked of the door first: a spawn into a directory that cannot exist answers -4 from a
+  // seed that carries the element, and begins the seed itself (which ends at once, and is waited for) from one that does not.
+  // (the body's seed is ./fkwu in the working directory, as every child this organ begins is)
+  def fhn-cwd-door?() = fhn-cwd-probe(sg-spawn-at(["./fkwu"], ["/dev/null", "/dev/null", "/dev/null", "/nonexistent/heal-native-cwd-probe"]));
+  def fhn-cwd-probe(pid) = nothing?(pid) ? 0 : (Comparable) pid == -4 ? 1 : fhn-cwd-reap(pid);
+  def fhn-cwd-reap(pid) {
+   let waited = (Comparable) pid > 0 ? host_wait(pid) : 0;
+   0;
+  }
+  def fhn-spawn(job, stage, cwd, input, argv) {
+   let streams = [(String) input == "-" ? "/dev/null" : input, fhn-stage-path(job, stage, ".out"), fhn-stage-path(job, stage, ".err")];
+   (String) cwd == host_cwd() ? sg-spawn-at(argv, streams) : fhn-cwd-door?() ? sg-spawn-at(argv, append(streams, [cwd])) : -4;
+  }
+  // the child's exit as the host reports it (a signal death reads 128 + the signal), kept beside its streams; "" while it lives
+  def fhn-reap(job, stage, pid) {
+   let known = fhn-read(fhn-stage-path(job, stage, ".raw-status"));
+   (String) known != "" ? known : fhn-reap-wait(job, stage, pid);
+  }
+  def fhn-reap-wait(job, stage, pid) {
+   let status = fhn-alive(pid) ? -2 : host_wait(pid);
+   let noted = (Comparable) status >= 0 ? write_file(fhn-stage-path(job, stage, ".raw-status"), status.str()) : 0;
+   (Comparable) status >= 0 ? status.str() : "";
+  }
   def fhn-field(parts, prefix) = nil?(parts) ? "" : (Comparable) str_find(parts[0], prefix, 0) == 0 ? substring(parts[0], len(prefix), len(parts[0])) : fhn-field(parts[1:], prefix);
   def fhn-observe-stage(job, stage, line, elapsed) {
    let parts = split-on(line, " ");
@@ -143,47 +190,52 @@ section [form.bml] {
    let clearedStatus = fs_remove(fhn-stage-path(job, stage, ".raw-status"));
    let clearedPid = fs_remove(fhn-stage-path(job, stage, ".pid"));
    let clearedAdmission = fs_remove(fhn-stage-path(job, stage, ".admitted"));
+   let clearedMembers = fs_remove(fhn-members-path(job, stage));
    let clearedOut = write_file(fhn-stage-path(job, stage, ".out"), "");
    let clearedErr = write_file(fhn-stage-path(job, stage, ".err"), "");
+   let privateStreams = host_chmod(fhn-stage-path(job, stage, ".out"), 384) + host_chmod(fhn-stage-path(job, stage, ".err"), 384);
    let discovery = fhn-discover-process(job,stage,host_monotonic_ms() - started);
-   let script = fhn-stage-path(job, stage, ".launch.sh");
-   let wrote = write_file(script, fhn-launch-script(job, stage, cwd, input, argv));
    let metadata = fhn-write-json(fhn-stage-path(job, stage, ".argv.json"), json-node-array(fhn-strings(argv)));
    let entered = fhn-stage-event(job, stage, "process-spawn-begin", 0, []);
-   let pid = sg-spawn-quiet(["/bin/sh", script]);
+   let pid = fhn-spawn(job, stage, cwd, input, argv);
+   let noted = nothing?(pid) || pid <= 0 ? 0 : write_file(fhn-stage-path(job, stage, ".pid"), pid.str());
    let running = fhn-process-record(job, stage, "running", started, wall, seconds, argv[0], pid, -1, "awaiting-child", json-node-object([fhn-s("state", "owned")]));
    nothing?(pid) || pid <= 0 ? "127" : fhn-run-loop(job, stage, seconds, started, wall, argv[0], pid, [0, ""], [0, ""], 0, 1000, 1000);
   }
-  def fhn-run-loop(job, stage, seconds, started, wall, program, wrapper, outReader, errReader, last, gap, next) {
+  // the child is begun directly, so the process that is waited for and the process that runs the program are one
+  def fhn-run-loop(job, stage, seconds, started, wall, program, child, outReader, errReader, last, gap, next) {
    let elapsed = host_monotonic_ms() - started;
    let out = fhn-drain(job, stage, ".out", outReader, elapsed);
    let err = fhn-drain(job, stage, ".err", errReader, elapsed);
    let moved = (out[1] + err[1]) > 0;
    let progress = moved ? elapsed : last;
    let interval = moved ? fhd-max(1, elapsed - last) : gap;
-   let raw = fhn-read(fhn-stage-path(job, stage, ".raw-status"));
-   let child = str_to_int(fhn-read(fhn-stage-path(job, stage, ".pid")));
-   let admitted = (child > 0) && (file_size(fhn-stage-path(job, stage, ".admitted")) < 0) ? fhn-process-admit(job, stage, seconds, started, wall, program, child) : 0;
-   len(raw) > 0 ? fhn-run-complete(job, stage, seconds, started, wall, program, wrapper, child, str_to_int(raw), "completed", out[0], err[0]) : !fhn-alive(wrapper) ? fhn-run-complete(job, stage, seconds, started, wall, program, wrapper, child, 127, "supervisor-exited-without-child-status", out[0], err[0]) : fhn-run-live(job, stage, seconds, started, wall, program, wrapper, child, out[0], err[0], progress, interval, next);
+   let admitted = file_size(fhn-stage-path(job, stage, ".admitted")) < 0 ? fhn-process-admit(job, stage, seconds, started, wall, program, child) : 0;
+   !fhn-alive(child) ? fhn-run-complete(job, stage, seconds, started, wall, program, child, str_to_int(fhn-reap(job, stage, child)), "completed", out[0], err[0]) : fhn-run-live(job, stage, seconds, started, wall, program, child, out[0], err[0], progress, interval, next);
   }
   def fhn-process-admit(job, stage, seconds, started, wall, program, child) {
-   let group = fhn-group(child);
-   let recorded = fhn-stage-event(job, stage, "process-child-observed", host_monotonic_ms() - started, [fhn-n("pid", child), fhn-n("group", group), fhn-s("group_basis", (Comparable) child == group ? "child-is-group-leader" : "child-exited-before-group-observation")]);
+   let recorded = fhn-stage-event(job, stage, "process-child-observed", host_monotonic_ms() - started, [fhn-n("pid", child), fhn-n("group", child), fhn-s("group_basis", "child-begun-directly")]);
    let saved = write_file(fhn-stage-path(job, stage, ".admitted"), child.str());
    fhn-process-record(job, stage, "running", started, wall, seconds, program, child, -1, "child-observed", json-node-object([fhn-s("state", "owned")]));
   }
-  def fhn-run-live(job, stage, seconds, started, wall, program, wrapper, child, outReader, errReader, last, gap, next) {
+  def fhn-run-live(job, stage, seconds, started, wall, program, child, outReader, errReader, last, gap, next) {
    let elapsed = host_monotonic_ms() - started;
    let stop = (String) fh-trim(fhn-read(fhn-stage-path(job, stage, ".control"))) == "stop";
    let timeout = (seconds > 0) && (elapsed >= (seconds * 1000));
-   (child > 0) && (stop || timeout) ? fhn-run-stop(job, stage, seconds, started, wall, program, wrapper, child, stop ? "cancelled" : "timeout", outReader, errReader) : fhn-run-continue(job, stage, seconds, started, wall, program, wrapper, child, outReader, errReader, last, gap, next, elapsed);
+   (child > 0) && (stop || timeout) ? fhn-run-stop(job, stage, seconds, started, wall, program, child, stop ? "cancelled" : "timeout", outReader, errReader) : fhn-run-continue(job, stage, seconds, started, wall, program, child, outReader, errReader, last, gap, next, elapsed);
   }
-  def fhn-run-continue(job, stage, seconds, started, wall, program, wrapper, child, outReader, errReader, last, gap, next, elapsed) {
+  def fhn-run-continue(job, stage, seconds, started, wall, program, child, outReader, errReader, last, gap, next, elapsed) {
    let due = ((Comparable) seconds == 0) && (elapsed >= next);
+   let noted = fhn-note-members(job, stage, child);
    let action = due ? fhn-dynamic-choice(job, stage, child, elapsed, elapsed - last, gap) : "continue";
    let nextTime = due ? (elapsed + fhd-next(elapsed - last, gap)) : next;
    let pause = host_sleep_ms(50);
-   (String) action == "control-error" ? fhn-run-stop(job, stage, seconds, started, wall, program, wrapper, child, "control-error", outReader, errReader) : fhn-run-loop(job, stage, seconds, started, wall, program, wrapper, outReader, errReader, last, gap, nextTime);
+   (String) action == "control-error" ? fhn-run-stop(job, stage, seconds, started, wall, program, child, "control-error", outReader, errReader) : fhn-run-loop(job, stage, seconds, started, wall, program, child, outReader, errReader, last, gap, nextTime);
+  }
+  // what the host says of a process, as one line (the `inspect` sample): pid, parent, executable, directory, how long it has lived
+  def fhn-process-sample(pid) {
+   let row = host_process(pid);
+   (String) value_kind(row) == "list" && (Comparable) len(row) > 5 ? "pid=" + row[0].str() + " ppid=" + row[1].str() + " exe=" + row[2] + " cwd=" + row[3] + " alive=" + (fhn-alive(pid) ? "1" : "0") + " started_ms=" + row[5].str() : "pid=" + pid.str() + " gone";
   }
   def fhn-dynamic-choice(job, stage, child, elapsed, quiet, gap) {
    let id = now_unix_ms();
@@ -194,12 +246,12 @@ section [form.bml] {
    let sensed = fhn-stage-event(job,stage,"organ-health",elapsed,[json-node-pair("health",reading)]);
    let responseEvent = fhn-stage-event(job,stage,"organ-response",elapsed,[json-node-pair("health",oh-response(reading,action))]);
    let selected = fhn-choice(job, stage, id.str(), "selected", ["continue", "inspect", "stop"], action, "observed-progress-gap", "awaiting-action");
-   let sample = (String) action == "inspect" ? fhn-capture(["/bin/ps", "-p", child.str(), "-o", "pid=,stat=,time=,rss="]) : "progress-observation-continues";
+   let sample = (String) action == "inspect" ? fhn-process-sample(child) : "progress-observation-continues";
    let reobserved = fhn-stage-event(job,stage,"organ-action-observed",elapsed,[json-node-pair("health",oh-applied(reading,action,json-node-string(sample)))]);
    let applied = fhn-choice(job, stage, id.str(), "applied", ["continue", "inspect", "stop"], action, "process-state-is-not-semantic-progress", sample);
    action;
   }
-  def fhn-run-stop(job, stage, seconds, started, wall, program, wrapper, child, reason, outReader, errReader) {
+  def fhn-run-stop(job, stage, seconds, started, wall, program, child, reason, outReader, errReader) {
    let id = now_unix_ms().str();
    let selected = fhn-choice(job, stage, id, "selected", ["stop"], "stop", reason, "awaiting-owned-group-release");
    let descendants = fhn-child-tree(child);
@@ -207,9 +259,9 @@ section [form.bml] {
    let signal = fhn-signal(job, stage, child, "TERM", started);
    let pause = host_sleep_ms(100);
    let killedChildren = fhn-signal-descendants(job, stage, descendants, "KILL", started);
-   let killed = fhn-group-empty(child) ? 0 : fhn-signal(job, stage, child, "KILL", started);
-   let applied = fhn-choice(job, stage, id, "applied", ["stop"], "stop", reason, fhn-group-empty(child) ? "owned-group-empty" : "release-pending");
-   fhn-run-complete(job, stage, seconds, started, wall, program, wrapper, child, (String) reason == "timeout" ? 124 : (String) reason == "cancelled" ? 130 : 125, reason, outReader, errReader);
+   let killed = fhn-group-empty(job, stage, child) ? 0 : fhn-signal(job, stage, child, "KILL", started);
+   let applied = fhn-choice(job, stage, id, "applied", ["stop"], "stop", reason, fhn-group-empty(job, stage, child) ? "owned-group-empty" : "release-pending");
+   fhn-run-complete(job, stage, seconds, started, wall, program, child, (String) reason == "timeout" ? 124 : (String) reason == "cancelled" ? 130 : 125, reason, outReader, errReader);
   }
   // Child release and raw-output traversal have separate completion states.
   // A deadline must not be followed by an unlimited recursive backlog drain.
@@ -240,22 +292,20 @@ section [form.bml] {
     fhn-drain-retain(job,stage,suffix,[next[0][0],""],started);
    };
   };
-  def fhn-run-complete(job, stage, seconds, started, wall, program, wrapper, child, status, reason, outReader, errReader) {
-   let killed = fhn-group-empty(child) ? 0 : fhn-signal(job, stage, child, "KILL", started);
-   let released = wait-until(() => fhn-group-empty(child) && (!fhn-alive(wrapper)), host_monotonic_ms() + 2000, 50);
-   let waited = fhn-alive(wrapper) ? -1 : host_wait(wrapper);
+  def fhn-run-complete(job, stage, seconds, started, wall, program, child, status, reason, outReader, errReader) {
+   let killed = fhn-group-empty(job, stage, child) ? 0 : fhn-signal(job, stage, child, "KILL", started);
+   let released = wait-until(() => fhn-group-empty(job, stage, child), host_monotonic_ms() + 2000, 50);
+   let actual = fhn-reap(job, stage, child);
    let out = fhn-drain-final(job, stage, ".out", outReader, started);
    let err = fhn-drain-final(job, stage, ".err", errReader, started);
-   let groupReleased = fhn-group-empty(child) && (!fhn-alive(wrapper));
-   let actual = fhn-read(fhn-stage-path(job, stage, ".raw-status"));
-   let reconciled = fhn-exit-observed(status,reason,actual);
-   let finalStatus = groupReleased ? reconciled[0] : 125;
-   let reaped = fhn-stage-event(job, stage, "process-reaped", host_monotonic_ms() - started, [fhn-s("child_wait_status", actual), fhn-n("wrapper_status", waited)]);
-   let cleanup = json-node-object([fhn-s("state", groupReleased ? "released" : "members-remain"), fhn-s("group_members", fhn-group-members(child)), fhn-s("child_wait_status", actual)]);
+   let groupReleased = fhn-group-empty(job, stage, child);
+   let finalStatus = groupReleased ? status : 125;
+   let reaped = fhn-stage-event(job, stage, "process-reaped", host_monotonic_ms() - started, [fhn-s("child_wait_status", actual)]);
+   let cleanup = json-node-object([fhn-s("state", groupReleased ? "released" : "members-remain"), fhn-s("group_members", fhn-group-members(job, stage, child)), fhn-s("child_wait_status", actual)]);
    let observed = fhn-stage-event(job, stage, "process-cleanup-observed", host_monotonic_ms() - started, [json-node-pair("cleanup", cleanup)]);
    let ended = fhn-stage-event(job,stage,"organ-health",host_monotonic_ms() - started,[json-node-pair("health",oh-reading("process-progress",fhn-stage-path(job,stage,""),"cadence",json-node-string("work-settled"),json-node-string(groupReleased ? "work-settled" : "release-pending"),groupReleased ? json-node-null() : json-node-int(0),groupReleased ? [] : [oh-need("owned-process-release",cleanup)],["request-evidence","defer"],cleanup))]);
    let health = fhn-record-health(job,stage,oh-reading("native-process",stage,"exit",json-node-int(0),json-node-int(finalStatus),json-node-int((Comparable) finalStatus == 0),(Comparable) finalStatus == 0 ? [] : [oh-need((String) reason == "timeout" ? "stage-timing" : (String) reason == "cancelled" ? "caller-direction" : "source-diagnostics",json-node-string(reason))],["request-evidence","defer"],json-node-object([json-node-pair("stdout",oh-reference(fhn-stage-path(job,stage,".out"))),json-node-pair("stderr",oh-reference(fhn-stage-path(job,stage,".err")))])),host_monotonic_ms() - started);
-   let saved = fhn-process-record(job, stage, groupReleased ? "finished" : "release-pending", started, wall, seconds, program, child, finalStatus, groupReleased ? reconciled[1] : "cleanup-incomplete", cleanup);
+   let saved = fhn-process-record(job, stage, groupReleased ? "finished" : "release-pending", started, wall, seconds, program, child, finalStatus, groupReleased ? reason : "cleanup-incomplete", cleanup);
    let result = write_file(fhn-stage-path(job, stage, ".status"), finalStatus.str());
    let learnerLock = groupReleased ? fhn-release-learner-lock(job, child) : 0;
    finalStatus.str();
@@ -315,9 +365,6 @@ section [form.bml] {
    let fresh = oh-reading(oh-str(reading,"organ"),oh-str(reading,"flow"),oh-str(reading,"aspect"),oh-get(reading,"expected"),oh-get(reading,"observed"),oh-get(reading,"health"),fhn-care-needs(json-array-elements(oh-get(reading,"needs")),span,exact),oh-values(json-array-elements(oh-get(reading,"offers"))),evidence);
    oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id")));
   }
-  // The status rename can occur between the first read and the liveness probe.
-  // Reconcile after reaping; explicit cancellation/deadline statuses retain meaning.
-  def fhn-exit-observed(status,reason,actual) = ((String) reason == "supervisor-exited-without-child-status") && (fsuf-uint?(actual) && (str_to_int(actual) <= 255)) ? [str_to_int(actual),"completed"] : [status,reason];
   def fhn-release-learner-lock(job, child) {
    let root = fhn-string(fhn-json(fhn-at(job, "snapshot.json")), "root");
    let lock = fhn-at(root, ".form-heal/native-learning/update.lock");

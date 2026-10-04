@@ -1,0 +1,218 @@
+; git-native-status-band.fk — `git status` in Form (git-status.bml, git-ignore.bml): HEAD against the index, the index against the working
+; tree, the untracked and the ignored, held against a SYNTHETIC repository this band builds from raw objects it writes itself (loose
+; blobs, trees, a commit, an index file) and a working tree it then alters in every way status has a code for. The expected lines are
+; written by hand from git's documented porcelain v1 rules, not produced by any program.
+;
+;   the working tree: a.txt b.txt c.txt d.txt e.txt racy.txt mode.sh .gitignore dir/{f.txt,g.txt,.gitignore} ren-old.txt gone.txt are in
+;   HEAD; the index differs (dir/g.txt re-staged, ren-old.txt renamed to ren-new.txt, gone.txt removed from the index, added.txt and
+;   staged-only.txt added, conflict.txt in stages 1/2/3); the files then change: b.txt same size and a new mtime and content, c.txt a
+;   new mtime and the same content, d.txt deleted, e.txt another size, racy.txt same size with an mtime not older than the index,
+;   mode.sh made executable, added.txt rewritten after it was staged.
+;
+;   1    the change lines, sorted by path, exactly: AM added.txt / " M" b.txt / UU conflict.txt / " D" d.txt / M  dir/g.txt / " M" e.txt /
+;        D  gone.txt / " M" mode.sh / " M" racy.txt / R  ren-old.txt -> ren-new.txt / A  staged-only.txt  (c.txt, touched but unchanged, is
+;        not there)
+;   2    the untracked section exactly: dir/important.tmp (a nested .gitignore's `!important.tmp`), gone.txt, "has space.txt" (quoted),
+;        keep.log (`!keep.log`), newdir/ (a wholly untracked directory collapses), sub/ , u1.txt
+;   4    --ignored adds exactly: build/ (directory pattern), dir/obj/, dir/z.tmp (the nested file's `*.tmp`), root-only.txt (anchored; the
+;        copy in sub/ is NOT ignored), x.log
+;   8    -b writes "## main" first; a detached HEAD writes "## HEAD (no branch)"; an unborn branch writes "## No commits yet on main"; -z
+;        writes `XY path` NUL-terminated and a rename as `R  new NUL old NUL`
+;   16   -uno writes no `??` line; -uall lists newdir/f1.txt and newdir/sub/f2.txt instead of newdir/
+;   32   the stat shortcut and the racy rule: a file whose content changed but whose size and mtime equal the index's is NOT reported
+;        (git's own documented limit: it trusts the stat); the same file with an mtime not older than the index file IS reported
+;   64   the ignore table: forty pattern/path/expectation rows over git's rules (anchoring, `**`, classes, negation, directory-only,
+;        escapes, nested files)
+;   128  an unborn HEAD with staged files writes `A  path` lines; unmerged combinations by stage presence: UU (1,2,3) AA (2,3) DD (1)
+;        AU (2) UA (3) UD (1,2) DU (1,3)
+;
+; Expected: 255
+; Verdict 255
+; REQUIRES: (host doors: host_utimes, host_chmod, host_file_identity, host_file_mode, host_dir_list, host_path_remove)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-write.bml;
+section [form.bml] {
+  def gsx-bit(ok, bit) = ok ? bit : 0;
+  def gsx-say(label, v) = print([label, v]);
+  def gsx-eq(a, b) = (String) a == (String) b;
+  def gsx-lines-eq(a, b) = nil?(a) ? nil?(b) : !nil?(b) && gsx-eq(a[0], b[0]) && gsx-lines-eq(a[1:], b[1:]);
+  def gsx-t0() = 1700000000000;
+  // write a file under top and give it an mtime (ms)
+  def gsx-put(top, rel, content, mtime) {
+    let d = gw-mkdirs(gs-parent(top ++ "/" ++ rel));
+    let w = write_file(top ++ "/" ++ rel, content);
+    let t = host_utimes(top ++ "/" ++ rel, mtime);
+    w;
+  }
+  // an index row for a file as it stands: stat fields from the file itself
+  def gsx-row(top, rel, mode, content) {
+    let idn = host_file_identity(top ++ "/" ++ rel);
+    [rel, mode, gs-hash("blob", content), len(content), idn[1] / 1000, (idn[1] % 1000) * 1000000, 0, 0, (idn[1] / 1000) - 1, 0, idn[2], 16777220, 0];
+  }
+  def gsx-row-at(rel, mode, content, size, mtime_ms, stage) = [rel, mode, gs-hash("blob", content), size, mtime_ms / 1000, (mtime_ms % 1000) * 1000000, stage, 0, (mtime_ms / 1000) - 1, 0, 77, 16777220, 0];
+  def gsx-blob(g, content) = gw-put-loose(g, "blob", content);
+  def gsx-sort(rows) = len(rows) <= 1 ? rows : gsx-merge(gsx-sort(take(len(rows) / 2, rows)), gsx-sort(drop(len(rows) / 2, rows)), []);
+  def gsx-before?(a, b) = gr-lt(a[0], b[0]) || (gsx-eq(a[0], b[0]) && a[6] < b[6]);
+  def gsx-merge(a, b, acc) = nil?(a) ? append(ginf-reverse(acc, []), b) : nil?(b) ? append(ginf-reverse(acc, []), a) : gsx-before?(b[0], a[0]) ? gsx-merge(a, b[1:], cons(b[0], acc)) : gsx-merge(a[1:], b, cons(a[0], acc));
+  def gsx-find(rows, rel) = nil?(rows) ? nothing() : gsx-eq(rows[0][0], rel) ? rows[0] : gsx-find(rows[1:], rel);
+  def gsx-without(rows, rel) = filter(x => !gsx-eq(x[0], rel), rows);
+  // ---- the scenario ------------------------------------------------------------------------------------------------------------
+  def gsx-committed() = [["a.txt", "alpha\n"], ["b.txt", "bravo!\n"], ["c.txt", "charlie\n"], ["d.txt", "delta\n"], ["e.txt", "echo\n"], ["racy.txt", "racy-1\n"], ["mode.sh", "#!/bin/sh\n"], [".gitignore", "*.log\nbuild/\n/root-only.txt\n!keep.log\nobj/\n"], ["dir/f.txt", "foxtrot\n"], ["dir/g.txt", "golf\n"], ["dir/.gitignore", "*.tmp\n!important.tmp\n"], ["ren-old.txt", "renamed content that is long enough\n"], ["gone.txt", "to be staged-deleted\n"], ["same.txt", "same-size-1\n"]];
+  def gsx-build(top) {
+    let m = gw-mkdirs(top);
+    let i = gw-init(top, "main");
+    let g = top ++ "/.git";
+    let files = gsx-committed();
+    let wrote = map(f => gsx-put(top, f[0], f[1], gsx-t0()), files);
+    let blobs = map(f => gsx-blob(g, f[1]), files);
+    let rows0 = gsx-sort(map(f => gsx-row(top, f[0], f[0] == "mode.sh" ? 33188 : 33188, f[1]), files));
+    let tree = gw-write-tree(g, rows0);
+    let c0 = gw-commit(g, gsha-hex-of-raw(tree), [], "Tess", "tess@example.test", 1700000000, "+0800", "base\n");
+    let u = gw-update-ref(g, "refs/heads/main", c0, nothing(), "Tess <tess@example.test>", "commit (initial): base");
+    // staged changes: the index is built from rows
+    let b_g2 = gsx-blob(g, "golf-v2\n");
+    let w1 = gsx-put(top, "dir/g.txt", "golf-v2\n", gsx-t0());
+    let b_added = gsx-blob(g, "added-1\n");
+    let w2 = gsx-put(top, "added.txt", "added-1\n", gsx-t0());
+    let b_staged = gsx-blob(g, "staged only\n");
+    let w3 = gsx-put(top, "staged-only.txt", "staged only\n", gsx-t0());
+    let w4 = gsx-put(top, "ren-new.txt", "renamed content that is long enough\n", gsx-t0());
+    let w5 = host_path_remove(top ++ "/ren-old.txt");
+    let c1b = gsx-blob(g, "base side\n");
+    let c2b = gsx-blob(g, "our side\n");
+    let c3b = gsx-blob(g, "their side\n");
+    let w6 = gsx-put(top, "conflict.txt", "<<<<<<< ours\nour side\n=======\ntheir side\n>>>>>>> theirs\n", gsx-t0());
+    let kept = filter(r => !gsx-eq(r[0], "ren-old.txt") && !gsx-eq(r[0], "gone.txt") && !gsx-eq(r[0], "dir/g.txt"), rows0);
+    let rows1 = append(kept, [gsx-row(top, "dir/g.txt", 33188, "golf-v2\n"), gsx-row(top, "added.txt", 33188, "added-1\n"), gsx-row(top, "staged-only.txt", 33188, "staged only\n"), gsx-row(top, "ren-new.txt", 33188, "renamed content that is long enough\n"), gsx-row-at("conflict.txt", 33188, "base side\n", 10, gsx-t0(), 1), gsx-row-at("conflict.txt", 33188, "our side\n", 9, gsx-t0(), 2), gsx-row-at("conflict.txt", 33188, "their side\n", 11, gsx-t0(), 3)]);
+    let ix = gw-index(gsx-sort(rows1));
+    let wi = gw-put-file(g ++ "/index", ix);
+    // working-tree changes after the index was written
+    let a1 = gsx-put(top, "b.txt", "bravX!\n", gsx-t0() + 50000);
+    let a2 = gsx-put(top, "c.txt", "charlie\n", gsx-t0() + 60000);
+    let a3 = host_path_remove(top ++ "/d.txt");
+    let a4 = gsx-put(top, "e.txt", "echo more\n", gsx-t0());
+    let a5 = gsx-put(top, "racy.txt", "racy-2\n", 4102444800000);
+    let a6 = host_chmod(top ++ "/mode.sh", 493);
+    let a7 = gsx-put(top, "added.txt", "added-22\n", gsx-t0() + 70000);
+    let a8 = gsx-put(top, "same.txt", "same-size-2\n", gsx-t0());
+    // untracked and ignored
+    let u1 = gsx-put(top, "u1.txt", "u\n", gsx-t0());
+    let u2 = gsx-put(top, "newdir/f1.txt", "f1\n", gsx-t0());
+    let u3 = gsx-put(top, "newdir/sub/f2.txt", "f2\n", gsx-t0());
+    let u4 = gsx-put(top, "keep.log", "k\n", gsx-t0());
+    let u5 = gsx-put(top, "sub/root-only.txt", "s\n", gsx-t0());
+    let u6 = gsx-put(top, "has space.txt", "h\n", gsx-t0());
+    let u7 = gsx-put(top, "dir/important.tmp", "i\n", gsx-t0());
+    let i1 = gsx-put(top, "x.log", "x\n", gsx-t0());
+    let i2 = gsx-put(top, "build/out.bin", "o\n", gsx-t0());
+    let i3 = gsx-put(top, "root-only.txt", "r\n", gsx-t0());
+    let i4 = gsx-put(top, "dir/obj/q.o", "q\n", gsx-t0());
+    let i5 = gsx-put(top, "dir/z.tmp", "z\n", gsx-t0());
+    top;
+  }
+  def gsx-want-changes() = ["AM added.txt", " M b.txt", "UU conflict.txt", " D d.txt", "M  dir/g.txt", " M e.txt", "D  gone.txt", " M mode.sh", " M racy.txt", "R  ren-old.txt -> ren-new.txt", "A  staged-only.txt"];
+  def gsx-want-untracked() = ["?? dir/important.tmp", "?? gone.txt", "?? \"has space.txt\"", "?? keep.log", "?? newdir/", "?? sub/", "?? u1.txt"];
+  def gsx-want-ignored() = ["!! build/", "!! dir/obj/", "!! dir/z.tmp", "!! root-only.txt", "!! x.log"];
+  def gsx-lines(r, mode, ign, br, nul) = gst-lines(r, [mode, ign, br, nul]);
+  // same.txt: changed content, same size, same mtime as the index remembers: reported or not by the rule
+  def gsx-has-line?(lines, want) = any?(l => gsx-eq(l, want), lines);
+  // ---- the ignore table: [rules text, path, isdir, expected 1 or 0, base] -------------------------------------------------------
+  def gsx-table() = [
+    ["*.log", "x.log", false, 1], ["*.log", "dir/y.log", false, 1], ["*.log\n!keep.log", "keep.log", false, 0], ["*.log\n!keep.log", "sub/keep.log", false, 0],
+    ["build/", "build", true, 1], ["build/", "build", false, 0], ["build/", "src/build", true, 1], ["/root", "root", false, 1], ["/root", "sub/root", false, 0],
+    ["doc/*.txt", "doc/a.txt", false, 1], ["doc/*.txt", "doc/sub/a.txt", false, 0], ["doc/*.txt", "x/doc/a.txt", false, 0],
+    ["**/foo", "foo", false, 1], ["**/foo", "a/b/foo", false, 1], ["foo/**", "foo/x", false, 1], ["foo/**", "foo", true, 0], ["a/**/b", "a/b", false, 1], ["a/**/b", "a/x/y/b", false, 1], ["a/**/b", "x/a/b", false, 0],
+    ["[abc].txt", "b.txt", false, 1], ["[abc].txt", "d.txt", false, 0], ["[!abc].txt", "d.txt", false, 1], ["[a-c].txt", "b.txt", false, 1], ["[a-c].txt", "e.txt", false, 0],
+    ["?.c", "a.c", false, 1], ["?.c", "ab.c", false, 0], ["\\#hash", "#hash", false, 1], ["# comment", "comment", false, 0], ["\\!bang", "!bang", false, 1],
+    ["*.o\n!lib.o", "lib.o", false, 0], ["*.o\n!lib.o\nlib.o", "lib.o", false, 1], ["tmp*", "tmpfile", false, 1], ["tmp*", "a/tmpdir", true, 1], ["*", "anything", false, 1], ["*\n!*.c", "x.c", false, 0],
+    ["a*b", "a/b", false, 0], ["a*b", "axxb", false, 1], ["foo", "foo", true, 1], ["/foo/", "foo", true, 1], ["/foo/", "sub/foo", true, 0], ["m?n", "man", false, 1]
+  ];
+  def gsx-table-ok(rows) = nil?(rows) ? true : gsx-row-ok(rows[0]) && gsx-table-ok(rows[1:]);
+  def gsx-row-ok(t) = gx-ignored?(gx-push([], gx-load("", t[0])), t[1], t[2]) == t[3];
+  def gsx-nested-ok() {
+    let rules = gx-push(gx-push([], gx-load("", "*.a\n")), gx-load("sub/", "!keep.a\n/only-here\n"));
+    gx-ignored?(rules, "x.a", false) == 1 && gx-ignored?(rules, "sub/keep.a", false) == 0 && gx-ignored?(rules, "sub/x.a", false) == 1 && gx-ignored?(rules, "sub/only-here", false) == 1 && gx-ignored?(rules, "only-here", false) == 0 && gx-ignored?(rules, "other/only-here", false) == 0;
+  }
+  // ---- unmerged and unborn -------------------------------------------------------------------------------------------------------
+  def gsx-stage-rows(rel, stages) = map(s => gsx-row-at(rel, 33188, "side-" ++ rel ++ s.str() ++ "\n", 7, gsx-t0(), s), stages);
+  def gsx-unmerged-ok() {
+    let top = host_temp_dir() ++ "/gsx-um-" ++ host_pid().str();
+    let m = gw-mkdirs(top);
+    let i = gw-init(top, "main");
+    let rows = gsx-sort(gs-flatten([gsx-stage-rows("uu", [1, 2, 3]), gsx-stage-rows("aa", [2, 3]), gsx-stage-rows("dd", [1]), gsx-stage-rows("au", [2]), gsx-stage-rows("ua", [3]), gsx-stage-rows("ud", [1, 2]), gsx-stage-rows("du", [1, 3])]));
+    let wi = gw-put-file(top ++ "/.git/index", gw-index(rows));
+    let r = git-open(top);
+    let lines = gst-lines(r, ["no", 0, 0, 0]);
+    let ok = gsx-lines-eq(lines, ["AA aa", "AU au", "DD dd", "DU du", "UA ua", "UD ud", "UU uu"]);
+    let rm = host_dir_rmdir(top);
+    ok;
+  }
+  def gsx-unborn-ok() {
+    let top = host_temp_dir() ++ "/gsx-ub-" ++ host_pid().str();
+    let m = gw-mkdirs(top);
+    let i = gw-init(top, "main");
+    let w = gsx-put(top, "x.txt", "x\n", gsx-t0());
+    let w2 = gsx-put(top, "sub/y.txt", "y\n", gsx-t0());
+    let wi = gw-put-file(top ++ "/.git/index", gw-index(gsx-sort([gsx-row(top, "x.txt", 33188, "x\n"), gsx-row(top, "sub/y.txt", 33188, "y\n")])));
+    let r = git-open(top);
+    let lines = gst-lines(r, ["normal", 0, 1, 0]);
+    let ok = gsx-lines-eq(lines, ["## No commits yet on main", "A  sub/y.txt", "A  x.txt"]);
+    let rm = host_dir_rmdir(top);
+    ok;
+  }
+  def gsx-run() {
+    let t0 = host_monotonic_ms();
+    let top = gsx-build(host_temp_dir() ++ "/gsx-st-" ++ host_pid().str());
+    let r = git-open(top);
+    let t1 = host_monotonic_ms();
+    let all = nothing?(r) ? [] : gsx-lines(r, "normal", 0, 0, 0);
+    let t2 = host_monotonic_ms();
+    let s1 = gsx-say("status lines", all);
+    let s1b = gsx-say("status ms", t2 - t1);
+    let changes = take(len(gsx-want-changes()), all);
+    let b1 = gsx-bit(gsx-lines-eq(changes, gsx-want-changes()), 1);
+    let rest = drop(len(gsx-want-changes()), all);
+    let b2 = gsx-bit(gsx-lines-eq(rest, gsx-want-untracked()), 2);
+    let withign = nothing?(r) ? [] : gsx-lines(r, "normal", 1, 0, 0);
+    let s3 = gsx-say("with --ignored", drop(len(all), withign));
+    let b4 = gsx-bit(gsx-lines-eq(drop(len(all), withign), gsx-want-ignored()) && gsx-lines-eq(take(len(all), withign), all), 4);
+    let withb = nothing?(r) ? [] : gsx-lines(r, "normal", 0, 1, 0);
+    let rz = nothing?(r) ? "" : gst-rows(r, ["normal", 0, 0, 1]);
+    let zline = nothing?(r) ? "" : gst-line(["R ", "ren-new.txt", "ren-old.txt"], 1);
+    let nl = byte_to_str(0);
+    let zok = gsx-eq(zline, "R  ren-new.txt" ++ nl ++ "ren-old.txt" ++ nl) && gsx-eq(gst-line([" M", "b.txt", ""], 1), " M b.txt" ++ nl);
+    let detached_top = host_temp_dir() ++ "/gsx-dt-" ++ host_pid().str();
+    let dm = gw-mkdirs(detached_top);
+    let di = gw-init(detached_top, "main");
+    let dw = gw-put-file(detached_top ++ "/.git/index", gw-index([]));
+    let dh = gw-put-file(detached_top ++ "/.git/HEAD", "0000000000000000000000000000000000000001\n");
+    let dr = git-open(detached_top);
+    let dline = nothing?(dr) ? "" : gst-branch-line(dr);
+    let drm = host_dir_rmdir(detached_top);
+    let b8 = gsx-bit(!nil?(withb) && gsx-eq(withb[0], "## main") && gsx-eq(dline, "## HEAD (no branch)") && gsx-unborn-ok() && zok, 8);
+    let uno = nothing?(r) ? [] : gsx-lines(r, "no", 0, 0, 0);
+    let uall = nothing?(r) ? [] : gsx-lines(r, "all", 0, 0, 0);
+    let b16 = gsx-bit(gsx-lines-eq(uno, gsx-want-changes()) && gsx-has-line?(uall, "?? newdir/f1.txt") && gsx-has-line?(uall, "?? newdir/sub/f2.txt") && !gsx-has-line?(uall, "?? newdir/"), 16);
+    // 32: same.txt changed but stat-identical -> unreported; give it a newer mtime -> reported
+    let shortcut_quiet = !gsx-has-line?(all, " M same.txt");
+    let touch = host_utimes(top ++ "/same.txt", 4102444800000);
+    let r2 = git-open(top);
+    let again = nothing?(r2) ? [] : gsx-lines(r2, "no", 0, 0, 0);
+    let b32 = gsx-bit(shortcut_quiet && gsx-has-line?(again, " M same.txt"), 32);
+    let b64 = gsx-bit(gsx-table-ok(gsx-table()) && gsx-nested-ok(), 64);
+    let b128 = gsx-bit(gsx-unmerged-ok(), 128);
+    let rm = host_dir_rmdir(top);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+    let shown = print(["git-native-status-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  gsx-run();
+}

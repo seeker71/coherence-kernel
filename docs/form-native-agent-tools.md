@@ -20,9 +20,13 @@ not shell commands.
 sends every copyable command below as one JSON request to `fat-wire-call`, the
 function form-cli's text face hands a raw JSON object to (`fc-tool-wire` in
 `form/form-stdlib/form-cli.fk`), and reads the response back through the wire's
-own JSON reader: the fifteen tool rows, the edit → write → read handoff, a
+own JSON reader: the sixteen tool rows, the edit → write → read handoff, a
 pipeline through held input, a pipe refused as `shell-syntax-not-supported`
-with the corpus unchanged, and `jq --arg` (`; Verdict 524287`).
+with the corpus unchanged, `jq --arg`, and grep's proof: selection, output
+shape, context, the regular-expression dialects, `-F`, several documents, exit
+codes, held input, the old `grep | head | grep -o | tr | tr` shell pipeline
+reproduced as five calls, the library door and the catalog row (`; Verdict
+4294967295`).
 
 ## Agent wire — the normal calling boundary
 
@@ -95,7 +99,38 @@ within a multi-edit returns JSON in stdout naming the one-based `failed_edit`
 and `documents_changed: 0`. Invalid batch shape and unchanged final text use
 the ordinary empty-stdout errors.
 Ordinary errors use exit 2. `rg` uses 1 for a completed search with no match;
-`jq -e` uses 1 for a final false/null and 4 for no output values.
+`jq -e` uses 1 for a final false/null and 4 for no output values. `grep` uses
+grep's own: 0 when a line was selected, 1 when none was, 2 for an error (bad
+flag or pattern, an absent document); `-q` with a selected line is 0 even when
+another operand errored. A grep error with partial output keeps that output in
+`stdout` and names the error on `stderr` (`grep: nope.txt: No such file or
+directory`).
+
+### grep as a function
+
+Any BML cell can call grep over held text, with no process and no documents
+wrapper, by importing `form/form-stdlib/bml/form-agent-grep.bml`. One implementation
+(`fag-run`) sits behind this, the catalog tool and the JSON wire:
+
+```lisp
+(grep-text (list "-n" "alpha") "Alpha one\nbeta two\nalpha three\n")
+; [0, "3:alpha three\n"]                    [exit, stdout]
+(grep-lines (list "-v" "b") (list "a" "b" "c"))
+; [0, ["a", "c"]]                           lines in, lines out
+(grep-text-error (list "-E" "a(") "")
+; "grep: unmatched-group-open: a(\n"        the stderr
+```
+
+The body's one grep sits behind the shell executor's `grep` builtin too (`sh-bi-grep` in
+`shell-exec.fk` answers `[stdout, exit]` from `grep-text`). Over the tree's files,
+`form/form-stdlib/bml/source-tree.bml` walks the working directory under its `.gitignore` files
+(`tracked-files()`, the seam the native `git ls-files` will answer) and runs the same grep over each
+file's text: `stw-grep-rows(args, paths)` gives `path:line:content` rows, `stw-grep-files(args, paths)`
+the paths with a selected line, `stw-pick(paths, suffixes)` the `*.fk` / `*.bml` pathspecs.
+prelude-reach, band-cover and the spawn-guard census read the tree this way.
+
+The `head` and `tail` tools also read the older `-N` spelling (`head -2`) as
+`-n N`, so a shell pipeline's stages become calls with the same argv.
 
 `fc-tool-command(docs, command, input)` is a convenience argv reader, not a
 shell. Single/double quotes and backslash quoting are supported. Unquoted
@@ -132,6 +167,7 @@ redirection, semicolons, expansions and executable lookup.
 | Tool | JSON `command` | JSON `input` | Expected `stdout` |
 | --- | --- | --- | --- |
 | `rg` | `rg -nF 'alpha 1'` | | `alpha.txt:1:alpha 1\n` |
+| `grep` | `grep -n beta alpha.txt` | | `2:beta 2\n` |
 | `jq` | `jq -r .name package.json` | | `demo\n` |
 | `read` | `read alpha.txt` | | `alpha 1\nbeta 2\n` |
 | `cat` | `cat alpha.txt table.txt` | | `alpha 1\nbeta 2\nleft:right\nup:down\n` |
@@ -174,7 +210,7 @@ response.stdout: "alpha.txt:1:alpha 1\n"
 ```
 
 `zg` is the separate native catalog-discovery route, rather than one of the
-fifteen resident-document operations. It has no document or state argument:
+sixteen resident-document operations. It has no document or state argument:
 
 ```text
 zg hybrid kernel call
@@ -223,9 +259,10 @@ a host command.
 | Tool | Native profile |
 | --- | --- |
 | `rg` | Line search; `-i -S -F -n -w -v -l -c -q`, `--column`, `--files`, `-e/--regexp`, `-g/--glob`, `-m/--max-count`, `-A/-B/-C`, `--`, and common long aliases. Short boolean flags can be clustered; value flags take a separate argv value. |
+| `grep` | POSIX/GNU grep over resident documents or held input; the flag table and the pattern dialects follow this table. |
 | `jq` | `.`, object paths and quoted bracket keys, nonnegative array indexes, `[]`, pipes, `//`, `map`, `select`, comparisons, array collection and explicit-key object construction; object-key `has` (string key, including present null/false/zero; array-index `has` is outside this subset); string `contains` (literal substring, string input and argument; collection containment is outside this subset); `keys length type empty sort unique to_entries`; literals and bound variables. Flags `-r -c -e -s -n`, `--arg`, `--argjson` precede the filter. |
 | `read`, `cat` | Read held input or concatenate resident documents selected by identity/path. `read path offset count [lines\|bytes] [sha256]` selects a one-based page; the default unit is lines. Byte pages must preserve UTF-8 boundaries. The optional hash refuses a changed source. |
-| `head`, `tail` | `-n N`, `-c N`, default ten lines; preserve final-newline state. |
+| `head`, `tail` | `-n N`, `-N` (the older spelling of `-n N`), `-c N`, default ten lines; preserve final-newline state. |
 | `sed` | Numeric print ranges only: `-n 'Np'` or `-n 'N,Mp'`. |
 | `wc` | Byte, word and newline counts: `-c -w -l` and common combinations. |
 | `sort` | Lexical lines, `-r`, `-u`, `-n` and common combinations. Numeric mode accepts complete JSON-number lines, with numeric deduplication for `-nu`. |
@@ -253,10 +290,78 @@ failed pair. A batch that restores the original document returns the existing
 apply to the complete result as they do to a single edit.
 Role, writable-path and caller-check requirements remain in the coding owner.
 
-Search patterns are byte-oriented: literals, `. ^ $ |`, character classes and
-ranges, ASCII `\d \w \s \b`, and `? * +`. Case folding is ASCII. Groups,
-counted repetition, backreferences, lookaround, PCRE and Unicode character
-classes are unsupported errors. Globs support `*`, `**`, `?`, and leading `!`;
+### grep
+
+`grep` reads the documents named as operands, the resident documents under a
+directory prefix with `-r`, or, with no operand, the held input (`-` names it).
+No process, no host file and no second regular-expression engine: it is the
+engine `rg` uses (`form/form-stdlib/bml/form-agent-pattern.bml`, one parser,
+three dialects, one matcher) over the documents the caller holds. Output is
+grep's: a file prefix when there are several operands, `-H`, or `-r` over a
+directory; `file:line:text` with `-n`; context lines after `-`, groups that do
+not touch split by `--` (also between files); `-o` one match per line; `-c`
+per file; `(standard input)` for held input under `-H`.
+
+| Flags | Meaning |
+| --- | --- |
+| `-G` (default) `-E` `-F` | basic regular expression, extended, fixed string. The last one given wins. |
+| `-e PAT` (repeatable) `-f FILE` | patterns; `-f` reads a resident document. A pattern holding a newline is several patterns. |
+| `-i` `-y` `-v` `-w` `-x` | ignore ASCII case, invert, whole word (a shorter match at the same place is tried, as GNU does), whole line (`-x` wins over `-w`). |
+| `-c` `-l` `-L` `-q` `-s` | count per file, files with a selected line, files without, quiet, no file errors on stderr. `-l`/`-L` win over `-c`, `-q` over all. |
+| `-n` `-o` `-H` `-h` | line numbers; each match alone on a line, leftmost-longest, empty matches skipped; force or drop the file prefix. |
+| `-m N` `-A N` `-B N` `-C N` `-N` | stop after N selected lines (context after the last is kept); lines of context; `-2` is `-C 2`. A value may be attached (`-A2`, `-m1`, `--max-count=1`). |
+| `-r` `-R` `-a` `-I` `-U` | recurse over the resident documents under a directory prefix (`.` and no operand mean all); the last three are accepted and change nothing, since input is read as text. |
+| `--` and clustered short flags | `grep -inE -- 'a|b' notes.txt`; options may follow operands. |
+| Long names | `--regexp= --file= --extended-regexp --fixed-strings --basic-regexp --ignore-case --no-ignore-case --invert-match --word-regexp --line-regexp --count --files-with-matches --files-without-match --line-number --only-matching --max-count= --after-context= --before-context= --context= --quiet --silent --no-messages --with-filename --no-filename --recursive --dereference-recursive --text --color=never\|auto --binary-files=` |
+
+Refused by name, exit 2, never a silent different answer: `-P`
+(`perl-regexp-not-supported`); `-b -T -z -Z -u -V`, `--include`, `--exclude`,
+`--null` and every other letter or long name (`unsupported-grep-option: -b`);
+`--color=always` (`color-always-not-supported`); `-o` with a context option
+(`context-with-only-matching-not-supported`); a bad number for `-m` or a context
+flag (`invalid-max-count`, `invalid-context-length-argument`); no pattern
+(`grep-needs-pattern`); `-f` on an absent document. The exit codes are
+grep's: 0 a line was selected, 1 none, 2 error. `-L` follows GNU 3.5 and later:
+0 when any line was selected, not when a file was listed. An
+operand that names no resident document is `grep: NAME: No such file or
+directory`; a directory prefix without `-r` is `NAME: Is a directory`; both end
+the run at 2 unless `-q` already selected a line.
+
+Pattern dialects. All three share literals, `.`, `^`, `$`, classes and ranges,
+negation, POSIX classes (`[[:alpha:]] [[:digit:]] [[:alnum:]] [[:upper:]]
+[[:lower:]] [[:space:]] [[:blank:]] [[:punct:]] [[:xdigit:]] [[:cntrl:]]
+[[:print:]] [[:graph:]]`), groups, alternation, `? * +` and the intervals
+`{m} {m,} {m,n} {,n}` on an atom or a group. `-G`: the metacharacters are
+`\( \) \| \{ \} \+ \?` and `* . [ ^ $`; a bare `+ ? | ( ) { }` is a letter, `*`
+at the start of an expression and `^`/`$` anywhere but the ends are literal,
+`\1`..`\9` match the text of an earlier group. `-E`: `( ) | { } + ?` are the
+metacharacters, and `\1`..`\9` work too. Both read the GNU escapes `\w \W \s \S
+\b \B \< \>`. `rg`: the extended shape with `\d \D \w \W \s \S \b \B`, `\n`,
+`\t`, no backreference, and a backslash in a class is an error.
+
+Unsupported pattern syntax is an error naming itself, whatever the input:
+`stacked-repetition` (`a**`, `a+?`, `a*+`: a lazy repetition is outside the
+profile), `quantified-anchor` (`^*`), `quantified-backreference`,
+`repetition-without-operand` (`*a` in `-E`), `unmatched-group-open`,
+`unmatched-group-close`, `invalid-interval-expression`,
+`interval-too-large` (over 32767), `invalid-interval-order`,
+`invalid-back-reference` (`\3` before group 3 opened), `unknown-character-class`,
+`collating-element-not-supported` (`[.x.]`, `[=x=]`),
+`unclosed-character-class`, `invalid-character-range`,
+`class-escape-not-supported` (`rg`), `unsupported-pattern-escape` (`\d` in grep,
+`\0`, any other letter), `unsupported-pattern-syntax` (`(?` in `rg`),
+`trailing-pattern-escape`, `pattern-limit` (256 bytes). Outside the engine
+entirely: lookaround, lazy repetition, Unicode classes and characters as units
+(matching is by byte, so `.` is one byte), non-ASCII case folding, binary-file
+detection, and the host tree (`-r` walks only the resident documents).
+Backtracking carries the 50,000-step budget per line; exhaustion is
+`pattern-work-limit`, exit 2.
+
+Search patterns for `rg` are byte-oriented: literals, `. ^ $ |`, groups,
+character classes and ranges, POSIX classes, ASCII `\d \D \w \W \s \S \b \B`,
+`? * +` and counted repetition `{m,n}`. Case folding is ASCII. Backreferences,
+lookaround, lazy repetition, PCRE and Unicode character classes are unsupported
+errors. Globs support `*`, `**`, `?`, and leading `!`;
 the last matching glob wins. Basename globs apply at any depth. Paths select
 resident exact names or directory prefixes. There is no host traversal,
 ignore-file loading, file-type registry or binary-file detection. Search output

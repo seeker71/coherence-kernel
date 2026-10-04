@@ -62,7 +62,7 @@
 ; compiler reads its exit, one never born reads nothing); the push answers its rejection's own line, so a main that
 ; moved reads as moved. The clock: a POSIX zone footer ("WITA-8", "<+08>-8", "IST-5:30", "UTC0") reads its offset
 ; east of UTC, a footer with a daylight rule reads nothing (so does one whose hours pass 24, whose minutes or
-; seconds pass 59, or whose angle name is empty, and `date +%z` is the fallback for all of them), and fixed instants name the day and the hhmm the zone
+; seconds pass 59, or whose angle name is empty, and the host_localtime offset is the fallback for all of them), and fixed instants name the day and the hhmm the zone
 ; puts them on (the 03:30 night and the 12:30 day turn, the midnight rollover, a leap day, a zone west of UTC); the
 ; host's own reading agrees with `date`.
 ;
@@ -119,7 +119,7 @@
 ;
 ; REQUIRES: host_alive, host_process and host_processes, fkwu doors.
 ; The band writes only under temp_dir and removes what it made.
-// preludes: form-stdlib/core.fk form-stdlib/bml/host-walk.bml form-stdlib/model-registry.bml
+// preludes: form-stdlib/core.fk form-stdlib/bml/host-walk.bml form-stdlib/model-registry.bml form-stdlib/bml/host-fs.bml
 section [form.bml] {
  class HostWalkBand {
   def hwb-root(ctx) = ctx[1];
@@ -761,23 +761,31 @@ section [form.bml] {
    let grandchild = parse-int(hw-line(split-on(run[1], "\n")[0]));
    hwb-bit(nothing?(run[0]) && !nothing?(grandchild) && ((Comparable) host_alive(grandchild) == 0) && hwb-has?(run[2], "with 1 descendant(s)") && (spent < 20000));
   }
-  // the walk's turn and plan reach the door with the window's end plus the backstop: a stub in the child's place whose
-  // window ended hw-backstop-ms less 0.3 s ago is stopped 0.3 s after it begins, with the options it read kept
+  // the walk's turn and plan reach the door with the window's end plus the backstop: a stub cell in the turn's place whose
+  // window ended hw-backstop-ms less 0.3 s ago is ended by its budget 0.3 s after it begins (it is called in this process,
+  // so its budget is the whole of the stop), with the options it read kept. A stub is a cell this band writes: it reads
+  // its stdin lines back, prints what it was told to, and never ends.
+  def hwb-stub-cell(path, said) {
+   let text = "; a stub cell the host-walk band writes: prints what it was told, then never ends\n; preludes: form-stdlib/core.fk\n(do\n (defn spin (n) (spin (add n 1)))\n (defn echo () (do (let l (read_line)) (if (nothing? l) 0 (do (print_str l) (echo)))))\n (defn drain () (do (let l (read_line)) (if (nothing? l) 0 (drain))))\n" ++ said ++ "\n (spin 0))\n";
+   let wrote = write_file_text(path, text);
+   path;
+  }
   def hwb-spawn-wiring(ctx) {
    let io = hwb-io(ctx) ++ "/wiring";
+   let made = hch-mkdirs(io);
+   let turnStub = hwb-stub-cell(io ++ "/turn-stub.fk", " (echo)");
+   let planStub = hwb-stub-cell(io ++ "/plan-stub.fk", " (drain)\n (print_str \"[local-plan] opened\")");
+   let queuedStub = hwb-stub-cell(io ++ "/queued-stub.fk", " (print_str " ++ json-emit(json-node-string(hwb-queued-line())) ++ ")");
    let began = host_monotonic_ms();
    let deadline = began + 300 - hw-backstop-ms();
-   let turn = hw-turn-run-of(io, hwb-sh("cat; exec sleep 30"), 24, deadline);
+   let turn = hw-turn-run-of(io, turnStub, 24, deadline);
    let turnSpent = host_monotonic_ms() - began;
    let planBegan = host_monotonic_ms();
-   let plan = hw-plan-run-of(io, hwb-sh("cat >/dev/null; echo '[local-plan] opened'; exec sleep 30"), planBegan + 300 - hw-backstop-ms());
+   let plan = hw-plan-run-of(io, planStub, planBegan + 300 - hw-backstop-ms());
    let planSpent = host_monotonic_ms() - planBegan;
-   let queuedFile = io ++ "/queued.txt";
-   let wroteQueued = write_file_text(queuedFile, hwb-queued-line() ++ "\n");
    let queuedBegan = host_monotonic_ms();
-   let queued = hw-plan-run-of(io, hwb-sh("cat " ++ queuedFile ++ "; exec sleep 30"), queuedBegan + 300 - hw-backstop-ms());
-   let turnArgv = hw-turn-argv();
-   hwb-bit(nothing?(turn[0]) && hwb-has?(turn[2], "deadline: the child ran past its deadline") && hwb-has?(turn[1], "\"turns\":24") && hwb-has?(turn[1], "\"deadline_ms\":" ++ deadline.str()) && (turnSpent >= 300) && (turnSpent < 15000) && nothing?(plan[0]) && hwb-has?(plan[2], "deadline: the child ran past its deadline") && (planSpent >= 300) && (planSpent < 15000) && hwb-has?(hw-plan-answer(plan), "[local-plan:stopped] deadline: the child ran past its deadline") && ((String) hw-plan-answer(queued) == hwb-queued-line() ++ "\n[host-child] " ++ queued[2]) && hw-planned?(hw-plan-answer(queued)) && ((String) hw-plan-or-stopped([0, "", ""], "[local-plan] no request") == "[local-plan] no request") && hwb-has?(hw-plan-or-stopped([nothing(), "", "birth refused: x"], ""), "[local-plan:stopped] birth refused: x") && ((String) turnArgv[1] == "observe/native-turn-run.bml") && ((String) hw-plan-argv()[1] == "observe/local-plan-run.bml") && ((Comparable) hch-step-backstop-ms() == 7200000) && ((Comparable) hch-git-backstop-ms() == 1800000));
+   let queued = hw-plan-run-of(io, queuedStub, queuedBegan + 300 - hw-backstop-ms());
+   hwb-bit(nothing?(turn[0]) && hwb-has?(turn[2], "deadline: the cell ran past its deadline") && hwb-has?(turn[1], "\"turns\":24") && hwb-has?(turn[1], "\"deadline_ms\":" ++ deadline.str()) && (turnSpent >= 300) && (turnSpent < 15000) && nothing?(plan[0]) && hwb-has?(plan[2], "deadline: the cell ran past its deadline") && (planSpent >= 300) && (planSpent < 15000) && hwb-has?(hw-plan-answer(plan), "[local-plan:stopped] deadline: the cell ran past its deadline") && ((String) hw-plan-answer(queued) == hwb-queued-line() ++ "\n[host-child] " ++ queued[2]) && hw-planned?(hw-plan-answer(queued)) && ((String) hw-plan-or-stopped([0, "", ""], "[local-plan] no request") == "[local-plan] no request") && hwb-has?(hw-plan-or-stopped([nothing(), "", "birth refused: x"], ""), "[local-plan:stopped] birth refused: x") && ((String) hw-turn-cell() == "observe/native-turn-run.bml") && ((String) hw-plan-cell() == "observe/local-plan-run.bml") && ((Comparable) hch-step-backstop-ms() == 7200000) && ((Comparable) hch-git-backstop-ms() == 1800000));
   }
   // the readers that replaced `grep -F ... | tail -1` and `grep -F -e ... -e ...`, and the lines they read
   def hwb-spawn-readers(ctx) {
@@ -829,19 +837,22 @@ section [form.bml] {
   def hwb-tzif(footer) = "TZif2" ++ byte_to_str(0) ++ "binary" ++ byte_to_str(0) ++ "\nTZif2" ++ byte_to_str(0) ++ "more\n" ++ footer ++ "\n";
   def hwb-zone(footer) = hw-zone-of-tz(hwb-tzif(footer));
   def hwb-hour(h) = h * 3600000;
-  def hwb-zones(ctx) = ((Comparable) hwb-zone("WITA-8") == 28800000) && ((Comparable) hwb-zone("<+08>-8") == 28800000) && ((Comparable) hwb-zone("UTC0") == 0) && ((Comparable) hwb-zone("<-03>3") == 0 - hwb-hour(3)) && ((Comparable) hwb-zone("IST-5:30") == hwb-hour(5) + 1800000) && ((Comparable) hwb-zone("EST5") == 0 - hwb-hour(5)) && nothing?(hwb-zone("EST5EDT,M3.2.0,M11.1.0")) && nothing?(hwb-zone("CET-1CEST,M3.5.0,M10.5.0/3")) && nothing?(hwb-zone("")) && nothing?(hwb-zone("garbage")) && nothing?(hwb-zone("WITA-99")) && nothing?(hwb-zone("WITA-25")) && ((Comparable) hwb-zone("WITA-24") == hwb-hour(24)) && nothing?(hwb-zone("WITA-8:99:99")) && nothing?(hwb-zone("WITA-8:60")) && ((Comparable) hwb-zone("WITA-8:59:59") == hwb-hour(8) + 3599000) && nothing?(hwb-zone("<>-8")) && ((Comparable) hwb-zone("<A>-8") == hwb-hour(8)) && nothing?(hw-zone-of-z("+9900")) && nothing?(hw-zone-of-z("+0860")) && nothing?(hw-zone-of-tz("not a tzif file\nWITA-8\n")) && nothing?(hw-zone-of-tz("")) && nothing?(hw-zone-of-tz(nothing())) && ((String) hw-tz-footer(hwb-tzif("WITA-8")) == "WITA-8") && ((Comparable) hw-zone-of-z("+0800") == 28800000) && ((Comparable) hw-zone-of-z("-0530\n") == 0 - 19800000) && nothing?(hw-zone-of-z("")) && nothing?(hw-zone-of-z("+08"));
+  def hwb-zones(ctx) = ((Comparable) hwb-zone("WITA-8") == 28800000) && ((Comparable) hwb-zone("<+08>-8") == 28800000) && ((Comparable) hwb-zone("UTC0") == 0) && ((Comparable) hwb-zone("<-03>3") == 0 - hwb-hour(3)) && ((Comparable) hwb-zone("IST-5:30") == hwb-hour(5) + 1800000) && ((Comparable) hwb-zone("EST5") == 0 - hwb-hour(5)) && nothing?(hwb-zone("EST5EDT,M3.2.0,M11.1.0")) && nothing?(hwb-zone("CET-1CEST,M3.5.0,M10.5.0/3")) && nothing?(hwb-zone("")) && nothing?(hwb-zone("garbage")) && nothing?(hwb-zone("WITA-99")) && nothing?(hwb-zone("WITA-25")) && ((Comparable) hwb-zone("WITA-24") == hwb-hour(24)) && nothing?(hwb-zone("WITA-8:99:99")) && nothing?(hwb-zone("WITA-8:60")) && ((Comparable) hwb-zone("WITA-8:59:59") == hwb-hour(8) + 3599000) && nothing?(hwb-zone("<>-8")) && ((Comparable) hwb-zone("<A>-8") == hwb-hour(8)) && nothing?(hw-zone-of-row([2026, 10, 4, 9, 5, 3, 0, 90000, "X"])) && nothing?(hw-zone-of-row([2026, 10, 4, 9, 5, 3, 0, 0 - 90000, "X"])) && nothing?(hw-zone-of-tz("not a tzif file\nWITA-8\n")) && nothing?(hw-zone-of-tz("")) && nothing?(hw-zone-of-tz(nothing())) && ((String) hw-tz-footer(hwb-tzif("WITA-8")) == "WITA-8") && ((Comparable) hw-zone-of-row([2026, 10, 4, 9, 5, 3, 0, 28800, "WITA"]) == 28800000) && ((Comparable) hw-zone-of-row([2026, 10, 4, 9, 5, 3, 0, 0 - 19800, "X"]) == 0 - 19800000) && nothing?(hw-zone-of-row(nothing())) && nothing?(hw-zone-of-row([2026, 10, 4]));
   // fixed instants (unix ms) against a zone: [instant, zone, day, hhmm]
   def hwb-instants() = [[1790883000000, hwb-hour(8), "2026-10-02", 330], [1790915400000, hwb-hour(8), "2026-10-02", 1230], [1790870399000, hwb-hour(8), "2026-10-01", 2359], [1790870400000, hwb-hour(8), "2026-10-02", 0], [1767236400000, 0 - hwb-hour(5), "2025-12-31", 2200], [1709208000000, 0, "2024-02-29", 1200], [1709251200000, 0, "2024-03-01", 0]];
   def hwb-instant?(row) = ((String) hw-day-in(row[1], row[0]) == row[2]) && ((Comparable) hw-hhmm-in(row[1], row[0]) == row[3]);
   def hwb-instants-hold(rows) = nil?(rows) ? true : hwb-instant?(rows[0]) && hwb-instants-hold(rows[1:]);
-  // the host's own reading agrees with `date` (read before and after, so a minute turning between the two reads cannot fail it)
+  // the host's own reading agrees with the seed's host_localtime (read before and after, so a minute turning between the two reads cannot fail it;
+  // the zone it reports is the footer's, read apart from this clock, so the two are independent witnesses of the offset)
+  def hwb-stamp(row) = nothing?(row) ? "" : hfs-date(row) ++ " " ++ hwb-pad4(row[3] * 100 + row[4]);
   def hwb-host-clock(ctx) {
-   let before = hch-read(["/bin/date", "+%F %H%M"]);
+   let before = hwb-stamp(host_localtime(now_unix_ms()));
    let zone = hw-zone-ms();
    let day = hw-day();
    let hhmm = hw-hhmm();
-   let after = hch-read(["/bin/date", "+%F %H%M"]);
-   !nothing?(zone) && (zone >= 0 - hwb-hour(12)) && (zone <= hwb-hour(14)) && hwb-has?(before ++ "|" ++ after, day ++ " ") && (hwb-has?(before, hwb-pad4(hhmm)) || hwb-has?(after, hwb-pad4(hhmm)));
+   let after = hwb-stamp(host_localtime(now_unix_ms()));
+   let fresh = hw-zone-of-row(host_localtime(now_unix_ms()));
+   !nothing?(zone) && (zone >= 0 - hwb-hour(12)) && (zone <= hwb-hour(14)) && !nothing?(fresh) && ((Comparable) zone == fresh) && hwb-has?(before ++ "|" ++ after, day ++ " ") && (hwb-has?(before, hwb-pad4(hhmm)) || hwb-has?(after, hwb-pad4(hhmm)));
   }
   def hwb-pad4(n) = n < 10 ? "000" ++ n.str() : n < 100 ? "00" ++ n.str() : n < 1000 ? "0" ++ n.str() : n.str();
   def hwb-clock(ctx) = hwb-bit(hwb-zones(ctx) && hwb-instants-hold(hwb-instants()) && nothing?(hw-hhmm-in(nothing(), 1790883000000)) && ((String) hw-day-in(nothing(), 1790883000000) == "") && hwb-host-clock(ctx));

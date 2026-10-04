@@ -63,6 +63,7 @@
 // flp-gpu-holders) ends the walk held, with no row for the option it could not take.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/bml/host-walk.bml;
+import form-stdlib/bml/cell-said.bml;
 import form-stdlib/bml/form-agent-json-query.bml;
 import form-stdlib/bml/parse.bml;
 import form-stdlib/meaning-codes.bml;
@@ -402,38 +403,32 @@ section [form.bml] {
    else if (!nothing?(measured)) then flp-refused(6, mc-cat(["row-band-taken:", flp-p-band(plan)]), mc-cat(["The queue already holds a gap measured by ", flp-p-band(plan), "; write a new band."]))
    else flp-held();
   }
-  // ── the band on fkwu: [reading, timed out, what fkwu said] ──
-  def flp-wait(pid, until) = if ((Comparable) host_alive(pid) != 1) then [host_wait(pid), 0] else if (host_monotonic_ms() > until) then flp-stop(pid) else flp-rest(pid, until);
-  def flp-stop(pid) {
-   let killed = host_kill(pid);
-   let waited = host_wait(pid);
-   [nothing(), 1];
-  }
-  def flp-rest(pid, until) {
-   let slept = host_sleep_ms(200);
-   flp-wait(pid, until);
-  }
-  def flp-last-line(lines, last) = if nil?(lines) then last else flp-last-line(lines[1:], if ((Comparable) len(trim(lines[0])) == 0) then last else trim(lines[0]));
+  // ── the band on fkwu, called in this process (cell_run): [reading, timed out, what fkwu said] ──
   def flp-organ-prefix() = "form-organ health ";
   // the compiler's own words: its diagnostic readings (what, which name, where) and its error lines
   def flp-said-line(line) = if (flp-starts?(line, flp-organ-prefix()) && ((str_find(line, "\"stage\":\"observe\"", 0) >= 0) && fcgp-object-line?(substring(line, len(flp-organ-prefix()), len(line))))) then flp-organ-words(parse-json("band-said", substring(line, len(flp-organ-prefix()), len(line)))) else if ((str_find(line, "error", 0) >= 0) && (!flp-starts?(line, "form-organ"))) then flp-head(line, 300) else "";
   def flp-need-detail(row) = if (fcgp-present?(row, "needs") && fcgp-array?(json-object-get(row, "needs")) && (!nil?(json-array-elements(json-object-get(row, "needs"))))) then fcgp-str(json-array-elements(json-object-get(row, "needs"))[0], "detail") else "";
   def flp-organ-words(row) = if (((String) fcgp-str(row, "observed") == "clean") || ((String) fcgp-str(row, "observed") == "")) then "" else mc-cat([fcgp-str(row, "observed"), if ((Comparable) len(flp-need-detail(row)) > 0) then mc-cat([" ", flp-need-detail(row)]) else "", " at line ", flp-show(fcgp-num(fcgp-obj(row, "evidence"), "line")), " of ", fcgp-str(fcgp-obj(row, "evidence"), "unit")]);
   def flp-errors(text) = flp-join(take(8, filter(l => ((Comparable) len(l) > 0), map(l => flp-said-line(l), flp-lines(text)))), "\n");
+  // The band reads a number only when the cell ran to its end with no compile error and ended on an integer (its value, not
+  // a last line read back); a budget that ran out is the "timed out" of the answer. What it said (the compiler's lines
+  // and readings, cs-stderr) stands beside the band as <path>.err, as it did for a child.
+  def flp-band-ran?(rec) = !nothing?(rec) && nothing?(record_get(rec, "stopped")) && ((Comparable) record_get(rec, "errors") == 0);
+  def flp-band-timed?(rec) = !nothing?(rec) && !nothing?(record_get(rec, "stopped")) && (String) record_get(record_get(rec, "stopped"), "kind") == "deadline";
+  def flp-band-number(v) = (String) value_kind(v) == "int" ? v : (String) value_kind(v) == "string" ? parse-int(trim(v)) : nothing();
   def flp-band-run(path, deadline) {
-   let out = path ++ ".out";
-   let err = path ++ ".err";
-   let g1 = host_path_remove(out);
-   let g2 = host_path_remove(err);
-   let pid = host_spawn_at(["./fkwu", path], ["/dev/null", out, err]);
-   let waited = if (pid <= 0) then [nothing(), 0] else flp-wait(pid, (host_monotonic_ms() + deadline));
-   let status = waited[0];
-   let stdout=fhn-read(out); let stderr=fhn-read(err);
-   let reading = if (nothing?(status) || (!((Comparable) status == 0))) then nothing() else parse-int(flp-last-line(flp-lines(stdout), ""));
+   let rec = cell_run(path, 0, deadline < 1 ? 1 : deadline, nothing());
+   let stdout = cs-stdout(rec);
+   let stderr = cs-stderr(rec) ++ (nothing?(rec) || nothing?(record_get(rec, "stopped")) ? "" : "fkwu: " ++ (String) record_get(record_get(rec, "stopped"), "message") ++ "\n");
+   let kept = write_file_text(path ++ ".err", stderr);
+   let printed = write_file_text(path ++ ".out", stdout);
+   let timed = flp-band-timed?(rec) ? 1 : 0;
+   let status = flp-band-ran?(rec) ? 0 : (timed == 1 ? nothing() : 1);
+   let reading = flp-band-ran?(rec) ? flp-band-number(record_get(rec, "value")) : nothing();
    let evidence=flp-dir() + "/executions/" + flp-sha(path) + ".json";
-   let receipt=json-emit(json-node-object([fhn-s("command","./fkwu " + path),json-node-pair("exit",nothing?(status) ? json-node-null() : json-node-int(status)),fhn-n("timed_out",waited[1]),fhn-s("stdout",stdout),fhn-s("stderr",stderr)]));
+   let receipt=json-emit(json-node-object([fhn-s("command","cell_run " + path),json-node-pair("exit",nothing?(status) ? json-node-null() : json-node-int(status)),fhn-n("timed_out",timed),fhn-s("stdout",stdout),fhn-s("stderr",stderr)]));
    let written=flp-put(evidence,receipt);
-   [reading, waited[1], mc-cat([nothing?(reading) ? "\nExecution exit=" + flp-show(status) + " stdout:\n" + stdout + "stderr:\n" + stderr : "\nExecution stdout:\n" + stdout + flp-errors(stderr),read_file(evidence)==receipt ? "\nExecution evidence: " + evidence : "\nExecution evidence could not be retained at " + evidence])];
+   [reading, timed, mc-cat([nothing?(reading) ? "\nExecution exit=" + flp-show(status) + " stdout:\n" + stdout + "stderr:\n" + stderr : "\nExecution stdout:\n" + stdout + flp-errors(stderr),read_file(evidence)==receipt ? "\nExecution evidence: " + evidence : "\nExecution evidence could not be retained at " + evidence])];
   }
   def flp-mkdirs-at(path, i) {
    let sp = str_find(path, "/", i);

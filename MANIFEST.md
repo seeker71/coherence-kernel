@@ -68,7 +68,8 @@ minimal surface and the recipe body. What is being released, reunited or lowered
 
 ## Proof
 
-Every band runs on `fkwu`, the one runtime, and answers its pin there (`./fkwu gate/band-sweep-run.bml`; the registered verdicts
+Every band runs on `fkwu`, the one runtime, and answers its pin there (`./fkwu gate/band-sweep-run.bml`, one `cell_run` call per band in this process, shardable:
+`docs/in-process-cells.md`; the registered verdicts
 are `form/band-verdicts.txt`). `./fkwu bootstrap/ground.fk` answers 42, and `gate/canonical-conformance.bml` holds
 fkwu and the Form codec to the pinned canonical expressions, the FORMBIN2 artifact and the malformed artifacts. A band
 that needs a host carrier (Metal) names it with `; PROOF LEVEL: FKWU-STAGED` and `; STAGED CARRIER:`, and reads

@@ -1,0 +1,158 @@
+; git-native-rev-band.fk — revisions, history walks, merge bases and dates in Form (git-rev.bml), held against a demonstration history this
+; band writes (gw-demo-dag in git-write.bml) and against hand arithmetic for dates. The expected answers are derived by hand from the
+; shape of the history, not by any program.
+;
+;   A <- B <- C <- D          B <- E <- F          M = merge(D, F)          G on M
+;   times:  A 100  B 200  C 300  D 400  E 250  F 350  M 500  G 600   (+ 1700000000)    refs: main = G, feat = F, origin/main = D,
+;   v1 = B (lightweight), t1 = an annotated tag object whose target is D; branch.main upstream is origin/main
+;
+;   1    names: HEAD, @, main, refs/heads/main, feat, origin/main, v1; t1 is the TAG object (not D) and t1^{commit} = t1^{} = D;
+;        G~1 = M, G~2 = D, G~3 = C; M^1 = D, M^2 = F, M^2~1 = E, M^2^ = E, G^0 = G; G^{tree}; G:f.txt, G:h.txt, G:sub-less paths;
+;        the unique 7-character prefix of M resolves, a 3-character prefix and a made-up name do not, G^3 and G:nope are nothing
+;   2    @{u}, main@{u} and HEAD@{u} resolve to origin/main's commit D through branch.main.remote and .merge; a branch with no upstream
+;        gives nothing
+;   4    the default walk from G is by committer date, newest first: G M D F C E B A; --first-parent gives G M D C B A; --no-merges
+;        G D F C E B A; a limit of 3 gives G M D; skip 2 limit 2 gives D F
+;   8    ranges: D..G is G M F E; F..G is G M D C; G..D is empty; the counts 4, 4, 0; the symmetric D...F has 2 left (D C) and 2 right
+;        (F E); ^F ^D G gives G M
+;   16   merge bases: (D F) = B; (G F) = F; (C E) = B; (A G) = A; (D G) = D; (E C) = B; (M M) = M; is-ancestor: B of G, E of M, F of G,
+;        A of D yes; G of B, F of D, D of F no
+;   32   dates by hand arithmetic: 0, 1000000000 (a Sunday), 2000000000 (a Wednesday), 951782400 (a leap day), 1582934400 (2020-02-29, a
+;        Saturday), 4102444800, 1700000000 in +0800 / -0500 / +0000, in the default, iso, iso-strict, rfc, short and strftime forms
+;   64   --format placeholders on B: %H %h %T %P %p %an %ae %ad %cd (both in the short date mode) %at %s %b %% %x1f; decorations: G " (HEAD -> main)",
+;        D " (tag: t1, origin/main)" (a tag ahead of a remote, the annotated tag peeled), F " (feat)"
+;   128  this repository's real history: HEAD~k by name equals the k-th element of the first-parent walk for k = 1..12; the merge base of HEAD and
+;        origin/main is an ancestor of both; origin/main..HEAD counted by the walk equals the length of its listing
+;
+; Expected: 255
+; Verdict 255
+; REQUIRES: (the host doors: host_temp_dir, host_dir_rmdir)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-rev.bml;
+import form-stdlib/bml/git-write.bml;
+section [form.bml] {
+  def grb-bit(ok, bit) = ok ? bit : 0;
+  def grb-say(label, v) = print([label, v]);
+  def grb-eq(a, b) = (String) a == (String) b;
+  def grb-hex(x) = nothing?(x) ? "NOTHING" : gsha-hex-of-raw(x);
+  def grb-res(r, spec) = grb-hex(grv-resolve(r, spec));
+  def grb-is(r, spec, hex) = grb-eq(grb-res(r, spec), hex);
+  def grb-none(r, spec) = nothing?(grv-resolve(r, spec));
+  def grb-raw(hex) = gsha-raw-of-hex(hex);
+  def grb-ids(infos) = map(i => gsha-hex-of-raw(i[0]), infos);
+  def grb-lst-eq(a, b) = nil?(a) ? nil?(b) : !nil?(b) && grb-eq(a[0], b[0]) && grb-lst-eq(a[1:], b[1:]);
+  def grb-walk(r, incl, excl, opts) = grb-ids(grv-walk(r, map(h => grb-raw(h), incl), map(h => grb-raw(h), excl), opts, nothing()));
+  def grb-pick(ids, names) = map(n => ids[n], names);
+  def grb-mb(r, a, b) = map(x => gsha-hex-of-raw(x), grv-merge-bases(r, grb-raw(a), grb-raw(b)));
+  def grb-anc(r, a, b) = grv-ancestor?(r, grb-raw(a), grb-raw(b));
+  def grb-index(c) = c == "A" ? 0 : c == "B" ? 1 : c == "C" ? 2 : c == "D" ? 3 : c == "E" ? 4 : c == "F" ? 5 : c == "M" ? 6 : 7;
+  def grb-list(ids, s) = map(i => ids[grb-index(substring(s, i, i + 1))], range(0, len(s)));
+  def grb-dates() {
+    let ok1 = grb-eq(gdt-default(0, "+0000"), "Thu Jan 1 00:00:00 1970 +0000");
+    let ok2 = grb-eq(gdt-default(1000000000, "+0000"), "Sun Sep 9 01:46:40 2001 +0000");
+    let ok3 = grb-eq(gdt-default(2000000000, "+0000"), "Wed May 18 03:33:20 2033 +0000");
+    let ok4 = grb-eq(gdt-default(951782400, "+0000"), "Tue Feb 29 00:00:00 2000 +0000");
+    let ok5 = grb-eq(gdt-default(1582934400, "+0000"), "Sat Feb 29 00:00:00 2020 +0000");
+    let ok6 = grb-eq(gdt-default(4102444800, "+0000"), "Fri Jan 1 00:00:00 2100 +0000");
+    let ok7 = grb-eq(gdt-default(1700000000, "+0800"), "Wed Nov 15 06:13:20 2023 +0800") && grb-eq(gdt-default(1700000000, "-0500"), "Tue Nov 14 17:13:20 2023 -0500") && grb-eq(gdt-default(1700000000, "+0000"), "Tue Nov 14 22:13:20 2023 +0000");
+    let ok8 = grb-eq(gdt-iso(1700000000, "+0800"), "2023-11-15 06:13:20 +0800") && grb-eq(gdt-iso-strict(1700000000, "+0800"), "2023-11-15T06:13:20+08:00") && grb-eq(gdt-iso-strict(1700000000, "+0000"), "2023-11-14T22:13:20Z") && grb-eq(gdt-rfc(1700000000, "+0800"), "Wed, 15 Nov 2023 06:13:20 +0800") && grb-eq(gdt-short(1700000000, "-0500"), "2023-11-14");
+    let ok9 = grb-eq(gdt-render("format:%Y-%m-%d %H:%M:%S %z %a %b %e %y", 1700000000, "+0800"), "2023-11-15 06:13:20 +0800 Wed Nov 15 23") && grb-eq(gdt-render("unix", 1700000000, "+0800"), "1700000000") && grb-eq(gdt-render("raw", 1700000000, "+0800"), "1700000000 +0800") && grb-eq(gdt-render("format:%H:%M", 1700000000, "+0000"), "22:13");
+    let ok10 = gdt-tz-secs("+0800") == 28800 && gdt-tz-secs("-0530") == 0 - 19800 && gdt-tz-secs("+0000") == 0;
+    let sh = grb-say("dates", [ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10]);
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10;
+  }
+  // commits that carry the same second (a rebase test run in one second does this): B0 <- B1 <- B2 at T and B0 <- D1 at T+1; the uninteresting
+  // side reaches B0 only after the interesting side has already popped it, and the walk must still leave it out (git's slop)
+  def grb-ties-ok() {
+    let top = host_temp_dir() ++ "/grb-ties-" ++ host_pid().str();
+    let m = gw-mkdirs(top);
+    let i = gw-init(top, "main");
+    let g = top ++ "/.git";
+    let tree = gw-put-loose(g, "tree", gw-tree-body([["100644", "f", gsha-raw-of-hex(gw-put-loose(g, "blob", "x\n"))]]));
+    let b0 = gw-commit(g, tree, [], "T", "t@x", 1700000000, "+0000", "B0\n");
+    let b1 = gw-commit(g, tree, [b0], "T", "t@x", 1700000000, "+0000", "B1\n");
+    let b2 = gw-commit(g, tree, [b1], "T", "t@x", 1700000000, "+0000", "B2\n");
+    let d1 = gw-commit(g, tree, [b0], "T", "t@x", 1700000001, "+0000", "D1\n");
+    let r = git-open(top);
+    let a = grb-walk(r, [d1], [b2], [false, false, 0 - 1, 0]);
+    let b = grb-walk(r, [b2], [d1], [false, false, 0 - 1, 0]);
+    let c = grb-walk(r, [d1, b2], [b0], [false, false, 0 - 1, 0]);
+    let n1 = grv-range-count(r, [grb-raw(d1)], [grb-raw(b2)]);
+    let n2 = grv-range-count(r, [grb-raw(b2)], [grb-raw(d1)]);
+    let rm = host_dir_rmdir(top);
+    grb-lst-eq(a, [d1]) && grb-lst-eq(b, [b2, b1]) && len(c) == 3 && n1 == 1 && n2 == 2;
+  }
+  def grb-first-parent-names(r, head, k) = map(i => grb-res(r, "HEAD~" ++ i.str()), range(1, k + 1));
+  def grb-run() {
+    let t0 = host_monotonic_ms();
+    let top = host_temp_dir() ++ "/grb-" ++ host_pid().str();
+    let ids = gw-demo-dag(top);
+    let r = git-open(top);
+    let A = ids[0];
+    let B = ids[1];
+    let C = ids[2];
+    let D = ids[3];
+    let E = ids[4];
+    let F = ids[5];
+    let M = ids[6];
+    let G = ids[7];
+    let tag = gr-resolve(r, "refs/tags/t1");
+    let treeG = gs-commit-parse(gs-read(r, grb-raw(G))[1])[0];
+    let fblob = gsha-hex-of-raw(gs-hash("blob", "1\n2\n3\nE\nF\n"));
+    let hblob = gsha-hex-of-raw(gs-hash("blob", "h1\n"));
+    let n1 = grb-is(r, "HEAD", G) && grb-is(r, "@", G) && grb-is(r, "main", G) && grb-is(r, "refs/heads/main", G) && grb-is(r, "feat", F) && grb-is(r, "origin/main", D) && grb-is(r, "v1", B) && grb-is(r, "t1", tag) && !grb-eq(tag, D) && grb-is(r, "t1^{commit}", D) && grb-is(r, "t1^{}", D);
+    let n2 = grb-is(r, G ++ "~1", M) && grb-is(r, G ++ "~2", D) && grb-is(r, G ++ "~3", C) && grb-is(r, "HEAD~4", B) && grb-is(r, M ++ "^1", D) && grb-is(r, M ++ "^2", F) && grb-is(r, M ++ "^2~1", E) && grb-is(r, M ++ "^2^", E) && grb-is(r, G ++ "^0", G) && grb-is(r, G ++ "^", M) && grb-is(r, "HEAD^^", D) && grb-is(r, G ++ "^{tree}", treeG);
+    let n3 = grb-is(r, G ++ ":f.txt", fblob) && grb-is(r, "HEAD:h.txt", hblob) && grb-is(r, M ++ ":h.txt", "NOTHING") && grb-none(r, G ++ ":nope") && grb-is(r, substring(M, 0, 7), M) && grb-none(r, substring(M, 0, 3)) && grb-none(r, "nonesuch") && grb-none(r, G ++ "^3") && grb-none(r, A ++ "^") && grb-is(r, A ++ "^0", A);
+    let s1 = grb-say("names", [n1, n2, n3]);
+    let b1 = grb-bit(n1 && n2 && n3, 1);
+    let u1 = grb-is(r, "@{u}", D) && grb-is(r, "main@{u}", D) && grb-is(r, "HEAD@{u}", D) && grb-none(r, "feat@{u}") && grb-none(r, "@{1}");
+    let b2 = grb-bit(u1 && grb-eq(grv-upstream-ref(r, "main"), "refs/remotes/origin/main") && nothing?(grv-upstream-ref(r, "feat")), 2);
+    let w1 = grb-walk(r, [G], [], [false, false, 0 - 1, 0]);
+    let w2 = grb-walk(r, [G], [], [true, false, 0 - 1, 0]);
+    let w3 = grb-walk(r, [G], [], [false, true, 0 - 1, 0]);
+    let w4 = grb-walk(r, [G], [], [false, false, 3, 0]);
+    let w5 = grb-walk(r, [G], [], [false, false, 2, 2]);
+    let s2 = grb-say("walks", [w1 == grb-list(ids, "GMDFCEBA")]);
+    let b4 = grb-bit(grb-lst-eq(w1, grb-list(ids, "GMDFCEBA")) && grb-lst-eq(w2, grb-list(ids, "GMDCBA")) && grb-lst-eq(w3, grb-list(ids, "GDFCEBA")) && grb-lst-eq(w4, grb-list(ids, "GMD")) && grb-lst-eq(w5, grb-list(ids, "DF")), 4);
+    let r1 = grb-walk(r, [G], [D], [false, false, 0 - 1, 0]);
+    let r2 = grb-walk(r, [G], [F], [false, false, 0 - 1, 0]);
+    let r3 = grb-walk(r, [D], [G], [false, false, 0 - 1, 0]);
+    let left = grb-walk(r, [D], [F], [false, false, 0 - 1, 0]);
+    let right = grb-walk(r, [F], [D], [false, false, 0 - 1, 0]);
+    let r4 = grb-walk(r, [G], [F, D], [false, false, 0 - 1, 0]);
+    let ties = grb-ties-ok();
+    let b8 = grb-bit(ties && grb-lst-eq(r1, grb-list(ids, "GMFE")) && grb-lst-eq(r2, grb-list(ids, "GMDC")) && nil?(r3) && grv-range-count(r, [grb-raw(G)], [grb-raw(D)]) == 4 && grv-range-count(r, [grb-raw(G)], [grb-raw(F)]) == 4 && grv-range-count(r, [grb-raw(D)], [grb-raw(G)]) == 0 && grb-lst-eq(left, grb-list(ids, "DC")) && grb-lst-eq(right, grb-list(ids, "FE")) && grb-lst-eq(r4, grb-list(ids, "GM")), 8);
+    let mb_ok = grb-lst-eq(grb-mb(r, D, F), [B]) && grb-lst-eq(grb-mb(r, G, F), [F]) && grb-lst-eq(grb-mb(r, C, E), [B]) && grb-lst-eq(grb-mb(r, A, G), [A]) && grb-lst-eq(grb-mb(r, D, G), [D]) && grb-lst-eq(grb-mb(r, E, C), [B]) && grb-lst-eq(grb-mb(r, M, M), [M]);
+    let an_ok = grb-anc(r, B, G) && grb-anc(r, E, M) && grb-anc(r, F, G) && grb-anc(r, A, D) && !grb-anc(r, G, B) && !grb-anc(r, F, D) && !grb-anc(r, D, F);
+    let b16 = grb-bit(mb_ok && an_ok, 16);
+    let b32 = grb-bit(grb-dates(), 32);
+    let info = grv-info(r, grb-raw(B));
+    let fmt = grv-format(r, "%H|%h|%T|%P|%p|%an|%ae|%ad|%cd|%at|%s|%b|%%|%x1f|", info, "short");
+    let want_tree = gs-commit-parse(gs-read(r, grb-raw(B))[1])[0];
+    let want_fmt = B ++ "|" ++ substring(B, 0, 7) ++ "|" ++ want_tree ++ "|" ++ A ++ "|" ++ substring(A, 0, 7) ++ "|Bob|bob@example.test|2023-11-14|2023-11-14|1700000200|B: second line|The body of B,\nin two lines.\n|%|" ++ byte_to_str(31) ++ "|";
+    let s3 = grb-say("format", [fmt]);
+    let deco = grb-eq(grv-format(r, "%d", grv-info(r, grb-raw(G)), "short"), " (HEAD -> main)") && grb-eq(grv-format(r, "%d", grv-info(r, grb-raw(D)), "short"), " (tag: t1, origin/main)") && grb-eq(grv-format(r, "%d", grv-info(r, grb-raw(F)), "short"), " (feat)") && grb-eq(grv-format(r, "%D", grv-info(r, grb-raw(B)), "short"), "tag: v1") && grb-eq(grv-format(r, "%d", grv-info(r, grb-raw(C)), "short"), "");
+    let b64 = grb-bit(grb-eq(fmt, want_fmt) && deco, 64);
+    let rm = host_dir_rmdir(top);
+    let rr = git-open(".");
+    let head = nothing?(rr) ? nothing() : gr-head-id(rr);
+    let chain = nothing?(head) ? [] : grb-ids(grv-walk(rr, [grb-raw(head)], [], [true, false, 13, 0], nothing()));
+    let names = nothing?(head) ? [] : grb-first-parent-names(rr, head, 12);
+    let om = nothing?(rr) ? nothing() : grv-resolve(rr, "origin/main");
+    let mbs = nothing?(om) ? [] : grv-merge-bases(rr, grb-raw(head), om);
+    let mbhex = nil?(mbs) ? "" : gsha-hex-of-raw(mbs[0]);
+    let listing = nothing?(om) ? [] : grv-walk(rr, [grb-raw(head)], [om], [false, false, 0 - 1, 0], nothing());
+    let s4 = grb-say("real history", [len(chain), "first-parent commits, merge-base with origin/main", mbhex, "ahead", len(listing)]);
+    let b128 = grb-bit(!nothing?(head) && len(chain) == 13 && grb-lst-eq(names, drop(1, chain)) && !nil?(mbs) && grv-ancestor?(rr, mbs[0], grb-raw(head)) && grv-ancestor?(rr, mbs[0], om) && grv-range-count(rr, [grb-raw(head)], [om]) == len(listing), 128);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+    let shown = print(["git-native-rev-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  grb-run();
+}

@@ -1,0 +1,150 @@
+; voice-track-service-band.fk — the voice-track worker is a SERVICE the host's manager starts; the body reads its progress as a typed value
+; and ends it when it stalls. Nothing is begun, nothing is parsed from stdout.
+;
+; The writer (the worker) gives one record into the shared field -- {pid, seq, stage, done, total, begun_ms, beat_ms, state} -- under a name
+; derived from the track directory and the tongue. The reader (the supervisor) takes it, judges it as data, and, for a stalled writer,
+; decides the signals. The band is its own writer and reader: direct writes for the timeline, and a writer CELL run in this process for
+; the cross-cell case. The signal door, the aliveness question and the nap are handed to the logic as functions, so the decision (which
+; signals, in which order, after which grace) is proven without ending any process.
+;
+;   1      a record is given: the frame answers "given"
+;   2      no record is "service absent", as DATA: the reading is ["absent"] and so is the finding -- never a spawn, never an exception
+;   4      write and read agree on every field (pid, seq, stage, done, total, begun_ms, beat_ms, state)
+;   8      the writer advances: the next record is the one read, with a later frame seq
+;   16     a writer CELL (cell_run) gives its record and this process reads it: the cell's pid is this one, its seq and state arrive, and a
+;          second run of the cell advances it
+;   32     a breathing worker is "live": the beat is young, the finding names the pid, the state and the age
+;   64     "stalled" is exactly: alive, working, and the beat older than the bound (at the bound, not one millisecond before); an idle,
+;          done or refused writer with an old beat is never stalled
+;   128    a record whose writer is gone is "dead" -- the manager's turn -- never "stalled", and no signal is decided for it
+;   256    ending a stalled worker that hears SIGTERM: one signal, 15, to that pid; the outcome is "term"; SIGKILL is not sent
+;   512    ending a deaf one: SIGTERM, then the grace window in 250 ms naps (4 naps for 1000 ms), then SIGKILL; "killed"; and a worker that is
+;          already gone is sent nothing ("gone")
+;   1024   the supervisor's whole timeline from findings alone: a stalled worker is ended, its record then reads dead (wait for the manager),
+;          and a new pid with a fresh beat reads live -- the restart is the manager's, met as data
+;   2048   voice-track.bml, voice-track-record.bml and the two run files begin nothing: no host_spawn, host_spawn_at, host_spawn_quiet,
+;          host_capture, host-exec or host_wait in them (read as text)
+;   4096   the service definition is data: docs/launchd/earth.hati.voice-track-worker.plist names the label, the program arguments
+;          (./fkwu observe/voice-track-worker-run.fk), the working directory, KeepAlive, a throttle and the logs -- the body never runs launchctl
+;   8192   when the band is done no fkwu child of this process stands (host_processes)
+;
+; A seed without the shared-memory doors says "door absent" by name and answers 0.
+;
+; Expected: 16383
+; Verdict 16383
+; REQUIRES: (shm_offer, shm_receive, cell_run, host_processes)
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/voice-track-record.bml
+import form/form-stdlib/voice-track-record.bml;
+section [form.bml] {
+  def vsb-bit(ok, bit) = ok ? bit : 0;
+  def vsb-say(label, v) = print([label, v]);
+  def vsb-dir() = ".hearth/voice-track-band";
+  def vsb-code() = "band";
+  def vsb-ghost() = "ghost-" ++ host_pid().str();
+  def vsb-log() = temp_dir() ++ "/voice-track-service-band." ++ host_pid().str() ++ ".log";
+  def vsb-s(x) = (String) value_str(x);
+  def vsb-has(text, token) = (Comparable) str_find(text, token, 0) >= 0;
+  def vsb-text(path) = nothing?(read_file(path)) ? "" : (String) read_file(path);
+  def vsb-children() = len(filter(x => (Comparable) x[5] == host_pid(), host_processes("fkwu*")));
+  def vsb-door?() = nothing?(cell_run(0, 0, nothing(), nothing())) ? 0 : 1;
+  def vsb-sig-door() = (p, s) => vsb-signal(p, s);
+  def vsb-nap-door() = ms => vsb-nap(ms);
+  // ---- the injected doors: a signal that only writes down what it was asked, an aliveness that follows the log, a nap that counts ----
+  def vsb-signal(p, s) {
+    let w = write_file(vsb-log(), vsb-text(vsb-log()) ++ "sig " ++ p.str() ++ " " ++ s.str() ++ "\n");
+    0;
+  }
+  def vsb-nap(ms) {
+    let w = write_file(vsb-log(), vsb-text(vsb-log()) ++ "nap " ++ ms.str() ++ "\n");
+    0;
+  }
+  // alive until the log holds a signal of this number (15: a worker that hears SIGTERM; 9: one only SIGKILL takes)
+  def vsb-alive-until(n) = p => vsb-has(vsb-text(vsb-log()), "sig " ++ p.str() ++ " " ++ n.str() ++ "\n") ? 0 : 1;
+  def vsb-count(text, token, from, n) = (Comparable) str_find(text, token, from) < 0 ? n : vsb-count(text, token, str_find(text, token, from) + len(token), n + 1);
+  def vsb-reset() = write_file(vsb-log(), "");
+  def vsb-rec(pid, seq, stage, done, beat, state) = vtq-new(pid, seq, stage, done, 5, 1000, beat, state);
+  def vsb-same(a, b) = (String) vsb-s(a) == vsb-s(b);
+  def vsb-absent() {
+    let shown = print(["voice-track-service-band", "door absent: this seed has no shm_offer; rebuild it (cc -O2 -o fkwu.new runtime/fkwu-uni.c)"]);
+    let verdict = print(["voice-track-service-band", "verdict", 0]);
+    0;
+  }
+  def vsb-run() {
+    let me = host_pid();
+    // 2: nothing was ever given under this name: the service is absent, as data
+    let ghost = vtq-read(vsb-dir(), vsb-ghost());
+    let gf = vtq-judge(ghost, 5000, 150000, 0);
+    let b2 = vsb-bit((String) ghost[0] == "absent" && (String) vtq-kind(gf) == "absent" && (Comparable) len(gf) == 1, 2);
+    // 1, 4, 8: the writer gives, the reader takes, the writer advances
+    let r1 = vsb-rec(me, 1, "render", 0, 2000, "working");
+    let g1 = vtq-give(vsb-dir(), vsb-code(), r1);
+    let read1 = vtq-read(vsb-dir(), vsb-code());
+    let b1 = vsb-bit(vtq-given?(g1), 1);
+    let b4 = vsb-bit((String) read1[0] == "record" && vsb-same(read1[1], r1) && (Comparable) vtq-pid(read1[1]) == me && (String) vtq-state(read1[1]) == "working" && (Comparable) vtq-total(read1[1]) == 5 && (Comparable) vtq-begun(read1[1]) == 1000, 4);
+    let r2 = vsb-rec(me, 2, "landed", 1, 3000, "working");
+    let g2 = vtq-give(vsb-dir(), vsb-code(), r2);
+    let read2 = vtq-read(vsb-dir(), vsb-code());
+    let b8 = vsb-bit(vtq-given?(g2) && vsb-same(read2[1], r2) && (Comparable) read2[2] > (Comparable) read1[2] && (Comparable) vtq-seq(read2[1]) == 2 && (Comparable) vtq-done(read2[1]) == 1, 8);
+    let s1 = vsb-say("round trip", [read1[2], read2[2], vtq-seq(read2[1]), vtq-done(read2[1])]);
+    // 16: a writer cell, run in this process, gives its record; this process reads it; run again it advances
+    let w1 = cell_run("form/form-stdlib/tests/fixtures/voice-track-service/writer-cell.fk", 0, nothing(), [vsb-dir(), vsb-code(), "7", "working"]);
+    let c1 = vtq-read(vsb-dir(), vsb-code());
+    let w2 = cell_run("form/form-stdlib/tests/fixtures/voice-track-service/writer-cell.fk", 0, nothing(), [vsb-dir(), vsb-code(), "8", "idle"]);
+    let c2 = vtq-read(vsb-dir(), vsb-code());
+    let s2 = vsb-say("writer cell", [record_get(w1, "errors"), record_get(w1, "out"), vtq-seq(c1[1]), vtq-seq(c2[1]), vtq-state(c2[1])]);
+    let b16 = vsb-bit(nothing?(record_get(w1, "stopped")) && (Comparable) record_get(w1, "errors") == 0 && (Comparable) record_get(w1, "value") == 7 && (Comparable) vtq-pid(c1[1]) == me && (Comparable) vtq-seq(c1[1]) == 7 && (String) vtq-state(c1[1]) == "working" && (Comparable) vtq-seq(c2[1]) == 8 && (String) vtq-state(c2[1]) == "idle" && (Comparable) c2[2] > (Comparable) c1[2], 16);
+    // 32, 64, 128: the findings, as data
+    let live = vtq-judge(read2, 4000, 150000, 1);
+    let b32 = vsb-bit(vsb-same(live, ["live", me, "working", 1000]) && (String) vtq-kind(live) == "live", 32);
+    let at-bound = vtq-judge(["record", vsb-rec(me, 2, "landed", 1, 3000, "working"), 1], 153000, 150000, 1);
+    let before-bound = vtq-judge(["record", vsb-rec(me, 2, "landed", 1, 3000, "working"), 1], 152999, 150000, 1);
+    let idle-old = vtq-judge(["record", vsb-rec(me, 2, "idle", 1, 3000, "idle"), 1], 900000, 150000, 1);
+    let done-old = vtq-judge(["record", vsb-rec(me, 2, "idle", 5, 3000, "done"), 1], 900000, 150000, 1);
+    let refused-old = vtq-judge(["record", vsb-rec(me, 2, "idle", 0, 3000, "refused"), 1], 900000, 150000, 1);
+    let s3 = vsb-say("findings", [at-bound, before-bound, idle-old, done-old, refused-old]);
+    let b64 = vsb-bit(vsb-same(at-bound, ["stalled", me, 150000]) && (String) vtq-kind(before-bound) == "live" && (String) vtq-kind(idle-old) == "live" && (String) vtq-kind(done-old) == "settled" && (String) vtq-kind(refused-old) == "refused", 64);
+    let dead = vtq-judge(["record", vsb-rec(me, 2, "landed", 1, 3000, "working"), 1], 900000, 150000, 0);
+    let b128 = vsb-bit(vsb-same(dead, ["dead", me, 897000]) && (String) vtq-kind(dead) != "stalled", 128);
+    // 256: a worker that hears SIGTERM gets exactly that
+    let z1 = vsb-reset();
+    let o256 = vtq-end(41001, vsb-sig-door(), vsb-alive-until(15), vsb-nap-door(), 1000);
+    let l256 = vsb-text(vsb-log());
+    let s4 = vsb-say("term", [o256, l256]);
+    let b256 = vsb-bit(vsb-same(o256, ["term", 41001, [[41001, 15, 0]]]) && vsb-same(l256, "sig 41001 15\n") && !vsb-has(l256, " 9"), 256);
+    // 512: a deaf one gets SIGTERM, the whole grace in naps, then SIGKILL; a gone one gets nothing
+    let z2 = vsb-reset();
+    let o512 = vtq-end(41002, vsb-sig-door(), vsb-alive-until(9), vsb-nap-door(), 1000);
+    let l512 = vsb-text(vsb-log());
+    let z3 = vsb-reset();
+    let gone = vtq-end(41003, vsb-sig-door(), p => 0, vsb-nap-door(), 1000);
+    let lgone = vsb-text(vsb-log());
+    let s5 = vsb-say("deaf", [o512, vsb-count(l512, "nap 250", 0, 0), gone, lgone]);
+    let b512 = vsb-bit(vsb-same(o512, ["killed", 41002, [[41002, 15, 0], [41002, 9, 0]]]) && (Comparable) vsb-count(l512, "nap 250", 0, 0) == 4 && vsb-has(l512, "sig 41002 15\n") && vsb-has(l512, "sig 41002 9\n") && vsb-same(gone, ["gone", 41003, []]) && vsb-same(lgone, ""), 512);
+    // 1024: the supervisor's timeline from findings: stalled -> ended -> dead (the manager's turn) -> a new pid, live
+    let rA = vsb-rec(50001, 20, "render", 10, 1000, "working");
+    let tA = vtq-judge(["record", rA, 1], 1000 + 150000, 150000, 1);
+    let endedA = vtq-end(vtq-finding-pid(tA), vsb-sig-door(), vsb-alive-until(15), vsb-nap-door(), 1000);
+    let tB = vtq-judge(["record", rA, 1], 1000 + 160000, 150000, 0);
+    let rB = vsb-rec(50002, 1, "open", 0, 1000 + 170000, "working");
+    let tC = vtq-judge(["record", rB, 2], 1000 + 171000, 150000, 1);
+    let s6 = vsb-say("timeline", [vtq-kind(tA), vtq-outcome-kind(endedA), vtq-kind(tB), vtq-kind(tC), vtq-finding-pid(tC)]);
+    let b1024 = vsb-bit((String) vtq-kind(tA) == "stalled" && (String) vtq-outcome-kind(endedA) == "term" && (String) vtq-kind(tB) == "dead" && (String) vtq-kind(tC) == "live" && (Comparable) vtq-finding-pid(tC) == 50002 && (Comparable) vtq-finding-pid(tC) != (Comparable) vtq-finding-pid(tA), 1024);
+    // 2048: the files begin nothing (read as text)
+    let src = vsb-text("form/form-stdlib/voice-track.bml") ++ vsb-text("form/form-stdlib/voice-track-record.bml") ++ vsb-text("observe/voice-track-run.fk") ++ vsb-text("observe/voice-track-worker-run.fk");
+    let spawned = filter(t => vsb-has(src, t), ["host_spawn", "host_capture", "host-exec", "host_wait"]);
+    let s7 = vsb-say("source", [len(src), spawned]);
+    let b2048 = vsb-bit((Comparable) len(src) > 10000 && (Comparable) len(spawned) == 0, 2048);
+    // 4096: the service definition is data
+    let plist = vsb-text("docs/launchd/earth.hati.voice-track-worker.plist");
+    let b4096 = vsb-bit(vsb-has(plist, "<key>Label</key><string>earth.hati.voice-track-worker</string>") && vsb-has(plist, "<string>./fkwu</string>") && vsb-has(plist, "<string>observe/voice-track-worker-run.fk</string>") && vsb-has(plist, "<key>WorkingDirectory</key>") && vsb-has(plist, "<key>KeepAlive</key>") && vsb-has(plist, "<key>ThrottleInterval</key>") && vsb-has(plist, "<key>StandardErrorPath</key>") && vsb-has(plist, "<key>StandardOutPath</key>"), 4096);
+    // 8192: nothing was begun
+    let kids = vsb-children();
+    let b8192 = vsb-bit((Comparable) kids == 0, 8192);
+    let gone-log = host_path_remove(vsb-log());
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024 + b2048 + b4096 + b8192;
+    let shown = print(["voice-track-service-band", "verdict", verdict]);
+    verdict;
+  }
+  (Comparable) vsb-door?() == 1 ? vsb-run() : vsb-absent();
+}

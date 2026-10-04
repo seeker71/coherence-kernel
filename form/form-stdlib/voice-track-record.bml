@@ -1,0 +1,108 @@
+//////////////////////////////////////////////////////////////////////
+// voice-track-record.bml — the progress record of a supervised service, as a typed value in the shared field.
+//
+// A long-lived organ the operating system must isolate (the voice-track worker can sit in an uninterruptible GPU wait that only
+// SIGKILL ends) is a SERVICE: the host's manager (launchd KeepAlive) starts it and starts it again; the body never begins it.
+// What the body does is read it and, when it has stalled, end it. This file is the contract between the two:
+//
+//   THE WRITER (the worker, once per piece and once when a piece begins) offers a frame into shared memory under a name derived
+//   from the track directory and the tongue (form-glass-gift-frame.bml: a seqlock, never torn, released without unlinking) and
+//   gives it ONE record, a JSON object of ints and short strings:
+//
+//       {"schema":"voice-track-record-v1","pid":N,"seq":N,"stage":"render","done":N,"total":N,"begun_ms":N,"beat_ms":N,"state":"working"}
+//
+//     pid       the writer's own process id (host_pid): the one thing a supervisor may end
+//     seq       the writer's own count of beats since it was born
+//     stage     what it is doing: "open" "render" "landed" "idle"
+//     done      pieces of this tongue accounted for (a sound or an untaught marker); total is how many there are
+//     begun_ms  when this writer was born (now_unix_ms)      beat_ms  when it last gave a record (now_unix_ms)
+//     state     "working" a request is being rendered   "idle" up and waiting   "done" the request is complete
+//               "refused" the voice would not open (the writer keeps waiting, aloud)
+//
+//   THE READER (the supervisor) takes the frame when it stands and survives when it does not: an absent frame is
+//   ["absent"], a service that is not there, as DATA. Nothing is parsed from stdout, no file is polled and counted, nothing
+//   is spawned. The record outlives its writer (release never unlinks), so a record whose pid is gone is a service that is
+//   between lives: ["dead" pid age], and the manager's turn.
+//
+// vtq-judge is pure: (reading, now, idle_ms, alive) -> a finding as data. vtq-end is the only place a signal is sent, and it
+// is handed the signal door, the aliveness question and the nap as FUNCTIONS, so a band proves the decision (which signals,
+// in which order, after which grace) without ending anything.
+//////////////////////////////////////////////////////////////////////
+import form/form-stdlib/core.fk;
+import form/form-stdlib/line-grammar.fk;
+import form/form-stdlib/json.fk;
+import form/form-stdlib/form-glass-gift-frame.bml;
+section [form.bml] {
+    class FormVoiceTrackRecord {
+        field VTQSchema = "voice-track-record-v1";
+        field VTQBytes = 4096;
+        field VTQGraceStepMs = 250;
+        // ---- the frame's name: the track directory and the tongue (form-glass-gift-frame hashes it to the host's 31-byte bound) ----
+        def vtq-publisher(dir, code) = ("voice-track:" ++ dir ++ ":" ++ code);
+        // ---- the record: [pid, seq, stage, done, total, begun_ms, beat_ms, state] ----
+        def vtq-new(pid, seq, stage, done, total, begun, beat, state) = [pid, seq, stage, done, total, begun, beat, state];
+        def vtq-pid(f) = f[0];
+        def vtq-seq(f) = f[1];
+        def vtq-stage(f) = f[2];
+        def vtq-done(f) = f[3];
+        def vtq-total(f) = f[4];
+        def vtq-begun(f) = f[5];
+        def vtq-beat(f) = f[6];
+        def vtq-state(f) = f[7];
+        def vtq-emit(f) = json-emit(json-node-object([
+            json-node-pair("schema", json-node-string(VTQSchema())),
+            json-node-pair("pid", json-node-int(f[0])),
+            json-node-pair("seq", json-node-int(f[1])),
+            json-node-pair("stage", json-node-string(f[2])),
+            json-node-pair("done", json-node-int(f[3])),
+            json-node-pair("total", json-node-int(f[4])),
+            json-node-pair("begun_ms", json-node-int(f[5])),
+            json-node-pair("beat_ms", json-node-int(f[6])),
+            json-node-pair("state", json-node-string(f[7]))]));
+        def vtq-int(doc, key) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : (0 - 1);
+        def vtq-str(doc, key) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : "";
+        def vtq-of-doc(doc) = vtq-new(vtq-int(doc, "pid"), vtq-int(doc, "seq"), vtq-str(doc, "stage"), vtq-int(doc, "done"), vtq-int(doc, "total"), vtq-int(doc, "begun_ms"), vtq-int(doc, "beat_ms"), vtq-str(doc, "state"));
+        // a frame that is not this schema's record reads as no record at all (an unwritten frame is zeros; a stranger's is not ours)
+        def vtq-parse(text) = (Comparable) len(trim(text)) < 2 ? [] : (String) substring(trim(text), 0, 1) != "{" ? [] : vtq-checked(parse-json("voice-track-record", trim(text)));
+        def vtq-checked(doc) = json-object-has?(doc, "schema") && (String) json-string-value(json-object-get(doc, "schema")) == VTQSchema() ? vtq-of-doc(doc) : [];
+        // ---- the writer: give the record; answers ["given" ...] or ["refused" ...] (form-glass-gift-frame's own answer) ----
+        def vtq-give(dir, code, f) = ggf-offer-and-give(vtq-publisher(dir, code), VTQBytes(), vtq-emit(f));
+        def vtq-given?(answer) = ggf-given?(answer);
+        // ---- the reader: ["absent"] or ["record" fields frame-seq] ----
+        def vtq-read(dir, code) = vtq-reading(ggf-reading(vtq-publisher(dir, code)));
+        def vtq-reading(r) = (String) ggf-reading-carrier(r) == "gift" ? vtq-reading-of(vtq-parse(ggf-reading-text(r)), ggf-reading-seq(r)) : ["absent"];
+        def vtq-reading-of(fields, frame-seq) = (Comparable) len(fields) == 0 ? ["absent"] : ["record", fields, frame-seq];
+        // ---- the finding, as data: what the supervisor sees at `now` ----
+        //   ["absent"]                    no record: the service has never been there (or never gave one)
+        //   ["settled" pid age]           the writer says its request is complete
+        //   ["refused" pid age]           the writer is up and cannot open the voice
+        //   ["dead" pid age]              the record stands and its writer is gone: the manager's turn
+        //   ["stalled" pid age]           the writer is alive, working, and has given no beat for idle_ms: it is to be ended
+        //   ["live" pid state age]        anything else that breathes
+        // alive is host_alive's answer for the record's pid (1 it answers, 0 it is gone), asked by the caller so this stays pure
+        def vtq-judge(reading, now, idle, alive) = (String) reading[0] == "absent" ? ["absent"] : vtq-judge-record(reading[1], (now - reading[1][6]), idle, alive);
+        def vtq-judge-record(f, age, idle, alive) = (String) f[7] == "done" ? ["settled", f[0], age]
+            : (Comparable) alive != 1 ? ["dead", f[0], age]
+            : (String) f[7] == "refused" ? ["refused", f[0], age]
+            : (String) f[7] == "working" && (Comparable) age >= idle ? ["stalled", f[0], age]
+            : ["live", f[0], f[7], age];
+        def vtq-kind(finding) = finding[0];
+        def vtq-finding-pid(finding) = (Comparable) len(finding) > 1 ? finding[1] : (0 - 1);
+        // ---- ending a stalled writer: SIGTERM, a grace window, then SIGKILL ----
+        // signal(pid, n) answers 0 sent, -1 refused (it is gone), -2 never a pid of ours; alive(pid) answers 1 or 0; rest(ms) waits.
+        // The outcome is data: ["gone" pid []] nothing was sent, it was not there; ["term" pid sends] it heard SIGTERM; ["killed" pid sends]
+        // the grace ran out and SIGKILL went. sends lists [pid signal answer] in the order the signals were sent.
+        def vtq-end(pid, signal, alive, rest, grace) = (Comparable) alive(pid) != 1 ? ["gone", pid, []] : vtq-grace(pid, signal, alive, rest, grace, signal(pid, 15));
+        def vtq-grace(pid, signal, alive, rest, left, termed) = (Comparable) alive(pid) != 1 ? ["term", pid, [[pid, 15, termed]]]
+            : (Comparable) left <= 0 ? vtq-killed(pid, termed, signal(pid, 9))
+            : vtq-grace-step(pid, signal, alive, rest, left, termed, rest(VTQGraceStepMs()));
+        def vtq-grace-step(pid, signal, alive, rest, left, termed, rested) = vtq-grace(pid, signal, alive, rest, (left - VTQGraceStepMs()), termed);
+        def vtq-killed(pid, termed, killed) = ["killed", pid, [[pid, 15, termed], [pid, 9, killed]]];
+        def vtq-outcome-kind(outcome) = outcome[0];
+        def vtq-outcome-sends(outcome) = outcome[2];
+        // the answer of the last signal an outcome sent (0 when none went)
+        def vtq-last-answer(outcome) = (Comparable) len(outcome[2]) == 0 ? 0 : vtq-last-send(outcome[2])[2];
+        def vtq-last-send(sends) = (Comparable) len(sends) == 1 ? sends[0] : vtq-last-send(sends[1:]);
+    }
+    0;
+}

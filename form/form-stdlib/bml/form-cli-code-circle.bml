@@ -30,7 +30,7 @@
 import form-stdlib/circle.bml;
 import control/choice-lane-core.fk;
 import form-stdlib/bml/text-diff.bml;
-import form-stdlib/bml/spawn-guard.bml;
+import form-stdlib/bml/cell-said.bml;
 import form-stdlib/bml/form-cli-code-live.bml;
 import form-stdlib/bml/parse.bml;
 section [form.bml] {
@@ -219,22 +219,17 @@ section [form.bml] {
    let cleared = nil?(conflicts) ? host_path_remove(path) : 0;
    [nil?(conflicts) ? 1 : 0, conflicts];
   };
-  // a child within its deadline: its exit status, or nothing when it could not start or was stopped
-  def fccc-spawn-wait(argv, out, err, deadline) {
-   let gone = host_path_remove(out);
-   let heard = host_path_remove(err);
-   let pid = sg-spawn-at(argv, ["/dev/null", out, err]);
-   pid <= 0 ? nothing() : fccc-wait(pid, host_monotonic_ms() + deadline);
-  }
-  def fccc-wait(pid, until) = ((Comparable) host_alive(pid) != 1) ? host_wait(pid) : (host_monotonic_ms() > until) ? fccc-stop(pid) : fccc-rest(pid, until);
-  def fccc-stop(pid) {
-   host_kill(pid);
-   host_wait(pid);
-   nothing();
-  }
-  def fccc-rest(pid, until) {
-   host_sleep_ms(100);
-   fccc-wait(pid, until);
+  // a cell called in this process within its deadline (cell_run: no child, no exit to wait for): the status a run of it
+  // gives, 0 when it ran to its end with no compile error and 1 when it stopped or its compile counted an error, or
+  // nothing when it would not run or ran past its budget. What it printed and the value it ended on stand in `out`, what
+  // it said (the compiler's lines, the live readings its claims voiced) in `err`, where the readers below look.
+  def fccc-cell-status(rec) = nothing?(rec) ? nothing() : nothing?(record_get(rec, "stopped")) ? ((Comparable) record_get(rec, "errors") > 0 ? 1 : 0) : (String) record_get(record_get(rec, "stopped"), "kind") == "stop" ? 1 : nothing();
+  def fccc-cell-stop-line(rec) = nothing?(rec) || nothing?(record_get(rec, "stopped")) ? "" : "fkwu: " ++ (String) record_get(record_get(rec, "stopped"), "message") ++ "\n";
+  def fccc-cell-run(path, out, err, deadline) {
+   let rec = cell_run(path, 0, deadline < 1 ? 1 : deadline, nothing());
+   let printed = write_file_text(out, cs-stdout(rec));
+   let said = write_file_text(err, cs-stderr(rec) ++ fccc-cell-stop-line(rec));
+   fccc-cell-status(rec);
   }
   def fccc-last-line(lines, last) = nil?(lines) ? last : fccc-last-line(lines[1:], (Comparable) len(trim(lines[0])) == 0 ? last : trim(lines[0]));
   def fccc-answered(status, out) = (nothing?(status) || !((Comparable) status == 0)) ? nothing() : fccc-last-line(split-on(read_file(out) ?? "", "\n"), "");
@@ -248,7 +243,7 @@ section [form.bml] {
   }
   def fccc-band-run(gap, cand, n) {
    let base = fccc-gap-root(gap) ++ "/band-" ++ host_pid().str() ++ "-" ++ n.str();
-   let status = fccc-spawn-wait(["./fkwu", fccc-gap-band(gap)], base ++ ".out", base ++ ".err", fccc-gap-deadline(gap));
+   let status = fccc-cell-run(fccc-gap-band(gap), base ++ ".out", base ++ ".err", fccc-gap-deadline(gap));
    let reading = parse-int(fccc-answered(status, base ++ ".out") ?? "");
    [reading, fccc-blocking(gap, status, reading, base ++ ".err")];
   }
@@ -266,7 +261,7 @@ section [form.bml] {
    let path = fccc-gap-root(gap) ++ "/riftcase-" ++ host_pid().str() ++ "-" ++ tag ++ (bml ? ".bml" : ".fk");
    let body = bml ? ("section [form.bml] {\n" ++ input ++ ";\n}\n") : ("(do\n    " ++ input ++ ")\n");
    let wrote = write_file(path, fccc-header(fccc-gap-band(gap)) ++ "\n" ++ body);
-   fccc-answered(fccc-spawn-wait(["./fkwu", path], path ++ ".out", path ++ ".err", fccc-gap-deadline(gap)), path ++ ".out");
+   fccc-answered(fccc-cell-run(path, path ++ ".out", path ++ ".err", fccc-gap-deadline(gap)), path ++ ".out");
   }
   def fccc-probe-run(gap, cand, arg) = fccc-index(arg[0], 0) |> map(pair => fccc-probe-one(gap, pair[1], arg[1].str() ++ "-" ++ pair[0].str()));
   // the prober: [outputs, restored]; each output is the last stdout line, or nothing when it stopped

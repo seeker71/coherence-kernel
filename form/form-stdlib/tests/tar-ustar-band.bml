@@ -1,0 +1,176 @@
+; tar-ustar-band.bml — a directory written as a ustar archive in Form (form-stdlib/bml/tar-ustar.bml), read back by a second hand.
+;
+; dsv4-proof-retention.bml ran `tar -cf - -C dir .` and kept its stdout. ust-tree writes the same archive without the program. The
+; reader below is written apart from the writer (it parses a header from its fields and checks the checksum itself), and the
+; existing retention band (dsv4-oracle-recipes-band, claim 4096) reads the archive the door publishes with the host's own tar.
+;
+; Expected: 2047
+; Verdict 2047 when every claim lands:
+;   1     round trip: the entries the reader finds are, in order, `./` and then every path under the directory as `./name` (a
+;         directory ends in `/`, siblings sorted), and each file's bytes equal the source's: text, a name with a space, a file of all
+;         256 byte values with NULs, an empty file, a file of 512 bytes exactly and one of 513
+;   2     every header's checksum is the sum of its bytes with the checksum field read as eight spaces, written as six octal digits, a
+;         NUL and a space; every header says `ustar` and version 00
+;   4     modes and times: the header of an executable says 493, of a read-only file 292, of a directory its own; the time is the
+;         source's modification time in seconds (1700000000)
+;   8     padding: every entry's bytes are padded to a multiple of 512, the archive's length is a multiple of 512, and it ends in
+;         two zero blocks
+;   16    a path longer than 100 bytes is cut into prefix and name at a `/` and the reader joins them back to the whole path
+;   32    a path that cannot be cut (a 120 byte name with no `/`) ends the archive with a named reason and no archive
+;   64    a link to a regular file arrives as that file's bytes; a link to a directory ends the archive with a named reason
+;   128   an empty directory is one header (`./hollow/`, type 5, size 0)
+;   256   plant: a flipped byte in a header is seen by the reader's checksum; a flipped content byte is seen by the round trip
+;   512   plant: an archive of a different directory does not read as the first (the round trip is not vacuous)
+;   1024  the writer is quick: a 3 MiB file and forty small ones are archived in under 10 s
+;
+; REQUIRES: the seed doors host_file_mode, host_file_identity, host_realpath, host_utimes, host_chmod (runtime/fkwu-uni.c leaf-door modes 35-48) and the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/tar-ustar.bml
+section [form.bml] {
+ class TarUstarBand {
+  def tub-fresh() {
+   let root = temp_dir() ++ "/tar-ustar-band-" ++ host_pid().str() ++ "-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["tar", root, 0] : nothing();
+  }
+  def tub-root(ctx) = ctx[1];
+  def tub-all-bytes() = str-spans(map(i => byte_to_str(i % 256), range(0, 256)));
+  def tub-put(path, text, mode) {
+   let made = cbn-ensure(cbn-parent(path), record_new(0));
+   let wrote = write_file(path, text);
+   let moded = host_chmod(path, mode);
+   let timed = host_utimes(path, 1700000000123);
+   (Comparable) wrote == len(text) && (Comparable) moded == 0 && (Comparable) timed == 0;
+  }
+  def tub-source(ctx) {
+   let src = tub-root(ctx) ++ "/src";
+   let a = tub-put(src ++ "/a.txt", "hello\n", 420);
+   let b = tub-put(src ++ "/odd name.bin", tub-all-bytes(), 420);
+   let c = tub-put(src ++ "/sub/tool", "#!/bin/true\n", 493);
+   let d = tub-put(src ++ "/sub/empty", "", 420);
+   let e = tub-put(src ++ "/sub/ro", "ro\n", 292);
+   let f = tub-put(src ++ "/z512", ust-rep("x", 512), 420);
+   let g = tub-put(src ++ "/z513", ust-rep("y", 513), 420);
+   let h = cbn-ensure(src ++ "/hollow", record_new(0));
+   a && b && c && d && e && f && g && h ? src : nothing();
+  }
+  // ---- the reader: a second hand
+  def tub-cstr(h, at, n) = substring(h, at, at + tub-nul-at(h, at, n));
+  def tub-nul-at(h, at, n) = tub-nul-go(h, at, 0, n);
+  def tub-nul-go(h, at, i, n) = i >= n ? n : (Comparable) str_byte_at(h, at + i) == 0 ? i : tub-nul-go(h, at, i + 1, n);
+  def tub-octal(s) = len(s) == 0 ? 0 : tub-octal-go(s, 0, 0);
+  def tub-octal-go(s, i, acc) = i >= len(s) ? acc : tub-octal-go(s, i + 1, acc * 8 + (str_byte_at(s, i) - 48));
+  def tub-spaced-sum(h) = foldl((acc, i) => acc + ((i >= 148 && i < 156) ? 32 : str_byte_at(h, i)), 0, range(0, 512));
+  def tub-sum-ok?(h) = (Comparable) tub-octal(tub-cstr(h, 148, 6)) == tub-spaced-sum(h) && (Comparable) str_byte_at(h, 154) == 0 && (Comparable) str_byte_at(h, 155) == 32;
+  def tub-magic-ok?(h) = (String) substring(h, 257, 262) == "ustar" && (Comparable) str_byte_at(h, 262) == 0 && (String) substring(h, 263, 265) == "00";
+  def tub-name(h) = len(tub-cstr(h, 345, 155)) > 0 ? tub-cstr(h, 345, 155) ++ "/" ++ tub-cstr(h, 0, 100) : tub-cstr(h, 0, 100);
+  def tub-zero-block?(h) = (String) h == ust-nuls(512);
+  // an entry: [name, type, bits, size, mtime, content, checksum-held, magic-held]
+  def tub-entry(archive, at) {
+   let h = substring(archive, at, at + 512);
+   let size = tub-octal(tub-cstr(h, 124, 12));
+   [tub-name(h), substring(h, 156, 157), tub-octal(tub-cstr(h, 100, 8)), size, tub-octal(tub-cstr(h, 136, 12)), substring(archive, at + 512, at + 512 + size), tub-sum-ok?(h), tub-magic-ok?(h)];
+  }
+  def tub-next(at, size) = at + 512 + ((size + 511) / 512) * 512;
+  def tub-entries(archive, at) = at + 512 > len(archive) || tub-zero-block?(substring(archive, at, at + 512)) ? [] : tub-entries-go(archive, at, tub-entry(archive, at));
+  def tub-entries-go(archive, at, e) = cons(e, tub-entries(archive, tub-next(at, e[3])));
+  def tub-names(entries) = map(e => e[0], entries);
+  // ---- 1 round trip
+  def tub-same?(src, entries) = nil?(entries) ? true : (((String) entries[0][1] == "5") || ((String) (read_file(src ++ "/" ++ substring(entries[0][0], 2, len(entries[0][0]))) ?? "x") == entries[0][5])) && tub-same?(src, entries[1:]);
+  def tub-expected() = ["./", "./a.txt", "./hollow/", "./odd name.bin", "./sub/", "./sub/empty", "./sub/ro", "./sub/tool", "./z512", "./z513"];
+  def tub-c-roundtrip(ctx) {
+   let src = tub-source(ctx);
+   let made = ust-tree(src);
+   let entries = tub-entries(made[1], 0);
+   (String) made[0] == "" && (Comparable) made[2] == 10 && (String) str-spans(map(n => n ++ "|", tub-names(entries))) == str-spans(map(n => n ++ "|", tub-expected())) && tub-same?(src, entries);
+  }
+  def tub-archive(ctx) = ust-tree(tub-root(ctx) ++ "/src")[1];
+  // ---- 2 checksums and magic
+  def tub-c-checksums(ctx) {
+   let entries = tub-entries(tub-archive(ctx), 0);
+   all?(e => e[6] && e[7], entries) && (Comparable) len(entries) == 10;
+  }
+  // ---- 4 modes and times
+  def tub-find(entries, name) = nil?(entries) ? nothing() : (String) entries[0][0] == name ? entries[0] : tub-find(entries[1:], name);
+  def tub-c-modes(ctx) {
+   let entries = tub-entries(tub-archive(ctx), 0);
+   let src = tub-root(ctx) ++ "/src";
+   (Comparable) tub-find(entries, "./sub/tool")[2] == 493 && (Comparable) tub-find(entries, "./sub/ro")[2] == 292 && (Comparable) tub-find(entries, "./a.txt")[2] == 420
+   && (Comparable) tub-find(entries, "./sub/")[2] == (host_file_mode(src ++ "/sub") % 4096) && (Comparable) tub-find(entries, "./a.txt")[4] == 1700000000 && (Comparable) tub-find(entries, "./a.txt")[3] == 6;
+  }
+  // ---- 8 padding and the end
+  def tub-c-padding(ctx) {
+   let archive = tub-archive(ctx);
+   let entries = tub-entries(archive, 0);
+   let used = foldl((acc, e) => tub-next(acc, e[3]), 0, entries);
+   (Comparable) (len(archive) % 512) == 0 && (Comparable) used + 1024 == len(archive) && (String) substring(archive, len(archive) - 1024, len(archive)) == ust-nuls(1024);
+  }
+  // ---- 16 a long path
+  def tub-long-name() = "d0123456789012345678901234567890123456789/d1123456789012345678901234567890123456789/d2123456789012345678901234567890123456789/leaf.txt";
+  def tub-c-long(ctx) {
+   let src = tub-root(ctx) ++ "/long";
+   let put = tub-put(src ++ "/" ++ tub-long-name(), "deep\n", 420);
+   let made = ust-tree(src);
+   let entries = tub-entries(made[1], 0);
+   (String) made[0] == "" && (Comparable) len("./" ++ tub-long-name()) > 100 && nothing?(tub-find(entries, "./" ++ tub-long-name())) == false && (String) tub-find(entries, "./" ++ tub-long-name())[5] == "deep\n"
+   && all?(e => e[6], entries);
+  }
+  // ---- 32 a path that cannot be cut
+  def tub-c-uncut(ctx) {
+   let src = tub-root(ctx) ++ "/uncut";
+   let put = tub-put(src ++ "/" ++ ust-rep("n", 120), "x", 420);
+   let made = ust-tree(src);
+   (String) made[0] != "" && (String) made[1] == "" && (Comparable) str_find(made[0], "path too long", 0) >= 0;
+  }
+  // ---- 64 links
+  def tub-c-links(ctx) {
+   let src = tub-root(ctx) ++ "/links";
+   let put = tub-put(src ++ "/real.txt", "real\n", 420);
+   let l1 = host_symlink("real.txt", src ++ "/link.txt");
+   let ok = ust-tree(src);
+   let entries = tub-entries(ok[1], 0);
+   let d = cbn-ensure(src ++ "/dir", record_new(0));
+   let l2 = host_symlink("dir", src ++ "/linked-dir");
+   let refused = ust-tree(src);
+   (String) ok[0] == "" && (String) tub-find(entries, "./link.txt")[5] == "real\n" && (String) refused[0] != "" && (Comparable) str_find(refused[0], "linked directory", 0) >= 0 && (String) refused[1] == "";
+  }
+  // ---- 128 empty directory
+  def tub-c-hollow(ctx) {
+   let entries = tub-entries(tub-archive(ctx), 0);
+   let e = tub-find(entries, "./hollow/");
+   !nothing?(e) && (String) e[1] == "5" && (Comparable) e[3] == 0;
+  }
+  // ---- 256 plants
+  def tub-c-plant-bytes(ctx) {
+   let archive = tub-archive(ctx);
+   let src = tub-root(ctx) ++ "/src";
+   let at = 512 + 4;
+   let broken = substring(archive, 0, at) ++ "Z" ++ substring(archive, at + 1, len(archive));
+   let header = tub-entries(broken, 0);
+   let first = tub-find(tub-entries(archive, 0), "./a.txt");
+   let a = substring(archive, 0, len(archive) - 1);
+   let content-at = 512 + 512;
+   let flipped = substring(archive, 0, content-at) ++ "J" ++ substring(archive, content-at + 1, len(archive));
+   !all?(e => e[6], header) && !tub-same?(src, tub-entries(flipped, 0)) && tub-same?(src, tub-entries(archive, 0));
+  }
+  // ---- 512 another directory is another archive
+  def tub-c-plant-other(ctx) {
+   let other = tub-root(ctx) ++ "/other";
+   let put = tub-put(other ++ "/a.txt", "HELLO\n", 420);
+   let made = ust-tree(other);
+   !tub-same?(tub-root(ctx) ++ "/src", tub-entries(made[1], 0)) || (Comparable) len(tub-entries(made[1], 0)) != 10;
+  }
+  // ---- 1024 speed
+  def tub-c-speed(ctx) {
+   let src = tub-root(ctx) ++ "/speed";
+   let big = tub-put(src ++ "/big.bin", ust-rep(tub-all-bytes(), 12288), 420);
+   let smalls = foldl((acc, i) => acc && tub-put(src ++ "/small/s" ++ i.str() ++ ".txt", "small " ++ i.str() ++ "\n", 420), true, range(0, 40));
+   let t0 = host_monotonic_ms();
+   let made = ust-tree(src);
+   (String) made[0] == "" && host_monotonic_ms() - t0 < 10000 && (Comparable) made[2] == 43 && big && smalls;
+  }
+ }
+ let ctx = tub-fresh();
+ nothing?(ctx) ? form_error("tar-ustar band needs a fresh directory") : 0;
+ let verdict = live-claims("tar-ustar-band", ctx, [["roundtrip", 1, 1, tub-c-roundtrip], ["checksums", 2, 1, tub-c-checksums], ["modes", 4, 1, tub-c-modes], ["padding", 8, 1, tub-c-padding], ["long", 16, 1, tub-c-long], ["uncut", 32, 1, tub-c-uncut], ["links", 64, 1, tub-c-links], ["hollow", 128, 1, tub-c-hollow], ["plant-bytes", 256, 1, tub-c-plant-bytes], ["plant-other", 512, 1, tub-c-plant-other], ["speed", 1024, 1, tub-c-speed]]);
+ host_dir_rmdir(tub-root(ctx));
+ verdict;
+}
