@@ -1,0 +1,423 @@
+; form-path-band.fk — form-path, a path query over Form nodes: XPath-shaped, resolving to content-addressed node ids with their source.
+;
+; The index is form-find's (fpa-open: fnd-open with the `path` verb taught); a query is parsed to a plan, narrowed through the index's tables, and
+; evaluated over the nodes of the files it names. The oracles are independent of the scanner that builds the tree: the text answers of form-find
+; (defs, find), the grep engine over files read afresh from disk (stw-grep-rows), and a reading of the lines by INDENTATION (a stack of the lines
+; that enclose a line, a def's extent ending where the indent comes back) which shares nothing with the bracket-matching scanner.
+; The tree must stand still while the band runs.
+;
+;   1      identity: a node's id is content-addressed (the same def twice, in two files, is one id and one interned node; another text is another id);
+;          the host field's own cell index is the order of first making, so it is not the identity
+;   2      twenty path expressions over this tree answer exactly their oracles: defs by name (4), a class, a class's defs, defs that call a name,
+;          the call sites, the strings of a def, defs over 40 lines, arity, a name regex against `find`, imports, a union, [1], [last()], a parent,
+;          count(), a path regex over files, and has()
+;   4      ids are stable: another def edited -> unchanged; the def's own text edited -> a new id; lines added above it -> the same id at a new
+;          span; the same text moved to another file -> the same id
+;   8      provenance: every result has file, byte span and line; the line is the count of newlines before the span; the span's text read from the
+;          file on disk equals the node's source; the span still hashes to the node's id
+;   16     a four-stage pipeline (path -> filter -> count -> render) passes nodes, and the render hook counts text made exactly once, at the edge
+;   32     refusals: every unsupported syntax is a named refusal (form-path-*), none a guess
+;   64     the cache: a file's tree is parsed once; a second query parses nothing; a changed file is parsed again, and only that one
+;   128    the wire: the service's `path` verb answers rows, ids, text and counts as the wire JSON, exit 1 for no match, exit 2 for a refusal;
+;          the expression rides in the argument or in "input"; form-find's own verbs still answer
+;   256    five questions timed: the first (cold) and the repeated (warm) path query, and the text scan that answers the nearest question
+;   512    the source begins nothing: no host_spawn, host_capture, host-exec or host_wait in form-path.bml or its doors
+;   1024   the cold door (no service: an index of its own) answers what the standing index answers
+;
+; Expected: 2047
+; Verdict 2047
+; REQUIRES: (host_file_identity, host_utimes, fs_list, host_mkdir_mode)
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/bml/form-path.bml
+import form/form-stdlib/bml/form-path.bml;
+section [form.bml] {
+  let FPB-SCANS = fnd-map();
+  def fpb-say(label, v) = print([label, v]);
+  def fpb-bit(ok, bit) = ok ? bit : 0;
+  def fpb-text(path) = read_file(path) ?? "";
+  def fpb-same(a, b) = (String) value_str(a) == (String) value_str(b);
+  def fpb-all(xs) = nil?(xs) ? true : xs[0] ? fpb-all(xs[1:]) : false;
+  def fpb-ms(t0) = host_monotonic_ms() - t0;
+  def fpb-nul() = byte_to_str(0);
+  def fpb-join(rows) = nil?(rows) ? "" : fat-join(rows, "\n") ++ "\n";
+  def fpb-flat(xss) = foldl((acc, xs) => append(acc, xs), [], xss);
+  def fpb-set(xs) = sort-strs(xs);
+  def fpb-same-set(a, b) = fpb-diff(fpb-uniq(a), fpb-uniq(b));
+  def fpb-diff(a, b) {
+   let ok = fpb-same(a, b);
+   let z = ok ? 0 : fpb-say("set-differs", ["mine", len(a), "oracle", len(b), "only-mine", take(5, filter(k => !fnd-has?(b, k), a)), "only-oracle", take(5, filter(k => !fnd-has?(a, k), b))]);
+   ok;
+  }
+  def fpb-rows-same(a, b) = (String) a == b ? true : fpb-diff(fag-lines(a), fag-lines(b));
+  def fpb-uniq(xs) = fpb-uniq-go(sort-strs(xs), []);
+  def fpb-uniq-go(xs, acc) = nil?(xs) ? reverse(acc) : fpb-uniq-go(xs[1:], (nil?(acc) || (String) acc[0] != xs[0]) ? cons(xs[0], acc) : acc);
+
+  // ---- asking through the wire: [exit, stdout, stderr, schema, crossings] ----
+  def fpb-request(cmd, input) = "{\"command\":" ++ json-quote-string(cmd) ++ ",\"input\":" ++ json-quote-string(input) ++ "}";
+  def fpb-decoded(n) = [node_value(json-object-get(n, "exit")), node_value(json-object-get(n, "stdout")), node_value(json-object-get(n, "stderr")), node_value(json-object-get(n, "schema")), node_value(json-object-get(n, "crossings"))];
+  def fpb-wire(s, cmd, input) = fpb-decoded(faj-json("form-path-band", fnd-serve(s, fpb-request(cmd, input))));
+  def fpb-fnd(s, cmd) = fpb-decoded(faj-json("form-path-band", fnd-serve(s, fpb-request(cmd, ""))));
+
+  // ---- results ----
+  def fpb-hits(s, expr) = fpb-hits-of(fpa-path(s, expr));
+  def fpb-hits-of(r) = (String) r[0] == "ok" ? fpa-hits(r[2]) : [];
+  def fpb-rows(s, expr) = fpb-rows-of(s, fpa-path(s, expr));
+  def fpb-rows-of(s, r) = (String) r[0] != "ok" ? "ERR" : nil?(fpa-hits(r[2])) ? "" : fpa-render(s, r[2], "rows");
+  def fpb-key(h) = fpa-hit-path(h) ++ ":" ++ fpa-hit-line(h).str();
+  def fpb-keys(s, expr) = fpb-hits(s, expr) |> map(h => fpb-key(h));
+
+  // ---- the oracle: a file read by lines and indentation ----
+  def fpb-ind(l) = scan_run(l, 0, 0);
+  def fpb-body(l) = substring(l, fpb-ind(l), len(l));
+  def fpb-sig?(l) = fpb-ind(l) < len(l) && !fnd-starts?(fpb-body(l), "//") && !fnd-starts?(fpb-body(l), ";");
+  def fpb-word(l) = substring(l, fpb-ind(l), scan_run(l, fpb-ind(l), 3));
+  def fpb-defl?(l) = (String) fpb-word(l) == "def" || (String) fpb-word(l) == "defn";
+  def fpb-openl?(l) = fpb-defl?(l) || (String) fpb-word(l) == "let" || (String) fpb-word(l) == "field" || (String) fpb-word(l) == "thought";
+  def fpb-closer?(l) = fpb-sig?(l) && (str_byte_at(l, fpb-ind(l)) == 125 || str_byte_at(l, fpb-ind(l)) == 41);
+  def fpb-name-end(l, i) = i >= len(l) ? i : (str_byte_at(l, i) == 32 || str_byte_at(l, i) == 40 || str_byte_at(l, i) == 61 || str_byte_at(l, i) == 58 || str_byte_at(l, i) == 123) ? i : fpb-name-end(l, i + 1);
+  def fpb-name-at(l) = scan_run(l, fpb-ind(l) + len(fpb-word(l)), 0);
+  def fpb-name(l) = substring(l, fpb-name-at(l), fpb-name-end(l, fpb-name-at(l)));
+  // the parameters counted on the line itself: -1 when the list does not close there
+  def fpb-arity(l) = fpb-ar(l, fpb-name-end(l, fpb-name-at(l)));
+  def fpb-ar(l, p) = (p >= len(l) || str_byte_at(l, p) != 40) ? 0 : fpb-ar-go(l, p + 1, 1, 0, 0);
+  def fpb-ar-go(l, i, depth, commas, any) = i >= len(l) ? 0 - 1 : fpb-ar-byte(l, i, depth, commas, any, str_byte_at(l, i));
+  def fpb-ar-byte(l, i, depth, commas, any, b) = (b == 41 && depth == 1) ? (any == 1 ? commas + 1 : 0)
+   : (b == 40 || b == 91 || b == 123) ? fpb-ar-go(l, i + 1, depth + 1, commas, 1)
+   : (b == 41 || b == 93 || b == 125) ? fpb-ar-go(l, i + 1, depth - 1, commas, 1)
+   : (b == 44 && depth == 1) ? fpb-ar-go(l, i + 1, depth, commas + 1, any)
+   : b == 32 ? fpb-ar-go(l, i + 1, depth, commas, any)
+   : fpb-ar-go(l, i + 1, depth, commas, 1);
+  // a stack of the lines that enclose the line being read: [indent, is a def, line no, name, local?, arity]
+  // the quotes of a line that open or close a string (a \" does not)
+  def fpb-qc(l, i, acc) = i >= len(l) ? acc : str_byte_at(l, i) == 92 ? fpb-qc(l, i + 2, acc) : fpb-qc(l, i + 1, str_byte_at(l, i) == 34 ? acc + 1 : acc);
+  // the code of a line: a trailing // comment (one whose slashes lie outside a string) is cut off
+  def fpb-cut(l, from) = str_find(l, "//", from) < 0 ? l : fpb-qc(substring(l, 0, str_find(l, "//", from)), 0, 0) % 2 == 0 ? substring(l, 0, str_find(l, "//", from)) : fpb-cut(l, str_find(l, "//", from) + 1);
+  def fpb-odd?(l) = fpb-qc(fpb-cut(l, 0), 0, 0) % 2 == 1;
+  // a line that begins something (or ends a block): only these end a def; a line that merely dedents is the def going on (a .fk ternary chain)
+  def fpb-boundary?(l) = fpb-closer?(l) || fpb-openl?(l) || (String) fpb-word(l) == "class" || (String) fpb-word(l) == "section" || (String) fpb-word(l) == "import" || (String) fpb-word(l) == "blueprint";
+  // instr: a multi-line string is open; its lines belong to the def that holds it and are read for nothing else
+  def fpb-scan(lines, no, stack, last, done, instr) = nil?(lines) ? fpb-flush(stack, last, done) : fpb-scan-line(lines, no, stack, last, done, instr, lines[0]);
+  def fpb-scan-line(lines, no, stack, last, done, instr, l) = instr ? fpb-scan(lines[1:], no + 1, stack, no, done, fpb-odd?(l) ? false : true)
+   : !fpb-sig?(l) ? fpb-scan(lines[1:], no + 1, stack, last, done, false)
+   : !fpb-boundary?(l) ? fpb-scan(lines[1:], no + 1, stack, no, done, fpb-odd?(l))
+   : fpb-scan-sig(lines, no, stack, done, l, fpb-pop(stack, fpb-ind(l), no, last, fpb-closer?(l), done));
+  def fpb-scan-sig(lines, no, stack, done, l, popped) = fpb-scan(lines[1:], no + 1, fpb-push(popped[0], l, no), no, popped[1], fpb-odd?(l));
+  def fpb-push(stack, l, no) = fpb-closer?(l) ? stack : cons([fpb-ind(l), fpb-defl?(l), no, fpb-openl?(l) ? fpb-name(l) : "", fpb-in-def?(stack), fpb-defl?(l) ? fpb-arity(l) : 0, fpb-word(l)], stack);
+  def fpb-in-def?(stack) = any?(e => e[1], stack);
+  def fpb-pop(stack, k, no, last, closer, done) = (nil?(stack) || (Comparable) stack[0][0] < k) ? [stack, done] : fpb-pop(stack[1:], k, no, last, closer, fpb-popped(stack[0], k, no, last, closer, done));
+  def fpb-popped(e, k, no, last, closer, done) = cons([e[2], (closer && (Comparable) e[0] == k) ? no : last, e[3], e[0], e[4], e[5], e[6]], done);
+  def fpb-flush(stack, last, done) = nil?(stack) ? done : fpb-flush(stack[1:], last, cons([stack[0][2], last, stack[0][3], stack[0][0], stack[0][4], stack[0][5], stack[0][6]], done));
+  // every opener of a file: [line, end line, name, indent, local?, arity, word]; the defs that are not local are the ones the tree holds
+  def fpb-file-scan(rel) = fnd-mhas?(FPB-SCANS, rel) ? fnd-mget(FPB-SCANS, rel, []) : fpb-file-scan-keep(rel, fpb-scan(fag-lines(fpb-text(rel)), 1, [], 0, [], false));
+  def fpb-file-scan-keep(rel, done) {
+   let z = fnd-mset(FPB-SCANS, rel, done);
+   done;
+  }
+  def fpb-top-defs(rel) = fpb-file-scan(rel) |> filter(e => !e[4] && (String) e[6] != "let" && (String) e[6] != "field" && (String) e[6] != "thought" && (String) e[2] != "");
+  def fpb-owners(rel) = fpb-file-scan(rel) |> filter(e => !e[4] && (String) e[2] != "");
+  def fpb-def-keys(rel, pred) = fpb-top-defs(rel) |> filter(e => pred(e)) |> map(e => rel ++ ":" ++ e[0].str());
+
+  // a hit row of the grep engine -> [path, line, text]
+  def fpb-row-path(r) = substring(r, 0, str_find(r, ":", 0));
+  def fpb-row-line(r) = str_to_int(substring(r, str_find(r, ":", 0) + 1, str_find(r, ":", str_find(r, ":", 0) + 1)));
+  def fpb-row-text(r) = substring(r, str_find(r, ":", str_find(r, ":", 0) + 1) + 1, len(r));
+  // a call written in code, not in a comment or a string: the literal's column has no // before it and an even number of quotes
+  def fpb-quotes(t, i, stop, n) = i >= stop ? n : fpb-quotes(t, i + 1, stop, str_byte_at(t, i) == 34 ? n + 1 : n);
+  def fpb-code-at?(l, p) = !fnd-starts?(fpb-body(l), "//") && !fnd-starts?(fpb-body(l), ";") && (fpb-quotes(l, 0, p, 0) % 2 == 0) && (str_find(l, "//", 0) < 0 || str_find(l, "//", 0) > p);
+  def fpb-occ?(l, lit, from) = str_find(l, lit, from) < 0 ? false : fpb-code-at?(l, str_find(l, lit, from)) ? true : fpb-occ?(l, lit, str_find(l, lit, from) + 1);
+  // a def's own header names it: the name is not a call of itself, so the search on that line begins after the name
+  def fpb-from(l) = fpb-defl?(l) ? fpb-name-at(l) + 1 : 0;
+  def fpb-lit-rows(srcheld, lit) = stw-grep-rows(["-n", "-F", "-e", lit], srcheld) |> filter(r => fpb-occ?(fpb-row-text(r), lit, fpb-from(fpb-row-text(r))));
+  // the owner of a line: the def (not local) whose extent holds it
+  def fpb-owner-keys(r) = fpb-owners(fpb-row-path(r)) |> filter(e => (String) e[6] != "let" && (Comparable) e[0] <= fpb-row-line(r) && (Comparable) fpb-row-line(r) <= e[1]) |> map(e => fpb-row-path(r) ++ ":" ++ e[0].str());
+
+  // ---- claim 2: the twenty expressions ----
+  def fpb-defs-eq(s, name) = (String) fnd-defs(s, [name])[1] == fpb-rows(s, "//def[@name=\"" ++ name ++ "\"]") && (String) fnd-defs(s, [name])[1] != "";
+  def fpb-e1(s) = fpb-defs-eq(s, "fnd-serve");
+  def fpb-e2(s) = fpb-defs-eq(s, "fat-wire-call");
+  def fpb-e3(s) = fpb-defs-eq(s, "count-computable");
+  def fpb-e4(s) = fpb-defs-eq(s, "sr-fresh");
+  def fpb-e5(s) = (String) fnd-defs(s, ["FormFind"])[1] == fpb-rows(s, "//class[@name=\"FormFind\"]") && (String) fpb-rows(s, "//class[@name=\"FormFind\"]") != "";
+  def fpb-ff() = "form/form-stdlib/bml/form-find.bml";
+  def fpb-e6(s) = fpb-same-set(fpb-keys(s, "//class[@name=\"FormFind\"]/def"), fpb-def-keys(fpb-ff(), e => true)) && len(fpb-keys(s, "//class[@name=\"FormFind\"]/def")) > 200;
+  def fpb-e7(s, srcheld) = fpb-same-set(fpb-keys(s, "//def[calls(\"host_spawn_at\")]"), fpb-flat(fpb-lit-rows(srcheld, "host_spawn_at(") |> map(r => fpb-owner-keys(r))) |> fpb-uniq);
+  def fpb-e8(s, srcheld) = fpb-same-set(fpb-keys(s, "//call[@name=\"host_spawn_at\"]"), fpb-lit-rows(srcheld, "host_spawn_at(") |> map(r => fpb-row-path(r) ++ ":" ++ fpb-row-line(r).str()) |> fpb-uniq);
+  // the strings of one def: the quotes of its own line, paired
+  def fpb-pairs(l, i, acc) = str_find(l, byte_to_str(34), i) < 0 ? reverse(acc) : fpb-pair-close(l, str_find(l, byte_to_str(34), i), acc);
+  def fpb-pair-close(l, a, acc) = str_find(l, byte_to_str(34), a + 1) < 0 ? reverse(acc) : fpb-pairs(l, str_find(l, byte_to_str(34), a + 1) + 1, cons(substring(l, a, str_find(l, byte_to_str(34), a + 1) + 1), acc));
+  def fpb-e9(s) = fpb-e9-with(fpb-rows(s, "//def[@name=\"fnd-serve\"]"), fpb-hits(s, "//def[@name=\"fnd-serve\"]//string"));
+  def fpb-e9-with(row, hits) = fpb-e9-cmp(fpb-pairs(fpb-row-text(substring(row, 0, len(row) - 1)), 0, []), hits);
+  def fpb-e9-cmp(want, hits) = (Comparable) len(want) >= 3 && len(want) == len(hits) && fpb-same(want, hits |> map(h => fpb-hit-text-of(h)));
+  def fpb-hit-text-of(h) = substring(fpb-text(fpa-hit-path(h)), fpa-hit-start(h), fpa-hit-end(h));
+  // the indentation reading is exact for the .bml files (one layout); in .fk files a ternary chain may close a block at its own def's indent or
+  // start a line in column 0, which an indent reading cannot tell from the next def: those are told apart below (printed, not counted)
+  def fpb-long-keys(rels) = fpb-flat(rels |> map(rel => fpb-def-keys(rel, e => (Comparable) e[1] - e[0] + 1 > 40)));
+  def fpb-e10(s, srcheld) = fpb-same-set(fpb-keys(s, "/file[@path~\"[.]bml$\"]//def[@lines>40]"), fpb-long-keys(srcheld |> filter(rel => fnd-ends?(rel, ".bml")))) && len(fpb-keys(s, "/file[@path~\"[.]bml$\"]//def[@lines>40]")) > 20 && fpb-fk-note(s, srcheld);
+  def fpb-fk-note(s, srcheld) {
+   let mine = fpb-keys(s, "/file[@path~\"[.]fk$\"]//def[@lines>40]");
+   let want = fpb-long-keys(srcheld |> filter(rel => fnd-ends?(rel, ".fk")));
+   let z = fpb-say("lines>40 in .fk files", ["mine", len(mine), "indentation-reading", len(want), "only-mine", filter(k => !fnd-has?(want, k), mine), "only-reading", filter(k => !fnd-has?(mine, k), want)]);
+   true;
+  }
+  def fpb-e11(s) = fpb-same-set(fpb-keys(s, "/file[@path=\"form/form-stdlib/bml/form-path.bml\"]//def[@arity=0]"), fpb-def-keys("form/form-stdlib/bml/form-path.bml", e => (Comparable) e[5] == 0)) && len(fpb-keys(s, "/file[@path=\"form/form-stdlib/bml/form-path.bml\"]//def[@arity=0]")) > 5;
+  def fpb-e12(s, srcheld) = fpb-rows-same(fpb-rows(s, "//def[@name~\"^fnd-ext\"]"), fpb-join(stw-grep-rows(["-n", "-E", "-e", "^ *defn? fnd-ext"], srcheld))) && fpb-rows(s, "//def[@name~\"^fnd-ext\"]") != "";
+  def fpb-e13(s, srcheld) = fpb-rows-same(fpb-rows(s, "//import[@value=\"form-stdlib/core.fk\"]"), fpb-join(stw-grep-rows(["-n", "-E", "-e", "^ *import form-stdlib/core\\.fk;?[ ]*$"], srcheld))) && len(fpb-hits(s, "//import[@value=\"form-stdlib/core.fk\"]")) > 100;
+  def fpb-e14(s) = fpb-same-set(fpb-keys(s, "//def[@name=\"fnd-serve\"] | //class[@name=\"FormFind\"] | //def[@name=\"fnd-serve\"]"), [fpb-ff() ++ ":" ++ fpb-row-line(fnd-defs(s, ["FormFind"])[1]).str(), fpb-ff() ++ ":" ++ fpb-row-line(fnd-defs(s, ["fnd-serve"])[1]).str()]);
+  def fpb-ordered-keys(rel) = sort-ints(fpb-top-defs(rel) |> map(e => e[0])) |> map(l => rel ++ ":" ++ l.str());
+  def fpb-e15(s) = fpb-same-set(fpb-keys(s, "//class[@name=\"FormFind\"]/def[1]"), fpb-ordered-keys(fpb-ff()) |> take(1)) && len(fpb-keys(s, "//class[@name=\"FormFind\"]/def[1]")) == 1;
+  def fpb-e16(s) = fpb-same-set(fpb-keys(s, "//class[@name=\"FormFind\"]/def[last()]"), fpb-last-of(fpb-ordered-keys(fpb-ff()))) && len(fpb-keys(s, "//class[@name=\"FormFind\"]/def[last()]")) == 1;
+  def fpb-last-of(xs) = nil?(xs) ? [] : nil?(xs[1:]) ? xs : fpb-last-of(xs[1:]);
+  def fpb-e17(s) = fpb-rows(s, "//def[@name=\"fnd-serve\"]/..") == fpb-rows(s, "//class[@name=\"FormFind\"]") && fpb-rows(s, "//class[@name=\"FormFind\"]") != "";
+  def fpb-e18(s, srcheld) = (Comparable) fpa-path(s, "count(//call[@name=\"host_spawn_at\"])")[2] == len(fpb-keys(s, "//call[@name=\"host_spawn_at\"]")) && len(fpb-lit-rows(srcheld, "host_spawn_at(")) > 20;
+  def fpb-e19(s, srcheld) = fpb-same-set(fpb-keys(s, "/file[@path~\"voice-\"]//def[@name~\"^vs-\"]"), fpb-flat(srcheld |> filter(rel => str_find(rel, "voice-", 0) >= 0) |> map(rel => fpb-def-keys(rel, e => fnd-starts?(e[2], "vs-"))))) && len(fpb-keys(s, "/file[@path~\"voice-\"]//def[@name~\"^vs-\"]")) > 10;
+  def fpb-e20(s, srcheld) = fpb-same-set(fpb-keys(s, "//def[has(//call[@name=\"fnd-mget\"])]"), fpb-flat(fpb-lit-rows(srcheld, "fnd-mget(") |> map(r => fpb-owner-keys(r))) |> fpb-uniq) && len(fpb-keys(s, "//def[has(//call[@name=\"fnd-mget\"])]")) > 20;
+  def fpb-exprs(s, srcheld) = [fpb-e1(s), fpb-e2(s), fpb-e3(s), fpb-e4(s), fpb-e5(s), fpb-e6(s), fpb-e7(s, srcheld), fpb-e8(s, srcheld), fpb-e9(s), fpb-e10(s, srcheld), fpb-e11(s), fpb-e12(s, srcheld), fpb-e13(s, srcheld), fpb-e14(s), fpb-e15(s), fpb-e16(s), fpb-e17(s), fpb-e18(s, srcheld), fpb-e19(s, srcheld), fpb-e20(s, srcheld)];
+
+  // ---- the fixture tree ----
+  def fpb-base() = temp_dir() ++ "/form-path-band-" ++ host_pid().str();
+  def fpb-put(rel, text) = write_file_text(fpb-base() ++ "/" ++ rel, text);
+  def fpb-alpha() = "  def alpha(a, b) = beta(a) + gamma(b, \"hi;x\");\n";
+  def fpb-src-a(beta-call) = "// header\nimport form-stdlib/core.fk;\nsection [form.bml] {\n let K = 5;\n class Foo {\n" ++ fpb-alpha() ++ "  def beta(x) {\n   let y = alpha(" ++ beta-call ++ ");\n   // comment f(z)\n   y;\n  }\n  field zed: int;\n }\n def top() = \"s\";\n host_spawn_at([\"x\"], 1);\n 0;\n}\n";
+  def fpb-src-b() = "section [form.bml] {\n class Bar {\n" ++ fpb-alpha() ++ " }\n}\n";
+  def fpb-fixture() {
+   let b = fpb-base();
+   let z0 = fs_rmdir(b);
+   let z1 = fs_mkdir(b);
+   let z2 = fpb-put("a.bml", fpb-src-a("1, 2"));
+   let z3 = fpb-put("b.bml", fpb-src-b());
+   fpa-install(fnd-build(fnd-new(b)));
+  }
+  def fpb-moved-line() = "// moved down by this line\n";
+  def fpb-cid-of(s, expr) = fpa-hit-id(fpb-hits(s, expr)[0]);
+  def fpb-refresh(s) = fnd-refresh(s);
+  def fpb-sleep() = host_sleep_ms(8);
+
+  // ---- claim 1: identity ----
+  def fpb-claim-identity(s) {
+   let hs = fpb-hits(s, "//def[@name=\"alpha\"]");
+   let a = hs[0];
+   let b = hs[1];
+   let same_id = (Comparable) fpa-hit-id(a) == fpa-hit-id(b) && len(hs) == 2;
+   let same_node = eq(fpa-hit-node(a), fpa-hit-node(b));
+   let two_hits = !eq(a, b) && (String) fpa-hit-path(a) != fpa-hit-path(b);
+   let beta = fpb-cid-of(s, "//def[@name=\"beta\"]");
+   let other = (Comparable) beta != fpa-hit-id(a);
+   // the field's own index is the order cells were first made in: two new texts interned in either order take the cells in that order, whatever their content
+   let t1 = intern_node(intern_trivial_string("fp:probe"), [intern_trivial_string("one-" ++ host_pid().str() ++ "-" ++ host_monotonic_ms().str())]);
+   let t2 = intern_node(intern_trivial_string("fp:probe"), [intern_trivial_string("two-" ++ host_pid().str() ++ "-" ++ host_monotonic_ms().str())]);
+   let order_ok = (Comparable) node_inst(t1) < node_inst(t2) && (Comparable) fpa-cid("probe", "n", "x") == fpa-cid("probe", "n", "x") && (Comparable) fpa-cid("probe", "n", "x") != fpa-cid("probe", "n", "y");
+   let fits = (Comparable) fpa-hit-id(a) > 0 && (Comparable) fpa-hit-id(a) < 4503599627370496;
+   let z = fpb-say("identity", ["same-id", same_id, "same-node", same_node, "two-hits", two_hits, "other", other, "field-order", order_ok, "cid", fpa-hex(fpa-hit-id(a)), "inst", node_inst(fpa-hit-node(a))]);
+   same_id && same_node && two_hits && other && order_ok && fits;
+  }
+
+  // ---- claim 4: stability under edits ----
+  def fpb-claim-stable(s) {
+   let alpha0 = fpb-cid-of(s, "/file[@path=\"a.bml\"]//def[@name=\"alpha\"]");
+   let top0 = fpb-cid-of(s, "//def[@name=\"top\"]");
+   let beta0 = fpb-cid-of(s, "//def[@name=\"beta\"]");
+   let h0 = fpb-hits(s, "/file[@path=\"a.bml\"]//def[@name=\"alpha\"]")[0];
+   let again = fpb-cid-of(s, "/file[@path=\"a.bml\"]//def[@name=\"alpha\"]");
+   let z0 = fpb-sleep();
+   let z1 = fpb-put("a.bml", fpb-src-a("1, 22"));
+   let c1 = fpb-refresh(s);
+   let alpha1 = fpb-cid-of(s, "/file[@path=\"a.bml\"]//def[@name=\"alpha\"]");
+   let top1 = fpb-cid-of(s, "//def[@name=\"top\"]");
+   let beta1 = fpb-cid-of(s, "//def[@name=\"beta\"]");
+   let z2 = fpb-sleep();
+   let z3 = fpb-put("a.bml", fpb-moved-line() ++ fpb-src-a("1, 22"));
+   let c2 = fpb-refresh(s);
+   let h2 = fpb-hits(s, "/file[@path=\"a.bml\"]//def[@name=\"alpha\"]")[0];
+   let moved = fpa-hit-start(h2) - fpa-hit-start(h0) == len(fpb-moved-line()) && fpa-hit-line(h2) - fpa-hit-line(h0) == 1;
+   let z4 = fpb-sleep();
+   let z5 = fpb-put("b.bml", "section [form.bml] {\n class Bar {\n" ++ fpb-alpha() ++ "  def alpha(a, b) = 1;\n }\n}\n");
+   let c3 = fpb-refresh(s);
+   let b_alphas = fpb-hits(s, "/file[@path=\"b.bml\"]//def[@name=\"alpha\"]");
+   let kept = (Comparable) fpa-hit-id(b_alphas[0]) == alpha0 && (Comparable) fpa-hit-id(b_alphas[1]) != alpha0;
+   let ok = (Comparable) again == alpha0 && (Comparable) c1 >= 1 && (Comparable) alpha1 == alpha0 && (Comparable) top1 == top0 && (Comparable) beta1 != beta0 && (Comparable) fpa-hit-id(h2) == alpha0 && moved && (Comparable) c2 >= 1 && (Comparable) c3 >= 1 && kept;
+   let z = fpb-say("stable", ["alpha", alpha1 == alpha0, "top", top1 == top0, "beta-moved", beta1 != beta0, "moved-span", moved, "kept-in-other-file", kept]);
+   ok;
+  }
+
+  // ---- claim 8: provenance ----
+  def fpb-nl-before(t, n) = fpb-nl-count(t, 0, n, 0);
+  def fpb-nl-count(t, i, n, acc) = i >= n ? acc : fpb-nl-count(t, i + 1, n, str_byte_at(t, i) == 10 ? acc + 1 : acc);
+  def fpb-prov-checks(s, base, h) {
+   let t = fpb-text(((String) base == "" ? "" : base ++ "/") ++ fpa-hit-path(h));
+   [(String) fpa-hit-path(h) != "", (Comparable) fpa-hit-start(h) >= 0, (Comparable) fpa-hit-start(h) <= fpa-hit-end(h), (Comparable) fpa-hit-end(h) <= len(t), (Comparable) fpa-hit-line(h) == fpb-nl-before(t, fpa-hit-start(h)) + 1, (String) fpa-hit-source(s, h) == substring(t, fpa-hit-start(h), fpa-hit-end(h)), fpa-hit-fresh?(s, h), (Comparable) fpa-node-bytes(fpa-hit-node(h)) == fpa-hit-end(h) - fpa-hit-start(h)];
+  }
+  def fpb-prov-one(s, base, h) {
+   let cs = fpb-prov-checks(s, base, h);
+   let ok = fpb-all(cs);
+   let z = ok ? 0 : fpb-say("provenance-fails", [fpa-node-kind(fpa-hit-node(h)), fpa-hit-path(h), fpa-hit-start(h), fpa-hit-end(h), cs]);
+   ok;
+  }
+  def fpb-claim-prov(s, sreal) {
+   let fixture = ["//def", "//call", "//string", "//class", "//*", "//import"] |> map(e => fpb-hits(s, e));
+   let fx_ok = fpb-all(fixture |> map(hs => nil?(hs) ? false : fpb-all(hs |> map(h => fpb-prov-one(s, fpb-base(), h)))));
+   let real = fpb-hits(sreal, "//def[@name~\"^fnd-ext\"]");
+   let real2 = fpb-hits(sreal, "/file[@path=\"form/form-stdlib/bml/form-path.bml\"]//call[@name=\"fpa-cid\"]");
+   let real_ok = !nil?(real) && !nil?(real2) && fpb-all(append(real, real2) |> map(h => fpb-prov-one(sreal, "", h)));
+   let nodes = fpb-hits(s, "//*") |> map(h => fpa-hit-node(h));
+   let z = fpb-say("provenance", ["fixture", len(fixture |> map(hs => len(hs))), "fixture-hits", foldl((a, hs) => a + len(hs), 0, fixture), "real-hits", len(real) + len(real2), fx_ok, real_ok]);
+   fx_ok && real_ok && (String) value_kind(nodes[0]) == "node_id";
+  }
+
+  // ---- claim 16: a pipeline of nodes ----
+  def fpb-claim-pipeline(s) {
+   let r0 = fpa-renders();
+   let p = fpa-path(s, "//def");
+   let all = p[2];
+   let two = fpa-where(all, "arity", v => (Comparable) v == 2);
+   let named = fpa-where(two, "name", v => (String) v == "alpha");
+   let n = fpa-count(named);
+   let between = fpa-renders();
+   let text = fpa-render(s, named, "rows");
+   let after = fpa-renders();
+   let nodes_ok = (String) value_kind(all) == "node_id" && (String) value_kind(two) == "node_id" && (String) value_kind(named) == "node_id" && (Comparable) fpa-count(two) == (Comparable) fpa-count(named);
+   let z = fpb-say("pipeline", ["defs", fpa-count(all), "arity-2", fpa-count(two), "alpha", n, "renders-before-edge", between - r0, "renders-at-edge", after - r0, text]);
+   nodes_ok && (Comparable) between == r0 && (Comparable) after == r0 + 1 && (Comparable) n == 2 && (Comparable) fpa-count(all) == 4 && (Comparable) len(fag-lines(text)) == 2;
+  }
+
+  // ---- claim 32: refusals ----
+  def fpb-refusals() = [
+    ["", "form-path-expects-a-step"],
+    ["def", "form-path-expects-a-step"],
+    ["//zzz", "form-path-unknown-node-test"],
+    ["/", "form-path-expects-a-node-test"],
+    ["//def[@x]", "form-path-unknown-attribute"],
+    ["//def[@name=]", "form-path-expects-a-literal"],
+    ["//def[@lines>\"a\"]", "form-path-number-expected"],
+    ["//def[@name>1]", "form-path-string-expected"],
+    ["//def[@name>\"a\"]", "form-path-order-needs-a-number"],
+    ["//def[@name~\"(\"]", "form-path-bad-regex"],
+    ["//def[@lines~2]", "form-path-regex-needs-a-string"],
+    ["//def[2 and @name]", "form-path-position-stands-alone"],
+    ["//def[@name=\"x\"", "form-path-expects-]"],
+    ["//..", "form-path-parent-needs-one-slash"],
+    ["count(//def", "form-path-expects-)"],
+    ["//def foo", "form-path-unexpected-text"],
+    ["//def[calls(1)]", "form-path-calls-needs-a-string"],
+    ["//def[@name=\"unterminated]", "form-path-unterminated-string"],
+    ["//def[foo]", "form-path-unknown-predicate"],
+    ["//def[@name=\"a\"] ||", "form-path-expects-a-step"]
+  ];
+  def fpb-refusal-ok?(s, pair) = fpb-refusal-is(fpa-path(s, pair[0]), pair[1]);
+  def fpb-refusal-is(r, name) = (String) r[0] == "err" && str_find(r[2], name, 0) == 0;
+  def fpb-claim-refusals(s) {
+   let rs = fpb-refusals() |> map(pair => fpb-refusal-ok?(s, pair));
+   let bad = fpb-refusals() |> filter(pair => !fpb-refusal-ok?(s, pair)) |> map(pair => [pair[0], fpa-path(s, pair[0])[2]]);
+   let wire = fpb-wire(s, "path --rows", "//zzz");
+   let none = fpb-wire(s, "path", "");
+   let z = fpb-say("refusals", [len(rs), "bad", bad]);
+   fpb-all(rs) && (Comparable) len(rs) >= 20 && (Comparable) wire[0] == 2 && (String) wire[2] == "path: " ++ fpa-path(s, "//zzz")[2] && (Comparable) none[0] == 2 && str_find(none[2], "form-path-needs-an-expression", 0) >= 0;
+  }
+
+  // ---- claim 64: the cache ----
+  def fpb-claim-cache(s) {
+   let q0 = fpb-keys(s, "//def");
+   let p0 = fpa-parses();
+   let q1 = fpb-keys(s, "//def");
+   let q2 = fpb-keys(s, "//call[@name=\"beta\"]");
+   let p1 = fpa-parses();
+   let z0 = fpb-sleep();
+   let z1 = fpb-put("b.bml", fpb-src-b() ++ "// grown\n");
+   let c = fpb-refresh(s);
+   let q3 = fpb-keys(s, "//def");
+   let p2 = fpa-parses();
+   let q4 = fpb-keys(s, "//def");
+   let p3 = fpa-parses();
+   let z = fpb-say("cache", ["parses", [p1 - p0, p2 - p1, p3 - p2], "changed", c]);
+   (Comparable) p1 == p0 && (Comparable) p2 == p1 + 1 && (Comparable) p3 == p2 && fpb-same(q0, q1) && fpb-same-set(q0, q3) && (Comparable) c == 1;
+  }
+
+  // ---- claim 128: the wire ----
+  def fpb-claim-wire(s) {
+   let rows = fpb-wire(s, "path --rows", "//def[@name=\"alpha\"]");
+   let ids = fpb-wire(s, "path --ids", "//def[@name=\"alpha\"]");
+   let text = fpb-wire(s, "path --text", "/file[@path=\"a.bml\"]//def[@name=\"alpha\"]");
+   let count = fpb-wire(s, "path --count", "//def");
+   let argexpr = fpb-wire(s, "path --count //def", "");
+   let counted = fpb-wire(s, "path", "count(//def)");
+   let none = fpb-wire(s, "path", "//def[@name=\"nothing-here\"]");
+   let defs = fpb-fnd(s, "defs alpha");
+   let status = fpb-fnd(s, "status");
+   let hs = fpb-hits(s, "//def[@name=\"alpha\"]");
+   let rows_ok = (Comparable) rows[0] == 0 && (String) rows[1] == fpa-render(s, fpa-path(s, "//def[@name=\"alpha\"]")[2], "rows") && str_find(rows[1], "a.bml:", 0) == 0;
+   let ids_ok = (Comparable) ids[0] == 0 && fnd-starts?(ids[1], "def:" ++ fpa-hex(fpa-hit-id(hs[0])) ++ " ") && len(fag-lines(ids[1])) == 2;
+   let text_ok = (Comparable) text[0] == 0 && (String) text[1] == "def alpha(a, b) = beta(a) + gamma(b, \"hi;x\");\n";
+   let count_ok = (Comparable) count[0] == 0 && (String) count[1] == "4\n" && (String) argexpr[1] == "4\n" && (String) counted[1] == "4\n";
+   let none_ok = (Comparable) none[0] == 1 && (String) none[1] == "";
+   let shape_ok = (String) rows[3] == "form-agent-tool-wire-v1" && (Comparable) rows[4] == 0 && (String) status[1] != "" && (Comparable) defs[0] == 0 && str_find(defs[1], "a.bml:", 0) == 0;
+   let z = fpb-say("wire", [rows_ok, ids_ok, text_ok, count_ok, none_ok, shape_ok, rows[1], ids[1]]);
+   rows_ok && ids_ok && text_ok && count_ok && none_ok && shape_ok;
+  }
+
+  // ---- claim 256: five questions ----
+  def fpb-timed(s, expr) {
+   let t0 = host_monotonic_ms();
+   let n = len(fpb-hits(s, expr));
+   [fpb-ms(t0), n];
+  }
+  def fpb-claim-time(srcheld) {
+   let s = fpa-open("");
+   let qs = ["//def[@name=\"fnd-serve\"]", "//def[calls(\"host_spawn_at\")]", "//class[@name=\"FormFind\"]/def", "//def[@name=\"fnd-serve\"]//string", "//def[@lines>40]"];
+   let cold = qs |> map(q => fpb-timed(s, q));
+   let warm = qs |> map(q => fpb-timed(s, q));
+   let t0 = host_monotonic_ms();
+   let g1 = len(stw-grep-rows(["-n", "-F", "-e", "def fnd-serve("], srcheld));
+   let t1 = host_monotonic_ms();
+   let g2 = len(stw-grep-rows(["-n", "-F", "-e", "host_spawn_at("], srcheld));
+   let t2 = host_monotonic_ms();
+   let g3 = len(stw-grep-rows(["-n", "-E", "-e", "^  def "], [fpb-ff()]));
+   let t3 = host_monotonic_ms();
+   let g4 = len(stw-grep-rows(["-n", "-F", "-e", "def fnd-serve("], srcheld));
+   let t4 = host_monotonic_ms();
+   let g5 = foldl((a, rel) => a + len(fpb-scan(fag-lines(fpb-text(rel)), 1, [], 0, [], false)), 0, srcheld);
+   let t5 = host_monotonic_ms();
+   let text = [t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4];
+   let z = fpb-say("timing-ms-cold-warm-text", [qs, cold |> map(x => x[0]), warm |> map(x => x[0]), text, "answers", warm |> map(x => x[1]), [g1, g2, g3, g4, g5], "index-ms", fnd-c(s, "build_ms")]);
+   fpb-all([0, 1, 2, 3, 4] |> map(i => (Comparable) warm[i][1] == cold[i][1])) && (Comparable) warm[0][0] < 200 && (Comparable) warm[2][0] < 200 && (Comparable) warm[3][0] < 200 && fpb-all([0, 1, 2, 3, 4] |> map(i => (Comparable) warm[i][0] <= cold[i][0] + 50));
+  }
+
+  def fpb-held-paths(files) = files |> filter(p => file_size(p) <= 2097152 && str_find(fpb-text(p), fpb-nul(), 0) < 0);
+
+  def fpb-run() {
+   let tstart = host_monotonic_ms();
+   let files = stw-files();
+   let srcheld = fpb-held-paths(files |> filter(p => fnd-source?(p)));
+   let fx = fpb-fixture();
+   let b1f = fpb-claim-identity(fx);
+   let b4f = fpb-claim-stable(fx);
+   let sreal = fpa-open("");
+   let z0 = fpb-say("index", ["files", fnd-c(sreal, "files"), "defs", fnd-c(sreal, "defs"), "build_ms", fnd-c(sreal, "build_ms"), "source-files", len(srcheld)]);
+   let ex = fpb-exprs(sreal, srcheld);
+   let z2 = fpb-say("expressions", ex);
+   let b2 = fpb-bit(fpb-all(ex) && (Comparable) len(ex) == 20, 2);
+   let fx2 = fpb-fixture();
+   let b1 = fpb-bit(b1f, 1);
+   let b4 = fpb-bit(b4f, 4);
+   let b8 = fpb-bit(fpb-claim-prov(fx2, sreal), 8);
+   let b16 = fpb-bit(fpb-claim-pipeline(fx2), 16);
+   let b32 = fpb-bit(fpb-claim-refusals(fx2), 32);
+   let b64 = fpb-bit(fpb-claim-cache(fx2), 64);
+   let fx3 = fpb-fixture();
+   let b128 = fpb-bit(fpb-claim-wire(fx3), 128);
+   let b256 = fpb-bit(fpb-claim-time(srcheld), 256);
+   let mine = "/file[@path~\"^(form/form-stdlib/bml/form-path.bml|observe/form-path-ask.bml|observe/form-find-run.fk)$\"]";
+   let begun = fpb-hits(sreal, mine ++ "//call[@name~\"^(host_spawn|host_capture|host_wait|host-exec)\"]");
+   let calls = fpb-hits(sreal, mine ++ "//call");
+   let z512 = fpb-say("begun", [len(calls), len(begun)]);
+   let b512 = fpb-bit((Comparable) len(calls) > 500 && (Comparable) len(begun) == 0, 512);
+   let req = fpb-request("path --count", "//def[@name=\"fnd-serve\"]");
+   let cold = fpb-decoded(faj-json("form-path-band", fpa-cold(req)));
+   let warm = fpb-decoded(faj-json("form-path-band", fnd-serve(sreal, req)));
+   let b1024 = fpb-bit((String) cold[1] == "1\n" && fpb-same(cold, warm), 1024);
+   let rm1 = fs_rmdir(fpb-base());
+   let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024;
+   let zt = fpb-say("form-path-band-ms", fpb-ms(tstart));
+   let shown = print(["form-path-band", "verdict", verdict]);
+   verdict;
+  }
+  fpb-run();
+}

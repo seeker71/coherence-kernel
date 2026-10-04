@@ -89,6 +89,7 @@ defines X" over a tree of 2,100 files. `form-find` can. It is a resident service
 | `bands [NAME]` | the band files (a `; Expected:` or `; Verdict` header) that name NAME: `path expected= verdict= mentions=` |
 | `imports UNIT` | `UNIT -> raw` for what it imports (`import` lines, `preludes:` headers), `UNIT <- path:line:text` for who imports it |
 | `rows FILE [FIELD[=VALUE]]` | a `.jsonl` census or ledger (a `.hearth/*.jsonl` too) as a keyed table: the rows holding FIELD=VALUE, an array field matching any element; with a bare FIELD its values and counts |
+| `path [--ids\|--text\|--rows\|--count] EXPR` | an XPath-shaped query over the files' nodes (`//def[calls("host_spawn_at")]`): node ids with file, byte span and line (below, "form-path") |
 | `status`, `refresh` | the index's counters; a refresh now |
 | `read cat head tail sed wc jq grep rg` | the wire's own tools over the indexed files the command names (`rg` and `grep` over the whole tree are `find`) |
 
@@ -139,6 +140,62 @@ exists and is rewritten every 2 s): the index answers, in about twenty milliseco
 door, `printf '%s' "$json" | ./fkwu observe/form-find-ask.bml`, which asks the service itself if one beats and otherwise builds an index of its own, answers, and
 ends (seconds, once per call: it is the cost the redirect avoids). Neither falls back to a host `grep`, `find` or `ls`; a polled directory is used, not
 a fifo bell, because a plain redirect into a fifo with no reader blocks the agent's shell.
+
+### form-path — a path query over Form nodes (XPath-shaped, resolving to node ids)
+
+`form-find` answers lines. `form-path` (`form/form-stdlib/bml/form-path.bml`) answers **nodes**: the files of the tree are read once into
+`file > section > class > def | defn | let | field | thought | import | blueprint | stmt`, and a `def`, a `class` or a `let` additionally holds its `call`s and
+`string`s (flat, in document order: the words of `grammars/form-bml.fk`, whose own trees carry no spans and are lowered at once, so this tree keeps
+what a lookup needs). A query is one expression and an answer is a set of **hits**; no stage re-serialises, text is made only at the edge. The `path`
+verb is taught to form-find's index (`fnd-ext-add`), so the service answers it from the same spool: `path [--ids|--text|--rows|--count] EXPR`, the
+expression in one argument (single-quoted in the shell, the wire refuses an unquoted `|`) or in the request's `"input"`.
+The one-shot door is `printf '%s' '--rows //def[@name="fnd-serve"]' | ./fkwu observe/form-path-ask.bml` (the service when one beats, else an index of its own).
+
+| syntax | meaning |
+| --- | --- |
+| `/file[@path~"voice-"]//def[@name="vs-phonemes"]/call[@name~"^vg-"]` | `/` child, `//` descendant; node tests `file section class blueprint def defn let import field thought stmt call string *`; `/..` the parent |
+| `//class[@name="X"]/def` · `//def[@name="f"]//string` | the defs of a class; the strings of a def |
+| `//def[calls("host_spawn_at")]` · `//def[has(//string[@value~"tmp"])]` | a call of that name lies in the node; `has(path)` is any relative path (existence) |
+| `//def[@lines>40]` · `//def[@arity=2]` | attributes `@name @kind @path @line @arity @value @lines @bytes @start @end`; `= != ~ !~ > < >= <=` (`~` is the grep engine's ERE; numbers order, text does not) |
+| `[2 and @name="x"]` · `[not(@arity=0)]` · `[@a or @b]` · `[1]` · `[last()]` | `and or not( )`; a position counts within one context node's step result |
+| `a \| b` · `count(...)` | union (first branch's nodes, then the second's, duplicates dropped); how many |
+
+Strings take `"` or `'`; inside, `\"` or `\\` is the character, any other backslash stays (a regex's `\.`). **Refused by name, never guessed**: `form-path-expects-a-step`,
+`-expects-a-node-test`, `-unknown-node-test`, `-unknown-attribute`, `-unknown-predicate`, `-expects-a-literal`, `-number-expected` (`@lines` with a string),
+`-string-expected`, `-order-needs-a-number` (`@name>"a"`), `-regex-needs-a-string`, `-bad-regex`, `-position-stands-alone`, `-parent-needs-one-slash`, `-expects-]`,
+`-expects-)`, `-unterminated-string`, `-calls-needs-a-string`, `-unexpected-text`, `-needs-an-expression` (exit 2, stderr `path: <name>: ... (column N)`); a miss is exit 1, an empty stdout.
+
+**The id is content.** A node's id (`--ids`: `kind:<13 hex> path:line name`) is a 52-bit hash (two 26-bit lanes) of its kind, name and **its own source text**: nothing
+positional is in it. Measured (`form-path-band.fk`, claim 4): editing another def left a def's id unchanged and gave the edited one a new id; adding a line above moved its
+span and line but not its id; the same text in a second file is the same id (and one interned node, `eq`; two hits, the node's provenance is the hit:
+`fp:hit(node, path, start, end, line)`); `7783e3effb19c` was the id of one fixture def in two separate processes. The host field's own cell index (`node_inst` of the interned
+node) is **not** the identity: it is the order cells were first made in (two new texts interned in the other order take the other order), stable across
+`cell_run` and processes only while the shared field lives and the cell was already made, and meaningless after a `field_reset`. A hit's span is checked, not trusted:
+`fpa-hit-fresh?` re-hashes the span's text against the id. In process, a result is `fp:set(fp:hit(...))`; `fpa-where(set, "arity", test)` and `fpa-count(set)` are stages
+over it, `fpa-render(s, set, "ids"|"text"|"rows"|"count")` the edge (the hook `fpa-renders()` counts text made: 1 for a path, a filter, a count and a render).
+
+**The plan reads form-find's tables first.** `@name="x"` on a `def class field thought` step is the defs table, `calls("x")` / a `call` step with `@name="x"` / a `string` step
+with `@value="x"` are the literal postings; the files named by all of a path's conjuncts are intersected and only those are parsed (each once, kept, keyed by size, mtime
+and inode as form-find's entries are: a changed file is parsed again, no other). A path with nothing to narrow it (`//def[@lines>40]`) parses every source file once.
+That narrowing reads form-find's definition anchors, so a def that follows other text on its line is found only by a path without `@name=`.
+
+**Measured** (`form/form-stdlib/tests/form-path-band.fk`, 2047 of 2047; one busy machine, 2026-10-04, tree of 2,165 files, 1,801 source files, 56k definition entries). Twenty expressions
+answer exactly their oracles: `defs` (text) for four names and a class, `find`'s text for a name regex and for imports, the grep engine over files read afresh for the call sites of `host_spawn_at`
+and the defs that call it or `fnd-mget`, an independent **indentation** reading of the lines for a class's defs, `[1]`, `[last()]`, `@arity`, a path regex over voice files and `@lines>40`
+(exact over the `.bml` files; in `.fk` files three defs differ and each was read by hand: two ternary chains that close a block at the def's own indent or begin a line in column 0, and one multi-line C string, where the
+indentation reading is the one that is wrong). The membrane census (`.hearth/membrane-sites.jsonl`) is not an oracle here: it is a past reading and its sites sit one or two lines off the tree today. Questions, milliseconds
+(cold = first on a fresh index; warm = again; text = the unindexed grep/scan that comes nearest, files read afresh):
+
+| question | cold | warm | text |
+| --- | --- | --- | --- |
+| `//def[@name="fnd-serve"]` | 48 | 1 | 865 (`grep -F 'def fnd-serve('`) |
+| `//def[calls("host_spawn_at")]` | 954 | 90 | 673 (`grep -F 'host_spawn_at('`: lines, not defs) |
+| `//class[@name="FormFind"]/def` | 15 | 17 | 25 (`grep -E '^  def '` in the one file: lines) |
+| `//def[@name="fnd-serve"]//string` | 1 | 2 | 638 |
+| `//def[@lines>40]` (every source file) | 10,142 | 572 | 5,524 (an indentation reading of every file; no grep answers it) |
+
+The whole-tree structural question pays once to parse 31 MB (about 10 s cold here); the same index then answers it in a few hundred milliseconds. The cold door
+(`fpa-cold`) opens an index of its own (2 s) and answers the same as the standing one.
 
  for a Form organ. It is not the
 recommended boundary for an agent or external tool caller:
