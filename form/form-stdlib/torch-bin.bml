@@ -27,15 +27,15 @@
 // What it will not read, it says: a deflated member, a zip64 archive, a tensor whose
 // strides are not the contiguous ones, a storage that is shorter than its tensor.
 //
-// THE T5 NAME TABLE (tb-t5-*). charsiu/g2p_multilingual_byT5_small_100 is a T5. The
-// config.json gives d_model, d_kv, heads, d_ff, layers, vocab and buckets; from those
-// alone tb-t5-expected writes the (name, shape) of every tensor a T5ForConditionalGeneration
-// must carry, and tb-t5-problems compares a checkpoint's table to it: [] means every name
-// is present with its config shape and nothing else is.
+// THE T5 NAME TABLE lives in t5-weights.bml (t5w-config, t5w-expected, t5w-problems), imported here: the rows
+// above have the same positions as the safetensors table's, so t5w-problems(rows, t5w-config(path)) checks a
+// checkpoint's table against the T5 its config.json describes, and [] means every name is present with its
+// config shape and nothing else is.
 import form/form-stdlib/core.fk;
 import form/form-stdlib/ear-npz.fk;
 import form/form-stdlib/json.fk;
 import form/form-stdlib/format-arith.fk;
+import form/form-stdlib/t5-weights.bml;
 //////////////////////////////////////////////////////////////////////
 section [form.bml] {
     class FormTorchBin {
@@ -258,60 +258,8 @@ section [form.bml] {
         def tb-f32-at(path, row, k) = tb-f32-of(tb-le(read_file_slice(path, tb-off(row) + (4 * k), 4), 0, 4));
         def tb-f32-words(path, row, k, n) = n <= 0 ? [] : cons(tb-le(read_file_slice(path, tb-off(row) + (4 * k), 4), 0, 4), tb-f32-words(path, row, k + 1, n - 1));
 
-        // ---- the T5 name table ----
-        // cfg = (d_model d_kv heads d_ff encoder-layers decoder-layers vocab buckets)
-        def tb-cfg-int(obj, key) = node_value(json-object-get(obj, key));
-        def tb-t5-config(path) {
-            let obj = parse-json(path, read_file(path));
-            [tb-cfg-int(obj, "d_model"), tb-cfg-int(obj, "d_kv"), tb-cfg-int(obj, "num_heads"), tb-cfg-int(obj, "d_ff"), tb-cfg-int(obj, "num_layers"), tb-cfg-int(obj, "num_decoder_layers"), tb-cfg-int(obj, "vocab_size"), tb-cfg-int(obj, "relative_attention_num_buckets")];
-        }
-        def tb-cd(c) = c[0];
-        def tb-cinner(c) = c[1] * c[2];
-        def tb-cheads(c) = c[2];
-        def tb-cff(c) = c[3];
-        def tb-cenc(c) = c[4];
-        def tb-cdec(c) = c[5];
-        def tb-cvocab(c) = c[6];
-        def tb-cbuckets(c) = c[7];
-        def tb-ent(name, shape) = [name, shape];
-        // an attention: q k v project d -> inner, o back; block 0 also owns the relative bias
-        def tb-t5-attn(c, pre, bias) = bias == 1 ? [tb-ent(pre + ".q.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".k.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".v.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".o.weight", [tb-cd(c), tb-cinner(c)]), tb-ent(pre + ".relative_attention_bias.weight", [tb-cbuckets(c), tb-cheads(c)])] : [tb-ent(pre + ".q.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".k.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".v.weight", [tb-cinner(c), tb-cd(c)]), tb-ent(pre + ".o.weight", [tb-cd(c), tb-cinner(c)])];
-        def tb-t5-ffn(c, pre) = [tb-ent(pre + ".wi_0.weight", [tb-cff(c), tb-cd(c)]), tb-ent(pre + ".wi_1.weight", [tb-cff(c), tb-cd(c)]), tb-ent(pre + ".wo.weight", [tb-cd(c), tb-cff(c)])];
-        def tb-t5-norm(c, pre) = [tb-ent(pre + ".layer_norm.weight", [tb-cd(c)])];
-        def tb-t5-enc-block(c, n) {
-            let p = "encoder.block." + n.str();
-            tb-cat4(tb-t5-attn(c, p + ".layer.0.SelfAttention", n == 0 ? 1 : 0), tb-t5-norm(c, p + ".layer.0"), tb-t5-ffn(c, p + ".layer.1.DenseReluDense"), tb-t5-norm(c, p + ".layer.1"));
-        }
-        def tb-t5-dec-block(c, n) {
-            let p = "decoder.block." + n.str();
-            tb-cat6(tb-t5-attn(c, p + ".layer.0.SelfAttention", n == 0 ? 1 : 0), tb-t5-norm(c, p + ".layer.0"), tb-t5-attn(c, p + ".layer.1.EncDecAttention", 0), tb-t5-norm(c, p + ".layer.1"), tb-t5-ffn(c, p + ".layer.2.DenseReluDense"), tb-t5-norm(c, p + ".layer.2"));
-        }
-        def tb-cat(a, b) = nil?(a) ? b : cons(a[0], tb-cat(a[1:], b));
-        def tb-cat4(a, b, c, d) = tb-cat(a, tb-cat(b, tb-cat(c, d)));
-        def tb-cat6(a, b, c, d, e, f) = tb-cat(a, tb-cat(b, tb-cat(c, tb-cat(d, tb-cat(e, f)))));
-        def tb-t5-enc-all(c, n) = n >= tb-cenc(c) ? [] : tb-cat(tb-t5-enc-block(c, n), tb-t5-enc-all(c, n + 1));
-        def tb-t5-dec-all(c, n) = n >= tb-cdec(c) ? [] : tb-cat(tb-t5-dec-block(c, n), tb-t5-dec-all(c, n + 1));
-        // every (name shape) a T5ForConditionalGeneration with this config must carry
-        def tb-t5-expected(c) = tb-cat6([tb-ent("shared.weight", [tb-cvocab(c), tb-cd(c)])], tb-t5-enc-all(c, 0), [tb-ent("encoder.final_layer_norm.weight", [tb-cd(c)])], tb-t5-dec-all(c, 0), [tb-ent("decoder.final_layer_norm.weight", [tb-cd(c)])], [tb-ent("lm_head.weight", [tb-cvocab(c), tb-cd(c)])]);
-        // the two tied embedding views a state_dict may also carry
-        def tb-t5-optional(c) = [tb-ent("encoder.embed_tokens.weight", [tb-cvocab(c), tb-cd(c)]), tb-ent("decoder.embed_tokens.weight", [tb-cvocab(c), tb-cd(c)])];
+        // a shape as the body spells it: 10x8
         def tb-shape-text(xs) = en-shape-text(xs);
-        def tb-same?(a, b) = len(a) != len(b) ? 0 : (nil?(a) ? 1 : (a[0] == b[0] ? tb-same?(a[1:], b[1:]) : 0));
-        def tb-t5-check-one(rows, e) {
-            let r = tb-find(rows, e[0]);
-            nil?(r) ? ["missing " + e[0]] : (tb-same?(tb-shape(r), e[1]) == 1 ?((String) tb-dtype(r) == "F32" ? [] : [e[0] + " is " + tb-dtype(r) + ", not F32"]) : [e[0] + " is " + tb-shape-text(tb-shape(r)) + ", config says " + tb-shape-text(e[1])]);
-        }
-        def tb-t5-check-all(rows, es) = nil?(es) ? [] : tb-cat(tb-t5-check-one(rows, es[0]), tb-t5-check-all(rows, es[1:]));
-        def tb-t5-known?(es, name) = nil?(es) ? 0 : ((String) es[0][0] == name ? 1 : tb-t5-known?(es[1:], name));
-        def tb-ent-find(es, name) = nil?(es) ? [] : ((String) es[0][0] == name ? es[0] : tb-ent-find(es[1:], name));
-        // a row the expected table does not hold: one of the two tied embedding views (shape-checked) or unexpected
-        def tb-t5-extra-one(r, es, opt) = tb-t5-known?(es, tb-name(r)) == 1 ? [] : (tb-t5-known?(opt, tb-name(r)) == 1 ? tb-t5-check-one([r], tb-ent-find(opt, tb-name(r))) : ["unexpected " + tb-name(r)]);
-        def tb-t5-extras(rows, es, opt) = nil?(rows) ? [] : tb-cat(tb-t5-extra-one(rows[0], es, opt), tb-t5-extras(rows[1:], es, opt));
-        // [] when the checkpoint is exactly the T5 the config describes; otherwise one line per disagreement
-        def tb-t5-problems(rows, c) = tb-cat(tb-t5-check-all(rows, tb-t5-expected(c)), tb-t5-extras(rows, tb-t5-expected(c), tb-t5-optional(c)));
-        // the parameters the config's T5 carries, counted from its own expected table
-        def tb-t5-params(c) = tb-t5-params-go(tb-t5-expected(c));
-        def tb-t5-params-go(es) = nil?(es) ? 0 : tb-product(es[0][1]) + tb-t5-params-go(es[1:]);
 
         // ---- the table, as text for a door ----
         def tb-row-text(r) = tb-name(r) + "  " + tb-dtype(r) + "  " + tb-shape-text(tb-shape(r)) + "  key=" + tb-key(r) + "  @" + tb-off(r).str() + "  +" + tb-bytes(r).str();

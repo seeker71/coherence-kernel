@@ -15,19 +15,22 @@
 // through the bridge as it stands — the move after the bridge itself has been re-fitted.
 // `taught` in place of a text file asks the model for every TAUGHT word not yet in the ledger and bridges nothing: the
 // ledger of the model's answers beside the taught rows is what the bridge is fitted on (voice-g2p-bridge-run.fk).
-// The model is asked in its own convention, with no end token (voice-g2p-t5.bml explains why it matters).
+// The model is asked in its own convention, with no end token and a lone initial capital lowered (nt5-run and nt5-query in native-t5.bml explain why it matters); the ledger and the model table keep the word as written.
 //
 // A word whose raw answer the bridge leaves empty gets NO row: an absence is not a phoneme string. Speaking-time
 // lookup is table-only (voice-g2p.bml); nothing here runs when the body speaks.
 //
-// GPU etiquette: a run that asks the model opens the Metal carrier. Take .hearth/gpu.lock (mkdir) before, rmdir after.
+// GPU etiquette: a run that asks the model opens the Metal carrier, and holds the GPU lease (/tmp/form-gpu.lock, machine-wide,
+// form/form-stdlib/gpu-lease.bml) for exactly that walk (ggr-leased-run); a run that asks nothing never takes it.
+// The lease is printed, taken and given back, as `lease  ...` lines. A live holder is waited for (20 minutes), a dead
+// holder's lease is taken over, and a refused take stops the door before the device.
 // preflight-exec: forbidden
 import form/form-stdlib/native-t5.bml;
-import form/form-stdlib/voice-g2p-t5.bml;
 import form/form-stdlib/voice-say.bml;
 import form/form-stdlib/voice-g2p-bridge.bml;
 import form/form-stdlib/spool-bell-transport.fk;
 import form/form-stdlib/line-grammar.fk;
+import form/form-stdlib/gpu-lease.bml;
 section [form.bml] {
     def ggr-line() = {
         let value = read_line();
@@ -70,7 +73,7 @@ section [form.bml] {
         (record_has(raw, words[i])) ? ggr-walk(m, tag, rawp, words, i + 1, raw, written, refused, cap) : ((cap > 0 && written >= cap) ? [written, refused] : ggr-one(m, tag, rawp, words, i, raw, written, refused, cap));
     }
     def ggr-one(m, tag, rawp, words, i, raw, written, refused, cap) {
-        let r = vgt5-run(m, "<" + tag + ">: " + words[i]);
+        let r = nt5-run(m, nt5-query(tag, words[i]));
         let ok = (!nothing?(r)) && (len(r) > 0);
         let rc = ok ? sbt-append(rawp, words[i] + vg-tab() + r + vg-nl()) : 0;
         (ok && ((nothing?(rc)) || rc < 0)) ? form_error("could not append to " + rawp) : ggr-walk(m, tag, rawp, words, i + 1, ok ? record_set(raw, words[i], r) : raw, written + (ok ? 1 : 0), refused + (ok ? 0 : 1), cap);
@@ -81,7 +84,7 @@ section [form.bml] {
     }
     def ggr-bridge-one(btab, valid, rawr, mt, mp, words, added, empty) {
         let w = words[0];
-        (record_has(mt, w) || (!record_has(rawr, w))) ? ggr-bridge-words(btab, valid, rawr, mt, mp, words[1:], added, empty) : ggr-bridge-put(btab, valid, rawr, mt, mp, words, added, empty, vgb-map(btab, valid, record_get(rawr, w))[0]);
+        (record_has(mt, w) || (!record_has(rawr, w))) ? ggr-bridge-words(btab, valid, rawr, mt, mp, words[1:], added, empty) : ggr-bridge-put(btab, valid, rawr, mt, mp, words, added, empty, vgb-map-w(btab, valid, record_get(rawr, w), w)[0]);
     }
     def ggr-bridge-put(btab, valid, rawr, mt, mp, words, added, empty, phs) {
         let w = words[0];
@@ -104,6 +107,12 @@ section [form.bml] {
         print_str("retained_buffers_closed=" + nt5-live().str());
         r;
     }
+    def ggr-leased-run(tag, rawp, words, raw, cap, ckpt) {
+        let lease = gpu-lease-door-held("voice-g2p-grow-run");
+        let r = ggr-model-run(tag, rawp, words, raw, cap, ckpt);
+        let gave = gpu-lease-door-end(lease);
+        r;
+    }
     let code = ggr-line();
     let src = ggr-line();
     let cap = ggr-int(str_to_int(ggr-or(ggr-line(), "0")));
@@ -124,7 +133,7 @@ section [form.bml] {
     let need = rebridge ? ggr-ledger-words(ggr-lines(rawp), wt, []) : (taught ? ggr-row-words(ggr-lines(vg-path(code, "word")), record_new(0), []) : ggr-need(lt, wt, mt0, ggr-lines(src), record_new(0), []));
     print_str("tongue=" + code + " tag=" + tag + " words_needing=" + len(need).str() + (rebridge ? " (rebridge: model table rebuilt from the ledger)" : (taught ? " (taught: the ledger of the model's answers for every taught word)" : "")));
     // ask the model only when a word has no raw answer yet
-    let fresh = rebridge ? 0 : ggr-count-fresh(need, rawr0, 0);    let res = fresh == 0 ? [0, 0] : ggr-model-run(tag, rawp, need, rawr0, cap, ckpt);
+    let fresh = rebridge ? 0 : ggr-count-fresh(need, rawr0, 0);    let res = fresh == 0 ? [0, 0] : ggr-leased-run(tag, rawp, need, rawr0, cap, ckpt);
     let rawr = vgb-raw-load(code);
     let btab = vgb-load(code);
     let valid = vgb-valid-of(vp-cfg(vs-voice(code)));

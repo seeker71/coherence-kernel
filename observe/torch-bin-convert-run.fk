@@ -10,7 +10,8 @@
 // WRITE. torch-bin.bml reads the zip and the pickle as data (nothing executes); the tied embedding views
 // (encoder.embed_tokens.weight, decoder.embed_tokens.weight: one storage with shared.weight) are dropped exactly as
 // HF's save_pretrained drops them, each checked to be a true alias first; safetensors-write.bml lays the file out in
-// Form and gathers the tensor ranges on Metal into one buffer, read once and written once. The header's
+// Form and gathers the tensor ranges on Metal into one buffer, read once and written once — to <path>.tmp, verified
+// byte for byte against the checkpoint, then renamed over <path>, so a crash never leaves a torn model. The header's
 // __metadata__ carries provenance: source repository, license, converter, the checkpoint's size and its content
 // seal (native-content-seal.bml's tree digest: sha256 over 64 KiB leaves on the device, not the flat file sha).
 //
@@ -20,8 +21,12 @@
 //      plus the T5 name table against config.json beside the file.
 // Then the file's content seal, the figure the registry row records.
 //
-// GPU etiquette: this opens the Metal carrier. Take .hearth/gpu.lock (mkdir) before the run, rmdir after.
+// GPU etiquette: this opens the Metal carrier, so the door holds the GPU lease (/tmp/form-gpu.lock, machine-wide,
+// form/form-stdlib/gpu-lease.bml) from before the carrier opens until the run is done, and prints it, taken and
+// given back, as `lease  ...` lines. A live holder is waited for (20 minutes), a dead holder's lease is taken over,
+// and a refused take stops the door before it touches the device.
 // preflight-exec: forbidden
+import form/form-stdlib/gpu-lease.bml;
 import form/form-stdlib/torch-bin.bml;
 import form/form-stdlib/safetensors-write.bml;
 import form/form-stdlib/t5-weights.bml;
@@ -74,11 +79,13 @@ section [form.bml] {
     let rows = tb-tensors(src);
     let es = sw-from-torch(src, rows);
     let drops = tcv-present(rows, tcv-drops());
+    let lease = gpu-lease-door-held("torch-bin-convert-run");
     let opened = sw-open();
     print_str("# " + src + "  ->  " + out + "  (" + len(rows).str() + " tensors, dropping " + len(drops).str() + " aliases)");
     sw-ok?(opened) ? 0 : form_error("metal: " + sw-why(opened));
     let w = ((String) mode == "verify") ? 0 : tcv-write(sw-why(opened), src, out, rows, es, drops);
     let v = ((String) mode == "write") ? 0 : tcv-verify(sw-why(opened), src, out, rows, es, drops);
+    let gave = gpu-lease-door-end(lease);
     print_str("done mode=" + mode);
     0;
 }

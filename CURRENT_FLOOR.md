@@ -244,15 +244,69 @@ voice-say-band           -> 131071  one mouth per tongue the ear renders, the ma
                                     mouth is the only mouth (a tongue without tables says "no native mouth yet")
 voice-g2p-band           -> 32767   letters to phonemes from the body's tables: taught line, taught words,
                                     model-bridged words, else nothing
-voice-g2p-bridge-band    -> pending the model's IPA spoken in the voice's symbols, learned from the taught pairs
-                                    and measured on held-out words (the band pins both the made-up truth and the real numbers)
+voice-g2p-bridge-band    -> 32767   the model's IPA spoken in the voice's symbols, learned from the taught pairs and
+                                    measured on held-out words (exact / edit: id 99.57% / 0.05%, en 83.9% / 2.76%,
+                                    pt 80.8% / 2.68%, fa 9.4% / 25.7% — Persian's taught phonemes are a guess
+                                    from unvowelled text)
 host-doors-band          -> 131071  host_spawn_at, host_alive and fs_mkfifo: the ear's lanes stand
                                     with no shell
+host-signal-band         -> 127     host_signal pid sig: any signal to one process, so a worker that will not
+                                    hear SIGTERM is ended with SIGKILL and no foreign program (voice-track,
+                                    the host walk's deadline). A fkwu built before the door reads "door absent"
+voice-track-reap-band    -> 7       the supervisor ends a wedged worker: SIGTERM, then SIGKILL after the grace
 ```
 
 `own-word-band` proves that a claim contradicting the record is set aside; a real room has not yet
 offered one. The cells are `form/form-stdlib/own-word.bml` and `form/form-stdlib/perception-rows.bml`;
 the doors are `observe/say.fk`, `observe/voice-mouth-lanes-run.fk` and `observe/voice-pass-run.fk`.
+
+### The native voice track
+
+A text is cut (`voice-chunk.bml`), its words become phonemes from the body's tables or its own T5 on Metal
+(`voice-g2p.bml`, `native-t5.bml`), the VITS voice renders each piece (`voice-pass.bml`), the master tones, compresses,
+roomes and sets it to -30 LUFS on the device (`voice-master.bml`), and the body's own ear scores it back
+(`voice-score.bml`, `voice-measure.bml`). Doors: `observe/voice-track-prepare-run.fk`, `voice-g2p-grow-run.fk`,
+`voice-track-run.fk`, `voice-master-run.fk`, `voice-score-run.fk`, `voice-measure-run.fk`. No foreign program runs
+anywhere in it; the model weights are data (`~/models/g2p-byt5-small-100/model.safetensors`, converted from the
+PyTorch file by `observe/torch-bin-convert-run.fk`). These bands open Metal and a model: each takes the machine-wide
+GPU lease (`gpu-lease.bml`) itself.
+
+```text
+voice-chunk-band          -> 4095     a text cut for a mouth that breathes: 22 words most, breaks after punctuation
+voice-pass-band           -> 4095     a whole VITS voice, phoneme ids to samples, held to onnxruntime's numbers
+voice-pass-old-export-band-> 255      the older exporter (serial node names) opens by structure; Indonesian renders
+voice-pass-leak-band      -> 127      a render gives back every buffer: live count flat across renders
+native-t5-band            -> 65535    a T5 grapheme-to-phoneme model on Metal, equal to the torch numbers it was
+                                      proved against; no end-of-sequence token by default
+torch-bin-band            -> 15871    a PyTorch checkpoint read as data: zip, allowlisted pickle, tensors from file ranges
+safetensors-write-band    -> 15871    the body's own weight file, written whole or not at all, every byte verified
+voice-master-band         -> 1048575  filters, shelves, compressor profiles, room, fades, K-weighted loudness, WAV
+voice-score-band          -> 4095     whisper round trip per piece: WER, CER, and two readings of Persian joiners
+voice-measure-band        -> 511      loudness, range, peaks, pauses, centroid, F0 and level jumps on the device
+gpu-lease-band            -> 16383    one Metal client at a time: owner, staleness, tombstone takeover
+```
+
+Measured on the sleep text (the body's own whisper, taught text word / character error): en 2.2% / 1.2%,
+pt 4.8% / 1.4%, id 2.1% / 0.3%, fa 13.8% characters (48% by words). Unseen sentences: en 6.1 / 2.9, pt 8.5 / 2.4,
+id 3.7 / 0.5, fa 48.9 / 17.2. Receipt: `receipts/2026-10-03-the-voice-spoke-without-leaving-the-body.md`.
+
+### The lowering contract
+
+The native loop lane (`runtime/fkwu-uni.c`, `fk_f64_*`) inlined a callee by substituting its arguments, so an argument
+the callee never read lost its effects once a recipe was hot; a guard stands in the seed with its shrink path in its
+comment. The contract is written in Form: `form/form-stdlib/bml/anf-lower.bml` binds every argument, in order, before
+its call. Judge a detector by a plain build of the committed source, not by a shared binary.
+
+```text
+anf-lower-band                 -> 2047    a defn becomes ordered rows; what cannot be named answers nothing()
+anf-shadow-band                -> 31      thirteen scalar defns lowered through rows to a native page, equal to the walker
+arg-order-lane-parity-band     -> 16383   effect order equal across the cold walker, the Form evaluator and the hot lane
+                                          (16356 on a build without the guard)
+form-lower-contract-band       -> 255     uncovered tags decline, division by zero declines, compares read as compares
+hot-recipe-effects-band        -> 63      a call with an effect runs, read or not, cold or hot (52 without the guard)
+bml-demand-jit-guard-band      -> 511     the demand JIT declines what it cannot name and answers negatives signed
+ignored-argument-scan-band     -> 7       a lint for the bug class: an ignored argument bound from a call
+```
 
 ## The Glass
 

@@ -18,9 +18,12 @@
 //   * the file is laid out in Form (names, shapes, offsets: tens of kilobytes of text),
 //   * the output is ONE device buffer; the header string is written into it, each tensor's source range is
 //     mapped off its file (metal_buf_from_file, no copy) and a small copy kernel gathers it into place,
-//   * the buffer is read back as ONE string and written with ONE write_file. Nothing is appended, so nothing
-//     can be quadratic. Dispatches are chained in batches: each answer is consumed by the next link, because a
+//   * the buffer is read back as ONE string and written with ONE write_file, to <path>.tmp. Nothing is appended, so
+//     nothing can be quadratic. Dispatches are chained in batches: each answer is consumed by the next link, because a
 //     recipe that runs many times drops a side-effecting call whose answer nothing reads.
+//   * the tmp is then verified (sw-verify, below: every byte against its source on the device) and only a verified tmp
+//     is renamed over <path> (fs_rename, one rename(2)). A crash, a refusal or a failed comparison leaves <path> as
+//     it was; the model file is never torn. (sw-publish is that last step, on its own.)
 //
 // REFUSALS ARE ANSWERS. ["refused", reason] for a dtype the format does not carry here, a duplicate or empty or
 // reserved name, a name with a control byte, a size that is not shape x width, a dimension of zero, a dropped
@@ -191,22 +194,34 @@ section [form.bml] {
   def sw-copy-stop(held, name, r) = sw-copy-stopped(sw-flush(held), name, r);
   def sw-copy-stopped(f, name, r) = form_error("safetensors-write: " + (r == 0 - 1 ? "the source range of " + name + " could not be mapped" : "the copy of " + name + " was refused by the device"));
 
-  // `gathered` is the answer of the gathering chain: reading it here is what makes the dispatches part of the value
-  def sw-emit(out, total, path, gathered) {
-   let s = (!nil?(gathered)) ? nothing() : metal_buf_read(out, 0, total);
-   nothing?(s) ? sw-refuse("the device buffer could not be read back") : sw-emit-write(path, total, write_file(path, s));
-  }
-  def sw-emit-write(path, total, w) = w < 0 ? sw-refuse("could not write " + path) : (file_size(path) != total ? sw-refuse("wrote " + file_size(path).str() + " bytes to " + path + ", not " + total.str()) : sw-done(total));
+  // THE FILE APPEARS WHOLE OR NOT AT ALL. The bytes go to <path>.tmp; the tmp is read back through the body's own
+  // reader and compared on the device with every source range (sw-verify); only then is it renamed over <path>
+  // (fs_rename: one rename(2), atomic on the volume). A crash, a refusal or a failed comparison leaves <path> as it
+  // was, and the tmp is removed; a tmp a crash left behind is truncated by the next write.
+  def sw-tmp(path) = path + ".tmp";
+  def sw-discard(tmp, why) = sw-discarded(fs_remove(tmp), why);
+  def sw-discarded(rc, why) = sw-refuse(why);
+  // ["ok", total] | ["refused", why]: the verified tmp becomes path, or the tmp goes and path is untouched
+  def sw-publish(ps, tmp, path, es, total) = sw-publish-verified(tmp, path, total, sw-verify(ps, tmp, es));
+  def sw-publish-verified(tmp, path, total, v) = sw-ok?(v) ? sw-publish-move(tmp, path, total, fs_rename(tmp, path)) : sw-discard(tmp, "the file written to " + tmp + " does not read back as the table (" + sw-why(v) + "); " + path + " is untouched");
+  def sw-publish-move(tmp, path, total, rc) = rc == 0 ? sw-done(total) : sw-discard(tmp, "could not rename " + tmp + " over " + path + "; " + path + " is untouched");
 
-  // a plan on the device: header written, tensors gathered, buffer read once and the file written once
-  def sw-write-plan(ps, p, path) {
-   let out = metal_buf_alloc(sw-plan-total(p));
-   out <= 0 ? sw-refuse("the device could not hold " + sw-plan-total(p).str() + " bytes") : sw-write-built(ps, p, path, out);
+  // `gathered` is the answer of the gathering chain: reading it here is what makes the dispatches part of the value
+  def sw-emit(out, total, path, gathered, ps, es) {
+   let s = (!nil?(gathered)) ? nothing() : metal_buf_read(out, 0, total);
+   nothing?(s) ? sw-refuse("the device buffer could not be read back") : sw-emit-write(ps, es, path, total, write_file(sw-tmp(path), s));
   }
-  def sw-write-built(ps, p, path, out) {
+  def sw-emit-write(ps, es, path, total, w) = w < 0 ? sw-discard(sw-tmp(path), "could not write " + sw-tmp(path)) : (file_size(sw-tmp(path)) != total ? sw-discard(sw-tmp(path), "wrote " + file_size(sw-tmp(path)).str() + " bytes to " + sw-tmp(path) + ", not " + total.str()) : sw-publish(ps, sw-tmp(path), path, es, total));
+
+  // a plan on the device: header written, tensors gathered, buffer read once and the file written once (to its tmp)
+  def sw-write-plan(ps, p, path, es) {
+   let out = metal_buf_alloc(sw-plan-total(p));
+   out <= 0 ? sw-refuse("the device could not hold " + sw-plan-total(p).str() + " bytes") : sw-write-built(ps, p, path, out, es);
+  }
+  def sw-write-built(ps, p, path, out, es) {
    let h = metal_buf_write(out, 0, sw-plan-header(p));
    let c = h < 0 ? form_error("safetensors-write: the header could not be written to the device") : sw-copy-all(ps, out, sw-plan-layout(p), sw-plan-start(p), [], 0);
-   let r = sw-emit(out, sw-plan-total(p), path, c);
+   let r = sw-emit(out, sw-plan-total(p), path, c, ps, es);
    let f = metal_buf_free(out);
    r;
   }
@@ -214,7 +229,7 @@ section [form.bml] {
   def sw-write(path, es, kvs) {
    let p = sw-plan(es, kvs);
    let ps = sw-ok?(p) ? sw-open() : p;
-   !sw-ok?(p) ? p : (!sw-ok?(ps) ? ps : sw-write-done(sw-write-plan(sw-why(ps), sw-why(p), path), sw-why(p), es));
+   !sw-ok?(p) ? p : (!sw-ok?(ps) ? ps : sw-write-done(sw-write-plan(sw-why(ps), sw-why(p), path, es), sw-why(p), es));
   }
   def sw-write-done(r, p, es) = sw-ok?(r) ? sw-done([sw-why(r), len(es), sw-plan-start(p)]) : r;
 
