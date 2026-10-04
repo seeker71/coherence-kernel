@@ -10213,6 +10213,13 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
  *       ours, so it answers 1: "gone" is ESRCH and nothing else. This is the
  *       whole of what `kill -0 <pid> && printf L` was doing through a fork.
  *
+ *   host_signal pid sig   a HOST DOOR (a syscall the kernel must expose, like host_kill and host_wait): the floor, not
+ *       a core recipe, so its shrink path is none -- it is the door. kill(pid, sig) for one process, and the answer
+ *       is 0 sent, -1 the host refused (no such process, or one this user may not signal), -2 a pid or a signal this
+ *       door will not send (pid not an int above zero, sig not an int in 1..31; 0 is refused, host_alive asks that).
+ *       host_kill sent SIGTERM only; a process that does not hear it (stopped, or stuck in a device wait) was ended
+ *       through /bin/kill, a foreign program borrowed for one syscall. Mode 34 of the leaf door, a rewrite row.
+ *
  *   fs_mkfifo path   1 the fifo was made, 0 a fifo already stands there,
  *       -1 refused (the path holds something that is not a fifo, or the host
  *       said no). A ring into an absent bell leaves a one-byte REGULAR file
@@ -10463,6 +10470,23 @@ static long long fk_host_door(long long mode, long long x) {
         /* host_process pid -- see fk_host_process */
         if ((x & 1) != 0) { return (0 - 1) * 2; }
         return fk_host_process(x >> 1);
+    }
+    if (mode == 34) {
+        /* host_signal pid sig -- see the host-door notes above: 0 sent, -1 the host refused, -2 a pid or a signal this
+         * door will not send. pid is an int above zero (never 0, never a group, never -1: one process, named), sig an
+         * int in 1..31; 0 is refused because host_alive is the aliveness question and it knows a corpse from a
+         * living process. The number is the host's own: 9 (KILL) and 15 (TERM) are the same everywhere, STOP and CONT
+         * are 17 and 19 on Darwin and 19 and 18 on Linux. */
+        if ((x & 1) == 0 || fk_is_str(x)) { return (0 - 2) * 2; }
+        long long pr34 = x >> 1;
+        if (pr34 < 1 || !FK_POK(pr34)) { return (0 - 2) * 2; }
+        long long pw34 = FK_HH(pr34);
+        long long sw34 = FK_HT(pr34);
+        if (((pw34 | sw34) & 1) != 0) { return (0 - 2) * 2; }
+        long long pid34 = pw34 >> 1;
+        long long sig34 = sw34 >> 1;
+        if (pid34 <= 0 || pid34 > 2147483647 || sig34 < 1 || sig34 > 31) { return (0 - 2) * 2; }
+        return kill((int)pid34, (int)sig34) == 0 ? 0 : (0 - 1) * 2;
     }
     if (mode != 17) { return fk_nothing; }
     /* host_spawn_at (cons argv redirects) */
@@ -12531,6 +12555,47 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
     long long pn = fk_f64_prog_n, rt = fk_f64_refuse_tag;
     int ln = fk_f64_lit_n, hm = fk_f64_hidden_mask, ns = fk_f64_need_scratch, acc = fk_f64_acc_slot, ad = fk_f64_acc_dir, cs = fk_f64_conses, rsw = fk_f64_reads_strword;
     int cn = fk_f64_call_n, wnn = fk_f64_warm_n, cnr = fk_f64_call_not_ready;
+    int cc0 = fk_f64_calls_c;
+    long long st0 = fk_f64_self_tag;
+    /* An inline substitutes each argument EXPRESSION at the callee's parameter reads (call by name): a parameter the body
+     * never reads drops its argument, a parameter read in one branch runs it only there, a parameter read twice runs it
+     * twice -- every one a changed meaning when the argument calls (a call, a self call, a closure call, an accumulator
+     * write) or is a form the lane cannot admit alone (a native with an effect). The walker evaluates each argument once, in
+     * order, whether the callee reads it or not; an inline holds to that by taking only arguments that are pure expressions
+     * of the frame. An argument with a call, or one that does not admit by itself, leaves the call to the call arm, which
+     * evaluates every argument once. (Found 2026-10-03: a recipe hot past FK_F64_HEAT dropped `(pe-nx (pe-layer ...) ...)`'s
+     * argument because pe-nx never read its first parameter -- the appends inside pe-layer stopped.)
+     * SHRINK PATH (this guard belongs to the lane the standing goal moves out of the kernel): the contract is now written in
+     * Form -- form/form-stdlib/bml/anf-lower.bml binds every argument, in order, before its call row -- and
+     * tests/arg-order-lane-parity-band.fk compares the effect order of the cold walker, the Form evaluator and this hot lane
+     * (it reads 8164 on a binary without this guard and 8191 with it). When a Form-built page owns hot recipes (shadow
+     * install, heat event, install door, call ABI, then flipping the default) fk_f64_inline_try and this lane are deleted,
+     * and the guard with them. */
+    {
+        int effectful = 0, admitted = 1;
+        k = 0;
+        while (k < car && admitted && !effectful) {
+            long long pn0 = fk_f64_prog_n;
+            int an = 0;
+            fk_f64_kind_ok = 1; /* a bare (value_kind x) argument is a compile-time fact, pure: let it stand as the substitution would */
+            int at = fk_f64_admit(args[k], arity, types, &an);
+            fk_f64_kind_ok = 0;
+            if (at == 0) { admitted = 0; }
+            else {
+                long long q = pn0;
+                while (q < fk_f64_prog_n) {
+                    int pk = fk_f64_prog[q].kind;
+                    if (pk == 19 || pk == 20 || pk == 21 || pk == 33 || pk == 38) { effectful = 1; break; } /* a call, an accumulator write, a closure call, a C call */
+                    q = q + 1;
+                }
+            }
+            k = k + 1;
+        }
+        fk_f64_prog_n = pn; fk_f64_refuse_tag = rt; fk_f64_lit_n = ln; fk_f64_hidden_mask = hm; fk_f64_need_scratch = ns;
+        fk_f64_acc_slot = acc; fk_f64_acc_dir = ad; fk_f64_conses = cs; fk_f64_reads_strword = rsw; fk_f64_calls_c = cc0; fk_f64_self_tag = st0;
+        fk_f64_call_n = cn; fk_f64_warm_n = wnn; fk_f64_call_not_ready = cnr; /* the call arm admits the argument again and raises any warm-up signal itself */
+        if (!admitted || effectful) { return 0; }
+    }
     /* the environment slot this inline borrows goes back as it was found: the param arm admits a caller's argument one
      * level down, and an inline inside that argument borrows the same slot the body being inlined still reads from */
     int d = fk_f64_env_depth;
@@ -17152,7 +17217,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury;
          * mode 25: value_str -- see fk_value_str; modes 26-27: read_file_bytes,
          * write_file_bytes -- the raw byte file doors, see fk_fb_door; modes 29-32: the stage
-         * bus (open, close, tail, name) -- see fk_bus_door; any other mode answers nothing. */
+         * bus (open, close, tail, name) -- see fk_bus_door; mode 33: metal_buf_fill, below; mode 34: host_signal -- see
+         * fk_host_door; any other mode answers nothing. */
+        if ((fm201 >> 1) == 34) { return fk_host_door(34, fx201); } /* before the >= 26 range below, which would take it for a byte-file door */
         if ((fm201 >> 1) == 33) {
             /* MODE 33 -- metal_buf_fill(buf, boff, [path, foff, len]): the fill door, see fk_metal_buf_fill_native. The rewrite row (native-rewrite-rules.bml) builds
              *     fk_smknode(201, LIT 33, buf, (cons boff spec))
