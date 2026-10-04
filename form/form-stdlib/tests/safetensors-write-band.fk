@@ -1,0 +1,285 @@
+; preludes: form/form-stdlib/safetensors-write.bml form/form-stdlib/t5-weights.bml form/form-stdlib/native-content-seal.bml
+; Expected: 15871
+; REQUIRES:it preludes .bml cells, writes and maps files through the Metal door (run it under the GPU lease: observe/gpu-lease-run.fk) and reads a model off this host.
+;
+; safetensors-write-band — the body holds a model in its own weight format, and the file it writes is the file it reads.
+;
+; THE SYNTHETIC TRUTH FIRST (bits 1-128; a 40-byte source blob the band writes itself, whose every number it knows):
+; four tensors in the order b (F16, 6 bytes), a.w (F32 2x3), c"q (I64, a name that needs JSON escaping), d (F32, read
+; from an unaligned source offset) become a file; the file is then read back by the body's own safetensors reader.
+;
+;   1     the plan: the header is a multiple of 8 bytes, its u64 prefix is its own length, the order is widest first
+;         (c"q, a.w, d, b), the offsets are contiguous from 0 (0, 8, 32, 36) and the total is the data start + 42
+;   2     the refusals, each with its reason in words: a dtype the format does not carry, a duplicate name, a size that
+;         is not shape x width, the reserved name __metadata__, a control byte in a name, a zero dimension, and a
+;         metadata value that is not a string
+;   4     the alias rule: dropping a true alias keeps one copy; dropping a tensor that is not an alias (another range,
+;         or the same range under another dtype) or that is not there is refused
+;   8     the round trip on the device: sw-write answers ok, and sti-open (the body's reader) finds four rows with the
+;         names, dtypes and shapes written, offsets that start at the data region, and a file exactly header + data
+;   16    every byte: sw-verify answers ok (a kernel counts differing words: zero), and each tensor mapped off the file
+;         reads back the very bytes of its source range (the F16 tensor is 6 bytes: the byte copy path, not the word one)
+;   32    the check can fail: one flipped byte is counted as 1 differing word, and a wrong shape is named
+;   64    sw-compare on four hand-made ranges answers 0 2 0 2 (a tail of 3 bytes, a shifted window, 24 equal bytes, a
+;         shifted word pair)
+;   128   the T5 loader over the same file: four rows with the loader's row shape (key empty), and t5w-map-f32 of a.w
+;         maps the bytes written
+;   256   the file appears whole or not at all (the write goes to <path>.tmp, is verified, is renamed over <path>):
+;         a tmp with one flipped byte is refused and the old file stays byte-for-byte what it was, tmp gone; a good tmp
+;         becomes the path; a refused rename (the destination is a directory) removes the tmp and leaves the
+;         destination; sw-write over an old file replaces it whole and leaves no tmp; a refused plan touches nothing
+;
+; THE REAL FILE (bits 1024-8192): /Users/ursmuff/models/g2p-byt5-small-100/model.safetensors, converted once from the
+; checkpoint by observe/torch-bin-convert-run.fk (which compared every byte against the checkpoint on the device before
+; this band pinned anything). This band needs no torch, no pickle and no python: what it holds is the file and the
+; numbers the one-off oracle gave (torch.load, recorded in torch-bin-band and native-t5-band). Present, or the skip bit
+; 16384 says it was not there.
+;
+;   1024  170 tensors, 299,637,760 parameters, the tied embedding views absent, every name and shape the T5 the
+;         config.json describes (t5w-problems answers []), the data region exactly covered by the tensors
+;   2048  the header's __metadata__ names its provenance: format pt, the source repo, license MIT, 170 tensors written,
+;         the two dropped aliases, and the source checkpoint's content seal
+;   4096  the first floats of shared.weight, the last float of lm_head.weight and of encoder block 3's wo, and the first
+;         float of decoder.final_layer_norm.weight, read through the T5 loader's mapped buffers, are the oracle's words
+;   8192  the file's content seal (native-content-seal: sha256 over 64 KiB leaves on the device) is the one pinned here,
+;         so every byte of all 1.2 GB is accounted for in one number
+; The skip is not a claim: a host without the model awards bit 16384 and none of 1024-8192, so a moved model reads as absent, not as a failing writer.
+;
+; Verdict 15871 with the model on this host (bits 1-256 and 1024-8192; it was 15615 before bit 256); a host without it
+; answers 16384 + 511 = 16895.
+(do
+    ; every claim holds, or the bit is dark; the first zero decides
+    (defn swb-all (xs) (if (eq (len xs) 0) true (if (head xs) (swb-all (tail xs)) false)))
+    (defn swb-bit (claims bit) (if (swb-all claims) bit 0))
+    (defn swb-has (hay needle) (ge (str_find hay needle 0) 0))
+    (defn swb-le (v n) (if (le n 0) (empty) (cons (mod v 256) (swb-le (div v 256) (sub n 1)))))
+    (defn swb-words (ws) (if (nil? ws) (empty) (append (swb-le (head ws) 4) (swb-words (tail ws)))))
+    (defn swb-refused? (r) (str_eq (nth r 0) "refused"))
+    (defn swb-ok? (r) (str_eq (nth r 0) "ok"))
+    (defn swb-reason (r) (nth r 1))
+    (defn swb-dir () ".hearth/swb-")
+    (defn swb-same (a b) (if (eq (len a) (len b)) (if (nil? a) true (and (eq (head a) (head b)) (swb-same (tail a) (tail b)))) false))
+    (defn swb-dq () (byte_to_str 34))
+    ; "key":"value" as the header spells it, and the same without its closing quote: a value's prefix
+    (defn swb-kv (k v) (str_concat (swb-dq) (str_concat k (str_concat (swb-dq) (str_concat ":" (str_concat (swb-dq) (str_concat v (swb-dq))))))))
+    (defn swb-kp (k v) (substring (swb-kv k v) 0 (sub (str_len (swb-kv k v)) 1)))
+    (defn swb-q () (str_concat "c" (str_concat (swb-dq) "q")))
+
+    ; the 40-byte source: six F32 (1.0 .. 6.0), three F16 (1.0 2.0 3.0), two pad bytes, one I64 (7)
+    (defn swb-blob ()
+        (append (swb-words (list 1065353216 1073741824 1077936128 1082130432 1084227584 1086324736))
+                (append (list 0 60 0 64 0 66 0 0) (list 7 0 0 0 0 0 0 0))))
+    (defn swb-src () (do (write_file_bytes (str_concat (swb-dir) "src.bin") (swb-blob)) (str_concat (swb-dir) "src.bin")))
+    (defn swb-entries (src)
+        (list (sw-entry "b" "F16" (list 3) src 24 6)
+              (sw-entry "a.w" "F32" (list 2 3) src 0 24)
+              (sw-entry (swb-q) "I64" (list 1) src 32 8)
+              (sw-entry "d" "F32" (list 1) src 28 4)))
+    (defn swb-meta () (list (list "format" "pt") (list "note" "band")))
+    (defn swb-names (ls) (if (nil? ls) (empty) (cons (nth (nth (head ls) 0) 0) (swb-names (tail ls)))))
+    (defn swb-begins (ls) (if (nil? ls) (empty) (cons (nth (head ls) 1) (swb-begins (tail ls)))))
+    (defn swb-hlen (h) (add (str_byte_at h 0) (add (mul 256 (str_byte_at h 1)) (add (mul 65536 (str_byte_at h 2)) (mul 16777216 (str_byte_at h 3))))))
+    (defn swb-e (name dt shape off bytes) (sw-entry name dt shape "/x" off bytes))
+    (defn swb-reason-has (es kvs needle) (do (let r (sw-plan es kvs)) (and (swb-refused? r) (swb-has (swb-reason r) needle))))
+    (defn swb-slice-eq (h src off bytes) (str_eq (metal_buf_read h 0 bytes) (read_file_slice src off bytes)))
+    (defn swb-all-eq (ix src es)
+        (if (nil? es) true
+            (do (let h (sti-map ix (nth (head es) 0)))
+                (let ok (swb-slice-eq (nth h 0) src (nth (head es) 4) (nth (head es) 5)))
+                (let fr (metal_buf_free (nth h 0)))
+                (and ok (swb-all-eq ix src (tail es))))))
+
+    ; ---- bits 1, 2, 4: no device ----
+    (defn swb-plan-bit (es)
+        (do
+            (let pr (sw-plan es (swb-meta)))
+            (let pl (nth pr 1))
+            (let hd (sw-plan-header pl))
+            (let hl (swb-hlen hd))
+            (let ls (sw-plan-layout pl))
+            (swb-bit (list (swb-ok? pr)
+                           (eq (mod hl 8) 0)
+                           (eq (add 8 hl) (str_len hd))
+                           (eq (sw-plan-start pl) (add 8 hl))
+                           (swb-same (swb-begins ls) (list 0 8 32 36))
+                           (str_eq (nth (swb-names ls) 0) (swb-q))
+                           (str_eq (nth (swb-names ls) 3) "b")
+                           (eq (sw-plan-total pl) (add (sw-plan-start pl) 42))) 1)))
+    (defn swb-refusal-bit ()
+        (swb-bit (list (swb-reason-has (list (swb-e "a" "F33" (list 1) 0 4)) (empty) "does not carry")
+                       (swb-reason-has (list (swb-e "a" "F32" (list 1) 0 4) (swb-e "a" "F32" (list 1) 4 4)) (empty) "duplicate tensor name")
+                       (swb-reason-has (list (swb-e "a" "F32" (list 2) 0 4)) (empty) "not shape x width")
+                       (swb-reason-has (list (swb-e "__metadata__" "F32" (list 1) 0 4)) (empty) "header's own key")
+                       (swb-reason-has (list (swb-e (str_concat "a" (byte_to_str 7)) "F32" (list 1) 0 4)) (empty) "control byte")
+                       (swb-reason-has (list (swb-e "a" "F32" (list 0) 0 0)) (empty) "dimension of zero")
+                       (swb-reason-has (list (swb-e "a" "F32" (list 1) 0 4)) (list (list "k" 5)) "not a string")) 2))
+    (defn swb-alias-bit ()
+        (do
+            (let ea (list (swb-e "a" "F32" (list 1) 0 4) (swb-e "b" "F32" (list 1) 0 4) (swb-e "c" "F32" (list 1) 4 4)))
+            (let d1 (sw-drop ea (list "b")))
+            (let d2 (sw-drop ea (list "c")))
+            (let d3 (sw-drop ea (list "zzz")))
+            (let d4 (sw-drop (list (swb-e "a" "F32" (list 1) 0 4) (swb-e "b" "I32" (list 1) 0 4)) (list "b")))
+            (swb-bit (list (swb-ok? d1)
+                           (eq (len (nth d1 1)) 2)
+                           (str_eq (nth (nth (nth d1 1) 0) 0) "a")
+                           (str_eq (nth (nth (nth d1 1) 1) 0) "c")
+                           (swb-refused? d2) (swb-has (swb-reason d2) "not an alias")
+                           (swb-refused? d3) (swb-has (swb-reason d3) "no such tensor")
+                           (swb-refused? d4) (swb-has (swb-reason d4) "not an alias")) 4)))
+
+    ; ---- bits 8 and 16: the round trip ----
+    (defn swb-round-bit (ix out w es pl)
+        (do
+            (let rows (nth ix 2))
+            (let ra (sti-find ix "a.w"))
+            (let rb (sti-find ix "b"))
+            (let rc (sti-find ix (swb-q)))
+            (swb-bit (list (swb-ok? w)
+                           (eq (nth (nth w 1) 0) (add (sw-plan-start pl) 42))
+                           (eq (file_size out) (add (sw-plan-start pl) 42))
+                           (eq (len rows) 4)
+                           (str_eq (nth ra 1) "F32") (swb-same (nth ra 2) (list 2 3))
+                           (str_eq (nth rb 1) "F16") (swb-same (nth rb 2) (list 3))
+                           (str_eq (nth rc 1) "I64")
+                           (eq (nth rc 3) (nth ix 1))
+                           (eq (nth ra 3) (add (nth ix 1) 8))) 8)))
+    (defn swb-bytes-bit (ps ix out es src)
+        (do
+            (let vr (sw-verify ps out es))
+            (swb-bit (list (swb-ok? vr)
+                           (eq (nth (nth vr 1) 0) 4)
+                           (eq (nth (nth vr 1) 1) 42)
+                           (swb-all-eq ix src es)) 16)))
+    ; ---- bit 32: the check can fail ----
+    (defn swb-fail-bit (ps out es src)
+        (do
+            (let text (read_file out))
+            (let n (str_len text))
+            (let bad (str_concat (swb-dir) "bad.safetensors"))
+            (let wb (write_file bad (str_concat (substring text 0 (sub n 1)) (byte_to_str (mod (add (str_byte_at text (sub n 1)) 1) 256)))))
+            (let vb (sw-verify ps bad es))
+            (let es2 (list (nth es 0) (sw-entry "a.w" "F32" (list 3 2) src 0 24) (nth es 2) (nth es 3)))
+            (let vs (sw-verify ps out es2))
+            (swb-bit (list (eq wb n) (swb-refused? vb) (swb-has (swb-reason vb) "1 words differ")
+                           (swb-refused? vs) (swb-has (swb-reason vs) "another shape")) 32)))
+    ; ---- bit 128: the loader ----
+    (defn swb-loader-bit (out src)
+        (do
+            (let lr (t5w-tensors out))
+            (let la (t5w-find lr "a.w"))
+            (let lh (t5w-map-f32 out lr "a.w"))
+            (let ok (swb-bit (list (eq (len lr) 4) (str_eq (nth la 3) "") (str_eq (nth la 1) "F32") (eq (nth la 5) 24)
+                                   (str_eq (nth lh 2) "F32") (swb-same (nth lh 1) (list 2 3))
+                                   (swb-slice-eq (nth lh 0) src 0 24)) 128))
+            (let fr (metal_buf_free (nth lh 0)))
+            ok))
+    ; ---- bit 256: the file appears whole or not at all ----
+    ; the tmp is verified and renamed over the path; a bad tmp, a refused rename or a crash leaves the old file whole
+    (defn swb-publish-bit (ps out es)
+        (do
+            (let good (read_file out))
+            (let n (str_len good))
+            (let dst (str_concat (swb-dir) "pub.safetensors"))
+            (let tmp (sw-tmp dst))
+            (let old "the old model, whole")
+            ; 1. the tmp has one flipped byte: refused, the old file is byte-for-byte what it was, the tmp is gone
+            (let w0 (write_file dst old))
+            (let w1 (write_file tmp (str_concat (substring good 0 (sub n 1)) (byte_to_str (mod (add (str_byte_at good (sub n 1)) 1) 256)))))
+            (let r1 (sw-publish ps tmp dst es n))
+            (let k1 (list (eq w1 n) (swb-refused? r1) (swb-has (swb-reason r1) "untouched") (str_eq (read_file dst) old) (eq (fs_exists tmp) 0)))
+            ; 2. a good tmp: it becomes the path, whole, and the tmp is gone
+            (let w2 (write_file tmp good))
+            (let r2 (sw-publish ps tmp dst es n))
+            (let k2 (list (swb-ok? r2) (eq (nth r2 1) n) (str_eq (read_file dst) good) (eq (fs_exists tmp) 0)))
+            ; 3. the destination is a directory, so the rename is refused: the tmp is removed and the directory stands
+            (let dd (str_concat (swb-dir) "pubdir"))
+            (let m3 (fs_mkdir dd))
+            (let w3 (write_file (sw-tmp dd) good))
+            (let r3 (sw-publish ps (sw-tmp dd) dd es n))
+            (let k3 (list (swb-refused? r3) (swb-has (swb-reason r3) "could not rename") (eq (fs_exists (sw-tmp dd)) 0) (eq (fs_is_dir dd) 1)))
+            (let rm3 (fs_rmdir dd))
+            ; 4. the door end to end over an old file: replaced whole, the same bytes as the first write, no tmp left
+            (let w4 (write_file dst old))
+            (let r4 (sw-write dst es (swb-meta)))
+            (let k4 (list (swb-ok? r4) (str_eq (read_file dst) good) (eq (fs_exists (sw-tmp dst)) 0)))
+            ; 5. a plan that is refused never touches an existing file nor makes a tmp
+            (let w5 (write_file dst old))
+            (let r5 (sw-write dst (list (swb-e "a" "F33" (list 1) 0 4)) (empty)))
+            (let k5 (list (swb-refused? r5) (str_eq (read_file dst) old) (eq (fs_exists (sw-tmp dst)) 0)))
+            (let rm (fs_remove dst))
+            (swb-bit (append k1 (append k2 (append k3 (append k4 k5)))) 256)))
+    (defn swb-synthetic ()
+        (do
+            (let src (swb-src))
+            (let es (swb-entries src))
+            (let out (str_concat (swb-dir) "out.safetensors"))
+            (let pl (nth (sw-plan es (swb-meta)) 1))
+            (let c1 (swb-plan-bit es))
+            (let c2 (swb-refusal-bit))
+            (let c4 (swb-alias-bit))
+            (let op (sw-open))
+            (let ps (nth op 1))
+            (let w (sw-write out es (swb-meta)))
+            (let ix (sti-open out))
+            (let c8 (swb-round-bit ix out w es pl))
+            (let c16 (swb-bytes-bit ps ix out es src))
+            (let c32 (swb-fail-bit ps out es src))
+            (let cnt (sw-compare ps (list (list src 0 src 0 3) (list src 0 src 1 3) (list src 0 src 0 24) (list src 0 src 4 8))))
+            (let c64 (swb-bit (list (swb-ok? op) (swb-same cnt (list 0 2 0 2))) 64))
+            (let c128 (swb-loader-bit out src))
+            (let c256 (swb-publish-bit ps out es))
+            (sum (list c1 c2 c4 c8 c16 c32 c64 c128 c256))))
+
+    ; ---- the real file ----
+    (defn swb-model () "/Users/ursmuff/models/g2p-byt5-small-100/model.safetensors")
+    (defn swb-config () "/Users/ursmuff/models/g2p-byt5-small-100/config.json")
+    ; 21144 bytes of header + 170 tensors of 1,198,551,040 bytes (299,637,760 float32 parameters)
+    (defn swb-model-bytes () 1198572184)
+    (defn swb-seal () "sha256-tree-65536-v1:56192754a4bd67a6cd386861f3de82b0a14eabf79d8eaa2d08383f9e86b88dfe")
+    (defn swb-here? () (eq (file_size (swb-model)) (swb-model-bytes)))
+    (defn swb-word (rows name k)
+        (do (let h (t5w-map-f32 (swb-model) rows name))
+            (let s (metal_buf_read (nth h 0) (mul 4 k) 4))
+            (let fr (metal_buf_free (nth h 0)))
+            (sw-le32 s 0)))
+    (defn swb-last (rows name) (sub (t5w-numel (t5w-find rows name)) 1))
+    (defn swb-hdr () (read_file_slice (swb-model) 8 (swb-hlen (read_file_slice (swb-model) 0 8))))
+    (defn swb-real ()
+        (do
+            (let rows (t5w-tensors (swb-model)))
+            (let cfg (t5w-config (swb-config)))
+            (let ix (sti-open (swb-model)))
+            (let probs (t5w-problems rows cfg))
+            (let hd (swb-hdr))
+            (let wo "encoder.block.3.layer.1.DenseReluDense.wo.weight")
+            (let c1 (swb-bit (list (eq (len rows) 170)
+                                   (eq (t5w-params rows) 299637760)
+                                   (eq (t5w-config-params cfg) 299637760)
+                                   (nil? probs)
+                                   (nil? (t5w-find rows "encoder.embed_tokens.weight"))
+                                   (nil? (t5w-find rows "decoder.embed_tokens.weight"))
+                                   (eq (t5w-total-bytes rows) (sub (file_size (swb-model)) (nth ix 1)))) 1024))
+            (let c2 (swb-bit (list (swb-has hd (swb-kv "format" "pt"))
+                                   (swb-has hd (swb-kv "source_repo" "charsiu/g2p_multilingual_byT5_small_100"))
+                                   (swb-has hd (swb-kv "license" "MIT"))
+                                   (swb-has hd (swb-kv "tensors_written" "170"))
+                                   (swb-has hd (swb-kv "tensors_dropped_as_aliases" "encoder.embed_tokens.weight,decoder.embed_tokens.weight"))
+                                   (swb-has hd (swb-kp "source_seal" "sha256-tree-65536-v1:"))) 2048))
+            ; the oracle's words (torch.load, one-off; recorded in torch-bin-band / native-t5-band)
+            (let c3 (swb-bit (list (eq (swb-word rows "shared.weight" 0) 1080808605)
+                                   (eq (swb-word rows "shared.weight" 1) 1091499194)
+                                   (eq (swb-word rows "shared.weight" 2) 3222227908)
+                                   (eq (swb-word rows "shared.weight" 3) 3223637754)
+                                   (eq (swb-word rows "lm_head.weight" (swb-last rows "lm_head.weight")) 3205570066)
+                                   (eq (swb-word rows wo (swb-last rows wo)) 3188468430)
+                                   (eq (swb-word rows "decoder.final_layer_norm.weight" 0) 1031685797)) 4096))
+            (let c4 (swb-bit (list (str_eq (ncs-file (swb-model)) (swb-seal))) 8192))
+            (sum (list c1 c2 c3 c4))))
+
+    (defn safetensors-write-band ()
+        (do
+            (let syn (swb-synthetic))
+            (if (swb-here?) (add syn (swb-real)) (add syn 16384))))
+
+    (safetensors-write-band))

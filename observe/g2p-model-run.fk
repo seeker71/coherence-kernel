@@ -1,0 +1,87 @@
+// g2p-model-run.fk — the body's own grapheme-to-phoneme model, run over a list of words.
+//
+//   printf '<lang tag>\n<words file>\n<output tsv>\n[<checkpoint>]\n[<max words this run>]\n' | ./fkwu observe/g2p-model-run.fk
+//
+// Line one is the model's language tag (eng-us for English; por-bz, por-po, pes, fas, per, ind ... the model
+// takes `<tag>: word`). Line two is a words file, one word per line (a taught table's rows are fine: the word is
+// the text before the first tab). Line three is the output: `word<TAB>phonemes` rows APPENDED as the walk goes.
+// Resumable: a word already in the output is skipped, so a run the host cut (exit 137) is simply run again.
+// Line four is the checkpoint (default: the charsiu g2p ByT5 on this host); line five caps the words processed
+// by THIS run (0 = all), for a caller that respawns the door to bound its lifetime.
+//
+// The model is form/form-stdlib/native-t5.bml: no process, no library, the weights mapped off the checkpoint's
+// file ranges, the kernels run on the body's own Metal. Scratch is allocated once when the model opens; the
+// summary prints the carrier's retained-buffer count before and after so a leak shows.
+// A word the model could not read (too long for the scratch, a non-finite logit, an empty answer) is NOT written:
+// an absence is not a phoneme string. The summary counts them.
+//
+// GPU etiquette: this opens the Metal carrier, so the door holds the GPU lease (/tmp/form-gpu.lock, machine-wide,
+// form/form-stdlib/gpu-lease.bml) from before the model opens until the run is done, and prints it, taken and
+// given back, as `lease  ...` lines. A live holder is waited for (20 minutes), a dead holder's lease is taken over,
+// and a refused take stops the door before it touches the device.
+// preflight-exec: forbidden
+import form/form-stdlib/native-t5.bml;
+import form/form-stdlib/spool-bell-transport.fk;
+import form/form-stdlib/line-grammar.fk;
+import form/form-stdlib/gpu-lease.bml;
+section [form.bml] {
+    def gmr-line() = {
+        let value = read_line();
+        nothing?(value) ? "" : trim(value);
+    };
+    def gmr-or(v, dflt) = len(v) == 0 ? dflt : v;
+    def gmr-tab() = byte_to_str(9);
+    def gmr-nl() = byte_to_str(10);
+    // the word of a row: the text before the first tab (a taught table's row) or the whole line
+    def gmr-word-of(row) {
+        let at = str_find(row, gmr-tab(), 0);
+        at < 0 ? trim(row) : trim(substring(row, 0, at));
+    }
+    def gmr-lines(path) = file_size(path) > 0 ? split-on(read_file(path), gmr-nl()) : [];
+    // the set of words already written
+    def gmr-set-add(set, rows) = nil?(rows) ? set : gmr-set-add(len(gmr-word-of(rows[0])) == 0 ? set : record_set(set, gmr-word-of(rows[0]), 1), rows[1:]);
+    def gmr-done?(set, w) = record_get(set, w) == 1;
+    def gmr-int(v) = value_kind(v) == "int" ? v : 0;
+    // state: [done-set, written, skipped-already, refused, seen]
+    def gmr-walk(m, tag, out, words, i, set, written, already, refused, cap) {
+        i >= len(words) ? [written, already, refused] : gmr-take(m, tag, out, words, i, set, written, already, refused, cap, gmr-word-of(words[i]));
+    }
+    def gmr-take(m, tag, out, words, i, set, written, already, refused, cap, w) {
+        len(w) == 0 ? gmr-walk(m, tag, out, words, i + 1, set, written, already, refused, cap) : (gmr-done?(set, w) ? gmr-walk(m, tag, out, words, i + 1, set, written, already + 1, refused, cap) : ((cap > 0 && written >= cap) ? [written, already, refused] : gmr-one(m, tag, out, words, i, set, written, already, refused, cap, w)));
+    }
+    def gmr-one(m, tag, out, words, i, set, written, already, refused, cap, w) {
+        let r = nt5-run(m, nt5-query(tag, w));
+        let ok = (!nothing?(r)) && (len(r) > 0);
+        let rc = ok ? sbt-append(out, w + gmr-tab() + r + gmr-nl()) : 0;
+        let wrote = ok && (!nothing?(rc)) && rc >= 0;
+        ok && (!wrote) ? form_error("could not append to " + out) : gmr-after(m, tag, out, words, i, record_set(set, w, 1), written + (ok ? 1 : 0), already, refused + (ok ? 0 : 1), cap);
+    }
+    def gmr-after(m, tag, out, words, i, set, written, already, refused, cap) {
+        let p = (written > 0 && written % 100 == 0 && (i + 1 < len(words))) ? print_str("progress written=" + written.str() + " retained_buffers=" + nt5-live().str()) : 0;
+        gmr-walk(m, tag, out, words, i + 1, set, written, already, refused, cap);
+    }
+    let tag = gmr-line();
+    let wpath = gmr-line();
+    let out = gmr-line();
+    let ckpt = gmr-or(gmr-line(), "/Users/ursmuff/models/g2p-byt5-small-100/model.safetensors");
+    let cap = gmr-int(str_to_int(gmr-or(gmr-line(), "0")));
+    (len(tag) == 0 || len(wpath) == 0 || len(out) == 0) ? form_error("usage: <lang tag> / <words file> / <output tsv> / [checkpoint] / [cap] on stdin") : 0;
+    let lease = gpu-lease-door-held("g2p-model-run");
+    let started = host_monotonic_ms();
+    let words = gmr-lines(wpath);
+    let set = gmr-set-add(record_new(0), gmr-lines(out));
+    let m = nt5-open(ckpt);
+    let base = nt5-live();
+    let opened = host_monotonic_ms();
+    print_str("tag=" + tag + " words_lines=" + len(words).str() + " retained_buffers_open=" + base.str() + " open_ms=" + (opened - started).str());
+    let res = gmr-walk(m, tag, out, words, 0, set, 0, 0, 0, cap);
+    let ended = host_monotonic_ms();
+    let live = nt5-live();
+    let ms = ended - opened;
+    print_str("written=" + res[0].str() + " already=" + res[1].str() + " refused=" + res[2].str() + " walk_ms=" + ms.str() + " retained_buffers_end=" + live.str() + " flat=" + (live == base ? "yes" : "NO"));
+    print_str("words_per_second_x100=" + (ms > 0 ? ((res[0] * 100000) / ms).str() : "0"));
+    let closed = nt5-close(m);
+    print_str("retained_buffers_closed=" + nt5-live().str());
+    let gave = gpu-lease-door-end(lease);
+    0;
+}

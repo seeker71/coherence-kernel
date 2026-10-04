@@ -1,0 +1,113 @@
+//////////////////////////////////////////////////////////////////////
+// t5-weights.bml — a T5's weights, held in the body's own format: the tensor table of a model.safetensors and
+// each tensor mapped straight off its file range as a metal buffer.
+//
+// The T5 pass (native-t5.bml) asks its weight source two things: the table of a file, and one tensor mapped.
+// This is that source over safetensors, with the same row and handle shape the pickle reader gave it:
+//     t5w-tensors(path)                    -> rows (name dtype shape key offset bytes)   [key is "": no storage member]
+//     t5w-map-f32(path, rows, name)        -> [handle, shape, "F32"]                      [handle = metal_buf_from_file]
+// The file's own reader is safetensors-index.bml (sti-open); this cell only reshapes its rows and maps. No pickle,
+// no zip, no torch, no python: the container was converted once (safetensors-write.bml, observe/torch-bin-convert-run.fk).
+//
+// THE T5 NAME TABLE (t5w-*). config.json gives d_model, d_kv, heads, d_ff, layers, vocab and buckets; from those
+// alone t5w-expected writes the (name, shape) of every tensor a T5ForConditionalGeneration carries, and
+// t5w-problems compares a table to it: [] means every name is present with its config shape and nothing else is.
+// The two tied embedding views (encoder.embed_tokens.weight, decoder.embed_tokens.weight) are optional: a
+// converted file drops them (one storage, one name: shared.weight), a raw state_dict names them.
+//
+// ONE HOME. This is the only copy of the T5 name table: torch-bin.bml (the pickle reader) imports it and its rows
+// (name dtype shape key offset bytes) have the same positions, so t5w-problems checks a torch checkpoint's table
+// and a safetensors table alike.
+//
+// Proven by: form/form-stdlib/tests/safetensors-write-band.fk  ·  form/form-stdlib/tests/torch-bin-band.fk
+// preflight-exec: forbidden
+import form/form-stdlib/core.fk;
+import form/form-stdlib/json.fk;
+import form/form-stdlib/safetensors-index.bml;
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+ class FormT5Weights {
+  // ---- the table of a file ----
+  def t5w-row(r) = [r[0], r[1], r[2], "", r[3], r[4]];
+  def t5w-rows-of(rs) = nil?(rs) ? [] : cons(t5w-row(rs[0]), t5w-rows-of(rs[1:]));
+  def t5w-tensors(path) = t5w-rows-of(sti-open(path)[2]);
+  def t5w-name(r) = r[0];
+  def t5w-dtype(r) = r[1];
+  def t5w-shape(r) = r[2];
+  def t5w-off(r) = r[4];
+  def t5w-bytes(r) = r[5];
+  def t5w-product(xs) = nil?(xs) ? 1 : (xs[0] * t5w-product(xs[1:]));
+  def t5w-numel(r) = t5w-product(r[2]);
+  def t5w-find(rows, name) = nil?(rows) ? [] : ((String) rows[0][0] == name ? rows[0] : t5w-find(rows[1:], name));
+  def t5w-params(rows) = nil?(rows) ? 0 : t5w-numel(rows[0]) + t5w-params(rows[1:]);
+  def t5w-total-bytes(rows) = nil?(rows) ? 0 : rows[0][5] + t5w-total-bytes(rows[1:]);
+
+  // ---- a tensor, mapped off the file: [handle, shape, dtype] ----
+  def t5w-buf(path, row) = metal_buf_from_file(path, t5w-off(row), t5w-bytes(row));
+  def t5w-map(path, rows, name) = t5w-map-row(path, t5w-find(rows, name), name);
+  def t5w-map-row(path, row, name) = nil?(row) ? form_error("t5-weights tensor absent: " + name) : t5w-map-held(t5w-buf(path, row), row);
+  def t5w-map-held(handle, row) = handle <= 0 ? form_error("t5-weights mapping refused: " + t5w-name(row)) : [handle, t5w-shape(row), t5w-dtype(row)];
+  // the same, for a pass that wants floats and nothing else
+  def t5w-map-f32(path, rows, name) = t5w-map-f32-row(path, t5w-find(rows, name), name);
+  def t5w-map-f32-row(path, row, name) = nil?(row) ? form_error("t5-weights tensor absent: " + name) : ((String) t5w-dtype(row) != "F32" ? form_error("t5-weights tensor " + name + " is " + t5w-dtype(row) + ", not F32") : t5w-map(path, [row], name));
+
+  // ---- the T5 name table ----
+  // cfg = (d_model d_kv heads d_ff encoder-layers decoder-layers vocab buckets)
+  def t5w-cfg-int(obj, key) = node_value(json-object-get(obj, key));
+  def t5w-config(path) {
+   let obj = parse-json(path, read_file(path));
+   [t5w-cfg-int(obj, "d_model"), t5w-cfg-int(obj, "d_kv"), t5w-cfg-int(obj, "num_heads"), t5w-cfg-int(obj, "d_ff"), t5w-cfg-int(obj, "num_layers"), t5w-cfg-int(obj, "num_decoder_layers"), t5w-cfg-int(obj, "vocab_size"), t5w-cfg-int(obj, "relative_attention_num_buckets")];
+  }
+  def t5w-cd(c) = c[0];
+  def t5w-cinner(c) = c[1] * c[2];
+  def t5w-cheads(c) = c[2];
+  def t5w-cff(c) = c[3];
+  def t5w-cenc(c) = c[4];
+  def t5w-cdec(c) = c[5];
+  def t5w-cvocab(c) = c[6];
+  def t5w-cbuckets(c) = c[7];
+  def t5w-ent(name, shape) = [name, shape];
+  // an attention: q k v project d -> inner, o back; block 0 also owns the relative bias
+  def t5w-attn(c, pre, bias) = bias == 1 ? [t5w-ent(pre + ".q.weight", [t5w-cinner(c), t5w-cd(c)]), t5w-ent(pre + ".k.weight", [t5w-cinner(c), t5w-cd(c)]), t5w-ent(pre + ".v.weight", [t5w-cinner(c), t5w-cd(c)]), t5w-ent(pre + ".o.weight", [t5w-cd(c), t5w-cinner(c)]), t5w-ent(pre + ".relative_attention_bias.weight", [t5w-cbuckets(c), t5w-cheads(c)])] : [t5w-ent(pre + ".q.weight", [t5w-cinner(c), t5w-cd(c)]), t5w-ent(pre + ".k.weight", [t5w-cinner(c), t5w-cd(c)]), t5w-ent(pre + ".v.weight", [t5w-cinner(c), t5w-cd(c)]), t5w-ent(pre + ".o.weight", [t5w-cd(c), t5w-cinner(c)])];
+  def t5w-ffn(c, pre) = [t5w-ent(pre + ".wi_0.weight", [t5w-cff(c), t5w-cd(c)]), t5w-ent(pre + ".wi_1.weight", [t5w-cff(c), t5w-cd(c)]), t5w-ent(pre + ".wo.weight", [t5w-cd(c), t5w-cff(c)])];
+  def t5w-norm(c, pre) = [t5w-ent(pre + ".layer_norm.weight", [t5w-cd(c)])];
+  def t5w-cat(a, b) = nil?(a) ? b : cons(a[0], t5w-cat(a[1:], b));
+  def t5w-cat4(a, b, c, d) = t5w-cat(a, t5w-cat(b, t5w-cat(c, d)));
+  def t5w-cat6(a, b, c, d, e, f) = t5w-cat(a, t5w-cat(b, t5w-cat(c, t5w-cat(d, t5w-cat(e, f)))));
+  def t5w-enc-block(c, n) {
+   let p = "encoder.block." + n.str();
+   t5w-cat4(t5w-attn(c, p + ".layer.0.SelfAttention", n == 0 ? 1 : 0), t5w-norm(c, p + ".layer.0"), t5w-ffn(c, p + ".layer.1.DenseReluDense"), t5w-norm(c, p + ".layer.1"));
+  }
+  def t5w-dec-block(c, n) {
+   let p = "decoder.block." + n.str();
+   t5w-cat6(t5w-attn(c, p + ".layer.0.SelfAttention", n == 0 ? 1 : 0), t5w-norm(c, p + ".layer.0"), t5w-attn(c, p + ".layer.1.EncDecAttention", 0), t5w-norm(c, p + ".layer.1"), t5w-ffn(c, p + ".layer.2.DenseReluDense"), t5w-norm(c, p + ".layer.2"));
+  }
+  def t5w-enc-all(c, n) = n >= t5w-cenc(c) ? [] : t5w-cat(t5w-enc-block(c, n), t5w-enc-all(c, n + 1));
+  def t5w-dec-all(c, n) = n >= t5w-cdec(c) ? [] : t5w-cat(t5w-dec-block(c, n), t5w-dec-all(c, n + 1));
+  // every (name shape) a T5ForConditionalGeneration with this config must carry
+  def t5w-expected(c) = t5w-cat6([t5w-ent("shared.weight", [t5w-cvocab(c), t5w-cd(c)])], t5w-enc-all(c, 0), [t5w-ent("encoder.final_layer_norm.weight", [t5w-cd(c)])], t5w-dec-all(c, 0), [t5w-ent("decoder.final_layer_norm.weight", [t5w-cd(c)])], [t5w-ent("lm_head.weight", [t5w-cvocab(c), t5w-cd(c)])]);
+  // the two tied embedding views a raw state_dict may also carry
+  def t5w-optional(c) = [t5w-ent("encoder.embed_tokens.weight", [t5w-cvocab(c), t5w-cd(c)]), t5w-ent("decoder.embed_tokens.weight", [t5w-cvocab(c), t5w-cd(c)])];
+  // 10x8: the body's one spelling of a shape (ear-npz's en-shape-text, torch-bin's tb-row-text)
+  def t5w-shape-text(xs) = t5w-join(t5w-ints-strs(xs), "x");
+  def t5w-ints-strs(xs) = nil?(xs) ? [] : cons(xs[0].str(), t5w-ints-strs(xs[1:]));
+  def t5w-join(parts, sep) = nil?(parts) ? "" : (nil?(parts[1:]) ? parts[0] : parts[0] + (sep + t5w-join(parts[1:], sep)));
+  def t5w-same?(a, b) = len(a) != len(b) ? 0 : (nil?(a) ? 1 : (a[0] == b[0] ? t5w-same?(a[1:], b[1:]) : 0));
+  def t5w-check-one(rows, e) {
+   let r = t5w-find(rows, e[0]);
+   nil?(r) ? ["missing " + e[0]] : (t5w-same?(t5w-shape(r), e[1]) == 1 ? ((String) t5w-dtype(r) == "F32" ? [] : [e[0] + " is " + t5w-dtype(r) + ", not F32"]) : [e[0] + " is " + t5w-shape-text(t5w-shape(r)) + ", config says " + t5w-shape-text(e[1])]);
+  }
+  def t5w-check-all(rows, es) = nil?(es) ? [] : t5w-cat(t5w-check-one(rows, es[0]), t5w-check-all(rows, es[1:]));
+  def t5w-known?(es, name) = nil?(es) ? 0 : ((String) es[0][0] == name ? 1 : t5w-known?(es[1:], name));
+  def t5w-ent-find(es, name) = nil?(es) ? [] : ((String) es[0][0] == name ? es[0] : t5w-ent-find(es[1:], name));
+  // a row the expected table does not hold: one of the two tied embedding views (shape-checked) or unexpected
+  def t5w-extra-one(r, es, opt) = t5w-known?(es, t5w-name(r)) == 1 ? [] : (t5w-known?(opt, t5w-name(r)) == 1 ? t5w-check-one([r], t5w-ent-find(opt, t5w-name(r))) : ["unexpected " + t5w-name(r)]);
+  def t5w-extras(rows, es, opt) = nil?(rows) ? [] : t5w-cat(t5w-extra-one(rows[0], es, opt), t5w-extras(rows[1:], es, opt));
+  // [] when the file is exactly the T5 the config describes; otherwise one line per disagreement
+  def t5w-problems(rows, c) = t5w-cat(t5w-check-all(rows, t5w-expected(c)), t5w-extras(rows, t5w-expected(c), t5w-optional(c)));
+  // the parameters the config's T5 carries, counted from its own expected table
+  def t5w-config-params(c) = t5w-config-params-go(t5w-expected(c));
+  def t5w-config-params-go(es) = nil?(es) ? 0 : t5w-product(es[0][1]) + t5w-config-params-go(es[1:]);
+ }
+ 0;
+}

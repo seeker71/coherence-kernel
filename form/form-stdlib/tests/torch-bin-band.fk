@@ -1,0 +1,237 @@
+; preludes: form/form-stdlib/torch-bin.bml
+; Expected: 15871
+; REQUIRES:it preludes a .bml, maps a real checkpoint through the Metal door (run it under the GPU lease: observe/gpu-lease-run.fk) and reads a model off this host.
+;
+; torch-bin-band — a PyTorch checkpoint is read by the body, and read as DATA.
+;
+; A torch .bin is a stored zip around a pickle. The reader runs a pickle MACHINE (a stack, marks, a memo and
+; the opcodes torch writes) that executes nothing; this band proves the machine on construction truth FIRST —
+; a zip and a pickle it builds byte by byte itself, whose every number it knows — and only then reads the
+; real charsiu/g2p_multilingual_byT5_small_100 file.
+;
+; THE SYNTHETIC ARCHIVE (bits 1-16, no model, no GPU). Four members: arch/data.pkl, arch/data/0 (six floats),
+; arch/data/1 (three floats), arch/version. Each local header carries a different extra field, so the data
+; offset is the LOCAL header's (30 + name + extra), not the central directory's guess. The pickle is a
+; state_dict of three tensors: w [2,3] over storage 0, b [3] over storage 1, and w2 [3] over storage 0 at
+; storage offset 3 — a tied view. The second and third tensors name their global and their storage class by
+; BINGET, as torch does, so the memo is on the proof path.
+;
+; THE REFUSALS (bits 32-256). An opcode it does not know, a global it will not name (os.system — the whole
+; reason a pickle is not loaded), a pickle that ends without STOP, a deflated member, a non-contiguous stride, a
+; file that is not a zip: each answers ["refused", reason] with its reason in words, never a stop and never a
+; plausible empty table.
+;
+; THE REAL FILE (bits 1024-8192). Present and complete, or the skip bit 16384 says it was not there — a moved
+; model is not a failing reader, and the other four bits never award themselves over a file that is not read.
+;
+; Verdict 15871 with the model on this host (bits 1-256 and 1024-8192); a host without it answers 16384 + 511 = 16895:
+;   1     the zip: four members, data.pkl stored, and arch/data/0 starts after the LOCAL header's own extra
+;   2     the pickle machine: BINGET/BINPUT, MEMOIZE, STACK_GLOBAL, LONG1, BININT/BININT1/BININT2, TUPLE1-3, SETITEM,
+;         SETITEMS, BUILD on one hand-built stream each
+;   4     the table: three rows, in pickle order: w, b, w2
+;   8     w: F32, [2,3], key 0, 24 bytes at storage 0's data offset; b: key 1, 12 bytes at storage 1's
+;   16    w2 is a view: key 0, offset = storage 0's data offset + 3 floats, 12 bytes; parameters = 12
+;   32    the floats read out of the file ranges are the floats written: 1.0, 6.0, 0.5, -1.5; and w2[0] is w[3]
+;   64    an unknown opcode, a forbidden global and a pickle cut before STOP are each refused, by name
+;   128   a deflated storage, a non-contiguous tensor, a file that is no zip and an absent file are each refused
+;   256   the T5 name table machinery: a tiny config's expected set has the right count and one mutated shape,
+;         one missing and one extra tensor are each caught by t5w-problems
+;   1024  the real file: tb-tensors reads it, and its tensor count and parameter total are the ones pinned here
+;   2048  every tensor's shape matches the config.json T5: t5w-problems answers []
+;   4096  the first floats of shared.weight, read from the file, equal the oracle's (torch.load, one-off)
+;   8192  shared.weight mapped through the Metal door reads back the same bytes the file range holds
+; The skip is not a claim: a host without the model awards bit 16384 and none of 1024-8192, so a moved model reads as absent, not as a failing reader.
+(do
+    (defn tbb-has (hay needle) (ge (str_find hay needle 0) 0))
+    (defn tbb-bit (ok bit) (if ok bit 0))
+    (defn tbb-le (v n) (if (le n 0) (empty) (cons (mod v 256) (tbb-le (div v 256) (sub n 1)))))
+    (defn tbb-asc (s i) (if (ge i (str_len s)) (empty) (cons (str_byte_at s i) (tbb-asc s (add i 1)))))
+    (defn tbb-bytes (xs) (if (nil? xs) "" (str_concat (byte_to_str (head xs)) (tbb-bytes (tail xs)))))
+    (defn tbb-cat (xss) (if (nil? xss) (empty) (append (head xss) (tbb-cat (tail xss)))))
+    (defn tbb-zeros (n) (if (le n 0) (empty) (cons 0 (tbb-zeros (sub n 1)))))
+
+    ; ---- the pickle writer: the opcodes, as byte lists ----
+    (defn tbb-X (s) (append (list 88) (append (tbb-le (str_len s) 4) (tbb-asc s 0))))
+    (defn tbb-SX (s) (append (list 140 (str_len s)) (tbb-asc s 0)))
+    (defn tbb-C (m n) (append (list 99) (append (tbb-asc m 0) (append (list 10) (append (tbb-asc n 0) (list 10))))))
+    (defn tbb-q (n) (list 113 n))
+    (defn tbb-K (v) (list 75 v))
+    (defn tbb-ints (xs) (if (nil? xs) (empty) (append (tbb-K (head xs)) (tbb-ints (tail xs)))))
+    (defn tbb-tup (xs)
+        (if (eq (len xs) 0) (list 41)
+        (if (eq (len xs) 1) (append (tbb-ints xs) (list 133))
+        (if (eq (len xs) 2) (append (tbb-ints xs) (list 134))
+            (append (tbb-ints xs) (list 135))))))
+    ; one tensor entry the way torch writes it: name, _rebuild_tensor_v2 (global the first time, BINGET after),
+    ; the persistent id ('storage', FloatStorage, key, 'cpu', numel), offset, size, stride, requires_grad, hooks
+    (defn tbb-ent (name first p key numel off shape stride)
+        (tbb-cat (list
+            (tbb-X name) (tbb-q p)
+            (if first (append (tbb-C "torch._utils" "_rebuild_tensor_v2") (tbb-q 10)) (list 104 10))
+            (list 40 40)
+            (tbb-X "storage") (tbb-q (add p 1))
+            (if first (append (tbb-C "torch" "FloatStorage") (tbb-q 11)) (list 104 11))
+            (tbb-X key) (tbb-q (add p 2))
+            (tbb-X "cpu") (tbb-q (add p 3))
+            (list 77 (mod numel 256) (div numel 256))
+            (list 116) (tbb-q (add p 4))
+            (list 81)
+            (tbb-K off)
+            (tbb-tup shape) (tbb-q (add p 5))
+            (tbb-tup stride) (tbb-q (add p 6))
+            (list 137)
+            (tbb-C "collections" "OrderedDict") (tbb-q (add p 7))
+            (list 41 82 116) (tbb-q (add p 8))
+            (list 82) (tbb-q (add p 9)))))
+    (defn tbb-pickle-of (ents)
+        (tbb-cat (list (list 128 2) (tbb-C "collections" "OrderedDict") (tbb-q 0) (list 41 82) (tbb-q 1) (list 40) ents (list 117 46))))
+    (defn tbb-pickle ()
+        (tbb-pickle-of
+            (append (tbb-ent "w" 1 20 "0" 6 0 (list 2 3) (list 3 1))
+            (append (tbb-ent "b" 0 40 "1" 3 0 (list 3) (list 1))
+                    (tbb-ent "w2" 0 60 "0" 6 3 (list 3) (list 1))))))
+
+    ; ---- the zip writer ----
+    (defn tbb-xlen (name) (add 1 (mod (str_len name) 7)))
+    (defn tbb-local (name data method)
+        (tbb-cat (list (list 80 75 3 4 20 0 0 0) (tbb-le method 2) (list 0 0 0 0 0 0 0 0)
+            (tbb-le (len data) 4) (tbb-le (len data) 4)
+            (tbb-le (str_len name) 2) (tbb-le (tbb-xlen name) 2)
+            (tbb-asc name 0) (tbb-zeros (tbb-xlen name)) data)))
+    (defn tbb-central (name data method lho)
+        (tbb-cat (list (list 80 75 1 2 20 0 20 0 0 0) (tbb-le method 2) (list 0 0 0 0 0 0 0 0)
+            (tbb-le (len data) 4) (tbb-le (len data) 4)
+            (tbb-le (str_len name) 2) (list 0 0 0 0 0 0 0 0 0 0 0 0)
+            (tbb-le lho 4) (tbb-asc name 0))))
+    (defn tbb-body (ms off)
+        (if (nil? ms) (empty)
+            (do (let l (tbb-local (nth (head ms) 0) (nth (head ms) 1) (nth (head ms) 2)))
+                (append l (tbb-body (tail ms) (add off (len l)))))))
+    (defn tbb-cd (ms off)
+        (if (nil? ms) (empty)
+            (do (let l (tbb-local (nth (head ms) 0) (nth (head ms) 1) (nth (head ms) 2)))
+                (append (tbb-central (nth (head ms) 0) (nth (head ms) 1) (nth (head ms) 2) off)
+                        (tbb-cd (tail ms) (add off (len l)))))))
+    (defn tbb-zip (ms)
+        (do (let body (tbb-body ms 0))
+            (let cd (tbb-cd ms 0))
+            (tbb-cat (list body cd (list 80 75 5 6 0 0 0 0) (tbb-le (len ms) 2) (tbb-le (len ms) 2) (tbb-le (len cd) 4) (tbb-le (len body) 4) (list 0 0)))))
+    ; floats as little-endian words: 1.0 2.0 3.0 4.0 5.0 6.0 / 0.5 -1.5 0.25
+    (defn tbb-words (ws) (if (nil? ws) (empty) (append (tbb-le (head ws) 4) (tbb-words (tail ws)))))
+    (defn tbb-s0 () (tbb-words (list 1065353216 1073741824 1077936128 1082130432 1084227584 1086324736)))
+    (defn tbb-s1 () (tbb-words (list 1056964608 3217031168 1048576000)))
+    (defn tbb-archive (pkl s0 m0) (tbb-zip (list (list "arch/data.pkl" pkl 0) (list "arch/data/0" s0 m0) (list "arch/data/1" (tbb-s1) 0) (list "arch/version" (list 51 10) 0))))
+
+    (defn tbb-dir () ".hearth/torch-bin-band-")
+    (defn tbb-put (name xs) (do (write_file_bytes (str_concat (tbb-dir) name) xs) (str_concat (tbb-dir) name)))
+    (defn tbb-refused? (r) (str_eq (nth r 0) "refused"))
+    (defn tbb-reason (r) (nth r 1))
+
+    ; ---- the real model ----
+    (defn tbb-model () "/Users/ursmuff/models/g2p-byt5-small-100/pytorch_model.bin")
+    (defn tbb-config () "/Users/ursmuff/models/g2p-byt5-small-100/config.json")
+    (defn tbb-model-bytes () 1198608045)
+    (defn tbb-here? () (eq (file_size (tbb-model)) (tbb-model-bytes)))
+
+    ; a pickle string for the machine alone: PROTO 2 then the given bytes
+    (defn tbb-run (xs) (tb-pickle (tbb-bytes (append (list 128 2) xs))))
+    (defn tbb-val (r) (nth r 1))
+
+    (defn tbb-synthetic ()
+        (do
+            (let good (tbb-put "good.bin" (tbb-archive (tbb-pickle) (tbb-s0) 0)))
+            (let ms (tb-members good))
+            (let rows (tb-tensors good))
+            (let w (tb-find rows "w"))
+            (let b (tb-find rows "b"))
+            (let w2 (tb-find rows "w2"))
+            (let d0 (tb-m-data (tb-m-find ms "arch/data/0")))
+            (let d1 (tb-m-data (tb-m-find ms "arch/data/1")))
+            ; the local header of arch/data/0: the member before it is data.pkl, and name + extra decide where its bytes begin
+            (let pkl-end (add (tb-m-data (tb-m-find ms "arch/data.pkl")) (len (tbb-pickle))))
+            (let x0 (add (add 30 (str_len "arch/data/0")) (tbb-xlen "arch/data/0")))
+
+            ; the pickle machine, one stream per opcode family
+            (let r1 (tbb-run (append (tbb-K 7) (append (tbb-q 0) (append (list 104 0) (append (list 134) (list 46)))))))
+            (let r2 (tbb-run (append (tbb-SX "collections") (append (list 148) (append (tbb-SX "OrderedDict") (append (list 148 147 148 41 82 148 40) (append (tbb-SX "k") (append (list 138 2 44 1) (append (list 117) (list 46))))))))))
+            (let r3 (tbb-run (append (list 74 254 255 255 255 77 0 1 138 0 135) (list 46))))
+            (let r4 (tbb-run (append (list 125) (append (tbb-SX "a") (append (tbb-K 1) (append (list 115) (append (list 125 98) (list 46))))))))
+            (let ok-r1 (and (str_eq (nth r1 0) "ok") (and (str_eq (nth (tbb-val r1) 0) "T") (and (eq (len (nth (tbb-val r1) 1)) 2) (eq (nth (nth (nth (tbb-val r1) 1) 1) 1) 7)))))
+            ; r2: an OrderedDict by STACK_GLOBAL, one SETITEMS pair whose value is LONG1 2 bytes little endian 44,1 = 300
+            (let ok-r2 (and (str_eq (nth r2 0) "ok") (and (str_eq (nth (tbb-val r2) 0) "od") (and (eq (len (nth (tbb-val r2) 1)) 1) (eq (nth (nth (nth (nth (tbb-val r2) 1) 0) 1) 1) 300)))))
+            ; r3: BININT -2 (254 255 255 255), BININT2 256 (0 1), LONG1 of zero bytes = 0, TUPLE3
+            (let t3 (nth (tbb-val r3) 1))
+            (let ok-r3 (and (str_eq (nth r3 0) "ok") (and (eq (nth (nth t3 0) 1) (sub 0 2)) (and (eq (nth (nth t3 1) 1) 256) (eq (nth (nth t3 2) 1) 0)))))
+            (let ok-r4 (and (str_eq (nth r4 0) "ok") (and (str_eq (nth (tbb-val r4) 0) "d") (eq (len (nth (tbb-val r4) 1)) 1))))
+
+            (let c1 (tbb-bit (and (eq (len ms) 4) (and (eq (tb-deflated ms) 0) (and (eq (tb-m-method (tb-m-find ms "arch/data.pkl")) 0) (eq d0 (add pkl-end x0))))) 1))
+            (let c2 (tbb-bit (and ok-r1 (and ok-r2 (and ok-r3 ok-r4))) 2))
+            (let c3 (tbb-bit (and (eq (len rows) 3) (and (str_eq (tb-name (nth rows 0)) "w") (and (str_eq (tb-name (nth rows 1)) "b") (str_eq (tb-name (nth rows 2)) "w2")))) 4))
+            (let c4 (tbb-bit (and (str_eq (tb-dtype w) "F32") (and (eq (len (tb-shape w)) 2) (and (eq (nth (tb-shape w) 0) 2) (and (eq (nth (tb-shape w) 1) 3) (and (str_eq (tb-key w) "0") (and (eq (tb-bytes w) 24) (and (eq (tb-off w) d0) (and (str_eq (tb-key b) "1") (and (eq (tb-bytes b) 12) (eq (tb-off b) d1)))))))))) 8))
+            (let c5 (tbb-bit (and (str_eq (tb-key w2) "0") (and (eq (tb-off w2) (add d0 12)) (and (eq (tb-bytes w2) 12) (eq (tb-params rows) 12)))) 16))
+            (let c6 (tbb-bit (and (eq (tb-f32-at good w 0) 1.0) (and (eq (tb-f32-at good w 5) 6.0) (and (eq (tb-f32-at good b 0) 0.5) (and (eq (tb-f32-at good b 1) (sub 0.0 1.5)) (eq (tb-f32-at good w2 0) (tb-f32-at good w 3)))))) 32))
+
+            ; refusals
+            (let u1 (tbb-run (list 83 10)))
+            (let u2 (tbb-run (append (tbb-C "os" "system") (list 46))))
+            (let u3 (tbb-run (append (tbb-K 1) (list 41))))
+            (let c7 (tbb-bit (and (tbb-refused? u1) (and (tbb-has (tbb-reason u1) "unknown pickle opcode 83")
+                            (and (tbb-refused? u2) (and (tbb-has (tbb-reason u2) "os.system")
+                            (and (tbb-refused? u3) (tbb-has (tbb-reason u3) "without STOP")))))) 64))
+            (let df (tbb-put "deflated.bin" (tbb-archive (tbb-pickle) (tbb-s0) 8)))
+            (let nc (tbb-put "strided.bin" (tbb-archive (tbb-pickle-of (tbb-ent "w" 1 20 "0" 6 0 (list 2 3) (list 1 2))) (tbb-s0) 0)))
+            (let nz (tbb-put "notzip.bin" (tbb-asc "this is not a zip archive at all, only text of some length." 0)))
+            (let r-df (tb-load df))
+            (let r-nc (tb-load nc))
+            (let r-nz (tb-load nz))
+            (let r-ab (tb-load (str_concat (tbb-dir) "absent-for-sure.bin")))
+            (let c8 (tbb-bit (and (tbb-refused? r-df) (and (tbb-has (tbb-reason r-df) "deflated")
+                            (and (tbb-refused? r-nc) (and (tbb-has (tbb-reason r-nc) "not contiguous")
+                            (and (tbb-refused? r-nz) (tbb-refused? r-ab)))))) 128))
+
+            ; the T5 name table, on a tiny config: d_model 8, d_kv 2, heads 2, d_ff 12, 1 encoder layer, 1 decoder layer, vocab 10, buckets 4
+            (let cfg (list 8 2 2 12 1 1 10 4))
+            (let ex (t5w-expected cfg))
+            ; encoder 9 + bias 1 = 10, decoder 14 + bias 1 = 15, + shared, two final norms, lm_head = 29 + 1
+            (let rows-ok (tbb-t5-rows-of ex))
+            (let rows-bad-shape (cons (list "shared.weight" "F32" (list 9 8) "0" 0 0) (tail rows-ok)))
+            (let rows-missing (tail rows-ok))
+            (let rows-extra (cons (list "mystery.weight" "F32" (list 1) "0" 0 0) rows-ok))
+            (let c9 (tbb-bit (and (eq (len ex) 29) (and (nil? (t5w-problems rows-ok cfg)) (and (eq (len (t5w-problems rows-bad-shape cfg)) 1) (and (tbb-has (nth (t5w-problems rows-bad-shape cfg) 0) "config says 10x8") (and (eq (len (t5w-problems rows-missing cfg)) 1) (and (tbb-has (nth (t5w-problems rows-missing cfg) 0) "missing shared.weight") (and (eq (len (t5w-problems rows-extra cfg)) 1) (tbb-has (nth (t5w-problems rows-extra cfg) 0) "unexpected mystery.weight")))))))) 256))
+            (sum (list c1 c2 c3 c4 c5 c6 c7 c8 c9))))
+
+    ; the rows a perfect checkpoint of that config would answer, for the machinery check
+    (defn tbb-t5-rows-of (es) (if (nil? es) (empty) (cons (list (nth (head es) 0) "F32" (nth (head es) 1) "0" 0 0) (tbb-t5-rows-of (tail es)))))
+
+    (defn tbb-same (a b) (if (eq (len a) (len b)) (if (nil? a) true (and (eq (head a) (head b)) (tbb-same (tail a) (tail b)))) false))
+    (defn tbb-real ()
+        (do
+            (let rows (tb-tensors (tbb-model)))
+            (let cfg (t5w-config (tbb-config)))
+            (let probs (t5w-problems rows cfg))
+            (let sh (tb-find rows "shared.weight"))
+            (let words (tb-f32-words (tbb-model) sh 0 4))
+            ; the oracle: torch.load(weights_only=True, mmap=True) read 172 tensors, 300768256 parameters (299637760 with
+            ; the three views of one embedding storage counted once), shared.weight[0:4] as the uint32 words below,
+            ; lm_head.weight[-1] = 3205570066, encoder.block.3...DenseReluDense.wo.weight[-1] = 3188468430,
+            ; decoder.final_layer_norm.weight[0] = 1031685797 — the last two sit at the far end of the file's storages
+            (let lm (tb-find rows "lm_head.weight"))
+            (let wo (tb-find rows "encoder.block.3.layer.1.DenseReluDense.wo.weight"))
+            (let fn (tb-find rows "decoder.final_layer_norm.weight"))
+            (let c1 (tbb-bit (and (eq (len rows) 172) (and (eq (tb-params rows) 300768256) (and (eq (tb-params-unique rows) 299637760) (eq (t5w-config-params cfg) 299637760)))) 1024))
+            (let c2 (tbb-bit (nil? probs) 2048))
+            (let c3 (tbb-bit (and (tbb-same words (list 1080808605 1091499194 3222227908 3223637754))
+                            (and (tbb-same (tb-f32-words (tbb-model) lm (sub (tb-numel lm) 1) 1) (list 3205570066))
+                            (and (tbb-same (tb-f32-words (tbb-model) wo (sub (tb-numel wo) 1) 1) (list 3188468430))
+                                 (tbb-same (tb-f32-words (tbb-model) fn 0 1) (list 1031685797))))) 4096))
+            (let hh (tb-map-f32 (tbb-model) rows "shared.weight"))
+            (let back (metal_buf_read (nth hh 0) 0 16))
+            (let c4 (tbb-bit (tbb-same (list (tb-le back 0 4) (tb-le back 4 4) (tb-le back 8 4) (tb-le back 12 4)) words) 8192))
+            (do (metal_buf_free (nth hh 0)) (sum (list c1 c2 c3 c4)))))
+
+    (defn torch-bin-band ()
+        (do
+            (let syn (tbb-synthetic))
+            (if (tbb-here?) (add syn (tbb-real)) (add syn 16384))))
+
+    (torch-bin-band))

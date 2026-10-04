@@ -1,0 +1,108 @@
+// voice-g2p-bridge-run.fk — fit the model->voice symbol bridge, measure it held out, and ship the table.
+//
+//   printf '<eval|show|classify|ship>\n<tongue codes, space divided>\n' | ./fkwu observe/voice-g2p-bridge-run.fk
+//
+// For each tongue the pairs are the taught word table (form/form-stdlib/data/g2p-<tongue>-word.tsv, each word once,
+// file order) beside the native T5's answer for that word (the ledger form/form-stdlib/data/g2p-<tongue>-raw.tsv,
+// which `observe/voice-g2p-grow-run.fk` writes in `taught` mode; the tag is voice-g2p-bridge.bml's `vgb-tag`).
+//
+//   eval  learn on the words whose index mod 5 is not 0, measure on the others (held out), and print per tongue:
+//         the model's answer as it came ("before"), and through the bridge ("after"), on the held-out words and on
+//         the training words, as exact-word matches and symbol edit rate (x10000, integers), plus rules kept and
+//         the symbols the voice's table lacked and the bridge dropped.
+//   show  print the first 40 held-out words the bridge still gets wrong, as  model | bridge | taught
+//   classify  the held-out errors by kind: stress-only words, and the symbol differences of the rest, most common first
+//   ship  fit on ALL words, write form/form-stdlib/data/g2p-<tongue>-bridge.tsv, print the in-sample numbers.
+//
+// Measured against the taught symbols as they stand: stress, length and tie marks included (the voice speaks them),
+// the pieces the teacher cut (a nasal vowel is a vowel and U+0303).
+// preflight-exec: forbidden
+import form/form-stdlib/voice-say.bml;
+import form/form-stdlib/voice-g2p-bridge.bml;
+section [form.bml] {
+    def gbr-line() = {
+        let value = read_line();
+        nothing?(value) ? "" : trim(value);
+    };
+    def gbr-lines(path) = file_size(path) > 0 ? split-on(read_file(path), vg-nl()) : [];
+    def gbr-rate(n, d) = d <= 0 ? 0 : ((n * 10000) / d);
+    def gbr-show(label, st) = print_str("  " + label + " words=" + st[0].str() + " exact=" + st[1].str() + " exact_x10000=" + gbr-rate(st[1], st[0]).str() + " edits=" + st[2].str() + " symbols=" + st[3].str() + " edit_rate_x10000=" + gbr-rate(st[2], st[3]).str() + " dropped=" + st[4].str());
+    def gbr-cfg-valid(code) = vgb-valid-of(vp-cfg(vs-voice(code)));
+    def gbr-tongue(mode, code) {
+        let tag = vgb-tag(code);
+        let pairs = vgb-pairs-of(code);
+        let valid = gbr-cfg-valid(code);
+        let t0 = host_monotonic_ms();
+        print_str("tongue " + code + " tag=" + tag + " pairs=" + len(pairs).str());
+        (String) mode == "eval" ? gbr-eval(code, pairs, valid, t0) : ((String) mode == "show" ? gbr-look(code, pairs, valid) : ((String) mode == "classify" ? gbr-classify(code, pairs, valid) : gbr-ship(code, pairs, valid, t0)));
+    }
+    // classify: the held-out errors by KIND. A word is wrong when its symbols differ from the taught ones; it is a
+    // STRESS error when the two agree once the marks ˈ and ˌ are taken off both. For the rest the two stripped lists
+    // are aligned and every difference is counted as `sub <bridge> -> <taught>`, `miss <taught>` (the bridge left it
+    // out) or `extra <bridge>` (the bridge wrote what the teacher did not); the 45 most common are printed.
+    def gbr-strip(xs) = nil?(xs) ? [] : (((String) xs[0] == "ˈ" || (String) xs[0] == "ˌ") ? gbr-strip(xs[1:]) : cons(xs[0], gbr-strip(xs[1:])));
+    def gbr-bump(rec, key) = record_set(rec, key, record_get(rec, key) + 1);
+    def gbr-count-events(rec, evs) = nil?(evs) ? rec : gbr-count-events(gbr-count-event(rec, evs[0]), evs[1:]);
+    def gbr-count-event(rec, e) = (String) e[2] == "m" ? (((String) e[3] == e[1]) ? rec : gbr-bump(rec, "sub " + e[3] + " -> " + e[1])) : (((String) e[2] == "t") ? gbr-bump(rec, "miss " + e[1]) : gbr-bump(rec, "extra " + e[3]));
+    def gbr-best(rec, keys, cur, cv) = nil?(keys) ? cur : ((record_get(rec, keys[0]) > cv) ? gbr-best(rec, keys[1:], keys[0], record_get(rec, keys[0])) : gbr-best(rec, keys[1:], cur, cv));
+    def gbr-top(rec, keys, n) = n <= 0 ? 0 : gbr-top1(rec, keys, n, gbr-best(rec, keys, "", 0));
+    def gbr-top1(rec, keys, n, b) = len(b) == 0 ? 0 : gbr-top2(rec, keys, n, b, print_str("   " + record_get(rec, b).str() + "  " + b));
+    def gbr-top2(rec, keys, n, b, shown) = gbr-top(record_set(rec, b, 0), keys, n - 1);
+    def gbr-classify(code, pairs, valid) {
+        let sp = vgb-split(pairs);
+        let tab = vgb-learn-table-for(code, sp[0]);
+        gbr-classify-go(tab, valid, sp[1], 0, 0, 0, record_new(0));
+    }
+    def gbr-classify-go(tab, valid, held, wrong, stress, n, rec) {
+        nil?(held) ? gbr-classify-done(wrong, stress, n, rec) : gbr-classify-one(tab, valid, held, wrong, stress, n, rec, vgb-map-w(tab, valid, held[0][0], held[0][2])[0], vgb-taught-syms(held[0][1]));
+    }
+    def gbr-classify-one(tab, valid, held, wrong, stress, n, rec, got, want) {
+        let same = vgb-dist(want, got) == 0;
+        let sonly = (!same) && vgb-dist(gbr-strip(want), gbr-strip(got)) == 0;
+        let r1 = (same || sonly) ? rec : gbr-count-events(rec, vgb-events(record_new(0), gbr-strip(got), gbr-strip(want)));
+        gbr-classify-go(tab, valid, held[1:], same ? wrong : wrong + 1, sonly ? stress + 1 : stress, n + 1, r1);
+    }
+    def gbr-classify-done(wrong, stress, n, rec) {
+        print_str("  held=" + n.str() + " wrong=" + wrong.str() + " stress_only=" + stress.str() + " other=" + (wrong - stress).str());
+        gbr-top(rec, record_keys(rec), 45);
+    }
+    // show: the held-out words the bridge still gets wrong, as  model | bridge | taught  (the first 40)
+    def gbr-look(code, pairs, valid) {
+        let sp = vgb-split(pairs);
+        let tab = vgb-learn-table-for(code, sp[0]);
+        gbr-look-go(tab, valid, sp[1], 40);
+    }
+    def gbr-look-go(tab, valid, held, n) = (n <= 0 || nil?(held)) ? 0 : gbr-look-one(tab, valid, held, n, vgb-map-w(tab, valid, held[0][0], held[0][2])[0], vgb-taught-syms(held[0][1]));
+    def gbr-look-one(tab, valid, held, n, got, want) {
+        let same = vgb-dist(want, got) == 0;
+        let p = same ? 0 : print_str("  " + held[0][0] + " | " + vgb-join(got) + " | " + vgb-join(want));
+        gbr-look-go(tab, valid, held[1:], same ? n : n - 1);
+    }
+    def gbr-eval(code, pairs, valid, t0) {
+        let sp = vgb-split(pairs);
+        let tab = vgb-learn-table-for(code, sp[0]);
+        print_str("  split train=" + len(sp[0]).str() + " held=" + len(sp[1]).str() + " rules=" + (len(record_keys(tab)) / 3).str());
+        let a = gbr-show("before held ", vgb-raw(sp[1]));
+        let b = gbr-show("after  held ", vgb-eval(tab, valid, sp[1]));
+        let c = gbr-show("before train", vgb-raw(sp[0]));
+        let d = gbr-show("after  train", vgb-eval(tab, valid, sp[0]));
+        print_str("  ms=" + (host_monotonic_ms() - t0).str());
+        0;
+    }
+    def gbr-join-lines(rows) = nil?(rows) ? "" : (rows[0] + vg-nl() + gbr-join-lines(rows[1:]));
+    def gbr-ship(code, pairs, valid, t0) {
+        let rows = vgb-learn-rows-for(code, pairs);
+        let tab = vgb-rows-add(record_new(0), rows);
+        let w = write_file(vgb-path(code), gbr-join-lines(rows));
+        let a = gbr-show("before all ", vgb-raw(pairs));
+        let b = gbr-show("after  all ", vgb-eval(tab, valid, pairs));
+        print_str("  shipped rules=" + len(rows).str() + " to " + vgb-path(code) + " ms=" + (host_monotonic_ms() - t0).str());
+        0;
+    }
+    def gbr-each(mode, codes) = nil?(codes) ? 0 : gbr-after(mode, codes, gbr-tongue(mode, codes[0]));
+    def gbr-after(mode, codes, done) = gbr-each(mode, codes[1:]);
+    let mode = gbr-line();
+    let codes = split-on(gbr-line(), " ");
+    (len(mode) == 0 || nil?(codes)) ? form_error("usage: <eval|ship> / <tongue codes> on stdin") : 0;
+    gbr-each(mode, codes);
+}
