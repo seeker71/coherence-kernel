@@ -212,6 +212,48 @@ choice handles the retained state. Partial prefill and other generation
 failures keep their own release handling. A repeated capacity issue against the
 same source identities invites a new plan, independent of its receipt path.
 
+#### Native action nodes
+
+The coding dispatcher accepts a Form node coordinate directly. Native recipes
+construct `fcap-native-tool(tool,args,input)` or
+`fcap-native-reply([[field,value],...])`. These are semantic
+`form-code-action` and `form-code-reply` nodes; the dispatcher reads their
+fields without serializing or parsing a JSON reply. Original role, writable
+scope, guarded edits, caller checks and review still apply. An unrelated or
+unresolved node cannot act.
+
+During decoding, an `eval` control can produce the node and return its actual
+coordinate. The stopped reply submits that coordinate after its controls.
+Native BML escapes are preserved; JSON-wrapped controls cross the unescaping
+edge. The incremental coding scanner consumes new bytes and retains an
+unfinished control, without a fixed 96-token window.
+
+The public request/result and observation reporting doors still use JSON.
+
+#### Native recipe authoring
+
+`syntax(name,children)` constructs the existing compiler recipe nodes directly;
+values become literal nodes and node children retain their identity. `ident`,
+`let`, `def`, `lambda`, `do` and `if` carry their structural meanings. Infix
+spelling follows the existing grammar, including generic `+` and `==`, `??`
+and `|>`; other names use the existing primitive or function-call constructor.
+`recipe-make(params,body,captures)` retains that graph as a callable native
+closure. Captures are ordered `[name,value]` pairs; omitted captures are empty.
+These doors execute in the decoding process, without a body-call child.
+
+`recipe-bml(node,name)` expresses the native closure as a high-grammar BML
+definition, including its captured values and callable dependencies. The view
+uses the existing lift renderer directly on nodes. It is optional: recovery
+and execution read the retained graph, without printing or reparsing it.
+New BML recipe births also retain their admitted closure graph. Already held
+source-backed addresses remain readable.
+
+The control expression itself still uses BML admission. General graph recipes
+currently run through Form's walker; direct CPU/Metal JIT admission for that
+whole graph remains work. Numeric affine Metal recipes keep their existing
+RAM-JIT path. Recipe authority with BML expression is the direction; the
+current graph authoring and native action transport establish separate steps.
+
 #### Actual capacity and growing observations
 
 The sealed model tokenizer counts the observation, role crossing and pending
