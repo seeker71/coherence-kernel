@@ -238,6 +238,75 @@ extern int fflush(void *);
 extern int printf(const char *, ...);
 extern int dprintf(int, const char *, ...);
 extern int vdprintf(int, const char *, __builtin_va_list);
+#if !defined(_WIN32)
+/* ── THE CELL DOOR'S SINKS (cell_run, below fk_attempt) ───────────────────────────────────────────────
+ * A cell run in this process answers a record, not a text protocol: what the unit printed is captured, not
+ * written to fd 1; what it said to stderr arrives as diagnostic rows (fk_dg_*), not as lines on fd 2; what it
+ * reads from stdin is a value. Every stdout byte of the seed goes through putchar/printf and every stderr
+ * line through fk_write_all_raw/dprintf/vdprintf, so ONE definition each, here, is the whole sink. With no
+ * sink on, each passes straight to libc: the check is one load and one branch. */
+extern int vprintf(const char *, __builtin_va_list);
+static int fk_sink_on;            /* 1: stdout bytes go to the capture buffer */
+static int fk_cell_diag_on;       /* 1: stderr lines are dropped and the organ voicings become rows */
+static int fk_cell_in_on;         /* 1: read_line draws from the cell's stdin value */
+static int fk_sink_putchar(int c);
+static int fk_sink_printf(const char *fmt, ...);
+static void fk_err_put(const char *p, long long n);   /* a cell's stderr bytes, kept as the record's err text */
+static void fk_dg_begin(const char *organ, const char *aspect, const char *stage, const char *observed, const char *health);
+static void fk_dg_detail(const char *detail);
+static void fk_dg_where(const char *path, long long line, const char *name, long long name_n);
+static void fk_dg_commit(long long at);
+#define putchar(c) fk_sink_putchar(c)
+#define printf(...) fk_sink_printf(__VA_ARGS__)
+#define dprintf(fd, ...) ((fk_cell_diag_on && (fd) == 2) ? 0 : (dprintf)((fd), __VA_ARGS__))
+#define vdprintf(fd, f, ap) ((fk_cell_diag_on && (fd) == 2) ? 0 : (vdprintf)((fd), (f), (ap)))
+/* the deadline: a count of walker steps, checked against the clock every 16384th (fk_walk, fk_walk_body) */
+static long long fk_cell_deadline_ms;   /* 0: none; else the fk_now_ms the unit must end by */
+static unsigned long long fk_cell_tick;
+static void fk_cell_deadline_hit(void);
+#define FK_CELL_TICK() do { if (fk_cell_deadline_ms != 0 && ((++fk_cell_tick) & 16383ULL) == 0) { fk_cell_deadline_hit(); } } while (0)
+/* the name windows: while parsing a cell, a name resolves only to what the cell's closure defines */
+static int fk_win_on;
+static unsigned char *fk_win_bits;
+static long long fk_win_cap;
+static long long fk_cell_base_dep;      /* deps below this index were loaded at startup; the cell door never reuses them */
+static int fk_cell_collect;             /* 1: the source collector is loading a cell's closure */
+static long long fk_prescan_from;       /* the first byte of the text the pre-scan and balance check read */
+static int fk_win_row_ok(long long row);
+static int fk_win_const_ok(long long row);
+static const char *fk_cell_root_path;   /* the cell being run: a stop in its own top-level frame is named for it */
+static long long fk_cell_read_line(void);
+static long long fk_cell_read_bytes(long long max);
+static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw);
+static long long fk_cell_dep_find(const char *path);
+static long long fk_cell_dep_find_raw(const char *path);
+static void fk_cell_dep_init(long long idx);
+static void fk_cell_dep_union(long long owner, long long child);
+#else
+#define fk_cell_read_line() 0
+#define fk_cell_read_bytes(m) 0
+#define fk_cell_run_door(a, b, c, d) fk_nothing
+#define fk_cell_dep_find(p) (-1)
+#define fk_cell_dep_find_raw(p) (-1)
+#define fk_cell_dep_init(i) do { } while (0)
+#define fk_cell_dep_union(o, c) do { } while (0)
+#define fk_err_put(p, n) do { } while (0)
+/* the cell door is POSIX only for now: the hooks below stand down */
+static const char *fk_cell_root_path;
+#define FK_CELL_TICK() do { } while (0)
+static int fk_win_on;
+static int fk_cell_collect;
+static int fk_cell_diag_on;
+static int fk_cell_in_on;
+static long long fk_prescan_from;
+static long long fk_cell_base_dep;
+#define fk_win_row_ok(row) 1
+#define fk_win_const_ok(row) 1
+#define fk_dg_begin(a, b, c, d, e) do { } while (0)
+#define fk_dg_detail(a) do { } while (0)
+#define fk_dg_where(a, b, c, d) do { } while (0)
+#define fk_dg_commit(a) do { } while (0)
+#endif
 /* The seed declares the host ABI directly. `unsigned long` is not size_t on
  * 64-bit Windows (LLP64), so allocator lengths used to be narrowed there.
  * The compiler's own size type keeps this declaration truthful on every
@@ -342,6 +411,7 @@ extern int proc_listpids(unsigned int type, unsigned int typeinfo, void *buffer,
 extern int proc_pidinfo(int pid, int flavor, unsigned long long arg, void *buffer, int buffersize);
 extern int proc_name(int pid, void *buffer, unsigned int buffersize);
 extern int proc_pidpath(int pid, void *buffer, unsigned int buffersize);
+extern int proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buffersize); /* host_file_holders: one open vnode's identity */
 extern unsigned int getuid(void);
 struct fk_mach_timebase { unsigned int numer; unsigned int denom; };
 extern int mach_timebase_info(struct fk_mach_timebase *info);
@@ -1888,8 +1958,26 @@ extern int unlink(const char *);
 extern int rename(const char *, const char *);
 extern int getpid(void);
 extern char *getcwd(char *, unsigned long);
+extern int chdir(const char *);
 extern int sprintf(char *, const char *, ...);
 extern char *getenv(const char *);
+#if !defined(_WIN32)
+/* the host doors of modes 35-49 (see fk_host_door): one syscall each, declared by hand as every door here is */
+extern int symlink(const char *, const char *);
+extern int link(const char *, const char *);
+extern void sync(void);
+extern int uname(void *);
+extern char *realpath(const char *, char *);
+#if defined(__APPLE__)
+#define FK_AT_FDCWD (-2)
+#else
+#define FK_AT_FDCWD (-100)
+#endif
+#ifndef FK_HAVE_STAT_HEADER
+extern int chmod(const char *, unsigned int);
+extern int utimensat(int, const char *, const struct timespec *, int);
+#endif
+#endif
 static long long fk_read_all_bounded(int fd, char *buf, long long cap) {
     long long total = 0;
     while (total < cap) {
@@ -9688,6 +9776,7 @@ static void fk_pv_root(long long v) {
 static long long fk_walk(long long i, long long fp);
 static long long fk_walk_body(long long i, long long fp) {
     for (;;) {
+        FK_CELL_TICK();
         long long t = fk_node[i][0];
         if (t < 0 || t >= FK_OPCODE_ARM_CAP) {
             fk_die("fk_walk_body: node tag outside FK_OPCODE_ARM_CAP (0..255) -- the walker's tag space is the contract the op table is generated against; this is a corrupt node or a tag minted past the last arm");
@@ -10188,6 +10277,12 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
  *       has had must not be truncated by the next birth, and an err path
  *       byte-equal to the out path SHARES the one descriptor -- which is all
  *       `2>&1` ever meant.
+ *       An optional FOURTH element of the redirect list is the directory the child begins in (`env -C dir`, `cd dir && ...`):
+ *       the child enters it after the fork and before the exec, so the parent's own directory never moves; "" or a short
+ *       list keeps the parent's. The redirect paths themselves are opened by the parent and are read from ITS directory.
+ *       A directory the child cannot enter is a birth refusal like a binary that cannot be exec'd (-4). A binary built
+ *       before this element existed ignores it, so a caller that needs the directory asks first: a spawn into a directory
+ *       that cannot exist answers -4 here and a pid on an older binary (fhn-cwd-door?, form-cli-heal-native-process.bml).
  *
  *       Four refusals, each answering its own question, and every one of them
  *       arriving BEFORE the caller holds a pid it could mistake for a live child:
@@ -10219,6 +10314,70 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
  *       door will not send (pid not an int above zero, sig not an int in 1..31; 0 is refused, host_alive asks that).
  *       host_kill sent SIGTERM only; a process that does not hear it (stopped, or stuck in a device wait) was ended
  *       through /bin/kill, a foreign program borrowed for one syscall. Mode 34 of the leaf door, a rewrite row.
+ *
+ *   modes 35-49 -- the filesystem, environment, clock and process-table doors the body used to borrow a program for. Each
+ *       is a HOST DOOR: the floor, not a core recipe, shrink path none: it is the door. Each is one syscall, a rewrite row
+ *       over the leaf door (native-rewrite-rules.bml), and answers in the host-door style: success a non-negative int or
+ *       the value, -1 the host refused, -2 a bad argument (a path is a non-empty string below FK_PATH_CAP bytes without a
+ *       NUL; a mode an int in 0..4095); strings are bytes; a bad argument is never a crash. Paths are used as given
+ *       (relative to the cwd) by every door that changes the tree; the two that only read (host_file_mode,
+ *       host_file_holders) resolve a missing relative path the way host_file_size does (fk_host_resolve).
+ *     35 host_chmod path mode        chmod(2): 0 changed.            was /bin/chmod
+ *     36 host_symlink target path    symlink(2): 0 made; -1 refused (EEXIST included). The target is stored as given and
+ *                                    is never resolved or required to exist.            was /bin/ln -s
+ *     37 host_link existing path     link(2), a HARD link: 0 made; -1 refused. EEXIST answers -1, so link(stage, path)
+ *                                    is an ATOMIC create-if-absent publish (the first caller gets 0, every later caller
+ *                                    -1 and the first one's bytes stand).             was /bin/ln stage path
+ *     38 host_sync                   sync(2): 0. The kernel schedules every dirty buffer; it does not wait on all hosts.
+ *                                    was /bin/sync
+ *     39 host_getenv name            the environment value as a string ("" is a set-but-empty variable), nothing() when
+ *                                    the variable is unset; -2 for a name that is not a non-empty string without '='.
+ *                                    was printenv
+ *     40 host_mkdir_mode path mode   mkdir(2), ONE level, with an exact mode (a chmod follows a successful mkdir so the
+ *                                    umask does not narrow it, as mkdir -m does): 1 THIS call made it, 0 it stood or could
+ *                                    not be made -- the contract of fs_mkdir / host_dir_mkdir, so a lock reads == 1.
+ *                                    was /bin/mkdir -m 700
+ *     41 host_localtime ms           [year month day hour minute second weekday utc_offset_seconds zone_name] for a unix
+ *                                    ms (floored to the second) in the host's local zone, localtime_r(3): month 1..12,
+ *                                    weekday 0 = Sunday, the offset in seconds EAST of UTC, DST included, zone_name the
+ *                                    host's abbreviation. -2 for a non-int, -1 when the host cannot place the instant.
+ *                                    was `date '+%Y-%m-%d %H:%M:%S %Z'`
+ *     42 host_os                     the kernel's name from uname(2): "Darwin", "Linux". was uname -s
+ *     43 host_file_holders path      the pids that hold the file open, ascending ([] when none; nothing() when this host
+ *                                    cannot tell or the path does not stat). Darwin only (libproc: proc_listpids,
+ *                                    proc_pidinfo PROC_PIDLISTFDS, proc_pidfdinfo PROC_PIDFDVNODEPATHINFO; a process is
+ *                                    held to the file by (device, inode), not by a path spelling). It sees this user's
+ *                                    processes; another user's are not readable without privilege and are skipped.
+ *                                    was lsof -t
+ *     44 host_file_mode path         the whole st_mode of what the path names (stat(2), following a symlink): the permission
+ *                                    bits are `mode % 4096` and the file type is `mode / 4096` (the S_IFMT nibble: 1 fifo,
+ *                                    2 character device, 4 directory, 6 block device, 8 regular file, 10 symlink, 12 socket),
+ *                                    so a fifo test is one read. -1 when the path does not stat. The read half of host_chmod /
+ *                                    host_mkdir_mode (after a chmod to 448, `mode % 4096` reads 448).
+ *     45 host_file_copy from to      the bytes of a regular file into `to` (created, or truncated first), through a fixed
+ *                                    1 MiB buffer, so no string holds the file: the string pool is append-only and capped
+ *                                    at 2 GiB, and the only append door a Form walk has (file_append_bytes) takes a byte
+ *                                    LIST (measured 2026-10-04: 79 s for a 4 MiB slice). The source's permission bits are
+ *                                    kept, as cp keeps them. Answers the bytes copied; -1 refused (the source is not a
+ *                                    regular file, the destination does not open, a read or write fell short, or `to` is
+ *                                    the same file as `from`); -2 a bad argument. A short copy leaves the partial `to`
+ *                                    behind: hfs-copy (host-fs.bml) stages it and renames.     was /bin/cp
+ *     46 host_file_identity path     [size mtime_ms inode birth_ms] of what the path names (stat(2), following a symlink),
+ *                                    nothing() when it does not stat; birth_ms is 0 where the host keeps no creation time
+ *                                    (Linux). mtime and birth are unix ms (the sub-millisecond part is cut). A seal reads
+ *                                    this row instead of `stat -f %z:%m:%i`. -2 for a bad argument.
+ *     47 host_utimes path mtime_ms   sets a file's modification AND access time to a unix ms (utimensat(2), following a
+ *                                    symlink): 0 set, -1 refused, -2 a bad argument.            was touch -t
+ *     48 host_realpath path          the physical absolute path (realpath(3): every symlink resolved, `.` and `..` gone) as
+ *                                    a string, nothing() when the path does not exist. -2 for a bad argument.
+ *                                    was `cd -P -- dir && pwd -P`. host_cwd is already physical (getcwd).
+ *     49 host_pwrite path offset bytes   writes `bytes` (a string, or a list of ints, each keeping its low byte as
+ *                                    write_file_bytes does) into the file at `offset`
+ *                                    WITHOUT truncating it, creating it if absent, and extending it (a hole reads zeros) when
+ *                                    the offset is past its end: the bytes written, -1 refused or short, -2 a bad argument
+ *                                    (offset not an int >= 0, bytes neither a string nor a byte list). Three arguments, so it
+ *                                    is walked like metal_buf_fill (the offset and the bytes ride a cons pair).
+ *                                    was `printf X | dd conv=notrunc`.
  *
  *   fs_mkfifo path   1 the fifo was made, 0 a fifo already stands there,
  *       -1 refused (the path holds something that is not a fifo, or the host
@@ -10434,6 +10593,251 @@ static long long fk_roster_forget(long long pid);
 static long long fk_page_bury(long long pid);
 static int fk_live_ended(long long pid);
 static long long fk_live_page_state(long long pid);
+/* ---- modes 35-48 of the leaf door (49 is walked beside host_pwrite below): see the notes above. Answers are value words (an int is n<<1). ---- */
+/* a path argument: a string of 1..FK_PATH_CAP-1 bytes with no NUL in it; fk_cstr would die on a longer one, and a door
+ * answers -2 instead */
+static int fk_door_path(long long sv, char *out) {
+    if (!fk_is_str(sv)) { return 0; }
+    long long sa = fk_stri(sv);
+    if (sa < 0 || !FK_SOK(sa)) { return 0; }
+    long long n = FK_SLEN(sa);
+    if (n <= 0 || n > FK_PATH_CAP - 1) { return 0; }
+    fk_cstr(sv, out, FK_PATH_CAP);
+    return fk_cstrlen(out) == n;
+}
+/* the two arguments of a two-argument door arrive as one cons pair */
+static int fk_door_pair(long long x, long long *a, long long *b) {
+    if ((x & 1) == 0 || fk_is_str(x)) { return 0; }
+    long long pr = x >> 1;
+    if (pr < 1 || !FK_POK(pr)) { return 0; }
+    *a = FK_HH(pr);
+    *b = FK_HT(pr);
+    return 1;
+}
+/* a permission mode: an int word in 0..4095, else -1 */
+static long long fk_door_mode(long long w) {
+    if ((w & 1) != 0 || fk_is_str(w)) { return -1; }
+    long long m = w >> 1;
+    return (m < 0 || m > 4095) ? -1 : m;
+}
+#if defined(__APPLE__)
+/* host_file_holders on Darwin: every process of this user that holds the file open, by (device, inode). */
+static long long fk_file_holders(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) { return fk_nothing; }
+    static int pids[8192];
+    int got = proc_listpids(1, 0, pids, (int)sizeof pids);
+    if (got <= 0) { return fk_nothing; }
+    long long count = got / (long long)sizeof(int);
+    static unsigned char fdb[262144];  /* proc_fdinfo rows: int fd, uint type -- 32768 descriptors a process */
+    static unsigned char vb[1200];     /* vnode_fdinfowithpath: proc_fileinfo (24) + vinfo_stat (dev u32 at 24, ino u64 at 32) ... path at 176 */
+    static int held[4096];
+    long long nh = 0;
+    long long k;
+    for (k = 0; k < count; k = k + 1) {
+        int pid = pids[k];
+        if (pid <= 0) { continue; }
+        int n = proc_pidinfo(pid, 1, 0, fdb, (int)sizeof fdb); /* PROC_PIDLISTFDS */
+        if (n <= 0) { continue; }
+        long long nfd = n / 8;
+        long long j;
+        int hit = 0;
+        for (j = 0; j < nfd && !hit; j = j + 1) {
+            if (*(unsigned int *)(fdb + j * 8 + 4) != 1) { continue; } /* PROX_FDTYPE_VNODE */
+            int r = proc_pidfdinfo(pid, *(int *)(fdb + j * 8), 2, vb, (int)sizeof vb); /* PROC_PIDFDVNODEPATHINFO */
+            if (r < 176) { continue; }
+            if (*(unsigned int *)(vb + 24) == (unsigned int)st.st_dev && *(unsigned long long *)(vb + 32) == (unsigned long long)st.st_ino) { hit = 1; }
+        }
+        if (hit && nh < 4096) { held[nh] = pid; nh = nh + 1; }
+    }
+    long long a;
+    for (a = 1; a < nh; a = a + 1) {
+        int v = held[a];
+        long long b = a - 1;
+        while (b >= 0 && held[b] > v) { held[b + 1] = held[b]; b = b - 1; }
+        held[b + 1] = v;
+    }
+    long long lst = 1;
+    for (a = nh - 1; a >= 0; a = a - 1) { lst = fk_cons_val(((long long)held[a]) << 1, lst); }
+    return lst;
+}
+#endif
+static long long fk_host_door_fs(long long mode, long long x) {
+#if defined(_WIN32)
+    (void)mode; (void)x;
+    return (0 - 1) * 2;
+#else
+    static char pa[FK_PATH_CAP];
+    static char pb[FK_PATH_CAP];
+    long long a, b;
+    if (mode == 35 || mode == 40) {
+        /* host_chmod path mode / host_mkdir_mode path mode */
+        if (!fk_door_pair(x, &a, &b) || !fk_door_path(a, pa)) { return (0 - 2) * 2; }
+        long long m = fk_door_mode(b);
+        if (m < 0) { return (0 - 2) * 2; }
+        if (mode == 35) { return chmod(pa, (unsigned int)m) == 0 ? 0 : (0 - 1) * 2; }
+        if (mkdir(pa, (unsigned int)m) != 0) { return 0; }
+        chmod(pa, (unsigned int)m); /* mkdir(2) narrows the mode by the umask; -m means exactly this */
+        return 1 * 2;
+    }
+    if (mode == 36 || mode == 37) {
+        /* host_symlink target path / host_link existing path */
+        if (!fk_door_pair(x, &a, &b) || !fk_door_path(a, pa) || !fk_door_path(b, pb)) { return (0 - 2) * 2; }
+        return (mode == 36 ? symlink(pa, pb) : link(pa, pb)) == 0 ? 0 : (0 - 1) * 2;
+    }
+    if (mode == 38) { sync(); return 0; }
+    if (mode == 39) {
+        /* host_getenv name */
+        if (!fk_door_path(x, pa)) { return (0 - 2) * 2; }
+        long long q = 0;
+        while (pa[q] != 0) { if (pa[q] == '=') { return (0 - 2) * 2; } q = q + 1; }
+        const char *v = getenv(pa);
+        if (v == 0) { return fk_nothing; }
+        return fk_sbuf(v, fk_cstrlen(v));
+    }
+    if (mode == 41) {
+        /* host_localtime ms */
+        if ((x & 1) != 0 || fk_is_str(x)) { return (0 - 2) * 2; }
+        long long ms = x >> 1;
+        long long sec = ms / 1000;
+        if (ms % 1000 < 0) { sec = sec - 1; }
+        time_t tt = (time_t)sec;
+        struct tm tv;
+        if (localtime_r(&tt, &tv) == 0) { return (0 - 1) * 2; }
+        const char *zn = tv.tm_zone != 0 ? tv.tm_zone : "";
+        long long zs = fk_sbuf(zn, fk_cstrlen(zn));
+        long long l = fk_cons_val(zs, 1);
+        l = fk_cons_val(((long long)tv.tm_gmtoff) << 1, l);
+        l = fk_cons_val(((long long)tv.tm_wday) << 1, l);
+        l = fk_cons_val(((long long)tv.tm_sec) << 1, l);
+        l = fk_cons_val(((long long)tv.tm_min) << 1, l);
+        l = fk_cons_val(((long long)tv.tm_hour) << 1, l);
+        l = fk_cons_val(((long long)tv.tm_mday) << 1, l);
+        l = fk_cons_val(((long long)tv.tm_mon + 1) << 1, l);
+        l = fk_cons_val(((long long)tv.tm_year + 1900) << 1, l);
+        return l;
+    }
+    if (mode == 42) {
+        /* host_os */
+        static char ub[2048];
+        long long z = 0;
+        while (z < 2048) { ub[z] = 0; z = z + 1; }
+        if (uname(ub) != 0) { return (0 - 1) * 2; }
+        ub[2047] = 0;
+        return fk_sbuf(ub, fk_cstrlen(ub));
+    }
+    if (mode == 46) {
+        /* host_file_identity path */
+        if (!fk_door_path(x, pa)) { return (0 - 2) * 2; }
+        fk_host_resolve(pa);
+        struct stat si;
+        if (stat(pa, &si) != 0) { return fk_nothing; }
+#if defined(__APPLE__)
+        long long mt = (long long)si.st_mtimespec.tv_sec * 1000 + (long long)si.st_mtimespec.tv_nsec / 1000000;
+        long long bt = (long long)si.st_birthtimespec.tv_sec * 1000 + (long long)si.st_birthtimespec.tv_nsec / 1000000;
+#else
+        long long mt = (long long)si.st_mtim.tv_sec * 1000 + (long long)si.st_mtim.tv_nsec / 1000000;
+        long long bt = 0;
+#endif
+        long long il = fk_cons_val((bt < 0 ? 0 : bt) << 1, 1);
+        il = fk_cons_val(((long long)(si.st_ino & 0x3FFFFFFFFFFFFFFFULL)) << 1, il);
+        il = fk_cons_val(mt << 1, il);
+        il = fk_cons_val(((long long)si.st_size) << 1, il);
+        return il;
+    }
+    if (mode == 47) {
+        /* host_utimes path mtime_ms */
+        if (!fk_door_pair(x, &a, &b) || !fk_door_path(a, pa)) { return (0 - 2) * 2; }
+        if ((b & 1) != 0 || fk_is_str(b)) { return (0 - 2) * 2; }
+        long long ms47 = b >> 1;
+        long long sec47 = ms47 / 1000;
+        if (ms47 % 1000 < 0) { sec47 = sec47 - 1; }
+        struct timespec ts47[2];
+        ts47[0].tv_sec = (time_t)sec47; ts47[0].tv_nsec = (long)((ms47 - sec47 * 1000) * 1000000);
+        ts47[1] = ts47[0];
+        return utimensat(FK_AT_FDCWD, pa, ts47, 0) == 0 ? 0 : (0 - 1) * 2;
+    }
+    if (mode == 48) {
+        /* host_realpath path */
+        if (!fk_door_path(x, pa)) { return (0 - 2) * 2; }
+        if (realpath(pa, pb) == 0) { return fk_nothing; }
+        return fk_sbuf(pb, fk_cstrlen(pb));
+    }
+    if (mode == 51) {
+        /* host_fifo_try path bytes: one non-blocking offer into a fifo. The fifo is opened O_WRONLY|O_NONBLOCK, which succeeds only while a
+         * reader holds (or is opening) the other end; the bytes (1..512, one atomic pipe write) go in and the fifo closes again. Answers the
+         * bytes written; 0 when no reader was there (ENXIO) or the pipe was full (EAGAIN) -- the caller owns the patience and tries
+         * again; -1 when the path does not stat, is not a fifo, or the host said no; -2 a bad argument. Never blocks, never creates.
+         * was `tee <fifo>` fed the word, ended at a deadline by a child that was waited on. */
+        if (!fk_door_pair(x, &a, &b) || !fk_door_path(a, pa)) { return (0 - 2) * 2; }
+        if (!fk_is_str(b)) { return (0 - 2) * 2; }
+        long long sb51 = fk_stri(b);
+        if (sb51 < 0 || !FK_SOK(sb51)) { return (0 - 2) * 2; }
+        long long n51 = FK_SLEN(sb51);
+        if (n51 <= 0 || n51 > 512) { return (0 - 2) * 2; }
+        fk_host_resolve(pa);
+        struct stat st51;
+        if (stat(pa, &st51) != 0 || !S_ISFIFO(st51.st_mode)) { return (0 - 1) * 2; }
+        int fd51 = open(pa, O_WRONLY | O_NONBLOCK);
+        if (fd51 < 0) { return errno == ENXIO ? 0 : (0 - 1) * 2; }
+        long long w51 = write(fd51, FK_SBYTES(sb51), (unsigned long)n51);
+        int e51 = errno;
+        close(fd51);
+        if (w51 < 0) { return e51 == EAGAIN ? 0 : (0 - 1) * 2; }
+        return w51 == n51 ? n51 << 1 : (0 - 1) * 2;
+    }
+    if (mode == 45) {
+        /* host_file_copy from to */
+        if (!fk_door_pair(x, &a, &b) || !fk_door_path(a, pa) || !fk_door_path(b, pb)) { return (0 - 2) * 2; }
+        fk_host_resolve(pa);
+        struct stat ss, sd;
+        if (stat(pa, &ss) != 0 || !S_ISREG(ss.st_mode)) { return (0 - 1) * 2; }
+        if (stat(pb, &sd) == 0 && sd.st_dev == ss.st_dev && sd.st_ino == ss.st_ino) { return (0 - 1) * 2; } /* a file over itself would be emptied by the truncate */
+        int fi = open(pa, O_RDBIN);
+        if (fi < 0) { return (0 - 1) * 2; }
+        int fo = open(pb, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fo < 0) { close(fi); return (0 - 1) * 2; }
+        static unsigned char cb[1 << 20];
+        long long total = 0;
+        int ok = 1;
+        for (;;) {
+            long long got = read(fi, cb, sizeof cb);
+            if (got < 0) { if (errno == EINTR) { continue; } ok = 0; break; }
+            if (got == 0) { break; }
+            long long put = 0;
+            while (put < got) {
+                long long w = write(fo, cb + put, (unsigned long)(got - put));
+                if (w < 0 && errno == EINTR) { continue; }
+                if (w <= 0) { ok = 0; break; }
+                put = put + w;
+            }
+            if (!ok) { break; }
+            total = total + got;
+        }
+        close(fi);
+        if (close(fo) != 0) { ok = 0; }
+        if (!ok) { return (0 - 1) * 2; }
+        chmod(pb, (unsigned int)(ss.st_mode & 07777)); /* cp keeps the source's permission bits; the umask does not narrow them here */
+        return total << 1;
+    }
+    if (mode == 43 || mode == 44) {
+        /* host_file_holders path / host_file_mode path */
+        if (!fk_door_path(x, pa)) { return (0 - 2) * 2; }
+        fk_host_resolve(pa);
+        if (mode == 44) {
+            struct stat sm;
+            if (stat(pa, &sm) != 0) { return (0 - 1) * 2; }
+            return ((long long)(sm.st_mode & 0xFFFF)) << 1;
+        }
+#if defined(__APPLE__)
+        return fk_file_holders(pa);
+#else
+        return fk_nothing; /* no libproc here: this host cannot tell (a /proc walk would answer it on Linux) */
+#endif
+    }
+    return fk_nothing;
+#endif
+}
 static long long fk_host_door(long long mode, long long x) {
     if (mode == 18) {
         /* host_alive pid */
@@ -10488,6 +10892,7 @@ static long long fk_host_door(long long mode, long long x) {
         if (pid34 <= 0 || pid34 > 2147483647 || sig34 < 1 || sig34 > 31) { return (0 - 2) * 2; }
         return kill((int)pid34, (int)sig34) == 0 ? 0 : (0 - 1) * 2;
     }
+    if ((mode >= 35 && mode <= 48) || mode == 51) { return fk_host_door_fs(mode, x); }
     if (mode != 17) { return fk_nothing; }
     /* host_spawn_at (cons argv redirects) */
     if ((x & 1) == 0 || fk_is_str(x)) { return (0 - 1) * 2; }
@@ -10510,13 +10915,16 @@ static long long fk_host_door(long long mode, long long x) {
     av17[n17] = 0;
     if (n17 == 0 || av17[0][0] == 0) { return (0 - 1) * 2; }
 
-    /* the three redirect paths, in order; a short list leaves the rest inherited */
-    static char rp17[3][FK_PATH_CAP];
+    /* the three redirect paths, in order, and an optional fourth element: the directory the child begins in (chdir in the
+     * child, after the fork, so the parent's own directory never moves; a directory that cannot be entered is the same
+     * birth refusal as a binary that cannot be exec'd, -4). The redirect paths are opened by the parent, before the fork,
+     * so they are read from the parent's directory. A short list leaves the rest inherited ("" keeps the parent's too). */
+    static char rp17[4][FK_PATH_CAP];
     long long k17 = 0;
-    while (k17 < 3) { rp17[k17][0] = 0; k17 = k17 + 1; }
+    while (k17 < 4) { rp17[k17][0] = 0; k17 = k17 + 1; }
     k17 = 0;
     long long q17 = redir17 >> 1;
-    while (k17 < 3 && q17 >= 1 && FK_POK(q17)) {
+    while (k17 < 4 && q17 >= 1 && FK_POK(q17)) {
         if (fk_is_str(FK_HH(q17))) { fk_cstr(FK_HH(q17), rp17[k17], FK_PATH_CAP); }
         k17 = k17 + 1;
         q17 = FK_HNEXT(q17);
@@ -10560,6 +10968,13 @@ static long long fk_host_door(long long mode, long long x) {
     /* no fork: the redirects are swapped into our own 0/1/2 around the spawn, and a child that could
      * not start is known at once, so the error pipe has nothing to carry */
     close(ef17[0]); close(ef17[1]);
+    if (rp17[3][0] != 0) {
+        /* no chdir between the spawn's fork and exec here: a directory asked for cannot be honoured, so the birth is refused */
+        if (rfd17[0] >= 0) { close(rfd17[0]); }
+        if (rfd17[1] >= 0) { close(rfd17[1]); }
+        if (rfd17[2] >= 0 && rfd17[2] != rfd17[1]) { close(rfd17[2]); }
+        return (0 - 4) * 2;
+    }
     long long pidw17 = fk_win_spawn(av17, rfd17[0], rfd17[1], rfd17[2]);
     if (rfd17[0] >= 0) { close(rfd17[0]); }
     if (rfd17[1] >= 0) { close(rfd17[1]); }
@@ -10585,7 +11000,7 @@ static long long fk_host_door(long long mode, long long x) {
         if (rfd17[0] > 2) { close(rfd17[0]); }
         if (rfd17[1] > 2) { close(rfd17[1]); }
         if (rfd17[2] > 2 && rfd17[2] != rfd17[1]) { close(rfd17[2]); }
-        execvp(av17[0], av17);
+        if (rp17[3][0] == 0 || chdir(rp17[3]) == 0) { execvp(av17[0], av17); }
         {
             int en17c = errno;
             long long w17 = write(ef17[1], &en17c, sizeof(int));
@@ -13174,6 +13589,7 @@ static long long fk_walk(long long i, long long fp) {
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
         fk_depth_wall((long long)(fk_stack_base - &fk_sp_probe));
     }
+    FK_CELL_TICK();
     long long t = fk_node[i][0];
     if (t < 0 || t >= FK_OPCODE_ARM_CAP) {
         fk_die("fk_walk: node tag outside FK_OPCODE_ARM_CAP (0..255) -- the walker's tag space is the contract the op table is generated against; this is a corrupt node or a tag minted past the last arm");
@@ -16113,6 +16529,36 @@ static int fk_write_byte_list(int fd, long long xs, long long *count) {
     *count = done + n;
     return ok;
 }
+/* MODE 49 -- host_pwrite path offset bytes (see the notes above fk_host_door): bytes written in place, never truncating */
+static long long fk_host_pwrite(long long pw, long long ow, long long dw) {
+#if defined(_WIN32)
+    (void)pw; (void)ow; (void)dw;
+    return (0 - 1) * 2;
+#else
+    static char pp[FK_PATH_CAP];
+    if (!fk_door_path(pw, pp)) { return (0 - 2) * 2; }
+    if ((ow & 1) != 0 || fk_is_str(ow)) { return (0 - 2) * 2; }
+    long long off = ow >> 1;
+    if (off < 0) { return (0 - 2) * 2; }
+    int isstr = fk_is_str(dw);
+    long long sa = isstr ? fk_stri(dw) : 0 - 1;
+    if (isstr && (sa < 0 || !FK_SOK(sa))) { return (0 - 2) * 2; }
+    if (!isstr && !fk_byte_list_ok(dw)) { return (0 - 2) * 2; }
+    int fd = open(pp, O_WRONLY | O_CREAT, 0666);
+    if (fd < 0) { return (0 - 1) * 2; }
+    if (lseek(fd, (long)off, 0) < 0) { close(fd); return (0 - 1) * 2; }
+    long long wrote = 0;
+    int ok = 1;
+    if (isstr) {
+        wrote = FK_SLEN(sa);
+        ok = fk_write_all_raw(fd, FK_SBYTES(sa), wrote);
+    } else {
+        ok = fk_write_byte_list(fd, dw, &wrote);
+    }
+    close(fd);
+    return ok ? wrote << 1 : (0 - 1) * 2;
+#endif
+}
 static long long fk_fb_door(long long mode, long long x) {
     if (mode == 4) { return fk_value_kind(x); }
     if (mode == 5) {
@@ -17217,9 +17663,42 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury;
          * mode 25: value_str -- see fk_value_str; modes 26-27: read_file_bytes,
          * write_file_bytes -- the raw byte file doors, see fk_fb_door; modes 29-32: the stage
-         * bus (open, close, tail, name) -- see fk_bus_door; mode 33: metal_buf_fill, below; mode 34: host_signal -- see
-         * fk_host_door; any other mode answers nothing. */
-        if ((fm201 >> 1) == 34) { return fk_host_door(34, fx201); } /* before the >= 26 range below, which would take it for a byte-file door */
+         * bus (open, close, tail, name) -- see fk_bus_door; mode 33: metal_buf_fill, below; modes 34-49: host_signal, host_chmod,
+         * host_symlink, host_link, host_sync, host_getenv, host_mkdir_mode, host_localtime, host_os, host_file_holders,
+         * host_file_mode, host_file_copy, host_file_identity, host_utimes, host_realpath, host_pwrite (49, below) -- see fk_host_door;
+         * mode 50: cell_run -- see fk_cell_run_door; any other mode answers nothing. */
+        if ((fm201 >> 1) == 49) {
+            /* MODE 49 -- host_pwrite(path, offset, bytes): three arguments, so the rewrite row builds
+             *     fk_smknode(201, LIT 49, path, (cons offset bytes))
+             * like metal_buf_fill's; the offset and the bytes live in the third child's tag-19 node and are walked here. */
+            long long rn49 = fk_node[i][3];
+            if (rn49 == 0 || fk_node[rn49][0] != 19) { return fk_nothing; }
+            fk_vp(fx201); /* the path word, across the walks of the offset and the bytes (which may allocate) */
+            long long ow49 = fk_walk(fk_node[rn49][1], fp);
+            fk_vp(ow49);
+            long long dw49 = fk_walk(fk_node[rn49][2], fp);
+            fk_vsp = fk_vsp - 2;
+            return fk_host_pwrite(fx201, ow49, dw49);
+        }
+        if (((fm201 >> 1) >= 34 && (fm201 >> 1) <= 48) || (fm201 >> 1) == 51) { return fk_host_door(fm201 >> 1, fx201); } /* before the >= 26 range below, which would take them for byte-file doors */
+        if ((fm201 >> 1) == 50) {
+            /* MODE 50 -- cell_run(path, arg, deadline_ms, stdin): a unit of Form run in this process, answered as a record
+             * (see fk_cell_run_door). The rewrite row builds
+             *     fk_smknode(201, LIT 50, path, (cons arg (cons deadline stdin)))
+             * so the three trailing operands live in the leaf node's third child, a tag-19 chain read child by child. */
+            long long rn35 = fk_node[i][3];
+            if (rn35 == 0 || fk_node[rn35][0] != 19) { return fk_nothing; }
+            long long rm35 = fk_node[rn35][2];
+            if (rm35 == 0 || fk_node[rm35][0] != 19) { return fk_nothing; }
+            fk_vp(fx201);
+            fk_vp(fk_walk(fk_node[rn35][1], fp));
+            fk_vp(fk_walk(fk_node[rm35][1], fp));
+            fk_vp(fk_walk(fk_node[rm35][2], fp));
+            /* read back from the stack: a melt between the walks moves what they hold */
+            long long r35 = fk_cell_run_door(fk_vs[fk_vsp - 4], fk_vs[fk_vsp - 3], fk_vs[fk_vsp - 2], fk_vs[fk_vsp - 1]);
+            fk_vsp = fk_vsp - 4;
+            return r35;
+        }
         if ((fm201 >> 1) == 33) {
             /* MODE 33 -- metal_buf_fill(buf, boff, [path, foff, len]): the fill door, see fk_metal_buf_fill_native. The rewrite row (native-rewrite-rules.bml) builds
              *     fk_smknode(201, LIT 33, buf, (cons boff spec))
@@ -17318,6 +17797,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * answered as a complete write, and nothing is appended. */
         if (!fk_byte_list_ok(xs)) {
             return -2;
+        }
+        if (fk_cell_diag_on && fk_cstr_eq(p, "/dev/stderr")) {
+            /* a cell run in this process (cell_run): its stderr is the record's err text, not the host's fd 2 */
+            long long to_err = 0;
+            int ok_err = fk_write_byte_list(2, xs, &to_err);
+            return ok_err ? (to_err << 1) : -2;
         }
         int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
         if (fd < 0) {
@@ -17432,14 +17917,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_terminal_dim(0);
     }
     if (t == 151) {
-        /* host_vm_stat: list(page_size, memsize, free, active, inactive, wired, speculative, purgeable, compressor_pages, pageins, pageouts, compressions, decompressions, swapins, swapouts, external, internal) -- Mach vm_statistics64, pages */
+        /* host_vm_stat: list(page_size, memsize, free, active, inactive, wired, speculative, purgeable, compressor_pages, pageins, pageouts, compressions, decompressions, swapins, swapouts, external, internal, stored_in_compressor) -- Mach vm_statistics64, pages */
 #ifdef __APPLE__
         unsigned int w151[40];
         unsigned int c151 = 38;
         long long k151;
         for (k151 = 0; k151 < 40; k151 = k151 + 1) { w151[k151] = 0; }
         if (host_statistics64(mach_host_self(), 4, (int *)w151, &c151) != 0) { return 1; }
-        long long vals151[17];
+        long long vals151[18];
         vals151[0] = fk_sysctl_ll("hw.pagesize");
         vals151[1] = fk_sysctl_ll("hw.memsize");
         vals151[2] = (long long)w151[0]; vals151[3] = (long long)w151[1]; vals151[4] = (long long)w151[2]; vals151[5] = (long long)w151[3];
@@ -17448,8 +17933,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         vals151[11] = fk_u64_words(w151[26], w151[27]); vals151[12] = fk_u64_words(w151[24], w151[25]);
         vals151[13] = fk_u64_words(w151[28], w151[29]); vals151[14] = fk_u64_words(w151[30], w151[31]);
         vals151[15] = (long long)w151[34]; vals151[16] = (long long)w151[35];
+        vals151[17] = fk_u64_words(w151[36], w151[37]); /* total_uncompressed_pages_in_compressor: vm_stat's "Pages stored in compressor" */
         long long l151 = 1;
-        for (k151 = 16; k151 >= 0; k151 = k151 - 1) { l151 = fk_cons_val(vals151[k151] << 1, l151); }
+        for (k151 = 17; k151 >= 0; k151 = k151 - 1) { l151 = fk_cons_val(vals151[k151] << 1, l151); }
         return l151;
 #else
         return 1;
@@ -18204,6 +18690,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fd71 < 0 || max71 <= 0) {
             return fk_sbuf("", 0);
         }
+        if (fd71 == 0 && fk_cell_in_on) { return fk_cell_read_bytes(max71); }   /* a cell's stdin is a value (cell_run), whoever reads it */
         fk_sinit();
         while (fk_sbp + max71 > fk_scap_b) {
             fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
@@ -18993,6 +19480,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 114) {
         char rbuf[8192];
         long long rn = 0;
+        if (fk_cell_in_on) { return fk_cell_read_line(); }   /* a cell's stdin is a value (cell_run) */
         while (rn < 8191) {
             char rc;
             long long rg = read(0, &rc, 1);
@@ -19348,9 +19836,21 @@ static void fk_sig_head(long long at, long long seq, const char *image, const ch
     fk_sig_lit("\",\"health\":");
     fk_sig_lit(health);
     fk_sig_lit(",\"surprise\":1,\"needs\":[");
+    if (fk_cell_diag_on) {
+        char aspect_row[FK_PATH_CAP + 16];
+        if (image != 0) {
+            sprintf(aspect_row, "image:%s", image);
+        } else {
+            sprintf(aspect_row, "diagnostic");
+        }
+        fk_dg_begin("fkwu-compiler", aspect_row, stage, observed, health);
+    }
 }
 /* the times close the row, and the line goes out whole */
 static void fk_sig_send(long long observed_at, long long at) {
+    if (fk_cell_diag_on) {
+        fk_dg_commit(at);
+    }
     fk_sig_lit(",\"observed_at_ms\":");
     fk_sig_int(observed_at);
     fk_sig_lit(",\"at_ms\":");
@@ -19395,6 +19895,10 @@ static void fk_stop_voice(const char *msg) {
     fk_sig_cstr(msg);
     fk_sig_lit(",\"health\":null,\"surprise\":1,\"needs\":[],\"offers\":[\"backtrack\"],"
                "\"selected\":\"backtrack\",\"result\":{\"answer\":\"nothing\"}");
+    if (fk_cell_diag_on) {
+        fk_dg_begin("fkwu-walker", "stop", "applied", msg, 0);
+        fk_dg_detail(msg);
+    }
     fk_sig_send(at, at);
 }
 /* where a stop happened: the recipe walking when it stopped, by name, and the unit whose text
@@ -19402,6 +19906,17 @@ static void fk_stop_voice(const char *msg) {
  * "<msg> -- in <name> (<unit>)"; the message alone when the recipe has no symbol. */
 static const char *fk_stop_where(const char *msg, char *buf, long long cap) {
     long long j = 0, n = 0, k = 0;
+    if (fk_cell_root_path != 0 && fk_cur_fn == 0) {
+        /* the top-level frame of a cell run in this process: no recipe, and the unit is the cell itself */
+        const char *rin = " -- in  (";
+        while (msg[n] != 0 && n < cap - 1) { buf[n] = msg[n]; n = n + 1; }
+        while (rin[k] != 0 && n < cap - 1) { buf[n] = rin[k]; n = n + 1; k = k + 1; }
+        k = 0;
+        while (fk_cell_root_path[k] != 0 && n < cap - 2) { buf[n] = fk_cell_root_path[k]; n = n + 1; k = k + 1; }
+        buf[n] = ')';
+        buf[n + 1] = 0;
+        return buf;
+    }
     while (j <= fk_fntop && fk_fnidx[j] != fk_cur_fn) { j = j + 1; }
     while (msg[n] != 0 && n < cap - 1) { buf[n] = msg[n]; n = n + 1; }
     if (j > fk_fntop || fk_srctext == 0) { buf[n] = 0; return buf; }
@@ -19570,7 +20085,7 @@ static void fk_diag_signal(int sev, long long off, const char *where, long long 
         form = "name";
         form_n = 4;
     }
-    if (sev == FK_DIAG_ERR && !binding) {
+    if ((sev == FK_DIAG_ERR && !binding) || fk_cell_diag_on) {
         __builtin_va_list len_ap;
         __builtin_va_copy(len_ap, msg_ap);
         int mn = vsnprintf(0, 0, fmt, len_ap);
@@ -19588,6 +20103,10 @@ static void fk_diag_signal(int sev, long long off, const char *where, long long 
     fk_sig_head(at, fk_sig_seq, 0, "observe",
                 binding ? "binding-missing" : sev == FK_DIAG_ERR ? "compile-error" : "compile-warning",
                 sev == FK_DIAG_ERR ? "0" : "null");
+    if (fk_cell_diag_on) {
+        fk_dg_detail(msg != 0 ? msg : fmt);
+        fk_dg_where(where, off >= 0 ? line : -1, name, name_n);
+    }
     if (binding) {
         fk_sig_lit("{\"resource\":\"binding\",\"detail\":");
         fk_sig_str(name, name_n);
@@ -19644,6 +20163,10 @@ static void fk_diag_path_signal(const char *level, const char *path, const char 
     fk_sig_seq = fk_sig_seq + 1;
     fk_sig_head(at, fk_sig_seq, heal ? path : 0, "observe", err ? "compile-error" : "compile-warning",
                 err ? "0" : "null");
+    if (fk_cell_diag_on) {
+        fk_dg_detail(msg);
+        fk_dg_where(path, -1, 0, 0);
+    }
     if (err) {
         fk_sig_lit("{\"resource\":\"source-diagnostics\",\"detail\":");
         fk_sig_cstr(msg);
@@ -19703,6 +20226,10 @@ static void fk_sig_heal_settle(const char *fkb_path) {
         }
         if (same) {
             fk_sig_head(fk_sig_heal_at[i], fk_sig_heal_seq[i], p, "applied", "compile-warning", "null");
+            if (fk_cell_diag_on) {
+                fk_dg_detail("image rebuilt");
+                fk_dg_where(fkb_path, -1, 0, 0);
+            }
             fk_sig_lit("],\"offers\":[\"rebuild\"],\"selected\":\"rebuild\",\"evidence\":{\"path\":");
             fk_sig_cstr(p);
             fk_sig_lit(",\"form\":\"image\"},\"result\":{\"image\":\"rebuilt\",\"path\":");
@@ -20419,7 +20946,7 @@ static long long fk_fn_lookup(long long s, long long n) {
     long long i = fk_fntop;
     while (i > 0) {
         i = i - 1;
-        if (fk_sym_eq2(s, n, fk_fnsym_s[i], fk_fnsym_n[i])) {
+        if (fk_sym_eq2(s, n, fk_fnsym_s[i], fk_fnsym_n[i]) && (!fk_win_on || fk_win_row_ok(i))) {
             return fk_fnidx[i];
         }
     }
@@ -20431,7 +20958,7 @@ static long long fk_const_lookup(long long s, long long n) {
     long long i = fk_const_top;
     while (i > 0) {
         i = i - 1;
-        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
+        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i]) && (!fk_win_on || fk_win_const_ok(i))) {
             return i;
         }
     }
@@ -20440,7 +20967,8 @@ static long long fk_const_lookup(long long s, long long n) {
 static long long fk_const_set(long long s, long long n, long long node) {
     long long i = 0;
     while (i < fk_const_top) {
-        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
+        /* in a cell load a row is a unit's own: the same name in another unit is another binding */
+        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i]) && (!fk_win_on || fk_const_unit[i] == fk_const_unit_now)) {
             if (fk_const_node[i] == FK_CONST_FORWARD && fk_const_wrapp1[i] != 0 && node != FK_CONST_FORWARD) {
                 /* the let a forward read waited for: the hold every earlier read
                  * shares learns its initializer, so they all read this binding. */
@@ -21838,7 +22366,7 @@ static void fk_prescan_seq(long long *pp) {
     }
 }
 static void fk_prescan_defns(void) {
-    long long p = 0;
+    long long p = fk_prescan_from;
     while (1) {
         fk_sskip_at(&p);
         if (p >= fk_slen) {
@@ -22113,6 +22641,12 @@ static long long fk_path_size_raw(const char *p) {
 static int fk_write_all_raw(int fd, const void *buf, unsigned long n) {
     unsigned long done = 0;
     const char *p = (const char *)buf;
+    if (fd == 2 && fk_cell_diag_on) {
+        /* a cell's stderr is rows (fk_dg_*), never bytes on fd 2; the same bytes a spawned run would have written
+         * stay as the record's err text, which is where a Form voicing (live, the proof outputs) is heard */
+        fk_err_put((const char *)buf, (long long)n);
+        return 1;
+    }
     while (done < n) {
         long long w = write(fd, p + done, n - done);
         if (w < 0 && errno == EINTR) continue;
@@ -22335,6 +22869,11 @@ static int fk_src_dep_index(const char *path) {
         i = i + 1;
     }
     return -1;
+}
+/* the collector's reuse question: at startup a path already collected is not collected twice; for a cell
+ * (cell_run) only the deps the cell door itself loaded count, and only while their files are what they were */
+static int fk_src_dep_lookup(const char *path) {
+    return fk_cell_collect ? (int)fk_cell_dep_find(path) : fk_src_dep_index(path);
 }
 static long long fk_path_dir_len(const char *path) {
     long long i = 0;
@@ -22677,7 +23216,28 @@ static int fk_src_prelude_bml_token(const char *text, long long start, long long
            text[start + n - 2] == 'm' && text[start + n - 1] == 'l';
 }
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len);
-static void fk_bml_child_close(void);
+/* THE BML FLOOR IS LOWERED IN THIS PROCESS (no child, no pipe). State the lowering below reads:
+ *   fk_load_phase   1 from process start until the program (or a cached image) begins to walk: the arena is still being
+ *                   built, so a memo miss met mid-collection abandons the collection, lowers (fk_bml_bootstrap) and
+ *                   re-enters the same command; 0 once a program runs, when a miss can only be answered by the cell door.
+ *   fk_bml_defer    1 while the cell door collects or freshness-checks a cell: a memo miss is recorded in fk_bml_need and
+ *                   answered with an empty unit, the door lowers the whole frontier in one floor call and loads again.
+ *   fk_bml_floor_busy  1 while the floor compiler itself is a cell being loaded or run: its closure is .fk only, so a
+ *                   miss met there is a refusal, never a recursion. */
+static int fk_load_phase = 1;
+static int fk_bml_round;                 /* how many times this command has begun again after lowering (from FK_BML_ROUND) */
+static char fk_boot_root[FK_PATH_CAP];   /* the unit the command was asked to load: where the miss scan starts */
+static int fk_bml_defer;
+static int fk_bml_floor_busy;
+static char **fk_bml_need;
+static long long fk_bml_need_n;
+static long long fk_bml_need_cap;
+static char **fk_bml_bad;                /* units the floor compiler refused (voiced by name once): never asked again by this process */
+static long long fk_bml_bad_n;
+static long long fk_bml_bad_cap;
+static int fk_bml_bad_hit;               /* a load met one of them */
+#define fk_walk_begins() (fk_load_phase = 0)
+static long long fk_bml_floor_lower_needs(void);
 static int fk_unit_lowers(const char *path);
 static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const char *tok,
                               long long tn);
@@ -22797,7 +23357,7 @@ static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const
         return 0;
     }
     if (fk_unit_lowers(dep_path)) {
-        if (fk_src_dep_index(dep_path) < 0) {
+        if (fk_src_dep_lookup(dep_path) < 0) {
             long long bml_mtime = fk_path_mtime_raw(dep_path);
             if (bml_mtime <= 0) {
                 fk_diag_path("error", dep_path,
@@ -22818,6 +23378,9 @@ static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const
         }
     } else if (!fk_src_collect_file(dep_path, owner_idx)) {
         return 0;
+    }
+    if (fk_cell_collect) {
+        fk_cell_dep_union(owner_idx, fk_cell_dep_find_raw(dep_path));
     }
     return 1;
 }
@@ -23066,7 +23629,7 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx);
 static int fk_src_collect_file(const char *path, long long parent_idx) {
-    if (fk_src_dep_index(path) >= 0) {
+    if (fk_src_dep_lookup(path) >= 0) {
         return 1;
     }
     long long mtime = fk_path_mtime_raw(path);
@@ -23131,6 +23694,9 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     fk_src_dep_text_len[fk_src_dep_count] = 0;
     fk_src_dep_lowered[fk_src_dep_count] = 0;
     fk_src_dep_count = fk_src_dep_count + 1;
+    if (fk_cell_collect) {
+        fk_cell_dep_init(idx);
+    }
     if (fk_cstr_eq(path, fk_src_root_path)) {
         fk_src_root_reserve(got + 1);
         i = 0;
@@ -24528,13 +25094,13 @@ static int fk_run_loaded_program_image(long long arg) {
     }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
-    fk_bml_child_close();
+    fk_walk_begins();
     fk_pv_root(fk_walk(fk_fn[0], 0));
     return 0;
 }
 typedef long long (*fk_dylib_main_v1_fn)(long long);
 static int fk_run_dylib_artifact(const char *dylib_path, long long arg, int hard_error) {
-    fk_bml_child_close();
+    fk_walk_begins();
     void *h = dlopen(dylib_path, 2);
     if (h == 0) {
         if (hard_error) {
@@ -24726,7 +25292,7 @@ static void fk_src_reset_compile_state(void) {
  * for a verdict to be OF -- the same line this stone drew for the unbound read. Set the
  * unrunnable latch and let both execution doors refuse with a non-zero exit. */
 static void fk_src_check_balance(void) {
-    long long p = 0;
+    long long p = fk_prescan_from;
     long long depth = 0;
     long long outermost_open = -1;
     while (p < fk_slen) {
@@ -25514,6 +26080,847 @@ static void fk_sig_heal_rebuild_deps(const char *root_fkb_path) {
  * signals print as they always do, and nothing runs. The exit is the compile's:
  * 0 clean, 1 when it carried an error or refused. */
 static int fk_check_only;
+#if !defined(_WIN32) && defined(FK_HAVE_SETJMP)
+/* ═══ cell_run: a unit of Form run IN THIS PROCESS, answering a record ═════════════════════════════════════
+ * cell_run(path, arg, deadline_ms, stdin) -> {value, out, diag, stopped, errors, resident, ms, cpu_us}
+ * (leaf-door mode 50; docs/in-process-cells.md is the design and its status).
+ *
+ *   value     the unit's final value, as the Form value it is (no text); nothing when it stopped
+ *   out       what the unit printed, captured by the stdout sink (fk_sink_*), never written to fd 1
+ *   diag      a list of records, one per organ voicing / compile diagnostic (fk_dg_*), never a line on fd 2
+ *   stopped   nothing, or {kind, message, recipe, unit}: kind "stop" (a Form-level stop: the attempt mechanism's
+ *             catch), "deadline" (the budget ended it) or "unrunnable" (the unit would not read as a program)
+ *   errors    the compile errors the unit's load counted (a spawned fkwu exits 1 on them)
+ *   resident  1 when the unit's text was already parsed here (no read, no lowering, no parse), 0 when this call loaded it
+ *
+ * A UNIT'S TEXT IS PARSED ONCE per path and content: the collector (fk_src_collect_*) appends the unit and the
+ * preludes it does not already hold to fk_srctext; the parser registers their definitions after everything
+ * already there (fn indices and nodes only ever grow); a cell is parsed against a NAME WINDOW -- fk_fn_lookup and
+ * fk_const_lookup see only the rows whose text belongs to the cell's own closure -- so two cells that define
+ * the same helper name never see each other's, and a library keeps one parse for every cell that preludes it.
+ * Code already parsed resolved its calls to fn indices at its own parse, so a later definition of a name can
+ * shadow nothing that exists. A file whose bytes changed is no longer the unit that was parsed: its entry is
+ * set aside (its path gains "#stale") and the closure is collected again.
+ * SHRINK PATH: this is the host-process-boundary door the spawn of ./fkwu was standing in for; when the
+ * program loader moves into Form (the goal in docs/local-agent-goal.form) the table below is Form's and the
+ * door is a call into it. */
+static unsigned char *fk_win_bits_store;
+static long long *fk_cd_win_n;
+static long long **fk_cd_win;
+static unsigned long long *fk_cd_id;
+static long long *fk_cd_unit;
+static long long *fk_cd_epoch;
+static char *fk_cd_ok;
+static char *fk_cd_loaded;
+static char *fk_cd_ran;
+static long long *fk_cd_framed;
+static long long *fk_cd_eff;       /* the unit whose sequence is the cell's answer each call: the root, else the last unit with one */
+static char *fk_cd_unrunnable;
+static void *fk_cd_rows_store;     /* per dep: the diagnostic rows its load voiced (fk_dgrow_t array), replayed for a resident call */
+static long long *fk_cd_rows_n;
+static long long fk_cd_cap;
+static long long fk_cell_epoch;
+static long long fk_cell_load_base;   /* the first dependency index the collection now in progress registers (see fk_cell_dep_find) */
+static int fk_cell_base_set;
+static long long *fk_fsym_dep;
+static long long fk_fsym_dep_n;
+static long long fk_fsym_dep_cap;
+static void fk_cd_reserve(long long need) {
+    if (need <= fk_cd_cap) { return; }
+    long long nc = fk_cd_cap > 0 ? fk_cd_cap : 64;
+    while (nc < need) { nc = nc * 2; }
+    fk_cd_win_n = (long long *)realloc(fk_cd_win_n, (unsigned long)nc * 8);
+    fk_cd_win = (long long **)realloc(fk_cd_win, (unsigned long)nc * sizeof(long long *));
+    fk_cd_id = (unsigned long long *)realloc(fk_cd_id, (unsigned long)nc * 8);
+    fk_cd_unit = (long long *)realloc(fk_cd_unit, (unsigned long)nc * 8);
+    fk_cd_epoch = (long long *)realloc(fk_cd_epoch, (unsigned long)nc * 8);
+    fk_cd_ok = (char *)realloc(fk_cd_ok, (unsigned long)nc);
+    fk_cd_loaded = (char *)realloc(fk_cd_loaded, (unsigned long)nc);
+    fk_cd_ran = (char *)realloc(fk_cd_ran, (unsigned long)nc);
+    fk_cd_framed = (long long *)realloc(fk_cd_framed, (unsigned long)nc * 8);
+    fk_cd_eff = (long long *)realloc(fk_cd_eff, (unsigned long)nc * 8);
+    fk_cd_unrunnable = (char *)realloc(fk_cd_unrunnable, (unsigned long)nc);
+    fk_cd_rows_store = realloc(fk_cd_rows_store, (unsigned long)nc * sizeof(void *));
+    fk_cd_rows_n = (long long *)realloc(fk_cd_rows_n, (unsigned long)nc * 8);
+    if (fk_cd_rows_store == 0 || fk_cd_rows_n == 0) { fk_die("fk_cd_reserve: out of memory growing the cell table"); }
+    if (fk_cd_win_n == 0 || fk_cd_win == 0 || fk_cd_id == 0 || fk_cd_unit == 0 || fk_cd_epoch == 0 || fk_cd_ok == 0 ||
+        fk_cd_loaded == 0 || fk_cd_ran == 0 || fk_cd_framed == 0 || fk_cd_eff == 0 || fk_cd_unrunnable == 0) {
+        fk_die("fk_cd_reserve: out of memory growing the cell table");
+    }
+    fk_cd_cap = nc;
+}
+static void fk_cell_dep_init(long long idx) {
+    fk_cd_reserve(idx + 1);
+    fk_cd_win[idx] = (long long *)malloc(8);
+    if (fk_cd_win[idx] == 0) { fk_die("fk_cell_dep_init: out of memory"); }
+    fk_cd_win[idx][0] = idx;
+    fk_cd_win_n[idx] = 1;
+    fk_cd_id[idx] = fk_canon_id63(fk_src_dep_path[idx]);
+    fk_cd_unit[idx] = -1;
+    fk_cd_epoch[idx] = -1;
+    fk_cd_ok[idx] = 0;
+    fk_cd_loaded[idx] = 0;
+    fk_cd_ran[idx] = 0;
+    fk_cd_framed[idx] = -1;
+    fk_cd_eff[idx] = -2;
+    fk_cd_unrunnable[idx] = 0;
+    ((void **)fk_cd_rows_store)[idx] = 0;
+    fk_cd_rows_n[idx] = 0;
+}
+static int fk_cd_has(long long owner, long long m) {
+    long long k = 0;
+    while (k < fk_cd_win_n[owner]) {
+        if (fk_cd_win[owner][k] == m) { return 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+static void fk_cell_dep_union(long long owner, long long child) {
+    long long k = 0;
+    if (owner < 0 || child < 0 || owner >= fk_src_dep_count || child >= fk_src_dep_count) { return; }
+    while (k < fk_cd_win_n[child]) {
+        long long m = fk_cd_win[child][k];
+        if (!fk_cd_has(owner, m)) {
+            long long *grown = (long long *)realloc(fk_cd_win[owner], (unsigned long)(fk_cd_win_n[owner] + 1) * 8);
+            if (grown == 0) { fk_die("fk_cell_dep_union: out of memory"); }
+            fk_cd_win[owner] = grown;
+            fk_cd_win[owner][fk_cd_win_n[owner]] = m;
+            fk_cd_win_n[owner] = fk_cd_win_n[owner] + 1;
+        }
+        k = k + 1;
+    }
+}
+static long long fk_cell_dep_find_raw(const char *path) {
+    long long i = fk_cell_base_dep;
+    while (i < fk_src_dep_count) {
+        if (fk_cstr_eq(fk_src_dep_path[i], path)) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+/* is the dependency's file what was parsed? mtime and size (and a clock old enough to trust them) say yes; any
+ * doubt reads the bytes and compares the digest the collector took -- the .fkb image's own freshness question */
+static int fk_cell_dep_fresh(long long d) {
+    if (fk_cd_epoch[d] == fk_cell_epoch) { return fk_cd_ok[d]; }
+    fk_cd_epoch[d] = fk_cell_epoch;
+    fk_cd_ok[d] = 0;
+    long long m = fk_path_mtime_raw(fk_src_dep_path[d]);
+    if (m <= 0) { return 0; }
+    long long age = fk_now_ms() / 1000 - m;
+    if (fk_src_dep_lowered[d]) {
+        if (m == fk_src_dep_mtime[d] && age > 2) { fk_cd_ok[d] = 1; return 1; }
+        long long ln = 0;
+        char *low = fk_bml_lower_to_mem(fk_src_dep_path[d], &ln);
+        if (low == 0) { return 0; }
+        int same = fk_bytes_fnv1a(low, ln) == fk_src_dep_digest[d];
+        free(low);
+        if (same) { fk_src_dep_mtime[d] = m; fk_cd_ok[d] = 1; }
+        return same;
+    }
+    long long sz = fk_path_size_raw(fk_src_dep_path[d]);
+    if (m == fk_src_dep_mtime[d] && sz == fk_src_dep_size[d] && age > 2) { fk_cd_ok[d] = 1; return 1; }
+    long long n = 0;
+    char *text = fk_read_whole_file(fk_src_dep_path[d], &n);
+    if (text == 0) { return 0; }
+    int same = fk_bytes_fnv1a(text, n) == fk_src_dep_digest[d];
+    free(text);
+    if (same) { fk_src_dep_mtime[d] = m; fk_src_dep_size[d] = sz; fk_cd_ok[d] = 1; }
+    return same;
+}
+static void fk_cell_dep_setaside(long long d) {
+    long long n = fk_path_len(fk_src_dep_path[d]);
+    if (n + 8 < FK_PATH_CAP) {
+        const char *tag = "#stale";
+        long long k = 0;
+        while (tag[k] != 0) { fk_src_dep_path[d][n + k] = tag[k]; k = k + 1; }
+        fk_src_dep_path[d][n + k] = 0;
+    }
+    fk_cd_loaded[d] = 0;
+    fk_cd_ok[d] = 0;
+}
+/* the dependency by path, only when it and everything its closure holds is still what was parsed */
+static long long fk_cell_dep_find(const char *path) {
+    long long d = fk_cell_dep_find_raw(path);
+    long long k = 0;
+    int stale = 0;
+    if (d < 0) { return -1; }
+    /* a unit this very collection registered is what was just read: it is not asked whether it is fresh. Asked, a unit whose
+     * preludes are still being collected (two units that name each other) reads as changed -- its lowered text is not its file's
+     * bytes -- is set aside and collected again, and again, until the stack ends: a cycle of two .bml units made a cold load
+     * recurse to the guard page (SIGBUS, 2026-10-04). Units from an earlier load keep the check. */
+    if (fk_cell_collect && d >= fk_cell_load_base) { return d; }
+    while (k < fk_cd_win_n[d]) {
+        long long m = fk_cd_win[d][k];
+        if (!fk_cell_dep_fresh(m)) { stale = 1; fk_cell_dep_setaside(m); }
+        k = k + 1;
+    }
+    if (stale) { fk_cell_dep_setaside(d); return -1; }
+    return d;
+}
+static long long fk_cell_dep_of_off(long long off) {
+    long long d = fk_cell_base_dep;
+    while (d < fk_src_dep_count) {
+        if (fk_src_dep_text_len[d] > 0 && off >= fk_src_dep_text_off[d] && off < fk_src_dep_text_off[d] + fk_src_dep_text_len[d]) { return d; }
+        d = d + 1;
+    }
+    return -1;
+}
+static int fk_win_dep_ok(long long d) {
+    return d >= 0 && d < fk_win_cap && fk_win_bits_store[d] != 0;
+}
+static int fk_win_row_ok(long long row) {
+    if (row >= fk_fsym_dep_cap) {
+        long long nc = fk_fsym_dep_cap > 0 ? fk_fsym_dep_cap : 1024;
+        while (nc <= row) { nc = nc * 2; }
+        fk_fsym_dep = (long long *)realloc(fk_fsym_dep, (unsigned long)nc * 8);
+        if (fk_fsym_dep == 0) { fk_die("fk_win_row_ok: out of memory"); }
+        fk_fsym_dep_cap = nc;
+    }
+    while (fk_fsym_dep_n <= row) { fk_fsym_dep[fk_fsym_dep_n] = -2; fk_fsym_dep_n = fk_fsym_dep_n + 1; }
+    if (fk_fsym_dep[row] == -2) { fk_fsym_dep[row] = fk_cell_dep_of_off(fk_fnsym_s[row]); }
+    return fk_win_dep_ok(fk_fsym_dep[row]);
+}
+static int fk_win_const_ok(long long row) {
+    unsigned long long id = fk_const_unit[row];
+    long long d = fk_cell_base_dep;
+    while (d < fk_src_dep_count && d < fk_win_cap) {
+        if (fk_win_bits_store[d] != 0 && fk_cd_id[d] == id) { return 1; }
+        d = d + 1;
+    }
+    return 0;
+}
+static void fk_win_set(long long root) {
+    long long k = 0;
+    if (fk_win_cap < fk_src_dep_count) {
+        fk_win_bits_store = (unsigned char *)realloc(fk_win_bits_store, (unsigned long)fk_src_dep_count + 64);
+        if (fk_win_bits_store == 0) { fk_die("fk_win_set: out of memory"); }
+        fk_win_cap = fk_src_dep_count + 64;
+    }
+    while (k < fk_win_cap) { fk_win_bits_store[k] = 0; k = k + 1; }
+    k = 0;
+    while (k < fk_cd_win_n[root]) { fk_win_bits_store[fk_cd_win[root][k]] = 1; k = k + 1; }
+    fk_win_bits = fk_win_bits_store;
+}
+
+/* ── the stdout sink ── */
+static char *fk_sink_buf;
+static long long fk_sink_n;
+static long long fk_sink_cap;
+static void fk_sink_put(const char *p, long long n) {
+    if (n <= 0) { return; }
+    if (fk_sink_n + n + 1 > fk_sink_cap) {
+        long long nc = fk_sink_cap > 0 ? fk_sink_cap : 4096;
+        while (nc < fk_sink_n + n + 1) { nc = nc * 2; }
+        char *q = (char *)realloc(fk_sink_buf, (unsigned long)nc);
+        if (q == 0) { fk_die("fk_sink_put: out of memory growing a cell's captured output"); }
+        fk_sink_buf = q;
+        fk_sink_cap = nc;
+    }
+    memcpy(fk_sink_buf + fk_sink_n, p, (unsigned long)n);
+    fk_sink_n = fk_sink_n + n;
+}
+/* ── the stderr text of a cell (the record's err): what a spawned run would have written to fd 2 ── */
+static char *fk_err_buf;
+static long long fk_err_n;
+static long long fk_err_cap;
+static void fk_err_put(const char *p, long long n) {
+    if (n <= 0) { return; }
+    if (fk_err_n + n + 1 > fk_err_cap) {
+        long long nc = fk_err_cap > 0 ? fk_err_cap : 4096;
+        while (nc < fk_err_n + n + 1) { nc = nc * 2; }
+        char *q = (char *)realloc(fk_err_buf, (unsigned long)nc);
+        if (q == 0) { fk_die("fk_err_put: out of memory growing a cell's captured stderr"); }
+        fk_err_buf = q;
+        fk_err_cap = nc;
+    }
+    memcpy(fk_err_buf + fk_err_n, p, (unsigned long)n);
+    fk_err_n = fk_err_n + n;
+}
+static int fk_sink_putchar(int c) {
+    if (!fk_sink_on) { return (putchar)(c); }
+    char b = (char)c;
+    fk_sink_put(&b, 1);
+    return c & 255;
+}
+static int fk_sink_printf(const char *fmt, ...) {
+    __builtin_va_list ap;
+    __builtin_va_list ap2;
+    __builtin_va_start(ap, fmt);
+    if (!fk_sink_on) {
+        int r = vprintf(fmt, ap);
+        __builtin_va_end(ap);
+        return r;
+    }
+    __builtin_va_copy(ap2, ap);
+    int n = vsnprintf(0, 0, fmt, ap2);
+    __builtin_va_end(ap2);
+    if (n > 0) {
+        char *tmp = (char *)malloc((unsigned long)n + 1);
+        if (tmp == 0) { fk_die("fk_sink_printf: out of memory"); }
+        vsnprintf(tmp, (fk_size_t)n + 1, fmt, ap);
+        fk_sink_put(tmp, n);
+        free(tmp);
+    }
+    __builtin_va_end(ap);
+    return n;
+}
+/* ── the stdin value ── */
+static char *fk_in_buf;
+static long long fk_in_n;
+static long long fk_in_pos;
+static long long fk_cell_read_line(void) {
+    if (fk_in_pos >= fk_in_n) { return fk_nothing; }
+    long long s = fk_in_pos;
+    while (fk_in_pos < fk_in_n && fk_in_buf[fk_in_pos] != FK_CH_LF) { fk_in_pos = fk_in_pos + 1; }
+    long long len = fk_in_pos - s;
+    if (fk_in_pos < fk_in_n) { fk_in_pos = fk_in_pos + 1; }
+    return fk_sbuf(fk_in_buf + s, len);
+}
+/* file_read(0, n) in a cell: up to n bytes of what is left of the stdin value, the way read(0, ...) would hand them */
+static long long fk_cell_read_bytes(long long max) {
+    long long take = fk_in_n - fk_in_pos;
+    long long s = fk_in_pos;
+    if (take <= 0) { return fk_sbuf("", 0); }
+    if (take > max) { take = max; }
+    fk_in_pos = fk_in_pos + take;
+    return fk_sbuf(fk_in_buf + s, take);
+}
+/* ── the diagnostic rows ── */
+typedef struct {
+    char *organ, *aspect, *stage, *observed, *detail, *path, *name;
+    long long line, health, at;
+} fk_dgrow_t;
+static fk_dgrow_t *fk_dg_rows;
+static long long fk_dg_n;
+static long long fk_dg_cap;
+static fk_dgrow_t fk_dg_cur;
+static int fk_dg_cur_live;
+static char *fk_dg_dup(const char *s, long long n) {
+    char *q;
+    if (s == 0) { return 0; }
+    q = (char *)malloc((unsigned long)n + 1);
+    if (q == 0) { fk_die("fk_dg_dup: out of memory"); }
+    memcpy(q, s, (unsigned long)n);
+    q[n] = 0;
+    return q;
+}
+static void fk_dg_row_free(fk_dgrow_t *r) {
+    free(r->organ); free(r->aspect); free(r->stage); free(r->observed); free(r->detail); free(r->path); free(r->name);
+    r->organ = r->aspect = r->stage = r->observed = r->detail = r->path = r->name = 0;
+}
+static void fk_dg_begin(const char *organ, const char *aspect, const char *stage, const char *observed, const char *health) {
+    if (fk_dg_cur_live) { fk_dg_row_free(&fk_dg_cur); }
+    fk_dg_cur.organ = fk_dg_dup(organ, fk_cstrlen(organ));
+    fk_dg_cur.aspect = fk_dg_dup(aspect, fk_cstrlen(aspect));
+    fk_dg_cur.stage = fk_dg_dup(stage, fk_cstrlen(stage));
+    fk_dg_cur.observed = fk_dg_dup(observed, fk_cstrlen(observed));
+    fk_dg_cur.detail = 0;
+    fk_dg_cur.path = 0;
+    fk_dg_cur.name = 0;
+    fk_dg_cur.line = -1;
+    fk_dg_cur.health = (health != 0 && health[0] >= '0' && health[0] <= '9') ? (long long)(health[0] - '0') : -1;
+    fk_dg_cur_live = 1;
+}
+static void fk_dg_detail(const char *detail) {
+    if (!fk_dg_cur_live) { return; }
+    free(fk_dg_cur.detail);
+    fk_dg_cur.detail = fk_dg_dup(detail != 0 ? detail : "", detail != 0 ? fk_cstrlen(detail) : 0);
+}
+static void fk_dg_where(const char *path, long long line, const char *name, long long name_n) {
+    if (!fk_dg_cur_live) { return; }
+    free(fk_dg_cur.path);
+    free(fk_dg_cur.name);
+    fk_dg_cur.path = path != 0 ? fk_dg_dup(path, fk_cstrlen(path)) : 0;
+    fk_dg_cur.name = name != 0 ? fk_dg_dup(name, name_n) : 0;
+    fk_dg_cur.line = line;
+}
+static void fk_dg_push(const fk_dgrow_t *r) {
+    if (fk_dg_n + 1 > fk_dg_cap) {
+        long long nc = fk_dg_cap > 0 ? fk_dg_cap * 2 : 16;
+        fk_dg_rows = (fk_dgrow_t *)realloc(fk_dg_rows, (unsigned long)nc * sizeof(fk_dgrow_t));
+        if (fk_dg_rows == 0) { fk_die("fk_dg_push: out of memory"); }
+        fk_dg_cap = nc;
+    }
+    fk_dg_rows[fk_dg_n] = *r;
+    fk_dg_n = fk_dg_n + 1;
+}
+static void fk_dg_commit(long long at) {
+    if (!fk_dg_cur_live) { return; }
+    fk_dg_cur.at = at;
+    fk_dg_push(&fk_dg_cur);
+    fk_dg_cur_live = 0;
+    fk_dg_cur.organ = fk_dg_cur.aspect = fk_dg_cur.stage = fk_dg_cur.observed = fk_dg_cur.detail = fk_dg_cur.path = fk_dg_cur.name = 0;
+}
+/* ── the deadline ── */
+static jmp_buf *fk_cell_jb;
+static int fk_cell_hit;
+static void fk_cell_deadline_hit(void) {
+    if (fk_now_ms() < fk_cell_deadline_ms) { return; }
+    if (fk_cell_jb != 0) {
+        fk_cell_hit = 2;
+        if (fk_cell_diag_on) {
+            fk_dg_begin("fkwu-walker", "stop", "applied", "deadline", 0);
+            fk_dg_detail("deadline: the unit ran past its budget and was ended");
+            fk_dg_commit(fk_now_ms());
+        }
+        FK_LONGJMP(*fk_cell_jb);
+    }
+}
+/* ── records built from C ── */
+static long long fk_cr_new(void) {
+    fk_rp = fk_rp + 1;
+    fk_record_reserve(fk_rp + 1);
+    fk_rcnt[fk_rp] = 0;
+    fk_rbp[fk_rp] = 0;
+    return fk_rp;
+}
+static void fk_cr_put(long long r, const char *key, long long v) {
+    long long k = fk_stri(fk_sbuf(key, fk_cstrlen(key)));
+    fk_record_keys_reserve(r, fk_rcnt[r] + 1);
+    fk_rkey[r][fk_rcnt[r]] = k;
+    fk_rval[r][fk_rcnt[r]] = v;
+    fk_rcnt[r] = fk_rcnt[r] + 1;
+}
+static long long fk_cr_str(const char *s) {
+    return fk_sbuf(s != 0 ? s : "", s != 0 ? fk_cstrlen(s) : 0);
+}
+static long long fk_dg_record(const fk_dgrow_t *g) {
+    long long r = fk_cr_new();
+    fk_cr_put(r, "organ", fk_cr_str(g->organ));
+    fk_cr_put(r, "aspect", fk_cr_str(g->aspect));
+    fk_cr_put(r, "stage", fk_cr_str(g->stage));
+    fk_cr_put(r, "observed", fk_cr_str(g->observed));
+    fk_cr_put(r, "detail", fk_cr_str(g->detail));
+    fk_cr_put(r, "path", fk_cr_str(g->path));
+    fk_cr_put(r, "name", fk_cr_str(g->name));
+    fk_cr_put(r, "line", g->line >= 0 ? g->line << 1 : fk_nothing);
+    fk_cr_put(r, "health", g->health >= 0 ? g->health << 1 : fk_nothing);
+    fk_cr_put(r, "at_ms", g->at << 1);
+    return fk_rbox(r);
+}
+static long long fk_stopped_record(const char *kind, const char *said) {
+    long long r = fk_cr_new();
+    long long n = fk_cstrlen(said);
+    long long cut = -1, k = 0;
+    while (k + 7 <= n) {
+        if (said[k] == ' ' && said[k + 1] == '-' && said[k + 2] == '-' && said[k + 3] == ' ' && said[k + 4] == 'i' && said[k + 5] == 'n' && said[k + 6] == ' ') { cut = k; }
+        k = k + 1;
+    }
+    fk_cr_put(r, "kind", fk_cr_str(kind));
+    if (cut < 0) {
+        fk_cr_put(r, "message", fk_cr_str(said));
+        fk_cr_put(r, "recipe", fk_cr_str(""));
+        fk_cr_put(r, "unit", fk_cr_str(""));
+    } else {
+        long long at = cut + 7, open = n - 1;
+        while (open > at && said[open] != '(') { open = open - 1; }
+        fk_cr_put(r, "message", fk_sbuf(said, cut));
+        if (said[n - 1] == ')' && open > at) {
+            fk_cr_put(r, "recipe", fk_sbuf(said + at, open - at - 1));
+            fk_cr_put(r, "unit", fk_sbuf(said + open + 1, n - open - 2));
+        } else {
+            fk_cr_put(r, "recipe", fk_sbuf(said + at, n - at));
+            fk_cr_put(r, "unit", fk_cr_str(""));
+        }
+    }
+    return fk_rbox(r);
+}
+static long long fk_cell_cpu_us(void) {
+    struct timespec tc;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &tc);
+    return (long long)tc.tv_sec * 1000000 + (long long)tc.tv_nsec / 1000;
+}
+/* the recover point of a cell: fk_attempt's, with the two answers an attempt cannot give -- which kind of end it
+ * was, and a deadline that no inner attempt can swallow (it jumps straight here) */
+static long long fk_cell_walk_guarded(long long node, long long fp, int *how) {
+    jmp_buf here;
+    jmp_buf *outer = fk_rp_top;
+    jmp_buf *outer_cell = fk_cell_jb;
+    long long vsp0 = fk_vsp, bus0 = fk_bus_depth, cur0 = fk_cur_fn;
+    int warm0 = fk_f64_warm_depth;
+    int env0 = fk_f64_env_depth;
+    fk_cell_hit = 0;
+    if (FK_SETJMP(here) == 0) {
+        fk_rp_top = &here;
+        fk_cell_jb = &here;
+        fk_cur_fn = 0;   /* the cell's own top-level frame, as the root of a program of its own */
+        long long v = fk_walk(node, fp);
+        fk_rp_top = outer;
+        fk_cell_jb = outer_cell;
+        fk_cur_fn = cur0;
+        *how = 0;
+        return v;
+    }
+    fk_rp_top = outer;
+    fk_cell_jb = outer_cell;
+    fk_vsp = vsp0;
+    fk_bus_unwind(bus0, 3, fk_stop_said);
+    fk_cur_fn = cur0;
+    fk_f64_warm_depth = warm0;
+    fk_f64_env_depth = env0;
+    *how = fk_cell_hit == 2 ? 2 : 1;
+    return fk_nothing;
+}
+/* ── the load: collect the closure, give every new unit its place, parse what is new against the window ── */
+static int fk_cell_load(const char *path, long long *root_out) {
+    long long d0 = fk_src_dep_count, slen0 = fk_slen, fnt0 = fk_fntop;
+    long long spos0 = fk_spos, root0 = fk_root, ucur0 = fk_units_cur, cun0 = fk_const_unit_now, maxslot0 = fk_maxslot, bdtop0 = fk_bd_top;
+    long long ne0 = fk_nerr, nw0 = fk_nwarn, nes0 = fk_nerr_seen, nws0 = fk_nwarn_seen;
+    int trunc0 = fk_src_truncated, unr0 = fk_src_unrunnable;
+    long long prescan0 = fk_prescan_from;
+    long long k;
+    int ok;
+    fk_nerr = 0; fk_nwarn = 0; fk_src_truncated = 0; fk_src_unrunnable = 0;
+    if (!fk_home_loaded) { fk_home_load(path); }
+    fk_cell_load_base = fk_src_dep_count;
+    fk_bml_bad_hit = 0;
+    fk_cell_collect = 1;
+    if (fk_unit_lowers(path)) {
+        long long ln = 0;
+        long long mt = fk_path_mtime_raw(path);
+        char *low = mt > 0 ? fk_bml_lower_to_mem(path, &ln) : 0;
+        if (low == 0) {
+            if (mt <= 0) { fk_diag_path("error", path, "cell source is missing or not stat-readable"); }
+            ok = 0;
+        } else {
+            long long bi = fk_src_dep_count;
+            ok = fk_src_collect_bytes(path, low, ln, mt, ln, -1);
+            if (ok) { fk_src_dep_lowered[bi] = 1; }
+        }
+    } else {
+        ok = fk_src_collect_file(path, -1);
+    }
+    fk_cell_collect = 0;
+    if (ok && (fk_bml_need_n > 0 || fk_bml_bad_hit)) { ok = 0; }   /* a lowering memo was missing (the door lowers the frontier and loads again), or the floor refused a unit of the closure */
+    *root_out = ok ? fk_cell_dep_find_raw(path) : -1;
+    if (!ok || *root_out < 0) {
+        k = d0;
+        while (k < fk_src_dep_count) { free(fk_cd_win[k]); fk_cd_win[k] = 0; k = k + 1; }
+        fk_srcseg_drop_from(slen0);
+        fk_src_dep_count = d0;
+        fk_slen = slen0;
+        fk_srctext[fk_slen] = 0;
+        fk_spos = spos0; fk_nerr = ne0; fk_nwarn = nw0; fk_src_truncated = trunc0; fk_src_unrunnable = unr0;
+        return 0;
+    }
+    /* each new unit gets its place in the unit table, so a form is filed under the unit whose text holds it */
+    k = d0;
+    while (k < fk_src_dep_count) {
+        if (fk_src_dep_text_len[k] > 0) {
+            fk_units_add(fk_cd_id[k], fk_src_dep_text_off[k], fk_src_dep_text_off[k] + fk_src_dep_text_len[k], -1);
+            fk_cd_unit[k] = fk_units_n - 1;
+        }
+        k = k + 1;
+    }
+    fk_win_set(*root_out);
+    fk_win_on = 1;
+    fk_root = -1;
+    /* a function row an earlier load gave back (a load that failed, or was rolled back) is numbered again by this one: the owner
+     * cached for that row belongs to the dead function, and is asked again */
+    { long long rr = fk_fntop; while (rr < fk_fsym_dep_n) { fk_fsym_dep[rr] = -2; rr = rr + 1; } }
+    fk_prescan_from = slen0;
+    fk_spos = slen0;
+    fk_srctext[fk_slen] = 0;
+    fk_src_check_balance();
+    if (!fk_src_unrunnable) {
+        fk_prescan_defns();
+        fk_spos = slen0;
+        while (1) {
+            fk_sskip();
+            if (fk_spos >= fk_slen) { break; }
+            fk_units_cur = fk_units_at(fk_spos);
+            fk_const_unit_now = fk_units_cur >= 0 ? fk_unit_id[fk_units_cur] : 0;
+            fk_parse_top();
+        }
+        fk_units_cur = -1;
+        fk_const_unit_now = 0;
+        fk_const_forward_finalize();
+        fk_fn_count = fk_defn_next;
+    }
+    fk_win_on = 0;
+    /* a unit's own sequence, framed, is what runs: the libraries once, the cell each call */
+    k = d0;
+    while (k < fk_src_dep_count) {
+        long long u = fk_cd_unit[k];
+        if (u >= 0 && fk_unit_chain[u] >= 0) { fk_cd_framed[k] = fk_smknode(111, fk_smklit(16), fk_unit_chain[u], 0); }
+        fk_cd_loaded[k] = 1;
+        fk_cd_ran[k] = 0;
+        k = k + 1;
+    }
+    fk_cd_unrunnable[*root_out] = fk_src_unrunnable ? 1 : 0;
+    fk_root = root0; fk_units_cur = ucur0; fk_const_unit_now = cun0; fk_maxslot = maxslot0; fk_bd_top = bdtop0; fk_spos = spos0;
+    fk_nerr = ne0; fk_nwarn = nw0; fk_nerr_seen = nes0; fk_nwarn_seen = nws0;
+    fk_src_truncated = trunc0; fk_src_unrunnable = unr0; fk_prescan_from = prescan0;
+    (void)fnt0;
+    return 1;
+}
+/* the program's answer is its last sequence in text order: the cell's own, or, for a root that only names preludes
+ * (the sweep's workload roots), the last prelude that has one. The root is last in text, so it is the choice whenever
+ * it has a sequence. -2 is not yet asked; -1 is a unit with no sequence at all. */
+static long long fk_cell_eff_of(long long root) {
+    if (fk_cd_eff[root] == -2) {
+        long long e = -1, w = 0;
+        while (w < fk_cd_win_n[root]) {
+            long long m = fk_cd_win[root][w];
+            if (fk_cd_framed[m] >= 0 && (e < 0 || fk_src_dep_text_off[m] > fk_src_dep_text_off[e])) { e = m; }
+            w = w + 1;
+        }
+        fk_cd_eff[root] = e;
+    }
+    return fk_cd_eff[root];
+}
+/* the cell's own top-level lets are built again for each call; a library's are built once */
+static void fk_cell_reset_lets(unsigned long long id) {
+    long long i = 0;
+    while (i < fk_const_top) {
+        if (fk_const_unit[i] == id && fk_const_wrapp1[i] != 0) { fk_node[fk_const_wrapp1[i] - 1][3] = 0; }
+        i = i + 1;
+    }
+}
+static void fk_dg_copy(fk_dgrow_t *to, const fk_dgrow_t *from) {
+    *to = *from;
+    to->organ = from->organ != 0 ? fk_dg_dup(from->organ, fk_cstrlen(from->organ)) : 0;
+    to->aspect = from->aspect != 0 ? fk_dg_dup(from->aspect, fk_cstrlen(from->aspect)) : 0;
+    to->stage = from->stage != 0 ? fk_dg_dup(from->stage, fk_cstrlen(from->stage)) : 0;
+    to->observed = from->observed != 0 ? fk_dg_dup(from->observed, fk_cstrlen(from->observed)) : 0;
+    to->detail = from->detail != 0 ? fk_dg_dup(from->detail, fk_cstrlen(from->detail)) : 0;
+    to->path = from->path != 0 ? fk_dg_dup(from->path, fk_cstrlen(from->path)) : 0;
+    to->name = from->name != 0 ? fk_dg_dup(from->name, fk_cstrlen(from->name)) : 0;
+}
+/* what a load voiced stays with the unit whose text it was about (the row's path), else with the cell: a resident
+ * call replays it, so the same unit answers the same diagnostics whether this call parsed it or an earlier one did */
+static void fk_cell_rows_keep(long long root, long long db, long long n0, long long n1) {
+    long long g = n0;
+    while (g < n1) {
+        long long target = root, d = db;
+        fk_dgrow_t **store = (fk_dgrow_t **)fk_cd_rows_store;
+        if (fk_dg_rows[g].path != 0) {
+            while (d < fk_src_dep_count) {
+                if (fk_cstr_eq(fk_src_dep_path[d], fk_dg_rows[g].path)) { target = d; }
+                d = d + 1;
+            }
+        }
+        store[target] = (fk_dgrow_t *)realloc(store[target], (unsigned long)(fk_cd_rows_n[target] + 1) * sizeof(fk_dgrow_t));
+        if (store[target] == 0) { fk_die("fk_cell_rows_keep: out of memory"); }
+        fk_dg_copy(&store[target][fk_cd_rows_n[target]], &fk_dg_rows[g]);
+        fk_cd_rows_n[target] = fk_cd_rows_n[target] + 1;
+        g = g + 1;
+    }
+}
+static void fk_cell_rows_replay(long long root) {
+    long long k = 0;
+    fk_dgrow_t **store = (fk_dgrow_t **)fk_cd_rows_store;
+    while (k < fk_cd_win_n[root]) {
+        long long m = fk_cd_win[root][k], j = 0;
+        while (j < fk_cd_rows_n[m]) {
+            fk_dgrow_t c;
+            fk_dg_copy(&c, &store[m][j]);
+            fk_dg_push(&c);
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+}
+static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw) {
+    char path[FK_PATH_CAP];
+    long long wall0 = fk_now_ms(), cpu0 = fk_cell_cpu_us();
+    long long deadline = 0, value = fk_nothing, root = -1, stopped = fk_nothing, errors = 0, vsp0 = fk_vsp;
+    int resident = 0, how = 0, refused = 0, check_only = 0;
+    const char *refusal = "";
+    /* the caller's sinks, put back on the way out (a cell may call cell_run) */
+    char *sv_buf = fk_sink_buf; long long sv_n = fk_sink_n, sv_cap = fk_sink_cap; int sv_on = fk_sink_on;
+    char *sv_err = fk_err_buf; long long sv_err_n = fk_err_n, sv_err_cap = fk_err_cap;
+    fk_dgrow_t *sv_rows = fk_dg_rows; long long sv_dn = fk_dg_n, sv_dcap = fk_dg_cap; int sv_diag = fk_cell_diag_on;
+    fk_dgrow_t sv_cur = fk_dg_cur; int sv_cur_live = fk_dg_cur_live;
+    char *sv_in = fk_in_buf; long long sv_in_n = fk_in_n, sv_in_pos = fk_in_pos; int sv_in_on = fk_cell_in_on;
+    long long sv_deadline = fk_cell_deadline_ms;
+    const char *sv_root_path = fk_cell_root_path;
+    long long out_w, err_w, diag_w = 1, stopped_w, r;
+    if (!fk_is_str(pathw)) { refused = 1; refusal = "cell_run: the unit is a path string"; }
+    if (!refused) { fk_cstr(pathw, path, FK_PATH_CAP); }
+    if (!refused && dlw != fk_nothing) {
+        if (fk_is_str(dlw)) {
+            /* the word "check" is the compile-only door (what `fkwu --check` is): the unit loads, its compile
+             * diagnostics are the rows, and nothing runs -- not the unit, not a library's top level */
+            char word[16];
+            fk_cstr(dlw, word, 16);
+            if (fk_cstr_eq(word, "check")) { check_only = 1; }
+            else { refused = 1; refusal = "cell_run: the deadline is an int of milliseconds, the word check, or nothing"; }
+        }
+        else if ((dlw & 1) != 0) { refused = 1; refusal = "cell_run: the deadline is an int of milliseconds, the word check, or nothing"; }
+        else if ((dlw >> 1) > 0) { deadline = wall0 + (dlw >> 1); }
+    }
+    fk_err_buf = 0; fk_err_n = 0; fk_err_cap = 0;
+    fk_sink_buf = 0; fk_sink_n = 0; fk_sink_cap = 0; fk_sink_on = 1;
+    fk_dg_rows = 0; fk_dg_n = 0; fk_dg_cap = 0; fk_cell_diag_on = 1; fk_dg_cur_live = 0;
+    fk_in_buf = 0; fk_in_n = 0; fk_in_pos = 0; fk_cell_in_on = 1;
+    if (!refused && inw != fk_nothing) {
+        /* stdin is a list of lines; each is read back by read_line, then end of input is nothing */
+        long long q = (inw & 1) ? inw >> 1 : -1, bytes = 0, put = 0;
+        if (q < 1) { refused = 1; refusal = "cell_run: stdin is a list of strings, or nothing"; }
+        while (!refused && q >= 1 && FK_POK(q)) {
+            long long si = fk_stri(FK_HH(q));
+            if (si < 0) { refused = 1; refusal = "cell_run: stdin is a list of strings, or nothing"; break; }
+            bytes = bytes + FK_SLEN(si) + 1;
+            q = FK_HNEXT(q);
+        }
+        if (!refused && bytes > 0) {
+            fk_in_buf = (char *)malloc((unsigned long)bytes);
+            if (fk_in_buf == 0) { fk_die("cell_run: out of memory holding stdin"); }
+            q = inw >> 1;
+            while (q >= 1 && FK_POK(q)) {
+                long long si = fk_stri(FK_HH(q));
+                memcpy(fk_in_buf + put, FK_SBYTES(si), (unsigned long)FK_SLEN(si));
+                put = put + FK_SLEN(si);
+                fk_in_buf[put] = FK_CH_LF;
+                put = put + 1;
+                q = FK_HNEXT(q);
+            }
+            fk_in_n = bytes;
+        }
+    }
+    if (!fk_cell_base_set) {
+        /* the deps the host loaded at startup are not the cell door's: it reuses only what it loaded itself */
+        fk_cell_base_dep = fk_src_dep_count;
+        fk_cell_base_set = 1;
+    }
+    if (!refused) {
+        long long one_deadline = deadline;
+        if (sv_deadline != 0 && (one_deadline == 0 || sv_deadline < one_deadline)) { one_deadline = sv_deadline; }
+        int sv_defer = fk_bml_defer, tries = 0;
+        /* a .bml of the closure whose lowering memo is missing or stale is recorded by the collector (fk_bml_defer),
+         * the load is given up, the whole frontier is lowered by the floor compiler in this process, and the load
+         * is made again: the closure's depth, not its size, is the number of rounds */
+        for (;;) {
+            fk_cell_epoch = fk_cell_epoch + 1;
+            fk_bml_defer = 1;
+            fk_bml_need_n = 0;
+            root = fk_cell_dep_find(path);
+            resident = root >= 0 && fk_cd_loaded[root];
+            if (!resident) {
+                long long db = fk_src_dep_count, dn0 = fk_dg_n;
+                int loaded = fk_cell_load(path, &root);
+                fk_bml_defer = sv_defer;
+                if (!loaded && fk_bml_need_n > 0 && !fk_bml_floor_busy && tries < 24) {
+                    while (fk_dg_n > dn0) { fk_dg_n = fk_dg_n - 1; fk_dg_row_free(&fk_dg_rows[fk_dg_n]); }
+                    tries = tries + 1;
+                    if (fk_bml_floor_lower_needs() > 0) { continue; }
+                }
+                fk_bml_need_n = 0;
+                if (!loaded) {
+                    stopped = fk_stopped_record("unrunnable", "the unit could not be read");
+                    root = -1;
+                } else {
+                    fk_cell_rows_keep(root, db, dn0, fk_dg_n);
+                }
+            } else {
+                fk_bml_defer = sv_defer;
+                fk_cell_rows_replay(root);
+            }
+            break;
+        }
+        if (root >= 0) {
+            if (fk_cd_unrunnable[root]) {
+                stopped = fk_stopped_record("unrunnable", "the unit is not a program that reads whole (unbalanced, truncated or an unbound name)");
+            } else if (check_only) {
+                value = fk_nothing;   /* loaded and read; nothing runs */
+            } else {
+                long long fp = fk_vsp, order_n = 0, k, m;
+                long long *order;
+                fk_vp(argw);
+                fk_cell_deadline_ms = one_deadline;
+                fk_cell_root_path = path;
+                /* the libraries this call loaded run once, in the order their text stands */
+                order = (long long *)malloc((unsigned long)(fk_cd_win_n[root] + 1) * 8);
+                if (order == 0) { fk_die("cell_run: out of memory"); }
+                k = 0;
+                while (k < fk_cd_win_n[root]) {
+                    m = fk_cd_win[root][k];
+                    if (m != fk_cell_eff_of(root) && !fk_cd_ran[m]) {
+                        long long j = order_n;
+                        while (j > 0 && fk_src_dep_text_off[order[j - 1]] > fk_src_dep_text_off[m]) { order[j] = order[j - 1]; j = j - 1; }
+                        order[j] = m;
+                        order_n = order_n + 1;
+                    }
+                    k = k + 1;
+                }
+                k = 0;
+                while (k < order_n && how == 0) {
+                    m = order[k];
+                    fk_cd_ran[m] = 1;
+                    if (fk_cd_framed[m] >= 0) { fk_cell_walk_guarded(fk_cd_framed[m], fp, &how); }
+                    k = k + 1;
+                }
+                free(order);
+                if (how == 0) {
+                    long long eff = fk_cell_eff_of(root);
+                    if (eff >= 0) {
+                        fk_cell_reset_lets(fk_cd_id[eff]);
+                        value = fk_cell_walk_guarded(fk_cd_framed[eff], fp, &how);
+                    } else {
+                        value = 0;
+                    }
+                }
+                fk_cell_deadline_ms = sv_deadline;
+                fk_cell_root_path = sv_root_path;
+                if (how != 0) {
+                    value = fk_nothing;
+                    stopped = fk_stopped_record(how == 2 ? "deadline" : "stop", how == 2 ? "deadline: the unit ran past its budget and was ended" : fk_stop_said);
+                }
+                fk_vsp = fp;
+            }
+        }
+    } else {
+        stopped = fk_stopped_record("refused", refusal);
+    }
+    /* the answer is built from the sinks, which then give way to the caller's */
+    out_w = fk_sbuf(fk_sink_buf != 0 ? fk_sink_buf : "", fk_sink_n);
+    err_w = fk_sbuf(fk_err_buf != 0 ? fk_err_buf : "", fk_err_n);
+    {
+        /* a spawned fkwu exits 1 when its compile counted an error: the same count, read off the rows */
+        long long g = 0;
+        while (g < fk_dg_n) {
+            if (fk_dg_rows[g].observed != 0 && (fk_cstr_eq(fk_dg_rows[g].observed, "compile-error") || fk_cstr_eq(fk_dg_rows[g].observed, "binding-missing"))) { errors = errors + 1; }
+            g = g + 1;
+        }
+    }
+    {
+        long long g = fk_dg_n;
+        while (g > 0) {
+            g = g - 1;
+            diag_w = fk_cons_val(fk_dg_record(&fk_dg_rows[g]), diag_w);
+        }
+    }
+    stopped_w = stopped;
+    {
+        long long g = 0;
+        while (g < fk_dg_n) { fk_dg_row_free(&fk_dg_rows[g]); g = g + 1; }
+        free(fk_dg_rows);
+        free(fk_sink_buf);
+        free(fk_err_buf);
+        free(fk_in_buf);
+    }
+    if (fk_dg_cur_live) { fk_dg_row_free(&fk_dg_cur); }
+    fk_err_buf = sv_err; fk_err_n = sv_err_n; fk_err_cap = sv_err_cap;
+    fk_sink_buf = sv_buf; fk_sink_n = sv_n; fk_sink_cap = sv_cap; fk_sink_on = sv_on;
+    fk_dg_rows = sv_rows; fk_dg_n = sv_dn; fk_dg_cap = sv_dcap; fk_cell_diag_on = sv_diag;
+    fk_dg_cur = sv_cur; fk_dg_cur_live = sv_cur_live;
+    fk_in_buf = sv_in; fk_in_n = sv_in_n; fk_in_pos = sv_in_pos; fk_cell_in_on = sv_in_on;
+    fk_cell_deadline_ms = sv_deadline;
+    fk_vsp = vsp0;
+    r = fk_cr_new();
+    fk_cr_put(r, "value", value);
+    fk_cr_put(r, "out", out_w);
+    fk_cr_put(r, "err", err_w);
+    fk_cr_put(r, "diag", diag_w);
+    fk_cr_put(r, "stopped", stopped_w);
+    fk_cr_put(r, "errors", errors << 1);
+    fk_cr_put(r, "resident", (long long)(resident ? 1 : 0) << 1);
+    fk_cr_put(r, "ms", (fk_now_ms() - wall0) << 1);
+    fk_cr_put(r, "cpu_us", (fk_cell_cpu_us() - cpu0) << 1);
+    return fk_rbox(r);
+}
+#endif
 static int fk_run_src(const char *path, long long arg) {
     char fkb_path[FK_PATH_CAP];
     char sym_path[FK_PATH_CAP];
@@ -25611,7 +27018,7 @@ static int fk_run_src(const char *path, long long arg) {
         fk_heat_report();
         return 1;
     }
-    fk_bml_child_close();
+    fk_walk_begins();
     fk_pv_root(fk_walk(fk_fn[0], 0));
     fk_heat_report();
     return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
@@ -25807,7 +27214,7 @@ static int fk_run_feval(const char *path) {
         fk_heat_report();
         return 1;
     }
-    fk_bml_child_close();
+    fk_walk_begins();
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
@@ -25998,9 +27405,39 @@ static char *fk_bml_packet_body(const char *owner, const char *packet, long long
     *out_len = n - at;
     return body;
 }
+/* A memo names ONE owner path (its P row): the same unit asked for under another spelling (absolute here, relative there, or through a
+ * symlinked checkout) is a different lowering, because the preludes it carries are resolved from the owner's directory. Two spellings
+ * of one unit used to take turns overwriting each other's memo, every load a relowering; and a begin-again that must find the memo the
+ * floor just wrote, never settled (form-cli-landing-band, claim 131072: "did not settle in 256 rounds"). A spelling whose primary memo
+ * belongs to another owner keeps its own beside it, <unit>.lowfk.s<digest of the spelling>; a read tries the primary, then its own. */
+static void fk_bml_memo_name(const char *path, int sidecar, char *out) {
+    if (sidecar) sprintf(out, "%s.lowfk.s%016llx", path, fk_bytes_fnv1a(path, fk_path_len(path)));
+    else sprintf(out, "%s.lowfk", path);
+}
+/* 1 the memo's P row names this path, 0 it names another, -1 there is no memo to read */
+static int fk_bml_memo_owner_is(const char *memo, const char *path) {
+    char head[4400];
+    long long got = 0, want = fk_path_len(path), at = 7;
+    int fd = open(memo, O_RDONLY);
+    if (fd < 0) return -1;
+    got = read(fd, head, sizeof(head) - 1);
+    close(fd);
+    if (got < 28 || memcmp(head, "fklow2\nP ", 9)) return -1;
+    /* "fklow2\n" "P " 16 hex " " count ":" path "\n" */
+    at = 7 + 2 + 16 + 1;
+    {
+        long long count = 0;
+        while (at < got && head[at] >= '0' && head[at] <= '9') { count = count * 10 + head[at] - '0'; at++; }
+        if (at >= got || head[at] != ':') return -1;
+        at++;
+        if (count != want || at + count > got) return 0;
+        return memcmp(head + at, path, (unsigned long)count) == 0 ? 1 : 0;
+    }
+}
 static void fk_bml_low_memo_write(const char *path, const char *packet, long long n) {
-    char memo[4300], temporary[4400], footer[32];
-    sprintf(memo, "%s.lowfk", path);
+    char memo[4400], primary[4400], temporary[4500], footer[32];
+    fk_bml_memo_name(path, 0, primary);
+    fk_bml_memo_name(path, fk_bml_memo_owner_is(primary, path) == 0 ? 1 : 0, memo);
     sprintf(temporary, "%s.tmp.%lld", memo, (long long)getpid());
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) return;
@@ -26016,183 +27453,353 @@ static void fk_bml_low_memo_write(const char *path, const char *packet, long lon
     if (close(fd) != 0) complete = 0;
     if (!complete || rename(temporary, memo) != 0) unlink(temporary);
 }
-static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len);
+static void fk_bml_bootstrap(const char *first);
+static void fk_bml_need_add(const char *path) {
+    long long k = 0;
+    while (k < fk_bml_need_n) {
+        if (fk_cstr_eq(fk_bml_need[k], path)) return;
+        k = k + 1;
+    }
+    if (fk_bml_need_n + 1 > fk_bml_need_cap) {
+        long long nc = fk_bml_need_cap > 0 ? fk_bml_need_cap * 2 : 32;
+        fk_bml_need = (char **)realloc(fk_bml_need, (unsigned long)nc * sizeof(char *));
+        if (fk_bml_need == 0) fk_die("fk_bml_need_add: out of memory");
+        fk_bml_need_cap = nc;
+    }
+    long long len = fk_path_len(path);
+    char *copy = (char *)malloc((unsigned long)len + 1);
+    if (copy == 0) fk_die("fk_bml_need_add: out of memory");
+    memcpy(copy, path, (unsigned long)len + 1);
+    fk_bml_need[fk_bml_need_n] = copy;
+    fk_bml_need_n = fk_bml_need_n + 1;
+}
+static int fk_bml_bad_has(const char *path) {
+    long long k = 0;
+    while (k < fk_bml_bad_n) {
+        if (fk_cstr_eq(fk_bml_bad[k], path)) return 1;
+        k = k + 1;
+    }
+    return 0;
+}
+static void fk_bml_bad_add(const char *path) {
+    if (fk_bml_bad_has(path)) return;
+    if (fk_bml_bad_n + 1 > fk_bml_bad_cap) {
+        long long nc = fk_bml_bad_cap > 0 ? fk_bml_bad_cap * 2 : 16;
+        fk_bml_bad = (char **)realloc(fk_bml_bad, (unsigned long)nc * sizeof(char *));
+        if (fk_bml_bad == 0) fk_die("fk_bml_bad_add: out of memory");
+        fk_bml_bad_cap = nc;
+    }
+    long long len = fk_path_len(path);
+    char *copy = (char *)malloc((unsigned long)len + 1);
+    if (copy == 0) fk_die("fk_bml_bad_add: out of memory");
+    memcpy(copy, path, (unsigned long)len + 1);
+    fk_bml_bad[fk_bml_bad_n] = copy;
+    fk_bml_bad_n = fk_bml_bad_n + 1;
+}
+/* A lowering is a memo read. The memo is valid when its seal holds and every file it observed still has the bytes it
+ * saw; any other state is a miss, and a miss is answered by the floor compiler in THIS process:
+ *   - while the cell door loads a cell (fk_bml_defer) the miss is recorded and an empty unit comes back, so the load
+ *     goes on to find the rest of the frontier and the door lowers them all in one floor call;
+ *   - while the program is still being loaded (fk_load_phase) the half-built arena is abandoned: fk_bml_bootstrap
+ *     lowers what is missing and begins the same command again, which then finds only memos;
+ *   - once a program walks, a miss is a refusal naming the way out (nothing is collecting that could be restarted). */
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len) {
     if (!fk_home_loaded) fk_home_load(bml_path);
-    char memo[4300];
+    char memo[4400];
     long long n = 0;
     unsigned long long seal;
-    sprintf(memo, "%s.lowfk", bml_path);
-    char *packet = fk_read_whole_file(memo, &n), *body = 0;
-    if (packet) {
-        if (n >= 25 && !memcmp(packet + n - 25, "\nfkend2 ", 8) && packet[n - 1] == '\n' &&
-            fk_hex16_parse(packet + n - 17, &seal) && seal == fk_bytes_fnv1a(packet, n - 25))
-            body = fk_bml_packet_body(bml_path, packet, n - 25, out_len);
-        free(packet);
-        if (body) return body;
-    }
-    packet = fk_bml_lower_spawn(bml_path, &n);
-    if (!packet) return 0;
-    body = fk_bml_packet_body(bml_path, packet, n, out_len);
-    if (body) fk_bml_low_memo_write(bml_path, packet, n);
-    else fk_diag_path("error", bml_path, "BML source observations changed or lowering packet is incomplete");
-    free(packet);
-    return body;
-}
-/* The runner's lowering child: opened on the first memo miss and kept for
- * every later unit, so the floor compiler reads each file of a closure once
- * per runner, not once per unit. It closes before the program walks. */
-static long long fk_bml_child_pid = -1;
-static int fk_bml_child_in = -1;
-static int fk_bml_child_out = -1;
-static void fk_bml_child_close(void) {
-#if !defined(_WIN32)
-    if (fk_bml_child_pid < 0) {
-        return;
-    }
-    close(fk_bml_child_in);
-    char sink[4096];
-    while (read(fk_bml_child_out, sink, sizeof(sink)) > 0) {
-    }
-    close(fk_bml_child_out);
-    int st = 0;
-    waitpid((int)fk_bml_child_pid, &st, 0);
-    fk_bml_child_pid = -1;
-    fk_bml_child_in = -1;
-    fk_bml_child_out = -1;
-#endif
-}
-#if !defined(_WIN32)
-static int fk_bml_child_open(const char *bml_path) {
-    int in_fds[2];
-    int out_fds[2];
-    if (pipe(in_fds) != 0) {
-        fk_diag_path("error", bml_path, "bml lowering could not open pipes");
-        return 0;
-    }
-    if (pipe(out_fds) != 0) {
-        close(in_fds[0]);
-        close(in_fds[1]);
-        fk_diag_path("error", bml_path, "bml lowering could not open pipes");
-        return 0;
-    }
-    long long pid = fork();
-    if (pid < 0) {
-        close(in_fds[0]);
-        close(in_fds[1]);
-        close(out_fds[0]);
-        close(out_fds[1]);
-        fk_diag_path("error", bml_path, "bml lowering could not fork");
-        return 0;
-    }
-    if (pid == 0) {
-        close(in_fds[1]);
-        close(out_fds[0]);
-        dup2(in_fds[0], 0);
-        dup2(out_fds[1], 1);
-        close(in_fds[0]);
-        close(out_fds[1]);
-        char *child_argv[3];
-        child_argv[0] = (char *)fk_self_path;
-        child_argv[1] = (char *)fk_bml_floor_path();
-        child_argv[2] = 0;
-        execvp(fk_self_path, child_argv);
-        _exit(127);
-    }
-    close(in_fds[0]);
-    close(out_fds[1]);
-    fk_bml_child_pid = pid;
-    fk_bml_child_in = in_fds[1];
-    fk_bml_child_out = out_fds[0];
-    return 1;
-}
-/* One request to the child and its answer, read up to the reply terminator
- * (the sentinel and print_str's newline). Answers the owned buffer and the
- * sentinel offset, or 0 when the child ended without a closed reply. */
-static char *fk_bml_child_ask(const char *bml_path, long long *got_out, long long *at_out) {
-    char line[FK_PATH_CAP * 2 + 32];
-    int m = sprintf(line, "%s\n@memo\n%s\n", bml_path, fk_home_path);
-    long long off = 0;
-    void (*old_pipe)(int) = signal(SIGPIPE, SIG_IGN);
-    while (off < m) {
-        long long put = write(fk_bml_child_in, line + off, (unsigned long)(m - off));
-        if (put < 0 && errno == EINTR) continue;
-        if (put <= 0) break;
-        off = off + put;
-    }
-    signal(SIGPIPE, old_pipe);
-    const char *term = "\n@bml-floor-lowered\n\n";
-    long long tn = 21;
-    long long cap = 65536;
-    long long got = 0;
-    long long scan = 0;
-    char *buf = malloc((unsigned long)cap);
-    if (buf == 0) {
-        fk_die("fk_bml_lower_to_mem: out of memory");
-    }
-    for (;;) {
-        while (scan + tn <= got) {
-            if (buf[scan] == '\n' && memcmp(buf + scan, term, (unsigned long)tn) == 0) {
-                buf[got] = 0;
-                *got_out = got;
-                *at_out = scan;
-                return buf;
-            }
-            scan = scan + 1;
+    int which = 0;
+    while (which < 2) {
+        fk_bml_memo_name(bml_path, which, memo);
+        which = which + 1;
+        char *packet = fk_read_whole_file(memo, &n), *body = 0;
+        if (packet) {
+            if (n >= 25 && !memcmp(packet + n - 25, "\nfkend2 ", 8) && packet[n - 1] == '\n' &&
+                fk_hex16_parse(packet + n - 17, &seal) && seal == fk_bytes_fnv1a(packet, n - 25))
+                body = fk_bml_packet_body(bml_path, packet, n - 25, out_len);
+            free(packet);
+            if (body) return body;
         }
-        if (got + 4096 >= cap) {
-            cap = cap * 2;
-            char *grown = realloc(buf, (unsigned long)cap);
-            if (grown == 0) {
-                fk_die("fk_bml_lower_to_mem: out of memory growing");
-            }
-            buf = grown;
-        }
-        long long r = read(fk_bml_child_out, buf + got, 4096);
-        if (r < 0 && errno == EINTR) continue;
-        if (r <= 0) {
-            buf[got] = 0;
-            *got_out = got;
-            *at_out = -1;
-            return buf;
-        }
-        got = got + r;
     }
-}
-#endif
-static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
 #if defined(_WIN32)
-    fk_diag_path("error", bml_path,
-                 "bml lowering via self-spawn is not wired on this platform yet");
+    fk_diag_path("error", bml_path, "bml lowering is not wired on this platform yet");
     return 0;
 #else
-    int attempt = 0;
-    while (attempt < 2) {
-        if (fk_bml_child_pid < 0 && !fk_bml_child_open(bml_path)) {
-            return 0;
-        }
-        long long got = 0, at = -1;
-        char *buf = fk_bml_child_ask(bml_path, &got, &at);
-        if (at >= 0) {
-            buf[at] = '\n';
-            buf[at + 1] = 0;
-            *out_len = at + 1;
-            return buf;
-        }
-        int stale = got >= 16 && memcmp(buf, "@bml-floor-stale", 16) == 0;
-        free(buf);
-        fk_bml_child_close();
-        if (!stale) {
-            fk_diag_path("error", bml_path,
-                    "bml lowering child failed; run form/form-stdlib/bml-floor-compile.fk by hand to see its diagnostics");
-            return 0;
-        }
-        attempt = attempt + 1;
+    if (fk_bml_defer) {
+        if (fk_bml_bad_has(bml_path)) { fk_bml_bad_hit = 1; } else { fk_bml_need_add(bml_path); }
+        char *empty = (char *)malloc(2);
+        if (empty == 0) fk_die("fk_bml_lower_to_mem: out of memory");
+        empty[0] = '\n'; empty[1] = 0;
+        *out_len = 1;
+        return empty;
     }
-    fk_diag_path("error", bml_path, "bml lowering child found its compiler changed twice in a row");
+    if (fk_load_phase && !fk_bml_floor_busy) {
+        fk_bml_bootstrap(bml_path);   /* does not return when it could begin the command again */
+        return 0;
+    }
+    fk_diag_path("error", bml_path, fk_bml_floor_busy
+        ? "bml lowering memo is missing while the floor compiler itself loads; its closure must be plain .fk"
+        : "bml lowering memo is missing or stale and the program is already running; lower it first (./fkwu --check <file>)");
     return 0;
 #endif
 }
+#if !defined(_WIN32)
+/* ── THE BML FLOOR COMPILER, A CELL OF THIS PROCESS ─────────────────────────────────────────────────────────────────
+ * The seed used to begin a resident `fkwu form/form-stdlib/bml-floor-compile.fk` over two pipes and read every lowered
+ * .bml back as text. The floor compiler is a Form program (a plain-.fk closure of 23 units, no .bml among them, which
+ * is what lets the seed reach it before it can lower anything), so it is run the way any cell is: the cell door loads it
+ * once and keeps it resident, the requests are its stdin (a source path, "@memo", the home registry path, three lines
+ * each), and the answer is the door's `out`: the lowered packet, then the floor's sentinel, once per request. One floor
+ * call serves a whole frontier of requests, so its pin of the compiler's own sources and its file reads are paid once
+ * per call, as the resident child paid them once per runner. Nothing is begun: no pipe, no fork, no waitpid.
+ *
+ * What it replaces had one more shape: a lowering child could be killed, could die with 127 when the seed's path
+ * did not resolve from the working directory, and could answer "stale" when its compiler moved; the cell cannot be
+ * orphaned, and a compiler that moved between two calls is a fresh pin of the next call.
+ *
+ * Shrink path (AGENTS.md "Ground the kernel first"): the lowering is Form's; the seed keeps only the order of
+ * things it cannot yet leave to Form -- find the memo, call the floor cell for the misses, write the memo. When the
+ * collector (fk_src_collect_*) is Form's, the miss list and the begin-again below are the loader's own recursion and this
+ * block, the defer flag and the re-entry leave with it. */
+static long long fk_cr_key_find(long long recw, const char *key) {
+    long long r = fk_ridx(recw), k = 0, kn = fk_cstrlen(key);
+    if (r < 1 || r > fk_rp) return fk_nothing;
+    while (k < fk_rcnt[r]) {
+        long long si = fk_rkey[r][k];
+        if (si >= 0 && FK_SOK(si) && FK_SLEN(si) == kn && memcmp(FK_SBYTES(si), key, (unsigned long)kn) == 0) return fk_rval[r][k];
+        k = k + 1;
+    }
+    return fk_nothing;
+}
+/* a Form string value's bytes, copied out (owned), with its length; 0 when the word is not a string */
+static char *fk_str_copy_out(long long w, long long *len) {
+    long long si = fk_stri(w);
+    long long n;
+    char *q;
+    if (si < 0 || !FK_SOK(si)) return 0;
+    n = FK_SLEN(si);
+    q = (char *)malloc((unsigned long)n + 1);
+    if (q == 0) fk_die("fk_str_copy_out: out of memory");
+    memcpy(q, FK_SBYTES(si), (unsigned long)n);
+    q[n] = 0;
+    *len = n;
+    return q;
+}
+static char fk_floor_warn[1024];   /* the first diagnostic row the last floor call voiced, or "" */
+static char fk_floor_stop[1024];   /* the line the last floor call stopped with, or "" */
+/* One floor call for paths[from..n): answers, in `out`, the floor's text (the packets, each closed by the sentinel). A floor that
+ * stopped or ended early answers fewer; why is held in fk_floor_warn / fk_floor_stop for the caller to voice on the right unit. */
+static char *fk_bml_floor_call(char **paths, long long from, long long n, long long *out_len, long long *stopped_msg_shown) {
+    long long list = 1, i = n, rec, out_w, stopped_w, dg;
+    char *out;
+    char floor[FK_PATH_CAP];
+    fk_cstr_copy(floor, fk_bml_floor_path(), FK_PATH_CAP);
+    while (i > from) {
+        i = i - 1;
+        list = fk_cons_val(fk_sbuf(fk_home_path, fk_cstrlen(fk_home_path)), list);
+        list = fk_cons_val(fk_sbuf("@memo", 5), list);
+        list = fk_cons_val(fk_sbuf(paths[i], fk_cstrlen(paths[i])), list);
+    }
+    fk_bml_floor_busy = fk_bml_floor_busy + 1;
+    rec = fk_cell_run_door(fk_sbuf(floor, fk_cstrlen(floor)), 0, fk_nothing, list);
+    fk_bml_floor_busy = fk_bml_floor_busy - 1;
+    out_w = fk_cr_key_find(rec, "out");
+    out = fk_str_copy_out(out_w, out_len);
+    if (out == 0) { out = (char *)malloc(1); out[0] = 0; *out_len = 0; }
+    /* the floor's own diagnostics come out as the child's stderr did, one line each: here they are only held (the caller knows which
+     * request of the batch they belong to: the one the floor was on when it spoke or stopped) */
+    fk_floor_warn[0] = 0;
+    fk_floor_stop[0] = 0;
+    dg = fk_cr_key_find(rec, "diag");
+    dg = (dg & 1) ? dg >> 1 : 0;
+    while (dg >= 1 && FK_POK(dg)) {
+        long long row = FK_HH(dg), dl = 0;
+        char *observed = fk_str_copy_out(fk_cr_key_find(row, "observed"), &dl);
+        char *detail = fk_str_copy_out(fk_cr_key_find(row, "detail"), &dl);
+        if (fk_floor_warn[0] == 0) {
+            sprintf(fk_floor_warn, "%.900s", detail != 0 && detail[0] != 0 ? detail : (observed != 0 ? observed : "the floor compiler voiced a diagnostic"));
+        }
+        free(observed); free(detail);
+        dg = FK_HNEXT(dg);
+    }
+    stopped_w = fk_cr_key_find(rec, "stopped");
+    if (stopped_w != fk_nothing) {
+        /* a floor that stopped is not asked again as it stands: its readers were left mid-read, and the next unit would meet the
+         * same refusal (a unit with an unterminated string made every unit after it "unterminated" in one process). It is set
+         * aside and read again, whole, by the next call. */
+        long long fd = fk_cell_dep_find_raw(floor);
+        if (fd >= 0) {
+            long long wk = 0;
+            while (wk < fk_cd_win_n[fd]) { fk_cell_dep_setaside(fk_cd_win[fd][wk]); wk = wk + 1; }
+            fk_cell_dep_setaside(fd);
+        }
+        long long ml = 0;
+        char *msg = fk_str_copy_out(fk_cr_key_find(stopped_w, "message"), &ml);
+        char *kind = fk_str_copy_out(fk_cr_key_find(stopped_w, "kind"), &ml);
+        sprintf(fk_floor_stop, "bml floor compiler %s: %.700s", kind != 0 ? kind : "stopped", msg != 0 ? msg : "");
+        free(msg); free(kind);
+    }
+    (void)stopped_msg_shown;
+    return out;
+}
+/* Lower every path in the miss list with the floor cell and write each memo. Answers how many memos stand now. The
+ * list is emptied. A path the floor cannot lower is voiced by name and left without a memo. */
+static long long fk_bml_floor_lower_needs(void) {
+    long long n = fk_bml_need_n, i = 0, done = 0;
+    char **paths;
+    if (n <= 0) return 0;
+    paths = (char **)malloc((unsigned long)n * sizeof(char *));
+    if (paths == 0) fk_die("fk_bml_floor_lower_needs: out of memory");
+    while (i < n) { paths[i] = fk_bml_need[i]; i = i + 1; }
+    fk_bml_need_n = 0;   /* the floor's own load starts from an empty list; the paths are held here */
+    if (!fk_home_loaded) fk_home_load(paths[0]);
+    i = 0;
+    while (i < n) {
+        long long out_len = 0, at = 0, start = 0, answered = 0, shown = 0;
+        /* sixteen requests to a floor call: the pin of the compiler's own sources is paid once for sixteen units, and
+         * each sixteen is on disk as memos before the next begins, so a long cold run is durable and can be watched */
+        long long end = i + 16 < n ? i + 16 : n;
+        char *out = fk_bml_floor_call(paths, i, end, &out_len, &shown);
+        while (i + answered < end) {
+            const char *term = "\n@bml-floor-lowered\n\n";
+            long long found = -1;
+            at = start;
+            while (at + 21 <= out_len) {
+                if (out[at] == '\n' && memcmp(out + at, term, 21) == 0) { found = at; break; }
+                at = at + 1;
+            }
+            if (found < 0) break;
+            {
+                const char *bml = paths[i + answered];
+                long long plen = found + 1 - start, blen = 0;
+                char *packet = (char *)malloc((unsigned long)plen + 1);
+                char *body;
+                if (packet == 0) fk_die("fk_bml_floor_lower_needs: out of memory");
+                memcpy(packet, out + start, (unsigned long)plen);
+                packet[plen] = 0;
+                body = fk_bml_packet_body(bml, packet, plen, &blen);
+                if (body) {
+                    fk_bml_low_memo_write(bml, packet, plen);
+                    free(body);
+                    done = done + 1;
+                } else {
+                    fk_diag_path("error", bml, "BML source observations changed or lowering packet is incomplete");
+                    fk_bml_bad_add(bml);
+                }
+                free(packet);
+            }
+            answered = answered + 1;
+            start = found + 21;
+        }
+        {
+            /* what the floor said belongs to the request it was on: the one after the last it closed, when it stopped */
+            const char *who = (i + answered < end) ? paths[i + answered] : paths[i];
+            if (fk_floor_stop[0] && answered > 0) {
+                /* it stopped on a later request: that unit is asked again by itself next, and said then */
+            } else {
+                if (fk_floor_warn[0]) fk_diag_path("warning", who, fk_floor_warn);
+                if (fk_floor_stop[0]) fk_diag_path("error", who, fk_floor_stop);
+                shown = fk_floor_stop[0] != 0;
+            }
+        }
+        if (answered == 0) {
+            /* the floor ended before it closed the first request left: say which, and go on to the next */
+            int stale = out_len >= 16 && memcmp(out, "@bml-floor-stale", 16) == 0;
+            fk_bml_bad_add(paths[i]);   /* said once, and not asked again by this process */
+            if (!shown) {
+                fk_diag_path("error", paths[i], stale
+                    ? "bml floor compiler found its own sources changed while it lowered"
+                    : "bml floor compiler gave no lowering for this unit; run it by hand (./fkwu form/form-stdlib/bml-floor-compile.fk) to see its diagnostics");
+            }
+            answered = 1;
+        }
+        free(out);
+        i = i + answered;
+    }
+    i = 0;
+    while (i < n) { free(paths[i]); i = i + 1; }
+    free(paths);
+    return done;
+}
+/* A memo was missing while the program was still loading. Its collection is abandoned (the process is about to begin
+ * again, so what the arena holds is of no use): the floor compiler is loaded as a cell beyond it, the missing memos are
+ * lowered, and the same closure is collected once more, in cell mode and without parsing, to meet the memos that lowering
+ * made reachable (a .bml named by a .bml). When a collection finds no miss left the process begins its own command again
+ * (execv of itself: the same pid, no child) and finds a warm tree. The begin-again carries a round count in the
+ * environment so a tree whose memos cannot hold (a read-only directory) is refused after three rounds, not looped. */
+extern int setenv(const char *, const char *, int);
+extern int unsetenv(const char *);
+extern int execv(const char *, char *const *);
+extern char *getenv(const char *);
+static char **fk_run_argv;
+static void fk_bml_scan(const char *root_path) {
+    long long d0 = fk_src_dep_count, slen0 = fk_slen, spos0 = fk_spos, k;
+    long long ne0 = fk_nerr, nw0 = fk_nwarn, nes0 = fk_nerr_seen, nws0 = fk_nwarn_seen;
+    int trunc0 = fk_src_truncated, unr0 = fk_src_unrunnable, ok;
+    if (!fk_cell_base_set) {
+        fk_cell_base_dep = fk_src_dep_count;
+        fk_cell_base_set = 1;
+    }
+    fk_cell_epoch = fk_cell_epoch + 1;
+    fk_cell_load_base = fk_src_dep_count;
+    fk_cell_collect = 1;
+    if (fk_unit_lowers(root_path)) {
+        long long ln = 0, mt = fk_path_mtime_raw(root_path);
+        char *low = mt > 0 ? fk_bml_lower_to_mem(root_path, &ln) : 0;
+        if (low == 0) { ok = 0; }
+        else { ok = fk_src_collect_bytes(root_path, low, ln, mt, ln, -1); }
+    } else {
+        ok = fk_src_collect_file(root_path, -1);
+    }
+    (void)ok;
+    fk_cell_collect = 0;
+    k = d0;
+    while (k < fk_src_dep_count) { free(fk_cd_win[k]); fk_cd_win[k] = 0; k = k + 1; }
+    fk_srcseg_drop_from(slen0);
+    fk_src_dep_count = d0;
+    fk_slen = slen0;
+    fk_srctext[fk_slen] = 0;
+    fk_spos = spos0; fk_nerr = ne0; fk_nwarn = nw0; fk_nerr_seen = nes0; fk_nwarn_seen = nws0;
+    fk_src_truncated = trunc0; fk_src_unrunnable = unr0;
+}
+static void fk_bml_bootstrap(const char *first) {
+    long long rounds = 0;
+    if (fk_bml_round >= 3) {
+        fk_diag_path("error", first, "bml lowering memo is still missing after three begin-agains; is the directory writable?");
+        return;
+    }
+    if (fk_boot_root[0] == 0) fk_cstr_copy(fk_boot_root, first, FK_PATH_CAP);
+    fk_bml_need_add(first);
+    while (fk_bml_need_n > 0 && rounds < 256) {
+        long long made;
+        fk_bml_defer = 0;
+        made = fk_bml_floor_lower_needs();
+        (void)made;   /* a unit the floor could not lower is voiced by name, set aside, and the rest go on */
+        fk_bml_defer = 1;
+        fk_bml_scan(fk_boot_root);
+        rounds = rounds + 1;
+    }
+    fk_bml_defer = 0;
+    if (fk_bml_need_n > 0) {
+        fk_diag_path("error", first, "bml lowering did not settle in 256 rounds");
+        return;
+    }
+    /* every unit that could be lowered is; one the floor refused fails this load, as the child's refusal did */
+    if (fk_bml_bad_n > 0) { return; }
+    {
+        char round[2];
+        round[0] = (char)('0' + fk_bml_round + 1); round[1] = 0;
+        setenv("FK_BML_ROUND", round, 1);
+    }
+    if (fk_run_argv != 0) {
+        execvp(fk_self_path, (char *const *)fk_run_argv);
+        fk_diag_path("error", first, "bml lowering is done but the command could not begin again");
+    }
+}
+#else
+static long long fk_bml_floor_lower_needs(void) { return 0; }
+static void fk_bml_bootstrap(const char *first) { (void)first; }
+#endif
 /* run a .bml as itself, filelessly: warm runs load <x>.bml.fkb through the
  * SAME content-checked door the .fk lane uses — the identity is computed
  * from a fresh in-memory lowering every run, so a same-second edit, an
@@ -26268,7 +27875,7 @@ static int fk_run_bml(const char *path, long long arg) {
         fk_heat_report();
         return 1;
     }
-    fk_bml_child_close();
+    fk_walk_begins();
     fk_pv_root(fk_walk(fk_fn[0], 0));
     fk_heat_report();
     return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
@@ -26304,7 +27911,7 @@ static int fk_run_closure(const char *path, const char *out) {
     } else if (!fk_src_load_unit(path, hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         return 2;
     }
-    fk_bml_child_close();
+    fk_walk_begins();
     if (fk_path_len(out) >= FK_PATH_CAP) {
         fk_diag_path("error", out, "closure output path exceeds buffer");
         return 2;
@@ -26360,6 +27967,18 @@ static int fk_run(int argc, char **argv) {
     if (argv[0] && argv[0][0]) {
         fk_self_path = argv[0];
     }
+#if !defined(_WIN32)
+    {
+        /* the begin-again after lowering (fk_bml_bootstrap) leaves its round count in the environment; this process
+         * takes it and clears it, so neither the program nor its children ever see it */
+        const char *round = getenv("FK_BML_ROUND");
+        if (round != 0 && round[0] >= '0' && round[0] <= '9') fk_bml_round = round[0] - '0';
+        unsetenv("FK_BML_ROUND");
+        if (argc >= 2 && fk_path_len(argv[argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH ? 2 : 1]) < FK_PATH_CAP) {
+            fk_cstr_copy(fk_boot_root, argv[argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH ? 2 : 1], FK_PATH_CAP);
+        }
+    }
+#endif
     /* --check <unit>: compile only (fk_check_only, above fk_run_src) */
     if (argc >= 3 && fk_cstr_eq(argv[1], "--check")) {
         fk_check_only = 1;
