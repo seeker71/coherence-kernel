@@ -177,9 +177,61 @@ section [form.bml] {
    let u = qpr-ulp-go(a, b, 0, n, 0, 0);
    print_str("[q38-prefill] parallel rmsnorm vs attestant, n=" ++ n.str() ++ ": rc " ++ eb.str() ++ ", " ++ u[0].str() ++ " of " ++ n.str() ++ " words differ, widest gap " ++ u[1].str() ++ " ulp");
   }
+  // the layer-major span blocks at the prompt's own length: each kind three times in one batch; bytes are the weights a block reads once
+  def qpr-spans(ctx, ids) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lays = ctx[3];
+   let sts = q38-new-state(geo);
+   let r = q38-prefill-span-batched(ps, bs, geo, lays, sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let n = len(ids);
+   let lin = nth(lays, 0);
+   let lf = qpr-first-full(0, geo);
+   let full = nth(lays, lf);
+   let ffn-bytes = qpr-tvbytes(lin[2]) + qpr-tvbytes(lin[3]) + qpr-tvbytes(lin[4]);
+   let lin-bytes = qpr-tvbytes(lin[5]) + qpr-tvbytes(lin[7]) + qpr-tvbytes(lin[8]) + qpr-tvbytes(lin[12]) + qpr-tvbytes(lin[13]);
+   let full-bytes = qpr-tvbytes(full[5]) + qpr-tvbytes(full[6]) + qpr-tvbytes(full[7]) + qpr-tvbytes(full[10]);
+   let a = qpr-block("SPAN ffn at " ++ n.str() ++ " tokens", 3, ffn-bytes, () => q38-ffn-span(ps, bs, geo, lin, n));
+   let b = qpr-block("SPAN linear-attn at " ++ n.str() ++ " tokens", 3, lin-bytes, () => q38-linear-attn-span(ps, bs, geo, lin, nth(sts, 0), n));
+   let c = qpr-block("SPAN full-attn at " ++ n.str() ++ " tokens", 3, full-bytes, () => q38-full-attn-span(ps, bs, geo, full, nth(sts, lf), 0, n));
+   let freed = q38-free-state(sts);
+   1;
+  }
+  // the span norm, old (one thread a token, serial fold) against new (a threadgroup a token), on the real residuals the span left
+  def qpr-span-witness(ctx, ids) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lay = nth(ctx[3], 0);
+   let n = geo[0];
+   let ntok = len(ids);
+   let sts = q38-new-state(geo);
+   let r = q38-prefill-span-batched(ps, bs, geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let oa = metal_buf_alloc(n * ntok * 4);
+   let ob = metal_buf_alloc(n * ntok * 4);
+   let gam = kth-tv-h(lay[0]);
+   let t0 = host_monotonic_ms();
+   metal_batch_concurrent();
+   let ea = qpr-times(8, () => metal_enqueue(ps[33], md-bind16([bs[33], gam, oa], [n, geo[6], ntok], 256, 0, 0, 1), ntok));
+   let sa = metal_sync();
+   let t1 = host_monotonic_ms();
+   metal_batch_concurrent();
+   let eb = qpr-times(8, () => metal_enqueue(ps[q38-rmspar-span-index()], md-bind16([bs[33], gam, ob], [n, geo[6], ntok], 256, 0, 1, 1), ntok));
+   let sb = metal_sync();
+   let t2 = host_monotonic_ms();
+   let a = metal_buf_read(oa, 0, n * ntok * 4);
+   let b = metal_buf_read(ob, 0, n * ntok * 4);
+   let fa = metal_buf_free(oa);
+   let fb = metal_buf_free(ob);
+   let u = qpr-ulp-go(a, b, 0, n * ntok, 0, 0);
+   let freed = q38-free-state(sts);
+   print_str("[q38-prefill] span rmsnorm over " ++ ntok.str() ++ " tokens: one-thread " ++ ((t1 - t0) * 1000 / 8).str() ++ " us each, threadgroup " ++ ((t2 - t1) * 1000 / 8).str() ++ " us each; " ++ u[0].str() ++ " of " ++ (n * ntok).str() ++ " words differ, widest gap " ++ u[1].str() ++ " ulp");
+  }
   def qpr-measure(ctx, ids, span, k, weights) {
    let witness = qpr-rms-witness(ctx, ids);
    let pwit = qpr-par-witness(ctx);
+   let swit = qpr-span-witness(ctx, ids);
    let b1 = qpr-batched(ctx, ids);
    let said1 = qpr-say("batched", 1, span, b1[1], b1[0]);
    let la = metal_live();
@@ -195,6 +247,7 @@ section [form.bml] {
    let said4 = qpr-say("sliced", 2, span, s2[1], s2[0]);
    let seen4 = qpr-delta("sliced", lc, ld, s2[1], span);
    let blocks = qpr-blocks(ctx, ids);
+   let spans = qpr-spans(ctx, ids);
    let split = qpr-split(ctx, ids, k);
    let le = metal_live();
    let d = qpr-decode(ctx, ids, k);
