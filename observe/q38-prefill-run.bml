@@ -228,9 +228,42 @@ section [form.bml] {
    let freed = q38-free-state(sts);
    print_str("[q38-prefill] span rmsnorm over " ++ ntok.str() ++ " tokens: one-thread " ++ ((t1 - t0) * 1000 / 8).str() ++ " us each, threadgroup " ++ ((t2 - t1) * 1000 / 8).str() ++ " us each; " ++ u[0].str() ++ " of " ++ (n * ntok).str() ++ " words differ, widest gap " ++ u[1].str() ++ " ulp");
   }
+  // the batched Q8_0 matmul, old matrix-unit kernel (pipeline 56) against the 64x32-tile kernel (pipeline 62), one FFN gate tensor at the
+  // span's token count, in one batch each: time, rate, and how far apart the two outputs are (largest gap over the largest value)
+  def qpr-fdiff-go(a, b, i, n, maxd, maxa) = i >= n ? [maxd, maxa] : {
+   let fa = ln-f32-decode(ln-u32-le(a, i * 4));
+   let fb = ln-f32-decode(ln-u32-le(b, i * 4));
+   let d = fa > fb ? fa - fb : fb - fa;
+   let aa = fa < 0.0 ? 0.0 - fa : fa;
+   qpr-fdiff-go(a, b, i + 1, n, d > maxd ? d : maxd, aa > maxa ? aa : maxa);
+  };
+  def qpr-mm-ab(ctx, ids) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lay = nth(ctx[3], 0);
+   let tv = lay[2];
+   let rows = kth-tv-r(tv);
+   let cols = kth-tv-c(tv);
+   let ntok = len(ids);
+   let sts = q38-new-state(geo);
+   let r = q38-prefill-span-batched(ps, bs, geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let yb = metal_buf_alloc(rows * ntok * 4);
+   let w = qpr-tvbytes(tv);
+   let gflop = (2 * rows * cols * ntok) / 1000000000;
+   let old = qpr-block("matmul OLD mma32 (" ++ gflop.str() ++ " GFLOP)", 8, w, () => metal_enqueue(ps[56], md-bind16([kth-tv-h(tv), bs[1], bs[14]], [rows, cols, ntok, rows], 256, 0, 1, 1), qmb-mma-groups(rows, ntok)));
+   let new = qpr-block("matmul NEW mm64 (" ++ gflop.str() ++ " GFLOP)", 8, w, () => metal_enqueue(ps[q38-mm64-index()], md-bind16([kth-tv-h(tv), bs[1], yb], [rows, cols, ntok, rows], 128, 0, 1, 1), q38-mm64-groups(rows, ntok)));
+   let a = metal_buf_read(bs[14], 0, rows * ntok * 4);
+   let b = metal_buf_read(yb, 0, rows * ntok * 4);
+   let fy = metal_buf_free(yb);
+   let u = qpr-fdiff-go(a, b, 0, rows * ntok, 0.0, 0.0);
+   let freed = q38-free-state(sts);
+   print_str("[q38-prefill] matmul old vs new outputs: largest gap " ++ u[0].str() ++ " over largest value " ++ u[1].str());
+  }
   def qpr-measure(ctx, ids, span, k, weights) {
    let witness = qpr-rms-witness(ctx, ids);
    let pwit = qpr-par-witness(ctx);
+   let mmab = qpr-mm-ab(ctx, ids);
    let swit = qpr-span-witness(ctx, ids);
    let b1 = qpr-batched(ctx, ids);
    let said1 = qpr-say("batched", 1, span, b1[1], b1[0]);
