@@ -75,6 +75,13 @@ recipe execution; lower training loss does not yet establish improved answer qua
   12:30 and 19:00 ([`docs/launchd/earth.hati.day-turn.plist`](docs/launchd/earth.hati.day-turn.plist)):
   native turns while a gap is open and its window has time, each landed through
   the movement door.
+- **The retry** — a second launchd job per schedule
+  ([`docs/launchd/earth.hati.rent-walk-retry.plist`](docs/launchd/earth.hati.rent-walk-retry.plist) at 03:40,
+  [`docs/launchd/earth.hati.day-turn-retry.plist`](docs/launchd/earth.hati.day-turn-retry.plist) at 12:40 and 19:10) runs
+  [`observe/walk-retry.bml`](observe/walk-retry.bml). A walk that began stamped its slot (`.hearth/walk.began`) and the
+  retry ends there. One that did not is read for why (launchctl, the OS's diagnostic reports, the job's log), named
+  launch-killed, crashed-after-launch, held or nothing-found, and begun again by a changed route, at most twice; the row
+  with its evidence stays in `.hearth/walk-retry.jsonl`.
 - **Planning** — when no gap is open, either walk asks the local planner
   ([`observe/local-plan-run.bml`](observe/local-plan-run.bml)) for one within its
   window. The planner takes the next pending request in

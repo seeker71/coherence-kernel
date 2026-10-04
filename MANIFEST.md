@@ -161,7 +161,9 @@ cell drives the device and the device agrees with Form's own arithmetic.
   `/trace` handing over any cell's change graph. The public door is `hati.earth/sema`.
 - **`docs/launchd/`** — the rows by which this Mac starts the body's own walks, with `fkwu` as the program: the
   night (`observe/scheduled-walk.bml`, 03:30) and the day (`observe/day-turn.bml`, 12:30 and 19:00), both from the
-  walk checkout. `host/launchd/` still holds a second 03:30 row, `observe/movement-run.bml` in the live checkout.
+  walk checkout, each with a retry job (`observe/walk-retry.bml` at 03:40, 12:40 and 19:10) that reads why the first
+  slot did not begin and changes what the second does; the night's movement is the walk's own last step.
+  `observe/walk-began-run.bml` is the land cadence's lens on the hours since a walk began.
 - **Hati-OS** — the Hati-OS kernel's walker, emitter and host-target catalog (`form/form-stdlib/hati-os-kernel.fk`,
   `hati-os-kernel-emit.fk`, `hati-os-targets.fk`).
 - **`Sema Ear.app`** — the Mac launcher for the ear: a bundle's executable is a program, and macOS binds the microphone
