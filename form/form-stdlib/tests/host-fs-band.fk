@@ -1,0 +1,322 @@
+; host-fs-band.fk — the host doors that end a borrowed program, held against what the host itself says.
+;
+; The body ran /bin/chmod, /bin/ln, /bin/mkdir -m, /bin/sync, /bin/cp, printenv, date, uname and lsof for want of a seed
+; door. Leaf-door modes 35-49 are those doors (host_chmod, host_symlink, host_link, host_sync, host_getenv,
+; host_mkdir_mode, host_localtime, host_os, host_file_holders, host_file_mode, host_file_copy, host_file_identity,
+; host_utimes, host_realpath, host_pwrite) and form-stdlib/bml/host-fs.bml gives them their Form names. Nothing foreign
+; runs here: the one child is a Form sleeper (tests/host-sleeper-run.fk).
+;
+;   1     chmod then the mode read back through host_file_mode (its `% 4096`: 416, 448 on a directory, 493); chmod on a
+;         path that is not there answers -1
+;   2     symlink: a read through the link is the target's bytes, a change to the target shows through the link (it is not a
+;         copy), the target removed leaves the link dangling (fs_exists 0), a second symlink over the name answers -1,
+;         and the target is stored as given (a target that does not exist is still linked)
+;   4     link is a HARD link and a create-if-absent publish: the first link answers 0, the second -1 (EEXIST) and the first
+;         one's bytes stand; both names read the same bytes after the stage is removed; hfs-publish answers 1, then 0
+;         (it stood), and -1 when neither the stage nor the path is there
+;   8     sync answers 0
+;   16    getenv: PATH is a non-empty string with a ":" in it, HOME is an existing directory, a name nothing sets answers
+;         nothing(), and the empty name and a name with "=" answer -2; hfs-env falls back to its default
+;   32    mkdir with a mode: 1 THIS call made it, 0 it stood, 0 for a missing parent; the mode reads back EXACTLY as asked
+;         (509, which a umask of 022 alone would have narrowed to 493), and hfs-private-dir reads 448
+;   64    localtime: for 0, -1 ms, a leap day (2000-02-29), 2026-10-04 and 2100-01-01 the row equals hand arithmetic over the
+;         offset the row itself reports (the civil date by the era algorithm, the weekday from the day count); the offset
+;         is a whole number of minutes within a day, the zone name is not empty, the row for now agrees with now_unix_ms
+;         to the second, and hfs-date-line formats a known row as `%Y-%m-%d %H:%M:%S %Z`
+;   128   host_os is "Darwin" here (and "Linux" where /proc/self stands)
+;   256   copy: a 10 MiB file of varying bytes arrives byte-equal and keeps its mode (493); the raw door onto the same file
+;         answers -1 (its truncate would empty it) and hfs-copy, which stages and renames, leaves the file whole; a missing source answers -1 and leaves neither the destination nor a stage; a copy over an
+;         existing destination replaces it whole
+;   512   file_holders (Darwin; on a host with no libproc the door answers nothing() and this claim reads that): a fresh
+;         file has no holder ([]), a Form child holding it open as its stdout is exactly [its pid], once the child is
+;         reaped it is [] again, a path that is not there is nothing(), and hfs-peers leaves the caller out
+;   1024  a bad argument is an answer, never a crash: a float, a list, a nothing(), an int where a string is wanted, a path of
+;         5000 bytes, a path with a NUL, a mode of 4096 or -1 all answer -2 from every door that takes them
+;   2048  host_file_identity is [size mtime_ms inode birth_ms] (size equals host_file_size, a fresh file's mtime is now,
+;         the inode is above 0), nothing() for a path that is not there; host_utimes sets the mtime to a millisecond
+;         exactly (1700000000123 reads back, the inode and size unchanged), answers -1 for a missing path, and
+;         hfs-seal-text reads "size:mtime_ms:inode"
+;   4096  host_realpath: a path through a symlinked directory, one with `..` and `.`, and the direct path all answer the
+;         same physical path, which names no symlink; a path that is not there answers nothing(); realpath of "." is
+;         host_cwd (host_cwd is already physical)
+;   8192  host_pwrite: bytes written IN PLACE (the size does not shrink; a string and an int list both work, an int keeps
+;         its low byte), an empty write truncates nothing, a write past the end extends the file and the hole reads
+;         zeros, an absent file is created
+;   16384 host_file_mode carries the type nibble: a fifo made by fs_mkfifo reads type 1 with permission 384, a regular
+;         file 8, a directory 4, so hfs-fifo? / hfs-kind tell them apart in one read
+;
+; The band's own scratch directory is made under host_temp_dir() and removed (recursively) at the end, whatever failed;
+; the child, if one stands, is ended with SIGKILL and reaped. A binary without the doors says "door absent" by name and
+; answers 0, making and spawning nothing.
+;
+; Expected: 32767
+; Verdict 32767
+; REQUIRES: (the host doors are seed doors; the sibling kernels carry no host doors)
+; preflight-exec: forbidden
+import form-stdlib/bml/host-fs.bml;
+section [form.bml] {
+  def hfb-bit(ok, bit) = ok ? bit : 0;
+  def hfb-say(label, v) = print([label, v]);
+  def hfb-linux?() = (Comparable) host_path_exists("/proc/self") == 1;
+  def hfb-grow(s, n) = (Comparable) len(s) >= n ? s : hfb-grow(str_concat(s, s), n);
+  def hfb-all(xs) = nil?(xs) ? true : ((Comparable) xs[0] == (0 - 2)) && hfb-all(xs[1:]);
+  def hfb-same?(a, b) = nil?(a) ? nil?(b) : nil?(b) ? false : ((Comparable) a[0] == b[0]) && hfb-same?(a[1:], b[1:]);
+  def hfb-absent() {
+    let shown = print(["host-fs-band", "door absent: this fkwu has no host doors 35-49; rebuild it (cc -O2 -o fkwu.new runtime/fkwu-uni.c)"]);
+    let verdict = print(["host-fs-band", "verdict", 0]);
+    0;
+  }
+  // floor division and modulus, so an instant before 1970 does the arithmetic the host did
+  def hfb-fdiv(a, b) = a >= 0 ? a / b : 0 - ((0 - a + b - 1) / b);
+  def hfb-fmod(a, b) = a - (hfb-fdiv(a, b) * b);
+  // the civil date of a day count since 1970-01-01 (the era algorithm), as [year month day]
+  def hfb-civil(days) {
+    let z = days + 719468;
+    let era = hfb-fdiv(z, 146097);
+    let doe = z - (era * 146097);
+    let yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
+    let doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
+    let mp = ((5 * doy) + 2) / 153;
+    let dd = doy - (((153 * mp) + 2) / 5) + 1;
+    let mm = mp < 10 ? mp + 3 : mp - 9;
+    [yoe + (era * 400) + (mm <= 2 ? 1 : 0), mm, dd];
+  }
+  // what the row should read for a unix ms, by hand, given the offset the host reported
+  def hfb-expect(ms, off) {
+    let ls = hfb-fdiv(ms, 1000) + off;
+    let days = hfb-fdiv(ls, 86400);
+    let sod = ls - (days * 86400);
+    let c = hfb-civil(days);
+    [c[0], c[1], c[2], sod / 3600, (sod % 3600) / 60, sod % 60, hfb-fmod(4 + days, 7), off];
+  }
+  def hfb-head8(row) = [row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]];
+  def hfb-time-ok?(ms) {
+    let row = host_localtime(ms);
+    (String) value_kind(row) != "list" ? false : (Comparable) len(row) != 9 ? false : hfb-same?(hfb-head8(row), hfb-expect(ms, row[7]));
+  }
+  def hfb-times() = [0, 0 - 1, 951782400000, 1791087423285, 4102444800000];
+  def hfb-times-ok?(xs) = nil?(xs) ? true : hfb-time-ok?(xs[0]) && hfb-times-ok?(xs[1:]);
+  def hfb-row-sane?(row) = (String) value_kind(row) != "list" ? false : ((Comparable) hfb-fmod(row[7], 60) == 0) && (row[7] > (0 - 86400)) && (row[7] < 86400) && ((Comparable) len(row[8]) > 0);
+  def hfb-now-ok?() {
+    let t0 = now_unix_ms();
+    let row = host_localtime(t0);
+    let e = hfb-expect(t0, row[7]);
+    // the row read back as local seconds, less its offset, is the instant it was asked for
+    let back = ((((hfb-civil-days(row[0], row[1], row[2]) * 86400) + (row[3] * 3600)) + (row[4] * 60)) + row[5]) - row[7];
+    (Comparable) back == hfb-fdiv(t0, 1000);
+  }
+  // days since 1970-01-01 of a civil date (the inverse of hfb-civil)
+  def hfb-civil-days(y, m, d) {
+    let yy = m <= 2 ? y - 1 : y;
+    let era = hfb-fdiv(yy, 400);
+    let yoe = yy - (era * 400);
+    let mp = m > 2 ? m - 3 : m + 9;
+    let doy = (((153 * mp) + 2) / 5) + d - 1;
+    let doe = (yoe * 365) + (yoe / 4) - (yoe / 100) + doy;
+    (era * 146097) + doe - 719468;
+  }
+  // a 10 MiB body whose bytes vary with the offset: a period that is not a divisor of any slice a copy might use
+  def hfb-body() {
+    let pat = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_=+/;:,.|!@#$%^&*()[]{}<>?~xyz012345678";
+    substring(hfb-grow(pat, 10485760), 0, 10485760);
+  }
+  def hfb-sleeper(out) = host_spawn_at(["./fkwu", "form/form-stdlib/tests/host-sleeper-run.fk"], ["/dev/null", out, "/dev/null"]);
+  def hfb-end(pid) {
+    let ended = (Comparable) pid > 0 ? ((Comparable) host_alive(pid) == 1 ? host_signal(pid, 9) : 0) : 0;
+    (Comparable) pid > 0 ? host_wait(pid) : 0;
+  }
+  def hfb-run() {
+    let dir = host_temp_dir() ++ "/host-fs-band-" ++ host_pid().str();
+    let gone0 = host_dir_rmdir(dir);
+    let made = host_dir_mkdir(dir);
+
+    // 1 chmod
+    let f1 = dir ++ "/mode";
+    let w1 = write_file(f1, "m");
+    let c416 = host_chmod(f1, 416);
+    let m416 = hfs-mode(f1);
+    let c493 = host_chmod(f1, 493);
+    let m493 = hfs-mode(f1);
+    let d1 = dir ++ "/modedir";
+    let md1 = host_dir_mkdir(d1);
+    let cd = host_chmod(d1, 448);
+    let md448 = hfs-mode(d1);
+    let missing = host_chmod(dir ++ "/no-such-path", 448);
+    let s1 = hfb-say("chmod", [c416, m416, c493, m493, cd, md448, missing]);
+    let b1 = hfb-bit(((Comparable) c416 == 0) && ((Comparable) m416 == 416) && ((Comparable) c493 == 0) && ((Comparable) m493 == 493) && ((Comparable) cd == 0) && ((Comparable) md448 == 448) && ((Comparable) missing == (0 - 1)) && hfs-private-chmod(f1) && ((Comparable) hfs-mode(f1) == 448), 1);
+
+    // 2 symlink
+    let t2 = dir ++ "/target";
+    let l2 = dir ++ "/link";
+    let w2 = write_file(t2, "first");
+    let k2 = host_symlink(t2, l2);
+    let r2 = read_file(l2);
+    let w2b = write_file(t2, "second");
+    let r2b = read_file(l2);
+    let again = host_symlink(t2, l2);
+    let dangling = dir ++ "/dangling";
+    let k2d = host_symlink(dir ++ "/never-was", dangling);
+    let rm2 = host_path_remove(t2);
+    let after = host_path_exists(l2);
+    let s2 = hfb-say("symlink", [k2, r2, r2b, again, k2d, rm2, after]);
+    let b2 = hfb-bit(((Comparable) k2 == 0) && ((String) r2 == "first") && ((String) r2b == "second") && ((Comparable) again == (0 - 1)) && ((Comparable) k2d == 0) && ((Comparable) rm2 == 0) && ((Comparable) after == 0), 2);
+
+    // 4 link
+    let st4 = dir ++ "/stage";
+    let pb4 = dir ++ "/published";
+    let w4 = write_file(st4, "first-bytes");
+    let l4a = host_link(st4, pb4);
+    let w4b = write_file(dir ++ "/stage2", "second-bytes");
+    let l4b = host_link(dir ++ "/stage2", pb4);
+    let rm4 = host_path_remove(st4);
+    let r4 = read_file(pb4);
+    let pub1 = hfs-publish(dir ++ "/stage2", dir ++ "/p2");
+    let pub2 = hfs-publish(dir ++ "/stage2", dir ++ "/p2");
+    let pub3 = hfs-publish(dir ++ "/no-stage", dir ++ "/p3");
+    let s4 = hfb-say("link", [l4a, l4b, r4, pub1, pub2, pub3]);
+    let b4 = hfb-bit(((Comparable) l4a == 0) && ((Comparable) l4b == (0 - 1)) && ((String) r4 == "first-bytes") && ((Comparable) pub1 == 1) && ((Comparable) pub2 == 0) && ((Comparable) pub3 == (0 - 1)), 4);
+
+    // 8 sync
+    let sy = [host_sync(), hfs-sync()];
+    let b8 = hfb-bit(hfb-same?(sy, [0, 0]), 8);
+
+    // 16 getenv
+    let path = host_getenv("PATH");
+    let home = host_getenv("HOME");
+    let unset = host_getenv("HOST_FS_BAND_SURELY_UNSET_NAME");
+    let s16 = hfb-say("getenv", [(String) value_kind(path), (String) value_kind(home), nothing?(unset), host_getenv(""), host_getenv("A=B")]);
+    let b16 = hfb-bit(((String) value_kind(path) == "string") && (len(path) > 0) && (str_find(path, ":", 0) >= 0) && ((String) value_kind(home) == "string") && ((Comparable) host_path_is_dir(home) == 1) && nothing?(unset) && ((Comparable) host_getenv("") == (0 - 2)) && ((Comparable) host_getenv("A=B") == (0 - 2)) && ((String) hfs-env("HOST_FS_BAND_SURELY_UNSET_NAME", "dflt") == "dflt") && ((String) hfs-env("PATH", "dflt") == (String) path), 16);
+
+    // 32 mkdir with a mode
+    let d32 = dir ++ "/made";
+    let m32a = host_mkdir_mode(d32, 509);
+    let m32b = host_mkdir_mode(d32, 509);
+    let m32c = host_mkdir_mode(dir ++ "/no/parent", 448);
+    let mode32 = hfs-mode(d32);
+    let p32a = hfs-private-dir(dir ++ "/private");
+    let p32b = hfs-private-dir(dir ++ "/private");
+    let s32 = hfb-say("mkdir mode", [m32a, m32b, m32c, mode32, p32a, p32b, hfs-mode(dir ++ "/private")]);
+    let b32 = hfb-bit(((Comparable) m32a == 1) && ((Comparable) m32b == 0) && ((Comparable) m32c == 0) && ((Comparable) mode32 == 509) && ((Comparable) p32a == 1) && ((Comparable) p32b == 0) && ((Comparable) hfs-mode(dir ++ "/private") == 448), 32);
+
+    // 64 localtime
+    let row0 = host_localtime(0);
+    let rown = host_localtime(now_unix_ms());
+    let s64 = hfb-say("localtime", [row0, rown]);
+    let known = ["2026-10-04 09:05:03 WITA", hfs-date-line-of([2026, 10, 4, 9, 5, 3, 0, 28800, "WITA"])];
+    let b64 = hfb-bit(hfb-times-ok?(hfb-times()) && hfb-row-sane?(row0) && hfb-row-sane?(rown) && hfb-now-ok?() && ((String) known[0] == (String) known[1]) && ((String) hfs-day(0) == hfs-date(row0)) && ((Comparable) len(hfs-date-line(0)) >= 20), 64);
+
+    // 128 os
+    let os = host_os();
+    let s128 = hfb-say("os", os);
+    let b128 = hfb-bit(((String) os == (hfb-linux?() ? "Linux" : "Darwin")) && ((String) hfs-os() == (String) os) && (hfs-darwin?() == !hfb-linux?()), 128);
+
+    // 256 copy
+    let big = hfb-body();
+    let src = dir ++ "/big";
+    let dst = dir ++ "/big-copy";
+    let w256 = write_file(src, big);
+    let x256 = host_chmod(src, 493);
+    let t0 = host_monotonic_ms();
+    let n256 = hfs-copy(src, dst);
+    let t1 = host_monotonic_ms();
+    let same = ((String) read_file(dst) == (String) big) && ((Comparable) host_file_size(dst) == 10485760);
+    let kept = hfs-mode(dst);
+    let raw_onto = host_file_copy(src, src);
+    let onto = hfs-copy(src, src);
+    let intact = ((Comparable) host_file_size(src) == 10485760) && ((String) read_file(src) == (String) big);
+    let nosrc = hfs-copy(dir ++ "/no-such-source", dir ++ "/nodest");
+    let leftovers = fs_list(dir) |> filter(n => (str_find(n, "nodest", 0) >= 0) || (str_find(n, ".hfs-copy-", 0) >= 0));
+    let w256b = write_file(dir ++ "/small", "short");
+    let over = hfs-copy(dir ++ "/small", dst);
+    let replaced = ((String) read_file(dst) == "short") && ((Comparable) host_file_size(dst) == 5);
+    let s256 = hfb-say("copy", [n256, "ms", t1 - t0, same, kept, raw_onto, onto, intact, nosrc, leftovers, over, replaced]);
+    let b256 = hfb-bit(((Comparable) n256 == 10485760) && same && ((Comparable) kept == 493) && ((Comparable) raw_onto == (0 - 1)) && ((Comparable) onto == 10485760) && intact && ((Comparable) nosrc == (0 - 1)) && nil?(leftovers) && ((Comparable) over == 5) && replaced, 256);
+
+    // 512 holders
+    let hf = dir ++ "/held";
+    let w512 = write_file(hf, "x");
+    let before = host_file_holders(hf);
+    let pid = hfb-sleeper(hf);
+    let settle = host_sleep_ms(1500);
+    let during = host_file_holders(hf);
+    let peers = hfs-peers(hf, pid);
+    let others = hfs-peers(hf, host_pid());
+    let ended = hfb-end(pid);
+    let after512 = host_file_holders(hf);
+    let none = host_file_holders(dir ++ "/no-such-holder-file");
+    let s512 = hfb-say("holders", [before, pid, during, peers, others, after512, nothing?(none)]);
+    let b512 = hfb-bit(hfs-darwin?() ? (hfb-same?(before, []) && hfb-same?(during, [pid]) && hfb-same?(peers, []) && hfb-same?(others, [pid]) && hfb-same?(after512, []) && nothing?(none)) : (nothing?(before) && nothing?(during)), 512);
+
+    // 2048 identity and utimes
+    let if1 = dir ++ "/ident";
+    let wi = write_file(if1, "twelve bytes");
+    let now0 = now_unix_ms();
+    let id1 = host_file_identity(if1);
+    let touched = host_utimes(if1, 1700000000123);
+    let id2 = host_file_identity(if1);
+    let noid = host_file_identity(dir ++ "/no-such-identity");
+    let notouch = host_utimes(dir ++ "/no-such-identity", 5);
+    let s2048 = hfb-say("identity", [id1, touched, id2, nothing?(noid), notouch, hfs-seal-text(if1)]);
+    let b2048 = hfb-bit(((String) value_kind(id1) == "list") && ((Comparable) len(id1) == 4) && ((Comparable) id1[0] == 12) && ((Comparable) id1[0] == host_file_size(if1)) && (id1[1] > now0 - 60000) && (id1[1] < now0 + 60000) && (id1[2] > 0) && (id1[3] >= 0) && ((Comparable) touched == 0) && ((Comparable) id2[1] == 1700000000123) && ((Comparable) id2[2] == id1[2]) && ((Comparable) id2[0] == 12) && nothing?(noid) && ((Comparable) notouch == (0 - 1)) && ((String) hfs-seal-text(if1) == "12:1700000000123:" ++ id1[2].str()) && nothing?(hfs-seal-text(dir ++ "/no-such-identity")) && hfs-touch(if1, 1700000001000) && ((Comparable) host_file_identity(if1)[1] == 1700000001000), 2048);
+
+    // 4096 realpath
+    let rd = dir ++ "/real";
+    let mr = host_dir_mkdir(rd);
+    let wr = write_file(rd ++ "/f", "r");
+    let lr = dir ++ "/real-link";
+    let kr = host_symlink(rd, lr);
+    let rp_direct = host_realpath(rd ++ "/f");
+    let rp_link = host_realpath(lr ++ "/f");
+    let rp_dots = host_realpath(rd ++ "/../real/./f");
+    let rp_none = host_realpath(dir ++ "/real/no-such");
+    let rp_cwd = host_realpath(".");
+    let s4096 = hfb-say("realpath", [rp_direct, rp_link, rp_dots, nothing?(rp_none), rp_cwd, host_cwd()]);
+    let b4096 = hfb-bit(((String) value_kind(rp_direct) == "string") && ((String) rp_link == (String) rp_direct) && ((String) rp_dots == (String) rp_direct) && (str_find(rp_direct, "real-link", 0) < 0) && (str_find(rp_direct, "/../", 0) < 0) && nothing?(rp_none) && ((String) rp_cwd == (String) host_cwd()) && ((String) hfs-realpath(rp_direct) == (String) rp_direct), 4096);
+
+    // 8192 pwrite
+    let pf = dir ++ "/pw";
+    let wp = write_file(pf, "0123456789");
+    let p1 = host_pwrite(pf, 2, "AB");
+    let r1 = read_file(pf);
+    let p2 = host_pwrite(pf, 8, [67, 68, 300]);
+    let r2 = read_file(pf);
+    let p0 = host_pwrite(pf, 0, "");
+    let r0 = read_file(pf);
+    let p3 = host_pwrite(pf, 14, "Z");
+    let r3 = read_file(pf);
+    let pn = dir ++ "/pw-new";
+    let p4 = host_pwrite(pn, 3, "Q");
+    let r4 = read_file(pn);
+    let s8192 = hfb-say("pwrite", [p1, r1, p2, r2, p0, p3, len(r3), p4, len(r4)]);
+    let b8192 = hfb-bit(((Comparable) p1 == 2) && ((String) r1 == "01AB456789") && ((Comparable) p2 == 3) && ((String) r2 == "01AB4567CD,") && ((Comparable) p0 == 0) && ((String) r0 == (String) r2) && ((Comparable) p3 == 1) && ((Comparable) len(r3) == 15) && ((Comparable) str_byte_at(r3, 11) == 0) && ((Comparable) str_byte_at(r3, 14) == 90) && ((Comparable) p4 == 1) && ((Comparable) len(r4) == 4) && ((Comparable) str_byte_at(r4, 0) == 0) && ((String) substring(r4, 3, 4) == "Q") && ((Comparable) hfs-pwrite(pf, 0, "x") == 1) && ((String) substring(read_file(pf), 0, 3) == "x1A"), 8192);
+
+    // 16384 the type nibble: a fifo is told from a file and a directory by one read
+    let ff = dir ++ "/fifo";
+    let mf = fs_mkfifo(ff);
+    let fm = host_file_mode(ff);
+    let s16384 = hfb-say("types", [mf, fm, host_file_mode(pf), host_file_mode(dir)]);
+    let b16384 = hfb-bit(((Comparable) mf == 1) && ((Comparable) (fm / 4096) == 1) && ((Comparable) (fm % 4096) == 384) && hfs-fifo?(ff) && !hfs-fifo?(pf) && !hfs-fifo?(dir) && ((String) hfs-kind(pf) == "file") && ((String) hfs-kind(dir) == "dir") && ((String) hfs-kind(ff) == "fifo") && nothing?(hfs-kind(dir ++ "/no-such-kind")), 16384);
+
+    // 1024 bad arguments
+    let long = hfb-grow("a", 5000);
+    let nul = "a" ++ byte_to_str(0) ++ "b";
+    let bad = [host_chmod(1.5, 448), host_chmod(dir, 1.5), host_chmod(dir, 4096), host_chmod(dir, 0 - 1), host_chmod([1], 448), host_chmod(nothing(), 448), host_chmod(long, 448), host_chmod(nul, 448), host_chmod("", 448),
+      host_symlink(1, dir), host_symlink(dir, 5), host_symlink(long, dir), host_symlink(dir, nul), host_link(nothing(), dir), host_link(dir, [2]), host_link(long, dir),
+      host_getenv(5), host_getenv(1.5), host_getenv(long), host_getenv(nul),
+      host_mkdir_mode(dir ++ "/z", "0"), host_mkdir_mode(dir ++ "/z", 4096), host_mkdir_mode(long, 448), host_mkdir_mode(7, 7),
+      host_localtime("0"), host_localtime(1.5), host_localtime(nothing()), host_localtime([0]),
+      host_file_mode(7), host_file_mode(long), host_file_holders([]), host_file_holders(1.5), host_file_holders(nul),
+      host_file_copy(dir, 3), host_file_copy(3, dir), host_file_copy(long, dir), host_file_copy(nul, nul),
+      host_file_identity(5), host_file_identity(long), host_file_identity(nul), host_utimes(dir, "x"), host_utimes(long, 0), host_utimes(5, 5), host_utimes(dir, 1.5),
+      host_realpath([1]), host_realpath(5), host_realpath(long), host_realpath(nul),
+      host_pwrite(dir ++ "/z", 0 - 1, "x"), host_pwrite(dir ++ "/z", "x", "x"), host_pwrite(dir ++ "/z", 1, 5), host_pwrite(dir ++ "/z", 1, [1, "x"]), host_pwrite(5, 1, "x"), host_pwrite(long, 0, "x"), host_pwrite(nul, 0, "x")];
+    let s1024 = hfb-say("bad arguments", bad);
+    let b1024 = hfb-bit(hfb-all(bad) && !(host_path_exists(dir ++ "/z") == 1), 1024);
+
+    let cleaned = host_dir_rmdir(dir);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024 + b2048 + b4096 + b8192 + b16384;
+    let shown = print(["host-fs-band", "verdict", verdict]);
+    verdict;
+  }
+  (Comparable) hfs-door?() == 1 ? hfb-run() : hfb-absent();
+}
