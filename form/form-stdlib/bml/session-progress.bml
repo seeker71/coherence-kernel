@@ -16,7 +16,7 @@
 // A row keeps what the earlier ones kept (rented requests, input, cache, output; local drafts, generated, lane) and
 // adds when the session began and last moved, and the bytes of its transcripts (the key that says it has not changed).
 //////////////////////////////////////////////////////////////////////
-// preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/session-rent.bml form-stdlib/bml/local-run.bml
+// preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/session-rent.bml form-stdlib/bml/local-run.bml form-stdlib/bml/host-fs.bml
 section [form.bml] {
  blueprint SessionRented { requests: int, input: int, cache_write: int, cache_read: int, output: int, transcripts: int }
  blueprint SessionLocal { drafts: int, generated: int, lane_options: option<int>, lane_generated: option<int>, lane_injected: option<int>, runs: option<int>, run_generated: option<int> }
@@ -26,8 +26,8 @@ section [form.bml] {
   def sp-drafts() = "receipts/draft-ledger.jsonl";
 
   // ---- the host's own facts ------------------------------------------------------------------------------------------
-  def sp-out(command) = trim(host-exec(command, ""));
-  def sp-env(name) = sp-out("printenv " ++ name);
+  // an environment variable as the host holds it ("" when unset), through the seed's own door (host_getenv), no program
+  def sp-env(name) = trim(hfs-env(name, ""));
   def sp-session-now() = sp-env("CLAUDE_CODE_SESSION_ID");
   // a path as the name its transcripts' directory wears: every / and . becomes -
   def sp-slug(path) = str-join-with(split-on(str-join-with(split-on(path, "/"), "-"), "."), "-");
@@ -41,7 +41,9 @@ section [form.bml] {
   def sp-dirs() = fs_list(sp-root()) |> filter(name => starts-with?(name, sp-prefix())) |> map(name => sp-root() ++ "/" ++ name) |> filter(dir => (Comparable) fs_is_dir(dir) == 1);
   def sp-transcripts() = foldl((found, dir) => append(found, fs_list(dir) |> filter(name => sr-jsonl?(name)) |> map(name => dir ++ "/" ++ name)), [], sp-dirs());
   // when the main transcript was made and last written, in ms
-  def sp-times(path) = split-on(sp-out("stat -f '%B %m' '" ++ path ++ "'"), " ") |> map(secs => (parse-int(secs) ?? 0) * 1000);
+  // (host_file_identity: [size mtime_ms inode birth_ms]; a path that does not stat has no times, and reads zero as the old stat text did)
+  def sp-times-of(identity) = (String) value_kind(identity) == "list" ? [identity[3], identity[1]] : [0, 0];
+  def sp-times(path) = sp-times-of(host_file_identity(path));
   def sp-bytes(files) = foldl((total, file) => total + file_size(file), 0, files);
 
   // ---- one session's row ------------------------------------------------------------------------------------------------
@@ -98,7 +100,8 @@ section [form.bml] {
   def sp-zeros(k) = k <= 0 ? "" : ("0" ++ sp-zeros(k - 1));
   def sp-sortable(n) = sp-zeros(15 - len(int_to_str(n))) ++ int_to_str(n);
   def sp-when(row) = row-get(row, "began_unix_ms") ?? row-get(row, "at_unix_ms");
-  def sp-date(ms) = sp-out("date -r " ++ int_to_str(ms / 1000) ++ " +%Y-%m-%d");
+  // the local day of a unix ms (`date -r secs +%Y-%m-%d`), from the host's zone (host_localtime); "" when the host cannot place it
+  def sp-date(ms) = hfs-day(ms) ?? "";
   // the latest row of each session: the ledger is a time series, and a session's last row is what it came to
   def sp-latest(rows) = rows |> map(row => [row-get(row, "session"), row]) |> sp-keep-last;
   def sp-keep-last(pairs) = nil?(pairs) ? [] : cons(sp-last-of(pairs[0][0], pairs), sp-keep-last(pairs |> filter(p => p[0] != pairs[0][0])));

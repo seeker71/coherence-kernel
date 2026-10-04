@@ -1,0 +1,57 @@
+// cell-said.bml — what a cell called in this process said, put into the words a reader of a child's stderr takes.
+//
+// cell_run answers a record (docs/in-process-cells.md): the value, what the cell printed (out), what it said to stderr
+// (err: the lines a Form voicing such as live or the proof outputs wrote), the compiler's diagnostics as rows (diag) and
+// the name of a stop. A door that reports to a person, or that keeps the evidence of a step, wants the diagnostics as the
+// lines a person reads and as the organ-health rows a reader of those rows parses. This unit renders them once, from the
+// rows, so a call that is resident (its load replayed its rows, not its bytes) reads as a call that loaded:
+//
+//   cs-diag-text(rows)   "fkwu: <path>:<line>: error: <detail>" for each error, "fkwu: <path>: warning: <detail>" for each
+//                        warning, and after each compiler row its organ-health row (schema organ-health-v1, the keys and the
+//                        needs the compiler names: a binding by its name, a compile error by its message)
+//   cs-tally-text(rec)   "fkwu: N error(s), M warning(s)" when the compile counted any (nothing when it counted none)
+//   cs-err-text(rec)     what the cell itself wrote to stderr, less the compiler's own rows (cs-diag-text carries those)
+//   cs-stderr(rec)       the three, in the order a child's stderr said them
+//
+// Nothing here begins a program or reads a stream; every function reads a record the door answered.
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class CellSaid {
+  def cs-cat(xs) = len(xs) == 0 ? "" : (String) xs[0] ++ cs-cat(xs[1:]);
+  def cs-nl() = "\n";
+  // JSON text: a quote, a backslash and a newline are escaped; any other control byte is a space
+  def cs-esc-byte(b) = b == 34 ? "\\\"" : b == 92 ? "\\\\" : b == 10 ? "\\n" : b < 32 ? " " : byte_to_str(b);
+  def cs-esc-go(s, i, n, acc) = i >= n ? acc : cs-esc-go(s, i + 1, n, acc ++ cs-esc-byte(str_byte_at(s, i)));
+  def cs-jstr(s) = cs-cat(["\"", cs-esc-go(s, 0, len(s), ""), "\""]);
+  // a field of a row as text ("" when the row has none)
+  def cs-say(v) = nothing?(v) ? "" : (String) value_kind(v) == "string" ? v : (String) value_kind(v) == "int" ? v.str() : value_str(v);
+  def cs-or-null(v) = nothing?(v) ? "null" : cs-say(v);
+  // the value a unit ended on as the last line a run of it printed: a nothing reads "nothing", never an empty line
+  def cs-value-text(v) = nothing?(v) ? "nothing" : cs-say(v);
+  // what a run of the unit printed to stdout: what it printed, then the value it ended on (a unit that stopped printed no value)
+  def cs-stdout(rec) = nothing?(rec) ? "" : (String) (record_get(rec, "out") ?? "") ++ (nothing?(record_get(rec, "stopped")) ? cs-value-text(record_get(rec, "value")) ++ cs-nl() : "");
+  def cs-observed(g) = (String) cs-say(record_get(g, "observed"));
+  def cs-error-row?(g) = (String) cs-observed(g) == "compile-error" || (String) cs-observed(g) == "binding-missing";
+  def cs-warning-row?(g) = (String) cs-observed(g) == "compile-warning" && str_find(cs-say(record_get(g, "aspect")), "image:", 0) != 0;
+  def cs-compiler-row?(g) = (String) cs-say(record_get(g, "organ")) == "fkwu-compiler";
+  def cs-diag-line(g) = cs-error-row?(g) ? cs-cat(["fkwu: ", cs-say(record_get(g, "path")), ":", cs-say(record_get(g, "line")), ": error: ", cs-say(record_get(g, "detail")), cs-nl()]) : cs-warning-row?(g) ? cs-cat(["fkwu: ", cs-say(record_get(g, "path")), ": warning: ", cs-say(record_get(g, "detail")), cs-nl()]) : "";
+  def cs-row-need(g) = (String) cs-observed(g) == "binding-missing" ? cs-cat(["{\"resource\":\"binding\",\"detail\":", cs-jstr(cs-say(record_get(g, "name"))), "}"]) : (String) cs-observed(g) == "compile-error" ? cs-cat(["{\"resource\":\"source-diagnostics\",\"detail\":", cs-jstr(cs-say(record_get(g, "detail"))), "}"]) : "";
+  def cs-row-offers(g) = cs-error-row?(g) ? "\"request-evidence\",\"revise\"" : "";
+  def cs-row-line(g) = cs-cat(["form-organ health {\"schema\":\"organ-health-v1\",\"id\":", cs-jstr(cs-cat([host_pid().str(), ":", cs-say(record_get(g, "at_ms")), ":1"])), ",\"organ\":", cs-jstr(cs-say(record_get(g, "organ"))), ",\"flow\":", cs-jstr(host_pid().str()), ",\"aspect\":", cs-jstr(cs-say(record_get(g, "aspect"))), ",\"stage\":", cs-jstr(cs-say(record_get(g, "stage"))), ",\"expected\":\"clean\",\"observed\":", cs-jstr(cs-observed(g)), ",\"health\":", cs-or-null(record_get(g, "health")), ",\"surprise\":1,\"needs\":[", cs-row-need(g), "],\"offers\":[", cs-row-offers(g), "],\"selected\":\"\",\"evidence\":{\"path\":", cs-jstr(cs-say(record_get(g, "path"))), ",\"line\":", cs-or-null(record_get(g, "line")), ",\"name\":", cs-jstr(cs-say(record_get(g, "name"))), ",\"unit\":", cs-jstr(cs-say(record_get(g, "path"))), "},\"observed_at_ms\":", cs-or-null(record_get(g, "at_ms")), ",\"at_ms\":", cs-or-null(record_get(g, "at_ms")), "}", cs-nl()]);
+  def cs-diag-text(rows) = len(rows) == 0 ? "" : cs-cat([cs-diag-line(rows[0]), cs-compiler-row?(rows[0]) ? cs-row-line(rows[0]) : "", cs-diag-text(rows[1:])]);
+  def cs-tally-text(rec) {
+   let e = record_get(rec, "errors");
+   let w = len(filter(g => cs-warning-row?(g), record_get(rec, "diag")));
+   e + w > 0 ? cs-cat(["fkwu: ", e.str(), " error(s), ", w.str(), " warning(s)", cs-nl()]) : "";
+  }
+  // the cell's own stderr: every line of err but the compiler's rows, which cs-diag-text renders from the rows themselves
+  def cs-own-line?(line) = str_find(line, "\"organ\":\"fkwu-compiler\"", 0) < 0;
+  def cs-err-text(rec) {
+   let kept = filter(l => cs-own-line?(l), split-on((String) (record_get(rec, "err") ?? ""), "\n"));
+   let text = cs-join(filter(l => len(l) > 0, kept));
+   len(text) == 0 ? "" : text ++ cs-nl();
+  }
+  def cs-join(lines) = len(lines) == 0 ? "" : len(lines) == 1 ? lines[0] : lines[0] ++ cs-nl() ++ cs-join(lines[1:]);
+  def cs-stderr(rec) = nothing?(rec) ? "" : cs-cat([cs-diag-text(record_get(rec, "diag")), cs-tally-text(rec), cs-err-text(rec)]);
+ }
+}

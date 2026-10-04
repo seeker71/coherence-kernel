@@ -1,8 +1,11 @@
 ; voice-track-reap-band.fk — the supervisor ends a wedged worker, and ends it with SIGKILL when SIGTERM has not taken it.
 ;
-; A worker stuck in the GPU wait answers only SIGKILL, and the wait that follows a kill that does not land
-; never returns. The synthetic workers are Form children (an fkwu running tests/host-sleeper-run.fk, which only
-; waits): no device, no foreign program. SIGKILL goes through the host_signal door.
+; A worker stuck in the GPU wait answers only SIGKILL. The supervisor does not own the worker (the host's manager does: voice-track.bml reads the
+; worker's record and ends it by pid), so it never waits on it as a child: it sends SIGTERM through the host_signal door, gives the grace window,
+; asks host_alive, and sends SIGKILL if the pid still answers. This band is the one place a multi-process claim is the claim: the synthetic
+; workers are Form children it begins on purpose (an fkwu running tests/host-sleeper-run.fk, which only waits; host-napper-run.fk, which leaves by
+; itself): no device, no foreign program. It is their parent, so it is the one that reaps them and reads their exit; the decision logic under test
+; (vtr-end, vtr-escalate) reaps nothing and waits for nothing. The same logic is proven without any process by tests/voice-track-service-band.fk.
 ;
 ; A worker that cannot hear SIGTERM is not made by stopping it. On this host (Darwin, witnessed 2026-10-04 in
 ; host-signal-band) a SIGSTOPped process still dies to SIGTERM, so a stopped sleeper is no deaf one. The escalation is
@@ -10,17 +13,17 @@
 ; SIGTERM never reached. It waits the grace window, then sends SIGKILL, and the child's own exit status says which
 ; signal ended it (host_wait answers 128 + the signal: 137 is SIGKILL, 143 would be SIGTERM).
 ;
-;   1   a worker that hears SIGTERM is gone in under 2 s and vtr-reap answers 1 (it was wedged)
+;   1   a worker that hears SIGTERM is gone in under 2 s, vtr-end answers "term" and sent that one signal, and its exit reads 143
 ;   2   a worker the SIGTERM did not take is still there while the grace runs, is ended by the escalation to
 ;       SIGKILL after VTRTermMs (5 s: between 4.5 s and 12 s), and its exit reads 137
-;   4   a worker that is not wedged is only waited for: it exits on its own and vtr-reap answers 0
+;   4   a worker that has already gone (it left by itself) is sent nothing: vtr-end answers "gone" at once with no signal
 ;
 ; A binary without the host_signal door cannot send the SIGKILL: the band says so by name ("door absent") and answers
-; 0, spawning nothing. A child still standing when the band ends is ended with SIGKILL and reaped, whatever failed.
+; 0, beginning nothing. A child still standing when the band ends is ended with SIGKILL and reaped, whatever failed.
 ;
 ; Expected: 7
 ; Verdict 7
-; REQUIRES: (host_spawn_at, host_kill, host_signal, host_alive)
+; REQUIRES: (host_spawn_at, host_signal, host_alive, host_wait)
 ; preflight-exec: forbidden
 ; preludes: form/form-stdlib/voice-track.bml
 import form/form-stdlib/voice-track.bml;
@@ -42,14 +45,16 @@ section [form.bml] {
   }
   def vrb-run() {
     let p1 = vrb-sleeper();
+    let settle1 = host_sleep_ms(300);
     let t1 = host_monotonic_ms();
-    let r1 = vtr-reap(p1, 1);
+    let o1 = vtr-end(p1);
     let ms1 = host_monotonic_ms() - t1;
-    let s1 = vrb-say("sigterm", [r1, ms1, host_alive(p1)]);
-    let b1 = vrb-bit(((Comparable) r1 == 1) && (ms1 < 2000) && ((Comparable) host_alive(p1) == 0), 1);
+    let st1 = host_wait(p1);
+    let s1 = vrb-say("sigterm", [vtq-outcome-kind(o1), vtq-outcome-sends(o1), ms1, st1, host_alive(p1)]);
+    let b1 = vrb-bit((String) vtq-outcome-kind(o1) == "term" && (Comparable) len(vtq-outcome-sends(o1)) == 1 && (Comparable) ms1 < 2000 && (Comparable) st1 == 143 && (Comparable) host_alive(p1) == 0, 1);
 
     let p2 = vrb-sleeper();
-    let settle = host_sleep_ms(300);
+    let settle2 = host_sleep_ms(300);
     let t2 = host_monotonic_ms();
     let r2 = vtr-escalate(p2);
     let ms2 = host_monotonic_ms() - t2;
@@ -58,11 +63,12 @@ section [form.bml] {
     let b2 = vrb-bit(((Comparable) r2 == 0) && (ms2 >= 4500) && (ms2 < 12000) && ((Comparable) st2 == 137), 2);
 
     let p3 = vrb-napper();
+    let st3 = host_wait(p3);
     let t3 = host_monotonic_ms();
-    let r3 = vtr-reap(p3, 0);
+    let o3 = vtr-end(p3);
     let ms3 = host_monotonic_ms() - t3;
-    let s3 = vrb-say("not wedged", [r3, ms3]);
-    let b3 = vrb-bit(((Comparable) r3 == 0) && (ms3 >= 800), 4);
+    let s3 = vrb-say("already gone", [vtq-outcome-kind(o3), vtq-outcome-sends(o3), ms3, st3]);
+    let b3 = vrb-bit((String) vtq-outcome-kind(o3) == "gone" && (Comparable) len(vtq-outcome-sends(o3)) == 0 && (Comparable) ms3 < 500 && (Comparable) st3 == 0, 4);
     let cleaned = vrb-clean(p1) + vrb-clean(p2) + vrb-clean(p3);
     let verdict = b1 + b2 + b3;
     let shown = print(["voice-track-reap-band", "verdict", verdict]);

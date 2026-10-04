@@ -1,0 +1,84 @@
+// git-ignore.bml — .gitignore matching in Form: the pattern language git documents in gitignore(5), for the forms in use.
+//
+// Supported: blank lines and `#` comments, `\#` and `\!` escapes, trailing spaces dropped, `!` negation, a trailing `/` (the
+// pattern matches directories only), a leading or inner `/` (the pattern is anchored to the directory of the file that holds
+// it), a pattern with no `/` (it matches a name at any depth below that directory), `*` `?` and `[...]` classes (with `!`/`^`
+// negation, ranges, a literal `]` first) that never cross a `/`, and `**` as a whole path segment (`**/x`, `x/**`, `a/**/b`).
+// The files read, lowest priority first: core.excludesFile (default ~/.config/git/ignore), <common>/info/exclude, then each
+// .gitignore from the top of the working tree down, a deeper file overriding a shallower one and a later line an earlier one.
+// A directory an earlier rule excludes is never entered, so a later `!` cannot re-include something inside it (git's own rule).
+// Refused by name, never guessed: a pattern with an unterminated `[` is read as a literal `[`; nothing else is refused.
+//
+//   gx-load(base, text)            the rules of one file, in file order; base is "" or "dir/" (the file's directory from the top)
+//   gx-stack(r)                    the rules below the working tree's .gitignore files: [info/exclude, global], highest priority first
+//   gx-push(rules, newrules)       enter a directory: its file's rules go in front (highest priority first)
+//   gx-ignored?(rules, rel, isdir) 1 when the path (from the top, no leading slash) is ignored, 0 when not
+//
+// PROOF: form-stdlib/tests/git-native-status-band.fk (the pattern table band-checked pattern by pattern).
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml form-stdlib/bml/git-refs.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+section [form.bml] {
+ class GitIgnore {
+  // ---- fnmatch for one path segment ---------------------------------------------------------------------------------------
+  def gx-fn(p, pi, s, si) = pi >= len(p) ? si >= len(s) : gx-fn-at(p, pi, s, si, str_byte_at(p, pi));
+  def gx-fn-at(p, pi, s, si, c) = c == 42 ? gx-star(p, pi + 1, s, si) : si >= len(s) ? false : c == 63 ? gx-fn(p, pi + 1, s, si + 1) : c == 91 ? gx-class(p, pi, s, si) : c == 92 && pi + 1 < len(p) ? str_byte_at(p, pi + 1) == str_byte_at(s, si) && gx-fn(p, pi + 2, s, si + 1) : c == str_byte_at(s, si) && gx-fn(p, pi + 1, s, si + 1);
+  def gx-star(p, pi, s, si) = pi < len(p) && str_byte_at(p, pi) == 42 ? gx-star(p, pi + 1, s, si) : gx-fn(p, pi, s, si) || (si < len(s) && gx-star(p, pi, s, si + 1));
+  // the index of the `]` that closes a class opened at pi (a `]` right after the opener, or after `!`/`^`, is a member), or -1
+  def gx-class-close(p, j) = j >= len(p) ? 0 - 1 : str_byte_at(p, j) == 93 ? j : gx-class-close(p, j + 1);
+  def gx-class-first(p, pi) = pi + 1 < len(p) && (str_byte_at(p, pi + 1) == 33 || str_byte_at(p, pi + 1) == 94) ? pi + 2 : pi + 1;
+  def gx-class(p, pi, s, si) {
+   let st = gx-class-first(p, pi);
+   let close = gx-class-close(p, st + 1);
+   let neg = st == pi + 2;
+   close < 0 ? str_byte_at(s, si) == 91 && gx-fn(p, pi + 1, s, si + 1) : gx-class-member(p, st, close, str_byte_at(s, si)) != neg && gx-fn(p, close + 1, s, si + 1);
+  }
+  def gx-class-member(p, j, close, ch) = j >= close ? false : j + 2 < close && str_byte_at(p, j + 1) == 45 ? (ch >= str_byte_at(p, j) && ch <= str_byte_at(p, j + 2)) || gx-class-member(p, j + 3, close, ch) : str_byte_at(p, j) == ch || gx-class-member(p, j + 1, close, ch);
+  // ---- segments and `**` ---------------------------------------------------------------------------------------------------
+  def gx-match-segs(ps, ts) = nil?(ps) ? nil?(ts) : str_eq(ps[0], "**") ? gx-doublestar(ps, ts) : !nil?(ts) && gx-fn(ps[0], 0, ts[0], 0) && gx-match-segs(ps[1:], ts[1:]);
+  def gx-doublestar(ps, ts) = nil?(ps[1:]) ? !nil?(ts) : gx-match-segs(ps[1:], ts) || (!nil?(ts) && gx-match-segs(ps, ts[1:]));
+  // ---- one pattern line ----------------------------------------------------------------------------------------------------
+  def gx-rtrim-sp(s) = len(s) > 0 && str_byte_at(s, len(s) - 1) == 32 && !(len(s) > 1 && str_byte_at(s, len(s) - 2) == 92) ? gx-rtrim-sp(substring(s, 0, len(s) - 1)) : s;
+  def gx-glob?(s) = gx-glob-at(s, 0);
+  def gx-glob-at(s, i) = i >= len(s) ? false : (str_byte_at(s, i) == 42 || str_byte_at(s, i) == 63 || str_byte_at(s, i) == 91 || str_byte_at(s, i) == 92) ? true : gx-glob-at(s, i + 1);
+  // a rule: [base, negate, dironly, anchored, segments, kind, literal]; kind 0: a literal name, 1: general
+  def gx-parse(base, line0) {
+   let line = gx-rtrim-sp(line0);
+   len(line) == 0 || str_byte_at(line, 0) == 35 ? nothing() : gx-parse-neg(base, line);
+  }
+  def gx-parse-neg(base, line) {
+   let neg = str_byte_at(line, 0) == 33;
+   gx-parse-body(base, neg, neg ? substring(line, 1, len(line)) : line);
+  }
+  def gx-unescape-lead(s) = len(s) > 1 && str_byte_at(s, 0) == 92 && (str_byte_at(s, 1) == 35 || str_byte_at(s, 1) == 33) ? substring(s, 1, len(s)) : s;
+  def gx-parse-body(base, neg, s0) {
+   let s1 = gx-unescape-lead(s0);
+   let dironly = len(s1) > 1 && str_byte_at(s1, len(s1) - 1) == 47;
+   let s2 = dironly ? substring(s1, 0, len(s1) - 1) : s1;
+   let lead = len(s2) > 0 && str_byte_at(s2, 0) == 47;
+   let s3 = lead ? substring(s2, 1, len(s2)) : s2;
+   let anchored = lead || gs-index-of(s3, 47, 0) >= 0;
+   len(s3) == 0 ? nothing() : [base, neg, dironly, anchored, gs-split(s3, 47), gx-glob?(s3) || anchored ? 1 : 0, s3];
+  }
+  def gx-load(base, text) = filter(x => !nothing?(x), map(l => gx-parse(base, l), gs-lines(text)));
+  // ---- deciding ------------------------------------------------------------------------------------------------------------
+  def gx-name(rel) = substring(rel, gx-last-slash(rel, len(rel) - 1) + 1, len(rel));
+  def gx-last-slash(s, i) = i < 0 ? 0 - 1 : str_byte_at(s, i) == 47 ? i : gx-last-slash(s, i - 1);
+  def gx-rule-hits?(rule, rel, name, isdir) = rule[2] && !isdir ? false : len(rule[0]) > 0 && !gs-starts?(rel, rule[0]) ? false : rule[5] == 0 ? str_eq(rule[6], name) : rule[3] ? gx-match-segs(rule[4], gs-split(substring(rel, len(rule[0]), len(rel)), 47)) : gx-fn(rule[6], 0, name, 0);
+  // rules: highest priority first. 1 ignored, 0 not (no rule, or the first rule that hits is a negation)
+  def gx-ign(rules, rel, name, isdir) = nil?(rules) ? 0 : gx-rule-hits?(rules[0], rel, name, isdir) ? (rules[0][1] ? 0 : 1) : gx-ign(rules[1:], rel, name, isdir);
+  def gx-ignored?(rules, rel, isdir) = gx-ign(rules, rel, gx-name(rel), isdir);
+  // ---- the stacks ----------------------------------------------------------------------------------------------------------
+  def gx-push(rules, newrules) = append(ginf-reverse(newrules, []), rules);
+  def gx-global-path() = (host_getenv("HOME") ?? "") ++ "/.config/git/ignore";
+  def gx-stack(r) {
+   let global = gx-load("", gs-text-or(gx-global-path(), ""));
+   let info = gx-load("", gs-text-or(gs-common(r) ++ "/info/exclude", ""));
+   gx-push(gx-push([], global), info);
+  }
+ }
+ 0;
+}

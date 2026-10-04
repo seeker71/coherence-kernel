@@ -1,0 +1,74 @@
+; band-pin-band.bml — observe/band-pin-run.bml pins the bands that answer their own head comment, and runs each band in this process:
+; cell_run answers the band's value, no child and no stdout to read back (docs/in-process-cells.md). The band plants four bands in the
+; temp directory (one that answers its `; Expected:` claim, one that answers otherwise, one with no claim, one that stops after
+; printing) and calls the door on them as a cell, with the paths as its stdin value.
+;
+; Verdict 31 when every claim lands:
+;   1   check: `pin <path> 7` for the band that answers its claim, `keep <path> answered=7 stated=8` for the one that answers otherwise,
+;       `none <path>` for the one with no claim, `keep <path> answered=<last printed line> stated=3` for the one that stops, then
+;       `band-pin pinned=1 kept=3`; the door's value is 3 (the bands left as written); no file changes
+;   2   apply: the agreeing band's head line becomes `; Verdict 7` (the text after the number stays); the other three files are as written
+;   4   a second apply pins nothing more (the pinned band has no `; Expected:` left): `none` for it and `band-pin pinned=0 kept=4`
+;   8   the door reads its input a line at a time, so an empty stdin value pins nothing and answers 0
+;   16  the door ran as a cell: its record has no stop, and the planted units were each run in this process (not-resident then resident on a second call)
+;
+; REQUIRES: the built ./fkwu with the cell_run door (docs/in-process-cells.md), the body root as the working directory.
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+ class BandPinBand {
+  def bpb-dir() = temp_dir() ++ "/band-pin-band-" ++ host_pid().str();
+  def bpb-has(s, part) = str_find(s, part, 0) >= 0;
+  def bpb-bit(ok, bit) = ok ? bit : 0;
+  def bpb-agree() = bpb-dir() ++ "/agree.fk";
+  def bpb-differ() = bpb-dir() ++ "/differ.fk";
+  def bpb-none() = bpb-dir() ++ "/none.fk";
+  def bpb-stops() = bpb-dir() ++ "/stops.fk";
+  def bpb-plant() {
+   let made = host_dir_mkdir(bpb-dir());
+   let a = write_file(bpb-agree(), "; agree.fk — answers its claim\n;\n; Expected: 7 when it holds\n(do 7)\n");
+   let b = write_file(bpb-differ(), "; differ.fk — answers otherwise\n;\n; Expected: 8\n(do 7)\n");
+   let c = write_file(bpb-none(), "; none.fk — no claim\n(do 5)\n");
+   let d = write_file(bpb-stops(), "; stops.fk — prints, then stops\n;\n; Expected: 3\n(do (print_str \"before the stop\") (form_error \"planted stop\"))\n");
+   made;
+  }
+  def bpb-paths() = [bpb-agree(), bpb-differ(), bpb-none(), bpb-stops()];
+  def bpb-call(mode) = cell_run("observe/band-pin-run.bml", 0, 120000, cons(mode, bpb-paths()));
+  def bpb-text(p) = read_file(p) ?? "";
+  def bpb-texts() = bpb-join(map(p => bpb-text(p), bpb-paths()), "|");
+  def bpb-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ bpb-join(xs[1:], sep);
+  def bpb-say(label, v) = print([label, v]);
+  def bpb-door?() = !nothing?(cell_run(0, 0, nothing(), nothing()));
+  def bpb-absent() {
+   let shown = print(["band-pin-band", "door absent: this fkwu has no cell_run; rebuild it (cc -O2 -o fkwu.new runtime/fkwu-uni.c)"]);
+   let verdict = print(["band-pin-band", "verdict", 0]);
+   0;
+  }
+  def bpb-run() {
+   let planted = bpb-plant();
+   let before = bpb-texts();
+   let checked = bpb-call("check");
+   let out1 = (String) record_get(checked, "out");
+   let shown1 = bpb-say("check", out1);
+   let unchanged = (String) bpb-texts() == before;
+   let b1 = bpb-bit(bpb-has(out1, "pin " ++ bpb-agree() ++ " 7\n") && bpb-has(out1, "keep " ++ bpb-differ() ++ " answered=7 stated=8\n") && bpb-has(out1, "none " ++ bpb-none() ++ "\n")
+    && bpb-has(out1, "keep " ++ bpb-stops() ++ " answered=before the stop stated=3\n") && bpb-has(out1, "band-pin pinned=1 kept=3\n") && nothing?(record_get(checked, "stopped")) && (Comparable) record_get(checked, "value") == 3 && unchanged, 1);
+   let applied = bpb-call("apply");
+   let out2 = (String) record_get(applied, "out");
+   let shown2 = bpb-say("apply", out2);
+   let agreed = bpb-text(bpb-agree());
+   let b2 = bpb-bit(bpb-has(agreed, "; Verdict 7 when it holds\n(do 7)") && !bpb-has(agreed, "Expected") && bpb-has(out2, "band-pin pinned=1 kept=3\n")
+    && (String) bpb-text(bpb-differ()) == "; differ.fk — answers otherwise\n;\n; Expected: 8\n(do 7)\n" && (String) bpb-text(bpb-none()) == "; none.fk — no claim\n(do 5)\n" && bpb-has(bpb-text(bpb-stops()), "; Expected: 3"), 2);
+   let again = bpb-call("apply");
+   let out3 = (String) record_get(again, "out");
+   let b4 = bpb-bit(bpb-has(out3, "none " ++ bpb-agree() ++ "\n") && bpb-has(out3, "band-pin pinned=0 kept=4\n") && (Comparable) record_get(again, "value") == 4, 4);
+   let empty = cell_run("observe/band-pin-run.bml", 0, 120000, nothing());
+   let b8 = bpb-bit(bpb-has((String) record_get(empty, "out"), "band-pin pinned=0 kept=0\n") && (Comparable) record_get(empty, "value") == 0, 8);
+   let b16 = bpb-bit(nothing?(record_get(applied, "stopped")) && (Comparable) record_get(again, "resident") == 1, 16);
+   let cleaned = host_dir_rmdir(bpb-dir());
+   let verdict = b1 + b2 + b4 + b8 + b16;
+   let shown = print(["band-pin-band", "verdict", verdict]);
+   verdict;
+  }
+ }
+ bpb-door?() ? bpb-run() : bpb-absent();
+}

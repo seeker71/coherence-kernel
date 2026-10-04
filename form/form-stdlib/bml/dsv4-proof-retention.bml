@@ -1,8 +1,8 @@
 // Preserve a completed proof directory before its caller removes that directory.
-// Form owns the request, complete process capture, new archive and readback.
-// tar carries the filesystem archive operation; captured streams stay private.
+// Form owns the request, the physical directory admission, the ustar archive (tar-ustar.bml writes it; no program runs), the new
+// archive's exclusive publication and its readback. The capture record of the writing stays private beside the evidence.
 // The caller owns the source directory and the archive's subsequent lifetime.
-// preludes: form-stdlib/bml/native-source-inventory.bml form-stdlib/bml/dsv4-oracle-input.bml form-stdlib/bml/dsv4-view-publication.bml
+// preludes: form-stdlib/bml/native-source-inventory.bml form-stdlib/bml/dsv4-oracle-input.bml form-stdlib/bml/dsv4-view-publication.bml form-stdlib/bml/tar-ustar.bml
 section [form.bml] {
  class Dsv4ProofRetention {
   def dpa-parse(bytes) {
@@ -14,25 +14,19 @@ section [form.bml] {
    oh-voice(row); let response = oh-response(row,if ok then "continue" else "request-evidence"); oh-voice(response);
    let action = oh-select(row,response,"request-evidence"); oh-voice(oh-applied(row,action,evidence)); ok;
   }
-  def dpa-argv(source) = list("/usr/bin/tar","-cf","-","-C",source,".");
   def dpa-operating-path(path) = if ((String) substring(path,0,1) == "/") then path else str_concat("./",path);
-  // The child carries only directory operations. Form reads its complete physical
-  // cwd and decides containment; one final output LF is transport, not path data.
+  // Form reads the complete physical path of a directory (realpath: every link resolved) and decides containment.
   def dpa-directory(path) {
-   let argv = list("/bin/sh","-c","CDPATH= cd -P -- \"$1\" && /bin/pwd -P","proof-directory",dpa-operating-path(path));
-   if (!npp-argv(argv)) then record_new(0,"ready",0,"path","","capture","") else dpa-directory-read(nsi-capture(argv));
-  }
-  def dpa-directory-read(captured) {
-   let text = nsi-text(captured);
-   let ready = (nsi-ok(captured) && ((str_len(text) > 1) && (((String) substring(text,0,1) == "/") && ((String) substring(text,(str_len(text) - 1),str_len(text)) == "\n"))));
-   record_new(0,"ready",ready,"path",if ready then dsi-without-final-lf(text) else "","capture",nsi-evidence(captured));
+   let physical = host_realpath(dpa-operating-path(path));
+   let ready = ((String) value_kind(physical) == "string") && ((str_len(physical) > 1) || ((String) physical == "/")) && ((String) substring(physical,0,1) == "/") && ((Comparable) fs_is_dir(physical) == 1);
+   record_new(0,"ready",if ready then 1 else 0,"path",if ready then physical else "","capture","");
   }
   def dpa-within(path,directory) = (((String) directory == "/") || (((String) path == directory) || ((Comparable) str_find(path,str_concat(directory,"/"),0) == 0)));
   def dpa-refused(reason) {
    dpa-observe(str_concat("archive-admission-",int_to_str(host_pid())),"complete-archive-admission",0,json-node-string(reason));
    record_new(0,"ready",0,"reason",reason,"capture","","child-exit",-1);
   }
-  def dpa-retain(source,destination) = if (!(dqi-path(source) && dqi-path(destination))) then dpa-refused("complete NUL-free source and archive paths required") else if (!npp-argv(dpa-argv(source))) then dpa-carrier-refused() else dpa-directories(source,destination);
+  def dpa-retain(source,destination) = if (!(dqi-path(source) && dqi-path(destination))) then dpa-refused("complete NUL-free source and archive paths required") else dpa-directories(source,destination);
   def dpa-directories(source,destination) {
    let parent = dpa-directory(fs-path-dirname(destination)); let input = dpa-directory(source); let captures = dpa-directory(".hearth");
    if (!((Comparable) record_get(parent,"ready") == 1)) then dpa-directory-refused(parent) else if (!((Comparable) record_get(input,"ready") == 1)) then dpa-directory-refused(input) else if (!((Comparable) record_get(captures,"ready") == 1)) then dpa-directory-refused(captures) else dpa-directories-admitted(record_get(input,"path"),record_get(parent,"path"),record_get(captures,"path"),destination);
@@ -40,14 +34,25 @@ section [form.bml] {
   def dpa-directory-refused(directory) {
    let refused = dpa-refused("complete physical directory admission refused; OS capture retained"); record_set(refused,"capture",record_get(directory,"capture")); refused;
   }
-  def dpa-directories-admitted(input,parent,captures,destination) = if (dpa-within(parent,input) || dpa-within(captures,input)) then dpa-refused("archive and capture directories must remain outside the source directory") else if (!npp-argv(dpa-argv(input))) then dpa-carrier-refused() else dpa-capture(dpa-argv(input),fs-path-join(parent,fs-path-basename(destination)));
-  def dpa-carrier-refused() {
-   dpa-observe(str_concat("archive-argv-",int_to_str(host_pid())),"complete-argv-admission",0,json-node-string("current host argv carrier cannot preserve this request"));
-   record_new(0,"ready",0,"reason","current host argv carrier cannot preserve this request","capture","","child-exit",-1);
+  def dpa-directories-admitted(input,parent,captures,destination) = if (dpa-within(parent,input) || dpa-within(captures,input)) then dpa-refused("archive and capture directories must remain outside the source directory") else dpa-capture(input,fs-path-join(parent,fs-path-basename(destination)));
+  // The private evidence directory of one writing: owner-only, new (a name that stands is never reused).
+  def dpa-job() {
+   let made = fs_mkdir(".hearth");
+   dpa-job-try(0);
   }
-  def dpa-capture(argv,destination) {
-   let captured = nsi-capture(argv);
-   let job = nsi-evidence(captured); let complete = (nsi-ok(captured) && (str_len(nsi-text(captured)) > 0));
+  def dpa-job-try(attempt) {
+   let path = str_concat(".hearth/proof-archive-",str_concat(int_to_str(host_pid()),str_concat("-",str_concat(int_to_str(host_monotonic_ms()),str_concat("-",int_to_str(attempt))))));
+   if ((Comparable) host_mkdir_mode(path,448) == 1) then path else if (attempt >= 32) then form_error("proof archive cannot create its private evidence directory") else dpa-job-try(attempt + 1);
+  }
+  // The capture shape is the one the publication below reads: accepted bytes, exit (0: the writer ran to its end), the archive, the evidence path.
+  def dpa-capture(source,destination) {
+   let job = dpa-job(); let made = ust-tree(source);
+   let complete = (((String) made[0] == "") && (str_len(made[1]) > 0));
+   let report = json-emit-precise(json-node-object(list(oh-s("schema","proof-archive-capture-v1"),oh-s("writer","form-ustar"),oh-n("entries",made[2]),oh-n("bytes",str_len(made[1])),oh-n("complete",if complete then 1 else 0),oh-s("reason",made[0]),oh-n("observed_at_ms",now_unix_ms()))));
+   if ((Comparable) write_file(nsi-path(job,"capture.json"),report) != str_len(report)) then form_error("proof archive cannot retain capture status") else dpa-captured(job,complete,made,destination);
+  }
+  def dpa-captured(job,complete,made,destination) {
+   let captured = list(complete,if complete then 0 else -1,made[1],job);
    dpa-observe(job,"complete-archive-capture",complete,oh-reference(nsi-path(job,"capture.json")));
    if (!complete) then record_new(0,"ready",0,"reason","archive command or complete stream refused","capture",job,"child-exit",nsi-status(captured)) else dpa-publish(captured,destination);
   }

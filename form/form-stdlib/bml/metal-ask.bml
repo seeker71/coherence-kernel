@@ -10,7 +10,6 @@ import native/metal/ask-declared-cost.fk;
 import form-stdlib/bml/sha256-owned.bml;
 import form-stdlib/organ-health.bml;
 import form-stdlib/form-fs.fk;
-import form-stdlib/bml/spawn-guard.bml;
 section [form.bml] {
  class MetalAsk {
   def ma-cat(xs) = nil?(xs) ? "" : ((String) xs[0] + ma-cat(xs[1:]));
@@ -148,14 +147,29 @@ section [form.bml] {
   def ma-publish(owner,path) {
    !((Comparable) record_get(owner,"ok") == 1) ? 0 : ((Comparable) len(path) == 0) || (str_find(path,byte_to_str(0),0) >= 0) ? ma-publish-refused(owner,"") : ma-publish-ready(owner,(Comparable) str_byte_at(path,0) == 47 ? path : fs-path-join(host_cwd(),path),ma-artifact(owner));
   }
-  // Host filesystem utilities carry only mode-aware mkdir and atomic 0600
-  // temporary creation. Form owns path traversal, admission, writing and rename.
-  def ma-command(argv) = ma-wait(sg-spawn-quiet(argv));
-  def ma-wait(pid) = nothing?(pid) ? -1 : pid <= 0 ? -1 : host_wait(pid);
+  // The seed's doors carry the mode-aware mkdir (host_mkdir_mode: 1 only for the call that made the directory)
+  // and chmod. Form owns path traversal, admission, naming, writing and rename.
   def ma-private-dir(path) = fs-is-dir?(path) ? 1 : fs-exists?(path) ? 0 : ma-private-child(path,ma-private-dir(fs-path-dirname(path)));
-  def ma-private-child(path,parent) = !parent ? 0 : ((Comparable) ma-command(["/bin/mkdir","-m","700",path]) == 0);
-  def ma-output-line(raw) = nothing?(raw) ? "" : (len(raw) > 0) && ((Comparable) str_byte_at(raw,len(raw) - 1) == 10) ? substring(raw,0,len(raw) - 1) : raw;
-  def ma-private-temp(path) = ma-check-temp(path,ma-output-line(host_capture(["/usr/bin/mktemp",path ++ ".native.XXXXXXXX"])));
+  def ma-private-child(path,parent) = !parent ? 0 : ((Comparable) host_mkdir_mode(path,448) == 1);
+  // A private 0600 temporary beside the artifact. The name is made unique by claiming it: the call that makes
+  // the directory `<name>.claim` owns `<name>` (mkdir answers 1 once per name, whoever else is racing); the empty
+  // file is then made at 0600 and the claim is released.
+  def ma-temp-name(path,attempt) = path ++ ".native." ++ host_pid().str() ++ "-" ++ now_unix_ms().str() ++ "-" ++ attempt.str();
+  def ma-private-temp(path) = ma-temp-try(path,0);
+  def ma-temp-try(path,attempt) = attempt >= 32 ? nothing() : ma-temp-claim(path,attempt,ma-temp-name(path,attempt));
+  def ma-temp-claim(path,attempt,name) = (Comparable) host_mkdir_mode(name ++ ".claim",448) == 1 ? ma-temp-owned(path,attempt,name) : ma-temp-try(path,attempt + 1);
+  // a name whose file stands already (an earlier call of this process in the same millisecond) is not ours: the claim goes back and the next attempt is tried
+  def ma-temp-owned(path,attempt,name) = (Comparable) fs_exists(name) == 0 ? ma-temp-made(path,name) : ma-temp-skip(path,attempt,name);
+  def ma-temp-skip(path,attempt,name) {
+   let released = fs_rmdir(name ++ ".claim");
+   ma-temp-try(path,attempt + 1);
+  }
+  def ma-temp-made(path,name) {
+   let created = write_file(name,"");
+   let private = host_chmod(name,384);
+   let released = fs_rmdir(name ++ ".claim");
+   (Comparable) private == 0 ? ma-check-temp(path,name) : nothing();
+  }
   def ma-check-temp(path,temporary) = ((Comparable) str_find(temporary,path ++ ".native.",0) == 0) && ((Comparable) file_size(temporary) == 0) ? temporary : nothing();
   def ma-publish-ready(owner,path,text) {
    let made = ma-private-dir(fs-path-dirname(path));

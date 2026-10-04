@@ -1,0 +1,295 @@
+// git-diff.bml — `git diff` in Form: which paths differ between two trees, a tree and the index, a tree and the working tree, or the
+// index and the working tree; and what differs inside a path (Myers' O(ND) line diff, unified hunks, line counts, --stat).
+//
+// A difference row is  [code, path, old mode, old raw id, new mode, new raw id]  with code A, D, M, T or R (a rename adds the old
+// path as element 6); a missing side has mode 0 and id nothing(). Exact renames (same blob id on a deleted and an added path) are
+// paired the way git's default detection pairs them; a similar-but-changed file is a deletion and an addition.
+//
+//   gdf-trees(r, ta, tb)            rows for two tree ids (either may be nothing(): the empty tree), subtrees with equal ids skipped
+//   gdf-index-rows(r, ix, tree)     tree against the index   (git diff --cached [tree])
+//   gdf-worktree-rows(r, ix, tree)  tree against the working tree, for the paths the index or the tree holds   (git diff <tree>)
+//   gdf-unstaged-rows(r, ix)        the index against the working tree   (git diff)
+//   gdf-lines-diff(a, b)            the edit script between two texts: [[kind, a pos, b pos] ...], kind "-" or "+", with the line arrays
+//   gdf-patch-text(...)             the unified diff of one row with n lines of context
+//
+// The line diff trims the common head and tail, then runs Myers on integer line ids held in strings (O(1) access); a script longer
+// than 600 edits is replaced by one delete-all/insert-all hunk (a valid diff, not a minimal one). Hunk headings after the second
+// `@@` (git's function-name context) are not written.
+//
+// PROOF: form-stdlib/tests/git-native-diff-band.fk — edit scripts checked by applying them (the result must equal the new text),
+// minimality against hand-counted distances, hunk headers against hand-written diffs, and the tree diffs of this repository.
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml form-stdlib/bml/git-refs.bml form-stdlib/bml/git-index.bml form-stdlib/bml/git-ignore.bml form-stdlib/bml/git-status.bml form-stdlib/bml/git-rev.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-rev.bml;
+section [form.bml] {
+ class GitDiff {
+  // ---- tree against tree ---------------------------------------------------------------------------------------------------
+  def gdf-ents(r, raw) = nothing?(raw) ? [] : grv-tree-ents(r, raw);
+  def gdf-key(e) = gs-tree?(e[0]) ? e[1] ++ "/" : e[1];
+  def gdf-del-all(r, e, prefix, acc) = gs-tree?(e[0]) ? foldl((a, f) => cons(["D", f[0], f[1], f[2], 0, nothing()], a), acc, gst-flatten(r, e[2], prefix ++ e[1] ++ "/")) : cons(["D", prefix ++ e[1], gs-mode-int(e[0]), e[2], 0, nothing()], acc);
+  def gdf-add-all(r, e, prefix, acc) = gs-tree?(e[0]) ? foldl((a, f) => cons(["A", f[0], 0, nothing(), f[1], f[2]], a), acc, gst-flatten(r, e[2], prefix ++ e[1] ++ "/")) : cons(["A", prefix ++ e[1], 0, nothing(), gs-mode-int(e[0]), e[2]], acc);
+  // newest-first rows
+  def gdf-walk(r, ta, tb, prefix, acc) {
+   nil?(ta) && nil?(tb) ? acc : nil?(tb) ? gdf-walk(r, ta[1:], tb, prefix, gdf-del-all(r, ta[0], prefix, acc)) : nil?(ta) ? gdf-walk(r, ta, tb[1:], prefix, gdf-add-all(r, tb[0], prefix, acc)) : gdf-walk-cmp(r, ta, tb, prefix, acc, gdf-key(ta[0]), gdf-key(tb[0]));
+  }
+  def gdf-walk-cmp(r, ta, tb, prefix, acc, ka, kb) = str_eq(ka, kb) ? gdf-both(r, ta, tb, prefix, acc) : gr-lt(ka, kb) ? gdf-walk(r, ta[1:], tb, prefix, gdf-del-all(r, ta[0], prefix, acc)) : gdf-walk(r, ta, tb[1:], prefix, gdf-add-all(r, tb[0], prefix, acc));
+  def gdf-both(r, ta, tb, prefix, acc) {
+   let a = ta[0];
+   let b = tb[0];
+   gs-tree?(a[0]) ? (str_eq(a[2], b[2]) ? gdf-walk(r, ta[1:], tb[1:], prefix, acc) : gdf-walk(r, ta[1:], tb[1:], prefix, gdf-walk(r, gdf-ents(r, a[2]), gdf-ents(r, b[2]), prefix ++ a[1] ++ "/", acc))) : gdf-walk(r, ta[1:], tb[1:], prefix, gdf-changed(a, b, prefix, acc));
+  }
+  def gdf-changed(a, b, prefix, acc) {
+   let am = gs-mode-int(a[0]);
+   let bm = gs-mode-int(b[0]);
+   str_eq(a[2], b[2]) && am == bm ? acc : cons([am / 4096 != bm / 4096 ? "T" : "M", prefix ++ a[1], am, a[2], bm, b[2]], acc);
+  }
+  def gdf-trees(r, ta, tb) = ginf-reverse(gdf-walk(r, gdf-ents(r, ta), gdf-ents(r, tb), "", []), []);
+  // ---- from the status machinery ---------------------------------------------------------------------------------------------
+  // status staged rows [code, path, mode, id, oldpath, oldmode, oldid] (HEAD = old, index = new) -> diff rows
+  def gdf-from-staged(row) = str_eq(row[0], "A") ? ["A", row[1], 0, nothing(), row[2], row[3]] : str_eq(row[0], "D") ? ["D", row[1], row[2], row[3], 0, nothing()] : [row[0], row[1], row[5], row[6], row[2], row[3]];
+  def gdf-index-rows(r, ix, tree) {
+   let staged = gst-staged-tree(r, ix, tree);
+   let plain = filter(x => !str_eq(x[0], "R"), staged);
+   let rens = filter(x => str_eq(x[0], "R"), staged);
+   append(map(x => gdf-from-staged(x), plain), map(x => ["R", x[1], x[5], x[6], x[2], x[3], x[4]], rens));
+  }
+  def gdf-wt-id(top, e) {
+   let m = host_file_mode(top ++ "/" ++ e[0]);
+   m < 0 ? nothing() : gst-blob-hex-raw(top ++ "/" ++ e[0]);
+  }
+  // the index against the working tree: [code, path, old mode, old id, new mode, new id|nothing()] for the entries whose file differs
+  def gdf-unstaged-rows(r, ix) {
+   let top = gs-top(r);
+   let dirty = gst-unstaged(top, ix[0], gst-index-mtime(r), []);
+   filter(x => !nothing?(x), map(d => gdf-unstaged-one(top, ix[0], d), dirty));
+  }
+  def gdf-find-entry(ents, path) = nil?(ents) ? nothing() : str_eq(ents[0][0], path) && ents[0][6] == 0 ? ents[0] : gdf-find-entry(ents[1:], path);
+  def gdf-unstaged-one(top, ents, d) {
+   let e = gdf-find-entry(ents, d[1]);
+   let m = host_file_mode(top ++ "/" ++ d[1]);
+   nothing?(e) ? nothing() : str_eq(d[0], "D") ? ["D", d[1], e[1], e[2], 0, nothing()] : [str_eq(d[0], "T") ? "T" : "M", d[1], e[1], e[2], gdf-wt-mode(e[1], m), nothing()];
+  }
+  def gdf-wt-mode(oldmode, m) = ((m / 4096) % 16) == 10 ? 40960 : band(m, 64) != 0 ? 33261 : 33188;
+  // tree against the working tree: paths the staged diff or the stat check marks, each judged by the working file's blob id
+  def gdf-worktree-rows(r, ix, tree) {
+   let top = gs-top(r);
+   let staged = gdf-index-rows(r, ix, tree);
+   let dirty = gst-unstaged(top, ix[0], gst-index-mtime(r), []);
+   let paths = gs-uniq-str(append(map(x => x[1], staged), map(d => d[1], dirty)), []);
+   let imtime = gst-index-mtime(r);
+   filter(x => !nothing?(x), map(p => gdf-wt-path(r, ix, imtime, tree, top, p), paths));
+  }
+  def gdf-tree-entry-at(r, tree, path) {
+   let id = nothing?(tree) ? nothing() : grv-path-entry(r, tree, gs-split(path, 47));
+   id;
+  }
+  // [mode, raw] of a path in a tree, or nothing()
+  def gdf-path-info(r, tree, path) = nothing?(tree) ? nothing() : gdf-path-walk(r, tree, gs-split(path, 47));
+  def gdf-path-walk(r, tree, segs) {
+   let hit = filter(e => str_eq(e[1], segs[0]), grv-tree-ents(r, tree));
+   nil?(hit) ? nothing() : nil?(segs[1:]) ? [gs-mode-int(hit[0][0]), hit[0][2]] : gs-tree?(hit[0][0]) ? gdf-path-walk(r, hit[0][2], segs[1:]) : nothing();
+  }
+  // one path of tree-against-working-tree. The new side is "the working file" (id nothing()); whether the content differs is settled by the
+  // cheapest question that answers: the index remembers a clean stat for the same blob; the sizes differ; only then the bytes are hashed
+  def gdf-wt-path(r, ix, imtime, tree, top, p) {
+   let old = gdf-path-info(r, tree, p);
+   let e = gdf-find-entry(ix[0], p);
+   let m = host_file_mode(top ++ "/" ++ p);
+   let idn = m < 0 || ((m / 4096) % 16) == 4 ? nothing() : host_file_identity(top ++ "/" ++ p);
+   nothing?(idn) ? (nothing?(old) ? nothing() : ["D", p, old[0], old[1], 0, nothing()]) : nothing?(old) ? ["A", p, 0, nothing(), gdf-wt-mode(33188, m), nothing()] : gdf-wt-compare(r, e, imtime, top, p, old, idn, m);
+  }
+  def gdf-wt-compare(r, e, imtime, top, p, old, idn, m) {
+   let nm = gdf-wt-mode(old[0], m);
+   let clean = !nothing?(e) && str_eq(e[2], old[1]) && gst-stat-clean?(e, idn, imtime);
+   let oldsize = !nothing?(e) && str_eq(e[2], old[1]) && !gst-smudged?(e) ? e[3] : len(gs-read(r, old[1])[1] ?? "");
+   clean && old[0] == nm ? nothing() : (idn[0] != oldsize || old[0] != nm || !str_eq(gst-blob-hex-raw(top ++ "/" ++ p), old[1])) ? ["M", p, old[0], old[1], nm, nothing()] : nothing();
+  }
+  // ---- renames (exact) ------------------------------------------------------------------------------------------------------
+  def gdf-find-del(rows, id) = nil?(rows) ? nothing() : str_eq(rows[0][0], "D") && !nothing?(rows[0][3]) && str_eq(rows[0][3], id) ? rows[0] : gdf-find-del(rows[1:], id);
+  def gdf-detect(rows) = gdf-detect-go(rows, filter(x => str_eq(x[0], "A"), rows), filter(x => str_eq(x[0], "D"), rows), []);
+  def gdf-detect-go(rows, adds, dels, pairs) = nil?(adds) ? gdf-apply-pairs(rows, pairs) : gdf-detect-one(rows, adds, dels, pairs, nothing?(adds[0][5]) ? nothing() : gdf-find-del(dels, adds[0][5]));
+  def gdf-detect-one(rows, adds, dels, pairs, hit) = nothing?(hit) ? gdf-detect-go(rows, adds[1:], dels, pairs) : gdf-detect-go(rows, adds[1:], filter(x => !str_eq(x[1], hit[1]), dels), cons([adds[0][1], hit], pairs));
+  def gdf-apply-pairs(rows, pairs) = nil?(pairs) ? rows : gdf-apply-pairs(gdf-merge-pair(rows, pairs[0]), pairs[1:]);
+  def gdf-merge-pair(rows, pair) = map(x => str_eq(x[0], "A") && str_eq(x[1], pair[0]) ? ["R", x[1], pair[1][2], pair[1][3], x[4], x[5], pair[1][1]] : x, filter(x => !(str_eq(x[0], "D") && str_eq(x[1], pair[1][1])), rows));
+  def gdf-sort(rows) = gst-msort(rows);
+  // ---- pathspecs -----------------------------------------------------------------------------------------------------------
+  def gdf-literal-hit?(spec, path) = len(spec) == 0 || str_eq(spec, ".") || str_eq(spec, path) || (gs-starts?(path, spec) && (str_byte_at(spec, len(spec) - 1) == 47 || (len(path) > len(spec) && str_byte_at(path, len(spec)) == 47)));
+  def gdf-glob?(spec) = gx-glob?(spec);
+  def gdf-spec-hit?(spec, path, literal) = gs-starts?(spec, ":!") || gs-starts?(spec, ":^") ? false : !literal && gdf-glob?(spec) ? gx-fn(spec, 0, path, 0) || gdf-glob-dir?(spec, path) : gdf-literal-hit?(spec, path);
+  // a glob can name a directory the path lies under
+  def gdf-glob-dir?(spec, path) = false;
+  def gdf-excl-spec(spec) = gs-starts?(spec, ":!") ? substring(spec, 2, len(spec)) : gs-starts?(spec, ":^") ? substring(spec, 2, len(spec)) : "";
+  def gdf-match-all?(specs, path, literal) {
+   let inc = filter(s => len(gdf-excl-spec(s)) == 0, specs);
+   let exc = filter(s => len(gdf-excl-spec(s)) > 0, specs);
+   (nil?(inc) || any?(s => gdf-spec-hit?(s, path, literal), inc)) && !any?(s => gdf-spec-hit?(gdf-excl-spec(s), path, literal), exc);
+  }
+  // ---- text to lines --------------------------------------------------------------------------------------------------------
+  def gdf-nonl?(s) = len(s) > 0 && str_byte_at(s, len(s) - 1) != 10;
+  def gdf-text-lines(s) = gs-split(s, 10);
+  def gdf-binary?(s) = gdf-nul-in(s, 0, len(s) < 8000 ? len(s) : 8000);
+  def gdf-nul-in(s, i, n) = i >= n ? false : str_byte_at(s, i) == 0 ? true : gdf-nul-in(s, i + 1, n);
+  // ids: one 3-byte id per line; the last line of a text with no final newline gets a distinct key
+  def gdf-id-of(rec, key) {
+   let known = record_has(rec, key);
+   known ? record_get(rec, key) : gdf-new-id(rec, key);
+  }
+  def gdf-new-id(rec, key) {
+   let id = record_get(rec, gdf-ckey()) + 1;
+   let a = record_set(rec, key, id);
+   let b = record_set(rec, gdf-ckey(), id);
+   id;
+  }
+  // the record's own counter key and the mark for a last line with no newline (bytes no text line is keyed by)
+  def gdf-ckey() = str_concat(byte_to_str(1), "n");
+  def gdf-nlkey() = byte_to_str(1);
+  def gdf-id-bytes(id) = str_concat(byte_to_str(band(shr_u32(id, 16), 255)), str_concat(byte_to_str(band(shr_u32(id, 8), 255)), byte_to_str(band(id, 255))));
+  def gdf-ids(rec, lines, nonl, n, i, acc) = i >= n ? ginf-join(acc) : gdf-ids(rec, lines[1:], nonl, n, i + 1, cons(gdf-id-bytes(gdf-id-of(rec, nonl && i == n - 1 ? lines[0] ++ gdf-nlkey() : lines[0])), acc));
+  def gdf-at(ids, i) = (str_byte_at(ids, 3 * i) * 65536) + (str_byte_at(ids, (3 * i) + 1) * 256) + str_byte_at(ids, (3 * i) + 2);
+  // ---- Myers ---------------------------------------------------------------------------------------------------------------
+  def gdf-snake(a, b, n, m, x, y, off) = x < n && y < m && gdf-at(a, off + x) == gdf-at(b, off + y) ? gdf-snake(a, b, n, m, x + 1, y + 1, off) : x;
+  // the x reached on diagonal k at depth d; prev holds depth d-1's xs for k = -(d-1) .. d-1 step 2
+  def gdf-pick(prev, k, d) {
+   let down = k == 0 - d ? true : k == d ? false : prev[(k - 1 + d - 1) / 2] < prev[(k + 1 + d - 1) / 2];
+   down ? prev[(k + 1 + d - 1) / 2] : prev[(k - 1 + d - 1) / 2] + 1;
+  }
+  def gdf-layer(a, b, n, m, d, prev, k, acc) = k > d ? ginf-reverse(acc, []) : gdf-layer(a, b, n, m, d, prev, k + 2, cons(gdf-snake(a, b, n, m, gdf-pick(prev, k, d), gdf-pick(prev, k, d) - k, 0), acc));
+  def gdf-done?(layer, d, n, m) = gdf-done-at(layer, 0 - d, n, m);
+  def gdf-done-at(layer, k, n, m) = nil?(layer) ? false : (layer[0] == n && layer[0] - k == m) ? true : gdf-done-at(layer[1:], k + 2, n, m);
+  // the trace: layers newest first. offsets are applied by the caller through a and b already being the trimmed middle (off 0)
+  def gdf-search(a, b, n, m, d, prev, trace) {
+   let layer = d == 0 ? [gdf-snake(a, b, n, m, 0, 0, 0)] : gdf-layer(a, b, n, m, d, prev, 0 - d, []);
+   gdf-done?(layer, d, n, m) ? cons(layer, trace) : d >= 600 ? nothing() : gdf-search(a, b, n, m, d + 1, layer, cons(layer, trace));
+  }
+  // edits from the trace: [[kind, a pos, b pos] ...] in script order
+  def gdf-back(trace, d, k, x, y, acc) {
+   d == 0 ? acc : gdf-back-step(trace, d, k, x, y, acc, trace[1]);
+  }
+  def gdf-back-step(trace, d, k, x, y, acc, prev) {
+   let down = k == 0 - d ? true : k == d ? false : prev[(k - 1 + d - 1) / 2] < prev[(k + 1 + d - 1) / 2];
+   let pk = down ? k + 1 : k - 1;
+   let px = prev[(pk + d - 1) / 2];
+   let py = px - pk;
+   gdf-back(trace[1:], d - 1, pk, px, py, cons(down ? ["+", px, py] : ["-", px, py], acc));
+  }
+  def gdf-script(a, b, n, m) {
+   let trace = gdf-search(a, b, n, m, 0, [], []);
+   nothing?(trace) ? gdf-replace(n, m) : gdf-back(trace, len(trace) - 1, n - m, n, m, []);
+  }
+  // a valid but not minimal script: delete everything, insert everything
+  def gdf-replace(n, m) = append(map(i => ["-", i, 0], range(0, n)), map(j => ["+", n, j], range(0, m)));
+  // ---- the diff of two texts ------------------------------------------------------------------------------------------------
+  // [script (positions are in whole-file line numbers), a lines, b lines, a ids, b ids, a nonl, b nonl]
+  def gdf-lines-diff(sa, sb) {
+   let rec = record_new(0);
+   let z = record_set(rec, gdf-ckey(), 0);
+   let la = gdf-text-lines(sa);
+   let lb = gdf-text-lines(sb);
+   let na = len(la);
+   let nb = len(lb);
+   let ia = gdf-ids(rec, la, gdf-nonl?(sa), na, 0, []);
+   let ib = gdf-ids(rec, lb, gdf-nonl?(sb), nb, 0, []);
+   gdf-diff-ids(la, lb, ia, ib, na, nb, gdf-nonl?(sa), gdf-nonl?(sb));
+  }
+  def gdf-prefix(a, b, n, m, i) = i < n && i < m && gdf-at(a, i) == gdf-at(b, i) ? gdf-prefix(a, b, n, m, i + 1) : i;
+  def gdf-suffix(a, b, n, m, p, j) = n - j > p && m - j > p && gdf-at(a, n - 1 - j) == gdf-at(b, m - 1 - j) ? gdf-suffix(a, b, n, m, p, j + 1) : j;
+  def gdf-diff-ids(la, lb, ia, ib, na, nb, nla, nlb) {
+   let p = gdf-prefix(ia, ib, na, nb, 0);
+   let s = gdf-suffix(ia, ib, na, nb, p, 0);
+   let ma = substring(ia, 3 * p, 3 * (na - s));
+   let mb = substring(ib, 3 * p, 3 * (nb - s));
+   let sc = gdf-script(ma, mb, na - s - p, nb - s - p);
+   [map(e => [e[0], e[1] + p, e[2] + p], sc), la, lb, ia, ib, nla, nlb];
+  }
+  // ---- hunks -----------------------------------------------------------------------------------------------------------------
+  def gdf-end-a(e) = str_eq(e[0], "-") ? e[1] + 1 : e[1];
+  def gdf-end-b(e) = str_eq(e[0], "+") ? e[2] + 1 : e[2];
+  // group script edits into hunks: edits whose gap of unchanged lines is at most 2*ctx
+  def gdf-group(script, ctx, cur, acc) = nil?(script) ? ginf-reverse(nil?(cur) ? acc : cons(ginf-reverse(cur, []), acc), []) : nil?(cur) ? gdf-group(script[1:], ctx, [script[0]], acc) : script[0][1] - gdf-end-a(cur[0]) <= 2 * ctx && (str_eq(script[0][0], "+") || script[0][1] >= gdf-end-a(cur[0])) ? gdf-group(script[1:], ctx, cons(script[0], cur), acc) : gdf-group(script[1:], ctx, [script[0]], cons(ginf-reverse(cur, []), acc));
+  def gdf-count(h, kind) = len(filter(e => str_eq(e[0], kind), h));
+  // [old start, old count, new start, new count] with the start the first line shown (git writes the line before for an empty side)
+  def gdf-header(h, ctx, na, nb) {
+   let first = h[0];
+   let dels = gdf-count(h, "-");
+   let inss = gdf-count(h, "+");
+   let a0 = first[1] - (ctx < first[1] ? ctx : first[1]);
+   let b0 = first[2] - (ctx < first[2] ? ctx : first[2]);
+   let lastend = gdf-end-a(h[len(h) - 1]);
+   let lastendb = gdf-end-b(h[len(h) - 1]);
+   let trailing = ctx < na - lastend ? ctx : na - lastend;
+   let lead = first[1] - a0;
+   let leadb = first[2] - b0;
+   [a0, lead + dels + trailing + (len(h) > 0 ? gdf-between(h) : 0), b0, leadb + inss + trailing + gdf-between(h)];
+  }
+  // unchanged lines between the first and last edit of a hunk
+  def gdf-between(h) = gdf-between-go(h, 0);
+  def gdf-between-go(h, acc) = nil?(h[1:]) ? acc : gdf-between-go(h[1:], acc + (h[1][1] - gdf-end-a(h[0])));
+  def gdf-range(s, c) = c == 1 ? s.str() : s.str() ++ "," ++ c.str();
+  // an empty side is written as the line before (0 at the top); a nonempty side starts at its first line, 1-based
+  def gdf-range-text(start0, count) = count == 0 ? gdf-range(start0, 0) : gdf-range(start0 + 1, count);
+  // ---- the unified text of one hunk -------------------------------------------------------------------------------------------
+  def gdf-line-out(sign, line, nonl) = sign ++ line ++ "\n" ++ (nonl ? "\\ No newline at end of file\n" : "");
+  def gdf-context-lines(lines, from, to, nonl, total, acc) = from >= to ? acc : gdf-context-lines(lines, from + 1, to, nonl, total, cons(gdf-line-out(" ", gdf-nth(lines, from), nonl && from == total - 1), acc));
+  def gdf-nth(xs, i) = i <= 0 ? xs[0] : gdf-nth(xs[1:], i - 1);
+  def gdf-hunk-text(d, h, ctx) {
+   let la = d[1];
+   let lb = d[2];
+   let na = len(la);
+   let nb = len(lb);
+   let hdr = gdf-header(h, ctx, na, nb);
+   let first = h[0];
+   let a0 = hdr[0];
+   let b0 = hdr[2];
+   "@@ -" ++ gdf-range-text(a0, hdr[1]) ++ " +" ++ gdf-range-text(b0, hdr[3]) ++ " @@\n" ++ ginf-join(gdf-hunk-body(d, h, ctx, a0, na, nb));
+  }
+  // newest-first pieces: leading context, each edit with the context between, trailing context
+  def gdf-hunk-body(d, h, ctx, a0, na, nb) {
+   let lead = gdf-context-lines(d[1], a0, h[0][1], d[5], na, []);
+   let mid = gdf-edits(d, h, lead);
+   let lastend = gdf-end-a(h[len(h) - 1]);
+   gdf-context-lines(d[1], lastend, lastend + (ctx < na - lastend ? ctx : na - lastend), d[5], na, mid);
+  }
+  def gdf-edits(d, h, acc) = nil?(h) ? acc : gdf-edits(d, h[1:], gdf-edit-one(d, h, acc));
+  def gdf-edit-one(d, h, acc) {
+   let e = h[0];
+   let na = len(d[1]);
+   let nb = len(d[2]);
+   let line = str_eq(e[0], "-") ? gdf-nth(d[1], e[1]) : gdf-nth(d[2], e[2]);
+   let out = str_eq(e[0], "-") ? gdf-line-out("-", line, d[5] && e[1] == na - 1) : gdf-line-out("+", line, d[6] && e[2] == nb - 1);
+   let acc2 = cons(out, acc);
+   nil?(h[1:]) ? acc2 : gdf-context-lines(d[1], gdf-end-a(e), h[1][1], d[5], na, acc2);
+  }
+  def gdf-hunks-text(d, ctx) = ginf-join(ginf-reverse(map(h => gdf-hunk-text(d, h, ctx), gdf-group(d[0], ctx, [], [])), []));
+  // number of added and deleted lines
+  def gdf-numstat(sa, sb) {
+   let d = gdf-lines-diff(sa, sb);
+   [gdf-count(d[0], "+"), gdf-count(d[0], "-")];
+  }
+  // ---- one row as text ------------------------------------------------------------------------------------------------------
+  def gdf-blob-of(r, top, id, wtpath) = nothing?(id) && len(wtpath) == 0 ? "" : len(wtpath) > 0 ? (read_file(top ++ "/" ++ wtpath) ?? "") : (gs-read(r, id)[1] ?? "");
+  def gdf-mode-text(m) = m == 0 ? "000000" : substring("0000000", 0, 0) ++ (m == 33188 ? "100644" : m == 33261 ? "100755" : m == 40960 ? "120000" : m == 57344 ? "160000" : m == 16384 ? "040000" : m.str());
+  def gdf-abbrev(r, id) = nothing?(id) ? "0000000" : grv-short(r, id, 7);
+  // the diff --git header block and the hunks. oldtext and newtext are the contents (""), wt: the new side is read from the working file
+  def gdf-patch(r, row, oldtext, newtext, ctx) {
+   let p = row[1];
+   let oldp = len(row) > 6 ? row[6] : p;
+   let kind = row[0];
+   let head = "diff --git a/" ++ oldp ++ " b/" ++ p ++ "\n" ++ gdf-mode-lines(r, row);
+   (gdf-binary?(oldtext) || gdf-binary?(newtext)) ? head ++ "Binary files " ++ (str_eq(kind, "A") ? "/dev/null" : "a/" ++ oldp) ++ " and " ++ (str_eq(kind, "D") ? "/dev/null" : "b/" ++ p) ++ " differ\n" : head ++ gdf-body(row, gdf-lines-diff(oldtext, newtext), oldtext, newtext, ctx, oldp);
+  }
+  def gdf-mode-lines(r, row) {
+   let kind = row[0];
+   let ids = gdf-abbrev(r, row[3]) ++ ".." ++ gdf-abbrev(r, row[5]);
+   str_eq(kind, "R") ? "similarity index 100%\nrename from " ++ row[6] ++ "\nrename to " ++ row[1] ++ "\n" : str_eq(kind, "A") ? "new file mode " ++ gdf-mode-text(row[4]) ++ "\nindex " ++ ids ++ "\n" : str_eq(kind, "D") ? "deleted file mode " ++ gdf-mode-text(row[2]) ++ "\nindex " ++ ids ++ "\n" : row[2] != row[4] ? "old mode " ++ gdf-mode-text(row[2]) ++ "\nnew mode " ++ gdf-mode-text(row[4]) ++ (nothing?(row[5]) || str_eq(row[3], row[5]) ? "\n" : "\nindex " ++ ids ++ "\n") : "index " ++ ids ++ " " ++ gdf-mode-text(row[4]) ++ "\n";
+  }
+  def gdf-body(row, d, oldtext, newtext, ctx, oldp) = nil?(d[0]) ? "" : "--- " ++ (str_eq(row[0], "A") ? "/dev/null" : "a/" ++ oldp) ++ "\n+++ " ++ (str_eq(row[0], "D") ? "/dev/null" : "b/" ++ row[1]) ++ "\n" ++ gdf-hunks-text(d, ctx);
+ }
+ 0;
+}

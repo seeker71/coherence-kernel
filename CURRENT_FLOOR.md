@@ -37,7 +37,7 @@ extension or its case, is foreign) and no foreign file stands outside two declar
 output-compaction wrapper whose Form classifier is pending, and the three lines of `Sema Ear.app`'s bundle
 executable), and no Form door calls sed, awk, perl or python: the band sweep (`./fkwu gate/band-sweep-run.bml`, `form/form-stdlib/bml/band-sweep.bml`) reads what a band's head and
 the verdict manifest say in process (`observe/band-head.bml`, band `observe/tests/band-head-band`, 2047), so
-`{"list":1}` names all 388 workloads with each one's staging, pin and row in about a second (the shell took 4 s,
+`{"list":1}` names every workload (410 on 2026-10-04) with each one's staging, pin and row in about a second (the shell took 4 s,
 2026-10-04: the same columns, line for line). `hearth.bml`, `rumi-glass.bml` and `observe/hearth-glass-live.fk` read the
 `ps` listing in Form (`hearth-band`, 131071) and `source-of.fk` reads grep's rows in Form
 (`source-of-band`, 15). A child that must end by a deadline is begun through `host-child.bml` (`hch-by`,
@@ -76,27 +76,30 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (15 rows; a row whose ground did not
-                                            move since origin/main sits out and leaves the fold)
-./fkwu gate/band-sweep-run.bml           -> every band the body keeps (388 workloads) on fkwu, one line each in order, then the summary;
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (15 rows, each one cell_run call in this process; a row whose
+                                            ground did not move since origin/main sits out and leaves the fold; band `gate/tests/drift-gates-band`, 262143)
+./fkwu gate/band-sweep-run.bml           -> every band the body keeps (`{"list":1}` counts the workloads), one line each in order, then the summary;
                                             the exit is an error when a workload failed, a gate refused or the tree moved while it ran.
                                             stdin is one JSON object: {"list":1} names the workloads with staging, pin and row (1 s),
-                                            {"match":"a|b"}, {"files":[..]}, {"jobs":8}, {"ceiling_s":1800}. A leg is `env TMPDIR=<scratch>
-                                            ./fkwu <unit>` with stdin /dev/null, a deadline of its own and its fifos released; a failing
-                                            workload's legs stand under .hearth/ as its evidence (2026-10-04: 20 bands in 48 s on 4 legs)
+                                            {"match":"a|b"}, {"files":[..]}, {"ceiling_s":1800}, {"shard":i,"of":n} (every n-th workload from
+                                            the i-th: an operator starts the n sweeps, the body begins none). A leg is one `cell_run` call in
+                                            this process with a deadline of its own (a leg past it comes back stopped "deadline"); a failing
+                                            workload's evidence (what it printed, what it said, why) stands under .hearth/
                                             A request that does not read (malformed JSON, another JSON value, an unknown key, a key of the
                                             wrong kind or given twice: `form/form-stdlib/bml/door-options.bml`), a `match` that selects no
                                             workload, and a form/band-verdicts.txt or band file that does not read or is empty each end in a
                                             named refusal and exit 1, never the default sweep or "answered every pin"
-form/form-stdlib/tests/band-sweep-band   -> 1048575  (enumeration against the tree, the heads read in process, the judgment order, the
-                                            content-keyed unit, a pool of six fixtures printing in order though the hang ends last, the
-                                            deadline, six naps in parallel in under five seconds, a reader left on a fifo that the sweep
-                                            releases, the list, the summary, the seal, the door as a child; the strict request, the unread
-                                            manifest (absent, empty, mode 000) and band, the sort of ended and kept legs over sixty rounds of
-                                            children that stop while it asks; plants for the pin, the deadline and the readable case. The
-                                            sort was a real loss: each leg was asked twice whether it was done, and one that stopped between
-                                            the questions was in neither list, so a sweep of six read `3 ok, 0 failed`; it is asked once, the
-                                            results are threaded, and a sweep whose results did not all arrive ends in an error)
+form/form-stdlib/tests/band-sweep-band   -> 1048575  (enumeration against the tree, the heads read in process, the judgment order and the
+                                            judgment fed synthetic records, the content-keyed unit, six fixtures run as cell_run legs and
+                                            printing in order though one spins to its deadline, the lines and the evidence a failing leg
+                                            leaves, the shards (disjoint, their union every workload, order kept; a shard out of range
+                                            refused), a leg that stops and a leg that does not compile, the list, the summary, the seal, the
+                                            door called as a cell; the strict request, the unread manifest (absent, empty, mode 000) and band,
+                                            residency of a unit called twice and the real voice-chunk-band leg; plants for the pin, the
+                                            deadline and the readable case)
+observe/tests/band-pin-band              -> 31       observe/band-pin-run.bml runs each band it pins as a cell_run call (a value, no child): check and
+                                            apply on a band that answers its claim, one that answers otherwise, one with no claim and one that
+                                            stops; the second apply pins nothing; an empty stdin pins nothing
 form/form-stdlib/tests/door-options-band -> 1023  (door-options.bml: empty and {} read; malformed JSON, trailing text, another JSON value,
                                             an unknown key (named, with the keys the door has), a key of the wrong kind (a string for an
                                             integer, a float, null, a bool, an object), a key given twice are each refused; the reading alone
@@ -323,7 +326,7 @@ pattern-match-band 511 · choice-lane-core-band 1023 · backtrack-band 255 · of
 control/tests/attempt-band 4095 · file-bytes-band 127
 form-bml-cursor-full-band 105
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
-form/form-stdlib/tests/form-agent-tools-band.bml 524287 (2026-10-01: the resident agent tools over their JSON wire)
+form/form-stdlib/tests/form-agent-tools-band.bml 4294967295 (2026-10-04: the sixteen resident agent tools over their JSON wire, grep among them)
 form/form-stdlib/tests/findings-requests-band.bml 1048575 · form/form-stdlib/tests/form-cli-local-plan-band.bml 33554431
                                             (2026-10-02, rc 0: the feeder reads whether the code a request cites moved since its
                                             review, git hunks plus the closing gate and no model, and keeps the definition the
@@ -444,8 +447,10 @@ floor-lens-band 31 · floor-spread-band 31 · kernel-length-band 63   (the lens 
 The lanes that open a model or hold the GPU. Each band declares its verdict in its header; the last
 run of each lives in its receipt. Re-read on this checkout today: `dense-multi-band` 1023,
 `native-lora-resume-band` 7, `ear-native-band` 32767, `voice-pass-band` 4095. The three `vk-*` bands
-read 0 here: their staged carrier `.hearth/vk/run_vk` is a compiled program this host does not hold
-(`./fkwu observe/vk-carrier-build.bml` names it missing).
+read their pins here (`vk-layers-live-band` 127, `vk-blocks-live-band` 127, `vk-train-live-band` 255): this
+body carries no Vulkan runner and no GLSL-to-SPIR-V compiler, so `vk-door.bml` answers `vulkan-runner-absent`
+by name and begins no process. What the bands hold is what is Form: the shaders the recipes emit, the plan
+laid out one line per word, the recipes the reads would be judged by, and the reader of a carrier's answer.
 
 | lane | band | last witnessed |
 |---|---|---|
@@ -454,7 +459,7 @@ read 0 here: their staged carrier `.hearth/vk/run_vk` is a compiled program this
 | cooperative matvec twins on real weights | `q8-0-matvec-tg-band` 1023, `q6k-q4k-matvec-tg-band` 8191 | `receipts/2026-09-06-the-root-crosses-the-barrier.md`, `receipts/2026-09-06-the-loader-was-the-wall.md` |
 | up to eight sequences in one decode step | `dense-multi-band` 1023 | `receipts/2026-09-09-the-body-had-a-mind-and-the-wrong-question.md` |
 | half and bfloat element formats | `precision-lanes-metal-live-band` 2097151 | `receipts/2026-09-11-the-registry-resolved-and-the-host-that-decided.md` |
-| Vulkan carrier (MoltenVK here) | `vk-layers-live-band` 1023, `vk-train-live-band` 255, `vk-blocks-live-band` 31 | the same receipt |
+| Vulkan plan, shaders and reader (no runner in this body; the absence is named) | `vk-layers-live-band` 127, `vk-train-live-band` 255, `vk-blocks-live-band` 127 | `form/form-stdlib/vk-door.bml` |
 | native LoRA with Adam moments resumed | `native-lora-resume-band` 7 | `receipts/2026-09-23-native-assessment-memory.md` |
 | the ear: whisper-tiny as the body's own pass | `ear-native-band` 32767 | `receipts/2026-09-09-the-ear-could-not-hear-the-house.md` |
 | the mouth: a whole VITS voice, phoneme ids to samples | `voice-pass-band` 4095 | `receipts/2026-09-09-the-shape-was-right-and-the-sound-was-empty.md` |
@@ -802,6 +807,15 @@ host-doors-band          -> 131071  host_spawn_at, host_alive and fs_mkfifo: the
 host-signal-band         -> 127     host_signal pid sig: any signal to one process, so a worker that will not
                                     hear SIGTERM is ended with SIGKILL and no foreign program (voice-track,
                                     the host walk's deadline). A fkwu built before the door reads "door absent"
+host-fs-band             -> 32767   leaf-door modes 35-49, one syscall each, Form names in bml/host-fs.bml: chmod, symlink,
+                                    link (the atomic create-if-absent publish), sync, getenv, mkdir with a mode, localtime,
+                                    os, file holders (Darwin libproc), file mode (with the type nibble), file copy (a fixed
+                                    1 MiB buffer), file identity, utimes, realpath, pwrite. A fkwu built before them reads "door absent"
+cell-run-band            -> 524287  cell_run(path, arg, deadline_ms, stdin) (leaf-door mode 50): a unit of Form run in this process answers
+                                    {value, out, diag, stopped, errors, resident, ms, cpu_us}, held to the child it replaces on five
+                                    tree bands and the fixtures (print, stop, unresolved name, stdin, .bml), with name windows, residency,
+                                    a deadline, nesting and growth. PENDING THE SEED: proven on a temporary seed, the patch waits for
+                                    runtime/ (docs/in-process-cells.md); a fkwu without the door reads "door absent" (0)
 voice-track-reap-band    -> 7       the supervisor ends a wedged worker: SIGTERM, then SIGKILL after the grace
 ```
 
