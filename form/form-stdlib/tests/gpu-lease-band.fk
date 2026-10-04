@@ -1,0 +1,240 @@
+; gpu-lease-band.fk — the GPU lease, held against synthetic truth. Every lock here is a SCRATCH directory under
+; .hearth/lease-probe/; the real .hearth/gpu.lock is never touched. The "clients" are fkwu children of
+; tests/gpu-lease-child-run.fk (no device): they take a lease and exit without giving it back, hold it and
+; give it back, or hang holding it.
+;
+;   1      a take on a free lock answers ["held" token]; the record names this pid, this process's start time, the label
+;   2      the holder's give answers ["released" token] and the directory is gone
+;   4      a give by anyone but the holder is refused and removes nothing: a made-up token, the holder's own token
+;          from another pid, and a give with no lease at all (["refused" "no-lease"])
+;   8      a LIVE holder is waited on and not stolen: the take runs out its wait and answers
+;          ["refused" "held-by-live-owner" ...] after the wait, and the record is still the holder's
+;   16     a live holder that gives back is waited for: ["waited" ms token]; the waiter's registry entry is gone after
+;   32     a holder that exited without giving back is STALE: ["took-over-stale" ["dead" its-token pid label "pid-gone"] token],
+;          its lease stands in the tombstone <lock>.gone/<its-token>, and the new record is the taker's
+;   64     a pid REUSED by another process is stale (["dead" ... "pid-reused"]); the same pid with the matching start time is live
+;   128    five rounds of two children taking over one stale lease at the same moment: exactly one ends holding
+;          (["took-over-stale" ...] if its rename won, or ["held" ...] if it made the lock the winner had just cleared),
+;          the other is refused, and exactly one tombstone stands
+;   256    a bare directory with no record (what a shell client leaves) is waited on for the bound, then taken over
+;          with no Metal client alive: ["took-over-stale" ["unowned" "none" age] token]
+;   512    the same bare directory with a Metal-door fkwu alive in this checkout is NOT taken over: the take is refused,
+;          naming that pid; once that client is gone, the bare directory is taken over
+;   1024   a record that does not read (garbage) is the same unowned directory: waited on, then taken over
+;   2048   renew by the holder moves the heartbeat and keeps the acquisition time; a renew by anyone else is refused
+;   4096   a take by the process that already holds the lease is refused at once ("already-held-by-this-process")
+;   8192   a lock that cannot be made (no parent directory) is refused ["refused" "cannot-make-lock" ...], not waited on
+;
+; Expected: 16383
+; PROOF LEVEL: FOURTH-ARM ONLY (spawns fkwu children, among them tests/host-sleeper-run.fk, a Form child that only waits;
+; host_process; no sibling kernel carries those doors)
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/gpu-lease.bml
+import form/form-stdlib/gpu-lease.bml;
+section [form.bml] {
+  def glb-dir() = ".hearth/lease-probe";
+  def glb-nl() = byte_to_str(10);
+  def glb-tag(k) = host_pid().str() ++ "-" ++ k;
+  def glb-lock(k) = glb-dir() ++ "/band-lock-" ++ glb-tag(k);
+  def glb-bit(ok, bit) = ok ? bit : 0;
+  def glb-say(label, v) = print([label, v]);
+  def glb-eq(a, b) = (Comparable) a == b ? 1 : 0;
+  def glb-seq(a, b) = (String) a == b ? 1 : 0;
+  def glb-sum(xs) = nil?(xs) ? 0 : xs[0] + glb-sum(xs[1:]);
+  def glb-all(xs) = (Comparable) glb-sum(xs) == len(xs);
+  def glb-again(path, n) {
+   let s = host_sleep_ms(50);
+   glb-await(path, n - 1);
+  }
+  def glb-await(path, n) {
+   let t = read_file(path);
+   (nothing?(t) && (n > 0)) ? glb-again(path, n) : t;
+  }
+  def glb-ans(tag, name) = glb-await(glb-dir() ++ "/" ++ name ++ "-" ++ tag, 300);
+  def glb-line(a, i) = nothing?(a) ? "no-answer" : glb-line-of(gpl-lines(a), i);
+  def glb-line-of(ls, i) = len(ls) > i ? ls[i] : "no-answer";
+  // the child's request goes to a file named for the child's pid, which only the spawn tells us
+  def glb-spawn(mode, lock, tag, hold, wait, go) {
+   let pid = host_spawn_at(["./fkwu", "form/form-stdlib/tests/gpu-lease-child-run.fk"], ["/dev/null", "/dev/null", glb-dir() ++ "/child-" ++ tag ++ ".err"]);
+   let w = write_file(glb-dir() ++ "/req-" ++ pid.str(), mode ++ glb-nl() ++ lock ++ glb-nl() ++ tag ++ glb-nl() ++ hold.str() ++ glb-nl() ++ wait.str() ++ glb-nl() ++ go);
+   pid;
+  }
+  // a lease record as a client would have left it: the pid and start time are the claim a judge checks
+  def glb-forge(lock, token, pid, start) {
+   let m = host_dir_mkdir(lock);
+   write_file(lock ++ "/owner", gpl-magic() ++ glb-nl() ++ token ++ glb-nl() ++ pid.str() ++ glb-nl() ++ start.str() ++ glb-nl() ++ "1" ++ glb-nl() ++ "1" ++ glb-nl() ++ "forged");
+  }
+  def glb-opts(wait, unowned, markers) = [wait, 100, unowned, markers];
+  def glb-only-children() = ["gpu-lease-child-run"];
+  def glb-take(lock, opts) = gpu-lease-take-with(lock, "band", opts);
+  def glb-ms-since(t0) = host_monotonic_ms() - t0;
+  def glb-round(k) {
+   let lock = glb-lock("r" ++ k.str());
+   let go = glb-dir() ++ "/go-" ++ glb-tag("r" ++ k.str());
+   let f = glb-forge(lock, "forged-" ++ k.str(), 999991, 1);
+   let ta = glb-tag("ra" ++ k.str());
+   let tb = glb-tag("rb" ++ k.str());
+   let pa = glb-spawn("hold", lock, ta, 2500, 1500, go);
+   let pb = glb-spawn("hold", lock, tb, 2500, 1500, go);
+   let ready = host_sleep_ms(1200);
+   let g = write_file(go, "1");
+   let ka = glb-line(glb-ans(ta, "ans"), 0);
+   let kb = glb-line(glb-ans(tb, "ans"), 0);
+   let wa = host_wait(pa);
+   let wb = host_wait(pb);
+   let tombs = host_dir_list(lock ++ ".gone");
+   let ok = glb-all([glb-eq(glb-seq(ka, "refused") + glb-seq(kb, "refused"), 1), glb-eq(glb-seq(ka, "took-over-stale") + glb-seq(kb, "took-over-stale") + glb-seq(ka, "held") + glb-seq(kb, "held"), 1), glb-eq(len(tombs), 1)]);
+   let sh = glb-say("round", [k, ka, kb, tombs]);
+   ok ? 1 : 0;
+  }
+  def glb-rounds(k, n) = k >= n ? 1 : (glb-round(k) == 1 ? glb-rounds(k + 1, n) : 0);
+  def glb-not(x) = (Comparable) x == 0 ? 1 : 0;
+  // everything this run left in the scratch directory carries "-<this pid>-" in its name
+  def glb-mine?(n) = str_find(n, "-" ++ host_pid().str() ++ "-", 0) >= 0;
+  def glb-rm(p) {
+   let a = host_dir_rmdir(p);
+   let b = host_path_remove(p);
+   1;
+  }
+  def glb-sweep-name(n) = glb-mine?(n) ? glb-rm(glb-dir() ++ "/" ++ n) : 0;
+  def glb-sweep-more(done, rest) = done + glb-sweep(rest);
+  def glb-sweep(names) = nil?(names) ? 0 : glb-sweep-more(glb-sweep-name(names[0]), names[1:]);
+
+  // the scratch directory (.hearth is not tracked, so a fresh checkout has neither level)
+  let mk0 = host_dir_mkdir(".hearth");
+  let mk1 = host_dir_mkdir(glb-dir());
+
+  // ===== 1, 2: a free lock is taken and given back =====
+  let l1 = glb-lock("one");
+  let a1 = glb-take(l1, glb-opts(1000, 60000, gpl-markers()));
+  let r1 = gpl-read(l1);
+  let s1 = glb-say("take", a1);
+  let b1 = glb-bit(glb-all([glb-seq(a1[0], "held"), glb-seq(r1[0], "rec"), glb-eq(r1[2], host_pid()), glb-eq(r1[3], gpl-me-start()), glb-seq(r1[1], a1[1]), glb-seq(r1[6], "band")]), 1);
+  let g1 = gpu-lease-give(l1, a1);
+  let s2 = glb-say("give", g1);
+  let b2 = glb-bit(glb-all([glb-seq(g1[0], "released"), glb-seq(g1[1], a1[1]), (Comparable) host_path_exists(l1) == 0 ? 1 : 0]), 2);
+
+  // ===== 4, 8, 16: a live child holds 4 s =====
+  let l3 = glb-lock("live");
+  let t3 = glb-tag("live");
+  let p3 = glb-spawn("hold", l3, t3, 4000, 3000, "");
+  let ans3 = glb-ans(t3, "ans");
+  let c3 = glb-line(ans3, 1);
+  let n3a = gpu-lease-release(l3, "a-token-nobody-holds");
+  let n3b = gpu-lease-release(l3, c3);
+  let n3c = gpu-lease-release(glb-lock("nothing-here"), "x");
+  let s4 = glb-say("non-owner give", [n3a, n3b, n3c]);
+  let r3 = gpl-read(l3);
+  let b4 = glb-bit(glb-all([glb-not(glb-seq(c3, "no-answer")),glb-seq(n3a[0], "refused"), glb-seq(n3a[1], "not-yours"), glb-seq(n3b[0], "refused"), glb-seq(n3b[1], "not-yours"), glb-seq(n3c[1], "no-lease"), glb-seq(r3[1], c3)]), 4);
+  let t0w = host_monotonic_ms();
+  let w3 = glb-take(l3, glb-opts(1200, 60000, gpl-markers()));
+  let ms3 = glb-ms-since(t0w);
+  let r3b = gpl-read(l3);
+  let s8 = glb-say("live holder", [w3, ms3]);
+  let b8 = glb-bit(glb-all([glb-seq(w3[0], "refused"), glb-seq(w3[1], "held-by-live-owner"), ms3 >= 1100 ? 1 : 0, glb-seq(r3b[1], c3)]), 8);
+  let w3b = glb-take(l3, glb-opts(15000, 60000, gpl-markers()));
+  let s16 = glb-say("waited for the live holder", w3b);
+  let rel3 = glb-ans(t3, "rel");
+  let b16 = glb-bit(glb-all([glb-seq(w3b[0], "waited"), w3b[1] >= 500 ? 1 : 0, glb-seq(glb-line(rel3, 0), "released"), (Comparable) host_path_exists(l3 ++ ".wait/" ++ host_pid().str()) == 0 ? 1 : 0]), 16);
+  let g3 = gpu-lease-give(l3, w3b);
+  let h3 = host_wait(p3);
+
+  // ===== 32: a holder that exited without giving back =====
+  let l6 = glb-lock("crash");
+  let t6 = glb-tag("crash");
+  let p6 = glb-spawn("exit", l6, t6, 0, 3000, "");
+  let ans6 = glb-ans(t6, "ans");
+  let h6 = host_wait(p6);
+  let c6 = glb-line(ans6, 1);
+  let a6 = glb-take(l6, glb-opts(3000, 60000, gpl-markers()));
+  let s32 = glb-say("stale takeover", a6);
+  let r6 = gpl-read(l6);
+  let tomb6 = l6 ++ ".gone/" ++ c6;
+  let b32 = glb-bit(glb-all([glb-seq(a6[0], "took-over-stale"), glb-seq(a6[1][0], "dead"), glb-seq(a6[1][1], c6), glb-eq(a6[1][2], p6), glb-seq(a6[1][4], "pid-gone"), glb-seq(r6[1], a6[2]), glb-eq(r6[2], host_pid()), (Comparable) host_path_exists(tomb6 ++ "/owner") == 1 ? 1 : 0]), 32);
+  let g6 = gpu-lease-give(l6, a6);
+
+  // ===== 64: a pid reused by another process; the same pid with its own start time is live =====
+  let sleeper = host_spawn_at(["./fkwu", "form/form-stdlib/tests/host-sleeper-run.fk"], ["/dev/null", "/dev/null", "/dev/null"]);
+  let l7 = glb-lock("reused");
+  let f7 = glb-forge(l7, "forged-reused", sleeper, 1);
+  let a7 = glb-take(l7, glb-opts(2000, 60000, gpl-markers()));
+  let s64 = glb-say("pid reused", a7);
+  let g7 = gpu-lease-give(l7, a7);
+  let l7b = glb-lock("same-process");
+  let f7b = glb-forge(l7b, "forged-live", sleeper, gpl-start-of(sleeper));
+  let a7b = glb-take(l7b, glb-opts(800, 60000, gpl-markers()));
+  let s64b = glb-say("same pid, same start", a7b);
+  let b64 = glb-bit(glb-all([glb-seq(a7[0], "took-over-stale"), glb-seq(a7[1][0], "dead"), glb-seq(a7[1][4], "pid-reused"), glb-seq(a7b[0], "refused"), glb-seq(a7b[1], "held-by-live-owner")]), 64);
+  let k7 = host_kill(sleeper);
+  let w7 = host_wait(sleeper);
+
+  // ===== 128: three rounds of two simultaneous takeovers =====
+  let b128 = glb-bit((Comparable) glb-rounds(0, 5) == 1, 128);
+
+  // ===== 256, 512, 1024: a directory with no (readable) owner =====
+  let l9 = glb-lock("bare");
+  let m9 = host_dir_mkdir(l9);
+  let t0b = host_monotonic_ms();
+  let a9 = glb-take(l9, glb-opts(8000, 2500, glb-only-children()));
+  let ms9 = glb-ms-since(t0b);
+  let s256 = glb-say("bare directory", [a9, ms9]);
+  let b256 = glb-bit(glb-all([glb-seq(a9[0], "took-over-stale"), glb-seq(a9[1][0], "unowned"), glb-seq(a9[1][1], "none"), a9[1][2] >= 2500 ? 1 : 0, ms9 >= 1400 ? 1 : 0, (Comparable) host_path_exists(l9) == 1 ? 1 : 0]), 256);
+  let g9 = gpu-lease-give(l9, a9);
+
+  let l10 = glb-lock("bare-peer");
+  let m10 = host_dir_mkdir(l10);
+  let t10 = glb-tag("peer");
+  let p10 = glb-spawn("hang", glb-lock("peer-own"), t10, 9000, 1000, "");
+  let up10 = glb-ans(t10, "ans");
+  let a10 = glb-take(l10, glb-opts(4500, 1500, gpl-markers()));
+  let s512 = glb-say("bare directory, a Metal door alive", [a10, p10]);
+  let k10 = host_kill(p10);
+  let w10 = host_wait(p10);
+  let a10b = glb-take(l10, glb-opts(4000, 1500, glb-only-children()));
+  let s512b = glb-say("the same, once it is gone", a10b);
+  let b512 = glb-bit(glb-all([glb-seq(a10[0], "refused"), glb-seq(a10[1], "held-by-live-owner"), glb-seq(a10[2][0], "unowned-with-metal-peers"), gpl-in?(p10, a10[2][1]), glb-seq(a10b[0], "took-over-stale")]), 512);
+  let g10 = gpu-lease-give(l10, a10b);
+
+  let l11 = glb-lock("garbage");
+  let m11 = host_dir_mkdir(l11);
+  let w11 = write_file(l11 ++ "/owner", "this is not a lease");
+  let a11 = glb-take(l11, glb-opts(8000, 2500, glb-only-children()));
+  let s1024 = glb-say("garbage record", a11);
+  let tombs11 = host_dir_list(l11 ++ ".gone");
+  let b1024 = glb-bit(glb-all([glb-seq(a11[0], "took-over-stale"), glb-seq(a11[1][0], "unowned"), glb-seq(a11[1][1], "garbage"), glb-eq(len(tombs11), 1), glb-seq(read_file(l11 ++ ".gone/" ++ tombs11[0] ++ "/owner"), "this is not a lease")]), 1024);
+  let g11 = gpu-lease-give(l11, a11);
+
+  // ===== 2048: the heartbeat =====
+  let l12 = glb-lock("renew");
+  let a12 = glb-take(l12, glb-opts(1000, 60000, gpl-markers()));
+  let r12a = gpl-read(l12);
+  let z12 = host_sleep_ms(30);
+  let n12 = gpu-lease-renew(l12, a12[1]);
+  let r12b = gpl-read(l12);
+  let n12x = gpu-lease-renew(l12, "someone-elses-token");
+  let s2048 = glb-say("renew", [n12, n12x]);
+  let b2048 = glb-bit(glb-all([glb-seq(n12[0], "renewed"), r12b[5] > r12a[5] ? 1 : 0, glb-eq(r12b[4], r12a[4]), glb-seq(r12b[1], a12[1]), glb-seq(n12x[0], "refused"), glb-seq(n12x[1], "not-yours")]), 2048);
+  let g12 = gpu-lease-give(l12, a12);
+
+  // ===== 4096: the holder asks again =====
+  let l13 = glb-lock("again");
+  let a13 = glb-take(l13, glb-opts(1000, 60000, gpl-markers()));
+  let t0c = host_monotonic_ms();
+  let a13b = glb-take(l13, glb-opts(5000, 60000, gpl-markers()));
+  let ms13 = glb-ms-since(t0c);
+  let s4096 = glb-say("held twice", a13b);
+  let b4096 = glb-bit(glb-all([glb-seq(a13b[0], "refused"), glb-seq(a13b[1], "already-held-by-this-process"), ms13 < 1000 ? 1 : 0]), 4096);
+  let g13 = gpu-lease-give(l13, a13);
+
+  // ===== 8192: a lock that cannot be made =====
+  let a14 = glb-take(glb-dir() ++ "/no-such-dir/lock", glb-opts(3000, 60000, gpl-markers()));
+  let s8192 = glb-say("no parent", a14);
+  let b8192 = glb-bit(glb-all([glb-seq(a14[0], "refused"), glb-seq(a14[1], "cannot-make-lock")]), 8192);
+
+  // ===== leave nothing behind =====
+  let swept = glb-sweep(host_dir_list(glb-dir()));
+  let sh-swept = glb-say("scratch entries removed", swept);
+  let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024 + b2048 + b4096 + b8192;
+  let shown = print(["gpu-lease-band", "verdict", verdict]);
+  verdict;
+}
