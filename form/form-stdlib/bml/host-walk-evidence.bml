@@ -8,15 +8,7 @@
 // OS diagnostic reports the kill left (<name>.ips: a JSON header line, then a JSON body: procLaunch, termination,
 // exception.signal, usedImages, coalitionName, the process's start and exit abs times), and the first job's log. A
 // report counts when its process launched inside the slot's window and its coalition is the first job's label.
-// The classes (hr-classify), in the order the rules read:
-//   begun                 the first slot stamped its start inside the window: nothing to heal
-//   launch-killed         a report in the window says CODESIGNING, a Launch Constraint Violation, Code Signature Invalid, an
-//                         executable path the OS could not read (dyld_path_missing, main_executable_path_missing), or a
-//                         SIGKILL within 100 ms of launch; or launchd's own last exit reason names CODESIGNING
-//   crashed-after-launch  a report in the window with SIGSEGV, SIGBUS, SIGILL, SIGABRT or SIGTRAP that is not a launch kill
-//   held                  the job's log, touched in the window, ends in a [walk-lock] "does not start" line: another walk
-//                         or day turn held the checkout; the line names who
-//   nothing-found         none of the above: no diagnostic, no log line, an unknown
+// The state of the first slot and the class of why it did not begin are host-walk-class.bml's.
 // What it needs: host-walk-text.bml (hw-field, hw-has?, hw-row-str, hw-row-int, hw-row-node), host-walk-clock.bml
 // (hw-zone-of-z) and parse.bml (parse-int, digits-end).
 import form-stdlib/bml/parse.bml;
@@ -77,13 +69,19 @@ section [form.bml] {
    at < 0 ? "" : substring(text, at + 1, len(text));
   }
   def hr-names(images) = hch-join(map(i => hw-row-str(i, "name"), node_children(images)), " ");
+  // the numbers the reading stands on, named (the band pins each)
+  def hr-ticks-per-ms() = 24000;
+  def hr-launch-life-ms() = 100;
+  def hr-report-slack-ms() = 120000;
+  // a report's text is one line: a stray newline or run of spaces in a field never reaches a row's why
+  def hr-oneline(s) = hch-join(filter(w => (Comparable) len(w) > 0, split-on(hch-join(split-on(s ?? "", "\n"), " "), " ")), " ");
   // mach abs time ticks of the report at 24 MHz: 24000 ticks to the ms
-  def hr-life-of(a, b) = nothing?(a) ? nothing() : nothing?(b) ? nothing() : b < a ? nothing() : (b - a) / 24000;
+  def hr-life-of(a, b) = nothing?(a) ? nothing() : nothing?(b) ? nothing() : b < a ? nothing() : (b - a) / hr-ticks-per-ms();
   def hr-life-ms(doc) = hr-life-of(hw-row-int(doc, "procStartAbsTime"), hw-row-int(doc, "procExitAbsTime"));
-  def hr-report-row(path, doc) = [path, hr-stamp-ms(hw-row-str(doc, "procLaunch")), hw-row-str(hw-row-node(doc, "exception"), "signal"), hw-row-str(hw-row-node(doc, "termination"), "namespace"), hw-row-str(hw-row-node(doc, "termination"), "indicator"), hr-names(hw-row-node(doc, "usedImages")), hw-row-str(doc, "coalitionName"), hr-life-ms(doc)];
-  // a report that does not read (half written, not JSON, no launch time) is nothing, never a stop
+  def hr-report-row(path, doc) = [path, hr-stamp-ms(hw-row-str(doc, "procLaunch")), hr-oneline(hw-row-str(hw-row-node(doc, "exception"), "signal")), hr-oneline(hw-row-str(hw-row-node(doc, "termination"), "namespace")), hr-oneline(hw-row-str(hw-row-node(doc, "termination"), "indicator")), hr-oneline(hr-names(hw-row-node(doc, "usedImages"))), hr-oneline(hw-row-str(doc, "coalitionName")), hr-life-ms(doc)];
+  // a report that does not read (half written, not JSON, no launch time, neither a signal nor a termination) is nothing, never a stop
   def hr-report-of(path, text) = hr-report-read(try hr-report-row(path, parse-json("ips", hr-ips-body(text))) else nothing());
-  def hr-report-read(row) = nothing?(row) ? nothing() : nothing?(row[1]) ? nothing() : row;
+  def hr-report-read(row) = nothing?(row) ? nothing() : nothing?(row[1]) ? nothing() : ((String) row[2] == "" && (String) row[3] == "") ? nothing() : row;
   def hr-row-path(r) = r[0];
   def hr-row-launch(r) = r[1];
   def hr-row-signal(r) = r[2];
@@ -93,9 +91,9 @@ section [form.bml] {
   def hr-row-coalition(r) = r[6];
   def hr-row-life(r) = r[7];
   // in the slot's window: launched no more than two minutes before the first slot and no later than its window's end
-  def hr-in-window?(r, slot, window) = nothing?(hr-row-launch(r)) ? false : (hr-row-launch(r) >= slot - 120000) && (hr-row-launch(r) <= slot + window);
+  def hr-in-window?(r, slot, window) = nothing?(hr-row-launch(r)) ? false : (hr-row-launch(r) >= slot - hr-report-slack-ms()) && (hr-row-launch(r) <= slot + window);
   def hr-of-job?(r, label) = (String) hr-row-coalition(r) == label;
-  def hr-launch-life?(r) = !nothing?(hr-row-life(r)) && (hr-row-life(r) < 100);
+  def hr-launch-life?(r) = !nothing?(hr-row-life(r)) && (hr-row-life(r) < hr-launch-life-ms());
   def hr-killed?(r) = (String) hr-row-namespace(r) == "CODESIGNING" || hw-has?(hr-row-indicator(r), "Launch Constraint") || hw-has?(hr-row-signal(r), "Code Signature Invalid") || hw-has?(hr-row-images(r), "path_missing") || (hw-has?(hr-row-signal(r), "SIGKILL") && hr-launch-life?(r));
   def hr-crash-signal?(sig) = hw-has?(sig, "SIGSEGV") || hw-has?(sig, "SIGBUS") || hw-has?(sig, "SIGILL") || hw-has?(sig, "SIGABRT") || hw-has?(sig, "SIGTRAP");
   def hr-crashed?(r) = !hr-killed?(r) && hr-crash-signal?(hr-row-signal(r));
@@ -103,19 +101,5 @@ section [form.bml] {
   def hr-first(rows, test) = nil?(rows) ? nothing() : test(rows[0]) ? rows[0] : hr-first(rows[1:], test);
   // ── the job's log: its last [walk-lock] line that says the start did not happen ──
   def hr-held-line(log) = hch-last(hch-with(log ?? "", ["[walk-lock]"]), "does not start");
-  // ── the class: [class, why, evidence paths] ──
-  def hr-classify(begun, launchd, reports, held) {
-   let killed = hr-first(reports, r => hr-killed?(r));
-   let crashed = hr-first(reports, r => hr-crashed?(r));
-   begun ? ["begun", "the first slot stamped its start", []]
-   : !nothing?(killed) ? ["launch-killed", "the OS killed the first launch: " ++ hr-report-line(killed), [hr-row-path(killed)]]
-   : hw-has?(hr-launchd-reason(launchd), "CODESIGNING") ? ["launch-killed", "launchd reads last exit reason " ++ hr-launchd-reason(launchd) ++ " and no report in the window", []]
-   : !nothing?(crashed) ? ["crashed-after-launch", "the first launch crashed: " ++ hr-report-line(crashed), [hr-row-path(crashed)]]
-   : (String) held != "" ? ["held", held, []]
-   : ["nothing-found", "no stamp, no report in the window, no refusal in the log, launchd reads " ++ hr-launchd-line(launchd), []];
-  }
-  def hr-class(c) = c[0];
-  def hr-why(c) = c[1];
-  def hr-paths(c) = c[2];
  }
 }
