@@ -161,21 +161,50 @@ section [form.bml] {
   }
   def flp-where-lines(req, path) = take(3, filter(n => (!nothing?(n)), map(e => flp-where-line(trim(e), path), flp-strs(req, "where"))));
   def flp-files-block(req) = mc-cat(map(p => flp-file-block(req, p), flp-req-files(req)));
-  def flp-source-names(paths) = foldl((names,path)=>append(names,flp-lines(fhn-read(path)) |> map(trim) |> filter(line=>flp-starts?(line,"def ")) |> map(line=>trim(flp-cut-at(substring(line,4,len(line)),"(")))),[],paths);
-  def flp-callers(req) {
-   let paths=flp-req-files(req); let names=flp-source-names(paths);
-   let files=split-on(nsi-text(nsi-git()),byte_to_str(0)) |> filter(path=>flp-starts?(path,"form/form-stdlib/bml/") && flp-ends?(path,".bml") && !flp-has?(paths,path));
-   files |> map(path=>[path,fhn-read(path)]) |> filter(source=>any?(name=>str_find(source[1],name + "(",0)>=0,names));
+  def flp-names(text) = flp-lines(text) |> map(trim) |> filter(line=>flp-starts?(line,"def ")) |> map(line=>trim(flp-cut-at(substring(line,4,len(line)),"(")));
+  def flp-source-names(paths) = foldl((names,path)=>append(names,flp-names(fhn-read(path))),[],paths);
+  def flp-focus-prompt(req) = "Select the existing entry functions whose behavior this task must change. Use only names in the catalog. Do not implement code or add helpers. Return only a JSON array of the selected function names.\nTask: " + flp-text(req,"needs") + "\nCatalog: " + flp-join(flp-source-names(flp-req-files(req)),", ");
+  def flp-focus-path(req) = flp-dir() + "/focus/" + flp-sha(flp-focus-prompt(req)) + ".json";
+  def flp-guided-focus(req) {
+   let held=fhn-read(flp-focus-path(req));
+   let row=faj-valid(held) ? parse-json("source-focus",held) : json-node-object([]);
+   let text=flp-text(row,"text");
+   let value=faj-valid(text) ? parse-json("source-focus-names",text) : json-node-null();
+   let selected=fcgp-array?(value) ? flp-strings(value) : [];
+   let names=flp-source-names(flp-req-files(req));
+   flp-text(row,"prompt")==flp-focus-prompt(req) && flp-text(row,"status")=="answered" && fcgp-num(row,"complete")==1 && fcgp-num(row,"released")==1 && !nil?(selected) && len(selected)==len(json-array-elements(value)) && !any?(name=>!flp-has?(names,name),selected) ? selected : [];
   }
-  def flp-callers-block(req) = mc-cat(flp-callers(req) |> map(source=>"Read-only caller and result contract in " + source[0] + ":\n" + source[1] + "\n\n"));
+  def flp-focus(req) {
+   let names=flp-source-names(flp-req-files(req));
+   let named=names |> filter(name=>str_find(flp-text(req,"needs"),name,0)>=0);
+   let guided=nil?(named) ? flp-guided-focus(req) : [];
+   !nil?(named) ? named : !nil?(guided) ? guided : names;
+  }
+  def flp-caller-closure(defs,selected) {
+   let body=mc-cat(selected |> map(d=>d[1]));
+   let next=defs |> filter(d=>any?(held=>held[0]==d[0],selected) || str_find(body,d[0],0)>=0);
+   len(next)==len(selected) ? selected : flp-caller-closure(defs,next);
+  }
+  def flp-caller-text(text,names) {
+   let defs=flp-names(text) |> map(name=>[name,flp-ref-text(text,[name,[],""],true) ?? ""]);
+   let roots=defs |> filter(d=>any?(name=>str_find(d[1],name,0)>=0,names));
+   let section=str_find(text,"section [",0);
+   (section<0 ? "" : substring(text,0,section)) + mc-cat(flp-caller-closure(defs,roots) |> map(d=>d[1] + "\n\n"));
+  }
+  def flp-callers(req) {
+   let paths=flp-req-files(req); let names=flp-focus(req);
+   let files=split-on(nsi-text(nsi-git()),byte_to_str(0)) |> filter(path=>flp-starts?(path,"form/form-stdlib/bml/") && flp-ends?(path,".bml") && !flp-has?(paths,path));
+   files |> map(path=>[path,fhn-read(path)]) |> filter(source=>any?(name=>str_find(source[1],name + "(",0)>=0,names)) |> map(source=>[source[0],flp-caller-text(source[1],names)]);
+  }
+  def flp-callers-block(req) = mc-cat(flp-callers(req) |> map(source=>"Read-only caller definitions and their local dependency closure in " + source[0] + ":\n" + source[1] + "\n\n"));
   def flp-queue-lines(path) = if (file_size(path) < 1) then [] else filter(l => (len(trim(l)) > 0), flp-lines(fhn-read(path)));
   def flp-queue-rows(path) = map(l => if fcgp-object-line?(trim(l)) then parse-json("queue-row", trim(l)) else json-node-object([]), flp-queue-lines(path));
   def flp-intro() = "Implement the original task in native BML. Supply the whole changed definitions and behavior cases; Form owns compilation, verification and publication. A candidate must change the requested behavior, preserve its callers, and pass cases that fail on today's implementation and on stubs. Repeating unchanged code cannot implement a change.";
   def flp-lens-text(lens) = lens=="narrow" ? "Lens: narrow. Focus on the smallest change that serves the original task; preserve its complete contract." : lens=="edit" ? "Lens: an existing definition. Follow the existing entry and its callers. Keep observed contracts and repair the actual operation." : "Choose behavior cases first, then implement the behavior they require. Form builds the executable witness.";
   def flp-feedback-block(feedback, prior) = if ((Comparable) len(trim(feedback)) == 0) then "" else mc-cat(["\nYour previous plan was refused by Form's verification. The exact failure:\n", feedback, if ((Comparable) len(trim(prior)) == 0) then "" else mc-cat(["\n\nYour rejected candidate:\n", flp-head(prior, flp-prior-bytes())]), "\n\nRecheck the original request against the current source and callers. The rejected candidate is not a contract: preserve only observed successes, not unchecked assumptions. When improving an existing operation, change and verify its existing entry or caller; a new uncalled helper does not improve that operation. Derive required fields and defaults from the actual validator, and construct inputs in its actual native data type. Write the whole reply again with the failure removed and the original operation improved.\n"]);
   def flp-case-words() = "Form writes the executable witness from your cases; write no proof scaffolding. Each call is a pure BML expression exercising the changed operation. equals is its expected JSON scalar or nested array. Form prints the actual results and checks every case, the unchanged implementation, both stubs and each definition's contribution. All cases together read 1; a failed case reads 0. Do not change the original task to fit a candidate. Preserve callers, optional fields and existing specialized behavior. A new helper needs its existing caller changed and observed too. BML: def name(args) = expression; or def name(args) { let x=expression; final_expression; }. Every if has then and else. Lambdas use =>. Lists are [a,b], indexing xs[0], tail xs[1:]. filter, map and foldl return values; append never mutates a binding. There is no C-style for loop. JSON objects are native nodes constructed with parse-json or json-node-object, not ordinary lists. Read the actual source for available function names and signatures.";
-  def flp-case-reply() = "Start the answer with <plan>; emit only the four completed blocks, without a preceding analysis or walkthrough. <plan> is a JSON object with id,writable,sources,definitions with name and params; include every changed definition and every new helper from <reference> in definitions. <goal> states the original operation and intended behavior; <cases> is a JSON array of {call,equals}; <reference> contains the whole changed BML definitions. Close every block. Form owns the witness path, full=1, executable text and structural source checks: supply none of those. sources names read-only dependencies, not writable files. A transport example is {\"call\":\"len([1,2])\",\"equals\":2}; actual cases must measure changed definitions through their callers. Supply JSON-node inputs when the operation accepts JSON. File lookup cases must use existing paths from the supplied source and caller catalog. An unchanged copy of today's definition cannot solve the task. No invented aliases or detached helpers.";
-  def flp-packet(req, lens, feedback, prior, queue) = mc-cat([flp-intro(), "\n\n", flp-case-words(), "\n", flp-lens-text(lens), "\n\nThe request:\n", flp-request-text(req), "\n", flp-files-block(req), "\n", flp-callers-block(req), flp-case-reply(), flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
+  def flp-case-reply() = "Start with <plan>; emit only four completed blocks. <plan> is a JSON object with id,writable,sources,definitions with name and params; include every changed definition and new helper. <goal> states the original behavior. <cases> is a JSON array of {function,arguments,equals}: function is its existing name, arguments its values, equals the expected scalar or nested array. Form generates native calls: objects become JSON nodes, arrays become Form lists, null becomes nothing(). Use JSON null in this transport, never nothing(). Example: {\"function\":\"len\",\"arguments\":[[1,2]],\"equals\":2}. Complex compositions may use {call,equals} instead. <reference> contains complete changed BML definitions. Close every block. Form owns witness paths, executable text, full and source checks; supply none. sources names read-only dependencies. Measure changed operations through their callers; use real source/catalog paths for file cases. Preserve original behavior outside the task. No invented aliases, detached helpers or unchanged definitions in the manifest.";
+  def flp-packet(req, lens, feedback, prior, queue) = mc-cat([flp-intro(), "\n\n", flp-case-words(), "\nThe witness imports form-stdlib/core.fk. Use start .. end for end-exclusive integer ranges, such as 0 .. len(xs); never enumerate a dynamic index range as literals. substring(text,start,end) also uses an exclusive end, not a length. str_byte_at(text,index) returns the integer byte.\n", flp-lens-text(lens), "\n\nThe request:\n", flp-request-text(req), "\n", flp-files-block(req), "\n", flp-callers-block(req), flp-case-reply(), flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
   // ── the reply: <plan>, <goal> and <band> ──
   def flp-unfence(s) {
    let t = trim(s);
@@ -213,21 +242,29 @@ section [form.bml] {
    let reference = flp-block(reply, "reference") ?? "";
    if nothing?(head) then ["plan-unreadable", "The reply has no <plan>...</plan> block.", []] else if (!faj-valid(head)) then ["plan-unreadable", mc-cat(["The <plan> block is not one valid JSON object: ", flp-head(head, 300)]), []] else flp-parse-cases(parse-json("local-plan",head),goal,band,flp-block(reply,"cases"),reference);
   }
-  def flp-parse-cases(obj,goal,band,text,reference) = nothing?(text) ? (nothing?(band) ? ["band-unreadable","The reply needs <cases>...</cases> or an executable <band>...</band>.",[]] : flp-parsed(obj,goal,band,reference)) : !faj-valid(text) ? ["cases-unreadable","The cases block needs a JSON array of {call,equals} observations.",[]] : flp-cases-parsed(obj,goal,parse-json("plan-cases",text),reference);
+  def flp-parse-cases(obj,goal,band,text,reference) = nothing?(text) ? (nothing?(band) ? ["band-unreadable","The reply needs <cases>...</cases> or an executable <band>...</band>.",[]] : flp-parsed(obj,goal,band,reference)) : !faj-valid(text) ? ["cases-unreadable","The cases block needs a JSON array. Use JSON null for Form's nothing() in arguments and equals; Form generates the native expressions.",[]] : flp-cases-parsed(obj,goal,parse-json("plan-cases",text),reference);
   def flp-case-value?(value) = fcgp-object?(value) ? false : fcgp-array?(value) ? all?(flp-case-value?,json-array-elements(value)) : true;
-  def flp-case?(item) = fcgp-object?(item) && len(json-object-pairs(item))==2 && fcgp-str-node?(json-object-get(item,"call")) && len(trim(fcgp-str(item,"call")))>0 && json-object-has?(item,"equals") && flp-case-value?(json-object-get(item,"equals"));
+  def flp-case?(item) = fcgp-object?(item) && json-object-has?(item,"equals") && flp-case-value?(json-object-get(item,"equals")) && (len(json-object-pairs(item))==2 && fcgp-str-node?(json-object-get(item,"call")) && len(trim(fcgp-str(item,"call")))>0 || len(json-object-pairs(item))==3 && fcgp-str-node?(json-object-get(item,"function")) && len(trim(fcgp-str(item,"function")))>0 && fcgp-array?(json-object-get(item,"arguments")));
   def flp-case-value(value) = fcgp-array?(value) ? "[" + flp-join(map(flp-case-value,json-array-elements(value)),",") + "]" : json-emit(value)=="null" ? "nothing()" : json-emit(value);
+  def flp-case-argument(value) = fcgp-object?(value) ? "parse-json(\"case-argument\"," + flp-said(json-emit(value)) + ")" : fcgp-array?(value) ? "[" + flp-join(map(flp-case-argument,json-array-elements(value)),",") + "]" : flp-case-value(value);
+  def flp-case-call(item) = json-object-has?(item,"call") ? fcgp-str(item,"call") : fcgp-str(item,"function") + "(" + flp-join(map(flp-case-argument,json-array-elements(json-object-get(item,"arguments"))),",") + ")";
+  def flp-source-path(path) = flp-starts?(path,"form-stdlib/") ? "form/" + path : path;
   def flp-case-check(definition) = json-node-object([fhn-s("tool","rg"),json-node-pair("arguments",flp-json-strings(["-c","-F",flp-file-bml?(definition[2]) ? "def " + definition[0] + "(" : flp-fk-mark(definition[0]),definition[2]])),fhn-s("stdout","1\n")]);
   def flp-case-plan(obj) {
    let writable=flp-strs(obj,"writable");
-   let sources=flp-strs(obj,"sources") |> filter(path=>!flp-has?(writable,path));
+   let sources=flp-strs(obj,"sources") |> map(flp-source-path) |> filter(path=>!flp-has?(writable,path));
    let checks=flp-defs-of(obj,writable) |> map(flp-case-check);
    oh-set(oh-set(oh-set(oh-set(obj,"full",json-node-int(1)),"band",json-node-string(flp-tests() + flp-text(obj,"id") + "-band.bml")),"sources",flp-json-strings(sources)),"checks",json-node-array(checks));
   }
-  def flp-cases-parsed(obj,goal,cases,reference) = !fcgp-object?(obj) || !fcgp-array?(cases) || nil?(json-array-elements(cases)) || !all?(flp-case?,json-array-elements(cases)) ? ["cases-shape","Each case needs a nonempty BML call expression and an equals value (scalar or nested array); observe object properties through the call.",[]] : flp-cases-owned(flp-case-plan(obj),goal,cases,reference);
+  def flp-cases-parsed(obj,goal,cases,reference) = !fcgp-object?(obj) || !fcgp-array?(cases) || nil?(json-array-elements(cases)) || !all?(flp-case?,json-array-elements(cases)) ? ["cases-shape","Each case needs function, arguments and equals, or call and equals. Expected values are scalars or nested arrays; observe object properties through the function.",[]] : flp-cases-balanced(obj,goal,cases,reference);
+  def flp-cases-balanced(obj,goal,cases,reference) {
+   let items=json-array-elements(cases);
+   let bad=flp-first(0 .. len(items),i=>len(flp-delims(flp-case-call(items[i]),true))>0);
+   nothing?(bad) ? flp-cases-owned(flp-case-plan(obj),goal,cases,reference) : ["case-delimiters","Case " + (bad+1).str() + ": " + flp-delims(flp-case-call(items[bad]),true) + "\nThe exact BML call: " + flp-case-call(items[bad]) + "\nUse function and arguments to let Form generate this expression, or complete the call before its witness is generated.",[]];
+  }
   def flp-cases-owned(obj,goal,cases,reference) = flp-parsed(obj,(goal ?? flp-text(obj,"goal")) + "\nDefinition manifest: " + flp-join(map(d=>d[0],flp-defs-of(obj,flp-strs(obj,"writable"))),", "),flp-cases-band(obj,json-array-elements(cases)),reference);
   def flp-case-lines(state,item) {
-   let id=state[0].str(); let call=fcgp-str(item,"call"); let expected=flp-case-value(json-object-get(item,"equals"));
+   let id=state[0].str(); let call=flp-case-call(item); let expected=flp-case-value(json-object-get(item,"equals"));
    [state[0]+1,state[1] + " let result" + id + "=try [(" + call + ")] catch [];\n let actual" + id + "=nil?(result" + id + ") ? nothing() : result" + id + "[0];\n let expected" + id + "=" + expected + ";\n let held" + id + "=len(result" + id + ")==1 && actual" + id + "==expected" + id + ";\n print_str(json-emit(fcam-pack([" + flp-said(call) + ",value_kind(actual" + id + "),actual" + id + ",expected" + id + ",held" + id + ",len(result" + id + ")==1])));\n let all=all && held" + id + ";\n"];
   }
   def flp-cases-band(obj,cases) = "; Native case observations; the final reading is their conjunction.\n; Verdict 1\n; preludes: form-stdlib/core.fk form-stdlib/bml/form-cli-code-memory.bml " + flp-join(map(flp-token,append(flp-strs(obj,"writable"),flp-strs(obj,"sources")))," ") + "\nsection [form.bml] {\n let all=true;\n" + foldl(flp-case-lines,[0,""],cases)[1] + " all ? 1 : 0;\n}\n";
@@ -396,7 +433,7 @@ section [form.bml] {
    let evidence=flp-dir() + "/executions/" + flp-sha(path) + ".json";
    let receipt=json-emit(json-node-object([fhn-s("command","./fkwu " + path),json-node-pair("exit",nothing?(status) ? json-node-null() : json-node-int(status)),fhn-n("timed_out",waited[1]),fhn-s("stdout",stdout),fhn-s("stderr",stderr)]));
    let written=flp-put(evidence,receipt);
-   [reading, waited[1], mc-cat([nothing?(reading) ? "\nExecution exit=" + flp-show(status) + " stdout:\n" + stdout + "stderr:\n" + stderr : flp-errors(stderr),read_file(evidence)==receipt ? "\nExecution evidence: " + evidence : "\nExecution evidence could not be retained at " + evidence])];
+   [reading, waited[1], mc-cat([nothing?(reading) ? "\nExecution exit=" + flp-show(status) + " stdout:\n" + stdout + "stderr:\n" + stderr : "\nExecution stdout:\n" + stdout + flp-errors(stderr),read_file(evidence)==receipt ? "\nExecution evidence: " + evidence : "\nExecution evidence could not be retained at " + evidence])];
   }
   def flp-mkdirs-at(path, i) {
    let sp = str_find(path, "/", i);
@@ -455,15 +492,30 @@ section [form.bml] {
    let at = str_find(text, flp-fk-mark(d[0]), 0);
    if (at >= 0) then flp-fk-replace(text, d, make, at) else flp-fk-insert(text, d, make);
   }
-  // a BML definition runs to the next line at its own indentation or less, and takes a closing brace at its own
+  // Source boundaries follow balanced syntax; indentation does not own a body.
   def flp-bml-end(text, from, width) {
-   let nl = str_find(text, "\n", from);
-   if (nl < 0) then len(text) else flp-bml-end-line(text, (nl + 1), width);
+   let end=flp-bml-end-at(text,from,from,[],false);
+   let line=flp-line-end(text,end);
+   len(trim(substring(text,end,line)))==0 && line<len(text) ? line+1 : end;
   }
-  def flp-bml-end-line(text, ls, width) {
-   let ie = flp-indent-end(text, ls);
-   let le = flp-line-end(text, ls);
-   if (ls >= len(text)) then len(text) else if ((Comparable) ie == le) then flp-bml-end(text, ls, width) else if ((ie - ls) > width) then flp-bml-end(text, ls, width) else if (((Comparable) (ie - ls) == width) && flp-starts?(substring(text, ie, le), "}")) then (if (le < len(text)) then (le + 1) else le) else ls;
+  def flp-bml-end-at(text,start,i,stack,quoted) = i>=len(text) ? len(text) : {
+   let b=str_byte_at(text,i);
+   quoted ? flp-bml-end-at(text,start,i+(b==92 ? 2 : 1),stack,b != 34) :
+   b==34 ? flp-bml-end-at(text,start,i+1,stack,true) :
+   b==47 && flp-slash2?(text,i) ? flp-bml-end-at(text,start,flp-line-end(text,i),stack,false) :
+   nil?(stack) && i>start && flp-indent-end(text,flp-line-start(text,i))==i && flp-starts?(substring(text,i,len(text)),"def ") ? flp-line-start(text,i) :
+   nil?(stack) && b==59 ? i+1 :
+   b==40 || b==91 || b==123 ? flp-bml-end-at(text,start,i+1,cons(b,stack),false) :
+   b==41 || b==93 || b==125 ? (nil?(stack) ? i : b==125 && nil?(stack[1:]) ? flp-bml-body-end(text,start,i) : flp-bml-end-at(text,start,i+1,stack[1:],false)) :
+   flp-bml-end-at(text,start,i+1,stack,false);
+  };
+  def flp-bml-after-space(text,i) = i<len(text) && flp-blank-byte?(str_byte_at(text,i)) ? flp-bml-after-space(text,i+1) : i;
+  def flp-bml-body-end(text,start,i) {
+   let next=flp-bml-after-space(text,i+1);
+   next>=len(text) ? i+1 : str_byte_at(text,next)==59 ? next+1 : {
+    let continuation=flp-starts?(substring(text,next,len(text)),"else") || (str_find("(.[?+-*/%<>=!&|^",substring(text,next,next+1),0)>=0 && !(str_byte_at(text,next)==47 && flp-slash2?(text,next)));
+    continuation ? flp-bml-end-at(text,start,i+1,[],false) : i+1;
+   };
   }
   def flp-paren-close(t, i, depth) = if (i >= len(t)) then -1 else if ((Comparable) str_byte_at(t, i) == 40) then flp-paren-close(t, (i + 1), (depth + 1)) else if ((Comparable) str_byte_at(t, i) == 41) then (if (depth <= 1) then i else flp-paren-close(t, (i + 1), (depth - 1))) else flp-paren-close(t, (i + 1), depth);
   def flp-bml-replace(text, d, make, at) {
@@ -778,7 +830,8 @@ section [form.bml] {
    let logged = fhn-append(flp-ctx-ledger(ctx), json-emit(row) ++ "\n");
    let spoken = print_str("[local-plan] " ++ json-emit(row));
    let swept = if (flp-held?(v) || flp-moot?(v)) then 0 else host_dir_rmdir(flp-at(flp-ctx-scratch(ctx), stamp));
-   if flp-moot?(v) then [3, flp-moot-witness(parsed[2], ctx, stamp, v, way, n)] else if flp-held?(v) then [1, flp-land(parsed[2], req, ctx, append(planner, [json-node-pair("reachable", if nothing?(v[5]) then json-node-null() else json-node-int(1)), json-node-pair("plan_solofall", flp-falls-node(v[6])), json-node-pair("plan_checkfall", flp-checkfall-node(v[6]))]), row)] else [0, [flp-finding(n, way, v), v[1], way[1], way[0], said[1], row, said[2], said[3]]];
+   let reuse=v[0]==7 && len(said)>4 && said[4] != "" ? flp-recheck(req,ctx,said[4]) : ["refused",[],""];
+   if reuse[0]=="queued" then [1,reuse[1]] else if flp-moot?(v) then [3, flp-moot-witness(parsed[2], ctx, stamp, v, way, n)] else if flp-held?(v) then [1, flp-land(parsed[2], req, ctx, append(planner, [json-node-pair("reachable", if nothing?(v[5]) then json-node-null() else json-node-int(1)), json-node-pair("plan_solofall", flp-falls-node(v[6])), json-node-pair("plan_checkfall", flp-checkfall-node(v[6]))]), row)] else [0, [flp-finding(n, way, v), v[1], way[1], way[0], said[1], row, said[2], said[3]]];
   }
   // ── the moot witness: the band kept in the option's scratch tree, with the readings that retire the request ──
   def flp-today-band(ctx, stamp, plan) = flp-at(mc-cat([flp-at(flp-ctx-scratch(ctx), stamp), "/today"]), flp-p-band(plan));
@@ -802,24 +855,46 @@ section [form.bml] {
   // A retained model proposal can become executable after native care. Recheck
   // it against current source; no new model usage is attributed to this event.
   def flp-recheck(req,ctx,reply) {
+   let first=flp-recheck-parts(req,ctx,reply,reply);
+   first[0]=="queued" || len(first)<4 || first[3]!=7 ? first : {
+    let alternatives=flp-queue-rows(flp-ctx-ledger(ctx)) |> filter(row=>flp-text(row,"request")==flp-req-id(req) && flp-text(row,"voice_status")=="answered" && flp-text(row,"reply") != reply);
+    foldl((result,row)=>result[0]=="queued" ? result : flp-recheck-parts(req,ctx,reply,flp-text(row,"reply")),first,alternatives);
+   };
+  }
+  def flp-reply-owner(rows,req,reply) = foldl((held,row)=>flp-text(row,"request")==flp-req-id(req) && flp-text(row,"reply")==reply && flp-text(row,"voice_status")=="answered" ? row : held,nothing(),rows);
+  def flp-reference-compatible(plan,raw) {
+   let head=flp-block(raw,"plan");
+   nothing?(head) || !faj-valid(head) ? false : {
+    let node=parse-json("retained-reference-manifest",head);
+    let writable=flp-strs(node,"writable");
+    let defs=flp-defs-of(node,writable);
+    flp-p-writable(plan)==writable && map(flp-def-key,flp-p-defs(plan))==map(flp-def-key,defs) && !nothing?(flp-block(raw,"reference"));
+   };
+  }
+  def flp-reference-plan(plan,reference) = flp-plan(flp-p-id(plan),flp-p-band(plan),flp-p-full(plan),flp-p-writable(plan),flp-p-sources(plan),flp-p-defs(plan),flp-p-checks(plan),flp-p-goal(plan),flp-p-text(plan),reference);
+  def flp-recheck-parts(req,ctx,reply,referenceReply) {
    let started=now_unix_ms();
    let rows=flp-queue-rows(flp-ctx-ledger(ctx));
-   let origin=foldl((held,row)=>flp-text(row,"request")==flp-req-id(req) && flp-text(row,"reply")==reply && flp-text(row,"voice_status")=="answered" ? row : held,nothing(),rows);
-   nothing?(origin) ? ["refused",[],"No retained local-model result owns this request and reply."] : {
-    let parsed=flp-parse(fhn-read(reply)); let stamp=flp-safe-id(req) + "-recheck-" + now_unix_ms().str();
+   let origin=flp-reply-owner(rows,req,reply);
+   let referenceOwner=flp-reply-owner(rows,req,referenceReply);
+   nothing?(origin) || nothing?(referenceOwner) ? ["refused",[],"No retained local-model result owns this request and both proposal parts."] : {
+    let original=flp-parse(fhn-read(reply));
+    let reference=fhn-read(referenceReply);
+    let parsed=referenceReply==reply || original[0]!="" ? original : !flp-reference-compatible(original[2],reference) ? ["reference-owner-conflict","The retained reference has a different writable or definition manifest.",[]] : ["","",flp-reference-plan(original[2],flp-block(reference,"reference"))];
+    let stamp=flp-safe-id(req) + "-recheck-" + now_unix_ms().str();
     let queued=flp-request-row(flp-ctx-queue(ctx),flp-req-id(req));
     let verifyCtx=nothing?(queued) ? ctx : flp-ctx(flp-ctx-voice(ctx),flp-ctx-voices(ctx),flp-ctx-attempts(ctx),"",flp-ctx-land(ctx),flp-ctx-scratch(ctx),flp-ctx-ledger(ctx),flp-ctx-deadline(ctx));
     let conflict=parsed[0]=="" && !nothing?(queued) && (!flp-row-reads?(queued,parsed[2]) || fhn-read(flp-p-band(parsed[2]))!=flp-p-text(parsed[2]));
     let shape=parsed[0]!="" ? flp-refused(6,parsed[0],parsed[1]) : conflict ? flp-refused(6,"recheck-conflict","The queued contract or witness differs from this retained proposal.") : flp-shape-at(parsed[2],verifyCtx,!nothing?(queued));
     let v=flp-held?(shape) ? flp-verify-paths(parsed[2],req,verifyCtx,[],stamp) : shape;
     let way=[flp-text(origin,"voice"),flp-text(origin,"lens"),"recheck"];
-    let row=flp-option-row(req,0,way,v,parsed[2],["retained",fhn-read(reply),0,0,reply],started,stamp);
+    let row=oh-set(flp-option-row(req,0,way,v,parsed[2],["retained",fhn-read(reply),0,0,reply],started,stamp),"reference_reply",json-node-string(referenceReply));
     let kept=fhn-append(flp-ctx-ledger(ctx),json-emit(row) + "\n");
-    !flp-held?(v) ? ["refused",[],v[2]] : {
+    !flp-held?(v) ? ["refused",[],v[2],v[0]] : {
      let taskRows=rows |> filter(r=>flp-text(r,"request")==flp-req-id(req));
      let generated=foldl((n,r)=>n + (fcgp-num(r,"local_generated_ids") ?? 0),0,taskRows);
      let injected=foldl((n,r)=>n + (fcgp-num(r,"local_injected_ids") ?? 0),0,taskRows);
-     let planner=[fhn-s("plan_voice",way[0]),fhn-s("plan_lens",way[1]),fhn-n("plan_options",len(taskRows)),fhn-n("plan_local_generated_ids",generated),fhn-n("plan_local_injected_ids",injected),fhn-n("reachable",1),json-node-pair("plan_solofall",flp-falls-node(v[6])),json-node-pair("plan_checkfall",flp-checkfall-node(v[6]))];
+     let planner=[fhn-s("plan_voice",way[0]),fhn-s("plan_lens",way[1]),fhn-n("plan_options",len(taskRows)),fhn-n("plan_local_generated_ids",generated),fhn-n("plan_local_injected_ids",injected),fhn-s("plan_reference_reply",referenceReply),fhn-s("plan_reference_voice",flp-text(referenceOwner,"voice")),fhn-n("reachable",1),json-node-pair("plan_solofall",flp-falls-node(v[6])),json-node-pair("plan_checkfall",flp-checkfall-node(v[6]))];
      ["queued",nothing?(queued) ? flp-land(parsed[2],req,ctx,planner,row) : [flp-p-band(parsed[2]),json-emit(queued),0,row],""];
     };
    };
