@@ -940,6 +940,27 @@ static double fk_num(long long v) {
  * frame to the callee for good -- exact for the hot loops that matter.
  * Written to .fkwu-boxing.<pid> beside the heat board. */
 static long long fk_cur_fn;
+/* the walker's frame chain (read by the fatal-signal organ and by a stack-depth stop): every non-tail call saves its
+ * caller here and takes it back on return; the callee itself is fk_cur_fn, so the chain at any moment is fk_cur_fn,
+ * then fk_fr_fn[fk_fr_depth - 1] down to fk_fr_fn[0]. A tail jump replaces fk_cur_fn and pushes nothing. The two
+ * recover points (fk_attempt, fk_cell_walk_guarded) put the depth back as they put fk_cur_fn back. Entries past
+ * FK_FR_CAP are counted and not kept. Shrink path: when the walker is Form's own, the chain is its call stack. */
+#define FK_FR_CAP 1048576
+static int fk_fr_fn[FK_FR_CAP];
+static long long fk_fr_depth;
+#define FK_FR_PUSH(caller) do { if (fk_fr_depth < FK_FR_CAP) { fk_fr_fn[fk_fr_depth] = (int)(caller); } fk_fr_depth = fk_fr_depth + 1; } while (0)
+#define FK_FR_POP() do { fk_fr_depth = fk_fr_depth - 1; } while (0)
+/* the innermost frames of the chain, named, taken when a stack-depth stop is raised (fk_fatal_frames_take) and carried
+ * to the cell_run record's `stopped.frames`; the fatal-signal organ takes the same view when the process is dying */
+#define FK_STOP_FRAMES 24
+static char fk_stop_frame_fn[FK_STOP_FRAMES][96];
+static char fk_stop_frame_unit[FK_STOP_FRAMES][160];
+static int fk_stop_frames_n;
+static long long fk_stop_frames_depth;
+static void fk_fatal_frames_take(void);
+static void fk_fatal_row(const char *name, int sig, unsigned long long addr);
+static void fk_depth_said(long long used);
+static char fk_depth_msg[1024];
 static long long *fk_fn_fbox;
 #define FK_F64_HEAT 1024
 static long long *fk_fn_unbox;      /* per-recipe float READS (a pool slot dereferenced per operand); beside fk_fn_fbox, the mints */
@@ -1915,6 +1936,18 @@ extern void _exit(int);
 #include <poll.h>
 #include <signal.h>
 #include <termios.h>
+/* the fatal-signal organ's readers of the process: resident size, the C call chain and its symbols */
+#if defined(__has_include)
+#if __has_include(<execinfo.h>)
+#include <execinfo.h>
+#define FK_HAVE_EXECINFO 1
+#endif
+#define FK_HAVE_RUSAGE 1   /* getrusage is declared by hand where it is used: <sys/resource.h> redefines this file's own struct timeval */
+#if defined(__APPLE__) && __has_include(<dlfcn.h>)
+#include <dlfcn.h>
+#define FK_HAVE_DLADDR 1
+#endif
+#endif
 #endif
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
 #define FK_HAVE_DARWIN_ARM64_JIT_WITNESS 1
@@ -13576,12 +13609,17 @@ static long long fk_truth(long long w) {
 /* the eval-depth wall: the walker meets it at every step, a leaf's non-tail self call before it recurses -- the same
  * report and the same stop, so a crystallized recursion ends where the walker would, honestly, never in a crash */
 static void fk_depth_wall(long long used) {
+    char fk_sp_here;
+    /* a stack-depth is a stop with a name and a frame chain, never a crash: inside a recover point (a cell_run, an
+     * attempt) it unwinds there reading "stack-depth: <unit> <fn> (...)" and the cell's record carries the frames;
+     * outside every one it is the end of the program, and the end is written as an organ row too (fk_fatal_row) */
+    fk_fatal_frames_take();
+    fk_depth_said(used);
     if (fk_recovering()) {
-        fk_stop("fkwu: eval too deep -- the recursion needs to be tail or balanced");
+        fk_stop(fk_depth_msg);
     }
-    printf("fkwu: eval too deep — %lld bytes of walker stack (wall %lld). The recursion "
-           "needs to be tail or balanced; the wall is honest, the silent crash was not.\n",
-           used, fk_stack_wall);
+    printf("fkwu: %s. The wall is honest, the silent crash was not.\n", fk_depth_msg);
+    fk_fatal_row("STACK-DEPTH", 0, (unsigned long long)(fk_size_t)&fk_sp_here);
     fk_die("eval-depth wall");
 }
 static long long fk_walk(long long i, long long fp) {
@@ -13676,12 +13714,14 @@ static long long fk_walk(long long i, long long fp) {
         long long b12 = fk_vsp - 1;
         fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
         long long caller12 = fk_cur_fn; /* the non-tail call has a return point: boxes minted after it are the caller's again */
+        FK_FR_PUSH(caller12);
         fk_cur_fn = c12;
         fk_heat_pulse();
         /* the entry is the loop lane's trigger too (it pulses the twin lane on the way): a loop that leaves on its first
          * compare is never tail-jumped and is hot all the same -- fstr-skip-ws over text with no space to skip */
         if ((fk_fn_heat[c12] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c12, b12, 1); }
         long long r12 = fk_walk_body(fk_fn[c12], b12);
+        FK_FR_POP();
         fk_cur_fn = caller12;
         fk_vsp = b12;
         return fk_offer_ack(c12, 1, r12);
@@ -13698,10 +13738,12 @@ static long long fk_walk(long long i, long long fp) {
         long long b240 = fk_vsp - 2;
         fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
         long long caller240 = fk_cur_fn;
+        FK_FR_PUSH(caller240);
         fk_cur_fn = c240;
         fk_heat_pulse();
         if ((fk_fn_heat[c240] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c240, b240, 2); } /* the entry triggers the loop lane too */
         long long r240 = fk_walk_body(fk_fn[c240], b240);
+        FK_FR_POP();
         fk_cur_fn = caller240;
         fk_vsp = b240;
         return fk_offer_ack(c240, 2, r240);
@@ -13720,10 +13762,12 @@ static long long fk_walk(long long i, long long fp) {
         long long n241 = fk_vsp - base241;
         fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
         long long caller241 = fk_cur_fn;
+        FK_FR_PUSH(caller241);
         fk_cur_fn = c241;
         fk_heat_pulse();
         if ((fk_fn_heat[c241] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c241, base241, n241); } /* the entry triggers the loop lane too (and the twin lane on the way) */
         long long r241 = fk_walk_body(fk_fn[c241], base241);
+        FK_FR_POP();
         fk_cur_fn = caller241;
         fk_vsp = base241;
         return fk_offer_ack(c241, n241, r241);
@@ -13788,9 +13832,11 @@ static long long fk_walk(long long i, long long fp) {
          * a capturing closure the lane cannot read stays the walker's */
         if (!fk_fnval_is_closure(hv244) && (fk_fn_heat[fi244] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(fi244, base244, n244); }
         long long caller244 = fk_cur_fn;
+        FK_FR_PUSH(caller244);
         fk_cur_fn = fi244;
         fk_heat_pulse();
         long long r244 = fk_walk_body(fk_fn[fi244], base244);
+        FK_FR_POP();
         fk_cur_fn = caller244;
         fk_vsp = base244 - FK_CLO_CALLEE_ROOT;
         return fk_offer_ack(fi244, n244, r244);
@@ -15596,6 +15642,322 @@ static const char *fk_hot_unit_of(long long so) {
     }
     return unit;
 }
+/* ── THE FATAL-SIGNAL ORGAN ──────────────────────────────────────────────────────────────────────────────────────
+ * A SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT used to end the process with nothing said (rc 138/139, an empty .err):
+ * a band-sweep shard lay dead for 50 minutes and the cause was read from the operating system's crash reports. Now the
+ * process says it itself. A handler on each thread's alternate stack writes ONE organ-health row (organ fkwu-seed,
+ * aspect fatal-signal, health 0, surprise 1, needs fatal-signal, offers request-evidence and revise: the keys and
+ * words every other row of the body uses) to stderr and appends it, whole and with one write, to .hearth/fatal-signal.jsonl
+ * (the seed's cwd; opened with O_APPEND at the moment of death, nothing held earlier). Its evidence is what the process
+ * knew: the signal and the fault address, the resident bytes, the cell_run units in flight, the walker's frame chain
+ * (the innermost FK_STOP_FRAMES Form functions with their units, and the chain's depth), the source collector's depth and
+ * the units it was entering, and the C call chain with symbols. Then the default action is restored and the signal
+ * raised again, so the exit status stays what the operating system says it was. Form's side
+ * (form/form-stdlib/bml/fatal-signal.bml) reads the file into the immune system's attention.
+ * Everything the handler touches is a static array or a read of a table; no allocation, no stdio.
+ * A stack that ends is a STOP before it is ever a signal: fk_depth_wall (the walker) and fk_src_collect_dep (the
+ * collector) name the unit and the function and unwind to the recover point; the handler is for what no guard met.
+ * FK_TEST_FAULT (an environment variable, absent in every product run) lets a band raise each fault on purpose:
+ * the door cell_run("fk-test-fault") raises the fault the variable names (segv, bus, ill, fpe, abort, cstack), and the
+ * words load-base and no-collect-guard switch off the two repairs whose absence the organ must still catch.
+ * Shrink path: when the walker and the collector are Form's, the frame chain is Form's call stack and the guards are
+ * its own depth law; what stays in C is the handler and the one row it writes. */
+static int fk_fatal_fn_info(long long fn, const char **name, long long *nl, const char **unit) {
+    long long j = 0;
+    *name = "(top)";
+    *nl = 5;
+    *unit = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
+    if (fn == 0 && fk_cell_root_path != 0) { return 1; }
+    if (fk_fnidx == 0 || fk_fnsym_s == 0 || fk_fnsym_n == 0 || fk_srctext == 0) { return 0; }
+    while (j <= fk_fntop && fk_fnidx[j] != fn) { j = j + 1; }
+    if (j > fk_fntop) { *name = "(unnamed)"; *nl = 9; return 0; }
+    {
+        long long so = fk_fnsym_s[j], nn = fk_fnsym_n[j];
+        if (so < 0 || nn < 0 || so + nn > fk_slen) { *name = "(unnamed)"; *nl = 9; return 0; }
+        *name = fk_srctext + so;
+        *nl = nn;
+        *unit = fk_hot_unit_of(so);
+        if (nn == 0) { *name = "(top)"; *nl = 5; }   /* the program's own top-level frame has no name */
+    }
+    return 1;
+}
+static void fk_fatal_cpy(char *to, long long cap, const char *s, long long n) {
+    long long k = 0;
+    while (k < n && k < cap - 1 && s[k] != 0) { to[k] = s[k]; k = k + 1; }
+    to[k] = 0;
+}
+/* the walker's chain, innermost first, named into fk_stop_frame_fn / fk_stop_frame_unit */
+static void fk_fatal_frames_take(void) {
+    long long k = fk_fr_depth - 1, fn = fk_cur_fn;
+    int n = 0;
+    fk_stop_frames_depth = fk_fr_depth;
+    if (k >= FK_FR_CAP) { k = FK_FR_CAP - 1; }
+    for (;;) {
+        const char *nm, *un;
+        long long nl;
+        fk_fatal_fn_info(fn, &nm, &nl, &un);
+        fk_fatal_cpy(fk_stop_frame_fn[n], 96, nm, nl);
+        fk_fatal_cpy(fk_stop_frame_unit[n], 160, un != 0 ? un : "", un != 0 ? fk_cstrlen(un) : 0);
+        n = n + 1;
+        if (n >= FK_STOP_FRAMES || k < 0) { break; }
+        fn = fk_fr_fn[k];
+        k = k - 1;
+    }
+    fk_stop_frames_n = n;
+}
+/* the message of a stack-depth stop: the reason, named for the unit and the function it was in */
+static void fk_depth_said(long long used) {
+    const char *nm, *un;
+    long long nl;
+    char fnb[96];
+    char unb[400];
+    fk_fatal_fn_info(fk_cur_fn, &nm, &nl, &un);
+    fk_fatal_cpy(fnb, 96, nm, nl);
+    fk_fatal_cpy(unb, 400, un != 0 ? un : "", un != 0 ? fk_cstrlen(un) : 0);
+    sprintf(fk_depth_msg,
+            "stack-depth: %s %s (%lld bytes of walker stack, wall %lld, %lld frames deep; the recursion needs to be tail or balanced)",
+            unb, fnb, used, fk_stack_wall, fk_fr_depth);
+}
+/* the source collector's depth: one level per prelude or import being entered. A chain of preludes is a handful of
+ * levels deep; a cycle the freshness check turned into endless re-collection (two .bml units that name each other, before
+ * fk_cell_load_base) was 100,000 levels deep and ended on the guard page. Past FK_COLLECT_DEPTH_MAX, or past the walker's
+ * own stack wall, the collector stops entering: the unit that would have been entered is named and every level returns. */
+#define FK_COLLECT_DEPTH_MAX 2048
+#define FK_COLLECT_RING 32
+static long long fk_collect_depth;
+static const char *fk_collect_ring[FK_COLLECT_RING];
+static long long fk_collect_hit;                 /* the depth at which the collector refused to go deeper; 0 when it did not */
+static char fk_collect_hit_path[FK_PATH_CAP];
+static int fk_test_flags;                        /* FK_TEST_FAULT words: 1 load-base, 2 no-collect-guard */
+static char fk_test_fault_word[16];
+#define FK_TEST_LOAD_BASE_OFF 1
+#define FK_TEST_NO_COLLECT_GUARD 2
+#if !defined(_WIN32)
+#define FK_FATAL_BUF 40960
+#define FK_FATAL_ALT 262144
+#define FK_FATAL_BT 32
+static char fk_fatal_b[FK_FATAL_BUF];
+static long long fk_fatal_n;
+static volatile int fk_fatal_busy;
+static long long fk_fatal_seq;
+extern int getrusage(int, void *);
+static char fk_fatal_alt_main[FK_FATAL_ALT];
+static char fk_fatal_alt_run[FK_FATAL_ALT];
+static const char *fk_cellrun_paths[8];          /* the cell_run units in flight, outermost first (the door pushes and pops) */
+static long long fk_cellrun_n;
+static void fk_fatal_raw(const char *s, long long n) {
+    long long k = 0;
+    while (k < n && fk_fatal_n < FK_FATAL_BUF - 1) { fk_fatal_b[fk_fatal_n] = s[k]; fk_fatal_n = fk_fatal_n + 1; k = k + 1; }
+}
+static void fk_fatal_lit(const char *s) {
+    long long n = 0;
+    while (s[n] != 0) { n = n + 1; }
+    fk_fatal_raw(s, n);
+}
+static void fk_fatal_int(long long v) {
+    char t[24];
+    int k = 0;
+    unsigned long long u = v < 0 ? (unsigned long long)0 - (unsigned long long)v : (unsigned long long)v;
+    if (v < 0) { fk_fatal_raw("-", 1); }
+    if (u == 0) { t[k] = '0'; k = k + 1; }
+    while (u > 0 && k < 24) { t[k] = (char)('0' + (int)(u % 10)); u = u / 10; k = k + 1; }
+    while (k > 0) { k = k - 1; fk_fatal_raw(&t[k], 1); }
+}
+static void fk_fatal_hex(unsigned long long u) {
+    char t[20];
+    int k = 0;
+    if (u == 0) { t[k] = '0'; k = k + 1; }
+    while (u > 0 && k < 20) { t[k] = "0123456789abcdef"[u & 15]; u = u >> 4; k = k + 1; }
+    while (k > 0) { k = k - 1; fk_fatal_raw(&t[k], 1); }
+}
+/* a JSON string body: a quote and a backslash are escaped, any control byte is a space; the bytes of a path pass as they are */
+static void fk_fatal_esc(const char *s, long long n) {
+    long long k = 0;
+    while (k < n && s[k] != 0) {
+        unsigned char c = (unsigned char)s[k];
+        if (c == '"' || c == '\\') { fk_fatal_raw("\\", 1); fk_fatal_raw(&s[k], 1); }
+        else if (c < 32 || c == 127) { fk_fatal_raw(" ", 1); }
+        else { fk_fatal_raw(&s[k], 1); }
+        k = k + 1;
+    }
+}
+static void fk_fatal_str(const char *s) {
+    long long n = 0;
+    if (s == 0) { fk_fatal_lit("\"\""); return; }
+    while (s[n] != 0 && n < FK_PATH_CAP) { n = n + 1; }
+    fk_fatal_raw("\"", 1);
+    fk_fatal_esc(s, n);
+    fk_fatal_raw("\"", 1);
+}
+static void fk_fatal_observed(const char *name, unsigned long long addr) {
+    fk_fatal_lit(name);
+    fk_fatal_lit(" at 0x");
+    fk_fatal_hex(addr);
+}
+static void fk_fatal_row(const char *name, int sig, unsigned long long addr) {
+    long long at = fk_now_ms();
+    long long pid = (long long)getpid();
+    long long rss = 0;
+    long long k;
+    void *bt[FK_FATAL_BT];
+    int bn = 0;
+    int fd;
+#if defined(FK_HAVE_RUSAGE)
+    {
+        long ru[40];   /* struct rusage: two timevals (4 longs), then ru_maxrss (bytes on Darwin, kilobytes elsewhere) */
+        if (getrusage(0, ru) == 0) {
+#if defined(__APPLE__)
+            rss = (long long)ru[4];
+#else
+            rss = (long long)ru[4] * 1024;
+#endif
+        }
+    }
+#endif
+#if defined(FK_HAVE_EXECINFO)
+    bn = backtrace(bt, FK_FATAL_BT);
+#endif
+    fk_fatal_frames_take();
+    fk_fatal_n = 0;
+    fk_fatal_seq = fk_fatal_seq + 1;
+    fk_fatal_lit("{\"schema\":\"organ-health-v1\",\"id\":\"");
+    fk_fatal_int(pid); fk_fatal_lit(":"); fk_fatal_int(at); fk_fatal_lit(":fatal:"); fk_fatal_int(fk_fatal_seq);
+    fk_fatal_lit("\",\"organ\":\"fkwu-seed\",\"flow\":\""); fk_fatal_int(pid);
+    fk_fatal_lit("\",\"aspect\":\"fatal-signal\",\"stage\":\"observe\",\"expected\":\"clean\",\"observed\":\"");
+    fk_fatal_observed(name, addr);
+    fk_fatal_lit("\",\"health\":0,\"surprise\":1,\"needs\":[{\"resource\":\"fatal-signal\",\"detail\":\"");
+    fk_fatal_observed(name, addr);
+    fk_fatal_lit("\"}],\"offers\":[\"request-evidence\",\"revise\"],\"selected\":\"\",\"evidence\":{\"signal\":");
+    fk_fatal_int(sig);
+    fk_fatal_lit(",\"name\":\""); fk_fatal_lit(name);
+    fk_fatal_lit("\",\"addr\":\"0x"); fk_fatal_hex(addr);
+    fk_fatal_lit("\",\"resident_bytes\":"); fk_fatal_int(rss);
+    fk_fatal_lit(",\"pid\":"); fk_fatal_int(pid);
+    fk_fatal_lit(",\"cell\":");
+    fk_fatal_str(fk_cellrun_n > 0 && fk_cellrun_n <= 8 ? fk_cellrun_paths[fk_cellrun_n - 1] : (fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path));
+    fk_fatal_lit(",\"root\":"); fk_fatal_str(fk_src_root_path);
+    fk_fatal_lit(",\"cells\":[");
+    for (k = 0; k < fk_cellrun_n && k < 8; k = k + 1) {
+        if (k > 0) { fk_fatal_lit(","); }
+        fk_fatal_str(fk_cellrun_paths[k]);
+    }
+    fk_fatal_lit("],\"depth\":"); fk_fatal_int(fk_stop_frames_depth);
+    fk_fatal_lit(",\"frames\":[");
+    for (k = 0; k < fk_stop_frames_n && fk_fatal_n < FK_FATAL_BUF - 12288; k = k + 1) {
+        if (k > 0) { fk_fatal_lit(","); }
+        fk_fatal_lit("{\"fn\":"); fk_fatal_str(fk_stop_frame_fn[k]);
+        fk_fatal_lit(",\"unit\":"); fk_fatal_str(fk_stop_frame_unit[k]);
+        fk_fatal_lit("}");
+    }
+    fk_fatal_lit("],\"collector\":{\"depth\":"); fk_fatal_int(fk_collect_depth);
+    fk_fatal_lit(",\"entering\":[");
+    {
+        long long first = fk_collect_depth - FK_COLLECT_RING + 1, d;
+        long long listed = 0;
+        if (first < 1) { first = 1; }
+        for (d = fk_collect_depth; d >= first && listed < 12; d = d - 1) {
+            const char *p = fk_collect_ring[d % FK_COLLECT_RING];
+            if (listed > 0) { fk_fatal_lit(","); }
+            fk_fatal_str(p);
+            listed = listed + 1;
+        }
+    }
+    fk_fatal_lit("]},\"c\":[");
+    for (k = 0; k < bn && fk_fatal_n < FK_FATAL_BUF - 3072; k = k + 1) {
+        if (k > 0) { fk_fatal_lit(","); }
+        fk_fatal_lit("{\"pc\":\"0x"); fk_fatal_hex((unsigned long long)(fk_size_t)bt[k]); fk_fatal_lit("\"");
+#if defined(FK_HAVE_DLADDR)
+        {
+            Dl_info di;
+            if (dladdr(bt[k], &di) != 0 && di.dli_sname != 0) {
+                fk_fatal_lit(",\"sym\":"); fk_fatal_str(di.dli_sname);
+                fk_fatal_lit(",\"off\":"); fk_fatal_int((long long)((char *)bt[k] - (char *)di.dli_saddr));
+            }
+        }
+#endif
+        fk_fatal_lit("}");
+    }
+    fk_fatal_lit("]},\"observed_at_ms\":"); fk_fatal_int(at);
+    fk_fatal_lit(",\"at_ms\":"); fk_fatal_int(at);
+    fk_fatal_lit("}\n");
+    /* stderr: the line every reader of a child's stderr takes; the durable file: the row alone, appended whole */
+    write(2, "form-organ health ", 18);
+    write(2, fk_fatal_b, (unsigned long)fk_fatal_n);
+    fd = open(".hearth/fatal-signal.jsonl", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        mkdir(".hearth", 0755);
+        fd = open(".hearth/fatal-signal.jsonl", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    }
+    if (fd >= 0) {
+        if (lseek(fd, 0, 2) < 4194304) { write(fd, fk_fatal_b, (unsigned long)fk_fatal_n); }   /* a file past 4 MB takes no more rows: the reader is behind, not blind */
+        close(fd);
+    }
+}
+static void fk_fatal_handler(int sig, siginfo_t *si, void *uc) {
+    const char *nm = sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL" : sig == SIGFPE ? "SIGFPE" : "SIGABRT";
+    unsigned long long addr = si != 0 ? (unsigned long long)(fk_size_t)si->si_addr : 0;
+    (void)uc;
+    if (fk_fatal_busy) { signal(sig, SIG_DFL); raise(sig); return; }
+    fk_fatal_busy = 1;
+    fk_fatal_row(nm, sig, addr);
+    signal(sig, SIG_DFL);   /* the default action back, then the signal again: the exit status stays the operating system's word */
+    raise(sig);
+}
+/* one alternate stack per thread: sigaltstack is the thread's own */
+static void fk_fatal_thread(int run) {
+    stack_t ss;
+    ss.ss_sp = run ? fk_fatal_alt_run : fk_fatal_alt_main;
+    ss.ss_size = FK_FATAL_ALT;
+    ss.ss_flags = 0;
+    sigaltstack(&ss, 0);
+}
+static void fk_fatal_arm(void) {
+    static const int sigs[5] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+    struct sigaction sa;
+    int k = 0;
+    const char *tf = getenv("FK_TEST_FAULT");
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = fk_fatal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    while (k < 5) { sigaction(sigs[k], &sa, 0); k = k + 1; }
+    fk_fatal_thread(0);
+#if defined(FK_HAVE_EXECINFO)
+    { void *warm[2]; backtrace(warm, 2); }   /* the unwinder loads what it needs now, not at the moment of death */
+#endif
+    if (tf != 0) {
+        /* comma-separated words: load-base and no-collect-guard are switches, any other word is the fault the door raises */
+        long long i = 0;
+        while (tf[i] != 0) {
+            char w[32];
+            long long n = 0;
+            while (tf[i] != 0 && tf[i] != ',') { if (n < 31) { w[n] = tf[i]; n = n + 1; } i = i + 1; }
+            w[n] = 0;
+            if (tf[i] == ',') { i = i + 1; }
+            if (fk_cstr_eq(w, "load-base")) { fk_test_flags = fk_test_flags | FK_TEST_LOAD_BASE_OFF; }
+            else if (fk_cstr_eq(w, "no-collect-guard")) { fk_test_flags = fk_test_flags | FK_TEST_NO_COLLECT_GUARD; }
+            else if (n > 0) { fk_fatal_cpy(fk_test_fault_word, 16, w, n); }
+        }
+    }
+}
+static int fk_test_recurse(int n) {
+    volatile char pad[2048];
+    pad[0] = (char)n;
+    if (n < 0) { return 0; }
+    return fk_test_recurse(n + 1) + pad[0];
+}
+extern void abort(void);
+static void fk_test_fault_now(void) {
+    if (fk_cstr_eq(fk_test_fault_word, "segv")) { *(volatile int *)16 = 1; }
+    else if (fk_cstr_eq(fk_test_fault_word, "bus")) { raise(SIGBUS); }
+    else if (fk_cstr_eq(fk_test_fault_word, "ill")) { raise(SIGILL); }
+    else if (fk_cstr_eq(fk_test_fault_word, "fpe")) { raise(SIGFPE); }
+    else if (fk_cstr_eq(fk_test_fault_word, "abort")) { abort(); }
+    else if (fk_cstr_eq(fk_test_fault_word, "cstack")) { fk_test_recurse(1); }
+}
+#else
+static void fk_fatal_row(const char *name, int sig, unsigned long long addr) { (void)name; (void)sig; (void)addr; }
+#endif
 /* ---- reading another kernel's store: its columns mapped read-only, every word read where it lives ----
  * A foreign word travels in this process as a plain int (cell_ref / cell_field answer it, cell_value
  * resolves it): small words as themselves, the far negatives (strings, floats, nothing, functions)
@@ -19956,6 +20318,7 @@ static long long fk_attempt(long long node, long long fp) {
     jmp_buf *outer = fk_rp_top;
     long long vsp0 = fk_vsp, bus0 = fk_bus_depth;
     long long cur0 = fk_cur_fn;
+    long long fr0 = fk_fr_depth;
     int warm0 = fk_f64_warm_depth;
     int env0 = fk_f64_env_depth;
     if (FK_SETJMP(here) == 0) {
@@ -19968,6 +20331,7 @@ static long long fk_attempt(long long node, long long fp) {
     fk_vsp = vsp0;
     fk_bus_unwind(bus0, 3, fk_stop_said);
     fk_cur_fn = cur0;
+    fk_fr_depth = fr0;
     fk_f64_warm_depth = warm0;
     fk_f64_env_depth = env0;
     return fk_nothing;
@@ -23349,8 +23713,8 @@ static int fk_src_line_is_bare_import(const char *text, long long line_start, lo
  * registers the unit at the count it is handed and then collects the unit's own preludes
  * behind it, so the last index after the call is that chain's last dependency, and an
  * unmarked .bml would send the import lane to image its raw high-grammar bytes. */
-static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const char *tok,
-                              long long tn) {
+static int fk_src_collect_dep_inner(const char *owner_path, long long owner_idx, const char *tok,
+                                    long long tn) {
     char dep_path[FK_PATH_CAP];
     if (!fk_path_resolve_fk_dep(owner_path, tok, tn, dep_path, FK_PATH_CAP)) {
         fk_diag_path("error", owner_path, "prelude path exceeds buffer");
@@ -23383,6 +23747,47 @@ static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const
         fk_cell_dep_union(owner_idx, fk_cell_dep_find_raw(dep_path));
     }
     return 1;
+}
+/* the collector's depth law (see the fatal-signal organ): each level is counted, the unit being entered is remembered for the
+ * organ's row, and a level that would pass FK_COLLECT_DEPTH_MAX or the walker's stack wall is not entered: the unit is named
+ * (fk_collect_hit_path, the depth in fk_collect_hit) and the collection returns false at every level, as it does for any
+ * unit it cannot read. A cell_run answers the named stop (stack-depth, the unit, fk_src_collect_dep); a program being
+ * loaded says it as a compile error. The two repairs that made a cycle of units shallow are switched off for a band by
+ * FK_TEST_FAULT=load-base (the freshness check of units this collection registered) and =no-collect-guard (this law). */
+static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const char *tok,
+                              long long tn) {
+    char probe;
+    int r;
+    if (!(fk_test_flags & FK_TEST_NO_COLLECT_GUARD) &&
+        (fk_collect_depth >= FK_COLLECT_DEPTH_MAX ||
+         (fk_stack_base != 0 && (long long)(fk_stack_base - &probe) > fk_stack_wall))) {
+        if (fk_collect_hit == 0) {
+            fk_collect_hit = fk_collect_depth;
+            fk_fatal_cpy(fk_collect_hit_path, FK_PATH_CAP, tok, tn);
+            {
+                /* the units being entered, innermost first, are the frames of this stop */
+                long long d = fk_collect_depth, n = 0;
+                while (d >= 1 && n < FK_STOP_FRAMES && n < FK_COLLECT_RING) {
+                    const char *p = fk_collect_ring[d % FK_COLLECT_RING];
+                    fk_fatal_cpy(fk_stop_frame_fn[n], 96, "fk_src_collect_dep", 18);
+                    fk_fatal_cpy(fk_stop_frame_unit[n], 160, p != 0 ? p : "", p != 0 ? fk_cstrlen(p) : 0);
+                    n = n + 1;
+                    d = d - 1;
+                }
+                fk_stop_frames_n = (int)n;
+                fk_stop_frames_depth = fk_collect_depth;
+            }
+            if (!fk_cell_collect) {
+                fk_diag_path("error", owner_path, "stack-depth: the prelude chain is too deep (a cycle of units that never settles?)");
+            }
+        }
+        return 0;
+    }
+    fk_collect_depth = fk_collect_depth + 1;
+    fk_collect_ring[fk_collect_depth % FK_COLLECT_RING] = owner_path;
+    r = fk_src_collect_dep_inner(owner_path, owner_idx, tok, tn);
+    fk_collect_depth = fk_collect_depth - 1;
+    return r;
 }
 /* LINK BY NAME. A unit that calls a name form-stdlib/home-index.txt lists, and defines no such
  * name itself, collects the name's home unit as if it had preluded it -- the way a linker pulls
@@ -26248,7 +26653,7 @@ static long long fk_cell_dep_find(const char *path) {
      * preludes are still being collected (two units that name each other) reads as changed -- its lowered text is not its file's
      * bytes -- is set aside and collected again, and again, until the stack ends: a cycle of two .bml units made a cold load
      * recurse to the guard page (SIGBUS, 2026-10-04). Units from an earlier load keep the check. */
-    if (fk_cell_collect && d >= fk_cell_load_base) { return d; }
+    if (fk_cell_collect && d >= fk_cell_load_base && !(fk_test_flags & FK_TEST_LOAD_BASE_OFF)) { return d; }
     while (k < fk_cd_win_n[d]) {
         long long m = fk_cd_win[d][k];
         if (!fk_cell_dep_fresh(m)) { stale = 1; fk_cell_dep_setaside(m); }
@@ -26523,6 +26928,18 @@ static long long fk_stopped_record(const char *kind, const char *said) {
             fk_cr_put(r, "unit", fk_cr_str(""));
         }
     }
+    if (fk_cstr_eq(kind, "stack-depth") && fk_stop_frames_n > 0) {
+        /* the innermost frames of the chain, innermost first, as "<function> (<unit>)", and how deep the chain was */
+        long long fl = 1, g = fk_stop_frames_n;
+        while (g > 0) {
+            char fb[300];
+            g = g - 1;
+            sprintf(fb, "%s (%s)", fk_stop_frame_fn[g], fk_stop_frame_unit[g]);
+            fl = fk_cons_val(fk_cr_str(fb), fl);
+        }
+        fk_cr_put(r, "frames", fl);
+        fk_cr_put(r, "depth", fk_stop_frames_depth << 1);
+    }
     return fk_rbox(r);
 }
 static long long fk_cell_cpu_us(void) {
@@ -26536,10 +26953,11 @@ static long long fk_cell_walk_guarded(long long node, long long fp, int *how) {
     jmp_buf here;
     jmp_buf *outer = fk_rp_top;
     jmp_buf *outer_cell = fk_cell_jb;
-    long long vsp0 = fk_vsp, bus0 = fk_bus_depth, cur0 = fk_cur_fn;
+    long long vsp0 = fk_vsp, bus0 = fk_bus_depth, cur0 = fk_cur_fn, fr0 = fk_fr_depth;
     int warm0 = fk_f64_warm_depth;
     int env0 = fk_f64_env_depth;
     fk_cell_hit = 0;
+    fk_stop_frames_n = 0;
     if (FK_SETJMP(here) == 0) {
         fk_rp_top = &here;
         fk_cell_jb = &here;
@@ -26556,6 +26974,7 @@ static long long fk_cell_walk_guarded(long long node, long long fp, int *how) {
     fk_vsp = vsp0;
     fk_bus_unwind(bus0, 3, fk_stop_said);
     fk_cur_fn = cur0;
+    fk_fr_depth = fr0;
     fk_f64_warm_depth = warm0;
     fk_f64_env_depth = env0;
     *how = fk_cell_hit == 2 ? 2 : 1;
@@ -26574,6 +26993,7 @@ static int fk_cell_load(const char *path, long long *root_out) {
     if (!fk_home_loaded) { fk_home_load(path); }
     fk_cell_load_base = fk_src_dep_count;
     fk_bml_bad_hit = 0;
+    fk_collect_hit = 0;
     fk_cell_collect = 1;
     if (fk_unit_lowers(path)) {
         long long ln = 0;
@@ -26737,7 +27157,13 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     const char *sv_root_path = fk_cell_root_path;
     long long out_w, err_w, diag_w = 1, stopped_w, r;
     if (!fk_is_str(pathw)) { refused = 1; refusal = "cell_run: the unit is a path string"; }
+    long long sv_cdepth = fk_collect_depth;
     if (!refused) { fk_cstr(pathw, path, FK_PATH_CAP); }
+    /* the unit in flight, for the fatal-signal organ's row (outermost first; a cell may call cell_run) */
+    if (fk_cellrun_n < 8) { fk_cellrun_paths[fk_cellrun_n] = path; }
+    fk_cellrun_n = fk_cellrun_n + 1;
+    /* FK_TEST_FAULT: a band raises a fault on purpose through the one path name that has no unit (never set in a product run) */
+    if (!refused && fk_test_fault_word[0] != 0 && fk_cstr_eq(path, "fk-test-fault")) { fk_test_fault_now(); }
     if (!refused && dlw != fk_nothing) {
         if (fk_is_str(dlw)) {
             /* the word "check" is the compile-only door (what `fkwu --check` is): the unit loads, its compile
@@ -26808,7 +27234,15 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                 }
                 fk_bml_need_n = 0;
                 if (!loaded) {
-                    stopped = fk_stopped_record("unrunnable", "the unit could not be read");
+                    if (fk_collect_hit > 0) {
+                        /* the collector refused to go deeper: a stop with a name, not a crash that ends the process */
+                        static char sd[2 * FK_PATH_CAP + 512];
+                        sprintf(sd, "stack-depth: %s fk_src_collect_dep; the prelude chain passed %lld levels, a cycle of units that never settles -- in fk_src_collect_dep (%s)",
+                                fk_collect_hit_path, fk_collect_hit, path);
+                        stopped = fk_stopped_record("stack-depth", sd);
+                    } else {
+                        stopped = fk_stopped_record("unrunnable", "the unit could not be read");
+                    }
                     root = -1;
                 } else {
                     fk_cell_rows_keep(root, db, dn0, fk_dg_n);
@@ -26865,7 +27299,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                 fk_cell_root_path = sv_root_path;
                 if (how != 0) {
                     value = fk_nothing;
-                    stopped = fk_stopped_record(how == 2 ? "deadline" : "stop", how == 2 ? "deadline: the unit ran past its budget and was ended" : fk_stop_said);
+                    stopped = fk_stopped_record(how == 2 ? "deadline" : memcmp(fk_stop_said, "stack-depth:", 12) == 0 ? "stack-depth" : "stop", how == 2 ? "deadline: the unit ran past its budget and was ended" : fk_stop_said);
                 }
                 fk_vsp = fp;
             }
@@ -26908,6 +27342,8 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     fk_in_buf = sv_in; fk_in_n = sv_in_n; fk_in_pos = sv_in_pos; fk_cell_in_on = sv_in_on;
     fk_cell_deadline_ms = sv_deadline;
     fk_vsp = vsp0;
+    fk_collect_depth = sv_cdepth;
+    fk_cellrun_n = fk_cellrun_n - 1;
     r = fk_cr_new();
     fk_cr_put(r, "value", value);
     fk_cr_put(r, "out", out_w);
@@ -28114,6 +28550,7 @@ static char **fk_run_argv;
 static int fk_run_ret;
 static void *fk_run_thunk(void *p) {
     (void)p;
+    fk_fatal_thread(1);   /* the walker's thread has its own alternate stack: a stack that ends is read from there */
     fk_run_ret = fk_run(fk_run_argc, fk_run_argv);
     fk_src_dep_release();
     return 0;
@@ -28121,6 +28558,7 @@ static void *fk_run_thunk(void *p) {
 int main(int argc, char **argv) {
     fk_run_argc = argc;
     fk_run_argv = argv;
+    fk_fatal_arm();
     unsigned long mb = 256;
     char *e = fk_conf("FORM_KERNEL_STACK_MB");
     if (e) {

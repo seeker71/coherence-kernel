@@ -259,6 +259,26 @@ Two carriers meet their surprises the same way outside `live.bml`:
   `form-organ health` rows, its last stdout line as a number, or its exit, is reading a text
   protocol the callee could have returned as a value; add no new one.
 
+## A process that dies by a signal says so
+
+A SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT no longer ends the seed in silence (rc 138/139 and an empty stderr was the sweep shard that lay dead
+for fifty minutes). Each thread's alternate-stack handler writes one organ-health row at the moment of death, to stderr as a `form-organ health` line
+and appended to `.hearth/fatal-signal.jsonl` (`runtime/fkwu-uni.c`, "THE FATAL-SIGNAL ORGAN"): organ `fkwu-seed`, aspect `fatal-signal`, health 0,
+surprise 1, the need `fatal-signal`, the offers `request-evidence` and `revise`; its evidence is the signal, the fault address, the resident bytes,
+the `cell_run` units in flight, the walker's frame chain (function and unit, innermost first), the collector's depth and the C chain with symbols.
+Then the signal is raised again and the exit stays 128 + n. A stack that ends is a stop before it is a signal: `cell_run` answers `stopped` kind
+`"stack-depth"` with the same frames and the process stands (`docs/in-process-cells.md`, "A stack that ends is a stop").
+
+The row reaches attention through the care every organ reading takes. `form/form-stdlib/bml/fatal-signal-attend.bml` speaks each retained group
+(the last 24 hours; one group per signal and innermost frame, counted; at most six listed) as a `form-organ health` line, which enters the
+framebuffer through `oh-frame` (organ-frame-v1: health 0, the declared need, the offers), and hands it to `oc-hear`: no provider claims a fatal signal,
+so the attention row says `unclaimed` (the repair is code, read from the frames). `observe/local-flow-review.bml` runs it before its review, so the
+next flow's reading opens with what died. The readers that judge a leg take a signalled leg as a finding, never a bare number:
+`form/form-stdlib/bml/host-child.bml` sets the finding (the signal, the cell, the frames) at the end of a child's text and in `<io>/<step>.finding`
+when its exit is 128 + n; the band sweep and the drift gates (`form/form-stdlib/bml/band-sweep.bml`, `gate/drift-gates.bml`) say the last day's findings
+before their first leg and read a `stack-depth` leg as its stop with its frames. Proof: `form/form-stdlib/tests/fatal-signal-band.fk`
+(16383), which begins the faulting seed on purpose through `hch-run-in`, the one band whose subject is a process's death.
+
 ## Kernel protocol witness
 
 After the normal ground and freshness checks:
