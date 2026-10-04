@@ -1,0 +1,237 @@
+// q38-prefill-run.bml — how fast the Qwen lane reads its prompt and speaks, by mode, against what the hardware streams.
+//
+//   echo '{}' | ./fkwu observe/q38-prefill-run.bml             the plan: the ids, the span, the file, the lease it would ask. Opens nothing.
+//   echo '{"go":1,"span":64}' | ./fkwu observe/q38-prefill-run.bml
+//                                                                THE MEASURE. Takes the memory lease, opens the Qwen context once (span positions of scratch),
+//                                                                then prefills the same span of ids from a fresh state in each mode, twice each (the second is
+//                                                                warm), reads each mode's winner, and decodes 16 tokens from the batched state. One line per
+//                                                                reading: mode, run, positions, ms, positions per second, the winner; then the decode line
+//                                                                (tokens, ms, tokens per second); then the weights' bytes streamed per second at that rate.
+//
+// The modes: sliced is what the session lane calls (q38-prefill-span-sliced: every position is its own matvec, so each position reads
+// every weight again: weight traffic grows with the positions); batched is q38-prefill-span-batched (layer-major: each layer runs
+// across all the positions with the batched matvec, so the weights are read once per span). Equal winners say the two read the
+// same prompt the same way at the head; the speeds say what the lane leaves on the table.
+// stdin, one JSON line, all optional: go, span (64), file, decode (16).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
+section [form.bml] {
+ class Q38PrefillRun {
+  def qpr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qpr-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qpr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qpr-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-prefill", line) : json-node-object([]);
+  }
+  // n ids, deterministic and inside the vocabulary
+  def qpr-ids(n, i) = i >= n ? [] : cons(1000 + ((i * 37) % 5000), qpr-ids(n, i + 1));
+  def qpr-rate(n, ms) = ms <= 0 ? 0 : (n * 1000) / ms;
+  def qpr-say(mode, run, n, ms, winner) = print_str("[q38-prefill] " ++ mode ++ " run " ++ run.str() ++ ": " ++ n.str() ++ " positions in " ++ ms.str() ++ " ms = " ++ qpr-rate(n, ms).str() ++ " positions/s, winner " ++ winner.str());
+  // the carrier's counters between two readings (metal_live: 7 dispatches, 8 syncs, 11 the device's busy microseconds): how many
+  // dispatches and syncs the work took, how long the device was busy of the wall, and what one dispatch cost on the wall
+  def qpr-delta(mode, a, b, ms, n) = print_str("[q38-prefill] " ++ mode ++ " counters: " ++ (b[7] - a[7]).str() ++ " dispatches, " ++ (b[8] - a[8]).str() ++ " syncs, device busy " ++ ((b[11] - a[11]) / 1000).str() ++ " ms of " ++ ms.str() ++ " ms wall (" ++ (ms <= 0 ? 0 : (((b[11] - a[11]) / 1000) * 100) / ms).str() ++ " percent), " ++ (b[7] - a[7] <= 0 ? 0 : (ms * 1000) / (b[7] - a[7])).str() ++ " us wall per dispatch, per " ++ n.str());
+  def qpr-sliced(ctx, ids, span) {
+   let sts = q38-new-state(ctx[2]);
+   let t0 = host_monotonic_ms();
+   let r = q38-prefill-span-sliced(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, span);
+   let t1 = host_monotonic_ms();
+   let freed = q38-free-state(sts);
+   [r[0], t1 - t0];
+  }
+  def qpr-batched(ctx, ids) {
+   let sts = q38-new-state(ctx[2]);
+   let t0 = host_monotonic_ms();
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let t1 = host_monotonic_ms();
+   let freed = q38-free-state(sts);
+   [r[0], t1 - t0];
+  }
+  // the decode: from a state the batched span left, speak k tokens one position at a time
+  def qpr-decode(ctx, ids, k) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let t0 = host_monotonic_ms();
+   let spoken = q38-generate(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], r[0], len(ids), k, [], []);
+   let t1 = host_monotonic_ms();
+   let freed = q38-free-state(sts);
+   let ids-said = print_str("[q38-prefill] decode ids: " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", spoken));
+   [len(spoken), t1 - t0];
+  }
+  // one position at a time, the host's encode (every dispatch handed to the batch) apart from the device's wait (the sync that
+  // submits the batch and waits for it): where the 1356 dispatches of a token spend the wall
+  def qpr-split-go(ctx, sts, id, pos, k, enc, wait) = k <= 0 ? [enc, wait] : {
+   let t0 = host_monotonic_ms();
+   let fed = q38-forward-state(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], id, pos);
+   let t1 = host_monotonic_ms();
+   let synced = metal_sync();
+   let t2 = host_monotonic_ms();
+   qpr-split-go(ctx, sts, id, pos + 1, k - 1, enc + (t1 - t0), wait + (t2 - t1));
+  };
+  def qpr-split(ctx, ids, k) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let a = metal_live();
+   let split = qpr-split-go(ctx, sts, r[0], len(ids), k, 0, 0);
+   let b = metal_live();
+   let freed = q38-free-state(sts);
+   let said = print_str("[q38-prefill] decode split over " ++ k.str() ++ " positions (no head): host encode " ++ split[0].str() ++ " ms, device wait " ++ split[1].str() ++ " ms, " ++ (b[7] - a[7]).str() ++ " dispatches, device busy " ++ ((b[11] - a[11]) / 1000).str() ++ " ms; per position " ++ ((split[0] + split[1]) / k).str() ++ " ms = encode " ++ (split[0] / k).str() ++ " + wait " ++ (split[1] / k).str());
+   1;
+  }
+  // blocks: n copies of one block kind in ONE batch (the barriers carry the order), submitted and waited once: the device time
+  // of the kind with no host in it, and the Q8_0 bytes its matvecs read, so a rate in GB/s says how near the weights' stream it runs
+  def qpr-tvbytes(tv) = (kth-tv-r(tv) * kth-tv-c(tv) / 32) * 34;
+  def qpr-times(n, f) = n <= 0 ? 1 : {
+   let done = f();
+   qpr-times(n - 1, f);
+  };
+  def qpr-ffn-mvs(ps, bs, lin) {
+   let g = q38-mv(ps, lin[2], bs[1], bs[14], 1);
+   let u = q38-mv(ps, lin[3], bs[1], bs[15], 0);
+   q38-mv(ps, lin[4], bs[16], bs[17], 1);
+   1;
+  }
+  def qpr-first-full(l, geo) = kth-full?(l, geo[22]) ? l : qpr-first-full(l + 1, geo);
+  def qpr-block(label, n, bytes, f) {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let queued = qpr-times(n, f);
+   let synced = metal_sync();
+   let t1 = host_monotonic_ms();
+   let ms = t1 - t0;
+   print_str("[q38-prefill] block " ++ label ++ ": " ++ n.str() ++ " in " ++ ms.str() ++ " ms = " ++ (n <= 0 ? 0 : (ms * 1000) / n).str() ++ " us each, " ++ (ms <= 0 ? 0 : (bytes * n) / ms / 1000000).str() ++ " GB/s of " ++ (bytes / 1000000).str() ++ " MB per block");
+  }
+  def qpr-blocks(ctx, ids) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lays = ctx[3];
+   let sts = q38-new-state(geo);
+   let r = q38-prefill-span-batched(ps, bs, geo, lays, sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let lin = nth(lays, 0);
+   let lf = qpr-first-full(0, geo);
+   let full = nth(lays, lf);
+   let pos = len(ids);
+   let n = 24;
+   let ffn-bytes = qpr-tvbytes(lin[2]) + qpr-tvbytes(lin[3]) + qpr-tvbytes(lin[4]);
+   let gam = kth-tv-h(lin[0]);
+   let said00a = qpr-block("tiny add (5120), DEPENDENT: barrier 1 each", 96, 0, () => metal_enqueue(ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]));
+   let said00b = qpr-block("tiny add (5120), INDEPENDENT: barrier 0 each", 96, 0, () => metal_enqueue(ps[19], q38-b16([bs[0], bs[10], bs[11]], [geo[0]], 0, 0), geo[0]));
+   let said0a = qpr-block("rmsnorm ONE-THREAD attestant (pipeline 5)", n, 0, () => metal_enqueue(ps[5], q38-b16([bs[0], gam, bs[1]], [geo[0], geo[6]], 0, 1), 1));
+   let said0b = qpr-block("rmsnorm COOPERATIVE twin (pipeline 6)", n, 0, () => metal_enqueue(ps[6], q38-b16([bs[0], gam, bs[1]], [geo[0], geo[6]], 1, 1), 1));
+   let said0c = qpr-block("rmsnorm PARALLEL (pipeline 60)", n, 0, () => metal_enqueue(ps[q38-rmspar-index()], q38-b16([bs[0], gam, bs[1]], [geo[0], geo[6]], 1, 1), 1));
+   let said1 = qpr-block("ffn (rms, gate, up, swiglu, down, add)", n, ffn-bytes, () => q38-ffn(ps, bs, geo, lin));
+   let said2 = qpr-block("ffn matvecs only (gate, up, down)", n, ffn-bytes, () => qpr-ffn-mvs(ps, bs, lin));
+   let said3 = qpr-block("gate matvec alone", n, qpr-tvbytes(lin[2]), () => q38-mv(ps, lin[2], bs[1], bs[14], 1));
+   let lin-bytes = qpr-tvbytes(lin[5]) + qpr-tvbytes(lin[7]) + qpr-tvbytes(lin[8]) + qpr-tvbytes(lin[12]) + qpr-tvbytes(lin[13]);
+   let said4 = qpr-block("linear-attn block", n, lin-bytes, () => q38-linear-attn(ps, bs, geo, lin, nth(sts, 0)));
+   let full-bytes = qpr-tvbytes(full[5]) + qpr-tvbytes(full[6]) + qpr-tvbytes(full[7]) + qpr-tvbytes(full[10]);
+   let said5 = qpr-block("full-attn block at position " ++ pos.str(), n, full-bytes, () => q38-full-attn(ps, bs, geo, full, nth(sts, lf), pos));
+   let freed = q38-free-state(sts);
+   1;
+  }
+  // the witness: the cooperative RMSNorm against the one-thread attestant, on the real residual and the real norm weights of
+  // the state a prefill left, at the model's own width: the same bytes or the widening is wrong
+  def qpr-rms-witness(ctx, ids) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lay = nth(ctx[3], 0);
+   let sts = q38-new-state(geo);
+   let r = q38-prefill-span-batched(ps, bs, geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let n = geo[0];
+   let oa = metal_buf_alloc(n * 4);
+   let ob = metal_buf_alloc(n * 4);
+   metal_batch_concurrent();
+   let ea = metal_enqueue(ps[5], q38-b16([bs[0], kth-tv-h(lay[0]), oa], [n, geo[6]], 0, 1), 1);
+   let eb = metal_enqueue(ps[6], q38-b16([bs[0], kth-tv-h(lay[0]), ob], [n, geo[6]], 1, 1), 1);
+   let a = metal_buf_read(oa, 0, n * 4);
+   let b = metal_buf_read(ob, 0, n * 4);
+   let fa = metal_buf_free(oa);
+   let fb = metal_buf_free(ob);
+   let freed = q38-free-state(sts);
+   print_str("[q38-prefill] rmsnorm witness n=" ++ n.str() ++ ": enqueue rc attestant " ++ ea.str() ++ ", cooperative " ++ eb.str() ++ "; pipelines " ++ ps[5].str() ++ " and " ++ ps[6].str() ++ "; first words " ++ ln-u32-le(a, 0).str() ++ " vs " ++ ln-u32-le(b, 0).str() ++ ", last words " ++ ln-u32-le(a, (n - 1) * 4).str() ++ " vs " ++ ln-u32-le(b, (n - 1) * 4).str() ++ ", " ++ ((String) a == (String) b ? "IDENTICAL" : "DIFFER"));
+  }
+  // words that differ between two float rows, and the widest gap in units in the last place (same-sign floats: the u32 gap)
+  def qpr-ulp-go(a, b, i, n, cnt, widest) = i >= n ? [cnt, widest] : {
+   let wa = ln-u32-le(a, i * 4);
+   let wb = ln-u32-le(b, i * 4);
+   let d = wa > wb ? wa - wb : wb - wa;
+   qpr-ulp-go(a, b, i + 1, n, d > 0 ? cnt + 1 : cnt, d > widest ? d : widest);
+  };
+  def qpr-par-witness(ctx) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lay = nth(ctx[3], 0);
+   let n = geo[0];
+   let oa = metal_buf_alloc(n * 4);
+   let ob = metal_buf_alloc(n * 4);
+   metal_batch_concurrent();
+   let ea = metal_enqueue(ps[5], q38-b16([bs[0], kth-tv-h(lay[0]), oa], [n, geo[6]], 0, 1), 1);
+   let eb = metal_enqueue(ps[q38-rmspar-index()], q38-b16([bs[0], kth-tv-h(lay[0]), ob], [n, geo[6]], 1, 1), 1);
+   let a = metal_buf_read(oa, 0, n * 4);
+   let b = metal_buf_read(ob, 0, n * 4);
+   let fa = metal_buf_free(oa);
+   let fb = metal_buf_free(ob);
+   let u = qpr-ulp-go(a, b, 0, n, 0, 0);
+   print_str("[q38-prefill] parallel rmsnorm vs attestant, n=" ++ n.str() ++ ": rc " ++ eb.str() ++ ", " ++ u[0].str() ++ " of " ++ n.str() ++ " words differ, widest gap " ++ u[1].str() ++ " ulp");
+  }
+  def qpr-measure(ctx, ids, span, k, weights) {
+   let witness = qpr-rms-witness(ctx, ids);
+   let pwit = qpr-par-witness(ctx);
+   let b1 = qpr-batched(ctx, ids);
+   let said1 = qpr-say("batched", 1, span, b1[1], b1[0]);
+   let la = metal_live();
+   let b2 = qpr-batched(ctx, ids);
+   let lb = metal_live();
+   let said2 = qpr-say("batched", 2, span, b2[1], b2[0]);
+   let seen2 = qpr-delta("batched", la, lb, b2[1], span);
+   let s1 = qpr-sliced(ctx, ids, span);
+   let said3 = qpr-say("sliced", 1, span, s1[1], s1[0]);
+   let lc = metal_live();
+   let s2 = qpr-sliced(ctx, ids, span);
+   let ld = metal_live();
+   let said4 = qpr-say("sliced", 2, span, s2[1], s2[0]);
+   let seen4 = qpr-delta("sliced", lc, ld, s2[1], span);
+   let blocks = qpr-blocks(ctx, ids);
+   let split = qpr-split(ctx, ids, k);
+   let le = metal_live();
+   let d = qpr-decode(ctx, ids, k);
+   let lf = metal_live();
+   let seen5 = qpr-delta("decode", le, lf, d[1], d[0]);
+   let said5 = print_str("[q38-prefill] decode: " ++ d[0].str() ++ " tokens in " ++ d[1].str() ++ " ms = " ++ (d[1] <= 0 ? 0 : (d[0] * 1000) / d[1]).str() ++ " tokens/s; weights " ++ (weights / 1000000).str() ++ " MB per token = " ++ (d[1] <= 0 ? 0 : ((weights / 1000000) * d[0] * 1000) / d[1] / 1000).str() ++ " GB/s streamed");
+   print_str("[q38-prefill] winners " ++ ((Comparable) b2[0] == s2[0] ? "agree" : "differ: batched " ++ b2[0].str() ++ " sliced " ++ s2[0].str()) ++ "; batched warm / sliced warm = " ++ (b2[1] <= 0 ? 0 : (s2[1] * 100) / b2[1]).str() ++ " percent");
+  }
+  def qpr-open(path, want, k, prompt) {
+   let src = fcmg-src(path);
+   let ids = (String) prompt == "" ? qpr-ids(want, 0) : q35-chat-ids(src, prompt);
+   let span = len(ids);
+   let maxpos = span + k + 8;
+   let own = fcms-qwen-own(src, maxpos);
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 prefill probe", path, weights, own);
+   !mg-granted?(granted) ? print_str("[q38-prefill] held: " ++ granted[1]) : {
+    let ctx = q38-open-span(path, maxpos, span);
+    !((Comparable) q38-context-ok?(ctx) == 1) ? {
+     let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-prefill] the context did not open");
+    } : {
+     let measured = qpr-measure(ctx, ids, span, k, weights);
+     let closed = q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-prefill] released");
+    };
+   };
+  }
+  def qpr-run() {
+   let opts = qpr-opts();
+   let path = qpr-text(opts, "file", qpr-file());
+   let span = qpr-int(opts, "span", 64);
+   let k = qpr-int(opts, "decode", 16);
+   (Comparable) qpr-int(opts, "go", 0) == 1 ? qpr-open(path, span, k, qpr-text(opts, "prompt", "")) : print_str("[q38-prefill] plan: " ++ span.str() ++ " ids, decode " ++ k.str() ++ ", file " ++ path ++ " (" ++ file_size(path).str() ++ " bytes); {\"go\":1} opens it and measures");
+  }
+ }
+ qpr-run();
+}
