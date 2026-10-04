@@ -147,9 +147,9 @@ keeps its own kind and verified write.
 
 ### Resident context and source queries
 
-Full admission includes original document text and current identities. A successful unchanged `read` may use `stdout_reference`; a changed read may use one `stdout_patch` against the admission snapshot after exact reconstruction and size comparison. Patches never depend on earlier patches. `cat` returns the current text, bounded beyond the observation cap (below). Checks always consume actual document bytes.
+Full admission includes original document text and current identities. A successful unchanged `read` may use `stdout_reference`; a changed read may use one `stdout_patch` against the admission snapshot after exact reconstruction and size comparison. Patches never depend on earlier patches. `cat` returns current text; actual tokenizer capacity decides whether it enters whole or as a source page. Checks always consume actual document bytes.
 
-Catalog admission supplies IDs, paths, sizes and SHA-256 identities while native tools retain all text. Optional `source_queries` execute actual read-only queries before generation, for example `{"tool":"sed","arguments":["-n","10,20p","notes.md"]}`. Results retain exit and diagnostics. Excerpts do not establish full visibility; catalog reads return source text up to the observation cap and a bounded note beyond it. Resume recomputes selected queries; omission clears prior selections. Supply enough source for the task and use the native tools for a specific missing fact.
+Catalog admission supplies IDs, paths, sizes and SHA-256 identities while native tools retain all text. Optional `source_queries` execute actual read-only queries before generation, for example `{"tool":"sed","arguments":["-n","10,20p","notes.md"]}`. Results retain exit and diagnostics. Excerpts do not establish full visibility; source pages carry exact bytes and executable continuations. Resume recomputes selected queries; omission clears prior selections. Supply enough source for the task and use native tools for a specific missing fact.
 
 ### Read-only review
 
@@ -212,63 +212,44 @@ choice handles the retained state. Partial prefill and other generation
 failures keep their own release handling. A repeated capacity issue against the
 same source identities invites a new plan, independent of its receipt path.
 
-#### The observation cap, the renewal reserve and the repeat across contexts
+#### Actual capacity and growing observations
 
-A native tool result (stdout and stderr together) larger than the **observation cap** does not enter the decoder whole,
-though it would fit: the cap is a fifth of the window, at least 1024 IDs, counted in bytes at 3 per ID (the whole read
-of host-walk.bml at the 12:30 day turn, before f-split cut that file, measured 2.84), so 3276 IDs and 9828 bytes at
-16384 positions. The cap counts bytes, not IDs: digit-dense or escaped output just under it can cost near one
-ID per byte, so the window refusal above stays behind it, and a cap on measured IDs waits for the sealed tokenizer's
-count. The stream takes a bounded note through the same focus path. An executed source read
-returns an exact page in `observation_excerpt.stdout`, with zero-based `start_byte`,
-exclusive `end_byte`, the original `requested_end_byte`, `resident_sha256` and a ready
-`next` tool call. Whole reads, paged reads and numeric native `sed` ranges get this
-source continuation only after their result reconstructs exactly from resident bytes.
-`read` takes `[path,one-based offset,count,optional unit]`; the default unit is `lines`,
-and `bytes` continues long lines without discarding their interiors. UTF-8 boundaries
-are preserved. The page is fitted to the live observation allowance, leaving room for
-the task and source catalog.
-The generated continuation includes an optional fifth argument with the source hash;
-a changed source returns `read-source-changed` rather than silently continuing another version.
-Following the continuations reassembles the requested source exactly. Query output
-retains exit, counts, SHA-256 and clipped first/last lines; its line numbers describe
-the result and do not imply source coordinates.
-The exact observation stays in private evidence (the note says so only when the write
-landed, else it says the bytes were not retained), the document stays whole in the tools, and a read that worked counts
-no repair and reads as a healthy organ reading with no need (a window refusal is a failure the lane repairs, and
-carries the same excerpt). A verification or check note is never bounded: failed-check evidence stays complete.
+The sealed model tokenizer counts the observation, role crossing and pending
+prediction before KV changes. A result that fits enters whole regardless of its
+byte size. Growth beyond the current context's observed mean injection sends an
+`observation-growth` health event with actual IDs, prior counts and remaining
+positions. The first observation has no invented baseline. Growth offers
+`continue` and `focus-source`; it does not reject fitting work.
 
-What a bounded result leaves behind is bounded too. The note replaces the observation; a failing result (exit above 1
-or any stderr) also wrote its whole note into the repair's failure evidence and pending rows, and those become the
-bounded note, so the decoder is handed the excerpt once and a 37580-byte read with a stderr stays under the cap. That
-repair counts once, and a second identical failure is counted by the call count (the policy's third), the evidence no
-longer being the whole text it compares. The tool history that detects a repeated call holds a stdout over 2048 bytes
-as its sha256 and byte count and a stderr as its first 200 bytes and its digest, so no checkpoint holds the read: it
-holds the bounded note, the digested history, and the document itself in its documents. A checkpoint written before
-that (a lane out of replies saves what it has) is bounded and digested again when a lane opens on it.
+Actual capacity refusal retains the complete observation and tries smaller source
+pages until one is admitted. Page selection halves its byte proposal after each
+refusal; this is a search strategy, not an admission cap or retry allowance.
+An irreducible envelope invites context renewal. Partial prefill failures retain
+their refused owner and never retry through an owner whose KV may have changed.
+The original documents and completed effects stay in the owned checkpoint.
 
-A renewal prompt must leave room for a reply and the next observation, the **renewal reserve**: an eighth of the window,
-at least 1024 IDs and at most a quarter, whether or not the caller sets a reply ceiling. A refusal is a choice point,
-not an exit, for both reasons a bounded trigger cures, no room for the reply (`prompt-caller-capacity-refused`) and a
-prompt over the whole window (`prompt-context-window-refused`): the trigger note is bounded and the renewal asked once
-more, and when nothing in the prompt can be bounded the lane ends with
-`native-context-renewal-prompt-caller-capacity-refused` (or the window reason) after one tokenization. It never renews
-into the overflow that stopped it. The lane continues with the state the renewal built its prompt from, and the
-`form-code-context` row names `renewal_attempts`.
+Exact source pages carry `stdout`, zero-based `start_byte`, exclusive
+`end_byte`, `requested_end_byte`, `resident_sha256` and an executable `next`.
+`read` accepts `[path,one-based offset,count,optional unit,optional hash]`;
+`bytes` continues long lines at UTF-8 boundaries. A changed source refuses with
+`read-source-changed`. Continuations reconstruct the requested bytes exactly.
+Query excerpts report result counts and digests without claiming source coordinates.
+Private retention is reported only when the exact write succeeds. Failed tool
+evidence and pending references follow the selected page; caller verification
+evidence keeps its complete meaning.
 
-A fresh context is sight regained, except where the call's bytes never reached a context. An observation that was
-refused or bounded marks the swerve record **unsighted**, and the next context keeps its context number and the
-policy's count of the same call in a row, so the same read over the same result keeps counting across renewals:
-the policy's no-progress route at the third, the swerve at the third, the replan at the fourth, the end at the fifth.
-Without the mark each renewal restarted both counts and the same read stayed silent however often it came back. The
-mark clears as soon as a context has observed anything. That cross-context carry serves a context that ends before it
-decodes another reply (an unadmitted note, a reply-capacity stop); a lane whose focus note is admitted decodes its next
-reply in the same context, where the same read counts 1, 2, 3 by the in-context count and the guards close on the third.
+Renewal checks actual prompt IDs against the allocated context, the decoder's
+pending prediction and the caller's explicit reply or reasoning reservation.
+It imposes no fractional reserve. A capacity refusal selects progressively
+smaller trigger pages and rechecks them. Non-capacity failures and irreducible
+caller contracts retain their distinct outcome and current resource owner.
+`form-code-context` reports actual attempts and consumption. Restoring a
+checkpoint preserves its observation rather than guessing a byte/token ratio.
 
-`form-cli-code-bounded-note-band` (524287) replays the 12:30 day option's retained replies and form-code-context rows
-(`form/form-stdlib/tests/fixtures/form-cli-code-day-option.jsonl`) through these paths with the decoder and the renewer
-scripted, and drives the renewal loop (`fcac-finish-contexts-with`) with a scripted loop port and renewer; no model
-runs. What it cannot show is the clock: the seconds returned are read on the next physical option.
+The existing `form-cli-code-bounded-note-band` (524287) observes these current
+contracts through scripted ports, including source reconstruction, partial
+ownership, growing results, explicit caller reservations and on-demand guides.
+The physical local run establishes model behavior and elapsed cost separately.
 
 This applies the distinction between truncated tool-call recovery and execution in [Hermes's truncation controller](https://github.com/NousResearch/hermes-agent/blob/main/agent/turn_truncation.py), and the focus on meaningful repeated outcomes in [OpenClaw's loop detection](https://docs.openclaw.ai/tools/loop-detection). Form uses its own owned state, live signals and caller allowances. [OpenClaw's agent loop](https://docs.openclaw.ai/concepts/agent-loop) also separates finished tool results from an unfinished continuation; Form's checkpoints preserve completed actions before admitting feedback. These are native BML flows in the existing process.
 
