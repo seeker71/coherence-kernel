@@ -1,0 +1,88 @@
+; hot-recipe-effects-band.fk -- a call with an effect runs whether or not its result is read, cold or hot.
+;
+; Found 2026-10-03: past ~1024 calls (FK_F64_HEAT) a recipe is crystallized, and its callers' expression leaves INLINE
+; small callees by substituting each argument EXPRESSION at the callee's parameter reads (call by name). A parameter the
+; body never reads dropped its argument -- the appends / metal dispatches / writes inside that argument stopped, with no
+; error, so a cold run and a hot run disagreed. A parameter read twice ran its argument twice; one read only in an if
+; branch ran it only there. The walker evaluates each argument once, in order, read or not; the inline now takes only
+; arguments that are pure expressions of the frame (fk_f64_inline_try in runtime/fkwu-uni.c).
+;
+; Every claim counts a host-visible effect: a one-byte append per call to a scratch file, read back with file_size.
+;
+;   1   the native-t5 shape: a mutually recursive pair, the next ignoring its first parameter, whose argument is a
+;       recipe call carrying two appends; 250 rounds of 12 layers -- every append lands: 6500 of 6500
+;   2   a loop passing an effectful recipe call to a callee that never reads it: 6000 calls x 2 appends = 12000
+;   4   a callee that reads the parameter TWICE: the argument runs once per call, 12000 (never 24000)
+;   8   a callee that reads the parameter only in a branch never taken: the argument still runs, 12000
+;  16   an unread `let` bound to an effect inside a recipe called 6000 times: 6000 of 6000
+;  32   pure arguments still inline and still compute: the sum over 6000 calls is exact (18003000)
+;
+; Verdict 63 when every claim lands. The bands before the fix (the unfixed seed): claim 1 fails (2390 of 6500).
+; REQUIRES: (the crystallizing lane is fkwu's own heat ledger; the host file doors answer here)
+; preflight-exec: forbidden
+section [form.bml] {
+    def hre-bit(ok, bit) = ok ? bit : 0;
+    def hre-path(name) = temp_dir() ++ "/hre-" ++ host_pid().str() ++ "-" ++ name;
+    def hre-eff(path, k) = host_file_append_bytes(path, [120]);
+    // an argument that is itself a recipe call: two effects, answers 1
+    def hre-one(m, k) { let a = hre-eff(m[0], k); let b = hre-eff(m[0], k); 1; }
+
+    // 1: the native-t5 shape
+    def hre-nx(rc, m, Ls, T) = hre-run(m, Ls, T);
+    def hre-run(m, Ls, T) = nil?(Ls) ? 1 : hre-nx(hre-one(m, Ls[0]), m, Ls[1:], T);
+    def hre-enc(m, T) {
+        let a = hre-eff(m[0], 1);
+        let b = hre-run(m, m[1], T);
+        let c = hre-eff(m[0], 2);
+        T;
+    }
+    def hre-outer(m, i, n) = i >= n ? 0 : hre-outer-next(hre-enc(m, 5), m, i, n);
+    def hre-outer-next(rc, m, i, n) = hre-outer(m, i + 1, n);
+
+    // 2: the callee never reads its first parameter
+    def hre-ignore(rc, m, i, n) = hre-go2(m, i, n);
+    def hre-go2(m, i, n) = i >= n ? 0 : hre-ignore(hre-one(m, i), m, i + 1, n);
+
+    // 3: the callee reads it twice
+    def hre-tw(x, m, i, n) = x + x > 100 ? 0 : hre-go3(m, i, n);
+    def hre-go3(m, i, n) = i >= n ? 0 : hre-tw(hre-one(m, i), m, i + 1, n);
+
+    // 4: the callee reads it only in a branch never taken
+    def hre-br(c, x, m, i, n) = c > 2 ? x : hre-go4(m, i, n);
+    def hre-go4(m, i, n) = i >= n ? 0 : hre-br(1, hre-one(m, i), m, i + 1, n);
+
+    // 5: an unread let
+    def hre-unread(path, k) { let a = hre-eff(path, k); 1; }
+    def hre-go5(path, i, n) = i >= n ? 0 : hre-go5-next(hre-unread(path, i), path, i, n);
+    def hre-go5-next(rc, path, i, n) = hre-go5(path, i + 1, n);
+
+    // 6: pure arguments still compute
+    def hre-add(a, b) = a + b;
+    def hre-go6(i, n, acc) = i >= n ? acc : hre-go6(i + 1, n, hre-add(acc, hre-add(i, 1)));
+
+    let p1 = hre-path("one.txt");
+    let p2 = hre-path("two.txt");
+    let p3 = hre-path("three.txt");
+    let p4 = hre-path("four.txt");
+    let p5 = hre-path("five.txt");
+    let z0 = [host_path_remove(p1), host_path_remove(p2), host_path_remove(p3), host_path_remove(p4), host_path_remove(p5)];
+
+    let m1 = [p1, [[1,2,3],[4,5,6],[7,8,9],[1,2,3],[4,5,6],[7,8,9],[1,2,3],[4,5,6],[7,8,9],[1,2,3],[4,5,6],[7,8,9]]];
+    let r1 = hre-outer(m1, 0, 250);
+    let r2 = hre-go2([p2], 0, 6000);
+    let r3 = hre-go3([p3], 0, 6000);
+    let r4 = hre-go4([p4], 0, 6000);
+    let r5 = hre-go5(p5, 0, 6000);
+    let r6 = hre-go6(0, 6000, 0);
+
+    let s1 = file_size(p1);
+    let s2 = file_size(p2);
+    let s3 = file_size(p3);
+    let s4 = file_size(p4);
+    let s5 = file_size(p5);
+    let shown = print(["hot-recipe-effects", "landed (want 6500 12000 12000 12000 6000 18003000)", [s1, s2, s3, s4, s5, r6]]);
+    let z1 = [host_path_remove(p1), host_path_remove(p2), host_path_remove(p3), host_path_remove(p4), host_path_remove(p5)];
+    let verdict = hre-bit((Comparable) s1 == 6500, 1) + hre-bit((Comparable) s2 == 12000, 2) + hre-bit((Comparable) s3 == 12000, 4) + hre-bit((Comparable) s4 == 12000, 8) + hre-bit((Comparable) s5 == 6000, 16) + hre-bit((Comparable) r6 == 18003000, 32);
+    let end = print(["hot-recipe-effects-band", "verdict", verdict]);
+    verdict;
+}
