@@ -1,0 +1,51 @@
+// form-path-ask.bml — ask a path query of the source tree: an expression on stdin, the matching nodes on stdout.
+//
+//   printf '%s' '//def[@name="fnd-serve"]' | ./fkwu observe/form-path-ask.bml                    rows: path:line:text
+//   printf '%s' '--text //class[@name="FormFind"]/def[1]' | ./fkwu observe/form-path-ask.bml     the source text of each node
+//   printf '%s' '--count //def[calls("host_spawn_at")]' | ./fkwu observe/form-path-ask.bml       how many (--ids, --text, --rows, --count)
+//
+// stdin is either a path expression (an optional leading --ids, --text, --rows or --count flag, then the expression) or the wire's JSON request
+// ({"command": "path --rows", "input": "//def"}). The question goes to the form-find service when one beats (its spool, the way
+// form-find-ask.bml asks); with no service it is answered by an index this process builds for itself (fpa-cold: seconds, once). The answer is the
+// wire's JSON (schema form-agent-tool-wire-v1): stdout holds the rows. Nothing is begun, nothing falls back to a host tool.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-path.bml form-stdlib/bml/stdin-source.bml
+import form-stdlib/bml/form-path.bml;
+import form-stdlib/bml/stdin-source.bml;
+section [form.bml] {
+ class FormPathAsk {
+  def fpk-deadline() = fat-natural(host_getenv("FORM_FIND_DEADLINE_MS") ?? "") ? str_to_int(host_getenv("FORM_FIND_DEADLINE_MS") ?? "") : 3000;
+  def fpk-name() = host_pid().str() ++ "-" ++ host_monotonic_ms().str();
+  def fpk-beat-age(dir) = (String) value_kind(host_file_identity(dir ++ "/status.json")) == "list" ? now_unix_ms() - host_file_identity(dir ++ "/status.json")[1] : 1000000000;
+  def fpk-standing?(dir) = fpk-beat-age(dir) < 10000;
+  def fpk-wait(path, until) {
+   let text = read_file(path);
+   (!nothing?(text) && len(text) > 0) ? text : host_monotonic_ms() >= until ? nothing() : fpk-nap(path, until);
+  }
+  def fpk-nap(path, until) {
+   let z = host_sleep_ms(10);
+   fpk-wait(path, until);
+  }
+  def fpk-ask(dir, line) {
+   let name = fpk-name();
+   let ask = dir ++ "/ask." ++ name ++ ".json";
+   let ans = dir ++ "/ans." ++ name ++ ".json";
+   let z = write_file_text(ask, line);
+   let got = fpk-wait(ans, host_monotonic_ms() + fpk-deadline());
+   let z2 = host_path_remove(ans);
+   nothing?(got) ? fat-wire-refusal("form-find-service-silent: no answer in " ++ fpk-deadline().str() ++ " ms; the service beats but did not answer") : got;
+  }
+  // a plain expression becomes the wire's request: the flag (if any) rides in the command, the expression in "input"
+  def fpk-flag?(text) = fnd-starts?(text, "--ids") || fnd-starts?(text, "--text") || fnd-starts?(text, "--rows") || fnd-starts?(text, "--count");
+  def fpk-flag-end(text) = scan_run(text, 2, 3) + 0;
+  def fpk-request(text) = fnd-starts?(text, "{") ? text : fpk-flag?(text) ? fpk-built("path " ++ substring(text, 0, fpk-flag-end(text)), fat-trim(substring(text, fpk-flag-end(text), len(text)))) : fpk-built("path", text);
+  def fpk-built(command, input) = "{\"command\":" ++ json-quote-string(command) ++ ",\"input\":" ++ json-quote-string(input) ++ "}";
+  def fpk-line() = fpk-request(fat-trim(stdin-text()));
+  def fpk-run() {
+   let dir = fnd-spool();
+   let line = fpk-line();
+   print_str(fpk-standing?(dir) ? fpk-ask(dir, line) : fpa-cold(line));
+  }
+ }
+ fpk-run();
+}
