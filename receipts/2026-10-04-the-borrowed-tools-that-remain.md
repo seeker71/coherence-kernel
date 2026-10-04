@@ -25,6 +25,16 @@ git grep -n -E 'host_spawn_at\(\["(/bin|/usr/bin)/[a-z]+"|host_spawn_quiet\(\["(
 | `/bin/sh -c` for `host-exec` | `bml/form-token-verbs.bml` (the `host-exec` verb) | by design: the verb exists to run a command; its guard (`spawn-guard.bml`) reads the argv or the script before a child begins |
 | `git` | `native-session-sources.bml`, `host-child.bml` (`hch-git-argv`) | none wanted: the repository's own tool |
 
+**Shell strings** (a command line given to `host-exec` or `host_capture`, which a scan of `host_spawn` argv does not see):
+37 product files run one. Re-scan with `git grep -n -E 'host-exec\(|host_capture\(' -- 'form/form-stdlib/*.bml' 'form/form-stdlib/*.fk' 'form/form-stdlib/bml/*.bml' 'observe/*' 'gate/*' 'learn/*' ':!form/form-stdlib/tests'`.
+Many already have a Form door and would be a one-line change: `sleep N` -> `host_sleep_ms` (`hearth.bml`), `vm_stat` -> `host_vm_stat`
+(`dsv4-validate.bml`), `ps -o pid= -p` -> `host_alive` and `ps -axo ...` -> `host_processes` (`hearth.bml`,
+`form-cli-response-session.bml`, `dsv4-oracle-mapped.bml`), `date` -> `now_unix_ms` plus a Form formatter. The rest want a
+door that does not exist: `printenv` (an environment read: `local-run.bml`, `model-admission.bml`, `hearth.bml`), `lsof -t`
+(`model-admission.bml`), `mktemp` (`metal-ask.bml`). Healed here because it failed a band on a clean origin and was one of
+these: `symbol-voice.bml` found a corpus word's sentence with `host-exec("grep -B2 | head | grep -o | tr")` against the
+corpus's old multi-line layout; it reads the corpus as text now (`symbol-voice-band` 63; it read 31 on a clean checkout).
+
 Not listed because they are fixtures that name a tool on purpose: `form-cli-landing-band`, `host-doors-band`,
 `host-walk-band.bml` (it uses `/usr/bin/true`, `/bin/sh -c "trap '' TERM ..."`, `/bin/cat`, `/bin/cp`, `/bin/date`
 and its deaf child is the only one: on Darwin a SIGSTOPped child still dies to SIGTERM, so `host_signal` cannot
