@@ -1,6 +1,6 @@
 ; preludes: form/form-stdlib/safetensors-write.bml form/form-stdlib/t5-weights.bml form/form-stdlib/native-content-seal.bml
-; Expected: 15615
-; PROOF LEVEL: FKWU-STAGED — it preludes .bml cells, writes and maps files through the Metal door (take .hearth/gpu.lock first) and reads a model off this host.
+; Expected: 15871
+; PROOF LEVEL: FKWU-STAGED — it preludes .bml cells, writes and maps files through the Metal door (run it under the GPU lease: observe/gpu-lease-run.fk) and reads a model off this host.
 ;
 ; safetensors-write-band — the body holds a model in its own weight format, and the file it writes is the file it reads.
 ;
@@ -24,6 +24,10 @@
 ;         shifted word pair)
 ;   128   the T5 loader over the same file: four rows with the loader's row shape (key empty), and t5w-map-f32 of a.w
 ;         maps the bytes written
+;   256   the file appears whole or not at all (the write goes to <path>.tmp, is verified, is renamed over <path>):
+;         a tmp with one flipped byte is refused and the old file stays byte-for-byte what it was, tmp gone; a good tmp
+;         becomes the path; a refused rename (the destination is a directory) removes the tmp and leaves the
+;         destination; sw-write over an old file replaces it whole and leaves no tmp; a refused plan touches nothing
 ;
 ; THE REAL FILE (bits 1024-8192): /Users/ursmuff/models/g2p-byt5-small-100/model.safetensors, converted once from the
 ; checkpoint by observe/torch-bin-convert-run.fk (which compared every byte against the checkpoint on the device before
@@ -39,9 +43,10 @@
 ;         float of decoder.final_layer_norm.weight, read through the T5 loader's mapped buffers, are the oracle's words
 ;   8192  the file's content seal (native-content-seal: sha256 over 64 KiB leaves on the device) is the one pinned here,
 ;         so every byte of all 1.2 GB is accounted for in one number
-;   16384 the model is not on this host (the skip; awarded only then)
+; The skip is not a claim: a host without the model awards bit 16384 and none of 1024-8192, so a moved model reads as absent, not as a failing writer.
 ;
-; Verdict 15615 with the model on this host (bits 1-128 and 1024-8192); a host without it answers 16384 + 255 = 16639.
+; Verdict 15871 with the model on this host (bits 1-256 and 1024-8192; it was 15615 before bit 256); a host without it
+; answers 16384 + 511 = 16895.
 (do
     ; every claim holds, or the bit is dark; the first zero decides
     (defn swb-all (xs) (if (eq (len xs) 0) true (if (head xs) (swb-all (tail xs)) false)))
@@ -169,6 +174,41 @@
                                    (swb-slice-eq (nth lh 0) src 0 24)) 128))
             (let fr (metal_buf_free (nth lh 0)))
             ok))
+    ; ---- bit 256: the file appears whole or not at all ----
+    ; the tmp is verified and renamed over the path; a bad tmp, a refused rename or a crash leaves the old file whole
+    (defn swb-publish-bit (ps out es)
+        (do
+            (let good (read_file out))
+            (let n (str_len good))
+            (let dst (str_concat (swb-dir) "pub.safetensors"))
+            (let tmp (sw-tmp dst))
+            (let old "the old model, whole")
+            ; 1. the tmp has one flipped byte: refused, the old file is byte-for-byte what it was, the tmp is gone
+            (let w0 (write_file dst old))
+            (let w1 (write_file tmp (str_concat (substring good 0 (sub n 1)) (byte_to_str (mod (add (str_byte_at good (sub n 1)) 1) 256)))))
+            (let r1 (sw-publish ps tmp dst es n))
+            (let k1 (list (eq w1 n) (swb-refused? r1) (swb-has (swb-reason r1) "untouched") (str_eq (read_file dst) old) (eq (fs_exists tmp) 0)))
+            ; 2. a good tmp: it becomes the path, whole, and the tmp is gone
+            (let w2 (write_file tmp good))
+            (let r2 (sw-publish ps tmp dst es n))
+            (let k2 (list (swb-ok? r2) (eq (nth r2 1) n) (str_eq (read_file dst) good) (eq (fs_exists tmp) 0)))
+            ; 3. the destination is a directory, so the rename is refused: the tmp is removed and the directory stands
+            (let dd (str_concat (swb-dir) "pubdir"))
+            (let m3 (fs_mkdir dd))
+            (let w3 (write_file (sw-tmp dd) good))
+            (let r3 (sw-publish ps (sw-tmp dd) dd es n))
+            (let k3 (list (swb-refused? r3) (swb-has (swb-reason r3) "could not rename") (eq (fs_exists (sw-tmp dd)) 0) (eq (fs_is_dir dd) 1)))
+            (let rm3 (fs_rmdir dd))
+            ; 4. the door end to end over an old file: replaced whole, the same bytes as the first write, no tmp left
+            (let w4 (write_file dst old))
+            (let r4 (sw-write dst es (swb-meta)))
+            (let k4 (list (swb-ok? r4) (str_eq (read_file dst) good) (eq (fs_exists (sw-tmp dst)) 0)))
+            ; 5. a plan that is refused never touches an existing file nor makes a tmp
+            (let w5 (write_file dst old))
+            (let r5 (sw-write dst (list (swb-e "a" "F33" (list 1) 0 4)) (empty)))
+            (let k5 (list (swb-refused? r5) (str_eq (read_file dst) old) (eq (fs_exists (sw-tmp dst)) 0)))
+            (let rm (fs_remove dst))
+            (swb-bit (append k1 (append k2 (append k3 (append k4 k5)))) 256)))
     (defn swb-synthetic ()
         (do
             (let src (swb-src))
@@ -188,7 +228,8 @@
             (let cnt (sw-compare ps (list (list src 0 src 0 3) (list src 0 src 1 3) (list src 0 src 0 24) (list src 0 src 4 8))))
             (let c64 (swb-bit (list (swb-ok? op) (swb-same cnt (list 0 2 0 2))) 64))
             (let c128 (swb-loader-bit out src))
-            (sum (list c1 c2 c4 c8 c16 c32 c64 c128))))
+            (let c256 (swb-publish-bit ps out es))
+            (sum (list c1 c2 c4 c8 c16 c32 c64 c128 c256))))
 
     ; ---- the real file ----
     (defn swb-model () "/Users/ursmuff/models/g2p-byt5-small-100/model.safetensors")

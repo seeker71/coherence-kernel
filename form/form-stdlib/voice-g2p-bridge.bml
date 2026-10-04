@@ -7,8 +7,8 @@
 // length mark each stand alone). The two conventions differ in ways a table can learn: ɡ and g are two code points,
 // Portuguese nasals are n-after-vowel in espeak and a combining tilde in the model, stress marks sit in different
 // places, and the model writes some vowels the teacher reduces. (A spurious final consonant the model once seemed to
-// carry was not the model's: it was the end token nt5-run appends and charsiu's own inference does not; see
-// voice-g2p-t5.bml. The bridge is fitted on the answers asked the model's way.)
+// carry was not the model's: it was the end token a ByT5 tokenizer appends and charsiu's own inference does not, so
+// nt5-run in native-t5.bml leaves it off; see there. The bridge is fitted on the answers asked the model's way.)
 //
 // This cell LEARNS that bridge from the pairs the body already holds — the model's answer for every taught word
 // beside the phonemes the teacher gave it — and APPLIES it, with no model and no process, to any model answer.
@@ -44,6 +44,10 @@ import form/form-stdlib/voice-phoneme.bml;
 section [form.bml] {
     class FormVoiceG2PBridge {
         field VGBMinSupport = 2;
+        field VGBSymSupport = 2;
+        field VGBSymPurity = 850;
+        field VGBStressSupport = 2;
+        field VGBStressPurity = 850;
         // the language tag the model answered best for each tongue (measured, see .hearth/g2p-model/agree-*.txt)
         def vgb-tags() = [["en", "eng-uk"], ["pt", "por-bz"], ["fa", "per"], ["id", "ind"]];
         def vgb-tag-of(rows, code) = if ((Comparable) len(rows) == 0) then "" else if ((String) rows[0][0] == code) then rows[0][1] else vgb-tag-of(rows[1:], code);
@@ -209,7 +213,7 @@ section [form.bml] {
                 else 1;
         }
         def vgb-admit(tab, cs, lvl) = if (nil?(cs)) then tab else vgb-admit(vgb-admit-one(tab, cs[0], lvl), cs[1:], lvl);
-        def vgb-admit-one(tab, c, lvl) = if ((Comparable) c[0] != lvl) then tab else if ((Comparable) vgb-keep?(tab, c) == 1) then vgb-put(tab, c[1], c[2], c[4]) else tab;
+        def vgb-admit-one(tab, c, lvl) = if ((Comparable) c[0] != lvl) then tab else if ((Comparable) vgb-keep?(tab, c) == 1) then record_set(vgb-put(tab, c[1], c[2], c[4]), vg-cat(["%", c[1]]), c[3]) else tab;
         // the table from a count, level by level so each level is judged against the ones below it
         def vgb-table-of-count(cnt) {
             let cs = vgb-candidates(cnt, record_keys(cnt));
@@ -232,16 +236,23 @@ section [form.bml] {
             let p3 = if (p2 < 0) then -1 else str_find(row, vg-tab(), (p2 + 1));
             let p4 = if (p3 < 0) then -1 else str_find(row, vg-tab(), (p3 + 1));
             let p5 = if (p4 < 0) then -1 else str_find(row, vg-tab(), (p4 + 1));
-            if (p5 < 0) then tab else vgb-put(tab, substring(row, 0, p3), str_to_int(substring(row, (p3 + 1), p4)), substring(row, (p5 + 1), len(row)));
+            if (p5 < 0) then tab else record_set(vgb-put(tab, substring(row, 0, p3), str_to_int(substring(row, (p3 + 1), p4)), substring(row, (p5 + 1), len(row))), vg-cat(["%", substring(row, 0, p3)]), str_to_int(substring(row, (p4 + 1), p5)));
         }
         def vgb-rows-add(tab, rows) = if (nil?(rows)) then tab else vgb-rows-add(vgb-row-add(tab, rows[0]), rows[1:]);
+        // the same table with only its context-free rows (symbol -> answer): the model's own vowels and consonants in the
+        // voice's symbols, with none of the teacher's habits learned from neighbours (a measuring stick, see the render door)
+        def vgb-flat-rows(rows) = if (nil?(rows)) then [] else if (((String) vgb-field(rows[0], 1) == "*") && ((String) vgb-field(rows[0], 2) == "*")) then cons(rows[0], vgb-flat-rows(rows[1:])) else vgb-flat-rows(rows[1:]);
+        def vgb-load-flat(code) = vgb-rows-add(record_new(0), vgb-flat-rows(vgb-lines(vgb-path(code))));
         def vgb-load(code) {
             let p = vgb-path(code);
             vgb-rows-add(record_new(0), if (file_size(p) > 0) then split-on(read_file(p), vg-nl()) else []);
         }
         // ---- applying it ----
+        def vgb-pick-dl(tab, m, l, r, f) = vgb-pick-dl-go(tab, [vgb-key(m, f, r), vgb-key(m, f, "*"), vgb-key(m, l, r), vgb-key(m, "*", r), vgb-key(m, l, "*"), vgb-key(m, "*", "*")], vgb-pick(tab, m, l, r, f));
+        def vgb-pick-dl-go(tab, ks, fallback) = if (nil?(ks)) then fallback else vgb-pick-dl-key(tab, ks, fallback, record_get(tab, vg-cat(["%", ks[0]])), record_get(tab, vg-cat(["#", ks[0]])));
+        def vgb-pick-dl-key(tab, ks, fallback, tot, conf) = if (((Comparable) vg-has?(record_get(tab, ks[0])) == 1) && ((Comparable) tot >= VGBSymSupport()) && ((Comparable) ((conf * (tot + 1)) / (if (tot < 1) then 1 else tot)) >= VGBSymPurity())) then [conf, record_get(tab, ks[0])] else vgb-pick-dl-go(tab, ks[1:], fallback);
         def vgb-answer(tab, m, l, r, f) {
-            let o = vgb-pick(tab, m, l, r, f);
+            let o = vgb-pick-dl(tab, m, l, r, f);
             if ((Comparable) o[0] < 0) then [m] else if ((Comparable) len(o[1]) == 0) then [] else split-on(o[1], vg-sep());
         }
         def vgb-apply-go(tab, bm, s, n) = if (s > n) then [] else append(vgb-answer(tab, bm[s], if (s == 0) then "^" else bm[s - 1], if (s == n) then "#" else bm[s + 1], vgb-feature(bm, s, n)), vgb-apply-go(tab, bm, (s + 1), n));
@@ -255,11 +266,14 @@ section [form.bml] {
         def vgb-valid-of(cfg) = vgb-valid-add(record_new(0), json-object-keys(vp-map(cfg)));
         def vgb-keep-valid(valid, phs, acc, dropped) = if (nil?(phs)) then [reverse(acc), dropped] else if ((Comparable) record_get(valid, phs[0]) == 1) then vgb-keep-valid(valid, phs[1:], cons(phs[0], acc), dropped) else vgb-keep-valid(valid, phs[1:], acc, (dropped + 1));
         // the voice's symbols for a model answer: [symbols, how many the voice's table lacked and were dropped]
-        def vgb-map(tab, valid, ipa) = vgb-keep-valid(valid, vgb-apply(tab, ipa), [], 0);
+        def vgb-map(tab, valid, ipa) = vgb-map-w(tab, valid, ipa, "");
+        // the same, for a word whose spelling is known: a table that carries stress rules places the stress by the word
+        def vgb-map-w(tab, valid, ipa, word) = vgb-stressed(tab, valid, word, vgb-keep-valid(valid, vgb-apply(tab, ipa), [], 0));
+        def vgb-stressed(tab, valid, word, r) = if (((Comparable) vgb-stress-on?(tab) == 1) && ((Comparable) record_get(valid, "ˈ") == 1)) then [vgb-stress(tab, word, r[0]), r[1]] else r;
         // ---- measuring: [words, exact, edits, taught symbols, dropped] over pairs ----
         def vgb-eval-go(tab, valid, pairs, st) {
             if (nil?(pairs)) then st
-                else vgb-eval-one(tab, valid, pairs, st, vgb-map(tab, valid, pairs[0][0]), vgb-taught-syms(pairs[0][1]));
+                else vgb-eval-one(tab, valid, pairs, st, vgb-map-w(tab, valid, pairs[0][0], (if ((Comparable) len(pairs[0]) > 2) then pairs[0][2] else "")), vgb-taught-syms(pairs[0][1]));
         }
         def vgb-eval-one(tab, valid, pairs, st, got, want) {
             let d = vgb-dist(want, got[0]);
@@ -294,6 +308,125 @@ section [form.bml] {
                 else vgb-pairs-go(rows[1:], raw, record_set(seen, w, 1), cons([record_get(raw, w), substring(rows[0], (at + 1), len(rows[0])), w], acc));
         }
         def vgb-pairs-of(code) = vgb-pairs-go(vgb-lines(vg-path(code, "word")), vgb-raw-load(code), record_new(0), []);
+        // ---- STRESS: where the teacher writes ˈ and ˌ is the WORD's business, not a symbol's ----
+        // The model writes no stress at all. A per-symbol rule can only guess it from the neighbours, and a word then gets
+        // two primaries or none. For a tongue whose stress follows its spelling (Portuguese) the bridge is fitted on the
+        // taught phonemes WITHOUT their stress marks, and the stress is placed afterwards, a word at a time, by two decision
+        // lists learned from the taught words: which nucleus (counted from the end) carries ˈ, from the number of nuclei,
+        // the word's last one and two letters and where its accent letter stands; and for each other nucleus whether it
+        // carries ˌ, from its distance to the primary, its place in the word and its vowel. A nucleus is a run of vowel
+        // symbols (a nasal mark and a length mark ride with their vowel; of two vowels together the second joins the first
+        // only when it is the glide ɪ or ʊ, else it is a nucleus of its own: ˈ stands before a vowel, hiatus included). The rules live in the same table as the
+        // symbol rules, under the pseudo-symbols `!P` (primary), `!Q` (secondary) and the marker `!S`.
+        def vgb-stress-tongues() = ["pt"];
+        def vgb-stress-code?(code) = vgb-in?(vgb-stress-tongues(), code);
+        def vgb-mark?(s) = if (((String) s == "ˈ") || ((String) s == "ˌ")) then 1 else 0;
+        def vgb-bare(xs) = if (nil?(xs)) then [] else if ((Comparable) vgb-mark?(xs[0]) == 1) then vgb-bare(xs[1:]) else cons(xs[0], vgb-bare(xs[1:]));
+        def vgb-nuclei(b) = vgb-nuc-go(b, 0, 0, []);
+        def vgb-nuc-go(b, i, pv, acc) = if (i >= len(b)) then reverse(acc) else vgb-nuc-step(b, i, pv, acc, vgb-in?(vgb-vowels(), b[i]), vgb-in?([vgb-modifiers()[0], vgb-modifiers()[2]], b[i]));
+        def vgb-nuc-step(b, i, pv, acc, isv, ext) {
+            if ((Comparable) isv == 1) then vgb-nuc-go(b, (i + 1), 1, (if (((Comparable) pv == 1) && ((Comparable) vgb-in?(["ɪ", "ʊ"], b[i]) == 1)) then acc else cons(i, acc)))
+                else if ((Comparable) ext == 1) then vgb-nuc-go(b, (i + 1), pv, acc)
+                else vgb-nuc-go(b, (i + 1), 0, acc);
+        }
+        // the taught side: its marks as [index into the bare list, mark]; a nucleus's label is the mark that stands after
+        // the previous nucleus's start and at or before its own
+        def vgb-marks(a, bi) = if (nil?(a)) then [] else if ((Comparable) vgb-mark?(a[0]) == 1) then cons([bi, a[0]], vgb-marks(a[1:], bi)) else vgb-marks(a[1:], (bi + 1));
+        def vgb-label-of(marks, lo, hi) = if (nil?(marks)) then "0" else if (((Comparable) marks[0][0] > lo) && ((Comparable) marks[0][0] <= hi)) then marks[0][1] else vgb-label-of(marks[1:], lo, hi);
+        def vgb-labels(marks, ns, prev) = if (nil?(ns)) then [] else cons(vgb-label-of(marks, prev, ns[0]), vgb-labels(marks, ns[1:], ns[0]));
+        def vgb-index-of(xs, x, i) = if (nil?(xs)) then -1 else if ((String) xs[0] == x) then i else vgb-index-of(xs[1:], x, (i + 1));
+        // the spelling: the last one and two letters, and the accent letter (acute or circumflex, else tilde) with the
+        // vowel group it stands in, counted from the end
+        def vgb-acute() = ["á", "é", "í", "ó", "ú", "â", "ê", "ô", "à", "Á", "É", "Í", "Ó", "Ú", "Â", "Ê", "Ô"];
+        def vgb-tilde() = ["ã", "õ", "Ã", "Õ"];
+        def vgb-ovowels() = ["a", "e", "i", "o", "u", "y", "A", "E", "I", "O", "U", "ü", "á", "é", "í", "ó", "ú", "â", "ê", "ô", "à", "ã", "õ", "Á", "É", "Í", "Ó", "Ú", "Â", "Ê", "Ô", "Ã", "Õ"];
+        def vgb-acc-of(w) = vgb-acc-go(reverse(vgb-cps(w, 0)), 0, 0, "n", 0);
+        def vgb-acc-go(ls, inrun, g, kind, pos) = if (nil?(ls)) then vg-cat([kind, (if (pos > 3) then 3 else pos).str()]) else vgb-acc-step(ls, inrun, g, kind, pos, vgb-in?(vgb-ovowels(), ls[0]));
+        def vgb-acc-step(ls, inrun, g, kind, pos, isv) {
+            let g2 = if ((Comparable) isv == 1) then (if ((Comparable) inrun == 1) then g else (g + 1)) else g;
+            let ac = vgb-in?(vgb-acute(), ls[0]);
+            let tl = vgb-in?(vgb-tilde(), ls[0]);
+            if ((Comparable) ac == 1) then (if ((String) kind == "a") then vgb-acc-go(ls[1:], isv, g2, kind, pos) else vgb-acc-go(ls[1:], isv, g2, "a", g2))
+                else if (((Comparable) tl == 1) && ((String) kind == "n")) then vgb-acc-go(ls[1:], isv, g2, "t", g2)
+                else vgb-acc-go(ls[1:], isv, g2, kind, pos);
+        }
+        def vgb-end1(w) = if ((Comparable) len(w) == 0) then "" else vgb-end1-of(reverse(vgb-cps(w, 0)));
+        def vgb-end1-of(r) = if (nil?(r)) then "" else r[0];
+        def vgb-end2(w) = if ((Comparable) len(w) == 0) then "" else vgb-end2-of(reverse(vgb-cps(w, 0)));
+        def vgb-end2-of(r) = if (nil?(r)) then "" else if (nil?(r[1:])) then r[0] else vg-cat([r[1], r[0]]);
+        // the keys of a decision, from the least to the most specific
+        // A word of two nuclei or more is judged by its ending and accent whatever its length (the answer is a place
+        // counted from the END, so the length only caps it) and also by its length; a word of one nucleus, where the
+        // question is whether it is stressed at all, by its own keys only.
+        def vgb-pkeys(n, e1, e2, acc) {
+            let base = vg-cat(["n", (if (n > 4) then 4 else n).str()]);
+            if (n > 1) then append(vgb-pkeys-of("w", e1, e2, acc), vgb-pkeys-of(base, e1, e2, acc)) else vgb-pkeys-of(base, e1, e2, acc);
+        }
+        def vgb-pkeys-of(base, e1, e2, acc) = [base, vg-cat([base, "|", e1]), vg-cat([base, "|", e2]), vg-cat([base, "|", acc]), vg-cat([base, "|", e1, "|", acc]), vg-cat([base, "|", e2, "|", acc])];
+        def vgb-skeys(d, s, n, v) {
+            let b = vg-cat(["d", d]);
+            let nn = if (n > 5) then 5 else n;
+            [b, vg-cat([b, "|s", s.str()]), vg-cat([b, "|s", s.str(), "|n", nn.str()]), vg-cat([b, "|", v]), vg-cat([b, "|s", s.str(), "|n", nn.str(), "|", v])];
+        }
+        def vgb-dstr(pi, k) = if (pi < 0) then "N" else (pi - k).str();
+        def vgb-bump-keys(cnt, sym, keys, out) = if (nil?(keys)) then cnt else vgb-bump-keys(vgb-bump(cnt, vgb-key(sym, keys[0], "*"), out), sym, keys[1:], out);
+        // ---- counting, from the taught side ----
+        def vgb-count-stress-pair(cnt, a, w) {
+            let b = vgb-bare(a);
+            let ns = vgb-nuclei(b);
+            let labels = vgb-labels(vgb-marks(a, 0), ns, -1);
+            let n = len(ns);
+            let pi = vgb-index-of(labels, "ˈ", 0);
+            let pe = if (pi < 0) then 0 else (n - pi);
+            let c1 = vgb-bump(cnt, vgb-key("!S", "on", "*"), "1");
+            if (n == 0) then c1 else vgb-count-sec(vgb-bump-keys(c1, "!P", vgb-pkeys(n, vgb-end1(w), vgb-end2(w), vgb-acc-of(w)), pe.str()), b, ns, labels, n, pi, 0);
+        }
+        def vgb-count-sec(cnt, b, ns, labels, n, pi, k) = if (k >= n) then cnt else if (k == pi) then vgb-count-sec(cnt, b, ns, labels, n, pi, (k + 1)) else vgb-count-sec(vgb-bump-keys(cnt, "!Q", vgb-skeys(vgb-dstr(pi, k), (k + 1), n, b[ns[k]]), (if ((String) labels[k] == "ˌ") then "1" else "0")), b, ns, labels, n, pi, (k + 1));
+        def vgb-count-stress(cnt, pairs) = if (nil?(pairs)) then cnt else vgb-count-stress(vgb-count-stress-pair(cnt, vgb-taught-syms(pairs[0][1]), pairs[0][2]), pairs[1:]);
+        // the pairs with the taught stress taken off, for the symbol rules
+        def vgb-strip-pairs(pairs) = if (nil?(pairs)) then [] else cons([pairs[0][0], vgb-join-sep(vgb-bare(vgb-taught-syms(pairs[0][1]))), pairs[0][2]], vgb-strip-pairs(pairs[1:]));
+        def vgb-count-all-ws(pairs) = vgb-count-stress(vgb-count-pairs(record_new(0), vgb-strip-pairs(pairs)), pairs);
+        def vgb-learn-table-ws(pairs) = vgb-table-of-count(vgb-count-all-ws(pairs));
+        def vgb-rows-of-count(cnt) {
+            let tab = vgb-table-of-count(cnt);
+            let cs = vgb-candidates(cnt, record_keys(cnt));
+            append(vgb-rows-of-level(tab, cs, 0), append(vgb-rows-of-level(tab, cs, 1), append(vgb-rows-of-level(tab, cs, 2), append(vgb-rows-of-level(tab, cs, 3), append(vgb-rows-of-level(tab, cs, 4), vgb-rows-of-level(tab, cs, 5))))));
+        }
+        def vgb-learn-rows-ws(pairs) = vgb-rows-of-count(vgb-count-all-ws(pairs));
+        // the tongue decides whether its stress is placed by the word
+        def vgb-learn-table-for(code, pairs) = if ((Comparable) vgb-stress-code?(code) == 1) then vgb-learn-table-ws(pairs) else vgb-learn-table(pairs);
+        def vgb-learn-rows-for(code, pairs) = if ((Comparable) vgb-stress-code?(code) == 1) then vgb-learn-rows-ws(pairs) else vgb-learn-rows(pairs);
+        // ---- placing ----
+        def vgb-stress-on?(tab) = vg-has?(record_get(tab, vgb-key("!S", "on", "*")));
+        def vgb-offers(tab, sym, keys, cur) = if (nil?(keys)) then cur else vgb-offers(tab, sym, keys[1:], vgb-offer(tab, vgb-key(sym, keys[0], "*"), cur));
+        // A stress decision is a DECISION LIST: the most specific key that has been seen VGBStressSupport times and
+        // answered the same way VGBStressPurity per mille of them speaks; only when none does, the most confident key.
+        // (Confidence alone lets the broad key "no accent letter: the penultimate" outvote the narrow, near-certain
+        // "ends in -al: the last".)
+        def vgb-decide(tab, sym, keys) = vgb-decide-go(tab, sym, reverse(keys), vgb-offers(tab, sym, keys, [-1, ""]));
+        def vgb-decide-go(tab, sym, rk, fallback) = if (nil?(rk)) then fallback else vgb-decide-key(tab, sym, rk, fallback, vgb-key(sym, rk[0], "*"));
+        def vgb-decide-key(tab, sym, rk, fallback, k) {
+            let tot = record_get(tab, vg-cat(["%", k]));
+            let conf = record_get(tab, vg-cat(["#", k]));
+            if (((Comparable) vg-has?(record_get(tab, k)) == 1) && ((Comparable) tot >= VGBStressSupport()) && ((Comparable) ((conf * (tot + 1)) / (if (tot < 1) then 1 else tot)) >= VGBStressPurity())) then [conf, record_get(tab, k)] else vgb-decide-go(tab, sym, rk[1:], fallback);
+        }
+        def vgb-sec-labels(tab, b, ns, n, pi, k) = if (k >= n) then [] else cons((if (k == pi) then "ˈ" else (if ((String) vgb-decide(tab, "!Q", vgb-skeys(vgb-dstr(pi, k), (k + 1), n, b[ns[k]]))[1] == "1") then "ˌ" else "0")), vgb-sec-labels(tab, b, ns, n, pi, (k + 1)));
+        def vgb-place-go(bl, i, ns, ls) = if (nil?(bl)) then [] else if (nil?(ns)) then bl else vgb-place-at(bl, i, ns, ls, (if ((Comparable) ns[0] == i) then ls[0] else "0"));
+        def vgb-place-at(bl, i, ns, ls, mark) {
+            if ((Comparable) ns[0] == i) then (if ((String) mark == "0") then cons(bl[0], vgb-place-go(bl[1:], (i + 1), ns[1:], ls[1:])) else cons(mark, cons(bl[0], vgb-place-go(bl[1:], (i + 1), ns[1:], ls[1:]))))
+                else cons(bl[0], vgb-place-go(bl[1:], (i + 1), ns, ls));
+        }
+        def vgb-stress(tab, w, syms) {
+            let b = vgb-bare(syms);
+            let ns = vgb-nuclei(b);
+            let n = len(ns);
+            if (n == 0) then b else vgb-stress-n(tab, w, b, ns, n, vgb-decide(tab, "!P", vgb-pkeys(n, vgb-end1(w), vgb-end2(w), vgb-acc-of(w))));
+        }
+        def vgb-stress-n(tab, w, b, ns, n, po) {
+            let pe = if ((Comparable) po[0] < 0) then (if (n > 1) then 2 else 1) else str_to_int(po[1]);
+            let pi = if (pe <= 0) then -1 else (if (pe > n) then 0 else (n - pe));
+            vgb-place-go(b, 0, ns, vgb-sec-labels(tab, b, ns, n, pi, 0));
+        }
     }
     0;
 }

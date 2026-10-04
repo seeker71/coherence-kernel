@@ -1,6 +1,6 @@
 ; preludes: form/form-stdlib/torch-bin.bml
 ; Expected: 15871
-; PROOF LEVEL: FKWU-STAGED — it preludes a .bml, maps a real checkpoint through the Metal door (take .hearth/gpu.lock first) and reads a model off this host.
+; PROOF LEVEL: FKWU-STAGED — it preludes a .bml, maps a real checkpoint through the Metal door (run it under the GPU lease: observe/gpu-lease-run.fk) and reads a model off this host.
 ;
 ; torch-bin-band — a PyTorch checkpoint is read by the body, and read as DATA.
 ;
@@ -35,12 +35,12 @@
 ;   64    an unknown opcode, a forbidden global and a pickle cut before STOP are each refused, by name
 ;   128   a deflated storage, a non-contiguous tensor, a file that is no zip and an absent file are each refused
 ;   256   the T5 name table machinery: a tiny config's expected set has the right count and one mutated shape,
-;         one missing and one extra tensor are each caught by tb-t5-problems
+;         one missing and one extra tensor are each caught by t5w-problems
 ;   1024  the real file: tb-tensors reads it, and its tensor count and parameter total are the ones pinned here
-;   2048  every tensor's shape matches the config.json T5: tb-t5-problems answers []
+;   2048  every tensor's shape matches the config.json T5: t5w-problems answers []
 ;   4096  the first floats of shared.weight, read from the file, equal the oracle's (torch.load, one-off)
 ;   8192  shared.weight mapped through the Metal door reads back the same bytes the file range holds
-;   16384 the model is not on this host (the skip; awarded only then)
+; The skip is not a claim: a host without the model awards bit 16384 and none of 1024-8192, so a moved model reads as absent, not as a failing reader.
 (do
     (defn tbb-has (hay needle) (ge (str_find hay needle 0) 0))
     (defn tbb-bit (ok bit) (if ok bit 0))
@@ -191,13 +191,13 @@
 
             ; the T5 name table, on a tiny config: d_model 8, d_kv 2, heads 2, d_ff 12, 1 encoder layer, 1 decoder layer, vocab 10, buckets 4
             (let cfg (list 8 2 2 12 1 1 10 4))
-            (let ex (tb-t5-expected cfg))
+            (let ex (t5w-expected cfg))
             ; encoder 9 + bias 1 = 10, decoder 14 + bias 1 = 15, + shared, two final norms, lm_head = 29 + 1
             (let rows-ok (tbb-t5-rows-of ex))
             (let rows-bad-shape (cons (list "shared.weight" "F32" (list 9 8) "0" 0 0) (tail rows-ok)))
             (let rows-missing (tail rows-ok))
             (let rows-extra (cons (list "mystery.weight" "F32" (list 1) "0" 0 0) rows-ok))
-            (let c9 (tbb-bit (and (eq (len ex) 29) (and (nil? (tb-t5-problems rows-ok cfg)) (and (eq (len (tb-t5-problems rows-bad-shape cfg)) 1) (and (tbb-has (nth (tb-t5-problems rows-bad-shape cfg) 0) "config says 10x8") (and (eq (len (tb-t5-problems rows-missing cfg)) 1) (and (tbb-has (nth (tb-t5-problems rows-missing cfg) 0) "missing shared.weight") (and (eq (len (tb-t5-problems rows-extra cfg)) 1) (tbb-has (nth (tb-t5-problems rows-extra cfg) 0) "unexpected mystery.weight")))))))) 256))
+            (let c9 (tbb-bit (and (eq (len ex) 29) (and (nil? (t5w-problems rows-ok cfg)) (and (eq (len (t5w-problems rows-bad-shape cfg)) 1) (and (tbb-has (nth (t5w-problems rows-bad-shape cfg) 0) "config says 10x8") (and (eq (len (t5w-problems rows-missing cfg)) 1) (and (tbb-has (nth (t5w-problems rows-missing cfg) 0) "missing shared.weight") (and (eq (len (t5w-problems rows-extra cfg)) 1) (tbb-has (nth (t5w-problems rows-extra cfg) 0) "unexpected mystery.weight")))))))) 256))
             (sum (list c1 c2 c3 c4 c5 c6 c7 c8 c9))))
 
     ; the rows a perfect checkpoint of that config would answer, for the machinery check
@@ -207,8 +207,8 @@
     (defn tbb-real ()
         (do
             (let rows (tb-tensors (tbb-model)))
-            (let cfg (tb-t5-config (tbb-config)))
-            (let probs (tb-t5-problems rows cfg))
+            (let cfg (t5w-config (tbb-config)))
+            (let probs (t5w-problems rows cfg))
             (let sh (tb-find rows "shared.weight"))
             (let words (tb-f32-words (tbb-model) sh 0 4))
             ; the oracle: torch.load(weights_only=True, mmap=True) read 172 tensors, 300768256 parameters (299637760 with
@@ -218,7 +218,7 @@
             (let lm (tb-find rows "lm_head.weight"))
             (let wo (tb-find rows "encoder.block.3.layer.1.DenseReluDense.wo.weight"))
             (let fn (tb-find rows "decoder.final_layer_norm.weight"))
-            (let c1 (tbb-bit (and (eq (len rows) 172) (and (eq (tb-params rows) 300768256) (and (eq (tb-params-unique rows) 299637760) (eq (tb-t5-params cfg) 299637760)))) 1024))
+            (let c1 (tbb-bit (and (eq (len rows) 172) (and (eq (tb-params rows) 300768256) (and (eq (tb-params-unique rows) 299637760) (eq (t5w-config-params cfg) 299637760)))) 1024))
             (let c2 (tbb-bit (nil? probs) 2048))
             (let c3 (tbb-bit (and (tbb-same words (list 1080808605 1091499194 3222227908 3223637754))
                             (and (tbb-same (tb-f32-words (tbb-model) lm (sub (tb-numel lm) 1) 1) (list 3205570066))

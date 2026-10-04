@@ -192,14 +192,16 @@ kernel void t5_bucket_init(device int* out [[buffer(0)]], uint i [[thread_positi
   def nt5-enc-layers-run(m, P, Ls, T) = nil?(Ls) ? 1 : nt5-enc-next(nt5-enc-layer-run(m, P, Ls[0], T), m, P, Ls[1:], T);
   def nt5-enc-next(rc, m, P, Ls, T) = nt5-seq(rc, nt5-enc-layers-run(m, P, Ls, T));
   // the text's ids and the encoder's output into scratch 11, and each decoder layer's cross keys and values
-  def nt5-ids(text, i) = i >= len(text) ? md-le32(1) : (md-le32(str_byte_at(text, i) + 3) + nt5-ids(text, i + 1));
+  // eos is the end-of-sequence token (id 1) after the last byte: 1 appends it, 0 leaves the input at its last letter
+  def nt5-ids(text, i, eos) = i >= len(text) ? (eos == 1 ? md-le32(1) : "") : (md-le32(str_byte_at(text, i) + 3) + nt5-ids(text, i + 1, eos));
   def nt5-cross(m, P, Ds, caches, T) = nil?(Ds) ? 1 : nt5-cross-one(m, P, Ds, caches, T, nt5-lin(P, nt5-S(m, 11), Ds[0][7], caches[0][0], T, 1472, 384, 0));
   def nt5-cross-one(m, P, Ds, caches, T, rc) = nt5-cross-two(m, P, Ds, caches, T, nt5-seq(rc, nt5-lin(P, nt5-S(m, 11), Ds[0][8], caches[0][1], T, 1472, 384, 0)));
   def nt5-cross-two(m, P, Ds, caches, T, rc) = nt5-seq(rc, nt5-cross(m, P, Ds[1:], caches[1:], T));
-  def nt5-encode(m, text) {
+  // answers T, the positions the decoder attends to: the bytes, plus one when the end token is asked
+  def nt5-encode(m, text, eos) {
    let P = m[5];
-   let T = len(text) + 1;
-   let w = nam-write(nt5-S(m, 0), nt5-ids(text, 0));
+   let T = len(text) + (eos == 1 ? 1 : 0);
+   let w = nam-write(nt5-S(m, 0), nt5-ids(text, 0, eos));
    let a = nt5-seq(w, nt5-embed(P, m[0][0], nt5-S(m, 0), nt5-S(m, 2), 1472, T));
    let b = nt5-seq(a, nt5-enc-layers-run(m, P, m[1], T));
    let c = nt5-seq(b, nt5-rms(P, nt5-S(m, 2), m[0][2], nt5-S(m, 11), nt5-S(m, 15), 1472, T));
@@ -256,8 +258,36 @@ kernel void t5_bucket_init(device int* out [[buffer(0)]], uint i [[thread_positi
   // greedy: at most 49 new tokens (max_length 50 counts the start token); eos ends it and is not written
   def nt5-decode(m, tok, p, Te, acc) = nt5-decode-with(m, p, Te, acc, nt5-step(m, tok, p, Te));
   def nt5-decode-with(m, p, Te, acc, id) = nothing?(id) ? nothing() : (id == 1 ? acc : ((p + 1) >= 49 ? nt5-accum(acc, id) : nt5-decode(m, id, p + 1, Te, nt5-accum(acc, id))));
-  // text = "<eng-us>: hello" -> the phoneme string, or nothing when it could not be read (never an empty string for a failure)
-  def nt5-run(m, text) = len(text) + 1 > 128 ? nothing() : nt5-decode(m, 0, 0, nt5-encode(m, text), "");
+  // THE ONE RUN PATH. text = "<eng-us>: hello" -> the phoneme string, or nothing when it could not be read (never an
+  // empty string for a failure). eos says whether the input ends with the end-of-sequence token (id 1).
+  //   nt5-run      eos OFF — the product default, charsiu's own inference: it feeds the bytes of `<tag>: word` with NO
+  //                special tokens. The model, taught on inputs that end at the last letter, reads an end token as one
+  //                more letter and writes one more phoneme for it (kita -> kˈitap, mulai -> mˈula͡ɪt, let -> lˈɛts:
+  //                measured 2026-10-03 on all four tongues). Asked its own way the answers are kˈita, mˈula͡ɪ, lˈɛt.
+  //   nt5-run-eos  eos ON — what a ByT5 tokenizer does by default, and what the band's torch oracle constants were
+  //                produced with; it stays here as the oracle's door, and as the proof of the extra phoneme.
+  // Both are the same encoder, decoder and kernels; the input is T = len(text) (+1 with eos) positions and the
+  // decoder's cross-attention reads T.
+  def nt5-run-with(m, text, eos) = (len(text) < 1 || len(text) + (eos == 1 ? 1 : 0) > 128) ? nothing() : nt5-decode(m, 0, 0, nt5-encode(m, text, eos), "");
+  def nt5-run(m, text) = nt5-run-with(m, text, 0);
+  def nt5-run-eos(m, text) = nt5-run-with(m, text, 1);
+
+  // HOW A WORD IS ASKED: the tag and the word, the word with a lone initial capital lowered. A sentence-initial
+  // capital is not a letter of the word, and the model reads it as one: measured 2026-10-04 on every capitalised word
+  // of the four taught tables (all of them initial-capital only), the answers to the word as written and lowercased
+  // differ for 9 of 71 English words, eight of the nine are closer to the taught phonemes lowercased and none is
+  // farther (Through written is θɹˈaʊ, lowercased θɹˈuː; These starts with θ, not ð; A is ˈɑː, not ˈeɪ); the bridged
+  // edit rate on those 71 falls from 11.5% to 8.7%, and the same on a bridge fitted without them. 1 of 76 Portuguese
+  // differs (E: written e, lowercased i, the conjunction's sound, one symbol farther from the taught ˈe) and 1 of 148
+  // Indonesian (a quoted word, closer lowercased). A word with any other capital
+  // (an acronym, iPhone) stays as written: no taught word has one, so nothing here is known about them. A caller keeps
+  // its table key as the word was written and asks the model with nt5-query.
+  // A capital at byte i is one byte (A-Z) or two (a Latin-1 capital: UTF-8 C3 80..9E, but not C3 97, the times sign).
+  def nt5-cap-len(s, i) = i >= len(s) ? 0 : ((str_byte_at(s, i) >= 65 && str_byte_at(s, i) <= 90) ? 1 : ((str_byte_at(s, i) == 195 && i + 1 < len(s) && str_byte_at(s, i + 1) >= 128 && str_byte_at(s, i + 1) <= 158 && str_byte_at(s, i + 1) != 151) ? 2 : 0));
+  def nt5-cap-count(s, i) = i >= len(s) ? 0 : (nt5-cap-len(s, i) == 0 ? nt5-cap-count(s, i + 1) : 1 + nt5-cap-count(s, i + nt5-cap-len(s, i)));
+  def nt5-lower-head(w, n) = (n == 1 ? byte_to_str(str_byte_at(w, 0) + 32) : byte_to_str(195) + byte_to_str(str_byte_at(w, 1) + 32)) + substring(w, n, len(w));
+  def nt5-fold(w) = (nt5-cap-len(w, 0) > 0 && nt5-cap-count(w, 0) == 1) ? nt5-lower-head(w, nt5-cap-len(w, 0)) : w;
+  def nt5-query(tag, word) = "<" + tag + ">: " + nt5-fold(word);
 
   // ---- the logits of the first step, for the band (scratch 14 holds them after nt5-step) ----
   def nt5-logits(m) = nam-read(nt5-S(m, 14), 384);
@@ -266,7 +296,7 @@ kernel void t5_bucket_init(device int* out [[buffer(0)]], uint i [[thread_positi
   def nt5-free-left(hs, left) = nil?(hs) ? reverse(left) : nt5-free-left(hs[1:], metal_buf_free(hs[0]) > 0 ? left : cons(hs[0], left));
   def nt5-free-rounds(hs, round) = nil?(hs) ? 1 : (round >= 4 ? form_error("native T5 weights not released after four rounds: " + len(hs).str()) : nt5-free-rounds(nt5-free-left(nt5-free-synced(hs, round), []), round + 1));
   def nt5-free-synced(hs, round) = round == 0 ? hs : nt5-free-after(nam-sync(), hs);
-  def nt5-free-after(rc, hs) = hs;
+  def nt5-free-after(rc, hs) = rc < 0 ? form_error("native T5 GPU completion refused") : hs;
   def nt5-close(m) {
    let done = nam-sync();
    let w = nt5-free-rounds(nt5-flat([m[0], m[1], m[2]]), 0);
