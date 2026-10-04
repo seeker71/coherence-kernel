@@ -1,0 +1,62 @@
+; preludes: form/form-stdlib/voice-measure.bml
+; Expected: 511
+; REQUIRES:it opens the Metal carrier and writes seven small WAVs under .hearth/.
+; GPU etiquette: run it under the GPU lease: `printf 'form/form-stdlib/tests/voice-measure-band.fk\n' | ./fkwu observe/gpu-lease-run.fk`.
+;
+; voice-measure-band — the acoustic measures of a spoken track, pinned on signals whose truth is known
+; before the count. The WAVs are made on the device by vmz-synth (a sine, an on/off gate, an amplitude
+; step), so nothing in the band was recorded or rendered by the thing it measures.
+;
+; Verdict 511:
+;   1    a 997 Hz sine at 0.1 for 6 s reads -23.01 LUFS (BS.1770: a full-scale 997 Hz sine is -3.01)
+;   2    its sample peak is -20.00 dBFS, its true peak is within 0.5 dB over that, its duration 6.000 s
+;   4    it has no pause and a flat loudness range
+;   8    a 200 Hz sine: f0 median 200 Hz, semitone SD under 0.15, nearly all its power under 300 Hz, centroid 200 Hz
+;   16   a 5 kHz sine: nearly all its power over 4 kHz, centroid 5000 Hz, and a true peak within 0.1 dB of
+;        its -20 dBFS amplitude (faded in and out over 0.1 s: a sine cut hard at the file's ends rings in
+;        any band-limited reading — the first run of this band read +0.3 dB of that ringing as a peak)
+;   32   five 0.4995 s gaps of digital silence in a 200 Hz tone: five pauses, median and max 0.450 s (18 frames),
+;        pause ratio 90 of 298 frames
+;   64   amplitude alternating 0.1 / 0.4 every four hops (2204 samples): the 95th-percentile frame jump is the
+;        9.3 dB between a pure quiet frame and the frame that straddles the step
+;   128  30 s at 0.05 then 30 s at 0.2 (12.04 dB step): loudness range 12.04 LU and integrated -19.71 LUFS (the two halves are
+;        -16.99 and -29.03 LUFS; their power mean is -19.73, and the filter at this rate sits 0.03 dB high)
+;   256  no device buffer is left alive by any measure
+(do
+    (defn vmb-in (x lo hi) (and (gt x lo) (lt x hi)))
+    (defn vmb-bit (ok v) (if ok v 0))
+    (let made (fs-mkdir ".hearth/voice-measure-band"))
+    (let live0 (nth (metal_live) 2))
+    (let p1 (vmz-synth ".hearth/voice-measure-band/sine997.wav" 22050 132300 997000 0.1 0.1 0 0 0 0))
+    (let r1 (vmz-measure p1))
+    (let p2 (vmz-synth ".hearth/voice-measure-band/sine200.wav" 22050 132300 200000 0.1 0.1 0 0 0 0))
+    (let r2 (vmz-measure p2))
+    (let p3 (vmz-synth ".hearth/voice-measure-band/sine5k.wav" 22050 132300 5000000 0.1 0.1 0 0 0 2205))
+    (let r3 (vmz-measure p3))
+    (let p4 (vmz-synth ".hearth/voice-measure-band/gaps.wav" 22050 165300 200000 0.1 0.1 22040 33060 0 0))
+    (let r4 (vmz-measure p4))
+    (let p5 (vmz-synth ".hearth/voice-measure-band/steps.wav" 22050 132300 997000 0.1 0.4 0 0 2204 0))
+    (let r5 (vmz-measure p5))
+    (let p6 (vmz-synth ".hearth/voice-measure-band/lra.wav" 22050 1323000 997000 0.05 0.2 0 0 661500 0))
+    (let r6 (vmz-measure p6))
+    (let live1 (nth (metal_live) 2))
+    (let c0 (vmb-bit (vmb-in (vmz-row-value r1 "lufs_integrated") -23.16 -22.86) 1))
+    (let c1 (vmb-bit (and (vmb-in (vmz-row-value r1 "sample_peak_dbfs") -20.02 -19.98)
+                          (and (vmb-in (vmz-row-value r1 "true_peak_dbfs") -20.02 -19.5)
+                               (vmb-in (vmz-row-value r1 "duration_s") 5.999 6.001))) 2))
+    (let c2 (vmb-bit (and (lt (vmz-row-value r1 "pause_ratio") 0.0001) (lt (vmz-row-value r1 "lra_lu") 0.3)) 4))
+    (let c3 (vmb-bit (and (vmb-in (vmz-row-value r2 "f0_median_hz") 198.5 201.5)
+                          (and (lt (vmz-row-value r2 "f0_semitone_sd") 0.15)
+                               (and (gt (vmz-row-value r2 "share_below_300hz") 0.97)
+                                    (vmb-in (vmz-row-value r2 "centroid_hz") 185.0 215.0)))) 8))
+    (let c4 (vmb-bit (and (gt (vmz-row-value r3 "share_above_4khz") 0.97)
+                          (and (vmb-in (vmz-row-value r3 "centroid_hz") 4940.0 5060.0)
+                               (vmb-in (vmz-row-value r3 "true_peak_dbfs") -20.05 -19.9))) 16))
+    (let c5 (vmb-bit (and (eq (float_to_int (vmz-row-value r4 "pause_count")) 5)
+                          (and (vmb-in (vmz-row-value r4 "pause_median_s") 0.449 0.451)
+                               (and (vmb-in (vmz-row-value r4 "pause_max_s") 0.449 0.451)
+                                    (vmb-in (vmz-row-value r4 "pause_ratio") 0.300 0.304)))) 32))
+    (let c6 (vmb-bit (vmb-in (vmz-row-value r5 "jump_p95_db") 8.7 9.9) 64))
+    (let c7 (vmb-bit (and (vmb-in (vmz-row-value r6 "lra_lu") 11.9 12.2) (vmb-in (vmz-row-value r6 "lufs_integrated") -19.86 -19.56)) 128))
+    (let c8 (vmb-bit (eq live0 live1) 256))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 c8)))))))))

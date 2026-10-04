@@ -1,0 +1,210 @@
+//////////////////////////////////////////////////////////////////////
+// gpu-lease.bml — one Metal client at a time, and a lock that knows who holds it.
+//
+// Two Metal clients at once wedge the GPU wait (the process sits in an uninterruptible state at 0% CPU until
+// kill -9). The first guard was a bare directory, `mkdir` to take and `rmdir` to give back. It had no owner: any
+// client could remove another's lock, a run that died left it standing, and a waiter could not tell a live
+// holder from a dead one. A lease has an owner and can be judged.
+//
+//   THE LEASE      the directory `/tmp/form-gpu.lock` -- one path for the whole machine, because the GPU is shared by
+//                  every checkout and session -- holding one file, `owner`: pid, the process's start time, when it
+//                  took the lease, the last heartbeat, a label, and a token no other lease shares. mkdir is
+//                  still the atomic act; the record is staged and renamed in, so a reader sees all of it or none.
+//   JUDGING        a held lease is LIVE while its pid answers and is the same process (host_process's start time
+//                  matches the record's: a reused pid is another process). It is DEAD when the pid is gone or reused.
+//                  A directory with no readable record is UNOWNED (a shell client, or a client between mkdir and
+//                  its record). Unowned is waited on for a bound, and only then judged stale -- and only if no
+//                  Metal-using fkwu of any checkout is alive (see gpl-markers).
+//   TAKING OVER    a dead lease is renamed to a tombstone named by its own token (`<lock>.gone/<token>`); a
+//                  rename onto a standing, non-empty tombstone fails, so of any number of clients that judged the
+//                  same lease dead exactly one wins. The winner reads the tombstone back to be sure it moved the
+//                  lease it judged (an unowned directory is named by its mtime), puts a wrong one back, then
+//                  makes the lock afresh and records itself. The answer says so.
+//   GIVING BACK    only the holder: the record's token and pid must be mine, else nothing is removed.
+//
+// Answers are data, never a bare number:
+//   take     ["held" token]   ["waited" ms token]   ["took-over-stale" prev token]   ["refused" reason ...]
+//   release  ["released" token]   ["refused" "not-yours" holder-token]   ["refused" "no-lease"]
+//   renew    ["renewed" token]    (or the same refusals)
+// A refusal is the lease meeting a state it will not step past: it ends the take with its finding, and the
+// caller (a door) ends aloud with "not run". A take that cannot record its owner undoes its mkdir first.
+//////////////////////////////////////////////////////////////////////
+import form/form-stdlib/core.fk;
+section [form.bml] {
+  // ONE path for the whole machine: the GPU is shared by every checkout and every session, so the lease is too
+  // (a relative path gave each checkout its own lock, and two checkouts never excluded each other)
+  def gpu-lease-path() = "/tmp/form-gpu.lock";
+  def gpl-magic() = "gpu-lease-v1";
+  def gpl-nl() = byte_to_str(10);
+  def gpl-wait-ms() = 1200000;
+  def gpl-poll-ms() = 1000;
+  def gpl-unowned-ms() = 60000;
+  def gpl-keep-ms() = 3600000;
+  def gpl-owner-file(lock) = lock ++ "/owner";
+  def gpl-stage-file(lock) = lock ++ "/owner.new";
+  def gpl-gone-dir(lock) = lock ++ ".gone";
+  def gpl-wait-dir(lock) = lock ++ ".wait";
+  def gpl-int(x) = (String) value_kind(x) == "int" ? x : 0;
+
+  // ---- who I am: the pid and the start time that tells one process from the next holder of that pid ----
+  def gpl-start-of(pid) {
+   let row = host_process(pid);
+   (String) value_kind(row) == "list" ? row[5] : nothing();
+  }
+  def gpl-me-start() = gpl-int(gpl-start-of(host_pid()));
+  def gpl-token() = host_pid().str() ++ "-" ++ gpl-me-start().str() ++ "-" ++ now_unix_ms().str() ++ "-" ++ host_monotonic_ms().str();
+
+  // ---- the owner record: staged, then renamed over, so it is whole or absent ----
+  def gpl-record(token, label, acquired, beat) = gpl-magic() ++ gpl-nl() ++ token ++ gpl-nl() ++ host_pid().str() ++ gpl-nl() ++ gpl-me-start().str() ++ gpl-nl() ++ acquired.str() ++ gpl-nl() ++ beat.str() ++ gpl-nl() ++ label;
+  def gpl-publish(lock, token, label, acquired) {
+   let w = write_file(gpl-stage-file(lock), gpl-record(token, label, acquired, now_unix_ms()));
+   (w < 0) ? w : host_path_rename(gpl-stage-file(lock), gpl-owner-file(lock));
+  }
+  def gpl-lines(s) = (Comparable) len(s) == 0 ? [] : gpl-lines-at(s, 0);
+  def gpl-lines-at(s, from) {
+   let i = str_find(s, gpl-nl(), from);
+   (i < 0) ? [substring(s, from, len(s))] : cons(substring(s, from, i), gpl-lines-at(s, i + 1));
+  }
+  def gpl-num(s) {
+   let n = str_to_int(s);
+   (String) n.str() == s ? n : nothing();
+  }
+  // ["rec" token pid start acquired beat label] | ["none"] no record | ["garbage"] a record that does not read
+  def gpl-read(lock) {
+   let t = read_file(gpl-owner-file(lock));
+   nothing?(t) ? ["none"] : gpl-parse(gpl-lines(t));
+  }
+  def gpl-parse(ls) = len(ls) < 7 ? ["garbage"] : ((String) ls[0] != gpl-magic() ? ["garbage"] : gpl-parse-nums(ls, gpl-num(ls[2]), gpl-num(ls[3]), gpl-num(ls[4]), gpl-num(ls[5])));
+  def gpl-parse-nums(ls, pid, start, acq, beat) = (nothing?(pid) || (nothing?(start) || (nothing?(acq) || nothing?(beat)))) ? ["garbage"] : ["rec", ls[1], pid, start, acq, beat, ls[6]];
+
+  // ---- judging a held lease ----
+  // the pid answers and is the process that took the lease (a start time of 0 is a host that would not say)
+  def gpl-same-process?(pid, start) = gpl-same-start?(gpl-start-of(pid), start);
+  def gpl-same-start?(now, start) = (Comparable) start == 0 ? 1 : (nothing?(now) ? 0 : ((Comparable) now == 0 ? 1 : ((Comparable) now == start ? 1 : 0)));
+  // ["absent"] | ["live" rec] | ["dead" rec why] | ["unowned" why]
+  def gpl-judge(lock) = (Comparable) host_path_exists(lock) == 1 ? gpl-judge-rec(gpl-read(lock)) : ["absent"];
+  def gpl-judge-rec(r) = (String) r[0] == "rec" ? gpl-judge-owner(r) : ["unowned", r[0]];
+  def gpl-judge-owner(r) = (Comparable) host_alive(r[2]) != 1 ? ["dead", r, "pid-gone"] : ((Comparable) gpl-same-process?(r[2], r[3]) == 1 ? ["live", r] : ["dead", r, "pid-reused"]);
+  def gpu-lease-owner(lock) = gpl-judge(lock);
+
+  // ---- an unowned directory: is a Metal client of this checkout alive? ----
+  // The host cannot say who has the device open, so this is read from the process table: an fkwu of ANY
+  // checkout (the lease is machine-wide), other than me and my parents, not itself waiting on this lease, whose command line names
+  // one of this lane's Metal doors. Conservative on purpose: a false peer only delays a takeover to the deadline.
+  def gpl-markers() = ["voice-", "g2p", "torch-bin", "safetensors", "native-t5", "metal", "lora", "gpu"];
+  def gpl-argv-text(argv) = nil?(argv) ? "" : argv[0] ++ " " ++ gpl-argv-text(argv[1:]);
+  def gpl-marked?(text, ms) = nil?(ms) ? 0 : (str_find(text, ms[0], 0) >= 0 ? 1 : gpl-marked?(text, ms[1:]));
+  def gpl-in?(x, xs) = nil?(xs) ? 0 : ((Comparable) xs[0] == x ? 1 : gpl-in?(x, xs[1:]));
+  def gpl-ancestors(pid, depth) = gpl-ancestors-of(host_process(pid), depth);
+  def gpl-ancestors-of(row, depth) = ((depth <= 0) || ((String) value_kind(row) != "list")) ? [] : cons(row[1], gpl-ancestors(row[1], depth - 1));
+  def gpl-waiting?(lock, pid, start) = gpl-waiting-text?(read_file(gpl-wait-dir(lock) ++ "/" ++ pid.str()), start);
+  def gpl-waiting-text?(t, start) = nothing?(t) ? 0 : ((Comparable) gpl-int(str_to_int(t)) == start ? 1 : 0);
+  def gpl-peer?(lock, ms, pid, cwd, kin) = gpl-peer-row?(lock, ms, pid, cwd, kin, host_process(pid));
+  def gpl-peer-row?(lock, ms, pid, cwd, kin, row) = (String) value_kind(row) != "list" ? 0 : ((Comparable) gpl-in?(pid, kin) == 1 ? 0 : ((Comparable) gpl-marked?(gpl-argv-text(row[4]), ms) == 0 ? 0 : ((Comparable) gpl-waiting?(lock, pid, row[5]) == 1 ? 0 : 1)));
+  def gpl-peers(lock, ms) = gpl-peers-of(lock, ms, host_processes("fkwu"), host_cwd(), cons(host_pid(), gpl-ancestors(host_pid(), 16)));
+  def gpl-peers-of(lock, ms, rows, cwd, kin) = nil?(rows) ? [] : ((Comparable) gpl-peer?(lock, ms, rows[0][0], cwd, kin) == 1 ? cons(rows[0][0], gpl-peers-of(lock, ms, rows[1:], cwd, kin)) : gpl-peers-of(lock, ms, rows[1:], cwd, kin));
+
+  // ---- taking ----
+  // c is the take in flight: [lock label opts t0 deadline]; opts is [wait-ms poll-ms unowned-ms markers]
+  def gpu-lease-take(lock, label, wait-ms) = gpu-lease-take-with(lock, label, [wait-ms, gpl-poll-ms(), gpl-unowned-ms(), gpl-markers()]);
+  def gpu-lease-take-with(lock, label, opts) {
+   let t0 = host_monotonic_ms();
+   let ans = gpl-go([lock, label, opts, t0, t0 + opts[0]], 0);
+   let cleared = host_path_remove(gpl-wait-dir(lock) ++ "/" ++ host_pid().str());
+   ans;
+  }
+  def gpl-go(c, slept) = (Comparable) host_dir_mkdir(c[0]) == 1 ? gpl-claim(c, slept, nothing()) : gpl-meet(c, slept, gpl-judge(c[0]));
+  def gpl-claim(c, slept, prev) {
+   let token = gpl-token();
+   let w = gpl-publish(c[0], token, c[1], now_unix_ms());
+   (Comparable) w == 0 ? gpl-granted(c, slept, prev, token) : gpl-unmake(c[0], w);
+  }
+  def gpl-unmake(lock, w) {
+   let gone = host_dir_rmdir(lock);
+   ["refused", "owner-record-not-written", w];
+  }
+  def gpl-granted(c, slept, prev, token) = nothing?(prev) ? ((Comparable) slept == 0 ? ["held", token] : ["waited", host_monotonic_ms() - c[3], token]) : ["took-over-stale", prev, token];
+
+  def gpl-meet(c, slept, j) = (String) j[0] == "absent" ? gpl-absent(c, slept)
+   : ((String) j[0] == "live" ? gpl-live(c, slept, j[1])
+   : ((String) j[0] == "dead" ? gpl-stale(c, slept, j[1][1], j[1][1], ["dead", j[1][1], j[1][2], j[1][6], j[2]])
+   : gpl-unowned(c, slept, j[1])));
+  // the directory went between my mkdir and my look: once more; if it still cannot be made, it is not a held lease
+  def gpl-absent(c, slept) = (Comparable) host_dir_mkdir(c[0]) == 1 ? gpl-claim(c, slept, nothing()) : ((Comparable) host_path_exists(c[0]) == 1 ? gpl-wait(c, slept, ["raced"]) : ["refused", "cannot-make-lock", c[0]]);
+  def gpl-live(c, slept, r) = (Comparable) r[2] == host_pid() ? ["refused", "already-held-by-this-process", r[1]] : gpl-wait(c, slept, ["live", r[1], r[2], r[6]]);
+  def gpl-wait(c, slept, owner) = host_monotonic_ms() >= c[4] ? ["refused", "held-by-live-owner", owner] : gpl-wait-again(c, owner);
+  def gpl-wait-again(c, owner) {
+   let m = host_dir_mkdir(gpl-wait-dir(c[0]));
+   let n = write_file(gpl-wait-dir(c[0]) ++ "/" ++ host_pid().str(), gpl-me-start().str());
+   let s = host_sleep_ms(c[2][1]);
+   gpl-go(c, 1);
+  }
+  // no readable record: wait for the bound (by the directory's own mtime), then take over only with no Metal peer alive
+  def gpl-unowned(c, slept, why) = gpl-unowned-aged(c, slept, why, host_file_mtime(c[0]));
+  def gpl-unowned-aged(c, slept, why, mtime) = mtime < 0 ? gpl-go(c, slept) : gpl-unowned-judge(c, slept, why, mtime, now_unix_ms() - (mtime * 1000));
+  def gpl-unowned-judge(c, slept, why, mtime, age) = age < c[2][2] ? gpl-wait(c, slept, ["unowned", why, age]) : gpl-unowned-peers(c, slept, why, mtime, age, gpl-peers(c[0], c[2][3]));
+  def gpl-unowned-peers(c, slept, why, mtime, age, peers) = nil?(peers) ? gpl-stale(c, slept, "unowned-" ++ mtime.str(), nothing(), ["unowned", why, age]) : gpl-wait(c, slept, ["unowned-with-metal-peers", peers]);
+
+  // ---- taking over ----
+  // rename the lease to its tombstone; of every client that judged it stale, one rename lands
+  def gpl-stale(c, slept, key, expect, prev) {
+   let g = host_dir_mkdir(gpl-gone-dir(c[0]));
+   let tomb = gpl-gone-dir(c[0]) ++ "/" ++ key;
+   (Comparable) host_path_rename(c[0], tomb) == 0 ? gpl-won(c, slept, tomb, expect, prev, gpl-read(tomb)) : gpl-wait(c, slept, ["takeover-lost", key]);
+  }
+  // expect is the token judged stale, or nothing for an unowned directory (which must still hold no record)
+  def gpl-expected?(seen, expect) = nothing?(expect) ? ((String) seen[0] != "rec" ? 1 : 0) : ((String) seen[0] != "rec" ? 0 : ((String) seen[1] == expect ? 1 : 0));
+  def gpl-won(c, slept, tomb, expect, prev, seen) = (Comparable) gpl-expected?(seen, expect) == 1 ? gpl-won-ok(c, slept, tomb, prev) : gpl-put-back(c, slept, tomb, seen);
+  def gpl-won-ok(c, slept, tomb, prev) {
+   let note = write_file(tomb ++ "/gone-at", now_unix_ms().str());
+   (Comparable) host_dir_mkdir(c[0]) == 1 ? gpl-swept(c[0], tomb, gpl-claim(c, slept, prev)) : gpl-go(c, slept);
+  }
+  def gpl-swept(lock, keep, ans) {
+   let n = gpl-sweep-names(gpl-gone-dir(lock), keep, host_dir_list(gpl-gone-dir(lock)));
+   ans;
+  }
+  // I moved a lease that was not the one I judged (it changed hands in between): give it back where it was
+  def gpl-put-back(c, slept, tomb, seen) = (Comparable) host_path_rename(tomb, c[0]) == 0 ? gpl-wait(c, slept, ["put-back", gpl-seen-name(seen)]) : ["refused", "displaced-a-live-lease", tomb];
+
+  def gpl-seen-name(seen) = (String) seen[0] == "rec" ? seen[1] : seen[0];
+
+  // tombstones older than an hour go; a tombstone with no stamp is stamped now and goes on a later sweep
+  def gpl-sweep-names(dir, keep, names) = (String) value_kind(names) != "list" ? 0 : (nil?(names) ? 0 : gpl-sweep-more(gpl-sweep-one(dir ++ "/" ++ names[0], keep), dir, keep, names[1:]));
+  def gpl-sweep-more(done, dir, keep, rest) = done + gpl-sweep-names(dir, keep, rest);
+  def gpl-sweep-one(path, keep) = (String) path == keep ? 0 : gpl-sweep-stamp(path, read_file(path ++ "/gone-at"));
+  def gpl-sweep-stamp(path, t) = nothing?(t) ? gpl-sweep-stamp-now(path) : ((now_unix_ms() - gpl-int(str_to_int(t))) > gpl-keep-ms() ? ((Comparable) host_dir_rmdir(path) == 0 ? 1 : 0) : 0);
+  def gpl-sweep-stamp-now(path) {
+   let w = write_file(path ++ "/gone-at", now_unix_ms().str());
+   0;
+  }
+
+  // ---- giving back, and the heartbeat: only the holder ----
+  def gpu-lease-token(ans) = (String) ans[0] == "held" ? ans[1] : ((String) ans[0] == "waited" ? ans[2] : ((String) ans[0] == "took-over-stale" ? ans[2] : nothing()));
+  def gpu-lease-held?(ans) = nothing?(gpu-lease-token(ans)) ? 0 : 1;
+  def gpl-mine?(r, token) = (String) r[0] != "rec" ? 0 : ((String) r[1] != token ? 0 : ((Comparable) r[2] == host_pid() ? 1 : 0));
+  def gpl-not-mine(r) = (String) r[0] == "rec" ? ["refused", "not-yours", r[1]] : ["refused", "no-lease"];
+  def gpu-lease-release(lock, token) = gpl-release-of(lock, token, gpl-read(lock));
+  def gpl-release-of(lock, token, r) = (Comparable) gpl-mine?(r, token) == 1 ? gpl-release-now(lock, token) : gpl-not-mine(r);
+  def gpl-release-now(lock, token) = (Comparable) host_dir_rmdir(lock) == 0 ? ["released", token] : ["refused", "rmdir-failed", token];
+  // give back what a take answered; a refused take holds nothing and gives back nothing
+  def gpu-lease-give(lock, ans) = (Comparable) gpu-lease-held?(ans) == 1 ? gpu-lease-release(lock, gpu-lease-token(ans)) : ["refused", "no-lease"];
+  // ---- for a door: take on the one real lock, say so on the door's own stdout in its `name  value` line shape ----
+  def gpu-lease-line(ans) = "lease  " ++ value_str(ans);
+  def gpu-lease-door(label) {
+   let ans = gpu-lease-take(gpu-lease-path(), label, gpl-wait-ms());
+   let said = print_str(gpu-lease-line(ans));
+   ans;
+  }
+  // for a door whose body is one straight run of lets: a refused take stops the door aloud, before it touches the device
+  def gpu-lease-door-held(label) = gpl-held-or-stop(gpu-lease-door(label));
+  def gpl-held-or-stop(ans) = (Comparable) gpu-lease-held?(ans) == 1 ? ans : form_error("gpu-lease: the lease was refused " ++ value_str(ans));
+  def gpu-lease-door-end(lease) {
+   let ans = gpu-lease-give(gpu-lease-path(), lease);
+   let said = print_str(gpu-lease-line(ans));
+   ans;
+  }
+  def gpu-lease-renew(lock, token) = gpl-renew-of(lock, token, gpl-read(lock));
+  def gpl-renew-of(lock, token, r) = (Comparable) gpl-mine?(r, token) == 1 ? gpl-renew-now(lock, token, r) : gpl-not-mine(r);
+  def gpl-renew-now(lock, token, r) = (Comparable) gpl-publish(lock, token, r[6], r[4]) == 0 ? ["renewed", token] : ["refused", "renew-not-written", token];
+  0;
+}
