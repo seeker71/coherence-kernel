@@ -1,0 +1,68 @@
+// walk-retry.bml — the second slot of a schedule: understand why the first did not begin, then change what the second does.
+//
+//   launchd (docs/launchd/earth.hati.rent-walk-retry.plist at 03:40, earth.hati.day-turn-retry.plist at 12:40 and 19:10)
+//   runs this door from the walk checkout; it takes no stdin and no argument. Which first slot it retries it reads from the
+//   clock: the slot of the schedule (form-stdlib/bml/host-walk-retry.bml hr-slots) that began between 5 and 45 minutes ago.
+//
+// What it does, in order (the whole reasoning lives in host-walk-retry.bml and its evidence part host-walk-evidence.bml):
+// 1. reads the first slot's row in .hearth/walk.began: a start inside the window means the slot began, and the door ends
+//    with the class "begun" (nothing to heal);
+// 2. else reads the evidence of why through read-only argv doors (`launchctl print` of the first job, the OS diagnostic
+//    reports of that day, the job's log) and names the class: launch-killed, crashed-after-launch, held, nothing-found;
+// 3. changes a named variable for that class and begins the walk door as its own child (a spawn inside this live process, not a
+//    launchd exec), at most twice and never a third time: a child that dies at once on the second attempt ends the ladder
+//    as retry-failed, naming what each attempt saw;
+// 4. appends one row to .hearth/walk-retry.jsonl (the slot, the class and why, the evidence paths, the launchd reading, what
+//    was changed, each attempt and what it saw, the outcome). The lens (observe/walk-began-run.bml) prints its last row.
+// It prints `[walk-retry]` lines: the class, each attempt, the outcome. The door never touches launchd except to read it.
+// stdin, optional, one JSON line (a hand start or a band): door (retry the latest slot of that door), now_ms, zone_ms,
+// stamp (the walk.began file), launchctl (the `launchctl print` text, instead of reading it), reports_dir (the diagnostic
+// directory), record (the row file), nap_ms (every nap and the wait for a holder are this long), dry (1: read, classify and
+// plan, begin no walk).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/host-walk.bml
+section [form.bml] {
+ class WalkRetry {
+  def wr-doc() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("walk-retry", line) : json-node-object([]);
+  }
+  def wr-said(line) = print_str("[walk-retry] " ++ line);
+  def wr-or(doc, key, fallback) = (String) hw-row-str(doc, key) != "" ? hw-row-str(doc, key) : fallback;
+  // the launchctl text is read only when none was handed in
+  def wr-launchd(doc, slot) = (String) hw-row-str(doc, "launchctl") != "" ? hw-row-str(doc, "launchctl") : hr-launchctl(slot[1]);
+  def wr-slot-of(doc, now, zone) = (String) hw-row-str(doc, "door") != "" ? hr-slot-named(hr-slots(), hw-row-str(doc, "door"), now, zone) : hr-slot-pick(hr-slots(), now, zone);
+  def wr-act(slot, spec, k, over) {
+   let attempt = hr-attempt(hch-dir(), slot, spec, k, over);
+   let said = wr-said("attempt " ++ k.str() ++ " " ++ attempt[0] ++ ": " ++ attempt[2] ++ " (" ++ attempt[3] ++ ")");
+   attempt;
+  }
+  def wr-run() {
+   let doc = wr-doc();
+   let now = hw-row-int(doc, "now_ms") ?? now_unix_ms();
+   let zone = hw-row-int(doc, "zone_ms") ?? hw-zone-ms();
+   let slot = wr-slot-of(doc, now, zone);
+   nothing?(slot) ? wr-said("no first slot of the schedule began 5 to 45 minutes ago: nothing to retry") : wr-slot(doc, slot, now, zone);
+   0;
+  }
+  def wr-slot(doc, slot, now, zone) {
+   let first = hr-slot-ms(slot, now, zone);
+   let begun = hw-slot-recent?(hw-slot-row(wr-or(doc, "stamp", hw-slot-path()), slot[0]), now);
+   let launchd = begun ? "" : wr-launchd(doc, slot);
+   let dir = wr-or(doc, "reports_dir", hr-reports-dir(launchd));
+   let reports = begun ? [] : hr-reports(dir, hw-day-in(zone, first), slot[1], first, hw-slot-window-ms());
+   let held = begun ? "" : hr-held-line(hr-log-tail(hr-launchd-out(launchd), first, hw-slot-window-ms()));
+   let c = hr-classify(begun, launchd, reports, held);
+   let said = wr-said(slot[0] ++ " slot " ++ hr-hhmm-text(slot) ++ ": " ++ hr-class(c) ++ ": " ++ hr-why(c));
+   let dry = (hw-row-int(doc, "dry") ?? 0) == 1;
+   let kept = (String) hr-class(c) == "nothing-found" && !dry ? [hr-capture(now, launchd, dir)] : [];
+   let changed = (String) hr-changed(hr-class(c)) == "" ? 0 : wr-said("changes: " ++ hr-changed(hr-class(c)));
+   let seen = dry ? [] : hr-ladder(hr-plan(hr-class(c)), 1, (spec, k) => wr-act(slot, spec, k, hw-row-int(doc, "nap_ms")), []);
+   let outcome = dry ? "dry: " ++ hr-class(c) ++ ", no walk begun" : hr-outcome(hr-class(c), seen);
+   let made = host_dir_mkdir(".hearth");
+   let recorded = hr-record(wr-or(doc, "record", hr-record-path()), hr-row(now, slot, c, launchd, kept, seen, outcome));
+   wr-said(outcome);
+  }
+ }
+ wr-run();
+}

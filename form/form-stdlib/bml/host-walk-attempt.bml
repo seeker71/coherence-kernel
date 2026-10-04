@@ -1,0 +1,77 @@
+// host-walk-attempt.bml — the retry's effects: the evidence read through argv doors, and one attempt.
+//
+// What it holds: the reads of the evidence the retry classifies (host-walk-evidence.bml reads the text; this part reads the
+// host): `launchctl print gui/<uid>/<label>` and `id -u` through hch-read (argv, no shell, read-only), the diagnostic reports
+// of the slot's local day (named fkwu-<day>-<time>.ips under <home>/Library/Logs/DiagnosticReports, the home read from the
+// job's own plist path), and the tail of the first job's stdout log when it was touched in the slot's window. And one
+// attempt (hr-attempt): a nap, then by kind: "same" begins the walk door as a child of this live process (hch-run-in: an
+// argv, a stdin file, a deadline of the door's window plus half an hour); "fresh" first builds a kernel beside (the walk's
+// own compiler argv, cc fkwu.next) and renames it over fkwu (a new inode and signature, still named fkwu so the walk's
+// coordinator still climbs to launchd), then begins the child; "safe" gives the child {"safe":1}; "wait" waits for the
+// holder of the checkout to end (up to 90 minutes) and begins once; "capture" is "same" after a longer nap with the
+// diagnostics kept (hr-capture). An attempt after the first tells the child {"again":1}: the first child may have stamped
+// its slot before it died. Every attempt answers [how, nap ms, outcome word, what it saw] (host-walk-retry.bml reads them).
+// What it needs: host-walk-text.bml, host-walk-lock.bml (the holder), host-walk-evidence.bml, host-walk-retry.bml (the
+// attempt row and the child's word), host-walk-sync.bml (hw-build-argv) and host-child.bml.
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-walk-lock.bml;
+import form-stdlib/bml/host-walk-evidence.bml;
+import form-stdlib/bml/host-walk-retry.bml;
+import form-stdlib/bml/host-walk-sync.bml;
+import form-stdlib/bml/host-child.bml;
+section [form.bml] {
+ class HostWalkAttempt {
+  // ── the evidence, read through argv doors ──
+  def hr-uid() = hch-read(["/usr/bin/id", "-u"]);
+  def hr-launchctl(label) = hch-read(["/bin/launchctl", "print", "gui/" ++ hr-uid() ++ "/" ++ label]);
+  def hr-reports-dir(launchd) = hr-launchd-home(launchd) ++ "/Library/Logs/DiagnosticReports";
+  // the reports named for the slot's local day, read as rows that fall in the slot's window and belong to the job
+  def hr-report-names(dir, day) = filter(n => hw-starts?(n, "fkwu-" ++ day ++ "-") && hw-ends?(n, ".ips"), fs_list(dir) ?? []);
+  def hr-reports(dir, day, label, slot, window) = filter(r => !nothing?(r) && hr-in-window?(r, slot, window) && hr-of-job?(r, label), map(n => hr-report-of(dir ++ "/" ++ n, read_file(dir ++ "/" ++ n) ?? ""), hr-report-names(dir, day)));
+  // the job's stdout, when it was touched in the slot's window: its last 8 KB
+  def hr-log-tail(path, slot, window) = (String) path == "" ? "" : hr-touched?(file_mtime(path), slot, window) ? read_file_slice(path, file_size(path) > 8000 ? file_size(path) - 8000 : 0, 8000) ?? "" : "";
+  def hr-touched?(at, slot, window) = (String) value_kind(at) == "int" && at > 0 && (at * 1000 >= slot - 60000) && (at * 1000 <= slot + window);
+  // what is kept beside the row when nothing explained the kill: the launchctl text and the diagnostics directory's names
+  def hr-capture(at, launchd, dir) {
+   let path = ".hearth/walk-retry-" ++ at.str() ++ ".evidence";
+   let wrote = write_file_text(path, launchd ++ "\n\n" ++ hch-join(fs_list(dir) ?? [], "\n") ++ "\n");
+   path;
+  }
+  // ── the attempt ──
+  def hr-door-path(door) = "observe/" ++ door ++ ".bml";
+  def hr-child-fields(k, kind) = append(k > 1 ? ["\"again\":1"] : [], (String) kind == "safe" ? ["\"safe\":1"] : []);
+  def hr-child-stdin(k, kind) = "{" ++ hch-join(hr-child-fields(k, kind), ",") ++ "}\n";
+  def hr-nap-of(ms, over) = nothing?(over) ? ms : over;
+  // the fresh kernel: built beside and renamed over fkwu (a new inode; still named fkwu, so the coordinator still reads launchd)
+  def hr-build(io) {
+   let run = hch-run-in(io, "retry-build", hw-build-argv(), "", hch-by(hch-git-backstop-ms()));
+   hch-ok?(run) ? [1, "built fresh, renamed " ++ hw-rc-text(host_path_rename("fkwu.next", "fkwu"))] : [0, "the fresh build did not finish: exit " ++ hch-status-text(run)];
+  }
+  // wait for the holder of the checkout to end; true while one still holds after the wait
+  def hr-holder?(lock) {
+   let text = hw-owner(lock);
+   let pid = hw-field(text, "pid=");
+   !nothing?(pid) && hw-holds?(pid, hw-field(text, " at="));
+  }
+  def hr-wait-holder(lock, until, nap) = hr-holder?(lock) && host_monotonic_ms() < until ? hr-wait-again(lock, until, nap, host_sleep_ms(nap)) : hr-holder?(lock);
+  def hr-wait-again(lock, until, nap, rested) = hr-wait-holder(lock, until, nap);
+  def hr-child-argv(slot) = ["./fkwu", hr-door-path(slot[0])];
+  def hr-run-child(io, slot, spec, k, argv) = hch-run-in(io, "retry-" ++ slot[0] ++ "-" ++ k.str(), argv, hr-child-stdin(k, spec[2]), hch-by(slot[3] + hch-git-backstop-ms()));
+  // env: [the child's argv, the build (io => [1 or 0, what it said]), the checkout's lock path]: the band hands stubs in their place
+  def hr-env(slot) = [hr-child-argv(slot), hr-build, hw-lock()];
+  def hr-built(env, io) {
+   let build = env[1];
+   build(io);
+  }
+  def hr-attempt(io, slot, spec, k, over) = hr-attempt-in(io, slot, spec, k, over, hr-env(slot));
+  def hr-attempt-in(io, slot, spec, k, over, env) {
+   let nap = hr-nap-of(spec[1], over);
+   let slept = host_sleep_ms(nap);
+   let held = (String) spec[2] == "wait" ? hr-wait-holder(env[2], host_monotonic_ms() + (nothing?(over) ? hr-hold-wait-ms() : over), nothing?(over) ? 60000 : 1) : false;
+   let built = (String) spec[2] == "fresh" ? hr-built(env, io) : [1, ""];
+   let began = host_monotonic_ms();
+   held ? hr-attempt-of(spec, nap, "refused", "the holder of the checkout still walks after the wait") : (Comparable) built[0] != 1 ? hr-attempt-of(spec, nap, "died-at-once", built[1]) : hr-ran(spec, nap, hr-run-child(io, slot, spec, k, env[0]), host_monotonic_ms() - began, built[1]);
+  }
+  def hr-ran(spec, nap, run, life, note) = hr-attempt-of(spec, nap, hr-child-word(run, life), (String) note == "" ? hr-child-saw(run, life) : note ++ "; " ++ hr-child-saw(run, life));
+ }
+}
