@@ -108,6 +108,13 @@ choices; ask for what only a person can supply while independent work proceeds.
 Keep guidance small enough to serve attention. More events, direct backtrace,
 local choices and observed learning should make repeated instructions unnecessary.
 
+Question a limit at its owning boundary. Distinguish an explicit caller allowance
+and measured physical capacity from a policy guess. Prefer observed growth and
+resource signals that offer attention, focus, throttling or another choice.
+Let actual admission establish what fits; a round number or window fraction is
+no evidence of a healthy boundary. Preserve context and completed effects when
+adapting, and observe the resulting behavior before claiming the limit healed.
+
 Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
 and BML. A missing internal tool belongs in that body, with its behavior observed
 in the same movement. OS operations are begun by argv through the body's doors (`host-child.bml`), and the tree holds
