@@ -123,6 +123,9 @@ or `git grep` through a wrapper: `find PATTERN [PATH...]`, `defs NAME`, `callers
 and the index answers in tens of milliseconds; no answer in about three seconds, then the cold door once,
 `printf '%s' "$json" | ./fkwu observe/form-find-ask.bml` (it asks the service, else builds an index of its own, seconds). The operator starts the service
 once (`docs/launchd/earth.hati.form-find.plist`); the body never does. Commands, limits and numbers: `docs/form-native-agent-tools.md`, "form-find".
+Structure is asked of the same service with `path`: `{"command":"path --rows","input":"//def[calls(\"host_spawn_at\")]"}`, an XPath-shaped query (`/file[@path~"voice-"]//def[@name="f"]/call`,
+`//class[@name="X"]/def[last()]`, `//def[@lines>40]`) that answers content-addressed node ids with file, byte span and line, not text to re-parse
+(`docs/form-native-agent-tools.md`, "form-path"; one shot: `printf '%s' '--rows //def[@name="x"]' | ./fkwu observe/form-path-ask.bml`).
 
 Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
 and BML. A missing internal tool belongs in that body, with its behavior observed
