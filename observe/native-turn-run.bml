@@ -72,6 +72,7 @@
 // the door so).
 // preflight-exec: forbidden
 import form-stdlib/bml/host-walk.bml;
+import form-stdlib/bml/form-cli-task.bml;
 import form-stdlib/bml/native-turn-ladder.bml;
 import form-stdlib/model-registry.bml;
 import form-stdlib/bml/form-cli-heal-native-report.bml;
@@ -243,7 +244,9 @@ section [form.bml] {
   def nt-ways-of(gap, opts) {
    let model = nt-model(opts);
    let all = ntl-ways(model, ntl-voice(model, nt-chain()), nt-context(gap));
-   json-object-has?(opts, "ways") ? filter(a => fcgp-member?(nt-strs(opts, "ways"), ntl-rung(a)), all) : all;
+   let selected=json-object-has?(opts, "ways") ? filter(a => fcgp-member?(nt-strs(opts, "ways"), ntl-rung(a)), all) : all;
+   // An owned candidate needs publication and observation, not another search.
+   json-object-has?(opts,"candidate") ? take(1,filter(a=>ntl-rung(a)!="native",selected)) : selected;
   }
   // one option's request: the original request (documents, checks, writable set) with the approach's model, entry and
   // document view. A resume hears its finding as an identified feedback event at the last checkpoint; a fresh way
@@ -361,6 +364,10 @@ section [form.bml] {
   def nt-window-text(opts, floor) = mc-cat(["the window's end left ", hw-minutes(hw-left(nt-deadline(opts), host_monotonic_ms())), ", short of an option of ", hw-minutes(floor[0]), " (", floor[1], ")"]);
   // The original request is one value throughout the walk; feedback never rewrites its contract.
   def nt-walk(gap, opts, id, full, band, before, coordinator, notes) {
+   // The planner's checked reference is already a local candidate. Reuse it
+   // through this publication owner while source bytes and checks still agree.
+   let planned = (json-object-has?(opts,"candidate") || json-object-has?(opts,"publish_from")) ? "" : fct-plan-candidate(gap);
+   let opts = planned=="" ? opts : json-node-object(append(json-object-pairs(opts),[fhn-s("candidate",planned)]));
    let request = nt-request(gap,opts,nt-str(gap,"goal") + "\nInitial execution evidence:\n" + nt-band-errors() + "\n" + nt-band-claims());
    let floor = hw-option-floor();
    let w = oac-backtrack-walk(map(way => (offered => nt-way-option(way, offered)), nt-ways-of(gap, opts)),[gap,opts,id,full,band,before,coordinator,request,floor],[]);
@@ -421,13 +428,13 @@ section [form.bml] {
   // Only an actual coding invocation establishes its provider-free lane scope.
   // Caller/coordinator guidance and arbitrary band work remain unattributed.
   def nt-local-execution?(opts,said) = nt-int(opts,"dry",0) != 1 && nt-int(opts,"test",0) != 1 && !json-object-has?(opts,"candidate") && !json-object-has?(opts,"publish_from") && nt-starts?(said,"lane-exit=");
-  def nt-measured(row,result,opts,said,green,conflict) {
-   let local = nt-local-execution?(opts,said);
-   let verified = local && green && nt-str(result,"status") == "complete" && nt-int(result,"release_ok",0) == 1;
+  def nt-measured(row,result,opts,said,green,conflict,planned,gap) {
+   let local = planned || nt-local-execution?(opts,said);
+   let verified = green && (planned || (local && nt-str(result,"status") == "complete" && nt-int(result,"release_ok",0) == 1));
    let unknown = ["required_remote_prompts","required_remote_tokens","optional_remote_review_prompts","optional_remote_review_tokens","rented_tokens"] |> map(key => nt-reading(key,nothing()));
    json-node-object(append(json-object-pairs(row),append([
-    fhn-s("checkpoint_id",nt-str(result,"checkpoint_id")),nt-reading("local_generated_ids",nt-maybe(result,"generated_ids")),nt-reading("local_injected_ids",nt-maybe(result,"injected_ids")),nt-reading("local_repairs",nt-maybe(result,"repair_attempts")),nt-reading("lane_release_ok",nt-maybe(result,"release_ok")),fhn-n("local_verified",verified),
-    nt-reading("execution_required_remote_prompts",local ? 0 : nothing()),nt-reading("execution_required_remote_tokens",local ? 0 : nothing()),fhn-s("usage_scope","Actual native coding invocation only; whole-task guidance, coordinator, band and optional review usage require attribution."),fhn-n("source_conflict",conflict)
+    fhn-s("checkpoint_id",nt-str(result,"checkpoint_id")),nt-reading("local_generated_ids",planned ? 0 : nt-maybe(result,"generated_ids")),nt-reading("local_injected_ids",planned ? 0 : nt-maybe(result,"injected_ids")),nt-reading("local_repairs",nt-maybe(result,"repair_attempts")),nt-reading("lane_release_ok",nt-maybe(result,"release_ok")),fhn-n("local_verified",verified),
+    nt-reading("plan_local_generated_ids",planned ? nt-maybe(gap,"plan_local_generated_ids") : nothing()),nt-reading("plan_local_injected_ids",planned ? nt-maybe(gap,"plan_local_injected_ids") : nothing()),nt-reading("execution_required_remote_prompts",local ? 0 : nothing()),nt-reading("execution_required_remote_tokens",local ? 0 : nothing()),fhn-s("candidate_origin",planned ? "verified-local-plan" : json-object-has?(opts,"candidate") ? "caller-candidate" : ""),fhn-s("usage_scope","Publication/coding usage; verified-plan authoring is reported separately. Whole-task guidance, coordinator and optional review usage require attribution."),fhn-n("source_conflict",conflict)
    ],unknown)));
   }
   // the candidate's change against its checkpoint, read in Form from the texts themselves (form-stdlib/bml/text-diff.bml)
@@ -454,6 +461,7 @@ section [form.bml] {
    let bdigest = nt-band-digest(gap);
    let started = now_unix_ms();
    let dry = ((Comparable) nt-int(opts, "dry", 0) == 1);
+   let planned = json-object-has?(opts,"candidate") && nt-str(opts,"candidate")!="" && fct-plan-candidate(gap)==nt-str(opts,"candidate");
    let outPath = if json-object-has?(opts, "publish_from") then nt-str(opts, "publish_from") else mc-cat([nt-dir(), "/", stamp, ".out"]);
    let said = if (dry || (json-object-has?(opts,"publish_from") || json-object-has?(opts,"candidate"))) then "not-run" else nt-code(reqPath,outPath,nt-deadline(opts));
    let result = if dry then json-node-object([]) else if json-object-has?(opts, "candidate") then nt-candidate-result(gap, nt-str(opts, "candidate")) else nt-result-of(outPath);
@@ -484,7 +492,7 @@ section [form.bml] {
    let aspects = if (green || !ran) then [] else nt-unheld-aspects();
    let outcome = ntl-outcome-digest(after, reason, nt-node-or-null(result, "blocking_check"), errors, aspects);
    let row = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gap", id), fhn-n("option", n), nt-reading("band_before", before), nt-reading("band_after", after), fhn-n("full", full), fhn-n("band_green", if green then 1 else 0), fhn-n("dry", if dry then 1 else 0), fhn-n("test", if test then 1 else 0), fhn-s("coordinated_by", if nt-keeper?(coordinator) then "host-schedule" else "session"), fhn-s("coordinator", coordinator), fhn-n("rented_mind", if nt-keeper?(coordinator) then 0 else 1), fhn-s("request", reqPath), fhn-s("lane", trim(said)), fhn-s("lane_status", nt-str(result, "status")), fhn-s("lane_reason", reason), json-node-pair("blocking_check", nt-node-or-null(result, "blocking_check")), fhn-s("checks_digest", digest), fhn-s("band_digest", bdigest), nt-reading("lane_check_runs", nt-maybe(result, "check_runs")), nt-reading("lane_turns", nt-maybe(result, "turns")), fhn-n("published", shown), fhn-s("publish_refused", refused), fhn-n("restored", if window[1] then 1 else 0), fhn-n("candidates_kept", kept), fhn-n("wall_ms", (now_unix_ms() - started))], append(ntl-row-pairs(way, verdict[1], outcome, ntl-clip(finding, 4000), nt-dependence(coordinator)), append([nt-reading("stillstreak_max", nt-maybe(result, "stillstreak_max"))], nt-session(opts)))));
-   let measured = nt-measured(row,result,opts,said,green,conflict);
+   let measured = nt-measured(row,result,opts,said,green,conflict,planned,gap);
    let appended = fhn-append(nt-ledger-path(opts),json-emit(measured) + "\n");
    print_str("[native-turn] " + json-emit(measured));
    // a conflict or a refused publish ends the walk: a further option could only meet the same tree
