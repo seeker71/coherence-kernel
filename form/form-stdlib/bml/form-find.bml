@@ -1,0 +1,733 @@
+// form-find.bml — the body's source tree, indexed and resident: one question, one table lookup.
+//
+// Urs, 2026-10-04: "you run many non-form tools through form-run, how come you are not using form-cli and make the types of queries
+// form native with indexes and other ways to improve the lookup and improve the integration".
+//
+// WHAT HOLDS. A resident service (observe/form-find-run.fk, run by launchd as DATA: docs/launchd/earth.hati.form-find.plist; the body
+// never starts it) holds the source tree in memory: the file table (source-tree.bml's walk, every .gitignore honoured), each file's
+// identity (size, mtime, inode: host_file_identity) and, for text under 2 MiB with no NUL, its bytes; a DEFINITION index (`def`,
+// `defn`, `class`, `field`, `thought` names with their offsets); the IMPORT edges (`import` lines and `preludes:` headers); the BAND
+// headers (`; Expected:` / `; Verdict`); a lazily built TRIGRAM posting set (trigram -> the files holding it, built the first time
+// a search needs that trigram and kept; a literal search then reads only the files its trigram names; a literal's own posting is kept
+// beside the trigrams', 400 keys at most). There is no watcher: every query first stats each file (about 15 ms for 2,100 files) and
+// lists again each directory whose mtime moved, so a file that changed is read again and only that one. A search with no case-exact
+// literal to narrow it (-i, -v, a pattern of classes alone) must name PATH operands: the grep engine reads every line of every file
+// it is given, and a file whose lines exhaust its per-line work budget (pattern-work-limit) is skipped and named on stderr, not fatal.
+//
+// THE WIRE. The request is the agent wire's JSON ({"command": "...", "input": "...", "documents": [...]}); the answer is the wire's
+// JSON (schema form-agent-tool-wire-v1). Commands:
+//   find [-i -F -w -x -v -l -c -m N] PATTERN [PATH...]   indexed search, ERE (grep -E) or -F; rows as `rg -n`: path:line:text
+//   defs NAME...          where NAME is defined (def defn class field thought): path:line:text
+//   callers NAME          the lines that use NAME as a whole name, definitions left out: path:line:text
+//   bands [NAME]          the band files (a `; Expected:` or `; Verdict` header) that name NAME: path expected= verdict= mentions=
+//   imports UNIT          what UNIT imports (`<UNIT> -> raw`) and who imports it (`<UNIT> <- path:line:text`)
+//   rows FILE [FIELD[=VALUE]]   a .jsonl census or ledger as a keyed table (a `.hearth/*.jsonl` too): the rows holding FIELD=VALUE
+//   status | refresh      the index's size and counters | a refresh now
+//   read cat head tail sed wc jq grep rg   the wire's own tools over the indexed files the command names (never a host file)
+// Anything else is a named refusal (unknown-command, form-find-reads-only for edit and write), never a host fallback. A request that
+// carries its own documents goes to the wire untouched.
+//
+// THE TRANSPORT. A spool directory (FORM_FIND_SPOOL, default /tmp/form-find/<UID or USER>): the client writes ask.<n>.json with a plain
+// shell redirect, the service answers ans.<n>.json (written as a .part and renamed, so a reader never sees half an answer) and removes
+// the ask. The service looks every 20 ms for 10 s after the last ask and every 100 ms after that, and writes status.json as its beat.
+// A fifo bell was the other option the body proves (spool-bell-transport.fk); it is not used because a plain redirect into a fifo with
+// no reader BLOCKS the agent's shell, and a polled directory never does.
+//
+// fnd-serve(s, request) answers one request in process: it is what the service calls, what the band calls, and what the cold door
+// (observe/form-find-ask.bml, service absent) calls after opening an index of its own.
+// preludes: form-stdlib/core.fk form-stdlib/sort.fk form-stdlib/json.fk form-stdlib/bml/source-tree.bml form-stdlib/bml/form-agent-grep.bml form-stdlib/bml/form-agent-tool-wire.bml
+import form-stdlib/core.fk;
+import form-stdlib/sort.fk;
+import form-stdlib/json.fk;
+import form-stdlib/bml/source-tree.bml;
+import form-stdlib/bml/form-agent-grep.bml;
+import form-stdlib/bml/form-agent-tool-wire.bml;
+section [form.bml] {
+ class FormFind {
+  // ---- constants -----------------------------------------------------------------------------------------------------
+  def fnd-max-held() = 2097152;
+  def fnd-max-out() = 1048576;
+  def fnd-q() = byte_to_str(34);
+  def fnd-nul() = byte_to_str(0);
+  def fnd-sep() = byte_to_str(1);
+
+  // ---- a map of any size: 509 records, the key's hash picks one (one record alone turns O(n) per key past a few thousand) ----
+  def fnd-hash(k, i, n, h) = i >= n ? h : fnd-hash(k, i + 1, n, (h * 31 + str_byte_at(k, i)) % 1000003);
+  def fnd-slot(k) = "s" ++ (fnd-hash(k, 0, len(k), 7) % 509).str();
+  def fnd-map() = fnd-map-fill(record_new(0), 0);
+  def fnd-map-fill(m, i) = i >= 509 ? m : fnd-map-next(m, i, record_set(m, "s" ++ i.str(), record_new(0)));
+  def fnd-map-next(m, i, z) = fnd-map-fill(m, i + 1);
+  def fnd-mset(m, k, v) = record_set(record_get(m, fnd-slot(k)), k, v);
+  def fnd-mhas?(m, k) = record_has(record_get(m, fnd-slot(k)), k);
+  def fnd-mget(m, k, fallback) = fnd-mhas?(m, k) ? record_get(record_get(m, fnd-slot(k)), k) : fallback;
+
+  // ---- state: one record -----------------------------------------------------------------------------------------------
+  def fnd-new(base) {
+   let s = record_new(0);
+   let a = record_set(s, "base", base);
+   let b = record_set(s, "files", fnd-map());
+   let c = record_set(s, "byid", fnd-map());
+   let d = record_set(s, "dirs", fnd-map());
+   let e = record_set(s, "defs", fnd-map());
+   let f = record_set(s, "imps", fnd-map());
+   let g = record_set(s, "tri", fnd-map());
+   let h = record_set(s, "rowtabs", fnd-map());
+   let i = record_set(s, "bases", fnd-map());
+   let j = record_set(s, "c", record_new(0));
+   let k = record_set(s, "held", []);
+   let l = record_set(s, "rels", []);
+   let m = record_set(s, "dirlist", []);
+   let n = record_set(s, "trilist", []);
+   let o = record_set(s, "heldrev", []);
+   let p = record_set(s, "building", 0);
+   let q = record_set(s, "nextid", 0);
+   let r = record_set(s, "maxheld", fnd-max-held());
+   s;
+  }
+  def fnd-c(s, key) = record_get(record_get(s, "c"), key);
+  def fnd-cset(s, key, v) = record_set(record_get(s, "c"), key, v);
+  def fnd-bump(s, key, n) = fnd-cset(s, key, fnd-c(s, key) + n);
+  def fnd-base(s) = record_get(s, "base");
+  def fnd-abs(s, rel) = (String) fnd-base(s) == "" ? rel : fnd-base(s) ++ "/" ++ rel;
+  def fnd-rel(s, p) = (String) fnd-base(s) == "" ? p : substring(p, len(fnd-base(s)) + 1, len(p));
+  def fnd-dir-path(s, dir) = (String) dir == "" ? "." : dir;
+  def fnd-next-id(s) {
+   let id = record_get(s, "nextid");
+   let z = record_set(s, "nextid", id + 1);
+   id;
+  }
+  def fnd-read(s, abs) {
+   let z = fnd-bump(s, "reads", 1);
+   read_file(abs) ?? "";
+  }
+
+  // ---- bytes -------------------------------------------------------------------------------------------------------------
+  def fnd-ident?(b) = (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || b == 45 || b == 63 || b == 33 || b == 42 || b == 60 || b == 62 || b == 47 || b == 43;
+  def fnd-extra?(b) = b == 63 || b == 33 || b == 42 || b == 60 || b == 62 || b == 47 || b == 43;
+  def fnd-name-end(t, i) {
+   let e = scan_run(t, i, 3);
+   (e < len(t) && fnd-extra?(str_byte_at(t, e))) ? fnd-name-end(t, e + 1) : e;
+  }
+  def fnd-line-start(t, p) = p <= 0 ? 0 : str_byte_at(t, p - 1) == 10 ? p : fnd-line-start(t, p - 1);
+  def fnd-line-at(t, ls) = substring(t, ls, scan_run(t, ls, 5));
+  def fnd-nl(t, i, stop, acc) = i >= stop ? acc : fnd-nl(t, i + 1, stop, str_byte_at(t, i) == 10 ? acc + 1 : acc);
+  def fnd-ctx?(t, p) = p <= 0 ? true : fnd-ctx-back(t, p - 1);
+  def fnd-ctx-back(t, i) = str_byte_at(t, i) == 10 ? true : (str_byte_at(t, i) == 32 || str_byte_at(t, i) == 9 || str_byte_at(t, i) == 40) ? (i == 0 ? true : fnd-ctx-back(t, i - 1)) : false;
+  def fnd-comment-prefix?(t, p) = fnd-cp(t, fnd-line-start(t, p), p, 0);
+  def fnd-cp(t, i, p, mark) = i >= p ? mark > 0 : fnd-cp-byte(t, i, p, mark, str_byte_at(t, i));
+  def fnd-cp-byte(t, i, p, mark, b) = (b == 59 || b == 47) ? fnd-cp(t, i + 1, p, 1) : (b == 32 || b == 9) ? fnd-cp(t, i + 1, p, mark) : false;
+  def fnd-bound?(t, p, n) = (p == 0 || !fnd-ident?(str_byte_at(t, p - 1))) && (p + n >= len(t) || !fnd-ident?(str_byte_at(t, p + n)));
+  def fnd-padz(s, w) = len(s) >= w ? s : fnd-padz("0" ++ s, w);
+  def fnd-pad(n, w) = fnd-padz(n.str(), w);
+  def fnd-starts?(s, p) = len(s) >= len(p) && (String) substring(s, 0, len(p)) == p;
+  def fnd-ends?(s, t) = len(s) >= len(t) && (String) substring(s, len(s) - len(t), len(s)) == t;
+  def fnd-last-slash(s, i) = i < 0 ? 0 - 1 : str_byte_at(s, i) == 47 ? i : fnd-last-slash(s, i - 1);
+  def fnd-basename(s) = substring(s, fnd-last-slash(s, len(s) - 1) + 1, len(s));
+  def fnd-has?(xs, x) = nil?(xs) ? false : (String) xs[0] == x ? true : fnd-has?(xs[1:], x);
+  def fnd-has-int?(xs, x) = nil?(xs) ? false : (Comparable) xs[0] == x ? true : fnd-has-int?(xs[1:], x);
+  def fnd-count-lines(t, name, from, acc) {
+   let p = str_find(t, name, from);
+   p < 0 ? acc : fnd-count-lines(t, name, scan_run(t, p, 5) + 1, acc + 1);
+  }
+
+  // ---- the index of one file: definitions, imports, band headers ------------------------------------------------------------
+  def fnd-source?(rel) = fnd-ends?(rel, ".fk") || fnd-ends?(rel, ".bml") || fnd-ends?(rel, ".form");
+  def fnd-anchor-kinds() = [["def ", "def"], ["defn ", "defn"], ["class ", "class"], ["field ", "field"], ["thought ", "thought"]];
+  def fnd-def-add(s, name, entry) {
+   let defs = record_get(s, "defs");
+   let z = fnd-bump(s, "defs", 1);
+   fnd-mset(defs, name, cons(entry, fnd-mget(defs, name, [])));
+  }
+  def fnd-defs-of(s, id, text) = foldl((acc, k) => fnd-defs-anchor(s, id, text, k[0], k[1], 0, acc), [], fnd-anchor-kinds());
+  def fnd-defs-anchor(s, id, text, anchor, kind, from, acc) = str_find(text, anchor, from) < 0 ? acc : fnd-defs-hit(s, id, text, anchor, kind, str_find(text, anchor, from), acc);
+  def fnd-defs-hit(s, id, text, anchor, kind, p, acc) {
+   let ns = p + len(anchor);
+   let ne = fnd-name-end(text, ns);
+   let ok = fnd-ctx?(text, p) && ne > ns;
+   let name = ok ? substring(text, ns, ne) : "";
+   let z = ok ? fnd-def-add(s, name, [id, ns, kind]) : 0;
+   fnd-defs-anchor(s, id, text, anchor, kind, ns, ok ? cons(name, acc) : acc);
+  }
+  // imports: `import X;` lines and `preludes: a b c` headers; an edge is [basename, raw, offset of the line's anchor]
+  def fnd-imp-add(s, id, edge) {
+   let imps = record_get(s, "imps");
+   let z = fnd-bump(s, "imps", 1);
+   fnd-mset(imps, edge[0], cons([id, edge[1], edge[2]], fnd-mget(imps, edge[0], [])));
+  }
+  def fnd-tok-end(t, i) = (i >= len(t) || str_byte_at(t, i) == 32 || str_byte_at(t, i) == 9 || str_byte_at(t, i) == 10 || str_byte_at(t, i) == 13 || str_byte_at(t, i) == 59 || str_byte_at(t, i) == 44 || str_byte_at(t, i) == 41) ? i : fnd-tok-end(t, i + 1);
+  def fnd-imps-of(s, id, text) = fnd-imp-lines(s, id, text, "preludes:", 1, 0, fnd-imp-lines(s, id, text, "import ", 0, 0, []));
+  def fnd-imp-lines(s, id, text, anchor, kind, from, acc) = str_find(text, anchor, from) < 0 ? acc : fnd-imp-hit(s, id, text, anchor, kind, str_find(text, anchor, from), acc);
+  def fnd-imp-hit(s, id, text, anchor, kind, p, acc) {
+   let lend = scan_run(text, p, 5);
+   let ok = kind == 0 ? fnd-ctx?(text, p) : fnd-comment-prefix?(text, p);
+   let edges = ok ? (kind == 0 ? fnd-imp-one(text, p + len(anchor), p, []) : fnd-imp-many(text, p + len(anchor), lend, p, [])) : [];
+   let z = fnd-imp-register(s, id, edges);
+   fnd-imp-lines(s, id, text, anchor, kind, lend, append(acc, edges));
+  }
+  def fnd-imp-one(text, i, off, acc) {
+   let e = fnd-tok-end(text, i);
+   e > i ? [[fnd-basename(substring(text, i, e)), substring(text, i, e), off]] : [];
+  }
+  def fnd-imp-many(text, i, lend, off, acc) {
+   let st = scan_run(text, i, 0);
+   let e = fnd-tok-end(text, st);
+   (st >= lend || e <= st) ? reverse(acc) : fnd-imp-many(text, e, lend, off, cons([fnd-basename(substring(text, st, e)), substring(text, st, e), off], acc));
+  }
+  def fnd-imp-register(s, id, edges) = nil?(edges) ? 0 : fnd-imp-register-next(s, id, edges, fnd-imp-add(s, id, edges[0]));
+  def fnd-imp-register-next(s, id, edges, z) = fnd-imp-register(s, id, edges[1:]);
+  // band headers: `; Expected: N` and `; Verdict N` (a `//` comment too): [expected, verdict] or [] when the file has neither
+  def fnd-band-find(t, word, from) = str_find(t, word, from) < 0 ? 0 - 1 : fnd-comment-prefix?(t, str_find(t, word, from)) ? str_find(t, word, from) : fnd-band-find(t, word, str_find(t, word, from) + len(word));
+  def fnd-after-digits(t, i) = substring(t, scan_run(t, i, 0), scan_run(t, scan_run(t, i, 0), 1));
+  def fnd-band-of(text) {
+   let e = fnd-band-find(text, "Expected:", 0);
+   let v = fnd-band-find(text, "Verdict", 0);
+   (e < 0 && v < 0) ? [] : [e < 0 ? "" : fnd-after-digits(text, e + 9), v < 0 ? "" : fnd-after-digits(text, v + 7)];
+  }
+  def fnd-index(s, id, rel, text) = fnd-source?(rel) ? [fnd-defs-of(s, id, text), fnd-imps-of(s, id, text), fnd-band-of(text)] : [[], [], []];
+  def fnd-unindex(s, id, e) {
+   let defs = record_get(s, "defs");
+   let imps = record_get(s, "imps");
+   let z1 = fnd-def-drop(defs, id, e[6]);
+   let z2 = fnd-imp-drop(imps, id, e[7]);
+   0;
+  }
+  def fnd-def-drop(defs, id, names) = nil?(names) ? 0 : fnd-def-drop-next(defs, id, names, fnd-mset(defs, names[0], filter(en => (Comparable) en[0] != id, fnd-mget(defs, names[0], []))));
+  def fnd-def-drop-next(defs, id, names, z) = fnd-def-drop(defs, id, names[1:]);
+  def fnd-imp-drop(imps, id, edges) = nil?(edges) ? 0 : fnd-imp-drop-next(imps, id, edges, fnd-mset(imps, edges[0][0], filter(en => (Comparable) en[0] != id, fnd-mget(imps, edges[0][0], []))));
+  def fnd-imp-drop-next(imps, id, edges, z) = fnd-imp-drop(imps, id, edges[1:]);
+
+  // ---- one file in the table: [id, size, mtime, ino, held, text, def names, import edges, band] -----------------------------
+  def fnd-load(s, id, rel, ident) {
+   let wants = ident[0] <= record_get(s, "maxheld");
+   let text = wants ? fnd-read(s, fnd-abs(s, rel)) : "";
+   let held = (wants && str_find(text, fnd-nul(), 0) < 0) ? 1 : 0;
+   let kept = held == 1 ? text : "";
+   let ix = held == 1 ? fnd-index(s, id, rel, kept) : [[], [], []];
+   [id, ident[0], ident[1], ident[2], held, kept, ix[0], ix[1], ix[2]];
+  }
+  def fnd-held-add(s, id, rel, e) = e[4] == 0 ? 0 : (Comparable) record_get(s, "building") == 1 ? record_set(s, "heldrev", cons([id, rel, e[5], e[8]], record_get(s, "heldrev"))) : record_set(s, "held", fnd-held-insert(record_get(s, "held"), [id, rel, e[5], e[8]], []));
+  def fnd-held-insert(held, h, before) = nil?(held) ? append(reverse(before), [h]) : sort-str-le?(h[1], held[0][1]) ? append(reverse(before), cons(h, held)) : fnd-held-insert(held[1:], h, cons(held[0], before));
+  def fnd-add(s, abs) = fnd-add-ident(s, fnd-rel(s, abs), host_file_identity(abs));
+  def fnd-add-ident(s, rel, ident) = (String) value_kind(ident) != "list" ? 0 : fnd-add-entry(s, rel, fnd-next-id(s), ident);
+  def fnd-add-entry(s, rel, id, ident) {
+   let e = fnd-load(s, id, rel, ident);
+   let z1 = fnd-mset(record_get(s, "files"), rel, e);
+   let z2 = fnd-mset(record_get(s, "byid"), id.str(), rel);
+   let z3 = record_set(s, "rels", cons(rel, record_get(s, "rels")));
+   let z4 = fnd-bases-add(s, rel);
+   let z5 = fnd-held-add(s, id, rel, e);
+   let z6 = (Comparable) record_get(s, "building") == 1 ? 0 : fnd-post-update(s, id, "", e[4] == 1 ? e[5] : "", e[4] == 1);
+   let z6b = (Comparable) record_get(s, "building") == 1 ? 0 : fnd-cset(s, "reordered", 1);
+   let z7 = fnd-bump(s, "files", 1);
+   let z8 = fnd-bump(s, "heldfiles", e[4]);
+   let z9 = fnd-bump(s, "bytes", e[4] == 1 ? len(e[5]) : 0);
+   let z10 = fnd-bump(s, "bands", nil?(e[8]) ? 0 : 1);
+   0;
+  }
+  def fnd-bases-add(s, rel) {
+   let bases = record_get(s, "bases");
+   fnd-mset(bases, fnd-basename(rel), cons(rel, fnd-mget(bases, fnd-basename(rel), [])));
+  }
+  def fnd-bases-drop(s, rel) {
+   let bases = record_get(s, "bases");
+   fnd-mset(bases, fnd-basename(rel), filter(r => (String) r != rel, fnd-mget(bases, fnd-basename(rel), [])));
+  }
+  def fnd-entry(s, rel) = fnd-mget(record_get(s, "files"), rel, []);
+  def fnd-text-of(s, id) = fnd-entry(s, fnd-mget(record_get(s, "byid"), id.str(), ""))[5];
+
+  // ---- the walk: source-tree.bml's rules, the files and directories kept as tables ---------------------------------------------
+  def fnd-dir-note(s, dir, names) {
+   let ident = host_file_identity(fnd-dir-path(s, dir));
+   let dirs = record_get(s, "dirs");
+   let fresh = !fnd-mhas?(dirs, dir);
+   let z = fresh ? record_set(s, "dirlist", cons(dir, record_get(s, "dirlist"))) : 0;
+   fnd-mset(dirs, dir, [(String) value_kind(ident) == "list" ? ident[1] : 0, names]);
+  }
+  def fnd-walk(s, dir, rules, depth) {
+   let names = fs_list(fnd-dir-path(s, dir));
+   (nothing?(names) || depth > 40) ? 0 : fnd-walk-dir(s, dir, stw-with-nested(dir, rules, names), depth, names);
+  }
+  def fnd-walk-dir(s, dir, rules, depth, names) {
+   let z = fnd-dir-note(s, dir, names);
+   fnd-walk-keys(s, dir, rules, depth, sort-strs(names |> map(n => stw-key(dir, n))));
+  }
+  def fnd-walk-keys(s, dir, rules, depth, keys) = nil?(keys) ? 0 : fnd-walk-next(s, dir, rules, depth, keys, fnd-walk-entry(s, dir, rules, depth, keys[0]));
+  def fnd-walk-next(s, dir, rules, depth, keys, z) = fnd-walk-keys(s, dir, rules, depth, keys[1:]);
+  def fnd-walk-entry(s, dir, rules, depth, key) {
+   let isdir = stw-ends?(key, "/");
+   let name = isdir ? substring(key, 0, len(key) - 1) : key;
+   let path = stw-path(dir, name);
+   (stw-has?(stw-never(), name) || stw-ign(rules, path, name, isdir)) ? 0 : isdir ? fnd-walk(s, path, rules, depth + 1) : fnd-add(s, path);
+  }
+  def fnd-build(s) {
+   let t0 = host_monotonic_ms();
+   let z0 = record_set(s, "building", 1);
+   let z1 = record_set(s, "heldrev", []);
+   let z2 = fnd-walk(s, fnd-base(s), [], 0);
+   let z3 = record_set(s, "held", reverse(record_get(s, "heldrev")));
+   let z4 = record_set(s, "heldrev", []);
+   let z5 = record_set(s, "building", 0);
+   let z5b = fnd-stats-rebuild(s);
+   let z6 = fnd-cset(s, "build_ms", host_monotonic_ms() - t0);
+   s;
+  }
+  // one row per file for the refresh: [rel, path on disk, size, mtime, inode]
+  def fnd-stats-rebuild(s) = record_set(s, "stats", record_get(s, "rels") |> map(rel => fnd-stat-of(s, rel)));
+  def fnd-stat-of(s, rel) = fnd-stat-row(s, rel, fnd-entry(s, rel));
+  def fnd-stat-row(s, rel, e) = nil?(e) ? [rel, fnd-abs(s, rel), 0 - 1, 0 - 1, 0 - 1] : [rel, fnd-abs(s, rel), e[1], e[2], e[3]];
+  def fnd-open(base) = fnd-build(fnd-new(base));
+
+  // ---- the trigram postings: built the first time a search needs a trigram, kept, kept right when a file changes ---------------
+  def fnd-posting(s, t) {
+   let tri = record_get(s, "tri");
+   fnd-mhas?(tri, t) ? fnd-mget(tri, t, []) : fnd-posting-build(s, t, tri);
+  }
+  def fnd-posting-build(s, t, tri) {
+   let ids = record_get(s, "held") |> filter(h => str_find(h[2], t, 0) >= 0) |> map(h => h[0]);
+   let z1 = fnd-posting-keep(s, t, ids);
+   let z3 = fnd-bump(s, "tri_builds", 1);
+   ids;
+  }
+  def fnd-tri-at(lit, i) = substring(lit, i, i + 3);
+  def fnd-pick-tri(s, lit) {
+   let cands = [fnd-tri-at(lit, 0), fnd-tri-at(lit, (len(lit) - 3) / 2), fnd-tri-at(lit, len(lit) - 3)];
+   let cached = filter(t => fnd-mhas?(record_get(s, "tri"), t), cands);
+   nil?(cached) ? cands[1] : foldl((best, t) => len(fnd-mget(record_get(s, "tri"), t, [])) < len(fnd-mget(record_get(s, "tri"), best, [])) ? t : best, cached[0], cached);
+  }
+  // the ids of the held files holding lit: the posting of one of its trigrams, each candidate then checked for the whole literal
+  // a literal's own posting is kept beside the trigrams' (one key space: every key is a string a file holds or does not)
+  def fnd-lit-ids(s, lit) = fnd-mhas?(record_get(s, "tri"), lit) ? fnd-mget(record_get(s, "tri"), lit, []) : fnd-lit-build(s, lit);
+  def fnd-lit-build(s, lit) {
+   let ids = len(lit) < 3 ? (record_get(s, "held") |> filter(h => str_find(h[2], lit, 0) >= 0) |> map(h => h[0])) : (fnd-posting(s, fnd-pick-tri(s, lit)) |> filter(id => str_find(fnd-text-of(s, id), lit, 0) >= 0));
+   let z = fnd-posting-keep(s, lit, ids);
+   ids;
+  }
+  def fnd-posting-keep(s, key, ids) = fnd-mhas?(record_get(s, "tri"), key) ? 0 : fnd-posting-store(s, key, ids);
+  // at most 400 keys are kept: a refresh visits each of them for every file that changed, so past that the set starts again
+  def fnd-posting-store(s, key, ids) {
+   let z0 = len(record_get(s, "trilist")) >= 400 ? fnd-post-reset(s) : 0;
+   let z1 = fnd-mset(record_get(s, "tri"), key, ids);
+   record_set(s, "trilist", cons(key, record_get(s, "trilist")));
+  }
+  def fnd-post-reset(s) {
+   let z1 = record_set(s, "tri", fnd-map());
+   record_set(s, "trilist", []);
+  }
+  def fnd-ins(ids, id) = nil?(ids) ? [id] : (Comparable) ids[0] > id ? cons(id, ids) : cons(ids[0], fnd-ins(ids[1:], id));
+  def fnd-post-update(s, id, oldtext, newtext, newheld) = fnd-post-each(s, id, newtext, newheld, record_get(s, "trilist"));
+  def fnd-post-each(s, id, newtext, newheld, ts) = nil?(ts) ? 0 : fnd-post-next(s, id, newtext, newheld, ts, fnd-post-one(s, id, newtext, newheld, ts[0]));
+  def fnd-post-next(s, id, newtext, newheld, ts, z) = fnd-post-each(s, id, newtext, newheld, ts[1:]);
+  def fnd-post-one(s, id, newtext, newheld, t) {
+   let tri = record_get(s, "tri");
+   let kept = filter(x => (Comparable) x != id, fnd-mget(tri, t, []));
+   fnd-mset(tri, t, (newheld && str_find(newtext, t, 0) >= 0) ? fnd-ins(kept, id) : kept);
+  }
+
+  // ---- refresh: no watcher; stat every file, list again every directory whose mtime moved ---------------------------------------------
+  def fnd-reload(s, rel, old, ident) {
+   let id = old[0];
+   let z1 = fnd-unindex(s, id, old);
+   let e = fnd-load(s, id, rel, ident);
+   let z2 = fnd-mset(record_get(s, "files"), rel, e);
+   let z3 = fnd-held-replace(s, id, rel, old, e);
+   let z4 = fnd-post-update(s, id, old[5], e[4] == 1 ? e[5] : "", e[4] == 1);
+   let z5 = fnd-bump(s, "heldfiles", e[4] - old[4]);
+   let z6 = fnd-bump(s, "bytes", (e[4] == 1 ? len(e[5]) : 0) - (old[4] == 1 ? len(old[5]) : 0));
+   let z7 = fnd-bump(s, "bands", (nil?(e[8]) ? 0 : 1) - (nil?(old[8]) ? 0 : 1));
+   1;
+  }
+  def fnd-held-replace(s, id, rel, old, e) {
+   let held = record_get(s, "held");
+   e[4] == 1 ? (old[4] == 1 ? record_set(s, "held", held |> map(h => (Comparable) h[0] == id ? [id, rel, e[5], e[8]] : h)) : record_set(s, "held", fnd-held-insert(held, [id, rel, e[5], e[8]], []))) : record_set(s, "held", held |> filter(h => (Comparable) h[0] != id));
+  }
+  def fnd-remove(s, rel) {
+   let e = fnd-entry(s, rel);
+   nil?(e) ? 0 : fnd-remove-entry(s, rel, e);
+  }
+  def fnd-remove-entry(s, rel, e) {
+   let id = e[0];
+   let z1 = fnd-unindex(s, id, e);
+   let z2 = fnd-mset(record_get(s, "files"), rel, []);
+   let z3 = fnd-mset(record_get(s, "byid"), id.str(), "");
+   let z4 = record_set(s, "rels", filter(r => (String) r != rel, record_get(s, "rels")));
+   let z5 = fnd-bases-drop(s, rel);
+   let z6 = record_set(s, "held", record_get(s, "held") |> filter(h => (Comparable) h[0] != id));
+   let z7 = fnd-post-update(s, id, e[5], "", false);
+   let z8 = fnd-bump(s, "files", 0 - 1);
+   let z9 = fnd-bump(s, "heldfiles", 0 - e[4]);
+   let z10 = fnd-bump(s, "bytes", 0 - (e[4] == 1 ? len(e[5]) : 0));
+   let z11 = fnd-bump(s, "bands", nil?(e[8]) ? 0 : 0 - 1);
+   1;
+  }
+  def fnd-same-ident?(e, ident) = (Comparable) e[1] == ident[0] && (Comparable) e[2] == ident[1] && (Comparable) e[3] == ident[2];
+  def fnd-refresh-file(s, rel) {
+   let e = fnd-entry(s, rel);
+   let ident = host_file_identity(fnd-abs(s, rel));
+   nil?(e) ? 0 : (String) value_kind(ident) != "list" ? fnd-remove(s, rel) : fnd-same-ident?(e, ident) ? 0 : fnd-reload(s, rel, e, ident);
+  }
+  // the files whose identity is not the one the table holds: one stat each, nothing read
+  def fnd-stat-moved?(st, ident) = (String) value_kind(ident) != "list" ? true : !((Comparable) st[2] == ident[0] && (Comparable) st[3] == ident[1] && (Comparable) st[4] == ident[2]);
+  def fnd-moved(s) = record_get(s, "stats") |> filter(st => fnd-stat-moved?(st, host_file_identity(st[1]))) |> map(st => st[0]);
+  def fnd-refresh-files(s, rels, n) = nil?(rels) ? n : fnd-refresh-files(s, rels[1:], n + fnd-refresh-file(s, rels[0]));
+  // a directory whose mtime moved: its new names are classified by the rules in force there, its missing names are dropped
+  def fnd-chain(s, dir) {
+   let rel = (String) dir == (String) fnd-base(s) ? "" : fnd-rel(s, dir);
+   fnd-chain-from(s, (String) rel == "" ? [] : split-on(rel, "/"), [fnd-base(s)], fnd-base(s));
+  }
+  def fnd-chain-from(s, segs, acc, at) = nil?(segs) ? reverse(acc) : fnd-chain-from(s, segs[1:], cons(stw-path(at, segs[0]), acc), stw-path(at, segs[0]));
+  def fnd-rules-chain(chain, rules) = nil?(chain) ? rules : fnd-rules-chain(chain[1:], stw-with-nested(chain[0], rules, fs_list(fnd-dir-path(0, chain[0])) ?? []));
+  def fnd-rules-for(s, dir) = fnd-rules-chain(fnd-chain(s, dir), []);
+  def fnd-dir-changed(s, dir, ident) {
+   let dirs = record_get(s, "dirs");
+   let old = fnd-mget(dirs, dir, []);
+   let names = fs_list(fnd-dir-path(s, dir)) ?? [];
+   let fresh = filter(n => !fnd-has?(old[1], n), names);
+   let gone = filter(n => !fnd-has?(names, n), old[1]);
+   let z1 = fnd-mset(dirs, dir, [ident[1], names]);
+   let rules = nil?(fresh) ? [] : fnd-rules-for(s, dir);
+   let n1 = fnd-take-new(s, dir, rules, fresh, 0);
+   let n2 = fnd-drop-gone(s, dir, gone, 0);
+   n1 + n2;
+  }
+  def fnd-take-new(s, dir, rules, names, n) = nil?(names) ? n : fnd-take-new(s, dir, rules, names[1:], n + fnd-take-one(s, dir, rules, names[0]));
+  def fnd-take-one(s, dir, rules, name) {
+   let path = stw-path(dir, name);
+   let isdir = fs_is_dir(path);
+   (stw-has?(stw-never(), name) || stw-ign(rules, path, name, isdir)) ? 0 : isdir ? fnd-take-dir(s, path, rules) : fnd-take-file(s, path);
+  }
+  def fnd-take-dir(s, path, rules) {
+   let z = fnd-walk(s, path, rules, 1);
+   1;
+  }
+  def fnd-take-file(s, path) {
+   let z = fnd-add(s, path);
+   1;
+  }
+  def fnd-drop-gone(s, dir, names, n) = nil?(names) ? n : fnd-drop-gone(s, dir, names[1:], n + fnd-drop-path(s, stw-path(dir, names[0])));
+  def fnd-drop-path(s, abs) {
+   let rel = fnd-rel(s, abs);
+   let below = record_get(s, "rels") |> filter(r => (String) r == rel || fnd-starts?(r, rel ++ "/"));
+   let z = fnd-remove-all(s, below);
+   let z2 = record_set(s, "dirlist", filter(d => !((String) d == abs || fnd-starts?(d, abs ++ "/")), record_get(s, "dirlist")));
+   1;
+  }
+  def fnd-remove-all(s, rels) = nil?(rels) ? 0 : fnd-remove-all-next(s, rels, fnd-remove(s, rels[0]));
+  def fnd-remove-all-next(s, rels, z) = fnd-remove-all(s, rels[1:]);
+  def fnd-refresh-dirs(s, dirs, n) = nil?(dirs) ? n : fnd-refresh-dirs(s, dirs[1:], n + fnd-refresh-dir(s, dirs[0]));
+  def fnd-refresh-dir(s, dir) {
+   let old = fnd-mget(record_get(s, "dirs"), dir, []);
+   let ident = host_file_identity(fnd-dir-path(s, dir));
+   (nil?(old) || (String) value_kind(ident) != "list") ? 0 : (Comparable) old[0] == ident[1] ? 0 : fnd-dir-changed(s, dir, ident);
+  }
+  // a .gitignore that changed redraws what is ignored: the whole tree is walked again
+  def fnd-any-gitignore?(rels) = nil?(rels) ? false : fnd-ends?(rels[0], ".gitignore") ? true : fnd-any-gitignore?(rels[1:]);
+  def fnd-refresh(s) {
+   let t0 = host_monotonic_ms();
+   let moved = fnd-moved(s);
+   let rewalk = fnd-any-gitignore?(moved);
+   let nd = rewalk ? 0 : fnd-refresh-dirs(s, record_get(s, "dirlist"), 0);
+   let nf = rewalk ? 0 : fnd-refresh-files(s, moved, 0);
+   let n = rewalk ? fnd-rewalk(s) : nd + nf;
+   let z0 = (rewalk || n == 0) ? 0 : fnd-stats-rebuild(s);
+   let z = fnd-cset(s, "refresh_ms", host_monotonic_ms() - t0);
+   let z2 = fnd-cset(s, "refresh_changed", n);
+   n;
+  }
+  def fnd-rewalk(s) {
+   let blank = fnd-new(fnd-base(s));
+   let z0 = record_set(blank, "maxheld", record_get(s, "maxheld"));
+   let fresh = fnd-build(blank);
+   let keep = fnd-cset(fresh, "reads", fnd-c(fresh, "reads") + fnd-c(s, "reads"));
+   let z = fnd-adopt(s, fresh);
+   1;
+  }
+  def fnd-adopt(s, fresh) = fnd-adopt-keys(s, fresh, ["files", "byid", "dirs", "defs", "imps", "tri", "bases", "c", "held", "rels", "dirlist", "trilist", "nextid", "stats"]);
+  def fnd-adopt-keys(s, fresh, keys) = nil?(keys) ? 0 : fnd-adopt-next(s, fresh, keys, record_set(s, keys[0], record_get(fresh, keys[0])));
+  def fnd-adopt-next(s, fresh, keys, z) = fnd-adopt-keys(s, fresh, keys[1:]);
+
+  // ---- answers: [exit, stdout, stderr] ---------------------------------------------------------------------------------------------
+  def fnd-ok(rows) = nil?(rows) ? [1, "", ""] : [0, fat-join(rows, "\n") ++ "\n", ""];
+  def fnd-refuse(why) = [2, "", why];
+  def fnd-sorted(pairs) {
+   let tmp = fnd-map();
+   let z = fnd-fill(tmp, pairs);
+   sort-strs(pairs |> map(p => p[0])) |> map(k => fnd-mget(tmp, k, ""));
+  }
+  def fnd-fill(tmp, pairs) = nil?(pairs) ? 0 : fnd-fill-next(tmp, pairs, fnd-mset(tmp, pairs[0][0], pairs[0][1]));
+  def fnd-fill-next(tmp, pairs, z) = fnd-fill(tmp, pairs[1:]);
+  def fnd-path-ok?(rel, paths) = nil?(paths) ? true : ((String) paths[0] == "." || (String) paths[0] == rel || fnd-starts?(rel, paths[0] ++ "/")) ? true : fnd-path-ok?(rel, paths[1:]);
+
+  // ---- find: the engine of grep over the candidates the postings name ------------------------------------------------------------------
+  def fnd-flag(c) = (String) c == "i" ? ["ic", 1] : (String) c == "F" ? ["syntax", "F"] : (String) c == "w" ? ["word", 1] : (String) c == "x" ? ["line", 1] : (String) c == "v" ? ["invert", 1] : (String) c == "l" ? ["list", 1] : (String) c == "c" ? ["count", 1] : (String) c == "n" ? ["noop", 1] : [];
+  def fnd-find-parse(args, o, rest, nomore) = nil?(args) ? [o, reverse(rest), ""] : fnd-find-arg(args, o, rest, nomore, args[0]);
+  def fnd-find-arg(args, o, rest, nomore, a) = (nomore || (String) a == "-" || !fnd-starts?(a, "-")) ? fnd-find-parse(args[1:], o, cons(a, rest), nomore)
+   : (String) a == "--" ? fnd-find-parse(args[1:], o, rest, 1)
+   : (String) a == "-m" ? (nil?(args[1:]) ? [o, [], "missing-find-option-value: -m"] : fat-natural(args[1]) ? fnd-find-parse(args[2:], fag-set(o, "max", str_to_int(args[1])), rest, 0) : [o, [], "invalid-max-count: " ++ args[1]])
+   : (String) a == "-A" || (String) a == "-B" || (String) a == "-C" ? [o, [], "find-context-not-supported: read PATH OFFSET COUNT shows the lines around a hit"]
+   : fnd-find-flags(args, o, rest, a, 1);
+  def fnd-find-flags(args, o, rest, a, i) = i >= len(a) ? fnd-find-parse(args[1:], o, rest, 0) : fnd-find-flag(args, o, rest, a, i, fnd-flag(substring(a, i, i + 1)));
+  def fnd-find-flag(args, o, rest, a, i, f) = nil?(f) ? [o, [], "unsupported-find-option: -" ++ substring(a, i, i + 1)] : fnd-find-flags(args, fag-set(o, f[0], f[1]), rest, a, i + 1);
+  def fnd-find(s, argv) = fnd-find-parsed(s, fnd-find-parse(argv[1:], [], [], 0));
+  def fnd-find-parsed(s, p) = (String) p[2] != "" ? fnd-refuse("find: " ++ p[2]) : nil?(p[1]) ? fnd-refuse("find: find-needs-pattern") : fnd-find-compiled(s, p[0], p[1][0], p[1][1:], fag-compile([p[1][0]], fag-get(p[0], "syntax", "E"), []));
+  def fnd-find-compiled(s, o, pat, paths, c) = (String) c[1] != "" ? fnd-refuse("find: " ++ c[1]) : fnd-find-run(s, fnd-plain?(o, pat) ? fag-set(fag-set(o, "plain", 1), "pat", pat) : o, pat, paths, fnd-plain?(o, pat) ? [pat] : (fag-get(o, "ic", 0) || fag-get(o, "invert", 0)) ? [] : fap-required(c[0], 0));
+  // a literal (-F, or an ERE with no metacharacter) under no other flag: the lines holding it are found by the native scan, not the engine
+  def fnd-meta?(b) = b == 46 || b == 91 || b == 93 || b == 40 || b == 41 || b == 42 || b == 43 || b == 63 || b == 123 || b == 125 || b == 124 || b == 94 || b == 36 || b == 92;
+  def fnd-has-meta?(t, i) = i >= len(t) ? false : fnd-meta?(str_byte_at(t, i)) ? true : fnd-has-meta?(t, i + 1);
+  def fnd-plain?(o, pat) = len(pat) > 0 && str_find(pat, "\n", 0) < 0 && !fag-get(o, "ic", 0) && !fag-get(o, "word", 0) && !fag-get(o, "line", 0) && !fag-get(o, "invert", 0) && !fag-get(o, "list", 0) && !fag-get(o, "count", 0) && fag-get(o, "max", 0 - 1) < 0 && ((String) fag-get(o, "syntax", "E") == "F" || !fnd-has-meta?(pat, 0));
+  def fnd-lit-rows(rel, t, lit) = reverse(fnd-lit-scan(rel, t, lit, 0, 0, 1, 0 - 1, []));
+  def fnd-lit-scan(rel, t, lit, from, cpos, cline, lastls, acc) = str_find(t, lit, from) < 0 ? acc : fnd-lit-hit(rel, t, lit, cpos, cline, lastls, acc, str_find(t, lit, from));
+  def fnd-lit-hit(rel, t, lit, cpos, cline, lastls, acc, p) {
+   let ls = fnd-line-start(t, p);
+   let line = cline + fnd-nl(t, cpos, p, 0);
+   fnd-lit-scan(rel, t, lit, p + len(lit), p, line, ls, ls != lastls ? cons(rel ++ ":" ++ line.str() ++ ":" ++ fnd-line-at(t, ls), acc) : acc);
+  }
+  def fnd-grep-args(o, pat) = append(["-n", fag-get(o, "syntax", "E") == "F" ? "-F" : "-E"], append(fag-get(o, "ic", 0) ? ["-i"] : [], append(fag-get(o, "word", 0) ? ["-w"] : [], append(fag-get(o, "line", 0) ? ["-x"] : [], append(fag-get(o, "invert", 0) ? ["-v"] : [], append(fag-get(o, "max", 0 - 1) >= 0 ? ["-m", fag-get(o, "max", 0 - 1).str()] : [], ["-e", pat]))))));
+  // the candidate entries, in path order: the held files under the path operands, narrowed by the required literals
+  def fnd-cands(s, lits, paths) = (nil?(lits) ? record_get(s, "held") : fnd-ordered(s, fnd-held-of(s, fnd-lit-ids-all(s, lits)))) |> filter(h => fnd-path-ok?(h[1], paths));
+  // the ids of the files holding any of the literals, ascending
+  def fnd-lit-ids-all(s, lits) = nil?(lits[1:]) ? fnd-lit-ids(s, lits[0]) : fnd-uniq-sorted(sort-ints(foldl((acc, l) => append(acc, fnd-lit-ids(s, l)), [], lits)), []);
+  def fnd-uniq-sorted(xs, acc) = nil?(xs) ? reverse(acc) : fnd-uniq-sorted(xs[1:], (nil?(acc) || (Comparable) acc[0] != xs[0]) ? cons(xs[0], acc) : acc);
+  def fnd-held-of(s, ids) = ids |> map(id => fnd-held-tuple(s, id));
+  def fnd-held-tuple(s, id) = fnd-held-tuple-of(id, fnd-mget(record_get(s, "byid"), id.str(), ""), s);
+  def fnd-held-tuple-of(id, rel, s) = [id, rel, fnd-entry(s, rel)[5], fnd-entry(s, rel)[8]];
+  // ids come in the order files were first met; once a file has been added since the walk they are no longer path order
+  def fnd-ordered(s, tuples) = (Comparable) fnd-c(s, "reordered") == 0 ? tuples : fnd-sorted(tuples |> map(h => [h[1], h]));
+  // a search with no literal to narrow it (-i, -v, a pattern of classes alone) reads every file the engine's way: it must name PATH operands
+  def fnd-find-run(s, o, pat, paths, lits) = (nil?(lits) && nil?(paths)) ? fnd-refuse("find: find-needs-a-literal-or-paths: this search has no case-exact literal to narrow it (-i, -v or a pattern of classes), so it would read every file; name PATH... or put a literal in the pattern") : fnd-find-go(s, o, pat, paths, lits);
+  def fnd-find-go(s, o, pat, paths, lits) {
+   let cands = fnd-cands(s, lits, paths);
+   let args = fnd-grep-args(o, pat);
+   let z = fnd-bump(s, "find_queries", 1);
+   let z2 = fnd-cset(s, "last_cands", len(cands));
+   fnd-find-files(s, o, args, cands, [], 0, []);
+  }
+  // one candidate: [error, rows]; a file whose lines exhaust the engine's per-line work budget is ["skip", [path]], told at the end, not fatal
+  def fnd-file-rows(o, args, h) = fag-get(o, "plain", 0) ? ["", fnd-lit-rows(h[1], h[2], fag-get(o, "pat", ""))] : fnd-file-engine(o, args, h);
+  def fnd-file-error(args, h) = fnd-file-error-of(h, grep-text-error(args, h[2]));
+  def fnd-file-error-of(h, e) = str_find(e, "pattern-work-limit", 0) >= 0 ? ["skip", [h[1]]] : ["find: " ++ h[1] ++ ": " ++ e, []];
+  def fnd-file-engine(o, args, h) {
+   let r = fag-get(o, "list", 0) ? grep-text(cons("-q", args), h[2]) : fag-get(o, "count", 0) ? grep-text(cons("-c", args), h[2]) : grep-text(args, h[2]);
+   (Comparable) r[0] == 2 ? fnd-file-error(args, h)
+   : fag-get(o, "list", 0) ? ["", ((Comparable) r[0] == 0 ? [h[1]] : [])]
+   : fag-get(o, "count", 0) ? ["", ((Comparable) r[0] == 0 && str_to_int(fat-trim(r[1])) > 0 ? [h[1] ++ ":" ++ fat-trim(r[1])] : [])]
+   : ["", ((Comparable) r[0] == 0 ? (fag-lines(r[1]) |> map(l => h[1] ++ ":" ++ l)) : [])];
+  }
+  def fnd-find-files(s, o, args, cands, acc, bytes, skipped) = nil?(cands) ? fnd-find-done(acc, 0, skipped) : bytes > fnd-max-out() ? fnd-find-done(acc, 1, skipped) : fnd-find-more(s, o, args, cands, acc, bytes, skipped, fnd-file-rows(o, args, cands[0]));
+  def fnd-find-more(s, o, args, cands, acc, bytes, skipped, got) = (String) got[0] == "skip" ? fnd-find-files(s, o, args, cands[1:], acc, bytes, append(skipped, got[1]))
+   : (String) got[0] != "" ? fnd-refuse(got[0])
+   : fnd-find-files(s, o, args, cands[1:], append(acc, got[1]), bytes + foldl((a, r) => a + len(r) + 1, 0, got[1]), skipped);
+  def fnd-find-note(truncated, skipped) = (truncated == 1 ? "truncated: output-limit " ++ fnd-max-out().str() ++ " bytes; add paths or a longer pattern. " : "") ++ (nil?(skipped) ? "" : "skipped " ++ len(skipped).str() ++ " file(s) whose lines exhaust the engine's work budget (pattern-work-limit): " ++ fat-join(skipped, " "));
+  def fnd-find-done(rows, truncated, skipped) = nil?(rows) ? [1, "", fnd-find-note(truncated, skipped)] : [0, fat-join(rows, "\n") ++ "\n", fnd-find-note(truncated, skipped)];
+
+  // ---- defs, callers, bands, imports -----------------------------------------------------------------------------------------------------------
+  def fnd-def-row(s, en) {
+   let rel = fnd-mget(record_get(s, "byid"), en[0].str(), "");
+   let text = fnd-text-of(s, en[0]);
+   let ls = fnd-line-start(text, en[1]);
+   [rel ++ fnd-sep() ++ fnd-pad(en[1], 9), rel ++ ":" ++ (1 + fnd-nl(text, 0, ls, 0)).str() ++ ":" ++ fnd-line-at(text, ls)];
+  }
+  def fnd-defs(s, names) = nil?(names) ? fnd-refuse("defs: defs-needs-a-name") : fnd-ok(fnd-sorted(foldl((acc, n) => append(acc, fnd-mget(record_get(s, "defs"), n, []) |> map(en => fnd-def-row(s, en))), [], names)));
+  def fnd-callers(s, name) = (String) name == "" ? fnd-refuse("callers: callers-needs-a-name") : fnd-ok(fnd-callers-rows(s, name, fnd-cands(s, [name], [])));
+  def fnd-callers-rows(s, name, cands) = foldl((acc, h) => append(acc, fnd-file-callers(s, name, h)), [], cands);
+  def fnd-def-offs(s, name, id) = fnd-mget(record_get(s, "defs"), name, []) |> filter(en => (Comparable) en[0] == id) |> map(en => en[1]);
+  def fnd-file-callers(s, name, h) = reverse(fnd-occ(h[1], h[2], name, fnd-def-offs(s, name, h[0]), 0, 0, 1, 0 - 1, []));
+  def fnd-occ(rel, t, name, defoffs, from, cpos, cline, lastls, acc) = str_find(t, name, from) < 0 ? acc : fnd-occ-hit(rel, t, name, defoffs, cpos, cline, lastls, acc, str_find(t, name, from));
+  def fnd-occ-hit(rel, t, name, defoffs, cpos, cline, lastls, acc, p) {
+   let valid = fnd-bound?(t, p, len(name)) && !fnd-has-int?(defoffs, p);
+   let ls = fnd-line-start(t, p);
+   let line = cline + fnd-nl(t, cpos, p, 0);
+   let take = valid && ls != lastls;
+   fnd-occ(rel, t, name, defoffs, p + len(name), p, line, valid ? ls : lastls, take ? cons(rel ++ ":" ++ line.str() ++ ":" ++ fnd-line-at(t, ls), acc) : acc);
+  }
+  def fnd-band-row(h, name) = h[1] ++ " expected=" ++ h[3][0] ++ " verdict=" ++ h[3][1] ++ ((String) name == "" ? "" : " mentions=" ++ fnd-count-lines(h[2], name, 0, 0).str());
+  def fnd-bands(s, names) {
+   let name = nil?(names) ? "" : names[0];
+   let named = (String) name == "" ? (record_get(s, "held") |> filter(h => !nil?(h[3]))) : (fnd-cands(s, [name], []) |> filter(h => !nil?(h[3])));
+   fnd-ok(named |> map(h => fnd-band-row(h, name)));
+  }
+  def fnd-resolve(s, x) = !nil?(fnd-entry(s, x)) ? [x] : !nil?(fnd-entry(s, "form/" ++ x)) ? ["form/" ++ x] : (fnd-mget(record_get(s, "bases"), fnd-basename(x), []) |> filter(r => fnd-ends?(r, "/" ++ x) || (String) r == x));
+  def fnd-raw-of?(raw, p) = (String) p == raw || (String) p == "form/" ++ raw || fnd-ends?(p, "/" ++ raw);
+  def fnd-imp-row(s, p, en) {
+   let rel = fnd-mget(record_get(s, "byid"), en[0].str(), "");
+   let text = fnd-text-of(s, en[0]);
+   let ls = fnd-line-start(text, en[2]);
+   [rel ++ fnd-sep() ++ fnd-pad(en[2], 9), p ++ " <- " ++ rel ++ ":" ++ (1 + fnd-nl(text, 0, ls, 0)).str() ++ ":" ++ fnd-line-at(text, ls)];
+  }
+  def fnd-imports-of(s, p) = fnd-entry(s, p)[7] |> map(e => p ++ " -> " ++ e[1]);
+  def fnd-imported-by(s, p) = fnd-sorted(fnd-mget(record_get(s, "imps"), fnd-basename(p), []) |> filter(en => fnd-raw-of?(en[1], p)) |> map(en => fnd-imp-row(s, p, en)));
+  def fnd-imports(s, names) = nil?(names) ? fnd-refuse("imports: imports-needs-a-unit") : fnd-ok(foldl((acc, p) => append(acc, append(fnd-imports-of(s, p), fnd-imported-by(s, p))), [], fnd-resolve(s, names[0])));
+
+  // ---- rows: a .jsonl census or ledger as a keyed table; a table is built the first time a field is asked and read again when the file moves ------
+  def fnd-str-end(t, i) {
+   let j = scan_run(t, i, 4);
+   j >= len(t) ? len(t) : str_byte_at(t, j) == 34 ? j + 1 : fnd-str-end(t, j + 2);
+  }
+  def fnd-lit-end(t, i) = (i >= len(t) || str_byte_at(t, i) == 44 || str_byte_at(t, i) == 125 || str_byte_at(t, i) == 93 || str_byte_at(t, i) == 32 || str_byte_at(t, i) == 10 || str_byte_at(t, i) == 13 || str_byte_at(t, i) == 9) ? i : fnd-lit-end(t, i + 1);
+  def fnd-skip-nest(t, i, depth) = i >= len(t) ? len(t) : fnd-nest-byte(t, i, depth, str_byte_at(t, i));
+  def fnd-nest-byte(t, i, depth, b) = b == 34 ? fnd-skip-nest(t, fnd-str-end(t, i + 1), depth) : (b == 91 || b == 123) ? fnd-skip-nest(t, i + 1, depth + 1) : (b == 93 || b == 125) ? (depth == 1 ? i + 1 : fnd-skip-nest(t, i + 1, depth - 1)) : fnd-skip-nest(t, i + 1, depth);
+  def fnd-skip-value(t, i) = i >= len(t) ? i : str_byte_at(t, i) == 34 ? fnd-str-end(t, i + 1) : (str_byte_at(t, i) == 91 || str_byte_at(t, i) == 123) ? fnd-skip-nest(t, i + 1, 1) : fnd-lit-end(t, i);
+  def fnd-pairs(t) {
+   let st = scan_run(t, 0, 0);
+   (st < len(t) && str_byte_at(t, st) == 123) ? fnd-pairs-from(t, st + 1, []) : [];
+  }
+  def fnd-pairs-from(t, i, acc) {
+   let j = scan_run(t, i, 0);
+   (j >= len(t) || str_byte_at(t, j) != 34) ? reverse(acc) : fnd-pair-key(t, j + 1, acc);
+  }
+  def fnd-pair-key(t, ks, acc) {
+   let ke = fnd-str-end(t, ks);
+   let key = substring(t, ks, ke - 1);
+   let vs = scan_run(t, scan_run(t, ke, 0) + 1, 0);
+   let ve = fnd-skip-value(t, vs);
+   let after = scan_run(t, ve, 0);
+   let acc2 = cons([key, substring(t, vs, ve)], acc);
+   (after < len(t) && str_byte_at(t, after) == 44) ? fnd-pairs-from(t, after + 1, acc2) : reverse(acc2);
+  }
+  def fnd-pair-get(pairs, key) = nil?(pairs) ? "" : (String) pairs[0][0] == key ? pairs[0][1] : fnd-pair-get(pairs[1:], key);
+  def fnd-array-items(raw, from, acc) = str_find(raw, fnd-q(), from) < 0 ? reverse(acc) : fnd-array-item(raw, str_find(raw, fnd-q(), from), acc);
+  def fnd-array-item(raw, p, acc) = fnd-array-items(raw, fnd-str-end(raw, p + 1), cons(substring(raw, p + 1, fnd-str-end(raw, p + 1) - 1), acc));
+  def fnd-value-items(raw) = len(raw) == 0 ? [] : str_byte_at(raw, 0) == 34 ? [substring(raw, 1, len(raw) - 1)] : str_byte_at(raw, 0) == 91 ? fnd-array-items(raw, 1, []) : [raw];
+  def fnd-rowtab(s, path) {
+   let tabs = record_get(s, "rowtabs");
+   let ident = host_file_identity(fnd-abs(s, path));
+   let held = fnd-mget(tabs, path, []);
+   (String) value_kind(ident) != "list" ? [] : (!nil?(held) && fnd-same-ident?([0, held[0][0], held[0][1], held[0][2]], ident)) ? held : fnd-rowtab-load(s, path, tabs, ident);
+  }
+  def fnd-rowtab-load(s, path, tabs, ident) {
+   let text = fnd-read(s, fnd-abs(s, path));
+   let lines = fag-lines(text);
+   let lm = fnd-map();
+   let z1 = fnd-lines-fill(lm, lines, 1);
+   let entry = [[ident[0], ident[1], ident[2]], lm, len(lines), record_new(0), lines];
+   let z2 = fnd-mset(tabs, path, entry);
+   entry;
+  }
+  def fnd-lines-fill(lm, lines, i) = nil?(lines) ? 0 : fnd-lines-next(lm, lines, i, fnd-mset(lm, i.str(), lines[0]));
+  def fnd-lines-next(lm, lines, i, z) = fnd-lines-fill(lm, lines[1:], i + 1);
+  // the table of one field: value -> the line numbers holding it (newest first), and the values in the order first met
+  def fnd-field-tab(entry, field) {
+   let ft = entry[3];
+   record_has(ft, field) ? record_get(ft, field) : fnd-field-build(entry, field, ft);
+  }
+  def fnd-field-build(entry, field, ft) {
+   let tab = fnd-map();
+   let keys = record_new(0);
+   let z0 = record_set(keys, "list", []);
+   let z1 = fnd-field-lines(tab, keys, field, entry[4], 1);
+   let built = [tab, record_get(keys, "list")];
+   let z2 = record_set(ft, field, built);
+   built;
+  }
+  def fnd-field-lines(tab, keys, field, lines, i) = nil?(lines) ? 0 : fnd-field-next(tab, keys, field, lines, i, fnd-field-add(tab, keys, i, fnd-value-items(fnd-pair-get(fnd-pairs(lines[0]), field))));
+  def fnd-field-next(tab, keys, field, lines, i, z) = fnd-field-lines(tab, keys, field, lines[1:], i + 1);
+  def fnd-field-add(tab, keys, i, items) = nil?(items) ? 0 : fnd-field-add-next(tab, keys, i, items, fnd-field-one(tab, keys, i, items[0]));
+  def fnd-field-add-next(tab, keys, i, items, z) = fnd-field-add(tab, keys, i, items[1:]);
+  def fnd-field-one(tab, keys, i, item) {
+   let seen = fnd-mhas?(tab, item);
+   let z = seen ? 0 : record_set(keys, "list", cons(item, record_get(keys, "list")));
+   fnd-mset(tab, item, cons(i, fnd-mget(tab, item, [])));
+  }
+  def fnd-rows(s, args) = nil?(args) ? fnd-refuse("rows: rows-needs-a-file") : fnd-rows-table(s, args[0], nil?(args[1:]) ? "" : args[1], fnd-rowtab(s, args[0]));
+  def fnd-rows-table(s, path, spec, entry) = nil?(entry) ? [2, "", "rows: no such file: " ++ path] : (String) spec == "" ? [0, entry[2].str() ++ " rows\n", ""] : fnd-rows-spec(entry, spec, str_find(spec, "=", 0));
+  def fnd-rows-spec(entry, spec, eq) = eq < 0 ? fnd-rows-values(fnd-field-tab(entry, spec), spec) : fnd-rows-match(entry, fnd-field-tab(entry, substring(spec, 0, eq)), substring(spec, eq + 1, len(spec)));
+  def fnd-rows-values(tabkeys, field) = [0, fat-join(sort-strs(tabkeys[1]) |> map(v => v ++ "\t" ++ len(fnd-mget(tabkeys[0], v, [])).str()), "\n") ++ "\n", ""];
+  def fnd-rows-match(entry, tabkeys, value) = fnd-ok(reverse(fnd-mget(tabkeys[0], value, [])) |> map(i => fnd-mget(entry[1], i.str(), "")));
+
+  // ---- status ----------------------------------------------------------------------------------------------------------------------------------------
+  def fnd-tri-entries(s) = foldl((a, t) => a + len(fnd-mget(record_get(s, "tri"), t, [])), 0, record_get(s, "trilist"));
+  def fnd-status-text(s) = "files=" ++ fnd-c(s, "files").str() ++ " held=" ++ fnd-c(s, "heldfiles").str() ++ " bytes=" ++ fnd-c(s, "bytes").str() ++ " defs=" ++ fnd-c(s, "defs").str() ++ " imports=" ++ fnd-c(s, "imps").str() ++ " bands=" ++ fnd-c(s, "bands").str() ++ " trigrams=" ++ len(record_get(s, "trilist")).str() ++ " postings=" ++ fnd-tri-entries(s).str() ++ " reads=" ++ fnd-c(s, "reads").str() ++ " build_ms=" ++ fnd-c(s, "build_ms").str() ++ " refresh_ms=" ++ fnd-c(s, "refresh_ms").str() ++ " changed=" ++ fnd-c(s, "refresh_changed").str() ++ "\n";
+
+  // ---- the wire in, the wire out -----------------------------------------------------------------------------------------------------------------------
+  def fnd-reply(r) = fat-wire-render(fat-result(r[0], r[1], r[2], []));
+  def fnd-verbs() = ["find", "defs", "callers", "bands", "imports", "rows", "status", "refresh"];
+  def fnd-tools() = ["read", "cat", "head", "tail", "sed", "wc", "jq", "grep", "rg"];
+  def fnd-serve(s, request) = !fat-text?(request) ? fat-wire-refusal("wire-request-needs-text") : len(request) > FatMaxBytes() ? fat-wire-refusal("wire-request-limit") : !faj-valid(request) ? fat-wire-refusal("invalid-wire-json") : fnd-serve-node(s, request, faj-json("form-agent-tool-wire", request));
+  def fnd-serve-node(s, request, node) = !fat-wire-object?(node) ? fat-wire-refusal("wire-request-needs-object") : fnd-serve-command(s, request, node, fat-wire-required-string(node, "command"));
+  def fnd-serve-command(s, request, node, command) = !((String) fat-wire-error(command) == "") ? fat-wire-refusal(fat-wire-error(command)) : fnd-serve-input(s, request, node, fat-wire-value(command), fat-wire-field-string(node, "input", ""));
+  def fnd-serve-input(s, request, node, command, input) = !((String) fat-wire-error(input) == "") ? fat-wire-refusal(fat-wire-error(input)) : fnd-serve-argv(s, request, node, command, fat-wire-value(input), fat-argv(command));
+  def fnd-serve-argv(s, request, node, command, input, parsed) = (String) parsed[1] != "" ? fat-wire-refusal(parsed[1]) : nil?(parsed[0]) ? fat-wire-refusal("missing-tool") : fnd-serve-verb(s, request, node, command, input, parsed[0]);
+  def fnd-serve-verb(s, request, node, command, input, argv) {
+   let own = fnd-has?(fnd-verbs(), argv[0]);
+   let docs = fat-wire-documents(node);
+   (!own && (String) fat-wire-error(docs) == "" && !nil?(fat-wire-value(docs))) ? fat-wire-call(request) : fnd-serve-fresh(s, command, input, argv, own);
+  }
+  def fnd-serve-fresh(s, command, input, argv, own) {
+   let changed = fnd-refresh(s);
+   fnd-reply(own ? fnd-verb(s, argv, changed) : fnd-tool(s, command, input, argv));
+  }
+  def fnd-verb(s, argv, changed) = (String) argv[0] == "find" ? fnd-find(s, argv)
+   : (String) argv[0] == "defs" ? fnd-defs(s, argv[1:])
+   : (String) argv[0] == "callers" ? fnd-callers(s, nil?(argv[1:]) ? "" : argv[1])
+   : (String) argv[0] == "bands" ? fnd-bands(s, argv[1:])
+   : (String) argv[0] == "imports" ? fnd-imports(s, argv[1:])
+   : (String) argv[0] == "rows" ? fnd-rows(s, argv[1:])
+   : (String) argv[0] == "status" ? [0, fnd-status-text(s), ""]
+   : [0, "refreshed: " ++ changed.str() ++ " changes\n", ""];
+  def fnd-tool(s, command, input, argv) = (String) argv[0] == "edit" || (String) argv[0] == "write" ? fnd-refuse("form-find-reads-only: edit and write belong to the edit tool")
+   : !fnd-has?(fnd-tools(), argv[0]) ? fnd-refuse("unknown-command: " ++ argv[0] ++ "; form-find answers find defs callers bands imports rows status refresh, and read cat head tail sed wc jq grep rg over indexed files")
+   : fnd-tool-docs(s, command, input, argv, argv[1:] |> filter(a => !fnd-starts?(a, "-")) |> map(a => fnd-entry(s, a)) |> filter(e => !nil?(e) && e[4] == 1));
+  def fnd-tool-docs(s, command, input, argv, ents) = ((String) argv[0] == "rg" || (String) argv[0] == "grep") && nil?(ents) ? fnd-refuse("use find PATTERN [PATH...]: rg and grep over the whole tree are find; name an indexed file to search one")
+   : fnd-tool-run(command, input, ents |> map(e => ["resident:" ++ fnd-rel-of(s, e), fnd-rel-of(s, e), e[5]]));
+  def fnd-rel-of(s, e) = fnd-mget(record_get(s, "byid"), e[0].str(), "");
+  def fnd-tool-run(command, input, docs) {
+   let r = fat-command(docs, command, input);
+   [fat-exit(r), fat-out(r), fat-error(r)];
+  }
+  // the cold door: a service that is absent still answers, from an index of this process's own
+  def fnd-cold(request) = fnd-serve(fnd-open(""), request);
+
+  // ---- the spool: ask.<n>.json in, ans.<n>.json out ----------------------------------------------------------------------------------------------------------
+  def fnd-spool() = host_getenv("FORM_FIND_SPOOL") ?? ("/tmp/form-find/" ++ (host_getenv("UID") ?? (host_getenv("USER") ?? "default")));
+  def fnd-ask?(n) = fnd-starts?(n, "ask.") && fnd-ends?(n, ".json");
+  def fnd-ans-name(n) = "ans." ++ substring(n, 4, len(n) - 5) ++ ".json";
+  def fnd-mkdirs(dir) {
+   let cut = fnd-last-slash(dir, len(dir) - 1);
+   let z = cut > 0 ? host_mkdir_mode(substring(dir, 0, cut), 493) : 0;
+   host_mkdir_mode(dir, 448);
+  }
+  def fnd-poll(s, dir) {
+   let names = fs_list(dir);
+   let asks = (String) value_kind(names) == "list" ? sort-strs(filter(n => fnd-ask?(n), names)) : [];
+   fnd-poll-each(s, dir, asks, 0);
+  }
+  def fnd-poll-each(s, dir, asks, served) = nil?(asks) ? served : fnd-poll-next(s, dir, asks, served, fnd-poll-one(s, dir, asks[0]));
+  def fnd-poll-next(s, dir, asks, served, did) = fnd-poll-each(s, dir, asks[1:], served + did);
+  // an ask still being written (empty or not yet valid JSON, younger than 400 ms) is left for the next look
+  def fnd-poll-one(s, dir, n) {
+   let path = dir ++ "/" ++ n;
+   let text = read_file(path) ?? "";
+   let ident = host_file_identity(path);
+   let age = (String) value_kind(ident) == "list" ? now_unix_ms() - ident[1] : 1000000;
+   ((len(text) == 0 || !faj-valid(text)) && age < 400) ? 0 : fnd-answer(s, dir, n, path, text);
+  }
+  def fnd-answer(s, dir, n, path, text) {
+   let resp = fnd-serve(s, text);
+   let ans = dir ++ "/" ++ fnd-ans-name(n);
+   let z1 = write_file_text(ans ++ ".part", resp);
+   let z2 = fs_rename(ans ++ ".part", ans);
+   let z3 = host_path_remove(path);
+   1;
+  }
+  def fnd-status-json(s) = json-emit(json-node-object([json-node-pair("service", json-node-string("form-find")), json-node-pair("pid", json-node-int(host_pid())), json-node-pair("beat_ms", json-node-int(now_unix_ms())), json-node-pair("status", json-node-string(fnd-status-text(s)))]));
+  def fnd-beat(s, dir) = write_file_text(dir ++ "/status.json", fnd-status-json(s));
+  // the loop: look, answer what is there, rest. busy (an ask within 10 s) rests 20 ms, idle 100 ms. A `stop` file ends it (launchd then starts the next).
+  def fnd-loop(s, dir, busy_at, beat_at) {
+   let served = fnd-poll(s, dir);
+   let now = host_monotonic_ms();
+   let busy = served > 0 ? now : busy_at;
+   let due = now - beat_at > 2000;
+   let z1 = due ? fnd-beat(s, dir) : 0;
+   let stop = (Comparable) host_path_exists(dir ++ "/stop") == 1;
+   let z2 = stop ? host_path_remove(dir ++ "/stop") : host_sleep_ms(now - busy < 10000 ? 20 : 100);
+   stop ? 0 : fnd-loop(s, dir, busy, due ? now : beat_at);
+  }
+  def fnd-run() {
+   let dir = fnd-spool();
+   let z1 = fnd-mkdirs(dir);
+   let s = fnd-open("");
+   let z2 = fnd-beat(s, dir);
+   fnd-loop(s, dir, host_monotonic_ms(), host_monotonic_ms());
+  }
+ }
+ 0;
+}
