@@ -1,11 +1,13 @@
 // Form owns snapshot identity, admission and guarded replacement.
-// git/tar/cp carry filesystem operations; no interpreter owns repair meaning.
+// git names the checkout's files (the one program asked); Form copies them by name (copy-by-names.bml), hashes them, scans for
+// symbolic links and replaces a source by a staged rename. No archive, no shell script and no other program carries the filesystem.
 import form-stdlib/bml/form-cli-heal-policy.bml;
 import form-stdlib/bml/retry.bml;
 import form-stdlib/json.fk;
 import form-stdlib/qwen35-artifact-seal-reader.fk;
 import form-stdlib/spool-bell-transport.fk;
 import form-stdlib/bml/spawn-guard.bml;
+import form-stdlib/bml/copy-by-names.bml;
 section [form.bml] {
  class FormCliHealNativeIO {
   def fhn-at(dir, leaf) = fh-cat([dir, "/", leaf]);
@@ -32,10 +34,6 @@ section [form.bml] {
    let out = sg-capture(argv);
    nothing?(out) ? "" : fh-trim(out);
   }
-  def fhn-shell(path, source) {
-   let wrote = write_file(path, "umask 077\n" + source);
-   wrote < 0 ? 127 : fhn-command(["/bin/sh", path]);
-  }
   def fhn-hash(path) = file_size(path) < 0 ? "absent" : qaf-string-hex(saj-file-digest-any-tail(path, file_size(path)));
   def fhn-valid-hash(hash) = (Comparable) len(hash) == 64;
   def fhn-parts-valid(parts) = nil?(parts) ? 1 : ((String) parts[0] == "..") || (((String) parts[0] == ".git") || (((String) parts[0] == ".form-heal") || ((String) parts[0] == ""))) ? 0 : fhn-parts-valid(parts[1:]);
@@ -44,19 +42,27 @@ section [form.bml] {
   def fhn-clean-names(paths, seen) = nil?(paths) ? reverse(seen) : ((String) paths[0] == "") || (file_size(paths[0]) < 0) ? fhn-clean-names(paths[1:], seen) : fhn-clean-names(paths[1:], cons(paths[0], seen));
   def fhn-add-name(paths, path) = fhn-member(paths, path) ? paths : append(paths, [path]);
   def fhn-names-valid(paths, root) = nil?(paths) ? 1 : (fhn-relative(paths[0]) && ((!fs_is_dir(fhn-at(root, paths[0]))) && fhn-names-valid(paths[1:], root)));
-  def fhn-lines(paths) = nil?(paths) ? "" : fh-cat([paths[0], "\n", fhn-lines(paths[1:])]);
-  def fhn-nuls(paths) = nil?(paths) ? "" : fh-cat([paths[0], byte_to_str(0), fhn-nuls(paths[1:])]);
-  def fhn-unique(parent, prefix) {
-   let made = retry-first(32, 0, i => fhn-mkdir-new(fhn-at(parent, fh-cat([prefix, host_pid().str(), "-", host_monotonic_ms().str(), "-", i.str()]))));
-   nothing?(made) ? nothing() : fhn-private-dir(made);
+  def fhn-lines(paths) = str-spans(paths |> map(path => path + "\n"));
+  // a private directory made owner-only in the one call that makes it (1 made, 0 stood), so no moment holds it wider
+  def fhn-unique(parent, prefix) = retry-first(32, 0, i => fhn-mkdir-new(fhn-at(parent, fh-cat([prefix, host_pid().str(), "-", host_monotonic_ms().str(), "-", i.str()]))));
+  def fhn-mkdir-new(path) = (Comparable) host_mkdir_mode(path, 448) == 1 ? path : nothing();
+  // the physical working directory: the body root, every link resolved
+  def fhn-root() = host_cwd();
+  // the checkout's own file names, NUL separated, into a file only the owner reads: `git ls-files` is the one program asked
+  // (git is the repository's own tool); its status is the answer, 0 when it listed
+  def fhn-inventory(path) {
+   let cleared = host_path_remove(path);
+   let pid = sg-spawn-at(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], ["/dev/null", path, ""]);
+   let status = nothing?(pid) || pid <= 0 ? 127 : host_wait(pid);
+   let private = (Comparable) status == 0 ? host_chmod(path, 384) : 0;
+   status;
   }
-  def fhn-mkdir-new(path) = (Comparable) host_dir_mkdir(path) == 1 ? path : nothing();
-  def fhn-mkdir-new(path) = (Comparable) host_dir_mkdir(path) == 1 ? path : nothing();
-  def fhn-private-dir(path) = (Comparable) fhn-command(["/bin/chmod", "700", path]) == 0 ? path : nothing();
-  def fhn-root() = fhn-capture(["/bin/pwd", "-P"]);
-  // Refuse managed symlinks, including ancestors, before reading through them.
-  def fhn-link-scan-script(root, names) = fh-cat(["cd ", fh-quote(root), " || exit 1\nwhile IFS= read -r fh_item; do\n fh_probe=$fh_item\n while [ \"$fh_probe\" != . ]; do\n  [ ! -L \"$fh_probe\" ] || exit 1\n  case \"$fh_probe\" in */*) fh_probe=${fh_probe%/*};; *) fh_probe=.;; esac\n done\ndone < ", fh-quote(names), "\n"]);
-  def fhn-no-links(job, root, names) = (Comparable) fhn-shell(fhn-at(job, "links-check.sh"), fhn-link-scan-script(root, names)) == 0;
+  def fhn-name-lines(path) = file_size(path) < 0 ? nothing() : filter(name => len(name) > 0, split-on(fhn-read(path), "\n"));
+  // Refuse managed symlinks, including ancestors, before reading through them. `names` is a file of names, one per line.
+  def fhn-no-links(job, root, names) {
+   let rows = fhn-name-lines(names);
+   !nothing?(rows) && cbn-link-free?(root, rows);
+  }
   def fhn-manifest(paths, root) = paths |> map(path => fhn-s(path, fhn-hash(fhn-at(root, path))));
   def fhn-manifest-valid(pairs) = nil?(pairs) ? 1 : (fhn-valid-hash(json-string-value(json-pair-value(pairs[0]))) && fhn-manifest-valid(pairs[1:]));
   def fhn-dirty(pairs, root, except) = nil?(pairs) ? "" : (!((String) json-pair-key(pairs[0]) == except)) && (!((String) fhn-hash(fhn-at(root, json-pair-key(pairs[0]))) == json-string-value(json-pair-value(pairs[0])))) ? json-pair-key(pairs[0]) : fhn-dirty(pairs[1:], root, except);
@@ -70,10 +76,9 @@ section [form.bml] {
   }
   def fhn-prepare-files(job, root, target, band) {
    let namesPath = fhn-at(job, "names.nul");
-   let listed = fhn-shell(fhn-at(job, "inventory.sh"), fh-cat(["git ls-files -z --cached --others --exclude-standard > ", fh-quote(namesPath), "\n"]));
+   let listed = fhn-inventory(namesPath);
    let names = fhn-add-name(fhn-add-name(fhn-add-name(fhn-clean-names(split-on(fhn-read(namesPath), byte_to_str(0)), []), target), band), "fkwu");
    let lines = write_file(fhn-at(job, "names.txt"), fhn-lines(names));
-   let nuls = write_file(namesPath, fhn-nuls(names));
    !(((Comparable) listed == 0) && (fhn-names-valid(names, root) && fhn-no-links(job, root, fhn-at(job, "names.txt")))) ? "refused:snapshot-inventory-or-symlink" : fhn-prepare-sealed(job, root, target, band, names);
   }
   def fhn-prepare-sealed(job, root, target, band, names) {
@@ -81,8 +86,7 @@ section [form.bml] {
    let work = fhn-at(job, "work");
    let made = fs_mkdir(work);
    let empty = fs_mkdir(fhn-at(job, "empty"));
-   let archive = fhn-command(["/usr/bin/tar", "-c", "-f", fhn-at(job, "source.tar"), "-C", root, "--null", "-T", fhn-at(job, "names.nul")]);
-   let copied = (Comparable) archive == 0 ? fhn-command(["/usr/bin/tar", "-x", "-p", "-f", fhn-at(job, "source.tar"), "-C", work]) : archive;
+   let copied = (String) cbn-copy(root, names, work) == "" ? 0 : 1;
    let doc = json-node-object([fhn-s("root", root), fhn-s("target", target), fhn-s("band", band), json-node-pair("manifest", json-node-object(manifest)), fhn-s("carrier", "native-form-v1")]);
    let saved = fhn-write-json(fhn-at(job, "snapshot.json"), doc);
    let original = write_file(fhn-at(job, "original"), fhn-read(fhn-at(root, target)));
@@ -103,13 +107,15 @@ section [form.bml] {
   def fhn-reset(job) {
    let doc = fhn-json(fhn-at(job, "snapshot.json"));
    let root = fhn-string(doc, "root");
-   !fhn-owned(job, doc) ? "refused:session-outside-spool" : !fhn-no-links(job, root, fhn-at(job, "names.txt")) ? "refused:live-source-symlink" : !((String) fhn-dirty(json-object-pairs(json-object-get(doc, "manifest")), root, "") == "") ? "refused:stale-input" : fhn-reset-copy(job, fhn-at(job, "work"));
+   !fhn-owned(job, doc) ? "refused:session-outside-spool" : !fhn-no-links(job, root, fhn-at(job, "names.txt")) ? "refused:live-source-symlink" : !((String) fhn-dirty(json-object-pairs(json-object-get(doc, "manifest")), root, "") == "") ? "refused:stale-input" : fhn-reset-copy(job, fhn-at(job, "work"), root);
   }
-  def fhn-reset-copy(job, work) {
-   let removed = fhn-command(["/bin/rm", "-rf", "--", work]);
+  // the live files stand as the manifest says (fhn-reset checked), so the work copy is made again from them by name
+  def fhn-reset-copy(job, work, root) {
+   let removed = fs_is_dir(work) ? host_dir_rmdir(work) : 0;
    let made = fs_mkdir(work);
-   let copied = fhn-command(["/usr/bin/tar", "-x", "-p", "-f", fhn-at(job, "source.tar"), "-C", work]);
-   ((Comparable) removed == 0) && ((Comparable) copied == 0) ? "ready" : "refused:snapshot-reset";
+   let names = fhn-name-lines(fhn-at(job, "names.txt"));
+   let copied = nothing?(names) ? "the names are absent" : cbn-copy(root, names, work);
+   ((Comparable) removed == 0) && ((String) copied == "") ? "ready" : "refused:snapshot-reset";
   }
   def fhn-commit(job, proposal) {
    let doc = fhn-json(fhn-at(job, "snapshot.json"));
@@ -126,16 +132,19 @@ section [form.bml] {
    let valid = offered && (fhn-valid-hash(fhn-hash(proposal)) && (fhn-no-links(job, root, fhn-at(job, "names.txt")) && (((String) fhn-dirty(json-object-pairs(json-object-get(doc, "manifest")), root, "") == "") && (((String) fhn-guard(job) == "clean") && (((String) fhn-hash(candidate) == fhn-hash(proposal)) && (!((String) fhn-hash(candidate) == fhn-hash(fhn-at(job, "original")))))))));
    valid ? fhn-commit-copy(job, candidate, target) : "refused:stale-or-mutated-input";
   }
+  // the candidate is staged beside its target with its bytes, mode and time (as cp -p carried them) and renamed into place whole
   def fhn-commit-copy(job, candidate, target) {
    let staged = (String) target + fh-cat([".heal-", host_pid().str()]);
-   let copied = fhn-command(["/bin/cp", "-p", candidate, staged]);
-   let moved = (Comparable) copied == 0 ? fs_rename(staged, target) : -1;
+   let copied = cbn-copy-file(candidate, staged);
+   let moved = (String) copied == "" ? fs_rename(staged, target) : -1;
+   let cleaned = (Comparable) moved == 0 ? 0 : host_path_remove(staged);
    (Comparable) moved == 0 ? "applied" : "refused:atomic-source-replacement";
   }
   def fhn-finish(job) {
    let doc = fhn-json(fhn-at(job, "snapshot.json"));
-   !fhn-owned(job, doc) ? "refused:session-outside-spool" : (Comparable) fhn-command(["/bin/rm", "-rf", "--", fhn-at(job, "work"), fhn-at(job, "source.tar")]) == 0 ? "snapshot-released;evidence-retained" : "refused:snapshot-release";
+   !fhn-owned(job, doc) ? "refused:session-outside-spool" : fhn-finish-release(fhn-at(job, "work"));
   }
+  def fhn-finish-release(work) = (Comparable) (fs_is_dir(work) ? host_dir_rmdir(work) : 0) == 0 ? "snapshot-released;evidence-retained" : "refused:snapshot-release";
  }
  0;
 }

@@ -1,0 +1,639 @@
+// git-cmd.bml — the read commands of git as pure Form functions over a repository handle: argv in, [stdout, exit code, stderr] out.
+//
+//   git-run(cwd, argv)      argv is the word list after `git` (global options -C, -c, --literal-pathspecs, --no-pager are read here)
+//   git-run-line(cwd, line) the same from one command line (whitespace words, '…' and "…" quoting)
+//
+// Supported (R class: nothing is written to the repository or the working tree):
+//   rev-parse   --show-toplevel --git-dir --git-common-dir --absolute-git-dir --is-inside-work-tree --is-bare-repository
+//               --show-prefix --show-cdup --verify -q/--quiet --short[=N] --abbrev-ref --symbolic-full-name, rev names
+//   status      --porcelain[=v1] -s/--short -b/--branch --ignored[=traditional|matching|no] -u<mode>/--untracked-files[=<mode>] -z
+//   diff        [<tree>] [<a> <b>] [<a>..<b>] [<a>...<b>] --cached/--staged --name-only --name-status --numstat --stat --quiet/--exit-code
+//               -U<n>/--unified=<n> --diff-filter=<letters> -z --no-color --no-renames -- <pathspec>
+//   log         --oneline --format=/--pretty=format:/--pretty=oneline -n/-N/--max-count --skip --first-parent --no-merges --date=
+//               -S<string> <revs and ranges> -- <pathspec>
+//   show        <rev> / <rev>:<path> (-s, --format, --name-only, --name-status, --stat)
+//   ls-files    --cached --others --modified --deleted --unmerged --stage --exclude-standard --ignored -z, pathspecs
+//   ls-tree     -r -t -d --name-only -z --full-name <tree-ish> [<path>...]
+//   cat-file    -t -s -p -e <type> <object>
+//   merge-base  [--all] [--is-ancestor] <a> <b>
+//   rev-list    --count --left-right --first-parent --no-merges --max-count/-n --skip, revs and ranges
+//   branch      --show-current --list -a -r [<pattern>]
+//   config      --get --get-all --list/-l (-z)
+//   remote      get-url <name>; (no arguments) and -v
+//   worktree    list [--porcelain] [-z]
+//   check-attr  <attr>... -- <path>...
+//   hash-object [-t <type>] [--stdin] <file>   (the id only: -w is a write, phase 2)
+//   symbolic-ref [-q] [--short] HEAD
+// Refused by name, exit 129 with the flag in the message, never answered wrongly: every other flag; every command of the write class
+// (add commit checkout switch restore reset rebase merge stash init update-ref tag branch -d ... : phase 2) and the transport
+// class (fetch pull push clone remote update ... : phase 3); `grep` (the body's internal grep reads the tree).
+//
+// PROOF: form-stdlib/tests/git-native-cmd-band.fk.
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml form-stdlib/bml/git-refs.bml form-stdlib/bml/git-index.bml form-stdlib/bml/git-ignore.bml form-stdlib/bml/git-status.bml form-stdlib/bml/git-rev.bml form-stdlib/bml/git-diff.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-rev.bml;
+import form-stdlib/bml/git-diff.bml;
+section [form.bml] {
+ class GitCmd {
+  // ---- results ---------------------------------------------------------------------------------------------------------------
+  def gcm-ok(out) = [out, 0, ""];
+  def gcm-code(out, code) = [out, code, ""];
+  def gcm-fatal(msg) = ["", 128, "fatal: " ++ msg ++ "\n"];
+  def gcm-usage(cmd, flag) = ["", 129, "error: unknown option `" ++ flag ++ "'\nnative-git: " ++ cmd ++ " " ++ flag ++ " is refused by name (not in the supported set listed in form-stdlib/bml/git-cmd.bml)\n"];
+  def gcm-text(lines) = len(lines) == 0 ? "" : ginf-join(ginf-reverse(map(l => l ++ "\n", lines), []));
+  def gcm-text-z(lines) = len(lines) == 0 ? "" : ginf-join(ginf-reverse(map(l => l ++ byte_to_str(0), lines), []));
+  // ---- options -------------------------------------------------------------------------------------------------------------
+  def gcm-find(spec, name) = nil?(spec) ? nothing() : str_eq(spec[0][0], name) ? spec[0] : gcm-find(spec[1:], name);
+  def gcm-flag?(a) = len(a) > 1 && str_byte_at(a, 0) == 45;
+  def gcm-digits?(s) = len(s) > 0 && all?(i => str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57, range(0, len(s)));
+  // [options [[name value] ...], positionals, paths after --, unknown flags]
+  def gcm-parse(args, spec) = gcm-go(args, spec, [], [], [], [], false);
+  def gcm-fin(o, p, ps, u) = [ginf-reverse(o, []), ginf-reverse(p, []), ginf-reverse(ps, []), ginf-reverse(u, [])];
+  def gcm-go(args, spec, o, p, ps, u, dd) = nil?(args) ? gcm-fin(o, p, ps, u) : dd ? gcm-go(args[1:], spec, o, p, cons(args[0], ps), u, true) : str_eq(args[0], "--") ? gcm-go(args[1:], spec, o, p, ps, u, true) : !gcm-flag?(args[0]) ? gcm-go(args[1:], spec, o, cons(args[0], p), ps, u, false) : str_byte_at(args[0], 1) == 45 ? gcm-long(args, spec, o, p, ps, u) : gcm-short(args, spec, o, p, ps, u);
+  def gcm-name-of(a) {
+   let eq = gs-index-of(a, 61, 0);
+   eq < 0 ? a : substring(a, 0, eq);
+  }
+  def gcm-attached(a) {
+   let eq = gs-index-of(a, 61, 0);
+   eq < 0 ? nothing() : substring(a, eq + 1, len(a));
+  }
+  def gcm-long(args, spec, o, p, ps, u) {
+   let a = args[0];
+   let row = gcm-find(spec, gcm-name-of(a));
+   let att = gcm-attached(a);
+   nothing?(row) ? gcm-go(args[1:], spec, o, p, ps, cons(a, u), false) : str_eq(row[1], "flag") ? gcm-go(args[1:], spec, cons([row[0], ""], o), p, ps, u, false) : str_eq(row[1], "opt") ? gcm-go(args[1:], spec, cons([row[0], att ?? ""], o), p, ps, u, false) : !nothing?(att) ? gcm-go(args[1:], spec, cons([row[0], att], o), p, ps, u, false) : nil?(args[1:]) ? gcm-go([], spec, o, p, ps, cons(a, u), false) : gcm-go(args[2:], spec, cons([row[0], args[1]], o), p, ps, u, false);
+  }
+  // -x, -xyz clusters, -n5, -5, -U0
+  def gcm-short(args, spec, o, p, ps, u) {
+   let a = args[0];
+   let num = gcm-find(spec, "-NUM");
+   gcm-digits?(substring(a, 1, len(a))) && !nothing?(num) ? gcm-go(args[1:], spec, cons(["-n", substring(a, 1, len(a))], o), p, ps, u, false) : gcm-short-letters(args, spec, o, p, ps, u, substring(a, 1, 2), substring(a, 2, len(a)));
+  }
+  def gcm-short-letters(args, spec, o, p, ps, u, c, rest) {
+   let row = gcm-find(spec, "-" ++ c);
+   nothing?(row) ? gcm-go(args[1:], spec, o, p, ps, cons(args[0], u), false) : str_eq(row[1], "flag") ? (len(rest) == 0 ? gcm-go(args[1:], spec, cons([row[0], ""], o), p, ps, u, false) : gcm-go(cons("-" ++ rest, args[1:]), spec, cons([row[0], ""], o), p, ps, u, false)) : str_eq(row[1], "opt") ? gcm-go(args[1:], spec, cons([row[0], rest], o), p, ps, u, false) : len(rest) > 0 ? gcm-go(args[1:], spec, cons([row[0], rest], o), p, ps, u, false) : nil?(args[1:]) ? gcm-go([], spec, o, p, ps, cons(args[0], u), false) : gcm-go(args[2:], spec, cons([row[0], args[1]], o), p, ps, u, false);
+  }
+  def gcm-opt?(opts, name) = any?(o => str_eq(o[0], name), opts);
+  def gcm-opt-val(opts, name, d) = foldl((acc, o) => str_eq(o[0], name) ? o[1] : acc, d, opts);
+  def gcm-opt-all(opts, name) = map(o => o[1], filter(o => str_eq(o[0], name), opts));
+  def gcm-not-repo() = gcm-fatal("not a git repository (or any of the parent directories): .git");
+  // ---- command line words ----------------------------------------------------------------------------------------------------
+  def gcm-tok(s, i, q, cur, acc) {
+   let c = i < len(s) ? str_byte_at(s, i) : 0 - 1;
+   i >= len(s) ? ginf-reverse(len(cur) > 0 || q != 0 ? cons(cur, acc) : acc, []) : q == 0 && (c == 32 || c == 9 || c == 10) ? gcm-tok(s, i + 1, 0, "", len(cur) > 0 ? cons(cur, acc) : acc) : q == 0 && (c == 39 || c == 34) ? gcm-tok(s, i + 1, c, cur, acc) : q != 0 && c == q ? gcm-tok(s, i + 1, 0, cur == "" ? "" : cur, acc) : gcm-tok(s, i + 1, q, cur ++ substring(s, i, i + 1), acc);
+  }
+  def gcm-words(line) = gcm-tok(line, 0, 0, "", []);
+  // ---- global options ----------------------------------------------------------------------------------------------------------
+  // [dir, literal, rest of argv] after -C / -c / --literal-pathspecs / --no-pager / --no-optional-locks; refuses the others
+  def gcm-global(args, dir, lit, cfg) {
+   nil?(args) ? [dir, lit, args, cfg, ""] : str_eq(args[0], "-C") && !nil?(args[1:]) ? gcm-global(args[2:], gs-starts?(args[1], "/") ? args[1] : dir ++ "/" ++ args[1], lit, cfg) : str_eq(args[0], "-c") && !nil?(args[1:]) ? gcm-global(args[2:], dir, lit, cons(args[1], cfg)) : str_eq(args[0], "--literal-pathspecs") ? gcm-global(args[1:], dir, true, cfg) : str_eq(args[0], "--no-pager") || str_eq(args[0], "--no-optional-locks") || str_eq(args[0], "--no-replace-objects") || str_eq(args[0], "-P") ? gcm-global(args[1:], dir, lit, cfg) : gcm-flag?(args[0]) && !nil?(args) ? [dir, lit, args, cfg, args[0]] : [dir, lit, args, cfg, ""];
+  }
+  // ---- the entry points ----------------------------------------------------------------------------------------------------------
+  def git-run-line(cwd, line) = git-run(cwd, gcm-words(line));
+  def git-run(cwd, argv) {
+   let g = gcm-global(argv, cwd, false, []);
+   len(g[4]) > 0 ? gcm-usage("git", g[4]) : nil?(g[2]) ? ["", 1, "usage: git [-C <path>] [-c <name>=<value>] <command> [<args>]\n"] : gcm-with-repo(g[0], g[1], g[2][0], g[2][1:], git-open(g[0]));
+  }
+  def gcm-with-repo(dir, lit, cmd, rest, r) = nothing?(r) ? gcm-not-repo() : gcm-dispatch(r, dir, lit, cmd, rest);
+  def gcm-write-cmds() = ["add", "commit", "checkout", "switch", "restore", "reset", "rebase", "merge", "stash", "init", "update-ref", "tag", "mv", "rm", "cherry-pick", "revert", "clean", "gc", "pack-refs", "apply", "am"];
+  def gcm-transport-cmds() = ["fetch", "pull", "push", "clone", "remote-update", "ls-remote", "submodule"];
+  def gcm-dispatch(r, dir, lit, cmd, rest) =
+   str_eq(cmd, "rev-parse") ? gcm-rev-parse(r, dir, rest)
+   : str_eq(cmd, "status") ? gcm-status(r, rest)
+   : str_eq(cmd, "diff") ? gcm-diff(r, lit, rest)
+   : str_eq(cmd, "log") ? gcm-log(r, lit, rest)
+   : str_eq(cmd, "show") ? gcm-show(r, rest)
+   : str_eq(cmd, "ls-files") ? gcm-ls-files(r, lit, rest)
+   : str_eq(cmd, "ls-tree") ? gcm-ls-tree(r, rest)
+   : str_eq(cmd, "cat-file") ? gcm-cat-file(r, rest)
+   : str_eq(cmd, "merge-base") ? gcm-merge-base(r, rest)
+   : str_eq(cmd, "rev-list") ? gcm-rev-list(r, rest)
+   : str_eq(cmd, "branch") ? gcm-branch(r, rest)
+   : str_eq(cmd, "config") ? gcm-config(r, rest)
+   : str_eq(cmd, "remote") ? gcm-remote(r, rest)
+   : str_eq(cmd, "worktree") ? gcm-worktree(r, rest)
+   : str_eq(cmd, "check-attr") ? gcm-check-attr(r, rest)
+   : str_eq(cmd, "hash-object") ? gcm-hash-object(r, dir, rest)
+   : str_eq(cmd, "symbolic-ref") ? gcm-symbolic-ref(r, rest)
+   : str_eq(cmd, "grep") ? ["", 129, "native-git: git grep is refused by name: the body's internal grep tool reads the working tree (docs/form-native-agent-tools.md)\n"]
+   : any?(c => str_eq(c, cmd), gcm-write-cmds()) ? ["", 129, "native-git: '" ++ cmd ++ "' is a write command (phase 2 of receipts/2026-10-04-the-native-git.md); this build reads\n"]
+   : any?(c => str_eq(c, cmd), gcm-transport-cmds()) ? ["", 129, "native-git: '" ++ cmd ++ "' is a transport command (phase 3 of receipts/2026-10-04-the-native-git.md); this build reads\n"]
+   : ["", 129, "git: '" ++ cmd ++ "' is not a git command supported by the native organ\n"];
+  // ---- revisions as commands see them ------------------------------------------------------------------------------------------
+  def gcm-unknown-rev(spec) = gcm-fatal("ambiguous argument '" ++ spec ++ "': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'");
+  def gcm-resolve(r, spec) = grv-resolve(r, spec);
+  // ---- rev-parse -------------------------------------------------------------------------------------------------------------
+  def gcm-rp-spec() = [["--show-toplevel", "flag"], ["--git-dir", "flag"], ["--git-common-dir", "flag"], ["--absolute-git-dir", "flag"], ["--is-inside-work-tree", "flag"], ["--is-bare-repository", "flag"], ["--is-inside-git-dir", "flag"], ["--show-prefix", "flag"], ["--show-cdup", "flag"], ["--verify", "flag"], ["-q", "flag"], ["--quiet", "flag"], ["--short", "opt"], ["--abbrev-ref", "opt"], ["--symbolic-full-name", "flag"], ["--symbolic", "flag"]];
+  def gcm-rev-parse(r, dir, args) {
+   let p = gcm-parse(args, gcm-rp-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("rev-parse", p[3][0]) : gcm-rp-run(r, dir, o, p[1], gcm-opt?(o, "--verify"), gcm-opt?(o, "-q") || gcm-opt?(o, "--quiet"));
+  }
+  def gcm-rp-run(r, dir, o, revs, verify, quiet) {
+   let infos = gcm-rp-infos(r, dir, o);
+   verify && len(revs) != 1 ? (quiet ? ["", 1, ""] : gcm-fatal("Needed a single revision")) : gcm-rp-revs(r, o, revs, verify, quiet, infos, []);
+  }
+  def gcm-rp-infos(r, dir, o) {
+   let top = gs-top(r);
+   let gd = gs-gitdir(r);
+   append(gcm-opt?(o, "--show-toplevel") ? [top] : [], append(gcm-opt?(o, "--git-dir") ? [str_eq(dir, top) && str_eq(gd, top ++ "/.git") ? ".git" : gd] : [], append(gcm-opt?(o, "--git-common-dir") ? [str_eq(gs-common(r), top ++ "/.git") && str_eq(dir, top) ? ".git" : gs-common(r)] : [], append(gcm-opt?(o, "--absolute-git-dir") ? [gd] : [], append(gcm-opt?(o, "--is-inside-work-tree") ? ["true"] : [], append(gcm-opt?(o, "--is-bare-repository") ? ["false"] : [], append(gcm-opt?(o, "--is-inside-git-dir") ? ["false"] : [], append(gcm-opt?(o, "--show-prefix") ? [""] : [], gcm-opt?(o, "--show-cdup") ? [""] : []))))))));
+  }
+  def gcm-rp-revs(r, o, revs, verify, quiet, infos, acc) {
+   nil?(revs) ? gcm-ok(gcm-text(append(infos, ginf-reverse(acc, [])))) : gcm-rp-one(r, o, revs, verify, quiet, infos, acc, gcm-rp-name(r, o, revs[0]));
+  }
+  def gcm-rp-one(r, o, revs, verify, quiet, infos, acc, line) = nothing?(line) ? (quiet && verify ? ["", 1, ""] : verify ? gcm-fatal("Needed a single revision") : gcm-unknown-rev(revs[0])) : gcm-rp-revs(r, o, revs[1:], verify, quiet, infos, cons(line, acc));
+  // the line a rev prints: the id, a short id, or a ref name
+  def gcm-rp-name(r, o, spec) {
+   let raw = gcm-resolve(r, spec);
+   gcm-opt?(o, "--abbrev-ref") ? gcm-abbrev-ref(r, spec) : gcm-opt?(o, "--symbolic-full-name") ? gcm-full-name(r, spec) : nothing?(raw) ? nothing() : gcm-opt?(o, "--short") ? grv-short(r, raw, gcm-short-n(o)) : grv-hex(raw);
+  }
+  def gcm-short-n(o) {
+   let v = gcm-opt-val(o, "--short", "");
+   gcm-digits?(v) && str_to_int(v) >= 4 ? str_to_int(v) : 7;
+  }
+  def gcm-abbrev-ref(r, spec) {
+   str_eq(spec, "HEAD") || str_eq(spec, "@") ? (str_eq(gr-head(r)[0], "detached") ? "HEAD" : gr-short-branch(gr-head(r)[1])) : gcm-short-of-ref(r, spec);
+  }
+  def gcm-short-of-ref(r, spec) {
+   let hit = filter(c => !nothing?(gr-resolve(r, c)), grv-ref-candidates(spec));
+   nil?(hit) ? nothing() : gcm-shorten(hit[0]);
+  }
+  def gcm-shorten(full) = gs-starts?(full, "refs/heads/") ? substring(full, 11, len(full)) : gs-starts?(full, "refs/tags/") ? substring(full, 10, len(full)) : gs-starts?(full, "refs/remotes/") ? substring(full, 13, len(full)) : gs-starts?(full, "refs/") ? substring(full, 5, len(full)) : full;
+  def gcm-full-name(r, spec) {
+   str_eq(spec, "HEAD") ? (str_eq(gr-head(r)[0], "detached") ? "HEAD" : gr-head(r)[1]) : gcm-first-or(filter(c => !nothing?(gr-resolve(r, c)), grv-ref-candidates(spec)));
+  }
+  def gcm-first-or(xs) = nil?(xs) ? nothing() : xs[0];
+  // ---- status ----------------------------------------------------------------------------------------------------------------
+  def gcm-st-spec() = [["--porcelain", "opt"], ["-s", "flag"], ["--short", "flag"], ["-b", "flag"], ["--branch", "flag"], ["--ignored", "opt"], ["-u", "opt"], ["--untracked-files", "opt"], ["-z", "flag"], ["--no-renames", "flag"], ["--no-ahead-behind", "flag"]];
+  def gcm-status(r, args) {
+   let p = gcm-parse(args, gcm-st-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("status", p[3][0]) : gcm-opt?(o, "--porcelain") && !(str_eq(gcm-opt-val(o, "--porcelain", ""), "") || str_eq(gcm-opt-val(o, "--porcelain", ""), "v1") || str_eq(gcm-opt-val(o, "--porcelain", ""), "1")) ? ["", 129, "native-git: status --porcelain=" ++ gcm-opt-val(o, "--porcelain", "") ++ " is refused by name (porcelain v1 only)\n"] : !(gcm-opt?(o, "--porcelain") || gcm-opt?(o, "-s") || gcm-opt?(o, "--short")) ? ["", 129, "native-git: status: the long format is refused by name; use --short or --porcelain\n"] : gcm-st-run(r, o, p[2]);
+  }
+  def gcm-untracked-mode(o) {
+   let v = gcm-opt?(o, "-u") ? gcm-opt-val(o, "-u", "") : gcm-opt?(o, "--untracked-files") ? gcm-opt-val(o, "--untracked-files", "") : "normal";
+   len(v) == 0 ? "all" : str_eq(v, "no") || str_eq(v, "normal") || str_eq(v, "all") ? v : "normal";
+  }
+  def gcm-st-run(r, o, paths) {
+   let nul = gcm-opt?(o, "-z") ? 1 : 0;
+   let ign = gcm-opt?(o, "--ignored") && !str_eq(gcm-opt-val(o, "--ignored", ""), "no") ? 1 : 0;
+   let br = gcm-opt?(o, "-b") || gcm-opt?(o, "--branch") ? 1 : 0;
+   let rows = gst-rows(r, [gcm-untracked-mode(o), ign, br, nul]);
+   let rows2 = nil?(paths) ? rows : filter(x => gdf-match-all?(paths, x[1], false), rows);
+   let body = map(row => gst-line(row, nul), rows2);
+   let head = br == 1 ? [gcm-branch-header(r)] : [];
+   gcm-ok(nul == 1 ? gcm-text-nul(append(head, body)) : gcm-text(append(head, body)));
+  }
+  // -z lines already end in NUL
+  def gcm-text-nul(lines) = len(lines) == 0 ? "" : ginf-join(ginf-reverse(lines, []));
+  def gcm-branch-header(r) {
+   let h = gr-head(r);
+   str_eq(h[0], "branch") ? gcm-branch-up(r, gr-short-branch(h[1]), grv-upstream-ref(r, gr-short-branch(h[1]))) : gst-branch-line(r);
+  }
+  def gcm-branch-up(r, name, up) = nothing?(up) ? "## " ++ name : "## " ++ name ++ "..." ++ gcm-shorten(up) ++ gcm-ahead-behind(r, up);
+  def gcm-ahead-behind(r, up) {
+   let upid = gr-resolve(r, up);
+   let head = gr-head-id(r);
+   nothing?(upid) ? " [gone]" : nothing?(head) ? "" : gcm-ab-text(grv-range-count(r, [gsha-raw-of-hex(head)], [gsha-raw-of-hex(upid)]), grv-range-count(r, [gsha-raw-of-hex(upid)], [gsha-raw-of-hex(head)]));
+  }
+  def gcm-ab-text(ahead, behind) = ahead == 0 && behind == 0 ? "" : ahead > 0 && behind > 0 ? " [ahead " ++ ahead.str() ++ ", behind " ++ behind.str() ++ "]" : ahead > 0 ? " [ahead " ++ ahead.str() ++ "]" : " [behind " ++ behind.str() ++ "]";
+  // ---- ls-files --------------------------------------------------------------------------------------------------------------
+  def gcm-lf-spec() = [["--cached", "flag"], ["-c", "flag"], ["--others", "flag"], ["-o", "flag"], ["--modified", "flag"], ["-m", "flag"], ["--deleted", "flag"], ["-d", "flag"], ["--unmerged", "flag"], ["-u", "flag"], ["--stage", "flag"], ["-s", "flag"], ["--exclude-standard", "flag"], ["--ignored", "flag"], ["-i", "flag"], ["-z", "flag"], ["--full-name", "flag"], ["--directory", "flag"]];
+  def gcm-ls-files(r, lit, args) {
+   let p = gcm-parse(args, gcm-lf-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("ls-files", p[3][0]) : gcm-lf-run(r, lit, o, append(p[1], p[2]));
+  }
+  def gcm-lf-any?(o, a, b) = gcm-opt?(o, a) || gcm-opt?(o, b);
+  def gcm-lf-run(r, lit, o, paths) {
+   let ix = gi-read(r);
+   let others = gcm-lf-any?(o, "--others", "-o");
+   let cached = gcm-lf-any?(o, "--cached", "-c") || !(others || gcm-lf-any?(o, "--modified", "-m") || gcm-lf-any?(o, "--deleted", "-d") || gcm-lf-any?(o, "--unmerged", "-u") || gcm-lf-any?(o, "--stage", "-s"));
+   nothing?(ix) ? gcm-ok("") : gcm-lf-out(r, o, ix, others, cached, nil?(paths) ? [] : paths, lit);
+  }
+  def gcm-lf-sel(r, o, ix, cached, paths, lit) {
+   let ents = ix[0];
+   let stage = gcm-lf-any?(o, "--stage", "-s") || gcm-lf-any?(o, "--unmerged", "-u");
+   let base = gcm-lf-any?(o, "--unmerged", "-u") ? filter(e => e[6] > 0, ents) : stage ? ents : filter(e => e[6] == 0 || cached, ents);
+   let mod = gcm-lf-any?(o, "--modified", "-m");
+   let del = gcm-lf-any?(o, "--deleted", "-d");
+   let dirty = mod || del ? gst-unstaged(gs-top(r), ix[0], gst-index-mtime(r), []) : [];
+   let sel = mod || del ? filter(e => any?(d => str_eq(d[1], e[0]) && ((mod && (str_eq(d[0], "M") || str_eq(d[0], "T"))) || (del && str_eq(d[0], "D"))), dirty), base) : base;
+   filter(e => nil?(paths) || gdf-match-all?(paths, e[0], lit), sel);
+  }
+  def gcm-lf-line(e, stage, z) = stage ? gcm-mode-oct(e[1]) ++ " " ++ gsha-hex-of-raw(e[2]) ++ " " ++ e[6].str() ++ "\t" ++ e[0] : e[0];
+  def gcm-mode-oct(m) = gcm-oct-digits(m, "");
+  def gcm-oct-digits(m, acc) = m == 0 ? (len(acc) == 0 ? "0" : acc) : gcm-oct-digits(m / 8, substring("01234567", m % 8, (m % 8) + 1) ++ acc);
+  def gcm-lf-out(r, o, ix, others, cached, paths, lit) {
+   let z = gcm-opt?(o, "-z");
+   let stage = gcm-lf-any?(o, "--stage", "-s") || gcm-lf-any?(o, "--unmerged", "-u");
+   let sel = (cached || stage || gcm-lf-any?(o, "--modified", "-m") || gcm-lf-any?(o, "--deleted", "-d") || gcm-lf-any?(o, "--unmerged", "-u")) ? gcm-lf-sel(r, o, ix, cached, paths, lit) : [];
+   let lines = map(e => gcm-lf-line(e, stage, z), sel);
+   let un = others ? gcm-lf-others(r, o, ix, paths, lit) : [];
+   gcm-ok(z ? gcm-text-z(append(lines, un)) : gcm-text(append(lines, un)));
+  }
+  // untracked (or, with --ignored, ignored) files: the same walk status uses, files listed one by one
+  def gcm-lf-others(r, o, ix, paths, lit) {
+   let std = gcm-opt?(o, "--exclude-standard");
+   let ign = gcm-lf-any?(o, "--ignored", "-i");
+   let scan = gst-scan(gs-top(r), "", std ? gx-stack(r) : [], ix[0], "all", ign ? 1 : 0);
+   let found = ign ? scan[1] : scan[0];
+   filter(p => nil?(paths) || gdf-match-all?(paths, p, lit), found);
+  }
+  // ---- ls-tree --------------------------------------------------------------------------------------------------------------
+  def gcm-lt-spec() = [["-r", "flag"], ["-t", "flag"], ["-d", "flag"], ["--name-only", "flag"], ["--name-status", "flag"], ["-z", "flag"], ["--full-name", "flag"], ["--full-tree", "flag"]];
+  def gcm-ls-tree(r, args) {
+   let p = gcm-parse(args, gcm-lt-spec());
+   !nil?(p[3]) ? gcm-usage("ls-tree", p[3][0]) : nil?(p[1]) ? gcm-fatal("Not a valid object name") : gcm-lt-run(r, p[0], grv-resolve(r, p[1][0]), append(p[1][1:], p[2]));
+  }
+  def gcm-lt-run(r, o, raw, paths) {
+   let tree = nothing?(raw) ? nothing() : grv-peel(r, raw, "tree");
+   nothing?(tree) ? gcm-fatal("Not a valid object name") : gcm-lt-out(r, o, gcm-lt-rows(r, o, tree, "", nil?(paths) ? [] : paths), paths);
+  }
+  def gcm-lt-rows(r, o, tree, prefix, paths) = gs-flatten(map(e => gcm-lt-entry(r, o, e, prefix, paths), grv-tree-ents(r, tree)));
+  def gcm-lt-entry(r, o, e, prefix, paths) {
+   let full = prefix ++ e[1];
+   let isdir = gs-tree?(e[0]);
+   let hit = nil?(paths) || any?(sp => gdf-literal-hit?(sp, full) || (isdir && gs-starts?(sp, full ++ "/")), paths);
+   !hit ? [] : isdir ? (gcm-opt?(o, "-r") ? (gcm-opt?(o, "-t") || gcm-opt?(o, "-d") ? cons([e[0], "tree", e[2], full], gcm-lt-rows(r, o, e[2], full ++ "/", paths)) : gcm-lt-rows(r, o, e[2], full ++ "/", paths)) : [[e[0], "tree", e[2], full]]) : gcm-opt?(o, "-d") ? [] : [[e[0], gs-gitlink?(e[0]) ? "commit" : "blob", e[2], full]];
+  }
+  def gcm-lt-out(r, o, rows, paths) {
+   let z = gcm-opt?(o, "-z");
+   let lines = map(x => gcm-opt?(o, "--name-only") || gcm-opt?(o, "--name-status") ? x[3] : gcm-pad6(x[0]) ++ " " ++ x[1] ++ " " ++ gsha-hex-of-raw(x[2]) ++ "\t" ++ x[3], rows);
+   gcm-ok(z ? gcm-text-z(lines) : gcm-text(lines));
+  }
+  def gcm-pad6(m) = len(m) >= 6 ? m : gcm-pad6("0" ++ m);
+  // ---- cat-file --------------------------------------------------------------------------------------------------------------
+  def gcm-cf-spec() = [["-t", "flag"], ["-s", "flag"], ["-p", "flag"], ["-e", "flag"]];
+  def gcm-cat-file(r, args) {
+   let p = gcm-parse(args, gcm-cf-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("cat-file", p[3][0]) : len(p[1]) == 1 && (gcm-opt?(o, "-t") || gcm-opt?(o, "-s") || gcm-opt?(o, "-p") || gcm-opt?(o, "-e")) ? gcm-cf-one(r, o, p[1][0]) : len(p[1]) == 2 && nil?(o) ? gcm-cf-typed(r, p[1][0], p[1][1]) : ["", 129, "usage: git cat-file (-t | -s | -e | -p) <object> | git cat-file <type> <object>\n"];
+  }
+  def gcm-cf-one(r, o, spec) {
+   let raw = gcm-resolve(r, spec);
+   let obj = nothing?(raw) ? nothing() : gs-read(r, raw);
+   nothing?(obj) ? (gcm-opt?(o, "-e") ? (nothing?(raw) ? gcm-fatal("Not a valid object name " ++ spec) : ["", 1, ""]) : gcm-fatal("Not a valid object name " ++ spec)) : gcm-opt?(o, "-e") ? gcm-ok("") : gcm-opt?(o, "-t") ? gcm-ok(obj[0] ++ "\n") : gcm-opt?(o, "-s") ? gcm-ok(len(obj[1]).str() ++ "\n") : gcm-ok(gcm-pretty(obj));
+  }
+  def gcm-valid-name?(spec) = true;
+  def gcm-pretty(obj) = str_eq(obj[0], "tree") ? gcm-text(map(e => gcm-pad6(e[0]) ++ " " ++ (gs-tree?(e[0]) ? "tree" : gs-gitlink?(e[0]) ? "commit" : "blob") ++ " " ++ gsha-hex-of-raw(e[2]) ++ "\t" ++ e[1], gs-tree-entries(obj[1]))) : obj[1];
+  def gcm-cf-typed(r, type, spec) {
+   let raw0 = gcm-resolve(r, spec);
+   let raw = nothing?(raw0) ? nothing() : grv-peel(r, raw0, type);
+   let obj = nothing?(raw) ? nothing() : gs-read(r, raw);
+   nothing?(obj) ? gcm-fatal("git cat-file: could not get object info") : gcm-ok(gcm-pretty-typed(obj));
+  }
+  def gcm-pretty-typed(obj) = obj[1];
+  // ---- merge-base ------------------------------------------------------------------------------------------------------------
+  def gcm-mb-spec() = [["--all", "flag"], ["--is-ancestor", "flag"]];
+  def gcm-merge-base(r, args) {
+   let p = gcm-parse(args, gcm-mb-spec());
+   !nil?(p[3]) ? gcm-usage("merge-base", p[3][0]) : len(p[1]) != 2 ? ["", 129, "usage: git merge-base [--all] [--is-ancestor] <commit> <commit>\n"] : gcm-mb-run(r, p[0], grv-resolve(r, p[1][0]), grv-resolve(r, p[1][1]), p[1]);
+  }
+  def gcm-mb-run(r, o, a0, b0, names) {
+   let a = nothing?(a0) ? nothing() : grv-peel(r, a0, "commit");
+   let b = nothing?(b0) ? nothing() : grv-peel(r, b0, "commit");
+   nothing?(a) ? gcm-fatal("Not a valid object name " ++ names[0]) : nothing?(b) ? gcm-fatal("Not a valid object name " ++ names[1]) : gcm-opt?(o, "--is-ancestor") ? ["", grv-ancestor?(r, a, b) ? 0 : 1, ""] : gcm-mb-print(r, o, grv-merge-bases(r, a, b));
+  }
+  def gcm-mb-print(r, o, bases) = nil?(bases) ? ["", 1, ""] : gcm-ok(gcm-opt?(o, "--all") ? gcm-text(map(b => grv-hex(b), bases)) : grv-hex(bases[0]) ++ "\n");
+  // ---- revision lists ---------------------------------------------------------------------------------------------------------
+  // [included raws, excluded raws, error text] from rev arguments: X, ^X, A..B, A...B
+  def gcm-revargs(r, revs) = gcm-revargs-go(r, revs, [], [], "");
+  def gcm-revargs-go(r, revs, inc, exc, err) = nil?(revs) ? [ginf-reverse(inc, []), ginf-reverse(exc, []), err] : gcm-rev-one(r, revs, inc, exc, err, revs[0]);
+  def gcm-rev-one(r, revs, inc, exc, err, a) {
+   let dots3 = gcm-find-dots(a, 3);
+   let dots2 = dots3 < 0 ? gcm-find-dots(a, 2) : 0 - 1;
+   dots3 >= 0 ? gcm-sym(r, revs, inc, exc, err, a, dots3) : dots2 >= 0 ? gcm-range(r, revs, inc, exc, err, a, dots2) : gs-starts?(a, "^") ? gcm-add(r, revs, inc, exc, err, substring(a, 1, len(a)), true) : gcm-add(r, revs, inc, exc, err, a, false);
+  }
+  // where an A..B (n = 2) or A...B (n = 3) range splits, or -1
+  def gcm-find-dots(a, n) = gcm-dots-by(a, n, str_find(a, "..", 0));
+  def gcm-dots-by(a, n, at) = at < 0 ? 0 - 1 : (at + 2 < len(a) && str_byte_at(a, at + 2) == 46) ? (n == 3 ? at : 0 - 1) : (n == 2 ? at : 0 - 1);
+  def gcm-commit-of(r, spec) {
+   let raw = len(spec) == 0 ? gr-head-id-raw(r) : grv-resolve(r, spec);
+   nothing?(raw) ? nothing() : grv-peel(r, raw, "commit");
+  }
+  def gcm-add(r, revs, inc, exc, err, spec, negate) {
+   let c = gcm-commit-of(r, spec);
+   nothing?(c) ? gcm-revargs-go(r, [], inc, exc, "bad revision '" ++ spec ++ "'") : negate ? gcm-revargs-go(r, revs[1:], inc, cons(c, exc), err) : gcm-revargs-go(r, revs[1:], cons(c, inc), exc, err);
+  }
+  def gcm-range(r, revs, inc, exc, err, a, at) {
+   let l = gcm-commit-of(r, substring(a, 0, at));
+   let h = gcm-commit-of(r, substring(a, at + 2, len(a)));
+   nothing?(l) || nothing?(h) ? gcm-revargs-go(r, [], inc, exc, "bad revision '" ++ a ++ "'") : gcm-revargs-go(r, revs[1:], cons(h, inc), cons(l, exc), err);
+  }
+  def gcm-sym(r, revs, inc, exc, err, a, at) {
+   let l = gcm-commit-of(r, substring(a, 0, at));
+   let h = gcm-commit-of(r, substring(a, at + 3, len(a)));
+   nothing?(l) || nothing?(h) ? gcm-revargs-go(r, [], inc, exc, "bad revision '" ++ a ++ "'") : gcm-revargs-go(r, revs[1:], cons(h, cons(l, inc)), append(grv-merge-bases(r, l, h), exc), err);
+  }
+  def gcm-rl-spec() = [["--count", "flag"], ["--left-right", "flag"], ["--first-parent", "flag"], ["--no-merges", "flag"], ["--max-count", "val"], ["-n", "val"], ["-NUM", "num"], ["--skip", "val"], ["--parents", "flag"], ["--reverse", "flag"]];
+  def gcm-rev-list(r, args) {
+   let p = gcm-parse(args, gcm-rl-spec());
+   !nil?(p[3]) ? gcm-usage("rev-list", p[3][0]) : gcm-rl-run(r, p[0], nil?(p[1]) ? ["HEAD"] : p[1]);
+  }
+  def gcm-limit(o) {
+   let v = gcm-opt?(o, "--max-count") ? gcm-opt-val(o, "--max-count", "") : gcm-opt-val(o, "-n", "");
+   gcm-digits?(v) ? str_to_int(v) : 0 - 1;
+  }
+  def gcm-skip(o) = gcm-digits?(gcm-opt-val(o, "--skip", "")) ? str_to_int(gcm-opt-val(o, "--skip", "")) : 0;
+  def gcm-walk-opts(o) = [gcm-opt?(o, "--first-parent"), gcm-opt?(o, "--no-merges"), gcm-limit(o), gcm-skip(o)];
+  def gcm-rl-run(r, o, revs) {
+   let ra = gcm-revargs(r, revs);
+   len(ra[2]) > 0 ? gcm-fatal(ra[2]) : gcm-opt?(o, "--left-right") && gcm-opt?(o, "--count") ? gcm-rl-lr(r, ra, revs) : gcm-rl-emit(r, o, grv-walk(r, ra[0], ra[1], gcm-walk-opts(o), nothing()));
+  }
+  def gcm-rl-emit(r, o, infos) = gcm-opt?(o, "--count") ? gcm-ok(len(infos).str() ++ "\n") : gcm-ok(gcm-text(gcm-rl-order(o, map(i => gcm-rl-line(o, i), infos))));
+  def gcm-rl-order(o, lines) = gcm-opt?(o, "--reverse") ? ginf-reverse(lines, []) : lines;
+  def gcm-rl-line(o, i) = gcm-opt?(o, "--parents") ? grv-join(cons(grv-hex(i[0]), map(p => grv-hex(p), i[1])), " ") : grv-hex(i[0]);
+  def gcm-rl-lr(r, ra, revs) {
+   let sym = filter(a => gcm-find-dots(a, 3) >= 0, revs);
+   nil?(sym) ? gcm-fatal("--left-right needs a symmetric range") : gcm-rl-lr2(r, gcm-commit-of(r, substring(sym[0], 0, gcm-find-dots(sym[0], 3))), gcm-commit-of(r, substring(sym[0], gcm-find-dots(sym[0], 3) + 3, len(sym[0]))));
+  }
+  def gcm-rl-lr2(r, l, h) = nothing?(l) || nothing?(h) ? gcm-fatal("bad revision") : gcm-ok(grv-range-count(r, [l], [h]).str() ++ "\t" ++ grv-range-count(r, [h], [l]).str() ++ "\n");
+  // ---- log -------------------------------------------------------------------------------------------------------------------
+  def gcm-lg-spec() = [["--oneline", "flag"], ["--format", "val"], ["--pretty", "val"], ["-n", "val"], ["-NUM", "num"], ["--max-count", "val"], ["--skip", "val"], ["--first-parent", "flag"], ["--no-merges", "flag"], ["--date", "val"], ["-S", "val"], ["--no-color", "flag"], ["--no-decorate", "flag"], ["--decorate", "opt"], ["--abbrev-commit", "flag"]];
+  def gcm-log(r, lit, args) {
+   let p = gcm-parse(args, gcm-lg-spec());
+   !nil?(p[3]) ? gcm-usage("log", p[3][0]) : gcm-lg-run(r, lit, p[0], nil?(p[1]) ? ["HEAD"] : p[1], p[2]);
+  }
+  // the format string, "oneline", "medium", and whether lines are separated (format:) or terminated (tformat / --format)
+  def gcm-lg-format(o) {
+   gcm-opt?(o, "--oneline") ? ["%h %s", true] : gcm-opt?(o, "--format") ? gcm-fmt-of(gcm-opt-val(o, "--format", ""), true) : gcm-opt?(o, "--pretty") ? gcm-fmt-of(gcm-opt-val(o, "--pretty", ""), false) : ["medium", true];
+  }
+  def gcm-fmt-of(v, tformat) = gs-starts?(v, "format:") ? [substring(v, 7, len(v)), false] : gs-starts?(v, "tformat:") ? [substring(v, 8, len(v)), true] : str_eq(v, "oneline") ? ["%h %s", true] : str_eq(v, "short") || str_eq(v, "medium") || str_eq(v, "full") || str_eq(v, "fuller") ? ["medium", true] : [v, tformat];
+  def gcm-lg-run(r, lit, o, revs, paths) {
+   let ra = gcm-revargs(r, revs);
+   len(ra[2]) > 0 ? gcm-fatal(ra[2]) : gcm-lg-walk(r, lit, o, ra, paths);
+  }
+  def gcm-lg-walk(r, lit, o, ra, paths) {
+   let needle = gcm-opt-val(o, "-S", "");
+   let pred = nil?(paths) && len(needle) == 0 ? nothing() : (i => gcm-lg-pred(r, lit, i, paths, needle));
+   gcm-lg-out(r, o, grv-walk(r, ra[0], ra[1], gcm-walk-opts(o), pred));
+  }
+  // path limiting (the commit's entry at a path differs from every parent's) and the -S pickaxe (the count of the needle changes)
+  def gcm-lg-pred(r, lit, info, paths, needle) {
+   let changed = gcm-changed-paths(r, info, paths, lit);
+   !nil?(changed) && (len(needle) == 0 || any?(p => gcm-pickaxe(r, info, p, needle), changed));
+  }
+  // paths (matching the pathspecs) whose blob differs between the commit and its first parent
+  // A literal path is judged level by level and stops at the first directory whose tree id is the same on both sides, so a commit that
+  // changed other parts of the tree costs the reading of the trees on the way down and no further; globs and directories read the diff.
+  def gcm-changed-paths(r, info, paths, lit) {
+   let tree = info[3];
+   let ptree = nil?(info[1]) ? nothing() : grv-peel(r, info[1][0], "tree");
+   !nil?(paths) && all?(p => gcm-plain-path?(p), paths) ? filter(p => gcm-path-changed?(r, tree, ptree, gs-split(p, 47)), paths) : gcm-changed-by-diff(r, tree, ptree, paths, lit);
+  }
+  def gcm-plain-path?(p) = len(p) > 0 && !gx-glob?(p) && !gs-starts?(p, ":") && str_byte_at(p, len(p) - 1) != 47;
+  def gcm-changed-by-diff(r, tree, ptree, paths, lit) = map(x => x[1], filter(x => nil?(paths) || gdf-match-all?(paths, x[1], lit), gdf-trees(r, ptree, tree)));
+  // [mode string, name, raw] of the entry called seg in a tree, or nothing()
+  def gcm-entry-in(r, tree, seg) {
+   let hit = nothing?(tree) ? [] : filter(e => str_eq(e[1], seg), grv-tree-ents(r, tree));
+   nil?(hit) ? nothing() : hit[0];
+  }
+  def gcm-path-changed?(r, ta, tb, segs) {
+   let ea = gcm-entry-in(r, ta, head(segs));
+   let eb = gcm-entry-in(r, tb, head(segs));
+   nothing?(ea) && nothing?(eb) ? false : nothing?(ea) || nothing?(eb) ? true : str_eq(ea[2], eb[2]) && str_eq(ea[0], eb[0]) ? false : nil?(tail(segs)) ? true : gs-tree?(ea[0]) && gs-tree?(eb[0]) ? gcm-path-changed?(r, ea[2], eb[2], tail(segs)) : true;
+  }
+  def gcm-count-at(s, needle, from, n) = from > len(s) ? n : gcm-count-hit(s, needle, from, n, str_find(s, needle, from));
+  def gcm-count-hit(s, needle, from, n, at) = at < 0 ? n : gcm-count-at(s, needle, at + len(needle), n + 1);
+  def gcm-blob-at(r, tree, path) {
+   let info = nothing?(tree) ? nothing() : gdf-path-info(r, tree, path);
+   nothing?(info) ? "" : (gs-read(r, info[1])[1] ?? "");
+  }
+  def gcm-pickaxe(r, info, path, needle) {
+   let ptree = nil?(info[1]) ? nothing() : grv-peel(r, info[1][0], "tree");
+   gcm-count-at(gcm-blob-at(r, info[3], path), needle, 0, 0) != gcm-count-at(gcm-blob-at(r, ptree, path), needle, 0, 0);
+  }
+  def gcm-lg-out(r, o, infos) {
+   let f = gcm-lg-format(o);
+   let dm = gcm-opt-val(o, "--date", "default");
+   str_eq(f[0], "medium") ? gcm-ok(nil?(infos) ? "" : grv-join(map(i => gcm-medium(r, i, dm), infos), "\n")) : gcm-ok(gcm-lg-join(map(i => grv-format(r, f[0], i, dm), infos), f[1]));
+  }
+  def gcm-lg-join(lines, term) = nil?(lines) ? "" : term ? gcm-text(lines) : grv-join(lines, "\n") ++ "\n";
+  def gcm-indent(msg) = grv-join(map(l => len(l) == 0 ? "" : "    " ++ l, gs-lines(gs-trim(msg))), "\n");
+  def gcm-medium(r, info0, dm) {
+   let info = grv-full(r, info0);
+   let a = gs-person(info[4][2] ?? "");
+   "commit " ++ grv-hex(info[0]) ++ grv-deco-paren(grv-decorations(r, info[0])) ++ "\n" ++ (len(info[1]) > 1 ? "Merge: " ++ grv-join(map(p => grv-short(r, p, 7), info[1]), " ") ++ "\n" : "") ++ "Author: " ++ a[0] ++ " <" ++ a[1] ++ ">\nDate:   " ++ gdt-render(dm, a[2], a[3]) ++ "\n\n" ++ gcm-indent(info[4][4]) ++ "\n";
+  }
+  // ---- show ------------------------------------------------------------------------------------------------------------------
+  def gcm-sh-spec() = [["-s", "flag"], ["--no-patch", "flag"], ["--format", "val"], ["--pretty", "val"], ["--name-only", "flag"], ["--name-status", "flag"], ["--stat", "flag"], ["--date", "val"], ["--no-color", "flag"], ["-U", "val"]];
+  def gcm-show(r, args) {
+   let p = gcm-parse(args, gcm-sh-spec());
+   !nil?(p[3]) ? gcm-usage("show", p[3][0]) : gcm-sh-run(r, p[0], nil?(p[1]) ? "HEAD" : p[1][0]);
+  }
+  def gcm-sh-run(r, o, spec) {
+   let raw = gcm-resolve(r, spec);
+   let obj = nothing?(raw) ? nothing() : gs-read(r, raw);
+   nothing?(obj) ? gcm-unknown-rev(spec) : str_eq(obj[0], "blob") ? gcm-ok(obj[1]) : str_eq(obj[0], "tree") ? gcm-ok("tree " ++ spec ++ "\n\n" ++ gcm-text(map(e => e[1] ++ (gs-tree?(e[0]) ? "/" : ""), gs-tree-entries(obj[1])))) : str_eq(obj[0], "commit") ? gcm-sh-commit(r, o, raw) : gcm-ok(obj[1]);
+  }
+  def gcm-sh-commit(r, o, raw) {
+   let info = grv-info(r, raw);
+   let f = gcm-lg-format(o);
+   let dm = gcm-opt-val(o, "--date", "default");
+   let head = str_eq(f[0], "medium") ? gcm-medium(r, info, dm) : grv-format(r, f[0], info, dm) ++ "\n";
+   let ptree = nil?(info[1]) ? nothing() : grv-peel(r, info[1][0], "tree");
+   let rows = gdf-detect(gdf-trees(r, ptree, info[3]));
+   gcm-opt?(o, "-s") || gcm-opt?(o, "--no-patch") ? gcm-ok(head) : gcm-ok(head ++ "\n" ++ (gcm-opt?(o, "--name-only") ? gcm-text(map(x => x[1], rows)) : gcm-opt?(o, "--name-status") ? gcm-text(map(x => gcm-ns-line(x), rows)) : gcm-patches(r, rows, 3)));
+  }
+  def gcm-patches(r, rows, ctx) = ginf-join(ginf-reverse(map(x => gdf-patch(r, x, gdf-blob-of(r, gs-top(r), x[3], ""), gdf-blob-of(r, gs-top(r), x[5], ""), ctx), rows), []));
+  // ---- diff ------------------------------------------------------------------------------------------------------------------
+  def gcm-df-spec() = [["--cached", "flag"], ["--staged", "flag"], ["--name-only", "flag"], ["--name-status", "flag"], ["--numstat", "flag"], ["--stat", "flag"], ["--quiet", "flag"], ["--exit-code", "flag"], ["-U", "val"], ["--unified", "val"], ["--diff-filter", "val"], ["-z", "flag"], ["--no-color", "flag"], ["--no-renames", "flag"], ["--no-ext-diff", "flag"], ["--patch", "flag"], ["-p", "flag"]];
+  def gcm-diff(r, lit, args) {
+   let p = gcm-parse(args, gcm-df-spec());
+   !nil?(p[3]) ? gcm-usage("diff", p[3][0]) : gcm-df-run(r, lit, p[0], p[1], p[2]);
+  }
+  def gcm-tree-of(r, spec) {
+   let raw = grv-resolve(r, spec);
+   nothing?(raw) ? nothing() : grv-peel(r, raw, "tree");
+  }
+  def gcm-df-rows(r, o, revs, ix) {
+   let cached = gcm-opt?(o, "--cached") || gcm-opt?(o, "--staged");
+   len(revs) == 2 ? gcm-df-two(r, revs[0], revs[1]) : len(revs) == 1 && gcm-find-dots(revs[0], 3) >= 0 ? gcm-df-sym(r, revs[0]) : len(revs) == 1 && gcm-find-dots(revs[0], 2) >= 0 ? gcm-df-two(r, substring(revs[0], 0, gcm-find-dots(revs[0], 2)), substring(revs[0], gcm-find-dots(revs[0], 2) + 2, len(revs[0]))) : len(revs) == 1 ? (cached ? gdf-index-rows(r, ix, gcm-tree-of(r, revs[0])) : gdf-worktree-rows(r, ix, gcm-tree-of(r, revs[0]))) : cached ? gdf-index-rows(r, ix, gst-head-tree(r)) : gdf-unstaged-rows(r, ix);
+  }
+  def gcm-df-two(r, a, b) {
+   let ta = gcm-tree-of(r, len(a) == 0 ? "HEAD" : a);
+   let tb = gcm-tree-of(r, len(b) == 0 ? "HEAD" : b);
+   nothing?(ta) || nothing?(tb) ? nothing() : gdf-trees(r, ta, tb);
+  }
+  def gcm-df-sym(r, spec) {
+   let at = gcm-find-dots(spec, 3);
+   let l = gcm-commit-of(r, substring(spec, 0, at));
+   let h = gcm-commit-of(r, substring(spec, at + 3, len(spec)));
+   let mb = nothing?(l) || nothing?(h) ? [] : grv-merge-bases(r, l, h);
+   nil?(mb) ? nothing() : gdf-trees(r, grv-peel(r, mb[0], "tree"), grv-peel(r, h, "tree"));
+  }
+  def gcm-ns-line(x) = str_eq(x[0], "R") ? "R100\t" ++ x[6] ++ "\t" ++ x[1] : x[0] ++ "\t" ++ x[1];
+  def gcm-df-run(r, lit, o, revs, paths) {
+   let ix = gi-read(r);
+   let filt = gcm-opt-val(o, "--diff-filter", "");
+   let rows0 = nothing?(ix) && len(revs) < 2 ? [] : gcm-df-rows(r, o, nil?(revs) ? [] : revs, nothing?(ix) ? [[], [], 2, ""] : ix);
+   nothing?(rows0) ? gcm-fatal("bad revision") : gcm-df-emit(r, lit, o, gcm-df-filter(r, o, ix, filt, gcm-df-select(o, nil?(paths) ? [] : paths, lit, rows0)));
+  }
+  def gcm-df-select(o, paths, lit, rows) {
+   let kept = filter(x => nil?(paths) || gdf-match-all?(paths, x[1], lit), rows);
+   gcm-opt?(o, "--no-renames") ? kept : gdf-sort(gdf-detect(kept));
+  }
+  // --diff-filter=U lists unmerged paths (the index stages), the other letters filter by status code
+  def gcm-df-filter(r, o, ix, filt, rows) {
+   len(filt) == 0 ? rows : gs-index-of(filt, 85, 0) >= 0 && len(filt) == 1 ? (nothing?(ix) ? [] : map(p => ["U", p, 0, nothing(), 0, nothing()], gs-uniq-str(map(e => e[0], filter(e => e[6] > 0, ix[0])), []))) : filter(x => gs-index-of(filt, str_byte_at(x[0], 0), 0) >= 0, rows);
+  }
+  def gcm-df-emit(r, lit, o, rows) {
+   let z = gcm-opt?(o, "-z");
+   let ctx = gcm-df-ctx(o);
+   gcm-opt?(o, "--quiet") ? ["", nil?(rows) ? 0 : 1, ""] : gcm-opt?(o, "--name-only") ? gcm-ok(z ? gcm-text-z(map(x => x[1], rows)) : gcm-text(map(x => x[1], rows))) : gcm-opt?(o, "--name-status") ? gcm-ok(z ? gcm-text-z(map(x => gcm-ns-z(x), rows)) : gcm-text(map(x => gcm-ns-line(x), rows))) : gcm-opt?(o, "--numstat") ? gcm-ok(gcm-text(map(x => gcm-numstat-line(r, x), rows))) : gcm-opt?(o, "--stat") ? gcm-ok(gcm-stat(r, rows)) : gcm-df-patch(r, o, rows, ctx);
+  }
+  def gcm-ns-z(x) = str_eq(x[0], "R") ? "R100" ++ byte_to_str(0) ++ x[6] ++ byte_to_str(0) ++ x[1] : x[0] ++ byte_to_str(0) ++ x[1];
+  def gcm-df-ctx(o) {
+   let v = gcm-opt?(o, "-U") ? gcm-opt-val(o, "-U", "3") : gcm-opt-val(o, "--unified", "3");
+   gcm-digits?(v) ? str_to_int(v) : 3;
+  }
+  def gcm-df-patch(r, o, rows, ctx) {
+   let out = gcm-patches-wt(r, rows, ctx);
+   ["" ++ out, 0, ""];
+  }
+  // a row whose new id is nothing() with a mode but not a delete reads its new side from the working file
+  def gcm-side(r, x, new) = new ? (nothing?(x[5]) && !str_eq(x[0], "D") ? gdf-blob-of(r, gs-top(r), nothing(), x[1]) : gdf-blob-of(r, gs-top(r), x[5], "")) : gdf-blob-of(r, gs-top(r), x[3], "");
+  def gcm-patches-wt(r, rows, ctx) = ginf-join(ginf-reverse(map(x => gdf-patch(r, gcm-fill-new(r, x), gcm-side(r, x, false), gcm-side(r, x, true), ctx), rows), []));
+  // a working-tree new side has no id yet: hash it for the index line
+  def gcm-fill-new(r, x) = nothing?(x[5]) && !str_eq(x[0], "D") && !str_eq(x[0], "U") ? [x[0], x[1], x[2], x[3], x[4], gst-blob-hex-raw(gs-top(r) ++ "/" ++ x[1])] : x;
+  def gcm-numstat-line(r, x) {
+   let a = gcm-side(r, x, false);
+   let b = gcm-side(r, x, true);
+   gdf-binary?(a) || gdf-binary?(b) ? "-\t-\t" ++ x[1] : gcm-ns-counts(gdf-numstat(a, b), x);
+  }
+  def gcm-ns-counts(c, x) = c[0].str() ++ "\t" ++ c[1].str() ++ "\t" ++ (str_eq(x[0], "R") ? x[6] ++ " => " ++ x[1] : x[1]);
+  def gcm-stat(r, rows) {
+   let stats = map(x => [x[1], gcm-stat-counts(r, x)], rows);
+   let width = foldl((m, s) => len(s[0]) > m ? len(s[0]) : m, 0, stats);
+   let lines = map(s => " " ++ s[0] ++ gcm-spaces(width - len(s[0])) ++ " | " ++ (s[1][0] + s[1][1]).str() ++ (s[1][0] + s[1][1] > 0 ? " " ++ gcm-bar(s[1][0], s[1][1]) : ""), stats);
+   let ins = foldl((a, s) => a + s[1][0], 0, stats);
+   let del = foldl((a, s) => a + s[1][1], 0, stats);
+   nil?(rows) ? "" : gcm-text(append(lines, [" " ++ len(rows).str() ++ (len(rows) == 1 ? " file changed" : " files changed") ++ (ins > 0 ? ", " ++ ins.str() ++ (ins == 1 ? " insertion(+)" : " insertions(+)") : "") ++ (del > 0 ? ", " ++ del.str() ++ (del == 1 ? " deletion(-)" : " deletions(-)") : "")]));
+  }
+  def gcm-stat-counts(r, x) = gdf-numstat(gcm-side(r, x, false), gcm-side(r, x, true));
+  def gcm-spaces(n) = n <= 0 ? "" : " " ++ gcm-spaces(n - 1);
+  def gcm-rep(c, n) = n <= 0 ? "" : c ++ gcm-rep(c, n - 1);
+  def gcm-bar(a, d) = gcm-rep("+", a > 50 ? 50 : a) ++ gcm-rep("-", d > 50 ? 50 : d);
+  // ---- branch ----------------------------------------------------------------------------------------------------------------
+  def gcm-br-spec() = [["--show-current", "flag"], ["--list", "flag"], ["-l", "flag"], ["-a", "flag"], ["--all", "flag"], ["-r", "flag"], ["--remotes", "flag"]];
+  def gcm-branch(r, args) {
+   let p = gcm-parse(args, gcm-br-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("branch", p[3][0]) : gcm-opt?(o, "--show-current") ? gcm-ok(nothing?(grv-current-branch(r)) ? "" : grv-current-branch(r) ++ "\n") : !nil?(p[1]) && !(gcm-opt?(o, "--list") || gcm-opt?(o, "-l")) ? ["", 129, "native-git: 'branch <name>' creates a branch (write class, phase 2)\n"] : gcm-br-list(r, o, p[1]);
+  }
+  def gcm-br-list(r, o, pats) {
+   let h = gr-head(r);
+   let all = gcm-opt?(o, "-a") || gcm-opt?(o, "--all");
+   let rem = gcm-opt?(o, "-r") || gcm-opt?(o, "--remotes");
+   let locals = rem ? [] : map(x => gr-short-branch(x[0]), gr-list(r, "refs/heads/"));
+   let remotes = all || rem ? map(x => (all ? "remotes/" : "") ++ substring(x[0], 13, len(x[0])), filter(x => !gs-ends?(x[0], "/HEAD"), gr-list(r, "refs/remotes/"))) : [];
+   let names = filter(n => nil?(pats) || any?(pt => gx-fn(pt, 0, n, 0), pats), append(locals, remotes));
+   let cur = str_eq(h[0], "branch") ? gr-short-branch(h[1]) : "";
+   gcm-ok(gcm-text(append(str_eq(h[0], "detached") && !rem && nil?(pats) ? ["* (HEAD detached at " ++ grv-short(r, gsha-raw-of-hex(h[1]), 7) ++ ")"] : [], map(n => (str_eq(n, cur) ? "* " : "  ") ++ n, names))));
+  }
+  // ---- config, remote, symbolic-ref -------------------------------------------------------------------------------------------
+  def gcm-cf2-spec() = [["--get", "flag"], ["--get-all", "flag"], ["--list", "flag"], ["-l", "flag"], ["-z", "flag"], ["--local", "flag"], ["--global", "flag"], ["--system", "flag"], ["--worktree", "flag"]];
+  def gcm-config(r, args) {
+   let p = gcm-parse(args, gcm-cf2-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("config", p[3][0]) : gcm-opt?(o, "--list") || gcm-opt?(o, "-l") ? gcm-ok(gcm-text(map(row => row[0] ++ "=" ++ row[1], gc-all(r)))) : gcm-opt?(o, "--get-all") && !nil?(p[1]) ? gcm-cfg-all(r, p[1][0]) : (gcm-opt?(o, "--get") && !nil?(p[1])) || len(p[1]) == 1 ? gcm-cfg-get(r, p[1][0]) : ["", 129, "native-git: config writes are phase 2; reads are --get, --get-all, --list\n"];
+  }
+  def gcm-cfg-get(r, key) {
+   let v = gc-get(r, key);
+   nothing?(v) ? ["", 1, ""] : gcm-ok(v ++ "\n");
+  }
+  def gcm-cfg-all(r, key) {
+   let vs = gc-get-all(r, key);
+   nil?(vs) ? ["", 1, ""] : gcm-ok(gcm-text(vs));
+  }
+  def gcm-rm-spec() = [["-v", "flag"], ["--verbose", "flag"]];
+  def gcm-remote(r, args) {
+   let p = gcm-parse(args, gcm-rm-spec());
+   !nil?(p[3]) ? gcm-usage("remote", p[3][0]) : nil?(p[1]) ? gcm-remote-list(r, gcm-opt?(p[0], "-v") || gcm-opt?(p[0], "--verbose")) : str_eq(p[1][0], "get-url") && len(p[1]) == 2 ? gcm-remote-url(r, p[1][1]) : ["", 129, "native-git: remote " ++ p[1][0] ++ " is refused by name (get-url, list and -v are read)\n"];
+  }
+  def gcm-remote-names(r) = gs-uniq-str(map(row => substring(row[0], 7, gs-index-of(row[0], 46, 7)), filter(row => gs-starts?(row[0], "remote.") && gs-ends?(row[0], ".url"), gc-all(r))), []);
+  def gcm-remote-list(r, verbose) = gcm-ok(gcm-text(verbose ? gs-flatten(map(n => [n ++ "\t" ++ (gc-get(r, "remote." ++ n ++ ".url") ?? "") ++ " (fetch)", n ++ "\t" ++ (gc-get(r, "remote." ++ n ++ ".url") ?? "") ++ " (push)"], gcm-remote-names(r))) : gcm-remote-names(r)));
+  def gcm-remote-url(r, name) {
+   let u = gc-get(r, "remote." ++ name ++ ".url");
+   nothing?(u) ? gcm-fatal("No such remote '" ++ name ++ "'") : gcm-ok(u ++ "\n");
+  }
+  def gcm-sr-spec() = [["-q", "flag"], ["--quiet", "flag"], ["--short", "flag"]];
+  def gcm-symbolic-ref(r, args) {
+   let p = gcm-parse(args, gcm-sr-spec());
+   let h = gr-head(r);
+   !nil?(p[3]) ? gcm-usage("symbolic-ref", p[3][0]) : len(p[1]) != 1 || !str_eq(p[1][0], "HEAD") ? ["", 129, "native-git: symbolic-ref reads HEAD only\n"] : str_eq(h[0], "detached") ? (gcm-opt?(p[0], "-q") || gcm-opt?(p[0], "--quiet") ? ["", 1, ""] : gcm-fatal("ref HEAD is not a symbolic ref")) : gcm-ok((gcm-opt?(p[0], "--short") ? gr-short-branch(h[1]) : h[1]) ++ "\n");
+  }
+  // ---- worktree list ---------------------------------------------------------------------------------------------------------------
+  def gcm-wt-spec() = [["--porcelain", "flag"], ["-z", "flag"]];
+  def gcm-worktree(r, args) {
+   let p = gcm-parse(args, gcm-wt-spec());
+   !nil?(p[3]) ? gcm-usage("worktree", p[3][0]) : nil?(p[1]) || !str_eq(p[1][0], "list") ? ["", 129, "native-git: worktree " ++ (nil?(p[1]) ? "" : p[1][0]) ++ " is refused by name (only `worktree list` is read)\n"] : gcm-wt-list(r, gcm-opt?(p[0], "--porcelain"), gcm-opt?(p[0], "-z"));
+  }
+  // [path, HEAD hex or nothing(), branch ref or "" , detached]
+  def gcm-wt-main(r) {
+   let common = gs-common(r);
+   let top = gs-parent(common);
+   [top, common, str_eq(common, gs-gitdir(r))];
+  }
+  def gcm-wt-rows(r) {
+   let common = gs-common(r);
+   let main = [gs-parent(common), common];
+   let names = host_dir_list(common ++ "/worktrees") ?? [];
+   cons(main, map(n => [gs-parent(gs-trim(gs-text-or(common ++ "/worktrees/" ++ n ++ "/gitdir", ""))), common ++ "/worktrees/" ++ n], gr-msort-names(names)));
+  }
+  def gr-msort-names(names) = map(x => x[0], gr-msort(map(n => [n], names)));
+  def gcm-wt-head(gd) = gs-trim(gs-text-or(gd ++ "/HEAD", ""));
+  def gcm-wt-record(r, row) {
+   let text = gcm-wt-head(row[1]);
+   let target = gr-sym-target(text);
+   let id = nothing?(target) ? text : gcm-wt-resolve(r, row[1], target);
+   append(["worktree " ++ row[0], "HEAD " ++ (nothing?(id) ? "0000000000000000000000000000000000000000" : id)], nothing?(target) ? ["detached"] : ["branch " ++ target]);
+  }
+  def gcm-wt-resolve(r, gd, target) = gr-resolve(r, target);
+  def gcm-wt-list(r, porcelain, z) {
+   let recs = map(row => gcm-wt-record(r, row), gcm-wt-rows(r));
+   porcelain ? gcm-ok(z ? ginf-join(ginf-reverse(map(rec => gcm-text-z(rec) ++ byte_to_str(0), recs), [])) : ginf-join(ginf-reverse(map(rec => gcm-text(rec) ++ "\n", recs), []))) : gcm-ok(gcm-text(map(rec => substring(rec[0], 9, len(rec[0])) ++ " " ++ substring(rec[1], 5, 12) ++ " " ++ (str_eq(rec[2], "detached") ? "(detached HEAD)" : "[" ++ gr-short-branch(substring(rec[2], 7, len(rec[2]))) ++ "]"), recs)));
+  }
+  // ---- check-attr ------------------------------------------------------------------------------------------------------------------
+  def gcm-ca-spec() = [];
+  // attribute lines of .gitattributes: pattern then name, -name, name=value ; later lines win
+  def gcm-attr-rules(text) = filter(x => !nothing?(x), map(l => gcm-attr-line(l), gs-lines(text)));
+  def gcm-attr-line(l0) {
+   let l = gs-trim(gs-ltrim(l0));
+   len(l) == 0 || str_byte_at(l, 0) == 35 ? nothing() : gcm-attr-split(l);
+  }
+  def gcm-attr-split(l) {
+   let ws = gcm-words(l);
+   nil?(ws[1:]) ? nothing() : [ws[0], ws[1:]];
+  }
+  def gcm-attr-hit?(pat, path) = gs-index-of(pat, 47, 0) >= 0 ? gx-match-segs(gs-split(gs-starts?(pat, "/") ? substring(pat, 1, len(pat)) : pat, 47), gs-split(path, 47)) || (gs-starts?(path, pat ++ "/")) : gx-fn(pat, 0, gx-name(path), 0);
+  def gcm-attr-value(rules, attr, path, cur) = nil?(rules) ? cur : gcm-attr-value(rules[1:], attr, path, gcm-attr-apply(rules[0], attr, path, cur));
+  def gcm-attr-apply(rule, attr, path, cur) = gcm-attr-hit?(rule[0], path) ? gcm-attr-from(rule[1], attr, cur) : cur;
+  def gcm-attr-from(settings, attr, cur) = nil?(settings) ? cur : str_eq(settings[0], attr) ? gcm-attr-from(settings[1:], attr, "set") : str_eq(settings[0], "-" ++ attr) ? gcm-attr-from(settings[1:], attr, "unset") : str_eq(settings[0], "!" ++ attr) ? gcm-attr-from(settings[1:], attr, "unspecified") : gs-starts?(settings[0], attr ++ "=") ? gcm-attr-from(settings[1:], attr, substring(settings[0], len(attr) + 1, len(settings[0]))) : gcm-attr-from(settings[1:], attr, cur);
+  def gcm-check-attr(r, args) {
+   let p = gcm-parse(args, gcm-ca-spec());
+   !nil?(p[3]) ? gcm-usage("check-attr", p[3][0]) : nil?(p[1]) || nil?(p[2]) ? ["", 129, "usage: git check-attr <attr>... -- <path>...\n"] : gcm-ca-run(r, p[1], p[2]);
+  }
+  def gcm-ca-run(r, attrs, paths) {
+   let rules = gcm-attr-rules(gs-text-or(gs-top(r) ++ "/.gitattributes", "") ++ "\n" ++ gs-text-or(gs-common(r) ++ "/info/attributes", ""));
+   gcm-ok(gcm-text(gs-flatten(map(pth => map(a => pth ++ ": " ++ a ++ ": " ++ gcm-attr-value(rules, a, pth, "unspecified"), attrs), paths))));
+  }
+  // ---- hash-object -----------------------------------------------------------------------------------------------------------------
+  def gcm-ho-spec() = [["-t", "val"], ["--stdin", "flag"], ["-w", "flag"]];
+  def gcm-hash-object(r, dir, args) {
+   let p = gcm-parse(args, gcm-ho-spec());
+   !nil?(p[3]) ? gcm-usage("hash-object", p[3][0]) : gcm-opt?(p[0], "-w") ? ["", 129, "native-git: hash-object -w writes a loose object (phase 2); the id alone is read\n"] : gcm-opt?(p[0], "--stdin") ? ["", 129, "native-git: hash-object --stdin is refused by name (name a file)\n"] : len(p[1]) != 1 ? ["", 129, "usage: git hash-object [-t <type>] <file>\n"] : gcm-ho-run(gcm-opt-val(p[0], "-t", "blob"), read_file(gs-abs(dir, p[1][0])));
+  }
+  def gcm-ho-run(type, body) = nothing?(body) ? gcm-fatal("could not open the file for reading") : gcm-ok(gsha-hex-of-raw(gs-hash(type, body)) ++ "\n");
+ }
+ 0;
+}

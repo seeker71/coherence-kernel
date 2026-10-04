@@ -1,0 +1,358 @@
+// git-rev.bml — revisions in Form: naming an object (rev-parse), walking history (log, rev-list), common ancestors (merge-base),
+// and the date and format language `log` prints with.
+//
+// Revision names read: HEAD and @, full and abbreviated hex ids (the shortest unique prefix over packs and loose objects, at least 4
+// characters), ref names tried as git tries them (<n>, refs/<n>, refs/tags/<n>, refs/heads/<n>, refs/remotes/<n>,
+// refs/remotes/<n>/HEAD), the pseudo refs (ORIG_HEAD FETCH_HEAD MERGE_HEAD REBASE_HEAD ...), and the suffixes `^`, `^N`, `~N`,
+// `^{commit}` `^{tree}` `^{blob}` `^{tag}` `^{}`, `<rev>:<path>`, `@{upstream}` / `@{u}`, `<branch>@{upstream}`. Refused by name:
+// reflog selectors (`@{1}`, `@{yesterday}`), `:/text` search, `:N:path` stage selectors.
+//
+// History is walked the way git walks it: a queue ordered by committer date (newest first, equal dates in arrival order), a commit
+// reaches the output when it is popped, parents are queued as they are seen, and for a range (`A..B`, `^A B`) the side marked
+// uninteresting is walked alongside until nothing interesting is left in the queue. Only the commits actually needed are read.
+//
+// PROOF: form-stdlib/tests/git-native-rev-band.fk (this repository's history: first-parent chain, ranges, merge-base identities,
+// date arithmetic against hand arithmetic) and the synthetic repository of git-native-store-band.fk.
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml form-stdlib/bml/git-refs.bml form-stdlib/bml/git-index.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+section [form.bml] {
+ class GitRev {
+  // ---- dates ---------------------------------------------------------------------------------------------------------------
+  def gdt-fdiv(a, b) = a >= 0 ? a / b : 0 - ((0 - a + b - 1) / b);
+  def gdt-fmod(a, b) = a - (gdt-fdiv(a, b) * b);
+  // [year month day] of a day count since 1970-01-01 (the era algorithm)
+  def gdt-civil(days) {
+   let z = days + 719468;
+   let era = gdt-fdiv(z, 146097);
+   let doe = z - (era * 146097);
+   let yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365;
+   let doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100));
+   let mp = ((5 * doy) + 2) / 153;
+   let dd = doy - (((153 * mp) + 2) / 5) + 1;
+   let mm = mp < 10 ? mp + 3 : mp - 9;
+   [yoe + (era * 400) + (mm <= 2 ? 1 : 0), mm, dd];
+  }
+  // "+0800" -> seconds east of UTC
+  def gdt-tz-secs(tz) {
+   let sign = len(tz) > 0 && str_byte_at(tz, 0) == 45 ? 0 - 1 : 1;
+   len(tz) < 5 ? 0 : sign * (((str_to_int(substring(tz, 1, 3)) * 60) + str_to_int(substring(tz, 3, 5))) * 60);
+  }
+  // [year month day hour minute second weekday(0=Sunday)] of unix seconds at a zone
+  def gdt-fields(secs, tz) {
+   let local = secs + gdt-tz-secs(tz);
+   let days = gdt-fdiv(local, 86400);
+   let rest = gdt-fmod(local, 86400);
+   let ymd = gdt-civil(days);
+   [ymd[0], ymd[1], ymd[2], rest / 3600, (rest % 3600) / 60, rest % 60, gdt-fmod(days + 4, 7)];
+  }
+  def gdt-p2(n) = n < 10 ? "0" ++ n.str() : n.str();
+  def gdt-wday(i) = substring("SunMonTueWedThuFriSat", i * 3, (i * 3) + 3);
+  def gdt-month(m) = substring("JanFebMarAprMayJunJulAugSepOctNovDec", (m - 1) * 3, ((m - 1) * 3) + 3);
+  def gdt-wday-long(i) = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][i];
+  def gdt-month-long(m) = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][m - 1];
+  def gdt-default(secs, tz) {
+   let f = gdt-fields(secs, tz);
+   gdt-wday(f[6]) ++ " " ++ gdt-month(f[1]) ++ " " ++ f[2].str() ++ " " ++ gdt-p2(f[3]) ++ ":" ++ gdt-p2(f[4]) ++ ":" ++ gdt-p2(f[5]) ++ " " ++ f[0].str() ++ " " ++ tz;
+  }
+  def gdt-iso(secs, tz) {
+   let f = gdt-fields(secs, tz);
+   f[0].str() ++ "-" ++ gdt-p2(f[1]) ++ "-" ++ gdt-p2(f[2]) ++ " " ++ gdt-p2(f[3]) ++ ":" ++ gdt-p2(f[4]) ++ ":" ++ gdt-p2(f[5]) ++ " " ++ tz;
+  }
+  def gdt-iso-strict(secs, tz) {
+   let f = gdt-fields(secs, tz);
+   f[0].str() ++ "-" ++ gdt-p2(f[1]) ++ "-" ++ gdt-p2(f[2]) ++ "T" ++ gdt-p2(f[3]) ++ ":" ++ gdt-p2(f[4]) ++ ":" ++ gdt-p2(f[5]) ++ (str_eq(tz, "+0000") ? "Z" : substring(tz, 0, 3) ++ ":" ++ substring(tz, 3, 5));
+  }
+  def gdt-rfc(secs, tz) {
+   let f = gdt-fields(secs, tz);
+   gdt-wday(f[6]) ++ ", " ++ f[2].str() ++ " " ++ gdt-month(f[1]) ++ " " ++ f[0].str() ++ " " ++ gdt-p2(f[3]) ++ ":" ++ gdt-p2(f[4]) ++ ":" ++ gdt-p2(f[5]) ++ " " ++ tz;
+  }
+  def gdt-short(secs, tz) {
+   let f = gdt-fields(secs, tz);
+   f[0].str() ++ "-" ++ gdt-p2(f[1]) ++ "-" ++ gdt-p2(f[2]);
+  }
+  // strftime for the conversions in use
+  def gdt-strftime(fmt, secs, tz) = gdt-sf(fmt, 0, gdt-fields(secs, tz), tz, "");
+  def gdt-sf(fmt, i, f, tz, acc) = i >= len(fmt) ? acc : str_byte_at(fmt, i) == 37 && i + 1 < len(fmt) ? gdt-sf(fmt, i + 2, f, tz, acc ++ gdt-conv(str_byte_at(fmt, i + 1), f, tz)) : gdt-sf(fmt, i + 1, f, tz, acc ++ substring(fmt, i, i + 1));
+  def gdt-conv(c, f, tz) = c == 89 ? f[0].str() : c == 109 ? gdt-p2(f[1]) : c == 100 ? gdt-p2(f[2]) : c == 101 ? (f[2] < 10 ? " " ++ f[2].str() : f[2].str()) : c == 72 ? gdt-p2(f[3]) : c == 77 ? gdt-p2(f[4]) : c == 83 ? gdt-p2(f[5]) : c == 122 ? tz : c == 97 ? gdt-wday(f[6]) : c == 65 ? gdt-wday-long(f[6]) : c == 98 || c == 104 ? gdt-month(f[1]) : c == 66 ? gdt-month-long(f[1]) : c == 121 ? gdt-p2(f[0] % 100) : c == 37 ? "%" : c == 110 ? "\n" : "%" ++ byte_to_str(c);
+  // date mode "default" | "short" | "iso" | "iso-strict" | "rfc" | "format:<strftime>" | "unix" | "raw"
+  def gdt-render(mode, secs, tz) = str_eq(mode, "short") ? gdt-short(secs, tz) : str_eq(mode, "iso") || str_eq(mode, "iso8601") ? gdt-iso(secs, tz) : str_eq(mode, "iso-strict") || str_eq(mode, "iso8601-strict") ? gdt-iso-strict(secs, tz) : str_eq(mode, "rfc") || str_eq(mode, "rfc2822") ? gdt-rfc(secs, tz) : str_eq(mode, "unix") ? secs.str() : str_eq(mode, "raw") ? secs.str() ++ " " ++ tz : gs-starts?(mode, "format:") ? gdt-strftime(substring(mode, 7, len(mode)), secs, tz) : gdt-default(secs, tz);
+  // ---- commit info ---------------------------------------------------------------------------------------------------------
+  // [raw id, [parent raws], committer secs, tree raw, parsed commit]
+  def grv-info(r, raw) = grv-info-g(r, raw, gcg-commit(r, raw));
+  def grv-info-g(r, raw, g) = nothing?(g) ? grv-info-full(r, raw) : [raw, g[0], g[1], g[2], nothing()];
+  def grv-info-full(r, raw) {
+   let o = gs-read(r, raw);
+   nothing?(o) || !str_eq(o[0], "commit") ? nothing() : grv-info-of(raw, gs-commit-parse(o[1]));
+  }
+  // an info from the commit-graph carries no message or people; this reads the commit object for them
+  def grv-full(r, info) = nothing?(info[4]) ? grv-info-full(r, info[0]) : info;
+  def grv-info-of(raw, c) = [raw, map(h => gsha-raw-of-hex(h), c[1]), gs-person(nothing?(c[3]) ? "" : c[3])[2], gsha-raw-of-hex(c[0]), c];
+  def grv-id(i) = i[0];
+  def grv-parents(i) = i[1];
+  def grv-date(i) = i[2];
+  // ---- naming --------------------------------------------------------------------------------------------------------------
+  def grv-hex(raw) = gsha-hex-of-raw(raw);
+  def grv-peel(r, raw, want) {
+   let o = gs-read(r, raw);
+   nothing?(o) ? nothing() : grv-peel-obj(r, raw, o, want);
+  }
+  def grv-peel-obj(r, raw, o, want) = str_eq(want, o[0]) ? raw : str_eq(o[0], "tag") && !str_eq(want, "tag") ? grv-peel(r, gsha-raw-of-hex(gs-tag-parse(o[1])[0]), want) : str_eq(want, "") ? raw : str_eq(o[0], "commit") && str_eq(want, "tree") ? gsha-raw-of-hex(gs-commit-parse(o[1])[0]) : nothing();
+  // the nth parent (1-based) of a commit
+  def grv-parent(r, raw, n) {
+   let i = grv-info(r, raw);
+   nothing?(i) || n < 1 || n > len(i[1]) ? nothing() : i[1][n - 1];
+  }
+  def grv-first-parent-n(r, raw, n) = nothing?(raw) ? nothing() : n <= 0 ? raw : grv-first-parent-n(r, grv-parent(r, raw, 1), n - 1);
+  def grv-ref-candidates(name) = [name, "refs/" ++ name, "refs/tags/" ++ name, "refs/heads/" ++ name, "refs/remotes/" ++ name, "refs/remotes/" ++ name ++ "/HEAD"];
+  def grv-ref-first(r, cands) = nil?(cands) ? nothing() : grv-ref-try(r, cands, gr-resolve(r, cands[0]));
+  def grv-ref-try(r, cands, got) = nothing?(got) ? grv-ref-first(r, cands[1:]) : got;
+  // the hex a ref name (as typed) resolves to, or nothing()
+  def grv-ref(r, name) = str_eq(name, "@") ? gr-head-id(r) : grv-ref-first(r, grv-ref-candidates(name));
+  def grv-upstream-ref(r, branch) {
+   let remote = gc-get(r, "branch." ++ branch ++ ".remote");
+   let merge = gc-get(r, "branch." ++ branch ++ ".merge");
+   nothing?(remote) || nothing?(merge) ? nothing() : str_eq(remote, ".") ? merge : "refs/remotes/" ++ remote ++ "/" ++ gr-short-branch(merge);
+  }
+  def grv-current-branch(r) {
+   let h = gr-head(r);
+   str_eq(h[0], "detached") ? nothing() : gr-short-branch(h[1]);
+  }
+  // full text of the upstream ref of a branch (nothing() when none is configured)
+  def grv-upstream-name(r, branch) = nothing?(branch) ? nothing() : grv-upstream-ref(r, branch);
+  // a unique hex prefix -> raw, nothing() when none or ambiguous
+  def grv-abbrev(r, pre) {
+   let hits = gs-expand(r, gc-lower(pre));
+   len(hits) == 1 ? hits[0] : nothing();
+  }
+  def grv-base(r, name) {
+   let ref = len(name) > 0 ? grv-ref(r, name) : nothing();
+   len(name) == 0 ? nothing() : gr-hex40?(name) ? gsha-raw-of-hex(name) : !nothing?(ref) ? gsha-raw-of-hex(ref) : len(name) >= 4 && len(name) < 40 && gsha-hex?(name) || (len(name) % 2 == 1 && len(name) >= 5 && gsha-hex?(name ++ "0")) ? grv-abbrev(r, name) : nothing();
+  }
+  // first position of an operator character in a rev spec, or the length
+  def grv-op-at(s, i) = i >= len(s) ? i : str_byte_at(s, i) == 94 || str_byte_at(s, i) == 126 || str_byte_at(s, i) == 58 || (str_byte_at(s, i) == 64 && i + 1 < len(s) && str_byte_at(s, i + 1) == 123) ? i : grv-op-at(s, i + 1);
+  def grv-digits-end(s, i) = i < len(s) && str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57 ? grv-digits-end(s, i + 1) : i;
+  // resolve the base name and then apply each operator in turn
+  def grv-parse(r, spec) {
+   let at = grv-op-at(spec, 0);
+   str_byte_at(spec, 0) == 58 ? grv-index-path(r, substring(spec, 1, len(spec))) : at >= len(spec) ? grv-base(r, spec) : grv-apply(r, grv-start(r, substring(spec, 0, at)), spec, at);
+  }
+  def grv-start(r, base) = len(base) == 0 ? gr-head-id-raw(r) : grv-base(r, base);
+  def gr-head-id-raw(r) = nothing?(gr-head-id(r)) ? nothing() : gsha-raw-of-hex(gr-head-id(r));
+  def grv-apply(r, cur, spec, i) {
+   let c = i < len(spec) ? str_byte_at(spec, i) : 0 - 1;
+   nothing?(cur) ? nothing() : i >= len(spec) ? cur : c == 94 ? grv-caret(r, cur, spec, i + 1) : c == 126 ? grv-tilde(r, cur, spec, i + 1) : c == 58 ? grv-tree-at(r, cur, substring(spec, i + 1, len(spec))) : c == 64 ? grv-at-brace(r, cur, spec, i) : nothing();
+  }
+  def grv-caret(r, cur, spec, j) {
+   str_byte_at(spec, j) == 123 && j < len(spec) ? grv-peel-spec(r, cur, spec, j) : grv-caret-n(r, cur, spec, j, grv-digits-end(spec, j));
+  }
+  def grv-caret-n(r, cur, spec, j, e) {
+   let n = e == j ? 1 : str_to_int(substring(spec, j, e));
+   let p = n == 0 ? cur : grv-parent(r, cur, n);
+   grv-apply(r, p, spec, e);
+  }
+  def grv-tilde(r, cur, spec, j) {
+   let e = grv-digits-end(spec, j);
+   grv-apply(r, grv-first-parent-n(r, cur, e == j ? 1 : str_to_int(substring(spec, j, e))), spec, e);
+  }
+  def grv-peel-spec(r, cur, spec, j) {
+   let close = gs-index-of(spec, 125, j);
+   close < 0 ? nothing() : grv-apply(r, grv-peel(r, cur, substring(spec, j + 1, close)), spec, close + 1);
+  }
+  def grv-at-brace(r, cur, spec, i) = nothing();
+  // <rev>:<path> — the object at a path in a commit's tree
+  def grv-tree-at(r, cur, path) {
+   let tree = grv-peel(r, cur, "tree");
+   nothing?(tree) ? nothing() : len(path) == 0 ? tree : grv-path-entry(r, tree, gs-split(path, 47));
+  }
+  def grv-path-entry(r, tree, segs) {
+   let es = grv-tree-ents(r, tree);
+   let hit = filter(e => str_eq(e[1], segs[0]), es);
+   nil?(hit) ? nothing() : nil?(segs[1:]) ? hit[0][2] : gs-tree?(hit[0][0]) ? grv-path-entry(r, hit[0][2], segs[1:]) : nothing();
+  }
+  def grv-tree-ents(r, raw) {
+   let o = gs-read(r, raw);
+   nothing?(o) || !str_eq(o[0], "tree") ? [] : gs-tree-entries(o[1]);
+  }
+  // :<path> — the blob staged at a path
+  def grv-index-path(r, path) {
+   let ix = gi-read(r);
+   nothing?(ix) ? nothing() : grv-index-find(ix[0], path);
+  }
+  def grv-index-find(es, path) = nil?(es) ? nothing() : str_eq(es[0][0], path) && es[0][6] == 0 ? es[0][2] : grv-index-find(es[1:], path);
+  // the raw id a spec names, with `@{upstream}` and `HEAD@{u}` read here
+  def grv-resolve(r, spec) {
+   let ub = gs-index-of(spec, 64, 0);
+   ub >= 0 && ub + 1 < len(spec) && str_byte_at(spec, ub + 1) == 123 ? grv-resolve-at(r, spec, ub) : grv-parse(r, spec);
+  }
+  def grv-resolve-at(r, spec, ub) {
+   let close = gs-index-of(spec, 125, ub);
+   let sel = close < 0 ? "" : substring(spec, ub + 2, close);
+   let head = substring(spec, 0, ub);
+   (str_eq(sel, "u") || str_eq(sel, "upstream")) && close == len(spec) - 1 ? grv-upstream-id(r, len(head) == 0 || str_eq(head, "HEAD") ? grv-current-branch(r) : head) : nothing();
+  }
+  def grv-upstream-id(r, branch) {
+   let name = nothing?(branch) ? nothing() : grv-upstream-ref(r, branch);
+   nothing?(name) || nothing?(gr-resolve(r, name)) ? nothing() : gsha-raw-of-hex(gr-resolve(r, name));
+  }
+  // ---- the date-ordered queue ----------------------------------------------------------------------------------------------
+  // items [info, flag]; the queue is ordered newest first, equal dates in arrival order
+  def grv-insert(q, item) = nil?(q) ? [item] : q[0][0][2] >= item[0][2] ? cons(q[0], grv-insert(q[1:], item)) : cons(item, q);
+  def grv-any-interesting?(q, marks) = any?(it => record_get(marks, grv-hex(it[0][0])) == 0, q);
+  // marks: a record id -> 0 (seen, interesting) | 1 (uninteresting)
+  def grv-mark(marks, hex, v) = record_set(marks, hex, v);
+  def grv-marked?(marks, hex) = record_has(marks, hex);
+  // a commit seen again as uninteresting only has its mark raised; one never seen is read and queued
+  def grv-enqueue(r, q, marks, raw, flag) {
+   let hex = grv-hex(raw);
+   grv-marked?(marks, hex) ? grv-raise(q, marks, hex, flag) : grv-enqueue-new(r, q, marks, raw, flag, hex);
+  }
+  def grv-raise(q, marks, hex, flag) {
+   let m = flag == 1 ? grv-mark(marks, hex, 1) : 0;
+   q;
+  }
+  def grv-enqueue-new(r, q, marks, raw, flag, hex) {
+   let info = grv-info(r, raw);
+   let m = grv-mark(marks, hex, flag);
+   nothing?(info) ? q : grv-insert(q, [info, flag]);
+  }
+  def grv-enqueue-all(r, q, marks, raws, flag) = nil?(raws) ? q : grv-enqueue-all(r, grv-enqueue(r, q, marks, raws[0], flag), marks, raws[1:], flag);
+  // opts: [first-parent, no-merges, limit (-1 none), skip]
+  // incl, excl: lists of raw ids. answers the emitted infos, newest first as git prints them
+  // pred: nothing(), or a function of an info answering whether the commit is shown (path limits, the -S pickaxe)
+  def grv-walk(r, incl, excl, opts, pred) {
+   let marks = record_new(0);
+   let q1 = grv-enqueue-all(r, [], marks, excl, 1);
+   let q2 = grv-enqueue-all(r, q1, marks, incl, 0);
+   grv-walk-loop(r, q2, marks, opts, [], 0, nil?(excl), pred, 5);
+  }
+  // popped: the effective flag of an item is its mark (an uninteresting mark overrides). When nothing interesting is queued the walk goes on
+  // for `slop` more pops (git's SLOP): an uninteresting commit still waiting may yet mark a commit that was emitted a moment before
+  def grv-walk-loop(r, q, marks, opts, out, count, nolimit, pred, slop) {
+   nil?(q) ? grv-finish(marks, out, opts) : grv-any-interesting?(q, marks) ? grv-walk-pop(r, q[0], q[1:], marks, opts, out, count, nolimit, pred, 5) : slop <= 0 ? grv-finish(marks, out, opts) : grv-walk-pop(r, q[0], q[1:], marks, opts, out, count, nolimit, pred, slop - 1);
+  }
+  def grv-walk-pop(r, it, rest, marks, opts, out, count, nolimit, pred, slop) {
+   let info = it[0];
+   let hex = grv-hex(info[0]);
+   let flag = record_get(marks, hex);
+   let parents = opts[0] ? (nil?(info[1]) ? [] : [info[1][0]]) : info[1];
+   let shown = flag == 0 && (nothing?(pred) ? true : pred(info));
+   let counts = shown && !(opts[1] && len(info[1]) > 1);
+   let c2 = counts ? count + 1 : count;
+   let out2 = shown ? cons(info, out) : out;
+   let enough = nolimit && opts[2] >= 0 && c2 >= opts[2] + opts[3];
+   enough ? grv-finish(marks, out2, opts) : grv-walk-loop(r, grv-enqueue-all(r, rest, marks, parents, flag), marks, opts, out2, c2, nolimit, pred, slop);
+  }
+  def grv-finish(marks, out, opts) {
+   let kept = filter(i => record_get(marks, grv-hex(i[0])) == 0, ginf-reverse(out, []));
+   let nm = opts[1] ? filter(i => len(i[1]) <= 1, kept) : kept;
+   let sk = drop(opts[3], nm);
+   opts[2] >= 0 ? take(opts[2], sk) : sk;
+  }
+  // ---- merge bases ---------------------------------------------------------------------------------------------------------
+  // flags: 1 reachable from a, 2 reachable from b, 4 stale; marks hold the flags
+  def grv-mb-insert(r, q, marks, raw, fl) {
+   let hex = grv-hex(raw);
+   let old = record_has(marks, hex) ? record_get(marks, hex) : 0;
+   let nf = bor(old, fl);
+   let m = record_set(marks, hex, nf);
+   nf == old ? q : (nothing?(grv-info(r, raw)) ? q : grv-insert(q, [grv-info(r, raw), nf]));
+  }
+  def grv-mb-live?(q, marks) = any?(it => band(record_get(marks, grv-hex(it[0][0])), 4) == 0, q);
+  def grv-mb-loop(r, q, marks, found) {
+   nil?(q) || !grv-mb-live?(q, marks) ? found : grv-mb-pop(r, q[0], q[1:], marks, found);
+  }
+  def grv-mb-pop(r, it, rest, marks, found) {
+   let hex = grv-hex(it[0][0]);
+   let fl = record_get(marks, hex);
+   let both = band(fl, 3) == 3;
+   let stale = band(fl, 4) != 0;
+   let pf = both ? 7 : fl;
+   let found2 = both && !stale ? cons(it[0][0], found) : found;
+   grv-mb-loop(r, grv-mb-parents(r, rest, marks, it[0][1], bor(band(fl, 3), both ? 4 : band(fl, 4))), marks, found2);
+  }
+  def grv-mb-parents(r, q, marks, ps, fl) = nil?(ps) ? q : grv-mb-parents(r, grv-mb-update(r, q, marks, ps[0], fl), marks, ps[1:], fl);
+  // a parent gains the flags; if it is already queued with fewer flags the queue copy is read through the marks, so only new ones are inserted
+  def grv-mb-update(r, q, marks, raw, fl) = grv-mb-insert(r, q, marks, raw, fl);
+  // raw ids of the best common ancestors of a and b (candidates not reachable from another candidate)
+  def grv-merge-bases(r, a, b) {
+   let marks = record_new(0);
+   str_eq(a, b) ? [a] : grv-mb-clean(r, gs-uniq(grv-mb-loop(r, grv-mb-insert(r, grv-mb-insert(r, [], marks, a, 1), marks, b, 2), marks, []), []));
+  }
+  // drop candidates that are ancestors of another candidate
+  def grv-mb-clean(r, cands) = filter(c => !any?(o => !str_eq(o, c) && grv-reaches?(r, o, c), cands), cands);
+  // whether `target` is reachable from `from` (walking parents, newest date first, stopping below the target's date)
+  def grv-reaches?(r, from, target) {
+   let ti = grv-info(r, target);
+   let marks = record_new(0);
+   nothing?(ti) ? false : grv-reach-loop(r, grv-mb-seed(r, from, marks), marks, target, ti[2]);
+  }
+  def grv-mb-seed(r, raw, marks) {
+   let i = grv-info(r, raw);
+   let m = record_set(marks, grv-hex(raw), 1);
+   nothing?(i) ? [] : [[i, 1]];
+  }
+  def grv-reach-loop(r, q, marks, target, tdate) {
+   nil?(q) ? false : str_eq(q[0][0][0], target) ? true : q[0][0][2] < tdate - 2592000 ? false : grv-reach-loop(r, grv-reach-add(r, q[1:], marks, q[0][0][1]), marks, target, tdate);
+  }
+  def grv-reach-add(r, q, marks, ps) = nil?(ps) ? q : grv-reach-add(r, grv-reach-one(r, q, marks, ps[0]), marks, ps[1:]);
+  def grv-reach-one(r, q, marks, raw) {
+   let hex = grv-hex(raw);
+   record_has(marks, hex) ? q : grv-reach-new(r, q, marks, raw, hex);
+  }
+  def grv-reach-new(r, q, marks, raw, hex) {
+   let m = record_set(marks, hex, 1);
+   let i = grv-info(r, raw);
+   nothing?(i) ? q : grv-insert(q, [i, 1]);
+  }
+  // is a an ancestor of b (or equal)
+  def grv-ancestor?(r, a, b) = str_eq(a, b) || grv-reaches?(r, b, a);
+  // ---- counting ------------------------------------------------------------------------------------------------------------
+  def grv-range-count(r, incl, excl) = len(grv-walk(r, incl, excl, [false, false, 0 - 1, 0], nothing()));
+  // ---- pretty formats ------------------------------------------------------------------------------------------------------
+  def grv-short(r, raw, n) {
+   let hex = grv-hex(raw);
+   grv-short-try(r, hex, n);
+  }
+  // the shortest prefix of at least n characters that names no other object
+  def grv-short-try(r, hex, n) = n >= 40 ? hex : len(gs-expand(r, substring(hex, 0, n))) <= 1 ? substring(hex, 0, n) : grv-short-try(r, hex, n + 1);
+  def grv-msg-body(msg) {
+   let i = gs-find-blank(msg, 0);
+   i < 0 ? "" : gs-trim(substring(msg, i + 2, len(msg))) ++ "\n";
+  }
+  // ref names that point at a commit, for %d / %D: [HEAD -> branch, tags, other branches]
+  def grv-decorations(r, raw) {
+   let hex = grv-hex(raw);
+   let heads = map(x => x[0], filter(x => str_eq(x[1], hex), gr-list(r, "refs/heads/")));
+   let tags = map(x => x[0], filter(x => grv-tag-points?(r, x[1], hex), gr-list(r, "refs/tags/")));
+   let remotes = map(x => x[0], filter(x => str_eq(x[1], hex) && !gs-ends?(x[0], "/HEAD"), gr-list(r, "refs/remotes/")));
+   let head = gr-head-id(r);
+   let h = gr-head(r);
+   let headhere = !nothing?(head) && str_eq(head, hex);
+   append(headhere ? (str_eq(h[0], "branch") ? ["HEAD -> " ++ gr-short-branch(h[1])] : ["HEAD"]) : [], append(map(t => "tag: " ++ substring(t, 10, len(t)), tags), append(map(b => substring(b, 13, len(b)), remotes), filter(b => !(headhere && str_eq(b, gr-short-branch(h[1]))), map(b => gr-short-branch(b), heads)))));
+  }
+  // a tag ref names the commit directly, or an annotated tag object that peels to it
+  def grv-tag-points?(r, tagid, hex) = str_eq(tagid, hex) || (!nothing?(grv-peel(r, gsha-raw-of-hex(tagid), "commit")) && str_eq(grv-hex(grv-peel(r, gsha-raw-of-hex(tagid), "commit")), hex));
+  def grv-join(xs, sep) = foldl((acc, x) => len(acc) == 0 ? x : acc ++ sep ++ x, "", xs);
+  // expand a --format string for one commit info. dm: date mode
+  def grv-format(r, fmt, info, dm) = grv-fmt(r, fmt, 0, grv-full(r, info), dm, "");
+  def grv-fmt(r, fmt, i, info, dm, acc) = i >= len(fmt) ? acc : str_byte_at(fmt, i) == 37 && i + 1 < len(fmt) ? grv-fmt-conv(r, fmt, i + 1, info, dm, acc) : grv-fmt(r, fmt, i + 1, info, dm, acc ++ substring(fmt, i, i + 1));
+  def grv-fmt-conv(r, fmt, i, info, dm, acc) {
+   let c = str_byte_at(fmt, i);
+   let c2 = i + 1 < len(fmt) ? str_byte_at(fmt, i + 1) : 0 - 1;
+   c == 37 ? grv-fmt(r, fmt, i + 1, info, dm, acc ++ "%") : c == 110 ? grv-fmt(r, fmt, i + 1, info, dm, acc ++ "\n") : c == 120 && i + 2 < len(fmt) ? grv-fmt(r, fmt, i + 3, info, dm, acc ++ byte_to_str(gsha-hexval(str_byte_at(fmt, i + 1)) * 16 + gsha-hexval(str_byte_at(fmt, i + 2)))) : (c == 97 || c == 99) && c2 >= 0 ? grv-fmt(r, fmt, i + 2, info, dm, acc ++ grv-person-field(info, c, c2, dm)) : grv-fmt(r, fmt, i + 1, info, dm, acc ++ grv-simple(r, c, info, dm));
+  }
+  def grv-person-of(info, who) = gs-person((who == 97 ? info[4][2] : info[4][3]) ?? "");
+  def grv-person-field(info, who, f, dm) {
+   let p = grv-person-of(info, who);
+   f == 110 ? p[0] : f == 101 ? p[1] : f == 100 ? gdt-render(dm, p[2], p[3]) : f == 68 ? gdt-rfc(p[2], p[3]) : f == 105 ? gdt-iso(p[2], p[3]) : f == 73 ? gdt-iso-strict(p[2], p[3]) : f == 116 ? p[2].str() : f == 115 ? gdt-short(p[2], p[3]) : "%" ++ byte_to_str(who) ++ byte_to_str(f);
+  }
+  def grv-simple(r, c, info, dm) = c == 72 ? grv-hex(info[0]) : c == 104 ? grv-short(r, info[0], 7) : c == 84 ? grv-hex(info[3]) : c == 116 ? grv-short(r, info[3], 7) : c == 80 ? grv-join(map(p => grv-hex(p), info[1]), " ") : c == 112 ? grv-join(map(p => grv-short(r, p, 7), info[1]), " ") : c == 115 ? gs-subject(info[4][4]) : c == 98 ? grv-msg-body(info[4][4]) : c == 66 ? info[4][4] : c == 100 ? grv-deco-paren(grv-decorations(r, info[0])) : c == 68 ? grv-join(grv-decorations(r, info[0]), ", ") : "%" ++ byte_to_str(c);
+  def grv-deco-paren(ds) = nil?(ds) ? "" : " (" ++ grv-join(ds, ", ") ++ ")";
+ }
+ 0;
+}

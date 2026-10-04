@@ -3,7 +3,8 @@
 ; the drift gate's form-cli-build row (it builds a copy in a private body and proves it by identity); this band holds what that row cannot
 ; say by passing: the identity folds against independent answers, every way an attestation can be wrong, the lock's refusals.
 ;
-; Verdict 16383 when every claim lands:
+; Expected: 65535
+; Verdict 65535 when every claim lands:
 ;   1     identity: SHA-256 of "" and "abc" are the standard answers; the source fold of a.txt "alpha\nbeta\n" and b.txt "gamma" is
 ;         81740dcdfa544c889373f78411e8b3f68503db024eb19cdc68d8cca182e8dcd9 and the stamp (the first 16 hex over the bytes, CR stripped) is
 ;         f3220283d05d1ff2, both answers of an independent SHA-256 over the same bytes (shasum, read once on 2026-10-04); the same files with
@@ -32,8 +33,17 @@
 ;         refusal (`form-cli-build: unknown key "rgen"`, ...) and never begins the default install (no regeneration, no private build)
 ;   8192  plant: a request that reads (a prove of a missing executable) is not refused by the reader but answered by the flow: claim 4096's
 ;         refusal is the reader's, not a general failure
+;   16384 the seed doors that ended cp, chmod, ln -s, test -L, printenv and uname: fcb-copy keeps the bytes and the mode and refuses a
+;         directory, a link and a path that is not there; fcb-chmod reads "700" as 448 and "600" as 384, "+x" gives execute wherever
+;         read stands (644 reads 755, 600 reads 700), and refuses digits that are not octal and a path that is not there; the
+;         symlink test is true for a link and false for a file, a directory and a missing path; the carrier path is the environment's
+;         (host_getenv) or this body's own; the machine is read from an executable header (Mach-O arm64 and x86_64, ELF x86_64 and
+;         aarch64 named, a short head and an unknown magic read "unknown") and this host's slug is its kernel's name and that machine
+;   32768 the oversize fixture the proof builds (17 MiB of zero bytes, once made by dd) is written by Form in 64 KiB slices (host_pwrite):
+;         its size is 17825792, its first, middle and last bytes are zero, a second making replaces the first whole, and it takes
+;         under 30 s (making the whole string in Form first took 31 s on a loaded host)
 ;
-; REQUIRES: the built ./fkwu and the body root as the working directory.
+; REQUIRES: the built ./fkwu with the host doors (host_chmod host_symlink host_getenv host_os host_file_copy host_file_mode host_realpath host_pwrite host_mkdir_mode, runtime/fkwu-uni.c leaf-door modes 35-49) and the body root as the working directory.
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/form-cli-build-flow.bml form-stdlib/bml/form-cli-prove.bml
 section [form.bml] {
  class FormCliBuildBand {
@@ -139,8 +149,8 @@ section [form.bml] {
    let real = fbb-root(ctx) ++ "/wf-real";
    let link = fbb-root(ctx) ++ "/wf-link";
    let w = write_file(real, fcb-att-text(fbb-start-pairs()));
-   let made = hch-run-in(fcb-io(), "band-ln", ["/bin/ln", "-s", real, link], "", hch-by(20000));
-   !nothing?(fcb-att-load(real)) && nothing?(fcb-att-load(link));
+   let made = host_symlink(real, link);
+   (Comparable) made == 0 && !nothing?(fcb-att-load(real)) && nothing?(fcb-att-load(link));
   }
   // ---- 16 platform
   def fbb-c-platform(ctx) {
@@ -232,6 +242,46 @@ section [form.bml] {
    fbb-refused?(bad, "stdin is not well-formed JSON") && fbb-refused?(typo, "unknown key \"rgen\"") && fbb-refused?(kind, "key \"retain\" must be an integer") && fbb-refused?(array, "stdin must be one JSON object")
    && host_monotonic_ms() - t0 < 120000;
   }
+  // ---- 16384 the doors that replaced the borrowed programs
+  def fbb-mode(path) = host_file_mode(path) % 4096;
+  def fbb-head(bytes) = str-spans(map(b => byte_to_str(b), append(bytes, map(i => 0, range(0, 32 - len(bytes))))));
+  def fbb-c-doors(ctx) {
+   let dir = fbb-root(ctx) ++ "/doors";
+   let made = hch-mkdirs(dir);
+   let put = write_file(dir ++ "/src", "bytes\n");
+   let m1 = host_chmod(dir ++ "/src", 420);
+   let copied = fcb-copy(dir ++ "/src", dir ++ "/dst");
+   let kept = (String) (read_file(dir ++ "/dst") ?? "x") == "bytes\n" && (Comparable) fbb-mode(dir ++ "/dst") == 420;
+   let plus = fcb-chmod("+x", dir ++ "/dst") && (Comparable) fbb-mode(dir ++ "/dst") == 493;
+   let seven = fcb-chmod("700", dir ++ "/dst") && (Comparable) fbb-mode(dir ++ "/dst") == 448;
+   let six = fcb-chmod("600", dir ++ "/dst") && (Comparable) fbb-mode(dir ++ "/dst") == 384;
+   let plus-private = fcb-chmod("+x", dir ++ "/dst") && (Comparable) fbb-mode(dir ++ "/dst") == 448;
+   let refused = !fcb-chmod("789", dir ++ "/dst") && !fcb-chmod("", dir ++ "/dst") && !fcb-chmod("700", dir ++ "/nobody") && !fcb-chmod("+x", dir ++ "/nobody");
+   let link = host_symlink(dir ++ "/src", dir ++ "/link");
+   let copies-refused = !fcb-copy(dir, dir ++ "/dir-copy") && !fcb-copy(dir ++ "/link", dir ++ "/link-copy") && !fcb-copy(dir ++ "/nobody", dir ++ "/nobody-copy");
+   let links = (Comparable) link == 0 && fcb-symlink?(dir ++ "/link") && !fcb-symlink?(dir ++ "/src") && !fcb-symlink?(dir) && !fcb-symlink?(dir ++ "/nobody");
+   let carrier = (String) fcb-carrier-path() == (len(host_getenv("FKWU_METAL_CARRIER") ?? "") > 0 ? host_getenv("FKWU_METAL_CARRIER") : (Comparable) file_size(fcb-own-carrier()) >= 0 ? fcb-own-carrier() : "");
+   let arch = (String) fcb-image-arch(fbb-head([207, 250, 237, 254, 12, 0, 0, 1])) == "arm64" && (String) fcb-image-arch(fbb-head([207, 250, 237, 254, 7, 0, 0, 1])) == "x86_64"
+    && (String) fcb-image-arch(fbb-head([127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 62, 0])) == "x86_64" && (String) fcb-image-arch(fbb-head([127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 183, 0])) == "aarch64"
+    && (String) fcb-image-arch("short") == "unknown" && (String) fcb-image-arch(fbb-head([1, 2, 3, 4])) == "unknown" && (String) fcb-image-arch("") == "unknown";
+   let host = (String) fcb-host-arch() != "unknown" && (String) fcb-platform-slug() == fcb-slug-of(host_os() ?? "", fcb-host-arch()) && fcb-slug-valid?(fcb-platform-slug());
+   copied && kept && plus && seven && six && plus-private && refused && copies-refused && links && carrier && arch && host;
+  }
+  // ---- 32768 the oversize fixture, written by Form
+  def fbb-c-zero(ctx) {
+   let path = fbb-root(ctx) ++ "/zero.bin";
+   let t0 = host_monotonic_ms();
+   let n = fcp-zero-file(path, 17 * 1048576);
+   let took = host_monotonic_ms() - t0;
+   (Comparable) n == 0 && (Comparable) file_size(path) == 17825792 && (String) (read_file_slice(path, 0, 4) ?? "x") == fcp-rep(byte_to_str(0), 4) && (String) (read_file_slice(path, 8000000, 4) ?? "x") == fcp-rep(byte_to_str(0), 4)
+   && (String) (read_file_slice(path, 17825788, 4) ?? "x") == fcp-rep(byte_to_str(0), 4) && took < 30000 && fbb-zero-replaced?(path);
+  }
+  // a mark in the middle and a second making: the file is made again whole, not written over
+  def fbb-zero-replaced?(path) {
+   let marked = host_pwrite(path, 8000000, "X");
+   let again = fcp-zero-file(path, 17 * 1048576);
+   (Comparable) marked == 1 && (Comparable) again == 0 && (Comparable) file_size(path) == 17825792 && (String) (read_file_slice(path, 7999999, 3) ?? "x") == fcp-rep(byte_to_str(0), 3);
+  }
   // ---- plants
   def fbb-c-plant-reads(ctx) {
    let run = fbb-door-run(ctx, "p-reads", "{\"prove\":\"" ++ fbb-root(ctx) ++ "/nobody\",\"sha\":\"" ++ fbb-sha() ++ "\"}");
@@ -252,7 +302,7 @@ section [form.bml] {
  }
  let ctx = fbb-fresh();
  nothing?(ctx) ? form_error("form-cli build band needs a fresh directory") : 0;
- let verdict = live-claims("form-cli-build-band", ctx, [["identity", 1, 1, fbb-c-identity], ["closure", 2, 1, fbb-c-closure], ["attest", 4, 1, fbb-c-attest], ["well-formed", 8, 1, fbb-c-wellformed], ["platform", 16, 1, fbb-c-platform], ["lock", 32, 1, fbb-c-lock], ["proof", 64, 1, fbb-c-proof], ["roots", 128, 1, fbb-c-roots], ["gate", 256, 1, fbb-c-gate], ["no-shell", 512, 1, fbb-c-noshell], ["plant-cr", 1024, 1, fbb-c-plant-cr], ["plant-shape", 2048, 1, fbb-c-plant-shape], ["strict", 4096, 1, fbb-c-strict], ["plant-reads", 8192, 1, fbb-c-plant-reads]]);
+ let verdict = live-claims("form-cli-build-band", ctx, [["identity", 1, 1, fbb-c-identity], ["closure", 2, 1, fbb-c-closure], ["attest", 4, 1, fbb-c-attest], ["well-formed", 8, 1, fbb-c-wellformed], ["platform", 16, 1, fbb-c-platform], ["lock", 32, 1, fbb-c-lock], ["proof", 64, 1, fbb-c-proof], ["roots", 128, 1, fbb-c-roots], ["gate", 256, 1, fbb-c-gate], ["no-shell", 512, 1, fbb-c-noshell], ["plant-cr", 1024, 1, fbb-c-plant-cr], ["plant-shape", 2048, 1, fbb-c-plant-shape], ["strict", 4096, 1, fbb-c-strict], ["plant-reads", 8192, 1, fbb-c-plant-reads], ["doors", 16384, 1, fbb-c-doors], ["zero-fixture", 32768, 1, fbb-c-zero]]);
  host_dir_rmdir(fbb-root(ctx));
  verdict;
 }

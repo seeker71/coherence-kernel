@@ -41,6 +41,7 @@
 // PROOF: form-stdlib/tests/host-walk-band.bml (claim "spawn").
 import form-stdlib/line-grammar.fk;
 import form-stdlib/bml/spawn-guard.bml;
+import form-stdlib/bml/cell-said.bml;
 section [form.bml] {
  class HostChild {
   def hch-dir() = ".hearth/walk-io";
@@ -132,8 +133,57 @@ section [form.bml] {
   def hch-rotate(io, step) {
    let fed = hch-carry(io, step, ".in");
    let said = hch-carry(io, step, ".out");
+   let heard = hch-carry(io, step, ".err");
    hch-carry(io, step, ".exit");
   }
+  // ── a cell, called in this process (docs/in-process-cells.md) ──
+  // hch-cell-in(io, step, path, input, until) runs the cell at path through cell_run: no child, no exit to read, no stream
+  // to parse. It answers what hch-run answers, [status, text, why], and the cell's own record after them:
+  //   status  0 when the cell ran to its end with no compile error, 1 when its compile counted an error or it stopped
+  //           (the exit a spawned fkwu gave), nothing() when it never ran (the unit would not read as a program, the call was
+  //           refused, or this fkwu has no cell_run door) or ended at its deadline
+  //   text    what the cell printed (the value it ended on is the record's, not a last line to be read back); a stop is named
+  //           on the text's last line, as a spawned run's stderr named it
+  //   why     "" when it ran, else the reason, named as hch-run names one ("birth refused: ...", "deadline: ...")
+  //   [3]     the record {value, out, err, diag, stopped, errors, resident, ms, cpu_us}, nothing() when no record came
+  // The step's evidence stands as it does for a child: <io>/<step>.{in,out,err,exit} (err is the stderr text the cell said:
+  // its diagnostics and organ-health rows, cs-stderr of cell-said.bml; the exit line is the reading above), the run before
+  // it beside it as .prev.*. `until` is a time on
+  // host_monotonic_ms as it is for hch-run; the cell's budget is what is left of it (a deadline instead of a kill).
+  def hch-cell-left(until) = nothing?(until) ? nothing() : until - host_monotonic_ms() < 1 ? 1 : until - host_monotonic_ms();
+  def hch-cell-input-lines(input) {
+   let lines = split-on(input, "\n");
+   len(lines) > 0 && (String) lines[len(lines) - 1] == "" ? take(len(lines) - 1, lines) : lines;
+  }
+  def hch-cell-stdin(input) = (String) (input ?? "") == "" ? nothing() : hch-cell-input-lines(input);
+  def hch-cell-field(rec, key) = nothing?(rec) ? nothing() : record_get(rec, key);
+  def hch-cell-stop(rec) = hch-cell-field(rec, "stopped");
+  def hch-cell-kind(rec) = nothing?(hch-cell-stop(rec)) ? "" : (String) record_get(hch-cell-stop(rec), "kind");
+  def hch-cell-message(rec) = nothing?(hch-cell-stop(rec)) ? "" : (String) record_get(hch-cell-stop(rec), "message");
+  def hch-cell-status(rec) = nothing?(rec) ? nothing() : (String) hch-cell-kind(rec) == "" ? ((Comparable) record_get(rec, "errors") > 0 ? 1 : 0) : (String) hch-cell-kind(rec) == "stop" ? 1 : nothing();
+  def hch-cell-why(rec) = nothing?(rec) ? "birth refused: this fkwu has no cell_run door; rebuild it from runtime/fkwu-uni.c" : (String) hch-cell-kind(rec) == "deadline" ? "deadline: the cell ran past its deadline and was stopped" : ((String) hch-cell-kind(rec) == "unrunnable" || (String) hch-cell-kind(rec) == "refused") ? "birth refused: " ++ hch-cell-message(rec) : "";
+  def hch-cell-printed(rec) = nothing?(rec) ? "" : (String) (record_get(rec, "out") ?? "");
+  def hch-cell-text(rec) = (String) hch-cell-kind(rec) == "stop" ? hch-cell-printed(rec) ++ (hch-ends-nl?(hch-cell-printed(rec)) || (String) hch-cell-printed(rec) == "" ? "" : "\n") ++ "[cell] stopped: " ++ hch-cell-message(rec) ++ "\n" : hch-cell-printed(rec);
+  def hch-cell-in(io, step, path, input, until) {
+   let made = hch-mkdirs(io);
+   let rotated = hch-rotate(io, step);
+   let out = hch-out-path(io, step);
+   let cleared = host_path_remove(out);
+   let from = hch-input(io, step, input);
+   let rec = cell_run(path, 0, hch-cell-left(until), hch-cell-stdin(input));
+   hch-cell-answer(io, step, out, rec);
+  }
+  def hch-cell-answer(io, step, out, rec) {
+   let status = hch-cell-status(rec);
+   let why = hch-cell-why(rec);
+   let text = hch-cell-text(rec);
+   let wrote = write_file_text(out, nothing?(rec) ? "[host-child] " ++ why ++ "\n" : text);
+   let heard = write_file_text(hch-err-path(io, step), cs-stderr(rec));
+   let noted = write_file_text(hch-exit-path(io, step), hch-exit-line(status, why) ++ "\n");
+   [status, text, why, rec];
+  }
+  def hch-err-path(io, step) = io ++ "/" ++ step ++ ".err";
+  def hch-cell(step, path, input, until) = hch-cell-in(hch-dir(), step, path, input, until);
   // err: "" shares the out file; any other path takes stderr there
   // A command that runs a forbidden tool (sed, awk, perl, python: spawn-guard.bml) is never begun: its ending is the
   // step's [nothing(), "", "birth refused: forbidden-tool <names>: ..."], written beside the step like any refusal at birth.

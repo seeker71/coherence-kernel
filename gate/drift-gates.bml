@@ -8,9 +8,9 @@
 // substring and str_find meanings, the kernel laws, binary freshness,
 // ground, door links, release ledger, the form-cli build, the cursor's
 // coverage of every section —
-// runs through one door: one host-exec per row, one pass bit per
-// row, one fold. The number names the gate that refused. Adding a
-// gate is adding a row.
+// runs through one door: one cell_run per row (in this process, no
+// child: docs/in-process-cells.md), one pass bit per row, one fold.
+// The number names the gate that refused. Adding a gate is adding a row.
 //
 // This unit is the organ; the door is gate/drift-gates-run.bml, the
 // structural-gate / structural-gate-run shape. A preluded unit runs
@@ -20,7 +20,8 @@
 //
 //   ./fkwu gate/drift-gates-run.bml
 //
-// prints one line per gate (name, exit code of the child, last line
+// prints one line per gate (name, rc of the cell: 0 when it ran and
+// ended clean, 1 when it stopped or compiled with errors, last line
 // of the gate, pass or REFUSED with the command to rerun), then
 //
 //   drift-gates pass=<fold> full=<mask> refused=<mask> names=<a,b | ->
@@ -44,22 +45,27 @@
 //
 //   ./fkwu gate/drift-gates-run.bml | tee /dev/stderr | grep -q ' refused=0 '
 //
-// Row shape: name, command, want. Each command runs in a subshell
-// with stderr folded into stdout and its exit code appended as the
-// last line (@rc=N). want is the Form verdict the gate answers on
-// its last line (with exit 0); want = dg-exit-only() means exit 0 is
-// the whole verdict (a gate that speaks in prose).
+// Row shape: name, unit, input, want. A row runs its unit as one cell_run call
+// (a deadline instead of a kill; the input is the cell's stdin, a list of
+// lines or nothing, and the mark @scratch@ in a line is a fresh path in the
+// temp directory that is removed with whatever sits beside it when the cell
+// returns). The reading is the record's: the cell's rc is 0 when it ran and
+// ended clean and 1 when it stopped or compiled with errors; its last line is
+// the value it answered. want is the Form verdict the gate answers as its
+// value (with rc 0); want = dg-exit-only() means rc 0 is the whole verdict (a
+// gate that speaks in prose). A unit that would not run at all reads no rc.
 //
 // A landing runs only the rows whose ground moved: each row names the paths it guards (dg-grounds),
 // and a row whose ground no path since origin/main touches sits out, said so on its own line and
 // absent from the fold, never a pass. A row with no ground named guards the whole tree and always
-// runs. A grounded row that runs `./fkwu <unit>` also guards every unit that unit loads: the one
-// reader computes that part (`./fkwu --closure` names each loaded unit), so only the data files a
-// gate reads by name are written by hand. Every row that runs is a live step (form-stdlib/bml/live.bml): its reading is spoken on
+// runs. A grounded row also guards every unit its unit loads: dg-closure computes that part with the
+// body's own dependency reader (form-stdlib/bml-source.fk: the prelude lines and imports of each unit,
+// resolved by the loader's search order), so only the data files a gate reads by name are written by
+// hand. Every row that runs is a live step (form-stdlib/bml/live.bml): its reading is spoken on
 // stderr as it lands, and a red row is offered only the repairs that meet what it observed before
 // it refuses (see dg-repairs); the printed line says "pass after <repair>" when one made it hold.
 //
-// preludes: form-stdlib/core.fk form-stdlib/table.bml form-stdlib/term-graphics.bml form-stdlib/bml/live.bml
+// preludes: form-stdlib/core.fk form-stdlib/table.bml form-stdlib/term-graphics.bml form-stdlib/bml/live.bml form-stdlib/bml-source.fk
 //
 // Proven by: gate/tests/drift-gates-band.fk
 //
@@ -70,10 +76,15 @@ section [form.bml] {
         thought drift-gates-pattern = ["gates-are-rows", "one-bit-per-gate", "exit-is-the-last-line", "red-lands-nothing", "names-travel"];
 
         def dg-exit-only() = 0 - 1;
-        def dg-row(name, command, want) = [name, command, want];
+        // a row: [name, unit, input, want]; input is the cell's stdin (a list of lines, or nothing for none)
+        def dg-row(name, unit, input, want) = [name, unit, input, want];
         def dg-name(r) = r[0];
-        def dg-command(r) = r[1];
-        def dg-want(r) = r[2];
+        def dg-unit(r) = r[1];
+        def dg-input-of(r) = r[2];
+        def dg-want(r) = r[3];
+        // the words that rerun a row by hand, said on a refusal
+        def dg-command(r) = nothing?(dg-input-of(r)) ? "./fkwu " ++ dg-unit(r) : "printf '" ++ dg-join(dg-input-of(r), "\\n") ++ "' | ./fkwu " ++ dg-unit(r);
+        def dg-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ dg-join(xs[1:], sep);
 
         // The substring-one-meaning row: substring is the door the tree stands
         // on — str_find, split-on, trim and char_at are recipes over it. The
@@ -121,21 +132,21 @@ section [form.bml] {
         // A row list is one statement: a comment BETWEEN rows ends it early and
         // the unit lowers with three parens still open. Comments live here.
         def dg-all-rows() = [
-            dg-row("native-surface", "./fkwu gate/native-surface.bml", 1),
-            dg-row("op-manifest", "./fkwu gate/op-manifest.bml", 1),
-            dg-row("flt-ops-gen", "./fkwu gate/flt-ops-gen.bml", 1),
-            dg-row("reserved-heads", "./fkwu gate/reserved-heads.bml </dev/null", 1),
-            dg-row("canonical-conformance", "./fkwu gate/canonical-conformance-run.bml", 1),
-            dg-row("structural-gate", "./fkwu gate/structural-gate-run.fk", 1),
-            dg-row("substring-one-meaning", "./fkwu form/form-stdlib/tests/substring-one-meaning-band.fk", 4095),
-            dg-row("str-find-one-meaning", "./fkwu form/form-stdlib/tests/str-find-one-meaning-band.fk", 8191),
-            dg-row("kernel-laws", "./fkwu form/form-stdlib/tests/kernel-laws-band.fk", 2147483647),
-            dg-row("binary-freshness", "./fkwu form/form-stdlib/tests/binary-freshness-band.fk </dev/null", 31),
-            dg-row("ground", "./fkwu bootstrap/ground.fk", 42),
-            dg-row("door-links", "./fkwu observe/door-link-health-run.bml", 0),
-            dg-row("release-ledger", "./fkwu form/form-stdlib/release-ledger.bml", dg-exit-only()),
-            dg-row("form-cli-build", "out=\"${TMPDIR:-/tmp}/form-cli-gate-$$\" && printf '{\"out\":\"%s\"}' \"$out\" | ./fkwu gate/form-cli-build-run.bml >/dev/null; rc=$?; rm -f \"$out\" \"$out\".*; exit $rc", dg-exit-only()),
-            dg-row("bml-cursor-coverage", "echo gate | ./fkwu observe/bml-cursor-coverage-run.bml", 0)];
+            dg-row("native-surface", "gate/native-surface.bml", nothing(), 1),
+            dg-row("op-manifest", "gate/op-manifest.bml", nothing(), 1),
+            dg-row("flt-ops-gen", "gate/flt-ops-gen.bml", nothing(), 1),
+            dg-row("reserved-heads", "gate/reserved-heads.bml", nothing(), 1),
+            dg-row("canonical-conformance", "gate/canonical-conformance-run.bml", nothing(), 1),
+            dg-row("structural-gate", "gate/structural-gate-run.fk", nothing(), 1),
+            dg-row("substring-one-meaning", "form/form-stdlib/tests/substring-one-meaning-band.fk", nothing(), 4095),
+            dg-row("str-find-one-meaning", "form/form-stdlib/tests/str-find-one-meaning-band.fk", nothing(), 8191),
+            dg-row("kernel-laws", "form/form-stdlib/tests/kernel-laws-band.fk", nothing(), 2147483647),
+            dg-row("binary-freshness", "form/form-stdlib/tests/binary-freshness-band.fk", nothing(), 31),
+            dg-row("ground", "bootstrap/ground.fk", nothing(), 42),
+            dg-row("door-links", "observe/door-link-health-run.bml", nothing(), 0),
+            dg-row("release-ledger", "form/form-stdlib/release-ledger.bml", nothing(), dg-exit-only()),
+            dg-row("form-cli-build", "gate/form-cli-build-run.bml", ["{\"out\":\"@scratch@\"}"], dg-exit-only()),
+            dg-row("bml-cursor-coverage", "observe/bml-cursor-coverage-run.bml", ["gate"], 0)];
 
         // --- a row's ground: the paths whose change it guards. The kernel rows guard the kernel
         // (the seed and the units every lens reads), the data files they read by name, and every unit
@@ -162,21 +173,17 @@ section [form.bml] {
         def dg-touches?(paths, ground) = nil?(paths) ? false : dg-under?(paths[0], ground) ? true : dg-touches?(paths[1:], ground);
         def dg-under?(path, ground) = nil?(ground) ? false : dg-starts?(path, ground[0]) ? true : dg-under?(path, ground[1:]);
 
-        // --- the computed part of a ground: the unit a row runs (`./fkwu <unit> ...`) and every
-        // unit it loads, as the one reader names them. `./fkwu --closure <unit> <out>` writes a
-        // `; unit: <path>` line per unit, spelled from the repo root; a spelling that walks up
-        // (form/../control/x.fk) folds to the path a change names. A closure that does not arrive
-        // reads nothing, and a row whose closure is nothing runs: an unread ground is never a rest.
-        def dg-fkwu-mark() = "./fkwu ";
-        def dg-unit(row) {
-            let c = dg-command(row);
-            let at = str_find(c, dg-fkwu-mark(), 0);
-            at < 0 ? "" : dg-token-at(c, at + str_len(dg-fkwu-mark()));
+        // --- the computed part of a ground: the unit a row runs and every unit it loads, as the
+        // loader names them. dg-closure reads each unit's prelude lines and imports with the body's own
+        // dependency reader (bml-source-dependencies) and resolves each token by the loader's search
+        // order (bml-source-resolve), unit by unit, spelled from the repo root; a spelling that walks
+        // up (form/../control/x.fk) folds to the path a change names. A unit that does not read gives
+        // no closure (nothing), and a row whose closure is nothing runs: an unread ground is never a rest.
+        def dg-rfind-go(s, needle, from, last) {
+            let i = str_find(s, needle, from);
+            i < 0 ? last : dg-rfind-go(s, needle, i + 1, i);
         }
-        def dg-token-at(c, start) {
-            let sp = str_find(c, " ", start);
-            substring(c, start, sp < 0 ? str_len(c) : sp);
-        }
+        def dg-rfind(s, needle) = dg-rfind-go(s, needle, 0, 0 - 1);
         def dg-cut-up(p, at) {
             let slash = dg-rfind(substring(p, 0, at), "/");
             slash < 0 ? substring(p, at + 4, str_len(p)) : (substring(p, 0, slash + 1) ++ substring(p, at + 4, str_len(p)));
@@ -185,28 +192,47 @@ section [form.bml] {
             let at = str_find(p, "/../", 0);
             at < 0 ? p : dg-fold-up(dg-cut-up(p, at));
         }
-        def dg-unit-mark() = byte_to_str(10) ++ "; unit: ";
-        def dg-units-from(s, from) {
-            let at = str_find(s, dg-unit-mark(), from);
-            at < 0 ? [] : dg-unit-at(s, at + str_len(dg-unit-mark()));
+        def dg-bml?(path) = dg-ends?(path, ".bml");
+        def dg-ends?(s, p) = (len(s) >= len(p)) && ((String) substring(s, len(s) - len(p), len(s)) == p);
+        // the units one unit names, resolved to the path the loader opens (a token nothing answers is no unit)
+        def dg-named(owner, text) = bml-source-dependencies(text, dg-bml?(owner) ? 0 : 1) |> map(token => bml-source-resolve(owner, token)) |> filter(p => !nothing?(p)) |> map(p => dg-fold-up(p));
+        def dg-in?(xs, s) = nil?(xs) ? false : (String) xs[0] == s ? true : dg-in?(xs[1:], s);
+        // depth first, each unit once, the first-met order; a unit that does not read names no more
+        def dg-walk-units(pending, seen) {
+            nil?(pending) ? reverse(seen)
+            : dg-in?(seen, pending[0]) ? dg-walk-units(pending[1:], seen)
+            : dg-walk-units(append(dg-named(pending[0], read_file(pending[0]) ?? ""), pending[1:]), cons(pending[0], seen));
         }
-        def dg-unit-at(s, start) {
-            let nl = str_find(s, byte_to_str(10), start);
-            let end = nl < 0 ? str_len(s) : nl;
-            cons(dg-fold-up(substring(s, start, end)), dg-units-from(s, end));
+        // two loads the lines do not name. A program with a .bml unit in it is lowered over the operator floor
+        // (form-stdlib/bml/value-operators.bml). And form-stdlib/home-index.txt (<name> <unit>): a unit that calls a home
+        // name and defines no such name in its closure gets the home linked in, as if it had preluded it. The call
+        // is read as the name and an open paren in some text of the closure, the definition as def/defn of the name
+        // (a name read as called where the loader sees it defined or bound locally only widens the ground, never narrows it)
+        def dg-operator-floor() = "form/form-stdlib/bml/value-operators.bml";
+        def dg-home-index() = "form/form-stdlib/home-index.txt";
+        def dg-home-rows() = split-on(read_file(dg-home-index()) ?? "", "\n") |> filter(l => len(l) > 0 && !dg-starts?(l, "#")) |> map(l => split-on(l, " ")) |> filter(r => len(r) == 2);
+        def dg-home-unit(row) = bml-source-resolve(dg-operator-floor(), row[1]);
+        def dg-mentions?(text, part) = str_find(text, part, 0) >= 0;
+        // a name stands as a word where the byte before it is no part of an identifier
+        def dg-ident-byte?(b) = (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95 || b == 45 || b == 63;
+        def dg-word-before?(text, i) = i == 0 || !dg-ident-byte?(str_byte_at(text, i - 1));
+        def dg-opens-at?(text, i) = i < len(text) && (str_byte_at(text, i) == 40 || (str_byte_at(text, i) == 32 && i + 1 < len(text) && str_byte_at(text, i + 1) == 40));
+        def dg-call-from?(text, name, from) {
+            let i = str_find(text, name, from);
+            i < 0 ? false : dg-word-before?(text, i) && dg-opens-at?(text, i + len(name)) ? true : dg-call-from?(text, name, i + 1);
         }
-        def dg-unit-paths(text) = dg-units-from(byte_to_str(10) ++ text, 0);
-        def dg-closure-out() = temp_dir() ++ "/drift-gates-closure-" ++ host_pid().str() ++ ".fk";
-        def dg-closure-text(said, out) {
-            let rc = nothing?(said) ? nothing() : dg-rc(said);
-            nothing?(rc) ? nothing() : (Comparable) rc == 0 ? read_file(out) : nothing();
+        def dg-calls?(text, name) = dg-call-from?(text, name, 0);
+        def dg-defines?(text, name) = dg-mentions?(text, "def " ++ name ++ "(") || dg-mentions?(text, "defn " ++ name ++ " ");
+        def dg-homes-for(units) {
+            let texts = units |> map(u => read_file(u) ?? "");
+            dg-home-rows() |> filter(r => any?(t => dg-calls?(t, r[0]), texts) && !any?(t => dg-defines?(t, r[0]), texts)) |> map(r => dg-home-unit(r)) |> filter(p => !nothing?(p) && !dg-in?(units, p));
         }
-        def dg-closure(unit) {
-            let out = dg-closure-out();
-            let text = dg-closure-text(host-exec(dg-wrap("./fkwu --closure " ++ unit ++ " " ++ out ++ " >/dev/null"), ""), out);
-            let gone = fs_remove(out);
-            nothing?(text) ? nothing() : dg-unit-paths(text);
+        def dg-close(units) {
+            let lowered = dg-in?(units, dg-operator-floor()) || !any?(u => dg-bml?(u), units) ? units : dg-walk-units([dg-operator-floor()], reverse(units));
+            let homes = dg-homes-for(lowered);
+            nil?(homes) ? lowered : dg-close(dg-walk-units(homes, reverse(lowered)));
         }
+        def dg-closure(unit) = nothing?(read_file(unit)) ? nothing() : dg-close(dg-walk-units([unit], []));
         def dg-touches-closure?(moved, units) = nothing?(units) ? true : dg-touches?(moved, units);
         // a grounded row meets a change through its hand-named paths first; only then is its unit's
         // closure read, so a kernel or data move never pays for a closure
@@ -225,14 +251,12 @@ section [form.bml] {
         def dg-resting(calls) = calls |> filter(c => !c[1]) |> map(c => c[0]);
         // what moved since origin/main: committed, in the working tree, or untracked. The merge-base
         // is read once from git; a base that does not arrive reads nothing, and every row runs.
-        def dg-sh(cmd) {
-            let v = host-exec(cmd, "");
-            v ?? "";
-        }
-        def dg-base() = dg-sh("git merge-base HEAD origin/main 2>/dev/null | tr -d '[:space:]'");
+        // (git is asked by argv; the body reads its answer, no shell reads a line)
+        def dg-git(args) = host_capture(cons("git", args)) ?? "";
+        def dg-base() = trim(dg-git(["merge-base", "HEAD", "origin/main"]));
         def dg-moved() {
             let base = dg-base();
-            (Comparable) len(base) == 0 ? nothing() : dg-paths(split-on(dg-sh("{ git diff --name-only " ++ base ++ "; git ls-files --others --exclude-standard; }"), "\n"));
+            (Comparable) len(base) == 0 ? nothing() : dg-paths(split-on(dg-git(["diff", "--name-only", base]) ++ "\n" ++ dg-git(["ls-files", "--others", "--exclude-standard"]), "\n"));
         }
         def dg-paths(lines) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? dg-paths(lines[1:]) : cons(trim(lines[0]), dg-paths(lines[1:]));
         def dg-rest-lines(rows) = nil?(rows) ? 0 : dg-rest-next(rows, print(dg-name(rows[0]) ++ "  sits out: its ground did not move"));
@@ -246,47 +270,49 @@ section [form.bml] {
             chosen;
         }
 
-        // --- the carrier: subshell, stderr folded in, exit code as the last line
-        def dg-mark() = "@rc=";
-        def dg-wrap(command) = "( " ++ command ++ " ) 2>&1; echo " ++ dg-mark() ++ "$?";
+        // --- the cell's record: {value, out, diag, stopped, errors, ...} (docs/in-process-cells.md). A row
+        // is one cell_run call with a deadline instead of a kill; its rc is 0 when the unit ran and ended
+        // clean and 1 when it stopped or compiled with errors (what a spawned run showed as exit 1)
+        def dg-deadline-ms() = 1800000;
+        def dg-ran?(stopped) = nothing?(stopped) ? true : ((String) record_get(stopped, "kind") == "stop") || ((String) record_get(stopped, "kind") == "deadline");
+        def dg-rc-of(r) = !nothing?(record_get(r, "stopped")) || (Comparable) record_get(r, "errors") > 0 ? 1 : 0;
+        def dg-render(v) = (String) value_kind(v) == "int" ? v.str() : (String) value_kind(v) == "string" ? v : value_str(v);
+        def dg-first-line(s) {
+            let nl = str_find(s, byte_to_str(10), 0);
+            nl < 0 ? s : substring(s, 0, nl);
+        }
+        // the last line a row speaks: the value it answered, or how it stopped
+        def dg-last-of(r) {
+            let stopped = record_get(r, "stopped");
+            nothing?(stopped) ? dg-render(record_get(r, "value")) : (String) record_get(stopped, "kind") ++ ": " ++ dg-first-line((String) record_get(stopped, "message"));
+        }
+        // the value as a number, when the unit answered one
+        def dg-int-of(r) = nothing?(record_get(r, "stopped")) && (String) value_kind(record_get(r, "value")) == "int" ? record_get(r, "value") : nothing();
 
-        // --- reading a child's voice: rc after the last mark, body before it
-        def dg-rfind-go(s, needle, from, last) {
-            let i = str_find(s, needle, from);
-            i < 0 ? last : dg-rfind-go(s, needle, i + 1, i);
-        }
-        def dg-rfind(s, needle) = dg-rfind-go(s, needle, 0, 0 - 1);
-        def dg-digit?(c) = (ord(c) >= 48) && (ord(c) <= 57);
-        def dg-int-end(seen, acc) = seen > 0 ? acc : nothing();
-        def dg-int-go(s, i, acc, seen) = i >= len(s) ? dg-int-end(seen, acc) : (Comparable) dg-digit?(char_at(s, i)) == 1 ? dg-int-go(s, i + 1, (acc * 10) + (ord(char_at(s, i)) - 48), 1) : dg-int-end(seen, acc);
-        def dg-int-at(s, i) = dg-int-go(s, i, 0, 0);
-        def dg-rc(out) {
-            let at = dg-rfind(out, dg-mark());
-            at < 0 ? nothing() : dg-int-at(out, at + len(dg-mark()));
-        }
-        def dg-body(out) {
-            let at = dg-rfind(out, dg-mark());
-            at < 0 ? out : substring(out, 0, at);
-        }
-        def dg-strip-nl(s) = (Comparable) len(s) == 0 ? s : (Comparable) ord(char_at(s, len(s) - 1)) == 10 ? dg-strip-nl(substring(s, 0, len(s) - 1)) : s;
-        def dg-last-line(s) {
-            let t = dg-strip-nl(s);
-            let nl = dg-rfind(t, byte_to_str(10));
-            nl < 0 ? t : substring(t, nl + 1, len(t));
-        }
-        def dg-all-digits-go(s, i) = i >= len(s) ? 1 : (Comparable) dg-digit?(char_at(s, i)) == 1 ? dg-all-digits-go(s, i + 1) : 0;
-        def dg-all-digits?(s) = (Comparable) len(s) == 0 ? 0 : dg-all-digits-go(s, 0);
-        def dg-last-int(s) {
-            let l = dg-last-line(s);
-            (Comparable) dg-all-digits?(l) == 1 ? str_to_int(l) : nothing();
+        // --- the scratch a row may name: the mark @scratch@ in an input line becomes a fresh path in the temp
+        // directory, and the path and whatever the cell left beside it (path.*) are removed when it returns
+        def dg-scratch-mark() = "@scratch@";
+        def dg-scratch(row) = temp_dir() ++ "/drift-gates-" ++ host_pid().str() ++ "-" ++ dg-name(row);
+        def dg-fill(line, scratch) = dg-join(split-on(line, dg-scratch-mark()), scratch);
+        def dg-input(row, scratch) = nothing?(dg-input-of(row)) ? nothing() : dg-input-of(row) |> map(l => dg-fill(l, scratch));
+        def dg-beside?(name, stem) = dg-starts?(name, stem);
+        def dg-sweep-scratch(scratch) {
+            let stem = substring(scratch, len(temp_dir()) + 1, len(scratch));
+            let names = fs_list(temp_dir()) ?? [];
+            let gone = foldl((acc, n) => dg-beside?(n, stem) ? host_path_remove(temp_dir() ++ "/" ++ n) : acc, 0, names);
+            host_path_remove(scratch);
         }
 
         // --- a reading: row, rc, last line, last int. What did not arrive reads nothing: a
-        // vanished launch (host-exec answers nothing) has no rc and no value, never a pass.
+        // unit that would not run at all (the call was refused, or the text would not read as a
+        // program) has no rc and no value, never a pass.
         def dg-reading(row, rc, last, value) = [row, rc, last, value];
+        def dg-reading-of(row, r) = dg-ran?(record_get(r, "stopped")) ? dg-reading(row, dg-rc-of(r), dg-last-of(r), dg-int-of(r)) : dg-reading(row, nothing(), "launch vanished: " ++ dg-last-of(r), nothing());
         def dg-read(row) {
-            let out = host-exec(dg-wrap(dg-command(row)), "");
-            nothing?(out) ? dg-reading(row, nothing(), "launch vanished", nothing()) : dg-reading(row, dg-rc(out), dg-last-line(dg-body(out)), dg-last-int(dg-body(out)));
+            let scratch = dg-scratch(row);
+            let r = cell_run(dg-unit(row), 0, dg-deadline-ms(), dg-input(row, scratch));
+            let swept = dg-sweep-scratch(scratch);
+            dg-reading-of(row, r);
         }
         def dg-exited-0?(reading) = nothing?(reading[1]) ? false : ((Comparable) reading[1] == 0);
         def dg-rc-text(rc) = nothing?(rc) ? "nothing" : rc.str();
@@ -301,9 +327,17 @@ section [form.bml] {
         // from today's runtime (a fresh inode, so the running gates keep theirs). Cached images need no
         // repair: fkwu reads them content-true and rebuilds a foreign one itself. A row no repair meets
         // refuses at once, and its reading names its need.
+        // the C compiler is the one external tool the seed needs to be BUILT: begun by argv (no shell), the product
+        // made beside the live binary and renamed over it
+        def dg-streams() = ["/dev/null", "/dev/null", "/dev/null"];
+        def dg-cc-argv() = ["cc", "-O2", "-o", "fkwu.next", "runtime/fkwu-uni.c"];
+        def dg-cc-exit() {
+            let pid = host_spawn_at(dg-cc-argv(), dg-streams());
+            pid <= 0 ? nothing() : host_wait(pid);
+        }
         def dg-rebuild-fkwu(row) {
-            let out = host-exec("cc -O2 -o fkwu.next runtime/fkwu-uni.c && mv fkwu.next fkwu && echo rebuilt", "");
-            nothing?(out) || (str_find(out, "rebuilt", 0) < 0) ? nothing() : row;
+            let built = dg-cc-exit();
+            nothing?(built) || (Comparable) built != 0 ? nothing() : (Comparable) fs_rename("fkwu.next", "fkwu") == 0 ? row : nothing();
         }
         def dg-stale-binary?(observed, row) = (String) dg-name(row) == "binary-freshness";
         def dg-repairs() = [live-repair("rebuild-fkwu", dg-stale-binary?, dg-rebuild-fkwu)];
@@ -336,9 +370,9 @@ section [form.bml] {
         }
         def dg-report() = dg-run(dg-rows());
 
-        // --- rows stay sound as data: every row named, every command present, names distinct
+        // --- rows stay sound as data: every row named, every unit present, names distinct
         def dg-name-in?(rows, name) = (Comparable) len(rows) == 0 ? 0 : (String) dg-name(rows[0]) == name ? 1 : dg-name-in?(rows[1:], name);
-        def dg-rows-sound?(rows) = (Comparable) len(rows) == 0 ? 1 : (Comparable) len(dg-name(rows[0])) == 0 ? 0 : (Comparable) len(dg-command(rows[0])) == 0 ? 0 : (Comparable) dg-name-in?(rows[1:], dg-name(rows[0])) == 1 ? 0 : dg-rows-sound?(rows[1:]);
+        def dg-rows-sound?(rows) = (Comparable) len(rows) == 0 ? 1 : (Comparable) len(dg-name(rows[0])) == 0 ? 0 : (Comparable) len(dg-unit(rows[0])) == 0 ? 0 : (Comparable) dg-name-in?(rows[1:], dg-name(rows[0])) == 1 ? 0 : dg-rows-sound?(rows[1:]);
     }
     0;
 }

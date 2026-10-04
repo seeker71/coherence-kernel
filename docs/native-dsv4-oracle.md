@@ -178,11 +178,17 @@ the full proof.
 
 `observe/dsv4-proof-retention-run.bml` accepts four NUL-terminated fields:
 `DPA1`, source directory, new archive path and `END`, with an optional final LF.
-The source must be quiescent. Form supervises the OS archive operation,
-retains complete stdout/stderr and exit status, creates the destination
-exclusively, settles publication resources and verifies every archive byte.
-Physical directory admission refuses an archive inside the source and a source
+The source must be quiescent. Form writes the ustar archive itself
+(`form/form-stdlib/bml/tar-ustar.bml`: `./` first, then every path under it as `./name`, sorted, a
+file's bytes, mode and time; no program runs and any tar reads it back), keeps
+a private capture record of the writing beside its evidence, creates the
+destination exclusively, settles publication resources and verifies every
+archive byte.
+Physical directory admission (`host_realpath`) refuses an archive inside the source and a source
 containing the capture directory, including aliases through directory symlinks.
+A link to a regular file arrives as the file's bytes; a link to a directory, a path
+over 255 bytes that cannot be cut at a `/`, and a file the host will not read whole each end
+the retention with a named reason.
 These are cooperative path and lifetime contracts, not an atomic filesystem
 snapshot against concurrent writers or parent replacement.
 

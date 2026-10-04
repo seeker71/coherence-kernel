@@ -126,7 +126,9 @@ control; the policy does not yet classify semantic stalls automatically.
 
 Write `stop` to the recorded `<stage>.control` file to cancel a dynamic stage.
 The supervisor records Form's offered, selected, and applied action, signals
-the owned process group, and verifies its release. Explicit positive process
+every process the stage owns (the child and its descendants among the fkwu
+kernels, each by the host's own signal number through `host_signal`), and
+verifies their release. Explicit positive process
 deadlines remain supported, including the caller's checker bound. A failed
 signal is retained with its command status; it cannot erase the child's actual exit
 or turn incomplete cleanup into a completed process.
@@ -271,8 +273,12 @@ transport and evaluation.
 
 The snapshot is filesystem isolation, not an OS sandbox for arbitrary test
 code. Run trusted repository checks: absolute-path effects in a checker can
-still reach host resources. The healing path requires fkwu and ordinary host
-utilities (git, tar, cp, ps, sh). It runs no Python and no model server.
+still reach host resources. The healing path requires fkwu and git (git names
+the checkout's files; no other program runs). Snapshots are copied by name
+(`form/form-stdlib/bml/copy-by-names.bml`: a directory level, a file's bytes, its mode and time per
+name; no archive), children are begun by `host_spawn_at` with their streams and
+directory, and exits, liveness and signals come from the seed's host doors.
+It runs no Python and no model server.
 Form owns process supervision, snapshot hashes, guarded replacement, stream
 parsing, choices, reports, evaluation, and native adapter fitting. Healing
 carries no C seed runtime meaning.

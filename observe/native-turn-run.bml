@@ -7,7 +7,7 @@
 // documents) waits on that contract, and the walk's own pick passes it by; a changed check or a healed source opens
 // it, and a gap asked for by name is taken. A gap whose every way the ladder's gate refuses under its contract (each
 // way's approach already stands with a non-green outcome) waits the same way, so its turn is never opened to print
-// nothing. Runs the gap's band in its own fresh kernel; when it already
+// nothing. Runs the gap's band as a cell called in this process (cell_run); when it already
 // reads full the gap is closed and nothing runs. A band that read above its full, or whose own "; Verdict n"
 // head names another verdict than the gap's full, cannot be met: the turn lands one row (rung "contract", lane_reason
 // "band-above-full" or "band-head-differs") and opens no option, and the gap waits on its contract (its checks, the
@@ -72,6 +72,7 @@
 // the door so).
 // preflight-exec: forbidden
 import form-stdlib/bml/host-walk.bml;
+import form-stdlib/bml/cell-said.bml;
 import form-stdlib/bml/native-turn-ladder.bml;
 import form-stdlib/model-registry.bml;
 import form-stdlib/bml/form-cli-heal-native-report.bml;
@@ -153,27 +154,31 @@ section [form.bml] {
   // stay beside the reading.
   def nt-out() = mc-cat([nt-dir(), "/band.out"]);
   def nt-err() = mc-cat([nt-dir(), "/band.err"]);
-  def nt-last-line(lines, last) = if nil?(lines) then last else nt-last-line(lines[1:], if ((Comparable) len(trim(lines[0])) == 0) then last else trim(lines[0]));
   // A candidate may loop; the band answers within its deadline or reads nothing, so one
   // looping candidate cannot hold the night's turns. With a wall deadline (the walk's window end) the band also
   // stops there: the earlier of ten minutes from its start and the deadline.
   def nt-band-deadline-ms() = 600000;
   def nt-band-until(deadline, now) = ((Comparable) deadline > 0) && (deadline < (now + nt-band-deadline-ms())) ? deadline : now + nt-band-deadline-ms();
-  def nt-band-wait(pid, until) = if ((Comparable) host_alive(pid) != 1) then host_wait(pid) else if (host_monotonic_ms() > until) then nt-band-stop(pid) else nt-band-rest(pid, until);
   def nt-band-stop(pid) {
    host_kill(pid);
    host_wait(pid);
    nothing();
   }
-  def nt-band-rest(pid, until) {
-   host_sleep_ms(200);
-   nt-band-wait(pid, until);
+  // The band is a cell called in this process (cell_run: no child, no exit to wait for), with the budget the turn gives it
+  // (nt-band-until) as its deadline. It reads a number only when the cell ran to its end with no compile error and ended on
+  // an integer; its evidence stands where the turn reads it: band.out holds what it printed and the value it ended on,
+  // band.err what it said (the compiler's lines, the live readings its claims voiced).
+  def nt-band-left(deadline, now) = nt-band-until(deadline, now) - now < 1 ? 1 : nt-band-until(deadline, now) - now;
+  def nt-band-ran?(rec) = !nothing?(rec) && nothing?(record_get(rec, "stopped")) && ((Comparable) record_get(rec, "errors") == 0);
+  def nt-band-number(v) = (String) value_kind(v) == "int" ? v : (String) value_kind(v) == "string" ? parse-int(trim(v)) : nothing();
+  def nt-band-keep(rec) {
+   let wrote = write_file_text(nt-out(), cs-stdout(rec));
+   write_file_text(nt-err(), cs-stderr(rec) ++ (nothing?(rec) || nothing?(record_get(rec, "stopped")) ? "" : "fkwu: " ++ (String) record_get(record_get(rec, "stopped"), "message") ++ "\n"));
   }
   def nt-band-run(ctx) {
-   let gone = host_path_remove(nt-out());
-   let pid = host_spawn_at(["./fkwu", ctx[0]], ["/dev/null", nt-out(), nt-err()]);
-   let status = if (pid <= 0) then nothing() else nt-band-wait(pid, nt-band-until(ctx[2], host_monotonic_ms()));
-   if (nothing?(status) || (!((Comparable) status == 0))) then nothing() else parse-int(nt-last-line(split-on(nt-read(nt-out()), "\n"), ""));
+   let rec = cell_run(ctx[0], 0, nt-band-left(ctx[2], host_monotonic_ms()), nothing());
+   let kept = nt-band-keep(rec);
+   nt-band-ran?(rec) ? nt-band-number(record_get(rec, "value")) : nothing();
   }
   def nt-full?(value, ctx) = if nothing?(value) then false else ((Comparable) value == ctx[1]);
   def nt-band(path, full, deadline) {
@@ -264,7 +269,10 @@ section [form.bml] {
   def nt-memory-checkpoint(memory) = ntl-first-named(reverse(map(m => m[1], nt-options(memory))));
   def nt-resume-target(memory, hist, model) = ((Comparable) len(nt-memory-checkpoint(memory)) > 0) ? nt-memory-checkpoint(memory) : ntl-last-checkpoint(hist, model);
   // the lane runs to its end, or, with a wall deadline, until the deadline: then it is stopped (SIGTERM), reaped,
-  // and reads lane-deadline. The wait rests a second between looks.
+  // and reads lane-deadline. The wait rests a second between looks. The lane stays a program of its own, on purpose
+  // (docs/in-process-cells.md, class C): it is a model session that holds the machine's one Metal client and can sit in a
+  // device wait no budget of this process can end, so its ending is a kill by pid; it moves to the host manager's
+  // service with the typed progress record, not to cell_run.
   def nt-lane-poll-ms() = 1000;
   def nt-lane-wait(pid, until) = if ((Comparable) until <= 0) then host_wait(pid) else if ((Comparable) host_alive(pid) != 1) then host_wait(pid) else if (host_monotonic_ms() > until) then nt-band-stop(pid) else nt-lane-rest(pid, until);
   def nt-lane-rest(pid, until) {

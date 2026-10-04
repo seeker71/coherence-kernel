@@ -1,0 +1,208 @@
+// grep, an internal tool: POSIX/GNU grep semantics over resident documents or held input. No process, no shell,
+// no host file: the ONE pattern engine of rg (form-agent-pattern.bml) read in its BRE/ERE dialects, and the
+// documents the caller holds. Exit codes are grep's: 0 a line was selected, 1 none, 2 an error (a bad option or
+// pattern, an absent file); -q with a selected line is 0 even when another operand errored.
+//
+// Supported: -E -F -G -i -y -v -c -l -L -n -o -m N -A N -B N -C N -NUM -w -x -H -h -q -s -r -R -a -I -U
+// -e PATTERN (repeatable) -f FILE (a resident document) --, clustered short flags (-inE, -A2, -m1), options after
+// operands, and the long names of these (--ignore-case, --max-count=N, --regexp=P ...). A pattern holding a
+// newline is several patterns. No file operand reads the held input; "-" names it; -r with no operand, ".",
+// or a directory prefix reads the resident documents under it.
+// Refused by name, exit 2: -P (perl-regexp-not-supported), -b -T -z -Z -u -V and any other letter or long
+// name (unsupported-grep-option), --include/--exclude (the resident corpus has no file-type registry),
+// --color=always, -o together with a context option (context-with-only-matching-not-supported).
+// Matching is by byte and the input is read as text: no multi-byte characters, no binary-file detection.
+// Library door for any BML cell: grep-text(args, text) -> [exit, stdout]; grep-lines(args, lines) -> [exit, lines];
+// grep-text-error(args, text) -> stderr.
+import form-stdlib/core.fk;
+import form-stdlib/bml/form-agent-tool-values.bml;
+import form-stdlib/bml/form-agent-pattern.bml;
+section [form.bml] {
+    class FormAgentGrep {
+        def fag-get(o, key, fallback) = nil?(o) ? fallback : (String) o[0][0] == key ? o[0][1] : fag-get(o[1:], key, fallback);
+        def fag-set(o, key, value) = cons([key, value], o);
+        def fag-push(o, key, value) = fag-set(o, key, cons(value, fag-get(o, key, [])));
+        def fag-stdin() = "(standard input)";
+
+        // ---- lines: a final newline ends the last line, it does not start another ----
+        def fag-lines(s) {
+            let parts = split-on(s, "\n");
+            (len(parts) > 0) && ((String) parts[len(parts) - 1] == "") ? parts[0:len(parts) - 1] : parts;
+        }
+
+        // ---- options ----
+        def fag-table(rows, name) = nil?(rows) ? "" : (String) rows[0][0] == name ? rows[0][1] : fag-table(rows[1:], name);
+        def fag-long-flags() = [["extended-regexp", "E"], ["fixed-strings", "F"], ["basic-regexp", "G"], ["ignore-case", "i"], ["no-ignore-case", "N"], ["invert-match", "v"], ["word-regexp", "w"], ["line-regexp", "x"], ["count", "c"], ["files-with-matches", "l"], ["files-without-match", "L"], ["line-number", "n"], ["only-matching", "o"], ["quiet", "q"], ["silent", "q"], ["no-messages", "s"], ["with-filename", "H"], ["no-filename", "h"], ["recursive", "r"], ["dereference-recursive", "r"], ["text", "a"]];
+        def fag-long-values() = [["regexp", "e"], ["file", "f"], ["max-count", "m"], ["after-context", "A"], ["before-context", "B"], ["context", "C"]];
+        // letter -> [key, value] of a flag that takes no value, [] when the letter is not one
+        def fag-flag(f) = (String) f == "E" ? ["syntax", "E"]
+            : (String) f == "F" ? ["syntax", "F"]
+            : (String) f == "G" ? ["syntax", "G"]
+            : (String) f == "i" ? ["ic", 1]
+            : (String) f == "y" ? ["ic", 1]
+            : (String) f == "N" ? ["ic", 0]
+            : (String) f == "v" ? ["invert", 1]
+            : (String) f == "w" ? ["word", 1]
+            : (String) f == "x" ? ["line", 1]
+            : (String) f == "c" ? ["count", 1]
+            : (String) f == "l" ? ["list", "l"]
+            : (String) f == "L" ? ["list", "L"]
+            : (String) f == "n" ? ["number", 1]
+            : (String) f == "o" ? ["only", 1]
+            : (String) f == "q" ? ["quiet", 1]
+            : (String) f == "s" ? ["silent", 1]
+            : (String) f == "H" ? ["filename", 1]
+            : (String) f == "h" ? ["filename", 0]
+            : (String) f == "r" ? ["recursive", 1]
+            : (String) f == "R" ? ["recursive", 1]
+            : (String) f == "a" ? ["noop", 1]
+            : (String) f == "I" ? ["noop", 1]
+            : (String) f == "U" ? ["noop", 1]
+            : [];
+        def fag-refused(name) = (String) name == "P" || (String) name == "perl-regexp" ? "perl-regexp-not-supported" : "unsupported-grep-option: " + (len(name) > 1 ? "--" : "-") + name;
+        def fag-parse(args, o, ops, nomore) = nil?(args) ? [o, fat-reverse(ops), ""] : fag-arg(args, o, ops, nomore, args[0]);
+        def fag-arg(args, o, ops, nomore, a) = nomore || ((String) a == "-") || (!fat-starts(a, "-")) ? fag-parse(args[1:], o, cons(a, ops), nomore)
+            : (String) a == "--" ? fag-parse(args[1:], o, ops, 1)
+            : fat-starts(a, "--") ? fag-long(args, o, ops, a)
+            : fag-short(args, o, ops, a, 1);
+        def fag-short(args, o, ops, a, i) = i >= len(a) ? fag-parse(args[1:], o, ops, 0) : fag-short-at(args, o, ops, a, i, byte_to_str(fat-char(a, i)));
+        def fag-short-at(args, o, ops, a, i, f) = fat-has(["e", "f", "m", "A", "B", "C"], f) ? fag-short-value(args, o, ops, a, i, f)
+            : fat-digit(fat-char(a, i)) ? fag-short-digits(args, o, ops, a, i, i)
+            : nil?(fag-flag(f)) || ((String) f == "N") ? [o, ops, fag-refused(f)]
+            : fag-short(args, fag-set(o, fag-flag(f)[0], fag-flag(f)[1]), ops, a, i + 1);
+        def fag-digits-end(a, j) = fat-digit(fat-char(a, j)) ? fag-digits-end(a, j + 1) : j;
+        def fag-short-digits(args, o, ops, a, i, j) = fag-short(args, fag-set(fag-set(fag-set(o, "before", str_to_int(substring(a, i, fag-digits-end(a, i)))), "after", str_to_int(substring(a, i, fag-digits-end(a, i)))), "context", 1), ops, a, fag-digits-end(a, i));
+        def fag-short-value(args, o, ops, a, i, f) = (i + 1) < len(a) ? fag-valued(args[1:], o, ops, f, substring(a, i + 1, len(a)))
+            : nil?(args[1:]) ? [o, ops, "missing-grep-option-value: -" + f]
+            : fag-valued(args[2:], o, ops, f, args[1]);
+        def fag-long(args, o, ops, a) {
+            let eq = str_find(a, "=", 0);
+            let name = eq < 0 ? substring(a, 2, len(a)) : substring(a, 2, eq);
+            let value = eq < 0 ? "" : substring(a, eq + 1, len(a));
+            let flag = fag-table(fag-long-flags(), name);
+            let valued = fag-table(fag-long-values(), name);
+            !((String) flag == "") ? (eq >= 0 ? [o, ops, "grep-option-takes-no-value: --" + name] : fag-parse(args[1:], fag-set(o, fag-flag(flag)[0], fag-flag(flag)[1]), ops, 0))
+            : !((String) valued == "") ? (eq >= 0 ? fag-valued(args[1:], o, ops, valued, value) : nil?(args[1:]) ? [o, ops, "missing-grep-option-value: --" + name] : fag-valued(args[2:], o, ops, valued, args[1]))
+            : (String) name == "color" || (String) name == "colour" ? (eq < 0 || fat-has(["never", "no", "none", "auto", "tty", "if-tty"], value) ? fag-parse(args[1:], o, ops, 0) : [o, ops, "color-always-not-supported"])
+            : (String) name == "binary-files" && eq >= 0 ? fag-parse(args[1:], o, ops, 0)
+            : [o, ops, fag-refused(name)];
+        }
+        def fag-valued(rest, o, ops, key, value) = fag-valued-at(rest, ops, fag-value(o, key, value));
+        def fag-valued-at(rest, ops, r) = !((String) r[1] == "") ? [r[0], ops, r[1]] : fag-parse(rest, r[0], ops, 0);
+        // [options, error]
+        def fag-value(o, key, value) = (String) key == "e" ? [fag-push(o, "patterns", value), ""]
+            : (String) key == "f" ? [fag-push(o, "pfiles", value), ""]
+            : (String) key == "m" ? (fat-natural(value) ? [fag-set(o, "max", str_to_int(value)), ""] : [o, "invalid-max-count: " + value])
+            : (!fat-natural(value)) ? [o, "invalid-context-length-argument: " + value]
+            : (String) key == "A" ? [fag-set(fag-set(o, "after", str_to_int(value)), "context", 1), ""]
+            : (String) key == "B" ? [fag-set(fag-set(o, "before", str_to_int(value)), "context", 1), ""]
+            : [fag-set(fag-set(fag-set(o, "before", str_to_int(value)), "after", str_to_int(value)), "context", 1), ""];
+
+        // ---- patterns ----
+        def fag-literal(s, i) = i >= len(s) ? [] : cons(fap-token(0, byte_to_str(fat-char(s, i))), fag-literal(s, i + 1));
+        def fag-compile-one(p, syntax) = len(p) > FatMaxPattern() ? [[], "pattern-limit"] : (String) syntax == "F" ? [[fag-literal(p, 0)], ""] : fap-compile-d(p, (String) syntax == "E" ? 1 : 2);
+        def fag-compile(pats, syntax, out) = nil?(pats) ? [out, ""] : fag-compile-next(pats, syntax, out, fag-compile-one(pats[0], syntax));
+        def fag-compile-next(pats, syntax, out, r) = !((String) r[1] == "") ? [[], r[1] + ": " + pats[0]] : fag-compile(pats[1:], syntax, append(out, r[0]));
+        def fag-split-patterns(ps) = nil?(ps) ? [] : append(split-on(ps[0], "\n"), fag-split-patterns(ps[1:]));
+        // pattern files are resident documents; [patterns, error]
+        def fag-pfile-patterns(docs, files, out) = nil?(files) ? [out, ""] : fag-pfile-next(docs, files, out, fat-find-doc(docs, files[0]));
+        def fag-pfile-next(docs, files, out, doc) = nil?(doc) ? [[], files[0] + ": No such file or directory"] : fag-pfile-patterns(docs, files[1:], append(out, fag-lines(doc[2])));
+
+        // ---- sources: [[name, text] ...] and the errors met on the way ----
+        def fag-under(docs, op) {
+            let base = (String) op == "." ? "" : fat-ends(op, "/") ? op : op + "/";
+            docs |> filter(d => (String) base == "" || fat-starts(d[1], base));
+        }
+        def fag-named(d, op) = (String) op == "." ? ["./" + d[1], d[2]] : [d[1], d[2]];
+        def fag-list(docs, input, rec, ops, srcs, errs) = nil?(ops) ? [srcs, errs] : fag-list-op(docs, input, rec, ops, srcs, errs, ops[0], fat-find-doc(docs, ops[0]));
+        def fag-list-op(docs, input, rec, ops, srcs, errs, op, doc) = (String) op == "-" ? fag-list(docs, input, rec, ops[1:], append(srcs, [[fag-stdin(), input]]), errs)
+            : !nil?(doc) ? fag-list(docs, input, rec, ops[1:], append(srcs, [[op, doc[2]]]), errs)
+            : fag-list-dir(docs, input, rec, ops, srcs, errs, op, fag-under(docs, op));
+        // an operand that cannot be read stays in its place as [operand, message, 1]: grep tells it when it gets there,
+        // so -q that has already selected a line never reaches it
+        def fag-list-dir(docs, input, rec, ops, srcs, errs, op, under) = nil?(under) ? fag-list(docs, input, rec, ops[1:], append(srcs, [[op, op + ": No such file or directory", 1]]), errs)
+            : rec ? fag-list(docs, input, rec, ops[1:], append(srcs, under |> map(d => fag-named(d, op))), errs)
+            : fag-list(docs, input, rec, ops[1:], append(srcs, [[op, op + ": Is a directory", 1]]), errs);
+        def fag-sources(docs, input, rec, ops) = nil?(ops) ? (rec ? [docs |> map(d => [d[1], d[2]]), []] : [[[fag-stdin(), input]], []]) : fag-list(docs, input, rec, ops, [], []);
+        def fag-nonfile?(docs, ops) = nil?(ops) ? 0 : ((String) ops[0] != "-") && nil?(fat-find-doc(docs, ops[0])) ? 1 : fag-nonfile?(docs, ops[1:]);
+        def fag-with-filename(docs, o, ops) = (Comparable) fag-get(o, "filename", 2) < 2 ? fag-get(o, "filename", 2) : (len(ops) > 1) || (fag-get(o, "recursive", 0) && (nil?(ops) || fag-nonfile?(docs, ops)));
+
+        // ---- selection: [numbers of the selected lines, how many, error] ----
+        // lits: the bytes every match holds (fap-required): a line with none of them is a miss without the walk
+        def fag-select(lines, branches, lits, ic, invert, cap, n, count, hits) = (cap >= 0) && (count >= cap) ? [fat-reverse(hits), count, ""] : nil?(lines) ? [fat-reverse(hits), count, ""] : fag-select-line(lines, branches, lits, ic, invert, cap, n, count, hits, fag-find(branches, lits, lines[0], ic));
+        def fag-find(branches, lits, line, ic) = fap-may?(lits, line) ? fap-find(branches, line, 0, ic) : [-1, -1, FatMatchFuel()];
+        def fag-select-line(lines, branches, lits, ic, invert, cap, n, count, hits, r) = r[2] <= 0 ? [[], 0, "pattern-work-limit"] : (invert ? (r[0] < 0) : (r[0] >= 0)) ? fag-select(lines[1:], branches, lits, ic, invert, cap, n + 1, count + 1, cons(n, hits)) : fag-select(lines[1:], branches, lits, ic, invert, cap, n + 1, count, hits);
+
+        // ---- output ----
+        def fag-prefix(name, withfn, o, n, sep) = (withfn ? name + sep : "") + (fag-get(o, "number", 0) ? n.str() + sep : "");
+        def fag-fmt(name, withfn, o, n, sep, text) = fag-prefix(name, withfn, o, n, sep) + text + "\n";
+        // Lines with context. State: lines left, line number, selected numbers left, the last selected number before
+        // this line, the last line printed, whether anything was printed before (this file or an earlier one).
+        def fag-render(lines, n, hits, prev, lastp, anyprev, name, withfn, o, out) {
+            let after = fag-get(o, "after", 0);
+            let before = fag-get(o, "before", 0);
+            nil?(lines) ? [out, anyprev]
+            : (nil?(hits) && ((prev <= 0) || ((n - prev) > after))) ? [out, anyprev]
+            : fag-render-line(lines, n, hits, prev, lastp, anyprev, name, withfn, o, out, (!nil?(hits)) && ((Comparable) hits[0] == n), after, before);
+        }
+        def fag-render-line(lines, n, hits, prev, lastp, anyprev, name, withfn, o, out, hit, after, before) {
+            let show = hit || ((prev > 0) && ((n - prev) <= after)) || ((!nil?(hits)) && ((hits[0] - n) <= before));
+            let gap = fag-get(o, "context", 0) && (lastp > 0 ? (n > (lastp + 1)) : anyprev);
+            fag-render(lines[1:], n + 1, hit ? hits[1:] : hits, hit ? n : prev, show ? n : lastp, show ? 1 : anyprev, name, withfn, o, show ? ((String) out + (gap ? "--\n" : "") + fag-fmt(name, withfn, o, n, hit ? ":" : "-", lines[0])) : out);
+        }
+        // -o: each match of each selected line on a line of its own, leftmost-longest, empty matches skipped
+        def fag-only(lines, n, hits, branches, ic, name, withfn, o, out) = nil?(lines) || nil?(hits) ? [out, ""] : (Comparable) hits[0] == n ? fag-only-line(lines, n, hits, branches, ic, name, withfn, o, out, fag-pieces(branches, lines[0], 0, ic, name, withfn, o, n, "")) : fag-only(lines[1:], n + 1, hits, branches, ic, name, withfn, o, out);
+        def fag-only-line(lines, n, hits, branches, ic, name, withfn, o, out, r) = !((String) r[1] == "") ? [out, r[1]] : fag-only(lines[1:], n + 1, hits[1:], branches, ic, name, withfn, o, (String) out + r[0]);
+        def fag-pieces(branches, line, from, ic, name, withfn, o, n, out) = from > len(line) ? [out, ""] : fag-piece(branches, line, ic, name, withfn, o, n, out, fap-find-longest(branches, line, from, ic));
+        def fag-piece(branches, line, ic, name, withfn, o, n, out, r) = r[2] <= 0 ? ["", "pattern-work-limit"] : r[0] < 0 ? [out, ""] : (r[1] > r[0]) ? fag-pieces(branches, line, r[1], ic, name, withfn, o, n, (String) out + fag-fmt(name, withfn, o, n, ":", substring(line, r[0], r[1]))) : fag-pieces(branches, line, r[0] + 1, ic, name, withfn, o, n, out);
+
+        // One source: [output, selected, anyprev, error]
+        def fag-one(src, branches, o, withfn, anyprev) = fag-one-lines(src, branches, o, withfn, anyprev, fag-lines(src[1]));
+        def fag-one-lines(src, branches, o, withfn, anyprev, lines) = fag-scanned(src, branches, o, withfn, anyprev, lines, fag-select(lines, branches, fap-required(branches, fag-get(o, "ic", 0)), fag-get(o, "ic", 0), fag-get(o, "invert", 0), fag-cap(o), 1, 0, []));
+        def fag-cap(o) = fag-get(o, "quiet", 0) || (!((String) fag-get(o, "list", "") == "")) ? 1 : fag-get(o, "max", -1);
+        def fag-listed?(kind, count) = (String) kind == "l" ? (count > 0) : ((Comparable) count == 0);
+        def fag-scanned(src, branches, o, withfn, anyprev, lines, sel) = !((String) sel[2] == "") ? ["", 0, anyprev, sel[2]]
+            : fag-get(o, "quiet", 0) ? ["", sel[1], anyprev, ""]
+            : !((String) fag-get(o, "list", "") == "") ? [fag-listed?(fag-get(o, "list", ""), sel[1]) ? src[0] + "\n" : "", sel[1], anyprev, ""]
+            : fag-get(o, "count", 0) ? [(withfn ? src[0] + ":" : "") + sel[1].str() + "\n", sel[1], anyprev, ""]
+            : fag-get(o, "only", 0) ? fag-only-result(src, branches, o, withfn, anyprev, lines, sel, fag-only(lines, 1, sel[0], branches, fag-get(o, "ic", 0), src[0], withfn, o, ""))
+            : fag-rendered(sel, fag-render(lines, 1, sel[0], 0, 0, anyprev, src[0], withfn, o, ""));
+        def fag-only-result(src, branches, o, withfn, anyprev, lines, sel, r) = !((String) r[1] == "") ? ["", 0, anyprev, r[1]] : [r[0], sel[1], (len(r[0]) > 0) ? 1 : anyprev, ""];
+        def fag-rendered(sel, r) = [r[0], sel[1], r[1], ""];
+
+        // ---- the tool ----
+        def fag-run(docs, args, input) = fag-parsed(docs, input, fag-parse(args, [], [], 0));
+        def fag-fail(docs, reason) = fat-fail("grep: " + reason, docs);
+        def fag-parsed(docs, input, p) = !((String) p[2] == "") ? fag-fail(docs, p[2])
+            : fag-get(p[0], "only", 0) && fag-get(p[0], "context", 0) ? fag-fail(docs, "context-with-only-matching-not-supported")
+            : (nil?(fag-get(p[0], "patterns", [])) && nil?(fag-get(p[0], "pfiles", []))) ? (nil?(p[1]) ? fag-fail(docs, "grep-needs-pattern") : fag-sourced(docs, input, p[0], p[1][1:], fag-split-patterns([p[1][0]])))
+            : fag-pfiled(docs, input, p[0], p[1], fag-split-patterns(fat-reverse(fag-get(p[0], "patterns", []))), fag-pfile-patterns(docs, fat-reverse(fag-get(p[0], "pfiles", [])), []));
+        def fag-pfiled(docs, input, o, ops, pats, pf) = !((String) pf[1] == "") ? fag-fail(docs, pf[1]) : fag-sourced(docs, input, o, ops, append(pats, pf[0]));
+        def fag-sourced(docs, input, o, ops, pats) = fag-compiled(docs, input, o, ops, fag-compile(pats, fag-get(o, "syntax", "G"), []));
+        def fag-compiled(docs, input, o, ops, c) = !((String) c[1] == "") ? fag-fail(docs, c[1])
+            : fag-sourced-all(docs, input, o, ops, fap-wrap(c[0], fag-get(o, "line", 0) ? 2 : fag-get(o, "word", 0) ? 1 : 0), fag-sources(docs, input, fag-get(o, "recursive", 0), ops), fag-with-filename(docs, o, ops));
+        def fag-sourced-all(docs, input, o, ops, branches, srcs, withfn) = fag-files(docs, o, branches, srcs[0], withfn, "", 0, 0, srcs[1]);
+        // loop the sources: output, selected so far, whether anything printed, and the errors
+        def fag-files(docs, o, branches, srcs, withfn, out, hits, anyprev, errs) = nil?(srcs) || (fag-get(o, "quiet", 0) && (hits > 0)) ? fag-finish(docs, o, out, hits, errs, "")
+            : len(srcs[0]) > 2 ? fag-files(docs, o, branches, srcs[1:], withfn, out, hits, anyprev, append(errs, [srcs[0][1]]))
+            : fag-files-next(docs, o, branches, srcs, withfn, out, hits, errs, fag-one(srcs[0], branches, o, withfn, anyprev));
+        def fag-files-next(docs, o, branches, srcs, withfn, out, hits, errs, r) = !((String) r[3] == "") ? fag-finish(docs, o, out, hits, errs, r[3]) : fag-files(docs, o, branches, srcs[1:], withfn, (String) out + r[0], hits + r[1], r[2], errs);
+        // an error met in a file is told on stderr (-s keeps it quiet) and ends the run at 2; a pattern or option
+        // error is always told. -q with a selected line is 0 whatever else went wrong.
+        def fag-finish(docs, o, out, hits, errs, err) {
+            let quiet = fag-get(o, "quiet", 0);
+            let told = !((String) err == "") ? "grep: " + err + "\n" : fag-get(o, "silent", 0) ? "" : fat-join(errs |> map(e => "grep: " + e + "\n"), "");
+            let failed = (!((String) err == "")) || (!nil?(errs));
+            fat-result((quiet && (hits > 0)) ? 0 : failed ? 2 : (hits > 0) ? 0 : 1, quiet ? "" : out, told, docs);
+        }
+
+        // Library door: any BML cell calls grep over held text with no documents wrapper and no process.
+        def grep-run(args, text) = fag-run([], args, text);
+        def grep-text(args, text) = fag-pair(grep-run(args, text));
+        def fag-pair(r) = [fat-exit(r), fat-out(r)];
+        def grep-text-error(args, text) = fat-error(grep-run(args, text));
+        def grep-lines(args, lines) = fag-lines-pair(grep-run(args, fag-join-lines(lines)));
+        def fag-lines-pair(r) = [fat-exit(r), fag-lines(fat-out(r))];
+        def fag-join-lines(lines) = nil?(lines) ? "" : fat-join(lines, "\n") + "\n";
+    }
+}
