@@ -91,6 +91,7 @@ var fkwuReservedHeads = fkwuReservedHeadSet([]string{
 	"host_pid",
 	"host_process",
 	"host_processes",
+	"host_signal",
 	"host_sleep_ms",
 	"host_source_inventory",
 	"host_spawn",
