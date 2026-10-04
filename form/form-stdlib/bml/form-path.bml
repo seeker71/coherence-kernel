@@ -1,0 +1,559 @@
+// form-path.bml — a path query over Form nodes: XPath-shaped, resolving to node ids with their source (file, byte span, line).
+//
+// Urs, 2026-10-04: "And we resolve to node ids and we can use query syntax like xpath to query inside a file? Or definitions? Or similar?"
+//
+// THE TREE. A source file (.fk .bml .form) is read by a structural scanner (strings and comments skipped, brackets matched) into
+//   file > section > class > def | defn | let | field | thought | import | blueprint | stmt,   def (let, field, thought, stmt) > call | string
+// the words of grammars/form-bml.fk (section, class, def, let, fncall -> call). The grammar's own trees carry no spans and are lowered at once,
+// so this tree keeps what a lookup needs: every node has a byte span [start, end) in its file and a line. Calls and strings are the flat children of the
+// definition that holds them (a call inside a call is a sibling, not a child; a def local to another def's block is part of that def). A statement the
+// scanner does not name (a call at the top of a section, a route) is a stmt. A { } group and a (do ... ) wrapper (the .fk spelling) are passed through.
+// The scanner reads the text form-find already holds: nothing is re-read.
+//
+// IDENTITY. A node's id is CONTENT-ADDRESSED: fpa-cid = a 52-bit hash (two 26-bit lanes) of kind, name and the node's own source text. The same text is the
+// same id in any file, any process, any session; editing another definition does not move it (nothing positional is in it). The id the host field gives
+// (node_inst of an interned node) is the order cells were first made in: stable across processes only while the field lives, and not a function of the
+// content, so it is never used as the identity. The interned node (category fp:<kind>, children cid, name, arity, bytes) is content-addressed in the
+// field too: equal content, equal cell (eq). Where a node came from is a HIT: fp:hit(node, path, start, end, line), so one definition seen in two files is one
+// node and two hits. A result is fp:set(hits). Stages pass these nodes; text is made only by fpa-render (counted by fpa-renders()).
+//
+// THE SYNTAX (docs/form-native-agent-tools.md, "form-path"):
+//   /file[@path~"voice-"]//def[@name="vs-phonemes"]/call[@name~"^vg-"]     //class[@name="X"]/def     //def[@name="f"]//string
+//   //def[calls("host_spawn_at")]   //def[@lines>40]   //def[has(//string[@value~"tmp"])]   //def[@name="f"][1]   //call[last()]   //call/..
+//   union  a | b      count(...)      predicates: @name @kind @path @line @arity @value @lines @bytes @start @end with = != ~ !~ > < >= <=, and or not( ), [N], [last()]
+// Anything not in it is a named refusal (form-path-*), never a guess.
+//
+// PLAN. A path is narrowed first through form-find's tables: `@name="x"` on a def/class/field/thought step is the defs table, `calls("x")`, a call step with
+// @name="x", a string step with @value="x" are the literal postings; the files are the intersection. Only those files are parsed, each once and kept
+// (keyed by size, mtime, inode, as form-find's own entries are), and only the definitions' bodies a step reaches are walked for calls and strings.
+//
+// WIRE. form-find's service answers `path [--ids|--text|--rows|--count] EXPR` (EXPR in one argument, or in the request's "input"). fpa-open(base) is
+// form-find's index with the verb taught; fpa-run is the service loop with it; fpa-cold answers one request from an index of its own.
+// preludes: form-stdlib/core.fk form-stdlib/bml/form-find.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/form-find.bml;
+section [form.bml] {
+ let FPA-STATE = record_new(0, "renders", 0, "parses", 0);
+ let FPA-CAT-SET = intern_trivial_string("fp:set");
+ let FPA-CAT-HIT = intern_trivial_string("fp:hit");
+ class FormPath {
+  // ---- hooks: how many times text was made, how many files were read into a tree ------------------------------------------
+  def fpa-bump(key) {
+   record_set(FPA-STATE, key, record_get(FPA-STATE, key) + 1);
+   0;
+  }
+  def fpa-renders() = record_get(FPA-STATE, "renders");
+  def fpa-parses() = record_get(FPA-STATE, "parses");
+
+  // ---- identity: content-addressed, 52 bits (two lanes under 2^26) ---------------------------------------------------------
+  def fpa-hash-go(t, i, n, h1, h2) = i >= n ? h1 * 67108864 + h2 : fpa-hash-go(t, i + 1, n, (h1 * 131 + str_byte_at(t, i)) % 67108859, (h2 * 257 + str_byte_at(t, i) + 1) % 67108837);
+  def fpa-hash(t) = fpa-hash-go(t, 0, len(t), 7, 11);
+  def fpa-cid(kind, name, text) = fpa-hash(kind ++ byte_to_str(1) ++ name ++ byte_to_str(1) ++ text);
+  def fpa-hex-go(n, k, acc) = k == 0 ? acc : fpa-hex-go(n / 16, k - 1, substring("0123456789abcdef", n % 16, n % 16 + 1) ++ acc);
+  def fpa-hex(n) = fpa-hex-go(n, 13, "");
+
+  // ---- bytes ------------------------------------------------------------------------------------------------------------------------
+  def fpa-ws?(b) = b == 32 || b == 9 || b == 10 || b == 13;
+  def fpa-idb?(b) = (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || b == 45;
+  def fpa-idstart?(b) = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+  def fpa-first-on-line?(t, i) = fpa-fol(t, i - 1);
+  def fpa-fol(t, j) = j < 0 ? true : str_byte_at(t, j) == 10 ? true : (str_byte_at(t, j) == 32 || str_byte_at(t, j) == 9) ? fpa-fol(t, j - 1) : false;
+  def fpa-skip-plain(t, i, b) = fpa-idb?(b) ? scan_run(t, i, 3) : fpa-ws?(b) ? scan_run(t, i, 0) : i + 1;
+  def fpa-comment?(t, i, e, b) = (b == 47 && i + 1 < e && str_byte_at(t, i + 1) == 47) || (b == 59 && fpa-first-on-line?(t, i));
+  def fpa-word-end(t, i) {
+   let j = scan_run(t, i, 3);
+   (j < len(t) && (str_byte_at(t, j) == 63 || str_byte_at(t, j) == 33)) ? j + 1 : j;
+  }
+  def fpa-min(a, b) = a < b ? a : b;
+  def fpa-max(a, b) = a > b ? a : b;
+
+  // whitespace and comments (// to the end of the line; a ; that begins its line)
+  def fpa-trivia(t, i, n) {
+   let j = scan_run(t, i, 0);
+   j >= n ? n : fpa-trivia-at(t, j, n, str_byte_at(t, j));
+  }
+  def fpa-trivia-at(t, j, n, b) = fpa-comment?(t, j, n, b) ? fpa-trivia(t, scan_run(t, j, 5), n) : j;
+
+  // i at an opener: the index just after its closer (n when it never closes)
+  def fpa-close(t, i, n) = fpa-depth(t, i + 1, n, 1);
+  def fpa-depth(t, i, n, d) = i >= n ? n : fpa-depth-at(t, i, n, d, str_byte_at(t, i));
+  def fpa-depth-at(t, i, n, d, b) = b == 34 ? fpa-depth(t, fpa-min(fnd-str-end(t, i + 1), n), n, d)
+   : fpa-comment?(t, i, n, b) ? fpa-depth(t, scan_run(t, i, 5), n, d)
+   : (b == 40 || b == 91 || b == 123) ? fpa-depth(t, i + 1, n, d + 1)
+   : (b == 41 || b == 93 || b == 125) ? (d == 1 ? i + 1 : fpa-depth(t, i + 1, n, d - 1))
+   : fpa-depth(t, fpa-skip-plain(t, i, b), n, d);
+  // a statement: to its ; at depth 0 (inclusive), or to an unmatched closer (exclusive)
+  def fpa-stmt-end(t, i, n) = fpa-sg(t, i, n, 0);
+  def fpa-sg(t, i, n, d) = i >= n ? n : fpa-sg-at(t, i, n, d, str_byte_at(t, i));
+  def fpa-sg-at(t, i, n, d, b) = b == 34 ? fpa-sg(t, fpa-min(fnd-str-end(t, i + 1), n), n, d)
+   : fpa-comment?(t, i, n, b) ? fpa-sg(t, scan_run(t, i, 5), n, d)
+   : (b == 40 || b == 91 || b == 123) ? fpa-sg(t, i + 1, n, d + 1)
+   : (b == 41 || b == 93 || b == 125) ? (d == 0 ? i : fpa-sg(t, i + 1, n, d - 1))
+   : (b == 59 && d == 0) ? i + 1
+   : fpa-sg(t, fpa-skip-plain(t, i, b), n, d);
+  // an unknown statement is skipped to its ; or to the end of its first bracketed group
+  def fpa-skip-stmt(t, j, e) = fpa-skip-from(t, j, e, fpa-ue(t, j, e, 0));
+  def fpa-skip-from(t, j, e, k) = k > j ? k : j + 1;
+  def fpa-ue(t, i, n, d) = i >= n ? n : fpa-ue-at(t, i, n, d, str_byte_at(t, i));
+  def fpa-ue-at(t, i, n, d, b) = b == 34 ? fpa-ue(t, fpa-min(fnd-str-end(t, i + 1), n), n, d)
+   : fpa-comment?(t, i, n, b) ? fpa-ue(t, scan_run(t, i, 5), n, d)
+   : (b == 40 || b == 91 || b == 123) ? fpa-ue(t, i + 1, n, d + 1)
+   : (b == 41 || b == 93 || b == 125) ? (d == 0 ? i : d == 1 ? i + 1 : fpa-ue(t, i + 1, n, d - 1))
+   : (b == 59 && d == 0) ? i + 1
+   : fpa-ue(t, fpa-skip-plain(t, i, b), n, d);
+
+  // the number of parameters of the list that opens at open and ends at end (after its closer)
+  def fpa-arity(t, open, end) {
+   let a = scan_run(t, open + 1, 0);
+   a >= end - 1 ? 0 : fpa-commas(t, a, end - 1, 0, 1);
+  }
+  def fpa-commas(t, i, e, d, c) = i >= e ? c : fpa-comma-at(t, i, e, d, c, str_byte_at(t, i));
+  def fpa-comma-at(t, i, e, d, c, b) = b == 34 ? fpa-commas(t, fpa-min(fnd-str-end(t, i + 1), e), e, d, c)
+   : (b == 40 || b == 91 || b == 123) ? fpa-commas(t, i + 1, e, d + 1, c)
+   : (b == 41 || b == 93 || b == 125) ? fpa-commas(t, i + 1, e, d - 1, c)
+   : (b == 44 && d == 0) ? fpa-commas(t, i + 1, e, d, c + 1)
+   : fpa-commas(t, i + 1, e, d, c);
+
+  // ---- nodes: [kind, name, start, end, arity, value, parent, path, body, kids] -------------------------------------------------
+  // end -1 = a call whose closer is found when asked; arity -1 = none, -2 = a call's, counted when asked; parent = [path, start of the parent, -1 for the file]
+  def fpa-mk(kind, name, start, end, arity, value, parent, rel, body, kids) = [kind, name, start, end, arity, value, parent, rel, body, kids];
+  def fpa-with-kids(nd, kids) = [nd[0], nd[1], nd[2], nd[3], nd[4], nd[5], nd[6], nd[7], nd[8], kids];
+  def fpa-def-like?(kind) = (String) kind == "def" || (String) kind == "defn" || (String) kind == "let" || (String) kind == "field" || (String) kind == "thought" || (String) kind == "stmt";
+  def fpa-container?(kind) = (String) kind == "class" || (String) kind == "section";
+
+  // ---- the file's items: a sequence of statements at one level ------------------------------------------------------------------
+  def fpa-items(t, i, e, parent, rel, acc) {
+   let j = fpa-trivia(t, i, e);
+   j >= e ? reverse(acc) : fpa-item-at(t, j, e, parent, rel, acc, str_byte_at(t, j));
+  }
+  // a (do ... ) wrapper (the .fk spelling) is passed through: its statements are this level's; any other group is one unknown statement
+  def fpa-item-at(t, j, e, parent, rel, acc, b) = b == 123 ? fpa-items(t, j + 1, e, parent, rel, acc) : (b == 40 &&fpa-do-word?(t, scan_run(t, j + 1, 0), e)) ? fpa-items(t, scan_run(t, j + 1, 0) + 2, e, parent, rel, acc) : fpa-item-word(t, j, e, parent, rel, acc, substring(t, j, scan_run(t, j, 3)));
+  def fpa-do-word?(t, k, e) = k + 2 < e && str_byte_at(t, k) == 100 && str_byte_at(t, k + 1) == 111 && !fpa-idb?(str_byte_at(t, k + 2));
+  def fpa-item-word(t, j, e, parent, rel, acc, w) = ((String) w == "def" || (String) w == "defn") ? fpa-add(t, j, e, parent, rel, acc, fpa-parse-def(t, j, e, w, parent, rel))
+   : (String) w == "class" ? fpa-add(t, j, e, parent, rel, acc, fpa-parse-box(t, j, e, "class", scan_run(t, j + 5, 0), parent, rel, true))
+   : (String) w == "section" ? fpa-add(t, j, e, parent, rel, acc, fpa-parse-section(t, j, e, parent, rel))
+   : (String) w == "blueprint" ? fpa-add(t, j, e, parent, rel, acc, fpa-parse-box(t, j, e, "blueprint", scan_run(t, j + 9, 0), parent, rel, false))
+   : (String) w == "let" ? fpa-add(t, j, e, parent, rel, acc, fpa-parse-simple(t, j, e, "let", 3, parent, rel))
+   : (String) w == "field" ? fpa-add(t, j, e, parent, rel, acc, fpa-parse-simple(t, j, e, "field", 5, parent, rel))
+   : (String) w == "thought" ? fpa-add(t, j, e, parent, rel, acc, fpa-parse-simple(t, j, e, "thought", 7, parent, rel))
+   : (String) w == "import" ? fpa-add(t, j, e, parent, rel, acc, fpa-parse-import(t, j, e, parent, rel))
+   : fpa-add(t, j, e, parent, rel, acc, fpa-parse-stmt(t, j, e, parent, rel));
+  // a statement the scanner does not name (a call at the top of a section, a route, a template ...): kind stmt, its calls and strings are its children
+  def fpa-parse-stmt(t, j, e, parent, rel) = fpa-idstart?(str_byte_at(t, j)) ? fpa-mk("stmt", "", j, fpa-skip-stmt(t, j, e), 0 - 1, "", parent, rel, j, []) : [];
+  def fpa-add(t, j, e, parent, rel, acc, nd) = nil?(nd) ? fpa-items(t, fpa-skip-stmt(t, j, e), e, parent, rel, acc) : fpa-items(t, nd[3] > j ? nd[3] : j + 1, e, parent, rel, cons(nd, acc));
+
+  // def NAME(params) = expr ;   or   def NAME(params) { block }
+  def fpa-parse-def(t, j, e, w, parent, rel) {
+   let ns = scan_run(t, j + len(w), 0);
+   let ne = fnd-name-end(t, ns);
+   ne <= ns ? [] : fpa-def-shape(t, j, e, w, parent, rel, ns, ne);
+  }
+  def fpa-def-shape(t, j, e, w, parent, rel, ns, ne) {
+   let after = scan_run(t, ne, 0);
+   let hasp = after < e && str_byte_at(t, after) == 40;
+   let pe = hasp ? fpa-close(t, after, e) : ne;
+   let end = fpa-hdr(t, pe, e);
+   fpa-mk(w, substring(t, ns, ne), j, end, hasp ? fpa-arity(t, after, pe) : 0, "", parent, rel, pe, []);
+  }
+  def fpa-hdr(t, i, e) = i >= e ? e : fpa-hdr-at(t, i, e, str_byte_at(t, i));
+  def fpa-hdr-at(t, i, e, b) = b == 123 ? fpa-close(t, i, e)
+   : b == 61 ? fpa-stmt-end(t, i + 1, e)
+   : b == 59 ? i + 1
+   : (b == 125 || b == 41) ? i
+   : fpa-hdr(t, fpa-skip-plain(t, i, b), e);
+
+  // class NAME { members }   blueprint NAME { fields }
+  def fpa-find-open(t, i, e) = i >= e ? 0 - 1 : str_byte_at(t, i) == 123 ? i : (str_byte_at(t, i) == 59 || str_byte_at(t, i) == 125) ? 0 - 1 : fpa-find-open(t, i + 1, e);
+  def fpa-parse-box(t, j, e, kind, ns, parent, rel, kids) {
+   let ne = fnd-name-end(t, ns);
+   let op = fpa-find-open(t, ne, e);
+   (ne <= ns || op < 0) ? [] : fpa-box-shape(t, j, e, kind, substring(t, ns, ne), op, parent, rel, kids);
+  }
+  def fpa-box-shape(t, j, e, kind, name, op, parent, rel, kids) {
+   let end = fpa-close(t, op, e);
+   let bodyend = (end > op + 1 && str_byte_at(t, end - 1) == 125) ? end - 1 : end;
+   let shell = fpa-mk(kind, name, j, end, 0 - 1, "", parent, rel, op + 1, []);
+   kids ? fpa-with-kids(shell, fpa-items(t, op + 1, bodyend, [rel, j], rel, [])) : shell;
+  }
+  // section [name] { items }
+  def fpa-parse-section(t, j, e, parent, rel) {
+   let b = scan_run(t, j + 7, 0);
+   let ce = (b < e && str_byte_at(t, b) == 91) ? str_find(t, "]", b) : 0 - 1;
+   let op = fpa-find-open(t, b, e);
+   (ce < 0 || op < 0) ? [] : fpa-section-shape(t, j, e, substring(t, b + 1, ce), op, parent, rel);
+  }
+  def fpa-section-shape(t, j, e, name, op, parent, rel) {
+   let end = fpa-close(t, op, e);
+   let bodyend = (end > op + 1 && str_byte_at(t, end - 1) == 125) ? end - 1 : end;
+   let shell = fpa-mk("section", name, j, end, 0 - 1, "", parent, rel, op + 1, []);
+   fpa-with-kids(shell, fpa-items(t, op + 1, bodyend, [rel, j], rel, []));
+  }
+  // let NAME = ... ;   field NAME ... ;   thought NAME ... ;
+  def fpa-parse-simple(t, j, e, kind, klen, parent, rel) {
+   let ns = scan_run(t, j + klen, 0);
+   let ne = fnd-name-end(t, ns);
+   ne <= ns ? [] : fpa-mk(kind, substring(t, ns, ne), j, fpa-stmt-end(t, ne, e), 0 - 1, "", parent, rel, ne, []);
+  }
+  def fpa-parse-import(t, j, e, parent, rel) {
+   let ns = scan_run(t, j + 6, 0);
+   let ne = fnd-tok-end(t, ns);
+   ne <= ns ? [] : fpa-mk("import", substring(t, ns, ne), j, fpa-import-end(t, ne, fpa-min(scan_run(t, ne, 5), e), str_find(t, ";", ne)), 0 - 1, substring(t, ns, ne), parent, rel, ne, []);
+  }
+  // an import ends at its ; on the same line, or with the line (the .fk spelling has no ;)
+  def fpa-import-end(t, ne, le, semi) = (semi >= 0 && semi < le) ? semi + 1 : le;
+
+  // ---- calls and strings of a body: flat, in document order ---------------------------------------------------------------------
+  def fpa-body(s, c) = fpa-body-text(fnd-entry(s, c[7])[5], c);
+  def fpa-body-text(t, c) = fpa-body-walk(t, c[8], fpa-end-of(t, c), c[7], [c[7], c[2]], []);
+  def fpa-body-walk(t, i, e, rel, parent, acc) = i >= e ? reverse(acc) : fpa-body-at(t, i, e, rel, parent, acc, str_byte_at(t, i));
+  def fpa-body-at(t, i, e, rel, parent, acc, b) = b == 34 ? fpa-body-str(t, i, e, rel, parent, acc, fpa-min(fnd-str-end(t, i + 1), e))
+   : fpa-comment?(t, i, e, b) ? fpa-body-walk(t, scan_run(t, i, 5), e, rel, parent, acc)
+   : fpa-idstart?(b) ? fpa-body-word(t, i, e, rel, parent, acc, fpa-word-end(t, i))
+   : fpa-body-walk(t, fpa-skip-plain(t, i, b), e, rel, parent, acc);
+  def fpa-body-str(t, i, e, rel, parent, acc, se) = fpa-body-walk(t, se, e, rel, parent, cons(fpa-mk("string", "", i, se, 0 - 1, substring(t, i + 1, (se > i + 1 && str_byte_at(t, se - 1) == 34) ? se - 1 : se), parent, rel, i, []), acc));
+  def fpa-body-word(t, i, e, rel, parent, acc, we) = (we < e && str_byte_at(t, we) == 40) ? fpa-body-walk(t, we, e, rel, parent, cons(fpa-mk("call", substring(t, i, we), i, 0 - 1, 0 - 2, "", parent, rel, we, []), acc)) : fpa-body-walk(t, we, e, rel, parent, acc);
+  // a call's closer, found when asked
+  def fpa-end-of(t, c) = c[3] >= 0 ? c[3] : fpa-close(t, c[8], len(t));
+  def fpa-end(s, c) = c[3] >= 0 ? c[3] : fpa-end-of(fnd-entry(s, c[7])[5], c);
+
+  // ---- a file's tree, parsed once and kept (size, mtime, inode as form-find's own entries) ------------------------------------------
+  def fpa-cache(s) = record_has(s, "fpa") ? record_get(s, "fpa") : fpa-cache-new(s);
+  def fpa-cache-new(s) {
+   let c = fnd-map();
+   let z = record_set(s, "fpa", c);
+   c;
+  }
+  def fpa-fresh?(rec, e) = (Comparable) record_get(rec, "size") == e[1] && (Comparable) record_get(rec, "mtime") == e[2] && (Comparable) record_get(rec, "ino") == e[3];
+  def fpa-entry(s, rel) = fpa-entry-of(s, rel, fnd-entry(s, rel));
+  def fpa-entry-of(s, rel, e) = (nil?(e) || (Comparable) e[4] != 1) ? [] : fpa-entry-held(s, rel, e, fnd-mget(fpa-cache(s), rel, []));
+  def fpa-rec?(r) = (String) value_kind(r) == "record";
+  def fpa-entry-held(s, rel, e, rec) = (fpa-rec?(rec) && fpa-fresh?(rec, e)) ? rec : fpa-entry-build(s, rel, e);
+  def fpa-entry-build(s, rel, e) {
+   let t = e[5];
+   let items = fpa-items(t, 0, len(t), [rel, 0 - 1], rel, []);
+   let rec = record_new(0);
+   let z1 = record_set(rec, "size", e[1]);
+   let z2 = record_set(rec, "mtime", e[2]);
+   let z3 = record_set(rec, "ino", e[3]);
+   let z4 = record_set(rec, "items", items);
+   let starts = fnd-map();
+   let z5 = fpa-register(starts, items);
+   let z6 = record_set(rec, "starts", starts);
+   let z7 = record_set(rec, "lm", []);
+   let z8 = fnd-mset(fpa-cache(s), rel, rec);
+   let z9 = fpa-bump("parses");
+   rec;
+  }
+  def fpa-register(m, nodes) = nil?(nodes) ? 0 : fpa-register-rest(m, nodes, fpa-register-one(m, nodes[0]));
+  def fpa-register-one(m, nd) {
+   let z = fnd-mset(m, nd[2].str(), nd);
+   fpa-register(m, nd[9]);
+  }
+  def fpa-register-rest(m, nodes, z) = fpa-register(m, nodes[1:]);
+
+  // ---- lines: a table of line starts, built when a line is asked, then a binary search --------------------------------------------------
+  def fpa-lines(s, rel) = fpa-lines-of(s, rel, fpa-entry(s, rel));
+  def fpa-lines-of(s, rel, rec) = !fpa-rec?(rec) ? [fnd-map(), 1] : nil?(record_get(rec, "lm")) ? fpa-lines-build(rec, fnd-entry(s, rel)[5]) : record_get(rec, "lm");
+  def fpa-lines-build(rec, t) {
+   let m = fnd-map();
+   let k = fpa-nl-fill(t, m, 0, 0);
+   let lm = [m, k];
+   let z = record_set(rec, "lm", lm);
+   lm;
+  }
+  def fpa-nl-fill(t, m, k, from) {
+   let z = fnd-mset(m, k.str(), from);
+   let p = str_find(t, "\n", from);
+   p < 0 ? k + 1 : fpa-nl-fill(t, m, k + 1, p + 1);
+  }
+  // the newlines in [a, b): a span's own count (a def's @lines), no table needed
+  def fpa-nl-between(t, a, b, n) = fpa-nl-at(t, b, n, str_find(t, "\n", a));
+  def fpa-nl-at(t, b, n, p) = (p < 0 || p >= b) ? n : fpa-nl-between(t, p + 1, b, n + 1);
+  def fpa-line-of(s, rel, off) = fpa-line-in(fpa-lines(s, rel), off);
+  def fpa-line-in(lm, off) = fpa-bsearch(lm[0], 0, lm[1] - 1, off) + 1;
+  def fpa-bsearch(m, lo, hi, off) = lo >= hi ? lo : fpa-bs-mid(m, lo, hi, off, (lo + hi + 1) / 2);
+  def fpa-bs-mid(m, lo, hi, off, mid) = (Comparable) fnd-mget(m, mid.str(), 0) <= off ? fpa-bsearch(m, mid, hi, off) : fpa-bsearch(m, lo, mid - 1, off);
+
+  // ---- the axes ------------------------------------------------------------------------------------------------------------------------------
+  def fpa-root() = fpa-mk("root", "", 0, 0, 0 - 1, "", [], "", 0, []);
+  def fpa-file-ctx(s, rel) = fpa-mk("file", fnd-basename(rel), 0, len(fnd-entry(s, rel)[5]), 0 - 1, "", [rel, 0 - 1], rel, 0, []);
+  def fpa-test-ok?(test, kind) = (String) test == "*" || (String) test == kind || ((String) test == "def" && (String) kind == "defn");
+  def fpa-needs-body?(test) = (String) test == "*" || (String) test == "call" || (String) test == "string";
+  def fpa-kids(s, c, files, body) = (String) c[0] == "root" ? (files |> map(rel => fpa-file-ctx(s, rel)))
+   : (String) c[0] == "file" ? fpa-file-items(s, c[7])
+   : fpa-container?(c[0]) ? c[9]
+   : (body && fpa-def-like?(c[0])) ? fpa-body(s, c)
+   : [];
+  def fpa-file-items(s, rel) = fpa-items-of(fpa-entry(s, rel));
+  def fpa-items-of(rec) = !fpa-rec?(rec) ? [] : record_get(rec, "items");
+  // descendants in document order (acc is built reversed)
+  def fpa-desc(s, c, files, test, acc) = fpa-desc-list(s, fpa-kids(s, c, files, fpa-needs-body?(test)), files, test, acc);
+  def fpa-desc-list(s, kids, files, test, acc) = nil?(kids) ? acc : fpa-desc-list(s, kids[1:], files, test, fpa-desc-one(s, kids[0], files, test, acc));
+  def fpa-desc-one(s, k, files, test, acc) = fpa-desc(s, k, files, test, fpa-test-ok?(test, k[0]) ? cons(k, acc) : acc);
+  def fpa-parent(s, c) = ((String) c[0] == "file" || (String) c[0] == "root" || nil?(c[6])) ? [] : (Comparable) c[6][1] < 0 ? [fpa-file-ctx(s, c[6][0])] : fpa-parent-node(fnd-mget(record_get(fpa-entry(s, c[6][0]), "starts"), c[6][1].str(), []));
+  def fpa-parent-node(nd) = nil?(nd) ? [] : [nd];
+  def fpa-axis(s, c, axis, test, files) = (String) axis == "parent" ? fpa-parent(s, c)
+   : (String) axis == "child" ? filter(k => fpa-test-ok?(test, k[0]), fpa-kids(s, c, files, fpa-needs-body?(test)))
+   : reverse(fpa-desc(s, c, files, test, []));
+
+  // ---- predicates ----------------------------------------------------------------------------------------------------------------------------
+  def fpa-arity-of(s, c) = (Comparable) c[4] == 0 - 1 ? nothing() : (Comparable) c[4] == 0 - 2 ? fpa-arity(fnd-entry(s, c[7])[5], c[8], fpa-end(s, c)) : c[4];
+  def fpa-attr(s, c, name) = (String) name == "name" ? c[1]
+   : (String) name == "kind" ? c[0]
+   : (String) name == "path" ? c[7]
+   : (String) name == "line" ? fpa-line-of(s, c[7], c[2])
+   : (String) name == "start" ? c[2]
+   : (String) name == "end" ? fpa-end(s, c)
+   : (String) name == "bytes" ? fpa-end(s, c) - c[2]
+   : (String) name == "lines" ? fpa-nl-between(fnd-entry(s, c[7])[5], c[2], fpa-max(c[2], fpa-end(s, c) - 1), 0) + 1
+   : (String) name == "arity" ? fpa-arity-of(s, c)
+   : (String) name == "value" ? (((String) c[0] == "string" || (String) c[0] == "import") ? c[5] : nothing())
+   : nothing();
+  def fpa-kind-of(v) = (String) value_kind(v) == "string" ? "s" : "n";
+  def fpa-rx?(rx, v) = (Comparable) fap-search(rx, v, 0, 0)[0] >= 0;
+  // p = ["cmp", attribute, op, literal kind, literal, compiled regex]
+  def fpa-cmp?(s, c, p) = fpa-cmp-val(p, fpa-attr(s, c, p[1]));
+  def fpa-cmp-val(p, v) = nothing?(v) ? false : fpa-cmp-op(p[2], p[3], p[4], p[5], v);
+  def fpa-cmp-op(op, lk, lit, rx, v) = (String) op == "exists" ? true
+   : (String) op == "~" ? fpa-rx?(rx, v)
+   : (String) op == "!~" ? !fpa-rx?(rx, v)
+   : (String) fpa-kind-of(v) != (String) lk ? (String) op == "!="
+   : fpa-cmp-same(op, lk, lit, v);
+  def fpa-cmp-same(op, lk, lit, v) = (String) op == "=" ? (lk == "s" ? (String) v == lit : (Comparable) v == lit)
+   : (String) op == "!=" ? (lk == "s" ? (String) v != lit : (Comparable) v != lit)
+   : (String) op == ">" ? (Comparable) v > lit
+   : (String) op == "<" ? (Comparable) v < lit
+   : (String) op == ">=" ? (Comparable) v >= lit
+   : (Comparable) v <= lit;
+  def fpa-holds?(s, c, p) = (String) p[0] == "and" ? (fpa-holds?(s, c, p[1]) && fpa-holds?(s, c, p[2]))
+   : (String) p[0] == "or" ? (fpa-holds?(s, c, p[1]) || fpa-holds?(s, c, p[2]))
+   : (String) p[0] == "not" ? !fpa-holds?(s, c, p[1])
+   : (String) p[0] == "cmp" ? fpa-cmp?(s, c, p)
+   : (String) p[0] == "has" ? !nil?(fpa-steps-from(s, [c], p[1], []))
+   : (String) p[0] == "calls" ? fpa-calls?(s, c, p[1])
+   : false;
+  // calls("x"): a call named x lies within the node's span; the text is looked at first, the body walked only when it holds the name
+  def fpa-calls?(s, c, lit) = fpa-calls-text(s, c, lit, fnd-entry(s, c[7])[5]);
+  def fpa-calls-text(s, c, lit, t) = fpa-calls-at(s, c, lit, t, str_find(t, lit, c[2]));
+  def fpa-calls-at(s, c, lit, t, at) = (at < 0 || at >= fpa-end(s, c) || (String) c[0] == "root") ? false : any?(k => (String) k[1] == lit, fpa-body-text(t, c) |> filter(k => (String) k[0] == "call"));
+  def fpa-nth(xs, k) = (k < 1 || nil?(xs)) ? [] : k == 1 ? [xs[0]] : fpa-nth(xs[1:], k - 1);
+  def fpa-last(xs) = nil?(xs[1:]) ? xs[0] : fpa-last(xs[1:]);
+  def fpa-pred-apply(s, xs, p) = (String) p[0] == "pos" ? fpa-nth(xs, p[1])
+   : (String) p[0] == "last" ? (nil?(xs) ? [] : [fpa-last(xs)])
+   : filter(x => fpa-holds?(s, x, p), xs);
+  def fpa-preds(s, xs, preds) = nil?(preds) ? xs : fpa-preds(s, fpa-pred-apply(s, xs, preds[0]), preds[1:]);
+
+  // ---- steps and paths ----------------------------------------------------------------------------------------------------------------------
+  def fpa-step-one(s, c, step, files) = fpa-preds(s, fpa-axis(s, c, step[0], step[1], files), step[2]);
+  def fpa-push(xs, acc) = nil?(xs) ? acc : fpa-push(xs[1:], cons(xs[0], acc));
+  def fpa-step-loop(s, ctxs, step, files, acc) = nil?(ctxs) ? acc : fpa-step-loop(s, ctxs[1:], step, files, fpa-push(fpa-step-one(s, ctxs[0], step, files), acc));
+  def fpa-step(s, ctxs, step, files) = reverse(fpa-step-loop(s, ctxs, step, files, []));
+  def fpa-steps-from(s, ctxs, steps, files) = nil?(steps) ? ctxs : fpa-steps-from(s, fpa-step(s, ctxs, steps[0], files), steps[1:], files);
+
+  // ---- the plan: files from form-find's tables ---------------------------------------------------------------------------------------------
+  def fpa-source-rels(s) = record_get(s, "held") |> filter(h => fnd-source?(h[1])) |> map(h => h[1]);
+  def fpa-ids-set(ids) {
+   let m = fnd-map();
+   let z = fpa-ids-fill(m, ids);
+   m;
+  }
+  def fpa-ids-fill(m, ids) = nil?(ids) ? 0 : fpa-ids-next(m, ids, fnd-mset(m, ids[0].str(), 1));
+  def fpa-ids-next(m, ids, z) = fpa-ids-fill(m, ids[1:]);
+  def fpa-intersect(a, b) = filter(id => fnd-mhas?(fpa-ids-set(b), id.str()), a);
+  def fpa-def-ids(s, name) = fnd-mget(record_get(s, "defs"), name, []) |> map(en => en[0]);
+  def fpa-conj(p) = (String) p[0] == "and" ? append(fpa-conj(p[1]), fpa-conj(p[2])) : [p];
+  def fpa-indexed-test?(test) = (String) test == "def" || (String) test == "defn" || (String) test == "class" || (String) test == "field" || (String) test == "thought";
+  // the id sets one conjunct of a step necessarily narrows to
+  def fpa-need-one(s, test, p) = (String) p[0] == "cmp" ? fpa-need-cmp(s, test, p)
+   : (String) p[0] == "calls" ? [fnd-lit-ids(s, p[1])]
+   : (String) p[0] == "has" ? fpa-need-steps(s, p[1])
+   : [];
+  def fpa-need-cmp(s, test, p) = ((String) p[2] == "=" && (String) p[3] == "s" && (String) p[1] == "name" && fpa-indexed-test?(test)) ? [fpa-def-ids(s, p[4])]
+   : ((String) p[2] == "=" && (String) p[3] == "s" && (String) p[1] == "name" && (String) test == "call") ? [fnd-lit-ids(s, p[4])]
+   : ((String) p[2] == "=" && (String) p[3] == "s" && (String) p[1] == "value" && (String) test == "string" && len(p[4]) > 0) ? [fnd-lit-ids(s, p[4])]
+   : [];
+  def fpa-need-step(s, step) = foldl((acc, p) => append(acc, foldl((a2, q) => append(a2, fpa-need-one(s, step[1], q)), [], fpa-conj(p))), [], step[2]);
+  def fpa-need-steps(s, steps) = foldl((acc, st) => append(acc, fpa-need-step(s, st)), [], steps);
+  def fpa-path-rels(s, steps) = fpa-rels-of-ids(s, fpa-need-steps(s, steps));
+  def fpa-rels-of-ids(s, sets) = nil?(sets) ? sort-strs(fpa-source-rels(s)) : sort-strs(fpa-rels-held(s, foldl((acc, st) => fpa-intersect(acc, st), sets[0], sets[1:])));
+  def fpa-rels-held(s, ids) = ids |> map(id => fnd-mget(record_get(s, "byid"), id.str(), "")) |> filter(rel => !nil?(fnd-entry(s, rel)) && (Comparable) fnd-entry(s, rel)[4] == 1 && fnd-source?(rel));
+
+  // ---- evaluation ----------------------------------------------------------------------------------------------------------------------------
+  def fpa-has-parent?(steps) = any?(st => (String) st[0] == "parent", steps);
+  def fpa-eval-path(s, steps) = fpa-steps-from(s, [fpa-root()], steps, fpa-path-rels(s, steps));
+  def fpa-ckey(c) = c[0] ++ "|" ++ c[7] ++ "|" ++ c[2].str();
+  def fpa-dd(xs, m, acc) = nil?(xs) ? reverse(acc) : fpa-dd-one(xs, m, acc, fpa-ckey(xs[0]));
+  def fpa-dd-one(xs, m, acc, key) = fnd-mhas?(m, key) ? fpa-dd(xs[1:], m, acc) : fpa-dd-add(xs, m, acc, fnd-mset(m, key, 1));
+  def fpa-dd-add(xs, m, acc, z) = fpa-dd(xs[1:], m, cons(xs[0], acc));
+  def fpa-eval(s, union) {
+   let all = foldl((acc, steps) => append(acc, fpa-eval-path(s, steps)), [], union);
+   (nil?(union[1:]) && !fpa-has-parent?(union[0])) ? all : fpa-dd(all, fnd-map(), []);
+  }
+
+  // ---- the path syntax: text -> a plan, or a named refusal ------------------------------------------------------------------------------------
+  // a parse answers ["ok", next position, value] or ["err", position, refusal]
+  def fpa-pk(v, i) = ["ok", i, v];
+  def fpa-pe(msg, i) = ["err", i, msg ++ " (column " ++ (i + 1).str() ++ ")"];
+  def fpa-ok?(r) = (String) r[0] == "ok";
+  def fpa-sk(x, i) = scan_run(x, i, 0);
+  def fpa-at?(x, i, lit) = i + len(lit) <= len(x) && (String) substring(x, i, i + len(lit)) == lit;
+  def fpa-byte(x, i) = i < len(x) ? str_byte_at(x, i) : 0;
+  def fpa-kw?(x, j, w) = fpa-at?(x, j, w) && j + len(w) < len(x) && (fpa-ws?(str_byte_at(x, j + len(w))) || str_byte_at(x, j + len(w)) == 40 || str_byte_at(x, j + len(w)) == 64);
+  def fpa-tests() = ["file", "section", "class", "blueprint", "def", "defn", "let", "import", "field", "thought", "stmt", "call", "string", "*"];
+  def fpa-attrs() = ["name", "kind", "path", "line", "arity", "value", "lines", "bytes", "start", "end"];
+  def fpa-num-attr?(a) = fnd-has?(["line", "arity", "lines", "bytes", "start", "end"], a);
+
+  def fpa-parse(x) {
+   let i = fpa-sk(x, 0);
+   fpa-at?(x, i, "count(") ? fpa-parse-count(x, i + 6) : fpa-parse-whole(x, "path", fpa-parse-union(x, i, []));
+  }
+  def fpa-parse-count(x, i) = fpa-parse-count-close(x, fpa-parse-union(x, fpa-sk(x, i), []));
+  def fpa-parse-count-close(x, r) = !fpa-ok?(r) ? r : fpa-count-end(x, r, fpa-sk(x, r[1]));
+  def fpa-count-end(x, r, j) = fpa-byte(x, j) == 41 ? fpa-parse-whole(x, "count", fpa-pk(r[2], j + 1)) : fpa-pe("form-path-expects-): count( is closed by )", j);
+  def fpa-parse-whole(x, tag, r) = !fpa-ok?(r) ? r : fpa-whole-end(x, tag, r, fpa-sk(x, r[1]));
+  def fpa-whole-end(x, tag, r, j) = j < len(x) ? fpa-pe("form-path-unexpected-text: " ++ substring(x, j, fpa-min(len(x), j + 12)), j) : fpa-pk([tag, r[2]], j);
+
+  def fpa-parse-union(x, i, acc) = fpa-union-next(x, acc, fpa-parse-path(x, i));
+  def fpa-union-next(x, acc, r) = !fpa-ok?(r) ? r : fpa-union-more(x, cons(r[2], acc), fpa-sk(x, r[1]));
+  def fpa-union-more(x, acc, j) = fpa-byte(x, j) == 124 ? fpa-parse-union(x, fpa-sk(x, j + 1), acc) : fpa-pk(reverse(acc), j);
+  def fpa-parse-path(x, i) = fpa-byte(x, i) == 47 ? fpa-parse-steps(x, i, []) : fpa-pe("form-path-expects-a-step: a path begins with / or //", i);
+  def fpa-parse-steps(x, i, acc) = fpa-byte(x, i) == 47 ? fpa-steps-next(x, acc, fpa-parse-step(x, i)) : fpa-pk(reverse(acc), i);
+  def fpa-steps-next(x, acc, r) = !fpa-ok?(r) ? r : fpa-parse-steps(x, r[1], cons(r[2], acc));
+  def fpa-parse-step(x, i) = fpa-byte(x, i + 1) == 47 ? fpa-parse-test(x, i + 2, "desc") : fpa-parse-test(x, i + 1, "child");
+  def fpa-parse-test(x, j, axis) = fpa-at?(x, j, "..") ? ((String) axis == "desc" ? fpa-pe("form-path-parent-needs-one-slash: use /.. not //..", j) : fpa-pk(["parent", "*", []], j + 2)) : fpa-test-name(x, j, axis, fpa-byte(x, j) == 42 ? j + 1 : scan_run(x, j, 2));
+  def fpa-test-name(x, j, axis, e) = e <= j ? fpa-pe("form-path-expects-a-node-test: " ++ fat-join(fpa-tests(), " "), j)
+   : !fnd-has?(fpa-tests(), substring(x, j, e)) ? fpa-pe("form-path-unknown-node-test: " ++ substring(x, j, e) ++ " (" ++ fat-join(fpa-tests(), " ") ++ ")", j)
+   : fpa-test-preds(x, axis, substring(x, j, e), fpa-parse-preds(x, e, []));
+  def fpa-test-preds(x, axis, test, r) = !fpa-ok?(r) ? r : fpa-pk([axis, test, r[2]], r[1]);
+
+  def fpa-parse-preds(x, i, acc) = fpa-byte(x, i) == 91 ? fpa-pred-next(x, acc, fpa-parse-or(x, fpa-sk(x, i + 1))) : fpa-pk(reverse(acc), i);
+  def fpa-pred-next(x, acc, r) = !fpa-ok?(r) ? r : fpa-pred-close(x, acc, r, fpa-sk(x, r[1]));
+  def fpa-pred-close(x, acc, r, j) = fpa-byte(x, j) != 93 ? fpa-pe("form-path-expects-]: a predicate is closed by ]", j) : fpa-pos-nested?(r[2]) ? fpa-pe("form-path-position-stands-alone: [N] and [last()] are whole predicates", j) : fpa-parse-preds(x, j + 1, cons(r[2], acc));
+  def fpa-pos-nested?(p) = ((String) p[0] == "and" || (String) p[0] == "or") ? (fpa-pos-in?(p[1]) || fpa-pos-in?(p[2])) : (String) p[0] == "not" ? fpa-pos-in?(p[1]) : false;
+  def fpa-pos-in?(p) = (String) p[0] == "pos" || (String) p[0] == "last" || fpa-pos-nested?(p);
+
+  def fpa-parse-or(x, i) = fpa-or-next(x, fpa-parse-and(x, i));
+  def fpa-or-next(x, r) = !fpa-ok?(r) ? r : fpa-or-more(x, r[2], fpa-sk(x, r[1]));
+  def fpa-or-more(x, left, j) = fpa-kw?(x, j, "or") ? fpa-or-join(x, left, fpa-parse-and(x, fpa-sk(x, j + 2))) : fpa-pk(left, j);
+  def fpa-or-join(x, left, r) = !fpa-ok?(r) ? r : fpa-or-more(x, ["or", left, r[2]], fpa-sk(x, r[1]));
+  def fpa-parse-and(x, i) = fpa-and-next(x, fpa-parse-term(x, i));
+  def fpa-and-next(x, r) = !fpa-ok?(r) ? r : fpa-and-more(x, r[2], fpa-sk(x, r[1]));
+  def fpa-and-more(x, left, j) = fpa-kw?(x, j, "and") ? fpa-and-join(x, left, fpa-parse-term(x, fpa-sk(x, j + 3))) : fpa-pk(left, j);
+  def fpa-and-join(x, left, r) = !fpa-ok?(r) ? r : fpa-and-more(x, ["and", left, r[2]], fpa-sk(x, r[1]));
+
+  def fpa-parse-term(x, i) = fpa-byte(x, i) == 64 ? fpa-parse-attr(x, i + 1)
+   : fpa-byte(x, i) == 40 ? fpa-term-group(x, fpa-parse-or(x, fpa-sk(x, i + 1)))
+   : fpa-at?(x, i, "not(") ? fpa-term-not(x, fpa-parse-or(x, fpa-sk(x, i + 4)))
+   : fpa-at?(x, i, "calls(") ? fpa-term-calls(x, fpa-sk(x, i + 6))
+   : fpa-at?(x, i, "has(") ? fpa-term-has(x, fpa-parse-path(x, fpa-sk(x, i + 4)))
+   : fpa-at?(x, i, "last()") ? fpa-pk(["last"], i + 6)
+   : (fpa-byte(x, i) >= 48 && fpa-byte(x, i) <= 57) ? fpa-pk(["pos", str_to_int(substring(x, i, scan_run(x, i, 1)))], scan_run(x, i, 1))
+   : fpa-pe("form-path-unknown-predicate: expected @attribute, calls('x'), has(path), not(...), a number or last()", i);
+  def fpa-term-group(x, r) = !fpa-ok?(r) ? r : fpa-close-with(x, r, fpa-sk(x, r[1]), r[2]);
+  def fpa-term-not(x, r) = !fpa-ok?(r) ? r : fpa-close-with(x, r, fpa-sk(x, r[1]), ["not", r[2]]);
+  def fpa-close-with(x, r, j, v) = fpa-byte(x, j) == 41 ? fpa-pk(v, j + 1) : fpa-pe("form-path-expects-): a group is closed by )", j);
+  def fpa-term-calls(x, j) = (fpa-byte(x, j) == 34 || fpa-byte(x, j) == 39) ? fpa-calls-close(x, fpa-lit-str(x, j)) : fpa-pe("form-path-calls-needs-a-string: calls('name')", j);
+  def fpa-calls-close(x, r) = !fpa-ok?(r) ? r : fpa-close-with(x, r, fpa-sk(x, r[1]), ["calls", r[2]]);
+  def fpa-term-has(x, r) = !fpa-ok?(r) ? r : fpa-close-with(x, r, fpa-sk(x, r[1]), ["has", r[2]]);
+
+  // a quoted literal: ["ok", next, text]; \ before the quote or a backslash is dropped, any other backslash stays (a regex's \.)
+  def fpa-lit-str(x, i) = fpa-lit-go(x, i + 1, str_byte_at(x, i), "", i);
+  def fpa-lit-go(x, i, q, acc, from) = i >= len(x) ? fpa-pe("form-path-unterminated-string: the string opened at column " ++ (from + 1).str(), from) : fpa-lit-byte(x, i, q, acc, from, str_byte_at(x, i));
+  def fpa-lit-byte(x, i, q, acc, from, b) = b == q ? fpa-pk(acc, i + 1)
+   : (b == 92 && i + 1 < len(x) && (str_byte_at(x, i + 1) == q || str_byte_at(x, i + 1) == 92)) ? fpa-lit-go(x, i + 2, q, acc ++ byte_to_str(str_byte_at(x, i + 1)), from)
+   : fpa-lit-go(x, i + 1, q, acc ++ byte_to_str(b), from);
+  def fpa-op-at(x, j) = fpa-at?(x, j, "!=") ? "!=" : fpa-at?(x, j, "!~") ? "!~" : fpa-at?(x, j, ">=") ? ">=" : fpa-at?(x, j, "<=") ? "<=" : fpa-at?(x, j, "=") ? "=" : fpa-at?(x, j, "~") ? "~" : fpa-at?(x, j, ">") ? ">" : fpa-at?(x, j, "<") ? "<" : "";
+  def fpa-parse-attr(x, i) = fpa-attr-known(x, substring(x, i, scan_run(x, i, 2)), i, scan_run(x, i, 2));
+  def fpa-attr-known(x, a, i, e) = !fnd-has?(fpa-attrs(), a) ? fpa-pe("form-path-unknown-attribute: @" ++ a ++ " (" ++ fat-join(fpa-attrs(), " ") ++ ")", i) : fpa-attr-op(x, a, fpa-sk(x, e), e);
+  def fpa-attr-op(x, a, j, e) = (String) fpa-op-at(x, j) == "" ? fpa-pk(["cmp", a, "exists", "n", 0, []], e) : fpa-attr-lit(x, a, fpa-op-at(x, j), fpa-sk(x, j + len(fpa-op-at(x, j))));
+  def fpa-attr-lit(x, a, op, k) = (fpa-byte(x, k) == 34 || fpa-byte(x, k) == 39) ? fpa-cmp-string(a, op, fpa-lit-str(x, k))
+   : (fpa-byte(x, k) >= 48 && fpa-byte(x, k) <= 57) ? fpa-cmp-number(a, op, str_to_int(substring(x, k, scan_run(x, k, 1))), scan_run(x, k, 1))
+   : fpa-pe("form-path-expects-a-literal: a quoted string or a number after " ++ op, k);
+  def fpa-cmp-string(a, op, r) = !fpa-ok?(r) ? r
+   : fpa-num-attr?(a) ? fpa-pe("form-path-number-expected: @" ++ a ++ " compares with a number", r[1])
+   : (String) op == ">" || (String) op == "<" || (String) op == ">=" || (String) op == "<=" ? fpa-pe("form-path-order-needs-a-number: " ++ op ++ " orders numbers, @" ++ a ++ " is text", r[1])
+   : ((String) op == "~" || (String) op == "!~") ? fpa-cmp-regex(a, op, r[2], r[1], fag-compile([r[2]], "E", []))
+   : fpa-pk(["cmp", a, op, "s", r[2], []], r[1]);
+  def fpa-cmp-regex(a, op, lit, next, c) = (String) c[1] != "" ? fpa-pe("form-path-bad-regex: " ++ c[1], next) : fpa-pk(["cmp", a, op, "s", lit, c[0]], next);
+  def fpa-cmp-number(a, op, n, next) = !fpa-num-attr?(a) ? fpa-pe("form-path-string-expected: @" ++ a ++ " compares with a quoted string", next)
+   : ((String) op == "~" || (String) op == "!~") ? fpa-pe("form-path-regex-needs-a-string: ~ matches text", next)
+   : fpa-pk(["cmp", a, op, "n", n, []], next);
+
+  // ---- results: nodes with their source ----------------------------------------------------------------------------------------------------------
+  def fpa-span-text(s, c) = substring(fnd-entry(s, c[7])[5], c[2], fpa-end(s, c));
+  def fpa-node-of(s, c) = intern_node(intern_trivial_string("fp:" ++ c[0]), [intern_trivial_int(fpa-cid(c[0], c[1], fpa-span-text(s, c))), intern_trivial_string(c[1]), intern_trivial_int(fpa-arity-num(s, c)), intern_trivial_int(fpa-end(s, c) - c[2])]);
+  def fpa-arity-num(s, c) = nothing?(fpa-arity-of(s, c)) ? 0 - 1 : fpa-arity-of(s, c);
+  def fpa-hit-of(s, c) = intern_node(FPA-CAT-HIT, [fpa-node-of(s, c), intern_trivial_string(c[7]), intern_trivial_int(c[2]), intern_trivial_int(fpa-end(s, c)), intern_trivial_int(fpa-line-of(s, c[7], c[2]))]);
+  def fpa-set-of(s, ctxs) = intern_node(FPA-CAT-SET, map(c => fpa-hit-of(s, c), ctxs));
+  def fpa-hits(set) = node_children(set);
+  def fpa-hit-node(h) = node_children(h)[0];
+  def fpa-hit-path(h) = node_value(node_children(h)[1]);
+  def fpa-hit-start(h) = node_value(node_children(h)[2]);
+  def fpa-hit-end(h) = node_value(node_children(h)[3]);
+  def fpa-hit-line(h) = node_value(node_children(h)[4]);
+  def fpa-node-id(n) = node_value(node_children(n)[0]);
+  def fpa-node-kind(n) = substring(node_value(node_category(n)), 3, len(node_value(node_category(n))));
+  def fpa-node-name(n) = node_value(node_children(n)[1]);
+  def fpa-node-arity(n) = node_value(node_children(n)[2]);
+  def fpa-node-bytes(n) = node_value(node_children(n)[3]);
+  def fpa-hit-id(h) = fpa-node-id(fpa-hit-node(h));
+  // a hit's own source still hashes to its node's id (the file did not move under it)
+  def fpa-hit-fresh?(s, h) = fpa-hit-fresh-text?(h, fnd-entry(s, fpa-hit-path(h)));
+  def fpa-hit-fresh-text?(h, e) = nil?(e) ? false : (Comparable) fpa-hit-id(h) == fpa-cid(fpa-node-kind(fpa-hit-node(h)), fpa-node-name(fpa-hit-node(h)), substring(e[5], fpa-hit-start(h), fpa-hit-end(h)));
+
+  // stages: nodes in, nodes out
+  def fpa-path(s, expr) = fpa-path-parsed(s, fpa-parse(expr));
+  def fpa-path-parsed(s, r) = !fpa-ok?(r) ? r : fpa-pk((String) r[2][0] == "count" ? len(fpa-eval(s, r[2][1])) : fpa-set-of(s, fpa-eval(s, r[2][1])), r[1]);
+  def fpa-hit-attr(h, name) = (String) name == "id" ? fpa-hit-id(h)
+   : (String) name == "name" ? fpa-node-name(fpa-hit-node(h))
+   : (String) name == "kind" ? fpa-node-kind(fpa-hit-node(h))
+   : (String) name == "path" ? fpa-hit-path(h)
+   : (String) name == "line" ? fpa-hit-line(h)
+   : (String) name == "arity" ? fpa-node-arity(fpa-hit-node(h))
+   : (String) name == "bytes" ? fpa-node-bytes(fpa-hit-node(h))
+   : (String) name == "start" ? fpa-hit-start(h)
+   : (String) name == "end" ? fpa-hit-end(h)
+   : nothing();
+  def fpa-where(set, name, test) = intern_node(FPA-CAT-SET, filter(h => test(fpa-hit-attr(h, name)), fpa-hits(set)));
+  def fpa-count(set) = len(fpa-hits(set));
+
+  // the edge: the only place a result becomes text
+  def fpa-line-text(t, off) = fnd-line-at(t, fnd-line-start(t, off));
+  def fpa-hit-row(s, h, mode) = (String) mode == "ids" ? fpa-node-kind(fpa-hit-node(h)) ++ ":" ++ fpa-hex(fpa-hit-id(h)) ++ " " ++ fpa-hit-path(h) ++ ":" ++ fpa-hit-line(h).str() ++ " " ++ fpa-node-name(fpa-hit-node(h))
+   : (String) mode == "text" ? fpa-hit-source(s, h)
+   : fpa-hit-path(h) ++ ":" ++ fpa-hit-line(h).str() ++ ":" ++ fpa-line-text(fnd-entry(s, fpa-hit-path(h))[5], fpa-hit-start(h));
+  def fpa-hit-source(s, h) = substring(fnd-entry(s, fpa-hit-path(h))[5], fpa-hit-start(h), fpa-hit-end(h));
+  def fpa-render(s, set, mode) {
+   let z = fpa-bump("renders");
+   (String) mode == "count" ? fpa-count(set).str() ++ "\n" : nil?(fpa-hits(set)) ? "" : fat-join(map(h => fpa-hit-row(s, h, mode), fpa-hits(set)), "\n") ++ "\n";
+  }
+
+  // ---- the wire verb: path [--ids|--text|--rows|--count] EXPR ------------------------------------------------------------------------------------
+  def fpa-flags() = ["--ids", "--text", "--rows", "--count"];
+  def fpa-expr-of(argv, input) {
+   let words = filter(a => !fnd-has?(fpa-flags(), a), argv[1:]);
+   nil?(words) ? fat-trim(input) : fat-join(words, " ");
+  }
+  def fpa-mode-of(argv) = fnd-has?(argv, "--ids") ? "ids" : fnd-has?(argv, "--text") ? "text" : fnd-has?(argv, "--count") ? "count" : "rows";
+  def fpa-verb(s, argv, input) = (String) fpa-expr-of(argv, input) == "" ? [2, "", "path: form-path-needs-an-expression: path [--ids|--text|--rows|--count] EXPR (in one argument, or in the request input)"] : fpa-verb-parsed(s, fpa-mode-of(argv), fpa-path(s, fpa-expr-of(argv, input)));
+  def fpa-verb-parsed(s, mode, r) = !fpa-ok?(r) ? [2, "", "path: " ++ r[2]] : fpa-verb-answer(s, mode, r[2]);
+  def fpa-verb-answer(s, mode, v) = (String) value_kind(v) == "int" ? [0, v.str() ++ "\n", ""] : nil?(fpa-hits(v)) ? [1, "", ""] : fpa-verb-cap(fpa-render(s, v, mode));
+  def fpa-verb-cap(out) = len(out) <= fnd-max-out() ? [0, out, ""] : [0, substring(out, 0, fnd-max-out()), "truncated: output-limit " ++ fnd-max-out().str() ++ " bytes; narrow the path or use --count"];
+
+  // ---- the service: form-find's index with the verb taught --------------------------------------------------------------------------------------------
+  def fpa-install(s) {
+   let z = fnd-ext-add(s, "path", (st, argv, input) => fpa-verb(st, argv, input));
+   s;
+  }
+  def fpa-open(base) = fpa-install(fnd-open(base));
+  def fpa-cold(request) = fnd-serve(fpa-open(""), request);
+  def fpa-run() {
+   let dir = fnd-spool();
+   let z1 = fnd-mkdirs(dir);
+   let s = fpa-open("");
+   let z2 = fnd-beat(s, dir);
+   fnd-loop(s, dir, host_monotonic_ms(), host_monotonic_ms());
+  }
+ }
+ 0;
+}
