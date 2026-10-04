@@ -1,0 +1,308 @@
+//////////////////////////////////////////////////////////////////////
+// native-t5.bml — a T5 encoder-decoder read and run by the body, on its own Metal.
+//
+// charsiu/g2p_multilingual_byT5_small_100 (MIT) is a ByT5-small: a byte-level T5 whose job is one word
+// of letters in, the word's phonemes out. This pass runs it with no process, no library and no tensor
+// copy: the weights are mapped straight off the model's file ranges (t5-weights.bml reads the body's own
+// safetensors; the PyTorch checkpoint it came from was read once, as data, by torch-bin.bml, and converted by
+// observe/torch-bin-convert-run.fk), the kernels are emitted here as MSL text and dispatched through the handle door.
+//
+// WHAT THE T5 DOES THAT A GPT DOES NOT (each one is a kernel or a constant below, and each is pinned by
+// the band on a hand-computable case before the model's own numbers are trusted):
+//   RMS norm        no mean, no bias: x * rsqrt(mean(x^2) + 1e-6) * weight       (nam_rms, reused)
+//   attention       scores are q.k with NO 1/sqrt(d); a learned bias by relative-position BUCKET is added;
+//                   the 32x6 bias table lives in block 0 of each stack and every layer of the stack reads it
+//   buckets         encoder: bidirectional, 16 per sign; decoder self: causal, 32; cross-attention: none.
+//                   Half of a sign's buckets are exact distances, the rest grow logarithmically to 128. The
+//                   host builds the (relative distance -> bucket) table ONCE, in exact arithmetic, and the
+//                   kernel only looks it up
+//   gated gelu      wo( gelu_new(wi_0 x) * wi_1 x ), gelu_new the tanh form
+//   untied head     the logits are lm_head . h, no d_model^-0.5 rescale; embeddings are shared.weight
+// Tokens are ByT5's: id = utf-8 byte + 3, pad 0, eos 1, decoder start 0.
+//
+// DEVICE MEMORY. Every scratch buffer is allocated ONCE when the model opens and reused for every word and
+// every decoding step; a word costs no allocation. nt5-live reads metal_live()[2], the carrier's own count of
+// retained buffers, so a caller (the band, the door) can prove it flat. nt5-close gives the buffers back, the
+// weights in settled rounds (a free asked while work is unsettled is refused and the carrier reads that as 0).
+//
+// ACTIVATIONS ARE [token][dim] FLOAT32, row-major. A linear is y = x . W^T with W [out][in] exactly as torch
+// stores it. One simdgroup computes one output for up to 8 tokens, so a weight row is read once per eight
+// tokens, not once per token.
+//////////////////////////////////////////////////////////////////////
+import form-stdlib/native-affine-metal.bml;
+import form/form-stdlib/t5-weights.bml;
+section [form.bml] {
+ class NativeT5 {
+  field T5MaxTokens = 128;
+  field T5MaxDecode = 50;
+  field T5EpsBits = 897988541;
+  def nt5-msl() = "#include <metal_stdlib>
+using namespace metal;
+kernel void t5_embed(device const float* w [[buffer(0)]], device const uint* ids [[buffer(1)]], device float* y [[buffer(2)]], constant uint& D [[buffer(3)]], constant uint& T [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= T * D) return; y[i] = w[(ulong)ids[i / D] * D + (i % D)]; }
+kernel void t5_lin(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]], device float* y [[buffer(2)]], constant uint& T [[buffer(3)]], constant uint& K [[buffer(4)]], constant uint& N [[buffer(5)]], constant uint& add [[buffer(6)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+ uint nch = (T + 7) / 8; uint n = gid / nch; uint t0 = (gid % nch) * 8; if (n >= N) return;
+ uint tn = min(8u, T - t0); float a0=0,a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0;
+ device const float* wr = w + (ulong)n * K;
+ for (uint c = lane; c < K; c += 32) { float wv = wr[c]; device const float* xr = x + (ulong)t0 * K + c;
+  a0 += wv * xr[0]; if (tn > 1) a1 += wv * xr[K]; if (tn > 2) a2 += wv * xr[2*K]; if (tn > 3) a3 += wv * xr[3*K]; if (tn > 4) a4 += wv * xr[4*K]; if (tn > 5) a5 += wv * xr[5*K]; if (tn > 6) a6 += wv * xr[6*K]; if (tn > 7) a7 += wv * xr[7*K]; }
+ float s0=simd_sum(a0),s1=simd_sum(a1),s2=simd_sum(a2),s3=simd_sum(a3),s4=simd_sum(a4),s5=simd_sum(a5),s6=simd_sum(a6),s7=simd_sum(a7);
+ if (lane == 0) { float s[8] = {s0,s1,s2,s3,s4,s5,s6,s7}; for (uint t = 0; t < tn; t++) { ulong o = (ulong)(t0 + t) * N + n; y[o] = add ? y[o] + s[t] : s[t]; } }
+}
+kernel void t5_scores(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* tab [[buffer(2)]], device const int* bkt [[buffer(3)]], device float* s [[buffer(4)]], constant uint& Tq [[buffer(5)]], constant uint& Tk [[buffer(6)]], constant uint& H [[buffer(7)]], constant uint& D [[buffer(8)]], constant uint& q0 [[buffer(9)]], constant uint& mode [[buffer(10)]], uint gid [[thread_position_in_grid]]) {
+ if (gid >= H * Tq * Tk) return; uint h = gid / (Tq * Tk); uint r = gid - h * Tq * Tk; uint i = r / Tk; uint j = r - i * Tk;
+ uint HD = H * D; float acc = 0; for (uint d = 0; d < D; d++) acc += q[(ulong)i * HD + h * D + d] * k[(ulong)j * HD + h * D + d];
+ if (mode < 2) { int rel = int(j) - int(q0 + i); if (mode == 1 && rel > 0) acc = -1e30f; else { int c = clamp(rel, -128, 128) + 128; acc += tab[bkt[mode * 257 + c] * H + h]; } }
+ s[gid] = acc;
+}
+kernel void t5_softmax(device float* x [[buffer(0)]], constant uint& n [[buffer(1)]], uint g [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+ device float* r = x + (ulong)g * n; float m = -INFINITY; for (uint i = lane; i < n; i += 32) m = max(m, r[i]); m = simd_max(m);
+ float s = 0; for (uint i = lane; i < n; i += 32) { float e = exp(r[i] - m); r[i] = e; s += e; } s = simd_sum(s);
+ for (uint i = lane; i < n; i += 32) r[i] = r[i] / s;
+}
+kernel void t5_attn_out(device const float* p [[buffer(0)]], device const float* v [[buffer(1)]], device float* y [[buffer(2)]], constant uint& Tq [[buffer(3)]], constant uint& Tk [[buffer(4)]], constant uint& H [[buffer(5)]], constant uint& D [[buffer(6)]], uint gid [[thread_position_in_grid]]) {
+ uint HD = H * D; if (gid >= Tq * HD) return; uint i = gid / HD; uint c = gid - i * HD; uint h = c / D;
+ float acc = 0; device const float* pr = p + (ulong)(h * Tq + i) * Tk; for (uint j = 0; j < Tk; j++) acc += pr[j] * v[(ulong)j * HD + c];
+ y[gid] = acc;
+}
+kernel void t5_geglu(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) {
+ if (i >= n) return; float x = a[i]; float z = 0.7978845608028654f * (x + 0.044715f * x * x * x); y[i] = 0.5f * x * (1.0f + precise::tanh(z)) * b[i];
+}
+kernel void t5_put(device const float* src [[buffer(0)]], device float* dst [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i < n) dst[off + i] = src[i]; }
+kernel void t5_argmax(device const float* x [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& n [[buffer(2)]], uint lane [[thread_index_in_simdgroup]]) {
+ float best = -INFINITY; uint id = 0xffffffffu; for (uint i = lane; i < n; i += 32) { float v = x[i]; if (v > best) { best = v; id = i; } }
+ float mx = simd_max(best); id = (best == mx) ? id : 0xffffffffu; id = simd_min(id); if (lane == 0) { out[0] = id; out[1] = as_type<uint>(mx); }
+}
+kernel void t5_bucket_init(device int* out [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+ if (i >= 514) return; int mode = int(i) / 257; int rel = int(i % 257) - 128;
+ int nb = mode == 0 ? 16 : 32; int ex = nb / 2; int base = 0; int r;
+ if (mode == 0) { if (rel > 0) base = 16; r = abs(rel); } else { r = rel < 0 ? -rel : 0; }
+ int b; if (r < ex) b = r; else { float l = precise::log(float(r) / float(ex)) / precise::log(128.0f / float(ex)) * float(nb - ex); b = min(ex + int(l), nb - 1); }
+ out[i] = base + b;
+}
+";
+  // the pipelines, compiled once and held: 0 embed 1 lin 2 scores 3 softmax 4 attn_out 5 geglu 6 put 7 argmax 8 rms (nam_rms, reused)
+  def nt5-pipes() = [nt5-pipe("t5_embed"), nt5-pipe("t5_lin"), nt5-pipe("t5_scores"), nt5-pipe("t5_softmax"), nt5-pipe("t5_attn_out"), nt5-pipe("t5_geglu"), nt5-pipe("t5_put"), nt5-pipe("t5_argmax"), nam-pipe("nam_rms"), nt5-pipe("t5_bucket_init")];
+  def nt5-pipe(name) = nam-held-pipe(metal_pipeline(nt5-msl(), name));
+  def nt5-go(p, bufs, consts, count) {
+   let rc = metal_enqueue(p, md-bind(bufs, consts), count);
+   rc < 0 ? form_error("native T5 dispatch refused") : rc;
+  }
+  def nt5-gg(p, bufs, consts, groups) {
+   let rc = metal_enqueue(p, md-bind16(bufs, consts, 32, 0, 1, 0), groups);
+   rc < 0 ? form_error("native T5 grouped dispatch refused") : rc;
+  }
+  // ---- one dispatch per piece; P is the pipeline list ----
+  def nt5-embed(P, w, ids, y, D, T) = nt5-go(P[0], [w, ids, y], [D, T], T * D);
+  def nt5-lin(P, x, w, y, T, K, N, accumulate) = nt5-gg(P[1], [x, w, y], [T, K, N, accumulate], N * ((T + 7) / 8));
+  def nt5-scores(P, q, k, tab, bkt, s, Tq, Tk, H, D, q0, mode) = nt5-go(P[2], [q, k, tab, bkt, s], [Tq, Tk, H, D, q0, mode], H * Tq * Tk);
+  def nt5-softmax(P, x, rows, n) = nt5-gg(P[3], [x], [n], rows);
+  def nt5-attn-out(P, p, v, y, Tq, Tk, H, D) = nt5-go(P[4], [p, v, y], [Tq, Tk, H, D], Tq * H * D);
+  def nt5-geglu(P, a, b, y, n) = nt5-go(P[5], [a, b, y], [n], n);
+  def nt5-put(P, src, dst, off, n) = nt5-go(P[6], [src, dst], [off, n], n);
+  def nt5-argmax(P, x, out, n) = nt5-gg(P[7], [x, out], [n], 1);
+  def nt5-rms(P, x, g, y, inv, d, t) = nt5-gg(P[8], [x, g, y, inv], [d, t, T5EpsBits()], t);
+
+  // ---- the relative-position bucket table (T5Attention._relative_position_bucket), built once on the device ----
+  // rel is memory position minus query position. A sign's buckets: the first half exact distances, the rest
+  // logarithmic, bucket = exact + floor(n * ln(r / exact) / ln(max_distance / exact)), clamped at the last.
+  // The table is two rows of 257 (the bidirectional row, then the causal one), index = clamp(rel, -128, 128) + 128;
+  // distances beyond 128 land in the saturated bucket, so the clamp loses nothing. A host float walk was the
+  // first reading and it stopped fkwu (a float-heavy recursion in one statement), so the arithmetic is the
+  // device's own float32, and the band holds it to torch's table and to the construction's hand truths.
+  def nt5-bucket-init(P, bkt) = nt5-go(P[9], [bkt], [], 514);
+
+  // ---- the weights, mapped off the file ----
+  def nt5-w(path, rows, name) = t5w-map-f32(path, rows, name)[0];
+  def nt5-pre(side, l) = side + ".block." + l.str() + ".layer.";
+  def nt5-enc-layer(path, rows, l) {
+   let a = nt5-pre("encoder", l) + "0.";
+   let f = nt5-pre("encoder", l) + "1.";
+   [nt5-w(path, rows, a + "layer_norm.weight"), nt5-w(path, rows, a + "SelfAttention.q.weight"), nt5-w(path, rows, a + "SelfAttention.k.weight"), nt5-w(path, rows, a + "SelfAttention.v.weight"), nt5-w(path, rows, a + "SelfAttention.o.weight"), nt5-w(path, rows, f + "layer_norm.weight"), nt5-w(path, rows, f + "DenseReluDense.wi_0.weight"), nt5-w(path, rows, f + "DenseReluDense.wi_1.weight"), nt5-w(path, rows, f + "DenseReluDense.wo.weight")];
+  }
+  def nt5-dec-layer(path, rows, l) {
+   let a = nt5-pre("decoder", l) + "0.";
+   let c = nt5-pre("decoder", l) + "1.";
+   let f = nt5-pre("decoder", l) + "2.";
+   [nt5-w(path, rows, a + "layer_norm.weight"), nt5-w(path, rows, a + "SelfAttention.q.weight"), nt5-w(path, rows, a + "SelfAttention.k.weight"), nt5-w(path, rows, a + "SelfAttention.v.weight"), nt5-w(path, rows, a + "SelfAttention.o.weight"), nt5-w(path, rows, c + "layer_norm.weight"), nt5-w(path, rows, c + "EncDecAttention.q.weight"), nt5-w(path, rows, c + "EncDecAttention.k.weight"), nt5-w(path, rows, c + "EncDecAttention.v.weight"), nt5-w(path, rows, c + "EncDecAttention.o.weight"), nt5-w(path, rows, f + "layer_norm.weight"), nt5-w(path, rows, f + "DenseReluDense.wi_0.weight"), nt5-w(path, rows, f + "DenseReluDense.wi_1.weight"), nt5-w(path, rows, f + "DenseReluDense.wo.weight")];
+  }
+  def nt5-enc-layers(path, rows, l, n) = l >= n ? [] : cons(nt5-enc-layer(path, rows, l), nt5-enc-layers(path, rows, l + 1, n));
+  def nt5-dec-layers(path, rows, l, n) = l >= n ? [] : cons(nt5-dec-layer(path, rows, l), nt5-dec-layers(path, rows, l + 1, n));
+  def nt5-globals(path, rows) = [nt5-w(path, rows, "shared.weight"), nt5-w(path, rows, "lm_head.weight"), nt5-w(path, rows, "encoder.final_layer_norm.weight"), nt5-w(path, rows, "decoder.final_layer_norm.weight"), nt5-w(path, rows, "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"), nt5-w(path, rows, "decoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight")];
+  def nt5-flat(xs) = nil?(xs) ? [] : (value_kind(xs[0]) == "list" ? append(nt5-flat(xs[0]), nt5-flat(xs[1:])) : cons(xs[0], nt5-flat(xs[1:])));
+
+  // ---- the scratch, allocated once: [ids_enc ids_dec x xn q k v att g u scores enc_out bkt out logits inv] ----
+  def nt5-caches() = nt5-dec-caches(4);
+  def nt5-dec-cache() = [nam-alloc(128 * 384), nam-alloc(128 * 384), nam-alloc(64 * 384), nam-alloc(64 * 384)];
+  def nt5-dec-caches(n) = n <= 0 ? [] : cons(nt5-dec-cache(), nt5-dec-caches(n - 1));
+  def nt5-scratch() {
+   [nam-alloc(128), nam-alloc(1), nam-alloc(128 * 1472), nam-alloc(128 * 1472), nam-alloc(128 * 384), nam-alloc(128 * 384), nam-alloc(128 * 384), nam-alloc(128 * 384), nam-alloc(128 * 3584), nam-alloc(128 * 3584), nam-alloc(6 * 128 * 128), nam-alloc(128 * 1472), nam-alloc(514), nam-alloc(4), nam-alloc(384), nam-alloc(128)];
+  }
+  // model = [globals enc-layers dec-layers scratch dec-caches pipes weights-path]
+  def nt5-open(path) {
+   let rows = t5w-tensors(path);
+   let g = nt5-globals(path, rows);
+   let enc = nt5-enc-layers(path, rows, 0, 12);
+   let dec = nt5-dec-layers(path, rows, 0, 4);
+   let P = nt5-pipes();
+   let S = nt5-scratch();
+   let b = nt5-bucket-init(P, S[12]);
+   let done = nam-sync();
+   [g, enc, dec, S, nt5-caches(), P, path];
+  }
+  def nt5-live() = metal_live()[2];
+
+  // ---- the encoder ----
+  def nt5-S(m, i) = m[3][i];
+  // A STEP IS A CHAIN. Every dispatch's answer is the first argument of the next link (nt5-seq), and the last
+  // link's answer is what the function returns, so each dispatch sits in the value the caller receives and is
+  // consumed. This is not style: written as a row of `let a = dispatch(...)` whose answers nothing read, the
+  // encoder's twelve layers ran for 77 words and then stopped dispatching at all (the carrier's dispatch count
+  // fell from 166 to 10 a word, the encoder output froze, every word after read garbage) — the recipe had
+  // heated past 1024 calls and its crystallized form did not run the calls whose answers fed nothing.
+  def nt5-seq(rc, next) = rc < 0 ? form_error("native T5 dispatch refused") : next;
+  def nt5-ffn(m, P, ln, wi0, wi1, wo, T) {
+   let x = nt5-S(m, 2);
+   let xn = nt5-S(m, 3);
+   let g = nt5-S(m, 8);
+   let u = nt5-S(m, 9);
+   let a = nt5-rms(P, x, ln, xn, nt5-S(m, 15), 1472, T);
+   let b = nt5-seq(a, nt5-lin(P, xn, wi0, g, T, 1472, 3584, 0));
+   let c = nt5-seq(b, nt5-lin(P, xn, wi1, u, T, 1472, 3584, 0));
+   let d = nt5-seq(c, nt5-geglu(P, g, u, g, T * 3584));
+   nt5-seq(d, nt5-lin(P, g, wo, x, T, 3584, 1472, 1));
+  }
+  def nt5-enc-layer-run(m, P, L, T) {
+   let x = nt5-S(m, 2);
+   let xn = nt5-S(m, 3);
+   let q = nt5-S(m, 4);
+   let k = nt5-S(m, 5);
+   let v = nt5-S(m, 6);
+   let att = nt5-S(m, 7);
+   let sc = nt5-S(m, 10);
+   let a = nt5-rms(P, x, L[0], xn, nt5-S(m, 15), 1472, T);
+   let b = nt5-seq(a, nt5-lin(P, xn, L[1], q, T, 1472, 384, 0));
+   let c = nt5-seq(b, nt5-lin(P, xn, L[2], k, T, 1472, 384, 0));
+   let d = nt5-seq(c, nt5-lin(P, xn, L[3], v, T, 1472, 384, 0));
+   let e = nt5-seq(d, nt5-scores(P, q, k, m[0][4], nt5-S(m, 12), sc, T, T, 6, 64, 0, 0));
+   let f = nt5-seq(e, nt5-softmax(P, sc, 6 * T, T));
+   let g = nt5-seq(f, nt5-attn-out(P, sc, v, att, T, T, 6, 64));
+   let h = nt5-seq(g, nt5-lin(P, att, L[4], x, T, 384, 1472, 1));
+   nt5-seq(h, nt5-ffn(m, P, L[5], L[6], L[7], L[8], T));
+  }
+  def nt5-enc-layers-run(m, P, Ls, T) = nil?(Ls) ? 1 : nt5-enc-next(nt5-enc-layer-run(m, P, Ls[0], T), m, P, Ls[1:], T);
+  def nt5-enc-next(rc, m, P, Ls, T) = nt5-seq(rc, nt5-enc-layers-run(m, P, Ls, T));
+  // the text's ids and the encoder's output into scratch 11, and each decoder layer's cross keys and values
+  // eos is the end-of-sequence token (id 1) after the last byte: 1 appends it, 0 leaves the input at its last letter
+  def nt5-ids(text, i, eos) = i >= len(text) ? (eos == 1 ? md-le32(1) : "") : (md-le32(str_byte_at(text, i) + 3) + nt5-ids(text, i + 1, eos));
+  def nt5-cross(m, P, Ds, caches, T) = nil?(Ds) ? 1 : nt5-cross-one(m, P, Ds, caches, T, nt5-lin(P, nt5-S(m, 11), Ds[0][7], caches[0][0], T, 1472, 384, 0));
+  def nt5-cross-one(m, P, Ds, caches, T, rc) = nt5-cross-two(m, P, Ds, caches, T, nt5-seq(rc, nt5-lin(P, nt5-S(m, 11), Ds[0][8], caches[0][1], T, 1472, 384, 0)));
+  def nt5-cross-two(m, P, Ds, caches, T, rc) = nt5-seq(rc, nt5-cross(m, P, Ds[1:], caches[1:], T));
+  // answers T, the positions the decoder attends to: the bytes, plus one when the end token is asked
+  def nt5-encode(m, text, eos) {
+   let P = m[5];
+   let T = len(text) + (eos == 1 ? 1 : 0);
+   let w = nam-write(nt5-S(m, 0), nt5-ids(text, 0, eos));
+   let a = nt5-seq(w, nt5-embed(P, m[0][0], nt5-S(m, 0), nt5-S(m, 2), 1472, T));
+   let b = nt5-seq(a, nt5-enc-layers-run(m, P, m[1], T));
+   let c = nt5-seq(b, nt5-rms(P, nt5-S(m, 2), m[0][2], nt5-S(m, 11), nt5-S(m, 15), 1472, T));
+   let d = nt5-seq(c, nt5-cross(m, P, m[2], m[4], T));
+   nt5-seq(d, T);
+  }
+
+  // ---- one decoding step: token tok at position p; answers the next id, or nothing ----
+  def nt5-dec-layer-run(m, P, L, C, p, Te) {
+   let x = nt5-S(m, 2);
+   let xn = nt5-S(m, 3);
+   let q = nt5-S(m, 4);
+   let k = nt5-S(m, 5);
+   let v = nt5-S(m, 6);
+   let att = nt5-S(m, 7);
+   let sc = nt5-S(m, 10);
+   let inv = nt5-S(m, 15);
+   let a = nt5-rms(P, x, L[0], xn, inv, 1472, 1);
+   let b = nt5-seq(a, nt5-lin(P, xn, L[1], q, 1, 1472, 384, 0));
+   let c = nt5-seq(b, nt5-lin(P, xn, L[2], k, 1, 1472, 384, 0));
+   let d = nt5-seq(c, nt5-lin(P, xn, L[3], v, 1, 1472, 384, 0));
+   let e = nt5-seq(d, nt5-put(P, k, C[2], p * 384, 384));
+   let f = nt5-seq(e, nt5-put(P, v, C[3], p * 384, 384));
+   let g = nt5-seq(f, nt5-scores(P, q, C[2], m[0][5], nt5-S(m, 12), sc, 1, p + 1, 6, 64, p, 1));
+   let h = nt5-seq(g, nt5-softmax(P, sc, 6, p + 1));
+   let i = nt5-seq(h, nt5-attn-out(P, sc, C[3], att, 1, p + 1, 6, 64));
+   let j = nt5-seq(i, nt5-lin(P, att, L[4], x, 1, 384, 1472, 1));
+   let k2 = nt5-seq(j, nt5-rms(P, x, L[5], xn, inv, 1472, 1));
+   let l = nt5-seq(k2, nt5-lin(P, xn, L[6], q, 1, 1472, 384, 0));
+   let n = nt5-seq(l, nt5-scores(P, q, C[0], m[0][5], nt5-S(m, 12), sc, 1, Te, 6, 64, 0, 2));
+   let o = nt5-seq(n, nt5-softmax(P, sc, 6, Te));
+   let r = nt5-seq(o, nt5-attn-out(P, sc, C[1], att, 1, Te, 6, 64));
+   let s = nt5-seq(r, nt5-lin(P, att, L[9], x, 1, 384, 1472, 1));
+   nt5-seq(s, nt5-ffn(m, P, L[10], L[11], L[12], L[13], 1));
+  }
+  def nt5-dec-layers-run(m, P, Ls, Cs, p, Te) = nil?(Ls) ? 1 : nt5-dec-next(nt5-dec-layer-run(m, P, Ls[0], Cs[0], p, Te), m, P, Ls[1:], Cs[1:], p, Te);
+  def nt5-dec-next(rc, m, P, Ls, Cs, p, Te) = nt5-seq(rc, nt5-dec-layers-run(m, P, Ls, Cs, p, Te));
+  // enqueue a whole step; the logits row is scratch 14, the argmax scratch 13
+  def nt5-step-enqueue(m, tok, p, Te) {
+   let P = m[5];
+   let w = nam-write(nt5-S(m, 1), md-le32(tok));
+   let a = nt5-seq(w, nt5-embed(P, m[0][0], nt5-S(m, 1), nt5-S(m, 2), 1472, 1));
+   let b = nt5-seq(a, nt5-dec-layers-run(m, P, m[2], m[4], p, Te));
+   let c = nt5-seq(b, nt5-rms(P, nt5-S(m, 2), m[0][3], nt5-S(m, 3), nt5-S(m, 15), 1472, 1));
+   let d = nt5-seq(c, nt5-lin(P, nt5-S(m, 3), m[0][1], nt5-S(m, 14), 1, 1472, 384, 0));
+   nt5-seq(d, nt5-argmax(P, nt5-S(m, 14), nt5-S(m, 13), 384));
+  }
+  def nt5-sync(rc) = nt5-seq(rc, nam-sync());
+  def nt5-step(m, tok, p, Te) = nt5-step-read(m, nt5-sync(nt5-step-enqueue(m, tok, p, Te)));
+  def nt5-step-read(m, done) = nt5-step-bytes(nt5-seq(done, metal_buf_read(nt5-S(m, 13), 0, 8)));
+  def nt5-step-bytes(bytes) = nothing?(bytes) || (len(bytes) < 8) ? nothing() : nt5-step-id(ln-u32-le(bytes, 0));
+  def nt5-step-id(id) = id >= 384 ? nothing() : id;
+  def nt5-accum(acc, id) = id >= 3 ? (acc + byte_to_str(id - 3)) : acc;
+  // greedy: at most 49 new tokens (max_length 50 counts the start token); eos ends it and is not written
+  def nt5-decode(m, tok, p, Te, acc) = nt5-decode-with(m, p, Te, acc, nt5-step(m, tok, p, Te));
+  def nt5-decode-with(m, p, Te, acc, id) = nothing?(id) ? nothing() : (id == 1 ? acc : ((p + 1) >= 49 ? nt5-accum(acc, id) : nt5-decode(m, id, p + 1, Te, nt5-accum(acc, id))));
+  // THE ONE RUN PATH. text = "<eng-us>: hello" -> the phoneme string, or nothing when it could not be read (never an
+  // empty string for a failure). eos says whether the input ends with the end-of-sequence token (id 1).
+  //   nt5-run      eos OFF — the product default, charsiu's own inference: it feeds the bytes of `<tag>: word` with NO
+  //                special tokens. The model, taught on inputs that end at the last letter, reads an end token as one
+  //                more letter and writes one more phoneme for it (kita -> kˈitap, mulai -> mˈula͡ɪt, let -> lˈɛts:
+  //                measured 2026-10-03 on all four tongues). Asked its own way the answers are kˈita, mˈula͡ɪ, lˈɛt.
+  //   nt5-run-eos  eos ON — what a ByT5 tokenizer does by default, and what the band's torch oracle constants were
+  //                produced with; it stays here as the oracle's door, and as the proof of the extra phoneme.
+  // Both are the same encoder, decoder and kernels; the input is T = len(text) (+1 with eos) positions and the
+  // decoder's cross-attention reads T.
+  def nt5-run-with(m, text, eos) = (len(text) < 1 || len(text) + (eos == 1 ? 1 : 0) > 128) ? nothing() : nt5-decode(m, 0, 0, nt5-encode(m, text, eos), "");
+  def nt5-run(m, text) = nt5-run-with(m, text, 0);
+  def nt5-run-eos(m, text) = nt5-run-with(m, text, 1);
+
+  // HOW A WORD IS ASKED: the tag and the word, the word with a lone initial capital lowered. A sentence-initial
+  // capital is not a letter of the word, and the model reads it as one: measured 2026-10-04 on every capitalised word
+  // of the four taught tables (all of them initial-capital only), the answers to the word as written and lowercased
+  // differ for 9 of 71 English words, eight of the nine are closer to the taught phonemes lowercased and none is
+  // farther (Through written is θɹˈaʊ, lowercased θɹˈuː; These starts with θ, not ð; A is ˈɑː, not ˈeɪ); the bridged
+  // edit rate on those 71 falls from 11.5% to 8.7%, and the same on a bridge fitted without them. 1 of 76 Portuguese
+  // differs (E: written e, lowercased i, the conjunction's sound, one symbol farther from the taught ˈe) and 1 of 148
+  // Indonesian (a quoted word, closer lowercased). A word with any other capital
+  // (an acronym, iPhone) stays as written: no taught word has one, so nothing here is known about them. A caller keeps
+  // its table key as the word was written and asks the model with nt5-query.
+  // A capital at byte i is one byte (A-Z) or two (a Latin-1 capital: UTF-8 C3 80..9E, but not C3 97, the times sign).
+  def nt5-cap-len(s, i) = i >= len(s) ? 0 : ((str_byte_at(s, i) >= 65 && str_byte_at(s, i) <= 90) ? 1 : ((str_byte_at(s, i) == 195 && i + 1 < len(s) && str_byte_at(s, i + 1) >= 128 && str_byte_at(s, i + 1) <= 158 && str_byte_at(s, i + 1) != 151) ? 2 : 0));
+  def nt5-cap-count(s, i) = i >= len(s) ? 0 : (nt5-cap-len(s, i) == 0 ? nt5-cap-count(s, i + 1) : 1 + nt5-cap-count(s, i + nt5-cap-len(s, i)));
+  def nt5-lower-head(w, n) = (n == 1 ? byte_to_str(str_byte_at(w, 0) + 32) : byte_to_str(195) + byte_to_str(str_byte_at(w, 1) + 32)) + substring(w, n, len(w));
+  def nt5-fold(w) = (nt5-cap-len(w, 0) > 0 && nt5-cap-count(w, 0) == 1) ? nt5-lower-head(w, nt5-cap-len(w, 0)) : w;
+  def nt5-query(tag, word) = "<" + tag + ">: " + nt5-fold(word);
+
+  // ---- the logits of the first step, for the band (scratch 14 holds them after nt5-step) ----
+  def nt5-logits(m) = nam-read(nt5-S(m, 14), 384);
+
+  // ---- closing: scratch back at once, weights in settled rounds ----
+  def nt5-free-left(hs, left) = nil?(hs) ? reverse(left) : nt5-free-left(hs[1:], metal_buf_free(hs[0]) > 0 ? left : cons(hs[0], left));
+  def nt5-free-rounds(hs, round) = nil?(hs) ? 1 : (round >= 4 ? form_error("native T5 weights not released after four rounds: " + len(hs).str()) : nt5-free-rounds(nt5-free-left(nt5-free-synced(hs, round), []), round + 1));
+  def nt5-free-synced(hs, round) = round == 0 ? hs : nt5-free-after(nam-sync(), hs);
+  def nt5-free-after(rc, hs) = rc < 0 ? form_error("native T5 GPU completion refused") : hs;
+  def nt5-close(m) {
+   let done = nam-sync();
+   let w = nt5-free-rounds(nt5-flat([m[0], m[1], m[2]]), 0);
+   let s = nt5-free-rounds(nt5-flat([m[3], m[4]]), 0);
+   1;
+  }
+ }
+ 0;
+}

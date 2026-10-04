@@ -59,7 +59,42 @@ section [form.bml] {
         def vv-tc(t) = t[1];
         def vv-tl(t) = t[2];
         def vv-tn(t) = (t[1] * t[2]);
-        def vv-new(c, l) = vv-t(metal_buf_alloc((4 * (c * l))), c, l);
+        // EVERY BUFFER A RENDER ALLOCATES IS ENTERED IN THE STATE'S LEDGER, and vv-release gives them back.
+        // The ledger is one record made at vv-open and mutated in place; its "h" is the list of handles the
+        // pass has handed out since the last release. It is a LIST and not a range because the carrier's
+        // handles carry a generation (slot + generation * 65536, freed slots recycled last in first out), so
+        // the numbers between a mark and a top are not the buffers between them (witnessed 2026-10-03).
+        // Before the ledger a render left ~390 buffers behind and, after ~160 renders in one process, the
+        // carrier's allocations answered empty and a render read as zero samples, silently.
+        // Every write to the ledger feeds the handle it answers (vv-keep-seq), never a call whose answer
+        // nobody reads: a recipe run over a thousand times drops side effects nothing reads.
+        def vv-led(st) = st[14];
+        def vv-held(st) = record_get(vv-led(st), "h");
+        def vv-keep-seq(rc, h) = nothing?(rc) ? form_error("voice-pass: the ledger refused a handle") : h;
+        def vv-keep(st, h) = h <= 0 ? h : vv-keep-seq(record_set(vv-led(st), "h", cons(h, vv-held(st))), h);
+        def vv-alloc(st, bytes) = vv-keep(st, metal_buf_alloc(bytes));
+        def vv-new(st, c, l) = vv-t(vv-alloc(st, (4 * (c * l))), c, l);
+
+        // ---- giving the ledger back ----
+        // A free asked while work is unsettled is refused and the carrier reads the refusal as 0, so the
+        // device is settled first and a refused handle stays in the ledger for another round. Whatever four
+        // rounds could not free is left in the ledger (never lost, never freed twice) and its count answered.
+        def vv-free-one(rc, h, left) = rc > 0 ? left : cons(h, left);
+        def vv-free-left(hs, left) = (Comparable) len(hs) == 0 ? left : vv-free-left(hs[1:], vv-free-one(metal_buf_free(hs[0]), hs[0], left));
+        def vv-free-after(rc, hs) = rc < 0 ? form_error("voice-pass: the device did not settle") : vv-free-left(hs, []);
+        def vv-free-rounds(hs, round) = (Comparable) len(hs) == 0 ? hs : (round >= 4 ? hs : vv-free-rounds(vv-free-after(metal_sync(), hs), (round + 1)));
+        def vv-kept-seq(rc, left) = nothing?(rc) ? form_error("voice-pass: the ledger refused its remainder") : len(left);
+        def vv-release-to(st, left) = vv-kept-seq(record_set(vv-led(st), "h", left), left);
+        // every tensor the pass handed out since the last release goes back; answers how many it could not free (0 = clean).
+        // The tensors of the line just rendered are gone after this: read the samples first (vv-pcm), then release.
+        def vv-release(st) = vv-release-to(st, vv-free-rounds(vv-held(st), 0));
+        // what the carrier holds right now (its own count of live buffers), for a caller to prove it flat
+        def vv-live() = metal_live()[2];
+        // closing the voice: the ledger, then the weights, the zero bias and the mapped file, in settled rounds.
+        // Answers how many buffers it could not give back (0 = the carrier holds nothing of this voice).
+        def vv-hs-handles(hs, acc) = (Comparable) len(hs) == 0 ? acc : vv-hs-handles(hs[1:], hs[0][1] > 0 ? cons(hs[0][1], acc) : acc);
+        def vv-close-sum(left, rest) = left + len(rest);
+        def vv-close(st) = vv-close-sum(vv-release(st), vv-free-rounds(cons(vv-zero(st), cons(vv-whole(st), vv-hs-handles(vv-hs(st), []))), 0));
 
         // ---- the state a run carries ----
         def vv-path(st) = st[0];
@@ -107,11 +142,36 @@ section [form.bml] {
         // ---- the convolution table: every Conv and ConvTranspose, with how it is set ----
         // (name w b K stride padbegin padend dil group transposed? in0)
         def vv-first-or(xs, d) = if ((Comparable) len(xs) == 0) then d else xs[0];
+        // ---- the name-resolution layer: one name for a node, whichever exporter wrote the file ----
+        // The newer torch exporter names every node after the module that holds it
+        // (`/enc_p/encoder/attn_layers.2/conv_q/Conv`). The older one numbers them serially
+        // (`Conv_816`) and leaves the module's name only on the WEIGHTS it reads
+        // (`enc_p.encoder.attn_layers.2.conv_q.weight`) — and, for the fused weight-norm kernels
+        // that have no name at all, on the BIAS beside them. Both say the same thing, so the pass
+        // reads the node's own inputs and spells the newer name from them: dots become slashes,
+        // a number clings to the segment before it (`attn_layers` `2` is `attn_layers.2`), and the
+        // node's op closes it. A node that already carries a slash-name keeps it, untouched, so a
+        // newer export resolves exactly as it always did.
+        def vv-digits-go(s, i) = if (i >= len(s)) then 1 else if (str_byte_at(s, i) < 48) then 0 else if (str_byte_at(s, i) > 57) then 0 else vv-digits-go(s, (i + 1));
+        def vv-digits?(s) = if ((Comparable) len(s) == 0) then 0 else vv-digits-go(s, 0);
+        // segments are kept newest first, so the number that follows a name is glued onto the head
+        def vv-segs-add(acc, part) = if ((Comparable) len(acc) == 0) then [part] else if ((Comparable) vv-digits?(part) == 1) then cons(vv-s([acc[0], ".", part]), acc[1:]) else cons(part, acc);
+        def vv-segs-go(s, i, acc) {
+            let at = str_find(s, ".", i);
+            if (at < 0) then vv-segs-add(acc, substring(s, i, len(s))) else vv-segs-go(s, (at + 1), vv-segs-add(acc, substring(s, i, at)));
+        }
+        def vv-ends?(s, suf) = if (len(s) < len(suf)) then 0 else if ((String) substring(s, (len(s) - len(suf)), len(s)) == suf) then 1 else 0;
+        def vv-stem(nm) = if ((Comparable) vv-ends?(nm, ".weight") == 1) then substring(nm, 0, (len(nm) - 7)) else if ((Comparable) vv-ends?(nm, ".bias") == 1) then substring(nm, 0, (len(nm) - 5)) else "";
+        def vv-canon(nm, w, b, op) {
+            let sw = vv-stem(w);
+            let stem = if ((Comparable) len(sw) > 0) then sw else vv-stem(b);
+            if ((Comparable) len(nm) > 0) then (if ((Comparable) str_byte_at(nm, 0) == 47) then nm else if ((Comparable) len(stem) == 0) then nm else vv-s(["/", vo-join(reverse(vv-segs-go(stem, 0, [])), "/"), "/", op])) else nm;
+        }
         def vv-ct-row(path, f, tf) {
             let a = vo-n-attrs(path, f);
             let ins = vo-n-inputs(path, f);
             let pads = vo-a-ints(a, "pads");
-            [vo-n-name(path, f), ins[1], if (len(ins) >= 3) then ins[2] else "", vv-first-or(vo-a-ints(a, "kernel_shape"), 1), vv-first-or(vo-a-ints(a, "strides"), 1), if ((Comparable) len(pads) == 0) then 0 else pads[0], if ((Comparable) len(pads) == 0) then 0 else pads[1], vv-first-or(vo-a-ints(a, "dilations"), 1), vo-a-int(a, "group", 1), tf, ins[0]];
+            [vv-canon(vo-n-name(path, f), ins[1], if (len(ins) >= 3) then ins[2] else "", if ((Comparable) tf == 1) then "ConvTranspose" else "Conv"), ins[1], if (len(ins) >= 3) then ins[2] else "", vv-first-or(vo-a-ints(a, "kernel_shape"), 1), vv-first-or(vo-a-ints(a, "strides"), 1), if ((Comparable) len(pads) == 0) then 0 else pads[0], if ((Comparable) len(pads) == 0) then 0 else pads[1], vv-first-or(vo-a-ints(a, "dilations"), 1), vo-a-int(a, "group", 1), tf, ins[0]];
         }
         def vv-ctab-step(path, fs, acc, op) = if ((String) op == "Conv") then vv-ctab-go(path, fs[1:], cons(vv-ct-row(path, fs[0], 0), acc)) else if ((String) op == "ConvTranspose") then vv-ctab-go(path, fs[1:], cons(vv-ct-row(path, fs[0], 1), acc)) else vv-ctab-go(path, fs[1:], acc);
         def vv-ctab-go(path, fs, acc) = if ((Comparable) len(fs) == 0) then reverse(acc) else vv-ctab-step(path, fs, acc, vo-n-op(path, fs[0]));
@@ -156,10 +216,46 @@ section [form.bml] {
             let n = if ((Comparable) len(r) == 0) then vo-node-by-out(path, nodes, nm) else [];
             if (len(r) >= 1) then vv-imax(vv-ints-of-row(path, r)) else if (d <= 0) then 0 else if ((Comparable) len(n) == 0) then 0 else vv-padchain(path, nodes, rows, vo-n-in(path, n, 0), (d - 1));
         }
-        def vv-ffn-pad-of(path, nodes, rows, cnm) {
-            let c = vo-node-by-name(path, nodes, cnm);
-            let p = if ((Comparable) len(c) == 0) then [] else vo-node-by-out(path, nodes, vo-n-in(path, c, 0));
-            if ((Comparable) len(p) == 0) then 0 else if ((String) vo-n-op(path, p) == "Pad") then vv-padchain(path, nodes, rows, vo-n-in(path, p, 1), 12) else 0;
+        // The older exporter folds that Pad into the Conv's own pads and writes no Pad node at all;
+        // then the Conv's pad IS the amount, and the one Pad-free answer is the node's own.
+        def vv-ffn-pad-of(path, nodes, rows, ctab, cnm) {
+            let r = vv-crow-go(ctab, cnm);
+            let p = if ((Comparable) len(r) == 0) then [] else vo-node-by-out(path, nodes, vv-cin0(r));
+            if ((Comparable) len(r) == 0) then 0 else if ((Comparable) len(p) == 0) then vv-cpb(r) else if ((String) vo-n-op(path, p) == "Pad") then vv-padchain(path, nodes, rows, vo-n-in(path, p, 1), 12) else vv-cpb(r);
+        }
+
+        // ---- scalars the older exporter leaves without a name: found by what consumes them ----
+        // The newer export names them for where they sit (`/enc_p/Constant_output_0`); the older
+        // one makes them initializers with serial names. What stays the same is the graph around
+        // them, so each is asked of its consumer. A name that is there is still read first.
+        def vv-by-op-go(path, fs, op, acc) = if ((Comparable) len(fs) == 0) then reverse(acc) else vv-by-op-go(path, fs[1:], op, if ((String) vo-n-op(path, fs[0]) == op) then cons(fs[0], acc) else acc);
+        def vv-by-op(path, nodes, op) = vv-by-op-go(path, nodes, op, []);
+        def vv-in-is?(path, f, i, nm) = if ((Comparable) len(vo-n-inputs(path, f)) <= i) then 0 else if ((String) vo-n-in(path, f, i) == nm) then 1 else 0;
+        def vv-find-in(path, fs, i, nm) = if ((Comparable) len(fs) == 0) then [] else if ((Comparable) vv-in-is?(path, fs[0], i, nm) == 1) then fs[0] else vv-find-in(path, fs[1:], i, nm);
+        def vv-first-row-name(rows, xs) = if ((Comparable) len(xs) == 0) then "" else if ((Comparable) vv-has-row?(rows, xs[0]) == 1) then xs[0] else vv-first-row-name(rows, xs[1:]);
+        // the first number a node reads out of the table; an absence is 0.0, which the open refuses
+        def vv-const-of(path, rows, f) {
+            let nm = if ((Comparable) len(f) == 0) then "" else vv-first-row-name(rows, vo-n-inputs(path, f));
+            if ((Comparable) len(nm) == 0) then 0.0 else vv-f1(path, rows, nm);
+        }
+        def vv-prod-of(path, nodes, f, i) = if ((Comparable) len(f) == 0) then [] else vo-node-by-out(path, nodes, vo-n-in(path, f, i));
+        // the layernorm's epsilon: the number the Add before the first Sqrt adds to the variance
+        def vv-eps-struct(path, nodes, rows) {
+            let sq = vv-by-op(path, nodes, "Sqrt");
+            if ((Comparable) len(sq) == 0) then 0.0 else vv-const-of(path, rows, vv-prod-of(path, nodes, sq[0], 0));
+        }
+        // the embedding's scale: what the Mul after the embedding Gather multiplies by
+        def vv-escale-struct(path, nodes, rows) {
+            let g = vv-find-in(path, vv-by-op(path, nodes, "Gather"), 0, "sid");
+            let m = if ((Comparable) len(g) == 0) then [] else vv-find-in(path, vv-by-op(path, nodes, "Mul"), 0, vo-n-out(path, g, 0));
+            vv-const-of(path, rows, m);
+        }
+        // the vocoder's divisor: the Div that closes the first residual sum, found backwards from
+        // the second upsample (Div -> LeakyRelu -> ConvTranspose)
+        def vv-decdiv-struct(path, nodes, rows, ctab) {
+            let u = vv-crow-go(ctab, "/dec/ups.1/ConvTranspose");
+            let lk = if ((Comparable) len(u) == 0) then [] else vo-node-by-out(path, nodes, vv-cin0(u));
+            vv-const-of(path, rows, vv-prod-of(path, nodes, lk, 0));
         }
 
         // ---- the elementwise affine at the end of the duration chain ----
@@ -169,7 +265,9 @@ section [form.bml] {
         // the Mul what it multiplies by, and then asking whether THAT is a number or an Exp of one.
         def vv-exp-all(xs) = if ((Comparable) len(xs) == 0) then [] else cons(math_exp(xs[0]), vv-exp-all(xs[1:]));
         def vv-ea-pair(path, nodes, rows) {
-            let mn = vo-node-by-name(path, nodes, "/dp/flows.0/Mul");
+            let mnn = vo-node-by-name(path, nodes, "/dp/flows.0/Mul");
+            let sbn = if ((Comparable) len(mnn) == 0) then vv-find-in(path, vv-by-op(path, nodes, "Sub"), 1, "dp.flows.0.m") else [];
+            let mn = if ((Comparable) len(mnn) == 0) then (if ((Comparable) len(sbn) == 0) then [] else vv-find-in(path, vv-by-op(path, nodes, "Mul"), 0, vo-n-out(path, sbn, 0))) else mnn;
             let en = if ((Comparable) len(mn) == 0) then "" else vo-n-in(path, mn, 1);
             let direct = if ((Comparable) len(en) == 0) then 0 else vv-has-row?(rows, en);
             let ex = if ((Comparable) direct == 1) then [] else if ((Comparable) len(en) == 0) then [] else vo-node-by-out(path, nodes, en);
@@ -178,12 +276,31 @@ section [form.bml] {
         }
         // the spline's own numbers, read from the first ConvFlow the file carries
         def vv-cf-first(st) = vv-cf-list(st)[0].str();
-        def vv-spline-of(path, rows, ctab, f0) {
+        // The spline's four constants sit in the graph as the numbers its comparisons and its
+        // sums read: the tail bounds are the second input of the first GreaterOrEqual and
+        // LessOrEqual, the minimum width/derivative is what the Add after the first Softplus adds,
+        // and the search epsilon is what an Add adds to a Gather's answer.
+        def vv-sp-struct(path, nodes, rows) {
+            let lo = vv-const-of(path, rows, vv-by-op(path, nodes, "GreaterOrEqual")[0]);
+            let hi = vv-const-of(path, rows, vv-by-op(path, nodes, "LessOrEqual")[0]);
+            let sp = vv-by-op(path, nodes, "Softplus");
+            let ad = if ((Comparable) len(sp) == 0) then [] else vv-find-in(path, vv-by-op(path, nodes, "Add"), 0, vo-n-out(path, sp[0], 0));
+            [lo, hi, vv-const-of(path, rows, ad), vv-seps-struct(path, nodes, rows)];
+        }
+        def vv-outs-of(path, fs) = if ((Comparable) len(fs) == 0) then [] else cons(vo-n-out(path, fs[0], 0), vv-outs-of(path, fs[1:]));
+        def vv-member?(xs, nm) = if ((Comparable) len(xs) == 0) then 0 else if ((String) xs[0] == nm) then 1 else vv-member?(xs[1:], nm);
+        def vv-ins0-of(path, fs) = if ((Comparable) len(fs) == 0) then [] else cons(vo-n-in(path, fs[0], 0), vv-ins0-of(path, fs[1:]));
+        // the first Add that puts a table number onto a Gather's answer and hands the sum to an
+        // Expand — the spline's bin-edge search epsilon (an Add of a Gather alone is also how the
+        // graph counts positions, and that one is not an epsilon)
+        def vv-add-after-go(path, rows, adds, outs, exps) = if ((Comparable) len(adds) == 0) then [] else if ((Comparable) vv-member?(outs, vo-n-in(path, adds[0], 0)) == 0) then vv-add-after-go(path, rows, adds[1:], outs, exps) else if ((Comparable) vv-has-row?(rows, vo-n-in(path, adds[0], 1)) == 0) then vv-add-after-go(path, rows, adds[1:], outs, exps) else if ((Comparable) vv-member?(exps, vo-n-out(path, adds[0], 0)) == 0) then vv-add-after-go(path, rows, adds[1:], outs, exps) else adds[0];
+        def vv-seps-struct(path, nodes, rows) = vv-const-of(path, rows, vv-add-after-go(path, rows, vv-by-op(path, nodes, "Add"), vv-outs-of(path, vv-by-op(path, nodes, "Gather")), vv-ins0-of(path, vv-by-op(path, nodes, "Expand"))));
+        def vv-spline-of(path, nodes, rows, ctab, f0) {
             let np = vv-s(["/dp/flows.", f0, "/"]);
             let nb = ((vo-dims(vo-find(rows, vv-s(["dp.flows.", f0, ".proj.bias"])))[0] + 1) / 3);
             let fc = vo-dims(vo-find(rows, vv-s(["dp.flows.", f0, ".pre.weight"])))[0];
             let ok = if ((Comparable) vv-has-row?(rows, vv-s([np, "Constant_18_output_0"])) == 0) then 0 else if ((Comparable) vv-has-row?(rows, vv-s([np, "Constant_19_output_0"])) == 0) then 0 else if ((Comparable) vv-has-row?(rows, vv-s([np, "Constant_83_output_0"])) == 0) then 0 else vv-has-row?(rows, vv-s([np, "Constant_193_output_0"]));
-            if ((Comparable) ok == 0) then [] else [vv-f1(path, rows, vv-s([np, "Constant_18_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_19_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_83_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_193_output_0"])), nb, math_sqrt((1.0 * fc))];
+            if ((Comparable) ok == 0) then (append(vv-sp-struct(path, nodes, rows), [nb, math_sqrt((1.0 * fc))])) else [vv-f1(path, rows, vv-s([np, "Constant_18_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_19_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_83_output_0"])), vv-f1(path, rows, vv-s([np, "Constant_193_output_0"])), nb, math_sqrt((1.0 * fc))];
         }
         def vv-sp-lo(st) = vv-spline(st)[0];
         def vv-sp-hi(st) = vv-spline(st)[1];
@@ -204,14 +321,14 @@ section [form.bml] {
             let latab = vv-la-go(path, nodes, []);
             let zero = metal_buf_alloc(16384);
             let epsn = "/enc_p/encoder/norm_layers_1.0/Constant_1_output_0";
-            let eps = if ((Comparable) vv-has-row?(rows, epsn) == 1) then vv-f1(path, rows, epsn) else 0.0;
-            let sc = if ((Comparable) vv-has-row?(rows, "/enc_p/Constant_output_0") == 1) then vv-f1(path, rows, "/enc_p/Constant_output_0") else 0.0;
-            let dd = if ((Comparable) vv-has-row?(rows, "/dec/Constant_output_0") == 1) then vv-f1(path, rows, "/dec/Constant_output_0") else 0.0;
-            let fp = vv-ffn-pad-of(path, nodes, rows, "/enc_p/encoder/ffn_layers.0/conv_1/Conv");
+            let eps = if ((Comparable) vv-has-row?(rows, epsn) == 1) then vv-f1(path, rows, epsn) else vv-eps-struct(path, nodes, rows);
+            let sc = if ((Comparable) vv-has-row?(rows, "/enc_p/Constant_output_0") == 1) then vv-f1(path, rows, "/enc_p/Constant_output_0") else vv-escale-struct(path, nodes, rows);
+            let dd = if ((Comparable) vv-has-row?(rows, "/dec/Constant_output_0") == 1) then vv-f1(path, rows, "/dec/Constant_output_0") else vv-decdiv-struct(path, nodes, rows, ctab);
+            let fp = vv-ffn-pad-of(path, nodes, rows, ctab, "/enc_p/encoder/ffn_layers.0/conv_1/Conv");
             let ea = vv-ea-pair(path, nodes, rows);
             let f0 = vv-cf0-of(ctab, 0, 32, []);
-            let sp = if ((Comparable) len(f0) == 0) then [] else vv-spline-of(path, rows, ctab, f0[0].str());
-            [path, rows, pipes, whole, hs, ctab, zero, eps, sc, fp, latab, dd, ea, sp];
+            let sp = if ((Comparable) len(f0) == 0) then [] else vv-spline-of(path, nodes, rows, ctab, f0[0].str());
+            [path, rows, pipes, whole, hs, ctab, zero, eps, sc, fp, latab, dd, ea, sp, record_new(0, "h", [])];
         }
         // the ConvFlow indices the file actually carries, newest first — read before the state exists
         def vv-cf0-of(ctab, i, n, acc) = if (i >= n) then acc else vv-cf0-of(ctab, (i + 1), n, if ((Comparable) len(vv-crow-go(ctab, vv-s(["/dp/flows.", i.str(), "/pre/Conv"]))) == 0) then acc else cons(i, acc));
@@ -219,8 +336,8 @@ section [form.bml] {
         // a scalar the table did not hold is an absence, and an absence does not render as silence
         def vv-pipes-ok-go(ps) = if ((Comparable) len(ps) == 0) then 1 else if (ps[0] <= 0) then 0 else vv-pipes-ok-go(ps[1:]);
         def vv-open-ok?(st) = if (vv-whole(st) <= 0) then 0 else if ((Comparable) vv-pipes-ok-go(st[2]) == 0) then 0 else vv-scalars-ok?(st);
-        def vv-scalars-ok?(st) = if (vv-eps(st) <= 0.0) then 0 else if (vv-escale(st) <= 0.0) then 0 else if (vv-decdiv(st) <= 0.0) then 0 else if (vv-ffnpad(st) <= 0) then 0 else if (len(vv-eapair(st)) < 2) then 0 else if (len(vv-spline(st)) < 6) then 0 else 1;
-        def vv-open-why(st) = if (vv-whole(st) <= 0) then "the model file did not map" else if ((Comparable) vv-pipes-ok-go(st[2]) == 0) then "a kernel did not compile" else if (vv-eps(st) <= 0.0) then "no layernorm epsilon in this export" else if (vv-escale(st) <= 0.0) then "no embedding scale in this export" else if (vv-decdiv(st) <= 0.0) then "no vocoder divisor in this export" else if (vv-ffnpad(st) <= 0) then "the feed-forward padding did not resolve" else if (len(vv-eapair(st)) < 2) then "the duration affine's exp did not resolve" else if (len(vv-spline(st)) < 6) then "the spline's own constants did not resolve" else "";
+        def vv-scalars-ok?(st) = if (vv-eps(st) <= 0.0) then 0 else if (vv-escale(st) <= 0.0) then 0 else if (vv-decdiv(st) <= 0.0) then 0 else if (vv-ffnpad(st) <= 0) then 0 else if (len(vv-eapair(st)) < 2) then 0 else if (len(vv-spline(st)) < 6) then 0 else if (vv-sp-seps(st) <= 0.0) then 0 else if (vv-sp-minb(st) <= 0.0) then 0 else if (vv-sp-hi(st) <= vv-sp-lo(st)) then 0 else 1;
+        def vv-open-why(st) = if (vv-whole(st) <= 0) then "the model file did not map" else if ((Comparable) vv-pipes-ok-go(st[2]) == 0) then "a kernel did not compile" else if (vv-eps(st) <= 0.0) then "no layernorm epsilon in this export" else if (vv-escale(st) <= 0.0) then "no embedding scale in this export" else if (vv-decdiv(st) <= 0.0) then "no vocoder divisor in this export" else if (vv-ffnpad(st) <= 0) then "the feed-forward padding did not resolve" else if (len(vv-eapair(st)) < 2) then "the duration affine's exp did not resolve" else if (len(vv-spline(st)) < 6) then "the spline's own constants did not resolve" else if (vv-sp-seps(st) <= 0.0) then "the spline's own constants did not resolve" else if (vv-sp-minb(st) <= 0.0) then "the spline's own constants did not resolve" else if (vv-sp-hi(st) <= vv-sp-lo(st)) then "the spline's own constants did not resolve" else "";
 
         // ---- the dispatches ----
         def vv-go(st, pi, bind, threads) = metal_enqueue(vv-pipe(st, pi), bind, threads);
@@ -241,7 +358,7 @@ section [form.bml] {
             let tr = vv-ct(r);
             let Cout = if ((Comparable) tr == 1) then (dims[1] * g) else dims[0];
             let Lout = if ((Comparable) tr == 1) then vv-lout-t(Lin, pb, pe, vv-cd(r), K, vv-cs(r)) else vv-lout(Lin, pb, pe, vv-cd(r), K, vv-cs(r));
-            let y = vv-new(Cout, Lout);
+            let y = vv-new(st, Cout, Lout);
             let bufs = [vv-th(x), vv-h(st, vv-cw(r)), vv-cbias(st, r), vv-th(y)];
             let bind = if ((Comparable) tr == 1) then md-bind(bufs, [vv-tc(x), Cout, Lin, Lout, K, vv-cs(r), pb]) else md-bind(bufs, [vv-tc(x), Cout, Lin, Lout, K, vv-cs(r), pb, vv-cd(r), g]);
             let e = vv-go(st, if ((Comparable) tr == 1) then vm-pi-convt() else vm-pi-conv(), bind, (Cout * Lout));
@@ -249,12 +366,12 @@ section [form.bml] {
         }
 
         def vv-un(st, x, op, abits) {
-            let y = vv-new(vv-tc(x), vv-tl(x));
+            let y = vv-new(st, vv-tc(x), vv-tl(x));
             let e = vv-go(st, vm-pi-unary(), md-bind([vv-th(x), vv-th(y)], [vv-tn(x), op, abits]), vv-tn(x));
             y;
         }
         def vv-bin(st, a, b, op) {
-            let y = vv-new(vv-tc(a), vv-tl(a));
+            let y = vv-new(st, vv-tc(a), vv-tl(a));
             let e = vv-go(st, vm-pi-binary(), md-bind([vv-th(a), vv-th(b), vv-th(y)], [vv-tn(a), op]), vv-tn(a));
             y;
         }
@@ -267,31 +384,31 @@ section [form.bml] {
         def vv-mulc(st, x, a) = vv-un(st, x, 9, md-f32-bits(a));
 
         def vv-ln(st, x, gname, bname) {
-            let y = vv-new(vv-tc(x), vv-tl(x));
+            let y = vv-new(st, vv-tc(x), vv-tl(x));
             let e = vv-go(st, vm-pi-ln(), md-bind([vv-th(x), vv-h(st, gname), vv-h(st, bname), vv-th(y)], [vv-tc(x), vv-tl(x), md-f32-bits(vv-eps(st))]), vv-tl(x));
             y;
         }
         // a contiguous channel range — Split, Concat and the coupling halves are all this
         def vv-chan(st, x, c0, nc) {
-            let y = vv-new(nc, vv-tl(x));
+            let y = vv-new(st, nc, vv-tl(x));
             let n = (nc * vv-tl(x));
             let e = vv-go(st, vm-pi-copyf(), md-bind([vv-th(x), vv-th(y)], [n, (c0 * vv-tl(x)), 0]), n);
             y;
         }
         def vv-cat2(st, a, b) {
-            let y = vv-new((vv-tc(a) + vv-tc(b)), vv-tl(a));
+            let y = vv-new(st, (vv-tc(a) + vv-tc(b)), vv-tl(a));
             let e1 = vv-go(st, vm-pi-copyf(), md-bind([vv-th(a), vv-th(y)], [vv-tn(a), 0, 0]), vv-tn(a));
             let e2 = vv-go(st, vm-pi-copyf(), md-bind([vv-th(b), vv-th(y)], [vv-tn(b), 0, vv-tn(a)]), vv-tn(b));
             y;
         }
         def vv-flip(st, x) {
-            let y = vv-new(vv-tc(x), vv-tl(x));
+            let y = vv-new(st, vv-tc(x), vv-tl(x));
             let e = vv-go(st, vm-pi-flip(), md-bind([vv-th(x), vv-th(y)], [vv-tc(x), vv-tl(x)]), vv-tn(x));
             y;
         }
         def vv-gate(st, x) {
             let c = (vv-tc(x) / 2);
-            let y = vv-new(c, vv-tl(x));
+            let y = vv-new(st, c, vv-tl(x));
             let e = vv-go(st, vm-pi-gate(), md-bind([vv-th(x), vv-th(y)], [c, vv-tl(x)]), (c * vv-tl(x)));
             y;
         }
@@ -305,8 +422,8 @@ section [form.bml] {
         def vv-u32-bytes(xs) = if ((Comparable) len(xs) == 0) then "" else ((String) md-le32(xs[0]) + vv-u32-bytes(xs[1:]));
         def vv-f32s-go(s, i, n, acc) = if (n <= 0) then reverse(acc) else vv-f32s-go(s, (i + 4), (n - 1), cons(vo-f32-at(s, i), acc));
         def vv-read(t, from, n) = vv-f32s-go(metal_buf_read(vv-th(t), (from * 4), (n * 4)), 0, n, []);
-        def vv-upload-f(xs) {
-            let y = vv-new(1, len(xs));
+        def vv-upload-f(st, xs) {
+            let y = vv-new(st, 1, len(xs));
             let w = metal_buf_write(vv-th(y), 0, vv-f32-bytes(xs));
             y;
         }
@@ -323,10 +440,10 @@ section [form.bml] {
             let HD = rkd[2];
             let H = (vv-tc(q) / HD);
             let T = vv-tl(x);
-            let sc = vv-new((H * T), T);
+            let sc = vv-new(st, (H * T), T);
             let e1 = vv-go(st, vm-pi-scores(), md-bind([vv-th(q), vv-th(k), vv-h(st, vv-s([wp, "emb_rel_k"])), vv-th(sc)], [T, H, HD, W]), ((H * T) * T));
             let e2 = vv-go(st, vm-pi-softmax(), md-bind16([vv-th(sc)], [T], 256, 0, 1, 0), (H * T));
-            let o = vv-new(vv-tc(q), T);
+            let o = vv-new(st, vv-tc(q), T);
             let e3 = vv-go(st, vm-pi-attnout(), md-bind([vv-th(sc), vv-th(v), vv-h(st, vv-s([wp, "emb_rel_v"])), vv-th(o)], [T, H, HD, W]), (vv-tc(q) * T));
             vv-conv(st, vv-s([np, "conv_o/Conv"]), o, -1);
         }
@@ -348,9 +465,9 @@ section [form.bml] {
             let e = vo-find(vv-rows(st), "sid");
             let D = vo-dims(e)[1];
             let T = len(ids);
-            let idb = metal_buf_alloc((4 * T));
+            let idb = vv-alloc(st, (4 * T));
             let w = metal_buf_write(idb, 0, vv-u32-bytes(ids));
-            let y = vv-new(D, T);
+            let y = vv-new(st, D, T);
             let d = vv-go(st, vm-pi-embed(), md-bind([idb, vv-h(st, "sid"), vv-th(y)], [T, D, md-f32-bits(vv-escale(st))]), (D * T));
             y;
         }
@@ -461,7 +578,7 @@ section [form.bml] {
         // So the chain that runs is flip, 7, flip, 5, flip, 3, flip, the elementwise affine — and
         // the flows that exist are found by asking which ones have a `pre` convolution.
         def vv-cf-step(st, fi, g, z0, z1) {
-            let x0d = vv-upload-f(z0);
+            let x0d = vv-upload-f(st, z0);
             let hb = vv-cf-params(st, fi, g, x0d);
             let sy = metal_sync();
             let hs = vv-read(hb, 0, vv-tn(hb));
@@ -490,9 +607,9 @@ section [form.bml] {
         def vv-idx-go(ds, t, out) = if ((Comparable) len(ds) == 0) then reverse(out) else vv-idx-go(ds[1:], (t + 1), vv-rep(ds[0], t, out));
         def vv-take-rows(st, x, idx) {
             let Lout = len(idx);
-            let ib = metal_buf_alloc((4 * Lout));
+            let ib = vv-alloc(st, (4 * Lout));
             let w = metal_buf_write(ib, 0, vv-u32-bytes(idx));
-            let y = vv-new(vv-tc(x), Lout);
+            let y = vv-new(st, vv-tc(x), Lout);
             let e = vv-go(st, vm-pi-take(), md-bind([vv-th(x), ib, vv-th(y)], [vv-tc(x), vv-tl(x), Lout]), (vv-tc(x) * Lout));
             y;
         }
@@ -511,7 +628,7 @@ section [form.bml] {
         def vv-wn-go(st, np, i, n, h, out) = if (i >= n) then out else vv-wn-next(st, np, i, n, vv-wn-layer(st, np, i, h, out));
         def vv-wn-next(st, np, i, n, r) = vv-wn-go(st, np, (i + 1), n, r[0], r[1]);
         def vv-wn-n(st, np, i) = if ((Comparable) vv-node?(st, vv-s([np, "in_layers.", i.str(), "/Conv"])) == 0) then i else vv-wn-n(st, np, (i + 1));
-        def vv-wn(st, np, h) = vv-wn-go(st, np, 0, vv-wn-n(st, np, 0), h, vv-new(vv-tc(h), vv-tl(h)));
+        def vv-wn(st, np, h) = vv-wn-go(st, np, 0, vv-wn-n(st, np, 0), h, vv-new(st, vv-tc(h), vv-tl(h)));
         // one residual coupling layer, reversed: the first half conditions, the second is shifted
         def vv-rcl(st, fi, x) {
             let np = vv-s(["/flow/flows.", fi.str(), "/"]);
@@ -583,7 +700,7 @@ section [form.bml] {
         // and the samples as signed 16-bit, in one string, ready for the seed's own mouth
         def vv-pcm(st, o) {
             let n = vv-tn(o);
-            let p = metal_buf_alloc((2 * n));
+            let p = vv-alloc(st, (2 * n));
             let e = vv-go(st, vm-pi-pcm16(), md-bind([vv-th(o), p], [n, md-f32-bits(32767.0)]), n);
             let sy = metal_sync();
             metal_buf_read(p, 0, (2 * n));
