@@ -1,9 +1,9 @@
 // host-walk-began.bml — the slot stamp: a retry slot finds the night begun and starts nothing.
 //
-// Each schedule has a second slot a few minutes after its first (docs/launchd: the night 03:30 and 03:40, the day turns
-// 12:30 and 12:40, 19:00 and 19:10), so a first start the machine killed at launch (a night once lost to a 15 ms
-// code-signing kill) is tried again. The retry must start nothing when the first slot BEGAN, whether it finished early or
-// still walks: a door that claims the checkout (hw-begin, over hw-claim-at of host-walk-lock.bml) writes one row per door
+// Each schedule has a retry job a few minutes after its first slot (docs/launchd: the night 03:30 and 03:40, the day turns
+// 12:30 and 12:40, 19:00 and 19:10; observe/walk-retry.bml), so a first start the machine killed at launch (a night once
+// lost to a 15 ms code-signing kill) is tried again, informed by why (host-walk-retry.bml). The retry must start nothing
+// when the first slot BEGAN, whether it finished early or still walks: a door that claims the checkout (hw-begin, over hw-claim-at of host-walk-lock.bml) writes one row per door
 // into .hearth/walk.began ("pid=<pid> at=<unix ms> door=<door>", the lock's own owner text), under the claim it holds.
 // A later start of the SAME door that finds its own row younger than hw-slot-window-ms (25 minutes: the retry gap plus
 // slack, far less than the two-hour windows and the eight hours between slots) ends at once with the [walk-lock] line
@@ -12,8 +12,10 @@
 // start killed before its claim wrote none and the retry runs; a walk that crashed after its claim is not retried
 // inside the window, and the next slot's heal and yield (hw-heal, hw-turns) carry the work. Another door's row is another
 // slot: the day turn is not blocked by the night's stamp, and the two doors share one lock only for exclusion. A hand
-// start inside the window is refused too, and says so in its line; {"again":1} on stdin (hw-again?; launchd gives its
-// doors no stdin) starts it anyway and stamps it. A row from before the window is ignored, and so is one from the
+// start inside the window is refused too, and says so in its line; {"again":1} on the door's stdin (hw-again?, read once
+// by the door and handed to hw-begin; launchd gives its jobs no stdin, the retry door gives its child the field after
+// the first attempt) starts it anyway and stamps it. {"safe":1} (hw-safe?, hw-safe-skips?) is the same stdin's other field:
+// a safe start takes no model door. A row from before the window is ignored, and so is one from the
 // future (a clock set back reads no age).
 // The same rows are the lens "hours since a walk began" of the land cadence (observe/walk-began-run.bml): the latest
 // row across the stamp files read gives its age in hours counted up (a walk that began this hour reads 1, so 0 stays
@@ -58,11 +60,15 @@ section [form.bml] {
    let held = hw-field(hw-slot-row(path, door), "pid=");
    !nothing?(held) && (Comparable) held == pid;
   }
+  // the door's stdin (read once, by the door): {"again":1} starts inside the window, {"safe":1} takes no model door
   def hw-again?(text) = hw-has?(text, "\"again\":1") || hw-has?(text, "\"again\": 1");
+  def hw-safe?(text) = hw-has?(text, "\"safe\":1") || hw-has?(text, "\"safe\": 1");
+  // the model steps of a walk: a safe start skips each of them (heal, sync, build, carrier and carry stand)
+  def hw-safe-skips?(safe, step) = safe && ((String) step == "turns" || (String) step == "drafts" || (String) step == "page" || (String) step == "movement");
   // the door's start: [1, line] when it holds the checkout and has stamped its slot, [0, line] when it does not
-  def hw-begin(door) {
+  def hw-begin(door, opts) {
    let home = host_dir_mkdir(".hearth");
-   hw-begin-at(hw-lock(), hw-slot-path(), door, host_pid(), now_unix_ms(), hw-again?(stdin-text()), hw-zone-ms());
+   hw-begin-at(hw-lock(), hw-slot-path(), door, host_pid(), now_unix_ms(), hw-again?(opts), hw-zone-ms());
   }
   def hw-begin-at(lock, path, door, pid, now, again, zone) {
    let row = hw-slot-row(path, door);
@@ -91,7 +97,9 @@ section [form.bml] {
   def hw-gap-note(row, now, zone) = "hours since a walk began: " ++ hw-gap-hours(row, now).str() ++ " (" ++ hw-owner-door(row) ++ " began " ++ hw-gap-since(row, now, zone) ++ ", " ++ (hw-slot-age(row, now) / 60000).str() ++ " min ago)" ++ (hw-gap-gone?(row, now) ? "; [walk-gap] no walk began since " ++ hw-gap-since(row, now, zone) : "");
   // the lens's report: its note line (a stamp that did not read says nothing), and its field code, which the door ends with
   // (0 is the cadence's word for no reading)
-  def hw-gap-lines(row, now, zone) = nothing?(row) ? [] : nothing?(hw-gap-hours(row, now)) ? [] : ["note: " ++ hw-gap-note(row, now, zone)];
+  // extra is what the lens adds after the hours (the last retry's line); "" adds nothing
+  def hw-gap-lines(row, now, zone, extra) = nothing?(row) ? hw-gap-extra(extra) : nothing?(hw-gap-hours(row, now)) ? hw-gap-extra(extra) : ["note: " ++ hw-gap-note(row, now, zone) ++ ((String) extra == "" ? "" : "; " ++ extra)];
+  def hw-gap-extra(extra) = (String) extra == "" ? [] : ["note: " ++ extra];
   def hw-gap-code(row, now) = nothing?(row) ? 0 : (hw-gap-hours(row, now) ?? 0);
  }
 }

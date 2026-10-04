@@ -1,0 +1,92 @@
+// host-walk-retry.bml — the informed retry: understand why the first slot did not begin, then change what the second does.
+//
+// A retry that runs the same door the same way is likely to repeat what stopped the first. Each schedule has a second job
+// (earth.hati.rent-walk-retry at 03:40, earth.hati.day-turn-retry at 12:40 and 19:10) whose program is observe/walk-retry.bml,
+// and that door does this, in this order:
+//   1. Did the first slot begin? Its door's row in .hearth/walk.began (host-walk-began.bml) less than 25 minutes old says so:
+//      the door prints that and ends 0, nothing to heal. A walk that crashed after it began is not retried here: the stamp
+//      marks began, and the next slot's heal and yield carry it.
+//   2. If it did not, read the evidence of why through read-only doors (host-walk-attempt.bml reads, host-walk-evidence.bml
+//      classifies): `launchctl print` of the first job's label, the OS diagnostic reports its kill left, the job's log.
+//      The classes (hr-classify): launch-killed, crashed-after-launch, held, nothing-found.
+//   3. Adapt, each change a named variable the row states (hr-plan; never more than hr-max-attempts, two):
+//      launch-killed          attempt 1 begins the walk door as a child of this live process (a spawn inside a running process
+//                             is not a launchd exec, the launch that was killed), after a nap; attempt 2, if that child dies
+//                             at once, builds a fresh kernel beside and begins the walk on it; a child that also dies at once
+//                             stops the ladder: retry-failed, naming what each attempt saw
+//      crashed-after-launch   one child with its model doors off ({"safe":1}: heal, sync, build, carrier, carry), the crash
+//                             report named in the row
+//      held                   wait for the holder of the checkout to end (up to 90 minutes), then begin once
+//      nothing-found          one child after a longer nap, the launchctl text and the diagnostics directory's names kept
+//   4. Record one row in .hearth/walk-retry.jsonl: the slot, the class and why, the evidence paths, the launchd reading, what
+//      was changed, each attempt and what it saw, the outcome. The lens (observe/walk-began-run.bml) prints the last row, so a
+//      second occurrence has data. Why 2026-10-04 03:30:04 killed two launchd jobs in the same second is not known.
+// What this part holds is pure: the schedule's slots, the plan of a class, the ladder over an injected attempt, the reading of
+// a child's end, the row and the lens line. The effects are host-walk-attempt.bml's.
+// What it needs: host-walk-text.bml, host-walk-clock.bml, host-walk-began.bml (hw-gap-day, hw-clock-text) and
+// host-walk-evidence.bml (the class, the launchd line).
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-walk-clock.bml;
+import form-stdlib/bml/host-walk-began.bml;
+import form-stdlib/bml/host-walk-evidence.bml;
+import form-stdlib/bml/host-child.bml;
+section [form.bml] {
+ class HostWalkRetry {
+  // ── the schedule: [door, the first job's label, the first slot's hhmm, the door's window in ms] ──
+  def hr-slots() = [["scheduled-walk", "earth.hati.rent-walk", 330, 7200000], ["day-turn", "earth.hati.day-turn", 1230, 9000000], ["day-turn", "earth.hati.day-turn", 1900, 9000000]];
+  def hr-slot-ms(slot, now, zone) = (((now + zone) / 86400000) * 86400000) + ((slot[2] / 100) * 3600000) + ((slot[2] % 100) * 60000) - zone;
+  // this start is the retry of a slot that began between five and forty-five minutes ago
+  def hr-slot-due?(slot, now, zone) = ((now - hr-slot-ms(slot, now, zone)) >= 300000) && ((now - hr-slot-ms(slot, now, zone)) <= 2700000);
+  def hr-slot-pick(slots, now, zone) = nil?(slots) ? nothing() : hr-slot-due?(slots[0], now, zone) ? slots[0] : hr-slot-pick(slots[1:], now, zone);
+  // a door named by hand: its latest slot that has begun
+  def hr-slot-named(slots, door, now, zone) = foldl((best, s) => (String) s[0] != door ? best : hr-slot-ms(s, now, zone) > now ? best : nothing?(best) ? s : hr-slot-ms(s, now, zone) > hr-slot-ms(best, now, zone) ? s : best, nothing(), slots);
+  def hr-hhmm-text(slot) = hw-pad2(slot[2] / 100) ++ ":" ++ hw-pad2(slot[2] % 100);
+  // ── the plan: the attempts a class allows, each [how, nap ms, kind]; never more than hr-max-attempts ──
+  def hr-max-attempts() = 2;
+  def hr-plan(class) = (String) class == "launch-killed" ? [["child-of-the-retry", 15000, "same"], ["fresh-binary-child", 60000, "fresh"]]
+   : (String) class == "crashed-after-launch" ? [["safe-child", 15000, "safe"]]
+   : (String) class == "held" ? [["wait-for-the-holder", 0, "wait"]]
+   : (String) class == "nothing-found" ? [["captured-child", 120000, "capture"]]
+   : [];
+  def hr-changed(class) = (String) class == "launch-killed" ? "the walk begins as a child of this live process, not a launchd exec; if that dies at once, on a kernel built fresh beside (new inode, new signature)"
+   : (String) class == "crashed-after-launch" ? "the walk runs with its model doors off ({\"safe\":1}: heal, sync, build, carrier, carry)"
+   : (String) class == "held" ? "the start waits for the holder of the checkout to end (up to 90 min), then begins once"
+   : (String) class == "nothing-found" ? "a 120 s nap first, and the launchctl text and the diagnostics directory's names kept beside the row"
+   : "";
+  def hr-hold-wait-ms() = 5400000;
+  // ── what one attempt saw: [how, nap ms, outcome word, saw] ──
+  // a child that ends within five seconds without a clean exit died at once; one that exits 0 and printed the lock's refusal began nothing
+  def hr-died-at-once-ms() = 5000;
+  def hr-early?(life) = life < hr-died-at-once-ms();
+  def hr-child-word(run, life) = nothing?(run[0]) ? ((String) run[2] != "" && hw-starts?(run[2], "deadline") ? "stopped" : "died-at-once")
+   : (Comparable) run[0] == 0 ? (hw-has?(run[1], "already began") ? "begun" : hw-has?(run[1], "does not start") && !hw-has?(run[1], "holds this checkout") ? "refused" : "ok")
+   : hr-early?(life) ? "died-at-once" : "failed";
+  def hr-child-saw(run, life) = "exit " ++ hw-rc-text(run[0]) ++ " after " ++ (life / 1000).str() ++ " s" ++ ((String) run[2] == "" ? "" : ", " ++ run[2]) ++ (hr-child-lock-line(run[1]) == "" ? "" : ": " ++ hr-child-lock-line(run[1]));
+  def hr-child-lock-line(text) = hch-last(text ?? "", "[walk-lock]");
+  def hr-attempt-of(spec, nap, word, saw) = [spec[0], nap, word, saw];
+  // the ladder goes on only when an attempt died at once and another is allowed; anything else ends it
+  def hr-continue?(word) = (String) word == "died-at-once";
+  def hr-ladder(plan, k, act, seen) = nil?(plan) || k > hr-max-attempts() ? seen : hr-ladder-next(plan, k, act, append(seen, [act(plan[0], k)]));
+  def hr-ladder-next(plan, k, act, seen) = hr-continue?(seen[len(seen) - 1][2]) ? hr-ladder(plan[1:], k + 1, act, seen) : seen;
+  // the outcome: what the whole retry came to
+  def hr-ok-word?(word) = ((String) word == "ok") || ((String) word == "begun");
+  def hr-saw-text(seen, k) = nil?(seen) ? "" : "attempt " ++ k.str() ++ " (" ++ seen[0][0] ++ "): " ++ seen[0][2] ++ " " ++ seen[0][3] ++ (nil?(seen[1:]) ? "" : "; " ++ hr-saw-text(seen[1:], k + 1));
+  def hr-outcome(class, seen) = (String) class == "begun" ? "nothing to heal: the first slot began" : nil?(seen) ? "no attempt: no way is planned for " ++ class : hr-ok-word?(seen[len(seen) - 1][2]) ? "ok: " ++ seen[len(seen) - 1][0] : "retry-failed: " ++ hr-saw-text(seen, 1);
+  // ── the row and the lens line ──
+  def hr-attempt-node(a) = json-node-object([fhn-s("how", a[0]), fhn-n("nap_ms", a[1]), fhn-s("outcome", a[2]), fhn-s("saw", a[3])]);
+  def hr-row(at, slot, c, launchd, kept, seen, outcome) = json-node-object([fhn-n("at_unix_ms", at), fhn-s("door", slot[0]), fhn-s("label", slot[1]), fhn-s("slot", hr-hhmm-text(slot)), fhn-s("class", hr-class(c)), fhn-s("why", hr-why(c)), json-node-pair("evidence", json-node-array(map(p => json-node-string(p), append(hr-paths(c), kept)))), fhn-s("launchd", hr-launchd-line(launchd)), fhn-s("changed", hr-changed(hr-class(c))), json-node-pair("attempts", json-node-array(map(a => hr-attempt-node(a), seen))), fhn-s("outcome", outcome)]);
+  def hr-record-path() = ".hearth/walk-retry.jsonl";
+  def hr-record(path, row) = fhn-append(path, json-emit(row) ++ "\n");
+  def hr-last-row-text(path) = hr-last-of(filter(l => (Comparable) len(l) > 0, split-on(read_file(path) ?? "", "\n")));
+  def hr-last-of(rows) = nil?(rows) ? "" : rows[len(rows) - 1];
+  // the latest row across the record files read (the walk checkout's, and this checkout's when it is another)
+  def hr-row-at(text) = hw-field(text, "\"at_unix_ms\":") ?? 0;
+  def hr-latest-row(paths) = foldl((best, p) => hr-row-at(hr-last-row-text(p)) > hr-row-at(best) ? hr-last-row-text(p) : best, "", paths);
+  def hr-word-of(outcome) = substring(outcome, 0, str_find(outcome, ":", 0) < 0 ? len(outcome) : str_find(outcome, ":", 0));
+  def hr-last-how(attempts) = nil?(attempts) ? "" : hw-row-str(attempts[len(attempts) - 1], "how");
+  def hr-lens-of(row, now, zone) = hr-lens-says(row, now, zone, json-array-elements(hw-row-node(row, "attempts")));
+  def hr-lens-says(row, now, zone, attempts) = "walk retry " ++ hw-clock-text(zone, hw-row-int(row, "at_unix_ms")) ++ " " ++ hw-gap-day(zone, now, hw-row-int(row, "at_unix_ms")) ++ ": " ++ hw-row-str(row, "class") ++ " -> " ++ (nil?(attempts) ? "nothing to heal" : hr-last-how(attempts) ++ ": " ++ hr-word-of(hw-row-str(row, "outcome")));
+  // a record that does not read is no line, never a stop
+  def hr-lens-line(text, now, zone) = (String) text == "" ? "" : try hr-lens-of(parse-json("walk-retry", text), now, zone) else "";
+ }
+}
