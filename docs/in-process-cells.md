@@ -27,6 +27,7 @@ read the ratios, not the digits.
 | the voice-track worker as a service, its supervisor reading the record | **built** | `form/form-stdlib/voice-track.bml` begins nothing (membrane census: 0 sites), `docs/launchd/earth.hati.voice-track-worker.plist` is the service as data; `form/form-stdlib/tests/voice-track-reap-band.fk` reads 7 on the new logic |
 | the glass supervisor and the ear lanes as services | designed, reasons in "Services" below | not built |
 | the seed's own BML-floor child (`fk_bml_child_open`) | **removed**: the floor compiler is a cell of the seed's process | cold lowering of every `.bml` and floor-lowered `.fk` in a fresh tree, old and new seed side by side, same bytes (the "Lowering in this process" section) |
+| the fatal-signal organ: a handler per thread writes one organ-health row (frames, cell in flight, C chain) before the process dies by SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT; a stack that ends is a `stopped` `"stack-depth"` with frames; Form reads the file as findings and as the immune system's attention | **landed** (2026-10-04) | `form/form-stdlib/tests/fatal-signal-band.fk` reads 16383 (section "A stack that ends is a stop; a signal that ends the process is a row") |
 
 Deployment: apply the patch (inproc.patch, from the repo root: `git apply -p2 inproc.patch`; it applies cleanly to the tree as it stood at
 the end of this work, siblings' filesystem doors included) when `runtime/` is free, rebuild with `cc -O2 -o fkwu.new runtime/fkwu-uni.c && mv fkwu.new fkwu`,
@@ -61,7 +62,7 @@ end) or `nothing()` for an empty input. It answers one record, always (a call th
 | `out` | everything the unit printed (`print`, `print_str`, every byte the seed writes to stdout), captured, never written to fd 1 |
 | `err` | everything the unit said to stderr, as text: the seed's own lines and organ-health rows, and what Form code appended to `/dev/stderr` (`live`'s readings, the proof outputs), which would otherwise reach the host's fd 2. `diag` carries the compiler's rows structured and replayed on a resident call; `err` is the bytes of this call (a resident call's compile rows are in `diag` only). `form/form-stdlib/bml/cell-said.bml` renders `diag` and `err` once, as the lines and organ-health rows a reader of a child's stderr takes (`cs-stderr`) |
 | `diag` | a list of records, one per organ voicing or compile diagnostic: `organ aspect stage observed detail path name line health at_ms` |
-| `stopped` | `nothing()`, or `{kind, message, recipe, unit}`: kind `"stop"` (a Form-level stop, the `attempt` mechanism's catch: the same line a spawned run dies with), `"deadline"` (the budget ended it), `"unrunnable"` (it would not read as a program), `"refused"` (the call itself was malformed) |
+| `stopped` | `nothing()`, or `{kind, message, recipe, unit}`: kind `"stop"` (a Form-level stop, the `attempt` mechanism's catch: the same line a spawned run dies with), `"deadline"` (the budget ended it), `"unrunnable"` (it would not read as a program), `"refused"` (the call itself was malformed), `"stack-depth"` (a stack that ended, named before it was ever a crash: the message reads `stack-depth: <unit> <function> (...)`, `recipe` and `unit` say where, `frames` is the walker's chain, innermost first, as `"<function> (<unit>)"` (up to 24), and `depth` how many frames deep it was; see "A stack that ends is a stop") |
 | `errors` | the compile errors counted in `diag` (a spawned `fkwu` exits 1 on them) |
 | `resident` | 1 when the unit was already parsed here, 0 when this call loaded it |
 | `ms`, `cpu_us` | wall and process CPU spent in the call |
@@ -119,6 +120,42 @@ name across a file and its prelude closure: the later arity wins") needed no ren
   result record; the record table has no collector), and 650 bytes a call for a cell that returns three records. Eviction by mark
   (the LIFO truncation `store`/`restore` use for choice points) is designed for loads that fail, where nothing ran; it is not needed
   for the rate above.
+
+### A stack that ends is a stop; a signal that ends the process is a row
+
+A cell shares its process, so what ends a process ends every cell in it. Two layers answer, in this order (runtime/fkwu-uni.c, "THE
+FATAL-SIGNAL ORGAN"; `form/form-stdlib/tests/fatal-signal-band.fk` reads 16383):
+
+- **The stack is a stop.** The walker measures real stack use at every step (`fk_depth_wall`, the wall at the run thread's reserve less 2 MB) and the
+  source collector counts its own depth (`fk_src_collect_dep`: at most 2048 nested preludes, and the same stack wall). Past either, the walker
+  unwinds to the call's recover point and the collector returns false at every level; the record answers `stopped` kind `"stack-depth"` with the unit,
+  the function and the frames, and the process stands (the next `cell_run` answers). Measured, 2026-10-04: a two-function non-tail recursion stops at
+  2047 frames deep, 266 MB of walker stack, in 18 ms; the cycle of two `.bml` units that name each other (`fk_cell_load_base` is what makes it settle)
+  with that repair switched off stops at the collector's 2048th level in 4.6 s naming `fk_src_collect_dep` and the units it was entering. A program run
+  by `./fkwu <file>` whose walker meets the wall outside every recover point prints the same line, ends with exit 1 and writes the row below (name
+  `STACK-DEPTH`, signal 0, the frames; witnessed with `form/form-stdlib/tests/fixtures/fatal-signal/dive-cell.fk` run as a program).
+- **A signal is a row.** Each thread has its own alternate stack and a handler for SIGSEGV, SIGBUS, SIGILL, SIGFPE and SIGABRT. At the moment of death
+  the handler writes one organ-health row (organ `fkwu-seed`, aspect `fatal-signal`, health 0, surprise 1, the need `fatal-signal`, the offers
+  `request-evidence` and `revise`) to stderr as a `form-organ health` line and appends it, whole and by one write, to `.hearth/fatal-signal.jsonl`
+  (opened with `O_APPEND` then, nothing held earlier; no more rows past 4 MB). Its `evidence` is what the process knew: the signal and the fault
+  address, the resident bytes, the `cell_run` units in flight (outermost first) and the program's root, the walker's Form frame chain (`frames`: the
+  innermost 24, each a function and its unit; `depth`), the collector's depth and the units it was entering, and the C call chain with symbols (`c`).
+  Then the default action is restored and the signal raised again, so the exit stays 128 + n. The walker's chain is kept by the four non-tail call
+  arms (a saved caller each, put back by `fk_attempt` and `fk_cell_walk_guarded`); a unit inside a crystallized hot leaf shows its entering frame.
+  Nothing a handler cannot do safely is done in it: no allocation, no stdio, static buffers and table reads only.
+- **Form reads it.** `form/form-stdlib/bml/fatal-signal.bml` reads the file's tail as findings (the last 24 hours, one group per signal and innermost
+  frame with its count, at most six groups listed and the rest counted); `form/form-stdlib/bml/fatal-signal-attend.bml` speaks each group's row and hands it to `oc-hear`, the
+  care every organ reading takes (no provider claims a fatal signal; the attention is "unclaimed", the repair is code), and `observe/local-flow-review.bml`
+  runs it first. A leg that ended by a signal is a finding, never the bare number: `host-child.bml` appends the finding (the signal, the cell, the frames)
+  to a child's text when its exit is 128 + n and keeps it in `<io>/<step>.finding`; `band-sweep.bml` and `gate/drift-gates.bml` print the last day's
+  findings before their first leg and read a `stack-depth` leg as its stop with its frames.
+- **What the band begins, on purpose.** A fault ends the process that raises it and nothing in `cell_run` can contain a SIGSEGV, so the band begins the
+  seed in use through `hch-run-in` (class D: the child is the thing under test). `FK_TEST_FAULT` (an environment word, absent in every product run) lets
+  `cell_run("fk-test-fault")` raise `segv`, `bus`, `ill`, `fpe`, `abort` or `cstack` (a real C stack overflow), and the words `load-base` and
+  `no-collect-guard` switch off the two repairs whose absence the organ must still catch.
+- **The sweep shards' death, as the organ reads it** (cyc-a.bml and cyc-b.bml with both repairs switched off, 55 s to the guard page):
+  `SIGBUS at 0x16b3cbff8`, cell `form/form-stdlib/tests/fixtures/cell-run/cyc-a.bml`, collector depth 21097 entering `cyc-a`, `cyc-b`, `cyc-a`, ..., 448 MB
+  resident, the C chain `fk_bml_packet_body < fk_bml_lower_to_mem < fk_src_collect_dep < fk_src_collect_bytes < fk_src_collect_dep < ...`, exit 138.
 
 ## What it costs (measured, one busy machine)
 

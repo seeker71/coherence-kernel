@@ -1,0 +1,140 @@
+// fatal-signal.bml — a process that died by a signal, read as a finding with its frames, never as a bare exit number.
+//
+// The seed (runtime/fkwu-uni.c, "THE FATAL-SIGNAL ORGAN") installs a handler for SIGSEGV, SIGBUS, SIGILL, SIGFPE and SIGABRT on each
+// thread's alternate stack. At the moment of death it writes ONE organ-health row (organ fkwu-seed, aspect fatal-signal, health 0,
+// surprise 1, a need named fatal-signal, offers request-evidence and revise) to stderr and appends it, whole, to
+// .hearth/fatal-signal.jsonl, then restores the default action and raises the signal again, so the exit status stays the
+// operating system's word (rc 128 + n). The row's evidence is what the process knew: the signal, the fault address, the resident
+// bytes, the cell_run units in flight, the walker's Form frame chain (innermost first, each a function and its unit), the source
+// collector's depth and the units it was entering, and the C call chain with symbols. A stack that ends is a stop before it is a
+// signal: the walker's depth wall and the collector's depth law answer `stopped` kind "stack-depth" with the same frames.
+//
+// This unit reads that file and those records for the readers that judge a leg:
+//   fsg-groups(path, now)       the rows of the last 24 hours, newest first, one group per (signal, innermost frame): [row, count]
+//   fsg-review-lines(path, now) the findings as lines (at most fsg-cap() groups, the rest counted); [] when nothing died
+//   fsg-leg-finding(label, rc, path, now)   the lines for a leg whose process ended with rc 128 + n: its row's frames, never the number alone
+//   fsg-stopped-lines(label, stopped)       the lines for a cell_run record that stopped "stack-depth": its message and frames
+//   fsg-signalled?(rc) fsg-sig-name(rc)     whether an exit is a signal's, and which
+// A row is read from its own text (the seed writes it in one fixed shape); fatal-signal-attend.bml hands the same rows to the
+// immune system's attention (oc-hear), and the sweep, the drift gates and the host-child door print these lines.
+// Nothing here begins a program; every function reads a file the seed wrote or a record a door answered.
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class FatalSignal {
+  def fsg-path() = ".hearth/fatal-signal.jsonl";
+  def fsg-day-ms() = 86400000;
+  def fsg-cap() = 6;
+  def fsg-tail-bytes() = 262144;
+  def fsg-q() = byte_to_str(34);
+  // ---- a field of one row's text
+  def fsg-key-at(l, key, from) {
+   let p = str_find(l, fsg-q() ++ key ++ fsg-q() ++ ":", from);
+   p < 0 ? 0 - 1 : p + len(key) + 3;
+  }
+  def fsg-close(l, i, n) = i >= n ? n : (Comparable) str_byte_at(l, i) == 92 ? fsg-close(l, i + 2, n) : (Comparable) str_byte_at(l, i) == 34 ? i : fsg-close(l, i + 1, n);
+  def fsg-str-at(l, v) = v < 0 ? "" : substring(l, v + 1, fsg-close(l, v + 1, len(l)));
+  def fsg-digits-end(l, i, n) = i < n && (Comparable) str_byte_at(l, i) >= 48 && (Comparable) str_byte_at(l, i) <= 57 ? fsg-digits-end(l, i + 1, n) : i;
+  def fsg-int-at(l, v) = v < 0 ? 0 : str_to_int(substring(l, v, fsg-digits-end(l, v, len(l))));
+  def fsg-str(l, key) = fsg-str-at(l, fsg-key-at(l, key, 0));
+  def fsg-int(l, key) = fsg-int-at(l, fsg-key-at(l, key, 0));
+  // ---- the frames: {"fn":"<function>","unit":"<path>"} between "frames":[ and the collector, innermost first
+  def fsg-frames-end(l) {
+   let e = str_find(l, "],\"collector\"", 0);
+   e < 0 ? len(l) : e;
+  }
+  def fsg-frame-text(l, at) = fsg-str-at(l, at + 6) ++ " (" ++ fsg-str-at(l, fsg-key-at(l, "unit", at)) ++ ")";
+  def fsg-frames-from(l, p, stop, k) {
+   let at = str_find(l, "{\"fn\":", p);
+   at < 0 || at >= stop || k <= 0 ? [] : cons(fsg-frame-text(l, at), fsg-frames-from(l, at + 6, stop, k - 1));
+  }
+  def fsg-frames(l) {
+   let from = str_find(l, "\"frames\":[", 0);
+   from < 0 ? [] : fsg-frames-from(l, from, fsg-frames-end(l), 24);
+  }
+  def fsg-first-fn(l) {
+   let from = str_find(l, "\"frames\":[", 0);
+   let at = from < 0 ? 0 - 1 : str_find(l, "{\"fn\":", from);
+   at < 0 || at >= fsg-frames-end(l) ? "" : fsg-str-at(l, at + 6);
+  }
+  def fsg-first-unit(l) {
+   let from = str_find(l, "\"frames\":[", 0);
+   let at = from < 0 ? 0 - 1 : str_find(l, "{\"fn\":", from);
+   at < 0 || at >= fsg-frames-end(l) ? "" : fsg-str-at(l, fsg-key-at(l, "unit", at));
+  }
+  // ---- the C chain: the symbols after "c":[, less the handler's own frames
+  def fsg-own-sym?(s) = len(s) == 0 || str_find(s, "fk_fatal", 0) == 0 || (String) s == "_sigtramp";
+  def fsg-syms-from(l, p, k) {
+   let at = str_find(l, "\"sym\":", p);
+   at < 0 || k <= 0 ? [] : fsg-sym-keep(fsg-str-at(l, at + 6), fsg-syms-from(l, at + 6, k - 1));
+  }
+  def fsg-sym-keep(s, rest) = fsg-own-sym?(s) ? rest : cons(s, rest);
+  // a recursion repeats one symbol many times: the chain keeps each symbol once while it repeats
+  def fsg-squeeze(xs) = nil?(xs) || nil?(xs[1:]) ? xs : (String) xs[0] == (String) xs[1] ? fsg-squeeze(xs[1:]) : cons(xs[0], fsg-squeeze(xs[1:]));
+  def fsg-syms(l) {
+   let from = str_find(l, "\"c\":[", 0);
+   from < 0 ? [] : fsg-squeeze(fsg-syms-from(l, from, 32));
+  }
+  def fsg-collector-depth(l) = fsg-int-at(l, fsg-key-at(l, "depth", fsg-key-at(l, "collector", 0)));
+  // ---- a row: [signal, observed, innermost fn, its unit, the cell in flight, at_ms, Form depth, frames, the line, C symbols, collector depth, resident bytes]
+  def fsg-row(l) = [fsg-str(l, "name"), fsg-str(l, "observed"), fsg-first-fn(l), fsg-first-unit(l), fsg-str(l, "cell"), fsg-int(l, "at_ms"), fsg-int(l, "depth"), fsg-frames(l), l, fsg-syms(l), fsg-collector-depth(l), fsg-int(l, "resident_bytes")];
+  def fsg-key(row) = (String) row[0] ++ "|" ++ (String) row[2] ++ "|" ++ (String) row[3];
+  def fsg-ok-line?(l) = len(l) > 2 && str_find(l, "\"aspect\":\"fatal-signal\"", 0) >= 0;
+  // ---- the file: its tail (a row is at most 40 KB; the seed stops appending past 4 MB), the first line dropped when the slice began mid-line
+  def fsg-size(path) = file_size(path);
+  def fsg-text(path) {
+   let size = fsg-size(path);
+   let start = size > fsg-tail-bytes() ? size - fsg-tail-bytes() : 0;
+   size <= 0 ? "" : (String) (read_file_slice(path, start, size - start) ?? "");
+  }
+  def fsg-lines(path) {
+   let size = fsg-size(path);
+   let lines = split-on(fsg-text(path), "\n");
+   size > fsg-tail-bytes() && len(lines) > 0 ? lines[1:] : lines;
+  }
+  def fsg-rows(path) = map(l => fsg-row(l), filter(l => fsg-ok-line?(l), fsg-lines(path)));
+  // ---- dedupe by (signal, innermost frame): the newest row stands for its group, and the count says how many
+  def fsg-add(kept, row) = nil?(kept) ? [[row, 1]] : (String) fsg-key(kept[0][0]) == fsg-key(row) ? cons([kept[0][0], (Comparable) kept[0][1] + 1], kept[1:]) : cons(kept[0], fsg-add(kept[1:], row));
+  def fsg-group(rows, kept) = nil?(rows) ? kept : fsg-group(rows[1:], fsg-add(kept, rows[0]));
+  def fsg-recent(rows, now) = filter(r => (Comparable) r[5] >= now - fsg-day-ms(), rows);
+  def fsg-groups(path, now) = fsg-group(reverse(fsg-recent(fsg-rows(path), now)), []);
+  def fsg-row-count(groups) = foldl((acc, g) => acc + g[1], 0, groups);
+  // ---- the words
+  def fsg-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ fsg-join(xs[1:], sep);
+  def fsg-mb(bytes) = (bytes / 1048576).str() ++ " MB";
+  def fsg-where(row) = len((String) row[4]) > 0 ? (String) row[4] : (String) row[3];
+  def fsg-head(g) {
+   let row = g[0];
+   "fatal-signal: " ++ (String) row[1] ++ " in " ++ fsg-where(row) ++ " — innermost " ++ (len((String) row[2]) > 0 ? (String) row[2] : "?") ++ ", " ++ row[6].str() ++ " Form frames deep, collector depth " ++ row[10].str() ++ ", resident " ++ fsg-mb(row[11]) ++ ", " ++ g[1].str() ++ " row(s) in 24 h, last at_ms " ++ row[5].str();
+  }
+  def fsg-group-lines(g) {
+   let row = g[0];
+   let frames = take(6, row[7]);
+   let syms = take(8, row[9]);
+   append([fsg-head(g)], append(map(f => "    frame: " ++ f, frames), len(syms) > 0 ? ["    c: " ++ fsg-join(syms, " < ")] : []));
+  }
+  def fsg-groups-lines(groups) = len(groups) == 0 ? [] : foldl((acc, g) => append(acc, fsg-group-lines(g)), [], take(fsg-cap(), groups));
+  def fsg-review-lines(path, now) {
+   let groups = fsg-groups(path, now);
+   let shown = take(fsg-cap(), groups);
+   let hidden = fsg-row-count(groups) - fsg-row-count(shown);
+   len(groups) == 0 ? [] : append(fsg-groups-lines(groups), hidden > 0 ? ["fatal-signal: " ++ hidden.str() ++ " more row(s) of other groups or repeats in the last 24 h, kept in " ++ path] : []);
+  }
+  // ---- an exit that is a signal's (rc 128 + n; Darwin's numbers, which the rows name as well)
+  def fsg-signalled?(rc) = !nothing?(rc) && (Comparable) rc > 128 && (Comparable) rc < 160;
+  def fsg-sig-of(rc) = (Comparable) rc - 128;
+  def fsg-sig-name(rc) = !fsg-signalled?(rc) ? "" : fsg-sig-of(rc) == 4 ? "SIGILL" : fsg-sig-of(rc) == 6 ? "SIGABRT" : fsg-sig-of(rc) == 8 ? "SIGFPE" : fsg-sig-of(rc) == 10 ? "SIGBUS" : fsg-sig-of(rc) == 11 ? "SIGSEGV" : "signal " ++ fsg-sig-of(rc).str();
+  def fsg-pick(groups, name) = nil?(groups) ? [] : (String) groups[0][0][0] == name ? groups[0] : fsg-pick(groups[1:], name);
+  def fsg-leg-finding(label, rc, path, now) {
+   let groups = fsg-groups(path, now);
+   let name = fsg-sig-name(rc);
+   let hit = fsg-pick(groups, name);
+   let lead = label ++ " died by " ++ name ++ " (rc " ++ rc.str() ++ ")";
+   fsg-leg-lines(lead, hit, path);
+  }
+  def fsg-leg-lines(lead, hit, path) = nil?(hit) ? [lead ++ ": no " ++ "fatal-signal row of that signal in " ++ path ++ " within 24 h (the seed that ran it predates the organ, or it ended before its handler could write)"] : cons(lead ++ ":", fsg-group-lines(hit));
+  // ---- a leg that stopped "stack-depth": the record carries the message, the depth and the frames the walker (or the collector) named
+  def fsg-stopped-frames(stopped) = (String) value_kind(record_get(stopped, "frames")) == "list" ? record_get(stopped, "frames") : [];
+  def fsg-stopped-lines(label, stopped) = nothing?(stopped) ? [] : cons(label ++ " stopped " ++ (String) record_get(stopped, "kind") ++ ": " ++ (String) record_get(stopped, "message") ++ " (" ++ (String) record_get(stopped, "recipe") ++ " in " ++ (String) record_get(stopped, "unit") ++ ")", map(f => "    frame: " ++ f, take(6, fsg-stopped-frames(stopped))));
+  def fsg-stack-depth?(stopped) = !nothing?(stopped) && (String) record_get(stopped, "kind") == "stack-depth";
+ }
+}
