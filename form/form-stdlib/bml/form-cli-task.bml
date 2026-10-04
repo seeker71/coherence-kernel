@@ -1,0 +1,55 @@
+// Prompt-only admission to the existing native planner and coding walk.
+import form-stdlib/bml/host-child.bml;
+import form-stdlib/bml/form-agent-tool-wire.bml;
+import form-stdlib/bml/form-cli-check-witness.bml;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+section [form.bml] {
+ class FormCliTask {
+  def fct-string(obj,key) = fat-wire-string?(json-object-get(obj,key)) ? json-string-value(json-object-get(obj,key)) : "";
+  def fct-pair(key,value) = json-node-pair(key,json-node-string(value));
+  def fct-trim-path(word) = len(word)==0 ? word : str_find("`\"'([{",substring(word,0,1),0)>=0 ? fct-trim-path(substring(word,1,len(word))) : str_find("`\"')]}.,;:",substring(word,len(word)-1,len(word)),0)>=0 ? fct-trim-path(substring(word,0,len(word)-1)) : word;
+  def fct-path?(path) = len(path)>0 && !fat-has(split-on(path,"/"),"..") && !fat-starts(path,"/") && file_size(path)>=0 && fs_is_dir(path)!=1;
+  def fct-words(goal) = foldl((parts,separator) => foldl((words,part) => append(words,split-on(part,separator)),[],parts),[goal],[" ","\t","\r","\n"]);
+  def fct-paths(goal) = foldl((paths,word) => { let path=fct-trim-path(word); fct-path?(path) && !fat-has(paths,path) ? append(paths,[path]) : paths; },[],fct-words(goal));
+  def fct-id(goal) = "task-" + substring(hex-encode(sha256-stream-string(goal)),0,16);
+  def fct-request(goal,paths) = json-node-object([fct-pair("id",fct-id(goal)),fct-pair("title",goal),fct-pair("problem",goal),fct-pair("needs",goal),fct-pair("where",paths[0]),json-node-pair("files",json-node-array(paths |> map(json-node-string))),fct-pair("evidence","Caller supplied the task only. Source, contract, implementation and verification belong to the native flow.")]);
+  def fct-queued(id) = foldl((held,line) => {
+   let row=len(trim(line))==0 ? json-node-object([]) : parse-json("task-queue-row",line);
+   fct-string(row,"request")==id ? row : held;
+  },json-node-object([]),split-on(read_file("learn/native-turn-queue.jsonl") ?? "","\n"));
+  def fct-plan-row(gap) = foldl((held,line) => {
+   let row=len(trim(line))==0 ? json-node-object([]) : parse-json("task-plan-row",line);
+   fct-string(row,"request")==fct-string(gap,"request") && fct-string(row,"plan_id")==fct-string(gap,"id") && fct-string(row,"verdict")=="verified" ? row : held;
+  },json-node-object([]),split-on(read_file(".hearth/local-plans/ledger.jsonl") ?? "","\n"));
+  def fct-plan-candidate(gap) {
+   let row=fct-plan-row(gap); let scratch=fct-string(row,"scratch");
+   scratch=="" ? "" : {
+    let paths=json-array-elements(json-object-get(gap,"writable")) |> map(json-string-value);
+    len(paths)!=1 ? "" : fct-plan-candidate-at(gap,".hearth/local-plans/scratch/" + scratch,paths[0]);
+   };
+  }
+  def fct-plan-candidate-at(gap,root,path) {
+   let candidate=root + "/reference/" + path;
+   let original=root + "/today/" + path;
+   let band=fct-string(gap,"band");
+   let docs=[[path,path,read_file(candidate) ?? ""]] + (json-array-elements(json-object-get(gap,"sources")) |> map(json-string-value) |> map(p=>[p,p,read_file(p) ?? ""]));
+   let checks=json-array-elements(json-object-get(gap,"checks"));
+   file_size(candidate)>=0 && read_file(original)==read_file(path) && read_file(root + "/reference/" + band)==read_file(band) && !any?(check=>!fccw-eval(check,docs)[0],checks) ? candidate : "";
+  }
+  def fct-report(id,stage,io,why) = json-emit(json-node-object([fct-pair("schema","form-native-task-v1"),fct-pair("task",id),fct-pair("stage",stage),fct-pair("evidence",io),fct-pair("reason",why)]));
+  def fct-command(goal) {
+   let paths=fct-paths(goal);
+   len(trim(goal))==0 || nil?(paths) ? fct-report(fct-id(goal),"attention","","Name the task and its existing repository file in the prompt; Form owns source discovery and checks.") : fct-run(goal,paths);
+  }
+  def fct-run(goal,paths) {
+   let id=fct-id(goal); let io=".hearth/tasks/" + id;
+   let plan=hch-run-in(io,"plan",["./fkwu","observe/local-plan-run.bml"],json-emit(fct-request(goal,paths)) + "\n",nothing());
+   let queued=fct-queued(id); let gap=fct-string(queued,"id");
+   plan[0]!=0 || gap=="" ? fct-report(id,"attention",io,plan[2]=="" ? "Local planner returned without a verified queued task; its complete evidence is retained." : plan[2]) : {
+    let turn=hch-run-in(io,"turn",["./fkwu","observe/native-turn-run.bml"],json-emit(json-node-object([fct-pair("gap",gap),fct-pair("session",id)])) + "\n",nothing());
+    fct-report(id,turn[0]==0 ? "returned" : "attention",io,turn[2]);
+   };
+  }
+ }
+}
