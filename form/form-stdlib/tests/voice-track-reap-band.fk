@@ -1,0 +1,72 @@
+; voice-track-reap-band.fk — the supervisor ends a wedged worker, and ends it with SIGKILL when SIGTERM has not taken it.
+;
+; A worker stuck in the GPU wait answers only SIGKILL, and the wait that follows a kill that does not land
+; never returns. The synthetic workers are Form children (an fkwu running tests/host-sleeper-run.fk, which only
+; waits): no device, no foreign program. SIGKILL goes through the host_signal door.
+;
+; A worker that cannot hear SIGTERM is not made by stopping it. On this host (Darwin, witnessed 2026-10-04 in
+; host-signal-band) a SIGSTOPped process still dies to SIGTERM, so a stopped sleeper is no deaf one. The escalation is
+; therefore proven on its own seam: vtr-escalate(pid) is what follows the SIGTERM, and here it meets a worker the
+; SIGTERM never reached. It waits the grace window, then sends SIGKILL, and the child's own exit status says which
+; signal ended it (host_wait answers 128 + the signal: 137 is SIGKILL, 143 would be SIGTERM).
+;
+;   1   a worker that hears SIGTERM is gone in under 2 s and vtr-reap answers 1 (it was wedged)
+;   2   a worker the SIGTERM did not take is still there while the grace runs, is ended by the escalation to
+;       SIGKILL after VTRTermMs (5 s: between 4.5 s and 12 s), and its exit reads 137
+;   4   a worker that is not wedged is only waited for: it exits on its own and vtr-reap answers 0
+;
+; A binary without the host_signal door cannot send the SIGKILL: the band says so by name ("door absent") and answers
+; 0, spawning nothing. A child still standing when the band ends is ended with SIGKILL and reaped, whatever failed.
+;
+; Expected: 7
+; Verdict 7
+; REQUIRES: (host_spawn_at, host_kill, host_signal, host_alive)
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/voice-track.bml
+import form/form-stdlib/voice-track.bml;
+section [form.bml] {
+  def vrb-bit(ok, bit) = ok ? bit : 0;
+  def vrb-sleeper() = host_spawn_at(["./fkwu", "form/form-stdlib/tests/host-sleeper-run.fk"], ["/dev/null", "/dev/null", "/dev/null"]);
+  def vrb-napper() = host_spawn_at(["./fkwu", "form/form-stdlib/tests/host-napper-run.fk"], ["/dev/null", "/dev/null", "/dev/null"]);
+  def vrb-say(label, v) = print([label, v]);
+  // whatever is still standing is ended and reaped; a pid already reaped answers a refusal and nothing waits
+  def vrb-clean(pid) {
+    let ended = (Comparable) host_alive(pid) == 1 ? host_signal(pid, 9) : 0;
+    host_wait(pid);
+  }
+  def vrb-door?() = nothing?(host_signal(0, 9)) ? 0 : 1;
+  def vrb-absent() {
+    let shown = print(["voice-track-reap-band", "door absent: this fkwu has no host_signal; rebuild it (cc -O2 -o fkwu.new runtime/fkwu-uni.c)"]);
+    let verdict = print(["voice-track-reap-band", "verdict", 0]);
+    0;
+  }
+  def vrb-run() {
+    let p1 = vrb-sleeper();
+    let t1 = host_monotonic_ms();
+    let r1 = vtr-reap(p1, 1);
+    let ms1 = host_monotonic_ms() - t1;
+    let s1 = vrb-say("sigterm", [r1, ms1, host_alive(p1)]);
+    let b1 = vrb-bit(((Comparable) r1 == 1) && (ms1 < 2000) && ((Comparable) host_alive(p1) == 0), 1);
+
+    let p2 = vrb-sleeper();
+    let settle = host_sleep_ms(300);
+    let t2 = host_monotonic_ms();
+    let r2 = vtr-escalate(p2);
+    let ms2 = host_monotonic_ms() - t2;
+    let st2 = host_wait(p2);
+    let s2 = vrb-say("sigterm never reached it, escalated", [r2, ms2, st2]);
+    let b2 = vrb-bit(((Comparable) r2 == 0) && (ms2 >= 4500) && (ms2 < 12000) && ((Comparable) st2 == 137), 2);
+
+    let p3 = vrb-napper();
+    let t3 = host_monotonic_ms();
+    let r3 = vtr-reap(p3, 0);
+    let ms3 = host_monotonic_ms() - t3;
+    let s3 = vrb-say("not wedged", [r3, ms3]);
+    let b3 = vrb-bit(((Comparable) r3 == 0) && (ms3 >= 800), 4);
+    let cleaned = vrb-clean(p1) + vrb-clean(p2) + vrb-clean(p3);
+    let verdict = b1 + b2 + b3;
+    let shown = print(["voice-track-reap-band", "verdict", verdict]);
+    verdict;
+  }
+  (Comparable) vrb-door?() == 1 ? vrb-run() : vrb-absent();
+}
