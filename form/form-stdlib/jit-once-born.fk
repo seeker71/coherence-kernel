@@ -67,11 +67,28 @@ section [form.bml] {
     // a birth that produced no image is refused, never indexed
     def jonb-retain(reg, id, img) = nothing?(img) ? nothing() : (Comparable) len(img) == 0 ? nothing() : [jonb-epoch(reg), cons([id, img, jonb-image-id(img), [0, id, img]], jonb-entries(reg))];
     // ── the form route: the same program, interpreted ──────────────────────
+    // TAG 5 HAS TWO MEANINGS, by position — the vocabulary form-lower already speaks. As a VALUE (an operand of an
+    // add, sub, mul, div, or the root) tag 5 is MUL. As the CONDITION of a COND it is LE, one of the compare tags
+    // (5 le, 14 eq, 15 lt, 16 ge, 17 gt, 18 ne; lo-cmp-skip). The COND used to evaluate its condition as a VALUE and
+    // branch on zero, so LE(n, 3) was read as n*3 and `n <= 3 ? 10 : 20` answered 20 at 0 and 10 at 4 (witnessed
+    // 2026-10-04, jonb-request-form against the native page and the walker: the page and the walker agreed, the form
+    // route did not). jonb-holds? reads a compare condition as a compare; any other condition keeps its old reading, a
+    // value that is nonzero. A compare in value position (14..18) answers 1 or 0; there is no value-position LE, since
+    // 5 there is MUL.
+    def jonb-cmp-tag?(t) = ((Comparable) t == 5) || (((Comparable) t == 14) || (((Comparable) t == 15) || (((Comparable) t == 16) || (((Comparable) t == 17) || ((Comparable) t == 18)))));
+    def jonb-cmp(tag, a, b) = (Comparable) tag == 5 ? ((Comparable) a <= b ? 1 : 0) : (Comparable) tag == 14 ? ((Comparable) a == b ? 1 : 0) : (Comparable) tag == 15 ? ((Comparable) a < b ? 1 : 0) : (Comparable) tag == 16 ? ((Comparable) a >= b ? 1 : 0) : (Comparable) tag == 17 ? ((Comparable) a > b ? 1 : 0) : ((Comparable) a == b ? 0 : 1);
+    def jonb-holds?(prog, c, arg) = jonb-cmp-tag?(prog[c][0]) ? jonb-cmp(prog[c][0], jonb-eval(prog, prog[c][1], arg), jonb-eval(prog, prog[c][2], arg)) : ((Comparable) jonb-eval(prog, c, arg) == 0 ? 0 : 1);
     def jonb-eval(prog, i, arg) = {
         let row = prog[i];
         let tag = row[0];
-        (Comparable) tag == 1 ? row[1] : (Comparable) tag == 2 ? arg : (Comparable) tag == 3 ? jonb-eval(prog, row[1], arg) + jonb-eval(prog, row[2], arg) : (Comparable) tag == 4 ? jonb-eval(prog, row[1], arg) - jonb-eval(prog, row[2], arg) : (Comparable) tag == 5 ? jonb-eval(prog, row[1], arg) * jonb-eval(prog, row[2], arg) : (Comparable) tag == 8 ? jonb-eval(prog, row[1], arg) / jonb-eval(prog, row[2], arg) : (Comparable) tag == 14 ? (Comparable) jonb-eval(prog, row[1], arg) == jonb-eval(prog, row[2], arg) ? 1 : 0 : (Comparable) tag == 6 ? (Comparable) jonb-eval(prog, row[1], arg) == 0 ? jonb-eval(prog, row[3], arg) : jonb-eval(prog, row[2], arg) : nothing();
+        (Comparable) tag == 1 ? row[1] : (Comparable) tag == 2 ? arg : (Comparable) tag == 3 ? jonb-eval(prog, row[1], arg) + jonb-eval(prog, row[2], arg) : (Comparable) tag == 4 ? jonb-eval(prog, row[1], arg) - jonb-eval(prog, row[2], arg) : (Comparable) tag == 5 ? jonb-eval(prog, row[1], arg) * jonb-eval(prog, row[2], arg) : (Comparable) tag == 8 ? jonb-eval(prog, row[1], arg) / jonb-eval(prog, row[2], arg) : ((Comparable) tag >= 14) && ((Comparable) tag <= 18) ? jonb-cmp(tag, jonb-eval(prog, row[1], arg), jonb-eval(prog, row[2], arg)) : (Comparable) tag == 6 ? ((Comparable) jonb-holds?(prog, row[1], arg) == 1 ? jonb-eval(prog, row[2], arg) : jonb-eval(prog, row[3], arg)) : nothing();
     };
+    // The form route's own vocabulary: the tags jonb-eval has an arm for. A tag outside it answers nothing() at its node
+    // and an arithmetic parent stops on it; asking first turns that stop into a plain nothing() at the door.
+    def jonb-tag-ok?(t) = ((Comparable) t == 1) || (((Comparable) t == 2) || (((Comparable) t == 3) || (((Comparable) t == 4) || (((Comparable) t == 5) || (((Comparable) t == 8) || (((Comparable) t == 14) || (((Comparable) t == 15) || (((Comparable) t == 16) || (((Comparable) t == 17) || (((Comparable) t == 18) || ((Comparable) t == 6)))))))))));
+    def jonb-reach-ok?(prog, seen) = lo-nil?(seen) ? 1 : jonb-tag-ok?(lo-tag(prog, seen[0])) ? jonb-reach-ok?(prog, seen[1:]) : 0;
+    def jonb-evaluable?(prog, root) = jonb-reach-ok?(prog, lo-reach(prog, root, []));
+    def jonb-eval-covered(prog, root, arg) = (Comparable) jonb-evaluable?(prog, root) == 1 ? jonb-eval(prog, root, arg) : nothing();
     // ── request: exactly one birth per (shape, meaning); routes explicit ───
     // returns (list value route reg' born). One retained Form request carries
     // [invoke, structural identity, image] through the existing inram door.
@@ -79,20 +96,24 @@ section [form.bml] {
     // by the interned NodeID index. No new fixed primitive seat names this flow.
     def jonb-exec(request, prog, root, arg, reg, born) = {
         let native = jit_leaf_inram(request, arg);
-        nothing?(native) ? [jonb-eval(prog, root, arg), "form", reg, born] : [native, "native", reg, born];
+        nothing?(native) ? [jonb-eval-covered(prog, root, arg), "form", reg, born] : [native, "native", reg, born];
     };
-    def jonb-request(reg, prog, root, arg) = {
+    // A program holding a host-effect row the root does not reach is refused whole: no route runs the effect (the
+    // form route has no arm for tags 10 and 11, the native route lowers only what the root reaches), so any answer
+    // would be an answer with the effect silently dropped. The value is nothing(), the route "refused".
+    def jonb-request(reg, prog, root, arg) = (Comparable) lo-effects-bound?(prog, root) == 0 ? [nothing(), "refused", reg, 0] : jonb-request-go(reg, prog, root, arg);
+    def jonb-request-go(reg, prog, root, arg) = {
         let id = jonb-identity(prog, root, jonb-epoch(reg));
         let e = jonb-find(jonb-entries(reg), id);
         nothing?(e) ? {
             let img = lo-compile-fn(prog, root);
             let reg2 = jonb-retain(reg, id, img);
-            nothing?(reg2) ? [jonb-eval(prog, root, arg), "refused", reg, 0] : jonb-exec(jonb-entries(reg2)[0][3], prog, root, arg, reg2, 1);
+            nothing?(reg2) ? [jonb-eval-covered(prog, root, arg), "refused", reg, 0] : jonb-exec(jonb-entries(reg2)[0][3], prog, root, arg, reg2, 1);
         } : jonb-exec(e[3], prog, root, arg, reg, 0);
     };
     // the form route, requestable by name — a host without the door, or a
     // caller checking agreement, asks for it explicitly
-    def jonb-request-form(reg, prog, root, arg) = [jonb-eval(prog, root, arg), "form", reg, 0];
+    def jonb-request-form(reg, prog, root, arg) = (Comparable) lo-effects-bound?(prog, root) == 0 ? [nothing(), "refused", reg, 0] : [jonb-eval-covered(prog, root, arg), "form", reg, 0];
     // ── the membrane: new meaning in, dissolutions out, all counted ────────
     // returns (list reg' dissolved-stale dissolved-corrupt kept)
     def jonb-membrane(reg, new-epoch) = {

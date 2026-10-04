@@ -1,0 +1,114 @@
+// anf-shadow.bml -- rung R2's shadow: the ANF rows of a pure scalar defn, lowered through the EXISTING form-lower
+// (lo-compile-fn-n) to a native page, and answers compared with the walker's. Nothing here is wired into the runtime.
+//
+// anf-lower.bml gives ordered rows; form-lower.fk takes an op-tagged tree (1 LIT, 2 ARG, 3 ADD, 4 SUB, 5 MUL, 8 DIV,
+// 6 COND over a compare of an ARG with a LIT). This is the translation between them, and it declines in gpu-lower's
+// wording what the tree cannot say: a call (inlining is the next rung), a float, a string, a list, a compare of two
+// parameters, a literal outside 0..4095 (the immediates are 12 bits), more than four arguments (the frame banks four).
+// A defn that lowers here has no effect rows at all, so the order contract has nothing to guard in it; the shadow
+// proves the PIPELINE -- kernel_ast -> rows -> op-tagged tree -> bytes -> page -- answers as the walker does.
+//
+// An answer from the page is the walker's answer wherever it fits a signed 32-bit word: form-lower's epilogue
+// sign-extends (lo-sign), so no reader here knows a width. A division is lowered only by a nonzero literal (lo-div-safe?):
+// the walker stops on a zero divisor and a page cannot, so ans-prim declines the rest, with that reason.
+import form-stdlib/bml/anf-lower.bml;
+import form-stdlib/jit-once-born.fk;
+section [form.bml] {
+    class AnfShadow {
+        // ---- state: [prog, tmap]; tmap: temp -> prog index, or ["cmp" op ta tb] for a compare awaiting its if ----
+        def ans-tmap-get(tm, t) = nil?(tm) ? nothing() : (Comparable) tm[0][0] == t ? tm[0][1] : ans-tmap-get(tm[1:], t);
+        def ans-tmap-put(tm, t, v) = cons([t, v], tm);
+        def ans-params(arity, k, prog, tm) = k >= arity ? [prog, tm] : ans-params(arity, k + 1, append(prog, [[2, k]]), ans-tmap-put(tm, k, k));
+        def ans-index?(v) = (!nothing?(v)) && ((String) value_kind(v) == "int");
+
+        // ---- a defn: list(1, [prog, root, arity]) or list(0, reason) ----
+        def ans-lower(name) {
+            let r = anf-lower-named(name);
+            anf-ok?(r) ? ans-lower-anf(anf-val(r)) : r;
+        }
+        def ans-lower-anf(f) = f[2] > 4 ? anf-no("more than four arguments: the frame banks four") : ans-lower-body(f, ans-block([f[3], f[4]], ans-params(f[2], 0, [], []), f[2]), f[2]);
+        def ans-lower-body(f, r, arity) = anf-ok?(r) ? anf-ok([anf-val(r)[0][0], anf-val(r)[1], arity]) : r;
+        // a block: its rows, then the index of its result
+        def ans-block(blk, st, arity) {
+            let s = ans-rows(blk[0], st, arity);
+            anf-ok?(s) ? ans-result(anf-val(s), blk[1], arity) : s;
+        }
+        // a block's answer: a node of the tree; a compare used as a value (a > 3 answering 1 or 0) is the if it stands for
+        def ans-result(st, res, arity) {
+            let ix = ans-tmap-get(st[1], res);
+            ans-index?(ix) ? anf-ok([st, ix]) : nothing?(ix) ? anf-no("the answer is not a value the tree can hold") : ans-materialize(st, ix, arity);
+        }
+        def ans-materialize(st, c, arity) {
+            let r = ans-if-cmp(["if", -1, 0, [[["int", -2, 1]], -2], [[["int", -3, 0]], -3]], st, arity, c);
+            anf-ok?(r) ? anf-ok([anf-val(r), ans-tmap-get(anf-val(r)[1], -1)]) : r;
+        }
+        def ans-rows(rows, st, arity) = nil?(rows) ? anf-ok(st) : ans-rows-at(rows, arity, ans-row(rows[0], st, arity));
+        def ans-rows-at(rows, arity, r) = anf-ok?(r) ? ans-rows(rows[1:], anf-val(r), arity) : r;
+        def ans-row(row, st, arity) {
+            let op = row[0];
+            (String) op == "int" ? ans-int(row, st) : (String) op == "let" ? ans-let(row, st) : (String) op == "prim" ? ans-prim(row, st) : (String) op == "if" ? ans-if(row, st, arity) : anf-no("a " + op + " row has no op-tagged form");
+        }
+        // a node appended to the tree, its temporary now naming it: answers [state, index]
+        def ans-add(st, node, t) = [[append(st[0], [node]), ans-tmap-put(st[1], t, len(st[0]))], len(st[0])];
+        def ans-int(row, st) = (row[2] < 0) || (row[2] > 4095) ? anf-no("a literal outside 0..4095") : anf-ok(ans-add(st, [1, row[2]], row[1])[0]);
+        def ans-let(row, st) {
+            let v = ans-tmap-get(st[1], row[3]);
+            nothing?(v) ? anf-no("a let of nothing") : anf-ok([st[0], ans-tmap-put(st[1], row[1], v)]);
+        }
+        def ans-arith-tag(op) = (String) op == "add" ? 3 : (String) op == "sub" ? 4 : (String) op == "mul" ? 5 : (String) op == "div" ? 8 : nothing();
+        def ans-cmp-op?(op) = ((String) op == "le") || (((String) op == "lt") || ((String) op == "eq"));
+        def ans-prim(row, st) {
+            let op = row[2];
+            let args = row[3];
+            let ia = ans-tmap-get(st[1], args[0]);
+            let ib = len(args) > 1 ? ans-tmap-get(st[1], args[1]) : nothing();
+            ans-cmp-op?(op) ? anf-ok([st[0], ans-tmap-put(st[1], row[1], ["cmp", op, args[0], args[1], 0])]) : nothing?(ans-arith-tag(op)) ? anf-no("the primitive " + op + " has no op-tagged form") : ans-index?(ia) && ans-index?(ib) ? ((Comparable) ans-div-open?(st[0], op, ib) == 1 ? anf-no("a division whose divisor is not a nonzero literal: the walker stops on zero and a page cannot") : anf-ok(ans-add(st, [ans-arith-tag(op), ia, ib], row[1])[0])) : anf-no("an operand that is not a value the tree can hold");
+        }
+        // 1 when this primitive is a division and its divisor node is not a literal other than zero (lo-div-safe?'s rule, said
+        // here as a reason instead of as a nothing() the image would give)
+        def ans-div-open?(prog, op, ib) = (String) op == "div" ? (ans-is-tag?(prog, ib, 1) ? ((Comparable) prog[ib][1] == 0 ? 1 : 0) : 1) : 0;
+        // a compare of an ARG with a LIT: the tag the tree uses, 5 le, 14 eq, 15 lt, 16 ge, 17 gt (lo-cmp-skip's vocabulary)
+        def ans-cmp-tag(op, swapped, neg) = (Comparable) neg == 1 ? ans-cmp-not(ans-cmp-tag(op, swapped, 0)) : (String) op == "eq" ? 14 : (String) op == "le" ? (swapped ? 16 : 5) : (swapped ? 17 : 15);
+        // the compare that holds exactly when the other fails: le/gt, lt/ge, eq/ne
+        def ans-cmp-not(t) = (Comparable) t == 5 ? 17 : (Comparable) t == 17 ? 5 : (Comparable) t == 15 ? 16 : (Comparable) t == 16 ? 15 : (Comparable) t == 14 ? 18 : 14;
+        // a block that is one integer literal: its value, or nothing
+        def ans-lit-block(blk) = (Comparable) len(blk[0]) == 1 ? ((String) blk[0][0][0] == "int" ? ((Comparable) blk[0][0][1] == blk[1] ? blk[0][0][2] : nothing()) : nothing()) : nothing();
+        // an if that only turns a compare into 0 or 1 is that compare, negated when it answers 0 on success
+        def ans-bool-if(row, st, c) {
+            let tv = ans-lit-block(row[3]);
+            let ev = ans-lit-block(row[4]);
+            let flat = nothing?(tv) ? 0 : nothing?(ev) ? 0 : ((Comparable) (tv + ev) == 1 ? 1 : 0);
+            (Comparable) flat == 1 ? anf-ok([st[0], ans-tmap-put(st[1], row[1], ["cmp", c[1], c[2], c[3], (Comparable) tv == 0 ? 1 - c[4] : c[4]])]) : nothing();
+        }
+        def ans-is-tag?(prog, ix, tag) = (Comparable) prog[ix][0] == tag;
+        def ans-if(row, st, arity) {
+            let c = ans-tmap-get(st[1], row[2]);
+            nothing?(c) ? anf-no("an if on something that is not a compare") : ans-index?(c) ? anf-no("an if on a number: the tree branches on a compare of a parameter with a literal") : ans-if-flat(row, st, arity, c, ans-bool-if(row, st, c));
+        }
+        def ans-if-flat(row, st, arity, c, flat) = nothing?(flat) ? ans-if-cmp(row, st, arity, c) : flat;
+        def ans-if-cmp(row, st, arity, c) {
+            let ia = ans-tmap-get(st[1], c[2]);
+            let ib = ans-tmap-get(st[1], c[3]);
+            let shape = ans-shape(st[0], ia, ib);
+            (Comparable) shape == 0 ? anf-no("a compare of something other than one parameter and one literal") : ans-if-arms(row, st, arity, ans-cmp-tag(c[1], (Comparable) shape == 2, c[4]), (Comparable) shape == 1 ? ia : ib, (Comparable) shape == 1 ? ib : ia);
+        }
+        // 1: (parameter, literal) as written, 2: (literal, parameter), 0: neither
+        def ans-shape(prog, ia, ib) = !ans-index?(ia) ? 0 : !ans-index?(ib) ? 0 : ans-is-tag?(prog, ia, 2) ? (ans-is-tag?(prog, ib, 1) ? 1 : 0) : ans-is-tag?(prog, ia, 1) ? (ans-is-tag?(prog, ib, 2) ? 2 : 0) : 0;
+        def ans-if-arms(row, st, arity, ctag, argix, litix) {
+            let th = ans-block(row[3], st, arity);
+            let el = anf-ok?(th) ? ans-block(row[4], [anf-val(th)[0][0], st[1]], arity) : th;
+            anf-ok?(el) ? ans-if-join(row, st, ctag, argix, litix, anf-val(th)[1], anf-val(el)) : el;
+        }
+        def ans-if-join(row, st, ctag, argix, litix, thix, elr) {
+            let prog1 = append(elr[0][0], [[ctag, argix, litix]]);
+            let prog2 = append(prog1, [[6, len(prog1) - 1, thix, elr[1]]]);
+            anf-ok([prog2, ans-tmap-put(st[1], row[1], len(prog2) - 1)]);
+        }
+
+        // ---- the page: lower the tree through form-lower, birth it, call it ----
+        def ans-image(low) = lo-compile-fn-n(low[0], low[1], low[2]);
+        def ans-ident(low) = jonb-identity(low[0], low[1], 7);
+        def ans-run(img, ident, args) = jit_leaf_inram([0, ident, img], args);
+        def ans-release(ident) = jit_leaf_inram([1, ident, []], 0);
+    }
+}
