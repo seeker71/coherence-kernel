@@ -1,0 +1,322 @@
+; native-t5-band.fk — a T5 encoder-decoder run by the body on its own Metal, held against construction truth and torch.
+;
+; Every kernel is proven on a tiny input whose answer is computed by hand BEFORE the model's own numbers are trusted;
+; only then does charsiu/g2p_multilingual_byT5_small_100 run, and it is held to a torch + transformers oracle
+; (ORACLE ONLY: a one-off ~/.mlx-venv/bin/python run, never in the product path — it produced the constants below
+; with `T5ForConditionalGeneration.generate(num_beams=1, do_sample=False, max_length=50)`, one word at a time, input
+; `<tag>: word` as utf-8 bytes + 3 then eos; the logits of `<eng-us>: hello` with decoder_input_ids [[0]]; the
+; relative-position bucket table with T5Attention._relative_position_bucket(arange(-128,129), bidirectional, 32, 128);
+; NewGELUActivation on [0,1,-1,3,-6]; softmax([1,2,3]); the RMS norm of [3,4] with weight [1,2]).
+;
+;   1     the door opens: ten pipelines compile and none is numb
+;   2     the bucket table the device builds equals torch's, both rows, all 257 distances each; and the
+;         construction's own truths hold: distances below the exact half are their own bucket, the sign splits the
+;         bidirectional row at 16, 128 saturates at the last bucket, the causal row sends every future distance to 0
+;   4     RMS norm on [3,4 | 1,1] with weight [1,2]: no mean, no bias, eps 1e-6 (the reused nam_rms)
+;   8     gelu_new (tanh form) gated by a second input: 0, 1, -1, 3, -6 against torch's own activation
+;   16    softmax: [1,2,3,4], a row that would overflow without the max subtracted, a masked entry, a flat row
+;   32    the linear y = x . W^T over 10 tokens (two chunks of eight), K = 40 (not a multiple of 32), and accumulate
+;   64    attention scores q.k with NO scale and the relative bias: no bias / bidirectional / causal, two queries,
+;         two heads, a masked future key; and the weighted sum of values by those weights
+;   128   embed gathers rows by id, put writes at an offset, argmax takes the FIRST maximum across lanes and
+;         answers an id no vocabulary holds (>= 384) when every logit is NaN
+;   256   the model opens (172 tensors mapped off the file, scratch allocated once) and the first decoding step of
+;         `<eng-us>: hello` has torch's logits (first six within 1e-3 relative) and torch's argmax, 206
+;   512   greedy decoding equals torch generate for 42 (tag, word) pairs: eng-us, por-bz, por-po, pes, fas, per, ind,
+;         six words each, written in each tongue's own script
+;   1024  336 words in ONE open model — each equal to its pin again, so scratch reuse leaks no state from one word
+;         to the next — and the carrier's retained-buffer count (metal_live()[2]) is flat from the first to the last
+;   2048  the same word costs the same number of dispatches at run 1 and at run 337 (a recipe that heated past 1024
+;         calls once stopped dispatching its encoder layers; this holds the chain that fixed it), and close gives
+;         every buffer back (the count returns to its value before the model opened)
+;   4096  a text too long for the scratch answers nothing, never an empty string
+;   8192  the PRODUCT default, nt5-run, asks the model its own way: the bytes of `<tag>: word` and NO end token
+;         (charsiu's own inference). The 42 strings it gives for the same 42 pairs are pinned below as constants
+;         obtained from the body itself (body-native, vgt5-run 2026-10-04, the entry point since folded into
+;         nt5-run; no torch)
+;   16384 the end token is read as one more letter: for each of the six Indonesian pairs the answer WITH the token
+;         (nt5-run-eos, the torch oracle's door above) is the answer WITHOUT it plus one trailing phoneme, and for
+;         kita that phoneme is exactly "p" (kˈitap against kˈita); a text of 128 bytes is read without the token and
+;         refused with it (128 positions are the scratch, the token needs the 129th)
+;   32768 the way a word is asked (nt5-query): a LONE initial capital is lowered, any other capital stays (OK, iPhone,
+;         McDonald), a Latin-1 capital is lowered whole (Então, É), a script without case is untouched; and the model
+;         answers the lowercased Through, These and A the way the taught words have them (θɹˈuː, ðˈiːz, ˈeɪ) where the
+;         word as written is read as another word (θɹˈaʊ, θˈiːz, ˈɑː) — body-native 2026-10-04, no torch
+;
+; The 42 constants of bits 512 and 1024 were produced WITH the end token (the ByT5 tokenizer default), so they are
+; asked through nt5-run-eos; they stay true. The 42 of bit 8192 are what the product asks.
+;
+; Expected: 65535 (8191 before the no-end-token and capital bits)
+; Verdict 65535
+; REQUIRES: (Metal dispatches over the host's own device and the 1.2 GB checkpoint on this host)
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/native-t5.bml
+import form/form-stdlib/native-t5.bml;
+section [form.bml] {
+  def nb-bit(ok, bit) = ok ? bit : 0;
+  def nb-near(a, b, tol) = abs(a - b) <= tol;
+  def nb-near-list(xs, ys, tol) = nil?(xs) ? nil?(ys) : (nil?(ys) ? false : (nb-near(xs[0], ys[0], tol) && nb-near-list(xs[1:], ys[1:], tol)));
+  def nb-say(label, v) = print([label, v]);
+  def nb-ids(xs) = nil?(xs) ? "" : (md-le32(xs[0]) + nb-ids(xs[1:]));
+  def nb-rep32(v, n) = n <= 0 ? "" : (md-le32(v) + nb-rep32(v, n - 1));
+  def nb-dig(b) = substring("0123456789abcdefghijklmnopqrstuv", b, b + 1);
+  def nb-words(bytes, i, n) = i >= n ? "" : (nb-dig(ln-u32-le(bytes, i * 4)) + nb-words(bytes, i + 1, n));
+  def nb-bk(bytes, mode, rel) = ln-u32-le(bytes, ((mode * 257) + rel + 128) * 4);
+  def nb-all(bytes, mode, rels, want) = nil?(rels) ? true : ((nb-bk(bytes, mode, rels[0]) == want[0]) && nb-all(bytes, mode, rels[1:], want[1:]));
+  def nb-ints(n) = n <= 0 ? [] : append(nb-ints(n - 1), [n]);
+  // a [token][k] matrix whose entry is (token + 1) * (c + 1)
+  def nb-mat-row(t, c, k) = c >= k ? [] : cons((t + 1) * (c + 1) * 1.0, nb-mat-row(t, c + 1, k));
+  def nb-mat(t, tn, k) = t >= tn ? [] : append(nb-mat-row(t, 0, k), nb-mat(t + 1, tn, k));
+  def nb-zeros(n) = n <= 0 ? [] : cons(0.0, nb-zeros(n - 1));
+  def nb-unit(c, k) = c >= k ? [] : cons(c == 0 ? 1.0 : 0.0, nb-unit(c + 1, k));
+  def nb-pick(c, k, at) = c >= k ? [] : cons(c == at ? 1.0 : 0.0, nb-pick(c + 1, k, at));
+  def nb-expect-lin(t, tn) = t >= tn ? [] : append([(t + 1) * 820.0, (t + 1) * 6.0, (t + 1) * 1.0], nb-expect-lin(t + 1, tn));
+  def nb-double(xs) = nil?(xs) ? [] : cons(xs[0] * 2.0, nb-double(xs[1:]));
+  def nb-ones(n) = n <= 0 ? [] : cons(1.0, nb-ones(n - 1));
+  // the bias table [32 buckets][2 heads]: bucket b, head h holds b + 0.5 h, so a lookup names its bucket and head
+  def nb-bias-table(b) = b >= 32 ? [] : cons(b * 1.0, cons((b * 1.0) + 0.5, nb-bias-table(b + 1)));
+
+  // the pinned words: [tag word torch-ipa]
+  def nb-pins() = [
+   ["eng-us", "hello", "ˈhɛɫoʊ"], ["eng-us", "world", "ˈwɝɫd"], ["eng-us", "begin", "bɪˈɡɪn"], ["eng-us", "operators", "ˈɑpɝˌeɪtɝz"], ["eng-us", "carry", "ˈkæɹi"], ["eng-us", "wondering", "ˈwəndɝɪŋ"],
+   ["por-bz", "casa", "kazɐ"], ["por-bz", "começar", "komesaʁ"], ["por-bz", "vamos", "vɐmus"], ["por-bz", "Então", "ẽtɐ̃w̃"], ["por-bz", "obrigado", "obɾiɡadu"], ["por-bz", "português", "poʁtuɡejʃ"],
+   ["por-po", "casa", "kazɐ̃"], ["por-po", "começar", "kumɨsaɾɨ"], ["por-po", "vamos", "vɐmuʃɐ"], ["por-po", "Então", "ẽtɐ̃w̃"], ["por-po", "obrigado", "ɔβɾiɣaðu"], ["por-po", "português", "puɾtuɣeʒ"],
+   ["pes", "سلام", "səlˈaːməs"], ["pes", "کنیم", "kənˈiːmət"], ["pes", "آغاز", "aːɣˈaːzə"], ["pes", "بگذارید", "beɡzɒːɾiːdæ"], ["pes", "خانه", "xɒːne"], ["pes", "دوست", "duːstæ"],
+   ["fas", "سلام", "sælɒːme"], ["fas", "کنیم", "keniːm"], ["fas", "آغاز", "ɒːɢɒːz"], ["fas", "بگذارید", "beɡzɒːɾiːd"], ["fas", "خانه", "xɒːne"], ["fas", "دوست", "dost"],
+   ["per", "سلام", "sɛlaːm"], ["per", "کنیم", "kənˈiːmət"], ["per", "آغاز", "aːɣaːz"], ["per", "بگذارید", "beɡzɒːɾiːde"], ["per", "خانه", "xaːne"], ["per", "دوست", "duːst"],
+   ["ind", "rumah", "rˈumahf"], ["ind", "selamat", "səlˈamatt"], ["ind", "mulai", "mˈula͡ɪt"], ["ind", "kita", "kˈitap"], ["ind", "belajar", "bəlˈad͡ʒart"], ["ind", "bahasa", "bahˈasar"]
+  ];
+  // the torch oracle's door: the end token on. nb-run-plain is the product's: nt5-run, no end token.
+  def nb-run-pin(m, pin) = nt5-run-eos(m, "<" + pin[0] + ">: " + pin[1]);
+  def nb-run-plain(m, pin) = nt5-run(m, "<" + pin[0] + ">: " + pin[1]);
+  // the same 42 pairs as nb-pins, asked with NO end token. OBTAINED: body-native, vgt5-run 2026-10-04 (the same
+  // encoder, decoder and kernels as nt5-run-eos with the one token left off) — no torch. English has no extra
+  // phoneme to lose: the six strings equal the oracle's; the other tongues differ where the end token had been read.
+  def nb-pins-plain() = [
+   ["eng-us", "hello", "ˈhɛɫoʊ"], ["eng-us", "world", "ˈwɝɫd"], ["eng-us", "begin", "bɪˈɡɪn"], ["eng-us", "operators", "ˈɑpɝˌeɪtɝz"], ["eng-us", "carry", "ˈkæɹi"], ["eng-us", "wondering", "ˈwəndɝɪŋ"],
+   ["por-bz", "casa", "kazɐ"], ["por-bz", "começar", "komesaʁ"], ["por-bz", "vamos", "vɐmus"], ["por-bz", "Então", "ẽtɐ̃w̃"], ["por-bz", "obrigado", "obɾiɡadu"], ["por-bz", "português", "poʁtuɡejs"],
+   ["por-po", "casa", "kazɐ"], ["por-po", "começar", "kumɨsaɾ"], ["por-po", "vamos", "vɐmuʃ"], ["por-po", "Então", "ẽtɐ̃w̃"], ["por-po", "obrigado", "ɔβɾiɣaðu"], ["por-po", "português", "puɾtuɣeʃ"],
+   ["pes", "سلام", "sɒːlɒːm"], ["pes", "کنیم", "kenˈiːm"], ["pes", "آغاز", "aːɣˈaːz"], ["pes", "بگذارید", "beɡzɒːɾiːd"], ["pes", "خانه", "xɒːne"], ["pes", "دوست", "duːst"],
+   ["fas", "سلام", "sælɒːm"], ["fas", "کنیم", "keniːm"], ["fas", "آغاز", "ɒːɢɒːz"], ["fas", "بگذارید", "beɡzɒːɾiːd"], ["fas", "خانه", "xɒːne"], ["fas", "دوست", "duːst"],
+   ["per", "سلام", "salaːm"], ["per", "کنیم", "kəniːm"], ["per", "آغاز", "aːɣaːz"], ["per", "بگذارید", "beɡzaːriːd"], ["per", "خانه", "xaːne"], ["per", "دوست", "duːst"],
+   ["ind", "rumah", "rˈumah"], ["ind", "selamat", "səlˈamat"], ["ind", "mulai", "mˈula͡ɪ"], ["ind", "kita", "kˈita"], ["ind", "belajar", "bəlˈad͡ʒar"], ["ind", "bahasa", "bahˈasa"]
+  ];
+  def nb-plain-count-ok(m, pins) = nil?(pins) ? 0 : ((nb-same(nb-run-plain(m, pins[0]), pins[0][2]) ? 1 : 0) + nb-plain-count-ok(m, pins[1:]));
+  // the trailing text the end token added, or nothing when the with-token answer is not the plain one plus something
+  def nb-extra(eosd, plain) = (nothing?(eosd) || nothing?(plain)) ? nothing() : ((len(eosd) > len(plain) && (((String) substring(eosd, 0, len(plain))) == plain)) ? substring(eosd, len(plain), len(eosd)) : nothing());
+  def nb-extra-ok(m, pin) = !nothing?(nb-extra(nb-run-pin(m, pin), nb-run-plain(m, pin)));
+  def nb-eq(a, b) = ((String) a) == b;
+  // nt5-fold lowers a LONE initial capital (A-Z or a Latin-1 capital) and nothing else
+  def nb-fold-ok() = nb-eq(nt5-fold("Hello"), "hello") && nb-eq(nt5-fold("hello"), "hello") && nb-eq(nt5-fold("OK"), "OK") && nb-eq(nt5-fold("iPhone"), "iPhone") && nb-eq(nt5-fold("McDonald"), "McDonald") && nb-eq(nt5-fold("Então"), "então") && nb-eq(nt5-fold("É"), "é") && nb-eq(nt5-fold("A"), "a") && nb-eq(nt5-fold("Bintang-bintang"), "bintang-bintang") && nb-eq(nt5-fold("سلام"), "سلام") && nb-eq(nt5-fold(""), "") && nb-eq(nt5-query("ind", "Baiklah"), "<ind>: baiklah") && nb-eq(nt5-query("eng-uk", "ALL"), "<eng-uk>: ALL");
+  def nb-extra-count(m, pins) = nil?(pins) ? 0 : ((nb-extra-ok(m, pins[0]) ? 1 : 0) + nb-extra-count(m, pins[1:]));
+  def nb-pin-ok?(m, pin) = nb-same(nb-run-pin(m, pin), pin[2]);
+  def nb-same(got, want) = nothing?(got) ? false : ((String) got == want);
+  // misses over `n` words cycling the pins; prints the first miss
+  def nb-cycle(m, pins, i, n, misses) = i >= n ? misses : nb-cycle-next(m, pins, i, n, misses, pins[i % len(pins)]);
+  def nb-cycle-next(m, pins, i, n, misses, pin) = nb-cycle-judge(m, pins, i, n, misses, pin, nb-run-pin(m, pin));
+  def nb-cycle-judge(m, pins, i, n, misses, pin, got) {
+   let ok = nb-same(got, pin[2]);
+   let say = ok ? 0 : print(["miss", i, pin[0], pin[1], got, pin[2]]);
+   nb-cycle(m, pins, i + 1, n, misses + (ok ? 0 : 1));
+  }
+  def nb-count-ok(m, pins) = nil?(pins) ? 0 : ((nb-pin-ok?(m, pins[0]) ? 1 : 0) + nb-count-ok(m, pins[1:]));
+  def nb-a(n) = n <= 0 ? "" : ("a" + nb-a(n - 1));
+
+  // ===== the door: ten pipelines =====
+  let live0 = metal_live();
+  let P = nt5-pipes();
+  let b1 = nb-bit((len(P) == 10) && (P[0] > 0) && (P[1] > 0) && (P[2] > 0) && (P[3] > 0) && (P[4] > 0) && (P[5] > 0) && (P[6] > 0) && (P[7] > 0) && (P[8] > 0) && (P[9] > 0), 1);
+
+  // ===== the bucket table =====
+  let bkt = nam-alloc(514);
+  let bi = nt5-bucket-init(P, bkt);
+  let bs = nam-sync();
+  let bb = metal_buf_read(bkt, 0, 2056);
+  let torch-bidir = "ffffffffffffffffffffffffffffffffffffffeeeeeeeeeeeeeeeeeeeeeeeeeeeddddddddddddddddddccccccccccccccbbbbbbbbbaaaaaaa9999888876543210hijklmnooooppppqqqqqqqrrrrrrrrrssssssssssssssttttttttttttttttttuuuuuuuuuuuuuuuuuuuuuuuuuuuvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv";
+  let torch-causal = "vvvvvvvvvvvvvvvvuuuuuuuuuuuuuuttttttttttttssssssssssrrrrrrrrrrqqqqqqqqpppppppoooooonnnnnnmmmmmllllkkkkjjjiiihhgggfedcba987654321000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+  let g1 = (((String) nb-words(bb, 0, 257)) == torch-bidir) && (((String) nb-words(bb, 257, 514)) == torch-causal);
+  let g2 = nb-all(bb, 0, [0 - 7, 0 - 3, 0, 1, 7, 128, 0 - 128, 0 - 8, 8], [7, 3, 0, 17, 23, 31, 15, 8, 24]);
+  let g3 = nb-all(bb, 1, [0 - 15, 0 - 1, 0, 1, 5, 128, 0 - 128, 0 - 16, 0 - 17], [15, 1, 0, 0, 0, 0, 31, 16, 16]);
+  let b2 = nb-bit(g1 && g2 && g3, 2);
+
+  // ===== RMS norm =====
+  let rx = nam-buffer([3.0, 4.0, 1.0, 1.0]);
+  let rg = nam-buffer([1.0, 2.0]);
+  let ry = nam-alloc(4);
+  let rinv = nam-alloc(2);
+  let rr = nt5-rms(P, rx, rg, ry, rinv, 2, 2);
+  let rs = nam-sync();
+  let rv = nam-read(ry, 4);
+  let b4 = nb-bit(nb-near-list(rv, [0.8485280871391296, 2.2627415657043457, 0.9999995, 1.999999], 0.00001), 4);
+
+  // ===== gelu_new, gated =====
+  let gx = nam-buffer([0.0, 1.0, 0.0 - 1.0, 3.0, 0.0 - 6.0]);
+  let gb = nam-buffer([1.0, 1.0, 1.0, 1.0, 1.0]);
+  let gb2 = nam-buffer([2.0, 2.0, 2.0, 2.0, 2.0]);
+  let gy = nam-alloc(5);
+  let gy2 = nam-alloc(5);
+  let gg = nt5-geglu(P, gx, gb, gy, 5);
+  let gg2 = nt5-geglu(P, gx, gb2, gy2, 5);
+  let gs = nam-sync();
+  let gv = nam-read(gy, 5);
+  let gv2 = nam-read(gy2, 5);
+  let gt = [0.0, 0.8411920070648193, 0.0 - 0.15880799293518066, 2.9963626861572266, 0.0];
+  let b8 = nb-bit(nb-near-list(gv, gt, 0.00001) && nb-near-list(gv2, nb-double(gt), 0.00002), 8);
+
+  // ===== softmax =====
+  let sx = nam-buffer([1.0, 2.0, 3.0, 4.0, 1000.0, 1000.0, 999.0, 0.0 - 1000000000.0, 0.0, 0.0, 0.0, 0.0]);
+  let sr = nt5-softmax(P, sx, 3, 4);
+  let ss = nam-sync();
+  let sv = nam-read(sx, 12);
+  let st = [0.03205860328008499, 0.08714431874203257, 0.23688281808991013, 0.6439142598879722, 0.4223187982, 0.4223187982, 0.1553624041, 0.0, 0.25, 0.25, 0.25, 0.25];
+  let b16 = nb-bit(nb-near-list(sv, st, 0.00001), 16);
+
+  // ===== the linear =====
+  let lx = nam-buffer(nb-mat(0, 10, 40));
+  let lw1 = nam-buffer(append(nb-ones(40), append(nb-pick(0, 40, 5), nb-unit(0, 40))));
+  let ly = nam-alloc(30);
+  let l1 = nt5-lin(P, lx, lw1, ly, 10, 40, 3, 0);
+  let ls = nam-sync();
+  let lv = nam-read(ly, 30);
+  let l2 = nt5-lin(P, lx, lw1, ly, 10, 40, 3, 1);
+  let ls2 = nam-sync();
+  let lv2 = nam-read(ly, 30);
+  let lt = nb-expect-lin(0, 10);
+  let b32 = nb-bit(nb-near-list(lv, lt, 0.01) && nb-near-list(lv2, nb-double(lt), 0.02), 32);
+
+  // ===== attention scores, bias, weighted values =====
+  let aq = nam-buffer([1.0, 2.0, 3.0, 4.0, 0.0, 1.0, 1.0, 0.0]);
+  let ak = nam-buffer([1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 2.0, 2.0]);
+  let atab = nam-buffer(nb-bias-table(0));
+  let as0 = nam-alloc(8);
+  let as1 = nam-alloc(8);
+  let as2 = nam-alloc(8);
+  let as3 = nam-alloc(8);
+  let ac0 = nt5-scores(P, aq, ak, atab, bkt, as0, 2, 2, 2, 2, 0, 2);
+  let ac1 = nt5-scores(P, aq, ak, atab, bkt, as1, 2, 2, 2, 2, 0, 0);
+  let ac2 = nt5-scores(P, aq, ak, atab, bkt, as2, 2, 2, 2, 2, 0, 1);
+  let ac3 = nt5-scores(P, aq, ak, atab, bkt, as3, 1, 2, 2, 2, 1, 1);
+  let asy = nam-sync();
+  let av0 = nam-read(as0, 8);
+  let av1 = nam-read(as1, 8);
+  let av2 = nam-read(as2, 8);
+  let av3 = nam-read(as3, 4);
+  let ap = nam-buffer([0.25, 0.75, 0.5, 0.5, 1.0, 0.0, 0.0, 1.0]);
+  let avv = nam-buffer([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+  let aout = nam-alloc(8);
+  let ao = nt5-attn-out(P, ap, avv, aout, 2, 2, 2, 2);
+  let aos = nam-sync();
+  let aov = nam-read(aout, 8);
+  let s0ok = nb-near-list(av0, [3.0, 2.0, 1.0, 1.0, 3.0, 14.0, 1.0, 2.0], 0.0001);
+  let s1ok = nb-near-list(av1, [3.0, 19.0, 2.0, 1.0, 3.5, 31.5, 2.5, 2.5], 0.0001);
+  let s2ok = (av2[1] < (0.0 - 100000000000000000000000000000.0)) && (av2[5] < (0.0 - 100000000000000000000000000000.0)) && nb-near-list([av2[0], av2[2], av2[3], av2[4], av2[6], av2[7]], [3.0, 2.0, 1.0, 3.5, 2.5, 2.5], 0.0001);
+  let s3ok = nb-near-list(av3, [4.0, 2.0, 4.5, 14.5], 0.0001);
+  let oout = nb-near-list(aov, [4.0, 5.0, 3.0, 4.0, 3.0, 4.0, 7.0, 8.0], 0.0001);
+  let b64 = nb-bit(s0ok && s1ok && s2ok && s3ok && oout, 64);
+
+  // ===== embed, put, argmax =====
+  let ew = nam-buffer([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+  let eids = nam-write(nam-alloc(3), nb-ids([2, 0, 1]));
+  let ey = nam-alloc(6);
+  let e1 = nt5-embed(P, ew, eids, ey, 2, 3);
+  let pdst = nam-buffer(nb-zeros(8));
+  let psrc = nam-buffer([1.0, 2.0, 3.0]);
+  let p1 = nt5-put(P, psrc, pdst, 4, 3);
+  let lg = nam-buffer(append(nb-zeros(3), append([7.0], append(nb-zeros(16), append([7.0], append(nb-zeros(14), [7.0, 0.0 - 1.0, 0.0, 0.0, 0.0]))))));
+  let nanb = nam-write(nam-alloc(40), nb-rep32(2143289344, 40));
+  let aid = nam-alloc(4);
+  let aid2 = nam-alloc(4);
+  let a1 = nt5-argmax(P, lg, aid, 40);
+  let a2 = nt5-argmax(P, nanb, aid2, 40);
+  let es = nam-sync();
+  let evv = nam-read(ey, 6);
+  let pvv = nam-read(pdst, 8);
+  let abytes = metal_buf_read(aid, 0, 8);
+  let abytes2 = metal_buf_read(aid2, 0, 8);
+  let b128 = nb-bit(nb-near-list(evv, [5.0, 6.0, 1.0, 2.0, 3.0, 4.0], 0.00001) && nb-near-list(pvv, [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 0.0], 0.00001) && (ln-u32-le(abytes, 0) == 3) && (ln-u32-le(abytes2, 0) >= 384), 128);
+
+  // ===== free the pieces' buffers, then the model =====
+  let freed = nam-free([bkt, rx, rg, ry, rinv, gx, gb, gb2, gy, gy2, sx, lx, lw1, ly, aq, ak, atab, as0, as1, as2, as3, ap, avv, aout, ew, eids, ey, pdst, psrc, lg, nanb, aid, aid2]);
+  let live_pieces = metal_live()[2];
+  let t0 = host_monotonic_ms();
+  let m = nt5-open("/Users/ursmuff/models/g2p-byt5-small-100/model.safetensors");
+  let live_open = nt5-live();
+  let t1 = host_monotonic_ms();
+  let say1 = nb-say("pieces held buffers", live_pieces);
+  let say2 = nb-say("model open: retained buffers, ms", [live_open, t1 - t0]);
+
+  // ===== the first decoding step against torch =====
+  let Te = nt5-encode(m, "<eng-us>: hello", 1);
+  let id1 = nt5-step(m, 0, 0, Te);
+  let lg1 = nt5-logits(m);
+  let tl = [0.0 - 10.071305274963379, 2.3146770000457764, 0.0 - 9.963909149169922, 0.0 - 9.598133087158203, 0.0 - 9.865837097167969, 0.0 - 10.703614234924316];
+  let say3 = nb-say("hello step 1 first six logits", [lg1[0], lg1[1], lg1[2], lg1[3], lg1[4], lg1[5]]);
+  let b256 = nb-bit((Te == 16) && (id1 == 206) && nb-near-list([lg1[0], lg1[1], lg1[2], lg1[3], lg1[4], lg1[5]], tl, 0.001 * 11.0), 256);
+
+  // ===== greedy strings, 42 pairs =====
+  let pins = nb-pins();
+  let ok42 = nb-count-ok(m, pins);
+  let say4 = nb-say("pins equal to torch", [ok42, len(pins)]);
+  let b512 = nb-bit((len(pins) == 42) && (ok42 == 42), 512);
+
+  // ===== 336 words in one process =====
+  let d0 = metal_live()[7];
+  let w_first = nb-run-pin(m, pins[0]);
+  let d1 = metal_live()[7];
+  let live_a = nt5-live();
+  let misses = nb-cycle(m, pins, 1, 336, 0);
+  let d2 = metal_live()[7];
+  let w_last = nb-run-pin(m, pins[0]);
+  let d3 = metal_live()[7];
+  let live_b = nt5-live();
+  let say5 = nb-say("336 cycle: misses, retained before/after, dispatches first/last word", [misses, live_a, live_b, d1 - d0, d3 - d2]);
+  let b1024 = nb-bit((misses == 0) && (live_a == live_open) && (live_b == live_open) && nb-same(w_first, pins[0][2]) && nb-same(w_last, pins[0][2]), 1024);
+
+  // ===== the same cost at run 1 and run 337; close returns everything =====
+  let closed = nt5-close(m);
+  let live_closed = metal_live()[2];
+  let say6 = nb-say("after close: retained buffers vs before open", [live_closed, live_pieces]);
+  let b2048 = nb-bit(((d1 - d0) == (d3 - d2)) && ((d1 - d0) > 100) && (live_closed == live_pieces) && (live_pieces == live0[2]), 2048);
+
+  // ===== too long answers nothing =====
+  let m2 = nt5-open("/Users/ursmuff/models/g2p-byt5-small-100/model.safetensors");
+  let longr = nt5-run-eos(m2, "<eng-us>: " + nb-a(130));
+  let longp = nt5-run(m2, "<eng-us>: " + nb-a(130));
+  let okr = nt5-run-eos(m2, "<eng-us>: hello");
+  let c2 = nt5-close(m2);
+  let b4096 = nb-bit(nothing?(longr) && nothing?(longp) && nb-same(okr, "ˈhɛɫoʊ"), 4096);
+
+  // ===== the product's way: no end token =====
+  let m3 = nt5-open("/Users/ursmuff/models/g2p-byt5-small-100/model.safetensors");
+  let plain = nb-pins-plain();
+  let okp = nb-plain-count-ok(m3, plain);
+  let say7 = nb-say("pins equal to the no-end-token constants", [okp, len(plain)]);
+  let b8192 = nb-bit((len(plain) == 42) && (okp == 42), 8192);
+
+  // ===== the end token is one more letter =====
+  let kita_eos = nt5-run-eos(m3, "<ind>: kita");
+  let kita_plain = nt5-run(m3, "<ind>: kita");
+  let ind_pins = [plain[36], plain[37], plain[38], plain[39], plain[40], plain[41]];
+  let extras = nb-extra-count(m3, ind_pins);
+  let say8 = nb-say("kita with / without the end token; indonesian pairs that gain only a trailing phoneme", [kita_eos, kita_plain, extras]);
+  let r128 = nt5-run(m3, "<eng-us>: " + nb-a(118));
+  let r128e = nt5-run-eos(m3, "<eng-us>: " + nb-a(118));
+  // ===== the way a word is asked: a lone initial capital lowered (nt5-query); the answers body-native, 2026-10-04 =====
+  let thr_w = nt5-run(m3, "<eng-uk>: Through");
+  let thr_q = nt5-run(m3, nt5-query("eng-uk", "Through"));
+  let the_w = nt5-run(m3, "<eng-uk>: These");
+  let the_q = nt5-run(m3, nt5-query("eng-uk", "These"));
+  let a_w = nt5-run(m3, "<eng-uk>: A");
+  let a_q = nt5-run(m3, nt5-query("eng-uk", "A"));
+  let thr_l = nt5-run(m3, nt5-query("eng-uk", "through"));
+  let say9 = nb-say("capitalised as written / asked lowercased: Through, These, A", [thr_w, thr_q, the_w, the_q, a_w, a_q]);
+  let c3 = nt5-close(m3);
+  let b16384 = nb-bit((extras == 6) && nb-same(nb-extra(kita_eos, kita_plain), "p") && (!nothing?(r128)) && nothing?(r128e), 16384);
+  let fold_ok = nb-fold-ok();
+  let ask_ok = nb-same(thr_w, "θɹˈaʊ") && nb-same(thr_q, "θɹˈuː") && nb-same(thr_l, "θɹˈuː") && nb-same(the_w, "θˈiːz") && nb-same(the_q, "ðˈiːz") && nb-same(a_w, "ˈɑː") && nb-same(a_q, "ˈeɪ");
+  let b32768 = nb-bit(fold_ok && ask_ok, 32768);
+
+  let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024 + b2048 + b4096 + b8192 + b16384 + b32768;
+  let shown = print(["native-t5-band", "verdict", verdict]);
+  verdict;
+}
