@@ -1,0 +1,204 @@
+; cell-run-band.fk — cell_run: a unit of Form run in THIS process answers a record, and the record is what a spawned ./fkwu said.
+;
+; The body used to run its own cells as children and read a text protocol back: the last line of stdout as the value, the lines
+; of stderr as diagnostics, the exit as the verdict. cell_run(path, arg, deadline_ms, stdin) answers {value, out, diag, stopped,
+; errors, resident, ms, cpu_us} as a value, with nothing begun (docs/in-process-cells.md). The oracle here is the thing being
+; replaced: each case runs the same unit as a child (this band is the one place that still spawns a cell, on purpose) and the
+; record is held to it. A unit of the tree and a unit of the fixtures alike:
+;
+;   1      pure text: voice-chunk-band answers its 4095, prints what it printed, voices nothing, exits 0 spawned and in process
+;   2      a band that reads the kernel's own AST (kernel_ast): anf-shadow-band
+;   4      a band that reads and writes files: file-bytes-band
+;   8      substring-one-meaning-band        16   str-find-one-meaning-band
+;   32     a cell that prints 20000 lines: out is all of them, value is the 5 the spawned run printed last
+;   64     a cell that stops (the length of nothing): stopped names the recipe and the unit, the spawned stderr says the same
+;          line and exits 1, the value is nothing and what it printed before the stop is out
+;   128    a cell that calls a name nothing defines: errors is 1 as the spawned exit is, diag is the spawned organ-health row
+;          (observed binding-missing), the value is the 7 it runs on to
+;   256    stdin is a value: two lines and the end of input read back as the spawned run reads them from a file
+;   512    a high-grammar cell (.bml) with a top-level let and a statement
+;   1024   a resident call (the unit already parsed) answers what the first call answered, resident 1, diag replayed
+;   2048   scope: two cells define crs-pick differently and prelude one library; each answers its own, in any order, and a third
+;          that defines neither is told the names are unbound (errors 1) although both are resident
+;   4096   a budget: a cell that never ends comes back stopped "deadline" within 250 ms of its 300 ms, with what it printed
+;   8192   freshness: a cell rewritten to the same length inside the same second is the new cell
+;   16384  nesting: a cell that runs a cell that stops goes on, its own output intact, and reads the stop as a value
+;   32768  500 resident calls grow the process by less than 8 MB, every one resident
+;   65536  a call that cannot be made (the unit is not a path; the deadline is not a number; stdin is not lines) is a stopped
+;          record "refused", never a crash
+;   131072 nothing was begun: no fkwu child of this process stands when the calls are done
+;   262144 the spawned oracle ran and agreed with itself (a unit run twice as a child answers the same twice)
+;   524288 stdin is a value for file_read(0, n) too: a cell that reads its input as bytes gets the two lines the call passed (7 bytes), then ""
+;   1048576 isolation: after a gate cell has been loaded (gate/op-manifest.bml), a cell loaded next resolves its own names (fact.fk answers 3628800
+;          with no unresolved-call): a function row an earlier load gave back does not keep its old owner
+;
+;   2097152 a sequence of bands in one process, after a gate and again resident: boot-band answers 9 and base64-band 12 each time, no stop (the
+;          sweep shards that died with SIGBUS after ~50 minutes did not reproduce on this sequence, nor with arg-order-lane-parity-band in it
+;          three times, 2026-10-04; that band is a hundred seconds, so the claim keeps the two quick ones)
+;
+;   4194304 a cold load of two .bml units that name each other ends in seconds and answers (cyc-a.bml + cyc-b.bml, memos removed first): a
+;          collection asked whether a unit it had just registered was fresh, found its lowered text unlike its file, set it aside and collected it
+;          again until the thread's stack ended -- SIGBUS after the stack guard, in every sweep shard that met a cycle (2026-10-04)
+;
+; A binary without the cell_run door says "door absent" by name and answers 0.
+;
+; Expected: 8388607
+; Verdict 8388607
+; REQUIRES: (cell_run is a seed door, leaf-door mode 35; the sibling kernels carry no host doors)
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk
+section [form.bml] {
+  def crb-bit(ok, bit) = ok ? bit : 0;
+  def crb-say(label, v) = print([label, v]);
+  def crb-dir() = temp_dir() ++ "/cell-run-band." ++ host_pid().str();
+  def crb-fx(name) = "form/form-stdlib/tests/fixtures/cell-run/" ++ name;
+  def crb-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ crb-join(xs[1:], sep);
+  def crb-starts?(s, p) = len(s) >= len(p) && (String) substring(s, 0, len(p)) == p;
+  // ---- the oracle: the same unit as a child, its streams read back as text
+  // a fixture's image is dropped before the child runs: a child that reads its image back does not compile, and it is the
+  // compile that voices a diagnostic (the cell run in process always parses, once)
+  def crb-stem(p) = len(p) > 3 && (String) substring(p, len(p) - 3, len(p)) == ".fk" ? substring(p, 0, len(p) - 3) : p;
+  def crb-uncache(cell) = str_find(cell, "fixtures/cell-run/", 0) >= 0 ? host_path_remove(crb-stem(cell) ++ ".fkb") + host_path_remove(crb-stem(cell) ++ ".sym") + host_path_remove(cell ++ ".fkb") + host_path_remove(cell ++ ".sym") : 0;
+  def crb-oracle(cell, stdin-path, n) {
+    let uncached = crb-uncache(cell);
+    let out = crb-dir() ++ "/" ++ n.str() ++ ".out";
+    let err = crb-dir() ++ "/" ++ n.str() ++ ".err";
+    let gone = host_path_remove(out) + host_path_remove(err);
+    let pid = host_spawn_at(["./fkwu", cell], [stdin-path, out, err]);
+    let rc = host_wait(pid);
+    [rc, read_file(out) ?? "", read_file(err) ?? ""];
+  }
+  def crb-field(line, key) {
+    let at = str_find(line, "\"" ++ key ++ "\":\"", 0);
+    let from = at + len(key) + 4;
+    at < 0 ? "" : substring(line, from, str_find(line, "\"", from));
+  }
+  // the organ-health rows a spawned run voiced, less the image rebuilds a cold cache adds
+  def crb-health(err) = split-on(err, "\n") |> filter(l => crb-starts?(l, "form-organ health {") && !crb-starts?(crb-field(l, "aspect"), "image:"));
+  def crb-observed-oracle(err) = crb-join(map(l => crb-field(l, "observed"), crb-health(err)), "|");
+  def crb-observed(r) = crb-join(map(g => (String) record_get(g, "observed"), record_get(r, "diag")), "|");
+  def crb-last-line(text) {
+    let lines = split-on(trim(text), "\n");
+    nil?(lines) ? "" : lines[len(lines) - 1];
+  }
+  def crb-render(v) = (String) value_kind(v) == "int" ? v.str() : (String) value_kind(v) == "string" ? v : value_str(v);
+  def crb-stopped(r) = record_get(r, "stopped");
+  def crb-said(r) {
+    let s = crb-stopped(r);
+    (String) record_get(s, "message") ++ " -- in " ++ (String) record_get(s, "recipe") ++ " (" ++ (String) record_get(s, "unit") ++ ")";
+  }
+  // the record held to the child: a unit that ran to its end printed its value last; a unit that stopped died with its line
+  def crb-same(r, o) {
+    nothing?(crb-stopped(r))
+      ? ((Comparable) o[0] == ((Comparable) record_get(r, "errors") > 0 ? 1 : 0))
+        && ((String) o[1] == (String) record_get(r, "out") ++ crb-render(record_get(r, "value")) ++ "\n")
+        && ((String) crb-observed-oracle(o[2]) == (String) crb-observed(r))
+      : ((Comparable) o[0] == 1)
+        && ((String) o[1] == (String) record_get(r, "out"))
+        && ((String) crb-last-line(o[2]) == (String) crb-said(r));
+  }
+  def crb-case(cell, n) {
+    let first = crb-oracle(cell, "/dev/null", n);
+    let again = crb-oracle(cell, "/dev/null", n + 1000);
+    let r = cell_run(cell, 0, nothing(), nothing());
+    let shown = crb-say(cell, [first[0], record_get(r, "errors"), record_get(r, "ms"), crb-render(record_get(r, "value"))]);
+    [crb-same(r, again), (Comparable) first[0] == again[0] && (String) first[1] == (String) again[1], r];
+  }
+  def crb-rss() {
+    let rows = host_processes("fkwu*");
+    let mine = filter(x => (Comparable) x[0] == host_pid(), rows);
+    nil?(mine) ? 0 : mine[0][1];
+  }
+  def crb-children() = len(filter(x => (Comparable) x[5] == host_pid(), host_processes("fkwu*")));
+  def crb-door?() = nothing?(cell_run(0, 0, nothing(), nothing())) ? 0 : 1;
+  def crb-absent() {
+    let shown = print(["cell-run-band", "door absent: this fkwu has no cell_run; rebuild it (cc -O2 -o fkwu.new runtime/fkwu-uni.c)"]);
+    let verdict = print(["cell-run-band", "verdict", 0]);
+    0;
+  }
+  def crb-repeat(n, cell) = n <= 0 ? 0 : crb-repeat-one(n, cell, cell_run(cell, 0, nothing(), nothing()));
+  def crb-repeat-one(n, cell, r) = (Comparable) record_get(r, "resident") == 1 ? crb-repeat(n - 1, cell) : 1000000;
+  def crb-run() {
+    let made = host_dir_mkdir(crb-dir());
+    let bands = "form/form-stdlib/tests/";
+    let c1 = crb-case(bands ++ "voice-chunk-band.fk", 1);
+    let c2 = crb-case(bands ++ "anf-shadow-band.fk", 2);
+    let c4 = crb-case(bands ++ "file-bytes-band.fk", 3);
+    let c8 = crb-case(bands ++ "substring-one-meaning-band.fk", 4);
+    let c16 = crb-case(bands ++ "str-find-one-meaning-band.fk", 5);
+    let c32 = crb-case(crb-fx("print-cell.fk"), 6);
+    let c64 = crb-case(crb-fx("stop-cell.fk"), 7);
+    let c128 = crb-case(crb-fx("warn-cell.fk"), 8);
+    let c512 = crb-case(crb-fx("bml-cell.bml"), 10);
+    let b1 = crb-bit(c1[0] && (Comparable) record_get(c1[2], "value") == 4095 && (Comparable) record_get(c1[2], "errors") == 0 && nil?(record_get(c1[2], "diag")), 1);
+    let b2 = crb-bit(c2[0], 2);
+    let b4 = crb-bit(c4[0], 4);
+    let b8 = crb-bit(c8[0], 8);
+    let b16 = crb-bit(c16[0], 16);
+    let b32 = crb-bit(c32[0] && (Comparable) record_get(c32[2], "value") == 5 && len((String) record_get(c32[2], "out")) == 20000 * 31, 32);
+    let b64 = crb-bit(c64[0] && !nothing?(crb-stopped(c64[2])) && nothing?(record_get(c64[2], "value")) && (String) record_get(crb-stopped(c64[2]), "kind") == "stop" && (String) record_get(crb-stopped(c64[2]), "unit") == crb-fx("stop-cell.fk") && (String) record_get(c64[2], "out") == "before the stop\n", 64);
+    let b128 = crb-bit(c128[0] && (Comparable) record_get(c128[2], "errors") == 1 && (Comparable) record_get(c128[2], "value") == 7 && (String) crb-observed(c128[2]) == "binding-missing", 128);
+    let ins = "form/form-stdlib/tests/fixtures/cell-run/stdin-cell.fk";
+    let inpath = crb-dir() ++ "/stdin.txt";
+    let wrote = write_file(inpath, "first line\nsecond line\n");
+    let o256 = crb-oracle(ins, inpath, 20);
+    let r256 = cell_run(ins, 0, nothing(), ["first line", "second line"]);
+    let r256e = cell_run(ins, 0, nothing(), nothing());
+    let o256e = crb-oracle(ins, "/dev/null", 21);
+    let b256 = crb-bit(crb-same(r256, o256) && crb-same(r256e, o256e) && (Comparable) record_get(r256, "value") == 99 && (String) record_get(r256, "out") == "first line\nsecond line\n", 256);
+    let b512 = crb-bit(c512[0] && (Comparable) record_get(c512[2], "value") == 42, 512);
+    // residency: the same unit again, parsed already
+    let a1 = cell_run(bands ++ "voice-chunk-band.fk", 0, nothing(), nothing());
+    let w1 = cell_run(crb-fx("warn-cell.fk"), 0, nothing(), nothing());
+    let b1024 = crb-bit((Comparable) record_get(a1, "resident") == 1 && (Comparable) record_get(a1, "value") == 4095 && (String) record_get(a1, "out") == (String) record_get(c1[2], "out") && (Comparable) record_get(w1, "resident") == 1 && (String) crb-observed(w1) == "binding-missing" && (Comparable) record_get(w1, "errors") == 1, 1024);
+    let sa = cell_run(crb-fx("scope-a.fk"), 0, nothing(), nothing());
+    let sb = cell_run(crb-fx("scope-b.fk"), 0, nothing(), nothing());
+    let sa2 = cell_run(crb-fx("scope-a.fk"), 0, nothing(), nothing());
+    let sc = cell_run(crb-fx("scope-c.fk"), 0, nothing(), nothing());
+    let shown2 = crb-say("scope", [record_get(sa, "value"), record_get(sb, "value"), record_get(sa2, "value"), record_get(sc, "errors"), record_get(sc, "resident")]);
+    let b2048 = crb-bit((Comparable) record_get(sa, "value") == 11 && (Comparable) record_get(sb, "value") == 12 && (Comparable) record_get(sa2, "value") == 11 && (Comparable) record_get(sa2, "resident") == 1 && (Comparable) record_get(sc, "errors") > 0, 2048);
+    let sp = cell_run(crb-fx("spin-cell.fk"), 0, 300, nothing());
+    let b4096 = crb-bit(!nothing?(crb-stopped(sp)) && (String) record_get(crb-stopped(sp), "kind") == "deadline" && (Comparable) record_get(sp, "ms") >= 300 && (Comparable) record_get(sp, "ms") < 550 && (String) record_get(sp, "out") == "spinning\n", 4096);
+    let live = crb-dir() ++ "/live.fk";
+    let w_a = write_file(live, "(do 111)\n");
+    let f1 = cell_run(live, 0, nothing(), nothing());
+    let w_b = write_file(live, "(do 222)\n");
+    let f2 = cell_run(live, 0, nothing(), nothing());
+    let shown3 = crb-say("fresh", [record_get(f1, "value"), record_get(f2, "value"), record_get(f2, "resident")]);
+    let b8192 = crb-bit((Comparable) record_get(f1, "value") == 111 && (Comparable) record_get(f2, "value") == 222, 8192);
+    let ne = cell_run(crb-fx("nest-cell.fk"), 0, nothing(), nothing());
+    let b16384 = crb-bit((Comparable) record_get(ne, "value") == 1 && (String) record_get(ne, "out") == "outer before\nouter after\n" && nothing?(crb-stopped(ne)), 16384);
+    // the heap fills to its first collection before it is steady (about 1000 calls of this band); growth is read after that
+    let warmed = crb-repeat(1200, bands ++ "voice-chunk-band.fk");
+    let rss0 = crb-rss();
+    let grown = crb-repeat(500, bands ++ "voice-chunk-band.fk");
+    let rss1 = crb-rss();
+    let shown4 = crb-say("500 resident calls after 1200: rss before, after, not-resident", [rss0, rss1, grown]);
+    let b32768 = crb-bit((Comparable) warmed == 0 && (Comparable) grown == 0 && rss1 - rss0 < 2097152, 32768);
+    let x1 = cell_run(0, 0, nothing(), nothing());
+    let x2 = cell_run(crb-fx("scope-a.fk"), 0, "soon", nothing());
+    let x3 = cell_run(crb-fx("scope-a.fk"), 0, nothing(), 5);
+    let b65536 = crb-bit(!nothing?(crb-stopped(x1)) && (String) record_get(crb-stopped(x1), "kind") == "refused" && (String) record_get(crb-stopped(x2), "kind") == "refused" && (String) record_get(crb-stopped(x3), "kind") == "refused", 65536);
+    let b131072 = crb-bit((Comparable) crb-children() == 0, 131072);
+    let b262144 = crb-bit(c1[1] && c2[1] && c4[1] && c8[1] && c16[1] && c32[1] && c64[1] && c128[1], 262144);
+    let rb = cell_run(crb-fx("stdin-bytes-cell.fk"), 0, nothing(), ["abc", "de"]);
+    let b524288 = crb-bit(nothing?(crb-stopped(rb)) && (Comparable) record_get(rb, "value") == 7 && (String) record_get(rb, "out") == "abc\nde\n\n" && (Comparable) record_get(rb, "errors") == 0, 524288);
+    let gate = cell_run("gate/op-manifest.bml", 0, nothing(), nothing());
+    let fact = cell_run("form/form-samples/fact.fk", 0, nothing(), nothing());
+    let b1048576 = crb-bit((Comparable) record_get(fact, "value") == 3628800 && (Comparable) record_get(fact, "errors") == 0 && nothing?(crb-stopped(fact)), 1048576);
+    let q1 = cell_run("form/form-stdlib/tests/boot-band.fk", 0, nothing(), nothing());
+    let q2 = cell_run("form/form-stdlib/tests/base64-band.fk", 0, nothing(), nothing());
+    let q3 = cell_run("form/form-stdlib/tests/boot-band.fk", 0, nothing(), nothing());
+    let q4 = cell_run("form/form-stdlib/tests/base64-band.fk", 0, nothing(), nothing());
+    let b2097152 = crb-bit((Comparable) record_get(q1, "value") == 9 && (Comparable) record_get(q3, "value") == 9 && (Comparable) record_get(q2, "value") == 12 && (Comparable) record_get(q4, "value") == 12 && nothing?(crb-stopped(q3)) && nothing?(crb-stopped(q4)) && (Comparable) record_get(q3, "resident") == 1 && (Comparable) record_get(q4, "resident") == 1, 2097152);
+    let cycGone = host_path_remove(crb-fx("cyc-a.bml.lowfk")) + host_path_remove(crb-fx("cyc-b.bml.lowfk"));
+    let cycT0 = host_monotonic_ms();
+    let cyc = cell_run(crb-fx("cyc-a.bml"), 0, nothing(), nothing());
+    let cycMs = host_monotonic_ms() - cycT0;
+    let b4194304 = crb-bit(nothing?(crb-stopped(cyc)) && (Comparable) record_get(cyc, "value") == 3 && (Comparable) record_get(cyc, "errors") == 0 && (Comparable) cycMs < 60000, 4194304);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024 + b2048 + b4096 + b8192 + b16384 + b32768 + b65536 + b131072 + b262144 + b524288 + b1048576 + b2097152 + b4194304;
+    let shown5 = print(["cell-run-band", "verdict", verdict]);
+    verdict;
+  }
+  (Comparable) crb-door?() == 1 ? crb-run() : crb-absent();
+}
