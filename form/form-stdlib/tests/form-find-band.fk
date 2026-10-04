@@ -1,0 +1,467 @@
+; form-find-band.fk — form-find, the source tree indexed and resident: every answer is a table lookup, and it is the answer the brute-force scan gives.
+;
+; The service loop is exercised IN PROCESS: fnd-serve answers one request, fnd-poll answers a spool directory, fnd-loop runs until a stop file
+; (no launchd, no child). The oracle for each question is the body's own unindexed engine over the files read afresh: stw-grep-rows (grep-text
+; per file) for find and defs, a line-by-line scan of its own for callers, bands and imports, the wire's own JSON reader (faj-json) for rows.
+; The index is built over THIS tree for the real-tree claims, and over a small fixture tree (a .gitignore, a binary, a file over the held
+; limit, nested directories) for every change the refresh must follow. Honest numbers are printed: build time, index size, and for five
+; questions the unindexed time, the first indexed time (which builds the postings it needs) and the warm indexed time.
+; The tree must stand still while the band runs: a file edited between the oracle's read and the index's query is a difference the band reports.
+;
+;   1      the index builds over this tree: the same held files as an independent walk (size <= 2 MiB, no NUL), thousands of definitions,
+;          import edges and band headers, and the build time is read
+;   2      find: twenty fixed patterns (literals, -F, alternation, anchors, -w, -x, -m, a path operand, one that matches nothing) answer exactly
+;          the rows of the unindexed grep engine, each literal read only its candidate files, and -l and -c agree with the rows
+;   4      defs: twenty names answer exactly the rows of a regex scan of every source file
+;   8      callers: twenty names answer exactly an independent line-by-line scan (whole names only, definitions left out)
+;   16     bands: twenty names answer exactly the band files an independent scan finds, with expected, verdict and mentions
+;   32     imports: eight units answer exactly what an independent scan of import lines and preludes headers finds, both ways
+;   64     rows: a .jsonl census as a keyed table answers exactly what the JSON reader finds, for field=value, an array field, a number, a
+;          boolean, the value histogram and a miss, and it is read again when the file grows
+;   128    an incremental refresh on this tree: nothing changed reads nothing; a touched file is read once and no other, and the next refresh is quiet
+;   256    a fixture tree: .gitignore, a binary and a file over the limit honoured; a modified, an added, a removed file, a new directory and a
+;          changed .gitignore followed, every answer and the cached postings staying right, each file read as often as it changed
+;   512    refusals: an unknown command, edit and write, a search with nothing to narrow it, context flags, a bad request are named
+;          refusals; the wire's read, head, wc and rg answer over indexed files and refuse an absent one; nothing falls back to a host
+;   1024   the spool: an ask file is answered by an ans file written whole and the ask removed; a half-written ask is left, a stale one refused
+;   2048   five questions: the warm indexed answer is at least five times faster than the unindexed scan for each, and the cold door (a
+;          service absent: an index of its own, built once) answers the same as the warm service
+;   4096   the source begins nothing: no host_spawn, host_capture, host-exec or host_wait in form-find.bml, form-find-run.fk, form-find-ask.bml;
+;          the service definition is data: docs/launchd/earth.hati.form-find.plist
+;   8192   the loop ends on a stop file after answering what was asked, and the beat is a record
+;   16384  the wire's shape: every answer carries schema form-agent-tool-wire-v1, exit, stdout, stderr, documents and crossings 0, and a request that brings
+;          its own documents is answered by the wire untouched
+;
+; Expected: 32767
+; Verdict 32767
+; REQUIRES: (host_file_identity, host_utimes, fs_list, host_mkdir_mode)
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/bml/form-find.bml
+import form/form-stdlib/bml/form-find.bml;
+section [form.bml] {
+  def fbd-bit(ok, bit) = ok ? bit : 0;
+  def fbd-say(label, v) = print([label, v]);
+  def fbd-text(path) = read_file(path) ?? "";
+  def fbd-has(text, token) = str_find(text, token, 0) >= 0;
+  def fbd-nul() = byte_to_str(0);
+  def fbd-tab() = byte_to_str(9);
+  def fbd-same(a, b) = (String) value_str(a) == (String) value_str(b);
+  def fbd-join(rows) = nil?(rows) ? "" : fat-join(rows, "\n") ++ "\n";
+  def fbd-flat(xss) = foldl((acc, xs) => append(acc, xs), [], xss);
+  def fbd-all(xs) = nil?(xs) ? true : xs[0] ? fbd-all(xs[1:]) : false;
+  def fbd-count(xs) = foldl((a, x) => a + (x ? 1 : 0), 0, xs);
+  def fbd-sleep() = host_sleep_ms(8);
+  // ---- asking: one request through fnd-serve, read back through the wire's own JSON reader: [exit, stdout, stderr, schema, crossings, raw]
+  def fbd-request(cmd) = "{\"command\":" ++ json-quote-string(cmd) ++ "}";
+  def fbd-decode(raw) = fbd-decoded(raw, faj-json("form-find-band", raw));
+  def fbd-decoded(raw, n) = [node_value(json-object-get(n, "exit")), node_value(json-object-get(n, "stdout")), node_value(json-object-get(n, "stderr")), node_value(json-object-get(n, "schema")), node_value(json-object-get(n, "crossings")), raw];
+  def fbd-ask(s, cmd) = fbd-decode(fnd-serve(s, fbd-request(cmd)));
+  def fbd-out(s, cmd) = fbd-ask(s, cmd)[1];
+  def fbd-ms(t0) = host_monotonic_ms() - t0;
+
+  // ---- the oracle's world: every file of an independent walk, the held ones read afresh ----
+  def fbd-held-paths(files) = files |> filter(p => file_size(p) <= 2097152 && str_find(fbd-text(p), fbd-nul(), 0) < 0);
+  def fbd-source?(p) = fnd-ends?(p, ".fk") || fnd-ends?(p, ".bml") || fnd-ends?(p, ".form");
+  def fbd-texts(paths) = paths |> map(p => [p, fbd-text(p)]);
+
+  // ---- claim 2: find ----
+  def fbd-find-specs() = [
+    ["find -F 'def fat-wire-call'", ["-n", "-F", "-e", "def fat-wire-call"], []],
+    ["find fat-wire-call", ["-n", "-E", "-e", "fat-wire-call"], []],
+    ["find 'class FormAgentGrep'", ["-n", "-E", "-e", "class FormAgentGrep"], []],
+    ["find 'preludes: form-stdlib/core.fk'", ["-n", "-E", "-e", "preludes: form-stdlib/core.fk"], []],
+    ["find 'def fag-(parse|short)\\('", ["-n", "-E", "-e", "def fag-(parse|short)\\("], []],
+    ["find '^import form-stdlib/core\\.fk;'", ["-n", "-E", "-e", "^import form-stdlib/core\\.fk;"], []],
+    ["find -w stw-files form/form-stdlib/bml", ["-n", "-E", "-w", "-e", "stw-files"], ["form/form-stdlib/bml"]],
+    ["find -F 'a.b(c)'", ["-n", "-F", "-e", "a.b(c)"], []],
+    ["find host_file_identity", ["-n", "-E", "-e", "host_file_identity"], []],
+    ["find 'cell_run\\('", ["-n", "-E", "-e", "cell_run\\("], []],
+    ["find -F -x ' class FormFind {' form/form-stdlib/bml", ["-n", "-F", "-x", "-e", " class FormFind {"], ["form/form-stdlib/bml"]],
+    ["find 'Expected: [0-9]+'", ["-n", "-E", "-e", "Expected: [0-9]+"], []],
+    ["find 'bootstrap/ground\\.fk'", ["-n", "-E", "-e", "bootstrap/ground\\.fk"], []],
+    ["find 'launchctl bootstrap'", ["-n", "-E", "-e", "launchctl bootstrap"], []],
+    ["find -m 2 FatMaxBytes", ["-n", "-E", "-m", "2", "-e", "FatMaxBytes"], []],
+    ["find form-find", ["-n", "-E", "-e", "form-find"], []],
+    ["find 'zzzz-no-such-(literal)-zzzz'", ["-n", "-E", "-e", "zzzz-no-such-(literal)-zzzz"], []],
+    ["find -F fnd-serve", ["-n", "-F", "-e", "fnd-serve"], []],
+    ["find forbidden-tool", ["-n", "-E", "-e", "forbidden-tool"], []],
+    ["find '^ class (FormFind|FormHearth|FormAgentGrep) \\{' form/form-stdlib", ["-n", "-E", "-e", "^ class (FormFind|FormHearth|FormAgentGrep) \\{"], ["form/form-stdlib"]]
+  ];
+  def fbd-find-one(s, held, spec) {
+    let paths = nil?(spec[2]) ? held : (held |> filter(p => fnd-path-ok?(p, spec[2])));
+    let want = fbd-join(stw-grep-rows(spec[1], paths));
+    let got = fbd-ask(s, spec[0]);
+    let cands = fnd-c(s, "last_cands");
+    [(String) got[1] == want && (String) got[2] == "" && (Comparable) got[0] == ((String) want == "" ? 1 : 0), (String) want == "" ? 0 : 1, cands, want];
+  }
+  def fbd-find-all(s, held) = fbd-find-specs() |> map(spec => fbd-find-one(s, held, spec));
+  // -l and -c agree with the rows of the first pattern
+  def fbd-find-forms(s, held) {
+    let rows = stw-grep-rows(["-n", "-E", "-e", "fat-wire-call"], held);
+    let paths = rows |> map(r => substring(r, 0, str_find(r, ":", 0)));
+    let uniq = foldl((acc, p) => (nil?(acc) || (String) acc[0] != p) ? cons(p, acc) : acc, [], paths);
+    let want_l = fbd-join(reverse(uniq));
+    let counts = reverse(uniq) |> map(p => p ++ ":" ++ len(filter(q => (String) q == p, paths)).str());
+    (String) fbd-out(s, "find -l fat-wire-call") == want_l && (String) fbd-out(s, "find -c fat-wire-call") == fbd-join(counts);
+  }
+
+  // ---- claim 4: defs ----
+  def fbd-names() = ["fat-wire-call", "fag-run", "stw-files", "fnd-serve", "fnd-open", "grep-text", "hearth-send", "sort-strs", "fat-call", "vtq-judge", "bsw-unit", "hch-cell-in", "fap-required", "json-emit", "fat-argv", "stw-has?", "FormHearth", "FormAgentGrep", "FatMaxBytes", "zz-no-such-name-zz"];
+  def fbd-meta?(b) = b == 46 || b == 91 || b == 93 || b == 40 || b == 41 || b == 42 || b == 43 || b == 63 || b == 123 || b == 125 || b == 124 || b == 94 || b == 36 || b == 92;
+  def fbd-esc(n) = fbd-esc-from(n, 0, "");
+  def fbd-esc-from(n, i, acc) = i >= len(n) ? acc : fbd-esc-from(n, i + 1, acc ++ (fbd-meta?(str_byte_at(n, i)) ? "\\" : "") ++ substring(n, i, i + 1));
+  def fbd-defs-regex(name) = "^[ " ++ fbd-tab() ++ "(]*(def|defn|class|field|thought) " ++ fbd-esc(name) ++ "([^A-Za-z0-9_?!*<>/+-]|$)";
+  def fbd-defs-one(s, srcheld, name) {
+    let want = fbd-join(stw-grep-rows(["-n", "-E", "-e", fbd-defs-regex(name)], srcheld));
+    let got = fbd-ask(s, "defs " ++ name);
+    [(String) got[1] == want && (String) got[2] == "", (String) want == "" ? 0 : 1];
+  }
+
+  // ---- claim 8: callers, by lines ----
+  def fbd-idc?(b) = (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || b == 45 || b == 63 || b == 33 || b == 42 || b == 60 || b == 62 || b == 47 || b == 43;
+  def fbd-bounded?(line, p, n) = (p == 0 || !fbd-idc?(str_byte_at(line, p - 1))) && (p + n >= len(line) || !fbd-idc?(str_byte_at(line, p + n)));
+  def fbd-defsite?(prefix) = (Comparable) grep-text(["-q", "-E", "-e", "^[ " ++ fbd-tab() ++ "(]*(def|defn|class|field|thought) $"], prefix)[0] == 0;
+  def fbd-line-calls?(rel, line, name, from) = str_find(line, name, from) < 0 ? false : (fbd-bounded?(line, str_find(line, name, from), len(name)) && !(fbd-source?(rel) && fbd-defsite?(substring(line, 0, str_find(line, name, from))))) ? true : fbd-line-calls?(rel, line, name, str_find(line, name, from) + 1);
+  def fbd-rows-of(rel, lines, name, no, acc) = nil?(lines) ? reverse(acc) : fbd-rows-of(rel, lines[1:], name, no + 1, fbd-line-calls?(rel, lines[0], name, 0) ? cons(rel ++ ":" ++ no.str() ++ ":" ++ lines[0], acc) : acc);
+  def fbd-file-callers(rel, text, name) = str_find(text, name, 0) < 0 ? [] : fbd-rows-of(rel, fag-lines(text), name, 1, []);
+  // each oracle reads its files just before the question is asked, so a file a sibling edits mid-band is read by both or by neither
+  def fbd-callers-one(s, held, name) {
+    let want = fbd-join(fbd-flat(fbd-texts(held) |> map(t => fbd-file-callers(t[0], t[1], name))));
+    let got = fbd-ask(s, "callers " ++ name);
+    [(String) got[1] == want && (String) got[2] == "", (String) want == "" ? 0 : 1];
+  }
+
+  // ---- claim 16: bands, by lines ----
+  def fbd-band-re(word) = "^[ " ++ fbd-tab() ++ ";/]*[;/][ " ++ fbd-tab() ++ ";/]*" ++ word;
+  def fbd-is-band?(text) = (str_find(text, "Expected:", 0) >= 0 || str_find(text, "Verdict", 0) >= 0) && (Comparable) grep-text(["-q", "-E", "-e", fbd-band-re("(Expected:|Verdict)")], text)[0] == 0;
+  def fbd-skip-blank(l, i) = i < len(l) && (str_byte_at(l, i) == 32 || str_byte_at(l, i) == 9) ? fbd-skip-blank(l, i + 1) : i;
+  def fbd-digits-end(l, i) = i < len(l) && str_byte_at(l, i) >= 48 && str_byte_at(l, i) <= 57 ? fbd-digits-end(l, i + 1) : i;
+  def fbd-digits-after(l, word) = substring(l, fbd-skip-blank(l, str_find(l, word, 0) + len(word)), fbd-digits-end(l, fbd-skip-blank(l, str_find(l, word, 0) + len(word))));
+  def fbd-first-line(text, word) {
+    let r = grep-text(["-m", "1", "-E", "-e", fbd-band-re(word)], text);
+    (Comparable) r[0] == 0 ? fag-lines(r[1])[0] : "";
+  }
+  def fbd-band-row(rel, text, name) {
+    let el = fbd-first-line(text, "Expected:");
+    let vl = fbd-first-line(text, "Verdict");
+    let k = (String) name == "" ? 0 : str_to_int(fat-trim(grep-text(["-c", "-F", "-e", name], text)[1]));
+    rel ++ " expected=" ++ ((String) el == "" ? "" : fbd-digits-after(el, "Expected:")) ++ " verdict=" ++ ((String) vl == "" ? "" : fbd-digits-after(vl, "Verdict")) ++ ((String) name == "" ? "" : " mentions=" ++ k.str());
+  }
+  def fbd-bands-one(s, bandpaths, name) {
+    let want = fbd-join(fbd-texts(bandpaths) |> filter(t => fbd-is-band?(t[1]) && ((String) name == "" || str_find(t[1], name, 0) >= 0)) |> map(t => fbd-band-row(t[0], t[1], name)));
+    let got = fbd-ask(s, (String) name == "" ? "bands" : "bands " ++ name);
+    [(String) got[1] == want && (String) got[2] == "", (String) want == "" ? 0 : 1];
+  }
+
+  // ---- claim 32: imports, by lines ----
+  def fbd-term?(b) = b == 32 || b == 9 || b == 10 || b == 13 || b == 59 || b == 44 || b == 41;
+  def fbd-tok-end(l, i) = i >= len(l) || fbd-term?(str_byte_at(l, i)) ? i : fbd-tok-end(l, i + 1);
+  def fbd-prefix-only?(l, p, allowed) = p <= 0 ? true : fbd-allowed?(str_byte_at(l, p - 1), allowed) && fbd-prefix-only?(l, p - 1, allowed);
+  def fbd-allowed?(b, allowed) = (String) allowed == "code" ? (b == 32 || b == 9 || b == 40) : (b == 32 || b == 9 || b == 59 || b == 47);
+  def fbd-mark?(l, i, p) = i >= p ? false : (str_byte_at(l, i) == 59 || str_byte_at(l, i) == 47) ? true : fbd-mark?(l, i + 1, p);
+  def fbd-comment-line?(l, p) = fbd-prefix-only?(l, p, "comment") && fbd-mark?(l, 0, p);
+  def fbd-import-raw(l) = (str_find(l, "import ", 0) >= 0 && fbd-prefix-only?(l, str_find(l, "import ", 0), "code")) ? fbd-one-raw(l, str_find(l, "import ", 0) + 7) : [];
+  def fbd-one-raw(l, i) = fbd-tok-end(l, i) > i ? [substring(l, i, fbd-tok-end(l, i))] : [];
+  def fbd-pre-raw(l) = (str_find(l, "preludes:", 0) >= 0 && fbd-comment-line?(l, str_find(l, "preludes:", 0))) ? fbd-many-raw(l, str_find(l, "preludes:", 0) + 9, []) : [];
+  def fbd-many-raw(l, i, acc) {
+    let st = fbd-skip-blank(l, i);
+    let e = fbd-tok-end(l, st);
+    e <= st ? reverse(acc) : fbd-many-raw(l, e, cons(substring(l, st, e), acc));
+  }
+  def fbd-raw-of?(raw, p) = (String) p == raw || (String) p == "form/" ++ raw || fnd-ends?(p, "/" ++ raw);
+  def fbd-own-raws(text) {
+    let lines = fag-lines(text);
+    append(fbd-flat(lines |> map(l => fbd-import-raw(l))), fbd-flat(lines |> map(l => fbd-pre-raw(l))));
+  }
+  // an importing line holds the unit's file name, so a text without it has none
+  def fbd-importer-rows(rel, text, p) = str_find(text, fnd-basename(p), 0) < 0 ? [] : fbd-imp-rows(rel, fag-lines(text), p, 1, []);
+  def fbd-imp-rows(rel, lines, p, no, acc) = nil?(lines) ? reverse(acc) : fbd-imp-rows(rel, lines[1:], p, no + 1, fbd-prepend(fbd-line-imp-rows(rel, lines[0], p, no), acc));
+  def fbd-line-imp-rows(rel, l, p, no) = filter(r => fbd-raw-of?(r, p), append(fbd-import-raw(l), fbd-pre-raw(l))) |> map(r => p ++ " <- " ++ rel ++ ":" ++ no.str() ++ ":" ++ l);
+  def fbd-prepend(rows, acc) = nil?(rows) ? acc : fbd-prepend(rows[1:], cons(rows[0], acc));
+  def fbd-resolve(files, x) {
+    let exact = filter(f => (String) f == x, files);
+    let formed = filter(f => (String) f == "form/" ++ x, files);
+    !nil?(exact) ? exact : !nil?(formed) ? formed : filter(f => fnd-ends?(f, "/" ++ x), files);
+  }
+  def fbd-imports-want(srctexts, ps) = fbd-join(fbd-flat(ps |> map(p => append(fbd-own-raws(fbd-text(p)) |> map(r => p ++ " -> " ++ r), fbd-flat(srctexts |> map(t => fbd-importer-rows(t[0], t[1], p)))))));
+  def fbd-imports-one(s, files, srcheld, x) {
+    let want = fbd-imports-want(fbd-texts(srcheld), fbd-resolve(files, x));
+    let got = fbd-ask(s, "imports " ++ x);
+    [(String) got[1] == want && (String) got[2] == "", (String) want == "" ? 0 : 1];
+  }
+
+  // ---- claim 64: rows ----
+  def fbd-rows-fixture() = "{\"file\":\"a.fk\",\"line\":3,\"kind\":\"call\",\"words\":[\"fkwu\",\"git\"],\"verdict\":\"self\",\"nested\":{\"file\":\"inner\",\"x\":[\"fkwu\"]}}\n{\"file\":\"b.fk\",\"line\":10,\"kind\":\"prim\",\"words\":[\"git\"],\"verdict\":\"exception-git\",\"cmd\":\"[\\\"./fkwu\\\",\\\"x\\\"]\"}\n{\"file\":\"a.fk\",\"line\":7,\"kind\":\"call\",\"words\":[],\"verdict\":\"self\"}\n{\"file\":\"c.fk\",\"line\":3,\"kind\":\"door\",\"words\":[\"fkwu\"],\"verdict\":\"door\",\"computed\":true}\n";
+  def fbd-row-matches?(line, field, value) {
+    let n = faj-json("form-find-band-row", line);
+    json-object-has?(n, field) && fbd-value-matches?(json-object-get(n, field), value);
+  }
+  def fbd-value-matches?(v, value) = (String) faj-type(v) == "string" ? (String) node_value(v) == value : (String) faj-type(v) == "array" ? any?(c => (String) faj-type(c) == "string" && (String) node_value(c) == value, node_children(v)) : (String) faj-type(v) == "number" || (String) faj-type(v) == "boolean" ? (String) json-emit(v) == value : false;
+  def fbd-rows-oracle(text, field, value) = fbd-join(fag-lines(text) |> filter(l => fbd-row-matches?(l, field, value)));
+  def fbd-rows-check(fx, text, field, value) = (String) fbd-out(fx, "rows rows.jsonl " ++ field ++ "=" ++ value) == fbd-rows-oracle(text, field, value);
+
+  // ---- claim 256: the fixture tree ----
+  def fbd-exists?(p) = (Comparable) host_path_exists(p) == 1;
+  def fbd-base() = temp_dir() ++ "/form-find-band-" ++ host_pid().str();
+  def fbd-put(rel, text) = write_file_text(fbd-base() ++ "/" ++ rel, text);
+  def fbd-fixture() {
+    let b = fbd-base();
+    let z0 = fs_rmdir(b);
+    let z1 = fs_mkdir(b);
+    let z2 = fs_mkdir(b ++ "/sub");
+    let z3 = fs_mkdir(b ++ "/build");
+    let z4 = fs_mkdir(b ++ "/t");
+    let z5 = fbd-put(".gitignore", "ignored.txt\nbuild/\n");
+    let z6 = fbd-put("a.fk", "(defn alpha (x) x)\n");
+    let z7 = fbd-put("b.bml", "// preludes: a.fk\nimport a.fk;\nsection [form.bml] {\n def beta(x) = alpha(x);\n}\n");
+    let z8 = fbd-put("notes.txt", "alpha beta\n");
+    let z9 = fbd-put("sub/c.bml", "def gamma() = 1;\n");
+    let z10 = fbd-put("ignored.txt", "alpha hidden\n");
+    let z11 = fbd-put("build/x.txt", "alpha built\n");
+    let z12 = write_file_bytes(b ++ "/bin.dat", [65, 0, 66]);
+    let z13 = fbd-put("long.txt", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n");
+    let z14 = fbd-put("t/x-band.fk", "; Expected: 7\n; Verdict 7\n(do 1)\n");
+    let z15 = fbd-put("rows.jsonl", fbd-rows-fixture());
+    let s = fnd-new(b);
+    let z16 = record_set(s, "maxheld", 128);
+    fnd-build(s);
+  }
+  def fbd-paths(s) = record_get(s, "rels") |> sort-strs;
+  def fbd-held-rels(s) = record_get(s, "held") |> map(h => h[1]);
+  def fbd-fixture-first(fx) {
+    let files_ok = fbd-same(fbd-paths(fx), [".gitignore", "a.fk", "b.bml", "bin.dat", "long.txt", "notes.txt", "rows.jsonl", "sub/c.bml", "t/x-band.fk"]);
+    let held_ok = fbd-same(fbd-held-rels(fx), [".gitignore", "a.fk", "b.bml", "notes.txt", "sub/c.bml", "t/x-band.fk"]);
+    let reads_ok = (Comparable) fnd-c(fx, "reads") == 7;
+    let defs_ok = (String) fbd-out(fx, "defs alpha") == "a.fk:1:(defn alpha (x) x)\n" && (String) fbd-out(fx, "defs beta") == "b.bml:4: def beta(x) = alpha(x);\n";
+    let callers_ok = (String) fbd-out(fx, "callers alpha") == "b.bml:4: def beta(x) = alpha(x);\nnotes.txt:1:alpha beta\n";
+    let bands_ok = (String) fbd-out(fx, "bands") == "t/x-band.fk expected=7 verdict=7\n";
+    let imports_ok = (String) fbd-out(fx, "imports a.fk") == "a.fk <- b.bml:1:// preludes: a.fk\na.fk <- b.bml:2:import a.fk;\n" && (String) fbd-out(fx, "imports b.bml") == "b.bml -> a.fk\nb.bml -> a.fk\n";
+    let find_ok = (String) fbd-out(fx, "find alpha") == "a.fk:1:(defn alpha (x) x)\nb.bml:4: def beta(x) = alpha(x);\nnotes.txt:1:alpha beta\n" && (String) fbd-out(fx, "find -F zzzzzzzz") == "";
+    let z = fbd-say("fixture-first", [files_ok, held_ok, reads_ok, defs_ok, callers_ok, bands_ok, imports_ok, find_ok]);
+    files_ok && held_ok && reads_ok && defs_ok && callers_ok && bands_ok && imports_ok && find_ok;
+  }
+  // a modified file, an added one (and one an ignore rule names), a removed one
+  def fbd-fixture-changes(fx) {
+    let z0 = fbd-sleep();
+    let quiet = fnd-refresh(fx);
+    let reads0 = fnd-c(fx, "reads");
+    let z1 = fbd-put("a.fk", "(defn alpha2 (x) x)\n(defn delta (y) y)\n");
+    let c1 = fnd-refresh(fx);
+    let m_ok = (Comparable) quiet == 0 && (Comparable) c1 == 1 && (Comparable) fnd-c(fx, "reads") == reads0 + 1 && (String) fbd-out(fx, "defs alpha") == "" && (String) fbd-out(fx, "defs alpha2") == "a.fk:1:(defn alpha2 (x) x)\n" && (String) fbd-out(fx, "defs delta") == "a.fk:2:(defn delta (y) y)\n" && (String) fbd-out(fx, "find delta") == "a.fk:2:(defn delta (y) y)\n" && (String) fbd-out(fx, "find alpha") == "a.fk:1:(defn alpha2 (x) x)\nb.bml:4: def beta(x) = alpha(x);\nnotes.txt:1:alpha beta\n";
+    let z2 = fbd-sleep();
+    let z3 = fbd-put("sub/d.bml", "def epsilon() = alpha(1);\n");
+    let z4 = fbd-put("sub/ignored.txt", "alpha sub-ignored\n");
+    let reads1 = fnd-c(fx, "reads");
+    let c2 = fnd-refresh(fx);
+    let a_ok = (Comparable) c2 == 1 && (Comparable) fnd-c(fx, "reads") == reads1 + 1 && (String) fbd-out(fx, "callers alpha") == "b.bml:4: def beta(x) = alpha(x);\nnotes.txt:1:alpha beta\nsub/d.bml:1:def epsilon() = alpha(1);\n" && (String) fbd-out(fx, "defs epsilon") == "sub/d.bml:1:def epsilon() = alpha(1);\n" && !fbd-has(fbd-out(fx, "find sub-ignored"), "sub/");
+    let z5 = fbd-sleep();
+    let z6 = host_path_remove(fbd-base() ++ "/notes.txt");
+    let reads2 = fnd-c(fx, "reads");
+    let c3 = fnd-refresh(fx);
+    let r_ok = (Comparable) c3 == 1 && (Comparable) fnd-c(fx, "reads") == reads2 && (String) fbd-out(fx, "callers alpha") == "b.bml:4: def beta(x) = alpha(x);\nsub/d.bml:1:def epsilon() = alpha(1);\n" && (String) fbd-out(fx, "find alpha") == "a.fk:1:(defn alpha2 (x) x)\nb.bml:4: def beta(x) = alpha(x);\nsub/d.bml:1:def epsilon() = alpha(1);\n";
+    let z7 = fbd-sleep();
+    let z8 = fs_mkdir(fbd-base() ++ "/sub/deep");
+    let z9 = fbd-put("sub/deep/e.bml", "def zeta() = 2;\n");
+    let reads3 = fnd-c(fx, "reads");
+    let c4 = fnd-refresh(fx);
+    let d_ok = (Comparable) c4 >= 1 && (Comparable) fnd-c(fx, "reads") == reads3 + 1 && (String) fbd-out(fx, "defs zeta") == "sub/deep/e.bml:1:def zeta() = 2;\n";
+    let z10 = fbd-sleep();
+    let z11 = fbd-put(".gitignore", "ignored.txt\nbuild/\nd.bml\n");
+    let c5 = fnd-refresh(fx);
+    let g_ok = (Comparable) c5 == 1 && (String) fbd-out(fx, "defs epsilon") == "" && (String) fbd-out(fx, "callers alpha") == "b.bml:4: def beta(x) = alpha(x);\n" && (String) fbd-out(fx, "defs zeta") == "sub/deep/e.bml:1:def zeta() = 2;\n";
+    let z12 = fbd-say("fixture-changes", [m_ok, a_ok, r_ok, d_ok, g_ok]);
+    m_ok && a_ok && r_ok && d_ok && g_ok;
+  }
+  def fbd-fixture-rows(fx) {
+    let text = fbd-rows-fixture();
+    let first = fbd-rows-check(fx, text, "file", "a.fk") && fbd-rows-check(fx, text, "words", "fkwu") && fbd-rows-check(fx, text, "line", "3") && fbd-rows-check(fx, text, "kind", "call") && fbd-rows-check(fx, text, "computed", "true") && fbd-rows-check(fx, text, "file", "inner") && fbd-rows-check(fx, text, "file", "none");
+    let hist = (String) fbd-out(fx, "rows rows.jsonl verdict") == "door\t1\nexception-git\t1\nself\t2\n" && (String) fbd-out(fx, "rows rows.jsonl") == "4 rows\n";
+    let nonvac = (String) fbd-out(fx, "rows rows.jsonl words=fkwu") != "" && (String) fbd-out(fx, "rows rows.jsonl file=a.fk") != "" && (Comparable) fbd-ask(fx, "rows rows.jsonl file=none")[0] == 1;
+    let reads0 = fnd-c(fx, "reads");
+    let z = fbd-sleep();
+    let grown = text ++ "{\"file\":\"d.fk\",\"line\":9,\"kind\":\"call\",\"words\":[\"fkwu\"],\"verdict\":\"self\"}\n";
+    let w = fbd-put("rows.jsonl", grown);
+    let again = fbd-rows-check(fx, grown, "words", "fkwu") && fbd-rows-check(fx, grown, "kind", "call") && (Comparable) fnd-c(fx, "reads") == reads0 + 1 && (String) fbd-out(fx, "rows rows.jsonl") == "5 rows\n";
+    let z2 = fbd-say("rows", [first, hist, nonvac, again]);
+    first && hist && nonvac && again;
+  }
+
+  // ---- claim 512 and 16384: refusals, tools, the wire's shape ----
+  def fbd-refused?(r, fragment) = (Comparable) r[0] == 2 && (String) r[1] == "" && fbd-has(r[2], fragment);
+  def fbd-tools(fx) {
+    let unknown = fbd-refused?(fbd-ask(fx, "frobnicate x"), "unknown-command: frobnicate");
+    let edit = fbd-refused?(fbd-ask(fx, "edit a.fk old new"), "form-find-reads-only") && fbd-refused?(fbd-ask(fx, "write n.txt held"), "form-find-reads-only");
+    let nolit = fbd-refused?(fbd-ask(fx, "find -i alpha"), "find-needs-a-literal-or-paths") && fbd-refused?(fbd-ask(fx, "find '[a-z]+'"), "find-needs-a-literal-or-paths");
+    let shape = fbd-refused?(fbd-ask(fx, "find"), "find-needs-pattern") && fbd-refused?(fbd-ask(fx, "find -A 2 alpha"), "find-context-not-supported") && fbd-refused?(fbd-ask(fx, "rg alpha"), "use find") && fbd-refused?(fbd-ask(fx, "find -Z alpha"), "unsupported-find-option") && fbd-refused?(fbd-ask(fx, "find 'a(' sub"), "find:");
+    let pipe = fbd-refused?(fbd-ask(fx, "find alpha | head"), "shell-syntax-not-supported");
+    let bad = fbd-refused?(fbd-decode(fnd-serve(fx, "{\"command\":")), "invalid-wire-json") && fbd-refused?(fbd-decode(fnd-serve(fx, "[1]")), "wire-request-needs-object") && fbd-refused?(fbd-decode(fnd-serve(fx, "{\"input\":\"x\"}")), "wire-field-required:command");
+    let read = (String) fbd-out(fx, "read a.fk") == "(defn alpha2 (x) x)\n(defn delta (y) y)\n" && (String) fbd-out(fx, "head -n 1 a.fk") == "(defn alpha2 (x) x)\n" && (String) fbd-out(fx, "rg -nH delta a.fk") == "a.fk:2:(defn delta (y) y)\n";
+    let wc = (String) fbd-out(fx, "wc -l b.bml") == "5\n" && (String) fbd-out(fx, "rg -nH beta b.bml") == "b.bml:4: def beta(x) = alpha(x);\n";
+    let absent = fbd-refused?(fbd-ask(fx, "cat nope.txt"), "resident-document-not-found") && fbd-refused?(fbd-ask(fx, "read long.txt"), "resident-document-not-found");
+    let z = fbd-say("tools", [unknown, edit, nolit, shape, pipe, bad, read, wc, absent]);
+    unknown && edit && nolit && shape && pipe && bad && read && wc && absent;
+  }
+  def fbd-shape(fx) {
+    let answers = [fbd-ask(fx, "defs beta"), fbd-ask(fx, "status"), fbd-ask(fx, "refresh"), fbd-ask(fx, "find nothing-here-anywhere"), fbd-ask(fx, "frobnicate")];
+    let schema = all?(r => (String) r[3] == "form-agent-tool-wire-v1" && (Comparable) r[4] == 0, answers);
+    let keys = all?(r => fbd-has(r[5], "\"documents\":[]") && fbd-has(r[5], "\"exit\":") && fbd-has(r[5], "\"stderr\":") && fbd-has(r[5], "\"stdout\":"), answers);
+    let req = "{\"command\":\"rg -nF 'alpha 1'\",\"documents\":[{\"id\":\"source:alpha\",\"path\":\"alpha.txt\",\"text\":\"alpha 1\\nbeta 2\\n\"}]}";
+    let through = (String) fnd-serve(fx, req) == (String) fat-wire-call(req) && (String) fbd-decode(fnd-serve(fx, req))[1] == "alpha.txt:1:alpha 1\n";
+    let status = fbd-has(fbd-out(fx, "status"), "files=") && fbd-has(fbd-out(fx, "status"), "held=") && fbd-has(fbd-out(fx, "refresh"), "refreshed:");
+    let z = fbd-say("shape", [schema, keys, through, status]);
+    schema && keys && through && status;
+  }
+
+  // ---- claims 1024 and 8192: the spool and the loop, in process ----
+  def fbd-spool() = fbd-base() ++ "-spool";
+  def fbd-spool-claim(fx) {
+    let sp = fbd-spool();
+    let z0 = fs_rmdir(sp);
+    let z1 = fs_mkdir(sp);
+    let req = fbd-request("defs beta");
+    let z2 = write_file_text(sp ++ "/ask.1.json", req);
+    let z3 = write_file_text(sp ++ "/ask.2.json", "{\"comm");
+    let n1 = fnd-poll(fx, sp);
+    let ans1 = fbd-text(sp ++ "/ans.1.json");
+    let first = (Comparable) n1 == 1 && (String) ans1 == (String) fnd-serve(fx, req) && !fbd-exists?(sp ++ "/ask.1.json") && fbd-exists?(sp ++ "/ask.2.json") && !fbd-exists?(sp ++ "/ans.2.json") && !fbd-exists?(sp ++ "/ans.1.json.part");
+    let z4 = host_utimes(sp ++ "/ask.2.json", now_unix_ms() - 5000);
+    let n2 = fnd-poll(fx, sp);
+    let ans2 = fbd-decode(fbd-text(sp ++ "/ans.2.json"));
+    let second = (Comparable) n2 == 1 && fbd-refused?(ans2, "invalid-wire-json") && !fbd-exists?(sp ++ "/ask.2.json");
+    let z5 = fnd-beat(fx, sp);
+    let beat = faj-json("form-find-band-beat", fbd-text(sp ++ "/status.json"));
+    let beaten = (String) node_value(json-object-get(beat, "service")) == "form-find" && (Comparable) node_value(json-object-get(beat, "pid")) == host_pid() && fbd-has(node_value(json-object-get(beat, "status")), "files=");
+    let z6 = fbd-say("spool", [first, second, beaten]);
+    first && second && beaten;
+  }
+  def fbd-loop-claim(fx) {
+    let sp = fbd-spool();
+    let req = fbd-request("defs zeta");
+    let z0 = write_file_text(sp ++ "/ask.3.json", req);
+    let z1 = write_file_text(sp ++ "/stop", "x");
+    let ended = fnd-loop(fx, sp, host_monotonic_ms(), host_monotonic_ms());
+    let answered = (String) fbd-text(sp ++ "/ans.3.json") == (String) fnd-serve(fx, req);
+    let z2 = fbd-say("loop", [ended, answered, fbd-exists?(sp ++ "/stop"), fbd-exists?(sp ++ "/ask.3.json")]);
+    (Comparable) ended == 0 && answered && !fbd-exists?(sp ++ "/stop") && !fbd-exists?(sp ++ "/ask.3.json");
+  }
+
+  // ---- the five timed questions ----
+  // the unindexed answers read the files afresh, as an agent's scan would; the indexed ones come from an index opened for the purpose, so
+  // "first" is the first question that index has been asked (it builds the postings that question needs) and "warm" the same question again
+  def fbd-time-questions(held, srcheld, files) {
+    let s = fnd-open("");
+    let t0 = host_monotonic_ms();
+    let u1 = fbd-join(stw-grep-rows(["-n", "-E", "-e", fbd-defs-regex("fat-wire-call")], srcheld));
+    let t1 = host_monotonic_ms();
+    let u2 = fbd-join(fbd-flat(fbd-texts(held) |> map(t => fbd-file-callers(t[0], t[1], "fat-wire-call"))));
+    let t2 = host_monotonic_ms();
+    let u3 = fbd-join(stw-grep-rows(["-n", "-F", "-e", "def fat-wire-call"], held));
+    let t3 = host_monotonic_ms();
+    let u4 = fbd-join(fbd-texts(srcheld) |> filter(t => fbd-is-band?(t[1]) && str_find(t[1], "fat-wire-call", 0) >= 0) |> map(t => fbd-band-row(t[0], t[1], "fat-wire-call")));
+    let t4 = host_monotonic_ms();
+    let u5 = fbd-imports-want(fbd-texts(srcheld), fbd-resolve(files, "form-stdlib/bml/form-agent-grep.bml"));
+    let t5 = host_monotonic_ms();
+    let cmds = ["defs fat-wire-call", "callers fat-wire-call", "find -F 'def fat-wire-call'", "bands fat-wire-call", "imports form-stdlib/bml/form-agent-grep.bml"];
+    let firsts = cmds |> map(c => fbd-timed(s, c));
+    let warms = cmds |> map(c => fbd-timed(s, c));
+    let unindexed = [t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4];
+    let z = fbd-say("timing-ms-unindexed-first-warm", [cmds, unindexed, firsts |> map(x => x[0]), warms |> map(x => x[0])]);
+    let same = (String) warms[0][1] == u1 && (String) warms[1][1] == u2 && (String) warms[2][1] == u3 && (String) warms[3][1] == u4 && (String) warms[4][1] == u5;
+    let faster = fbd-all([0, 1, 2, 3, 4] |> map(i => warms[i][0] * 5 < unindexed[i]));
+    [same, faster];
+  }
+  def fbd-timed(s, cmd) {
+    let t0 = host_monotonic_ms();
+    let a = fbd-ask(s, cmd);
+    [fbd-ms(t0), a[1]];
+  }
+
+  def fbd-run() {
+    let tstart = host_monotonic_ms();
+    let s = fnd-open("");
+    let build_ms = fnd-c(s, "build_ms");
+    let tw = host_monotonic_ms();
+    let files = stw-files();
+    let walk_ms = fbd-ms(tw);
+    let held = fbd-held-paths(files);
+    let srcheld = held |> filter(p => fbd-source?(p));
+    let z0 = fbd-say("index", ["files", fnd-c(s, "files"), "held", fnd-c(s, "heldfiles"), "bytes", fnd-c(s, "bytes"), "defs", fnd-c(s, "defs"), "imports", fnd-c(s, "imps"), "bands", fnd-c(s, "bands"), "build_ms", build_ms, "independent_walk_ms", walk_ms]);
+    // 1
+    let paths_same = fbd-same(fbd-held-rels(s), held);
+    let b1 = fbd-bit(paths_same && (Comparable) fnd-c(s, "files") >= 1500 && (Comparable) fnd-c(s, "defs") > 10000 && (Comparable) fnd-c(s, "imps") > 1000 && (Comparable) fnd-c(s, "bands") > 100 && (Comparable) build_ms > 0, 1);
+    // 2
+    let fr = fbd-find-all(s, held);
+    let z2 = fbd-say("find", [fr |> map(r => r[0]), fr |> map(r => r[2]), "held", len(held)]);
+    let forms_ok = fbd-find-forms(s, held);
+    let literal_cands = [fr[0][2], fr[1][2], fr[2][2], fr[3][2], fr[6][2], fr[8][2], fr[17][2]];
+    let narrowed = all?(c => (Comparable) c * 2 < len(held), literal_cands);
+    let b2 = fbd-bit(fbd-all(fr |> map(r => r[0])) && (Comparable) fbd-count(fr |> map(r => (Comparable) r[1] == 1)) >= 14 && narrowed && forms_ok, 2);
+    // 4
+    let dr = fbd-names() |> map(n => fbd-defs-one(s, srcheld, n));
+    let z4 = fbd-say("defs", [dr |> map(r => r[0]), dr |> map(r => r[1])]);
+    let b4 = fbd-bit(fbd-all(dr |> map(r => r[0])) && (Comparable) fbd-count(dr |> map(r => (Comparable) r[1] == 1)) >= 15, 4);
+    // 8
+    let cr = fbd-names() |> map(n => fbd-callers-one(s, held, n));
+    let z8 = fbd-say("callers", [cr |> map(r => r[0]), cr |> map(r => r[1])]);
+    let b8 = fbd-bit(fbd-all(cr |> map(r => r[0])) && (Comparable) fbd-count(cr |> map(r => (Comparable) r[1] == 1)) >= 14, 8);
+    // 16
+    let bandpaths = srcheld |> filter(p => fbd-is-band?(fbd-text(p)));
+    let br = append([""], fbd-names()) |> map(n => fbd-bands-one(s, bandpaths, n));
+    let z16 = fbd-say("bands", [br |> map(r => r[0]), br |> map(r => r[1])]);
+    let b16 = fbd-bit(fbd-all(br |> map(r => r[0])) && (Comparable) fbd-count(br |> map(r => (Comparable) r[1] == 1)) >= 6, 16);
+    // 32
+    let ir = ["form-stdlib/core.fk", "form-stdlib/bml/form-agent-grep.bml", "form-stdlib/bml/source-tree.bml", "form-stdlib/json.fk", "form/form-stdlib/bml/form-find.bml", "form-stdlib/hearth.bml","form-stdlib/bml/form-agent-tool-wire.bml", "form-stdlib/zzz-none.fk"] |> map(x => fbd-imports-one(s, files, srcheld, x));
+    let z32 = fbd-say("imports", [ir |> map(r => r[0]), ir |> map(r => r[1])]);
+    let b32 = fbd-bit(fbd-all(ir |> map(r => r[0])) && (Comparable) fbd-count(ir |> map(r => (Comparable) r[1] == 1)) >= 6, 32);
+    // 128: the real tree, a touched file
+    let plist = "docs/launchd/earth.hati.form-find.plist";
+    let q0 = fnd-refresh(s);
+    let r0 = fnd-c(s, "reads");
+    let quiet_ok = (Comparable) fnd-c(s, "reads") == r0;
+    let touched = host_utimes(plist, now_unix_ms() - 12345);
+    let c1 = fnd-refresh(s);
+    let r1 = fnd-c(s, "reads");
+    let c2 = fnd-refresh(s);
+    let inc_ok = quiet_ok && (Comparable) touched == 0 && (Comparable) c1 >= 1 && (Comparable) r1 - r0 == c1 && (Comparable) c2 == 0 && (Comparable) fnd-c(s, "reads") == r1;
+    let z128 = fbd-say("incremental", ["quiet-changed", q0, "touched", touched, "changed", c1, "reads-delta", r1 - r0, "next", c2, "refresh_ms", fnd-c(s, "refresh_ms")]);
+    let b128 = fbd-bit(inc_ok, 128);
+    // 256, 64 (rows), 512, 16384, 1024, 8192: the fixture
+    let fx = fbd-fixture();
+    let f1 = fbd-fixture-first(fx);
+    let f2 = fbd-fixture-changes(fx);
+    let b256 = fbd-bit(f1 && f2, 256);
+    let rows_ok = fbd-fixture-rows(fx);
+    let b64 = fbd-bit(rows_ok, 64);
+    let tools_ok = fbd-tools(fx);
+    let b512 = fbd-bit(tools_ok, 512);
+    let shape_ok = fbd-shape(fx);
+    let b16384 = fbd-bit(shape_ok, 16384);
+    let sp_ok = fbd-spool-claim(fx);
+    let b1024 = fbd-bit(sp_ok, 1024);
+    let lp_ok = fbd-loop-claim(fx);
+    let b8192 = fbd-bit(lp_ok, 8192);
+    // 2048: five questions, and the cold door
+    let tq = fbd-time-questions(held, srcheld, files);
+    let tc = host_monotonic_ms();
+    let cold = fbd-decode(fnd-cold(fbd-request("defs fat-wire-call")));
+    let cold_ms = fbd-ms(tc);
+    let warm = fbd-ask(s, "defs fat-wire-call");
+    let cold_ok = (String) cold[1] == (String) warm[1] && (String) cold[1] != "";
+    let z2048 = fbd-say("cold-door-ms", [cold_ms, "warm-ms", fnd-c(s, "refresh_ms"), cold_ok, tq]);
+    let b2048 = fbd-bit(tq[0] && tq[1] && cold_ok, 2048);
+    // 4096: nothing begun; the plist is data
+    let src = fbd-text("form/form-stdlib/bml/form-find.bml") ++ fbd-text("observe/form-find-run.fk") ++ fbd-text("observe/form-find-ask.bml");
+    let begun = filter(t => fbd-has(src, t), ["host_spawn", "host_capture", "host-exec", "host_wait"]);
+    let pl = fbd-text(plist);
+    let plist_ok = fbd-has(pl, "<key>Label</key><string>earth.hati.form-find</string>") && fbd-has(pl, "<string>./fkwu</string>") && fbd-has(pl, "<string>observe/form-find-run.fk</string>") && fbd-has(pl, "<key>WorkingDirectory</key>") && fbd-has(pl, "<key>KeepAlive</key>") && fbd-has(pl, "<key>ThrottleInterval</key>") && fbd-has(pl, "<key>FORM_FIND_SPOOL</key>") && fbd-has(pl, "<key>StandardErrorPath</key>");
+    let z4096 = fbd-say("source", [len(src), begun, plist_ok]);
+    let b4096 = fbd-bit((Comparable) len(src) > 10000 && (Comparable) len(begun) == 0 && plist_ok, 4096);
+    let rm1 = fs_rmdir(fbd-base());
+    let rm2 = fs_rmdir(fbd-spool());
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024 + b2048 + b4096 + b8192 + b16384;
+    let zt = fbd-say("form-find-band-ms", fbd-ms(tstart));
+    let shown = print(["form-find-band", "verdict", verdict]);
+    verdict;
+  }
+  fbd-run();
+}
