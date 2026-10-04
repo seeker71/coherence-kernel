@@ -1,0 +1,164 @@
+//////////////////////////////////////////////////////////////////////
+// voice-track.bml — a track rendered by the body, kept alive by the body.
+//
+// Two jobs that were shell scripts the first time, and are Form now.
+//
+// THE WORKER renders the pieces of one tongue (.hearth/voice-track/<tongue>-chunks.txt) with the body's own
+// mouth: phonemes from the body's tables (voice-g2p.bml — no process, no oracle), ids from the voice's own
+// table, the whole VITS on this Mac's metal, the samples written beside it as .hearth/voice-track/pcm-<tongue>/
+// NNNN.pcm. A piece whose words the body has not been taught is not guessed at: it gets an NNNN.untaught
+// marker holding its text, and the track reports it. A piece already rendered is not rendered again, so a
+// worker the host cut short resumes where it stopped.
+//
+// THE SUPERVISOR spawns the worker and watches one thing: whether pieces keep arriving. The GPU wait wedges
+// now and then (the process sits in an uninterruptible state at 0% CPU; two clients at once make it likely, one
+// client at a time almost never), and a wedged worker looks exactly like a busy one except that nothing
+// lands. When nothing has landed for `VTRIdleMs` the worker is killed and spawned again; it resumes. The
+// supervisor is done when every piece has its sound or its marker.
+//
+// THE GPU LEASE (gpu-lease.bml, /tmp/form-gpu.lock, machine-wide) is held by the WORKER and only the worker: vtr-leased-work takes
+// it before the voice opens and gives it back when the worker is done. The supervisor never holds it. A worker that
+// is killed (or that dies) leaves its lease standing with a dead owner, and the respawned worker takes it over and
+// says so; a supervisor holding the lease across that respawn would make every worker wait on its own parent.
+//////////////////////////////////////////////////////////////////////
+import form/form-stdlib/voice-say.bml;
+import form/form-stdlib/voice-master.bml;
+import form/form-stdlib/gpu-lease.bml;
+section [form.bml] {
+    class FormVoiceTrack {
+        field VTRDir = ".hearth/voice-track";
+        field VTRIdleMs = 150000;
+        field VTRPollMs = 10000;
+        field VTRTermMs = 5000;
+        field VTRTries = 60;
+        field VTRBatch = 100000;
+        def vtr-pcm-dir(code) = vg-cat([VTRDir(), "/pcm-", code]);
+        def vtr-stem(code, i) = vg-cat([vtr-pcm-dir(code), "/", (1000 + i).str()]);
+        def vtr-chunks(code) = vg-drop-empty(split-on(read_file(vg-cat([VTRDir(), "/", code, "-chunks.txt"])), vg-nl()));
+        // a slower voice than the page's own: how long each tongue is drawn out (VITS length scale)
+        def vtr-scale(code) = if ((String) code == "en") then 1.65 else 1.6;
+        // ---- the worker ----
+        def vtr-one(st, cfg, ltab, wtab, mtab, code, i, text) {
+            let heard = vg-phonemes(ltab, wtab, mtab, text);
+            let ids = if (nothing?(heard)) then [] else if ((Comparable) len(heard) == 0) then [] else vp-ids(cfg, heard);
+            if ((Comparable) len(ids) == 0) then vtr-mark-untaught(code, i, text) else vtr-sound(st, code, i, ids);
+        }
+        def vtr-mark-untaught(code, i, text) {
+            let w = write_file(vg-cat([vtr-stem(code, i), ".untaught"]), text);
+            print_str(vg-cat([code, " ", i.str(), " untaught"]));
+            0;
+        }
+        // A render allocates its intermediate tensors on the device; the pass entered every one in its ledger and
+        // vv-release gives them back once the samples are read, so the carrier's count of live buffers is the same
+        // after piece 1 and piece 1000 (voice-pass-leak-band.fk). Before the ledger the pass freed none, and after
+        // ~160 renders in one process the allocations answered empty and a render read as zero samples — silently,
+        // and the first track wrote those as empty files and called them done (found 2026-10-03). The batch cap and
+        // the exit-and-respawn stay as a safety net, and an empty rendering is still never written down.
+        def vtr-sound(st, code, i, ids) {
+            let o = vv-render(st, ids, vtr-scale(code));
+            let pcm = vv-pcm(st, o);
+            vtr-landed-after(vv-release(st), code, i, pcm);
+        }
+        // the release's answer is read here, never dropped: a piece is written only after its buffers are given back
+        def vtr-landed-after(left, code, i, pcm) = if (left < 0) then form_error("voice-track: the release answered a refusal") else if ((Comparable) len(pcm) == 0) then vtr-silent(code, i) else vtr-write(code, i, pcm);
+        def vtr-silent(code, i) {
+            print_str(vg-cat([code, " ", i.str(), " rendered no samples"]));
+            0;
+        }
+        def vtr-write(code, i, pcm) {
+            let w = write_file(vg-cat([vtr-stem(code, i), ".pcm"]), pcm);
+            print_str(vg-cat([code, " ", i.str(), " ", len(pcm).str()]));
+            1;
+        }
+        def vtr-have?(code, i) = if (file_size(vg-cat([vtr-stem(code, i), ".pcm"])) > 0) then 1 else if (file_size(vg-cat([vtr-stem(code, i), ".untaught"])) >= 0) then 1 else 0;
+        def vtr-walk(st, cfg, ltab, wtab, mtab, code, i, xs, budget) {
+            if ((Comparable) len(xs) == 0) then 0
+                else if ((Comparable) budget <= 0) then 0
+                else vtr-walk-step(st, cfg, ltab, wtab, mtab, code, i, xs, budget, if ((Comparable) vtr-have?(code, i) == 1) then 0 else vtr-one(st, cfg, ltab, wtab, mtab, code, i, xs[0]));
+        }
+        def vtr-walk-step(st, cfg, ltab, wtab, mtab, code, i, xs, budget, rendered) = vtr-walk(st, cfg, ltab, wtab, mtab, code, (i + 1), xs[1:], (budget - rendered));
+        def vtr-work(code) {
+            let made = fs-mkdir(vtr-pcm-dir(code));
+            let name = vs-voice(code);
+            let cfg = vp-cfg(name);
+            let st = vv-open(vp-model-path(name));
+            if ((Comparable) vv-open-ok?(st) == 0) then print_str(vg-cat([code, " voice does not open natively: ", vv-open-why(st)]))
+                else vtr-walk(st, cfg, vg-load(code, "line"), vg-load(code, "word"), vg-load(code, "model"), code, 0, vtr-chunks(code), VTRBatch());
+        }
+        // the worker's whole run under the GPU lease; a refused take stops the worker aloud before the device opens
+        def vtr-leased-work(code) {
+            let lease = gpu-lease-door-held("voice-track-worker");
+            let w = vtr-work(code);
+            let gave = gpu-lease-door-end(lease);
+            w;
+        }
+        // ---- the pieces as WAV, for the ear: the master's own header in front of the samples ----
+        def vtr-wav-one(code, i) {
+            let p = vg-cat([vtr-stem(code, i), ".pcm"]);
+            let pcm = if (file_size(p) > 0) then read_file(p) else "";
+            if ((Comparable) len(pcm) == 0) then 0 else vtr-wav-write(code, i, pcm);
+        }
+        def vtr-wav-write(code, i, pcm) {
+            let w = write_file(vg-cat([vtr-stem(code, i), ".wav"]), vg-cat([vmm-wav-header(22050, (len(pcm) / 2)), pcm]));
+            1;
+        }
+        def vtr-wav-go(code, i, n, done) = if (i >= n) then done else vtr-wav-go(code, (i + 1), n, (done + vtr-wav-one(code, i)));
+        def vtr-wav-all(code) = vtr-wav-go(code, 0, len(vtr-chunks(code)), 0);
+        // ---- the supervisor ----
+        // a piece has landed when its file holds something (an untaught marker holds the text that was refused)
+        def vtr-count-go(dir, names, n) = if ((Comparable) len(names) == 0) then n else vtr-count-go(dir, names[1:], if (file_size(vg-cat([dir, "/", names[0]])) > 0) then (n + 1) else n);
+        def vtr-landed(code) = vtr-count-go(vtr-pcm-dir(code), fs-list(vtr-pcm-dir(code)), 0);
+        def vtr-done?(code) = if ((Comparable) vtr-landed(code) >= len(vtr-chunks(code))) then 1 else 0;
+        def vtr-request(code) = write_file(vg-cat([VTRDir(), "/worker.request"]), code);
+        def vtr-spawn(code) {
+            let r = vtr-request(code);
+            host_spawn_at(["./fkwu", "observe/voice-track-worker-run.fk"], ["/dev/null", vg-cat([VTRDir(), "/worker-", code, ".log"]), vg-cat([VTRDir(), "/worker-", code, ".err"])]);
+        }
+        // watch one worker: returns when it exits or when nothing has landed for VTRIdleMs (it is killed then)
+        def vtr-watch(code, pid, last, idle) {
+            let slept = host_sleep_ms(VTRPollMs());
+            if ((Comparable) host_alive(pid) != 1) then vtr-reap(pid, 0)
+                else vtr-watch-step(code, pid, last, idle, vtr-landed(code));
+        }
+        def vtr-watch-step(code, pid, last, idle, now) {
+            if ((Comparable) now != last) then vtr-watch(code, pid, now, 0)
+                else if ((Comparable) (idle + VTRPollMs()) >= VTRIdleMs()) then vtr-reap(pid, 1)
+                else vtr-watch(code, pid, last, (idle + VTRPollMs()));
+        }
+        def vtr-reap(pid, wedged) {
+            let k = if ((Comparable) wedged == 1) then vtr-end(pid) else 0;
+            let w = host_wait(pid);
+            wedged;
+        }
+        // A wedged worker is asked to end (SIGTERM) and, if it has not gone in VTRTermMs, ended (SIGKILL): a process
+        // stuck in the GPU wait answers only SIGKILL, and the wait that follows would otherwise never return.
+        // Its GPU lease stays behind with a dead owner; the next worker takes it over (gpu-lease.bml).
+        // SIGKILL goes through the host_signal door, the seed's own syscall; no foreign program is run to send it.
+        def vtr-end(pid) {
+            let t = host_kill(pid);
+            vtr-escalate(pid);
+        }
+        // the grace window and what follows it: the worker has VTRTermMs to go, then it is ended with SIGKILL
+        def vtr-escalate(pid) = vtr-term-wait(pid, VTRTermMs());
+        def vtr-term-wait(pid, left) = if ((Comparable) host_alive(pid) != 1) then 0 else if (left <= 0) then vtr-kill9(pid) else vtr-term-poll(pid, left);
+        def vtr-term-poll(pid, left) {
+            let s = host_sleep_ms(250);
+            vtr-term-wait(pid, (left - 250));
+        }
+        // SIGKILL for one process: 0 sent, -1 the host refused (it is gone), -2 never a pid of ours
+        def vtr-kill9(pid) = host_signal(pid, 9);
+        // Whether this fkwu carries the host_signal door. A binary without it names the missing binding when the file is
+        // lowered and answers nothing for the call; pid 0 is refused by the door (-2) and signals no process, so asking
+        // costs nothing. A run that would reach for SIGKILL hours from now asks first.
+        def vtr-door?() = if (nothing?(host_signal(0, 9))) then 0 else 1;
+        def vtr-door-missing() = form_error("voice-track: this fkwu has no host_signal door (runtime/fkwu-uni.c, host door mode 33); rebuild it: cc -O2 -o fkwu.new runtime/fkwu-uni.c && mv fkwu.new fkwu");
+        // run a tongue to the end; the count of wedges it took is the answer. The door is asked once, before any worker is born.
+        def vtr-supervise(code, tries, wedges) = if ((Comparable) vtr-door?() == 0) then vtr-door-missing() else vtr-supervise-go(code, tries, wedges);
+        def vtr-supervise-go(code, tries, wedges) {
+            if ((Comparable) vtr-done?(code) == 1) then wedges
+                else if ((Comparable) tries >= VTRTries()) then (0 - 1)
+                else vtr-supervise-go(code, (tries + 1), (wedges + vtr-watch(code, vtr-spawn(code), vtr-landed(code), 0)));
+        }
+    }
+    0;
+}
