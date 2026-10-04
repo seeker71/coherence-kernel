@@ -698,6 +698,9 @@ plainly once, and give the conversation your attention.
    retain per-row or per-stage transitions whenever available. Never record private prompt/answer content in
    the framebuffer. The executable protocol, quick witness, integration example, and honest boundaries live in
    [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
+   A process that dies by a signal is never silent: the seed writes its own organ-health row (frames, cell in flight, C chain) to stderr and
+   `.hearth/fatal-signal.jsonl` before it ends, a stack that ends is a `stopped` `"stack-depth"` with frames, and
+   `local-flow-review` hears the rows as attention (`docs/live-dynamic-diagnostics.md`, "A process that dies by a signal says so").
 9. **Use diagnostics where they clarify the next choice.** Read the actual exit
    and diagnostics alongside a cell's result. A green tally with compile errors
    establishes no pass. For changed source or an unclear admission failure,
