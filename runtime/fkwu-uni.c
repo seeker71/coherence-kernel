@@ -9866,6 +9866,13 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
  *       ours, so it answers 1: "gone" is ESRCH and nothing else. This is the
  *       whole of what `kill -0 <pid> && printf L` was doing through a fork.
  *
+ *   host_signal pid sig   a HOST DOOR (a syscall the kernel must expose, like host_kill and host_wait): the floor, not
+ *       a core recipe, so its shrink path is none -- it is the door. kill(pid, sig) for one process, and the answer
+ *       is 0 sent, -1 the host refused (no such process, or one this user may not signal), -2 a pid or a signal this
+ *       door will not send (pid not an int above zero, sig not an int in 1..31; 0 is refused, host_alive asks that).
+ *       host_kill sent SIGTERM only; a process that does not hear it (stopped, or stuck in a device wait) was ended
+ *       through /bin/kill, a foreign program borrowed for one syscall. Mode 33 of the leaf door, a rewrite row.
+ *
  *   fs_mkfifo path   1 the fifo was made, 0 a fifo already stands there,
  *       -1 refused (the path holds something that is not a fifo, or the host
  *       said no). A ring into an absent bell leaves a one-byte REGULAR file
@@ -10116,6 +10123,23 @@ static long long fk_host_door(long long mode, long long x) {
         /* host_process pid -- see fk_host_process */
         if ((x & 1) != 0) { return (0 - 1) * 2; }
         return fk_host_process(x >> 1);
+    }
+    if (mode == 33) {
+        /* host_signal pid sig -- see the host-door notes above: 0 sent, -1 the host refused, -2 a pid or a signal this
+         * door will not send. pid is an int above zero (never 0, never a group, never -1: one process, named), sig an
+         * int in 1..31; 0 is refused because host_alive is the aliveness question and it knows a corpse from a
+         * living process. The number is the host's own: 9 (KILL) and 15 (TERM) are the same everywhere, STOP and CONT
+         * are 17 and 19 on Darwin and 19 and 18 on Linux. */
+        if ((x & 1) == 0 || fk_is_str(x)) { return (0 - 2) * 2; }
+        long long pr33 = x >> 1;
+        if (pr33 < 1 || !FK_POK(pr33)) { return (0 - 2) * 2; }
+        long long pw33 = FK_HH(pr33);
+        long long sw33 = FK_HT(pr33);
+        if (((pw33 | sw33) & 1) != 0) { return (0 - 2) * 2; }
+        long long pid33 = pw33 >> 1;
+        long long sig33 = sw33 >> 1;
+        if (pid33 <= 0 || pid33 > 2147483647 || sig33 < 1 || sig33 > 31) { return (0 - 2) * 2; }
+        return kill((int)pid33, (int)sig33) == 0 ? 0 : (0 - 1) * 2;
     }
     if (mode != 17) { return fk_nothing; }
     /* host_spawn_at (cons argv redirects) */
@@ -12193,7 +12217,13 @@ static int fk_f64_inline_try(long long i, long long t, long long callee, long lo
      * order, whether the callee reads it or not; an inline holds to that by taking only arguments that are pure expressions
      * of the frame. An argument with a call, or one that does not admit by itself, leaves the call to the call arm, which
      * evaluates every argument once. (Found 2026-10-03: a recipe hot past FK_F64_HEAT dropped `(pe-nx (pe-layer ...) ...)`'s
-     * argument because pe-nx never read its first parameter -- the appends inside pe-layer stopped.) */
+     * argument because pe-nx never read its first parameter -- the appends inside pe-layer stopped.)
+     * SHRINK PATH (this guard belongs to the lane the standing goal moves out of the kernel): the contract is now written in
+     * Form -- form/form-stdlib/bml/anf-lower.bml binds every argument, in order, before its call row -- and
+     * tests/arg-order-lane-parity-band.fk compares the effect order of the cold walker, the Form evaluator and this hot lane
+     * (it reads 8164 on a binary without this guard and 8191 with it). When a Form-built page owns hot recipes (shadow
+     * install, heat event, install door, call ABI, then flipping the default) fk_f64_inline_try and this lane are deleted,
+     * and the guard with them. */
     {
         int effectful = 0, admitted = 1;
         k = 0;
@@ -16839,7 +16869,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * mode 23: host_process -- see fk_host_process; mode 24: kernel_page_ended -- see fk_page_bury;
          * mode 25: value_str -- see fk_value_str; modes 26-27: read_file_bytes,
          * write_file_bytes -- the raw byte file doors, see fk_fb_door; modes 29-32: the stage
-         * bus (open, close, tail, name) -- see fk_bus_door; any other mode answers nothing. */
+         * bus (open, close, tail, name) -- see fk_bus_door; mode 33: host_signal -- see fk_host_door;
+         * any other mode answers nothing. */
+        if ((fm201 >> 1) == 33) { return fk_host_door(33, fx201); }
         if ((fm201 >> 1) >= 29 && (fm201 >> 1) <= 32) { return fk_bus_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 26) { return fk_fb_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) == 25) { return fk_value_str(fx201); }

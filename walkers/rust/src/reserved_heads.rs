@@ -90,6 +90,7 @@ pub(crate) const FKWU_RESERVED_HEADS: &[&str] = &[
     "host_pid",
     "host_process",
     "host_processes",
+    "host_signal",
     "host_sleep_ms",
     "host_source_inventory",
     "host_spawn",
