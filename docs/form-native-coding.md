@@ -354,9 +354,14 @@ checkpoints and model context. Guard, read, mutation and verification metadata
 extend those cells directly. Context admission binds their existing graphs;
 it no longer decodes a record and builds a second workspace graph. The checkpoint
 codec distinguishes a held observation cell from a list value and verifies its
-supported record/list/scalar shape before retention. Existing text checkpoints
-remain readable. Text-only diagnostics and public callers use the note's text
-view; the live tool-to-model path carries the cell itself.
+supported record/list/scalar shape before retention. Unsupported cells return
+through owned persistence refusal. A tool's structured `value` keeps its graph
+and scalar types through admission and retention; data strings are not decoded
+as diagnostic envelopes. Native `jq` carries its zero, one or many query results
+as an array cell alongside its compatibility text. Existing text checkpoints remain readable. Text-only
+diagnostics and public callers use the note's text view; the live tool-to-model
+path carries the cell itself. Checkpoint integrity still hashes canonical text;
+removing that encoding remains a native codec improvement.
 
 The north star is a model choosing and returning executable native recipes and
 cells, with Form retaining context, ownership, observations and verification.
