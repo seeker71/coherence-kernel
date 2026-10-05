@@ -244,7 +244,34 @@ section [form.bml] {
    let freed = q38-free-state(sts);
    qsr-say("plain decode, ms per " ++ c.str() ++ " tokens, from position " ++ len(ids).str() ++ ": " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", ms));
   }
+  // how exact is the check? the plain decode's own head value (the winning logit's bits) at every position, against the value the check
+  // computed for the same position in a span: equal words say the check reproduced the decode bit for bit there
+  def qsr-plain-go(ctx, sts, id, pos, k, said, vals) = k <= 0 ? [said, vals] : {
+   let nid = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], id, pos);
+   let vb = metal_buf_read(nth(ctx[1], 32), 0, 4);
+   qsr-plain-go(ctx, sts, nid, pos + 1, k - 1, append(said, [nid]), append(vals, [ln-u32-le(vb, 0)]));
+  };
+  def qsr-cmp-go(a, b, i, same, diff) = i >= len(a) ? [same, diff] : (a[i] == b[i] ? qsr-cmp-go(a, b, i + 1, same + 1, diff) : qsr-cmp-go(a, b, i + 1, same, append(diff, [[i, ln-f32-decode(a[i]), ln-f32-decode(b[i])]])));
+  def qsr-bits(ctx, qs, sx, ids, n, k) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let a = qsr-plain-go(ctx, sts, r[0], len(ids), n, [], []);
+   let freed = q38-free-state(sts);
+   let sts2 = q38-new-state(ctx[2]);
+   let r2 = q38s-prefill(ctx, qs, sts2, sx, ids);
+   let g = q38s-generate(ctx, qs, sts2, sx, ids, r2[0], k, n, 0);
+   let freed2 = q38-free-state(sts2);
+   let c = qsr-cmp-go(a[1], g[3], 0, 0, []);
+   qsr-say("k=" ++ k.str() ++ ": " ++ n.str() ++ " positions, ids " ++ ((String) qsr-idstr(a[0]) == qsr-idstr(g[0]) ? "IDENTICAL" : "DIFFER") ++ ", winning-logit words equal at " ++ c[0].str() ++ ", differ at " ++ len(c[1]).str() ++ (len(c[1]) == 0 ? "" : " (position, decode, check): " ++ foldl((acc, d) => acc ++ "(" ++ d[0].str() ++ " " ++ d[1].str() ++ " " ++ d[2].str() ++ ") ", "", c[1])));
+  }
+  def qsr-bits-open(ctx, qs, ids, n, k) {
+   let sx = q38s-open(ctx, k, len(ids));
+   let w = qsr-bits(ctx, qs, sx, ids, n, k);
+   let closed = q38s-close(sx);
+   1;
+  }
   def qsr-measure(ctx, qs, ids, mode, n, k, ph, kmin, rounds) {
+   (String) mode == "bits" ? qsr-bits-open(ctx, qs, ids, n, k) :
    (String) mode == "drift" ? qsr-drift(ctx, ids, 8, 12) :
    (String) mode == "mvk" ? qsr-mvk(ctx, qs, ids) : (String) mode == "spec" ? qsr-spec-open(ctx, qs, ids, n, k, ph, kmin, rounds) : (String) mode == "blocks" ? qsr-blocks-open(ctx, qs, ids, k + 1) : qsr-say("no such mode: " ++ mode);
   }
