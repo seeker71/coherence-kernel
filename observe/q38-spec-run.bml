@@ -5,7 +5,7 @@
 //                                                           the small-batch matvec against the lane's wide matvec on real activations
 // stdin, one JSON line, all optional: go, mode, span (64), file, prompt.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-spec.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-spec.fk form-stdlib/bml/qwen38-spec-witness.bml
 section [form.bml] {
  class Q38SpecRun {
   def qsr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
@@ -144,20 +144,24 @@ section [form.bml] {
    let sts = q38-new-state(ctx[2]);
    let r = q38s-prefill(ctx, qs, sts, sx, ids);
    let t0 = host_monotonic_ms();
-   let g = q38s-generate(ctx, qs, sts, sx, ids, r[0], k, n, phased);
+   let g = q38s-generate-a(ctx, qs, sts, sx, ids, r[0], k < 0 ? 0 - k : k, n, phased, k < 0 ? 1 : 0);
    let t1 = host_monotonic_ms();
    let freed = q38-free-state(sts);
    [g[0], t1 - t0, g[1], r[0], g[2]];
   }
-  def qsr-hits(stats, j, k) = j > k ? "" : "p" ++ j.str() ++ " " ++ ((stats[8 + j] * 100) / (stats[0] <= 0 ? 1 : stats[0])).str() ++ "%  " ++ qsr-hits(stats, j + 1, k);
+  // a negative k asks for the adaptive policy with at most -k drafts a step
+  def qsr-kmax(k) = k < 0 ? 0 - k : k;
+  def qsr-klabel(k) = k < 0 ? "adaptive<=" ++ (0 - k).str() : k.str();
+  // the share of the steps that tried draft position j and took it
+  def qsr-hits(stats, j, kmax) = j > kmax ? "" : "p" ++ j.str() ++ " " ++ ((stats[8 + j] * 100) / (stats[8 + kmax + j] <= 0 ? 1 : stats[8 + kmax + j])).str() ++ "% of " ++ stats[8 + kmax + j].str() ++ "  " ++ qsr-hits(stats, j + 1, kmax);
   def qsr-trace(tr) = foldl((acc, t) => acc ++ t[0].str() ++ ":" ++ t[1].str() ++ ":" ++ t[2].str() ++ ":" ++ t[3].str() ++ " ", "", tr);
   def qsr-report(label, a, b, n, k) {
    let sa = qsr-idstr(a[0]);
    let sb = qsr-idstr(b[0]);
    let st = b[2];
    let steps = st[0] <= 0 ? 1 : st[0];
-   qsr-say(label ++ " k=" ++ k.str() ++ " first token " ++ a[2].str() ++ "/" ++ b[3].str() ++ ": ids " ++ ((String) sa == sb ? "IDENTICAL" : "DIFFER") ++ "; plain " ++ n.str() ++ " tokens in " ++ a[1].str() ++ " ms = " ++ (qsr-rate10(n, a[1]) / 10).str() ++ "." ++ (qsr-rate10(n, a[1]) % 10).str() ++ " tok/s; spec " ++ (qsr-rate10(n, b[1]) / 10).str() ++ "." ++ (qsr-rate10(n, b[1]) % 10).str() ++ " tok/s in " ++ b[1].str() ++ " ms = " ++ (b[1] <= 0 ? 0 : (a[1] * 100) / b[1]).str() ++ " percent of the plain speed");
-   qsr-say(label ++ " steps " ++ st[0].str() ++ ", tokens per step " ++ ((n * 100) / steps).str() ++ "/100; acceptance " ++ qsr-hits(st, 1, k) ++ "; per step: host before wait " ++ (st[1] / steps).str() ++ " ms, wait " ++ (st[2] / steps).str() ++ " ms; sections (phased) restore " ++ (st[3] / steps).str() ++ ", catch-up+draft " ++ (st[4] / steps).str() ++ ", chain " ++ (st[5] / steps).str() ++ ", check " ++ (st[6] / steps).str() ++ " ms; device busy " ++ (st[7] / steps).str() ++ " ms and " ++ (st[8] / steps).str() ++ " dispatches a step (plain: " ++ (a[3] / n).str() ++ " ms and " ++ (a[4] / n).str() ++ " dispatches a token)");
+   qsr-say(label ++ " k=" ++ qsr-klabel(k) ++ " first token " ++ a[2].str() ++ "/" ++ b[3].str() ++ ": ids " ++ ((String) sa == sb ? "IDENTICAL" : "DIFFER") ++ "; plain " ++ n.str() ++ " tokens in " ++ a[1].str() ++ " ms = " ++ (qsr-rate10(n, a[1]) / 10).str() ++ "." ++ (qsr-rate10(n, a[1]) % 10).str() ++ " tok/s; spec " ++ (qsr-rate10(n, b[1]) / 10).str() ++ "." ++ (qsr-rate10(n, b[1]) % 10).str() ++ " tok/s in " ++ b[1].str() ++ " ms = " ++ (b[1] <= 0 ? 0 : (a[1] * 100) / b[1]).str() ++ " percent of the plain speed");
+   qsr-say(label ++ " steps " ++ st[0].str() ++ ", tokens per step " ++ ((n * 100) / steps).str() ++ "/100; acceptance " ++ qsr-hits(st, 1, qsr-kmax(k)) ++ "; per step: host before wait " ++ (st[1] / steps).str() ++ " ms, wait " ++ (st[2] / steps).str() ++ " ms; sections (phased) restore " ++ (st[3] / steps).str() ++ ", catch-up+draft " ++ (st[4] / steps).str() ++ ", chain " ++ (st[5] / steps).str() ++ ", check " ++ (st[6] / steps).str() ++ " ms; device busy " ++ (st[7] / steps).str() ++ " ms and " ++ (st[8] / steps).str() ++ " dispatches a step (plain: " ++ (a[3] / n).str() ++ " ms and " ++ (a[4] / n).str() ++ " dispatches a token)");
    qsr-say(label ++ " trace accepted:step ms:device busy ms:host-before-wait ms " ++ qsr-trace(b[4]));
    (String) sa == sb ? 1 : qsr-say(label ++ " spec ids: " ++ sb);
   }
@@ -166,7 +170,7 @@ section [form.bml] {
   def qsr-short(label, a, b, n, kk) {
    let st = b[2];
    let steps = st[0] <= 0 ? 1 : st[0];
-   qsr-say(label ++ " k=" ++ kk.str() ++ ": ids " ++ ((String) qsr-idstr(a[0]) == qsr-idstr(b[0]) ? "IDENTICAL" : "DIFFER") ++ "; plain " ++ (qsr-rate10(n, a[1]) / 10).str() ++ "." ++ (qsr-rate10(n, a[1]) % 10).str() ++ " tok/s, spec " ++ (qsr-rate10(n, b[1]) / 10).str() ++ "." ++ (qsr-rate10(n, b[1]) % 10).str() ++ " tok/s = " ++ (b[1] <= 0 ? 0 : (a[1] * 100) / b[1]).str() ++ " percent; " ++ st[0].str() ++ " steps, " ++ ((n * 100) / steps).str() ++ "/100 tokens a step, acceptance " ++ qsr-hits(st, 1, kk) ++ " step " ++ (b[1] / steps).str() ++ " ms (host before wait " ++ (st[1] / steps).str() ++ ")");
+   qsr-say(label ++ " k=" ++ qsr-klabel(kk) ++ ": ids " ++ ((String) qsr-idstr(a[0]) == qsr-idstr(b[0]) ? "IDENTICAL" : "DIFFER") ++ "; plain " ++ (qsr-rate10(n, a[1]) / 10).str() ++ "." ++ (qsr-rate10(n, a[1]) % 10).str() ++ " tok/s, spec " ++ (qsr-rate10(n, b[1]) / 10).str() ++ "." ++ (qsr-rate10(n, b[1]) % 10).str() ++ " tok/s = " ++ (b[1] <= 0 ? 0 : (a[1] * 100) / b[1]).str() ++ " percent; " ++ st[0].str() ++ " steps, " ++ ((n * 100) / steps).str() ++ "/100 tokens a step, acceptance " ++ qsr-hits(st, 1, qsr-kmax(kk)) ++ " step " ++ (b[1] / steps).str() ++ " ms (host before wait " ++ (st[1] / steps).str() ++ ")");
    b[1] <= 0 ? 0 : (a[1] * 100) / b[1];
   }
   // rounds pairs of (plain, speculative) back to back at k drafts: the ratio of each pair, and their median
@@ -178,7 +182,7 @@ section [form.bml] {
   };
   def qsr-ab(ctx, qs, sx, ids, n, kk, kmax, rounds) = kk > kmax ? 1 : {
    let ratios = qsr-rounds(ctx, qs, sx, ids, n, kk, rounds, []);
-   qsr-say("k=" ++ kk.str() ++ " median of " ++ rounds.str() ++ " pairs: " ++ qsr-median(ratios).str() ++ " percent of the plain speed (" ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", ratios) ++ ")");
+   qsr-say("k=" ++ qsr-klabel(kk) ++ " median of " ++ rounds.str() ++ " pairs: " ++ qsr-median(ratios).str() ++ " percent of the plain speed (" ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", ratios) ++ ")");
    qsr-ab(ctx, qs, sx, ids, n, kk + 1, kmax, rounds);
   };
   def qsr-spec(ctx, qs, sx, ids, n, k, phased, kmin, rounds) {
@@ -186,7 +190,13 @@ section [form.bml] {
    let w2 = qsr-specrun(ctx, qs, sx, ids, n, k, 0);
    qsr-say("warm-up done (weights paged in, pipelines built); plain ids: " ++ qsr-idstr(w1[0]));
    let ab = qsr-ab(ctx, qs, sx, ids, n, kmin, k, rounds);
-   phased == 1 ? qsr-phased(ctx, qs, sx, ids, n, k) : 1;
+   let adaptive = (phased == 2) || (phased == 3) ? qsr-ab-adapt(ctx, qs, sx, ids, n, k, rounds) : 1;
+   (phased == 1) || (phased == 3) ? qsr-phased(ctx, qs, sx, ids, n, k) : 1;
+  }
+  // phased: 1 adds a phase-timed run, 2 adds the adaptive policy (at most k drafts) against the plain decode, 3 both
+  def qsr-ab-adapt(ctx, qs, sx, ids, n, k, rounds) {
+   let ratios = qsr-rounds(ctx, qs, sx, ids, n, 0 - k, rounds, []);
+   qsr-say("k=" ++ qsr-klabel(0 - k) ++ " median of " ++ rounds.str() ++ " pairs: " ++ qsr-median(ratios).str() ++ " percent of the plain speed (" ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", ratios) ++ ")");
   }
   def qsr-phased(ctx, qs, sx, ids, n, k) {
    let a2 = qsr-plain(ctx, ids, n);
@@ -215,21 +225,30 @@ section [form.bml] {
    let lf = qsr-first-full(0, geo);
    let full = nth(lays, lf);
    let snp = nth(sx[9], 0);
-   let reps = 24;
-   let a1 = qsr-block("decode ffn (1 token, wide matvec)", reps, () => q38-ffn(ps, bs, geo, lin));
-   let a2 = qsr-block("decode linear-attn (1 token)", reps, () => q38-linear-attn(ps, bs, geo, lin, nth(sts, 0)));
-   let a3 = qsr-block("decode full-attn (1 token) at " ++ pos.str(), reps, () => q38-full-attn(ps, bs, geo, full, nth(sts, lf), pos));
-   let b1 = qsr-block("spec ffn ntok " ++ ntok.str(), reps, () => q38s-ffn-span(ps, qs, bs, geo, lin, ntok));
-   let b2 = qsr-block("spec linear-attn ntok " ++ ntok.str() ++ " (snapshots)", reps, () => q38s-linear-attn-span(ps, qs, bs, geo, lin, nth(sts, 0), snp, ntok));
-   let b3 = qsr-block("spec full-attn ntok " ++ ntok.str(), reps, () => q38s-full-attn-span(ps, qs, bs, geo, full, nth(sts, lf), pos, ntok));
-   let c1 = qsr-block("lane ffn-span ntok " ++ ntok.str() ++ " (mm64)", reps, () => q38-ffn-span(ps, bs, geo, lin, ntok));
-   let c2 = qsr-block("lane linear-attn-span ntok " ++ ntok.str() ++ " (mm64, no snapshots)", reps, () => q38-linear-attn-span(ps, bs, geo, lin, nth(sts, 0), ntok));
-   let c3 = qsr-block("lane full-attn-span ntok " ++ ntok.str() ++ " (mm64)", reps, () => q38-full-attn-span(ps, bs, geo, full, nth(sts, lf), pos, ntok));
-   let d1 = qsr-block("check head ntok " ++ ntok.str() ++ ": output_norm span, mvk vocab, argmax", 8, () => q38s-head-check(ctx, qs, sx, ntok));
-   let d2 = qsr-block("decode head (1 token): norm, wide matvec vocab, argmax", 8, () => q38-head(ps, bs, geo, ctx[5], ctx[6]));
+   let variants = [
+    ["decode ffn (1 token, wide matvec)", 24, () => q38-ffn(ps, bs, geo, lin)],
+    ["decode linear-attn (1 token)", 24, () => q38-linear-attn(ps, bs, geo, lin, nth(sts, 0))],
+    ["decode full-attn (1 token) at " ++ pos.str(), 24, () => q38-full-attn(ps, bs, geo, full, nth(sts, lf), pos)],
+    ["check ffn ntok " ++ ntok.str(), 24, () => q38s-ffn-span(ps, qs, bs, geo, lin, ntok)],
+    ["check linear-attn ntok " ++ ntok.str() ++ " WITH snapshots", 24, () => q38s-linear-attn-span-s(ps, qs, bs, geo, lin, nth(sts, 0), snp, ntok, 1)],
+    ["check linear-attn ntok " ++ ntok.str() ++ " without snapshots (the lane's recurrence kernels)", 24, () => q38s-linear-attn-span-s(ps, qs, bs, geo, lin, nth(sts, 0), snp, ntok, 0)],
+    ["check full-attn ntok " ++ ntok.str() ++ " (decode-exact attention)", 24, () => q38s-full-attn-span(ps, qs, bs, geo, full, nth(sts, lf), pos, ntok)],
+    ["lane full-attn-span ntok " ++ ntok.str() ++ " (mm64, the lane's span attention)", 24, () => q38-full-attn-span(ps, bs, geo, full, nth(sts, lf), pos, ntok)],
+    ["decode head (1 token): norm, wide matvec vocab, argmax", 8, () => q38-head(ps, bs, geo, ctx[5], ctx[6])],
+    ["check head ntok " ++ ntok.str() ++ ": output_norm span, mvk vocab, argmax", 8, () => q38s-head-check(ctx, qs, sx, ntok)]
+   ];
+   let r = qsr-racelist(variants, 5, len(variants) * 0, []);
    let freed = q38-free-state(sts);
    1;
   }
+  // every variant timed in turn, round after round (the GPU changes speed between seconds here); the best round of each is its reading
+  def qsr-round(vs, acc) = len(vs) == 0 ? acc : qsr-round(vs[1:], append(acc, [qsr-ms(vs[0][1], vs[0][2])]));
+  def qsr-mins(rows, i, n, acc) = i >= n ? acc : qsr-mins(rows, i + 1, n, append(acc, [qsr-min(foldl((a, row) => append(a, [row[i]]), [], rows), 1000000)]));
+  def qsr-racelist(vs, rounds, unused, rows) = rounds <= 0 ? qsr-report-race(vs, qsr-mins(rows, 0, len(vs), [])) : qsr-racelist(vs, rounds - 1, unused, append(rows, [qsr-round(vs, [])]));
+  def qsr-report-race(vs, best) = len(vs) == 0 ? 1 : {
+   qsr-say("race best-of-rounds: " ++ vs[0][0] ++ ": " ++ ((best[0] * 1000) / vs[0][1]).str() ++ " us each");
+   qsr-report-race(vs[1:], best[1:]);
+  };
   // does the plain decode slow down as it runs (clocks, position)? chunks of c tokens, the ms of each
   def qsr-drift-go(ctx, sts, id, pos, c, left, acc) = left <= 0 ? acc : {
    let t0 = host_monotonic_ms();
@@ -246,23 +265,9 @@ section [form.bml] {
   }
   // how exact is the check? the plain decode's own head value (the winning logit's bits) at every position, against the value the check
   // computed for the same position in a span: equal words say the check reproduced the decode bit for bit there
-  def qsr-plain-go(ctx, sts, id, pos, k, said, vals) = k <= 0 ? [said, vals] : {
-   let nid = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], id, pos);
-   let vb = metal_buf_read(nth(ctx[1], 32), 0, 4);
-   qsr-plain-go(ctx, sts, nid, pos + 1, k - 1, append(said, [nid]), append(vals, [ln-u32-le(vb, 0)]));
-  };
-  def qsr-cmp-go(a, b, i, same, diff) = i >= len(a) ? [same, diff] : (a[i] == b[i] ? qsr-cmp-go(a, b, i + 1, same + 1, diff) : qsr-cmp-go(a, b, i + 1, same, append(diff, [[i, ln-f32-decode(a[i]), ln-f32-decode(b[i])]])));
   def qsr-bits(ctx, qs, sx, ids, n, k) {
-   let sts = q38-new-state(ctx[2]);
-   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
-   let a = qsr-plain-go(ctx, sts, r[0], len(ids), n, [], []);
-   let freed = q38-free-state(sts);
-   let sts2 = q38-new-state(ctx[2]);
-   let r2 = q38s-prefill(ctx, qs, sts2, sx, ids);
-   let g = q38s-generate(ctx, qs, sts2, sx, ids, r2[0], k, n, 0);
-   let freed2 = q38-free-state(sts2);
-   let c = qsr-cmp-go(a[1], g[3], 0, 0, []);
-   qsr-say("k=" ++ k.str() ++ ": " ++ n.str() ++ " positions, ids " ++ ((String) qsr-idstr(a[0]) == qsr-idstr(g[0]) ? "IDENTICAL" : "DIFFER") ++ ", winning-logit words equal at " ++ c[0].str() ++ ", differ at " ++ len(c[1]).str() ++ (len(c[1]) == 0 ? "" : " (position, decode, check): " ++ foldl((acc, d) => acc ++ "(" ++ d[0].str() ++ " " ++ d[1].str() ++ " " ++ d[2].str() ++ ") ", "", c[1])));
+   let w = q38sw-compare(ctx, qs, sx, ids, n, k);
+   qsr-say("k=" ++ k.str() ++ ": " ++ n.str() ++ " positions, ids " ++ (w[0] == 1 ? "IDENTICAL" : "DIFFER") ++ ", winning-logit words equal at " ++ w[1].str() ++ ", differ at " ++ w[2].str() ++ (w[2] == 0 ? "" : " (position, decode, check): " ++ q38sw-differ-text(w[6])) ++ "; " ++ q38sw-steps(w[3]).str() ++ " steps");
   }
   def qsr-bits-open(ctx, qs, ids, n, k) {
    let sx = q38s-open(ctx, k, len(ids));
@@ -273,11 +278,16 @@ section [form.bml] {
   def qsr-measure(ctx, qs, ids, mode, n, k, ph, kmin, rounds) {
    (String) mode == "bits" ? qsr-bits-open(ctx, qs, ids, n, k) :
    (String) mode == "drift" ? qsr-drift(ctx, ids, 8, 12) :
-   (String) mode == "mvk" ? qsr-mvk(ctx, qs, ids) : (String) mode == "spec" ? qsr-spec-open(ctx, qs, ids, n, k, ph, kmin, rounds) : (String) mode == "blocks" ? qsr-blocks-open(ctx, qs, ids, k + 1) : qsr-say("no such mode: " ++ mode);
+   (String) mode == "mvk" ? qsr-mvk(ctx, qs, ids) : (String) mode == "spec" ? qsr-spec-open(ctx, qs, ids, n, k, ph, kmin, rounds) : (String) mode == "blocks" ? qsr-blocks-open(ctx, qs, ids, kmin + 1, k + 1) : qsr-say("no such mode: " ++ mode);
   }
-  def qsr-blocks-open(ctx, qs, ids, ntok) {
-   let sx = q38s-open(ctx, ntok, len(ids));
+  def qsr-blocks-loop(ctx, qs, sx, ids, ntok, last) = ntok > last ? 1 : {
+   qsr-say("---- span of " ++ ntok.str() ++ " tokens (" ++ (ntok - 1).str() ++ " drafts) ----");
    let said = qsr-blocks(ctx, qs, sx, ids, ntok);
+   qsr-blocks-loop(ctx, qs, sx, ids, ntok + 1, last);
+  };
+  def qsr-blocks-open(ctx, qs, ids, first, last) {
+   let sx = q38s-open(ctx, last, len(ids));
+   let looped = qsr-blocks-loop(ctx, qs, sx, ids, first, last);
    let closed = q38s-close(sx);
    1;
   }

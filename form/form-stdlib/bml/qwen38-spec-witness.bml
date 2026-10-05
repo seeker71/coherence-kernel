@@ -1,0 +1,41 @@
+// qwen38-spec-witness.bml — the witness that speculative decoding says what the plain greedy decode says.
+//
+// One call (q38sw-compare) runs the plain decode and the speculative one from fresh states over the same prompt ids and compares them
+// three ways: the ids; the bits of the winning logit at every position (the decode head's value against the value the span check
+// computed for the same position: equal words say the check reproduced the decode exactly there); and how the speculation went
+// (steps, tokens a step, which draft positions were accepted). It is shared by the probe door (observe/q38-spec-run.bml) and the band
+// (form/native/metal/tests/qwen35-dense-spec-identity-band.bml): one reading of "the same", not two.
+// preludes: form-stdlib/core.fk native/metal/qwen35-dense-spec.fk form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class Q38SpecWitness {
+  def q38sw-idstr(xs) = foldl((acc, x) => acc ++ x.str() ++ " ", "", xs);
+  // the plain decode, one position at a time: the ids and the winning logit's bits (the head leaves value and id in bs 32 and 31)
+  def q38sw-plain-go(ctx, sts, id, pos, k, said, vals) = k <= 0 ? [said, vals] : {
+   let nid = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], id, pos);
+   let vb = metal_buf_read(nth(ctx[1], 32), 0, 4);
+   q38sw-plain-go(ctx, sts, nid, pos + 1, k - 1, append(said, [nid]), append(vals, [ln-u32-le(vb, 0)]));
+  };
+  // [words equal, [position, decode value, check value] of the words that differ]
+  def q38sw-cmp-go(a, b, i, same, diff) = i >= len(a) ? [same, diff] : (a[i] == b[i] ? q38sw-cmp-go(a, b, i + 1, same + 1, diff) : q38sw-cmp-go(a, b, i + 1, same, append(diff, [[i, ln-f32-decode(a[i]), ln-f32-decode(b[i])]])));
+  // [ids identical (0/1), words equal, words that differ, speculation stats, the plain ids, the speculative ids]
+  def q38sw-compare(ctx, qs, sx, ids, n, k) = q38sw-compare-a(ctx, qs, sx, ids, n, k, 0);
+  // adapt = 1: at most k drafts a step, the policy choosing (q38s-next-k)
+  def q38sw-compare-a(ctx, qs, sx, ids, n, k, adapt) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let a = q38sw-plain-go(ctx, sts, r[0], len(ids), n, [], []);
+   let freed = q38-free-state(sts);
+   let sts2 = q38-new-state(ctx[2]);
+   let r2 = q38s-prefill(ctx, qs, sts2, sx, ids);
+   let g = q38s-generate-a(ctx, qs, sts2, sx, ids, r2[0], k, n, 0, adapt);
+   let freed2 = q38-free-state(sts2);
+   let c = q38sw-cmp-go(a[1], g[3], 0, 0, []);
+   [(String) q38sw-idstr(a[0]) == q38sw-idstr(g[0]) ? 1 : 0, c[0], len(c[1]), g[1], a[0], g[0], c[1]];
+  }
+  // how many steps accepted draft position j (stats: 0 steps, then 8 counters, then one per position)
+  def q38sw-hits(stats, j) = stats[8 + j];
+  def q38sw-steps(stats) = stats[0];
+  def q38sw-differ-text(diff) = foldl((acc, d) => acc ++ "(" ++ d[0].str() ++ " " ++ d[1].str() ++ " " ++ d[2].str() ++ ") ", "", diff);
+ }
+ 0;
+}
