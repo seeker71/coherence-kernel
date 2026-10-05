@@ -409,3 +409,53 @@ kernel void lab_mm_t64e(device const uchar* qb [[buffer(0)]], device const float
     for (uint t = trow; t < 64u; t += 2u) { uint tt = r1 + t; uint n = r0 + col; if (tt < ntok && n < rows) { y[(ulong)tt * (ulong)ystride + (ulong)n] = sm[t * 64u + col]; } }
   }
 }
+
+// ---- lab_mm_t64g256e: a 64-row x 64-token tile, 256 threads: eight simdgroups, each 32 rows x 16 tokens in eight accumulators (ggml's per-simdgroup shape,
+// 4 + 2 loads for 8 multiplies), twice the resident simdgroups of lab_mm_t64e for the same tile. Four threads a weight row / token, 8 values each.
+kernel void lab_mm_t64g256e(device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& ystride [[buffer(6)]], uint gr [[threadgroup_position_in_grid]], uint lt [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float sm[4096];
+  threadgroup float* sa = sm; threadgroup float* sb = sm + 2048;
+  uint nTok = (ntok + 63u) / 64u;
+  uint r1 = (gr % nTok) * 64u; uint r0 = (gr / nTok) * 64u;
+  uint nb = cols / 32u;
+  uint lr0 = min(lt >> 2, rows - r0 - 1u); uint q4 = lt & 3u;
+  uint lr1 = min(lt >> 2, ntok - r1 - 1u);
+  device const uchar* xrow = qb + (ulong)(r0 + lr0) * (ulong)nb * 34ul;
+  device const float* yrow = x + (ulong)(r1 + lr1) * (ulong)cols + q4 * 8u;
+  simdgroup_float8x8 ma[4]; simdgroup_float8x8 mb[2]; simdgroup_float8x8 mc[8];
+  _Pragma("clang loop unroll(full)") for (short i = 0; i < 8; i++) { mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
+  uint sy = (lt >> 2) / 8u; uint lx = (lt >> 2) % 8u;
+  for (uint kb = 0u; kb < nb; kb++) {
+    device const uchar* blk = xrow + (ulong)kb * 34ul;
+    ushort hh = (ushort)blk[0] | ((ushort)blk[1] << 8); float dd = float(as_type<half>(hh));
+    device const uchar* qs = blk + 2u + q4 * 8u;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    _Pragma("clang loop unroll(full)") for (short i = 0; i < 8; i++) {
+      sa[64u * (8u * q4 + sy) + 8u * (uint)i + lx] = dd * float((char)qs[i]);
+    }
+    { device const float4* yp = (device const float4*)(yrow + (ulong)kb * 32ul);
+      float4 v0 = yp[0]; float4 v1 = yp[1];
+      *(threadgroup float4*)(sb + 64u * (8u * q4 + sy) + 8u * lx) = v0;
+      *(threadgroup float4*)(sb + 64u * (8u * q4 + sy) + 8u * lx + 4u) = v1; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup const float* lsma = sa + 4 * 64 * (sg & 1u);
+    threadgroup const float* lsmb = sb + 2 * 64 * (sg >> 1);
+    _Pragma("clang loop unroll(full)") for (short ik = 0; ik < 4; ik++) {
+      _Pragma("clang loop unroll(full)") for (short i = 0; i < 4; i++) { simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false); }
+      _Pragma("clang loop unroll(full)") for (short i = 0; i < 2; i++) { simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false); }
+      _Pragma("clang loop unroll(full)") for (short i = 0; i < 8; i++) { simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]); }
+      lsma += 8 * 64; lsmb += 8 * 64;
+    }
+  }
+  if (r0 + 64u <= rows && r1 + 64u <= ntok) {
+    device float* C = y + (r0 + 32u * (sg & 1u)) + (ulong)(r1 + 16u * (sg >> 1)) * (ulong)ystride;
+    _Pragma("clang loop unroll(full)") for (short i = 0; i < 8; i++) { simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * (ulong)ystride * (i / 4), ystride, 0, false); }
+  } else {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float* temp = sm + 32 * (sg & 1u) + (16 * (sg >> 1)) * 64;
+    _Pragma("clang loop unroll(full)") for (short i = 0; i < 8; i++) { simdgroup_store(mc[i], temp + 8 * (i % 4) + 8 * 64 * (i / 4), 64, 0, false); }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint col = lt & 63u; uint trow = lt >> 6;
+    for (uint t = trow; t < 64u; t += 4u) { uint tt = r1 + t; uint n = r0 + col; if (tt < ntok && n < rows) { y[(ulong)tt * (ulong)ystride + (ulong)n] = sm[t * 64u + col]; } }
+  }
+}
