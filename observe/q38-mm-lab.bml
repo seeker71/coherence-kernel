@@ -1,0 +1,187 @@
+// q38-mm-lab.bml — the matrix-multiply lab: MSL read from plain files, one factor timed at a time, no model opened.
+//
+//   echo '{"go":1}' | ./fkwu observe/q38-mm-lab.bml            the micro-kernels (micro.metal): the fp32 and fp16 FMA ceilings, the matrix
+//                                                                 unit from registers (float / half / bfloat operands), then from threadgroup memory.
+//   echo '{"go":1,"micro":0,"gemm":1}' | ./fkwu observe/q38-mm-lab.bml
+//                                                                 the Q8_0 GEMM variants of gemm.metal on synthetic weights (rows x cols) at ntok
+//                                                                 tokens, each against the first (largest gap over largest value).
+// stdin, one JSON line, all optional: go, micro (1), gemm (0), rows (17408), cols (5120), ntok (64), rounds (24), k (8), only (a kernel name).
+// The GPU is shared with the desktop's own renderers (Cursor, WindowServer, the Claude and ChatGPT apps), which pause compute kernels: one
+// reading is never a result. The gemm lane times ROUNDS rounds, each round every candidate in turn (k dispatches, one barrier between them, one
+// wait), and reports each candidate's minimum, quartile and median over the rounds: the minimum is what the kernel does with the GPU to itself.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class Q38MmLab {
+  def lab-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-mm-lab", line) : json-node-object([]);
+  }
+  def lab-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def lab-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def lab-dir() = "observe/q38-mm-lab/";
+  def lab-times(n, f) = n <= 0 ? 1 : {
+   let done = f();
+   lab-times(n - 1, f);
+  };
+  // microseconds per dispatch of pipeline p: k dispatches in one batch (bar 1: each waits for the one before)
+  def lab-time-bar(p, bufs, consts, tpg, tgmem, groups, k, bar) {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let q = lab-times(k, () => metal_enqueue(p, md-bind16(bufs, consts, tpg, tgmem, 1, bar), groups));
+   let s = metal_sync();
+   let t1 = host_monotonic_ms();
+   ((t1 - t0) * 1000) / k;
+  }
+  // the same, read from the device's own busy counter (metal_live field 11, microseconds): no millisecond clock in it
+  def lab-busy-bar(p, bufs, consts, tpg, tgmem, groups, k, bar) = lab-busy-mode(p, bufs, consts, tpg, tgmem, groups, k, bar, 1);
+  def lab-busy-mode(p, bufs, consts, tpg, tgmem, groups, k, bar, mode) {
+   metal_batch_concurrent();
+   let a = metal_live();
+   let q = lab-times(k, () => metal_enqueue(p, md-bind16(bufs, consts, tpg, tgmem, mode, bar), groups));
+   let s = metal_sync();
+   let b = metal_live();
+   (b[11] - a[11]) / k;
+  }
+  def lab-say(label, us, flop) = print_str("[q38-mm-lab] " ++ label ++ ": " ++ us.str() ++ " us a dispatch" ++ ((flop > 0) && (us > 0) ? " = " ++ (flop / us / 1000).str() ++ " GFLOP/s" : ""));
+  def lab-micro-one(src, name, bufs, iters, groups, tpg, tgmem, flopper, k) {
+   let p = metal_pipeline(src, name);
+   p <= 0 ? print_str("[q38-mm-lab] " ++ name ++ ": did not compile (pipeline " ++ p.str() ++ ")") : {
+    let rc = metal_enqueue(p, md-bind16(bufs, [iters], tpg, tgmem, 1, 0), groups);
+    let sy = metal_sync();
+    let a = lab-time-bar(p, bufs, [iters], tpg, tgmem, groups, k, 0);
+    let b = lab-time-bar(p, bufs, [iters], tpg, tgmem, groups, k, 0);
+    let c = lab-time-bar(p, bufs, [iters], tpg, tgmem, groups, k, 0);
+    let us = a < b ? (a < c ? a : c) : (b < c ? b : c);
+    lab-say("rc " ++ rc.str() ++ " " ++ name ++ " iters " ++ iters.str() ++ " groups " ++ groups.str() ++ " (best of 3)", us, flopper * iters * groups);
+   };
+  }
+  def lab-micro(k) {
+   let src = "#include <metal_stdlib>\n" ++ read_file(lab-dir() ++ "micro.metal");
+   let out = metal_buf_alloc(1048576);
+   let g = 640;
+   let it = 2000;
+   // flop per iteration per group: fma 256 threads x 8 x 2; matrix kernels 4 simdgroups x 8 mma x 1024
+   let a = lab-micro-one(src, "lab_fma", [out], it * 4, g, 256, 0, 4096, k);
+   let b = lab-micro-one(src, "lab_fma_h", [out], it * 4, g, 256, 0, 4096, k);
+   let c = lab-micro-one(src, "lab_mma_f32", [out], it, g, 128, 0, 32768, k);
+   let d = lab-micro-one(src, "lab_mma_h_f32", [out], it, g, 128, 0, 32768, k);
+   let e = lab-micro-one(src, "lab_mma_h_h", [out], it, g, 128, 0, 32768, k);
+   let f = lab-micro-one(src, "lab_mma_bf_f32", [out], it, g, 128, 0, 32768, k);
+   let h = lab-micro-one(src, "lab_tg_f32", [out], it / 4, g, 128, 0, 131072, k);
+   let i = lab-micro-one(src, "lab_tg_h_f32", [out], it / 4, g, 128, 0, 131072, k);
+   let j = lab-micro-one(src, "lab_tg_bf_f32", [out], it / 4, g, 128, 0, 131072, k);
+   let z = metal_buf_free(out);
+   1;
+  }
+  def lab-fdiff-go(a, b, i, n, maxd, maxa) = i >= n ? [maxd, maxa] : {
+   let fa = ln-f32-decode(ln-u32-le(a, i * 4));
+   let fb = ln-f32-decode(ln-u32-le(b, i * 4));
+   let d = fa > fb ? fa - fb : fb - fa;
+   let aa = fa < 0.0 ? 0.0 - fa : fa;
+   lab-fdiff-go(a, b, i + 1, n, d > maxd ? d : maxd, aa > maxa ? aa : maxa);
+  };
+  def lab-ins(x, xs) = len(xs) == 0 ? [x] : (x <= xs[0] ? cons(x, xs) : cons(xs[0], lab-ins(x, xs[1:])));
+  def lab-sort(xs) = len(xs) == 0 ? [] : lab-ins(xs[0], lab-sort(xs[1:]));
+  def lab-col(rows, i) = len(rows) == 0 ? [] : cons(nth(rows[0], i), lab-col(rows[1:], i));
+  // a candidate: [label, pipeline, bufs, consts, tpg, tgmem, groups]
+  def lab-round-list(cs, k) = len(cs) == 0 ? [] : cons(lab-busy-mode(cs[0][1], cs[0][2], cs[0][3], cs[0][4], cs[0][5], cs[0][6], k, 1, cs[0][7]), lab-round-list(cs[1:], k));
+  def lab-rounds(cs, k, r, acc) = r <= 0 ? acc : lab-rounds(cs, k, r - 1, cons(lab-round-list(cs, k), acc));
+  def lab-report(cs, rows, i, flop) = i >= len(cs) ? 1 : {
+   let s = lab-sort(lab-col(rows, i));
+   let n = len(s);
+   let mn = s[0];
+   let q1 = nth(s, n / 4);
+   let md = nth(s, n / 2);
+   let say = print_str("[q38-mm-lab] " ++ cs[i][0] ++ ": min " ++ mn.str() ++ " us (" ++ (mn <= 0 ? 0 : flop / mn / 1000).str() ++ " GFLOP/s), p25 " ++ q1.str() ++ ", median " ++ md.str() ++ ", rounds " ++ n.str());
+   lab-report(cs, rows, i + 1, flop);
+  };
+  def lab-gemm-names(only) = len(only) > 0 ? [only] : ["lab_mm_base", "lab_mm_ll"];
+  def lab-gemm-cands(src, names, qb, x, rows, cols, ntok, ntiles, ys) = len(names) == 0 ? [] : {
+   let p = metal_pipeline(src, names[0]);
+   let y = metal_buf_alloc(rows * ntok * 4);
+   cons([names[0], p, [qb, x, y], [rows, cols, ntok, rows], 128, 0, ntiles, 1], lab-gemm-cands(src, names[1:], qb, x, rows, cols, ntok, ntiles, ys));
+  };
+  def lab-gemm(rows, cols, ntok, rounds, k, only) {
+   let usrc = "#include <metal_stdlib>\n" ++ read_file(lab-dir() ++ "micro.metal");
+   let src = "#include <metal_stdlib>\n" ++ read_file(lab-dir() ++ "gemm.metal");
+   let nb = cols / 32;
+   let qb = metal_buf_alloc(rows * nb * 34 + 64);
+   let x = metal_buf_alloc(ntok * cols * 4);
+   let pf = metal_pipeline(usrc, "lab_fill_f32");
+   let pq = metal_pipeline(usrc, "lab_fill_q8");
+   let e1 = metal_enqueue(pq, md-bind16([qb], [rows * nb], 256, 0, 0, 0), rows * nb);
+   let e2 = metal_enqueue(pf, md-bind16([x], [ntok * cols], 256, 0, 0, 0), ntok * cols);
+   let s = metal_sync();
+   let flop = 2 * rows * cols * ntok;
+   let ntiles = ((ntok + 31) / 32) * ((rows + 63) / 64);
+   let said = print_str("[q38-mm-lab] gemm " ++ rows.str() ++ " x " ++ cols.str() ++ " x " ++ ntok.str() ++ " tokens, " ++ (flop / 1000000).str() ++ " MFLOP, " ++ ntiles.str() ++ " tiles");
+   let cs = lab-gemm-cands(src, lab-gemm-names(only), qb, x, rows, cols, ntok, ntiles, 0);
+   // correctness: every candidate once, compared with the first
+   let ok = lab-check(cs, 0, 2, rows * ntok);
+   let warm = lab-rounds(cs, k, 3, []);
+   let rs = lab-rounds(cs, k, rounds, []);
+   let rep = lab-report(cs, rs, 0, flop);
+   let f1 = metal_buf_free(qb);
+   let f2 = metal_buf_free(x);
+   1;
+  }
+  // run candidate i once and compare its buffer oi (nelem floats) with the first candidate's
+  def lab-check(cs, i, oi, nelem) = i >= len(cs) ? 1 : {
+   let c = cs[i];
+   let e = metal_enqueue(c[1], md-bind16(c[2], c[3], c[4], c[5], c[7], 0), c[6]);
+   let s = metal_sync();
+   let a = metal_buf_read(cs[0][2][oi], 0, nelem * 4);
+   let b = metal_buf_read(c[2][oi], 0, nelem * 4);
+   let u = lab-fdiff-go(a, b, 0, nelem, 0.0, 0.0);
+   let said = print_str("[q38-mm-lab] " ++ c[0] ++ " (pipeline " ++ c[1].str() ++ ") buffer " ++ oi.str() ++ " vs first: largest gap " ++ u[0].str() ++ " over largest value " ++ u[1].str());
+   lab-check(cs, i + 1, oi, nelem);
+  };
+  // the gated-delta recurrence of one linear-attention layer, at the model's shape (48 value heads of 128, 16 key heads of 128)
+  def lab-gdn-cand(label, p, sbuf, c, al, be, o, nv, dv, dk, nk, cstride, ntok, tpg, groups, mode) =
+   [label, p, [sbuf, c, al, be, o], [nv, dv, dk, nk, md-f32-bits(0.08838834764831845), cstride, nv, nv * dv, ntok], tpg, 0, groups, mode];
+  def lab-gdn(ntok, rounds, k) {
+   let usrc = "#include <metal_stdlib>\n" ++ read_file(lab-dir() ++ "gdn.metal");
+   let nv = 48;
+   let dv = 128;
+   let dk = 128;
+   let nk = 16;
+   let cstride = 2 * nk * dk + nv * dv;
+   let pf = metal_pipeline(usrc, "lab_fill_range");
+   let sa = metal_buf_alloc(nv * dv * dk * 4);
+   let sb = metal_buf_alloc(nv * dv * dk * 4);
+   let c = metal_buf_alloc(ntok * cstride * 4);
+   let al = metal_buf_alloc(ntok * nv * 4);
+   let be = metal_buf_alloc(ntok * nv * 4);
+   let oa = metal_buf_alloc(ntok * nv * dv * 4);
+   let ob = metal_buf_alloc(ntok * nv * dv * 4);
+   let fa = metal_enqueue(pf, md-bind16([sa], [nv * dv * dk, md-f32-bits(0.0 - 0.05), md-f32-bits(0.05)], 256, 0, 0, 0), nv * dv * dk);
+   let fb = metal_enqueue(pf, md-bind16([sb], [nv * dv * dk, md-f32-bits(0.0 - 0.05), md-f32-bits(0.05)], 256, 0, 0, 0), nv * dv * dk);
+   let fc = metal_enqueue(pf, md-bind16([c], [ntok * cstride, md-f32-bits(0.0 - 0.1), md-f32-bits(0.1)], 256, 0, 0, 0), ntok * cstride);
+   let fal = metal_enqueue(pf, md-bind16([al], [ntok * nv, md-f32-bits(0.8), md-f32-bits(1.0)], 256, 0, 0, 0), ntok * nv);
+   let fbe = metal_enqueue(pf, md-bind16([be], [ntok * nv, md-f32-bits(0.0), md-f32-bits(0.5)], 256, 0, 0, 0), ntok * nv);
+   let sy = metal_sync();
+   let po = metal_pipeline(usrc, "lab_delta_old");
+   let pn = metal_pipeline(usrc, "lab_delta_sg");
+   let cs = [lab-gdn-cand("lab_delta_old", po, sa, c, al, be, oa, nv, dv, dk, nk, cstride, ntok, 256, nv * dv, 0), lab-gdn-cand("lab_delta_sg", pn, sb, c, al, be, ob, nv, dv, dk, nk, cstride, ntok, 128, (nv * dv) / 4, 1)];
+   let said = print_str("[q38-mm-lab] gdn delta, " ++ nv.str() ++ " heads of " ++ dv.str() ++ " x " ++ dk.str() ++ ", " ++ ntok.str() ++ " tokens");
+   let chk1 = lab-check(cs, 0, 4, ntok * nv * dv);
+   let chk2 = lab-check(cs, 0, 0, nv * dv * dk);
+   let warm = lab-rounds(cs, k, 3, []);
+   let rs = lab-rounds(cs, k, rounds, []);
+   let rep = lab-report(cs, rs, 0, 0);
+   1;
+  }
+  def lab-run() {
+   let opts = lab-opts();
+   let k = lab-int(opts, "k", 8);
+   (Comparable) lab-int(opts, "go", 0) == 1 ? {
+    let m = (Comparable) lab-int(opts, "micro", 1) == 1 ? lab-micro(k) : 1;
+    let g = (Comparable) lab-int(opts, "gemm", 0) == 1 ? lab-gemm(lab-int(opts, "rows", 17408), lab-int(opts, "cols", 5120), lab-int(opts, "ntok", 64), lab-int(opts, "rounds", 24), k, lab-text(opts, "only", "")) : 1;
+    let d = (Comparable) lab-int(opts, "gdn", 0) == 1 ? lab-gdn(lab-int(opts, "ntok", 64), lab-int(opts, "rounds", 24), k) : 1;
+    print_str("[q38-mm-lab] done");
+   } : print_str("[q38-mm-lab] plan: {\"go\":1} runs the micro-kernels; add \"gemm\":1 for the Q8_0 variants");
+  }
+ }
+ lab-run();
+}

@@ -1,0 +1,144 @@
+// q38-span-profile.bml — where the device time of one prefill span goes, step by step, on the REAL model, robust to a shared GPU.
+//
+//   echo '{"go":1,"span":64}' | ./fkwu observe/q38-span-profile.bml
+//
+// Opens the Qwen context once, runs one batched prefill so every buffer and state holds real values, then times each step of a linear-attention
+// span block, of a full-attention span block and of an FFN span block ALONE: ROUNDS rounds, each round every step in turn (K dispatches of the
+// step, one barrier between them, one wait), the time read from the device's own busy counter (metal_live field 11, microseconds). It prints each
+// step's minimum over the rounds (what the kernel does with the GPU to itself), the lower quartile and the median, then the sums by block kind.
+// A step's dispatch carries the same arguments and barrier flag as in q38-linear-attn-span-f / q38-full-attn-span / q38-ffn-span.
+// stdin, one JSON line, all optional: go, span (64), rounds (16), k (3).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
+section [form.bml] {
+ class Q38SpanProfile {
+  def qsp-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qsp-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qsp-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qsp-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-span-profile", line) : json-node-object([]);
+  }
+  def qsp-ids(n, i) = i >= n ? [] : cons(1000 + ((i * 37) % 5000), qsp-ids(n, i + 1));
+  def qsp-times(n, f) = n <= 0 ? 1 : {
+   let done = f();
+   qsp-times(n - 1, f);
+  };
+  def qsp-busy(f, k) {
+   metal_batch_concurrent();
+   let a = metal_live();
+   let q = qsp-times(k, f);
+   let s = metal_sync();
+   let b = metal_live();
+   (b[11] - a[11]) / k;
+  }
+  def qsp-ins(x, xs) = len(xs) == 0 ? [x] : (x <= xs[0] ? cons(x, xs) : cons(xs[0], qsp-ins(x, xs[1:])));
+  def qsp-sort(xs) = len(xs) == 0 ? [] : qsp-ins(xs[0], qsp-sort(xs[1:]));
+  def qsp-col(rows, i) = len(rows) == 0 ? [] : cons(nth(rows[0], i), qsp-col(rows[1:], i));
+  // a step: [label, thunk]
+  def qsp-round(steps, k) = len(steps) == 0 ? [] : cons(qsp-busy(steps[0][1], k), qsp-round(steps[1:], k));
+  def qsp-rounds(steps, k, r, acc) = r <= 0 ? acc : qsp-rounds(steps, k, r - 1, cons(qsp-round(steps, k), acc));
+  def qsp-report(name, steps, rows, i, sum-min, sum-q1, sum-med) = i >= len(steps) ? {
+   print_str("[q38-span] " ++ name ++ " TOTAL: min " ++ sum-min.str() ++ " us, p25 " ++ sum-q1.str() ++ ", median " ++ sum-med.str());
+  } : {
+   let s = qsp-sort(qsp-col(rows, i));
+   let n = len(s);
+   let mn = s[0];
+   let q1 = nth(s, n / 4);
+   let md = nth(s, n / 2);
+   let say = print_str("[q38-span] " ++ name ++ " / " ++ steps[i][0] ++ ": min " ++ mn.str() ++ " us, p25 " ++ q1.str() ++ ", median " ++ md.str());
+   qsp-report(name, steps, rows, i + 1, sum-min + mn, sum-q1 + q1, sum-med + md);
+  };
+  def qsp-block(name, steps, rounds, k) {
+   let warm = qsp-rounds(steps, k, 2, []);
+   let rs = qsp-rounds(steps, k, rounds, []);
+   qsp-report(name, steps, rs, 0, 0, 0, 0);
+  }
+  def qsp-linear-steps(ps, bs, geo, lay, st, ntok) {
+   let pitch = qlslc-bs2-output-pitch(geo);
+   [["rms-span", () => q38-rms-span(ps, bs[33], lay[0], bs[1], geo[0], geo[6], ntok, 1)],
+    ["mm qkv (lay5 -> bs2)", () => q38-mv-batch-y(ps, lay[5], bs[1], bs[2], ntok, pitch, 1)],
+    ["mm z (lay7 -> bs3)", () => q38-mv-batch(ps, lay[7], bs[1], bs[3], ntok, 1)],
+    ["mm b (lay8 -> bs4)", () => q38-mv-batch(ps, lay[8], bs[1], bs[4], ntok, 1)],
+    ["mm a (lay12 -> bs7)", () => q38-mv-batch(ps, lay[12], bs[1], bs[7], ntok, 1)],
+    ["conv span", () => metal_enqueue(nth(ps, qlslc-conv-span-pipeline()), q38-b16([st[0], bs[2], kth-tv-h(lay[6]), bs[2]], [geo[1], geo[23], pitch, ntok], 0, 1), geo[1])],
+    ["silu (ps8)", () => metal_enqueue(ps[8], q38-b16([bs[2]], [qlslc-bs2-allocation-elements(geo, ntok)], 0, 1), qlslc-bs2-allocation-elements(geo, ntok))],
+    ["l2norm span", () => metal_enqueue(nth(ps, qlslc-l2norm-span-pipeline()), q38-b16([bs[2]], [2 * geo[2], geo[4], geo[6], pitch, ntok], 0, 1), 2 * geo[2] * ntok)],
+    ["gates span", () => metal_enqueue(nth(ps, qlslc-gates-span-pipeline()), q38-b16([bs[3], bs[4], kth-tv-h(lay[9]), kth-tv-h(lay[10]), bs[5], bs[6]], [geo[3], ntok], 0, 1), geo[3] * ntok)],
+    ["delta span (the lane's: simdgroup-row kernel)", () => q38-delta-span-run(ps, bs, geo, st, pitch, ntok)],
+    ["delta span (the thread-a-row kernel it replaced)", () => metal_enqueue(nth(ps, qlslc-delta-span-pipeline()), q38-b16([st[1], bs[2], bs[5], bs[6], bs[8]], [geo[3], geo[5], geo[4], geo[2], geo[7], pitch, geo[3], geo[3] * geo[5], ntok], 0, 1), geo[3] * geo[5])],
+    ["norm-gate span", () => metal_enqueue(nth(ps, qlslc-norm-gate-span-pipeline()), q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6], ntok], 0, 1), geo[3] * ntok)],
+    ["mm out (lay13)", () => q38-mv-batch(ps, lay[13], bs[9], bs[10], ntok, 1)],
+    ["residual add", () => metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok)]];
+  }
+  def qsp-full-steps(ps, bs, geo, lay, st, pos0, ntok) {
+   let nqhd = geo[12] * geo[14];
+   let nkvhd = geo[13] * geo[14];
+   [["rms-span", () => q38-rms-span(ps, bs[33], lay[0], bs[1], geo[0], geo[6], ntok, 1)],
+    ["mm q (lay5)", () => q38-mv-batch-y(ps, lay[5], bs[1], bs[2], ntok, q38-bs2-stride(geo), 1)],
+    ["mm k (lay6)", () => q38-mv-batch(ps, lay[6], bs[1], bs[24], ntok, 1)],
+    ["mm v (lay7)", () => q38-mv-batch(ps, lay[7], bs[1], bs[25], ntok, 1)],
+    ["qsplit x2", () => metal_enqueue(ps[34], q38-b16([bs[2], bs[22]], [nqhd, geo[14], 0, ntok, q38-bs2-stride(geo)], 0, 1), nqhd * ntok)],
+    ["headrms x2", () => metal_enqueue(ps[35], q38-b16([bs[22], kth-tv-h(lay[8]), bs[22]], [geo[12], geo[14], geo[6], ntok], 0, 1), geo[12] * ntok)],
+    ["rope x2", () => metal_enqueue(ps[36], q38-b16([bs[22]], [geo[12], geo[14], geo[15], pos0, geo[16], ntok], 0, 1), geo[12] * (geo[15] / 2) * ntok)],
+    ["cache x2", () => metal_enqueue(ps[37], q38-b16([bs[24], st[2]], [geo[20], pos0, ntok], 0, 1), geo[20] * ntok)],
+    ["attention", () => q38pa-enqueue(nth(ps, q38pa-index()), [bs[22], st[2], st[3], bs[26], bs[27]], [pos0, geo[12], geo[13], geo[14], geo[17], geo[18], ntok], geo[12] * ntok, 1)],
+    ["gate mul", () => metal_enqueue(ps[17], q38-b16([bs[26], bs[23]], [nqhd * ntok], 0, 1), nqhd * ntok)],
+    ["mm out (lay10)", () => q38-mv-batch(ps, lay[10], bs[26], bs[10], ntok, 1)],
+    ["residual add", () => metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok)]];
+  }
+  def qsp-ffn-steps(ps, bs, geo, lay, ntok) =
+   [["rms-span", () => q38-rms-span(ps, bs[33], lay[1], bs[1], geo[0], geo[6], ntok, 1)],
+    ["mm gate", () => q38-mv-batch(ps, lay[2], bs[1], bs[14], ntok, 1)],
+    ["mm up", () => q38-mv-batch(ps, lay[3], bs[1], bs[15], ntok, 1)],
+    ["swiglu", () => metal_enqueue(ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10] * ntok], 0, 1), geo[10] * ntok)],
+    ["mm down", () => q38-mv-batch(ps, lay[4], bs[16], bs[17], ntok, 1)],
+    ["residual add", () => metal_enqueue(ps[19], q38-b16([bs[33], bs[17], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok)]];
+  def qsp-first-full(l, geo) = kth-full?(l, geo[22]) ? l : qsp-first-full(l + 1, geo);
+  def qsp-profile(ctx, ids, rounds, k) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lays = ctx[3];
+   let sts = q38-new-state(geo);
+   let r = q38-prefill-span-batched(ps, bs, geo, lays, sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let n = len(ids);
+   let lin = nth(lays, 0);
+   let lf = qsp-first-full(0, geo);
+   let full = nth(lays, lf);
+   let head = print_str("[q38-span] profile at " ++ n.str() ++ " tokens, " ++ rounds.str() ++ " rounds of " ++ k.str() ++ " dispatches a step");
+   let a = qsp-block("ffn", qsp-ffn-steps(ps, bs, geo, lin, n), rounds, k);
+   let b = qsp-block("linear-attn", qsp-linear-steps(ps, bs, geo, lin, nth(sts, 0), n), rounds, k);
+   let c = qsp-block("full-attn", qsp-full-steps(ps, bs, geo, full, nth(sts, lf), 0, n), rounds, k);
+   let freed = q38-free-state(sts);
+   1;
+  }
+  def qsp-open(path, want, rounds, k) {
+   let src = fcmg-src(path);
+   let ids = qsp-ids(want, 0);
+   let span = len(ids);
+   let maxpos = span + 16 + 8;
+   let own = fcms-qwen-own(src, maxpos);
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 span profile", path, weights, own);
+   !mg-granted?(granted) ? print_str("[q38-span] held: " ++ granted[1]) : {
+    let ctx = q38-open-span(path, maxpos, span);
+    !((Comparable) q38-context-ok?(ctx) == 1) ? {
+     let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-span] the context did not open");
+    } : {
+     let measured = qsp-profile(ctx, ids, rounds, k);
+     let closed = q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-span] released");
+    };
+   };
+  }
+  def qsp-run() {
+   let opts = qsp-opts();
+   (Comparable) qsp-int(opts, "go", 0) == 1 ? qsp-open(qsp-text(opts, "file", qsp-file()), qsp-int(opts, "span", 64), qsp-int(opts, "rounds", 16), qsp-int(opts, "k", 3)) : print_str("[q38-span] plan: {\"go\":1} opens the model and times every step of a span block");
+  }
+ }
+ qsp-run();
+}

@@ -1,0 +1,77 @@
+// q38-prefill-bench.bml — the prefill rate, robust to a shared GPU: the batched span prefill run RUNS times from a fresh state, each timed on
+// the wall and on the device's busy counter, then the minimum, lower quartile and median. The minimum is what the lane does with the GPU to itself.
+//
+//   echo '{"go":1,"span":64,"runs":10}' | ./fkwu observe/q38-prefill-bench.bml
+// stdin, one JSON line, all optional: go, span (64), runs (10), prompt (a chat prompt: its ids replace the synthetic ones).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
+section [form.bml] {
+ class Q38PrefillBench {
+  def qpb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qpb-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qpb-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qpb-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-prefill-bench", line) : json-node-object([]);
+  }
+  def qpb-ids(n, i) = i >= n ? [] : cons(1000 + ((i * 37) % 5000), qpb-ids(n, i + 1));
+  def qpb-ins(x, xs) = len(xs) == 0 ? [x] : (x <= xs[0] ? cons(x, xs) : cons(xs[0], qpb-ins(x, xs[1:])));
+  def qpb-sort(xs) = len(xs) == 0 ? [] : qpb-ins(xs[0], qpb-sort(xs[1:]));
+  def qpb-rate(n, ms) = ms <= 0 ? 0 : (n * 1000) / ms;
+  // one run: [winner, wall ms, device busy ms]
+  def qpb-run-once(ctx, ids) {
+   let sts = q38-new-state(ctx[2]);
+   let a = metal_live();
+   let t0 = host_monotonic_ms();
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let t1 = host_monotonic_ms();
+   let b = metal_live();
+   let freed = q38-free-state(sts);
+   [r[0], t1 - t0, (b[11] - a[11]) / 1000];
+  }
+  def qpb-runs(ctx, ids, n, acc) = n <= 0 ? acc : {
+   let one = qpb-run-once(ctx, ids);
+   qpb-runs(ctx, ids, n - 1, cons(one, acc));
+  };
+  def qpb-col(rows, i) = len(rows) == 0 ? [] : cons(nth(rows[0], i), qpb-col(rows[1:], i));
+  def qpb-report(label, xs, npos) {
+   let s = qpb-sort(xs);
+   let n = len(s);
+   print_str("[q38-bench] " ++ label ++ ": min " ++ s[0].str() ++ " ms (" ++ qpb-rate(npos, s[0]).str() ++ " positions/s), p25 " ++ nth(s, n / 4).str() ++ " ms (" ++ qpb-rate(npos, nth(s, n / 4)).str() ++ "), median " ++ nth(s, n / 2).str() ++ " ms (" ++ qpb-rate(npos, nth(s, n / 2)).str() ++ "), runs " ++ n.str());
+  }
+  def qpb-measure(ctx, ids, runs) {
+   let warm = qpb-run-once(ctx, ids);
+   let rs = qpb-runs(ctx, ids, runs, []);
+   let a = print_str("[q38-bench] " ++ len(ids).str() ++ " positions, winner " ++ warm[0].str());
+   let b = qpb-report("wall", qpb-col(rs, 1), len(ids));
+   qpb-report("device busy", qpb-col(rs, 2), len(ids));
+  }
+  def qpb-open(path, want, runs, prompt) {
+   let src = fcmg-src(path);
+   let ids = (String) prompt == "" ? qpb-ids(want, 0) : q35-chat-ids(src, prompt);
+   let span = len(ids);
+   let maxpos = span + 8;
+   let own = fcms-qwen-own(src, maxpos);
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 prefill bench", path, weights, own);
+   !mg-granted?(granted) ? print_str("[q38-bench] held: " ++ granted[1]) : {
+    let ctx = q38-open-span(path, maxpos, span);
+    !((Comparable) q38-context-ok?(ctx) == 1) ? {
+     let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-bench] the context did not open");
+    } : {
+     let measured = qpb-measure(ctx, ids, runs);
+     let closed = q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-bench] released");
+    };
+   };
+  }
+  def qpb-run() {
+   let opts = qpb-opts();
+   (Comparable) qpb-int(opts, "go", 0) == 1 ? qpb-open(qpb-text(opts, "file", qpb-file()), qpb-int(opts, "span", 64), qpb-int(opts, "runs", 10), qpb-text(opts, "prompt", "")) : print_str("[q38-bench] plan: {\"go\":1} opens the model and times the batched span prefill");
+  }
+ }
+ qpb-run();
+}
