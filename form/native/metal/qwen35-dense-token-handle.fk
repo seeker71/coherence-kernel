@@ -148,8 +148,23 @@ section [form.bml] {
     // real prompt against the attestant's (identical). Appended last: pipeline 60. Any width (a strided loop).
     def q38-rmspar-index() = 60;
     def q38-rmspar-msl(fname) = ("kernel void " + (fname + " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { threadgroup float part[32]; float ss = 0.0f; for (uint j = t; j < n; j += nt) { float xv = x[j]; ss = metal::fma(xv, xv, ss); } float s = metal::simd_sum(ss); if (lane == 0u) { part[sg] = s; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); uint nsg = (nt + 31u) / 32u; float tot = 0.0f; for (uint i = 0u; i < nsg; ++i) { tot = tot + part[i]; } float inv = 1.0f / metal::precise::sqrt(tot / float(n) + eps); for (uint j = t; j < n; j += nt) { y[j] = (x[j] * inv) * g[j]; } }"));
-    def q38-rms(ps, xh, gtv, yh, n, epsBits, barrier) = metal_enqueue(ps[q38-rmspar-index()], q38-b16([xh, kth-tv-h(gtv), yh], [n, epsBits], 1, barrier), 1);
-    def q38-mv(ps, tv, xh, yh, barrier) = q38-tv-planar?(tv) ? metal_enqueue(ps[q38-plv-index()], md-bind16([tv[4], tv[5], xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 64, 0, 1, barrier), q38-plv-groups(kth-tv-r(tv))) : (Comparable) kth-tv-ty(tv) == 8 ? metal_enqueue(ps[29], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 256, 0, 1, barrier), ((Number) kth-tv-r(tv) + (Number) 1) / 2) : q38dq-index(kth-tv-ty(tv)) >= 0 ? q38dq-enqueue(ps, kth-tv-ty(tv), kth-tv-h(tv), xh, yh, kth-tv-r(tv), kth-tv-c(tv), barrier) : metal_enqueue(ps[27], q38-b16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 0, barrier), kth-tv-r(tv));
+    // ── a dispatch as a record ─────────────────────────────────────────────
+    // A token is ~1265 dispatches and the walker spent ~26 us a dispatch building each binding string (md-bind16): 33 ms of a token's host
+    // time, which is the whole of the encode when the machine's cores are held by other work (170-200 ms a token then, against 90-100
+    // for the device). So a dispatch is data first: [pipeline, binding, threads] (a record of one, [thunk], is a dispatch that is not a
+    // plain kernel: the declarative attention's own enqueue), built by the *-rec functions and run by q38-run. The blocks below build
+    // their records and run them (one definition of every dispatch); a plan (q38-plan) builds the position-independent records of a whole
+    // token ONCE for a state and a token then only runs them and builds the few that carry the position.
+    def q38-call(f) = f();
+    def q38-enq(r) = (Comparable) len(r) == 1 ? q38-call(r[0]) : metal_enqueue(r[0], r[1], r[2]);
+    def q38-run(rs) = (Comparable) len(rs) == 0 ? 1 : {
+        q38-enq(rs[0]);
+        q38-run(rs[1:]);
+    };
+    def q38-rms-rec(ps, xh, gtv, yh, n, epsBits, barrier) = [ps[q38-rmspar-index()], q38-b16([xh, kth-tv-h(gtv), yh], [n, epsBits], 1, barrier), 1];
+    def q38-rms(ps, xh, gtv, yh, n, epsBits, barrier) = q38-enq(q38-rms-rec(ps, xh, gtv, yh, n, epsBits, barrier));
+    def q38-mv-rec(ps, tv, xh, yh, barrier) = q38-tv-planar?(tv) ? [ps[q38-plv-index()], md-bind16([tv[4], tv[5], xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 64, 0, 1, barrier), q38-plv-groups(kth-tv-r(tv))] : (Comparable) kth-tv-ty(tv) == 8 ? [ps[29], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 256, 0, 1, barrier), ((Number) kth-tv-r(tv) + (Number) 1) / 2] : q38dq-index(kth-tv-ty(tv)) >= 0 ? [ps[q38dq-index(kth-tv-ty(tv))], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv), 1], 256, 0, 0, barrier), kth-tv-r(tv)] : [ps[27], q38-b16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 0, barrier), kth-tv-r(tv)];
+    def q38-mv(ps, tv, xh, yh, barrier) = q38-enq(q38-mv-rec(ps, tv, xh, yh, barrier));
     // Adapter = [A-handle B-handle dot-handle width alpha-f32-bits].  Its
     // buffers are independent allocations owned by the adapter, so this is an
     // overlay on an activation, never an in-place patch of the immutable GGUF.
@@ -185,55 +200,63 @@ section [form.bml] {
     def q38-layer(src, base, path, tabs, l, interval) = kth-full?(l, interval) ? append(q38-layer-common(src, base, path, tabs, l), [q38-tv-for(src, base, path, tabs, 14, l), q38-tv-for(src, base, path, tabs, 15, l), q38-tv-for(src, base, path, tabs, 16, l), q38-tv-for(src, base, path, tabs, 17, l), q38-tv-for(src, base, path, tabs, 18, l), q38-tv-for(src, base, path, tabs, 19, l)]) : append(q38-layer-common(src, base, path, tabs, l), [q38-tv-for(src, base, path, tabs, 5, l), q38-tv-for(src, base, path, tabs, 6, l), q38-tv-for(src, base, path, tabs, 7, l), q38-tv-for(src, base, path, tabs, 8, l), q38-tv-for(src, base, path, tabs, 9, l), q38-tv-for(src, base, path, tabs, 10, l), q38-tv-for(src, base, path, tabs, 11, l), q38-tv-for(src, base, path, tabs, 12, l), q38-tv-for(src, base, path, tabs, 13, l)]);
     def q38-layers-go(src, base, path, tabs, l, n, interval, acc) = l >= n ? acc : q38-layers-go(src, base, path, tabs, (Number) l + (Number) 1, n, interval, append(acc, [q38-layer(src, base, path, tabs, l, interval)]));
     def q38-layers(src, base, path, n, interval) = q38-layers-go(src, base, path, q38-tabs(src), 0, n, interval, []);
-    def q38-linear-attn(ps, bs, geo, lay, st) = {
-        q38-rms(ps, bs[0], lay[0], bs[1], geo[0], geo[6], 1);
-        q38-mv(ps, lay[5], bs[1], bs[2], 1);
-        q38-mv(ps, lay[7], bs[1], bs[3], 0);
-        q38-mv(ps, lay[8], bs[1], bs[4], 0);
-        q38-mv(ps, lay[12], bs[1], bs[7], 0);
-        metal_enqueue(ps[7], q38-b16([st[0], bs[2], kth-tv-h(lay[6]), bs[2]], [geo[1], geo[23]], 0, 1), geo[1]);
-        metal_enqueue(ps[8], q38-b16([bs[2]], [geo[1]], 0, 1), geo[1]);
-        metal_enqueue(ps[9], q38-b16([bs[2]], [2 * geo[2], geo[4], geo[6]], 0, 1), 2 * geo[2]);
-        metal_enqueue(ps[10], q38-b16([bs[3], bs[4], kth-tv-h(lay[9]), kth-tv-h(lay[10]), bs[5], bs[6]], [geo[3]], 0, 0), geo[3]);
-        metal_enqueue(ps[11], q38-b16([st[1], bs[2], bs[5], bs[6], bs[8]], [geo[3], geo[5], geo[4], geo[2], geo[7]], 0, 1), geo[3] * geo[5]);
-        metal_enqueue(ps[12], q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6]], 0, 1), geo[3]);
-        q38-mv(ps, lay[13], bs[9], bs[10], 1);
-        metal_enqueue(ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]);
-        1;
-    };
+    // Each block is its records (the *-recs below) run in order: one definition of every dispatch, run directly by the blocks and
+    // built once into a plan by q38-plan.
+    def q38-linear-attn-recs(ps, bs, geo, lay, st) = [
+        q38-rms-rec(ps, bs[0], lay[0], bs[1], geo[0], geo[6], 1),
+        q38-mv-rec(ps, lay[5], bs[1], bs[2], 1),
+        q38-mv-rec(ps, lay[7], bs[1], bs[3], 0),
+        q38-mv-rec(ps, lay[8], bs[1], bs[4], 0),
+        q38-mv-rec(ps, lay[12], bs[1], bs[7], 0),
+        [ps[7], q38-b16([st[0], bs[2], kth-tv-h(lay[6]), bs[2]], [geo[1], geo[23]], 0, 1), geo[1]],
+        [ps[8], q38-b16([bs[2]], [geo[1]], 0, 1), geo[1]],
+        [ps[9], q38-b16([bs[2]], [2 * geo[2], geo[4], geo[6]], 0, 1), 2 * geo[2]],
+        [ps[10], q38-b16([bs[3], bs[4], kth-tv-h(lay[9]), kth-tv-h(lay[10]), bs[5], bs[6]], [geo[3]], 0, 0), geo[3]],
+        [ps[11], q38-b16([st[1], bs[2], bs[5], bs[6], bs[8]], [geo[3], geo[5], geo[4], geo[2], geo[7]], 0, 1), geo[3] * geo[5]],
+        [ps[12], q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6]], 0, 1), geo[3]],
+        q38-mv-rec(ps, lay[13], bs[9], bs[10], 1),
+        [ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]]];
+    def q38-linear-attn(ps, bs, geo, lay, st) = q38-run(q38-linear-attn-recs(ps, bs, geo, lay, st));
+    // The full-attention block in three parts: the records before the position's own (projections, q/k split, head norms), the records that
+    // carry the position (rope at pos, the K and V rows written at pos * kvd, the attention over pos + 1 rows), and the records after (output
+    // gate, projection, residual). Only the middle part is built again for every token of a plan.
+    def q38-full-attn-pre-recs(ps, bs, geo, lay) = [
+        q38-rms-rec(ps, bs[0], lay[0], bs[1], geo[0], geo[6], 1),
+        q38-mv-rec(ps, lay[5], bs[1], bs[2], 1),
+        q38-mv-rec(ps, lay[6], bs[1], bs[24], 0),
+        q38-mv-rec(ps, lay[7], bs[1], bs[25], 0),
+        [ps[14], q38-b16([bs[2], bs[22]], [geo[12] * geo[14], geo[14], 0], 0, 1), geo[12] * geo[14]],
+        [ps[14], q38-b16([bs[2], bs[23]], [geo[12] * geo[14], geo[14], geo[14]], 0, 0), geo[12] * geo[14]],
+        [ps[13], q38-b16([bs[22], kth-tv-h(lay[8]), bs[22]], [geo[12], geo[14], geo[6]], 0, 1), geo[12]],
+        [ps[13], q38-b16([bs[24], kth-tv-h(lay[9]), bs[24]], [geo[13], geo[14], geo[6]], 0, 0), geo[13]]];
+    // pipeline 39: one 256-thread threadgroup per head (mode 1 makes the
+    // threads argument a GROUP count). The serial one-thread-per-head
+    // dispatch this replaces cost the block ~1.7 ms of its 2.1 ms
+    // (2026-08-24, per-layer-kind probe: 2113 -> 553 us per block).
+    def q38-full-attn-pos-recs(ps, bs, geo, st, pos, scope) = [
+        [ps[15], q38-b16([bs[22]], [geo[12], geo[14], geo[15], pos, geo[16]], 0, 1), geo[12] * (geo[15] / 2)],
+        [ps[15], q38-b16([bs[24]], [geo[13], geo[14], geo[15], pos, geo[16]], 0, 0), geo[13] * (geo[15] / 2)],
+        [ps[24], q38-b16([bs[24], st[2]], [geo[20], pos * geo[20]], 0, 1), geo[20]],
+        [ps[24], q38-b16([bs[25], st[3]], [geo[20], pos * geo[20]], 0, 0), geo[20]],
+        nothing?(scope) ? [nth(ps, qlslc-cooperative-gqa-pipeline()), q38-b16([bs[22], st[2], st[3], bs[26], bs[27]], [(Number) pos + (Number) 1, geo[12], geo[13], geo[14], geo[17], geo[18]], 1, 1), geo[12]] : [() => dam-enqueue(scope, bs[22], st[2], st[3], bs[26], bs[27], (Number) pos + (Number) 1, geo[12], geo[13], geo[14], geo[17], geo[18])]];
+    def q38-full-attn-post-recs(ps, bs, geo, lay) = [
+        [ps[17], q38-b16([bs[26], bs[23]], [geo[12] * geo[14]], 0, 1), geo[12] * geo[14]],
+        q38-mv-rec(ps, lay[10], bs[26], bs[10], 1),
+        [ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]]];
     def q38-full-attn(ps, bs, geo, lay, st, pos) = q38-full-attn-scoped(ps, bs, geo, lay, st, pos, nothing());
     def q38-full-attn-scoped(ps, bs, geo, lay, st, pos, scope) = {
-        q38-rms(ps, bs[0], lay[0], bs[1], geo[0], geo[6], 1);
-        q38-mv(ps, lay[5], bs[1], bs[2], 1);
-        q38-mv(ps, lay[6], bs[1], bs[24], 0);
-        q38-mv(ps, lay[7], bs[1], bs[25], 0);
-        metal_enqueue(ps[14], q38-b16([bs[2], bs[22]], [geo[12] * geo[14], geo[14], 0], 0, 1), geo[12] * geo[14]);
-        metal_enqueue(ps[14], q38-b16([bs[2], bs[23]], [geo[12] * geo[14], geo[14], geo[14]], 0, 0), geo[12] * geo[14]);
-        metal_enqueue(ps[13], q38-b16([bs[22], kth-tv-h(lay[8]), bs[22]], [geo[12], geo[14], geo[6]], 0, 1), geo[12]);
-        metal_enqueue(ps[13], q38-b16([bs[24], kth-tv-h(lay[9]), bs[24]], [geo[13], geo[14], geo[6]], 0, 0), geo[13]);
-        metal_enqueue(ps[15], q38-b16([bs[22]], [geo[12], geo[14], geo[15], pos, geo[16]], 0, 1), geo[12] * (geo[15] / 2));
-        metal_enqueue(ps[15], q38-b16([bs[24]], [geo[13], geo[14], geo[15], pos, geo[16]], 0, 0), geo[13] * (geo[15] / 2));
-        metal_enqueue(ps[24], q38-b16([bs[24], st[2]], [geo[20], pos * geo[20]], 0, 1), geo[20]);
-        metal_enqueue(ps[24], q38-b16([bs[25], st[3]], [geo[20], pos * geo[20]], 0, 0), geo[20]);
-        // pipeline 39: one 256-thread threadgroup per head (mode 1 makes the
-        // threads argument a GROUP count). The serial one-thread-per-head
-        // dispatch this replaces cost the block ~1.7 ms of its 2.1 ms
-        // (2026-08-24, per-layer-kind probe: 2113 -> 553 us per block).
-        nothing?(scope) ? metal_enqueue(nth(ps, qlslc-cooperative-gqa-pipeline()), q38-b16([bs[22], st[2], st[3], bs[26], bs[27]], [(Number) pos + (Number) 1, geo[12], geo[13], geo[14], geo[17], geo[18]], 1, 1), geo[12]) : dam-enqueue(scope, bs[22], st[2], st[3], bs[26], bs[27], (Number) pos + (Number) 1, geo[12], geo[13], geo[14], geo[17], geo[18]);
-        metal_enqueue(ps[17], q38-b16([bs[26], bs[23]], [geo[12] * geo[14]], 0, 1), geo[12] * geo[14]);
-        q38-mv(ps, lay[10], bs[26], bs[10], 1);
-        metal_enqueue(ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]);
-        1;
+        q38-run(q38-full-attn-pre-recs(ps, bs, geo, lay));
+        q38-run(q38-full-attn-pos-recs(ps, bs, geo, st, pos, scope));
+        q38-run(q38-full-attn-post-recs(ps, bs, geo, lay));
     };
-    def q38-ffn(ps, bs, geo, lay) = {
-        q38-rms(ps, bs[0], lay[1], bs[1], geo[0], geo[6], 1);
-        q38-mv(ps, lay[2], bs[1], bs[14], 1);
-        q38-mv(ps, lay[3], bs[1], bs[15], 0);
-        metal_enqueue(ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10]], 0, 1), geo[10]);
-        q38-mv(ps, lay[4], bs[16], bs[17], 1);
-        metal_enqueue(ps[19], q38-b16([bs[0], bs[17], bs[0]], [geo[0]], 0, 1), geo[0]);
-        1;
-    };
+    def q38-ffn-recs(ps, bs, geo, lay) = [
+        q38-rms-rec(ps, bs[0], lay[1], bs[1], geo[0], geo[6], 1),
+        q38-mv-rec(ps, lay[2], bs[1], bs[14], 1),
+        q38-mv-rec(ps, lay[3], bs[1], bs[15], 0),
+        [ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10]], 0, 1), geo[10]],
+        q38-mv-rec(ps, lay[4], bs[16], bs[17], 1),
+        [ps[19], q38-b16([bs[0], bs[17], bs[0]], [geo[0]], 0, 1), geo[0]]];
+    def q38-ffn(ps, bs, geo, lay) = q38-run(q38-ffn-recs(ps, bs, geo, lay));
     // ── the batched matmul, dispatched ─────────────────────────────────────
     // The typed batch kernels take rows, cols and ntok, read x[t*cols+j] and
     // writes y[t*rows+r]. Grid is rows * ceil(ntok/8) * 32 with a threadgroup that
@@ -519,11 +542,13 @@ section [form.bml] {
         let handed = q38-handover-after((Number) l + (Number) 1, n);
         q38-blocks-scoped(ps, bs, geo, lays, sts, pos, (Number) l + (Number) 1, n, interval, scope);
     };
+    def q38-head-recs(ps, bs, geo, onormTv, projTv) = [
+        q38-rms-rec(ps, bs[0], onormTv, bs[1], geo[0], geo[6], 1),
+        q38-mv-rec(ps, projTv, bs[1], bs[28], 1),
+        [ps[25], q38-b16([bs[28], bs[29], bs[30]], [geo[19], 1024], 0, 1), 1024],
+        [ps[26], md-bind16([bs[29], bs[30], bs[31], bs[32]], [1024], 1024, 0, 1, 1), 1]];
     def q38-head(ps, bs, geo, onormTv, projTv) = {
-        q38-rms(ps, bs[0], onormTv, bs[1], geo[0], geo[6], 1);
-        q38-mv(ps, projTv, bs[1], bs[28], 1);
-        metal_enqueue(ps[25], q38-b16([bs[28], bs[29], bs[30]], [geo[19], 1024], 0, 1), 1024);
-        metal_enqueue(ps[26], md-bind16([bs[29], bs[30], bs[31], bs[32]], [1024], 1024, 0, 1, 1), 1);
+        q38-run(q38-head-recs(ps, bs, geo, onormTv, projTv));
         0;
     };
     // This is the only adapted Qwen head.  It preserves the base path above
@@ -583,6 +608,37 @@ section [form.bml] {
     def q38-generate(ps, bs, geo, lays, sts, embTv, onormTv, projTv, id, pos, n, stops, acc) = n <= 0 ? acc : {
         let nid = q38-forward(ps, bs, geo, lays, sts, embTv, onormTv, projTv, id, pos);
         (nid < 0 ? 1 : q38-stop?(nid, stops)) ? acc : q38-generate(ps, bs, geo, lays, sts, embTv, onormTv, projTv, nid, (Number) pos + (Number) 1, n - 1, stops, append(acc, [nid]));
+    };
+    // ── a plan: the records of a whole token that do not depend on its position, built ONCE for a state ──
+    // [layers, head, stamp]: per layer [0 records] (linear: attention and FFN) or [1 pre post] (full: the records before the position's own
+    // and the records after it with the FFN); the head's records; the first state buffer's handle as the stamp of the state it was built for
+    // (every handle carries its allocation's generation, so a plan for a freed state does not match a fresh one). A token run from a plan
+    // (q38-forward-planned) embeds, runs each layer's records (building only the full layers' position records), runs the head's and reads:
+    // the same dispatches in the same order with the same bytes as q38-forward, without rebuilding ~1200 binding strings.
+    def q38-plan-layer(ps, bs, geo, lays, sts, l) = kth-full?(l, geo[22]) ? [1, q38-full-attn-pre-recs(ps, bs, geo, nth(lays, l)), append(q38-full-attn-post-recs(ps, bs, geo, nth(lays, l)), q38-ffn-recs(ps, bs, geo, nth(lays, l)))] : [0, append(q38-linear-attn-recs(ps, bs, geo, nth(lays, l), nth(sts, l)), q38-ffn-recs(ps, bs, geo, nth(lays, l)))];
+    def q38-plan-go(ps, bs, geo, lays, sts, l, n) = l >= n ? [] : cons(q38-plan-layer(ps, bs, geo, lays, sts, l), q38-plan-go(ps, bs, geo, lays, sts, (Number) l + (Number) 1, n));
+    def q38-plan(ctx, sts) = [q38-plan-go(ctx[0], ctx[1], ctx[2], ctx[3], sts, 0, ctx[2][21]), q38-head-recs(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6]), nth(sts, 0)[0]];
+    def q38-plan-valid?(plan, sts) = (Comparable) len(plan) == 3 && (Comparable) len(sts) > 0 && (Comparable) plan[2] == nth(sts, 0)[0];
+    def q38-plan-blocks(ps, bs, geo, sts, entries, pos, l, n) = (Comparable) len(entries) == 0 ? 1 : {
+        let e = entries[0];
+        (Comparable) e[0] == 1 ? {
+            q38-run(e[1]);
+            q38-run(q38-full-attn-pos-recs(ps, bs, geo, nth(sts, l), pos, nothing()));
+            q38-run(e[2]);
+        } : q38-run(e[1]);
+        let handed = q38-handover-after((Number) l + (Number) 1, n);
+        q38-plan-blocks(ps, bs, geo, sts, entries[1:], pos, (Number) l + (Number) 1, n);
+    };
+    def q38-forward-planned(ctx, plan, sts, id, pos) {
+        metal_batch_concurrent();
+        q38-embed(ctx[0], ctx[1], ctx[2], ctx[4], id, 0);
+        q38-plan-blocks(ctx[0], ctx[1], ctx[2], sts, plan[0], pos, 0, ctx[2][21]);
+        q38-run(plan[1]);
+        kth-u32at(metal_buf_read(ctx[1][31], 0, 4), 0);
+    }
+    def q38-generate-planned(ctx, plan, sts, id, pos, n, stops, acc) = n <= 0 ? acc : {
+        let nid = q38-forward-planned(ctx, plan, sts, id, pos);
+        (nid < 0 ? 1 : q38-stop?(nid, stops)) ? acc : q38-generate-planned(ctx, plan, sts, nid, (Number) pos + (Number) 1, n - 1, stops, append(acc, [nid]));
     };
     // The adapter is present for every head query, including all decode tokens;
     // state-only prompt positions remain head-free exactly as in q38-prefill.
