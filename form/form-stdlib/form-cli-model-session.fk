@@ -280,7 +280,17 @@ section [form.bml] {
             nid < 0 ? [out2, -1, pos + 1, 1] : (Comparable) q38-stop?(nid, stops) == 1 ? [out2, nid, pos + 1, 1] : fcms-walk-by(step, s, nid, pos + 1, left - 1, stops, out2, next-left, next-width, completed2);
         };
     };
-    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-by(fcms-forward, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps);
+    // THE PLANNED STEP. A walk of n tokens builds the token's position-independent dispatch records ONCE for this session's state
+    // (q38-plan: ~50-80 ms, about a token) and every step then runs them, building only the full-attention layers' position records: the
+    // same dispatches in the same order with the same bytes as fcms-forward, without rebuilding ~1200 binding strings a token. On a machine
+    // whose cores are held by other work that building was 170-200 ms a token against 90-100 for the device (the walker, not the GPU,
+    // set the speed); planned, the host is ~25 ms and the device sets it. Only the plain Qwen session takes it (no adapter carrier, not
+    // DeepSeek-V4) and only for a walk long enough to repay the build; every other session, and a short walk, takes fcms-forward as it was.
+    def fcms-plan-min() = 6;
+    def fcms-plannable?(s, n) = n >= fcms-plan-min() && !fcms-ds4?(s) && nil?(fcmd-carrier(s)) && len(fcms-sts(s)) > 0 && len(fcms-ctx(s)) > 10;
+    def fcms-planned-step(ctx, sts, plan) = (s2, id2, pos2) => q38-forward-planned(ctx, plan, sts, id2, pos2);
+    def fcms-step-for(s, n) = fcms-plannable?(s, n) ? fcms-planned-step(fcms-ctx(s), fcms-sts(s), q38-plan(fcms-ctx(s), fcms-sts(s))) : fcms-forward;
+    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-by(fcms-step-for(s, left), s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps);
     // generation = tag text ids updated-session. No generated text is needed to
     // resume; the bytes are exposed only for the Form/BMF boundary that asks.
     def fcms-generation(text, ids, session) = ["form-cli-model-session-generation-v1", text, ids, session];
@@ -323,7 +333,7 @@ section [form.bml] {
     // the line a DeepSeek session reports its usage in: the prompt, what it generated, how its last walk ended and the last position the driver serves for it
     def fcms-usage-line-ds4(s) = fcds-usage-line(fcms-prompt-ids(s), fcms-generated-ids(s), fcms-ending(s), fcds-consumed(fcms-pos(s), fcms-maxpos(s)), fcms-maxpos(s), fcds-driver-limit(fcms-src(s)));
     def fcms-generate-sampled(s, n) = {
-        let walked = fcsam-run(s, fcsam-owner(s), fcms-ctx(s)[1][28], fcms-forward, fcms-decode-pulse, fcms-pos(s), n, fcmo-stops(s));
+        let walked = fcsam-run(s, fcsam-owner(s), fcms-ctx(s)[1][28], fcms-step-for(s, n),fcms-decode-pulse, fcms-pos(s), n, fcmo-stops(s));
         let ids = walked[0];
         let owned = fcsam-with-owner(s, walked[4]);
         let next = fcms-with-stream(owned, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
