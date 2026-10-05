@@ -5,6 +5,21 @@ the task flow. An observed native answer takes precedence over model prose;
 local models contribute where the substrate does not yet carry the task.
 Form's choices, care, checkpoints, original checks and release own both paths.
 
+The serving goal is a local task owner that can find source, propose an approach,
+act, observe, repair and independently review until the original checks and current
+publication agree. Model size is a resource choice inside that flow. Native cells
+carry context and actions; warm model state and fingerprinted images carry reuse.
+Required remote assistance is measured as a capability still needing attention;
+optional review does not establish independent local completion.
+
+The open-harness references supply concrete reliability practices:
+[Hermes repairs malformed tool names against its admitted catalog](https://github.com/NousResearch/hermes-agent/blob/main/agent/agent_runtime_helpers.py),
+and [OpenClaw keeps tool calls and results together during compaction](https://docs.openclaw.ai/concepts/compaction).
+Form carries those responsibilities at its own native boundaries: admitted tools,
+correlated observations, unchanged task/check identities, retained effects and
+changed choices in the same checkpoint. A passing structural witness establishes
+that boundary; a completed local edit with its actual checks establishes task quality.
+
 `task <goal mentioning an existing repository file>` admits a task without a
 caller-built source packet, candidate or checks. Form reads the named source and
 discovers its direct callers in the native BML library from current repository files.
@@ -300,8 +315,10 @@ scope, guarded edits, caller checks and review still apply. An unrelated or
 unresolved node cannot act.
 
 During ordinary coding decode, a complete `eval` returning an action or reply
-hands the actual node directly to dispatch. The reply ends at that semantic
-boundary; the model does not copy its coordinate. A control closing in the
+hands the actual final value directly to dispatch through the control event,
+without rendering, parsing or resolving its address. Refused controls clear
+that value; an unused constructed action and printed address cannot submit.
+The reply ends at that semantic boundary; the model does not copy its coordinate. A control closing in the
 terminal quantum is observed before the next choice. Data reads provide
 evidence and preserve the current role. Multiple action nodes in one submission
 are refused without executing them. Native BML escapes are preserved; the
@@ -309,19 +326,28 @@ incremental scanner retains unfinished controls without a fixed token window.
 Native payloads go straight to that executor; the coding decoder has no JSON
 unescaping or preliminary parse pass. Admission selects the task workspace
 before binding context, so the decoder reads those same cells.
+The lowered control unit checks known offered-organ arities before any statement
+runs, using the owner's signatures and preserving lexical bindings. A mismatch
+reports expected and received counts. Dynamically selected callees retain their
+execution checks; this is not a claim of whole-program static typing.
 
 Admission and feedback carry native record/list/scalar cells. The model receives
 the original goal, current guidance and actual context coordinates; sources,
 caller corrections, tool results and checks remain whole behind those IDs.
-`fcap-context-field(address,key)` retrieves a record field or list index; compound
-values return another native cell. Context lookup and action/reply construction
+`fcap-context-field(address,key)` reads existing child cells directly. Its key may
+be a dotted path or a path list such as `["current","pending",0]`; exact dotted
+keys take precedence. Negative integer indexes select from the end. Missing
+fields and invalid index kinds return the current shape as typed unease; a
+present null value remains nothing. Compound values retain their node identity
+with record-key or list-size observations. Context lookup and action/reply construction
 are offered organs inside the same decoder process, without a source-call child.
 `task_context` retains admitted task/source context; `code_context` follows the
 current role and observation. These native bindings avoid recopying coordinates
 from older receipts. A noninteger list index returns a typed unease cell.
 No JSON context or JSON reply protocol crosses
 this coding model boundary. External requests, results and receipts retain their
-public JSON compatibility; old checkpoint evidence is converted at admission.
+public JSON compatibility; result fields are assembled once as cells and emitted
+only at that public boundary. Old checkpoint evidence is converted at admission.
 
 The north star is a model choosing and returning executable native recipes and
 cells, with Form retaining context, ownership, observations and verification.
@@ -409,9 +435,14 @@ Each stage below is a BML organ with its own band; none of the bands opens a mod
   own tool turns as a stillstreak. At 2 the observation names the repeat, at 3 a replan is required, at 4 the
   attempt ends with the candidate retained. `form-cli-code-turn-guard-band` 131071.
 - **Swerve** (`form-cli-code-swerve.bml`, stepped by `form-cli-code-live.bml`): a reply whose content was
-  already decoded decodes again seeded from that content, the lane's phases speak on the stage bus, and the
+  already decoded admits a seeded sampler from that content at the live boundary, the lane's phases speak on the stage bus, and the
   last replies are kept for the deliverable. A context that has observed nothing is fresh sight unless the record is
-  unsighted (an observation that never entered a context). `form-cli-code-swerve-band` 4095,
+  unsighted (an observation that never entered a context); recording a reply preserves that marker. Failed
+  sampler admission/reset emits its cause and keeps any partial owner for session release. It runs no decode
+  or action, and does not substitute another greedy reply. Physical sampling witnesses belong to the test
+  surface; no fixed source flag enables retries. An incomplete close keeps the sampler attached and speaks
+  expected/released counts; a later session release cannot report success by forgetting that owner.
+  `form-cli-code-swerve-band` 4095,
   `form-cli-code-bounded-note-band` 524287.
 - **The circle** (`form-cli-code-circle.bml`): the local satsang for code. Candidates are published over a toy
   copy of the gap and their band runs in a `./fkwu` child under a deadline; voices other than the writer's

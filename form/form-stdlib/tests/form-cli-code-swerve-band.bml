@@ -28,19 +28,17 @@
 ;        inside code.tool "verify", outcome ok
 ;   1024 the deliverable reserve: with remaining replies equal to the completion minimum, outside review, the
 ;        budget instruction says finish now; one more reply, or review, keeps the ordinary instruction
-;   2048 the live hook is off until the physical check reads as expected: fcsw-reply over content already
-;        decoded decodes greedy with no sampler, records seed 0, holds the seed (seeds_held 1), counts the
-;        context it was decoded in (contexts 1), and its code.decode stage closes as "greedy"
+;   2048 repeated content tries sampler admission, retains a refused owner and cause without decoding;
+;        an unsighted observation remains unsighted when recording a reply
 ;
 ; The physical check needs the local GPU on a quiet machine, never while LoRA trains:
 ;   printf 'physical\n' | ./fkwu form/form-stdlib/tests/form-cli-code-swerve-band.bml
 ; prints swerve-physical with greedy, seeded and seeded-again quanta from qwen38-q8 on one fixture prompt (seed
 ; 1729), each [ids owned owned-after released pending], and one seeded coding reply on the closure-unit-line
-; state through fcsw-reply-seeding and the lane's own decode, [seeded-replies stopped json ids detached
+; state through fcsw-reply and the lane's own decode, [seeded-replies stopped native-cell ids detached
 ; released]; then swerve-physical-verdict ok when seeded IDs differ from greedy, the same seed reproduces them,
-; the sampler owns 0 handles after close, every session releases, and the seeded reply stops as complete JSON.
-; Only that ok opens seeding in the live loop (fcsw-seeding-live, form-cli-code-swerve.bml). A terminal stdin
-; skips it; the band sweep's /dev/null skips it.
+; the sampler owns 0 handles after close, every session releases, and the seeded reply submits a native cell.
+; A terminal stdin skips it; the band sweep's /dev/null skips it. Admission is observed live, never source-gated.
 section [form.bml] {
  class FormCliCodeSwerveBand {
   def swb-bit(ok, bit) = ok ? bit : 0;
@@ -158,35 +156,53 @@ section [form.bml] {
   def swb-session(observed) = fcms-session("live", "band", "", "", [], [], 64, 10, 7, 0, 0, 0, 0, observed);
   def swb-decode() = (sess, state, started, stops, ids) => fcms-generation("", [5, 6, 7], fcms-with-stream(sess, 13, 9, 1, 3, 0, 0));
   def swb-kept() = (g, state, checker, turns, started) => [g, state];
-  def swb-held() {
+  def swb-refused() {
    let s = swb-start();
    let seen = fcsw-record(s, fcsw-content(s), 0, 0);
    let cursor = swb-bus?() ? swb-head() : 0;
-   let out = fcsw-reply(swb-session(0), seen, swb-checker(), 24, now_unix_ms(), [0, 1], swb-decode(), swb-kept());
+   let out = fcsw-reply-with(swb-session(0), seen, swb-checker(), 24, now_unix_ms(), [0, 1], (sess,state,started,stops,ids) => fail(), swb-kept(), (sess,seed) => []);
    let slot = fcsw-slot(out[1]);
    let pairs = fcsw-telemetry-pairs(out[1]);
    let rows = swb-staged(swb-mine(cursor), "code.decode", "greedy");
-   fcsw-seeding-live() == 0 && fcsw-decision(seen)[1] == 1 && nil?(fcsam-owner(fcms-generation-session(out[0]))) && slot[3] == 2 && slot[4] == 0 && slot[8] == 0
-   && slot[2][-1][1] == 0 && node_value(swb-pair(pairs, "seeds_held")) == 1 && node_value(swb-pair(pairs, "contexts")) == 1 && (!swb-bus?() || swb-pair-closed(rows, "ok"));
+   let unsighted = fcsw-mark-unsighted(seen);
+   let kept = fcsw-record(unsighted,fcsw-content(unsighted),0,0);
+   fcsw-decision(seen)[1] == 1 && !fcms-live?(fcms-generation-session(out[0])) && fcms-reason(fcms-generation-session(out[0])) == "sampling-admission-failed" && nil?(fcms-generation-ids(out[0])) && slot[3] == 1 && slot[4] == 0 && slot[8] == 1
+   && fcsw-unsighted(kept) == 1 && node_value(swb-pair(pairs,"seeds_held")) == 0 && (!swb-bus?() || swb-pair-closed(rows,"sampling-admission-failed"));
   }
   // ── the physical check ──
+  // The quantum witness uses the live reply's own admission, reset and release.
+  def swb-physical-quanta(model,prompt,n,seed) {
+   let path=mr-path(mr-find(model));
+   [swb-physical-quantum(path,prompt,n,0),swb-physical-quantum(path,prompt,n,seed),swb-physical-quantum(path,prompt,n,seed)];
+  }
+  def swb-physical-quantum(path,prompt,n,seed) {
+   let s=swb-start();
+   let session=fcms-open-with-profile(path,prompt,4096,"knowledge-query");
+   let seen=seed>0 ? fcsw-record(s,fcsw-content(s),0,0) : s;
+   let held=record_new(0,"owned",0,"pending",0);
+   let decoded=(sess,state,started,stops,ids)=>{ let generation=fcacs-quantum(sess,stops,n); record_set(held,"owned",fcsam-owned(fcsam-owner(fcms-generation-session(generation)))); record_set(held,"pending",fcms-pending(fcms-generation-session(generation))>=0 ? 1 : 0); generation; };
+   let out=fcms-live?(session) ? fcsw-reply-with(session,seen,swb-checker(),24,now_unix_ms(),fcacs-stops(session,qsx-load(path)),decoded,swb-kept(),(sess,chosen)=>fcsw-sampler(sess,seed)) : [fcms-generation("",[],session),seen];
+   let after=fcms-generation-session(out[0]);
+   [fcms-generation-ids(out[0]),record_get(held,"owned"),fcsam-owned(fcsam-owner(after)),fcms-release-ok?(after),record_get(held,"pending")];
+  }
   // one seeded coding reply on metal: content already decoded once, seeding open for this reply only
   def swb-physical-reply(model) {
    let s = swb-start();
    let seen = fcsw-record(s, fcsw-content(s), 0, 0);
    let session = fcac-model-ready(model) ? fcac-open-budget(model, seen, 16384, 24) : fcms-session("refused", "model-not-ready", "", "", [], [], 0, 0, 0 - 1, 1, 0, 0, 0, 0);
-   let out = fcms-live?(session) ? fcsw-reply-seeding(session, seen, swb-checker(), 24, now_unix_ms(), fcacs-stops(session, qsx-load(fcms-path(session))), fcac-decode, swb-kept(), 1) : [fcms-generation("", [], session), seen];
+   let out = fcms-live?(session) ? fcsw-reply(session, seen, swb-checker(), 24, now_unix_ms(), fcacs-stops(session, qsx-load(fcms-path(session))), fcac-decode, swb-kept()) : [fcms-generation("", [], session), seen];
    let after = fcms-generation-session(out[0]);
-   let text = fat-trim(fcms-generation-text(out[0]));
+   let cells = fcac-control-submissions();
+   let submitted = len(cells)==1 && !nothing?(fcap-node-object(cells[0]));
    let detached = nil?(fcsam-owner(after)) ? 1 : 0;
    let released = fcms-live?(session) ? fcms-release-ok?(after) : 0;
-   [fcsw-slot(out[1])[4], fcms-stopped?(after) ? 1 : 0, faj-valid(text) ? 1 : 0, len(fcms-generation-ids(out[0])), detached, released];
+   [fcsw-slot(out[1])[4], fcms-stopped?(after) || submitted ? 1 : 0, submitted ? 1 : 0, len(fcms-generation-ids(out[0])), detached, released];
   }
   def swb-physical-ok(q, r) = !((Value) q[0][0] == q[1][0]) && (Value) q[1][0] == q[2][0] && len(q[1][0]) > 0 && q[1][2] == 0 && q[2][2] == 0
    && q[0][3] == 1 && q[1][3] == 1 && q[2][3] == 1 && r[0] == 1 && r[1] == 1 && r[2] == 1 && r[4] == 1 && r[5] == 1;
   def swb-physical() {
    let ask = isatty() == 1 ? nothing() : read_line();
-   !nothing?(ask) && ask == "physical" ? swb-physical-said(fcsw-physical("qwen38-q8", "Write one Form definition (defn add2 (a b) ...) that answers the sum of a and b.", 8, 1729), swb-physical-reply("qwen38-q8")) : 0;
+   !nothing?(ask) && ask == "physical" ? swb-physical-said(swb-physical-quanta("qwen38-q8", "Read the current source through a native Form action.", 64, 1729), swb-physical-reply("qwen38-q8")) : 0;
   }
   def swb-physical-said(q, r) {
    let said = print_str("swerve-physical " ++ json-emit(fcam-pack([q, r])));
@@ -200,7 +216,7 @@ section [form.bml] {
  let verdict = swb-bit(swb-sequence(walk), 1) + swb-bit(swb-seeds(walk) == swb-seeds(again) && swb-seeds(walk)[3] > 0, 2) + swb-bit(swb-counters(walk), 4)
   + swb-bit(swb-docs-change(walk[1][3]), 8) + swb-bit(swb-renewal(walk), 16) + swb-bit(swb-third(walk), 32) + swb-bit(swb-files(), 64)
   + swb-bit(swb-telemetry(walk), 128) + swb-bit(swb-reply(), 256) + swb-bit(swb-tool-check(), 512) + swb-bit(swb-reserve(), 1024)
-  + swb-bit(swb-held(), 2048);
+   + swb-bit(swb-refused(), 2048);
  let physical = swb-physical();
  print_str("form-cli-code-swerve-band " ++ verdict.str() ++ " seeds=" ++ json-emit(json-node-array(swb-seeds(walk) |> map(json-node-int))));
  verdict;
