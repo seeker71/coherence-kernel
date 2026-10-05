@@ -51,13 +51,17 @@ section [form.bml] {
   // the trailing run of entries that share the newest entry's documents digest and context
   def fcctg-span(window) = nil?(window) ? [] : fcctg-span-of(reverse(window), reverse(window)[0], []);
   def fcctg-span-of(rev, newest, out) = nil?(rev) || !fcctg-same-span?(rev[0], newest) ? out : fcctg-span-of(rev[1:], newest, cons(rev[0], out));
-  def fcctg-stillstreak(window) = fcctg-streak(fcctg-span(window), [], 0);
+  def fcctg-stillstreak(window) = max2(fcctg-streak(fcctg-span(window), [], 0), fcctg-returns(window));
+  // the turns whose documents came back to a state an earlier turn of the same context left, after another state between
+  // (an edit and its undo, again): the span above restarts at every changed document, so this is the loop it cannot see
+  def fcctg-returns(window) = fcctg-return-go(window, [], "", 0 - 1, 0);
+  def fcctg-return-go(w, seen, prev, ctx, n) = nil?(w) ? n : fcctg-return-go(w[1:], fcctg-context(w[0]) == ctx ? cons(w[0][2], seen) : [w[0][2]], w[0][2], fcctg-context(w[0]), n + (fcctg-context(w[0]) == ctx && w[0][2] != prev && fat-has(seen, w[0][2]) ? 1 : 0));
   def fcctg-seen?(seen, e) = any?(p => p[0] == e[0] && p[1] == e[1], seen);
   def fcctg-streak(span, seen, n) = nil?(span) ? n : fcctg-streak(span[1:], cons(span[0], seen), fcctg-seen?(seen, span[0]) ? n + 1 : n);
   // the action a streak crossing selects: "" below the swerve, then swerve, replan, end
   def fcctg-action(before, after) = after <= before ? "" : after >= fcctg-end-at() ? "end" : after == fcctg-replan-at() ? "replan" : after == fcctg-swerve-at() ? "swerve" : "";
-  def fcctg-swerve-note(streak, tool, near) = "Turn guard: the same " ++ tool ++ " call returned the same result again with no document change since (stillstreak " ++ streak.str()
-   ++ "). Repeating it is not progress. Change the approach: use the resident bytes the evidence shows" ++ (nothing?(near) ? "" : " (nearest_span below holds the closest resident lines)")
+  def fcctg-swerve-note(streak, tool, near, back) = "Turn guard: " ++ (back >= streak ? ("the documents came back to a state an earlier turn already left (an edit and its undo, " ++ back.str() ++ " returns)") : ("the same " ++ tool ++ " call returned the same result again with no document change since (stillstreak " ++ streak.str() ++ ")"))
+   ++ ". Repeating it is not progress. Change the approach: use the resident bytes the evidence shows" ++ (nothing?(near) ? "" : " (nearest_span below holds the closest resident lines)")
    ++ ", or choose another tool or plan. " ++ (nothing?(near) ? "" : "nearest_span=" ++ json-emit(near) ++ " ");
 
   // ── tool names ──────────────────────────────────────────────────────────
@@ -115,13 +119,61 @@ section [form.bml] {
    json-node-pair("tool_before", json-node-string(from)), json-node-pair("tool_after", json-node-string(to)), json-node-pair("fields", json-node-array(fcctg-strings(fields))),
    json-node-pair("scope", json-node-string("call shape only; role, writable paths, guards and caller checks decide as before"))]));
   // [text rows refusal]: the call text the policy reads, the repair rows, and a refusal note ("" when none)
-  def fcctg-repair(raw, names) = !faj-valid(raw) ? [raw, [], ""] : fcctg-repair-obj(raw, names, parse-json("turn-guard-call", raw));
-  def fcctg-repair-obj(raw, names, obj) = !(fat-wire-object?(obj) && json-object-has?(obj, "tool") && fat-wire-string?(json-object-get(obj, "tool"))) ? [raw, [], ""]
+  def fcctg-repair(raw, names) = faj-valid(raw) ? fcctg-repair-obj(raw, names, parse-json("turn-guard-call", raw)) : fcctg-read(raw, names);
+  // A reply that is no JSON as it stands is read the way a small model writes it: the answer after its reasoning block,
+  // inside a tool_call tag or a code fence, among prose, with trailing commas, bare keys or single quotes. Only text
+  // that then reads as JSON replaces the reply (one row names the repairs), and it enters the same boundary as any call;
+  // a reply this cannot read stays as it was for the closer and the syntax feedback below it.
+  def fcctg-read(raw, names) {
+   let read = fcctg-tolerate(raw);
+   nil?(read[1]) ? [raw, [], ""] : fcctg-read-rows(raw, read, fcctg-repair-obj(read[0], names, parse-json("turn-guard-call", read[0])));
+  }
+  def fcctg-read-rows(raw, read, one) = [one[0], cons(fcctg-row("native-reply-read", raw, read[0], "", "", read[1]), one[1]), one[2]];
+  def fcctg-has(s, mark) = str_find(s, mark, 0) >= 0;
+  def fcctg-after(s, mark) = substring(s, str_find(s, mark, 0) + len(mark), len(s));
+  def fcctg-before(s, mark) = fcctg-has(s, mark) ? substring(s, 0, str_find(s, mark, 0)) : s;
+  def fcctg-unthink(s) = fcctg-has(s, "</think>") ? fcctg-after(s, "</think>") : s;
+  def fcctg-untag(s) = fcctg-has(s, "<tool_call>") ? fcctg-before(fcctg-after(s, "<tool_call>"), "</tool_call>") : s;
+  def fcctg-fence-body(t) = (fcctg-has(t, "\n") && str_find(t, "\n", 0) < 12 && !fat-starts(fat-trim(t), "{")) ? fcctg-after(t, "\n") : t;
+  def fcctg-unfence(s) = fcctg-has(s, "```") ? fcctg-before(fcctg-fence-body(fcctg-after(s, "```")), "```") : s;
+  def fcctg-last-brace(s, i) = i < 0 ? 0 - 1 : str_byte_at(s, i) == 125 ? i : fcctg-last-brace(s, i - 1);
+  def fcctg-braces(s) = (fcctg-has(s, "{") && fcctg-last-brace(s, len(s) - 1) > str_find(s, "{", 0)) ? substring(s, str_find(s, "{", 0), fcctg-last-brace(s, len(s) - 1) + 1) : s;
+  // [text repairs]: each stage that changed the text is named; the lenient stage runs only when the stages above left no JSON
+  def fcctg-stage(acc, name, f) = (String) f(acc[0]) == acc[0] ? acc : [fat-trim(f(acc[0])), append(acc[1], [name])];
+  def fcctg-tolerate(raw) {
+   let a = fcctg-stage(fcctg-stage(fcctg-stage(fcctg-stage([raw, []], "think-block", fcctg-unthink), "tool-call-tag", fcctg-untag), "code-fence", fcctg-unfence), "prose-around", fcctg-braces);
+   let l = faj-valid(a[0]) ? a : fcctg-stage(a, "lenient-json", fcctg-lenient);
+   faj-valid(l[0]) ? l : [raw, []];
+  }
+  // trailing commas dropped, bare keys quoted, single-quoted strings double-quoted; one pass over the bytes, strings left whole
+  def fcctg-lenient(s) = len(s) > 32768 ? s : str-join(fcctg-len-go(s, 0, len(s), [], 0, 0));
+  def fcctg-closes?(s, i, n) = i >= n ? false : str_byte_at(s, i) <= 32 ? fcctg-closes?(s, i + 1, n) : (str_byte_at(s, i) == 125 || str_byte_at(s, i) == 93);
+  def fcctg-colon?(s, i, n) = i >= n ? false : str_byte_at(s, i) <= 32 ? fcctg-colon?(s, i + 1, n) : str_byte_at(s, i) == 58;
+  def fcctg-word-byte?(b) = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+  def fcctg-word-end(s, i, n) = (i < n && (fcctg-word-byte?(str_byte_at(s, i)) || (str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57))) ? fcctg-word-end(s, i + 1, n) : i;
+  def fcctg-len-go(s, i, n, out, q, p) = i >= n ? reverse(out) : fcctg-len-at(s, i, n, out, q, p, str_byte_at(s, i), substring(s, i, i + 1));
+  def fcctg-len-at(s, i, n, out, q, p, b, c) {
+   if q == 1 then (b == 92 && i + 1 < n ? fcctg-len-go(s, i + 2, n, cons(substring(s, i, i + 2), out), 1, p) : fcctg-len-go(s, i + 1, n, cons(c, out), b == 34 ? 0 : 1, p))
+   else if q == 2 then (b == 92 && i + 1 < n && str_byte_at(s, i + 1) == 39 ? fcctg-len-go(s, i + 2, n, cons("'", out), 2, p) : b == 39 ? fcctg-len-go(s, i + 1, n, cons("\"", out), 0, 34) : fcctg-len-go(s, i + 1, n, cons(b == 34 ? "\\\"" : c, out), 2, p))
+   else if b == 34 then fcctg-len-go(s, i + 1, n, cons(c, out), 1, 34)
+   else if b == 39 then fcctg-len-go(s, i + 1, n, cons("\"", out), 2, 34)
+   else if b == 44 && fcctg-closes?(s, i + 1, n) then fcctg-len-go(s, i + 1, n, out, 0, p)
+   else if fcctg-word-byte?(b) then fcctg-len-word(s, i, n, out, p, fcctg-word-end(s, i, n))
+   else fcctg-len-go(s, i + 1, n, cons(c, out), 0, b <= 32 ? p : b);
+  }
+  def fcctg-len-word(s, i, n, out, p, e) = fcctg-len-go(s, e, n, cons((p == 123 || p == 44) && fcctg-colon?(s, e, n) ? ("\"" ++ substring(s, i, e) ++ "\"") : substring(s, i, e), out), 0, 97);
+  // the reply that repeats the observation it was given (role, mode, instruction first) is input, not an action
+  def fcctg-echo?(t) = fat-starts(fat-trim(t), "{\"role\":\"") && str_find(t, "\"mode\":\"", 0) > 0 && str_find(t, "\"mode\":\"", 0) < 48;
+  def fcctg-echo-note() = "Typed repair request [echo]: the reply repeated the observation it was given (role, mode, instruction, observation), which is input and no action. Reply with one action for the current role: a native tool call {\"tool\":...,\"arguments\":[...]} or this role's own fields.";
+  def fcctg-noop?(tool, strs) = tool == "edit" && ((len(strs) == 3 && (String) strs[1] == strs[2]) || (len(strs) == 4 && (String) strs[2] == strs[3]));
+  def fcctg-noop-note() = "Typed repair request [no-op]: the edit replaces a span with the same text, so it changes no document. Name the span that must change and the text that replaces it.";
+  def fcctg-repair-obj(raw, names, obj) = fcctg-echo?(raw) ? [raw, [], fcctg-echo-note()] : !(fat-wire-object?(obj) && json-object-has?(obj, "tool") && fat-wire-string?(json-object-get(obj, "tool"))) ? [raw, [], ""]
    : fcctg-repair-named(raw, obj, fcctg-name(node_value(json-object-get(obj, "tool")), names), names);
   def fcctg-repair-named(raw, obj, named, names) = named[0] == "ambiguous" ? [raw, [], "Tool name \"" ++ node_value(json-object-get(obj, "tool")) ++ "\" reads as more than one native tool: " ++ str-join-with(named[2], ", ") ++ ". Use one exact name."]
    : named[0] == "unknown" ? [raw, [], "Unknown tool \"" ++ fcctg-shown(node_value(json-object-get(obj, "tool"))) ++ "\". Native tools: " ++ str-join-with(names, ", ") ++ "."]
    : fcctg-repair-args(raw, obj, named, json-object-has?(obj, "arguments") ? fcctg-args(named[1], json-object-get(obj, "arguments")) : ["absent", [], [], []]);
   def fcctg-repair-args(raw, obj, named, args) = args[0] == "refused" ? [raw, [], fcctg-arguments-note(named[1], args[2])]
+   : fcctg-noop?(named[1], args[1]) ? [raw, [], fcctg-noop-note()]
    : named[0] == "exact" && args[0] != "repaired" ? [raw, [], ""]
    : fcctg-rebuilt(raw, named, args, json-emit(json-node-object(json-object-pairs(obj) |> map(p => fcctg-pair(p, named, args)))));
   def fcctg-pair(p, named, args) = json-pair-key(p) == "tool" ? json-node-pair("tool", json-node-string(named[1]))
@@ -130,6 +182,15 @@ section [form.bml] {
   def fcctg-rebuilt(raw, named, args, text) = [text, append(named[0] == "repaired" ? [fcctg-row("native-tool-name-repair", raw, text, fcctg-tool-of(raw), named[1], ["tool"])] : [],
    args[0] == "repaired" ? [fcctg-row("native-tool-argument-repair", raw, text, fcctg-tool-of(raw), named[1], args[3])] : []), ""];
   def fcctg-tool-of(raw) = node_value(json-object-get(parse-json("turn-guard-call", raw), "tool"));
+
+  // ── the bounded note ────────────────────────────────────────────────────
+  // What a fresh context carries of earlier turns is bounded: a text over its cap keeps its head and its tail (an ending, a
+  // total, a closing brace live there), cut on code points, the middle named by its size.
+  def fcctg-cont?(b) = b >= 128 && b <= 191;
+  def fcctg-back(t, i) = (i > 0 && fcctg-cont?(str_byte_at(t, i))) ? fcctg-back(t, i - 1) : i;
+  def fcctg-fwd(t, i) = (i < len(t) && fcctg-cont?(str_byte_at(t, i))) ? fcctg-fwd(t, i + 1) : i;
+  def fcctg-squeeze(t, cap) = len(t) <= cap ? t : fcctg-squeezed(t, fcctg-back(t, (cap * 2) / 3), fcctg-fwd(t, len(t) - (cap / 3)));
+  def fcctg-squeezed(t, h, e) = substring(t, 0, h) ++ "\n[... " ++ (e - h).str() ++ " bytes omitted ...]\n" ++ substring(t, e, len(t));
 
   // ── the counterexample ──────────────────────────────────────────────────
   def fcctg-assertion-prefix() = "Failed caller assertion: ";
