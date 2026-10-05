@@ -1,0 +1,278 @@
+// qwen35-dense-spec.fk — speculative decoding for the dense Qwen3.5/Qwen3.8 lane, from the MTP head the GGUF already carries.
+//
+// Decode is bound by streaming every weight once a token. Checking k drafted tokens is ONE weight pass (a span through the
+// layers), so the tokens the model accepts of its own draft are tokens the bandwidth wall did not charge for. The draft is the
+// model's own MTP head: blk.<nL> (one full-attention block, dense FFN) and the four nextn tensors. The graph, as llama.cpp
+// builds it (src/models/qwen35.cpp graph_mtp), read from the source:
+//     h' = rms(h, hnorm)   e' = rms(embed(token), enorm)   cur = eh_proj . [e' ; h']        (e' first, then h')
+//     cur = cur + FullAttnBlock(rms(cur, attn_norm))        (its own K/V cache, position = the token's position)
+//     cur = cur + FFN(rms(cur, post_attention_norm))
+//     h_next = rms(cur, shared_head_norm)                   (the hidden the NEXT chained draft step takes as its h)
+//     logits = output.weight . h_next                       (the main model's own head)
+// where h is the main model's hidden AFTER output_norm at the position before the token (h_nextn = result_norm), and the
+// token is the one sampled from that hidden: the head at position q pairs (h_{q-1}, x_q) and predicts x_{q+1}.
+//
+// WHAT THIS FILE ADDS, all appended and local (its own pipeline list, so the lane's 63 pipelines keep their indices):
+//   * mvk: a Q8_0 matvec over NT activation columns (NT = 1..8) that reads each weight once and keeps the wide matvec's
+//     arithmetic and reduction order exactly, token by token (a verification column is the same bits as a decode matvec).
+//   * snapshot variants of the two recurrences (conv window, delta state): after every token but the last of a span they write
+//     the state they reached into a per-layer snapshot slot, so a rejected draft restores by a copy, never by recompute.
+//   * span embedding from a device id buffer, row concat, span argmax: a verified step needs no host round trip but one.
+//
+import native/metal/qwen35-dense-token-handle.fk;
+section [form.bml] {
+    def q38s-cat(parts) = (Comparable) len(parts) == 0 ? "" : ((String) parts[0] + q38s-cat(parts[1:]));
+    def q38s-nt-max() = 8;
+    // ── mvk ────────────────────────────────────────────────────────────────
+    def q38s-mvk-msl(nt) = q38s-cat(["kernel void form_q38s_mvk", nt.str(), " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ystride [[buffer(5)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 ntg [[threads_per_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { threadgroup float sh[", (nt * 64).str(), "]; uint nb = cols / 32u; uint r0 = tgpig.x * 2u; uint nsg = (uint)ntg.x / 32u; uint stride = nsg * 8u; ushort ix = tiisg / 4u; ushort il = tiisg - ix * 4u; uint ib0 = (uint)sgitg * 8u + (uint)ix; float sumf[", (nt * 2).str(), "]; for (uint a = 0u; a < ", (nt * 2).str(), "u; ++a) { sumf[a] = 0.0f; } for (uint ib = ib0; ib < nb; ib += stride) { char4 wa[2]; char4 wc[2]; float dd[2]; for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) { wa[row] = char4(0); wc[row] = char4(0); dd[row] = 0.0f; } else { ulong bo = ((ulong)r * (ulong)nb + (ulong)ib) * 34ul; ushort h = (ushort)qb[bo] | ((ushort)qb[bo + 1ul] << 8); device const uchar* qs = qb + bo + 2ul + (ulong)((uint)il * 8u); wa[row] = char4(*(device const packed_char4*)(qs)); wc[row] = char4(*(device const packed_char4*)(qs + 4)); dd[row] = float(as_type<half>(h)); } } for (uint t = 0u; t < ", nt.str(), "u; ++t) { device const float* yb = x + (ulong)t * (ulong)cols + (ulong)ib * 32ul + (ulong)il * 8ul; packed_float4 ya = *(device const packed_float4*)(yb); packed_float4 yc = *(device const packed_float4*)(yb + 4); for (ushort row = 0u; row < 2u; ++row) { float sumq = 0.0f; sumq = metal::fma(float(wa[row].x), ya.x, sumq); sumq = metal::fma(float(wa[row].y), ya.y, sumq); sumq = metal::fma(float(wa[row].z), ya.z, sumq); sumq = metal::fma(float(wa[row].w), ya.w, sumq); sumq = metal::fma(float(wc[row].x), yc.x, sumq); sumq = metal::fma(float(wc[row].y), yc.y, sumq); sumq = metal::fma(float(wc[row].z), yc.z, sumq); sumq = metal::fma(float(wc[row].w), yc.w, sumq); sumf[t * 2u + (uint)row] = metal::fma(sumq, dd[row], sumf[t * 2u + (uint)row]); } } } for (uint a = 0u; a < ", (nt * 2).str(), "u; ++a) { sumf[a] = metal::simd_sum(sumf[a]); } if (sgitg == 0u) { for (uint a = 0u; a < ", (nt * 2).str(), "u; ++a) { sh[a * 32u + (uint)tiisg] = 0.0f; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) { for (uint a = 0u; a < ", (nt * 2).str(), "u; ++a) { sh[a * 32u + (uint)sgitg] = sumf[a]; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint a = 0u; a < ", (nt * 2).str(), "u; ++a) { float tot = metal::simd_sum(sh[a * 32u + (uint)tiisg]); if (tiisg == 0u && sgitg == 0u) { uint t = a / 2u; uint r = r0 + (a - t * 2u); if (r < rows) { y[(ulong)t * (ulong)ystride + (ulong)r] = tot; } } } }"]);
+    def q38s-mvk-all-go(nt) = nt > q38s-nt-max() ? "" : ((String) q38s-mvk-msl(nt) + q38s-mvk-all-go(nt + 1));
+    // ── embedding a span of tokens whose ids live on the device (the drafts the chain just chose) ──
+    def q38s-embed-msl() = "kernel void form_q38s_embed_ids (device const uchar* qb [[buffer(0)]], device const uint* ids [[buffer(1)]], device float* d [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& ntok [[buffer(4)]], constant uint& idoff [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint t = gid / n; if (t >= ntok) return; uint i = gid - t * n; ulong idx = (ulong)ids[idoff + t] * (ulong)n + (ulong)i; ulong blk = idx / 32ul; uint k = (uint)(idx - blk * 32ul); ulong b = blk * 34ul; ushort hb = (ushort)qb[b] | ((ushort)qb[b + 1ul] << 8); float dd = float(as_type<half>(hb)); float q = float(as_type<char>(qb[b + 2ul + (ulong)k])); d[(ulong)t * (ulong)n + (ulong)i] = dd * q; }";
+    // y[t] = [a[t] ; b[t]], rows of n floats: the input of eh_proj
+    def q38s-concat-msl() = "kernel void form_q38s_concat2 (device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& ntok [[buffer(4)]], uint gid [[thread_position_in_grid]]) { uint w = 2u * n; uint t = gid / w; if (t >= ntok) return; uint i = gid - t * w; y[(ulong)t * (ulong)w + (ulong)i] = i < n ? a[(ulong)t * (ulong)n + (ulong)i] : b[(ulong)t * (ulong)n + (ulong)(i - n)]; }";
+    // ── the two recurrences with a snapshot of the state after every token but the last ──
+    // The bodies are q38-conv-span-msl and q38-delta-span-msl line for line; the only addition is the write into snap.
+    def q38s-conv-snap-msl() = "kernel void form_q38s_conv_snap (device float* win [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device float* y [[buffer(3)]], device float* snap [[buffer(4)]], constant uint& nch [[buffer(5)]], constant uint& kw [[buffer(6)]], constant uint& stride [[buffer(7)]], constant uint& ntok [[buffer(8)]], constant uint& snapstride [[buffer(9)]], uint c [[thread_position_in_grid]]) { if (c >= nch) return; uint b = c * kw; for (uint t = 0u; t < ntok; ++t) { for (uint j = 0u; j + 1u < kw; ++j) { win[b + j] = win[b + j + 1u]; } win[b + kw - 1u] = x[t * stride + c]; float acc = 0.0f; for (uint j = 0u; j < kw; ++j) { acc = acc + win[b + j] * w[b + j]; } y[t * stride + c] = acc; if (t + 1u < ntok) { for (uint j = 0u; j < kw; ++j) { snap[t * snapstride + b + j] = win[b + j]; } } } }";
+    def q38s-delta-snap-msl() = "kernel void form_q38s_delta_snap (device float* S [[buffer(0)]], device const float* c [[buffer(1)]], device const float* alpha [[buffer(2)]], device const float* beta [[buffer(3)]], device float* o [[buffer(4)]], device float* snap [[buffer(5)]], constant uint& nv [[buffer(6)]], constant uint& dv [[buffer(7)]], constant uint& dk [[buffer(8)]], constant uint& nk [[buffer(9)]], constant float& qscale [[buffer(10)]], constant uint& cstride [[buffer(11)]], constant uint& gstride [[buffer(12)]], constant uint& ostride [[buffer(13)]], constant uint& ntok [[buffer(14)]], constant uint& snapstride [[buffer(15)]], uint gid [[thread_position_in_grid]]) { if (gid >= nv * dv) return; uint h = gid / dv; uint i = gid - h * dv; uint kh = h - (h / nk) * nk; uint r = (h * dv + i) * dk; for (uint t = 0u; t < ntok; ++t) { uint co = t * cstride; device const float* q = c + co + kh * dk; device const float* k = c + co + nk * dk + kh * dk; float v = c[co + 2u * nk * dk + h * dv + i]; float al = alpha[t * gstride + h]; float pred = 0.0f; for (uint j = 0u; j < dk; ++j) { float sp = al * S[r + j]; S[r + j] = sp; pred = pred + sp * k[j]; } float err = v - pred; float bw = beta[t * gstride + h] * err; float acc = 0.0f; for (uint j = 0u; j < dk; ++j) { float sn = S[r + j] + bw * k[j]; S[r + j] = sn; acc = acc + sn * (qscale * q[j]); if (t + 1u < ntok) { snap[t * snapstride + r + j] = sn; } } o[t * ostride + h * dv + i] = acc; } }";
+    // ── the argmax over every position of a span: stage one a chunk a thread (the lane's rule: strict >, lowest index wins), stage two a
+    // threadgroup a position folding the partials ascending. out/oval are written at ooff + position.
+    def q38s-argpart-msl() = "kernel void form_q38s_argmax_part (device const float* x [[buffer(0)]], device uint* pi [[buffer(1)]], device float* pv [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& parts [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint t = gid / parts; if (t >= ntok) return; uint p = gid - t * parts; ulong xo = (ulong)t * (ulong)n; uint chunk = (n + parts - 1u) / parts; uint lo = p * chunk; uint hi = lo + chunk; if (hi > n) hi = n; if (lo >= hi) { pi[t * parts + p] = 0u; pv[t * parts + p] = x[xo]; return; } uint best = lo; float bv = x[xo + lo]; uint i = lo + 1u; while (i < hi) { float xv = x[xo + i]; if (xv > bv) { bv = xv; best = i; } i += 1u; } pi[t * parts + p] = best; pv[t * parts + p] = bv; }";
+    def q38s-argcomb-msl() = "kernel void form_q38s_argmax_comb (device const uint* pi [[buffer(0)]], device const float* pv [[buffer(1)]], device uint* out [[buffer(2)]], device float* oval [[buffer(3)]], constant uint& parts [[buffer(4)]], constant uint& ooff [[buffer(5)]], uint tg [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup uint li[4096]; threadgroup float lv[4096]; uint po = tg * parts; uint j = t; while (j < parts) { li[j] = pi[po + j]; lv[j] = pv[po + j]; j += nt; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t != 0u) return; uint best = li[0]; float bv = lv[0]; uint p = 1u; while (p < parts) { if (lv[p] > bv) { bv = lv[p]; best = li[p]; } p += 1u; } out[ooff + tg] = best; oval[ooff + tg] = bv; }";
+    def q38s-msl() = ("#include <metal_stdlib>\n#pragma clang fp contract(off)\n" + (q38s-mvk-all-go(1) + (q38s-embed-msl() + (q38s-concat-msl() + (q38s-conv-snap-msl() + (q38s-delta-snap-msl() + (q38s-argpart-msl() + q38s-argcomb-msl())))))));
+    // qs: 0..7 mvk NT 1..8, 8 embed ids, 9 concat2, 10 conv snap, 11 delta snap, 12 argmax part, 13 argmax comb
+    def q38s-pipe-embed() = 8;
+    def q38s-pipe-concat() = 9;
+    def q38s-pipe-conv() = 10;
+    def q38s-pipe-delta() = 11;
+    def q38s-pipe-argpart() = 12;
+    def q38s-pipe-argcomb() = 13;
+    def q38s-pipes(msl) = [metal_pipeline(msl, "form_q38s_mvk1"), metal_pipeline(msl, "form_q38s_mvk2"), metal_pipeline(msl, "form_q38s_mvk3"), metal_pipeline(msl, "form_q38s_mvk4"), metal_pipeline(msl, "form_q38s_mvk5"), metal_pipeline(msl, "form_q38s_mvk6"), metal_pipeline(msl, "form_q38s_mvk7"), metal_pipeline(msl, "form_q38s_mvk8"), metal_pipeline(msl, "form_q38s_embed_ids"), metal_pipeline(msl, "form_q38s_concat2"), metal_pipeline(msl, "form_q38s_conv_snap"), metal_pipeline(msl, "form_q38s_delta_snap"), metal_pipeline(msl, "form_q38s_argmax_part"), metal_pipeline(msl, "form_q38s_argmax_comb")];
+    def q38s-pipes-ok?(qs) = kth-pipes-ok?(qs);
+    // the small-batch matvec: NT columns, one weight pass. Q8_0 only; any other type, or more columns than the kernel family holds,
+    // goes to the lane's batched matmul (q38-mv-batch-y), which answers to its own named bound.
+    def q38s-mv(ps, qs, tv, xh, yh, ntok, ystride, barrier) = ((Comparable) kth-tv-ty(tv) == 8 && ntok >= 1 && ntok <= q38s-nt-max()) ? metal_enqueue(qs[ntok - 1], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv), ystride], 256, 0, 1, barrier), ((Number) kth-tv-r(tv) + (Number) 1) / 2) : q38-mv-batch-y(ps, tv, xh, yh, ntok, ystride, barrier);
+    // ── the span blocks with the small-batch matvec (the lane's q38-full-attn-span / q38-ffn-span / q38-linear-attn-span-f, op for op) ──
+    def q38s-ffn-span(ps, qs, bs, geo, lay, ntok) = {
+        q38-rms-span(ps, bs[33], lay[1], bs[1], geo[0], geo[6], ntok, 1);
+        q38s-mv(ps, qs, lay[2], bs[1], bs[14], ntok, kth-tv-r(lay[2]), 1);
+        q38s-mv(ps, qs, lay[3], bs[1], bs[15], ntok, kth-tv-r(lay[3]), 0);
+        metal_enqueue(ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10] * ntok], 0, 1), geo[10] * ntok);
+        q38s-mv(ps, qs, lay[4], bs[16], bs[17], ntok, kth-tv-r(lay[4]), 1);
+        metal_enqueue(ps[19], q38-b16([bs[33], bs[17], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        1;
+    };
+    def q38s-full-attn-span(ps, qs, bs, geo, lay, st, pos0, ntok) = {
+        let nqhd = geo[12] * geo[14];
+        let nkvhd = geo[13] * geo[14];
+        q38-rms-span(ps, bs[33], lay[0], bs[1], geo[0], geo[6], ntok, 1);
+        q38s-mv(ps, qs, lay[5], bs[1], bs[2], ntok, q38-bs2-stride(geo), 1);
+        q38s-mv(ps, qs, lay[6], bs[1], bs[24], ntok, kth-tv-r(lay[6]), 0);
+        q38s-mv(ps, qs, lay[7], bs[1], bs[25], ntok, kth-tv-r(lay[7]), 0);
+        metal_enqueue(ps[34], q38-b16([bs[2], bs[22]], [nqhd, geo[14], 0, ntok, q38-bs2-stride(geo)], 0, 1), nqhd * ntok);
+        metal_enqueue(ps[34], q38-b16([bs[2], bs[23]], [nqhd, geo[14], geo[14], ntok, q38-bs2-stride(geo)], 0, 0), nqhd * ntok);
+        metal_enqueue(ps[35], q38-b16([bs[22], kth-tv-h(lay[8]), bs[22]], [geo[12], geo[14], geo[6], ntok], 0, 1), geo[12] * ntok);
+        metal_enqueue(ps[35], q38-b16([bs[24], kth-tv-h(lay[9]), bs[24]], [geo[13], geo[14], geo[6], ntok], 0, 0), geo[13] * ntok);
+        metal_enqueue(ps[36], q38-b16([bs[22]], [geo[12], geo[14], geo[15], pos0, geo[16], ntok], 0, 1), geo[12] * (geo[15] / 2) * ntok);
+        metal_enqueue(ps[36], q38-b16([bs[24]], [geo[13], geo[14], geo[15], pos0, geo[16], ntok], 0, 0), geo[13] * (geo[15] / 2) * ntok);
+        metal_enqueue(ps[37], q38-b16([bs[24], st[2]], [geo[20], pos0, ntok], 0, 1), geo[20] * ntok);
+        metal_enqueue(ps[37], q38-b16([bs[25], st[3]], [geo[20], pos0, ntok], 0, 0), geo[20] * ntok);
+        q38pa-enqueue(nth(ps, q38pa-index()), [bs[22], st[2], st[3], bs[26], bs[27]], [pos0, geo[12], geo[13], geo[14], geo[17], geo[18], ntok], geo[12] * ntok, 1);
+        metal_enqueue(ps[17], q38-b16([bs[26], bs[23]], [nqhd * ntok], 0, 1), nqhd * ntok);
+        q38s-mv(ps, qs, lay[10], bs[26], bs[10], ntok, kth-tv-r(lay[10]), 1);
+        metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        1;
+    };
+    // snp = [conv snapshots, delta snapshots]: slot t holds the state after token t of the span (t = 0..kmax-1)
+    def q38s-linear-attn-span(ps, qs, bs, geo, lay, st, snp, ntok) = {
+        let bs2-pitch = qlslc-bs2-output-pitch(geo);
+        q38-rms-span(ps, bs[33], lay[0], bs[1], geo[0], geo[6], ntok, 1);
+        q38s-mv(ps, qs, lay[5], bs[1], bs[2], ntok, bs2-pitch, 1);
+        q38s-mv(ps, qs, lay[7], bs[1], bs[3], ntok, kth-tv-r(lay[7]), 0);
+        q38s-mv(ps, qs, lay[8], bs[1], bs[4], ntok, kth-tv-r(lay[8]), 0);
+        q38s-mv(ps, qs, lay[12], bs[1], bs[7], ntok, kth-tv-r(lay[12]), 0);
+        metal_enqueue(qs[q38s-pipe-conv()], q38-b16([st[0], bs[2], kth-tv-h(lay[6]), bs[2], snp[0]], [geo[1], geo[23], bs2-pitch, ntok, geo[1] * geo[23]], 0, 1), geo[1]);
+        metal_enqueue(ps[8], q38-b16([bs[2]], [qlslc-bs2-allocation-elements(geo, ntok)], 0, 1), qlslc-bs2-allocation-elements(geo, ntok));
+        metal_enqueue(nth(ps, qlslc-l2norm-span-pipeline()), q38-b16([bs[2]], [2 * geo[2], geo[4], geo[6], bs2-pitch, ntok], 0, 1), 2 * geo[2] * ntok);
+        metal_enqueue(nth(ps, qlslc-gates-span-pipeline()), q38-b16([bs[3], bs[4], kth-tv-h(lay[9]), kth-tv-h(lay[10]), bs[5], bs[6]], [geo[3], ntok], 0, 1), geo[3] * ntok);
+        metal_enqueue(qs[q38s-pipe-delta()], q38-b16([st[1], bs[2], bs[5], bs[6], bs[8], snp[1]], [geo[3], geo[5], geo[4], geo[2], geo[7], bs2-pitch, geo[3], geo[3] * geo[5], ntok, geo[3] * geo[5] * geo[4]], 0, 1), geo[3] * geo[5]);
+        metal_enqueue(nth(ps, qlslc-norm-gate-span-pipeline()), q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6], ntok], 0, 1), geo[3] * ntok);
+        q38s-mv(ps, qs, lay[13], bs[9], bs[10], ntok, kth-tv-r(lay[13]), 1);
+        metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        1;
+    };
+    // ── the MTP head's tensors, the spec scratch, the snapshots ──
+    def q38s-find(src, base, path, name) = kth-tv-at(src, base, path, egg-find-tensor(src, name));
+    def q38s-bname(l, sfx) = ("blk." + (l.str() + sfx));
+    // [eh_proj, enorm, hnorm, shared_head_norm, layer(11 tensors in the lane's full-layer order)]
+    def q38s-mtp-tensors(src, base, path, l) = [q38s-find(src, base, path, q38s-bname(l, ".nextn.eh_proj.weight")), q38s-find(src, base, path, q38s-bname(l, ".nextn.enorm.weight")), q38s-find(src, base, path, q38s-bname(l, ".nextn.hnorm.weight")), q38s-find(src, base, path, q38s-bname(l, ".nextn.shared_head_norm.weight")), [q38s-find(src, base, path, q38s-bname(l, ".attn_norm.weight")), q38s-find(src, base, path, q38s-bname(l, ".post_attention_norm.weight")), q38s-find(src, base, path, q38s-bname(l, ".ffn_gate.weight")), q38s-find(src, base, path, q38s-bname(l, ".ffn_up.weight")), q38s-find(src, base, path, q38s-bname(l, ".ffn_down.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_q.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_k.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_v.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_q_norm.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_k_norm.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_output.weight"))]];
+    def q38s-snaps-go(l, n, interval, convn, deltan, kmax, acc) = l >= n ? acc : q38s-snaps-go(l + 1, n, interval, convn, deltan, kmax, append(acc, kth-full?(l, interval) ? [[0, 0]] : [[metal_buf_alloc(kmax * convn * 4), metal_buf_alloc(kmax * deltan * 4)]]));
+    // sx: 0 tok ids (device) 1 logits 2 argmax part idx 3 part val 4 verified ids 5 verified vals 6 main hidden rows (after output_norm)
+    //     7 chain hidden 8 zero row 9 snapshots per layer 10 mtp tensors 11 mtp state [0 0 K V] 12 kmax 13 chain argmax vals
+    def q38s-open(ctx, kmax, span) {
+        let geo = ctx[2];
+        let d = geo[0];
+        let vocab = geo[19];
+        let nt = q38s-nt-max();
+        let kvb = geo[20] * geo[18] * 4;
+        [metal_buf_alloc((span + 16) * 4), metal_buf_alloc(nt * vocab * 4), metal_buf_alloc(nt * 1024 * 4), metal_buf_alloc(nt * 1024 * 4), metal_buf_alloc(64), metal_buf_alloc(64), metal_buf_alloc(span * d * 4), metal_buf_alloc(d * 4), metal_buf_alloc(d * 4), q38s-snaps-go(0, geo[21], geo[22], q38-recur-conv-n(geo), q38-recur-delta-n(geo), kmax, []), q38s-mtp-tensors(ctx[7], ctx[8], ctx[9], geo[21]), [0, 0, metal_buf_alloc(kvb), metal_buf_alloc(kvb)], kmax, metal_buf_alloc(64)];
+    }
+    def q38s-free-snap-row(row) = (Number) q38-free-handle(row[0]) + (Number) q38-free-handle(row[1]);
+    def q38s-free-snaps(snps) = (Comparable) len(snps) == 0 ? 0 : (Number) q38s-free-snap-row(snps[0]) + (Number) q38s-free-snaps(snps[1:]);
+    def q38s-close(sx) = {
+        metal_sync();
+        let mt = sx[10];
+        let kv = sx[11];
+        sum([q38-free-handles([sx[0], sx[1], sx[2], sx[3], sx[4], sx[5], sx[6], sx[7], sx[8], sx[13], kv[2], kv[3]]), q38s-free-snaps(sx[9]), q38-free-tvs([mt[0], mt[1], mt[2], mt[3]]), q38-free-tvs(mt[4])]);
+    };
+    def q38s-ids-bytes(ids) = (Comparable) len(ids) == 0 ? "" : ((String) md-le32(ids[0]) + q38s-ids-bytes(ids[1:]));
+    def q38s-u32s(bytes, i, n) = i >= n ? [] : cons(kth-u32at(bytes, i), q38s-u32s(bytes, i + 1, n));
+    // ── the draft ──
+    // the MTP block over ntok tokens whose ids sit at ids[idoff..] on the device and whose preceding hidden rows are hbuf[0..ntok): the
+    // result is the block's output residual in bs[33], its K/V rows written at pos0.. in kv
+    def q38s-mtp-forward(ps, qs, bs, geo, mt, kv, embTv, idsbuf, idoff, hbuf, ntok, pos0) = {
+        metal_enqueue(qs[q38s-pipe-embed()], md-bind16([kth-tv-h(embTv), idsbuf, bs[33]], [geo[0], ntok, idoff], 256, 0, 0, 1), geo[0] * ntok);
+        q38-rms-span(ps, bs[33], mt[1], bs[17], geo[0], geo[6], ntok, 1);
+        q38-rms-span(ps, hbuf, mt[2], bs[18], geo[0], geo[6], ntok, 1);
+        metal_enqueue(qs[q38s-pipe-concat()], md-bind16([bs[17], bs[18], bs[14]], [geo[0], ntok], 256, 0, 0, 1), 2 * geo[0] * ntok);
+        q38s-mv(ps, qs, mt[0], bs[14], bs[33], ntok, geo[0], 1);
+        q38s-full-attn-span(ps, qs, bs, geo, mt[4], kv, pos0, ntok);
+        q38s-ffn-span(ps, qs, bs, geo, mt[4], ntok);
+        1;
+    };
+    // the draft head on row `row` of the residual in bs[33]: shared_head_norm, the main model's output head, the argmax into tok[outoff];
+    // the normed row (the next chained step's hidden) is kept in sx[7]
+    def q38s-draft-head(ps, qs, bs, geo, sx, projTv, row, outoff) = {
+        let mt = sx[10];
+        q38-gather(ps, bs, geo, row, 1);
+        q38-rms(ps, bs[0], mt[3], bs[1], geo[0], geo[6], 1);
+        q38-mv(ps, projTv, bs[1], bs[28], 1);
+        metal_enqueue(ps[24], q38-b16([bs[1], sx[7]], [geo[0], 0], 0, 0), geo[0]);
+        metal_enqueue(qs[q38s-pipe-argpart()], q38-b16([bs[28], sx[2], sx[3]], [geo[19], 1024, 1], 0, 1), 1024);
+        metal_enqueue(qs[q38s-pipe-argcomb()], md-bind16([sx[2], sx[3], sx[0], sx[13]], [1024, outoff], 1024, 0, 1, 1), 1);
+        1;
+    };
+    // draft tokens 2..k from the chain: token d_{i-1} at position p+i-1 with the previous step's normed hidden
+    def q38s-chain(ps, qs, bs, geo, sx, embTv, projTv, i, k, p) = i > k ? 1 : {
+        q38s-mtp-forward(ps, qs, bs, geo, sx[10], sx[11], embTv, sx[0], i - 1, sx[7], 1, p + i - 1);
+        q38s-draft-head(ps, qs, bs, geo, sx, projTv, 0, i);
+        let handed = q38-handover();
+        q38s-chain(ps, qs, bs, geo, sx, embTv, projTv, i + 1, k, p);
+    };
+    // ── the check ──
+    def q38s-layers(ps, qs, bs, geo, lays, sts, snps, l, nL, ntok, pos0) = l >= nL ? 1 : {
+        kth-full?(l, geo[22]) ? q38s-full-attn-span(ps, qs, bs, geo, nth(lays, l), nth(sts, l), pos0, ntok) : q38s-linear-attn-span(ps, qs, bs, geo, nth(lays, l), nth(sts, l), nth(snps, l), ntok);
+        q38s-ffn-span(ps, qs, bs, geo, nth(lays, l), ntok);
+        let handed = q38-handover-after(l + 1, nL);
+        q38s-layers(ps, qs, bs, geo, lays, sts, snps, l + 1, nL, ntok, pos0);
+    };
+    // the main model over tok[0..ntok) at positions pos0..: the greedy next token after every one of them into sx[4], the hidden rows
+    // (after output_norm) into sx[6]. Linear-layer state after every token but the last is snapshotted (sx[9]).
+    def q38s-verify(ctx, qs, sts, sx, ntok, pos0) = {
+        let ps = ctx[0];
+        let bs = ctx[1];
+        let geo = ctx[2];
+        metal_enqueue(qs[q38s-pipe-embed()], md-bind16([kth-tv-h(ctx[4]), sx[0], bs[33]], [geo[0], ntok, 0], 256, 0, 0, 1), geo[0] * ntok);
+        q38s-layers(ps, qs, bs, geo, ctx[3], sts, sx[9], 0, geo[21], ntok, pos0);
+        q38s-head-check(ctx, qs, sx, ntok);
+    };
+    // output_norm over the span's residual rows (kept in sx[6]: the MTP block's next input), the vocab head over every row, the argmax of every row
+    def q38s-head-check(ctx, qs, sx, ntok) = {
+        let ps = ctx[0];
+        let bs = ctx[1];
+        let geo = ctx[2];
+        q38-rms-span(ps, bs[33], ctx[5], sx[6], geo[0], geo[6], ntok, 1);
+        q38s-mv(ps, qs, ctx[6], sx[6], sx[1], ntok, geo[19], 1);
+        metal_enqueue(qs[q38s-pipe-argpart()], q38-b16([sx[1], sx[2], sx[3]], [geo[19], 1024, ntok], 0, 1), 1024 * ntok);
+        metal_enqueue(qs[q38s-pipe-argcomb()], md-bind16([sx[2], sx[3], sx[4], sx[5]], [1024, 0], 1024, 0, 1, 1), ntok);
+        1;
+    };
+    // rejected drafts advanced the recurrent layers past the accepted token: put the state after token m back (a device copy a layer)
+    def q38s-restore-go(ps, geo, sts, snps, l, nL, m, convn, deltan) = l >= nL ? 1 : {
+        let sn = nth(snps, l);
+        let st = nth(sts, l);
+        (Comparable) sn[0] == 0 ? 0 : {
+            metal_enqueue(ps[32], q38-b16([sn[0], st[0]], [convn, m * convn], 0, 1), convn);
+            metal_enqueue(ps[32], q38-b16([sn[1], st[1]], [deltan, m * deltan], 0, 1), deltan);
+            1;
+        };
+        q38s-restore-go(ps, geo, sts, snps, l + 1, nL, m, convn, deltan);
+    };
+    def q38s-restore(ctx, sts, sx, m) = q38s-restore-go(ctx[0], ctx[2], sts, sx[9], 0, ctx[2][21], m, q38-recur-conv-n(ctx[2]), q38-recur-delta-n(ctx[2]));
+    // ── one speculative step: ONE batch, ONE wait. ──
+    // x pending at position p; cu-ids / cu-pos0: the tokens the MTP block has yet to take (their hidden rows are sx[6] rows 0..): the last is x;
+    // slot: the snapshot to restore first (-1: none). Returns [drafts 1..k, verified 0..k].
+    // phased = 1 waits after each section (the restore, the catch-up with the first draft, the chain, the check) and times it: the
+    // diagnostic split, which costs the syncs it measures; phased = 0 is the one-wait step.
+    def q38s-mark(phased) {
+        phased == 1 ? {
+            metal_sync();
+            metal_batch_concurrent();
+            host_monotonic_ms();
+        } : 0;
+    }
+    def q38s-step(ctx, qs, sts, sx, x, p, k, cu-ids, cu-pos0, slot, phased) {
+        let ps = ctx[0];
+        let bs = ctx[1];
+        let geo = ctx[2];
+        let l0 = metal_live();
+        let ta = host_monotonic_ms();
+        let w0 = metal_buf_write(sx[0], 0, md-le32(x));
+        let w1 = metal_buf_write(sx[0], 32, q38s-ids-bytes(cu-ids));
+        metal_batch_concurrent();
+        let t0 = host_monotonic_ms();
+        slot >= 0 ? q38s-restore(ctx, sts, sx, slot) : 0;
+        let t1 = q38s-mark(phased);
+        let ncu = len(cu-ids);
+        q38s-mtp-forward(ps, qs, bs, geo, sx[10], sx[11], ctx[4], sx[0], 8, sx[6], ncu, cu-pos0);
+        q38s-draft-head(ps, qs, bs, geo, sx, ctx[6], ncu - 1, 1);
+        let handed = q38-handover();
+        let t2 = q38s-mark(phased);
+        q38s-chain(ps, qs, bs, geo, sx, ctx[4], ctx[6], 2, k, p);
+        let t3 = q38s-mark(phased);
+        q38s-verify(ctx, qs, sts, sx, k + 1, p);
+        let tb = host_monotonic_ms();
+        let ver = metal_buf_read(sx[4], 0, (k + 1) * 4);
+        let toks = metal_buf_read(sx[0], 0, (k + 1) * 4);
+        let t4 = host_monotonic_ms();
+        let l1 = metal_live();
+        [q38s-u32s(toks, 0, k + 1), q38s-u32s(ver, 0, k + 1), tb - ta, phased == 1 ? [t1 - t0, t2 - t1, t3 - t2, t4 - t3] : [0, 0, 0, 0], [(l1[11] - l0[11]) / 1000, l1[7] - l0[7]]];
+    }
+    // the longest prefix of the drafts d[1..k] that the model's own next tokens v[0..k-1] repeat
+    def q38s-accept-go(d, v, j, k) = j > k ? k : (Comparable) d[j] == v[j - 1] ? q38s-accept-go(d, v, j + 1, k) : j - 1;
+    // ── prefill for speculation ──
+    // The lane's layer-major span prefill, then what the head needs of it: the hidden rows after output_norm for every prompt position,
+    // and the MTP block's own position 0 (token 0 with a zero hidden, as llama.cpp pairs it). Returns [x0, N]: the model's first token.
+    def q38s-prefill(ctx, qs, sts, sx, ids) {
+        let ps = ctx[0];
+        let bs = ctx[1];
+        let geo = ctx[2];
+        let n = len(ids);
+        let r = q38-prefill-span-batched(ps, bs, geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+        metal_batch_concurrent();
+        q38-rms-span(ps, bs[33], ctx[5], sx[6], geo[0], geo[6], n, 1);
+        let w = metal_buf_write(sx[0], 32, md-le32(ids[0]));
+        q38s-mtp-forward(ps, qs, bs, geo, sx[10], sx[11], ctx[4], sx[0], 8, sx[8], 1, 0);
+        metal_sync();
+        r;
+    }
+    def q38s-hits-go(m, j, k) = j > k ? [] : cons(m >= j ? 1 : 0, q38s-hits-go(m, j + 1, k));
+    def q38s-add-go(a, b) = (Comparable) len(a) == 0 ? [] : cons(a[0] + b[0], q38s-add-go(a[1:], b[1:]));
+    def q38s-zeros(n) = n <= 0 ? [] : cons(0, q38s-zeros(n - 1));
+    // stats: [steps, host ms before the wait, ms of the wait, restore, catch-up+draft, chain, check (phased only), then per draft
+    // position j how many steps accepted position j]; trace: [accepted, step ms] a step
+    def q38s-gen-go(ctx, qs, sts, sx, x, p, k, cu-ids, cu-pos0, slot, want, acc, stats, trace, phased) = len(acc) >= want ? [take(want, acc), stats, trace] : {
+        let t0 = host_monotonic_ms();
+        let out = q38s-step(ctx, qs, sts, sx, x, p, k, cu-ids, cu-pos0, slot, phased);
+        let t1 = host_monotonic_ms();
+        let d = out[0];
+        let v = out[1];
+        let ph = out[3];
+        let m = q38s-accept-go(d, v, 1, k);
+        let said = append(take(m, d[1:]), [v[m]]);
+        let st2 = q38s-add-go(stats, cons(1, cons(out[2], cons((t1 - t0) - out[2], cons(ph[0], cons(ph[1], cons(ph[2], cons(ph[3], cons(out[4][0], cons(out[4][1], q38s-hits-go(m, 1, k)))))))))));
+        q38s-gen-go(ctx, qs, sts, sx, v[m], p + m + 1, k, said, p + 1, m < k ? m : -1, want, append(acc, said), st2, append(trace, [[m, t1 - t0, out[4][0], out[2]]]), phased);
+    };
+    // x0 pending at position N; the first catch-up is the whole prompt after position 0, then x0
+    def q38s-generate(ctx, qs, sts, sx, ids, x0, k, want, phased) = q38s-gen-go(ctx, qs, sts, sx, x0, len(ids), k, append(ids[1:], [x0]), 1, -1, want, [], q38s-zeros(9 + k), [], phased);
+    0;
+}
