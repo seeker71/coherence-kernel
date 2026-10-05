@@ -1,0 +1,136 @@
+// form-cli-task-runtime.bml — the runtime a task rides: one sentence in, a finished task out.
+//
+// Seven organs, each a reading the live doors call:
+//   fctrt-intake            a sentence becomes a contract: the paths it names, the band whose prelude names one
+//                           of them, or, among bands that only share a barrel, the larger verdict, and the model
+//   fctrt-act               a lane reason becomes [class, spend, next, end]. spend 0 and end 1 tried nothing
+//                           (fctrt-untried?): the seat, a memory refusal, a memory return. model-idle spends
+//                           nothing and names voice, so the same walk continues on the next local model with the
+//                           finding and the documents. A red band spends the attempt and stays in repair.
+//   fctrt-claim / commit    one writer holds the session. A second writer cannot claim, and cannot commit a tool
+//                           result. The file door is fctrt-claim-file / fctrt-commit-file.
+//   fctrt-compact           after a context renewal, the same tool triple ends the attempt. A different triple,
+//                           or an unarmed record, does not.
+//   fctrt-neighbor-paths    the bands whose prelude names a changed file, or a barrel that imports it. Publish
+//                           waits until each of those reads its own verdict (fctrt-holds).
+//   the voice row of fctrt-act("local-stall") is how the next model receives the same task
+//   fctrt-clock             tokens are progress. A seat or a memory ending is a seat. No tokens past the local
+//                           idle bound is a stall. A short silence is idle.
+// What it needs: the host's files (fs_list, read_file, file_size, fs_mkdir, write_file_text) for the tree and the
+// writer door. The readings above are pure over the texts and rows a caller hands in.
+// preludes: form-stdlib/line-grammar.fk form-stdlib/bml/parse.bml
+section [form.bml] {
+ class FormCliTaskRuntime {
+  def fctrt-idle-ms() = 300000;
+  def fctrt-starts?(s, p) = ((String) value_kind(s) == "string") && ((Comparable) len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
+  def fctrt-ends?(s, p) = ((String) value_kind(s) == "string") && ((Comparable) len(s) >= len(p)) && ((String) substring(s, len(s) - len(p), len(s)) == p);
+  def fctrt-n(v) = nothing?(v) ? 0 : v;
+  def fctrt-body-path(path) = fctrt-starts?(path, "form/") ? substring(path, 5, len(path)) : path;
+
+  // ── intake ──
+  def fctrt-path?(token) = (str_find(token, "/", 0) >= 0) && (fctrt-ends?(token, ".bml") || fctrt-ends?(token, ".fk") || fctrt-ends?(token, ".md") || fctrt-ends?(token, ".form"));
+  def fctrt-trim-token(s) = fctrt-trim-end(fctrt-trim-start(s));
+  def fctrt-trim-start(s) = (fctrt-starts?(s, "\"") || fctrt-starts?(s, "'") || fctrt-starts?(s, "(") || fctrt-starts?(s, ",")) ? fctrt-trim-start(substring(s, 1, len(s))) : s;
+  def fctrt-trim-end(s) = (len(s) > 0 && (fctrt-ends?(s, "\"") || fctrt-ends?(s, "'") || fctrt-ends?(s, ")") || fctrt-ends?(s, ",") || fctrt-ends?(s, ".") || fctrt-ends?(s, ";"))) ? fctrt-trim-end(substring(s, 0, len(s) - 1)) : s;
+  def fctrt-paths(sentence) = filter(t => fctrt-path?(t), map(t => fctrt-trim-token(t), split-on(sentence ?? "", " ")));
+  def fctrt-prelude(text) = fctrt-prelude-line(split-on(text ?? "", "\n"));
+  def fctrt-prelude-line(lines) = nil?(lines) ? "" : (str_find(lines[0], "preludes:", 0) >= 0 ? lines[0] : fctrt-prelude-line(lines[1:]));
+  def fctrt-band?(path) = str_find(path, "/tests/", 0) >= 0 || fctrt-starts?(path, "tests/");
+  def fctrt-imports?(text, path) = str_find(text, "import " ++ fctrt-body-path(path), 0) >= 0;
+  def fctrt-any?(paths, f) = nil?(paths) ? 0 : (f(paths[0]) ? 1 : fctrt-any?(paths[1:], f));
+  def fctrt-barrel?(entry, changed) = (!fctrt-band?(entry[0])) && (fctrt-any?(changed, p => fctrt-imports?(entry[1], p)) == 1);
+  def fctrt-barrels(entries, changed) = filter(e => fctrt-barrel?(e, changed), entries);
+  def fctrt-mentions?(text, path) = ((String) path != "") && (str_find(text, fctrt-body-path(path), 0) >= 0);
+  def fctrt-mentions-any?(text, paths) = fctrt-any?(paths, p => fctrt-mentions?(text, p)) == 1;
+  def fctrt-neighbor?(entry, changed, barrels, primary) = fctrt-band?(entry[0]) && ((String) entry[0] != primary) && (fctrt-mentions-any?(fctrt-prelude(entry[1]), changed) || fctrt-mentions-any?(fctrt-prelude(entry[1]), map(b => b[0], barrels)));
+  def fctrt-neighbor-paths(entries, changed, primary) = map(e => e[0], filter(e => fctrt-neighbor?(e, changed, fctrt-barrels(entries, changed), primary), entries));
+  def fctrt-verdict-at(text, at) = at < 0 ? 0 : fctrt-verdict-digits(text, at + 10, "");
+  def fctrt-verdict-digits(text, i, out) = (i >= len(text) || !(((Comparable) str_byte_at(text, i) >= 48) && ((Comparable) str_byte_at(text, i) <= 57))) ? (out == "" ? 0 : parse-int(out)) : fctrt-verdict-digits(text, i + 1, out ++ substring(text, i, i + 1));
+  def fctrt-verdict(text) = fctrt-verdict-at(text, str_find(text ?? "", "; Verdict ", 0));
+  def fctrt-band-score(entry, changed, barrelPaths) = fctrt-mentions-any?(fctrt-prelude(entry[1]), changed) ? 2 : (fctrt-mentions-any?(fctrt-prelude(entry[1]), barrelPaths) ? 1 : 0);
+  def fctrt-band-row(entry, changed, barrelPaths) = [fctrt-band-score(entry, changed, barrelPaths), fctrt-verdict(entry[1]), entry[0]];
+  def fctrt-prefer?(a, b) = ((Comparable) a[0] > b[0]) || (((Comparable) a[0] == b[0]) && ((Comparable) a[1] > b[1]));
+  def fctrt-best-row(rows, best) = nil?(rows) ? best : (fctrt-prefer?(rows[0], best) ? fctrt-best-row(rows[1:], rows[0]) : fctrt-best-row(rows[1:], best));
+  def fctrt-chosen(rows) {
+   let best = fctrt-best-row(rows[1:], rows[0]);
+   [best[2], best[1]];
+  }
+  def fctrt-band-for(entries, changed) {
+   let barrelPaths = map(b => b[0], fctrt-barrels(entries, changed));
+   let rows = filter(r => (Comparable) r[0] > 0, map(e => fctrt-band-row(e, changed, barrelPaths), filter(e => fctrt-band?(e[0]), entries)));
+   nil?(rows) ? ["", 0] : fctrt-chosen(rows);
+  }
+  // [goal, writable paths, band, full, model, next]. next is run, needs-files, or needs-band.
+  def fctrt-intake(sentence, entries, model) {
+   let paths = fctrt-paths(sentence);
+   let band = nil?(paths) ? ["", 0] : fctrt-band-for(entries, paths);
+   let next = nil?(paths) ? "needs-files" : ((String) band[0] == "" || (Comparable) band[1] == 0) ? "needs-band" : "run";
+   [sentence ?? "", paths, band[0], band[1], model ?? "", next];
+  }
+  def fctrt-source?(name) = fctrt-ends?(name, ".bml") || fctrt-ends?(name, ".fk");
+  def fctrt-read-dir(dir) = map(name => [dir ++ "/" ++ name, ((Comparable) (file_size(dir ++ "/" ++ name) ?? 0) > 0 && (Comparable) (file_size(dir ++ "/" ++ name) ?? 0) < 400000) ? (read_file(dir ++ "/" ++ name) ?? "") : ""], filter(name => fctrt-source?(name), fs_list(dir) ?? []));
+  def fctrt-read-tree() = append(fctrt-read-dir("form/form-stdlib/tests"), fctrt-read-dir("form/form-stdlib/bml"));
+
+  // ── failure table ──
+  // [class, spend, next, end]
+  def fctrt-act(reason) {
+   let r = (String) value_kind(reason) == "string" ? reason : "";
+   fctrt-starts?(r, "model-queued:") ? ["seat-busy", 0, "wait", 1] :
+   ((String) r == "host-memory-low") ? ["memory-low", 0, "resume", 1] :
+   fctrt-starts?(r, "host-memory-held:") ? ["admission-refused", 0, "wait", 1] :
+   fctrt-starts?(r, "native-context-renewal-") ? ["context-overflow", 1, "stop", 1] :
+   (fctrt-starts?(r, "prompt-context-window-refused") || fctrt-starts?(r, "prompt-caller-capacity-refused")) ? ["context-overflow", 0, "compress", 0] :
+   fctrt-starts?(r, "stillstreak") ? ["no-progress", 1, "replan", 0] :
+   fctrt-starts?(r, "compaction-loop") ? ["compaction-loop", 1, "stop", 1] :
+   fctrt-starts?(r, "local-stall") ? ["model-idle", 0, "voice", 0] :
+   fctrt-starts?(r, "truncated") ? ["truncated-tool", 0, "recover", 0] :
+   fctrt-starts?(r, "malformed") ? ["malformed-action", 0, "repair", 0] :
+   fctrt-starts?(r, "edit-miss") ? ["edit-miss", 0, "repair", 0] :
+   ["red-band", 1, "repair", 0];
+  }
+  def fctrt-untried?(reason) = (fctrt-act(reason)[1] == 0) && (fctrt-act(reason)[3] == 1);
+
+  // ── one writer ──
+  def fctrt-note(session, writer, tool, n) = [session, writer, tool, n];
+  def fctrt-blank() = ["", "", "", 0];
+  def fctrt-claim(note, writer) = ((String) note[1] == "" || (String) note[1] == writer) ? [1, fctrt-note(note[0], writer, note[2], note[3])] : [0, note];
+  def fctrt-commit(note, writer, tool) = (String) note[1] != writer ? [0, note] : [1, fctrt-note(note[0], writer, tool, note[3] + 1)];
+  def fctrt-note-text(note) = note[0] ++ "\n" ++ note[1] ++ "\n" ++ note[2] ++ "\n" ++ note[3].str() ++ "\n";
+  def fctrt-note-read(text) {
+   let lines = split-on(text ?? "", "\n");
+   (Comparable) len(lines) < 4 ? fctrt-blank() : fctrt-note(lines[0], lines[1], lines[2], parse-int(lines[3]) ?? 0);
+  }
+  def fctrt-writer-path(root, session) = root ++ "/" ++ session ++ "/writer.txt";
+  def fctrt-claim-file(root, session, writer) {
+   let dir = root ++ "/" ++ session;
+   let made = fs_mkdir(dir);
+   let path = fctrt-writer-path(root, session);
+   let claimed = fctrt-claim(fctrt-note-read(read_file(path) ?? ""), writer);
+   claimed[0] == 1 ? [1, write_file_text(path, fctrt-note-text(fctrt-note(session, writer, claimed[1][2], claimed[1][3])))] : [0, claimed[1]];
+  }
+  def fctrt-commit-file(root, session, writer, tool) {
+   let path = fctrt-writer-path(root, session);
+   let committed = fctrt-commit(fctrt-note-read(read_file(path) ?? ""), writer, tool);
+   committed[0] == 1 ? [1, write_file_text(path, fctrt-note-text(fctrt-note(session, writer, tool, committed[1][3])))] : [0, committed[1]];
+  }
+
+  // ── compression guard ──
+  // armed is the tool triple digest kept at renewal. The same triple ends. Empty armed, or a different triple, continues.
+  def fctrt-triple(call, result) = (call ?? "") ++ "\n" ++ (result ?? "");
+  def fctrt-compact(armed, triple) = ((String) armed != "") && ((String) armed == triple) ? "end" : "";
+
+  // ── acceptance ──
+  def fctrt-held?(row) = (!nothing?(row[0])) && ((Comparable) row[0] == row[1]);
+  def fctrt-holds(rows) = nil?(rows) ? 1 : (fctrt-held?(rows[0]) ? fctrt-holds(rows[1:]) : 0);
+
+  // ── local clock ──
+  // progress, seat, stall, idle
+  def fctrt-clock(generated, injected, wall, reason) {
+   let act = fctrt-act(reason);
+   (act[0] == "seat-busy" || act[0] == "admission-refused" || act[0] == "memory-low") ? "seat" :
+   (fctrt-n(generated) > 0 || fctrt-n(injected) > 0) ? "progress" :
+   fctrt-n(wall) >= fctrt-idle-ms() ? "stall" : "idle";
+  }
+ }
+ 0;
+}
