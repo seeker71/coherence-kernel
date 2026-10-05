@@ -112,6 +112,11 @@ uniqueness and replay identity: use a retained event key in an exclusively
 claimed run, not a reused label. An empty identity is refused. This is an
 explicit identity contract, not a fallback that guesses a process birth time.
 
+The native event queue accepts `nve-run(owner,nothing())` to drain ready work
+without a slice ceiling. An explicit zero still grants no slices. Repeat
+receivers retain their cursor, context and findings, yield between passes and
+finish by returning a value. The existing care path handles unchanged cursors.
+
 The process organ observes its actual exit and owned-process release. The
 generation organ senses output-byte delivery, prediction refusal and context
 pressure where they occur. The session learner reads each actual before/after
