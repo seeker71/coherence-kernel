@@ -3,7 +3,7 @@
 ; Real Metal dispatch. No model is admitted; the end-to-end witness (same token ids as the plain greedy decode, rejected drafts
 ; restored) is observe/q38-spec-run.bml and its band observe/q38-spec-identity-band.bml, which need the 29 GB file.
 ;
-;   1   the spec pipelines compile (30), and the lane's own pipeline list is untouched (63)
+;   1   the spec pipelines compile (31), and the lane's own pipeline list is untouched (63)
 ;   2   mvk, the small-batch Q8_0 matvec, NT = 1..8 columns, two, four and eight rows a group: every column is BYTE FOR BYTE the lane's wide matvec on that token's
 ;       activations (rows odd so a group's second row can fall past the end; output pitch exceeds rows and its padding keeps its sentinel)
 ;   4   the conv recurrence with snapshots: outputs and final window byte for byte the lane's span kernel; snapshot t byte for byte the
@@ -13,8 +13,10 @@
 ;       single-row argmax kernels
 ;   32  embedding from device ids (the drafts the chain chose) is the lane's row dequant, idoff included; concat is [a ; b] a row
 ;   64  the accept rule (the longest prefix of drafts the model repeats) and the id bytes round trip
+;   128 the span attention (a group a (token, head)) is the decode attention kernel's own arithmetic: every token's output row is byte for
+;       byte what the lane's decode kernel gives it over the same K/V and the same npos (positions past 256, so the strided loops wrap)
 ;
-; Verdict 127
+; Verdict 255
 ; REQUIRES: a live Metal device
 ; preludes: native/metal/qwen35-dense-spec.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
 (do
@@ -227,6 +229,41 @@
    (let freed (sum (list (metal_buf_free wh) (metal_buf_free idb) (metal_buf_free d) (metal_buf_free d2) (metal_buf_free a) (metal_buf_free b) (metal_buf_free y))))
    (print (list "embed" "ids-equal-lane" (str_eq mine lane) "idoff" (str_eq mine2 lane2) "concat" (str_eq cat want)))
    (if (and (and (gt e 0) (gt e3 0)) (and (str_eq mine lane) (and (str_eq mine2 lane2) (str_eq cat want)))) 1 0)))
+ ; ── 128: the span attention is the decode attention, bit for bit ──
+ (defn qdsb-gqa-tok (ps q kc vc mine nq nkv hd pos0 sstride scale t ntok)
+  (if (ge t ntok) 1
+   (do
+    (let rowb (mul (mul nq hd) 4))
+    (let qt (metal_buf_alloc rowb))
+    (let yt (metal_buf_alloc rowb))
+    (let sct (metal_buf_alloc (mul (mul 2 nq) (mul sstride 4))))
+    (let w (metal_buf_write qt 0 (metal_buf_read q (mul t rowb) rowb)))
+    (metal_batch_concurrent)
+    (let e (metal_enqueue (nth ps (qlslc-cooperative-gqa-pipeline)) (md-bind16 (list qt kc vc yt sct) (list (add pos0 (add t 1)) nq nkv hd scale sstride) 256 0 1 1) nq))
+    (let ref (metal_buf_read yt 0 rowb))
+    (let freed (sum (list (metal_buf_free qt) (metal_buf_free yt) (metal_buf_free sct))))
+    (if (and (gt e 0) (str_eq ref (substring mine (mul t rowb) (mul (add t 1) rowb)))) (qdsb-gqa-tok ps q kc vc mine nq nkv hd pos0 sstride scale (add t 1) ntok) 0))))
+ (defn qdsb-gqa-band (ps qs)
+  (do
+   (let nq 4) (let nkv 2) (let hd 8) (let pos0 300) (let ntok 3) (let sstride 512) (let kvd 16)
+   (let qn (mul ntok (mul nq hd)))
+   (let kn (mul (add pos0 ntok) kvd))
+   (let q (metal_buf_alloc (mul qn 4)))
+   (let kc (metal_buf_alloc (mul kn 4)))
+   (let vc (metal_buf_alloc (mul kn 4)))
+   (let y (metal_buf_alloc (mul qn 4)))
+   (let sc (metal_buf_alloc (mul (mul (mul 2 (mul ntok nq)) sstride) 4)))
+   (let w0 (metal_buf_write q 0 (qdsb-pat qn 3 0 "")))
+   (let w1 (metal_buf_write kc 0 (qdsb-pat kn 7 0 "")))
+   (let w2 (metal_buf_write vc 0 (qdsb-pat kn 19 0 "")))
+   (let scale (md-f32-bits 0.35355339))
+   (metal_batch_concurrent)
+   (let e (metal_enqueue (nth qs (q38s-pipe-gqa)) (md-bind16 (list q kc vc y sc) (list pos0 nq nkv hd scale sstride ntok) 256 0 1 1) (mul nq ntok)))
+   (let mine (metal_buf_read y 0 (mul qn 4)))
+   (let same (qdsb-gqa-tok ps q kc vc mine nq nkv hd pos0 sstride scale 0 ntok))
+   (let freed (sum (list (metal_buf_free q) (metal_buf_free kc) (metal_buf_free vc) (metal_buf_free y) (metal_buf_free sc))))
+   (print (list "gqa-span" "every-token-the-decode-kernel" same))
+   (if (and (gt e 0) (eq same 1)) 1 0)))
  ; ── 64: the accept rule and the id bytes ──
  (defn qdsb-rules ()
   (do
@@ -240,7 +277,7 @@
  (let msl (q38-msl))
  (let ps (q38-pipes msl))
  (let qs (q38s-pipes (q38s-msl)))
- (let pipes-ok (if (and (eq (len ps) 63) (and (eq (len qs) 30) (and (kth-pipes-ok? qs) (eq (nth (metal_live) 2) 0)))) 1 0))
+ (let pipes-ok (if (and (eq (len ps) 63) (and (eq (len qs) 31) (and (kth-pipes-ok? qs) (eq (nth (metal_live) 2) 0)))) 1 0))
  ; 5 rows, 4096 columns: all eight simdgroups and the stride loop, the second row of the last group past the end
  (let rows 5) (let cols 2112)
  (let weights (qdsb-w8 (mul rows (div cols 32)) 0 ""))
@@ -257,5 +294,6 @@
  (let arg (qdsb-argmax-band ps qs))
  (let emb (qdsb-embed-band ps qs))
  (let rules (qdsb-rules))
- (let verdict (sum (list pipes-ok (mul 2 mvk) (mul 4 conv) (mul 8 delta) (mul 16 arg) (mul 32 emb) (mul 64 rules))))
- (if (eq verdict 127) verdict (form_error (str_concat "qwen35 dense spec band failed: " (int_to_str verdict)))))
+ (let gqa (qdsb-gqa-band ps qs))
+ (let verdict (sum (list pipes-ok (mul 2 mvk) (mul 4 conv) (mul 8 delta) (mul 16 arg) (mul 32 emb) (mul 64 rules) (mul 128 gqa))))
+ (if (eq verdict 255) verdict (form_error (str_concat "qwen35 dense spec band failed: " (int_to_str verdict)))))
