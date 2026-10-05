@@ -94,8 +94,42 @@ section [form.bml] {
     ["swiglu", () => metal_enqueue(ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10] * ntok], 0, 1), geo[10] * ntok)],
     ["mm down", () => q38-mv-batch(ps, lay[4], bs[16], bs[17], ntok, 1)],
     ["residual add", () => metal_enqueue(ps[19], q38-b16([bs[33], bs[17], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok)]];
+  // one tensor through the 64 x 32 kernel (pipeline 62) and the 64 x 64 kernel (pipeline 64) into two buffers at the span's token count and the lane's
+  // own output pitch: the same bytes or the new kernel is wrong. The lane's own router (q38-mm-q80) is timed as a third.
+  def qsp-mm-pair(ps, tv, xh, ntok, label) {
+   let rows = kth-tv-r(tv);
+   let cols = kth-tv-c(tv);
+   let ya = metal_buf_alloc(rows * ntok * 4);
+   let yb = metal_buf_alloc(rows * ntok * 4);
+   let e1 = metal_enqueue(nth(ps, q38-mm64-index()), md-bind16([kth-tv-h(tv), xh, ya], [rows, cols, ntok, rows], 128, 0, 1, 1), q38-mm64-groups(rows, ntok));
+   let e2 = metal_enqueue(nth(ps, q38-t64-index()), md-bind16([kth-tv-h(tv), xh, yb], [rows, cols, ntok, rows], 128, 0, 1, 1), q38-t64-groups(rows, ntok));
+   let s = metal_sync();
+   let a = metal_buf_read(ya, 0, rows * ntok * 4);
+   let b = metal_buf_read(yb, 0, rows * ntok * 4);
+   let ta = qsp-busy(() => metal_enqueue(nth(ps, q38-mm64-index()), md-bind16([kth-tv-h(tv), xh, ya], [rows, cols, ntok, rows], 128, 0, 1, 1), q38-mm64-groups(rows, ntok)), 3);
+   let tb = qsp-busy(() => metal_enqueue(nth(ps, q38-t64-index()), md-bind16([kth-tv-h(tv), xh, yb], [rows, cols, ntok, rows], 128, 0, 1, 1), q38-t64-groups(rows, ntok)), 3);
+   let fa = metal_buf_free(ya);
+   let fb = metal_buf_free(yb);
+   print_str("[q38-span] pair " ++ label ++ " (" ++ rows.str() ++ " x " ++ cols.str() ++ " x " ++ ntok.str() ++ "): 64x32 " ++ ta.str() ++ " us, 64x64 " ++ tb.str() ++ " us, router uses " ++ (q38-t64-use?(rows, ntok) ? "64x64" : "64x32") ++ "; outputs " ++ ((String) a == (String) b ? "IDENTICAL" : "DIFFER"));
+  }
   def qsp-first-full(l, geo) = kth-full?(l, geo[22]) ? l : qsp-first-full(l + 1, geo);
+  // the GPU's own pace right now: the fp32 FMA loop of the lab (13000+ GFLOP/s when the GPU is ours and at full clock), best of 5 short runs
+  def qsp-gauge(tag) {
+   let src = "#include <metal_stdlib>\n" ++ read_file("observe/q38-mm-lab/micro.metal");
+   let p = metal_pipeline(src, "lab_fma");
+   let out = metal_buf_alloc(1048576);
+   let f = () => metal_enqueue(p, md-bind16([out], [8000], 256, 0, 1, 1), 640);
+   let w = qsp-busy(f, 2);
+   let a = qsp-busy(f, 2);
+   let b = qsp-busy(f, 2);
+   let c = qsp-busy(f, 2);
+   let d = qsp-busy(f, 2);
+   let m = qsp-sort([a, b, c, d])[0];
+   let fr = metal_buf_free(out);
+   print_str("[q38-span] gauge " ++ tag ++ ": fp32 FMA loop " ++ m.str() ++ " us = " ++ (m <= 0 ? 0 : 20971520000 / m / 1000).str() ++ " GFLOP/s (clean: 13000+)");
+  }
   def qsp-profile(ctx, ids, rounds, k) {
+   let g0 = qsp-gauge("before");
    let ps = ctx[0];
    let bs = ctx[1];
    let geo = ctx[2];
@@ -107,10 +141,16 @@ section [form.bml] {
    let lf = qsp-first-full(0, geo);
    let full = nth(lays, lf);
    let head = print_str("[q38-span] profile at " ++ n.str() ++ " tokens, " ++ rounds.str() ++ " rounds of " ++ k.str() ++ " dispatches a step");
+   let p1 = qsp-mm-pair(ps, lin[2], bs[1], n, "ffn gate");
+   let p2 = qsp-mm-pair(ps, lin[4], bs[16], n, "ffn down");
+   let p3 = qsp-mm-pair(ps, lin[5], bs[1], n, "linear qkv");
+   let p4 = qsp-mm-pair(ps, lin[13], bs[9], n, "linear out");
+   let p5 = qsp-mm-pair(ps, lin[8], bs[1], n, "linear b (48 rows)");
    let a = qsp-block("ffn", qsp-ffn-steps(ps, bs, geo, lin, n), rounds, k);
    let b = qsp-block("linear-attn", qsp-linear-steps(ps, bs, geo, lin, nth(sts, 0), n), rounds, k);
    let c = qsp-block("full-attn", qsp-full-steps(ps, bs, geo, full, nth(sts, lf), 0, n), rounds, k);
    let freed = q38-free-state(sts);
+   let g1 = qsp-gauge("after");
    1;
   }
   def qsp-open(path, want, rounds, k) {

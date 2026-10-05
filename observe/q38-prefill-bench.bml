@@ -39,12 +39,37 @@ section [form.bml] {
    let n = len(s);
    print_str("[q38-bench] " ++ label ++ ": min " ++ s[0].str() ++ " ms (" ++ qpb-rate(npos, s[0]).str() ++ " positions/s), p25 " ++ nth(s, n / 4).str() ++ " ms (" ++ qpb-rate(npos, nth(s, n / 4)).str() ++ "), median " ++ nth(s, n / 2).str() ++ " ms (" ++ qpb-rate(npos, nth(s, n / 2)).str() ++ "), runs " ++ n.str());
   }
+  def qpb-busy(f, k) {
+   metal_batch_concurrent();
+   let a = metal_live();
+   let q = qpb-times(k, f);
+   let s = metal_sync();
+   let b = metal_live();
+   (b[11] - a[11]) / k;
+  }
+  def qpb-times(n, f) = n <= 0 ? 1 : {
+   let done = f();
+   qpb-times(n - 1, f);
+  };
+  // the GPU's own pace right now: the fp32 FMA loop of the lab (13000+ GFLOP/s when the GPU is ours and at full clock), best of 4 short runs
+  def qpb-gauge(tag) {
+   let src = "#include <metal_stdlib>\n" ++ read_file("observe/q38-mm-lab/micro.metal");
+   let p = metal_pipeline(src, "lab_fma");
+   let out = metal_buf_alloc(1048576);
+   let f = () => metal_enqueue(p, md-bind16([out], [8000], 256, 0, 1, 1), 640);
+   let w = qpb-busy(f, 2);
+   let m = qpb-sort([qpb-busy(f, 2), qpb-busy(f, 2), qpb-busy(f, 2), qpb-busy(f, 2)])[0];
+   let fr = metal_buf_free(out);
+   print_str("[q38-bench] gauge " ++ tag ++ ": fp32 FMA loop " ++ m.str() ++ " us = " ++ (m <= 0 ? 0 : 20971520000 / m / 1000).str() ++ " GFLOP/s (clean: 13000+)");
+  }
   def qpb-measure(ctx, ids, runs) {
+   let g0 = qpb-gauge("before");
    let warm = qpb-run-once(ctx, ids);
    let rs = qpb-runs(ctx, ids, runs, []);
    let a = print_str("[q38-bench] " ++ len(ids).str() ++ " positions, winner " ++ warm[0].str());
    let b = qpb-report("wall", qpb-col(rs, 1), len(ids));
-   qpb-report("device busy", qpb-col(rs, 2), len(ids));
+   let c = qpb-report("device busy", qpb-col(rs, 2), len(ids));
+   qpb-gauge("after");
   }
   def qpb-open(path, want, runs, prompt) {
    let src = fcmg-src(path);
