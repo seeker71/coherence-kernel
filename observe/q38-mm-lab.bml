@@ -96,11 +96,26 @@ section [form.bml] {
    let say = print_str("[q38-mm-lab] " ++ cs[i][0] ++ ": min " ++ mn.str() ++ " us (" ++ (mn <= 0 ? 0 : flop / mn / 1000).str() ++ " GFLOP/s), p25 " ++ q1.str() ++ ", median " ++ md.str() ++ ", rounds " ++ n.str());
    lab-report(cs, rows, i + 1, flop);
   };
-  def lab-gemm-names(only) = len(only) > 0 ? [only] : ["lab_mm_base", "lab_mm_ll"];
+  // the GPU's own pace right now: the fp32 FMA loop (13000+ GFLOP/s when the GPU is ours and at full clock), best of 4 short runs
+  def lab-gauge(tag) {
+   let src = "#include <metal_stdlib>\n" ++ read_file(lab-dir() ++ "micro.metal");
+   let p = metal_pipeline(src, "lab_fma");
+   let out = metal_buf_alloc(1048576);
+   let w = lab-busy-bar(p, [out], [8000], 256, 0, 640, 2, 1);
+   let m = lab-sort([lab-busy-bar(p, [out], [8000], 256, 0, 640, 2, 1), lab-busy-bar(p, [out], [8000], 256, 0, 640, 2, 1), lab-busy-bar(p, [out], [8000], 256, 0, 640, 2, 1), lab-busy-bar(p, [out], [8000], 256, 0, 640, 2, 1)])[0];
+   let fr = metal_buf_free(out);
+   print_str("[q38-mm-lab] gauge " ++ tag ++ ": fp32 FMA loop " ++ m.str() ++ " us = " ++ (m <= 0 ? 0 : 20971520000 / m / 1000).str() ++ " GFLOP/s (clean: 13000+)");
+  }
+  def lab-gemm-names(only) = len(only) > 0 ? (only == "ablations" ? ["lab_mm_base", "lab_mm_abl_full", "lab_mm_abl_nomma", "lab_mm_abl_nogl", "lab_mm_abl_nobar", "lab_mm_abl_nost", "lab_mm_abl_mmaonly", "lab_mm_abl_glonly", "lab_mm_abl_glst"] : (only == "tiles" ? ["lab_mm_base", "lab_mm_ll", "lab_mm_t64"] : (only == "ll" ? ["lab_mm_base", "lab_mm_ll", "lab_mm_llh", "lab_mm_llf"] : (only == "t64" ? ["lab_mm_base", "lab_mm_llf", "lab_mm_llt64f", "lab_mm_t64e", "lab_mm_llt64h"] : only == "edge" ? ["lab_mm_base", "lab_mm_t64e"] : only == "ll2" ? ["lab_mm_base", "lab_mm_llf", "lab_mm_llh", "lab_mm_llf_k2", "lab_mm_llh_k2", "lab_mm_lldf", "lab_mm_lldh"] : [only])))) : ["lab_mm_base", "lab_mm_ll"];
+  // tokens a tile covers, by kernel name: t64 = 64, t128 = 128, else 32; rows a tile covers: r128 = 128, else 64; threads a group: g256 = 256, else 128
+  def lab-tilet(name) = str_find(name, "t128", 0) >= 0 ? 128 : (str_find(name, "t64", 0) >= 0 ? 64 : 32);
+  def lab-tiler(name) = str_find(name, "r128", 0) >= 0 ? 128 : 64;
+  def lab-tpg(name) = str_find(name, "g256", 0) >= 0 ? 256 : 128;
   def lab-gemm-cands(src, names, qb, x, rows, cols, ntok, ntiles, ys) = len(names) == 0 ? [] : {
    let p = metal_pipeline(src, names[0]);
    let y = metal_buf_alloc(rows * ntok * 4);
-   cons([names[0], p, [qb, x, y], [rows, cols, ntok, rows], 128, 0, ntiles, 1], lab-gemm-cands(src, names[1:], qb, x, rows, cols, ntok, ntiles, ys));
+   let groups = ((ntok + lab-tilet(names[0]) - 1) / lab-tilet(names[0])) * ((rows + lab-tiler(names[0]) - 1) / lab-tiler(names[0]));
+   cons([names[0], p, [qb, x, y], [rows, cols, ntok, rows], lab-tpg(names[0]), 0, groups, 1], lab-gemm-cands(src, names[1:], qb, x, rows, cols, ntok, ntiles, ys));
   };
   def lab-gemm(rows, cols, ntok, rounds, k, only) {
    let usrc = "#include <metal_stdlib>\n" ++ read_file(lab-dir() ++ "micro.metal");
@@ -120,7 +135,9 @@ section [form.bml] {
    // correctness: every candidate once, compared with the first
    let ok = lab-check(cs, 0, 2, rows * ntok);
    let warm = lab-rounds(cs, k, 3, []);
+   let g0 = lab-gauge("before");
    let rs = lab-rounds(cs, k, rounds, []);
+   let g1 = lab-gauge("after");
    let rep = lab-report(cs, rs, 0, flop);
    let f1 = metal_buf_free(qb);
    let f2 = metal_buf_free(x);
@@ -172,12 +189,31 @@ section [form.bml] {
    let rep = lab-report(cs, rs, 0, 0);
    1;
   }
+  // the GPU's pace over time: windows x width single fp32 FMA dispatches (about 1.6 ms each when clean), one line a window: the wall ms, the device's busy
+  // microseconds a dispatch (min and median) and the wall microseconds a dispatch
+  def lab-series-win(p, out, width, acc) = width <= 0 ? acc : lab-series-win(p, out, width - 1, cons(lab-busy-bar(p, [out], [8000], 256, 0, 640, 1, 1), acc));
+  def lab-series-go(p, out, w, windows, width, t00) = w >= windows ? 1 : {
+   let t0 = host_monotonic_ms();
+   let xs = lab-sort(lab-series-win(p, out, width, []));
+   let t1 = host_monotonic_ms();
+   let say = print_str("[q38-mm-lab] series window " ++ w.str() ++ " at +" ++ (t0 - t00).str() ++ " ms: busy min " ++ xs[0].str() ++ " median " ++ nth(xs, width / 2).str() ++ " max " ++ nth(xs, width - 1).str() ++ " us, wall " ++ (((t1 - t0) * 1000) / width).str() ++ " us a dispatch");
+   lab-series-go(p, out, w + 1, windows, width, t00);
+  };
+  def lab-series(windows, width) {
+   let src = "#include <metal_stdlib>\n" ++ read_file(lab-dir() ++ "micro.metal");
+   let p = metal_pipeline(src, "lab_fma");
+   let out = metal_buf_alloc(1048576);
+   let go = lab-series-go(p, out, 0, windows, width, host_monotonic_ms());
+   let fr = metal_buf_free(out);
+   1;
+  }
   def lab-run() {
    let opts = lab-opts();
    let k = lab-int(opts, "k", 8);
    (Comparable) lab-int(opts, "go", 0) == 1 ? {
     let m = (Comparable) lab-int(opts, "micro", 1) == 1 ? lab-micro(k) : 1;
     let g = (Comparable) lab-int(opts, "gemm", 0) == 1 ? lab-gemm(lab-int(opts, "rows", 17408), lab-int(opts, "cols", 5120), lab-int(opts, "ntok", 64), lab-int(opts, "rounds", 24), k, lab-text(opts, "only", "")) : 1;
+    let sr = lab-int(opts, "series", 0) > 0 ? lab-series(lab-int(opts, "series", 0), lab-int(opts, "width", 50)) : 1;
     let d = (Comparable) lab-int(opts, "gdn", 0) == 1 ? lab-gdn(lab-int(opts, "ntok", 64), lab-int(opts, "rounds", 24), k) : 1;
     print_str("[q38-mm-lab] done");
    } : print_str("[q38-mm-lab] plan: {\"go\":1} runs the micro-kernels; add \"gemm\":1 for the Q8_0 variants");
