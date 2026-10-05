@@ -142,7 +142,7 @@ section [form.bml] {
             let missing=providers |> filter(source => nothing?(source[1])) |> map(source => json-node-string(source[0]));
             let result=json-node-object([json-node-pair("scope",json-node-string("current resident and floor-library declarations; bindings and behavior require execution")),json-node-pair("symbols",json-node-array(symbols)),json-node-pair("unavailable_sources",json-node-array(missing))]);
             fb_record(intern_node(intern_trivial_string("bml-api"),[intern_trivial_int(host_monotonic_ms() - started),intern_trivial_int(len(rows)),intern_trivial_int(len(providers))]),"form-agent-tools",0);
-            append(fat-result(0,json-emit(result) + "\n","",docs)[0:5],[len(providers)]);
+            fat-with-value(append(fat-result(0,json-emit(result) + "\n","",docs)[0:5],[len(providers)]),result);
         };
         def fat-ar-text(t) = fat-ar-lines(t, reverse(fat-ar-forms(t, 0, len(t), [])[1]));
         def fat-ar-lines(t, found) = if nil?(found) then "" else ((String) fat-ar-line-of(t, found[0]) + fat-ar-lines(t, found[1:]));
@@ -181,13 +181,18 @@ section [form.bml] {
         // Intermediate documents stay local to this call. A later failure
         // returns the original set, including when an earlier step succeeded.
         // rungs: [step rung] for each step that landed past the exact bytes.
-        def fat-edit-batch(original,docs,path,pairs,step,rungs) = if nil?(pairs) then
+        def fat-edit-batch(original,docs,path,pairs,step,rungs) {
+            if nil?(pairs) then
             if ((Value) original == docs) then fat-fail("edit-unchanged: old and new text are identical; no source changed",original) else fat-ok(fat-edit-batch-out(rungs,(step - 1)),docs)
             else {
                 let result = fat-edit-literal(docs,[path,pairs[0],pairs[1]],fat-find-doc(docs,path));
                 if ((Comparable) fat-exit(result) == 0) then fat-edit-batch(original,fat-documents(result),path,fat-drop(pairs,2),(step + 1),fat-edit-rungs(rungs,step,fat-out(result)))
-                else fat-result(fat-exit(result),json-emit(json-node-object(append([json-node-pair("failed_edit",json-node-int(step)),json-node-pair("documents_changed",json-node-int(0)),json-node-pair("scope",json-node-string("The numbered literal replacement failed against the intermediate text; all replacements in this call were rolled back."))],fat-edit-step-detail(fat-out(result))))),fat-error(result),original);
+                else {
+                    let failed = json-node-object(append([json-node-pair("failed_edit",json-node-int(step)),json-node-pair("documents_changed",json-node-int(0)),json-node-pair("scope",json-node-string("The numbered literal replacement failed against the intermediate text; all replacements in this call were rolled back."))],fat-edit-step-detail(result)));
+                    fat-with-value(fat-result(fat-exit(result),json-emit(failed),fat-error(result),original),failed);
+                };
             };
+        }
         def fat-edit-literal(docs,args,doc) = if ((String) args[1] == "") then fat-fail("empty-edit-pattern",docs)
             else if nil?(doc) then fat-fail("resident-document-not-found",docs)
             else {
@@ -198,12 +203,18 @@ section [form.bml] {
         // matches at its strictest rung, names that rung, and refuses two places with their count.
         def fat-edit-ladder(docs,args,doc) = fat-edit-landed(docs,doc,fael-approximate(doc[2],args[1],args[2]));
         def fat-edit-landed(docs,doc,landing) = if ((String) landing[0] == "landed") then (if ((String) landing[3] == doc[2]) then fat-fail("edit-unchanged: old and new text are identical; no source changed",docs) else fat-ok(fat-rung-out(landing[1]),fat-put-doc(docs,[doc[0],doc[1],landing[3]])))
-            else if ((String) landing[0] == "ambiguous") then fat-result(2,json-emit(json-node-object([json-node-pair("rung",json-node-string(landing[1])),json-node-pair("matches",json-node-int(landing[2])),json-node-pair("scope",json-node-string("The old text matched more than one place at this rung; nothing changed. Supply a longer span that occurs once."))])),"edit-ambiguous",docs)
+            else if ((String) landing[0] == "ambiguous") then fat-edit-ambiguous(docs,landing)
             else fat-fail("edit-not-found",docs);
         def fat-rung-out(rung) = ("edited\nrung=" + (rung + "\n"));
         def fat-edit-rungs(rungs,step,out) = if fat-starts(out,"edited\nrung=") then append(rungs,[[step,substring(out,12,(len(out) - 1))]]) else rungs;
         def fat-edit-batch-out(rungs,steps) = if nil?(rungs) then "edited\n" else if ((Comparable) steps == 1) then fat-rung-out(rungs[0][1]) else ("edited\n" + (fat-join(rungs |> map(r => ("rung=" + (r[1] + (" step=" + r[0].str())))),"\n") + "\n"));
-        def fat-edit-step-detail(out) = if (!faj-valid(out)) then [] else fat-edit-step-pairs(faj-json("edit-step",out));
+        def fat-edit-ambiguous(docs, landing) {
+            let node = json-node-object([json-node-pair("rung",json-node-string(landing[1])),json-node-pair("matches",json-node-int(landing[2])),json-node-pair("scope",json-node-string("The old text matched more than one place at this rung; nothing changed. Supply a longer span that occurs once."))]);
+            fat-with-value(fat-result(2,json-emit(node),"edit-ambiguous",docs),node);
+        }
+        def fat-edit-step-detail(result) {
+            if fat-has-value?(result) then fat-edit-step-pairs(fat-value(result)) else if (!faj-valid(fat-out(result))) then [] else fat-edit-step-pairs(faj-json("edit-step",fat-out(result)));
+        }
         def fat-edit-step-pairs(obj) = if (!(fat-edit-object?(obj) && json-object-has?(obj,"rung"))) then [] else [json-node-pair("rung",json-object-get(obj,"rung")),json-node-pair("matches",json-object-get(obj,"matches"))];
         def fat-edit-object?(node) = faj-is(node, JSON-OBJECT());
         def fat-edit-guarded(docs,path,digest,apply) = !fat-sha?(digest) ? fat-fail("edit-invalid-sha256",docs) : {

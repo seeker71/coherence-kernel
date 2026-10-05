@@ -537,7 +537,9 @@ the turn. A gap whose band is empty and whose goal names paths becomes that
 contract as a value: the band whose prelude names one of them, or, when several
 bands only share a barrel that imports the path, the larger verdict. The model
 way calls `fcaq-decoded` in the same process. The request and the result stay
-nodes. Text is emitted once, at a stdin door or a ledger row.
+nodes. Text is emitted once, at a stdin door or a ledger row. A tool result
+stays that resident value. A structured tool keeps its node on the value, and
+the model note is emitted once from the node.
 A lane reason is a failure class with its own spend, next step, and whether
 the walk ends. One writer holds the session. After a context renewal the same
 tool triple ends the attempt. Publish waits until the neighbor bands that
