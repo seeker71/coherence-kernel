@@ -104,18 +104,20 @@ section [form.bml] {
         1;
     };
     // snp = [conv snapshots, delta snapshots]: slot t holds the state after token t of the span (t = 0..kmax-1)
-    def q38s-linear-attn-span(ps, qs, bs, geo, lay, st, snp, ntok) = {
+    def q38s-linear-attn-span(ps, qs, bs, geo, lay, st, snp, ntok) = q38s-linear-attn-span-s(ps, qs, bs, geo, lay, st, snp, ntok, 1);
+    // snapon = 0 runs the lane's own two recurrence kernels (no snapshots): only the cost probe asks for it
+    def q38s-linear-attn-span-s(ps, qs, bs, geo, lay, st, snp, ntok, snapon) = {
         let bs2-pitch = qlslc-bs2-output-pitch(geo);
         q38-rms-span(ps, bs[33], lay[0], bs[1], geo[0], geo[6], ntok, 1);
         q38s-mv(ps, qs, lay[5], bs[1], bs[2], ntok, bs2-pitch, 1);
         q38s-mv(ps, qs, lay[7], bs[1], bs[3], ntok, kth-tv-r(lay[7]), 0);
         q38s-mv(ps, qs, lay[8], bs[1], bs[4], ntok, kth-tv-r(lay[8]), 0);
         q38s-mv(ps, qs, lay[12], bs[1], bs[7], ntok, kth-tv-r(lay[12]), 0);
-        metal_enqueue(qs[q38s-pipe-conv()], q38-b16([st[0], bs[2], kth-tv-h(lay[6]), bs[2], snp[0]], [geo[1], geo[23], bs2-pitch, ntok, geo[1] * geo[23]], 0, 1), geo[1]);
+        (Comparable) snapon == 1 ? metal_enqueue(qs[q38s-pipe-conv()], q38-b16([st[0], bs[2], kth-tv-h(lay[6]), bs[2], snp[0]], [geo[1], geo[23], bs2-pitch, ntok, geo[1] * geo[23]], 0, 1), geo[1]) : metal_enqueue(nth(ps, qlslc-conv-span-pipeline()), q38-b16([st[0], bs[2], kth-tv-h(lay[6]), bs[2]], [geo[1], geo[23], bs2-pitch, ntok], 0, 1), geo[1]);
         metal_enqueue(ps[8], q38-b16([bs[2]], [qlslc-bs2-allocation-elements(geo, ntok)], 0, 1), qlslc-bs2-allocation-elements(geo, ntok));
         metal_enqueue(nth(ps, qlslc-l2norm-span-pipeline()), q38-b16([bs[2]], [2 * geo[2], geo[4], geo[6], bs2-pitch, ntok], 0, 1), 2 * geo[2] * ntok);
         metal_enqueue(nth(ps, qlslc-gates-span-pipeline()), q38-b16([bs[3], bs[4], kth-tv-h(lay[9]), kth-tv-h(lay[10]), bs[5], bs[6]], [geo[3], ntok], 0, 1), geo[3] * ntok);
-        metal_enqueue(qs[q38s-pipe-delta()], q38-b16([st[1], bs[2], bs[5], bs[6], bs[8], snp[1]], [geo[3], geo[5], geo[4], geo[2], geo[7], bs2-pitch, geo[3], geo[3] * geo[5], ntok, geo[3] * geo[5] * geo[4]], 0, 1), geo[3] * geo[5]);
+        (Comparable) snapon == 1 ? metal_enqueue(qs[q38s-pipe-delta()], q38-b16([st[1], bs[2], bs[5], bs[6], bs[8], snp[1]], [geo[3], geo[5], geo[4], geo[2], geo[7], bs2-pitch, geo[3], geo[3] * geo[5], ntok, geo[3] * geo[5] * geo[4]], 0, 1), geo[3] * geo[5]) : metal_enqueue(nth(ps, qlslc-delta-span-pipeline()), q38-b16([st[1], bs[2], bs[5], bs[6], bs[8]], [geo[3], geo[5], geo[4], geo[2], geo[7], bs2-pitch, geo[3], geo[3] * geo[5], ntok], 0, 1), geo[3] * geo[5]);
         metal_enqueue(nth(ps, qlslc-norm-gate-span-pipeline()), q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6], ntok], 0, 1), geo[3] * ntok);
         q38s-mv(ps, qs, lay[13], bs[9], bs[10], ntok, kth-tv-r(lay[13]), 1);
         metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
@@ -277,24 +279,39 @@ section [form.bml] {
         metal_sync();
         r;
     }
-    def q38s-hits-go(m, j, k) = j > k ? [] : cons(m >= j ? 1 : 0, q38s-hits-go(m, j + 1, k));
+    // per draft position j = 1..kmax: how many steps accepted it (the step used kcur drafts: positions past it were not tried), and tried
+    def q38s-hits-go(m, j, kcur, kmax) = j > kmax ? [] : cons(j <= kcur && m >= j ? 1 : 0, q38s-hits-go(m, j + 1, kcur, kmax));
+    def q38s-tries-go(j, kcur, kmax) = j > kmax ? [] : cons(j <= kcur ? 1 : 0, q38s-tries-go(j + 1, kcur, kmax));
     def q38s-add-go(a, b) = (Comparable) len(a) == 0 ? [] : cons(a[0] + b[0], q38s-add-go(a[1:], b[1:]));
     def q38s-zeros(n) = n <= 0 ? [] : cons(0, q38s-zeros(n - 1));
-    // stats: [steps, host ms before the wait, ms of the wait, restore, catch-up+draft, chain, check (phased only), then per draft
-    // position j how many steps accepted position j]; trace: [accepted, step ms] a step
-    def q38s-gen-go(ctx, qs, sts, sx, x, p, k, cu-ids, cu-pos0, slot, want, acc, stats, trace, phased, vacc) = len(acc) >= want ? [take(want, acc), stats, trace, take(want, vacc)] : {
+    def q38s-fill(n, v) = n <= 0 ? [] : cons(v, q38s-fill(n - 1, v));
+    // How many drafts the next step makes. ema[j-1] is the running share (percent) of steps that accepted draft position j when it was
+    // tried; a position costs the check about a fifth of a token (a column of the matvec, a row of attention, a snapshot) plus the chain's
+    // 7 ms, so it pays when more than about a third of the steps take it. The policy tries one position past the last that paid, and
+    // never fewer than one. adapt = 0 keeps k fixed.
+    def q38s-ema-go(ema, m, j, kcur) = (Comparable) len(ema) == 0 ? [] : cons(j <= kcur ? (ema[0] * 7 + (m >= j ? 300 : 0)) / 10 : ema[0], q38s-ema-go(ema[1:], m, j + 1, kcur));
+    def q38s-next-k(ema, j) = j <= 1 ? 1 : ema[j - 1] >= 35 ? j : q38s-next-k(ema, j - 1);
+    // stats: [steps, host ms before the wait, ms of the wait, restore, catch-up+draft, chain, check (phased only), device busy ms, dispatches,
+    // then per draft position j how many steps accepted it, then how many tried it]; trace: [accepted, step ms, device busy ms, host ms] a step
+    def q38s-gen-go(ctx, qs, sts, sx, x, p, kcur, kmax, adapt, ema, cu-ids, cu-pos0, slot, want, acc, stats, trace, phased, vacc) = len(acc) >= want ? [take(want, acc), stats, trace, take(want, vacc)] : {
         let t0 = host_monotonic_ms();
-        let out = q38s-step(ctx, qs, sts, sx, x, p, k, cu-ids, cu-pos0, slot, phased);
+        let out = q38s-step(ctx, qs, sts, sx, x, p, kcur, cu-ids, cu-pos0, slot, phased);
         let t1 = host_monotonic_ms();
         let d = out[0];
         let v = out[1];
         let ph = out[3];
-        let m = q38s-accept-go(d, v, 1, k);
+        let m = q38s-accept-go(d, v, 1, kcur);
         let said = append(take(m, d[1:]), [v[m]]);
-        let st2 = q38s-add-go(stats, cons(1, cons(out[2], cons((t1 - t0) - out[2], cons(ph[0], cons(ph[1], cons(ph[2], cons(ph[3], cons(out[4][0], cons(out[4][1], q38s-hits-go(m, 1, k)))))))))));
-        q38s-gen-go(ctx, qs, sts, sx, v[m], p + m + 1, k, said, p + 1, m < k ? m : -1, want, append(acc, said), st2, append(trace, [[m, t1 - t0, out[4][0], out[2]]]), phased, append(vacc, take(m + 1, out[5])));
+        let st2 = q38s-add-go(stats, cons(1, cons(out[2], cons((t1 - t0) - out[2], cons(ph[0], cons(ph[1], cons(ph[2], cons(ph[3], cons(out[4][0], cons(out[4][1], append(q38s-hits-go(m, 1, kcur, kmax), q38s-tries-go(1, kcur, kmax))))))))))));
+        let ema2 = q38s-ema-go(ema, m, 1, kcur);
+        let knext = (Comparable) adapt == 1 ? q38s-next-k(ema2, kcur + 1 > kmax ? kmax : kcur + 1) : kcur;
+        q38s-gen-go(ctx, qs, sts, sx, v[m], p + m + 1, knext, kmax, adapt, ema2, said, p + 1, m < kcur ? m : -1, want, append(acc, said), st2, append(trace, [[m, t1 - t0, out[4][0], out[2]]]), phased, append(vacc, take(m + 1, out[5])));
     };
-    // x0 pending at position N; the first catch-up is the whole prompt after position 0, then x0
-    def q38s-generate(ctx, qs, sts, sx, ids, x0, k, want, phased) = q38s-gen-go(ctx, qs, sts, sx, x0, len(ids), k, append(ids[1:], [x0]), 1, -1, want, [], q38s-zeros(9 + k), [], phased, []);
+    // x0 pending at position N; the first catch-up is the whole prompt after position 0, then x0. k is the most drafts a step makes;
+    // adapt = 1 starts at two and lets the acceptance decide, adapt = 0 makes k every step.
+    // The snapshots hold the sx's own kmax slots (q38s-open): asking for more drafts than that is clamped to it, never written past.
+    def q38s-generate-a(ctx, qs, sts, sx, ids, x0, k, want, phased, adapt) = q38s-generate-b(ctx, qs, sts, sx, ids, x0, k > sx[12] ? sx[12] : k, want, phased, adapt);
+    def q38s-generate-b(ctx, qs, sts, sx, ids, x0, k, want, phased, adapt) = q38s-gen-go(ctx, qs, sts, sx, x0, len(ids), (Comparable) adapt == 1 ? (k < 2 ? k : 2) : k, k, adapt, q38s-fill(k, 100), append(ids[1:], [x0]), 1, -1, want, [], q38s-zeros(9 + 2 * k), [], phased, []);
+    def q38s-generate(ctx, qs, sts, sx, ids, x0, k, want, phased) = q38s-generate-a(ctx, qs, sts, sx, ids, x0, k, want, phased, 0);
     0;
 }
