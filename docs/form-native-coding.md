@@ -349,6 +349,15 @@ this coding model boundary. External requests, results and receipts retain their
 public JSON compatibility; result fields are assembled once as cells and emitted
 only at that public boundary. Old checkpoint evidence is converted at admission.
 
+Native tool observations stay as structured cells in policy state, binary
+checkpoints and model context. Guard, read, mutation and verification metadata
+extend those cells directly. Context admission binds their existing graphs;
+it no longer decodes a record and builds a second workspace graph. The checkpoint
+codec distinguishes a held observation cell from a list value and verifies its
+supported record/list/scalar shape before retention. Existing text checkpoints
+remain readable. Text-only diagnostics and public callers use the note's text
+view; the live tool-to-model path carries the cell itself.
+
 The north star is a model choosing and returning executable native recipes and
 cells, with Form retaining context, ownership, observations and verification.
 Removing transport work is useful when it improves independently verified local

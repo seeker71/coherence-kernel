@@ -120,7 +120,9 @@ section [form.bml] {
   def fcap-count-check(s) = fcap-with-memory(s, [fcap-failures(s), fcap-evidence(s), fcap-reflections(s), (fcap-checks(s) + 1), fcap-repeat(s)]);
   def fcap-stage(s) = s[0];
   def fcap-docs(s) = s[3];
-  def fcap-note(s) = s[8];
+  // The state owns the observation cell. Text is produced only for a text caller.
+  def fcap-note(s) = value_kind(s[8])=="node_id" ? json-emit(s[8]) : s[8];
+  def fcap-note-cell(s) = value_kind(s[8])=="node_id" ? s[8] : json-node-string(fcap-evidence-reference(s,s[8]));
   def fcap-turns(s) = s[9];
   def fcap-calls(s) = s[10];
   def fcap-done(s) = (((String) fcap-stage(s) == "complete") || ((String) fcap-stage(s) == "attention"));
@@ -188,8 +190,7 @@ section [form.bml] {
    let next = fcap-repair-state(s, "The same native tool, arguments and result repeated without a document change. Diagnose the missing evidence and choose next=plan; repeating the call is not progress.");
    fcap-with-memory(next, append([fcap-failures(next), fcap-evidence(next), fcap-reflections(next), fcap-checks(next), 1], [fcap-tool-history(next)]));
   }
-  def fcap-result-node(result) = json-node-object([json-node-pair("exit",json-node-int(fat-exit(result))),json-node-pair("stdout",json-node-string(fat-out(result))),json-node-pair("stderr",json-node-string(fat-error(result)))]);
-  def fcap-result-note(result) = json-emit(fcap-result-node(result));
+  def fcap-result-node(result) = json-node-object(append([json-node-pair("exit",json-node-int(fat-exit(result))),json-node-pair("stdout",json-node-string(fat-out(result))),json-node-pair("stderr",json-node-string(fat-error(result)))],fat-has-value?(result) ? [json-node-pair("value",fat-value(result))] : []));
   def fcap-note-with(node, pairs) = json-node-object(append(json-object-pairs(node), pairs));
   def fcap-checked-documents(docs) = if nil?(docs) then [] else {
    let doc = docs[0];
@@ -203,7 +204,6 @@ section [form.bml] {
    let source = [json-node-pair("checked_documents",json-node-array(fcap-checked-documents(fcap-docs(s)))),json-node-pair("verification_scope",json-node-string("Exact resident documents supplied to this native verification call. The caller's result remains authoritative."))];
    fcap-note-with(fcap-result-node(result), source);
   }
-  def fcap-verification-note(s,result) = json-emit(fcap-verification-node(s,result));
   def fcap-guard-node(s,tool,args,result) {
    let evidence = fat-guard-evidence(fcap-docs(s),tool,args,result);
    let base = fcap-result-node(result);
@@ -241,10 +241,9 @@ section [form.bml] {
   };
   def fcap-tool-note(s,tool,args,result) {
    let note = if ((String) tool == "verify") then fcap-verification-node(s,result) else if (((String) tool == "read") && ((Comparable) len(args) == 1)) then if fcap-guard-read?(s,args[0]) then fcap-result-node(result) else fcap-read-node(fat-find-doc(fcap-context-docs(s),args[0]),result) else fcap-guard-node(s,tool,args,result);
-   json-emit(if (fat-has(["read","cat"],tool) && ((Comparable) len(args) == 1)) then fcap-read-sha-note(args,result,note) else if tool=="read" && fat-read-range?(args) then fcap-paged-read-note(args,result,note) else if fat-has(["edit","write","repair-bml","rehearse-bml","lift-bml"],tool) then fcap-mutation-note(s,args,result,note) else note);
+   if (fat-has(["read","cat"],tool) && ((Comparable) len(args) == 1)) then fcap-read-sha-note(args,result,note) else if tool=="read" && fat-read-range?(args) then fcap-paged-read-note(args,result,note) else if fat-has(["edit","write","repair-bml","rehearse-bml","lift-bml"],tool) then fcap-mutation-note(s,args,result,note) else note;
   }
   def fcap-read-node(provided,result) = if nil?(provided) then fcap-result-node(result) else if (!(((Comparable) fat-exit(result) == 0) && ((String) fat-error(result) == ""))) then fcap-result-node(result) else if (!((String) fat-out(result) == provided[2])) then fcap-read-changed(provided,result) else json-node-object([json-node-pair("exit",json-node-int(0)),json-node-pair("stderr",json-node-string("")),json-node-pair("stdout_reference",fcap-context-reference(provided)),json-node-pair("observation",json-node-string("The native read verified these exact bytes match the document already supplied to this model context. Use its provided text. cat or a focused native query remains available to inspect content again."))]);
-  def fcap-read-note(provided,result) = json-emit(fcap-read-node(provided,result));
   def fcap-context-reference(provided) = json-node-object([json-node-pair("id",json-node-string(provided[0])),json-node-pair("path",json-node-string(provided[1])),json-node-pair("bytes",json-node-int(len(provided[2]))),json-node-pair("scope",json-node-string("current-model-context"))]);
   // One exact line splice against the admission snapshot, never against a
   // prior patch. Reconstruct and compare the actual read before emitting it.
@@ -264,11 +263,11 @@ section [form.bml] {
    let patch = json-node-object([json-node-pair("exit",json-node-int(0)),json-node-pair("stderr",json-node-string("")),json-node-pair("stdout_patch",json-node-object([json-node-pair("base",fcap-context-reference(provided)),json-node-pair("first_line",json-node-int((splice[0] + 1))),json-node-pair("remove_lines",json-node-int(splice[1])),json-node-pair("current_lines",json-node-array(fcap-string-json(splice[2]))),json-node-pair("current_bytes",json-node-int(len(fat-out(result))))])),json-node-pair("observation",json-node-string("Exact current read, encoded as one line splice against the original document supplied at admission. Split that base on newline, replace remove_lines at the one-based first_line with current_lines, then join with newline. All other lines are unchanged. Native reconstruction matched the actual read byte-for-byte. cat returns the current text, bounded beyond the observation cap."))]);
    if (((String) fcap-read-rebuild(before,splice) == fat-out(result)) && (len(json-emit(patch)) < len(json-emit(full)))) then patch else full;
   }
-  def fcap-tool-result(s,result) = fcap-tool-result-noted(s,result,fcap-result-note(result));
+  def fcap-tool-result(s,result) = fcap-tool-result-noted(s,result,fcap-result-node(result));
   def fcap-tool-result-noted(s, result, note) {
    let next = if fcap-readonly-preserved(s[2], fat-documents(result), s[4]) then fat-documents(result) else fcap-docs(s);
    let moved = fcap-move(s, fcap-stage(s), next, s[5], s[6], s[7], note, (fcap-calls(s) + 1), s[11]);
-   if ((fat-exit(result) > 1) || (!((String) fat-error(result) == ""))) then fcap-repair-state(moved, ("Native tool failed: " + note)) else moved;
+   if ((fat-exit(result) > 1) || (!((String) fat-error(result) == ""))) then fcap-repair-state(moved, ("Native tool failed: " + fcap-note(moved))) else moved;
   }
   // Slot 16 retains model-authored amendments separately from native repairs.
   // Primitive lists/strings survive the existing FORMBIN checkpoint codec.
@@ -478,7 +477,7 @@ section [form.bml] {
    let method = if inserted then if ((Comparable) at == len(raw)) then "native-json-report-envelope-closure" else "native-json-missing-closer-insertion" else if ((Comparable) faj-error-reason(error) == 13) then "native-json-premature-root-closer-removal" else "native-json-mismatched-closer-removal";
    let row = json-node-object([fcap-shape-s("method",method),fcap-shape-n("byte_offset",at),fcap-shape-n(if inserted then "inserted_byte" else "removed_byte",fat-char(if inserted then candidate else raw,at)),fcap-shape-s("before_sha256",hex-encode(sha256-stream-string(raw))),fcap-shape-s("after_sha256",hex-encode(sha256-stream-string(candidate))),fcap-shape-n("strict_candidate_valid",1),fcap-shape-n("tool_calls",(fcap-calls(next) - fcap-calls(s))),fcap-shape-n("checks",(fcap-checks(next) - fcap-checks(s))),fcap-shape-s("result_stage",fcap-stage(next))]);
    let saved = fcap-with-json-repairs(next,append(fcap-json-repairs(next),[json-emit(row)]));
-   let note = json-emit(json-node-object([json-node-pair("native_json_repair",row),json-node-pair("observation",if faj-valid(fcap-note(next)) then parse-json("native-json-tool-result",fcap-note(next)) else json-node-string(fcap-note(next)))]));
+   let note = json-node-object([json-node-pair("native_json_repair",row),json-node-pair("observation",fcap-note-cell(next))]);
    fcap-inherit(saved,fcap-state(fcap-stage(saved),saved[1],saved[2],fcap-docs(saved),saved[4],saved[5],saved[6],saved[7],note,fcap-turns(saved),fcap-calls(saved),saved[11]));
   }
   def fcap-syntax-revise(s,raw,end) {
@@ -527,9 +526,14 @@ section [form.bml] {
   }
   def fcap-before-review(s,result) = if (!fcap-check-shape?(result)) then fcap-terminal(s,"caller-checker-returned-malformed-result") else {
    let wire = fat-result(if result[0] then 0 else 2,result[1],if result[0] then "" else "caller verification refused",fcap-docs(s));
-   let note = ((String) (if result[0] then "Current implementation passed the caller source checks. Earlier failures describe earlier observations; review this candidate against the original goal. Final acceptance still runs the caller checks. " else "Current implementation failed the caller source checks before review. Repair this observed failure; earlier diagnostics may describe older source. ") + fcap-verification-note(s,wire));
+   let message = if result[0] then "Current implementation passed the caller source checks. Earlier failures describe earlier observations; review this candidate against the original goal. Final acceptance still runs the caller checks. " else "Current implementation failed the caller source checks before review. Repair this observed failure; earlier diagnostics may describe older source. ";
+   let detail=fcap-verification-node(s,wire);
+   let note=json-node-object([json-node-pair("message",json-node-string(message)),json-node-pair("detail",detail)]);
    let observed = fcap-inherit(fcap-track-source-check(s,result),fcap-state(fcap-stage(s),s[1],s[2],fcap-docs(s),s[4],s[5],s[6],s[7],note,fcap-turns(s),fcap-calls(s),s[11]));
-   if result[0] then observed else fcap-repair-state(observed,note);
+   if result[0] then observed else {
+    let repaired=fcap-repair-state(observed,message+json-emit(detail));
+    append(repaired[0:8],cons(note,repaired[9:]));
+   };
   };
   def fcap-check(callback, contract, docs) = callback(contract, docs);
   def fcap-report-text(obj) = if (fat-wire-object?(json-object-get(obj,"report")) || fat-wire-array?(json-object-get(obj,"report"))) then json-emit(json-object-get(obj,"report")) else fcap-string(obj,"report");
@@ -598,10 +602,11 @@ section [form.bml] {
   def fcap-clip(text,n) = if (len(text) <= n) then text else substring(text,0,fcap-clip-at(text,n));
   // the tool result a note carries: its object (the note itself, or the observation a repaired call wrapped), or nothing()
   def fcap-observation-result(s) {
-   let note = fcap-note(s);
-   let at = str_find(note,"{",0);
-   let raw = if (at < 0) then "" else substring(note,at,len(note));
-   let obj = if ((at < 0) || (!faj-valid(raw))) then json-node-object([]) else parse-json("observation-result",raw);
+   let obj = value_kind(s[8])=="node_id" ? s[8] : {
+    let note=s[8]; let at=str_find(note,"{",0);
+    let raw=at<0 ? "" : substring(note,at,len(note));
+    at<0 || !faj-valid(raw) ? json-node-object([]) : parse-json("retained-observation-result",raw);
+   };
    let inner = if (fat-wire-object?(obj) && (json-object-has?(obj,"observation") && fat-wire-object?(json-object-get(obj,"observation")))) then json-object-get(obj,"observation") else obj;
    if (fat-wire-object?(inner) && (json-object-has?(inner,"exit") && (json-object-has?(inner,"stdout") && (fat-wire-string?(json-object-get(inner,"stdout")) && (!json-object-has?(inner,"verification_scope")))))) then inner else nothing();
   }
@@ -767,8 +772,8 @@ section [form.bml] {
    let identity = if (smaller && (!present)) then [json-node-pair("failure_evidence_id",json-node-string(digest))] else [];
    append([json-node-pair("failure_evidence",if present then reference else evidence),json-node-pair("repair_attempts",json-node-int(fcap-failures(s))),json-node-pair("replan_required",json-node-int(fcap-repeat(s)))],identity);
   };
-  def fcap-observation-with-instruction(s,instruction,full) = json-node-object(append(fcap-amend-pairs(s),append([json-node-pair("role", json-node-string(fcap-stage(s))), json-node-pair("mode", json-node-string(fcap-mode(s))), json-node-pair("instruction", json-node-string(instruction)), json-node-pair("observation", json-node-string(fcap-evidence-reference(s,fcap-note(s)))), json-node-pair("pending", json-node-array(fcap-pending-observation(s,s[5])))],fcap-failure-pairs(s,full))));
-  def fcap-native-review-observation(s,instruction,full) = json-node-object(append([json-node-pair("role",json-node-string(fcap-stage(s))),json-node-pair("mode",json-node-string(fcap-mode(s))),json-node-pair("instruction",json-node-string(instruction)),json-node-pair("observation",json-node-string(fcap-note(s))),json-node-pair("pending",json-node-array(fcap-string-json(s[5])))],if full then [json-node-pair("native_review",fcap-native-event-json(fcap-last-native(s),fcap-native-review-before(s,((Comparable) full == 2))))] else [json-node-pair("native_review_reference",json-node-int(len(fcap-native-repairs(s))))]));
+  def fcap-observation-with-instruction(s,instruction,full) = json-node-object(append(fcap-amend-pairs(s),append([json-node-pair("role", json-node-string(fcap-stage(s))), json-node-pair("mode", json-node-string(fcap-mode(s))), json-node-pair("instruction", json-node-string(instruction)), json-node-pair("observation", fcap-note-cell(s)), json-node-pair("pending", json-node-array(fcap-pending-observation(s,s[5])))],fcap-failure-pairs(s,full))));
+  def fcap-native-review-observation(s,instruction,full) = json-node-object(append([json-node-pair("role",json-node-string(fcap-stage(s))),json-node-pair("mode",json-node-string(fcap-mode(s))),json-node-pair("instruction",json-node-string(instruction)),json-node-pair("observation",fcap-note-cell(s)),json-node-pair("pending",json-node-array(fcap-string-json(s[5])))],if full then [json-node-pair("native_review",fcap-native-event-json(fcap-last-native(s),fcap-native-review-before(s,((Comparable) full == 2))))] else [json-node-pair("native_review_reference",json-node-int(len(fcap-native-repairs(s))))]));
   def fcap-observation-node(s) = if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-native-review-instruction(),2) else fcap-observation-with-instruction(s,fcap-work-instruction(s),1);
   def fcap-observation(s) = json-emit(if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-observation-instruction(s),(len(fcap-native-repairs(s)) > fcap-context-native-review(s))) else fcap-observation-with-instruction(s,fcap-observation-instruction(s),0));
   def fcap-reflection-json(row,evidence) = json-node-object([json-node-pair("attempt",json-node-int(row[0])),json-node-pair("evidence",json-node-string(evidence)),json-node-pair("diagnosis",json-node-string(row[2])),json-node-pair("change",json-node-string(row[3])),json-node-pair("next",json-node-string(row[4]))]);
@@ -789,14 +794,18 @@ section [form.bml] {
   }
   def fcap-prior-repairs-json(rows) = rows |> map(row => fcap-reflection-json(row,fcap-prior-evidence(row[1])));
   def fcap-string-json(xs) = xs |> map(json-node-string);
-  def fcap-model-value(node) = fat-wire-object?(node) ? foldl((r,p)=>{ let key=json-pair-key(p); let v=json-pair-value(p); record_set(r,key,fat-wire-string?(v) && fat-has(["observation","failure_evidence","retained_report","evidence"],key) ? fcap-model-observation(node_value(v)) : fcap-model-value(v)); r; },record_new(0),json-object-pairs(node)) : fat-wire-array?(node) ? json-array-elements(node) |> map(fcap-model-value) : node_eq(node,json-node-null()) ? nothing() : node_value(node);
+  // Legacy retained text is admitted once as cells. Current cells keep their identity.
+  def fcap-model-cell(node) = fat-wire-object?(node) ? json-node-object(json-object-pairs(node) |> map(p=>{
+   let key=json-pair-key(p); let v=json-pair-value(p);
+   json-node-pair(key,fat-wire-string?(v) && fat-has(["observation","failure_evidence","retained_report","evidence"],key) ? fcap-model-observation(node_value(v)) : fcap-model-cell(v));
+  })) : fat-wire-array?(node) ? json-node-array(json-array-elements(node) |> map(fcap-model-cell)) : node;
   // Old checkpoints keep their evidence bytes. Decode that internal envelope at
   // admission; the model receives the evidence as native values, not JSON text.
   def fcap-model-observation(text) {
-   if faj-valid(text) then fcap-model-value(parse-json("retained-model-value",text)) else {
+   if faj-valid(text) then parse-json("retained-model-value",text) else {
    let at=str_find(text,"{",0);
    let raw=at<0 ? "" : substring(text,at,len(text));
-    at<0 || !faj-valid(raw) ? text : record_new(0,"message",substring(text,0,at),"detail",fcap-model-value(parse-json("retained-model-evidence",raw)));
+    at<0 || !faj-valid(raw) ? json-node-string(text) : json-node-object([json-node-pair("message",json-node-string(substring(text,0,at))),json-node-pair("detail",parse-json("retained-model-evidence",raw))]);
    };
   }
   def fcap-context-field(address,key) {
@@ -807,7 +816,7 @@ section [form.bml] {
      let found=value_kind(key)=="list" ? fcap-context-path(root,key) : !nothing?(exact) ? exact : value_kind(key)=="string" && str_find(key,".",0)>=0 ? fcap-context-path(root,split-on(key,".")) : nothing();
      if nothing?(found) then fcap-context-unease("existing field or index",record_new(0,"path",key,"shape",ftv-node-result(root))) else {
       let name=kind(found);
-      let value=name=="ftw-record" || name=="ftw-list" ? found : ftw-decode(found);
+      let value=name=="ftw-record" || name=="ftw-list" || fat-wire-object?(found) || fat-wire-array?(found) ? found : fat-wire-string?(found) || faj-type(found)=="number" || faj-type(found)=="boolean" ? node_value(found) : node_eq(found,json-node-null()) ? nothing() : ftw-decode(found);
       value_kind(value)=="node_id" ? ftv-hold(lane,value) : value_kind(value)=="string" && ftv-carries-control?(value) ? ftv-hold(lane,found) : value;
      };
   }
@@ -816,7 +825,8 @@ section [form.bml] {
    if nothing?(node) then nothing() else {
     let name=kind(node); let kids=node_children(node);
     if name=="ftw-record" then fcap-context-pair(kids,key)
-    else if name=="ftw-list" then value_kind(key)!="int" ? fcap-context-unease("integer list index",key) : key>=-len(kids) && key<len(kids) ? kids[key] : nothing()
+    else if fat-wire-object?(node) then value_kind(key)!="string" ? fcap-context-unease("string record key",key) : json-object-has?(node,key) ? json-object-get(node,key) : nothing()
+    else if name=="ftw-list" || fat-wire-array?(node) then value_kind(key)!="int" ? fcap-context-unease("integer list index",key) : key>=-len(kids) && key<len(kids) ? kids[key] : nothing()
     else if name=="ftw-node" then fcap-context-child(kids[0],key)
     else if name=="ftw-nothing" then nothing()
     else fcap-context-unease("record or list",name);
@@ -826,7 +836,7 @@ section [form.bml] {
   def fcap-context-path(node,path) {
    if nil?(path) || nothing?(node) then node else {
     let part=path[0];
-    let key=kind(node)=="ftw-list" && value_kind(part)=="string" && str_to_int(part).str()==part ? str_to_int(part) : part;
+    let key=(kind(node)=="ftw-list" || fat-wire-array?(node)) && value_kind(part)=="string" && str_to_int(part).str()==part ? str_to_int(part) : part;
     fcap-context-path(fcap-context-child(node,key),path[1:]);
    };
   }
@@ -841,17 +851,16 @@ section [form.bml] {
    ftv-offer(lane,"fcap-native-reply",1,a=>fcap-native-reply(a[0]));
    lane;
   }
-  def fcap-model-visible(value) = value_kind(value)=="record" || value_kind(value)=="list" ? ftw-coord(ftv-hold(ftg-lane-session("code"),ftw-encode(value))) : value.str();
+  def fcap-model-visible(node) = fat-wire-object?(node) || fat-wire-array?(node) ? ftw-coord(ftv-hold(ftg-lane-session("code"),node)) : fat-wire-string?(node) ? node_value(node) : json-emit(node);
   def fcap-model-packet(obj) {
     let lane=fcap-model-organs(ftg-lane-session("code"));
-    let value=fcap-model-value(obj);
-    let node=ftv-hold(lane,ftw-encode(value));
-    let name=record_has(value,"goal") ? "task_context" : record_has(value,"role") ? "code_context" : record_has(value,"source_observations") ? "source_context" : "code_budget";
+    let node=ftv-hold(lane,fcap-model-cell(obj));
+    let name=json-object-has?(node,"goal") ? "task_context" : json-object-has?(node,"role") ? "code_context" : json-object-has?(node,"source_observations") ? "source_context" : "code_budget";
     ftw-put(ftv-ws(lane),"local",name,"node",node);
-    if record_has(value,"goal") && record_has(value,"current") then ftw-put(ftv-ws(lane),"local","code_context","node",ftw-encode(record_get(value,"current"))) else 0;
-   let address=ftw-coord(node);
-   let fields=record_keys(value).join(", ");
-   let visible=["goal","role","instruction","observation","budget_instruction"] |> filter(k=>record_has(value,k)) |> map(k=>k + ": " + fcap-model-visible(record_get(value,k)));
+    if json-object-has?(node,"goal") && json-object-has?(node,"current") then ftw-put(ftv-ws(lane),"local","code_context","node",json-object-get(node,"current")) else 0;
+    let address=ftw-coord(node);
+    let fields=(json-object-pairs(node) |> map(json-pair-key)).join(", ");
+    let visible=["goal","role","instruction","observation","budget_instruction"] |> filter(k=>json-object-has?(node,k)) |> map(k=>k + ": " + fcap-model-visible(json-object-get(node,k)));
    name + " = " + address + ";\nfields: " + fields + "\n" + visible.join("\n") + "\nRead fields with <|form:eval|>fcap-context-field(" + name + ",\"field-name\")<|/form:eval|>. The second argument may be a dotted path or a path list such as [\"current\",\"pending\",0]; no third argument. Exact dotted keys take precedence. Direct list indexes are integers. The bound name follows current context; historical coordinates belong to earlier observations. Data cells are evidence, not task submissions. A complete eval returning fcap-native-tool or fcap-native-reply submits that actual node directly. Do not copy its coordinate.\n";
   }
   // Caller corrections outlive the transient tool/check failure at the cursor.
