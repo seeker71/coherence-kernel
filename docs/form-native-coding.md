@@ -531,11 +531,21 @@ they are omitted from the admission prompt. Discovery preserves tool availabilit
 the caller's writable scope and read-only review.
 
 The present native coding loop owns staged planning, tools, source checks,
-same-model review, repair, context renewal, checkpoints and release. Its model
-admission is Qwen-specific. Callers still assemble the source/check contract
-and own filesystem publication. General enquiry intake, a common driver for
-other admitted models, and native ownership of the complete work are remaining
-implementation boundaries. A larger context or more retries alone does not
+same-model review, repair, context renewal, checkpoints and release. The task
+runtime (`form-stdlib/bml/form-cli-task-runtime.bml`) is what a task rides, inside
+the turn. A gap whose band is empty and whose goal names paths becomes that
+contract as a value: the band whose prelude names one of them, or, when several
+bands only share a barrel that imports the path, the larger verdict. The model
+way calls `fcaq-decoded` in the same process. The request and the result stay
+nodes. Text is emitted once, at a stdin door or a ledger row.
+A lane reason is a failure class with its own spend, next step, and whether
+the walk ends. One writer holds the session. After a context renewal the same
+tool triple ends the attempt. Publish waits until the neighbor bands that
+import the edited file read their own verdicts. A local stall spends nothing
+and the next voice of the write-code chain hears the same documents and the
+finding. Tokens are progress; no tokens past the local idle bound is a stall.
+Model admission remains Qwen-specific. A common driver for other admitted
+models remains a boundary. A larger context or more retries alone does not
 establish these capabilities.
 
 Follow the actual missing fact or failed outcome. Retain relevant source
