@@ -800,13 +800,35 @@ section [form.bml] {
    };
   }
   def fcap-context-field(address,key) {
-    let lane=ftg-lane-session("code");
-    let node=value_kind(address)=="node_id" ? address : value_kind(address)=="string" ? ftv-held(lane,address) : nothing();
-    let value=nothing?(node) ? address : ftw-decode(node);
-    if !nothing?(value) && value_kind(value)!="record" && value_kind(value)!="list" then fcap-context-unease("record or list",value_kind(value)) else if value_kind(value)=="list" && value_kind(key)!="int" then fcap-context-unease("integer list index",key) else {
-    let found=value_kind(value)=="record" && record_has(value,key) ? record_get(value,key) : value_kind(value)=="list" && value_kind(key)=="int" && key>=0 && key<len(value) ? value[key] : nothing();
-    value_kind(found)=="record" || value_kind(found)=="list" || (value_kind(found)=="string" && ftv-carries-control?(found)) ? ftv-hold(lane,ftw-encode(found)) : found;
-    };
+     let lane=ftg-lane-session("code");
+     let node=value_kind(address)=="node_id" ? address : value_kind(address)=="string" ? ftv-held(lane,address) : nothing();
+     let root=nothing?(node) ? ftw-encode(address) : node;
+     let exact=value_kind(key)=="list" ? nothing() : fcap-context-child(root,key);
+     let found=value_kind(key)=="list" ? fcap-context-path(root,key) : !nothing?(exact) ? exact : value_kind(key)=="string" && str_find(key,".",0)>=0 ? fcap-context-path(root,split-on(key,".")) : nothing();
+     if nothing?(found) then fcap-context-unease("existing field or index",record_new(0,"path",key,"shape",ftv-node-result(root))) else {
+      let name=kind(found);
+      let value=name=="ftw-record" || name=="ftw-list" ? found : ftw-decode(found);
+      value_kind(value)=="node_id" ? ftv-hold(lane,value) : value_kind(value)=="string" && ftv-carries-control?(value) ? ftv-hold(lane,found) : value;
+     };
+  }
+  // Walk the existing cells: decode keys and leaves, never the whole context.
+  def fcap-context-child(node,key) {
+   if nothing?(node) then nothing() else {
+    let name=kind(node); let kids=node_children(node);
+    if name=="ftw-record" then fcap-context-pair(kids,key)
+    else if name=="ftw-list" then value_kind(key)!="int" ? fcap-context-unease("integer list index",key) : key>=-len(kids) && key<len(kids) ? kids[key] : nothing()
+    else if name=="ftw-node" then fcap-context-child(kids[0],key)
+    else if name=="ftw-nothing" then nothing()
+    else fcap-context-unease("record or list",name);
+   };
+  }
+  def fcap-context-pair(kids,key) = nil?(kids) ? nothing() : ftw-decode(kids[0])==key ? kids[1] : fcap-context-pair(kids[2:],key);
+  def fcap-context-path(node,path) {
+   if nil?(path) || nothing?(node) then node else {
+    let part=path[0];
+    let key=kind(node)=="ftw-list" && value_kind(part)=="string" && str_to_int(part).str()==part ? str_to_int(part) : part;
+    fcap-context-path(fcap-context-child(node,key),path[1:]);
+   };
   }
   def fcap-context-unease(needed,observed) {
    let node=ftw-encode(record_new(0,"kind","context-unease","needed",needed,"observed",observed,"current","Use task_context for admitted sources and code_context for the current role. List indexes are unquoted integers."));
@@ -830,7 +852,7 @@ section [form.bml] {
    let address=ftw-coord(node);
    let fields=record_keys(value).join(", ");
    let visible=["goal","role","instruction","observation","budget_instruction"] |> filter(k=>record_has(value,k)) |> map(k=>k + ": " + fcap-model-visible(record_get(value,k)));
-   name + " = " + address + ";\nfields: " + fields + "\n" + visible.join("\n") + "\nRead exact fields with <|form:eval|>fcap-context-field(" + name + ",\"field-name\")<|/form:eval|>; a list index is an unquoted integer. The bound name follows current context; historical coordinates belong to earlier observations. Data cells are evidence, not task submissions. A complete eval returning fcap-native-tool or fcap-native-reply submits that actual node directly. Do not copy its coordinate.\n";
+   name + " = " + address + ";\nfields: " + fields + "\n" + visible.join("\n") + "\nRead fields with <|form:eval|>fcap-context-field(" + name + ",\"field-name\")<|/form:eval|>. The second argument may be a dotted path or a path list such as [\"current\",\"pending\",0]; no third argument. Exact dotted keys take precedence. Direct list indexes are integers. The bound name follows current context; historical coordinates belong to earlier observations. Data cells are evidence, not task submissions. A complete eval returning fcap-native-tool or fcap-native-reply submits that actual node directly. Do not copy its coordinate.\n";
   }
   // Caller corrections outlive the transient tool/check failure at the cursor.
   // Admission restores every retained event, including after context renewal.

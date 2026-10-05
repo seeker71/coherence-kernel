@@ -138,7 +138,13 @@ section [form.bml] {
   // A RESULT closes no observation and opens no control: text that carries <| is not spoken, so
   // the stream, the crossing ledger and a trace never hold a control Form did not receive.
   def ftv-value-result(text) = nothing?(text) ? ftv-nothing("value-exceeds-observation") : len(text) > ftv-max-render() ? ftv-nothing("value-exceeds-observation") : ftv-carries-control?(text) ? ftv-nothing("value-carries-control") : "value=" ++ text ++ ";";
-  def ftv-node-result(node) = "node=" ++ ftv-coord(node) ++ ";";
+  def ftv-node-result(node) = "node=" ++ ftv-coord(node) ++ ftv-node-summary(node) ++ ";";
+  def ftv-node-summary(node) {
+   let name = kind(node); let kids = node_children(node);
+   if name == "ftw-record" then " record of " ++ (len(kids) / 2).str() ++ " keys: " ++ ftv-defang(ftv-join(range(0, min2(8, len(kids) / 2)) |> map(i => value_str(ftw-decode(kids[i * 2]))), ", "))
+   else if name == "ftw-list" then " list of " ++ len(kids).str()
+   else "";
+  }
   def ftv-recipe-result(node) = "recipe=" ++ ftv-coord(node) ++ ";";
   def ftv-nothing(reason) = "nothing=" ++ (ftv-carries-control?(reason) ? "reason-carries-control" : ftv-defang(reason)) ++ ";";
 
@@ -1071,8 +1077,35 @@ section [form.bml] {
   }
   def ftv-run(session, body, scope) {
    let ctx = ftv-ctx(session);
-   let value = ftv-guarded(ctx, () => ftv-top(ctx, body, scope));
+   let value = ftv-guarded(ctx, () => { ftv-admit(ctx,body,[]); ftv-refused?(ctx) ? nothing() : ftv-top(ctx,body,scope); });
    ftv-settle(ctx, value);
+  }
+  // Check the lowered unit against the owner's actual organ signatures before
+  // executing any statement. Lexical bindings keep their own authority.
+  def ftv-admit(ctx,node,bound) {
+   if ftv-refused?(ctx) || ftv-leaf?(node) then 0 else {
+    let cat=node_category(node); let kids=node_children(node);
+    if node_eq(cat,FTV-DO) then ftv-admit-sequence(ctx,kids,bound)
+    else if node_eq(cat,FTV-FNDEF) then ftv-admit(ctx,kids[2],append(map(p=>node_value(p),node_children(kids[1])),cons(node_value(kids[0]),bound)))
+    else {
+     let name=node_eq(cat,FTV-FNCALL) ? ftv-callee(kids[0]) : "";
+     let organs=ftv-organs(ftv-session-of(ctx));
+     let known=record_has(organs,name) && !any?(n=>n==name,bound);
+     let made=known ? ftv-made-lookup(ctx,name) : nothing();
+     let owned=known && nothing?(nothing?(made) ? nothing() : ftv-callee-of(ftv-session-of(ctx),ftv-bound-value(ftv-session-of(ctx),made)));
+     if owned && len(kids) - 1 != record_get(organs,name)[0] then ftv-refuse(ctx,"compile-arity:"+name+" expected="+record_get(organs,name)[0].str()+" received="+(len(kids) - 1).str())
+     else if name=="$bml-lambda" then ftv-admit(ctx,kids[2],append(map(p=>node_value(p),node_children(kids[1])),bound))
+     else foldl((last,child)=>ftv-admit(ctx,child,bound),0,kids);
+    };
+   };
+  }
+  def ftv-admit-sequence(ctx,nodes,bound) {
+   if nil?(nodes) || ftv-refused?(ctx) then 0 else {
+    let node=nodes[0]; let cat=node_category(node);
+    ftv-admit(ctx,node,bound);
+    let next=node_eq(cat,FTV-LET) || node_eq(cat,FTV-FNDEF) ? cons(node_value(node_children(node)[0]),bound) : bound;
+    ftv-admit-sequence(ctx,nodes[1:],next);
+   };
   }
   // what a control answered is kept as it and it<n> in the local scope, then spoken
   // A value the control answered is also the session's observation (the microthought owner
@@ -1081,6 +1114,7 @@ section [form.bml] {
    let ended = ftv-end(ctx);
    let session = ftv-session-of(ctx);
    let result = ftv-refused?(ctx) ? ftv-nothing(record_get(ctx, "refused")) : ftv-speak-settled(ctx, ftv-keep-value(session, value));
+   record_set(session, "returned", ftv-refused?(ctx) || ftv-starts?(result, "nothing=") ? nothing() : value);
    if ftv-starts?(result, "value=") then record_set(session, "observed", ftv-observation-value(value)) else 0;
    result;
   }

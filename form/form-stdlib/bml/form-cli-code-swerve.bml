@@ -11,11 +11,9 @@
 // (form-cli-model-sampling.bml), opened for that one reply, its presence set cleared once, and closed
 // and detached when the reply ends; the session's release still closes whatever it owns.
 //
-// The live loop seeds only once the seeded decode has run on this Mac's metal (fcsw-seeding-live): the
-// physical check in form-cli-code-swerve-band.bml reads seeded IDs that differ from greedy, the same seed
-// reproducing them, the sampler owning nothing after close, the session releasing, and one seeded coding
-// reply that stops as complete JSON. Until it reads so, a live reply whose content repeats decides,
-// records and decodes greedy, and counts the seed it held (seeds_held).
+// A repeated context admits its sampler at the executing boundary. Failed admission or reset retains
+// the partial owner for session release and emits its cause; it does not replay the same greedy reply.
+// The physical witness reads seeded IDs, determinism, release and native submission independently.
 //
 // At the reply boundary, fcsw-step reads the call before the policy does (the turn guard's name and
 // argument repair) and the turn after it (the stillstreak window): at 2 the observation names the
@@ -36,7 +34,8 @@
 // [window repairs decodes greedy seeded seeds stillstreak-max crossings seed-refusals contexts seeds-held unsighted].
 // A managed run also appends each decode to <code-memory>/<contract hash>.swerve, so a fresh rung of the
 // same contract knows what was already decoded; an evaluation run writes no file. The form-code line
-// carries greedy_replies, seeded_replies, seeds, seeds_held and contexts.
+// carries greedy_replies, seeded_replies, seeds, seed_refusals and contexts. Slot 10 retains earlier
+// seeds-held counts for checkpoint compatibility; new replies have no source switch holding a seed.
 import form-stdlib/bml/form-cli-code-memory.bml;
 import form-stdlib/bml/form-cli-code-session.bml;
 import form-stdlib/bml/form-cli-code-turn-guard.bml;
@@ -86,7 +85,7 @@ section [form.bml] {
    let slot = fcsw-slot(s);
    let written = fcam-managed(s) ? fcsw-append(fcsw-path(s), content ++ " " ++ seed.str() ++ "\n") : 0;
    fcsw-with-slot(s, [slot[0], slot[1], fcsw-last(SwerveKeep(), append(slot[2], [[content, seed]])), slot[3] + (seed > 0 ? 0 : 1), slot[4] + (seed > 0 ? 1 : 0),
-    seed > 0 ? fcsw-last(SwerveSeedsKept(), append(slot[5], [seed])) : slot[5], slot[6], slot[7], slot[8] + refused, slot[9], slot[10]]);
+     seed > 0 ? fcsw-last(SwerveSeedsKept(), append(slot[5], [seed])) : slot[5], slot[6], slot[7], slot[8] + refused, slot[9], slot[10], slot[11]]);
   }
   def fcsw-bump(s, i) = fcsw-with-slot(s, fcsw-put(fcsw-slot(s), i, fcsw-slot(s)[i] + 1));
   // A reply decoded in a context that has observed nothing yet is that context's first: a new span opens, and
@@ -101,38 +100,37 @@ section [form.bml] {
   def fcsw-unsighted(s) = fcsw-slot(s)[11];
   def fcsw-mark-unsighted(s) = fcsw-with-slot(s, fcsw-put(fcsw-slot(s), 11, 1));
   def fcsw-sighted-now(s) = fcsw-unsighted(s) == 1 ? fcsw-with-slot(s, fcsw-put(fcsw-slot(s), 11, 0)) : s;
-  // Seeding in the live loop: 0 until the physical check reads as the header says (then 1, in one landing).
-  def fcsw-seeding-live() = 0;
   def fcsw-sampler(session, seed) = fcsam-open(fcms-ctx(session)[2][19], seed);
   // the reply's sampler closes before the session goes on; an incomplete close refuses the session
   def fcsw-release(session) {
    let owner = fcsam-owner(session);
    let expected = fcsam-owned(owner);
    let closed = fcsam-close(owner);
-   let detached = fcsam-with-owner(session, []);
-   (Comparable) closed == expected ? detached : fcms-refuse(detached, "sampling-release-incomplete");
+   if (Comparable) closed == expected then fcsam-with-owner(session, []) else {
+    oh-voice(oh-reading("native-coding","code." + host_pid().str(),"sampler-release",json-node-int(expected),json-node-int(closed),json-node-int(0),[oh-need("sampler-release",json-node-object([oh-n("expected",expected),oh-n("released",closed)]))],["retain-owner"],json-node-object([oh-s("cause","sampling-release-incomplete")])));
+    fcms-refuse(session, "sampling-release-incomplete");
+   };
   }
-  // One reply: read the context, decide, admit the sampler when the content repeats and seeding is open,
-  // decode through the caller's decode, release, and hand the generation and the recorded state to the
-  // caller's continuation. A sampler that cannot be admitted is closed (a partial admission owns its
-  // handles) and the reply decodes greedy; while seeding is closed, a repeat decodes greedy and is held.
-  def fcsw-reply(session, state, checker, turns, started, stops, decode, generated) = fcsw-reply-seeding(session, fcsw-in-context(session, state), checker, turns, started, stops, decode, generated, fcsw-seeding-live());
-  def fcsw-reply-seeding(session, state, checker, turns, started, stops, decode, generated, seeding) {
+  // A partial sampler stays owned by a refused session until its normal release. No decode runs from
+  // that refusal. The admission port lets the same boundary be observed without admitting a model.
+  def fcsw-reply(session, state, checker, turns, started, stops, decode, generated) = fcsw-reply-with(session, fcsw-in-context(session, state), checker, turns, started, stops, decode, generated, fcsw-sampler);
+  def fcsw-reply-with(session, state, checker, turns, started, stops, decode, generated, sampler) {
    let decided = fcsw-decision(state);
-   let seeds = decided[2] > 0 && seeding == 1;
-   let owner = seeds ? fcsw-sampler(session, decided[2]) : [];
+   let seeds = decided[2] > 0;
+   let owner = seeds ? sampler(session, decided[2]) : [];
    let admitted = seeds && fcsam-live(owner);
    let reset = admitted ? fcsam-reset(owner) : 0;
    let sampled = admitted && (Comparable) reset == 1;
-   let refused = seeds && !sampled ? fcsam-close(owner) : 0;
-   let ready = sampled ? fcsam-with-owner(session, owner) : session;
-   let noted = fcsw-record(state, decided[0], sampled ? decided[2] : 0, seeds && !sampled ? 1 : 0);
-   let recorded = decided[2] > 0 && !seeds ? fcsw-bump(noted, 10) : noted;
+   let owned = seeds ? fcsam-with-owner(session, owner) : session;
+   let reason = !admitted ? "sampling-admission-failed" : "sampling-reset-failed";
+   let ready = seeds && !sampled ? fcms-refuse(owned, reason) : owned;
+   let recorded = seeds && !sampled ? fcsw-bump(state, 8) : fcsw-record(state, decided[0], sampled ? decided[2] : 0, 0);
+   if seeds && !sampled then oh-voice(oh-reading("native-coding",fcsw-flow(state),"sampler-admission",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("local-sampler",json-node-object([oh-s("cause",reason),oh-n("seed",decided[2]),oh-n("owned_buffers",fcsam-owned(owner))]))],["retain-owner-and-release"],json-node-object([oh-s("cause",reason),oh-n("actions_executed",0)]))) else 0;
    let open = fcacs-stage-open("code.decode", sampled ? "seeded" : "greedy");
-   let generation = decode(ready, recorded, started, stops, []);
+   let generation = fcms-live?(ready) ? decode(ready, recorded, started, stops, []) : fcms-generation("", [], ready);
    let after = fcms-generation-session(generation);
    let released = sampled ? fcsw-release(after) : after;
-   let closed = fcacs-stage-close(open, fcms-stopped?(after) ? "ok" : "unstopped", len(fcms-generation-ids(generation)), decided[0]);
+   let closed = fcacs-stage-close(open, !fcms-live?(released) ? fcms-reason(released) : fcms-stopped?(after) ? "ok" : "unstopped", len(fcms-generation-ids(generation)), decided[0]);
    generated(fcms-generation(fcms-generation-text(generation), fcms-generation-ids(generation), released), recorded, checker, turns, started);
   }
 
@@ -233,29 +231,6 @@ section [form.bml] {
   def fcsw-finish-now() = "Finish now: the remaining replies equal the minimum completion protocol. Return task=done for the implemented task, then the review verdict with concrete findings; a further read or verify leaves no reply for the deliverable. All caller checks still apply.";
   def fcsw-coding-instruction(s, remaining, minimum, ordinary) = fcsw-reserve?(s, remaining, minimum) ? fcsw-finish-now() : ordinary;
 
-  // ── the physical check (local GPU, quiet machine) ───────────────────────
-  // One fixture prompt decodes one quantum of n IDs three times on fresh sessions: greedy, seeded, seeded
-  // again with the same seed. Each run answers [ids owned-during owned-after released pending-held].
-  def fcsw-physical(model, prompt, n, seed) {
-   let path = mr-path(mr-find(model));
-   [fcsw-physical-run(path, prompt, n, 0), fcsw-physical-run(path, prompt, n, seed), fcsw-physical-run(path, prompt, n, seed)];
-  }
-  def fcsw-physical-run(path, prompt, n, seed) {
-   let session = fcms-open-with-profile(path, prompt, 4096, "knowledge-query");
-   let owner = seed > 0 && fcms-live?(session) ? fcsw-sampler(session, seed) : [];
-   let admitted = seed > 0 && fcsam-live(owner);
-   let reset = admitted ? fcsam-reset(owner) : 0;
-   let sampled = admitted && (Comparable) reset == 1;
-   let refused = seed > 0 && !sampled ? fcsam-close(owner) : 0;
-   let ready = sampled ? fcsam-with-owner(session, owner) : session;
-   let generation = fcms-live?(ready) ? fcacs-quantum(ready, fcacs-stops(ready, qsx-load(fcms-path(ready))), n) : fcms-generation("", [], ready);
-   let after = fcms-generation-session(generation);
-   let owned = fcsam-owned(fcsam-owner(after));
-   let released = sampled ? fcsw-release(after) : after;
-   let ownedAfter = fcsam-owned(fcsam-owner(released));
-   let pending = fcms-pending(after) >= 0 ? 1 : 0;
-   [fcms-generation-ids(generation), owned, ownedAfter, fcms-release-ok?(released), pending];
-  }
  }
  0;
 }
