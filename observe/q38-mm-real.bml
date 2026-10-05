@@ -1,0 +1,136 @@
+// q38-mm-real.bml — the matmul lab against the REAL model: observe/q38-mm-lab/gemm.metal kernels run on the real FFN gate tensor
+// (the mapped GGUF pages) and the real residual the span left, beside the same kernels on synthetic weights, so the lane's own pipeline
+// and the lab's are compared on the same data in one process.
+//   echo '{"go":1,"span":64}' | ./fkwu observe/q38-mm-real.bml
+// stdin, one JSON line, all optional: go, span (64), reps (20), only (a kernel name).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
+section [form.bml] {
+ class Q38MmReal {
+  def qmr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qmr-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qmr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qmr-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-mm-real", line) : json-node-object([]);
+  }
+  def qmr-ids(n, i) = i >= n ? [] : cons(1000 + ((i * 37) % 5000), qmr-ids(n, i + 1));
+  def qmr-times(n, f) = n <= 0 ? 1 : {
+   let done = f();
+   qmr-times(n - 1, f);
+  };
+  def qmr-time(p, bufs, consts, tpg, tgmem, groups, reps, bar) {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let q = qmr-times(reps, () => metal_enqueue(p, md-bind16(bufs, consts, tpg, tgmem, 1, bar), groups));
+   let s = metal_sync();
+   let t1 = host_monotonic_ms();
+   ((t1 - t0) * 1000) / reps;
+  }
+  def qmr-say(label, us, flop) = print_str("[q38-mm-real] " ++ label ++ ": " ++ us.str() ++ " us = " ++ (us <= 0 ? 0 : flop / us / 1000).str() ++ " GFLOP/s");
+  def qmr-fdiff-go(a, b, i, n, maxd, maxa) = i >= n ? [maxd, maxa] : {
+   let fa = ln-f32-decode(ln-u32-le(a, i * 4));
+   let fb = ln-f32-decode(ln-u32-le(b, i * 4));
+   let d = fa > fb ? fa - fb : fb - fa;
+   let aa = fa < 0.0 ? 0.0 - fa : fa;
+   qmr-fdiff-go(a, b, i + 1, n, d > maxd ? d : maxd, aa > maxa ? aa : maxa);
+  };
+  // one kernel on (weights w, activations x): serial and overlapped times
+  def qmr-one(label, p, w, x, rows, cols, ntok, reps, flop, groups) {
+   let y = metal_buf_alloc(rows * ntok * 4);
+   let warm = qmr-time(p, [w, x, y], [rows, cols, ntok, rows], 128, 0, groups, 3, 1);
+   let ser = qmr-time(p, [w, x, y], [rows, cols, ntok, rows], 128, 0, groups, reps, 1);
+   let ovl = qmr-time(p, [w, x, y], [rows, cols, ntok, rows], 128, 0, groups, reps, 0);
+   let a = qmr-say(label ++ " serial", ser, flop);
+   let b = qmr-say(label ++ " overlapped", ovl, flop);
+   let f = metal_buf_free(y);
+   1;
+  }
+  // synthetic weights and activations only: the lab's kernel, timed in this process at the moment of the call (before or after the model is open)
+  def qmr-synth(tag, rows, cols, ntok, reps) {
+   let flop = 2 * rows * cols * ntok;
+   let groups = ((ntok + 31) / 32) * ((rows + 63) / 64);
+   let nb = cols / 32;
+   let usrc = "#include <metal_stdlib>\n" ++ read_file("observe/q38-mm-lab/micro.metal");
+   let gsrc = "#include <metal_stdlib>\n" ++ read_file("observe/q38-mm-lab/gemm.metal");
+   let pf = metal_pipeline(usrc, "lab_fill_f32");
+   let pq = metal_pipeline(usrc, "lab_fill_q8");
+   let pl = metal_pipeline(gsrc, "lab_mm_base");
+   let sw = metal_buf_alloc(rows * nb * 34 + 64);
+   let sx = metal_buf_alloc(ntok * cols * 4);
+   let e1 = metal_enqueue(pq, md-bind16([sw], [rows * nb], 256, 0, 0, 0), rows * nb);
+   let e2 = metal_enqueue(pf, md-bind16([sx], [ntok * cols], 256, 0, 0, 0), ntok * cols);
+   let sy0 = metal_sync();
+   let a = qmr-one(tag ++ ": lab base, synthetic/synthetic", pl, sw, sx, rows, cols, ntok, reps, flop, groups);
+   let f1 = metal_buf_free(sw);
+   let f2 = metal_buf_free(sx);
+   1;
+  }
+  def qmr-real(ctx, ids, reps) {
+   let after = qmr-synth("AFTER open", 17408, 5120, len(ids), reps);
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lay = nth(ctx[3], 0);
+   let tv = lay[2];
+   let rows = kth-tv-r(tv);
+   let cols = kth-tv-c(tv);
+   let ntok = len(ids);
+   let sts = q38-new-state(geo);
+   let r = q38-prefill-span-batched(ps, bs, geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let flop = 2 * rows * cols * ntok;
+   let groups = q38-mm64-groups(rows, ntok);
+   let nb = cols / 32;
+   let usrc = "#include <metal_stdlib>\n" ++ read_file("observe/q38-mm-lab/micro.metal");
+   let gsrc = "#include <metal_stdlib>\n" ++ read_file("observe/q38-mm-lab/gemm.metal");
+   let pf = metal_pipeline(usrc, "lab_fill_f32");
+   let pq = metal_pipeline(usrc, "lab_fill_q8");
+   let pl = metal_pipeline(gsrc, "lab_mm_base");
+   let sw = metal_buf_alloc(rows * nb * 34 + 64);
+   let sx = metal_buf_alloc(ntok * cols * 4);
+   let e1 = metal_enqueue(pq, md-bind16([sw], [rows * nb], 256, 0, 0, 0), rows * nb);
+   let e2 = metal_enqueue(pf, md-bind16([sx], [ntok * cols], 256, 0, 0, 0), ntok * cols);
+   let sy0 = metal_sync();
+   let w = kth-tv-h(tv);
+   let head = print_str("[q38-mm-real] FFN gate " ++ rows.str() ++ " x " ++ cols.str() ++ " x " ++ ntok.str() ++ " tokens, " ++ (flop / 1000000).str() ++ " MFLOP");
+   let a1 = qmr-one("lane mm64 (pipeline 62), real weights, real x", ps[q38-mm64-index()], w, bs[1], rows, cols, ntok, reps, flop, groups);
+   let a2 = qmr-one("lab base, real weights, real x", pl, w, bs[1], rows, cols, ntok, reps, flop, groups);
+   let a3 = qmr-one("lab base, synthetic weights, real x", pl, sw, bs[1], rows, cols, ntok, reps, flop, groups);
+   let a4 = qmr-one("lab base, real weights, synthetic x", pl, w, sx, rows, cols, ntok, reps, flop, groups);
+   let a5 = qmr-one("lab base, synthetic weights, synthetic x", pl, sw, sx, rows, cols, ntok, reps, flop, groups);
+   let a6 = qmr-one("lane mm64 (pipeline 62), synthetic weights, synthetic x", ps[q38-mm64-index()], sw, sx, rows, cols, ntok, reps, flop, groups);
+   let f1 = metal_buf_free(sw);
+   let f2 = metal_buf_free(sx);
+   let freed = q38-free-state(sts);
+   1;
+  }
+  def qmr-open(path, want, reps) {
+   let src = fcmg-src(path);
+   let ids = qmr-ids(want, 0);
+   let span = len(ids);
+   let maxpos = span + 16 + 8;
+   let own = fcms-qwen-own(src, maxpos);
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 mm real", path, weights, own);
+   !mg-granted?(granted) ? print_str("[q38-mm-real] held: " ++ granted[1]) : {
+    let before = qmr-synth("BEFORE open", 17408, 5120, span, reps);
+    let ctx = q38-open-span(path, maxpos, span);
+    !((Comparable) q38-context-ok?(ctx) == 1) ? {
+     let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-mm-real] the context did not open");
+    } : {
+     let measured = qmr-real(ctx, ids, reps);
+     let closed = q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-mm-real] released");
+    };
+   };
+  }
+  def qmr-run() {
+   let opts = qmr-opts();
+   (Comparable) qmr-int(opts, "go", 0) == 1 ? qmr-open(qmr-text(opts, "file", qmr-file()), qmr-int(opts, "span", 64), qmr-int(opts, "reps", 20)) : print_str("[q38-mm-real] plan: {\"go\":1} opens the model and times the gemm kernels on real and synthetic data");
+  }
+ }
+ qmr-run();
+}
