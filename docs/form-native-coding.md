@@ -271,11 +271,11 @@ Closing the last task runs source checks before review; acceptance with a nonemp
 
 `reasoning_tokens` plus `reasoning_answer_tokens` applies that flow to every reply. Before generation, Form reserves the current final-stage task handoff as well as both allowances. Only complete final output reaches tools/checks. Reasoning and partial output stay in private evidence, outside the framebuffer. Metadata reports actual stage counts and completion separately from response quality.
 
-Each generated reply consumes `turns`, including tool reads and retained no-action attempts. The model sees remaining replies and the minimum completion protocol. An unfinished local reply at a generation boundary retains its exact private bytes, preserves completed effects and enters the existing repair flow with a request for one smaller complete JSON action. The caller's reply ceiling stays unchanged. Feedback uses the same stream while room remains; a full context can renew on the same admitted weights, retaining the task and counters. Failed prediction, admission, evidence retention and partial prefill do not select this retry. Exhausted turns settle release with the candidate retained. The returned session owns release even after failure; incomplete release remains a distinct outcome.
+Each generated reply consumes `turns`, including tool reads and retained no-action attempts. The model sees remaining replies and the minimum completion protocol. An unfinished reply retains its exact private bytes, preserves completed effects and enters native repair requesting a smaller complete action or reply control. The caller's reply ceiling stays unchanged. Feedback uses the same stream while room remains; a full context can renew on the same admitted weights, retaining the task and counters. Failed prediction, admission, evidence retention and partial prefill do not select this retry. Exhausted turns settle release with the candidate retained. The returned session owns release even after failure; incomplete release remains a distinct outcome.
 
 ### Local retry and changed choices
 
-`form-cli-code-live.bml` owns reply completion; `form-cli-code-policy.bml` owns repair and replanning. A truncated reply never reaches tool admission. Its failure travels with the original goal, current candidate, checks and private evidence path. The same cause, role and reply ceiling remain the same counterexample even when the private path or generated count changes. A checked candidate first retries its review role with a shorter response; retained native identities need not be copied into prose. An unchanged failure after that changed instruction requires a new plan. A stopped reply re-observes completion through the framebuffer; JSON validity and task quality retain their separate checks.
+`form-cli-code-live.bml` owns reply completion; `form-cli-code-policy.bml` owns repair and replanning. A truncated control never reaches tool admission. Its failure travels with the original goal, current candidate, checks and private evidence path. The same cause, role and reply ceiling remain the same counterexample even when private paths or generated counts change. A checked candidate first retries its review role with a shorter response. An unchanged failure requires a new plan. The framebuffer distinguishes native submission, executed effects, caller checks and task quality.
 
 When an observation exceeds the current decoder capacity before prefill, its
 exact bytes are retained privately and the live stream receives a compact
@@ -299,13 +299,34 @@ fields without serializing or parsing a JSON reply. Original role, writable
 scope, guarded edits, caller checks and review still apply. An unrelated or
 unresolved node cannot act.
 
-During decoding, an `eval` control can produce the node and return its actual
-coordinate. The stopped reply submits that coordinate after its controls.
-Native BML escapes are preserved; JSON-wrapped controls cross the unescaping
-edge. The incremental coding scanner consumes new bytes and retains an
-unfinished control, without a fixed 96-token window.
+During ordinary coding decode, a complete `eval` returning an action or reply
+hands the actual node directly to dispatch. The reply ends at that semantic
+boundary; the model does not copy its coordinate. A control closing in the
+terminal quantum is observed before the next choice. Data reads provide
+evidence and preserve the current role. Multiple action nodes in one submission
+are refused without executing them. Native BML escapes are preserved; the
+incremental scanner retains unfinished controls without a fixed token window.
+Native payloads go straight to that executor; the coding decoder has no JSON
+unescaping or preliminary parse pass. Admission selects the task workspace
+before binding context, so the decoder reads those same cells.
 
-The public request/result and observation reporting doors still use JSON.
+Admission and feedback carry native record/list/scalar cells. The model receives
+the original goal, current guidance and actual context coordinates; sources,
+caller corrections, tool results and checks remain whole behind those IDs.
+`fcap-context-field(address,key)` retrieves a record field or list index; compound
+values return another native cell. Context lookup and action/reply construction
+are offered organs inside the same decoder process, without a source-call child.
+`task_context` retains admitted task/source context; `code_context` follows the
+current role and observation. These native bindings avoid recopying coordinates
+from older receipts. A noninteger list index returns a typed unease cell.
+No JSON context or JSON reply protocol crosses
+this coding model boundary. External requests, results and receipts retain their
+public JSON compatibility; old checkpoint evidence is converted at admission.
+
+The north star is a model choosing and returning executable native recipes and
+cells, with Form retaining context, ownership, observations and verification.
+Removing transport work is useful when it improves independently verified local
+completion; it does not by itself establish a successful local implementation.
 
 #### Native recipe authoring
 
