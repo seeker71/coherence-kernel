@@ -186,7 +186,7 @@ section [form.bml] {
     // ── the step: one batch, one wait ──
     // x pending at position p; the context holds positions < p once the previous step's accepted rows (ncommit of them at cpos0) are committed;
     // slot: the recurrent snapshot to restore first (-1: none). Returns [ids (x, d1..d7), verified 0..7, ms, phases, plain argmax of the block, winning logits]
-    def q38d-step(ctx, qs, ds, dx, sts, sx, x, p, slot, ncommit, cpos0, phased) {
+    def q38d-step(ctx, qs, ds, dx, sts, sx, x, p, k, slot, ncommit, cpos0, phased) {
         let ps = ctx[0];
         let bs = ctx[1];
         let geo = ctx[2];
@@ -202,7 +202,7 @@ section [form.bml] {
         q38d-forward(ctx, qs, ds, dx, sx, p);
         let handed = q38-handover();
         let t2 = q38s-mark(phased);
-        q38d-verify(ctx, qs, ds, dx, sts, sx, 8, p);
+        q38d-verify(ctx, qs, ds, dx, sts, sx, k + 1, p);
         let tb = host_monotonic_ms();
         let ver = metal_buf_read(sx[4], 0, 32);
         let toks = metal_buf_read(sx[0], 0, 32);
@@ -216,18 +216,33 @@ section [form.bml] {
     def q38d-accept-go(d, v, j, k) = j > k ? k : (Comparable) d[j - 1] == v[j - 1] ? q38d-accept-go(d, v, j + 1, k) : j - 1;
     // stats: [steps, host ms before the wait, ms of the wait, restore+commit, draft, check (phased only), device busy ms, dispatches,
     //         then per draft position j=1..7 how many steps accepted it (selector path), then the same for the plain argmax block]
-    def q38d-gen-go(ctx, qs, ds, dx, sts, sx, x, p, slot, ncommit, cpos0, want, acc, stats, trace, phased, vacc) = len(acc) >= want ? [take(want, acc), stats, trace, take(want, vacc)] : {
+    // The draft is the whole block whatever k is (one weight pass either way); k is how many of its seven proposals the check span takes.
+    // What a step of n check rows costs, in percent of a decode token. Measured on this M4 Max with the machine quiet (plain decode 74 ms a
+    // token, 11.5 tok/s): the blocks race (observe/q38-spec-run.bml mode blocks, best of rounds) puts the 8-row check at 2.24 tokens
+    // (ffn 2.4x, linear-attn 2.2x, full-attn 1.6x, head 3x of the one-token costs), about 18 percent of a token a row, because the
+    // exact-arithmetic multi-column matvec (every column the decode matvec's own bits) is ALU-bound from the second column on, on the
+    // throttled clock; the draft and the context commit add about 22 ms, 30 percent. ema[j-1] is the running share (percent) of the
+    // steps that took proposal j when it was tried, so a step of k rows yields T(k) = 100 + the sum of the first k shares, and the
+    // policy takes the k in 1 .. (current + 1) with the best yield per cost (one row past the current k is how its share stays current).
+    def q38d-cost(n) = 112 + 18 * n;
+    def q38d-ema-sum(ema, j, k) = j > k ? 0 : ema[j - 1] + q38d-ema-sum(ema, j + 1, k);
+    def q38d-score(ema, k) = ((100 + q38d-ema-sum(ema, 1, k)) * 1000) / q38d-cost(k + 1);
+    def q38d-best-go(ema, k, hi, bk, bs) = k > hi ? bk : (q38d-score(ema, k) > bs ? q38d-best-go(ema, k + 1, hi, k, q38d-score(ema, k)) : q38d-best-go(ema, k + 1, hi, bk, bs));
+    def q38d-next-k(ema, k, kmax) = q38d-best-go(ema, 1, k + 1 > kmax ? kmax : k + 1, 1, 0);
+    def q38d-gen-go(ctx, qs, ds, dx, sts, sx, x, p, kcur, kmax, adapt, ema, slot, ncommit, cpos0, want, acc, stats, trace, phased, vacc) = len(acc) >= want ? [take(want, acc), stats, trace, take(want, vacc)] : {
         let t0 = host_monotonic_ms();
-        let out = q38d-step(ctx, qs, ds, dx, sts, sx, x, p, slot, ncommit, cpos0, phased);
+        let out = q38d-step(ctx, qs, ds, dx, sts, sx, x, p, kcur, slot, ncommit, cpos0, phased);
         let t1 = host_monotonic_ms();
         let d = out[0];
         let v = out[1];
         let ph = out[3];
-        let m = q38s-accept-go(d, v, 1, 7);
-        let m1 = q38d-accept-go(out[5], v, 1, 7);
+        let m = q38s-accept-go(d, v, 1, kcur);
+        let m1 = q38d-accept-go(out[5], v, 1, kcur);
         let said = append(take(m, d[1:]), [v[m]]);
-        let st2 = q38s-add-go(stats, cons(1, cons(out[2], cons((t1 - t0) - out[2], cons(ph[0], cons(ph[1], cons(ph[2], cons(out[4][0], cons(out[4][1], append(q38s-hits-go(m, 1, 7, 7), q38s-hits-go(m1, 1, 7, 7)))))))))));
-        q38d-gen-go(ctx, qs, ds, dx, sts, sx, v[m], p + m + 1, m < 7 ? m : -1, m + 1, p, want, append(acc, said), st2, append(trace, [[m, t1 - t0, out[4][0], out[2]]]), phased, append(vacc, take(m + 1, out[6])));
+        let st2 = q38s-add-go(stats, cons(1, cons(out[2], cons((t1 - t0) - out[2], cons(ph[0], cons(ph[1], cons(ph[2], cons(out[4][0], cons(out[4][1], append(q38s-hits-go(m, 1, kcur, 7), append(q38s-tries-go(1, kcur, 7), q38s-hits-go(m1, 1, kcur, 7))))))))))));
+        let ema2 = q38s-ema-go(ema, m, 1, kcur);
+        let knext = (Comparable) adapt == 1 ? q38d-next-k(ema2, kcur, kmax) : kcur;
+        q38d-gen-go(ctx, qs, ds, dx, sts, sx, v[m], p + m + 1, knext, kmax, adapt, ema2, m < kcur ? m : -1, m + 1, p, want, append(acc, said), st2, append(trace, [[m, t1 - t0, out[4][0], out[2], kcur, ph[0], ph[1], ph[2]]]), phased, append(vacc, take(m + 1, out[6])));
     };
     // the prompt through the layer-major prefill with the tapped residuals captured, the context committed, the model's first token returned: [x0, n]
     def q38d-prefill(ctx, qs, ds, dx, sts, sx, ids) {
@@ -245,7 +260,11 @@ section [form.bml] {
         metal_sync();
         [x0, n];
     }
-    // x0 pending at position N (the prompt's length); every step drafts seven and checks eight
-    def q38d-generate(ctx, qs, ds, dx, sts, sx, ids, x0, want, phased) = q38d-gen-go(ctx, qs, ds, dx, sts, sx, x0, len(ids), -1, 0, 0, want, [], q38s-zeros(8 + 14), [], phased, []);
+    // x0 pending at position N (the prompt's length); every step drafts the block and checks k + 1 rows of it: k = kmax (at most 7) a step, or,
+    // with adapt = 1, at most kmax with the policy above choosing (it starts at four)
+    // stats: the eight counters, then per position j = 1..7 the steps that accepted it, the steps that tried it, and the same for the plain
+    // argmax block's first k proposals
+    def q38d-generate-a(ctx, qs, ds, dx, sts, sx, ids, x0, want, phased, kmax, adapt) = q38d-gen-go(ctx, qs, ds, dx, sts, sx, x0, len(ids), (Comparable) adapt == 1 ? (kmax < 4 ? kmax : 4) : kmax, kmax, adapt, q38s-fill(7, 100), -1, 0, 0, want, [], q38s-zeros(8 + 21), [], phased, []);
+    def q38d-generate(ctx, qs, ds, dx, sts, sx, ids, x0, want, phased) = q38d-generate-a(ctx, qs, ds, dx, sts, sx, ids, x0, want, phased, 7, 0);
     0;
 }
