@@ -38,6 +38,7 @@ import form-stdlib/bml/form-cli-model-adapter.bml;
 import form-stdlib/bml/form-cli-model-sampling.bml;
 import form-stdlib/bml/form-cli-model-draft.bml;
 import form-stdlib/bml/memory-governor.bml;
+import form-stdlib/form-cli-model-spec.fk;
 section [form.bml] {
     // session = tag status reason path src ctx sts maxpos pos pending
     //           stopped prompt-ids generated-ids injected-ids observation-count
@@ -160,19 +161,27 @@ section [form.bml] {
                 let context-closed = q38-close(ctx, []);
                 let unleased = mg-release();
                 fcms-none("model-stream-state-refused");
-            } : (Comparable) live-cursor == 1 ? {
-                let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
-                let pf = fcmg-live-prefill-span(ctx, sts, cursor);
-                let _prefill-ready = q38oo-stage((String) pf[1] == "ok" ? "model-session-prefill-ready" : "model-session-prefill-refused", 8388622);
-                !((String) pf[1] == "ok") ? fcms-session("nothing", pf[5], path, src, ctx, sts, maxpos, pf[3], -1, 0, prompt-count, 0, 0, 0) : fcms-session("live", "opened-live-cursor", path, src, ctx, sts, maxpos, pf[3], pf[2], 0, prompt-count, 0, 0, 0);
             } : {
-                let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
-                let pf = q38-prefill-span-sliced(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, span);
-                let complete = pf[0] >= 0 && (Comparable) pf[1] == prompt-count;
-                let _prefill-ready = q38oo-stage(complete ? "model-session-prefill-ready" : "model-session-prefill-refused", 8388622);
-                fcms-session(complete ? "live" : "nothing", complete ? "opened-scanner-fallback" : "model-prefill-refused", path, src, ctx, sts, maxpos, pf[1], pf[0], 0, prompt-count, 0, 0, 0);
+                // The speculative drafter opens before the prompt's prefill, so the prefill's own batches capture what it reads (form-cli-model-spec.fk).
+                // A refusal names its reason in the owner and the session opens plain.
+                let _spec-begin = q38oo-stage("model-session-spec-open-begin", 8388626);
+                let spec = fcsp-open(path, ctx, maxpos);
+                let _spec-ready = q38oo-stage((Comparable) q38x-on?(spec) == 1 ? "model-session-spec-open-ready" : "model-session-spec-off", 8388626);
+                fcms-open-prefilled(path, src, maxpos, prompt-count, cursor, ids, live-cursor, ctx, sts, span, spec);
             };
         };
+    };
+    def fcms-open-prefilled(path, src, maxpos, prompt-count, cursor, ids, live-cursor, ctx, sts, span, spec) = (Comparable) live-cursor == 1 ? {
+        let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
+        let pf = fcmg-live-prefill-span-t(ctx, sts, cursor, q38x-tap(spec));
+        let _prefill-ready = q38oo-stage((String) pf[1] == "ok" ? "model-session-prefill-ready" : "model-session-prefill-refused", 8388622);
+        !((String) pf[1] == "ok") ? fcsp-attach(fcms-session("nothing", pf[5], path, src, ctx, sts, maxpos, pf[3], -1, 0, prompt-count, 0, 0, 0), spec, sts) : fcsp-attach(fcms-session("live", "opened-live-cursor", path, src, ctx, sts, maxpos, pf[3], pf[2], 0, prompt-count, 0, 0, 0), spec, sts);
+    } : {
+        let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
+        let pf = q38-prefill-span-sliced-t(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, span, q38x-tap(spec));
+        let complete = pf[0] >= 0 && (Comparable) pf[1] == prompt-count;
+        let _prefill-ready = q38oo-stage(complete ? "model-session-prefill-ready" : "model-session-prefill-refused", 8388622);
+        fcsp-attach(fcms-session(complete ? "live" : "nothing", complete ? "opened-scanner-fallback" : "model-prefill-refused", path, src, ctx, sts, maxpos, pf[1], pf[0], 0, prompt-count, 0, 0, 0), spec, sts);
     };
     // The PROFILE names which chat shape wraps the prompt: "full" arms
     // the teach-layer control grammar (its <FAIL> is a typed decline, not
@@ -297,12 +306,32 @@ section [form.bml] {
     def fcms-generation-text(g) = g[1];
     def fcms-generation-ids(g) = g[2];
     def fcms-generation-session(g) = g[3];
-    def fcms-generate(s, n) = !((Comparable) fcms-live?(s) == 1) || n <= 0 ? fcms-generation("", [], s) : fcms-ds4?(s) ? fcms-generate-ds4(s, n) : !nil?(fcsam-owner(s)) ? fcms-generate-sampled(s, n) : {
+    def fcms-generate(s, n) = !((Comparable) fcms-live?(s) == 1) || n <= 0 ? fcms-generation("", [], s) : fcms-ds4?(s) ? fcms-generate-ds4(s, n) : !nil?(fcsam-owner(s)) ? fcms-generate-sampled(s, n) : fcms-generate-greedy(s, n);
+    // THE GREEDY WALK of a plain Qwen session is speculative while its owner is ready (form-cli-model-spec.fk): the same generation (text, ids, session) and a fifth
+    // element naming what happened: the walk's report, or the reason it was the plain planned walk. A session with no owner (opened before the lane had one) is plain and says nothing.
+    def fcms-generation-spec(g) = len(g) > 4 ? g[4] : "";
+    def fcms-generation-with-spec(g, note) = append(g, [note]);
+    // a session may take the speculative step when its drafter holds every position the stream holds (q38x-ready-why: "" means ready)
+    def fcms-spec-why(s, n) = fcsp-has?(s) != 1 ? "" : n < fcsp-min-walk() ? "spec-off:short-walk" : q38x-ready-why(fcsp-owner(s), fcms-sts(s), fcms-pos(s));
+    def fcms-spec?(s, n) = fcsp-has?(s) == 1 && (String) fcms-spec-why(s, n) == "" ? 1 : 0;
+    def fcms-generate-greedy(s, n) = (Comparable) fcms-spec?(s, n) == 1 ? fcms-generate-spec(s, n) : fcms-generate-plain(s, n);
+    def fcms-generate-plain(s, n) = {
         let stops = fcmo-stops(s);
         let walked = fcms-walk(s, fcms-pending(s), fcms-pos(s), n, stops, [], 1, 1, 0);
         let ids = walked[0];
         let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
-        fcms-generation(ftdb-text(fcms-src(s), ids), ids, next);
+        let g = fcms-generation(ftdb-text(fcms-src(s), ids), ids, next);
+        fcsp-has?(s) == 1 ? fcms-generation-with-spec(g, fcms-spec-why(s, n) == "" ? "spec-off:plain-walk" : fcms-spec-why(s, n)) : g;
+    };
+    // The speculative walk: the plain walk's contract (ids said, pending token and position, stopped) from steps that check a drafted block in one weight pass.
+    def fcms-generate-spec(s, n) = {
+        let o = fcsp-owner(s);
+        let t0 = host_monotonic_ms();
+        let walked = q38x-walk(o, fcms-sts(s), fcms-pending(s), fcms-pos(s), n, fcmo-stops(s), fcms-decode-pulse);
+        let ids = walked[0];
+        let judged = q38x-judge(o, walked[4]);
+        let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        fcms-generation-with-spec(fcms-generation(ftdb-text(fcms-src(s), ids), ids, next), fcsp-report(o, walked, host_monotonic_ms() - t0));
     };
     // The DeepSeek-V4 walk: the same walk (fcms-walk takes the session's own step, which is the driver's decode), the header's own stop ids, the DeepSeek tokenizer's decode. Greedy: the sampler is not wired here.
     // A walk ends with a NAMED ending (form-cli-model-ds4.fk fcds-ending-of: eos, max-tokens, context-limit, step-refused) and the session keeps it as its reason (fcms-ending): the driver serves positions 0 through 2047,
@@ -396,7 +425,8 @@ section [form.bml] {
         let ctx = fcms-ctx(s);
         // All IDs retain their order and the same stream state.
         // Submission width, unlike observation length, is bounded.
-        let pf = fcmo-prefill(ctx, fcms-sts(s), ids, fcms-pos(s));
+        // the speculative drafter reads the observation's hidden states in the observation's own batches (fcsp-tap: nothing for a session without a drafter)
+        let pf = fcmo-prefill-t(ctx, fcms-sts(s), ids, fcms-pos(s), fcsp-tap(s));
         !fcmo-shape(pf, fcms-pos(s), len(ids)) ?         // No retry may resume this state: a completed prefix or
         // a partially executed failing submission can be present.
         // Counters retain the last completed observation, not a
@@ -439,20 +469,24 @@ fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stre
         let draft-expected = fcmdr-owned(fcmdr-owner(s));
         let draft-closed = fcmdr-close(fcmdr-owner(s));
         let draft-ok = adapter-ok && (Comparable) draft-closed == draft-expected;
-        (Comparable) fcms-resident?(s) == 0 ? draft-ok : fcms-ds4?(s) ? fcms-release-ds4(s, draft-ok) : {
+        // Slot 19 owns the speculative drafter and its scratch (form-cli-model-spec.fk): closed before the context its weights sit beside, the same count.
+        let spec-expected = fcsp-owned(s);
+        let spec-closed = fcsp-close(s);
+        let spec-ok = draft-ok && (Comparable) spec-closed == spec-expected;
+        (Comparable) fcms-resident?(s) == 0 ? spec-ok : fcms-ds4?(s) ? fcms-release-ds4(s, spec-ok) : {
             let state-expected = q38-state-handle-count(fcms-sts(s));
             let state-closed = q38-free-state(fcms-sts(s));
             let context-expected = q38-close-expected(fcms-ctx(s), []);
             let context-closed = q38-close(fcms-ctx(s), []);
             let unleased = mg-release();
-            let observed = [["cursor", cursor-released, 1], ["sampler", sampler-closed, sampler-expected], ["adapter", adapter-closed, adapter-expected], ["draft", draft-closed, draft-expected], ["state", state-closed, state-expected], ["context", context-closed, context-expected]];
+            let observed = [["cursor", cursor-released, 1], ["sampler", sampler-closed, sampler-expected], ["adapter", adapter-closed, adapter-expected], ["draft", draft-closed, draft-expected], ["spec", spec-closed, spec-expected], ["state", state-closed, state-expected], ["context", context-closed, context-expected]];
             let unease = filter(row => row[1] != row[2], observed);
             nil?(unease) ? 0 : {
                 let signal = intern_node(intern_trivial_string("model-release"), map(row => intern_node(intern_trivial_string(row[0]), [intern_trivial_int(row[1]), intern_trivial_int(row[2])]), unease));
                 fb_record(signal, "model-session-release", len(unease));
                 print_str("form-model-release unease " + unease.str());
             };
-            draft-ok &&((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
+            spec-ok &&((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
         };
     };
     0;

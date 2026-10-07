@@ -1,0 +1,169 @@
+// qwen35-dense-session-spec.fk — the DFlash2 speculative walk as the model session's own greedy walk.
+//
+// The probe doors (observe/q38-dflash-run.bml, q38-spec-run.bml) speak a fresh state from a prefill they run themselves. The session lane
+// (form-cli-model-session.fk) holds one resident stream across many asks, so the drafter has to live in the stream: it learns the target's
+// tapped hidden states WHERE THE TARGET PRODUCES THEM, in the session's own prefill (the open's prompt and every observation, q38-lm-layers-span-t),
+// and in the speculative steps themselves, so no position is ever run twice and a session that already prefilled can draft at any ask.
+//
+// THE OWNER. One mutable record (record_new) holds what the session owns beside the target: the pipelines, the drafter (q38d-open), the spec scratch
+// (q38s-open: logits, ids, the recurrent snapshots), and the walk's persistent choices. Fields:
+//   on         1 while the drafter is open; 0 for a record that only names why speculation is off (reason)
+//   reason     the named reason speculation is off or was left, "" while it speaks
+//   committed  the drafter's context holds rows for positions [0, committed) of THIS stream (stamp: the stream's first state handle)
+//   mode       "dflash" while the walk is speculative, "plain" after its measured yield fell below the plain token's
+//   ema kcur   the adaptive row count's running acceptance shares and the rows it will try next (carried from ask to ask)
+//   plain-ms   the cheapest one-row check measured in this session: the plain token's cost, the yardstick of the yield
+//   last       [steps, tokens, ms, plain-ms] of the last walk
+// The drafter's context can only ever lower the ACCEPTANCE, never change an id: every id a walk says is the argmax of the verify logits at its
+// position, and a draft the target does not repeat changes nothing (state restored from the snapshots). The only thing that must be exact is the
+// target's own state, which the walk leaves where the plain walk would: KV rows for the positions before the pending token, the recurrent state
+// after the token before it, the pending token held (never in KV), a stop id kept out of the speech and held as pending.
+//
+// THE WALK (q38x-walk) is the plain walk's contract (fcms-walk-by) with its speculative step: the ids said (the pending token first, a stop id never),
+// the pending token and its position, whether it stopped. A step from the pending token x at p checks k drafts in ONE weight pass; the accepted run
+// d1..dm and the verified successor y are the stream's next tokens; the rows of x, d1..dm entered the KV and the drafter's context, the state is put back
+// to after dm (restore from the snapshot of the span's token m). A stop id inside an accepted run ends the walk there: pending = that id, KV and state
+// as after the token before it (a restore to that token's snapshot), the rows before it committed to the drafter. The row count is capped so a step never
+// verifies past the tokens still wanted (k <= wanted - 2) or past the context (p + k < maxpos): the last tokens of a walk are checked one row at a time,
+// on the same matrix-unit arithmetic (q38s-fast1, batch invariant), so the ids are the verify path's greedy decode whatever the steps' shape.
+import native/metal/qwen35-dense-dflash.fk;
+section [form.bml] {
+    def q38x-min(a, b) = a < b ? a : b;
+    def q38x-max(a, b) = a > b ? a : b;
+    // the rows the capture/commit buffers hold: the widest prefill slice the context was opened for, and at least the check span's eight
+    def q38x-rows(ctx) = q38x-max(q38-ctx-span(ctx), 8);
+    def q38x-kmax() = 7;
+    def q38x-off(reason) = record_new(0, "on", 0, "reason", reason);
+    def q38x-on?(o) = !nothing?(o) && (String) value_kind(o) == "record" && record_get(o, "on") == 1 ? 1 : 0;
+    // what the drafter and its scratch take beside the target (the file's pages are shared and touched lazily: the head's rows and each layer's weights as they are drafted from)
+    def q38x-linear-layers(geo) = geo[21] - geo[21] / geo[22];
+    def q38x-snap-bytes(geo) = q38x-kmax() * (q38-recur-conv-n(geo) + q38-recur-delta-n(geo)) * 4 * q38x-linear-layers(geo);
+    def q38x-own-bytes(ctx, maxpos) = {
+        let geo = ctx[2];
+        40960 * maxpos + q38x-snap-bytes(geo) + 8 * geo[19] * 4 + 2 * geo[20] * 4 * maxpos + 160 * 1048576;
+    };
+    // ── the tap: what the session's prefill calls in its own batch ──
+    def q38x-tap-capture(o, l, n) = n > record_get(o, "nr") ? 0 : q38d-capture-layer(record_get(o, "ctx")[1], record_get(o, "ctx")[2], record_get(o, "ds"), record_get(o, "dx"), l, n, 0);
+    // rows pos0 .. pos0 + n enter the drafter's context; a slice that begins past the committed prefix leaves a hole, which keeps the walk plain (named)
+    def q38x-tap-commit(o, n, pos0) = n > record_get(o, "nr") ? 0 : {
+        q38d-commit(record_get(o, "ctx"), record_get(o, "qs"), record_get(o, "ds"), record_get(o, "dx"), n, pos0);
+        pos0 <= record_get(o, "committed") ? record_set(o, "committed", pos0 + n) : 0;
+        1;
+    };
+    def q38x-tap-go(o, phase, l, n, pos0) = phase == 0 ? q38x-tap-capture(o, l, n) : q38x-tap-commit(o, n, pos0);
+    def q38x-tap(o) = q38x-on?(o) == 1 && (String) record_get(o, "mode") == "dflash" ? ((phase, l, n, pos0) => q38x-tap-go(o, phase, l, n, pos0)) : nothing();
+    // a walk may begin when the drafter holds every position the stream holds, in THIS stream
+    def q38x-ready-why(o, sts, pos) = q38x-on?(o) != 1 ? (String) record_get(o, "reason") : (String) record_get(o, "mode") != "dflash" ? (String) record_get(o, "reason") : len(sts) == 0 || record_get(o, "stamp") != nth(sts, 0)[0] ? "spec-off:stream-renewed" : record_get(o, "committed") != pos ? ("spec-off:drafter-context-behind:" ++ record_get(o, "committed").str() ++ "<" ++ pos.str()) : "";
+    // ── the walk ──
+    def q38x-first-stop(acc, stops, i) = i >= len(acc) ? -1 : (Comparable) q38-stop?(acc[i], stops) == 1 ? i : q38x-first-stop(acc, stops, i + 1);
+    // the rejected rows' recurrent state put back (slot: the snapshot of the span's token after which the stream stands; -1 none) and the rows
+    // the stream keeps entering the drafter's context, in one batch, settled: nothing is left pending between two calls
+    def q38x-flush(ctx, qs, ds, dx, sts, sx, slot, nc, cp) = slot >= 0 || nc > 0 ? {
+        metal_batch_concurrent();
+        slot >= 0 ? q38s-restore(ctx, sts, sx, slot) : 0;
+        nc > 0 ? q38d-commit(ctx, qs, ds, dx, nc, cp) : 0;
+        metal_sync();
+        1;
+    } : 0;
+    // the decode checkpoints the plain walk pulses at (1, 2, 4, 8, ...): the next one at or beyond what is said
+    def q38x-pulse-next(nxt, emitted) = nxt > emitted ? nxt : q38x-pulse-next(nxt * 2, emitted);
+    def q38x-pulse(pulse, st, emitted) = emitted >= st[7] ? {
+        let said = pulse(emitted);
+        append(take(7, st), cons(q38x-pulse-next(st[7], emitted + 1), drop(8, st)));
+    } : st;
+    // st = [ema, kcur, steps, tokens, ms, plain-ms, probes left, next pulse]; steps/tokens/ms count the speculative steps only
+    def q38x-end(ctx, qs, ds, dx, sts, sx, out, pending, pos, stopped, slot, nc, cp, st) = {
+        let flushed = q38x-flush(ctx, qs, ds, dx, sts, sx, slot, nc, cp);
+        [out, pending, pos, stopped, st];
+    };
+    def q38x-go(ctx, qs, ds, dx, sts, sx, x, p, left, stops, pulse, slot, nc, cp, out, st) = (Comparable) q38-stop?(x, stops) == 1 ? q38x-end(ctx, qs, ds, dx, sts, sx, out, x, p, 1, slot, nc, cp, st) : left <= 1 ? q38x-end(ctx, qs, ds, dx, sts, sx, append(out, [x]), x, p, 0, slot, nc, cp, q38x-pulse(pulse, st, len(out) + 1)) : p >= ctx[2][18] ? q38x-end(ctx, qs, ds, dx, sts, sx, append(out, [x]), -1, p + 1, 1, slot, nc, cp, st) : q38x-step-go(ctx, qs, ds, dx, sts, sx, x, p, left, stops, pulse, slot, nc, cp, out, st);
+    def q38x-step-go(ctx, qs, ds, dx, sts, sx, x, p, left, stops, pulse, slot, nc, cp, out, st) = {
+        let out2 = append(out, [x]);
+        let room = q38x-min(left - 2, ctx[2][18] - 1 - p);
+        // the plain-cost probes come after two speculative steps (the pipelines and weight pages are warm by then) and while tokens remain to be said
+        let probing = st[6] > 0 && st[2] >= 2 && left >= 4 ? 1 : 0;
+        let keff = probing == 1 ? 0 : q38x-min(st[1], room);
+        let t0 = host_monotonic_ms();
+        let r = q38d-step(ctx, qs, ds, dx, sts, sx, x, p, keff, slot, nc, cp, 0);
+        let dt = host_monotonic_ms() - t0;
+        let d = r[0];
+        let v = r[1];
+        let m = q38s-accept-go(d, v, 1, keff);
+        let acc = take(m, d[1:]);
+        let si = q38x-first-stop(acc, stops, 0);
+        let ema2 = keff == 0 ? st[0] : q38s-ema-go(st[0], m, 1, keff);
+        let k2 = keff == 0 ? st[1] : q38d-next-k(ema2, st[1], q38x-kmax());
+        let pms2 = keff == 0 && (st[5] <= 0 || dt < st[5]) ? dt : st[5];
+        let st2 = [ema2, k2, keff > 0 ? st[2] + 1 : st[2], keff > 0 ? st[3] + m + 1 : st[3], keff > 0 ? st[4] + dt : st[4], pms2, probing == 1 ? st[6] - 1 : st[6], st[7]];
+        si >= 0 ? q38x-end(ctx, qs, ds, dx, sts, sx, append(out2, take(si, acc)), acc[si], p + si + 1, 1, si, si + 1, p, st2) : {
+            let out3 = append(out2, acc);
+            let st3 = q38x-pulse(pulse, st2, len(out3));
+            q38x-go(ctx, qs, ds, dx, sts, sx, v[m], p + m + 1, left - 1 - m, stops, pulse, m < keff ? m : -1, m + 1, p, out3, st3);
+        };
+    };
+    // x pending at p (the session's pending id and position), want ids to say at most, stops the session's: [ids, pending, pos, stopped, st]
+    // An ask of eight tokens or more whose session has no plain-cost yet spends two of its steps, after two speculative ones, as one-row checks (the session's
+    // yardstick: they say two tokens at a token's price); every walk's last token is a one-row check too, and the cheapest ever seen stands.
+    def q38x-walk(o, sts, x, p, want, stops, pulse) = {
+        let pms = record_get(o, "plain-ms");
+        let st0 = [record_get(o, "ema"), record_get(o, "kcur"), 0, 0, 0, pms, pms <= 0 && want >= 8 ? 2 : 0, 1];
+        let r = q38x-go(record_get(o, "ctx"), record_get(o, "qs"), record_get(o, "ds"), record_get(o, "dx"), sts, record_get(o, "sx"), x, p, want, stops, pulse, -1, 0, 0, [], st0);
+        let st = r[4];
+        record_set(o, "ema", st[0]);
+        record_set(o, "kcur", st[1]);
+        record_set(o, "plain-ms", st[5]);
+        // the rows the drafter holds are the positions the stream holds: the ones before the pending token (a walk that ended past the context has no pending token and its last position never ran)
+        record_set(o, "committed", r[1] < 0 ? r[2] - 1 : r[2]);
+        record_set(o, "last", [st[2], st[3], st[4], st[5]]);
+        record_set(o, "calls", record_get(o, "calls") + 1);
+        r;
+    };
+    // After a walk: the measured yield against the plain token's cost. tokens * plain-ms / ms is how many times faster the speculative steps said
+    // their tokens than the one-row check would have (100 = equal). Two walks in a row below the plain token's rate leave the walk plain for the
+    // rest of this stream (named): the tap stops, the plain planned step takes over.
+    def q38x-ratio(st) = st[4] <= 0 || st[5] <= 0 ? 0 : (st[3] * st[5] * 100) / st[4];
+    def q38x-judge(o, st) = st[2] >= 4 && st[5] > 0 ? {
+        let ratio = q38x-ratio(st);
+        let strikes = ratio < 100 ? record_get(o, "strikes") + 1 : 0;
+        record_set(o, "strikes", strikes);
+        strikes >= 2 ? {
+            record_set(o, "mode", "plain");
+            record_set(o, "reason", "spec-off:yield-below-plain:" ++ ratio.str() ++ "/100 over " ++ st[2].str() ++ " steps");
+            0;
+        } : 1;
+    } : 1;
+    // ── open and close ──
+    def q38x-bufs-ok?(sx) = q38-handles-ok?([sx[0], sx[1], sx[2], sx[3], sx[4], sx[5], sx[6], sx[7], sx[8], sx[13]]);
+    def q38x-expected-snaps(snps) = len(snps) == 0 ? 0 : (snps[0][0] > 0 ? 2 : 0) + q38x-expected-snaps(snps[1:]);
+    def q38x-expected-layers(ls) = len(ls) == 0 ? 0 : len(ls[0]) + q38x-expected-layers(ls[1:]);
+    def q38x-expected-dx(dx) = len(dx[2]) + 2 * len(dx[3]) + len(dx[1]) + q38x-expected-layers(dx[0]);
+    def q38x-expected-sx(sx) = 12 + q38x-expected-snaps(sx[9]) + 4 + len(sx[10][4]);
+    def q38x-owned(o) = q38x-on?(o) == 1 ? q38x-expected-dx(record_get(o, "dx")) + q38x-expected-sx(record_get(o, "sx")) : 0;
+    def q38x-close(o) = q38x-on?(o) == 1 ? {
+        record_set(o, "on", 0);
+        record_set(o, "reason", "closed");
+        q38d-close(record_get(o, "dx")) + q38s-close(record_get(o, "sx"));
+    } : 0;
+    // the drafter at dpath for the stream context ctx (opened with at least two positions a slice), maxpos the session's: the owner record, or one that names why not.
+    // The memory is the caller's to ask for first (the session glue leases it beside the target's).
+    def q38x-open(ctx, dpath, maxpos) = {
+        let qs = q38s-fast1(q38s-pipes(q38s-msl()));
+        let ds = q38d-pipes(q38d-msl());
+        !(q38s-pipes-ok?(qs) && q38s-pipes-ok?(ds)) ? q38x-off("spec-off:pipelines-did-not-compile") : q38x-open-drafter(ctx, qs, ds, dpath, maxpos);
+    };
+    def q38x-open-drafter(ctx, qs, ds, dpath, maxpos) = {
+        let dx = q38d-open(ctx, dpath, maxpos, q38x-rows(ctx));
+        !(len(dx) == 7 && (Comparable) q38d-ok?(dx) == 1) ? {
+            let closed = len(dx) == 7 ? q38d-close(dx) : 0;
+            q38x-off("spec-off:drafter-did-not-open");
+        } : q38x-open-scratch(ctx, qs, ds, dx, maxpos);
+    };
+    def q38x-open-scratch(ctx, qs, ds, dx, maxpos) = {
+        let sx = q38s-open(ctx, q38x-kmax(), 8);
+        !((Comparable) q38x-bufs-ok?(sx) == 1) ? {
+            let closed = q38d-close(dx) + q38s-close(sx);
+            q38x-off("spec-off:scratch-did-not-open");
+        } : record_new(0, "on", 1, "reason", "", "ctx", ctx, "qs", qs, "ds", ds, "dx", dx, "sx", sx, "nr", q38x-rows(ctx), "maxpos", maxpos, "committed", 0, "stamp", 0, "mode", "dflash", "ema", q38s-fill(q38x-kmax(), 100), "kcur", 4, "plain-ms", 0, "strikes", 0, "calls", 0, "last", [0, 0, 0, 0]);
+    };
+    0;
+}

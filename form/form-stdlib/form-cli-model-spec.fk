@@ -1,0 +1,78 @@
+// form-cli-model-spec.fk — the model session's speculative walk: what a plain Qwen session owns beside its target, and how the session holds it.
+//
+// A plain Qwen3.8-27B session (form-cli-model-session.fk) says its greedy tokens speculatively by default: the DFlash2 block-diffusion drafter
+// (a 2 GB Q8_0 file beside the target's) proposes a block, the target checks it in one weight pass on the matrix unit, and what it accepts is bandwidth the
+// wall did not charge for (qwen35-dense-session-spec.fk holds the walk and its contract; qwen35-dense-dflash.fk the drafter).
+//
+// WHERE IT LIVES. Slot 19 of the session record (after the adapter carrier 15, the sampler 16, the cursor epoch 17, the draft lane 18) holds the OWNER, one mutable
+// record: the drafter, its scratch and the walk's persistent choices. Every copy of the session (fcms-with-stream, fcmd-inherit) carries it.
+//   open      fcms-open-granted opens it after the target's context and state, before the prompt's prefill, so the prefill's own batch captures the five tapped
+//             hidden states the drafter reads (the tap, q38-lm-layers-span-t) and commits them as it goes: a prompt is never run twice, and the drafter is the
+//             prompt's by the time the open returns. The drafter's file pages are mapped and touched lazily (the head's rows at the first prefill slice, each layer's
+//             weights at the first draft), and its memory is leased beside the target's (mg-lease with the empty key adds to this process's promise).
+//   observe   every observation's prefill (fcms-observe-ids) carries the tap too; a renewal's fresh stream re-arms it (fcmr-prefill-of).
+//   generate  the greedy walk of a plain session is the speculative one (fcms-generate-spec) while the owner is ready: the drafter holds every position the stream
+//             holds, in this stream, and the measured yield beats the plain token. Anything else is the plain planned walk, and the generation says why:
+//             a fifth element of the generation (fcms-generation-spec) names the reason or reports the walk (never a silent downgrade).
+//   release   fcms-release-ok? closes the drafter and its scratch with the same expected-against-closed count as every other owner.
+// Off by choice: FORM_SPEC=off in the environment. The drafter's file: FORM_SPEC_DRAFT, or the sibling of the target (models/qwen38-dflash2/).
+import native/metal/qwen35-dense-session-spec.fk;
+import form-stdlib/bml/memory-governor.bml;
+section [form.bml] {
+    def fcsp-slot() = 19;
+    def fcsp-target-tail() = "/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+    def fcsp-drafter-tail() = "/qwen38-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
+    def fcsp-tail?(path, tail) = len(path) > len(tail) && (String) substring(path, len(path) - len(tail), len(path)) == tail;
+    def fcsp-drafter-path(path) = {
+        let named = host_getenv("FORM_SPEC_DRAFT") ?? "";
+        (String) named != "" ? named : fcsp-tail?(path, fcsp-target-tail()) ? substring(path, 0, len(path) - len(fcsp-target-tail())) ++ fcsp-drafter-tail() : "";
+    };
+    def fcsp-wanted?() = (String) (host_getenv("FORM_SPEC") ?? "") != "off";
+    // ── the owner in the session ──
+    def fcsp-owner(s) = len(s) > fcsp-slot() ? s[fcsp-slot()] : nothing();
+    def fcsp-pad(s) = len(s) >= fcsp-slot() ? s : fcsp-pad(append(s, [len(s) == 17 || len(s) == 18 ? nothing() : []]));
+    def fcsp-with-owner(s, o) = append(take(fcsp-slot(), fcsp-pad(s)), cons(o, drop(fcsp-slot() + 1, s)));
+    def fcsp-has?(s) = !nothing?(fcsp-owner(s)) && (String) value_kind(fcsp-owner(s)) == "record" ? 1 : 0;
+    // the minimum walk the speculative step is taken for: one id is the pending token alone (no forward in either walk)
+    def fcsp-min-walk() = 2;
+    def fcsp-tap(s) = q38x-tap(fcsp-owner(s));
+    // the stream the owner belongs to: the first handle of the stream state (every handle carries its allocation's generation)
+    def fcsp-stamp(sts) = len(sts) > 0 ? nth(sts, 0)[0] : 0;
+    def fcsp-attach(s, o, sts) = {
+        record_set(o, "stamp", fcsp-stamp(sts));
+        fcsp-with-owner(s, o);
+    };
+    // a renewal's fresh stream: the owner's context starts again at position 0 and the new stream is its stream (the old stream's rows are overwritten as the new ones commit)
+    def fcsp-renew-tap(s) = fcsp-has?(s) == 1 && q38x-on?(fcsp-owner(s)) == 1 ? {
+        record_set(fcsp-owner(s), "committed", 0);
+        fcsp-tap(s);
+    } : nothing();
+    def fcsp-restamp(s, sts) = fcsp-has?(s) == 1 ? {
+        record_set(fcsp-owner(s), "stamp", fcsp-stamp(sts));
+        s;
+    } : s;
+    // ── open ──
+    // the owner for a stream context: opened and leased, or a record that names why speculation is off for this session
+    def fcsp-open(path, ctx, maxpos) = !fcsp-wanted?() ? q38x-off("spec-off:disabled-by-FORM_SPEC") : fcsp-open-for(path, ctx, maxpos, fcsp-drafter-path(path));
+    def fcsp-open-for(path, ctx, maxpos, dpath) = (String) dpath == "" ? q38x-off("spec-off:no-drafter-for-model") : len(ctx) < 11 || q38-ctx-span(ctx) < 2 ? q38x-off("spec-off:prefill-span-1") : (file_size(dpath) ?? 0) <= 0 ? q38x-off("spec-off:drafter-file-missing") : fcsp-lease(ctx, maxpos, dpath);
+    def fcsp-lease(ctx, maxpos, dpath) = {
+        let shared = file_size(dpath);
+        let own = q38x-own-bytes(ctx, maxpos);
+        let granted = mg-lease("drafter " ++ dpath, "", shared, own);
+        !mg-granted?(granted) ? q38x-off("spec-off:drafter-memory-held:" ++ granted[1]) : fcsp-opened(q38x-open(ctx, dpath, maxpos), shared + own);
+    };
+    def fcsp-opened(o, bytes) = q38x-on?(o) == 1 ? o : {
+        let returned = mg-lease-return(bytes);
+        o;
+    };
+    // ── the walk's report ──
+    // "spec dflash: 31 tokens in 6 steps (5.1/step, k 7), 4.4x the plain token (plain 66 ms)" or "spec-off:<why>"
+    def fcsp-ratio-text(st) = q38x-ratio(st) <= 0 ? "n/a" : (q38x-ratio(st) / 100).str() ++ "." ++ ((q38x-ratio(st) / 10) % 10).str() ++ "x";
+    def fcsp-report(o, walked, ms) = {
+        let st = walked[4];
+        "spec dflash: " ++ len(walked[0]).str() ++ " tokens, " ++ st[2].str() ++ " speculative steps (" ++ (st[2] <= 0 ? 0 : (st[3] * 10) / st[2]).str() ++ "/10 tokens a step, next k " ++ st[1].str() ++ "), " ++ fcsp-ratio-text(st) ++ " the plain token (plain " ++ st[5].str() ++ " ms), " ++ ms.str() ++ " ms";
+    };
+    def fcsp-owned(s) = q38x-owned(fcsp-owner(s));
+    def fcsp-close(s) = q38x-close(fcsp-owner(s));
+    0;
+}
