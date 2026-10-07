@@ -220,7 +220,7 @@ Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a documen
 
 ### Direct implementation entry
 
-`code_entry: "direct"` begins one pending task referring to the full original goal. It avoids generated refinement, planning and splitting, while retaining review, verification and the requirement for an actual change. Resume retains the saved phase. `review_entry: "direct"` selects the corresponding read-only entry.
+`code_entry: "direct"` begins one pending task referring to the full original goal. It avoids generated preparation, while retaining review, verification and the requirement for an actual change. A resumed or renewed direct attempt with native calls, unchanged documents and no completed step invites the local model to split that generic task into concrete dependent steps. Original goals, documents, observations, checks and counters remain intact. Concrete tasks, changed candidates and read-only review retain their phase. `review_entry: "direct"` selects the corresponding read-only entry.
 
 Repair can choose `next: "split"` when the retained approach needs concrete
 dependent tasks. The existing split stage keeps those tasks in the same owned
