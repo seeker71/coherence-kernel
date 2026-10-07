@@ -306,15 +306,15 @@ section [form.bml] {
    metal_batch_concurrent();
    let l0 = metal_live();
    let t0 = host_monotonic_ms();
-   let r = f();
+   let te = f();
    let t1 = host_monotonic_ms();
    let l1 = metal_live();
-   [t1 - t0, (l1[11] - l0[11]) / 1000, l1[7] - l0[7]];
+   [t1 - t0, te > 0 ? te - t0 : 0, l1[7] - l0[7]];
   }
   def qsr-whole-go(ctx, qe, qf, sts, sx, ntok, pos, rounds, acc) = rounds <= 0 ? acc : {
-   let a = qsr-whole-one(() => { let e = q38s-verify(ctx, qe, sts, sx, ntok, pos); metal_buf_read(sx[4], 0, 4); });
-   let b = qsr-whole-one(() => { let e = q38s-verify(ctx, qf, sts, sx, ntok, pos); metal_buf_read(sx[4], 0, 4); });
-   let c = qsr-whole-one(() => q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], 1000, pos));
+   let a = qsr-whole-one(() => { let e = q38s-verify(ctx, qe, sts, sx, ntok, pos); let te = host_monotonic_ms(); let rd = metal_buf_read(sx[4], 0, 4); te; });
+   let b = qsr-whole-one(() => { let e = q38s-verify(ctx, qf, sts, sx, ntok, pos); let te = host_monotonic_ms(); let rd = metal_buf_read(sx[4], 0, 4); te; });
+   let c = qsr-whole-one(() => { let nid = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], 1000, pos); 0; });
    qsr-whole-go(ctx, qe, qf, sts, sx, ntok, pos, rounds - 1, append(acc, [[a, b, c]]));
   };
   def qsr-col-min(rows, i, j) = qsr-min(map(r => r[i][j], rows), 1000000);
@@ -329,7 +329,27 @@ section [form.bml] {
    let closed = q38s-close(sx);
    1;
   }
+  // ── the matrix-unit tuning (kb, rt for 8192+ rows, rt for the rest, fewest rows) raced on the whole check: interleaved rounds, the best of each ──
+  def qsr-tunes() = [[1, 64, 32, 2048], [2, 64, 32, 2048], [1, 64, 16, 2048], [2, 64, 16, 2048], [1, 32, 32, 2048], [1, 64, 32, 1024], [1, 64, 32, 0], [1, 64, 32, 100000000]];
+  def qsr-tune-round(ctx, qs, sts, sx, ntok, pos, tunes) = map(t => qsr-whole-one(() => { let e = q38s-verify(ctx, q38s-tune(qs, t), sts, sx, ntok, pos); let te = host_monotonic_ms(); let rd = metal_buf_read(sx[4], 0, 4); te; }), tunes);
+  def qsr-tune-go(ctx, qs, sts, sx, ntok, pos, tunes, rounds, acc) = rounds <= 0 ? acc : qsr-tune-go(ctx, qs, sts, sx, ntok, pos, tunes, rounds - 1, append(acc, [qsr-tune-round(ctx, qs, sts, sx, ntok, pos, tunes)]));
+  def qsr-tune-say(tunes, rows, i) = i >= len(tunes) ? 1 : {
+   qsr-say("tune kb " ++ tunes[i][0].str() ++ " rt " ++ tunes[i][1].str() ++ "/" ++ tunes[i][2].str() ++ " min rows " ++ tunes[i][3].str() ++ ": whole check best " ++ qsr-min(map(r => r[i][0], rows), 1000000).str() ++ " ms (host encode " ++ qsr-min(map(r => r[i][1], rows), 1000000).str() ++ ")");
+   qsr-tune-say(tunes, rows, i + 1);
+  };
+  def qsr-tune(ctx, qs, ids, ntok, rounds) {
+   let sx = q38s-open(ctx, 8, len(ids));
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let tunes = qsr-tunes();
+   let rows = qsr-tune-go(ctx, q38s-fast(qs), sts, sx, ntok, len(ids), tunes, rounds + 1, []);
+   let said = qsr-tune-say(tunes, rows[1:], 0);
+   let freed = q38-free-state(sts);
+   let closed = q38s-close(sx);
+   1;
+  }
   def qsr-measure(ctx, qs, ids, mode, n, k, ph, kmin, rounds, pids) {
+   (String) mode == "tune" ? qsr-tune(ctx, qs, ids, k + 1, rounds) :
    (String) mode == "whole" ? qsr-whole(ctx, qs, ids, k + 1, rounds) :
    (String) mode == "agree" ? qsr-agree-open(ctx, qs, pids, n, k) :
    (String) mode == "bits" ? qsr-bits-open(ctx, qs, ids, n, k) :
