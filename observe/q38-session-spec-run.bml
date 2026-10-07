@@ -1,0 +1,94 @@
+// q38-session-spec-run.bml — the model session lane's greedy walk, plain and speculative, through the session API (fcms-open-*, fcms-generate).
+//
+//   echo '{}' | ./fkwu observe/q38-session-spec-run.bml            the plan. Opens nothing.
+//   echo '{"go":1,"which":"code","n":64}' | ./fkwu observe/q38-session-spec-run.bml
+//                                                                  opens a session (the default walk: speculative), says n tokens, then the verify path's own greedy decode of the
+//                                                                  same prompt as the reference, then a second session said by the plain planned walk: ids against ids, tok/s of each.
+// stdin, one JSON line, all optional: go, which (sky | code | prose | json | long | a prompt text via "prompt"), n (64), spec (1), plain (1), ref (1), warm (1: one untimed
+// 8-token walk first, so pipelines and weights are paged in), reps (1: the timed walks repeated, each from a fresh session).
+// The reference needs a prompt of at most 64 tokens (the session's scratch is as wide as its prompt, capped at 64): the door says so and skips it otherwise.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen38-spec-witness.bml form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class Q38SessionSpecRun {
+  def qss-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qss-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qss-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qss-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-session-spec", line) : json-node-object([]);
+  }
+  def qss-say(s) = print_str("[q38-session-spec] " ++ s);
+  def qss-idstr(xs) = foldl((acc, x) => acc ++ x.str() ++ " ", "", xs);
+  def qss-prompt(which) = which == "sky" ? "Explain in two sentences why the sky is blue." : which == "code" ? "Write a Python function that checks whether a string is a palindrome." : which == "prose" ? "Write a short paragraph about autumn in a quiet mountain village." : which == "json" ? "Reply with only a JSON object with keys \"tool\" and \"args\" calling the tool read_file on the path src/main.rs." : which == "long" ? "Write a Python class that implements a binary search tree with insert, search and in-order traversal methods." : which;
+  def qss-rate10(n, ms) = ms <= 0 ? 0 : (n * 10000) / ms;
+  def qss-rate(n, ms) = (qss-rate10(n, ms) / 10).str() ++ "." ++ (qss-rate10(n, ms) % 10).str();
+  def qss-same-go(a, b, i, same) = i >= len(a) || i >= len(b) ? same : qss-same-go(a, b, i + 1, a[i] == b[i] ? same + 1 : same);
+  // one session, one walk: [ids, ms, the generation's spec note, the session (kept for the reference) ]
+  def qss-open(path, prompt, n) = fcms-open-reserved(path, prompt, n + 16, "knowledge-query");
+  def qss-walk(s, n, spec) {
+   let t0 = host_monotonic_ms();
+   let g = spec == 1 ? fcms-generate(s, n) : fcms-generate-plain(s, n);
+   let t1 = host_monotonic_ms();
+   [fcms-generation-ids(g), t1 - t0, fcms-generation-spec(g), fcms-generation-session(g)];
+  }
+  // the verify path's greedy decode of the prompt: the lane prefill's first token, then n - 1 one-row checks on the matrix unit
+  def qss-ref(s, ids, n) {
+   let o = fcsp-owner(s);
+   let ctx = fcms-ctx(s);
+   let sx = q38s-open(ctx, 8, 8);
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let a = q38sw-ref-go(ctx, record_get(o, "qs"), sts, sx, r[0], len(ids), n - 1, [], []);
+   let f1 = q38-free-state(sts);
+   let f2 = q38s-close(sx);
+   cons(r[0], a[0]);
+  }
+  def qss-refused(s, acc) {
+   qss-say("the session did not open: " ++ fcms-reason(s));
+   acc;
+  }
+  def qss-timed(path, prompt, n, spec, reps, acc) {
+   reps <= 0 ? acc : qss-timed-open(path, prompt, n, spec, reps, acc, qss-open(path, prompt, n));
+  }
+  def qss-timed-open(path, prompt, n, spec, reps, acc, s) {
+   !((Comparable) fcms-live?(s) == 1) ? qss-refused(s, acc) : qss-timed-walk(path, prompt, n, spec, reps, acc, s, qss-walk(s, n, spec));
+  }
+  def qss-timed-walk(path, prompt, n, spec, reps, acc, s, w) {
+   qss-say((spec == 1 ? "spec  " : "plain ") ++ n.str() ++ " tokens in " ++ w[1].str() ++ " ms = " ++ qss-rate(len(w[0]), w[1]) ++ " tok/s; " ++ (String) w[2]);
+   let released = fcms-release-ok?(w[3]);
+   qss-timed(path, prompt, n, spec, reps - 1, append(acc, [[w[0], w[1]]]));
+  }
+  def qss-best(rows) = foldl((m, r) => (m < 0 || r[1] < m) ? r[1] : m, 0 - 1, rows);
+  def qss-run(path, which, prompt, n, spec, plain, ref, warm, reps) {
+   let src = fcmg-src(path);
+   let ids = q35-chat-ids(src, prompt);
+   qss-say("prompt " ++ which ++ ": " ++ len(ids).str() ++ " tokens, n " ++ n.str());
+   // the first session: the warm-up walk (untimed), the speculative walk, the reference
+   let s0 = qss-open(path, prompt, n);
+   !((Comparable) fcms-live?(s0) == 1) ? qss-say("the session did not open: " ++ fcms-reason(s0)) : {
+    let o = fcsp-owner(s0);
+    qss-say("open: spec owner " ++ (q38x-on?(o) == 1 ? "on" : "off: " ++ (String) record_get(o, "reason")) ++ ", committed " ++ (q38x-on?(o) == 1 ? record_get(o, "committed").str() : "-") ++ " of pos " ++ fcms-pos(s0).str());
+    let ws = spec == 1 ? qss-walk(s0, n, 1) : [[], 0, "", s0];
+    spec == 1 ? qss-say("spec  " ++ n.str() ++ " tokens in " ++ ws[1].str() ++ " ms = " ++ qss-rate(len(ws[0]), ws[1]) ++ " tok/s; " ++ (String) ws[2]) : 0;
+    let rf = ref == 1 && len(ids) <= 64 ? qss-ref(ws[3], ids, n) : [];
+    ref == 1 && len(ids) > 64 ? qss-say("reference skipped: the prompt is " ++ len(ids).str() ++ " tokens (scratch holds 64)") : 0;
+    len(rf) > 0 && spec == 1 ? qss-say("spec ids vs the verify path's greedy decode: " ++ ((String) qss-idstr(take(n, ws[0])) == qss-idstr(take(len(ws[0]), rf)) ? "IDENTICAL" : "DIFFER") ++ " (" ++ qss-same-go(ws[0], rf, 0, 0).str() ++ " of " ++ len(ws[0]).str() ++ ")") : 0;
+    let released = fcms-release-ok?(ws[3]);
+    qss-say("released " ++ released.str());
+    let tp = plain == 1 ? qss-timed(path, prompt, n, 0, reps, []) : [];
+    plain == 1 && len(tp) > 0 && spec == 1 ? qss-say("spec ids vs plain walk ids: " ++ qss-same-go(ws[0], tp[0][0], 0, 0).str() ++ " of " ++ len(ws[0]).str() ++ " positions agree; plain best " ++ qss-best(tp).str() ++ " ms") : 0;
+    spec == 1 ? qss-say("spec  ids: " ++ qss-idstr(ws[0])) : 0;
+    plain == 1 && len(tp) > 0 ? qss-say("plain ids: " ++ qss-idstr(tp[0][0])) : 0;
+    len(rf) > 0 ? qss-say("ref   ids: " ++ qss-idstr(rf)) : 0;
+   };
+   1;
+  }
+  def qss-main() {
+   let opts = qss-opts();
+   let which = qss-text(opts, "which", "sky");
+   qss-int(opts, "go", 0) == 1 ? qss-run(qss-file(), which, qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "n", 64), qss-int(opts, "spec", 1), qss-int(opts, "plain", 1), qss-int(opts, "ref", 1), qss-int(opts, "warm", 1), qss-int(opts, "reps", 1)) : qss-say("plan: go=1 opens a session on " ++ qss-file() ++ " and says n tokens speculatively (the session's default walk), against the verify path's greedy decode and the plain planned walk");
+  }
+ }
+ qss-main();
+}
