@@ -18,9 +18,10 @@ section [form.bml] {
   }
   def qvl-say(s) = print_str("[q38-verify-lab] " ++ s);
   def qvl-min(xs, m) = len(xs) == 0 ? m : qvl-min(xs[1:], xs[0] < m ? xs[0] : m);
-  def qvl-times(n, f) = n <= 0 ? 1 : {
-   let done = f();
-   qvl-times(n - 1, f);
+  def qvl-times(n, f) = qvl-times-i(n, 0, f);
+  def qvl-times-i(n, i, f) = i >= n ? 1 : {
+   let done = f(i);
+   qvl-times-i(n, i + 1, f);
   };
   // one round of one variant: 48 dispatches in one batch, ms
   def qvl-round(f) {
@@ -44,47 +45,82 @@ section [form.bml] {
    let d = wa > wb ? wa - wb : wb - wa;
    qvl-ulp-go(a, b, i + 1, n, d > 0 ? cnt + 1 : cnt, d > widest ? d : widest);
   };
+  // the widest absolute gap between two float rows and the widest value of the reference, in millionths (the half twin's error budget)
+  def qvl-err-go(a, b, i, n, gap, top) = i >= n ? [gap, top] : {
+   let fa = ln-f32-decode(ln-u32-le(a, i * 4));
+   let fb = ln-f32-decode(ln-u32-le(b, i * 4));
+   let d = fa > fb ? fa - fb : fb - fa;
+   let m = fb > 0 - fb ? fb : 0 - fb;
+   qvl-err-go(a, b, i + 1, n, d > gap ? d : gap, m > top ? m : top);
+  };
+  def qvl-err(label, ya, yb, n) {
+   let r = qvl-err-go(metal_buf_read(ya, 0, n * 4), metal_buf_read(yb, 0, n * 4), 0, n, 0.0, 0.0);
+   qvl-say(label ++ ": widest gap " ++ ((r[0] * 1000000.0) / 1).str() ++ " e-6 against the reference's widest value " ++ r[1].str() ++ " (relative " ++ ((r[0] * 1000000.0) / (r[1] + 0.000001)).str() ++ " e-6)");
+  }
   def qvl-compare(label, ya, yb, n) {
    let ba = metal_buf_read(ya, 0, n * 4);
    let bb = metal_buf_read(yb, 0, n * 4);
    let r = qvl-ulp-go(ba, bb, 0, n, 0, 0);
    qvl-say(label ++ ": " ++ r[0].str() ++ " of " ++ n.str() ++ " words differ, widest " ++ r[1].str() ++ " ulp");
   }
-  def qvl-variants(ctx, qs, ms, tv, nt, ys) {
+  // tvf(i) is the tensor the i-th dispatch of a round reads: one tensor (hot: its bytes are in the caches after the first) or a different layer's (cold)
+  def qvl-variants(ctx, qs, ms, tvf, nt, ys) {
    let ps = ctx[0];
    let bs = ctx[1];
-   let rows = kth-tv-r(tv);
+   let rows = kth-tv-r(tvf(0));
    let xh = bs[1];
    let tn = nt <= 8 ? 8 : 16;
-   let mine = filter(v => v[0] == tn, q38m-variants());
+   let mine = filter(v => v[0] == tn && v[3] == 0, q38m-variants());
    append([
-    ["mvr (exact association, " ++ (q38s-rows-for(nt)).str() ++ " rows a group)", () => q38s-mv(ps, qs, tv, xh, ys[0], nt, rows, 1)],
-    ["mm64 (pipeline 62, the lane)", () => q38-mv-batch-y(ps, tv, xh, ys[1], nt, rows, 1)],
-    ["decode matvec (1 token)", () => q38-mv(ps, tv, xh, ys[2], 1)]
-   ], map(v => ["mm " ++ v[0].str() ++ " tokens kb " ++ v[1].str() ++ " rt " ++ v[2].str(), () => q38m-run(ms, tv, xh, ys[3 + q38m-slot(v[0], v[1], v[2])], nt, rows, 1, v[0], v[1], v[2])], mine));
+    ["mvr (exact association, " ++ (q38s-rows-for(nt)).str() ++ " rows a group)", (i) => q38s-mv(ps, qs, tvf(i), xh, ys[0], nt, rows, 1)],
+    ["mm64 (pipeline 62, the lane)", (i) => q38-mv-batch-y(ps, tvf(i), xh, ys[1], nt, rows, 1)],
+    ["decode matvec (1 token)", (i) => q38-mv(ps, tvf(i), xh, ys[2], 1)]
+   ], append(append(map(v => ["mm " ++ v[0].str() ++ " tokens kb " ++ v[1].str() ++ " rt " ++ v[2].str(), (i) => q38m-run(ms, tvf(i), xh, ys[3 + q38m-slot(v[0], v[1], v[2], 0)], nt, rows, 1, v[0], v[1], v[2])], mine), qvl-half-variants(ms, tvf, xh, nt, rows, ys, 0)), qvl-frag-variants(ms, tvf, xh, nt, rows, ys, 0)));
   }
+  // the fragment kernels (no threadgroup memory for the weights): pipelines after the half ones, outputs after theirs
+  def qvl-fbase() = len(q38m-variants()) + len(q38m-hvariants());
+  def qvl-frag-variants(ms, tvf, xh, nt, rows, ys, i) = i >= len(q38f-variants()) ? [] : {
+   let v = q38f-variants()[i];
+   v[3] == 1 ? qvl-frag-variants(ms, tvf, xh, nt, rows, ys, i + 1) : cons(["FRAG ts " ++ v[0].str() ++ " sgr " ++ v[1].str() ++ " slices " ++ v[2].str(), (j) => metal_enqueue(ms[qvl-fbase() + i], md-bind16([kth-tv-h(tvf(j)), xh, ys[3 + qvl-fbase() + i]], [rows, kth-tv-c(tvf(j)), nt, rows], 32 * v[1] * v[2], 0, 1, 1), q38f-groups(rows, v[0], v[1]))], qvl-frag-variants(ms, tvf, xh, nt, rows, ys, i + 1));
+  };
+  def qvl-frag-errs(ys, n, i) = i >= len(q38f-variants()) ? 1 : {
+   let v = q38f-variants()[i];
+   let e = v[3] == 1 ? 0 : qvl-err("FRAG " ++ v[0].str() ++ "/" ++ v[1].str() ++ "/" ++ v[2].str() ++ " vs mm64 (fp32)", ys[3 + qvl-fbase() + i], ys[1], n);
+   qvl-frag-errs(ys, n, i + 1);
+  };
+  // the half-operand twins: pipelines after the float ones in ms, outputs after theirs in ys
+  def qvl-half-variants(ms, tvf, xh, nt, rows, ys, i) = i >= len(q38m-hvariants()) ? [] : {
+   let v = q38m-hvariants()[i];
+   cons(["HALF mm " ++ v[0].str() ++ " tokens kb " ++ v[1].str() ++ " rt " ++ v[2].str(), (j) => metal_enqueue(ms[len(q38m-variants()) + i], md-bind16([kth-tv-h(tvf(j)), xh, ys[3 + len(q38m-variants()) + i]], [rows, kth-tv-c(tvf(j)), nt, rows], 2 * v[2], 0, 1, 1), q38m-groups(rows, nt, v[0], v[2]))], qvl-half-variants(ms, tvf, xh, nt, rows, ys, i + 1));
+  };
+  def qvl-half-errs(ys, n, i) = i >= len(q38m-hvariants()) ? 1 : {
+   let e = qvl-err("HALF " ++ q38m-hvariants()[i][1].str() ++ "/" ++ q38m-hvariants()[i][2].str() ++ " vs mm64 (fp32)", ys[3 + len(q38m-variants()) + i], ys[1], n);
+   qvl-half-errs(ys, n, i + 1);
+  };
   def qvl-cmp-go(vs, ys, nt, n, i) = i >= len(vs) ? 1 : {
-   let c = qvl-compare("mm " ++ vs[i][0].str() ++ "/" ++ vs[i][1].str() ++ "/" ++ vs[i][2].str() ++ " vs mm64", ys[3 + q38m-slot(vs[i][0], vs[i][1], vs[i][2])], ys[1], n);
+   let c = qvl-compare("mm " ++ vs[i][0].str() ++ "/" ++ vs[i][1].str() ++ "/" ++ vs[i][2].str() ++ " vs mm64", ys[3 + q38m-slot(vs[i][0], vs[i][1], vs[i][2], 0)], ys[1], n);
    qvl-cmp-go(vs, ys, nt, n, i + 1);
   };
   def qvl-alloc(n, k) = k <= 0 ? [] : cons(metal_buf_alloc(n), qvl-alloc(n, k - 1));
   def qvl-tensor(ctx, which) = which == 0 ? nth(ctx, 3)[0][2] : (which == 1 ? nth(ctx, 3)[0][4] : ctx[6]);
-  def qvl-lab(ctx, qs, ms, nt, which, rounds) {
+  def qvl-lab(ctx, qs, ms, nt, which, rounds, cold) {
    let tv = qvl-tensor(ctx, which);
    let rows = kth-tv-r(tv);
-   qvl-say("tensor " ++ rows.str() ++ " x " ++ kth-tv-c(tv).str() ++ ", " ++ nt.str() ++ " tokens");
-   let ys = qvl-alloc(rows * 16 * 4 + 4096, 3 + len(q38m-variants()));
-   let vs = qvl-variants(ctx, qs, ms, tv, nt, ys);
+   qvl-say("tensor " ++ rows.str() ++ " x " ++ kth-tv-c(tv).str() ++ ", " ++ nt.str() ++ " tokens, " ++ (cold == 1 && which < 2 ? "cold (a different layer's tensor each dispatch)" : "hot (one tensor)"));
+   let ys = qvl-alloc(rows * 16 * 4 + 4096, 3 + qvl-fbase() + len(q38f-variants()));
+   let vs = qvl-variants(ctx, qs, ms, (i) => (cold == 1 && which < 2) ? nth(ctx[3], i % 64)[which == 0 ? 2 : 4] : tv, nt, ys);
    let warm = qvl-one(vs, []);
    let best = qvl-race(vs, rounds, []);
    let r = qvl-report(vs, best);
    let n = rows * nt;
-   let c1 = qvl-cmp-go(filter(v => v[0] == (nt <= 8 ? 8 : 16), q38m-variants()), ys, nt, n, 0);
+   let c1 = qvl-cmp-go(filter(v => v[0] == (nt <= 8 ? 8 : 16) && v[3] == 0, q38m-variants()), ys, nt, n, 0);
    let c6 = qvl-compare("mm64 vs mvr", ys[1], ys[0], n);
+   let c7 = qvl-half-errs(ys, n, 0);
+   let c8 = qvl-frag-errs(ys, n, 0);
    let freed = map(y => metal_buf_free(y), ys);
    1;
   }
-  def qvl-run-open(path, nt, which, rounds, prompt) {
+  def qvl-run-open(path, nt, which, rounds, prompt, cold) {
    let src = fcmg-src(path);
    let ids = q35-chat-ids(src, prompt);
    let maxpos = len(ids) + 16;
@@ -95,10 +131,11 @@ section [form.bml] {
     let ctx = q38-open-span(path, maxpos, len(ids) + 1);
     !((Comparable) q38-context-ok?(ctx) == 1) ? qvl-say("the context did not open") : {
      let qs = q38s-pipes(q38s-msl());
-     let ms = q38m-pipes(q38m-text());
+     let mtext = q38m-text() ++ (q38m-hmsl-go(q38m-hvariants()) ++ q38f-msl-go(q38f-variants()));
+     let ms = append(append(q38m-pipes(mtext), q38m-hpipes-go(mtext, q38m-hvariants())), q38f-pipes-go(mtext, q38f-variants()));
      let sts = q38-new-state(ctx[2]);
      let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
-     let lab = !q38s-pipes-ok?(qs) ? qvl-say("spec pipelines did not compile") : (!kth-pipes-ok?(ms) ? qvl-say("mm pipelines did not compile: " ++ ms.str()) : qvl-lab(ctx, qs, ms, nt, which, rounds));
+     let lab = !q38s-pipes-ok?(qs) ? qvl-say("spec pipelines did not compile") : (!kth-pipes-ok?(ms) ? qvl-say("mm pipelines did not compile: " ++ ms.str()) : qvl-lab(ctx, qs, ms, nt, which, rounds, cold));
      let freed = q38-free-state(sts);
      let closed = q38-close(ctx, []);
      1;
@@ -109,7 +146,7 @@ section [form.bml] {
   }
   def qvl-run() {
    let opts = qvl-opts();
-   (Comparable) qvl-int(opts, "go", 0) == 1 ? qvl-run-open(qvl-file(), qvl-int(opts, "nt", 8), qvl-int(opts, "which", 0), qvl-int(opts, "rounds", 8), qvl-text(opts, "prompt", "Explain in two sentences why the sky is blue.")) : qvl-say("plan: go=1 races the check span's matmuls on the gate (which 0), down (1) or head (2) tensor at nt tokens");
+   (Comparable) qvl-int(opts, "go", 0) == 1 ? qvl-run-open(qvl-file(), qvl-int(opts, "nt", 8), qvl-int(opts, "which", 0), qvl-int(opts, "rounds", 8), qvl-text(opts, "prompt", "Explain in two sentences why the sky is blue."), qvl-int(opts, "cold", 0)) : qvl-say("plan: go=1 (cold 1: a different layer's tensor each dispatch) races the check span's matmuls on the gate (which 0), down (1) or head (2) tensor at nt tokens");
   }
  }
  qvl-run();

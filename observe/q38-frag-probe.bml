@@ -1,0 +1,34 @@
+// q38-frag-probe.bml — which element of an 8x8 simdgroup matrix does each lane hold? (thread_elements, on this GPU and this Metal compiler)
+//
+//   echo '{"go":1}' | ./fkwu observe/q38-frag-probe.bml
+// A matrix loaded from threadgroup memory with the value r * 8 + c at row r, column c; every lane writes the two elements it holds. Prints, per
+// lane, the (row, column) of its two elements, for a plain load and for a transposed one. No model is opened.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml native/metal/qwen35-dense-token-handle.fk
+section [form.bml] {
+ class Q38FragProbe {
+  def qfp-say(s) = print_str("[q38-frag-probe] " ++ s);
+  def qfp-msl() = "#include <metal_stdlib>\nkernel void frag_probe (device float* out [[buffer(0)]], uint lane [[thread_index_in_simdgroup]]) { threadgroup float t[64]; for (uint i = lane; i < 64u; i += 32u) { t[i] = float(i); } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); metal::simdgroup_float8x8 m; metal::simdgroup_load(m, t, 8); out[lane * 2u] = m.thread_elements()[0]; out[lane * 2u + 1u] = m.thread_elements()[1]; metal::simdgroup_float8x8 mt; metal::simdgroup_load(mt, t, 8, ulong2(0, 0), true); out[64u + lane * 2u] = mt.thread_elements()[0]; out[64u + lane * 2u + 1u] = mt.thread_elements()[1]; }";
+  def qfp-line(b, lane, off) = {
+   let a = ln-f32-decode(ln-u32-le(b, (off + lane * 2) * 4));
+   let c = ln-f32-decode(ln-u32-le(b, (off + lane * 2 + 1) * 4));
+   "lane " ++ lane.str() ++ ": (" ++ (a / 8).str() ++ "," ++ (a % 8).str() ++ ") (" ++ (c / 8).str() ++ "," ++ (c % 8).str() ++ ")  ";
+  };
+  def qfp-lines(b, lane, off) = lane >= 32 ? "" : qfp-line(b, lane, off) ++ qfp-lines(b, lane + 1, off);
+  def qfp-run() {
+   let p = metal_pipeline(qfp-msl(), "frag_probe");
+   p <= 0 ? qfp-say("did not compile: " ++ p.str() ++ " " ++ metal_status()) : {
+    let out = metal_buf_alloc(1024);
+    metal_batch_concurrent();
+    let q = metal_enqueue(p, md-bind16([out], [], 32, 0, 1, 0), 1);
+    let s = metal_sync();
+    let b = metal_buf_read(out, 0, 1024);
+    qfp-say("plain load (row, col) of element 0 and 1 per lane: " ++ qfp-lines(b, 0, 0));
+    qfp-say("transposed load: " ++ qfp-lines(b, 0, 64));
+    let f = metal_buf_free(out);
+    1;
+   };
+  }
+ }
+ qfp-run();
+}
