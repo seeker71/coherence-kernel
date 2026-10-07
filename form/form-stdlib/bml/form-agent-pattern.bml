@@ -11,10 +11,9 @@
 // invalid-interval-expression, interval-too-large, invalid-interval-order, unknown-character-class,
 // collating-element-not-supported ([.x.] and [=x=]), unclosed-character-class, invalid-character-range,
 // class-escape-not-supported (rg), unsupported-pattern-escape (\d in grep, any letter not named above, \0),
-// unsupported-pattern-syntax ((? in rg), trailing-pattern-escape, pattern-limit.
+// unsupported-pattern-syntax ((? in rg), trailing-pattern-escape.
 // Outside the engine: lookaround, lazy repetition, Unicode classes, case-insensitive non-ASCII, multi-byte
-// characters as one unit (matching is by byte). The evaluator carries a work budget per line; exhaustion is
-// an explicit error, never a negative answer.
+// characters as one unit (matching is by byte). Regular suffixes share states; captures carry their continuation.
 import form-stdlib/core.fk;
 import form-stdlib/bml/form-agent-tool-values.bml;
 import form-stdlib/bml/zvec-grep.bml;
@@ -29,7 +28,7 @@ section [form.bml] {
         def fap-requant(t, mn, mx) = len(t) > 4 ? [t[0], t[1], mn, mx, t[4]] : [t[0], t[1], mn, mx];
         def fap-anchor?(kind) = ((Comparable) kind == 6) || (((Comparable) kind == 7) || (((Comparable) kind == 8) || (((Comparable) kind == 12) || (((Comparable) kind == 13) || (((Comparable) kind == 17) || (((Comparable) kind == 18) || (((Comparable) kind == 19) || ((Comparable) kind == 20))))))));
         def fap-compile(s) = fap-compile-d(s, 0);
-        def fap-compile-d(s, d) = len(s) > FatMaxPattern() ? [[], "pattern-limit"] : fap-compiled(fap-p(s, 0, d, 0, 0, [], []));
+        def fap-compile-d(s, d) = fap-compiled(fap-p(s, 0, d, 0, 0, [], []));
         def fap-compiled(r) = (String) r[3] == "" ? [r[0], ""] : [[], r[3]];
 
         // ---- parser: [branches, next index, groups opened, error] ----
@@ -216,49 +215,88 @@ section [form.bml] {
             : (Comparable) kind == 19 ? (before && (!after))
             : (Comparable) pos == token[1];
         }
-        // A match is [end position or -1, fuel left]. k is the continuation: k(position, captures, fuel) answers
+        // A match is [end position or -1, steps observed]. k(position, captures, steps) answers
         // such a pair, so a group can backtrack into the rest of the pattern. Captures: [index, start, end] rows,
         // newest first.
         def fap-accept(p, caps, f) = [p, f];
-        def fap-seq(tokens, s, pos, ic, fuel) = fap-m(tokens, s, pos, ic, [], fuel, fap-accept);
-        def fap-m(tokens, s, pos, ic, caps, fuel, k) = fuel <= 0 ? [-1, 0] : nil?(tokens) ? k(pos, caps, fuel - 1) : fap-m-at(tokens, s, pos, ic, caps, fuel - 1, k);
-        def fap-m-at(tokens, s, pos, ic, caps, fuel, k) {
+        def fap-seq(tokens, s, pos, ic, steps) = fap-m(tokens, s, pos, ic, [], steps, fap-accept);
+        def fap-m(tokens, s, pos, ic, caps, steps, k) = nil?(tokens) ? k(pos, caps, steps + 1) : fap-m-at(tokens, s, pos, ic, caps, steps + 1, k);
+        def fap-m-at(tokens, s, pos, ic, caps, steps, k) {
             let token = tokens[0];
             let kind = token[0];
-            fap-anchor?(kind) ? (fap-anchor-ok(token, s, pos) ? fap-m(tokens[1:], s, pos, ic, caps, fuel, k) : [-1, fuel])
-            : (Comparable) kind == 10 ? fap-group(token, tokens[1:], s, pos, ic, caps, fuel, k, 0)
-            : (Comparable) kind == 11 ? fap-ref(token, tokens[1:], s, pos, ic, caps, fuel, k)
-            : fap-consumed(tokens, s, pos, ic, caps, k, fap-consume(token, s, pos, ic, token[3], fuel));
+            fap-anchor?(kind) ? (fap-anchor-ok(token, s, pos) ? fap-m(tokens[1:], s, pos, ic, caps, steps, k) : [-1, steps])
+            : (Comparable) kind == 10 ? fap-group(token, tokens[1:], s, pos, ic, caps, steps, k, 0)
+            : (Comparable) kind == 11 ? fap-ref(token, tokens[1:], s, pos, ic, caps, steps, k)
+            : fap-consumed(tokens, s, pos, ic, caps, k, fap-consume(token, s, pos, ic, token[3], steps));
         }
-        def fap-consume(token, s, pos, ic, remaining, fuel) = fuel <= 0 ? [pos, 0] : ((Comparable) remaining == 0) || (!fap-atom(token, s, pos, ic)) ? [pos, fuel - 1] : fap-consume(token, s, pos + 1, ic, remaining < 0 ? -1 : (remaining - 1), fuel - 1);
+        def fap-consume(token, s, pos, ic, remaining, steps) = ((Comparable) remaining == 0) || (!fap-atom(token, s, pos, ic)) ? [pos, steps + 1] : fap-consume(token, s, pos + 1, ic, remaining < 0 ? -1 : (remaining - 1), steps + 1);
         def fap-consumed(tokens, s, pos, ic, caps, k, span) = (span[0] - pos) < tokens[0][2] ? [-1, span[1]] : fap-rest(tokens[1:], s, pos + tokens[0][2], span[0], ic, caps, span[1], k);
-        def fap-rest(tokens, s, minimum, pos, ic, caps, fuel, k) = (pos < minimum) || (fuel <= 0) ? [-1, fat-max(0, fuel)] : fap-rest-result(tokens, s, minimum, pos, ic, caps, k, fap-m(tokens, s, pos, ic, caps, fuel, k));
+        def fap-rest(tokens, s, minimum, pos, ic, caps, steps, k) = pos < minimum ? [-1, steps] : fap-rest-result(tokens, s, minimum, pos, ic, caps, k, fap-m(tokens, s, pos, ic, caps, steps, k));
         def fap-rest-result(tokens, s, minimum, pos, ic, caps, k, result) = result[0] >= 0 ? result : fap-rest(tokens, s, minimum, pos - 1, ic, caps, result[1], k);
         // A group repeats greedily between its minimum and maximum; an empty extra round is no progress and is cut.
-        def fap-group(token, rest, s, pos, ic, caps, fuel, k, count) = fuel <= 0 ? [-1, 0] : ((token[3] < 0) || (count < token[3])) ? fap-group-alts(token, token[1], rest, s, pos, ic, caps, fuel - 1, k, count) : fap-group-done(token, rest, s, pos, ic, caps, fuel, k, count);
-        def fap-group-alts(token, alts, rest, s, pos, ic, caps, fuel, k, count) = nil?(alts) ? fap-group-done(token, rest, s, pos, ic, caps, fuel, k, count) : fap-group-alt(token, alts, rest, s, pos, ic, caps, k, count, fap-m(alts[0], s, pos, ic, caps, fuel, (p2, caps2, f2) => fap-group-after(token, rest, s, pos, p2, ic, caps2, f2, k, count)));
+        def fap-group(token, rest, s, pos, ic, caps, steps, k, count) = ((token[3] < 0) || (count < token[3])) ? fap-group-alts(token, token[1], rest, s, pos, ic, caps, steps + 1, k, count) : fap-group-done(token, rest, s, pos, ic, caps, steps, k, count);
+        def fap-group-alts(token, alts, rest, s, pos, ic, caps, steps, k, count) = nil?(alts) ? fap-group-done(token, rest, s, pos, ic, caps, steps, k, count) : fap-group-alt(token, alts, rest, s, pos, ic, caps, k, count, fap-m(alts[0], s, pos, ic, caps, steps, (p2, caps2, f2) => fap-group-after(token, rest, s, pos, p2, ic, caps2, f2, k, count)));
         def fap-group-alt(token, alts, rest, s, pos, ic, caps, k, count, r) = r[0] >= 0 ? r : fap-group-alts(token, alts[1:], rest, s, pos, ic, caps, r[1], k, count);
         def fap-group-after(token, rest, s, pos, p2, ic, caps2, f2, k, count) = ((Comparable) p2 == pos) && (count >= token[2]) ? [-1, f2] : fap-group(token, rest, s, p2, ic, cons([token[4], pos, p2], caps2), f2, k, count + 1);
-        def fap-group-done(token, rest, s, pos, ic, caps, fuel, k, count) = count < token[2] ? [-1, fuel] : fap-m(rest, s, pos, ic, caps, fuel, k);
+        def fap-group-done(token, rest, s, pos, ic, caps, steps, k, count) = count < token[2] ? [-1, steps] : fap-m(rest, s, pos, ic, caps, steps, k);
         def fap-cap(caps, n) = nil?(caps) ? [] : ((Comparable) caps[0][0] == n) ? caps[0] : fap-cap(caps[1:], n);
-        def fap-ref(token, rest, s, pos, ic, caps, fuel, k) {
+        def fap-ref(token, rest, s, pos, ic, caps, steps, k) {
             let cap = fap-cap(caps, token[1]);
-            nil?(cap) ? [-1, fuel] : fap-ref-at(substring(s, cap[1], cap[2]), rest, s, pos, ic, caps, fuel, k);
+            nil?(cap) ? [-1, steps] : fap-ref-at(substring(s, cap[1], cap[2]), rest, s, pos, ic, caps, steps, k);
         }
-        def fap-ref-at(text, rest, s, pos, ic, caps, fuel, k) = fap-same?(text, s, pos, 0, ic) ? fap-m(rest, s, pos + len(text), ic, caps, fuel, k) : [-1, fuel];
+        def fap-ref-at(text, rest, s, pos, ic, caps, steps, k) = fap-same?(text, s, pos, 0, ic) ? fap-m(rest, s, pos + len(text), ic, caps, steps, k) : [-1, steps];
         def fap-same?(text, s, pos, j, ic) = j >= len(text) ? 1 : (pos + j) >= len(s) ? 0 : ((Comparable) fap-fold(fat-char(text, j), ic) == fap-fold(fat-char(s, pos + j), ic)) ? fap-same?(text, s, pos, j + 1, ic) : 0;
-        def fap-branches(branches, s, pos, ic, fuel) = nil?(branches) || (fuel <= 0) ? [-1, fat-max(0, fuel)] : fap-branch-result(branches, s, pos, ic, fap-seq(branches[0], s, pos, ic, fuel));
+        def fap-branches(branches, s, pos, ic, steps) = nil?(branches) ? [-1, steps] : fap-branch-result(branches, s, pos, ic, fap-seq(branches[0], s, pos, ic, steps));
         def fap-branch-result(branches, s, pos, ic, result) = result[0] >= 0 ? result : fap-branches(branches[1:], s, pos, ic, result[1]);
         def fap-word-branches(branches) = branches |> map(branche => cons(fap-token(8, ""), append(branche, [fap-token(8, "")])));
-        def fap-search(branches, s, ic, whole) = fap-search-at(whole ? fap-word-branches(branches) : branches, s, 0, ic, 0, FatMatchFuel());
-        def fap-search-at(branches, s, pos, ic, whole, fuel) = (pos > len(s)) || (fuel <= 0) ? [-1, -1, fat-max(0, fuel)] : fap-search-result(branches, s, pos, ic, whole, fap-branches(branches, s, pos, ic, fuel));
+        def fap-search-at(branches, s, pos, ic, whole, steps) = pos > len(s) ? [-1, -1, steps + 1] : fap-search-result(branches, s, pos, ic, whole, fap-branches(branches, s, pos, ic, steps));
         def fap-search-result(branches, s, pos, ic, whole, r) = (r[0] >= 0) && (whole ? ((!fap-word(fat-char(s, pos - 1))) && (!fap-word(fat-char(s, r[0])))) : 1) ? [pos, r[0], r[1]] : fap-search-at(branches, s, pos + 1, ic, whole, r[1]);
+
+        // A row holds the greedy suffix end at each source position; -1 is absent.
+        // Repetition reuses the following state, so no retry tree or steps is needed.
+        def fap-table(tokens, s, ic) = foldl((row, token) => fap-row(token, s, ic, row), range(0, len(s) + 1), reverse(tokens));
+        def fap-row(token, s, ic, next) = foldl((state, end) => fap-row-at(token, s, ic, state, end), [len(s), -1, -1, []], reverse(next))[3];
+        def fap-row-at(token, s, ic, state, end) {
+            let pos = state[0];
+            let kind = token[0];
+            let hit = fap-atom(token, s, pos, ic);
+            let zero = hit && (state[2] >= 0) ? state[2] : end;
+            let accepted = fap-anchor?(kind) ? (fap-anchor-ok(token, s, pos) ? end : -1)
+                : token[3] < 0 ? (token[2] == 0 ? zero : hit ? state[2] : -1)
+                : hit && (state[1] >= 0) ? state[1] : token[2] == 0 ? end : -1;
+            [pos - 1, end, zero, cons(accepted, state[3])];
+        }
+        // Compile once per query. Literal prefixes use the native byte search;
+        // suffix tables are built only where that prefix actually occurs.
+        def fap-regular?(tokens) = all?(token => (token[0] != 10) && (token[0] != 11) && (token[2] <= 1) && ((token[3] == 1) || (token[3] < 0)), tokens);
+        def fap-prepare(branches, whole) = (whole ? fap-word-branches(branches) : branches) |> map(branch => append(fap-prefix(branch, [], []), [fap-regular?(branch), branch]));
+        def fap-prefix(tokens, anchors, letters) = nil?(tokens) ? [reverse(anchors), fat-join(reverse(letters), ""), []]
+            : nil?(letters) && fap-anchor?(tokens[0][0]) ? fap-prefix(tokens[1:], cons(tokens[0], anchors), letters)
+            : (tokens[0][0] == 0) && (tokens[0][2] == 1) && (tokens[0][3] == 1) ? fap-prefix(tokens[1:], anchors, cons(tokens[0][1], letters))
+            : [reverse(anchors), fat-join(reverse(letters), ""), tokens];
+        def fap-fold-text(s, ic) = ic ? fat-join(range(0, len(s)) |> map(i => byte_to_str(fap-fold(fat-char(s, i), 1))), "") : s;
+        def fap-search(branches, s, ic, whole) = fap-search-program(fap-prepare(branches, whole), s, ic);
+        def fap-search-program(programs, s, ic) = fap-search-fold(programs, s, ic, fap-fold-text(s, ic));
+        def fap-search-fold(programs, s, ic, folded) = foldl((best, program) => fap-earlier(best, fap-find-program(program, s, ic, folded)), [-1, -1], programs);
+        def fap-earlier(best, found) = (found[0] >= 0) && ((best[0] < 0) || (found[0] < best[0])) ? found : best;
+        def fap-find-program(program, s, ic, folded) = !program[3] ? take(2,fap-search-at([program[4]],s,0,ic,0,0)) : len(program[1]) == 0 ? fap-first(fap-table(append(program[0], program[2]), s, ic), 0)
+            : fap-prefix-found(program, s, ic, folded, fap-fold-text(program[1], ic), str_find(folded, fap-fold-text(program[1], ic), 0));
+        def fap-prefix-found(program, s, ic, folded, prefix, pos) = pos < 0 ? [-1, -1]
+            : fap-find-prefix(program, s, folded, prefix, nil?(program[2]) ? [] : fap-table(program[2], s, ic), pos);
+        def fap-find-prefix(program, s, folded, prefix, ends, pos) {
+            let end = nil?(ends) ? pos + len(prefix) : ends[pos + len(prefix)];
+            (end >= 0) && all?(token => fap-anchor-ok(token, s, pos), program[0]) ? [pos, end]
+                : any?(token => token[0] == 6, program[0]) ? [-1, -1]
+                : fap-next-prefix(program, s, folded, prefix, ends, str_find(folded, prefix, pos + 1));
+        }
+        def fap-next-prefix(program, s, folded, prefix, ends, pos) = pos < 0 ? [-1, -1] : fap-find-prefix(program, s, folded, prefix, ends, pos);
+        def fap-first(row, pos) = nil?(row) ? [-1, -1] : row[0] >= 0 ? [pos, row[0]] : fap-first(row[1:], pos + 1);
 
         // ---- grep's frame around a pattern: -x whole line, -w whole word (a match may not touch a word byte,
         // and a shorter match at the same start is tried), -o leftmost-LONGEST ----
         def fap-wrap(branches, mode) = (Comparable) mode == 0 ? branches : branches |> map(b => (Comparable) mode == 2 ? cons(fap-token(6, ""), append(b, [fap-token(7, "")])) : cons(fap-token(12, ""), append(b, [fap-token(13, "")])));
-        // [start, end, fuel] of the first match at or after from; start -1 when there is none
-        def fap-find(branches, s, from, ic) = fap-search-at(branches, s, from, ic, 0, FatMatchFuel());
+        // [start, end, steps] of the first match at or after from; start -1 when there is none
+        def fap-find(branches, s, from, ic) = fap-search-at(branches, s, from, ic, 0, 0);
         // The literal bytes a match must hold: per branch the longest run of exact one-byte literal tokens. A line that holds
         // none of them cannot match, and the native byte search says so before the backtracking walk begins. [] when the
         // search folds case or some branch has no literal: then nothing is skipped.
@@ -272,19 +310,17 @@ section [form.bml] {
         // a pattern of one branch whose tokens all take exactly one round has one length: nothing longer to find
         def fap-fixed?(branches) = (Comparable) len(branches) == 1 && all?((t) => (!((Comparable) t[0] == 10)) && ((Comparable) t[2] == t[3]), branches[0]);
         def fap-ends(branches, e) = branches |> map(b => append(b, [[20, e, 1, 1]]));
-        // [start, end, fuel]: the first match's start, and the longest end the pattern reaches from that start
+        // [start, end, steps]: the first match's start, and the longest end the pattern reaches from that start
         def fap-find-longest(branches, s, from, ic) = fap-longest(branches, s, ic, fap-find(branches, s, from, ic));
-        def fap-longest(branches, s, ic, first) = first[0] < 0 || fap-fixed?(branches) || first[2] <= 0 ? first : fap-longest-from(branches, s, first[0], len(s), first[1], ic, first[2]);
-        def fap-longest-from(branches, s, st, e, e0, ic, fuel) = (e <= e0) || (fuel <= 0) ? [st, e0, fat-max(0, fuel)] : fap-longest-try(branches, s, st, e, e0, ic, fap-branches(fap-ends(branches, e), s, st, ic, fuel));
+        def fap-longest(branches, s, ic, first) = first[0] < 0 || fap-fixed?(branches) ? first : fap-longest-from(branches, s, first[0], len(s), first[1], ic, first[2]);
+        def fap-longest-from(branches, s, st, e, e0, ic, steps) = e <= e0 ? [st, e0, steps] : fap-longest-try(branches, s, st, e, e0, ic, fap-branches(fap-ends(branches, e), s, st, ic, steps));
         def fap-longest-try(branches, s, st, e, e0, ic, r) = r[0] >= 0 ? [st, e, r[1]] : fap-longest-from(branches, s, st, e - 1, e0, ic, r[1]);
 
         // Glob matching is anchored; * does not consume '/', ** does.
         def fap-glob-tokens(s, i, out) = i >= len(s) ? append(fat-reverse(out), [fap-token(7, "")]) : (Comparable) fat-char(s, i) == 42 ? fap-glob-tokens(s, (Comparable) fat-char(s, i + 1) == 42 ? (i + 2) : (i + 1), cons([(Comparable) fat-char(s, i + 1) == 42 ? 1 : 9, "", 0, -1], out)) : (Comparable) fat-char(s, i) == 63 ? fap-glob-tokens(s, i + 1, cons(fap-token(9, ""), out)) : fap-glob-tokens(s, i + 1, cons(fap-token(0, byte_to_str(fat-char(s, i))), out));
         def fap-basename(s) = fat-reverse(split-on(s, "/"))[0];
-        // -1 is exhaustion, distinct from a completed non-match (0).
         def fap-glob(pattern, path) = fat-starts(pattern, "**/") ? fap-glob-prefix(pattern, path, fap-glob(substring(pattern, 3, len(pattern)), path)) : fap-glob-full(pattern, path);
-        def fap-glob-prefix(pattern, path, short) = !((Comparable) short == 0) ? short : fap-glob-full(pattern, path);
-        def fap-glob-full(pattern, path) = fap-glob-result(fap-seq(fap-glob-tokens(pattern, 0, [fap-token(6, "")]), str_find(pattern, "/", 0) < 0 ? fap-basename(path) : path, 0, 0, FatMatchFuel()));
-        def fap-glob-result(r) = r[1] <= 0 ? -1 : r[0] >= 0 ? 1 : 0;
+        def fap-glob-prefix(pattern, path, short) = short ? short : fap-glob-full(pattern, path);
+        def fap-glob-full(pattern, path) = fap-table(fap-glob-tokens(pattern, 0, [fap-token(6, "")]), str_find(pattern, "/", 0) < 0 ? fap-basename(path) : path, 0)[0] >= 0;
     }
 }

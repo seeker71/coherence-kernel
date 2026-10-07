@@ -470,12 +470,13 @@ profile), `quantified-anchor` (`^*`), `quantified-backreference`,
 `unclosed-character-class`, `invalid-character-range`,
 `class-escape-not-supported` (`rg`), `unsupported-pattern-escape` (`\d` in grep,
 `\0`, any other letter), `unsupported-pattern-syntax` (`(?` in `rg`),
-`trailing-pattern-escape`, `pattern-limit` (256 bytes). Outside the engine
+`trailing-pattern-escape`. Outside the engine
 entirely: lookaround, lazy repetition, Unicode classes and characters as units
 (matching is by byte, so `.` is one byte), non-ASCII case folding, binary-file
 detection, and the host tree (`-r` walks only the resident documents).
-Backtracking carries the 50,000-step budget per line; exhaustion is
-`pattern-work-limit`, exit 2.
+Captures carry their continuation and observed step count. Regular suffixes
+share states, and literal prefixes use native byte lookup. Matching has no
+separate pattern length or step cap; resident admission and output limits apply.
 
 Search patterns for `rg` are byte-oriented: literals, `. ^ $ |`, groups,
 character classes and ranges, POSIX classes, ASCII `\d \D \w \W \s \S \b \B`,
@@ -485,7 +486,8 @@ errors. Globs support `*`, `**`, `?`, and leading `!`;
 the last matching glob wins. Basename globs apply at any depth. Paths select
 resident exact names or directory prefixes. There is no host traversal,
 ignore-file loading, file-type registry or binary-file detection. Search output
-always carries its source path, even for one document.
+follows the filename convention: one explicit file omits its path; directory
+and corpus searches include it. `-H` and `-I` select explicitly.
 
 JSON input is a whitespace-separated stream of syntactically admitted values.
 Missing keys become null; incompatible input types error. Object equality is
@@ -505,9 +507,11 @@ headers. Sorting is deterministic, without host locale collation.
 Admission limits: 512 documents with nonempty, unambiguous identities/paths;
 128 argv values; one MiB each for resident document bytes (including identity
 and path), argv bytes and held input. Output/state over one MiB is rejected.
-Patterns/globs are limited to 256 bytes, queries to 512 bytes, JSON nesting to
-64, and sorting to 1,024 items. Matching carries a 50,000-step budget per line
-or glob attempt; exhaustion is an explicit error, not a negative result.
+JSON queries are limited to 512 bytes, JSON nesting to 64, and sorting to
+1,024 items. Search patterns and globs have no separate length or step limit.
+Literal prefixes use native byte search; greedy suffix states are shared across
+positions, avoiding repeated backtracking. Admission and output limits still
+apply to the actual resident request and result.
 These bounds do not promise upstream-tool throughput or a wall-clock deadline.
 
 The tools live in `form/form-stdlib/bml/form-agent-tools.bml`, with

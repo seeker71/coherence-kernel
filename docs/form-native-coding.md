@@ -335,15 +335,40 @@ Admission and feedback carry native record/list/scalar cells. The model receives
 the original goal, current guidance and actual context coordinates; sources,
 caller corrections, tool results and checks remain whole behind those IDs.
 `fcap-context-field(address,key)` reads existing child cells directly. Its key may
-be a dotted path or a path list such as `["current","pending",0]`; exact dotted
+be a dotted path or a path list such as `["pending",0]`; exact dotted
 keys take precedence. Negative integer indexes select from the end. Missing
 fields and invalid index kinds return the current shape as typed unease; a
 present null value remains nothing. Compound values retain their node identity
 with record-key or list-size observations. Context lookup and action/reply construction
 are offered organs inside the same decoder process, without a source-call child.
-`task_context` retains admitted task/source context; `code_context` follows the
-current role and observation. These native bindings avoid recopying coordinates
-from older receipts. A noninteger list index returns a typed unease cell.
+`task_context` retains admitted task/source context; admission also displays the
+retained brief and plan, actual resident paths, byte sizes and writable scope.
+`code_context` follows the
+current role and observation, with no frozen current-role copy in task context.
+These native bindings avoid recopying coordinates from older receipts. A failed
+path retains its first unease and original path; traversal cannot reinterpret
+the diagnostic as source data. The observation speaks its needed resource and
+next useful choice. Short tool output and failure guidance arrive as views of
+those same cells. Large text fields stay native cells: `node_value(cell)` reads
+their exact content, while an `@address` already reads its value; `substring`
+selects a focused span for the model. Coding scalar observations have no fixed
+byte ceiling: the actual tokenizer admits them against remaining context
+positions. Compound rendering stays bounded by that owner's window. An
+explicit source-page read displays its verified requested span through the same
+context admission. Requested query results and guidance use that admission too;
+a second display ceiling cannot silently withhold them. Whole-document reads
+and structured values keep their cells. An
+oversized observation supplies the held value's cell without repeating its
+execution. If even that observation cannot fit, the owner retains its context
+with a capacity refusal. Context grammar travels once at admission;
+later packets carry current bindings, role guidance and actual evidence.
+`bml-api` supplies declaration, source path, line and fingerprint cells for a
+named function. Native search finds its callers; focused reads bring their
+ownership and state contracts into the same working context.
+Repeated inline controls returning identical evidence yield to native care in
+the same decoder owner, preserving the role, candidate, completed effects and
+checks. Care is attributed separately from model-submitted actions. A changed
+control or actual action continues; no new reply quota governs these lookups.
 No JSON context or JSON reply protocol crosses
 this coding model boundary. External requests, results and receipts retain their
 public JSON compatibility; result fields are assembled once as cells and emitted
@@ -351,7 +376,9 @@ only at that public boundary. Old checkpoint evidence is converted at admission.
 
 Native tool observations stay as structured cells in policy state, binary
 checkpoints and model context. Guard, read, mutation and verification metadata
-extend those cells directly. Context admission binds their existing graphs;
+extend those cells directly. Failed tools retain their observation cell while
+entering repair; missing resident documents offer the actual admitted paths.
+Context admission binds their existing graphs;
 it no longer decodes a record and builds a second workspace graph. The checkpoint
 codec distinguishes a held observation cell from a list value and verifies its
 supported record/list/scalar shape before retention. Unsupported cells return
@@ -419,7 +446,8 @@ evidence and pending references follow the selected page; caller verification
 evidence keeps its complete meaning.
 
 Renewal checks actual prompt IDs against the allocated context, the decoder's
-pending prediction and the caller's explicit reply or reasoning reservation.
+pending prediction and explicit reasoning-stage reservations. `max_reply_tokens`
+is a consumption ceiling; unused allowance does not discard a live context.
 It imposes no fractional reserve. A capacity refusal selects progressively
 smaller trigger pages and rechecks them. Non-capacity failures and irreducible
 caller contracts retain their distinct outcome and current resource owner.

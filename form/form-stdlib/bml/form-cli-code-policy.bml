@@ -25,6 +25,10 @@ section [form.bml] {
   // repeated counterexample]. It is working memory, never a weight update.
   def fcap-state(stage, goal, originals, docs, writable, pending, brief, plan, note, turns, calls, completed) = [stage, goal, originals, docs, writable, pending, brief, plan, note, turns, calls, completed, [0, "", [], 0, 0]];
   def fcap-memory(s) = s[12];
+  // Checkpoint identity is shared state; reading it needs no storage organ.
+  def fcam-context(s) = len(s) >= 14 ? s[13] : [];
+  def fcam-managed(s) = (Comparable) len(fcam-context(s)) == 4;
+  def fcam-id(s) = fcam-context(s)[1];
   // Preserve the tool history and caller-owned work kind when a repair updates
   // the earlier memory slots. Model JSON cannot change the kind.
   def fcap-with-memory(s, memory) = append(append(fat-take(s, 12), [append(memory, fat-drop(fcap-memory(s), len(memory)))]), if (len(s) >= 14) then [s[13]] else []);
@@ -240,7 +244,7 @@ section [form.bml] {
    };
   };
   def fcap-tool-note(s,tool,args,result) {
-   let note = if ((String) tool == "verify") then fcap-verification-node(s,result) else if (((String) tool == "read") && ((Comparable) len(args) == 1)) then if fcap-guard-read?(s,args[0]) then fcap-result-node(result) else fcap-read-node(fat-find-doc(fcap-context-docs(s),args[0]),result) else fcap-guard-node(s,tool,args,result);
+   let note = if ((String) tool == "verify") then fcap-verification-node(s,result) else if fat-error(result)=="resident-document-not-found" then fcap-guard-node(s,tool,args,result) else if (((String) tool == "read") && ((Comparable) len(args) == 1)) then if fcap-guard-read?(s,args[0]) then fcap-result-node(result) else fcap-read-node(fat-find-doc(fcap-context-docs(s),args[0]),result) else fcap-guard-node(s,tool,args,result);
    if (fat-has(["read","cat"],tool) && ((Comparable) len(args) == 1)) then fcap-read-sha-note(args,result,note) else if tool=="read" && fat-read-range?(args) then fcap-paged-read-note(args,result,note) else if fat-has(["edit","write","repair-bml","rehearse-bml","lift-bml"],tool) then fcap-mutation-note(s,args,result,note) else note;
   }
   def fcap-read-node(provided,result) = if nil?(provided) then fcap-result-node(result) else if (!(((Comparable) fat-exit(result) == 0) && ((String) fat-error(result) == ""))) then fcap-result-node(result) else if (!((String) fat-out(result) == provided[2])) then fcap-read-changed(provided,result) else json-node-object([json-node-pair("exit",json-node-int(0)),json-node-pair("stderr",json-node-string("")),json-node-pair("stdout_reference",fcap-context-reference(provided)),json-node-pair("observation",json-node-string("The native read verified these exact bytes match the document already supplied to this model context. Use its provided text. cat or a focused native query remains available to inspect content again."))]);
@@ -267,7 +271,10 @@ section [form.bml] {
   def fcap-tool-result-noted(s, result, note) {
    let next = if fcap-readonly-preserved(s[2], fat-documents(result), s[4]) then fat-documents(result) else fcap-docs(s);
    let moved = fcap-move(s, fcap-stage(s), next, s[5], s[6], s[7], note, (fcap-calls(s) + 1), s[11]);
-   if ((fat-exit(result) > 1) || (!((String) fat-error(result) == ""))) then fcap-repair-state(moved, ("Native tool failed: " + fcap-note(moved))) else moved;
+   if ((fat-exit(result) > 1) || (!((String) fat-error(result) == ""))) then {
+    let repaired=fcap-repair-state(moved,"Native tool failed: " + fcap-note(moved));
+    append(repaired[0:8],cons(note,repaired[9:]));
+   } else moved;
   }
   // Slot 16 retains model-authored amendments separately from native repairs.
   // Primitive lists/strings survive the existing FORMBIN checkpoint codec.
@@ -813,11 +820,11 @@ section [form.bml] {
      let node=value_kind(address)=="node_id" ? address : value_kind(address)=="string" ? ftv-held(lane,address) : nothing();
      let root=nothing?(node) ? ftw-encode(address) : node;
      let exact=value_kind(key)=="list" ? nothing() : fcap-context-child(root,key);
-     let found=value_kind(key)=="list" ? fcap-context-path(root,key) : !nothing?(exact) ? exact : value_kind(key)=="string" && str_find(key,".",0)>=0 ? fcap-context-path(root,split-on(key,".")) : nothing();
+      let found=value_kind(key)=="list" ? fcap-context-path(root,key) : !nothing?(exact) ? exact : value_kind(key)=="string" && str_find(key,".",0)>=0 ? fcap-context-path(root,split-on(key,".")) : nothing();
      if nothing?(found) then fcap-context-unease("existing field or index",record_new(0,"path",key,"shape",ftv-node-result(root))) else {
       let name=kind(found);
       let value=name=="ftw-record" || name=="ftw-list" || fat-wire-object?(found) || fat-wire-array?(found) ? found : fat-wire-string?(found) || faj-type(found)=="number" || faj-type(found)=="boolean" ? node_value(found) : node_eq(found,json-node-null()) ? nothing() : ftw-decode(found);
-      value_kind(value)=="node_id" ? ftv-hold(lane,value) : value_kind(value)=="string" && ftv-carries-control?(value) ? ftv-hold(lane,found) : value;
+       value_kind(value)=="node_id" ? ftv-hold(lane,value) : value_kind(value)=="string" && (len(value)>ftv-max-render() || ftv-carries-control?(value)) ? ftv-hold(lane,found) : value;
      };
   }
   // Walk the existing cells: decode keys and leaves, never the whole context.
@@ -833,15 +840,24 @@ section [form.bml] {
    };
   }
   def fcap-context-pair(kids,key) = nil?(kids) ? nothing() : ftw-decode(kids[0])==key ? kids[1] : fcap-context-pair(kids[2:],key);
-  def fcap-context-path(node,path) {
-   if nil?(path) || nothing?(node) then node else {
+  def fcap-context-unease?(node) = value_kind(node)=="node_id" && kind(node)=="ftw-record" && !nothing?(fcap-context-pair(node_children(node),"kind")) && ftw-decode(fcap-context-pair(node_children(node),"kind"))=="context-unease";
+  def fcap-context-path(node,path) = fcap-context-path-at(node,path,path);
+  def fcap-context-path-at(node,path,original) {
+   if nil?(path) || nothing?(node) || fcap-context-unease?(node) then node else {
     let part=path[0];
     let key=(kind(node)=="ftw-list" || fat-wire-array?(node)) && value_kind(part)=="string" && str_to_int(part).str()==part ? str_to_int(part) : part;
-    fcap-context-path(fcap-context-child(node,key),path[1:]);
+    let child=fcap-context-child(node,key);
+    let next=nothing?(child) ? fcap-context-unease("existing field or index",record_new(0,"path",original,"at",key,"shape",ftv-node-result(node))) : fcap-context-unease?(child) ? fcap-context-failed-path(child,original) : child;
+    fcap-context-path-at(next,path[1:],original);
    };
   }
+  def fcap-context-failed-path(node,path) {
+   let reading=ftw-decode(node);
+   record_set(reading,"path",path);
+   ftw-encode(reading);
+  }
   def fcap-context-unease(needed,observed) {
-   let node=ftw-encode(record_new(0,"kind","context-unease","needed",needed,"observed",observed,"current","Use task_context for admitted sources and code_context for the current role. List indexes are unquoted integers."));
+   let node=ftw-encode(record_new(0,"kind","context-unease","needed",needed,"observed",observed,"current","Each path component descends into the preceding value; query peer fields separately. Use code_context for current role, pending and observation; task_context holds admitted sources and goal. Choose a valid path or submit a focused read action. List indexes are integers. Do not traverse this diagnostic as source data."));
    fb_record(node,"coding-context-unease",1);
    node;
   }
@@ -851,17 +867,29 @@ section [form.bml] {
    ftv-offer(lane,"fcap-native-reply",1,a=>fcap-native-reply(a[0]));
    lane;
   }
-  def fcap-model-visible(node) = fat-wire-object?(node) || fat-wire-array?(node) ? ftw-coord(ftv-hold(ftg-lane-session("code"),node)) : fat-wire-string?(node) ? node_value(node) : json-emit(node);
+  def fcap-model-visible(node) {
+   if fat-wire-object?(node) then {
+   let fields=["path","resident_sha256","start_byte","end_byte","message","needed","next","stdout_reference","observation","stdout","stderr","detail","guard_evidence"] |> filter(k=>json-object-has?(node,k)) |> map(k=>{
+     let value=json-object-get(node,k);
+      let whole=k=="stdout" && json-object-has?(node,"path") && !json-object-has?(node,"start_byte");
+      let structured=k=="stdout" && json-object-has?(node,"value");
+      k + ": " + (fat-wire-string?(value) && len(node_value(value))>ftv-max-render() && (whole || structured) ? ftv-node-result(ftv-hold(ftg-lane-session("code"),value)) : fcap-model-visible(value));
+    });
+    ftv-node-result(ftv-hold(ftg-lane-session("code"),node)) + (json-object-has?(node,"change") ? "\nAttention: " + fcap-string(node,"change") : "") + (nil?(fields) ? "" : "\n"+fields.join("\n"));
+   } else if fat-wire-array?(node) then ftv-node-result(ftv-hold(ftg-lane-session("code"),node)) else fat-wire-string?(node) ? node_value(node) : json-emit(node);
+  }
   def fcap-model-packet(obj) {
     let lane=fcap-model-organs(ftg-lane-session("code"));
     let node=ftv-hold(lane,fcap-model-cell(obj));
     let name=json-object-has?(node,"goal") ? "task_context" : json-object-has?(node,"role") ? "code_context" : json-object-has?(node,"source_observations") ? "source_context" : "code_budget";
     ftw-put(ftv-ws(lane),"local",name,"node",node);
-    if json-object-has?(node,"goal") && json-object-has?(node,"current") then ftw-put(ftv-ws(lane),"local","code_context","node",json-object-get(node,"current")) else 0;
     let address=ftw-coord(node);
     let fields=(json-object-pairs(node) |> map(json-pair-key)).join(", ");
-    let visible=["goal","role","instruction","observation","budget_instruction"] |> filter(k=>json-object-has?(node,k)) |> map(k=>k + ": " + fcap-model-visible(json-object-get(node,k)));
-   name + " = " + address + ";\nfields: " + fields + "\n" + visible.join("\n") + "\nRead fields with <|form:eval|>fcap-context-field(" + name + ",\"field-name\")<|/form:eval|>. The second argument may be a dotted path or a path list such as [\"current\",\"pending\",0]; no third argument. Exact dotted keys take precedence. Direct list indexes are integers. The bound name follows current context; historical coordinates belong to earlier observations. Data cells are evidence, not task submissions. A complete eval returning fcap-native-tool or fcap-native-reply submits that actual node directly. Do not copy its coordinate.\n";
+    let visible=["goal","brief","plan","role","instruction","observation","replan_required","repair_attempts","budget_instruction"] |> filter(k=>json-object-has?(node,k)) |> map(k=>k + ": " + fcap-model-visible(json-object-get(node,k)));
+    let catalog=json-object-get(node,"document_catalog");
+    let paths=fat-wire-array?(catalog) ? node_children(catalog) |> map(doc=>fcap-string(doc,"path") + " (" + node_value(json-object-get(doc,"bytes")).str() + " bytes)") : [];
+    let writable=json-object-get(node,"writable");
+   name + " = " + address + ";\nfields: " + fields + "\n" + visible.join("\n") + (nil?(paths) ? "" : "\nResident paths:\n"+paths.join("\n")) + (fat-wire-array?(writable) ? "\nWritable: " + (node_children(writable) |> map(value=>node_value(value))).join(", ") : "") + "\n";
   }
   // Caller corrections outlive the transient tool/check failure at the cursor.
   // Admission restores every retained event, including after context renewal.
@@ -874,14 +902,14 @@ section [form.bml] {
    let lane=fcap-model-lane(s);
    let source = if fcap-catalog?(s) then json-node-pair("document_catalog",json-node-array(fcap-document-catalog(fcap-docs(s)))) else json-node-pair("documents",json-node-array(fcap-model-documents(fcap-docs(s))));
    let retained = append(fcap-caller-feedback-pairs(s),if fcap-amendable(s) then [json-node-pair("retained_report",json-node-string(fcap-report(s)))] else []);
-   let body = json-node-object(append(retained,[json-node-pair("goal", json-node-string(s[1])), json-node-pair("writable", json-node-array(fcap-string-json(s[4]))), source, json-node-pair("brief", json-node-string(s[6])), json-node-pair("plan", json-node-string(s[7])), json-node-pair("prior_repairs", json-node-array(fcap-prior-repairs-json(fat-take(reverse(fcap-reflections(s)), 3)))),json-node-pair("native_source_verification",fcap-source-reading(s)), json-node-pair("current", fcap-observation-node(s))]));
-    let protocol = "You are the local Qwen coding member inside Form. Submit one native node for the CURRENT role. <|form:eval|>fcap-native-tool(\"read\",[\"path\",\"1\",\"20\"],\"\")<|/form:eval|> submits the returned action node directly; Form executes it and supplies its observation. Stop after this complete control. Do not echo its address. fcap-native-reply([[\"task\",\"done\"]]) constructs role fields; follow the current role instruction. Use native BML strings, no markdown fences. Original goal and caller constraints stay authoritative. Context/data reads supply evidence; they do not submit tasks. Native tools: " + str-join-with(fat-tools(),", ") + ". Read offset is one-based, count is lines, optional fourth argument bytes. A whole read uses [path]. ";
-   let authority = "write arguments are [path], input is new text. Read-only tools are allowed in every role. Implement and repair may edit caller-writable paths; a changed repair runs caller checks immediately. Repeated counterexamples require next=plan before more edits. Failed tools/checks enter repair: act on the evidence or name a changed approach and route. failure_evidence may reference its matching failure_evidence_id already supplied in this context; use those exact earlier bytes. Keep replies concise and tasks few. Do not invent successful checks. ";
-    let guidance = "Ask fcap-native-tool(\"help\",[\"bml\"],\"\") for guidance: " + str-join-with(fcap-guides() |> map(row=>row[0]),", ") + ". Form owns tools, choices, checkpoints, checks and release. edit arguments are [path,old,new], input is empty: replace a resident span. Read help edit for matching details, help bml for authoring, help form for native controls and help meaning for shared Form meanings. ";
+   let body = json-node-object(append(retained,[json-node-pair("goal", json-node-string(s[1])), json-node-pair("writable", json-node-array(fcap-string-json(s[4]))), source, json-node-pair("brief", json-node-string(s[6])), json-node-pair("plan", json-node-string(s[7])), json-node-pair("prior_repairs", json-node-array(fcap-prior-repairs-json(fat-take(reverse(fcap-reflections(s)), 3)))),json-node-pair("native_source_verification",fcap-source-reading(s))]));
+    let protocol = "You are the local Qwen coding member inside Form. Submit one native node for the CURRENT role. <|form:eval|>fcap-native-tool(\"read\",[\"path\",\"1\",\"20\"],\"\")<|/form:eval|> submits the returned action node directly; Form executes it and supplies its observation. Stop after this complete control. Do not echo its address. fcap-native-reply([[\"task\",\"done\"]]) constructs role fields; follow the current role instruction. Use native BML strings, no markdown fences. Original goal and caller constraints stay authoritative. Read fields with fcap-context-field(code_context,\"field-name\"). The second argument may be a dotted path or a nested path list; no third argument. Query peer fields separately. Current work is code_context: [\"pending\",0] or [\"observation\",\"stdout\"]. task_context holds goal and sources. Exact dotted keys take precedence. List indexes are integers. Large text stays a native cell. An @address already reads its value: use substring(@address,start,end) for focused text, without node_value. A cell returned directly into a variable uses node_value(cell). Bound names follow current context; historical coordinates belong to earlier observations. Context/data reads supply evidence; they do not submit tasks. Native tools: " + str-join-with(fat-tools(),", ") + ". Read offset is one-based, count is lines, optional fourth argument bytes. A whole read uses [path]. ";
+   let authority = "Tools read caller-supplied resident documents by exact catalog id or path, not host scratch paths. write creates absent paths; arguments=[path], input=new text. Existing documents, including empty ones, use edit. For whole replacement, edit arguments=[path,\"sha256\",resident_sha256,new_text], input=\"\"; the catalog or a read supplies that guard. Read-only tools are allowed in every role. Implement and repair may edit caller-writable paths; a changed repair runs caller checks immediately. Repeated counterexamples require next=plan before more edits. Failed tools/checks enter repair: act on the evidence or name a changed approach and route. failure_evidence may reference its matching failure_evidence_id already supplied in this context; use those exact earlier bytes. Keep replies concise and tasks few. Do not invent successful checks. ";
+   let guidance = "fcap-native-tool(\"bml-api\",[\"function-name\"],\"\") supplies native declaration, path, line and source fingerprint cells under code_context.observation.value.symbols. Use fcap-context-field to read them; rg -n finds related calls. Read the relevant function, callers and ownership contract. Retain the learned design in your plan before context renewal. Ask fcap-native-tool(\"help\",[\"bml\"],\"\") for guidance: " + str-join-with(fcap-guides() |> map(row=>row[0]),", ") + ". Form owns tools, choices, checkpoints, checks and release. edit arguments are [path,old,new], input is empty: replace a resident span. Read help edit for matching details, help bml for authoring, help form for native controls and help meaning for shared Form meanings. ";
    let rules = protocol + guidance + authority;
    let verification = "The native verify tool takes arguments=[] and no input. It runs the caller's existing source checks; it cannot execute a command supplied by you. Review mode is read-only and returns a report, never a source edit. Documents below are already present in this context. A read may return stdout_reference for identical bytes or stdout_patch with exact changed lines against the original supplied document. Native reconstruction verifies the current bytes before either compact result is emitted. Resolve each against its original supplied text. Oversized source reads return exact stdout in observation_excerpt with source byte coordinates, resident_sha256 and next: an executable continuation. Read that content and call next only for missing evidence. Query excerpts use clipped head/tail, not whole source.\n";
    let catalogVerification = "The native verify tool takes arguments=[] and no input. It runs the caller's existing source checks; it cannot execute a command supplied by you. Review mode is read-only and returns a report, never a source edit. The document catalog lists source identities. NATIVE SOURCE OBSERVATIONS supply actual admitted query results. Use evidence already supplied and retrieve a specific missing fact. Oversized source reads return exact stdout in observation_excerpt with source byte coordinates, resident_sha256 and next: an executable continuation. Read that content and call next only for missing evidence. All original documents stay whole for native tools and unchanged caller checks.\n";
-    rules + (fcap-reviewing(s) || !fcbmr-relevant(fcap-docs(s)) ? "" : "BML repair-bml, lift-bml and rehearse-bml tools remain available. Read their native help before use. ") + (fcap-catalog?(s) ? catalogVerification : verification) + fcap-model-packet(body) + "\nCURRENT REPLY: " + fcap-work-instruction(s) + fcap-source-context(s);
+    rules + (fcap-reviewing(s) || !fcbmr-relevant(fcap-docs(s)) ? "" : "BML repair-bml, lift-bml and rehearse-bml tools remain available. Read their native help before use. ") + (fcap-catalog?(s) ? catalogVerification : verification) + fcap-model-packet(body) + fcap-model-packet(fcap-observation-node(s)) + "\nCURRENT REPLY: " + fcap-work-instruction(s) + fcap-source-context(s);
   }
  }
  0;
