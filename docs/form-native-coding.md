@@ -222,6 +222,11 @@ Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a documen
 
 `code_entry: "direct"` begins one pending task referring to the full original goal. It avoids generated preparation, while retaining review, verification and the requirement for an actual change. A resumed or renewed direct attempt with native calls, unchanged documents and no completed step invites the local model to split that generic task into concrete dependent steps. Original goals, documents, observations, checks and counters remain intact. Concrete tasks, changed candidates and read-only review retain their phase. `review_entry: "direct"` selects the corresponding read-only entry.
 
+Role instructions carry complete Form eval controls. The decoder executes their
+BML constructors and submits the returned native reply cell directly to the
+current phase. Bare constructor text supplies no action or reply cell; its
+retained diagnostic invites a complete control in the same checkpoint.
+
 Repair can choose `next: "split"` when the retained approach needs concrete
 dependent tasks. The existing split stage keeps those tasks in the same owned
 checkpoint with the original goal, documents, writable paths and caller checks;
@@ -291,11 +296,11 @@ Closing the last task runs source checks before review; acceptance with a nonemp
 
 ### Optional initial reasoning
 
-`initial_reasoning_tokens` bounds the first reply's generation, including reasoning and final output. Optional `reasoning_answer_tokens` reserves a separate final stage. Each allowance is capped independently by `max_reply_tokens` when present. Form uses the actual final-channel boundary for role replies; partial controls never act. Reserved reasoning can yield a complete native tool request as described below. Within a reserved final stage, a stop inside an unfinished JSON string may yield to a finite non-stop prediction using the remaining allowance. It retains the prefix and stop-selection evidence; it invents no closing text. Other stop/syntax behavior is unchanged.
+`initial_reasoning_tokens` bounds the first reply's generation, including reasoning and final output. Optional `reasoning_answer_tokens` reserves a separate final stage. Each allowance is capped independently by `max_reply_tokens` when present. Reserved reasoning can yield a complete native action or role reply cell as described below; partial controls never act. Prose retains its actual final-channel boundary. Within a reserved final stage, a stop inside an unfinished JSON string may yield to a finite non-stop prediction using the remaining allowance. It retains the prefix and stop-selection evidence; it invents no closing text. Other stop/syntax behavior is unchanged.
 
 ### Reasoning across the task
 
-`reasoning_tokens` plus `reasoning_answer_tokens` applies that flow to every reply. Before generation, Form reserves the current final-stage task handoff as well as both allowances. One complete native tool-request cell can yield directly from reasoning to the existing scoped dispatcher; it is executed once, without regenerating the request or prefilling a final-stage handoff. Its result returns through the same owned task and KV stream. Role replies still require final-stage completion. Reasoning prose and partial controls stay private and never become actions. Metadata distinguishes `native-tool-stage` from final responses, and reports actual stage counts separately from task quality. Original checks, review and publication remain authoritative.
+`reasoning_tokens` plus `reasoning_answer_tokens` applies that flow to every reply. Before generation, Form reserves the current final-stage task handoff as well as both allowances. One complete native action or role reply cell yields directly from reasoning to the existing scoped dispatcher, without regenerating the submission or prefilling a final-stage handoff. Its result returns through the same owned task and KV stream. Reasoning prose and partial controls stay private and never become actions. Metadata distinguishes `native-tool-stage`, `native-reply-stage` and final responses, and reports actual stage counts separately from task quality. Original phase validation, checks, review and publication remain authoritative.
 
 Each generated reply consumes `turns`, including tool reads and retained no-action attempts. The model sees remaining replies and the minimum completion protocol. An unfinished reply retains its exact private bytes, preserves completed effects and enters native repair requesting a smaller complete action or reply control. The caller's reply ceiling stays unchanged. Feedback uses the same stream while room remains; a full context can renew on the same admitted weights, retaining the task and counters. Failed prediction, admission, evidence retention and partial prefill do not select this retry. Exhausted turns settle release with the candidate retained. The returned session owns release even after failure; incomplete release remains a distinct outcome.
 
