@@ -94,7 +94,7 @@ section [form.bml] {
   // [RESULT, touched]: what the control answered and what it touched
   def ftg-observe-touched(session, verb, payload) {
    let result = ftg-observe-with(session, verb, payload);
-   [result, record_get(session, "touched")];
+    [result, record_get(session, "touched"), record_get(session,"returned")];
   }
   def ftg-dispatch(session, verb, payload) {
    if verb == "eval" then ftv-eval(session, payload)
@@ -248,22 +248,34 @@ section [form.bml] {
    record_set(lane,"coding-window",w[0]);
    complete |> map(c=>[c[0],c[1],ftg-render(c[0],c[1]),""]);
   }
-  // Without room the stream goes on unanswered: nothing touched KV, so nextf forwards as before.
+   // Exact token admission follows execution once. A large observation keeps
+   // its actual value in a native cell; an exhausted owner ends with a reason.
   // The ledger's flag is what happened: 1 only when the observation entered and the session
   // resumed live. The stdout line names verbs and byte counts, never the control bytes, so a
   // reader of the lane's transcript counts the voice's controls once, in the reply.
   def ftg-quantum-answer(session, stops, items, nextf) {
-   let lane = ftg-lane-session("code");
-   let answered = map(c => len(c[3]) > 0 ? [c[3], ""] : ftg-observe-touched(lane, c[0], c[1]), items);
-   let results = map(a => a[0], answered);
-   let ids = fcms-inline-bml-observation-ids(session, ftv-join(map(r => ftg-observation(r), results), byte_to_str(10)));
-   let room = nothing?(ids) ? 0 : (fcms-pos(session) + len(ids) + 2) < fcms-maxpos(session);
-   let resumed = room ? fcms-observe-ids(session, ids, "form-token-observation-refused") : nextf(session, stops);
+    let lane = ftg-lane-session("code");
+    record_set(lane,"render-room",max2(0,fcms-maxpos(session)-fcms-pos(session)));
+    let answered = map(c => len(c[3]) > 0 ? [c[3], "",nothing()] : ftg-observe-touched(lane, c[0], c[1]), items);
+    record_set(lane,"render-room",nothing());
+    let admitted=ftg-admit-observations(session,lane,answered,text=>fcms-inline-bml-observation-ids(session,text));
+    let results=admitted[0]; let ids=admitted[1];
+    let room=ftg-observation-fits(session,ids);
+    let resumed = room ? fcms-observe-ids(session, ids, "form-token-observation-refused") : fcms-refuse(session,nothing?(ids) ? "form-token-codec-unavailable" : "form-token-observation-reserve-exhausted");
    let injected = (room && fcms-live?(resumed)) ? 1 : 0;
    print_str("form-token-crossing " ++ json-emit(ftg-crossing-line("code", items, results, injected)));
    ftg-retain-with("code", map(c => c[2], items), results, map(c => injected, items), map(a => a[1], answered));
-   resumed;
-  }
+    resumed;
+   }
+   def ftg-observation-fits(session,ids) = !nothing?(ids) && (fcms-pos(session)+len(ids)+2)<fcms-maxpos(session);
+   def ftg-admit-observations(session,lane,answered,encode) {
+    let results=answered |> map(a=>a[0]);
+    let ids=encode(ftv-join(results |> map(ftg-observation),byte_to_str(10)));
+    if ftg-observation-fits(session,ids) then [results,ids] else {
+     let held=answered |> map(a=>nothing?(a[2]) ? a[0] : value_kind(a[2])=="node_id" ? ftv-node-result(ftv-hold(lane,a[2])) : ftv-large(lane,a[2]));
+     [held,encode(ftv-join(held |> map(ftg-observation),byte_to_str(10)))];
+    };
+   }
   // Native BML strings keep their own escapes. JSON-wrapped eval payloads have
   // an invalid raw grammar and cross the unescaping edge before evaluation.
   def ftg-crossing-line(lane, items, results, injected) = json-node-object([json-node-pair("lane", json-node-string(lane)), json-node-pair("verbs", json-node-array(map(c => json-node-string(c[0]), items))), json-node-pair("control_bytes", json-node-array(map(c => json-node-int(len(c[2])), items))), json-node-pair("results", json-node-array(map(r => json-node-string(ftg-ledger-result(r)), results))), json-node-pair("injected", json-node-int(injected))]);
