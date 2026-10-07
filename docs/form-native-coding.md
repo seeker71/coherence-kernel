@@ -369,6 +369,19 @@ Repeated inline controls returning identical evidence yield to native care in
 the same decoder owner, preserving the role, candidate, completed effects and
 checks. Care is attributed separately from model-submitted actions. A changed
 control or actual action continues; no new reply quota governs these lookups.
+Consecutive identical alphabetic decode quanta inside an unfinished control
+also yield to this care flow. Completed controls, punctuation and ordinary
+prose continue. The partial reply stays private; the framebuffer carries only
+the repeated byte count and absence of a complete control. Current role guidance
+follows each tool observation and the initial source context.
+Coding decode, echo detection and private reply retention share the session's
+owned token decoder. Its touched pieces are reused until that model epoch is
+released. Crossing frames separately report native execution, token encoding
+and prefill time so attention follows the actual cost.
+Caller feedback retains the previous exact observation at
+`code_context.observation.previous_observation`. New findings preserve that
+native cell rather than growing nested feedback wrappers. Delivery retries reuse
+their event identity and leave the checkpoint unchanged.
 No JSON context or JSON reply protocol crosses
 this coding model boundary. External requests, results and receipts retain their
 public JSON compatibility; result fields are assembled once as cells and emitted
