@@ -516,14 +516,21 @@ section [form.bml] {
     // fold rides down to every linear layer's two recurrences, so one process
     // can walk the same span both ways against the same open weights
     // (the fold A/B probe). The default below is fold 1.
-    def q38-lm-layers-span-f(ps, bs, geo, lays, sts, l, nL, n, pos0, fold) = l >= nL ? 1 : {
+    // THE TAP. A prefill that something downstream must also learn from (the speculative drafter reads the residual stream after five of the
+    // layers, for every position it will draft from) carries a tap: nothing(), or a function tap(phase, l, n, pos0) the walk calls in its own
+    // batch, so what it reads is read where it is produced and the prompt is never run twice. phase 0 follows layer l's FFN (the residual in
+    // bs[33] holds that layer's output for the n positions of the span that begins at pos0); phase 1 follows the last layer (l = nL). The walk
+    // with no tap is the walk it always was.
+    def q38-lm-layers-span-t(ps, bs, geo, lays, sts, l, nL, n, pos0, fold, tap) = l >= nL ? (nothing?(tap) ? 1 : tap(1, l, n, pos0)) : {
         kth-full?(l, geo[22]) ? q38-full-attn-span(ps, bs, geo, nth(lays, l), nth(sts, l), pos0, n) : q38-linear-attn-span-f(ps, bs, geo, nth(lays, l), nth(sts, l), n, fold);
         q38-ffn-span(ps, bs, geo, nth(lays, l), n);
+        nothing?(tap) ? 0 : tap(0, l, n, pos0);
         // the hand-over (decode's, below): the open batch goes to the queue every q38-submit-every() layers without waiting, so the device runs the
         // early layers while the host encodes the later ones; the host's ~1400 dispatches no longer run before the first begins
         let handed = q38-handover-after((Number) l + (Number) 1, nL);
-        q38-lm-layers-span-f(ps, bs, geo, lays, sts, (Number) l + (Number) 1, nL, n, pos0, fold);
+        q38-lm-layers-span-t(ps, bs, geo, lays, sts, (Number) l + (Number) 1, nL, n, pos0, fold, tap);
     };
+    def q38-lm-layers-span-f(ps, bs, geo, lays, sts, l, nL, n, pos0, fold) = q38-lm-layers-span-t(ps, bs, geo, lays, sts, l, nL, n, pos0, fold, nothing());
     def q38-lm-layers-span(ps, bs, geo, lays, sts, l, nL, n, pos0) = q38-lm-layers-span-f(ps, bs, geo, lays, sts, l, nL, n, pos0, 1);
     def q38-prefill-span-batched-f(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, fold) = {
         let n = len(ids);
@@ -775,21 +782,24 @@ section [form.bml] {
     // kernel is the deeper stone). Needs scratch opened span-wide
     // (q38-open-span, span >= slice). The head is read once, after the
     // last slice; the final id stays pending per the prefill contract.
-    def q38-prefill-sliced-go(ps, bs, geo, lays, sts, embTv, ids, pos, span) = (Comparable) len(ids) == 0 ? [pos, 1] : {
+    def q38-prefill-sliced-go(ps, bs, geo, lays, sts, embTv, ids, pos, span) = q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, ids, pos, span, nothing());
+    // the same walk with a tap (q38-lm-layers-span-t): each slice's layers run with it, inside the slice's own batch
+    def q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, ids, pos, span, tap) = (Comparable) len(ids) == 0 ? [pos, 1] : {
         let n = len(ids) < span ? len(ids) : span;
         metal_batch_concurrent();
         q38pc-stage(pos, "embed-begin");
         q38-lm-embed(ps, bs, geo, embTv, take(n, ids), 0);
         q38pc-stage(pos, "layers-begin");
-        q38-lm-layers-span(ps, bs, geo, lays, sts, 0, geo[21], n, pos);
+        q38-lm-layers-span-t(ps, bs, geo, lays, sts, 0, geo[21], n, pos, 1, tap);
         !q38pc-sync(pos, n) ? [pos, 0] : {
             q38oo-stage(("model-prefill-positions-" + ((Number) pos + (Number) n).str()), 8388623);
-            q38-prefill-sliced-go(ps, bs, geo, lays, sts, embTv, drop(n, ids), (Number) pos + (Number) n, span);
+            q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, drop(n, ids), (Number) pos + (Number) n, span, tap);
         };
     };
-    def q38-prefill-span-sliced(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span) = span <= 0 || (Comparable) len(ids) == 0 ? [-1, pos] : {
+    def q38-prefill-span-sliced(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span) = q38-prefill-span-sliced-t(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span, nothing());
+    def q38-prefill-span-sliced-t(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span, tap) = span <= 0 || (Comparable) len(ids) == 0 ? [-1, pos] : {
         q38pc-wait-policy();
-        let end = q38-prefill-sliced-go(ps, bs, geo, lays, sts, embTv, ids, pos, span);
+        let end = q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, ids, pos, span, tap);
         !end[1] ? [-1, end[0]] : {
             // The final slice sync closed its concurrent batch. Re-arm before
             // the barrier-bearing gather and head, or their enqueues refuse
