@@ -1,0 +1,94 @@
+// q38-mvk-lab.bml — what limits the multi-column Q8_0 matvec (mvk) of the check span? Ablations of its own text, timed on the real gate tensor.
+//
+//   echo '{"go":1}' | ./fkwu observe/q38-mvk-lab.bml
+// stdin, one JSON line, all optional: go, nt (8), rr (4), prompt. Variants of the same kernel with one part replaced: the activation loads, the
+// weight loads, the reductions. A part whose removal frees the time is the limiter. Best of rounds of 48 dispatches in one batch, us each.
+// (The answers of an ablated kernel are not the matvec's: only the production text, flags 0 0 0, is compared with the lane's wide matvec.)
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-spec.fk
+section [form.bml] {
+ class Q38MvkLab {
+  def qml-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qml-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qml-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qml-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-mvk-lab", line) : json-node-object([]);
+  }
+  def qml-say(s) = print_str("[q38-mvk-lab] " ++ s);
+  def qml-cat(parts) = (Comparable) len(parts) == 0 ? "" : ((String) parts[0] + qml-cat(parts[1:]));
+  // the production kernel (q38s-mvr-msl) with parts switched: sx = no activation loads, sw = no weight loads, sr = no reductions
+  def qml-msl(name, nt, rr, sx, sw, sr) {
+   let n = nt.str();
+   let r = rr.str();
+   let nr = (nt * rr).str();
+   let wload = sw == 1 ? "wa[row] = char4(3, 5, 7, 9); wc[row] = char4(2, 4, 6, 8); dd[row] = 0.01f + float(ib & 1u) * 0.001f;" : "uint r = r0 + (uint)row; if (r >= rows) { wa[row] = char4(0); wc[row] = char4(0); dd[row] = 0.0f; } else { ulong bo = ((ulong)r * (ulong)nb + (ulong)ib) * 34ul; ushort h = (ushort)qb[bo] | ((ushort)qb[bo + 1ul] << 8); device const uchar* qs = qb + bo + 2ul + (ulong)((uint)il * 8u); wa[row] = char4(*(device const packed_char4*)(qs)); wc[row] = char4(*(device const packed_char4*)(qs + 4)); dd[row] = float(as_type<half>(h)); }";
+   let xload = sx == 1 ? "packed_float4 ya = packed_float4(float(ib & 3u), 1.0f, 2.0f, 3.0f); packed_float4 yc = packed_float4(4.0f, 5.0f, float(t), 7.0f);" : "device const float* yb = x + (ulong)t * (ulong)cols + (ulong)ib * 32ul + (ulong)il * 8ul; packed_float4 ya = *(device const packed_float4*)(yb); packed_float4 yc = *(device const packed_float4*)(yb + 4);";
+   let reduce = sr == 1 ? ("float tot = 0.0f; for (uint a = 0u; a < " ++ nr ++ "u; ++a) { tot = tot + sumf[a]; } y[(ulong)tgpig.x * 256ul + (ulong)sgitg * 32ul + (ulong)tiisg] = tot; }") : ("for (uint a = 0u; a < " ++ nr ++ "u; ++a) { sumf[a] = metal::simd_sum(sumf[a]); } if (sgitg == 0u) { for (uint a = 0u; a < " ++ nr ++ "u; ++a) { sh[a * 32u + (uint)tiisg] = 0.0f; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) { for (uint a = 0u; a < " ++ nr ++ "u; ++a) { sh[a * 32u + (uint)sgitg] = sumf[a]; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint a = 0u; a < " ++ nr ++ "u; ++a) { float tot = metal::simd_sum(sh[a * 32u + (uint)tiisg]); if (tiisg == 0u && sgitg == 0u) { uint t = a / " ++ r ++ "u; uint r = r0 + (a - t * " ++ r ++ "u); if (r < rows) { y[(ulong)t * (ulong)ystride + (ulong)r] = tot; } } } }");
+   "kernel void " ++ name ++ " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ystride [[buffer(5)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 ntg [[threads_per_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { threadgroup float sh[" ++ (nt * rr * 32).str() ++ "]; uint nb = cols / 32u; uint r0 = tgpig.x * " ++ r ++ "u; uint nsg = (uint)ntg.x / 32u; uint stride = nsg * 8u; ushort ix = tiisg / 4u; ushort il = tiisg - ix * 4u; uint ib0 = (uint)sgitg * 8u + (uint)ix; float sumf[" ++ nr ++ "]; for (uint a = 0u; a < " ++ nr ++ "u; ++a) { sumf[a] = 0.0f; } for (uint ib = ib0; ib < nb; ib += stride) { char4 wa[" ++ r ++ "]; char4 wc[" ++ r ++ "]; float dd[" ++ r ++ "]; for (ushort row = 0u; row < " ++ r ++ "u; ++row) { " ++ wload ++ " } for (uint t = 0u; t < " ++ n ++ "u; ++t) { " ++ xload ++ " for (ushort row = 0u; row < " ++ r ++ "u; ++row) { float sumq = 0.0f; sumq = metal::fma(float(wa[row].x), ya.x, sumq); sumq = metal::fma(float(wa[row].y), ya.y, sumq); sumq = metal::fma(float(wa[row].z), ya.z, sumq); sumq = metal::fma(float(wa[row].w), ya.w, sumq); sumq = metal::fma(float(wc[row].x), yc.x, sumq); sumq = metal::fma(float(wc[row].y), yc.y, sumq); sumq = metal::fma(float(wc[row].z), yc.z, sumq); sumq = metal::fma(float(wc[row].w), yc.w, sumq); sumf[t * " ++ r ++ "u + (uint)row] = metal::fma(sumq, dd[row], sumf[t * " ++ r ++ "u + (uint)row]); } } } " ++ reduce;
+  }
+  def qml-head() = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n";
+  def qml-min(xs, m) = len(xs) == 0 ? m : qml-min(xs[1:], xs[0] < m ? xs[0] : m);
+  def qml-times(n, f) = n <= 0 ? 1 : {
+   let done = f();
+   qml-times(n - 1, f);
+  };
+  // one round: 48 dispatches in one batch, ms
+  def qml-round(f) {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let queued = qml-times(48, f);
+   let synced = metal_sync();
+   host_monotonic_ms() - t0;
+  }
+  def qml-rounds(f, k, acc) = k <= 0 ? acc : qml-rounds(f, k - 1, cons(qml-round(f), acc));
+  def qml-variant(ctx, tv, nt, rr, sx, sw, sr, label) {
+   let name = "form_lab_" ++ nt.str() ++ "_" ++ rr.str() ++ "_" ++ sx.str() ++ sw.str() ++ sr.str();
+   let pipe = metal_pipeline(qml-head() ++ qml-msl(name, nt, rr, sx, sw, sr), name);
+   let bs = ctx[1];
+   let rows = kth-tv-r(tv);
+   let y = metal_buf_alloc(rows * nt * 4 + 4194304);
+   let warm = pipe > 0 ? qml-round(() => metal_enqueue(pipe, md-bind16([kth-tv-h(tv), bs[1], y], [rows, kth-tv-c(tv), rows], 256, 0, 1, 1), (rows + rr - 1) / rr)) : 0;
+   let rs = pipe > 0 ? qml-rounds(() => metal_enqueue(pipe, md-bind16([kth-tv-h(tv), bs[1], y], [rows, kth-tv-c(tv), rows], 256, 0, 1, 1), (rows + rr - 1) / rr), 6, []) : [100000];
+   let freed = metal_buf_free(y);
+   qml-say("NT=" ++ nt.str() ++ " rows/group " ++ rr.str() ++ " " ++ label ++ ": " ++ ((qml-min(rs, 100000) * 1000) / 48).str() ++ " us each (best of 6 rounds of 48), pipeline " ++ pipe.str());
+  }
+  def qml-all(ctx, tv, nt, rr) {
+   let a = qml-variant(ctx, tv, nt, rr, 0, 0, 0, "production");
+   let b = qml-variant(ctx, tv, nt, rr, 1, 0, 0, "no activation loads");
+   let c = qml-variant(ctx, tv, nt, rr, 0, 1, 0, "no weight loads");
+   let d = qml-variant(ctx, tv, nt, rr, 0, 0, 1, "no reductions");
+   let e = qml-variant(ctx, tv, nt, rr, 1, 0, 1, "no activation loads, no reductions");
+   let f = qml-variant(ctx, tv, nt, rr, 1, 1, 0, "no loads (reductions only)");
+   let g = qml-variant(ctx, tv, nt, rr, 1, 1, 1, "no loads, no reductions (the FMAs)");
+   1;
+  }
+  def qml-run-open(path, nt, rr, ids) {
+   let src = fcmg-src(path);
+   let maxpos = len(ids) + 16;
+   let own = fcms-qwen-own(src, maxpos);
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 mvk lab", path, weights, own);
+   !mg-granted?(granted) ? qml-say("held: " ++ granted[1]) : {
+    let ctx = q38-open-span(path, maxpos, len(ids) + 1);
+    !((Comparable) q38-context-ok?(ctx) == 1) ? qml-say("the context did not open") : {
+     let sts = q38-new-state(ctx[2]);
+     let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+     let tv = nth(ctx, 3)[0][2];
+     qml-say("gate tensor " ++ kth-tv-r(tv).str() ++ " x " ++ kth-tv-c(tv).str());
+     let all = qml-all(ctx, tv, nt, rr);
+     let freed = q38-free-state(sts);
+     let closed = q38-close(ctx, []);
+     1;
+    };
+    let unleased = mg-release();
+    qml-say("released");
+   };
+  }
+  def qml-run() {
+   let opts = qml-opts();
+   (Comparable) qml-int(opts, "go", 0) == 1 ? qml-run-open(qml-file(), qml-int(opts, "nt", 8), qml-int(opts, "rr", 4), q35-chat-ids(fcmg-src(qml-file()), qml-text(opts, "prompt", "Explain in two sentences why the sky is blue."))) : qml-say("plan: go=1 times ablations of the multi-column matvec on the gate tensor");
+  }
+ }
+ qml-run();
+}
