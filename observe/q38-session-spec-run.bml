@@ -11,7 +11,7 @@
 // stdin, one JSON line, all optional: go, mode (walk | tapab), which (sky | code | prose | json | long | a prompt text via "prompt"), n (64), warm (8), spec (1), plain (1), ref (1), reps (1).
 // The reference needs a prompt of at most 64 tokens (the session's scratch is as wide as its prompt, capped at 64): the door says so and skips it otherwise.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen38-spec-witness.bml form-stdlib/lora-adapter.bml
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen38-spec-witness.bml form-stdlib/lora-adapter.bml form-stdlib/bml/form-cli-code-live.bml
 section [form.bml] {
  class Q38SessionSpecRun {
   def qss-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
@@ -204,11 +204,47 @@ section [form.bml] {
    let rb = fcms-release-ok?(w1[3]);
    1;
   }
+  // ── quanta: the code lane's own decode loop (form-cli-code-session.bml): a quantum of fcac-quantum IDs, then the boundary forward (fcacs-next), until `target` IDs are said.
+  // Two sessions of one prompt, the first as the lane takes it by default (speculative while its drafter holds the stream), the second held plain (its owner's mode set to plain: the
+  // lane's token-wise quanta of four); a round is a chunk of each, in turn ──
+  def qss-quanta-go(s, stops, target, said, ms) = said >= target || fcms-stopped?(s) || !((Comparable) fcms-live?(s) == 1) ? [s, said, ms] : qss-quanta-step(s, stops, target, said, ms, host_monotonic_ms());
+  def qss-quanta-step(s, stops, target, said, ms, t0) {
+   let o = fcsp-owner(s);
+   let wide = !nothing?(o) && record_has(o, "width") ? record_get(o, "width") : fcac-quantum(s);
+   let g = fcacs-quantum(s, stops, wide);
+   let s1 = fcms-generation-session(g);
+   let s2 = fcms-stopped?(s1) || !((Comparable) fcms-live?(s1) == 1) ? s1 : fcacs-next(s1, stops);
+   qss-quanta-go(s2, stops, target, said + len(fcms-generation-ids(g)), ms + (host_monotonic_ms() - t0));
+  }
+  def qss-quanta-round(sa, sb, target, rounds, i) {
+   i >= rounds ? 1 : qss-quanta-pair(sa, sb, target, rounds, i, qss-quanta-go(sa, fcmo-stops(sa), target, 0, 0));
+  }
+  def qss-quanta-pair(sa, sb, target, rounds, i, ra) {
+   let rb = qss-quanta-go(sb, fcmo-stops(sb), target, 0, 0);
+   let ratio = (rb[2] * ra[1] * 100) / ((ra[2] <= 0 ? 1 : ra[2]) * (rb[1] <= 0 ? 1 : rb[1]));
+   qss-say("round " ++ i.str() ++ ": lane default " ++ ra[1].str() ++ " ids in " ++ ra[2].str() ++ " ms = " ++ qss-rate(ra[1], ra[2]) ++ " tok/s (quantum " ++ fcac-quantum(ra[0]).str() ++ "); held plain " ++ rb[1].str() ++ " ids in " ++ rb[2].str() ++ " ms = " ++ qss-rate(rb[1], rb[2]) ++ " tok/s (quantum " ++ fcac-quantum(rb[0]).str() ++ "); ratio " ++ ratio.str() ++ "/100; spec " ++ (String) fcms-spec-why(ra[0], 2));
+   qss-quanta-round(ra[0], rb[0], target, rounds, i + 1);
+  }
+  def qss-quanta(path, prompt, target, rounds, width) {
+   let sa = qss-open(path, prompt, target * rounds + 64);
+   let sb = qss-open(path, prompt, target * rounds + 64);
+   !((Comparable) fcms-live?(sa) == 1) || !((Comparable) fcms-live?(sb) == 1) ? qss-say("a session did not open") : qss-quanta-live(sa, sb, target, rounds, width);
+  }
+  def qss-quanta-live(sa, sb, target, rounds, width) {
+   width > 0 ? record_set(fcsp-owner(sa), "width", width) : 0;
+   record_set(fcsp-owner(sb), "mode", "plain");
+   record_set(fcsp-owner(sb), "reason", "spec-off:held-plain-by-the-door");
+   qss-quanta-round(sa, sb, target, rounds, 0);
+   let ra = fcms-release-ok?(sa);
+   let rb = fcms-release-ok?(sb);
+   qss-say("released " ++ ra.str() ++ " " ++ rb.str());
+   1;
+  }
   def qss-main() {
    let opts = qss-opts();
    let which = qss-text(opts, "which", "sky");
    let mode = qss-text(opts, "mode", "walk");
-   qss-int(opts, "go", 0) != 1 ? qss-say("plan: go=1 opens a session on " ++ qss-file() ++ " and says n tokens speculatively (the session's default walk), against the verify path's greedy decode and the plain planned walk; mode tapab times the prefill with and without the tap; mode pairs alternates a speculative and a plain session a chunk at a time") : mode == "rowab" ? qss-rowab(qss-file(), qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 16), qss-int(opts, "rounds", 4)) : mode == "plainab" ? qss-plainab(qss-file(), qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 16), qss-int(opts, "rounds", 4)) : mode == "pairs" ? qss-pairs(qss-file(), which, qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 32), qss-int(opts, "rounds", 4), qss-int(opts, "warm", 8)) : mode == "tapab" ? qss-tapab(qss-file(), qss-int(opts, "reps", 3)) : qss-walks(qss-file(), which, qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "n", 64), qss-int(opts, "warm", 8), qss-int(opts, "spec", 1), qss-int(opts, "plain", 1), qss-int(opts, "ref", 1), qss-int(opts, "reps", 1));
+   qss-int(opts, "go", 0) != 1 ? qss-say("plan: go=1 opens a session on " ++ qss-file() ++ " and says n tokens speculatively (the session's default walk), against the verify path's greedy decode and the plain planned walk; mode tapab times the prefill with and without the tap; mode pairs alternates a speculative and a plain session a chunk at a time") : mode == "quanta" ? qss-quanta(qss-file(), qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "target", 32), qss-int(opts, "rounds", 4), qss-int(opts, "width", 0)) : mode == "rowab" ? qss-rowab(qss-file(), qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 16), qss-int(opts, "rounds", 4)) : mode == "plainab" ? qss-plainab(qss-file(), qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 16), qss-int(opts, "rounds", 4)) : mode == "pairs" ? qss-pairs(qss-file(), which, qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 32), qss-int(opts, "rounds", 4), qss-int(opts, "warm", 8)) : mode == "tapab" ? qss-tapab(qss-file(), qss-int(opts, "reps", 3)) : qss-walks(qss-file(), which, qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "n", 64), qss-int(opts, "warm", 8), qss-int(opts, "spec", 1), qss-int(opts, "plain", 1), qss-int(opts, "ref", 1), qss-int(opts, "reps", 1));
   }
  }
  qss-main();
