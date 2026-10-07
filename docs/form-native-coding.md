@@ -83,6 +83,22 @@ this native reuse before asking for another generation. Reuse records verificati
 time and no new generation. A queued
 contract must still match, and rechecking does not append a duplicate queue row.
 
+A completed proposal that fails reference verification enters native coding
+before the planner generates a replacement plan. Compatible retained references
+are offered first. The coding lane can edit only `proposal.reference`; the original
+proposal, request and source snapshots remain read-only resident documents.
+Its caller-owned checker reconstructs the proposal from those original bytes
+and runs the original planner verification in private scratch, without publishing.
+Changed source presence or bytes select a different checkpoint scope and refuse
+an old candidate. The checkpoint is retained before model admission, so interrupted
+work can resume with its original goal and failure, even when a new verification
+receipt names a different time or scratch path. Current execution allowances remain
+caller-selected. A complete, released result returns to the planner's existing
+verification, ledger and queue path. Failed or unfinished work stays retained.
+`repair_model` selects a local registry model; otherwise the `write-code` chain
+supplies it. `repair_turns` adds a caller-selected continuation allowance, default
+64. Coding stage, tools, checks, generated and injected IDs remain observable.
+
 List `.join(separator)` is shared by ordinary BML and decode-stream pure
 evaluation. It renders native values with `.str()` and uses the native balanced
 string join. Receiver and separator are evaluated once, in that order.
@@ -91,8 +107,8 @@ The current entry requires a source-file hint. Automatic repository-wide discove
 creation of absent files and a task-owned Codex guidance request remain open.
 The planner's reference authoring currently changes function definitions; blueprint
 changes and effectful witnesses need their own owned flow. The public `code` path
-already supports source edits, tools and retained repair, but the prompt-only task
-driver does not yet use that path for this planning stage. The source-selection
+supports source edits, tools and retained repair. The planner uses that path for
+reference repair; initial whole-plan generation remains a separate voice. The source-selection
 guide has its own retained answer and usage; the escalation quota still requires
 repair-guide rows that this planner does not produce. The existing Codex adapter in
 `heal` is therefore not yet a task-owned continuation from this entry.

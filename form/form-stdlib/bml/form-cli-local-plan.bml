@@ -96,7 +96,11 @@ section [form.bml] {
   def flp-ctx-land(ctx) = ctx[4];
   def flp-ctx-scratch(ctx) = ctx[5];
   def flp-ctx-ledger(ctx) = ctx[6];
-  def flp-ctx-deadline(ctx) = ctx[7];
+   def flp-ctx-deadline(ctx) = ctx[7];
+   // Native care returns a released proposal or nothing. Verification and
+   // publication stay in the planner; older eight-field contexts stay valid.
+   def flp-with-reference-care(ctx, care) = append(ctx[:8], [care]);
+   def flp-reference-care(req, ctx, said, refusal) = len(ctx) > 8 ? ctx[8](req, ctx, said, refusal) : nothing();
   // ── text ──
   def flp-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
   def flp-ends?(s, p) = (len(s) >= len(p)) && ((String) substring(s, (len(s) - len(p)), len(s)) == p);
@@ -815,8 +819,8 @@ section [form.bml] {
   }
   // the voice's reply, verified: [1, landing] when it lands, [3, witness] when the request is moot, [0, finding] when
   // refused; a refused option's scratch tree leaves once its row lands, and a verified or moot option's stays
-  def flp-heard(req, ctx, memory, n, way, said, started) {
-   let planner = [fhn-s("plan_voice", way[0]), fhn-s("plan_lens", way[1]), fhn-n("plan_options", n), fhn-n("plan_local_generated_ids", (flp-spent(memory, 7) + said[3])), fhn-n("plan_local_injected_ids", (flp-spent(memory, 6) + said[2]))];
+   def flp-planner(memory, n, way, said) = [fhn-s("plan_voice", way[0]), fhn-s("plan_lens", way[1]), fhn-n("plan_options", n), fhn-n("plan_local_generated_ids", (flp-spent(memory, 7) + said[3])), fhn-n("plan_local_injected_ids", (flp-spent(memory, 6) + said[2]))];
+   def flp-observed(req, ctx, n, way, said, started, planner) {
    let heard = !fat-has(["answered","incomplete"],said[0]) || len(trim(said[1])) == 0 ? ["voice-" + said[0],mc-cat(["The voice ",way[0]," gave no admissible reply (",said[0],"). ",said[1]]),[]] : flp-parse(said[1]);
    let parsed = if (((String) said[0] == "incomplete") && ((Comparable) len(heard[0]) > 0)) then [heard[0], mc-cat([heard[1], " The reply was cut at its reply budget: write a shorter goal and band."]), heard[2]] else heard;
    let stamp = mc-cat([flp-safe-id(req), "-", n.str(), "-", now_unix_ms().str()]);
@@ -825,9 +829,27 @@ section [form.bml] {
    let logged = fhn-append(flp-ctx-ledger(ctx), json-emit(row) ++ "\n");
    let spoken = print_str("[local-plan] " ++ json-emit(row));
    let swept = if (flp-held?(v) || flp-moot?(v)) then 0 else host_dir_rmdir(flp-at(flp-ctx-scratch(ctx), stamp));
-   let reuse=v[0]==7 && len(said)>4 && said[4] != "" ? flp-recheck(req,ctx,said[4]) : ["refused",[],""];
-   if reuse[0]=="queued" then [1,reuse[1]] else if flp-moot?(v) then [3, flp-moot-witness(parsed[2], ctx, stamp, v, way, n)] else if flp-held?(v) then [1, flp-land(parsed[2], req, ctx, append(planner, [json-node-pair("reachable", if nothing?(v[5]) then json-node-null() else json-node-int(1)), json-node-pair("plan_solofall", flp-falls-node(v[6])), json-node-pair("plan_checkfall", flp-checkfall-node(v[6]))]), row)] else [0, [flp-finding(n, way, v), v[1], way[1], way[0], said[1], row, said[2], said[3]]];
-  }
+    [parsed, v, row, stamp];
+   }
+   def flp-finish(req, ctx, n, way, said, planner, observed) {
+    let parsed=observed[0]; let v=observed[1]; let row=observed[2]; let stamp=observed[3];
+    flp-moot?(v) ? [3, flp-moot-witness(parsed[2], ctx, stamp, v, way, n)] : flp-held?(v) ? [1, flp-land(parsed[2], req, ctx, append(planner, [json-node-pair("reachable", if nothing?(v[5]) then json-node-null() else json-node-int(1)), json-node-pair("plan_solofall", flp-falls-node(v[6])), json-node-pair("plan_checkfall", flp-checkfall-node(v[6]))]), row)] : [0, [flp-finding(n, way, v), v[1], way[1], way[0], said[1], row, said[2], said[3]]];
+   }
+   def flp-heard(req, ctx, memory, n, way, said, started) {
+    let planner=flp-planner(memory,n,way,said);
+    let observed=flp-observed(req,ctx,n,way,said,started,planner);
+    let v=observed[1];
+    let reuse=v[0]==7 && len(said)>4 && said[4] != "" ? flp-recheck(req,ctx,said[4]) : ["refused",[],""];
+    if reuse[0]=="queued" then [1,reuse[1]] else {
+     let repaired=v[0]==7 && said[0]=="answered" ? flp-reference-care(req,ctx,said,v) : nothing();
+     if nothing?(repaired) then flp-finish(req,ctx,n,way,said,planner,observed) else {
+      let total=[repaired[0],repaired[1],said[2]+repaired[2],said[3]+repaired[3],repaired[4]];
+      let ownership=flp-planner(memory,n,way,total);
+      let fresh=flp-observed(req,ctx,n,[way[0],way[1],"reference-repair"],repaired,started,ownership);
+      flp-finish(req,ctx,n,way,total,ownership,fresh);
+     };
+    };
+   }
   // ── the moot witness: the band kept in the option's scratch tree, with the readings that retire the request ──
   def flp-today-band(ctx, stamp, plan) = flp-at(mc-cat([flp-at(flp-ctx-scratch(ctx), stamp), "/today"]), flp-p-band(plan));
   def flp-moot-witness(plan, ctx, stamp, v, way, n) = json-node-object([json-node-pair("moot", json-node-object([fhn-s("kind", "band"), fhn-s("band", flp-today-band(ctx, stamp, plan)), fhn-s("band_sha", flp-sha(flp-p-text(plan))), fhn-s("band_text", flp-p-text(plan)), json-node-pair("defs", flp-json-strings(map(flp-def-key, flp-p-defs(plan)))), fhn-n("full", flp-p-full(plan)), fhn-n("today", v[3]), json-node-pair("stubs", json-node-array(map(x => json-node-int(x), v[4]))), fhn-s("voice", way[0]), fhn-n("option", n), fhn-n("at_unix_ms", now_unix_ms())]))]);
