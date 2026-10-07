@@ -1,0 +1,251 @@
+// qwen35-dense-dflash.fk — the DFlash2 block-diffusion drafter for the dense Qwen3.8-27B lane, beside the MTP head of qwen35-dense-spec.fk.
+//
+// The drafter (z-lab / Inco AI, Apache-2.0; GGUF arch "dflash", 5 layers, width 5120, 2 GB at Q8_0) proposes a whole block in ONE forward:
+// the pending token x and seven mask tokens go through five layers whose keys and values also come from the TARGET's own hidden states
+// (the residual stream after target layers 5, 19, 33, 47, 61, concatenated to 25600 and projected by fc to 5120, one row per committed
+// position). Rows 1..7 of the block then say the tokens at x+1..x+7; the verify span checks all seven at once, and what the target accepts of
+// them is bandwidth the wall did not charge for. The math, read from Splash's DFlashDraft.cpp / draft.metal / sampling.metal and checked
+// against the GGUF's own tensors:
+//     ctx row   : c = rms(fc . [h5;h19;h33;h47;h61], enc.output_norm)       (h = target residual after the layer, before output_norm)
+//                 per layer: K = knorm(rope(Wk c)), V = Wv c  at the row's position       (no input_layernorm on the context)
+//     layer     : n = rms(h, attn_norm); d = Wdyn_a n   (1280 = [stage 2][tap 2][group 320])
+//                 conv stage 0:  u[r] = n[r]*(base[0][0] + d[r][0][g]) + n[r-1]*(base[0][1] + d[r][1][g])      (row 0 has no row before it)
+//                 q,k,v = Wq u, Wk u, Wv u; q,k per-head rms (128) then rope (half-split pairs i, i+64, theta 1e7, position = L + row)
+//                 attention: 32 q heads over 8 kv heads, keys = the context ring (positions < L, window 2048) and the block's own 8 rows
+//                 (bidirectional: no causal mask), scale 1/sqrt(128)
+//                 conv stage 1:  h1[r] = a[r]*(base[1][0] + d[r][2][g]) + a[r-1]*(base[1][1] + d[r][3][g]) + h[r],  a = Wo attention
+//                 the MLP half is the same with ffn_norm, ffn_conv_*, swiglu (gate, up, down)
+//     head      : f = rms(h, output_norm); logits = the TARGET's output.weight . f (no lm_head in the drafter); s = selector_hidden . f (256)
+//     selector  : per position the top 16 logits; edge(prev, cand) = sum_d pred[prev][d] * s[d] * succ[cand][d]; the path is greedy:
+//                 cand = argmax(logit + edge from the chosen predecessor), the predecessor of position 0 being the anchor x itself
+// WHAT THIS FILE ADDS (all appended and local, its own pipeline list):
+//   kernels: conv, q/k norm + rope, block attention over the context, context commit, capture, top16 + edges + path
+//   capture of the five tapped residuals during the layer-major prefill and during the verify span
+//   the drafter's tensors (a second GGUF), its context K/V (the target's hidden rows become keys and values), the draft forward, the step
+import native/metal/qwen35-dense-spec.fk;
+section [form.bml] {
+    def q38d-cat(parts) = (Comparable) len(parts) == 0 ? "" : ((String) parts[0] + q38d-cat(parts[1:]));
+    // ── kernels ──
+    // x, dyn, base, resid, out | H, D, kind, finish, nrows
+    def q38d-conv-msl() = "kernel void form_q38d_conv (device const float* x [[buffer(0)]], device const float* dyn [[buffer(1)]], device const float* base [[buffer(2)]], device const float* resid [[buffer(3)]], device float* out [[buffer(4)]], constant uint& H [[buffer(5)]], constant uint& D [[buffer(6)]], constant uint& kind [[buffer(7)]], constant uint& finish [[buffer(8)]], constant uint& nrows [[buffer(9)]], uint e [[thread_position_in_grid]]) { if (e >= nrows * H) return; uint row = e / H; uint ch = e - row * H; uint g = ch / 16u; uint G = H / 16u; float v = x[e] * (base[(kind * 2u) * H + ch] + dyn[row * D + (kind * 2u) * G + g]); if (row > 0u) { v = v + x[(row - 1u) * H + ch] * (base[(kind * 2u + 1u) * H + ch] + dyn[row * D + (kind * 2u + 1u) * G + g]); } if (finish == 1u) { v = v + resid[e]; } out[e] = v; }";
+    // q [nrows][4096], k [nrows][1024] -> per-head rms * weight, rope at L + row: qo, ko | L, nrows
+    def q38d-qkrope-msl() = "kernel void form_q38d_qkrope (device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* qw [[buffer(2)]], device const float* kw [[buffer(3)]], device float* qo [[buffer(4)]], device float* ko [[buffer(5)]], constant uint& L [[buffer(6)]], constant uint& nrows [[buffer(7)]], uint gid [[thread_position_in_grid]]) { uint row = gid / 40u; if (row >= nrows) return; uint hd = gid - row * 40u; bool isq = hd < 32u; device const float* src = isq ? (q + row * 4096u + hd * 128u) : (k + row * 1024u + (hd - 32u) * 128u); device const float* w = isq ? qw : kw; device float* dst = isq ? (qo + row * 4096u + hd * 128u) : (ko + row * 1024u + (hd - 32u) * 128u); float ss = 0.0f; for (uint i = 0u; i < 128u; ++i) { ss = ss + src[i] * src[i]; } float inv = 1.0f / metal::sqrt(ss / 128.0f + 1.0e-6f); float pos = (float)(L + row); for (uint i = 0u; i < 64u; ++i) { float a = src[i] * inv * w[i]; float b = src[i + 64u] * inv * w[i + 64u]; float ang = pos * metal::pow(10000000.0f, -(float)i / 64.0f); float c = metal::cos(ang); float s = metal::sin(ang); dst[i] = a * c - b * s; dst[i + 64u] = b * c + a * s; } }";
+    // the context row's keys and values into the cache at pos0 + row: kin [nrows][1024], vin [nrows][1024], knorm, kc, vc | pos0, maxpos, nrows
+    def q38d-commit-msl() = "kernel void form_q38d_commit (device const float* kin [[buffer(0)]], device const float* vin [[buffer(1)]], device const float* kw [[buffer(2)]], device float* kc [[buffer(3)]], device float* vc [[buffer(4)]], constant uint& pos0 [[buffer(5)]], constant uint& maxpos [[buffer(6)]], constant uint& nrows [[buffer(7)]], uint gid [[thread_position_in_grid]]) { uint row = gid / 8u; if (row >= nrows) return; uint kh = gid - row * 8u; device const float* src = kin + row * 1024u + kh * 128u; device const float* vs = vin + row * 1024u + kh * 128u; uint pos = pos0 + row; device float* kd = kc + ((ulong)kh * (ulong)maxpos + (ulong)pos) * 128ul; device float* vd = vc + ((ulong)kh * (ulong)maxpos + (ulong)pos) * 128ul; float ss = 0.0f; for (uint i = 0u; i < 128u; ++i) { ss = ss + src[i] * src[i]; } float inv = 1.0f / metal::sqrt(ss / 128.0f + 1.0e-6f); float p = (float)pos; for (uint i = 0u; i < 64u; ++i) { float a = src[i] * inv * kw[i]; float b = src[i + 64u] * inv * kw[i + 64u]; float ang = p * metal::pow(10000000.0f, -(float)i / 64.0f); float c = metal::cos(ang); float s = metal::sin(ang); kd[i] = a * c - b * s; kd[i + 64u] = b * c + a * s; } for (uint i = 0u; i < 128u; ++i) { vd[i] = vs[i]; } }";
+    // a group is (head, row): scores over the context positions [start, L) and the block's own 8 rows (no mask), softmax, values.
+    // q [8][4096] (normed, roped), kc/vc [8 kv heads][maxpos][128], kcur [8][1024] (normed, roped), vcur [8][1024], out [8][4096] | L, maxpos, nrows
+    def q38d-attn-msl() = "kernel void form_q38d_attn (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device const float* kcur [[buffer(3)]], device const float* vcur [[buffer(4)]], device float* out [[buffer(5)]], constant uint& L [[buffer(6)]], constant uint& maxpos [[buffer(7)]], constant uint& nrows [[buffer(8)]], constant uint& ctxon [[buffer(9)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { threadgroup float sc[2112]; threadgroup float sh[16]; uint g = tgpig.x; uint h = g / nrows; uint row = g - h * nrows; uint kh = h / 4u; uint pos = L + row; uint start = pos >= 2047u ? pos - 2047u : 0u; uint nctx = (L > start && ctxon == 1u) ? L - start : 0u; uint total = nctx + nrows; uint lid = (uint)sgitg * 32u + (uint)tiisg; device const float* qr = q + row * 4096u + h * 128u; for (uint i = lid; i < total; i += 256u) { device const float* kr = i < nctx ? (kc + ((ulong)kh * (ulong)maxpos + (ulong)(start + i)) * 128ul) : (kcur + (i - nctx) * 1024u + kh * 128u); float acc = 0.0f; for (uint c = 0u; c < 128u; ++c) { acc = metal::fma(qr[c], kr[c], acc); } sc[i] = acc * 0.08838834765f; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float mx = -3.4e38f; for (uint i = lid; i < total; i += 256u) { mx = metal::max(mx, sc[i]); } mx = metal::simd_max(mx); if (tiisg == 0) { sh[sgitg] = mx; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float gmx = sh[0]; for (uint k = 1u; k < 8u; ++k) { gmx = metal::max(gmx, sh[k]); } float se = 0.0f; for (uint i = lid; i < total; i += 256u) { float e = metal::exp(sc[i] - gmx); sc[i] = e; se = se + e; } se = metal::simd_sum(se); if (tiisg == 0) { sh[8u + sgitg] = se; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float tot = 0.0f; for (uint k = 0u; k < 8u; ++k) { tot = tot + sh[8u + k]; } float inv = 1.0f / tot; if (lid < 128u) { float acc = 0.0f; for (uint i = 0u; i < total; ++i) { float v = i < nctx ? vc[((ulong)kh * (ulong)maxpos + (ulong)(start + i)) * 128ul + lid] : vcur[(i - nctx) * 1024u + kh * 128u + lid]; acc = metal::fma(sc[i], v, acc); } out[row * 4096u + h * 128u + lid] = acc * inv; } }";
+    // src [nrows][d] (the target's residual after a tapped layer) into dst row (rowoff + t), columns slot * d ..: dst [rows][W]
+    def q38d-capture-msl() = "kernel void form_q38d_capture (device const float* src [[buffer(0)]], device float* dst [[buffer(1)]], constant uint& d [[buffer(2)]], constant uint& W [[buffer(3)]], constant uint& slot [[buffer(4)]], constant uint& rowoff [[buffer(5)]], constant uint& nrows [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint t = gid / d; if (t >= nrows) return; uint i = gid - t * d; dst[(ulong)(rowoff + t) * (ulong)W + (ulong)slot * (ulong)d + (ulong)i] = src[(ulong)t * (ulong)d + (ulong)i]; }";
+    // top 16 of each part of logits row pos + 1 (descending, lower id first on a tie): pi/pv [npos][parts][16]
+    def q38d-top16-msl() = "kernel void form_q38d_top16 (device const float* lg [[buffer(0)]], device uint* pi [[buffer(1)]], device float* pv [[buffer(2)]], constant uint& vocab [[buffer(3)]], constant uint& parts [[buffer(4)]], constant uint& npos [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint pos = gid / parts; if (pos >= npos) return; uint p = gid - pos * parts; ulong xo = (ulong)(pos + 1u) * (ulong)vocab; uint chunk = (vocab + parts - 1u) / parts; uint lo = p * chunk; uint hi = metal::min(lo + chunk, vocab); float tv[16]; uint ti[16]; for (uint k = 0u; k < 16u; ++k) { tv[k] = -3.4e38f; ti[k] = 4294967295u; } for (uint i = lo; i < hi; ++i) { float v = lg[xo + i]; if (v > tv[15]) { uint k = 15u; while (k > 0u && v > tv[k - 1u]) { tv[k] = tv[k - 1u]; ti[k] = ti[k - 1u]; k = k - 1u; } tv[k] = v; ti[k] = i; } } ulong o = ((ulong)pos * (ulong)parts + (ulong)p) * 16ul; for (uint k = 0u; k < 16u; ++k) { pi[o + k] = ti[k]; pv[o + k] = tv[k]; } }";
+    // one group a position: merge its parts into the top 16 (cand, unary), the previous position's (or the anchor) as the predecessors, and
+    // the 16 x 16 edge table. sel [8][256], pred / succ the Q8_0 codebooks [vocab][256]; ids[0] is the anchor.
+    def q38d-edges-msl() = q38d-cat(["inline void q38d_merge16(device const uint* pi, device const float* pv, ulong rb, uint parts, threadgroup uint* oi, threadgroup float* ov, threadgroup float* shv, threadgroup uint* shi, uint tid, ushort lane, ushort sg) { uint n = parts * 16u; for (uint r = 0u; r < 16u; ++r) { float bv = -3.5e38f; uint bi = 4294967295u; for (uint e = tid; e < n; e += 256u) { float v = pv[rb + e]; uint id = pi[rb + e]; if (v > bv || (v == bv && id < bi)) { bool taken = false; for (uint k = 0u; k < r; ++k) { if (oi[k] == id) { taken = true; } } if (!taken) { bv = v; bi = id; } } } float sv = metal::simd_max(bv); uint si = metal::simd_min(bv == sv ? bi : 4294967295u); if (lane == 0) { shv[sg] = sv; shi[sg] = si; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tid == 0u) { float gv = shv[0]; uint gi = shi[0]; for (uint k = 1u; k < 8u; ++k) { if (shv[k] > gv || (shv[k] == gv && shi[k] < gi)) { gv = shv[k]; gi = shi[k]; } } ov[r] = gv; oi[r] = gi; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } } ",
+        "inline float q38d_dq8(device const uchar* qb, ulong row, uint d) { ulong blk = row * 8ul + (ulong)(d / 32u); ulong b = blk * 34ul; ushort h = (ushort)qb[b] | ((ushort)qb[b + 1ul] << 8); return float(as_type<half>(h)) * float(as_type<char>(qb[b + 2ul + (ulong)(d & 31u)])); } ",
+        "kernel void form_q38d_edges (device const uint* pi [[buffer(0)]], device const float* pv [[buffer(1)]], device uint* cand [[buffer(2)]], device float* unary [[buffer(3)]], device float* table [[buffer(4)]], device const float* sel [[buffer(5)]], device const uchar* pred [[buffer(6)]], device const uchar* succ [[buffer(7)]], device const uint* ids [[buffer(8)]], constant uint& vocab [[buffer(9)]], constant uint& parts [[buffer(10)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]], uint tidx [[thread_index_in_threadgroup]]) { threadgroup uint sc[16]; threadgroup float sv[16]; threadgroup uint sp[16]; threadgroup float svp[16]; threadgroup float shv[8]; threadgroup uint shi[8]; uint pos = tgpig.x; uint tid = (uint)tidx; q38d_merge16(pi, pv, (ulong)pos * (ulong)parts * 16ul, parts, sc, sv, shv, shi, tid, lane, sg); if (pos > 0u) { q38d_merge16(pi, pv, (ulong)(pos - 1u) * (ulong)parts * 16ul, parts, sp, svp, shv, shi, tid, lane, sg); } else { if (tid < 16u) { sp[tid] = ids[0]; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (tid < 16u) { cand[pos * 16u + tid] = sc[tid]; unary[pos * 16u + tid] = sv[tid]; } uint i = tid / 16u; uint j = tid - i * 16u; uint pi_ = metal::min(sp[i], vocab - 1u); uint cj = metal::min(sc[j], vocab - 1u); float acc = 0.0f; for (uint d = 0u; d < 256u; ++d) { acc = acc + q38d_dq8(pred, (ulong)pi_, d) * sel[(pos + 1u) * 256u + d] * q38d_dq8(succ, (ulong)cj, d); } table[(pos * 16u + i) * 16u + j] = acc; }"]);
+    // the greedy path: one thread; ids[1 + pos] = the chosen candidate of position pos, dbg[pos] = the plain argmax of position pos
+    def q38d-path-msl() = "kernel void form_q38d_path (device const uint* cand [[buffer(0)]], device const float* unary [[buffer(1)]], device const float* table [[buffer(2)]], device uint* ids [[buffer(3)]], device uint* dbg [[buffer(4)]], constant uint& npos [[buffer(5)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; uint prev = 0u; for (uint pos = 0u; pos < npos; ++pos) { uint best = 0u; float bs = unary[pos * 16u] + table[(pos * 16u + prev) * 16u]; for (uint j = 1u; j < 16u; ++j) { float s = unary[pos * 16u + j] + table[(pos * 16u + prev) * 16u + j]; if (s > bs) { bs = s; best = j; } } prev = best; ids[1u + pos] = cand[pos * 16u + best]; dbg[pos] = cand[pos * 16u]; } }";
+    def q38d-msl() = ("#include <metal_stdlib>\n#pragma clang fp contract(off)\n" + (ldm-msl-helpers() + (q38d-conv-msl() + (q38d-qkrope-msl() + (q38d-commit-msl() + (q38d-attn-msl() + (q38d-capture-msl() + (q38d-top16-msl() + (q38d-edges-msl() + q38d-path-msl())))))))));
+    // ds: 0 conv 1 qkrope 2 commit 3 attn 4 capture 5 top16 6 edges 7 path
+    def q38d-pipes(msl) = [metal_pipeline(msl, "form_q38d_conv"), metal_pipeline(msl, "form_q38d_qkrope"), metal_pipeline(msl, "form_q38d_commit"), metal_pipeline(msl, "form_q38d_attn"), metal_pipeline(msl, "form_q38d_capture"), metal_pipeline(msl, "form_q38d_top16"), metal_pipeline(msl, "form_q38d_edges"), metal_pipeline(msl, "form_q38d_path")];
+    // ── the drafter's tensors (a second GGUF) ──
+    def q38d-tv(dsrc, dbase, dpath, name) = kth-tv-at(dsrc, dbase, dpath, egg-find-tensor(dsrc, name));
+    def q38d-bn(l, sfx) = ("blk." + (l.str() + sfx));
+    // per layer: 0 attn_norm 1 attn_conv_base 2 attn_conv_proj 3 q 4 k 5 v 6 q_norm 7 k_norm 8 attn_output 9 ffn_norm 10 ffn_conv_base
+    // 11 ffn_conv_proj 12 gate 13 up 14 down
+    def q38d-layer-tvs(dsrc, dbase, dpath, l) = [q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_norm.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_conv_base")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_conv_proj.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_q.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_k.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_v.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_q_norm.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_k_norm.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_output.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_norm.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_conv_base")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_conv_proj.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_gate.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_up.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_down.weight"))];
+    def q38d-layers-tvs(dsrc, dbase, dpath, l, n) = l >= n ? [] : cons(q38d-layer-tvs(dsrc, dbase, dpath, l), q38d-layers-tvs(dsrc, dbase, dpath, l + 1, n));
+    // model level: 0 enc.output_norm (hidden_norm) 1 fc 2 output_norm 3 selector_hidden 4 selector_predecessor 5 selector_successor
+    def q38d-model-tvs(dsrc, dbase, dpath) = [q38d-tv(dsrc, dbase, dpath, "enc.output_norm.weight"), q38d-tv(dsrc, dbase, dpath, "fc.weight"), q38d-tv(dsrc, dbase, dpath, "output_norm.weight"), q38d-tv(dsrc, dbase, dpath, "selector_hidden.weight"), q38d-tv(dsrc, dbase, dpath, "selector_predecessor.weight"), q38d-tv(dsrc, dbase, dpath, "selector_successor.weight")];
+    def q38d-block() = 8;
+    def q38d-width() = 25600;
+    def q38d-tap-count() = 5;
+    // the target layers whose residual (after the layer, before output_norm) the drafter reads: the GGUF lists 6 20 34 48 62 (hidden_states
+    // indices, embedding = 0), Splash's checkpoint 5 19 33 47 61 (layer indices): the same five outputs
+    def q38d-tap-shift() = 0;
+    def q38d-ctx-on() = 1;
+    def q38d-slot(l) = l - q38d-tap-shift() == 5 ? 0 : (l - q38d-tap-shift() == 19 ? 1 : (l - q38d-tap-shift() == 33 ? 2 : (l - q38d-tap-shift() == 47 ? 3 : (l - q38d-tap-shift() == 61 ? 4 : 0 - 1))));
+    // db: 0 h0 1 h1 2 nrm 3 dyn 4 cv 5 q 6 k 7 v 8 q2 9 k2 10 att 11 proj 12 res 13 gate 14 up 15 inter 16 fnrm 17 sel 18 cap 19 fco 20 hn
+    //     21 kin 22 vin 23 logits 24 pi 25 pv 26 cand 27 unary 28 table 29 dbg 30 dids
+    def q38d-alloc-kv(l, n, maxpos) = l >= n ? [] : cons([metal_buf_alloc(8 * maxpos * 128 * 4), metal_buf_alloc(8 * maxpos * 128 * 4)], q38d-alloc-kv(l + 1, n, maxpos));
+    def q38d-bufs(geo, nr) {
+        let H = geo[0];
+        let V = geo[19];
+        let F = geo[10];
+        [metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(nr * H * 4), metal_buf_alloc(8 * 1280 * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * 4096 * 4), metal_buf_alloc(8 * 1024 * 4), metal_buf_alloc(8 * 1024 * 4), metal_buf_alloc(8 * 4096 * 4), metal_buf_alloc(8 * 1024 * 4), metal_buf_alloc(8 * 4096 * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * F * 4), metal_buf_alloc(8 * F * 4), metal_buf_alloc(8 * F * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * 256 * 4), metal_buf_alloc(nr * q38d-width() * 4), metal_buf_alloc(nr * H * 4), metal_buf_alloc(nr * H * 4), metal_buf_alloc(nr * 1024 * 4), metal_buf_alloc(nr * 1024 * 4), metal_buf_alloc(8 * V * 4), metal_buf_alloc(7 * 1024 * 16 * 4), metal_buf_alloc(7 * 1024 * 16 * 4), metal_buf_alloc(7 * 16 * 4), metal_buf_alloc(7 * 16 * 4), metal_buf_alloc(7 * 256 * 4), metal_buf_alloc(64), metal_buf_alloc(64)];
+    }
+    // dx: 0 layers' tensors 1 model tensors 2 buffers 3 per-layer [K, V] context caches 4 maxpos 5 nr (rows the capture and commit buffers hold) 6 layers
+    def q38d-open(ctx, dpath, maxpos, nr0) {
+        let dsrc = eqr-of-file(dpath, 0, 40000000);
+        let dbase = egg-data-base(dsrc, 32);
+        let n = gmt-u32(dsrc, "dflash.block_count");
+        let nr = nr0 < 8 ? 8 : nr0;
+        let db = q38d-bufs(ctx[2], nr);
+        let wm = metal_buf_write(db[30], 0, md-le32(0) + (md-le32(248070) + (md-le32(248070) + (md-le32(248070) + (md-le32(248070) + (md-le32(248070) + (md-le32(248070) + md-le32(248070))))))));
+        [q38d-layers-tvs(dsrc, dbase, dpath, 0, n), q38d-model-tvs(dsrc, dbase, dpath), db, q38d-alloc-kv(0, n, maxpos), maxpos, nr, n];
+    }
+    def q38d-free-kv(kvs) = (Comparable) len(kvs) == 0 ? 0 : (Number) q38-free-handles(kvs[0]) + (Number) q38d-free-kv(kvs[1:]);
+    def q38d-free-layers(ls) = (Comparable) len(ls) == 0 ? 0 : (Number) q38-free-tvs(ls[0]) + (Number) q38d-free-layers(ls[1:]);
+    def q38d-close(dx) = {
+        metal_sync();
+        sum([q38-free-handles(dx[2]), q38d-free-kv(dx[3]), q38-free-tvs(dx[1]), q38d-free-layers(dx[0])]);
+    };
+    def q38d-ok?(dx) = len(dx) < 7 ? 0 : (q38-handles-ok?(dx[2]) && (q38-handle-ok?(kth-tv-h(dx[1][1])) && (q38-handle-ok?(kth-tv-h(dx[1][5])) && q38-handle-ok?(kth-tv-h(dx[0][0][14])))));
+    def q38d-mv(ps, qs, tv, xh, yh, nt, barrier) = q38s-mv(ps, qs, tv, xh, yh, nt, kth-tv-r(tv), barrier);
+    // ── the target's tapped residuals ──
+    def q38d-capture-layer(bs, geo, ds, dx, l, ntok, rowoff) = q38d-slot(l) < 0 ? 0 : metal_enqueue(ds[4], q38-b16([bs[33], dx[2][18]], [geo[0], q38d-width(), q38d-slot(l), rowoff, ntok], 0, 1), geo[0] * ntok);
+    // the check span, qwen35-dense-spec's q38s-layers with the capture after each tapped layer
+    def q38d-layers(ps, qs, bs, geo, lays, sts, snps, ds, dx, l, nL, ntok, pos0) = l >= nL ? 1 : {
+        kth-full?(l, geo[22]) ? q38s-full-attn-span(ps, qs, bs, geo, nth(lays, l), nth(sts, l), pos0, ntok) : q38s-linear-attn-span(ps, qs, bs, geo, nth(lays, l), nth(sts, l), nth(snps, l), ntok);
+        q38s-ffn-span(ps, qs, bs, geo, nth(lays, l), ntok);
+        q38d-capture-layer(bs, geo, ds, dx, l, ntok, 0);
+        let handed = q38-handover-after(l + 1, nL);
+        q38d-layers(ps, qs, bs, geo, lays, sts, snps, ds, dx, l + 1, nL, ntok, pos0);
+    };
+    def q38d-verify(ctx, qs, ds, dx, sts, sx, ntok, pos0) = {
+        let ps = ctx[0];
+        let bs = ctx[1];
+        let geo = ctx[2];
+        metal_enqueue(qs[q38s-pipe-embed()], md-bind16([kth-tv-h(ctx[4]), sx[0], bs[33]], [geo[0], ntok, 0], 256, 0, 0, 1), geo[0] * ntok);
+        q38d-layers(ps, qs, bs, geo, ctx[3], sts, sx[9], ds, dx, 0, geo[21], ntok, pos0);
+        q38s-head-check(ctx, qs, sx, ntok);
+    };
+    def q38d-prefill-layers(ps, bs, geo, lays, sts, ds, dx, l, nL, n) = l >= nL ? 1 : {
+        kth-full?(l, geo[22]) ? q38-full-attn-span(ps, bs, geo, nth(lays, l), nth(sts, l), 0, n) : q38-linear-attn-span-f(ps, bs, geo, nth(lays, l), nth(sts, l), n, 1);
+        q38-ffn-span(ps, bs, geo, nth(lays, l), n);
+        q38d-capture-layer(bs, geo, ds, dx, l, n, 0);
+        q38d-prefill-layers(ps, bs, geo, lays, sts, ds, dx, l + 1, nL, n);
+    };
+    // ── the draft ──
+    // the context rows captured in dx[2][18] (rows 0..nrows) into every layer's K/V cache at positions pos0..: fc, hidden_norm, then each layer's k and v
+    def q38d-commit-layers(ps, qs, ds, dx, geo, l, n, nrows, pos0) = l >= n ? 1 : {
+        let lay = nth(dx[0], l);
+        let kv = nth(dx[3], l);
+        let db = dx[2];
+        q38d-mv(ps, qs, lay[4], db[20], db[21], nrows, 1);
+        q38d-mv(ps, qs, lay[5], db[20], db[22], nrows, 1);
+        metal_enqueue(ds[2], q38-b16([db[21], db[22], kth-tv-h(lay[7]), kv[0], kv[1]], [pos0, dx[4], nrows], 0, 1), nrows * 8);
+        q38d-commit-layers(ps, qs, ds, dx, geo, l + 1, n, nrows, pos0);
+    };
+    def q38d-commit(ctx, qs, ds, dx, nrows, pos0) = {
+        let ps = ctx[0];
+        let geo = ctx[2];
+        let dm = dx[1];
+        let db = dx[2];
+        q38d-mv(ps, qs, dm[1], db[18], db[19], nrows, 1);
+        q38-rms-span(ps, db[19], dm[0], db[20], geo[0], geo[6], nrows, 1);
+        q38d-commit-layers(ps, qs, ds, dx, geo, 0, dx[6], nrows, pos0);
+    };
+    def q38d-conv(ds, x, dyn, base, resid, out, kind, finish) = metal_enqueue(ds[0], q38-b16([x, dyn, base, resid, out], [5120, 1280, kind, finish, 8], 0, 1), 8 * 5120);
+    // one draft layer over the block in cur -> nxt; L = the committed context length (the block's rows are positions L..L+7)
+    def q38d-layer(ps, qs, ds, dx, geo, l, cur, nxt, L) = {
+        let lay = nth(dx[0], l);
+        let kv = nth(dx[3], l);
+        let db = dx[2];
+        q38-rms-span(ps, cur, lay[0], db[2], geo[0], geo[6], 8, 1);
+        q38d-mv(ps, qs, lay[2], db[2], db[3], 8, 1);
+        q38d-conv(ds, db[2], db[3], kth-tv-h(lay[1]), cur, db[4], 0, 0);
+        q38d-mv(ps, qs, lay[3], db[4], db[5], 8, 1);
+        q38d-mv(ps, qs, lay[4], db[4], db[6], 8, 1);
+        q38d-mv(ps, qs, lay[5], db[4], db[7], 8, 1);
+        metal_enqueue(ds[1], q38-b16([db[5], db[6], kth-tv-h(lay[6]), kth-tv-h(lay[7]), db[8], db[9]], [L, 8], 0, 1), 8 * 40);
+        metal_enqueue(ds[3], md-bind16([db[8], kv[0], kv[1], db[9], db[7], db[10]], [L, dx[4], 8, q38d-ctx-on()], 256, 0, 1, 1), 32 * 8);
+        q38d-mv(ps, qs, lay[8], db[10], db[11], 8, 1);
+        q38d-conv(ds, db[11], db[3], kth-tv-h(lay[1]), cur, db[12], 1, 1);
+        q38-rms-span(ps, db[12], lay[9], db[2], geo[0], geo[6], 8, 1);
+        q38d-mv(ps, qs, lay[11], db[2], db[3], 8, 1);
+        q38d-conv(ds, db[2], db[3], kth-tv-h(lay[10]), db[12], db[4], 0, 0);
+        q38d-mv(ps, qs, lay[12], db[4], db[13], 8, 1);
+        q38d-mv(ps, qs, lay[13], db[4], db[14], 8, 1);
+        metal_enqueue(ps[18], q38-b16([db[13], db[14], db[15]], [geo[10] * 8], 0, 1), geo[10] * 8);
+        q38d-mv(ps, qs, lay[14], db[15], db[11], 8, 1);
+        q38d-conv(ds, db[11], db[3], kth-tv-h(lay[10]), db[12], nxt, 1, 1);
+        1;
+    };
+    def q38d-layers-go(ps, qs, ds, dx, geo, l, n, L) = l >= n ? 1 : {
+        q38d-layer(ps, qs, ds, dx, geo, l, (Comparable) (l % 2) == 0 ? dx[2][0] : dx[2][1], (Comparable) (l % 2) == 0 ? dx[2][1] : dx[2][0], L);
+        q38d-layers-go(ps, qs, ds, dx, geo, l + 1, n, L);
+    };
+    // the block [x, mask x7] through the drafter, the head and the selector: the seven chosen tokens land in sx[0] at 1..7 (the check span's ids)
+    def q38d-forward(ctx, qs, ds, dx, sx, L) = {
+        let ps = ctx[0];
+        let geo = ctx[2];
+        let dm = dx[1];
+        let db = dx[2];
+        metal_enqueue(qs[q38s-pipe-embed()], md-bind16([kth-tv-h(ctx[4]), db[30], db[0]], [geo[0], 8, 0], 256, 0, 0, 1), geo[0] * 8);
+        q38d-layers-go(ps, qs, ds, dx, geo, 0, dx[6], L);
+        q38-rms-span(ps, (Comparable) (dx[6] % 2) == 0 ? db[0] : db[1], dm[2], db[16], geo[0], geo[6], 8, 1);
+        q38d-mv(ps, qs, ctx[6], db[16], db[23], 8, 1);
+        q38d-mv(ps, qs, dm[3], db[16], db[17], 8, 1);
+        metal_enqueue(ds[5], q38-b16([db[23], db[24], db[25]], [geo[19], 1024, 7], 0, 1), 7 * 1024);
+        metal_enqueue(ds[6], md-bind16([db[24], db[25], db[26], db[27], db[28], db[17], kth-tv-h(dm[4]), kth-tv-h(dm[5]), sx[0]], [geo[19], 1024], 256, 0, 1, 1), 7);
+        metal_enqueue(ds[7], q38-b16([db[26], db[27], db[28], sx[0], db[29]], [7], 0, 1), 1);
+        1;
+    };
+    // ── the step: one batch, one wait ──
+    // x pending at position p; the context holds positions < p once the previous step's accepted rows (ncommit of them at cpos0) are committed;
+    // slot: the recurrent snapshot to restore first (-1: none). Returns [ids (x, d1..d7), verified 0..7, ms, phases, plain argmax of the block, winning logits]
+    def q38d-step(ctx, qs, ds, dx, sts, sx, x, p, slot, ncommit, cpos0, phased) {
+        let ps = ctx[0];
+        let bs = ctx[1];
+        let geo = ctx[2];
+        let l0 = metal_live();
+        let ta = host_monotonic_ms();
+        let w0 = metal_buf_write(sx[0], 0, md-le32(x));
+        let w1 = metal_buf_write(dx[2][30], 0, md-le32(x));
+        metal_batch_concurrent();
+        let t0 = host_monotonic_ms();
+        slot >= 0 ? q38s-restore(ctx, sts, sx, slot) : 0;
+        ncommit > 0 ? q38d-commit(ctx, qs, ds, dx, ncommit, cpos0) : 0;
+        let t1 = q38s-mark(phased);
+        q38d-forward(ctx, qs, ds, dx, sx, p);
+        let handed = q38-handover();
+        let t2 = q38s-mark(phased);
+        q38d-verify(ctx, qs, ds, dx, sts, sx, 8, p);
+        let tb = host_monotonic_ms();
+        let ver = metal_buf_read(sx[4], 0, 32);
+        let toks = metal_buf_read(sx[0], 0, 32);
+        let vals = metal_buf_read(sx[5], 0, 32);
+        let dbg = metal_buf_read(dx[2][29], 0, 28);
+        let t3 = host_monotonic_ms();
+        let l1 = metal_live();
+        [q38s-u32s(toks, 0, 8), q38s-u32s(ver, 0, 8), tb - ta, phased == 1 ? [t1 - t0, t2 - t1, t3 - t2, 0] : [0, 0, 0, 0], [(l1[11] - l0[11]) / 1000, l1[7] - l0[7]], q38s-u32s(dbg, 0, 7), q38s-u32s(vals, 0, 8)];
+    }
+    // the same prefix rule on the plain argmax block (the selector's worth, measured with no extra run): the longest prefix of dbg[0..6] the target's v[0..] repeats
+    def q38d-accept-go(d, v, j, k) = j > k ? k : (Comparable) d[j - 1] == v[j - 1] ? q38d-accept-go(d, v, j + 1, k) : j - 1;
+    // stats: [steps, host ms before the wait, ms of the wait, restore+commit, draft, check (phased only), device busy ms, dispatches,
+    //         then per draft position j=1..7 how many steps accepted it (selector path), then the same for the plain argmax block]
+    def q38d-gen-go(ctx, qs, ds, dx, sts, sx, x, p, slot, ncommit, cpos0, want, acc, stats, trace, phased, vacc) = len(acc) >= want ? [take(want, acc), stats, trace, take(want, vacc)] : {
+        let t0 = host_monotonic_ms();
+        let out = q38d-step(ctx, qs, ds, dx, sts, sx, x, p, slot, ncommit, cpos0, phased);
+        let t1 = host_monotonic_ms();
+        let d = out[0];
+        let v = out[1];
+        let ph = out[3];
+        let m = q38s-accept-go(d, v, 1, 7);
+        let m1 = q38d-accept-go(out[5], v, 1, 7);
+        let said = append(take(m, d[1:]), [v[m]]);
+        let st2 = q38s-add-go(stats, cons(1, cons(out[2], cons((t1 - t0) - out[2], cons(ph[0], cons(ph[1], cons(ph[2], cons(out[4][0], cons(out[4][1], append(q38s-hits-go(m, 1, 7, 7), q38s-hits-go(m1, 1, 7, 7)))))))))));
+        q38d-gen-go(ctx, qs, ds, dx, sts, sx, v[m], p + m + 1, m < 7 ? m : -1, m + 1, p, want, append(acc, said), st2, append(trace, [[m, t1 - t0, out[4][0], out[2]]]), phased, append(vacc, take(m + 1, out[6])));
+    };
+    // the prompt through the layer-major prefill with the tapped residuals captured, the context committed, the model's first token returned: [x0, n]
+    def q38d-prefill(ctx, qs, ds, dx, sts, sx, ids) {
+        let ps = ctx[0];
+        let bs = ctx[1];
+        let geo = ctx[2];
+        let n = len(ids);
+        metal_batch_concurrent();
+        q38-lm-embed(ps, bs, geo, ctx[4], ids, 0);
+        q38d-prefill-layers(ps, bs, geo, ctx[3], sts, ds, dx, 0, geo[21], n);
+        q38-gather(ps, bs, geo, n - 1, 1);
+        let x0 = q38-head-only(ps, bs, geo, ctx[5], ctx[6]);
+        metal_batch_concurrent();
+        q38d-commit(ctx, qs, ds, dx, n, 0);
+        metal_sync();
+        [x0, n];
+    }
+    // x0 pending at position N (the prompt's length); every step drafts seven and checks eight
+    def q38d-generate(ctx, qs, ds, dx, sts, sx, ids, x0, want, phased) = q38d-gen-go(ctx, qs, ds, dx, sts, sx, x0, len(ids), -1, 0, 0, want, [], q38s-zeros(8 + 14), [], phased, []);
+    0;
+}
