@@ -47,7 +47,7 @@ section [form.bml] {
   def fcac-reply-fits(session,state) = if fcac-reasoning?(state) then frbg-reserve-fits(session,fcac-token-allowance(state,fcap-reasoning(state)[0]),fcac-token-allowance(state,fcap-reasoning(state)[1])) else fcac-reply-room(session)>=2;
   def fcac-decode-width(state,session,count) = fat-max(0,fat-min(CodeProgressQuantum(),fat-min((fcms-maxpos(session) - fcms-pos(session)),if (fcap-reply-token-limit(state) <= 0) then CodeProgressQuantum() else (fcap-reply-token-limit(state) - count))));
   def fcac-bootstrap-budget(state,turns) = fcap-bootstrap(state) + "\nCALLER REPLY BUDGET: " + fcap-model-packet(json-node-object(fcac-budget-pairs(state,turns)));
-  def fcac-observation-budget(state,turns) = fcap-model-packet(json-node-object(append(json-object-pairs(fcap-observation-node(state)),fcac-budget-pairs(state,turns))));
+  def fcac-observation-budget(state,turns) = fcap-model-packet(json-node-object(append(json-object-pairs(fcap-observation-node(state)),fcac-budget-pairs(state,turns)))) + "\nCURRENT REPLY: " + fcap-work-instruction(state);
   // The final-stage request carries current work and full failed-check evidence.
   // A reference to an earlier observation must not replace the active correction.
   def fcac-current-reply-fits(session,state,turns) = if (!fcac-reply-fits(session,state)) then 0 else if (!fcac-reasoning?(state)) then 1 else frbg-task-reserve-fits(session,fcac-token-allowance(state,fcap-reasoning(state)[0]),fcac-token-allowance(state,fcap-reasoning(state)[1]),fcac-observation-budget(state,turns));
@@ -318,10 +318,21 @@ section [form.bml] {
   // answers.
   def fcac-control-submissions() = record_get(ftg-lane-session("code"),"coding-submissions") ?? [];
   def fcac-control-care() = record_get(ftg-lane-session("code"),"coding-care");
+  // Repeated alphabetic decode quanta in an unfinished control have added no
+  // executable evidence. Keep their private bytes and choose care in this KV.
+  def fcac-control-repeat(lane,fresh) {
+   let chunk=record_get(lane,"coding-chunk") ?? "";
+   let repeated=nil?(fresh) && len(chunk)>0 && chunk==(record_get(lane,"coding-previous-chunk") ?? "") && fat-starts(record_get(lane,"coding-window") ?? "","<|form:") && all?(i=>{ let b=str_byte_at(chunk,i); (b>=65 && b<=90) || (b>=97 && b<=122); },range(0,len(chunk)));
+   if repeated && nothing?(fcac-control-care()) then record_set(lane,"coding-care",json-node-object([oh-s("verb","decode"),oh-s("payload",chunk),oh-s("result","nothing=repeated-alphabetic-decoder-quantum;")])) else 0;
+   0;
+  }
+  def fcac-control-public(signal) = fcap-string(signal,"verb")=="decode" ? json-node-object([oh-s("verb","decode"),oh-n("repeated_chunk_bytes",len(fcap-string(signal,"payload"))),oh-n("complete_controls",0)]) : json-node-object([json-node-pair("verb",json-object-get(signal,"verb")),oh-s("payload_sha256",fcctg-sha(fcap-string(signal,"payload"))),oh-s("result_kind",ftg-result-kind(fcap-string(signal,"result")))]);
   def fcac-control-cared(state,evidence) {
    let signal=fcac-control-care();
-   let note=json-node-object([oh-s("cause","repeated-native-control-without-new-evidence"),json-node-pair("control",signal),json-node-pair("previous_observation",fcap-note-cell(state)),oh-s("private_reply_evidence",evidence),oh-s("change","The repeated control returned the same evidence. No action was submitted or executed. Keep the original goal, documents and checks. Use code_context for the current role and observation; task_context contains goal and sources. Act from the evidence already read: submit one focused native tool action or a changed repair choice. Do not repeat the same lookup.")]);
-   let public=json-node-object([json-node-pair("verb",json-object-get(signal,"verb")),oh-s("payload_sha256",fcctg-sha(fcap-string(signal,"payload"))),oh-s("result_kind",ftg-result-kind(fcap-string(signal,"result")))]);
+   let decode=fcap-string(signal,"verb")=="decode";
+   let change=decode ? "The unfinished control repeated an alphabetic decoder quantum. No action was submitted or executed. Keep completed effects, original goal, documents and checks. Choose a different complete action. Query one observed function with bml-api or read its focused source; do not expand an invented search pattern. Act from the evidence already read." : "The repeated control returned the same evidence. No action was submitted or executed. Keep the original goal, documents and checks. Use code_context for the current role and observation; task_context contains goal and sources. Act from the evidence already read: submit one focused native tool action or a changed repair choice. Do not repeat the same lookup.";
+   let note=json-node-object([oh-s("cause",decode ? "unfinished-control-decode-repetition" : "repeated-native-control-without-new-evidence"),json-node-pair("control",signal),json-node-pair("previous_observation",fcap-note-cell(state)),oh-s("private_reply_evidence",evidence),oh-s("change",change)]);
+   let public=fcac-control-public(signal);
    let reading=oh-reading("native-coding",fcam-managed(state) ? fcam-id(state) : "code."+host_pid().str(),"control-progress",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("changed-native-choice",public)],["changed-native-choice"],public);
    oh-voice(reading);
    let next=fcap-revise(state,note);
@@ -371,18 +382,19 @@ section [form.bml] {
   // A reply that opens by repeating the observation it was given (fcctg-echo?) is cut at once: it is input, and decoding the rest
   // of it spends the whole window (the echoes in the walk's retained replies are 44 percent of their bytes). It enters the
   // incomplete-reply flow with its prefix retained, so the next reply is asked for an action.
-  def fcac-echoing?(session, ids) = len(ids) >= 12 && len(ids) <= 96 && fcctg-echo?(tkz-decode-text(fcms-src(session), ids));
+  def fcac-echoing?(session, ids) = len(ids) >= 12 && len(ids) <= 96 && fcctg-echo?(fcmo-text(session,ids));
   def fcac-decoded(generation, state, started, stops, before) {
    let session = fcms-generation-session(generation);
    let ids = append(before, fcms-generation-ids(generation));
    let observed = fcac-observe(state, session, started);
     let lane = fcap-model-lane(state);
-    let fresh = ftg-quantum-controls(session, before, ids);
-    let room = !fcac-reply-exhausted(state,len(ids)) && fcms-pos(session) < fcms-maxpos(session) - 1 && !fcac-echoing?(session, ids);
+     let fresh = ftg-quantum-controls(session, before, ids);
+     fcac-control-repeat(lane,fresh);
+     let room = nothing?(fcac-control-care()) && !fcac-reply-exhausted(state,len(ids)) && fcms-pos(session) < fcms-maxpos(session) - 1 && !fcac-echoing?(session, ids);
     let limit=fcap-reply-token-limit(state);
     let answerable=(limit<=0 || len(ids)<=limit) && fcms-pos(session)<fcms-maxpos(session)-1;
     let next = !nil?(fresh) && answerable ? fcac-control-answer(session, stops, fresh) : room && !fcms-stopped?(session) ? fcacs-next(session, stops) : session;
-    if (!room || !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) || fcms-stopped?(next) || !fcms-live?(next)) then fcms-generation(tkz-decode-text(fcms-src(session), ids), ids, next) else fcac-decode(next, state, started, stops, ids);
+    if (!room || !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) || fcms-stopped?(next) || !fcms-live?(next)) then fcms-generation(fcmo-text(session,ids), ids, next) else fcac-decode(next, state, started, stops, ids);
   }
  }
  0;
