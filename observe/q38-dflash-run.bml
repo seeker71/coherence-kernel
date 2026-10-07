@@ -3,7 +3,7 @@
 //   echo '{}' | ./fkwu observe/q38-dflash-run.bml            the plan. Opens nothing.
 //   echo '{"go":1,"prompt":"Explain in two sentences why the sky is blue.","decode":32}' | ./fkwu observe/q38-dflash-run.bml
 //                                                            the same ids or the speculation is wrong; acceptance per draft position; tokens a step; step split
-// stdin, one JSON line, all optional: go, file, draft, prompt, decode (32), rounds (1), phased (0|1), plain (1: also run the plain decode), cap (maxpos extra).
+// stdin, one JSON line, all optional: go, file, draft, prompt, decode (32), gate (0: min plain tok/s, below it the run says noisy and measures nothing), phased (0|1), plain (1: also run the plain decode).
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-dflash.fk
 section [form.bml] {
@@ -24,11 +24,13 @@ section [form.bml] {
   def qdr-plain(ctx, ids, n) {
    let sts = q38-new-state(ctx[2]);
    let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let l0 = metal_live();
    let t0 = host_monotonic_ms();
    let spoken = q38-generate(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], r[0], len(ids), n, [], []);
    let t1 = host_monotonic_ms();
+   let l1 = metal_live();
    let freed = q38-free-state(sts);
-   [spoken, t1 - t0, r[0]];
+   [spoken, t1 - t0, r[0], (l1[11] - l0[11]) / 1000];
   }
   def qdr-dflash(ctx, qs, ds, dx, sx, ids, n, phased) {
    let sts = q38-new-state(ctx[2]);
@@ -48,17 +50,25 @@ section [form.bml] {
    qdr-say("steps " ++ st[0].str() ++ ", tokens per step " ++ ((n * 100) / steps).str() ++ "/100; acceptance path: " ++ qdr-hits-go(st, 8, 1));
    qdr-say("plain-argmax block acceptance: " ++ qdr-hits-go(st, 15, 1));
    qdr-say("per step: host before wait " ++ (st[1] / steps).str() ++ " ms, wait " ++ (st[2] / steps).str() ++ " ms, restore+commit " ++ (st[3] / steps).str() ++ " ms, draft " ++ (st[4] / steps).str() ++ " ms, check " ++ (st[5] / steps).str() ++ " ms, device busy " ++ (st[6] / steps).str() ++ " ms, dispatches " ++ (st[7] / steps).str());
+   qdr-say("device busy: plain " ++ a[3].str() ++ " ms for " ++ n.str() ++ " tokens (" ++ (a[3] / (n <= 0 ? 1 : n)).str() ++ " ms/token), dflash " ++ st[6].str() ++ " ms (" ++ (st[6] / (n <= 0 ? 1 : n)).str() ++ " ms/token): device-side speedup " ++ (st[6] <= 0 ? 0 : (a[3] * 100) / st[6]).str() ++ "/100");
    qdr-say("plain ids:  " ++ qdr-idstr(a[0]));
    qdr-say("dflash ids: " ++ qdr-idstr(b[0]));
    qdr-say("accepted:step ms: " ++ foldl((acc, t) => acc ++ t[0].str() ++ ":" ++ t[1].str() ++ " ", "", b[4]));
    (String) qdr-idstr(a[0]) == qdr-idstr(b[0]) ? 1 : 0;
   }
-  def qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain) {
+  def qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain, gate) {
+   let w1 = qdr-dflash(ctx, qs, ds, dx, sx, ids, 16, 0);
+   let w2 = plain == 1 ? qdr-plain(ctx, ids, 8) : 0;
+   qdr-say("warm-up done (weights paged in, pipelines built)");
+   let g = (plain == 1) && (gate > 0) ? qdr-plain(ctx, ids, 24) : [[], 1, 0, 0];
+   (plain == 1) && (gate > 0) && (qdr-rate10(24, g[1]) < gate * 10) ? qdr-say("noisy: plain decode " ++ qdr-rate(24, g[1]) ++ " tok/s is below the gate of " ++ gate.str() ++ "; not measuring") : qdr-run-measured(ctx, qs, ds, dx, sx, ids, n, phased, plain);
+  }
+  def qdr-run-measured(ctx, qs, ds, dx, sx, ids, n, phased, plain) {
    let b = qdr-dflash(ctx, qs, ds, dx, sx, ids, n, phased);
-   let a = plain == 1 ? qdr-plain(ctx, ids, n) : [b[0], 1, b[3]];
+   let a = plain == 1 ? qdr-plain(ctx, ids, n) : [b[0], 1, b[3], 0];
    qdr-report(a, b, n);
   }
-  def qdr-open(path, dpath, n, prompt, phased, rounds, plain) {
+  def qdr-open(path, dpath, n, prompt, phased, gate, plain) {
    let src = fcmg-src(path);
    let ids = q35-chat-ids(src, prompt);
    let span = len(ids);
@@ -80,7 +90,7 @@ section [form.bml] {
       !((Comparable) q38d-ok?(dx) == 1) ? qdr-say("the drafter did not open") : {
        let sx = q38s-open(ctx, 7, span);
        qdr-say("open: prompt " ++ span.str() ++ " tokens, drafter layers " ++ dx[6].str());
-       let ok = qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain);
+       let ok = qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain, gate);
        let closed = q38s-close(sx);
        1;
       };
@@ -95,7 +105,7 @@ section [form.bml] {
   }
   def qdr-run() {
    let opts = qdr-opts();
-   (Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(qdr-text(opts, "file", qdr-file()), qdr-text(opts, "draft", qdr-draft()), qdr-int(opts, "decode", 32), qdr-text(opts, "prompt", "Explain in two sentences why the sky is blue."), qdr-int(opts, "phased", 0), qdr-int(opts, "rounds", 1), qdr-int(opts, "plain", 1)) : qdr-say("plan: go=1 runs the plain decode and the DFlash2 speculative decode of one prompt and compares the ids");
+   (Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(qdr-text(opts, "file", qdr-file()), qdr-text(opts, "draft", qdr-draft()), qdr-int(opts, "decode", 32), qdr-text(opts, "prompt", "Explain in two sentences why the sky is blue."), qdr-int(opts, "phased", 0), qdr-int(opts, "gate", 0), qdr-int(opts, "plain", 1)) : qdr-say("plan: go=1 runs the plain decode and the DFlash2 speculative decode of one prompt and compares the ids");
   }
  }
  qdr-run();
