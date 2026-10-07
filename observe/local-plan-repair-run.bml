@@ -1,0 +1,83 @@
+// Reference-only local coding. The planner owns retained-reference reuse,
+// verification, ledger and publication; this lane owns a coding checkpoint.
+import form-stdlib/bml/form-cli-local-plan.bml;
+import form-stdlib/bml/form-cli-code-request.bml;
+import form-stdlib/model-registry.bml;
+section [form.bml] {
+ class LocalPlanRepair {
+  def lrpr-reference() = "proposal.reference";
+  def lrpr-original() = "proposal.original";
+  def lrpr-sources(plan) = foldl((paths,path)=>flp-has?(paths,path) ? paths : append(paths,[path]),[],append(flp-p-writable(plan),flp-p-sources(plan)));
+  def lrpr-snapshots(paths) = map(path=>[path,flp-exists?(path),fhn-read(path)],paths);
+  def lrpr-scope(req,raw,snapshots) = flp-sha(json-emit(req)+raw+json-emit(fcam-pack(snapshots)));
+  // Only the reference body is writable; all surrounding bytes retain their
+  // original owner, including the contract and executable witness.
+  def lrpr-proposal(raw,reference) {
+   let open="<reference>"; let close="</reference>";
+   let a=str_find(raw,open,0); let b=str_find(raw,close,0);
+   if str_find(reference,open,0)>=0 || str_find(reference,close,0)>=0 then nothing()
+   else if a<0 && b<0 then raw+"\n"+open+"\n"+reference+"\n"+close+"\n"
+   else if a<0 || b<a+len(open) then nothing()
+   else substring(raw,0,a+len(open))+"\n"+reference+"\n"+substring(raw,b,len(raw));
+  }
+  def lrpr-current(owner) = owner[3]==lrpr-scope(owner[0],owner[2],lrpr-snapshots(map(s=>s[0],owner[4])));
+  def lrpr-documents(owner) = append([[lrpr-reference(),lrpr-reference(),flp-p-reference(flp-parse(owner[2])[2])],[lrpr-original(),lrpr-original(),owner[2]],["request.original","request.original",json-emit(owner[0])]],map(s=>[s[0],s[0],s[2]],owner[4]));
+  def lrpr-readonly(owner,docs) = foldl((same,d)=>same && fat-find-doc(docs,d[1])==d,true,lrpr-documents(owner)[1:]);
+  def lrpr-check(owner,docs) {
+   let reference=fat-find-doc(docs,lrpr-reference());
+   if !lrpr-current(owner) then [0,"source-or-witness-changed: this owned repair cannot use stale observations"]
+   else if !lrpr-readonly(owner,docs) || nil?(reference) then [0,"reference-only-contract: original proposal, request and sources must remain unchanged"]
+   else {
+    let raw=lrpr-proposal(owner[2],reference[2]);
+    let parsed=nothing?(raw) ? ["reference-delimiters","Write only reference definitions, without block tags.",[]] : flp-parse(raw);
+    if parsed[0]!="" then [0,parsed[1]] else {
+     let stamp="reference-check-"+host_pid().str()+"-"+now_unix_ms().str();
+     let v=flp-verify(parsed[2],owner[0],owner[1],[],stamp);
+     let swept=host_dir_rmdir(flp-at(flp-ctx-scratch(owner[1]),stamp));
+     let current=lrpr-current(owner);
+     [flp-held?(v) && current,!current ? "source-or-witness-changed during verification" : flp-held?(v) ? "Original planner verification passed in private scratch; no queue publication." : flp-finding(0,["native-code","reference","check"],v)];
+    };
+   };
+  }
+  def lrpr-request(opts,refusal) = json-node-object([
+   oh-s("goal","Repair only proposal.reference so the original proposal's executable witness and checks pass. Preserve its goal, band, full value, writable/source/definition manifests and checks. Read proposal.original and request.original through native tools. Read source definitions as needed. Edit proposal.reference, verify with the caller's planner checker, review and complete the owned work. Exact original refusal: "+refusal[2]),
+   json-node-pair("writable",flp-json-strings([lrpr-reference()])),json-node-pair("checks",json-node-array([])),oh-s("code_entry","direct"),oh-s("document_context","catalog"),oh-s("model",fcgp-str(opts,"repair_model")=="" ? mr-chain-names("write-code")[0] : fcgp-str(opts,"repair_model")),oh-n("weight_training",0),
+   oh-n("context",fcgp-num(opts,"context") ?? 32768),oh-n("turns",fcgp-num(opts,"repair_turns") ?? 64),oh-n("max_reply_tokens",fcgp-num(opts,"max_reply_tokens") ?? 3072)]);
+  // Bind the existing checkpoint before admission, including source presence
+  // and exact bytes. Interrupted work resumes; a changed scope never reuses it.
+  def lrpr-reenter(obj,kept) = oh-set(oh-set(obj,"goal",json-object-get(kept,"goal")),"resume",json-object-get(kept,"checkpoint_id"));
+  def lrpr-owned(obj,docs,checker,path,scope) {
+   let kept=fcam-read(path);
+   if !nothing?(kept) && fcap-string(kept,"scope")==scope && fcam-id-valid(fcap-string(kept,"checkpoint_id")) && len(fcap-string(kept,"goal"))>0 then lrpr-reenter(obj,kept) else {
+    let state=fcaq-prepare(obj,docs,checker,hearth-code-memory());
+    let saved=fcam-save(state);
+    let bound=saved && fcam-write(path,json-node-object([oh-s("scope",scope),oh-s("checkpoint_id",fcam-id(state)),json-node-pair("goal",json-object-get(obj,"goal"))]));
+    bound ? oh-set(obj,"resume",json-node-string(fcam-id(state))) : nothing();
+   };
+  }
+  def lrpr-result(owner,result,stem) {
+   let docs=map(n=>[fcap-string(n,"id"),fcap-string(n,"path"),fcap-string(n,"text")],json-array-elements(json-object-get(result,"documents")));
+   let ready=fcap-string(result,"status")=="complete" && fcaq-number(result,"release_ok",0)==1;
+   let checked=ready ? lrpr-check(owner,docs) : [0,"owned coding work remains retained"];
+   let kept=fcam-write(stem+".result.fkb",result);
+   print_str("[local-plan:reference-repair] "+json-emit(json-node-object([oh-s("status",fcap-string(result,"status")),oh-s("checkpoint_id",fcap-string(result,"checkpoint_id")),oh-n("turns",fcaq-number(result,"turns",0)),oh-n("tool_calls",fcaq-number(result,"tool_calls",0)),oh-n("check_runs",fcaq-number(result,"check_runs",0)),oh-n("generated_ids",fcaq-number(result,"generated_ids",0)),oh-n("injected_ids",fcaq-number(result,"injected_ids",0)),oh-n("release_ok",fcaq-number(result,"release_ok",0)),oh-s("check",checked[1])])));
+   if !kept || !ready || !checked[0] then nothing() else {
+    let raw=lrpr-proposal(owner[2],fat-find-doc(docs,lrpr-reference())[2]);
+    let path=stem+".reply.txt"; let written=write_file_text(path,raw);
+    fhn-read(path)!=raw ? nothing() : ["answered",raw,fcaq-number(result,"injected_ids",0),fcaq-number(result,"generated_ids",0),path];
+   };
+  }
+  def lrpr-repair(req,ctx,said,refusal,opts) {
+   let parsed=flp-parse(said[1]);
+   if refusal[0]!=7 || said[0]!="answered" || parsed[0]!="" then nothing() else {
+    let snapshots=lrpr-snapshots(lrpr-sources(parsed[2]));
+    let scope=lrpr-scope(req,said[1],snapshots); let owner=[req,ctx,said[1],scope,snapshots];
+    let dir=flp-dir()+"/repairs"; let made=flp-mkdirs(dir); let stem=dir+"/"+scope;
+    let docs=lrpr-documents(owner); let checker=[lrpr-check,owner];
+    let obj=lrpr-owned(lrpr-request(opts,refusal),docs,checker,stem+".owner.fkb",scope);
+    nothing?(obj) ? nothing() : lrpr-result(owner,fcaq-managed-with(obj,docs,checker),stem);
+   };
+  }
+ }
+ 0;
+}
