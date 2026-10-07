@@ -1,0 +1,117 @@
+// qwen35-dense-verify-band.bml — the speculative verify on the matrix unit: lossless with respect to the VERIFY path, and within a bounded
+// near-tie of the plain single-token decode, on the real Qwen3.8-27B Q8_0.
+//
+// What "lossless" means here is the field's meaning (Splash, llama.cpp): the speculative output is the greedy decode of the target on the verify
+// path's OWN arithmetic, and that arithmetic is not bitwise the single-token decode's (the matrix unit's sums, the simdgroup recurrence's
+// reductions). The verify path R is batch invariant (an output element is its own row and token column through one K order; the attention and the
+// conv are the decode kernels), so R at one token a step (q38s-fast1) is the reference every speculative step must reproduce:
+//   1   the DFlash2 drafter, adaptive, sky prompt, 32 tokens: the ids AND the winning-logit word at every position are R's
+//   2   the DFlash2 drafter, adaptive, code prompt, 40 tokens: the same
+//   4   the model's own MTP head, 3 drafts, code prompt, 32 tokens: the same
+//   8   an arbitrary 40-id prompt through the drafter: the same, AND drafts were rejected (the recurrent state was restored from its snapshots)
+//   16  AGREEMENT with the plain decode: five prompts (sky, code, prose, long code, counting) x 64 tokens, the check as a checker over the plain
+//       decode's own sequence in windows of eight: at least 99 percent of the positions say the plain decode's token, and every disagreement is a
+//       near-tie: the check's own logit margin between the two tokens AND the plain decode's margin are both under 0.15 nats
+//   32  the speculation still speaks more than a token a step (sky: fewer than 32 steps for 32 tokens)
+// The band prints the agreement (positions, first divergence, the margins) for the record. It needs the 29 GB file, the 2 GB drafter and a Metal
+// device; run it inside the GPU quiet window like every timed lane.
+// Verdict 63
+// REQUIRES: a live Metal device, Qwen3.8-27B-Q8_0.gguf and Qwen3.8-27B-DFlash2-Q8_0.gguf
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-dflash.fk form-stdlib/bml/qwen38-spec-witness.bml form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class Q38VerifyBand {
+  def qvb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qvb-draft() = "/Users/ursmuff/models/qwen38-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
+  def qvb-ids(n, i) = i >= n ? [] : cons(1000 + ((i * 37) % 5000), qvb-ids(n, i + 1));
+  def qvb-say(s) = print_str("[q38-verify-band] " ++ s);
+  def qvb-prompts() = ["Explain in two sentences why the sky is blue.", "Write a Python function that checks whether a number is prime.", "Write a short paragraph about autumn in a quiet mountain village.", "Write a Python class that implements a binary search tree with insert, search and in-order traversal methods.", "Count from 1 to 40, separated by commas."];
+  def qvb-names() = ["sky", "code", "prose", "long code", "counting"];
+  // near-tie: both margins under 0.15 nats
+  def qvb-tie?(d) = d[3] < 0.15 && d[4] < 0.15;
+  def qvb-ties(bad) = len(filter(d => qvb-tie?(d), bad));
+  // a speculative run (fast numerics) against the reference R of the same prompt: [ids identical, words equal, words that differ, stats]
+  def qvb-dflash(ctx, qs, ds, dx, sx, ids, ref, n, kmax, adapt) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38d-prefill(ctx, qs, ds, dx, sts, sx, ids);
+   let g = q38d-generate-a(ctx, qs, ds, dx, sts, sx, ids, r[0], n, 0, kmax, adapt);
+   let freed = q38-free-state(sts);
+   append(q38sw-vs-ref(ref, g[0], g[3]), [g[1]]);
+  }
+  def qvb-mtp(ctx, qs, sx, ids, ref, n, k) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38s-prefill(ctx, qs, sts, sx, ids);
+   let g = q38s-generate-a(ctx, qs, sts, sx, ids, r[0], k, n, 0, 0);
+   let freed = q38-free-state(sts);
+   append(q38sw-vs-ref(ref, g[0], g[3]), [g[1]]);
+  }
+  def qvb-exact(w) = (w[0] == 1) && (w[2] == 0) ? 1 : 0;
+  def qvb-show(label, w) = qvb-say(label ++ ": ids " ++ (w[0] == 1 ? "identical to R" : "DIFFER from R") ++ ", winning-logit words equal " ++ w[1].str() ++ ", differ " ++ w[2].str() ++ ", " ++ w[3][0].str() ++ " steps");
+  // the agreement of R with the plain decode, five prompts: [positions, disagreements, near-tie disagreements]
+  def qvb-agree-go(ctx, qs, sx, pids, names, n, acc) = len(pids) == 0 ? acc : {
+   let a = q38sw-agree(ctx, qs, sx, pids[0], n, 8);
+   let bad = a[2];
+   qvb-say("agreement " ++ names[0] ++ ": " ++ (n - len(bad)).str() ++ " of " ++ n.str() ++ " positions" ++ (len(bad) == 0 ? "" : "; first divergence at position " ++ bad[0][0].str() ++ "; " ++ q38sw-bad-text(bad)));
+   qvb-agree-go(ctx, qs, sx, pids[1:], names[1:], n, [acc[0] + n, acc[1] + len(bad), acc[2] + qvb-ties(bad)]);
+  };
+  def qvb-run-all(ctx, qs, ds, dx, src) {
+   let sx = q38s-open(ctx, 8, 64);
+   let sky = q35-chat-ids(src, "Explain in two sentences why the sky is blue.");
+   let code = q35-chat-ids(src, "Write a Python function that checks whether a string is a palindrome.");
+   let syn = qvb-ids(40, 0);
+   let refSky = q38sw-ref(ctx, qs, sx, sky, 32);
+   let refCode = q38sw-ref(ctx, qs, sx, code, 40);
+   let refSyn = q38sw-ref(ctx, qs, sx, syn, 40);
+   let dSky = qvb-dflash(ctx, qs, ds, dx, sx, sky, refSky, 32, 7, 1);
+   let s1 = qvb-show("dflash adaptive sky", dSky);
+   let dCode = qvb-dflash(ctx, qs, ds, dx, sx, code, refCode, 40, 7, 1);
+   let s2 = qvb-show("dflash adaptive code", dCode);
+   let mCode = qvb-mtp(ctx, qs, sx, code, refCode, 40, 3);
+   let s3 = qvb-show("mtp k=3 code", mCode);
+   let dSyn = qvb-dflash(ctx, qs, ds, dx, sx, syn, refSyn, 40, 7, 0);
+   let s4 = qvb-show("dflash k=7 arbitrary ids", dSyn);
+   let ag = qvb-agree-go(ctx, qs, sx, map(p => q35-chat-ids(src, p), qvb-prompts()), qvb-names(), 64, [0, 0, 0]);
+   let closed = q38s-close(sx);
+   let total = ag[0];
+   let b1 = qvb-exact(dSky);
+   let b2 = qvb-exact(dCode) == 1 ? 2 : 0;
+   let b4 = qvb-exact(mCode) == 1 ? 4 : 0;
+   let rejected = dSyn[3][10] < dSyn[3][0] ? 1 : 0;
+   let b8 = (qvb-exact(dSyn) == 1) && (rejected == 1) ? 8 : 0;
+   let b16 = ((total - ag[1]) * 100 >= total * 99) && (ag[2] == ag[1]) ? 16 : 0;
+   let b32 = dSky[3][0] < 32 ? 32 : 0;
+   qvb-say("AGREEMENT with the plain decode: " ++ (total - ag[1]).str() ++ " of " ++ total.str() ++ " positions, " ++ ag[1].str() ++ " disagreements, " ++ ag[2].str() ++ " of them near-ties");
+   qvb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str());
+   b1 + b2 + b4 + b8 + b16 + b32;
+  }
+  def qvb-opened(ctx, src, dpath, maxpos) {
+   let qs = q38s-fast(q38s-pipes(q38s-msl()));
+   let ds = q38d-pipes(q38d-msl());
+   let dx = (q38s-pipes-ok?(qs) && q38s-pipes-ok?(ds)) ? q38d-open(ctx, dpath, maxpos, 64) : [];
+   let v = (len(dx) == 7 && (Comparable) q38d-ok?(dx) == 1) ? qvb-run-all(ctx, qs, ds, dx, src) : 0;
+   let dclosed = len(dx) == 7 ? q38d-close(dx) : 0;
+   let closed = q38-close(ctx, []);
+   v;
+  }
+  def qvb-leased(path, dpath, src, maxpos) {
+   let ctx = q38-open-span(path, maxpos, 65);
+   let verdict = (Comparable) q38-context-ok?(ctx) == 1 ? qvb-opened(ctx, src, dpath, maxpos) : 0;
+   let unleased = mg-release();
+   verdict;
+  }
+  def qvb-open(path, dpath) {
+   let src = fcmg-src(path);
+   let maxpos = 64 + 64 + 8 + 16;
+   let own = fcms-qwen-own(src, maxpos) + file_size(dpath) + 1200000000;
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 verify band", path, weights, own);
+   !mg-granted?(granted) ? qvb-held(granted) : qvb-leased(path, dpath, src, maxpos);
+  }
+  def qvb-held(granted) {
+   qvb-say("held: " ++ granted[1]);
+   0;
+  }
+  def qvb-run() = qvb-open(qvb-file(), qvb-draft());
+ }
+ qvb-run();
+}
