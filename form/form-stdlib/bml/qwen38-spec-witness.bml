@@ -32,6 +32,85 @@ section [form.bml] {
    let c = q38sw-cmp-go(a[1], g[3], 0, 0, []);
    [(String) q38sw-idstr(a[0]) == q38sw-idstr(g[0]) ? 1 : 0, c[0], len(c[1]), g[1], a[0], g[0], c[1]];
   }
+  // ── the verify path's own reference, and how far it stands from the plain decode ──
+  // The check on the matrix unit is not the decode's arithmetic (its sums are the matrix unit's association), so a speculation that takes its
+  // tokens from the check says what the CHECK says: the greedy decode of the verify path, R. R is batch invariant (every output element is
+  // its own row and token column through the same K order, the attention and the recurrences are the decode kernels), so R at one token a
+  // step (mode 3, q38s-fast1) is the reference every speculative step must reproduce, ids and winning-logit words.
+  def q38sw-ref-go(ctx, qs, sts, sx, id, pos, k, said, vals) = k <= 0 ? [said, vals] : {
+   let w = metal_buf_write(sx[0], 0, md-le32(id));
+   metal_batch_concurrent();
+   let e = q38s-verify(ctx, qs, sts, sx, 1, pos);
+   let ver = metal_buf_read(sx[4], 0, 4);
+   let vb = metal_buf_read(sx[5], 0, 4);
+   let nid = ln-u32-le(ver, 0);
+   q38sw-ref-go(ctx, qs, sts, sx, nid, pos + 1, k - 1, append(said, [nid]), append(vals, [ln-u32-le(vb, 0)]));
+  };
+  // the greedy decode of the verify path over n tokens after the prompt (the first token is the lane prefill's x0)
+  def q38sw-ref(ctx, qs, sx, ids, n) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38s-prefill(ctx, qs, sts, sx, ids);
+   let a = q38sw-ref-go(ctx, q38s-fast1(qs), sts, sx, r[0], len(ids), n, [], []);
+   let freed = q38-free-state(sts);
+   [r[0], a[0], a[1]];
+  }
+  // the verify path as a checker over a sequence the plain decode said: seq = [x0, t1 .. tn] at positions N..N+n; the check of window
+  // [i, i+m) says the next token after each; where it differs from the plain decode's, [index, plain token, check token, the check's own
+  // logit margin check(b) - check(a)]
+  def q38sw-teach-bad(sx, vocab, seq, ver, i, j, m, acc) = j >= m ? acc : {
+   let a = seq[i + j + 1];
+   let b = ver[j];
+   a == b ? q38sw-teach-bad(sx, vocab, seq, ver, i, j + 1, m, acc) : {
+    let la = ln-f32-decode(ln-u32-le(metal_buf_read(sx[1], (j * vocab + a) * 4, 4), 0));
+    let lb = ln-f32-decode(ln-u32-le(metal_buf_read(sx[1], (j * vocab + b) * 4, 4), 0));
+    q38sw-teach-bad(sx, vocab, seq, ver, i, j + 1, m, append(acc, [[i + j, a, b, lb - la]]));
+   };
+  };
+  def q38sw-teach-go(ctx, qs, sts, sx, seq, n, i, w, npos, bad) = i >= n ? bad : {
+   let m = (n - i) < w ? (n - i) : w;
+   let wr = metal_buf_write(sx[0], 0, q38s-ids-bytes(take(m, seq[i:])));
+   metal_batch_concurrent();
+   let e = q38s-verify(ctx, qs, sts, sx, m, npos + i);
+   let ver = q38s-u32s(metal_buf_read(sx[4], 0, m * 4), 0, m);
+   q38sw-teach-go(ctx, qs, sts, sx, seq, n, i + m, w, npos, q38sw-teach-bad(sx, ctx[2][19], seq, ver, i, 0, m, bad));
+  };
+  // a speculative run (its ids said, its winning-logit words) against the verify path's reference: [ids identical (0/1), words equal, words that differ]
+  def q38sw-vs-ref(ref, gids, gvals) {
+   let c = q38sw-cmp-go(ref[2], gvals, 0, 0, []);
+   [(String) q38sw-idstr(ref[1]) == q38sw-idstr(gids) ? 1 : 0, c[0], len(c[1])];
+  }
+  // the plain decode again, reading at the probed steps the plain logits of the two tokens that differ: probes [index, plain token, check token]
+  // -> [index, the plain decode's margin plain(a) - plain(b)]
+  def q38sw-probe-read(ctx, p) {
+   let la = ln-f32-decode(ln-u32-le(metal_buf_read(nth(ctx[1], 28), p[1] * 4, 4), 0));
+   let lb = ln-f32-decode(ln-u32-le(metal_buf_read(nth(ctx[1], 28), p[2] * 4, 4), 0));
+   [p[0], la - lb];
+  }
+  def q38sw-probe-go(ctx, sts, id, pos, k, i, probes, acc) = k <= 0 ? acc : {
+   let nid = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], id, pos);
+   let hit = filter(p => p[0] == i, probes);
+   q38sw-probe-go(ctx, sts, nid, pos + 1, k - 1, i + 1, probes, len(hit) == 0 ? acc : append(acc, [q38sw-probe-read(ctx, hit[0])]));
+  };
+  // one prompt: the plain decode (ids, winning logits), the check over its sequence at window w, the plain margins at the disagreements.
+  // -> [plain ids (n), plain winning words, disagreements [index, a, b, check margin, plain margin], x0]
+  def q38sw-agree(ctx, qs, sx, ids, n, w) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let a = q38sw-plain-go(ctx, sts, r[0], len(ids), n, [], []);
+   let freed = q38-free-state(sts);
+   let seq = cons(r[0], a[0]);
+   let sts2 = q38-new-state(ctx[2]);
+   let r2 = q38s-prefill(ctx, qs, sts2, sx, ids);
+   let bad = q38sw-teach-go(ctx, q38s-fast1(qs), sts2, sx, seq, n, 0, w, len(ids), []);
+   let freed2 = q38-free-state(sts2);
+   let probes = map(b => [b[0], b[1], b[2]], bad);
+   let sts3 = q38-new-state(ctx[2]);
+   let r3 = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts3, ctx[4], ctx[5], ctx[6], ids, 0);
+   let pm = len(probes) == 0 ? [] : q38sw-probe-go(ctx, sts3, r3[0], len(ids), n, 0, probes, []);
+   let freed3 = q38-free-state(sts3);
+   [a[0], a[1], map(b => append(b, [filter(p => p[0] == b[0], pm)[0][1]]), bad), r[0]];
+  }
+  def q38sw-bad-text(bad) = foldl((acc, d) => acc ++ "(pos " ++ d[0].str() ++ " plain " ++ d[1].str() ++ " check " ++ d[2].str() ++ " check-margin " ++ d[3].str() ++ " plain-margin " ++ d[4].str() ++ ") ", "", bad);
   // how many steps accepted draft position j (stats: 0 steps, then 8 counters, then one per position)
   def q38sw-hits(stats, j) = stats[8 + j];
   def q38sw-steps(stats) = stats[0];

@@ -225,6 +225,7 @@ section [form.bml] {
    let lf = qsr-first-full(0, geo);
    let full = nth(lays, lf);
    let snp = nth(sx[9], 0);
+   let qf = q38s-fast(qs);
    let variants = [
     ["decode ffn (1 token, wide matvec)", 24, () => q38-ffn(ps, bs, geo, lin)],
     ["decode linear-attn (1 token)", 24, () => q38-linear-attn(ps, bs, geo, lin, nth(sts, 0))],
@@ -234,6 +235,13 @@ section [form.bml] {
     ["check linear-attn ntok " ++ ntok.str() ++ " without snapshots (the lane's recurrence kernels)", 24, () => q38s-linear-attn-span-s(ps, qs, bs, geo, lin, nth(sts, 0), snp, ntok, 0)],
     ["check full-attn ntok " ++ ntok.str() ++ " (decode-exact attention)", 24, () => q38s-full-attn-span(ps, qs, bs, geo, full, nth(sts, lf), pos, ntok)],
     ["lane full-attn-span ntok " ++ ntok.str() ++ " (mm64, the lane's span attention)", 24, () => q38-full-attn-span(ps, bs, geo, full, nth(sts, lf), pos, ntok)],
+    ["MMA check ffn ntok " ++ ntok.str(), 24, () => q38s-ffn-span(ps, qf, bs, geo, lin, ntok)],
+    ["MMA check linear-attn ntok " ++ ntok.str() ++ " WITH snapshots", 24, () => q38s-linear-attn-span-s(ps, qf, bs, geo, lin, nth(sts, 0), snp, ntok, 1)],
+    ["MMA check full-attn ntok " ++ ntok.str(), 24, () => q38s-full-attn-span(ps, qf, bs, geo, full, nth(sts, lf), pos, ntok)],
+    ["MMA check head ntok " ++ ntok.str(), 8, () => q38s-head-check(ctx, qf, sx, ntok)],
+    ["WHOLE check ntok " ++ ntok.str() ++ " exact (mvr)", 2, () => q38s-verify(ctx, qs, sts, sx, ntok, pos)],
+    ["WHOLE check ntok " ++ ntok.str() ++ " MMA", 2, () => q38s-verify(ctx, qf, sts, sx, ntok, pos)],
+    ["decode token (1 token, whole model)", 2, () => q38-forward(ps, bs, geo, lays, sts, ctx[4], ctx[5], ctx[6], 1000, pos)],
     ["decode head (1 token): norm, wide matvec vocab, argmax", 8, () => q38-head(ps, bs, geo, ctx[5], ctx[6])],
     ["check head ntok " ++ ntok.str() ++ ": output_norm span, mvk vocab, argmax", 8, () => q38s-head-check(ctx, qs, sx, ntok)]
    ];
@@ -275,7 +283,55 @@ section [form.bml] {
    let closed = q38s-close(sx);
    1;
   }
-  def qsr-measure(ctx, qs, ids, mode, n, k, ph, kmin, rounds) {
+  // ── the verify path against the plain decode: five prompts, n tokens each, the check as a checker over the plain sequence, window w ──
+  def qsr-prompts() = ["Explain in two sentences why the sky is blue.", "Write a Python function that checks whether a number is prime.", "Write a short paragraph about autumn in a quiet mountain village.", "Write a Python class that implements a binary search tree with insert, search and in-order traversal methods.", "Count from 1 to 40, separated by commas."];
+  def qsr-names() = ["sky", "code", "prose", "long code", "counting"];
+  def qsr-agree-one(ctx, qs, sx, ids, name, n, w) {
+   let a = q38sw-agree(ctx, qs, sx, ids, n, w);
+   let bad = a[2];
+   qsr-say("agree " ++ name ++ ": " ++ (n - len(bad)).str() ++ " of " ++ n.str() ++ " positions the plain decode's token" ++ (len(bad) == 0 ? "" : "; first divergence at " ++ bad[0][0].str() ++ "; " ++ q38sw-bad-text(bad)));
+   len(bad);
+  }
+  def qsr-agree-go(ctx, qs, sx, pids, names, n, w, total) = len(pids) == 0 ? total : qsr-agree-go(ctx, qs, sx, pids[1:], names[1:], n, w, total + qsr-agree-one(ctx, qs, sx, pids[0], names[0], n, w));
+  def qsr-agree-open(ctx, qs, pids, n, w) {
+   let sx = q38s-open(ctx, 8, foldl((m, p) => len(p) > m ? len(p) : m, 0, pids));
+   let bad = qsr-agree-go(ctx, qs, sx, pids, qsr-names(), n, w, 0);
+   let total = len(pids) * n;
+   qsr-say("AGREEMENT of the verify path with the plain decode: " ++ (total - bad).str() ++ " of " ++ total.str() ++ " positions (" ++ (((total - bad) * 10000) / total).str() ++ " per 10000), window " ++ w.str());
+   let closed = q38s-close(sx);
+   1;
+  }
+  // ── one whole check (and one decode token) timed alone: wall ms and the device's busy ms, interleaved rounds, the best of each ──
+  def qsr-whole-one(f) {
+   metal_batch_concurrent();
+   let l0 = metal_live();
+   let t0 = host_monotonic_ms();
+   let r = f();
+   let t1 = host_monotonic_ms();
+   let l1 = metal_live();
+   [t1 - t0, (l1[11] - l0[11]) / 1000, l1[7] - l0[7]];
+  }
+  def qsr-whole-go(ctx, qe, qf, sts, sx, ntok, pos, rounds, acc) = rounds <= 0 ? acc : {
+   let a = qsr-whole-one(() => { let e = q38s-verify(ctx, qe, sts, sx, ntok, pos); metal_buf_read(sx[4], 0, 4); });
+   let b = qsr-whole-one(() => { let e = q38s-verify(ctx, qf, sts, sx, ntok, pos); metal_buf_read(sx[4], 0, 4); });
+   let c = qsr-whole-one(() => q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], 1000, pos));
+   qsr-whole-go(ctx, qe, qf, sts, sx, ntok, pos, rounds - 1, append(acc, [[a, b, c]]));
+  };
+  def qsr-col-min(rows, i, j) = qsr-min(map(r => r[i][j], rows), 1000000);
+  def qsr-whole(ctx, qs, ids, ntok, rounds) {
+   let sx = q38s-open(ctx, 8, len(ids));
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let rows = qsr-whole-go(ctx, q38s-exact(qs), q38s-fast(qs), sts, sx, ntok, len(ids), rounds + 1, []);
+   let kept = rows[1:];
+   qsr-say("WHOLE " ++ ntok.str() ++ "-token check, best of " ++ rounds.str() ++ " rounds (wall ms / device busy ms / dispatches): exact " ++ qsr-col-min(kept, 0, 0).str() ++ " / " ++ qsr-col-min(kept, 0, 1).str() ++ " / " ++ qsr-col-min(kept, 0, 2).str() ++ "; matrix unit " ++ qsr-col-min(kept, 1, 0).str() ++ " / " ++ qsr-col-min(kept, 1, 1).str() ++ " / " ++ qsr-col-min(kept, 1, 2).str() ++ "; decode token " ++ qsr-col-min(kept, 2, 0).str() ++ " / " ++ qsr-col-min(kept, 2, 1).str() ++ " / " ++ qsr-col-min(kept, 2, 2).str());
+   let freed = q38-free-state(sts);
+   let closed = q38s-close(sx);
+   1;
+  }
+  def qsr-measure(ctx, qs, ids, mode, n, k, ph, kmin, rounds, pids) {
+   (String) mode == "whole" ? qsr-whole(ctx, qs, ids, k + 1, rounds) :
+   (String) mode == "agree" ? qsr-agree-open(ctx, qs, pids, n, k) :
    (String) mode == "bits" ? qsr-bits-open(ctx, qs, ids, n, k) :
    (String) mode == "drift" ? qsr-drift(ctx, ids, 8, 12) :
    (String) mode == "mvk" ? qsr-mvk(ctx, qs, ids) : (String) mode == "spec" ? qsr-spec-open(ctx, qs, ids, n, k, ph, kmin, rounds) : (String) mode == "blocks" ? qsr-blocks-open(ctx, qs, ids, kmin + 1, k + 1) : qsr-say("no such mode: " ++ mode);
@@ -291,9 +347,10 @@ section [form.bml] {
    let closed = q38s-close(sx);
    1;
   }
-  def qsr-open(path, want, n, k, prompt, mode, ph, kmin, rounds) {
+  def qsr-open(path, want, n, k, prompt, mode, ph, kmin, rounds, fast) {
    let src = fcmg-src(path);
-   let ids = (String) prompt == "" ? qsr-ids(want, 0) : q35-chat-ids(src, prompt);
+   let pids = (String) mode == "agree" ? map(p => q35-chat-ids(src, p), qsr-prompts()) : [];
+   let ids = (String) mode == "agree" ? foldl((best, p) => len(p) > len(best) ? p : best, [], pids) : ((String) prompt == "" ? qsr-ids(want, 0) : q35-chat-ids(src, prompt));
    let span = len(ids);
    let maxpos = span + n + k + 16;
    let own = fcms-qwen-own(src, maxpos);
@@ -306,9 +363,10 @@ section [form.bml] {
      let unleased = mg-release();
      qsr-say("the context did not open: len " ++ len(ctx).str() ++ ", scratch ok " ++ (len(ctx) < 10 ? 0 : q38-handles-ok?(ctx[1])).str() ++ ", layers ok " ++ (len(ctx) < 10 ? 0 : q38-layers-ok?(ctx[3])).str() ++ ", emb " ++ (len(ctx) < 10 ? 0 : kth-tv-h(ctx[4])).str() ++ ", onorm " ++ (len(ctx) < 10 ? 0 : kth-tv-h(ctx[5])).str() ++ ", proj " ++ (len(ctx) < 10 ? 0 : kth-tv-h(ctx[6])).str() ++ ", bs " ++ (len(ctx) < 10 ? "" : ctx[1].str()));
     } : {
-     let qs = q38s-pipes(q38s-msl());
+     let qs0 = q38s-pipes(q38s-msl());
+     let qs = fast == 1 ? q38s-fast(qs0) : qs0;
      !q38s-pipes-ok?(qs) ? qsr-say("the spec pipelines did not compile: " ++ qs.str()) : {
-      let measured = qsr-measure(ctx, qs, ids, mode, n, k, ph, kmin, rounds);
+      let measured = qsr-measure(ctx, qs, ids, mode, n, k, ph, kmin, rounds, pids);
       1;
      };
      let closed = q38-close(ctx, []);
@@ -323,7 +381,7 @@ section [form.bml] {
    let span = qsr-int(opts, "span", 64);
    let n = qsr-int(opts, "decode", 32);
    let k = qsr-int(opts, "k", 2);
-   (Comparable) qsr-int(opts, "go", 0) == 1 ? qsr-open(path, span, n, k, qsr-text(opts, "prompt", ""), qsr-text(opts, "mode", "mvk"), qsr-int(opts, "phased", 0), qsr-int(opts, "kmin", 1), qsr-int(opts, "rounds", 2)) : print_str("[q38-spec] plan: modes mvk, spec (decode n tokens, k drafts); {\"go\":1,\"mode\":\"spec\",\"prompt\":\"...\"} opens the model and measures");
+   (Comparable) qsr-int(opts, "go", 0) == 1 ? qsr-open(path, span, n, k, qsr-text(opts, "prompt", ""), qsr-text(opts, "mode", "mvk"), qsr-int(opts, "phased", 0), qsr-int(opts, "kmin", 1), qsr-int(opts, "rounds", 2), qsr-int(opts, "fast", 1)) : print_str("[q38-spec] plan: modes mvk, spec (decode n tokens, k drafts), agree (five prompts, window k); fast 0 keeps the exact-association check; {\"go\":1,\"mode\":\"spec\",\"prompt\":\"...\"} opens the model and measures");
   }
  }
  qsr-run();
