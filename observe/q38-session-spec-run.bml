@@ -121,11 +121,94 @@ section [form.bml] {
    qss-say("released " ++ released.str());
    1;
   }
+  // ── pairs: two sessions of one prompt open together (one speculative, one plain), asked in turn a chunk at a time ──
+  // The machine's weather changes the speed of everything by 2x and more from one minute to the next, so what is compared is a PAIR of walks taken a moment apart:
+  // the speculative session's chunk, then the plain session's, round after round. The ratio of a pair is the speedup of that moment; the best of each is the clean-window figure.
+  def qss-pair-go(sa, sb, chunk, rounds, i, acc) {
+   i >= rounds ? acc : qss-pair-round(sa, sb, chunk, rounds, i, acc);
+  }
+  def qss-pair-round(sa, sb, chunk, rounds, i, acc) {
+   let wa = qss-walk(sa, chunk, 1);
+   let wb = qss-walk(sb, chunk, 0);
+   let ratio = (wb[1] * len(wa[0]) * 100) / ((wa[1] <= 0 ? 1 : wa[1]) * (len(wb[0]) <= 0 ? 1 : len(wb[0])));
+   qss-say("round " ++ i.str() ++ ": spec " ++ len(wa[0]).str() ++ " tokens in " ++ wa[1].str() ++ " ms = " ++ qss-rate(len(wa[0]), wa[1]) ++ " tok/s; plain " ++ len(wb[0]).str() ++ " in " ++ wb[1].str() ++ " ms = " ++ qss-rate(len(wb[0]), wb[1]) ++ " tok/s; ratio " ++ ratio.str() ++ "/100; " ++ (String) wa[2]);
+   qss-pair-go(wa[3], wb[3], chunk, rounds, i + 1, append(acc, [[wa[1], len(wa[0]), wb[1], len(wb[0]), ratio]]));
+  }
+  def qss-insert(x, xs) = len(xs) == 0 ? [x] : x <= xs[0] ? cons(x, xs) : cons(xs[0], qss-insert(x, xs[1:]));
+  def qss-sorted(xs) = foldl((acc, x) => qss-insert(x, acc), [], xs);
+  def qss-pairs(path, which, prompt, chunk, rounds, warm) {
+   qss-say("pairs: prompt " ++ which ++ ", " ++ rounds.str() ++ " rounds of " ++ chunk.str() ++ " tokens, warm-up " ++ warm.str());
+   let sa = qss-open(path, prompt, chunk * rounds + warm + 32);
+   let sb = qss-open(path, prompt, chunk * rounds + warm + 32);
+   !((Comparable) fcms-live?(sa) == 1) || !((Comparable) fcms-live?(sb) == 1) ? qss-say("a session did not open: " ++ fcms-reason(sa) ++ " / " ++ fcms-reason(sb)) : qss-pairs-live(sa, sb, chunk, rounds, warm);
+  }
+  def qss-pairs-live(sa, sb, chunk, rounds, warm) {
+   qss-say("spec session: owner " ++ (q38x-on?(fcsp-owner(sa)) == 1 ? "on" : "off: " ++ (String) record_get(fcsp-owner(sa), "reason")));
+   let wa = warm > 0 ? qss-walk(sa, warm, 1) : [[], 0, "", sa];
+   let wb = warm > 0 ? qss-walk(sb, warm, 0) : [[], 0, "", sb];
+   let rows = qss-pair-go(wa[3], wb[3], chunk, rounds, 0, []);
+   let ratios = qss-sorted(map(r => r[4], rows));
+   let bs = foldl((m, r) => (m < 0 || r[0] * 1000 / (r[1] <= 0 ? 1 : r[1]) < m) ? r[0] * 1000 / (r[1] <= 0 ? 1 : r[1]) : m, 0 - 1, rows);
+   let bp = foldl((m, r) => (m < 0 || r[2] * 1000 / (r[3] <= 0 ? 1 : r[3]) < m) ? r[2] * 1000 / (r[3] <= 0 ? 1 : r[3]) : m, 0 - 1, rows);
+   qss-say("pairs summary: ratio median " ++ ratios[len(ratios) / 2].str() ++ "/100, lowest " ++ ratios[0].str() ++ "/100, highest " ++ ratios[len(ratios) - 1].str() ++ "/100; best spec " ++ (bs / 1000).str() ++ "." ++ ((bs % 1000) / 100).str() ++ " ms a token = " ++ qss-rate(1000, bs) ++ " tok/s, best plain " ++ (bp / 1000).str() ++ "." ++ ((bp % 1000) / 100).str() ++ " ms a token = " ++ qss-rate(1000, bp) ++ " tok/s; best-pair ratio " ++ ((bp * 100) / (bs <= 0 ? 1 : bs)).str() ++ "/100");
+   let ra = fcms-release-ok?(sa);
+   let rb = fcms-release-ok?(sb);
+   qss-say("released " ++ ra.str() ++ " " ++ rb.str());
+   1;
+  }
+  // ── plainab: the session's plain walks, the planned step against the token-wise forward, a chunk each in turn on ONE session (both are plain: the drafter is not asked) ──
+  def qss-unplanned(s, n) {
+   let t0 = host_monotonic_ms();
+   let walked = fcms-walk-by(fcms-forward, s, fcms-pending(s), fcms-pos(s), n, fcmo-stops(s), [], 1, 1, 0);
+   let t1 = host_monotonic_ms();
+   let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(walked[0]), fcms-injected-ids(s), fcms-observations(s));
+   [walked[0], t1 - t0, "unplanned", next];
+  }
+  def qss-plainab-go(s, chunk, rounds, i) = i >= rounds ? 1 : qss-plainab-round(s, chunk, rounds, i, qss-walk(s, chunk, 0));
+  def qss-plainab-round(s, chunk, rounds, i, wp) {
+   let wu = qss-unplanned(wp[3], chunk);
+   qss-say("round " ++ i.str() ++ ": planned " ++ len(wp[0]).str() ++ " tokens in " ++ wp[1].str() ++ " ms = " ++ (wp[1] / (len(wp[0]) <= 0 ? 1 : len(wp[0]))).str() ++ " ms a token; unplanned " ++ len(wu[0]).str() ++ " in " ++ wu[1].str() ++ " ms = " ++ (wu[1] / (len(wu[0]) <= 0 ? 1 : len(wu[0]))).str() ++ " ms a token");
+   qss-plainab-go(wu[3], chunk, rounds, i + 1);
+  }
+  def qss-plainab(path, prompt, chunk, rounds) {
+   let s = qss-open(path, prompt, chunk * rounds * 2 + 48);
+   !((Comparable) fcms-live?(s) == 1) ? qss-say("the session did not open: " ++ fcms-reason(s)) : qss-plainab-live(s, chunk, rounds);
+  }
+  def qss-plainab-live(s, chunk, rounds) {
+   let w = qss-walk(s, 8, 0);
+   qss-plainab-go(w[3], chunk, rounds, 0);
+   let released = fcms-release-ok?(w[3]);
+   1;
+  }
+  // ── rowab: what ONE token costs three ways, a chunk each in turn: the session's speculative walk held to one-row checks (no draft: the matrix-unit verify of the pending token alone),
+  // the plain planned step, the plain token-wise forward. The first on a session of its own (its drafter has to hold every position), the other two on a second session ──
+  def qss-rowab-go(sa, sb, chunk, rounds, i) = i >= rounds ? 1 : qss-rowab-round(sa, sb, chunk, rounds, i, qss-walk(sa, chunk, 1));
+  def qss-rowab-round(sa, sb, chunk, rounds, i, wa) {
+   let wp = qss-walk(sb, chunk, 0);
+   let wu = qss-unplanned(wp[3], chunk);
+   qss-say("round " ++ i.str() ++ " ms a token: one-row check " ++ (wa[1] / (len(wa[0]) <= 0 ? 1 : len(wa[0]))).str() ++ ", plain planned " ++ (wp[1] / (len(wp[0]) <= 0 ? 1 : len(wp[0]))).str() ++ ", plain token-wise " ++ (wu[1] / (len(wu[0]) <= 0 ? 1 : len(wu[0]))).str() ++ " (" ++ (String) wa[2] ++ ")");
+   qss-rowab-go(wa[3], wu[3], chunk, rounds, i + 1);
+  }
+  def qss-rowab(path, prompt, chunk, rounds) {
+   let sa = qss-open(path, prompt, chunk * rounds + 48);
+   let sb = qss-open(path, prompt, chunk * rounds * 2 + 48);
+   !((Comparable) fcms-live?(sa) == 1) || !((Comparable) fcms-live?(sb) == 1) ? qss-say("a session did not open") : qss-rowab-live(sa, sb, chunk, rounds);
+  }
+  def qss-rowab-live(sa, sb, chunk, rounds) {
+   let o = fcsp-owner(sa);
+   record_set(o, "kcur", 0);
+   let w0 = qss-walk(sa, 8, 1);
+   let w1 = qss-walk(sb, 8, 0);
+   qss-rowab-go(w0[3], w1[3], chunk, rounds, 0);
+   let ra = fcms-release-ok?(w0[3]);
+   let rb = fcms-release-ok?(w1[3]);
+   1;
+  }
   def qss-main() {
    let opts = qss-opts();
    let which = qss-text(opts, "which", "sky");
    let mode = qss-text(opts, "mode", "walk");
-   qss-int(opts, "go", 0) != 1 ? qss-say("plan: go=1 opens a session on " ++ qss-file() ++ " and says n tokens speculatively (the session's default walk), against the verify path's greedy decode and the plain planned walk; mode tapab times the prefill with and without the tap") : mode == "tapab" ? qss-tapab(qss-file(), qss-int(opts, "reps", 3)) : qss-walks(qss-file(), which, qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "n", 64), qss-int(opts, "warm", 8), qss-int(opts, "spec", 1), qss-int(opts, "plain", 1), qss-int(opts, "ref", 1), qss-int(opts, "reps", 1));
+   qss-int(opts, "go", 0) != 1 ? qss-say("plan: go=1 opens a session on " ++ qss-file() ++ " and says n tokens speculatively (the session's default walk), against the verify path's greedy decode and the plain planned walk; mode tapab times the prefill with and without the tap; mode pairs alternates a speculative and a plain session a chunk at a time") : mode == "rowab" ? qss-rowab(qss-file(), qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 16), qss-int(opts, "rounds", 4)) : mode == "plainab" ? qss-plainab(qss-file(), qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 16), qss-int(opts, "rounds", 4)) : mode == "pairs" ? qss-pairs(qss-file(), which, qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "chunk", 32), qss-int(opts, "rounds", 4), qss-int(opts, "warm", 8)) : mode == "tapab" ? qss-tapab(qss-file(), qss-int(opts, "reps", 3)) : qss-walks(qss-file(), which, qss-text(opts, "prompt", qss-prompt(which)), qss-int(opts, "n", 64), qss-int(opts, "warm", 8), qss-int(opts, "spec", 1), qss-int(opts, "plain", 1), qss-int(opts, "ref", 1), qss-int(opts, "reps", 1));
   }
  }
  qss-main();
