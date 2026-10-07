@@ -27262,6 +27262,14 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                 long long fp = fk_vsp, order_n = 0, k, m;
                 long long *order;
                 fk_vp(argw);
+                /* a cell starts with no JIT page released: a node is its content, so the node a cell released at its close is the
+                 * very node the next run of the same unit mints, and the tombstone made every call of that second run answer nothing
+                 * (anf-shadow-band read 31 the first time and 3 the second, in one process). SHRINK PATH: the tombstone moves into
+                 * the cell's own frame when residency is owned per cell in Form (jit-once-born.fk), and this loop goes. */
+                if (fk_inram_node_released != 0) {
+                    long long zi = 1;
+                    while (zi <= fk_np && zi < fk_node_cap) { fk_inram_node_released[zi] = 0; zi = zi + 1; }
+                }
                 fk_cell_deadline_ms = one_deadline;
                 fk_cell_root_path = path;
                 /* the libraries this call loaded run once, in the order their text stands */
