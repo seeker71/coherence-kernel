@@ -1,0 +1,102 @@
+// q38-dflash-run.bml — the DFlash2 drafter on the Qwen lane: the plain greedy decode and the block-diffusion speculative one, from a fresh state each.
+//
+//   echo '{}' | ./fkwu observe/q38-dflash-run.bml            the plan. Opens nothing.
+//   echo '{"go":1,"prompt":"Explain in two sentences why the sky is blue.","decode":32}' | ./fkwu observe/q38-dflash-run.bml
+//                                                            the same ids or the speculation is wrong; acceptance per draft position; tokens a step; step split
+// stdin, one JSON line, all optional: go, file, draft, prompt, decode (32), rounds (1), phased (0|1), plain (1: also run the plain decode), cap (maxpos extra).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-dflash.fk
+section [form.bml] {
+ class Q38DflashRun {
+  def qdr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qdr-draft() = "/Users/ursmuff/models/qwen38-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
+  def qdr-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qdr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qdr-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-dflash", line) : json-node-object([]);
+  }
+  def qdr-say(s) = print_str("[q38-dflash] " ++ s);
+  def qdr-idstr(xs) = foldl((acc, x) => acc ++ x.str() ++ " ", "", xs);
+  def qdr-rate10(n, ms) = ms <= 0 ? 0 : (n * 10000) / ms;
+  def qdr-rate(n, ms) = (qdr-rate10(n, ms) / 10).str() ++ "." ++ (qdr-rate10(n, ms) % 10).str();
+  def qdr-hits-go(stats, off, j) = j > 7 ? "" : "p" ++ j.str() ++ " " ++ ((stats[off + j - 1] * 100) / (stats[0] <= 0 ? 1 : stats[0])).str() ++ "%  " ++ qdr-hits-go(stats, off, j + 1);
+  def qdr-plain(ctx, ids, n) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let t0 = host_monotonic_ms();
+   let spoken = q38-generate(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], r[0], len(ids), n, [], []);
+   let t1 = host_monotonic_ms();
+   let freed = q38-free-state(sts);
+   [spoken, t1 - t0, r[0]];
+  }
+  def qdr-dflash(ctx, qs, ds, dx, sx, ids, n, phased) {
+   let sts = q38-new-state(ctx[2]);
+   let tp0 = host_monotonic_ms();
+   let r = q38d-prefill(ctx, qs, ds, dx, sts, sx, ids);
+   let tp1 = host_monotonic_ms();
+   let t0 = host_monotonic_ms();
+   let g = q38d-generate(ctx, qs, ds, dx, sts, sx, ids, r[0], n, phased);
+   let t1 = host_monotonic_ms();
+   let freed = q38-free-state(sts);
+   [g[0], t1 - t0, g[1], r[0], g[2], tp1 - tp0, g[3]];
+  }
+  def qdr-report(a, b, n) {
+   let st = b[2];
+   let steps = st[0] <= 0 ? 1 : st[0];
+   qdr-say("first token " ++ a[2].str() ++ "/" ++ b[3].str() ++ ": ids " ++ ((String) qdr-idstr(a[0]) == qdr-idstr(b[0]) ? "IDENTICAL" : "DIFFER") ++ "; plain " ++ n.str() ++ " tokens in " ++ a[1].str() ++ " ms = " ++ qdr-rate(n, a[1]) ++ " tok/s; dflash in " ++ b[1].str() ++ " ms = " ++ qdr-rate(n, b[1]) ++ " tok/s (prefill+commit " ++ b[5].str() ++ " ms)");
+   qdr-say("steps " ++ st[0].str() ++ ", tokens per step " ++ ((n * 100) / steps).str() ++ "/100; acceptance path: " ++ qdr-hits-go(st, 8, 1));
+   qdr-say("plain-argmax block acceptance: " ++ qdr-hits-go(st, 15, 1));
+   qdr-say("per step: host before wait " ++ (st[1] / steps).str() ++ " ms, wait " ++ (st[2] / steps).str() ++ " ms, restore+commit " ++ (st[3] / steps).str() ++ " ms, draft " ++ (st[4] / steps).str() ++ " ms, check " ++ (st[5] / steps).str() ++ " ms, device busy " ++ (st[6] / steps).str() ++ " ms, dispatches " ++ (st[7] / steps).str());
+   qdr-say("plain ids:  " ++ qdr-idstr(a[0]));
+   qdr-say("dflash ids: " ++ qdr-idstr(b[0]));
+   qdr-say("accepted:step ms: " ++ foldl((acc, t) => acc ++ t[0].str() ++ ":" ++ t[1].str() ++ " ", "", b[4]));
+   (String) qdr-idstr(a[0]) == qdr-idstr(b[0]) ? 1 : 0;
+  }
+  def qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain) {
+   let b = qdr-dflash(ctx, qs, ds, dx, sx, ids, n, phased);
+   let a = plain == 1 ? qdr-plain(ctx, ids, n) : [b[0], 1, b[3]];
+   qdr-report(a, b, n);
+  }
+  def qdr-open(path, dpath, n, prompt, phased, rounds, plain) {
+   let src = fcmg-src(path);
+   let ids = q35-chat-ids(src, prompt);
+   let span = len(ids);
+   let maxpos = span + n + 16;
+   let own = fcms-qwen-own(src, maxpos) + file_size(dpath) + 1200000000;
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 dflash probe", path, weights, own);
+   !mg-granted?(granted) ? print_str("[q38-dflash] held: " ++ granted[1]) : {
+    let ctx = q38-open-span(path, maxpos, span + 1);
+    !((Comparable) q38-context-ok?(ctx) == 1) ? {
+     let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
+     let unleased = mg-release();
+     qdr-say("the context did not open: len " ++ len(ctx).str() ++ ", scratch ok " ++ (len(ctx) < 10 ? 0 : q38-handles-ok?(ctx[1])).str() ++ ", layers ok " ++ (len(ctx) < 10 ? 0 : q38-layers-ok?(ctx[3])).str() ++ ", emb " ++ (len(ctx) < 10 ? 0 : q38-handle-ok?(kth-tv-h(ctx[4]))).str());
+    } : {
+     let qs = q38s-pipes(q38s-msl());
+     let ds = q38d-pipes(q38d-msl());
+     !(q38s-pipes-ok?(qs) && q38s-pipes-ok?(ds)) ? qdr-say("the pipelines did not compile: " ++ qs.str() ++ " / " ++ ds.str() ++ " status " ++ metal_status()) : {
+      let dx = q38d-open(ctx, dpath, maxpos, span);
+      !((Comparable) q38d-ok?(dx) == 1) ? qdr-say("the drafter did not open") : {
+       let sx = q38s-open(ctx, 7, span);
+       qdr-say("open: prompt " ++ span.str() ++ " tokens, drafter layers " ++ dx[6].str());
+       let ok = qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain);
+       let closed = q38s-close(sx);
+       1;
+      };
+      let dclosed = len(dx) < 7 ? 0 : q38d-close(dx);
+      1;
+     };
+     let closed = q38-close(ctx, []);
+     let unleased = mg-release();
+     qdr-say("released");
+    };
+   };
+  }
+  def qdr-run() {
+   let opts = qdr-opts();
+   (Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(qdr-text(opts, "file", qdr-file()), qdr-text(opts, "draft", qdr-draft()), qdr-int(opts, "decode", 32), qdr-text(opts, "prompt", "Explain in two sentences why the sky is blue."), qdr-int(opts, "phased", 0), qdr-int(opts, "rounds", 1), qdr-int(opts, "plain", 1)) : qdr-say("plan: go=1 runs the plain decode and the DFlash2 speculative decode of one prompt and compares the ids");
+  }
+ }
+ qdr-run();
+}
