@@ -478,6 +478,12 @@ caller contracts retain their distinct outcome and current resource owner.
 `form-code-context` reports actual attempts and consumption. Restoring a
 checkpoint preserves its observation rather than guessing a byte/token ratio.
 
+Prefill advances only after its GPU slice completes. A refusal retains the
+wait frame, carrier counters and exact `carrier_error`, including multiline
+diagnostics, before session release. A partial prefill leaves mutated model
+state; the retained task resumes through a fresh admission rather than reusing
+that stream.
+
 The existing `form-cli-code-bounded-note-band` (524287) observes these current
 contracts through scripted ports, including source reconstruction, partial
 ownership, growing results, explicit caller reservations and on-demand guides.
