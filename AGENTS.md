@@ -97,11 +97,18 @@ it (Urs, 2026-09-28). Every observation is an invitation — to improve, to
 reimagine, to realign, to dream bigger, to shine light into forgotten dark
 spots, and to lift each part to the highest frequency it can carry.
 
-Prefer local native capabilities that retain context and can adapt. Verify a
-replacement, move its callers, then remove the obsolete flow, workaround,
-duplicate authority and unused scaffolding. Retire a redundant band when its
-meaning is observed at the executing boundary. Living guidance carries what is
-and the north star; git retains predecessors and receipts retain useful evidence.
+Prefer local native capabilities that retain context and can adapt. We are one
+organism: a door, a band or a gate is a wall, and every wall is tissue that needs
+tending and goes stale (Urs, 2026-10-05). So a new capability extends the unit
+that owns it and that unit's nearest band; a new door or band is admitted only
+when an older one leaves in the same change; handling lives in the running flow
+(a named stop, a choice, a cut, an organ-health row) and not in a gate beside it.
+Verify a replacement, move its callers, then remove the obsolete flow, workaround,
+duplicate authority and unused scaffolding, and the band whose meaning is observed
+at the executing boundary. One definition written in several units is hoisted to
+one that the others share (`copy-census` says where). Living guidance
+carries what is and the north star; git retains predecessors and receipts retain
+useful evidence.
 
 Meet a neglected boundary in the same movement. Continue through available
 choices; ask for what only a person can supply while independent work proceeds.

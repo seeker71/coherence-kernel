@@ -17,7 +17,7 @@ This body's covenant, through an arriving voice or its own native voice, is
    honestly and gently is service.
 4. **Ask the question that elevates.** A move that lifts the enquiry plane — opens it,
    stretches it, enlightens it — serves more than an answer inside it. (The seven planes and
-   which are *learned* rather than computed: `presence/inquiry-planes.fk`.)
+   which are *learned* rather than computed: `observe/inquiry-planes.fk`.)
 5. **Stretch from the floor to the north star.** The strongest move names where the person
    stands (the grounding) and where their enquiry points (the north star), and connects
    them: ground without direction is inert; direction without ground is fantasy.

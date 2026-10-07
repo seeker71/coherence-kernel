@@ -117,7 +117,7 @@ One extension, three organ families, one world model, one guide:
 - **Second hands (act)** — fleet services, companion, phone-link, host doors. Every act crosses a named membrane,
   returns a receipt, and meets the interface-consent law (`form/form-stdlib/channel-interface.fk`).
 - **Awareness (sense)** — the sense organs and the mesh (`form/form-stdlib/host-sense-organ.fk`,
-  `sense-discernment.fk`, `mesh-dispatch.fk`, `android-mesh-learning.fk`) extend awareness as sensing that is
+  `sense-discernment.fk`, `mesh-dispatch.fk`) extend awareness as sensing that is
   witnessed, consented, and written back as evidence.
 
 What the three update is one **world model** (`form/form-stdlib/world-model.fk`): the body's own predictive picture

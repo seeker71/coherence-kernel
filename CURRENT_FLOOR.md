@@ -376,7 +376,7 @@ bml-band 268435455 · bml-generics-band 16777215 · native-route-goal-cells-band
 nested-defn-scope-band 63 · nested-defn-closure-capture-band 63
 bml-float-literal-band 2047 · bml-form-size-band 127 · cell-channel-band 4095
 json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
-circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
+circle-band 1048575 · static-to-dynamic-cells-band 262143
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band.bml 4294967295
 language-packs-band 31 (2026-10-01) · bml-bmf-control-curriculum-band 1048575
 bml-bmf-stream-curriculum-band 16777215 · form-cli-lens-mint-band 1023
@@ -414,7 +414,7 @@ form-cli-peer-contribution-turnwheel-band  -> 33554431
 observed-auto-learning-band                -> 32767
 hearth-band                                -> 131071
 receipt-texture-band                       -> 16383
-lora-backward-band 511 · lora-step-live-band 511 · lora-adapter-band 31 · symbol-voice-band 63
+lora-backward-band 511 · lora-adapter-band 31 · symbol-voice-band 63
 ```
 
 The Llama-3.2-3B voice has an adapter for speaking Form in its own stream, `form/form-stdlib/adapters/llama-3.2-3b-form-tokens`:
@@ -550,7 +550,7 @@ reference      dsv4-oracle-recipes-band.bml 65535   (the reference arithmetic ag
                doors, the one minting door of the native organs' owner ids, the pipe owner's flow key)
 emitters       dsv4-compressor-band 2047 · dsv4-kv-cache-band 511 · dsv4-hc-band 63 · dsv4-hc-msl-band 63
                dsv4-moe-msl-band 63 · dsv4-forward-band 127 · mla-attn-band 63 · mla-msl-band 127
-               moe-msl-band 511 · moe-route-radius-band 63 · moe-route-wide-msl-band 255
+               moe-msl-band 511 · moe-route-wide-msl-band 255
 stack          dsv4-proof-emission-band.bml 127   (eleven streams, 85 kernels compiled on the device, two run)
                ds4-order-match-band.bml 255       (the quantiser and the Q8_0 row dot against a Form reference of ds4's order)
 references     ds4-recorded-references-band.bml 8191   (the logits pinned by a SHA-256 of the whole file, by the body's own door; their 14 chat-templated prompt ids derived by the body's
@@ -788,7 +788,6 @@ What the body hears, says and perceives, read by bands that open no microphone, 
 ```text
 ear-heard-tongues-band   -> 63      the tongues the ear listens for are the tongues the glass offers
 whisper-shape-band       -> 127     whisper's dimensions read from the model file, npz or safetensors
-ear-ground-band          -> 32767   every delay in the live path judged physics or furniture, as data
 perception-symbols-band  -> 8191    the room, the ear and the voice's manner as addressed symbols
 perception-rows-band     -> 65535   a perceived day folded into trainable rows; words travel only
                                     from a frame naming its speaker and an organ of this body
@@ -977,13 +976,12 @@ checkout starts them again on whichever `./fkwu` that checkout holds. The ear pr
 
 ## The body's own lenses
 
-The body reads itself: which doors bear the most walking, which door is a private copy of a warm one,
-which of a native's mirrors still stand, where a definition is written twice, and which written limit
-carries a witness.
+The body reads itself: which doors bear the most walking, which of a native's mirrors still stand,
+where a definition is written twice (one body under several names, one name in several files), and
+which written limit carries a witness.
 
 ```text
 bearing-census-band 32767   form/form-stdlib/bearing-census.bml    (steps, not milliseconds)
-twin-census-band 65535      form/form-stdlib/twin-census.bml
 mirror-census-band 16383    form/form-stdlib/mirror-census.bml
 copy-census-band 63         form/form-stdlib/bml/copy-census.bml
 wall-census-band 63         form/form-stdlib/bml/wall-census.bml
@@ -1040,9 +1038,9 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   lifted `import` inside the first section, and its own verification compile stops: `the cursor does not
   read this form.bml section: line 3: import (wanted: topstmt)` (2026-10-01). The five grammar packs it
   lifted carry their imports above the section by hand; `form-source-lift-band` holds no such case yet.
-- `form-cli-allowance-band`, `form-cli-live-band` and `native-tensor-lifecycle-band` reach the Metal
+- `form-cli-allowance-band` and `native-tensor-lifecycle-band` reach the Metal
   door and were not re-run in the gates pass (it held no GPU). The integrated review's sweep
-  (2026-10-01) read form-cli-allowance 2047, form-cli-live 255 and native-tensor-lifecycle 1023 on fkwu.
+  (2026-10-01) read form-cli-allowance 2047 and native-tensor-lifecycle 1023 on fkwu.
 - `form-glass-wait-band` read 246 of 255 on the fkwu-only lane (2026-10-01, several sweeps loading the
   host): it landed 12 of 20 rests inside half a millisecond and its watched frame did not wake it. A
   quiet machine is the reading that counts.

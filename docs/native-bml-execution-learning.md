@@ -5,16 +5,20 @@ three distinct transfer tests. The native runtime executes every reference
 before any target can enter session learning. This distinguishes a correct
 execution target from a plausible explanation of BML.
 
+One door carries every lane of this practice: `observe/bml-practice-fit-run.bml` reads one JSON line whose
+`lane` is `fit` (the default), `status`, `teacher`, `practice`, `execution`, `scalar`, `token` or `compact`;
+the lane's own fields follow, and the file's head lists them.
+
 The practice covers absence versus present zero, a complete recursive
 declaration, and an arithmetic repair. The transfer tests compose selection
 with recovery, request the last present value, and repair summation across
 absent entries. These small cases measure those contracts only. They do not
 establish mastery of BML or the repository's broader concepts.
 
-Prepare a fresh private evidence home, with its path on stdin:
+Prepare a fresh private evidence home, with its path as `home`:
 
 ```sh
-form-run ./fkwu observe/bml-execution-practice-prepare.bml
+printf '{"lane":"practice","home":"HOME"}\n' | form-run ./fkwu observe/bml-practice-fit-run.bml
 ```
 
 The preparation executes all six references, retaining their exact source,
@@ -23,7 +27,7 @@ both practice and test prompts before model generation. Prediction targets
 come from actual reference output; code targets are the declarations that ran.
 Changes to the curriculum require a fresh preparation and comparison.
 
-`observe/bml-execution-observe.bml` accepts one JSON line. Its actions are:
+The `execution` lane accepts one JSON line. Its actions are:
 
 - `generate`: supply `home`, a fresh `condition` label, and an explicit
   `adapter` generation (an empty string measures the base without LoRA).
@@ -90,7 +94,7 @@ and [live diagnostics](live-dynamic-diagnostics.md) for its event flow.
 
 ## A local teacher and practice that checks its own behavior
 
-`observe/bml-native-teacher-run.bml` accepts `home`, a new `condition`,
+The `teacher` lane accepts `home`, a new `condition`,
 `model` (for example `qwen38-q8`) and `context_capacity`. It supplies the
 executed practice references to native Qwen and uses the original transfer
 contracts. Weights stay admitted between tasks; each task receives fresh
@@ -109,7 +113,7 @@ A retained response is not necessarily complete: read its stopping reason.
 asks for present-entry counting, first-positive selection and sum of squares.
 Its separate transfer tests ask for zero counting, first-negative selection
 and sum of absolute values. Every reference has six actual execution checks.
-The native JSON door is `observe/bml-scalar-observe.bml`:
+Its native lane is `scalar`, by `action`:
 
 - `prepare` takes a fresh `home` and executes all six references.
 - `test` takes `home`, a new `condition` and an `adapter`; it generates the
@@ -131,8 +135,8 @@ The native JSON door is `observe/bml-scalar-observe.bml`:
   The parent's practice or evaluation role stays attached; extracting a test
   response never makes it a training target.
 
-After the teacher's actual code passes, `observe/bml-practice-fit-run.bml`
-accepts a `prepare` request with `home`, the verified `teacher` condition,
+After the teacher's actual code passes, the `fit` lane
+accepts a `prepare` action with `home`, the verified `teacher` condition,
 an explicit parent adapter generation in `parent`, and `learning_rate`.
 It binds the prompts, code, execution receipts, training rows, request and
 parent identity before writing `home/fit/request.json`. Only practice enters
@@ -161,8 +165,7 @@ weights, gradient health, GPU times and checkpoint identity through the
 existing native trainer events. Generation names the checkpoint represented
 by the live adapter tensors.
 
-While the owner runs, send the evidence home as one stdin line to
-`observe/bml-practice-fit-status.bml`. It reads complete events without
+While the owner runs, ask the `status` lane with the evidence `home`. It reads complete events without
 interrupting the model. The reading names model admission, LoRA pairs, the
 last offered and selected care, event age, completed updates, the latest
 generated practice and cumulative token and timing records. An in-flight
@@ -195,7 +198,7 @@ promote them. This makes verified local teacher practice available to the
 existing cross-worktree experience and rehearsal paths without promoting a
 fit checkpoint or admitting transfer answers as training targets.
 
-`observe/bml-token-observe.bml` accepts `home`, `teacher`, a fresh `condition`,
+The `token` lane accepts `home`, `teacher`, a fresh `condition`,
 an explicit `adapter`, and the practice `case` id. It rechecks the teacher's
 execution, performs one native forward pass, and compares each supervised
 target token with the highest-logit token under the verified preceding text.
@@ -224,7 +227,7 @@ The two effect rows grade the first stdout line, which is the last-registered
 before preparation accepts the home; `bep-wrap` supplies the `retry.bml`,
 `disposable.bml` and control (`offer-ack-core.fk`, `choice-lane-core.fk`)
 preludes to references and generations alike. The
-native JSON door is `observe/bml-compact-observe.bml`:
+native lane is `compact`, by `action`:
 
 - `prepare` takes a fresh `home` and executes every reference.
 - `enqueue` takes that `home`. Only practice rows whose execution matched are
