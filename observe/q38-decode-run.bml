@@ -1,0 +1,568 @@
+// q38-decode-run.bml — where one decoded token of the Qwen lane spends its wall, and what each lever buys.
+//
+//   echo '{}' | ./fkwu observe/q38-decode-run.bml               the plan. Opens nothing.
+//   echo '{"go":1,"decode":24,"prompt":"Explain in two sentences why the sky is blue."}' | ./fkwu observe/q38-decode-run.bml
+//                                                                THE MEASURE. Takes the memory lease, opens the Qwen context once, prefills the prompt batched
+//                                                                from a fresh state per variant and speaks `decode` tokens one position at a time, reading each
+//                                                                variant's ms a token and its ids: the base lane (q38-forward), the same with the host's encode
+//                                                                and the device's wait split, and the hand-over every n layers (0 never).
+// stdin, one JSON line, all optional: go, decode (24), prompt, only (a variant name).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
+section [form.bml] {
+ class Q38DecodeRun {
+  def qdr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qdr-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qdr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qdr-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-decode", line) : json-node-object([]);
+  }
+  def qdr-prompt() = "Explain in two sentences why the sky is blue.";
+  // the blocks with the hand-over every `every` layers (0: never): q38-blocks-scoped with the cadence a parameter
+  def qdr-blocks(ps, bs, geo, lays, sts, pos, l, n, interval, every) = l >= n ? 1 : {
+   kth-full?(l, interval) ? q38-full-attn-scoped(ps, bs, geo, nth(lays, l), nth(sts, l), pos, nothing()) : q38-linear-attn(ps, bs, geo, nth(lays, l), nth(sts, l));
+   q38-ffn(ps, bs, geo, nth(lays, l));
+   let handed = every > 0 && l + 1 < n && (l + 1) % every == 0 ? q38-handover() : 0;
+   qdr-blocks(ps, bs, geo, lays, sts, pos, l + 1, n, interval, every);
+  };
+  def qdr-state(ctx, id, pos, every) {
+   metal_batch_concurrent();
+   q38-embed(ctx[0], ctx[1], ctx[2], ctx[4], id, 0);
+   qdr-blocks(ctx[0], ctx[1], ctx[2], ctx[3], ctx[7], pos, 0, ctx[2][21], ctx[2][22], every);
+   1;
+  }
+  def qdr-forward(ctx, id, pos, every) {
+   let s = qdr-state(ctx, id, pos, every);
+   q38-head(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6]);
+   kth-u32at(metal_buf_read(ctx[1][31], 0, 4), 0);
+  }
+  // k tokens from id at pos: [ids, ms]
+  def qdr-go(ctx, id, pos, k, every, acc) = k <= 0 ? acc : {
+   let nid = qdr-forward(ctx, id, pos, every);
+   qdr-go(ctx, nid, pos + 1, k - 1, every, append(acc, [nid]));
+  };
+  // the same token loop with encode, head encode and the read timed apart: [ids, enc, head, read]
+  def qdr-split-go(ctx, id, pos, k, every, acc, enc, hd, rd) = k <= 0 ? [acc, enc, hd, rd] : {
+   let t0 = host_monotonic_ms();
+   let s = qdr-state(ctx, id, pos, every);
+   let t1 = host_monotonic_ms();
+   let h = q38-head(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6]);
+   let t2 = host_monotonic_ms();
+   let nid = kth-u32at(metal_buf_read(ctx[1][31], 0, 4), 0);
+   let t3 = host_monotonic_ms();
+   qdr-split-go(ctx, nid, pos + 1, k - 1, every, append(acc, [nid]), enc + (t1 - t0), hd + (t2 - t1), rd + (t3 - t2));
+  };
+  def qdr-start(ctx, ids) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   [sts, r[0]];
+  }
+  def qdr-ids-line(ids) = foldl((acc, x) => acc ++ x.str() ++ " ", "", ids);
+  def qdr-ctx(ctx, sts) = [ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], sts];
+  // one variant: a fresh state per run; the ids and the ms a token, `runs` times (the first is warm-up)
+  def qdr-variant(ctx, ids, name, k, every, runs) {
+   let t = qdr-variant-go(ctx, ids, name, k, every, runs, 1);
+   1;
+  }
+  def qdr-variant-go(ctx, ids, name, k, every, runs, run) = run > runs ? 1 : {
+   let st = qdr-start(ctx, ids);
+   let c = qdr-ctx(ctx, st[0]);
+   let a = metal_live();
+   let t0 = host_monotonic_ms();
+   let sp = qdr-split-go(c, st[1], len(ids), k, every, [], 0, 0, 0);
+   let t1 = host_monotonic_ms();
+   let b = metal_live();
+   let freed = q38-free-state(st[0]);
+   let say = print_str("[q38-decode] " ++ name ++ " every " ++ every.str() ++ " run " ++ run.str() ++ ": " ++ k.str() ++ " tokens in " ++ (t1 - t0).str() ++ " ms = " ++ ((t1 - t0) * 10 / k).str() ++ " ms/10 a token; encode " ++ sp[1].str() ++ " head " ++ sp[2].str() ++ " read " ++ sp[3].str() ++ " ms total; dispatches " ++ (b[7] - a[7]).str() ++ " syncs " ++ (b[8] - a[8]).str() ++ " busy " ++ ((b[11] - a[11]) / 1000).str() ++ " ms");
+   let idsay = run == 1 ? print_str("[q38-decode] ids: " ++ qdr-ids-line(sp[0])) : 0;
+   qdr-variant-go(ctx, ids, name, k, every, runs, run + 1);
+  };
+  def qdr-plain-go(ctx, ids, k, runs, run) = run > runs ? 1 : {
+   let st = qdr-start(ctx, ids);
+   let c = qdr-ctx(ctx, st[0]);
+   let t0 = host_monotonic_ms();
+   let spoken = q38-generate(c[0], c[1], c[2], c[3], st[0], c[4], c[5], c[6], st[1], len(ids), k, [], []);
+   let t1 = host_monotonic_ms();
+   let freed = q38-free-state(st[0]);
+   let say = print_str("[q38-decode] q38-generate run " ++ run.str() ++ ": " ++ k.str() ++ " tokens in " ++ (t1 - t0).str() ++ " ms = " ++ ((t1 - t0) * 10 / k).str() ++ " ms/10 a token");
+   let idsay = run == 1 ? print_str("[q38-decode] ids: " ++ qdr-ids-line(spoken)) : 0;
+   qdr-plain-go(ctx, ids, k, runs, run + 1);
+  };
+  // ---- the layout A/B: the Q8_0 matvec on the FFN tensors of `n` layers, as the lane reads them (34-byte blocks) against a planar
+  // repack (the scales in one array, the int8 in a 16-byte-aligned array) and against a pure stream of the same bytes ----
+  def qdr-hdr() = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n";
+  def qdr-stream-msl() = "kernel void q38_stream(device const uchar* w [[buffer(0)]], device float* o [[buffer(1)]], constant uint& nvec [[buffer(2)]], uint t [[thread_position_in_grid]], uint nt [[threads_per_grid]]) { device const uint4* v = (device const uint4*)w; uint4 a0 = uint4(0u); uint4 a1 = uint4(0u); uint4 a2 = uint4(0u); uint4 a3 = uint4(0u); uint i = t; for (; i + 3u * nt < nvec; i += 4u * nt) { a0 ^= v[i]; a1 ^= v[i + nt]; a2 ^= v[i + 2u * nt]; a3 ^= v[i + 3u * nt]; } for (; i < nvec; i += nt) { a0 ^= v[i]; } uint4 a = a0 ^ a1 ^ a2 ^ a3; uint s = a.x ^ a.y ^ a.z ^ a.w; if (s == 0x12345678u) { o[t] = 1.0f; } }";
+  def qdr-repack-msl() = "kernel void q38_q8_repack(device const uchar* src [[buffer(0)]], device uchar* qs [[buffer(1)]], device half* sc [[buffer(2)]], constant uint& nblk [[buffer(3)]], uint t [[thread_position_in_grid]]) { if (t >= nblk) return; device const uchar* b = src + (ulong)t * 34ul; ushort h = (ushort)b[0] | ((ushort)b[1] << 8); sc[t] = as_type<half>(h); device uint* dst = (device uint*)(qs + (ulong)t * 32ul); for (uint i = 0u; i < 8u; ++i) { uint v = (uint)b[2u + 4u * i] | ((uint)b[3u + 4u * i] << 8) | ((uint)b[4u + 4u * i] << 16) | ((uint)b[5u + 4u * i] << 24); dst[i] = v; } }";
+  def qdr-dot16-msl() = "static inline float q8dot16(uint4 w, float4 y0, float4 y1, float4 y2, float4 y3) { char4 a = as_type<char4>(w.x); char4 b = as_type<char4>(w.y); char4 c = as_type<char4>(w.z); char4 e = as_type<char4>(w.w); float s = 0.0f; s = metal::fma(float(a.x), y0.x, s); s = metal::fma(float(a.y), y0.y, s); s = metal::fma(float(a.z), y0.z, s); s = metal::fma(float(a.w), y0.w, s); s = metal::fma(float(b.x), y1.x, s); s = metal::fma(float(b.y), y1.y, s); s = metal::fma(float(b.z), y1.z, s); s = metal::fma(float(b.w), y1.w, s); s = metal::fma(float(c.x), y2.x, s); s = metal::fma(float(c.y), y2.y, s); s = metal::fma(float(c.z), y2.z, s); s = metal::fma(float(c.w), y2.w, s); s = metal::fma(float(e.x), y3.x, s); s = metal::fma(float(e.y), y3.y, s); s = metal::fma(float(e.z), y3.z, s); s = metal::fma(float(e.w), y3.w, s); return s; } ";
+  def qdr-acc-decl(R, i) = i >= R ? "" : ("float acc" ++ i.str() ++ " = 0.0f; " ++ qdr-acc-decl(R, i + 1));
+  def qdr-row-body(R, i) = i >= R ? "" : ("{ uint rr = metal::min(r0 + " ++ i.str() ++ "u, rows - 1u); uint4 w = *(device const uint4*)(qs + (ulong)rr * (ulong)cols + (ulong)k + (ulong)lane * 16ul); float d = float(sc[rr * nb + (k >> 5) + (lane >> 1)]); acc" ++ i.str() ++ " = metal::fma(q8dot16(w, y0, y1, y2, y3), d, acc" ++ i.str() ++ "); } " ++ qdr-row-body(R, i + 1));
+  def qdr-row-store(R, i) = i >= R ? "" : ("{ float s = metal::simd_sum(acc" ++ i.str() ++ "); if (lane == 0u && r0 + " ++ i.str() ++ "u < rows) { y[r0 + " ++ i.str() ++ "u] = s; } } " ++ qdr-row-store(R, i + 1));
+  // R rows a simdgroup, SG simdgroups a threadgroup; a lane takes 16 contiguous int8 of a row per step of 512 (cols a multiple of 512)
+  def qdr-planar-msl(fname, R, SG) = "kernel void " ++ fname ++ " (device const uchar* qs [[buffer(0)]], device const half* sc [[buffer(1)]], device const float* x [[buffer(2)]], device float* y [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort sgi [[simdgroup_index_in_threadgroup]]) { uint nb = cols / 32u; uint r0 = (tg * " ++ SG.str() ++ "u + (uint)sgi) * " ++ R.str() ++ "u; " ++ qdr-acc-decl(R, 0) ++ "for (uint k = 0u; k < cols; k += 512u) { device const float4* yp = (device const float4*)(x + k + (uint)lane * 16u); float4 y0 = yp[0]; float4 y1 = yp[1]; float4 y2 = yp[2]; float4 y3 = yp[3]; " ++ qdr-row-body(R, 0) ++ "} " ++ qdr-row-store(R, 0) ++ "}";
+  def qdr-ab-msl() = qdr-hdr() ++ qdr-stream-msl() ++ qdr-repack-msl() ++ qdr-dot16-msl() ++ qdr-planar-msl("q38_pl_r2s2", 2, 2) ++ qdr-planar-msl("q38_pl_r4s2", 4, 2) ++ qdr-planar-msl("q38_pl_r4s4", 4, 4) ++ qdr-planar-msl("q38_pl_r8s2", 8, 2) ++ qdr-planar-msl("q38_pl_r1s8", 1, 8);
+  def qdr-ffn-tvs(lays, l, n) = l >= n ? [] : append([nth(lays, l)[2], nth(lays, l)[3], nth(lays, l)[4]], qdr-ffn-tvs(lays, l + 1, n));
+  def qdr-nblk(tv) = (kth-tv-r(tv) * kth-tv-c(tv)) / 32;
+  def qdr-tv-bytes(tv) = qdr-nblk(tv) * 34;
+  def qdr-bytes-sum(tvs) = len(tvs) == 0 ? 0 : qdr-tv-bytes(tvs[0]) + qdr-bytes-sum(tvs[1:]);
+  // [qs, sc, rows, cols] per tensor, repacked on the device
+  def qdr-repack-one(pipe, tv) {
+   let nb = qdr-nblk(tv);
+   let qs = metal_buf_alloc(nb * 32);
+   let sc = metal_buf_alloc(nb * 2);
+   let e = metal_enqueue(pipe, md-bind16([kth-tv-h(tv), qs, sc], [nb], 256, 0, 0, 0), nb);
+   [qs, sc, kth-tv-r(tv), kth-tv-c(tv)];
+  }
+  def qdr-repack-all(pipe, tvs) = len(tvs) == 0 ? [] : cons(qdr-repack-one(pipe, tvs[0]), qdr-repack-all(pipe, tvs[1:]));
+  def qdr-free-packs(ps) = len(ps) == 0 ? 0 : { let a = metal_buf_free(ps[0][0]); let b = metal_buf_free(ps[0][1]); qdr-free-packs(ps[1:]); };
+  // a pass over all tensors, ONE batch (concurrent, no barriers: the tensors are independent reads), timed to the sync
+  def qdr-pass-stream(pipe, tvs, o) = len(tvs) == 0 ? 1 : {
+   let e = metal_enqueue(pipe, md-bind16([kth-tv-h(tvs[0]), o], [qdr-tv-bytes(tvs[0]) / 16], 256, 0, 1, 0), 4096);
+   qdr-pass-stream(pipe, tvs[1:], o);
+  };
+  def qdr-pass-wide(ps, tvs, xs, yh) = len(tvs) == 0 ? 1 : {
+   let e = q38-mv(ps, tvs[0], kth-tv-c(tvs[0]) > 6000 ? xs[1] : xs[0], yh, 0);
+   qdr-pass-wide(ps, tvs[1:], xs, yh);
+  };
+  def qdr-pass-planar(pipe, packs, xs, yh, R, SG) = len(packs) == 0 ? 1 : {
+   let e = metal_enqueue(pipe, md-bind16([packs[0][0], packs[0][1], packs[0][3] > 6000 ? xs[1] : xs[0], yh], [packs[0][2], packs[0][3]], 32 * SG, 0, 1, 0), (packs[0][2] + R * SG - 1) / (R * SG));
+   qdr-pass-planar(pipe, packs[1:], xs, yh, R, SG);
+  };
+  def qdr-timed(label, bytes, f) {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let q = f();
+   let s = metal_sync();
+   let t1 = host_monotonic_ms();
+   let ms = t1 - t0;
+   ms;
+  }
+  def qdr-min2(a, b) = a <= b ? a : b;
+  def qdr-mins(a, b) = len(a) == 0 ? [] : cons(qdr-min2(a[0], b[0]), qdr-mins(a[1:], b[1:]));
+  def qdr-names() = ["stream  ", "wide    ", "pl r2 s2", "pl r4 s2", "pl r4 s4", "pl r8 s2", "pl r1 s8"];
+  def qdr-adds(a, b) = len(a) == 0 ? [] : cons(a[0] + b[0], qdr-adds(a[1:], b[1:]));
+  def qdr-say-mins(names, ms, sums, n, bytes) = len(names) == 0 ? 1 : {
+   let say = print_str("[q38-decode] ab " ++ names[0] ++ ": best " ++ ms[0].str() ++ " ms = " ++ (ms[0] <= 0 ? 0 : bytes / ms[0] / 1000000).str() ++ " GB/s; mean of the last " ++ n.str() ++ " rounds " ++ (sums[0] * 10 / n).str() ++ " ms/10 = " ++ (sums[0] <= 0 ? 0 : (bytes * n) / sums[0] / 1000000).str() ++ " GB/s");
+   qdr-say-mins(names[1:], ms[1:], sums[1:], n, bytes);
+  };
+  def qdr-ab-round(ps, tvs, packs, xs, yh, o, pst, plp, bytes, i, keep, best) = i <= 0 ? best : {
+   let a = qdr-timed("stream  ", bytes, () => qdr-pass-stream(pst, tvs, o));
+   let b = qdr-timed("wide    ", bytes, () => qdr-pass-wide(ps, tvs, xs, yh));
+   let c = qdr-timed("pl r2 s2", bytes, () => qdr-pass-planar(plp[0], packs, xs, yh, 2, 2));
+   let d = qdr-timed("pl r4 s2", bytes, () => qdr-pass-planar(plp[1], packs, xs, yh, 4, 2));
+   let e = qdr-timed("pl r4 s4", bytes, () => qdr-pass-planar(plp[2], packs, xs, yh, 4, 4));
+   let f = qdr-timed("pl r8 s2", bytes, () => qdr-pass-planar(plp[3], packs, xs, yh, 8, 2));
+   let g = qdr-timed("pl r1 s8", bytes, () => qdr-pass-planar(plp[4], packs, xs, yh, 1, 8));
+   let now = [a, b, c, d, e, f, g];
+   let say = i % 4 == 0 ? print_str("[q38-decode] ab round " ++ i.str() ++ " ms: " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", now)) : 0;
+   let mins = len(best) == 0 ? now : qdr-mins(best[0], now);
+   let sums = len(best) == 0 ? [0, 0, 0, 0, 0, 0, 0] : best[1];
+   let sums2 = i <= keep ? qdr-adds(sums, now) : sums;
+   qdr-ab-round(ps, tvs, packs, xs, yh, o, pst, plp, bytes, i - 1, keep, [mins, sums2]);
+  };
+  def qdr-ab(ctx, ids, nl, rounds) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let st = qdr-start(ctx, ids);
+   let msl = qdr-ab-msl();
+   let pst = metal_pipeline(msl, "q38_stream");
+   let prp = metal_pipeline(msl, "q38_q8_repack");
+   let plp = [metal_pipeline(msl, "q38_pl_r2s2"), metal_pipeline(msl, "q38_pl_r4s2"), metal_pipeline(msl, "q38_pl_r4s4"), metal_pipeline(msl, "q38_pl_r8s2"), metal_pipeline(msl, "q38_pl_r1s8")];
+   let pl = print_str("[q38-decode] ab pipelines: stream " ++ pst.str() ++ " repack " ++ prp.str() ++ " planar " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", plp));
+   let tvs = qdr-ffn-tvs(ctx[3], 0, nl);
+   let bytes = qdr-bytes-sum(tvs);
+   let o = metal_buf_alloc(4 * 1048576);
+   let yh = bs[14];
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let packs = qdr-repack-all(prp, tvs);
+   let s = metal_sync();
+   let t1 = host_monotonic_ms();
+   let rp = print_str("[q38-decode] ab repack of " ++ len(tvs).str() ++ " tensors (" ++ (bytes / 1000000).str() ++ " MB): " ++ (t1 - t0).str() ++ " ms");
+   let xs = [bs[1], bs[16]];
+   let heat = qdr-burn-go(pst, tvs, o, bytes, 1, 250, host_monotonic_ms());
+   let best = qdr-ab-round(ps, tvs, packs, xs, yh, o, pst, plp, bytes, rounds, rounds - 4, []);
+   let said = qdr-say-mins(qdr-names(), best[0], best[1], rounds - 4, bytes);
+   let fr = qdr-free-packs(packs);
+   let fo = metal_buf_free(o);
+   let freed = q38-free-state(st[0]);
+   1;
+  }
+  // ---- the planar kernel family, one generator: R rows a simdgroup, SG simdgroups a threadgroup, C accumulate chains a row-step, U steps of 512 a loop turn ----
+  def qdr-chain-msl(c) = c == 1 ? "static inline float q8dotc(uint4 w, float4 y0, float4 y1, float4 y2, float4 y3) { char4 a = as_type<char4>(w.x); char4 b = as_type<char4>(w.y); char4 c = as_type<char4>(w.z); char4 e = as_type<char4>(w.w); float s = 0.0f; s = metal::fma(float(a.x), y0.x, s); s = metal::fma(float(a.y), y0.y, s); s = metal::fma(float(a.z), y0.z, s); s = metal::fma(float(a.w), y0.w, s); s = metal::fma(float(b.x), y1.x, s); s = metal::fma(float(b.y), y1.y, s); s = metal::fma(float(b.z), y1.z, s); s = metal::fma(float(b.w), y1.w, s); s = metal::fma(float(c.x), y2.x, s); s = metal::fma(float(c.y), y2.y, s); s = metal::fma(float(c.z), y2.z, s); s = metal::fma(float(c.w), y2.w, s); s = metal::fma(float(e.x), y3.x, s); s = metal::fma(float(e.y), y3.y, s); s = metal::fma(float(e.z), y3.z, s); s = metal::fma(float(e.w), y3.w, s); return s; } " : c == 2 ? "static inline float q8dotc(uint4 w, float4 y0, float4 y1, float4 y2, float4 y3) { char4 a = as_type<char4>(w.x); char4 b = as_type<char4>(w.y); char4 c = as_type<char4>(w.z); char4 e = as_type<char4>(w.w); float s = 0.0f; float t = 0.0f; s = metal::fma(float(a.x), y0.x, s); t = metal::fma(float(c.x), y2.x, t); s = metal::fma(float(a.y), y0.y, s); t = metal::fma(float(c.y), y2.y, t); s = metal::fma(float(a.z), y0.z, s); t = metal::fma(float(c.z), y2.z, t); s = metal::fma(float(a.w), y0.w, s); t = metal::fma(float(c.w), y2.w, t); s = metal::fma(float(b.x), y1.x, s); t = metal::fma(float(e.x), y3.x, t); s = metal::fma(float(b.y), y1.y, s); t = metal::fma(float(e.y), y3.y, t); s = metal::fma(float(b.z), y1.z, s); t = metal::fma(float(e.z), y3.z, t); s = metal::fma(float(b.w), y1.w, s); t = metal::fma(float(e.w), y3.w, t); return s + t; } " : "static inline float q8dotc(uint4 w, float4 y0, float4 y1, float4 y2, float4 y3) { char4 a = as_type<char4>(w.x); char4 b = as_type<char4>(w.y); char4 c = as_type<char4>(w.z); char4 e = as_type<char4>(w.w); float s0 = float(a.x) * y0.x; float s1 = float(b.x) * y1.x; float s2 = float(c.x) * y2.x; float s3 = float(e.x) * y3.x; s0 = metal::fma(float(a.y), y0.y, s0); s1 = metal::fma(float(b.y), y1.y, s1); s2 = metal::fma(float(c.y), y2.y, s2); s3 = metal::fma(float(e.y), y3.y, s3); s0 = metal::fma(float(a.z), y0.z, s0); s1 = metal::fma(float(b.z), y1.z, s1); s2 = metal::fma(float(c.z), y2.z, s2); s3 = metal::fma(float(e.z), y3.z, s3); s0 = metal::fma(float(a.w), y0.w, s0); s1 = metal::fma(float(b.w), y1.w, s1); s2 = metal::fma(float(c.w), y2.w, s2); s3 = metal::fma(float(e.w), y3.w, s3); return (s0 + s1) + (s2 + s3); } ";
+  // generated dots: kind 11 extract_bits, 12 magic (and, or), 13 magic (insert_bits); two chains (even words, odd words)
+  def qdr-wn(wi) = wi == 0 ? "x" : wi == 1 ? "y" : wi == 2 ? "z" : "w";
+  def qdr-stmt(kind, wi, k) {
+   let W = "w." ++ qdr-wn(wi);
+   let V = "v" ++ wi.str();
+   let ch = wi % 2 == 0 ? "s" : "t";
+   let yv = "y" ++ wi.str() ++ "." ++ qdr-wn(k);
+   let off = (k * 8).str() ++ "u";
+   kind == 11 ? ch ++ " = metal::fma(float(metal::extract_bits((int)" ++ W ++ ", " ++ off ++ ", 8u)), " ++ yv ++ ", " ++ ch ++ "); " : kind == 12 ? ch ++ " = metal::fma(as_type<float>(((" ++ V ++ " >> " ++ off ++ ") & 255u) | 0x4B000000u) - 8388736.0f, " ++ yv ++ ", " ++ ch ++ "); " : ch ++ " = metal::fma(as_type<float>(metal::insert_bits(0x4B000000u, " ++ V ++ " >> " ++ off ++ ", 0u, 8u)) - 8388736.0f, " ++ yv ++ ", " ++ ch ++ "); ";
+  }
+  def qdr-stmts(kind, wi, k) = wi >= 4 ? "" : (k >= 4 ? qdr-stmts(kind, wi + 1, 0) : qdr-stmt(kind, wi, k) ++ qdr-stmts(kind, wi, k + 1));
+  def qdr-dotgen(kind) = "static inline float q8dotc(uint4 w, float4 y0, float4 y1, float4 y2, float4 y3) { uint v0 = w.x ^ 0x80808080u; uint v1 = w.y ^ 0x80808080u; uint v2 = w.z ^ 0x80808080u; uint v3 = w.w ^ 0x80808080u; float s = 0.0f; float t = 0.0f; " ++ qdr-stmts(kind, 0, 0) ++ "return s + t; } ";
+  // F: a bit mask of ablations for the probe: 1 no activation loads, 2 no dot (xor of the words), 4 no scale loads
+  def qdr-bit(f, b) = (f / b) % 2 == 1;
+  def qdr-vrow(R, i, j, F) = i >= R ? "" : ("{ uint rr = metal::min(r0 + " ++ i.str() ++ "u, rows - 1u); uint4 w = *(device const uint4*)(qs + (ulong)rr * (ulong)cols + (ulong)kk + (ulong)lane * 16ul); float d = " ++ (qdr-bit(F, 4) ? "1.0f" : "float(sc[rr * nb + (kk >> 5) + (lane >> 1)])") ++ "; acc" ++ i.str() ++ " = metal::fma(" ++ (qdr-bit(F, 2) ? "as_type<float>(w.x ^ w.y ^ w.z ^ w.w)" : "q8dotc(w, y0, y1, y2, y3)") ++ ", d, acc" ++ i.str() ++ "); } " ++ qdr-vrow(R, i + 1, j, F));
+  def qdr-vstep(R, j, F) = "{ uint kk = k + " ++ (j * 512).str() ++ "u; " ++ (qdr-bit(F, 1) ? "float4 y0 = float4(1.0f); float4 y1 = y0; float4 y2 = y0; float4 y3 = y0; " : "device const float4* yp = (device const float4*)(x + kk + (uint)lane * 16u); float4 y0 = yp[0]; float4 y1 = yp[1]; float4 y2 = yp[2]; float4 y3 = yp[3]; ") ++ qdr-vrow(R, 0, j, F) ++ "} ";
+  def qdr-vsteps(R, U, j, F) = j >= U ? "" : (qdr-vstep(R, j, F) ++ qdr-vsteps(R, U, j + 1, F));
+  def qdr-vkernel(fname, R, SG, U, F) = "kernel void " ++ fname ++ " (device const uchar* qs [[buffer(0)]], device const half* sc [[buffer(1)]], device const float* x [[buffer(2)]], device float* y [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort sgi [[simdgroup_index_in_threadgroup]]) { uint nb = cols / 32u; uint r0 = (tg * " ++ SG.str() ++ "u + (uint)sgi) * " ++ R.str() ++ "u; " ++ qdr-acc-decl(R, 0) ++ "for (uint k = 0u; k < cols; k += " ++ (512 * U).str() ++ "u) { " ++ qdr-vsteps(R, U, 0, F) ++ "} " ++ qdr-row-store(R, 0) ++ "}";
+  // the sweep table: [label, R, SG, C, U, F]; one MSL unit per variant
+  def qdr-vtable() = [["r4 s2 c2 cvt", 4, 2, 2, 1, 0], ["r4 s2 dot(float4)", 4, 2, 14, 1, 0], ["r4 s2 short-halves", 4, 2, 15, 1, 0], ["r4 s2 c1 cvt", 4, 2, 1, 1, 0], ["r4 s2 no-dot", 4, 2, 2, 1, 2], ["r3 s2 c2 cvt", 3, 2, 2, 1, 0], ["r4 s3 c2 cvt", 4, 3, 2, 1, 0], ["r6 s2 c2 cvt", 6, 2, 2, 1, 0]];
+  def qdr-dotvec() = "static inline float q8dotc(uint4 w, float4 y0, float4 y1, float4 y2, float4 y3) { float s = metal::dot(float4(as_type<char4>(w.x)), y0); float t = metal::dot(float4(as_type<char4>(w.y)), y1); s += metal::dot(float4(as_type<char4>(w.z)), y2); t += metal::dot(float4(as_type<char4>(w.w)), y3); return s + t; } ";
+  // 15: sixteen weights as two float8 halves through short conversion (sign-extend by 16-bit lanes), 16: uint bytes with the offset taken off the sum
+  def qdr-dotshort() = "static inline float q8dotc(uint4 w, float4 y0, float4 y1, float4 y2, float4 y3) { float s = 0.0f; float t = 0.0f; short2 a0 = as_type<short2>(w.x << 8u); short2 a1 = as_type<short2>(w.x & 0xFF00FF00u); short2 b0 = as_type<short2>(w.y << 8u); short2 b1 = as_type<short2>(w.y & 0xFF00FF00u); short2 c0 = as_type<short2>(w.z << 8u); short2 c1 = as_type<short2>(w.z & 0xFF00FF00u); short2 e0 = as_type<short2>(w.w << 8u); short2 e1 = as_type<short2>(w.w & 0xFF00FF00u); s = metal::fma(float(a0.x >> 8), y0.x, s); s = metal::fma(float(a1.x >> 8), y0.y, s); s = metal::fma(float(a0.y >> 8), y0.z, s); s = metal::fma(float(a1.y >> 8), y0.w, s); t = metal::fma(float(b0.x >> 8), y1.x, t); t = metal::fma(float(b1.x >> 8), y1.y, t); t = metal::fma(float(b0.y >> 8), y1.z, t); t = metal::fma(float(b1.y >> 8), y1.w, t); s = metal::fma(float(c0.x >> 8), y2.x, s); s = metal::fma(float(c1.x >> 8), y2.y, s); s = metal::fma(float(c0.y >> 8), y2.z, s); s = metal::fma(float(c1.y >> 8), y2.w, s); t = metal::fma(float(e0.x >> 8), y3.x, t); t = metal::fma(float(e1.x >> 8), y3.y, t); t = metal::fma(float(e0.y >> 8), y3.z, t); t = metal::fma(float(e1.y >> 8), y3.w, t); return s + t; } ";
+  def qdr-dotfor(c) = c == 14 ? qdr-dotvec() : c == 15 ? qdr-dotshort() : c >= 11 ? qdr-dotgen(c) : qdr-chain-msl(c);
+  def qdr-vmsl(vs, i) = qdr-hdr() ++ qdr-dotfor(vs[i][3]) ++ qdr-vkernel("q38_plv" ++ i.str(), vs[i][1], vs[i][2], vs[i][4], vs[i][5]);
+  def qdr-vpipes(vs, i) = i >= len(vs) ? [] : cons(metal_pipeline(qdr-vmsl(vs, i), "q38_plv" ++ i.str()), qdr-vpipes(vs, i + 1));
+  def qdr-vnames(vs, i) = i >= len(vs) ? [] : cons("pl " ++ vs[i][0], qdr-vnames(vs, i + 1));
+  def qdr-vpasses(vs, pipes, packs, xs, yh, i, acc) = i >= len(vs) ? acc : {
+   let ms = qdr-timed("v", 0, () => qdr-pass-planar(pipes[i], packs, xs, yh, vs[i][1], vs[i][2]));
+   qdr-vpasses(vs, pipes, packs, xs, yh, i + 1, append(acc, [ms]));
+  };
+  def qdr-ab2-round(ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, i, keep, best) = i <= 0 ? best : {
+   let a = qdr-timed("stream", bytes, () => qdr-pass-stream(pst, tvs, o));
+   let b = qdr-timed("wide", bytes, () => qdr-pass-wide(ps, tvs, xs, yh));
+   let rest = qdr-vpasses(vs, vp, packs, xs, yh, 0, []);
+   let now = append([a, b], rest);
+   let say = i % 6 == 0 ? print_str("[q38-decode] ab round " ++ i.str() ++ " ms: " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", now)) : 0;
+   let mins = len(best) == 0 ? now : qdr-mins(best[0], now);
+   let zeros = qdr-zeros(len(now));
+   let sums = len(best) == 0 ? zeros : best[1];
+   let sums2 = i <= keep ? qdr-adds(sums, now) : sums;
+   qdr-ab2-round(ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, i - 1, keep, [mins, sums2]);
+  };
+  def qdr-zeros(n) = n <= 0 ? [] : cons(0, qdr-zeros(n - 1));
+  // ---- ab3: the same family, the job order rotated every round, a median over the rounds kept (the device drifts and others share it) ----
+  def qdr-job(k, ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes) = k == 0 ? qdr-timed("stream", bytes, () => qdr-pass-stream(pst, tvs, o)) : k == 1 ? qdr-timed("wide", bytes, () => qdr-pass-wide(ps, tvs, xs, yh)) : qdr-timed("v", 0, () => qdr-pass-planar(vp[k - 2], packs, xs, yh, vs[k - 2][1], vs[k - 2][2]));
+  def qdr-rot-run(n, r, j, ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, acc) = j >= n ? acc : {
+   let k = (j + r) % n;
+   let ms = qdr-job(k, ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes);
+   qdr-rot-run(n, r, j + 1, ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, append(acc, [[k, ms]]));
+  };
+  def qdr-find(res, k) = len(res) == 0 ? 0 : res[0][0] == k ? res[0][1] : qdr-find(res[1:], k);
+  def qdr-by-job(res, k, n) = k >= n ? [] : cons(qdr-find(res, k), qdr-by-job(res, k + 1, n));
+  def qdr-ins(x, xs) = len(xs) == 0 ? [x] : x <= xs[0] ? cons(x, xs) : cons(xs[0], qdr-ins(x, xs[1:]));
+  def qdr-isort(xs) = len(xs) == 0 ? [] : qdr-ins(xs[0], qdr-isort(xs[1:]));
+  // hist: a list per job of its ms, one entry a round
+  def qdr-hist-add(hist, now) = len(now) == 0 ? [] : cons(cons(now[0], len(hist) == 0 ? [] : hist[0]), qdr-hist-add(len(hist) == 0 ? [] : hist[1:], now[1:]));
+  def qdr-ab3-round(ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, i, hist) = i <= 0 ? hist : {
+   let n = 2 + len(vs);
+   let res = qdr-rot-run(n, i % n, 0, ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, []);
+   let now = qdr-by-job(res, 0, n);
+   qdr-ab3-round(ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, i - 1, qdr-hist-add(hist, now));
+  };
+  def qdr-say-med(names, hist, bytes) = len(names) == 0 ? 1 : {
+   let s = qdr-isort(hist[0]);
+   let n = len(s);
+   let med = nth(s, n / 2);
+   let q1 = nth(s, n / 4);
+   let say = print_str("[q38-decode] ab3 " ++ names[0] ++ ": median " ++ med.str() ++ " ms = " ++ (med <= 0 ? 0 : bytes / med / 1000000).str() ++ " GB/s; quartile " ++ q1.str() ++ " ms = " ++ (q1 <= 0 ? 0 : bytes / q1 / 1000000).str() ++ " GB/s; best " ++ s[0].str() ++ " ms; rounds " ++ n.str());
+   qdr-say-med(names[1:], hist[1:], bytes);
+  };
+  def qdr-ab3(ctx, ids, nl, rounds) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let st = qdr-start(ctx, ids);
+   let msl = qdr-ab-msl();
+   let pst = metal_pipeline(msl, "q38_stream");
+   let prp = metal_pipeline(msl, "q38_q8_repack");
+   let vs = qdr-vtable();
+   let vp = qdr-vpipes(vs, 0);
+   let pl = print_str("[q38-decode] ab3 pipelines: stream " ++ pst.str() ++ " repack " ++ prp.str() ++ " variants " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", vp));
+   let tvs = qdr-ffn-tvs(ctx[3], 0, nl);
+   let bytes = qdr-bytes-sum(tvs);
+   let o = metal_buf_alloc(4 * 1048576);
+   let yh = bs[14];
+   metal_batch_concurrent();
+   let packs = qdr-repack-all(prp, tvs);
+   let s = metal_sync();
+   let xs = [bs[1], bs[16]];
+   let heat = qdr-burn-go(pst, tvs, o, bytes, 1, 250, host_monotonic_ms());
+   let hist = qdr-ab3-round(ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, rounds, []);
+   let said = qdr-say-med(append(["stream", "wide"], qdr-vnames(vs, 0)), hist, bytes);
+   let fr = qdr-free-packs(packs);
+   let fo = metal_buf_free(o);
+   let freed = q38-free-state(st[0]);
+   1;
+  }
+  def qdr-ab2(ctx, ids, nl, rounds) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let st = qdr-start(ctx, ids);
+   let msl = qdr-ab-msl();
+   let pst = metal_pipeline(msl, "q38_stream");
+   let prp = metal_pipeline(msl, "q38_q8_repack");
+   let vs = qdr-vtable();
+   let vp = qdr-vpipes(vs, 0);
+   let pl = print_str("[q38-decode] ab2 pipelines: stream " ++ pst.str() ++ " repack " ++ prp.str() ++ " variants " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", vp));
+   let tvs = qdr-ffn-tvs(ctx[3], 0, nl);
+   let bytes = qdr-bytes-sum(tvs);
+   let o = metal_buf_alloc(4 * 1048576);
+   let yh = bs[14];
+   metal_batch_concurrent();
+   let packs = qdr-repack-all(prp, tvs);
+   let s = metal_sync();
+   let xs = [bs[1], bs[16]];
+   let heat = qdr-burn-go(pst, tvs, o, bytes, 1, 250, host_monotonic_ms());
+   let best = qdr-ab2-round(ps, tvs, packs, xs, yh, o, pst, vs, vp, bytes, rounds, rounds - 4, []);
+   let said = qdr-say-mins(append(["stream", "wide"], qdr-vnames(vs, 0)), best[0], best[1], rounds - 4, bytes);
+   let fr = qdr-free-packs(packs);
+   let fo = metal_buf_free(o);
+   let freed = q38-free-state(st[0]);
+   1;
+  }
+  // sustained load: stream passes over the FFN tensors of nl layers, the ms of every pass, to see whether the device holds its rate
+  def qdr-burn-go(pst, tvs, o, bytes, i, n, t00) = i > n ? 1 : {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let q = qdr-pass-stream(pst, tvs, o);
+   let s = metal_sync();
+   let t1 = host_monotonic_ms();
+   let say = i % 25 == 1 ? print_str("[q38-decode] burn pass " ++ i.str() ++ " at +" ++ ((t1 - t00) / 1000).str() ++ " s: " ++ (t1 - t0).str() ++ " ms = " ++ (t1 - t0 <= 0 ? 0 : bytes / (t1 - t0) / 1000000).str() ++ " GB/s") : 0;
+   qdr-burn-go(pst, tvs, o, bytes, i + 1, n, t00);
+  };
+  def qdr-burn(ctx, nl, n) {
+   let msl = qdr-ab-msl();
+   let pst = metal_pipeline(msl, "q38_stream");
+   let tvs = qdr-ffn-tvs(ctx[3], 0, nl);
+   let bytes = qdr-bytes-sum(tvs);
+   let o = metal_buf_alloc(4 * 1048576);
+   let a = qdr-burn-go(pst, tvs, o, bytes, 1, 3, host_monotonic_ms());
+   let b = qdr-burn-go(pst, tvs, o, bytes, 1, n, host_monotonic_ms());
+   let w = host_sleep_ms(30000);
+   let c = qdr-burn-go(pst, tvs, o, bytes, 1, 75, host_monotonic_ms());
+   let fo = metal_buf_free(o);
+   1;
+  }
+  // burn3: the same bytes read from the file's own mapping (the way the lane holds its weights) and from a device-allocated copy, one after the other
+  def qdr-hb-mapped(tvs) = len(tvs) == 0 ? [] : cons([kth-tv-h(tvs[0]), qdr-tv-bytes(tvs[0])], qdr-hb-mapped(tvs[1:]));
+  def qdr-hb-packs(ps) = len(ps) == 0 ? [] : cons([ps[0][0], (ps[0][2] * ps[0][3])], qdr-hb-packs(ps[1:]));
+  def qdr-hb-bytes(hbs) = len(hbs) == 0 ? 0 : hbs[0][1] + qdr-hb-bytes(hbs[1:]);
+  def qdr-pass-hb(pst, hbs, o) = len(hbs) == 0 ? 1 : {
+   let e = metal_enqueue(pst, md-bind16([hbs[0][0], o], [hbs[0][1] / 16], 256, 0, 1, 0), 4096);
+   qdr-pass-hb(pst, hbs[1:], o);
+  };
+  def qdr-timed-hb(pst, hbs, o) {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let q = qdr-pass-hb(pst, hbs, o);
+   let s = metal_sync();
+   host_monotonic_ms() - t0;
+  }
+  def qdr-burn3-go(pst, ma, aa, ms, as, o, i, n, t00) = i > n ? 1 : {
+   let a = qdr-timed-hb(pst, ma, o);
+   let b = qdr-timed-hb(pst, aa, o);
+   let c = qdr-timed-hb(pst, ms, o);
+   let d = qdr-timed-hb(pst, as, o);
+   let say = (i - 1) % 40 == 0 ? print_str("[q38-decode] burn3 pass " ++ i.str() ++ " at +" ++ ((host_monotonic_ms() - t00) / 1000).str() ++ " s: mapped " ++ a.str() ++ " ms (" ++ (a <= 0 ? 0 : qdr-hb-bytes(ma) / a / 1000000).str() ++ " GB/s), alloc " ++ b.str() ++ " ms (" ++ (b <= 0 ? 0 : qdr-hb-bytes(aa) / b / 1000000).str() ++ " GB/s), mapped-small " ++ c.str() ++ " ms (" ++ (c <= 0 ? 0 : qdr-hb-bytes(ms) / c / 1000000).str() ++ " GB/s), alloc-small " ++ d.str() ++ " ms (" ++ (d <= 0 ? 0 : qdr-hb-bytes(as) / d / 1000000).str() ++ " GB/s)") : 0;
+   qdr-burn3-go(pst, ma, aa, ms, as, o, i + 1, n, t00);
+  };
+  def qdr-take(xs, n) = n <= 0 || len(xs) == 0 ? [] : cons(xs[0], qdr-take(xs[1:], n - 1));
+  def qdr-burn3(ctx, nl, n) {
+   let msl = qdr-ab-msl();
+   let pst = metal_pipeline(msl, "q38_stream");
+   let prp = metal_pipeline(msl, "q38_q8_repack");
+   let tvs = qdr-ffn-tvs(ctx[3], 0, nl);
+   let o = metal_buf_alloc(4 * 1048576);
+   metal_batch_concurrent();
+   let packs = qdr-repack-all(prp, tvs);
+   let s = metal_sync();
+   let ma = qdr-hb-mapped(tvs);
+   let aa = qdr-hb-packs(packs);
+   let ms = qdr-take(ma, 13);
+   let as = qdr-take(aa, 13);
+   let w = print_str("[q38-decode] burn3 mapped " ++ (qdr-hb-bytes(ma) / 1000000).str() ++ " MB, alloc " ++ (qdr-hb-bytes(aa) / 1000000).str() ++ " MB, small " ++ (qdr-hb-bytes(ms) / 1000000).str() ++ " MB / " ++ (qdr-hb-bytes(as) / 1000000).str() ++ " MB");
+   let a = qdr-burn3-go(pst, ma, aa, ms, as, o, 1, n, host_monotonic_ms());
+   let fr = qdr-free-packs(packs);
+   let fo = metal_buf_free(o);
+   1;
+  }
+  // pair: each decoded token (the lane's own forward, hand-over every 2) is followed at once by one stream pass over the FFN tensors of nl layers,
+  // both timed: the two read the same memory system within a fraction of a second of each other, so their ratio is the lane's share of what
+  // the device streams in whatever state it is in
+  def qdr-pair-go(ctx, c, pst, hb, o, id, pos, k, i, sd, ss, ids) = i > k ? [sd, ss, ids] : {
+   let t0 = host_monotonic_ms();
+   let nid = qdr-forward(c, id, pos, 2);
+   let t1 = host_monotonic_ms();
+   let sp = qdr-timed-hb(pst, hb, o);
+   qdr-pair-go(ctx, c, pst, hb, o, nid, pos + 1, k, i + 1, sd + (t1 - t0), ss + sp, append(ids, [nid]));
+  };
+  def qdr-pair(ctx, ids, k, nl) {
+   let msl = qdr-ab-msl();
+   let pst = metal_pipeline(msl, "q38_stream");
+   let hb = qdr-hb-mapped(qdr-ffn-tvs(ctx[3], 0, nl));
+   let o = metal_buf_alloc(4 * 1048576);
+   let st = qdr-start(ctx, ids);
+   let c = qdr-ctx(ctx, st[0]);
+   let w = qdr-timed-hb(pst, hb, o);
+   let r = qdr-pair-go(ctx, c, pst, hb, o, st[1], len(ids), k, 1, 0, 0, []);
+   let bytes = qdr-hb-bytes(hb);
+   let say = print_str("[q38-decode] pair over " ++ k.str() ++ " tokens: decode " ++ r[0].str() ++ " ms = " ++ (r[0] * 10 / k).str() ++ " ms/10 a token = " ++ (r[0] <= 0 ? 0 : (29047000000 * k) / r[0] / 1000000).str() ++ " GB/s; stream " ++ r[1].str() ++ " ms for " ++ k.str() ++ " passes of " ++ (bytes / 1000000).str() ++ " MB = " ++ (r[1] <= 0 ? 0 : (bytes * k) / r[1] / 1000000).str() ++ " GB/s; ratio decode/stream " ++ (r[0] <= 0 || r[1] <= 0 ? 0 : ((29047000000 * k) / r[0]) * 100 / ((bytes * k) / r[1])).str() ++ " percent");
+   let freed = q38-free-state(st[0]);
+   let fo = metal_buf_free(o);
+   1;
+  }
+  // lane: two states, the same prompt, advanced in lockstep one token at a time through the wide lane (ctx) and the planar lane (the planarized ctx);
+  // which goes first alternates, both are timed in the same breath, and the ids of the two must be the same every token
+  def qdr-lane-go(c1, c2, sa, sb, ida, idb, pos, k, i, ta, tb, same, diff, la, lb) = i > k ? [ta, tb, same, diff, la, lb] : {
+   let first = i % 2 == 1;
+   let t0 = host_monotonic_ms();
+   let n1 = first ? q38-forward(c1[0], c1[1], c1[2], c1[3], sa, c1[4], c1[5], c1[6], ida, pos) : q38-forward(c2[0], c2[1], c2[2], c2[3], sb, c2[4], c2[5], c2[6], idb, pos);
+   let t1 = host_monotonic_ms();
+   let n2 = first ? q38-forward(c2[0], c2[1], c2[2], c2[3], sb, c2[4], c2[5], c2[6], idb, pos) : q38-forward(c1[0], c1[1], c1[2], c1[3], sa, c1[4], c1[5], c1[6], ida, pos);
+   let t2 = host_monotonic_ms();
+   let na = first ? n1 : n2;
+   let nb = first ? n2 : n1;
+   let da = first ? t1 - t0 : t2 - t1;
+   let db = first ? t2 - t1 : t1 - t0;
+   qdr-lane-go(c1, c2, sa, sb, na, nb, pos + 1, k, i + 1, ta + da, tb + db, na == nb ? same + 1 : same, na == nb ? diff : diff + 1, append(la, [na]), append(lb, [nb]));
+  };
+  // the same lockstep, but only the DEVICE is timed: the whole token is encoded into ONE batch (no hand-over), then the read submits it and waits,
+  // so the wait is the device's time for the token and the host's speed (the machine's other work on the cores) is out of the reading
+  def qdr-dev-token(c, id, pos) {
+   let s = qdr-state(c, id, pos, 0);
+   let h = q38-head(c[0], c[1], c[2], c[5], c[6]);
+   let t0 = host_monotonic_ms();
+   let nid = kth-u32at(metal_buf_read(c[1][31], 0, 4), 0);
+   [nid, host_monotonic_ms() - t0];
+  }
+  def qdr-dev-go(c1, c2, ida, idb, pos, k, i, ta, tb, same, diff, la, lb) = i > k ? [ta, tb, same, diff, la, lb] : {
+   let first = i % 2 == 1;
+   let r1 = first ? qdr-dev-token(c1, ida, pos) : qdr-dev-token(c2, idb, pos);
+   let r2 = first ? qdr-dev-token(c2, idb, pos) : qdr-dev-token(c1, ida, pos);
+   let ra = first ? r1 : r2;
+   let rb = first ? r2 : r1;
+   qdr-dev-go(c1, c2, ra[0], rb[0], pos + 1, k, i + 1, ta + ra[1], tb + rb[1], ra[0] == rb[0] ? same + 1 : same, ra[0] == rb[0] ? diff : diff + 1, append(la, [ra[0]]), append(lb, [rb[0]]));
+  };
+  def qdr-lane-dev(ctx, ids, k) {
+   let c2 = q38-planarize(ctx);
+   let s1 = qdr-start(ctx, ids);
+   let s2 = qdr-start(ctx, ids);
+   let ca = qdr-ctx(ctx, s1[0]);
+   let cb = qdr-ctx(c2, s2[0]);
+   let w = qdr-dev-go(ca, cb, s1[1], s2[1], len(ids), 8, 1, 0, 0, 0, 0, [], []);
+   let res = qdr-dev-go(ca, cb, nth(w[4], len(w[4]) - 1), nth(w[5], len(w[5]) - 1), len(ids) + 8, k, 1, 0, 0, 0, 0, [], []);
+   let say = print_str("[q38-decode] device-only over " ++ k.str() ++ " tokens, alternating: wide " ++ res[0].str() ++ " ms = " ++ (res[0] * 10 / k).str() ++ " ms/10 a token = " ++ (res[0] <= 0 ? 0 : (29047000000 * k) / res[0] / 1000000).str() ++ " GB/s; planar " ++ res[1].str() ++ " ms = " ++ (res[1] * 10 / k).str() ++ " ms/10 a token = " ++ (res[1] <= 0 ? 0 : (29047000000 * k) / res[1] / 1000000).str() ++ " GB/s; ids same " ++ res[2].str() ++ " differ " ++ res[3].str() ++ "; planar/wide speed " ++ (res[1] <= 0 ? 0 : res[0] * 100 / res[1]).str() ++ " percent");
+   let idsw = print_str("[q38-decode] dev ids wide: " ++ qdr-ids-line(append(w[4], res[4])));
+   let idsp = print_str("[q38-decode] dev ids planar: " ++ qdr-ids-line(append(w[5], res[5])));
+   let f1 = q38-free-state(s1[0]);
+   let f2 = q38-free-state(s2[0]);
+   let closed = q38-close(c2, []);
+   1;
+  }
+  def qdr-lane(ctx, ids, k) {
+   let c2 = q38-planarize(ctx);
+   let planar-n = len(ctx[3]);
+   let s1 = qdr-start(ctx, ids);
+   let s2 = qdr-start(ctx, ids);
+   let w = qdr-lane-go(ctx, c2, s1[0], s2[0], s1[1], s2[1], len(ids), 6, 1, 0, 0, 0, 0, [], []);
+   let r = qdr-lane-go(ctx, c2, s1[0], s2[0], s1[1], s2[1], len(ids), 6, 1, 0, 0, 0, 0, [], []);
+   let s3 = qdr-start(ctx, ids);
+   let s4 = qdr-start(ctx, ids);
+   let res = qdr-lane-go(ctx, c2, s3[0], s4[0], s3[1], s4[1], len(ids), k, 1, 0, 0, 0, 0, [], []);
+   let say = print_str("[q38-decode] lane over " ++ k.str() ++ " tokens, alternating: wide " ++ res[0].str() ++ " ms = " ++ (res[0] * 10 / k).str() ++ " ms/10 a token = " ++ (res[0] <= 0 ? 0 : (29047000000 * k) / res[0] / 1000000).str() ++ " GB/s; planar " ++ res[1].str() ++ " ms = " ++ (res[1] * 10 / k).str() ++ " ms/10 a token = " ++ (res[1] <= 0 ? 0 : (29047000000 * k) / res[1] / 1000000).str() ++ " GB/s; ids same " ++ res[2].str() ++ " differ " ++ res[3].str() ++ "; planar/wide speed " ++ (res[1] <= 0 ? 0 : res[0] * 100 / res[1]).str() ++ " percent");
+   let idsw = print_str("[q38-decode] ids wide: " ++ qdr-ids-line(res[4]));
+   let idsp = print_str("[q38-decode] ids planar: " ++ qdr-ids-line(res[5]));
+   let f1 = q38-free-state(s1[0]);
+   let f2 = q38-free-state(s2[0]);
+   let f3 = q38-free-state(s3[0]);
+   let f4 = q38-free-state(s4[0]);
+   let expected = q38-close-expected(c2, []);
+   let closed = q38-close(c2, []);
+   print_str("[q38-decode] planar context closed: freed " ++ closed.str() ++ " of " ++ expected.str() ++ " expected (the layers' planar views included)");
+  }
+  // burn2: no model. Stream passes over four 1 GB buffers and an ALU-only pass (fma chains), each timed alone, so the device's memory rate and
+  // its arithmetic rate are read apart as the load stays on (and after a rest)
+  def qdr-alu-msl() = "kernel void q38_alu(device float* o [[buffer(0)]], constant uint& iters [[buffer(1)]], uint t [[thread_position_in_grid]]) { float a = float(t) * 1e-9f; float b = a + 0.5f; float c = a + 0.25f; float d = a + 0.125f; for (uint i = 0u; i < iters; ++i) { a = metal::fma(a, 1.0001f, 0.1f); b = metal::fma(b, 1.0002f, 0.2f); c = metal::fma(c, 1.0003f, 0.3f); d = metal::fma(d, 1.0004f, 0.4f); } o[t & 65535u] = a + b + c + d; }";
+  def qdr-pass-bufs(pst, bufs, o) = len(bufs) == 0 ? 1 : {
+   let e = metal_enqueue(pst, md-bind16([bufs[0], o], [1073741824 / 16], 256, 0, 1, 0), 4096);
+   qdr-pass-bufs(pst, bufs[1:], o);
+  };
+  def qdr-alu-pass(pa, o) = metal_enqueue(pa, md-bind16([o], [20000], 256, 0, 1, 0), 4096);
+  def qdr-burn2-go(pst, pa, bufs, o, i, n, every, t00) = i > n ? 1 : {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let q = qdr-pass-bufs(pst, bufs, o);
+   let s = metal_sync();
+   let t1 = host_monotonic_ms();
+   metal_batch_concurrent();
+   let q2 = qdr-alu-pass(pa, o);
+   let s2 = metal_sync();
+   let t2 = host_monotonic_ms();
+   let say = (i - 1) % every == 0 ? print_str("[q38-decode] burn2 pass " ++ i.str() ++ " at +" ++ ((t2 - t00) / 1000).str() ++ " s: stream " ++ (t1 - t0).str() ++ " ms = " ++ (t1 - t0 <= 0 ? 0 : 4294967296 / (t1 - t0) / 1000000).str() ++ " GB/s, alu " ++ (t2 - t1).str() ++ " ms") : 0;
+   qdr-burn2-go(pst, pa, bufs, o, i + 1, n, every, t00);
+  };
+  def qdr-burn2() {
+   let msl = qdr-hdr() ++ qdr-stream-msl() ++ qdr-alu-msl();
+   let pst = metal_pipeline(msl, "q38_stream");
+   let pa = metal_pipeline(msl, "q38_alu");
+   let bufs = [metal_buf_alloc(1073741824), metal_buf_alloc(1073741824), metal_buf_alloc(1073741824), metal_buf_alloc(1073741824)];
+   let o = metal_buf_alloc(4 * 1048576);
+   let w0 = print_str("[q38-decode] burn2 pipelines " ++ pst.str() ++ " " ++ pa.str() ++ " bufs " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", bufs));
+   let a = qdr-burn2-go(pst, pa, bufs, o, 1, 3, 1, host_monotonic_ms());
+   let b = qdr-burn2-go(pst, pa, bufs, o, 1, 600, 50, host_monotonic_ms());
+   let w1 = host_sleep_ms(60000);
+   let c = qdr-burn2-go(pst, pa, bufs, o, 1, 150, 15, host_monotonic_ms());
+   let w2 = host_sleep_ms(90000);
+   let d = qdr-burn2-go(pst, pa, bufs, o, 1, 150, 15, host_monotonic_ms());
+   1;
+  }
+  def qdr-measure(ctx, ids, k, mode) {
+   let bn = (String) mode == "burn" ? qdr-burn(ctx, 40, 1000) : 0;
+   let b3 = (String) mode == "burn3" ? qdr-burn3(ctx, 40, 700) : 0;
+   let pr = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40) : 0;
+   let pr2 = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40) : 0;
+   let pr3 = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40) : 0;
+   let ab = (String) mode == "ab" || (String) mode == "both" ? qdr-ab(ctx, ids, 40, 28) : 0;
+   let ab2 = (String) mode == "ab2" ? qdr-ab2(ctx, ids, 40, 28) : 0;
+   let ab3 = (String) mode == "ab3" ? qdr-ab3(ctx, ids, 40, 60) : 0;
+   let ln = (String) mode == "lane" ? qdr-lane(ctx, ids, k) : 0;
+   let ld = (String) mode == "lane-dev" ? qdr-lane-dev(ctx, ids, k) : 0;
+   let dc = (String) mode == "decode" || (String) mode == "both" ? qdr-measure-decode(ctx, ids, k) : 0;
+   let pl = (String) mode == "plain" ? qdr-plain-go(ctx, ids, k, 12, 1) : 0;
+   1;
+  }
+  def qdr-measure-decode(ctx, ids, k) {
+   let a = qdr-plain-go(ctx, ids, k, 3, 1);
+   let b = qdr-variant(ctx, ids, "split", k, 2, 3);
+   let c = qdr-variant(ctx, ids, "split", k, 0, 2);
+   let d = qdr-variant(ctx, ids, "split", k, 1, 2);
+   let e = qdr-variant(ctx, ids, "split", k, 4, 2);
+   let f = qdr-variant(ctx, ids, "split", k, 8, 2);
+   let g = qdr-variant(ctx, ids, "split", k, 16, 2);
+   1;
+  }
+  def qdr-open(path, k, prompt, mode) {
+   let src = fcmg-src(path);
+   let ids = q35-chat-ids(src, prompt);
+   let span = len(ids);
+   let maxpos = span + k + 8;
+   let own = fcms-qwen-own(src, maxpos);
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 decode probe", path, weights, own);
+   !mg-granted?(granted) ? print_str("[q38-decode] held: " ++ granted[1]) : {
+    let ctx = q38-open-span(path, maxpos, span);
+    !((Comparable) q38-context-ok?(ctx) == 1) ? {
+     let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
+     let unleased = mg-release();
+     let why = len(ctx) < 10 ? print_str("[q38-decode] context length " ++ len(ctx).str()) : print_str("[q38-decode] handles " ++ q38-handles-ok?(ctx[1]).str() ++ " layers " ++ q38-layers-ok?(ctx[3]).str() ++ " emb " ++ kth-tv-h(ctx[4]).str() ++ " onorm " ++ kth-tv-h(ctx[5]).str() ++ " proj " ++ kth-tv-h(ctx[6]).str() ++ " bs " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", ctx[1]));
+     print_str("[q38-decode] the context did not open");
+    } : {
+     let measured = qdr-measure(ctx, ids, k, mode);
+     let closed = q38-close(ctx, []);
+     let unleased = mg-release();
+     print_str("[q38-decode] released; weights " ++ (weights / 1000000).str() ++ " MB per token");
+    };
+   };
+  }
+  def qdr-run() {
+   let opts = qdr-opts();
+   let path = qdr-text(opts, "file", qdr-file());
+   let k = qdr-int(opts, "decode", 24);
+   (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "burn2" ? qdr-burn2() : (Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(path, k, qdr-text(opts, "prompt", qdr-prompt()), qdr-text(opts, "mode", "decode")) : print_str("[q38-decode] plan: decode " ++ k.str() ++ ", file " ++ path ++ "; {\"go\":1} opens it and measures");
+  }
+ }
+ qdr-run();
+}
