@@ -10,10 +10,10 @@
 //   on         1 while the drafter is open; 0 for a record that only names why speculation is off (reason)
 //   reason     the named reason speculation is off or was left, "" while it speaks
 //   committed  the drafter's context holds rows for positions [0, committed) of THIS stream (stamp: the stream's first state handle)
-//   mode       "dflash" while the walk is speculative, "plain" after its measured yield fell below the plain token's
+//   mode       "dflash" while the walk is speculative, "plain" after its measured yield fell below the plain token's (q38x-judge)
 //   ema kcur   the adaptive row count's running acceptance shares and the rows it will try next (carried from ask to ask)
-//   plain-ms   the cheapest one-row check measured in this session: the plain token's cost, the yardstick of the yield
-//   last       [steps, tokens, ms, plain-ms] of the last walk
+//   strikes    the walks in a row whose yield scored below the plain token
+//   last       [steps, tokens, ms, yield per thousand of a plain token] of the last walk
 // The drafter's context can only ever lower the ACCEPTANCE, never change an id: every id a walk says is the argmax of the verify logits at its
 // position, and a draft the target does not repeat changes nothing (state restored from the snapshots). The only thing that must be exact is the
 // target's own state, which the walk leaves where the plain walk would: KV rows for the positions before the pending token, the recurrent state
@@ -67,11 +67,11 @@ section [form.bml] {
     } : 0;
     // the decode checkpoints the plain walk pulses at (1, 2, 4, 8, ...): the next one at or beyond what is said
     def q38x-pulse-next(nxt, emitted) = nxt > emitted ? nxt : q38x-pulse-next(nxt * 2, emitted);
-    def q38x-pulse(pulse, st, emitted) = emitted >= st[7] ? {
+    def q38x-pulse(pulse, st, emitted) = emitted >= st[5] ? {
         let said = pulse(emitted);
-        append(take(7, st), cons(q38x-pulse-next(st[7], emitted + 1), drop(8, st)));
+        append(take(5, st), [q38x-pulse-next(st[5], emitted + 1)]);
     } : st;
-    // st = [ema, kcur, steps, tokens, ms, plain-ms, probes left, next pulse]; steps/tokens/ms count the speculative steps only
+    // st = [ema, kcur, steps, tokens, ms, next pulse]; steps/tokens/ms count the steps of this walk
     def q38x-end(ctx, qs, ds, dx, sts, sx, out, pending, pos, stopped, slot, nc, cp, st) = {
         let flushed = q38x-flush(ctx, qs, ds, dx, sts, sx, slot, nc, cp);
         [out, pending, pos, stopped, st];
@@ -80,9 +80,7 @@ section [form.bml] {
     def q38x-step-go(ctx, qs, ds, dx, sts, sx, x, p, left, stops, pulse, slot, nc, cp, out, st) = {
         let out2 = append(out, [x]);
         let room = q38x-min(left - 2, ctx[2][18] - 1 - p);
-        // the plain-cost probes come after two speculative steps (the pipelines and weight pages are warm by then) and while tokens remain to be said
-        let probing = st[6] > 0 && st[2] >= 2 && left >= 4 ? 1 : 0;
-        let keff = probing == 1 ? 0 : q38x-min(st[1], room);
+        let keff = q38x-min(st[1], room);
         let t0 = host_monotonic_ms();
         let r = q38d-step(ctx, qs, ds, dx, sts, sx, x, p, keff, slot, nc, cp, 0);
         let dt = host_monotonic_ms() - t0;
@@ -93,8 +91,7 @@ section [form.bml] {
         let si = q38x-first-stop(acc, stops, 0);
         let ema2 = keff == 0 ? st[0] : q38s-ema-go(st[0], m, 1, keff);
         let k2 = keff == 0 ? st[1] : q38d-next-k(ema2, st[1], q38x-kmax());
-        let pms2 = keff == 0 && (st[5] <= 0 || dt < st[5]) ? dt : st[5];
-        let st2 = [ema2, k2, keff > 0 ? st[2] + 1 : st[2], keff > 0 ? st[3] + m + 1 : st[3], keff > 0 ? st[4] + dt : st[4], pms2, probing == 1 ? st[6] - 1 : st[6], st[7]];
+        let st2 = [ema2, k2, st[2] + 1, st[3] + m + 1, st[4] + dt, st[5]];
         si >= 0 ? q38x-end(ctx, qs, ds, dx, sts, sx, append(out2, take(si, acc)), acc[si], p + si + 1, 1, si, si + 1, p, st2) : {
             let out3 = append(out2, acc);
             let st3 = q38x-pulse(pulse, st2, len(out3));
@@ -102,33 +99,32 @@ section [form.bml] {
         };
     };
     // x pending at p (the session's pending id and position), want ids to say at most, stops the session's: [ids, pending, pos, stopped, st]
-    // An ask of eight tokens or more whose session has no plain-cost yet spends two of its steps, after two speculative ones, as one-row checks (the session's
-    // yardstick: they say two tokens at a token's price); every walk's last token is a one-row check too, and the cheapest ever seen stands.
     def q38x-walk(o, sts, x, p, want, stops, pulse) = {
-        let pms = record_get(o, "plain-ms");
-        let st0 = [record_get(o, "ema"), record_get(o, "kcur"), 0, 0, 0, pms, pms <= 0 && want >= 8 ? 2 : 0, 1];
+        let st0 = [record_get(o, "ema"), record_get(o, "kcur"), 0, 0, 0, 1];
         let r = q38x-go(record_get(o, "ctx"), record_get(o, "qs"), record_get(o, "ds"), record_get(o, "dx"), sts, record_get(o, "sx"), x, p, want, stops, pulse, -1, 0, 0, [], st0);
         let st = r[4];
         record_set(o, "ema", st[0]);
         record_set(o, "kcur", st[1]);
-        record_set(o, "plain-ms", st[5]);
         // the rows the drafter holds are the positions the stream holds: the ones before the pending token (a walk that ended past the context has no pending token and its last position never ran)
         record_set(o, "committed", r[1] < 0 ? r[2] - 1 : r[2]);
-        record_set(o, "last", [st[2], st[3], st[4], st[5]]);
+        record_set(o, "last", [st[2], st[3], st[4], q38x-yield(st[0])]);
         record_set(o, "calls", record_get(o, "calls") + 1);
         r;
     };
-    // After a walk: the measured yield against the plain token's cost. tokens * plain-ms / ms is how many times faster the speculative steps said
-    // their tokens than the one-row check would have (100 = equal). Two walks in a row below the plain token's rate leave the walk plain for the
-    // rest of this stream (named): the tap stops, the plain planned step takes over.
-    def q38x-ratio(st) = st[4] <= 0 || st[5] <= 0 ? 0 : (st[3] * st[5] * 100) / st[4];
-    def q38x-judge(o, st) = st[2] >= 4 && st[5] > 0 ? {
-        let ratio = q38x-ratio(st);
-        let strikes = ratio < 100 ? record_get(o, "strikes") + 1 : 0;
+    // THE YIELD, measured by the acceptance the adaptive row count already keeps (ema: the running share, in percent, of the steps that took each draft position
+    // when it was tried). A step of k drafts says 100 + the first k shares of a token's worth and costs q38d-cost(k + 1) percent of a decode token (the draft, the
+    // commit and a row's check, calibrated on this machine); the best k is the policy's own choice (q38d-best-go) and its score is that quotient, per thousand of a
+    // plain token: a plain walk scores 1000. The speculative walk goes on while it scores above the plain token; two walks in a row below it (at least three steps each)
+    // leave this stream plain for good, named: the tap stops and the plain planned step takes over. The measured wall of the steps stays in the report.
+    def q38x-best-k(ema) = q38d-best-go(ema, 1, q38x-kmax(), 1, 0);
+    def q38x-yield(ema) = q38d-score(ema, q38x-best-k(ema));
+    def q38x-judge(o, st) = st[2] >= 3 ? {
+        let y = q38x-yield(st[0]);
+        let strikes = y < 1000 ? record_get(o, "strikes") + 1 : 0;
         record_set(o, "strikes", strikes);
         strikes >= 2 ? {
             record_set(o, "mode", "plain");
-            record_set(o, "reason", "spec-off:yield-below-plain:" ++ ratio.str() ++ "/100 over " ++ st[2].str() ++ " steps");
+            record_set(o, "reason", "spec-off:yield-below-plain:" ++ y.str() ++ "/1000 over " ++ st[2].str() ++ " steps");
             0;
         } : 1;
     } : 1;
@@ -170,7 +166,7 @@ section [form.bml] {
         !((Comparable) q38x-bufs-ok?(sx) == 1) ? {
             let closed = q38d-close(dx) + q38s-close(sx);
             q38x-off("spec-off:scratch-did-not-open");
-        } : record_new(0, "on", 1, "reason", "", "ctx", ctx, "qs", qs, "ds", ds, "dx", dx, "sx", sx, "nr", q38x-rows(ctx), "maxpos", maxpos, "committed", 0, "stamp", 0, "mode", "dflash", "ema", q38s-fill(q38x-kmax(), 100), "kcur", 4, "plain-ms", 0, "strikes", 0, "calls", 0, "last", [0, 0, 0, 0], "open-ms", append(open-ms, [t3 - t2]));
+        } : record_new(0, "on", 1, "reason", "", "ctx", ctx, "qs", qs, "ds", ds, "dx", dx, "sx", sx, "nr", q38x-rows(ctx), "maxpos", maxpos, "committed", 0, "stamp", 0, "mode", "dflash", "ema", q38s-fill(q38x-kmax(), 100), "kcur", 4, "strikes", 0, "calls", 0, "last", [0, 0, 0, 0], "open-ms", append(open-ms, [t3 - t2]));
     };
     0;
 }
