@@ -1,0 +1,291 @@
+; qwen35-dense-dflash-band.fk — the pieces of the DFlash2 drafter, each against a scalar reading of Splash's draft math, on small synthetic fixtures.
+;
+; Real Metal dispatch. No target model is admitted; the end-to-end witness (same token ids as the plain greedy decode, drafts rejected and
+; restored, the drafter reading the target's hidden states) is form/native/metal/tests/qwen35-dense-dflash-identity-band.bml, which needs the
+; 29 GB file. The drafter's own GGUF header (2 GB file, header only) pins the layout the kernels are written for.
+;
+;   1   the drafter pipelines compile (8) and the lane's and the spec lane's lists are untouched (63, 31)
+;   2   the dynamic convolution, both stages (prepare; finish with the residual): row 0 has no row before it, the dynamic weight of a channel is its
+;       group's of 16, the base is [stage][tap][channel]; every output against the scalar formula
+;   4   q/k per-head rms with weight, then rope (half-split pairs i, i+64, theta 1e7, position L + row): a q head and a k head against the scalar formula
+;   8   the context commit: key rms + rope + store at position pos0 + row, value copy; a head's row against the scalar formula, neighbours keep their sentinel
+;   16  the block attention over the context ring and the block's own eight rows (no mask among them), scale 1/sqrt(128): one (head, row) against the
+;       scalar softmax, with the context and with the context left out
+;   32  the capture of a tapped residual into its slot of the 25600-wide row; the accept rule; the tap map (layers 5 19 33 47 61 -> slots 0..4, others none)
+;   64  the selector: per position the top 16 (descending), the 16 x 16 edge table over the Q8_0 codebooks, the greedy path, against the scalar reading
+;   128 the drafter's GGUF header: arch dflash, 5 blocks, width 5120, 32/8 heads of 128, block 8, conv 2 taps of groups of 16, selector rank 256 top 16,
+;       target layers 6 20 34 48 62 (hidden_states indices = the layers 5 19 33 47 61 the taps read), mask token 248070, 81 tensors and the shapes of
+;       fc, the selector, and layer 0
+;
+; Verdict 255
+; REQUIRES: a live Metal device and /Users/ursmuff/models/qwen38-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf (header only)
+; preludes: native/metal/qwen35-dense-dflash.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
+(do
+ (defn dfb-repeat (text n acc) (if (le n 0) acc (dfb-repeat text (sub n 1) (str_concat acc text))))
+ ; a repeatable pattern of floats in [-1, 1)
+ (defn dfb-pat (n seed i acc)
+  (if (ge i n) acc
+   (dfb-pat n seed (add i 1) (str_concat acc (md-le32 (md-f32-bits (div (mul 1.0 (sub (mod (add (mul i 17) seed) 257) 128)) 128.0)))))))
+ (defn dfb-pat-at (i seed) (div (mul 1.0 (sub (mod (add (mul i 17) seed) 257) 128)) 128.0))
+ (defn dfb-f32 (bytes i) (ewl-f32 bytes (mul i 4)))
+ (defn dfb-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+ (defn dfb-close (a b) (if (le (dfb-abs (sub a b)) (mul 0.00005 (add 1.0 (dfb-abs b)))) 1 0))
+ ; cos and sin by argument reduction and series (the angles here are below 20 radians)
+ (defn dfb-reduce (x) (sub x (mul 6.283185307179586 (float_to_int (div x 6.283185307179586)))))
+ (defn dfb-neg-big () (sub 0.0 1000000.0))
+ (defn dfb-lists-eq (a b i) (if (eq (len a) (len b)) (if (ge i (len a)) 1 (if (eq (nth a i) (nth b i)) (dfb-lists-eq a b (add i 1)) 0)) 0))
+ (defn dfb-series-cos (x t k acc) (if (gt k 14) acc (dfb-series-cos x (div (mul (sub 0.0 t) (mul x x)) (mul (mul 1.0 (add (mul 2 k) 1)) (mul 1.0 (add (mul 2 k) 2)))) (add k 1) (add acc t))))
+ (defn dfb-cos (x) (dfb-series-cos (dfb-reduce x) 1.0 0 0.0))
+ (defn dfb-sin (x) (dfb-cos (sub 1.5707963267948966 x)))
+ ; ── 2: the convolution ──
+ (defn dfb-conv-ref (x dyn base resid h d nrows kind finish row ch)
+  (do
+   (let g (div ch 16)) (let ng (div h 16))
+   (let cur (mul (dfb-f32 x (add (mul row h) ch)) (add (dfb-f32 base (add (mul (mul kind 2) h) ch)) (dfb-f32 dyn (add (mul row d) (add (mul (mul kind 2) ng) g))))))
+   (let prev (if (gt row 0) (mul (dfb-f32 x (add (mul (sub row 1) h) ch)) (add (dfb-f32 base (add (mul (add (mul kind 2) 1) h) ch)) (dfb-f32 dyn (add (mul row d) (add (mul (add (mul kind 2) 1) ng) g))))) 0.0))
+   (add (add cur prev) (if (eq finish 1) (dfb-f32 resid (add (mul row h) ch)) 0.0))))
+ (defn dfb-conv-all (x dyn base resid out h d nrows kind finish e)
+  (if (ge e (mul nrows h)) 1
+   (if (eq (dfb-close (dfb-f32 out e) (dfb-conv-ref x dyn base resid h d nrows kind finish (div e h) (mod e h))) 1)
+    (dfb-conv-all x dyn base resid out h d nrows kind finish (add e 1)) 0)))
+ (defn dfb-conv-one (ds kind finish)
+  (do
+   (let h 64) (let d 16) (let nrows 8)
+   (let xb (dfb-pat (mul nrows h) 3 0 ""))
+   (let db (dfb-pat (mul nrows d) 11 0 ""))
+   (let bb (dfb-pat (mul 4 h) 23 0 ""))
+   (let rb (dfb-pat (mul nrows h) 31 0 ""))
+   (let x (metal_buf_alloc (str_len xb))) (let dy (metal_buf_alloc (str_len db))) (let b (metal_buf_alloc (str_len bb)))
+   (let r (metal_buf_alloc (str_len rb))) (let o (metal_buf_alloc (str_len xb)))
+   (let w (sum (list (metal_buf_write x 0 xb) (metal_buf_write dy 0 db) (metal_buf_write b 0 bb) (metal_buf_write r 0 rb))))
+   (metal_batch_concurrent)
+   (let e (metal_enqueue (nth ds 0) (q38-b16 (list x dy b r o) (list h d kind finish nrows) 0 1) (mul nrows h)))
+   (let ob (metal_buf_read o 0 (str_len xb)))
+   (let freed (sum (list (metal_buf_free x) (metal_buf_free dy) (metal_buf_free b) (metal_buf_free r) (metal_buf_free o))))
+   (if (gt e 0) (dfb-conv-all xb db bb rb ob h d nrows kind finish 0) 0)))
+ (defn dfb-conv-band (ds)
+  (do
+   (let a (dfb-conv-one ds 0 0))
+   (let b (dfb-conv-one ds 1 1))
+   (print (list "conv" "prepare" a "finish-with-residual" b))
+   (if (and (eq a 1) (eq b 1)) 1 0)))
+ ; ── 4: q/k norm + rope; 8: the context commit (the same math into the cache) ──
+ ; the normalized, rotated head: element i of head `src` (a list of 128 floats at offset off of bytes), weight pattern wseed, position pos
+ (defn dfb-ss (bytes off i acc) (if (ge i 128) acc (dfb-ss bytes off (add i 1) (add acc (mul (dfb-f32 bytes (add off i)) (dfb-f32 bytes (add off i)))))))
+ (defn dfb-rope-ref (bytes off wbytes pos i)
+  (do
+   (let inv (div 1.0 (math_sqrt (add (div (dfb-ss bytes off 0 0.0) 128.0) 0.000001))))
+   (let j (mod i 64))
+   (let a (mul (mul (dfb-f32 bytes (add off j)) inv) (dfb-f32 wbytes j)))
+   (let b (mul (mul (dfb-f32 bytes (add off (add j 64))) inv) (dfb-f32 wbytes (add j 64))))
+   (let ang (mul (mul 1.0 pos) (math_pow 10000000.0 (sub 0.0 (div (mul 1.0 j) 64.0)))))
+   (let c (dfb-cos ang)) (let s (dfb-sin ang))
+   (if (lt i 64) (sub (mul a c) (mul b s)) (add (mul b c) (mul a s)))))
+ (defn dfb-rope-all (bytes off wbytes pos out ooff i)
+  (if (ge i 128) 1
+   (if (eq (dfb-close (dfb-f32 out (add ooff i)) (dfb-rope-ref bytes off wbytes pos i)) 1) (dfb-rope-all bytes off wbytes pos out ooff (add i 1)) 0)))
+ (defn dfb-qk-band (ds)
+  (do
+   (let L 5)
+   (let qb (dfb-pat (mul 8 4096) 5 0 "")) (let kb (dfb-pat (mul 8 1024) 9 0 ""))
+   (let qw (dfb-pat 128 13 0 "")) (let kw (dfb-pat 128 29 0 ""))
+   (let q (metal_buf_alloc (str_len qb))) (let k (metal_buf_alloc (str_len kb))) (let qwh (metal_buf_alloc 512)) (let kwh (metal_buf_alloc 512))
+   (let qo (metal_buf_alloc (str_len qb))) (let ko (metal_buf_alloc (str_len kb)))
+   (let w (sum (list (metal_buf_write q 0 qb) (metal_buf_write k 0 kb) (metal_buf_write qwh 0 qw) (metal_buf_write kwh 0 kw))))
+   (metal_batch_concurrent)
+   (let e (metal_enqueue (nth ds 1) (q38-b16 (list q k qwh kwh qo ko) (list L 8) 0 1) (mul 8 40)))
+   (let qob (metal_buf_read qo 0 (str_len qb))) (let kob (metal_buf_read ko 0 (str_len kb)))
+   (let freed (sum (list (metal_buf_free q) (metal_buf_free k) (metal_buf_free qwh) (metal_buf_free kwh) (metal_buf_free qo) (metal_buf_free ko))))
+   ; q head 3 of row 2 (position L + 2), k head 5 of row 6 (position L + 6)
+   (let qok (dfb-rope-all qb (add (mul 2 4096) (mul 3 128)) qw (add L 2) qob (add (mul 2 4096) (mul 3 128)) 0))
+   (let kok (dfb-rope-all kb (add (mul 6 1024) (mul 5 128)) kw (add L 6) kob (add (mul 6 1024) (mul 5 128)) 0))
+   (print (list "qk-rope" "q-head" qok "k-head" kok))
+   (if (and (gt e 0) (and (eq qok 1) (eq kok 1))) 1 0)))
+ (defn dfb-vcopy-ok (vin vc voff cin i)
+  (if (ge i 128) 1 (if (eq (dfb-f32 vc (add voff i)) (dfb-f32 vin (add cin i))) (dfb-vcopy-ok vin vc voff cin (add i 1)) 0)))
+ (defn dfb-commit-band (ds)
+  (do
+   (let maxpos 16) (let pos0 3) (let nrows 3)
+   (let kb (dfb-pat (mul 8 1024) 41 0 "")) (let vb (dfb-pat (mul 8 1024) 43 0 "")) (let kw (dfb-pat 128 47 0 ""))
+   (let sentinel (md-le32 (md-f32-bits 42.25)))
+   (let cache-bytes (mul (mul 8 (mul maxpos 128)) 4))
+   (let kin (metal_buf_alloc (str_len kb))) (let vin (metal_buf_alloc (str_len vb))) (let kwh (metal_buf_alloc 512))
+   (let kc (metal_buf_alloc cache-bytes)) (let vc (metal_buf_alloc cache-bytes))
+   (let w (sum (list (metal_buf_write kin 0 kb) (metal_buf_write vin 0 vb) (metal_buf_write kwh 0 kw) (metal_buf_write kc 0 (dfb-repeat sentinel (mul 8 (mul maxpos 128)) "")) (metal_buf_write vc 0 (dfb-repeat sentinel (mul 8 (mul maxpos 128)) "")))))
+   (metal_batch_concurrent)
+   (let e (metal_enqueue (nth ds 2) (q38-b16 (list kin vin kwh kc vc) (list pos0 maxpos nrows) 0 1) (mul nrows 8)))
+   (let kcb (metal_buf_read kc 0 cache-bytes)) (let vcb (metal_buf_read vc 0 cache-bytes))
+   (let freed (sum (list (metal_buf_free kin) (metal_buf_free vin) (metal_buf_free kwh) (metal_buf_free kc) (metal_buf_free vc))))
+   ; kv head 2, row 1 -> position 4
+   (let slot (mul (add (mul 2 maxpos) 4) 128))
+   (let kok (dfb-rope-all kb (add (mul 1 1024) (mul 2 128)) kw 4 kcb slot 0))
+   (let vok (dfb-vcopy-ok vb vcb slot (add (mul 1 1024) (mul 2 128)) 0))
+   ; positions 2 and 6 (outside pos0 .. pos0 + nrows - 1) keep the sentinel
+   (let before (dfb-f32 kcb (mul (add (mul 2 maxpos) 2) 128)))
+   (let after (dfb-f32 vcb (mul (add (mul 2 maxpos) 6) 128)))
+   (print (list "commit" "key" kok "value" vok "neighbours" before after))
+   (if (and (gt e 0) (and (eq kok 1) (and (eq vok 1) (and (eq before 42.25) (eq after 42.25))))) 1 0)))
+ ; ── 16: the block attention ──
+ (defn dfb-dot (a aoff b boff i acc) (if (ge i 128) acc (dfb-dot a aoff b boff (add i 1) (add acc (mul (dfb-f32 a (add aoff i)) (dfb-f32 b (add boff i)))))))
+ ; the key and value rows of position slot i of the attention of (h, row): i < nctx a context row, else a block row
+ (defn dfb-key-off (i nctx kh maxpos) (if (lt i nctx) (mul (add (mul kh maxpos) i) 128) (add (mul (sub i nctx) 1024) (mul kh 128))))
+ (defn dfb-scores (q qoff kc kcur nctx total kh maxpos i acc)
+  (if (ge i total) acc
+   (dfb-scores q qoff kc kcur nctx total kh maxpos (add i 1)
+    (append acc (list (mul (dfb-dot q qoff (if (lt i nctx) kc kcur) (dfb-key-off i nctx kh maxpos) 0 0.0) 0.08838834765))))))
+ (defn dfb-maxl (xs i m) (if (ge i (len xs)) m (dfb-maxl xs (add i 1) (if (gt (nth xs i) m) (nth xs i) m))))
+ (defn dfb-expsum (xs i acc) (if (ge i (len xs)) acc (dfb-expsum xs (add i 1) (add acc (math_exp (sub (nth xs i) (dfb-maxl xs 0 (dfb-neg-big))))))))
+ (defn dfb-attn-out (sc vc vcur nctx kh maxpos c i acc)
+  (if (ge i (len sc)) acc
+   (dfb-attn-out sc vc vcur nctx kh maxpos c (add i 1)
+    (add acc (mul (div (math_exp (sub (nth sc i) (dfb-maxl sc 0 (dfb-neg-big)))) (dfb-expsum sc 0 0.0))
+                  (dfb-f32 (if (lt i nctx) vc vcur) (add (dfb-key-off i nctx kh maxpos) c)))))))
+ (defn dfb-attn-check (out oo sc vc vcur nctx kh maxpos c)
+  (if (ge c 128) 1
+   (if (eq (dfb-close (dfb-f32 out (add oo c)) (dfb-attn-out sc vc vcur nctx kh maxpos c 0 0.0)) 1) (dfb-attn-check out oo sc vc vcur nctx kh maxpos (add c 1)) 0)))
+ (defn dfb-attn-one (ds ctxon)
+  (do
+   (let L 11) (let maxpos 32) (let h 6) (let row 3) (let kh (div h 4))
+   (let qb (dfb-pat (mul 8 4096) 51 0 "")) (let kcb (dfb-pat (mul 8 (mul maxpos 128)) 53 0 "")) (let vcb (dfb-pat (mul 8 (mul maxpos 128)) 59 0 ""))
+   (let kcur (dfb-pat (mul 8 1024) 61 0 "")) (let vcur (dfb-pat (mul 8 1024) 67 0 ""))
+   (let q (metal_buf_alloc (str_len qb))) (let kc (metal_buf_alloc (str_len kcb))) (let vc (metal_buf_alloc (str_len vcb)))
+   (let kn (metal_buf_alloc (str_len kcur))) (let vn (metal_buf_alloc (str_len vcur))) (let o (metal_buf_alloc (str_len qb)))
+   (let w (sum (list (metal_buf_write q 0 qb) (metal_buf_write kc 0 kcb) (metal_buf_write vc 0 vcb) (metal_buf_write kn 0 kcur) (metal_buf_write vn 0 vcur))))
+   (metal_batch_concurrent)
+   (let e (metal_enqueue (nth ds 3) (md-bind16 (list q kc vc kn vn o) (list L maxpos 8 ctxon) 256 0 1 1) 256))
+   (let ob (metal_buf_read o 0 (str_len qb)))
+   (let freed (sum (list (metal_buf_free q) (metal_buf_free kc) (metal_buf_free vc) (metal_buf_free kn) (metal_buf_free vn) (metal_buf_free o))))
+   (let nctx (if (eq ctxon 1) L 0))
+   (let sc (dfb-scores qb (add (mul row 4096) (mul h 128)) kcb kcur nctx (add nctx 8) kh maxpos 0 (list)))
+   (if (gt e 0) (dfb-attn-check ob (add (mul row 4096) (mul h 128)) sc vcb vcur nctx kh maxpos 0) 0)))
+ (defn dfb-attn-band (ds)
+  (do
+   (let a (dfb-attn-one ds 1))
+   (let b (dfb-attn-one ds 0))
+   (print (list "attention" "with-context" a "block-only" b))
+   (if (and (eq a 1) (eq b 1)) 1 0)))
+ ; ── 32: capture, accept, taps ──
+ (defn dfb-capture-band (ds)
+  (do
+   (let d 10) (let w 50) (let slot 3) (let rowoff 2) (let nrows 4)
+   (let sb (dfb-pat (mul nrows d) 71 0 ""))
+   (let src (metal_buf_alloc (str_len sb)))
+   (let dst (metal_buf_alloc (mul (mul 8 w) 4)))
+   (let w0 (sum (list (metal_buf_write src 0 sb) (metal_buf_write dst 0 (dfb-repeat (md-le32 (md-f32-bits 42.25)) (mul 8 w) "")))))
+   (metal_batch_concurrent)
+   (let e (metal_enqueue (nth ds 4) (q38-b16 (list src dst) (list d w slot rowoff nrows) 0 1) (mul d nrows)))
+   (let db (metal_buf_read dst 0 (mul (mul 8 w) 4)))
+   (let freed (add (metal_buf_free src) (metal_buf_free dst)))
+   ; row rowoff + t, columns slot * d + i is src row t element i; every other word is the sentinel
+   (let hit (str_eq (substring db (mul (add (mul rowoff w) (mul slot d)) 4) (mul (add (mul rowoff w) (add (mul slot d) d)) 4)) (substring sb 0 (mul d 4))))
+   (let last (str_eq (substring db (mul (add (mul (add rowoff 3) w) (mul slot d)) 4) (mul (add (mul (add rowoff 3) w) (add (mul slot d) d)) 4)) (substring sb (mul 3 (mul d 4)) (mul 4 (mul d 4)))))
+   (let before (dfb-f32 db (add (mul rowoff w) (sub (mul slot d) 1))))
+   (let after (dfb-f32 db (add (mul rowoff w) (add (mul slot d) d))))
+   (let beyond (dfb-f32 db (add (mul (add rowoff nrows) w) (mul slot d))))
+   (print (list "capture" hit last before after beyond))
+   (if (and (gt e 0) (and hit (and last (and (eq before 42.25) (and (eq after 42.25) (eq beyond 42.25)))))) 1 0)))
+ (defn dfb-rules ()
+  (do
+   (let a (q38d-accept-go (list 5 6 9 1 0 0 0) (list 5 6 7 1 0 0 0 0) 1 7))
+   (let b (q38d-accept-go (list 4 6 7 1 0 0 0) (list 5 6 7 1 0 0 0 0) 1 7))
+   (let c (q38d-accept-go (list 5 6 7 8 9 10 11) (list 5 6 7 8 9 10 11 12) 1 7))
+   (let taps (list (q38d-slot 5) (q38d-slot 19) (q38d-slot 33) (q38d-slot 47) (q38d-slot 61) (q38d-slot 4) (q38d-slot 6) (q38d-slot 62)))
+   (print (list "rules" a b c taps))
+   (let neg (sub 0 1))
+   (let tapsok (dfb-lists-eq taps (list 0 1 2 3 4 neg neg neg) 0))
+   (if (and (eq a 2) (and (eq b 0) (and (eq c 7) (eq tapsok 1)))) 1 0)))
+ ; ── 64: the selector ──
+ ; logits [8][vocab]: row r word i = ((i * 7919 + r * 131) mod 1009) / 1009: distinct within a row for i < 1009
+ (defn dfb-logit (r i) (div (mul 1.0 (mod (add (mul i 7919) (mul r 131)) 1009)) 1009.0))
+ (defn dfb-logits (vocab r i acc)
+  (if (ge r 8) acc
+   (if (ge i vocab) (dfb-logits vocab (add r 1) 0 acc)
+    (dfb-logits vocab r (add i 1) (str_concat acc (md-le32 (md-f32-bits (dfb-logit r i))))))))
+ ; the top 16 of row r by repeated maximum, descending (values are distinct): list of ids
+ (defn dfb-best (vocab r i bi bv taken)
+  (if (ge i vocab) bi
+   (if (and (gt (dfb-logit r i) bv) (eq (dfb-memq i taken 0) 0)) (dfb-best vocab r (add i 1) i (dfb-logit r i) taken) (dfb-best vocab r (add i 1) bi bv taken))))
+ (defn dfb-memq (x xs j) (if (ge j (len xs)) 0 (if (eq (nth xs j) x) 1 (dfb-memq x xs (add j 1)))))
+ (defn dfb-top16 (vocab r k acc) (if (ge k 16) acc (dfb-top16 vocab r (add k 1) (append acc (list (dfb-best vocab r 0 0 (sub 0.0 1.0) acc))))))
+ ; Q8_0 codebook row t: 8 blocks, a scale (a small normal f16) and 32 int8, a function of (t, block, j)
+ (defn dfb-cb-q (t b j) (sub (mod (add (mul t 31) (add (mul b 17) (add (mul j 29) 7))) 255) 127))
+ (defn dfb-cb-scale-bytes (t b) (str_concat (byte_to_str (mod (add (mul t 53) (mul b 7)) 256)) (byte_to_str (add 40 (mod (add t b) 8)))))
+ (defn dfb-cb-block (t b j acc) (if (ge j 32) acc (dfb-cb-block t b (add j 1) (str_concat acc (byte_to_str (mod (add (dfb-cb-q t b j) 256) 256))))))
+ (defn dfb-cb-row (t b acc) (if (ge b 8) acc (dfb-cb-row t (add b 1) (str_concat acc (str_concat (dfb-cb-scale-bytes t b) (dfb-cb-block t b 0 ""))))))
+ (defn dfb-codebook (vocab t acc) (if (ge t vocab) acc (dfb-codebook vocab (add t 1) (str_concat acc (dfb-cb-row t 0 "")))))
+ (defn dfb-cb-scale (t b)
+  (do
+   (let lo (mod (add (mul t 53) (mul b 7)) 256)) (let hi (add 40 (mod (add t b) 8)))
+   (fd-value (add (mul hi 256) lo) 5 10)))
+ (defn dfb-cb (t d) (mul (dfb-cb-scale t (div d 32)) (mul 1.0 (dfb-cb-q t (div d 32) (mod d 32)))))
+ (defn dfb-edge-sum (pt st hid d acc) (if (ge d 256) acc (dfb-edge-sum pt st hid (add d 1) (add acc (mul (mul (dfb-cb pt d) (dfb-f32 hid d)) (dfb-cb st d))))))
+ (defn dfb-select-band (ds)
+  (do
+   (let vocab 150) (let parts 16)
+   (let lg (dfb-logits vocab 0 0 ""))
+   (let hidb (dfb-pat (mul 8 256) 73 0 ""))
+   (let cbp (dfb-codebook vocab 0 "")) (let cbs (dfb-codebook vocab 0 ""))
+   (let lh (metal_buf_alloc (str_len lg))) (let pi (metal_buf_alloc (mul (mul 7 (mul parts 16)) 4))) (let pv (metal_buf_alloc (mul (mul 7 (mul parts 16)) 4)))
+   (let cand (metal_buf_alloc (mul (mul 7 16) 4))) (let un (metal_buf_alloc (mul (mul 7 16) 4))) (let tb (metal_buf_alloc (mul (mul 7 256) 4)))
+   (let hh (metal_buf_alloc (str_len hidb))) (let ph (metal_buf_alloc (str_len cbp))) (let sh (metal_buf_alloc (str_len cbs)))
+   (let ids (metal_buf_alloc 64)) (let dbg (metal_buf_alloc 64))
+   (let w (sum (list (metal_buf_write lh 0 lg) (metal_buf_write hh 0 hidb) (metal_buf_write ph 0 cbp) (metal_buf_write sh 0 cbs) (metal_buf_write ids 0 (md-le32 77)))))
+   (metal_batch_concurrent)
+   (let e1 (metal_enqueue (nth ds 5) (q38-b16 (list lh pi pv) (list vocab parts 7) 0 1) (mul 7 parts)))
+   (let e2 (metal_enqueue (nth ds 6) (md-bind16 (list pi pv cand un tb hh ph sh ids) (list vocab parts) 256 0 1 1) 7))
+   (let e3 (metal_enqueue (nth ds 7) (q38-b16 (list cand un tb ids dbg) (list 7) 0 1) 1))
+   (let cb (metal_buf_read cand 0 (mul (mul 7 16) 4)))
+   (let ub (metal_buf_read un 0 (mul (mul 7 16) 4)))
+   (let tbb (metal_buf_read tb 0 (mul (mul 7 256) 4)))
+   (let idb (metal_buf_read ids 0 32))
+   (let dbb (metal_buf_read dbg 0 28))
+   (let freed (sum (list (metal_buf_free lh) (metal_buf_free pi) (metal_buf_free pv) (metal_buf_free cand) (metal_buf_free un) (metal_buf_free tb) (metal_buf_free hh) (metal_buf_free ph) (metal_buf_free sh) (metal_buf_free ids) (metal_buf_free dbg))))
+   ; candidates: position p takes logits row p + 1
+   (let top (dfb-top16 vocab 1 0 (list)))
+   (let top2 (dfb-top16 vocab 4 0 (list)))
+   (let c0 (if (eq (dfb-u32s cb 0 16) top) 1 0))
+   (let c3 (if (eq (dfb-u32s (substring cb (mul 3 64) (mul 4 64)) 0 16) top2) 1 0))
+   (let u0 (dfb-close (dfb-f32 ub 0) (dfb-logit 1 (nth top 0))))
+   ; edge (position 2, predecessor 5, candidate 9): predecessor = the 6th candidate of position 1, candidate = the 10th of position 2
+   (let top1 (dfb-top16 vocab 2 0 (list)))
+   (let top3 (dfb-top16 vocab 3 0 (list)))
+   (let edge (dfb-edge-sum (nth top1 5) (nth top3 9) (substring hidb (mul 3 (mul 256 4)) (mul 4 (mul 256 4))) 0 0.0))
+   (let eok (dfb-close (dfb-f32 tbb (add (mul (add (mul 2 16) 5) 16) 9)) edge))
+   ; the path walks position 0 from the anchor (every predecessor row of position 0 is the anchor's), and it is a chosen candidate each position
+   (let path (dfb-u32s idb 1 7))
+   (let inrange (dfb-each-in path cb 0))
+   (let dtop (dfb-u32s dbb 0 7))
+   (print (list "selector" "top16-p0" c0 "top16-p3" c3 "unary" u0 "edge" eok "path-in-candidates" inrange "plain-argmax-ids" (eq (nth dtop 0) (nth top 0))))
+   (if (and (gt e1 0) (and (gt e2 0) (and (gt e3 0) (and (eq c0 1) (and (eq c3 1) (and (eq u0 1) (and (eq eok 1) (and (eq inrange 1) (eq (nth dtop 0) (nth top 0)))))))))) 1 0)))
+ (defn dfb-u32s (bytes i n) (if (ge n 1) (cons (egg-u32 bytes (mul i 4)) (dfb-u32s bytes (add i 1) (sub n 1))) (list)))
+ (defn dfb-each-in (path cb p) (if (ge p (len path)) 1 (if (eq (dfb-memq (nth path p) (dfb-u32s (substring cb (mul p 64) (mul (add p 1) 64)) 0 16) 0) 1) (dfb-each-in path cb (add p 1)) 0)))
+ ; ── 128: the drafter's header ──
+ (defn dfb-header-band ()
+  (do
+   (let path "/Users/ursmuff/models/qwen38-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf")
+   (let src (eqr-of-file path 0 40000000))
+   (let arch (gmt-str src "general.architecture"))
+   (let ints (list (gmt-u32 src "dflash.block_count") (gmt-u32 src "dflash.embedding_length") (gmt-u32 src "dflash.feed_forward_length") (gmt-u32 src "dflash.attention.head_count") (gmt-u32 src "dflash.attention.head_count_kv") (gmt-u32 src "dflash.attention.key_length") (gmt-u32 src "dflash.block_size") (gmt-u32 src "dflash.conv_kernel_size") (gmt-u32 src "dflash.conv_group_size") (gmt-u32 src "dflash.selector_rank") (gmt-u32 src "dflash.selector_top_k") (gmt-u32 src "tokenizer.ggml.mask_token_id") (gmt-u32 src "dflash.attention.sliding_window")))
+   (let want (list 5 5120 17408 32 8 128 8 2 16 256 16 248070 2048))
+   (let tl (gmt-find src "dflash.target_layers"))
+   (let targets (list (egg-u32 src (gmt-arr-elem src tl 0)) (egg-u32 src (gmt-arr-elem src tl 1)) (egg-u32 src (gmt-arr-elem src tl 2)) (egg-u32 src (gmt-arr-elem src tl 3)) (egg-u32 src (gmt-arr-elem src tl 4))))
+   (let count (egg-tensor-count src))
+   (let fc (egg-find-tensor src "fc.weight"))
+   (let conv (egg-find-tensor src "blk.0.attn_conv_base"))
+   (let sp (egg-find-tensor src "selector_predecessor.weight"))
+   (let shapes (list (egg-ti-dim src fc 0) (egg-ti-dim src fc 1) (egg-ti-type src fc) (egg-ti-dim src conv 0) (egg-ti-dim src conv 1) (egg-ti-dim src conv 2) (egg-ti-type src conv) (egg-ti-dim src sp 0) (egg-ti-dim src sp 1) (egg-ti-type src sp)))
+   (print (list "header" arch ints targets count shapes))
+   (if (and (str_eq arch "dflash") (and (eq (dfb-lists-eq ints want 0) 1) (and (eq (dfb-lists-eq targets (list 6 20 34 48 62) 0) 1) (and (eq count 81) (eq (dfb-lists-eq shapes (list 25600 5120 8 5120 2 2 0 256 248320 8) 0) 1))))) 1 0)))
+ (let ds (q38d-pipes (q38d-msl)))
+ (let ps (q38-pipes (q38-msl)))
+ (let qs (q38s-pipes (q38s-msl)))
+ (let pipes-ok (if (and (eq (len ds) 8) (and (kth-pipes-ok? ds) (and (eq (len ps) 63) (and (eq (len qs) 31) (eq (nth (metal_live) 2) 0))))) 1 0))
+ (let conv (dfb-conv-band ds))
+ (let qk (dfb-qk-band ds))
+ (let commit (dfb-commit-band ds))
+ (let attn (dfb-attn-band ds))
+ (let cap (if (and (eq (dfb-capture-band ds) 1) (eq (dfb-rules) 1)) 1 0))
+ (let sel (dfb-select-band ds))
+ (let header (dfb-header-band))
+ (let verdict (sum (list pipes-ok (mul 2 conv) (mul 4 qk) (mul 8 commit) (mul 16 attn) (mul 32 cap) (mul 64 sel) (mul 128 header))))
+ (if (eq verdict 255) verdict (form_error (str_concat "qwen35 dense dflash band failed: " (int_to_str verdict)))))
