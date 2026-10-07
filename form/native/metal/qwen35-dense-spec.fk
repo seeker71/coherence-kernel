@@ -74,34 +74,50 @@ section [form.bml] {
     def q38s-mm-base() = 31;
     def q38s-pipe-delta-sg() = q38s-mm-base() + len(q38m-variants());
     def q38s-mode-slot() = q38s-pipe-delta-sg() + 1;
-    def q38s-pipes(msl) = append(append(append(q38s-pipes-base(msl), q38m-pipes(msl)), [metal_pipeline(msl, "form_q38s_delta_sg_snap")]), [1]);
-    def q38s-fast(qs) = append(take(q38s-mode-slot(), qs), [2]);
-    def q38s-exact(qs) = append(take(q38s-mode-slot(), qs), [1]);
+    // after the mode, the tuning of the matrix-unit projections: [kb (blocks a K step), rt for tensors of 8192 rows and more, rt for the rest, the
+    // fewest rows a tensor must have to take the matrix unit (below it the exact matvec: its groups of two rows fill the GPU where a tile of
+    // 16..64 rows leaves a few groups walking a 5120-long K alone)]
+    def q38s-tune-default() = [1, 64, 32, 2048];
+    def q38s-pipes(msl) = append(append(append(q38s-pipes-base(msl), q38m-pipes(msl)), [metal_pipeline(msl, "form_q38s_delta_sg_snap")]), [1, q38s-tune-default()]);
+    def q38s-with-mode(qs, m) = append(take(q38s-mode-slot(), qs), [m, qs[q38s-mode-slot() + 1]]);
+    def q38s-fast(qs) = q38s-with-mode(qs, 2);
+    def q38s-exact(qs) = q38s-with-mode(qs, 1);
     // 3 = the matrix unit at every width, one token included: the verify path's own reference (a check of one token is the check of eight, column for column)
-    def q38s-fast1(qs) = append(take(q38s-mode-slot(), qs), [3]);
+    def q38s-fast1(qs) = q38s-with-mode(qs, 3);
+    def q38s-tune(qs, t) = append(take(q38s-mode-slot() + 1, qs), [t]);
+    def q38s-tuning(qs) = qs[q38s-mode-slot() + 1];
     def q38s-fast?(qs) = len(qs) > q38s-mode-slot() && qs[q38s-mode-slot()] >= 2;
     def q38s-mm-min(qs) = qs[q38s-mode-slot()] == 3 ? 1 : 2;
+    // does this projection run on the matrix unit?
+    def q38s-mm-ok?(qs, tv, ntok) = q38s-fast?(qs) && (Comparable) kth-tv-ty(tv) == 8 && ntok >= q38s-mm-min(qs) && ntok <= q38s-nt-max() && kth-tv-r(tv) >= q38s-tuning(qs)[3];
     def q38s-pipes-base(msl) = append([metal_pipeline(msl, "form_q38s_mvk1"), metal_pipeline(msl, "form_q38s_mvk2"), metal_pipeline(msl, "form_q38s_mvk3"), metal_pipeline(msl, "form_q38s_mvk4"), metal_pipeline(msl, "form_q38s_mvk5"), metal_pipeline(msl, "form_q38s_mvk6"), metal_pipeline(msl, "form_q38s_mvk7"), metal_pipeline(msl, "form_q38s_mvk8"), metal_pipeline(msl, "form_q38s_embed_ids"), metal_pipeline(msl, "form_q38s_concat2"), metal_pipeline(msl, "form_q38s_conv_snap"), metal_pipeline(msl, "form_q38s_delta_snap"), metal_pipeline(msl, "form_q38s_argmax_part"), metal_pipeline(msl, "form_q38s_argmax_comb")], q38s-pipes-more(msl));
     def q38s-pipes-more(msl) = append(append(q38s-mvr-pipes-go(msl, 4, 1), q38s-mvr-pipes-go(msl, 8, 1)), [metal_pipeline(msl, "form_q38s_gqa_span")]);
-    def q38s-pipes-ok?(qs) = kth-pipes-ok?(qs);
+    def q38s-pipes-ok?(qs) = kth-pipes-ok?(take(q38s-mode-slot(), qs));
     // the small-batch matvec: NT columns, one weight pass. Q8_0 only; any other type, or more columns than the kernel family holds,
     // goes to the lane's batched matmul (q38-mv-batch-y), which answers to its own named bound.
-    def q38s-mv(ps, qs, tv, xh, yh, ntok, ystride, barrier) = (q38s-fast?(qs) && (Comparable) kth-tv-ty(tv) == 8 && ntok >= q38s-mm-min(qs) && ntok <= q38s-nt-max()) ? q38s-mm(qs, tv, xh, yh, ntok, ystride, barrier) : q38s-mv-r(ps, qs, tv, xh, yh, ntok, ystride, barrier, q38s-rows-for(ntok));
+    def q38s-mv(ps, qs, tv, xh, yh, ntok, ystride, barrier) = q38s-mm-ok?(qs, tv, ntok) ? q38s-mm(qs, tv, xh, yh, ntok, ystride, barrier) : q38s-mv-r(ps, qs, tv, xh, yh, ntok, ystride, barrier, q38s-rows-for(ntok));
     // the span on the matrix unit: 8 or 16 tokens a tile, kb blocks a K step, rt rows a tile (a tensor of few rows gets a smaller tile so its groups fill the GPU)
-    def q38s-mm-tile(rows) = rows >= 8192 ? 64 : 32;
-    def q38s-mm(qs, tv, xh, yh, ntok, ystride, barrier) = q38s-mm-v(qs, tv, xh, yh, ntok, ystride, barrier, 8, 1, q38s-mm-tile(kth-tv-r(tv)));
-    def q38s-mm-v(qs, tv, xh, yh, ntok, ystride, barrier, tn, kb, rt) = metal_enqueue(qs[q38s-mm-base() + q38m-slot(tn, kb, rt)], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv), ntok, ystride], 2 * rt, 0, 1, barrier), q38m-groups(kth-tv-r(tv), ntok, tn, rt));
+    def q38s-mm-tile(qs, rows) = rows >= 8192 ? q38s-tuning(qs)[1] : q38s-tuning(qs)[2];
+    def q38s-mm(qs, tv, xh, yh, ntok, ystride, barrier) = q38s-mm-v(qs, tv, xh, yh, ntok, ystride, barrier, 8, q38s-tuning(qs)[0], q38s-mm-tile(qs, kth-tv-r(tv)));
+    def q38s-mm-v(qs, tv, xh, yh, ntok, ystride, barrier, tn, kb, rt) = metal_enqueue(qs[q38s-mm-base() + q38m-slot(tn, kb, rt, 0)], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv), ntok, ystride], 2 * rt, 0, 1, barrier), q38m-groups(kth-tv-r(tv), ntok, tn, rt));
     // rr rows a group (2, 4 or 8) by the number of columns
     def q38s-rows-for(ntok) = ntok >= 3 ? 4 : 2;
     def q38s-mv-r(ps, qs, tv, xh, yh, ntok, ystride, barrier, rr) = ((Comparable) kth-tv-ty(tv) == 8 && ntok >= 1 && ntok <= q38s-nt-max()) ? metal_enqueue((Comparable) rr == 2 ? qs[ntok - 1] : qs[q38s-mvr-index(rr, ntok)], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv), ystride], 256, 0, 1, barrier), ((Number) kth-tv-r(tv) + (Number) (rr - 1)) / rr) : q38-mv-batch-y(ps, tv, xh, yh, ntok, ystride, barrier);
+    // a projection whose product joins the residual stream: res = res + W x. On the matrix unit the add rides the matmul's epilogue (tmp unused);
+    // on the exact path it is the lane's own pair, the matvec into tmp and the add dispatch
+    def q38s-mv-res(ps, qs, tv, xh, tmp, resh, ntok, ystride, barrier) = q38s-mm-ok?(qs, tv, ntok) ? q38s-mm-res(qs, tv, xh, resh, ntok, ystride, barrier) : {
+        q38s-mv(ps, qs, tv, xh, tmp, ntok, ystride, barrier);
+        metal_enqueue(ps[19], q38-b16([resh, tmp, resh], [kth-tv-r(tv) * ntok], 0, 1), kth-tv-r(tv) * ntok);
+    };
+    def q38s-mm-res(qs, tv, xh, resh, ntok, ystride, barrier) = q38s-mm-res-v(qs, tv, xh, resh, ntok, ystride, barrier, q38s-tuning(qs)[0], q38s-mm-tile(qs, kth-tv-r(tv)));
+    def q38s-mm-res-v(qs, tv, xh, resh, ntok, ystride, barrier, kb, rt) = metal_enqueue(qs[q38s-mm-base() + q38m-slot(8, kb, rt, 1)], md-bind16([kth-tv-h(tv), xh, resh, resh], [kth-tv-r(tv), kth-tv-c(tv), ntok, ystride], 2 * rt, 0, 1, barrier), q38m-groups(kth-tv-r(tv), ntok, 8, rt));
     // ── the span blocks with the small-batch matvec (the lane's q38-full-attn-span / q38-ffn-span / q38-linear-attn-span-f, op for op) ──
     def q38s-ffn-span(ps, qs, bs, geo, lay, ntok) = {
         q38-rms-span(ps, bs[33], lay[1], bs[1], geo[0], geo[6], ntok, 1);
         q38s-mv(ps, qs, lay[2], bs[1], bs[14], ntok, kth-tv-r(lay[2]), 1);
         q38s-mv(ps, qs, lay[3], bs[1], bs[15], ntok, kth-tv-r(lay[3]), 0);
         metal_enqueue(ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10] * ntok], 0, 1), geo[10] * ntok);
-        q38s-mv(ps, qs, lay[4], bs[16], bs[17], ntok, kth-tv-r(lay[4]), 1);
-        metal_enqueue(ps[19], q38-b16([bs[33], bs[17], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        q38s-mv-res(ps, qs, lay[4], bs[16], bs[17], bs[33], ntok, kth-tv-r(lay[4]), 1);
         1;
     };
     def q38s-full-attn-span(ps, qs, bs, geo, lay, st, pos0, ntok) = {
@@ -121,8 +137,7 @@ section [form.bml] {
         metal_enqueue(ps[37], q38-b16([bs[25], st[3]], [geo[20], pos0, ntok], 0, 0), geo[20] * ntok);
         metal_enqueue(qs[q38s-pipe-gqa()], md-bind16([bs[22], st[2], st[3], bs[26], bs[27]], [pos0, geo[12], geo[13], geo[14], geo[17], geo[18], ntok], 256, 0, 1, 1), geo[12] * ntok);
         metal_enqueue(ps[17], q38-b16([bs[26], bs[23]], [nqhd * ntok], 0, 1), nqhd * ntok);
-        q38s-mv(ps, qs, lay[10], bs[26], bs[10], ntok, kth-tv-r(lay[10]), 1);
-        metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        q38s-mv-res(ps, qs, lay[10], bs[26], bs[10], bs[33], ntok, kth-tv-r(lay[10]), 1);
         1;
     };
     // snp = [conv snapshots, delta snapshots]: slot t holds the state after token t of the span (t = 0..kmax-1)
@@ -141,8 +156,7 @@ section [form.bml] {
         metal_enqueue(nth(ps, qlslc-gates-span-pipeline()), q38-b16([bs[3], bs[4], kth-tv-h(lay[9]), kth-tv-h(lay[10]), bs[5], bs[6]], [geo[3], ntok], 0, 1), geo[3] * ntok);
         (Comparable) snapon == 1 && q38s-fast?(qs) && (Comparable) geo[4] == 128 ? metal_enqueue(qs[q38s-pipe-delta-sg()], md-bind16([st[1], bs[2], bs[5], bs[6], bs[8], snp[1]], [geo[3], geo[5], geo[4], geo[2], geo[7], bs2-pitch, geo[3], geo[3] * geo[5], ntok, geo[3] * geo[5] * geo[4]], 128, 0, 1, 1), (geo[3] * geo[5] + 3) / 4) : (Comparable) snapon == 1 ? metal_enqueue(qs[q38s-pipe-delta()], q38-b16([st[1], bs[2], bs[5], bs[6], bs[8], snp[1]], [geo[3], geo[5], geo[4], geo[2], geo[7], bs2-pitch, geo[3], geo[3] * geo[5], ntok, geo[3] * geo[5] * geo[4]], 0, 1), geo[3] * geo[5]) : metal_enqueue(nth(ps, qlslc-delta-span-pipeline()), q38-b16([st[1], bs[2], bs[5], bs[6], bs[8]], [geo[3], geo[5], geo[4], geo[2], geo[7], bs2-pitch, geo[3], geo[3] * geo[5], ntok], 0, 1), geo[3] * geo[5]);
         metal_enqueue(nth(ps, qlslc-norm-gate-span-pipeline()), q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6], ntok], 0, 1), geo[3] * ntok);
-        q38s-mv(ps, qs, lay[13], bs[9], bs[10], ntok, kth-tv-r(lay[13]), 1);
-        metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        q38s-mv-res(ps, qs, lay[13], bs[9], bs[10], bs[33], ntok, kth-tv-r(lay[13]), 1);
         1;
     };
     // ── the MTP head's tensors, the spec scratch, the snapshots ──
