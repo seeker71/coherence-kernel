@@ -3,7 +3,7 @@
 //   echo '{}' | ./fkwu observe/q38-dflash-run.bml            the plan. Opens nothing.
 //   echo '{"go":1,"prompt":"Explain in two sentences why the sky is blue.","decode":32}' | ./fkwu observe/q38-dflash-run.bml
 //                                                            the same ids or the speculation is wrong; acceptance per draft position; tokens a step; step split
-// stdin, one JSON line, all optional: go, file, draft, prompt, decode (32), gate (0: min plain tok/s, below it the run says noisy and measures nothing), phased (0|1), plain (1: also run the plain decode).
+// stdin, one JSON line, all optional: go, file, draft, prompt, decode (32), gate (the number of timed rounds: dflash and plain back to back, the best of each and the best ratio reported; the last pair is the full report), phased (0|1), plain (1: also run the plain decode).
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-dflash.fk
 section [form.bml] {
@@ -20,7 +20,8 @@ section [form.bml] {
   def qdr-idstr(xs) = foldl((acc, x) => acc ++ x.str() ++ " ", "", xs);
   def qdr-rate10(n, ms) = ms <= 0 ? 0 : (n * 10000) / ms;
   def qdr-rate(n, ms) = (qdr-rate10(n, ms) / 10).str() ++ "." ++ (qdr-rate10(n, ms) % 10).str();
-  def qdr-hits-go(stats, off, j) = j > 7 ? "" : "p" ++ j.str() ++ " " ++ ((stats[off + j - 1] * 100) / (stats[0] <= 0 ? 1 : stats[0])).str() ++ "%  " ++ qdr-hits-go(stats, off, j + 1);
+  // per proposal position: the share of the steps that tried it which took it (stats: hits at 8.., tries at 15.., the plain-argmax block's hits at 22..)
+  def qdr-hits-go(stats, hoff, toff, j) = j > 7 ? "" : "p" ++ j.str() ++ " " ++ ((stats[hoff + j - 1] * 100) / (stats[toff + j - 1] <= 0 ? 1 : stats[toff + j - 1])).str() ++ "% of " ++ stats[toff + j - 1].str() ++ "  " ++ qdr-hits-go(stats, hoff, toff, j + 1);
   def qdr-plain(ctx, ids, n) {
    let sts = q38-new-state(ctx[2]);
    let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
@@ -32,43 +33,136 @@ section [form.bml] {
    let freed = q38-free-state(sts);
    [spoken, t1 - t0, r[0], (l1[11] - l0[11]) / 1000];
   }
-  def qdr-dflash(ctx, qs, ds, dx, sx, ids, n, phased) {
+  def qdr-dflash(ctx, qs, ds, dx, sx, ids, n, phased, kk) {
    let sts = q38-new-state(ctx[2]);
    let tp0 = host_monotonic_ms();
    let r = q38d-prefill(ctx, qs, ds, dx, sts, sx, ids);
    let tp1 = host_monotonic_ms();
    let t0 = host_monotonic_ms();
-   let g = q38d-generate(ctx, qs, ds, dx, sts, sx, ids, r[0], n, phased);
+   let g = q38d-generate-a(ctx, qs, ds, dx, sts, sx, ids, r[0], n, phased, kk < 0 ? 0 - kk : kk, kk < 0 ? 1 : 0);
    let t1 = host_monotonic_ms();
    let freed = q38-free-state(sts);
    [g[0], t1 - t0, g[1], r[0], g[2], tp1 - tp0, g[3]];
   }
+  def qdr-insert(x, xs) = len(xs) == 0 ? [x] : x <= xs[0] ? cons(x, xs) : cons(xs[0], qdr-insert(x, xs[1:]));
+  def qdr-sorted(xs) = foldl((acc, x) => qdr-insert(x, acc), [], xs);
+  // the ms of the trace's steps that checked k rows' worth of drafts, sorted; and the tokens (accepted + 1) those steps said
+  def qdr-ms-of-k(trace, k) = qdr-sorted(map(t => t[1], filter(t => t[4] == k, trace)));
+  def qdr-tok-of-k(trace, k) = foldl((acc, t) => acc + t[0] + 1, 0, filter(t => t[4] == k, trace));
+  // a timed plain decode, one token a forward, from a fresh state: the sorted per-token ms
+  def qdr-plain-go(ctx, sts, id, pos, k, acc) = k <= 0 ? acc : {
+   let t0 = host_monotonic_ms();
+   let nid = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], id, pos);
+   let t1 = host_monotonic_ms();
+   qdr-plain-go(ctx, sts, nid, pos + 1, k - 1, append(acc, [t1 - t0]));
+  };
+  def qdr-plain-times(ctx, ids, n) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let ms = qdr-plain-go(ctx, sts, r[0], len(ids), n, []);
+   let freed = q38-free-state(sts);
+   qdr-sorted(ms);
+  }
+  // phased runs: the best (and median) of each phase over the steps, ms: restore+commit, draft, check+read
+  def qdr-phase-line(trace, i, name) {
+   let ms = qdr-sorted(map(t => t[i], trace));
+   qdr-say("phase " ++ name ++ ": best " ++ ms[0].str() ++ " ms, median " ++ ms[len(ms) / 2].str() ++ " ms over " ++ len(ms).str() ++ " steps");
+  }
+  def qdr-k-lines(trace, pmin, k) = k > 7 ? 1 : {
+   let ms = qdr-ms-of-k(trace, k);
+   let tok = qdr-tok-of-k(trace, k);
+   len(ms) == 0 ? 0 : qdr-say("k=" ++ k.str() ++ ": " ++ len(ms).str() ++ " steps, best " ++ ms[0].str() ++ " ms, median " ++ ms[len(ms) / 2].str() ++ " ms, " ++ ((tok * 100) / len(ms)).str() ++ "/100 tokens a step; with the best plain token " ++ pmin.str() ++ " ms the best-case speedup is " ++ ((tok * pmin * 100) / (len(ms) * (ms[0] <= 0 ? 1 : ms[0]))).str() ++ "/100");
+   qdr-k-lines(trace, pmin, k + 1);
+  };
   def qdr-report(a, b, n) {
    let st = b[2];
    let steps = st[0] <= 0 ? 1 : st[0];
    qdr-say("first token " ++ a[2].str() ++ "/" ++ b[3].str() ++ ": ids " ++ ((String) qdr-idstr(a[0]) == qdr-idstr(b[0]) ? "IDENTICAL" : "DIFFER") ++ "; plain " ++ n.str() ++ " tokens in " ++ a[1].str() ++ " ms = " ++ qdr-rate(n, a[1]) ++ " tok/s; dflash in " ++ b[1].str() ++ " ms = " ++ qdr-rate(n, b[1]) ++ " tok/s (prefill+commit " ++ b[5].str() ++ " ms)");
-   qdr-say("steps " ++ st[0].str() ++ ", tokens per step " ++ ((n * 100) / steps).str() ++ "/100; acceptance path: " ++ qdr-hits-go(st, 8, 1));
-   qdr-say("plain-argmax block acceptance: " ++ qdr-hits-go(st, 15, 1));
+   qdr-say("steps " ++ st[0].str() ++ ", tokens per step " ++ ((n * 100) / steps).str() ++ "/100; acceptance path: " ++ qdr-hits-go(st, 8, 15, 1));
+   qdr-say("plain-argmax block acceptance: " ++ qdr-hits-go(st, 22, 15, 1));
    qdr-say("per step: host before wait " ++ (st[1] / steps).str() ++ " ms, wait " ++ (st[2] / steps).str() ++ " ms, restore+commit " ++ (st[3] / steps).str() ++ " ms, draft " ++ (st[4] / steps).str() ++ " ms, check " ++ (st[5] / steps).str() ++ " ms, device busy " ++ (st[6] / steps).str() ++ " ms, dispatches " ++ (st[7] / steps).str());
    qdr-say("device busy: plain " ++ a[3].str() ++ " ms for " ++ n.str() ++ " tokens (" ++ (a[3] / (n <= 0 ? 1 : n)).str() ++ " ms/token), dflash " ++ st[6].str() ++ " ms (" ++ (st[6] / (n <= 0 ? 1 : n)).str() ++ " ms/token): device-side speedup " ++ (st[6] <= 0 ? 0 : (a[3] * 100) / st[6]).str() ++ "/100");
    qdr-say("plain ids:  " ++ qdr-idstr(a[0]));
    qdr-say("dflash ids: " ++ qdr-idstr(b[0]));
-   qdr-say("accepted:step ms: " ++ foldl((acc, t) => acc ++ t[0].str() ++ ":" ++ t[1].str() ++ " ", "", b[4]));
+   qdr-say("accepted/k:step ms: " ++ foldl((acc, t) => acc ++ t[0].str() ++ "/" ++ t[4].str() ++ ":" ++ t[1].str() ++ " ", "", b[4]));
    (String) qdr-idstr(a[0]) == qdr-idstr(b[0]) ? 1 : 0;
   }
-  def qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain, gate) {
-   let w1 = qdr-dflash(ctx, qs, ds, dx, sx, ids, 16, 0);
+  // gate < 0: -gate iterations of one plain decode token and one DFlash step (k = kk rows of drafts), each from its own state, back to back,
+  // so a pair of readings shares the machine's state to the millisecond: no drift between the lanes. [plain ms], [step ms], [tokens a step]
+  def qdr-inter-go(ctx, qs, ds, dx, stsP, stsD, sx, idP, posP, x, p, k, slot, nc, cp, left, plains, steps, toks) = left <= 0 ? [plains, steps, toks] : {
+   let t0 = host_monotonic_ms();
+   let nid = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], stsP, ctx[4], ctx[5], ctx[6], idP, posP);
+   let t1 = host_monotonic_ms();
+   let out = q38d-step(ctx, qs, ds, dx, stsD, sx, x, p, k, slot, nc, cp, 0);
+   let t2 = host_monotonic_ms();
+   let m = q38s-accept-go(out[0], out[1], 1, k);
+   qdr-inter-go(ctx, qs, ds, dx, stsP, stsD, sx, nid, posP + 1, out[1][m], p + m + 1, k, m < k ? m : -1, m + 1, p, left - 1, append(plains, [t1 - t0]), append(steps, [t2 - t1]), append(toks, [m + 1]));
+  };
+  def qdr-ratios-go(pl, st, tk, i) = i >= len(pl) ? [] : cons((tk[i] * pl[i] * 100) / (st[i] <= 0 ? 1 : st[i]), qdr-ratios-go(pl, st, tk, i + 1));
+  def qdr-inter-run(ctx, qs, ds, dx, sx, ids, iters, kk) {
+   let k = kk < 0 ? 0 - kk : kk;
+   let stsP = q38-new-state(ctx[2]);
+   let rP = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], stsP, ctx[4], ctx[5], ctx[6], ids, 0);
+   let stsD = q38-new-state(ctx[2]);
+   let rD = q38d-prefill(ctx, qs, ds, dx, stsD, sx, ids);
+   let r = qdr-inter-go(ctx, qs, ds, dx, stsP, stsD, sx, rP[0], len(ids), rD[0], len(ids), k, -1, 0, 0, iters, [], [], []);
+   let f1 = q38-free-state(stsP);
+   let f2 = q38-free-state(stsD);
+   let pl = qdr-sorted(r[0]);
+   let st = qdr-sorted(r[1]);
+   let rat = qdr-sorted(qdr-ratios-go(r[0], r[1], r[2], 0));
+   let total = foldl((a, t) => a + t, 0, r[2]);
+   let stotal = foldl((a, t) => a + t, 0, r[1]);
+   let ptotal = foldl((a, t) => a + t, 0, r[0]);
+   qdr-say("interleaved k=" ++ k.str() ++ ", " ++ iters.str() ++ " iterations: plain token best " ++ pl[0].str() ++ " median " ++ pl[len(pl) / 2].str() ++ " ms; dflash step best " ++ st[0].str() ++ " median " ++ st[len(st) / 2].str() ++ " ms, " ++ ((total * 100) / iters).str() ++ "/100 tokens a step");
+   qdr-say("interleaved speedup (tokens a second of the steps over the plain tokens, same iterations): total " ++ ((total * ptotal * 100) / (stotal * iters)).str() ++ "/100; per-iteration median " ++ rat[len(rat) / 2].str() ++ "/100, lowest " ++ rat[0].str() ++ "/100, highest " ++ rat[len(rat) - 1].str() ++ "/100");
+   1;
+  }
+  def qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain, gate, kk) = gate < 0 ? qdr-inter-all(ctx, qs, ds, dx, sx, ids, 0 - gate, kk) : qdr-run-pair-b(ctx, qs, ds, dx, sx, ids, n, phased, plain, gate, kk);
+  // one warm-up, then the iterations at kk rows
+  def qdr-inter-all(ctx, qs, ds, dx, sx, ids, iters, kk) {
+   let w = qdr-dflash(ctx, qs, ds, dx, sx, ids, 16, 0, 7);
+   qdr-say("warm-up done (pipelines built)");
+   qdr-inter-run(ctx, qs, ds, dx, sx, ids, iters, kk);
+  }
+  def qdr-run-pair-b(ctx, qs, ds, dx, sx, ids, n, phased, plain, gate, kk) {
+   let w1 = qdr-dflash(ctx, qs, ds, dx, sx, ids, 16, 0, kk);
    let w2 = plain == 1 ? qdr-plain(ctx, ids, 8) : 0;
    qdr-say("warm-up done (weights paged in, pipelines built)");
-   let g = (plain == 1) && (gate > 0) ? qdr-plain(ctx, ids, 24) : [[], 1, 0, 0];
-   (plain == 1) && (gate > 0) && (qdr-rate10(24, g[1]) < gate * 10) ? qdr-say("noisy: plain decode " ++ qdr-rate(24, g[1]) ++ " tok/s is below the gate of " ++ gate.str() ++ "; not measuring") : qdr-run-measured(ctx, qs, ds, dx, sx, ids, n, phased, plain);
+   let rounds = gate < 1 ? 1 : gate;
+   let rs = qdr-rounds(ctx, qs, ds, dx, sx, ids, n, plain, kk, rounds - 1, []);
+   let last = qdr-run-measured(ctx, qs, ds, dx, sx, ids, n, phased, plain, kk);
+   qdr-summary(append(rs, [last]), n);
   }
-  def qdr-run-measured(ctx, qs, ds, dx, sx, ids, n, phased, plain) {
-   let b = qdr-dflash(ctx, qs, ds, dx, sx, ids, n, phased);
+  // rounds - 1 timed (dflash, plain) pairs back to back, so a pair shares the machine's state: [dflash ms, plain ms] each
+  def qdr-rounds(ctx, qs, ds, dx, sx, ids, n, plain, kk, left, acc) = left <= 0 ? acc : {
+   let b = qdr-dflash(ctx, qs, ds, dx, sx, ids, n, 0, kk);
    let a = plain == 1 ? qdr-plain(ctx, ids, n) : [b[0], 1, b[3], 0];
-   qdr-report(a, b, n);
+   let row = [b[1], a[1]];
+   qdr-say("round: dflash " ++ b[1].str() ++ " ms = " ++ qdr-rate(n, b[1]) ++ " tok/s, plain " ++ a[1].str() ++ " ms = " ++ qdr-rate(n, a[1]) ++ " tok/s, ratio " ++ (b[1] <= 0 ? 0 : (a[1] * 100) / b[1]).str() ++ "/100");
+   qdr-rounds(ctx, qs, ds, dx, sx, ids, n, plain, kk, left - 1, append(acc, [row]));
+  };
+  def qdr-min-go(rs, k, m) = len(rs) == 0 ? m : qdr-min-go(rs[1:], k, (m < 0 || rs[0][k] < m) ? rs[0][k] : m);
+  def qdr-summary(rs, n) {
+   len(rs) == 0 ? 1 : {
+    let bd = qdr-min-go(rs, 0, 0 - 1);
+    let bp = qdr-min-go(rs, 1, 0 - 1);
+    qdr-say("best of " ++ len(rs).str() ++ " rounds: dflash " ++ bd.str() ++ " ms = " ++ qdr-rate(n, bd) ++ " tok/s, plain " ++ bp.str() ++ " ms = " ++ qdr-rate(n, bp) ++ " tok/s, best ratio " ++ (bd <= 0 ? 0 : (bp * 100) / bd).str() ++ "/100");
+   };
   }
-  def qdr-open(path, dpath, n, prompt, phased, gate, plain) {
+  def qdr-run-measured(ctx, qs, ds, dx, sx, ids, n, phased, plain, kk) {
+   let b = qdr-dflash(ctx, qs, ds, dx, sx, ids, n, phased, kk);
+   let a = plain == 1 ? qdr-plain(ctx, ids, n) : [b[0], 1, b[3], 0];
+   let reported = qdr-report(a, b, n);
+   let pt = plain == 1 ? qdr-plain-times(ctx, ids, 24) : [];
+   plain == 1 ? qdr-say("plain decode per token over 24 tokens: best " ++ pt[0].str() ++ " ms, median " ++ pt[len(pt) / 2].str() ++ " ms, slowest " ++ pt[len(pt) - 1].str() ++ " ms") : 0;
+   plain == 1 ? qdr-k-lines(b[4], pt[0], 1) : 0;
+   phased == 1 ? qdr-phase-line(b[4], 5, "restore+commit") : 0;
+   phased == 1 ? qdr-phase-line(b[4], 6, "draft") : 0;
+   phased == 1 ? qdr-phase-line(b[4], 7, "check+read") : 0;
+   [b[1], a[1]];
+  }
+  def qdr-open(path, dpath, n, prompt, phased, gate, plain, kk) {
    let src = fcmg-src(path);
    let ids = q35-chat-ids(src, prompt);
    let span = len(ids);
@@ -90,7 +184,7 @@ section [form.bml] {
       !((Comparable) q38d-ok?(dx) == 1) ? qdr-say("the drafter did not open") : {
        let sx = q38s-open(ctx, 7, span);
        qdr-say("open: prompt " ++ span.str() ++ " tokens, drafter layers " ++ dx[6].str());
-       let ok = qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain, gate);
+       let ok = qdr-run-pair(ctx, qs, ds, dx, sx, ids, n, phased, plain, gate, kk);
        let closed = q38s-close(sx);
        1;
       };
@@ -105,7 +199,7 @@ section [form.bml] {
   }
   def qdr-run() {
    let opts = qdr-opts();
-   (Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(qdr-text(opts, "file", qdr-file()), qdr-text(opts, "draft", qdr-draft()), qdr-int(opts, "decode", 32), qdr-text(opts, "prompt", "Explain in two sentences why the sky is blue."), qdr-int(opts, "phased", 0), qdr-int(opts, "gate", 0), qdr-int(opts, "plain", 1)) : qdr-say("plan: go=1 runs the plain decode and the DFlash2 speculative decode of one prompt and compares the ids");
+   (Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(qdr-text(opts, "file", qdr-file()), qdr-text(opts, "draft", qdr-draft()), qdr-int(opts, "decode", 32), qdr-text(opts, "prompt", "Explain in two sentences why the sky is blue."), qdr-int(opts, "phased", 0), qdr-int(opts, "gate", 0), qdr-int(opts, "plain", 1), qdr-int(opts, "k", 7)) : qdr-say("plan: go=1 runs the plain decode and the DFlash2 speculative decode of one prompt and compares the ids");
   }
  }
  qdr-run();
