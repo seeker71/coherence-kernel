@@ -1,0 +1,177 @@
+// qwen35-dense-fmm-band.bml — the matrix-unit check's kernels, each on small synthetic fixtures (real Metal dispatch, no model).
+//
+// The fragment matmuls (qwen35-dense-mm.fk, q38f-prod) dequantize Q8_0 weights straight into the matrix fragments and reassociate every
+// sum, so they are not the decode matvec's bits. What the speculative verify needs of them is three things, checked here on synthetic
+// tensors (odd row counts so a tile's last rows fall past the end, 66 blocks so the K slices are uneven):
+//   1   BOUNDED: every output of every kernel shape, at 1, 3 and 8 tokens, is within 2e-5 of the largest value of the lane's own wide matvec on
+//       that token's activations (the decode arithmetic)
+//   2   BATCH INVARIANT: column t of an 8-token pass is the very bits of the 1-token pass on token t (a verified position says the same thing
+//       whatever else rides in the step; the reference decode of the verify path is the 1-token pass)
+//   4   the residual epilogue is the add the lane runs as its own dispatch: y = res + W x, byte for byte
+//   8   the simdgroup gated-delta kernel with snapshots (q38s-delta-sg-msl) is the lane's recurrence within 1e-5 of the largest value (state and
+//       outputs), and its snapshot t is the state a pass over tokens 0..t reaches, byte for byte (the restore copy is the lane's own)
+//   16  the pipelines compile: the spec list is q38s-mode-slot() pipelines, then the numerics mode and the tuning
+// Verdict 31
+// REQUIRES: a live Metal device
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk native/metal/qwen35-dense-spec.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class Q38FmmBand {
+  def qfb-say(s) = print_str("[q38-fmm-band] " ++ s);
+  def qfb-pat(n, seed, i) = i >= n ? "" : (md-le32(md-f32-bits(((((i * 17) + seed) % 257) - 128) * 1.0 / 128.0)) ++ qfb-pat(n, seed, i + 1));
+  def qfb-pos(n, seed, i) = i >= n ? "" : (md-le32(md-f32-bits((40 + (((i + seed) * 13) % 200)) * 1.0 / 256.0)) ++ qfb-pos(n, seed, i + 1));
+  def qfb-q32(i, j) = j >= 32 ? "" : (byte_to_str(((i * 31) + (j * 29) + 7) % 256) ++ qfb-q32(i, j + 1));
+  def qfb-w8(nblk, i) = i >= nblk ? "" : (byte_to_str((i * 53) % 256) ++ byte_to_str(40 + (i % 8)) ++ qfb-q32(i, 0) ++ qfb-w8(nblk, i + 1));
+  def qfb-f(bytes, i) = ln-f32-decode(ln-u32-le(bytes, i * 4));
+  def qfb-abs(x) = x < 0.0 ? 0.0 - x : x;
+  def qfb-absmax(bytes, i, n, m) = i >= n ? m : qfb-absmax(bytes, i + 1, n, qfb-abs(qfb-f(bytes, i)) > m ? qfb-abs(qfb-f(bytes, i)) : m);
+  def qfb-zero(n) = n <= 0 ? "" : (md-le32(0) ++ qfb-zero(n - 1));
+  // every word of a within tol * top of b?
+  def qfb-close(a, b, n, tol) {
+   let top = qfb-absmax(b, 0, n, 0.0);
+   qfb-close-go(a, b, 0, n, tol * top);
+  }
+  def qfb-close-go(a, b, i, n, lim) = i >= n ? 1 : {
+   let d = qfb-f(a, i) - qfb-f(b, i);
+   (d <= lim) && ((0 - d) <= lim) ? qfb-close-go(a, b, i + 1, n, lim) : 0;
+  };
+  // ── the fragment matmuls ──
+  // the kernel (ts sgr sl fz) over ntok tokens of x (token-major, cols each): the output rows (pitch rows) as bytes; res (bytes) feeds a fz = 1 shape
+  def qfb-run(fp, v, wh, rows, cols, xbytes, ntok, resbytes) {
+   let pipe = fp[q38f-slot(v[0], v[1], v[2], v[3])];
+   let x = metal_buf_alloc(len(xbytes));
+   let y = metal_buf_alloc(rows * 8 * 4);
+   let w1 = metal_buf_write(x, 0, xbytes);
+   let w2 = metal_buf_write(y, 0, v[3] % 2 == 1 ? resbytes : qfb-pat(rows * 8, 99, 0));
+   metal_batch_concurrent();
+   let e = v[3] % 2 == 1 ? metal_enqueue(pipe, md-bind16([wh, x, y, y], [rows, cols, ntok, rows], 32 * v[1] * v[2], 0, 1, 1), q38f-groups(rows, v[0], v[1])) : metal_enqueue(pipe, md-bind16([wh, x, y], [rows, cols, ntok, rows], 32 * v[1] * v[2], 0, 1, 1), q38f-groups(rows, v[0], v[1]));
+   let out = metal_buf_read(y, 0, rows * ntok * 4);
+   let f = metal_buf_free(x) + metal_buf_free(y);
+   e > 0 ? out : "";
+  }
+  // the lane's wide matvec on token t of x: the decode arithmetic
+  def qfb-ref(ps, wh, rows, cols, xbytes, t) {
+   let x = metal_buf_alloc(cols * 4);
+   let y = metal_buf_alloc(rows * 4);
+   let w = metal_buf_write(x, 0, substring(xbytes, t * cols * 4, (t + 1) * cols * 4));
+   metal_batch_concurrent();
+   let e = q38-mv(ps, [wh, rows, cols, 8], x, y, 1);
+   let out = metal_buf_read(y, 0, rows * 4);
+   let f = metal_buf_free(x) + metal_buf_free(y);
+   out;
+  }
+  def qfb-col(bytes, t, rows) = substring(bytes, t * rows * 4, (t + 1) * rows * 4);
+  // claim 1 and 2 for one shape at ntok tokens (res-free shapes; the fz = 1 shape is checked by claim 4)
+  // a claim code is bounded + 2 * invariant (1 = holds); qfb-and keeps a claim only when both hold. Parameters here are used once: a hot
+  // recipe is inlined call by name, so a parameter used twice would run its expression twice.
+  def qfb-and(x, y) {
+   let xx = x;
+   let yy = y;
+   ((xx % 2) * (yy % 2)) + 2 * (((xx / 2) % 2) * ((yy / 2) % 2));
+  }
+  def qfb-shape-tokens(ps, fp, v, wh, rows, cols, xbytes, ntok, t, ok) = t >= ntok ? ok : {
+   let full = qfb-run(fp, v, wh, rows, cols, xbytes, ntok, "");
+   let one = qfb-run(fp, v, wh, rows, cols, substring(xbytes, t * cols * 4, (t + 1) * cols * 4), 1, "");
+   let ref = qfb-ref(ps, wh, rows, cols, xbytes, t);
+   let bounded = len(full) == rows * ntok * 4 && qfb-close(qfb-col(full, t, rows), ref, rows, 0.00002) == 1 ? 1 : 0;
+   let invariant = ((String) qfb-col(full, t, rows) == (String) one) ? 1 : 0;
+   qfb-shape-tokens(ps, fp, v, wh, rows, cols, xbytes, ntok, t + 1, qfb-and(ok, bounded + 2 * invariant));
+  };
+  def qfb-shapes(ps, fp, vs, wh, rows, cols, xbytes, ok) = len(vs) == 0 ? ok : {
+   let v = vs[0];
+   let a = v[3] % 2 == 1 ? 3 : qfb-shape-tokens(ps, fp, v, wh, rows, cols, xbytes, 8, 0, 3);
+   let b = v[3] % 2 == 1 ? 3 : qfb-shape-tokens(ps, fp, v, wh, rows, cols, xbytes, 3, 0, 3);
+   let c = v[3] % 2 == 1 ? 3 : qfb-shape-tokens(ps, fp, v, wh, rows, cols, xbytes, 1, 0, 3);
+   qfb-shapes(ps, fp, vs[1:], wh, rows, cols, xbytes, qfb-and(qfb-and(ok, a), qfb-and(b, c)));
+  };
+  // claim 4: the fused shape against the unfused shape of the same tile, then the lane's add dispatch
+  def qfb-resid-one(ps, fp, v, wh, rows, cols, xbytes, resbytes) {
+   let fused = qfb-run(fp, v, wh, rows, cols, xbytes, 8, resbytes);
+   let plain = qfb-run(fp, [v[0], v[1], v[2], v[3] - 1], wh, rows, cols, xbytes, 8, "");
+   let a = metal_buf_alloc(rows * 8 * 4);
+   let b = metal_buf_alloc(rows * 8 * 4);
+   let w1 = metal_buf_write(a, 0, resbytes);
+   let w2 = metal_buf_write(b, 0, plain);
+   metal_batch_concurrent();
+   let e = metal_enqueue(ps[19], q38-b16([a, b, a], [rows * 8], 0, 1), rows * 8);
+   let expected = metal_buf_read(a, 0, rows * 8 * 4);
+   let f = metal_buf_free(a) + metal_buf_free(b);
+   len(fused) == rows * 8 * 4 && (String) fused == (String) expected ? 1 : 0;
+  }
+  def qfb-resid(ps, fp, vs, wh, rows, cols, xbytes, resbytes, ok) = len(vs) == 0 ? ok : qfb-resid(ps, fp, vs[1:], wh, rows, cols, xbytes, resbytes, vs[0][3] % 2 == 1 ? ok * qfb-resid-one(ps, fp, vs[0], wh, rows, cols, xbytes, resbytes) : ok);
+  def qfb-frag-band(ps, fp) {
+   let rows = 21;
+   let cols = 1088;
+   let t0 = host_monotonic_ms();
+   let weights = qfb-w8(rows * (cols / 32), 0);
+   let wh = metal_buf_alloc(len(weights));
+   let w0 = metal_buf_write(wh, 0, weights);
+   let xbytes = qfb-pat(8 * cols, 5, 0);
+   qfb-say("fixtures built in " ++ (host_monotonic_ms() - t0).str() ++ " ms");
+   let r = qfb-shapes(ps, fp, q38f-prod(), wh, rows, cols, xbytes, 3);
+   let res = qfb-resid(ps, fp, q38f-prod(), wh, rows, cols, xbytes, qfb-pat(rows * 8, 21, 0), 1);
+   let rows2 = 5;
+   let r2 = qfb-shapes(ps, fp, q38f-prod(), wh, rows2, cols, xbytes, 3);
+   let freed = metal_buf_free(wh);
+   let both = qfb-and(r, r2);
+   qfb-say("fragment matmuls: bounded " ++ (both % 2).str() ++ ", batch invariant " ++ ((both / 2) % 2).str() ++ ", residual epilogue byte-equal " ++ res.str());
+   both + 4 * res;
+  }
+  // ── the simdgroup gated-delta with snapshots ──
+  def qfb-delta(ps, qs, which, ntok) {
+   let nv = 4;
+   let dv = 4;
+   let dk = 128;
+   let nk = 2;
+   let cstride = 540;
+   let gstride = 5;
+   let ostride = 18;
+   let sn = nv * dv * dk;
+   let S = metal_buf_alloc(sn * 4);
+   let c = metal_buf_alloc(8 * cstride * 4);
+   let al = metal_buf_alloc(8 * gstride * 4);
+   let be = metal_buf_alloc(8 * gstride * 4);
+   let o = metal_buf_alloc(8 * ostride * 4);
+   let snap = metal_buf_alloc(8 * sn * 4);
+   let w0 = metal_buf_write(S, 0, qfb-pat(sn, 3, 0));
+   let w1 = metal_buf_write(c, 0, qfb-pat(8 * cstride, 9, 0));
+   let w2 = metal_buf_write(al, 0, qfb-pos(8 * gstride, 1, 0));
+   let w3 = metal_buf_write(be, 0, qfb-pos(8 * gstride, 7, 0));
+   let w4 = metal_buf_write(o, 0, qfb-zero(8 * ostride));
+   let w5 = metal_buf_write(snap, 0, qfb-zero(8 * sn));
+   let qscale = md-f32-bits(0.088388346);
+   metal_batch_concurrent();
+   let e = which == 0 ? metal_enqueue(nth(ps, qlslc-delta-span-pipeline()), md-bind16([S, c, al, be, o], [nv, dv, dk, nk, qscale, cstride, gstride, ostride, ntok], 256, 0, 0, 1), nv * dv) : metal_enqueue(qs[q38s-pipe-delta-sg()], md-bind16([S, c, al, be, o, snap], [nv, dv, dk, nk, qscale, cstride, gstride, ostride, ntok, sn], 128, 0, 1, 1), (nv * dv + 3) / 4);
+   let rS = metal_buf_read(S, 0, sn * 4);
+   let ro = metal_buf_read(o, 0, ntok * ostride * 4);
+   let rsnap = metal_buf_read(snap, 0, 8 * sn * 4);
+   let freed = metal_buf_free(S) + metal_buf_free(c) + metal_buf_free(al) + metal_buf_free(be) + metal_buf_free(o) + metal_buf_free(snap);
+   [rS, ro, rsnap, e];
+  }
+  def qfb-delta-slots(ps, qs, full, t) = t >= 3 ? 1 : {
+   let oracle = qfb-delta(ps, qs, 1, t + 1);
+   (String) qfb-col(full[2], t, 2048) == (String) oracle[0] ? qfb-delta-slots(ps, qs, full, t + 1) : 0;
+  };
+  def qfb-delta-band(ps, qs) {
+   let lane = qfb-delta(ps, qs, 0, 4);
+   let spec = qfb-delta(ps, qs, 1, 4);
+   let near = (lane[3] > 0 && spec[3] > 0 && qfb-close(spec[0], lane[0], 2048, 0.00001) == 1 && qfb-close(spec[1], lane[1], 4 * 18, 0.00001) == 1) ? 1 : 0;
+   let slots = qfb-delta-slots(ps, qs, spec, 0);
+   qfb-say("simdgroup delta: state and outputs within 1e-5 of the lane's " ++ near.str() ++ ", snapshots are the passes' states " ++ slots.str());
+   near * slots;
+  }
+  def qfb-main() {
+   let msl = q38-msl();
+   let ps = q38-pipes(msl);
+   let qs = q38s-pipes(q38s-msl());
+   let pipesOk = (len(ps) == 63 && len(qs) == q38s-mode-slot() + 2 && q38s-pipes-ok?(qs)) ? 1 : 0;
+   let fp = take(len(q38f-prod()), qs[q38s-mm-base():]);
+   let fr = pipesOk == 1 ? qfb-frag-band(ps, fp) : 0;
+   let dl = pipesOk == 1 ? qfb-delta-band(ps, qs) : 0;
+   let verdict = fr + dl * 8 + pipesOk * 16;
+   qfb-say("verdict " ++ verdict.str());
+   verdict;
+  }
+ }
+ qfb-main();
+}
