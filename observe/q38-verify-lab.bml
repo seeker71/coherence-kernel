@@ -1,0 +1,116 @@
+// q38-verify-lab.bml — the matmul of the check span (8..16 tokens): the exact-association matvec (mvr), the lane's 64 x 32-token matrix-unit kernel
+// (pipeline 62) and the short-span matrix-unit kernels (qwen35-dense-mm.fk), raced on real tensors, best of rounds, in one process.
+//
+//   echo '{"go":1}' | ./fkwu observe/q38-verify-lab.bml
+// stdin, one JSON line, all optional: go, nt (8), which (0 gate, 1 down, 2 head), rounds (8), prompt.
+// Every variant is timed in turn, round after round (the GPU changes speed between seconds); the best round is the reading. The matrix-unit
+// outputs are compared word for word with pipeline 62's (same accumulation chain: expected 0 differing words) and with the matvec's (ulp).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-spec.fk native/metal/qwen35-dense-mm.fk
+section [form.bml] {
+ class Q38VerifyLab {
+  def qvl-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qvl-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def qvl-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def qvl-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-verify-lab", line) : json-node-object([]);
+  }
+  def qvl-say(s) = print_str("[q38-verify-lab] " ++ s);
+  def qvl-min(xs, m) = len(xs) == 0 ? m : qvl-min(xs[1:], xs[0] < m ? xs[0] : m);
+  def qvl-times(n, f) = n <= 0 ? 1 : {
+   let done = f();
+   qvl-times(n - 1, f);
+  };
+  // one round of one variant: 48 dispatches in one batch, ms
+  def qvl-round(f) {
+   metal_batch_concurrent();
+   let t0 = host_monotonic_ms();
+   let queued = qvl-times(48, f);
+   let synced = metal_sync();
+   host_monotonic_ms() - t0;
+  }
+  def qvl-one(vs, acc) = len(vs) == 0 ? acc : qvl-one(vs[1:], append(acc, [qvl-round(vs[0][1])]));
+  def qvl-mins(rows, i, n, acc) = i >= n ? acc : qvl-mins(rows, i + 1, n, append(acc, [qvl-min(foldl((a, row) => append(a, [row[i]]), [], rows), 1000000)]));
+  def qvl-race(vs, rounds, rows) = rounds <= 0 ? qvl-mins(rows, 0, len(vs), []) : qvl-race(vs, rounds - 1, append(rows, [qvl-one(vs, [])]));
+  def qvl-report(vs, best) = len(vs) == 0 ? 1 : {
+   qvl-say(vs[0][0] ++ ": " ++ ((best[0] * 1000) / 48).str() ++ " us each");
+   qvl-report(vs[1:], best[1:]);
+  };
+  // words that differ between two float rows, widest gap in ulp
+  def qvl-ulp-go(a, b, i, n, cnt, widest) = i >= n ? [cnt, widest] : {
+   let wa = ln-u32-le(a, i * 4);
+   let wb = ln-u32-le(b, i * 4);
+   let d = wa > wb ? wa - wb : wb - wa;
+   qvl-ulp-go(a, b, i + 1, n, d > 0 ? cnt + 1 : cnt, d > widest ? d : widest);
+  };
+  def qvl-compare(label, ya, yb, n) {
+   let ba = metal_buf_read(ya, 0, n * 4);
+   let bb = metal_buf_read(yb, 0, n * 4);
+   let r = qvl-ulp-go(ba, bb, 0, n, 0, 0);
+   qvl-say(label ++ ": " ++ r[0].str() ++ " of " ++ n.str() ++ " words differ, widest " ++ r[1].str() ++ " ulp");
+  }
+  def qvl-variants(ctx, qs, ms, tv, nt, ys) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let rows = kth-tv-r(tv);
+   let xh = bs[1];
+   let tn = nt <= 8 ? 8 : 16;
+   let mine = filter(v => v[0] == tn, q38m-variants());
+   append([
+    ["mvr (exact association, " ++ (q38s-rows-for(nt)).str() ++ " rows a group)", () => q38s-mv(ps, qs, tv, xh, ys[0], nt, rows, 1)],
+    ["mm64 (pipeline 62, the lane)", () => q38-mv-batch-y(ps, tv, xh, ys[1], nt, rows, 1)],
+    ["decode matvec (1 token)", () => q38-mv(ps, tv, xh, ys[2], 1)]
+   ], map(v => ["mm " ++ v[0].str() ++ " tokens kb " ++ v[1].str() ++ " rt " ++ v[2].str(), () => q38m-run(ms, tv, xh, ys[3 + q38m-slot(v[0], v[1], v[2])], nt, rows, 1, v[0], v[1], v[2])], mine));
+  }
+  def qvl-cmp-go(vs, ys, nt, n, i) = i >= len(vs) ? 1 : {
+   let c = qvl-compare("mm " ++ vs[i][0].str() ++ "/" ++ vs[i][1].str() ++ "/" ++ vs[i][2].str() ++ " vs mm64", ys[3 + q38m-slot(vs[i][0], vs[i][1], vs[i][2])], ys[1], n);
+   qvl-cmp-go(vs, ys, nt, n, i + 1);
+  };
+  def qvl-alloc(n, k) = k <= 0 ? [] : cons(metal_buf_alloc(n), qvl-alloc(n, k - 1));
+  def qvl-tensor(ctx, which) = which == 0 ? nth(ctx, 3)[0][2] : (which == 1 ? nth(ctx, 3)[0][4] : ctx[6]);
+  def qvl-lab(ctx, qs, ms, nt, which, rounds) {
+   let tv = qvl-tensor(ctx, which);
+   let rows = kth-tv-r(tv);
+   qvl-say("tensor " ++ rows.str() ++ " x " ++ kth-tv-c(tv).str() ++ ", " ++ nt.str() ++ " tokens");
+   let ys = qvl-alloc(rows * 16 * 4 + 4096, 3 + len(q38m-variants()));
+   let vs = qvl-variants(ctx, qs, ms, tv, nt, ys);
+   let warm = qvl-one(vs, []);
+   let best = qvl-race(vs, rounds, []);
+   let r = qvl-report(vs, best);
+   let n = rows * nt;
+   let c1 = qvl-cmp-go(filter(v => v[0] == (nt <= 8 ? 8 : 16), q38m-variants()), ys, nt, n, 0);
+   let c6 = qvl-compare("mm64 vs mvr", ys[1], ys[0], n);
+   let freed = map(y => metal_buf_free(y), ys);
+   1;
+  }
+  def qvl-run-open(path, nt, which, rounds, prompt) {
+   let src = fcmg-src(path);
+   let ids = q35-chat-ids(src, prompt);
+   let maxpos = len(ids) + 16;
+   let own = fcms-qwen-own(src, maxpos);
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 verify lab", path, weights, own);
+   !mg-granted?(granted) ? qvl-say("held: " ++ granted[1]) : {
+    let ctx = q38-open-span(path, maxpos, len(ids) + 1);
+    !((Comparable) q38-context-ok?(ctx) == 1) ? qvl-say("the context did not open") : {
+     let qs = q38s-pipes(q38s-msl());
+     let ms = q38m-pipes(q38m-text());
+     let sts = q38-new-state(ctx[2]);
+     let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+     let lab = !q38s-pipes-ok?(qs) ? qvl-say("spec pipelines did not compile") : (!kth-pipes-ok?(ms) ? qvl-say("mm pipelines did not compile: " ++ ms.str()) : qvl-lab(ctx, qs, ms, nt, which, rounds));
+     let freed = q38-free-state(sts);
+     let closed = q38-close(ctx, []);
+     1;
+    };
+    let unleased = mg-release();
+    qvl-say("released");
+   };
+  }
+  def qvl-run() {
+   let opts = qvl-opts();
+   (Comparable) qvl-int(opts, "go", 0) == 1 ? qvl-run-open(qvl-file(), qvl-int(opts, "nt", 8), qvl-int(opts, "which", 0), qvl-int(opts, "rounds", 8), qvl-text(opts, "prompt", "Explain in two sentences why the sky is blue.")) : qvl-say("plan: go=1 races the check span's matmuls on the gate (which 0), down (1) or head (2) tensor at nt tokens");
+  }
+ }
+ qvl-run();
+}
