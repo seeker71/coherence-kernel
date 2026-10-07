@@ -222,6 +222,17 @@ Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a documen
 
 `code_entry: "direct"` begins one pending task referring to the full original goal. It avoids generated refinement, planning and splitting, while retaining review, verification and the requirement for an actual change. Resume retains the saved phase. `review_entry: "direct"` selects the corresponding read-only entry.
 
+Repair can choose `next: "split"` when the retained approach needs concrete
+dependent tasks. The existing split stage keeps those tasks in the same owned
+checkpoint with the original goal, documents, writable paths and caller checks;
+completion still passes review and verification. A repeated counterexample can
+choose either a revised plan or this decomposition before more edits.
+
+Model admission advances past loads with live matching memory reservations,
+keeping their tickets and owners intact. Each session still checks its atomic
+reservation before allocation. Waiting reasons and actual memory needs travel
+through the live framebuffer.
+
 ### Resident instruction context
 
 Every admission receives the shared Form meanings in `bml/form-cli-qwen-meaning.bml`. BML coding also receives `form-lift.bml` guidance and the available repair instructions. A later role instruction may reference exact text already delivered in that resident context; incomplete observations never mark it delivered. Renewal/resume supplies the current instructions again. Delivery establishes context availability, not that the generated work followed it.
