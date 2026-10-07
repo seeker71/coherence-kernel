@@ -1,0 +1,96 @@
+// qwen35-dense-dflash-identity-band.bml — the DFlash2 drafter says what the plain greedy decode says, on the real Qwen3.8-27B Q8_0.
+//
+// The model and the drafter open once (under the memory lease). Each prompt is decoded plain and with the drafter from fresh states, ids and
+// the head's winning-logit bits compared position by position (form-stdlib/bml/qwen38-spec-witness.bml):
+//   1   the sky prompt, 32 tokens: the same ids, and the winning-logit word equal at every one of the 32 positions
+//   2   those ids are the 32 the lane has always said for that prompt (12515 7701 6105 ... 18016 13)
+//   4   a code prompt, 32 tokens: the same ids, every word equal
+//   8   an arbitrary 40-id prompt, 40 tokens: the same ids, every word equal, AND drafts were rejected (the recurrent state was restored
+//       from its snapshots and the decode went on exactly as the plain one did)
+//   16  a counting prompt, 40 tokens: the drafter spoke at least five tokens a step (its seven proposals were taken whole) and the ids are
+//       the plain decode's
+//   32  the drafter reads the target's hidden states: on the sky prompt the first proposal is the target's own next token in at least half of
+//       the steps (with the context left out the first proposal is right in 3 percent of them)
+// The band writes nothing and leaves the lease released. It needs the 29 GB file, the 2 GB drafter and a Metal device.
+// Verdict 63
+// REQUIRES: a live Metal device, Qwen3.8-27B-Q8_0.gguf and Qwen3.8-27B-DFlash2-Q8_0.gguf
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk native/metal/qwen35-dense-dflash.fk form-stdlib/bml/qwen38-spec-witness.bml
+section [form.bml] {
+ class Q38DflashIdentityBand {
+  def qdb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qdb-draft() = "/Users/ursmuff/models/qwen38-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
+  def qdb-pinned() = "12515 7701 6105 1521 33470 303 279 8964 579 16078 43000 22602 89661 314 37728 11 1680 430 6105 321 76990 11 777 13057 1056 4860 89661 1040 2438 321 18016 13 ";
+  def qdb-ids(n, i) = i >= n ? [] : cons(1000 + ((i * 37) % 5000), qdb-ids(n, i + 1));
+  def qdb-say(s) = print_str("[q38-dflash-identity] " ++ s);
+  // [ids identical (0/1), words equal, words that differ, stats, plain ids, dflash ids]
+  def qdb-compare(ctx, qs, ds, dx, sx, ids, n) {
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let a = q38sw-plain-go(ctx, sts, r[0], len(ids), n, [], []);
+   let freed = q38-free-state(sts);
+   let sts2 = q38-new-state(ctx[2]);
+   let r2 = q38d-prefill(ctx, qs, ds, dx, sts2, sx, ids);
+   let g = q38d-generate(ctx, qs, ds, dx, sts2, sx, ids, r2[0], n, 0);
+   let freed2 = q38-free-state(sts2);
+   let c = q38sw-cmp-go(a[1], g[3], 0, 0, []);
+   [(String) q38sw-idstr(a[0]) == q38sw-idstr(g[0]) ? 1 : 0, c[0], len(c[1]), g[1], a[0], g[0], c[1]];
+  }
+  def qdb-exact(w) = (w[0] == 1) && (w[2] == 0) ? 1 : 0;
+  // stats: 0 steps, then [1 host, 2 wait, 3 4 5 phases, 6 busy, 7 dispatches], then per proposal position j the steps that took it
+  def qdb-steps(stats) = stats[0];
+  def qdb-hits(stats, j) = stats[7 + j];
+  def qdb-hit-text(stats, j) = j > 7 ? "" : " p" ++ j.str() ++ " " ++ qdb-hits(stats, j).str() ++ qdb-hit-text(stats, j + 1);
+  def qdb-show(label, w) = qdb-say(label ++ ": ids " ++ (w[0] == 1 ? "identical" : "DIFFER") ++ ", winning-logit words equal " ++ w[1].str() ++ ", differ " ++ w[2].str() ++ ", " ++ qdb-steps(w[3]).str() ++ " steps, accepted per position" ++ qdb-hit-text(w[3], 1));
+  def qdb-run-all(ctx, qs, ds, dx, src) {
+   let sx = q38s-open(ctx, 7, 48);
+   let sky = qdb-compare(ctx, qs, ds, dx, sx, q35-chat-ids(src, "Explain in two sentences why the sky is blue."), 32);
+   let s1 = qdb-show("sky", sky);
+   let code = qdb-compare(ctx, qs, ds, dx, sx, q35-chat-ids(src, "Write a Python function that checks whether a string is a palindrome."), 32);
+   let s2 = qdb-show("code", code);
+   let syn = qdb-compare(ctx, qs, ds, dx, sx, qdb-ids(40, 0), 40);
+   let s3 = qdb-show("arbitrary ids", syn);
+   let cnt = qdb-compare(ctx, qs, ds, dx, sx, q35-chat-ids(src, "Write the numbers from 1 to 60 separated by commas, nothing else."), 40);
+   let s4 = qdb-show("counting", cnt);
+   let closed = q38s-close(sx);
+   let b1 = qdb-exact(sky);
+   let b2 = (String) q38sw-idstr(sky[4]) == qdb-pinned() ? 2 : 0;
+   let b4 = qdb-exact(code) == 1 ? 4 : 0;
+   let rejected = qdb-hits(syn[3], 3) < qdb-steps(syn[3]) ? 1 : 0;
+   let b8 = (qdb-exact(syn) == 1) && (rejected == 1) ? 8 : 0;
+   let b16 = (qdb-exact(cnt) == 1) && (qdb-steps(cnt[3]) * 5 <= 40 + 5) ? 16 : 0;
+   let b32 = qdb-hits(sky[3], 1) * 2 >= qdb-steps(sky[3]) ? 32 : 0;
+   qdb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str());
+   b1 + b2 + b4 + b8 + b16 + b32;
+  }
+  def qdb-opened(ctx, src, dpath, maxpos) {
+   let qs = q38s-pipes(q38s-msl());
+   let ds = q38d-pipes(q38d-msl());
+   let dx = (q38s-pipes-ok?(qs) && q38s-pipes-ok?(ds)) ? q38d-open(ctx, dpath, maxpos, 48) : [];
+   let v = (len(dx) == 7 && (Comparable) q38d-ok?(dx) == 1) ? qdb-run-all(ctx, qs, ds, dx, src) : 0;
+   let dclosed = len(dx) == 7 ? q38d-close(dx) : 0;
+   let closed = q38-close(ctx, []);
+   v;
+  }
+  def qdb-leased(path, dpath, src, maxpos) {
+   let ctx = q38-open-span(path, maxpos, 49);
+   let verdict = (Comparable) q38-context-ok?(ctx) == 1 ? qdb-opened(ctx, src, dpath, maxpos) : 0;
+   let unleased = mg-release();
+   verdict;
+  }
+  def qdb-open(path, dpath) {
+   let src = fcmg-src(path);
+   let maxpos = 48 + 40 + 8 + 16;
+   let own = fcms-qwen-own(src, maxpos) + file_size(dpath) + 1200000000;
+   let weights = fcms-weights-bytes(path);
+   let granted = mg-lease("q38 dflash identity band", path, weights, own);
+   !mg-granted?(granted) ? qdb-held(granted) : qdb-leased(path, dpath, src, maxpos);
+  }
+  def qdb-held(granted) {
+   qdb-say("held: " ++ granted[1]);
+   0;
+  }
+  def qdb-run() = qdb-open(qdb-file(), qdb-draft());
+ }
+ qdb-run();
+}
