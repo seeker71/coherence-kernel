@@ -1,0 +1,210 @@
+// form-token-tool.bml — the tool call as a Form control: <|form:tool|>NAME WORD... [block]<|/form:tool|>.
+//
+// The coding tools (rg, read, edit, jq ...) were reached by a model writing JSON {"tool":..,"arguments":[..],"input":..}
+// that the lane parsed, repaired and re-read, or by an eval control that spelled a constructor call. This verb is the
+// call spoken in the control table itself, read by one cursor (a single pass over the payload's bytes) straight into the
+// node the lane dispatches: a form-code-action cell, the same cell fcap-native-tool builds. No JSON is written, parsed,
+// escaped or repaired on the way, and a call that does not read is refused by name in the observation, in the stream,
+// before the reply goes on.
+//
+//   <|form:tool|>rg -n -F segplant form/native/metal/dsv4-layer.fk<|/form:tool|>
+//   <|form:tool|>read form/native/metal/dsv4-layer.fk 225 30<|/form:tool|>
+//   <|form:tool|>read @0.0.0.6806910<|/form:tool|>
+//   <|form:tool|>edit form/x.fk
+//   <<<<
+//   the span to replace, byte for byte
+//   ====
+//   the text that replaces it
+//   >>>>
+//   <|/form:tool|>
+//
+// A call is the tool's name, then its words, then an optional block. A word is bare (no space or quote), "double quoted"
+// (\n \t \" \\ read), 'single quoted' (raw, no escapes), or @p.l.t.i, an address the workspace holds: a text cell stands
+// for its text, so a document or an earlier result is named by its node and never sent again. A block opens on the line
+// after the call with <<<<, closes with >>>> on a line of its own, and its text is verbatim: nothing in it is escaped.
+// The tool decides what the block is: edit takes the block's sections (split at a line ==== ) as its last words, old
+// text then new; every other tool takes the whole block as its input (write: the file's text). A quoted word is always
+// its own text, an @address in quotes included. ftt-render spells a call the same way, so a call read back from its
+// spelling is the same cell.
+//
+// Tools are nodes. ftt-roster() interns one form-tool cell per tool (name, fewest words, most words, which words are
+// whole numbers, what the block is); the call reads its tool's spec from that cell, so a tool is dispatched by the cell
+// that names it. RESULT is node=@p.l.t.i; (the action cell, which the lane steps) or nothing=<reason>; where the
+// reason names the first thing that did not read: tool-call-empty, tool-unknown:NAME known=..., tool-quote-unterminated:N,
+// tool-block-unterminated, tool-trailing-text, tool-words:NAME expected=A..B received=N, tool-word-not-number:NAME:I:WORD,
+// tool-address-not-text:@..., tool-address-unknown:@....
+import form-stdlib/bml/form-token-verbs.bml;
+section [form.bml] {
+ let FTT-HELD = record_new(0);
+ class FormTokenTool {
+  // [name, fewest words, most words (-1 for any), indexes of words that are whole numbers, block mode]
+  // block mode: "input" (the block is the tool's input), "args" (its sections are the last words)
+  def ftt-specs() = [
+   ["rg", 1, -1, [], "input"], ["grep", 1, -1, [], "input"], ["jq", 1, -1, [], "input"],
+   ["read", 1, 4, [1, 2], "input"], ["cat", 1, -1, [], "input"], ["head", 0, -1, [], "input"], ["tail", 0, -1, [], "input"],
+   ["wc", 0, -1, [], "input"], ["sort", 0, -1, [], "input"], ["uniq", 0, -1, [], "input"], ["tr", 1, -1, [], "input"],
+   ["cut", 1, -1, [], "input"], ["awk", 1, -1, [], "input"], ["sed", 1, -1, [], "input"],
+   ["edit", 3, 4, [], "args"], ["write", 1, 2, [], "input"],
+   ["balance", 0, -1, [], "input"], ["arity", 0, -1, [], "input"], ["bml-syntax", 0, -1, [], "input"], ["bml-api", 1, -1, [], "input"],
+   ["help", 1, 1, [], "input"], ["verify", 0, 0, [], "input"], ["repair-bml", 0, -1, [], "input"], ["rehearse-bml", 0, -1, [], "input"], ["lift-bml", 0, -1, [], "input"]];
+  def ftt-spec-node(s) = intern_node(ftw-cat("form-tool"), [intern_trivial_string(s[0]), intern_trivial_int(s[1]), intern_trivial_int(s[2]), ftw-encode(s[3]), intern_trivial_string(s[4])]);
+  // the roster, interned once per process: the cells that name the tools
+  def ftt-roster() {
+   if record_has(FTT-HELD, "roster") then record_get(FTT-HELD, "roster") else ftt-roster-hold(ftt-specs() |> map(ftt-spec-node));
+  }
+  def ftt-roster-hold(nodes) {
+   record_set(FTT-HELD, "roster", nodes);
+   nodes;
+  }
+  def ftt-node-name(n) = node_value(node_children(n)[0]);
+  def ftt-node-min(n) = node_value(node_children(n)[1]);
+  def ftt-node-max(n) = node_value(node_children(n)[2]);
+  def ftt-node-numbers(n) = ftw-decode(node_children(n)[3]);
+  def ftt-node-block(n) = node_value(node_children(n)[4]);
+  def ftt-names() = ftt-specs() |> map(s => s[0]);
+  def ftt-tool-node(name) {
+   let found = ftt-roster() |> filter(n => ftt-node-name(n) == name);
+   nil?(found) ? nothing() : found[0];
+  }
+  // the one constructor of a call cell: the lane's fcap-native-tool is this
+  def ftt-action(tool, args, input) = intern_node(ftw-cat("form-code-action"), [intern_trivial_string(tool), ftw-encode(args), intern_trivial_string(input)]);
+
+  // ── the cursor ────────────────────────────────────────────────────────
+  def ftt-blank?(b) = b == 32 || b == 9 || b == 13;
+  def ftt-skip(t, i, n) = (i < n) && ftt-blank?(str_byte_at(t, i)) ? ftt-skip(t, i + 1, n) : i;
+  def ftt-bare-end(t, i, n) = (i < n) && !ftt-blank?(str_byte_at(t, i)) && str_byte_at(t, i) != 10 ? ftt-bare-end(t, i + 1, n) : i;
+  // the end of a quoted word: the index of the closing quote, or -1
+  def ftt-close-at(t, i, n, q) {
+   if i >= n then -1
+   else if str_byte_at(t, i) == q then i
+   else if q == 34 && str_byte_at(t, i) == 92 then ftt-close-at(t, i + 2, n, q)
+   else ftt-close-at(t, i + 1, n, q);
+  }
+  def ftt-unescape(s) = str-join(ftt-unescape-go(s, 0, len(s), []));
+  def ftt-unescape-go(s, i, n, out) {
+   if i >= n then reverse(out)
+   else if str_byte_at(s, i) == 92 && i + 1 < n then ftt-unescape-go(s, i + 2, n, cons(ftt-escaped(str_byte_at(s, i + 1)), out))
+   else ftt-unescape-go(s, i + 1, n, cons(substring(s, i, i + 1), out));
+  }
+  def ftt-escaped(b) = b == 110 ? byte_to_str(10) : b == 116 ? byte_to_str(9) : b == 34 ? "\"" : b == 92 ? "\\" : "\\" ++ byte_to_str(b);
+  // [words, rest or nothing, reason]: the words of the call line; rest is the text after its newline
+  def ftt-words(t, i, n, out) {
+   let j = ftt-skip(t, i, n);
+   if j >= n then [reverse(out), nothing(), ""]
+   else if str_byte_at(t, j) == 10 then [reverse(out), substring(t, j + 1, n), ""]
+   else if str_byte_at(t, j) == 34 || str_byte_at(t, j) == 39 then ftt-quoted(t, j, n, out)
+   else ftt-words(t, ftt-bare-end(t, j, n), n, cons([substring(t, j, ftt-bare-end(t, j, n)), 0], out));
+  }
+  // a word is [text, quoted]: a quoted word is always its own text, an address among them included
+  def ftt-quoted(t, j, n, out) {
+   let q = str_byte_at(t, j);
+   let c = ftt-close-at(t, j + 1, n, q);
+   if c < 0 then [[], nothing(), "tool-quote-unterminated:" ++ j.str()]
+   else ftt-words(t, c + 1, n, cons([q == 34 ? ftt-unescape(substring(t, j + 1, c)) : substring(t, j + 1, c), 1], out));
+  }
+  // the block: [body, reason]; body is nothing when the call has none
+  def ftt-block(rest) {
+   let r = nothing?(rest) ? "" : rest;
+   let at = ftt-skip-lines(r, 0, len(r));
+   if len(trim(r)) == 0 then [nothing(), ""]
+   else if !ftt-starts-at?(r, at, "<<<<") then [nothing(), "tool-trailing-text"]
+   else ftt-block-body(r, at);
+  }
+  def ftt-skip-lines(r, i, n) = (i < n) && (ftt-blank?(str_byte_at(r, i)) || str_byte_at(r, i) == 10) ? ftt-skip-lines(r, i + 1, n) : i;
+  def ftt-starts-at?(s, at, p) = at + len(p) <= len(s) && substring(s, at, at + len(p)) == p;
+  def ftt-block-body(r, at) {
+   let open = str_find(r, "\n", at);
+   let close = ftt-last-close(r);
+   if open < 0 || close < open then [nothing(), "tool-block-unterminated"]
+   else [close > open ? substring(r, open + 1, close) : "", ""];
+  }
+  // the last line that is exactly >>>>
+  def ftt-last-close(r) {
+   let a = ftv-last-index(r, "\n>>>>");
+   a >= 0 && (trim(substring(r, a + 1, len(r))) == ">>>>") ? a : -1;
+  }
+  // an args block splits at a line ====; the text between is verbatim. An input block is one text, whatever it holds.
+  def ftt-sections(body) {
+   let wrapped = "\n" ++ body ++ "\n";
+   let parts = split-on(wrapped, "\n====\n");
+   let n = len(parts);
+   map(i => substring(parts[i], len(parts[i]) > 0 && i == 0 ? 1 : 0, len(parts[i]) - (len(parts[i]) > 0 && i == n - 1 ? 1 : 0)), range(0, n));
+  }
+
+  // ── reading a call ────────────────────────────────────────────────────
+  def ftt-whole-number?(w) = len(w) > 0 && all?(i => str_byte_at(w, i) >= 48 && str_byte_at(w, i) <= 57, range(0, len(w)));
+  // a word that is an address stands for the text of the cell it names
+  // [text, reason]: reason is "" when the word reads
+  def ftt-word(session, w) {
+    if w[1] == 1 || !ftv-starts?(w[0], "@") then [w[0], ""]
+    else ftt-address(w[0], try ftv-held(session, w[0]) catch nothing());
+  }
+  def ftt-address(w, node) = nothing?(node) ? ["", "tool-address-unknown:" ++ ftv-cap(w)] : (ftv-leaf?(node) && node_type(node) == 2) ? [node_value(node), ""] : ["", "tool-address-not-text:" ++ ftv-cap(w)];
+  def ftt-number-reason(spec, words) {
+   let bad = filter(i => i < len(words) && !ftt-whole-number?(words[i]), ftt-node-numbers(spec));
+   nil?(bad) ? "" : "tool-word-not-number:" ++ ftt-node-name(spec) ++ ":" ++ bad[0].str() ++ ":" ++ ftv-cap(words[bad[0]]);
+  }
+  // [tool, args, input, reason]
+  def ftt-read(session, payload) {
+   let n = len(payload);
+   let line = ftt-words(payload, 0, n, []);
+   let words = line[0];
+   if len(line[2]) > 0 then [nothing(), [], "", line[2]]
+   else if nil?(words) then [nothing(), [], "", "tool-call-empty"]
+   else ftt-read-tool(session, words, ftt-block(line[1]));
+  }
+  def ftt-read-tool(session, words, block) {
+   let name = words[0][0];
+   let spec = ftt-tool-node(name);
+   if len(block[1]) > 0 then [nothing(), [], "", block[1]]
+   else if nothing?(spec) then [nothing(), [], "", "tool-unknown:" ++ ftv-cap(name) ++ " known=" ++ str-join-with(ftt-names(), ",")]
+   else ftt-read-args(spec, words[1:] |> map(w => ftt-word(session, w)), block[0]);
+  }
+  def ftt-read-args(spec, read, body) {
+   let bad = filter(r => len(r[1]) > 0, read);
+   let words = read |> map(r => r[0]);
+   let args = ftt-node-block(spec) == "args" && !nothing?(body) ? append(words, ftt-sections(body)) : words;
+   let most = ftt-node-max(spec);
+   if !nil?(bad) then [nothing(), [], "", bad[0][1]]
+   else if len(args) < ftt-node-min(spec) || (most >= 0 && len(args) > most) then [nothing(), [], "", "tool-words:" ++ ftt-node-name(spec) ++ " expected=" ++ ftt-node-min(spec).str() ++ ".." ++ (most < 0 ? "any" : most.str()) ++ " received=" ++ len(args).str()]
+   else if len(ftt-number-reason(spec, args)) > 0 then [nothing(), [], "", ftt-number-reason(spec, args)]
+   else [ftt-node-name(spec), args, ftt-node-block(spec) == "input" && !nothing?(body) ? body : "", ""];
+  }
+
+  // ── writing a call ────────────────────────────────────────────────────
+  // The canonical spelling of a call: what the lane shows the model, what a receipt keeps, what the census replays.
+  // nothing when the tool is not in the roster.
+  def ftt-bare-word?(w) = len(w) > 0 && !ftv-starts?(w, "@") && !ftv-starts?(w, "<<<<") && all?(i => str_byte_at(w, i) > 32 && str_byte_at(w, i) != 34 && str_byte_at(w, i) != 39, range(0, len(w)));
+  def ftt-quote(s) = "\"" ++ str-join(ftt-quote-go(s, 0, len(s), [])) ++ "\"";
+  def ftt-quote-go(s, i, n, out) = i >= n ? reverse(out) : ftt-quote-go(s, i + 1, n, cons(ftt-quote-byte(str_byte_at(s, i), substring(s, i, i + 1)), out));
+  def ftt-quote-byte(b, c) = b == 34 ? "\\\"" : b == 92 ? "\\\\" : b == 10 ? "\\n" : b == 9 ? "\\t" : c;
+  def ftt-spell(w) = ftt-bare-word?(w) ? w : ftt-quote(w);
+  // a text may travel in a block when none of its lines is ====
+  def ftt-blockable?(t) = str_find("\n" ++ t ++ "\n", "\n====\n", 0) < 0;
+  def ftt-render(tool, args, input) {
+   let spec = ftt-tool-node(tool);
+   if nothing?(spec) then nothing() else ftt-render-spec(spec, args, input);
+  }
+  def ftt-render-spec(spec, args, input) {
+   let args-mode = ftt-node-block(spec) == "args";
+   let texts = args-mode ? (len(args) == 3 ? 2 : len(args) == 4 ? 1 : 0) : 0;
+   let tail = drop(len(args) - texts, args);
+   let blocked = args-mode ? (texts > 0 && all?(t => ftt-blockable?(t), tail)) : len(input) > 0;
+   let words = args-mode && blocked ? take(len(args) - texts, args) : args;
+   let line = str-join-with(cons(ftt-node-name(spec), words |> map(ftt-spell)), " ");
+   let body = !blocked ? "" : args-mode ? "\n<<<<\n" ++ str-join-with(tail, "\n====\n") ++ "\n>>>>" : "\n<<<<\n" ++ input ++ "\n>>>>";
+   args-mode && len(input) > 0 ? nothing() : line ++ body;
+  }
+  // the verb: RESULT is the call cell's address, or the reason the call did not read
+  def ftt-call(session, payload) {
+   let read = ftt-read(session, payload);
+   if len(read[3]) > 0 then ftv-nothing(read[3]) else {
+    let node = ftt-action(read[0], read[1], read[2]);
+    let made = ftv-made(session, "", "", "node", node);
+    record_set(session, "returned", node);
+    made;
+   };
+  }
+ }
+ 0;
+}

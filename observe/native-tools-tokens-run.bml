@@ -1,0 +1,61 @@
+// native-tools-tokens-run.bml — the Qwen tokens one tool call costs in each form the lane has spoken or can speak.
+//
+//   echo /Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf | ./fkwu observe/native-tools-tokens-run.bml
+//
+// stdin: the GGUF whose tokenizer counts. Each call below is written four ways and encoded by the model's own tokenizer
+// (q35-encode over the GGUF's merges; nothing else of the model is read):
+//   json   {"tool":"read","arguments":["p","220","40"],"input":""}                   the lane's wire and the rg/read JSON of the retained replies
+//   eval   <|form:eval|>fcap-native-tool("read",["p","220","40"],"")<|/form:eval|>    the constructor in an eval, as the lane teaches today
+//   tool   <|form:tool|>read p 220 40<|/form:tool|>                                   the control table's verb (form-token-tool.bml)
+//   bare   read p 220 40                                                              tool without its envelope: what the words alone cost
+// The strings are escaped by json-emit (a BML string and a JSON string escape alike), the tool form is verbatim.
+// preflight-exec: forbidden
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/bml/form-token-grammar.bml;
+import form-stdlib/qwen35-tokenizer.fk;
+section [form.bml] {
+ class NativeToolsTokens {
+  def ntt-q(s) = json-emit(json-node-string(s));
+  def ntt-list(xs) = "[" ++ str-join-with(xs |> map(ntt-q), ",") ++ "]";
+  def ntt-json(tool, args, input) = "{\"tool\":" ++ ntt-q(tool) ++ ",\"arguments\":" ++ ntt-list(args) ++ ",\"input\":" ++ ntt-q(input) ++ "}";
+  def ntt-eval(tool, args, input) = ftg-render("eval", "fcap-native-tool(" ++ ntt-q(tool) ++ "," ++ ntt-list(args) ++ "," ++ ntt-q(input) ++ ")");
+  // words: bare when they can be; a block carries the text word(s) of edit and write, or the input of the rest
+  def ntt-bare-word?(w) = len(w) > 0 && all?(i => str_byte_at(w, i) > 32 && str_byte_at(w, i) != 34 && str_byte_at(w, i) != 39, range(0, len(w)));
+  def ntt-word(w) = ntt-bare-word?(w) ? w : ntt-q(w);
+  def ntt-bare(tool, args, input, block) {
+   let words = block == "args" ? take(len(args) - 2, args) : args;
+   let texts = block == "args" ? drop(len(args) - 2, args) : [];
+   let line = str-join-with(cons(tool, words |> map(ntt-word)), " ");
+   let body = block == "args" ? "\n<<<<\n" ++ str-join-with(texts, "\n====\n") ++ "\n>>>>\n" : len(input) > 0 ? "\n<<<<\n" ++ input ++ "\n>>>>\n" : "";
+   line ++ body;
+  }
+  def ntt-tool(tool, args, input, block) = ftg-render("tool", ntt-bare(tool, args, input, block));
+  def ntt-calls() = [
+   ["read p", "read", ["form/native/metal/dsv4-layer.fk", "220", "40"], "", "none"],
+   ["rg one file", "rg", ["-n", "-F", "-m", "10", "segplant", "form/native/metal/dsv4-layer.fk"], "", "none"],
+   ["rg two files", "rg", ["-n", "-F", "plant-rope", "form/native/metal/tests/dsv4-token-run-band.bml", "form/form-stdlib/dsv4-kernels.fk"], "", "none"],
+   ["edit one line", "edit", ["config.json", "\"enabled\":false", "\"enabled\":true"], "", "args"],
+   ["edit six lines", "edit", ["form/native/metal/dsv4-layer.fk", "        // THE PLANT (segplant 1: the band's, never a mode of the driver): the query's rope,\n        // which depends on the position.\n        let q = dkl-rope(qk, \"pos\", n);\n        let k = dkl-cache(\"k\", pos);\n        let seg = plant ? 1 : 0;\n        q;", "        let q = dkl-rope(qk, \"pos\", n);\n        let k = dkl-cache(\"k\", pos);\n        q;"], "", "args"],
+   ["jq with input", "jq", [".depth"], "{\"depth\":3,\"name\":\"a\"}", "input"],
+   ["write five lines", "write", ["notes.txt", "one\ntwo \"three\"\nfour\\five\nsix"], "", "args"]];
+  def ntt-count(src, text) = len(q35-encode(src, text));
+  def ntt-row(src, c) {
+   let json = ntt-json(c[1], c[2], c[3]);
+   let ev = ntt-eval(c[1], c[2], c[3]);
+   let tl = ntt-tool(c[1], c[2], c[3], c[4]);
+   let bare = ntt-bare(c[1], c[2], c[3], c[4]);
+   let a = ntt-count(src, json); let b = ntt-count(src, ev); let t = ntt-count(src, tl); let w = ntt-count(src, bare);
+   print_str("[native-tools-tokens] " ++ c[0] ++ ": json " ++ a.str() ++ " (" ++ len(json).str() ++ " bytes), eval " ++ b.str() ++ " (" ++ len(ev).str() ++ "), tool " ++ t.str() ++ " (" ++ len(tl).str() ++ "), bare " ++ w.str() ++ " (" ++ len(bare).str() ++ ")");
+   [a, b, t, w];
+  }
+  def ntt-run(gguf) {
+   let src = read_file_slice(gguf, 0, 40000000);
+   let t0 = host_monotonic_ms();
+   let rows = ntt-calls() |> map(c => ntt-row(src, c));
+   let sum = foldl((acc, r) => [acc[0] + r[0], acc[1] + r[1], acc[2] + r[2], acc[3] + r[3]], [0, 0, 0, 0], rows);
+   print_str("[native-tools-tokens] total over " ++ len(rows).str() ++ " calls: json " ++ sum[0].str() ++ ", eval " ++ sum[1].str() ++ ", tool " ++ sum[2].str() ++ ", bare " ++ sum[3].str() ++ " (" ++ (host_monotonic_ms() - t0).str() ++ " ms)");
+   0;
+  }
+ }
+ ntt-run(trim(stdin-text()));
+}
