@@ -29,6 +29,12 @@ claimed string bytes and `kernel_stat(66)` observes string slots. Node, pair and
 string metadata columns still have their current capacities. Resource refusal
 cannot publish a private string word into a shared node.
 
+Compiled image identity follows the admitted executable. On macOS it uses the
+loaded image's UUID and text fingerprint, so replacing its pathname cannot
+change an existing owner's identity. Identical rebuilds reuse their compiled
+images; a different executable still requires fresh compilation. This carrier
+belongs in the native artifact layer as the seed's image reader and writer shrink.
+
 Executing organs send signals when they encounter unease, uncertainty or a
 needed resource. `organ-care.bml` receives those signals at their execution
 boundaries, directs attention to each need, and calls an available native

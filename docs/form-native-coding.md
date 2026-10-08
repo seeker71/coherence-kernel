@@ -364,6 +364,13 @@ An exact comparison on a retained 205-token tool result took 240 ms through the
 owned cursor, 2 ms on reuse and 20,902 ms through the reference encoder. This
 measures encoding alone; model decoding and prefill retain their own live timings.
 
+Native tool carriers retain complete source and result cells without document,
+argument or byte-count ceilings. Value shape and document identity are checked
+at dispatch and return; the decoder's owned cursor chooses how much enters
+attention. Binary checkpoints retain the complete graph and verify their write
+before publication, without a transport-size cutoff. Public text compatibility
+doors still carry their existing request limits.
+
 Construction stays pure: unused actions and printed addresses cannot submit.
 Data reads preserve the current role. A role reply yields to the owned phase
 controller; another tool after that pending reply cannot execute ahead of it.
