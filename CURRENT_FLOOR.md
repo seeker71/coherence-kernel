@@ -846,7 +846,8 @@ voice-master-band         -> 1048575  filters, shelves, compressor profiles, roo
 voice-score-band          -> 4095     whisper round trip per piece: WER, CER, and two readings of Persian joiners
 voice-measure-band        -> 511      loudness, range, peaks, pauses, centroid, F0 and level jumps on the device
 gpu-lease-band            -> 16383    one Metal client at a time: owner, staleness, tombstone takeover
-gpu-window-band           -> 255      a GPU window: peers paused and resumed only by their holder, swept when the holder is gone, proven by a gauge
+gpu-window-band           -> 511      a GPU window: peers paused and resumed only by their holder, swept when the holder is gone, proven by a gauge
+role-singleton-band       -> 255      one working process of a role: the elder stays, the younger yields, a stopped or dead elder is no role
 ```
 
 A timed run on a shared device reads the device's weather: the same kernel measured 2x to 12x apart from minute to minute while a resident model
@@ -860,8 +861,18 @@ token), reads the gauge again with the peers still stopped, sends SIGCONT to exa
 another process), and prints one line: `gpu window  PROVEN | NOT PROVEN | NOT HELD  gauge a -> b`. A window whose holder died, or that is older than
 20 minutes, is swept by the next open or by `sweep`. `printf 'with <cell>\n' | ./fkwu observe/gpu-window-run.bml` runs a cell in-process inside a
 window (`cell_run`, no child process). A number printed beside NOT PROVEN is a reading of the weather. A peer already stopped by someone else when a
-window opens is resumed by its close: the host's process rows carry no run state to tell it apart. It replaces the shell helper whose stop was
+window opens is not recorded and not resumed by its close (the process row's run state says it is stopped). It replaces the shell helper whose stop was
 ownerless (one client's stop thawed another's window; a killed client left the household frozen for two days).
+
+A process row (`host_process pid`) is `(pid ppid exe cwd argv start-ms withheld state)`: `state` is the host's own word for the process, 1 running or
+sleeping, 2 stopped, 3 a zombie, 0 not said (macOS `p_stat` of the process table row, Linux the letter after the name in `/proc/<pid>/stat`). A stopped
+process exists, answers `host_alive`, and does nothing; the question a side process asks about another is whether it WORKS, and that is this field.
+`role-singleton.bml` is one live process of a role by the process table (band `role-singleton-band` 255): a door (the file an fkwu runs, exactly
+`./fkwu <door>`) has one working process, the elder (earlier start, then the lower pid) and a younger yields at its next check; a stopped or dead elder is
+no role. The glass's three frame producers (`form-glass-sensors-live.fk`, `-machine-live.fk`, `-organs-live.fk`) yield to an elder at the cadence they
+already check their carrier (every 2 s): six glass stacks had run at once, eighteen producers (160 percent of a core, 5 GB) publishing the same shared-memory
+frames, and six readers of the one accelerator gauge that is consumed by its reading made it flip between 0 and 44 with no GPU work.
+`observe/process-census-run.bml` names the doors that run, how many of each work and how many stand stopped, and marks a door with more than one DUPLICATE.
 
 Measured on the sleep text (the body's own whisper, taught text word / character error): en 2.2% / 1.2%,
 pt 4.8% / 1.4%, id 2.1% / 0.3%, fa 13.8% characters (48% by words). Unseen sentences: en 6.1 / 2.9, pt 8.5 / 2.4,
