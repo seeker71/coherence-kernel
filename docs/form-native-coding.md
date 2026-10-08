@@ -371,6 +371,16 @@ attention. Binary checkpoints retain the complete graph and verify their write
 before publication, without a transport-size cutoff. Public text compatibility
 doors still carry their existing request limits.
 
+Structured tool results keep their native value through source discovery,
+dispatch, repeat tracking, checkpointing and decoder continuation. Document
+handoffs preserve the value and crossing count. `observation.value` supplies the
+actual data; `stdout` carries text already produced. A requested `fat-out` text
+view renders its held nodes, raw-string mode and ending at that boundary. Its
+frame records rendering time, encoded bytes and node count; native repeat
+tracking uses shared identity and reports zero emitted stdout bytes.
+Scalar query equality compares native values; structured equality retains its
+array and object semantics without serializing scalar operands.
+
 Construction stays pure: unused actions and printed addresses cannot submit.
 Data reads preserve the current role. A role reply yields to the owned phase
 controller; another tool after that pending reply cannot execute ahead of it.
