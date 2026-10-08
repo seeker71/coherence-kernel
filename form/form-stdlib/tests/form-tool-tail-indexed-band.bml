@@ -1,0 +1,44 @@
+; form-tool-tail-indexed-band.bml — a tool observation enters the stream through the exact BPE cursor, not the reference encoder.
+; preludes: form-stdlib/bml/form-cli-model-observation.bml
+; Verdict 7
+; REQUIRES: the Qwen3.8-27B-Q8_0 GGUF with its seal and crystal side files (read only; no model is opened, no Metal touched).
+;
+; The reference tool tail (fcmo-tool-tail-ids) encodes the chat scaffolding and the observation with q35-encode, which scans the
+; whole merge table on every call: measured 9 to 16 seconds for one 60-byte observation. The session's indexed cursor
+; (fcmo-session-tail-ids over the tokenizer index and crystal) encodes the same bytes in tens of milliseconds. The lane's
+; crossing (fcms-observation-ids in form-cli-model-session.fk, taken when the model has already closed its turn) still calls
+; the reference: wiring this tail there was measured live (a crossing's encoding fell from 9 s to 60 ms) and not landed,
+; because that one changed call site made the runtime's lowering of the lane's units come out garbled (observe/ receipts
+; 2026-10-08-tool-call-as-control.md has the reproduction). This band holds the equivalence the wiring stands on.
+;     1  a result observation (node=@..;) wrapped in its envelope: the indexed ids are the reference ids
+;     2  an observation carrying control bytes, a quote, a backslash, a tab and non-ASCII text: the same ids
+;     4  a multi-line stdout of several hundred bytes: the same ids, and the indexed encode is under a tenth of the
+;        reference's time (it measured 400 times under)
+section [form.bml] {
+ class FormToolTailIndexedBand {
+  def ttb-path() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def ttb-ref(src, text) = fcmo-tool-tail-ids(src, text);
+  def ttb-idx(index, x, text) = fcmo-direct-cursor-ids(qtlc-open-index(index, fcmo-direct-segments(fcmo-tool-content(text), x)));
+  def ttb-text1() = "<|form:observation|>node=@0.2.0.8358002;<|/form:observation|>";
+  def ttb-text2() = "exit 0\n\tkey: \"va\\lue\" <|x|> café ✓";
+  def ttb-text3() = str-join(map(i => "  let line" ++ i.str() ++ " = dkl-rope(qk, \"pos\", n);  // plant\n", range(0, 9)));
+  def ttb-run() {
+   let src = read_file_slice(ttb-path(), 0, 40000000);
+   let index = qtf2r-open(ttb-path(), qsx-seal-line(ttb-path()));
+   let x = qsx-load(ttb-path());
+   let a = ttb-ref(src, ttb-text1()); let b = ttb-idx(index, x, ttb-text1());
+   let c = ttb-ref(src, ttb-text2()); let d = ttb-idx(index, x, ttb-text2());
+   let t0 = host_monotonic_ms();
+   let e = ttb-ref(src, ttb-text3());
+   let t1 = host_monotonic_ms();
+   let f = ttb-idx(index, x, ttb-text3());
+   let t2 = host_monotonic_ms();
+   print_str("[tool-tail] reference " ++ (t1 - t0).str() ++ " ms, indexed " ++ (t2 - t1).str() ++ " ms for " ++ len(ttb-text3()).str() ++ " bytes");
+   let bit1 = x[0] == 1 && !nothing?(b) && (Value) a == b ? 1 : 0;
+   let bit2 = !nothing?(d) && (Value) c == d ? 2 : 0;
+   let bit4 = !nothing?(f) && (Value) e == f && (t2 - t1) * 10 < (t1 - t0) ? 4 : 0;
+   bit1 + bit2 + bit4;
+  }
+ }
+ ttb-run();
+}

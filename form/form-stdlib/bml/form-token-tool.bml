@@ -24,18 +24,17 @@
 // after the call with <<<<, closes with >>>> on a line of its own, and its text is verbatim: nothing in it is escaped.
 // The tool decides what the block is: edit takes the block's sections (split at a line ==== ) as its last words, old
 // text then new; every other tool takes the whole block as its input (write: the file's text). A quoted word is always
-// its own text, an @address in quotes included. ftt-render spells a call the same way, so a call read back from its
+// its own text, an @address in quotes included. ftt-render (form-token-tool-spell.bml) spells a call the same way, so a call read back from its
 // spelling is the same cell.
 //
 // Tools are nodes. ftt-roster() interns one form-tool cell per tool (name, fewest words, most words, which words are
 // whole numbers, what the block is); the call reads its tool's spec from that cell, so a tool is dispatched by the cell
 // that names it. RESULT is node=@p.l.t.i; (the action cell, which the lane steps) or nothing=<reason>; where the
-// reason names the first thing that did not read: tool-call-empty, tool-unknown:NAME known=..., tool-quote-unterminated:N,
-// tool-block-unterminated, tool-trailing-text, tool-words:NAME expected=A..B received=N, tool-word-not-number:NAME:I:WORD,
-// tool-address-not-text:@..., tool-address-unknown:@....
+// reason names the first thing that did not read: tool-call-empty, tool-unknown:NAME known=..., tool-quote-open:N,
+// tool-block-open, tool-text-after-call, tool-words:NAME expected=A..B received=N, tool-word-not-number:NAME:I:WORD,
+// tool-address-not-text:@..., tool-address-unknown:@.... The contract is written in docs/form-native-agent-tools.md.
 import form-stdlib/bml/form-token-verbs.bml;
 section [form.bml] {
- let FTT-HELD = record_new(0);
  class FormTokenTool {
   // [name, fewest words, most words (-1 for any), indexes of words that are whole numbers, block mode]
   // block mode: "input" (the block is the tool's input), "args" (its sections are the last words)
@@ -44,18 +43,13 @@ section [form.bml] {
    ["read", 1, 4, [1, 2], "input"], ["cat", 1, -1, [], "input"], ["head", 0, -1, [], "input"], ["tail", 0, -1, [], "input"],
    ["wc", 0, -1, [], "input"], ["sort", 0, -1, [], "input"], ["uniq", 0, -1, [], "input"], ["tr", 1, -1, [], "input"],
    ["cut", 1, -1, [], "input"], ["awk", 1, -1, [], "input"], ["sed", 1, -1, [], "input"],
-   ["edit", 3, 4, [], "args"], ["write", 1, 2, [], "input"],
+   ["edit", 3, -1, [], "args"], ["write", 1, 2, [], "input"],
    ["balance", 0, -1, [], "input"], ["arity", 0, -1, [], "input"], ["bml-syntax", 0, -1, [], "input"], ["bml-api", 1, -1, [], "input"],
    ["help", 1, 1, [], "input"], ["verify", 0, 0, [], "input"], ["repair-bml", 0, -1, [], "input"], ["rehearse-bml", 0, -1, [], "input"], ["lift-bml", 0, -1, [], "input"]];
-  def ftt-spec-node(s) = intern_node(ftw-cat("form-tool"), [intern_trivial_string(s[0]), intern_trivial_int(s[1]), intern_trivial_int(s[2]), ftw-encode(s[3]), intern_trivial_string(s[4])]);
-  // the roster, interned once per process: the cells that name the tools
-  def ftt-roster() {
-   if record_has(FTT-HELD, "roster") then record_get(FTT-HELD, "roster") else ftt-roster-hold(ftt-specs() |> map(ftt-spec-node));
-  }
-  def ftt-roster-hold(nodes) {
-   record_set(FTT-HELD, "roster", nodes);
-   nodes;
-  }
+  def ftt-spec-category() = ftw-cat("tool-spec-cell");
+  def ftt-spec-node(s) = intern_node(ftt-spec-category(), [intern_trivial_string(s[0]), intern_trivial_int(s[1]), intern_trivial_int(s[2]), ftw-encode(s[3]), intern_trivial_string(s[4])]);
+  // the roster: the cells that name the tools. Interning is hash-consing, so asking again is the same cells, not new ones.
+  def ftt-roster() = ftt-specs() |> map(ftt-spec-node);
   def ftt-node-name(n) = node_value(node_children(n)[0]);
   def ftt-node-min(n) = node_value(node_children(n)[1]);
   def ftt-node-max(n) = node_value(node_children(n)[2]);
@@ -87,6 +81,8 @@ section [form.bml] {
    else ftt-unescape-go(s, i + 1, n, cons(substring(s, i, i + 1), out));
   }
   def ftt-escaped(b) = b == 110 ? byte_to_str(10) : b == 116 ? byte_to_str(9) : b == 34 ? "\"" : b == 92 ? "\\" : "\\" ++ byte_to_str(b);
+  def ftt-bad-words(reason) = [[], nothing(), reason];
+  def ftt-bad-block(reason) = [nothing(), reason];
   // [words, rest or nothing, reason]: the words of the call line; rest is the text after its newline
   def ftt-words(t, i, n, out) {
    let j = ftt-skip(t, i, n);
@@ -99,7 +95,7 @@ section [form.bml] {
   def ftt-quoted(t, j, n, out) {
    let q = str_byte_at(t, j);
    let c = ftt-close-at(t, j + 1, n, q);
-   if c < 0 then [[], nothing(), "tool-quote-unterminated:" ++ j.str()]
+   if c < 0 then ftt-bad-words("tool-quote-open:" ++ j.str())
    else ftt-words(t, c + 1, n, cons([q == 34 ? ftt-unescape(substring(t, j + 1, c)) : substring(t, j + 1, c), 1], out));
   }
   // the block: [body, reason]; body is nothing when the call has none
@@ -107,7 +103,7 @@ section [form.bml] {
    let r = nothing?(rest) ? "" : rest;
    let at = ftt-skip-lines(r, 0, len(r));
    if len(trim(r)) == 0 then [nothing(), ""]
-   else if !ftt-starts-at?(r, at, "<<<<") then [nothing(), "tool-trailing-text"]
+   else if !ftt-starts-at?(r, at, "<<<<") then ftt-bad-block("tool-text-after-call")
    else ftt-block-body(r, at);
   }
   def ftt-skip-lines(r, i, n) = (i < n) && (ftt-blank?(str_byte_at(r, i)) || str_byte_at(r, i) == 10) ? ftt-skip-lines(r, i + 1, n) : i;
@@ -115,13 +111,13 @@ section [form.bml] {
   def ftt-block-body(r, at) {
    let open = str_find(r, "\n", at);
    let close = ftt-last-close(r);
-   if open < 0 || close < open then [nothing(), "tool-block-unterminated"]
+   if open < 0 || close < open then ftt-bad-block("tool-block-open")
    else [close > open ? substring(r, open + 1, close) : "", ""];
   }
   // the last line that is exactly >>>>
   def ftt-last-close(r) {
-   let a = ftv-last-index(r, "\n>>>>");
-   a >= 0 && (trim(substring(r, a + 1, len(r))) == ">>>>") ? a : -1;
+   let a = ftv-last-index(r, ">>>>");
+   a >= 1 && str_byte_at(r, a - 1) == 10 && len(trim(substring(r, a, len(r)))) == 4 ? a - 1 : -1;
   }
   // an args block splits at a line ====; the text between is verbatim. An input block is one text, whatever it holds.
   def ftt-sections(body) {
@@ -171,30 +167,6 @@ section [form.bml] {
    else [ftt-node-name(spec), args, ftt-node-block(spec) == "input" && !nothing?(body) ? body : "", ""];
   }
 
-  // ── writing a call ────────────────────────────────────────────────────
-  // The canonical spelling of a call: what the lane shows the model, what a receipt keeps, what the census replays.
-  // nothing when the tool is not in the roster.
-  def ftt-bare-word?(w) = len(w) > 0 && !ftv-starts?(w, "@") && !ftv-starts?(w, "<<<<") && all?(i => str_byte_at(w, i) > 32 && str_byte_at(w, i) != 34 && str_byte_at(w, i) != 39, range(0, len(w)));
-  def ftt-quote(s) = "\"" ++ str-join(ftt-quote-go(s, 0, len(s), [])) ++ "\"";
-  def ftt-quote-go(s, i, n, out) = i >= n ? reverse(out) : ftt-quote-go(s, i + 1, n, cons(ftt-quote-byte(str_byte_at(s, i), substring(s, i, i + 1)), out));
-  def ftt-quote-byte(b, c) = b == 34 ? "\\\"" : b == 92 ? "\\\\" : b == 10 ? "\\n" : b == 9 ? "\\t" : c;
-  def ftt-spell(w) = ftt-bare-word?(w) ? w : ftt-quote(w);
-  // a text may travel in a block when none of its lines is ====
-  def ftt-blockable?(t) = str_find("\n" ++ t ++ "\n", "\n====\n", 0) < 0;
-  def ftt-render(tool, args, input) {
-   let spec = ftt-tool-node(tool);
-   if nothing?(spec) then nothing() else ftt-render-spec(spec, args, input);
-  }
-  def ftt-render-spec(spec, args, input) {
-   let args-mode = ftt-node-block(spec) == "args";
-   let texts = args-mode ? (len(args) == 3 ? 2 : len(args) == 4 ? 1 : 0) : 0;
-   let tail = drop(len(args) - texts, args);
-   let blocked = args-mode ? (texts > 0 && all?(t => ftt-blockable?(t), tail)) : len(input) > 0;
-   let words = args-mode && blocked ? take(len(args) - texts, args) : args;
-   let line = str-join-with(cons(ftt-node-name(spec), words |> map(ftt-spell)), " ");
-   let body = !blocked ? "" : args-mode ? "\n<<<<\n" ++ str-join-with(tail, "\n====\n") ++ "\n>>>>" : "\n<<<<\n" ++ input ++ "\n>>>>";
-   args-mode && len(input) > 0 ? nothing() : line ++ body;
-  }
   // the verb: RESULT is the call cell's address, or the reason the call did not read
   def ftt-call(session, payload) {
    let read = ftt-read(session, payload);

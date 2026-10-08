@@ -389,6 +389,12 @@ observation admission retains the completed effects and their checkpoint.
 Unowned recipe evaluation still returns its action as a value. Native BML
 escapes are preserved; the incremental scanner retains unfinished controls
 without a fixed token window.
+
+The control table speaks the call itself: `<|form:tool|>read path 1 20<|/form:tool|>`, or `edit path` with a verbatim
+`<<<<` old `====` new `>>>>` block, is read by one cursor (`form-token-tool.bml`) into the same `form-code-action` cell,
+checked against its tool's roster cell, and a call that does not read answers a named `nothing=tool-...` in the stream. It
+is the lane's default form (`FORM_CODE_CALL_FORM=eval` teaches the constructor in an eval); the contract is in
+[`form-native-agent-tools.md`](form-native-agent-tools.md#the-tool-call-as-a-control--the-local-voices-calling-boundary).
 Native payloads go straight to that executor; the coding decoder has no JSON
 unescaping or preliminary parse pass. Admission selects the task workspace
 before binding context, so the decoder reads those same cells.
