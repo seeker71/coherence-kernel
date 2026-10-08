@@ -1490,6 +1490,18 @@ static long long fk_hole_take(long long len, long long limit) {
     if (look == n && cut == 0) { fk_holmax = len - 1; }
     return -1;
 }
+/* string births by recipe: with FK_STRING_BIRTHS in fkwu.conf every string that takes a slot (a new one or one the melt
+ * freed) is charged to fk_cur_fn, and the exit writes .fkwu-strings.<pid> (the forty recipes that minted most). The
+ * measure that says where the string melt's work is born, so that work can stop being made. */
+static char *fk_conf(const char *key);
+static long long *fk_fn_smint;
+static int fk_sboard_on = -1;
+static void fk_sboard_count(void) {
+    if (fk_sboard_on < 0) { fk_sboard_on = fk_conf("FK_STRING_BIRTHS") ? 1 : 0; }
+    if (!fk_sboard_on || fk_cur_fn < 0 || fk_cur_fn >= (1LL << 20)) { return; }
+    if (fk_fn_smint == 0) { fk_fn_smint = (long long *)calloc((size_t)1 << 20, 8); if (fk_fn_smint == 0) { fk_sboard_on = 0; return; } }
+    fk_fn_smint[fk_cur_fn] = fk_fn_smint[fk_cur_fn] + 1;
+}
 static long long fk_sintern(long long off, long long len) {
     fk_sinit();
     long long bucket = fk_str_hash(off, len);
@@ -1518,6 +1530,7 @@ static long long fk_sintern(long long off, long long len) {
             fk_sbp = off;
         }
     }
+    if (fk_sboard_on != 0) { fk_sboard_count(); }
     if (fk_sfree_n > 0) {
         /* a slot the string melt freed: reuse its index (its bytes went to the holes when it died) */
         long long r = fk_sfree[fk_sfree_n - 1];
@@ -21109,10 +21122,33 @@ static void fk_heat_bury_ended(const char *prefix) {
     (void)prefix;
 #endif
 }
+/* the forty recipes that minted the most strings, by name, with the count (FK_STRING_BIRTHS) */
+static void fk_sboard_write(void) {
+    if (fk_fn_smint == 0) { return; }
+    char path[96];
+    sprintf(path, ".fkwu-strings.%d", getpid());
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) { return; }
+    long long round = 0;
+    while (round < 40) {
+        long long best = -1, bestv = 0, j = 0;
+        while (j < fk_fntop) {
+            long long fx = fk_fnidx[j];
+            if (fx >= 0 && fx < (1LL << 20) && fk_fn_smint[fx] > bestv) { bestv = fk_fn_smint[fx]; best = j; }
+            j = j + 1;
+        }
+        if (best < 0) { break; }
+        dprintf(fd, "%lld %.*s\n", bestv, (int)fk_fnsym_n[best], fk_srctext + fk_fnsym_s[best]);
+        fk_fn_smint[fk_fnidx[best]] = 0;
+        round = round + 1;
+    }
+    close(fd);
+}
 static void fk_heat_report(void) {
     if (fk_heat_reported) {
         return;
     }
+    if (fk_sboard_on == 1) { fk_sboard_write(); }
     fk_heat_reported = 1;
     fk_bus_unwind(0, 3, "exit");
     fk_live_publish(1);
