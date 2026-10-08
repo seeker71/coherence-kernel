@@ -28,6 +28,7 @@ import form-stdlib/bml/stdin-source.bml;
 import form-stdlib/bml/form-cli-code-policy.bml;
 import form-stdlib/bml/form-cli-code-swerve.bml;
 import form-stdlib/bml/form-token-grammar.bml;
+import form-stdlib/bml/form-token-tool-spell.bml;
 import form-stdlib/qwen35-tokenizer.fk;
 section [form.bml] {
  class NativeToolsCensus {
@@ -55,7 +56,8 @@ section [form.bml] {
   def ntc-class(text) {
    let t = trim(text);
    let controls = ftg-scan-any(t);
-   if !nil?(controls) then ntc-best(append(["control-other"], controls |> filter(c => c[0] == "eval") |> map(c => ntc-payload-class(c[1]))))
+   if len(t) == 0 then "empty"
+   else if !nil?(controls) then ntc-best(append(["control-other"], controls |> filter(c => c[0] == "eval") |> map(c => ntc-payload-class(c[1]))))
    else if faj-valid(t) then ntc-json-class(t)
    else if !nil?(fcctg-read(t, fcsw-tool-names())[1]) then "json-tolerated"
    else if ntc-has?(t, "{") && (ntc-has?(t, "\"tool\"") || ntc-has?(t, "\"role\"") || ntc-has?(t, "\"diagnosis\"")) then "json-invalid"
@@ -95,6 +97,40 @@ section [form.bml] {
    ftv-offer(sess, "fcap-native-tool", 3, a => fcap-native-tool(a[0], a[1], a[2]));
    ftv-eval(sess, payload);
   }
+  // the call cell an action payload builds: [tool, words, input], or nothing
+  def ntc-eval-call(payload) {
+   let sess = ftv-session();
+   ftv-offer(sess, "fcap-native-tool", 3, a => fcap-native-tool(a[0], a[1], a[2]));
+   let seen = ftv-eval(sess, payload);
+   let node = record_get(sess, "returned");
+   nothing?(node) || value_kind(node) != "node_id" ? nothing() : [ftw-decode(node_children(node)[0]), ftw-decode(node_children(node)[1]), ftw-decode(node_children(node)[2])];
+  }
+  def ntc-json-call(t) {
+   let obj = parse-json("census-call", t);
+   fat-wire-object?(obj) && json-object-has?(obj, "tool") && fat-wire-string?(json-object-get(obj, "tool")) && fcap-string-array(json-object-get(obj, "arguments")) ? [fcap-string(obj, "tool"), fcap-array(obj, "arguments"), fcap-string(obj, "input")] : nothing();
+  }
+  // a call replayed as a tool control: [spelled, read back as itself, bytes of the spelling]
+  def ntc-replay(c) {
+   let text = nothing?(c) ? nothing() : ftt-render(c[0], c[1], c[2]);
+   let back = nothing?(text) ? nothing() : ftt-read(ftv-session(), text);
+   [nothing?(text) ? 0 : 1, !nothing?(back) && back[3] == "" && back[0] == c[0] && back[1] == c[1] && back[2] == c[2] ? 1 : 0, nothing?(text) ? 0 : len(text)];
+  }
+  def ntc-first-diff(a, b, i) = i >= len(a) || i >= len(b) ? i : str_byte_at(a, i) != str_byte_at(b, i) ? i : ntc-first-diff(a, b, i + 1);
+  def ntc-diff-report(c) {
+   let back = ftt-read(ftv-session(), ftt-render(c[0], c[1], c[2]));
+   let rows = range(0, len(c[1])) |> map(k => k < len(back[1]) && back[1][k] != c[1][k] ? print_str("[native-tools-census] diff arg " ++ k.str() ++ " of " ++ len(c[1]).str() ++ ": " ++ len(c[1][k]).str() ++ " bytes became " ++ len(back[1][k]).str() ++ ", first difference at " ++ ntc-first-diff(c[1][k], back[1][k], 0).str() ++ " original byte " ++ str_byte_at(c[1][k], ntc-first-diff(c[1][k], back[1][k], 0)).str()) : 0);
+   print_str("[native-tools-census] diff words read " ++ len(back[1]).str() ++ " of " ++ len(c[1]).str() ++ " reason [" ++ back[3] ++ "] input " ++ len(back[2]).str() ++ " of " ++ len(c[2]).str());
+   0;
+  }
+  def ntc-replay-line(label, calls) {
+   let rs = calls |> map(ntc-replay);
+   let odd = filter(c => ntc-replay(c)[1] == 0, calls);
+   let diffs = take(3, odd) |> map(c => ntc-diff-report(c));
+   let shown = take(4, odd) |> map(c => print_str("[native-tools-census] replay " ++ label ++ " not read back as itself: " ++ c[0] ++ " " ++ ftv-cap(json-emit(json-node-array(c[1] |> map(json-node-string)))) ++ " input " ++ len(c[2]).str() ++ " bytes; spelled " ++ (nothing?(ftt-render(c[0], c[1], c[2])) ? "no" : ftv-cap(ftt-render(c[0], c[1], c[2])))));
+   let sum = foldl((acc, r) => [acc[0] + r[0], acc[1] + r[1], acc[2] + r[2]], [0, 0, 0], rs);
+   print_str("[native-tools-census] replay " ++ label ++ ": " ++ len(calls).str() ++ " calls, " ++ sum[0].str() ++ " spelled as a tool control, " ++ sum[1].str() ++ " read back as the same cell, " ++ sum[2].str() ++ " bytes of spelling");
+   0;
+  }
   def ntc-run(lines) {
    let given = filter(l => len(trim(l)) > 0, lines);
    let gguf = given[0];
@@ -115,6 +151,13 @@ section [form.bml] {
    ntc-us("control-action: control scan", actions, t => ftg-scan-any(trim(t)));
    ntc-us("control-action: eval cursor (ftv-parse-expr)", payloads, p => ftv-parse-expr(ftv-at-rewrite(p)));
    ntc-us("control-action: whole eval (ftv-eval)", payloads, p => ntc-eval-once(p));
+   let eval-calls = payloads |> map(ntc-eval-call);
+   let json-calls = json |> map(ntc-json-call);
+   print_str("[native-tools-census] action controls that built a call cell: " ++ len(filter(c => !nothing?(c), eval-calls)).str() ++ " of " ++ len(payloads).str());
+   ntc-replay-line("eval actions", filter(c => !nothing?(c), eval-calls));
+   ntc-replay-line("json tools", filter(c => !nothing?(c), json-calls));
+   let spelled = filter(c => !nothing?(c), append(eval-calls, json-calls)) |> map(c => ftt-render(c[0], c[1], c[2])) |> filter(s => !nothing?(s));
+   ntc-us("tool control: ftt-read of the spelling", spelled, s => ftt-read(ftv-session(), s));
    0;
   }
  }

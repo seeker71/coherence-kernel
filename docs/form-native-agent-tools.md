@@ -75,6 +75,46 @@ Malformed JSON, missing fields, unsupported command syntax and tool failures
 are ordinary structured results with `stderr`; inspect them and repair the next
 request rather than switching to a host command.
 
+## The tool call as a control — the local voice's calling boundary
+
+The JSON wire above is the edge for callers outside the body. A model decoding inside the body reaches the same tools by
+writing the call in the control table's own words (`form-token-tool.bml`, verb `tool` beside eval, node-get and the rest):
+
+```
+<|form:tool|>rg -n -F segplant form/native/metal/dsv4-layer.fk<|/form:tool|>
+<|form:tool|>read @0.0.0.6806910 225 30<|/form:tool|>
+<|form:tool|>edit config.json
+<<<<
+{"enabled":false}
+====
+{"enabled":true}
+>>>>
+<|/form:tool|>
+```
+
+A call is the tool's name, its words and an optional block. A word is bare, `"double quoted"` (`\n \t \" \\` read), `'single
+quoted'` (raw) or `@p.l.t.i`, the address of a text cell the workspace holds, which stands for its text (a quoted word is
+always its own text). A block opens with `<<<<` on the line after the call and closes with `>>>>` on a line of its own; what
+it holds is verbatim, nothing is escaped. `edit` takes the block's sections (split at a line `====`) as its old and new text;
+every other tool takes the whole block as its input (`write`: the file's text).
+
+One cursor reads the call straight into the cell the lane steps, a `form-code-action` node `[tool, words, input]`: the very
+cell `fcap-native-tool` builds (they share `ftt-action`), so the same call is the same node id. Tools are cells too
+(`ftt-roster`: name, fewest and most words, which words are whole numbers, what the block is); the call is checked against
+its tool's cell, and a call that does not read is answered in the stream, before the reply goes on, with a named
+observation, never a stop: `nothing=tool-call-empty`, `tool-unknown:NAME known=...`, `tool-quote-open:N`,
+`tool-block-open`, `tool-text-after-call`, `tool-words:NAME expected=A..B received=N`,
+`tool-word-not-number:NAME:I:WORD`, `tool-address-unknown:@..`, `tool-address-not-text:@..`. The result of a good call is
+`node=@p.l.t.i;`; the lane executes the cell and its result returns as the cells and addresses the model packets already
+carry. `ftt-render` (`form-token-tool-spell.bml`, kept out of the lane's closure) spells any call back the same way, and a
+read of the spelling is the same cell, which is how receipts, bands and the census show a call.
+
+The lane teaches this form by default; `FORM_CODE_CALL_FORM=eval` teaches the constructor spelled in an eval
+(`<|form:eval|>fcap-native-tool("read",["path"],"")<|/form:eval|>`) for comparison. A JSON reply is neither: since
+2026-10-05 the live lane answers it with the no-action note (`fcac-replied` hands only an address to the JSON route), and
+JSON stays the edge for callers outside the body (`fat-wire-call`, the request door). `form-native-tools-guard-band.bml`
+pins how many places write or read JSON text in each lane file, so a new one is a decision.
+
 ## form-find — the source tree, indexed and resident (the agents' normal lookup)
 
 The wire above carries the documents it is handed: at most 512 documents and one MiB, and a cold `./fkwu` for every call. It cannot answer "who
