@@ -975,6 +975,12 @@ calls took 0 new slots while the melt reclaimed 28,968 (the melt is what keeps a
 42,864 in `str-spans-pair` (a join interns every pairwise intermediate). The churn is interning intermediates: every
 `str_concat` result is interned, though only the last of a join is kept.
 
+A list may begin on the heap and end in the field: a heap pair consed onto the elements of a parsed JSON array carries a
+shared pair as its tail. The loop lane's emitted head, tail and len read the heap's columns by pair index, so its tail and
+its length walk compare each word they read with the heap's top and leave for the overflow block past it; the interpreter
+reads either column. `shared-pair-walk-band` reads 31, and the build without the guard dies on it (it killed
+`form-token-census` on every build: reverse of an append of two parsed arrays).
+
 A closure row lives while a root reaches it: the value stack, memory cells, records, nodes, held lets, the method
 table, and the captures of a row that is itself reached. A melt also keeps the rows made since the melt before it
 (`FK_CLO_YOUNG`: a row survives exactly one melt unrooted), copies only what a kept row captured, slides those values
