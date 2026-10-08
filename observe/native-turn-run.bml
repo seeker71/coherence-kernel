@@ -467,6 +467,7 @@ section [form.bml] {
   def nt-seat?(reason) = nt-memory-low?(reason) || ntl-queued?(reason);
   def nt-lane-reason(said, result) =if ((String) said == nt-lane-deadline()) then "deadline" else nt-str(result, "reason");
   def nt-node-or-null(doc, key) = if json-object-has?(doc, key) then json-object-get(doc, key) else json-node-null();
+  def nt-lane-done?(result) = ((String) nt-str(result, "status") == "complete") && ((Comparable) nt-int(result, "release_ok", 0) == 1) && node_eq(nt-node-or-null(result, "blocking_check"), json-node-null());
   def nt-session(opts) = if json-object-has?(opts, "session") then [fhn-s("session", nt-str(opts, "session"))] else [];
   // one option: ask the lane, publish inside hw-with-published, read the band; returns (list green row finding)
   def nt-attempt(gap, opts, id, full, band, before, coordinator, request, memory, n, way, verdict, hist, target) {
@@ -492,29 +493,30 @@ section [form.bml] {
    // the tree as it stands after the lane is the publish's checkpoint, absence included (hw-tree)
    let checkpoint = hw-tree(paths);
    let conflict = ((Value) originals != nt-as-text(checkpoint));
+   let done = if !direct then 0 else if conflict then 0 else nt-lane-done?(result);
    let ready = nt-publishable(result,opts,conflict);
    let cand = nt-candidate(nt-docs-of(result), paths);
    let published = if ready then nt-written(cand) else 0;
-   let window = if (published > 0) then hw-with-published(nt-dir(), paths, checkpoint, hw-over(cand, checkpoint), () => nt-band-under(band, full, nt-deadline(opts))) else [[before], true, ""];
+   let window = if (published > 0 && !done) then hw-with-published(nt-dir(), paths, checkpoint, hw-over(cand, checkpoint), () => nt-band-under(band, full, nt-deadline(opts))) else [[before], true, ""];
    let test = ((Comparable) nt-int(opts, "test", 0) == 1);
    // a band ran under the candidate only when the door published it; a refused publish leaves the band where it
    // was, and its compiler words and claims are the original source's, never the candidate's
    let reading = hw-band-after(window, published, before);
    let ran = reading[0];
    let after = reading[1];
-   let shown = if ran then published else 0;
+   let shown = if (done || ran) then published else 0;
    let errors = if (ran && nothing?(after)) then nt-band-errors() else "";
-   let neighbors = nt-neighbors-hold(paths, band, after, full, nt-deadline(opts), test);
-   let claim = (test == 1 || neighbors == 0) ? [1, 0] : fctrt-claim-file(".hearth/tasks", id, host_pid().str());
+   let neighbors = if done then 1 else nt-neighbors-hold(paths, band, after, full, nt-deadline(opts), test);
+   let claim = (test == 1 || neighbors == 0 || published == 0) ? [1, 0] : fctrt-claim-file(".hearth/tasks", id, host_pid().str());
    let refused = (String) window[2] != "" ? window[2] : (claim[0] == 0 ? "writer-held" : "");
-   let green = ran && (((Comparable) after == full) && (!((Comparable) before == full))) && (neighbors == 1) && ((String) refused == "");
+   let green = if ((String) refused != "") then 0 else if done then (claim[0] == 1) else (ran && (((Comparable) after == full) && (!((Comparable) before == full))) && (neighbors == 1));
    // a green option keeps its edit for the landing: the candidate stands again once the window restored it
-   let landed = if (green && !test) then hw-put-all(paths, hw-over(cand, checkpoint)) else 0;
-   let committed = (green && !test) ? fctrt-commit-file(".hearth/tasks", id, host_pid().str(), "publish") : [0, 0];
+   let landed = if (green && !test && (published > 0)) then hw-put-all(paths, hw-over(cand, checkpoint)) else 0;
+   let committed = (green && !test && (published > 0)) ? fctrt-commit-file(".hearth/tasks", id, host_pid().str(), "publish") : [0, 0];
    let claims = if (green || !ran) then "" else nt-band-claims();
    let raw = nt-lane-reason(said, result);
    let clock = fctrt-clock(nt-maybe(result, "generated_ids"), nt-maybe(result, "injected_ids"), (now_unix_ms() - started), raw);
-   let reason = ((String) clock == "stall" && (String) fctrt-act(raw)[0] == "red-band") ? "local-stall" : raw;
+   let reason = if done then raw else if (((String) clock == "stall") && ((String) fctrt-act(raw)[0] == "red-band")) then "local-stall" else raw;
    let neighborNote = neighbors == 0 ? "\nA neighbor band that imports the edited file read short of its own verdict, so the edit stays unpublished." : "";
    let finding = if green then "" else (conflict ? "Source changed during generation; candidate was not published. Refresh the caller's source contract before resuming." : mc-cat([nt-finding(n,before,after,full,said,nt-str(result,"status"),shown,nt-diff-texts(paths,cand,originals),errors,claims), if ((String) refused == "") then "" else mc-cat(["\nThe candidate was not published: ", refused]), neighborNote])) + "\nCoding observation: " + reason;
    let kept = nt-keep(paths, cand, originals, stamp);

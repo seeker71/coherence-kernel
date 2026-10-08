@@ -659,8 +659,9 @@ stays that resident value. A structured tool keeps its node on the value, and
 the model note is emitted once from the node.
 A lane reason is a failure class with its own spend, next step, and whether
 the walk ends. One writer holds the session. After a context renewal the same
-tool triple ends the attempt. Publish waits until the neighbor bands that
-import the edited file read their own verdicts. A local stall spends nothing
+tool triple ends the attempt. A request the lane completed, with its session released and no check still
+refusing the documents, lands from that result. The band child and the
+neighbor-band scan stay the judge only when the lane did not complete. A local stall spends nothing
 and the next voice of the write-code chain hears the same documents and the
 finding. Tokens are progress; no tokens past the local idle bound is a stall.
 Model admission remains Qwen-specific. A common driver for other admitted
