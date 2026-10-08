@@ -12241,21 +12241,37 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
             return 100 + rd;
         }
         if (p->kind == 25) {
+            if (fk_f64_ovf_n >= FK_F64_OVF_CAP) { return -1; }
             if (!fk_f64_put(words, wn, 0xB5000069U)) { return -1; }                                               /* CBNZ X9, +3 */
             if (!fk_f64_put(words, wn, 0xD2800020U | xd)) { return -1; }                                          /* MOV Xd, #1: the empty list */
             if (!fk_f64_put(words, wn, 0x14000003U)) { return -1; }                                               /* B +3 */
             if (!fk_f64_put(words, wn, 0xF9400010U | (31U << 10))) { return -1; }                                 /* LDR X16, [X0, #8*31]: the tails' base */
             if (!fk_f64_put(words, wn, 0xF8697A00U | xd)) { return -1; }                                          /* LDR Xd, [X16, X9, LSL #3] */
+            /* A heap pair's tail may name a SHARED pair (a list consed onto a list the field holds: the elements of a parsed JSON
+             * array): its index is past the heap's top and the next head, tail or len would read the heap's columns at an address
+             * beyond them. The tail word leaves for the overflow block unless it names a pair under the top; the interpreter,
+             * whose FK_HH and FK_HT read either column, takes the walk from there. */
+            if (!fk_f64_put(words, wn, 0xD341FC09U | (xd << 5))) { return -1; }                                   /* LSR X9, Xd, #1 */
+            if (!fk_f64_put(words, wn, 0xF9400010U | (22U << 10))) { return -1; }                                 /* LDR X16, [X0, #8*22]: the heap's top for this leaf */
+            if (!fk_f64_put(words, wn, 0xEB10013FU)) { return -1; }                                               /* CMP X9, X16 */
+            fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+            if (!fk_f64_put(words, wn, 0x54000008U)) { return -1; }                                               /* B.HI overflow: past the top */
             return 100 + rd;
         }
-        /* kind 27: the length, a walk of the tails */
+        /* kind 27: the length, a walk of the tails; each tail names a pair under the heap's top or the walk leaves for the
+         * overflow block (a tail may name a shared pair, whose index no heap column holds) */
+        if (fk_f64_ovf_n >= FK_F64_OVF_CAP) { return -1; }
         if (!fk_f64_put(words, wn, 0xD2800000U | xd)) { return -1; }                                              /* MOV Xd, #0 */
         if (!fk_f64_put(words, wn, 0xF9400010U | (31U << 10))) { return -1; }                                     /* LDR X16, [X0, #8*31]: the tails' base */
-        if (!fk_f64_put(words, wn, 0xB40000A9U)) { return -1; }                                                   /* CBZ X9, +5: done */
+        if (!fk_f64_put(words, wn, 0xF9400011U | (22U << 10))) { return -1; }                                     /* LDR X17, [X0, #8*22]: the heap's top for this leaf */
+        if (!fk_f64_put(words, wn, 0xB40000E9U)) { return -1; }                                                   /* CBZ X9, +7: done */
         if (!fk_f64_put(words, wn, 0x91000400U | (xd << 5) | xd)) { return -1; }                                  /* ADD Xd, Xd, #1 */
         if (!fk_f64_put(words, wn, 0xF8697A09U)) { return -1; }                                                   /* LDR X9, [X16, X9, LSL #3] */
         if (!fk_f64_put(words, wn, 0xD341FD29U)) { return -1; }                                                   /* LSR X9, X9, #1 */
-        if (!fk_f64_put(words, wn, 0x17FFFFFCU)) { return -1; }                                                   /* B -4 */
+        if (!fk_f64_put(words, wn, 0xEB11013FU)) { return -1; }                                                   /* CMP X9, X17 */
+        fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
+        if (!fk_f64_put(words, wn, 0x54000008U)) { return -1; }                                                   /* B.HI overflow: past the top */
+        if (!fk_f64_put(words, wn, 0x17FFFFFAU)) { return -1; }                                                   /* B -6 */
         return 100 + rd;
     }
     if (p->kind == 32) {
