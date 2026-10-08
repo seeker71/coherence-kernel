@@ -1,3 +1,6 @@
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #if defined(_WIN32)
 /* fkwu Windows port shim (mingw-w64) — guarded by _WIN32 so the mac/linux path is byte-identical.
  * mingw's <io.h> declares read/write/mkdir with int / unsigned-int signatures that clash with the
@@ -24584,25 +24587,63 @@ static void fk_src_sweep_dead_temps(const char *fkb_path) {
     closedir(d);
 }
 #endif
-/* The .fkb's own pipeline identity. Before v5 the artifact recorded only its
- * INPUT -- source path, content hash, mtime -- so two different fkwu builds
- * writing from the same bytes produced artifacts indistinguishable to each
- * other, and either would load the other's as fresh. That is not theoretical:
- * a binary built before the unbalanced-form refusal compiles `(do (defn p ()
- * (add 40 2)) (p)` to 42 and seals a stamp-valid .fkb; the healed binary next
- * to it then PRINTS 42 and exits 0, because it never compiles the text at all.
- * The heal is defeated by the cache, silently, with a right-looking number --
- * the numb-green shape axiom-5 already names.
- * So the stamp now carries who wrote it as well as what it was written from.
- * __DATE__/__TIME__ keys the identity to the translation-unit build, which is
- * conservative in the safe direction: two byte-identical rebuilds refuse each
- * other's caches (a false REJECT, paid once per rebuild in recompile time),
- * and no build ever accepts a foreign one (the false ACCEPT, which was paid in
- * wrong answers). SHRINK NOTE: this is a checkout-witness repair in the C
- * seed. Its home is the native body's artifact layer, where the identity of a
- * compiled image belongs next to the image; it lives here only while the seed
- * still owns .fkb. */
-#define FK_FKB_BUILDER_ID ("fkwu-uni " __DATE__ " " __TIME__)
+/* Cache identity follows the executable bytes, captured before the process
+ * admits a unit or changes directory. Identical rebuilds reuse images; another
+ * executable cannot lend them its meaning. The native artifact layer takes this
+ * carrier home when it replaces the seed's image reader and writer. */
+static char fk_fkb_builder_id[64];
+#define FK_FKB_BUILDER_ID fk_fkb_builder_id
+static void fk_fkb_builder_admit(void) {
+    const char *path = fk_self_path;
+#if defined(__linux__)
+    path = "/proc/self/exe";
+#elif defined(__APPLE__)
+    /* The loaded header belongs to this owner even if its pathname is replaced. */
+    const struct mach_header *image = _dyld_get_image_header(0);
+    const struct load_command *command = (const struct load_command *)((const char *)image +
+        (image->magic == MH_MAGIC_64 ? sizeof(struct mach_header_64) : sizeof(struct mach_header)));
+    const unsigned char *uuid = 0; unsigned long long text_hash = 0;
+    unsigned int c;
+    for (c = 0; c < image->ncmds; c++) {
+        if (command->cmd == LC_UUID) { uuid = ((const struct uuid_command *)command)->uuid; }
+        if (command->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *segment = (const struct segment_command_64 *)command;
+            if (segment->segname[0] == '_' && segment->segname[1] == '_' &&
+                segment->segname[2] == 'T' && segment->segname[3] == 'E' &&
+                segment->segname[4] == 'X' && segment->segname[5] == 'T' && segment->segname[6] == 0) {
+                text_hash = fk_field_bytes_hash((const char *)(segment->vmaddr + _dyld_get_image_vmaddr_slide(0)), segment->filesize);
+            }
+        }
+        command = (const struct load_command *)((const char *)command + command->cmdsize);
+    }
+    if (!uuid || !text_hash) { fk_die("fkwu: loaded executable identity unavailable"); }
+    int at = sprintf(fk_fkb_builder_id, "fkwu-image-v1 ");
+    for (c = 0; c < 16; c++) { at += sprintf(fk_fkb_builder_id + at, "%02x", uuid[c]); }
+    sprintf(fk_fkb_builder_id + at, " %016llx", text_hash);
+    return;
+#elif defined(_WIN32)
+    extern unsigned int GetModuleFileNameA(void *, char *, unsigned int);
+    char image_path[FK_PATH_CAP];
+    unsigned int path_size = GetModuleFileNameA(0, image_path, sizeof(image_path));
+    if (!path_size || path_size >= sizeof(image_path)) { fk_die("fkwu: executable identity path unavailable"); }
+    path = image_path;
+#endif
+    int fd = open(path, O_RDONLY
+#if defined(_WIN32)
+        | 0x8000
+#endif
+    );
+    if (fd < 0) { fk_die("fkwu: executable identity cannot be read"); }
+    unsigned char bytes[16384]; unsigned long long hash = 14695981039346656037ULL, count = 0;
+    long long n;
+    while ((n = read(fd, bytes, sizeof(bytes))) > 0) {
+        long long i; for (i = 0; i < n; i++) { hash = (hash ^ bytes[i]) * 1099511628211ULL; }
+        count += n;
+    }
+    close(fd);
+    if (n < 0 || !count) { fk_die("fkwu: executable identity read incomplete"); }
+    sprintf(fk_fkb_builder_id, "fkwu-image-v1 %016llx/%llu", hash, count);
+}
 
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
@@ -28458,13 +28499,14 @@ static int fk_run_closure(const char *path, const char *out) {
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
-    fk_nodes_init();
     if (argc < 2) {
         return 1;
     }
     if (argv[0] && argv[0][0]) {
         fk_self_path = argv[0];
     }
+    fk_fkb_builder_admit();
+    fk_nodes_init();
 #if !defined(_WIN32)
     {
         /* the begin-again after lowering (fk_bml_bootstrap) leaves its round count in the environment; this process
