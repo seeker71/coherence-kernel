@@ -346,15 +346,32 @@ fields without serializing or parsing a JSON reply. Original role, writable
 scope, guarded edits, caller checks and review still apply. An unrelated or
 unresolved node cannot act.
 
-During ordinary coding decode, a complete `eval` returning an action or reply
-hands the actual final value directly to dispatch through the control event,
-without rendering, parsing or resolving its address. Refused controls clear
-that value; an unused constructed action and printed address cannot submit.
-The reply ends at that semantic boundary; the model does not copy its coordinate. A control closing in the
-terminal quantum is observed before the next choice. Data reads provide
-evidence and preserve the current role. Multiple action nodes in one submission
-are refused without executing them. Native BML escapes are preserved; the
-incremental scanner retains unfinished controls without a fixed token window.
+During coding decode, a complete `eval` returning a tool cell executes against
+the admitted coding owner before its observation enters KV. The native policy
+applies writable scope, guarded edits, caller checks and failure handling, saves
+completed effects, refreshes `code_context` and returns the actual result cell
+into the same decoding stream. Further tools can use that result immediately;
+an outside caller need not read output or construct a continuation request.
+The original caller allowance remains in force. Source and failures remain
+native cells, with text rendered only for the model's current attention. The
+result's coordinate and relevant fields enter KV; the full current context is
+bound internally. Role guidance is repeated only when the role changes.
+
+Tool results and rejection feedback use the admitted model's cached BMF cursor,
+including a control ending at the model's stop token. Encoding completes before
+KV mutation; an incomplete cursor returns nothing while the stream remains owned.
+An exact comparison on a retained 205-token tool result took 240 ms through the
+owned cursor, 2 ms on reuse and 20,902 ms through the reference encoder. This
+measures encoding alone; model decoding and prefill retain their own live timings.
+
+Construction stays pure: unused actions and printed addresses cannot submit.
+Data reads preserve the current role. A role reply yields to the owned phase
+controller; another tool after that pending reply cannot execute ahead of it.
+The controller owns subsequent guidance, repair, review and release. Refused
+observation admission retains the completed effects and their checkpoint.
+Unowned recipe evaluation still returns its action as a value. Native BML
+escapes are preserved; the incremental scanner retains unfinished controls
+without a fixed token window.
 Native payloads go straight to that executor; the coding decoder has no JSON
 unescaping or preliminary parse pass. Admission selects the task workspace
 before binding context, so the decoder reads those same cells.
