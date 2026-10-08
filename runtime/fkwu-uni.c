@@ -9187,28 +9187,10 @@ static void fk_smelt(void) {
     }
     k = 1;
     while (!fk_field_on && k <= fk_np) { fk_smark(fk_ncat[k]); fk_smark(fk_nkids[k]); fk_smark(fk_nval[k]); k = k + 1; }
-    if (fk_field_on) {
-        /* A field node or pair holds a LOCAL string when the field's string bank was full as it was shared
-         * (fk_field_share_string answers the local word then). Nothing else holds such a string, so it is marked
-         * here: every field node's words and every field pair's head and tail that name a local string. A word
-         * another kernel left names an unrelated slot of ours and only keeps it -- never frees a live one. Before
-         * this, a definition name minted after the bank filled lowered as "" (the melt freed it and zeroed its
-         * length), and a .bml unit read back with unresolved '' calls. */
-        long long fnp = fk_np;
-        k = 1;
-        while (k <= fnp && k < fk_node_cap) {
-            if (fk_is_str(fk_nval[k])) { fk_smark(fk_nval[k]); }
-            if (fk_is_str(fk_ncat[k])) { fk_smark(fk_ncat[k]); }
-            k = k + 1;
-        }
-        long long fpp = fk_field_pp();
-        long long j = 0;
-        while (j < fpp) {
-            if (fk_is_str(fk_fph[j])) { fk_smark(fk_fph[j]); }
-            if (fk_is_str(fk_fpt[j])) { fk_smark(fk_fpt[j]); }
-            j = j + 1;
-        }
-    }
+    /* With the field on, a node's or pair's string words are SHARED strings (fk_field_share_value answers a shared
+     * word for every local one, the bank growing by segments), and fk_smark takes no shared string into a local
+     * mark. A pass over the field's nodes and pairs would mark nothing and cost every melt the whole field --
+     * millions of cold cells, seconds a melt, minutes for a lowering that melts often. */
     fk_clo_smark_roots();
     k = 0;
     while (k < fk_node_count) {
@@ -19901,8 +19883,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 57) {
             return fk_field_fp() << 1;
         }
-        if (ks_k == 65) { return fk_field_on ? (fk_field_hdr[7] << 1) : 0; }
-        if (ks_k == 66) { return fk_field_sp() << 1; }
+        if (ks_k == 70) { return fk_field_on ? (fk_field_hdr[7] << 1) : 0; }   /* the shared string bytes claimed */
+        if (ks_k == 71) { return fk_field_sp() << 1; }                         /* the shared string slots claimed */
         if (ks_k == 58) {
             return (fk_field_on || fk_store_shared) ? 0 : (fk_np << 1);
         }
@@ -19936,6 +19918,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 66) { return (fk_clo_top - fk_clo_free_n) << 1; }
         if (ks_k == 67) { return fk_clo_reclaimed << 1; }
         if (ks_k == 68) { return fk_clo_capvals_top << 1; }
+        if (ks_k == 69) { return fk_melt_gen << 1; }   /* the melts this kernel has run */
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
