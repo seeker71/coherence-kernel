@@ -21,6 +21,14 @@ bounded; it cannot prove complete host liveness. A refusal prints the observed
 roster and exits nonzero. Recovery
 does not change the normal runtime's shared-memory configuration.
 
+Shared string bytes use expandable sparse segments in field version 4. String
+words, source attribution and foreign cell reads retain shared identity across
+growth and garbage collection. Older owners retain their own field;
+incompatible foreign mappings refuse admission. `kernel_stat(65)` observes
+claimed string bytes and `kernel_stat(66)` observes string slots. Node, pair and
+string metadata columns still have their current capacities. Resource refusal
+cannot publish a private string word into a shared node.
+
 Executing organs send signals when they encounter unease, uncertainty or a
 needed resource. `organ-care.bml` receives those signals at their execution
 boundaries, directs attention to each need, and calls an available native

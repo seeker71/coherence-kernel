@@ -479,6 +479,7 @@ static double *fk_ffv;
 static long long fk_field_pp(void);
 static long long fk_field_sp(void);
 static long long fk_field_fp(void);
+static char *fk_field_string_span(long long off, long long len);
 static unsigned long long fk_field_bytes_hash(const char *b, long long n);
 static long long fk_str_bytes_eq(long long a, long long b);
 static int fk_field_open(void);
@@ -497,7 +498,7 @@ static int fk_field_open(void);
 #define FK_HNEXT(p) ((FK_HT(p) & 1) ? (FK_HT(p) >> 1) : 0)
 #define FK_SO(si) ((si) >= FK_STR_BASE ? fk_fso[(si) - FK_STR_BASE] : fk_so[(si)])
 #define FK_SLEN(si) ((si) >= FK_STR_BASE ? fk_fsl[(si) - FK_STR_BASE] : fk_sl[(si)])
-#define FK_SBYTES(si) ((si) >= FK_STR_BASE ? fk_fsb + fk_fso[(si) - FK_STR_BASE] : fk_sb + fk_so[(si)])
+#define FK_SBYTES(si) ((si) >= FK_STR_BASE ? fk_field_string_span(fk_fso[(si) - FK_STR_BASE], fk_fsl[(si) - FK_STR_BASE]) : fk_sb + fk_so[(si)])
 #define FK_SOK(si) ((si) >= FK_STR_BASE ? ((si) - FK_STR_BASE < fk_field_sp()) : ((si) < fk_sp))
 #define FK_FV(fi) ((fi) >= FK_FLT_BASE ? fk_ffv[(fi) - FK_FLT_BASE] : fk_fv[(fi)])
 static int fk_store_shared;
@@ -14357,13 +14358,13 @@ static long long fk_walk(long long i, long long fp) {
 static int fk_gift_live(long long gh) {
     return gh >= 0 && gh < fk_gift_count && fk_gift_base[gh] != 0;
 }
-/* ---- the field store: /fg-field2-<letter>, host-wide, never unlinked by a kernel ----
+/* ---- the field store: versioned columns, host-wide, never unlinked by a kernel ----
  * header h (words after the 16-byte gift header): 0 magic 1 version 2 nodes 3 pairs 4 strings 5 string bytes 6 floats
  * columns: k kind c cat i kids v val n nid f sfile l sline o scol a sattr m hash-memo x intern hash;
  * P Q shared pairs; s O L X shared node-strings (bytes, offsets, lengths, hash); F Y shared floats (values, hash).
  * A kernel that cannot open the field keeps private tables and says so on its live page (word 22). */
 #define FK_FIELD_MAGIC 0x4649454C44LL
-#define FK_FIELD_VERSION 2
+#define FK_FIELD_VERSION 4
 #define FK_FIELD_NODES (1LL << 26)
 #define FK_FIELD_PAIRS (1LL << 27)
 #define FK_FIELD_STRB (1LL << 31)
@@ -14376,7 +14377,7 @@ static const char fk_field_letters[] = "hkcivnfloamxPQsOLXFY";
 static long long *fk_field_itab;
 static long long *fk_fstab;
 static long long *fk_fftab;
-static void fk_field_name(char letter, char *out) { const char *p = "/fg-field2-"; long long k = 0; while (p[k]) { out[k] = p[k]; k = k + 1; } out[k] = letter; out[k + 1] = 0; }
+static void fk_field_name(char letter, char *out) { sprintf(out, "/fg-field%d-%c", FK_FIELD_VERSION, letter); }
 static void *fk_field_take(char letter, long long bytes) {
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
     char nm[32];
@@ -14393,6 +14394,52 @@ static void *fk_field_take(char letter, long long bytes) {
 #else
     (void)letter; (void)bytes;
     return 0;
+#endif
+}
+/* Shared string bytes grow through sparse segments. Offsets and identities stay
+ * native words; old views remain valid until process release. Versioned admission
+ * keeps owners with the fixed mapping on their own field. Form's arena admission
+ * will own this carrier when it replaces the seed's field allocator. */
+static long long fk_field_string_cap, fk_field_string_mapped;
+static void fk_field_string_name(long long segment, char *out) {
+    if (!segment) { fk_field_name('s', out); }
+    else { sprintf(out, "/fg-field%d-s%llx", FK_FIELD_VERSION, (unsigned long long)segment); }
+}
+static char *fk_field_string_span(long long off, long long len) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    if (off < 0 || len < 0 || off > 9223372036854775807LL - len) { fk_die("fkwu: shared string extent overflow"); }
+    long long need = off + len;
+    long long segments = need / FK_FIELD_STRB + (need % FK_FIELD_STRB != 0);
+    if (segments <= fk_field_string_mapped) { return fk_fsb + off; }
+    long long cap = fk_field_string_cap ? fk_field_string_cap : FK_FIELD_STRB;
+    while (cap < need) {
+        if (cap > 9223372036854775807LL / 2) { cap = need; break; }
+        cap *= 2;
+    }
+    char *base = fk_fsb;
+    long long start = fk_field_string_mapped;
+    if (cap != fk_field_string_cap) {
+        base = mmap(0, (size_t)cap, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (base == MAP_FAILED) { fk_die("fkwu: cannot reserve shared string extent"); }
+        start = 0;
+    }
+    while (start < segments) {
+        char name[32]; struct stat st;
+        fk_field_string_name(start, name);
+        int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
+        if (fd < 0) { fk_die("fkwu: cannot open shared string segment"); }
+        int sized = fstat(fd, &st) == 0 &&
+            (st.st_size >= FK_FIELD_STRB || (st.st_size == 0 && ftruncate(fd, FK_FIELD_STRB) == 0));
+        void *part = sized ? mmap(base + start * FK_FIELD_STRB, FK_FIELD_STRB,
+            PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) : MAP_FAILED;
+        close(fd);
+        if (part == MAP_FAILED) { fk_die("fkwu: cannot map shared string segment"); }
+        start++;
+    }
+    fk_fsb = base; fk_field_string_cap = cap; fk_field_string_mapped = segments;
+    return base + off;
+#else
+    (void)len; return fk_fsb + off;
 #endif
 }
 static long long fk_field_pp(void) { return fk_field_on ? fk_field_hdr[2 + 3] : 0; }
@@ -14421,6 +14468,7 @@ static int fk_field_open(void) {
     fk_field_hdr = (volatile long long *)hdr;
     fk_nkind = k; fk_ncat = c; fk_nkids = i; fk_nval = v; fk_nid = n; fk_nsfile = f; fk_nsline = l; fk_nscol = o; fk_nsattr = a; fk_nhash_memo = m;
     fk_field_itab = x; fk_fph = P; fk_fpt = Q; fk_fsb = s; fk_fso = O; fk_fsl = L; fk_fstab = X; fk_ffv = F; fk_fftab = Y;
+    fk_field_string_cap = FK_FIELD_STRB; fk_field_string_mapped = 1;
     fk_np_p = &w[2];
     fk_field_on = 1;
     fk_live_publish(0); /* the page's store word changes here; the page has no tick, so the change is written where it happens */
@@ -14428,6 +14476,10 @@ static int fk_field_open(void) {
 }
 static void fk_field_unlink_all(void) {
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    if (fk_field_hdr) {
+        long long end = fk_field_hdr[7] / FK_FIELD_STRB + 1, j = 1;
+        while (j < end) { char nm[32]; fk_field_string_name(j++, nm); shm_unlink(nm); }
+    }
     long long k = 0;
     while (fk_field_letters[k]) { char nm[32]; fk_field_name(fk_field_letters[k], nm); shm_unlink(nm); k = k + 1; }
 #endif
@@ -14461,7 +14513,7 @@ static long long fk_field_share_string(long long sv) {
         long long cur = __atomic_load_n(&fk_fstab[slot], __ATOMIC_ACQUIRE);
         if (cur > 0) {
             long long j = cur - 1;
-            if (fk_fsl[j] == len) { long long q = 0; const char *pj = fk_fsb + fk_fso[j]; while (q < len && pj[q] == bytes[q]) { q = q + 1; } if (q == len) { return fk_strv(FK_STR_BASE + j); } }
+            if (fk_fsl[j] == len) { long long q = 0; const char *pj = fk_field_string_span(fk_fso[j], len); while (q < len && pj[q] == bytes[q]) { q = q + 1; } if (q == len) { return fk_strv(FK_STR_BASE + j); } }
             slot = (slot + 1) & mask; probes = probes + 1; continue;
         }
         if (cur == 0) {
@@ -14469,8 +14521,9 @@ static long long fk_field_share_string(long long sv) {
             if (__atomic_compare_exchange_n(&fk_fstab[slot], &z, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
                 long long off = fk_field_claim(5, len);
                 long long j = fk_field_claim(4, 1);
-                if (off + len > FK_FIELD_STRB || j >= FK_FIELD_STRS) { __atomic_store_n(&fk_fstab[slot], 0, __ATOMIC_RELEASE); return sv; }
-                long long q = 0; while (q < len) { fk_fsb[off + q] = bytes[q]; q = q + 1; }
+                if (j >= FK_FIELD_STRS) { __atomic_store_n(&fk_fstab[slot], 0, __ATOMIC_RELEASE); fk_die("fkwu: shared string metadata needs more storage"); }
+                char *target = fk_field_string_span(off, len);
+                long long q = 0; while (q < len) { target[q] = bytes[q]; q = q + 1; }
                 fk_fso[j] = off; fk_fsl[j] = len;
                 __atomic_store_n(&fk_fstab[slot], j + 1, __ATOMIC_RELEASE);
                 return fk_strv(FK_STR_BASE + j);
@@ -14479,7 +14532,8 @@ static long long fk_field_share_string(long long sv) {
         }
         fk_field_yield();
     }
-    return sv;
+    fk_die("fkwu: shared string index needs more storage");
+    return fk_nothing;
 }
 /* a private float box becomes a shared float: same bits, one index for every kernel */
 static long long fk_field_share_float(long long fv) {
@@ -14543,7 +14597,7 @@ static long long fk_field_node_matches(long long ix, long long kind, long long s
     if (fk_nkind[ix] != kind) { return 0; }
     if (kind == 1) {
         if (fk_nid_get(fk_nid[ix], 2) != sub) { return 0; }
-        if (sub == 2) { return fk_str_bytes_eq(fk_nval[ix], a); }
+        if (sub == 2) { return fk_stri(fk_nval[ix]) >= FK_STR_BASE && fk_str_bytes_eq(fk_nval[ix], a); }
         if (sub == 6 || sub == 7) { double x = fk_num(fk_nval[ix]), y = fk_num(a); return (x == y || (x != x && y != y)) ? 1 : 0; }
         return fk_nval[ix] == a;
     }
@@ -16095,10 +16149,8 @@ static long long fk_cell_value(long long s, long long raw) {
         if (si < 0) { return fk_nothing; }
         long long off = 0, len = 0;
         if (!fk_cell_col(m, 'O', si, 8, &off) || !fk_cell_col(m, 'L', si, 8, &len)) { return fk_nothing; }
-        int sb = fk_cell_letter('s');
-        if (m->base[sb] == 0) { fk_cell_col_open(m, sb); }
-        if (m->base[sb] == 0 || off < 0 || len < 0 || off + len > m->size[sb]) { return fk_nothing; }
-        return fk_sbuf((const char *)m->base[sb] + off, len);
+        if (off < 0 || len < 0 || off > 9223372036854775807LL - len) { return fk_nothing; }
+        return fk_field_on ? fk_strv(FK_STR_BASE + si) : fk_sbuf(fk_field_string_span(off, len), len);
     }
     if (kind == 4) {
         long long fi = ((fk_fbase - raw - 1) >> 1) - FK_FLT_BASE;
@@ -19707,6 +19759,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 57) {
             return fk_field_fp() << 1;
         }
+        if (ks_k == 65) { return fk_field_on ? (fk_field_hdr[7] << 1) : 0; }
+        if (ks_k == 66) { return fk_field_sp() << 1; }
         if (ks_k == 58) {
             return (fk_field_on || fk_store_shared) ? 0 : (fk_np << 1);
         }
@@ -19769,7 +19823,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_fblastidx = fr_ni;
         if (fr_ni >= 1 && fr_ni <= fk_np) {
             fk_fbaccepted = fk_fbaccepted + 1;
-            fk_nsfile[fr_ni] = fr_fv;
+            fk_nsfile[fr_ni] = fk_field_on ? fk_field_share_string(fr_fv) : fr_fv;
             fk_nsline[fr_ni] = fr_pk >> 16;
             fk_nscol[fr_ni] = fr_pk & 65535;
             fk_nsattr[fr_ni] = 1;

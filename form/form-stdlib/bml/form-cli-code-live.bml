@@ -147,6 +147,7 @@ section [form.bml] {
    let learned = if saved then fcam-learn(candidate) else 0;
    let final = if (saved && learned) then candidate else fcap-terminal(candidate, "continuity-write-refused;candidate-retained");
    let observed = fcac-observe(final, last, started);
+   let detached=fcac-stream-release();
    [final, released, fcms-generated-ids(last), fcms-injected-ids(last), fcms-observations(last)];
   }
   // A lane that already holds memory gives it back when the machine runs low (memory-governor.bml mg-low?: available
@@ -172,16 +173,17 @@ section [form.bml] {
    let saved = fcam-save(state);
    let observed = fcac-observe(state, session, started);
    let lane = fcap-model-lane(state);
+   let owned=fcac-stream-bind(lane,state,checker,turns);
    if (!saved) then fcac-finish(session, fcap-terminal(state, "checkpoint-write-refused;candidate-retained"), started) else if fcap-done(state) then [session, state] else if (!fcms-live?(session)) then fcac-finish(session,fcap-terminal(state,fcms-reason(session)),started) else if (fcap-turns(state) >= turns) then fcac-finish(session, fcap-terminal(state, ("caller-turn-budget-reached" + fcac-retained(state))), started) else if (fcms-pos(session) >= (fcms-maxpos(session) - 1)) then fcac-capacity-stop(session,state,("context-capacity" + fcac-retained(state)),started) else if (!fcac-current-reply-fits(session,state,turns)) then fcac-capacity-stop(session,state,"coding-reply-context-capacity",started) else if fcac-reasoning?(state) then fcac-reasoned(session,fcsw-in-context(session,state),checker,turns,fcap-reasoning(state)[0],fcap-reasoning(state)[1],started) else fcsw-reply(session, state, checker, turns, started, fcacs-stops(session, qsx-load(fcms-path(session))), fcac-decode, fcac-generated);
   }
   def fcac-finish(session, state, started) {
    let observed = fcac-observe(state, session, started);
    [session, state];
   }
-  def fcac-reasoned-answer(result) = if (!frbg-complete(result)) then [0,"",("reasoning-reserve-" + (frbg-reason(result) + ";candidate-retained"))] else if (!frbg-stopped(frbg-session(result)) && nil?(fcac-control-submissions())) then [0,"","reasoning-reserve-stream-not-stopped;candidate-retained"] else [1,fat-trim(frbg-answer(result)),""];
+  def fcac-reasoned-answer(result) = if (!frbg-complete(result)) then [0,"",("reasoning-reserve-" + (frbg-reason(result) + ";candidate-retained"))] else if (!frbg-stopped(frbg-session(result)) && nil?(fcac-control-submissions()) && fcac-stream-steps()==0) then [0,"","reasoning-reserve-stream-not-stopped;candidate-retained"] else [1,fat-trim(frbg-answer(result)),""];
    def fcac-reasoned-submission(first) {
     let session=fcms-generation-session(first); let calls=fcac-control-submissions();
-    !frbg-valid-session(session) || len(calls)!=1 || !nothing?(fcac-control-care()) || nothing?(fcap-node-object(calls[0])) ? nothing() : frbg-result(session,first,frbg-empty(session),"",ftw-cat-name(node_category(calls[0]))=="form-code-action" ? "native-tool-stage" : "native-reply-stage","",1,"native-cell-submitted");
+    !frbg-valid-session(session) || !nothing?(fcac-control-care()) ? nothing() : fcac-stream-steps()>0 && nil?(calls) ? frbg-result(session,first,frbg-empty(session),"","native-tool-stage","",1,"native-tool-executed") : len(calls)!=1 || nothing?(fcap-node-object(calls[0])) ? nothing() : frbg-result(session,first,frbg-empty(session),"",ftw-cat-name(node_category(calls[0]))=="form-code-action" ? "native-tool-stage" : "native-reply-stage","",1,"native-cell-submitted");
   }
   // Initial-only and continuing reasoning share generation, privacy, action
   // admission and accounting. Each stage retains the caller's token ceiling.
@@ -203,11 +205,13 @@ section [form.bml] {
    let noticeEvidence = if (len(frbg-notice(bounded)) > 0) then fcac-retain-reply(frbg-notice(bounded)) else "";
    let selected = fcac-reasoned-answer(bounded);
    print_str(("form-code-reasoning-reserve " + json-emit(json-node-object([fcap-shape-n("reply",(fcap-turns(state) + 1)),fcap-shape-n("requested_initial_tokens",initial),fcap-shape-n("requested_answer_tokens",answer),fcap-shape-n("effective_initial_tokens",initialLimit),fcap-shape-n("effective_answer_tokens",answerLimit),fcap-shape-n("initial_generated_ids",len(fcms-generation-ids(first))),fcap-shape-n("final_generated_ids",len(fcms-generation-ids(final))),fcap-shape-n("observation_prefill_ids",fcms-injected-ids(next)),fcap-shape-s("answer_origin",frbg-origin(bounded)),fcap-shape-n("completion_observed",selected[0]),fcap-shape-s("generation_reason",frbg-reason(bounded)),fcap-shape-s("private_initial_evidence",firstEvidence),fcap-shape-s("private_final_evidence",finalEvidence),fcap-shape-s("private_controller_evidence",noticeEvidence)]))));
-   if selected[0] then fcac-replied(next,state,selected[1],checker,turns,started) else fcac-recover-incomplete(next,state,selected[2],finalEvidence,(len(fcms-generation-ids(first)) + len(fcms-generation-ids(final))),((String) frbg-reason(bounded) == "final-generation-incomplete"),checker,turns,started);
+   let current=fcac-stream-state(state);
+   if selected[0] then if fcac-stream-steps()>0 && nil?(fcac-control-submissions()) then fcac-advance(next,current,checker,turns,started) else fcac-replied(next,current,selected[1],checker,turns,started) else fcac-recover-incomplete(next,current,selected[2],finalEvidence,(len(fcms-generation-ids(first)) + len(fcms-generation-ids(final))),((String) frbg-reason(bounded) == "final-generation-incomplete"),checker,turns,started);
   }
   def fcac-generated(generation, state, checker, turns, started) {
    let session = fcms-generation-session(generation);
-   if !fcms-live?(session) then fcac-finish(session,fcap-terminal(state,fcms-reason(session)),started) else if !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) then fcac-replied(session,state,fat-trim(fcms-generation-text(generation)),checker,turns,started) else if ((!fcms-stopped?(session)) || (fcms-pending(session) < 0)) then fcac-incomplete(generation,state,checker,turns,started) else fcac-replied(session,state,fat-trim(fcms-generation-text(generation)),checker,turns,started);
+   let current=fcac-stream-state(state);
+   if !fcms-live?(session) then fcac-finish(session,fcap-terminal(current,fcms-reason(session)),started) else if !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) then fcac-replied(session,current,fat-trim(fcms-generation-text(generation)),checker,turns,started) else if fcac-stream-ended() then fcac-loop(session,current,checker,turns,started) else if ((!fcms-stopped?(session)) || (fcms-pending(session) < 0)) then fcac-incomplete(generation,current,checker,turns,started) else if fcac-stream-steps()>0 then fcac-advance(session,current,checker,turns,started) else fcac-replied(session,current,fat-trim(fcms-generation-text(generation)),checker,turns,started);
   }
   def fcac-incomplete(generation,state,checker,turns,started) {
    let session = fcms-generation-session(generation);
@@ -243,7 +247,7 @@ section [form.bml] {
     let addressed = len(submitted)==1 ? ftw-coord(submitted[0]) : raw;
     let observed = record_get(ftg-lane-session("code"),"coding-observed") ?? 0;
     if fat-starts(fcap-evidence(state),fcap-incomplete-prefix()) then oh-voice(fcac-reply-reading(state,1,json-node-object([oh-s("private_reply_evidence",evidence),oh-n("reply_bytes",len(raw)),oh-s("scope","complete native submission and task quality are checked separately")]))) else 0;
-    let stepped = len(submitted)>1 ? fcap-revise(state,"Return one native action or reply cell per submission; no actions from this reply were executed.") : len(submitted)==1 ? fcsw-node-step(state,submitted[0],checker) : !nothing?(fcac-control-care()) ? fcac-control-cared(state,evidence) : observed>0 ? fcap-note-at(state,fcap-stage(state),"Native control observations received. Continue the current task from that evidence. " + fcap-work-instruction(state)) : fcap-node-address?(raw) ? fcsw-step(state,raw,checker) : fcap-revise(state,"No native action or reply cell was submitted. Use a complete Form eval returning fcap-native-tool or fcap-native-reply, or an observed action/reply coordinate. No tool ran from this reply; original documents and checks remain unchanged.");
+    let stepped = len(submitted)>1 ? fcap-revise(state,"Return one role reply cell per submission; no role transition was executed. Completed native tool effects remain retained.") : len(submitted)==1 ? fcsw-node-step(state,submitted[0],checker) : !nothing?(fcac-control-care()) ? fcac-control-cared(state,evidence) : observed>0 ? fcap-note-at(state,fcap-stage(state),"Native control observations received. Continue the current task from that evidence. " + fcap-work-instruction(state)) : fcap-node-address?(raw) ? fcsw-step(state,raw,checker) : fcap-revise(state,"No native action or reply cell was submitted. Use a complete Form eval returning fcap-native-tool or fcap-native-reply, or an observed action/reply coordinate. No tool ran from this reply; original documents and checks remain unchanged.");
     let next = fcap-native-submission-admitted(stepped,addressed);
     let shape = fcap-reply-shape(state,addressed,next);
    print_str(("form-code-reply " + json-emit(json-node-object(append(json-object-pairs(shape),[json-node-pair("reply_evidence",if ((String) evidence == "") then json-node-null() else json-node-string(evidence))])))));
@@ -350,12 +354,48 @@ section [form.bml] {
    oh-voice(oh-applied(reading,"changed-native-choice",json-node-object([oh-n("actions_executed",0),oh-n("context_replaced",0),oh-s("stage",fcap-stage(next))])));
    next;
   }
+  // One admitted coding owner consumes tool cells at the decoder boundary.
+  // Construction remains pure; only the control's actual returned cell acts.
+  def fcac-stream-bind(lane,state,checker,turns) {
+   record_set(lane,"coding-state",state); record_set(lane,"coding-checker",checker); record_set(lane,"coding-turns",turns);
+   record_set(lane,"control-result",observed=>fcac-stream-returned(lane,observed));
+   lane;
+  }
+  def fcac-stream-state(original) = ftw-get(ftg-lane-session("code"),"coding-state") ?? original;
+  def fcac-stream-steps() = ftw-get(ftg-lane-session("code"),"coding-steps") ?? 0;
+  def fcac-stream-ended() {
+   let lane=ftg-lane-session("code"); let state=ftw-get(lane,"coding-state");
+   !nothing?(state) && (fcap-done(state) || fcap-turns(state)>=(record_get(lane,"coding-turns") ?? 0));
+  }
+  def fcac-stream-release() {
+   let lane=ftg-lane-session("code");
+   ["control-result","coding-state","coding-checker","coding-turns"] |> map(key=>record_set(lane,key,nothing()));
+   record_set(lane,"coding-steps",0); 0;
+  }
+  def fcac-stream-returned(lane,observed) {
+   let node=observed[2]; let obj=value_kind(node)=="node_id" ? fcap-node-object(node) : nothing();
+   if nothing?(obj) then observed else if ftw-cat-name(node_category(node))!="form-code-action" then { record_set(lane,"coding-role-pending",1); observed; } else {
+    let state=record_get(lane,"coding-state"); let turns=record_get(lane,"coding-turns");
+    if record_get(lane,"coding-role-pending")==1 then [ftv-nothing("role-reply-pending;tool-not-executed"),observed[1],nothing()] else {
+     let moved=fcap-done(state) ? state : fcap-turns(state)>=turns ? fcap-terminal(state,"caller-turn-budget-reached"+fcac-retained(state)) : fcap-native-submission-admitted(fcsw-node-step(state,node,record_get(lane,"coding-checker")),ftw-coord(node));
+     record_set(lane,"coding-state",moved);
+     let saved=try fcam-save(moved) catch 0; let next=saved ? moved : fcap-terminal(moved,"checkpoint-write-refused;candidate-retained");
+     record_set(lane,"coding-state",next); record_set(lane,"coding-steps",fcac-stream-steps()+1);
+     let context=fcap-model-bind("code_context",json-node-object(append(json-object-pairs(fcap-observation-node(next)),fcac-budget-pairs(next,turns))));
+     let value=ftv-hold(lane,fcap-note-cell(next));
+     let packet=fcap-model-visible(value)+"\ncode_context = "+ftw-coord(context)+"\nrole: "+fcap-stage(next)+(fcap-stage(next)==fcap-stage(state) ? "" : "\n"+fcap-work-instruction(next));
+     fb_record(value,"coding-tool-result",fcap-calls(next));
+     [ftv-defang(packet),observed[1],value];
+    };
+   };
+  }
    def fcac-control-begin() {
     let lane=ftg-lane-session("code");
     record_set(lane,"coding-submissions",[]);
    record_set(lane,"coding-observed",0);
    record_set(lane,"coding-reads",[]);
    record_set(lane,"coding-care",nothing());
+   record_set(lane,"coding-steps",0); record_set(lane,"coding-role-pending",0);
     0;
    }
    // Carry the actual returned node from the executing control. The model does
@@ -385,7 +425,7 @@ section [form.bml] {
    0;
   }
    def fcac-decode(session, state, started, stops, ids) {
-    if nil?(ids) then fcac-control-begin() else 0;
+    if nil?(ids) then { fcac-control-begin(); let held=ftw-get(ftg-lane-session("code"),"coding-state"); if !nothing?(held) then record_set(ftg-lane-session("code"),"coding-state",fcap-with-reply-token-limit(state,fcap-reply-token-limit(held))) else 0; } else 0;
     fcac-decoded(fcacs-quantum(session, stops, fcac-decode-width(state,session,len(ids))), state, started, stops, ids);
    }
   // A Form control the reply closed in this quantum is answered in the same stream before the
@@ -405,7 +445,7 @@ section [form.bml] {
     let limit=fcap-reply-token-limit(state);
     let answerable=(limit<=0 || len(ids)<=limit) && fcms-pos(session)<fcms-maxpos(session)-1;
     let next = !nil?(fresh) && answerable ? fcac-control-answer(session, stops, fresh) : room && !fcms-stopped?(session) ? fcacs-next(session, stops) : session;
-    if (!room || !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) || fcms-stopped?(next) || !fcms-live?(next)) then fcms-generation(fcmo-text(session,ids), ids, next) else fcac-decode(next, state, started, stops, ids);
+    if (!room || fcac-stream-ended() || !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) || fcms-stopped?(next) || !fcms-live?(next)) then fcms-generation(fcmo-text(session,ids), ids, next) else fcac-decode(next, fcac-stream-state(state), started, stops, ids);
   }
  }
  0;
