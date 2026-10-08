@@ -10497,7 +10497,10 @@ static void fk_proc_file(long long pid, const char *leaf, char *out) {
     out[o] = 0;
 }
 #endif
-/* host_process pid: what a process runs, where, and since when -- (pid ppid exe cwd argv start-ms withheld), argv a
+/* host_process pid: what a process runs, where, and since when -- (pid ppid exe cwd argv start-ms withheld state), state
+ * its run state as the host's process table says it: 1 running or sleeping, 2 stopped (SIGSTOP, a job-control stop), 3 a
+ * zombie, 0 when the host did not say. A stopped process exists and does nothing: the question "is the elder still
+ * working" is this field, where the pid answering host_alive is not. argv a
  * list of strings; -1 when no process has that pid. A field the host will not tell (the cwd or argv of a process
  * this user may not read, pid 1 among them) is "" or an empty list, never guessed, and withheld says which fields the
  * host kept from this kernel -- 1 exe, 2 cwd, 4 argv -- so a withheld field stays apart from an empty one: a binary removed
@@ -10515,6 +10518,7 @@ static long long fk_host_process(long long pid) {
     long long ppid = 0;
     long long start = 0;
     long long withheld = 0;
+    long long state = 0; /* 0 the host did not say, 1 running or sleeping, 2 stopped (SIGSTOP), 3 a zombie */
     long long exe = fk_sbuf("", 0);
     long long cwd = fk_sbuf("", 0);
     long long argv = 1;
@@ -10531,6 +10535,10 @@ static long long fk_host_process(long long pid) {
     if (sysctl(mk, 4, kb, &kl, 0, 0) == 0 && kl >= 564) {
         ppid = (long long)(*(int *)(kb + 560));
         start = *(long long *)(kb + 0) * 1000 + (long long)(*(int *)(kb + 8)) / 1000;
+        /* the run state is p_stat, a char at byte 36 of the same row (after the 16-byte start, two pointers and p_flag):
+         * SIDL 1, SRUN 2, SSLEEP 3, SSTOP 4, SZOMB 5 */
+        int ps = (int)kb[36];
+        state = ps == 4 ? 2 : (ps == 5 ? 3 : ((ps >= 1 && ps <= 3) ? 1 : 0));
     }
     static char pth[4096];
     errno = 0;
@@ -10586,6 +10594,7 @@ static long long fk_host_process(long long pid) {
         long long k = got - 1;
         while (k > 0 && sb[k] != ')') { k = k - 1; }
         long long o = k + 4;
+        if (k > 0 && k + 2 < got) { char sc = sb[k + 2]; state = (sc == 'T' || sc == 't') ? 2 : (sc == 'Z' ? 3 : 1); }
         while (k > 0 && o < got && sb[o] >= '0' && sb[o] <= '9') { ppid = ppid * 10 + (sb[o] - '0'); o = o + 1; }
         /* the start: field 22 (starttime, clock ticks after boot), the twentieth word after the name's ')', put on
          * the wall clock a live page's opening is read on: now, less the time since boot on the clock starttime
@@ -10645,7 +10654,7 @@ static long long fk_host_process(long long pid) {
 #else
     (void)starts; (void)lens; (void)nw;
 #endif
-    return fk_cons_val(pid << 1, fk_cons_val(ppid << 1, fk_cons_val(exe, fk_cons_val(cwd, fk_cons_val(argv, fk_cons_val(start << 1, fk_cons_val(withheld << 1, 1)))))));
+    return fk_cons_val(pid << 1, fk_cons_val(ppid << 1, fk_cons_val(exe, fk_cons_val(cwd, fk_cons_val(argv, fk_cons_val(start << 1, fk_cons_val(withheld << 1, fk_cons_val(state << 1, 1))))))));
 }
 static long long fk_roster_adopt(long long pid);
 static long long fk_roster_forget(long long pid);
