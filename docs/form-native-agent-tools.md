@@ -135,11 +135,13 @@ printf '%s' '{"command":"defs fat-wire-call"}' > $SP/ask.$n.json
 until [ -s $SP/ans.$n.json ]; do zselect -t 2; done; cat $SP/ans.$n.json; rm -f $SP/ans.$n.json
 ```
 
-The service looks every 20 ms while asks are coming and every 100 ms after ten quiet seconds. Fallbacks, in order: (1) the service stands (`$SP/status.json`
-exists and is rewritten every 2 s): the index answers, in about twenty milliseconds; (2) no answer in about three seconds, or no `status.json`: the cold
-door, `printf '%s' "$json" | ./fkwu observe/form-find-ask.bml`, which asks the service itself if one beats and otherwise builds an index of its own, answers, and
-ends (seconds, once per call: it is the cost the redirect avoids). Neither falls back to a host `grep`, `find` or `ls`; a polled directory is used, not
-a fifo bell, because a plain redirect into a fifo with no reader blocks the agent's shell.
+The service rests on `host_watch` (kqueue on Darwin, inotify on Linux) over the spool and the memory notes: an ask wakes it, a note written, added
+or removed wakes it and the notes' index is rewritten, and nothing runs on a clock (measured: 0.00 s of CPU over ten idle seconds; a note added, edited in
+place or removed is in the index within a second). It writes `$SP/service.pid` once. Fallbacks, in order: (1) the pid names a living process: the index
+answers, in tens of milliseconds; (2) no living pid, or no answer in about three seconds: the cold door, `printf '%s' "$json" | ./fkwu
+observe/form-find-ask.bml`, which asks the living service through the same event-driven wait (`fpa-one`) and otherwise builds an index of its own,
+answers, and ends (seconds, once per call: it is the cost the redirect avoids). Neither falls back to a host `grep`, `find` or `ls`; a spool directory
+is used, not a fifo bell, because a plain redirect into a fifo with no reader blocks the agent's shell.
 
 ### form-path — a path query over Form nodes (XPath-shaped, resolving to node ids)
 
@@ -149,7 +151,7 @@ a fifo bell, because a plain redirect into a fifo with no reader blocks the agen
 what a lookup needs). A query is one expression and an answer is a set of **hits**; no stage re-serialises, text is made only at the edge. The `path`
 verb is taught to form-find's index (`fnd-ext-add`), so the service answers it from the same spool: `path [--ids|--text|--rows|--count] EXPR`, the
 expression in one argument (single-quoted in the shell, the wire refuses an unquoted `|`) or in the request's `"input"`.
-The one-shot door is `printf '%s' '--rows //def[@name="fnd-serve"]' | ./fkwu observe/form-path-ask.bml` (the service when one beats, else an index of its own).
+The one-shot door is `printf '%s' '--rows //def[@name="fnd-serve"]' | ./fkwu observe/form-path-ask.bml` (the service when it is alive, else an index of its own).
 
 | syntax | meaning |
 | --- | --- |

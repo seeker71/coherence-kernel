@@ -126,8 +126,8 @@ adapting, and observe the resulting behavior before claiming the limit healed.
 or `git grep` through a wrapper: `find PATTERN [PATH...]`, `defs NAME`, `callers NAME`, `bands NAME`, `imports UNIT`, `rows FILE FIELD=VALUE`, and the wire's
 `read`, `head`, `wc` over the indexed files. The normal ask costs the client no process, a plain shell redirect into the spool, in zsh
 (`SP=/tmp/form-find/$UID; n=$$.$RANDOM; zmodload zsh/zselect`, then `printf '%s' '{"command":"defs fat-wire-call"}' > $SP/ask.$n.json`,
-`until [ -s $SP/ans.$n.json ]; do zselect -t 2; done; cat $SP/ans.$n.json; rm -f $SP/ans.$n.json`). Fallbacks in order: the service stands (`$SP/status.json`)
-and the index answers in tens of milliseconds; no answer in about three seconds, then the cold door once,
+`until [ -s $SP/ans.$n.json ]; do zselect -t 2; done; cat $SP/ans.$n.json; rm -f $SP/ans.$n.json`). Fallbacks in order: the service is alive (`$SP/service.pid`
+names a living process; it rests on file events, never a clock) and the index answers in tens of milliseconds; no answer in about three seconds, then the cold door once,
 `printf '%s' "$json" | ./fkwu observe/form-find-ask.bml` (it asks the service, else builds an index of its own, seconds). The operator starts the service
 once (`docs/launchd/earth.hati.form-find.plist`); the body never does. Commands, limits and numbers: `docs/form-native-agent-tools.md`, "form-find".
 Structure is asked of the same service with `path`: `{"command":"path --rows","input":"//def[calls(\"host_spawn_at\")]"}`, an XPath-shaped query (`/file[@path~"voice-"]//def[@name="f"]/call`,
