@@ -869,7 +869,7 @@ sleeping, 2 stopped, 3 a zombie, 0 not said (macOS `p_stat` of the process table
 process exists, answers `host_alive`, and does nothing; the question a side process asks about another is whether it WORKS, and that is this field.
 `role-singleton.bml` is one live process of a role by the process table (band `role-singleton-band` 255): a door (the file an fkwu runs, exactly
 `./fkwu <door>`) has one working process, the elder (earlier start, then the lower pid) and a younger yields at its next check; a stopped or dead elder is
-no role. The glass's three frame producers (`form-glass-sensors-live.fk`, `-machine-live.fk`, `-organs-live.fk`) yield to an elder at the cadence they
+no role. The glass's three frame producers (`form-glass-sensors-live.fk`, `form-glass-machine-live.fk`, `form-glass-organs-live.fk`) yield to an elder at the cadence they
 already check their carrier (every 2 s): six glass stacks had run at once, eighteen producers (160 percent of a core, 5 GB) publishing the same shared-memory
 frames, and six readers of the one accelerator gauge that is consumed by its reading made it flip between 0 and 44 with no GPU work.
 `observe/process-census-run.bml` names the doors that run, how many of each work and how many stand stopped, and marks a door with more than one DUPLICATE.
