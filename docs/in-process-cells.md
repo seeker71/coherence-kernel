@@ -315,7 +315,8 @@ band that begins synthetic workers on purpose, to see the escalation to SIGKILL 
 
 **A second service, for lookup: form-find.** `observe/form-find-run.fk` (`docs/launchd/earth.hati.form-find.plist`, label `earth.hati.form-find`) holds the source tree
 indexed in memory and answers the agent wire through a spool directory (`/tmp/form-find/<uid>`: a client's plain redirect writes `ask.<n>.json`, the service writes
-`ans.<n>.json`), so an agent's lookup begins no process; its progress is the `status.json` beat. The body begins nothing (`form/form-stdlib/bml/form-find.bml` has no spawn
+`ans.<n>.json`), so an agent's lookup begins no process. It rests on `host_watch` (leaf-door mode 52: kqueue or inotify) until an ask or a memory note changes, and
+is alive when `service.pid` names a living process: nothing in it runs on a clock. The body begins nothing (`form/form-stdlib/bml/form-find.bml` has no spawn
 word, proven by `form/form-stdlib/tests/form-find-band.fk`); the operator runs `launchctl bootstrap` once. Commands, fallbacks and numbers: `docs/form-native-agent-tools.md`, "form-find".
 
 **The same pattern, the other organs (2026-10-04): what each would change, and why they are not done.**

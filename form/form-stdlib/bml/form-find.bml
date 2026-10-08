@@ -30,9 +30,9 @@
 //
 // THE TRANSPORT. A spool directory (FORM_FIND_SPOOL, default /tmp/form-find/<UID or USER>): the client writes ask.<n>.json with a plain
 // shell redirect, the service answers ans.<n>.json (written as a .part and renamed, so a reader never sees half an answer) and removes
-// the ask. The service looks every 20 ms for 10 s after the last ask and every 100 ms after that, and writes status.json as its beat.
-// A fifo bell was the other option the body proves (spool-bell-transport.fk); it is not used because a plain redirect into a fifo with
-// no reader BLOCKS the agent's shell, and a polled directory never does.
+// the ask. The service rests on host_watch (kqueue or inotify) over the spool and the notes, so an ask wakes it and nothing runs on a clock;
+// it writes service.pid once, and a client asks host_alive of that pid when it asks. A fifo bell was the other option the body proves
+// (spool-bell-transport.fk); it is not used because a plain redirect into a fifo with no reader BLOCKS the agent's shell, and a file never does.
 //
 // fnd-serve(s, request) answers one request in process: it is what the service calls, what the band calls, and what the cold door
 // (observe/form-find-ask.bml, service absent) calls after opening an index of its own.
@@ -678,7 +678,7 @@ section [form.bml] {
    let written = write_file_text(fnd-mem-dir() ++ "/MEMORY.md", text);
    [0, len(text).str() ++ " bytes, " ++ len(es).str() ++ " notes\n", ""];
   }
-  // self-indexing: a service beat or any query looks at the notes with one stat each, and rewrites the index only when a note is newer than it,
+  // self-indexing: a note's change wakes the service, and any query looks too; each looks at the notes with one stat each, and rewrites the index only when a note is newer than it,
   // a note is gone or added (the links no longer count the notes), or the index is absent; nobody has to remember to regenerate it
   def fnd-mem-mtime(name) = (host_file_identity(fnd-mem-dir() ++ "/" ++ name) ?? [0, 0])[1];
   def fnd-mem-newest-mtime(names) = foldl((acc, n) => fnd-mem-mtime(n) > acc ? fnd-mem-mtime(n) : acc, 0, names);
@@ -779,26 +779,49 @@ section [form.bml] {
    let z3 = host_path_remove(path);
    1;
   }
-  def fnd-status-json(s) = json-emit(json-node-object([json-node-pair("service", json-node-string("form-find")), json-node-pair("pid", json-node-int(host_pid())), json-node-pair("beat_ms", json-node-int(now_unix_ms())), json-node-pair("status", json-node-string(fnd-status-text(s)))]));
-  def fnd-beat(s, dir) = write_file_text(dir ++ "/status.json", fnd-status-json(s));
-  // the loop: look, answer what is there, rest. busy (an ask within 10 s) rests 20 ms, idle 100 ms. A `stop` file ends it (launchd then starts the next).
-  def fnd-loop(s, dir, busy_at, beat_at) {
+  // the service is alive when its pid file names a living process; a client asks that when it asks, nothing is written on a clock
+  def fnd-pid-file(dir) = dir ++ "/service.pid";
+  def fnd-mark(dir) = write_file_text(fnd-pid-file(dir), host_pid().str() ++ "\n");
+  def fnd-alive?(dir) {
+   let text = trim(read_file(fnd-pid-file(dir)) ?? "");
+   fat-natural(text) && str_to_int(text) > 0 && (Comparable) host_alive(str_to_int(text)) == 1;
+  }
+  // the client: an ask written into the spool, then rest on the spool until the answer is renamed in (an event) or the deadline passes
+  def fnd-deadline() = fat-natural(host_getenv("FORM_FIND_DEADLINE_MS") ?? "") ? str_to_int(host_getenv("FORM_FIND_DEADLINE_MS") ?? "") : 3000;
+  def fnd-wait(dir, path, until) {
+   let text = read_file(path);
+   (!nothing?(text) && len(text) > 0) ? text : host_monotonic_ms() >= until ? nothing() : fnd-rest(dir, path, until);
+  }
+  def fnd-rest(dir, path, until) {
+   let z = host_watch([dir], until - host_monotonic_ms() < 1 ? 1 : until - host_monotonic_ms());
+   fnd-wait(dir, path, until);
+  }
+  def fnd-question(dir, line) {
+   let name = host_pid().str() ++ "-" ++ host_monotonic_ms().str();
+   let ans = dir ++ "/ans." ++ name ++ ".json";
+   let z = write_file_text(dir ++ "/ask." ++ name ++ ".json", line);
+   let got = fnd-wait(dir, ans, host_monotonic_ms() + fnd-deadline());
+   let z2 = host_path_remove(ans);
+   nothing?(got) ? fat-wire-refusal("form-find-service-silent: no answer in " ++ fnd-deadline().str() ++ " ms; the service is alive but did not answer") : got;
+  }
+  def fnd-pending?(dir) = (String) value_kind(fs_list(dir)) == "list" && any?(n => fnd-ask?(n), fs_list(dir));
+  // what wakes the service: the spool (an ask arrives), the notes' directory (a note added or gone) and each note (a note written in place)
+  def fnd-wakers(dir) = append([dir, fnd-mem-dir()], map(n => fnd-mem-dir() ++ "/" ++ n, fnd-mem-names()));
+  // the loop rests on host_watch until something changes, then answers what is there and heals the index of the notes; it looks at nothing
+  // on a clock. An ask still being written is waited for by its own completion (a short wait, only while one is pending). A `stop` file ends it.
+  def fnd-loop(s, dir) {
    let served = fnd-poll(s, dir);
-   let now = host_monotonic_ms();
-   let busy = served > 0 ? now : busy_at;
-   let due = now - beat_at > 2000;
-   let z1 = due ? fnd-beat(s, dir) : 0;
-   let z3 = due ? fnd-mem-sync() : "";
+   let healed = fnd-mem-sync();
    let stop = (Comparable) host_path_exists(dir ++ "/stop") == 1;
-   let z2 = stop ? host_path_remove(dir ++ "/stop") : host_sleep_ms(now - busy < 10000 ? 20 : 100);
-   stop ? 0 : fnd-loop(s, dir, busy, due ? now : beat_at);
+   let z = stop ? host_path_remove(dir ++ "/stop") : host_watch(fnd-wakers(dir), fnd-pending?(dir) ? 50 : 0);
+   stop ? 0 : fnd-loop(s, dir);
   }
   def fnd-run() {
    let dir = fnd-spool();
    let z1 = fnd-mkdirs(dir);
    let s = fnd-open("");
-   let z2 = fnd-beat(s, dir);
-   fnd-loop(s, dir, host_monotonic_ms(), host_monotonic_ms());
+   let z2 = fnd-mark(dir);
+   fnd-loop(s, dir);
   }
  }
  0;
