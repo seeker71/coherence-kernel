@@ -9187,6 +9187,28 @@ static void fk_smelt(void) {
     }
     k = 1;
     while (!fk_field_on && k <= fk_np) { fk_smark(fk_ncat[k]); fk_smark(fk_nkids[k]); fk_smark(fk_nval[k]); k = k + 1; }
+    if (fk_field_on) {
+        /* A field node or pair holds a LOCAL string when the field's string bank was full as it was shared
+         * (fk_field_share_string answers the local word then). Nothing else holds such a string, so it is marked
+         * here: every field node's words and every field pair's head and tail that name a local string. A word
+         * another kernel left names an unrelated slot of ours and only keeps it -- never frees a live one. Before
+         * this, a definition name minted after the bank filled lowered as "" (the melt freed it and zeroed its
+         * length), and a .bml unit read back with unresolved '' calls. */
+        long long fnp = fk_np;
+        k = 1;
+        while (k <= fnp && k < fk_node_cap) {
+            if (fk_is_str(fk_nval[k])) { fk_smark(fk_nval[k]); }
+            if (fk_is_str(fk_ncat[k])) { fk_smark(fk_ncat[k]); }
+            k = k + 1;
+        }
+        long long fpp = fk_field_pp();
+        long long j = 0;
+        while (j < fpp) {
+            if (fk_is_str(fk_fph[j])) { fk_smark(fk_fph[j]); }
+            if (fk_is_str(fk_fpt[j])) { fk_smark(fk_fpt[j]); }
+            j = j + 1;
+        }
+    }
     fk_clo_smark_roots();
     k = 0;
     while (k < fk_node_count) {
@@ -10875,6 +10897,113 @@ static long long fk_host_door_fs(long long mode, long long x) {
     return fk_nothing;
 #endif
 }
+/* host_watch paths deadline_ms (leaf-door mode 52): wait in this process until one of the named directories or files changes -- an
+ * entry added, removed or renamed in a directory, a file written, extended, renamed, deleted or its attributes set -- or the deadline
+ * passes. Answers the 1-based index of the first path that changed, 0 at the deadline, -1 when a path cannot be watched (or the host has
+ * no watcher), -2 for a bad argument. deadline_ms 0 waits until a change; a running cell's own deadline still bounds the wait, so a cell
+ * never outlives its budget here. At most FK_WATCH_MAX paths: a directory's event is an entry added, removed or renamed, so a file written in
+ * place is seen only when the file itself is named (one descriptor each; the host's limit here is far above it). Darwin: kqueue EVFILT_VNODE on O_EVTONLY descriptors; Linux: inotify under poll.
+ * This is the body's event: a service rests on it instead of looking every few milliseconds, and heals when something changed, never
+ * on a clock. SHRINK PATH: none wanted -- an event wait is a host primitive like read(); it stays a leaf door. */
+#if !defined(_WIN32) && defined(__APPLE__)
+struct kevent;
+extern int kqueue(void);
+extern int kevent(int, const struct kevent *, int, struct kevent *, int, const struct timespec *);
+#include <sys/event.h>
+#ifndef O_EVTONLY
+#define O_EVTONLY 0x8000
+#endif
+#endif
+#if !defined(_WIN32) && defined(__linux__)
+#include <sys/inotify.h>
+#endif
+#define FK_WATCH_MAX 1024
+static long long fk_host_watch(long long x) {
+#if defined(_WIN32) || (!defined(__APPLE__) && !defined(__linux__))
+    (void)x;
+    return (0 - 1) * 2;
+#else
+    if ((x & 1) == 0 || fk_is_str(x)) { return (0 - 2) * 2; }
+    long long pr52 = x >> 1;
+    if (pr52 < 1 || !FK_POK(pr52)) { return (0 - 2) * 2; }
+    long long paths52 = FK_HH(pr52);
+    long long dlw52 = FK_HT(pr52);
+    if ((dlw52 & 1) != 0) { return (0 - 2) * 2; }
+    long long wait52 = dlw52 >> 1;
+    if (wait52 < 0) { return (0 - 2) * 2; }
+    if (fk_cell_deadline_ms != 0) {
+        long long left52 = fk_cell_deadline_ms - fk_now_ms();
+        if (left52 < 1) { left52 = 1; }
+        if (wait52 == 0 || left52 < wait52) { wait52 = left52; }
+    }
+    static char pb52[FK_WATCH_MAX][FK_PATH_CAP];
+    long long n52 = 0;
+    long long p52 = paths52 >> 1;
+    while (p52 >= 1 && FK_POK(p52) && n52 < FK_WATCH_MAX) {
+        if (!fk_is_str(FK_HH(p52))) { return (0 - 2) * 2; }
+        fk_cstr(FK_HH(p52), pb52[n52], FK_PATH_CAP);
+        fk_host_resolve(pb52[n52]);
+        n52 = n52 + 1;
+        p52 = FK_HNEXT(p52);
+    }
+    if (n52 == 0) { return (0 - 2) * 2; }
+    long long got52 = 0;
+#if defined(__APPLE__)
+    int kq52 = kqueue();
+    if (kq52 < 0) { return (0 - 1) * 2; }
+    static int fd52[FK_WATCH_MAX];
+    static struct kevent ch52[FK_WATCH_MAX];
+    long long k52 = 0;
+    while (k52 < n52) {
+        fd52[k52] = open(pb52[k52], O_EVTONLY);
+        if (fd52[k52] < 0) {
+            while (k52 > 0) { k52 = k52 - 1; close(fd52[k52]); }
+            close(kq52);
+            return (0 - 1) * 2;
+        }
+        EV_SET(&ch52[k52], fd52[k52], EVFILT_VNODE, EV_ADD | EV_CLEAR,
+               NOTE_WRITE | NOTE_EXTEND | NOTE_DELETE | NOTE_RENAME | NOTE_ATTRIB, 0, (void *)(long)(k52 + 1));
+        k52 = k52 + 1;
+    }
+    struct timespec ts52;
+    ts52.tv_sec = (long)(wait52 / 1000);
+    ts52.tv_nsec = (long)((wait52 % 1000) * 1000000);
+    struct kevent ev52;
+    int r52 = kevent(kq52, ch52, (int)n52, &ev52, 1, wait52 == 0 ? 0 : &ts52);
+    got52 = r52 > 0 ? (long long)(long)ev52.udata : (r52 == 0 ? 0 : -1);
+    k52 = 0;
+    while (k52 < n52) { close(fd52[k52]); k52 = k52 + 1; }
+    close(kq52);
+#else
+    int in52 = inotify_init1(IN_CLOEXEC);
+    if (in52 < 0) { return (0 - 1) * 2; }
+    static int wd52[FK_WATCH_MAX];
+    long long k52 = 0;
+    while (k52 < n52) {
+        wd52[k52] = inotify_add_watch(in52, pb52[k52], IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MODIFY |
+                                      IN_CLOSE_WRITE | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
+        if (wd52[k52] < 0) { close(in52); return (0 - 1) * 2; }
+        k52 = k52 + 1;
+    }
+    struct pollfd pf52;
+    pf52.fd = in52; pf52.events = POLLIN; pf52.revents = 0;
+    int r52 = poll(&pf52, 1, wait52 == 0 ? -1 : (int)(wait52 > 2147483647 ? 2147483647 : wait52));
+    if (r52 > 0) {
+        static char eb52[4096] __attribute__((aligned(8)));
+        long long len52 = read(in52, eb52, sizeof(eb52));
+        if (len52 >= (long long)sizeof(struct inotify_event)) {
+            struct inotify_event *e52 = (struct inotify_event *)eb52;
+            k52 = 0;
+            while (k52 < n52 && wd52[k52] != e52->wd) { k52 = k52 + 1; }
+            got52 = k52 < n52 ? k52 + 1 : -1;
+        } else { got52 = -1; }
+    } else { got52 = r52 == 0 ? 0 : -1; }
+    close(in52);
+#endif
+    return got52 * 2;
+#endif
+}
+
 static long long fk_host_door(long long mode, long long x) {
     if (mode == 18) {
         /* host_alive pid */
@@ -10930,6 +11059,7 @@ static long long fk_host_door(long long mode, long long x) {
         return kill((int)pid34, (int)sig34) == 0 ? 0 : (0 - 1) * 2;
     }
     if ((mode >= 35 && mode <= 48) || mode == 51) { return fk_host_door_fs(mode, x); }
+    if (mode == 52) { return fk_host_watch(x); }
     if (mode != 17) { return fk_nothing; }
     /* host_spawn_at (cons argv redirects) */
     if ((x & 1) == 0 || fk_is_str(x)) { return (0 - 1) * 2; }
@@ -18097,7 +18227,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_vsp = fk_vsp - 2;
             return fk_host_pwrite(fx201, ow49, dw49);
         }
-        if (((fm201 >> 1) >= 34 && (fm201 >> 1) <= 48) || (fm201 >> 1) == 51) { return fk_host_door(fm201 >> 1, fx201); } /* before the >= 26 range below, which would take them for byte-file doors */
+        if (((fm201 >> 1) >= 34 && (fm201 >> 1) <= 48) || (fm201 >> 1) == 51 || (fm201 >> 1) == 52) { return fk_host_door(fm201 >> 1, fx201); } /* before the >= 26 range below, which would take them for byte-file doors */
         if ((fm201 >> 1) == 50) {
             /* MODE 50 -- cell_run(path, arg, deadline_ms, stdin): a unit of Form run in this process, answered as a record
              * (see fk_cell_run_door). The rewrite row builds
