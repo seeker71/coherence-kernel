@@ -1,0 +1,141 @@
+; form-token-tool-band.bml — the tool call as a Form control, read by one cursor into the lane's call cell.
+; preludes: form-stdlib/bml/form-token-grammar.bml form-stdlib/bml/form-cli-code-policy.bml
+; Verdict 4095
+; REQUIRES: the running fkwu. No model is opened; every call is a scripted payload.
+;
+;     1  a bare call reads: tool, words, no input; whole numbers are checked where the tool wants them
+;     2  a quoted word keeps its spaces, "double" reads its escapes, 'single' is raw; flags stay words
+;     4  an edit's block gives the last two words verbatim (quotes, backslashes, <|, tabs, blank lines, a
+;        leading space) and the cell is the very cell fcap-native-tool builds for the same call (node identity)
+;     8  write and jq take their block as input, whole (a line ==== inside it is text); write also takes its text as a
+;        quoted word
+;    16  an @address word stands for the text of the cell it names; an unknown address and a cell that is no text
+;        are refused by name
+;    32  every malformed call is refused by name in the observation (never a stop), and the next call reads
+;    64  through the control table: tool is a stream verb, ftg-observe answers node=@..; and the session's
+;        returned value is the cell the lane steps; the contract's nine stay nine
+;   128  the roster is one cell per tool and covers every native tool the lane offers
+;   256  the same call is the same node; a changed word is another
+;  1024  the lane's stream hook holds a call split across quanta until it closes and answers a malformed call
+;        and a good one in the same reply, each in order, the first by name
+;  2048  a call reads back as itself from its spelling (ftt-render): quoted words, a text with a line ====, empty and
+;        trailing-newline texts, input blocks; a tool outside the roster and an edit with input have no spelling
+;   512  round trip with the legacy wire: the cell the control builds holds the very tool, arguments and input
+;        the JSON call parses to, for calls taken from the lane's retained replies
+section [form.bml] {
+ class FormTokenToolBand {
+  def tb-ob(sess, payload) = ftg-observe-with(sess, "tool", payload);
+  def tb-read(payload) = ftt-read(ftv-session(), payload);
+  def tb-ok?(r, tool, args, input) = r[3] == "" && r[0] == tool && r[1] == args && r[2] == input;
+  def tb-refused?(sess, payload, reason) = ftv-starts?(tb-ob(sess, payload), "nothing=" ++ reason);
+  def tb-parts(node) = [ftw-decode(node_children(node)[0]), ftw-decode(node_children(node)[1]), ftw-decode(node_children(node)[2])];
+
+  def tb-bit1() {
+   let a = tb-read("read form/x.fk 225 30");
+   let b = tb-read("rg -n -F segplant form/native/metal/dsv4-layer.fk");
+   let c = tb-read("read a.fk 2x");
+   let d = tb-read("read a.fk 1 abc");
+   tb-ok?(a, "read", ["form/x.fk", "225", "30"], "") && tb-ok?(b, "rg", ["-n", "-F", "segplant", "form/native/metal/dsv4-layer.fk"], "") && c[3] == "tool-word-not-number:read:1:2x" && d[3] == "tool-word-not-number:read:2:abc" ? 1 : 0;
+  }
+  def tb-bit2() {
+   let a = tb-read("rg -n \"seg plant\" a.fk");
+   let b = tb-read("rg \"a\\tb\\n\\\"q\\\"\\\\\" a.fk");
+   let c = tb-read("rg 'a\\tb \"x\"' a.fk");
+   tb-ok?(a, "rg", ["-n", "seg plant", "a.fk"], "") && tb-ok?(b, "rg", [byte_to_str(97) ++ byte_to_str(9) ++ "b" ++ byte_to_str(10) ++ "\"q\"\\", "a.fk"], "") && tb-ok?(c, "rg", ["a\\tb \"x\"", "a.fk"], "") ? 2 : 0;
+  }
+  def tb-old() = "  let a = \"x\\ny\";\t// <|form:eval|> tail\n\n  b;";
+  def tb-new() = "  let a = 'z';\n";
+  def tb-bit4() {
+   let payload = "edit form/x.fk\n<<<<\n" ++ tb-old() ++ "\n====\n" ++ tb-new() ++ "\n>>>>";
+   let r = tb-read(payload);
+   let node = ftt-action(r[0], r[1], r[2]);
+   tb-ok?(r, "edit", ["form/x.fk", tb-old(), tb-new()], "") && node_eq(node, fcap-native-tool("edit", ["form/x.fk", tb-old(), tb-new()], "")) ? 4 : 0;
+  }
+  def tb-bit8() {
+   let w = tb-read("write new.txt\n<<<<\nline one\nline two\n>>>>");
+   let j = tb-read("jq .a\n<<<<\n{\"a\":1}\n>>>>");
+   let m = tb-read("jq .a\n<<<<\nx\n====\ny\n>>>>");
+   let q = tb-read("write new.txt \"two words\"");
+   tb-ok?(w, "write", ["new.txt"], "line one\nline two") && tb-ok?(j, "jq", [".a"], "{\"a\":1}") && tb-ok?(m, "jq", [".a"], "x\n====\ny") && tb-ok?(q, "write", ["new.txt", "two words"], "") ? 8 : 0;
+  }
+  def tb-bit16() {
+   let sess = ftv-session();
+   let held = ftv-hold(sess, intern_trivial_string("form/held.fk"));
+   let addr = ftv-coord(held);
+   let a = ftt-read(sess, "read " ++ addr ++ " 3 4");
+   let b = ftt-read(sess, "read @0.0.0.1");
+   let list = ftv-hold(sess, ftw-encode([1, 2]));
+   let c = ftt-read(sess, "read " ++ ftv-coord(list));
+   tb-ok?(a, "read", ["form/held.fk", "3", "4"], "") && ftv-starts?(b[3], "tool-address-unknown:@0.0.0.1") && ftv-starts?(c[3], "tool-address-not-text:") ? 16 : 0;
+  }
+  def tb-bit32() {
+   let sess = ftv-session();
+   let refused = [["", "tool-call-empty"], ["   \n", "tool-call-empty"], ["frob a", "tool-unknown:frob known=rg,"], ["rg \"abc", "tool-quote-unterminated:3"], ["edit a.fk\n<<<<\nold\n====\nnew", "tool-block-unterminated"], ["read a.fk\nand then more", "tool-trailing-text"], ["edit a.fk", "tool-words:edit expected=3..4 received=1"], ["verify now", "tool-words:verify expected=0..0 received=1"], ["help", "tool-words:help expected=1..1 received=0"]];
+   let all = all?(p => tb-refused?(sess, p[0], p[1]), refused);
+   all && ftv-starts?(tb-ob(sess, "read a.fk"), "node=@") ? 32 : 0;
+  }
+  def tb-bit64() {
+   let sess = ftv-session();
+   let r = tb-ob(sess, "read a.fk 1 20");
+   let node = record_get(sess, "returned");
+   let kept = record_get(sess, "calls") == 1;
+   let bad = tb-ob(sess, "frob");
+   let after = record_get(sess, "returned");
+   ftv-starts?(r, "node=@") && !nothing?(node) && tb-parts(node) == ["read", ["a.fk", "1", "20"], ""] && ftg-verb?("tool") && len(ftg-verbs()) == 9 && kept && ftv-starts?(bad, "nothing=tool-unknown") && nothing?(after) && ftg-result-kind(r) == "node" ? 64 : 0;
+  }
+  def tb-bit128() {
+   let names = append(fat-tools(), ["help", "verify", "repair-bml", "rehearse-bml", "lift-bml"]);
+   let roster = ftt-roster();
+   all?(n => any?(k => k == n, ftt-names()), names) && len(roster) == len(ftt-names()) && all?(k => !nothing?(ftt-tool-node(k)), ftt-names()) && node_eq(ftt-tool-node("read"), ftt-tool-node("read")) && ftt-node-name(ftt-tool-node("edit")) == "edit" && ftt-node-min(ftt-tool-node("edit")) == 3 ? 128 : 0;
+  }
+  def tb-bit256() {
+   let a = tb-read("rg -n x a.fk");
+   let b = tb-read("rg  -n   x  a.fk");
+   let c = tb-read("rg -n y a.fk");
+   node_eq(ftt-action(a[0], a[1], a[2]), ftt-action(b[0], b[1], b[2])) && !node_eq(ftt-action(a[0], a[1], a[2]), ftt-action(c[0], c[1], c[2])) ? 256 : 0;
+  }
+  // calls the lane's retained replies carry (JSON), and the same calls spoken as controls
+  def tb-wire() = [
+   ["{\"tool\":\"read\",\"arguments\":[\"form/native/metal/dsv4-layer.fk\",\"220\",\"40\"],\"input\":\"\"}", "read form/native/metal/dsv4-layer.fk 220 40"],
+   ["{\"tool\":\"rg\",\"arguments\":[\"-n\",\"-F\",\"-m\",\"10\",\"segplant\",\"form/native/metal/dsv4-layer.fk\"],\"input\":\"\"}", "rg -n -F -m 10 segplant form/native/metal/dsv4-layer.fk"],
+   ["{\"tool\":\"rg\",\"arguments\":[\"-n\",\"-F\",\"-m\",\"10\",\"plant-rope\",\"a.bml\",\"b.fk\"],\"input\":\"\"}", "rg -n -F -m 10 plant-rope a.bml b.fk"],
+   ["{\"tool\":\"edit\",\"arguments\":[\"a.fk\",\"  // THE PLANT\\n  x\",\"  y\"],\"input\":\"\"}", "edit a.fk\n<<<<\n  // THE PLANT\n  x\n====\n  y\n>>>>"],
+   ["{\"tool\":\"jq\",\"arguments\":[\".depth\"],\"input\":\"{\\\"depth\\\":3}\"}", "jq .depth\n<<<<\n{\"depth\":3}\n>>>>"]];
+  def tb-same?(pair) {
+   let obj = parse-json("band-wire", pair[0]);
+   let r = tb-read(pair[1]);
+   r[3] == "" && r[0] == fcap-string(obj, "tool") && r[1] == fcap-array(obj, "arguments") && r[2] == fcap-string(obj, "input");
+  }
+  def tb-bit512() = all?(p => tb-same?(p), tb-wire()) ? 512 : 0;
+  // the coding lane's stream hook: a call split across quanta is held until it closes; a malformed call and a good one
+  // in the same reply are each answered, in order, the malformed one by name, and nothing stops
+  def tb-bit1024() {
+   let lane = ftv-session();
+   let first = ftg-coding-chunk(lane, 0, "I will look.\n<|form:tool|>read form/x.fk 1");
+   let second = ftg-coding-chunk(lane, 1, " 20<|/form:tool|> then <|form:tool|>rg \"open<|/form:tool|><|form:tool|>rg -n x a.fk<|/form:tool|>");
+   let answered = second |> map(c => ftg-observe-touched(lane, c[0], c[1]));
+   let results = answered |> map(a => a[0]);
+   let verbs = second |> map(c => c[0]);
+   let held = nil?(first) && len(second) == 3 && verbs == ["tool", "tool", "tool"];
+   let named = ftv-starts?(results[0], "node=@") && results[1] == "nothing=tool-quote-unterminated:3;" && ftv-starts?(results[2], "node=@");
+   held && named && !nothing?(answered[2][2]) ? 1024 : 0;
+  }
+  // every call the roster can spell reads back as itself from its spelling (ftt-render), words that need quotes,
+  // texts that cannot ride a block (a line ====), empty and trailing-newline texts included
+  def tb-trip() = [
+   ["read", ["a b.fk", "3", "4"], ""], ["read", ["@weird path"], ""], ["read", ["\"quoted\".fk"], ""],
+   ["rg", ["-n", "say \"hi\"", "x.fk", "y\\z", "it's"], ""],
+   ["edit", ["f.fk", "old\n\"q\" \\ <|x|>\t tab\n\n  lead", "new\n"], ""], ["edit", ["f.fk", "", "all new\n"], ""],
+   ["edit", ["f.fk", "a\n====\nb", "c"], ""], ["edit", ["f.fk", "sha256", "abc123", "whole\ntext"], ""],
+   ["jq", [".a"], "{\"a\":1}\n"], ["write", ["new.txt"], "line\n\nline"], ["write", ["new.txt", "x"], ""],
+   ["verify", [], ""], ["help", ["edit"], ""], ["sed", ["-n", "2,4p", "a.bml"], ""], ["cat", ["a.fk", "b.fk"], ""]];
+  def tb-trip?(c) {
+   let text = ftt-render(c[0], c[1], c[2]);
+   let back = nothing?(text) ? [nothing(), [], "", "unspelled"] : tb-read(text);
+   back[3] == "" && back[0] == c[0] && back[1] == c[1] && back[2] == c[2];
+  }
+  def tb-bit2048() = all?(c => tb-trip?(c), tb-trip()) && nothing?(ftt-render("frob", [], "")) && nothing?(ftt-render("edit", ["a", "b", "c"], "input")) ? 2048 : 0;
+  def tb-run() = tb-bit1() + tb-bit2() + tb-bit4() + tb-bit8() + tb-bit16() + tb-bit32() + tb-bit64() + tb-bit128() + tb-bit256() + tb-bit512() + tb-bit1024() + tb-bit2048();
+ }
+ tb-run();
+}

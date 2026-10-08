@@ -1,0 +1,122 @@
+// native-tools-census-run.bml — what a coding-lane tool call costs on the model <-> tool path, by the form it is written in.
+//
+//   printf '%s\n' - /path/to/.hearth/code-memory/replies ... | ./fkwu observe/native-tools-census-run.bml
+//   printf '%s\n' /Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf DIR ... | ./fkwu observe/native-tools-census-run.bml
+//
+// stdin, one path per line: the first is the GGUF whose tokenizer counts tokens ("-" counts bytes only), then every
+// replies directory to read. Each reply the lane retained is classed once, by the era it was written in:
+//   E1  the JSON era      (before 2026-10-04 10:11 +0800: no native action node; context and reply are JSON)
+//   E2  the cell era      (native action nodes accepted, context still JSON text)
+//   E3  the packet era    (2026-10-05 11:28 +0800 on: code_context is a native packet, the reply is an eval control)
+// and by what it is:
+//   control-action   a <|form:eval|> control that returns a fcap-native-tool action
+//   control-reply    a control that returns a fcap-native-reply cell (a role's fields)
+//   control-read     a control that only reads (fcap-context-field, substring, node-get ...)
+//   control-other    any other known control
+//   json-tool        a JSON object {"tool":..., "arguments":[...]} that reads whole
+//   json-fields      a JSON object of a role's fields (diagnosis, verdict, report, plan, task)
+//   json-echo        a JSON object that repeats the observation it was given (role, mode, instruction first)
+//   json-tolerated   no JSON as it stands, JSON after the turn guard's tolerant reading (a repair row)
+//   json-invalid     starts like JSON, never reads
+//   prose            neither
+// Per era and class: replies, bytes and, when a tokenizer is given, the Qwen tokens of each reply that fits (the
+// big echoes are counted in bytes only). Then the parse the lane spends on one reply of each reading class, in
+// microseconds over repeated runs: faj-valid + parse-json (the JSON edge), the turn guard's repair, the control scan,
+// the eval's cursor (ftv-parse-expr), and the whole eval of an action control (ftv-eval).
+// preflight-exec: forbidden
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/bml/form-cli-code-policy.bml;
+import form-stdlib/bml/form-cli-code-swerve.bml;
+import form-stdlib/bml/form-token-grammar.bml;
+import form-stdlib/qwen35-tokenizer.fk;
+section [form.bml] {
+ class NativeToolsCensus {
+  def ntc-e2-from() = 1791079860000;
+  def ntc-e3-from() = 1791170880000;
+  def ntc-max-token-bytes() = 4000;
+  def ntc-reps() = 8;
+  def ntc-has?(s, sub) = str_find(s, sub, 0) >= 0;
+  def ntc-era(name) {
+   let b = substring(name, 0, len(name) - 4);
+   let parts = split-on(b, "-");
+   let ms = len(parts) > 1 ? str_to_int(parts[1]) : 0;
+   ms < ntc-e2-from() ? "E1" : ms < ntc-e3-from() ? "E2" : "E3";
+  }
+  def ntc-payload-class(p) = ntc-has?(p, "fcap-native-tool(") ? "control-action" : ntc-has?(p, "fcap-native-reply(") ? "control-reply" : (ntc-has?(p, "fcap-context-field(") || ntc-has?(p, "substring(") || ntc-has?(p, "node-get")) ? "control-read" : "control-other";
+  def ntc-rank(c) = c == "control-action" ? 0 : c == "control-reply" ? 1 : c == "control-read" ? 2 : 3;
+  def ntc-best(classes) = foldl((acc, c) => ntc-rank(c) < ntc-rank(acc) ? c : acc, "control-other", classes);
+  def ntc-json-class(t) {
+   let obj = parse-json("census-reply", t);
+   if !fat-wire-object?(obj) then "json-fields"
+   else if fcctg-echo?(t) then "json-echo"
+   else if json-object-has?(obj, "tool") then "json-tool"
+   else "json-fields";
+  }
+  def ntc-class(text) {
+   let t = trim(text);
+   let controls = ftg-scan-any(t);
+   if !nil?(controls) then ntc-best(append(["control-other"], controls |> filter(c => c[0] == "eval") |> map(c => ntc-payload-class(c[1]))))
+   else if faj-valid(t) then ntc-json-class(t)
+   else if !nil?(fcctg-read(t, fcsw-tool-names())[1]) then "json-tolerated"
+   else if ntc-has?(t, "{") && (ntc-has?(t, "\"tool\"") || ntc-has?(t, "\"role\"") || ntc-has?(t, "\"diagnosis\"")) then "json-invalid"
+   else "prose";
+  }
+  def ntc-tokens(src, text) = (nothing?(src) || len(text) > ntc-max-token-bytes()) ? nothing() : len(q35-encode(src, text));
+  // [era, class, bytes, tokens or nothing]
+  def ntc-read(src, dir, name) {
+   let text = read_file(dir ++ "/" ++ name) ?? "";
+   [ntc-era(name), ntc-class(text), len(text), ntc-tokens(src, text), text];
+  }
+  def ntc-files(dir) = (fs_is_dir(dir) == 1) ? filter(n => str_find(n, ".txt", 0) > 0, fs_list(dir) ?? []) : [];
+  def ntc-key(r) = r[0] ++ " " ++ r[1];
+  def ntc-add(tab, r) {
+   let k = ntc-key(r);
+   let old = record_has(tab, k) ? record_get(tab, k) : [0, 0, 0, 0];
+   record_set(tab, k, [old[0] + 1, old[1] + r[2], old[2] + (nothing?(r[3]) ? 0 : r[3]), old[3] + (nothing?(r[3]) ? 0 : 1)]);
+   tab;
+  }
+  def ntc-line(k, v) = "[native-tools-census] " ++ k ++ ": replies " ++ v[0].str() ++ ", bytes " ++ v[1].str() ++ ", tokens " ++ v[2].str() ++ " over " ++ v[3].str() ++ " tokenized (" ++ (v[3] > 0 ? (v[2] / v[3]).str() : "-") ++ " per reply)";
+  // microseconds per run of f over every text, reps times
+  def ntc-time(texts, f) {
+   let t0 = host_monotonic_ms();
+   let ran = map(i => map(t => f(t), texts), range(0, ntc-reps()));
+   let ms = host_monotonic_ms() - t0;
+   nil?(texts) ? nothing() : (ms * 1000) / (len(texts) * ntc-reps());
+  }
+  def ntc-us(label, texts, f) {
+   let us = ntc-time(texts, f);
+   print_str("[native-tools-census] parse " ++ label ++ ": " ++ (nothing?(us) ? "no replies" : us.str() ++ " us per reply") ++ " over " ++ len(texts).str() ++ " replies");
+   0;
+  }
+  def ntc-of(rows, era, cls) = rows |> filter(r => r[0] == era && r[1] == cls) |> map(r => r[4]);
+  def ntc-action-payloads(texts) = texts |> map(t => ftg-scan-any(trim(t))) |> filter(cs => !nil?(cs)) |> map(cs => cs |> filter(c => c[0] == "eval" && ntc-has?(c[1], "fcap-native-tool(")) |> map(c => c[1])) |> filter(ps => !nil?(ps)) |> map(ps => ps[0]);
+  def ntc-eval-once(payload) {
+   let sess = ftv-session();
+   ftv-offer(sess, "fcap-native-tool", 3, a => fcap-native-tool(a[0], a[1], a[2]));
+   ftv-eval(sess, payload);
+  }
+  def ntc-run(lines) {
+   let given = filter(l => len(trim(l)) > 0, lines);
+   let gguf = given[0];
+   let src = gguf == "-" ? nothing() : read_file_slice(gguf, 0, 40000000);
+   let dirs = given[1:];
+   let rows = dirs |> map(d => ntc-files(d) |> map(n => ntc-read(src, d, n))) |> foldl((acc, xs) => append(acc, xs), []);
+   let tab = foldl((t, r) => ntc-add(t, r), record_new(0), rows);
+   print_str("[native-tools-census] " ++ len(rows).str() ++ " replies from " ++ len(dirs).str() ++ " directories");
+   let keys = record_keys(tab);
+   let shown = map(k => print_str(ntc-line(k, record_get(tab, k))), keys);
+   let json = rows |> filter(r => r[1] == "json-tool") |> map(r => r[4]);
+   let actions = rows |> filter(r => r[1] == "control-action") |> map(r => r[4]);
+   let tolerated = rows |> filter(r => r[1] == "json-tolerated") |> map(r => r[4]);
+   let payloads = ntc-action-payloads(actions);
+   ntc-us("json-tool: faj-valid + parse-json", json, t => faj-valid(t) ? parse-json("census-call", t) : 0);
+   ntc-us("json-tool: turn-guard repair", json, t => fcctg-repair(t, fcsw-tool-names()));
+   ntc-us("json-tolerated: tolerant reading", tolerated, t => fcctg-read(t, fcsw-tool-names()));
+   ntc-us("control-action: control scan", actions, t => ftg-scan-any(trim(t)));
+   ntc-us("control-action: eval cursor (ftv-parse-expr)", payloads, p => ftv-parse-expr(ftv-at-rewrite(p)));
+   ntc-us("control-action: whole eval (ftv-eval)", payloads, p => ntc-eval-once(p));
+   0;
+  }
+ }
+ ntc-run(split-on(stdin-text(), byte_to_str(10)));
+}
