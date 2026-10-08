@@ -957,6 +957,12 @@ starts them once and keeps them for its life. `kernel_stat(64)` reads the top, `
 `string-holes-band` reads 127, and 115 on a build that takes no hole (`-DFK_HOLE_LOOK=0`). A dead string's slot owns
 no bytes, so a stale word naming one reads length 0 where it used to read the old bytes until the slot was reused.
 
+A melt costs the live heap, not the shared field. With the field on, every word a field node or pair holds is a
+shared string (`fk_field_share_value` shares each one; `fk_smark` takes no shared string into a local mark), so the
+string melt walks nothing of the field. `kernel_stat(69)` reads the melts this kernel has run, `(70)` and `(71)` the
+shared string bytes and slots claimed (the field readings once sat on 65 and 66 and hid the holes and the closure
+rows behind them). `melt-cost-band` reads 15: at least eight melts, a mean under 400 ms, what the churn kept intact.
+
 A closure row lives while a root reaches it: the value stack, memory cells, records, nodes, held lets, the method
 table, and the captures of a row that is itself reached. A melt also keeps the rows made since the melt before it
 (`FK_CLO_YOUNG`: a row survives exactly one melt unrooted), copies only what a kept row captured, slides those values

@@ -24,8 +24,9 @@ does not change the normal runtime's shared-memory configuration.
 Shared string bytes use expandable sparse segments in field version 4. String
 words, source attribution and foreign cell reads retain shared identity across
 growth and garbage collection. Older owners retain their own field;
-incompatible foreign mappings refuse admission. `kernel_stat(65)` observes
-claimed string bytes and `kernel_stat(66)` observes string slots. Node, pair and
+incompatible foreign mappings refuse admission. `kernel_stat(70)` observes
+claimed string bytes and `kernel_stat(71)` observes string slots (65 and 66 read the local string holes and the
+standing closure rows; the field readings once took those two numbers and hid them). Node, pair and
 string metadata columns still have their current capacities. Resource refusal
 cannot publish a private string word into a shared node.
 
