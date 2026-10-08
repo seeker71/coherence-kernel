@@ -1,71 +1,44 @@
 # In-process cells
 
-Urs, 2026-10-04: "for the body to call fkwu makes no sense to me ... design and architect a different direct integration that does
-not spawn a new child process and then has to parse stdout, stderr and exit code which is highly inefficient."
+Form runs its own cells in the current process and receives their answers as values. A cell is a runnable Form or BML unit with its declared dependencies. OS operations and supervised workers keep their required process boundaries.
 
-**The rule.** The body does not begin `./fkwu` to run a cell and read a text protocol back. It calls the cell in its own process and
-takes the answer as a value. A *cell* here is a unit of Form that can be run: a `.fk` or `.bml` file and the preludes it names (a
-band, a gate, a door run file, a probe). Spawning stays for what the operating system must isolate or what is foreign (below).
+## Current capability and direction
 
-This page says what is built, what is a patch waiting for the seed to be free, and what is only designed. Where it says "measured"
-the number was read inside Form on `host_monotonic_ms` and `host_cpu_us` on 2026-10-04, on a busy machine (siblings were running);
-read the ratios, not the digits.
+The committed C bootstrap carries `cell_call(path, argument, deadline_ms)`. The cell reads its actual Form argument with `cell_input()` and returns its final value directly. Its record retains structured diagnostics, named stop, compilation errors, residency, elapsed time and process CPU time. No stdin, stdout or stderr is needed for this call. The [cell-run witness](../form/form-stdlib/tests/cell-run-band.fk) exercises typed arguments, nesting, stops, diagnostics, freshness and repeated residency, alongside the text adapters. Build and verify the seed through [the repository bootstrap](../AGENTS.md#ground-the-kernel-first-temporary-c-seed-shrinking-to-zero).
 
-## Status
+BML lowering runs as a cell in this process. Its memo and compiled image are caches validated against current source and compiler identity. Gates, band sweeps and native walk stages use resident cells through `hch-cell-in` or `cell_run`; [host-walk](../form/form-stdlib/tests/host-walk-band.bml) observes their wiring, deadlines, retained evidence and publication.
 
-| part | status | witness |
-| --- | --- | --- |
-| `cell_run(path, arg, deadline_ms, stdin)` answering a record (leaf-door mode 50) | **prototyped as a patch**, built and proven on a temporary seed | `form/form-stdlib/tests/cell-run-band.fk` reads 524287 on it; "door absent" (verdict 0) on a seed without it |
-| stdout sink, stderr as diagnostic rows, stdin as a value, deadline | in the same patch | bits 32, 64, 128, 256, 4096 of the band |
-| name windows, residency by path and content, freshness | in the same patch | bits 1024, 2048, 8192 |
-| band sweep with a `cell_run` per leg, shardable | **landed**: it is `gate/band-sweep-run.bml` over `form/form-stdlib/bml/band-sweep.bml`; the spawn path (`bsw-begin`, the pool, the fifo release, the `jobs` and `fkwu` keys) and the duplicate `band-sweep-cells` files are deleted | `form/form-stdlib/tests/band-sweep-band.bml` reads 1044479 of 1048575 (claim 4096 fails, cause not yet read); 12 of 35 workloads (shard 0 of 3) gave the same verdict lines as the spawned sweep, and shards 1 and 2 ended on a SIGBUS with the signature `fk_cell_dep_find` later fixed (not reproduced on those legs, not yet rerun); `{"shard":i,"of":n}` splits the work into disjoint parts whose union is every workload |
-| the dead `fmv-ask` row-walk of `form/form-stdlib/form-cli-movement.bml` | **removed** | it had no caller; its `./fkwu` child is gone |
-| drift gates (`gate/drift-gates.bml`: every row a `cell_run`; the closure of a row's unit read in Form with the loader's own dependency reader and the home index, equal to `./fkwu --closure` on all 15 rows), canonical conformance (`gate/canonical-conformance.bml`), band-pin (`observe/band-pin-run.bml`), the band legs of `findings-requests.bml` | **landed** | `gate/tests/drift-gates-band.fk` 262143, `gate/tests/canonical-conformance-band.fk` 1023, `observe/tests/band-pin-band.bml` 31, `form/form-stdlib/tests/findings-requests-band.bml` 1048575 |
-| the native-turn, local-plan and code-circle band legs, the host walk's turn, plan, review, gates and movement, the landing's gates and the reunion's redraw, the native-op-emitter check, preflight (its probe, its fresh run, its compile-only reading), tree-heal | **landed** (2026-10-04): each is a `cell_run` through `hch-cell-in` (`host-child.bml`) or directly; the result is read from `value`, `stopped`, `errors`, `diag` and `err` (`cell-said.bml` renders the last two as a child's stderr said them) | `host-walk-band` 1099511627775, `form-cli-code-circle-band` 1048575, `form-cli-local-plan-band` 33554431, `native-turn-ladder-band` 262143 (its door called in process), `native-op-emitter-band` 31, `preflight-band` 131071, `preflight-exit-status-band` 262143 (the exit status, the marker and the tally), `tree-heal-band` 255, `form-cli-landing-band` 131071 of 262143 (its last claim, the reunion's default wiring run by a kernel child in a scratch checkout, reads 0 while that child cannot lower the chain from a scratch directory: "bml lowering did not settle in 256 rounds", also on the seed before this patch and on units this lane does not touch); the preflight pages are byte-identical to the spawned ones; `cell_run` gained the `err` field and the `"check"` mode in the same patch |
-| form-cli-heal, the remaining lens children | designed (migration order below) | not built |
-| a progress record in the shared field for a supervised worker | **built** (2026-10-04) | `form/form-stdlib/voice-track-record.bml`; `form/form-stdlib/tests/voice-track-service-band.fk` reads 16383 (the record, the stall decision, nothing begun) |
-| the voice-track worker as a service, its supervisor reading the record | **built** | `form/form-stdlib/voice-track.bml` begins nothing (membrane census: 0 sites), `docs/launchd/earth.hati.voice-track-worker.plist` is the service as data; `form/form-stdlib/tests/voice-track-reap-band.fk` reads 7 on the new logic |
-| the glass supervisor and the ear lanes as services | designed, reasons in "Services" below | not built |
-| the seed's own BML-floor child (`fk_bml_child_open`) | **removed**: the floor compiler is a cell of the seed's process | cold lowering of every `.bml` and floor-lowered `.fk` in a fresh tree, old and new seed side by side, same bytes (the "Lowering in this process" section) |
-| the fatal-signal organ: a handler per thread writes one organ-health row (frames, cell in flight, C chain) before the process dies by SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT; a stack that ends is a `stopped` `"stack-depth"` with frames; Form reads the file as findings and as the immune system's attention | **landed** (2026-10-04) | `form/form-stdlib/tests/fatal-signal-band.fk` reads 16383 (section "A stack that ends is a stop; a signal that ends the process is a row") |
+The [task flow](form-native-coding.md) passes native request and result nodes directly between planning, execution and completion checks through `cell_call`. Durable queues and terminal reports retain serialization at their own boundaries. Completion requires the original checks and owned publication; a returned process alone establishes neither.
 
-Deployment: apply the patch (inproc.patch, from the repo root: `git apply -p2 inproc.patch`; it applies cleanly to the tree as it stood at
-the end of this work, siblings' filesystem doors included) when `runtime/` is free, rebuild with `cc -O2 -o fkwu.new runtime/fkwu-uni.c && mv fkwu.new fkwu`,
-run `./fkwu form/form-stdlib/tests/cell-run-band.fk` (524287).
+Cell-return framebuffer events correlate owner and step with named stops, elapsed time, CPU time, residency, compilation errors and value kind. The executing organ owns care and continuation. Supervised workers can publish progress records through [voice-track-record](../form/form-stdlib/voice-track-record.bml); the service boundary is described below.
 
-Two things the seed in use still owes the callers that landed (each a few lines in `runtime/fkwu-uni.c`):
-- `file_read(0, n)` (leaf op 134) must draw from the active cell's stdin value while `fk_cell_in_on`, as `read_line` does; a door that reads its
-  input with `stdin-text()` (`form/form-stdlib/bml/stdin-source.bml`: `file_read` on fd 0) otherwise reads the host's fd 0 and not the value
-  its caller handed it. `gate/form-cli-build-run.bml` reads `{"out": ...}` that way: with the stdin lost it would run its default install.
-  The sweep and band-pin read their input a line at a time (`read_line`) and are not waiting on it.
-- `fk_cell_load` must reset the owner cache of the function rows it is about to register (`fk_fsym_dep[r] = -2` for every `r >= fk_fntop`
-  before `fk_prescan_defns`): a row index an earlier load gave back keeps the owner it cached, and a later cell's own `defn` is then
-  outside its own name window. Seen: `cell_run("gate/structural-gate-run.fk")` and then `cell_run("form/form-samples/fact.fk")` answered
-  nothing with two `unresolved-call 'fact'` rows; with the reset it answers 3628800 (the sweep's first leg was the casualty).
+The direction is direct native composition: fewer process and representation crossings, shared typed values, and Form-owned scheduling, care and release. The C seed retains the physical runtime carrier while those responsibilities move into Form. Native task quality and verified local completion remain separate from transport and runtime witnesses.
 
 ## The call
 
 ```
-let r = cell_run("form/form-stdlib/tests/voice-chunk-band.fk", 0, 30000, ["line one", "line two"]);
+let r = cell_call("observe/local-plan-run.bml", request, nothing());
+let planned = record_get(r, "value");
 ```
 
-`path` is a string, `arg` is the value the program receives as its argument (the int `./fkwu <path> <n>` would hand it), `deadline_ms`
+`path` is a string. `argument` is any Form value, including `nothing()`, a node, list, string or number. `cell_input()` reads the active cell's rooted argument; outside a cell it returns `nothing()`. Nested calls restore the outer argument even when the inner call stops. The seed carries the physical stack slot; its shrink path is the Form-owned cell frame and residency. `deadline_ms`
 is an int of milliseconds, `nothing()` for none, or the word `"check"`: the compile-only door (what `./fkwu --check <unit>` was). In check
 mode the unit and its closure load and compile, their diagnostics come back as rows, and nothing runs, not the unit and not a
 library's top level, so a unit marked `preflight-exec: forbidden` can be read (`value` is `nothing()`, `errors` and `diag` are the
-compile's). `stdin` is a list of strings (the lines `read_line` returns, then `nothing()` at the
-end) or `nothing()` for an empty input. It answers one record, always (a call that cannot be made is a stopped record, never a crash):
+compile's). It answers one record, always (a call that cannot be made is a stopped record, never a crash).
+
+`cell_run(path, argument, deadline_ms, stdin)` is the text adapter for cells that still consume lines or render output. `stdin` is a list of strings (`read_line` returns them, then `nothing()`) or `nothing()` for empty input. Native calls give an empty reading to input primitives and discard printed text before the sink formats or allocates a capture buffer. Structured diagnostics and stops still reach the returned record.
 
 | field | meaning |
 | --- | --- |
 | `value` | the unit's final value as the Form value it is, no stringification; `nothing()` when it stopped |
-| `out` | everything the unit printed (`print`, `print_str`, every byte the seed writes to stdout), captured, never written to fd 1 |
-| `err` | everything the unit said to stderr, as text: the seed's own lines and organ-health rows, and what Form code appended to `/dev/stderr` (`live`'s readings, the proof outputs), which would otherwise reach the host's fd 2. `diag` carries the compiler's rows structured and replayed on a resident call; `err` is the bytes of this call (a resident call's compile rows are in `diag` only). `form/form-stdlib/bml/cell-said.bml` renders `diag` and `err` once, as the lines and organ-health rows a reader of a child's stderr takes (`cs-stderr`) |
+| `out` | empty for `cell_call`; captured printed text for the `cell_run` adapter, never written to fd 1 |
+| `err` | empty for `cell_call`; captured diagnostic text for the `cell_run` adapter. `diag` carries structured compiler rows, replayed on resident calls. `form/form-stdlib/bml/cell-said.bml` renders the adapter's diagnostic evidence when text is needed |
 | `diag` | a list of records, one per organ voicing or compile diagnostic: `organ aspect stage observed detail path name line health at_ms` |
 | `stopped` | `nothing()`, or `{kind, message, recipe, unit}`: kind `"stop"` (a Form-level stop, the `attempt` mechanism's catch: the same line a spawned run dies with), `"deadline"` (the budget ended it), `"unrunnable"` (it would not read as a program), `"refused"` (the call itself was malformed), `"stack-depth"` (a stack that ended, named before it was ever a crash: the message reads `stack-depth: <unit> <function> (...)`, `recipe` and `unit` say where, `frames` is the walker's chain, innermost first, as `"<function> (<unit>)"` (up to 24), and `depth` how many frames deep it was; see "A stack that ends is a stop") |
 | `errors` | the compile errors counted in `diag` (a spawned `fkwu` exits 1 on them) |
 | `resident` | 1 when the unit was already parsed here, 0 when this call loaded it |
-| `ms`, `cpu_us` | wall and process CPU spent in the call |
+| `ms`, `cpu_us` | elapsed time from the monotonic clock and process CPU spent in the call |
 
 There is no exit code: "exit 1" is `stopped` not nothing, or `errors > 0`. There is no last line: the answer is `value`. There is
 no stderr to re-read: a diagnostic is a row. A leg is judged in `form/form-stdlib/bml/band-sweep.bml` from the record: its first
@@ -84,7 +57,8 @@ back when it returns (bit 16384).
 
 ### The budget
 
-A walker step counts; every 16384th compares the clock to the deadline (`FK_CELL_TICK` in `fk_walk` and `fk_walk_body`). When the
+A cell's budget and elapsed time use the same monotonic clock as `host_monotonic_ms`; diagnostic timestamps retain calendar time.
+A walker step counts; every 16384th compares that clock to the deadline (`FK_CELL_TICK` in `fk_walk` and `fk_walk_body`). When the
 budget is spent the walker jumps straight to the call's own recover point, past any `attempt` the cell holds, so an inner `try` cannot
 swallow the end. The cell comes back `stopped: "deadline"` with what it had printed (bit 4096: a cell that never ends returns at its
 300 ms, measured 300 ms). What this cannot end: a unit inside a crystallized hot leaf (the check is the walker's), a blocking

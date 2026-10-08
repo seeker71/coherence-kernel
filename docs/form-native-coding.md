@@ -42,13 +42,20 @@ the encoded prompt plus its answer reserve. The model artifact and memory owner
 still decide admission. An explicitly supplied context remains a caller limit.
 
 `turn` uses the same task owner. The standalone entry is `observe/form-cli-task-run.bml`, with the original prompt on
-stdin. `.hearth/tasks/<task>/` retains planner and coding output. `attention`
-names an unfinished task; `returned` only records that the coding child returned,
-so inspect its actual checks and publication before claiming completion.
+stdin. Internal task calls return a native report; only the terminal entry renders it. Its `trace_owner` correlates the task's framebuffer events and durable planner/coding ledgers. `attention`
+names an unfinished task.
 `completed` requires an owned publication whose original witness and source
 checks pass on current files. Task admission reads that state before opening a
-planner, and again when a planner returns, so a completed effect is kept even
-when a redundant planner stops.
+planner, after planning and after execution, so a completed effect is kept even
+when a redundant planner stops. Planner, execution and completion witnesses run
+as resident cells in the task's process through `cell_call(path, argument, deadline)`.
+The called cell reads the actual argument with `cell_input()`; the planner returns
+its native row, which execution consumes directly. No stdin, stdout, stderr, address
+text or temporary I/O files carry this handoff. Queue and ledger JSON retain durable
+continuity; terminal reports render at their own boundary. Cell-return framebuffer events correlate the task owner
+and step with named stops, elapsed time, CPU time, cache residency, errors and
+value kind without private payloads. Model
+admission and OS operations retain their own resource and process boundaries.
 
 The planner supplies typed `<cases>` with `function`, `arguments` and `equals`.
 Function names follow their source declarations. Form builds the call syntax:
