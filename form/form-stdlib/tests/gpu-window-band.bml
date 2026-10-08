@@ -4,7 +4,7 @@
 // rows carry no run state, so a stopped peer is a count that stops and a resumed one is a count that moves. The lease and the windows live
 // under a scratch directory (never /tmp/form-gpu.lock). REQUIRES a Metal device (the gauge) and ./fkwu in the working directory.
 //
-// Verdict 255:
+// Verdict 511:
 //   1   a window pauses exactly the peers the lease names (two stopped: their counts stand still) and its close resumes them (the counts move)
 //   2   a close with another window's token is refused, "not-yours", and the peers stay stopped; the true holder's close then resumes them
 //   4   a window left in a takeover tombstone (its holder gone) is swept: the peer it recorded is resumed and the file removed
@@ -13,6 +13,7 @@
 //   32  the gauge reads a device throughput; proven? is true within 15 percent either way and false outside it or without a reading
 //   64  a second open by the holder is refused by the lease, and the held window is untouched
 //   128 the report line says PROVEN, NOT PROVEN or NOT HELD; gpw-with-lock answers the thunk and the closed report
+//   256 a peer already stopped by someone else (host_process run state 2) is not recorded and its window's close does not resume it
 //
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/live.bml form-stdlib/gpu-window.bml
 section [form.bml] {
@@ -58,6 +59,26 @@ section [form.bml] {
   def gwb-head(token, opened) = gpw-magic() ++ " " ++ token ++ " 0 " ++ opened.str();
   def gwb-window-file(path, token, opened, rows) = write_file_text(path, gpw-join(cons(gwb-head(token, opened), rows)));
   def gwb-closed?(c) = (String) c[0] == "closed";
+  // a recorded row for a fixture, whatever its run state (gpw-row-of records only a RUNNING peer)
+  def gwb-row-of(pid) = pid.str() ++ ":" ++ host_process(pid)[5].str();
+  // ── 256 a peer already stopped by someone else is not recorded and is not resumed by the close ──
+  def gwb-prestopped(ctx) {
+   let a = gwb-spawn(ctx, "s1");
+   let b = gwb-spawn(ctx, "s2");
+   let up = gwb-up?(a) && gwb-up?(b);
+   let pre = gwb-stop(a);
+   let nap = host_sleep_ms(300);
+   let state-seen = (Comparable) host_process(a[0])[7] == 2;
+   let lock = gwb-lock(ctx, "lock-prestopped");
+   let win = gpw-open-cool(lock, "band", gwb-markers(), 0);
+   let only-running = ((String) win[0] == "window") && ((Comparable) len(win[2]) == 1) && gwb-flat?(b);
+   let closed = ((String) win[0] == "window") ? gpw-close(lock, win) : ["none"];
+   let b-back = gwb-closed?(closed) && ((Comparable) closed[2] == 1) && gwb-moving?(b);
+   let a-left = gwb-flat?(a);
+   let ra = gwb-reap(a);
+   let rb = gwb-reap(b);
+   gwb-bit(up && (pre == 0) && state-seen && only-running && b-back && a-left);
+  }
 
   // ── 1 pause and resume ──
   def gwb-pause(ctx) {
@@ -97,7 +118,7 @@ section [form.bml] {
    let g0 = host_dir_mkdir(lock ++ ".gone");
    let g1 = host_dir_mkdir(lock ++ ".gone/tok-1");
    let stopped = gwb-stop(c);
-   let wrote = gwb-window-file(lock ++ ".gone/tok-1/window", "tok-1", now_unix_ms(), [gpw-row-of(c[0])]);
+   let wrote = gwb-window-file(lock ++ ".gone/tok-1/window", "tok-1", now_unix_ms(), [gwb-row-of(c[0])]);
    let flat = gwb-flat?(c);
    let swept = gpw-sweep(lock);
    let gone = (Comparable) host_path_exists(lock ++ ".gone/tok-1/window") == 0;
@@ -114,12 +135,12 @@ section [form.bml] {
    let ans = gpu-lease-take(lock, "band", 5000);
    let mine = gpu-lease-held?(ans) == 1;
    let sd = gwb-stop(d);
-   let wrote = gwb-window-file(gpw-file(lock), "tok-old", now_unix_ms() - (2 * gpw-max-ms()), [gpw-row-of(d[0])]);
+   let wrote = gwb-window-file(gpw-file(lock), "tok-old", now_unix_ms() - (2 * gpw-max-ms()), [gwb-row-of(d[0])]);
    let flat = gwb-flat?(d);
    let swept = gpw-sweep(lock);
    let old-over = mine && ((Comparable) swept[1] == 1) && gwb-moving?(d);
    let se = gwb-stop(e);
-   let wrote2 = gwb-window-file(gpw-file(lock), "tok-young", now_unix_ms(), [gpw-row-of(e[0])]);
+   let wrote2 = gwb-window-file(gpw-file(lock), "tok-young", now_unix_ms(), [gwb-row-of(e[0])]);
    let kept = gpw-sweep(lock);
    let young-kept = mine && ((Comparable) kept[1] == 0) && gwb-flat?(e);
    let freed = host_path_remove(gpw-file(lock));
@@ -181,7 +202,7 @@ section [form.bml] {
  }
  let ctx = gwb-fresh();
  nothing?(ctx) ? form_error("gpu-window band needs a fresh directory under temp_dir") : 0;
- let verdict = live-claims("gpu-window-band", ctx, [["pause-resume", 1, 1, gwb-pause], ["not-yours", 2, 1, gwb-not-yours], ["sweep-tomb", 4, 1, gwb-sweep-tomb], ["sweep-live", 8, 1, gwb-sweep-live], ["reused-pid", 16, 1, gwb-reused], ["gauge", 32, 1, gwb-gauge], ["held-twice", 64, 1, gwb-twice], ["report", 128, 1, gwb-report]]);
+ let verdict = live-claims("gpu-window-band", ctx, [["pause-resume", 1, 1, gwb-pause], ["not-yours", 2, 1, gwb-not-yours], ["sweep-tomb", 4, 1, gwb-sweep-tomb], ["sweep-live", 8, 1, gwb-sweep-live], ["reused-pid", 16, 1, gwb-reused], ["gauge", 32, 1, gwb-gauge], ["held-twice", 64, 1, gwb-twice], ["report", 128, 1, gwb-report], ["prestopped", 256, 1, gwb-prestopped]]);
  host_dir_rmdir(gwb-root(ctx));
  verdict;
 }
