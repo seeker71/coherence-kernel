@@ -486,9 +486,12 @@ static char *fk_field_string_span(long long off, long long len);
 static unsigned long long fk_field_bytes_hash(const char *b, long long n);
 static long long fk_str_bytes_eq(long long a, long long b);
 static int fk_field_open(void);
+/* the shared pairs this process has mapped (whole segments of FK_FIELD_PAIRS); a read past them maps the next segment first */
+static long long fk_field_pair_ready;
+static long long fk_field_pair_slow(long long at, int tail);
 /* every read of a pair, a string cell or a float goes through one door, so the shared arenas can stand behind the same words */
-#define FK_HH(p) ((p) >= FK_PAIR_BASE ? fk_fph[(p) - FK_PAIR_BASE] : fk_hh[(p)])
-#define FK_HT(p) ((p) >= FK_PAIR_BASE ? fk_fpt[(p) - FK_PAIR_BASE] : fk_ht[(p)])
+#define FK_HH(p) ((p) >= FK_PAIR_BASE ? ((p) - FK_PAIR_BASE < fk_field_pair_ready ? fk_fph[(p) - FK_PAIR_BASE] : fk_field_pair_slow((p) - FK_PAIR_BASE, 0)) : fk_hh[(p)])
+#define FK_HT(p) ((p) >= FK_PAIR_BASE ? ((p) - FK_PAIR_BASE < fk_field_pair_ready ? fk_fpt[(p) - FK_PAIR_BASE] : fk_field_pair_slow((p) - FK_PAIR_BASE, 1)) : fk_ht[(p)])
 #define FK_POK(p) ((p) >= FK_PAIR_BASE ? ((p) - FK_PAIR_BASE < fk_field_pp()) : ((p) <= fk_hp))
 /* the next pair of a LIST walk: a tail that is a list word (odd) continues; any other tail -- the int a
  * door's pair carries, (cons 1 5) -- ends the walk at 0, never read as a pair index. Without it print
@@ -9163,81 +9166,6 @@ static void fk_clo_smark_roots(void) {
         k = k + 1;
     }
 }
-/* ── a field node keeps its dependencies ─────────────────────────────────────
- * A node in the shared field holds shared words: a field string, a field pair. When the field's string bank or
- * pair bank is full, fk_field_share_value answers the LOCAL word instead, and the node then depends on this process's
- * own string pool or heap. The node says so itself, at the moment it is filled: its index goes on fk_ndep. Both melts
- * visit exactly these nodes -- the string melt keeps the strings they name, the pair melt counts and moves the pairs
- * they hold, writing the moved word back into the node (or into the field pair that holds it) -- and nothing else is
- * scanned. Before this the melts skipped every node while the field was on: a definition name minted after the bank
- * filled was freed and read back as "" (2026-10-08). A field node another kernel filled is that kernel's own. */
-static long long *fk_ndep;
-static long long fk_ndep_n, fk_ndep_cap;
-static int fk_ndep_has_local(long long w) {
-    if (fk_is_str(w)) { long long si = fk_stri(w); return si >= 0 && si < FK_STR_BASE; }
-    if (w < 0 || (w & 1) == 0 || w <= 1) { return 0; }
-    long long p = w >> 1;
-    if (p < FK_PAIR_BASE) { return p >= 1; }
-    long long at = p - FK_PAIR_BASE;
-    while (at >= 0 && at < fk_field_pp()) {
-        if (fk_ndep_has_local(fk_fph[at])) { return 1; }
-        long long t = fk_fpt[at];
-        if (t > 1 && (t & 1) != 0 && (t >> 1) >= FK_PAIR_BASE) { at = (t >> 1) - FK_PAIR_BASE; continue; }
-        return fk_ndep_has_local(t);
-    }
-    return 0;
-}
-static void fk_ndep_add(long long idx) {
-    if (fk_ndep_n >= fk_ndep_cap) {
-        long long nc = fk_ndep_cap == 0 ? 256 : fk_ndep_cap * 2;
-        long long *q = (long long *)realloc(fk_ndep, (unsigned long)nc * 8);
-        if (q == 0) { fk_die("fk_ndep_add: out of memory -- a field node that holds local storage must be remembered, or a melt frees what it holds"); }
-        fk_ndep = q; fk_ndep_cap = nc;
-    }
-    fk_ndep[fk_ndep_n] = idx;
-    fk_ndep_n = fk_ndep_n + 1;
-}
-/* one word a dependent node holds: mode 0 counts its live local pairs, 1 moves them (answers the new word, field pairs
- * written in place), 2 marks its local strings. A field pair is followed through; its words never move. */
-static long long fk_ndep_word(long long w, int mode) {
-    if (fk_is_str(w)) {
-        if (mode == 2) { long long si = fk_stri(w); if (si >= 0 && si < FK_STR_BASE) { fk_smark(w); } }
-        return mode == 0 ? 0 : w;
-    }
-    if (w < 0 || (w & 1) == 0 || w <= 1) { return mode == 0 ? 0 : w; }
-    long long p = w >> 1;
-    if (p < FK_PAIR_BASE) {
-        if (mode == 0) { return fk_mlive(w); }
-        if (mode == 1) { return fk_mcopy(w); }
-        fk_smark(w);
-        return w;
-    }
-    long long n = 0;
-    long long at = p - FK_PAIR_BASE;
-    while (at >= 0 && at < fk_field_pp()) {
-        if (mode == 1) { fk_fph[at] = fk_ndep_word(fk_fph[at], 1); } else { n = n + fk_ndep_word(fk_fph[at], mode); }
-        long long t = fk_fpt[at];
-        if (t > 1 && (t & 1) != 0 && (t >> 1) >= FK_PAIR_BASE) { at = (t >> 1) - FK_PAIR_BASE; continue; }
-        if (mode == 1) { fk_fpt[at] = fk_ndep_word(t, 1); } else { n = n + fk_ndep_word(t, mode); }
-        break;
-    }
-    return mode == 0 ? n : w;
-}
-static long long fk_ndep_visit(int mode) {
-    long long n = 0, k = 0;
-    while (k < fk_ndep_n) {
-        long long ix = fk_ndep[k];
-        if (mode == 1) {
-            fk_ncat[ix] = fk_ndep_word(fk_ncat[ix], 1);
-            fk_nkids[ix] = fk_ndep_word(fk_nkids[ix], 1);
-            fk_nval[ix] = fk_ndep_word(fk_nval[ix], 1);
-        } else {
-            n = n + fk_ndep_word(fk_ncat[ix], mode) + fk_ndep_word(fk_nkids[ix], mode) + fk_ndep_word(fk_nval[ix], mode);
-        }
-        k = k + 1;
-    }
-    return n;
-}
 static long long fk_smelt_reclaimed;
 static void fk_smelt(void) {
     if (fk_sp <= 0 || fk_sb == 0) { return; }
@@ -9262,12 +9190,11 @@ static void fk_smelt(void) {
     }
     k = 1;
     while (!fk_field_on && k <= fk_np) { fk_smark(fk_ncat[k]); fk_smark(fk_nkids[k]); fk_smark(fk_nval[k]); k = k + 1; }
-    /* With the field on, a node's or pair's string words are SHARED strings (fk_field_share_value answers a shared
-     * word for every local one, the bank growing by segments), and fk_smark takes no shared string into a local
-     * mark. A pass over the field's nodes and pairs would mark nothing and cost every melt the whole field --
-     * millions of cold cells, seconds a melt, minutes for a lowering that melts often. Only a node that said, when it
-     * was filled, that it holds local storage (fk_ndep: the pair bank was full) is visited -- none, while the banks have room. */
-    fk_ndep_visit(2);    fk_clo_smark_roots();
+    /* With the field on, every word a field node or field pair holds is a SHARED word: strings and pairs grow by
+     * segments and floats stop the kernel when their index is full, so fk_field_share_value never answers a local
+     * word. Nothing local hangs from the field, so the melt leaves it alone -- no pass over its nodes or pairs, which
+     * would mark nothing and cost every melt the whole field. */
+    fk_clo_smark_roots();
     k = 0;
     while (k < fk_node_count) {
         if (fk_node[k][0] == 24) { long long si = fk_node[k][1]; if (si >= 0 && si < fk_sp) { fk_smk[si] = 1; } }
@@ -9354,7 +9281,6 @@ static void fk_melt(void) {
         nlive = nlive + fk_mlive(fk_nval[k]);
         k = k + 1;
     }
-    nlive = nlive + fk_ndep_visit(0);   /* field nodes that hold local pairs */
     lv_node = nlive - lv_stack - lv_mem - lv_rec;
     nlive = nlive + fk_clo_live_roots();
     lv_clo = nlive - lv_stack - lv_mem - lv_rec - lv_node;
@@ -9422,7 +9348,6 @@ static void fk_melt(void) {
         fk_nval[k] = fk_mcopy(fk_nval[k]);
         k = k + 1;
     }
-    fk_ndep_visit(1);   /* their local pairs moved, the new words written back into the node or its field pair */
     fk_clo_mcopy_roots();
     k = 0;
     while (k < fk_node_count) {
@@ -14566,7 +14491,7 @@ static int fk_gift_live(long long gh) {
  * P Q shared pairs; s O L X shared node-strings (bytes, offsets, lengths, hash); F Y shared floats (values, hash).
  * A kernel that cannot open the field keeps private tables and says so on its live page (word 22). */
 #define FK_FIELD_MAGIC 0x4649454C44LL
-#define FK_FIELD_VERSION 4
+#define FK_FIELD_VERSION 5   /* 5: shared pairs grow by segments (a binary of 4 would read past its mapping) */
 #define FK_FIELD_NODES (1LL << 26)
 #define FK_FIELD_PAIRS (1LL << 27)
 #define FK_FIELD_STRB (1LL << 31)
@@ -14644,6 +14569,63 @@ static char *fk_field_string_span(long long off, long long len) {
     (void)len; return fk_fsb + off;
 #endif
 }
+/* Shared pairs grow the same way: the head and tail columns (letters P and Q) are reserved as one extent each and filled by
+ * segments of FK_FIELD_PAIRS cells, named /fg-field<v>-P<n> and -Q<n> past the first. A pair word is FK_PAIR_BASE + its index,
+ * so every word stays what it was when the columns move; a writer maps the segment its claim reaches before it writes, and a
+ * reader past its own mapping (another kernel claimed further) maps it at the read (FK_HH / FK_HT). There is no full bank:
+ * a field node never holds a local pair. */
+static long long fk_field_pair_cap, fk_field_pair_mapped;
+static void fk_field_pair_name(char letter, long long segment, char *out) {
+    if (!segment) { fk_field_name(letter, out); }
+    else { sprintf(out, "/fg-field%d-%c%llx", FK_FIELD_VERSION, letter, (unsigned long long)segment); }
+}
+static long long *fk_field_pair_column(char letter, long long *old, long long cap, long long from, long long segments) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    char *base = (char *)old;
+    if (cap != fk_field_pair_cap) {
+        base = mmap(0, (size_t)(cap * 8), PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (base == MAP_FAILED) { fk_die("fkwu: cannot reserve shared pair extent"); }
+        from = 0;
+    }
+    long long seg_bytes = FK_FIELD_PAIRS * 8;
+    while (from < segments) {
+        char name[32]; struct stat st;
+        fk_field_pair_name(letter, from, name);
+        int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
+        if (fd < 0) { fk_die("fkwu: cannot open shared pair segment"); }
+        int sized = fstat(fd, &st) == 0 && (st.st_size >= seg_bytes || (st.st_size == 0 && ftruncate(fd, seg_bytes) == 0));
+        void *part = sized ? mmap(base + from * seg_bytes, (size_t)seg_bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) : MAP_FAILED;
+        close(fd);
+        if (part == MAP_FAILED) { fk_die("fkwu: cannot map shared pair segment"); }
+        from++;
+    }
+    return (long long *)base;
+#else
+    (void)letter; (void)cap; (void)from; (void)segments;
+    if (segments > 1) { fk_die("fkwu: shared pairs cannot grow on this host"); }
+    return old;
+#endif
+}
+/* the pairs [0, end) are mapped in this process when this returns */
+static void fk_field_pair_span(long long end) {
+    if (end <= fk_field_pair_ready) { return; }
+    long long segments = end / FK_FIELD_PAIRS + (end % FK_FIELD_PAIRS != 0);
+    long long cap = fk_field_pair_cap ? fk_field_pair_cap : FK_FIELD_PAIRS;
+    while (cap < segments * FK_FIELD_PAIRS) {
+        if (cap > (FK_PAIR_BASE / 2)) { fk_die("fkwu: shared pairs past the pair word range"); }
+        cap *= 2;
+    }
+    long long from = fk_field_pair_mapped;
+    long long *h = fk_field_pair_column('P', fk_fph, cap, from, segments);
+    long long *t = fk_field_pair_column('Q', fk_fpt, cap, from, segments);
+    fk_fph = h; fk_fpt = t;
+    fk_field_pair_cap = cap; fk_field_pair_mapped = segments; fk_field_pair_ready = segments * FK_FIELD_PAIRS;
+}
+static long long fk_field_pair_slow(long long at, int tail) {
+    if (at < 0) { return 1; }
+    fk_field_pair_span(at + 1);
+    return tail ? fk_fpt[at] : fk_fph[at];
+}
 static long long fk_field_pp(void) { return fk_field_on ? fk_field_hdr[2 + 3] : 0; }
 static long long fk_field_sp(void) { return fk_field_on ? fk_field_hdr[2 + 4] : 0; }
 static long long fk_field_fp(void) { return fk_field_on ? fk_field_hdr[2 + 6] : 0; }
@@ -14671,6 +14653,7 @@ static int fk_field_open(void) {
     fk_nkind = k; fk_ncat = c; fk_nkids = i; fk_nval = v; fk_nid = n; fk_nsfile = f; fk_nsline = l; fk_nscol = o; fk_nsattr = a; fk_nhash_memo = m;
     fk_field_itab = x; fk_fph = P; fk_fpt = Q; fk_fsb = s; fk_fso = O; fk_fsl = L; fk_fstab = X; fk_ffv = F; fk_fftab = Y;
     fk_field_string_cap = FK_FIELD_STRB; fk_field_string_mapped = 1;
+    fk_field_pair_cap = FK_FIELD_PAIRS; fk_field_pair_mapped = 1; fk_field_pair_ready = FK_FIELD_PAIRS;
     fk_np_p = &w[2];
     fk_field_on = 1;
     fk_live_publish(0); /* the page's store word changes here; the page has no tick, so the change is written where it happens */
@@ -14681,6 +14664,9 @@ static void fk_field_unlink_all(void) {
     if (fk_field_hdr) {
         long long end = fk_field_hdr[7] / FK_FIELD_STRB + 1, j = 1;
         while (j < end) { char nm[32]; fk_field_string_name(j++, nm); shm_unlink(nm); }
+        long long pend = fk_field_hdr[2 + 3] / FK_FIELD_PAIRS + 1;
+        j = 1;
+        while (j < pend) { char nm[32]; fk_field_pair_name('P', j, nm); shm_unlink(nm); fk_field_pair_name('Q', j, nm); shm_unlink(nm); j = j + 1; }
     }
     long long k = 0;
     while (fk_field_letters[k]) { char nm[32]; fk_field_name(fk_field_letters[k], nm); shm_unlink(nm); k = k + 1; }
@@ -14757,7 +14743,7 @@ static long long fk_field_share_float(long long fv) {
             long long z = 0;
             if (__atomic_compare_exchange_n(&fk_fftab[slot], &z, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
                 long long j = fk_field_claim(6, 1);
-                if (j >= FK_FIELD_FLOATS) { __atomic_store_n(&fk_fftab[slot], 0, __ATOMIC_RELEASE); return fv; }
+                if (j >= FK_FIELD_FLOATS) { __atomic_store_n(&fk_fftab[slot], 0, __ATOMIC_RELEASE); fk_die("fkwu: the field's shared floats are full (2^25 distinct values): run observe/field-reset-run.fk with no kernel alive"); }
                 fk_ffv[j] = d;
                 __atomic_store_n(&fk_fftab[slot], j + 1, __ATOMIC_RELEASE);
                 return fk_fbase - ((FK_FLT_BASE + j) << 1) - 1;
@@ -14766,6 +14752,7 @@ static long long fk_field_share_float(long long fv) {
         }
         fk_field_yield();
     }
+    fk_die("fkwu: the field's float index is full: run observe/field-reset-run.fk with no kernel alive");
     return fv;
 }
 /* every word a shared cell carries must itself be shared: lists copied into shared pairs, strings and floats interned */
@@ -14781,7 +14768,7 @@ static long long fk_field_share_value(long long v) {
     while (q >= 1 && q <= fk_hp) { n = n + 1; q = FK_HNEXT(q); }
     if (n == 0) { return v; }
     long long base = fk_field_claim(3, n);
-    if (base + n > FK_FIELD_PAIRS) { return v; }
+    fk_field_pair_span(base + n);   /* the claim's segments mapped before a cell is written: no bank is ever full */
     long long k = 0;
     q = p;
     while (k < n) {
@@ -14828,8 +14815,6 @@ static long long fk_field_fill(long long kind, long long sub, long long a, long 
         fk_ncat[idx] = 0; fk_nkids[idx] = 1; fk_nval[idx] = 0;
         fk_nid[idx] = id;
     }
-    /* a bank that was full left a local word in this node: the node remembers it depends on this process (fk_ndep) */
-    if (fk_ndep_has_local(fk_nval[idx]) || fk_ndep_has_local(fk_ncat[idx]) || fk_ndep_has_local(fk_nkids[idx])) { fk_ndep_add(idx); }
     return idx;
 }
 /* one intern door for every kind: find the cell in the shared hash or claim a slot, fill, publish */
@@ -19968,6 +19953,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 70) { return fk_field_on ? (fk_field_hdr[7] << 1) : 0; }   /* the shared string bytes claimed */
         if (ks_k == 71) { return fk_field_sp() << 1; }                         /* the shared string slots claimed */
+        if (ks_k == 72) { return fk_field_pp() << 1; }                         /* the shared pairs claimed */
+        if (ks_k == 73) { return fk_field_pair_mapped << 1; }                  /* the shared pair segments this kernel has mapped */
         if (ks_k == 58) {
             return (fk_field_on || fk_store_shared) ? 0 : (fk_np << 1);
         }
