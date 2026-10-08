@@ -27278,7 +27278,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     if (!refused && inw != fk_nothing) {
         /* stdin is a list of lines; each is read back by read_line, then end of input is nothing */
         long long q = (inw & 1) ? inw >> 1 : -1, bytes = 0, put = 0;
-        if (q < 1) { refused = 1; refusal = "cell_run: stdin is a list of strings, or nothing"; }
+        if (q < 0 || (q > 0 && !FK_POK(q))) { refused = 1; refusal = "cell_run: stdin is a list of strings, or nothing"; }
         while (!refused && q >= 1 && FK_POK(q)) {
             long long si = fk_stri(FK_HH(q));
             if (si < 0) { refused = 1; refusal = "cell_run: stdin is a list of strings, or nothing"; break; }
