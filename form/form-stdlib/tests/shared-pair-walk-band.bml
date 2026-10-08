@@ -1,0 +1,44 @@
+; shared-pair-walk-band.bml — a heap list whose tail is a shared list walks whole in the loop lane.
+;
+; preludes: form-stdlib/core.fk form-stdlib/json.fk
+; REQUIRES: fkwu's loop lane (a recipe that turns hot is emitted as arm64) and the shared field
+;
+; The loop lane emits head, tail and len over a list word as loads from the heap's columns by pair index. A list
+; the field holds (the elements of a parsed JSON array) is made of SHARED pairs whose indexes lie far past any
+; heap column, and a heap pair consed onto such a list carries a shared pair as its tail. The emitted tail read
+; that word and the next head, tail or len loaded from the heap's column at an index of 2^40: a SIGSEGV in
+; form-token-census (reverse of an append of two parsed arrays, five rows of a 188 KB receipt), the same on
+; every build. The tail and the length walk now leave for the overflow block when the word they read names a
+; pair past the heap's top; the interpreter, whose head and tail read either column, takes the walk from there.
+;
+; Each claim walks a list that begins on the heap and ends in the shared pairs, enough times that the recipes
+; are hot and emitted: reverse, len, append, map and a hand-written tail walk.
+;
+; Verdict 31 when every claim lands:
+;   1     reverse of a heap prefix and a shared tail has the length of both, its first element the shared list's last
+;   2     len of the same list is the sum, hot
+;   4     append of two shared lists and a third keeps all three in order
+;   8     map over the mixed list reads every element once, in order
+;   16    a hand-written tail walk (the loop lane's own tail and len) counts the mixed list
+section [form.bml] {
+    class SharedPairWalkBand {
+        def spw-bit(ok, bit) = ok ? bit : 0;
+        def spw-text(n) = "[" + str-join-with(map(i => i.str(), range(0, n)), ",") + "]";
+        // the elements of a parsed JSON array: shared pairs (the field holds the array's children)
+        def spw-shared(n) = json-array-elements(json-parse-value(spw-text(n), 0, "")[0]);
+        def spw-walk(xs, n) = nil?(xs) ? n : spw-walk(xs[1:], n + 1);
+        def spw-mixed(k) = append(range(1000, 1002), spw-shared(k));
+        def spw-rounds(r, k, ok) = r <= 0 ? ok : spw-rounds(r - 1, k, ok && len(reverse(spw-mixed(k))) == k + 2);
+        def spw-score() {
+            let q = spw-shared(64);
+            let mixed = cons(1, cons(2, q));
+            let hot = spw-rounds(2000, 64, 1);
+            spw-bit(len(reverse(mixed)) == 66 && reverse(mixed)[0] == q[63], 1)
+              + spw-bit(len(mixed) == 66 && hot == 1, 2)
+              + spw-bit(len(append(append(q, spw-shared(64)), spw-shared(64))) == 192 && len(append(append(q, q), q)) == 192, 4)
+              + spw-bit(len(map(x => x, mixed)) == 66 && map(x => x, mixed)[65] == q[63], 8)
+              + spw-bit(spw-walk(mixed, 0) == 66, 16);
+        }
+    }
+    spw-score();
+}
