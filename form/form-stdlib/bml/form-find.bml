@@ -639,6 +639,53 @@ section [form.bml] {
   def fnd-tri-entries(s) = foldl((a, t) => a + len(fnd-mget(record_get(s, "tri"), t, [])), 0, record_get(s, "trilist"));
   def fnd-status-text(s) = "files=" ++ fnd-c(s, "files").str() ++ " held=" ++ fnd-c(s, "heldfiles").str() ++ " bytes=" ++ fnd-c(s, "bytes").str() ++ " defs=" ++ fnd-c(s, "defs").str() ++ " imports=" ++ fnd-c(s, "imps").str() ++ " bands=" ++ fnd-c(s, "bands").str() ++ " trigrams=" ++ len(record_get(s, "trilist")).str() ++ " postings=" ++ fnd-tri-entries(s).str() ++ " reads=" ++ fnd-c(s, "reads").str() ++ " build_ms=" ++ fnd-c(s, "build_ms").str() ++ " refresh_ms=" ++ fnd-c(s, "refresh_ms").str() ++ " changed=" ++ fnd-c(s, "refresh_changed").str() ++ "\n";
 
+  // ---- the memory: the notes kept for this body are files with a frontmatter (name, description, type); they are asked like the rest of the tree
+  //   memory WORDS...   the notes whose name, description or first lines hold every word: file, type, name — description
+  //   memory --index    the index derived from the notes: the newest thirty with their hook, the rest as links, newest first
+  //   memory --write    the same index written as MEMORY.md in the notes' directory, so the index is never kept by hand
+  def fnd-mem-env(name) = (String) value_kind(host_getenv(name)) == "string" ? host_getenv(name) : "";
+  def fnd-mem-dir() = len(fnd-mem-env("FORM_MEMORY_DIR")) > 0 ? fnd-mem-env("FORM_MEMORY_DIR") : fnd-mem-env("HOME") ++ "/.claude/projects/-Users-ursmuff-source-coherence-kernel/memory";
+  def fnd-mem-starts?(s, p) = len(s) >= len(p) && (String) substring(s, 0, len(p)) == p;
+  def fnd-mem-ends?(s, x) = len(s) >= len(x) && (String) substring(s, len(s) - len(x), len(s)) == x;
+  def fnd-mem-lower-byte(b) = byte_to_str(b >= 65 && b <= 90 ? b + 32 : b);
+  def fnd-mem-lower(s) = str-spans(map(i => fnd-mem-lower-byte(str_byte_at(s, i)), range(0, len(s))));
+  def fnd-mem-key(lines, key) = nil?(lines) ? "" : fnd-mem-starts?(lines[0], key) ? trim(substring(lines[0], len(key), len(lines[0]))) : fnd-mem-key(lines[1:], key);
+  def fnd-mem-unq(s) = len(s) >= 2 && (String) substring(s, 0, 1) == "\"" && (String) substring(s, len(s) - 1, len(s)) == "\"" ? substring(s, 1, len(s) - 1) : s;
+  def fnd-mem-names() = filter(n => fnd-mem-ends?(n, ".md") && (String) n != "MEMORY.md", fs_list(fnd-mem-dir()) ?? []);
+  def fnd-mem-entry(name) {
+   let path = fnd-mem-dir() ++ "/" ++ name;
+   let head = take(40, split-on(read_file(path) ?? "", "\n"));
+   [name, fnd-mem-unq(fnd-mem-key(head, "name:")), fnd-mem-unq(fnd-mem-key(head, "description:")), fnd-mem-key(head, "  type:"), fnd-mem-lower(fat-join(head, "\n")), (host_file_identity(path) ?? [0, 0])[1]];
+  }
+  def fnd-mem-hit?(e, words) = all?(w => str_find(e[4], fnd-mem-lower(w), 0) >= 0, words);
+  def fnd-mem-row(e) = e[0] ++ "\t" ++ e[3] ++ "\t" ++ e[1] ++ " — " ++ e[2];
+  def fnd-mem-zeros(k) = k <= 0 ? "" : "0" ++ fnd-mem-zeros(k - 1);
+  def fnd-mem-stamp(e) = fnd-mem-zeros(14 - len(e[5].str())) ++ e[5].str() ++ "|" ++ e[0];
+  def fnd-mem-newest(es) = reverse(sort-strs(map(e => fnd-mem-stamp(e), es))) |> map(k => fnd-mem-by-name(es, substring(k, 15, len(k))));
+  def fnd-mem-by-name(es, name) = nil?(es) ? [] : (String) es[0][0] == name ? es[0] : fnd-mem-by-name(es[1:], name);
+  def fnd-mem-safe(s, k) = k > 0 && str_byte_at(s, k) >= 128 && str_byte_at(s, k) < 192 ? fnd-mem-safe(s, k - 1) : k;
+  def fnd-mem-cut(s, n) = len(s) <= n ? s : substring(s, 0, fnd-mem-safe(s, n)) ++ "…";
+  def fnd-mem-link(e) = "[" ++ e[1] ++ "](" ++ e[0] ++ ")";
+  def fnd-mem-full(e) = "- " ++ fnd-mem-link(e) ++ " — " ++ fnd-mem-cut(e[2], 60);
+  def fnd-mem-group(es) = "- " ++ fat-join(map(e => fnd-mem-link(e), es), " · ");
+  def fnd-mem-chunks(xs, n) = nil?(xs) ? [] : cons(take(n, xs), fnd-mem-chunks(xs[n:], n));
+  def fnd-mem-index(es) {
+   let ordered = fnd-mem-newest(es);
+   fat-join(append(map(e => fnd-mem-full(e), take(30, ordered)), map(g => fnd-mem-group(g), fnd-mem-chunks(ordered[30:], 6))), "\n") ++ "\n";
+  }
+  def fnd-mem-write(es) {
+   let text = fnd-mem-index(es);
+   let written = write_file_text(fnd-mem-dir() ++ "/MEMORY.md", text);
+   [0, len(text).str() ++ " bytes, " ++ len(es).str() ++ " notes\n", ""];
+  }
+  def fnd-mem-verb(s, argv, input) {
+   let flags = filter(w => fnd-mem-starts?(w, "--"), argv[1:]);
+   let terms = filter(w => !fnd-mem-starts?(w, "--"), argv[1:]);
+   let es = map(n => fnd-mem-entry(n), fnd-mem-names());
+   let hits = filter(e => fnd-mem-hit?(e, terms), es);
+   fnd-has?(flags, "--write") ? fnd-mem-write(es) : fnd-has?(flags, "--index") ? [0, fnd-mem-index(es), ""] : nil?(hits) ? [1, "", ""] : [0, fat-join(map(e => fnd-mem-row(e), hits), "\n") ++ "\n", ""];
+  }
+
   // ---- the wire in, the wire out -----------------------------------------------------------------------------------------------------------------------
   def fnd-reply(r) = fat-wire-render(fat-result(r[0], r[1], r[2], []));
   def fnd-verbs() = ["find", "defs", "callers", "bands", "imports", "rows", "status", "refresh"];
