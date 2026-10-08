@@ -9163,6 +9163,81 @@ static void fk_clo_smark_roots(void) {
         k = k + 1;
     }
 }
+/* ── a field node keeps its dependencies ─────────────────────────────────────
+ * A node in the shared field holds shared words: a field string, a field pair. When the field's string bank or
+ * pair bank is full, fk_field_share_value answers the LOCAL word instead, and the node then depends on this process's
+ * own string pool or heap. The node says so itself, at the moment it is filled: its index goes on fk_ndep. Both melts
+ * visit exactly these nodes -- the string melt keeps the strings they name, the pair melt counts and moves the pairs
+ * they hold, writing the moved word back into the node (or into the field pair that holds it) -- and nothing else is
+ * scanned. Before this the melts skipped every node while the field was on: a definition name minted after the bank
+ * filled was freed and read back as "" (2026-10-08). A field node another kernel filled is that kernel's own. */
+static long long *fk_ndep;
+static long long fk_ndep_n, fk_ndep_cap;
+static int fk_ndep_has_local(long long w) {
+    if (fk_is_str(w)) { long long si = fk_stri(w); return si >= 0 && si < FK_STR_BASE; }
+    if (w < 0 || (w & 1) == 0 || w <= 1) { return 0; }
+    long long p = w >> 1;
+    if (p < FK_PAIR_BASE) { return p >= 1; }
+    long long at = p - FK_PAIR_BASE;
+    while (at >= 0 && at < fk_field_pp()) {
+        if (fk_ndep_has_local(fk_fph[at])) { return 1; }
+        long long t = fk_fpt[at];
+        if (t > 1 && (t & 1) != 0 && (t >> 1) >= FK_PAIR_BASE) { at = (t >> 1) - FK_PAIR_BASE; continue; }
+        return fk_ndep_has_local(t);
+    }
+    return 0;
+}
+static void fk_ndep_add(long long idx) {
+    if (fk_ndep_n >= fk_ndep_cap) {
+        long long nc = fk_ndep_cap == 0 ? 256 : fk_ndep_cap * 2;
+        long long *q = (long long *)realloc(fk_ndep, (unsigned long)nc * 8);
+        if (q == 0) { fk_die("fk_ndep_add: out of memory -- a field node that holds local storage must be remembered, or a melt frees what it holds"); }
+        fk_ndep = q; fk_ndep_cap = nc;
+    }
+    fk_ndep[fk_ndep_n] = idx;
+    fk_ndep_n = fk_ndep_n + 1;
+}
+/* one word a dependent node holds: mode 0 counts its live local pairs, 1 moves them (answers the new word, field pairs
+ * written in place), 2 marks its local strings. A field pair is followed through; its words never move. */
+static long long fk_ndep_word(long long w, int mode) {
+    if (fk_is_str(w)) {
+        if (mode == 2) { long long si = fk_stri(w); if (si >= 0 && si < FK_STR_BASE) { fk_smark(w); } }
+        return mode == 0 ? 0 : w;
+    }
+    if (w < 0 || (w & 1) == 0 || w <= 1) { return mode == 0 ? 0 : w; }
+    long long p = w >> 1;
+    if (p < FK_PAIR_BASE) {
+        if (mode == 0) { return fk_mlive(w); }
+        if (mode == 1) { return fk_mcopy(w); }
+        fk_smark(w);
+        return w;
+    }
+    long long n = 0;
+    long long at = p - FK_PAIR_BASE;
+    while (at >= 0 && at < fk_field_pp()) {
+        if (mode == 1) { fk_fph[at] = fk_ndep_word(fk_fph[at], 1); } else { n = n + fk_ndep_word(fk_fph[at], mode); }
+        long long t = fk_fpt[at];
+        if (t > 1 && (t & 1) != 0 && (t >> 1) >= FK_PAIR_BASE) { at = (t >> 1) - FK_PAIR_BASE; continue; }
+        if (mode == 1) { fk_fpt[at] = fk_ndep_word(t, 1); } else { n = n + fk_ndep_word(t, mode); }
+        break;
+    }
+    return mode == 0 ? n : w;
+}
+static long long fk_ndep_visit(int mode) {
+    long long n = 0, k = 0;
+    while (k < fk_ndep_n) {
+        long long ix = fk_ndep[k];
+        if (mode == 1) {
+            fk_ncat[ix] = fk_ndep_word(fk_ncat[ix], 1);
+            fk_nkids[ix] = fk_ndep_word(fk_nkids[ix], 1);
+            fk_nval[ix] = fk_ndep_word(fk_nval[ix], 1);
+        } else {
+            n = n + fk_ndep_word(fk_ncat[ix], mode) + fk_ndep_word(fk_nkids[ix], mode) + fk_ndep_word(fk_nval[ix], mode);
+        }
+        k = k + 1;
+    }
+    return n;
+}
 static long long fk_smelt_reclaimed;
 static void fk_smelt(void) {
     if (fk_sp <= 0 || fk_sb == 0) { return; }
@@ -9190,8 +9265,9 @@ static void fk_smelt(void) {
     /* With the field on, a node's or pair's string words are SHARED strings (fk_field_share_value answers a shared
      * word for every local one, the bank growing by segments), and fk_smark takes no shared string into a local
      * mark. A pass over the field's nodes and pairs would mark nothing and cost every melt the whole field --
-     * millions of cold cells, seconds a melt, minutes for a lowering that melts often. */
-    fk_clo_smark_roots();
+     * millions of cold cells, seconds a melt, minutes for a lowering that melts often. Only a node that said, when it
+     * was filled, that it holds local storage (fk_ndep: the pair bank was full) is visited -- none, while the banks have room. */
+    fk_ndep_visit(2);    fk_clo_smark_roots();
     k = 0;
     while (k < fk_node_count) {
         if (fk_node[k][0] == 24) { long long si = fk_node[k][1]; if (si >= 0 && si < fk_sp) { fk_smk[si] = 1; } }
@@ -9278,6 +9354,7 @@ static void fk_melt(void) {
         nlive = nlive + fk_mlive(fk_nval[k]);
         k = k + 1;
     }
+    nlive = nlive + fk_ndep_visit(0);   /* field nodes that hold local pairs */
     lv_node = nlive - lv_stack - lv_mem - lv_rec;
     nlive = nlive + fk_clo_live_roots();
     lv_clo = nlive - lv_stack - lv_mem - lv_rec - lv_node;
@@ -9345,6 +9422,7 @@ static void fk_melt(void) {
         fk_nval[k] = fk_mcopy(fk_nval[k]);
         k = k + 1;
     }
+    fk_ndep_visit(1);   /* their local pairs moved, the new words written back into the node or its field pair */
     fk_clo_mcopy_roots();
     k = 0;
     while (k < fk_node_count) {
@@ -14750,6 +14828,8 @@ static long long fk_field_fill(long long kind, long long sub, long long a, long 
         fk_ncat[idx] = 0; fk_nkids[idx] = 1; fk_nval[idx] = 0;
         fk_nid[idx] = id;
     }
+    /* a bank that was full left a local word in this node: the node remembers it depends on this process (fk_ndep) */
+    if (fk_ndep_has_local(fk_nval[idx]) || fk_ndep_has_local(fk_ncat[idx]) || fk_ndep_has_local(fk_nkids[idx])) { fk_ndep_add(idx); }
     return idx;
 }
 /* one intern door for every kind: find the cell in the shared hash or claim a slot, fill, publish */
@@ -16125,7 +16205,10 @@ static int fk_test_recurse(int n) {
     return fk_test_recurse(n + 1) + pad[0];
 }
 extern void abort(void);
-static void fk_test_fault_now(void) {
+/* its own frame, never folded into the door: a cold path the compiler moves away from its caller is named after whatever
+ * symbol lies before it (the chain read "fk_boot_root" where it meant fk_cell_run_door), so the fault keeps a frame of its
+ * own and the door's return address names the door */
+__attribute__((noinline)) static void fk_test_fault_now(void) {
     if (fk_cstr_eq(fk_test_fault_word, "segv")) { *(volatile int *)16 = 1; }
     else if (fk_cstr_eq(fk_test_fault_word, "bus")) { raise(SIGBUS); }
     else if (fk_cstr_eq(fk_test_fault_word, "ill")) { raise(SIGILL); }
