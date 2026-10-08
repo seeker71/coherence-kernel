@@ -110,11 +110,10 @@ carry. `ftt-render` (`form-token-tool-spell.bml`, kept out of the lane's closure
 read of the spelling is the same cell, which is how receipts, bands and the census show a call.
 
 The lane teaches this form by default; `FORM_CODE_CALL_FORM=eval` teaches the constructor spelled in an eval
-(`<|form:eval|>fcap-native-tool("read",["path"],"")<|/form:eval|>`) for comparison. A JSON reply is neither. The live
-step (`fcsw-step`) takes a node; a retained JSON reply is replayed by `fcsw-json-step` in
-`form-cli-code-json-call.bml`, which the live lane does not import. JSON stays the edge for callers outside the
-body (`fat-wire-call`, the request door). `form-native-tools-guard-band.bml` pins how many places write or read
-JSON text in each lane file, so a new one is a decision.
+(`<|form:eval|>fcap-native-tool("read",["path"],"")<|/form:eval|>`) for comparison. A tool call is the cell the lane
+steps. A JSON tool reply is not read. A role reply's fields, and the doors outside this lane (`fat-wire-call`,
+the request door, form-find), still speak JSON. `form-native-tools-guard-band.bml` pins how many places write or
+read JSON text in each lane file, so a new one is a decision.
 
 ## form-find — the source tree, indexed and resident (the agents' normal lookup)
 

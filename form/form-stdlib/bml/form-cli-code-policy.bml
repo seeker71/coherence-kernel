@@ -449,58 +449,29 @@ section [form.bml] {
    !fcap-native-fields?(fields) ? nothing() : json-node-object(fields |> map(pair=>json-node-pair(pair[0],fcap-native-value(pair[1]))));
   };
   def fcap-response-object(s,obj,checker) = if (fat-wire-object?(obj) && json-object-has?(obj,"report_amend")) then fcap-amend(s,obj,checker) else fcap-object(s,faj-normalize(obj),checker);
-  def fcap-response(s,raw,checker) {
-   let obj = parse-json("native-code-response",raw);
-   fcap-response-object(s,obj,checker);
-  }
-  def fcap-step(s, raw, checker) = if fcap-done(s) then s else fcap-syntax-step(s,raw,checker,faj-complete(raw));
-  def fcap-syntax-step(s,raw,checker,end) = if (end >= 0) then fcap-response(s,raw,checker) else fcap-syntax-candidate(s,raw,checker,end,faj-closer-candidate(raw,end));
-  def fcap-json-command?(candidate) = if nothing?(candidate) then 0 else {
-   let obj = parse-json("native-json-candidate",candidate);
-   (fat-wire-object?(obj) && (json-object-has?(obj,"tool") && ((!json-object-has?(obj,"report_amend")) && (fat-wire-string?(json-object-get(obj,"tool")) && (fcap-string-array(json-object-get(obj,"arguments")) && ((!json-object-has?(obj,"input")) || fat-wire-string?(json-object-get(obj,"input"))))))));
+  def fcap-args-text?(args) = (String) value_kind(args) == "list" && all?(a => (String) value_kind(a) == "string", args);
+  def fcap-act(s, tool, args, input, checker) = if !((String) value_kind(tool) == "string" && fcap-args-text?(args) && (String) value_kind(input) == "string") then fcap-revise(s, "Tool arguments must be an array of strings.") else if (String) tool == "verify" then (nil?(args) && (String) input == "" ? fcap-verify-assisted(s, fcap-source-check(s, checker), checker) : fcap-revise(s, nil?(args) ? "verify takes no input; the caller owns its checks." : "verify takes no arguments; the caller owns its checks.")) else if (String) tool == "rehearse-bml" then ((String) input == "" ? fcap-rehearse-values(s, args, checker) : fcap-revise(s, "rehearse-bml takes empty input.")) else fcap-assisted(s, tool, args, input, checker);
+  def fcap-rehearse-values(s, args, checker) = if !fcap-tool-allowed(s, "rehearse-bml", args) then fcap-revise(s, "Tool unavailable in this role or target is not caller-writable.") else {
+   let sourceChecker = if (len(checker) >= 4) then [checker[2], checker[3]] else checker;
+   let action = fcap-control((now_unix_ms() + fcap-turns(s)), [fcap-checks(s), fcap-failures(s)], 1);
+   let result = if ((Comparable) action == 1) then fcbvs-call(fcap-docs(s), args, "", sourceChecker) else [fat-fail("native-rehearsal-branch-unavailable", fcap-docs(s)), 0];
+   fcap-control((now_unix_ms() + fcap-turns(s)), [result[1], fat-exit(result[0])], 0);
+   fcap-tool-observed(fcap-count-checks(s, result[1]), "rehearse-bml", args, "", result[0]);
   };
-  // A read-only report can contain its entire value but omit the
-  // envelope's final brace. Close only that one-member envelope; never fill
-  // an unfinished value, add report fields or complete an action at EOF.
-  def fcap-report-closer(s,raw,error) = if (!(fcap-reviewing(s) && (fat-has(["review","repair"],fcap-stage(s)) && (((Comparable) faj-error-reason(error) == 12) && ((Comparable) faj-error-at(error) == len(raw)))))) then nothing() else {
-   let candidate = (raw + "}");
-   if (!faj-valid(candidate)) then nothing() else {
-    let obj = parse-json("native-report-envelope",candidate);
-    if (!(fat-wire-object?(obj) && (((Comparable) len(json-object-pairs(obj)) == 1) && json-object-has?(obj,"report")))) then nothing() else {
-     let report = json-object-get(obj,"report");
-     if (fat-wire-object?(report) || fat-wire-string?(report)) then candidate else nothing();
-    };
+  def fcap-repair-applied(s, next, tool, args, checker) = if (!((((String) fcap-stage(s) == "repair") || fcap-source-repair-open(s)) && ((!fcap-reviewing(s)) && (fat-has(["implement", "repair"], fcap-stage(next)) && (((Comparable) fcap-failures(s) == fcap-failures(next)) && (!((Value) fcap-docs(s) == fcap-docs(next)))))))) then next else {
+   let applied = "Native controller observed the model tool apply: " + (tool + (" " + args[0]));
+   let recorded = if ((String) fcap-stage(s) == "repair") then fcap-repaired(next, "Native controller retained the failure evidence; no model diagnosis was supplied with this action.", applied, "implement") else next;
+   let checked = fcap-verify-observed(recorded, fcap-source-check(recorded, checker));
+   append(fat-take(checked, 9), cons(fcap-turns(next), fat-drop(checked, 10)));
+  };
+  def fcap-assisted(s, tool, args, input, checker) {
+   let next = fcap-repair-applied(s, fcap-tool-ready(s, tool, args, input), tool, args, checker);
+   if (!((fcap-rehearsal-budget(s) > 0) && (((String) tool == "edit") && (((Comparable) len(args) == 3) && (fcap-tool-allowed(s, "edit", args) && (((String) fcap-stage(next) == "repair") && (str_find(fcap-note(next), "edit-unchanged:", 0) >= 0))))))) then next else {
+    let doc = fat-find-doc(fcap-docs(s), args[0]);
+    let digest = hex-encode(sha256-stream-string(doc[2]));
+    if ((!fcbmr-relevant([doc])) || fcap-rehearsed(fcap-rehearsals(s), args[0], digest)) then next else fcap-auto-rehearse(next, doc, digest, checker);
    };
   };
-  def fcap-syntax-candidate(s,raw,checker,error,candidate) = if fcap-json-command?(candidate) then fcap-syntax-controlled(s,raw,checker,error,candidate) else {
-   let report = fcap-report-closer(s,raw,error);
-   if nothing?(report) then fcap-syntax-revise(s,raw,error) else fcap-syntax-controlled(s,raw,checker,error,report);
-  };
-  def fcap-syntax-controlled(s,raw,checker,error,candidate) {
-   let action = fcap-control((now_unix_ms() + fcap-turns(s)),[fcap-turns(s),fcap-calls(s),faj-error-at(error)],1);
-   if (!((Comparable) action == 1)) then fcap-syntax-revise(s,raw,error) else fcap-syntax-apply(s,raw,checker,error,candidate);
-  };
-  def fcap-syntax-apply(s,raw,checker,error,candidate) {
-   let evidence = ("JSON syntax failure: " + json-emit(faj-diagnostic(raw,error)));
-   let counted = fcap-with-memory(s,[(fcap-failures(s) + 1),evidence,fcap-reflections(s),fcap-checks(s),0]);
-   // The repaired reply enters the ordinary role, writable-path, guarded
-   // edit and caller-check boundaries. Grammar repair grants no authority.
-   let next = fcap-response(counted,candidate,checker);
-   let inserted = (len(candidate) > len(raw));
-   let at = faj-closer-offset(raw,error);
-   let method = if inserted then if ((Comparable) at == len(raw)) then "native-json-report-envelope-closure" else "native-json-missing-closer-insertion" else if ((Comparable) faj-error-reason(error) == 13) then "native-json-premature-root-closer-removal" else "native-json-mismatched-closer-removal";
-   let row = json-node-object([fcap-shape-s("method",method),fcap-shape-n("byte_offset",at),fcap-shape-n(if inserted then "inserted_byte" else "removed_byte",fat-char(if inserted then candidate else raw,at)),fcap-shape-s("before_sha256",hex-encode(sha256-stream-string(raw))),fcap-shape-s("after_sha256",hex-encode(sha256-stream-string(candidate))),fcap-shape-n("strict_candidate_valid",1),fcap-shape-n("tool_calls",(fcap-calls(next) - fcap-calls(s))),fcap-shape-n("checks",(fcap-checks(next) - fcap-checks(s))),fcap-shape-s("result_stage",fcap-stage(next))]);
-   let saved = fcap-with-json-repairs(next,append(fcap-json-repairs(next),[json-emit(row)]));
-   let note = json-node-object([json-node-pair("native_json_repair",row),json-node-pair("observation",fcap-note-cell(next))]);
-   fcap-inherit(saved,fcap-state(fcap-stage(saved),saved[1],saved[2],fcap-docs(saved),saved[4],saved[5],saved[6],saved[7],note,fcap-turns(saved),fcap-calls(saved),saved[11]));
-  }
-  def fcap-syntax-revise(s,raw,end) {
-   let evidence = ("JSON syntax failure: " + json-emit(faj-diagnostic(raw,end)));
-   let repeated = ((String) evidence == fcap-evidence(s));
-   let note = ((String) evidence + (if repeated then " The same syntax failure repeated. Correct the named byte in the original response and return one complete JSON object. No tool ran and no document changed." else " Correct this syntax in the original response and return one complete JSON object. No tool ran and no document changed."));
-   let revised = fcap-revise(s,note);
-   fcap-with-memory(revised,[(fcap-failures(s) + 1),evidence,fcap-reflections(s),fcap-checks(s),repeated]);
-  }
   def fcap-object(s, obj, checker) = if (!fat-wire-object?(obj)) then fcap-revise(s, "Response must be an object.") else if json-object-has?(obj, "tool") then if ((String) fcap-string(obj, "tool") == "verify") then fcap-verify-tool(s, obj, checker) else if ((String) fcap-string(obj,"tool") == "rehearse-bml") then fcap-rehearse(s,obj,checker) else fcap-tools-assisted(s,obj,checker) else fcap-role(s, obj, checker);
   def fcap-count-checks(s,n) = if (n <= 0) then s else fcap-count-checks(fcap-count-check(s),(n - 1));
   def fcap-rehearse(s,obj,checker) = if (!fcap-string-array(json-object-get(obj,"arguments"))) then fcap-revise(s,"rehearse-bml arguments must be strings.") else if (json-object-has?(obj,"input") && (!(fat-wire-string?(json-object-get(obj,"input")) && ((String) fcap-string(obj,"input") == "")))) then fcap-revise(s,"rehearse-bml takes empty input.") else {
