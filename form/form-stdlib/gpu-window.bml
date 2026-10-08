@@ -1,0 +1,202 @@
+//////////////////////////////////////////////////////////////////////
+// gpu-window.bml — a window in which the GPU is yours, and a proof that it was.
+//
+// A timed run on a shared device reads the device's weather, not the code: on this machine the same kernel measured 2x to 12x apart
+// from minute to minute because a resident model door, an ear lane or a glass lane held the GPU, and a fixed arithmetic loop falls
+// from 12.7 to 4-5 TFLOP/s in two seconds of sustained load. The first helper was a shell script that stopped every Metal process it
+// could find and resumed them from a list anyone could run: a stop by one client thawed another's window, a client killed mid-window
+// froze the household for two days, and the number printed whether or not the window had held. This is that helper as the body's own
+// organ, on the body's own lease (gpu-lease.bml) and doors (host_processes, host_process, host_signal):
+//
+//   OPEN    sweep the windows left by dead or overlong holders; take the machine-wide lease (a live holder is waited for); name the
+//           peers (the lease's own reading of the process table: an fkwu whose command line names a Metal door; never me, never my
+//           parents); write WHO to <lock>/window as pid:start rows BEFORE the first signal (a crash after a signal leaves the list);
+//           send each SIGSTOP; read the gauge: a fixed FMA loop on the device, best of three, in TFLOP/s x 100.
+//   CLOSE   only the holder of the lease (the window file names its token): read the gauge again while the peers are still stopped,
+//           send SIGCONT to exactly the recorded pid:start rows that are still the same process (a reused pid is another process and
+//           is not signalled), remove the window file, give the lease back. The proof is the two gauges: a window held when the
+//           device delivered the same throughput at both ends (within 15 percent); a number measured in a window that is not proven
+//           is a reading of the weather and says so.
+//   SWEEP   a window whose lease is dead (its holder gone or its pid reused), or whose lease is older than gpw-max-ms, is over: its
+//           recorded peers are resumed and the file removed, in the lock directory and in the tombstones a takeover moved it to.
+//
+// Answers are data: ["window" token peers gauge0]  ["refused" lease-answer]  ["closed" token resumed gauge0 gauge1 proven]
+//                   ["refused" "not-yours" ...]    ["swept" n]
+// The signal numbers are Darwin's (STOP 17, CONT 19; Linux's are 19 and 18).
+//////////////////////////////////////////////////////////////////////
+import form/form-stdlib/core.fk;
+import form/form-stdlib/gpu-lease.bml;
+import form/form-stdlib/metal-door.fk;
+section [form.bml] {
+  class GpuWindow {
+    def gpw-stop-sig() = 17;
+    def gpw-cont-sig() = 19;
+    def gpw-max-ms() = 1200000;
+    def gpw-settle-ms() = 300;
+    def gpw-magic() = "gpu-window-v1";
+    // the Metal doors of this body: the lease's own markers, and the lanes that hold the device while they serve
+    def gpw-markers() = append(gpl-markers(), ["q38", "spec", "dflash", "form-cli", "local-plan", "native-session", "native-turn", "dsv4", "ear-", "glass", "qwen"]);
+    def gpw-file(lock) = lock ++ "/window";
+    def gpw-nl() = byte_to_str(10);
+    def gpw-lines(text) = nothing?(text) ? [] : filter(l => (Comparable) len(l) > 0, split-on(text, gpw-nl()));
+    def gpw-join(lines) = foldl((acc, l) => acc ++ l ++ gpw-nl(), "", lines);
+    def gpw-int(s) = gpl-int(str_to_int(s));
+
+    // ---- who: pid:start rows ----
+    def gpw-row-of(pid) {
+      let row = host_process(pid);
+      (String) value_kind(row) != "list" ? "" : pid.str() ++ ":" ++ row[5].str();
+    }
+    def gpw-rows-of(pids) = filter(l => (Comparable) len(l) > 0, map(p => gpw-row-of(p), pids));
+    def gpw-pid-of(row) = gpw-int(split-on(row, ":")[0]);
+    def gpw-start-of(row) = gpw-int(split-on(row, ":")[1]);
+    // 0 sent, -1 the host refused, -2 not a pid or a signal the door sends; -3 the pid is gone or is another process now
+    def gpw-signal-row(row, sig) {
+      let pid = gpw-pid-of(row);
+      (Comparable) gpl-same-process?(pid, gpw-start-of(row)) == 1 ? host_signal(pid, sig) : 0 - 3;
+    }
+    def gpw-count-sent(rows, sig) = foldl((n, r) => (Comparable) gpw-signal-row(r, sig) == 0 ? n + 1 : n, 0, rows);
+
+    // ---- the window file: line one names the lease token and the open time, then one pid:start row a peer ----
+    def gpw-head(token) = gpw-magic() ++ " " ++ token ++ " " ++ host_monotonic_ms().str() ++ " " ++ now_unix_ms().str();
+    def gpw-read(lock) {
+      let lines = gpw-lines(read_file(gpw-file(lock)));
+      nil?(lines) ? nothing() : [split-on(lines[0], " "), lines[1:]];
+    }
+    def gpw-token-of(w) = nth(w[0], 1);
+    def gpw-opened-unix(w) = gpw-int(nth(w[0], 3));
+    def gpw-rows(w) = w[1];
+
+    // ---- the gauge: a fixed FMA loop, best of three, TFLOP/s x 100 (nothing when no device answers) ----
+    def gpw-gauge-msl() = "kernel void form_gpw_gauge (device float* y [[buffer(0)]], constant uint& iters [[buffer(1)]], uint gid [[thread_position_in_grid]]) { float a = float(gid) * 1.0e-6f + 1.0f; float b = 1.0001f; float c = 0.9999f; float d = 1.0002f; for (uint i = 0u; i < iters; i++) { a = metal::fma(a, b, c); b = metal::fma(b, c, d); c = metal::fma(c, d, a); d = metal::fma(d, a, b); } y[gid] = a + b + c + d; }";
+    def gpw-gauge-threads() = 1048576;
+    def gpw-gauge-iters() = 16384;
+    // flops of one run / 10^7, so that flops / (ms * 10^9) x 100 = this / ms
+    def gpw-gauge-units() = (gpw-gauge-threads() * gpw-gauge-iters() * 8) / 10000000;
+    def gpw-gauge-once(p, y) {
+      let batch = metal_batch_concurrent();
+      let t0 = host_monotonic_ms();
+      let queued = metal_enqueue(p, md-bind16([y], [gpw-gauge-iters()], 256, 0, 0, 0), gpw-gauge-threads());
+      let synced = metal_sync();
+      host_monotonic_ms() - t0;
+    }
+    def gpw-best(p, y, n, best) = n <= 0 ? best : gpw-best-of(p, y, n, best, gpw-gauge-once(p, y));
+    def gpw-best-of(p, y, n, best, ms) = gpw-best(p, y, n - 1, (best <= 0 || (ms > 0 && ms < best)) ? ms : best);
+    def gpw-gauge-run(p) {
+      let y = metal_buf_alloc(gpw-gauge-threads() * 4);
+      let ms = gpw-best(p, y, 3, 0);
+      let freed = metal_buf_free(y);
+      ms <= 0 ? nothing() : gpw-gauge-units() / ms;
+    }
+    def gpw-gauge() {
+      let p = metal_pipeline(gpw-gauge-msl(), "form_gpw_gauge");
+      ((String) value_kind(p) != "int" || p <= 0) ? nothing() : gpw-gauge-run(p);
+    }
+    // a window is proven when the device gave the same throughput at both ends
+    def gpw-proven?(g0, g1) = (nothing?(g0) || nothing?(g1)) ? false : ((g1 * 100 >= g0 * 85) && (g0 * 100 >= g1 * 85));
+
+    // ---- sweeping: windows whose holder is gone or whose time is over ----
+    def gpw-over?(lock, w) {
+      let j = gpl-judge(lock);
+      (String) j[0] == "dead" ? true : (((String) j[0] == "live") && (now_unix_ms() - gpw-opened-unix(w) > gpw-max-ms()));
+    }
+    def gpw-end-window(file, w) {
+      let n = gpw-count-sent(gpw-rows(w), gpw-cont-sig());
+      let gone = host_path_remove(file);
+      n;
+    }
+    def gpw-sweep-lock(lock) {
+      let w = gpw-read(lock);
+      (nothing?(w) || !gpw-over?(lock, w)) ? 0 : gpw-end-window(gpw-file(lock), w);
+    }
+    // a takeover renames a dead lease to <lock>.gone/<token>: its window file, if any, goes with it
+    def gpw-sweep-tombs(lock) {
+      let dir = gpl-gone-dir(lock);
+      let names = (Comparable) host_path_exists(dir) == 1 ? (host_dir_list(dir) ?? []) : [];
+      foldl((n, name) => n + gpw-sweep-tomb(dir ++ "/" ++ name), 0, names);
+    }
+    def gpw-sweep-tomb(path) {
+      let lines = gpw-lines(read_file(path ++ "/window"));
+      nil?(lines) ? 0 : gpw-end-window(path ++ "/window", [split-on(lines[0], " "), lines[1:]]);
+    }
+    def gpw-sweep(lock) = ["swept", gpw-sweep-lock(lock) + gpw-sweep-tombs(lock)];
+
+    // ---- opening ----
+    def gpw-open(lock, label, markers) = gpw-open-cool(lock, label, markers, gpw-cool-wait-ms());
+    // cool-ms: how long the open may wait for the device to come back to its remembered ceiling (0: take the window as the device is)
+    def gpw-open-cool(lock, label, markers, cool-ms) {
+      let swept = gpw-sweep(lock);
+      let ans = gpu-lease-take(lock, label, gpl-wait-ms());
+      (Comparable) gpu-lease-held?(ans) != 1 ? ["refused", ans] : gpw-open-held(lock, markers, gpu-lease-token(ans), cool-ms);
+    }
+    // the device settles after its peers stop: the queued work drains and the clock comes back. Read the gauge until two readings in a row
+    // agree within 10 percent (at most gpw-settle-tries), and open the window on the last: the first window of 2026-10-08 opened at 549 and
+    // closed at 1057 (TFLOP/s x 100) because it measured while the device was still coming back.
+    def gpw-near?(a, b) = (nothing?(a) || nothing?(b)) ? false : ((b * 100 >= a * 90) && (a * 100 >= b * 90));
+    def gpw-settle-tries() = 10;
+    def gpw-settle(prev, n) {
+      let g = gpw-gauge();
+      (n <= 0 || nothing?(g) || gpw-near?(prev, g)) ? g : gpw-settle-again(g, n);
+    }
+    def gpw-settle-again(g, n) {
+      let nap = host_sleep_ms(gpw-settle-ms());
+      gpw-settle(g, n - 1);
+    }
+    // A stable reading is not a cool one: the device just off heavy load can sit stably low (298 at open, 1057 at close, 2026-10-08). So the
+    // best gauge this machine has shown is remembered (gpw-ceiling-file), and a window opens cool when its reading is within 80 percent of
+    // it; the open waits up to gpw-cool-wait-ms for the device to come back and says what it got if it did not.
+    def gpw-ceiling-file() = ".hearth/gpu-gauge-ceiling";
+    def gpw-ceiling() = gpw-int(trim(read_file(gpw-ceiling-file()) ?? "0"));
+    def gpw-ceiling-note(ceil, g0, g1) {
+      let best = gpw-max3(ceil, nothing?(g0) ? 0 : g0, nothing?(g1) ? 0 : g1);
+      let made = host_dir_mkdir(".hearth");
+      (best > ceil) ? write_file_text(gpw-ceiling-file(), best.str()) : 0;
+      best;
+    }
+    def gpw-max3(a, b, c) = (a >= b && a >= c) ? a : (b >= c ? b : c);
+    def gpw-cool?(g, ceil) = nothing?(g) ? false : ((ceil <= 0) || (g * 100 >= ceil * 80));
+    def gpw-cool-wait-ms() = 90000;
+    def gpw-cool-poll-ms() = 2000;
+    def gpw-cool-wait(g, ceil, until) {
+      (nothing?(g) || gpw-cool?(g, ceil) || host_monotonic_ms() >= until) ? g : gpw-cool-again(ceil, until);
+    }
+    def gpw-cool-again(ceil, until) {
+      let nap = host_sleep_ms(gpw-cool-poll-ms());
+      gpw-cool-wait(gpw-gauge(), ceil, until);
+    }
+    def gpw-open-held(lock, markers, token, cool-ms) {
+      let rows = gpw-rows-of(gpl-peers(lock, markers));
+      let wrote = write_file_text(gpw-file(lock), gpw-join(cons(gpw-head(token), rows)));
+      let sent = gpw-count-sent(rows, gpw-stop-sig());
+      let settled = host_sleep_ms(gpw-settle-ms());
+      let ceil = gpw-ceiling();
+      let g0 = gpw-cool-wait(gpw-settle(nothing(), gpw-settle-tries()), ceil, host_monotonic_ms() + cool-ms);
+      ["window", token, rows, g0, ceil];
+    }
+
+    // ---- closing: only the holder ----
+    def gpw-close(lock, win) {
+      let w = gpw-read(lock);
+      nothing?(w) ? ["closed", win[1], 0, win[3], nothing(), false, "window-was-swept", win[4]] : gpw-close-mine(lock, win, w);
+    }
+    def gpw-close-mine(lock, win, w) = (String) gpw-token-of(w) != win[1] ? ["refused", "not-yours", gpw-token-of(w)] : gpw-close-held(lock, win, w);
+    def gpw-close-held(lock, win, w) {
+      let g1 = gpw-gauge();
+      let resumed = gpw-end-window(gpw-file(lock), w);
+      let given = gpu-lease-release(lock, win[1]);
+      let ceil = gpw-ceiling-note(win[4], win[3], g1);
+      ["closed", win[1], resumed, win[3], g1, gpw-proven?(win[3], g1) && gpw-cool?(win[3], win[4]), (String) given[0], ceil];
+    }
+
+    // run a thunk inside a window: [the thunk's answer, the window's report]
+    def gpw-with-lock(lock, label, markers, thunk) = gpw-with-cool(lock, label, markers, gpw-cool-wait-ms(), thunk);
+    def gpw-with-cool(lock, label, markers, cool-ms, thunk) {
+      let win = gpw-open-cool(lock, label, markers, cool-ms);
+      (String) win[0] != "window" ? [nothing(), win] : gpw-with-run(lock, win, thunk());
+    }
+    def gpw-with-run(lock, win, answer) = [answer, gpw-close(lock, win)];
+    def gpw-with(label, thunk) = gpw-with-lock(gpu-lease-path(), label, gpw-markers(), thunk);
+    // the report as the one line a measurement prints beside its number
+    def gpw-report-line(rep) = (String) rep[0] != "closed" ? "gpu window  NOT HELD  " ++ value_str(rep) : "gpu window  " ++ (rep[5] ? "PROVEN" : "NOT PROVEN") ++ "  gauge " ++ value_str(rep[3]) ++ " -> " ++ value_str(rep[4]) ++ " (TFLOP/s x 100)" ++ ((Comparable) len(rep) > 7 ? ", ceiling " ++ rep[7].str() : "") ++ "  resumed " ++ rep[2].str();
+  }
+}

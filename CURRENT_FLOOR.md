@@ -846,7 +846,22 @@ voice-master-band         -> 1048575  filters, shelves, compressor profiles, roo
 voice-score-band          -> 4095     whisper round trip per piece: WER, CER, and two readings of Persian joiners
 voice-measure-band        -> 511      loudness, range, peaks, pauses, centroid, F0 and level jumps on the device
 gpu-lease-band            -> 16383    one Metal client at a time: owner, staleness, tombstone takeover
+gpu-window-band           -> 255      a GPU window: peers paused and resumed only by their holder, swept when the holder is gone, proven by a gauge
 ```
+
+A timed run on a shared device reads the device's weather: the same kernel measured 2x to 12x apart from minute to minute while a resident model
+door, an ear lane or a glass lane held the GPU, and a fixed FMA loop falls from 12.7 to 4-5 TFLOP/s in two seconds of sustained load. The GPU window
+(`gpu-window.bml`, door `observe/gpu-window-run.bml`) is the body's organ for it, on the lease above and on `host_processes`, `host_process` and
+`host_signal`: it takes the machine-wide lease, names the peers the lease reads from the process table (an fkwu whose command line names a Metal
+door, never itself or its parents), records them as `pid:start` rows in `<lock>/window` before the first SIGSTOP, waits for the device to settle (two
+gauge readings within 10 percent) and to come back to 80 percent of the best gauge this checkout has seen (`.hearth/gpu-gauge-ceiling`, at most 90 s), and
+opens on a gauge: a fixed FMA loop on the device, best of three, in TFLOP/s x 100. Its close is the holder's alone (the window file names the lease
+token), reads the gauge again with the peers still stopped, sends SIGCONT to exactly the recorded rows that are still the same process (a reused pid is
+another process), and prints one line: `gpu window  PROVEN | NOT PROVEN | NOT HELD  gauge a -> b`. A window whose holder died, or that is older than
+20 minutes, is swept by the next open or by `sweep`. `printf 'with <cell>\n' | ./fkwu observe/gpu-window-run.bml` runs a cell in-process inside a
+window (`cell_run`, no child process). A number printed beside NOT PROVEN is a reading of the weather. A peer already stopped by someone else when a
+window opens is resumed by its close: the host's process rows carry no run state to tell it apart. It replaces the shell helper whose stop was
+ownerless (one client's stop thawed another's window; a killed client left the household frozen for two days).
 
 Measured on the sleep text (the body's own whisper, taught text word / character error): en 2.2% / 1.2%,
 pt 4.8% / 1.4%, id 2.1% / 0.3%, fa 13.8% characters (48% by words). Unseen sentences: en 6.1 / 2.9, pt 8.5 / 2.4,
