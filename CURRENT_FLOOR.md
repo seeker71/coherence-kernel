@@ -966,6 +966,15 @@ kernel has run, `(70)` and `(71)` the shared string bytes and slots claimed, `(7
 the pair segments this kernel has mapped. `melt-cost-band` reads 15: at least eight melts, a mean under 400 ms, what
 the churn kept intact.
 
+Where the string melt's work is born: `FK_STRING_BIRTHS 1` in `fkwu.conf` charges every string that takes a slot to the
+recipe that minted it and writes `.fkwu-strings.<pid>` at exit (the forty heaviest). Measured 2026-10-08: lowering
+`form-path.bml` took 45,973 new slots and the melt reclaimed 360,734 strings; `form-find-band` 416,312 and 5,530,157,
+13,227,555 of its births in `split-on-loop` (the band's unindexed oracle re-splits every file by design); 300 resident
+calls took 0 new slots while the melt reclaimed 28,968 (the melt is what keeps a resident loop flat). A cold
+`form-find` query mints 76,000 to 145,000 strings: 54,725 in `fnd-defs-hit` (the index's own names, kept) and up to
+42,864 in `str-spans-pair` (a join interns every pairwise intermediate). The churn is interning intermediates: every
+`str_concat` result is interned, though only the last of a join is kept.
+
 A closure row lives while a root reaches it: the value stack, memory cells, records, nodes, held lets, the method
 table, and the captures of a row that is itself reached. A melt also keeps the rows made since the melt before it
 (`FK_CLO_YOUNG`: a row survives exactly one melt unrooted), copies only what a kept row captured, slides those values
