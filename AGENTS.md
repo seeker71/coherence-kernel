@@ -749,9 +749,10 @@ plainly once, and give the conversation your attention.
     living. Repeating that picture in chat is noise. Recipe:
     [`form/form-stdlib/land-cadence.fk`](form/form-stdlib/land-cadence.fk).
     Door: `./fkwu form/form-stdlib/land-cadence-live.fk`.
-11. **Cells run in-process: take the value.** The body does not begin `./fkwu` to run a cell and parse stdout, stderr and an exit
-    code (Urs, 2026-10-04). A cell is called in the process that needs it, and its value, its printed output, its diagnostics and
-    the name of a stop come back as one record (`cell_run`), with a deadline instead of a kill and a stdin that is a value.
+11. **Cells run in-process: pass and take the value.** Call `cell_call(path, argument, deadline)` in the process that needs the
+    tool. The cell reads its actual Form value with `cell_input()` and returns a native record containing its value, structured
+    diagnostics, named stop and timing. Internal calls need no stdin, stdout, stderr, address text or temporary I/O files.
+    `cell_run` retains the text adapter for cells whose callers still consume lines or rendered output.
     Parallelism is sharding (an operator starts the shards), not children; a worker that can wedge in a device wait is a service
     the host's manager starts, read through the shared field and ended with `host_signal`. What may still begin a program: the `cc`
     that builds the seed, `git` until Urs decides, and a service the manager starts. What is built, what waits on the seed, and the

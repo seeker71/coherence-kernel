@@ -249,7 +249,7 @@ extern int vdprintf(int, const char *, __builtin_va_list);
  * line through fk_write_all_raw/dprintf/vdprintf, so ONE definition each, here, is the whole sink. With no
  * sink on, each passes straight to libc: the check is one load and one branch. */
 extern int vprintf(const char *, __builtin_va_list);
-static int fk_sink_on;            /* 1: stdout bytes go to the capture buffer */
+static int fk_sink_on;            /* 1: capture text; 2: native value/diagnostics only */
 static int fk_cell_diag_on;       /* 1: stderr lines are dropped and the organ voicings become rows */
 static int fk_cell_in_on;         /* 1: read_line draws from the cell's stdin value */
 static int fk_sink_putchar(int c);
@@ -264,7 +264,9 @@ static void fk_dg_commit(long long at);
 #define dprintf(fd, ...) ((fk_cell_diag_on && (fd) == 2) ? 0 : (dprintf)((fd), __VA_ARGS__))
 #define vdprintf(fd, f, ap) ((fk_cell_diag_on && (fd) == 2) ? 0 : (vdprintf)((fd), (f), (ap)))
 /* the deadline: a count of walker steps, checked against the clock every 16384th (fk_walk, fk_walk_body) */
-static long long fk_cell_deadline_ms;   /* 0: none; else the fk_now_ms the unit must end by */
+static long long fk_mono_ns(void);
+static long long fk_cell_arg_slot = -1; /* Form cell frames take this slot when residency moves out of the seed. */
+static long long fk_cell_deadline_ms;   /* 0: none; else monotonic milliseconds the unit must end by */
 static unsigned long long fk_cell_tick;
 static void fk_cell_deadline_hit(void);
 #define FK_CELL_TICK() do { if (fk_cell_deadline_ms != 0 && ((++fk_cell_tick) & 16383ULL) == 0) { fk_cell_deadline_hit(); } } while (0)
@@ -280,7 +282,7 @@ static int fk_win_const_ok(long long row);
 static const char *fk_cell_root_path;   /* the cell being run: a stop in its own top-level frame is named for it */
 static long long fk_cell_read_line(void);
 static long long fk_cell_read_bytes(long long max);
-static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw);
+static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw, int native_only);
 static long long fk_cell_dep_find(const char *path);
 static long long fk_cell_dep_find_raw(const char *path);
 static void fk_cell_dep_init(long long idx);
@@ -288,7 +290,7 @@ static void fk_cell_dep_union(long long owner, long long child);
 #else
 #define fk_cell_read_line() 0
 #define fk_cell_read_bytes(m) 0
-#define fk_cell_run_door(a, b, c, d) fk_nothing
+#define fk_cell_run_door(a, b, c, d, e) fk_nothing
 #define fk_cell_dep_find(p) (-1)
 #define fk_cell_dep_find_raw(p) (-1)
 #define fk_cell_dep_init(i) do { } while (0)
@@ -301,6 +303,7 @@ static int fk_win_on;
 static int fk_cell_collect;
 static int fk_cell_diag_on;
 static int fk_cell_in_on;
+static long long fk_cell_arg_slot = -1;
 static long long fk_prescan_from;
 static long long fk_cell_base_dep;
 #define fk_win_row_ok(row) 1
@@ -10926,7 +10929,7 @@ static long long fk_host_watch(long long x) {
     long long wait52 = dlw52 >> 1;
     if (wait52 < 0) { return (0 - 2) * 2; }
     if (fk_cell_deadline_ms != 0) {
-        long long left52 = fk_cell_deadline_ms - fk_now_ms();
+        long long left52 = fk_cell_deadline_ms - fk_mono_ns() / 1000000LL;
         if (left52 < 1) { left52 = 1; }
         if (wait52 == 0 || left52 < wait52) { wait52 = left52; }
     }
@@ -18272,7 +18275,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * bus (open, close, tail, name) -- see fk_bus_door; mode 33: metal_buf_fill, below; modes 34-49: host_signal, host_chmod,
          * host_symlink, host_link, host_sync, host_getenv, host_mkdir_mode, host_localtime, host_os, host_file_holders,
          * host_file_mode, host_file_copy, host_file_identity, host_utimes, host_realpath, host_pwrite (49, below) -- see fk_host_door;
-         * mode 50: cell_run -- see fk_cell_run_door; any other mode answers nothing. */
+         * mode 50: cell_run; mode 53: cell_input -- the active cell's rooted argument. */
+        if ((fm201 >> 1) == 53) { return fk_cell_arg_slot < 0 ? fk_nothing : fk_vs[fk_cell_arg_slot]; }
         if ((fm201 >> 1) == 49) {
             /* MODE 49 -- host_pwrite(path, offset, bytes): three arguments, so the rewrite row builds
              *     fk_smknode(201, LIT 49, path, (cons offset bytes))
@@ -18287,21 +18291,23 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_host_pwrite(fx201, ow49, dw49);
         }
         if (((fm201 >> 1) >= 34 && (fm201 >> 1) <= 48) || (fm201 >> 1) == 51 || (fm201 >> 1) == 52) { return fk_host_door(fm201 >> 1, fx201); } /* before the >= 26 range below, which would take them for byte-file doors */
-        if ((fm201 >> 1) == 50) {
-            /* MODE 50 -- cell_run(path, arg, deadline_ms, stdin): a unit of Form run in this process, answered as a record
+        if ((fm201 >> 1) == 50 || (fm201 >> 1) == 54) {
+            /* MODE 50 -- cell_run(path, arg, deadline_ms, stdin); MODE 54 -- cell_call(path, arg, deadline_ms).
+             * Both answer a native record; mode 54 has no stream operand or capture.
              * (see fk_cell_run_door). The rewrite row builds
              *     fk_smknode(201, LIT 50, path, (cons arg (cons deadline stdin)))
-             * so the three trailing operands live in the leaf node's third child, a tag-19 chain read child by child. */
+             * Mode 54 needs only (cons arg deadline). Operands stay rooted while their neighbors are walked. */
+            int native_only = (fm201 >> 1) == 54;
             long long rn35 = fk_node[i][3];
             if (rn35 == 0 || fk_node[rn35][0] != 19) { return fk_nothing; }
             long long rm35 = fk_node[rn35][2];
-            if (rm35 == 0 || fk_node[rm35][0] != 19) { return fk_nothing; }
+            if (!native_only && (rm35 == 0 || fk_node[rm35][0] != 19)) { return fk_nothing; }
             fk_vp(fx201);
             fk_vp(fk_walk(fk_node[rn35][1], fp));
-            fk_vp(fk_walk(fk_node[rm35][1], fp));
-            fk_vp(fk_walk(fk_node[rm35][2], fp));
+            fk_vp(fk_walk(native_only ? rm35 : fk_node[rm35][1], fp));
+            fk_vp(native_only ? fk_nothing : fk_walk(fk_node[rm35][2], fp));
             /* read back from the stack: a melt between the walks moves what they hold */
-            long long r35 = fk_cell_run_door(fk_vs[fk_vsp - 4], fk_vs[fk_vsp - 3], fk_vs[fk_vsp - 2], fk_vs[fk_vsp - 1]);
+            long long r35 = fk_cell_run_door(fk_vs[fk_vsp - 4], fk_vs[fk_vsp - 3], fk_vs[fk_vsp - 2], fk_vs[fk_vsp - 1], native_only);
             fk_vsp = fk_vsp - 4;
             return r35;
         }
@@ -18829,9 +18835,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((long long)fk_tc.tv_sec * 1000000 + (long long)fk_tc.tv_nsec / 1000) << 1;
     }
     if (t == 182) {
-        struct timespec fk_ts;
-        clock_gettime(CLOCK_MONOTONIC, &fk_ts);
-        return ((long long)fk_ts.tv_sec * 1000 + (long long)fk_ts.tv_nsec / 1000000) << 1;
+        return (fk_mono_ns() / 1000000LL) << 1;
     }
     if (t == 183) {
         /* host_sleep_ms n: rest n ms landing within half a millisecond; host_sleep_ms (list n watch...): rest at most n ms,
@@ -27016,7 +27020,7 @@ static char *fk_err_buf;
 static long long fk_err_n;
 static long long fk_err_cap;
 static void fk_err_put(const char *p, long long n) {
-    if (n <= 0) { return; }
+    if (fk_sink_on == 2 || n <= 0) { return; }
     if (fk_err_n + n + 1 > fk_err_cap) {
         long long nc = fk_err_cap > 0 ? fk_err_cap : 4096;
         while (nc < fk_err_n + n + 1) { nc = nc * 2; }
@@ -27029,12 +27033,14 @@ static void fk_err_put(const char *p, long long n) {
     fk_err_n = fk_err_n + n;
 }
 static int fk_sink_putchar(int c) {
+    if (fk_sink_on == 2) { return c & 255; }
     if (!fk_sink_on) { return (putchar)(c); }
     char b = (char)c;
     fk_sink_put(&b, 1);
     return c & 255;
 }
 static int fk_sink_printf(const char *fmt, ...) {
+    if (fk_sink_on == 2) { return 0; }
     __builtin_va_list ap;
     __builtin_va_list ap2;
     __builtin_va_start(ap, fmt);
@@ -27147,7 +27153,7 @@ static void fk_dg_commit(long long at) {
 static jmp_buf *fk_cell_jb;
 static int fk_cell_hit;
 static void fk_cell_deadline_hit(void) {
-    if (fk_now_ms() < fk_cell_deadline_ms) { return; }
+    if (fk_mono_ns() / 1000000LL < fk_cell_deadline_ms) { return; }
     if (fk_cell_jb != 0) {
         fk_cell_hit = 2;
         if (fk_cell_diag_on) {
@@ -27428,12 +27434,13 @@ static void fk_cell_rows_replay(long long root) {
         k = k + 1;
     }
 }
-static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw) {
+static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw, int native_only) {
     char path[FK_PATH_CAP];
-    long long wall0 = fk_now_ms(), cpu0 = fk_cell_cpu_us();
+    long long mono0 = fk_mono_ns() / 1000000LL, cpu0 = fk_cell_cpu_us();
     long long deadline = 0, value = fk_nothing, root = -1, stopped = fk_nothing, errors = 0, vsp0 = fk_vsp;
     int resident = 0, how = 0, refused = 0, check_only = 0;
     const char *refusal = "";
+    fk_vp(argw); /* keep the typed argument rooted while the unit and its dependencies load */
     /* the caller's sinks, put back on the way out (a cell may call cell_run) */
     char *sv_buf = fk_sink_buf; long long sv_n = fk_sink_n, sv_cap = fk_sink_cap; int sv_on = fk_sink_on;
     char *sv_err = fk_err_buf; long long sv_err_n = fk_err_n, sv_err_cap = fk_err_cap;
@@ -27441,6 +27448,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     fk_dgrow_t sv_cur = fk_dg_cur; int sv_cur_live = fk_dg_cur_live;
     char *sv_in = fk_in_buf; long long sv_in_n = fk_in_n, sv_in_pos = fk_in_pos; int sv_in_on = fk_cell_in_on;
     long long sv_deadline = fk_cell_deadline_ms;
+    long long sv_argument = fk_cell_arg_slot;
     const char *sv_root_path = fk_cell_root_path;
     long long out_w, err_w, diag_w = 1, stopped_w, r;
     if (!fk_is_str(pathw)) { refused = 1; refusal = "cell_run: the unit is a path string"; }
@@ -27461,13 +27469,13 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
             else { refused = 1; refusal = "cell_run: the deadline is an int of milliseconds, the word check, or nothing"; }
         }
         else if ((dlw & 1) != 0) { refused = 1; refusal = "cell_run: the deadline is an int of milliseconds, the word check, or nothing"; }
-        else if ((dlw >> 1) > 0) { deadline = wall0 + (dlw >> 1); }
+        else if ((dlw >> 1) > 0) { deadline = mono0 + (dlw >> 1); }
     }
     fk_err_buf = 0; fk_err_n = 0; fk_err_cap = 0;
-    fk_sink_buf = 0; fk_sink_n = 0; fk_sink_cap = 0; fk_sink_on = 1;
+    fk_sink_buf = 0; fk_sink_n = 0; fk_sink_cap = 0; fk_sink_on = native_only ? 2 : 1;
     fk_dg_rows = 0; fk_dg_n = 0; fk_dg_cap = 0; fk_cell_diag_on = 1; fk_dg_cur_live = 0;
     fk_in_buf = 0; fk_in_n = 0; fk_in_pos = 0; fk_cell_in_on = 1;
-    if (!refused && inw != fk_nothing) {
+    if (!refused && !native_only && inw != fk_nothing) {
         /* stdin is a list of lines; each is read back by read_line, then end of input is nothing */
         long long q = (inw & 1) ? inw >> 1 : -1, bytes = 0, put = 0;
         if (q < 0 || (q > 0 && !FK_POK(q))) { refused = 1; refusal = "cell_run: stdin is a list of strings, or nothing"; }
@@ -27546,9 +27554,9 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
             } else if (check_only) {
                 value = fk_nothing;   /* loaded and read; nothing runs */
             } else {
-                long long fp = fk_vsp, order_n = 0, k, m;
+                long long fp = vsp0, order_n = 0, k, m;
                 long long *order;
-                fk_vp(argw);
+                fk_cell_arg_slot = fp;
                 /* a cell starts with no JIT page released: a node is its content, so the node a cell released at its close is the
                  * very node the next run of the same unit mints, and the tombstone made every call of that second run answer nothing
                  * (anf-shadow-band read 31 the first time and 3 the second, in one process). SHRINK PATH: the tombstone moves into
@@ -27637,6 +27645,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     fk_in_buf = sv_in; fk_in_n = sv_in_n; fk_in_pos = sv_in_pos; fk_cell_in_on = sv_in_on;
     fk_cell_deadline_ms = sv_deadline;
     fk_vsp = vsp0;
+    fk_cell_arg_slot = sv_argument;
     fk_collect_depth = sv_cdepth;
     fk_cellrun_n = fk_cellrun_n - 1;
     r = fk_cr_new();
@@ -27647,7 +27656,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     fk_cr_put(r, "stopped", stopped_w);
     fk_cr_put(r, "errors", errors << 1);
     fk_cr_put(r, "resident", (long long)(resident ? 1 : 0) << 1);
-    fk_cr_put(r, "ms", (fk_now_ms() - wall0) << 1);
+    fk_cr_put(r, "ms", (fk_mono_ns() / 1000000LL - mono0) << 1);
     fk_cr_put(r, "cpu_us", (fk_cell_cpu_us() - cpu0) << 1);
     return fk_rbox(r);
 }
@@ -28332,7 +28341,7 @@ static char *fk_bml_floor_call(char **paths, long long from, long long n, long l
         list = fk_cons_val(fk_sbuf(paths[i], fk_cstrlen(paths[i])), list);
     }
     fk_bml_floor_busy = fk_bml_floor_busy + 1;
-    rec = fk_cell_run_door(fk_sbuf(floor, fk_cstrlen(floor)), 0, fk_nothing, list);
+    rec = fk_cell_run_door(fk_sbuf(floor, fk_cstrlen(floor)), 0, fk_nothing, list, 0);
     fk_bml_floor_busy = fk_bml_floor_busy - 1;
     out_w = fk_cr_key_find(rec, "out");
     out = fk_str_copy_out(out_w, out_len);
