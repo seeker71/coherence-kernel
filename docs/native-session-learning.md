@@ -22,6 +22,10 @@ The integration points are the real CLI doors:
 - `session learn|{"prompt":"...","completion":"..."}` accepts an explicit
   local correction. Optional `session` and `event` values provide stable replay
   identity. `session ask|question` uses the serving adapter or the disclosed seed.
+- `cell_call("observe/form-cli-session-home-embody-run.fk", teaching, nothing())`
+  accepts the teaching as a native Form node and returns a record with `teaching`
+  and current `learning` state while the owned worker continues. Internal delivery
+  uses no text encoding or standard streams; explicit terminal drain still waits.
 
 Experiences and training examples are immutable and keyed by session/event
 identity. Replaying the same event does not add a gradient step. Reusing an
