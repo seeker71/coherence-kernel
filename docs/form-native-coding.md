@@ -76,6 +76,11 @@ Admission refusals return the planner's lease when the voice reports release.
 The planner retains original source snapshots with each verified reference.
 Publication checks those bytes, the witness and source assertions before using
 the candidate. A supplied candidate goes directly to publication and observation.
+The primary witness and affected neighboring checks run inside the same guarded
+candidate window. Their actual readings, declared expectations, source paths and
+diagnostics remain in the publication row and framebuffer. Changed neighboring
+witnesses or publication code change the verification fingerprint and permit a
+fresh choice under that contract.
 Planner executions retain their command, exit, timeout, stdout and stderr under
 `.hearth/local-plans/executions/` before temporary verification trees are removed.
 A missing reading carries the actual exit and output into the next choice. A
