@@ -73,7 +73,7 @@ cell is parsed against a **name window**: `fk_fn_lookup` and `fk_const_lookup` s
 closure. So two cells that define the same helper name (`vb-bit`) never see each other's, a library keeps one parse for every cell
 that preludes it, and a cell that forgot a prelude is told so (`unresolved-call`, `errors > 0`) although a sibling cell defining the
 name is resident (bit 2048: the fixture scope-c, in `form/form-stdlib/tests/fixtures/cell-run/scope-c.fk`, calls crs-pick and crs-lib, defines neither, and
-reads `errors` 2, while scope-a and scope-b beside it, which define crs-pick differently, answer 11 and 12 in any order). Code already parsed resolved its calls to function
+reads `errors` 2, while scope-a and scope-b beside it, which define crs-pick differently, answer 11 and 12 in any order). Each definition fills the function slot registered at its own source position. Calls prefer their unit's definitions before imports, preserving the library's two-argument `crs-pick` alongside each cell's zero-argument definition. Code already parsed resolved its calls to function
 indices at its own parse, so a later definition of a name shadows nothing that exists; this is why the old failure ("a duplicate def
 name across a file and its prelude closure: the later arity wins") needed no rename pass.
 
