@@ -21657,15 +21657,17 @@ static long long *fk_const_fwd;
  * two scopes must resolve to the INNER, currently-live registration while both are
  * in scope -- a forward scan would always find the outer/lower-indexed one first
  * and the inner one could never actually shadow it. */
+static long long fk_units_at(long long pos);
 static long long fk_fn_lookup(long long s, long long n) {
-    long long i = fk_fntop;
+    long long i = fk_fntop, own = fk_units_at(s), imported = -1;
     while (i > 0) {
         i = i - 1;
         if (fk_sym_eq2(s, n, fk_fnsym_s[i], fk_fnsym_n[i]) && (!fk_win_on || fk_win_row_ok(i))) {
-            return fk_fnidx[i];
+            if (own >= 0 && fk_units_at(fk_fnsym_s[i]) == own) { return fk_fnidx[i]; }
+            if (imported < 0) { imported = fk_fnidx[i]; }
         }
     }
-    return -1;
+    return imported;
 }
 /* returns the const ROW (not the node): the reference site builds/reuses
  * the row's shared hold node, so all references share one memo slot. */
@@ -23156,12 +23158,15 @@ static void fk_parse_top(void) {
             fk_spos = fk_sym_end(fk_spos);
             long long nlen2 = fk_spos - ns2;
 
-            /* two-pass: the pre-scan (fk_prescan_defns) already registered this name + index +
-             * arity. LOOK UP the index it assigned rather than allocating a fresh one, so the
-             * fn-index the body fills matches the one every call site (incl. forward/mutual
-             * references) resolves to. Fallback to the old allocate-on-the-fly path only if the
-             * name is somehow unregistered (defensive; pre-scan covers all top-level defns). */
-            long long idx = fk_fn_lookup(ns2, nlen2);
+            /* The prescan row belongs to this definition's source position. Name lookup is for calls:
+             * using it here filled only the last same-named definition and left earlier units with
+             * zero bodies, later visible to a cell's own window. SHRINK PATH: Form's program loader
+             * takes this source-owned binding with the cell table (docs/in-process-cells.md). */
+            long long idx = -1, own = fk_fntop;
+            while (own > 0) {
+                own = own - 1;
+                if (fk_fnsym_s[own] == ns2 && fk_fnsym_n[own] == nlen2) { idx = fk_fnidx[own]; break; }
+            }
             if (idx < 0) {
                 idx = fk_defn_next;
                 fk_defn_next = fk_defn_next + 1;
