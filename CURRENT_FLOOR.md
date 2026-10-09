@@ -981,6 +981,15 @@ its length walk compare each word they read with the heap's top and leave for th
 reads either column. `shared-pair-walk-band` reads 31, and the build without the guard dies on it (it killed
 `form-token-census` on every build: reverse of an append of two parsed arrays).
 
+A string is written with BML `+` (or `++`); it lowers to `str_concat` nested on either side, and fkwu walks a nested chain
+as ONE append (`fk_concat_chain`): the leaves in the nesting's order, each held on the value stack and checked where its
+level checked it, then their bytes copied once and the result interned once. The recipe is unchanged; every kernel
+still reads plain `str_concat`. Measured on the same three workloads: lowering `form-path.bml` reclaims 42,404 strings
+in 5 melts and 1.4 s (was 360,734, 63 and 8.9 s); 300 resident calls reclaim 0 in 0 melts (was 28,968 and 2); a loop
+building 20,000 rows of `"row " + k.str() + ": " + ...` takes 50,017 string slots (was 190,017). A `+` whose operands
+the compiler cannot type stays `bml-value-add`, and a join over a list built at run time (`str-spans`, `fat-join`)
+still pairs its pieces: those are the churn left.
+
 A closure row lives while a root reaches it: the value stack, memory cells, records, nodes, held lets, the method
 table, and the captures of a row that is itself reached. A melt also keeps the rows made since the melt before it
 (`FK_CLO_YOUNG`: a row survives exactly one melt unrooted), copies only what a kept row captured, slides those values

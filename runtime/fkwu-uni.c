@@ -17754,6 +17754,48 @@ static long long fk_prog_read(long long pid, long long spec) {
     munmap(D, (size_t)dsz);
     return out;
 }
+/* A chain of str_concat is one append. BML writes a string as a + b + c (or a ++ b ++ c); it lowers to str_concat nested
+ * on either side, and each level used to intern its own piece -- a join of n parts minted n - 1 strings the program never
+ * kept (the string melt's churn, 2026-10-08). The leaves of the chain are walked in the order the nesting walks them,
+ * each held on the value stack, each level's own leaves checked as that level checked them; then their bytes are copied
+ * once and the result interned once. The recipe is unchanged: every kernel still reads plain str_concat. */
+static void fk_concat_leaves(long long i, long long fp) {
+    long long at0 = -1, at1 = -1;
+    long long c = fk_node[i][1];
+    if (c >= 0 && c < fk_node_count && fk_node[c][0] == 27) { fk_concat_leaves(c, fp); }
+    else { long long w = fk_walk(c, fp); at0 = fk_vsp; fk_vp(w); }
+    c = fk_node[i][2];
+    if (c >= 0 && c < fk_node_count && fk_node[c][0] == 27) { fk_concat_leaves(c, fp); }
+    else { long long w = fk_walk(c, fp); at1 = fk_vsp; fk_vp(w); }
+    long long s0 = at0 >= 0 ? fk_stri(fk_vs[at0]) : 0, s1 = at1 >= 0 ? fk_stri(fk_vs[at1]) : 0;
+    if ((at0 >= 0 && (s0 < 0 || !FK_SOK(s0))) || (at1 >= 0 && (s1 < 0 || !FK_SOK(s1)))) {
+        fk_stop("fkwu: str_concat: only strings join -- ask value_kind first");
+    }
+}
+static long long fk_concat_chain(long long i, long long fp) {
+    long long base = fk_vsp;
+    fk_concat_leaves(i, fp);
+    long long ln = 0, k = base;
+    while (k < fk_vsp) { ln = ln + FK_SLEN(fk_stri(fk_vs[k])); k = k + 1; }
+    while (fk_sbp + ln > fk_scap_b) {
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_scap_b = fk_scap_b * 2;
+        fk_sb_check();
+    }
+    long long at = fk_sbp;
+    k = base;
+    while (k < fk_vsp) {
+        long long si = fk_stri(fk_vs[k]);
+        long long n = FK_SLEN(si);
+        const char *src = FK_SBYTES(si);
+        long long j = 0;
+        while (j < n) { fk_sb[at + j] = src[j]; j = j + 1; }
+        at = at + n;
+        k = k + 1;
+    }
+    fk_vsp = base;
+    return fk_strv(fk_sintern(fk_sbp, ln));
+}
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 194) { return fk_walk(fk_node[i][2], fp); }
     if (t == 9) {
@@ -17855,6 +17897,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return 0;
     }
     if (t == 27) {
+        long long l27 = fk_node[i][1], r27 = fk_node[i][2];
+        if ((l27 >= 0 && l27 < fk_node_count && fk_node[l27][0] == 27) || (r27 >= 0 && r27 < fk_node_count && fk_node[r27][0] == 27)) {
+            return fk_concat_chain(i, fp);
+        }
         long long wa27 = fk_walk(fk_node[i][1], fp); fk_vp(wa27); long long sa = fk_stri(wa27);
         long long sb = fk_stri(fk_walk(fk_node[i][2], fp)); fk_vsp = fk_vsp - 1;
         if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
