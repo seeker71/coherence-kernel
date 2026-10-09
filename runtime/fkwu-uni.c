@@ -18352,6 +18352,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * host_file_mode, host_file_copy, host_file_identity, host_utimes, host_realpath, host_pwrite (49, below) -- see fk_host_door;
          * mode 50: cell_run; mode 53: cell_input -- the active cell's rooted argument. */
         if ((fm201 >> 1) == 53) { return fk_cell_arg_slot < 0 ? fk_nothing : fk_vs[fk_cell_arg_slot]; }
+        /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
+        if ((fm201 >> 1) == 55) {
+            const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
+            return root55 == 0 ? fk_nothing : fk_sbuf(root55, fk_cstrlen(root55));
+        }
         if ((fm201 >> 1) == 49) {
             /* MODE 49 -- host_pwrite(path, offset, bytes): three arguments, so the rewrite row builds
              *     fk_smknode(201, LIT 49, path, (cons offset bytes))
