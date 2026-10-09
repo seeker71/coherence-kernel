@@ -155,9 +155,15 @@ section [form.bml] {
   // ── the packet the voice reads ──
   def flp-exists?(path) = file_size(path) >= 0;
   def flp-is-dir?(path) = (Comparable) fs_is_dir(path) == 1;
-  def flp-file-block(req, path) = if (!flp-exists?(path)) then mc-cat(["The file ", path, " does not exist yet.\n\n"]) else if flp-is-dir?(path) then mc-cat([path, " is a directory.\n\n"]) else flp-file-text(path, fhn-read(path), flp-where-lines(req, path));
-  // The validator and its callers remain visible; a signature is not their contract.
-  def flp-file-text(path, text, at) = mc-cat(["The file ", path, " reads in full:\n", text, "\n\n"]);
+  def flp-file-block(req, path) = if (!flp-exists?(path)) then mc-cat(["The file ", path, " does not exist yet.\n\n"]) else if flp-is-dir?(path) then mc-cat([path, " is a directory.\n\n"]) else {
+   let text=fhn-read(path); let declared=flp-names(text);
+   let focused=flp-focus(req) |> filter(name=>flp-has?(declared,name));
+   let context=nil?(focused) || len(focused)==len(declared) ? text : flp-caller-text(text,focused);
+   fb_record(["local-plan-source",path,len(text),len(context),focused],"form-cli-local-plan.bml",0);
+   flp-file-text(path,context,flp-where-lines(req,path));
+  };
+  // Selected definitions keep their callers, dependency closure and import header.
+  def flp-file-text(path, text, at) = mc-cat(["Source and dependency context for ", path, ":\n", text, "\n\n"]);
   // the line numbers the request's where names in path ("<path>:<n>" or "<basename>:<n>"), three at most
   def flp-where-line(entry, path) {
    let colon = str_find(entry, ":", 0);
@@ -179,9 +185,14 @@ section [form.bml] {
    let names=flp-source-names(flp-req-files(req));
    flp-text(row,"prompt")==flp-focus-prompt(req) && flp-text(row,"status")=="answered" && fcgp-num(row,"complete")==1 && fcgp-num(row,"released")==1 && !nil?(selected) && len(selected)==len(json-array-elements(value)) && !any?(name=>!flp-has?(names,name),selected) ? selected : [];
   }
+  def flp-name-boundary?(text,at) = at<0 || at>=len(text) || str_find(" \t\r\n`'\"()[]{}.,;:",substring(text,at,at+1),0)>=0;
+  def flp-mentioned?(text,name,from) {
+   let at=len(name)==0 ? -1 : str_find(text,name,from);
+   at<0 ? false : flp-name-boundary?(text,at - 1) && flp-name-boundary?(text,at+len(name)) ? true : flp-mentioned?(text,name,at+len(name));
+  }
   def flp-focus(req) {
    let names=flp-source-names(flp-req-files(req));
-   let named=names |> filter(name=>str_find(flp-text(req,"needs"),name,0)>=0);
+   let named=names |> filter(name=>flp-mentioned?(flp-text(req,"needs"),name,0));
    let guided=nil?(named) ? flp-guided-focus(req) : [];
    !nil?(named) ? named : !nil?(guided) ? guided : names;
   }
@@ -194,7 +205,14 @@ section [form.bml] {
    let defs=flp-names(text) |> map(name=>[name,flp-ref-text(text,[name,[],""],true) ?? ""]);
    let roots=defs |> filter(d=>any?(name=>str_find(d[1],name,0)>=0,names));
    let section=str_find(text,"section [",0);
-   (section<0 ? "" : substring(text,0,section)) + mc-cat(flp-caller-closure(defs,roots) |> map(d=>d[1] + "\n\n"));
+   flp-module-state?(text,defs) ? text : (section<0 ? "" : substring(text,0,section)) + mc-cat(flp-caller-closure(defs,roots) |> map(d=>d[1] + "\n\n"));
+  }
+  def flp-module-state?(text,defs) {
+   let scope=foldl((rest,d)=>{
+    let at=len(d[1])==0 ? -1 : str_find(rest,d[1],0);
+    at<0 ? rest : substring(rest,0,at)+substring(rest,at+len(d[1]),len(rest));
+   },text,defs);
+   flp-mentioned?(scope,"let",0) || flp-mentioned?(scope,"thought",0);
   }
   def flp-callers(req) {
    let paths=flp-req-files(req); let names=flp-focus(req);
@@ -204,7 +222,7 @@ section [form.bml] {
   def flp-callers-block(req) = mc-cat(flp-callers(req) |> map(source=>"Read-only caller definitions and their local dependency closure in " + source[0] + ":\n" + source[1] + "\n\n"));
   def flp-queue-lines(path) = if (file_size(path) < 1) then [] else filter(l => (len(trim(l)) > 0), flp-lines(fhn-read(path)));
   def flp-queue-rows(path) = map(l => if fcgp-object-line?(trim(l)) then parse-json("queue-row", trim(l)) else json-node-object([]), flp-queue-lines(path));
-  def flp-intro() = "Implement the original task in native BML. Supply the whole changed definitions and behavior cases; Form owns compilation, verification and publication. A candidate must change the requested behavior, preserve its callers, and pass cases that fail on today's implementation and on stubs. Repeating unchanged code cannot implement a change.";
+  def flp-intro() = "Implement the original task in native BML. Supply the whole changed definitions and behavior cases; Form owns compilation, verification and publication. A candidate must change the requested behavior, preserve its callers, and pass cases that fail on today's implementation and on stubs. Repeating unchanged code cannot implement a change.\nNative literal observations: true=" + true.str() + " (" + value_kind(true) + "), false=" + false.str() + " (" + value_kind(false) + "). Case expectations follow these execution values. JSON boolean nodes have their own node identity; a direct BML literal is the value observed here.";
   def flp-lens-text(lens) = lens=="narrow" ? "Lens: narrow. Focus on the smallest change that serves the original task; preserve its complete contract." : lens=="edit" ? "Lens: an existing definition. Follow the existing entry and its callers. Keep observed contracts and repair the actual operation." : "Choose behavior cases first, then implement the behavior they require. Form builds the executable witness.";
   def flp-feedback-block(feedback, prior) = if ((Comparable) len(trim(feedback)) == 0) then "" else mc-cat(["\nYour previous plan was refused by Form's verification. The exact failure:\n", feedback, if ((Comparable) len(trim(prior)) == 0) then "" else mc-cat(["\n\nYour rejected candidate:\n", flp-head(prior, flp-prior-bytes())]), "\n\nRecheck the original request against the current source and callers. The rejected candidate is not a contract: preserve only observed successes, not unchecked assumptions. When improving an existing operation, change and verify its existing entry or caller; a new uncalled helper does not improve that operation. Derive required fields and defaults from the actual validator, and construct inputs in its actual native data type. Write the whole reply again with the failure removed and the original operation improved.\n"]);
   def flp-case-words() = "Form writes the executable witness from your cases; write no proof scaffolding. Each call is a pure BML expression exercising the changed operation. equals is its expected JSON scalar or nested array. Form prints the actual results and checks every case, the unchanged implementation, both stubs and each definition's contribution. All cases together read 1; a failed case reads 0. Do not change the original task to fit a candidate. Preserve callers, optional fields and existing specialized behavior. A new helper needs its existing caller changed and observed too. BML: def name(args) = expression; or def name(args) { let x=expression; final_expression; }. Every if has then and else. Lambdas use =>. Lists are [a,b], indexing xs[0], tail xs[1:]. filter, map and foldl return values; append never mutates a binding. There is no C-style for loop. JSON objects are native nodes constructed with parse-json or json-node-object, not ordinary lists. Read the actual source for available function names and signatures.";
@@ -842,7 +860,14 @@ section [form.bml] {
     let reuse=v[0]==7 && len(said)>4 && said[4] != "" ? flp-recheck(req,ctx,said[4]) : ["refused",[],""];
     if reuse[0]=="queued" then [1,reuse[1]] else {
      let repaired=v[0]==7 && said[0]=="answered" ? flp-reference-care(req,ctx,said,v) : nothing();
-     if nothing?(repaired) then flp-finish(req,ctx,n,way,said,planner,observed) else {
+     if nothing?(repaired) then flp-finish(req,ctx,n,way,said,planner,observed) else if repaired[0]=="attention" then {
+      let reply=len(said)>4 ? said[4] : "";
+      let declined=append(v[:2],append(["Native reference care: "+repaired[1]+"\nRetained result: "+repaired[4]+"\nOriginal refusal: "+v[2]],v[3:]));
+      let total=[said[0],said[1],said[2]+repaired[2],said[3]+repaired[3],reply];
+      let row=flp-option-row(req,n,[way[0],way[1],"reference-attention"],declined,observed[0][2],[said[0],said[1],repaired[2],repaired[3],reply],started,observed[3]);
+      fhn-append(flp-ctx-ledger(ctx),json-emit(row)+"\n");
+      flp-finish(req,ctx,n,way,total,flp-planner(memory,n,way,total),[observed[0],declined,row,observed[3]]);
+     } else {
       let total=[repaired[0],repaired[1],said[2]+repaired[2],said[3]+repaired[3],repaired[4]];
       let ownership=flp-planner(memory,n,way,total);
       let fresh=flp-observed(req,ctx,n,[way[0],way[1],"reference-repair"],repaired,started,ownership);

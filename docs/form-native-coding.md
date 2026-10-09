@@ -23,10 +23,21 @@ that boundary; a completed local edit with its actual checks establishes task qu
 `task <goal mentioning an existing repository file>` admits a task without a
 caller-built source packet, candidate or checks. Form reads the named source and
 discovers its direct callers in the native BML library from current repository files.
-An explicitly named function selects its callers. For a broad request, the local
+Function names match whole request words. Focused source readings retain complete
+definitions, callers, local dependency closure and import header; broad readings
+and modules with state bindings retain the complete source. Framebuffer rows report original and admitted source
+bytes and selected names. Case guidance includes observed native literal values
+and kinds. For a broad request, the local
 triage model first selects entries from the native function catalog. Its completed,
 released answer is retained under the exact request/catalog fingerprint; only
 existing names are accepted, and source bytes are read again for every proposal.
+Reference repair retains the proposal's local model unless the caller selects
+another. An interrupted, fingerprint-matched coding checkpoint resumes before
+another whole-plan generation; its original request, witness and sources remain owned.
+Repair can choose `next: attention` with a diagnosis and next action when its
+constraints conflict or the needed change belongs to its caller. This retains
+the candidate, evidence and checks; it does not verify or publish the candidate.
+The local planner receives that finding and continues with its next choice.
 This selection guides reading and does not establish behavior. Caller excerpts
 retain complete definitions, their local dependency
 closure and import header, rather than unrelated definitions. The writable source

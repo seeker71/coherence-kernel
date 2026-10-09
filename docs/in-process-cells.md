@@ -65,6 +65,13 @@ swallow the end. The cell comes back `stopped: "deadline"` with what it had prin
 host call (`host_wait` on a hung child, an uninterruptible GPU wait) and `fk_die` (out of memory, a broken table), which end the process
 as they always did. Those are the reasons a wedge-prone worker is a service, below.
 
+`cell_path()` returns the active root's source path, including direct source execution.
+Nested calls restore the outer root. `cs-entry?(path)` in `bml/cell-said.bml`
+lets an executable own its entry while its definitions remain safe to import.
+The seed carries only the root slot; Form-owned cell frames take that identity
+with arguments and residency. The native turn uses this ownership before running
+its queue, so importing it from a witness cannot start another turn.
+
 ### Scope and residency
 
 A cell's text is read once per path and content. The collector appends the unit and the preludes it does not already hold to the
