@@ -764,6 +764,31 @@
             (fsc-bml-type-signatures (tail recipes)
                 (if (node_eq (node_category (head recipes)) fsc-rec-FNDEF-CAT)
                     (cons (fsc-bml-binding (fsc-bml-type-name (head recipes))) out) out))))
+    ;; A section's signatures with each definition's RESULT named: an annotated `def name: Kind` keeps its kind; an
+    ;; unannotated one takes the contract its body answers when typed against the section's signatures (its params
+    ;; unnamed). Three rounds let a definition that calls a later one, or itself, settle. The kinds travel in the
+    ;; discovery facts, so a caller in another unit reads them too, and a `+` over such a call lowers to str_concat or add.
+    (defn fsc-bml-def-result (recipe sigs)
+        (do (let kids (node_children recipe))
+            (let params (fsc-bml-type-params (node_children (nth kids 1))))
+            (fsc-bml-value-contract (fsc-bml-typed-in (nth kids 2) params sigs 1))))
+    (defn fsc-bml-infer-round (defs sigs out)
+        (if (nil? defs) out
+            (do (let r (head defs))
+                (let b (fsc-bml-binding (fsc-bml-type-name r)))
+                (let kind (if (str_eq (nth b 1) "") (fsc-bml-def-result r sigs) (nth b 1)))
+                (fsc-bml-infer-round (tail defs) sigs (cons (list (head b) kind) out)))))
+    (defn fsc-bml-defs-of (recipes)
+        (if (nil? recipes) (empty)
+            (if (node_eq (node_category (head recipes)) fsc-rec-FNDEF-CAT)
+                (cons (head recipes) (fsc-bml-defs-of (tail recipes)))
+                (fsc-bml-defs-of (tail recipes)))))
+    (defn fsc-bml-infer-rounds (defs prefix sigs k)
+        (if (le k 0) sigs
+            (fsc-bml-infer-rounds defs prefix (fsc-bml-infer-round defs sigs prefix) (sub k 1))))
+    (defn fsc-bml-inferred-signatures (recipes prefix)
+        (do (let defs (fsc-bml-defs-of (node_children (fsc-bml-expand (fsc-rec-do recipes)))))
+            (fsc-bml-infer-rounds defs prefix (fsc-bml-type-signatures recipes prefix) 3)))
     (defn fsc-bml-type-params (params)
         (if (nil? params) (empty)
             (cons (fsc-bml-binding (node_value (head params))) (fsc-bml-type-params (tail params)))))
@@ -1110,9 +1135,15 @@
                     (let op (if (node_eq (node_category value) fsc-rec-FNCALL-CAT)
                         (fsc-bml-type-name (head (node_children value)))
                         (fsc-source-primitive-name (node_category value))))
-                    (if (or (str_eq op "str_concat") (str_eq op "value_str")) "String"
-                        (if (or (str_eq op "len") (or (str_eq op "str_len")
-                            (or (str_eq op "add") (or (str_eq op "sub") (or (str_eq op "mul") (or (str_eq op "div") (str_eq op "mod"))))))) "Number" ""))))))
+                    (fsc-bml-native-contract op)))))
+    ;; The natives whose every answer is one kind (a stop is not an answer). A native that can answer nothing
+    ;; (substring, read_file) or a value of either kind is not here: its result stays unnamed until its use names it.
+    (defn fsc-bml-native-contract (op)
+        (if (or (str_eq op "str_concat") (or (str_eq op "value_str") (str_eq op "byte_to_str"))) "String"
+            (if (or (str_eq op "len") (or (str_eq op "str_len") (or (str_eq op "str_find") (or (str_eq op "str_byte_at")
+                (or (str_eq op "scan_run") (or (str_eq op "host_monotonic_ms") (or (str_eq op "now_unix_ms") (str_eq op "host_pid"))))))))
+                "Number"
+                (if (or (str_eq op "add") (or (str_eq op "sub") (or (str_eq op "mul") (or (str_eq op "div") (str_eq op "mod"))))) "Number" ""))))
     (defn fsc-bml-typed-add (rows)
         (if (ne (len rows) 2) (fsc-compiler-error "form.bml + requires two operands")
             (do (let left (fsc-bml-value-contract (head rows)))
@@ -2085,7 +2116,7 @@
                             (head (fsc-bml-typed-sequence recipes (empty) signatures (empty) ""))))
                         (fsc-compile-section dialect-name body out-path)))
                     (let rest (fsc-bml-walk src out-path (fsc-section-after src close) signatures
-                        (if (and contract (nothing? signatures)) (fsc-bml-type-signatures recipes prefix) prefix)))
+                        (if (and contract (nothing? signatures)) (fsc-bml-inferred-signatures recipes prefix) prefix)))
                     (list (str_concat (fsc-strip-bml-comments (fsc-sub src i pos))
                             (str_concat emitted (head rest)))
                         (nth rest 1))))))
