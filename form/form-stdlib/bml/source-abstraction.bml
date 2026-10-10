@@ -7,6 +7,8 @@ import form-stdlib/bml/native-source-inventory.bml;
 import gate/lens-text.bml;
 section [form.bml] {
  class SourceAbstraction {
+  field SourceCache = "source.fkb";
+  field SourceTextCache = "source-text.fkb";
   def sa-home() = ".hearth/abstraction-flow";
   def sa-path(leaf) = sa-home() + ("/" + leaf);
   def sa-prepare() { fs_mkdir(".hearth"); fs_mkdir(sa-home()); }
@@ -17,7 +19,25 @@ section [form.bml] {
    let temp = path + ("." + host_pid().str());
    write_form_binary(temp,node) > 0 && fs_rename(temp,path) == 0 ? path : form_error("abstraction observation publication failed");
   }
-  def sa-read(path) = file_size(path) < 0 ? [] : sa-value(read_form_binary(path));
+  def sa-read-count() = record_has(sa-census-held,"reads") ? record_get(sa-census-held,"reads") : 0;
+  def sa-read(path) = file_size(path) < 0 ? [] : {
+   let value=read_form_binary(path); record_set(sa-census-held,"reads",sa-read-count()+1); sa-value(value);
+  };
+  def sa-source-census() {
+   let held=record_has(sa-census-held,"current") ? record_get(sa-census-held,"current") : [];
+   if !nil?(held) then held else {
+    let files=foldl((index,row)=>record_set(index,row[0],row),record_new(0),sa-read(sa-path(SourceCache())));
+    let texts=foldl((index,row)=>record_set(index,row[0],row),record_new(0),sa-read(sa-path(SourceTextCache())));
+    let current=[files,texts]; record_set(sa-census-held,"current",current); current;
+   };
+  }
+  def sa-cached-file(path,source) {
+   let index=sa-source-census();
+   let cached=record_has(index[0],path) ? record_get(index[0],path) : [];
+   let prior=record_has(index[1],path) ? record_get(index[1],path) : [];
+   let valid=!nil?(cached) && len(prior)>2 && source==prior[1] && cached[1]==prior[2];
+   sa-source-row(path,source,valid ? cached : [],valid ? prior[1] : "");
+  }
   def sa-lines(s) = len(s) == 0 ? 0 : lx-count(s,"\n") + (str_byte_at(s,len(s) - 1) == 10 ? 0 : 1);
   def sa-skip(c,raw) {
    let at = skip-ws(c);
@@ -121,8 +141,10 @@ section [form.bml] {
   def sa-eligible(path) = fs-suffix?(path,".fk") || fs-suffix?(path,".bml") || fs-suffix?(path,".c") || fs-suffix?(path,".h");
   // File row: path, content fingerprint, physical lines, scope, definitions.
   def sa-file(path,source,cached,prior-text) {
-   !nsi-exact(path,source) ? form_error("abstraction source unread: " + path) :
-    !nil?(cached) && (String) source == prior-text && cached[5] == 5 ? cached :
+   !nsi-exact(path,source) ? form_error("abstraction source unread: " + path) : sa-source-row(path,source,cached,prior-text);
+  }
+  def sa-source-row(path,source,cached,prior-text) {
+   !nil?(cached) && (String) source == prior-text && cached[5] == 5 ? cached :
     [path,bml-source-fingerprint(source),sa-lines(source),sa-scope(path),
      fs-suffix?(path,".c") || fs-suffix?(path,".h") ? sa-host(source,cursor-str(source),"",1,[]) :
       sa-defs(source,cursor-str(source),!fs-suffix?(path,".bml"),"",1,[]),5];
@@ -132,9 +154,9 @@ section [form.bml] {
    sa-prepare();
    let started = host_monotonic_ms();
    let paths = filter(path => sa-eligible(path) && fs_exists(path),split-on(inventory,byte_to_str(0)));
-   let retained = file_size(sa-path("source.fkb")) < 0 ? json-node-array([]) : read_form_binary(sa-path("source.fkb"));
+   let retained = file_size(sa-path(SourceCache())) < 0 ? json-node-array([]) : read_form_binary(sa-path(SourceCache()));
    let previous = sa-value(retained);
-   let prior-texts = sa-read(sa-path("source-text.fkb"));
+   let prior-texts = sa-read(sa-path(SourceTextCache()));
    let loaded = host_monotonic_ms();
    let cached = foldl((index,row) => record_set(index,row[0],row),record_new(0),previous);
    let nodes = foldl((index,node) => record_set(index,node_value(node_children(node)[0]),node),record_new(0),node_children(retained));
@@ -142,17 +164,21 @@ section [form.bml] {
    let texts = map(path => [path,read_file(path)],paths);
    let files = map(row => sa-file(row[0],row[1],record_has(cached,row[0]) ? record_get(cached,row[0]) : [],
     record_has(text-index,row[0]) ? record_get(text-index,row[0]) : ""),texts);
+   let fingerprints=foldl((index,row)=>record_set(index,row[0],row[1]),record_new(0),files);
+   let sealed=texts |> map(row=>[row[0],row[1],record_get(fingerprints,row[0])]);
    let scanned = host_monotonic_ms();
    let changed = (Value) files != previous;
-   changed && !nil?(previous) ? fs_rename(sa-path("source.fkb"),sa-path("source-previous.fkb")) : 0;
-   changed ? sa-write-node(sa-path("source.fkb"),json-node-array(map(row =>
+   changed && !nil?(previous) ? fs_rename(sa-path(SourceCache()),sa-path("source-previous.fkb")) : 0;
+   changed ? sa-write-node(sa-path(SourceCache()),json-node-array(map(row =>
     record_has(cached,row[0]) && (Value) row == record_get(cached,row[0]) ? record_get(nodes,row[0]) : sa-json(row),files))) : "";
-   (Value) texts != prior-texts ? sa-write(sa-path("source-text.fkb"),texts) : "";
+   (Value) sealed != prior-texts ? sa-write(sa-path(SourceTextCache()),sealed) : "";
+   changed || ((Value) sealed != prior-texts) ? record_set(sa-census-held,"current",[]) : 0;
    print_str(str-join(["abstraction refresh: read-ms=",(loaded - started).str()," scan-ms=",(scanned - loaded).str()," retain-ms=",(host_monotonic_ms() - scanned).str(),"\n"]));
    fb_record(intern_node(intern_trivial_string("abstraction-census-ms"),[intern_trivial_int(host_monotonic_ms() - started)]),self_source(),0);
    files;
   }
  }
+ let sa-census-held=record_new(0);
  let sa-low-words = foldl((r,word) => record_set(r,word,1),record_new(0),sa-low());
  let sa-rich-words = foldl((r,word) => record_set(r,word,1),record_new(0),sa-rich());
 }

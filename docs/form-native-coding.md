@@ -252,17 +252,26 @@ compiler diagnostic to the tool caller. This checks syntax; imported bindings
 and behavior still need the original execution checks.
 
 `bml-api` with `arguments:[symbol names]` and empty input returns exact current
-declaration headers, source paths, lines and hashes from resident documents and
-the core, line-grammar and string-join libraries. It supplies names and argument
-order without asking a model. Empty declarations state this lookup's coverage;
-they do not establish universal absence. The three local library reads are
-reported as crossings. Documents stay unchanged; no model or process is opened.
+declaration headers, complete definitions, source paths, lines and hashes from
+resident documents, their declared import closure and the core, line-grammar and
+string-join libraries. It uses the compiler's dependency reader and loader
+resolution. Empty declarations state this lookup's coverage; they do not
+establish universal absence. An exact miss returns actual related names sharing
+the requested namespace prefix from the same source index.
+Source file reads are reported as crossings; loader resolution probes are outside
+that count. Documents stay unchanged; no model or process is opened.
 Imports and behavior still need execution evidence. Tool availability and coding
 permissions derive from the same native catalog.
-Declaration scans and hashes are reused only for byte-identical source in the
-current process. Changed source replaces its reading; sources outside the current
-resident catalog and floor libraries leave the memo. Each lookup publishes
-its elapsed time, declaration count and file crossings into the live framebuffer.
+The process memo reuses declaration scans, dependencies and hashes for
+byte-identical source. Changed source replaces its reading; sources outside the current
+closure leave the memo. Each lookup publishes elapsed time, declaration count
+and provider count into the live framebuffer.
+Cold admission reuses the native abstraction census when source bytes and paired
+snapshot fingerprints agree. Changed or unsealed entries are scanned from current
+source. SHA-256 is computed only for units supplying requested definitions;
+retained-index reads are reported separately from source reads.
+Resident documents are analyzed as supplied; repository census refreshes separately
+verify the disk content they record.
 
 Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a document, or `field` instead of `path` for a top-level report string. Inclusive nonnegative bounds use the shared ASCII-whitespace counter, including headings. Missing text differs from empty text. Failure supplies observed count and repair direction; count agreement does not establish content quality. Report checks take the report on stdin, have no document access and accept no `input` override. The additional `{kind:"provider-usage-sequences"}` report assertion takes no other field; `form/form-stdlib/bml/form-cli-code-request.bml` (`fcaq-replay-check`) owns its meaning.
 
@@ -466,7 +475,7 @@ oversized observation supplies the held value's cell without repeating its
 execution. If even that observation cannot fit, the owner retains its context
 with a capacity refusal. Context grammar travels once at admission;
 later packets carry current bindings, role guidance and actual evidence.
-`bml-api` supplies declaration, source path, line and fingerprint cells for a
+`bml-api` supplies declaration, complete definition, source path, line and fingerprint cells for a
 named function. Native search finds its callers; focused reads bring their
 ownership and state contracts into the same working context.
 Repeated inline controls returning identical evidence yield to native care in

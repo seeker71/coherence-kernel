@@ -115,35 +115,72 @@ section [form.bml] {
         // Current declarations answer library questions; the caller's execution
         // checks establish whether its program imports and uses them correctly.
         def fat-api-paths() = ["form/form-stdlib/core.fk","form/form-stdlib/line-grammar.fk","form/form-stdlib/bml/string-join.bml"];
-        def fat-api-header(text,row) {
+        def fat-api-surface(text,row) {
             let prefix=str-join-with(split-on(text,"\n")[0:row[2] - 1],"\n");
             let cursor=cur-advance(cursor-str(text),len(prefix) + (row[2] > 1 ? 1 : 0));
-            let token=sa-next(cursor,true); let raw=token[0]=="(";
-            let declared=raw ? sa-next(token[2],true) : token;
-            let named=sa-next(declared[2],raw); let header=sa-header(named[2],raw,[]);
-            nothing?(header) || named[0]!=row[0] ? nothing() : substring(text,token[1],cur-pos(header[0]));
+            fat-api-surface-at(text,row,cursor,row[1]=="form");
         }
-        def fat-api-source(path,text,names,prior,current) = nothing?(text) ? [] : {
+        def fat-api-surface-at(text,row,cursor,raw) {
+            let token=sa-next(cursor,raw);
+            let declared=raw && token[0]=="(" ? sa-next(token[2],true) : token;
+            let named=sa-next(declared[2],raw);
+            if cur-eof?(cursor) then nothing()
+            else if declared[0]!=(raw ? "defn" : "def") || named[0]!=row[0] then fat-api-surface-at(text,row,token[2],raw)
+            else { let header=sa-header(named[2],raw,[]);
+             if nothing?(header) then nothing() else {
+                let body=sa-body(header[0],raw,header[1],0,0,"",raw ? ")" : nil?(header[1]) ? ";" : "}");
+                [substring(text,token[1],cur-pos(header[0])),substring(text,token[1],body[0])];
+             };
+            };
+        }
+        def fat-api-reading(path,text,prior,current) = nothing?(text) ? nothing() : {
             let cached=record_has(prior,path) ? record_get(prior,path) : [];
-            let reading=!nil?(cached) && cached[0]==text ? cached : [text,hex-encode(sha256-stream-string(text)),sa-defs(text,cursor-str(text),true,"",1,[])];
+            let reading=!nil?(cached) && cached[0]==text ? cached : [text,nothing(),sa-cached-file(path,text)[4],bml-source-dependencies(text,!fat-ar-bml-surface?(text))];
             record_set(current,path,reading);
-            reading[2] |> filter(row => fat-has(names,row[0])) |> map(row => [row[0],path,row[2],reading[1],fat-api-header(text,row)]) |> filter(row => !nothing?(row[4]));
+            reading;
         };
-        def fat-api-declaration(row) = json-node-object([json-node-pair("path",json-node-string(row[1])),json-node-pair("line",json-node-int(row[2])),json-node-pair("source_sha256",json-node-string(row[3])),json-node-pair("declaration",json-node-string(row[4]))]);
+        def fat-api-providers(todo,prior,current,found,reads) = nil?(todo) ? [found,reads] : {
+            let pending=todo[0]; let path=pending[0];
+            if record_has(current,path) then fat-api-providers(todo[1:],prior,current,found,reads) else {
+                let source=[path,pending[2] ? read_file(path) : pending[1]];
+                let reading=fat-api-reading(path,source[1],prior,current);
+                if nothing?(reading) then record_set(current,path,[]) else 0;
+                let dependencies=nothing?(reading) ? [] : reading[3] |> map(token=>{ let resolved=bml-source-resolve(path,token); nothing?(resolved) ? [path+":"+token,nothing(),0] : [resolved,nothing(),1]; });
+                fat-api-providers(append(todo[1:],dependencies),prior,current,append(found,[source]),reads+pending[2]);
+            };
+        };
+        def fat-api-source(path,text,names,prior,current) = nothing?(text) ? [] : {
+            let reading=fat-api-reading(path,text,prior,current);
+            let matches=reading[2] |> filter(row => fat-has(names,row[0]));
+            if nil?(matches) then [] else {
+                let digest=reading[1] ?? hex-encode(sha256-stream-string(text));
+                record_set(current,path,[text,digest,reading[2],reading[3]]);
+                matches |> map(row => { let surface=fat-api-surface(text,row); nothing?(surface) ? [] : [row[0],path,row[2],digest,surface[0],surface[1]]; }) |> filter(row => !nil?(row));
+            };
+        };
+        def fat-api-declaration(row) = json-node-object([json-node-pair("path",json-node-string(row[1])),json-node-pair("line",json-node-int(row[2])),json-node-pair("source_sha256",json-node-string(row[3])),json-node-pair("declaration",json-node-string(row[4])),json-node-pair("definition",json-node-string(row[5]))]);
+        def fat-api-related(providers,current,name) {
+            let dash=str_find(name,"-",0); let underscore=str_find(name,"_",0);
+            let prefix=substring(name,0,min2(dash<0 ? len(name) : dash,underscore<0 ? len(name) : underscore));
+            foldl((names,source)=>nothing?(source[1]) ? names : foldl((held,row)=>str_find(row[0],prefix,0)==0 && !fat-has(held,row[0]) ? append(held,[row[0]]) : held,names,record_get(current,source[0])[2]),[],providers);
+        }
         def fat-bml-api(docs,args,input) = nil?(args) || input != "" ? fat-fail("bml-api-needs-symbol-arguments-and-empty-input",docs) : {
             let started=host_monotonic_ms();
+            let indexReads=sa-read-count();
             let prior=record_has(fat-api-held,"current") ? record_get(fat-api-held,"current") : record_new(0);
             let current=record_new(0);
-            let providers=fat-api-paths() |> map(path => [path,read_file(path)]);
-            let held=docs |> map(doc => fat-api-source(doc[1],doc[2],args,prior,current));
-            let floor=providers |> map(source => fat-api-source(source[0],source[1],args,prior,current));
+            let roots=append(docs |> map(doc=>[doc[1],doc[2],0]),fat-api-paths() |> map(path => [path,nothing(),1]));
+            let observed=fat-api-providers(roots,prior,current,[],0); let providers=observed[0];
+            let found=providers |> map(source => fat-api-source(source[0],source[1],args,current,current));
             record_set(fat-api-held,"current",current);
-            let rows=foldl((all,one) => append(all,one),[],append(held,floor));
-            let symbols=args |> map(name => json-node-object([json-node-pair("symbol",json-node-string(name)),json-node-pair("declarations",json-node-array(rows |> filter(row => row[0]==name) |> map(fat-api-declaration)))]));
+            let rows=foldl((all,one) => append(all,one),[],found);
+            let symbols=args |> map(name => { let exact=rows |> filter(row => row[0]==name);
+                json-node-object([json-node-pair("symbol",json-node-string(name)),json-node-pair("declarations",json-node-array(exact |> map(fat-api-declaration))),json-node-pair("related_names",json-node-array(nil?(exact) ? fat-api-related(providers,current,name) |> map(n=>json-node-string(n)) : []))]);
+            });
             let missing=providers |> filter(source => nothing?(source[1])) |> map(source => json-node-string(source[0]));
-            let result=json-node-object([json-node-pair("scope",json-node-string("current resident and floor-library declarations; bindings and behavior require execution")),json-node-pair("symbols",json-node-array(symbols)),json-node-pair("unavailable_sources",json-node-array(missing))]);
+            let result=json-node-object([json-node-pair("scope",json-node-string("current resident sources, their declared import closure and floor libraries; exact definitions and fingerprints; bindings and behavior require execution")),json-node-pair("symbols",json-node-array(symbols)),json-node-pair("unavailable_sources",json-node-array(missing)),json-node-pair("index_reads",json-node-int(sa-read-count() - indexReads)),json-node-pair("crossings_scope",json-node-string("source file reads; retained-index reads are separate; loader resolution probes are not included"))]);
             fb_record(intern_node(intern_trivial_string("bml-api"),[intern_trivial_int(host_monotonic_ms() - started),intern_trivial_int(len(rows)),intern_trivial_int(len(providers))]),"form-agent-tools",0);
-            fat-with-value(append(fat-result(0,[[result],0,"\n"],"",docs)[0:5],[len(providers)]),result);
+            fat-with-value(append(fat-result(0,[[result],0,"\n"],"",docs)[0:5],[observed[1]]),result);
         };
         def fat-ar-text(t) = fat-ar-lines(t, reverse(fat-ar-forms(t, 0, len(t), [])[1]));
         def fat-ar-lines(t, found) = if nil?(found) then "" else ((String) fat-ar-line-of(t, found[0]) + fat-ar-lines(t, found[1:]));
