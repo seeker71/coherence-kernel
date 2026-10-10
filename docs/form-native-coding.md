@@ -478,9 +478,12 @@ Caller feedback retains the previous exact observation at
 native cell rather than growing nested feedback wrappers. Delivery retries reuse
 their event identity and leave the checkpoint unchanged.
 No JSON context or JSON reply protocol crosses
-this coding model boundary. External requests, results and receipts retain their
+this coding model boundary. A role reply is read as the pairs the cell already
+holds. External requests, results and receipts retain their
 public JSON compatibility; result fields are assembled once as cells and emitted
-only at that public boundary. Old checkpoint evidence is converted at admission.
+only at that public boundary. A text site that remains names, on the function
+that holds it, who reads those bytes and why that crossing is cheaper than
+sharing the cell. Old checkpoint evidence is converted at admission.
 
 Native tool observations stay as structured cells in policy state, binary
 checkpoints and model context. Guard, read, mutation and verification metadata
