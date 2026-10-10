@@ -1,0 +1,69 @@
+// form-token-usage.bml — the Form tokens in use, per kind, from what the body already holds.
+//
+// One reading over four stores, so a change to the corpus, the trainer or the voice can be seen kind by kind:
+//   taught     the controls the trace corpus teaches (learn/form-token-traces.jsonl, rows of the train split)
+//   expected   the controls the held-out traces of an evaluation row's questions hold
+//   written    the complete controls the voice wrote in those questions' streams (ftg-scan over each stream)
+//   substitute written - expected: positive where a verb stands in for another, negative where it was not written
+// and, per family, the answers exact and the observations the answer used. Diversity is the inverse Simpson index of
+// the written kinds (how many kinds the voice effectively uses), kept in hundredths with integers only.
+//
+// Rules, not taste, name what to do next (fu-advice): a kind written under half of what was expected is under-written
+// (more cases of it, with a question only it answers); a kind written over one and a half times is over-written (the
+// neighbour it replaces needs contrast rows where only that neighbour is right).
+import form-stdlib/bml/form-token-kinds.bml;
+import form-stdlib/bml/form-token-grammar.bml;
+import form-stdlib/bml/form-token-eval.bml;
+section [form.bml] {
+ class FormTokenUsage {
+  def fu-eval-path() = "receipts/form-token-eval.jsonl";
+  def fu-corpus-path() = "learn/form-token-traces.jsonl";
+  def fu-rows() = fcgp-rows(fu-eval-path());
+  def fu-corpus() = fcgp-rows(fu-corpus-path());
+  def fu-row-at(rows, ms) = foldl((found, r) => (Comparable) (fcgp-num(r, "at_unix_ms") ?? (0 - 1)) == ms ? r : found, nothing(), rows);
+  def fu-arm(row, name) = foldl((found, a) => (String) fcgp-str(a, "arm") == name ? a : found, nothing(), ftcn-elements(row, "arms"));
+  def fu-questions(arm) = nothing?(arm) ? [] : ftcn-elements(arm, "questions_judged");
+  def fu-verbs-of(stream) = ftg-scan(stream ?? "") |> map(c => c[0]);
+  def fu-written(arm) = foldl((acc, q) => append(acc, fu-verbs-of(fcgp-str(q, "stream"))), [], fu-questions(arm));
+  def fu-trace-verbs(t) = ftcn-elements(t, "verbs") |> map(v => json-string-value(v));
+  def fu-expected-of(corpus, id) = foldl((found, t) => (String) fcgp-str(t, "id") == id ? fu-trace-verbs(t) : found, [], corpus);
+  def fu-expected(arm, corpus) = foldl((acc, q) => append(acc, fu-expected-of(corpus, fcgp-str(q, "id") ?? "")), [], fu-questions(arm));
+  def fu-taught(corpus) = foldl((acc, t) => (String) (fcgp-str(t, "split") ?? "train") == "heldout" ? acc : append(acc, fu-trace-verbs(t)), [], corpus);
+  def fu-count(vs, k) = len(filter(v => (String) v == k, vs));
+  def fu-kinds-used(vs) = len(filter(k => fu-count(vs, k) > 0, ftk-verbs()));
+  // 100 * n^2 / sum of squares: the number of kinds the voice effectively uses, in hundredths
+  def fu-effective(vs) {
+   let squares = foldl((acc, k) => acc + (fu-count(vs, k) * fu-count(vs, k)), 0, ftk-verbs());
+   squares == 0 ? 0 : (100 * len(vs) * len(vs)) / squares;
+  }
+  def fu-sum(qs, key) = foldl((acc, q) => acc + (fcgp-num(q, key) ?? 0), 0, qs);
+  def fu-families(qs) = foldl((acc, q) => any?(f => (String) f == (fcgp-str(q, "family") ?? "?"), acc) ? acc : append(acc, [fcgp-str(q, "family") ?? "?"]), [], qs);
+  def fu-in(qs, f) = filter(q => (String) (fcgp-str(q, "family") ?? "?") == f, qs);
+  // "" when the kind is used as taught; otherwise what the rule reads
+  def fu-verdict(expected, written) =
+   expected == 0 && written == 0 ? ""
+   : written * 2 < expected ? "under-written"
+   : written * 2 > expected * 3 ? "over-written"
+   : "";
+  def fu-signed(n) = n > 0 ? "+" ++ n.str() : n.str();
+  def fu-kind-line(k, taught, exp, got) = mc-cat(["[form-token-usage] ", k, ": taught ", fu-count(taught, k).str(), ", expected ", fu-count(exp, k).str(), ", written ", fu-count(got, k).str(), " (", fu-signed(fu-count(got, k) - fu-count(exp, k)), ")", fu-verdict(fu-count(exp, k), fu-count(got, k)) == "" ? "" : mc-cat(["  ", fu-verdict(fu-count(exp, k), fu-count(got, k))])]);
+  def fu-family-line(qs, f) = mc-cat(["[form-token-usage] family ", f, ": exact ", fu-sum(fu-in(qs, f), "exact").str(), " of ", len(fu-in(qs, f)).str(), ", controls ", fu-sum(fu-in(qs, f), "controls").str(), ", observations used ", fu-sum(fu-in(qs, f), "used").str()]);
+  // advice, by rule: one line per kind that is under- or over-written
+  def fu-advice-of(k, exp, got) =
+   fu-verdict(fu-count(exp, k), fu-count(got, k)) == "under-written" ? mc-cat(["[form-token-usage] advise ", k, ": under-written, add cases a question only ", k, " answers and re-ask"])
+   : fu-verdict(fu-count(exp, k), fu-count(got, k)) == "over-written" ? mc-cat(["[form-token-usage] advise ", k, ": over-written, stands in for another verb; add contrast rows where only the neighbour is right"])
+   : "";
+  def fu-advice(exp, got) = filter(l => (String) l != "", map(k => fu-advice-of(k, exp, got), ftk-verbs()));
+  def fu-lines(row, armName, corpus) {
+   let arm = fu-arm(row, armName);
+   let qs = fu-questions(arm);
+   let exp = fu-expected(arm, corpus);
+   let got = fu-written(arm);
+   let taught = fu-taught(corpus);
+   let head = [mc-cat(["[form-token-usage] arm ", armName, ": ", len(qs).str(), " question(s), exact ", fu-sum(qs, "exact").str(), ", controls ", fu-sum(qs, "controls").str(), " (", len(got).str(), " complete), observations used ", fu-sum(qs, "used").str(), ", refusals ", fu-sum(qs, "refusals").str(), ", forged ", fu-sum(qs, "forged").str()]),
+    mc-cat(["[form-token-usage] diversity: ", fu-kinds-used(got).str(), " of ", len(ftk-verbs()).str(), " kinds written, effectively ", ftcn-hundredths(fu-effective(got)), " (expected ", ftcn-hundredths(fu-effective(exp)), ")"])];
+   append(head, append(map(k => fu-kind-line(k, taught, exp, got), ftk-verbs()), append(map(f => fu-family-line(qs, f), fu-families(qs)), fu-advice(exp, got))));
+  }
+ }
+ 0;
+}
