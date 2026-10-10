@@ -111,9 +111,12 @@ read of the spelling is the same cell, which is how receipts, bands and the cens
 
 The lane teaches this form by default; `FORM_CODE_CALL_FORM=eval` teaches the constructor spelled in an eval
 (`<|form:eval|>fcap-native-tool("read",["path"],"")<|/form:eval|>`) for comparison. A tool call is the cell the lane
-steps. A JSON tool reply is not read. A role reply's fields, and the doors outside this lane (`fat-wire-call`,
-the request door, form-find), still speak JSON. `form-native-tools-guard-band.bml` pins how many places write or
-read JSON text in each lane file, so a new one is a decision.
+steps. A JSON tool reply is not read. A role reply is the pairs the lane already holds.
+The doors outside this lane (`fat-wire-call`, the request door, form-find) still speak JSON, and so does any
+text a reader outside the cell actually takes: the model packet, a log line, a checkpoint another process reads,
+a checker that stores a report string. Each of those sites names, on the function that holds it, who that reader
+is and why the bytes are the cheaper share. `form-native-tools-guard-band.bml` refuses a text site that does
+not name its reader, and pins how many places write or read JSON text in each lane file.
 
 ## form-find — the source tree, indexed and resident (the agents' normal lookup)
 

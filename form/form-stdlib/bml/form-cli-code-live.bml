@@ -22,6 +22,7 @@ section [form.bml] {
   def fcac-retained(state) = if fcam-managed(state) then ";checkpoint-retained" else ";candidate-retained-in-result";
   def fcac-sample(s, session, started) = fcac-metric(s, "tools", fcap-calls(s), started);
   def fcac-metric(s, lane, value, started) = fgtm-sample((("code." + host_pid().str()) + ("." + lane)), fgtm-absent(), "metric", "form", "qwen.coding", lane, fcap-stage(s), fgtm-absent(), fgtm-present(value), if fcap-done(s) then if ((String) fcap-stage(s) == "complete") then "ready" else "unknown" else "active", fgtm-present(started), fgtm-present(now_unix_ms()), fgtm-absent(), fgtm-absent(), "pinned", "physical-live", "form-cli-code", ["qwen", "coding", "native", fcap-stage(s)]);
+  // json-serves: a log reader outside this process. text: one line is the share; the cells stay in the lane.
   def fcac-observe(s, session, started) {
    let publish = fgtm-publish-snapshot(hearth-telemetry-root(), ("qwen.coding." + host_pid().str()), now_unix_ms(), [fcac-sample(s, session, started), fcac-metric(s, "generated-ids", fcms-generated-ids(session), started), fcac-metric(s, "repairs", fcap-failures(s), started), fcac-metric(s, "checks", fcap-checks(s), started), fcac-metric(s, "lessons-recalled", fcam-hits(s), started)]);
    let frame = fb_record(intern_trivial_int(fcap-turns(s)), "form-cli-code-live.bml", fcap-calls(s));
@@ -115,6 +116,7 @@ section [form.bml] {
   // the renewal (session, state, turns, answering [renewal result, state its prompt was built from, attempts]). A band
   // hands in its own pair to read what the lane continues with and how it ends, with no model.
   def fcac-finish-contexts(result,checker,turns,started,firstTurn,prior,number) = fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,fcac-loop,fcac-renew);
+  // json-serves: a log reader outside this process. text: the renewal line is the share; the session stays the owner.
   def fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,loop,renew) = if (!fcac-renewable(result,firstTurn,turns)) then fcac-total-result(fcac-settle(result,started),prior) else {
    let session = result[0]; let state = result[2];
    let reading = fcac-context-reading(state,number,0);
@@ -183,10 +185,11 @@ section [form.bml] {
   def fcac-reasoned-answer(result) = if (!frbg-complete(result)) then [0,"",("reasoning-reserve-" + (frbg-reason(result) + ";candidate-retained"))] else if (!frbg-stopped(frbg-session(result)) && nil?(fcac-control-submissions()) && fcac-stream-steps()==0) then [0,"","reasoning-reserve-stream-not-stopped;candidate-retained"] else [1,fat-trim(frbg-answer(result)),""];
    def fcac-reasoned-submission(first) {
     let session=fcms-generation-session(first); let calls=fcac-control-submissions();
-    !frbg-valid-session(session) || !nothing?(fcac-control-care()) ? nothing() : fcac-stream-steps()>0 && nil?(calls) ? frbg-result(session,first,frbg-empty(session),"","native-tool-stage","",1,"native-tool-executed") : len(calls)!=1 || nothing?(fcap-node-object(calls[0])) ? nothing() : frbg-result(session,first,frbg-empty(session),"",ftw-cat-name(node_category(calls[0]))=="form-code-action" ? "native-tool-stage" : "native-reply-stage","",1,"native-cell-submitted");
+    !frbg-valid-session(session) || !nothing?(fcac-control-care()) ? nothing() : fcac-stream-steps()>0 && nil?(calls) ? frbg-result(session,first,frbg-empty(session),"","native-tool-stage","",1,"native-tool-executed") : len(calls)!=1 || nothing?(fcap-cell-fields(calls[0])) ? nothing() : frbg-result(session,first,frbg-empty(session),"",ftw-cat-name(node_category(calls[0]))=="form-code-action" ? "native-tool-stage" : "native-reply-stage","",1,"native-cell-submitted");
   }
   // Initial-only and continuing reasoning share generation, privacy, action
   // admission and accounting. Each stage retains the caller's token ceiling.
+  // json-serves: a log reader outside this process. text: the reserve line is the share; the generation stays in the session.
   def fcac-reasoned(session,state,checker,turns,initial,answer,started) {
    let lane=fcap-model-lane(state);
    fcac-control-begin();
@@ -213,6 +216,7 @@ section [form.bml] {
    let current=fcac-stream-state(state);
    if !fcms-live?(session) then fcac-finish(session,fcap-terminal(current,fcms-reason(session)),started) else if !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) then fcac-replied(session,current,fat-trim(fcms-generation-text(generation)),checker,turns,started) else if fcac-stream-ended() then fcac-loop(session,current,checker,turns,started) else if ((!fcms-stopped?(session)) || (fcms-pending(session) < 0)) then fcac-incomplete(generation,current,checker,turns,started) else if fcac-stream-steps()>0 then fcac-advance(session,current,checker,turns,started) else fcac-replied(session,current,fat-trim(fcms-generation-text(generation)),checker,turns,started);
   }
+  // json-serves: a log reader outside this process. text: the incomplete line is the share; the reply bytes stay retained.
   def fcac-incomplete(generation,state,checker,turns,started) {
    let session = fcms-generation-session(generation);
    let evidence = fcac-retain-reply(fcms-generation-text(generation));
@@ -225,6 +229,7 @@ section [form.bml] {
   // An unfinished reply never becomes a call. Keep its exact own bytes,
   // count the attempt, and feed a changed choice through the existing repair
   // flow. Feedback closes the unfinished turn; only full contexts renew KV.
+  // json-serves: the model. text: the unfinished reply becomes the failure sentence the model reads; no action was taken from it.
   def fcac-incomplete-state(state,cause,evidence,count) {
     let next = fcap-rework(state,fcap-incomplete-prefix() + json-emit(json-node-object([oh-s("cause",cause),oh-s("role",fcap-stage(state)),oh-n("reply_limit",fcap-reply-token-limit(state)),oh-n("generated_ids",count),oh-s("private_reply_evidence",evidence),oh-s("change","No action from this reply was executed. Keep completed effects, documents, original goal and checks. Return a smaller complete native action or reply control for the current role. For edits, use focused reads and unique spans. An unchanged failure needs a new plan. The caller's token ceiling is unchanged.")])));
    // A checked candidate needs a shorter review, not another implementation.
@@ -241,6 +246,7 @@ section [form.bml] {
     fcac-advance(session,next,checker,turns,started);
    };
   }
+  // json-serves: a log reader outside this process. text: the reply line is the share; the submitted cell stays in the lane.
   def fcac-replied(session,state,raw,checker,turns,started) {
     let evidence = fcac-retain-reply(raw);
     let submitted = fcac-control-submissions();
@@ -293,6 +299,7 @@ section [form.bml] {
   // the same experiment, not fresh sight (form-cli-code-swerve.bml).
   // A read that worked but is bounded (the cap) is no failure: the state keeps its stage, turns and repair count and
   // only its note changes. An observation the context could not take (the window) is the failure the lane repairs.
+  // json-serves: the model. text: the bounded note is the sentence the next context reads; the document stays whole.
   def fcac-observation-capacity-state(state,evidence,cause,capBytes) {
    let note=fcap-observation-capacity-prefix() + json-emit(fcap-observation-detail(state,evidence,cause,capBytes));
    let moved=if ((String) cause == fcap-cause-cap()) then fcsw-with-note(state,note) else fcap-rework(state,note);
@@ -373,8 +380,8 @@ section [form.bml] {
    record_set(lane,"coding-steps",0); 0;
   }
   def fcac-stream-returned(lane,observed) {
-   let node=observed[2]; let obj=value_kind(node)=="node_id" ? fcap-node-object(node) : nothing();
-   if nothing?(obj) then observed else if ftw-cat-name(node_category(node))!="form-code-action" then { record_set(lane,"coding-role-pending",1); observed; } else {
+   let node=observed[2]; let held=value_kind(node)=="node_id" ? fcap-cell-fields(node) : nothing();
+   if nothing?(held) then observed else if ftw-cat-name(node_category(node))!="form-code-action" then { record_set(lane,"coding-role-pending",1); observed; } else {
     let state=record_get(lane,"coding-state"); let turns=record_get(lane,"coding-turns");
     if record_get(lane,"coding-role-pending")==1 then [ftv-nothing("role-reply-pending;tool-not-executed"),observed[1],nothing()] else {
      let moved=fcap-done(state) ? state : fcap-turns(state)>=turns ? fcap-terminal(state,"caller-turn-budget-reached"+fcac-retained(state)) : fcap-native-submission-admitted(fcsw-node-step(state,node,record_get(lane,"coding-checker")),ftw-coord(node));
@@ -407,7 +414,7 @@ section [form.bml] {
     next;
    }
    def fcac-control-returned(lane,results) {
-    let nodes=results |> map(r=>r[4]) |> filter(n=>value_kind(n)=="node_id" && !nothing?(fcap-node-object(n)));
+    let nodes=results |> map(r=>r[4]) |> filter(n=>value_kind(n)=="node_id" && !nothing?(fcap-cell-fields(n)));
     record_set(lane,"coding-submissions",append(fcac-control-submissions(),reverse(nodes)));
    record_set(lane,"coding-observed",(record_get(lane,"coding-observed") ?? 0) + len(filter(r=>ftg-result-kind(r[2])!="nothing",results)));
    if nil?(nodes) then reverse(results) |> map(r=>fcac-control-read(lane,r)) else 0;
