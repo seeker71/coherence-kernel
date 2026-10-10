@@ -34,6 +34,15 @@ existing names are accepted, and source bytes are read again for every proposal.
 Reference repair retains the proposal's local model unless the caller selects
 another. An interrupted, fingerprint-matched coding checkpoint resumes before
 another whole-plan generation; its original request, witness and sources remain owned.
+Repair edits complete source documents in its private checkpoint, with the
+planner's candidate installed at the declared definitions. Native source
+observations supply those documents and the original executable witness through
+the bound `source_context` cell. The original request and definition scope travel
+with the goal. Verification rejects changes outside that scope or to the witness,
+then runs the original planner checks before publication. Existing native BML
+rehearsal can repair an eligible writable source after a failed action.
+Repair reserves local reasoning and answer stages using the reply allowance;
+callers can select either allowance. Resuming retains the candidate and findings.
 Repair can choose `next: attention` with a diagnosis and next action when its
 constraints conflict or the needed change belongs to its caller. This retains
 the candidate, evidence and checks; it does not verify or publish the candidate.
