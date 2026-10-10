@@ -1,0 +1,85 @@
+// form-token-cycle-run.bml — the whole Form-token loop, once, in this process.
+//
+//   print -r -- "steps=100" | ./fkwu observe/form-token-cycle-run.bml        the full cycle, waits for a quiet GPU
+//   print -r -- "dry" | ./fkwu observe/form-token-cycle-run.bml              the model-free stages, then what the rest would run
+//
+// The cycle is the loop the Form tokens have to walk to improve the voice that writes them, with every stage a door the body
+// already holds, run as a cell here (cell_run: no child process, nothing parsed back from a pipe):
+//   1  refresh the trace families whose answers move with the receipts (knowledge-receipts, knowledge-enrich), so the
+//      trainer's replay finds Form answering as the rows recorded
+//   2  the trainer's census: every row must be admitted (a refusal stops the cycle: the corpus and the contract disagree)
+//   3  wait for a quiet GPU (the evaluation door's own gate: no door that holds a model runs), up to three hours
+//   4  train the native Llama-3.2-3B LoRA on the corpus into a fresh adapter directory (the serving adapter is untouched)
+//   5  re-ask the voice every held-out question in stream wearing that adapter (observe/form-token-eval-run.bml)
+//   6  read the Form tokens in use, kind by kind, for that row (observe/form-token-usage-run.bml)
+// Each stage appends one line to .hearth/form-token-cycle/ledger.jsonl (its name, wall time, whether it stopped) and says it.
+// stdin, optional words: steps=N (default 100), dry (stages 1 and 2, then the commands the rest would run), adapter=DIR
+// preflight-exec: forbidden
+import form-stdlib/bml/form-token-eval.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class FormTokenCycleRun {
+  def ftcy-words() = filter(w => len(w) > 0, split-on(trim(stdin-text() ?? ""), " "));
+  def ftcy-word-after(prefix, default) = foldl((found, w) => str_find(w, prefix, 0) == 0 ? substring(w, len(prefix), len(w)) : found, default, ftcy-words());
+  def ftcy-dry?() = any?(w => (String) w == "dry", ftcy-words());
+  def ftcy-steps() = str_to_int(ftcy-word-after("steps=", "100"));
+  def ftcy-adapter() = ftcy-word-after("adapter=", "form/form-stdlib/adapters/llama-3.2-3b-form-tokens-next");
+  def ftcy-dir() = ".hearth/form-token-cycle";
+  def ftcy-ledger() = ftcy-dir() ++ "/ledger.jsonl";
+  def ftcy-say(t) = print_str("[form-token-cycle] " ++ t);
+  def ftcy-wait-ms() = 10800000;
+  def ftcy-quiet?() = len(fte-held()) == 0;
+  // up to ftcy-wait-ms for the GPU to be quiet; the milliseconds waited, or nothing when it never was
+  def ftcy-wait(waited) = ftcy-quiet?() ? waited : waited >= ftcy-wait-ms() ? nothing() : ftcy-nap(waited);
+  def ftcy-nap(waited) {
+   let slept = host_sleep_ms(120000);
+   ftcy-wait(waited + 120000);
+  }
+  def ftcy-mark(name, wall, stopped) {
+   let made = host_dir_mkdir(ftcy-dir());
+   fhn-append(ftcy-ledger(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("stage", name), fhn-n("wall_ms", wall), fhn-s("stopped", stopped)])) ++ "\n");
+  }
+  // run a door as a cell; its output is said, a stop is recorded and answered as nothing()
+  def ftcy-stage(name, path, input, deadline) {
+   let t0 = host_monotonic_ms();
+   let r = cell_run(path, 0, deadline, [input]);
+   let out = record_get(r, "out") ?? "";
+   let stopped = record_get(r, "stopped");
+   let why = nothing?(stopped) ? "" : mc-cat([record_get(stopped, "kind") ?? "?", ": ", record_get(stopped, "message") ?? ""]);
+   let said = (String) out == "" ? 0 : print_str(out);
+   let marked = ftcy-mark(name, host_monotonic_ms() - t0, why);
+   ftcy-say(name ++ ": " ++ (nothing?(stopped) ? "done" : "stopped (" ++ why ++ ")") ++ " in " ++ ((host_monotonic_ms() - t0) / 1000).str() ++ " s");
+   nothing?(stopped) ? out : nothing();
+  }
+  def ftcy-census-whole?(out) = !nothing?(out) && str_find(out, "refused 0,", 0) >= 0;
+  def ftcy-run() {
+   let a = ftcy-stage("refresh knowledge-receipts", "form/form-stdlib/bml/form-token-traces.bml", "refresh knowledge-receipts", 1800000);
+   let b = ftcy-stage("refresh knowledge-enrich", "form/form-stdlib/bml/form-token-traces.bml", "refresh knowledge-enrich", 1800000);
+   let c = ftcy-stage("trainer census", "observe/form-token-lora-run.bml", "{\"lane\":\"census\"}", 1800000);
+   if !ftcy-census-whole?(c) then ftcy-say("the trainer's census refused rows or did not run: the cycle stops here, the corpus and the contract disagree")
+   else if ftcy-dry?() then ftcy-dry-lines()
+   else ftcy-gpu();
+   0;
+  }
+  def ftcy-dry-lines() {
+   ftcy-say("dry: would wait for a quiet GPU, train " ++ ftcy-steps().str() ++ " rounds into " ++ ftcy-adapter() ++ ", re-ask every held-out question wearing it, and read the Form tokens in use");
+   ftcy-say("dry: the GPU gate now reads: " ++ (ftcy-quiet?() ? "quiet" : fte-held-text(fte-held())));
+   ftcy-stage("evaluation dry", "observe/form-token-eval-run.bml", "{\"dry\":1,\"questions\":96}", 600000);
+  }
+  def ftcy-gpu() {
+   let waited = ftcy-wait(0);
+   if nothing?(waited) then ftcy-say("the GPU was not quiet for three hours: nothing was trained")
+   else {
+    let t = ftcy-stage("train", "observe/form-token-lora-run.bml", "{\"lane\":\"llama\",\"steps\":" ++ ftcy-steps().str() ++ ",\"batch\":4,\"learning_rate\":0.0001,\"save_every\":25,\"export\":\"" ++ ftcy-adapter() ++ "\"}", 14400000);
+    if nothing?(t) then ftcy-say("the trainer stopped: no evaluation was asked")
+    else {
+     let e = ftcy-stage("evaluation", "observe/form-token-eval-run.bml", "{\"questions\":96,\"arms\":\"lora\",\"adapter\":\"" ++ ftcy-adapter() ++ "\",\"crossings\":3}", 5400000);
+     if nothing?(e) then ftcy-say("the evaluation stopped: no meter was read")
+     else ftcy-stage("usage", "observe/form-token-usage-run.bml", "-1 lora", 600000);
+    };
+   };
+  }
+ }
+ ftcy-run();
+}
