@@ -981,6 +981,21 @@ its length walk compare each word they read with the heap's top and leave for th
 reads either column. `shared-pair-walk-band` reads 31, and the build without the guard dies on it (it killed
 `form-token-census` on every build: reverse of an append of two parsed arrays).
 
+The nine Form tokens (recipe-birth, recipe-exec, choice, eval, knowledge-query, node-get, node-make, node-select,
+recipe-import) are one list, `form-token-kinds.bml`; the grammar, the census and the trainer's contract read it, and its
+order is the Qwen head's control-ID rows (first PAD row 248077, verbs 248078 to 248086; a new verb closes the list, an
+existing verb never moves). The trainer's contract once held eight, so every recipe-import trace was refused and the
+adapter never held the ninth token. `observe/form-token-usage-run.bml` reads one evaluation row kind by kind (taught,
+expected, written, substituted, the kinds used and their effective number, each family's answers, the advice the rules in
+`form-token-usage.bml` give); `form-token-usage-band` reads 31 over the 2026-10-02 and 2026-10-09 rows. The teaching
+corpus holds 18 families and 729 rows, each run twice in fresh sessions and checked against an oracle apart from the
+verb; recipe-both (each of two recipes run with recipe-exec) and eval-reuse (a name and `it` read by the next control) are
+the newest. `observe/form-token-cycle-run.bml` walks the loop in one process: refresh the families that move with the
+receipts, stop unless the trainer admits every row, wait for a quiet GPU, train into a fresh adapter directory, re-ask
+every held-out question wearing it, read the meter; its model-free half ran (729 admitted, 0 refused). Measured on the
+2026-10-09 evaluation of generation 50 of the rebalanced corpus: more kinds written (effective 3.84 to 4.40) and fewer
+answers right (55 of 64 to 39 of 72), recipe-exec 9 expected and 0 written; `receipts/2026-10-09-form-token-endtoend.md`.
+
 A string is written with BML `+` (or `++`); it lowers to `str_concat` nested on either side, and fkwu walks a nested chain
 as ONE append (`fk_concat_chain`): the leaves in the nesting's order, each held on the value stack and checked where its
 level checked it, then their bytes copied once and the result interned once. The recipe is unchanged; every kernel
