@@ -1,0 +1,49 @@
+// native-lora-score-bench-run.bml — what a token costs the native Llama forward, on real held-out rows.
+//
+//   print -r -- ".hearth/form-token-lora/data-1791682092626 6" | ./fkwu observe/native-lora-score-bench-run.bml
+//   print -r -- "DIR 6" | FORM_NAM_REFERENCE=1 ./fkwu observe/native-lora-score-bench-run.bml      the reference kernel, for the A/B
+//
+// stdin: the data directory a census made (its valid.jsonl is read) and how many rows to score (default 6). Opens the native
+// Llama-3.2-3B voice with its voice-native adapter, scores each row once the way validation does (ntr-score), and prints per
+// row the input tokens, the milliseconds and the loss, then the milliseconds a token cost over the rows after the first (the
+// first carries the pipelines' compile). The losses are the check: the same rows must score alike under both kernels.
+// The GPU must be quiet: the numbers are meant to be a kernel's, not a neighbour's.
+// preflight-exec: forbidden
+import form-stdlib/native-lora-train.bml;
+import form-stdlib/model-registry.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class NativeLoraScoreBench {
+  def nlsb-parts() = filter(w => len(w) > 0, split-on(trim(stdin-text() ?? ""), " "));
+  def nlsb-rows(tk, rows, masked, i, out) = nil?(rows) ? reverse(out) : nlsb-row(tk, rows[0], rows[1:], masked, i, out);
+  def nlsb-row(tk, row, rest, masked, i, out) = nlsb-rows(tk, rest, masked, i + 1, cons(nld-prepare(tk, [row], masked)[0], out));
+  // the device's own counters around a row: dispatches, syncs, command buffers, the device's busy microseconds (metal_live words 0, 1, 6, 2)
+  def nlsb-score(model, sample) {
+   let a = metal_live();
+   let t0 = host_monotonic_ms();
+   let totals = ntr-score(model, sample);
+   let ms = host_monotonic_ms() - t0;
+   let b = metal_live();
+   print(["row tokens", totals[2], "ms", ms, "gpu busy ms", (b[2] - a[2]) / 1000, "dispatches", b[0] - a[0], "syncs", b[1] - a[1], "command buffers", b[6] - a[6], "loss", ntr-score-loss(totals)]);
+   [totals[2], ms];
+  }
+  def nlsb-run() {
+   let parts = nlsb-parts();
+   let dir = parts[0];
+   let n = len(parts) > 1 ? str_to_int(parts[1]) : 6;
+   let session = nlg-open(mr-path(mr-find("llama32-3b-mlx-4bit")), "form/form-stdlib/adapters/llama-3.2-3b-voice-native");
+   let model = session[0]; let tk = session[1];
+   let rows = take(n, nld-file(dir ++ "/valid.jsonl"));
+   let samples = nlsb-rows(tk, rows, 1, 0, []);
+   let measured = map(s => nlsb-score(model, s), samples);
+   let rest = measured[1:];
+   let tokens = foldl((acc, m) => acc + m[0], 0, rest);
+   let ms = foldl((acc, m) => acc + m[1], 0, rest);
+   print(["rows", len(measured), "after the first: tokens", tokens, "ms", ms, "ms per token (hundredths)", tokens == 0 ? 0 : (ms * 100) / tokens, "reference kernel", nam-reference?() ? "yes" : "no"]);
+   nlg-close(session);
+   0;
+  }
+ }
+ nlsb-run();
+}

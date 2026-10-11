@@ -1,0 +1,85 @@
+; native-affine-mt-band.bml — the affine product for a block of tokens matches the reference and is faster.
+;
+; preludes: form-stdlib/core.fk form-stdlib/native-affine-metal.bml
+; REQUIRES: the Metal carrier (a fresh worktree builds it: form-stdlib/metal-carrier.bml)
+;
+; nam_affine gave every (token, row) output a simdgroup that dequantized each 4-bit weight again, five byte loads a weight, so
+; a row's forward cost tokens times the parameters in scalar work: 50 ms a token on the 3B voice, 2026-10-11, and the same kernel
+; decoded the voice at 5 tokens a second. nam_affine_mt takes a block of 8 tokens for one row per simdgroup, a lane reading eight
+; contiguous columns (one packed word, one scale, one bias) for all eight tokens. This band runs both over synthetic quantized
+; weights and compares every output. The weights are a 4096-byte pattern tiled to length: never a list of millions.
+;
+; Verdict 7 when every claim lands:
+;   1     f32 scales, 48 rows by 512 columns, group 64: the new product matches the reference to 1e-4 of the largest output for 1, 3, 8, 9, 17 and 100 tokens
+;   2     f16 scales and biases, 40 rows by 192 columns, group 32 (fewer columns than one pass of 32 lanes): the same for 1, 5, 8 and 13 tokens
+;   4     the real 3B shape (8192 rows by 3072 columns, group 64) at 128 tokens, eight products to one sync: the best of three runs of the new product is no slower
+;         than the reference's. The size of the gain is printed, not claimed: a quiet GPU measured 8.3 times (3,326 ms against 400 ms) and the same rows scored
+;         through the trainer cost 162 ms a token under the reference and 21 to 24 under the new product (observe/native-lora-score-bench-run.bml), but the gates
+;         run bands in parallel and a ratio would read the neighbours.
+section [form.bml] {
+ class NativeAffineMtBand {
+  def namb-bit(ok, bit) = ok ? bit : 0;
+  def namb-pat(salt) = str-join(map(i => byte_to_str(((i * 2654435761) + (salt * 40503) + 12345) % 256), range(0, 4096)));
+  def namb-rep(pat, times) = times <= 1 ? pat : namb-rep-go(namb-rep(pat, times / 2), pat, times % 2);
+  def namb-rep-go(half, pat, odd) = odd == 0 ? half ++ half : half ++ half ++ pat;
+  def namb-fill(pat, n) = substring(namb-rep(pat, (n + len(pat) - 1) / len(pat)), 0, n);
+  def namb-f32-pat(salt) = nam-f32s(map(i => (((i * 53 + salt) % 17) + 1) / 16.0, range(0, 1024)));
+  def namb-x-pat() = nam-f32s(map(i => (((i * 37) % 101) - 50) / 25.0, range(0, 1024)));
+  def namb-half(bits) = byte_to_str(bits % 256) ++ byte_to_str(bits / 256);
+  def namb-half-pat(bitsList) = str-join(map(i => namb-half(bitsList[i % len(bitsList)]), range(0, 2048)));
+  def namb-buf(floats, bytes) = nam-write(nam-alloc(floats), bytes);
+  // views: [w, scales, biases, rows, cols, group, scalar type]
+  def namb-view-f32(rows, cols, group) {
+   let n = rows * (cols / group);
+   [namb-buf((rows * cols) / 8, namb-fill(namb-pat(1), (rows * cols) / 2)), namb-buf(n, namb-fill(namb-f32-pat(3), n * 4)), namb-buf(n, namb-fill(namb-f32-pat(7), n * 4)), rows, cols, group, 0];
+  }
+  def namb-view-f16(rows, cols, group) {
+   let n = rows * (cols / group);
+   [namb-buf((rows * cols) / 8, namb-fill(namb-pat(2), (rows * cols) / 2)), namb-buf((n + 1) / 2 + 1, namb-fill(namb-half-pat([15360, 14336, 16384, 13312]), n * 2)), namb-buf((n + 1) / 2 + 1, namb-fill(namb-half-pat([0, 47104, 14336]), n * 2)), rows, cols, group, 1];
+  }
+  def namb-x(tokens, cols) = namb-buf(tokens * cols, namb-fill(namb-x-pat(), tokens * cols * 4));
+  def namb-max-abs(xs) = foldl((m, v) => (v < 0.0 ? 0.0 - v : v) > m ? (v < 0.0 ? 0.0 - v : v) : m, 0.0, xs);
+  def namb-max-diff(a, b) = namb-max-abs(map(i => a[i] - b[i], range(0, len(a))));
+  def namb-compare(view, tokens) {
+   let rows = view[3]; let cols = view[4];
+   let x = namb-x(tokens, cols);
+   let yr = nam-alloc(tokens * rows); let ym = nam-alloc(tokens * rows);
+   let r = nam-linear-ref(view, x, yr, tokens);
+   let m = nam-linear-mt(view, x, ym, tokens);
+   let done = nam-sync();
+   let a = nam-read(yr, tokens * rows); let c = nam-read(ym, tokens * rows);
+   let freed = nam-free([x, yr, ym]);
+   namb-max-diff(a, c) <= 0.0001 * (namb-max-abs(a) + 1.0);
+  }
+  def namb-all(view, tokensList) = all?(t => namb-compare(view, t), tokensList);
+  // eight dispatches to one sync, as a forward issues them: one short dispatch measures the GPU's clock ramp as much as the kernel
+  def namb-run(view, x, y, tokens, kind, n) = n <= 0 ? 1 : namb-run-next(view, x, y, tokens, kind, n, kind == 0 ? nam-linear-ref(view, x, y, tokens) : nam-linear-mt(view, x, y, tokens));
+  def namb-run-next(view, x, y, tokens, kind, n, sent) = namb-run(view, x, y, tokens, kind, n - 1);
+  def namb-time(view, tokens, kind) {
+   let x = namb-x(tokens, view[4]);
+   let y = nam-alloc(tokens * view[3]);
+   let warm = namb-run(view, x, y, tokens, kind, 2);
+   let warmed = nam-sync();
+   let t0 = host_monotonic_ms();
+   let r = namb-run(view, x, y, tokens, kind, 8);
+   let done = nam-sync();
+   let t1 = host_monotonic_ms();
+   let freed = nam-free([x, y]);
+   t1 - t0;
+  }
+  def namb-min3(a, b, c) = (a < b ? a : b) < c ? (a < b ? a : b) : c;
+  def namb-best(view, tokens, kind) = namb-min3(namb-time(view, tokens, kind), namb-time(view, tokens, kind), namb-time(view, tokens, kind));
+  def namb-score() {
+   let v1 = namb-view-f32(48, 512, 64);
+   let v2 = namb-view-f16(40, 192, 32);
+   let big = namb-view-f32(8192, 3072, 64);
+   let ref = namb-best(big, 128, 0);
+   let mt = namb-best(big, 128, 1);
+   print(["native-affine-mt", "3B shape, 128 tokens, eight products: reference ms", ref, "new ms", mt]);
+   namb-bit(namb-all(v1, [1, 3, 8, 9, 17, 100]), 1)
+     + namb-bit(namb-all(v2, [1, 5, 8, 13]), 2)
+     + namb-bit(mt <= ref, 4);
+  }
+ }
+ namb-score();
+}
