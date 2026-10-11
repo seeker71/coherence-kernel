@@ -293,6 +293,7 @@ static const struct fk_rwtab_row fk_rwtab[] = {
   { "cell_input", 0, 7, { 1,53,1,0,2,201,2,} },
   { "cell_call", 3, 14, { 1,54,0,0,0,1,0,2,2,19,2,2,201,3,} },
   { "cell_path", 0, 7, { 1,55,1,0,2,201,2,} },
+  { "jit_fn_bind", 2, 12, { 1,56,0,0,0,1,2,19,2,2,201,2,} },
 
 };
 static const long long fk_rwtab_n = sizeof(fk_rwtab)/sizeof(fk_rwtab[0]);

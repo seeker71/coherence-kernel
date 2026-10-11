@@ -9834,6 +9834,243 @@ static void fk_pv_root(long long v) {
     }
 }
 static long long fk_walk(long long i, long long fp);
+/* ── THE FORM PAGE: a hot defn's own machine code, written by Form ───────────────────────────────────────────────
+ * A defn whose heat reaches a multiple of FK_JIT_HEAT is offered to form-stdlib/bml/jit-page.bml, a resident cell of this
+ * process (fk_jit_offer). The cell reads the defn's nodes, writes AArch64 words, and binds them (jit_fn_bind, leaf-door
+ * mode 56). The defn then wears the crystallized-defn node (tag 194) and the walker's 194 arm runs the page in the
+ * frame the call built.
+ *
+ * The page keeps the walker's frame: parameters and lets stay in fk_vs[fp + slot] where the walker keeps them, the
+ * page's own temporaries sit above the lets and under fk_vsp, so a melt sees and moves every value it holds, and the
+ * page reads them back from the frame after each helper. What the page does not carry in its own words it hands to
+ * the walker, exact by construction:
+ *   walk(node, fp)          the walker walks that node in this frame
+ *   apply(node, fp, t, n)   the node's own arm runs over the n operands the page already evaluated, fk_vs[fp + t ..]:
+ *                           a site copy of the node whose children are once-holds (tag 190) carrying them
+ *   truth(w)                the branch law of an if in value position
+ *   tick()                  the cell deadline's tick, at a self tail call
+ *   enter(fp, need)         the frame reserved and zeroed to fp + need, as the body's tag-111 wrapper reserves it
+ * A tail the page does not take itself it gives back: cx.next names the node the walker continues at, in the same
+ * frame, so a tail call keeps its frame and nothing the page did runs twice. */
+static long long fk_truth(long long w);
+typedef long long (*fk_jit_page_fn)(long long fp, void *cx);
+struct fk_jit_cx {
+    long long **vs;                                                         /* 0: &fk_vs */
+    long long next;                                                         /* 8: the node the walker continues at, or 0 */
+    long long (*walk)(long long node, long long fp);                        /* 16 */
+    long long (*apply)(long long node, long long fp, long long t, long long n); /* 24 */
+    long long (*truth)(long long w);                                        /* 32 */
+    void (*tick)(void);                                                     /* 40 */
+    void (*enter)(long long fp, long long need);                            /* 48 */
+    long long (*call)(long long c, long long fp, long long t, long long n); /* 56: a call in value position */
+    long long (*tail)(long long c, long long fp, long long t, long long n); /* 64: a tail call made ready; answers the node to continue at */
+    long long (*ops[7])(long long a, long long b);                          /* 72..: head tail len str_len str_eq str_byte_at cons */
+};
+static struct fk_jit_cx fk_jit_cx;
+#define FK_JIT_HEAT 4096
+static void **fk_jit_page;           /* per defn: its page, or 0 */
+static unsigned char *fk_jit_state;  /* per defn: 0 never offered, 1 offered (a page bound or the cell declined) */
+static long long fk_jit_cap;
+static long long fk_jit_bound, fk_jit_offers, fk_jit_offer_us, fk_jit_sites; /* kernel_stat 74-77 */
+static int fk_jit_busy;
+static long long fk_jit_pending[64];
+static int fk_jit_pending_n;
+static void fk_jit_reserve(long long need) {
+    if (need <= fk_jit_cap) { return; }
+    long long next = fk_jit_cap > 0 ? fk_jit_cap : 1024;
+    while (next < need) { next = next * 2; }
+    void **pg = (void **)realloc(fk_jit_page, (size_t)next * sizeof(void *));
+    unsigned char *st = (unsigned char *)realloc(fk_jit_state, (size_t)next);
+    if (pg == 0 || st == 0) { fk_die("fk_jit_reserve: out of memory growing the page table"); }
+    memset(pg + fk_jit_cap, 0, (size_t)(next - fk_jit_cap) * sizeof(void *));
+    memset(st + fk_jit_cap, 0, (size_t)(next - fk_jit_cap));
+    fk_jit_page = pg;
+    fk_jit_state = st;
+    fk_jit_cap = next;
+}
+/* site copies, keyed by the node they copy: open addressing over node indices */
+static long long *fk_jit_site_k, *fk_jit_site_v;
+static long long fk_jit_site_cap;
+static long long fk_jit_hold(void) { return fk_smknode(FK_TAG_CONST_HOLD, 0, 0, 1); }
+static long long fk_jit_site_mint(long long node, long long n) {
+    long long t = fk_node[node][0], f1 = fk_node[node][1], f2 = fk_node[node][2], f3 = fk_node[node][3];
+    if (t == 12) { long long h = fk_jit_hold(); return fk_smknode(12, f1, h, 0); }
+    if (t == 240) { long long h0 = fk_jit_hold(); long long h1 = fk_jit_hold(); return fk_smknode(240, f1, h0, h1); }
+    if (t == 241) {
+        long long chain = -1, k = n - 1;
+        while (k >= 0) { long long h = fk_jit_hold(); chain = fk_smknode(242, h, chain, 0); k = k - 1; }
+        return fk_smknode(241, f1, chain, f3);
+    }
+    if (n >= 1) { f1 = fk_jit_hold(); }
+    if (n >= 2) { f2 = fk_jit_hold(); }
+    if (n >= 3) { f3 = fk_jit_hold(); }
+    return fk_smknode(t, f1, f2, f3);
+}
+static long long fk_jit_site_of(long long node, long long n) {
+    if (fk_jit_sites * 2 >= fk_jit_site_cap) {
+        long long oc = fk_jit_site_cap, nc = oc == 0 ? 1024 : oc * 2, j = 0;
+        long long *nk = (long long *)malloc((size_t)nc * 8), *nv = (long long *)malloc((size_t)nc * 8);
+        if (nk == 0 || nv == 0) { fk_die("fk_jit_site_of: out of memory growing the site table"); }
+        while (j < nc) { nk[j] = -1; j = j + 1; }
+        j = 0;
+        while (j < oc) {
+            if (fk_jit_site_k[j] >= 0) {
+                long long q = (fk_jit_site_k[j] * 40503) & (nc - 1);
+                while (nk[q] >= 0) { q = (q + 1) & (nc - 1); }
+                nk[q] = fk_jit_site_k[j]; nv[q] = fk_jit_site_v[j];
+            }
+            j = j + 1;
+        }
+        free(fk_jit_site_k); free(fk_jit_site_v);
+        fk_jit_site_k = nk; fk_jit_site_v = nv; fk_jit_site_cap = nc;
+    }
+    long long q = (node * 40503) & (fk_jit_site_cap - 1);
+    while (fk_jit_site_k[q] >= 0) {
+        if (fk_jit_site_k[q] == node) { return fk_jit_site_v[q]; }
+        q = (q + 1) & (fk_jit_site_cap - 1);
+    }
+    long long s = fk_jit_site_mint(node, n);
+    fk_jit_site_k[q] = node;
+    fk_jit_site_v[q] = s;
+    fk_jit_sites = fk_jit_sites + 1;
+    return s;
+}
+static void fk_jit_put(long long h, long long v) { fk_node[h][2] = v; fk_node[h][3] = 1; }
+static long long fk_jit_apply(long long node, long long fp, long long t0, long long n) {
+    long long s = fk_jit_site_of(node, n), t = fk_node[s][0], k = 0;
+    if (t == 12 || t == 240) {
+        while (k < n) { fk_jit_put(fk_node[s][2 + k], fk_vs[fp + t0 + k]); k = k + 1; }
+    } else if (t == 241) {
+        long long cell = fk_node[s][2];
+        while (k < n && cell >= 0) { fk_jit_put(fk_node[cell][1], fk_vs[fp + t0 + k]); cell = fk_node[cell][2]; k = k + 1; }
+    } else {
+        while (k < n) { fk_jit_put(fk_node[s][1 + k], fk_vs[fp + t0 + k]); k = k + 1; }
+    }
+    return fk_walk(s, fp);
+}
+/* a call in value position, its n arguments already in fk_vs[fp + t ..]: the walker's call arm, step for step (a new frame
+ * at fk_vsp, the heat, the frame chain, the pulses, the body walked -- a page when the callee wears one -- the offer's ack) */
+static long long fk_walk_body(long long i, long long fp);
+static long long fk_op_head(long long v, long long unused);
+static long long fk_op_tail(long long v, long long unused);
+static long long fk_op_len(long long v, long long unused);
+static long long fk_op_str_len(long long v, long long unused);
+static long long fk_op_str_eq(long long wa, long long wb);
+static long long fk_op_byte_at(long long ws, long long wk);
+static long long fk_op_cons(long long h, long long t);
+static char *fk_stack_base;
+static long long fk_stack_wall;
+static void fk_depth_wall(long long used);
+static long long fk_jit_call(long long c, long long fp, long long t, long long n) {
+    char fk_sp_probe;
+    /* page to page never passes fk_walk's probe: the same wall, met here, so a deep recursion ends honestly */
+    if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
+        fk_depth_wall((long long)(fk_stack_base - &fk_sp_probe));
+    }
+    if (c < 0 || c >= fk_fn_count) { return fk_nothing; }
+    long long base = fk_vsp, k = 0;
+    while (k < n) { fk_vp(fk_vs[fp + t + k]); k = k + 1; }
+    fk_fn_heat[c] = fk_fn_heat[c] + 1;
+    long long caller = fk_cur_fn;
+    FK_FR_PUSH(caller);
+    fk_cur_fn = c;
+    fk_heat_pulse();
+    if ((fk_fn_heat[c] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, base, n); }
+    long long r = fk_walk_body(fk_fn[c], base);
+    FK_FR_POP();
+    fk_cur_fn = caller;
+    fk_vsp = base;
+    return fk_offer_ack(c, n, r);
+}
+/* a tail call: the arguments move into this frame's first slots and the frame ends after them, as the body loop's call
+ * arm leaves it; the heat and the pulses, then the node the walker continues at (read after the pulse, which may bind
+ * a page) */
+static long long fk_jit_nothing_node = -1;
+static long long fk_jit_tail(long long c, long long fp, long long t, long long n) {
+    if (c < 0 || c >= fk_fn_count) {
+        /* the body loop answers nothing for a callee that is not a defn: the walker continues at a node that says so */
+        if (fk_jit_nothing_node < 0) { fk_jit_nothing_node = fk_smknode(137, 0, 0, 0); }
+        fk_vsp = fp;
+        return fk_jit_nothing_node;
+    }
+    long long k = 0;
+    while (k < n) { fk_vs[fp + k] = fk_vs[fp + t + k]; k = k + 1; }
+    fk_vsp = fp + n;
+    long long h = fk_fn_heat[c] + 1;
+    fk_fn_heat[c] = h;
+    fk_cur_fn = c;
+    fk_heat_pulse();
+    if ((h & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, fp, n); }
+    return fk_fn[c];
+}
+static long long fk_walk(long long i, long long fp);
+static long long fk_jit_walk(long long node, long long fp) { return fk_walk(node, fp); }
+static long long fk_jit_truth(long long w) { return fk_truth(w); }
+static void fk_jit_tick(void) { FK_CELL_TICK(); }
+static void fk_jit_enter(long long fp, long long need) {
+    long long top = fp + need;
+    if (top >= fk_vs_cap) { fk_vs_grow(top + 1); }
+    while (fk_vsp < top) { fk_vs[fk_vsp] = 0; fk_vsp = fk_vsp + 1; }
+}
+/* jit_fn_bind(fn, words): the page for defn fn from a list of 32-bit instruction words. Answers 1 when bound, 0 when
+ * refused (not a defn, already bound, a word that is not an instruction, no executable memory). */
+static long long fk_jit_bind(long long x) {
+    if ((x & 1) == 0 || fk_is_str(x)) { return 0; }
+    long long pr = x >> 1;
+    if (pr < 1 || !FK_POK(pr)) { return 0; }
+    long long cw = FK_HH(pr), ws = FK_HT(pr), n = 0, q = ws;
+    /* the defn by its index, or by its value (a function named as a value) */
+    if ((cw & 1) != 0 && !fk_is_fnval(cw)) { return 0; }
+    long long c = (cw & 1) != 0 ? fk_fnval_target(cw) : cw >> 1;
+    if (c <= 0 || c >= fk_fn_count) { return 0; }
+    fk_jit_reserve(c + 1);
+    /* binding no words asks: 1 when the defn wears a Form page */
+    if (ws == 1) { return fk_jit_page[c] != 0 ? 2 : 0; }
+    if (fk_jit_page[c] != 0) { return 0; }
+    while (q != 1) {
+        if ((q & 1) == 0 || fk_is_str(q) || (q >> 1) < 1 || !FK_POK(q >> 1)) { return 0; }
+        long long h = FK_HH(q >> 1);
+        if ((h & 1) != 0 || h < 0 || (h >> 1) > 4294967295LL) { return 0; }
+        n = n + 1;
+        q = FK_HT(q >> 1);
+    }
+    if (n == 0) { return 0; }
+#if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+    return 0;
+#else
+    long long page = getpagesize();
+    size_t span = (((size_t)n * 4 + (size_t)page - 1) / (size_t)page) * (size_t)page;
+    void *mem = mmap(0, span, 0x7, 0x1802, -1, 0);
+    if (mem == (void *)-1) { return 0; }
+    pthread_jit_write_protect_np(0);
+    q = ws;
+    long long k = 0;
+    while (q != 1) { ((unsigned int *)mem)[k] = (unsigned int)(FK_HH(q >> 1) >> 1); k = k + 1; q = FK_HT(q >> 1); }
+    pthread_jit_write_protect_np(1);
+    __builtin___clear_cache((char *)mem, (char *)mem + n * 4);
+    fk_jit_page[c] = mem;
+    fk_jit_cx.vs = &fk_vs;
+    fk_jit_cx.walk = fk_jit_walk;
+    fk_jit_cx.apply = fk_jit_apply;
+    fk_jit_cx.truth = fk_jit_truth;
+    fk_jit_cx.tick = fk_jit_tick;
+    fk_jit_cx.enter = fk_jit_enter;
+    fk_jit_cx.call = fk_jit_call;
+    fk_jit_cx.tail = fk_jit_tail;
+    fk_jit_cx.ops[0] = fk_op_head;
+    fk_jit_cx.ops[1] = fk_op_tail;
+    fk_jit_cx.ops[2] = fk_op_len;
+    fk_jit_cx.ops[3] = fk_op_str_len;
+    fk_jit_cx.ops[4] = fk_op_str_eq;
+    fk_jit_cx.ops[5] = fk_op_byte_at;
+    fk_jit_cx.ops[6] = fk_op_cons;
+    long long body = fk_fn[c];
+    if (body < 0 || fk_node[body][0] != 194) { fk_fn[c] = fk_smknode(194, c, body, 0); }
+    fk_jit_bound = fk_jit_bound + 1;
+    return 2;
+#endif
+}
+static void fk_jit_offer(long long c);
 static long long fk_walk_body(long long i, long long fp) {
     for (;;) {
         FK_CELL_TICK();
@@ -9929,8 +10166,16 @@ static long long fk_walk_body(long long i, long long fp) {
             continue;
         }
         if (t == 194) {
-            /* a crystallized defn: the frame's floats go to d0..d7, the f64 leaf runs, one box comes back; any other shape walks the original body */
+            /* a crystallized defn: its Form page runs in this frame (a value comes back, or the node the walker continues at);
+             * else the frame's floats go to d0..d7, the f64 leaf runs, one box comes back; any other shape walks the original body */
             long long c194 = fk_node[i][1];
+            if (c194 >= 0 && c194 < fk_jit_cap && fk_jit_page[c194] != 0) {
+                fk_jit_cx.next = 0;
+                long long r194 = ((fk_jit_page_fn)fk_jit_page[c194])(fp, &fk_jit_cx);
+                if (fk_jit_cx.next == 0) { return r194; }
+                i = fk_jit_cx.next;
+                continue;
+            }
             void *m194 = (c194 >= 0 && c194 < fk_f64_cap) ? fk_f64_mem[c194] : 0;
             long long n194 = fk_fnar[c194];
             long long sig194 = m194 != 0 ? fk_f64_sig[c194] : -1;
@@ -13372,7 +13617,12 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
 }
 static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n);
 /* a pulse whose admit met a callee not yet crystallized leaves the defn cold, to be asked again at its next heat */
+static int fk_f64_lane_off = -1;
 static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
+    /* FK_NO_F64 in fkwu.conf holds the C loop lane, so the Form page (jit-page.bml) is witnessed alone: the retirement
+     * path's flip (R8) reads both lanes on the same defns before the C lane goes */
+    if (fk_f64_lane_off < 0) { fk_f64_lane_off = fk_conf("FK_NO_F64") ? 1 : 0; }
+    if (fk_f64_lane_off) { return; }
     fk_f64_call_not_ready = 0; fk_f64_warm_n = 0;
     /* another signature: the primary instance stands for one parameter shape, and this frame wears one no instance holds.
      * Compile it into the primary slot (reusing the whole pulse untouched), then relocate the fresh page into a free extra
@@ -13782,6 +14032,79 @@ static void fk_depth_wall(long long used) {
     fk_fatal_row("STACK-DEPTH", 0, (unsigned long long)(fk_size_t)&fk_sp_here);
     fk_die("eval-depth wall");
 }
+/* THE ONE MEANING of head, tail, len, str_len, str_eq, str_byte_at and cons over words already walked: the walker's
+ * arms call these, and so do the Form pages (jit-page.bml), through the page's op table (fk_jit_cx.ops). */
+static long long fk_op_head(long long v, long long unused) {
+    (void)unused;
+    long long p = v >> 1;
+    if ((v & 1) == 0 || p < 1 || !FK_POK(p)) { return fk_nothing; }
+    return FK_HH(p);
+}
+static long long fk_op_tail(long long v, long long unused) {
+    (void)unused;
+    if (v == 1) { return 1; }
+    long long p = v >> 1;
+    if ((v & 1) == 0 || p < 1 || !FK_POK(p)) { return fk_nothing; }
+    return FK_HT(p);
+}
+/* len — a LIST cell's length; a STRING's byte length, as the primitive registry declares ("string bytes"). Until
+ * 2026-07-31 a string was `poolidx << 1`, the same even word as an int, so (len "abc") answered 0 — a plausible zero
+ * over the wrong kind that left tb-any2? silently false over string rows (R70). Strings carry their own odd-negative
+ * band since (fk_sbase). Other non-lists answer 0; nothing is not an empty collection: its length is a stop. */
+static long long fk_op_len(long long v, long long unused) {
+    (void)unused;
+    if (v == fk_nothing) { fk_stop(FK_LEN_REFUSAL); }
+    if (fk_is_str(v)) { return FK_SLEN(fk_stri(v)) << 1; }
+    if ((v & 1) == 0) { return 0; }
+    long long p = v >> 1, n = 0;
+    while (p >= 1 && FK_POK(p)) { n = n + 1; p = FK_HNEXT(p); }
+    return n << 1;
+}
+/* Measuring an absence must not answer a counterfeit 0: a silent 0 here dressed a vanished host-exec launch as "empty"
+ * (2026-08-27). str_len dies this death everywhere, and callers name the absence with nothing? before measuring. */
+static long long fk_op_str_len(long long v, long long unused) {
+    (void)unused;
+    if (v == fk_nothing) { fk_stop("fkwu: str_len: nothing has no length -- ask nothing? before measuring"); }
+    long long sa = fk_stri(v);
+    if (sa < 0 || !FK_SOK(sa)) { fk_stop("fkwu: str_len: only a string has a length -- ask value_kind first"); }
+    return FK_SLEN(sa) << 1;
+}
+/* the axiom-1 absence is a value str_eq may ask about -- it equals only an absence (str-eq-absence-band); any other
+ * non-string stops (a non-string is not a string) */
+static long long fk_op_str_eq(long long wa, long long wb) {
+    long long sa = fk_stri(wa), sb = fk_stri(wb);
+    if ((wa != fk_nothing && (sa < 0 || !FK_SOK(sa))) || (wb != fk_nothing && (sb < 0 || !FK_SOK(sb)))) {
+        fk_stop("fkwu: str_eq: only strings and nothing compare as strings -- ask value_kind first, or use value_eq");
+    }
+    return fk_keyeq(sa, sb) ? 2 : 0;
+}
+static long long fk_op_byte_at(long long ws, long long wk) {
+    long long sa = fk_stri(ws);
+    if (sa < 0 || !FK_SOK(sa)) { fk_stop("fkwu: str_byte_at: only a string has bytes -- ask value_kind first"); }
+    if ((wk & 1) != 0) { fk_stop("fkwu: str_byte_at: a byte index is an int -- ask nothing? first"); }
+    long long k = wk >> 1;
+    if (k < 0 || k >= FK_SLEN(sa)) { return 0 - 2; }
+    return ((long long)(unsigned char)FK_SBYTES(sa)[k]) << 1;
+}
+/* a tail that is not a list makes a pair, the carrier the two-word doors read (the stage bus's (cons stage key), a
+ * (handle seq) watch); a list walk ends at it (FK_HNEXT), so the pair reads as the one-element list [h]. Both words are
+ * roots on the value stack while the heap melts or grows. */
+static long long fk_op_cons(long long h, long long t) {
+    if (t == fk_nothing) { fk_stop("fkwu: cons: nothing is not a list -- ask nothing? before consing"); }
+    fk_vp(h);
+    fk_vp(t);
+    if (fk_cap == 0) { fk_arena(); }
+    if (fk_hp * 100 >= fk_cap * 90) { fk_melt(); }
+    if (fk_hp + 1 >= fk_cap) {
+        /* full even after the melt grew its arena: grow again rather than hand back nil as if it were the cons */
+        fk_heap_grow();
+    }
+    fk_hp = fk_hp + 1;
+    fk_hh[fk_hp] = fk_vs[fk_vsp - 2];
+    fk_ht[fk_hp] = fk_vs[fk_vsp - 1];
+    fk_vsp = fk_vsp - 2;
+    return (fk_hp << 1) | 1;
+}
 static long long fk_walk(long long i, long long fp) {
     char fk_sp_probe;
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
@@ -14028,86 +14351,28 @@ static long long fk_walk(long long i, long long fp) {
         return fk_is_nothing(fk_walk(fk_node[i][1], fp)) ? 2 : 0;
     }
     if (t == 19) {
+        /* the head waits on the stack while the tail walks: a melt moves the pair it may be */
         long long h19 = fk_walk(fk_node[i][1], fp);
         fk_vp(h19);
         long long t19 = fk_walk(fk_node[i][2], fp);
-        if (t19 == fk_nothing) {
-            fk_stop("fkwu: cons: nothing is not a list -- ask nothing? before consing");
-        }
-        /* a tail that is not a list makes a pair, the carrier the two-word doors read (the stage bus's
-         * (cons stage key), a (handle seq) watch); a list walk ends at it (FK_HNEXT), so the pair reads
-         * as the one-element list [h] and its tail is never taken for a pair index */
-        fk_vp(t19);
-        if (fk_cap == 0) {
-            fk_arena();
-        }
-        if (fk_hp * 100 >= fk_cap * 90) {
-            fk_melt();
-        }
-        if (fk_hp + 1 >= fk_cap) {
-            /* full even after the melt grew its arena: grow again rather
-             * than hand back nil as if it were the cons -- a corrupt list
-             * with a stderr note was still a corrupt list. */
-            fk_heap_grow();
-        }
-        fk_hp = fk_hp + 1;
-        fk_hh[fk_hp] = fk_vs[fk_vsp - 2];
-        fk_ht[fk_hp] = fk_vs[fk_vsp - 1];
-        fk_vsp = fk_vsp - 2;
-        return (fk_hp << 1) | 1;
+        h19 = fk_vs[fk_vsp - 1];
+        fk_vsp = fk_vsp - 1;
+        return fk_op_cons(h19, t19);
     }
     /* head, tail, nth — a list is an odd, non-negative word; an int is even and a string or
      * nothing odd-negative, so each door reads the tag bit before it walks, as len does. A
      * receiver that is not a list, and an element that is not there, answer nothing (null);
      * the tail of a list is a list. */
     if (t == 20) {
-        long long v20 = fk_walk(fk_node[i][1], fp);
-        long long p = v20 >> 1;
-        if ((v20 & 1) == 0 || p < 1 || !FK_POK(p)) {
-            return fk_nothing;
-        }
-        return FK_HH(p);
+        return fk_op_head(fk_walk(fk_node[i][1], fp), 0);
     }
     if (t == 21) {
-        long long v21 = fk_walk(fk_node[i][1], fp);
-        if (v21 == 1) {
-            return 1;
-        }
-        long long p = v21 >> 1;
-        if ((v21 & 1) == 0 || p < 1 || !FK_POK(p)) {
-            return fk_nothing;
-        }
-        return FK_HT(p);
+        return fk_op_tail(fk_walk(fk_node[i][1], fp), 0);
     }
     if (t == 22) {
-        /* len — a LIST cell's length; a STRING's byte length, as
-         * the primitive registry declares ("string bytes").
-         * Until 2026-07-31 a string was `poolidx << 1`, the same even word as
-         * an int, so the low-bit guard below was all this door could read and
-         * (len "abc") answered 0 — a plausible zero over the wrong kind that
-         * left tb-any2? silently false over string rows (R70). Strings have
-         * carried their own odd-negative band since (fk_sbase); the door reads
-         * it now. Other non-lists answer 0. The emitted
-         * walker's fk_list_len (fkc-table-serialize.fk) still answers 0 for a
-         * string: its words carry no string band to read.
-         * nothing is not an empty collection: its length is a stop, as str_len's is. */
-        long long lv22 = fk_walk(fk_node[i][1], fp);
-        if (lv22 == fk_nothing) {
-            fk_stop(FK_LEN_REFUSAL);
-        }
-        if (fk_is_str(lv22)) {
-            return FK_SLEN(fk_stri(lv22)) << 1;
-        }
-        if ((lv22 & 1) == 0) {
-            return 0;
-        }
-        long long p = lv22 >> 1;
-        long long n = 0;
-        while (p >= 1 && FK_POK(p)) {
-            n = n + 1;
-            p = FK_HNEXT(p);
-        }
-        return n << 1;
+        /* the emitted walker's fk_list_len (fkc-table-serialize.fk) still answers 0 for a string: its words carry no
+         * string band to read */
+        return fk_op_len(fk_walk(fk_node[i][1], fp), 0);
     }
     if (t == 23) {
         long long x23 = fk_walk(fk_node[i][1], fp);
@@ -17696,6 +17961,34 @@ static void *fk_prog_map(char letter, long long pid, long long *size) {
 }
 static long long fk_prog_read(long long pid, long long spec) {
     long long dsz = 0, out = fk_nothing;
+    /* this process's own surface is read where it lives: the published A, S and the defn rows ARE these tables, so a node's
+     * four words, a defn's row and a span of source come from them with no segment mapped per read (a JIT written in Form
+     * reads a defn node by node, and a scan reads every defn row and its name: a map per read made one defn cost a second) */
+    if (pid == (long long)getpid() && spec != fk_nothing && (spec & 1) == 0 && (spec >> 1) >= 0) {
+        long long k = spec >> 1;
+        if (k >= fk_node_count) { return fk_nothing; }
+        return fk_cons_val(fk_node[k][0] << 1, fk_cons_val(fk_node[k][1] << 1, fk_cons_val(fk_node[k][2] << 1, fk_cons_val(fk_node[k][3] << 1, 1))));
+    }
+    if (pid == (long long)getpid() && spec != fk_nothing && spec >= 3 && (spec & 1) != 0 && !fk_is_str(spec) && FK_POK(spec >> 1)) {
+        long long p = spec >> 1;
+        char mode[16];
+        mode[0] = 0;
+        fk_cstr(FK_HH(p), mode, 16);
+        long long q = FK_HNEXT(p);
+        if (fk_cstr_eq(mode, "defn") && q >= 1 && FK_POK(q) && (FK_HH(q) & 1) == 0) {
+            long long j = FK_HH(q) >> 1;
+            if (j < 0 || j >= fk_fntop) { return fk_nothing; }
+            long long idx = fk_fnidx[j];
+            long long body = idx >= 0 && idx < fk_fn_count ? fk_fn[idx] : -1;
+            return fk_cons_val(fk_fnsym_s[j] << 1, fk_cons_val(fk_fnsym_n[j] << 1, fk_cons_val(idx << 1, fk_cons_val(body << 1, 1))));
+        }
+        if (fk_cstr_eq(mode, "src") && q >= 1 && FK_POK(q) && (FK_HH(q) & 1) == 0) {
+            long long off = FK_HH(q) >> 1, len = -1, r = FK_HNEXT(q);
+            if (r >= 1 && FK_POK(r) && (FK_HH(r) & 1) == 0) { len = FK_HH(r) >> 1; }
+            if (off < 0 || len < 0 || off + len > fk_slen) { return fk_nothing; }
+            return fk_sbuf(fk_srctext + off, len);
+        }
+    }
     long long *D = (long long *)fk_prog_map('D', pid, &dsz);
     if (D == 0) { return fk_nothing; }
     if (dsz < FK_PROG_D_BYTES || D[0] != FK_PROG_MAGIC) { munmap(D, (size_t)dsz); return fk_nothing; }
@@ -17839,23 +18132,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_strv(fk_node[i][1]);
     }
     if (t == 25) {
-        long long sv25 = fk_walk(fk_node[i][1], fp);
-        if (sv25 == fk_nothing) {
-            /* Measuring an absence must not answer a counterfeit 0 — the
-             * fk_nothing stone: no-value is never conflated with 0. A silent 0
-             * here dressed a vanished host-exec launch as "empty" (2026-08-27);
-             * silent error hides illness. This is the op-238 class of
-             * legitimate runtime death (a state the program cannot honestly
-             * continue past), not a bounds check: str_len dies this same
-             * death everywhere, and callers name the absence with nothing? before
-             * measuring. */
-            fk_stop("fkwu: str_len: nothing has no length -- ask nothing? before measuring");
-        }
-        long long sa = fk_stri(sv25);
-        if (sa < 0 || !FK_SOK(sa)) {
-            fk_stop("fkwu: str_len: only a string has a length -- ask value_kind first");
-        }
-        return FK_SLEN(sa) << 1;
+        return fk_op_str_len(fk_walk(fk_node[i][1], fp), 0);
     }
     if (t == 238) {
         /* form_error — the voice of refusal. Inside an attempt it is a stop
@@ -17884,17 +18161,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         exit(1);
     }
     if (t == 26) {
-        long long wa26 = fk_walk(fk_node[i][1], fp); fk_vp(wa26); long long sa26 = fk_stri(wa26);
-        long long wb26 = fk_walk(fk_node[i][2], fp); long long sb26 = fk_stri(wb26); fk_vsp = fk_vsp - 1;
-        /* the axiom-1 absence is a value str_eq may ask about -- it equals only an absence (str-eq-absence-band,
-         * band); any other non-string stops (a non-string is not a string) */
-        if ((wa26 != fk_nothing && (sa26 < 0 || !FK_SOK(sa26))) || (wb26 != fk_nothing && (sb26 < 0 || !FK_SOK(sb26)))) {
-            fk_stop("fkwu: str_eq: only strings and nothing compare as strings -- ask value_kind first, or use value_eq");
-        }
-        if (fk_keyeq(sa26, sb26)) {
-            return 2;
-        }
-        return 0;
+        long long wa26 = fk_walk(fk_node[i][1], fp); fk_vp(wa26);
+        long long wb26 = fk_walk(fk_node[i][2], fp); wa26 = fk_vs[fk_vsp - 1]; fk_vsp = fk_vsp - 1;
+        return fk_op_str_eq(wa26, wb26);
     }
     if (t == 27) {
         long long l27 = fk_node[i][1], r27 = fk_node[i][2];
@@ -17925,19 +18194,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_strv(fk_sintern(fk_sbp, ln));
     }
     if (t == 28) {
-        long long wa28 = fk_walk(fk_node[i][1], fp); fk_vp(wa28); long long sa = fk_stri(wa28);
-        long long wk28 = fk_walk(fk_node[i][2], fp); fk_vsp = fk_vsp - 1;
-        if (sa < 0 || !FK_SOK(sa)) {
-            fk_stop("fkwu: str_byte_at: only a string has bytes -- ask value_kind first");
-        }
-        if ((wk28 & 1) != 0) {
-            fk_stop("fkwu: str_byte_at: a byte index is an int -- ask nothing? first");
-        }
-        long long k = wk28 >> 1;
-        if (k < 0 || k >= FK_SLEN(sa)) {
-            return 0 - 2;
-        }
-        return ((long long)(unsigned char)FK_SBYTES(sa)[k]) << 1;
+        long long wa28 = fk_walk(fk_node[i][1], fp); fk_vp(wa28);
+        long long wk28 = fk_walk(fk_node[i][2], fp); wa28 = fk_vs[fk_vsp - 1]; fk_vsp = fk_vsp - 1;
+        return fk_op_byte_at(wa28, wk28);
     }
     if (t == 30) {
         /* str_find(h, needle, from) -- the body's search. It answers the BYTE
@@ -18352,6 +18611,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * host_file_mode, host_file_copy, host_file_identity, host_utimes, host_realpath, host_pwrite (49, below) -- see fk_host_door;
          * mode 50: cell_run; mode 53: cell_input -- the active cell's rooted argument. */
         if ((fm201 >> 1) == 53) { return fk_cell_arg_slot < 0 ? fk_nothing : fk_vs[fk_cell_arg_slot]; }
+        /* mode 56: jit_fn_bind(fn, words) -- a defn's Form page, see fk_jit_bind */
+        if ((fm201 >> 1) == 56) { return fk_jit_bind(fx201); }
         /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
         if ((fm201 >> 1) == 55) {
             const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
@@ -20039,6 +20300,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 71) { return fk_field_sp() << 1; }                         /* the shared string slots claimed */
         if (ks_k == 72) { return fk_field_pp() << 1; }                         /* the shared pairs claimed */
         if (ks_k == 73) { return fk_field_pair_mapped << 1; }                  /* the shared pair segments this kernel has mapped */
+        if (ks_k == 74) { return fk_jit_offers << 1; }                         /* defns offered to the Form JIT */
+        if (ks_k == 75) { return fk_jit_bound << 1; }                          /* defns running as Form pages */
+        if (ks_k == 76) { return fk_jit_offer_us << 1; }                       /* microseconds the offers took */
+        if (ks_k == 77) { return fk_jit_sites << 1; }                          /* site copies the pages apply through */
         if (ks_k == 58) {
             return (fk_field_on || fk_store_shared) ? 0 : (fk_np << 1);
         }
@@ -21224,10 +21489,17 @@ static void fk_heat_report(void) {
     if (placed & 1) { fk_heat_bury_ended(".fkwu-heat."); }
     if (placed & 2) { fk_heat_bury_ended(".fkwu-boxing."); }
 }
+static void fk_jit_pulse(long long c);
 static void fk_heat_pulse(void) {
     fk_heat_total = fk_heat_total + 1;
     if ((fk_heat_total & FK_HEAT_PULSE_MASK) == 0) {
         fk_heat_write();
+    }
+    /* the JIT's event: a defn's heat at a multiple of FK_JIT_HEAT, or defns that wait for a quiet pulse */
+    long long c = fk_cur_fn;
+    if ((c > 0 && c < fk_fn_capacity && fk_fn_heat[c] != 0 && (fk_fn_heat[c] & (FK_JIT_HEAT - 1)) == 0 &&
+         (c >= fk_jit_cap || fk_jit_state[c] == 0)) || fk_jit_pending_n > 0) {
+        fk_jit_pulse(c);
     }
 }
 static int fk_sws(char c) {
@@ -27769,6 +28041,82 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     return fk_rbox(r);
 }
 #endif
+/* The heat offer: a defn whose heat reaches a multiple of FK_JIT_HEAT goes to the Form JIT once. The cell runs in this
+ * process between two steps of the walk (the call that crossed the heat has its frame whole), and leaves the defn
+ * wearing its page or as it was. A defn that crosses while the JIT runs, or while a unit is being collected, waits in a
+ * short line and is offered at the next quiet pulse, so the JIT's own hot recipes come to run as pages too. */
+static char fk_jit_unit[FK_PATH_CAP];
+static int fk_jit_unit_state;  /* 0 not looked for, 1 found, 2 absent */
+static int fk_jit_on = -1;
+static int fk_jit_quiet(void) { return !fk_jit_busy && fk_collect_depth == 0 && !fk_cell_collect; }
+static void fk_jit_offer_one(long long c) {
+#if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || defined(_WIN32) || !defined(FK_HAVE_SETJMP)
+    (void)c;
+#else
+    if (c <= 0 || c >= fk_fn_count) { return; }
+    fk_jit_reserve(c + 1);
+    if (fk_jit_state[c] != 0) { return; }
+    fk_jit_state[c] = 1;
+    if (fk_jit_on < 0) { fk_jit_on = fk_conf("FK_NO_JIT") ? 0 : 1; }
+    if (!fk_jit_on) { return; }
+    if (fk_jit_unit_state == 0) {
+        const char *tok = "form-stdlib/bml/jit-page.bml";
+        fk_jit_unit_state = 2;
+        if (fk_boot_root[0] != 0 && fk_path_resolve_fk_dep(fk_boot_root, tok, fk_cstrlen(tok), fk_jit_unit, FK_PATH_CAP) &&
+            fk_path_size_raw(fk_jit_unit) > 0) {
+            fk_jit_unit_state = 1;
+        }
+    }
+    if (fk_jit_unit_state != 1) { return; }
+    long long body = fk_fn[c];
+    /* a defn the C loop lane crystallized keeps its leaf: unboxed floats are that lane's, until the flip (R8) */
+    if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) { return; }
+    long long arg = fk_cons_val(c << 1, fk_cons_val(body << 1, fk_cons_val(fk_fnar[c] << 1, 1)));
+    fk_vp(arg);
+    long long path = fk_sbuf(fk_jit_unit, fk_cstrlen(fk_jit_unit));
+    arg = fk_vs[fk_vsp - 1];
+    fk_vsp = fk_vsp - 1;
+    long long cur = fk_cur_fn, t0 = fk_mono_ns();
+    fk_jit_busy = 1;
+    long long r = fk_cell_run_door(path, arg, fk_nothing, fk_nothing, 1);
+    fk_jit_busy = 0;
+    fk_cur_fn = cur;
+    fk_jit_offers = fk_jit_offers + 1;
+    fk_jit_offer_us = fk_jit_offer_us + (fk_mono_ns() - t0) / 1000;
+    if (fk_conf("FK_JIT_SAY")) {
+        long long j = 0, ns = 0, nn = 0;
+        while (j < fk_fntop) { if (fk_fnidx[j] == c) { ns = fk_fnsym_s[j]; nn = fk_fnsym_n[j]; break; } j = j + 1; }
+        long long rr = fk_ridx(r), st = fk_nothing, q = 0, key = fk_stri(fk_sbuf("stopped", 7));
+        while (rr >= 1 && q < fk_rcnt[rr]) { if (fk_rkey[rr][q] == key) { st = fk_rval[rr][q]; } q = q + 1; }
+        long long si = st == fk_nothing ? -1 : fk_stri(fk_value_str(st));
+        dprintf(2, "fkwu: jit: %.*s (fn %lld, heat %lld) %s in %lld us%s%.*s\n", (int)nn, fk_srctext + ns, c, fk_fn_heat[c],
+                (c < fk_jit_cap && fk_jit_page[c] != 0) ? "bound" : "walks", (fk_mono_ns() - t0) / 1000, si >= 0 ? ": " : "",
+                si >= 0 && FK_SOK(si) ? (int)(FK_SLEN(si) > 600 ? 600 : FK_SLEN(si)) : 0, si >= 0 && FK_SOK(si) ? FK_SBYTES(si) : "");
+    }
+#endif
+}
+static void fk_jit_offer(long long c) {
+    if (!fk_jit_quiet()) {
+        if (fk_jit_pending_n < 64) { fk_jit_pending[fk_jit_pending_n] = c; fk_jit_pending_n = fk_jit_pending_n + 1; }
+        return;
+    }
+    fk_jit_offer_one(c);
+    while (fk_jit_pending_n > 0 && fk_jit_quiet()) {
+        fk_jit_pending_n = fk_jit_pending_n - 1;
+        fk_jit_offer_one(fk_jit_pending[fk_jit_pending_n]);
+    }
+}
+static void fk_jit_pulse(long long c) {
+    if (c > 0 && c < fk_fn_capacity && fk_fn_heat[c] != 0 && (fk_fn_heat[c] & (FK_JIT_HEAT - 1)) == 0 &&
+        (c >= fk_jit_cap || fk_jit_state[c] == 0)) {
+        fk_jit_offer(c);
+        return;
+    }
+    if (fk_jit_pending_n > 0 && fk_jit_quiet()) {
+        fk_jit_pending_n = fk_jit_pending_n - 1;
+        fk_jit_offer(fk_jit_pending[fk_jit_pending_n]);
+    }
+}
 static int fk_run_src(const char *path, long long arg) {
     char fkb_path[FK_PATH_CAP];
     char sym_path[FK_PATH_CAP];

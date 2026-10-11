@@ -1064,12 +1064,48 @@ observe/tests/voice-frequency-band 255 · number-band 255 · float-printer-band 
 
 ## The JIT
 
-A pure-float defn crystallizes into an arm64 f64 leaf when its box ledger crosses a boundary
-(`fk_f64_pulse`); a self-tail-call loop crystallizes on heat (`fk_heat_pulse`). `form-lower.fk`
+The walker's JIT is written in Form and needs no caller. A defn whose heat reaches a multiple of 4096 is offered once to
+`form/form-stdlib/bml/jit-page.bml`, a resident cell of the same process. The cell reads the defn's nodes where they live
+(`kernel_ast` of its own pid: a node, a defn row and a span of source are read straight from the kernel's tables, with no
+shared segment mapped per read, so ignored-argument-scan-band went from 4.1 s to 1 s), writes AArch64 words and binds them with
+`jit_fn_bind(fn, words)`. From then on the defn wears the crystallized-defn node (tag 194), and the walker's 194 arm runs
+the page in the frame the call built. A defn that gets hot while the JIT itself runs waits in a short line, so the JIT's
+own hot recipes run as pages too.
+
+The page keeps the walker's frame and the walker's meaning:
+
+- Parameters, lets and the page's own temporaries live in the value stack, so a melt moves what the page holds.
+- In the page's own words: literals, frame reads, let, do, if, the int paths of add, sub, mul, div, mod, band, bor, bxor,
+  lt, le and eq (eq also against nil), and a self tail call, which is a loop.
+- head, tail, len, str_len, str_eq, str_byte_at and cons are one C function each. The walker's arm and the page both
+  call it.
+- A call evaluates its arguments in the page. A call in value position then runs the walker's call arm. A tail call
+  moves the arguments into the frame and the walker continues at the callee.
+- An operand that is not an int, or a zero divisor, takes the node's own arm.
+- Any other node is walked, or given back to the walker in tail position.
+- Binding no words asks whether a page stands.
+
+kernel_stat reads 74 offers, 75 pages bound, 76 microseconds spent offering, and 77 site copies.
+
+Measured on one machine, with the walker alone versus pages, each pair giving the same answer or the same bytes:
+
+| work | walker | pages |
+|---|---|---|
+| a 3M-step tail loop | 156 ms | 7 ms, plus 7 ms for the first offer |
+| fingerprinting 232 KB of source | 36 ms | 2 ms, plus 9 ms for the first offer |
+| lowering form-find.bml | 2.1 s | 1.26 s |
+| lowering form-path.bml | 1.65 s | 1.0 s |
+
+Lowering form-find makes 171 offers, binds 160 pages and spends 0.15 s offering.
+
+The C loop lane (`fk_f64_*`) still crystallizes pure-float defns and self-tail-call loops at heat 1024, earlier than the
+Form JIT is offered, and keeps its leaf. The Form JIT does not offer a defn that already wears that leaf.
+`FK_NO_F64` in `fkwu.conf` holds the C lane so the Form page is witnessed alone; `FK_NO_JIT` holds the Form JIT;
+`FK_JIT_SAY` names each offer on stderr. The flip (R8) waits on the page carrying unboxed floats. `form-lower.fk`
 carries runtime strings through the two-slot `fk_inram_args` convention.
 
 ```text
-jit-lens-band 16383 · jit-heat-gate-band 4095 · observe/tests/jit-evaluator-heat-band 4095
+jit-page-band 31 · jit-lens-band 16383 · jit-heat-gate-band 4095 · observe/tests/jit-evaluator-heat-band 4095
 form-lower-string-band 63 · form-lower-string-runtime-band 255 · form-lower-string-both-runtime-band 511
 float-natives-band 28 · persistence-band 7 · channel-breath-band 500 · eq-shape-band 524287
 blueprint-authority-band 8191
