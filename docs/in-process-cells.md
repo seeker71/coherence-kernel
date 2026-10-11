@@ -10,7 +10,7 @@ BML lowering runs as a cell in this process. Its memo and compiled image are cac
 
 The [task flow](form-native-coding.md) passes native request and result nodes directly between planning, execution and completion checks through `cell_call`. Durable queues and terminal reports retain serialization at their own boundaries. Completion requires the original checks and owned publication; a returned process alone establishes neither.
 
-Cell-return framebuffer events correlate owner and step with named stops, elapsed time, CPU time, residency, compilation errors and value kind. The executing organ owns care and continuation. Supervised workers can publish progress records through [voice-track-record](../form/form-stdlib/voice-track-record.bml); the service boundary is described below.
+Cell-return framebuffer events correlate owner and step with named stops, elapsed time, CPU time, residency, compilation errors and value kind. Their final two fields carry the actual stop record and diagnostic rows by native reference, so live attention can read the cause without waiting for a release check or reconstructing stderr. The executing organ owns care and continuation. Supervised workers can publish progress records through [voice-track-record](../form/form-stdlib/voice-track-record.bml); the service boundary is described below.
 
 The direction is direct native composition: fewer process and representation crossings, shared typed values, and Form-owned scheduling, care and release. The C seed retains the physical runtime carrier while those responsibilities move into Form. Native task quality and verified local completion remain separate from transport and runtime witnesses.
 

@@ -4,6 +4,7 @@ import form-stdlib/bml/form-agent-tool-wire.bml;
 import form-stdlib/bml/form-cli-check-witness.bml;
 import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
+import control/offer-ack-core.fk;
 section [form.bml] {
  class FormCliTask {
   def fct-string(obj,key) = fat-wire-string?(json-object-get(obj,key)) ? json-string-value(json-object-get(obj,key)) : "";
@@ -37,10 +38,29 @@ section [form.bml] {
    let checks=json-array-elements(json-object-get(gap,"checks"));
    file_size(candidate)>=0 && read_file(original)==read_file(path) && read_file(root + "/reference/" + band)==read_file(band) && !any?(check=>!fccw-eval(check,docs)[0],checks) ? candidate : "";
   }
-  def fct-report(id,stage,owner,why,plan) {
-   let report=json-node-object([fct-pair("schema","form-native-task-v1"),fct-pair("task",id),fct-pair("stage",stage),fct-pair("trace_owner",owner),fct-pair("reason",why),json-node-pair("plan",nothing?(plan) ? json-node-null() : plan)]);
+  // Native callers keep complete planning and execution cell records, including
+  // its typed value, diagnostics and stop. Rendering belongs to the terminal.
+  def fct-report(id,stage,owner,why,plan,execution) {
+   let kind="form-native-task-v1";
+   let metadata=json-node-object([fct-pair("schema",kind),fct-pair("task",id),fct-pair("stage",stage),fct-pair("trace_owner",owner),fct-pair("reason",why)]);
+   let report=intern_node(bp(kind),[metadata,plan,execution]);
    fb_record(report,"form-cli-task.bml",42);
    report;
+  }
+  def fct-render-cell(execution) {
+   if nothing?(execution) then json-node-null() else {
+    let value=record_get(execution,"value");
+    let walk=value_kind(value)=="node_id" && node_eq(node_category(value),bp("native-turn-result"));
+    let parts=walk ? node_children(value) : [];
+    let outcome=walk ? (oac-one?(parts[2]) ? oac-payload(parts[2]) : nothing()) : value;
+    let findings=walk ? oac-payload(parts[3]) : [];
+    let shown=nothing?(outcome) ? json-node-null() : value_kind(outcome)=="node_id" ? outcome : value_kind(outcome)=="int" ? json-node-int(outcome) : json-node-string(cs-value-text(outcome));
+    json-node-object([fct-pair("reason",hch-cell-why(execution)),json-node-pair("errors",json-node-int(record_get(execution,"errors"))),json-node-pair("result",shown),json-node-pair("findings",json-node-array(findings |> map(m=>json-node-object([fct-pair("finding",m[0]),fct-pair("checkpoint",m[1]),json-node-pair("ends_walk",json-node-bool(m[2])),fct-pair("kind",m[4]),fct-pair("rung",len(m)>5 ? m[5] : "")]))))]);
+   };
+  }
+  def fct-render(report) {
+   let parts=node_children(report);
+   json-emit(json-node-object(json-object-pairs(parts[0])+[json-node-pair("plan",fct-render-cell(parts[1])),json-node-pair("execution",fct-render-cell(parts[2]))]));
   }
   def fct-completed(gap,io) {
    let id=fct-string(gap,"id");
@@ -56,19 +76,19 @@ section [form.bml] {
   }
   def fct-command(goal) {
    let paths=fct-paths(goal);
-   len(trim(goal))==0 || nil?(paths) ? fct-report(fct-id(goal),"attention","","Name the task and its existing repository file in the prompt; Form owns source discovery and checks.",nothing()) : fct-run(goal,paths);
+   len(trim(goal))==0 || nil?(paths) ? fct-report(fct-id(goal),"attention","","Name the task and its existing repository file in the prompt; Form owns source discovery and checks.",nothing(),nothing()) : fct-run(goal,paths);
   }
   def fct-run(goal,paths) {
    let id=fct-id(goal); let io=".hearth/tasks/" + id;
-   fct-completed(fct-queued(id),io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing()) : fct-plan-run(goal,paths,id,io);
+   fct-completed(fct-queued(id),io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing(),nothing()) : fct-plan-run(goal,paths,id,io);
   }
   def fct-plan-run(goal,paths,id,io) {
    let plan=hch-cell-observe(io,"plan",cell_call("observe/local-plan-run.bml",fct-request(goal,paths),nothing()));
    let queued=record_get(plan,"value"); let gap=nothing?(queued) ? "" : fct-string(queued,"id");
    let why=hch-cell-why(plan);
-   fct-completed(queued,io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing()) : hch-cell-status(plan)!=0 || gap=="" ? fct-report(id,"attention",io,why=="" ? "Local planner has not verified a queued task; the plan carries its outcome and latest finding." : why,queued) : {
+   fct-completed(queued,io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",plan,nothing()) : hch-cell-status(plan)!=0 || gap=="" ? fct-report(id,"attention",io,why=="" ? "Local planner has not verified a queued task; the plan carries its outcome and latest finding." : why,plan,nothing()) : {
     let turn=hch-cell-observe(io,"turn",cell_call("observe/native-turn-run.bml",json-node-object([json-node-pair("gap",queued),fct-pair("session",id)]),nothing()));
-    fct-report(id,fct-completed(queued,io) ? "completed" : "attention",io,hch-cell-why(turn),nothing());
+    fct-report(id,fct-completed(queued,io) ? "completed" : "attention",io,hch-cell-why(turn),plan,turn);
    };
   }
  }

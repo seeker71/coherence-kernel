@@ -62,13 +62,21 @@ the encoded prompt plus its answer reserve. The model artifact and memory owner
 still decide admission. An explicitly supplied context remains a caller limit.
 
 `turn` uses the same task owner. The standalone entry is `observe/form-cli-task-run.bml`, with the original prompt on
-stdin. Internal task calls return a native report; only the terminal entry renders it. Its `trace_owner` correlates the task's framebuffer events and durable planner/coding ledgers. `attention`
+stdin. Internal task calls return a `form-native-task-v1` node whose children are
+metadata, the complete planning cell record and the complete execution cell record. Each
+keeps its actual value, diagnostics and named stop; the walk's choices and
+findings retain their native identities. `fct-render` projects this report only
+at the terminal, including execution findings and stop evidence. Its `trace_owner` correlates the task's framebuffer events and durable planner/coding ledgers. `attention`
 names an unfinished task.
 The planner returns its outcome and latest finding as native nodes even when it
-cannot queue a verified task. The task report carries that result directly,
+cannot queue a verified task. The task report carries the planning record directly,
 including the original failure, local option count and retained guide packet.
 Reading separate ledgers is no longer required to recover a declined planner's
 last finding. This preserves evidence; it does not establish local completion.
+Cell stop reasons and compiler diagnostics remain visible at the shared cell
+boundary; an ordinary Form stop cannot become an empty reason. Framebuffer
+events supply attention during execution. Release verification confirms the
+resulting movement.
 Retained findings preserve the complete diagnostic. Execution evidence and
 stderr precede ordinary output, so earlier successful cases cannot hide the
 error from the next local choice or a resumed checkpoint.
