@@ -1,0 +1,61 @@
+// time-board-run.bml — where the wall clock went: every time board in this directory, read together.
+//
+//   ./fkwu observe/time-board-run.bml </dev/null                     every .fkwu-time.<pid> here, by phase and by recipe
+//   printf '{"top":80}' | ./fkwu observe/time-board-run.bml           more recipe rows
+//   printf '{"take":1}' | ./fkwu observe/time-board-run.bml           and the boards are taken once read
+//   printf '{"dir":"d"}' | ./fkwu observe/time-board-run.bml          the boards a workload's runs left in directory d
+//
+// fkwu's main thread samples its run thread a millisecond apart (runtime/fkwu-uni.c, fk_prof_sample): the C phase it is in
+// (melt, string-melt, load, parse, image, file, child, wait, gpu, net) or else the recipe it is in, walked, running as a
+// Form page, or as a C leaf of the loop lane. A board is written when a run that took a fifth of a second or more ends,
+// and at each heat pulse while it runs. A recipe's share is its own time, not the time of what it calls.
+import form-stdlib/core.fk;
+import form-stdlib/sort.fk;
+import form-stdlib/line-grammar.fk;
+import form-stdlib/json.fk;
+section [form.bml] {
+    class TimeBoard {
+        def tb-board?(name) = (Comparable) str_find(name, ".fkwu-time.", 0) == 0 && (Comparable) str_find(name, ".tmp", 0) < 0;
+        def tb-boards(dir) = map(n => dir + "/" + n, filter(n => tb-board?(n), fs_list(dir) ?? []));
+        def tb-str-opt(opts, key, fallback) = json-object-has?(opts, key) ? (json-string-value(json-object-get(opts, key)) ?? fallback) : fallback;
+        def tb-words(l) = filter(w => (Comparable) len(w) > 0, split-on(trim(l), " "));
+        def tb-int(s) = str_to_int(s) ?? 0;
+        // a board: [samples, wall-ms, cpu-ms, phases [[n, name]], recipes [[own, under, how, name]]]
+        def tb-read(path) = tb-parse(split-on(read_file(path) ?? "", byte_to_str(10)), [0, 0, 0, [], []]);
+        def tb-parse(lines, b) = nil?(lines) ? b : tb-parse(lines[1:], tb-line(tb-words(lines[0]), b));
+        def tb-line(w, b) = nil?(w) ? b : (String) w[0] == "time" ? [tb-int(w[1]), tb-int(w[3]), tb-int(w[5]), b[3], b[4]] : (String) w[0] == "phase" ? [b[0], b[1], b[2], cons([tb-int(w[1]), w[2]], b[3]), b[4]] : (String) w[0] == "recipe" ? [b[0], b[1], b[2], b[3], cons([tb-int(w[1]), tb-int(w[2]), w[3], tb-rest(w, 4)], b[4])] : b;
+        def tb-rest(w, i) = i >= len(w) ? "" : (Comparable) i == len(w) - 1 ? w[i] : w[i] + " " + tb-rest(w, i + 1);
+        // rows summed by name: [n, name] for phases, [own, under, how, name] for recipes
+        def tb-add-phase(acc, r) = tb-add-at(acc, r, 1, []);
+        def tb-add-recipe(acc, r) = tb-add-at(acc, r, 3, []);
+        def tb-add-at(acc, r, key, seen) = nil?(acc) ? cons(r, seen) : (String) acc[0][key] == r[key] ? append(reverse(seen), cons(tb-sum(acc[0], r, key), acc[1:])) : tb-add-at(acc[1:], r, key, cons(acc[0], seen));
+        def tb-sum(a, r, key) = (Comparable) key == 1 ? [a[0] + r[0], a[1]] : [a[0] + r[0], a[1] + r[1], a[2], a[3]];
+        def tb-fold(rows, acc, f) = nil?(rows) ? acc : tb-fold(rows[1:], f(acc, rows[0]), f);
+        def tb-pct(n, total) = total <= 0 ? "0.0" : (n * 1000 / total / 10).str() + "." + (n * 1000 / total % 10).str();
+        def tb-take(xs, n) = (n <= 0) || nil?(xs) ? [] : cons(xs[0], tb-take(xs[1:], n - 1));
+        def tb-lines(rows) = nil?(rows) ? "" : rows[0] + byte_to_str(10) + tb-lines(rows[1:]);
+        def tb-opts() {
+            let line = read_line();
+            nothing?(line) || (Comparable) len(trim(line)) == 0 ? json-node-object([]) : parse-json("time-board", trim(line));
+        }
+        def tb-opt(opts, key, fallback) = json-object-has?(opts, key) ? (json-int-value(json-object-get(opts, key)) ?? fallback) : fallback;
+        def tb-run() {
+            let opts = tb-opts();
+            let names = tb-boards(tb-str-opt(opts, "dir", "."));
+            let boards = map(n => tb-read(n), names);
+            let samples = sum(map(b => b[0], boards));
+            let wall = sum(map(b => b[1], boards));
+            let cpu = sum(map(b => b[2], boards));
+            let phases = reverse(sort-by(tb-fold(boards, [], (acc, b) => tb-fold(b[3], acc, tb-add-phase)), r => r[0]));
+            let recipes = reverse(sort-by(tb-fold(boards, [], (acc, b) => tb-fold(b[4], acc, tb-add-recipe)), r => r[0]));
+            let head = print_str("time-board: " + len(names).str() + " board(s), " + samples.str() + " samples over " + wall.str() + " ms of wall clock, " + cpu.str() + " ms of cpu");
+            let ph = print_str("== phases" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[0], samples) + "%  " + r[0].str() + "  " + r[1], phases)));
+            let rc = print_str("== recipes by their own time (walk: the walker; page: a Form page; leaf: the C loop lane)" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[0], samples) + "%  " + r[0].str() + "  " + r[2] + "  " + r[3], tb-take(recipes, tb-opt(opts, "top", 40)))));
+            let under = reverse(sort-by(recipes, r => r[1]));
+            let ru = print_str("== recipes by the time under them (theirs and their callees')" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[1], samples) + "%  " + r[1].str() + "  " + r[2] + "  " + r[3], tb-take(under, tb-opt(opts, "top", 40)))));
+            let taken = (Comparable) tb-opt(opts, "take", 0) == 1 ? map(n => fs_remove(n), names) : [];
+            samples;
+        }
+    }
+    tb-run();
+}
