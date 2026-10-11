@@ -138,13 +138,41 @@ section [form.bml] {
   def ntr-validation(model,tk,rows,masked,out,step,held) {
    let start = host_monotonic_ms();
    let totals = ntr-validation-rows(model,tk,rows,masked,0.0,0.0,0,held);
-   if (totals[1] <= 0.0) then form_error("native validation has no supervised tokens") else ntr-event(out,"validation",[ntr-int("optimizer_step",step),ntr-int("rows",totals[2]),ntr-real("supervised_tokens",totals[1]),ntr-real("loss",(totals[0] / totals[1])),ntr-int("wall_ms",(host_monotonic_ms() - start))]);
+   if (totals[1] <= 0.0) then form_error("native validation has no supervised tokens") else ntr-event(out,"validation",[ntr-int("optimizer_step",step),ntr-int("rows",totals[2]),ntr-real("supervised_tokens",totals[1]),ntr-real("loss",(totals[0] / totals[1])),ntr-int("cached",nil?(record_get(held,"cached")) ? 0 : 1),ntr-int("wall_ms",(host_monotonic_ms() - start))]);
+  }
+  // ── the baseline, remembered ──
+  // The baseline validation scores the held-out rows under the parent adapter before any step. The adapter, the rows, the mask
+  // policy and the kernels' numerics are the same run after run, and a baseline of 81 rows cost 282 s and 388 s beside neighbours
+  // (2026-10-11), 88% of a two-step run. Each row's totals are kept under a key of those four; a run with the same key takes
+  // them back and scores nothing. A change of adapter (its size, its first and last 4096 bytes), of the rows' text, of the mask
+  // policy or of ntr-numerics() is a different key: nothing stale is read. ntr-numerics() is bumped when a kernel change moves a loss.
+  def ntr-numerics() = "affine-numerics-3-mma";
+  def ntr-baseline-key(adapter,validText,masked) {
+   let file = nag-resolve(adapter) ++ "/adapters.safetensors";
+   let bytes = read_file(file) ?? "";
+   nlp-hex(sha256-stream-string(nag-resolve(adapter) ++ "|" ++ file_size(file).str() ++ "|" ++ substring(bytes,0,4096) ++ "|" ++ substring(bytes,nlg-max(0,len(bytes) - 4096),len(bytes)) ++ "|" ++ validText ++ "|" ++ masked.str() ++ "|" ++ ntr-numerics()));
+  }
+  def ntr-baseline-path(key) = ".hearth/form-token-lora/baseline-" ++ substring(key,0,16) ++ ".jsonl";
+  def ntr-totals-of(doc) = map(n => node_value(n),json-array-elements(json-object-get(doc,"totals")));
+  def ntr-baseline-load(path,count) {
+   let lines = filter(l => (Comparable) len(trim(l)) > 0,split-on(read_file(path) ?? "","\n"));
+   (Comparable) len(lines) == count ? map(l => ntr-totals-of(parse-json("baseline",l)),lines) : [];
+  }
+  def ntr-totals-node(v) = (String) value_kind(v) == "int" ? json-node-int(v) : json-precise-float(v);
+  def ntr-baseline-line(totals) = json-emit-precise(json-node-object([json-node-pair("totals",json-node-array(map(v => ntr-totals-node(v),totals)))]));
+  def ntr-baseline-save(path,held) {
+   let totals = reverse(map(p => p[1],record_get(held,"scored")));
+   nil?(totals) ? 0 : nag-write(path,str-join(map(t => ntr-baseline-line(t) ++ "\n",totals)));
+  }
+  def ntr-score-or-cached(model,sample,held,count) {
+   let cached = record_get(held,"cached");
+   (nil?(cached) || (count >= len(cached))) ? ntr-score(model,sample) : cached[count];
   }
   def ntr-validation-rows(model,tk,rows,masked,loss,tokens,count,held) {
    if nil?(rows) then [loss,tokens,count] else ntr-validation-row(model,tk,nld-prepare(tk,[rows[0]],masked)[0],rows[1:],masked,loss,tokens,count,held);
   }
   def ntr-validation-row(model,tk,sample,rest,masked,loss,tokens,count,held) {
-   let totals = ntr-score(model,sample);
+   let totals = ntr-score-or-cached(model,sample,held,count);
    let kept = ntr-hold(held,sample,totals);
    let value = ntr-score-loss(totals);
    ntr-validation-rows(model,tk,rest,masked,(loss + (value * sample[3])),(tokens + sample[3]),(count + 1),held);
@@ -292,8 +320,11 @@ section [form.bml] {
    let traversal = nlp-restore(model[5],json-object-get(r,"training_progress"));
    let event = ntr-event(out,"admitted",[ntr-text("model",model[4]),ntr-text("adapter",nag-resolve(adapter)),ntr-int("rows",len(rows)),ntr-int("steps_requested",ntr-get(r,"steps")),ntr-int("batch",ntr-get(r,"batch")),ntr-int("lora_pairs",len(state)),ntr-int("optimizer_step",resumed[0]),ntr-text("optimizer_resume",resumed[1]),ntr-int("open_ms",(host_monotonic_ms() - start)),ntr-text("sequence_policy","whole-row, device-memory admission, no token truncation")]);
    let validationRows = nld-file((ntr-get(r,"data") + "/valid.jsonl"));
-   let heldBefore = record_new(0,"scored",[]);
+   let baselinePath = ntr-baseline-path(ntr-baseline-key(adapter,read_file((ntr-get(r,"data") + "/valid.jsonl")) ?? "",ntr-get(r,"mask_prompt")));
+   let remembered = ntr-baseline-load(baselinePath,len(validationRows));
+   let heldBefore = record_new(0,"scored",[],"cached",remembered);
    let baseline = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,resumed[0],heldBefore);
+   let kept = nil?(remembered) ? ntr-baseline-save(baselinePath,heldBefore) : 0;
    let assessedBefore = ntr-assessment(model,tk,r,"before",heldBefore);
    let progress = traversal[0];
    let continuing = ((String) traversal[1] == "same dataset; continue checkpointed examples");
@@ -305,7 +336,7 @@ section [form.bml] {
    let ready = if ((String) selected == "defer") then form_error("native dataset response did not correlate") else nlp-request(r,progress);
    let applied = ntr-health-event(out,"dataset-applied",oh-applied(reading,selected,progress),[]);
    let result = ntr-round(model,tk,state,rows,ready,0,resumed[0]);
-   let heldAfter = record_new(0,"scored",[]);
+   let heldAfter = record_new(0,"scored",[],"cached",[]);
    let validation = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,result[0],heldAfter);
    let assessedAfter = ntr-assessment(model,tk,r,"after",heldAfter);
    let profiled = nam-profile?() ? map(p => print(["kernel", p[0], "device ms", p[1] / 1000, "dispatches", p[2], "mean us", p[1] / p[2]]), nam-profile-report()) : [];
