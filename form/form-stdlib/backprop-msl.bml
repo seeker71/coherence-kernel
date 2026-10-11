@@ -28,7 +28,43 @@ section [form.bml] {
     class FormBackpropMsl {
         def bpm-read-msl() = "static inline float bpm_read(device const uchar* p, uint i, uint ty) { uint at = i * (ty == 0u ? 4u : 2u); uint bits = uint(p[at]) | (uint(p[at + 1u]) << 8); if (ty == 0u) { return as_type<float>(bits | (uint(p[at + 2u]) << 16) | (uint(p[at + 3u]) << 24)); } if (ty == 1u) { return float(as_type<half>(ushort(bits))); } return as_type<float>(bits << 16); } ";
         def bpm-affine4-t-msl(fname) = ("kernel void " + (fname + " (device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* dy [[buffer(3)]], device float* dx [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], uint gid [[thread_position_in_grid]]) { uint blk = gid / cols; uint j = gid - blk * cols; uint tb = blk * 8u; if (tb >= tokens) return; uint gpr = cols / group; uint gj = j / group; uint sh = (j % 2u) * 4u; float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}; uint i = 0u; while (i < rows) { uint wi = i * cols + j; float q = float((uint(w[wi / 2u]) >> sh) & 15u); uint si = i * gpr + gj; float sc = bpm_read(s, si, ty); float bi = bpm_read(b, si, ty); float qs = q * sc; float wv = qs + bi; for (uint u = 0u; u < 8u; u++) { if (tb + u < tokens) { float p = wv * dy[(tb + u) * rows + i]; acc[u] = acc[u] + p; } } i += 1u; } for (uint u = 0u; u < 8u; u++) { if (tb + u < tokens) { dx[(tb + u) * cols + j] = acc[u]; } } }"));
-        def bpm-unit() = ("#pragma clang fp contract(off)\n" + ((String) bpm-read-msl() + bpm-affine4-t-msl("form_affine4_t_f32")));
+        // dx = W^T dy for sixteen tokens and more on the matrix unit, the mirror of nam_affine_mma (native-affine-metal.bml): a 32-token
+        // by 32-column output tile a threadgroup of 256 threads, the contraction walking the weight's ROWS 64 a step. Each thread
+        // dequantizes eight consecutive columns of one row (four bytes, one scale, one bias) into threadgroup memory beside the
+        // gradient tile, and the product is simdgroup_multiply_accumulate over 8x8 float tiles. The hardware picks the association,
+        // so it answers to an epsilon of the walk down the rows, not to its bits. It needs the rows a multiple of 64 and the
+        // columns and the group a multiple of 8.
+        def bpm-affine4-t-mma-msl() = "
+kernel void form_affine4_t_mma_f32(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* dy [[buffer(3)]], device float* dx [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], uint gr [[threadgroup_position_in_grid]], uint lt [[thread_index_in_threadgroup]]) {
+ threadgroup float xs[2048]; threadgroup float ws[2048];
+ uint tilesN=(cols+31u)/32u; uint tgx=gr%tilesN; uint tgy=gr/tilesN; uint n0=tgx*32u; uint t0=tgy*32u;
+ uint sg=lt/32u; uint r4=sg/2u; uint c2=sg-r4*2u;
+ simdgroup_float8x8 acc0=simdgroup_float8x8(0.0f); simdgroup_float8x8 acc1=simdgroup_float8x8(0.0f);
+ uint xr=lt/8u; uint xc=(lt%8u)*8u; uint xt=t0+xr; uint wk=lt/4u; uint wj=(lt%4u)*8u; uint jcol=n0+wj; uint gpr=cols/group;
+ for(uint k0=0u;k0<rows;k0+=64u) {
+  if(xt<tokens) { device const float* xp=dy+ulong(xt)*ulong(rows)+k0+xc; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4); xs[xr*64u+xc]=x0.x; xs[xr*64u+xc+1u]=x0.y; xs[xr*64u+xc+2u]=x0.z; xs[xr*64u+xc+3u]=x0.w; xs[xr*64u+xc+4u]=x1.x; xs[xr*64u+xc+5u]=x1.y; xs[xr*64u+xc+6u]=x1.z; xs[xr*64u+xc+7u]=x1.w; }
+  else { for(uint j=0u;j<8u;j++) { xs[xr*64u+xc+j]=0.0f; } }
+  uint i=k0+wk;
+  if(jcol<cols) {
+   ulong wi=ulong(i)*ulong(cols)+jcol; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
+   uint si=i*gpr+jcol/group; float sc=bpm_read(s,si,ty); float bi=bpm_read(b,si,ty);
+   for(uint j=0u;j<8u;j++) { ws[wk*32u+wj+j]=float((word>>(4u*j))&15u)*sc+bi; }
+  } else { for(uint j=0u;j<8u;j++) { ws[wk*32u+wj+j]=0.0f; } }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for(uint kb=0u;kb<8u;kb++) {
+   simdgroup_float8x8 a; simdgroup_float8x8 b0m; simdgroup_float8x8 b1m;
+   simdgroup_load(a,xs+(r4*8u)*64u+kb*8u,64); simdgroup_load(b0m,ws+(kb*8u)*32u+c2*16u,32); simdgroup_load(b1m,ws+(kb*8u)*32u+c2*16u+8u,32);
+   simdgroup_multiply_accumulate(acc0,a,b0m,acc0); simdgroup_multiply_accumulate(acc1,a,b1m,acc1);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+ }
+ simdgroup_store(acc0,xs+(r4*8u)*32u+c2*16u,32); simdgroup_store(acc1,xs+(r4*8u)*32u+c2*16u+8u,32);
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ uint tx=lt%16u; uint ty2=lt/16u;
+ for(uint ii=0u;ii<2u;ii++) { uint t=t0+ty2*2u+ii; if(t>=tokens) continue; for(uint jj=0u;jj<2u;jj++) { uint n=n0+tx*2u+jj; if(n>=cols) continue; dx[ulong(t)*ulong(cols)+n]=xs[(ty2*2u+ii)*32u+tx*2u+jj]; } }
+}
+";
+        def bpm-unit() = ("#pragma clang fp contract(off)\n#include <metal_stdlib>\nusing namespace metal;\n" + ((String) bpm-read-msl() + (bpm-affine4-t-msl("form_affine4_t_f32") + bpm-affine4-t-mma-msl())));
         // the pipeline, or the carrier's non-positive answer: a caller that
         // wants to know whether it minted asks this, not bpm-pipe
         def bpm-mint() = metal_pipeline(bpm-unit(), "form_affine4_t_f32");
@@ -37,7 +73,11 @@ section [form.bml] {
         // view: (w s b rows cols group ty) — nam-view's own tuple, so any view
         // nam-linear reads, this reads
         def bpm-affine4-t-with(p, view, dy, dx, tokens) = bpm-sent(metal_enqueue(p, md-bind([view[0], view[1], view[2], dy, dx], [view[3], view[4], tokens, view[5], view[6]]), (((tokens + 7) / 8) * view[4])));
-        def bpm-affine4-t(view, dy, dx, tokens) = bpm-affine4-t-with(bpm-pipe(), view, dy, dx, tokens);
+        def bpm-mma?(view, tokens) = (tokens >= 16) && ((view[3] % 64) == 0) && ((view[4] % 8) == 0) && ((view[5] % 8) == 0);
+        def bpm-pipe-mma() = bpm-held-mma(metal_pipeline(bpm-unit(), "form_affine4_t_mma_f32"));
+        def bpm-held-mma(p) = if (p <= 0) then form_error("backprop-msl: form_affine4_t_mma_f32 did not mint") else p;
+        def bpm-affine4-t-mma(view, dy, dx, tokens) = bpm-sent(metal_enqueue(bpm-pipe-mma(), md-bind16([view[0], view[1], view[2], dy, dx], [view[3], view[4], tokens, view[5], view[6]], 256, 0, 1, 0), (((tokens + 31) / 32) * ((view[4] + 31) / 32))));
+        def bpm-affine4-t(view, dy, dx, tokens) = bpm-mma?(view, tokens) ? bpm-affine4-t-mma(view, dy, dx, tokens) : bpm-affine4-t-with(bpm-pipe(), view, dy, dx, tokens);
         def bpm-sent(rc) = if (rc < 0) then form_error("backprop-msl: form_affine4_t_f32 dispatch did not go") else rc;
     }
     0;

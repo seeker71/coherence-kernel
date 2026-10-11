@@ -54,6 +54,34 @@ kernel void nam_affine_mt4(device const uchar* w [[buffer(0)]], device const uch
  }
  for(uint q=0;q<4;q++) for(uint t=0;t<8;t++) { float v=simd_sum(acc[q][t]); if(lane==0 && tb+t<tokens) y[ulong(tb+t)*rows+rb+q]=v; }
 }
+kernel void nam_affine_mma(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& first_lo [[buffer(10)]], constant uint& first_hi [[buffer(11)]], uint gr [[threadgroup_position_in_grid]], uint lt [[thread_index_in_threadgroup]]) {
+ threadgroup float xs[2048]; threadgroup float ws[2048];
+ ulong gi=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gr); uint tilesN=(rows+31u)/32u; uint tgx=uint(gi%ulong(tilesN)); uint tgy=uint(gi/ulong(tilesN)); uint n0=tgx*32u; uint t0=tgy*32u;
+ uint sg=lt/32u; uint r4=sg/2u; uint c2=sg-r4*2u;
+ simdgroup_float8x8 acc0=simdgroup_float8x8(0.0f); simdgroup_float8x8 acc1=simdgroup_float8x8(0.0f);
+ uint xr=lt/8u; uint xc=(lt%8u)*8u; uint xt=t0+xr; uint wn=lt/8u; uint wc=(lt%8u)*8u; uint wrow=n0+wn;
+ uint gpr=cols/group; uint gshift=ctz(group); bool gpow2=(group&(group-1u))==0u; uint gbase=wrow*gpr;
+ for(uint k0=0u;k0<cols;k0+=64u) {
+  if(xt<tokens) { device const float* xp=x+ulong(xt)*ulong(cols)+k0+xc; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4); xs[xr*64u+xc]=x0.x; xs[xr*64u+xc+1u]=x0.y; xs[xr*64u+xc+2u]=x0.z; xs[xr*64u+xc+3u]=x0.w; xs[xr*64u+xc+4u]=x1.x; xs[xr*64u+xc+5u]=x1.y; xs[xr*64u+xc+6u]=x1.z; xs[xr*64u+xc+7u]=x1.w; }
+  else { for(uint j=0u;j<8u;j++) { xs[xr*64u+xc+j]=0.0f; } }
+  if(wrow<rows) {
+   ulong wi=ulong(wrow)*ulong(cols)+k0+wc; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
+   uint kk=k0+wc; uint g=gbase+(gpow2?(kk>>gshift):(kk/group)); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty);
+   for(uint j=0u;j<8u;j++) { ws[(wc+j)*32u+wn]=float((word>>(4u*j))&15u)*sc+bi; }
+  } else { for(uint j=0u;j<8u;j++) { ws[(wc+j)*32u+wn]=0.0f; } }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for(uint kb=0u;kb<8u;kb++) {
+   simdgroup_float8x8 a; simdgroup_float8x8 b0m; simdgroup_float8x8 b1m;
+   simdgroup_load(a,xs+(r4*8u)*64u+kb*8u,64); simdgroup_load(b0m,ws+(kb*8u)*32u+c2*16u,32); simdgroup_load(b1m,ws+(kb*8u)*32u+c2*16u+8u,32);
+   simdgroup_multiply_accumulate(acc0,a,b0m,acc0); simdgroup_multiply_accumulate(acc1,a,b1m,acc1);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+ }
+ simdgroup_store(acc0,xs+(r4*8u)*32u+c2*16u,32); simdgroup_store(acc1,xs+(r4*8u)*32u+c2*16u+8u,32);
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ uint tx=lt%16u; uint ty2=lt/16u;
+ for(uint i=0u;i<2u;i++) { uint t=t0+ty2*2u+i; if(t>=tokens) continue; for(uint j=0u;j<2u;j++) { uint n=n0+tx*2u+j; if(n>=rows) continue; y[ulong(t)*ulong(rows)+n]=xs[(ty2*2u+i)*32u+tx*2u+j]; } }
+}
 inline float nam_chunk(device const uchar* w, device const uchar* s, device const uchar* b, device const float* x, uint r, uint cols, uint c, uint group, uint ty) {
  ulong wi=ulong(r)*ulong(cols)+c; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
  uint g=nam_g(r,cols,c,group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty);
@@ -90,6 +118,12 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   def nam-run(name, handles, values, count, grouped) {
    let p = nam-pipe(name);
    let rc = nam-enqueue(name, p, grouped ? md-bind16(handles, values, 32, 0, 1, 0) : md-bind(handles, values), count);
+   rc < 0 ? form_error("native affine dispatch refused: " + name) : rc;
+  }
+  // threadgroups of `tpg` threads, `groups` of them (nam-run's grouped mode fixes 32)
+  def nam-run-tg(name, handles, values, groups, tpg) {
+   let p = nam-pipe(name);
+   let rc = nam-enqueue(name, p, md-bind16(handles, values, tpg, 0, 1, 0), groups);
    rc < 0 ? form_error("native affine dispatch refused: " + name) : rc;
   }
   // FORM_NAM_PROFILE=1: every dispatch is waited for and the device's own busy time (metal_live word 11, the command buffer's
@@ -162,12 +196,18 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   // the block kernel 4,879 -> 2,384; observe/decode-matvec-probe-run.bml reads it).
   def nam-dec8?(view) = (view[4] % 8) == 0 && (view[5] % 8) == 0;
   def nam-decode?(view, tokens) = tokens == 1 && nam-dec8?(view);
-  def nam-mt-kernel(view, tokens) = nam-decode?(view, tokens) ? "nam_affine_v1" : nam-mt-four?(view) ? "nam_affine_mt4" : "nam_affine_mt";
-  def nam-mt-groups(view,tokens) = nam-decode?(view, tokens) ? view[3] : (nam-mt-four?(view) ? view[3] / 4 : view[3]) * ((tokens + 7) / 8);
+  // Sixteen tokens and more, on the matrix unit: a 32-token by 32-row output tile a threadgroup of 256 threads, the weights
+  // dequantized (the same dequantize-then-multiply) into threadgroup memory 32 columns a step beside the activations, the product
+  // taken by simdgroup_multiply_accumulate over 8x8 float tiles. The hardware chooses the association, so this answers to an
+  // epsilon of the scalar walk, not to its bits (the Qwen prefill's matrix unit stands on the same bound). It needs the columns
+  // and the group a multiple of 32, which every projection of the 3B model is.
+  def nam-mma?(view, tokens) = tokens >= 16 && (view[4] % 64) == 0 && (view[5] % 8) == 0;
+  def nam-mt-kernel(view, tokens) = nam-mma?(view, tokens) ? "nam_affine_mma" : nam-decode?(view, tokens) ? "nam_affine_v1" : nam-mt-four?(view) ? "nam_affine_mt4" : "nam_affine_mt";
+  def nam-mt-groups(view,tokens) = nam-mma?(view, tokens) ? ((tokens + 31) / 32) * ((view[3] + 31) / 32) : nam-decode?(view, tokens) ? view[3] : (nam-mt-four?(view) ? view[3] / 4 : view[3]) * ((tokens + 7) / 8);
   def nam-linear-mt(view,x,y,tokens) = tokens <= 0 ? form_error("native affine token count must be positive") : nam-linear-mt-grid(view,x,y,tokens,0,nam-mt-groups(view,tokens));
   def nam-linear-mt-grid(view,x,y,tokens,first,count) = first >= count ? 1 : {
    let width = (count - first) < AffineDispatchGroups() ? (count - first) : AffineDispatchGroups();
-   let sent = nam-run(nam-mt-kernel(view,tokens),[view[0],view[1],view[2],x,y],[view[3],view[4],tokens,view[5],view[6],first % AffineIndexWord(),first / AffineIndexWord()],width,1);
+   let sent = nam-run-tg(nam-mt-kernel(view,tokens),[view[0],view[1],view[2],x,y],[view[3],view[4],tokens,view[5],view[6],first % AffineIndexWord(),first / AffineIndexWord()],width,nam-mma?(view,tokens) ? 256 : 32);
    nam-linear-mt-grid(view,x,y,tokens,first + width,count);
   };
   // Bound each cooperative grid while retaining every output's global index.
