@@ -563,7 +563,8 @@ the execution integer; byte ranges clamp to the source before adding offsets.
 The external JSON tool wire retains its one MiB request ceiling, and JSON
 syntax admission retains its nesting depth of 64. Query expressions and
 sorting have no separate byte or item ceiling. Lexical, numeric and JSON scalar
-sorting share Form's stable mergesort; numeric text keys are converted once.
+sorting share Form's stable mergesort; numeric text keys are converted once
+and retain their native integer or float kind through ordering and selection.
 Search patterns and globs have no separate length or step limit. `rg -m` is
 the caller's match allowance; an omitted allowance does not introduce a cap.
 Literal prefixes use native byte search; greedy suffix states are shared across
