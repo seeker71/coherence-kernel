@@ -1075,17 +1075,19 @@ own hot recipes run as pages too.
 The page keeps the walker's frame and the walker's meaning:
 
 - Parameters, lets and the page's own temporaries live in the value stack, so a melt moves what the page holds.
-- In the page's own words: literals, frame reads, let, do, if, the int paths of add, sub, mul, div, mod, band, bor, bxor,
-  lt, le and eq (eq also against nil), and a self tail call, which is a loop.
-- head, tail, len, str_len, str_eq, str_byte_at and cons are one C function each. The walker's arm and the page both
-  call it.
-- A call evaluates its arguments in the page. A call in value position then runs the walker's call arm. A tail call
-  moves the arguments into the frame and the walker continues at the callee.
-- An operand that is not an int, or a zero divisor, takes the node's own arm.
+- In the page's own words: literals, frame reads, let, do, if (the branch law, as both walkers read it), the int paths of
+  add, sub, mul, div, mod, band, bor, bxor, lt, le and eq (eq also against nil), and a self tail call, which is a loop.
+- Every strict op has one meaning, a C function the walker's arm and the page both call (`fk_op_*`): the page takes an
+  int path in its own words and hands any other operand, or a zero divisor, to that function. head, tail, len,
+  str_len, str_eq, str_byte_at, cons, nth, byte_to_str, shl_u32 and shr_u32 always go to it.
+- A call has one meaning too (`fk_call_value`, `fk_call_tail`), used by every call arm of both walkers and by the page,
+  which evaluates the arguments itself. A closure's captures are written after the heat pulse, immediately before the
+  body, because the pulse can run the JIT's own cell.
+- Every lane that runs machine code is born through one page door (`fk_page_alloc`, `fk_page_write`).
 - Any other node is walked, or given back to the walker in tail position.
 - Binding no words asks whether a page stands.
 
-kernel_stat reads 74 offers, 75 pages bound, 76 microseconds spent offering, and 77 site copies.
+kernel_stat reads 74 offers, 75 pages bound, and 76 microseconds spent offering.
 
 Measured on one machine, with the walker alone versus pages, each pair giving the same answer or the same bytes:
 

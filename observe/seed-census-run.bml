@@ -1,0 +1,157 @@
+// seed-census-run.bml — the C seed, measured by the body: what runtime/fkwu-uni.c carries, by family, and what it carries
+// that nothing calls.
+//
+//   ./fkwu observe/seed-census-run.bml </dev/null          the census
+//   printf 'table\n' | ./fkwu observe/seed-census-run.bml     and every function: name, lines, code references, first line
+//
+// A function is a line that begins `static`, names itself before its `(` and ends `{`; it ends at the next line that is
+// only `}`. Its family is its name up to the second underscore (fk_f64_install is fk_f64). A function is unreferenced when
+// its name stands, as a whole word, nowhere but in its own definition and its declarations (lines that end `;` and begin
+// `static`). The walker's arms are the `if (t == N)` lines inside fk_walk, fk_walk_body and fk_walk_cold; a tag armed in
+// more than one is a mirror of one meaning. Toggles are the fk_conf("...") keys. The census reads; it changes nothing.
+import form-stdlib/core.fk;
+import form-stdlib/sort.fk;
+import form-stdlib/line-grammar.fk;
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+    class SeedCensus {
+        def sc-path() = "runtime/fkwu-uni.c";
+        def sc-word-byte?(b) = ((b >= 48) && (b <= 57)) || (((b >= 65) && (b <= 90)) || (((b >= 97) && (b <= 122)) || ((Comparable) b == 95)));
+        def sc-starts?(s, p) = (Comparable) str_find(s, p, 0) == 0;
+        def sc-ends-brace?(s) = (len(s) > 0) && ((Comparable) str_byte_at(s, len(s) - 1) == 123);
+        // the name before the first `(`: the word that ends there
+        def sc-name-end(s) = str_find(s, "(", 0);
+        def sc-name-start(s, i) = (i > 0) && sc-word-byte?(str_byte_at(s, i - 1)) ? sc-name-start(s, i - 1) : i;
+        def sc-name(s) {
+            let e = sc-name-end(s);
+            e <= 0 ? "" : substring(s, sc-name-start(s, e), e);
+        }
+        def sc-defn?(s) = sc-starts?(s, "static ") && (sc-ends-brace?(s) && ((sc-name-end(s) > 0) && (str_find(s, "=", 0) < 0 || str_find(s, "=", 0) > sc-name-end(s))));
+        // [name, first line, length] for every definition, in order
+        def sc-fns(lines, i, open, acc) {
+            nil?(lines) ? reverse(acc) : sc-fns-at(lines, i, open, acc, lines[0]);
+        }
+        def sc-fns-at(lines, i, open, acc, l) {
+            nothing?(open) ? sc-fns(lines[1:], i + 1, sc-defn?(l) ? [sc-name(l), i] : nothing(), acc) : (String) l == "}" ? sc-fns(lines[1:], i + 1, nothing(), cons([open[0], open[1], i - open[1] + 1], acc)) : sc-fns(lines[1:], i + 1, open, acc);
+        }
+        def sc-family(name) {
+            let a = str_find(name, "_", 0);
+            let b = a < 0 ? 0 - 1 : str_find(name, "_", a + 1);
+            b < 0 ? name : substring(name, 0, b);
+        }
+        // whole-word occurrences of a name in the text
+        def sc-count(text, name, from, n) {
+            let at = str_find(text, name, from);
+            at < 0 ? n : sc-count(text, name, at + 1, sc-whole?(text, name, at) ? n + 1 : n);
+        }
+        def sc-whole?(text, name, at) = ((at == 0) || !sc-word-byte?(str_byte_at(text, at - 1))) && ((at + len(name) >= len(text)) || !sc-word-byte?(str_byte_at(text, at + len(name))));
+        // the code without its comments, read with the block comment's state carried from line to line: inside one, a line
+        // is code only after its `*/`; outside, `//` ends the code and `/*` opens a comment that may close on the same line.
+        // (A line that begins `*` is code when no comment is open: `*out = v;`.) A string holding either marker is cut too:
+        // the census reads names, not literals.
+        def sc-code-of(lines, open, acc) {
+            nil?(lines) ? reverse(acc) : sc-code-at(lines[1:], open, acc, lines[0]);
+        }
+        def sc-code-at(rest, open, acc, l) {
+            let close = str_find(l, "*/", 0);
+            open ? (close < 0 ? sc-code-of(rest, 1, cons("", acc)) : sc-code-line(rest, acc, substring(l, close + 2, len(l)))) : sc-code-line(rest, acc, l);
+        }
+        def sc-code-line(rest, acc, l) {
+            let c1 = str_find(l, "//", 0);
+            let c2 = str_find(l, "/*", 0);
+            c2 >= 0 && (c1 < 0 || c2 < c1) ? sc-code-block(rest, acc, substring(l, 0, c2), substring(l, c2 + 2, len(l))) : sc-code-of(rest, 0, cons(c1 < 0 ? l : substring(l, 0, c1), acc));
+        }
+        // a comment opened at the cut: closed on this line, the line goes on after it; else the comment stays open
+        def sc-code-block(rest, acc, before, after) {
+            let close = str_find(after, "*/", 0);
+            close < 0 ? sc-code-of(rest, 1, cons(before, acc)) : sc-code-line(rest, cons(before, acc), substring(after, close + 2, len(after)));
+        }
+        // pieces of one line around an inline comment stand on their own lines: a name is never joined across them
+        def sc-code(lines) = str-join-with(sc-code-of(lines, 0, []), byte_to_str(10));
+        def sc-decls(lines, name, n) = nil?(lines) ? n : sc-decls(lines[1:], name, sc-decl?(lines[0], name) ? n + 1 : n);
+        def sc-decl?(l, name) = sc-starts?(l, "static ") && (((Comparable) str_byte_at(l, len(l) - 1) == 59) && ((String) sc-name(l) == name));
+        // the families: [family, functions, lines], most lines first
+        def sc-families(fns, acc) = nil?(fns) ? acc : sc-families(fns[1:], sc-fam-add(acc, sc-family(fns[0][0]), fns[0][2], []));
+        def sc-fam-add(acc, fam, n, seen) = nil?(acc) ? cons([fam, 1, n], seen) : (String) acc[0][0] == fam ? append(reverse(seen), cons([fam, acc[0][1] + 1, acc[0][2] + n], acc[1:])) : sc-fam-add(acc[1:], fam, n, cons(acc[0], seen));
+        // the arms of one walker: the N of every `if (t == N)` between its first line and its last
+        def sc-arms(lines, from, to, i, acc) = nil?(lines) || (i > to) ? reverse(acc) : sc-arms(lines[1:], from, to, i + 1, (i >= from) && (str_find(lines[0], "if (t == ", 0) >= 0) ? cons(sc-arm-tag(lines[0]), acc) : acc);
+        def sc-arm-tag(l) {
+            let at = str_find(l, "if (t == ", 0) + 9;
+            let close = str_find(l, ")", at);
+            substring(l, at, close);
+        }
+        def sc-find-fn(fns, name) = nil?(fns) ? nothing() : (String) fns[0][0] == name ? fns[0] : sc-find-fn(fns[1:], name);
+        def sc-walker-arms(lines, fns, name) {
+            let f = sc-find-fn(fns, name);
+            nothing?(f) ? [] : sc-arms(lines, f[1], f[1] + f[2], 1, []);
+        }
+        def sc-member?(xs, x) = nil?(xs) ? 0 : (String) xs[0] == x ? 1 : sc-member?(xs[1:], x);
+        def sc-shared(a, b) = filter(x => (Comparable) sc-member?(b, x) == 1, a);
+        def sc-toggles(text, from, acc) {
+            let at = str_find(text, "fk_conf(\"", from);
+            at < 0 ? reverse(acc) : sc-toggles(text, at + 9, cons(substring(text, at + 9, str_find(text, "\"", at + 9)), acc));
+        }
+        def sc-uniq(xs, acc) = nil?(xs) ? reverse(acc) : (Comparable) sc-member?(acc, xs[0]) == 1 ? sc-uniq(xs[1:], acc) : sc-uniq(xs[1:], cons(xs[0], acc));
+        // ---- the producers: every tag a node can be made with ----
+        // the op table: a row's tag (`{ "add", 2, 3 }`), and the NODE cells of its template (`2,tag,arity`; LIT and ARG
+        // cells, `1,v` and `0,k`, are two words)
+        def sc-int-list(s) = map(p => str_to_int(trim(p)), filter(p => (Comparable) len(trim(p)) > 0, split-on(s, ",")));
+        def sc-template-tags(ws, acc) = nil?(ws) ? acc : (Comparable) ws[0] == 2 ? (nil?(ws[1:]) ? acc : sc-template-tags(sc-drop(ws, 3), cons(ws[1].str(), acc))) : sc-template-tags(sc-drop(ws, 2), acc);
+        def sc-drop(xs, n) = (n <= 0) || nil?(xs) ? xs : sc-drop(xs[1:], n - 1);
+        def sc-optab-row-tags(l) {
+            let open = str_find(l, "{ \"", 0);
+            let fields = open < 0 ? [] : split-on(substring(l, open + 3, len(l)), ",");
+            let tag = len(fields) >= 3 ? trim(fields[2]) : "";
+            let t1 = str_find(l, "{ ", open + 3);
+            let t2 = t1 < 0 ? 0 - 1 : str_find(l, "}", t1);
+            let tpl = t1 < 0 || t2 < 0 ? [] : sc-template-tags(sc-int-list(substring(l, t1 + 2, t2)), []);
+            open < 0 ? [] : cons(str_find(tag, " ", 0) >= 0 ? substring(tag, 0, str_find(tag, " ", 0)) : tag, tpl);
+        }
+        // the code: every fk_smknode(N, ...) with a literal N
+        def sc-smknode-tags(code, from, acc) {
+            let at = str_find(code, "fk_smknode(", from);
+            let close = at < 0 ? 0 - 1 : str_find(code, ",", at);
+            at < 0 ? acc : sc-smknode-tags(code, at + 11, sc-digits?(trim(substring(code, at + 11, close))) ? cons(trim(substring(code, at + 11, close)), acc) : acc);
+        }
+        def sc-digits?(s) = (len(s) > 0) && sc-digits-at?(s, 0);
+        def sc-digits-at?(s, i) = i >= len(s) ? 1 : ((str_byte_at(s, i) >= 48) && (str_byte_at(s, i) <= 57)) ? sc-digits-at?(s, i + 1) : 0;
+        def sc-concat-all(xss) = nil?(xss) ? [] : append(xss[0], sc-concat-all(xss[1:]));
+        def sc-producers(code) {
+            let optab = read_file("runtime/fkwu-optable.h") ?? "";
+            sc-uniq(append(sc-concat-all(map(l => sc-optab-row-tags(l), split-on(optab, byte_to_str(10)))), sc-smknode-tags(code, 0, [])), []);
+        }
+        def sc-row(f) = f[0] + " " + f[2].str() + " lines at " + f[1].str();
+        def sc-fam-row(r) = r[0] + " " + r[1].str() + " fns " + r[2].str() + " lines";
+        def sc-lines-of(rows) = nil?(rows) ? "" : rows[0] + byte_to_str(10) + sc-lines-of(rows[1:]);
+        def sc-take(xs, n) = (n <= 0) || nil?(xs) ? [] : cons(xs[0], sc-take(xs[1:], n - 1));
+        def sc-run() {
+            let text = read_file(sc-path());
+            let lines = split-on(text, byte_to_str(10));
+            let fns = sc-fns(lines, 1, nothing(), []);
+            let inside = sum(map(f => f[2], fns));
+            let code = sc-code(lines);
+            let decls = filter(l => sc-starts?(l, "static ") && ((len(l) > 0) && ((Comparable) str_byte_at(l, len(l) - 1) == 59)), lines);
+            let dead = filter(f => (Comparable) sc-count(code, f[0], 0, 0) - 1 - sc-decls(decls, f[0], 0) <= 0, fns);
+            let fams = reverse(sort-by(sc-families(fns, []), r => r[2]));
+            let largest = sc-take(reverse(sort-by(fns, f => f[2])), 40);
+            let walk = sc-walker-arms(lines, fns, "fk_walk");
+            let body = sc-walker-arms(lines, fns, "fk_walk_body");
+            let cold = sc-walker-arms(lines, fns, "fk_walk_cold");
+            let toggles = sc-uniq(sc-toggles(code, 0, []), []);
+            let head = "seed-census " + sc-path() + ": " + len(lines).str() + " lines, " + len(fns).str() + " functions holding " + inside.str() + " lines, " + len(dead).str() + " unreferenced, " + len(toggles).str() + " fkwu.conf toggles";
+            let said = print_str(head);
+            let s1 = print_str("== families (functions, lines), most lines first" + byte_to_str(10) + sc-lines-of(map(r => sc-fam-row(r), fams)));
+            let s2 = print_str("== the forty largest" + byte_to_str(10) + sc-lines-of(map(f => sc-row(f), largest)));
+            let s3 = print_str("== unreferenced" + byte_to_str(10) + sc-lines-of(map(f => sc-row(f), dead)));
+            let s4 = print_str("== arms: fk_walk " + len(walk).str() + ", fk_walk_body " + len(body).str() + ", fk_walk_cold " + len(cold).str() + "; in walk and cold " + value_str(sc-shared(walk, cold)) + "; in body and walk " + value_str(sc-shared(body, walk)));
+            let producers = sc-producers(code);
+            let unmade = filter(t => sc-digits?(t) && ((Comparable) sc-member?(producers, t) == 0), sc-uniq(append(walk, append(body, cold)), []));
+            let s4b = print_str("== arms no producer names (" + len(producers).str() + " tags made by the op table and fk_smknode): " + value_str(unmade));
+            let s5 = print_str("== toggles " + value_str(toggles));
+            let asked = read_line();
+            let s6 = !nothing?(asked) && ((String) trim(asked) == "table") ? print_str("== table: name lines refs first-line" + byte_to_str(10) + sc-lines-of(map(f => f[0] + " " + f[2].str() + " " + (sc-count(code, f[0], 0, 0) - 1 - sc-decls(decls, f[0], 0)).str() + " " + f[1].str(), fns))) : 0;
+            len(dead);
+        }
+    }
+    sc-run();
+}
