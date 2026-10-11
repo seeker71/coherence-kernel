@@ -107,7 +107,7 @@ section [form.bml] {
   def ftv-session() = ftv-session-with(ftw-ephemeral(), "");
   def ftv-session-at(root) = ftv-session-with(ftw-ephemeral(), root);
   def ftv-session-in(ws) = ftv-session-with(ws, "");
-  def ftv-session-with(ws, root) = record_new(0, "ws", ws, "nodes", record_new(0), "recipes", record_new(0), "libraries", record_new(0), "recipe-usage", record_new(0), "root", root, "calls", 0, "refusals", 0, "receipts", nothing(), "receipts-at", 0, "mc", nothing(), "events", [], "touched", "", "observed", nothing(), "bound", 0, "bound-key", "", "patience-ms", ftv-patience-default());
+  def ftv-session-with(ws, root) = record_new(0, "ws", ws, "nodes", record_new(0), "recipes", record_new(0), "libraries", record_new(0), "recipe-usage", record_new(0), "root", root, "calls", 0, "refusals", 0, "receipts", nothing(), "receipts-at", 0, "mc", nothing(), "events", [], "thread", [], "touched", "", "observed", nothing(), "bound", 0, "bound-key", "", "patience-ms", ftv-patience-default());
   def ftv-ws(session) = record_get(session, "ws");
   // A control's patience: the walk and every body call it makes answer within this many
   // milliseconds of the control's start. A minute holds a cold door compile and the longest walk
@@ -1252,16 +1252,79 @@ section [form.bml] {
    let best = ftv-best(rows, nothing());
    if (k <= 0) || nothing?(best) then [] else cons(best, ftv-top-rows(filter(r => r[1] != best[1], rows), k - 1));
   }
-  def ftv-receipt-rows(session, terms) {
+  def ftv-receipt-rows(session, terms) = ftv-receipt-rows-except(session, terms, []);
+  def ftv-receipt-rows-except(session, terms, skip) {
    let lowered = map(t => ftv-lower(t), terms);
-   let scored = filter(r => r[0] > 0, map(name => ftv-receipt-score(session, name, lowered), ftv-receipt-names(session)));
+   let scored = filter(r => (r[0] > 0) && !any?(n => n == r[1], skip), map(name => ftv-receipt-score(session, name, lowered), ftv-receipt-names(session)));
    map(r => ftv-cap("receipts/" ++ r[1] ++ ": " ++ ftv-opening(session, r[1])[1]), ftv-top-rows(scored, 3));
+  }
+  def ftv-follow-words() = ["continue", "continued", "following", "follow", "follows", "followed", "more", "next", "again", "further"];
+  def ftv-follow-word?(w) = any?(s => s == w, ftv-follow-words());
+  def ftv-follows?(terms) = !nil?(terms) && all?(ftv-follow-word?, map(ftv-lower, terms));
+  def ftv-thread(session) = record_get(session, "thread");
+  def ftv-threaded?(t) = (value_kind(t) == "list") && (len(t) == 3);
+  def ftv-thread-put(session, terms, offered, deepened) = record_set(session, "thread", [terms, offered, deepened]);
+  def ftv-thread-field(session, i) {
+   let t = ftv-thread(session);
+   ftv-threaded?(t) ? t[i] : [];
+  }
+  def ftv-split(text, sep) = reverse(ftv-split-at(text, sep, []));
+  def ftv-split-at(text, sep, out) {
+   let at = str_find(text, sep, 0);
+   at < 0 ? cons(text, out) : ftv-split-at(substring(text, at + len(sep), len(text)), sep, cons(substring(text, 0, at), out));
+  }
+  def ftv-commas(text) = len(text) == 0 ? [] : filter(n => len(n) > 0, ftv-split(text, ","));
+  def ftv-name-of(row) {
+   let at = str_find(row, "receipts/", 0);
+   let colon = at < 0 ? -1 : str_find(row, ": ", at);
+   (at < 0) || (colon < 0) ? "" : substring(row, at + 9, colon);
+  }
+  def ftv-shown(rows) = filter(n => len(n) > 0, map(ftv-name-of, rows));
+  def ftv-thread-seed(session, goal, offered, deepened) {
+   let terms = take(6, ftv-terms(goal));
+   nil?(terms) ? 0 : ftv-thread-put(session, terms, ftv-commas(offered), ftv-commas(deepened));
+  }
+  def ftv-deeper-row(session, name) {
+   let text = read_file(ftv-receipt-dir(session) ++ "/" ++ name) ?? "";
+   let nl = str_find(text, byte_to_str(10), 0);
+   let body = nl < 0 ? "" : trim(substring(text, nl + 1, len(text) < nl + 401 ? len(text) : nl + 401));
+   (len(body) == 0) || ftv-carries-control?(body) ? "" : ftv-cap("receipts/" ++ name ++ ": " ++ body);
+  }
+  def ftv-next-deep(session, offered, deepened) = ftv-next-deep-at(session, offered, deepened, 0);
+  def ftv-next-deep-at(session, offered, deepened, i) {
+   if i >= len(offered) then "" else if any?(n => n == offered[i], deepened) then ftv-next-deep-at(session, offered, deepened, i + 1) else ftv-deeper-or-next(session, offered, deepened, i);
+  }
+  def ftv-deeper-or-next(session, offered, deepened, i) {
+   let row = ftv-deeper-row(session, offered[i]);
+   len(row) == 0 ? ftv-next-deep-at(session, offered, deepened, i + 1) : row;
   }
   def ftv-knowledge(session, payload) {
    let terms = ftv-control?(payload) ? [] : take(6, ftv-terms(payload));
    if ftv-control?(payload) then ftv-nothing("nested-control")
+   else if ftv-follows?(terms) then ftv-knowledge-continue(session)
    else if nil?(terms) then ftv-nothing("no-terms")
-   else ftv-knowledge-rows(append(ftv-enrich-rows(session, terms), ftv-receipt-rows(session, terms)));
+   else ftv-knowledge-ask(session, terms);
+  }
+  def ftv-knowledge-ask(session, terms) {
+   let rows = append(ftv-enrich-rows(session, terms), ftv-receipt-rows(session, terms));
+   let kept = ftv-thread-put(session, terms, ftv-shown(rows), []);
+   ftv-knowledge-rows(rows);
+  }
+  def ftv-knowledge-continue(session) {
+   let thread = ftv-thread(session);
+   ftv-threaded?(thread) ? ftv-knowledge-next(session, thread[0], thread[1], thread[2]) : ftv-nothing("no-thread");
+  }
+  def ftv-knowledge-next(session, terms, offered, deepened) {
+   let rows = ftv-receipt-rows-except(session, terms, offered);
+   !nil?(rows) ? ftv-knowledge-kept(session, terms, append(offered, ftv-shown(rows)), deepened, rows) : ftv-knowledge-deeper(session, terms, offered, deepened);
+  }
+  def ftv-knowledge-kept(session, terms, offered, deepened, rows) {
+   let kept = ftv-thread-put(session, terms, offered, deepened);
+   ftv-knowledge-rows(rows);
+  }
+  def ftv-knowledge-deeper(session, terms, offered, deepened) {
+   let row = ftv-next-deep(session, offered, deepened);
+   if len(row) == 0 then ftv-nothing("thread-read") else ftv-knowledge-kept(session, terms, offered, cons(ftv-name-of(row), deepened), [row]);
   }
   // a row read from a file that carries control bytes is not offered; the others still are
   def ftv-knowledge-rows(rows) = ftv-knowledge-offer(filter(r => !ftv-carries-control?(r), rows));
