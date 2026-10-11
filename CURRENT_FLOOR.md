@@ -1153,10 +1153,19 @@ The page keeps the walker's frame and the walker's meaning:
 
 - Parameters, lets and the page's own temporaries live in the value stack, so a melt moves what the page holds.
 - In the page's own words: literals, frame reads, let, do, if (the branch law, as both walkers read it), the int paths of
-  add, sub, mul, div, mod, band, bor, bxor, lt, le and eq (eq also against nil), and a self tail call, which is a loop.
+  add, sub, mul, div, mod, band, bor, bxor, lt, le and eq (eq also against nil) and of the u32 doors shl_u32, shr_u32,
+  rotr_u32, add_u32 and bnot_u32 (one 32-bit instruction between untag and retag), and a self tail call, which is a loop.
 - Every strict op has one meaning, a C function the walker's arm and the page both call (`fk_op_*`): the page takes an
   int path in its own words and hands any other operand, or a zero divisor, to that function. head, tail, len,
-  str_len, str_eq, str_byte_at, cons, nth, byte_to_str, shl_u32 and shr_u32 always go to it.
+  str_len, str_eq, str_byte_at, cons, nth, byte_to_str and value_kind (the leaf door's mode 4, which a BML index, first,
+  tail and equal ask every call) always go to it.
+- A callee whose tail spine holds no call is written in place of its call, two deep: its arguments become its frame
+  among the page's temporaries, its slots are read at their offset, a node the page cannot carry is walked in that frame
+  (fp plus the offset), and it enters and leaves as the call would (the frame chain and the running defn), so the board's
+  own and under and a stop's "in" still name it. Its body is written in value position: the spine (a let's body, a do's
+  last, an if's arms) may hold a call only to a defn whose own spine holds none, so a pair of defns that tail-call each
+  other is never written in place and never grows the stack (`jit_node ["fn", c]` answers a body and arity, or nothing
+  for a capturing closure). A callee written in place is not called again and never heats to a page of its own.
 - A call has one meaning too (`fk_call_value`, `fk_call_tail`), used by every call arm of both walkers and by the page,
   which evaluates the arguments itself. A closure's captures are written after the heat pulse, immediately before the
   body, because the pulse can run the JIT's own cell.
@@ -1198,6 +1207,20 @@ Measured on one machine, with the walker alone versus pages, each pair giving th
 
 Lowering form-find makes 171 offers, binds 160 pages and spends 0.15 s offering.
 
+SHA-256 in Form (`form/form-stdlib/sha256.fk`, the meaning every seal and attestation digest stands on) folded 256 KB in
+534 ms on the morning of 2026-10-11 and folds it in 54 ms now. 5.5 MB take 210 ms, about 26 MB/s. Three things moved it:
+
+- The page asks value_kind of its own op.
+- Leaf callees (the sigmas, ch, maj, the BML index) are written in place, and the u32 doors are in the page's own words.
+- The 64 rounds are one loop over a..h and a sixteen-word window of the schedule, and a whole block is read where it
+  lies in the string. Before, the state was an 8-list and the schedule a list, both read by index, and a block was
+  folded byte by byte.
+
+The digests agree with the CPU's SHA-256 instructions over the whole seed file. Those instructions are the body's other
+lane (`sha256-owned-bytes.bml`, about 276 MB/s), and `ntss-hash` takes it only where the Metal carrier stands. A fresh
+worktree has no carrier until `host-walk-sync` builds one, so its gate hashes the 100-160 MB form-cli candidate in Form:
+past the 30-minute deadline at the old fold, about 8 s now.
+
 The C loop lane (`fk_f64_*`) still crystallizes pure-float defns and self-tail-call loops at heat 1024, earlier than the
 Form JIT is offered, and keeps its leaf. The Form JIT does not offer a defn that already wears that leaf.
 `FK_NO_F64` in `fkwu.conf` holds the C lane so the Form page is witnessed alone; `FK_NO_JIT` holds the Form JIT;
@@ -1205,7 +1228,7 @@ Form JIT is offered, and keeps its leaf. The Form JIT does not offer a defn that
 carries runtime strings through the two-slot `fk_inram_args` convention.
 
 ```text
-jit-page-band 31 · jit-lens-band 16383 · jit-heat-gate-band 4095 · observe/tests/jit-evaluator-heat-band 4095
+jit-page-band 63 · jit-lens-band 16383 · jit-heat-gate-band 4095 · observe/tests/jit-evaluator-heat-band 4095
 form-lower-string-band 63 · form-lower-string-runtime-band 255 · form-lower-string-both-runtime-band 511
 float-natives-band 28 · persistence-band 7 · channel-breath-band 500 · eq-shape-band 524287
 blueprint-authority-band 8191
