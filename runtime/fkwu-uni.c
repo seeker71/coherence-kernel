@@ -4726,6 +4726,21 @@ extern void pthread_jit_write_protect_np(int);
 extern int getpagesize(void);
 #endif
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+/* THE PAGE, one birth for every lane that runs machine code (the in-RAM leaf, the u32 leaf, the C loop lane, the Form
+ * page): span bytes PROT_READ|WRITE|EXEC, MAP_PRIVATE|ANON|JIT (this seed keeps platform ABI values local rather than
+ * importing system headers), or 0. The words are written once, with this thread's JIT write protection lifted, and the
+ * instruction cache is cleared over them; a lane that patches its own address into its words (the C loop lane's
+ * non-tail self calls) does so between the two. A host door: the shrink path is none. */
+static void *fk_page_alloc(size_t span) {
+    void *mem = mmap(0, span, 0x7, 0x1802, -1, 0);
+    return mem == (void *)-1 ? 0 : mem;
+}
+static void fk_page_write(void *mem, const void *src, size_t n) {
+    pthread_jit_write_protect_np(0);
+    memcpy(mem, src, n);
+    pthread_jit_write_protect_np(1);
+    __builtin___clear_cache((char *)mem, (char *)mem + n);
+}
 static int fk_arm64_u32_cons(long long cell, long long *head, long long *tail) {
     long long p;
     if ((cell & 1) == 0 || cell <= 1) {
@@ -5218,17 +5233,12 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
     e->code = 0;
     e->mem = 0;
     e->live = 0;
-    mem = mmap(0, span, 0x7, 0x1802, -1, 0);
-    if (mem == (void *)-1) {
+    mem = fk_page_alloc(span);
+    if (mem == 0) {
         free(code);
         return fk_nothing;
     }
-    pthread_jit_write_protect_np(0);
-    for (i = 0; i < n; i = i + 1) {
-        ((unsigned char *)mem)[i] = code[i];
-    }
-    pthread_jit_write_protect_np(1);
-    __builtin___clear_cache((char *)mem, (char *)mem + n);
+    fk_page_write(mem, code, (size_t)n);
     {
         e->generation = e->generation + 1;
         e->live = 1;
@@ -5414,20 +5424,11 @@ static long long fk_native_call_arm64_u32_leaf(long long program, long long root
         i = i + 1;
     }
     {
-        /* Darwin: PROT_READ|WRITE|EXEC, MAP_PRIVATE|ANON|JIT.  This seed keeps
-         * platform ABI declarations local rather than importing system headers. */
-        void *mem = mmap(0, 4096, 0x7, 0x1802, -1, 0);
-        if (mem == (void *)-1) {
+        void *mem = fk_page_alloc(4096);
+        if (mem == 0) {
             return fk_nothing;
         }
-        pthread_jit_write_protect_np(0);
-        i = 0;
-        while (i < words * 4) {
-            ((unsigned char *)mem)[i] = bytes[i];
-            i = i + 1;
-        }
-        pthread_jit_write_protect_np(1);
-        __builtin___clear_cache((char *)mem, (char *)mem + words * 4);
+        fk_page_write(mem, bytes, (size_t)(words * 4));
         {
             unsigned int (*fn)(unsigned int) =
                 (unsigned int (*)(unsigned int))fk_arm64_u32_keep(nodes, nodes_n, root, mem, 4096);
@@ -9842,36 +9843,46 @@ static long long fk_walk(long long i, long long fp);
  *
  * The page keeps the walker's frame: parameters and lets stay in fk_vs[fp + slot] where the walker keeps them, the
  * page's own temporaries sit above the lets and under fk_vsp, so a melt sees and moves every value it holds, and the
- * page reads them back from the frame after each helper. What the page does not carry in its own words it hands to
- * the walker, exact by construction:
+ * page reads them back from the frame after each helper. What the page does not carry in its own words it reaches
+ * through the walker's own meanings, never a copy of them:
  *   walk(node, fp)          the walker walks that node in this frame
- *   apply(node, fp, t, n)   the node's own arm runs over the n operands the page already evaluated, fk_vs[fp + t ..]:
- *                           a site copy of the node whose children are once-holds (tag 190) carrying them
- *   truth(w)                the branch law of an if in value position
+ *   truth(w)                the branch law of an if in value position (fk_truth)
  *   tick()                  the cell deadline's tick, at a self tail call
  *   enter(fp, need)         the frame reserved and zeroed to fp + need, as the body's tag-111 wrapper reserves it
+ *   call, tail              THE CALL and THE TAIL CALL (fk_call_value, fk_call_tail) over arguments in the page's temps
+ *   ops                     the one-meaning functions the walker's arms call (fk_op_*): an int path the page takes in its
+ *                           own words, and the arm's whole law when an operand is not an int
  * A tail the page does not take itself it gives back: cx.next names the node the walker continues at, in the same
- * frame, so a tail call keeps its frame and nothing the page did runs twice. */
+ * frame, so a tail call keeps its frame and nothing the page did runs twice.
+ * SHRINK PATH: when the walker is Form's own, the 194 arm, the helper table and the heat event are Form's calls; what
+ * stays in the seed is the page birth (fk_page_alloc / fk_page_write, a host door: mmap, write protection, icache). */
 static long long fk_truth(long long w);
 typedef long long (*fk_jit_page_fn)(long long fp, void *cx);
+/* the helper table, in words: what the page's words name by offset (form-stdlib/bml/jit-page.bml mirrors it). Its layout
+ * has a number, FK_JIT_ABI, handed to the JIT with every offer: an emitter written for another layout declines, so a seed
+ * built before a change and a jit-page.bml written after it (a checkout's ./fkwu is not rebuilt by a merge) never bind a
+ * page whose words name the wrong helpers. Change the number with the layout. */
+#define FK_JIT_ABI 2
+#define FK_JIT_OPS 22
 struct fk_jit_cx {
     long long **vs;                                                         /* 0: &fk_vs */
-    long long next;                                                         /* 8: the node the walker continues at, or 0 */
-    long long (*walk)(long long node, long long fp);                        /* 16 */
-    long long (*apply)(long long node, long long fp, long long t, long long n); /* 24 */
-    long long (*truth)(long long w);                                        /* 32 */
-    void (*tick)(void);                                                     /* 40 */
-    void (*enter)(long long fp, long long need);                            /* 48 */
-    long long (*call)(long long c, long long fp, long long t, long long n); /* 56: a call in value position */
-    long long (*tail)(long long c, long long fp, long long t, long long n); /* 64: a tail call made ready; answers the node to continue at */
-    long long (*ops[7])(long long a, long long b);                          /* 72..: head tail len str_len str_eq str_byte_at cons */
+    long long next;                                                         /* 1: the node the walker continues at, or 0 */
+    long long (*walk)(long long node, long long fp);                        /* 2 */
+    long long (*truth)(long long w);                                        /* 3 */
+    void (*tick)(void);                                                     /* 4 */
+    void (*enter)(long long fp, long long need);                            /* 5 */
+    long long (*call)(long long c, long long fp, long long t, long long n); /* 6: a call in value position */
+    long long (*tail)(long long c, long long fp, long long t, long long n); /* 7: a tail call made ready; answers the node to continue at */
+    /* 8..: the one-meaning ops -- head tail len str_len str_eq str_byte_at cons, add sub mul div mod le lt eq,
+     * band bor bxor shl_u32 shr_u32, nth byte_to_str */
+    long long (*ops[FK_JIT_OPS])(long long a, long long b);
 };
 static struct fk_jit_cx fk_jit_cx;
 #define FK_JIT_HEAT 4096
 static void **fk_jit_page;           /* per defn: its page, or 0 */
 static unsigned char *fk_jit_state;  /* per defn: 0 never offered, 1 offered (a page bound or the cell declined) */
 static long long fk_jit_cap;
-static long long fk_jit_bound, fk_jit_offers, fk_jit_offer_us, fk_jit_sites; /* kernel_stat 74-77 */
+static long long fk_jit_bound, fk_jit_offers, fk_jit_offer_us; /* kernel_stat 74-76 */
 static int fk_jit_busy;
 static long long fk_jit_pending[64];
 static int fk_jit_pending_n;
@@ -9888,68 +9899,6 @@ static void fk_jit_reserve(long long need) {
     fk_jit_state = st;
     fk_jit_cap = next;
 }
-/* site copies, keyed by the node they copy: open addressing over node indices */
-static long long *fk_jit_site_k, *fk_jit_site_v;
-static long long fk_jit_site_cap;
-static long long fk_jit_hold(void) { return fk_smknode(FK_TAG_CONST_HOLD, 0, 0, 1); }
-static long long fk_jit_site_mint(long long node, long long n) {
-    long long t = fk_node[node][0], f1 = fk_node[node][1], f2 = fk_node[node][2], f3 = fk_node[node][3];
-    if (t == 12) { long long h = fk_jit_hold(); return fk_smknode(12, f1, h, 0); }
-    if (t == 240) { long long h0 = fk_jit_hold(); long long h1 = fk_jit_hold(); return fk_smknode(240, f1, h0, h1); }
-    if (t == 241) {
-        long long chain = -1, k = n - 1;
-        while (k >= 0) { long long h = fk_jit_hold(); chain = fk_smknode(242, h, chain, 0); k = k - 1; }
-        return fk_smknode(241, f1, chain, f3);
-    }
-    if (n >= 1) { f1 = fk_jit_hold(); }
-    if (n >= 2) { f2 = fk_jit_hold(); }
-    if (n >= 3) { f3 = fk_jit_hold(); }
-    return fk_smknode(t, f1, f2, f3);
-}
-static long long fk_jit_site_of(long long node, long long n) {
-    if (fk_jit_sites * 2 >= fk_jit_site_cap) {
-        long long oc = fk_jit_site_cap, nc = oc == 0 ? 1024 : oc * 2, j = 0;
-        long long *nk = (long long *)malloc((size_t)nc * 8), *nv = (long long *)malloc((size_t)nc * 8);
-        if (nk == 0 || nv == 0) { fk_die("fk_jit_site_of: out of memory growing the site table"); }
-        while (j < nc) { nk[j] = -1; j = j + 1; }
-        j = 0;
-        while (j < oc) {
-            if (fk_jit_site_k[j] >= 0) {
-                long long q = (fk_jit_site_k[j] * 40503) & (nc - 1);
-                while (nk[q] >= 0) { q = (q + 1) & (nc - 1); }
-                nk[q] = fk_jit_site_k[j]; nv[q] = fk_jit_site_v[j];
-            }
-            j = j + 1;
-        }
-        free(fk_jit_site_k); free(fk_jit_site_v);
-        fk_jit_site_k = nk; fk_jit_site_v = nv; fk_jit_site_cap = nc;
-    }
-    long long q = (node * 40503) & (fk_jit_site_cap - 1);
-    while (fk_jit_site_k[q] >= 0) {
-        if (fk_jit_site_k[q] == node) { return fk_jit_site_v[q]; }
-        q = (q + 1) & (fk_jit_site_cap - 1);
-    }
-    long long s = fk_jit_site_mint(node, n);
-    fk_jit_site_k[q] = node;
-    fk_jit_site_v[q] = s;
-    fk_jit_sites = fk_jit_sites + 1;
-    return s;
-}
-static void fk_jit_put(long long h, long long v) { fk_node[h][2] = v; fk_node[h][3] = 1; }
-static long long fk_jit_apply(long long node, long long fp, long long t0, long long n) {
-    long long s = fk_jit_site_of(node, n), t = fk_node[s][0], k = 0;
-    if (t == 12 || t == 240) {
-        while (k < n) { fk_jit_put(fk_node[s][2 + k], fk_vs[fp + t0 + k]); k = k + 1; }
-    } else if (t == 241) {
-        long long cell = fk_node[s][2];
-        while (k < n && cell >= 0) { fk_jit_put(fk_node[cell][1], fk_vs[fp + t0 + k]); cell = fk_node[cell][2]; k = k + 1; }
-    } else {
-        while (k < n) { fk_jit_put(fk_node[s][1 + k], fk_vs[fp + t0 + k]); k = k + 1; }
-    }
-    return fk_walk(s, fp);
-}
-/* a call in value position, its n arguments already in fk_vs[fp + t ..]: the walker's call arm, step for step (a new frame
- * at fk_vsp, the heat, the frame chain, the pulses, the body walked -- a page when the callee wears one -- the offer's ack) */
 static long long fk_walk_body(long long i, long long fp);
 static long long fk_op_head(long long v, long long unused);
 static long long fk_op_tail(long long v, long long unused);
@@ -9958,33 +9907,86 @@ static long long fk_op_str_len(long long v, long long unused);
 static long long fk_op_str_eq(long long wa, long long wb);
 static long long fk_op_byte_at(long long ws, long long wk);
 static long long fk_op_cons(long long h, long long t);
+static long long fk_op_add(long long a, long long b);
+static long long fk_op_sub(long long a, long long b);
+static long long fk_op_mul(long long a, long long b);
+static long long fk_op_div(long long a, long long b);
+static long long fk_op_mod(long long a, long long b);
+static long long fk_op_le(long long a, long long b);
+static long long fk_op_lt(long long a, long long b);
+static long long fk_op_eq(long long a, long long b);
+static long long fk_op_band(long long a, long long b);
+static long long fk_op_bor(long long a, long long b);
+static long long fk_op_bxor(long long a, long long b);
+static long long fk_op_shl(long long a, long long b);
+static long long fk_op_shr(long long a, long long b);
+static long long fk_op_nth(long long l, long long w);
+static long long fk_op_byte_to_str(long long w, long long unused);
 static char *fk_stack_base;
 static long long fk_stack_wall;
 static void fk_depth_wall(long long used);
-static long long fk_jit_call(long long c, long long fp, long long t, long long n) {
+/* THE CALL, one meaning for every caller: defn c entered with its n arguments on the value stack from base. The heat, the
+ * frame chain (the caller is kept so a box minted after the return is the caller's again), the pulses (the entry is the
+ * loop lane's trigger too: a loop that leaves on its first compare is never tail-jumped and is hot all the same --
+ * fstr-skip-ws over text with no space to skip), the body walked (a page when the defn wears one), the frame left, the
+ * offer's ack. lane 0 keeps a capturing closure from the loop lane, which cannot read its captures. The walker's call arms
+ * and the Form pages call it; a page reaches it with no fk_walk between, so the depth wall is met here too. */
+/* A capturing closure's values go to fk_call_cap_vals LAST, immediately before its body: an argument expression can itself
+ * call ANOTHER capturing closure, which fills the same shared scratch for its own callee, and the heat pulse can run the
+ * JIT's offer, a whole Form cell. Nothing may run between this write and the callee's prologue read (tag 149). */
+static void fk_call_caps(long long clo) {
+    if (clo == 0 || !fk_fnval_is_closure(clo)) { return; }
+    long long inst = fk_fnval_idx(clo) - FK_CLOSURE_IDX_BASE;
+    long long cb = fk_clo_capbase[inst], cn = fk_clo_capcount[inst], ci = 0;
+    fk_call_cap_reserve(cn);
+    while (ci < cn) { fk_call_cap_vals[ci] = fk_clo_capvals[cb + ci]; ci = ci + 1; }
+}
+static long long fk_call_value(long long c, long long base, long long n, long long clo) {
     char fk_sp_probe;
-    /* page to page never passes fk_walk's probe: the same wall, met here, so a deep recursion ends honestly */
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
         fk_depth_wall((long long)(fk_stack_base - &fk_sp_probe));
     }
-    if (c < 0 || c >= fk_fn_count) { return fk_nothing; }
-    long long base = fk_vsp, k = 0;
-    while (k < n) { fk_vp(fk_vs[fp + t + k]); k = k + 1; }
+    int lane = clo == 0 || !fk_fnval_is_closure(clo);
     fk_fn_heat[c] = fk_fn_heat[c] + 1;
     long long caller = fk_cur_fn;
     FK_FR_PUSH(caller);
     fk_cur_fn = c;
     fk_heat_pulse();
-    if ((fk_fn_heat[c] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, base, n); }
+    if (lane && (fk_fn_heat[c] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, base, n); }
+    fk_call_caps(clo);
     long long r = fk_walk_body(fk_fn[c], base);
     FK_FR_POP();
     fk_cur_fn = caller;
     fk_vsp = base;
     return fk_offer_ack(c, n, r);
 }
-/* a tail call: the arguments move into this frame's first slots and the frame ends after them, as the body loop's call
- * arm leaves it; the heat and the pulses, then the node the walker continues at (read after the pulse, which may bind
- * a page) */
+/* THE TAIL CALL, one meaning for every caller: the n arguments at fk_vs[from ..] become this frame's first slots and the
+ * frame ends after them (from is fp itself, or above the frame's slots), the heat and the pulses, then the body the walker
+ * continues at, read after the pulse because the pulse may bind a page */
+static long long fk_call_tail(long long c, long long fp, long long from, long long n, long long clo) {
+    long long k = 0;
+    int lane = clo == 0 || !fk_fnval_is_closure(clo);
+    while (from != fp && k < n) { fk_vs[fp + k] = fk_vs[from + k]; k = k + 1; }
+    fk_vsp = fp + n;
+    /* the closure's own root slot now lies past the frame's end: it waits on the stack while the pulses run (an offer can
+     * melt, and a melt hands back a closure row no root names) */
+    if (!lane) { fk_vp(clo); }
+    long long h = fk_fn_heat[c] + 1;
+    fk_fn_heat[c] = h;
+    fk_cur_fn = c;
+    fk_heat_pulse();
+    if (lane && (h & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, fp, n); }
+    if (!lane) { clo = fk_vs[fk_vsp - 1]; fk_vsp = fk_vsp - 1; }
+    fk_call_caps(clo);
+    return fk_fn[c];
+}
+/* the page's calls: its arguments sit in its own temporaries, fk_vs[fp + t ..] */
+static long long fk_jit_call(long long c, long long fp, long long t, long long n) {
+    if (c < 0 || c >= fk_fn_count) { return fk_nothing; }
+    long long base = fk_vsp, k = 0;
+    while (k < n) { fk_vp(fk_vs[fp + t + k]); k = k + 1; }
+    return fk_call_value(c, base, n, 0);
+}
 static long long fk_jit_nothing_node = -1;
 static long long fk_jit_tail(long long c, long long fp, long long t, long long n) {
     if (c < 0 || c >= fk_fn_count) {
@@ -9993,27 +9995,18 @@ static long long fk_jit_tail(long long c, long long fp, long long t, long long n
         fk_vsp = fp;
         return fk_jit_nothing_node;
     }
-    long long k = 0;
-    while (k < n) { fk_vs[fp + k] = fk_vs[fp + t + k]; k = k + 1; }
-    fk_vsp = fp + n;
-    long long h = fk_fn_heat[c] + 1;
-    fk_fn_heat[c] = h;
-    fk_cur_fn = c;
-    fk_heat_pulse();
-    if ((h & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, fp, n); }
-    return fk_fn[c];
+    return fk_call_tail(c, fp, fp + t, n, 0);
 }
 static long long fk_walk(long long i, long long fp);
-static long long fk_jit_walk(long long node, long long fp) { return fk_walk(node, fp); }
-static long long fk_jit_truth(long long w) { return fk_truth(w); }
 static void fk_jit_tick(void) { FK_CELL_TICK(); }
 static void fk_jit_enter(long long fp, long long need) {
     long long top = fp + need;
     if (top >= fk_vs_cap) { fk_vs_grow(top + 1); }
     while (fk_vsp < top) { fk_vs[fk_vsp] = 0; fk_vsp = fk_vsp + 1; }
 }
-/* jit_fn_bind(fn, words): the page for defn fn from a list of 32-bit instruction words. Answers 1 when bound, 0 when
- * refused (not a defn, already bound, a word that is not an instruction, no executable memory). */
+/* jit_fn_bind(fn, [abi, words...]): the page for defn fn from a list of 32-bit instruction words, headed by the helper
+ * table layout the words were written for (FK_JIT_ABI; another layout is refused). Answers 1 when bound, 0 when refused
+ * (not a defn, already bound, another layout, a word that is not an instruction, no executable memory). */
 static long long fk_jit_bind(long long x) {
     if ((x & 1) == 0 || fk_is_str(x)) { return 0; }
     long long pr = x >> 1;
@@ -10027,6 +10020,10 @@ static long long fk_jit_bind(long long x) {
     /* binding no words asks: 1 when the defn wears a Form page */
     if (ws == 1) { return fk_jit_page[c] != 0 ? 2 : 0; }
     if (fk_jit_page[c] != 0) { return 0; }
+    /* the layout the words name helpers by */
+    if ((ws & 1) == 0 || fk_is_str(ws) || (ws >> 1) < 1 || !FK_POK(ws >> 1) || FK_HH(ws >> 1) != (FK_JIT_ABI << 1)) { return 0; }
+    ws = FK_HT(ws >> 1);
+    q = ws;
     while (q != 1) {
         if ((q & 1) == 0 || fk_is_str(q) || (q >> 1) < 1 || !FK_POK(q >> 1)) { return 0; }
         long long h = FK_HH(q >> 1);
@@ -10040,32 +10037,32 @@ static long long fk_jit_bind(long long x) {
 #else
     long long page = getpagesize();
     size_t span = (((size_t)n * 4 + (size_t)page - 1) / (size_t)page) * (size_t)page;
-    void *mem = mmap(0, span, 0x7, 0x1802, -1, 0);
-    if (mem == (void *)-1) { return 0; }
-    pthread_jit_write_protect_np(0);
+    unsigned int *words = (unsigned int *)malloc((size_t)n * 4);
+    if (words == 0) { return 0; }
     q = ws;
     long long k = 0;
-    while (q != 1) { ((unsigned int *)mem)[k] = (unsigned int)(FK_HH(q >> 1) >> 1); k = k + 1; q = FK_HT(q >> 1); }
-    pthread_jit_write_protect_np(1);
-    __builtin___clear_cache((char *)mem, (char *)mem + n * 4);
+    while (q != 1) { words[k] = (unsigned int)(FK_HH(q >> 1) >> 1); k = k + 1; q = FK_HT(q >> 1); }
+    void *mem = fk_page_alloc(span);
+    if (mem == 0) { free(words); return 0; }
+    fk_page_write(mem, words, (size_t)n * 4);
+    free(words);
     fk_jit_page[c] = mem;
-    fk_jit_cx.vs = &fk_vs;
-    fk_jit_cx.walk = fk_jit_walk;
-    fk_jit_cx.apply = fk_jit_apply;
-    fk_jit_cx.truth = fk_jit_truth;
-    fk_jit_cx.tick = fk_jit_tick;
-    fk_jit_cx.enter = fk_jit_enter;
-    fk_jit_cx.call = fk_jit_call;
-    fk_jit_cx.tail = fk_jit_tail;
-    fk_jit_cx.ops[0] = fk_op_head;
-    fk_jit_cx.ops[1] = fk_op_tail;
-    fk_jit_cx.ops[2] = fk_op_len;
-    fk_jit_cx.ops[3] = fk_op_str_len;
-    fk_jit_cx.ops[4] = fk_op_str_eq;
-    fk_jit_cx.ops[5] = fk_op_byte_at;
-    fk_jit_cx.ops[6] = fk_op_cons;
+    if (fk_jit_cx.vs == 0) {
+        long long (*ops[FK_JIT_OPS])(long long, long long) = {
+            fk_op_head, fk_op_tail, fk_op_len, fk_op_str_len, fk_op_str_eq, fk_op_byte_at, fk_op_cons,
+            fk_op_add, fk_op_sub, fk_op_mul, fk_op_div, fk_op_mod, fk_op_le, fk_op_lt, fk_op_eq,
+            fk_op_band, fk_op_bor, fk_op_bxor, fk_op_shl, fk_op_shr, fk_op_nth, fk_op_byte_to_str };
+        memcpy(fk_jit_cx.ops, ops, sizeof(ops));
+        fk_jit_cx.vs = &fk_vs;
+        fk_jit_cx.walk = fk_walk;
+        fk_jit_cx.truth = fk_truth;
+        fk_jit_cx.tick = fk_jit_tick;
+        fk_jit_cx.enter = fk_jit_enter;
+        fk_jit_cx.call = fk_jit_call;
+        fk_jit_cx.tail = fk_jit_tail;
+    }
     long long body = fk_fn[c];
-    if (body < 0 || fk_node[body][0] != 194) { fk_fn[c] = fk_smknode(194, c, body, 0); }
+    if (body < 0 || fk_node[body][0] != 194) { fk_fn[c] = fk_smknode(194, c, body, 0); fk_prog_note_body(c); }
     fk_jit_bound = fk_jit_bound + 1;
     return 2;
 #endif
@@ -10080,7 +10077,10 @@ static long long fk_walk_body(long long i, long long fp) {
         }
         fk_arms[t] = fk_arms[t] + 1;
         if (t == 6) {
-            if (fk_walk(fk_node[i][1], fp) == 0) {
+            /* the branch law, the same in tail position as in value position (fk_truth): nothing refuses, a float zero
+             * is 0. Until 2026-10-11 this arm read only `== 0`, so a tail-position if took its then-arm on nothing and
+             * on 0.0 where the same if in value position stopped or took its else-arm. */
+            if (fk_truth(fk_walk(fk_node[i][1], fp)) == 0) {
                 i = fk_node[i][3];
             } else {
                 i = fk_node[i][2];
@@ -10134,13 +10134,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 return fk_nothing;
             }
             fk_vs[fp] = v12;
-            fk_vsp = fp + 1;
-            long long h12 = fk_fn_heat[c12] + 1;
-            fk_fn_heat[c12] = h12;
-            fk_cur_fn = c12;
-            fk_heat_pulse();
-            if ((h12 & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c12, fp, 1); } /* the heat ledger is the loop lane's trigger: the frame is whole here */
-            i = fk_fn[c12];
+            i = fk_call_tail(c12, fp, fp, 1, 0); /* the heat ledger is the loop lane's trigger: the frame is whole here */
             continue;
         }
         if (t == 240) {
@@ -10156,13 +10150,7 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vs[fp] = a0;
             fk_vs[fp + 1] = a1;
-            fk_vsp = fp + 2;
-            long long h240 = fk_fn_heat[c240] + 1;
-            fk_fn_heat[c240] = h240;
-            fk_cur_fn = c240;
-            fk_heat_pulse();
-            if ((h240 & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c240, fp, 2); }
-            i = fk_fn[c240];
+            i = fk_call_tail(c240, fp, fp, 2, 0);
             continue;
         }
         if (t == 194) {
@@ -10363,18 +10351,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 fk_vsp = fp;
                 return fk_nothing;
             }
-            long long m241 = 0;
-            while (m241 < n241) {
-                fk_vs[fp + m241] = fk_vs[base241 + m241];
-                m241 = m241 + 1;
-            }
-            fk_vsp = fp + n241;
-            long long h241 = fk_fn_heat[c241] + 1;
-            fk_fn_heat[c241] = h241;
-            fk_cur_fn = c241;
-            fk_heat_pulse();
-            if ((h241 & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c241, fp, n241); }
-            i = fk_fn[c241];
+            i = fk_call_tail(c241, fp, base241, n241, 0);
             continue;
         }
         if (t == 244) {
@@ -10395,38 +10372,10 @@ static long long fk_walk_body(long long i, long long fp) {
             if (fk_observe_on()) {
                 printf("offer-indirect fn%lld args=%lld (computed head)\n", fi244, n244);
             }
-            long long m244 = 0;
-            while (m244 < n244) {
-                fk_vs[fp + m244] = fk_vs[base244 + m244];
-                m244 = m244 + 1;
-            }
-            fk_vsp = fp + n244;
-            /* Populate fk_call_cap_vals LAST, immediately before the jump -- an adversarial
-             * review caught this written any earlier (right after resolving hv244, before the
-             * args above were walked): an argument expression can itself be an indirect call
-             * into ANOTHER capturing closure, which would populate this SAME shared scratch
-             * buffer for ITS OWN callee and leave it clobbered by the time control finally
-             * reached here. Nothing after this point can make another call before the jump, so
-             * this is the one place in the arm where the "nothing runs between write and read"
-             * invariant fk_call_cap_vals depends on is actually true. */
-            if (fk_fnval_is_closure(hv244)) {
-                long long inst244 = fk_fnval_idx(hv244) - FK_CLOSURE_IDX_BASE;
-                long long cb244 = fk_clo_capbase[inst244];
-                long long cn244 = fk_clo_capcount[inst244];
-                long long ci244 = 0;
-                fk_call_cap_reserve(cn244);
-                while (ci244 < cn244) {
-                    fk_call_cap_vals[ci244] = fk_clo_capvals[cb244 + ci244];
-                    ci244 = ci244 + 1;
-                }
-            }
-            fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
-            /* a defn reached through a value heats and crystallizes like one called by name: the frame the args were moved
-             * into is fp, the arity n244; a capturing closure the lane cannot read is left to the walker */
-            if (!fk_fnval_is_closure(hv244) && (fk_fn_heat[fi244] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(fi244, fp, n244); }
-            fk_cur_fn = fi244;
-            fk_heat_pulse();
-            i = fk_fn[fi244];
+            /* the arguments move into this frame; a defn reached through a value heats and crystallizes like one called by
+             * name; a closure's captures are written last, by the call (fk_call_caps: an adversarial review once caught them
+             * written before an argument that itself called another capturing closure) */
+            i = fk_call_tail(fi244, fp, base244, n244, hv244);
             continue;
         }
         if (t == 44) {
@@ -10495,11 +10444,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 return 0;
             }
             fk_vs[fp] = carg44;
-            fk_vsp = fp + 1;
-            fk_fn_heat[f44] = fk_fn_heat[f44] + 1;
-            fk_cur_fn = f44;
-            fk_heat_pulse();
-            i = fk_fn[f44];
+            i = fk_call_tail(f44, fp, fp, 1, 0);
             continue;
         }
         return fk_walk(i, fp);
@@ -13148,8 +13093,8 @@ static int fk_f64_body_of(long long fx, long long *root_out, long long *orig_out
 /* the words land on a MAP_JIT page and the defn's entry becomes the tag-194 door */
 static int fk_f64_install(long long fx, long long root, long long orig, unsigned int *words, long long wn, long long sig, long long state) {
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-    void *mem = mmap(0, FK_F64_PAGE_BYTES, 0x7, 0x1802, -1, 0);
-    if (mem == (void *)-1) { return 0; }
+    void *mem = fk_page_alloc(FK_F64_PAGE_BYTES);
+    if (mem == 0) { return 0; }
     /* patch each non-tail self-call's placeholder address (a 4-word MOVZ/MOVK into X16) to this page's own address */
     {
         unsigned long long selfbits = (unsigned long long)(fk_size_t)mem;
@@ -13166,10 +13111,7 @@ static int fk_f64_install(long long fx, long long root, long long orig, unsigned
             si = si + 1;
         }
     }
-    pthread_jit_write_protect_np(0);
-    memcpy(mem, words, (size_t)(wn * 4));
-    pthread_jit_write_protect_np(1);
-    __builtin___clear_cache((char *)mem, (char *)mem + wn * 4);
+    fk_page_write(mem, words, (size_t)(wn * 4));
     if (!fk_f64_reserve(fx)) { munmap(mem, FK_F64_PAGE_BYTES); return 0; }
     fk_f64_mem[fx] = mem;
     fk_f64_sig[fx] = sig;
@@ -14105,6 +14047,117 @@ static long long fk_op_cons(long long h, long long t) {
     fk_vsp = fk_vsp - 2;
     return (fk_hp << 1) | 1;
 }
+/* THE ONE MEANING of the arithmetic, the compares and the bit doors over words already walked: int words compute in
+ * place (<<1 tagging keeps sums, differences and order exact), a float on either side computes in doubles and boxes the
+ * answer, and every other word refuses by name. The walker's arms and the Form pages' slow paths call these. */
+#define FK_ORDER_REFUSAL "fkwu: order: only numbers have an order -- ask value_kind before lt/le/gt/ge"
+static long long fk_op_add(long long a, long long b) {
+    if ((a | b) & 1) { fk_arith_check(a, b); return fk_fbox(fk_num(a) + fk_num(b)); }
+    return a + b;
+}
+static long long fk_op_sub(long long a, long long b) {
+    if ((a | b) & 1) { fk_arith_check(a, b); return fk_fbox(fk_num(a) - fk_num(b)); }
+    return a - b;
+}
+static long long fk_op_mul(long long a, long long b) {
+    if ((a | b) & 1) { fk_arith_check(a, b); return fk_fbox(fk_num(a) * fk_num(b)); }
+    return ((a >> 1) * (b >> 1)) << 1;
+}
+static long long fk_op_div(long long a, long long b) {
+    if ((a | b) & 1) { fk_arith_check(a, b); return fk_fbox(fk_num(a) / fk_num(b)); }
+    if ((b >> 1) == 0) { fk_stop("fkwu: div: integer division by zero"); }
+    return ((a >> 1) / (b >> 1)) << 1;
+}
+/* law 5: the exact truncating remainder, the sign of the dividend (fk_fmod_d) */
+static long long fk_op_mod(long long a, long long b) {
+    if ((a | b) & 1) { fk_arith_check(a, b); return fk_fbox(fk_fmod_d(fk_num(a), fk_num(b))); }
+    if ((b >> 1) == 0) { fk_stop("fkwu: mod: integer division by zero"); }
+    return ((a >> 1) % (b >> 1)) << 1;
+}
+/* The compare law, for le and lt here and eq below (gt/ge/abs lower onto these via fk_rwtab): int/int compares the
+ * tagged words exactly, a float on either side forces an IEEE comparison, and only numbers have an order -- an odd word
+ * that is not a float refuses by name. */
+static long long fk_op_le(long long a, long long b) {
+    if ((a | b) & 1) {
+        if (!((fk_isf(a) || (a & 1) == 0) && (fk_isf(b) || (b & 1) == 0))) { fk_stop(FK_ORDER_REFUSAL); }
+        return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+    }
+    return (a <= b) ? 2 : 0;
+}
+static long long fk_op_lt(long long a, long long b) {
+    if ((a | b) & 1) {
+        if (!((fk_isf(a) || (a & 1) == 0) && (fk_isf(b) || (b & 1) == 0))) { fk_stop(FK_ORDER_REFUSAL); }
+        return (fk_num(a) < fk_num(b)) ? 2 : 0;
+    }
+    return (a < b) ? 2 : 0;
+}
+/* eq: int/int exact and a float promotes (the compare law); two NodeIDs meet by their four coordinates (identity by
+ * content, whichever mint built the node); two strings by their text, as value_eq does (the shared field keeps its own
+ * word for a text this process also interned); two cons pairs by their items (a list's identity is its composition,
+ * axiom-3); every other word meets itself. */
+static long long fk_op_eq(long long ae, long long be) {
+    if (fk_isf(ae) || fk_isf(be)) {   /* a float meets numbers only: fk_num would read nil's word 1 as 0.0 */
+        return (((ae & 1) == 0 || fk_isf(ae)) && ((be & 1) == 0 || fk_isf(be)) && fk_num(ae) == fk_num(be)) ? 2 : 0;
+    }
+    if (ae < 0 && be < 0 && (ae & 1) != 0 && (be & 1) != 0) {
+        long long ia = fk_nidx(ae), ib = fk_nidx(be);
+        if (ia >= 1 && ia <= fk_np && ib >= 1 && ib <= fk_np && fk_nkind[ia] == 3 && fk_nkind[ib] == 3) {
+            return fk_nid[ia] == fk_nid[ib] ? 2 : 0;
+        }
+    }
+    if ((ae & be & 1) && ae < 0 && be < 0 && ae != be && fk_is_str(ae) && fk_is_str(be)) {
+        return fk_str_bytes_eq(ae, be) ? 2 : 0;
+    }
+    return (ae == be || ((ae & be & 1) && ae > 1 && be > 1 && fk_veq(ae, be))) ? 2 : 0;
+}
+/* the bit doors take ints only: a float, a string or nothing stops (a non-int has no bits), where its tagged word once
+ * answered as bits (bxor 1.5 0 read the float box's word). 37-40 are the u32 doors, 41 the u32 complement (bb unread) */
+static long long fk_op_bits(long long t, long long ba, long long bb) {
+    if (((ba | bb) & 1) != 0) { fk_stop("fkwu: bits: only an int has bits -- ask value_kind first"); }
+    if (t == 34) { return (((ba >> 1) & (bb >> 1)) << 1); }
+    if (t == 35) { return (((ba >> 1) | (bb >> 1)) << 1); }
+    if (t == 36) { return (((ba >> 1) ^ (bb >> 1)) << 1); }
+    if (t == 37) { unsigned int x = (unsigned int)(ba >> 1); long long n = (bb >> 1) & 31; return ((long long)(unsigned int)(x << n)) << 1; }
+    if (t == 38) { unsigned int x = (unsigned int)(ba >> 1); long long n = (bb >> 1) & 31; return ((long long)(x >> n)) << 1; }
+    if (t == 39) {
+        unsigned long long x = (unsigned int)(ba >> 1);
+        long long n = (bb >> 1) & 31;
+        return ((long long)(unsigned int)((x >> n) | (x << (32 - n)))) << 1;
+    }
+    if (t == 40) { unsigned int x = (unsigned int)(ba >> 1); unsigned int y = (unsigned int)(bb >> 1); return ((long long)(unsigned int)(x + y)) << 1; }
+    if (t == 41) { unsigned int x41 = (unsigned int)(ba >> 1); return ((long long)(unsigned int)(~x41)) << 1; }
+    fk_die("fk_op_bits: a bit door outside tags 34..41");
+    return 0;
+}
+static long long fk_op_band(long long a, long long b) { return fk_op_bits(34, a, b); }
+static long long fk_op_bor(long long a, long long b) { return fk_op_bits(35, a, b); }
+static long long fk_op_bxor(long long a, long long b) { return fk_op_bits(36, a, b); }
+static long long fk_op_shl(long long a, long long b) { return fk_op_bits(37, a, b); }
+static long long fk_op_shr(long long a, long long b) { return fk_op_bits(38, a, b); }
+/* nth: an index is an int, as str_byte_at's is (a float, a string or nothing read through >> 1 was a large negative
+ * number and answered nothing; now it stops); a receiver that is not a list, or an element that is not there, answers
+ * nothing */
+static long long fk_op_nth(long long l, long long w) {
+    if ((w & 1) != 0) { fk_stop("fkwu: nth: an index is an int -- ask value_kind first"); }
+    long long k = w >> 1;
+    long long p = (l & 1) ? l >> 1 : 0;
+    while (p >= 1 && FK_POK(p) && k > 0) { p = FK_HNEXT(p); k = k - 1; }
+    if (p < 1 || !FK_POK(p) || k < 0) { return fk_nothing; }
+    return FK_HH(p);
+}
+static long long fk_op_byte_to_str(long long w, long long unused) {
+    (void)unused;
+    if ((w & 1) != 0) { fk_stop("fkwu: byte_to_str: only an int is a byte -- ask value_kind first"); }
+    long long b = w >> 1;
+    if (b < 0 || b > 255) { return fk_strv(fk_sintern(fk_sbp, 0)); }
+    while (fk_sbp + 1 > fk_scap_b) {
+        fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
+        fk_scap_b = fk_scap_b * 2;
+        fk_sb_check();
+    }
+    fk_sb[fk_sbp] = (char)b;
+    return fk_strv(fk_sintern(fk_sbp, 1));
+}
 static long long fk_walk(long long i, long long fp) {
     char fk_sp_probe;
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
@@ -14138,35 +14191,16 @@ static long long fk_walk(long long i, long long fp) {
     }
     if (t == 3) {
         long long a3 = fk_walk(fk_node[i][1], fp);
-        long long b3 = fk_walk(fk_node[i][2], fp);
-        if ((a3 | b3) & 1) { fk_arith_check(a3, b3);
-            return fk_fbox(fk_num(a3) + fk_num(b3));
-        }
-        return a3 + b3;
+        return fk_op_add(a3, fk_walk(fk_node[i][2], fp));
     }
     if (t == 4) {
         long long a4 = fk_walk(fk_node[i][1], fp);
-        long long b4 = fk_walk(fk_node[i][2], fp);
-        if ((a4 | b4) & 1) { fk_arith_check(a4, b4);
-            return fk_fbox(fk_num(a4) - fk_num(b4));
-        }
-        return a4 - b4;
+        return fk_op_sub(a4, fk_walk(fk_node[i][2], fp));
     }
-#define FK_ORDER_REFUSAL "fkwu: order: only numbers have an order -- ask value_kind before lt/le/gt/ge"
     if (t == 5) {
         { long long r5; if (fk_len_cmp(i, fp, 2, &r5)) { return r5; } }
         long long a5 = fk_walk(fk_node[i][1], fp);
-        long long b5 = fk_walk(fk_node[i][2], fp);
-        /* The compare law, for le here and eq/lt on tags 102/103 (gt/ge/abs
-         * lower onto these via fk_rwtab): int/int compares the tagged words
-         * exactly (<<1 tagging keeps order), a float on either side forces an
-         * IEEE comparison, and only numbers have an order -- an odd word that
-         * is not a float refuses by name. */
-        if ((a5 | b5) & 1) {
-            if (!((fk_isf(a5) || (a5 & 1) == 0) && (fk_isf(b5) || (b5 & 1) == 0))) { fk_stop(FK_ORDER_REFUSAL); }
-            return (fk_num(a5) <= fk_num(b5)) ? 2 : 0;
-        }
-        return (a5 <= b5) ? 2 : 0;
+        return fk_op_le(a5, fk_walk(fk_node[i][2], fp));
     }
     if (t == 6) {
         if (fk_truth(fk_walk(fk_node[i][1], fp)) == 0) {
@@ -14194,20 +14228,7 @@ static long long fk_walk(long long i, long long fp) {
         }
         long long v12 = fk_walk(fk_node[i][2], fp);
         fk_vp(v12);
-        long long b12 = fk_vsp - 1;
-        fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
-        long long caller12 = fk_cur_fn; /* the non-tail call has a return point: boxes minted after it are the caller's again */
-        FK_FR_PUSH(caller12);
-        fk_cur_fn = c12;
-        fk_heat_pulse();
-        /* the entry is the loop lane's trigger too (it pulses the twin lane on the way): a loop that leaves on its first
-         * compare is never tail-jumped and is hot all the same -- fstr-skip-ws over text with no space to skip */
-        if ((fk_fn_heat[c12] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c12, b12, 1); }
-        long long r12 = fk_walk_body(fk_fn[c12], b12);
-        FK_FR_POP();
-        fk_cur_fn = caller12;
-        fk_vsp = b12;
-        return fk_offer_ack(c12, 1, r12);
+        return fk_call_value(c12, fk_vsp - 1, 1, 0);
     }
     if (t == 240) {
         long long c240 = fk_node[i][1];
@@ -14218,18 +14239,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(a0);   /* the first argument is a root while the second walks (a melt moves a pair, reuses a string slot or a closure row) */
         long long a1 = fk_walk(fk_node[i][3], fp);
         fk_vp(a1);
-        long long b240 = fk_vsp - 2;
-        fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
-        long long caller240 = fk_cur_fn;
-        FK_FR_PUSH(caller240);
-        fk_cur_fn = c240;
-        fk_heat_pulse();
-        if ((fk_fn_heat[c240] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c240, b240, 2); } /* the entry triggers the loop lane too */
-        long long r240 = fk_walk_body(fk_fn[c240], b240);
-        FK_FR_POP();
-        fk_cur_fn = caller240;
-        fk_vsp = b240;
-        return fk_offer_ack(c240, 2, r240);
+        return fk_call_value(c240, fk_vsp - 2, 2, 0);
     }
     if (t == 241) {
         long long c241 = fk_node[i][1];
@@ -14242,18 +14252,7 @@ static long long fk_walk(long long i, long long fp) {
             fk_vp(fk_walk(fk_node[cell241][1], fp));
             cell241 = fk_node[cell241][2];
         }
-        long long n241 = fk_vsp - base241;
-        fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
-        long long caller241 = fk_cur_fn;
-        FK_FR_PUSH(caller241);
-        fk_cur_fn = c241;
-        fk_heat_pulse();
-        if ((fk_fn_heat[c241] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c241, base241, n241); } /* the entry triggers the loop lane too (and the twin lane on the way) */
-        long long r241 = fk_walk_body(fk_fn[c241], base241);
-        FK_FR_POP();
-        fk_cur_fn = caller241;
-        fk_vsp = base241;
-        return fk_offer_ack(c241, n241, r241);
+        return fk_call_value(c241, base241, fk_vsp - base241, 0);
     }
     if (t == 242) {
         return 0;
@@ -14296,33 +14295,11 @@ static long long fk_walk(long long i, long long fp) {
         if (fk_observe_on()) {
             printf("offer-indirect fn%lld args=%lld (computed head)\n", fi244, n244);
         }
-        /* Populate fk_call_cap_vals LAST, immediately before the jump -- see the fk_walk_body
-         * copy of this arm for why an argument expression that itself calls another capturing
-         * closure would otherwise clobber this shared scratch buffer first. */
-        if (fk_fnval_is_closure(hv244)) {
-            long long inst244 = fk_fnval_idx(hv244) - FK_CLOSURE_IDX_BASE;
-            long long cb244 = fk_clo_capbase[inst244];
-            long long cn244 = fk_clo_capcount[inst244];
-            long long ci244 = 0;
-            fk_call_cap_reserve(cn244);
-            while (ci244 < cn244) {
-                fk_call_cap_vals[ci244] = fk_clo_capvals[cb244 + ci244];
-                ci244 = ci244 + 1;
-            }
-        }
-        fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
         /* a defn reached through a value heats and crystallizes like one called by name (the callee's frame base is base244);
-         * a capturing closure the lane cannot read stays the walker's */
-        if (!fk_fnval_is_closure(hv244) && (fk_fn_heat[fi244] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(fi244, base244, n244); }
-        long long caller244 = fk_cur_fn;
-        FK_FR_PUSH(caller244);
-        fk_cur_fn = fi244;
-        fk_heat_pulse();
-        long long r244 = fk_walk_body(fk_fn[fi244], base244);
-        FK_FR_POP();
-        fk_cur_fn = caller244;
+         * its captures are written last, by the call (fk_call_caps) */
+        long long r244 = fk_call_value(fi244, base244, n244, hv244);
         fk_vsp = base244 - FK_CLO_CALLEE_ROOT;
-        return fk_offer_ack(fi244, n244, r244);
+        return r244;
     }
     if (t == 13) {
         long long mi = fk_walk(fk_node[i][1], fp) >> 1;
@@ -14375,26 +14352,12 @@ static long long fk_walk(long long i, long long fp) {
         return fk_op_len(fk_walk(fk_node[i][1], fp), 0);
     }
     if (t == 23) {
+        /* the list waits on the stack while the index walks: a melt moves the pair it is */
         long long x23 = fk_walk(fk_node[i][1], fp);
         fk_vp(x23);
         long long w23 = fk_walk(fk_node[i][2], fp);
         fk_vsp = fk_vsp - 1;
-        /* an index is an int, as str_byte_at's is: a float, a string or nothing read through >> 1 was a
-         * large negative number and answered nothing; now it stops */
-        if ((w23 & 1) != 0) {
-            fk_stop("fkwu: nth: an index is an int -- ask value_kind first");
-        }
-        long long k23 = w23 >> 1;
-        long long l23 = fk_vs[fk_vsp];
-        long long p = (l23 & 1) ? l23 >> 1 : 0;
-        while (p >= 1 && FK_POK(p) && k23 > 0) {
-            p = FK_HNEXT(p);
-            k23 = k23 - 1;
-        }
-        if (p < 1 || !FK_POK(p) || k23 < 0) {
-            return fk_nothing;
-        }
-        return FK_HH(p);
+        return fk_op_nth(fk_vs[fk_vsp], w23);
     }
     if (t == 44) {
         long long fv44 = fk_walk(fk_node[i][1], fp);
@@ -14462,21 +14425,11 @@ static long long fk_walk(long long i, long long fp) {
         }
         fk_vsp = fk_vsp - 2;
         fk_vp(carg44);
-        long long b44 = fk_vsp - 1;
-        fk_fn_heat[f44] = fk_fn_heat[f44] + 1;
-            fk_cur_fn = f44;
-        fk_heat_pulse();
-        long long r44 = fk_walk_body(fk_fn[f44], b44);
-        fk_vsp = b44;
-        return fk_offer_ack(f44, 1, r44);
+        return fk_call_value(f44, fk_vsp - 1, 1, 0);
     }
     if (t == 42) {
         long long a42 = fk_walk(fk_node[i][1], fp);
-        long long b42 = fk_walk(fk_node[i][2], fp);
-        if ((a42 | b42) & 1) { fk_arith_check(a42, b42);
-            return fk_fbox(fk_num(a42) * fk_num(b42));
-        }
-        return ((a42 >> 1) * (b42 >> 1)) << 1;
+        return fk_op_mul(a42, fk_walk(fk_node[i][2], fp));
     }
     if (t == 45) {
         return fk_walk(fk_node[i][1], fp);
@@ -14685,30 +14638,7 @@ static long long fk_walk(long long i, long long fp) {
         } else {
             be = fk_walk(fk_node[i][2], fp);
         }
-        if (fk_isf(ae) || fk_isf(be)) {   /* a float meets numbers only: fk_num would read nil's word 1 as 0.0 */
-            return (((ae & 1) == 0 || fk_isf(ae)) && ((be & 1) == 0 || fk_isf(be)) && fk_num(ae) == fk_num(be)) ? 2 : 0;
-        }
-        /* Two node boxes (0 - ((i << 1) | 1): negative and ODD, where an int
-         * word is EVEN) that are both NodeIDs meet by their four coordinates:
-         * a NodeID is identity-by-content, whichever mint built the value node. */
-        if (ae < 0 && be < 0 && (ae & 1) != 0 && (be & 1) != 0) {
-            long long ia102 = fk_nidx(ae);
-            long long ib102 = fk_nidx(be);
-            if (ia102 >= 1 && ia102 <= fk_np && ib102 >= 1 && ib102 <= fk_np &&
-                fk_nkind[ia102] == 3 && fk_nkind[ib102] == 3) {
-                return fk_nid[ia102] == fk_nid[ib102] ? 2 : 0;
-            }
-        }
-        /* Two strings meet by their text, as value_eq does. Interning gives one text one word
-         * inside a process, but the shared field keeps its own word for the same text (a composite's category,
-         * a node string), so (eq (node_category (intern_node (bp "NIB") kids)) (bp "NIB")) read 0 by identity. */
-        if ((ae & be & 1) && ae < 0 && be < 0 && ae != be && fk_is_str(ae) && fk_is_str(be)) {
-            return fk_str_bytes_eq(ae, be) ? 2 : 0;
-        }
-        /* Two cons pairs (odd words above nil's 1) meet by their items, as
-         * value_eq does: a list's identity is its composition (axiom-3), never
-         * the pair a build happened to share. Every other word meets itself. */
-        return (ae == be || ((ae & be & 1) && ae > 1 && be > 1 && fk_veq(ae, be))) ? 2 : 0;
+        return fk_op_eq(ae, be);
     }
     if (t == 103) {
         { long long r103; if (fk_len_cmp(i, fp, 1, &r103)) { return r103; } }
@@ -14724,11 +14654,7 @@ static long long fk_walk(long long i, long long fp) {
         } else {
             bl = fk_walk(fk_node[i][2], fp);
         }
-        if ((al | bl) & 1) {
-            if (!((fk_isf(al) || (al & 1) == 0) && (fk_isf(bl) || (bl & 1) == 0))) { fk_stop(FK_ORDER_REFUSAL); }
-            return (fk_num(al) < fk_num(bl)) ? 2 : 0;
-        }
-        return (al < bl) ? 2 : 0;
+        return fk_op_lt(al, bl);
     }
     if (t == 109) {
         long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
@@ -18097,22 +18023,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 10) {
         long long a10 = fk_walk(fk_node[i][1], fp);
-        long long b10 = fk_walk(fk_node[i][2], fp);
-        if ((a10 | b10) & 1) { fk_arith_check(a10, b10);
-            return fk_fbox(fk_num(a10) / fk_num(b10));
-        }
-        if ((b10 >> 1) == 0) { fk_stop("fkwu: div: integer division by zero"); }
-        return ((a10 >> 1) / (b10 >> 1)) << 1;
+        return fk_op_div(a10, fk_walk(fk_node[i][2], fp));
     }
     if (t == 11) {
         long long a11 = fk_walk(fk_node[i][1], fp);
-        long long b11 = fk_walk(fk_node[i][2], fp);
-        if ((a11 | b11) & 1) { fk_arith_check(a11, b11);
-            /* law 5: the exact truncating remainder, the sign of the dividend (fk_fmod_d) */
-            return fk_fbox(fk_fmod_d(fk_num(a11), fk_num(b11)));
-        }
-        if ((b11 >> 1) == 0) { fk_stop("fkwu: mod: integer division by zero"); }
-        return ((a11 >> 1) % (b11 >> 1)) << 1;
+        return fk_op_mod(a11, fk_walk(fk_node[i][2], fp));
     }
     if (t == 15) {
         /* now_unix_ms: milliseconds since the Unix epoch */
@@ -18318,63 +18233,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return (sign * v) << 1;
     }
     if (t == 33) {
-        long long w33 = fk_walk(fk_node[i][1], fp);
-        if ((w33 & 1) != 0) {
-            fk_stop("fkwu: byte_to_str: only an int is a byte -- ask value_kind first");
-        }
-        long long b = w33 >> 1;
-        if (b < 0 || b > 255) {
-            return fk_strv(fk_sintern(fk_sbp, 0));
-        }
-        while (fk_sbp + 1 > fk_scap_b) {
-            fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
-            fk_scap_b = fk_scap_b * 2;
-            fk_sb_check();
-        }
-        fk_sb[fk_sbp] = (char)b;
-        return fk_strv(fk_sintern(fk_sbp, 1));
+        return fk_op_byte_to_str(fk_walk(fk_node[i][1], fp), 0);
     }
     if (t >= 34 && t <= 41) {
-        /* the bit doors take ints only: a float, a string or nothing stops (a non-int has no bits),
-         * where its tagged word once answered as bits (bxor 1.5 0 read the float box's word) */
         long long ba = fk_walk(fk_node[i][1], fp);
-        long long bb = t == 41 ? 0 : fk_walk(fk_node[i][2], fp);
-        if (((ba | bb) & 1) != 0) {
-            fk_stop("fkwu: bits: only an int has bits -- ask value_kind first");
-        }
-        if (t == 34) {
-            return (((ba >> 1) & (bb >> 1)) << 1);
-        }
-        if (t == 35) {
-            return (((ba >> 1) | (bb >> 1)) << 1);
-        }
-        if (t == 36) {
-            return (((ba >> 1) ^ (bb >> 1)) << 1);
-        }
-        if (t == 37) {
-            unsigned int x = (unsigned int)(ba >> 1);
-            long long n = (bb >> 1) & 31;
-            return ((long long)(unsigned int)(x << n)) << 1;
-        }
-        if (t == 38) {
-            unsigned int x = (unsigned int)(ba >> 1);
-            long long n = (bb >> 1) & 31;
-            return ((long long)(x >> n)) << 1;
-        }
-        if (t == 39) {
-            unsigned long long x = (unsigned int)(ba >> 1);
-            long long n = (bb >> 1) & 31;
-            return ((long long)(unsigned int)((x >> n) | (x << (32 - n)))) << 1;
-        }
-        if (t == 40) {
-            unsigned int x = (unsigned int)(ba >> 1);
-            unsigned int y = (unsigned int)(bb >> 1);
-            return ((long long)(unsigned int)(x + y)) << 1;
-        }
-        if (t == 41) {
-            unsigned int x41 = (unsigned int)(ba >> 1);
-            return ((long long)(unsigned int)(~x41)) << 1;
-        }
+        return fk_op_bits(t, ba, t == 41 ? 0 : fk_walk(fk_node[i][2], fp));
     }
     if (t == 43) {
         long long iv43 = fk_walk(fk_node[i][1], fp);
@@ -20024,23 +19887,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_vp(fk_walk(fk_node[cell199][1], fp));
             cell199 = fk_node[cell199][2];
         }
-        long long n199 = fk_vsp - base199;
-        /* a closure method's captures fill fk_call_cap_vals after every argument is walked,
-         * right before the jump, the same invariant tag 244 keeps */
-        if (fk_fnval_is_closure(fv199)) {
-            long long inst199 = fk_fnval_idx(fv199) - FK_CLOSURE_IDX_BASE;
-            long long ci199 = 0;
-            fk_call_cap_reserve(fk_clo_capcount[inst199]);
-            while (ci199 < fk_clo_capcount[inst199]) {
-                fk_call_cap_vals[ci199] = fk_clo_capvals[fk_clo_capbase[inst199] + ci199];
-                ci199 = ci199 + 1;
-            }
-        }
-        fk_fn_heat[fi199] = fk_fn_heat[fi199] + 1;
-        fk_heat_pulse();
-        long long r199 = fk_walk_body(fk_fn[fi199], base199);
-        fk_vsp = base199;
-        return fk_offer_ack(fi199, n199, r199);
+        /* the receiver and the arguments make the frame; a closure method's captures are written last, by the call */
+        return fk_call_value(fi199, base199, fk_vsp - base199, fv199);
     }
     if (t == 127) {
         fk_live_note(0);
@@ -20303,7 +20151,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 74) { return fk_jit_offers << 1; }                         /* defns offered to the Form JIT */
         if (ks_k == 75) { return fk_jit_bound << 1; }                          /* defns running as Form pages */
         if (ks_k == 76) { return fk_jit_offer_us << 1; }                       /* microseconds the offers took */
-        if (ks_k == 77) { return fk_jit_sites << 1; }                          /* site copies the pages apply through */
         if (ks_k == 58) {
             return (fk_field_on || fk_store_shared) ? 0 : (fk_np << 1);
         }
@@ -28071,7 +27918,7 @@ static void fk_jit_offer_one(long long c) {
     long long body = fk_fn[c];
     /* a defn the C loop lane crystallized keeps its leaf: unboxed floats are that lane's, until the flip (R8) */
     if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) { return; }
-    long long arg = fk_cons_val(c << 1, fk_cons_val(body << 1, fk_cons_val(fk_fnar[c] << 1, 1)));
+    long long arg = fk_cons_val(c << 1, fk_cons_val(body << 1, fk_cons_val(fk_fnar[c] << 1, fk_cons_val(FK_JIT_ABI << 1, 1))));
     fk_vp(arg);
     long long path = fk_sbuf(fk_jit_unit, fk_cstrlen(fk_jit_unit));
     arg = fk_vs[fk_vsp - 1];

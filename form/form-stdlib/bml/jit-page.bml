@@ -8,15 +8,16 @@
 // temporaries sit above the lets (slots t0 ..), reserved and zeroed at entry, so a melt sees and moves every value the page
 // holds. x19 holds the helper table, x20 fp, x21 the frame's address (reloaded after every helper, because a helper can grow
 // the value stack). A value is in x0; nothing lives in a register across a helper.
-//   in its own words  an int literal, a parameter or let read, a let, a do, an if, the int paths of add sub mul div mod
-//                     band bor bxor lt le eq (an operand that is not an int, or a zero divisor, takes the node's own arm
-//                     through apply), and a self tail call, which is a loop
-//   through apply     head tail len str_len byte_to_str cons nth str_eq str_byte_at shl_u32 shr_u32 and a call in value
-//                     position: the page evaluates the operands, the node's own arm runs over them
+//   in its own words  an int literal, (empty), a parameter or let read, a let, a do, an if, the int paths of add sub mul
+//                     div mod band bor bxor lt le eq (and eq against nil), and a self tail call, which is a loop
+//   one meaning       an operand that is not an int, or a zero divisor, goes to the op's own function, the one the
+//                     walker's arm calls (fk_op_*); head tail len str_len str_eq str_byte_at cons nth byte_to_str
+//                     shl_u32 shr_u32 always do
+//   the call          a call evaluates its arguments here, then THE CALL (value position) or THE TAIL CALL runs it
 //   through walk      any other node in value position: the walker walks it in this frame
 //   given back        any other node in tail position: the walker continues there in this frame (a tail call keeps it)
-// An if in tail position reads 0 as else, as the walker's body loop does; in value position it reads the branch law
-// (fk_truth). A compare whose side is a len against a literal is walked whole, so it stays the walker's bounded len.
+// An if reads the branch law (fk_truth) in tail and value position alike, as both walkers do. A compare whose side is a
+// len against a literal is walked whole, so it stays the walker's bounded len.
 // A defn whose page would do nothing in its own words is not bound.
 import form-stdlib/core.fk;
 section [form.bml] {
@@ -70,18 +71,19 @@ section [form.bml] {
         def jp-movk-pos(rd, v, k) = k > 3 ? [] : (Comparable) jp-hw(v, k) == 0 ? jp-movk-pos(rd, v, k + 1) : cons(jp-movk(rd, jp-hw(v, k), k), jp-movk-pos(rd, v, k + 1));
         def jp-movk-neg(rd, nv, k) = k > 3 ? [] : (Comparable) jp-hw(nv, k) == 0 ? jp-movk-neg(rd, nv, k + 1) : cons(jp-movk(rd, 65535 - jp-hw(nv, k), k), jp-movk-neg(rd, nv, k + 1));
 
-        // ---- the helper table (x19), in words: vs 0, next 1, walk 2, apply 3, truth 4, tick 5, enter 6, call 7, tail 8,
-        //      then the one-meaning ops 9..: head tail len str_len str_eq str_byte_at cons ----
+        // ---- the helper table (x19), in words (struct fk_jit_cx in runtime/fkwu-uni.c): vs 0, next 1, walk 2, truth 3,
+        //      tick 4, enter 5, call 6, tail 7, then the one-meaning ops from 8: head tail len str_len str_eq str_byte_at
+        //      cons, add sub mul div mod le lt eq, band bor bxor shl_u32 shr_u32, nth byte_to_str ----
+        def jp-op-word(tag) = (Comparable) tag == 20 ? 8 : (Comparable) tag == 21 ? 9 : (Comparable) tag == 22 ? 10 : (Comparable) tag == 25 ? 11 : (Comparable) tag == 26 ? 12 : (Comparable) tag == 28 ? 13 : (Comparable) tag == 19 ? 14 : (Comparable) tag == 3 ? 15 : (Comparable) tag == 4 ? 16 : (Comparable) tag == 42 ? 17 : (Comparable) tag == 10 ? 18 : (Comparable) tag == 11 ? 19 : (Comparable) tag == 5 ? 20 : (Comparable) tag == 103 ? 21 : (Comparable) tag == 102 ? 22 : (Comparable) tag == 34 ? 23 : (Comparable) tag == 35 ? 24 : (Comparable) tag == 36 ? 25 : (Comparable) tag == 37 ? 26 : (Comparable) tag == 38 ? 27 : (Comparable) tag == 23 ? 28 : (Comparable) tag == 33 ? 29 : nothing();
         def jp-reload() = [jp-ldr(9, 19, 0), jp-ldr(9, 9, 0), jp-add-lsl3(21, 9, 20)];
         def jp-call(slot) = append([jp-ldr(9, 19, slot), jp-blr(9)], jp-reload());
         // stp x29,x30,[sp,#-48]!  mov x29,sp  stp x19,x20,[sp,#16]  stp x21,x22,[sp,#32]  x19 = table  x20 = fp  enter(fp, need)
-        def jp-prologue(need) = append([2847767549, 2432697341, 2835436531, 2835504117, jp-mov(19, 1), jp-mov(20, 0), jp-mov(0, 20), jp-movz(1, need, 0)], jp-call(6));
+        def jp-prologue(need) = append([2847767549, 2432697341, 2835436531, 2835504117, jp-mov(19, 1), jp-mov(20, 0), jp-mov(0, 20), jp-movz(1, need, 0)], jp-call(5));
         // ldp x21,x22,[sp,#32]  ldp x19,x20,[sp,#16]  ldp x29,x30,[sp],#48  ret
         def jp-leave() = [2839698421, 2839630835, 2831383549, 3596551104];
         def jp-return() = cons(jp-str(31, 19, 1), jp-leave());
         def jp-handoff(k) = append(jp-imm(9, k), cons(jp-str(9, 19, 1), jp-leave()));
         def jp-walk(k) = append(jp-imm(0, k), cons(jp-mov(1, 20), jp-call(2)));
-        def jp-apply(k, t, n) = append(jp-imm(0, k), append([jp-mov(1, 20), jp-movz(2, t, 0), jp-movz(3, n, 0)], jp-call(3)));
         def jp-callee(c, t, n, slot) = append(jp-imm(0, c), append([jp-mov(1, 20), jp-movz(2, t, 0), jp-movz(3, n, 0)], jp-call(slot)));
 
         // ---- an emission: [words, slots used, nodes taken in the page's own words] ----
@@ -126,7 +128,8 @@ section [form.bml] {
             let b = jp-emit(cx, n[2], t, tail);
             jp-r(append(a[0], b[0]), jp-max(a[1], b[1]), a[2] + b[2] + 1);
         }
-        // tail: 0 is else (the walker's body loop); value: the branch law, with 0 and 2 read in place and the rest asked
+        // the branch law (fk_truth), in tail and value position alike: 0 and 2 read in place, any other word asked. In tail
+        // position each arm ends the page itself, so no branch joins them after the then-arm
         def jp-if(cx, n, t, tail) {
             let c = jp-emit(cx, n[1], t, 0);
             let th = jp-emit(cx, n[2], t, tail);
@@ -134,22 +137,21 @@ section [form.bml] {
             let lth = len(th[0]);
             let hi = jp-max(c[1], jp-max(th[1], el[1]));
             let nat = c[2] + th[2] + el[2] + 1;
-            tail ? jp-r(append(c[0], cons(jp-cbz(0, lth + 1), append(th[0], el[0]))), hi, nat) : jp-if-value(c, th, el, lth, hi, nat);
-        }
-        def jp-if-value(c, th, el, lth, hi, nat) {
-            let tr = jp-call(4);
+            let tr = jp-call(3);
             let lt = len(tr);
-            let head = append(c[0], [jp-cbz(0, lt + lth + 5), jp-cmpi(0, 2), jp-bcond(jp-eq(), lt + 2)]);
-            let mid = append(tr, cons(jp-cbz(0, lth + 2), append(th[0], cons(jp-b(len(el[0]) + 1), el[0]))));
-            jp-r(append(head, mid), hi, nat);
+            let join = tail ? 0 : 1;
+            let head = append(c[0], [jp-cbz(0, lt + lth + 4 + join), jp-cmpi(0, 2), jp-bcond(jp-eq(), lt + 2)]);
+            let arms = tail ? append(th[0], el[0]) : append(th[0], cons(jp-b(len(el[0]) + 1), el[0]));
+            jp-r(append(head, append(tr, cons(jp-cbz(0, lth + 1 + join), arms))), hi, nat);
         }
 
         // ---- operators ----
         def jp-int-op(tag) = (Comparable) tag == 3 ? 1 : (Comparable) tag == 4 ? 1 : (Comparable) tag == 42 ? 1 : (Comparable) tag == 10 ? 1 : (Comparable) tag == 11 ? 1 : (Comparable) tag == 34 ? 1 : (Comparable) tag == 35 ? 1 : (Comparable) tag == 36 ? 1 : (Comparable) tag == 5 ? 1 : (Comparable) tag == 103 ? 1 : (Comparable) tag == 102 ? 1 : 0;
         def jp-cmp-op?(tag) = ((Comparable) tag == 5) || (((Comparable) tag == 103) || ((Comparable) tag == 102));
-        // the one-meaning ops the page calls directly: [table word, operand count]; the rest go through apply
-        def jp-direct(tag) = (Comparable) tag == 20 ? [9, 1] : (Comparable) tag == 21 ? [10, 1] : (Comparable) tag == 22 ? [11, 1] : (Comparable) tag == 25 ? [12, 1] : (Comparable) tag == 26 ? [13, 2] : (Comparable) tag == 28 ? [14, 2] : (Comparable) tag == 19 ? [15, 2] : nothing();
-        def jp-applied-arity(tag) = (Comparable) tag == 33 ? 1 : (Comparable) tag == 23 ? 2 : (Comparable) tag == 37 ? 2 : (Comparable) tag == 38 ? 2 : 0;
+        // the ops the page always hands to their one meaning: [table word, operand count]
+        def jp-unary?(tag) = ((Comparable) tag == 20) || (((Comparable) tag == 21) || (((Comparable) tag == 22) || (((Comparable) tag == 25) || ((Comparable) tag == 33))));
+        def jp-binary?(tag) = ((Comparable) tag == 26) || (((Comparable) tag == 28) || (((Comparable) tag == 19) || (((Comparable) tag == 23) || (((Comparable) tag == 37) || ((Comparable) tag == 38)))));
+        def jp-direct(tag) = jp-unary?(tag) ? [jp-op-word(tag), 1] : jp-binary?(tag) ? [jp-op-word(tag), 2] : nothing();
         def jp-call-tag?(tag) = ((Comparable) tag == 12) || (((Comparable) tag == 240) || ((Comparable) tag == 241));
         // the walker's bounded len: (op (len X) K) or (op K (len X)) with K a literal at or above 0
         def jp-len-lit?(a, b) {
@@ -159,9 +161,8 @@ section [form.bml] {
         }
         def jp-len-shape?(n) = jp-len-lit?(n[1], n[2]) || jp-len-lit?(n[2], n[1]);
         def jp-op(cx, k, n, tag, t, tail) {
-            (Comparable) jp-int-op(tag) == 1 ? (jp-cmp-op?(tag) && jp-len-shape?(n) ? jp-walked(k, t, tail) : jp-valued(jp-bin(cx, k, n, tag, t), tail)) : !nothing?(jp-direct(tag)) ? jp-valued(jp-op-call(cx, n, jp-direct(tag), t), tail) : jp-applied-arity(tag) > 0 ? jp-valued(jp-applied(cx, k, jp-first-kids(n, jp-applied-arity(tag)), t), tail) : jp-call-tag?(tag) ? jp-call-node(cx, k, n, tag, t, tail) : jp-walked(k, t, tail);
+            (Comparable) jp-int-op(tag) == 1 ? (jp-cmp-op?(tag) && jp-len-shape?(n) ? jp-walked(k, t, tail) : jp-valued(jp-bin(cx, k, n, tag, t), tail)) : !nothing?(jp-direct(tag)) ? jp-valued(jp-op-call(cx, n, jp-direct(tag), t), tail) : jp-call-tag?(tag) ? jp-call-node(cx, k, n, tag, t, tail) : jp-walked(k, t, tail);
         }
-        def jp-first-kids(n, a) = (Comparable) a == 1 ? [n[1]] : [n[1], n[2]];
         // a one-meaning op: x0 = the first operand, x1 = the second; the first waits in slot t while the second is made
         def jp-op-call(cx, n, d, t) = (Comparable) d[1] == 1 ? jp-op-call1(cx, n, d[0], t) : jp-op-call2(cx, n, d[0], t);
         def jp-op-call1(cx, n, w, t) {
@@ -178,13 +179,13 @@ section [form.bml] {
             jp-r(append(ra[0], append(stash, append(rb[0], cons(jp-mov(1, 0), append(geta, jp-call(w)))))), jp-max(jp-max(ra[1], rb[1]), ta), ra[2] + rb[2] + 1);
         }
 
-        // x1 = a, x0 = b; the int path in place, anything else through the node's own arm
+        // x1 = a, x0 = b; the int path in place, anything else through the op's one meaning (x0 = a, x1 = b there)
         def jp-fast(tag) {
             (Comparable) tag == 3 ? [jp-add(0, 1, 0)] : (Comparable) tag == 4 ? [jp-sub(0, 1, 0)] : (Comparable) tag == 42 ? [jp-asr1(1, 1), jp-mul(0, 1, 0)] : (Comparable) tag == 34 ? [jp-and(0, 1, 0)] : (Comparable) tag == 35 ? [jp-orr(0, 1, 0)] : (Comparable) tag == 36 ? [jp-eor(0, 1, 0)] : (Comparable) tag == 5 ? [jp-cmp(1, 0), jp-cset(0, jp-le()), jp-lsl1(0, 0)] : (Comparable) tag == 103 ? [jp-cmp(1, 0), jp-cset(0, jp-lt()), jp-lsl1(0, 0)] : (Comparable) tag == 102 ? [jp-cmp(1, 0), jp-cset(0, jp-eq()), jp-lsl1(0, 0)] : (Comparable) tag == 10 ? [jp-asr1(1, 1), jp-asr1(2, 0), jp-sdiv(0, 1, 2), jp-lsl1(0, 0)] : [jp-asr1(1, 1), jp-asr1(2, 0), jp-sdiv(3, 1, 2), jp-msub(0, 3, 2, 1), jp-lsl1(0, 0)];
         }
         def jp-divides?(tag) = ((Comparable) tag == 10) || ((Comparable) tag == 11);
         // the int test jumps past the int path to the not-int words: for eq, an identity read when either side is nil
-        // (nil equals only nil, whatever the other word is), then the node's own arm
+        // (nil equals only nil, whatever the other word is), then the op's one meaning
         def jp-guard(tag, lf) = jp-divides?(tag) ? [jp-orr(9, 1, 0), jp-tbnz0(9, lf + 3), jp-cbz(0, lf + 2)] : [jp-orr(9, 1, 0), jp-tbnz0(9, lf + 2)];
         def jp-not-int(tag, lslow) = (Comparable) tag == 102 ? [jp-cmpi(1, 1), jp-bcond(jp-eq(), 3), jp-cmpi(0, 1), jp-bcond(1, 5), jp-cmp(1, 0), jp-cset(0, jp-eq()), jp-lsl1(0, 0), jp-b(lslow + 1)] : [];
         def jp-bin(cx, k, n, tag, t) {
@@ -195,23 +196,18 @@ section [form.bml] {
             let geta = sa ? jp-simple-into(1, n[1]) : [jp-ldr(1, 21, t)];
             let stash = sa ? [] : [jp-str(0, 21, t)];
             let fast = jp-fast(tag);
-            let slow = append([jp-str(1, 21, ta), jp-str(0, 21, ta + 1)], jp-apply(k, ta, 2));
+            let slow = append([jp-mov(2, 0), jp-mov(0, 1), jp-mov(1, 2)], jp-call(jp-op-word(tag)));
             let other = append(jp-not-int(tag, len(slow)), slow);
             let tailws = append(fast, cons(jp-b(len(other) + 1), other));
             let ws = append(ra[0], append(stash, append(rb[0], append(geta, append(jp-guard(tag, len(fast)), tailws)))));
-            jp-r(ws, jp-max(jp-max(ra[1], rb[1]), ta + 2), ra[2] + rb[2] + 1);
+            jp-r(ws, jp-max(jp-max(ra[1], rb[1]), ta), ra[2] + rb[2] + 1);
         }
 
-        // operands into t .. t+n-1 (each evaluated with temporaries above them), then the node's own arm over them
+        // a call's arguments into t .. t+n-1, each evaluated with temporaries above them
         def jp-args(cx, kids, t, i, top, acc) {
             nil?(kids) ? acc : jp-args-at(cx, kids, t, i, top, acc, jp-emit(cx, kids[0], top, 0));
         }
         def jp-args-at(cx, kids, t, i, top, acc, r) = jp-args(cx, kids[1:], t, i + 1, top, jp-r(append(acc[0], append(r[0], [jp-str(0, 21, t + i)])), jp-max(acc[1], r[1]), acc[2] + r[2]));
-        def jp-applied(cx, k, kids, t) {
-            let a = len(kids);
-            let ev = jp-args(cx, kids, t, 0, t + a, jp-r([], t + a, 0));
-            jp-r(append(ev[0], jp-apply(k, t, a)), ev[1], ev[2] + 1);
-        }
         def jp-chain(cell, acc) {
             let n = cell < 0 ? nothing() : jp-node(cell);
             nothing?(n) ? reverse(acc) : (Comparable) n[0] == 242 ? jp-chain(n[2], cons(n[1], acc)) : reverse(acc);
@@ -228,14 +224,14 @@ section [form.bml] {
         def jp-call-other(cx, c, kids, t, tail) {
             let a = len(kids);
             let ev = jp-args(cx, kids, t, 0, t + a, jp-r([], t + a, 0));
-            let go = tail ? append(jp-callee(c, t, a, 8), cons(jp-str(0, 19, 1), jp-leave())) : jp-callee(c, t, a, 7);
+            let go = tail ? append(jp-callee(c, t, a, 7), cons(jp-str(0, 19, 1), jp-leave())) : jp-callee(c, t, a, 6);
             jp-r(append(ev[0], go), ev[1], ev[2] + 1);
         }
         def jp-moves(t, i, a) = i >= a ? [] : cons(jp-ldr(0, 21, t + i), cons(jp-str(0, 21, i), jp-moves(t, i + 1, a)));
         def jp-self-loop(cx, kids, t) {
             let a = len(kids);
             let ev = jp-args(cx, kids, t, 0, t + a, jp-r([], t + a, 0));
-            jp-r(append(ev[0], append(jp-moves(t, 0, a), append(jp-call(5), [0 - 1]))), ev[1], ev[2] + 1);
+            jp-r(append(ev[0], append(jp-moves(t, 0, a), append(jp-call(4), [0 - 1]))), ev[1], ev[2] + 1);
         }
 
         // ---- the page: prologue, body, the loop's branches placed ----
@@ -252,9 +248,13 @@ section [form.bml] {
             let pro = jp-prologue(r[1]);
             (r[1] > 4095) || ((Comparable) r[2] == 0) ? nothing() : jp-link(append(pro, r[0]), len(pro), 0);
         }
+        // the helper table's layout this emitter writes for (FK_JIT_ABI in runtime/fkwu-uni.c): a seed that offers
+        // another layout is declined, never bound to words that would name the wrong helpers
+        def jp-abi() = 2;
         def jp-offer(input) {
-            let words = nothing?(input) ? nothing() : jp-page(input[0], input[1], input[2]);
-            nothing?(words) ? 0 : jit_fn_bind(input[0], words);
+            let fits = !nothing?(input) && ((len(input) > 3) && ((Comparable) input[3] == jp-abi()));
+            let words = fits ? jp-page(input[0], input[1], input[2]) : nothing();
+            nothing?(words) ? 0 : jit_fn_bind(input[0], cons(jp-abi(), words));
         }
     }
     jp-offer(cell_input());
