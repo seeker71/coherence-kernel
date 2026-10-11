@@ -10058,12 +10058,24 @@ struct fk_jit_cx {
 static struct fk_jit_cx fk_jit_cx;
 #define FK_JIT_HEAT 4096
 static void **fk_jit_page;           /* per defn: its page, or 0 */
-static unsigned char *fk_jit_state;  /* per defn: 0 never offered, 1 offered (a page bound or the cell declined) */
+/* per defn: 0 never offered, 1 offered (a page bound or the cell declined), 2 waiting in the line, 3 written in place of
+ * its calls by a page (jit_node ["inline", c]): its own time is its callers' pages' time, so it is offered by heat only */
+static unsigned char *fk_jit_state;
 static long long fk_jit_cap;
+#define FK_JIT_HEAT_OFFERABLE(c) ((c) >= fk_jit_cap || fk_jit_state[c] == 0 || fk_jit_state[c] == 3)
 static long long fk_jit_bound, fk_jit_offers, fk_jit_offer_us; /* kernel_stat 74-76 */
 static int fk_jit_busy;
+/* the line: a defn offered while the JIT runs (or before it is resident) waits here once. A defn already waiting is not
+ * pushed again: a line pushed at every further 4096 calls filled with repeats of the first hot defns, and a later one
+ * (the grammar's reader in the cell that lowers jit-page.bml) ran 41,372 calls walked. A defn the full line cannot take
+ * stays unoffered and asks again at its next multiple */
 static long long fk_jit_pending[64];
 static int fk_jit_pending_n;
+/* an offer by time: a defn called too seldom to heat (a few dozen calls of 20 ms each) is as cold to the call count as one
+ * never run. The sampler posts a defn whose own samples reach a multiple of FK_JIT_TIME_SAMPLES here, and the run thread
+ * offers it at its next pulse when it was never offered */
+#define FK_JIT_TIME_SAMPLES 32
+static volatile long long fk_jit_time_want;
 static void fk_jit_reserve(long long need) {
     if (need <= fk_jit_cap) { return; }
     long long next = fk_jit_cap > 0 ? fk_jit_cap : 1024;
@@ -10285,6 +10297,7 @@ static long long fk_jit_bind(long long x) {
  *   ["word", k]    the constant word of a string literal (its index is pinned, fk_lit_pin) as four 16-bit halves, low first
  *   ["fn", c]      defn c's body (the one it wears under its page) and its arity, for a page that writes a callee's body in
  *                  place of the call; nothing for a capturing function, whose prologue reads the call's capture channel
+ *   ["inline", c]  marks defn c written in place by a page (fk_jit_state 3), so its own time offers it nothing
  * The arms read for the table: record_get 65, record_set 66, record_has 67, record_keys 99, value_eq 80, node_category 92,
  * str_find 30, intern_node 47, intern_trivial_string 46, intern_trivial_int 43, node_children 48, node_value 49, file_size
  * 60, host_file_append_bytes 61, read_file 63, write_file 104 (children 1..n in order); str_concat 27
@@ -10399,6 +10412,12 @@ static long long fk_jit_node(long long x) {
     long long q = FK_HNEXT(p);
     if (!(q >= 1 && FK_POK(q)) || (FK_HH(q) & 1) != 0) { return fk_nothing; }
     long long k = FK_HH(q) >> 1;
+    if (fk_cstr_eq(what, "inline")) {
+        if (k <= 0 || k >= fk_fn_count) { return fk_nothing; }
+        fk_jit_reserve(k + 1);
+        if (fk_jit_state[k] == 0) { fk_jit_state[k] = 3; }
+        return 2;
+    }
     if (fk_cstr_eq(what, "fn")) {
         if (k <= 0 || k >= fk_fn_count || (k < fk_fn_cap_capacity && fk_fn_cap_count[k] > 0)) { return fk_nothing; }
         long long b = fk_fn[k];
@@ -21674,6 +21693,7 @@ static void fk_prof_sample(void) {
     long long c = fk_cur_fn;
     if (c >= 0 && c < FK_PROF_FNS) {
         fk_prof_self[c] = fk_prof_self[c] + 1;
+        if (c > 0 && (fk_prof_self[c] & (FK_JIT_TIME_SAMPLES - 1)) == 0 && fk_jit_time_want == 0) { fk_jit_time_want = c; }
         if (c != 0 && fk_page_walk_fn == c) {
             fk_prof_pwalk[c] = fk_prof_pwalk[c] + 1;
             long long tg = fk_page_walk_tag;
@@ -21697,8 +21717,10 @@ static void fk_time_write(void) {
         p = p + 1;
     }
     /* every recipe with a sample, named by the symbol map; a row says how it ran at the end: page (a Form page), leaf (the
-     * C loop lane), declined (offered to the JIT, which bound no page: a gap in the page compiler), walk (never offered:
-     * its heat never reached FK_JIT_HEAT). Every sample is named: fn 0 is a unit's own top-level sequence, (top), and a fn
+     * C loop lane), declined (offered to the JIT, which bound no page: a gap in the page compiler), waiting (offered while
+     * the JIT was not free, still in its line), inplace (written in place of its calls by a page, its time spent there),
+     * walk (never offered: neither its calls nor its own time reached an offer).
+     * Every sample is named: fn 0 is a unit's own top-level sequence, (top), and a fn
      * no symbol names prints as fn#N, so the rows sum to the recipe phase */
     static unsigned char named[FK_PROF_FNS / 8];
     memset(named, 0, sizeof(named));
@@ -21710,7 +21732,8 @@ static void fk_time_write(void) {
             named[fx >> 3] = (unsigned char)(named[fx >> 3] | (1u << (fx & 7)));
             long long b = fk_fn[fx];
             const char *how = (fx < fk_jit_cap && fk_jit_page[fx] != 0) ? "page" : (b >= 0 && b < fk_node_count && fk_node[b][0] == 194) ? "leaf"
-                            : (fx < fk_jit_cap && fk_jit_state[fx] != 0) ? "declined" : "walk";
+                            : (fx < fk_jit_cap && fk_jit_state[fx] == 1) ? "declined" : (fx < fk_jit_cap && fk_jit_state[fx] == 2) ? "waiting"
+                            : (fx < fk_jit_cap && fk_jit_state[fx] == 3) ? "inplace" : "walk";
             dprintf(fd, "recipe %u %u %s %.*s\n", fk_prof_self[fx], fk_prof_incl[fx], how, (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
             if (fk_prof_pwalk[fx] > 0) { dprintf(fd, "pagewalk %u %.*s\n", fk_prof_pwalk[fx], (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]); }
         }
@@ -21926,7 +21949,7 @@ static void fk_heat_pulse(void) {
     /* the JIT's event: a defn's heat at a multiple of FK_JIT_HEAT, or defns that wait for a quiet pulse */
     long long c = fk_cur_fn;
     if ((c > 0 && c < fk_fn_capacity && fk_fn_heat[c] != 0 && (fk_fn_heat[c] & (FK_JIT_HEAT - 1)) == 0 &&
-         (c >= fk_jit_cap || fk_jit_state[c] == 0)) || fk_jit_pending_n > 0) {
+         FK_JIT_HEAT_OFFERABLE(c)) || fk_jit_pending_n > 0 || fk_jit_time_want != 0) {
         fk_jit_pulse(c);
     }
 }
@@ -28596,7 +28619,7 @@ static void fk_jit_offer_one(long long c) {
 #else
     if (c <= 0 || c >= fk_fn_count) { return; }
     fk_jit_reserve(c + 1);
-    if (fk_jit_state[c] != 0) { return; }
+    if (fk_jit_state[c] == 1) { return; }
     fk_jit_state[c] = 1;
     if (!fk_jit_ready()) { return; }
     long long body = fk_fn[c];
@@ -28636,8 +28659,14 @@ static void fk_jit_offer_one(long long c) {
 #endif
 }
 static void fk_jit_offer(long long c) {
+    if (c <= 0 || c >= fk_fn_count) { return; }
+    fk_jit_reserve(c + 1);
     if (!fk_jit_quiet()) {
-        if (fk_jit_pending_n < 64) { fk_jit_pending[fk_jit_pending_n] = c; fk_jit_pending_n = fk_jit_pending_n + 1; }
+        if ((fk_jit_state[c] == 0 || fk_jit_state[c] == 3) && fk_jit_pending_n < 64) {
+            fk_jit_state[c] = 2;
+            fk_jit_pending[fk_jit_pending_n] = c;
+            fk_jit_pending_n = fk_jit_pending_n + 1;
+        }
         return;
     }
     fk_jit_offer_one(c);
@@ -28647,14 +28676,19 @@ static void fk_jit_offer(long long c) {
     }
 }
 static void fk_jit_pulse(long long c) {
+    long long w = fk_jit_time_want;
+    if (w != 0) {
+        fk_jit_time_want = 0;
+        if (w > 0 && w < fk_fn_count && (w >= fk_jit_cap || fk_jit_state[w] == 0)) { fk_jit_offer(w); }
+    }
     if (c > 0 && c < fk_fn_capacity && fk_fn_heat[c] != 0 && (fk_fn_heat[c] & (FK_JIT_HEAT - 1)) == 0 &&
-        (c >= fk_jit_cap || fk_jit_state[c] == 0)) {
+        FK_JIT_HEAT_OFFERABLE(c)) {
         fk_jit_offer(c);
         return;
     }
     if (fk_jit_pending_n > 0 && fk_jit_quiet()) {
         fk_jit_pending_n = fk_jit_pending_n - 1;
-        fk_jit_offer(fk_jit_pending[fk_jit_pending_n]);
+        fk_jit_offer_one(fk_jit_pending[fk_jit_pending_n]);
     }
 }
 static int fk_run_src(const char *path, long long arg) {

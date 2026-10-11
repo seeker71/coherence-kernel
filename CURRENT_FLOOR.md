@@ -1144,16 +1144,20 @@ clock.
 
 ## The JIT
 
-The walker's JIT is written in Form and needs no caller. A defn whose heat reaches a multiple of 4096 is offered once to
+The walker's JIT is written in Form and needs no caller. A defn whose heat reaches a multiple of 4096, or whose own sampled
+time reaches a multiple of 32 samples while it was never offered (a recipe called a few dozen times at tens of ms each
+is as cold to the call count as one never run), is offered once to
 `form/form-stdlib/bml/jit-page.bml`, a resident cell of the same process. The cell reads the defn's nodes where they live
 (`kernel_ast` of its own pid: a node, a defn row and a span of source are read straight from the kernel's tables, with no
 shared segment mapped per read, so ignored-argument-scan-band went from 4.1 s to 1 s), writes AArch64 words and binds them with
 `jit_fn_bind(fn, words)`. From then on the defn wears the crystallized-defn node (tag 194), and the walker's 194 arm runs
-the page in the frame the call built. A defn that gets hot while the JIT itself runs waits in a short line, so the JIT's
-own hot recipes run as pages too. The line holds 64, and a defn waiting in it is put in again at each further 4096 calls,
-so it fills with the first hot recipes' repeats and a later one is dropped: in a fresh tree the first offer lowers
-jit-page.bml in a floor cell, and that cell's grammar copy ran gx 41,372 times without an offer (a cold lowering's board
-shows it as walk rows beside the run's paged copy, about 1.5% of the run).
+the page in the frame the call built. A defn that gets hot while the JIT itself runs waits in a short line, once, so the
+JIT's own hot recipes run as pages too. The line holds 64 different defns. One the full line cannot take stays unoffered
+and asks again at its next multiple. Until 2026-10-11 a waiting defn was put in again at each further 4096 calls, so the
+line filled with the first hot recipes' repeats and dropped later ones: in a fresh tree the first offer lowers
+jit-page.bml in a floor cell, and that cell's grammar copy ran gx 41,372 times without an offer. The board names a defn
+still in the line `waiting`, and a callee a page wrote in place `inplace` (its own time is spent in its callers' pages,
+so its time offers it nothing; its heat still can, from a caller that walks).
 
 The page keeps the walker's frame and the walker's meaning:
 
