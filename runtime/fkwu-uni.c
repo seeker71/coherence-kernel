@@ -2220,6 +2220,14 @@ static long long **fk_rval;
 static long long *fk_rkcap;
 static long long *fk_rcnt;
 static long long *fk_rbp;
+/* A record that holds many keys finds one by a hash of its bytes, not by walking its rows: fk_rhash[r] is an open-addressing
+ * table of row+1 (0 empty) of fk_rhsz[r] slots (a power of two), built when the record reaches FK_RHASH_MIN keys and doubled
+ * as it fills; fk_rhsz[r] is 0 for a record below that. The rows stay the record's truth and keep their order; the table only
+ * answers which row, and the first key inserted is the first found, as the walk found it (fk_rfind, fk_rappend). The tokenizer
+ * of the Llama voice holds 128 thousand vocabulary and 280 thousand merge keys: the Form-level ordered index took 41 seconds
+ * to build them at every door start (2026-10-11, observe/model-open-time-run.bml). */
+static long long **fk_rhash;
+static long long *fk_rhsz;
 static long long fk_record_cap;  /* live row capacity; fk_record_reserve owns it */
 static long long fk_rp;
 static void fk_record_reserve(long long need) {
@@ -2231,7 +2239,9 @@ static void fk_record_reserve(long long need) {
         fk_rkcap = (long long *)calloc(FK_RECORD_CAP_INIT, 8);
         fk_rcnt = (long long *)calloc(FK_RECORD_CAP_INIT, 8);
         fk_rbp = (long long *)calloc(FK_RECORD_CAP_INIT, 8);
-        if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0) {
+        fk_rhash = (long long **)calloc(FK_RECORD_CAP_INIT, sizeof(long long *));
+        fk_rhsz = (long long *)calloc(FK_RECORD_CAP_INIT, 8);
+        if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0 || fk_rhash == 0 || fk_rhsz == 0) {
             fk_die("fk_record_reserve: out of memory for the record table");
         }
         fk_record_cap = FK_RECORD_CAP_INIT;
@@ -2248,7 +2258,9 @@ static void fk_record_reserve(long long need) {
     fk_rkcap = (long long *)realloc(fk_rkcap, (unsigned long)(nc * 8));
     fk_rcnt = (long long *)realloc(fk_rcnt, (unsigned long)(nc * 8));
     fk_rbp = (long long *)realloc(fk_rbp, (unsigned long)(nc * 8));
-    if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0) {
+    fk_rhash = (long long **)realloc(fk_rhash, (unsigned long)(nc * sizeof(long long *)));
+    fk_rhsz = (long long *)realloc(fk_rhsz, (unsigned long)(nc * 8));
+    if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0 || fk_rhash == 0 || fk_rhsz == 0) {
         fk_die("fk_record_reserve: out of memory growing the record table");
     }
     i = fk_record_cap;
@@ -2258,6 +2270,8 @@ static void fk_record_reserve(long long need) {
         fk_rkcap[i] = 0;
         fk_rcnt[i] = 0;
         fk_rbp[i] = 0;
+        fk_rhash[i] = 0;
+        fk_rhsz[i] = 0;
         i = i + 1;
     }
     fk_record_cap = nc;
@@ -5941,6 +5955,83 @@ static long long fk_keyeq(long long a, long long b) {
         j = j + 1;
     }
     return 1;
+}
+#define FK_RHASH_MIN 24
+static unsigned long long fk_rhash_of(long long key) {
+    unsigned long long h = 14695981039346656037ULL;
+    long long j = 0;
+    if (key < 0 || !FK_SOK(key)) {
+        return h;
+    }
+    while (j < FK_SLEN(key)) {
+        h = (h ^ (unsigned long long)(unsigned char)FK_SBYTES(key)[j]) * 1099511628211ULL;
+        j = j + 1;
+    }
+    return h ^ (h >> 29);
+}
+/* rebuild record r's table at `size` slots (a power of two) from its rows, in row order */
+static void fk_rindex_build(long long r, long long size) {
+    long long j = 0;
+    free(fk_rhash[r]);
+    fk_rhash[r] = (long long *)calloc((unsigned long)size, 8);
+    if (fk_rhash[r] == 0) {
+        fk_die("fk_rindex_build: out of memory for a record's key table");
+    }
+    fk_rhsz[r] = size;
+    while (j < fk_rcnt[r]) {
+        unsigned long long h = fk_rhash_of(fk_rkey[r][j]) & (unsigned long long)(size - 1);
+        while (fk_rhash[r][h] != 0) {
+            h = (h + 1) & (unsigned long long)(size - 1);
+        }
+        fk_rhash[r][h] = j + 1;
+        j = j + 1;
+    }
+}
+/* the row of key in record r, or -1: the first inserted, as a walk of the rows from the first finds it */
+static long long fk_rfind(long long r, long long key) {
+    long long j = 0;
+    if (fk_rhsz[r] == 0) {
+        while (j < fk_rcnt[r]) {
+            if (fk_keyeq(fk_rkey[r][j], key)) {
+                return j;
+            }
+            j = j + 1;
+        }
+        return -1;
+    }
+    unsigned long long mask = (unsigned long long)(fk_rhsz[r] - 1);
+    unsigned long long h = fk_rhash_of(key) & mask;
+    while (fk_rhash[r][h] != 0) {
+        long long row = fk_rhash[r][h] - 1;
+        if (fk_keyeq(fk_rkey[r][row], key)) {
+            return row;
+        }
+        h = (h + 1) & mask;
+    }
+    return -1;
+}
+/* add a row to record r (the key is absent, or the caller means a second row) and keep the table whole */
+static void fk_rappend(long long r, long long key, long long val) {
+    long long n;
+    fk_record_keys_reserve(r, fk_rcnt[r] + 1);
+    fk_rkey[r][fk_rcnt[r]] = key;
+    fk_rval[r][fk_rcnt[r]] = val;
+    fk_rcnt[r] = fk_rcnt[r] + 1;
+    n = fk_rcnt[r];
+    if (fk_rhsz[r] == 0) {
+        if (n >= FK_RHASH_MIN) {
+            fk_rindex_build(r, 128);
+        }
+    } else if (n * 2 > fk_rhsz[r]) {
+        fk_rindex_build(r, fk_rhsz[r] * 2);
+    } else {
+        unsigned long long mask = (unsigned long long)(fk_rhsz[r] - 1);
+        unsigned long long h = fk_rhash_of(key) & mask;
+        while (fk_rhash[r][h] != 0) {
+            h = (h + 1) & mask;
+        }
+        fk_rhash[r][h] = n;
+    }
 }
 /* fk_host_resolve — where a host path names a file for a read-side door, the same way on every
  * kernel. A path that stands where the kernel runs names itself. Otherwise the walk tries dir/p,
@@ -19415,10 +19506,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 if (k64 == -1) {
                     fk_rbp[fk_rp] = v64;
                 } else {
-                    fk_record_keys_reserve(fk_rp, fk_rcnt[fk_rp] + 1);
-                    fk_rkey[fk_rp][fk_rcnt[fk_rp]] = k64;
-                    fk_rval[fk_rp][fk_rcnt[fk_rp]] = v64;
-                    fk_rcnt[fk_rp] = fk_rcnt[fk_rp] + 1;
+                    fk_rappend(fk_rp, k64, v64);
                 }
             }
             q64 = FK_HNEXT(q64);
@@ -19431,14 +19519,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (r < 1 || r > fk_rp) {
             fk_stop("fkwu: record_get: only a record has fields -- ask record? first");
         }
-        long long j = 0;
-        while (j < fk_rcnt[r]) {
-            if (fk_keyeq(fk_rkey[r][j], key)) {
-                return fk_rval[r][j];
-            }
-            j = j + 1;
-        }
-        return 0;
+        long long j = fk_rfind(r, key);
+        return j >= 0 ? fk_rval[r][j] : 0;
     }
     if (t == 66) {
         long long rec = fk_walk(fk_node[i][1], fp); fk_vp(rec);
@@ -19448,18 +19530,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (r < 1 || r > fk_rp) {
             fk_stop("fkwu: record_set: only a record has fields -- ask record? first");
         }
-        long long j = 0;
-        while (j < fk_rcnt[r]) {
-            if (fk_keyeq(fk_rkey[r][j], key)) {
-                fk_rval[r][j] = val;
-                return rec;
-            }
-            j = j + 1;
+        long long j = fk_rfind(r, key);
+        if (j >= 0) {
+            fk_rval[r][j] = val;
+            return rec;
         }
-        fk_record_keys_reserve(r, fk_rcnt[r] + 1);
-        fk_rkey[r][fk_rcnt[r]] = key;
-        fk_rval[r][fk_rcnt[r]] = val;
-        fk_rcnt[r] = fk_rcnt[r] + 1;
+        fk_rappend(r, key, val);
         return rec;
     }
     if (t == 67) {
@@ -19471,14 +19547,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (r < 1 || r > fk_rp) {
             return 0;
         }
-        long long j = 0;
-        while (j < fk_rcnt[r]) {
-            if (fk_keyeq(fk_rkey[r][j], key)) {
-                return 2;
-            }
-            j = j + 1;
-        }
-        return 0;
+        return fk_rfind(r, key) >= 0 ? 2 : 0;
     }
     if (t == 68) {
         if (fk_isrec(fk_walk(fk_node[i][1], fp))) {
@@ -19983,14 +20052,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (r < 1 || r > fk_rp) {
             return 0;
         }
-        long long j = 0;
-        while (j < fk_rcnt[r]) {
-            if (fk_keyeq(fk_rkey[r][j], key)) {
-                return fk_rval[r][j];
-            }
-            j = j + 1;
-        }
-        return 0;
+        long long j = fk_rfind(r, key);
+        return j >= 0 ? fk_rval[r][j] : 0;
     }
     if (t == 98) {
         long long rec = fk_walk(fk_node[i][1], fp); fk_vp(rec);
@@ -20000,18 +20063,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (r < 1 || r > fk_rp) {
             return 0;
         }
-        long long j = 0;
-        while (j < fk_rcnt[r]) {
-            if (fk_keyeq(fk_rkey[r][j], key)) {
-                fk_rval[r][j] = val;
-                return 0;
-            }
-            j = j + 1;
+        long long j = fk_rfind(r, key);
+        if (j >= 0) {
+            fk_rval[r][j] = val;
+            return 0;
         }
-        fk_record_keys_reserve(r, fk_rcnt[r] + 1);
-        fk_rkey[r][fk_rcnt[r]] = key;
-        fk_rval[r][fk_rcnt[r]] = val;
-        fk_rcnt[r] = fk_rcnt[r] + 1;
+        fk_rappend(r, key, val);
         return 0;
     }
     if (t == 100) {
@@ -27690,10 +27747,7 @@ static long long fk_cr_new(void) {
 }
 static void fk_cr_put(long long r, const char *key, long long v) {
     long long k = fk_stri(fk_sbuf(key, fk_cstrlen(key)));
-    fk_record_keys_reserve(r, fk_rcnt[r] + 1);
-    fk_rkey[r][fk_rcnt[r]] = k;
-    fk_rval[r][fk_rcnt[r]] = v;
-    fk_rcnt[r] = fk_rcnt[r] + 1;
+    fk_rappend(r, k, v);
 }
 static long long fk_cr_str(const char *s) {
     return fk_sbuf(s != 0 ? s : "", s != 0 ? fk_cstrlen(s) : 0);
