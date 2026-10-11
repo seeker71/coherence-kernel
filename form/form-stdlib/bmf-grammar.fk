@@ -70,9 +70,10 @@
     ;; door armed: its reading there does not depend on how it was reached, so a retry from
     ;; the same place -- an alternative, a longer form, a block read again as its other kind --
     ;; takes the reading it already has. A source then costs its length, not its nesting.
-    ;; A record's read walks its keys, so the memo is a record of records: a rule's readings
-    ;; over each 1024 bytes of source sit in one record keyed by the place.
-    ;; The seed roots every record value. A parse owner releases both levels
+    ;; The memo record (g-armed's fifth element) holds, for a pruned reading, one record of
+    ;; each memo rule's latest reading ("latest"); a traced reading keeps every reading, a
+    ;; record per rule and 1024 bytes of source keyed by the place, since a record's read walks
+    ;; its keys. The seed roots every record value. A parse owner releases both levels
     ;; after keeping its result; dropping the grammar alone retains its readings.
     (defn g-release-values (keys record)
         (if (nil? keys) 0
@@ -166,12 +167,14 @@
     ;; Read as data at every step, a grammar cost a string compare per pattern tag, a rule
     ;; found by name per reference, a cursor row per byte and every alternative tried at
     ;; every place: about fifty microseconds a byte. Compiled once, a pattern is a numbered
-    ;; op, a reference holds its rule in a cell, and each reference and alternation carries
+    ;; op; a reference holds its rule (a cell only where it closes a cycle), a rule that
+    ;; reads one pattern through is read inline, and each reference and alternation carries
     ;; FIRST: the bytes at which its pattern can begin. A pattern that cannot begin at the
     ;; byte under the cursor fails there having built nothing, so the reader does not try it:
     ;; the reading and every node it makes, in their order, are the ones the data gives.
-    ;; A traced grammar is compiled without FIRST, so each rule that could not begin is
-    ;; tried and noted, as a refusal reads it.
+    ;; Rules that begin alike are read through their shared beginning once (op 21).
+    ;; A traced grammar is compiled without FIRST or shared beginnings, so each rule that
+    ;; could not begin is tried and noted, as a refusal reads it.
     ;;
     ;; A byte set lives over index i = byte + 1 (0 is the end of the source): ascending
     ;; ranges (list lo hi) that neither touch nor overlap while it is computed, then 257 bytes
@@ -320,10 +323,11 @@
                     (do (record_set rf (head (head rs)) now) (gf-round (tail rs) rf 1))))))
     (defn gf-fix (rs rf) (if (eq (gf-round rs rf 0) 1) (gf-fix rs rf) rf))
 
-    ;; compiled ops: 1 ref, 2 cap, 3 lit, 4 keyword, 5 seq, 6 alt over byte groups, 7 run,
-    ;; 8 opt, 9 rep, 10 sep, 11 str, 12 char, 13 num, 14 infix, 15 chain, 16 ternary,
-    ;; 17 not, 18 leaf, 19 never, 20 alt over every alternative.
-    ;; ctx: (list firsts cells prune ref-texts)
+    ;; compiled ops: 1 ref through a cell, 2 cap, 3 lit, 4 keyword, 5 seq, 6 alt over byte
+    ;; groups, 7 run, 8 opt, 9 rep, 10 sep, 11 str, 12 char, 13 num, 14 infix, 15 chain,
+    ;; 16 ternary, 17 not, 18 leaf, 19 never, 20 alt over every alternative, 21 rules read
+    ;; through a shared beginning, 22 a rule read through inline, 23 ref holding its rule.
+    ;; ctx: see gx-compile
     (defn gc-pat (pat ctx)
         (do (let tag (head pat))
             (if (str_eq tag "ref") (gc-ref (nth pat 1) ctx)
@@ -594,7 +598,6 @@
     (defn gx-at? (s i lit j k)
         (if (ge j k) 1
             (if (eq (str_byte_at s (add i j)) (str_byte_at lit j)) (gx-at? s i lit (add j 1) k) 0)))
-    (defn gx-in? (set b) (eq (str_byte_at set (add b 1)) 49))
 
     ;; The ops read most are read here, in the one function every reading passes through, so
     ;; they run in its page from early on. A place past the space is found with one byte read
@@ -635,11 +638,6 @@
                                                     m))))
                                     (gx-rule s n x r c cs caps))))
                         0))
-            ;; 2: a capture
-            (if (eq op 2)
-                (do (let m (gx s n x (nth p 2) c caps))
-                    (if (eq m 0) 0 (cons (head m) (cons GX-UNIT (cons (cons (nth p 1) (cons (nth m 1) (empty))) (tail (tail m)))))))
-            (if (eq op 5) (gx-seq s n x (nth p 1) c caps)
             (if (eq op 6)
                 (do (let b (str_byte_at s c))
                     (let bc (if (gt b 32) (if (eq b 47) (str_byte_at s (gx-sw s n c)) b) (str_byte_at s (gx-sw s n c))))
@@ -675,23 +673,64 @@
                                         (cons e (cons GX-UNIT caps))))))
                         0))
             (if (eq op 20) (gx-alts s n x (nth p 1) c caps)
-            (if (eq op 8)
-                (do (let m (gx s n x (nth p 1) c caps))
-                    (if (eq m 0) (cons c (cons GX-UNIT caps)) m))
-            (if (eq op 9) (gx-rep s n x (nth p 1) c caps (empty))
-            (if (eq op 10) (gx-sep s n x p c caps)
-            (if (eq op 11) (gx-str s n c caps)
-            (if (eq op 13) (gx-num s n c caps)
             (if (eq op 14)
                 (do (let m (gx s n x (nth p 1) c caps))
                     (if (eq m 0) 0 (gx-infix-loop s n x p (nth m 1) (tail (tail m)) (head m) 0)))
             (if (eq op 15)
                 (do (let m (gx s n x (nth p 1) c caps))
                     (if (eq m 0) 0 (gx-chain-loop s n x p (nth m 1) (tail (tail m)) (head m))))
-            (if (eq op 16) (gx-ternary s n x p c caps)
-            (if (eq op 18) (gx-leaf s n x p c caps)
+            ;; 16: an operator expression that a `?` turns into `c ? yes : no`
+            (if (eq op 16)
+                (do (let m (gx s n x (nth p 1) c caps))
+                    (if (eq m 0) 0
+                        (do (let b0 (str_byte_at s (head m)))
+                            (let cc (if (gt b0 32) (if (eq b0 47) (gx-sw s n (head m)) (head m)) (gx-sw s n (head m))))
+                            (if (eq (str_byte_at s cc) 63) (gx-ternary-arms s n x p m cc caps)
+                                (if (eq (tail (tail m)) caps) m (cons (head m) (cons (nth m 1) caps)))))))
+            ;; 2: a capture
+            (if (eq op 2)
+                (do (let m (gx s n x (nth p 2) c caps))
+                    (if (eq m 0) 0 (cons (head m) (cons GX-UNIT (cons (cons (nth p 1) (cons (nth m 1) (empty))) (tail (tail m)))))))
+            (if (eq op 5) (gx-seq s n x (nth p 1) c caps)
+            (if (eq op 8)
+                (do (let m (gx s n x (nth p 1) c caps))
+                    (if (eq m 0) (cons c (cons GX-UNIT caps)) m))
+            (if (eq op 9) (gx-rep s n x (nth p 1) c caps (empty))
+            (if (eq op 10) (gx-sep s n x p c caps)
+            ;; 11: a quoted text, its value unescaped
+            (if (eq op 11)
+                (do (let b (str_byte_at s c))
+                    (let cc (if (gt b 32) (if (eq b 47) (gx-sw s n c) c) (gx-sw s n c)))
+                    (if (eq (str_byte_at s cc) 34)
+                        (do (let e (gx-qscan s n (add cc 1) GX-DQ))
+                            (if (eq (str_byte_at s e) 34)
+                                (cons (add e 1) (cons (intern_trivial_string (gx-unescape (substring s (add cc 1) e))) caps))
+                                0))
+                        0))
+            ;; 13: a number -- digits, a fraction, an exponent (e or E, a sign, digits)
+            (if (eq op 13)
+                (do (let b (str_byte_at s c))
+                    (let cc (if (gt b 32) (if (eq b 47) (gx-sw s n c) c) (gx-sw s n c)))
+                    (let d (str_byte_at s cc))
+                    (if (if (lt d 48) 0 (le d 57))
+                        (do (let e (gx-num-exp s (gx-num-frac s (gx-digits s (add cc 1)))))
+                            (cons e (cons (intern_trivial_string (substring s cc e)) caps)))
+                        0))
+            ;; 18: a leaf -- a string or a number standing before one of the follow bytes is the
+            ;; whole operand, so the chain of rules that would find that out is spared; any other
+            ;; follower leaves the reading to the alternatives after it
+            (if (eq op 18)
+                (do (let m (gx s n x (nth p 1) c caps))
+                    (if (eq m 0) 0
+                        (if (eq (str_byte_at (nth p 2) (add (str_byte_at s (gx-sw s n (head m))) 1)) 49) m 0)))
             (if (eq op 12) (gx-char s n c caps)
-            (if (eq op 21) (gx-fact s n x p c caps)
+            ;; 21: the shared beginning read once at the place past the space, then each rule's
+            ;; rest from where it ended, with the captures it made; the first rule whose rest
+            ;; holds builds its template, as its own reading would
+            (if (eq op 21)
+                (do (let cs (gx-sw s n c))
+                    (let pm (gx-seq s n x (nth p 1) cs (empty)))
+                    (if (eq pm 0) 0 (gx-fact-rest s n x (nth p 2) c cs pm caps)))
             (if (eq op 17) (if (eq (gx s n x (nth p 1) c caps) 0) (cons c (cons (intern_trivial_string "") caps)) 0)
                 0)))))))))))))))))))))))
 
@@ -727,13 +766,7 @@
                     (record_set slot (nth r 6) c)
                     (record_set slot (nth r 7) (if (eq m 0) 1 m))
                     m))))
-    ;; op 21: the shared beginning read once at the place past the space, then each rule's
-    ;; rest from where it ended, with the captures it made; the first rule whose rest holds
-    ;; builds its template, as its own reading would
-    (defn gx-fact (s n x p c caps)
-        (do (let cs (gx-sw s n c))
-            (let pm (gx-seq s n x (nth p 1) cs (empty)))
-            (if (eq pm 0) 0 (gx-fact-rest s n x (nth p 2) c cs pm caps))))
+    ;; op 21's rules, each read on from where the shared beginning ended
     (defn gx-fact-rest (s n x ms c cs pm caps)
         (if (eq ms (empty)) 0
             (do (let m (gx-seq s n x (head (head ms)) (head pm) (tail (tail pm))))
@@ -803,61 +836,45 @@
                 (do (let e (gx-scan s cls (add cc 1)))
                     (cons e (cons (intern_trivial_string (substring s cc e)) caps)))
                 0)))
-    (defn gx-scan (s cls i) (if (gx-in? cls (str_byte_at s i)) (gx-scan s cls (add i 1)) i))
-    ;; a quoted text: past escapes to its closing quote. Its value unescapes; text with no
-    ;; escape and no byte past ASCII is already its own value.
+    (defn gx-scan (s cls i) (if (eq (str_byte_at cls (add (str_byte_at s i) 1)) 49) (gx-scan s cls (add i 1)) i))
+    ;; A quoted text runs past escapes to its closing quote q (a one-byte text): a native find
+    ;; to the next quote and the next backslash, and a backslash before the quote skips the
+    ;; byte after it. The value unescapes; text with no escape and no byte past ASCII is
+    ;; already its own value.
+    (let GX-DQ (byte_to_str 34))
+    (let GX-SQ (byte_to_str 39))
+    (let GX-BS (byte_to_str 92))
     (defn gx-qscan (s n i q)
-        (if (ge i n) i
-            (do (let b (str_byte_at s i))
-                (if (eq b q) i (if (eq b 92) (gx-qscan s n (add i 2) q) (gx-qscan s n (add i 1) q))))))
-    (defn gx-str (s n c caps)
-        (do (let cc (gx-sw s n c))
-            (if (eq (str_byte_at s cc) 34)
-                (do (let e (gx-qscan s n (add cc 1) 34))
-                    (if (eq (str_byte_at s e) 34)
-                        (cons (add e 1) (cons (intern_trivial_string (gx-unescape (substring s (add cc 1) e))) caps))
-                        0))
-                0)))
-    (defn gx-unescape (t) (if (and (lt (str_find t "\\" 0) 0) (gx-ascii? t 0 (str_len t))) t (bmf-unescape-str t)))
+        (do (let e (str_find s q i))
+            (let k (str_find s GX-BS i))
+            (if (if (lt k 0) 1 (if (lt e 0) 0 (lt e k)))
+                (if (lt e 0) (if (ge i n) i n) e)
+                (if (ge (add k 2) n) (add k 2) (gx-qscan s n (add k 2) q)))))
+    (defn gx-unescape (t) (if (and (lt (str_find t GX-BS 0) 0) (gx-ascii? t 0 (str_len t))) t (bmf-unescape-str t)))
     (defn gx-ascii? (t i k) (if (ge i k) 1 (if (lt (str_byte_at t i) 128) (gx-ascii? t (add i 1) k) 0)))
     (defn gx-char (s n c caps)
         (do (let cc (gx-sw s n c))
             (if (eq (str_byte_at s cc) 39)
-                (do (let e (gx-qscan s n (add cc 1) 39))
+                (do (let e (gx-qscan s n (add cc 1) GX-SQ))
                     (if (eq (str_byte_at s e) 39)
                         (gx-ok (add e 1) (intern_trivial_string (substring s (add cc 1) e)) caps)
                         0))
                 0)))
-    ;; a number: digits, a fraction, an exponent (e or E, a sign, digits) -- 1e-12, 2.5E+3
-    (defn gx-digit? (b) (if (lt b 48) 0 (if (gt b 57) 0 1)))
-    (defn gx-digits (s i) (if (gx-digit? (str_byte_at s i)) (gx-digits s (add i 1)) i))
-    (defn gx-num (s n c caps)
-        (do (let cc (gx-sw s n c))
-            (if (gx-digit? (str_byte_at s cc))
-                (do (let e (gx-num-exp s (gx-num-frac s (gx-digits s (add cc 1)))))
-                    (cons e (cons (intern_trivial_string (substring s cc e)) caps)))
-                0)))
+    ;; a number's digits, its fraction and its exponent (e or E, a sign, digits) -- 1e-12, 2.5E+3
+    (defn gx-digits (s i) (do (let d (str_byte_at s i)) (if (if (lt d 48) 0 (le d 57)) (gx-digits s (add i 1)) i)))
     (defn gx-num-frac (s i)
         (if (eq (str_byte_at s i) 46)
-            (if (gx-digit? (str_byte_at s (add i 1))) (gx-digits s (add i 2)) i)
+            (do (let d (str_byte_at s (add i 1)))
+                (if (if (lt d 48) 0 (le d 57)) (gx-digits s (add i 2)) i))
             i))
     (defn gx-num-exp (s i)
         (do (let b (str_byte_at s i))
-            (if (eq b 101) (gx-num-exp-at s i)
-                (if (eq b 69) (gx-num-exp-at s i) i))))
-    (defn gx-num-exp-at (s i)
-        (do (let b2 (str_byte_at s (add i 1)))
-            (let d (if (eq b2 45) (add i 2) (if (eq b2 43) (add i 2) (add i 1))))
-            (if (gx-digit? (str_byte_at s d)) (gx-digits s (add d 1)) i)))
-
-    ;; A leaf: a pattern whose reading is the whole operand when one of the follow bytes
-    ;; comes next -- a string or a number standing before , ] ) has no operator, call or
-    ;; ternary after it, so the chain of rules that would find that out is spared. Any
-    ;; other follower leaves the reading to the alternatives after it.
-    (defn gx-leaf (s n x p c caps)
-        (do (let m (gx s n x (nth p 1) c caps))
-            (if (eq m 0) 0
-                (if (gx-in? (nth p 2) (str_byte_at s (gx-sw s n (head m)))) m 0))))
+            (if (if (eq b 101) 1 (eq b 69))
+                (do (let b2 (str_byte_at s (add i 1)))
+                    (let at (if (if (eq b2 45) 1 (eq b2 43)) (add i 2) (add i 1)))
+                    (let d (str_byte_at s at))
+                    (if (if (lt d 48) 0 (le d 57)) (gx-digits s (add at 1)) i))
+                i)))
 
     ;; Operators climb by precedence; a call row gives a library operation the same
     ;; machinery, and a row marked right associates to the right.
@@ -868,24 +885,33 @@
         (do (let b0 (str_byte_at s c))
             (let cc (if (gt b0 32) (if (eq b0 47) (gx-sw s n c) c) (gx-sw s n c)))
             (let es (nth (nth p 3) (sub (str_byte_at (nth p 2) (add (str_byte_at s cc) 1)) 48)))
-            (let opm (if (eq es (empty)) 0 (gx-peek-op-in s cc es)))
+            (let opm (if (eq es (empty)) 0
+                (if (gx-at? s cc (head (head es)) 0 (nth (head es) 1))
+                    (cons (head es) (cons (add cc (nth (head es) 1)) (empty)))
+                    (gx-peek-op-in s cc (tail es)))))
             (if (eq opm 0) (cons c (cons lhs caps))
                 (do (let e (head opm))
                     (let prec (nth e 3))
                     (if (gt minp prec) (cons c (cons lhs caps))
                         (do (let rhs (gx-climb s n x p (nth opm 1) caps (if (eq (nth e 5) 1) prec (add prec 1))))
                             (if (eq rhs 0) (cons c (cons lhs caps))
-                                (gx-infix-loop s n x p (gx-infix-node e lhs (nth rhs 1)) (tail (tail rhs)) (head rhs) minp))))))))
+                                ;; the operator's node: a call row builds fncall[ident name, lhs, rhs]
+                                (do (let h (nth e 6))
+                                    (let node (if (eq (nth e 4) 1)
+                                        (do (let fc (record_get h "fncall"))
+                                            (let fcat (if (eq fc 0) (gx-hold h "fncall") fc))
+                                            (let ic (record_get h "ident"))
+                                            (intern_node fcat (list
+                                                (intern_node (if (eq ic 0) (gx-hold h "ident") ic) (list (intern_trivial_string (nth e 2))))
+                                                lhs (nth rhs 1))))
+                                        (do (let oc (record_get h (nth e 2)))
+                                            (intern_node (if (eq oc 0) (gx-hold h (nth e 2)) oc) (list lhs (nth rhs 1))))))
+                                    (gx-infix-loop s n x p node (tail (tail rhs)) (head rhs) minp)))))))))
     (defn gx-peek-op-in (s cc es)
         (if (eq es (empty)) 0
             (if (gx-at? s cc (head (head es)) 0 (nth (head es) 1))
                 (cons (head es) (cons (add cc (nth (head es) 1)) (empty)))
                 (gx-peek-op-in s cc (tail es)))))
-    (defn gx-infix-node (e lhs rhs)
-        (if (eq (nth e 4) 1)
-            (intern_node (gx-held (nth e 6) "fncall") (list
-                (intern_node (gx-held (nth e 6) "ident") (list (intern_trivial_string (nth e 2)))) lhs rhs))
-            (intern_node (gx-held (nth e 6) (nth e 2)) (list lhs rhs))))
     ;; a category an op holds once its first node asked bmf-bp for it
     (defn gx-held (holder name)
         (do (let held (record_get holder name)) (if (eq held 0) (gx-hold holder name) held)))
@@ -914,7 +940,8 @@
                 (do (let call (if (eq b 40) (gx-args s n x (nth cp 2) (add cc 1) caps)
                                   (if (eq b 60) (gx-call-generic s n x (nth cp 2) cc caps) 0)))
                     (if (eq call 0) (cons c (cons acc caps))
-                        (gx-chain-loop s n x cp (intern_node (gx-held (nth cp 4) "fncall") (cons acc (head call))) caps (nth call 1))))))))))
+                        (do (let fc (record_get (nth cp 4) "fncall"))
+                            (gx-chain-loop s n x cp (intern_node (if (eq fc 0) (gx-hold (nth cp 4) "fncall") fc) (cons acc (head call))) caps (nth call 1)))))))))))
     (defn gx-chain-member (s n x cp acc caps c cc)
         (do (let idm (gx-run s n (gx-member-name) (add cc 1) caps))
             (if (eq idm 0) (gx-ok c acc caps)
@@ -986,13 +1013,7 @@
                         (if (eq b 41) (cons (reverse more) (cons (add cc 1) (empty)))
                             (cons (reverse more) (cons (head m) (empty)))))))))
 
-    (defn gx-ternary (s n x p c caps)
-        (do (let m (gx s n x (nth p 1) c caps))
-            (if (eq m 0) 0
-                (do (let b0 (str_byte_at s (head m)))
-                    (let cc (if (gt b0 32) (if (eq b0 47) (gx-sw s n (head m)) (head m)) (gx-sw s n (head m))))
-                    (if (eq (str_byte_at s cc) 63) (gx-ternary-arms s n x p m cc caps)
-                        (if (eq (tail (tail m)) caps) m (cons (head m) (cons (nth m 1) caps))))))))
+    ;; op 16 past the `?`: the arm read when it holds and the one read after the `:`
     (defn gx-ternary-arms (s n x p m cc caps)
         (do (let tm (gx s n x (nth p 2) (add cc 1) caps))
             (if (eq tm 0) 0
