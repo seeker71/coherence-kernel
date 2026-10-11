@@ -272,12 +272,15 @@ source. SHA-256 is computed only for units supplying requested definitions;
 retained-index reads are reported separately from source reads.
 Resident documents are analyzed as supplied; repository census refreshes separately
 verify the disk content they record.
-Read-only tools resolve a missing resident source from declared imports and floor
-libraries within the same call. The executing boundary signals the missing evidence,
-applies import resolution, reruns the original operation and publishes its actual
-availability through organ-health frames. Returned documents and write authority
-remain unchanged. Source reads are counted; an unavailable source remains an explicit
-resource need. Import discovery needs no model retry or outside source handoff.
+Read-only tools acquire source evidence directly from the shared native import
+resolver, then consume it once. Requested files take priority in the discovered
+graph; traversal ends when they are available. Retained edges guide traversal;
+current source and imports establish admission. Definition analysis belongs to
+API lookup, which uses that same resolver with the complete closure. Form sources include their implicit floor libraries;
+plain data has no such implicit imports. Organ-health frames carry the need,
+acquisition duration and observed availability. Returned documents retain their
+owner's write scope. Source reads are counted; absent evidence remains a resource
+need. Import discovery needs no rejected tool call, model retry or outside handoff.
 
 Word checks are exactly `{kind:"word-range",path,minimum,maximum}` for a document, or `field` instead of `path` for a top-level report string. Inclusive nonnegative bounds use the shared ASCII-whitespace counter, including headings. Missing text differs from empty text. Failure supplies observed count and repair direction; count agreement does not establish content quality. Report checks take the report on stdin, have no document access and accept no `input` override. The additional `{kind:"provider-usage-sequences"}` report assertion takes no other field; `form/form-stdlib/bml/form-cli-code-request.bml` (`fcaq-replay-check`) owns its meaning.
 
