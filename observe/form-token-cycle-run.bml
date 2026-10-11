@@ -21,25 +21,27 @@ import form-stdlib/bml/stdin-source.bml;
 import form-stdlib/line-grammar.fk;
 section [form.bml] {
  class FormTokenCycleRun {
+  // stdin is read ONCE, in ftcy-run, and the words travel as `ws`: fd 0 drains at the first read, so a door that asks stdin-text() again
+  // is told "" (the 2026-10-11 cycle read "shared" for the dry check, then slept 34 minutes in the wait, told nothing was shared).
   def ftcy-words() = filter(w => len(w) > 0, split-on(trim(stdin-text() ?? ""), " "));
-  def ftcy-word-after(prefix, default) = foldl((found, w) => str_find(w, prefix, 0) == 0 ? substring(w, len(prefix), len(w)) : found, default, ftcy-words());
-  def ftcy-dry?() = any?(w => (String) w == "dry", ftcy-words());
+  def ftcy-word-after(ws, prefix, default) = foldl((found, w) => str_find(w, prefix, 0) == 0 ? substring(w, len(prefix), len(w)) : found, default, ws);
+  def ftcy-dry?(ws) = any?(w => (String) w == "dry", ws);
   // "shared": accept the neighbours the GPU gate names (a long task of another door can hold the GPU for hours): no wait for a
   // quiet GPU, and the trainer and the evaluation are told shared:1. The measurements of such a run are read as shared.
-  def ftcy-shared?() = any?(w => (String) w == "shared", ftcy-words());
-  def ftcy-shared-field() = ftcy-shared?() ? ",\"shared\":1" : "";
-  def ftcy-steps() = str_to_int(ftcy-word-after("steps=", "100"));
-  def ftcy-adapter() = ftcy-word-after("adapter=", "form/form-stdlib/adapters/llama-3.2-3b-form-tokens-next");
+  def ftcy-shared?(ws) = any?(w => (String) w == "shared", ws);
+  def ftcy-shared-field(ws) = ftcy-shared?(ws) ? ",\"shared\":1" : "";
+  def ftcy-steps(ws) = str_to_int(ftcy-word-after(ws, "steps=", "100"));
+  def ftcy-adapter(ws) = ftcy-word-after(ws, "adapter=", "form/form-stdlib/adapters/llama-3.2-3b-form-tokens-next");
   def ftcy-dir() = ".hearth/form-token-cycle";
   def ftcy-ledger() = ftcy-dir() ++ "/ledger.jsonl";
   def ftcy-say(t) = print_str("[form-token-cycle] " ++ t);
   def ftcy-wait-ms() = 10800000;
   def ftcy-quiet?() = len(fte-held()) == 0;
   // up to ftcy-wait-ms for the GPU to be quiet; the milliseconds waited, or nothing when it never was
-  def ftcy-wait(waited) = (ftcy-shared?() || ftcy-quiet?()) ? waited : waited >= ftcy-wait-ms() ? nothing() : ftcy-nap(waited);
-  def ftcy-nap(waited) {
+  def ftcy-wait(ws, waited) = (ftcy-shared?(ws) || ftcy-quiet?()) ? waited : waited >= ftcy-wait-ms() ? nothing() : ftcy-nap(ws, waited);
+  def ftcy-nap(ws, waited) {
    let slept = host_sleep_ms(120000);
-   ftcy-wait(waited + 120000);
+   ftcy-wait(ws, waited + 120000);
   }
   def ftcy-mark(name, wall, stopped) {
    let made = host_dir_mkdir(ftcy-dir());
@@ -58,17 +60,18 @@ section [form.bml] {
    nothing?(stopped) ? out : nothing();
   }
   def ftcy-census-whole?(out) = !nothing?(out) && str_find(out, "refused 0,", 0) >= 0;
-  def ftcy-run() {
-   let a = ftcy-stage("refresh knowledge-receipts", "form/form-stdlib/bml/form-token-traces.bml", "refresh knowledge-receipts", 1800000);
+  def ftcy-run() = ftcy-walk(ftcy-words());
+  def ftcy-walk(ws) {
+   let a =ftcy-stage("refresh knowledge-receipts", "form/form-stdlib/bml/form-token-traces.bml", "refresh knowledge-receipts", 1800000);
    let b = ftcy-stage("refresh knowledge-enrich", "form/form-stdlib/bml/form-token-traces.bml", "refresh knowledge-enrich", 1800000);
    let c = ftcy-stage("trainer census", "observe/form-token-lora-run.bml", "{\"lane\":\"census\"}", 1800000);
    if !ftcy-census-whole?(c) then ftcy-say("the trainer's census refused rows or did not run: the cycle stops here, the corpus and the contract disagree")
-   else if ftcy-dry?() then ftcy-dry-lines()
-   else ftcy-gpu();
+   else if ftcy-dry?(ws) then ftcy-dry-lines(ws)
+   else ftcy-gpu(ws);
    0;
   }
-  def ftcy-dry-lines() {
-   ftcy-say("dry: would wait for a quiet GPU, train " ++ ftcy-steps().str() ++ " rounds into " ++ ftcy-adapter() ++ ", re-ask every held-out question wearing it, and read the Form tokens in use");
+  def ftcy-dry-lines(ws) {
+   ftcy-say("dry: would wait for a quiet GPU, train " ++ ftcy-steps(ws).str() ++ " rounds into " ++ ftcy-adapter(ws) ++ ", re-ask every held-out question wearing it, and read the Form tokens in use");
    ftcy-say("dry: the GPU gate now reads: " ++ (ftcy-quiet?() ? "quiet" : fte-held-text(fte-held())));
    ftcy-stage("evaluation dry", "observe/form-token-eval-run.bml", "{\"dry\":1,\"questions\":96}", 600000);
   }
@@ -83,18 +86,18 @@ section [form.bml] {
    ftcy-say("carrier: " ++ a[0] ++ " in " ++ ((host_monotonic_ms() - t0) / 1000).str() ++ " s");
    (String) a[0] == "standing" || (String) a[0] == "admitted";
   }
-  def ftcy-gpu() {
+  def ftcy-gpu(ws) {
    if !ftcy-carrier() then ftcy-say("the Metal carrier is not admitted (see .hearth/carrier.err): nothing was trained")
-   else ftcy-gpu-run();
+   else ftcy-gpu-run(ws);
   }
-  def ftcy-gpu-run() {
-   let waited = ftcy-wait(0);
+  def ftcy-gpu-run(ws) {
+   let waited = ftcy-wait(ws, 0);
    if nothing?(waited) then ftcy-say("the GPU was not quiet for three hours: nothing was trained")
    else {
-    let t = ftcy-stage("train", "observe/form-token-lora-run.bml", "{\"lane\":\"llama\",\"steps\":" ++ ftcy-steps().str() ++ ",\"batch\":4,\"learning_rate\":0.0001,\"save_every\":25,\"export\":\"" ++ ftcy-adapter() ++ "\"" ++ ftcy-shared-field() ++ "}", 14400000);
+    let t = ftcy-stage("train", "observe/form-token-lora-run.bml", "{\"lane\":\"llama\",\"steps\":" ++ ftcy-steps(ws).str() ++ ",\"batch\":4,\"learning_rate\":0.0001,\"save_every\":25,\"export\":\"" ++ ftcy-adapter(ws) ++ "\"" ++ ftcy-shared-field(ws) ++ "}", 14400000);
     if nothing?(t) then ftcy-say("the trainer stopped: no evaluation was asked")
     else {
-     let e = ftcy-stage("evaluation", "observe/form-token-eval-run.bml", "{\"questions\":96,\"arms\":\"lora\",\"adapter\":\"" ++ ftcy-adapter() ++ "\",\"crossings\":3" ++ ftcy-shared-field() ++ "}", 5400000);
+     let e = ftcy-stage("evaluation", "observe/form-token-eval-run.bml", "{\"questions\":96,\"arms\":\"lora\",\"adapter\":\"" ++ ftcy-adapter(ws) ++ "\",\"crossings\":3" ++ ftcy-shared-field(ws) ++ "}", 5400000);
      if nothing?(e) then ftcy-say("the evaluation stopped: no meter was read")
      else ftcy-stage("usage", "observe/form-token-usage-run.bml", "-1 lora", 600000);
     };
