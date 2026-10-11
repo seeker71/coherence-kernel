@@ -753,8 +753,29 @@
                     (if (and (not (str_eq name "")) (fsc-bml-comparison-type? kind)) (list name kind)
                         (fsc-compiler-error-line "unknown form.bml comparison contract" text))))))
     (defn fsc-bml-type-find (rows name)
-        (if (nil? rows) (empty)
-            (if (str_eq (head (head rows)) name) (head rows) (fsc-bml-type-find (tail rows) name))))
+        (if (str_eq (value_kind rows) "record")
+            (if (record_has rows name) (record_get rows name)
+                (if (record_has rows "") (fsc-bml-type-find (record_get rows "") name) (empty)))
+            (if (nil? rows) (empty)
+                (if (str_eq (head (head rows)) name) (head rows) (fsc-bml-type-find (tail rows) name)))))
+    ;; Index a signature set once per pass. The first row still wins; lexical
+    ;; environments remain ordered rows for capture and shadowing.
+    (defn fsc-bml-type-index-into (rows index)
+        (if (nil? rows) index
+            (do (let row (head rows))
+                (if (record_has index (head row)) 0 (record_set index (head row) row))
+                (fsc-bml-type-index-into (tail rows) index))))
+    (defn fsc-bml-type-index (rows)
+        (if (str_eq (value_kind rows) "record") rows
+            (fsc-bml-type-index-into rows (record_new 0))))
+    ;; A block owns only its declarations. The empty key (never an identifier)
+    ;; names the enclosing table; sibling blocks never mutate that table.
+    (defn fsc-bml-signature-scope (recipes parent)
+        (do (let rows (fsc-bml-type-signatures recipes (empty)))
+            (if (nil? rows) parent
+                (do (let index (fsc-bml-type-index rows))
+                    (record_set index "" parent)
+                    index))))
     (defn fsc-bml-type-of (rows name)
         (do (let row (fsc-bml-type-find rows name)) (if (nil? row) "" (nth row 1))))
     (defn fsc-bml-type-name (recipe)
@@ -785,7 +806,7 @@
                 (fsc-bml-defs-of (tail recipes)))))
     (defn fsc-bml-infer-rounds (defs prefix sigs k)
         (if (le k 0) sigs
-            (fsc-bml-infer-rounds defs prefix (fsc-bml-infer-round defs sigs prefix) (sub k 1))))
+            (fsc-bml-infer-rounds defs prefix (fsc-bml-infer-round defs (fsc-bml-type-index sigs) prefix) (sub k 1))))
     (defn fsc-bml-inferred-signatures (recipes prefix)
         (do (let defs (fsc-bml-defs-of (node_children (fsc-bml-expand (fsc-rec-do recipes)))))
             (fsc-bml-infer-rounds defs prefix (fsc-bml-type-signatures recipes prefix) 3)))
@@ -874,8 +895,7 @@
             (str_concat "[" (str_concat (int_to_str (len value))
                 (str_concat ":" (str_concat (fsc-bml-cache-wires value) "]"))))))))
     (defn fsc-bml-cache-wires (values)
-        (if (nil? values) ""
-            (str_concat (fsc-bml-cache-wire (head values)) (fsc-bml-cache-wires (tail values)))))
+        (str-spans (map fsc-bml-cache-wire values)))
     (defn fsc-bml-cache-homes-key (homes)
         (if (and (record_has FSC-BML-DISK-CONTEXT "homes")
                  (value_eq homes (record_get FSC-BML-DISK-CONTEXT "homes")))
@@ -1092,7 +1112,7 @@
     (defn fsc-bml-typed-nodes (rows)
         (if (nil? rows) (empty) (cons (head (head rows)) (fsc-bml-typed-nodes (tail rows)))))
     (defn fsc-bml-typed-sequence (recipes env signatures out result-type)
-        (fsc-bml-typed-sequence-in (node_children (fsc-bml-expand (fsc-rec-do recipes))) env signatures out result-type 0))
+        (fsc-bml-typed-sequence-in (node_children (fsc-bml-expand (fsc-rec-do recipes))) env (fsc-bml-type-index signatures) out result-type 0))
     (defn fsc-bml-typed-sequence-in (recipes env signatures out result-type local)
         (if (nil? recipes) (list (fsc-rec-do (fsc-rev out)) result-type)
             (do
@@ -1189,7 +1209,7 @@
             (if (and (not (value_eq row 0)) (fsc-bml-unbound? name env signatures))
                 (fsc-bml-call-arity (fsc-rec-call (nth row 1) args))
                 (fsc-rec-call name args))))
-    (defn fsc-bml-typed (recipe env signatures) (fsc-bml-typed-in (fsc-bml-expand recipe) env signatures 0))
+    (defn fsc-bml-typed (recipe env signatures) (fsc-bml-typed-in (fsc-bml-expand recipe) env (fsc-bml-type-index signatures) 0))
     (defn fsc-bml-typed-in (recipe env signatures local)
         (do
             (let kids (node_children recipe))
@@ -1203,7 +1223,7 @@
                               (fsc-bml-resolved-call name (empty) env signatures) recipe)
                           (fsc-bml-type-of env name)))
             (if (node_eq cat fsc-rec-DO-CAT)
-                (fsc-bml-typed-sequence-in kids env (fsc-bml-type-signatures kids signatures) (empty) "" local)
+                (fsc-bml-typed-sequence-in kids env (fsc-bml-signature-scope kids signatures) (empty) "" local)
             (if (node_eq cat fsc-rec-FNDEF-CAT)
                 (do
                     (let binding (fsc-bml-binding (node_value (head kids))))
@@ -1472,12 +1492,10 @@
     ;; A compiled section is rooted at DO.  Emitting that root as one `(do ...)`
     ;; would turn module bindings into lexical bindings, so the native text path
     ;; emits the root children as top-level forms.
+    (defn fsc-source-emit-module-line (recipe)
+        (str_concat (fsc-source-emit-recipe recipe) "\n"))
     (defn fsc-source-emit-module-loop (recipes)
-        (if (fsc-empty? recipes) ""
-            (str_concat
-                (fsc-source-emit-recipe (head recipes))
-                (str_concat "\n"
-                    (fsc-source-emit-module-loop (tail recipes))))))
+        (str-spans (map fsc-source-emit-module-line recipes)))
 
     (defn fsc-source-emit-module (recipe)
         (if (node_eq (node_category recipe) fsc-rec-DO-CAT)
@@ -2111,10 +2129,15 @@
                     (let body (fsc-sub src (add open 1) close))
                     (let contract (fsc-bml-contract-dialect? dialect-name))
                     (let recipes (if contract (fbl-section-recipes body (fbr-line-at src (add open 1))) (empty)))
+                    (let started (host_monotonic_ms))
                     (let emitted (if contract
                         (fsc-source-emit-module (if (nothing? signatures) (fsc-bml-erased (fsc-bml-expand (fsc-rec-do recipes)))
                             (head (fsc-bml-typed-sequence recipes (empty) signatures (empty) ""))))
                         (fsc-compile-section dialect-name body out-path)))
+                    (fb_record (intern_node (intern_trivial_string "bml-lowering-ms")
+                        (list (intern_trivial_string out-path) (intern_trivial_string dialect-name)
+                              (intern_trivial_int (str_len emitted))
+                              (intern_trivial_int (sub (host_monotonic_ms) started)))) out-path 0)
                     (let rest (fsc-bml-walk src out-path (fsc-section-after src close) signatures
                         (if (and contract (nothing? signatures)) (fsc-bml-inferred-signatures recipes prefix) prefix)))
                     (list (str_concat (fsc-strip-bml-comments (fsc-sub src i pos))
