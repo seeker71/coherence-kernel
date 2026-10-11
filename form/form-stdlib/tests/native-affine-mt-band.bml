@@ -13,7 +13,7 @@
 ; which is all of the 3B model's projections; nam_affine_mt serves the rest. nam_matmul_sk is the product with a small inner dimension (a
 ; LoRA's rank) as one thread an output, where nam_matmul gave each output a simdgroup of which k lanes worked.
 ;
-; Verdict 127 when every claim lands:
+; Verdict 255 when every claim lands:
 ;   1     f32 scales, 48 rows by 512 columns, group 64: the new product matches the reference to 1e-4 of the largest output for 1, 3, 8, 9, 17 and 100 tokens
 ;   2     f16 scales and biases, 40 rows by 192 columns, group 32 (fewer columns than one pass of 32 lanes): the same for 1, 5, 8 and 13 tokens
 ;   4     the real 3B shape (8192 rows by 3072 columns, group 64) at 128 tokens, eight products to one sync: the best of three runs of the new product is no slower
@@ -24,6 +24,8 @@
 ;   32    one token, the decode kernels: eight columns a lane (24 rows by 200 columns, group 8, which no 16-column lane can take), sixteen (24 by 208, group 16),
 ;         and f16 scales (16 by 96, group 32), each against the reference
 ;   64    the real 3B shape at one token, eight products to one sync: the best of three runs of the decode kernel is no slower than the reference's (the size printed)
+;   128   a token alone equals the same token inside a block of 8 bit for bit, through every kernel the one-token product takes (the trainer's head check: the
+;         final output row against an independent one-token projection must differ by exactly nothing)
 ;   16    nam-mm equals nam_matmul on both routes: one thread an output (k up to 128: 8, 16, 128) and the simdgroup an output above (200, 700, 1536);
 ;         every transposition and both accumulate modes
 section [form.bml] {
@@ -60,6 +62,20 @@ section [form.bml] {
    let a = nam-read(yr, tokens * rows); let c = nam-read(ym, tokens * rows);
    let freed = nam-free([x, yr, ym]);
    namb-max-diff(a, c) <= 0.0001 * (namb-max-abs(a) + 1.0);
+  }
+  // a token alone against the same token inside a block of 8: bit for bit (the trainer's head check asks for exactly this)
+  def namb-alone-same?(view) {
+   let rows = view[3]; let cols = view[4];
+   let x1 = namb-x(1, cols); let x8 = namb-x(8, cols);
+   let y1 = nam-alloc(rows); let y8 = nam-alloc(8 * rows);
+   let a = nam-linear-mt(view, x1, y1, 1);
+   let b = nam-linear-mt(view, x8, y8, 8);
+   let done = nam-sync();
+   let p = nam-read(y1, rows); let q = nam-read(y8, 8 * rows);
+   let freed = nam-free([x1, x8, y1, y8]);
+   let diff = namb-max-diff(p, take(rows, q));
+   let said = diff == 0.0 ? 0 : print(["native-affine-mt", "a token alone differs from the same token in a block", rows, cols, view[5], "by", diff]);
+   diff == 0.0;
   }
   def namb-all(view, tokensList) = all?(t => namb-compare(view, t), tokensList);
   // eight dispatches to one sync, as a forward issues them: one short dispatch measures the GPU's clock ramp as much as the kernel
@@ -108,7 +124,8 @@ section [form.bml] {
      + namb-bit(namb-all(namb-view-f32(45, 256, 32), [1, 9, 17]), 8)
      + namb-bit(namb-mm-all(), 16)
      + namb-bit(namb-all(namb-view-f32(24, 200, 8), [1]) && namb-all(namb-view-f32(24, 208, 16), [1]) && namb-all(namb-view-f16(16, 96, 32), [1]), 32)
-     + namb-bit(dnew <= dref, 64);
+     + namb-bit(dnew <= dref, 64)
+     + namb-bit(namb-alone-same?(namb-view-f32(48, 512, 64)) && namb-alone-same?(namb-view-f32(48, 1024, 64)) && namb-alone-same?(namb-view-f16(40, 192, 32)) && namb-alone-same?(namb-view-f32(45, 256, 32)) && namb-alone-same?(namb-view-f32(24, 200, 8)) && namb-alone-same?(namb-view-f32(16, 768, 64)), 128);
   }
  }
  namb-score();
