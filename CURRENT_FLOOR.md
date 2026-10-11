@@ -1089,8 +1089,12 @@ Lowering form-cli-local-plan.bml warm takes 4 s, and a third of it is the type i
 strings: the pair copy is 0.2%. A melt visits the held once-holds from their list and frees around the AST's literals
 (`fk_sdead` 2), so its cost follows the live heap and the strings, never the program's AST.
 
-The drift gates took 22 minutes on 2026-10-11, and two gates were 98% of it: form-cli-build (1,000 s) and
-bml-cursor-coverage (341 s). The form-cli build compiles about two hundred units in one process from a sealed body; the
+The drift gates took 22 minutes on the morning of 2026-10-11, and two gates were 98% of it: form-cli-build (1,000 s)
+and bml-cursor-coverage (341 s); by the afternoon they took 7 to 9 minutes (form-cli-build 276-316 s, coverage 155-192
+s, under other sessions' load). bml-cursor-coverage keeps each section's reading under its bytes' fingerprint, named by
+the pin of its own closure (the grammar, the lowering, the typed pass, the refusal reader), so a gate after a change
+reads only the bodies that changed: a second run over form/form-stdlib/bml kept 324 of 324 readings in 3 s, where
+reading them took 79 s. The form-cli build compiles about two hundred units in one process from a sealed body; the
 seal carries `form-stdlib/bml/jit-page.bml`, the seed's own Form unit. That compile lowers its BML inside its loads, where
 an offer once waited for a quiet load that never came: the first floor call now loads the JIT unit (where the floor's
 own first load runs), and a resident JIT is offered inside a load. A cold `--check` of form-cli-repl.fk in a sealed body
