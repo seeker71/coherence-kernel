@@ -34,7 +34,6 @@ section [form.bml] {
         field FatByteBraceOpen = 123;
         field FatByteBraceClose = 125;
         field FatHeadTailLines = 10;
-        field FatAwkLastField = 9;
         def fat-fk-suffix() = ".fk";
         def fat-tools() = append(tc-agent-tool-names(), ["balance", "arity", "bml-syntax", "bml-api"]);
         def fat-tool?(name) = fat-has(fat-tools(), name);
@@ -42,10 +41,14 @@ section [form.bml] {
         def fat-input(docs, paths, input, consume) = nil?(paths) ? consume([input, ""]) : fat-source(docs,paths,sources=>consume(fat-input-files(sources,paths,"")));
         def fat-input-files(docs, paths, out) = if nil?(paths) then [out, ""] else fat-input-doc(docs, paths, out, fat-find-doc(docs, paths[0]));
         def fat-input-doc(docs, paths, out, doc) = if nil?(doc) then ["", "resident-document-not-found"] else fat-input-files(docs, paths[1:], ((String) out + doc[2]));
-        def fat-call(docs, tool, args, input) =
-            if (!(fat-text?(input) && fat-text?(tool) && all?(fat-text?,args) && fat-docs-valid(docs, []))) then fat-fail("invalid-resident-values", docs)
+        def fat-call(docs, tool, args, input) {
+            let started=host_monotonic_ms();
+            let result=if (!(fat-text?(input) && fat-text?(tool) && value_kind(args)=="list" && all?(fat-text?,args) && fat-docs-valid(docs, []))) then fat-fail("invalid-resident-values", docs)
             else if (!fat-tool?(tool)) then fat-fail("unsupported-tool", docs)
             else fat-checked(fat-dispatch(docs, tool, args, input),docs);
+            fb_record(json-node-object([oh-s("kind","native-tool"),oh-s("tool",fat-text?(tool) ? tool : value_kind(tool)),oh-n("elapsed_ms",host_monotonic_ms() - started),oh-n("exit",fat-exit(result)),oh-n("crossings",fat-crossings(result))]),"form-agent-tools.bml",0);
+            result;
+        }
         // Read operations consume their evidence once. Imported sources belong
         // to the reading, while writable documents remain with their owner.
         def fat-source(docs,paths,consume) = nil?(paths) || all?(path=>far-path-present(docs,path),paths) ? consume(docs) : {
@@ -92,15 +95,19 @@ section [form.bml] {
         def fat-command-argv(docs, input, parsed) = if (!((String) parsed[1] == "")) then fat-fail(parsed[1], docs) else if nil?(parsed[0]) then fat-fail("missing-tool", docs) else fat-call(docs, parsed[0][0], parsed[0][1:], input);
         // One-based offset/count paging. Whole reads and multi-path concatenation
         // retain their byte contract; only a numeric offset selects paging.
-        def fat-read-range?(args) = len(args)>=3 && fat-natural(args[1]);
-        def fat-read(docs, args, input) = !fat-read-range?(args) ? fat-input(docs,args,input,r=>fat-read-result(docs,r)) : fat-source(docs,[args[0]],sources=>fat-read-page(docs,args,fat-find-doc(sources,args[0])));
-        def fat-read-page(docs,args,doc) = nil?(doc) ? fat-fail("resident-document-not-found",docs) : !(len(args)>=3 && len(args)<=5 && (str_to_int(args[1])>0 && fat-natural(args[2]))) ? fat-fail("read-needs-path-positive-offset-nonnegative-limit-optional-unit-and-sha256",docs) : len(args)>=4 && !fat-has(["lines","bytes"],args[3]) ? fat-fail("read-unit-is-lines-or-bytes",docs) : len(args)==5 && args[4]!=fat-document-sha(doc) ? fat-fail("read-source-changed; current resident_sha256=" + fat-document-sha(doc),docs) : {
+        def fat-read-range?(args) = len(args)>=3 && fat-natural-shape?(args[1]);
+        def fat-read(docs,args,input) = !fat-read-range?(args) ? fat-input(docs,args,input,r=>fat-read-result(docs,r))
+            : len(args)>5 || !fat-natural(args[1]) || str_to_int(args[1])<=0 || !fat-natural(args[2]) ? fat-fail("read-needs-path-positive-offset-nonnegative-limit-optional-unit-and-sha256",docs)
+            : len(args)>=4 && !fat-has(["lines","bytes"],args[3]) ? fat-fail("read-unit-is-lines-or-bytes",docs)
+            : fat-source(docs,[args[0]],sources=>{
+            let doc=fat-find-doc(sources,args[0]);
+            nil?(doc) ? fat-fail("resident-document-not-found",docs) : len(args)==5 && args[4]!=fat-document-sha(doc) ? fat-fail("read-source-changed; current resident_sha256="+fat-document-sha(doc),docs) : {
             let span=fat-read-span(doc[2],str_to_int(args[1]),str_to_int(args[2]),len(args)>=4 ? args[3] : "lines");
             fat-utf8-boundary?(doc[2],span[0]) && fat-utf8-boundary?(doc[2],span[1]) ? fat-ok(substring(doc[2],span[0],span[1]),docs) : fat-fail("read-byte-range-splits-utf8",docs);
-        };
-        def fat-read-span(text,offset,count,unit) = unit=="bytes" ? [min2(len(text),offset - 1),min2(len(text),offset - 1 + count)] : {
-            let start=len(fat-line-window(text,0,offset - 1));
-            [start,start + len(fat-line-window(text,offset - 1,count))];
+        }; });
+        def fat-read-span(text,offset,count,unit) = unit=="bytes" ? { let start=min2(len(text),offset - 1); [start,start + min2(len(text) - start,count)]; } : {
+            let start=fat-line-at(text,0,offset - 1);
+            [start,fat-line-at(text,start,count)];
         };
         def fat-utf8-boundary?(text,at) = at>=len(text) || !(str_byte_at(text,at)>=128 && str_byte_at(text,at)<192);
         def fat-read-result(docs, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-ok(r[0], docs);
@@ -354,9 +361,16 @@ section [form.bml] {
             : fat-window-count?(args[0]) ? fat-window(docs,tool,args[1:],input,"lines",str_to_int(substring(args[0],1,len(args[0]))))
             : fat-has(["-n","-c"],args[0]) ? (len(args)<2 || !fat-natural(args[1]) ? fat-fail("window-needs-nonnegative-count",docs) : fat-window(docs,tool,args[2:],input,args[0]=="-c" ? "bytes" : "lines",str_to_int(args[1])))
             : fat-starts(args[0],"-") ? fat-fail("unsupported-window-option",docs) : fat-input(docs,args,input,r=>fat-window-input(docs,tool,unit,amount,r));
-        def fat-window-input(docs, tool, unit, amount, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if ((String) unit == "bytes") then fat-ok(if ((String) tool == "head") then substring(r[0], 0, fat-min(amount, len(r[0]))) else substring(r[0], fat-max(0, (len(r[0]) - amount)), len(r[0])), docs) else fat-ok(fat-line-window(r[0], if ((String) tool == "head") then 0 else fat-max(0, (len(sh-lines(r[0])) - amount)), amount), docs);
-        def fat-line-window(s, start, count) = fat-window-join(fat-take(fat-drop(sh-lines(s), start), count), ((len(s) > 0) && ((Comparable) fat-char(s, (len(s) - 1)) == FatByteLf())), ((start + count) >= len(sh-lines(s))));
-        def fat-window-join(lines, finalNewline, reachesEnd) = if nil?(lines) then "" else ((String) fat-join(lines, "\n") + (if (finalNewline || (!reachesEnd)) then "\n" else ""));
+        def fat-window-input(docs, tool, unit, amount, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if ((String) unit == "bytes") then fat-ok(if ((String) tool == "head") then substring(r[0], 0, fat-min(amount, len(r[0]))) else substring(r[0], fat-max(0, (len(r[0]) - amount)), len(r[0])), docs) else fat-ok(fat-line-window(r[0], if ((String) tool == "head") then 0 else fat-max(0, (fat-line-count(r[0]) - amount)), amount), docs);
+        def fat-line-count(s) = ne-count(s,"\n") + (len(s)>0 && fat-char(s,len(s) - 1)!=FatByteLf() ? 1 : 0);
+        def fat-line-at(s, at, count) = count<=0 || at>=len(s) ? at : {
+            let end=str_find(s,"\n",at);
+            end<0 ? len(s) : fat-line-at(s,end + 1,count - 1);
+        };
+        def fat-line-window(s, start, count) {
+            let at=fat-line-at(s,0,start);
+            substring(s,at,fat-line-at(s,at,count));
+        }
         def fat-sed(docs, args, input) = if (len(args) < 2) then fat-fail("sed-supports-only-numeric-print-range", docs) else if (!((String) args[0] == "-n")) then fat-fail("sed-supports-only-numeric-print-range", docs) else if (!fat-ends(args[1], "p")) then fat-fail("sed-supports-only-numeric-print-range", docs) else fat-sed-range(docs, fat-drop(args, 2), input, split-on(substring(args[1], 0, (len(args[1]) - 1)), ","));
         def fat-sed-range(docs,paths,input,range) = !(len(range)==1 || len(range)==2) || !fat-natural(range[0]) || (len(range)==2 && !fat-natural(range[1])) ? fat-fail("invalid-print-range",docs) : fat-input(docs,paths,input,r=>fat-sed-ready(docs,str_to_int(range[0]),str_to_int(range[-1]),r));
         def fat-sed-ready(docs, first, last, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if ((first <= 0) || (last < first)) then fat-fail("invalid-print-range", docs) else fat-ok(fat-line-window(r[0], (first - 1), ((last - first) + 1)), docs);
@@ -364,12 +378,10 @@ section [form.bml] {
         def fat-valid-text-flag(tool, flag) = if ((String) tool == "wc") then fat-has(["-l", "-w", "-c", "-lw", "-lc", "-wc", "-lwc"], flag) else if ((String) tool == "sort") then fat-has(["-r", "-u", "-n", "-rn", "-nr", "-ru", "-ur", "-nu", "-un", "-nru"], flag) else if ((String) tool == "uniq") then fat-has(["-c", "-d", "-u"], flag) else 0;
         def fat-flag(flags, letter) = (str_find(fat-join(flags, ""), letter, 0) >= 0);
         def fat-text-ready(docs, tool, flags, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if ((String) tool == "wc") then fat-ok((fat-join(fat-counts(r[0], flags), " ") + "\n"), docs) else if ((String) tool == "sort") then fat-sort-ready(docs, sh-lines(r[0]), flags) else fat-ok(fat-uniq-lines(sh-lines(r[0]), flags), docs);
-        def fat-sort-ready(docs, lines, flags) = if (len(lines) > FatMaxSortItems()) then fat-fail("sort-item-limit", docs) else if (fat-flag(flags, "n") && (!fat-numeric-lines(lines))) then fat-fail("numeric-sort-needs-number-lines", docs) else fat-ok(sh-join-nl(fat-sort-lines(lines, flags)), docs);
-        def fat-numeric-lines(lines) = if nil?(lines) then 1 else (faj-valid-end(fat-trim(lines[0]), faj-number(fat-trim(lines[0]), 0)) && fat-numeric-lines(lines[1:]));
+        def fat-sort-ready(docs, lines, flags) = fat-flag(flags,"n") && !fat-numeric-lines(lines) ? fat-fail("numeric-sort-needs-number-lines",docs) : fat-ok(sh-join-nl(fat-sort-lines(lines,flags)),docs);
+        def fat-numeric-lines(lines) = all?(line=>{ let text=fat-trim(line); faj-valid-end(text,faj-number(text,0)); },lines);
         def fat-counts(s, flags) = append(if (nil?(flags) || fat-flag(flags, "l")) then [ne-count(s, "\n").str()] else [], append(if (nil?(flags) || fat-flag(flags, "w")) then [sh-count-words(s).str()] else [], if (nil?(flags) || fat-flag(flags, "c")) then [len(s).str()] else []));
-        def fat-num-insert(x, xs) = if nil?(xs) then [x] else if (str_to_float(x) <= str_to_float(xs[0])) then cons(x, xs) else cons(xs[0], fat-num-insert(x, xs[1:]));
-        def fat-num-sort(xs) = if nil?(xs) then [] else fat-num-insert(xs[0], fat-num-sort(xs[1:]));
-        def fat-sort-lines(lines, flags) = fat-sort-final(if fat-flag(flags, "n") then fat-num-sort(lines) else sh-sort(lines), flags);
+        def fat-sort-lines(lines, flags) = fat-sort-final(fat-flag(flags,"n") ? sort-with((a,b)=>a[0]<=b[0],nothing(),lines |> map(line=>[str_to_float(line),line])) |> map(row=>row[1]) : sh-sort(lines),flags);
         def fat-sort-final(lines, flags) = if fat-flag(flags, "r") then fat-reverse(fat-sort-unique(lines, flags)) else fat-sort-unique(lines, flags);
         def fat-sort-unique(lines, flags) = if (!fat-flag(flags, "u")) then lines else if fat-flag(flags, "n") then fat-num-unique(lines) else sh-uniq(lines);
         def fat-num-unique(lines) = if nil?(lines) then [] else cons(lines[0], fat-num-unique(fat-num-drop(lines[1:], str_to_float(lines[0]))));
@@ -385,11 +397,17 @@ section [form.bml] {
         def fat-cut(docs,args,input) = len(args)<4 || args[0]!="-d" || args[2]!="-f" ? fat-fail("cut-needs-d-delimiter-f-field",docs) : len(args[1])!=1 || !fat-natural(args[3]) || str_to_int(args[3])<=0 ? fat-fail("invalid-cut-field",docs) : fat-input(docs,args[4:],input,r=>fat-cut-ready(docs,args[1],str_to_int(args[3]),r));
         def fat-cut-ready(docs, delimiter, field, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-ok(fat-cut-lines(sh-lines(r[0]), delimiter, field), docs);
         def fat-cut-lines(lines, delimiter, field) = if nil?(lines) then "" else (fat-cut-line(lines[0], delimiter, field) + ("\n" + fat-cut-lines(lines[1:], delimiter, field)));
-        def fat-cut-line(line, delimiter, field) = if (str_find(line, delimiter, 0) < 0) then line else if (len(split-on(line, delimiter)) < field) then "" else split-on(line, delimiter)[(field - 1)];
-        def fat-awk-valid(program) = fat-awk-print(program, 0);
-        def fat-awk-print(program, field) = if (field > FatAwkLastField()) then 0 else if ((String) fat-trim(program) == ("{print $" + (field.str() + "}"))) then 1 else fat-awk-print(program, (field + 1));
-        def fat-awk(docs,args,input) = nil?(args) ? fat-fail("awk-needs-program",docs) : !fat-awk-valid(args[0]) ? fat-fail("awk-supports-single-field-print",docs) : fat-input(docs,args[1:],input,r=>fat-awk-ready(docs,args[0],r));
-        def fat-awk-ready(docs, program, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-ok(sh-bi-awk([program], r[0])[0], docs);
+        def fat-cut-line(line, delimiter, field) = str_find(line,delimiter,0)<0 ? line : { let fields=split-on(line,delimiter); field>len(fields) ? "" : fields[field - 1]; };
+        def fat-awk-field(program) {
+            let text=fat-trim(program); let prefix="{print $";
+            let field=fat-starts(text,prefix) && fat-ends(text,"}") ? substring(text,len(prefix),len(text) - 1) : "";
+            fat-natural(field) ? str_to_int(field) : nothing();
+        }
+        def fat-awk(docs,args,input) = nil?(args) ? fat-fail("awk-needs-program",docs) : {
+            let field=fat-awk-field(args[0]);
+            nothing?(field) ? fat-fail("awk-supports-single-field-print",docs) : fat-input(docs,args[1:],input,r=>fat-awk-ready(docs,field,r));
+        };
+        def fat-awk-ready(docs, field, r) = r[1]!="" ? fat-fail(r[1],docs) : fat-ok(sh-join-nl(sh-lines(r[0]) |> map(line=>sh-awk-field(line,field))),docs);
 
         def fat-jq(docs, args, input) = fat-jq-args(docs, args, input, []);
         def fat-jq-args(docs, args, input, options) = if nil?(args) then fat-fail("jq-needs-filter", docs) else if (((String) args[0] == "--arg") || ((String) args[0] == "--argjson")) then fat-jq-bind(docs, args, input, options) else if fat-starts(args[0], "-") then fat-jq-flags(docs, args, input, options, 1) else fat-jq-compiled(docs, options, args[1:], input, faj-compile(args[0]));
