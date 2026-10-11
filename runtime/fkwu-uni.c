@@ -17773,17 +17773,30 @@ FK_PHASED(FK_PHASE_CHILD, long long, fk_host_wait_arm, (long long a), (a)) {
             if (r >= 0 || errno != EINTR || fk_mono_ns() >= end) { break; }
         }
         close(kq);
+        /* the host answered: the child's end came, or the child is already past being watched (an error event, ESRCH,
+         * while it is between its exit and its reaping). It has ended either way, so the reading waits for it: a look
+         * that does not wait can come before the child is reapable and read as no exit (form-token-verbs-band's cat, 2
+         * runs in 3) */
+        if (r > 0) {
+            if (waitpid(pid, &st, 0) == pid) { return fk_wait_word(st); }
+            return -2;
+        }
 #elif defined(__linux__)
         int fd = (int)syscall(434, pid, 0);   /* pidfd_open */
         if (fd < 0) { return (0 - 2) * 2; }
+        int r = -1;
         for (;;) {
             long long rem = (end - fk_mono_ns()) / 1000000LL;
             if (rem < 1) { rem = 1; }
             struct pollfd pf = { fd, POLLIN, 0 };
-            int r = poll(&pf, 1, (int)(rem > 2147483647 ? 2147483647 : rem));
+            r = poll(&pf, 1, (int)(rem > 2147483647 ? 2147483647 : rem));
             if (r >= 0 || errno != EINTR || fk_mono_ns() >= end) { break; }
         }
         close(fd);
+        if (r > 0) {
+            if (waitpid(pid, &st, 0) == pid) { return fk_wait_word(st); }
+            return -2;
+        }
 #else
         return (0 - 2) * 2;
 #endif
