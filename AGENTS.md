@@ -486,7 +486,11 @@ first. Prefer an observed native answer to model-generated prose about it.
 Local models supply reasoning or generation the native substrate does not yet
 carry; Form owns choice, care, checkpoints, checks and release throughout.
 Optimize verified local completion and quality while reducing required remote
-prompts and tokens. Local tokens have no penalty: give useful local guidance,
+prompts and all rented tokens, including cached input. Native execution carries
+tool chains, repairs and waits in its owned context; return a compact verified
+result for review instead of a frontier turn for each step. Context replay and
+coordination count as work when completion depends on them. Local tokens have no
+penalty: give useful local guidance,
 review, repairs, changed prompts and model choices room to succeed in the owned
 checkpoint. Prefer a local guide; repeated changed local attempts can invite
 light remote guidance. Optional remote review may accompany any independently
