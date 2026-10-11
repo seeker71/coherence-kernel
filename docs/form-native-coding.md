@@ -505,9 +505,11 @@ No JSON context or JSON reply protocol crosses
 this coding model boundary. A role reply is read as the pairs the cell already
 holds. External requests, results and receipts retain their
 public JSON compatibility; result fields are assembled once as cells and emitted
-only at that public boundary. A text site that remains names, on the function
+only at that public boundary. A text site that remains carries, on the function
 that holds it, who reads those bytes and why that crossing is cheaper than
-sharing the cell. Old checkpoint evidence is converted at admission.
+sharing the cell. That naming is guidance. A repeated call guides the next
+choice and the attempt continues; the caller's turn budget is the bound.
+Old checkpoint evidence is converted at admission.
 
 Native tool observations stay as structured cells in policy state, binary
 checkpoints and model context. Guard, read, mutation and verification metadata
