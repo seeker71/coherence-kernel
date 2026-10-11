@@ -11,6 +11,7 @@
 // Partial output always carries its actual stopping reason.
 import form-stdlib/native-llama-metal.bml;
 import form-stdlib/native-llama-tokenizer.bml;
+import form/form-stdlib/gpu-lease.bml;
 import form-stdlib/spool-bell-transport.fk;
 import form-stdlib/form-fs.fk;
 section [form.bml] {
@@ -21,14 +22,22 @@ section [form.bml] {
    (Comparable) len(path) == 0 ? 0 : sbt-append(path,json-emit(event) + "\n");
   }
   def nlg-open(dir,adapter) = nlg-open-at(dir,adapter,"");
+  // The voice is a Metal client: two at once wedge the GPU wait and time-slice each other (a validation of 81 rows read 282 s and
+  // 388 s beside a day-turn and two band sweeps, 2026-10-11), so the open holds the machine's one GPU lease until nlg-close, or
+  // inherits it from the door that holds it across its stages (gpu-lease.bml gpu-lease-hold).
   def nlg-open-at(dir,adapter,events) {
+   let lease = gpu-lease-hold("native-llama-voice");
    let start = host_monotonic_ms(); let live = metal_live(); let model = nll-open(dir,adapter);
    let opened = nlg-event(events,"model-admission",0,start,live,model);
    let t0 = host_monotonic_ms(); let lg = metal_live(); let tk = nlt-open(dir);
    let indexed = nlg-event(events,"tokenizer-index",0,t0,lg,model);
-   [model,tk];
+   [model,tk,lease];
   }
-  def nlg-close(session) = nll-close(session[0]);
+  def nlg-close(session) {
+   let closed = nll-close(session[0]);
+   let given = len(session) > 2 ? gpu-lease-unhold(session[2]) : 0;
+   closed;
+  }
   def nlg-min(a,b) = a < b ? a : b;
   def nlg-max(a,b) = a > b ? a : b;
   def nlg-room(bytes) {
