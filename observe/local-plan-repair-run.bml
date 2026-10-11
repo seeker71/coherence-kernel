@@ -7,6 +7,29 @@ section [form.bml] {
   def lrpr-plan(owner) = flp-parse(owner[2])[2];
   def lrpr-sources(plan) = foldl((paths,path)=>flp-has?(paths,path) ? paths : append(paths,[path]),[],append(flp-p-writable(plan),flp-p-sources(plan)));
   def lrpr-snapshots(paths) = map(path=>[path,flp-exists?(path),fhn-read(path)],paths);
+  // Ground calls through the same scanner and native declaration tool the
+  // coding member uses. Strings and comments cannot invent dependencies.
+  def lrpr-calls(cursor,raw,previous,names) {
+   let token=sa-next(cursor,raw); let word=token[0];
+   if (raw && previous=="(" && word=="defn") || (!raw && word=="def") then {
+    let declared=sa-next(token[2],raw); let header=sa-header(declared[2],raw,[]);
+    nothing?(header) ? names : lrpr-calls(header[0],raw,"",names);
+   } else {
+    let name=raw ? previous=="(" ? word : "" : word=="(" ? previous : "";
+    let callable=len(name)>0 && str_find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",substring(name,0,1),0)>=0 && !flp-has?(["let","do","if"],name);
+    let next=callable && !flp-has?(names,name) ? append(names,[name]) : names;
+    cur-eof?(cursor) ? next : lrpr-calls(token[2],raw,word,next);
+   };
+  }
+  def lrpr-queries(owner) {
+   let plan=lrpr-plan(owner); let docs=lrpr-documents(owner);
+   let symbols=foldl((names,d)=>{
+    let source=fat-find-doc(docs,d[2]);
+    let body=nil?(source) ? "" : flp-ref-text(source[2],d,flp-file-bml?(d[2])) ?? "";
+    lrpr-calls(cursor-str(body),!flp-file-bml?(d[2]),"",names);
+   },[],flp-p-defs(plan)) |> filter(name=>!any?(d=>d[0]==name || flp-has?(d[1] ?? [],name),flp-p-defs(plan)));
+   append(docs |> map(doc=>json-node-object([oh-s("tool","cat"),json-node-pair("arguments",flp-json-strings([doc[1]]))])),nil?(symbols) ? [] : [json-node-object([oh-s("tool","bml-api"),json-node-pair("arguments",flp-json-strings(symbols))])]);
+  }
   def lrpr-scope(req,raw,snapshots) = flp-sha(json-emit(req)+raw+json-emit(fcam-pack(snapshots))+json-emit(fcam-pack(lrpr-documents([req,[],raw,"",snapshots]))));
   // Only the reference body is writable; all surrounding bytes retain their
   // original owner, including the contract and executable witness.
@@ -54,15 +77,26 @@ section [form.bml] {
    json-node-object([
    oh-s("goal","Repair the declared definitions in the complete writable source documents. Their current private candidate is the planner's reference. Preserve surrounding code, read-only sources and the original executable witness and checks. Original request: "+flp-text(owner[0],"needs")+"\nOriginal goal: "+flp-p-goal(lrpr-plan(owner))+"\nDeclared definitions: "+flp-join(map(d=>d[2]+":"+d[0],flp-p-defs(lrpr-plan(owner))),", ")+"\nWork from the failed cases. If the witness contradicts the original request, return attention with the exact counterexample; never distort behavior to satisfy it. Read the admitted native source observations, edit the actual source path, verify with the caller's planner checker, review and complete the owned work. Exact original refusal: "+refusal[2]),
    json-node-pair("writable",flp-json-strings(flp-p-writable(lrpr-plan(owner)))),json-node-pair("checks",json-node-array([])),oh-s("code_entry","direct"),oh-s("document_context","catalog"),oh-s("model",fcgp-str(opts,"repair_model")=="" ? voice : fcgp-str(opts,"repair_model")),oh-n("weight_training",0),oh-n("native_rehearsal_checks",fcgp-num(opts,"native_rehearsal_checks") ?? 16),
-   json-node-pair("source_queries",json-node-array(lrpr-documents(owner) |> map(doc=>json-node-object([oh-s("tool","cat"),json-node-pair("arguments",flp-json-strings([doc[1]]))])))),
+   json-node-pair("source_queries",json-node-array(lrpr-queries(owner))),
    oh-n("context",fcgp-num(opts,"context") ?? 32768),oh-n("turns",fcgp-num(opts,"repair_turns") ?? 64),oh-n("max_reply_tokens",reply),oh-n("reasoning_tokens",fcgp-num(opts,"reasoning_tokens") ?? reply),oh-n("reasoning_answer_tokens",fcgp-num(opts,"reasoning_answer_tokens") ?? reply)]);
   }
   // Bind the existing checkpoint before admission, including source presence
   // and exact bytes. Interrupted work resumes; a changed scope never reuses it.
   def lrpr-reenter(obj,kept) = oh-set(oh-set(obj,"goal",json-object-get(kept,"goal")),"resume",json-object-get(kept,"checkpoint_id"));
+  def lrpr-checkpoint(kept) {
+   let packet=fcam-read(fcam-path(hearth-code-memory(),fcap-string(kept,"checkpoint_id"),"checkpoint"));
+   nothing?(packet) ? nothing() : fcam-state-from(packet);
+  }
+  def lrpr-queries-current?(queries,state) = nothing?(state) || fcap-source-query-rows(queries)==fcap-source-queries(state);
+  def lrpr-refresh(obj,kept,state) {
+   let resumed=lrpr-reenter(obj,kept); let queries=node_children(json-object-get(obj,"source_queries"));
+   lrpr-queries-current?(queries,state) ? resumed : oh-set(resumed,"feedback",json-node-object([
+    oh-s("id","source-queries-"+flp-sha(json-emit(fcam-pack(fcap-source-query-rows(queries))))),
+    oh-s("text","Native source queries changed since the retained attempt. Use the newly admitted source observations to choose a changed approach to the original failure. The goal, candidate documents, definition scope, witness and checks remain unchanged.")]));
+  }
   def lrpr-owned(obj,docs,checker,path,scope) {
    let kept=fcam-read(path);
-   if !nothing?(kept) && fcap-string(kept,"scope")==scope && fcam-id-valid(fcap-string(kept,"checkpoint_id")) && len(fcap-string(kept,"goal"))>0 then lrpr-reenter(obj,kept) else {
+   if !nothing?(kept) && fcap-string(kept,"scope")==scope && fcam-id-valid(fcap-string(kept,"checkpoint_id")) && len(fcap-string(kept,"goal"))>0 then lrpr-refresh(obj,kept,lrpr-checkpoint(kept)) else {
     let state=fcaq-prepare(obj,docs,checker,hearth-code-memory());
     let saved=fcam-save(state);
     let bound=saved && fcam-write(path,json-node-object([oh-s("scope",scope),oh-s("checkpoint_id",fcam-id(state)),json-node-pair("goal",json-object-get(obj,"goal"))]));
@@ -110,7 +144,8 @@ section [form.bml] {
      else {
       let path=flp-dir()+"/repairs/"+scope+".result.fkb";
       let result=fcam-read(path);
-      let released=lrpr-released-attention?(result,id);
+      let owner=[req,ctx,prior[4],scope,lrpr-snapshots(lrpr-sources(parsed[2]))];
+      let released=lrpr-released-attention?(result,id) && lrpr-queries-current?(lrpr-queries(owner),lrpr-checkpoint(held));
       let continuation=released ? flp-with-reference-care(ctx,(request,context,said,refusal)=>["attention",fcap-string(result,"reason"),fcaq-number(result,"injected_ids",0),fcaq-number(result,"generated_ids",0),path]) : ctx;
       flp-heard(req,continuation,memory,len(memory)+1,[prior[3],prior[2],"checkpoint-resume"],["answered",prior[4],0,0,flp-text(prior[5],"reply")],now_unix_ms());
      };
