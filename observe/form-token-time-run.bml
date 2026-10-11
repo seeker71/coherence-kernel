@@ -1,0 +1,74 @@
+// form-token-time-run.bml — where a training run's time goes, read from the run's own events.
+//
+//   print -r -- ".hearth/form-token-lora/llama-1791695568140/training-events.jsonl" | ./fkwu observe/form-token-time-run.bml
+//   print -r -- "EVENTS.jsonl LEDGER.jsonl" | ./fkwu observe/form-token-time-run.bml        the cycle's stage walls as well
+//
+// The trainer writes an event for every phase it walks (training-events.jsonl): the open of the model, the baseline validation,
+// the assessment, and for every row its forward and backward milliseconds and the device's own busy microseconds, for every round
+// its tokenize, training, update and checkpoint milliseconds. This reads them back and says, in one block, where the wall clock
+// went: each phase's milliseconds and its share of the run, a row's forward and backward against the device's busy time (the rest
+// is dispatch, sync and the walker's own work), and the milliseconds a token costs each way. The cycle's ledger, when given,
+// adds each stage's wall (refresh, census, carrier, train, evaluation, usage).
+// stdin: the events path, optionally the ledger path after a space. Reads only; opens no model.
+// preflight-exec: forbidden
+import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class FormTokenTimeRun {
+  def ftt-words() = filter(w => len(w) > 0, split-on(trim(stdin-text() ?? ""), " "));
+  def ftt-of(rows, stage) = filter(r => (String) fcgp-str(r, "stage") == stage, rows);
+  def ftt-n(r, key) = fcgp-num(r, key) ?? 0;
+  def ftt-sum(rows, key) = foldl((a, r) => a + ftt-n(r, key), 0, rows);
+  def ftt-max(rows, key) = foldl((m, r) => ftt-n(r, key) > m ? ftt-n(r, key) : m, 0, rows);
+  def ftt-mean(rows, key) = len(rows) == 0 ? 0 : ftt-sum(rows, key) / len(rows);
+  def ftt-pct(part, whole) = whole <= 0 ? "-" : ((part * 1000) / whole / 10).str() ++ "." ++ (((part * 1000) / whole) % 10).str() ++ "%";
+  def ftt-s(ms) = (ms / 1000).str() ++ "." ++ ((ms % 1000) / 100).str() ++ " s";
+  def ftt-say(t) = print_str("[form-token-time] " ++ t);
+  def ftt-span(rows) = ftt-max(rows, "at_ms") - foldl((m, r) => ftt-n(r, "at_ms") < m ? ftt-n(r, "at_ms") : m, ftt-max(rows, "at_ms"), rows);
+  def ftt-phase(name, ms, whole) = ftt-say(name ++ ": " ++ ftt-s(ms) ++ " (" ++ ftt-pct(ms, whole) ++ " of the run)");
+  def ftt-report(rows) {
+   let opened = ftt-sum(ftt-of(rows, "admitted"), "open_ms");
+   let valid = ftt-sum(ftt-of(rows, "validation"), "wall_ms");
+   let assess = ftt-sum(ftt-of(rows, "assessment-before"), "wall_ms") + ftt-sum(ftt-of(rows, "assessment-after"), "wall_ms");
+   let rounds = ftt-of(rows, "round");
+   let walks = ftt-of(rows, "row");
+   let run = ftt-span(rows) + opened;
+   let training = ftt-sum(rounds, "training_ms");
+   let update = ftt-sum(rounds, "update_ms");
+   let token = ftt-sum(rounds, "tokenize_ms");
+   let check = ftt-sum(rounds, "checkpoint_ms");
+   let fwd = ftt-sum(walks, "forward_ms");
+   let bwd = ftt-sum(walks, "backward_ms");
+   let fgpu = ftt-sum(walks, "forward_gpu_us") / 1000;
+   let bgpu = ftt-sum(walks, "backward_gpu_us") / 1000;
+   let tokens = ftt-sum(walks, "input_tokens");
+   let said = ftt-say("run " ++ ftt-s(run) ++ ": " ++ len(rounds).str() ++ " round(s), " ++ len(walks).str() ++ " row(s), " ++ tokens.str() ++ " input tokens");
+   let a = ftt-phase("open the model", opened, run);
+   let b = ftt-phase("baseline validation", valid, run);
+   let c = ftt-phase("assessments", assess, run);
+   let d = ftt-phase("rounds: training", training, run);
+   let e = ftt-phase("rounds: update (Adam, adapter write)", update, run);
+   let f = ftt-phase("rounds: tokenize + checkpoint", token + check, run);
+   let g = ftt-phase("not accounted (between phases)", run - opened - valid - assess - training - update - token - check, run);
+   let h = ftt-say("a row: forward " ++ ftt-s(ftt-mean(walks, "forward_ms")) ++ " mean, " ++ ftt-s(ftt-max(walks, "forward_ms")) ++ " worst; backward " ++ ftt-s(ftt-mean(walks, "backward_ms")) ++ " mean, " ++ ftt-s(ftt-max(walks, "backward_ms")) ++ " worst");
+   let i = ftt-say("the device's own busy time: forward " ++ ftt-pct(fgpu, fwd) ++ " of its wall, backward " ++ ftt-pct(bgpu, bwd) ++ " (the rest is dispatch, sync and the walker)");
+   let j = ftt-say("per input token: forward " ++ (tokens == 0 ? 0 : fwd * 100 / tokens).str() ++ " centi-ms, backward " ++ (tokens == 0 ? 0 : bwd * 100 / tokens).str() ++ " centi-ms; dispatches a row " ++ ftt-mean(walks, "dispatches").str());
+   0;
+  }
+  def ftt-ledger(path) {
+   let rows = fcgp-rows(path);
+   let said = map(r => ftt-say("stage " ++ fcgp-str(r, "stage") ++ ": " ++ ftt-s(ftt-n(r, "wall_ms")) ++ ((String) fcgp-str(r, "stopped") == "" ? "" : " STOPPED " ++ fcgp-str(r, "stopped"))), rows);
+   0;
+  }
+  def ftt-run() {
+   let ws = ftt-words();
+   if len(ws) == 0 then ftt-say("give the path of a run's training-events.jsonl (and the cycle's ledger after a space)")
+   else {
+    let r = ftt-report(fcgp-rows(ws[0]));
+    len(ws) > 1 ? ftt-ledger(ws[1]) : 0;
+   };
+  }
+ }
+ ftt-run();
+}
