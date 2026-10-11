@@ -230,7 +230,7 @@ external model server and the page cache could each pass their own check and tog
   token is spent. A roomy reading, or one that did not arrive, continues unchanged, and a lane that spent all its turns
   ends by that, not as a memory ending. The walk reads that ending, and a session open refused for memory
   (`host-memory-held:<why>`), as a choice point (`mg-memory-ending?`, the one word its readers share): not idle, not an
-  unknown spend, no option spent (`nt-memory-low?`, `nt-attempts`), its wall no option's measure (`hw-wall`), no row in
+  unknown spend, no option spent (`nt-untried?`, `nt-attempts`), its wall no option's measure (`hw-wall`), no row in
   the review's options (`lfr-options`: never a split, never a lane failure), no tried approach in the ladder
   (`ntl-hist-of`: an interrupted row, so the first way is not refused and the resume is not capped). A memory ending
   that saved a checkpoint and is the contract's latest row leaves one pending row in the history: the resume way takes
