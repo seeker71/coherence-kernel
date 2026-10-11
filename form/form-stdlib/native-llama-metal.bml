@@ -13,6 +13,13 @@ kernel void nll_scores(device const float* q [[buffer(0)]],device const float* k
 kernel void nll_attend(device const float* p [[buffer(0)]],device const float* v [[buffer(1)]],device float* out [[buffer(2)]],constant uint& t [[buffer(3)]],constant uint& nq [[buffer(4)]],constant uint& nk [[buffer(5)]],constant uint& d [[buffer(6)]],constant uint& offset [[buffer(7)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint row=g/nq,h=g%nq,nh=offset+t;if(row>=t)return;uint kh=h/(nq/nk);for(uint c=lane;c<d;c+=32){float a=0;for(uint s=0;s<=offset+row;s++)a+=p[g*nh+s]*v[(s*nk+kh)*d+c];out[(row*nq+h)*d+c]=a;}}
 kernel void nll_argmax(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=lane;i<n;i+=32){bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0)out[0]=bad?0xffffffff:win;}
 kernel void nll_argmax_except(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& skip [[buffer(3)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=lane;i<n;i+=32){if(i==skip)continue;bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0)out[0]=bad?0xffffffff:win;}
+kernel void nll_top3(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint lane [[thread_index_in_simdgroup]]) {
+ float v0=-INFINITY,v1=-INFINITY,v2=-INFINITY;uint i0=0xffffffff,i1=0xffffffff,i2=0xffffffff,bad=0;
+ for(uint i=lane;i<n;i+=32){float v=x[i];bad+=uint(!isfinite(v));
+  if(v>v0){v2=v1;i2=i1;v1=v0;i1=i0;v0=v;i0=i;}else if(v>v1){v2=v1;i2=i1;v1=v;i1=i;}else if(v>v2){v2=v;i2=i;}}
+ bad=simd_sum(bad);uint r[3];
+ for(uint k=0;k<3;k++){float m=simd_max(v0);uint w=simd_min(v0==m?i0:0xffffffff);r[k]=w;if(i0==w){v0=v1;i0=i1;v1=v2;i1=i2;v2=-INFINITY;i2=0xffffffff;}}
+ if(lane==0){out[0]=bad?0xffffffff:r[0];out[1]=bad?0xffffffff:r[1];out[2]=bad?0xffffffff:r[2];}}
 kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& skip [[buffer(3)]],constant uint& skip2 [[buffer(4)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=lane;i<n;i+=32){if(i==skip||i==skip2)continue;bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0)out[0]=bad?0xffffffff:win;}
 ";
   def nll-run(name, handles, values, count, grouped) {
@@ -215,6 +222,16 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
    defer NativeAffineBuffer_dispose(out);
    let rc = nll-run(kernel,[logits,out],values,1,1);
    ln-u32-le(metal_buf_read(out,0,4),0);
+  }
+  // The best three in one dispatch and one read back, in the order the three selects below give them (value descending, index
+  // ascending among equals; any non-finite logit makes all three 0xffffffff, as each select would): the in-stream walk asked
+  // for all three after every token, three dispatches and three syncs (60 ms a token against 43 for one select).
+  def nll-select3(logits,vocab) {
+   let out = nam-alloc(3);
+   defer NativeAffineBuffer_dispose(out);
+   let rc = nll-run("nll_top3",[logits,out],[vocab],1,1);
+   let bytes = metal_buf_read(out,0,12);
+   [ln-u32-le(bytes,0),ln-u32-le(bytes,4),ln-u32-le(bytes,8)];
   }
   def nll-select(logits,vocab) = nll-pick("nll_argmax",logits,[vocab]);
   def nll-select-except(logits,vocab,skip) = nll-pick("nll_argmax_except",logits,[vocab,skip]);
