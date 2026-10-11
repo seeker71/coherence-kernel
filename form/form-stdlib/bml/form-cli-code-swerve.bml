@@ -16,11 +16,8 @@
 // The physical witness reads seeded IDs, determinism, release and native submission independently.
 //
 // At the reply boundary, fcsw-step steps a node. A tool call is the cell. A JSON tool reply is not read.
-// The turn after a call is the stillstreak window: at 2 the observation names the
-// repeat and carries the edit ladder's nearest_span, at 3 the policy's own no-progress route asks for a
-// new plan (once: when the policy's own repeat count already took that route in this turn, the guard
-// does not take it again), at 4 the attempt ends with its candidate retained. Each crossing speaks an
-// organ-health reading 'tool-progress'. Every reply's decode, tool call and check opens and closes a
+// The turn after a call records the stillstreak window. The call's result stands.
+// Every reply's decode, tool call and check opens and closes a
 // stage on the bus. A reply decoded in a context that has observed nothing yet (the first reply after
 // admission, renewal or a resumed checkpoint) counts a new context: the window's span opens anew, and the
 // policy's own count of the same call in a row restarts. That is sight regained, and it holds only where sight
@@ -39,7 +36,6 @@
 import form-stdlib/bml/form-cli-code-memory.bml;
 import form-stdlib/bml/form-cli-code-session.bml;
 import form-stdlib/bml/form-cli-code-turn-guard.bml;
-import form-stdlib/bml/form-cli-task-runtime.bml;
 import form-stdlib/organ-health.bml;
 import form-stdlib/spool-bell-transport.fk;
 section [form.bml] {
@@ -47,7 +43,6 @@ section [form.bml] {
   field SwerveSlot = 25;
   field SwerveKeep = 64;
   field SwerveSeedsKept = 32;
-  field SwerveCrossingsKept = 16;
   def fcsw-put(xs, i, v) = append(take(i, xs), cons(v, drop(i + 1, xs)));
   def fcsw-last(n, xs) = drop(max2(0, len(xs) - n), xs);
 
@@ -146,7 +141,7 @@ section [form.bml] {
     if category == "form-code-action" && len(kids) == 3 then {
      let tool = ftw-decode(kids[0]);
      let open = tool == "" ? nothing() : fcacs-stage-open("code.tool", tool);
-     fcsw-observed-step(state, fcap-act(state, tool, ftw-decode(kids[1]), ftw-decode(kids[2]), fcsw-staged-checker(checker)), [], open);
+     fcsw-observed-step(state, fcap-act(state, tool, ftw-decode(kids[1]), ftw-decode(kids[2]), fcsw-staged-checker(checker)), open);
     } else {
      let fields = fcap-cell-fields(node);
      if nothing?(fields) then fcap-note-at(state, fcap-stage(state), "Native data observed: " + ftw-coord(node) + ". Continue the current task with this evidence; submit an action or role reply cell.") else if fcap-has-field(fields, "tool") then {
@@ -154,74 +149,26 @@ section [form.bml] {
       let args = fcap-field(fields, "arguments");
       let input = fcap-field(fields, "input");
       let open = tool == "" ? nothing() : fcacs-stage-open("code.tool", tool);
-      fcsw-observed-step(state, fcap-act(state, tool, nothing?(args) ? [] : args, nothing?(input) ? "" : input, fcsw-staged-checker(checker)), [], open);
-     } else if fcap-has-field(fields, "report_amend") then fcsw-observed-step(state, fcap-amend(state, json-node-object([json-node-pair("report_amend", fcap-native-value(fcap-field(fields, "report_amend")))]), fcsw-staged-checker(checker)), [], nothing()) else fcsw-observed-step(state, fcap-reply(state, fields, fcsw-staged-checker(checker)), [], nothing());
+      fcsw-observed-step(state, fcap-act(state, tool, nothing?(args) ? [] : args, nothing?(input) ? "" : input, fcsw-staged-checker(checker)), open);
+     } else if fcap-has-field(fields, "report_amend") then fcsw-observed-step(state, fcap-amend(state, json-node-object([json-node-pair("report_amend", fcap-native-value(fcap-field(fields, "report_amend")))]), fcsw-staged-checker(checker)), nothing()) else fcsw-observed-step(state, fcap-reply(state, fields, fcsw-staged-checker(checker)), nothing());
     };
    };
   }
   def fcsw-word(err) = err == "" ? "ok" : str_find(err, ":", 0) > 0 ? substring(err, 0, str_find(err, ":", 0)) : err;
   def fcsw-signature(s) = fcap-tool-history(s)[0];
-  def fcsw-observed-step(state,next,rows,open) {
+  def fcsw-observed-step(state,next,open) {
    let observed = fcap-calls(next) > fcap-calls(state) && len(fcsw-signature(next)) == 6;
     // Text signatures carry a digest and byte count. Native views carry their
     // shared coordinate and zero emitted stdout bytes, without rendering.
    let entry = observed ? fcctg-entry(fcsw-signature(next)[0], fcsw-signature(next)[1], fcsw-signature(next)[2], fcsw-signature(next)[3], fcap-signature-out(fcsw-signature(next)), fcsw-signature(next)[5], fcap-docs(next), fcsw-context(next)) : [];
    let closed = fcacs-stage-close(open, observed ? fcsw-word(fcsw-signature(next)[5]) : "refused", observed ? fcap-signature-bytes(fcsw-signature(next)) : 0, observed ? entry[1] : 0);
-   let guarded = observed ? fcsw-guard(next, entry) : next;
-   nil?(rows) ? guarded : fcsw-noted-repairs(guarded, rows);
-  }
-  def fcsw-armed(slot) = len(slot) > 12 ? slot[12] : "";
-  def fcsw-arm-compression(s) {
-   let slot = fcsw-slot(s);
-   let window = slot[0];
-   let digest = nil?(window) ? "" : fctrt-triple(window[-1][0], window[-1][1]);
-   (String) digest == "" ? s : fcsw-with-slot(s, fcsw-put(fcsw-slot(s), 12, digest));
+   observed ? fcsw-guard(next, entry) : next;
   }
   def fcsw-guard(next, entry) {
    let slot = fcsw-slot(next);
-   let prior = fcctg-stillstreak(slot[0]);
    let window = fcctg-push(slot[0], entry);
    let streak = fcctg-stillstreak(window);
-   let tracked = fcsw-with-slot(next, fcsw-put(fcsw-put(slot, 0, window), 6, max2(slot[6], streak)));
-   let compact = fctrt-compact(fcsw-armed(slot), fctrt-triple(entry[0], entry[1]));
-   let action = compact == "end" ? "guide" : fcctg-action(prior, streak);
-   action == "" ? tracked : fcsw-crossed(tracked, streak, action);
-  }
-  def fcsw-crossed(s, streak, action) {
-   let detail = json-node-object([oh-n("stillstreak", streak), oh-s("action", action), oh-n("turn", fcap-turns(s)), oh-n("context", fcsw-context(s)), oh-s("scope", "native tool calls whose call and result already stood since the last document change in this model context; 2 swerves, 3 replans, 4 guides and the attempt continues with its candidate retained")]);
-   let reading = oh-reading("native-coding", fcsw-flow(s), "tool-progress", json-node-int(1), json-node-int(0), json-node-int(0), [oh-need("changed-approach", detail)], ["swerve", "replan", "guide"], detail);
-   let said = oh-voice(reading);
-   let acted = action == "swerve" ? fcsw-swerved(s, streak) : action == "replan" ? fcsw-replanned(s) : fcsw-guided(s);
-   let applied = oh-voice(oh-applied(reading, action, json-node-object([oh-s("stage", fcap-stage(acted)), oh-s("reason", action == "guide" ? fcsw-guide-note(fcsw-signature(s)[0]) : (fcap-done(acted) ? fcap-note(acted) : ""))])));
-   let slot = fcsw-slot(acted);
-   fcsw-with-slot(acted, fcsw-put(slot, 7, fcsw-last(SwerveCrossingsKept(), append(slot[7], [[fcap-turns(acted), streak, action]]))));
-  }
-  def fcsw-swerved(s, streak) = fcsw-with-note(s, fcctg-swerve-note(streak, fcsw-signature(s)[0], fcsw-nearest(s), fcctg-returns(fcsw-slot(s)[0])) ++ fcap-note(s));
-  // A repeat is guidance. The stage stays, the candidate stays, and the body chooses the next call.
-  def fcsw-guide-note(tool) = "The same " ++ tool ++ " call already stood, and the documents did not change. The candidate stays with this attempt. Choose another tool or a plan from the bytes already resident. Repeating this call does not carry the work. The attempt continues.";
-  def fcsw-guided(s) = fcsw-with-note(s, fcsw-guide-note(fcsw-signature(s)[0]) ++ fcap-note(s));
-  // the policy's own count rule (the same call a third time in a row) already took the no-progress route in
-  // this turn; the guard's replan is then that same route, taken once
-  def fcsw-replanned(s) = fcap-tool-history(s)[1] >= 3 ? s : fcap-no-progress(s);
-  // the edit ladder's nearest_span, from the note's or the retained failure's guard evidence
-  def fcsw-nearest(s) {
-   let near = fcsw-nearest-in(fcap-note(s));
-   nothing?(near) ? fcsw-nearest-in(fcap-evidence(s)) : near;
-  }
-  // json-serves: the model note. text: nearest_span rides in the sentence the model already reads.
-  def fcsw-nearest-in(text) {
-   let at = str_find(text, "{", 0);
-   let raw = at < 0 ? "" : substring(text, at, len(text));
-   let obj = faj-valid(raw) ? parse-json("swerve-evidence", raw) : json-node-object([]);
-   let guard = fat-wire-object?(obj) && json-object-has?(obj, "guard_evidence") ? json-object-get(obj, "guard_evidence") : json-node-object([]);
-   fat-wire-object?(guard) && json-object-has?(guard, "nearest_span") ? json-object-get(guard, "nearest_span") : nothing();
-  }
-  // json-serves: the model note. text: the repair rows were retained as the bytes the note already speaks.
-  def fcsw-noted-repairs(s, rows) {
-   let slot = fcsw-slot(s);
-   let kept = fcsw-with-slot(s, fcsw-put(slot, 1, fcsw-last(SwerveKeep(), append(slot[1], rows))));
-   let observation = faj-valid(fcap-note(kept)) ? parse-json("tool-observation", fcap-note(kept)) : json-node-string(fcap-note(kept));
-   fcap-done(kept) ? kept : fcsw-with-note(kept, json-emit(json-node-object([json-node-pair("native_tool_repairs", json-node-array(rows |> map(r => parse-json("tool-repair", r)))), json-node-pair("observation", observation)])));
+   fcsw-with-slot(next, fcsw-put(fcsw-put(slot, 0, window), 6, max2(slot[6], streak)));
   }
   // checks open and close their own stages; the caller's callbacks are called exactly as before
   def fcsw-staged-checker(checker) = len(checker) >= 4 ? append([fcsw-check-stage(checker[0], "caller"), checker[1], fcsw-check-stage(checker[2], "source"), checker[3]], drop(4, checker))

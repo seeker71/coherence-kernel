@@ -114,9 +114,8 @@ The lane teaches this form by default; `FORM_CODE_CALL_FORM=eval` teaches the co
 steps. A JSON tool reply is not read. A role reply is the pairs the lane already holds.
 The doors outside this lane (`fat-wire-call`, the request door, form-find) still speak JSON, and so does any
 text a reader outside the cell actually takes: the model packet, a log line, a checkpoint another process reads,
-a checker that stores a report string. Each of those sites carries, on the function that holds it, who that reader
-is and why the bytes are the cheaper share. `form-native-tools-guard-band.bml` pins how many places write or
-read JSON text in each lane file, and names a site that has not yet said who reads it. The name is guidance.
+a checker that stores a report string. `form-native-tools-guard-band.bml` pins how many places write or
+read JSON text in each lane file.
 
 ## form-find — the source tree, indexed and resident (the agents' normal lookup)
 
