@@ -1113,7 +1113,10 @@ A cold run, after a seed build, takes 16 s, because every image is rebuilt by th
 Lowering form-cli-local-plan.bml warm takes 4 s, and a third of it is the type index (`fsc-bml-type-index-into` 28%,
 `fsc-bml-type-find` 6%). A melt there is 3% of the run, and almost all of it is the string melt's pass over the
 strings: the pair copy is 0.2%. A melt visits the held once-holds from their list and frees around the AST's literals
-(`fk_sdead` 2), so its cost follows the live heap and the strings, never the program's AST.
+(`fk_sdead` 2), so its cost follows the live heap and the strings, never the program's AST. A heap that once peaked
+gives its capacity back: while the live heap is under an eighth of it, a melt halves it (within the headroom rules), since
+a melt's forwarding table and marks are sized by the heap it compacts. In a sweep's process a melt took 2 s with 1.5M
+live; after a 20M peak and its release, eight melts now take 593 ms.
 
 The drift gates took 22 minutes on the morning of 2026-10-11, and two gates were 98% of it: form-cli-build (1,000 s)
 and bml-cursor-coverage (341 s); by the afternoon they took 7 to 9 minutes (form-cli-build 276-316 s, coverage 155-192
@@ -1163,7 +1166,9 @@ The page keeps the walker's frame and the walker's meaning:
   str_find, the node natives, file_size, read_file, write_file, host_file_append_bytes, and the leaf doors except attempt)
   is taken apart: its value children are made in the page's own words, into temporaries, and the walker runs only the
   node's mirror, whose children read them. Which children are values is the arm's to say, so the table stands in the seed
-  beside the walker; the emitter only asks.
+  beside the walker; the emitter only asks. A compare against a len (`nil?`'s shape) is taken apart the same way: the page
+  makes the list and the walker's bounded len reads the mirror. value_kind answers one of ten pinned names, never a fresh
+  intern.
 - Any other node is walked, or given back to the walker in tail position.
 - Binding no words asks whether a page stands.
 
