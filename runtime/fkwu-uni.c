@@ -1968,6 +1968,7 @@ extern int ioctl(int, unsigned long, ...);
 extern int fork(void);
 extern int execvp(const char *, char *const *);
 extern int waitpid(int, int *, int);
+#define FK_WNOHANG 1   /* waitpid's WNOHANG on Darwin and Linux alike */
 extern int pipe(int *);
 extern int dup2(int, int);
 extern void _exit(int);
@@ -9170,6 +9171,41 @@ static long long fk_melt_want = 0;
  * temporaries (born last, dead first) and leaves anything older untouched.
  * Field strings (indices >= FK_STR_BASE) are shared by content and are never
  * touched here. */
+/* THE MELT'S OWN ROWS. A melt's roots are the live heap's holders, not the program: the once-holds whose value is held are
+ * listed when they are first held (the hold arm, node[3] 0 -> 1), and an AST string literal's string is marked a literal's
+ * (fk_sdead 2: an AST row holds it, and AST rows only grow) where the row is born or loaded. So a melt visits the holds and
+ * frees around the literals without a pass over every AST row, which cost each melt the whole program. A listed row that an
+ * image load or a redefinition emptied is dropped at the next melt; a row held again is listed again, and the copy pass
+ * visits each row once (node[3] 1 -> 2 -> 1), since a root copied twice would alias.
+ * SHRINK PATH: the melt is the seed's memory floor; when the heap is Form's own (docs/local-agent-goal.form), the hold list
+ * and the literal mark are that heap's roots and leave the seed with the melt. */
+static long long *fk_hold_rows;
+static long long fk_hold_n, fk_hold_cap;
+static void fk_hold_note(long long k) {
+    if (fk_hold_n >= fk_hold_cap) {
+        long long cap = fk_hold_cap > 0 ? fk_hold_cap * 2 : 256;
+        long long *rows = (long long *)realloc(fk_hold_rows, (unsigned long)(cap * 8));
+        if (rows == 0) { fk_die("fk_hold_note: the melt's hold list cannot grow -- out of memory"); }
+        fk_hold_rows = rows;
+        fk_hold_cap = cap;
+    }
+    fk_hold_rows[fk_hold_n] = k;
+    fk_hold_n = fk_hold_n + 1;
+}
+static int fk_hold_live(long long k) {
+    return k >= 0 && k < fk_node_count && fk_node[k][0] == FK_TAG_CONST_HOLD && fk_node[k][3] != 0;
+}
+static void fk_lit_pin(long long si) {
+    if (si >= 0 && si < FK_STR_BASE && si < fk_sp && fk_sdead[si] == 0) { fk_sdead[si] = 2; }
+}
+static void fk_lit_pin_rows(long long from, long long to) {
+    long long k = from;
+    while (k < to) { if (fk_node[k][0] == 24) { fk_lit_pin(fk_node[k][1]); } k = k + 1; }
+}
+static void fk_lit_unpin_all(void) {
+    long long z = 0;
+    while (fk_sdead != 0 && z < fk_sp) { if (fk_sdead[z] == 2) { fk_sdead[z] = 0; } z = z + 1; }
+}
 static unsigned char *fk_smk;
 static unsigned char *fk_smv;
 static void fk_smark(long long v) {
@@ -9230,11 +9266,7 @@ static void fk_smelt(void) {
      * would mark nothing and cost every melt the whole field. */
     fk_clo_smark_roots();
     k = 0;
-    while (k < fk_node_count) {
-        if (fk_node[k][0] == 24) { long long si = fk_node[k][1]; if (si >= 0 && si < fk_sp) { fk_smk[si] = 1; } }
-        if (fk_node[k][0] == FK_TAG_CONST_HOLD && fk_node[k][3] != 0) { fk_smark(fk_node[k][2]); }
-        k = k + 1;
-    }
+    while (k < fk_hold_n) { if (fk_hold_live(fk_hold_rows[k])) { fk_smark(fk_node[fk_hold_rows[k]][2]); } k = k + 1; }
     long long freed = 0;
     long long i = 0;
     while (i < fk_sp) {
@@ -9261,7 +9293,7 @@ static void fk_smelt(void) {
 }
 static void fk_melt(void) {
     long long phase0 = fk_phase;
-    fk_phase = 1;   /* FK_PHASE_MELT (the time board) */
+    fk_phase = FK_PHASE_MELT;   /* the time board's phase */
     fk_melt_gen = fk_melt_gen + 1;
     long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
@@ -9322,10 +9354,7 @@ static void fk_melt(void) {
     lv_clo = nlive - lv_stack - lv_mem - lv_rec - lv_node;
     /* the once-holds: a top-level let's held value is a root, so the melt keeps it and no read builds it again */
     k = 0;
-    while (k < fk_node_count) {
-        if (fk_node[k][0] == FK_TAG_CONST_HOLD && fk_node[k][3] != 0) { nlive = nlive + fk_mlive(fk_node[k][2]); }
-        k = k + 1;
-    }
+    while (k < fk_hold_n) { if (fk_hold_live(fk_hold_rows[k])) { nlive = nlive + fk_mlive(fk_node[fk_hold_rows[k]][2]); } k = k + 1; }
     long long ncap = fk_cap;
     if (nlive * 2 > fk_cap) {
         ncap = fk_cap * 2;
@@ -9385,11 +9414,23 @@ static void fk_melt(void) {
         k = k + 1;
     }
     fk_clo_mcopy_roots();
+    /* each held row copied once: a row listed twice is copied at its first entry (node[3] 1 -> 2) and dropped at the next,
+     * and a row no longer held is dropped; then the kept rows read held again (2 -> 1) */
     k = 0;
-    while (k < fk_node_count) {
-        if (fk_node[k][0] == FK_TAG_CONST_HOLD && fk_node[k][3] != 0) { fk_node[k][2] = fk_mcopy(fk_node[k][2]); }
+    long long kept = 0;
+    while (k < fk_hold_n) {
+        long long hr = fk_hold_rows[k];
+        if (fk_hold_live(hr) && fk_node[hr][3] == 1) {
+            fk_node[hr][2] = fk_mcopy(fk_node[hr][2]);
+            fk_node[hr][3] = 2;
+            fk_hold_rows[kept] = hr;
+            kept = kept + 1;
+        }
         k = k + 1;
     }
+    fk_hold_n = kept;
+    k = 0;
+    while (k < fk_hold_n) { fk_node[fk_hold_rows[k]][3] = 1; k = k + 1; }
     if (fk_store_shared) { fk_heap_alt_h = fk_hh; fk_heap_alt_t = fk_ht; fk_heap_gen = 1 - fk_heap_gen; } else { free(fk_hh); free(fk_ht); }
     free(fk_fw);
     fk_hh = fk_nh;
@@ -9397,12 +9438,14 @@ static void fk_melt(void) {
     fk_hp = fk_nhp;
     fk_cap = ncap;
     fk_nmelt = fk_nmelt + 1;
+    fk_phase = FK_PHASE_SMELT;
     fk_smelt();
+    fk_phase = FK_PHASE_MELT;
     fk_live_publish(0);
     fk_phase = phase0;
     if (fk_conf("FK_MELT_WITNESS")) {
-        dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld, held-by stack=%lld mem=%lld records=%lld nodes=%lld closures=%lld holds=%lld, string-holes=%lld bytes of %lld, closure-rows=%lld reclaimed=%lld capvals=%lld\n",
-                fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp,
+        dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, ast=%lld, fp=%lld, sp=%lld, held-by stack=%lld mem=%lld records=%lld nodes=%lld closures=%lld holds=%lld, string-holes=%lld bytes of %lld, closure-rows=%lld reclaimed=%lld capvals=%lld\n",
+                fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_node_count, fk_fp, fk_sp,
                 lv_stack, lv_mem, lv_rec, lv_node, lv_clo, nlive - lv_stack - lv_mem - lv_rec - lv_node - lv_clo, fk_hole_bytes, fk_sbp,
                 fk_clo_top - fk_clo_free_n, fk_clo_reclaimed, fk_clo_capvals_top);
     }
@@ -14207,6 +14250,7 @@ static long long fk_walk(long long i, long long fp) {
         long long v190 = fk_walk(fk_node[i][1], fp);
         fk_node[i][2] = v190;
         fk_node[i][3] = 1;
+        fk_hold_note(i);
         return v190;
     }
     if (t == 3) {
@@ -17644,7 +17688,82 @@ static long long fk_tty_door(long long mode) {
 #endif
     return fk_nothing;
 }
-static long long fk_rest_arm(long long a) {
+/* host_wait pid: the child's exit status (a signal death answers 128 + the signal), -1 when there is no such child.
+ * host_wait (list pid ms): the same, waiting at most ms for the exit, and nothing() when no exit arrived by then (-2 when
+ * this host cannot wait on a child's end). The host wakes the process on the child's end -- kqueue EVFILT_PROC on Darwin,
+ * a pidfd under poll on Linux -- never a look on a clock; a running cell's own deadline still bounds the wait.
+ * SHRINK PATH: none wanted -- a child's end is a host event, as host_watch's change is; it stays a leaf door. */
+#if !defined(_WIN32) && defined(__linux__)
+extern long syscall(long number, ...);
+#endif
+static long long fk_wait_word(int st) {
+    if ((st & 0x7f) == 0) { return ((long long)((st >> 8) & 0xff)) << 1; }
+    return ((long long)(128 + (st & 0x7f))) << 1;
+}
+FK_PHASED(FK_PHASE_CHILD, long long, fk_host_wait_arm, (long long a), (a)) {
+#if defined(_WIN32)
+    (void)a;
+    return -2;
+#else
+    int st = 0;
+    if ((a & 1) == 0) {
+        if (waitpid((int)(a >> 1), &st, 0) < 0) { return -2; }
+        return fk_wait_word(st);
+    }
+    long long p = a >> 1;
+    if (a == fk_nothing || !(p >= 1 && FK_POK(p)) || (FK_HH(p) & 1) != 0) { return fk_nothing; }
+    long long q = FK_HNEXT(p);
+    if (!(q >= 1 && FK_POK(q)) || (FK_HH(q) & 1) != 0) { return fk_nothing; }
+    int pid = (int)(FK_HH(p) >> 1);
+    long long ms = FK_HH(q) >> 1;
+    if (fk_cell_deadline_ms != 0) {
+        long long left = fk_cell_deadline_ms - fk_mono_ns() / 1000000LL;
+        if (left < 1) { left = 1; }
+        if (left < ms) { ms = left; }
+    }
+    int got = (int)waitpid(pid, &st, FK_WNOHANG);
+    if (got == pid) { return fk_wait_word(st); }
+    if (got < 0) { return -2; }
+    if (ms > 0) {
+        long long end = fk_mono_ns() + ms * 1000000LL;
+#if defined(__APPLE__)
+        int kq = kqueue();
+        if (kq < 0) { return (0 - 2) * 2; }
+        struct kevent ch, ev;
+        EV_SET(&ch, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, 0);
+        int r = -1;
+        for (;;) {
+            long long rem = end - fk_mono_ns();
+            if (rem < 1) { rem = 1; }
+            struct timespec ts;
+            ts.tv_sec = (long)(rem / 1000000000LL);
+            ts.tv_nsec = (long)(rem % 1000000000LL);
+            r = kevent(kq, &ch, 1, &ev, 1, &ts);
+            if (r >= 0 || errno != EINTR || fk_mono_ns() >= end) { break; }
+        }
+        close(kq);
+#elif defined(__linux__)
+        int fd = (int)syscall(434, pid, 0);   /* pidfd_open */
+        if (fd < 0) { return (0 - 2) * 2; }
+        for (;;) {
+            long long rem = (end - fk_mono_ns()) / 1000000LL;
+            if (rem < 1) { rem = 1; }
+            struct pollfd pf = { fd, POLLIN, 0 };
+            int r = poll(&pf, 1, (int)(rem > 2147483647 ? 2147483647 : rem));
+            if (r >= 0 || errno != EINTR || fk_mono_ns() >= end) { break; }
+        }
+        close(fd);
+#else
+        return (0 - 2) * 2;
+#endif
+    }
+    got = (int)waitpid(pid, &st, FK_WNOHANG);
+    if (got == pid) { return fk_wait_word(st); }
+    if (got < 0) { return -2; }
+    return fk_nothing;
+#endif
+}
+FK_PHASED(FK_PHASE_WAIT, long long, fk_rest_arm, (long long a), (a)) {
     volatile long long *wp[64];
     long long ws[64];
     long long ms = 0, woke = -1, nw = 0;
@@ -18890,12 +19009,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_host_spawn_arm(fk_walk(fk_node[i][1], fp), 161);
     }
     if (t == 156) {
-        /* host_wait pid: the child's exit status (signal death answers 128+signal), -1 when there is no such child */
-        long long pid156 = fk_walk(fk_node[i][1], fp) >> 1;
-        int st156 = 0;
-        if (waitpid((int)pid156, &st156, 0) < 0) { return -2; }
-        if ((st156 & 0x7f) == 0) { return ((long long)((st156 >> 8) & 0xff)) << 1; }
-        return ((long long)(128 + (st156 & 0x7f))) << 1;
+        /* host_wait pid, or (list pid ms): the child's exit status (fk_host_wait_arm) */
+        return fk_host_wait_arm(fk_walk(fk_node[i][1], fp));
     }
     if (t == 157) {
         /* host_kill pid: SIGTERM to the child; 0 sent, -1 refused */
@@ -21181,7 +21296,9 @@ static int fk_heat_reported;
  * main thread, which otherwise only waits for the run thread, samples every millisecond: the phase the run thread is
  * in (fk_phase, set by the C work that runs no Form code), else the recipe it is in (fk_cur_fn: walked, a Form page or a
  * C leaf alike). At the end of the run (and at each heat pulse) .fkwu-time.<pid> holds the samples by phase and by
- * recipe; observe/time-board-run.bml reads every board. The tables are fixed (no growth to race the sampler). */
+ * recipe; observe/time-board-run.bml reads every board. The tables are fixed (no growth to race the sampler).
+ * SHRINK PATH: none wanted for the sampler -- it is the host's clock reading the run thread, as a profiler's interrupt is;
+ * the board's reading and every judgment on it are Form's (observe/time-board-run.bml). */
 #define FK_PROF_FNS (1 << 20)
 #define FK_PROF_PHASES 12
 static unsigned int fk_prof_self[FK_PROF_FNS];
@@ -21227,17 +21344,30 @@ static void fk_time_write(void) {
         if (fk_prof_phase[p] > 0) { dprintf(fd, "phase %llu %s\n", fk_prof_phase[p], fk_prof_phase_name[p]); }
         p = p + 1;
     }
-    /* every recipe with a sample, named by the symbol map (a hot fn no symbol names prints as fn#N); a row says how it ran
-     * at the end: page (a Form page), leaf (the C loop lane), walk */
+    /* every recipe with a sample, named by the symbol map; a row says how it ran at the end: page (a Form page), leaf (the
+     * C loop lane), walk. Every sample is named: fn 0 is a unit's own top-level sequence, (top), and a fn no symbol names
+     * prints as fn#N, so the rows sum to the recipe phase */
+    static unsigned char named[FK_PROF_FNS / 8];
+    memset(named, 0, sizeof(named));
     long long j = 0;
     while (j < fk_fntop) {
         long long fx = fk_fnidx[j];
-        if (fx >= 0 && fx < FK_PROF_FNS && fx < fk_fn_count && (fk_prof_self[fx] > 0 || fk_prof_incl[fx] > 0)) {
+        if (fx >= 0 && fx < FK_PROF_FNS && fx < fk_fn_count && (fk_prof_self[fx] > 0 || fk_prof_incl[fx] > 0) &&
+            (named[fx >> 3] & (1u << (fx & 7))) == 0) {
+            named[fx >> 3] = (unsigned char)(named[fx >> 3] | (1u << (fx & 7)));
             long long b = fk_fn[fx];
             const char *how = (fx < fk_jit_cap && fk_jit_page[fx] != 0) ? "page" : (b >= 0 && b < fk_node_count && fk_node[b][0] == 194) ? "leaf" : "walk";
             dprintf(fd, "recipe %u %u %s %.*s\n", fk_prof_self[fx], fk_prof_incl[fx], how, (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
         }
         j = j + 1;
+    }
+    if (fk_prof_self[0] > 0) { dprintf(fd, "recipe %u %u walk (top)\n", fk_prof_self[0], fk_prof_incl[0]); }
+    long long fx = 1;
+    while (fx < FK_PROF_FNS) {
+        if ((fk_prof_self[fx] > 0 || fk_prof_incl[fx] > 0) && (named[fx >> 3] & (1u << (fx & 7))) == 0) {
+            dprintf(fd, "recipe %u %u walk fn#%lld\n", fk_prof_self[fx], fk_prof_incl[fx], fx);
+        }
+        fx = fx + 1;
     }
     if (close(fd) != 0 || rename(tmp, path) != 0) { unlink(tmp); }
 }
@@ -21565,6 +21695,7 @@ static long long fk_smknode(long long t0, long long c1, long long c2, long long 
     fk_node[k][1] = c1;
     fk_node[k][2] = c2;
     fk_node[k][3] = c3;
+    if (t0 == 24) { fk_lit_pin(c1); }
     return k;
 }
 static long long fk_smklit(long long v) {
@@ -25377,6 +25508,10 @@ static void fk_string_table_reset(void) {
     fk_sinit();
     fk_sp = 0;
     fk_sbp = 0;
+    /* no slot is dead, freed or a literal's in a table that starts over: a free list kept across the reset would hand out
+     * an index that is now a live string of the new table */
+    fk_sfree_n = 0;
+    memset(fk_sdead, 0, (unsigned long)fk_scap_s);
     fk_holn = 0;
     fk_hole_bytes = 0;
     fk_holhint = 0;
@@ -25657,6 +25792,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         fk_fkb_read_table_string();
         i = i + 1;
     }
+    fk_lit_pin_rows(node_base, node_base + nr);
     i = 1;
     while (i < nf) {
         fk_fn[fn_base + i - 1] = fn_roots[i] < 0 ? fn_roots[i] : fn_roots[i] + node_base;
@@ -26081,6 +26217,8 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         fk_fkb_read_table_string();
         i = i + 1;
     }
+    fk_hold_n = 0;   /* every hold of the image starts empty */
+    fk_lit_pin_rows(0, nr);
     if (!fk_fkb_restore_symbol_image(version)) {
         return 0;
     }
@@ -26247,6 +26385,7 @@ static void fk_src_reset_compile_state(void) {
     fk_fname_n = 0;
     fk_fn_count = 1;
     fk_node_count = 0;
+    fk_hold_n = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
     fk_nerr = 0;
@@ -28285,6 +28424,8 @@ static int fk_run_feval(const char *path) {
     /* same parse+walk pipeline as fk_run_src */
     fk_fname_n = 0;
     fk_node_count = 0;
+    fk_hold_n = 0;
+    fk_lit_unpin_all();   /* the rows start over and the strings stay: a literal of the old rows is the melt's again */
     fk_bd_top = 0;
     fk_maxslot = 0;
     fk_nerr = 0;

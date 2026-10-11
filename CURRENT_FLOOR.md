@@ -1068,7 +1068,9 @@ Every fkwu run that lasts a fifth of a second leaves a time board, `.fkwu-time.<
 process's main thread samples it a millisecond apart. Each sample records the C phase the run is in (melt, string-melt,
 load, parse, image, file, child, wait, gpu, net) or, when no phase holds it, the recipe running: walked, a Form page or
 a C leaf. It also credits every recipe on the frame chain once, so the board holds each recipe's own time and the time
-under it. `./fkwu observe/time-board-run.bml` reads every board in a directory (`{"dir":…}`, `{"top":n}`, `{"take":1}`).
+under it. Every sample is named: a unit's top-level sequence is `(top)`, a fn no symbol names is `fn#N`. A rest
+(`host_sleep_ms`) is wait and a child's end (`host_wait`) is child, so a recipe's own time is work, not a wait inside it.
+`./fkwu observe/time-board-run.bml` reads every board in a directory (`{"dir":…}`, `{"top":n}`, `{"take":1}`).
 
 Lowering form-find.bml warm takes 3.3 s:
 
@@ -1077,6 +1079,24 @@ Lowering form-find.bml warm takes 3.3 s:
 - 20% is fingerprinting the compiler's own sources (`bfc-pin`).
 
 A cold run, after a seed build, takes 16 s, because every image is rebuilt by the new binary.
+
+Lowering form-cli-local-plan.bml warm takes 4 s, and a third of it is the type index (`fsc-bml-type-index-into` 28%,
+`fsc-bml-type-find` 6%). A melt there is 3% of the run, and almost all of it is the string melt's pass over the
+strings: the pair copy is 0.2%. A melt visits the held once-holds from their list and frees around the AST's literals
+(`fk_sdead` 2), so its cost follows the live heap and the strings, never the program's AST.
+
+The drift gates took 22 minutes on 2026-10-11, and two gates were 98% of it: form-cli-build (1,000 s) and
+bml-cursor-coverage (341 s). The form-cli build compiles about two hundred units in one process from a sealed body; the
+seal carries `form-stdlib/bml/jit-page.bml`, the seed's own Form unit, so that compile runs its hot recipes as pages
+(the walked FNV fingerprint was 9% of it). Each unit's packet joins its compiler closure's manifest in halves: 4,000
+rows in 18 ms, where a right-recursive join took 2 s and 13% of the compile. A sweep shard measured the same day (75
+workloads, 12 minutes) spent 9% in that manifest, 6% in the type index, 9% waiting on children, 8% on the GPU and 7%
+melting.
+
+A child with a deadline is waited on by its end: `host_wait [pid, ms]` sleeps in the host (kqueue `EVFILT_PROC` on
+Darwin, a pidfd under poll on Linux) and answers `nothing()` when no exit arrived by the deadline. host-child.bml,
+the BML lowering's run watch and the token workspace's body calls rest on it; none of them looks at `host_alive` on a
+clock.
 
 ## The JIT
 
