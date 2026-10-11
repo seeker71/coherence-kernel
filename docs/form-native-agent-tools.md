@@ -304,11 +304,13 @@ and executable lookup are never evaluated. Pass intermediate output as a Form
 value to the next call. For `rg`, nonempty held input replaces the search corpus;
 pass the explicit `-` path to search an empty held input without selecting the
 resident corpus. The returned document state always remains the caller's corpus.
-When a read reports a missing resident source, the tool boundary resolves the
-declared import closure and floor libraries, then repeats the original operation
-before returning. Organ-health frames carry the missing evidence, applied care
-and fresh availability, including care duration. Imported source stays read-only;
-file reads are counted and the caller's returned corpus stays unchanged.
+Read, search and text operations acquire needed source through the same native
+resolver as API lookup and consume it once. Requested files take priority in the
+declared graph, and traversal ends when they are available. Form sources include
+their implicit floor libraries; plain data has no implicit imports. Organ-health
+frames carry the need, acquisition duration and observed availability. Imported
+source stays read-only; file reads are counted and returned documents keep their
+original ownership.
 
 The existing `fc-respond` text face dispatches read-only tools against the tool
 catalog already resident in form-cli. It does not load a workspace. It refuses
@@ -420,8 +422,8 @@ The wire's command reader also handles a single human-shaped command such as
 `jq -nr --arg x 'a b' '$x'`; its stdout is `a b\n`. Its deliberate errors
 (`shell-syntax-not-supported`, an unsupported option,
 malformed JSON, an ambiguous edit, or an absent resident path) are structured
-results. Missing resident-source results receive native import resolution in the
-same call. An unavailable source remains a resource need; invalid values retain
+results. Source evidence is acquired within the operation, before consumption.
+An unavailable source remains a resource need; invalid values retain
 their diagnostic. Read the resulting native observation before choosing the next
 action.
 
