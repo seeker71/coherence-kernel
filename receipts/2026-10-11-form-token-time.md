@@ -38,7 +38,14 @@ association); aligned wide loads gave NaN on the real model's buffers while the 
 drains, so a cycle told `shared` slept 34 minutes behind a neighbour; the default `export` of the trainer door was the
 serving adapter's own directory.
 
-Still open (named, not hidden): the day-turn and the band sweeps do not take the GPU lease, so their time-slices still
+Confirmation from the landed main (ae3a18307, 19:05 to 19:25, defaults only, nothing about a chain's length told): 66 of 81
+exact, forged 0, truncated 2, held-out loss 2.700 to 0.029; train stage 787 s, evaluation 371 s. The train stage was slower
+than the 563 s above because the machine was heavily shared (a day-turn at 97% CPU, a drift-gates run, a build and a band
+sweep at once): a row's forward and backward read 0.8 s and 0.5 s here against 0.5 s and 0.3 s, the same code. The spread
+between the two runs is the neighbours' share, which the lease does not yet cover.
+
+Still open (named, not hidden): early stopping on a held-out check (the training loss wanders between 0.003 and 0.4 from
+round 60 on while the held-out loss ends at 0.03 to 0.04, so some of the 100 steps are spent past the gain); the day-turn and the band sweeps do not take the GPU lease, so their time-slices still
 inflate timings; the corpus digest is a 4 s Form SHA-256; the 17 MB tokenizer JSON parses in 3 s; forward and backward
 are 25% non-device (a decode token is 621 dispatches, fusing q/k/v and gate/up would cut a fifth); `eval-compare`,
 `eval-refusal` and `recipe-import` (10 refusals) are the model's own gaps, now visible without a harness ceiling over them.
