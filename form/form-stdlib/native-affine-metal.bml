@@ -18,7 +18,8 @@ section [form.bml] {
   field AffineIndexWord = 4294967296;
   def nam-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" + ((String) nam-linear-msl() + nam-basic-msl());
   def nam-linear-msl() = "
-inline float nam_read(device const uchar* p, uint i, uint ty) {uint at=i*(ty==0?4:2);uint bits=uint(p[at])|(uint(p[at+1])<<8);if(ty==0)return as_type<float>(bits|(uint(p[at+2])<<16)|(uint(p[at+3])<<24));if(ty==1)return float(as_type<half>(ushort(bits)));return as_type<float>(bits<<16);}
+inline float nam_read(device const uchar* p, uint i, uint ty) {if(ty==0)return as_type<float>(((device const uint*)p)[i]);ushort h=((device const ushort*)p)[i];if(ty==1)return float(as_type<half>(h));return as_type<float>(uint(h)<<16);}
+inline uint nam_g(uint r, uint cols, uint c, uint group) { return r*(cols/group)+c/group; }
 inline float nam_w(device const uchar* w, device const uchar* s, device const uchar* b, uint i, uint group, uint ty) { return float((w[i/2] >> ((i%2)*4))&15)*nam_read(s,i/group,ty)+nam_read(b,i/group,ty); }
 kernel void nam_affine(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& transpose [[buffer(10)]], constant uint& first_lo [[buffer(11)]], constant uint& first_hi [[buffer(12)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
  ulong index=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gid); uint width=transpose?cols:rows; ulong token=index/width; uint r=uint(index%width); if(token>=tokens) return; float a=0; uint n=transpose?rows:cols; for(uint c=lane;c<n;c+=32) { uint wi=transpose?c*cols+r:r*cols+c; a+=nam_w(w,s,b,wi,group,ty)*x[token*n+c]; } a=simd_sum(a); if(lane==0) y[index]=a;
@@ -28,7 +29,7 @@ kernel void nam_affine_mt(device const uchar* w [[buffer(0)]], device const ucha
  float acc[8]={0,0,0,0,0,0,0,0}; ulong rowbase=ulong(r)*ulong(cols);
  for(uint c=lane*8;c<cols;c+=256) {
   ulong wi=rowbase+c; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
-  uint g=uint(wi/group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty); float wv[8];
+  uint g=nam_g(r,cols,c,group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty); float wv[8];
   for(uint j=0;j<8;j++) wv[j]=float((word>>(4*j))&15)*sc+bi;
   for(uint t=0;t<8;t++) { if(tb+t<tokens) { device const float* xp=x+ulong(tb+t)*cols+c; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4); acc[t]+=wv[0]*x0.x+wv[1]*x0.y+wv[2]*x0.z+wv[3]*x0.w+wv[4]*x1.x+wv[5]*x1.y+wv[6]*x1.z+wv[7]*x1.w; } }
  }
@@ -42,34 +43,24 @@ kernel void nam_affine_mt4(device const uchar* w [[buffer(0)]], device const uch
   for(uint t=0;t<8;t++) { if(tb+t<tokens) { device const float* xp=x+ulong(tb+t)*cols+c; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4); xv[t][0]=x0.x; xv[t][1]=x0.y; xv[t][2]=x0.z; xv[t][3]=x0.w; xv[t][4]=x1.x; xv[t][5]=x1.y; xv[t][6]=x1.z; xv[t][7]=x1.w; } else { for(uint j=0;j<8;j++) xv[t][j]=0; } }
   for(uint q=0;q<4;q++) {
    ulong wi=ulong(rb+q)*ulong(cols)+c; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
-   uint g=uint(wi/group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty); float wv[8];
+   uint g=nam_g(rb+q,cols,c,group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty); float wv[8];
    for(uint j=0;j<8;j++) wv[j]=float((word>>(4*j))&15)*sc+bi;
    for(uint t=0;t<8;t++) { acc[q][t]+=wv[0]*xv[t][0]+wv[1]*xv[t][1]+wv[2]*xv[t][2]+wv[3]*xv[t][3]+wv[4]*xv[t][4]+wv[5]*xv[t][5]+wv[6]*xv[t][6]+wv[7]*xv[t][7]; }
   }
  }
  for(uint q=0;q<4;q++) for(uint t=0;t<8;t++) { float v=simd_sum(acc[q][t]); if(lane==0 && tb+t<tokens) y[ulong(tb+t)*rows+rb+q]=v; }
 }
+inline float nam_chunk(device const uchar* w, device const uchar* s, device const uchar* b, device const float* x, uint r, uint cols, uint c, uint group, uint ty) {
+ ulong wi=ulong(r)*ulong(cols)+c; uint word=((device const uint*)w)[wi/8];
+ uint g=nam_g(r,cols,c,group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty);
+ device const float* xp=x+c; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4);
+ float w0=float(word&15)*sc+bi; float w1=float((word>>4)&15)*sc+bi; float w2=float((word>>8)&15)*sc+bi; float w3=float((word>>12)&15)*sc+bi; float w4=float((word>>16)&15)*sc+bi; float w5=float((word>>20)&15)*sc+bi; float w6=float((word>>24)&15)*sc+bi; float w7=float((word>>28)&15)*sc+bi;
+ return w0*x0.x+w1*x0.y+w2*x0.z+w3*x0.w+w4*x1.x+w5*x1.y+w6*x1.z+w7*x1.w;
+}
 kernel void nam_affine_v1(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& first_lo [[buffer(10)]], constant uint& first_hi [[buffer(11)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
  ulong r=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gid); if(r>=rows) return; float acc=0; ulong rowbase=r*ulong(cols);
  for(uint c=lane*8;c<cols;c+=256) {
-  ulong wi=rowbase+c; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
-  uint g=uint(wi/group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty);
-  device const float* xp=x+c; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4);
-  float sx=x0.x+x0.y+x0.z+x0.w+x1.x+x1.y+x1.z+x1.w;
-  float d=float(word&15)*x0.x+float((word>>4)&15)*x0.y+float((word>>8)&15)*x0.z+float((word>>12)&15)*x0.w+float((word>>16)&15)*x1.x+float((word>>20)&15)*x1.y+float((word>>24)&15)*x1.z+float((word>>28)&15)*x1.w;
-  acc+=sc*d+bi*sx;
- }
- acc=simd_sum(acc); if(lane==0) y[r]=acc;
-}
-kernel void nam_affine_v2(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& first_lo [[buffer(10)]], constant uint& first_hi [[buffer(11)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
- ulong r=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gid); if(r>=rows) return; float acc=0; ulong rowbase=r*ulong(cols);
- for(uint c=lane*16;c<cols;c+=512) {
-  ulong wi=rowbase+c; ulong at=wi/2; uint w0=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24); uint w1=uint(w[at+4])|(uint(w[at+5])<<8)|(uint(w[at+6])<<16)|(uint(w[at+7])<<24);
-  uint g=uint(wi/group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty);
-  device const float4* xp=(device const float4*)(x+c); float4 x0=xp[0]; float4 x1=xp[1]; float4 x2=xp[2]; float4 x3=xp[3];
-  float sx=x0.x+x0.y+x0.z+x0.w+x1.x+x1.y+x1.z+x1.w+x2.x+x2.y+x2.z+x2.w+x3.x+x3.y+x3.z+x3.w;
-  float d=float(w0&15)*x0.x+float((w0>>4)&15)*x0.y+float((w0>>8)&15)*x0.z+float((w0>>12)&15)*x0.w+float((w0>>16)&15)*x1.x+float((w0>>20)&15)*x1.y+float((w0>>24)&15)*x1.z+float((w0>>28)&15)*x1.w+float(w1&15)*x2.x+float((w1>>4)&15)*x2.y+float((w1>>8)&15)*x2.z+float((w1>>12)&15)*x2.w+float((w1>>16)&15)*x3.x+float((w1>>20)&15)*x3.y+float((w1>>24)&15)*x3.z+float((w1>>28)&15)*x3.w;
-  acc+=sc*d+bi*sx;
+  acc+=nam_chunk(w,s,b,x,uint(r),cols,c,group,ty);
  }
  acc=simd_sum(acc); if(lane==0) y[r]=acc;
 }
@@ -158,13 +149,17 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   // Four rows a simdgroup when the row count allows (every projection of the 3B model does): the block of 8 tokens' activations is
   // read once into registers and serves four rows, a quarter of the activation traffic that bound the one-row kernel.
   def nam-mt-four?(view) = (view[3] % 4) == 0;
-  // One token (the voice's decode, 5 tokens a second before this): a block of 8 tokens wastes seven of its lanes of work, so one row a
-  // simdgroup with each lane taking 16 contiguous columns (8 when the columns or the group are not a multiple of 16), the packed
-  // words read as wide as the lane can use and the scale and bias applied once per lane to the sum of its products.
-  def nam-dec16?(view) = (view[4] % 16) == 0 && (view[5] % 16) == 0;
+  // One token (the voice's decode): a block of 8 tokens wastes seven of its lanes of work, so one row a simdgroup, each lane taking 8
+  // contiguous columns at a time in the order the block kernels take them. The arithmetic is the block kernels' own, dequantize then
+  // multiply, so a token decoded alone equals the same token inside a block bit for bit: the trainer's head check holds that
+  // equality (a first decode kernel that factored the scale out of the sum differed by 3e-6 and the check stopped the trainer,
+  // 2026-10-11). The group index of a weight is computed in 32 bits (nam_g): the 64-bit division by the runtime group size that
+  // every lane did each step was most of the kernel (eight products of the 3B shape at one token: 3,426 us of device time -> 598;
+  // the block kernel 4,879 -> 2,384; observe/decode-matvec-probe-run.bml reads it).
   def nam-dec8?(view) = (view[4] % 8) == 0 && (view[5] % 8) == 0;
-  def nam-decode?(view, tokens) = tokens == 1 && nam-dec8?(view);
-  def nam-mt-kernel(view, tokens) = nam-decode?(view, tokens) ? (nam-dec16?(view) ? "nam_affine_v2" : "nam_affine_v1") : nam-mt-four?(view) ? "nam_affine_mt4" : "nam_affine_mt";
+  // only where the block kernel is the four-row one: the one-row block kernel is compiled to a different fused-multiply order (45 rows, 1e-5)
+  def nam-decode?(view, tokens) = tokens == 1 && nam-mt-four?(view) && nam-dec8?(view);
+  def nam-mt-kernel(view, tokens) = nam-decode?(view, tokens) ? "nam_affine_v1" : nam-mt-four?(view) ? "nam_affine_mt4" : "nam_affine_mt";
   def nam-mt-groups(view,tokens) = nam-decode?(view, tokens) ? view[3] : (nam-mt-four?(view) ? view[3] / 4 : view[3]) * ((tokens + 7) / 8);
   def nam-linear-mt(view,x,y,tokens) = tokens <= 0 ? form_error("native affine token count must be positive") : nam-linear-mt-grid(view,x,y,tokens,0,nam-mt-groups(view,tokens));
   def nam-linear-mt-grid(view,x,y,tokens,first,count) = first >= count ? 1 : {

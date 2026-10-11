@@ -1,0 +1,77 @@
+// decode-matvec-probe-run.bml — where the time of a one-token product goes: wall clock against the device's own busy time.
+//
+//   ./fkwu observe/decode-matvec-probe-run.bml
+//
+// Eight products of the real 3B shape (8192 rows by 3072 columns, group 64, 4-bit) at one token, to one sync, through the reference
+// (nam_affine, a simdgroup an output), the block kernel (nam_affine_mt4 with seven of its eight token lanes idle) and the one-token
+// kernels; each printed as wall ms, device busy us (metal_live word 11) and dispatches (word 7), the minimum of five runs. The
+// weights are a 4096-byte pattern tiled to length, as native-affine-mt-band.bml builds them.
+// preflight-exec: forbidden
+import form-stdlib/native-affine-metal.bml;
+import form-stdlib/metal-carrier.bml;
+section [form.bml] {
+ class DecodeMatvecProbeRun {
+  def dmp-pat(salt) = str-join(map(i => byte_to_str(((i * 2654435761) + (salt * 40503) + 12345) % 256), range(0, 4096)));
+  def dmp-rep(pat, times) = times <= 1 ? pat : dmp-rep-go(dmp-rep(pat, times / 2), pat, times % 2);
+  def dmp-rep-go(half, pat, odd) = odd == 0 ? half ++ half : half ++ half ++ pat;
+  def dmp-fill(pat, n) = substring(dmp-rep(pat, (n + len(pat) - 1) / len(pat)), 0, n);
+  def dmp-f32-pat(salt) = nam-f32s(map(i => (((i * 53 + salt) % 17) + 1) / 16.0, range(0, 1024)));
+  def dmp-x-pat() = nam-f32s(map(i => (((i * 37) % 101) - 50) / 25.0, range(0, 1024)));
+  def dmp-buf(floats, bytes) = nam-write(nam-alloc(floats), bytes);
+  def dmp-view(rows, cols, group) {
+   let n = rows * (cols / group);
+   [dmp-buf((rows * cols) / 8, dmp-fill(dmp-pat(1), (rows * cols) / 2)), dmp-buf(n, dmp-fill(dmp-f32-pat(3), n * 4)), dmp-buf(n, dmp-fill(dmp-f32-pat(7), n * 4)), rows, cols, group, 0];
+  }
+  def dmp-kernel-grid(kernel, view, x, y, tokens, groups) = nam-run(kernel, [view[0], view[1], view[2], x, y], [view[3], view[4], tokens, view[5], view[6], 0, 0], groups, 1);
+  def dmp-send(kernel, view, x, y, n) = n <= 0 ? 1 : dmp-send-next(kernel, view, x, y, n, dmp-kernel-grid(kernel, view, x, y, 1, kernel == "nam_affine_mt4" ? view[3] / 4 : view[3]));
+  def dmp-send-next(kernel, view, x, y, n, sent) = dmp-send(kernel, view, x, y, n - 1);
+  // [wall ms, busy us, dispatches] of eight dispatches to one sync
+  def dmp-once(kernel, view, x, y) {
+   let b0 = metal_live();
+   let t0 = host_monotonic_ms();
+   let sent = dmp-send(kernel, view, x, y, 8);
+   let done = nam-sync();
+   let t1 = host_monotonic_ms();
+   let b1 = metal_live();
+   [t1 - t0, b1[11] - b0[11], b1[7] - b0[7]];
+  }
+  def dmp-min(rs) = foldl((m, r) => nothing?(m) || r[1] < m[1] ? r : m, nothing(), rs);
+  def dmp-best(kernel, view, x, y) {
+   let warm = dmp-once(kernel, view, x, y);
+   dmp-min(map(i => dmp-once(kernel, view, x, y), range(0, 5)));
+  }
+  def dmp-line(kernel, view, x, y) {
+   let r = dmp-best(kernel, view, x, y);
+   print_str(kernel ++ ": wall " ++ r[0].str() ++ " ms, device busy " ++ r[1].str() ++ " us, dispatches " ++ r[2].str() ++ " (eight products)");
+  }
+  // the same bytes moved by nam_copy (3.1 million floats = the 12.6 MB of one product's weights, read and written): what the device does with this traffic now
+  def dmp-copies(a, b, n) = n <= 0 ? 1 : dmp-copies-next(a, b, n, nam-copy(a, b, 3145728));
+  def dmp-copies-next(a, b, n, sent) = dmp-copies(a, b, n - 1);
+  def dmp-copy-once(a, b) {
+   let b0 = metal_live();
+   let t0 = host_monotonic_ms();
+   let sent = dmp-copies(a, b, 8);
+   let done = nam-sync();
+   [host_monotonic_ms() - t0, metal_live()[11] - b0[11]];
+  }
+  def dmp-copy-line() {
+   let a = nam-alloc(3145728); let b = nam-alloc(3145728);
+   let warm = dmp-copy-once(a, b);
+   let rs = map(i => dmp-copy-once(a, b), range(0, 5));
+   let best = foldl((m, r) => nothing?(m) || r[1] < m[1] ? r : m, nothing(), rs);
+   print_str("nam_copy of the same bytes: wall " ++ best[0].str() ++ " ms, device busy " ++ best[1].str() ++ " us (eight copies)");
+  }
+  def dmp-run() {
+   let a = mca-admit(".hearth/carrier.log", ".hearth/carrier.err");
+   let view = dmp-view(8192, 3072, 64);
+   let x = dmp-buf(3072, dmp-fill(dmp-x-pat(), 3072 * 4));
+   let y = nam-alloc(8192);
+   let lines = map(k => dmp-line(k, view, x, y), ["nam_affine_mt4", "nam_affine_v1"]);
+   let ref = nam-run("nam_affine", [view[0], view[1], view[2], x, y], [view[3], view[4], 1, view[5], view[6], 0, 0, 0], 8192, 1);
+   let done = nam-sync();
+   let floor = dmp-copy-line();
+   0;
+  }
+ }
+ dmp-run();
+}
