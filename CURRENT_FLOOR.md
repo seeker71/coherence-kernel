@@ -431,6 +431,26 @@ local, request, lineage or global scope, eval reaches every door the runtime car
 defines, and each control answers within its deadline. Bands: `form-token-verbs-band` 4095,
 `form-token-workspace-band` 4095, `form-token-grammar-band` 1023. The trace corpus is 596 rows in sixteen families.
 
+Where a Form-token training run's time went, read 2026-10-11 from the run's own events (`observe/form-token-time-run.bml`;
+the baseline of 61 rounds on the earlier kernels: 2,914 s, of which the rounds 85%, the baseline validation 9.6%, opening the
+model 2.1%; the device busy for 95 to 98% of every row's wall): the cost was the device's, and inside it the affine products.
+Healed in the kernels and the runtime, each held by a band and by real rows (the first four held-out rows score 3.0603, 3.8659,
+3.7769, 2.8982 under every kernel; round 1 of a real run reads loss 2.943590 and gradient norm 32.93399 as before):
+the group index of a weight in 32 bits (a 64-bit division by the runtime group size in every lane was most of the kernel);
+contraction off over the affine unit, so a token alone and the same token in a block agree in the last bit (a first decode
+kernel that factored the scale out of the sum differed by 3e-6 and the trainer's exact head check stopped it); a one-token
+decode kernel (`nam_affine_v1`, 3.4 ms to 0.6 ms for eight 3B products); sixteen tokens and more on the matrix unit forward
+and backward (`nam_affine_mma` 4.4 times the block kernel, `form_affine4_t_mma_f32` 9 times the scalar walk; the head check
+answers to 1e-4 of the logits because the hardware chooses the association); records in fkwu find a key by a hash of its bytes
+once they hold 24 (`fk_rfind`, `record-hash-band` 31), so the Llama tokenizer's tables are records and opening the voice fell
+from 52 to 6 seconds, tokenization identical over 256,038 corpus ids; `nlg-open` holds the machine's one GPU lease until
+`nlg-close` (`gpu-lease-inherit-band` 15) and the cycle holds it across its stages. Aligned wide loads of scales gave NaN on
+the real model's buffers while the band's synthetic ones passed: a kernel change goes through
+`observe/native-lora-score-bench-run.bml` on real rows before the trainer. Bands: `native-affine-mt-band` 511,
+`affine4-t-mma-band` 7, `affine4-t-band` 63. Still open: the baseline validation re-scores 81 unchanged rows every run
+(cacheable by adapter and row), the corpus digest is a 4 s Form SHA-256, and the neighbours' time-slices (a day-turn, band
+sweeps) inflate every timing until their doors take the lease too.
+
 ### The GPU lanes
 
 Every layer is a Form recipe first and then a carrier on a GPU, held to that recipe. Four light
