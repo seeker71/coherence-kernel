@@ -1262,11 +1262,15 @@ section [form.bml] {
   def ftv-follow-word?(w) = any?(s => s == w, ftv-follow-words());
   def ftv-follows?(terms) = !nil?(terms) && all?(ftv-follow-word?, map(ftv-lower, terms));
   def ftv-lane-word?(w) = w == "query";
+  def ftv-ask-words() = ["who", "where", "when", "what", "how", "why"];
+  def ftv-ask-word?(w) = any?(s => s == w, ftv-ask-words());
+  def ftv-raw-words(payload) = filter(w => len(w) >= 3, map(ftv-lower, ftv-words(payload)));
+  def ftv-asks?(payload) = any?(ftv-ask-word?, ftv-raw-words(payload));
   def ftv-thread-term?(terms, w) = any?(t => ftv-lower(t) == ftv-lower(w), terms);
   def ftv-mentions?(prior, terms) = any?(w => ftv-thread-term?(prior, w), terms);
   def ftv-thread(session) = record_get(session, "thread");
-  def ftv-threaded?(t) = (value_kind(t) == "list") && (len(t) == 3);
-  def ftv-thread-put(session, terms, offered, deepened) = record_set(session, "thread", [terms, offered, deepened]);
+  def ftv-threaded?(t) = (value_kind(t) == "list") && (len(t) == 4);
+  def ftv-thread-put(session, terms, offered, deepened, context) = record_set(session, "thread", [terms, offered, deepened, context]);
   def ftv-thread-field(session, i) {
    let t = ftv-thread(session);
    ftv-threaded?(t) ? t[i] : [];
@@ -1283,10 +1287,26 @@ section [form.bml] {
    (at < 0) || (colon < 0) ? "" : substring(row, at + 9, colon);
   }
   def ftv-shown(rows) = filter(n => len(n) > 0, map(ftv-name-of, rows));
-  def ftv-thread-seed(session, goal, offered, deepened) {
+  def ftv-thread-seed(session, goal, offered, deepened, context) {
    let terms = take(6, ftv-terms(goal));
-   nil?(terms) ? 0 : ftv-thread-put(session, terms, ftv-commas(offered), ftv-commas(deepened));
+   nil?(terms) ? 0 : ftv-thread-put(session, terms, ftv-commas(offered), ftv-commas(deepened), context);
   }
+  def ftv-context-of(session) {
+   let t = ftv-thread(session);
+   ftv-threaded?(t) ? t[3] : "";
+  }
+  def ftv-bare(answer) = ftv-starts?(answer, "value=") && ftv-ends?(answer, ";") ? substring(answer, 6, len(answer) - 1) : answer;
+  def ftv-clip-segments(text, max) {
+   let parts = ftv-split(text, " | ");
+   len(text) <= max || nil?(parts) ? text : ftv-clip-from(parts, max);
+  }
+  def ftv-clip-from(parts, max) = nil?(parts) ? "" : len(ftv-join(parts, " | ")) <= max ? ftv-join(parts, " | ") : ftv-clip-from(parts[1:], max);
+  def ftv-context-add(prior, answer) {
+   let bare = ftv-bare(answer);
+   let joined = (len(prior) == 0) || (bare == prior) ? bare : len(bare) == 0 ? prior : prior ++ " | " ++ bare;
+   ftv-clip-segments(joined, 4000);
+  }
+  def ftv-spoken(text) = ftv-clip-segments(text, ftv-max-render() - 8);
   def ftv-deeper-row(session, name) {
    let text = read_file(ftv-receipt-dir(session) ++ "/" ++ name) ?? "";
    let nl = str_find(text, byte_to_str(10), 0);
@@ -1305,9 +1325,15 @@ section [form.bml] {
    let thread = ftv-thread(session);
    ftv-threaded?(thread) && (ftv-mentions?(thread[0], terms) || any?(ftv-lane-word?, map(ftv-lower, terms)));
   }
+  def ftv-only-thread?(session, payload) {
+   let thread = ftv-thread(session);
+   let rest = filter(w => !ftv-ask-word?(w) && !ftv-follow-word?(w) && !ftv-lane-word?(w), ftv-raw-words(payload));
+   ftv-threaded?(thread) && (nil?(rest) || all?(w => ftv-thread-term?(thread[0], w), rest));
+  }
   def ftv-knowledge(session, payload) {
    let terms = ftv-control?(payload) ? [] : take(6, ftv-terms(payload));
    if ftv-control?(payload) then ftv-nothing("nested-control")
+   else if ftv-asks?(payload) && ftv-only-thread?(session, payload) then ftv-knowledge-asked(session, payload)
    else if nil?(terms) then ftv-nothing("no-terms")
    else if ftv-follows?(terms) then ftv-knowledge-continue(session)
    else if ftv-mentions-thread?(session, terms) then ftv-knowledge-widen(session, terms)
@@ -1321,8 +1347,9 @@ section [form.bml] {
   }
   def ftv-knowledge-ask(session, terms) {
    let rows = append(ftv-enrich-rows(session, terms), ftv-receipt-rows(session, terms));
-   let kept = ftv-thread-put(session, terms, ftv-shown(rows), []);
-   ftv-knowledge-rows(rows);
+   let answer = ftv-knowledge-rows(rows);
+   let kept = ftv-thread-put(session, terms, ftv-shown(rows), [], ftv-bare(answer));
+   answer;
   }
   def ftv-knowledge-continue(session) {
    let thread = ftv-thread(session);
@@ -1333,8 +1360,64 @@ section [form.bml] {
    !nil?(rows) ? ftv-knowledge-kept(session, terms, append(offered, ftv-shown(rows)), deepened, rows) : ftv-knowledge-deeper(session, terms, offered, deepened);
   }
   def ftv-knowledge-kept(session, terms, offered, deepened, rows) {
-   let kept = ftv-thread-put(session, terms, offered, deepened);
-   ftv-knowledge-rows(rows);
+   let answer = ftv-knowledge-rows(rows);
+   let context = ftv-context-add(ftv-context-of(session), answer);
+   let kept = ftv-thread-put(session, terms, offered, deepened, context);
+   ftv-value-result(ftv-spoken(context));
+  }
+  def ftv-ask-kind(payload) {
+   let words = filter(ftv-ask-word?, ftv-raw-words(payload));
+   nil?(words) ? "what" : words[0];
+  }
+  def ftv-segments(context) = len(context) == 0 ? [] : ftv-split(context, " | ");
+  def ftv-after(seg) {
+   let at = str_find(seg, ": ", 0);
+   at < 0 ? seg : substring(seg, at + 2, len(seg));
+  }
+  def ftv-before(seg) {
+   let at = str_find(seg, ": ", 0);
+   at < 0 ? seg : substring(seg, 0, at);
+  }
+  def ftv-title-of(seg) {
+   let after = ftv-after(seg);
+   let bracket = str_find(after, " [", 0);
+   bracket < 0 ? after : trim(substring(after, 0, bracket));
+  }
+  def ftv-body?(seg) = str_find(ftv-after(seg), ".", 0) >= 0;
+  def ftv-date-of(seg) {
+   let name = ftv-name-of(seg);
+   (len(name) >= 10) && (str_byte_at(name, 4) == 45) && (str_byte_at(name, 7) == 45) ? substring(name, 0, 10) : "";
+  }
+  def ftv-brackets(seg) {
+   let at = str_find(seg, "[", 0);
+   let end = at < 0 ? -1 : str_find(seg, "]", at);
+   (at < 0) || (end < 0) ? "" : substring(seg, at + 1, end);
+  }
+  def ftv-where-of(seg) {
+   let path = ftv-before(seg);
+   let bracket = ftv-brackets(seg);
+   ftv-starts?(path, "receipts/") ? path : len(bracket) > 0 ? bracket : path;
+  }
+  def ftv-reading(kind, context) {
+   let segs = ftv-segments(context);
+   if kind == "who" then ftv-join(ftv-distinct(map(ftv-title-of, segs), []), " | ")
+   else if kind == "where" then ftv-join(ftv-distinct(map(ftv-where-of, segs), []), " | ")
+   else if kind == "when" then ftv-join(ftv-distinct(filter(d => len(d) > 0, map(ftv-date-of, segs)), []), " | ")
+   else if kind == "how" then ftv-join(filter(ftv-body?, segs), " | ")
+   else if kind == "why" then ftv-why(filter(ftv-body?, segs))
+   else context;
+  }
+  def ftv-why(bodies) = nil?(bodies) ? "" : ftv-after(bodies[0]);
+  def ftv-knowledge-asked(session, payload) {
+   let kind = ftv-ask-kind(payload);
+   let reading = ftv-reading(kind, ftv-context-of(session));
+   if len(reading) > 0 then ftv-value-result(ftv-spoken(reading)) else if (kind == "how") || (kind == "why") then ftv-asked-deeper(session, kind) else ftv-nothing("no-" ++ kind);
+  }
+  def ftv-asked-deeper(session, kind) {
+   let thread = ftv-thread(session);
+   let gathered = ftv-knowledge-deeper(session, thread[0], thread[1], thread[2]);
+   let reading = ftv-reading(kind, ftv-context-of(session));
+   len(reading) > 0 ? ftv-value-result(ftv-spoken(reading)) : gathered;
   }
   def ftv-knowledge-deeper(session, terms, offered, deepened) {
    let row = ftv-next-deep(session, offered, deepened);
