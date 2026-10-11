@@ -879,6 +879,7 @@ var sourceRouteLanguagePreludes = []string{
 	"source-compiler.fk",
 	"json.fk",
 	"core.fk",
+	"bounded-health-projection.fk",
 	"sha256.fk",
 	"choice-receipt.fk",
 	"branch-choice-order.fk",
