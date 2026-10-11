@@ -441,7 +441,7 @@ action.
 | `uniq` | Adjacent equal lines; `-c`, `-d`, `-u`. |
 | `tr` | Equal-length literal byte sets or `-d SET`; `\n \r \t \\` escapes. |
 | `cut` | `-d DELIMITER -f N`, one delimiter byte and one field. |
-| `awk` | Single field output `{print $N}`, N from 0 to 9. No arbitrary program or system call. |
+| `awk` | Single field output `{print $N}` with a nonnegative decimal execution integer; `$0` returns the whole line. No arbitrary program or system call. |
 | `edit` | `path old new`; exactly one literal occurrence, or no literal occurrence and `old` equals the current document's SHA256. Several literal replacements: `path old1 new1 old2 new2 ...`. Explicit whole-document replacement: `path sha256 digest new`. |
 | `write` | `new-path text`, or `new-path` plus held input. Existing documents cannot be overwritten. |
 
@@ -556,15 +556,25 @@ headers. Sorting is deterministic, without host locale collation.
 
 ## Bounds and evidence
 
-Admission limits: 512 documents with nonempty, unambiguous identities/paths;
-128 argv values; one MiB each for resident document bytes (including identity
-and path), argv bytes and held input. Output/state over one MiB is rejected.
-JSON queries are limited to 512 bytes, JSON nesting to 64, and sorting to
-1,024 items. Search patterns and globs have no separate length or step limit.
+Native admission checks value types and nonempty, unambiguous document
+identities/paths. It sorts aliases once to detect collisions and has no separate
+document, argv, input or result size ceiling. Window and field counts must fit
+the execution integer; byte ranges clamp to the source before adding offsets.
+The external JSON tool wire retains its one MiB request ceiling, and JSON
+syntax admission retains its nesting depth of 64. Query expressions and
+sorting have no separate byte or item ceiling. Lexical, numeric and JSON scalar
+sorting share Form's stable mergesort; numeric text keys are converted once.
+Search patterns and globs have no separate length or step limit. `rg -m` is
+the caller's match allowance; an omitted allowance does not introduce a cap.
 Literal prefixes use native byte search; greedy suffix states are shared across
-positions, avoiding repeated backtracking. Admission and output limits still
-apply to the actual resident request and result.
-These bounds do not promise upstream-tool throughput or a wall-clock deadline.
+positions, avoiding repeated backtracking. These contracts do not promise
+upstream-tool throughput or a wall-clock deadline.
+
+Paged line reads, `head` and `sed` locate byte spans directly in the held
+source; `tail` counts newline positions without materializing line lists.
+Each native tool invocation records its tool name, elapsed milliseconds,
+status and crossings in the live framebuffer. This observation keeps the
+native result with its caller and does not render it into text.
 
 The tools live in `form/form-stdlib/bml/form-agent-tools.bml`, with
 `form-agent-tool-values.bml` carrying values and `form-agent-tool-wire.bml` the
