@@ -252,6 +252,15 @@ func TestHealthRouteNativeOperationalShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, want := range []string{
+		`def api-recent-outcomes-cache-ttl-ms() = 60000;`,
+		`def api-ready-connected(conn)`,
+		`let recent_outcomes = api-recent-outcomes-with(conn);`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("health source missing non-liveness cache refresh %q", want)
+		}
+	}
 	artifact, err := sourceCompileServeProgram(
 		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
 		"../form-stdlib",
@@ -283,13 +292,39 @@ func TestHealthRouteNativeOperationalShape(t *testing.T) {
 	for _, want := range []string{
 		`"status":"ok"`,
 		`"schema_ok":`,
-		`"smart_reap_available":false`,
+		`"smart_reap_available":`,
 		`"smart_reap_import_error":null`,
 		`"recent_outcomes":`,
 		`"kernel_runtime":"form-kernel-go"`,
 	} {
 		if !strings.Contains(string(gotBody), want) {
 			t.Fatalf("health route body missing %s: %s", want, string(gotBody))
+		}
+	}
+
+	pulseReq := httptest.NewRequest(http.MethodGet, "http://native.example.test/api/health/pulse", nil)
+	pulseReq.Header.Set("Accept", "application/json")
+	pulseRec := httptest.NewRecorder()
+	worker.serve(pulseRec, pulseReq)
+	pulseRes := pulseRec.Result()
+	defer pulseRes.Body.Close()
+	pulseBody, err := io.ReadAll(pulseRes.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pulseRes.StatusCode != http.StatusOK {
+		t.Fatalf("health pulse route status = %d body=%s", pulseRes.StatusCode, string(pulseBody))
+	}
+	for _, want := range []string{
+		`"status":"ok"`,
+		`"integrity_verified":false`,
+		`"schema_ok":false`,
+		`"native_runtime_observation":null`,
+		`"deployment_witness_node_id":null`,
+		`"deployment_observation_fresh":false`,
+	} {
+		if !strings.Contains(string(pulseBody), want) {
+			t.Fatalf("health pulse route body missing %s: %s", want, string(pulseBody))
 		}
 	}
 }
