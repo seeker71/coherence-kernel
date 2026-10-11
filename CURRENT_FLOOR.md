@@ -1104,8 +1104,8 @@ is never charged to the recipe that happened to cross the heat. What a kernel ru
 writes its phase and fn there every millisecond, and `kernel_page_hot pid 0` answers `[phase, row]` (the row as a hot
 row names the defn, or nothing for a unit's top level), so a process that sits in one place for minutes says where.
 
-Lowering form-find.bml (61 KB) in a fresh tree takes 2.6 s cold, where every image is built by the binary, 0.37 s on
-the second run and 0.22 s once every dependency's facts are reused:
+Lowering form-find.bml (61 KB) in a fresh tree takes 2.2 s cold, where every image is built by the binary, 0.35 s on
+the second run and 0.19 s once every dependency's facts are reused:
 
 - about half of a warm run is scanning the dependencies' text for their signatures (`fsc-bml-dependency-signatures`);
 - the grammar engine parsing the unit's own source (`g-parse-full`) is an eighth, some 40 ms, under a microsecond a
@@ -1113,8 +1113,8 @@ the second run and 0.22 s once every dependency's facts are reused:
   dispatched on the byte under the cursor, and rules that begin alike are read through their shared beginning once;
 - fingerprinting the compiler's own sources (`bfc-pin`) is 3%.
 
-Lowering form-cli-local-plan.bml warm takes 0.43 s: half of it is the dependencies' signatures, a tenth the grammar,
-and the type index about 1%. A melt there is 2% of the run, and almost all of it is the string melt's pass over the
+Lowering form-cli-local-plan.bml warm takes 0.36 s: half of it is the dependencies' signatures, an eighth the grammar,
+and the type index 3%. A melt there is 3% of the run, and almost all of it is the string melt's pass over the
 strings. A melt visits the held once-holds from their list and frees around the AST's literals
 (`fk_sdead` 2), so its cost follows the live heap and the strings, never the program's AST. A heap that once peaked
 gives its capacity back: while the live heap is under an eighth of it, a melt halves it (within the headroom rules), since
@@ -1150,7 +1150,10 @@ The walker's JIT is written in Form and needs no caller. A defn whose heat reach
 shared segment mapped per read, so ignored-argument-scan-band went from 4.1 s to 1 s), writes AArch64 words and binds them with
 `jit_fn_bind(fn, words)`. From then on the defn wears the crystallized-defn node (tag 194), and the walker's 194 arm runs
 the page in the frame the call built. A defn that gets hot while the JIT itself runs waits in a short line, so the JIT's
-own hot recipes run as pages too.
+own hot recipes run as pages too. The line holds 64, and a defn waiting in it is put in again at each further 4096 calls,
+so it fills with the first hot recipes' repeats and a later one is dropped: in a fresh tree the first offer lowers
+jit-page.bml in a floor cell, and that cell's grammar copy ran gx 41,372 times without an offer (a cold lowering's board
+shows it as walk rows beside the run's paged copy, about 1.5% of the run).
 
 The page keeps the walker's frame and the walker's meaning:
 
