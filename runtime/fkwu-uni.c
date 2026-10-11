@@ -943,6 +943,10 @@ static volatile long long fk_phase;   /* the C phase the run thread is in, 0 whi
 #define FK_PHASE_WAIT 8
 #define FK_PHASE_GPU 9
 #define FK_PHASE_NET 10
+#define FK_PHASE_JIT 11   /* a JIT offer's cell: the emitter, and its unit's load; a floor it calls is the floor's recipes */
+#define FK_PROF_PHASES 12
+static const char *fk_prof_phase_name[FK_PROF_PHASES] = {
+    "recipe", "melt", "string-melt", "load", "parse", "image", "file", "child", "wait", "gpu", "net", "jit-offer" };
 /* a C function that runs no Form code, wrapped so its time is its phase's: FK_PHASED(phase, type, name, params, args) */
 #define FK_PHASED(ph, ty, nm, params, args) \
     static ty nm##_in params; \
@@ -15761,7 +15765,7 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
  * 21 melt generation 22 store shared (1: per-kernel columns, 2: the field) 23 heap generation (0: h/t, 1: H/T)
  * 24 float boxes minted 25 float boxes read 26 native leaf calls */
 #define FK_LIVE_MAGIC 0x464B4C4956LL
-#define FK_LIVE_WORDS 35
+#define FK_LIVE_WORDS 37
 static volatile long long *fk_live_page;
 static void fk_live_pid_name(long long pid, char *out) {
     char digits[24];
@@ -15788,7 +15792,9 @@ static long long fk_live_cpu_us(void) {
  * bytes 0..15 gift header; words at +16: 0 magic 1 pid 2 start-ms 3 seq 4 (reader sums the arms) 5 heat total
  * 6 nodes 7 strings 8 cons 9 fns 10 gift frames 11 gift bytes 12 node cap 13 heap cap 14 stack 15 floats
  * 16 (reader) 17 (reader) 18 cpu us 19 alive 20 (reader) 21 melt gen 22 store 23 heap gen 24 boxes 25 unboxes
- * 26 native leaf calls 27 fn count 28 layout version (3) 29 meta count 30 defns crystallized 31 native loops standing 32 native loop iterations.
+ * 26 native leaf calls 27 fn count 28 layout version (3) 29 meta count 30 defns crystallized 31 native loops standing 32 native loop iterations
+ * 33 value cells minted 34 field version 35 the phase the time board's sampler last saw, plus one (0: no reading yet, or a
+ * binary with no sampler) 36 the fn it last saw (0: a unit's top-level sequence). kernel_page_hot pid 0 reads 35 and 36.
  * byte 4096: the 256 arm counters. 8192: heat per fn (2^20 words). +8 MiB: boxes per fn. +16 MiB: unboxes per fn.
  * +24 MiB: meta per fn, 5 words (name offset, name length, unit length, line, col). +64 MiB: the name blob (name then
  * unit path, 32 MiB). Every hot-path increment the kernel already made now lands in these words; nothing is copied,
@@ -16748,6 +16754,31 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     free(pj); free(ph);
     fk_live_view_end(base, sz);
     return l;
+}
+/* what a kernel runs now, from its page (kernel_page_hot pid 0): (phase row). phase is the C phase its time board's sampler
+ * last saw ("recipe" when no phase held the run), row the defn it was in, as a hot row names one (heat name unit line col
+ * boxes unboxes native mints folds), nothing for a unit's top-level sequence or a defn the page does not name. nothing
+ * when the page carries no sampler reading (a kernel that has not yet sampled, or a binary with no sampler). */
+static long long fk_page_now(long long pid) {
+    long long sz = 0;
+    char *base = fk_live_view(pid, &sz);
+    if (base == 0) { return fk_nothing; }
+    volatile long long *w = (volatile long long *)base + 2;
+    if (sz < FK_LIVE_INRAM_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION || w[35] < 1 || w[35] > FK_PROF_PHASES) { fk_live_view_end(base, sz); return fk_nothing; }
+    long long ph = w[35] - 1, fx = w[36], count = w[29] < FK_LIVE_FNS ? w[29] : FK_LIVE_FNS, row = fk_nothing;
+    long long *meta = (long long *)(base + FK_LIVE_META_OFF);
+    if (fx > 0 && fx < count && meta[fx * 5 + 1] > 0) {
+        long long *heat = (long long *)(base + FK_LIVE_HEAT_OFF), *fbox = (long long *)(base + FK_LIVE_FBOX_OFF), *unbox = (long long *)(base + FK_LIVE_UNBOX_OFF), *native = (long long *)(base + FK_LIVE_NATIVE_OFF);
+        long long *mintl = (long long *)(base + FK_LIVE_MINT_OFF), *inraml = (long long *)(base + FK_LIVE_INRAM_OFF), *m = meta + fx * 5;
+        char *blob = base + FK_LIVE_BLOB_OFF;
+        row = fk_cons_val(heat[fx] << 1, fk_cons_val(fk_sbuf(blob + m[0], m[1]), fk_cons_val(fk_sbuf(blob + m[0] + m[1], m[2]), fk_cons_val(m[3] << 1, fk_cons_val(m[4] << 1, fk_cons_val(fbox[fx] << 1, fk_cons_val(unbox[fx] << 1, fk_cons_val(native[fx] << 1, fk_cons_val(mintl[fx] << 1, fk_cons_val(inraml[fx] << 1, 1))))))))));
+    }
+    fk_vp(row);
+    long long name = fk_sbuf(fk_prof_phase_name[ph], fk_cstrlen(fk_prof_phase_name[ph]));
+    row = fk_vs[fk_vsp - 1];
+    fk_vsp = fk_vsp - 1;
+    fk_live_view_end(base, sz);
+    return fk_cons_val(name, fk_cons_val(row, 1));
 }
 /* ---- the float-NodeID surface (tags 195 / 201) ---- */
 /* an odd integer: |y| at or past 2^53 is always even, so no (long long) cast ever meets it */
@@ -19088,6 +19119,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long p192 = fk_walk(fk_node[i][1], fp) >> 1;
         long long n192 = fk_walk(fk_node[i][2], fp) >> 1;
         if (n192 < 0) { return fk_page_rows(p192, 3, 0 - n192); }
+        if (n192 == 0) { return fk_page_now(p192); }   /* n 0: what that kernel runs now (fk_page_now) */
         return fk_page_rows(p192, 0, n192);
     }
     if (t == 193) {
@@ -21300,14 +21332,11 @@ static int fk_heat_reported;
  * SHRINK PATH: none wanted for the sampler -- it is the host's clock reading the run thread, as a profiler's interrupt is;
  * the board's reading and every judgment on it are Form's (observe/time-board-run.bml). */
 #define FK_PROF_FNS (1 << 20)
-#define FK_PROF_PHASES 12
 static unsigned int fk_prof_self[FK_PROF_FNS];
 static unsigned long long fk_prof_phase[FK_PROF_PHASES];
 static unsigned long long fk_prof_total;
 static long long fk_prof_t0_ns;                  /* when the sampler began: the board says the wall time it covered */
 static volatile int fk_run_done;
-static const char *fk_prof_phase_name[FK_PROF_PHASES] = {
-    "recipe", "melt", "string-melt", "load", "parse", "image", "file", "child", "wait", "gpu", "net", "jit-offer" };
 static long long fk_cell_cpu_us(void);
 /* the time under a recipe: each sample credits once every recipe on the frame chain (the walker's FK_FR_PUSH callers, the
  * outermost and innermost 2048 of a deep chain) and the one running, whatever phase holds the run */
@@ -21326,6 +21355,8 @@ static void fk_prof_sample(void) {
     k = depth - 2048 > k ? depth - 2048 : k;
     while (k < depth) { fk_prof_credit(fk_fr_fn[k], stamp); k = k + 1; }
     fk_prof_credit(fk_cur_fn, stamp);
+    /* what runs now, on the live page, where any kernel reads it (kernel_page_hot pid 0) */
+    if (fk_live_page != 0) { fk_live_page[2 + 35] = (ph >= 0 && ph < FK_PROF_PHASES ? ph : 0) + 1; fk_live_page[2 + 36] = fk_cur_fn; }
     if (ph > 0 && ph < FK_PROF_PHASES) { fk_prof_phase[ph] = fk_prof_phase[ph] + 1; return; }
     fk_prof_phase[0] = fk_prof_phase[0] + 1;
     long long c = fk_cur_fn;
@@ -28125,17 +28156,11 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
 static char fk_jit_unit[FK_PATH_CAP];
 static int fk_jit_unit_state;  /* 0 not looked for, 1 found, 2 absent */
 static int fk_jit_on = -1;
-static int fk_jit_quiet(void) { return !fk_jit_busy && fk_collect_depth == 0 && !fk_cell_collect; }
-static void fk_jit_offer_one(long long c) {
-#if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || defined(_WIN32) || !defined(FK_HAVE_SETJMP)
-    (void)c;
-#else
-    if (c <= 0 || c >= fk_fn_count) { return; }
-    fk_jit_reserve(c + 1);
-    if (fk_jit_state[c] != 0) { return; }
-    fk_jit_state[c] = 1;
+static int fk_jit_warmed;
+/* the JIT is on and its unit found: 1 */
+static int fk_jit_ready(void) {
     if (fk_jit_on < 0) { fk_jit_on = fk_conf("FK_NO_JIT") ? 0 : 1; }
-    if (!fk_jit_on) { return; }
+    if (!fk_jit_on) { return 0; }
     if (fk_jit_unit_state == 0) {
         const char *tok = "form-stdlib/bml/jit-page.bml";
         fk_jit_unit_state = 2;
@@ -28144,7 +28169,42 @@ static void fk_jit_offer_one(long long c) {
             fk_jit_unit_state = 1;
         }
     }
-    if (fk_jit_unit_state != 1) { return; }
+    return fk_jit_unit_state == 1;
+}
+/* the JIT unit is resident: an offer is a cell run that reads no unit and collects nothing, so it may run inside a load,
+ * where the BML floor compiler's recipes run while a unit's closure is collected */
+static int fk_jit_resident(void) {
+    if (fk_jit_unit_state != 1) { return 0; }
+    long long d = fk_cell_dep_find_raw(fk_jit_unit);
+    return d >= 0 && fk_cd_loaded[d];
+}
+static int fk_jit_quiet(void) { return !fk_jit_busy && ((fk_collect_depth == 0 && !fk_cell_collect) || fk_jit_resident()); }
+/* The first floor call loads the JIT unit (a cell run with no request: it binds nothing), where the floor compiler's own
+ * first load already runs, so a process whose work is lowering inside its loads (form-cli --compile-source, any cold load of
+ * BML) has its hot recipes offered: a JIT that waited for a quiet load walked the whole of such a run. */
+static void fk_jit_warm(void) {
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) && !defined(_WIN32) && defined(FK_HAVE_SETJMP)
+    if (fk_jit_warmed || fk_jit_busy) { return; }
+    fk_jit_warmed = 1;
+    if (!fk_jit_ready() || fk_jit_resident()) { return; }
+    long long path = fk_sbuf(fk_jit_unit, fk_cstrlen(fk_jit_unit)), cur = fk_cur_fn, phase0 = fk_phase;
+    fk_jit_busy = 1;
+    fk_phase = FK_PHASE_JIT;
+    (void)fk_cell_run_door(path, fk_nothing, fk_nothing, fk_nothing, 1);
+    fk_phase = phase0;
+    fk_jit_busy = 0;
+    fk_cur_fn = cur;
+#endif
+}
+static void fk_jit_offer_one(long long c) {
+#if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || defined(_WIN32) || !defined(FK_HAVE_SETJMP)
+    (void)c;
+#else
+    if (c <= 0 || c >= fk_fn_count) { return; }
+    fk_jit_reserve(c + 1);
+    if (fk_jit_state[c] != 0) { return; }
+    fk_jit_state[c] = 1;
+    if (!fk_jit_ready()) { return; }
     long long body = fk_fn[c];
     /* a defn the C loop lane crystallized keeps its leaf: unboxed floats are that lane's, until the flip (R8) */
     if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) { return; }
@@ -28153,9 +28213,11 @@ static void fk_jit_offer_one(long long c) {
     long long path = fk_sbuf(fk_jit_unit, fk_cstrlen(fk_jit_unit));
     arg = fk_vs[fk_vsp - 1];
     fk_vsp = fk_vsp - 1;
-    long long cur = fk_cur_fn, t0 = fk_mono_ns();
+    long long cur = fk_cur_fn, t0 = fk_mono_ns(), phase0 = fk_phase;
     fk_jit_busy = 1;
+    fk_phase = FK_PHASE_JIT;
     long long r = fk_cell_run_door(path, arg, fk_nothing, fk_nothing, 1);
+    fk_phase = phase0;
     fk_jit_busy = 0;
     fk_cur_fn = cur;
     fk_jit_offers = fk_jit_offers + 1;
@@ -28871,6 +28933,7 @@ FK_PHASED(FK_PHASE_RECIPE, fk_char_p, fk_bml_floor_call, (char **paths, long lon
     char *out;
     char floor[FK_PATH_CAP];
     fk_cstr_copy(floor, fk_bml_floor_path(), FK_PATH_CAP);
+    fk_jit_warm();
     while (i > from) {
         i = i - 1;
         list = fk_cons_val(fk_sbuf(fk_home_path, fk_cstrlen(fk_home_path)), list);
