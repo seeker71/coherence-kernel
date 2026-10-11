@@ -754,28 +754,46 @@
                         (fsc-compiler-error-line "unknown form.bml comparison contract" text))))))
     (defn fsc-bml-type-find (rows name)
         (if (str_eq (value_kind rows) "record")
-            (if (record_has rows name) (record_get rows name)
-                (if (record_has rows "") (fsc-bml-type-find (record_get rows "") name) (empty)))
+            (fsc-bml-type-find-in rows name (fsc-bml-type-bucket name 1) (fsc-bml-type-bucket name 2))
             (if (nil? rows) (empty)
                 (if (str_eq (head (head rows)) name) (head rows) (fsc-bml-type-find (tail rows) name)))))
-    ;; Index a signature set once per pass. The first row still wins; lexical
-    ;; environments remain ordered rows for capture and shadowing.
+    ;; A record field is found by a walk over its keys, so a signature table is
+    ;; shelved by a name's last byte, then by the byte before it: a lookup walks
+    ;; two short key rows and one shelf instead of every name. The empty key
+    ;; (never an identifier, never a one-byte bucket) is set first and names the
+    ;; enclosing table.
+    (defn fsc-bml-type-bucket (name at)
+        (do (let size (str_len name))
+            (if (lt size at) " " (substring name (sub size at) (add (sub size at) 1)))))
+    (defn fsc-bml-type-find-in (rows name outer inner)
+        (if (str_eq (value_kind rows) "record")
+            (do (let ring (record_get rows outer))
+                (let shelf (if (value_eq ring 0) 0 (record_get ring inner)))
+                (let row (if (value_eq shelf 0) 0 (record_get shelf name)))
+                (if (value_eq row 0) (fsc-bml-type-find-in (record_get rows "") name outer inner) row))
+            (fsc-bml-type-find rows name)))
+    (defn fsc-bml-type-shelf (table key)
+        (do (let held (record_get table key))
+            (if (value_eq held 0) (do (let fresh (record_new 0)) (record_set table key fresh) fresh) held)))
+    ;; Rows go in last to first and a later write replaces, so the first row of
+    ;; a name still wins and each row costs one walk of its shelf.
     (defn fsc-bml-type-index-into (rows index)
         (if (nil? rows) index
-            (do (let row (head rows))
-                (if (record_has index (head row)) 0 (record_set index (head row) row))
+            (do (let row (head rows)) (let name (head row))
+                (record_set (fsc-bml-type-shelf (fsc-bml-type-shelf index (fsc-bml-type-bucket name 1))
+                    (fsc-bml-type-bucket name 2)) name row)
                 (fsc-bml-type-index-into (tail rows) index))))
+    ;; Index a signature set once per unit (and per inference pass in discovery);
+    ;; lexical environments remain ordered rows for capture and shadowing.
     (defn fsc-bml-type-index (rows)
         (if (str_eq (value_kind rows) "record") rows
-            (fsc-bml-type-index-into rows (record_new 0))))
-    ;; A block owns only its declarations. The empty key (never an identifier)
-    ;; names the enclosing table; sibling blocks never mutate that table.
+            (fsc-bml-type-index-into (reverse rows) (record_set (record_new 0) "" (empty)))))
+    ;; A block owns only its declarations; sibling blocks never mutate the
+    ;; enclosing table.
     (defn fsc-bml-signature-scope (recipes parent)
         (do (let rows (fsc-bml-type-signatures recipes (empty)))
             (if (nil? rows) parent
-                (do (let index (fsc-bml-type-index rows))
-                    (record_set index "" parent)
-                    index))))
+                (fsc-bml-type-index-into (reverse rows) (record_set (record_new 0) "" parent)))))
     (defn fsc-bml-type-of (rows name)
         (do (let row (fsc-bml-type-find rows name)) (if (nil? row) "" (nth row 1))))
     (defn fsc-bml-type-name (recipe)
@@ -816,26 +834,34 @@
     (defn fsc-bml-type-names (rows)
         (if (nil? rows) (empty) (cons (head (head rows)) (fsc-bml-type-names (tail rows)))))
 
-    (defn fsc-form-signature-next (source i end markers)
-        (if (nil? markers) end
-            (do (let found (str_find source (head markers) i))
-                (fsc-form-signature-next source i
-                    (if (and (ge found 0) (lt found end)) found end) (tail markers)))))
+    ;; A raw Form span's exports in one linear pass. Each of the four markers keeps the
+    ;; position it was last found at; it is searched again only once the walk has passed
+    ;; it, and a marker that is absent stays absent, so no byte is scanned twice for one marker.
+    (defn fsc-form-signature-mark (source needle at known)
+        (if (ge known at) known
+            (do (let found (str_find source needle at))
+                (if (lt found 0) (str_len source) found))))
     (defn fsc-form-signature-span (source i end out)
+        (fsc-form-signature-walk source i end out -1 -1 -1 -1))
+    (defn fsc-form-signature-walk (source i end out q-at s-at c-at d-at)
         (if (ge i end) out
             (if (str_eq (char_at source i) "\"")
-                (fsc-form-signature-span source (fsc-bml-token-after source i end) end out)
+                (fsc-form-signature-walk source (fsc-bml-token-after source i end) end out q-at s-at c-at d-at)
             (if (str_eq (char_at source i) ";")
-                (fsc-form-signature-span source (fsc-line-next source i) end out)
+                (fsc-form-signature-walk source (fsc-line-next source i) end out q-at s-at c-at d-at)
             (if (str_eq (fsc-sub source i (add i 2)) "//")
-                (fsc-form-signature-span source (fsc-line-next source i) end out)
+                (fsc-form-signature-walk source (fsc-line-next source i) end out q-at s-at c-at d-at)
             (if (and (str_eq (fsc-sub source i (add i 5)) "(defn")
                      (bml-source-space? (char_at source (add i 5))))
                 (do (let start (bml-source-skip-spaces source (add i 5)))
                     (let stop (bml-source-word-end source start))
-                    (fsc-form-signature-span source stop end (cons (list (fsc-sub source start stop) "") out)))
-                (fsc-form-signature-span source
-                    (fsc-form-signature-next source (add i 1) end (list "\"" ";" "//" "(defn")) end out)))))))
+                    (fsc-form-signature-walk source stop end (cons (list (fsc-sub source start stop) "") out) q-at s-at c-at d-at))
+                (do (let at (add i 1))
+                    (let q (fsc-form-signature-mark source "\"" at q-at))
+                    (let s (fsc-form-signature-mark source ";" at s-at))
+                    (let c (fsc-form-signature-mark source "//" at c-at))
+                    (let d (fsc-form-signature-mark source "(defn" at d-at))
+                    (fsc-form-signature-walk source (min2 (min2 (min2 q s) (min2 c d)) end) end out q s c d))))))))
     (defn fsc-bml-contract-dialect? (name)
         (or (str_eq name "form.bml") (or (str_eq name "form.route") (str_eq name "form.action"))))
     (defn fsc-bml-dependency-signatures (owner tokens seen signatures observations homes discovery)
@@ -858,17 +884,22 @@
     ;; The floor admits its observed compiler closure once. Files retain their
     ;; own facts; dependency resolution and absent candidates stay live.
     (let FSC-BML-DISK-CONTEXT (record_new 0))
-    (let FSC-BML-DISK-SCHEMA "fsc-discovery-fnv64-v1")
+    (let FSC-BML-DISK-SCHEMA "fsc-discovery-fnv64-v2")
+    (let FSC-BML-PIN-SCHEMA "fsc-compiler-pin-v1")
     (let FSC-BML-DISK-LIST (bp "fsc-discovery-list-v1"))
     (let FSC-BML-DISK-ABSENT (bp "fsc-discovery-absent-v1"))
     (let FSC-BML-DISK-STRING (bp "fsc-discovery-string-v1"))
     (let FSC-BML-DISK-INT (bp "fsc-discovery-int-v1"))
     (let FSC-BML-DISK-OVERHEAD 4096)
     (let FSC-BML-DISK-EXPANSION 128)
-    (defn fsc-bml-cache-pin-row (row) (list (head row) (bml-source-fingerprint (nth row 1))))
+    ;; A held row is (path bytes fingerprint); the fingerprint was derived from
+    ;; those bytes when the pin was taken, so admission does not read them again.
+    (defn fsc-bml-cache-pin-row (row)
+        (list (head row) (if (gt (len row) 2) (nth row 2) (bml-source-fingerprint (nth row 1)))))
+    ;; Every key names the compiler by one fingerprint of its pin, taken here once.
     (defn fsc-bml-cache-pin (held)
         (record_set FSC-BML-DISK-CONTEXT "compiler"
-            (map fsc-bml-cache-pin-row held)))
+            (bml-source-fingerprint (fsc-bml-cache-wire (map fsc-bml-cache-pin-row held)))))
     (defn fsc-bml-cache-pack (value)
         (if (nothing? value) (intern_node FSC-BML-DISK-ABSENT (empty))
             (if (str_eq (value_kind value) "string") (intern_node FSC-BML-DISK-STRING (list (intern_trivial_string value)))
@@ -904,50 +935,126 @@
                 (record_set FSC-BML-DISK-CONTEXT "homes" homes)
                 (record_set FSC-BML-DISK-CONTEXT "homes-key" key)
                 key)))
-    (defn fsc-bml-cache-key (path source homes)
-        (list FSC-BML-DISK-SCHEMA path source (fsc-bml-cache-homes-key homes) (record_get FSC-BML-DISK-CONTEXT "compiler")))
+    ;; A file's exact bytes select its facts. They ride in the cache beside the
+    ;; key and are compared whole with the bytes just read, never fingerprinted
+    ;; again; the key names what else decides the facts (path, home bindings,
+    ;; compiler), and the seal covers the key and the derived facts, so a damaged
+    ;; cache reads as a miss.
+    (defn fsc-bml-cache-key (path homes)
+        (list FSC-BML-DISK-SCHEMA path (fsc-bml-cache-homes-key homes) (record_get FSC-BML-DISK-CONTEXT "compiler")))
     (defn fsc-bml-cache-path (path) (str_concat (bml-source-absolute path) ".discovery.fkb"))
-    (defn fsc-bml-cache-limit (key)
-        (add FSC-BML-DISK-OVERHEAD (mul FSC-BML-DISK-EXPANSION (str_len (fsc-bml-cache-wire key)))))
-    (defn fsc-bml-cache-row (path key)
+    (defn fsc-bml-cache-limit (path source)
+        (add FSC-BML-DISK-OVERHEAD (mul FSC-BML-DISK-EXPANSION (add (str_len path) (str_len source)))))
+    (defn fsc-bml-cache-seal (key derived)
+        (bml-source-fingerprint (fsc-bml-cache-wire (list key derived))))
+    (defn fsc-bml-cache-row (path key source)
         (do
             (let size (file_size path))
-            (if (or (le size 0) (gt size (fsc-bml-cache-limit key))) (nothing)
+            (if (or (le size 0) (gt size (fsc-bml-cache-limit (nth key 1) source))) (nothing)
                 (attempt
                     (do (let row (fsc-bml-cache-unpack (read_form_binary path)))
-                        (if (and (str_eq (value_kind row) "list") (eq (len row) 3))
-                            (if (and (value_eq (head row) key)
-                                     (and (fsc-bml-cache-facts? (nth row 1) key)
-                                          (and (str_eq (value_kind (nth row 2)) "string")
-                                               (str_eq (nth row 2) (bml-source-fingerprint (fsc-bml-cache-wire (list (head row) (nth row 1))))))))
-                                (nth row 1) (nothing))
-                            (nothing)))))))
-    (defn fsc-bml-cache-facts? (facts key)
-        (and (str_eq (value_kind facts) "list")
-            (and (eq (len facts) 5)
-                (and (value_eq (head facts) (nth key 2))
-                    (and (value_eq (nth facts 1) (bml-source-fingerprint (nth key 2)))
-                        (and (str_eq (value_kind (nth facts 2)) "list")
-                            (and (str_eq (value_kind (nth facts 3)) "list")
-                                 (str_eq (value_kind (nth facts 4)) "list"))))))))
+                        (if (not (and (str_eq (value_kind row) "list") (eq (len row) 4))) (nothing)
+                            (if (not (and (value_eq (head row) key) (value_eq (nth row 1) source))) (nothing)
+                                (if (not (fsc-bml-cache-facts? (nth row 2))) (nothing)
+                                    (if (value_eq (nth row 3) (fsc-bml-cache-seal key (nth row 2)))
+                                        (cons source (nth row 2)) (nothing))))))))))
+    (defn fsc-bml-cache-facts? (derived)
+        (and (str_eq (value_kind derived) "list")
+            (and (eq (len derived) 4)
+                (and (str_eq (value_kind (head derived)) "string")
+                    (and (str_eq (value_kind (nth derived 1)) "list")
+                        (and (str_eq (value_kind (nth derived 2)) "list")
+                             (str_eq (value_kind (nth derived 3)) "list")))))))
     (defn fsc-bml-cache-read (path source homes)
         (if (record_has FSC-BML-DISK-CONTEXT "compiler")
-            (fsc-bml-cache-row (fsc-bml-cache-path path) (fsc-bml-cache-key path source homes))
+            (fsc-bml-cache-row (fsc-bml-cache-path path) (fsc-bml-cache-key path homes) source)
             (nothing)))
+    ;; One atomic publication for every discovery memo: the row is written
+    ;; beside its target, read back by the reader that will serve it, and moved
+    ;; into place only when it answers what was meant.
+    (defn fsc-bml-cache-publish (target row reader-key reader-source expected)
+        (do (let temp (str_concat target (str_concat ".writing-" (int_to_str (host_pid)))))
+            (let size (write_form_binary temp (fsc-bml-cache-pack row)))
+            (let back (if (le size 0) (nothing)
+                (if (nothing? reader-source) (fsc-bml-pin-row temp reader-key)
+                    (fsc-bml-cache-row temp reader-key reader-source))))
+            (let moved (if (value_eq back expected) (fs-rename temp target) -1))
+            (if (lt moved 0) (fs-remove-file temp) 0)
+            (ge moved 0)))
     (defn fsc-bml-cache-write (path source homes facts)
         (if (not (record_has FSC-BML-DISK-CONTEXT "compiler")) 0
             (do (let wrote (attempt
                 (do
-                    (let key (fsc-bml-cache-key path source homes))
-                    (let target (fsc-bml-cache-path path))
-                    (let temp (str_concat target (str_concat ".writing-" (int_to_str (host_pid)))))
-                    (let seal (bml-source-fingerprint (fsc-bml-cache-wire (list key facts))))
-                    (let size (write_form_binary temp (fsc-bml-cache-pack (list key facts seal))))
-                    (let verified (and (gt size 0) (value_eq (fsc-bml-cache-row temp key) facts)))
-                    (let moved (if verified (fs-rename temp target) -1))
-                    (if (lt moved 0) (fs-remove-file temp) 0)
-                    (ge moved 0))))
+                    (let key (fsc-bml-cache-key path homes))
+                    (let derived (tail facts))
+                    (fsc-bml-cache-publish (fsc-bml-cache-path path)
+                        (list key source derived (fsc-bml-cache-seal key derived)) key source facts))))
                 (if (nothing? wrote) 0 wrote))))
+    ;; The compiler's pin, derived once for each state of its closure. The memo
+    ;; holds every file the closure walk observed -- a read one with its exact
+    ;; bytes and their fingerprint, an absent candidate as absent -- so it holds
+    ;; exactly while every read file still has those bytes and every absent one
+    ;; is still absent: the walk would then observe the same closure again.
+    (defn fsc-bml-pin-path (path) (str_concat (bml-source-absolute path) ".pin.fkb"))
+    (defn fsc-bml-pin-key (path) (list FSC-BML-PIN-SCHEMA path (host_cwd)))
+    (defn fsc-bml-pin-strip (row) (list (head row) (nth row 1) (nth row 2)))
+    (defn fsc-bml-pin-seal (key rows)
+        (bml-source-fingerprint (fsc-bml-cache-wire (list key (map fsc-bml-pin-strip rows)))))
+    (defn fsc-bml-pin-shape? (rows)
+        (if (nil? rows) 1
+            (do (let row (head rows))
+                (if (and (str_eq (value_kind row) "list")
+                        (if (str_eq (head row) "F") (and (eq (len row) 4) (str_eq (value_kind (nth row 3)) "string"))
+                            (and (str_eq (head row) "N") (eq (len row) 3))))
+                    (fsc-bml-pin-shape? (tail rows)) 0))))
+    (defn fsc-bml-pin-row (target key)
+        (if (le (file_size target) 0) (nothing)
+            (attempt
+                (do (let row (fsc-bml-cache-unpack (read_form_binary target)))
+                    (if (not (and (str_eq (value_kind row) "list") (eq (len row) 3))) (nothing)
+                        (if (not (value_eq (head row) key)) (nothing)
+                            (if (not (and (str_eq (value_kind (nth row 1)) "list") (fsc-bml-pin-shape? (nth row 1)))) (nothing)
+                                (if (value_eq (nth row 2) (fsc-bml-pin-seal key (nth row 1))) (nth row 1) (nothing)))))))))
+    (defn fsc-bml-pin-holds? (rows)
+        (if (nil? rows) 1
+            (do (let row (head rows))
+                (if (if (str_eq (head row) "F")
+                        (value_eq (read_file (nth row 1)) (nth row 3))
+                        (lt (file_size (nth row 1)) 0))
+                    (fsc-bml-pin-holds? (tail rows)) 0))))
+    (defn fsc-bml-pin-held (rows)
+        (if (nil? rows) (empty)
+            (do (let row (head rows))
+                (if (str_eq (head row) "F")
+                    (cons (list (nth row 1) (nth row 3) (nth row 2)) (fsc-bml-pin-held (tail rows)))
+                    (fsc-bml-pin-held (tail rows))))))
+    ;; The held rows of a pin still true for the compiler at `path`, or nothing.
+    (defn fsc-bml-pin-read (path)
+        (do (let rows (fsc-bml-pin-row (fsc-bml-pin-path path) (fsc-bml-pin-key path)))
+            (if (nothing? rows) (nothing)
+                (if (fsc-bml-pin-holds? rows) (fsc-bml-pin-held rows) (nothing)))))
+    (defn fsc-bml-pin-observed (observations)
+        (if (nil? observations) (empty)
+            (do (let row (head observations))
+                (let rest (fsc-bml-pin-observed (tail observations)))
+                (if (str_eq (head row) "F")
+                    (do (let text (read_file (nth row 1)))
+                        (cons (if (nothing? text) (list "F" (nth row 1) (nth row 2) text)
+                                (list "F" (nth row 1) (bml-source-fingerprint text) text)) rest))
+                    (cons row rest)))))
+    (defn fsc-bml-pin-complete? (rows)
+        (if (nil? rows) 1
+            (if (and (str_eq (head (head rows)) "F") (nothing? (nth (head rows) 3))) 0
+                (fsc-bml-pin-complete? (tail rows)))))
+    ;; Take the pin from the closure walk's observations and keep it for the next
+    ;; process. Answers the held rows.
+    (defn fsc-bml-pin-write (path observations)
+        (do (let rows (fsc-bml-pin-observed observations))
+            (if (fsc-bml-pin-complete? rows)
+                (attempt (do (let key (fsc-bml-pin-key path))
+                    (fsc-bml-cache-publish (fsc-bml-pin-path path) (list key rows (fsc-bml-pin-seal key rows)) key (nothing) rows)))
+                0)
+            (fsc-bml-pin-held rows)))
     (defn fsc-bml-cache-observe (path action started)
         (fb_record (intern_node (intern_trivial_string "bml-discovery-cache")
             (list (intern_trivial_string path) (intern_trivial_string action)
@@ -2144,8 +2251,9 @@
                             (str_concat emitted (head rest)))
                         (nth rest 1))))))
 
+    ;; The unit's catalog is indexed once; every section reads the same index.
     (defn form-source-compile-loop (src out-path i signatures)
-        (head (fsc-bml-walk src out-path i signatures (empty))))
+        (head (fsc-bml-walk src out-path i (if (nothing? signatures) signatures (fsc-bml-type-index signatures)) (empty))))
 
     (defn form-source-compile-text (src out-path)
         (do (fbl-section-owner src)
