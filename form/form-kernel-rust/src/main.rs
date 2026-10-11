@@ -10137,7 +10137,7 @@ const SOURCE_COMPILE_PRELUDES: [&str; 7] = [
 // same Form Recipe object as the manifest in this order. That keeps the runtime
 // carrier explicit: source entry plus Form stdlib language model yields one
 // executable Recipe object whose walk binds KernelHTTPRoute cells.
-const SOURCE_ROUTE_LANGUAGE_PRELUDES: [&str; 15] = [
+const SOURCE_ROUTE_LANGUAGE_PRELUDES: [&str; 16] = [
     "form-ontology-loader.fk",
     "line-grammar.fk",
     "bmf-core.fk",
@@ -10147,6 +10147,7 @@ const SOURCE_ROUTE_LANGUAGE_PRELUDES: [&str; 15] = [
     "source-compiler.fk",
     "json.fk",
     "core.fk",
+    "bounded-health-projection.fk",
     "sha256.fk",
     "choice-receipt.fk",
     "branch-choice-order.fk",
@@ -13322,6 +13323,7 @@ mod route_spec_tests {
 
         let headers = vec![("Accept".to_string(), "application/json".to_string())];
         let probes = vec![
+            ("api-health-pulse", "GET", "/api/health/pulse"),
             ("runtime-events-index", "GET", "/api/runtime/events"),
             ("spec-registry-index", "GET", "/api/spec-registry"),
             (
