@@ -2819,7 +2819,7 @@ static long long fk_metal_matvec_f32_native(long long mslv, long long kernelv, l
  * values, hand the carrier plain bytes and plain integers, wrap the answer back.
  * There is no arithmetic here and no policy; the layout of the binding string is
  * decided by the Form cell that emits it, exactly as the MSL is. */
-static long long fk_metal_pipeline_native(long long mslv, long long namev) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_pipeline_native, (long long mslv, long long namev), (mslv, namev)) {
     const char *msl;
     const char *name;
     long long ml;
@@ -2833,14 +2833,14 @@ static long long fk_metal_pipeline_native(long long mslv, long long namev) {
     }
     return h;
 }
-static long long fk_metal_buf_alloc_native(long long nbytes) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_buf_alloc_native, (long long nbytes), (nbytes)) {
     long long h = fk_metal_buf_alloc_external(nbytes);
     if (h == FK_METAL_HANDLE_UNLOADED || h < 0) {
         return 0;
     }
     return h;
 }
-static long long fk_metal_buf_from_file_native(long long pathv, long long off, long long len) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_buf_from_file_native, (long long pathv, long long off, long long len), (pathv, off, len)) {
     const char *path;
     long long pl;
     if (fk_srange(pathv, &path, &pl) == 0) {
@@ -2893,7 +2893,7 @@ static long long fk_metal_buf_write_list(long long h, long long off, long long l
     if (r == FK_METAL_HANDLE_UNLOADED || r < 0) { return 0; }
     return r;
 }
-static long long fk_metal_buf_write_native(long long h, long long off, long long bytesv) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_buf_write_native, (long long h, long long off, long long bytesv), (h, off, bytesv)) {
     const char *b;
     long long bl;
     if (bytesv == 1 || ((bytesv & 1) && bytesv > 0 && FK_POK(bytesv >> 1))) {
@@ -2911,7 +2911,7 @@ static long long fk_metal_buf_write_native(long long h, long long off, long long
 /* metal_buf_fill(h, boff, [path, foff, len]) -- the FILL DOOR: len bytes of the file at path, from byte foff, preaded straight into buffer h at byte boff (no Form string, no mapping, no GPU).
  * Answers len, or -1 for EVERY refusal and for a carrier without the door: the spec is not a list of a string and two ints, the buffer is not an allocated one, the destination or the file's
  * span is out of range, the file does not open or comes up short (the carrier's fk_metal_buf_fill_external names the refusals; nothing is written on any of them). */
-static long long fk_metal_buf_fill_native(long long h, long long boff, long long specv) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_buf_fill_native, (long long h, long long boff, long long specv), (h, boff, specv)) {
     const char *path;
     long long pl, foff, len, p, e;
     if (!((specv & 1) && specv > 0 && FK_POK(specv >> 1))) { return -1; }
@@ -2935,7 +2935,9 @@ static long long fk_metal_buf_fill_native(long long h, long long boff, long long
     if (r == FK_METAL_HANDLE_UNLOADED || r < 0) { return -1; }
     return r;
 }
-static long long fk_metal_enqueue_native(long long pipe, long long bindv, long long threads) {
+/* every call into the Metal carrier is the time board's gpu phase: encoding, submitting, and a read that waits for the
+ * queue to drain, as sync and the fence wait are -- a forward pass's own time is the GPU's, not its recipe's */
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_enqueue_native, (long long pipe, long long bindv, long long threads), (pipe, bindv, threads)) {
     const char *b;
     long long bl;
     if (fk_srange(bindv, &b, &bl) == 0) {
@@ -2957,7 +2959,7 @@ FK_PHASED(FK_PHASE_GPU, long long, fk_metal_sync_native, (void), ()) {
 /* Read-back is the one primitive whose size the CALLER chooses, so it is the one
  * that must not quietly hand back less than it was asked for. A short read here
  * would look to a Form cell exactly like a correct read of a shorter tensor. */
-static long long fk_metal_buf_read_native(long long h, long long off, long long len) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_buf_read_native, (long long h, long long off, long long len), (h, off, len)) {
     if (len <= 0) {
         return fk_sbuf("", 0);
     }
@@ -2981,21 +2983,21 @@ static long long fk_metal_buf_read_native(long long h, long long off, long long 
     }
     return fk_strv(fk_sintern(fk_sbp, n));
 }
-static long long fk_metal_batch_concurrent_native(void) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_batch_concurrent_native, (void), ()) {
     long long r = fk_metal_batch_concurrent_external();
     if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
     }
     return r;
 }
-static long long fk_metal_buf_free_native(long long h) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_buf_free_native, (long long h), (h)) {
     long long r = fk_metal_buf_free_external(h);
     if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
     }
     return r;
 }
-static long long fk_metal_submit_native(void) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_submit_native, (void), ()) {
     long long r = fk_metal_submit_external();
     if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
@@ -10156,6 +10158,26 @@ static long long fk_jit_tail(long long c, long long fp, long long t, long long n
     return fk_call_tail(c, fp, fp + t, n, 0);
 }
 static long long fk_walk(long long i, long long fp);
+/* the defn whose page has handed the walker a node it has no words for (a subtree in value position, through this
+ * helper, or the rest of its body in tail position, through the 194 arm), 0 while a page runs its own words: the time
+ * board counts a sample of that defn as page-walk, the part of a page the JIT does not yet carry */
+static volatile long long fk_page_walk_fn;
+static volatile long long fk_page_walk_tag;   /* the kind of node handed over: its tag, or 256 + mode for a leaf door (201) */
+static long long fk_jit_walk_kind(long long i) {
+    if (i < 0 || i >= fk_node_count) { return 0; }
+    long long t = fk_node[i][0], m = fk_node[i][1];
+    if (t == 201 && m >= 0 && m < fk_node_count && fk_node[m][0] == 1 && fk_node[m][1] >= 0 && fk_node[m][1] < 256) { return 256 + fk_node[m][1]; }
+    return t;
+}
+static long long fk_jit_walk_page(long long i, long long fp) {
+    long long sv = fk_page_walk_fn, st = fk_page_walk_tag;
+    fk_page_walk_fn = fk_cur_fn;
+    fk_page_walk_tag = fk_jit_walk_kind(i);
+    long long r = fk_walk(i, fp);
+    fk_page_walk_fn = sv;
+    fk_page_walk_tag = st;
+    return r;
+}
 static void fk_jit_tick(void) { FK_CELL_TICK(); }
 static void fk_jit_enter(long long fp, long long need) {
     long long top = fp + need;
@@ -10212,7 +10234,7 @@ static long long fk_jit_bind(long long x) {
             fk_op_band, fk_op_bor, fk_op_bxor, fk_op_shl, fk_op_shr, fk_op_nth, fk_op_byte_to_str };
         memcpy(fk_jit_cx.ops, ops, sizeof(ops));
         fk_jit_cx.vs = &fk_vs;
-        fk_jit_cx.walk = fk_walk;
+        fk_jit_cx.walk = fk_jit_walk_page;
         fk_jit_cx.truth = fk_truth;
         fk_jit_cx.tick = fk_jit_tick;
         fk_jit_cx.enter = fk_jit_enter;
@@ -10224,6 +10246,136 @@ static long long fk_jit_bind(long long x) {
     fk_jit_bound = fk_jit_bound + 1;
     return 2;
 #endif
+}
+/* jit_node(spec) (leaf-door mode 57): what the Form JIT may take apart, and the node it hands the walker in place of one it
+ * did. A strict node -- one whose arm walks each value child once, in order, and reads the rest of its shape as shape -- is
+ * evaluated by the page child by child into its frame temporaries; the walker then runs a mirror of the node whose value
+ * children read those temporaries, so the arm keeps its one meaning and its children run in the page's own words. Which
+ * children are values is the arm's to say, so it is written here beside the walker, read off the arms, not in the emitter:
+ *   ["kids", k]    the value children of node k in the order its arm walks them, or nothing when the page may not take k apart
+ *   ["mint", k, t] the mirror of k whose i-th value child reads frame slot t + i
+ *   ["word", k]    the constant word of a string literal (its index is pinned, fk_lit_pin) as four 16-bit halves, low first
+ * The arms read for the table: record_get 65, record_set 66, record_has 67, record_keys 99, value_eq 80, node_category 92,
+ * str_find 30, intern_node 47, intern_trivial_string 46, intern_trivial_int 43, node_children 48, node_value 49, file_size
+ * 60, host_file_append_bytes 61, read_file 63, write_file 104 (children 1..n in order); str_concat 27
+ * (a chain: the leaves depth first, a nested str_concat is shape); the leaf door 201 (the mode is shape; child 2 is the value,
+ * and for modes 9 33 49 54 the third child's cons and for 50 its nested cons carry values as shape; attempt, 28, is never
+ * taken apart -- its child runs under a recover point). A node not named here is walked whole, as it always was.
+ * SHRINK PATH: the table leaves with the walker -- when the walker is Form's, each arm states its strictness itself. */
+static long long fk_jit_plain_kids(long long t) {
+    if (t == 66 || t == 30) { return 3; }
+    if (t == 65 || t == 80 || t == 47 || t == 67 || t == 61 || t == 104) { return 2; }
+    if (t == 92 || t == 46 || t == 43 || t == 48 || t == 49 || t == 60 || t == 63 || t == 99) { return 1; }
+    return 0;
+}
+static int fk_jit_node_ok(long long k) { return k > 0 && k < fk_node_count; }
+/* the leaf door's mode, or -1 when its first child is not a literal */
+static long long fk_jit_leaf_mode(long long k) {
+    long long m = fk_node[k][1];
+    return fk_jit_node_ok(m) && fk_node[m][0] == 1 ? fk_node[m][1] : -1;
+}
+/* the shape of a leaf door's third child by mode: 0 none read, 1 a cons of two values, 2 a cons of a value and a cons of two */
+static long long fk_jit_leaf_tail(long long mode) {
+    if (mode == 9 || mode == 33 || mode == 49 || mode == 54) { return 1; }
+    if (mode == 50) { return 2; }
+    return 0;
+}
+static int fk_jit_cons_ok(long long k, long long depth) {
+    if (!fk_jit_node_ok(k) || fk_node[k][0] != 19) { return 0; }
+    return depth <= 1 ? 1 : fk_jit_cons_ok(fk_node[k][2], depth - 1);
+}
+/* the value children of k into out (at most cap); answers how many, or -1 when k is not one the page may take apart */
+static long long fk_jit_kids_of(long long k, long long *out, long long n, long long cap) {
+    if (!fk_jit_node_ok(k) || n >= cap) { return -1; }
+    long long t = fk_node[k][0], p = fk_jit_plain_kids(t), c = 1;
+    if (t == 27) {
+        while (c <= 2) {
+            long long ch = fk_node[k][c];
+            if (fk_jit_node_ok(ch) && fk_node[ch][0] == 27) { n = fk_jit_kids_of(ch, out, n, cap); if (n < 0) { return -1; } }
+            else { if (n >= cap || !fk_jit_node_ok(ch)) { return -1; } out[n] = ch; n = n + 1; }
+            c = c + 1;
+        }
+        return n;
+    }
+    if (p > 0) {
+        while (c <= p) { if (n >= cap || !fk_jit_node_ok(fk_node[k][c])) { return -1; } out[n] = fk_node[k][c]; n = n + 1; c = c + 1; }
+        return n;
+    }
+    if (t == 201) {
+        long long m = fk_jit_leaf_mode(k), tl = m < 0 ? 0 : fk_jit_leaf_tail(m), c3 = fk_node[k][3];
+        if (m < 0 || m == 28 || !fk_jit_node_ok(fk_node[k][2]) || n + 4 > cap) { return -1; }
+        out[n] = fk_node[k][2]; n = n + 1;
+        if (tl == 0) { return n; }
+        if (!fk_jit_cons_ok(c3, tl)) { return -1; }
+        out[n] = fk_node[c3][1]; n = n + 1;
+        if (tl == 1) { out[n] = fk_node[c3][2]; return n + 1; }
+        long long c32 = fk_node[c3][2];
+        out[n] = fk_node[c32][1]; out[n + 1] = fk_node[c32][2];
+        return n + 2;
+    }
+    return -1;
+}
+static long long fk_smklit(long long v);
+static long long fk_jit_read_node(long long slot) { return fk_smknode(110, fk_smklit(slot), 0, 0); }
+/* the mirror of k, its value children read from slots t + *at in the order fk_jit_kids_of named them */
+static long long fk_jit_mirror(long long k, long long t, long long *at) {
+    long long tg = fk_node[k][0], p = fk_jit_plain_kids(tg);
+    long long c1 = fk_node[k][1], c2 = fk_node[k][2], c3 = fk_node[k][3];
+    if (tg == 27) {
+        long long a = (fk_jit_node_ok(c1) && fk_node[c1][0] == 27) ? fk_jit_mirror(c1, t, at) : fk_jit_read_node(t + (*at)++);
+        long long b = (fk_jit_node_ok(c2) && fk_node[c2][0] == 27) ? fk_jit_mirror(c2, t, at) : fk_jit_read_node(t + (*at)++);
+        return fk_smknode(27, a, b, c3);
+    }
+    if (p > 0) {
+        long long r1 = p >= 1 ? fk_jit_read_node(t + (*at)++) : c1;
+        long long r2 = p >= 2 ? fk_jit_read_node(t + (*at)++) : c2;
+        long long r3 = p >= 3 ? fk_jit_read_node(t + (*at)++) : c3;
+        return fk_smknode(tg, r1, r2, r3);
+    }
+    /* the leaf door: the mode stays, child 2 reads its slot, the third child's cons is shape around reads */
+    long long tl = fk_jit_leaf_tail(fk_jit_leaf_mode(k));
+    long long v2 = fk_jit_read_node(t + (*at)++);
+    long long r3 = c3;
+    if (tl == 1) { long long a = fk_jit_read_node(t + (*at)++); long long b = fk_jit_read_node(t + (*at)++); r3 = fk_smknode(19, a, b, 0); }
+    if (tl == 2) {
+        long long a = fk_jit_read_node(t + (*at)++);
+        long long b = fk_jit_read_node(t + (*at)++);
+        long long d = fk_jit_read_node(t + (*at)++);
+        r3 = fk_smknode(19, a, fk_smknode(19, b, d, 0), 0);
+    }
+    return fk_smknode(201, c1, v2, r3);
+}
+static long long fk_jit_node(long long x) {
+    if ((x & 1) == 0 || fk_is_str(x) || x == fk_nothing) { return fk_nothing; }
+    long long p = x >> 1;
+    if (p < 1 || !FK_POK(p) || !fk_is_str(FK_HH(p))) { return fk_nothing; }
+    char what[8];
+    fk_cstr(FK_HH(p), what, 8);
+    long long q = FK_HNEXT(p);
+    if (!(q >= 1 && FK_POK(q)) || (FK_HH(q) & 1) != 0) { return fk_nothing; }
+    long long k = FK_HH(q) >> 1;
+    if (!fk_jit_node_ok(k)) { return fk_nothing; }
+    long long kids[16];
+    if (fk_cstr_eq(what, "kids")) {
+        long long n = fk_jit_kids_of(k, kids, 0, 16), l = 1;
+        if (n < 0) { return fk_nothing; }
+        while (n > 0) { n = n - 1; l = fk_cons_val(kids[n] << 1, l); }
+        return l;
+    }
+    if (fk_cstr_eq(what, "mint")) {
+        long long r = FK_HNEXT(q);
+        if (!(r >= 1 && FK_POK(r)) || (FK_HH(r) & 1) != 0 || fk_jit_kids_of(k, kids, 0, 16) < 0) { return fk_nothing; }
+        long long t = FK_HH(r) >> 1, at = 0;
+        if (t < 0 || t > 4095) { return fk_nothing; }
+        return fk_jit_mirror(k, t, &at) << 1;
+    }
+    if (fk_cstr_eq(what, "word")) {
+        if (fk_node[k][0] != 24) { return fk_nothing; }
+        unsigned long long w = (unsigned long long)fk_strv(fk_node[k][1]);
+        return fk_cons_val((long long)(w & 65535) << 1, fk_cons_val((long long)((w >> 16) & 65535) << 1,
+               fk_cons_val((long long)((w >> 32) & 65535) << 1, fk_cons_val((long long)((w >> 48) & 65535) << 1, 1))));
+    }
+    return fk_nothing;
 }
 static void fk_jit_offer(long long c);
 static long long fk_walk_body(long long i, long long fp) {
@@ -10317,9 +10469,12 @@ static long long fk_walk_body(long long i, long long fp) {
             long long c194 = fk_node[i][1];
             if (c194 >= 0 && c194 < fk_jit_cap && fk_jit_page[c194] != 0) {
                 fk_jit_cx.next = 0;
+                fk_page_walk_fn = 0;
                 long long r194 = ((fk_jit_page_fn)fk_jit_page[c194])(fp, &fk_jit_cx);
                 if (fk_jit_cx.next == 0) { return r194; }
+                fk_page_walk_fn = c194;
                 i = fk_jit_cx.next;
+                fk_page_walk_tag = fk_jit_walk_kind(i);
                 continue;
             }
             void *m194 = (c194 >= 0 && c194 < fk_f64_cap) ? fk_f64_mem[c194] : 0;
@@ -18765,6 +18920,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if ((fm201 >> 1) == 53) { return fk_cell_arg_slot < 0 ? fk_nothing : fk_vs[fk_cell_arg_slot]; }
         /* mode 56: jit_fn_bind(fn, words) -- a defn's Form page, see fk_jit_bind */
         if ((fm201 >> 1) == 56) { return fk_jit_bind(fx201); }
+        /* mode 57: jit_node(spec) -- what the Form JIT may take apart, see fk_jit_node */
+        if ((fm201 >> 1) == 57) { return fk_jit_node(fx201); }
         /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
         if ((fm201 >> 1) == 55) {
             const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
@@ -21428,11 +21585,17 @@ static long long fk_cell_cpu_us(void);
  * outermost and innermost 2048 of a deep chain) and the one running, whatever phase holds the run */
 static unsigned int fk_prof_incl[FK_PROF_FNS];
 static unsigned int fk_prof_seen[FK_PROF_FNS];
+static unsigned int fk_prof_pwalk[FK_PROF_FNS];   /* a page's own samples the walker ran for it (fk_page_walk_fn) */
+static unsigned int fk_prof_ptag[512];             /* the same samples by the kind of node handed over (fk_jit_walk_kind) */
 static void fk_prof_credit(long long c, unsigned int stamp) {
     if (c >= 0 && c < FK_PROF_FNS && fk_prof_seen[c] != stamp) { fk_prof_seen[c] = stamp; fk_prof_incl[c] = fk_prof_incl[c] + 1; }
 }
+static int fk_load_phase;   /* (defined below) 1 while a program loads, until its root begins to walk */
 static void fk_prof_sample(void) {
     long long ph = fk_phase;
+    /* a program's load is the load phase until its root begins to walk: the digests, the link by name, the symbol rows and
+     * the published surface run at fn 0 with no C phase of their own, and read as the unit's top level, (top), before */
+    if (ph == 0 && fk_load_phase) { ph = FK_PHASE_LOAD; }
     fk_prof_total = fk_prof_total + 1;
     unsigned int stamp = (unsigned int)fk_prof_total;
     long long depth = fk_fr_depth, k = 0;
@@ -21446,8 +21609,17 @@ static void fk_prof_sample(void) {
     if (ph > 0 && ph < FK_PROF_PHASES) { fk_prof_phase[ph] = fk_prof_phase[ph] + 1; return; }
     fk_prof_phase[0] = fk_prof_phase[0] + 1;
     long long c = fk_cur_fn;
-    if (c >= 0 && c < FK_PROF_FNS) { fk_prof_self[c] = fk_prof_self[c] + 1; }
+    if (c >= 0 && c < FK_PROF_FNS) {
+        fk_prof_self[c] = fk_prof_self[c] + 1;
+        if (c != 0 && fk_page_walk_fn == c) {
+            fk_prof_pwalk[c] = fk_prof_pwalk[c] + 1;
+            long long tg = fk_page_walk_tag;
+            if (tg >= 0 && tg < 512) { fk_prof_ptag[tg] = fk_prof_ptag[tg] + 1; }
+        }
+    }
 }
+static const char *fk_tag_name(long long tag);
+static const char *fk_leaf_mode_name(long long mode);
 static void fk_time_write(void) {
     if (fk_prof_total < 200) { return; }   /* under a fifth of a second: nothing to say */
     char path[96], tmp[112];
@@ -21462,8 +21634,9 @@ static void fk_time_write(void) {
         p = p + 1;
     }
     /* every recipe with a sample, named by the symbol map; a row says how it ran at the end: page (a Form page), leaf (the
-     * C loop lane), walk. Every sample is named: fn 0 is a unit's own top-level sequence, (top), and a fn no symbol names
-     * prints as fn#N, so the rows sum to the recipe phase */
+     * C loop lane), declined (offered to the JIT, which bound no page: a gap in the page compiler), walk (never offered:
+     * its heat never reached FK_JIT_HEAT). Every sample is named: fn 0 is a unit's own top-level sequence, (top), and a fn
+     * no symbol names prints as fn#N, so the rows sum to the recipe phase */
     static unsigned char named[FK_PROF_FNS / 8];
     memset(named, 0, sizeof(named));
     long long j = 0;
@@ -21473,12 +21646,22 @@ static void fk_time_write(void) {
             (named[fx >> 3] & (1u << (fx & 7))) == 0) {
             named[fx >> 3] = (unsigned char)(named[fx >> 3] | (1u << (fx & 7)));
             long long b = fk_fn[fx];
-            const char *how = (fx < fk_jit_cap && fk_jit_page[fx] != 0) ? "page" : (b >= 0 && b < fk_node_count && fk_node[b][0] == 194) ? "leaf" : "walk";
+            const char *how = (fx < fk_jit_cap && fk_jit_page[fx] != 0) ? "page" : (b >= 0 && b < fk_node_count && fk_node[b][0] == 194) ? "leaf"
+                            : (fx < fk_jit_cap && fk_jit_state[fx] != 0) ? "declined" : "walk";
             dprintf(fd, "recipe %u %u %s %.*s\n", fk_prof_self[fx], fk_prof_incl[fx], how, (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
+            if (fk_prof_pwalk[fx] > 0) { dprintf(fd, "pagewalk %u %.*s\n", fk_prof_pwalk[fx], (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]); }
         }
         j = j + 1;
     }
     if (fk_prof_self[0] > 0) { dprintf(fd, "recipe %u %u walk (top)\n", fk_prof_self[0], fk_prof_incl[0]); }
+    long long tg = 0;
+    while (tg < 512) {
+        if (fk_prof_ptag[tg] > 0) {
+            const char *tn = tg < 256 ? fk_tag_name(tg) : fk_leaf_mode_name(tg - 256);
+            dprintf(fd, "walktag %u %s%lld %s\n", fk_prof_ptag[tg], tg < 256 ? "" : "201:", tg < 256 ? tg : tg - 256, tn != 0 ? tn : "-");
+        }
+        tg = tg + 1;
+    }
     long long fx = 1;
     while (fx < FK_PROF_FNS) {
         if ((fk_prof_self[fx] > 0 || fk_prof_incl[fx] > 0) && (named[fx >> 3] & (1u << (fx & 7))) == 0) {
@@ -21745,6 +21928,21 @@ static long long fk_sym_end(long long s) {
  * VALUE form — every primitive, (empty) (arity 0), (list ..) (arity -1 variadic), every
  * comparison/boolean rewrite — flows through these data tables. */
 #include "fkwu-optable.h"
+/* the op table's first name for a tag, or 0 (a form the walker reads by hand: if, let, do, a read, a call...) */
+static const char *fk_tag_name(long long tag) {
+    long long i = 0;
+    while (i < fk_optab_n) { if (fk_optab[i].tag == tag) { return fk_optab[i].name; } i = i + 1; }
+    return 0;
+}
+/* the name of the rewrite row that builds a leaf door of this mode (its program begins LIT mode), or 0 */
+static const char *fk_leaf_mode_name(long long mode) {
+    long long i = 0;
+    while (i < fk_rwtab_n) {
+        if (fk_rwtab[i].nprog >= 2 && fk_rwtab[i].prog[0] == 1 && fk_rwtab[i].prog[1] == mode) { return fk_rwtab[i].name; }
+        i = i + 1;
+    }
+    return 0;
+}
 /* --feval reads grammars/form-eval.fk at runtime (no embedded blob / no codegen) — see fk_run_feval
  */
 /* match a source symbol [s,s+n) against a C string by length-and-bytes. */
@@ -24219,6 +24417,27 @@ static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, lon
             return 1;
         }
     }
+    {
+        /* last, the checkout the binary lives in (as the Metal carrier, the JIT unit and the floor are found): a unit run
+         * from a directory outside every checkout still reaches the stdlib its own runtime was built with */
+        long long last = -1, k = 0, m = 0;
+        while (fk_self_path[k] != 0) { if (fk_self_path[k] == '/') { last = k; } k = k + 1; }
+        if (last >= 0 && last + 1 + 5 + token_n + 1 <= cap) {
+            const char *forms[2] = { "form/", "" };
+            int f = 0;
+            while (f < 2) {
+                m = 0; k = 0;
+                while (k <= last) { out[m] = fk_self_path[k]; m = m + 1; k = k + 1; }
+                k = 0;
+                while (forms[f][k] != 0) { out[m] = forms[f][k]; m = m + 1; k = k + 1; }
+                j = 0;
+                while (j < token_n) { out[m + j] = token[j]; j = j + 1; }
+                out[m + j] = 0;
+                if (fk_path_size_raw(out) >= 0) { return 1; }
+                f = f + 1;
+            }
+        }
+    }
     if (dir_n + token_n + 1 > cap) {
         return 0;
     }
@@ -24610,8 +24829,12 @@ static int fk_src_collect_dep(const char *owner_path, long long owner_idx, const
 /* LINK BY NAME. A unit that calls a name form-stdlib/home-index.txt lists, and defines no such
  * name itself, collects the name's home unit as if it had preluded it -- the way a linker pulls
  * the archive member that defines an undefined symbol. The index is read once per process,
- * resolved like a prelude token from the first unit that asks. Comments and string literals
- * are skipped, so a word in prose links nothing. */
+ * resolved like a prelude token from the first unit that asks, else beside the binary (as the JIT
+ * unit and the floor compiler are): a run that began outside any checkout links by the index its
+ * runtime's checkout holds. A process that finds no index asks again at the next unit, so a first
+ * unit from nowhere does not leave every later unit unlinked (the JIT's own page compiler among
+ * them, which then declined every offer). Comments and string literals are skipped, so a word in
+ * prose links nothing. */
 static char *fk_read_whole_file(const char *path, long long *out_len);
 #define FK_HOME_CAP 4096
 static int fk_home_loaded;
@@ -24628,13 +24851,22 @@ static void fk_home_load(const char *owner_path) {
     long long n = 0;
     char *t;
     long long i = 0;
-    fk_home_loaded = 1;
     while (tok[tn] != 0) {
         tn = tn + 1;
     }
-    if (!fk_path_resolve_fk_dep(owner_path, tok, tn, path, FK_PATH_CAP)) {
-        return;
+    if (!fk_path_resolve_fk_dep(owner_path, tok, tn, path, FK_PATH_CAP) || fk_path_size_raw(path) < 0) {
+        const char *beside = "form/form-stdlib/home-index.txt";
+        long long last = -1, k = 0, m = 0;
+        while (fk_self_path[k] != 0) { if (fk_self_path[k] == '/') { last = k; } k = k + 1; }
+        if (last + 1 + fk_cstrlen(beside) + 1 >= FK_PATH_CAP) { return; }
+        k = 0;
+        while (k <= last) { path[m] = fk_self_path[k]; m = m + 1; k = k + 1; }
+        k = 0;
+        while (beside[k] != 0) { path[m] = beside[k]; m = m + 1; k = k + 1; }
+        path[m] = 0;
+        if (fk_path_size_raw(path) < 0) { return; }
     }
+    fk_home_loaded = 1;
     fk_cstr_copy(fk_home_path, path, FK_PATH_CAP);
     t = fk_read_whole_file(path, &n);
     if (t == 0) {
@@ -28240,7 +28472,9 @@ static char fk_jit_unit[FK_PATH_CAP];
 static int fk_jit_unit_state;  /* 0 not looked for, 1 found, 2 absent */
 static int fk_jit_on = -1;
 static int fk_jit_warmed;
-/* the JIT is on and its unit found: 1 */
+/* the JIT is on and its unit found: 1. The unit is the seed's own, so it is found where the program runs (beside the unit the
+ * command named, in its checkout, in the working directory) and else beside the binary itself, as the Metal carrier is: a
+ * unit run from a directory outside any checkout is offered to the JIT of the checkout its fkwu lives in. */
 static int fk_jit_ready(void) {
     if (fk_jit_on < 0) { fk_jit_on = fk_conf("FK_NO_JIT") ? 0 : 1; }
     if (!fk_jit_on) { return 0; }
@@ -28250,6 +28484,18 @@ static int fk_jit_ready(void) {
         if (fk_boot_root[0] != 0 && fk_path_resolve_fk_dep(fk_boot_root, tok, fk_cstrlen(tok), fk_jit_unit, FK_PATH_CAP) &&
             fk_path_size_raw(fk_jit_unit) > 0) {
             fk_jit_unit_state = 1;
+        } else {
+            const char *beside = "form/form-stdlib/bml/jit-page.bml";
+            long long last = -1, i = 0, n = 0;
+            while (fk_self_path[i] != 0) { if (fk_self_path[i] == '/') { last = i; } i = i + 1; }
+            if (last + 1 + fk_cstrlen(beside) + 1 < FK_PATH_CAP) {
+                i = 0;
+                while (i <= last) { fk_jit_unit[n] = fk_self_path[i]; n = n + 1; i = i + 1; }
+                i = 0;
+                while (beside[i] != 0) { fk_jit_unit[n] = beside[i]; n = n + 1; i = i + 1; }
+                fk_jit_unit[n] = 0;
+                if (fk_path_size_raw(fk_jit_unit) > 0) { fk_jit_unit_state = 1; }
+            }
         }
     }
     return fk_jit_unit_state == 1;
@@ -28279,6 +28525,7 @@ static void fk_jit_warm(void) {
     fk_cur_fn = cur;
 #endif
 }
+static long long fk_cr_key_find(long long recw, const char *key);
 static void fk_jit_offer_one(long long c) {
 #if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || defined(_WIN32) || !defined(FK_HAVE_SETJMP)
     (void)c;
@@ -28308,12 +28555,19 @@ static void fk_jit_offer_one(long long c) {
     if (fk_conf("FK_JIT_SAY")) {
         long long j = 0, ns = 0, nn = 0;
         while (j < fk_fntop) { if (fk_fnidx[j] == c) { ns = fk_fnsym_s[j]; nn = fk_fnsym_n[j]; break; } j = j + 1; }
-        long long rr = fk_ridx(r), st = fk_nothing, q = 0, key = fk_stri(fk_sbuf("stopped", 7));
-        while (rr >= 1 && q < fk_rcnt[rr]) { if (fk_rkey[rr][q] == key) { st = fk_rval[rr][q]; } q = q + 1; }
-        long long si = st == fk_nothing ? -1 : fk_stri(fk_value_str(st));
-        dprintf(2, "fkwu: jit: %.*s (fn %lld, heat %lld) %s in %lld us%s%.*s\n", (int)nn, fk_srctext + ns, c, fk_fn_heat[c],
+        /* the stop, named: its kind and message (a stop is a record; its value_str is only "<record>") */
+        long long st = fk_cr_key_find(r, "stopped");
+        long long sk = st == fk_nothing ? fk_nothing : fk_cr_key_find(st, "kind"), sm = st == fk_nothing ? fk_nothing : fk_cr_key_find(st, "message");
+        long long si = st == fk_nothing ? -1 : fk_stri(fk_value_str(sk));
+        long long mi = st == fk_nothing ? -1 : fk_stri(fk_value_str(sm));
+        long long vi = fk_stri(fk_value_str(fk_cr_key_find(r, "value")));
+        long long ei = fk_stri(fk_value_str(fk_cr_key_find(r, "err")));
+        dprintf(2, "fkwu: jit: %.*s (fn %lld, heat %lld) %s in %lld us%s%.*s%s%.*s; value %.*s%s%.*s\n", (int)nn, fk_srctext + ns, c, fk_fn_heat[c],
                 (c < fk_jit_cap && fk_jit_page[c] != 0) ? "bound" : "walks", (fk_mono_ns() - t0) / 1000, si >= 0 ? ": " : "",
-                si >= 0 && FK_SOK(si) ? (int)(FK_SLEN(si) > 600 ? 600 : FK_SLEN(si)) : 0, si >= 0 && FK_SOK(si) ? FK_SBYTES(si) : "");
+                si >= 0 && FK_SOK(si) ? (int)(FK_SLEN(si) > 60 ? 60 : FK_SLEN(si)) : 0, si >= 0 && FK_SOK(si) ? FK_SBYTES(si) : "",
+                mi >= 0 ? " -- " : "", mi >= 0 && FK_SOK(mi) ? (int)(FK_SLEN(mi) > 600 ? 600 : FK_SLEN(mi)) : 0, mi >= 0 && FK_SOK(mi) ? FK_SBYTES(mi) : "",
+                vi >= 0 && FK_SOK(vi) ? (int)(FK_SLEN(vi) > 80 ? 80 : FK_SLEN(vi)) : 0, vi >= 0 && FK_SOK(vi) ? FK_SBYTES(vi) : "",
+                ei >= 0 && FK_SOK(ei) && FK_SLEN(ei) > 0 ? "; said " : "", ei >= 0 && FK_SOK(ei) ? (int)(FK_SLEN(ei) > 400 ? 400 : FK_SLEN(ei)) : 0, ei >= 0 && FK_SOK(ei) ? FK_SBYTES(ei) : "");
     }
 #endif
 }
@@ -28772,12 +29026,45 @@ static int fk_hex16_parse(const char *p, unsigned long long *out) {
 }
 /* The floor compiler is selected from the current working directory. Form
  * records this same choice and context in each lowering packet. */
-static const char *fk_bml_floor_path(void) {
+/* The floor compiler that lowers a unit is its checkout's: found from the working directory (the checkout's root or its
+ * form/), else under the /form/ root the unit's own path names, else beside the binary (as the Metal carrier and the JIT
+ * unit are). A unit lowered from a directory outside any checkout -- the JIT's own page compiler among them, when the run
+ * began elsewhere -- is lowered by the floor its checkout holds. */
+static char fk_bml_floor_found[FK_PATH_CAP];
+static const char *fk_bml_floor_path(const char *unit) {
+    const char *tail = "form-stdlib/bml-floor-compile.fk";
+    long long tn = fk_cstrlen(tail), s = 0, root = -1, n = 0, i = 0;
     if (fk_path_size_raw("form/form-stdlib/bml-floor-compile.fk") >= 0) {
         return "form/form-stdlib/bml-floor-compile.fk";
     }
     if (fk_path_size_raw("form-stdlib/bml-floor-compile.fk") >= 0) {
         return "form-stdlib/bml-floor-compile.fk";
+    }
+    while (unit != 0 && unit[s] != 0) {
+        if (unit[s] == '/' && unit[s + 1] == 'f' && unit[s + 2] == 'o' && unit[s + 3] == 'r' && unit[s + 4] == 'm' && unit[s + 5] == '/') { root = s + 6; }
+        s = s + 1;
+    }
+    if (root > 0 && root + tn + 1 < FK_PATH_CAP) {
+        n = 0;
+        while (n < root) { fk_bml_floor_found[n] = unit[n]; n = n + 1; }
+        i = 0;
+        while (i < tn) { fk_bml_floor_found[n + i] = tail[i]; i = i + 1; }
+        fk_bml_floor_found[n + i] = 0;
+        if (fk_path_size_raw(fk_bml_floor_found) >= 0) { return fk_bml_floor_found; }
+    }
+    long long last = -1;
+    i = 0;
+    while (fk_self_path[i] != 0) { if (fk_self_path[i] == '/') { last = i; } i = i + 1; }
+    if (last + 1 + 5 + tn + 1 < FK_PATH_CAP) {
+        n = 0;
+        while (n <= last) { fk_bml_floor_found[n] = fk_self_path[n]; n = n + 1; }
+        const char *form = "form/";
+        i = 0;
+        while (form[i] != 0) { fk_bml_floor_found[n] = form[i]; n = n + 1; i = i + 1; }
+        i = 0;
+        while (i < tn) { fk_bml_floor_found[n + i] = tail[i]; i = i + 1; }
+        fk_bml_floor_found[n + i] = 0;
+        if (fk_path_size_raw(fk_bml_floor_found) >= 0) { return fk_bml_floor_found; }
     }
     return "form/form-stdlib/bml-floor-compile.fk";
 }
@@ -29015,7 +29302,7 @@ FK_PHASED(FK_PHASE_RECIPE, fk_char_p, fk_bml_floor_call, (char **paths, long lon
     long long list = 1, i = n, rec, out_w, stopped_w, dg;
     char *out;
     char floor[FK_PATH_CAP];
-    fk_cstr_copy(floor, fk_bml_floor_path(), FK_PATH_CAP);
+    fk_cstr_copy(floor, fk_bml_floor_path(n > from ? paths[from] : 0), FK_PATH_CAP);
     fk_jit_warm();
     while (i > from) {
         i = i - 1;
