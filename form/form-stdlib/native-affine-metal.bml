@@ -9,6 +9,10 @@ import form-stdlib/bml/disposable.bml;
 section [form.bml] {
  // the per-kernel device time of a profiled run (FORM_NAM_PROFILE=1)
  let NAM-PROFILE = record_new(0, "names", []);
+ // The unit's source and the pipelines minted from it, kept for the process: nam-msl() concatenated the unit's 25 KB of text on every
+ // call, 115 us, three quarters of a dispatch's 150 us of host work, and a one-token forward is 620 dispatches (the voice decoded at
+ // 6 tokens a second, 2026-10-11, observe/dispatch-cost-probe-run.bml).
+ let NAM-CACHE = record_new(0, "msl", "");
  // A Metal buffer is given back by its holder: `defer NativeAffineBuffer_dispose(h);` right after acquiring.
  class NativeAffineBuffer : Disposable<Int> {
   def dispose(h) = nam-free([h]);
@@ -20,7 +24,12 @@ section [form.bml] {
   // fuses a multiply-add in one kernel's shape and not in another's, so a token alone, in a block, in a one-row or four-row walk
   // differed in the last bit (1e-5) by the compiler's choice, never by the arithmetic. With contraction off the arithmetic IS the
   // expression, and the kernels agree wherever they fold the same terms in the same order.
-  def nam-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" + ((String) nam-linear-msl() + "\n#pragma clang fp contract(fast)\n" + nam-basic-msl());
+  def nam-msl() = (String) record_get(NAM-CACHE, "msl") != "" ? record_get(NAM-CACHE, "msl") : nam-msl-kept(nam-msl-build());
+  def nam-msl-kept(text) {
+   let set = record_set(NAM-CACHE, "msl", text);
+   text;
+  }
+  def nam-msl-build() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" + ((String) nam-linear-msl() + "\n#pragma clang fp contract(fast)\n" + nam-basic-msl());
   def nam-linear-msl() = "
 inline float nam_read(device const uchar* p, uint i, uint ty) {uint at=i*(ty==0?4:2);uint bits=uint(p[at])|(uint(p[at+1])<<8);if(ty==0)return as_type<float>(bits|(uint(p[at+2])<<16)|(uint(p[at+3])<<24));if(ty==1)return float(as_type<half>(ushort(bits)));return as_type<float>(bits<<16);}
 inline uint nam_g(uint r, uint cols, uint c, uint group) { return r*(cols/group)+c/group; }
@@ -110,7 +119,11 @@ kernel void nam_copy(device const float* x [[buffer(0)]],device float* y [[buffe
 kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint lane [[thread_index_in_simdgroup]]) {uint bad=0;float ss=0,m=0;for(uint i=lane;i<n;i+=32){float v=x[i];if(!isfinite(v)){bad++;}else{ss+=v*v;m=max(m,abs(v));}}bad=simd_sum(bad);ss=simd_sum(ss);m=simd_max(m);if(lane==0){out[0]=float(bad+uint(!isfinite(ss)));out[1]=isfinite(ss)?ss:0;out[2]=m;}}
 ";
   def nam-type(dtype) = (String) dtype == "F32" ? 0 : (String) dtype == "F16" ? 1 : (String) dtype == "BF16" ? 2 : form_error("native affine scalar dtype refused");
-  def nam-pipe(name) = nam-held-pipe(metal_pipeline(nam-msl(), name));
+  def nam-pipe(name) = record_has(NAM-CACHE, "pipe:" ++ name) ? record_get(NAM-CACHE, "pipe:" ++ name) : nam-pipe-kept(name, nam-held-pipe(metal_pipeline(nam-msl(), name)));
+  def nam-pipe-kept(name, p) {
+   let set = record_set(NAM-CACHE, "pipe:" ++ name, p);
+   p;
+  }
   def nam-held-pipe(p) = p <= 0 ? nam-refused("Metal compile") : p;
   // A 0 handle from an unloaded carrier is an absence, not a device refusal.
   def nam-refused(what) = nam-refused-in(what, metal_status());

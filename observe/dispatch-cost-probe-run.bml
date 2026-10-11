@@ -1,0 +1,41 @@
+// dispatch-cost-probe-run.bml — what one Metal dispatch costs on the host side, in the pieces a nam-run is made of.
+//
+//   ./fkwu observe/dispatch-cost-probe-run.bml
+//
+// A one-token forward of the 3B voice is about 620 dispatches, and the voice decodes at 6 tokens a second (3,936 ids in 618 s in the
+// 2026-10-11 cycle's evaluation): 160 ms a token, while the device's own busy time for a decode matvec is 75 microseconds. This times,
+// for 200 repetitions each, the parts of one dispatch: the pipeline (metal_pipeline over the affine unit's source), the binding
+// string (md-bind of five handles and seven values), the enqueue itself, and a whole nam-run, in microseconds a call.
+// preflight-exec: forbidden
+import form-stdlib/native-affine-metal.bml;
+import form-stdlib/metal-carrier.bml;
+section [form.bml] {
+ class DispatchCostProbeRun {
+  def dcp-n() = 200;
+  def dcp-loop(f, i, n) = i >= n ? 0 : dcp-loop-next(f, i, n, f(i));
+  def dcp-loop-next(f, i, n, r) = dcp-loop(f, i + 1, n);
+  def dcp-time(label, f) {
+   let t0 = host_monotonic_ms();
+   let ran = dcp-loop(f, 0, dcp-n());
+   let ms = host_monotonic_ms() - t0;
+   print_str("[dispatch-cost] " ++ label ++ ": " ++ (ms * 1000 / dcp-n()).str() ++ " us a call");
+  }
+  def dcp-run() {
+   let a = mca-admit(".hearth/carrier.log", ".hearth/carrier.err");
+   let w = nam-alloc(8192 * 3072 / 8); let s = nam-alloc(8192 * 48); let b = nam-alloc(8192 * 48);
+   let x = nam-alloc(3072); let y = nam-alloc(8192);
+   let view = [w, s, b, 8192, 3072, 64, 0];
+   let p = nam-pipe("nam_affine_v1");
+   let said = dcp-time("nam-msl() (the unit's source string)", i => len(nam-msl()));
+   let said2 = dcp-time("metal_pipeline(nam-msl(), name)", i => metal_pipeline(nam-msl(), "nam_affine_v1"));
+   let said3 = dcp-time("md-bind of five handles and seven values", i => len(md-bind([w, s, b, x, y], [8192, 3072, 1, 64, 0, 0, 0])));
+   let said4 = dcp-time("md-bind16 (the grouped tail as well)", i => len(md-bind16([w, s, b, x, y], [8192, 3072, 1, 64, 0, 0, 0], 32, 0, 1, 0)));
+   let said5 = dcp-time("metal_enqueue of a ready binding (no sync)", i => metal_enqueue(p, md-bind16([w, s, b, x, y], [8192, 3072, 1, 64, 0, 0, 0], 32, 0, 1, 0), 8192));
+   let synced = nam-sync();
+   let said6 = dcp-time("nam-linear-mt decode (a whole dispatch as the voice makes it)", i => nam-linear-mt(view, x, y, 1));
+   let done = nam-sync();
+   0;
+  }
+ }
+ dcp-run();
+}
