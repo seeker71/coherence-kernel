@@ -64,6 +64,16 @@ still decide admission. An explicitly supplied context remains a caller limit.
 `turn` uses the same task owner. The standalone entry is `observe/form-cli-task-run.bml`, with the original prompt on
 stdin. Internal task calls return a native report; only the terminal entry renders it. Its `trace_owner` correlates the task's framebuffer events and durable planner/coding ledgers. `attention`
 names an unfinished task.
+The planner returns its outcome and latest finding as native nodes even when it
+cannot queue a verified task. The task report carries that result directly,
+including the original failure, local option count and retained guide packet.
+Reading separate ledgers is no longer required to recover a declined planner's
+last finding. This preserves evidence; it does not establish local completion.
+Retained findings preserve the complete diagnostic. Execution evidence and
+stderr precede ordinary output, so earlier successful cases cannot hide the
+error from the next local choice or a resumed checkpoint.
+Native meter callers use `rw-close(state)` directly; request parsing stays at
+the terminal boundary.
 `completed` requires an owned publication whose original witness and source
 checks pass on current files. Task admission reads that state before opening a
 planner, after planning and after execution, so a completed effect is kept even
