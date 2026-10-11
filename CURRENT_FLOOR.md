@@ -1096,23 +1096,26 @@ load, parse, image, file, child, wait, gpu, net) or, when no phase holds it, the
 a C leaf. It also credits every recipe on the frame chain once, so the board holds each recipe's own time and the time
 under it. Every sample is named: a unit's top-level sequence is `(top)`, a fn no symbol names is `fn#N`. A rest
 (`host_sleep_ms`) is wait and a child's end (`host_wait`) is child, so a recipe's own time is work, not a wait inside it.
-`./fkwu observe/time-board-run.bml` reads every board in a directory (`{"dir":…}`, `{"top":n}`, `{"take":1}`). A JIT
+`./fkwu observe/time-board-run.bml` reads every board in a directory (`{"dir":…}`, `{"top":n}`, `{"take":1}`) and sums a
+recipe by its name and how it ran: a recipe a process holds twice (a page in the run's unit, walked in a cell that
+lowers BML inside a load) is two rows. A JIT
 offer's cell is its own phase, `jit-offer`, so a page compiler that loads (or relowers its unit after a compiler change)
 is never charged to the recipe that happened to cross the heat. What a kernel runs now is on its live page: the sampler
 writes its phase and fn there every millisecond, and `kernel_page_hot pid 0` answers `[phase, row]` (the row as a hot
 row names the defn, or nothing for a unit's top level), so a process that sits in one place for minutes says where.
 
-Lowering form-find.bml warm takes 3.3 s:
+Lowering form-find.bml (61 KB) in a fresh tree takes 2.6 s cold, where every image is built by the binary, 0.37 s on
+the second run and 0.22 s once every dependency's facts are reused:
 
-- half of it is the grammar engine parsing the unit's own source (`g-parse-full`, about 50 µs a byte);
-- 30% is rescanning the dependencies' text for their signatures;
-- 20% is fingerprinting the compiler's own sources (`bfc-pin`).
+- about half of a warm run is scanning the dependencies' text for their signatures (`fsc-bml-dependency-signatures`);
+- the grammar engine parsing the unit's own source (`g-parse-full`) is an eighth, some 40 ms, under a microsecond a
+  byte. It reads its rules compiled once a process (`gx-compiled`, 3 to 7 ms): each reference and alternation is
+  dispatched on the byte under the cursor, and rules that begin alike are read through their shared beginning once;
+- fingerprinting the compiler's own sources (`bfc-pin`) is 3%.
 
-A cold run, after a seed build, takes 16 s, because every image is rebuilt by the new binary.
-
-Lowering form-cli-local-plan.bml warm takes 4 s, and a third of it is the type index (`fsc-bml-type-index-into` 28%,
-`fsc-bml-type-find` 6%). A melt there is 3% of the run, and almost all of it is the string melt's pass over the
-strings: the pair copy is 0.2%. A melt visits the held once-holds from their list and frees around the AST's literals
+Lowering form-cli-local-plan.bml warm takes 0.43 s: half of it is the dependencies' signatures, a tenth the grammar,
+and the type index about 1%. A melt there is 2% of the run, and almost all of it is the string melt's pass over the
+strings. A melt visits the held once-holds from their list and frees around the AST's literals
 (`fk_sdead` 2), so its cost follows the live heap and the strings, never the program's AST. A heap that once peaked
 gives its capacity back: while the live heap is under an eighth of it, a melt halves it (within the headroom rules), since
 a melt's forwarding table and marks are sized by the heap it compacts. In a sweep's process a melt took 2 s with 1.5M
