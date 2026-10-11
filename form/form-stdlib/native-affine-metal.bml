@@ -16,7 +16,11 @@ section [form.bml] {
  class NativeAffineMetal {
   field AffineDispatchGroups = 16777216;
   field AffineIndexWord = 4294967296;
-  def nam-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" + ((String) nam-linear-msl() + nam-basic-msl());
+  // The affine products round every multiply and every add on its own (contraction off, as the backward unit has it): the compiler
+  // fuses a multiply-add in one kernel's shape and not in another's, so a token alone, in a block, in a one-row or four-row walk
+  // differed in the last bit (1e-5) by the compiler's choice, never by the arithmetic. With contraction off the arithmetic IS the
+  // expression, and the kernels agree wherever they fold the same terms in the same order.
+  def nam-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" + ((String) nam-linear-msl() + "\n#pragma clang fp contract(fast)\n" + nam-basic-msl());
   def nam-linear-msl() = "
 inline float nam_read(device const uchar* p, uint i, uint ty) {uint at=i*(ty==0?4:2);uint bits=uint(p[at])|(uint(p[at+1])<<8);if(ty==0)return as_type<float>(bits|(uint(p[at+2])<<16)|(uint(p[at+3])<<24));if(ty==1)return float(as_type<half>(ushort(bits)));return as_type<float>(bits<<16);}
 inline uint nam_g(uint r, uint cols, uint c, uint group) { return r*(cols/group)+c/group; }
@@ -157,8 +161,7 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   // every lane did each step was most of the kernel (eight products of the 3B shape at one token: 3,426 us of device time -> 598;
   // the block kernel 4,879 -> 2,384; observe/decode-matvec-probe-run.bml reads it).
   def nam-dec8?(view) = (view[4] % 8) == 0 && (view[5] % 8) == 0;
-  // only where the block kernel is the four-row one: the one-row block kernel is compiled to a different fused-multiply order (45 rows, 1e-5)
-  def nam-decode?(view, tokens) = tokens == 1 && nam-mt-four?(view) && nam-dec8?(view);
+  def nam-decode?(view, tokens) = tokens == 1 && nam-dec8?(view);
   def nam-mt-kernel(view, tokens) = nam-decode?(view, tokens) ? "nam_affine_v1" : nam-mt-four?(view) ? "nam_affine_mt4" : "nam_affine_mt";
   def nam-mt-groups(view,tokens) = nam-decode?(view, tokens) ? view[3] : (nam-mt-four?(view) ? view[3] / 4 : view[3]) * ((tokens + 7) / 8);
   def nam-linear-mt(view,x,y,tokens) = tokens <= 0 ? form_error("native affine token count must be positive") : nam-linear-mt-grid(view,x,y,tokens,0,nam-mt-groups(view,tokens));
