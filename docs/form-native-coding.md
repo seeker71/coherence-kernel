@@ -37,7 +37,16 @@ another whole-plan generation; its original request, witness and sources remain 
 Repair edits complete source documents in its private checkpoint, with the
 planner's candidate installed at the declared definitions. Native source
 observations supply those documents and the original executable witness through
-the bound `source_context` cell. The original request and definition scope travel
+the bound `source_context` cell. The BMF cursor also reads calls in the declared
+candidate and supplies their current `bml-api` declarations through native source
+observations. Strings, comments and local parameter names do not become API queries.
+Changed native query sets reopen the same retained repair through an idempotent
+feedback event, preserving its original goal and failure. An unchanged query set
+keeps its released attention result; changed source or witness bytes retain their
+separate scope identity.
+Retained reference choices are read from current bytes, newest first, with identical
+reference bodies tried once per movement; failed observations are not cached.
+The original request and definition scope travel
 with the goal. Verification rejects changes outside that scope or to the witness,
 then runs the original planner checks before publication. Existing native BML
 rehearsal can repair an eligible writable source after a failed action.
@@ -102,8 +111,12 @@ Form's `nothing()`. Quoted text remains text. Composed expressions can use
 `call` and `equals`; an unbalanced expression returns its exact case and delimiter
 diagnostic before compilation. The Form library namespace in source dependencies
 resolves to its repository path.
-Form serializes the executable witness, prints each actual
-result and verifies the reference against the original source and stubs. The
+Form builds the executable witness, prints each actual result and verifies the
+reference against the original source and stubs. Each witness return records a
+native `local-plan-witness` framebuffer event with its path and complete cell
+record before diagnostic rendering and the next verification step. Values,
+timing, stops and diagnostics stay native. This observation leaves the original
+witness text and its checkpoint fingerprint unchanged. The
 definition boundary follows balanced delimiters, quoted text and comments,
 independently of indentation, when extracting references and installing stubs. The
 case owner catches a stopped call, records it as failed and continues observing
