@@ -134,12 +134,26 @@
     ;; The cursor reads a section whole: its statements' recipes, or the compiler's refusal naming
     ;; the file's line, the word the cursor could not read there and the form the grammar wanted in its
     ;; place (first-line is the file line the body begins on).
+    ;; Successful recipes depend on exact body bytes. Discovery and executable
+    ;; lowering share these immutable native nodes in the owning compiler cell.
+    ;; Refusals stay live: their file line belongs to the current request.
+    (let FBL-PARSED-SECTIONS (record_new 0))
     (defn fbl-section-recipes (body first-line)
-        (do (let parsed (g-parse-full (form-bml-section-grammar) body))
-            (if (node_eq parsed (intern_trivial_string "PARSE-FAIL"))
-                (fbl-refuse (fbr-refusal body) first-line)
-                (do (fbl-check-refs (node_children parsed))
-                    (node_children (fbl-lower parsed))))))
+        (do (let started (host_monotonic_ms))
+            (let reused (record_has FBL-PARSED-SECTIONS body))
+            (let recipes (if reused (record_get FBL-PARSED-SECTIONS body)
+                (do (let parsed (g-parse-full (form-bml-section-grammar) body))
+                    (if (node_eq parsed (intern_trivial_string "PARSE-FAIL"))
+                        (fbl-refuse (fbr-refusal body) first-line)
+                        (do (fbl-check-refs (node_children parsed))
+                            (let lowered (node_children (fbl-lower parsed)))
+                            (record_set FBL-PARSED-SECTIONS body lowered)
+                            lowered)))))
+            (fb_record (intern_node (intern_trivial_string "bml-parse")
+                (list (intern_trivial_string (if reused "reused" "parsed"))
+                      (intern_trivial_int (str_len body)) (intern_trivial_int (len recipes))
+                      (intern_trivial_int (sub (host_monotonic_ms) started)))) "form.bml" 0)
+            recipes))
     ;; A `ref NAME = TARGET;` member names another abstraction: TARGET must be a class of this
     ;; section or a declared `import NAME;`. An unresolved target is refused here, at the
     ;; section, not met later as an unbound name. Method bodies still resolve at runtime.
