@@ -931,6 +931,23 @@ static long long *fk_inram_call_total_p = &fk_inram_call_total_private;
 #define fk_inram_call_total (*fk_inram_call_total_p)
 static long long *fk_fn_unbox;
 static long long fk_cur_fn;
+static volatile long long fk_phase;   /* the C phase the run thread is in, 0 while a recipe runs (the time board) */
+#define FK_PHASE_RECIPE 0
+#define FK_PHASE_MELT 1
+#define FK_PHASE_SMELT 2
+#define FK_PHASE_LOAD 3
+#define FK_PHASE_PARSE 4
+#define FK_PHASE_IMAGE 5
+#define FK_PHASE_FILE 6
+#define FK_PHASE_CHILD 7
+#define FK_PHASE_WAIT 8
+#define FK_PHASE_GPU 9
+#define FK_PHASE_NET 10
+/* a C function that runs no Form code, wrapped so its time is its phase's: FK_PHASED(phase, type, name, params, args) */
+#define FK_PHASED(ph, ty, nm, params, args) \
+    static ty nm##_in params; \
+    static ty nm params { long long fk_ph_sv = fk_phase; fk_phase = (ph); ty fk_ph_r = nm##_in args; fk_phase = fk_ph_sv; return fk_ph_r; } \
+    static ty nm##_in params
 static long long fk_fn_capacity;
 static double fk_num(long long v) {
     if (fk_isf(v)) {
@@ -2911,7 +2928,7 @@ static long long fk_metal_enqueue_native(long long pipe, long long bindv, long l
     }
     return r;
 }
-static long long fk_metal_sync_native(void) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_sync_native, (void), ()) {
     long long r = fk_metal_sync_external();
     if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
@@ -2966,7 +2983,7 @@ static long long fk_metal_submit_native(void) {
     }
     return r;
 }
-static long long fk_metal_fence_wait_native(long long fence) {
+FK_PHASED(FK_PHASE_GPU, long long, fk_metal_fence_wait_native, (long long fence), (fence)) {
     long long r = fk_metal_fence_wait_external(fence);
     if (r == FK_METAL_HANDLE_UNLOADED) {
         return 0;
@@ -7486,7 +7503,7 @@ static char *fk_http_build_request(const char *path, const char *host, long long
     *out_n = rn;
     return req;
 }
-static long long fk_http_get_plain(long long urlv, long long headersv, long long timeoutv) {
+FK_PHASED(FK_PHASE_NET, long long, fk_http_get_plain, (long long urlv, long long headersv, long long timeoutv), (urlv, headersv, timeoutv)) {
     (void)timeoutv;
     long long started = fk_now_ms();
     char url[2048];
@@ -7845,7 +7862,7 @@ static long long fk_host_exec_read(int fd, char **hbuf, long long *hcap, long lo
  * 368-path list at the membrane, so pipelines composed in the shell instead
  * of crossing. And input used to be `(void)inputv` — discarded — so
  * (host-exec "cat" "hello") answered "" (R69). */
-static long long fk_host_exec(long long cmdv, long long inputv) {
+FK_PHASED(FK_PHASE_CHILD, long long, fk_host_exec, (long long cmdv, long long inputv), (cmdv, inputv)) {
     char *cmd = fk_cstr_heap(cmdv);
     long long in_sa = fk_stri(inputv);
     long long in_n = (in_sa >= 0 && FK_SOK(in_sa)) ? FK_SLEN(in_sa) : 0;
@@ -7993,7 +8010,7 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
     free(hbuf);
     return ans;
 }
-static long long fk_sock_request(long long hostv, long long portv, long long reqv) {
+FK_PHASED(FK_PHASE_NET, long long, fk_sock_request, (long long hostv, long long portv, long long reqv), (hostv, portv, reqv)) {
     /* Never-connected (DNS failure, no reachable peer) answers the axiom-1 nothing,
      * never "" -- "" means a peer CONNECTED and spoke zero bytes. Same contract as
      * fk_host_exec above; silent error hides illness (2026-08-27). */
@@ -8224,7 +8241,7 @@ static int fk_tcp_connect(const char *host, const char *port) {
     freeaddrinfo(res);
     return fd;
 }
-static long long fk_https_get_ssl(long long urlv, long long headersv, long long timeoutv) {
+FK_PHASED(FK_PHASE_NET, long long, fk_https_get_ssl, (long long urlv, long long headersv, long long timeoutv), (urlv, headersv, timeoutv)) {
     (void)timeoutv;
     long long started = fk_now_ms();
     char url[2048];
@@ -8358,7 +8375,7 @@ static long long fk_http_get_native(long long urlv, long long headersv, long lon
     }
     return fk_http_get_plain(urlv, headersv, timeoutv);
 }
-static long long fk_tls_request(long long hostv, long long portv, long long reqv) {
+FK_PHASED(FK_PHASE_NET, long long, fk_tls_request, (long long hostv, long long portv, long long reqv), (hostv, portv, reqv)) {
     /* Every branch where no byte ever arrived from a VERIFIED peer -- no libssl,
      * missing symbols, TCP/TLS failure, and above all a certificate-verify
      * failure -- answers the axiom-1 nothing, never "": a trust verdict must not
@@ -9243,6 +9260,8 @@ static void fk_smelt(void) {
     free(fk_smk); free(fk_smv); fk_smk = 0; fk_smv = 0;
 }
 static void fk_melt(void) {
+    long long phase0 = fk_phase;
+    fk_phase = 1;   /* FK_PHASE_MELT (the time board) */
     fk_melt_gen = fk_melt_gen + 1;
     long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
@@ -9380,6 +9399,7 @@ static void fk_melt(void) {
     fk_nmelt = fk_nmelt + 1;
     fk_smelt();
     fk_live_publish(0);
+    fk_phase = phase0;
     if (fk_conf("FK_MELT_WITNESS")) {
         dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld, held-by stack=%lld mem=%lld records=%lld nodes=%lld closures=%lld holds=%lld, string-holes=%lld bytes of %lld, closure-rows=%lld reclaimed=%lld capvals=%lld\n",
                 fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp,
@@ -10452,7 +10472,7 @@ static long long fk_walk_body(long long i, long long fp) {
 }
 /* host_spawn (155) / host_capture (159) / host_spawn_quiet (161): fork and execvp the argument list itself -- no shell reads it.
  * spawn answers the pid at once; capture answers the child stdout after it ends; quiet sends the child stdout and stderr to /dev/null. */
-static long long fk_host_spawn_arm(long long argv155, long long t) {
+FK_PHASED(FK_PHASE_CHILD, long long, fk_host_spawn_arm, (long long argv155, long long t), (argv155, t)) {
         /* host_spawn argv / host_capture argv: fork and execvp the argument list itself -- no shell reads it. spawn answers the pid at once; capture answers the child's stdout after it ends */
 
         static char ab155[32][1024];
@@ -10921,7 +10941,7 @@ static long long fk_file_holders(const char *path) {
     return lst;
 }
 #endif
-static long long fk_host_door_fs(long long mode, long long x) {
+FK_PHASED(FK_PHASE_FILE, long long, fk_host_door_fs, (long long mode, long long x), (mode, x)) {
 #if defined(_WIN32)
     (void)mode; (void)x;
     return (0 - 1) * 2;
@@ -11118,7 +11138,7 @@ extern int kevent(int, const struct kevent *, int, struct kevent *, int, const s
 #include <sys/inotify.h>
 #endif
 #define FK_WATCH_MAX 1024
-static long long fk_host_watch(long long x) {
+FK_PHASED(FK_PHASE_WAIT, long long, fk_host_watch, (long long x), (x)) {
 #if defined(_WIN32) || (!defined(__APPLE__) && !defined(__linux__))
     (void)x;
     return (0 - 1) * 2;
@@ -11204,7 +11224,7 @@ static long long fk_host_watch(long long x) {
 #endif
 }
 
-static long long fk_host_door(long long mode, long long x) {
+FK_PHASED(FK_PHASE_CHILD, long long, fk_host_door, (long long mode, long long x), (mode, x)) {
     if (mode == 18) {
         /* host_alive pid */
         if ((x & 1) != 0) { return (0 - 1) * 2; }
@@ -17388,7 +17408,7 @@ static long long fk_host_pwrite(long long pw, long long ow, long long dw) {
     return ok ? wrote << 1 : (0 - 1) * 2;
 #endif
 }
-static long long fk_fb_door(long long mode, long long x) {
+FK_PHASED(FK_PHASE_FILE, long long, fk_fb_door, (long long mode, long long x), (mode, x)) {
     if (mode == 4) { return fk_value_kind(x); }
     if (mode == 5) {
         long long start = 0, n = 0;
@@ -20764,6 +20784,7 @@ static long long fk_attempt(long long node, long long fp) {
     long long vsp0 = fk_vsp, bus0 = fk_bus_depth;
     long long cur0 = fk_cur_fn;
     long long fr0 = fk_fr_depth;
+    long long phase0 = fk_phase;
     int warm0 = fk_f64_warm_depth;
     int env0 = fk_f64_env_depth;
     if (FK_SETJMP(here) == 0) {
@@ -20776,6 +20797,7 @@ static long long fk_attempt(long long node, long long fp) {
     fk_vsp = vsp0;
     fk_bus_unwind(bus0, 3, fk_stop_said);
     fk_cur_fn = cur0;
+    fk_phase = phase0;   /* a stop inside a C phase (a file door that refused) leaves the phase it unwound from */
     fk_fr_depth = fr0;
     fk_f64_warm_depth = warm0;
     fk_f64_env_depth = env0;
@@ -21154,6 +21176,71 @@ static void fk_diag_flush(void) {
  * boards of writers that have ended (fk_heat_bury_ended). */
 #define FK_HEAT_PULSE_MASK ((1LL << 26) - 1)
 static int fk_heat_reported;
+/* THE TIME BOARD: where the wall clock went. Heat counts the walker's dispatches -- a recipe called once that runs a
+ * native loop for a minute, a melt, a unit's load, a wait on the GPU or a child are all invisible to it. The process's
+ * main thread, which otherwise only waits for the run thread, samples every millisecond: the phase the run thread is
+ * in (fk_phase, set by the C work that runs no Form code), else the recipe it is in (fk_cur_fn: walked, a Form page or a
+ * C leaf alike). At the end of the run (and at each heat pulse) .fkwu-time.<pid> holds the samples by phase and by
+ * recipe; observe/time-board-run.bml reads every board. The tables are fixed (no growth to race the sampler). */
+#define FK_PROF_FNS (1 << 20)
+#define FK_PROF_PHASES 12
+static unsigned int fk_prof_self[FK_PROF_FNS];
+static unsigned long long fk_prof_phase[FK_PROF_PHASES];
+static unsigned long long fk_prof_total;
+static long long fk_prof_t0_ns;                  /* when the sampler began: the board says the wall time it covered */
+static volatile int fk_run_done;
+static const char *fk_prof_phase_name[FK_PROF_PHASES] = {
+    "recipe", "melt", "string-melt", "load", "parse", "image", "file", "child", "wait", "gpu", "net", "jit-offer" };
+static long long fk_cell_cpu_us(void);
+/* the time under a recipe: each sample credits once every recipe on the frame chain (the walker's FK_FR_PUSH callers, the
+ * outermost and innermost 2048 of a deep chain) and the one running, whatever phase holds the run */
+static unsigned int fk_prof_incl[FK_PROF_FNS];
+static unsigned int fk_prof_seen[FK_PROF_FNS];
+static void fk_prof_credit(long long c, unsigned int stamp) {
+    if (c >= 0 && c < FK_PROF_FNS && fk_prof_seen[c] != stamp) { fk_prof_seen[c] = stamp; fk_prof_incl[c] = fk_prof_incl[c] + 1; }
+}
+static void fk_prof_sample(void) {
+    long long ph = fk_phase;
+    fk_prof_total = fk_prof_total + 1;
+    unsigned int stamp = (unsigned int)fk_prof_total;
+    long long depth = fk_fr_depth, k = 0;
+    if (depth > FK_FR_CAP) { depth = FK_FR_CAP; }
+    while (k < depth && k < 2048) { fk_prof_credit(fk_fr_fn[k], stamp); k = k + 1; }
+    k = depth - 2048 > k ? depth - 2048 : k;
+    while (k < depth) { fk_prof_credit(fk_fr_fn[k], stamp); k = k + 1; }
+    fk_prof_credit(fk_cur_fn, stamp);
+    if (ph > 0 && ph < FK_PROF_PHASES) { fk_prof_phase[ph] = fk_prof_phase[ph] + 1; return; }
+    fk_prof_phase[0] = fk_prof_phase[0] + 1;
+    long long c = fk_cur_fn;
+    if (c >= 0 && c < FK_PROF_FNS) { fk_prof_self[c] = fk_prof_self[c] + 1; }
+}
+static void fk_time_write(void) {
+    if (fk_prof_total < 200) { return; }   /* under a fifth of a second: nothing to say */
+    char path[96], tmp[112];
+    sprintf(path, ".fkwu-time.%d", getpid());
+    sprintf(tmp, ".fkwu-time.%d.tmp", getpid());
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) { return; }
+    dprintf(fd, "time %llu samples %lld wall-ms %lld cpu-ms\n", fk_prof_total, (fk_mono_ns() - fk_prof_t0_ns) / 1000000, fk_cell_cpu_us() / 1000);
+    long long p = 0;
+    while (p < FK_PROF_PHASES) {
+        if (fk_prof_phase[p] > 0) { dprintf(fd, "phase %llu %s\n", fk_prof_phase[p], fk_prof_phase_name[p]); }
+        p = p + 1;
+    }
+    /* every recipe with a sample, named by the symbol map (a hot fn no symbol names prints as fn#N); a row says how it ran
+     * at the end: page (a Form page), leaf (the C loop lane), walk */
+    long long j = 0;
+    while (j < fk_fntop) {
+        long long fx = fk_fnidx[j];
+        if (fx >= 0 && fx < FK_PROF_FNS && fx < fk_fn_count && (fk_prof_self[fx] > 0 || fk_prof_incl[fx] > 0)) {
+            long long b = fk_fn[fx];
+            const char *how = (fx < fk_jit_cap && fk_jit_page[fx] != 0) ? "page" : (b >= 0 && b < fk_node_count && fk_node[b][0] == 194) ? "leaf" : "walk";
+            dprintf(fd, "recipe %u %u %s %.*s\n", fk_prof_self[fx], fk_prof_incl[fx], how, (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
+        }
+        j = j + 1;
+    }
+    if (close(fd) != 0 || rename(tmp, path) != 0) { unlink(tmp); }
+}
 
 /* answers which boards it placed: 1 the heat board, 2 the boxing board */
 static int fk_heat_write(void) {
@@ -21258,6 +21345,7 @@ static int fk_heat_write(void) {
             unlink(btmp);
         }
     }
+    fk_time_write();
     return placed;
 }
 /* A process that places a board at exit becomes the last hot writer of its kind in this directory, and
@@ -23220,7 +23308,9 @@ static void fk_prescan_defns(void) {
  * registers a function at its own index; anything else is the root expression. Multi-arg defns push
  * each arg name to slots 0..k-1 (callable single-arg via tag 12 today; multi-arg calls are the next
  * stone). */
-static void fk_parse_top(void) {
+static void fk_parse_top_in(void);
+static void fk_parse_top(void) { long long sv = fk_phase; fk_phase = FK_PHASE_PARSE; fk_parse_top_in(); fk_phase = sv; }
+static void fk_parse_top_in(void) {
     fk_sskip();
     if (fk_spos >= fk_slen) {
         return;
@@ -24513,7 +24603,7 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
 }
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx);
-static int fk_src_collect_file(const char *path, long long parent_idx) {
+FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long parent_idx), (path, parent_idx)) {
     if (fk_src_dep_lookup(path) >= 0) {
         return 1;
     }
@@ -26647,7 +26737,7 @@ static int fk_src_ids_has(const unsigned long long *ids, long long n, unsigned l
  * off disk, finds hundreds of unresolved names, and poisons the floor's cache with a REFUSED
  * sym (witnessed 2026-08-30). The lane does not image them -- it CARRIES their already-collected
  * text (and the text of every other unit no imported image covers) beside the imports. */
-static int fk_src_try_import_fkb_images(const char *root_path) {
+FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_path), (root_path)) {
     long long nd = 0;
     long long i = 1;
     fk_import_images = 0;
@@ -27473,7 +27563,7 @@ static long long fk_cell_walk_guarded(long long node, long long fp, int *how) {
     jmp_buf here;
     jmp_buf *outer = fk_rp_top;
     jmp_buf *outer_cell = fk_cell_jb;
-    long long vsp0 = fk_vsp, bus0 = fk_bus_depth, cur0 = fk_cur_fn, fr0 = fk_fr_depth;
+    long long vsp0 = fk_vsp, bus0 = fk_bus_depth, cur0 = fk_cur_fn, fr0 = fk_fr_depth, phase0 = fk_phase;
     int warm0 = fk_f64_warm_depth;
     int env0 = fk_f64_env_depth;
     fk_cell_hit = 0;
@@ -27494,6 +27584,7 @@ static long long fk_cell_walk_guarded(long long node, long long fp, int *how) {
     fk_vsp = vsp0;
     fk_bus_unwind(bus0, 3, fk_stop_said);
     fk_cur_fn = cur0;
+    fk_phase = phase0;
     fk_fr_depth = fr0;
     fk_f64_warm_depth = warm0;
     fk_f64_env_depth = env0;
@@ -27501,7 +27592,7 @@ static long long fk_cell_walk_guarded(long long node, long long fp, int *how) {
     return fk_nothing;
 }
 /* ── the load: collect the closure, give every new unit its place, parse what is new against the window ── */
-static int fk_cell_load(const char *path, long long *root_out) {
+FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_out), (path, root_out)) {
     long long d0 = fk_src_dep_count, slen0 = fk_slen, fnt0 = fk_fntop;
     long long spos0 = fk_spos, root0 = fk_root, ucur0 = fk_units_cur, cun0 = fk_const_unit_now, maxslot0 = fk_maxslot, bdtop0 = fk_bd_top;
     long long ne0 = fk_nerr, nw0 = fk_nwarn, nes0 = fk_nerr_seen, nws0 = fk_nwarn_seen;
@@ -28632,7 +28723,9 @@ static char fk_floor_warn[1024];   /* the first diagnostic row the last floor ca
 static char fk_floor_stop[1024];   /* the line the last floor call stopped with, or "" */
 /* One floor call for paths[from..n): answers, in `out`, the floor's text (the packets, each closed by the sentinel). A floor that
  * stopped or ended early answers fewer; why is held in fk_floor_warn / fk_floor_stop for the caller to voice on the right unit. */
-static char *fk_bml_floor_call(char **paths, long long from, long long n, long long *out_len, long long *stopped_msg_shown) {
+/* the floor compiler is Form code: inside a unit's load its walk is the compiler's recipes', not the load's */
+typedef char *fk_char_p;
+FK_PHASED(FK_PHASE_RECIPE, fk_char_p, fk_bml_floor_call, (char **paths, long long from, long long n, long long *out_len, long long *stopped_msg_shown), (paths, from, n, out_len, stopped_msg_shown)) {
     long long list = 1, i = n, rec, out_w, stopped_w, dg;
     char *out;
     char floor[FK_PATH_CAP];
@@ -29161,6 +29254,7 @@ static void *fk_run_thunk(void *p) {
     fk_fatal_thread(1);   /* the walker's thread has its own alternate stack: a stack that ends is read from there */
     fk_run_ret = fk_run(fk_run_argc, fk_run_argv);
     fk_src_dep_release();
+    fk_run_done = 1;
     return 0;
 }
 int main(int argc, char **argv) {
@@ -29184,6 +29278,16 @@ int main(int argc, char **argv) {
         int rc = fk_run(argc, argv);
         fk_src_dep_release();
         return rc;
+    }
+    /* this thread waits for the run, and samples it while it waits: a millisecond apart, the run thread's phase or
+     * recipe (the time board, fk_time_write) */
+    struct timespec tick;
+    tick.tv_sec = 0;
+    tick.tv_nsec = 1000000;
+    fk_prof_t0_ns = fk_mono_ns();
+    while (!fk_run_done) {
+        nanosleep(&tick, 0);
+        fk_prof_sample();
     }
     pthread_join(th, 0);
     return fk_run_ret;
