@@ -145,23 +145,26 @@
                 (if (eq cp 125) (empty)
                     (gen-scan (cur-advance c 1) depth)))))))))))
 
-    (defn bmf-unescape-str-loop (s i acc)
-        (if (ge i (str_len s)) acc
-            (do
-                (let ch (char_at s i))
-                (if (and (str_eq ch "\\") (lt (add i 1) (str_len s)))
-                    (do
-                        (let nx (char_at s (add i 1)))
-                        (let lit
-                            (if (str_eq nx "n") "\n"
-                            (if (str_eq nx "t") "\t"
-                            (if (str_eq nx "r") "\r"
-                            (if (str_eq nx "\\") "\\"
-                            (if (str_eq nx "\"") "\""
-                                nx))))))
-                        (bmf-unescape-str-loop s (add i 2) (str_concat acc lit)))
-                    (bmf-unescape-str-loop s (add i 1) (str_concat acc ch))))))
-    (defn bmf-unescape-str (s) (bmf-unescape-str-loop s 0 ""))
+    ;; A quoted text's value: \n \t \r \\ \" read as the byte they name, a backslash before any
+    ;; other byte as that byte, a backslash that ends the text as itself. The text goes by its
+    ;; spans between escapes, found natively and joined in pairs, so a long text with many
+    ;; escapes is copied a few times, not once for every byte it holds.
+    (defn bmf-unescape-str (s)
+        (if (lt (str_find s "\\" 0) 0) s (str-spans (bmf-unescape-spans s 0 (str_len s) (empty)))))
+    (defn bmf-unescape-spans (s i n acc)
+        (do (let k (str_find s "\\" i))
+            (if (if (lt k 0) 1 (ge (add k 1) n))
+                (reverse (cons (substring s i n) acc))
+                (bmf-unescape-spans s (add k 2) n
+                    (cons (bmf-unescape-byte s (add k 1)) (cons (substring s i k) acc))))))
+    (defn bmf-unescape-byte (s j)
+        (do (let b (str_byte_at s j))
+            (if (eq b 110) "\n"
+            (if (eq b 116) "\t"
+            (if (eq b 114) "\r"
+            (if (eq b 92) "\\"
+            (if (eq b 34) "\""
+                (substring s j (add j 1)))))))))
 
     ;; ── the compiled reader ──────────────────────────────────────────────
     ;; Read as data at every step, a grammar cost a string compare per pattern tag, a rule
@@ -709,7 +712,7 @@
                     (if (eq (str_byte_at s cc) 34)
                         (do (let e (gx-qscan s n (add cc 1) GX-DQ))
                             (if (eq (str_byte_at s e) 34)
-                                (cons (add e 1) (cons (intern_trivial_string (gx-unescape (substring s (add cc 1) e))) caps))
+                                (cons (add e 1) (cons (intern_trivial_string (bmf-unescape-str (substring s (add cc 1) e))) caps))
                                 0))
                         0))
             ;; 13: a number -- digits, a fraction, an exponent (e or E, a sign, digits)
@@ -847,19 +850,16 @@
     ;; A quoted text runs past escapes to its closing quote q (a one-byte text): a native find
     ;; to the next quote, then the bytes before it are asked for a backslash, which skips the
     ;; byte after it -- a find for the backslash would cross the rest of the source whenever
-    ;; none follows. The value unescapes; text with no escape and no byte past ASCII is
-    ;; already its own value.
+    ;; none follows. The value unescapes (bmf-unescape-str); a text with no escape is its own
+    ;; value.
     (let GX-DQ (byte_to_str 34))
     (let GX-SQ (byte_to_str 39))
-    (let GX-BS (byte_to_str 92))
     (defn gx-qscan (s n i q)
         (do (let e (str_find s q i))
             (if (lt e 0) (if (ge i n) i n)
                 (do (let k (gx-bs-before s i e))
                     (if (lt k 0) e (gx-qscan s n (add k 2) q))))))
     (defn gx-bs-before (s i e) (if (ge i e) -1 (if (eq (str_byte_at s i) 92) i (gx-bs-before s (add i 1) e))))
-    (defn gx-unescape (t) (if (and (lt (str_find t GX-BS 0) 0) (gx-ascii? t 0 (str_len t))) t (bmf-unescape-str t)))
-    (defn gx-ascii? (t i k) (if (ge i k) 1 (if (lt (str_byte_at t i) 128) (gx-ascii? t (add i 1) k) 0)))
     (defn gx-char (s n c caps)
         (do (let cc (gx-sw s n c))
             (if (eq (str_byte_at s cc) 39)
