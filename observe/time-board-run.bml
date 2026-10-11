@@ -4,6 +4,7 @@
 //   printf '{"top":80}' | ./fkwu observe/time-board-run.bml           more recipe rows
 //   printf '{"take":1}' | ./fkwu observe/time-board-run.bml           and the boards are taken once read
 //   printf '{"dir":"d"}' | ./fkwu observe/time-board-run.bml          the boards a workload's runs left in directory d
+//   printf '{"how":"declined"}' | ./fkwu observe/time-board-run.bml   only the recipes the JIT was offered and bound no page
 //
 // fkwu's main thread samples its run thread a millisecond apart (runtime/fkwu-uni.c, fk_prof_sample): the C phase it is in
 // (melt, string-melt, load, parse, image, file, child, wait, gpu, net) or else the recipe it is in, walked, running as a
@@ -20,12 +21,14 @@ section [form.bml] {
         def tb-str-opt(opts, key, fallback) = json-object-has?(opts, key) ? (json-string-value(json-object-get(opts, key)) ?? fallback) : fallback;
         def tb-words(l) = filter(w => (Comparable) len(w) > 0, split-on(trim(l), " "));
         def tb-int(s) = str_to_int(s) ?? 0;
-        // a board: [samples, wall-ms, cpu-ms, phases [[n, name]], recipes [[own, under, how, name]]]
-        def tb-read(path) = tb-parse(split-on(read_file(path) ?? "", byte_to_str(10)), [0, 0, 0, [], []]);
+        // a board: [samples, wall-ms, cpu-ms, phases [[n, name]], recipes [[own, under, how, name]], page-walks [[n, name]]]
+        // (page-walk: a page's own samples the walker ran for it -- a node the page has no words for)
+        // and walk-tags [[n, "tag name"]]: the same samples by the kind of node handed over
+        def tb-read(path) = tb-parse(split-on(read_file(path) ?? "", byte_to_str(10)), [0, 0, 0, [], [], [], []]);
         def tb-parse(lines, b) = nil?(lines) ? b : tb-parse(lines[1:], tb-line(tb-words(lines[0]), b));
-        def tb-line(w, b) = nil?(w) ? b : (String) w[0] == "time" ? [tb-int(w[1]), tb-int(w[3]), tb-int(w[5]), b[3], b[4]] : (String) w[0] == "phase" ? [b[0], b[1], b[2], cons([tb-int(w[1]), w[2]], b[3]), b[4]] : (String) w[0] == "recipe" ? [b[0], b[1], b[2], b[3], cons(tb-recipe-row(w), b[4])] : b;
+        def tb-line(w, b) = nil?(w) ? b : (String) w[0] == "time" ? [tb-int(w[1]), tb-int(w[3]), tb-int(w[5]), b[3], b[4], b[5], b[6]] : (String) w[0] == "phase" ? [b[0], b[1], b[2], cons([tb-int(w[1]), w[2]], b[3]), b[4], b[5], b[6]] : (String) w[0] == "recipe" ? [b[0], b[1], b[2], b[3], cons(tb-recipe-row(w), b[4]), b[5], b[6]] : (String) w[0] == "pagewalk" ? [b[0], b[1], b[2], b[3], b[4], cons([tb-int(w[1]), tb-rest(w, 2)], b[5]), b[6]] : (String) w[0] == "walktag" ? [b[0], b[1], b[2], b[3], b[4], b[5], cons([tb-int(w[1]), tb-rest(w, 2)], b[6])] : b;
         // a recipe row: own, under, how, name; a board written before the time under was kept has own, how, name
-        def tb-how?(s) = ((String) s == "walk") || (((String) s == "page") || ((String) s == "leaf"));
+        def tb-how?(s) = ((String) s == "walk") || (((String) s == "page") || (((String) s == "leaf") || ((String) s == "declined")));
         def tb-recipe-row(w) = tb-how?(w[2]) ? [tb-int(w[1]), 0, w[2], tb-rest(w, 3)] : [tb-int(w[1]), tb-int(w[2]), w[3], tb-rest(w, 4)];
         def tb-rest(w, i) = i >= len(w) ? "" : (Comparable) i == len(w) - 1 ? w[i] : w[i] + " " + tb-rest(w, i + 1);
         // rows summed by name: [n, name] for phases, [own, under, how, name] for recipes
@@ -36,6 +39,7 @@ section [form.bml] {
         def tb-fold(rows, acc, f) = nil?(rows) ? acc : tb-fold(rows[1:], f(acc, rows[0]), f);
         def tb-pct(n, total) = total <= 0 ? "0.0" : (n * 1000 / total / 10).str() + "." + (n * 1000 / total % 10).str();
         def tb-take(xs, n) = (n <= 0) || nil?(xs) ? [] : cons(xs[0], tb-take(xs[1:], n - 1));
+        def tb-walked-of(walks, name) = nil?(walks) ? 0 : (String) walks[0][1] == name ? walks[0][0] : tb-walked-of(walks[1:], name);
         def tb-lines(rows) = nil?(rows) ? "" : rows[0] + byte_to_str(10) + tb-lines(rows[1:]);
         def tb-opts() {
             let line = read_line();
@@ -53,7 +57,16 @@ section [form.bml] {
             let recipes = reverse(sort-by(tb-fold(boards, [], (acc, b) => tb-fold(b[4], acc, tb-add-recipe)), r => r[0]));
             let head = print_str("time-board: " + len(names).str() + " board(s), " + samples.str() + " samples over " + wall.str() + " ms of wall clock, " + cpu.str() + " ms of cpu");
             let ph = print_str("== phases" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[0], samples) + "%  " + r[0].str() + "  " + r[1], phases)));
-            let rc = print_str("== recipes by their own time (walk: the walker; page: a Form page; leaf: the C loop lane)" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[0], samples) + "%  " + r[0].str() + "  " + r[2] + "  " + r[3], tb-take(recipes, tb-opt(opts, "top", 40)))));
+            let walks = reverse(sort-by(tb-fold(boards, [], (acc, b) => tb-fold(b[5], acc, tb-add-phase)), r => r[0]));
+            let walked = sum(map(r => r[0], walks));
+            let hows = reverse(sort-by(tb-fold(recipes, [], (acc, r) => tb-add-phase(acc, [(String) r[2] == "page" ? r[0] - tb-walked-of(walks, r[3]) : r[0], r[2]])), r => r[0]));
+            let hw = print_str("== how the recipe time ran (page: a JIT page's own words; page-walk: a page's node the walker ran; leaf: the C loop lane; declined: offered to the JIT, no page bound; walk: never offered)" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[0], samples) + "%  " + r[0].str() + "  " + r[1], cons([walked, "page-walk"], hows))));
+            let pw = print_str("== pages by the time the walker ran for them" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[0], samples) + "%  " + r[0].str() + "  " + r[1], tb-take(walks, tb-opt(opts, "top", 40)))));
+            let kinds = reverse(sort-by(tb-fold(boards, [], (acc, b) => tb-fold(b[6], acc, tb-add-phase)), r => r[0]));
+            let pk = print_str("== page-walk time by the node kind handed over (tag, op-table name or - for a hand-read form)" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[0], samples) + "%  " + r[0].str() + "  " + r[1], tb-take(kinds, tb-opt(opts, "top", 40)))));
+            let only = tb-str-opt(opts, "how", "");
+            let shown = (String) only == "" ? recipes : filter(r => (String) r[2] == only, recipes);
+            let rc = print_str("== recipes by their own time" + ((String) only == "" ? "" : " (" + only + " only)") + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[0], samples) + "%  " + r[0].str() + "  " + r[2] + "  " + r[3], tb-take(shown, tb-opt(opts, "top", 40)))));
             let under = reverse(sort-by(recipes, r => r[1]));
             let ru = print_str("== recipes by the time under them (theirs and their callees')" + byte_to_str(10) + tb-lines(map(r => "  " + tb-pct(r[1], samples) + "%  " + r[1].str() + "  " + r[2] + "  " + r[3], tb-take(under, tb-opt(opts, "top", 40)))));
             let taken = (Comparable) tb-opt(opts, "take", 0) == 1 ? map(n => fs_remove(n), names) : [];

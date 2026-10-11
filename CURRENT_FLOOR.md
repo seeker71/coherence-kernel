@@ -1158,8 +1158,27 @@ The page keeps the walker's frame and the walker's meaning:
   which evaluates the arguments itself. A closure's captures are written after the heat pulse, immediately before the
   body, because the pulse can run the JIT's own cell.
 - Every lane that runs machine code is born through one page door (`fk_page_alloc`, `fk_page_write`).
+- A string literal is its constant word: its index is pinned, so the page loads the word in four halves.
+- A strict node the seed names (`jit_node`, leaf-door mode 57: a str_concat chain, record_get/set/has/keys, value_eq,
+  str_find, the node natives, file_size, read_file, write_file, host_file_append_bytes, and the leaf doors except attempt)
+  is taken apart: its value children are made in the page's own words, into temporaries, and the walker runs only the
+  node's mirror, whose children read them. Which children are values is the arm's to say, so the table stands in the seed
+  beside the walker; the emitter only asks.
 - Any other node is walked, or given back to the walker in tail position.
 - Binding no words asks whether a page stands.
+
+The JIT is there wherever a run begins. Its unit, the floor compiler that lowers it, the home index it links by and the
+call-head table are found from the unit the command named, from the working directory, and else beside the binary (as
+the Metal carrier is); the home index is asked again until one is found, so a first unit from outside every checkout no
+longer leaves the process unlinked. A unit the run lowers inside its loads is offered too (the first floor call loads
+the JIT unit).
+
+The time board says where the JIT is not: a recipe row reads page, leaf, declined (offered, no page bound) or walk (never
+offered), `pagewalk` rows count a page's samples the walker ran for it, and `walktag` rows sum that time by the node kind
+handed over (`{"how":"declined"}` lists only the gaps). On a lowering of form-cli-local-plan the walker's share of page time
+is now the strict natives' own arms (record_get 5%, value_kind 3%, str_concat 3% of all samples); their children run as
+page words. Across a census of two sweep shards the never-offered time was the Qwen forward pass waiting on the GPU, which
+the board now counts as gpu.
 
 kernel_stat reads 74 offers, 75 pages bound, and 76 microseconds spent offering.
 
