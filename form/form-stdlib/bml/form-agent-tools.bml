@@ -14,6 +14,7 @@ import form-stdlib/hex.fk;
 import form-stdlib/fkwu-op-arity.fk;
 import form-stdlib/source-compiler.fk;
 import form-stdlib/bml/source-abstraction.bml;
+import form-stdlib/organ-health.bml;
 section [form.bml] {
     class FormAgentTools {
         field FatByteTab = 9;
@@ -45,7 +46,27 @@ section [form.bml] {
         def fat-call(docs, tool, args, input) =
             if (!(fat-text?(input) && fat-text?(tool) && all?(fat-text?,args) && fat-docs-valid(docs, []))) then fat-fail("invalid-resident-values", docs)
             else if (!fat-tool?(tool)) then fat-fail("unsupported-tool", docs)
-            else fat-checked(fat-dispatch(docs, tool, args, input),docs);
+            else fat-checked(fat-source-care(docs,tool,args,input,fat-dispatch(docs, tool, args, input)),docs);
+        def fat-source-missing(result) = fat-error(result)=="resident-document-not-found" || fat-starts(fat-error(result),"resident-search-path-not-found:");
+        // Resolve missing read evidence before returning the tool result. Imported
+        // sources supply observations, never new writable documents.
+        def fat-source-care(docs,tool,args,input,result) = !fat-readonly(tool) || !fat-source-missing(result) ? result : {
+            let started=host_monotonic_ms(); let flow=host_pid().str();
+            let reading=oh-reading("native-source",flow,"catalog",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("declared-source",json-node-string("requested source is outside resident documents"))],["resolve-imports"],json-node-object([oh-s("tool",tool),oh-n("resident_documents",len(docs))]));
+            oh-frame(reading);
+            let prior=record_has(fat-api-held,"current") ? record_get(fat-api-held,"current") : record_new(0);
+            let current=record_new(0);
+            let roots=append(docs |> map(doc=>[doc[1],doc[2],0]),fat-api-paths() |> map(path=>[path,nothing(),1]));
+            let observed=fat-api-providers(roots,prior,current,[],0);
+            record_set(fat-api-held,"current",current);
+            let sources=append(docs,observed[0] |> filter(source=>!nothing?(source[1]) && nil?(fat-find-doc(docs,source[0]))) |> map(source=>[source[0],source[0],source[1]]));
+            let retry=fat-with-docs(fat-dispatch(sources,tool,args,input),docs);
+            let held=append(retry[0:5],cons(fat-crossings(retry)+observed[1],retry[6:]));
+            oh-frame(oh-set(oh-applied(reading,"resolve-imports",json-node-object([oh-n("source_reads",observed[1])])),"elapsed_ms",json-node-int(host_monotonic_ms() - started)));
+            let available=!fat-source-missing(held);
+            oh-frame(oh-reading("native-source",flow,"catalog",json-node-int(1),json-node-int(available),json-node-int(available),available ? [] : [oh-need("source",json-node-string("requested source is absent from resident documents and their declared imports"))],[],json-node-object([oh-s("tool",tool),oh-n("source_reads",observed[1])])));
+            held;
+        };
         def fat-checked(result,docs) = fat-output?(result[2]) && (fat-text?(result[2]) || fat-has-value?(result)) && fat-docs-valid(fat-documents(result), []) ? result : fat-fail("invalid-resident-output", docs);
         def fat-with-docs(result, docs) = append(result[0:4], cons(docs, result[5:]));
         def fat-dispatch(docs, tool, args, input) = if ((String) tool == "rg") then fat-with-docs(far-run-input(docs, args, input), docs)
