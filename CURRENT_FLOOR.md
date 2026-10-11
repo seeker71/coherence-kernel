@@ -1062,6 +1062,22 @@ wall-census-band 63         form/form-stdlib/bml/wall-census.bml
 observe/tests/voice-frequency-band 255 · number-band 255 · float-printer-band 31
 ```
 
+## Where the time goes
+
+Every fkwu run that lasts a fifth of a second leaves a time board, `.fkwu-time.<pid>`. While the run thread works, the
+process's main thread samples it a millisecond apart. Each sample records the C phase the run is in (melt, string-melt,
+load, parse, image, file, child, wait, gpu, net) or, when no phase holds it, the recipe running: walked, a Form page or
+a C leaf. It also credits every recipe on the frame chain once, so the board holds each recipe's own time and the time
+under it. `./fkwu observe/time-board-run.bml` reads every board in a directory (`{"dir":…}`, `{"top":n}`, `{"take":1}`).
+
+Lowering form-find.bml warm takes 3.3 s:
+
+- half of it is the grammar engine parsing the unit's own source (`g-parse-full`, about 50 µs a byte);
+- 30% is rescanning the dependencies' text for their signatures;
+- 20% is fingerprinting the compiler's own sources (`bfc-pin`).
+
+A cold run, after a seed build, takes 16 s, because every image is rebuilt by the new binary.
+
 ## The JIT
 
 The walker's JIT is written in Form and needs no caller. A defn whose heat reaches a multiple of 4096 is offered once to
