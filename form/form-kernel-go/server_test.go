@@ -252,6 +252,15 @@ func TestHealthRouteNativeOperationalShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, want := range []string{
+		`def api-recent-outcomes-cache-ttl-ms() = 60000;`,
+		`def api-ready-connected(conn)`,
+		`let recent_outcomes = api-recent-outcomes-with(conn);`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("health source missing non-liveness cache refresh %q", want)
+		}
+	}
 	artifact, err := sourceCompileServeProgram(
 		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
 		"../form-stdlib",

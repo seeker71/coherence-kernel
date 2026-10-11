@@ -281,15 +281,6 @@ section [form.bml] {
         let cached = api-gate-main-head-cache-get(repo, branch);
         if cached == "" then if api-gate-github-api-base() == "" then api-service-unavailable("github", "github.api_base is not configured") else api-gate-main-head-from-http(repo, branch, http_get(api-gate-main-head-url(repo, branch), api-gate-github-headers(), api-gate-main-head-timeout-ms(request))) else api-gate-main-head-ok(repo, branch, cached);
     }
-    def api-db-connected-with(conn) {
-        let ok = pg_ping(conn);
-        let closed = pg_close(conn);
-        ok;
-    }
-    def api-db-connected() {
-        let conn = pg_connect(config_database_url());
-        if lt(conn, 0) then false else api-db-connected-with(conn);
-    }
     def api-outcome-total(two_xx, three_xx, four_xx, five_xx) = add(add(two_xx, three_xx), add(four_xx, five_xx));
     def api-outcome-window-json(row, prefix) {
         let two_xx = idea-row(str_concat(prefix, "_2xx"), row);
@@ -300,7 +291,7 @@ section [form.bml] {
     }
     def api-recent-outcomes-json(row) = json-node-object(list(json-node-pair("last_1m", api-outcome-window-json(row, "last_1m")), json-node-pair("last_5m", api-outcome-window-json(row, "last_5m")), json-node-pair("as_of_minute", json-node-int(idea-row("as_of_minute", row)))));
     def api-recent-outcomes-sql() = "WITH filtered AS (SELECT status_code, recorded_at FROM runtime_events WHERE recorded_at >= now() - interval '5 minutes' AND endpoint NOT IN ('/api/health','/api/health/pulse','/api/ready','/api/ping','/api/version','/health','/')), counted AS (SELECT count(*) FILTER (WHERE recorded_at >= now() - interval '1 minute' AND status_code >= 200 AND status_code < 300)::bigint AS last_1m_2xx, count(*) FILTER (WHERE recorded_at >= now() - interval '1 minute' AND status_code >= 300 AND status_code < 400)::bigint AS last_1m_3xx, count(*) FILTER (WHERE recorded_at >= now() - interval '1 minute' AND status_code >= 400 AND status_code < 500)::bigint AS last_1m_4xx, count(*) FILTER (WHERE recorded_at >= now() - interval '1 minute' AND status_code >= 500)::bigint AS last_1m_5xx, count(*) FILTER (WHERE status_code >= 200 AND status_code < 300)::bigint AS last_5m_2xx, count(*) FILTER (WHERE status_code >= 300 AND status_code < 400)::bigint AS last_5m_3xx, count(*) FILTER (WHERE status_code >= 400 AND status_code < 500)::bigint AS last_5m_4xx, count(*) FILTER (WHERE status_code >= 500)::bigint AS last_5m_5xx FROM filtered) SELECT counted.*, floor(extract(epoch from now()) / 60)::bigint AS as_of_minute FROM counted";
-    def api-recent-outcomes-cache-ttl-ms() = 5000;
+    def api-recent-outcomes-cache-ttl-ms() = 60000;
     def api-recent-outcomes-cache-fresh?(cached) = if str_eq(value_kind(cached), "list") then lt(sub(now_unix_ms(), nth(cached, 1)), api-recent-outcomes-cache-ttl-ms()) else false;
     def api-recent-outcomes-cache-put(node) {
         let stored = volatile_cell_put("api.health", "recent_outcomes", list(node, now_unix_ms()));
@@ -391,9 +382,17 @@ section [form.bml] {
     def api_health_persistence(request) = if api-postgres-url?() then api-health-persistence-postgres(request) else api-native-ok-json("api_health_persistence", api-persistence-contract-json(0));
     def api_health(request) = api-native-ok-json("api_health", api-health-json("ok", false, false));
     def api_health_pulse(request) = api-native-ok-json("api_health_pulse", api-bounded-health-json("ok"));
+    def api-ready-unavailable-with(conn) {
+        let closed = pg_close(conn);
+        api-service-unavailable("database_unavailable", "database unavailable");
+    }
+    def api-ready-connected(conn) {
+        let recent_outcomes = api-recent-outcomes-with(conn);
+        api-native-ok-json("api_ready", api-health-json("ready", true, true));
+    }
     def api_ready(request) {
-        let db_ok = api-db-connected();
-        if db_ok then api-native-ok-json("api_ready", api-health-json("ready", db_ok, true)) else api-service-unavailable("database_unavailable", "database unavailable");
+        let conn = pg_connect(config_database_url());
+        if lt(conn, 0) then api-service-unavailable("database_unavailable", "database unavailable") else if pg_ping(conn) then api-ready-connected(conn) else api-ready-unavailable-with(conn);
     }
 
     def api-agent-task-id(request) {
