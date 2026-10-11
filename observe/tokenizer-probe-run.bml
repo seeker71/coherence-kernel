@@ -1,0 +1,41 @@
+// tokenizer-probe-run.bml — what the native Llama tokenizer says over a fixed spread of text, to compare two builds of it.
+//
+//   ./fkwu observe/tokenizer-probe-run.bml
+//
+// Opens the Llama-3.2-3B tokenizer, encodes a fixed set of strings (plain words, numbers, contractions, newlines and spaces,
+// punctuation, non-Latin text, emoji, a chat turn) and prints each one's ids, then every line of learn/form-token-traces.jsonl as
+// raw text: the line count, the ids' count, their sum and a position-weighted sum, and a decode round trip over the ids of the
+// fixed set. Two builds that print the same lines tokenize alike. The seconds the open took are the last line.
+// preflight-exec: forbidden
+import form-stdlib/native-llama-tokenizer.bml;
+import form-stdlib/model-registry.bml;
+section [form.bml] {
+ class TokenizerProbeRun {
+  def tpr-samples() = ["hello", "Hello, world!", "The quick brown fox jumps over 13 lazy dogs.", "I'm sure they'll say we've done it; don't you think?", "line one\nline two\n\n  indented\ttab", "  leading and trailing  ", "12345678901234567890", "naïve café — résumé", "日本語のテキストと中文", "emoji 🙂🚀 end", "def loop(n) = loop(n + 1); loop(0)", "{\"verb\":\"eval\",\"payload\":\"2 + 3\"}", ""];
+  def tpr-ids(ids) = str-join-with(map(i => i.str(), ids), ",");
+  def tpr-sample(tk, s) = print_str("[tokenizer-probe] " ++ tpr-ids(nlt-encode(tk, s)));
+  def tpr-sum(ids) = foldl((a, i) => a + i, 0, ids);
+  def tpr-weighted(ids, k) = nil?(ids) ? 0 : ids[0] * k + tpr-weighted(ids[1:], k + 1);
+  def tpr-corpus(tk, lines, n, total, sum, weighted) {
+   if nil?(lines) then print_str("[tokenizer-probe] corpus lines " ++ n.str() ++ ", ids " ++ total.str() ++ ", sum " ++ sum.str() ++ ", weighted " ++ weighted.str())
+   else {
+    let ids = nlt-encode(tk, lines[0]);
+    tpr-corpus(tk, lines[1:], n + 1, total + len(ids), sum + tpr-sum(ids), (weighted + tpr-weighted(ids, 1)) % 1000000007);
+   };
+  }
+  def tpr-run() {
+   let t0 = host_monotonic_ms();
+   let tk = nlt-open(mr-path(mr-find("llama32-3b-mlx-4bit")));
+   let opened = host_monotonic_ms() - t0;
+   let said = map(s => tpr-sample(tk, s), tpr-samples());
+   let round = print_str("[tokenizer-probe] round trip " ++ ((String) nlt-decode(tk, nlt-encode(tk, "The quick brown fox, 13 dogs. 日本語 🙂")) == "The quick brown fox, 13 dogs. 日本語 🙂" ? "same" : "DIFFERENT"));
+   let chat = print_str("[tokenizer-probe] chat " ++ tpr-ids(nlt-chat(tk, "What is 2 + 3?")));
+   let specials = print_str("[tokenizer-probe] special " ++ nlt-special(tk, "<|eot_id|>").str() ++ " " ++ nlt-special(tk, "<|begin_of_text|>").str());
+   let known = print_str("[tokenizer-probe] known " ++ (nlt-known-id(tk, 0) ? "1" : "0") ++ (nlt-known-id(tk, 128000) ? "1" : "0") ++ (nlt-known-id(tk, 999999) ? "1" : "0") ++ (nlt-known-id(tk, -1) ? "1" : "0"));
+   let lines = filter(l => len(trim(l)) > 0, split-on(read_file("learn/form-token-traces.jsonl") ?? "", "\n"));
+   let c = tpr-corpus(tk, lines, 0, 0, 0, 0);
+   print_str("[tokenizer-probe] open " ++ (opened / 1000).str() ++ " s");
+  }
+ }
+ tpr-run();
+}
