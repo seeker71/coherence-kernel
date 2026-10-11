@@ -1070,7 +1070,11 @@ load, parse, image, file, child, wait, gpu, net) or, when no phase holds it, the
 a C leaf. It also credits every recipe on the frame chain once, so the board holds each recipe's own time and the time
 under it. Every sample is named: a unit's top-level sequence is `(top)`, a fn no symbol names is `fn#N`. A rest
 (`host_sleep_ms`) is wait and a child's end (`host_wait`) is child, so a recipe's own time is work, not a wait inside it.
-`./fkwu observe/time-board-run.bml` reads every board in a directory (`{"dir":…}`, `{"top":n}`, `{"take":1}`).
+`./fkwu observe/time-board-run.bml` reads every board in a directory (`{"dir":…}`, `{"top":n}`, `{"take":1}`). A JIT
+offer's cell is its own phase, `jit-offer`, so a page compiler that loads (or relowers its unit after a compiler change)
+is never charged to the recipe that happened to cross the heat. What a kernel runs now is on its live page: the sampler
+writes its phase and fn there every millisecond, and `kernel_page_hot pid 0` answers `[phase, row]` (the row as a hot
+row names the defn, or nothing for a unit's top level), so a process that sits in one place for minutes says where.
 
 Lowering form-find.bml warm takes 3.3 s:
 
@@ -1087,8 +1091,12 @@ strings: the pair copy is 0.2%. A melt visits the held once-holds from their lis
 
 The drift gates took 22 minutes on 2026-10-11, and two gates were 98% of it: form-cli-build (1,000 s) and
 bml-cursor-coverage (341 s). The form-cli build compiles about two hundred units in one process from a sealed body; the
-seal carries `form-stdlib/bml/jit-page.bml`, the seed's own Form unit, so that compile runs its hot recipes as pages
-(the walked FNV fingerprint was 9% of it). Each unit's packet joins its compiler closure's manifest in halves: 4,000
+seal carries `form-stdlib/bml/jit-page.bml`, the seed's own Form unit. That compile lowers its BML inside its loads, where
+an offer once waited for a quiet load that never came: the first floor call now loads the JIT unit (where the floor's
+own first load runs), and a resident JIT is offered inside a load. A cold `--check` of form-cli-repl.fk in a sealed body
+lowered 118 units in 90 s with the JIT and none without it (the walked FNV fingerprint was 9% of the walked compile).
+A build begins by taking back the work dirs (`form-cli-{regen,build,private}.<pid>.<ms>`) of builds whose process ended:
+896 MB stood in the temp dir on 2026-10-11; a dir a failed build retains is marked `.retained` and stays. Each unit's packet joins its compiler closure's manifest in halves: 4,000
 rows in 18 ms, where a right-recursive join took 2 s and 13% of the compile. A sweep shard measured the same day (75
 workloads, 12 minutes) spent 9% in that manifest, 6% in the type index, 9% waiting on children, 8% on the GPU and 7%
 melting.
