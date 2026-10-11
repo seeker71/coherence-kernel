@@ -9299,9 +9299,11 @@ static void fk_lit_pin_rows(long long from, long long to) {
     long long k = from;
     while (k < to) { if (fk_node[k][0] == 24) { fk_lit_pin(fk_node[k][1]); } k = k + 1; }
 }
+static long long fk_kind_word[10];   /* value_kind's pinned names (fk_value_kind) */
 static void fk_lit_unpin_all(void) {
     long long z = 0;
     while (fk_sdead != 0 && z < fk_sp) { if (fk_sdead[z] == 2) { fk_sdead[z] = 0; } z = z + 1; }
+    memset(fk_kind_word, 0, sizeof(fk_kind_word));
 }
 static unsigned char *fk_smk;
 static unsigned char *fk_smv;
@@ -9470,6 +9472,14 @@ static void fk_melt(void) {
      * memory is fk_np/4 pairs. */
     while (ncap - nlive < fk_np / 4 + FK_HASHCONS_INIT_CAP) {
         ncap = ncap * 2;
+    }
+    /* a heap that once peaked keeps no more than it uses: while the live heap is under an eighth of the capacity, the
+     * capacity halves (never below the first size or the headroom rules above), so a melt -- whose forwarding table and
+     * marks are sized by the heap it compacts -- follows what is live, not what once was. Witnessed: 2 s a melt with 1.5M
+     * live in a sweep's process whose earlier bands had grown the heap (melt-cost-band, 2026-10-11). */
+    while (ncap / 2 >= FK_HASHCONS_INIT_CAP && nlive * 8 < ncap && ncap / 2 - nlive >= fk_melt_want &&
+           ncap / 2 - nlive >= fk_np / 4 + FK_HASHCONS_INIT_CAP) {
+        ncap = ncap / 2;
     }
     if (fk_store_shared && ncap > FK_STORE_HEAP_PAIRS) { fk_store_go_private(); }
     fk_nh = fk_store_shared ? (long long *)fk_heap_alt_h : malloc(ncap * 8);
@@ -10284,10 +10294,21 @@ static int fk_jit_cons_ok(long long k, long long depth) {
     if (!fk_jit_node_ok(k) || fk_node[k][0] != 19) { return 0; }
     return depth <= 1 ? 1 : fk_jit_cons_ok(fk_node[k][2], depth - 1);
 }
+/* a compare against a len (le 5, eq 102, lt 103 with (len X) on one side and a literal on the other): its arm reads the
+ * shape (fk_len_cmp walks at most K+1 cells), so the value child is X, and the len and the literal stay shape. Answers
+ * the side the len stands on (1 or 2), or 0 */
+static long long fk_jit_len_side(long long k) {
+    long long t = fk_node[k][0], c1 = fk_node[k][1], c2 = fk_node[k][2];
+    if (t != 5 && t != 102 && t != 103) { return 0; }
+    if (fk_jit_node_ok(c1) && fk_jit_node_ok(c2) && fk_node[c1][0] == 22 && fk_node[c2][0] == 1 && fk_jit_node_ok(fk_node[c1][1])) { return 1; }
+    if (fk_jit_node_ok(c1) && fk_jit_node_ok(c2) && fk_node[c2][0] == 22 && fk_node[c1][0] == 1 && fk_jit_node_ok(fk_node[c2][1])) { return 2; }
+    return 0;
+}
 /* the value children of k into out (at most cap); answers how many, or -1 when k is not one the page may take apart */
 static long long fk_jit_kids_of(long long k, long long *out, long long n, long long cap) {
     if (!fk_jit_node_ok(k) || n >= cap) { return -1; }
-    long long t = fk_node[k][0], p = fk_jit_plain_kids(t), c = 1;
+    long long t = fk_node[k][0], p = fk_jit_plain_kids(t), c = 1, ls = fk_jit_len_side(k);
+    if (ls > 0) { out[n] = fk_node[fk_node[k][ls]][1]; return n + 1; }
     if (t == 27) {
         while (c <= 2) {
             long long ch = fk_node[k][c];
@@ -10319,8 +10340,12 @@ static long long fk_smklit(long long v);
 static long long fk_jit_read_node(long long slot) { return fk_smknode(110, fk_smklit(slot), 0, 0); }
 /* the mirror of k, its value children read from slots t + *at in the order fk_jit_kids_of named them */
 static long long fk_jit_mirror(long long k, long long t, long long *at) {
-    long long tg = fk_node[k][0], p = fk_jit_plain_kids(tg);
+    long long tg = fk_node[k][0], p = fk_jit_plain_kids(tg), ls = fk_jit_len_side(k);
     long long c1 = fk_node[k][1], c2 = fk_node[k][2], c3 = fk_node[k][3];
+    if (ls > 0) {
+        long long len = fk_smknode(22, fk_jit_read_node(t + (*at)++), 0, 0);
+        return ls == 1 ? fk_smknode(tg, len, c2, c3) : fk_smknode(tg, c1, len, c3);
+    }
     if (tg == 27) {
         long long a = (fk_jit_node_ok(c1) && fk_node[c1][0] == 27) ? fk_jit_mirror(c1, t, at) : fk_jit_read_node(t + (*at)++);
         long long b = (fk_jit_node_ok(c2) && fk_node[c2][0] == 27) ? fk_jit_mirror(c2, t, at) : fk_jit_read_node(t + (*at)++);
@@ -17549,20 +17574,29 @@ static long long fk_fb_deserialize(const unsigned char *b, long long n) {
     if (fk_fb_pos != n) { fk_fb_err = "form binary: trailing bytes"; return fk_nothing; }
     return root;
 }
+/* a kind's name is one of ten strings: each is interned once and pinned (fk_lit_pin: the string melt never frees it), so
+ * value_kind answers a held word and asks the pool nothing; a string table that starts over, or an unpinning, clears them
+ * (fk_kind_word is declared beside fk_lit_pin) */
 static long long fk_value_kind(long long v) {
-    const char *k = "unknown";
-    if (v == fk_nothing) { k = "null"; }
-    else if (v == (0 - 9223372036854775807LL) || v == (0 - 9223372036854775805LL)) { k = "bool"; }
-    else if (fk_isf(v)) { k = "float"; }
-    else if (fk_is_str(v)) { k = "string"; }
-    else if (fk_is_fnval(v)) { k = "closure"; }
-    else if (fk_isrec(v)) { k = "record"; }
-    else if (v < 0 && (v & 1)) { long long ni = fk_nidx(v); if (ni >= 1 && ni <= fk_np) { k = "node_id"; } }
-    else if (v == 1 || ((v & 1) && v > 0 && FK_POK(v >> 1))) { k = "list"; }
-    else if ((v & 1) == 0) { k = "int"; }
-    long long kn = 0;
-    while (k[kn]) { kn = kn + 1; }
-    return fk_sbuf(k, kn);
+    static const char *const names[10] = { "unknown", "null", "bool", "float", "string", "closure", "record", "node_id", "list", "int" };
+    int k = 0;
+    if (v == fk_nothing) { k = 1; }
+    else if (v == (0 - 9223372036854775807LL) || v == (0 - 9223372036854775805LL)) { k = 2; }
+    else if (fk_isf(v)) { k = 3; }
+    else if (fk_is_str(v)) { k = 4; }
+    else if (fk_is_fnval(v)) { k = 5; }
+    else if (fk_isrec(v)) { k = 6; }
+    else if (v < 0 && (v & 1)) { long long ni = fk_nidx(v); if (ni >= 1 && ni <= fk_np) { k = 7; } }
+    else if (v == 1 || ((v & 1) && v > 0 && FK_POK(v >> 1))) { k = 8; }
+    else if ((v & 1) == 0) { k = 9; }
+    if (fk_kind_word[k] == 0) {
+        long long kn = 0;
+        while (names[k][kn]) { kn = kn + 1; }
+        long long w = fk_sbuf(names[k], kn);
+        fk_lit_pin(fk_stri(w));
+        fk_kind_word[k] = w;
+    }
+    return fk_kind_word[k];
 }
 /* value_str -- mode 25 of the leaf door: a word as text, the way the retired Go kernel's formValueString
  * wrote it, kept as the body's one rendering. A string is its bytes, an int its decimal, a float
@@ -25861,6 +25895,7 @@ static void fk_string_table_reset(void) {
      * an index that is now a live string of the new table */
     fk_sfree_n = 0;
     memset(fk_sdead, 0, (unsigned long)fk_scap_s);
+    memset(fk_kind_word, 0, sizeof(fk_kind_word));
     fk_holn = 0;
     fk_hole_bytes = 0;
     fk_holhint = 0;
