@@ -132,30 +132,45 @@ section [form.bml] {
    };
   }
   def ntr-score-loss(totals) = (totals[0] / totals[1]);
-  def ntr-validation(model,tk,rows,masked,out,step) {
+  // The held-out rows are scored once a phase. Validation keeps each row's sample and its totals in `held`; the grading of the same
+  // rows takes a row's totals from there when its sample is the same token for token (ids, targets, mask) and scores only a row it
+  // does not find. Before this the two passes scored the same 81 rows twice before training and twice after: half of a run's scoring.
+  def ntr-validation(model,tk,rows,masked,out,step,held) {
    let start = host_monotonic_ms();
-   let totals = ntr-validation-rows(model,tk,rows,masked,0.0,0.0,0);
+   let totals = ntr-validation-rows(model,tk,rows,masked,0.0,0.0,0,held);
    if (totals[1] <= 0.0) then form_error("native validation has no supervised tokens") else ntr-event(out,"validation",[ntr-int("optimizer_step",step),ntr-int("rows",totals[2]),ntr-real("supervised_tokens",totals[1]),ntr-real("loss",(totals[0] / totals[1])),ntr-int("wall_ms",(host_monotonic_ms() - start))]);
   }
-  def ntr-validation-rows(model,tk,rows,masked,loss,tokens,count) {
-   if nil?(rows) then [loss,tokens,count] else ntr-validation-row(model,tk,nld-prepare(tk,[rows[0]],masked)[0],rows[1:],masked,loss,tokens,count);
+  def ntr-validation-rows(model,tk,rows,masked,loss,tokens,count,held) {
+   if nil?(rows) then [loss,tokens,count] else ntr-validation-row(model,tk,nld-prepare(tk,[rows[0]],masked)[0],rows[1:],masked,loss,tokens,count,held);
   }
-  def ntr-validation-row(model,tk,sample,rest,masked,loss,tokens,count) {
-   let value = ntr-score-loss(ntr-score(model,sample));
-   ntr-validation-rows(model,tk,rest,masked,(loss + (value * sample[3])),(tokens + sample[3]),(count + 1));
+  def ntr-validation-row(model,tk,sample,rest,masked,loss,tokens,count,held) {
+   let totals = ntr-score(model,sample);
+   let kept = ntr-hold(held,sample,totals);
+   let value = ntr-score-loss(totals);
+   ntr-validation-rows(model,tk,rest,masked,(loss + (value * sample[3])),(tokens + sample[3]),(count + 1),held);
+  }
+  def ntr-hold(held,sample,totals) {
+   let set = record_set(held,"scored",cons([sample,totals],record_get(held,"scored")));
+   1;
+  }
+  def ntr-same-sample?(a,b) = ((Comparable) a[3] == b[3]) && bml-value-equal(a[0],b[0]) && bml-value-equal(a[1],b[1]) && bml-value-equal(a[2],b[2]);
+  def ntr-held-find(scored,sample) = nil?(scored) ? nothing() : ntr-same-sample?(scored[0][0],sample) ? scored[0][1] : ntr-held-find(scored[1:],sample);
+  def ntr-scored(model,held,sample) {
+   let hit = ntr-held-find(record_get(held,"scored"),sample);
+   nothing?(hit) ? ntr-score(model,sample) : hit;
   }
   def ntr-grade-hex(bytes) = nlp-hex(bytes);
-  def ntr-grade-rows(model,tk,rows,index) = if nil?(rows) then [] else cons(ntr-grade-row(model,tk,rows[0],index),ntr-grade-rows(model,tk,rows[1:],(index + 1)));
-  def ntr-grade-row(model,tk,row,index) {
-   let sample = nld-row(tk,row,1,(index + 1)); let totals = ntr-score(model,sample);
+  def ntr-grade-rows(model,tk,rows,index,held) = if nil?(rows) then [] else cons(ntr-grade-row(model,tk,rows[0],index,held),ntr-grade-rows(model,tk,rows[1:],(index + 1),held));
+  def ntr-grade-row(model,tk,row,index,held) {
+   let sample = nld-row(tk,row,1,(index + 1)); let totals = ntr-scored(model,held,sample);
    json-node-object([ntr-int("index",index),ntr-text("row_sha256",ntr-grade-hex(sha256-stream-string(json-emit-precise(row)))),ntr-real("loss",ntr-score-loss(totals)),ntr-real("supervised_tokens",totals[1]),ntr-int("input_tokens",totals[2]),ntr-int("assessment_slices",totals[3]),ntr-int("peak_slice_estimated_bytes",totals[4])]);
   }
-  def ntr-assessment(model,tk,r,phase) {
-   if (!json-object-has?(r,"assessment")) then 0 else ntr-assessment-at(model,tk,r,phase,host_monotonic_ms());
+  def ntr-assessment(model,tk,r,phase,held) {
+   if (!json-object-has?(r,"assessment")) then 0 else ntr-assessment-at(model,tk,r,phase,host_monotonic_ms(),held);
   }
-  def ntr-assessment-at(model,tk,r,phase,started) {
+  def ntr-assessment-at(model,tk,r,phase,started,held) {
    let rows = json-array-elements(parse-json("native-assessment",read_file(ntr-get(r,"assessment"))));
-   if nil?(rows) then form_error("native assessment has no rows") else ntr-assessment-save(r,phase,ntr-grade-rows(model,tk,rows,0),started);
+   if nil?(rows) then form_error("native assessment has no rows") else ntr-assessment-save(r,phase,ntr-grade-rows(model,tk,rows,0,held),started);
   }
   def ntr-assessment-save(r,phase,scores,started) {
    let out = ntr-get(r,"output"); let path = (out + ("/assessment-" + (phase + ".json")));
@@ -272,8 +287,9 @@ section [form.bml] {
    let traversal = nlp-restore(model[5],json-object-get(r,"training_progress"));
    let event = ntr-event(out,"admitted",[ntr-text("model",model[4]),ntr-text("adapter",nag-resolve(adapter)),ntr-int("rows",len(rows)),ntr-int("steps_requested",ntr-get(r,"steps")),ntr-int("batch",ntr-get(r,"batch")),ntr-int("lora_pairs",len(state)),ntr-int("optimizer_step",resumed[0]),ntr-text("optimizer_resume",resumed[1]),ntr-int("open_ms",(host_monotonic_ms() - start)),ntr-text("sequence_policy","whole-row, device-memory admission, no token truncation")]);
    let validationRows = nld-file((ntr-get(r,"data") + "/valid.jsonl"));
-   let baseline = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,resumed[0]);
-   let assessedBefore = ntr-assessment(model,tk,r,"before");
+   let heldBefore = record_new(0,"scored",[]);
+   let baseline = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,resumed[0],heldBefore);
+   let assessedBefore = ntr-assessment(model,tk,r,"before",heldBefore);
    let progress = traversal[0];
    let continuing = ((String) traversal[1] == "same dataset; continue checkpointed examples");
    let reading = oh-reading("native-lora",out,"dataset-continuity",json-node-string("same dataset; continue checkpointed examples"),json-node-string(traversal[1]),json-node-int(continuing),if continuing then [] else [oh-need("observed-dataset-traversal",json-node-string("start at first row; retain optimizer"))],["continue-checkpoint","start-first-row"],oh-reference(nag-resolve(adapter)));
@@ -284,8 +300,10 @@ section [form.bml] {
    let ready = if ((String) selected == "defer") then form_error("native dataset response did not correlate") else nlp-request(r,progress);
    let applied = ntr-health-event(out,"dataset-applied",oh-applied(reading,selected,progress),[]);
    let result = ntr-round(model,tk,state,rows,ready,0,resumed[0]);
-   let validation = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,result[0]);
-   let assessedAfter = ntr-assessment(model,tk,r,"after");
+   let heldAfter = record_new(0,"scored",[]);
+   let validation = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,result[0],heldAfter);
+   let assessedAfter = ntr-assessment(model,tk,r,"after",heldAfter);
+   let profiled = nam-profile?() ? map(p => print(["kernel", p[0], "device ms", p[1] / 1000, "dispatches", p[2], "mean us", p[1] / p[2]]), nam-profile-report()) : [];
    let exported = ntr-export(model,r,result[0]);
    let done = nam-sync(); let closeState = nlb-state-close(state); let closeModel = nlg-close(session);
    let final = ntr-event(out,"finished",[ntr-int("optimizer_step",result[0]),ntr-int("rounds_completed",result[1]),ntr-text("reason",result[2]),ntr-int("wall_ms",(host_monotonic_ms() - start)),ntr-int("retained_buffers",metal_live()[2])]);

@@ -9,13 +9,20 @@
 ; contiguous columns (one packed word, one scale, one bias) for all eight tokens. This band runs both over synthetic quantized
 ; weights and compares every output. The weights are a 4096-byte pattern tiled to length: never a list of millions.
 ;
-; Verdict 7 when every claim lands:
+; nam_affine_mt4 (four rows a simdgroup, the activations of a token block read once for all four) serves every row count divisible by four,
+; which is all of the 3B model's projections; nam_affine_mt serves the rest. nam_matmul_sk is the product with a small inner dimension (a
+; LoRA's rank) as one thread an output, where nam_matmul gave each output a simdgroup of which k lanes worked.
+;
+; Verdict 31 when every claim lands:
 ;   1     f32 scales, 48 rows by 512 columns, group 64: the new product matches the reference to 1e-4 of the largest output for 1, 3, 8, 9, 17 and 100 tokens
 ;   2     f16 scales and biases, 40 rows by 192 columns, group 32 (fewer columns than one pass of 32 lanes): the same for 1, 5, 8 and 13 tokens
 ;   4     the real 3B shape (8192 rows by 3072 columns, group 64) at 128 tokens, eight products to one sync: the best of three runs of the new product is no slower
 ;         than the reference's. The size of the gain is printed, not claimed: a quiet GPU measured 8.3 times (3,326 ms against 400 ms) and the same rows scored
 ;         through the trainer cost 162 ms a token under the reference and 21 to 24 under the new product (observe/native-lora-score-bench-run.bml), but the gates
 ;         run bands in parallel and a ratio would read the neighbours.
+;   8     a row count not divisible by four (45 rows by 256 columns, group 32), which takes the one-row kernel: the same for 1, 9, 17 tokens
+;   16    nam-mm equals nam_matmul on both routes: one thread an output (k up to 128: 8, 16, 128) and the simdgroup an output above (200, 700, 1536);
+;         every transposition and both accumulate modes
 section [form.bml] {
  class NativeAffineMtBand {
   def namb-bit(ok, bit) = ok ? bit : 0;
@@ -69,6 +76,19 @@ section [form.bml] {
   }
   def namb-min3(a, b, c) = (a < b ? a : b) < c ? (a < b ? a : b) : c;
   def namb-best(view, tokens, kind) = namb-min3(namb-time(view, tokens, kind), namb-time(view, tokens, kind), namb-time(view, tokens, kind));
+  // nam_matmul_sk (through nam-mm, k <= 32) against nam_matmul itself, called directly
+  def namb-mm-same?(m, k, n, ta, tb, accumulate) {
+   let a = namb-x(m, k); let b = namb-x(k, n);
+   // finite starting values: accumulate adds to them, and random bytes read back as NaN
+   let y1 = namb-buf(m * n, namb-fill(namb-x-pat(), m * n * 4)); let y2 = namb-buf(m * n, namb-fill(namb-x-pat(), m * n * 4));
+   let r = nam-run("nam_matmul", [a, b, y1], [m, k, n, ta, tb, md-f32-bits(0.5), accumulate], m * n, 1);
+   let s = nam-mm(a, b, y2, m, k, n, ta, tb, 0.5, accumulate);
+   let done = nam-sync();
+   let p = nam-read(y1, m * n); let q = nam-read(y2, m * n);
+   let freed = nam-free([a, b, y1, y2]);
+   namb-max-diff(p, q) <= 0.0001 * (namb-max-abs(p) + 1.0);
+  }
+  def namb-mm-all() = all?(c => namb-mm-same?(c[0], c[1], c[2], c[3], c[4], c[5]), [[13, 8, 20, 0, 0, 0], [13, 8, 20, 1, 0, 0], [13, 8, 20, 0, 1, 0], [13, 8, 20, 1, 1, 0], [13, 8, 20, 0, 0, 1], [9, 16, 31, 1, 0, 1], [11, 128, 5, 0, 0, 0], [13, 1536, 8, 0, 0, 0], [13, 1536, 8, 1, 0, 0], [13, 1536, 8, 0, 1, 1], [9, 700, 8, 1, 1, 0], [40, 200, 30, 0, 0, 0]]);
   def namb-score() {
    let v1 = namb-view-f32(48, 512, 64);
    let v2 = namb-view-f16(40, 192, 32);
@@ -78,7 +98,9 @@ section [form.bml] {
    print(["native-affine-mt", "3B shape, 128 tokens, eight products: reference ms", ref, "new ms", mt]);
    namb-bit(namb-all(v1, [1, 3, 8, 9, 17, 100]), 1)
      + namb-bit(namb-all(v2, [1, 5, 8, 13]), 2)
-     + namb-bit(mt <= ref, 4);
+     + namb-bit(mt <= ref, 4)
+     + namb-bit(namb-all(namb-view-f32(45, 256, 32), [1, 9, 17]), 8)
+     + namb-bit(namb-mm-all(), 16);
   }
  }
  namb-score();
