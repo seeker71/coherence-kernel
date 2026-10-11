@@ -1,0 +1,80 @@
+// jit-page-band.bml — the walker's transparent JIT (form-stdlib/bml/jit-page.bml) answers as the walker does.
+// Each defn of the family below is called on 4000 inputs while it is cold (the walker walks it), then on the same 4000
+// inputs again: its heat reaches 4096 within the second pass, the seed offers it to the Form JIT, and the rest of the pass
+// runs its page. Both passes are read through value_str, so an int, a float, a list and nothing are held to their text.
+//
+//   1   every defn of the family answers the second pass exactly as the first
+//   2   a self tail call: a cold loop, a loop that becomes a page in its middle, and a loop that is a page throughout
+//       answer alike
+//   4   a zero divisor stops cold and stops hot (the page hands the int it cannot divide to the node's own arm)
+//   8   pages stand for the defns the C loop lane leaves: bit ops, a string joined by the walker inside a page, a self
+//       tail loop, a compare of two lists of strings, and the band's own drivers (calls, value_str, a fifteen-way if)
+//   16  binding no words asks whether a page stands: a defn never heated answers 0
+//
+// Verdict 31 when every claim lands. The C loop lane crystallizes the rest of the family at heat 1024, before the Form JIT
+// is offered it; with FK_NO_F64 in fkwu.conf every defn of the family runs as a Form page and the verdict is 31 too
+// (witnessed 2026-10-11: 37 pages, the family equal).
+// REQUIRES: (jit_fn_bind and the heat offer are fkwu's own)
+// preflight-exec: forbidden
+section [form.bml] {
+    class JitPageBand {
+        def jpb-bit(ok, bit) = ok ? bit : 0;
+        // the family: every path of the page's vocabulary
+        def jpb-arith(a, b) = (a + b) * 3 - (a - b) / 2 + a % 7;
+        def jpb-bits(a, b) = bxor(band(a, 255), bor(b, 16));
+        def jpb-cmp(a, b) = (a < b ? 1 : 0) + (a <= b ? 2 : 0) + (a == b ? 4 : 0) + (a > b ? 8 : 0) + (a >= b ? 16 : 0) + (a != b ? 32 : 0);
+        def jpb-let(a, b) {
+            let x = a * b;
+            let y = x + a;
+            y - b;
+        }
+        def jpb-str(s, i) = str_byte_at(s, i % str_len(s)) + str_len(s);
+        def jpb-list(xs) = nil?(xs) ? 0 : head(xs) + len(tail(xs));
+        def jpb-cons(a, xs) = len(cons(a, cons(a + 1, xs)));
+        def jpb-streq(a, b) = str_eq(a, b) ? 1 : 2;
+        def jpb-call(a) = jpb-arith(a, 3) + jpb-let(a, 2);
+        def jpb-tail(a) = a <= 0 ? 0 : jpb-arith(a, 1);
+        def jpb-concat(a) = str_len("x" + a.str() + "y");
+        def jpb-float(a) = a + 1.5;
+        def jpb-nil-eq(xs) = eq(xs, empty()) ? 1 : 0;
+        def jpb-if-value(a) = (a > 3 ? a : 0 - a) * 2;
+        def jpb-nothing(a) = nothing?(a) ? 0 : a + 1;
+        def jpb-loop(i, n, acc) = i >= n ? acc : jpb-loop(i + 1, n, acc + bxor(i, 85) * 3);
+        def jpb-div(a) = 100 / a;
+        def jpb-div-heat(k, acc) = k >= 5000 ? acc : jpb-div-heat(k + 1, acc + jpb-div(k % 50 + 1));
+        def jpb-never(a) = a + 1;
+
+        // the inputs for call k
+        def jpb-a(k) = (k * 37 % 601) - 300;
+        def jpb-b(k) = k % 20 + 1;
+        def jpb-s(k) = (Comparable) k % 3 == 0 ? "page" : (Comparable) k % 3 == 1 ? "walker" : "pa";
+        def jpb-xs(k) = (Comparable) k % 4 == 0 ? [] : (Comparable) k % 4 == 1 ? [k] : [k, 2, 3];
+        def jpb-one(w, k) {
+            (Comparable) w == 0 ? jpb-arith(jpb-a(k), jpb-b(k)) : (Comparable) w == 1 ? jpb-bits(jpb-a(k), jpb-b(k)) : (Comparable) w == 2 ? jpb-cmp(jpb-a(k) % 5, jpb-b(k) % 5) : (Comparable) w == 3 ? jpb-let(jpb-a(k), jpb-b(k)) : (Comparable) w == 4 ? jpb-str(jpb-s(k), k) : (Comparable) w == 5 ? jpb-list(jpb-xs(k)) : (Comparable) w == 6 ? jpb-cons(k, jpb-xs(k)) : (Comparable) w == 7 ? jpb-streq(jpb-s(k), jpb-s(k + 1)) : (Comparable) w == 8 ? jpb-call(jpb-a(k)) : (Comparable) w == 9 ? jpb-tail(jpb-a(k)) : (Comparable) w == 10 ? jpb-concat(k) : (Comparable) w == 11 ? jpb-float(jpb-a(k)) : (Comparable) w == 12 ? jpb-nil-eq(jpb-xs(k)) : (Comparable) w == 13 ? jpb-if-value(jpb-a(k) % 9) : jpb-nothing((Comparable) k % 5 == 0 ? nothing() : k);
+        }
+        def jpb-count() = 15;
+        def jpb-pass(w, k, n, acc) = k >= n ? reverse(acc) : jpb-pass(w, k + 1, n, cons(value_str(jpb-one(w, k)), acc));
+        def jpb-same(xs, ys) = nil?(xs) ? nil?(ys) : nil?(ys) ? 0 : str_eq(xs[0], ys[0]) ? jpb-same(xs[1:], ys[1:]) : 0;
+        def jpb-family(w, bad) {
+            w >= jpb-count() ? bad : jpb-family-at(w, bad, jpb-pass(w, 0, 4000, []));
+        }
+        def jpb-family-at(w, bad, cold) = jpb-family(w + 1, jpb-same(cold, jpb-pass(w, 0, 4000, [])) ? bad : cons(w, bad));
+    }
+    let bad = jpb-family(0, []);
+    let loop-cold = jpb-loop(0, 3000, 0);
+    let loop-mixed = jpb-loop(0, 3000, 0);
+    let loop-page = jpb-loop(0, 3000, 0);
+    let div-cold = attempt(jpb-div(0));
+    let div-heat = jpb-div-heat(0, 0);
+    let div-hot = attempt(jpb-div(0));
+    let pages = [jit_fn_bind(jpb-bits, []), jit_fn_bind(jpb-concat, []), jit_fn_bind(jpb-loop, []), jit_fn_bind(jpb-same, []), jit_fn_bind(jpb-pass, []), jit_fn_bind(jpb-one, [])];
+    let never = jit_fn_bind(jpb-never, []);
+    let shown = print(["jit-page", "family differing", bad, "loops", [loop-cold, loop-mixed, loop-page], "div by zero", [div-cold, div-hot], "pages", pages, "never heated", never, "offers", kernel_stat(74), "bound", kernel_stat(75), "offer_us", kernel_stat(76)]);
+    let verdict = jpb-bit(nil?(bad), 1)
+        + jpb-bit(((Comparable) loop-cold == loop-mixed) && ((Comparable) loop-mixed == loop-page), 2)
+        + jpb-bit(nothing?(div-cold) && nothing?(div-hot), 4)
+        + jpb-bit(!any?(p => (Comparable) p != 1, pages), 8)
+        + jpb-bit((Comparable) never == 0, 16);
+    let end = print(["jit-page-band", "verdict", verdict]);
+    verdict;
+}
