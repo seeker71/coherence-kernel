@@ -10032,8 +10032,14 @@ typedef long long (*fk_jit_page_fn)(long long fp, void *cx);
  * has a number, FK_JIT_ABI, handed to the JIT with every offer: an emitter written for another layout declines, so a seed
  * built before a change and a jit-page.bml written after it (a checkout's ./fkwu is not rebuilt by a merge) never bind a
  * page whose words name the wrong helpers. Change the number with the layout. */
-#define FK_JIT_ABI 2
-#define FK_JIT_OPS 22
+#define FK_JIT_ABI 3
+#define FK_JIT_OPS 26
+/* ABI 3 gave the page value_kind and the u32 doors rotr_u32 add_u32 bnot_u32 as its own ops: a BML index, first, tail and
+ * equal ask a value's kind every call (a leaf door handed to the walker paid its dispatch each time, 2.6% of a form-cli
+ * build's samples, under bml-value-index), and a SHA-256 round's u32 arithmetic was walked whole inside its page; and the
+ * two words a callee's body written in place of its call enters and leaves by (inl_enter, inl_leave) */
+static long long fk_value_kind(long long v);
+static long long fk_op_value_kind(long long a, long long b) { (void)b; return fk_value_kind(a); }
 struct fk_jit_cx {
     long long **vs;                                                         /* 0: &fk_vs */
     long long next;                                                         /* 1: the node the walker continues at, or 0 */
@@ -10044,8 +10050,10 @@ struct fk_jit_cx {
     long long (*call)(long long c, long long fp, long long t, long long n); /* 6: a call in value position */
     long long (*tail)(long long c, long long fp, long long t, long long n); /* 7: a tail call made ready; answers the node to continue at */
     /* 8..: the one-meaning ops -- head tail len str_len str_eq str_byte_at cons, add sub mul div mod le lt eq,
-     * band bor bxor shl_u32 shr_u32, nth byte_to_str */
+     * band bor bxor shl_u32 shr_u32, nth byte_to_str, value_kind, rotr_u32 add_u32 bnot_u32 */
     long long (*ops[FK_JIT_OPS])(long long a, long long b);
+    void (*inl_enter)(long long c);                                         /* 34: a callee's body begins in place of its call */
+    void (*inl_leave)(long long c);                                         /* 35: ... and ends; c is the defn the page stands in again */
 };
 static struct fk_jit_cx fk_jit_cx;
 #define FK_JIT_HEAT 4096
@@ -10090,6 +10098,9 @@ static long long fk_op_bor(long long a, long long b);
 static long long fk_op_bxor(long long a, long long b);
 static long long fk_op_shl(long long a, long long b);
 static long long fk_op_shr(long long a, long long b);
+static long long fk_op_rotr(long long a, long long b);
+static long long fk_op_add_u32(long long a, long long b);
+static long long fk_op_bnot(long long a, long long unused);
 static long long fk_op_nth(long long l, long long w);
 static long long fk_op_byte_to_str(long long w, long long unused);
 static char *fk_stack_base;
@@ -10189,6 +10200,10 @@ static long long fk_jit_walk_page(long long i, long long fp) {
     return r;
 }
 static void fk_jit_tick(void) { FK_CELL_TICK(); }
+/* a callee's body written in place of its call keeps what the call would have said: the frame chain holds the caller and the
+ * running defn is the callee, so the time board's own and under, and a stop's "in", name it as the call did */
+static void fk_jit_inl_enter(long long c) { FK_FR_PUSH(fk_cur_fn); fk_cur_fn = c; }
+static void fk_jit_inl_leave(long long c) { FK_FR_POP(); fk_cur_fn = c; }
 static void fk_jit_enter(long long fp, long long need) {
     long long top = fp + need;
     if (top >= fk_vs_cap) { fk_vs_grow(top + 1); }
@@ -10241,7 +10256,8 @@ static long long fk_jit_bind(long long x) {
         long long (*ops[FK_JIT_OPS])(long long, long long) = {
             fk_op_head, fk_op_tail, fk_op_len, fk_op_str_len, fk_op_str_eq, fk_op_byte_at, fk_op_cons,
             fk_op_add, fk_op_sub, fk_op_mul, fk_op_div, fk_op_mod, fk_op_le, fk_op_lt, fk_op_eq,
-            fk_op_band, fk_op_bor, fk_op_bxor, fk_op_shl, fk_op_shr, fk_op_nth, fk_op_byte_to_str };
+            fk_op_band, fk_op_bor, fk_op_bxor, fk_op_shl, fk_op_shr, fk_op_nth, fk_op_byte_to_str, fk_op_value_kind,
+            fk_op_rotr, fk_op_add_u32, fk_op_bnot };
         memcpy(fk_jit_cx.ops, ops, sizeof(ops));
         fk_jit_cx.vs = &fk_vs;
         fk_jit_cx.walk = fk_jit_walk_page;
@@ -10250,6 +10266,8 @@ static long long fk_jit_bind(long long x) {
         fk_jit_cx.enter = fk_jit_enter;
         fk_jit_cx.call = fk_jit_call;
         fk_jit_cx.tail = fk_jit_tail;
+        fk_jit_cx.inl_enter = fk_jit_inl_enter;
+        fk_jit_cx.inl_leave = fk_jit_inl_leave;
     }
     long long body = fk_fn[c];
     if (body < 0 || fk_node[body][0] != 194) { fk_fn[c] = fk_smknode(194, c, body, 0); fk_prog_note_body(c); }
@@ -10265,6 +10283,8 @@ static long long fk_jit_bind(long long x) {
  *   ["kids", k]    the value children of node k in the order its arm walks them, or nothing when the page may not take k apart
  *   ["mint", k, t] the mirror of k whose i-th value child reads frame slot t + i
  *   ["word", k]    the constant word of a string literal (its index is pinned, fk_lit_pin) as four 16-bit halves, low first
+ *   ["fn", c]      defn c's body (the one it wears under its page) and its arity, for a page that writes a callee's body in
+ *                  place of the call; nothing for a capturing function, whose prologue reads the call's capture channel
  * The arms read for the table: record_get 65, record_set 66, record_has 67, record_keys 99, value_eq 80, node_category 92,
  * str_find 30, intern_node 47, intern_trivial_string 46, intern_trivial_int 43, node_children 48, node_value 49, file_size
  * 60, host_file_append_bytes 61, read_file 63, write_file 104 (children 1..n in order); str_concat 27
@@ -10379,6 +10399,12 @@ static long long fk_jit_node(long long x) {
     long long q = FK_HNEXT(p);
     if (!(q >= 1 && FK_POK(q)) || (FK_HH(q) & 1) != 0) { return fk_nothing; }
     long long k = FK_HH(q) >> 1;
+    if (fk_cstr_eq(what, "fn")) {
+        if (k <= 0 || k >= fk_fn_count || (k < fk_fn_cap_capacity && fk_fn_cap_count[k] > 0)) { return fk_nothing; }
+        long long b = fk_fn[k];
+        if (fk_jit_node_ok(b) && fk_node[b][0] == 194) { b = fk_node[b][2]; }
+        return fk_jit_node_ok(b) ? fk_cons_val(b << 1, fk_cons_val(fk_fnar[k] << 1, 1)) : fk_nothing;
+    }
     if (!fk_jit_node_ok(k)) { return fk_nothing; }
     long long kids[16];
     if (fk_cstr_eq(what, "kids")) {
@@ -14487,6 +14513,9 @@ static long long fk_op_bor(long long a, long long b) { return fk_op_bits(35, a, 
 static long long fk_op_bxor(long long a, long long b) { return fk_op_bits(36, a, b); }
 static long long fk_op_shl(long long a, long long b) { return fk_op_bits(37, a, b); }
 static long long fk_op_shr(long long a, long long b) { return fk_op_bits(38, a, b); }
+static long long fk_op_rotr(long long a, long long b) { return fk_op_bits(39, a, b); }
+static long long fk_op_add_u32(long long a, long long b) { return fk_op_bits(40, a, b); }
+static long long fk_op_bnot(long long a, long long unused) { (void)unused; return fk_op_bits(41, a, 0); }
 /* nth: an index is an int, as str_byte_at's is (a float, a string or nothing read through >> 1 was a large negative
  * number and answered nothing; now it stops); a receiver that is not a list, or an element that is not there, answers
  * nothing */
@@ -17779,7 +17808,6 @@ static long long fk_host_pwrite(long long pw, long long ow, long long dw) {
 #endif
 }
 FK_PHASED(FK_PHASE_FILE, long long, fk_fb_door, (long long mode, long long x), (mode, x)) {
-    if (mode == 4) { return fk_value_kind(x); }
     if (mode == 5) {
         long long start = 0, n = 0;
         if (!fk_fb_serialize(x, &start, &n)) { return fk_nothing; }
@@ -19012,9 +19040,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if ((fm201 >> 1) == 25) { return fk_value_str(fx201); }
         if ((fm201 >> 1) >= 17) { return fk_host_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 10) { return fk_spk_door(fm201 >> 1, fx201); }
-        /* modes 4-8: the binary form (value_kind, recipe_to_bytes, bytes_to_recipe,
-         * read_form_binary, write_form_binary) -- see fk_fb_door */
-        if ((fm201 >> 1) >= 4) { return fk_fb_door(fm201 >> 1, fx201); }
+        /* mode 4: value_kind, a reading of the value itself (no file in it, so not the file phase) */
+        if ((fm201 >> 1) == 4) { return fk_value_kind(fx201); }
+        /* modes 5-8: the binary form (recipe_to_bytes, bytes_to_recipe, read_form_binary, write_form_binary) -- see fk_fb_door */
+        if ((fm201 >> 1) >= 5) { return fk_fb_door(fm201 >> 1, fx201); }
         return fk_float_leaf(fm201 >> 1, fx201);
     }
     if (t == 55) {
