@@ -12132,7 +12132,22 @@ static int fk_f64_emit_divisor_guard(int bn, unsigned int xb, unsigned int *word
     return fk_f64_put(words, wn, 0xB4000000U | xb); /* CBZ Xb, overflow: a zero divisor */
 }
 /* postorder emit; returns the register code holding the node's value, -1 on overflow */
+static int fk_f64_emit_node(int n, unsigned int *words, long long *wn, int *ntemp, int *nitemp);
+static int fk_f64_emit_depth;
+static long long fk_f64_emit_refused;
+/* The emitter recurses over the node graph with no bound of its own: a graph that loops back on itself, or one nested without
+ * end, ran the native stack out (SIGBUS at fk_f64_emit, 2026-10-11, a cold run of a 1,024-call float conversion in md-f32-mant;
+ * a cached image of the same program ran). Past 4096 levels of nesting no leaf is wanted: the compile is refused as an
+ * overflow is (-1) and the recipe stays interpreted. */
 static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, int *nitemp) {
+    int r;
+    if (fk_f64_emit_depth >= 4096) { fk_f64_emit_refused = fk_f64_emit_refused + 1; return -1; }
+    fk_f64_emit_depth = fk_f64_emit_depth + 1;
+    r = fk_f64_emit_node(n, words, wn, ntemp, nitemp);
+    fk_f64_emit_depth = fk_f64_emit_depth - 1;
+    return r;
+}
+static int fk_f64_emit_node(int n, unsigned int *words, long long *wn, int *ntemp, int *nitemp) {
     fk_f64_node *p = &fk_f64_prog[n];
     if (p->kind == 2) { return p->a; }
     if (p->kind == 8) { return 110 + p->a; }
@@ -20073,6 +20088,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 67) { return fk_clo_reclaimed << 1; }
         if (ks_k == 68) { return fk_clo_capvals_top << 1; }
         if (ks_k == 69) { return fk_melt_gen << 1; }   /* the melts this kernel has run */
+        if (ks_k == 74) { return fk_f64_emit_refused << 1; }   /* node levels past 4096 the loop lane's emitter refused instead of running the stack out */
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
