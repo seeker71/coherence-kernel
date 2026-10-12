@@ -39,7 +39,7 @@ Bands: `form-rows-band` 63, `form-rows-bridge-band` 7.
 | `training-events.jsonl` | `training-events.rows` (trainer, time door, cost plan, session observers read it) |
 | cycle `ledger.jsonl`, baseline cache `.jsonl` | `ledger.rows`, `baseline-<key>.rows` (floats keep their kind) |
 | `receipts/form-token-{eval,lora,census}.jsonl` | `.rows`, history migrated with parity proven (11, 21, 7 rows) |
-| `learn/form-token-traces.jsonl` (729 rows) | `learn/form-token-traces.rows`, migrated with parity, then refreshed by its own generator |
+| the JSON trace corpus (729 rows) | `learn/form-token-traces.rows`, migrated with parity, then refreshed by its own generator |
 | dataset `train.jsonl` `valid.jsonl` `census.json` `assessment*.json` | `train.rows` `valid.rows` `census.rows` `assessment*.rows` |
 | `.hearth/form-tokens/crossings.jsonl`, the printed `form-token-crossing {json}` line | `crossings.rows`, a printed row |
 | `parse-json` fixtures in the bands | Form row literals |
