@@ -1,24 +1,23 @@
 // form-token-time-run.bml — where a training run's time goes, read from the run's own events.
 //
-//   print -r -- ".hearth/form-token-lora/llama-1791695568140/training-events.jsonl" | ./fkwu observe/form-token-time-run.bml
-//   print -r -- "EVENTS.jsonl LEDGER.jsonl" | ./fkwu observe/form-token-time-run.bml        the cycle's stage walls as well
+//   printf 'events .hearth/form-token-lora/llama-1791695568140/training-events.rows\n' | ./fkwu observe/form-token-time-run.bml
+//   printf 'events EVENTS.rows\nledger LEDGER.rows\n' | ./fkwu observe/form-token-time-run.bml        the cycle's stage walls as well
 //
-// The trainer writes an event for every phase it walks (training-events.jsonl): the open of the model, the baseline validation,
-// the assessment, and for every row its forward and backward milliseconds and the device's own busy microseconds, for every round
-// its tokenize, training, update and checkpoint milliseconds. This reads them back and says, in one block, where the wall clock
-// went: each phase's milliseconds and its share of the run, a row's forward and backward against the device's busy time (the rest
-// is dispatch, sync and the walker's own work), and the milliseconds a token costs each way. The cycle's ledger, when given,
-// adds each stage's wall (refresh, census, carrier, train, evaluation, usage).
-// stdin: the events path, optionally the ledger path after a space. Reads only; opens no model.
+// The trainer writes an event for every phase it walks (training-events.rows, one Form record a line, form-rows.bml): the open of
+// the model, the baseline validation, the assessment, and for every row its forward and backward milliseconds and the device's own
+// busy microseconds, for every round its tokenize, training, update and checkpoint milliseconds. This reads them back and says,
+// in one block, where the wall clock went: each phase's milliseconds and its share of the run, a row's forward and backward
+// against the device's busy time (the rest is dispatch, sync and the walker's own work), and the milliseconds a token costs each
+// way. The cycle's ledger (ledger.rows), when given, adds each stage's wall (refresh, census, carrier, train, evaluation, usage).
+// stdin: `events PATH` and, optionally, `ledger PATH` (frw-options). Reads only; opens no model.
 // preflight-exec: forbidden
-import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/form-rows.bml;
 import form-stdlib/bml/stdin-source.bml;
 import form-stdlib/line-grammar.fk;
 section [form.bml] {
  class FormTokenTimeRun {
-  def ftt-words() = filter(w => len(w) > 0, split-on(trim(stdin-text() ?? ""), " "));
-  def ftt-of(rows, stage) = filter(r => (String) fcgp-str(r, "stage") == stage, rows);
-  def ftt-n(r, key) = fcgp-num(r, key) ?? 0;
+  def ftt-of(rows, stage) = filter(r => (String) frw-str(r, "stage", "") == stage, rows);
+  def ftt-n(r, key) = frw-int(r, key, 0);
   def ftt-sum(rows, key) = foldl((a, r) => a + ftt-n(r, key), 0, rows);
   def ftt-max(rows, key) = foldl((m, r) => ftt-n(r, key) > m ? ftt-n(r, key) : m, 0, rows);
   def ftt-mean(rows, key) = len(rows) == 0 ? 0 : ftt-sum(rows, key) / len(rows);
@@ -27,6 +26,13 @@ section [form.bml] {
   def ftt-say(t) = print_str("[form-token-time] " ++ t);
   def ftt-span(rows) = ftt-max(rows, "at_ms") - foldl((m, r) => ftt-n(r, "at_ms") < m ? ftt-n(r, "at_ms") : m, ftt-max(rows, "at_ms"), rows);
   def ftt-phase(name, ms, whole) = ftt-say(name ++ ": " ++ ftt-s(ms) ++ " (" ++ ftt-pct(ms, whole) ++ " of the run)");
+  // the rows of a file, or none (said) when it is absent or refused
+  def ftt-rows(path) = ftt-rows-of(path, frw-rows(read_file(path) ?? ""));
+  def ftt-rows-of(path, r) = (String) r[0] == "ok" ? r[1] : ftt-refused(path, r);
+  def ftt-refused(path, r) {
+   let said = ftt-say(path ++ " was refused at line " ++ r[2].str() ++ ": " ++ r[1]);
+   [];
+  }
   def ftt-report(rows) {
    let opened = ftt-sum(ftt-of(rows, "admitted"), "open_ms");
    let valid = ftt-sum(ftt-of(rows, "validation"), "wall_ms");
@@ -57,16 +63,17 @@ section [form.bml] {
    0;
   }
   def ftt-ledger(path) {
-   let rows = fcgp-rows(path);
-   let said = map(r => ftt-say("stage " ++ fcgp-str(r, "stage") ++ ": " ++ ftt-s(ftt-n(r, "wall_ms")) ++ ((String) fcgp-str(r, "stopped") == "" ? "" : " STOPPED " ++ fcgp-str(r, "stopped"))), rows);
+   let rows = ftt-rows(path);
+   let said = map(r => ftt-say("stage " ++ frw-str(r, "stage", "") ++ ": " ++ ftt-s(ftt-n(r, "wall_ms")) ++ ((String) frw-str(r, "stopped", "") == "" ? "" : " STOPPED " ++ frw-str(r, "stopped", ""))), rows);
    0;
   }
-  def ftt-run() {
-   let ws = ftt-words();
-   if len(ws) == 0 then ftt-say("give the path of a run's training-events.jsonl (and the cycle's ledger after a space)")
+  def ftt-run() = ftt-with(frw-options(stdin-text() ?? ""));
+  def ftt-with(o) {
+   if (String) o[0] != "ok" then ftt-say("the options were refused at line " ++ o[2].str() ++ ": " ++ o[1])
+   else if !frw-has?(o[1], "events") then ftt-say("give `events PATH` (a run's training-events.rows) and, after it, `ledger PATH` for the cycle's stage walls")
    else {
-    let r = ftt-report(fcgp-rows(ws[0]));
-    len(ws) > 1 ? ftt-ledger(ws[1]) : 0;
+    let r = ftt-report(ftt-rows(frw-str(o[1], "events", "")));
+    frw-has?(o[1], "ledger") ? ftt-ledger(frw-str(o[1], "ledger", "")) : 0;
    };
   }
  }

@@ -1,13 +1,13 @@
 // form-token-lora-run.bml — teach the local voices Form's in-stream controls, and read what they learned.
 //
-// stdin, optional, one JSON line (default {"lane":"census"}):
-//   {"lane":"census"|"llama"|"qwen"|"kernels", "traces":"learn/form-token-traces.jsonl", "replay":1,
-//    "steps":2, "batch":1, "learning_rate":0.0001, "save_every":25,
-//    "parent":"form/form-stdlib/adapters/llama-3.2-3b-voice-native",
-//    "export":"form/form-stdlib/adapters/llama-3.2-3b-form-tokens-next" (the default; the serving adapter is named only on purpose),
-//    "require_whole":1 (the llama lane refuses to train when the census refused any row),
-//    "model":"qwen38-q8", "target":"text"|"control-id", "max_sites":24, "span":512, "ridge":0.001, "margin":1.0,
-//    "refine_rounds":3, "rivals":8}
+// stdin, optional, one `name value` a line (form-rows.bml frw-options; default `lane census`):
+//   lane census|llama|qwen|kernels      traces learn/form-token-traces.jsonl      replay 1
+//   steps 2   batch 1   learning_rate 0.0001   save_every 25
+//   parent form/form-stdlib/adapters/llama-3.2-3b-voice-native
+//   export form/form-stdlib/adapters/llama-3.2-3b-form-tokens-next   (the default; the serving adapter is named only on purpose)
+//   require_whole 1                     the llama lane refuses to train when the census refused any row
+//   shared 1                            accept the GPU's neighbours (the gate names them; a measurement)
+//   model qwen38-q8   target text|control-id   max_sites 24   span 512   ridge 0.001   margin 1.0   refine_rounds 3   rivals 8
 //
 // census  reads the traces through form-token-lora.bml into .hearth/form-token-lora/data-<ms>:
 //         train.jsonl, valid.jsonl, census.json. Model-free. A row off the contract is refused
@@ -43,6 +43,8 @@
 // witnessed decision. The llama and qwen lanes hold the GPU: while another door holds a model
 // (form-token-eval.bml fte-held) they name it and open nothing.
 // preflight-exec: forbidden
+import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/stdin-source.bml;
 import form-stdlib/bml/form-token-lora.bml;
 import form-stdlib/bml/form-token-eval.bml;
 import form-stdlib/bml/form-token-grammar.bml;
@@ -52,17 +54,19 @@ import form-stdlib/model-registry.bml;
 section [form.bml] {
  class FormTokenLoraRun {
   def ftlrr-root() = ".hearth/form-token-lora";
-  def ftlrr-str(doc, key, d) = ftlr-text(doc, key) ?? d;
-  def ftlrr-num(doc, key, d) = json-object-has?(doc, key) ? node_value(json-object-get(doc, key)) : d;
-  def ftlrr-opts() {
-   let line = read_line();
-   nothing?(line) || ((Comparable) len(trim(line ?? "")) == 0) ? json-node-object([]) : parse-json("form-token-lora-options", line);
-  }
+  def ftlrr-str(doc, key, d) = frw-str(doc, key, d);
+  def ftlrr-num(doc, key, d) = frw-num(doc, key, d);
+  // the options are Form's own text, read once (stdin drains at the first read): a refused text stops the door aloud, with its line
+  def ftlrr-opts() = ftlrr-opts-read(frw-options(stdin-text() ?? ""));
+  def ftlrr-opts-read(r) = (String) r[0] == "ok" ? r[1] : form_error("form-token-lora-run: the options were refused at line " ++ r[2].str() ++ ": " ++ r[1]);
   def ftlrr-milli(x) = float_to_int(x * 1000.0);
   def ftlrr-lines(path) = filter(x => (Comparable) len(trim(x)) != 0, split-on(read_file(path) ?? "", "\n"));
-  def ftlrr-stage(doc) = ftlr-text(doc, "stage") ?? "";
-  def ftlrr-loss(ev) = json-object-has?(ev, "loss") ? node_value(json-object-get(ev, "loss")) : -1.0;
-  def ftlrr-validations(out) = filter(e => (String) ftlrr-stage(e) == "validation", map(x => parse-json("training-event", x), ftlrr-lines(out ++ "/training-events.jsonl")));
+  // the trainer's events are Form rows (training-events.rows, one record a line)
+  def ftlrr-events(out) = ftlrr-events-of(frw-rows(read_file(out ++ "/training-events.rows") ?? ""));
+  def ftlrr-events-of(r) = (String) r[0] == "ok" ? r[1] : [];
+  def ftlrr-stage(ev) = frw-str(ev, "stage", "");
+  def ftlrr-loss(ev) = frw-num(ev, "loss", -1.0);
+  def ftlrr-validations(out) = filter(e => (String) ftlrr-stage(e) == "validation", ftlrr-events(out));
   def ftlrr-mean-loss(path) {
    let text = read_file(path);
    let rows = nothing?(text) ? [] : json-array-elements(parse-json(path, text));
@@ -143,7 +147,7 @@ section [form.bml] {
    ftlr-ledger-row(held[2], held[0], data, [ftlr-s("lane", "llama"), ftlrr-agreement-pair(held), ftlr-s("parent", parent), ftlr-s("child", nag-resolve(out)), ftlr-s("export", served), ftlr-n("exported_bytes", file_size(served ++ "/adapters.safetensors")), ftlr-n("steps", steps), ftlr-n("batch", ftlrr-num(opts, "batch", 1)), ftlr-n("learning_rate_micro", float_to_int(ftlrr-num(opts, "learning_rate", 0.0001) * 1000000.0)), ftlr-n("optimizer_step", result[0]), ftlr-s("reason", result[2]), ftlr-n("valid_loss_before_milli", ftlrr-milli(before)), ftlr-n("valid_loss_after_milli", ftlrr-milli(after)), ftlr-n("held_out_row_loss_before_milli", ftlrr-milli(graded-before)), ftlr-n("held_out_row_loss_after_milli", ftlrr-milli(graded-after)), ftlr-n("better", (before > 0.0) && ((after > 0.0) && (after < before)) ? 1 : 0), json-node-pair("curve_milli", ftlrr-curve-node(curve)), json-node-pair("held_out_families_milli", ftlrr-families-node(families)), ftlr-n("rent_tokens", 0), ftlr-n("wall_ms", now_unix_ms() - started)]);
   }
   // ---- the curve and the families ----
-  def ftlrr-round-losses(out) = map(e => ftlrr-loss(e), filter(e => (String) ftlrr-stage(e) == "round", map(x => parse-json("training-event", x), ftlrr-lines(out ++ "/training-events.jsonl"))));
+  def ftlrr-round-losses(out) = map(e => ftlrr-loss(e), filter(e => (String) ftlrr-stage(e) == "round", ftlrr-events(out)));
   def ftlrr-mean(xs) = nil?(xs) ? -1.0 : foldl((acc, x) => acc + x, 0.0, xs) / (len(xs) + 0.0);
   def ftlrr-tenth(n) = n < 10 ? 1 : n / 10;
   // [rounds, first, mean of the first tenth, mean of the last tenth, last]
