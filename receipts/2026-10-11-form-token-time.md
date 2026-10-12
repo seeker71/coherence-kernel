@@ -60,9 +60,14 @@ rows so the baseline is scored too): before training 42.7 s (0.53 s a row), afte
 training row's forward costs 0.2 s, and the runtime's time board puts 88% of the run in the `gpu` phase, so it is the device, not the
 walker. The same rows scored alone by `observe/native-lora-score-bench-run.bml` (24 rows) cost 3.6 to 4.2 ms a token wall and 2.8
 to 3.5 device, 1.4 to 1.6 times a training forward (2.5 ms), with no growth along the process (device busy for 91-token rows
-wanders 200 to 340 ms; a row is 622 dispatches and 2 syncs). So the scoring kernels are ordinary; what makes the trainer's validation 1.5
-times (before) and 2.7 times (after) that is its state around them, and that is the next thing to read: the same score call inside the
-trainer after the update (adapter buffers, retained training memory, the sample cache `held`).
+wanders 200 to 340 ms; a row is 622 dispatches and 2 syncs). So the scoring kernels are ordinary. Read again the same evening (20:50, a day-turn
+running, trainer taking `shared 1`, then the bench straight after): the whole two-step run took 25 s where it took 61 and 126 s
+in the afternoon, the bench scored at 1.55 ms a token (it read 3.6 to 4.2 that afternoon), and the trainer's after-training check
+cost 20.2 s for 81 rows (0.25 s a row, 2.8 ms a token) against about 10.7 s the bench's rate gives for the same rows. Two
+lessons: the same code on this machine moved by a factor of 2.7 between two readings an hour apart with no lease held by anyone, so a
+single reading attributes nothing and only a back-to-back pair does; and a residual of about 1.9 times stands between the trainer's
+after-training check and the same call alone (tokenizing is not it: 87 ms for 24 rows). That residual is worth about 10 s of a
+short run and is left unread; the evaluation stage (449 s of the cycle) is the larger target.
 
 Still open (named, not hidden): early stopping on a held-out check (the training loss wanders between 0.003 and 0.4 from
 round 60 on while the held-out loss ends at 0.03 to 0.04, so some of the 100 steps are spent past the gain); the day-turn and the band sweeps do not take the GPU lease, so their time-slices still
