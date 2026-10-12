@@ -55,8 +55,14 @@ A correction, 2026-10-12, from reading a run's events on nodes: the time door su
 validation". A run holds two, the baseline before training (0.5 s when remembered) and the held-out check after the last round,
 and the figures above that read "baseline validation" (282, 148, 69 and 93 s) were those two together; once the baseline is
 remembered they are the after-training check, 81 rows scored forward-only. A 2-step run beside a day-turn on a shared GPU reads
-0.5 s and 53.7 s. The door now says them apart. The after-training check is the largest part of a short train stage and costs
-about 0.66 s a row where a training row's forward costs 0.2 s: the next thing to read (does validation take the fast path?).
+0.5 s and 53.7 s. The door now says them apart. Read again on a quiet GPU (nothing leased, 2026-10-12, corpus refreshed, 81 new
+rows so the baseline is scored too): before training 42.7 s (0.53 s a row), after training 78.1 s (0.96 s a row), while a
+training row's forward costs 0.2 s, and the runtime's time board puts 88% of the run in the `gpu` phase, so it is the device, not the
+walker. The same rows scored alone by `observe/native-lora-score-bench-run.bml` (24 rows) cost 3.6 to 4.2 ms a token wall and 2.8
+to 3.5 device, 1.4 to 1.6 times a training forward (2.5 ms), with no growth along the process (device busy for 91-token rows
+wanders 200 to 340 ms; a row is 622 dispatches and 2 syncs). So the scoring kernels are ordinary; what makes the trainer's validation 1.5
+times (before) and 2.7 times (after) that is its state around them, and that is the next thing to read: the same score call inside the
+trainer after the update (adapter buffers, retained training memory, the sample cache `held`).
 
 Still open (named, not hidden): early stopping on a held-out check (the training loss wanders between 0.003 and 0.4 from
 round 60 on while the held-out loss ends at 0.03 to 0.04, so some of the 100 steps are spent past the gain); the day-turn and the band sweeps do not take the GPU lease, so their time-slices still
