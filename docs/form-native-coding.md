@@ -110,6 +110,27 @@ stderr precede ordinary output, so earlier successful cases cannot hide the
 error from the next local choice or a resumed checkpoint.
 Native meter callers use `rw-close(state)` directly; request parsing stays at
 the terminal boundary.
+`task --publish <goal>` carries a completed task into the existing native
+landing owner. A native request can instead supply `goal` and a
+`publication` node with an optional subject, body and additional caller-owned paths.
+An existing queued task resumes by `resume` identity. A supplied
+`publication.rented_session` retains complete work counters and the reconciled
+number of cumulative usage transitions in the native publication request.
+The original goal still identifies the task. Planning, execution and publication
+return their actual cell records together; the publication receipt is a
+`form-native-publication-v1` node. Terminal rendering is separate.
+
+Publication retains its native continuation and operation evidence under
+`.form-heal/landing-*/`. It commits owned paths, retains unrelated tracked
+edits under an owned Git reference, rebases, observes the original task witness
+and source assertions, and runs the existing affected release checks. Native
+values determine the result. A changed remote main resumes the same continuation
+and verifies the changed source before another ordinary atomic push. Both requested
+remote refs must equal the observed commit. Unchanged verification is reused
+against the current head and contract; no fixed retry count controls publication.
+Changed seed or Metal carrier source renews the affected artifact and resumes
+the retained native continuation in the fresh runtime. Restored local edits and
+release of their private reference have separate observations.
 `completed` requires an owned publication whose original witness and source
 checks pass on current files. Task admission reads that state before opening a
 planner, after planning and after execution, so a completed effect is kept even

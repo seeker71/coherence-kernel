@@ -35,5 +35,35 @@ section [form.bml] {
    ru-valid(delta) ? delta : nothing;
   };
   def ru-add(a,b) = 0 .. len(a) |> map(i => a[i] + b[i]);
+  def ru-audit-row(line,state) {
+   let prefix=substring(line,0,min2(300,len(line)));
+   if !record_get(state,"done") && str_find(prefix,"event_msg",0) >= 0 && str_find(prefix,"token_count",0) >= 0 then {
+    let sample=ru-line(line); let from=record_get(state,"from"); let later=record_get(state,"later");
+    if !nothing?(sample) && !ru-time-before(later[0],sample[0],0) then {
+     ru-time-before(sample[0],from[0],0) ? form_error("usage audit did not find its opening sample") : {
+      let delta=ru-delta(sample[1],later[1]);
+      nothing?(delta) ? form_error("usage audit counters moved backwards") : {
+       record_set(state,"sum",ru-add(record_get(state,"sum"),delta));
+       record_set(state,"count",record_get(state,"count") + (delta[4] > 0 ? 1 : 0));
+       record_set(state,"later",sample);
+       record_set(state,"done",sample == from);
+      };
+     };
+    } else 0;
+   } else 0;
+  }
+  def ru-audit-window(path,end,suffix,state) = record_get(state,"done") || end <= 0 ? state : {
+   let start=max2(0,end - ru-window()); let text=read_file_slice(path,start,end - start);
+   nothing?(text) ? form_error("usage audit transcript is unreadable") : {
+    let lines=split-on(text + suffix,"\n");
+    reverse(start > 0 ? lines[1:] : lines) |> map(line => ru-audit-row(line,state));
+    ru-audit-window(path,start,start > 0 ? lines[0] : "",state);
+   };
+  };
+  def ru-transitions(path,from,through) = from == through ? 0 : {
+   let state=record_new(0); record_set(state,"from",from); record_set(state,"later",through); record_set(state,"sum",ru-zero());
+   ru-audit-window(path,file_size(path),"",state);
+   record_get(state,"done") && record_get(state,"sum") == ru-delta(from[1],through[1]) ? record_get(state,"count") : form_error("usage audit does not reconcile with its complete counters");
+  };
  }
 }
