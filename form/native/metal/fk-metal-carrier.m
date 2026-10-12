@@ -399,18 +399,11 @@ static NSMutableDictionary *fk_pipe_cache_objs = nil; // content key -> native p
 static NSMutableDictionary *fk_pipe_cache_refs = nil; // content key -> live admissions
 static NSMutableDictionary *fk_pipe_by_key = nil;     // legacy content key -> stable handle
 static NSMutableArray *fk_pipe_keys = nil;  // slot -> cache key, NSNull when retired
-static NSMutableArray *fk_cpu_pipe_images = nil;   // NSData for CPU JIT, NSNull for Metal
-static NSMutableDictionary *fk_cpu_pipe_refs = nil;     // image -> live admissions
-static NSMutableDictionary *fk_cpu_pipe_by_image = nil; // legacy image -> stable handle
-static void **fk_cpu_pipe_mem = NULL;
-static size_t *fk_cpu_pipe_span = NULL;
 static unsigned int *fk_pipe_gen = NULL;
 static long long *fk_pipe_free_slots = NULL;
 static size_t fk_pipe_cap = 0;
 static long long fk_pipe_free_top = 0;
 static long long fk_pipe_retired_slots = 0;
-static long long fk_total_cpu_jit_dispatch = 0;
-static double fk_total_cpu_jit_busy_s = 0.0;
 static long long fk_metal_jit_compiles = 0;
 static long long fk_metal_jit_ram_hits = 0;
 static long long fk_metal_jit_archive_reads = 0;
@@ -509,25 +502,18 @@ static int fk_pipe_table_reserve(size_t need) {
             @"pipeline handle protocol exhausted at %lld slots", FK_PIPE_SLOT_MAX]);
         return 0;
     }
-    void **mem = (void **)calloc(next, sizeof(void *));
-    size_t *span = (size_t *)calloc(next, sizeof(size_t));
     unsigned int *gen = (unsigned int *)calloc(next, sizeof(unsigned int));
     long long *free_slots = (long long *)calloc(next, sizeof(long long));
-    if (mem == NULL || span == NULL || gen == NULL || free_slots == NULL) {
-        free(mem); free(span); free(gen); free(free_slots);
+    if (gen == NULL || free_slots == NULL) {
+        free(gen); free(free_slots);
         fk_err(@"pipeline bookkeeping allocation failed");
         return 0;
     }
     if (fk_pipe_cap > 0) {
-        memcpy(mem, fk_cpu_pipe_mem, fk_pipe_cap * sizeof(void *));
-        memcpy(span, fk_cpu_pipe_span, fk_pipe_cap * sizeof(size_t));
         memcpy(gen, fk_pipe_gen, fk_pipe_cap * sizeof(unsigned int));
         memcpy(free_slots, fk_pipe_free_slots, fk_pipe_cap * sizeof(long long));
     }
-    free(fk_cpu_pipe_mem); free(fk_cpu_pipe_span);
     free(fk_pipe_gen); free(fk_pipe_free_slots);
-    fk_cpu_pipe_mem = mem;
-    fk_cpu_pipe_span = span;
     fk_pipe_gen = gen;
     fk_pipe_free_slots = free_slots;
     fk_pipe_cap = next;
@@ -799,8 +785,7 @@ static long long fk_pipe_slot(long long h) {
     if (fk_pipe_objs == nil) { return 0; }
     if (slot < 1 || slot > (long long)[fk_pipe_objs count]) { return 0; }
     if (gen < 0 || gen != (long long)fk_pipe_gen[slot - 1]) { return 0; }
-    if (fk_pipe_objs[(NSUInteger)(slot - 1)] == [NSNull null] &&
-        fk_cpu_pipe_mem[slot - 1] == NULL) { return 0; }
+    if (fk_pipe_objs[(NSUInteger)(slot - 1)] == [NSNull null]) { return 0; }
     return slot;
 }
 
@@ -808,14 +793,13 @@ static long long fk_pipe_handle(long long slot) {
     return ((long long)fk_pipe_gen[slot - 1] << FK_PIPE_SLOT_BITS) | slot;
 }
 
-static long long fk_pipe_register(id pipe, id key, id image, void *mem, size_t span) {
+static long long fk_pipe_register(id pipe, id key) {
     long long slot;
     if (fk_pipe_free_top > 0) {
         fk_pipe_free_top--;
         slot = fk_pipe_free_slots[fk_pipe_free_top];
         fk_pipe_objs[(NSUInteger)(slot - 1)] = pipe == nil ? [NSNull null] : pipe;
         fk_pipe_keys[(NSUInteger)(slot - 1)] = key == nil ? [NSNull null] : key;
-        fk_cpu_pipe_images[(NSUInteger)(slot - 1)] = image == nil ? [NSNull null] : image;
     } else {
         if ([fk_pipe_objs count] >= FK_PIPE_SLOT_MAX) {
             fk_err([NSString stringWithFormat:
@@ -826,18 +810,12 @@ static long long fk_pipe_register(id pipe, id key, id image, void *mem, size_t s
         if (!fk_pipe_table_reserve((size_t)[fk_pipe_objs count] + 1)) { return 0; }
         [fk_pipe_objs addObject:pipe == nil ? [NSNull null] : pipe];
         [fk_pipe_keys addObject:key == nil ? [NSNull null] : key];
-        [fk_cpu_pipe_images addObject:image == nil ? [NSNull null] : image];
         slot = (long long)[fk_pipe_objs count];
     }
-    fk_cpu_pipe_mem[slot - 1] = mem;
-    fk_cpu_pipe_span[slot - 1] = span;
     long long h = fk_pipe_handle(slot);
     if (key != nil) {
         fk_pipe_cache_objs[key] = pipe;
         fk_pipe_cache_refs[key] = @([fk_pipe_cache_refs[key] longLongValue] + 1);
-    }
-    if (image != nil && mem != NULL) {
-        fk_cpu_pipe_refs[image] = @([fk_cpu_pipe_refs[image] longLongValue] + 1);
     }
     return h;
 }
@@ -865,25 +843,8 @@ long long fk_metal_pipeline_free_external(long long h) {
                 fk_pipe_cache_refs[key] = @(refs - 1);
             }
         }
-        id image = fk_cpu_pipe_images[(NSUInteger)(slot - 1)];
-        if (image != [NSNull null] && fk_cpu_pipe_mem[slot - 1] != NULL) {
-            NSNumber *mapped = fk_cpu_pipe_by_image[image];
-            if (mapped != nil && [mapped longLongValue] == h) {
-                [fk_cpu_pipe_by_image removeObjectForKey:image];
-            }
-            long long refs = [fk_cpu_pipe_refs[image] longLongValue];
-            if (refs <= 1) {
-                munmap(fk_cpu_pipe_mem[slot - 1], fk_cpu_pipe_span[slot - 1]);
-                [fk_cpu_pipe_refs removeObjectForKey:image];
-            } else {
-                fk_cpu_pipe_refs[image] = @(refs - 1);
-            }
-        }
-        fk_cpu_pipe_mem[slot - 1] = NULL;
-        fk_cpu_pipe_span[slot - 1] = 0;
         fk_pipe_objs[(NSUInteger)(slot - 1)] = [NSNull null];
         fk_pipe_keys[(NSUInteger)(slot - 1)] = [NSNull null];
-        fk_cpu_pipe_images[(NSUInteger)(slot - 1)] = [NSNull null];
         if (fk_pipe_gen[slot - 1] == FK_PIPE_GENERATION_MAX) {
             fk_pipe_retired_slots++;
         } else {
@@ -954,53 +915,10 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             fk_pipe_cache_refs = [NSMutableDictionary dictionary];
             fk_pipe_by_key = [NSMutableDictionary dictionary];
             fk_pipe_keys = [NSMutableArray array];
-            fk_cpu_pipe_images = [NSMutableArray array];
-            fk_cpu_pipe_refs = [NSMutableDictionary dictionary];
-            fk_cpu_pipe_by_image = [NSMutableDictionary dictionary];
         }
         NSString *fn = [[NSString alloc] initWithBytes:name length:(NSUInteger)name_len
                                               encoding:NSUTF8StringEncoding];
         if (fn == nil) { fk_err(@"kernel name is not UTF-8"); return 0; }
-
-        // The same Form-owned pipeline door admits a CPU organ when, and only
-        // when, the name says so. The payload is then raw AArch64 emitted by
-        // Form, not MSL; the carrier owns only W^X installation and the call.
-        if (name_len == 12 && memcmp(name, "form_cpu_jit", 12) == 0) {
-            if (msl_len <= 0 || msl_len > 1048576) {
-                fk_err(@"cpu jit image length is outside (0,1048576]"); return 0;
-            }
-            NSData *image = [NSData dataWithBytes:msl length:(NSUInteger)msl_len];
-            NSNumber *stable = fk_cpu_pipe_by_image[image];
-            if (!form_admission && stable != nil &&
-                fk_pipe_slot([stable longLongValue]) != 0) {
-                return [stable longLongValue];
-            }
-            for (NSUInteger k = 0; k < [fk_cpu_pipe_images count]; k++) {
-                id prior = fk_cpu_pipe_images[k];
-                if (fk_cpu_pipe_mem[k] != NULL && prior != [NSNull null] &&
-                    [prior isEqualToData:image]) {
-                    long long h = fk_pipe_register(nil, nil, image,
-                        fk_cpu_pipe_mem[k], fk_cpu_pipe_span[k]);
-                    if (h != 0 && !form_admission) { fk_cpu_pipe_by_image[image] = @(h); }
-                    return h;
-                }
-            }
-            if (fk_pipe_free_top == 0 &&
-                !fk_pipe_table_reserve((size_t)[fk_pipe_objs count] + 1)) { return 0; }
-            size_t pg = (size_t)getpagesize();
-            size_t span = ((size_t)msl_len + pg - 1) & ~(pg - 1);
-            void *mem = mmap(NULL, span, PROT_READ | PROT_WRITE | PROT_EXEC,
-                             MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
-            if (mem == MAP_FAILED) { fk_err(@"cpu jit MAP_JIT failed"); return 0; }
-            pthread_jit_write_protect_np(0);
-            memcpy(mem, msl, (size_t)msl_len);
-            pthread_jit_write_protect_np(1);
-            __builtin___clear_cache((char *)mem, (char *)mem + msl_len);
-            long long h = fk_pipe_register(nil, nil, image, mem, span);
-            if (h == 0) { munmap(mem, span); }
-            else if (!form_admission) { fk_cpu_pipe_by_image[image] = @(h); }
-            return h;
-        }
 
         NSString *src = [[NSString alloc] initWithBytes:msl length:(NSUInteger)msl_len
                                                encoding:NSUTF8StringEncoding];
@@ -1018,7 +936,7 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
         id<MTLComputePipelineState> cached = fk_pipe_cache_objs[key];
         if (cached != nil) {
             fk_metal_jit_ram_hits++;
-            long long h = fk_pipe_register(cached, key, nil, NULL, 0);
+            long long h = fk_pipe_register(cached, key);
             if (h != 0 && !form_admission) { fk_pipe_by_key[key] = @(h); }
             return h;
         }
@@ -1071,7 +989,7 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             }
             fk_metal_jit_archive_writes++;
         } else if (cache_mode == 2) { fk_metal_jit_archive_reads++; }
-        long long h = fk_pipe_register(pipe, key, nil, NULL, 0);
+        long long h = fk_pipe_register(pipe, key);
         if (h != 0 && !form_admission) { fk_pipe_by_key[key] = @(h); }
         return h;
     }
@@ -1383,36 +1301,6 @@ long long fk_metal_enqueue_external(long long pipe, const char *binding,
             return -1;
         }
 
-        if (fk_cpu_pipe_mem[pslot - 1] != NULL) {
-            if (nbuf > 64 || nconst > 64) {
-                fk_err(@"cpu jit binding exceeds 64 buffers or constants"); return -1;
-            }
-            if (tpg != 0 || tgmem != 0 || mode != 0 || barrier != 0) {
-                fk_err(@"cpu jit binding accepts no Metal dispatch tail"); return -1;
-            }
-            for (NSNumber *bhv in bound_handles) {
-                if (fk_buffer_settle([bhv longLongValue]) < 0) { return -1; }
-            }
-            void *bufs[64];
-            unsigned int consts[64];
-            for (unsigned int k = 0; k < nbuf; k++) {
-                long long bh = [bound_handles[k] longLongValue];
-                long long bslot = fk_buf_slot(bh);
-                id<MTLBuffer> b = fk_buf_objs[(NSUInteger)(bslot - 1)];
-                bufs[k] = (char *)[b contents] + fk_buf_meta[bslot - 1].view_off;
-            }
-            for (unsigned int k = 0; k < nconst; k++) {
-                consts[k] = fk_le32(bp + 4 + 4 * nbuf + 4 + 4 * k);
-            }
-            typedef void (*fk_cpu_pipe_fn)(void **, const unsigned int *, unsigned long long);
-            double started = [NSDate timeIntervalSinceReferenceDate];
-            ((fk_cpu_pipe_fn)fk_cpu_pipe_mem[pslot - 1])(bufs, consts,
-                                                        (unsigned long long)threads);
-            fk_total_cpu_jit_busy_s += [NSDate timeIntervalSinceReferenceDate] - started;
-            fk_total_cpu_jit_dispatch++;
-            return 1;
-        }
-
         if (fk_cb == nil) {
             int batch_concurrent = fk_next_concurrent;
             id<MTLCommandBuffer> cb = [fk_q commandBuffer];
@@ -1705,8 +1593,6 @@ long long fk_metal_status_external(char *out, long long cap) {
         [r appendFormat:@"in_flight=%lu\n",
             (unsigned long)(fk_inflight == nil ? 0 : [fk_inflight count])];
         [r appendFormat:@"total_dispatch=%lld\ntotal_sync=%lld\n", fk_total_dispatch, fk_total_sync];
-        [r appendFormat:@"cpu_jit_dispatch=%lld\ncpu_jit_busy_us_total=%lld\n",
-            fk_total_cpu_jit_dispatch, (long long)(fk_total_cpu_jit_busy_s * 1000000.0)];
         // Real GPU device-busy time (MTLCommandBuffer.GPUEndTime - GPUStartTime),
         // summed across every command buffer drained so far, converted to whole
         // microseconds to match this file's existing integer-reporting style.
@@ -1807,7 +1693,7 @@ long long fk_host_disk_stat(long long *out) {
 
 // METAL LIVE, AS NUMBERS. The same counters the text status carries, handed as words so no reader parses:
 // [0] linked [1] unified [2] buffers [3] pipelines [4] nocopy buffers [5] pending [6] in flight
-// [7] total dispatch [8] total sync [9] cpu-jit dispatch [10] cpu-jit busy us [11] gpu busy us
+// [7] total dispatch [8] total sync [9] [10] 0 (CPU images run in the seed's door: kernel_stat 77, 78) [11] gpu busy us
 // [12] last wait ms [13] deadline ms [14] shelf [15] batch mode (0 none, 1 serial, 2 concurrent)
 // [16] buffer slots [17] free slots [18] allocated bytes [19] recommended working-set bytes.
 // Answers 20, or 0 when Metal is not up.
@@ -1825,8 +1711,6 @@ long long fk_metal_live_external(long long *out) {
         out[6] = (long long)(fk_inflight == nil ? 0 : [fk_inflight count]);
         out[7] = fk_total_dispatch;
         out[8] = fk_total_sync;
-        out[9] = fk_total_cpu_jit_dispatch;
-        out[10] = (long long)(fk_total_cpu_jit_busy_s * 1000000.0);
         out[11] = (long long)(fk_total_gpu_busy_s * 1000000.0);
         out[12] = (long long)(fk_wait_last_s * 1000.0);
         out[13] = fk_deadline_ms;

@@ -944,9 +944,10 @@ static volatile long long fk_phase;   /* the C phase the run thread is in, 0 whi
 #define FK_PHASE_GPU 9
 #define FK_PHASE_NET 10
 #define FK_PHASE_JIT 11   /* a JIT offer's cell: the emitter, and its unit's load; a floor it calls is the floor's recipes */
-#define FK_PROF_PHASES 12
+#define FK_PHASE_CPU 12   /* a Form-emitted CPU image running over the body's bytes (jit_cpu_run) */
+#define FK_PROF_PHASES 13
 static const char *fk_prof_phase_name[FK_PROF_PHASES] = {
-    "recipe", "melt", "string-melt", "load", "parse", "image", "file", "child", "wait", "gpu", "net", "jit-offer" };
+    "recipe", "melt", "string-melt", "load", "parse", "image", "file", "child", "wait", "gpu", "net", "jit-offer", "cpu-image" };
 /* a C function that runs no Form code, wrapped so its time is its phase's: FK_PHASED(phase, type, name, params, args) */
 #define FK_PHASED(ph, ty, nm, params, args) \
     static ty nm##_in params; \
@@ -10032,12 +10033,11 @@ typedef long long (*fk_jit_page_fn)(long long fp, void *cx);
  * has a number, FK_JIT_ABI, handed to the JIT with every offer: an emitter written for another layout declines, so a seed
  * built before a change and a jit-page.bml written after it (a checkout's ./fkwu is not rebuilt by a merge) never bind a
  * page whose words name the wrong helpers. Change the number with the layout. */
-#define FK_JIT_ABI 3
+#define FK_JIT_ABI 4
 #define FK_JIT_OPS 26
-/* ABI 3 gave the page value_kind and the u32 doors rotr_u32 add_u32 bnot_u32 as its own ops: a BML index, first, tail and
- * equal ask a value's kind every call (a leaf door handed to the walker paid its dispatch each time, 2.6% of a form-cli
- * build's samples, under bml-value-index), and a SHA-256 round's u32 arithmetic was walked whole inside its page; and the
- * two words a callee's body written in place of its call enters and leaves by (inl_enter, inl_leave) */
+/* value_kind and the u32 doors rotr_u32 add_u32 bnot_u32 are the page's own ops (a BML index, first, tail and equal ask a
+ * value's kind every call; a SHA-256 round is u32 arithmetic), and the frame chain is four words the page keeps itself
+ * (cur_fn .. fr_cap) when it writes a callee's body in place of its call */
 static long long fk_value_kind(long long v);
 static long long fk_op_value_kind(long long a, long long b) { (void)b; return fk_value_kind(a); }
 struct fk_jit_cx {
@@ -10052,8 +10052,12 @@ struct fk_jit_cx {
     /* 8..: the one-meaning ops -- head tail len str_len str_eq str_byte_at cons, add sub mul div mod le lt eq,
      * band bor bxor shl_u32 shr_u32, nth byte_to_str, value_kind, rotr_u32 add_u32 bnot_u32 */
     long long (*ops[FK_JIT_OPS])(long long a, long long b);
-    void (*inl_enter)(long long c);                                         /* 34: a callee's body begins in place of its call */
-    void (*inl_leave)(long long c);                                         /* 35: ... and ends; c is the defn the page stands in again */
+    /* 34..37: the frame chain a callee's body written in place of its call keeps in the page's own words (the call's push
+     * of its caller and its running defn): the running defn's address, the chain's depth's address, the chain, its cap */
+    long long *cur_fn;
+    long long *fr_depth;
+    int *fr_fn;
+    long long fr_cap;
 };
 static struct fk_jit_cx fk_jit_cx;
 #define FK_JIT_HEAT 4096
@@ -10065,10 +10069,9 @@ static long long fk_jit_cap;
 #define FK_JIT_HEAT_OFFERABLE(c) ((c) >= fk_jit_cap || fk_jit_state[c] == 0 || fk_jit_state[c] == 3)
 static long long fk_jit_bound, fk_jit_offers, fk_jit_offer_us; /* kernel_stat 74-76 */
 static int fk_jit_busy;
-/* the line: a defn offered while the JIT runs (or before it is resident) waits here once. A defn already waiting is not
- * pushed again: a line pushed at every further 4096 calls filled with repeats of the first hot defns, and a later one
- * (the grammar's reader in the cell that lowers jit-page.bml) ran 41,372 calls walked. A defn the full line cannot take
- * stays unoffered and asks again at its next multiple */
+/* the line: a defn offered while the JIT runs (or before it is resident) waits here once, so the line holds 64 different
+ * defns and a later hot one is never crowded out by an earlier one's repeats. A defn the full line cannot take stays
+ * unoffered and asks again at its next multiple */
 static long long fk_jit_pending[64];
 static int fk_jit_pending_n;
 /* an offer by time: a defn called too seldom to heat (a few dozen calls of 20 ms each) is as cold to the call count as one
@@ -10212,10 +10215,6 @@ static long long fk_jit_walk_page(long long i, long long fp) {
     return r;
 }
 static void fk_jit_tick(void) { FK_CELL_TICK(); }
-/* a callee's body written in place of its call keeps what the call would have said: the frame chain holds the caller and the
- * running defn is the callee, so the time board's own and under, and a stop's "in", name it as the call did */
-static void fk_jit_inl_enter(long long c) { FK_FR_PUSH(fk_cur_fn); fk_cur_fn = c; }
-static void fk_jit_inl_leave(long long c) { FK_FR_POP(); fk_cur_fn = c; }
 static void fk_jit_enter(long long fp, long long need) {
     long long top = fp + need;
     if (top >= fk_vs_cap) { fk_vs_grow(top + 1); }
@@ -10278,8 +10277,10 @@ static long long fk_jit_bind(long long x) {
         fk_jit_cx.enter = fk_jit_enter;
         fk_jit_cx.call = fk_jit_call;
         fk_jit_cx.tail = fk_jit_tail;
-        fk_jit_cx.inl_enter = fk_jit_inl_enter;
-        fk_jit_cx.inl_leave = fk_jit_inl_leave;
+        fk_jit_cx.cur_fn = &fk_cur_fn;
+        fk_jit_cx.fr_depth = &fk_fr_depth;
+        fk_jit_cx.fr_fn = fk_fr_fn;
+        fk_jit_cx.fr_cap = FK_FR_CAP;
     }
     long long body = fk_fn[c];
     if (body < 0 || fk_node[body][0] != 194) { fk_fn[c] = fk_smknode(194, c, body, 0); fk_prog_note_body(c); }
@@ -10295,8 +10296,6 @@ static long long fk_jit_bind(long long x) {
  *   ["kids", k]    the value children of node k in the order its arm walks them, or nothing when the page may not take k apart
  *   ["mint", k, t] the mirror of k whose i-th value child reads frame slot t + i
  *   ["word", k]    the constant word of a string literal (its index is pinned, fk_lit_pin) as four 16-bit halves, low first
- *   ["fn", c]      defn c's body (the one it wears under its page) and its arity, for a page that writes a callee's body in
- *                  place of the call; nothing for a capturing function, whose prologue reads the call's capture channel
  *   ["inline", c]  marks defn c written in place by a page (fk_jit_state 3), so its own time offers it nothing
  * The arms read for the table: record_get 65, record_set 66, record_has 67, record_keys 99, value_eq 80, node_category 92,
  * str_find 30, intern_node 47, intern_trivial_string 46, intern_trivial_int 43, node_children 48, node_value 49, file_size
@@ -10418,12 +10417,6 @@ static long long fk_jit_node(long long x) {
         if (fk_jit_state[k] == 0) { fk_jit_state[k] = 3; }
         return 2;
     }
-    if (fk_cstr_eq(what, "fn")) {
-        if (k <= 0 || k >= fk_fn_count || (k < fk_fn_cap_capacity && fk_fn_cap_count[k] > 0)) { return fk_nothing; }
-        long long b = fk_fn[k];
-        if (fk_jit_node_ok(b) && fk_node[b][0] == 194) { b = fk_node[b][2]; }
-        return fk_jit_node_ok(b) ? fk_cons_val(b << 1, fk_cons_val(fk_fnar[k] << 1, 1)) : fk_nothing;
-    }
     if (!fk_jit_node_ok(k)) { return fk_nothing; }
     long long kids[16];
     if (fk_cstr_eq(what, "kids")) {
@@ -10447,6 +10440,172 @@ static long long fk_jit_node(long long x) {
     }
     return fk_nothing;
 }
+/* jit_cpu_run([image, buffers, consts]) (leaf-door mode 58): a Form-emitted AArch64 image run over the body's own bytes,
+ * the one door of the CPU organs (the SHA-256 compressor form/native/metal/sha256-arm64-jit.fk writes). The image is born
+ * through the one page door (fk_page_alloc, fk_page_write) once per process and found again by its bytes. A buffer is a
+ * string, handed where it lies (read only: no Form code runs during the call, so nothing moves the pool under it), a
+ * list of one string, copied into a writable buffer whose bytes after the call are answered, or ["file", path, offset,
+ * length], that span of a file mapped read only for the call; a const is a u32 word. The
+ * call is fn(bufs, consts, 1), the ABI the image is written for. Answers the written buffers' strings in order, or
+ * nothing when this host has no JIT witness or the image, a buffer or a const is refused. The lane stands wherever fkwu
+ * runs on this ISA: it needs no carrier, so every checkout seals at the CPU's own SHA-256 speed.
+ * SHRINK PATH: none for the call -- executable memory is the host's; the image, its ABI and its buffers are Form's. */
+#define FK_CPU_IMAGES 32
+#define FK_CPU_BUFS 64
+static long long fk_cpu_runs, fk_cpu_run_us;   /* kernel_stat 77, 78: the images run, and the microseconds inside them */
+static int fk_door_path(long long sv, char *out);
+/* a file buffer, ["file", path, offset, length]: the span mapped read only for the call (a model file of tens of GB is
+ * walked in such spans, never read into the string pool) */
+static int fk_jit_cpu_file(long long cell, void **ptr, void **map, size_t *mlen) {
+#if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || defined(_WIN32)
+    (void)cell; (void)ptr; (void)map; (void)mlen;
+    return 0;
+#else
+    long long w[4], n = 0, c = cell;
+    while (c >= 1 && n < 4) {
+        if (!FK_POK(c)) { return 0; }
+        w[n] = FK_HH(c);
+        n = n + 1;
+        c = FK_HNEXT(c);
+    }
+    const char *tp = 0;
+    long long tl = 0;
+    if (n != 4 || c != 0 || !fk_is_str(w[0]) || !fk_srange(w[0], &tp, &tl) || tl != 4 || memcmp(tp, "file", 4) != 0) { return 0; }
+    if ((w[2] & 1) != 0 || (w[3] & 1) != 0) { return 0; }
+    long long off = w[2] >> 1, len = w[3] >> 1;
+    static char path[FK_PATH_CAP];
+    if (off < 0 || len <= 0 || !fk_door_path(w[1], path)) { return 0; }
+    fk_host_resolve(path);
+    int fd = open(path, 0);
+    if (fd < 0) { return 0; }
+    long long size = (long long)lseek(fd, 0, 2);
+    long long pg = (long long)getpagesize(), at = off - (off % pg);
+    void *m = size >= off + len ? mmap(0, (size_t)(len + (off - at)), 1, 2, fd, (long)at) : (void *)-1;
+    close(fd);
+    if (m == (void *)-1) { return 0; }
+    *map = m;
+    *mlen = (size_t)(len + (off - at));
+    *ptr = (char *)m + (off - at);
+    return 1;
+#endif
+}
+FK_PHASED(FK_PHASE_CPU, long long, fk_jit_cpu_run, (long long x), (x)) {
+#if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || defined(_WIN32)
+    (void)x;
+    return fk_nothing;
+#else
+    static void *img_mem[FK_CPU_IMAGES];
+    static char *img_bytes[FK_CPU_IMAGES];
+    static long long img_len[FK_CPU_IMAGES];
+    static unsigned long long img_hash[FK_CPU_IMAGES];
+    static int img_n;
+    if ((x & 1) == 0 || fk_is_str(x) || x == 1) { return fk_nothing; }
+    long long p = x >> 1;
+    if (p < 1 || !FK_POK(p)) { return fk_nothing; }
+    long long q = FK_HNEXT(p);
+    if (q < 1 || !FK_POK(q)) { return fk_nothing; }
+    long long r = FK_HNEXT(q);
+    if (r < 1 || !FK_POK(r)) { return fk_nothing; }
+    long long iw = FK_HH(p), bw = FK_HH(q), cw = FK_HH(r);
+    const char *ip = 0;
+    long long il = 0;
+    if (!fk_is_str(iw) || !fk_srange(iw, &ip, &il) || il <= 0 || il > 1048576 || (il & 3) != 0) { return fk_nothing; }
+    if ((bw & 1) == 0 || fk_is_str(bw) || (cw & 1) == 0 || fk_is_str(cw)) { return fk_nothing; }
+    unsigned int consts[FK_CPU_BUFS];
+    long long nc = 0, c = cw >> 1;
+    while (c >= 1) {
+        long long v = FK_POK(c) ? FK_HH(c) : 1;
+        if ((v & 1) != 0 || nc >= FK_CPU_BUFS) { return fk_nothing; }
+        consts[nc] = (unsigned int)(v >> 1);
+        nc = nc + 1;
+        c = FK_HNEXT(c);
+    }
+    void *bufs[FK_CPU_BUFS];
+    char *owned[FK_CPU_BUFS];
+    long long olen[FK_CPU_BUFS];
+    void *mapped[FK_CPU_BUFS];
+    size_t maplen[FK_CPU_BUFS];
+    long long nb = 0, b = bw >> 1, ok = 1;
+    while (b >= 1 && ok) {
+        if (!FK_POK(b) || nb >= FK_CPU_BUFS) { ok = 0; break; }
+        long long e = FK_HH(b), one = (e & 1) != 0 && e != 1 && !fk_is_str(e) ? e >> 1 : 0;
+        const char *sp = 0;
+        long long sl = 0;
+        owned[nb] = 0;
+        olen[nb] = -1;
+        mapped[nb] = 0;
+        maplen[nb] = 0;
+        if (fk_is_str(e) && fk_srange(e, &sp, &sl)) {
+            bufs[nb] = (void *)sp;
+        } else if (one >= 1 && FK_POK(one) && FK_HNEXT(one) != 0 && fk_jit_cpu_file(one, &bufs[nb], &mapped[nb], &maplen[nb])) {
+            /* a file span, mapped */
+        } else if (one >= 1 && FK_POK(one) && FK_HNEXT(one) == 0 && fk_is_str(FK_HH(one)) && fk_srange(FK_HH(one), &sp, &sl)) {
+            owned[nb] = (char *)malloc((size_t)(sl > 0 ? sl : 1));
+            if (owned[nb] == 0) { ok = 0; break; }
+            memcpy(owned[nb], sp, (size_t)sl);
+            olen[nb] = sl;
+            bufs[nb] = owned[nb];
+        } else {
+            ok = 0;
+            break;
+        }
+        nb = nb + 1;
+        b = FK_HNEXT(b);
+    }
+    void *fn = 0;
+    if (ok) {
+        unsigned long long h = fk_bytes_fnv1a(ip, il);
+        int k = 0;
+        while (k < img_n) {
+            if (img_hash[k] == h && img_len[k] == il && memcmp(img_bytes[k], ip, (size_t)il) == 0) { fn = img_mem[k]; break; }
+            k = k + 1;
+        }
+        if (fn == 0 && img_n < FK_CPU_IMAGES) {
+            size_t pg = (size_t)getpagesize();
+            size_t span = ((size_t)il + pg - 1) & ~(pg - 1);
+            void *mem = fk_page_alloc(span);
+            char *copy = (char *)malloc((size_t)il);
+            if (mem != 0 && copy != 0) {
+                memcpy(copy, ip, (size_t)il);
+                fk_page_write(mem, ip, (size_t)il);
+                img_mem[img_n] = mem;
+                img_bytes[img_n] = copy;
+                img_len[img_n] = il;
+                img_hash[img_n] = h;
+                img_n = img_n + 1;
+                fn = mem;
+            } else {
+                if (mem != 0) { munmap(mem, span); }
+                free(copy);
+            }
+        }
+    }
+    long long answer = fk_nothing;
+    if (ok && fn != 0) {
+        typedef void (*fk_cpu_image_fn)(void **, const unsigned int *, unsigned long long);
+        long long t0 = fk_mono_ns();
+        ((fk_cpu_image_fn)fn)(bufs, consts, 1ULL);
+        fk_cpu_runs = fk_cpu_runs + 1;
+        fk_cpu_run_us = fk_cpu_run_us + (fk_mono_ns() - t0) / 1000;
+        /* each answer is rooted as it is made: a string's birth can melt the strings */
+        long long base = fk_vsp, made = 0, k = 0;
+        while (k < nb) {
+            if (owned[k] != 0) { fk_vp(fk_sbuf(owned[k], olen[k])); made = made + 1; }
+            k = k + 1;
+        }
+        answer = 1;
+        while (made > 0) { made = made - 1; answer = fk_cons_val(fk_vs[base + made], answer); }
+        fk_vsp = base;
+    }
+    long long k = 0;
+    while (k < nb) {
+        free(owned[k]);
+        if (mapped[k] != 0) { munmap(mapped[k], maplen[k]); }
+        k = k + 1;
+    }
+    return answer;
+#endif
+}
 static void fk_jit_offer(long long c);
 static long long fk_walk_body(long long i, long long fp) {
     for (;;) {
@@ -10458,8 +10617,7 @@ static long long fk_walk_body(long long i, long long fp) {
         fk_arms[t] = fk_arms[t] + 1;
         if (t == 6) {
             /* the branch law, the same in tail position as in value position (fk_truth): nothing refuses, a float zero
-             * is 0. Until 2026-10-11 this arm read only `== 0`, so a tail-position if took its then-arm on nothing and
-             * on 0.0 where the same if in value position stopped or took its else-arm. */
+             * is 0, so an if takes the same arm wherever it stands */
             if (fk_truth(fk_walk(fk_node[i][1], fp)) == 0) {
                 i = fk_node[i][3];
             } else {
@@ -18426,6 +18584,15 @@ static long long fk_prog_read(long long pid, long long spec) {
         mode[0] = 0;
         fk_cstr(FK_HH(p), mode, 16);
         long long q = FK_HNEXT(p);
+        /* ("fn" c): defn c's body (the one it wears under its page) and its arity, or nothing for a capturing function, whose
+         * prologue reads the call's capture channel -- what the Form JIT reads of a callee it writes in place of its call */
+        if (fk_cstr_eq(mode, "fn") && q >= 1 && FK_POK(q) && (FK_HH(q) & 1) == 0) {
+            long long c = FK_HH(q) >> 1;
+            if (c <= 0 || c >= fk_fn_count || (c < fk_fn_cap_capacity && fk_fn_cap_count[c] > 0)) { return fk_nothing; }
+            long long b = fk_fn[c];
+            if (b > 0 && b < fk_node_count && fk_node[b][0] == 194) { b = fk_node[b][2]; }
+            return b > 0 && b < fk_node_count ? fk_cons_val(b << 1, fk_cons_val(fk_fnar[c] << 1, 1)) : fk_nothing;
+        }
         if (fk_cstr_eq(mode, "defn") && q >= 1 && FK_POK(q) && (FK_HH(q) & 1) == 0) {
             long long j = FK_HH(q) >> 1;
             if (j < 0 || j >= fk_fntop) { return fk_nothing; }
@@ -19003,6 +19170,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if ((fm201 >> 1) == 56) { return fk_jit_bind(fx201); }
         /* mode 57: jit_node(spec) -- what the Form JIT may take apart, see fk_jit_node */
         if ((fm201 >> 1) == 57) { return fk_jit_node(fx201); }
+        /* mode 58: jit_cpu_run([image, buffers, consts]) -- a Form-emitted CPU image over the body's bytes, see fk_jit_cpu_run */
+        if ((fm201 >> 1) == 58) { return fk_jit_cpu_run(fx201); }
         /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
         if ((fm201 >> 1) == 55) {
             const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
@@ -19491,7 +19660,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 32) {
         /* kernel_ast pid spec: that kernel's program surface where it lives -- spec -1 the header words, k a node's four
-         * words, (list "src" off len) a source span, (list "defn" j) a defn's symbol span, fn idx and body node */
+         * words, (list "src" off len) a source span, (list "defn" j) a defn's symbol span, fn idx and body node, (list "fn" c)
+         * this kernel's defn c's body and arity */
         long long pid32 = fk_walk(fk_node[i][1], fp) >> 1;
         return fk_prog_read(pid32, fk_walk(fk_node[i][2], fp));
     }
@@ -20642,6 +20812,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 74) { return fk_jit_offers << 1; }                         /* defns offered to the Form JIT */
         if (ks_k == 75) { return fk_jit_bound << 1; }                          /* defns running as Form pages */
         if (ks_k == 76) { return fk_jit_offer_us << 1; }                       /* microseconds the offers took */
+        if (ks_k == 77) { return fk_cpu_runs << 1; }                           /* Form-emitted CPU images run (jit_cpu_run) */
+        if (ks_k == 78) { return fk_cpu_run_us << 1; }                         /* microseconds inside them */
         if (ks_k == 58) {
             return (fk_field_on || fk_store_shared) ? 0 : (fk_np << 1);
         }

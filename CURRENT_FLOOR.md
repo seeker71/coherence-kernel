@@ -1162,9 +1162,8 @@ shared segment mapped per read, so ignored-argument-scan-band went from 4.1 s to
 `jit_fn_bind(fn, words)`. From then on the defn wears the crystallized-defn node (tag 194), and the walker's 194 arm runs
 the page in the frame the call built. A defn that gets hot while the JIT itself runs waits in a short line, once, so the
 JIT's own hot recipes run as pages too. The line holds 64 different defns. One the full line cannot take stays unoffered
-and asks again at its next multiple. Until 2026-10-11 a waiting defn was put in again at each further 4096 calls, so the
-line filled with the first hot recipes' repeats and dropped later ones: in a fresh tree the first offer lowers
-jit-page.bml in a floor cell, and that cell's grammar copy ran gx 41,372 times without an offer. The board names a defn
+and asks again at its next multiple, so a later hot recipe (the grammar's reader in the floor cell that lowers
+jit-page.bml during the first offer) is never crowded out by an earlier one's repeats. The board names a defn
 still in the line `waiting`, and a callee a page wrote in place `inplace` (its own time is spent in its callers' pages,
 so its time offers it nothing; its heat still can, from a caller that walks).
 
@@ -1226,19 +1225,22 @@ Measured on one machine, with the walker alone versus pages, each pair giving th
 
 Lowering form-find makes 171 offers, binds 160 pages and spends 0.15 s offering.
 
-SHA-256 in Form (`form/form-stdlib/sha256.fk`, the meaning every seal and attestation digest stands on) folded 256 KB in
-534 ms on the morning of 2026-10-11 and folds it in 54 ms now. 5.5 MB take 210 ms, about 26 MB/s. Three things moved it:
+SHA-256 has two lanes, and they agree byte for byte over the whole seed file:
 
-- The page asks value_kind of its own op.
-- Leaf callees (the sigmas, ch, maj, the BML index) are written in place, and the u32 doors are in the page's own words.
-- The 64 rounds are one loop over a..h and a sixteen-word window of the schedule, and a whole block is read where it
-  lies in the string. Before, the state was an 8-list and the schedule a list, both read by index, and a block was
-  folded byte by byte.
-
-The digests agree with the CPU's SHA-256 instructions over the whole seed file. Those instructions are the body's other
-lane (`sha256-owned-bytes.bml`, about 276 MB/s), and `ntss-hash` takes it only where the Metal carrier stands. A fresh
-worktree has no carrier until `host-walk-sync` builds one, so its gate hashes the 100-160 MB form-cli candidate in Form:
-past the 30-minute deadline at the old fold, about 8 s now.
+- **The meaning, in Form** (`form/form-stdlib/sha256.fk`): 256 KB in 54 ms, 5.5 MB in 210 ms, about 26 MB/s.
+  - The page asks value_kind of its own op.
+  - Leaf callees (the sigmas, ch, maj, the BML index) are written in place, and the u32 doors are in the page's own words.
+  - The 64 rounds are one loop over a..h and a sixteen-word window of the schedule.
+  - A whole block is read where it lies in the string.
+- **The CPU's own SHA-256 instructions**, a Form-emitted image (`native/metal/sha256-arm64-jit.fk`) run through the seed's
+  door for CPU images (`jit_cpu_run`, leaf mode 58). It takes the image through the one page door, a string where it
+  lies, and a file as spans mapped for their run. The 1.39 MB seed file hashes in 1 ms. No Metal carrier is asked, so
+  the lane stands in every checkout, a fresh worktree included.
+  - `ntss-hash` (every form-cli seal and attestation) takes it when its context is ready. The context is ready when the
+    empty message's digest, computed through the door in this process, is the one FIPS 180-4 states.
+  - `sho-file` and the model seals walk files in 4 GiB spans.
+  - kernel_stat 77 and 78 count the images run and the microseconds inside them, and the board names that time
+    `cpu-image`.
 
 The C loop lane (`fk_f64_*`) still crystallizes pure-float defns and self-tail-call loops at heat 1024, earlier than the
 Form JIT is offered, and keeps its leaf. The Form JIT does not offer a defn that already wears that leaf.

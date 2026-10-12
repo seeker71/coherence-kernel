@@ -55,6 +55,9 @@ section [form.bml] {
         def jp-lsrw(rd, rn, rm) = jp-r3(448799744, rd, rn, rm);                 // lsr w<rd>, w<rn>, w<rm>       1ac02400
         def jp-mvnw(rd, rm) = 706741216 + rm * 65536 + rd;                      // mvn w<rd>, w<rm>              2a2003e0
         def jp-asr1(rd, rn) = 2470575104 + rn * 32 + rd;                        // asr x<rd>, x<rn>, #1          9341fc00
+        def jp-addi(rd, rn, imm) = 2432696320 + imm * 1024 + rn * 32 + rd;      // add x<rd>, x<rn>, #imm        91000000
+        def jp-subi(rd, rn, imm) = 3506438144 + imm * 1024 + rn * 32 + rd;      // sub x<rd>, x<rn>, #imm        d1000000
+        def jp-strw-lsl2(rt, rn, rm) = 3089135616 + rm * 65536 + rn * 32 + rt;  // str w<rt>, [x<rn>, x<rm>, lsl #2]  b8207800
         def jp-lsl1(rd, rn) = 3548379136 + rn * 32 + rd;                        // lsl x<rd>, x<rn>, #1          d37ff800
         def jp-cmp(rn, rm) = 3942645791 + rm * 65536 + rn * 32;                 // cmp x<rn>, x<rm>              eb00001f
         def jp-cmpi(rn, imm) = 4043309087 + imm * 1024 + rn * 32;               // cmp x<rn>, #imm               f100001f
@@ -72,6 +75,7 @@ section [form.bml] {
         def jp-add-lsl3(rd, rn, rm) = 2332033024 + rm * 65536 + 3072 + rn * 32 + rd; // add x<rd>, x<rn>, x<rm>, lsl #3
         // conditions
         def jp-eq() = 0;
+        def jp-ge() = 10;
         def jp-lt() = 11;
         def jp-le() = 13;
 
@@ -85,7 +89,7 @@ section [form.bml] {
         // ---- the helper table (x19), in words (struct fk_jit_cx in runtime/fkwu-uni.c): vs 0, next 1, walk 2, truth 3,
         //      tick 4, enter 5, call 6, tail 7, then the one-meaning ops from 8: head tail len str_len str_eq str_byte_at
         //      cons, add sub mul div mod le lt eq, band bor bxor shl_u32 shr_u32, nth byte_to_str, value_kind (30),
-        //      rotr_u32 add_u32 bnot_u32, then inl_enter 34 and inl_leave 35 ----
+        //      rotr_u32 add_u32 bnot_u32, then the frame chain: cur_fn 34, fr_depth 35, fr_fn 36, fr_cap 37 ----
         def jp-op-word(tag) = (Comparable) tag == 20 ? 8 : (Comparable) tag == 21 ? 9 : (Comparable) tag == 22 ? 10 : (Comparable) tag == 25 ? 11 : (Comparable) tag == 26 ? 12 : (Comparable) tag == 28 ? 13 : (Comparable) tag == 19 ? 14 : (Comparable) tag == 3 ? 15 : (Comparable) tag == 4 ? 16 : (Comparable) tag == 42 ? 17 : (Comparable) tag == 10 ? 18 : (Comparable) tag == 11 ? 19 : (Comparable) tag == 5 ? 20 : (Comparable) tag == 103 ? 21 : (Comparable) tag == 102 ? 22 : (Comparable) tag == 34 ? 23 : (Comparable) tag == 35 ? 24 : (Comparable) tag == 36 ? 25 : (Comparable) tag == 37 ? 26 : (Comparable) tag == 38 ? 27 : (Comparable) tag == 23 ? 28 : (Comparable) tag == 33 ? 29 : (Comparable) tag == 39 ? 31 : (Comparable) tag == 40 ? 32 : (Comparable) tag == 41 ? 33 : nothing();
         def jp-reload() = [jp-ldr(9, 19, 0), jp-ldr(9, 9, 0), jp-add-lsl3(21, 9, 20)];
         def jp-call(slot) = append([jp-ldr(9, 19, slot), jp-blr(9)], jp-reload());
@@ -273,14 +277,16 @@ section [form.bml] {
         }
         // a callee whose tail spine holds no call is written in place of the call (its own such callees too, two deep): its
         // arguments made into t .. t+a-1 are its frame's first slots, its lets follow, its temporaries above them, and it
-        // enters and leaves as the call would (inl_enter, inl_leave: the frame chain and the running defn). Its body is
+        // enters and leaves as the call would (the frame chain and the running defn, in the page's own words). Its body is
         // written in value position; a call it makes there was a value call already and stays one
         def jp-call-in(cx, c, kids, t, tail) {
             let inl = cx[3] < 2 ? jp-inline(cx, c, kids, t) : nothing();
             !nothing?(inl) ? jp-valued(inl, tail) : jp-call-other(cx, c, kids, t, tail);
         }
+        // the callee as the kernel holds it: its body and arity (kernel_ast ["fn", c]), nothing for a capturing closure
+        def jp-fn(c) = kernel_ast(host_pid(), ["fn", c]);
         def jp-inline(cx, c, kids, t) {
-            let f = jit_node(["fn", c]);
+            let f = jp-fn(c);
             nothing?(f) ? nothing() : (Comparable) len(kids) != f[1] ? nothing() : !jp-spine-ok?(f[0], 1) ? nothing() : jp-inline-body(cx, c, kids, t, f[0], f[1]);
         }
         // the tail spine: the positions the walker's tail loop continues through (fk_walk_body: the frame's 111, a let's
@@ -294,7 +300,7 @@ section [form.bml] {
             (Comparable) tag == 111 ? jp-spine-ok?(n[2], deep) : (Comparable) tag == 109 ? jp-spine-ok?(n[3], deep) : (Comparable) tag == 69 ? jp-spine-ok?(n[2], deep) : (Comparable) tag == 6 ? (jp-spine-ok?(n[2], deep) && jp-spine-ok?(n[3], deep)) : jp-named-call?(tag) ? ((Comparable) deep == 1 && jp-spine-bare?(n[1])) : !jp-tail-call?(tag);
         }
         def jp-spine-bare?(c) {
-            let f = jit_node(["fn", c]);
+            let f = jp-fn(c);
             nothing?(f) ? 0 : jp-spine-ok?(f[0], 0);
         }
         def jp-named-call?(tag) = ((Comparable) tag == 12) || (((Comparable) tag == 240) || ((Comparable) tag == 241));
@@ -309,10 +315,13 @@ section [form.bml] {
             let a = len(kids);
             let ev = jp-args(cx, kids, t, 0, t + a, jp-r([], t + a, 0));
             let r = jp-emit([0 - 1, lim, t, cx[3] + 1, c], inner, t + lim, 0);
-            let enter = append(jp-imm(0, c), jp-call(34));
-            let leave = cons(jp-str(0, 21, t), append(jp-imm(0, cx[4]), append(jp-call(35), [jp-ldr(0, 21, t)])));
-            (r[1] > 4095) || (len(r[0]) > 768) ? nothing() : jp-inline-made(c, jp-r(append(ev[0], append(enter, append(r[0], leave))), jp-max(ev[1], jp-max(r[1], t + lim)), ev[2] + r[2] + 1));
+            (r[1] > 4095) || (len(r[0]) > 768) ? nothing() : jp-inline-made(c, jp-r(append(ev[0], append(jp-enter-in-place(c), append(r[0], jp-leave-in-place(cx[4])))), jp-max(ev[1], jp-max(r[1], t + lim)), ev[2] + r[2] + 1));
         }
+        // the frame chain kept in the page's own words, as the call keeps it (FK_FR_PUSH): the running defn is pushed as the
+        // callee's caller while the chain has room, the depth rises, the callee runs; leaving lowers the depth and names the
+        // defn the page stands in again. Table words 34 cur_fn, 35 fr_depth, 36 fr_fn, 37 fr_cap; x0 is not touched
+        def jp-enter-in-place(c) = append([jp-ldr(9, 19, 34), jp-ldr(10, 9, 0), jp-ldr(11, 19, 35), jp-ldr(12, 11, 0), jp-ldr(13, 19, 37), jp-cmp(12, 13), jp-bcond(jp-ge(), 3), jp-ldr(13, 19, 36), jp-strw-lsl2(10, 13, 12), jp-addi(12, 12, 1), jp-str(12, 11, 0)], append(jp-imm(10, c), [jp-str(10, 9, 0)]));
+        def jp-leave-in-place(n) = append([jp-ldr(11, 19, 35), jp-ldr(12, 11, 0), jp-subi(12, 12, 1), jp-str(12, 11, 0), jp-ldr(9, 19, 34)], append(jp-imm(10, n), [jp-str(10, 9, 0)]));
         // the seed is told (jit_node ["inline", c]): a callee's own time is then its callers' pages' time, never an offer
         def jp-inline-made(c, r) {
             let told = jit_node(["inline", c]);
@@ -347,7 +356,7 @@ section [form.bml] {
         }
         // the helper table's layout this emitter writes for (FK_JIT_ABI in runtime/fkwu-uni.c): a seed that offers
         // another layout is declined, never bound to words that would name the wrong helpers
-        def jp-abi() = 3;
+        def jp-abi() = 4;
         def jp-offer(input) {
             let fits = !nothing?(input) && ((len(input) > 3) && ((Comparable) input[3] == jp-abi()));
             let words = fits ? jp-page(input[0], input[1], input[2]) : nothing();

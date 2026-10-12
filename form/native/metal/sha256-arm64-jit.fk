@@ -1,18 +1,18 @@
 // sha256-arm64-jit.fk — Form-emitted SHA-256 compression for Apple arm64.
 //
 // Form owns the instruction image, state, constants, padding, file admission,
-// and digest rendering.  The existing form_cpu_jit carrier only installs and
-// calls these bytes over unified handles.  Four SHA rounds are performed by
-// each SHA256H/SHA256H2 pair; SHA256SU0/SU1 extend the rolling schedule.
+// and digest rendering.  The seed's door for Form-emitted CPU images
+// (jit_cpu_run) installs these words through its one page door and calls them
+// over the body's own bytes.  Four SHA rounds are performed by each
+// SHA256H/SHA256H2 pair; SHA256SU0/SU1 extend the rolling schedule.
 //
-// ABI fixed by the carrier:
+// The image's ABI (the door calls fn(bufs, consts, 1)):
 //   x0 = void **buffers  [message, state, round constants]
 //   x1 = uint32_t *constants  [64-byte block count]
-//   x2 = thread count (unused)
+//   x2 = 1 (unused)
 //
 import form-stdlib/form-asm.fk;
 import form-stdlib/sha256.fk;
-import form-stdlib/metal-door.fk;
 section [form.bml] {
     def saj-byte-string(bytes) = (Comparable) len(bytes) == 0 ? "" : ((String) byte_to_str(bytes[0]) + saj-byte-string(bytes[1:]));
     def saj-u32-le(w) = [band(w, 255), band(shr_u32(w, 8), 255), band(shr_u32(w, 16), 255), band(shr_u32(w, 24), 255)];
@@ -59,90 +59,23 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
         let used = len(tail-bytes);
         (tail-bytes + (byte_to_str(128) + ((String) saj-zero-string(55 - used) + saj-byte-string(saj-be64-list(total-bytes * 8, 8, [])))));
     };
-    // Continue an unpadded SHA state across a handle whose byte count is an
-    // exact number of 64-byte blocks.  This is the resumable downloader seam:
-    // the returned 32 bytes are the actual eight hardware-updated state words.
-    // A CONDITIONAL EFFECT MUST BE A NAMED RECIPE, not an `if` in a let's value.
-    // form-flatten.fk's flt-do-let-store-op decides whether a let gets a real
-    // frame slot by looking at the HEAD op of its value and nothing deeper: an op
-    // named in host-effect-grammar.fk stores, a call to a known recipe stores, and
-    // everything else is SUBSTITUTED into the environment and re-evaluated at every
-    // mention.  `(let ran (if c (metal_enqueue …) 0))` has `if` at its head, so it
-    // was re-dispatched on each read of `ran`, and `(let raw (if (eq ran 1)
-    // (metal_buf_read …) ""))` re-read on each mention of `raw` — the guards then
-    // disagreed with each other and this recipe answered "" (2026-08-20, witnessed
-    // through the emitted walker while the source runner, which binds lets once,
-    // answered correctly).  Each conditional effect below is a recipe, so the let
-    // binds a CALL and stores.  The head-op-only decision is the deeper thread.
-    def saj-dispatch(message, state, rounds, block-count, sw, kw) = (Comparable) sw == 32 && (Comparable) kw == 256 ? metal_enqueue(metal_pipeline(saj-code(), "form_cpu_jit"), md-bind([message, state, rounds], [block-count]), 1) : 0;
-    def saj-read-state(ran, state) = (Comparable) ran == 1 ? metal_buf_read(state, 0, 32) : "";
-    def saj-compress-handle-state(message, state-raw, block-count) = !((Comparable) len(state-raw) == 32) ? "" : (Comparable) block-count == 0 ? state-raw : {
-        let state = metal_buf_alloc(32);
-        let rounds = metal_buf_alloc(256);
-        message <= 0 || (state <= 0 || rounds <= 0) ? "" : {
-            let sw = metal_buf_write(state, 0, state-raw);
-            let kw = metal_buf_write(rounds, 0, saj-round-constant-bytes());
-            let ran = saj-dispatch(message, state, rounds, block-count, sw, kw);
-            let raw = saj-read-state(ran, state);
-            let f0 = metal_buf_free(state);
-            let f1 = metal_buf_free(rounds);
-            (Comparable) len(raw) == 32 && ((Comparable) f0 == 1 && (Comparable) f1 == 1) ? raw : "";
-        };
-    };
-    // THE FILE IS HASHED IN CHUNKS. One no-copy buffer over a whole file cannot be made once the file passes the device's maxBufferLength (86,586,540,032 B on the M4 Max): the 86,720,111,488 B DeepSeek-V4 IQ2XXS
-    // build read an empty digest through a single buffer, where the 29 GB Qwen file fits. SHA-256 is sequential, so the file is walked in order: each chunk is its own no-copy handle, compressed from the 32-byte state
-    // the chunk before left (saj-compress-handle-state carries it), and freed before the next is made; the state after the last chunk is the state a single buffer would have left, bit for bit. The chunk is a
-    // multiple of 64 (a block) and of the 16 KiB page, and far under maxBufferLength; a band hands a tiny chunk to the same walk (saj-file-prefix-state-chunked) so a small synthetic file crosses many chunk seams.
+    // ONE COMPRESSION RUN through the seed's door for Form-emitted CPU images (jit_cpu_run): [the message (a string where
+    // it lies, or a file span mapped for the run), the 32 state bytes written back, the round constants] and the block
+    // count; the 32 bytes answered are the eight hardware-updated state words, so a state continues across runs (the
+    // resumable downloader seam). No buffer is allocated or released per run, and no carrier is asked.
+    def saj-compress(message, state-raw, block-count) = !((Comparable) len(state-raw) == 32) ? "" : (Comparable) block-count == 0 ? state-raw : saj-written(jit_cpu_run([saj-image-bytes, [message, [state-raw], saj-round-bytes], [block-count]]));
+    def saj-written(answer) = nothing?(answer) ? "" : answer[0];
+    // THE FILE IS HASHED IN CHUNKS. SHA-256 is sequential, so the file is walked in order: each chunk is a span mapped for its run and released after, compressed from the 32-byte state the chunk before
+    // left (saj-compress carries it); the state after the last chunk is the state one span over the whole file would have left, bit for bit. A chunk is a multiple of 64 (a block) and of the 16 KiB page, and
+    // bounds the mapping (the 86,720,111,488 B DeepSeek-V4 IQ2XXS build is walked in 4 GiB spans); a band hands a tiny chunk to the same walk (saj-file-prefix-state-chunked) so a small synthetic file crosses many seams.
     def saj-chunk-bytes() = 4294967296;
     def saj-chunk-ok?(chunk) = chunk > 0 && (chunk % 64) == 0;
     def saj-file-prefix-state(path, byte-count) = saj-file-prefix-state-chunked(path, byte-count, saj-chunk-bytes());
     def saj-file-prefix-state-chunked(path, byte-count, chunk) = byte-count < 0 || !((Comparable) (byte-count % 64) == 0) || !saj-chunk-ok?(chunk) ? "" : (Comparable) byte-count == 0 ? saj-initial-state-bytes() : saj-chunk-walk(path, byte-count, chunk, 0, saj-initial-state-bytes());
     def saj-chunk-walk(path, byte-count, chunk, off, state-raw) = off >= byte-count ? state-raw : !((Comparable) len(state-raw) == 32) ? "" : saj-chunk-step(path, byte-count, chunk, off, state-raw, (byte-count - off) < chunk ? (byte-count - off) : chunk);
-    def saj-chunk-step(path, byte-count, chunk, off, state-raw, span) = {
-        let message = metal_buf_from_file(path, off, span);
-        message <= 0 ? "" : {
-            let raw = saj-compress-handle-state(message, state-raw, span / 64);
-            let freed = metal_buf_free(message);
-            (Comparable) freed == 1 ? saj-chunk-walk(path, byte-count, chunk, off + span, raw) : "";
-        };
-    };
-    // Same law as saj-dispatch above: the conditional is a recipe, so the let that
-    // holds its answer stores instead of re-running it.  Here the cost of getting
-    // it wrong was exact — `freed` is read before `raw` in the closing guard, so an
-    // inlined `raw` re-entered the compressor with a handle that had just been
-    // released, and the whole digest came back empty.
-    def saj-compress-written(pad, state-raw, pw) = (Comparable) pw == 64 ? saj-compress-handle-state(pad, state-raw, 1) : "";
-    def saj-final-digest-from-state(state-raw, tail-bytes, total-bytes) = !((Comparable) len(state-raw) == 32) || (!((Comparable) len(tail-bytes) == total-bytes % 64) || len(tail-bytes) >= 56) ? "" : {
-        let padding = saj-padding-block(tail-bytes, total-bytes);
-        let pad = metal_buf_alloc(64);
-        pad <= 0 ? "" : {
-            let pw = metal_buf_write(pad, 0, padding);
-            let raw = saj-compress-written(pad, state-raw, pw);
-            let freed = metal_buf_free(pad);
-            (Comparable) freed == 1 && (Comparable) len(raw) == 32 ? saj-state-digest(raw) : "";
-        };
-    };
-    // A byte-list can enter the same Form-emitted arm64 compressor without a
-    // filesystem crossing.  The bridge materializes only one bounded 64-byte
-    // string at a time; it never builds a second whole-message string and it
-    // walks the list once.  The remaining tail is at most 63 bytes.
-    def saj-split-byte-string(bytes, remaining, acc) = (Comparable) remaining == 0 ? [acc, bytes] : nil?(bytes) ? ["", []] : saj-split-byte-string(bytes[1:], remaining - 1, ((String) acc + byte_to_str(bytes[0])));
-    def saj-write-byte-blocks(message, bytes, block-count, offset) = (Comparable) block-count == 0 ? [bytes, 1] : {
-        let split = saj-split-byte-string(bytes, 64, "");
-        let block = split[0];
-        let rest = split[1];
-        let wrote = metal_buf_write(message, offset, block);
-        (Comparable) wrote == 64 ? saj-write-byte-blocks(message, rest, block-count - 1, (Number) offset + (Number) 64) : [bytes, 0];
-    };
-    def saj-prefix-byte-state(bytes, prefix-size) = (Comparable) prefix-size == 0 ? [saj-initial-state-bytes(), bytes, 1] : {
-        let message = metal_buf_alloc(prefix-size);
-        message <= 0 ? ["", bytes, 0] : {
-            let written = saj-write-byte-blocks(message, bytes, prefix-size / 64, 0);
-            let state = (Comparable) written[1] == 1 ? saj-compress-handle-state(message, saj-initial-state-bytes(), prefix-size / 64) : "";
-            let freed = metal_buf_free(message);
-            (Comparable) freed == 1 && (Comparable) len(state) == 32 ? [state, written[0], 1] : ["", bytes, 0];
-        };
-    };
+    def saj-chunk-step(path, byte-count, chunk, off, state-raw, span) = saj-chunk-walk(path, byte-count, chunk, off + span, saj-compress(["file", path, off, span], state-raw, span / 64));
+    def saj-final-digest-from-state(state-raw, tail-bytes, total-bytes) = !((Comparable) len(state-raw) == 32) || (!((Comparable) len(tail-bytes) == total-bytes % 64) || len(tail-bytes) >= 56) ? "" : saj-digest-of(saj-compress(saj-padding-block(tail-bytes, total-bytes), state-raw, 1));
+    def saj-digest-of(raw) = (Comparable) len(raw) == 32 ? saj-state-digest(raw) : "";
     // Unlike the older downloader helper, this padding accepts either final
     // SHA shape: one block for tails 0..55, two blocks for tails 56..63.
     def saj-padding-string(tail-bytes, total-bytes) = {
@@ -150,56 +83,8 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
         let zeros = used <= 55 ? 55 - used : 119 - used;
         (tail-bytes + (byte_to_str(128) + ((String) saj-zero-string(zeros) + saj-byte-string(saj-be64-list(total-bytes * 8, 8, [])))));
     };
-    def saj-compress-padding-written(padding, state-raw, wrote, block-count) = (Comparable) wrote == block-count * 64 ? saj-compress-handle-state(padding, state-raw, block-count) : "";
-    def saj-final-byte-list-digest(state-raw, tail, total-bytes) = !((Comparable) len(tail) == total-bytes % 64) ? "" : {
-        let tail-bytes = saj-byte-string(tail);
-        let padding-bytes = saj-padding-string(tail-bytes, total-bytes);
-        let padding-size = len(padding-bytes);
-        let padding = metal_buf_alloc(padding-size);
-        padding <= 0 ? "" : {
-            let wrote = metal_buf_write(padding, 0, padding-bytes);
-            let raw = saj-compress-padding-written(padding, state-raw, wrote, padding-size / 64);
-            let freed = metal_buf_free(padding);
-            (Comparable) freed == 1 && (Comparable) len(raw) == 32 ? saj-state-digest(raw) : "";
-        };
-    };
-    def saj-final-tail-digest(state-raw, tail-bytes, total-bytes) = !((Comparable) len(tail-bytes) == total-bytes % 64) ? "" : {
-        let padding-bytes = saj-padding-string(tail-bytes, total-bytes);
-        let padding-size = len(padding-bytes);
-        let padding = metal_buf_alloc(padding-size);
-        padding <= 0 ? "" : {
-            let wrote = metal_buf_write(padding, 0, padding-bytes);
-            let raw = saj-compress-padding-written(padding, state-raw, wrote, padding-size / 64);
-            let freed = metal_buf_free(padding);
-            (Comparable) freed == 1 && (Comparable) len(raw) == 32 ? saj-state-digest(raw) : "";
-        };
-    };
-    // Canonical 32 digest bytes, or "" when the carrier declines.  The Form
-    // recipe still owns padding, constants and emitted instructions; Metal is
-    // the chosen execution organ for the compression rounds.
-    def saj-bytes-digest(bytes) = {
-        let total-bytes = len(bytes);
-        let tail-size = total-bytes % 64;
-        let prefix-size = total-bytes - tail-size;
-        let prefix = saj-prefix-byte-state(bytes, prefix-size);
-        !((Comparable) prefix[2] == 1) ? "" : saj-final-byte-list-digest(prefix[0], prefix[1], total-bytes);
-    };
-    // The current carrier has a bulk byte-list -> file door and a no-copy
-    // file -> Metal handle door, but no bulk byte-list -> Metal handle door.
-    // This explicitly named crossing uses those two existing doors so the SHA
-    // rounds take milliseconds rather than hundreds of evaluator transitions.
-    // Its directory claim is atomic, its result retains all release evidence,
-    // and a caller can turn any non-ready row toward the resident bridge above.
-    def saj-bulk-row(status, digest, byte-count, wrote, file-released, dir-released) = ["sha256-arm64-jit-bulk-byte-crossing-v1", status, digest, byte-count, wrote, file-released, dir-released];
-    def saj-bulk-row?(row) = (Comparable) len(row) == 7 ? (String) row[0] == "sha256-arm64-jit-bulk-byte-crossing-v1" : 0;
-    def saj-bulk-ready?(row) = saj-bulk-row?(row) ? (String) row[1] == "ready" : 0;
-    def saj-bulk-digest(row) = row[2];
-    def saj-bulk-dir-candidate(scope, stamp, byte-count, attempt) = (temp_dir() + ("/form-sha256-jit-" + (scope + ("-" + (stamp.str() + ("-" + (byte-count.str() + ("-" + attempt.str()))))))));
-    def saj-bulk-claim-dir(scope, stamp, byte-count, attempt) = attempt >= 64 ? nothing() : {
-        let path = saj-bulk-dir-candidate(scope, stamp, byte-count, attempt);
-        let made = host_dir_mkdir(path);
-        (Comparable) made == 1 ? path : saj-bulk-claim-dir(scope, stamp, byte-count, (Number) attempt + (Number) 1);
-    };
+    def saj-final-tail-digest(state-raw, tail-bytes, total-bytes) = !((Comparable) len(tail-bytes) == total-bytes % 64) ? "" : saj-final-padded(state-raw, saj-padding-string(tail-bytes, total-bytes));
+    def saj-final-padded(state-raw, padding) = saj-digest-of(saj-compress(padding, state-raw, len(padding) / 64));
     def saj-file-digest-any-tail(path, total-bytes) = saj-file-digest-any-tail-chunked(path, total-bytes, saj-chunk-bytes());
     def saj-file-digest-any-tail-chunked(path, total-bytes, chunk) = total-bytes < 0 ? "" : {
         let tail-size = total-bytes % 64;
@@ -207,39 +92,6 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
         let state-raw = saj-file-prefix-state-chunked(path, prefix-size, chunk);
         let tail = read_file_slice(path, prefix-size, tail-size);
         saj-final-tail-digest(state-raw, tail, total-bytes);
-    };
-    def saj-bytes-digest-bulk(bytes, scope) = {
-        let byte-count = len(bytes);
-        let dir = saj-bulk-claim-dir(scope, now_unix_ms(), byte-count, 0);
-        nothing?(dir) ? saj-bulk-row("scratch-claim-refused", "", byte-count, 0, nothing(), nothing()) : {
-            let path = (dir + "/bytes");
-            let wrote = file_append_bytes(path, bytes);
-            let digest = (Comparable) wrote == byte-count ? saj-file-digest-any-tail(path, byte-count) : "";
-            let file-released = fs_remove(path);
-            let dir-released = fs_rmdir(dir);
-            (Comparable) len(digest) == 32 && ((Comparable) file-released == 0 && (Comparable) dir-released == 0) ? saj-bulk-row("ready", digest, byte-count, wrote, file-released, dir-released) : saj-bulk-row("crossing-refused", digest, byte-count, wrote, file-released, dir-released);
-        };
-    };
-    // A cold byte-admission boundary often needs both the digest and one raw
-    // string cursor.  This sibling performs the bulk write once, reads the same
-    // bytes once, and releases the scratch carrier before returning either.
-    def saj-carrier-row(status, digest, raw, byte-count, wrote, file-released, dir-released) = ["sha256-arm64-jit-byte-carrier-v1", status, digest, raw, byte-count, wrote, file-released, dir-released];
-    def saj-carrier-row?(row) = (Comparable) len(row) == 8 ? (String) row[0] == "sha256-arm64-jit-byte-carrier-v1" : 0;
-    def saj-carrier-ready?(row) = saj-carrier-row?(row) ? (String) row[1] == "ready" : 0;
-    def saj-carrier-digest(row) = row[2];
-    def saj-carrier-raw(row) = row[3];
-    def saj-bytes-observe-bulk(bytes, scope) = {
-        let byte-count = len(bytes);
-        let dir = saj-bulk-claim-dir(scope, now_unix_ms(), byte-count, 0);
-        nothing?(dir) ? saj-carrier-row("scratch-claim-refused", "", "", byte-count, 0, nothing(), nothing()) : {
-            let path = (dir + "/bytes");
-            let wrote = file_append_bytes(path, bytes);
-            let digest = (Comparable) wrote == byte-count ? saj-file-digest-any-tail(path, byte-count) : "";
-            let raw = (Comparable) wrote == byte-count ? read_file_slice(path, 0, byte-count) : "";
-            let file-released = fs_remove(path);
-            let dir-released = fs_rmdir(dir);
-            (Comparable) len(digest) == 32 && ((Comparable) len(raw) == byte-count && ((Comparable) file-released == 0 && (Comparable) dir-released == 0)) ? saj-carrier-row("ready", digest, raw, byte-count, wrote, file-released, dir-released) : saj-carrier-row("crossing-refused", digest, raw, byte-count, wrote, file-released, dir-released);
-        };
     };
     // Returns canonical 32 digest bytes, or an empty string on any admission
     // failure.  The caller compares it with artifact manifest data.
@@ -251,5 +103,8 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
         let tail = read_file_slice(path, prefix-size, tail-size);
         saj-final-digest-from-state(state-raw, tail, total-bytes);
     };
+    // made once when the unit loads: the image and the constants are built byte by byte, and every run would build them
+    let saj-image-bytes = saj-code();
+    let saj-round-bytes = saj-round-constant-bytes();
     0;
 }

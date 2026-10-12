@@ -6,9 +6,9 @@
 ; Expected: 65535
 ; Verdict 65535 when every claim lands:
 ;   1     identity: SHA-256 of "" and "abc" are the standard answers; the source fold of a.txt "alpha\nbeta\n" and b.txt "gamma" is
-;         81740dcdfa544c889373f78411e8b3f68503db024eb19cdc68d8cca182e8dcd9 and the stamp (the first 16 hex over the bytes, CR stripped) is
-;         f3220283d05d1ff2, both answers of an independent SHA-256 over the same bytes (shasum, read once on 2026-10-04); the same files with
-;         CRLF endings fold to the same stamp, a file that is absent folds as `absent:<path>` and moves it
+;         81740dcdfa544c889373f78411e8b3f68503db024eb19cdc68d8cca182e8dcd9, the answer of an independent SHA-256 over the same bytes
+;         (shasum, read once on 2026-10-04), and the stamp is its first 16 hex, 81740dcdfa544c88; the same files with CRLF endings are other
+;         bytes and stamp otherwise, and a tree missing a listed file has no identity and no stamp
 ;   2     the closure door agrees: the seal it writes for the same two files holds a source.sha256 equal to the fold of its manifest and those files
 ;   4     attestations hold: a startup attestation and a platform attestation written for real files verify; a startup file, a runtime source,
 ;         an executable, an image, a symbol file, a bootstrap attestation, a stamp, a source digest, a slug or an author digest that is not
@@ -26,7 +26,8 @@
 ;         the three build organs, the door, the roots file itself and the closure door among them
 ;   256   the gate reads the Form door: the drift gates' form-cli-build row runs gate/form-cli-build-run.bml and names no shell script
 ;   512   no shell: no tracked file under form/scripts, no form/build-form-cli.sh
-;   1024  plant: folding the CRLF bytes without stripping the CR gives another stamp than the LF bytes: claim 1's invariance is the strip's
+;   1024  plant: a stamp file that is not its source digest's first 16 hex (the digest standing) reads the tree as not current: claim 1's
+;         stamp is the digest's own, not a second identity
 ;   2048  plant: an attestation of an executable whose bytes were changed still parses as an attestation (fcb-att-load) and fails verification:
 ;         claim 4's refusal is the digest comparison, not the shape
 ;   4096  strict: the door run as a child on `{bad json`, a typo'd key, a key of the wrong kind and a JSON array ends in exit 1 with a named
@@ -66,8 +67,8 @@ section [form.bml] {
    let gone = fbb-two(ctx, "gone", "alpha\nbeta\n", "gamma");
    (String) fcb-sha("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" && (String) fcb-sha("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
    && (String) fcb-source-sha(fcb-read-sources(lf, ["a.txt", "b.txt"])) == "81740dcdfa544c889373f78411e8b3f68503db024eb19cdc68d8cca182e8dcd9"
-   && (String) fcb-hash16(lf, ["a.txt", "b.txt"]) == "f3220283d05d1ff2" && (String) fcb-hash16(crlf, ["a.txt", "b.txt"]) == "f3220283d05d1ff2"
-   && (String) fcb-hash16(gone, ["a.txt", "zzz.txt"]) != "f3220283d05d1ff2" && nothing?(fcb-source-sha(fcb-read-sources(gone, ["a.txt", "zzz.txt"])));
+   && (String) fcb-hash16(lf, ["a.txt", "b.txt"]) == "81740dcdfa544c88" && (String) fcb-hash16(crlf, ["a.txt", "b.txt"]) != "81740dcdfa544c88"
+   && nothing?(fcb-hash16(gone, ["a.txt", "zzz.txt"])) && nothing?(fcb-source-sha(fcb-read-sources(gone, ["a.txt", "zzz.txt"])));
   }
   // ---- 2 the closure door agrees
   def fbb-c-closure(ctx) {
@@ -287,11 +288,14 @@ section [form.bml] {
    let run = fbb-door-run(ctx, "p-reads", "{\"prove\":\"" ++ fbb-root(ctx) ++ "/nobody\",\"sha\":\"" ++ fbb-sha() ++ "\"}");
    (Comparable) run[0] != 0 && fcb-has?(run[1], "binary is missing or not executable") && !fcb-has?(run[1], "unknown key") && !fcb-has?(run[1], "not well-formed");
   }
-  def fbb-c-plant-cr(ctx) {
-   let lf = fbb-two(ctx, "p-lf", "alpha\nbeta\n", "gamma");
-   let crlf = fbb-two(ctx, "p-crlf", "alpha\r\nbeta\r\n", "gamma");
-   (String) fcb-hash16(lf, ["a.txt", "b.txt"]) == (String) fcb-hash16(crlf, ["a.txt", "b.txt"])
-   && (String) substring(fcb-sha(fcb-fold-bytes(lf, ["a.txt", "b.txt"])), 0, 16) != (String) substring(fcb-sha(fcb-fold-bytes(crlf, ["a.txt", "b.txt"])), 0, 16);
+  def fbb-c-plant-stamp(ctx) {
+   let boot = fbb-root(ctx) ++ "/p-stamp";
+   let made = hch-mkdirs(boot);
+   let sha = "81740dcdfa544c889373f78411e8b3f68503db024eb19cdc68d8cca182e8dcd9";
+   let w = write_file(boot ++ "/form-cli.source.sha256", sha ++ "\n") + write_file(boot ++ "/form-cli.stamp", "81740dcdfa544c88\n");
+   let held = fcb-current-at?(boot, sha);
+   let tampered = write_file(boot ++ "/form-cli.stamp", "f3220283d05d1ff2\n");
+   held && !fcb-current-at?(boot, sha);
   }
   def fbb-c-plant-shape(ctx) {
    let w = fbb-written(ctx, "shape");
@@ -302,7 +306,7 @@ section [form.bml] {
  }
  let ctx = fbb-fresh();
  nothing?(ctx) ? form_error("form-cli build band needs a fresh directory") : 0;
- let verdict = live-claims("form-cli-build-band", ctx, [["identity", 1, 1, fbb-c-identity], ["closure", 2, 1, fbb-c-closure], ["attest", 4, 1, fbb-c-attest], ["well-formed", 8, 1, fbb-c-wellformed], ["platform", 16, 1, fbb-c-platform], ["lock", 32, 1, fbb-c-lock], ["proof", 64, 1, fbb-c-proof], ["roots", 128, 1, fbb-c-roots], ["gate", 256, 1, fbb-c-gate], ["no-shell", 512, 1, fbb-c-noshell], ["plant-cr", 1024, 1, fbb-c-plant-cr], ["plant-shape", 2048, 1, fbb-c-plant-shape], ["strict", 4096, 1, fbb-c-strict], ["plant-reads", 8192, 1, fbb-c-plant-reads], ["doors", 16384, 1, fbb-c-doors], ["zero-fixture", 32768, 1, fbb-c-zero]]);
+ let verdict = live-claims("form-cli-build-band", ctx, [["identity", 1, 1, fbb-c-identity], ["closure", 2, 1, fbb-c-closure], ["attest", 4, 1, fbb-c-attest], ["well-formed", 8, 1, fbb-c-wellformed], ["platform", 16, 1, fbb-c-platform], ["lock", 32, 1, fbb-c-lock], ["proof", 64, 1, fbb-c-proof], ["roots", 128, 1, fbb-c-roots], ["gate", 256, 1, fbb-c-gate], ["no-shell", 512, 1, fbb-c-noshell], ["plant-stamp", 1024, 1, fbb-c-plant-stamp], ["plant-shape", 2048, 1, fbb-c-plant-shape], ["strict", 4096, 1, fbb-c-strict], ["plant-reads", 8192, 1, fbb-c-plant-reads], ["doors", 16384, 1, fbb-c-doors], ["zero-fixture", 32768, 1, fbb-c-zero]]);
  host_dir_rmdir(fbb-root(ctx));
  verdict;
 }
