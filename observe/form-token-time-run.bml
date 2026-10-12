@@ -1,9 +1,10 @@
 // form-token-time-run.bml — where a training run's time goes, read from the run's own events.
 //
-//   printf 'events .hearth/form-token-lora/llama-1791695568140/training-events.rows\n' | ./fkwu observe/form-token-time-run.bml
-//   printf 'events EVENTS.rows\nledger LEDGER.rows\n' | ./fkwu observe/form-token-time-run.bml        the cycle's stage walls as well
+//   printf 'events .hearth/form-token-lora/llama-1791695568140/training-events.fkb\n' | ./fkwu observe/form-token-time-run.bml
+//   printf 'events EVENTS.fkb\nledger LEDGER.fkb\n' | ./fkwu observe/form-token-time-run.bml        the cycle's stage walls as well
 //
-// The trainer writes an event for every phase it walks (training-events.rows, one Form record a line, form-rows.bml): the open of
+// The trainer writes an event for every phase it walks (training-events.fkb, a ledger of Form nodes, form-value-nodes.bml; a path
+// ending .rows is read as form-rows text, the older checkouts' and a person's): the open of
 // the model, the baseline validation, the assessment, and for every row its forward and backward milliseconds and the device's own
 // busy microseconds, for every round its tokenize, training, update and checkpoint milliseconds. This reads them back and says,
 // in one block, where the wall clock went: each phase's milliseconds and its share of the run, a row's forward and backward
@@ -12,6 +13,7 @@
 // stdin: `events PATH` and, optionally, `ledger PATH` (frw-options). Reads only; opens no model.
 // preflight-exec: forbidden
 import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/form-value-nodes.bml;
 import form-stdlib/bml/stdin-source.bml;
 import form-stdlib/line-grammar.fk;
 section [form.bml] {
@@ -27,7 +29,7 @@ section [form.bml] {
   def ftt-span(rows) = ftt-max(rows, "at_ms") - foldl((m, r) => ftt-n(r, "at_ms") < m ? ftt-n(r, "at_ms") : m, ftt-max(rows, "at_ms"), rows);
   def ftt-phase(name, ms, whole) = ftt-say(name ++ ": " ++ ftt-s(ms) ++ " (" ++ ftt-pct(ms, whole) ++ " of the run)");
   // the rows of a file, or none (said) when it is absent or refused
-  def ftt-rows(path) = ftt-rows-of(path, frw-rows(read_file(path) ?? ""));
+  def ftt-rows(path) = ftt-rows-of(path, fvn-rows-of(path));
   def ftt-rows-of(path, r) = (String) r[0] == "ok" ? r[1] : ftt-refused(path, r);
   def ftt-refused(path, r) {
    let said = ftt-say(path ++ " was refused at line " ++ r[2].str() ++ ": " ++ r[1]);
@@ -35,7 +37,10 @@ section [form.bml] {
   }
   def ftt-report(rows) {
    let opened = ftt-sum(ftt-of(rows, "admitted"), "open_ms");
-   let valid = ftt-sum(ftt-of(rows, "validation"), "wall_ms");
+   let checks = ftt-of(rows, "validation");
+   let validBefore = ftt-sum(filter(r => ftt-n(r, "optimizer_step") == 0, checks), "wall_ms");
+   let validAfter = ftt-sum(filter(r => ftt-n(r, "optimizer_step") != 0, checks), "wall_ms");
+   let valid = validBefore + validAfter;
    let assess = ftt-sum(ftt-of(rows, "assessment-before"), "wall_ms") + ftt-sum(ftt-of(rows, "assessment-after"), "wall_ms");
    let rounds = ftt-of(rows, "round");
    let walks = ftt-of(rows, "row");
@@ -51,7 +56,8 @@ section [form.bml] {
    let tokens = ftt-sum(walks, "input_tokens");
    let said = ftt-say("run " ++ ftt-s(run) ++ ": " ++ len(rounds).str() ++ " round(s), " ++ len(walks).str() ++ " row(s), " ++ tokens.str() ++ " input tokens");
    let a = ftt-phase("open the model", opened, run);
-   let b = ftt-phase("baseline validation", valid, run);
+   let b = ftt-phase("held-out validation before training (the baseline, remembered when nothing moved)", validBefore, run);
+   let b2 = ftt-phase("held-out validation after training", validAfter, run);
    let c = ftt-phase("assessments", assess, run);
    let d = ftt-phase("rounds: training", training, run);
    let e = ftt-phase("rounds: update (Adam, adapter write)", update, run);
@@ -70,7 +76,7 @@ section [form.bml] {
   def ftt-run() = ftt-with(frw-options(stdin-text() ?? ""));
   def ftt-with(o) {
    if (String) o[0] != "ok" then ftt-say("the options were refused at line " ++ o[2].str() ++ ": " ++ o[1])
-   else if !frw-has?(o[1], "events") then ftt-say("give `events PATH` (a run's training-events.rows) and, after it, `ledger PATH` for the cycle's stage walls")
+   else if !frw-has?(o[1], "events") then ftt-say("give `events PATH` (a run's training-events.fkb) and, after it, `ledger PATH` for the cycle's stage walls")
    else {
     let r = ftt-report(ftt-rows(frw-str(o[1], "events", "")));
     frw-has?(o[1], "ledger") ? ftt-ledger(frw-str(o[1], "ledger", "")) : 0;

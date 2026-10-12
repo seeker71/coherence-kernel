@@ -460,6 +460,14 @@ ecosystem's model files, the session-learning subsystem's dialect (chosen by fil
 bridge (`form-rows-bridge.bml`, `form-rows-bridge-band` 7), the glass event lines. `observe/rows-from-json-run.bml` is the one door
 that reads a foreign JSON-lines file.
 
+The working ledgers are nodes, with text as the view (`form-value-nodes.bml`, `form-value-nodes-band` 127): a row is a content-
+addressed Form node (a record of node kids), kept as FORMBIN2 (`write_form_binary` now writes beside and renames over, so a ledger
+is whole or the last whole one) and read back as the same node ids. 3000 rows: built 25 to 34 ms, written 2, read 3 (rows as text:
+130 and 55). The trainer's `training-events.fkb`, the cycle's `ledger.fkb` and the baseline cache `baseline-<key>.fkb` are node
+ledgers (a real two-step run wrote and read them, a second run took the remembered baseline in 0.5 s); `observe/ledger-run.bml`
+shows one as form-rows text or carries a text ledger across, and `fvn-rows-of` still reads a path ending `.rows`. Receipts and the
+trace corpus stay text (documents read in git); crossings stay text until FORMBIN2 has an append two writers can share.
+
 ### The GPU lanes
 
 Every layer is a Form recipe first and then a carrier on a GPU, held to that recipe. Four light
