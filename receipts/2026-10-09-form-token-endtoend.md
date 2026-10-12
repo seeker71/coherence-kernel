@@ -11,7 +11,7 @@ the voice's diversity, flexibility and embodiment.
    100 rounds of 4 rows requested. Stopped after generation 50 (round 50, loss 2.94 at round 1, 0.09 near round 40) so
    the body's 19:00 day turn kept its slot; the closing validation and export did not run.
 3. `observe/form-token-eval-run.bml`, arm `lora` wearing generation 50, the 72 held-out questions, answered in stream
-   (crossings 3): 760,832 ms. The row is the last line of `receipts/form-token-eval.jsonl`.
+   (crossings 3): 760,832 ms. The row is the last line of `receipts/form-token-eval.rows`.
 
 ## What it read (lora arm; before = the 2026-10-02 row, 100 rounds on the old corpus, 64 questions)
 
