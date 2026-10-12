@@ -132,7 +132,7 @@ the missing denominator.
 
 `form/form-stdlib/adapters/llama-3.2-3b-form-tokens` is a Llama-3.2-3B-Instruct 4-bit LoRA (rank 8, eight
 layers) trained 100 steps (batch 4, learning rate 1e-4) from `llama-3.2-3b-voice-native` on the replayed rows
-of `learn/form-token-traces.jsonl`, exported through the checkpoint door. The ledger row
+of `learn/form-token-traces.rows`, exported through the checkpoint door. The ledger row
 (`receipts/form-token-lora.rows`, `lane: llama`) reads held-out loss 2935 milli before and 42 after; the
 commit that landed it rounds the first to 2.936. The held-out questions were asked in stream, the grammar
 answering each closed control (`receipts/form-token-eval.rows`, the row at 1790897633574):

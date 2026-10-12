@@ -194,13 +194,20 @@ section [form.bml] {
   def ntr-assessment(model,tk,r,phase,held) {
    if (!json-object-has?(r,"assessment")) then 0 else ntr-assessment-at(model,tk,r,phase,host_monotonic_ms(),held);
   }
+  // The dialect of a run is the dataset it was given: Form rows (train.rows, and an assessment that ends .rows) or the JSON
+  // documents of the session-learning subsystem (train.jsonl, assessment.json). The assessment rows are read, and the scores are
+  // written, in that dialect, so the subsystem that reads its own JSON back keeps reading it until it holds Form rows.
+  def ntr-rows-path?(path) = (Comparable) len(path) > 5 && (String) substring(path,len(path) - 5,len(path)) == ".rows";
+  def ntr-data-path(dir,name) = file_size(dir + "/" + name + ".rows") > 0 ? (dir + "/" + name + ".rows") : (dir + "/" + name + ".jsonl");
+  def ntr-assessment-nodes(path) = ntr-rows-path?(path) ? frb-nodes-of(path) : json-array-elements(parse-json("native-assessment",read_file(path)));
   def ntr-assessment-at(model,tk,r,phase,started,held) {
-   let rows = json-array-elements(parse-json("native-assessment",read_file(ntr-get(r,"assessment"))));
+   let rows = ntr-assessment-nodes(ntr-get(r,"assessment"));
    if nil?(rows) then form_error("native assessment has no rows") else ntr-assessment-save(r,phase,ntr-grade-rows(model,tk,rows,0,held),started);
   }
   def ntr-assessment-save(r,phase,scores,started) {
-   let out = ntr-get(r,"output"); let path = (out + ("/assessment-" + (phase + ".json")));
-   let saved = nag-write(path,json-emit-precise(json-node-array(scores)));
+   let out = ntr-get(r,"output"); let rowsRun = ntr-rows-path?(ntr-get(r,"assessment"));
+   let path = (out + ("/assessment-" + (phase + (rowsRun ? ".rows" : ".json"))));
+   let saved = nag-write(path,rowsRun ? str-join(map(s => frb-row-text(s),scores)) : json-emit-precise(json-node-array(scores)));
    ntr-event(out,("assessment-" + phase),[ntr-int("rows",len(scores)),ntr-int("wall_ms",(host_monotonic_ms() - started)),ntr-text("scores",path)]);
   }
   def ntr-admit(model,sample) {
@@ -299,7 +306,7 @@ section [form.bml] {
   }
   def ntr-run-ready(r) {
    let out = ntr-get(r,"output"); let made = fs-mkdir(out); let start = host_monotonic_ms();
-   let text = read_file((ntr-get(r,"data") + "/train.jsonl"));
+   let text = read_file(ntr-data-path(ntr-get(r,"data"),"train"));
    if nothing?(text) then form_error("native training corpus unreadable") else ntr-run-text(r,text,start);
   }
   def ntr-run-text(r,text,start) {
@@ -317,8 +324,8 @@ section [form.bml] {
    let resumed = ntr-resume(model,state,adapter);
    let traversal = nlp-restore(model[5],json-object-get(r,"training_progress"));
    let event = ntr-event(out,"admitted",[ntr-text("model",model[4]),ntr-text("adapter",nag-resolve(adapter)),ntr-int("rows",len(rows)),ntr-int("steps_requested",ntr-get(r,"steps")),ntr-int("batch",ntr-get(r,"batch")),ntr-int("lora_pairs",len(state)),ntr-int("optimizer_step",resumed[0]),ntr-text("optimizer_resume",resumed[1]),ntr-int("open_ms",(host_monotonic_ms() - start)),ntr-text("sequence_policy","whole-row, device-memory admission, no token truncation")]);
-   let validationRows = nld-file((ntr-get(r,"data") + "/valid.jsonl"));
-   let baselinePath = ntr-baseline-path(ntr-baseline-key(adapter,read_file((ntr-get(r,"data") + "/valid.jsonl")) ?? "",ntr-get(r,"mask_prompt")));
+   let validationRows = nld-file(ntr-data-path(ntr-get(r,"data"),"valid"));
+   let baselinePath = ntr-baseline-path(ntr-baseline-key(adapter,read_file(ntr-data-path(ntr-get(r,"data"),"valid")) ?? "",ntr-get(r,"mask_prompt")));
    let remembered = ntr-baseline-load(baselinePath,len(validationRows));
    let heldBefore = record_new(0,"scored",[],"cached",remembered);
    let baseline = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,resumed[0],heldBefore);
