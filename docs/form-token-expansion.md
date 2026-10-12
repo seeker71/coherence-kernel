@@ -12,7 +12,7 @@ What stands, measured on 2026-10-09 and 10 (every number is a reading the body h
   written), `node-select` was written three times over.
 * **A meter.** `observe/form-token-usage-run.bml` reads an evaluation row kind by kind: taught, expected, written,
   substituted, kinds used, each family's answers, and the advice its rules give (under-written, over-written).
-* **A loop.** `observe/form-token-cycle-run.bml` walks refresh, census, GPU gate, train, re-ask, meter in one process.
+* **A loop.** `observe/form-token-cycle-run.bml` walks refresh, GPU lease, train (the trainer's own census refuses a corpus that is not whole), re-ask, meter in one process; its doors take `name value` option lines and its ledger is Form rows (`docs/json-inside-form.md`).
 
 ## The expansion, in the order the evidence asks for it
 
