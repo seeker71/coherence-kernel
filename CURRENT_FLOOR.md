@@ -31,7 +31,7 @@ appear beside each source on its first run, and `./fkwu gate/form-cli-build-run.
 
 fkwu is the only runtime and every band answers its pin on it. Nothing in this tree builds, runs or
 gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc` and
-`./fkwu` (the digests are the body's own SHA-256, the HMAC Form's). The tree holds only kinds the body names
+`./fkwu` (the identities are the body's own fingerprint, the HMAC Form's). The tree holds only kinds the body names
 (Form, the C seed, documents and data: the structural gate is an allowlist, so any other file, whatever its
 extension or its case, is foreign) and no foreign file stands outside two declared carriers (`form-run`, the
 output-compaction wrapper whose Form classifier is pending, and the three lines of `Sema Ear.app`'s bundle
@@ -122,9 +122,10 @@ gate/tests/structural-gate-band          -> 262143  (every closed kind and the u
                                             with tracked, untracked, ignored, gone-from-disk and .claude files and a plain directory read by
                                             find, and the old list-of-scripts reading as the plant)
 gate/tests/structural-heal-carrier-band  -> 127
-form/form-stdlib/tests/form-cli-build-band -> 16383  (a request that does not read (`{bad json`, a typo'd key, a key of the wrong kind, an
+form/form-stdlib/tests/form-cli-build-band -> 65535  (a request that does not read (`{bad json`, a typo'd key, a key of the wrong kind, an
                                             array) is refused by name with exit 1 before any flow, never the default install, which
-                                            regenerates for minutes; the native form-cli's identity folds against independent SHA-256 answers, the
+                                            regenerates for minutes; the native form-cli's identity is the body's fingerprint, folding to
+                                            FNV-1a 64's published answers on the CPU's lane and in the Form recipe alike, the
                                             closure door's seal agreeing with the fold, every way an attestation can be wrong, the
                                             publication lock's refusals, the platform name, the proof's helpers, the roots list; the build
                                             itself is the drift gate's form-cli-build row, `printf '{"out":"<path>"}' | ./fkwu
@@ -1233,6 +1234,19 @@ Measured on one machine, with the walker alone versus pages, each pair giving th
 
 Lowering form-find makes 171 offers, binds 160 pages and spends 0.15 s offering.
 
+The body's identities are its own fingerprint, FNV-1a 64 written as 16 hex. That covers every form-cli seal, attestation,
+startup and carrier challenge, the files `source.id` and `form-cli.source.id`, and the compiler's and cursor's
+fingerprints. The fingerprint has two lanes that agree byte for byte:
+
+- **The Form recipe**: `bml-source-fingerprint` in `form/form-stdlib/bml-source.fk`. It reads 1.39 MB in 18 ms.
+- **The CPU lane**: `form/form-stdlib/bml/body-fingerprint.bml`, a Form-emitted image of 17 instructions run through
+  `jit_cpu_run`. It reads 1.39 MB in 2 ms.
+  - Before it serves, it witnesses `"a"` against the published answer.
+  - It walks files in 1 GiB spans mapped for their run.
+
+The native form-cli answers its identity in a 16-byte frame, and its challenge is the fingerprint of the domain and the
+nonce. A 64-hex digest is refused as an identity.
+
 SHA-256 has two lanes, and they agree byte for byte over the whole seed file:
 
 - **The meaning, in Form** (`form/form-stdlib/sha256.fk`): 256 KB in 54 ms, 5.5 MB in 210 ms, about 26 MB/s.
@@ -1244,8 +1258,8 @@ SHA-256 has two lanes, and they agree byte for byte over the whole seed file:
   door for CPU images (`jit_cpu_run`, leaf mode 58). It takes the image through the one page door, a string where it
   lies, and a file as spans mapped for their run. The 1.39 MB seed file hashes in 1 ms. No Metal carrier is asked, so
   the lane stands in every checkout, a fresh worktree included.
-  - `ntss-hash` (every form-cli seal and attestation) takes it when its context is ready. The context is ready when the
-    empty message's digest, computed through the door in this process, is the one FIPS 180-4 states.
+  - The lane is ready when the empty message's digest, computed through the door in this process, is the one FIPS
+    180-4 states.
   - `sho-file` and the model seals walk files in 4 GiB spans.
   - kernel_stat 77 and 78 count the images run and the microseconds inside them, and the board names that time
     `cpu-image`.
