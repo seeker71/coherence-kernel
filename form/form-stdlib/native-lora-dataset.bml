@@ -1,10 +1,11 @@
-// Chat, prompt/completion, segment and plain-text JSONL become teacher-forced token rows.
+// Chat, prompt/completion, segment and plain-text rows (Form rows, or the JSON lines of the session subsystem) become teacher-forced token rows.
 // Prompt masking supervises the final assistant response, including its end marker.
 // A segment row holds the response as ordered spans, each with its own supervise
 // mark: a span Form injected into the stream (an observation it answered) is read
 // as context and never taught as a prediction.
 // Rows retain their line number; malformed data never vanishes from the denominator.
 import form-stdlib/native-llama-tokenizer.bml;
+import form-stdlib/bml/form-rows-bridge.bml;
 section [form.bml] {
  class NativeLoraDataset {
   def nld-string(o,k) {
@@ -89,7 +90,16 @@ section [form.bml] {
    let text = read_file(path);
    nothing?(text) ? form_error("native training data absent: " + path) : nld-lines(text);
   }
-  def nld-prepare(t,rows,masked) = rows |> map(row => nld-row(t,parse-json("native-training-row",row[0]),masked,row[1]));
+  def nld-prepare(t,rows,masked) = rows |> map(row => nld-row(t,nld-node-of-line(row[0],row[1]),masked,row[1]));
+  // A training row is a Form row (form-rows.bml: `{prompt "..." completion "..."}`, a bare key right after the brace) or, in the
+  // dataset of the session-learning subsystem which still keeps JSON documents, a JSON object (`{"prompt":"..."}`): the first bytes
+  // tell them apart, and the JSON reader named here is the dataset boundary that goes when that subsystem holds Form rows.
+  def nld-rows-line?(text) {
+   let t = trim(text);
+   len(t) > 1 && str_byte_at(t,0) == 123 && frw-bare-start?(str_byte_at(t,1));
+  }
+  def nld-node-of-line(text,line) = nld-rows-line?(text) ? nld-node-of-row(frw-parse(text),line) : parse-json("native-training-row",text);
+  def nld-node-of-row(r,line) = (String) r[0] == "ok" && (String) value_kind(r[1]) == "record" ? frb-to-node(r[1]) : form_error("native training row is no Form row at line " + line.str() + ": " + (String) r[1]);
   def nld-weight(rows) = nil?(rows) ? 0.0 : (rows[0][3] + nld-weight(rows[1:]));
   def nld-tokens(rows) = nil?(rows) ? 0 : (len(rows[0][0]) + nld-tokens(rows[1:]));
  }

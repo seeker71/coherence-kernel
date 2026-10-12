@@ -1,11 +1,11 @@
 // form-token-lora.bml — the voice learns Form's in-stream controls by LoRA.
 //
-// A trace row (learn/form-token-traces.jsonl, the shared contract) holds a prompt and the
+// A trace row (learn/form-token-traces.rows, the shared contract: one Form record a line, form-rows.bml) holds a prompt and the
 // stream the voice and Form wrote together: the voice's prose, its
 // <|form:VERB|>PAYLOAD<|/form:VERB|> controls, and Form's
 // <|form:observation|>RESULT<|/form:observation|> answers. Accepted shapes:
-//   {"prompt": P, "stream": C}  or  {"prompt": P, "completion": C}
-//   {"messages": [{"role":"system"?}, ..., {"role":"user"}, {"role":"assistant","content":C}]}
+//   {prompt P stream C}  or  {prompt P completion C}
+//   {messages [{role "system"} ... {role "user"} {role "assistant" content C}]}
 // with an optional "system". When a row carries both, the stream is read: it is the whole reply
 // with Form's observations in place, where the corpus's completion is only the first control the
 // voice authors. "split", "id" and "family" are carried when present (a split marked heldout is
@@ -28,7 +28,7 @@
 // The asking again is a replayer: a function from a row's controls, in order, to Form's answer
 // for each, or nothing() where it cannot answer the same way twice (a lookup over a substrate
 // that moves). ftlr-convert-with takes one; ftlr-convert passes none, so every answer is counted
-// unverified, never silently trusted: census.json carries observations_replayed and
+// unverified, never silently trusted: census.rows carries observations_replayed and
 // observations_unverified, and every row carries its own two counts.
 //
 // The same spans give the Qwen head its sites (ftlr-sites): every point in a completion where
@@ -162,17 +162,14 @@ section [form.bml] {
   def ftlr-texts-at(texts,k) = if (len(texts) > k) then texts[k] else "";
   // one trace line ([text, number]) -> ["ok", row, spans, number, replayed, unverified, split]
   //                                   | ["refused", reason, number]
-  // The JSON reader is lenient, so wholeness is read from where it stopped: one object, ending
-  // in its own brace, with nothing but blank after it.
-  def ftlr-whole-object(text) {
-   let parsed = try json-parse-value(text,0,"form-token-trace") else nothing();
-   let t = trim(text);
-   if nothing?(parsed) then nothing() else if ((json-pair-pos(parsed) > len(text)) || ((!ftlr-blank?(substring(text,json-pair-pos(parsed),len(text)))) || ((!((Comparable) node_category(json-pair-r(parsed)) == JSON-OBJECT())) || (!((String) substring(t,len(t) - 1,len(t)) == "}"))))) then nothing() else json-pair-r(parsed);
-  }
+  // A trace line is one Form row (form-rows.bml), read strictly: one record, nothing after it. The accessors below read the row as
+  // the node the bridge makes of it.
+  def ftlr-whole-object(text) = ftlr-whole-of(frw-parse(text));
+  def ftlr-whole-of(r) = ((String) r[0] == "ok" && (String) value_kind(r[1]) == "record") ? frb-to-node(r[1]) : nothing();
   def ftlr-read-line(entry) = ftlr-read-line-with(entry,ftlr-no-replay);
   def ftlr-read-line-with(entry,replay) {
    let row = ftlr-whole-object(entry[0]);
-   if nothing?(row) then ["refused","json",entry[1]] else ftlr-read-row(row,entry[1],replay);
+   if nothing?(row) then ["refused","row",entry[1]] else ftlr-read-row(row,entry[1],replay);
   }
   def ftlr-read-row(row,line,replay) {
    let texts = ftlr-row-texts(row);
@@ -214,7 +211,7 @@ section [form.bml] {
    let k = ftlr-stride(n);
    map(j => rows[(j * k) % n], range(0,n));
   }
-  def ftlr-jsonl(rows) = foldl((acc, r) => acc ++ json-emit(r[1]) ++ "\n", "", rows);
+  def ftlr-rows-text(rows) = str-join(map(r => frb-row-text(r[1]), rows));
   // census: [lines, admitted, refused, reasons, verbs, observations, train, valid, ready,
   //          writes short, replayer, observations replayed, observations unverified]
   // ready is 1 only when a train and a held-out row exist and every file read back whole.
@@ -250,10 +247,10 @@ section [form.bml] {
    let ok = filter(r => ftlr-ok?(r), read);
    let split = ftlr-split-rows(ok);
    let dir = ftlr-mkdirs(data);
-   let wt = ftlr-write(data ++ "/train.jsonl",ftlr-jsonl(split[0]));
-   let wv = ftlr-write(data ++ "/valid.jsonl",ftlr-jsonl(split[1]));
+   let wt = ftlr-write(data ++ "/train.rows",ftlr-rows-text(split[0]));
+   let wv = ftlr-write(data ++ "/valid.rows",ftlr-rows-text(split[1]));
    let census = ftlr-census(read,split,filter(x => (Comparable) len(x) > 0, [if dir then "" else "no-directory",wt,wv]),replayer);
-   let wc = ftlr-write(data ++ "/census.json",json-emit(ftlr-census-node(census,traces,data)) ++ "\n");
+   let wc = ftlr-write(data ++ "/census.rows",frb-row-text(ftlr-census-node(census,traces,data)));
    if ((Comparable) len(wc) == 0) then census else ftlr-census-short(census,wc);
   }
   // ---- token-level reading of one segment row through a tokenizer ----
