@@ -31,6 +31,14 @@ and kinds. For a broad request, the local
 triage model first selects entries from the native function catalog. Its completed,
 released answer is retained under the exact request/catalog fingerprint; only
 existing names are accepted, and source bytes are read again for every proposal.
+Reference care first offers the existing strict `fcgp-num` accessor for declared
+two-parameter JSON integer readers. The BMF cursor recognizes actual calls;
+strings and comments do not qualify. Original source, definition scope, witness
+and checks must pass in private scratch before the candidate enters normal task
+publication. The framebuffer retains each attempted choice and its check result;
+the native receipt binds source hashes and zero model tokens. This is one native
+repair family, with quality bounded by the original checks.
+
 Reference repair retains the proposal's local model unless the caller selects
 another. An interrupted, fingerprint-matched coding checkpoint resumes before
 another whole-plan generation; its original request, witness and sources remain owned.
