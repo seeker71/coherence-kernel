@@ -46,6 +46,15 @@ keeps its released attention result when that result carries the same admitted
 queries. A newer checkpoint cannot refresh an older result after an interrupted
 attempt. Changed source or witness bytes retain their
 separate scope identity.
+Qwen prompt prefill publishes its current slice through native shared memory even
+when a containing cell captures stdout. `q38pc-publisher(pid, root)` identifies the
+frame; `ggf-receive` and `node_gift_read` return
+`[schema, pid, root, phase, position, count, epoch_ms, elapsed_ms, drained, metal_live]`.
+Join its owner and timestamp to the live model lease before treating a retained
+frame as current. Positions, completion and the carrier deadline distinguish
+slow progress from an unfinished wait. Q4_K and Q6_K prefill use the shared
+matrix-unit tile with their declared decoders and output pitch; Q8 keeps its
+wider matrix tile. Numerical agreement and span invariance have separate checks.
 Retained reference choices are read from current bytes, newest first, with identical
 reference bodies tried once per movement; failed observations are not cached.
 The original request and definition scope travel
