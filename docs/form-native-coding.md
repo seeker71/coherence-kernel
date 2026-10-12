@@ -42,7 +42,9 @@ candidate and supplies their current `bml-api` declarations through native sourc
 observations. Strings, comments and local parameter names do not become API queries.
 Changed native query sets reopen the same retained repair through an idempotent
 feedback event, preserving its original goal and failure. An unchanged query set
-keeps its released attention result; changed source or witness bytes retain their
+keeps its released attention result when that result carries the same admitted
+queries. A newer checkpoint cannot refresh an older result after an interrupted
+attempt. Changed source or witness bytes retain their
 separate scope identity.
 Retained reference choices are read from current bytes, newest first, with identical
 reference bodies tried once per movement; failed observations are not cached.
