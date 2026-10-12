@@ -44,6 +44,13 @@ than the 563 s above because the machine was heavily shared (a day-turn at 97% C
 sweep at once): a row's forward and backward read 0.8 s and 0.5 s here against 0.5 s and 0.3 s, the same code. The spread
 between the two runs is the neighbours' share, which the lease does not yet cover.
 
+The same cycle again on 2026-10-12 from the landed main (96f3ba937), now on Form rows end to end (options as lines, ledgers,
+corpus and dataset as rows; `docs/json-inside-form.md`), on a quiet machine: train stage **315 s** (open 2.9 s, baseline
+validation 93 s, 100 rounds 178 s + Adam 27 s; a row's forward 0.2 s and backward 0.1 s, 1.7 and 1.0 ms a token), evaluation
+449 s, **66 of 81 exact, forged 0, truncated 2, all nine kinds written** (effective 5.23 against 5.16 expected), held-out loss
+2.700 to about 0.03. The train stage is now 15 times faster than the 4,700 s it began the day at, and the evaluation (449 s,
+81 questions) is the largest stage left.
+
 Still open (named, not hidden): early stopping on a held-out check (the training loss wanders between 0.003 and 0.4 from
 round 60 on while the held-out loss ends at 0.03 to 0.04, so some of the 100 steps are spent past the gain); the day-turn and the band sweeps do not take the GPU lease, so their time-slices still
 inflate timings; the corpus digest is a 4 s Form SHA-256; the 17 MB tokenizer JSON parses in 3 s; forward and backward
