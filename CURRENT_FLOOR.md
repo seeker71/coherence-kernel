@@ -451,6 +451,15 @@ the real model's buffers while the band's synthetic ones passed: a kernel change
 (cacheable by adapter and row), the corpus digest is a 4 s Form SHA-256, and the neighbours' time-slices (a day-turn, band
 sweeps) inflate every timing until their doors take the lease too.
 
+JSON text is gone from the Form-token loop (`docs/json-inside-form.md`): Form's own value text, `form-rows.bml` (a value on a line,
+read back whole or refused with data; `form-rows-band` 63), carries the doors' options (`name value` lines, a cycle stage's input a
+list of them), the trainer's events, the cycle ledger, the baseline cache, the evaluation, trainer and census receipts (history
+migrated with parity: 11, 21, 7 rows), the trace corpus (`learn/form-token-traces.rows`, 729 rows) and the dataset files; a real run
+on the rows route reads the JSON route's losses (2.700 to 1.397). What stays JSON stays at an edge and is named there: the
+ecosystem's model files, the session-learning subsystem's dialect (chosen by file name), the organ-health nodes behind the one
+bridge (`form-rows-bridge.bml`, `form-rows-bridge-band` 7), the glass event lines. `observe/rows-from-json-run.bml` is the one door
+that reads a foreign JSON-lines file.
+
 ### The GPU lanes
 
 Every layer is a Form recipe first and then a carrier on a GPU, held to that recipe. Four light
