@@ -1106,6 +1106,23 @@ wall-census-band 63         form/form-stdlib/bml/wall-census.bml
 observe/tests/voice-frequency-band 255 · number-band 255 · float-printer-band 31
 ```
 
+The body's own awk (`form/form-stdlib/bml/form-awk.bml`) selects, transforms and computes over its own substrate.
+- **Records.** It reads lines, recipes and other source nodes (`-P XPATH`), blueprints (`-B`) and cells (`-C LEDGER`).
+- **Choice.** It carries Form's choice: `choice {} or {}`, `fail`, `cut`, `stop`, `try {} catch {}`, `timeout N {}`, `store()`/`undo()`
+  and `choice(...)`. A failed option's writes are undone by a journal, its printed lines included, and its finding reaches the next option.
+- **form-path.** form-path gains `{awk expression}` tests, the `??` choice and `XPATH => PROGRAM` transforms. A computed test that
+  ends reads as false, and the answer counts it on stderr.
+- **Measured** on 2026-10-12 against the whole tree:
+  - all 480 blueprint rows read in 185 ms;
+  - every recipe that begins a child (`path()` with `node()`) found in 448 ms;
+  - the long recipes per file (`-P '//def[@lines>60]'`) in 3.9 s with the trees parsed cold.
+- **On the way.** form-find's `callers` read a negated call `!name(` as a different name, so every negated use went uncounted. The
+  leading `!` is now a boundary.
+
+```text
+form/form-stdlib/tests/form-awk-band 4095   (a planted wrong expectation reads 4087)
+```
+
 ## Where the time goes
 
 Every fkwu run that lasts a fifth of a second leaves a time board, `.fkwu-time.<pid>`. While the run thread works, the

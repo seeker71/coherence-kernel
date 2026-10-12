@@ -29,9 +29,11 @@
 //
 // WIRE. form-find's service answers `path [--ids|--text|--rows|--count] EXPR` (EXPR in one argument, or in the request's "input"). fpa-open(base) is
 // form-find's index with the verb taught; fpa-run is the service loop with it; fpa-cold answers one request from an index of its own.
-// preludes: form-stdlib/core.fk form-stdlib/bml/form-find.bml
+// preludes: form-stdlib/core.fk form-stdlib/bml/form-find.bml form-stdlib/bml/form-awk.bml form-stdlib/bml/form-value-nodes.bml
 import form-stdlib/core.fk;
 import form-stdlib/bml/form-find.bml;
+import form-stdlib/bml/form-awk.bml;
+import form-stdlib/bml/form-value-nodes.bml;
 section [form.bml] {
  let FPA-STATE = record_new(0, "renders", 0, "parses", 0);
  let FPA-CAT-SET = intern_trivial_string("fp:set");
@@ -331,6 +333,7 @@ section [form.bml] {
    : (String) p[0] == "cmp" ? fpa-cmp?(s, c, p)
    : (String) p[0] == "has" ? !nil?(fpa-steps-from(s, [c], p[1], []))
    : (String) p[0] == "calls" ? fpa-calls?(s, c, p[1])
+   : (String) p[0] == "awk" ? fpa-awk-holds?(s, c, p)
    : false;
   // calls("x"): a call named x lies within the node's span; the text is looked at first, the body walked only when it holds the name
   def fpa-calls?(s, c, lit) = fpa-calls-text(s, c, lit, fnd-entry(s, c[7])[5]);
@@ -389,6 +392,9 @@ section [form.bml] {
    let all = foldl((acc, steps) => append(acc, fpa-eval-path(s, steps)), [], union);
    (nil?(union[1:]) && !fpa-has-parent?(union[0])) ? all : fpa-dd(all, fnd-map(), []);
   }
+  // a ?? b: Form's choice over node sets, the first alternative that is not empty
+  def fpa-eval-choice(s, unions) = nil?(unions[1:]) ? fpa-eval(s, unions[0]) : fpa-eval-took(s, unions, fpa-eval(s, unions[0]));
+  def fpa-eval-took(s, unions, xs) = (!nil?(xs) || nil?(unions[1:])) ? xs : fpa-eval-choice(s, unions[1:]);
 
   // ---- the path syntax: text -> a plan, or a named refusal ------------------------------------------------------------------------------------
   // a parse answers ["ok", next position, value] or ["err", position, refusal]
@@ -405,9 +411,13 @@ section [form.bml] {
 
   def fpa-parse(x) {
    let i = fpa-sk(x, 0);
-   fpa-at?(x, i, "count(") ? fpa-parse-count(x, i + 6) : fpa-parse-whole(x, "path", fpa-parse-union(x, i, []));
+   fpa-at?(x, i, "count(") ? fpa-parse-count(x, i + 6) : fpa-parse-whole(x, "path", fpa-parse-choice(x, i, []));
   }
-  def fpa-parse-count(x, i) = fpa-parse-count-close(x, fpa-parse-union(x, fpa-sk(x, i), []));
+  def fpa-parse-count(x, i) = fpa-parse-count-close(x, fpa-parse-choice(x, fpa-sk(x, i), []));
+  // a ?? b ?? c: unions offered in order
+  def fpa-parse-choice(x, i, acc) = fpa-choice-next(x, acc, fpa-parse-union(x, i, []));
+  def fpa-choice-next(x, acc, r) = !fpa-ok?(r) ? r : fpa-choice-more(x, cons(r[2], acc), fpa-sk(x, r[1]));
+  def fpa-choice-more(x, acc, j) = fpa-at?(x, j, "??") ? fpa-parse-choice(x, fpa-sk(x, j + 2), acc) : fpa-pk(reverse(acc), j);
   def fpa-parse-count-close(x, r) = !fpa-ok?(r) ? r : fpa-count-end(x, r, fpa-sk(x, r[1]));
   def fpa-count-end(x, r, j) = fpa-byte(x, j) == 41 ? fpa-parse-whole(x, "count", fpa-pk(r[2], j + 1)) : fpa-pe("form-path-expects-): count( is closed by )", j);
   def fpa-parse-whole(x, tag, r) = !fpa-ok?(r) ? r : fpa-whole-end(x, tag, r, fpa-sk(x, r[1]));
@@ -448,7 +458,31 @@ section [form.bml] {
    : fpa-at?(x, i, "has(") ? fpa-term-has(x, fpa-parse-path(x, fpa-sk(x, i + 4)))
    : fpa-at?(x, i, "last()") ? fpa-pk(["last"], i + 6)
    : (fpa-byte(x, i) >= 48 && fpa-byte(x, i) <= 57) ? fpa-pk(["pos", str_to_int(substring(x, i, scan_run(x, i, 1)))], scan_run(x, i, 1))
-   : fpa-pe("form-path-unknown-predicate: expected @attribute, calls('x'), has(path), not(...), a number or last()", i);
+   : fpa-byte(x, i) == 123 ? fpa-term-awk(x, i + 1, fpa-brace-end(x, i + 1, 0))
+   : fpa-pe("form-path-unknown-predicate: expected @attribute, calls('x'), has(path), not(...), {awk expression}, a number or last()", i);
+  // {expr}: an awk expression computed per node (form-awk.bml): @name and the other attributes, $0 the node's source, and every function
+  // a program has over the index; it holds when its value is true
+  def fpa-brace-end(x, i, d) = i >= len(x) ? 0 - 1
+   : str_byte_at(x, i) == 34 ? fpa-brace-end(x, fpa-q-end(x, i + 1, 34), d)
+   : str_byte_at(x, i) == 123 ? fpa-brace-end(x, i + 1, d + 1)
+   : str_byte_at(x, i) == 125 ? (d == 0 ? i : fpa-brace-end(x, i + 1, d - 1))
+   : fpa-brace-end(x, i + 1, d);
+  def fpa-term-awk(x, i, e) = e < 0 ? fpa-pe("form-path-unclosed-{: a computed test is closed by }", i) : fpa-term-awk-c(fwk-compile-expr(substring(x, i, e), fpa-awk-fns()), e + 1, i);
+  def fpa-term-awk-c(c, next, i) = (String) c[1] != "" ? fpa-pe("form-path-awk: " ++ c[1], i) : fpa-pk(["awk", c[0], record_new(0)], next);
+  def fpa-awk-holds?(s, c, p) = fpa-awk-held(s, fwk-pred(fpa-awk-pred-st(s, p[2]), p[1], fpa-span-text(s, c), (k) => fpa-c-attr(s, c, k)));
+  // a computed test that ends reads as false for that node, and is counted so the answer says so
+  def fpa-awk-held(s, r) {
+   let z = (String) r[1] != "" ? record_set(s, "awk-ends", [fpa-awk-ends(s)[0] + 1, r[1]]) : 0;
+   r[0];
+  }
+  def fpa-awk-ends(s) = record_has(s, "awk-ends") ? record_get(s, "awk-ends") : [0, ""];
+  def fpa-ends-said(r, e) = e[0] == 0 ? r : [r[0], r[1], r[2] ++ (len(r[2]) > 0 ? "; " : "") ++ e[0].str() ++ " computed test(s) ended and read as false (last: " ++ e[1] ++ ")"];
+  def fpa-ends-fresh(s) = record_set(s, "awk-ends", [0, ""]);
+  def fpa-awk-pred-st(s, holder) = record_has(holder, "st") ? record_get(holder, "st") : fpa-awk-put(holder, "st", fwk-pred-state(record_new(0, "vars", [], "ext", fpa-awk-ext(s))));
+  def fpa-c-attr(s, c, k) = (String) k == "id" ? fpa-hex(fpa-cid(c[0], c[1], fpa-span-text(s, c)))
+   : (String) k == "node" ? c[0] ++ ":" ++ fpa-hex(fpa-cid(c[0], c[1], fpa-span-text(s, c)))
+   : (String) k == "source" ? fpa-span-text(s, c)
+   : fpa-attr(s, c, k);
   def fpa-term-group(x, r) = !fpa-ok?(r) ? r : fpa-close-with(x, r, fpa-sk(x, r[1]), r[2]);
   def fpa-term-not(x, r) = !fpa-ok?(r) ? r : fpa-close-with(x, r, fpa-sk(x, r[1]), ["not", r[2]]);
   def fpa-close-with(x, r, j, v) = fpa-byte(x, j) == 41 ? fpa-pk(v, j + 1) : fpa-pe("form-path-expects-): a group is closed by )", j);
@@ -503,7 +537,7 @@ section [form.bml] {
 
   // stages: nodes in, nodes out
   def fpa-path(s, expr) = fpa-path-parsed(s, fpa-parse(expr));
-  def fpa-path-parsed(s, r) = !fpa-ok?(r) ? r : fpa-pk((String) r[2][0] == "count" ? len(fpa-eval(s, r[2][1])) : fpa-set-of(s, fpa-eval(s, r[2][1])), r[1]);
+  def fpa-path-parsed(s, r) = !fpa-ok?(r) ? r : fpa-pk((String) r[2][0] == "count" ? len(fpa-eval-choice(s, r[2][1])) : fpa-set-of(s, fpa-eval-choice(s, r[2][1])), r[1]);
   def fpa-hit-attr(h, name) = (String) name == "id" ? fpa-hit-id(h)
    : (String) name == "name" ? fpa-node-name(fpa-hit-node(h))
    : (String) name == "kind" ? fpa-node-kind(fpa-hit-node(h))
@@ -535,15 +569,109 @@ section [form.bml] {
    nil?(words) ? fat-trim(input) : fat-join(words, " ");
   }
   def fpa-mode-of(argv) = fnd-has?(argv, "--ids") ? "ids" : fnd-has?(argv, "--text") ? "text" : fnd-has?(argv, "--count") ? "count" : "rows";
-  def fpa-verb(s, argv, input) = (String) fpa-expr-of(argv, input) == "" ? [2, "", "path: form-path-needs-an-expression: path [--ids|--text|--rows|--count] EXPR (in one argument, or in the request input)"] : fpa-verb-parsed(s, fpa-mode-of(argv), fpa-path(s, fpa-expr-of(argv, input)));
+  def fpa-verb(s, argv, input) = (String) fpa-expr-of(argv, input) == "" ? [2, "", "path: form-path-needs-an-expression: path [--ids|--text|--rows|--count] EXPR [=> PROGRAM] (in one argument, or in the request input)"] : fpa-verb-split(s, fpa-mode-of(argv), fpa-arrow(fpa-expr-of(argv, input)));
+  def fpa-verb-split(s, mode, parts) = fpa-verb-split-at(s, mode, parts, fpa-ends-fresh(s));
+  def fpa-verb-split-at(s, mode, parts, z) = fpa-ends-said((String) parts[1] == "" ? fpa-verb-parsed(s, mode, fpa-path(s, parts[0])) : fpa-awk-then(s, fpa-path(s, parts[0]), parts[1]), fpa-awk-ends(s));
   def fpa-verb-parsed(s, mode, r) = !fpa-ok?(r) ? [2, "", "path: " ++ r[2]] : fpa-verb-answer(s, mode, r[2]);
   def fpa-verb-answer(s, mode, v) = (String) value_kind(v) == "int" ? [0, v.str() ++ "\n", ""] : nil?(fpa-hits(v)) ? [1, "", ""] : fpa-verb-cap(fpa-render(s, v, mode));
   def fpa-verb-cap(out) = len(out) <= fnd-max-out() ? [0, out, ""] : [0, substring(out, 0, fnd-max-out()), "truncated: output-limit " ++ fnd-max-out().str() ++ " bytes; narrow the path or use --count"];
 
-  // ---- the service: form-find's index with the verb taught --------------------------------------------------------------------------------------------
+  // ---- the awk verb: awk over indexed files and over the body's own substrate (form-awk.bml) ---------------------------------------------------
+  //   awk [-F FS] [-v N=V] PROGRAM [FILE...]   lines of indexed files, or of the request's input
+  //   awk -P 'XPATH' PROGRAM                    recipes and every other node a path resolves to: @kind @name @arity @path @line @start @end
+  //                                             @bytes @lines @id (the content id, 13 hex) @node (kind:id) @source; $0 the node's source
+  //   awk -B PROGRAM                            the blueprint registry: @name @id (@pkg.level.type.inst) @pkg @level @type @inst @meaning
+  //                                             @aliases @defined_in @reuse @node; $0 "id name meaning"
+  //   awk -C LEDGER PROGRAM                     a ledger's cells (FORMBIN2 .fkb rows, or form-rows .rows text): @KEY each field the cell
+  //                                             holds, @node the cell's NodeID; $0 its form-rows text
+  // and in every program: bp(name) bpname(id) bpmeaning(name or id) defined(name) callers(name) path(xpath, arr) node(id, attr).
+  def fpa-awk-fns() = ["bp", "bpname", "bpmeaning", "defined", "callers", "path", "node"];
+  def fpa-awk-verb(s, argv, input) = fpa-awk-verb-at(s, argv, input, fpa-ends-fresh(s));
+  def fpa-awk-verb-at(s, argv, input, z) = fpa-ends-said(fpa-awk-door(s, input, fwk-door(argv[1:])), fpa-awk-ends(s));
+  def fpa-awk-door(s, input, o) = (String) record_get(o, "err") != "" ? [2, "", "awk: " ++ record_get(o, "err")] : fpa-awk-compiled(s, input, o, fwk-compile(record_get(o, "prog"), fpa-awk-fns()));
+  def fpa-awk-compiled(s, input, o, c) = (String) c[1] != "" ? [2, "", "awk: " ++ c[1]] : fpa-awk-with(s, o, c[0], fpa-awk-source(s, input, o));
+  def fpa-awk-with(s, o, prog, src) = (String) src[1] != "" ? [2, "", "awk: " ++ src[1]] : fpa-awk-cap(fwk-run(prog, src[0], fwk-env(o, fpa-awk-ext(s))));
+  def fpa-awk-cap(r) = len(r[1]) <= fnd-max-out() ? r : [r[0], substring(r[1], 0, fnd-max-out()), r[2] ++ (len(r[2]) > 0 ? "; " : "") ++ "truncated: output-limit " ++ fnd-max-out().str() ++ " bytes"];
+  def fpa-awk-source(s, input, o) = len(record_get(o, "P")) > 0 ? fpa-awk-path-src(s, fpa-path(s, record_get(o, "P")))
+   : record_get(o, "B") == 1 ? [fpa-awk-bp-records(s), ""]
+   : len(record_get(o, "C")) > 0 ? fpa-awk-cells(record_get(o, "C"))
+   : nil?(record_get(o, "files")) ? [fwk-line-records(input, ""), ""]
+   : fpa-awk-files(s, record_get(o, "files"), []);
+  def fpa-awk-put(r, k, v) {
+   let z = record_set(r, k, v);
+   v;
+  }
+  // nodes a run has met, by id, for node(id, attr)
+  def fpa-awk-nodes(s) = record_has(s, "awk-nodes") ? record_get(s, "awk-nodes") : fpa-awk-put(s, "awk-nodes", record_new(0));
+  def fpa-awk-keep(s, h, v) {
+   let z = record_set(fpa-awk-nodes(s), fpa-hex(fpa-hit-id(h)), h);
+   v;
+  }
+  def fpa-awk-path-src(s, r) = !fpa-ok?(r) ? [[], r[2]] : (String) value_kind(r[2]) == "int" ? [[], "-P needs a node set; count() answers a number"] : [map(h => fpa-awk-hit-record(s, h), fpa-hits(r[2])), ""];
+  def fpa-awk-hit-record(s, h) = fpa-awk-keep(s, h, [fpa-hit-source(s, h), (k) => fpa-awk-hit-attr(s, h, k), fpa-hit-path(h)]);
+  def fpa-awk-hit-attr(s, h, k) = (String) k == "id" ? fpa-hex(fpa-hit-id(h))
+   : (String) k == "node" ? fpa-node-kind(fpa-hit-node(h)) ++ ":" ++ fpa-hex(fpa-hit-id(h))
+   : (String) k == "lines" ? len(split-on(fpa-hit-source(s, h), "\n"))
+   : (String) k == "source" ? fpa-hit-source(s, h)
+   : fpa-hit-attr(h, k);
+  def fpa-awk-files(s, files, acc) = nil?(files) ? [fwk-flat(reverse(acc)), ""] : fpa-awk-file(s, files, acc, fnd-entry(s, files[0]));
+  def fpa-awk-file(s, files, acc, e) = (nil?(e) || (Comparable) e[4] != 1) ? [[], "not an indexed text file: " ++ files[0]] : fpa-awk-files(s, files[1:], cons(fwk-line-records(e[5], files[0]), acc));
+  // the blueprint registry, parsed once per text and kept on the index: [text, rows, a map from name, alias and id to the row]
+  def fpa-awk-registry() = "form/form-stdlib/blueprint-registry.json";
+  def fpa-awk-bp(s) = fpa-awk-bp-of(s, fnd-entry(s, fpa-awk-registry()));
+  def fpa-awk-bp-of(s, e) = (nil?(e) || (Comparable) e[4] != 1) ? ["", [], record_new(0)] : fpa-awk-bp-held(s, e[5], record_has(s, "awk-bp") ? record_get(s, "awk-bp") : [""]);
+  def fpa-awk-bp-held(s, text, held) = (String) held[0] == text ? held : fpa-awk-put(s, "awk-bp", fpa-awk-bp-made(text, fpa-awk-bp-parse(text)));
+  def fpa-awk-bp-made(text, rows) = [text, rows, foldl((m, r) => fpa-awk-bp-index(m, r), record_new(0), rows)];
+  def fpa-awk-bp-index(m, r) = foldl((m2, k) => fwk-put-r(m2, k, r), m, append([record_get(r, "name"), record_get(r, "id")], filter(a => len(a) > 0, split-on(record_get(r, "aliases"), " "))));
+  def fpa-awk-bp-parse(text) = !faj-valid(text) ? [] : map(n => fpa-awk-bp-row(n), json-array-elements(json-object-get(faj-json("blueprint-registry", text), "blueprints")));
+  def fpa-awk-jv(n, k) = node_value(json-object-get(n, k));
+  def fpa-awk-jlist(n, k) = fat-join(map(x => fwk-str(node_value(x)), json-array-elements(json-object-get(n, k))), " ");
+  def fpa-awk-bp-row(n) = record_new(0, "name", fpa-awk-jv(n, "name"), "id", fwk-nodeid([fpa-awk-jv(n, "pkg"), fpa-awk-jv(n, "level"), fpa-awk-jv(n, "type"), fpa-awk-jv(n, "inst")]), "pkg", fpa-awk-jv(n, "pkg"), "level", fpa-awk-jv(n, "level"), "type", fpa-awk-jv(n, "type"), "inst", fpa-awk-jv(n, "inst"), "meaning", fpa-awk-jv(n, "meaning"), "aliases", fpa-awk-jlist(n, "aliases"), "defined_in", fpa-awk-jlist(n, "defined_in"), "reuse", fpa-awk-jv(n, "reuse"));
+  def fpa-awk-bp-records(s) = map(r => [record_get(r, "id") ++ " " ++ record_get(r, "name") ++ " " ++ record_get(r, "meaning"), (k) => fpa-awk-rec-attr(r, k), fpa-awk-registry()], fpa-awk-bp(s)[1]);
+  def fpa-awk-rec-attr(r, k) = (String) k == "node" ? record_get(r, "id") : record_has(r, k) ? record_get(r, k) : nothing();
+  def fpa-awk-bp-field(s, x, k) = record_has(fpa-awk-bp(s)[2], x) ? record_get(record_get(fpa-awk-bp(s)[2], x), k) : "";
+  // a ledger's cells: FORMBIN2 rows (.fkb), or form-rows text (.rows) read as the same nodes
+  def fpa-awk-cells(path) = !(fnd-ends?(path, ".fkb") || fnd-ends?(path, ".rows")) ? [[], "-C reads a node ledger (.fkb) or form-rows text (.rows): " ++ path]
+   : file_size(path) < 0 ? [[], "-C: no ledger at " ++ path]
+   : fnd-ends?(path, ".fkb") ? [map(n => fpa-awk-cell(n, path), fvn-ledger(path)), ""]
+   : fpa-awk-rows-of(fvn-rows-of(path), path);
+  def fpa-awk-rows-of(r, path) = (String) r[0] != "ok" ? [[], "-C: " ++ fwk-str(r[1])] : [map(v => fpa-awk-cell(fvn-of(v), path), r[1]), ""];
+  def fpa-awk-cell(n, path) = [fvn-text(n), (k) => fpa-awk-cell-attr(n, k), path];
+  def fpa-awk-cell-attr(n, k) = (String) k == "node" ? value_str(n) : fpa-awk-cell-val(fvn-field(n, k));
+  def fpa-awk-cell-val(f) = nothing?(f) ? nothing() : fpa-awk-scalar(fvn-to(f), f);
+  def fpa-awk-scalar(v, f) = nothing?(v) ? nothing() : ((String) value_kind(v) == "string" || (String) value_kind(v) == "int" || (String) value_kind(v) == "float") ? v : fvn-text(f);
+  // the functions a program has over the index
+  def fpa-awk-ext(s) = record_new(0,
+   "bp", (vs) => fpa-awk-bp-field(s, fwk-str(fwk-first(vs)), "id"),
+   "bpname", (vs) => fpa-awk-bp-field(s, fwk-str(fwk-first(vs)), "name"),
+   "bpmeaning", (vs) => fpa-awk-bp-field(s, fwk-str(fwk-first(vs)), "meaning"),
+   "defined", (vs) => fpa-awk-defined(s, fwk-str(fwk-first(vs))),
+   "callers", (vs) => len(fnd-callers-rows(s, fwk-str(fwk-first(vs)), fnd-cands(s, [fwk-str(fwk-first(vs))], []))),
+   "path", (vs) => fpa-awk-path-ids(s, fpa-path(s, fwk-str(fwk-first(vs)))),
+   "node", (vs) => fpa-awk-node(s, fwk-str(fwk-first(vs)), fwk-str(fwk-first(fwk-rest(vs)))));
+  def fpa-awk-defined(s, name) = fpa-awk-defined-rows(fnd-mget(record_get(s, "defs"), name, []) |> map(en => fnd-def-row(s, en)[1]));
+  def fpa-awk-defined-rows(rows) = nil?(rows) ? "" : fpa-awk-path-line(sort-strs(rows)[0]);
+  def fpa-awk-path-line(row) = substring(row, 0, str_find(row, ":", str_find(row, ":", 0) + 1));
+  def fpa-awk-path-ids(s, r) = !fpa-ok?(r) ? [[], r[2]] : (String) value_kind(r[2]) == "int" ? [[], "path() needs a node set; count() answers a number"] : [map(h => fpa-awk-keep(s, h, fpa-hex(fpa-hit-id(h))), fpa-hits(r[2])), ""];
+  def fpa-awk-node(s, id, k) = record_has(fpa-awk-nodes(s), id) ? fpa-awk-hit-attr(s, record_get(fpa-awk-nodes(s), id), k) : nothing();
+  // path EXPR => PROGRAM: the selection, transformed and computed by an awk program
+  def fpa-arrow(x) = fpa-arrow-at(x, fpa-arrow-find(x, 0, 0));
+  def fpa-arrow-at(x, k) = k < 0 ? [x, ""] : [fat-trim(substring(x, 0, k)), fat-trim(substring(x, k + 2, len(x)))];
+  def fpa-arrow-find(x, i, d) = i + 1 >= len(x) ? 0 - 1
+   : (str_byte_at(x, i) == 34 || str_byte_at(x, i) == 39) ? fpa-arrow-find(x, fpa-q-end(x, i + 1, str_byte_at(x, i)), d)
+   : (str_byte_at(x, i) == 91 || str_byte_at(x, i) == 123 || str_byte_at(x, i) == 40) ? fpa-arrow-find(x, i + 1, d + 1)
+   : (str_byte_at(x, i) == 93 || str_byte_at(x, i) == 125 || str_byte_at(x, i) == 41) ? fpa-arrow-find(x, i + 1, d - 1)
+   : (d == 0 && str_byte_at(x, i) == 61 && str_byte_at(x, i + 1) == 62) ? i
+   : fpa-arrow-find(x, i + 1, d);
+  def fpa-q-end(x, i, q) = i >= len(x) ? i : str_byte_at(x, i) == 92 ? fpa-q-end(x, i + 2, q) : str_byte_at(x, i) == q ? i + 1 : fpa-q-end(x, i + 1, q);
+  def fpa-awk-then(s, r, prog) = fpa-awk-then-c(s, fwk-compile(prog, fpa-awk-fns()), fpa-awk-path-src(s, r));
+  def fpa-awk-then-c(s, c, src) = (String) c[1] != "" ? [2, "", "path: awk: " ++ c[1]] : (String) src[1] != "" ? [2, "", "path: " ++ src[1]] : fpa-awk-cap(fwk-run(c[0], src[0], record_new(0, "vars", [], "ext", fpa-awk-ext(s))));
+
+  // ---- the service: form-find's index with the verbs taught --------------------------------------------------------------------------------------------
   def fpa-install(s) {
    let z = fnd-ext-add(s, "path", (st, argv, input) => fpa-verb(st, argv, input));
    let m = fnd-ext-add(s, "memory", (st, argv, input) => fnd-mem-verb(st, argv, input));
+   let a = fnd-ext-add(s, "awk", (st, argv, input) => fpa-awk-verb(st, argv, input));
    s;
   }
   def fpa-open(base) = fpa-install(fnd-open(base));

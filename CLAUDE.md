@@ -37,7 +37,9 @@ Before you believe a band's number, read its exit code and let preflight read th
 
 Work through the body's own tools and flows (Urs, 2026-09-28): edit with the edit tool or the body's doors, probe
 and count with `./fkwu` cells and BML, search and inspect through the native agent tools
-([`docs/form-native-agent-tools.md`](docs/form-native-agent-tools.md)) — not perl, python, sed or awk. A missing
+([`docs/form-native-agent-tools.md`](docs/form-native-agent-tools.md)), and compute with the body's own `awk` and `path`,
+which select, transform and compute over its recipes, blueprints and cells with Form's choice. Never the host's perl,
+python, sed or awk. A missing
 internal tool is a signal to write it and include it in the body, in the same movement; never reach for an external
 tool to get past it. The body holds this itself: every door of the body that begins a child reads the command first, and
 one that runs sed, awk, perl or python is refused with a named ending that says what to use

@@ -131,7 +131,8 @@ defines X" over a tree of 2,100 files. `form-find` can. It is a resident service
 | `bands [NAME]` | the band files (a `; Expected:` or `; Verdict` header) that name NAME: `path expected= verdict= mentions=` |
 | `imports UNIT` | `UNIT -> raw` for what it imports (`import` lines, `preludes:` headers), `UNIT <- path:line:text` for who imports it |
 | `rows FILE [FIELD[=VALUE]]` | a `.jsonl` census or ledger (a `.hearth/*.jsonl` too) as a keyed table: the rows holding FIELD=VALUE, an array field matching any element; with a bare FIELD its values and counts |
-| `path [--ids\|--text\|--rows\|--count] EXPR` | an XPath-shaped query over the files' nodes (`//def[calls("host_spawn_at")]`): node ids with file, byte span and line (below, "form-path") |
+| `path [--ids\|--text\|--rows\|--count] EXPR [=> PROGRAM]` | an XPath-shaped query over the files' nodes (`//def[calls("host_spawn_at")]`): node ids with file, byte span and line; `{...}` computed tests, `??` choice, and `=> PROGRAM` to transform and compute (below, "form-path") |
+| `awk [-F FS] [-v N=V] [-P XPATH \| -B \| -C LEDGER] PROGRAM [FILE...]` | the body's awk over indexed files, or over its own substrate as records: recipes and every source node (`-P`), blueprints (`-B`), cells (`-C`), with Form's choice (below, "awk") |
 | `status`, `refresh` | the index's counters; a refresh now |
 | `read cat head tail sed wc jq grep rg` | the wire's own tools over the indexed files the command names (`rg` and `grep` over the whole tree are `find`) |
 
@@ -203,6 +204,9 @@ The one-shot door is `printf '%s' '--rows //def[@name="fnd-serve"]' | ./fkwu obs
 | `//def[@lines>40]` · `//def[@arity=2]` | attributes `@name @kind @path @line @arity @value @lines @bytes @start @end`; `= != ~ !~ > < >= <=` (`~` is the grep engine's ERE; numbers order, text does not) |
 | `[2 and @name="x"]` · `[not(@arity=0)]` · `[@a or @b]` · `[1]` · `[last()]` | `and or not( )`; a position counts within one context node's step result |
 | `a \| b` · `count(...)` | union (first branch's nodes, then the second's, duplicates dropped); how many |
+| `//def[{ length(@name) > 30 }]` · `//def[@arity>2 and { callers(@name) == 0 }]` | a computed test: an awk expression per node (the attributes as `@name`, plus `@id @node @source`; `$0` the node's source; every awk function and the index's, below); a test that ends (`{ 1/0 }`) reads as false and the answer's stderr counts it |
+| `//def[@name="x"] ?? //defn[@name="x"]` | Form's choice over node sets: the first alternative that is not empty |
+| `//def[calls("host_spawn_at")] => { n[@path]++ } END { for (p in n) print n[p], p }` | transform and compute: an awk program over the selected nodes, each a record as `awk -P` gives it |
 
 Strings take `"` or `'`; inside, `\"` or `\\` is the character, any other backslash stays (a regex's `\.`). **Refused by name, never guessed**: `form-path-expects-a-step`,
 `-expects-a-node-test`, `-unknown-node-test`, `-unknown-attribute`, `-unknown-predicate`, `-expects-a-literal`, `-number-expected` (`@lines` with a string),
@@ -241,7 +245,96 @@ indentation reading is the one that is wrong). The membrane census (`.hearth/mem
 The whole-tree structural question pays once to parse 31 MB (about 10 s cold here); the same index then answers it in a few hundred milliseconds. The cold door
 (`fpa-cold`) opens an index of its own (2 s) and answers the same as the standing one.
 
- for a Form organ. It is not the
+### awk — the body's own pattern-action language, over lines and over Form's own records
+
+`form/form-stdlib/bml/form-awk.bml` is awk written in Form: a program is lexed, parsed and its regular expressions compiled once (the grep
+engine's ERE dialect), then run over records. One language stands behind three doors:
+
+- **the wire's `awk`** (`fat-call`, and the local voice's `<|form:tool|>awk '...' PATH<|/form:tool|>`): held input or resident documents, a
+  record a line, `FILENAME` the document's path and `FNR` counted per document;
+- **form-find's `awk` verb**: indexed files by path, and the body's own substrate as records (`-P`, `-B`, `-C`, below) with functions over the index;
+- **form-path**: a `{...}` computed test inside a step, and `path 'XPATH => PROGRAM'` over the selection.
+
+**The language.** `BEGIN { }` `END { }` `pattern { action }` `pattern` `{ action }` and ranges `p1, p2`; `print` `printf` `if`/`else` `while` `do`/`while`
+`for (;;)` `for (k in a)` `next` `exit [code]` `break` `continue` `delete a[k]` `delete a`; assignment and `+= -= *= /= %= ^=`, `?:` `|| && in ~ !~ < <= == != > >=`,
+concatenation, `+ - * / % ^`, `! -`, `++ --`, `$e`, `a[k]`, `a[i, j]` (joined by `SUBSEP`), `/re/` (matches `$0`). Functions: `length substr index split sub gsub
+match sprintf tolower toupper int`, and `attr(name)`, `kind(v)` (`unset`, `string`, `number`), `nodeid(p, l, t, i)` (`"@p.l.t.i"`). Variables: `NR NF FNR FS OFS ORS
+FILENAME RSTART RLENGTH SUBSEP`. `-F FS` and `-v NAME=VALUE` read escapes (`\t`). Two values compare as numbers when both read wholly as numbers (an unset value reads as
+both), otherwise as strings in byte order. Numbers print by the body's one float rendering (shortest round-trip digits: `7/2` is `3.5`, `1/3` is `0.3333333333333333`),
+not by `OFMT`; `length` and `substr` count bytes. `printf` reads `%d %i %u %o %x %X %c %s %e %E %f %F %g %G %%`, flags `- + space # 0`, width and precision, `*` for either.
+
+**Form's choice** (`control/offer-ack-core.fk`, `control/choice-lane-core.fk`, `teachings/surprise-is-a-choice-point.md`). Every option is offered from the same
+state: what an option wrote (variables, elements, fields, printed lines) is kept in a journal while it is offered, and undone when it does not land.
+
+| statement | what it does |
+| --- | --- |
+| `choice { A } or { B } or { C }` | offers A; when A does not land, undoes it and offers B, and so on; the first that lands wins; none lands: the choice fails. `FINDINGS[k]` is what option k failed with, `REASON` the last |
+| `fail [finding]` | this option did not land. Outside every `choice`, `try` and `timeout` the rule's action ends for this record (the next rule is offered) and `FAILS` counts it |
+| `cut` | commits the enclosing choice to this option: if it fails after the cut, the choice fails without offering the rest |
+| `stop` | makes no further offer: the run ends where it stands, its output kept, `END` not run |
+| `try { A } catch { B }` | offers A; when A does not land it is undone, `REASON` says why, and B decides the recovery |
+| `timeout N { A }` | offers A within N statements; running out is A's failure (`REASON` is `timeout`, counted in `TIMEOUTS`) |
+| `k = store()` · `undo(k)` · `undo()` | a checkpoint is a value; `undo(k)` returns to it, printed output included (`undo()`: the last one) |
+| `choice(e1, e2, ...)` | the first value that is set and does not end (`choice(@label, @name, "anon")`, `choice(a / b, 0)`) |
+
+A primitive that meets a state it cannot continue past (division by zero, a regular expression that does not compile) stops. Inside an option that is the option's
+failure, its text the finding. Outside every option the program ends aloud: exit 2, what it printed before, and the reason on stderr. A run is bounded at
+10,000,000 statements (`awk-step-limit`, not caught by any option).
+
+**The body's own records.** With `-P`, `-B` or `-C` a record is a node, not a line. Its attributes are asked by name as `@name` (or `attr("name")`), and `$0` is its text
+(split into `$1..$NF` as any line):
+
+| source | records | attributes |
+| --- | --- | --- |
+| `-P 'XPATH'` | recipes (`def defn let field`), classes, sections, imports, blueprint declarations, calls and strings: every node form-path resolves | `@kind @name @arity @path @line @start @end @bytes @lines @id` (the content id, 13 hex) `@node` (`kind:id`) `@source`; `$0` the node's source |
+| `-B` | the blueprint registry (`form/form-stdlib/blueprint-registry.json`), parsed once per text and kept on the index | `@name @id` (`@pkg.level.type.inst`) `@pkg @level @type @inst @meaning @aliases @defined_in @reuse @node`; `$0` `id name meaning` |
+| `-C LEDGER` | a ledger's cells: FORMBIN2 rows (`.fkb`, `form-value-nodes.bml`) or form-rows text (`.rows`) read as the same nodes | `@KEY` for every field the cell holds (a list or record field reads as its form-rows text), `@node` the cell's NodeID |
+
+Functions over the index, in every form-find program and in form-path's tests: `bp(name)` the NodeID text of a blueprint (by name or alias), `bpname(id)`,
+`bpmeaning(name or id)`, `defined(name)` the `path:line` of its definition, `callers(name)` how many lines use it, `path(xpath, arr)` the matching nodes' ids in
+`arr[1..n]` (answers n), `node(id, attr)` an attribute of a node a `path()` or `-P` met (`"source"` its text). A NodeID can be written as a literal: `bpname(@1.2.97.1)`.
+
+**Examples**, answered by the body (2026-10-12):
+
+```sh
+# lines: count, filter, reshape
+awk '{ n[$1]++ } END { for (k in n) print n[k], k }' PATH
+awk -F: '$3 > 100 { print $1 }' PATH
+awk '{ printf "%-20s %5d\n", $1, $2 }' PATH
+
+# Form's choice over lines: input "a 3\nb x\nc 4\n"  ->  skipped 2 not a number: x / sum 7
+awk '{ choice { if ($2 !~ /^[0-9]+$/) fail "not a number: " $2; s += $2 } or { print "skipped", NR, REASON } } END { print "sum", s }'
+
+# recipes as records  ->  435 recipes, mean arity 2.70, 80 over one line
+awk -P '//class[@name="FormAwk"]/def' '{ n++; a += @arity; if (@lines > 1) long++ } END { printf "%d recipes, mean arity %.2f, %d over one line\n", n, a / n, long }'
+
+# blueprints  ->  @1.2.99.1947 OAC-ZERO The 0-acknowledgment arm of the offer/ack core ...
+awk -B '@name ~ /^OAC/ { print @id, @name, @meaning }'
+
+# a selection inside a program: every recipe that begins a child, by name and place
+awk 'BEGIN { n = path("//def[calls(\"host_spawn_at\")]", ids); for (i = 1; i <= n; i++) print node(ids[i], "name"), node(ids[i], "path") ":" node(ids[i], "line") }'
+
+# cells: a ledger's events counted by kind (witnessed on the band's fixture ledger; no FORMBIN2 ledger stood in the hearth that day)
+awk -C LEDGER.fkb '{ n[@event]++; loss[@event] += @loss } END { for (e in n) print n[e], e, loss[e] / n[e] }'
+
+# form-path: computed test (recipes of one file no line calls), choice, transform
+path '/file[@path~"form-awk.bml"]//def[{ callers(@name) == 0 }]'
+path '//def[@name="fpa-awk-verb"] ?? //defn[@name="fpa-awk-verb"]'
+path '//def[calls("host_spawn_at")] => { n[@path]++ } END { for (p in n) print n[p], p }'
+```
+
+Quote the program and any path in single quotes: the wire's argv reader takes `>`, `|`, `{` and a bare `"` as shell syntax and refuses them (`shell-syntax-not-supported`).
+A local voice reads the same guide as `help awk` (`fwk-guidance`).
+
+**Named endings, never a guess:** `awk-syntax: ...` (with what was found), `awk-regex: ...`, `awk-unknown-function: NAME`, `awk-function-not-supported: NAME`
+(`rand sin cos atan2 exp log sqrt close fflush srand`), `awk-system-not-supported` (the body begins no child), `awk-getline-not-supported`, `awk-output-redirection-not-supported`,
+`awk-user-functions-not-supported`, `awk-division-by-zero`, `awk-fractional-power-not-supported`, `awk-step-limit`; at the door `awk-needs-a-program`, `awk-unknown-option`,
+`awk-v-needs-name=value`, `awk-one-record-source`, `awk-files-and-form-records`, and on the wire `awk-form-records-need-the-index` (`-P -B -C` are form-find's).
+Witness: `form/form-stdlib/tests/form-awk-band.bml`.
+
+## In-process Form API
+
+`fc-tool-call` remains the embedding API for a Form organ. It is not the
 recommended boundary for an agent or external tool caller:
 
 ```lisp
@@ -447,7 +540,7 @@ action.
 | `uniq` | Adjacent equal lines; `-c`, `-d`, `-u`. |
 | `tr` | Equal-length literal byte sets or `-d SET`; `\n \r \t \\` escapes. |
 | `cut` | `-d DELIMITER -f N`, one delimiter byte and one field. |
-| `awk` | Single field output `{print $N}` with a nonnegative decimal execution integer; `$0` returns the whole line. No arbitrary program or system call. |
+| `awk` | The body's awk (`form-awk.bml`, above): patterns, ranges, arrays, `printf`, the string functions, and Form's choice (`choice`/`or`, `fail`, `cut`, `stop`, `try`/`catch`, `timeout`, `store()`/`undo()`). No `getline`, output redirection, `system()`, user functions or math beyond `int`, each refused by name. `-P -B -C` are form-find's. |
 | `edit` | `path old new`; exactly one literal occurrence, or no literal occurrence and `old` equals the current document's SHA256. Several literal replacements: `path old1 new1 old2 new2 ...`. Explicit whole-document replacement: `path sha256 digest new`. |
 | `write` | `new-path text`, or `new-path` plus held input. Existing documents cannot be overwritten. |
 

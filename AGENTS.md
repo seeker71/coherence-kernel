@@ -133,6 +133,16 @@ once (`docs/launchd/earth.hati.form-find.plist`); the body never does. Commands,
 Structure is asked of the same service with `path`: `{"command":"path --rows","input":"//def[calls(\"host_spawn_at\")]"}`, an XPath-shaped query (`/file[@path~"voice-"]//def[@name="f"]/call`,
 `//class[@name="X"]/def[last()]`, `//def[@lines>40]`) that answers content-addressed node ids with file, byte span and line, not text to re-parse
 (`docs/form-native-agent-tools.md`, "form-path"; one shot: `printf '%s' '--rows //def[@name="x"]' | ./fkwu observe/form-path-ask.bml`).
+Computing over what is found goes to the body's own `awk`, not a host one. The same service runs `awk` over indexed files, and over the body's substrate
+as records:
+- `awk -P 'XPATH' PROGRAM` takes recipes and other nodes, with `@name @arity @path @line @id`;
+- `awk -B` takes blueprints;
+- `awk -C LEDGER` takes cells;
+- `bp() bpname() defined() callers() path() node()` reach the index from inside a program.
+
+`path` also selects with `{awk expression}` tests, takes the first non-empty alternative with `A ?? B`, and transforms with `XPATH => PROGRAM`.
+Both carry Form's choice: `choice { } or { }`, `fail`, `cut`, `stop`, `try { } catch { }`, `timeout N { }`, `store()`/`undo()`.
+Reach for them before reading files by hand (`docs/form-native-agent-tools.md`, "awk").
 
 Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
 and BML. A missing internal tool belongs in that body, with its behavior observed

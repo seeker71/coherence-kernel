@@ -1,0 +1,963 @@
+// form-awk.bml — awk, the body's own: the pattern-action language over records, with Form's choice and Form's records.
+//
+// Urs, 2026-10-12: "we have awk as internal tool, and if not, we shall, and it shall work for node-ids and understanding of
+// blueprints, recipes, and cells, enhancing the functionality of awk quite a bit", and "select, transform and compute using form
+// primitives including choice, stop, cut, fail, store, undo, substrate access".
+//
+// THE LANGUAGE. fwk-compile(src, ext-names) reads a program once (lexed, parsed, every constant regular expression compiled by the
+// body's one regex engine, form-agent-pattern.bml's ERE dialect) and answers [program, ""] or [[], why]; fwk-run(program, records,
+// env) runs it and answers [exit, stdout, stderr].
+//   items        BEGIN { }   END { }   pattern { action }   pattern   { action }   p1, p2 { action } (a range)
+//   statements   print [e, ...]   printf fmt, e ...   if (c) s [else s]   while (c) s   do s while (c)   for (i; c; s) s
+//                for (k in a) s   next   exit [e]   break   continue   delete a[k]   delete a   { ... }
+//   expressions  = += -= *= /= %= ^=   ?:   ||   &&   in   ~ !~   < <= == != > >=   concatenation   + - * / %   ! - +   ^
+//                ++ --   $e   a[k]   a[i, j] (joined by SUBSEP)   /re/ (matches $0)   "str"   numbers   @name (the record's
+//                attribute)   @1.2.97.1 (a NodeID, read as its text)
+//   functions    length substr index split sub gsub match sprintf tolower toupper int   attr(name) kind(v) nodeid(p, l, t, i)
+//   variables    NR NF FNR FS OFS ORS FILENAME RSTART RLENGTH SUBSEP   FAILS TIMEOUTS REASON FINDINGS (Form's, below)
+// A value is a string, a number or unset. Two values compare as numbers when both read wholly as numbers (unset reads as both),
+// as strings in byte order otherwise. Numbers print by the body's one float rendering (the shortest digits that round-trip), not
+// by OFMT's %.6g; length and substr count bytes.
+//
+// FORM'S CHOICE (control/offer-ack-core.fk, control/choice-lane-core.fk, teachings/surprise-is-a-choice-point.md). Every option is
+// offered from the same state: what a failed option wrote (variables, elements, fields, printed output) is undone by a journal,
+// and its finding is kept.
+//   choice { A } or { B } ...   offers A; when A does not land, undoes it and offers B; the first that lands wins; none lands:
+//                               the choice fails. FINDINGS[k] holds what option k failed with, REASON the last.
+//   fail [e]                    this option did not land; e is its finding. Outside every choice, try and timeout the rule's
+//                               action ends for this record (the next rule is offered) and FAILS counts it.
+//   cut                         commits the choice to this option: if it fails after the cut, the choice fails.
+//   stop                        makes no further offer: the program ends where it stands, END is not run.
+//   try { A } catch { B }       offers A; when A does not land it is undone, REASON says why, and B decides the recovery.
+//   timeout N { A }             offers A with N statements; running out reads as a failure with REASON "timeout", counted in
+//                               TIMEOUTS.
+//   k = store()   undo(k)       a checkpoint is a value; undo(k) returns to it (undo() to the last), output included.
+//   choice(e1, e2, ...)         the first value that is set and does not end; unset when none is.
+// A primitive that meets a state it cannot continue past (division by zero, a regex that does not compile) stops: inside an
+// option it is that option's failure, its text the finding; outside every option the program ends aloud, exit 2.
+//
+// RECORDS are [text, attributes, filename]: text is $0 and splits into $1..$NF by FS (" " splits on blanks and trims, one other
+// character splits on itself, longer is a regular expression); attributes, a function of a name, answer @name and attr(name),
+// nothing reading as unset. A line has none. The body's index gives records that are its own substrate (form-path.bml's awk
+// verb): recipes and the other source nodes (-P), blueprints (-B), cells (-C), and functions over the index (bp, bpname,
+// bpmeaning, defined, callers, path, node), handed in as env "ext": a record of name -> (values) => value.
+//
+// NAMED ENDINGS, never a guess: awk-syntax: ..., awk-regex: ..., awk-unknown-function: NAME, awk-function-not-supported: NAME,
+// awk-getline-not-supported, awk-system-not-supported (the body begins no child), awk-output-redirection-not-supported,
+// awk-user-functions-not-supported, awk-division-by-zero, awk-fractional-power-not-supported, awk-step-limit (10,000,000 statements).
+// preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/parse.bml;
+import form-stdlib/bml/order.bml;
+import form-stdlib/bml/form-agent-pattern.bml;
+section [form.bml] {
+ let FWK-GONE = ["fwk-gone"];
+ class FormAwk {
+  // ---- bytes and words ----------------------------------------------------------------------------------------------------------
+  def fwk-is?(a, b) = (String) a == b;
+  def fwk-has?(xs, x) = nil?(xs) ? false : (String) xs[0] == x ? true : fwk-has?(xs[1:], x);
+  def fwk-at(s, i) = i < len(s) ? str_byte_at(s, i) : 0;
+  def fwk-digit?(c) = c >= 48 && c <= 57;
+  def fwk-alpha?(c) = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+  def fwk-word?(c) = fwk-alpha?(c) || fwk-digit?(c);
+  def fwk-blank?(c) = c == 32 || c == 9 || c == 10;
+  def fwk-min(a, b) = a < b ? a : b;
+  def fwk-name?(s) = len(s) == 0 ? false : fwk-alpha?(str_byte_at(s, 0)) ? fwk-name-rest?(s, 1, len(s)) : false;
+  def fwk-name-rest?(s, i, n) = i >= n ? true : fwk-word?(str_byte_at(s, i)) ? fwk-name-rest?(s, i + 1, n) : false;
+  def fwk-first(vals) = nil?(vals) ? nothing() : vals[0];
+  def fwk-rest(vals) = nil?(vals) ? [] : vals[1:];
+  def fwk-flat(lists) = foldl((acc, xs) => append(acc, xs), [], lists);
+
+  // ---- numbers: awk reads the longest number a string begins with ----------------------------------------------------------------
+  def fwk-digits-end(s, i, n) = i >= n ? i : fwk-digit?(str_byte_at(s, i)) ? fwk-digits-end(s, i + 1, n) : i;
+  def fwk-num-end(s, i, n) = fwk-num-mant(s, i, n, (fwk-at(s, i) == 43 || fwk-at(s, i) == 45) ? i + 1 : i);
+  def fwk-num-mant(s, i, n, a) = fwk-num-frac(s, i, n, a, fwk-digits-end(s, a, n));
+  def fwk-num-frac(s, i, n, a, b) = fwk-num-done(s, i, n, a, b, fwk-at(s, b) == 46 ? fwk-digits-end(s, b + 1, n) : b);
+  def fwk-num-done(s, i, n, a, b, c) = (b > a || c > b + 1) ? fwk-exp-end(s, c, n) : i;
+  def fwk-exp-end(s, c, n) = (fwk-at(s, c) == 101 || fwk-at(s, c) == 69) ? fwk-exp-digits(s, c, n, (fwk-at(s, c + 1) == 43 || fwk-at(s, c + 1) == 45) ? c + 2 : c + 1) : c;
+  def fwk-exp-digits(s, c, n, f) = fwk-digits-end(s, f, n) > f ? fwk-digits-end(s, f, n) : c;
+  // an integer too large for an int reads as the float it is, never as 0
+  def fwk-num-of(t) = len(t) == 0 ? 0 : (str_find(t, ".", 0) >= 0 || str_find(t, "e", 0) >= 0 || str_find(t, "E", 0) >= 0) ? str_to_float(t) : (parse-int(t) ?? str_to_float(t));
+  def fwk-ws-skip(s, i, n) = i >= n ? i : fwk-blank?(str_byte_at(s, i)) ? fwk-ws-skip(s, i + 1, n) : i;
+  def fwk-rtrim-end(s, j) = j <= 0 ? 0 : fwk-blank?(str_byte_at(s, j - 1)) ? fwk-rtrim-end(s, j - 1) : j;
+  def fwk-prefix-num(s) = fwk-prefix-at(s, fwk-ws-skip(s, 0, len(s)), len(s));
+  def fwk-prefix-at(s, i, n) = fwk-num-of(substring(s, i, fwk-num-end(s, i, n)));
+  def fwk-numstr?(s) = fwk-numstr-at(s, fwk-ws-skip(s, 0, len(s)), fwk-rtrim-end(s, len(s)));
+  def fwk-numstr-at(s, i, j) = j > i ? fwk-num-end(s, i, j) == j : false;
+  def fwk-string?(v) = fwk-is?(value_kind(v), "string");
+  def fwk-int?(x) = fwk-is?(value_kind(x), "int");
+  def fwk-gone?(v) = nothing?(v) ? false : fwk-is?(value_kind(v), "list");
+
+  // ---- values -----------------------------------------------------------------------------------------------------------------------
+  def fwk-num(v) = nothing?(v) ? 0 : fwk-string?(v) ? fwk-prefix-num(v) : v;
+  def fwk-str(v) = nothing?(v) ? "" : fwk-str-k(v, value_kind(v));
+  def fwk-str-k(v, k) = fwk-is?(k, "string") ? v : (fwk-is?(k, "int") || fwk-is?(k, "float")) ? v.str() : value_str(v);
+  def fwk-numlike?(v) = nothing?(v) ? true : fwk-string?(v) ? fwk-numstr?(v) : true;
+  def fwk-true?(v) = nothing?(v) ? false : fwk-string?(v) ? (fwk-numstr?(v) ? fwk-num(v) != 0 : len(v) > 0) : v != 0;
+  def fwk-compare(a, b) = (fwk-numlike?(a) && fwk-numlike?(b)) ? fwk-ncmp(fwk-num(a), fwk-num(b)) : str-compare(fwk-str(a), fwk-str(b));
+  def fwk-ncmp(x, y) = x < y ? 0 - 1 : x > y ? 1 : 0;
+  def fwk-trunc(x) = fwk-int?(x) ? x : float_to_int(x);
+  def fwk-round(x) = fwk-int?(x) ? x : float_to_int(x < 0 ? x - 0.5 : x + 0.5);
+  def fwk-bool(b) = b ? 1 : 0;
+  def fwk-kind(v) = nothing?(v) ? "unset" : fwk-string?(v) ? "string" : "number";
+
+  // ---- the state: variables, arrays, the record, the output, and the journal that undoes an option ------------------------------------
+  def fwk-limit() = 10000000;
+  def fwk-state(env) {
+   let v = record_new(0, "FS", " ", "OFS", " ", "ORS", "\n", "SUBSEP", byte_to_str(28), "NR", 0, "FNR", 0, "FILENAME", "", "RSTART", 0, "RLENGTH", 0 - 1, "FAILS", 0, "TIMEOUTS", 0, "REASON", "");
+   let z = fwk-init-vars(v, record_get(env, "vars"));
+   let a = record_new(0, "FINDINGS", record_new(0));
+   record_new(0, "v", v, "a", a, "f0", "", "fs", [], "nf", 0, "out", [], "steps", 0, "deadline", fwk-limit() + 1, "err", "", "dead", 0, "code", 0, "attrs", nothing(), "res", record_new(0), "ext", record_get(env, "ext"), "rg", record_new(0), "log", [], "logn", 0, "depth", 0, "held", 0, "cps", record_new(0), "ncp", 0, "cuts", [], "finding", "");
+  }
+  def fwk-init-vars(v, pairs) = nil?(pairs) ? 0 : fwk-init-next(v, pairs, record_set(v, pairs[0][0], pairs[0][1]));
+  def fwk-init-next(v, pairs, z) = fwk-init-vars(v, pairs[1:]);
+  def fwk-fail(st, msg) {
+   let z = fwk-is?(record_get(st, "err"), "") ? record_set(st, "err", msg) : 0;
+   nothing();
+  }
+  def fwk-err?(st) = !fwk-is?(record_get(st, "err"), "");
+  def fwk-emit(st, text) {
+   let z = record_set(st, "out", cons(text, record_get(st, "out")));
+   0;
+  }
+  def fwk-put(r, k, x) {
+   let z = record_set(r, k, x);
+   x;
+  }
+  def fwk-put-r(r, k, x) {
+   let z = record_set(r, k, x);
+   r;
+  }
+  def fwk-bump(st, name) = record_set(record_get(st, "v"), name, fwk-num(record_get(record_get(st, "v"), name)) + 1);
+  // a write the journal can undo: kept while an option is offered or a checkpoint is held
+  def fwk-logging?(st) = record_get(st, "depth") > 0 || record_get(st, "held") == 1;
+  def fwk-jput(st, r, k, x, absent) = fwk-logging?(st) ? fwk-jput-log(st, r, k, x, absent) : fwk-put(r, k, x);
+  def fwk-jput-log(st, r, k, x, absent) {
+   let z1 = record_set(st, "log", cons([r, k, record_has(r, k) ? record_get(r, k) : absent], record_get(st, "log")));
+   let z2 = record_set(st, "logn", record_get(st, "logn") + 1);
+   fwk-put(r, k, x);
+  }
+  def fwk-snapshot(st) = [record_get(st, "logn"), record_get(st, "out"), record_get(st, "f0"), record_get(st, "fs"), record_get(st, "nf")];
+  def fwk-mark(st) {
+   let z = record_set(st, "depth", record_get(st, "depth") + 1);
+   fwk-snapshot(st);
+  }
+  def fwk-unmark(st) {
+   let d = record_get(st, "depth") - 1;
+   let z1 = record_set(st, "depth", d);
+   let z2 = (d == 0 && record_get(st, "held") != 1) ? fwk-log-clear(st) : 0;
+   0;
+  }
+  def fwk-log-clear(st) {
+   let z1 = record_set(st, "log", []);
+   let z2 = record_set(st, "logn", 0);
+   0;
+  }
+  def fwk-undo-to(st, mark) {
+   let z1 = fwk-unlog(st, record_get(st, "logn") - mark[0]);
+   let z2 = record_set(st, "out", mark[1]);
+   let z3 = record_set(st, "f0", mark[2]);
+   let z4 = record_set(st, "fs", mark[3]);
+   let z5 = record_set(st, "nf", mark[4]);
+   0;
+  }
+  def fwk-unlog(st, k) = k <= 0 ? 0 : fwk-unlog-one(st, k, record_get(st, "log")[0]);
+  def fwk-unlog-one(st, k, e) {
+   let z1 = record_set(e[0], e[1], e[2]);
+   let z2 = record_set(st, "log", record_get(st, "log")[1:]);
+   let z3 = record_set(st, "logn", record_get(st, "logn") - 1);
+   fwk-unlog(st, k - 1);
+  }
+  def fwk-store(st) {
+   let k = record_get(st, "ncp") + 1;
+   let z1 = record_set(st, "held", 1);
+   let z2 = record_set(st, "ncp", k);
+   let z3 = record_set(record_get(st, "cps"), k.str(), fwk-snapshot(st));
+   k;
+  }
+  def fwk-undo-call(st, vals) = fwk-undo-k(st, nil?(vals) ? record_get(st, "ncp") : fwk-trunc(fwk-num(vals[0])));
+  def fwk-undo-k(st, k) = record_has(record_get(st, "cps"), fwk-str(k)) ? fwk-undo-did(fwk-undo-to(st, record_get(record_get(st, "cps"), fwk-str(k)))) : 0;
+  def fwk-undo-did(z) = 1;
+
+  // ---- variables, arrays, places --------------------------------------------------------------------------------------------------------
+  def fwk-var(st, name) = fwk-is?(name, "NF") ? record_get(st, "nf") : fwk-var-in(record_get(st, "v"), name);
+  def fwk-var-in(v, name) = record_has(v, name) ? record_get(v, name) : nothing();
+  def fwk-vstr(st, name) = fwk-str(fwk-var(st, name));
+  def fwk-set-var(st, name, x) = fwk-is?(name, "NF") ? fwk-set-nf(st, fwk-trunc(fwk-num(x))) : fwk-jput(st, record_get(st, "v"), name, x, nothing());
+  def fwk-arr(st, name) = record_has(record_get(st, "a"), name) ? record_get(record_get(st, "a"), name) : fwk-put(record_get(st, "a"), name, record_new(0));
+  def fwk-arr-clear(st, name) = fwk-jput(st, record_get(st, "a"), name, record_new(0), record_new(0));
+  def fwk-elem(st, a, key) = fwk-elem-v(st, a, key, record_has(a, key) ? record_get(a, key) : FWK-GONE);
+  def fwk-elem-v(st, a, key, v) = fwk-gone?(v) ? fwk-jput(st, a, key, nothing(), FWK-GONE) : v;
+  def fwk-member?(a, key) = record_has(a, key) ? !fwk-gone?(record_get(a, key)) : false;
+  def fwk-live-keys(a) = filter(k => !fwk-gone?(record_get(a, k)), record_keys(a));
+  def fwk-delete(st, name, key) = fwk-member?(fwk-arr(st, name), key) ? fwk-jput(st, fwk-arr(st, name), key, FWK-GONE, FWK-GONE) : 0;
+  def fwk-key(st, subs) = len(subs) == 1 ? fwk-str(fwk-eval(st, subs[0])) : fat-join(map(e => fwk-str(fwk-eval(st, e)), subs), fwk-vstr(st, "SUBSEP"));
+  def fwk-lvalue?(n) = fwk-has?(["var", "idx", "field"], n[0]);
+  def fwk-place(st, lv) = fwk-is?(lv[0], "var") ? ["var", lv[1]] : fwk-is?(lv[0], "field") ? ["field", fwk-field-index(st, fwk-num(fwk-eval(st, lv[1])))] : ["elem", fwk-arr(st, lv[1]), fwk-key(st, lv[2])];
+  // a field number no record can reach is an ending, not a quiet $0
+  def fwk-field-index(st, x) = x >= 100000000 ? fwk-far-field(st, x) : fwk-trunc(x);
+  def fwk-far-field(st, x) {
+   let z = fwk-fail(st, "awk-field-index-too-large: $" + fwk-str(x));
+   0;
+  }
+  def fwk-place-get(st, p) = fwk-is?(p[0], "var") ? fwk-var(st, p[1]) : fwk-is?(p[0], "field") ? fwk-field(st, p[1]) : fwk-elem(st, p[1], p[2]);
+  def fwk-place-set(st, p, x) = fwk-is?(p[0], "var") ? fwk-set-var(st, p[1], x) : fwk-is?(p[0], "field") ? fwk-set-field(st, p[1], x) : fwk-jput(st, p[1], p[2], x, FWK-GONE);
+
+  // ---- the record and its fields -------------------------------------------------------------------------------------------------------
+  def fwk-set-record(st, text) {
+   let fs = fwk-split-text(st, text, fwk-var(st, "FS"));
+   let z1 = record_set(st, "f0", text);
+   let z2 = record_set(st, "fs", fs);
+   let z3 = record_set(st, "nf", len(fs));
+   text;
+  }
+  def fwk-field(st, i) = i == 0 ? record_get(st, "f0") : i < 0 ? fwk-fail(st, "awk-negative-field: $" + i.str()) : i <= record_get(st, "nf") ? record_get(st, "fs")[i - 1] : "";
+  def fwk-set-field(st, i, x) = i == 0 ? fwk-set-record(st, fwk-str(x)) : i < 0 ? fwk-fail(st, "awk-negative-field: $" + i.str()) : fwk-set-fields(st, fwk-replace-at(fwk-pad-list(record_get(st, "fs"), i), i - 1, fwk-str(x)), fwk-str(x));
+  def fwk-set-fields(st, fs, x) {
+   let z1 = record_set(st, "fs", fs);
+   let z2 = record_set(st, "nf", len(fs));
+   let z3 = record_set(st, "f0", fat-join(fs, fwk-vstr(st, "OFS")));
+   x;
+  }
+  def fwk-pad-list(xs, n) = len(xs) >= n ? xs : append(xs, fwk-blanks(n - len(xs)));
+  def fwk-blanks(k) = k <= 0 ? [] : cons("", fwk-blanks(k - 1));
+  def fwk-replace-at(xs, k, s) = k == 0 ? cons(s, xs[1:]) : cons(xs[0], fwk-replace-at(xs[1:], k - 1, s));
+  def fwk-set-nf(st, n) = n < 0 ? fwk-fail(st, "awk-negative-NF") : fwk-set-fields(st, n <= record_get(st, "nf") ? take(n, record_get(st, "fs")) : fwk-pad-list(record_get(st, "fs"), n), n);
+
+  // ---- splitting: blanks, one character, a regular expression, or every byte ----------------------------------------------------------
+  def fwk-split-text(st, text, fsv) = len(text) == 0 ? [] : fwk-split-sep(text, fwk-sep-of(st, fwk-str(fsv)));
+  def fwk-sep-of(st, f) = fwk-is?(f, " ") ? ["ws"] : len(f) == 0 ? ["chars"] : len(f) == 1 ? ["lit", f] : ["re", fwk-dyn-re(st, f)];
+  def fwk-split-sep(s, sep) = fwk-is?(sep[0], "ws") ? fwk-split-ws(s, 0, len(s), [])
+   : fwk-is?(sep[0], "lit") ? split-on(s, sep[1])
+   : fwk-is?(sep[0], "chars") ? fwk-chars(s, 0, len(s), [])
+   : fwk-split-re(sep[1], s, 0, 0, []);
+  def fwk-split-ws(s, i, n, acc) = i >= n ? reverse(acc) : fwk-blank?(str_byte_at(s, i)) ? fwk-split-ws(s, i + 1, n, acc) : fwk-split-word(s, i, fwk-word-end(s, i, n), n, acc);
+  def fwk-word-end(s, j, n) = j >= n ? j : fwk-blank?(str_byte_at(s, j)) ? j : fwk-word-end(s, j + 1, n);
+  def fwk-split-word(s, i, j, n, acc) = fwk-split-ws(s, j, n, cons(substring(s, i, j), acc));
+  def fwk-chars(s, i, n, acc) = i >= n ? reverse(acc) : fwk-chars(s, i + 1, n, cons(substring(s, i, i + 1), acc));
+  def fwk-split-re(br, s, start, pos, acc) = fwk-split-re-at(br, s, start, acc, fwk-longest(br, s, pos));
+  def fwk-split-re-at(br, s, start, acc, m) = m[0] < 0 ? reverse(cons(substring(s, start, len(s)), acc))
+   : m[1] == m[0] ? fwk-split-re(br, s, start, m[0] + 1, acc)
+   : fwk-split-re(br, s, m[1], m[1], cons(substring(s, start, m[0]), acc));
+  def fwk-lines(text) = len(text) == 0 ? [] : fwk-lines-of(split-on(text, "\n"), fwk-is?(substring(text, len(text) - 1, len(text)), "\n"));
+  def fwk-lines-of(parts, trailing) = trailing ? reverse(reverse(parts)[1:]) : parts;
+  // records of text, one a line, none of them with attributes
+  def fwk-line-records(text, file) = map(l => [l, nothing(), file], fwk-lines(text));
+
+  // ---- regular expressions: the one engine, ERE dialect; \/ \" \t \n \r \f \v read as their bytes -------------------------------------
+  def fwk-re-src(s) = fat-join(fwk-re-src-go(s, 0, len(s), []), "");
+  def fwk-re-src-go(s, i, n, acc) = i >= n ? reverse(acc) : (str_byte_at(s, i) != 92 || i + 1 >= n) ? fwk-re-src-go(s, i + 1, n, cons(substring(s, i, i + 1), acc)) : fwk-re-src-go(s, i + 2, n, cons(fwk-re-esc(substring(s, i, i + 2), str_byte_at(s, i + 1)), acc));
+  def fwk-re-esc(pair, c) = c == 47 ? "/" : c == 34 ? byte_to_str(34) : c == 116 ? byte_to_str(9) : c == 110 ? byte_to_str(10) : c == 114 ? byte_to_str(13) : c == 102 ? byte_to_str(12) : c == 118 ? byte_to_str(11) : pair;
+  def fwk-compile-re(src) = fap-compile-d(fwk-re-src(src), 1);
+  def fwk-dyn-re(st, src) = record_has(record_get(st, "res"), src) ? record_get(record_get(st, "res"), src) : fwk-dyn-made(st, src, fwk-compile-re(src));
+  def fwk-dyn-made(st, src, c) = !fwk-is?(c[1], "") ? fwk-dyn-bad(st, src, c[1]) : fwk-put(record_get(st, "res"), src, c[0]);
+  def fwk-dyn-bad(st, src, why) {
+   let z = fwk-fail(st, "awk-regex: " + why + ": " + src);
+   [];
+  }
+  def fwk-re-arg(st, n) = fwk-is?(n[0], "re") ? n[2] : fwk-dyn-re(st, fwk-str(fwk-eval(st, n)));
+  def fwk-re-test(br, s) = nil?(br) ? false : fap-find(br, s, 0, 0)[0] >= 0;
+  def fwk-longest(br, s, pos) = (nil?(br) || pos > len(s)) ? [0 - 1, 0 - 1] : fap-find-longest(br, s, pos, 0);
+
+  // ---- expressions ----------------------------------------------------------------------------------------------------------------------
+  def fwk-eval(st, n) = fwk-ev(st, n, n[0]);
+  def fwk-ev(st, n, t) = fwk-is?(t, "num") ? n[1]
+   : fwk-is?(t, "str") ? n[1]
+   : fwk-is?(t, "var") ? fwk-var(st, n[1])
+   : fwk-is?(t, "field") ? fwk-field(st, fwk-field-index(st, fwk-num(fwk-eval(st, n[1]))))
+   : fwk-is?(t, "idx") ? fwk-elem(st, fwk-arr(st, n[1]), fwk-key(st, n[2]))
+   : fwk-is?(t, "attr") ? fwk-attr(st, n[1])
+   : fwk-is?(t, "bin") ? fwk-bin(st, n[1], n[2], n[3])
+   : fwk-is?(t, "cat") ? fwk-cat(st, n[1], n[2])
+   : fwk-is?(t, "assign") ? fwk-assign(st, n[1], fwk-place(st, n[2]), n[3])
+   : fwk-is?(t, "cond") ? (fwk-true?(fwk-eval(st, n[1])) ? fwk-eval(st, n[2]) : fwk-eval(st, n[3]))
+   : fwk-is?(t, "not") ? (fwk-true?(fwk-eval(st, n[1])) ? 0 : 1)
+   : fwk-is?(t, "neg") ? 0 - fwk-num(fwk-eval(st, n[1]))
+   : fwk-is?(t, "pos") ? fwk-num(fwk-eval(st, n[1]))
+   : fwk-is?(t, "re") ? fwk-bool(fwk-re-test(n[2], record_get(st, "f0")))
+   : fwk-is?(t, "in") ? fwk-bool(fwk-member?(fwk-arr(st, n[2]), fwk-key(st, n[1])))
+   : fwk-is?(t, "pre") ? fwk-incr(st, n[1], fwk-place(st, n[2]), true)
+   : fwk-is?(t, "post") ? fwk-incr(st, n[1], fwk-place(st, n[2]), false)
+   : fwk-is?(t, "call") ? fwk-call(st, n[1], n[2])
+   : nothing();
+  def fwk-cat(st, a, b) {
+   let x = fwk-str(fwk-eval(st, a));
+   (String) x + fwk-str(fwk-eval(st, b));
+  }
+  def fwk-attr(st, name) = fwk-attr-of(record_get(st, "attrs"), name);
+  def fwk-attr-of(f, name) = nothing?(f) ? nothing() : f(name);
+  def fwk-bin(st, op, a, b) = fwk-is?(op, "||") ? (fwk-true?(fwk-eval(st, a)) ? 1 : fwk-bool(fwk-true?(fwk-eval(st, b))))
+   : fwk-is?(op, "&&") ? (fwk-true?(fwk-eval(st, a)) ? fwk-bool(fwk-true?(fwk-eval(st, b))) : 0)
+   : (fwk-is?(op, "~") || fwk-is?(op, "!~")) ? fwk-tilde(st, op, fwk-str(fwk-eval(st, a)), b)
+   : fwk-bin2(st, op, a, b);
+  def fwk-tilde(st, op, s, rn) = fwk-tilde-at(fwk-is?(op, "~"), fwk-re-test(fwk-re-arg(st, rn), s));
+  def fwk-tilde-at(pos, hit) = pos ? fwk-bool(hit) : fwk-bool(!hit);
+  def fwk-bin2(st, op, a, b) {
+   let x = fwk-eval(st, a);
+   let y = fwk-eval(st, b);
+   fwk-binv(st, op, x, y);
+  }
+  def fwk-binv(st, op, x, y) = fwk-is?(op, "<") ? fwk-bool(fwk-compare(x, y) < 0)
+   : fwk-is?(op, "<=") ? fwk-bool(fwk-compare(x, y) <= 0)
+   : fwk-is?(op, ">") ? fwk-bool(fwk-compare(x, y) > 0)
+   : fwk-is?(op, ">=") ? fwk-bool(fwk-compare(x, y) >= 0)
+   : fwk-is?(op, "==") ? fwk-bool(fwk-compare(x, y) == 0)
+   : fwk-is?(op, "!=") ? fwk-bool(fwk-compare(x, y) != 0)
+   : fwk-arith(st, op, fwk-num(x), fwk-num(y));
+  def fwk-arith(st, op, x, y) = fwk-is?(op, "+") ? x + y
+   : fwk-is?(op, "-") ? x - y
+   : fwk-is?(op, "*") ? x * y
+   : fwk-is?(op, "/") ? fwk-div(st, x, y)
+   : fwk-is?(op, "%") ? fwk-mod(st, x, y)
+   : fwk-pow(st, x, y);
+  def fwk-div(st, x, y) = y == 0 ? fwk-fail(st, "awk-division-by-zero") : (fwk-int?(x) && fwk-int?(y)) ? (x % y == 0 ? x / y : (x * 1.0) / y) : (x * 1.0) / y;
+  def fwk-mod(st, x, y) = y == 0 ? fwk-fail(st, "awk-division-by-zero") : (fwk-int?(x) && fwk-int?(y)) ? x % y : x - y * fwk-trunc((x * 1.0) / y);
+  def fwk-pow(st, x, y) = fwk-int?(y) ? (y >= 0 ? fwk-powi(x, y, 1) : 1.0 / fwk-powi(x * 1.0, 0 - y, 1)) : y == float_to_int(y) ? fwk-pow(st, x, float_to_int(y)) : fwk-fail(st, "awk-fractional-power-not-supported");
+  def fwk-powi(x, k, acc) = k == 0 ? acc : k % 2 == 1 ? fwk-powi(x * x, k / 2, acc * x) : fwk-powi(x * x, k / 2, acc);
+  def fwk-assign(st, op, p, e) = fwk-assign-v(st, op, p, fwk-eval(st, e));
+  def fwk-assign-v(st, op, p, v) = fwk-is?(op, "=") ? fwk-place-set(st, p, v) : fwk-place-set(st, p, fwk-arith(st, substring(op, 0, 1), fwk-num(fwk-place-get(st, p)), fwk-num(v)));
+  def fwk-incr(st, op, p, pre) = fwk-incr-v(st, p, pre, fwk-num(fwk-place-get(st, p)), fwk-is?(op, "++") ? 1 : 0 - 1);
+  def fwk-incr-v(st, p, pre, old, d) {
+   let z = fwk-place-set(st, p, old + d);
+   pre ? old + d : old;
+  }
+
+  // ---- functions --------------------------------------------------------------------------------------------------------------------------
+  def fwk-builtins() = ["length", "substr", "index", "split", "sub", "gsub", "match", "sprintf", "tolower", "toupper", "int", "attr", "kind", "nodeid", "choice", "store", "undo", "path"];
+  def fwk-refused-fns() = ["system", "close", "fflush", "getline", "srand", "rand", "sin", "cos", "atan2", "exp", "log", "sqrt"];
+  def fwk-call(st, name, args) = fwk-is?(name, "length") ? fwk-length(st, args)
+   : fwk-is?(name, "substr") ? fwk-substr(fwk-str(fwk-eval(st, args[0])), fwk-num(fwk-eval(st, args[1])), len(args) > 2 ? fwk-num(fwk-eval(st, args[2])) : nothing())
+   : fwk-is?(name, "index") ? fwk-index(fwk-str(fwk-eval(st, args[0])), fwk-str(fwk-eval(st, args[1])))
+   : fwk-is?(name, "split") ? fwk-split-call(st, args)
+   : fwk-is?(name, "sub") ? fwk-sub-call(st, false, args)
+   : fwk-is?(name, "gsub") ? fwk-sub-call(st, true, args)
+   : fwk-is?(name, "match") ? fwk-match-call(st, args)
+   : fwk-is?(name, "sprintf") ? fwk-format(fwk-str(fwk-eval(st, args[0])), fwk-vals(st, args[1:]))
+   : fwk-is?(name, "tolower") ? fwk-case(fwk-str(fwk-eval(st, args[0])), false)
+   : fwk-is?(name, "toupper") ? fwk-case(fwk-str(fwk-eval(st, args[0])), true)
+   : fwk-is?(name, "int") ? fwk-trunc(fwk-num(fwk-eval(st, args[0])))
+   : fwk-is?(name, "attr") ? fwk-attr(st, fwk-str(fwk-eval(st, args[0])))
+   : fwk-is?(name, "kind") ? fwk-kind(fwk-eval(st, args[0]))
+   : fwk-is?(name, "nodeid") ? fwk-nodeid(fwk-vals(st, args))
+   : fwk-is?(name, "choice") ? fwk-choice-expr(st, args)
+   : fwk-is?(name, "store") ? fwk-store(st)
+   : fwk-is?(name, "undo") ? fwk-undo-call(st, fwk-vals(st, args))
+   : fwk-is?(name, "path") ? fwk-path-call(st, args)
+   : fwk-ext-call(st, name, fwk-vals(st, args));
+  def fwk-vals(st, args) = map(e => fwk-eval(st, e), args);
+  def fwk-ext-call(st, name, vals) = record_has(record_get(st, "ext"), name) ? fwk-apply(record_get(record_get(st, "ext"), name), vals) : fwk-fail(st, "awk-unknown-function: " + name);
+  def fwk-apply(f, vals) = f(vals);
+  def fwk-nodeid(vs) = "@" + fwk-str(fwk-trunc(fwk-num(vs[0]))) + "." + fwk-str(fwk-trunc(fwk-num(vs[1]))) + "." + fwk-str(fwk-trunc(fwk-num(vs[2]))) + "." + fwk-str(fwk-trunc(fwk-num(vs[3])));
+  def fwk-length(st, args) = nil?(args) ? len(record_get(st, "f0")) : (fwk-is?(args[0][0], "var") && record_has(record_get(st, "a"), args[0][1])) ? len(fwk-live-keys(fwk-arr(st, args[0][1]))) : len(fwk-str(fwk-eval(st, args[0])));
+  def fwk-substr(s, m, n) = fwk-substr-at(s, fwk-round(m), nothing?(n) ? len(s) + 1 : fwk-round(m) + fwk-round(n));
+  def fwk-substr-at(s, a, b) = fwk-substr-cut(s, a < 1 ? 1 : a, b > len(s) + 1 ? len(s) + 1 : b);
+  def fwk-substr-cut(s, from, to) = to <= from ? "" : substring(s, from - 1, to - 1);
+  def fwk-index(s, t) = len(t) == 0 ? 0 : str_find(s, t, 0) + 1;
+  def fwk-split-call(st, args) {
+   let s = fwk-str(fwk-eval(st, args[0]));
+   let sep = len(args) > 2 ? fwk-sep-arg(st, args[2]) : fwk-sep-of(st, fwk-vstr(st, "FS"));
+   let parts = len(s) == 0 ? [] : fwk-split-sep(s, sep);
+   fwk-fill-array(st, args[1][1], parts);
+  }
+  def fwk-fill-array(st, name, parts) {
+   let a = fwk-arr-clear(st, name);
+   let z = fwk-fill(a, parts, 1);
+   len(parts);
+  }
+  def fwk-sep-arg(st, n) = fwk-is?(n[0], "re") ? ["re", n[2]] : fwk-sep-of(st, fwk-str(fwk-eval(st, n)));
+  def fwk-fill(a, parts, k) = nil?(parts) ? 0 : fwk-fill-next(a, parts, k, record_set(a, k.str(), parts[0]));
+  def fwk-fill-next(a, parts, k, z) = fwk-fill(a, parts[1:], k + 1);
+  def fwk-sub-call(st, g, args) = fwk-sub-place(st, g, fwk-re-arg(st, args[0]), fwk-str(fwk-eval(st, args[1])), fwk-place(st, len(args) > 2 ? args[2] : ["field", ["num", 0]]));
+  def fwk-sub-place(st, g, br, repl, p) = fwk-sub-done(st, p, fwk-subst(br, fwk-str(fwk-place-get(st, p)), repl, g, 0, "", 0, false));
+  def fwk-sub-done(st, p, r) {
+   let z = r[1] > 0 ? fwk-place-set(st, p, r[0]) : 0;
+   r[1];
+  }
+  // leftmost-longest, as awk: an empty match right after a match is passed over, so gsub(/b*/, "-", "abc") is "-a-c-"
+  def fwk-subst(br, s, repl, g, pos, acc, count, after) = fwk-subst-at(br, s, repl, g, pos, acc, count, after, fwk-longest(br, s, pos));
+  def fwk-subst-at(br, s, repl, g, pos, acc, count, after, m) = m[0] < 0 ? [(String) acc + substring(s, pos, len(s)), count]
+   : (after && m[0] == m[1] && m[0] == pos) ? fwk-subst-skip(br, s, repl, g, pos, acc, count)
+   : fwk-subst-hit(br, s, repl, g, m, (String) acc + substring(s, pos, m[0]) + fwk-repl(repl, substring(s, m[0], m[1])), count + 1);
+  def fwk-subst-skip(br, s, repl, g, pos, acc, count) = pos >= len(s) ? [acc, count] : fwk-subst(br, s, repl, g, pos + 1, (String) acc + substring(s, pos, pos + 1), count, false);
+  def fwk-subst-hit(br, s, repl, g, m, acc, count) = !g ? [(String) acc + substring(s, m[1], len(s)), count]
+   : m[1] > m[0] ? fwk-subst(br, s, repl, g, m[1], acc, count, true)
+   : m[0] >= len(s) ? [acc, count]
+   : fwk-subst(br, s, repl, g, m[0] + 1, (String) acc + substring(s, m[0], m[0] + 1), count, false);
+  def fwk-repl(repl, hit) = fat-join(fwk-repl-go(repl, hit, 0, len(repl), []), "");
+  def fwk-repl-go(r, hit, i, n, acc) = i >= n ? reverse(acc)
+   : str_byte_at(r, i) == 38 ? fwk-repl-go(r, hit, i + 1, n, cons(hit, acc))
+   : (str_byte_at(r, i) == 92 && (fwk-at(r, i + 1) == 38 || fwk-at(r, i + 1) == 92)) ? fwk-repl-go(r, hit, i + 2, n, cons(substring(r, i + 1, i + 2), acc))
+   : fwk-repl-go(r, hit, i + 1, n, cons(substring(r, i, i + 1), acc));
+  def fwk-match-call(st, args) = fwk-match-at(st, fwk-longest(fwk-re-arg(st, args[1]), fwk-str(fwk-eval(st, args[0])), 0));
+  def fwk-match-at(st, m) {
+   let rs = m[0] < 0 ? 0 : m[0] + 1;
+   let z1 = fwk-set-var(st, "RSTART", rs);
+   let z2 = fwk-set-var(st, "RLENGTH", m[0] < 0 ? 0 - 1 : m[1] - m[0]);
+   rs;
+  }
+  def fwk-case(s, up) = fat-join(fwk-case-go(s, 0, len(s), up, []), "");
+  def fwk-case-go(s, i, n, up, acc) = i >= n ? reverse(acc) : fwk-case-go(s, i + 1, n, up, cons(fwk-case-ch(s, i, str_byte_at(s, i), up), acc));
+  def fwk-case-ch(s, i, c, up) = (up && c >= 97 && c <= 122) ? byte_to_str(c - 32) : (!up && c >= 65 && c <= 90) ? byte_to_str(c + 32) : substring(s, i, i + 1);
+  // path(expr, arr): the index's nodes for a form-path expression, their ids in arr[1..n]; n
+  def fwk-path-call(st, args) = fwk-path-got(st, args[1][1], fwk-ext-call(st, "path", [fwk-str(fwk-eval(st, args[0]))]));
+  def fwk-path-got(st, name, r) = nothing?(r) ? 0 : !fwk-is?(r[1], "") ? fwk-fail(st, "awk-path: " + r[1]) : fwk-fill-array(st, name, r[0]);
+  // choice(e1, e2, ...): the first value that is set and does not end
+  def fwk-choice-expr(st, args) = fwk-choice-e(st, args, fwk-mark(st));
+  def fwk-choice-e(st, args, mark) = nil?(args) ? fwk-choice-e-end(st, nothing()) : fwk-choice-e-at(st, args, mark, fwk-eval(st, args[0]));
+  def fwk-choice-e-at(st, args, mark, v) = (fwk-err?(st) && record_get(st, "dead") != 1) || nothing?(v) ? fwk-choice-e-retry(st, args, mark) : fwk-choice-e-end(st, v);
+  def fwk-choice-e-retry(st, args, mark) {
+   let z1 = record_set(st, "err", "");
+   let z2 = fwk-undo-to(st, mark);
+   fwk-choice-e(st, args[1:], mark);
+  }
+  def fwk-choice-e-end(st, v) {
+   let z = fwk-unmark(st);
+   v;
+  }
+
+  // ---- printf and sprintf: %d %i %u %o %x %X %c %s %e %E %f %F %g %G %%, flags - + space # 0, width and precision (or *) -----------------
+  def fwk-format(f, vals) = fwk-fmt(f, 0, len(f), vals, "");
+  def fwk-fmt(f, i, n, vals, acc) = fwk-fmt-at(f, i, n, vals, acc, str_find(f, "%", i));
+  def fwk-fmt-at(f, i, n, vals, acc, p) = p < 0 ? (String) acc + substring(f, i, n) : fwk-fmt-pct(f, p + 1, n, vals, (String) acc + substring(f, i, p));
+  def fwk-fmt-pct(f, j, n, vals, acc) = j >= n ? (String) acc + "%" : str_byte_at(f, j) == 37 ? fwk-fmt(f, j + 1, n, vals, (String) acc + "%") : fwk-fmt-flags(f, j, n, vals, acc, "");
+  def fwk-fmt-flags(f, j, n, vals, acc, fl) = j >= n ? fwk-fmt-width(f, j, n, vals, acc, fl) : str_find("-+ #0", substring(f, j, j + 1), 0) >= 0 ? fwk-fmt-flags(f, j + 1, n, vals, acc, (String) fl + substring(f, j, j + 1)) : fwk-fmt-width(f, j, n, vals, acc, fl);
+  def fwk-fmt-width(f, j, n, vals, acc, fl) = fwk-at(f, j) == 42 ? fwk-fmt-prec(f, j + 1, n, fwk-rest(vals), acc, fl, fwk-trunc(fwk-num(fwk-first(vals)))) : fwk-fmt-prec(f, fwk-digits-end(f, j, n), n, vals, acc, fl, fwk-num-of(substring(f, j, fwk-digits-end(f, j, n))));
+  def fwk-fmt-prec(f, j, n, vals, acc, fl, w) = fwk-at(f, j) != 46 ? fwk-fmt-conv(f, j, n, vals, acc, fl, w, 0 - 1)
+   : fwk-at(f, j + 1) == 42 ? fwk-fmt-conv(f, j + 2, n, fwk-rest(vals), acc, fl, w, fwk-trunc(fwk-num(fwk-first(vals))))
+   : fwk-fmt-conv(f, fwk-digits-end(f, j + 1, n), n, vals, acc, fl, w, fwk-num-of(substring(f, j + 1, fwk-digits-end(f, j + 1, n))));
+  def fwk-fmt-conv(f, j, n, vals, acc, fl, w, p) = j >= n ? (String) acc + "%" : fwk-fmt(f, j + 1, n, fwk-rest(vals), (String) acc + fwk-spec(substring(f, j, j + 1), w < 0 ? (String) fl + "-" : fl, w < 0 ? 0 - w : w, p, fwk-first(vals)));
+  def fwk-flag?(fl, c) = str_find(fl, c, 0) >= 0;
+  def fwk-spec(c, fl, w, p, v) = (fwk-is?(c, "d") || fwk-is?(c, "i") || fwk-is?(c, "u")) ? fwk-pad-num(fwk-sign(fwk-trunc(fwk-num(v)), fl), fwk-int-digits(fwk-abs(fwk-trunc(fwk-num(v))), p), fl, w, p < 0)
+   : (fwk-is?(c, "x") || fwk-is?(c, "X") || fwk-is?(c, "o")) ? fwk-pad-num(fwk-trunc(fwk-num(v)) < 0 ? "-" : "", fwk-base-digits(c, fwk-abs(fwk-trunc(fwk-num(v))), p, fl), fl, w, p < 0)
+   : fwk-is?(c, "c") ? fwk-pad-str(fwk-char-of(v), fl, w)
+   : fwk-is?(c, "s") ? fwk-pad-str(p >= 0 ? fwk-substr-cut(fwk-str(v), 1, p + 1) : fwk-str(v), fl, w)
+   : (fwk-is?(c, "f") || fwk-is?(c, "F")) ? fwk-pad-num(fwk-sign(fwk-num(v), fl), fwk-fixed(fwk-abs(fwk-num(v)), p < 0 ? 6 : p, fl), fl, w, true)
+   : (fwk-is?(c, "e") || fwk-is?(c, "E")) ? fwk-pad-num(fwk-sign(fwk-num(v), fl), fwk-case-e(c, fwk-sci(fwk-abs(fwk-num(v)), p < 0 ? 6 : p, fl)), fl, w, true)
+   : (fwk-is?(c, "g") || fwk-is?(c, "G")) ? fwk-pad-num(fwk-sign(fwk-num(v), fl), fwk-case-e(c, fwk-gen(fwk-abs(fwk-num(v)), p < 0 ? 6 : (p == 0 ? 1 : p), fl)), fl, w, true)
+   : "%" + c;
+  def fwk-case-e(c, s) = (fwk-is?(c, "E") || fwk-is?(c, "G")) ? fwk-case(s, true) : s;
+  def fwk-sign(x, fl) = x < 0 ? "-" : fwk-flag?(fl, "+") ? "+" : fwk-flag?(fl, " ") ? " " : "";
+  def fwk-abs(x) = x < 0 ? 0 - x : x;
+  def fwk-zeros(k) = k <= 0 ? "" : "0" + fwk-zeros(k - 1);
+  def fwk-spaces(k) = k <= 0 ? "" : " " + fwk-spaces(k - 1);
+  def fwk-min-digits(ds, p) = p > len(ds) ? (String) fwk-zeros(p - len(ds)) + ds : ds;
+  def fwk-int-digits(k, p) = fwk-min-digits((k == 0 && p == 0) ? "" : k.str(), p);
+  def fwk-radix(k, b, up) = k == 0 ? "" : (String) fwk-radix(k / b, b, up) + substring(up ? "0123456789ABCDEF" : "0123456789abcdef", k % b, k % b + 1);
+  def fwk-base-digits(c, k, p, fl) = fwk-base-prefix(c, k, fl, fwk-min-digits(k == 0 ? (p == 0 ? "" : "0") : fwk-radix(k, fwk-is?(c, "o") ? 8 : 16, fwk-is?(c, "X")), p));
+  def fwk-base-prefix(c, k, fl, ds) = (fwk-flag?(fl, "#") && k != 0) ? (fwk-is?(c, "o") ? "0" + ds : fwk-is?(c, "X") ? "0X" + ds : "0x" + ds) : ds;
+  def fwk-char-of(v) = nothing?(v) ? "" : fwk-string?(v) ? substring(v, 0, len(v) > 0 ? 1 : 0) : byte_to_str(fwk-trunc(v) % 256);
+  def fwk-pad-str(s, fl, w) = len(s) >= w ? s : fwk-flag?(fl, "-") ? (String) s + fwk-spaces(w - len(s)) : (String) fwk-spaces(w - len(s)) + s;
+  def fwk-pad-num(sign, ds, fl, w, zerook) = fwk-pad-num-at((String) sign + ds, sign, ds, fl, w, zerook);
+  def fwk-pad-num-at(whole, sign, ds, fl, w, zerook) = len(whole) >= w ? whole
+   : fwk-flag?(fl, "-") ? (String) whole + fwk-spaces(w - len(whole))
+   : (zerook && fwk-flag?(fl, "0")) ? (String) sign + fwk-zeros(w - len(whole)) + ds
+   : (String) fwk-spaces(w - len(whole)) + whole;
+  def fwk-pow10(p) = p <= 0 ? 1 : 10 * fwk-pow10(p - 1);
+  def fwk-fixed(a, p, fl) = p > 15 ? (String) fwk-fixed(a, 15, fl) + fwk-zeros(p - 15) : (a * 1.0) * fwk-pow10(p) >= 9000000000000000000.0 ? fwk-str(a) : fwk-fixed-at(float_to_int(a * fwk-pow10(p) + 0.5), p, fl);
+  def fwk-fixed-at(r, p, fl) = fwk-fixed-ds(fwk-min-digits(r.str(), p + 1), p, fl);
+  def fwk-fixed-ds(ds, p, fl) = p == 0 ? (fwk-flag?(fl, "#") ? (String) ds + "." : ds) : (String) substring(ds, 0, len(ds) - p) + "." + substring(ds, len(ds) - p, len(ds));
+  def fwk-sci(a, p, fl) = a == 0 ? fwk-sci-text(fwk-fixed(0, p, fl), 0) : fwk-sci-norm(a * 1.0, 0, p, fl);
+  def fwk-sci-norm(m, e, p, fl) = m >= 10.0 ? fwk-sci-norm(m / 10.0, e + 1, p, fl) : m < 1.0 ? fwk-sci-norm(m * 10.0, e - 1, p, fl) : fwk-sci-round(fwk-fixed(m, p, fl), e, p, fl);
+  def fwk-sci-round(ms, e, p, fl) = fwk-num-of(ms) >= 10 ? fwk-sci-text(fwk-fixed(1, p, fl), e + 1) : fwk-sci-text(ms, e);
+  def fwk-sci-text(ms, e) = (String) ms + "e" + (e < 0 ? "-" : "+") + (fwk-abs(e) < 10 ? "0" : "") + fwk-abs(e).str();
+  def fwk-gen(a, p, fl) = a == 0 ? fwk-gen-trim(fwk-fixed(0, p - 1, fl), fl) : fwk-gen-x(a, p, fl, fwk-sci(a, p - 1, fl));
+  def fwk-gen-x(a, p, fl, s) = fwk-gen-pick(a, p, fl, s, fwk-num-of(substring(s, str_find(s, "e", 0) + 1, len(s))));
+  def fwk-gen-pick(a, p, fl, s, x) = (x < p && x >= 0 - 4) ? fwk-gen-trim(fwk-fixed(a, p - 1 - x, fl), fl) : fwk-gen-trim-e(s, fl);
+  def fwk-gen-trim(t, fl) = (fwk-flag?(fl, "#") || str_find(t, ".", 0) < 0) ? t : fwk-trim-dot(fwk-trim-zeros(t, len(t)));
+  def fwk-trim-zeros(t, j) = j <= 0 ? "" : str_byte_at(t, j - 1) == 48 ? fwk-trim-zeros(t, j - 1) : substring(t, 0, j);
+  def fwk-trim-dot(t) = len(t) == 0 ? t : str_byte_at(t, len(t) - 1) == 46 ? substring(t, 0, len(t) - 1) : t;
+  def fwk-gen-trim-e(s, fl) = (String) fwk-gen-trim(substring(s, 0, str_find(s, "e", 0)), fl) + substring(s, str_find(s, "e", 0), len(s));
+
+  // ---- statements: each answers a signal, "" when it ran through -----------------------------------------------------------------------
+  //   next exit break continue as awk; fail (this option did not land); stop (no further offer)
+  def fwk-leaves?(sig) = fwk-is?(sig, "next") || fwk-is?(sig, "exit") || fwk-is?(sig, "fail") || fwk-is?(sig, "stop");
+  def fwk-exec(st, s) = fwk-exec-at(st, s, fwk-step(st));
+  def fwk-exec-at(st, s, g) = fwk-is?(g, "") ? fwk-ex(st, s, s[0]) : g;
+  def fwk-step(st) = fwk-step-at(st, record_get(st, "steps") + 1);
+  def fwk-step-at(st, n) {
+   let z = record_set(st, "steps", n);
+   n > fwk-limit() ? fwk-dead(st) : n > record_get(st, "deadline") ? fwk-failing(st, "timeout") : fwk-err?(st) ? "exit" : "";
+  }
+  def fwk-dead(st) {
+   let z1 = fwk-fail(st, "awk-step-limit: 10000000 statements");
+   let z2 = record_set(st, "dead", 1);
+   "exit";
+  }
+  def fwk-ex(st, s, t) = fwk-is?(t, "block") ? fwk-exec-list(st, s[1])
+   : fwk-is?(t, "expr") ? fwk-done(st, fwk-eval(st, s[1]))
+   : fwk-is?(t, "print") ? fwk-done(st, fwk-print(st, s[1]))
+   : fwk-is?(t, "printf") ? fwk-done(st, fwk-printf(st, s[1]))
+   : fwk-is?(t, "if") ? fwk-if-ex(st, s, fwk-cond(st, s[1]))
+   : fwk-is?(t, "while") ? fwk-while-ex(st, s)
+   : fwk-is?(t, "do") ? fwk-do-ex(st, s, fwk-exec(st, s[1]))
+   : fwk-is?(t, "for") ? fwk-for-ex(st, s)
+   : fwk-is?(t, "forin") ? fwk-forin-ex(st, s)
+   : fwk-is?(t, "next") ? "next"
+   : fwk-is?(t, "exit") ? fwk-exit-ex(st, s[1])
+   : fwk-is?(t, "break") ? "break"
+   : fwk-is?(t, "continue") ? "continue"
+   : fwk-is?(t, "del") ? fwk-done(st, fwk-delete(st, s[1], fwk-key(st, s[2])))
+   : fwk-is?(t, "delall") ? fwk-done(st, fwk-arr-clear(st, s[1]))
+   : fwk-is?(t, "choice") ? fwk-choice-ex(st, s)
+   : fwk-is?(t, "try") ? fwk-try-ex(st, s)
+   : fwk-is?(t, "timeout") ? fwk-timeout-ex(st, s)
+   : fwk-is?(t, "fail") ? fwk-fail-ex(st, s[1])
+   : fwk-is?(t, "stop") ? "stop"
+   : fwk-is?(t, "cut") ? fwk-cut-ex(st)
+   : "";
+  def fwk-done(st, v) = fwk-err?(st) ? "exit" : "";
+  // 1 true, 0 false, 2 an ending
+  def fwk-cond(st, e) = fwk-cond-v(st, fwk-true?(fwk-eval(st, e)));
+  def fwk-cond-v(st, b) = fwk-err?(st) ? 2 : b ? 1 : 0;
+  def fwk-if-ex(st, s, c) = c == 2 ? "exit" : c == 1 ? fwk-exec(st, s[2]) : nothing?(s[3]) ? "" : fwk-exec(st, s[3]);
+  def fwk-exec-list(st, ss) = nil?(ss) ? "" : fwk-exec-rest(st, ss, fwk-exec(st, ss[0]));
+  def fwk-exec-rest(st, ss, sig) = !fwk-is?(sig, "") ? sig : fwk-exec-list(st, ss[1:]);
+  def fwk-while-ex(st, s) = fwk-while-at(st, s, fwk-cond(st, s[1]));
+  def fwk-while-at(st, s, c) = c == 2 ? "exit" : c == 0 ? "" : fwk-while-body(st, s, fwk-exec(st, s[2]));
+  def fwk-while-body(st, s, sig) = fwk-is?(sig, "break") ? "" : fwk-leaves?(sig) ? sig : fwk-while-ex(st, s);
+  def fwk-do-ex(st, s, sig) = fwk-is?(sig, "break") ? "" : fwk-leaves?(sig) ? sig : fwk-do-cond(st, s, fwk-cond(st, s[2]));
+  def fwk-do-cond(st, s, c) = c == 2 ? "exit" : c == 0 ? "" : fwk-do-ex(st, s, fwk-exec(st, s[1]));
+  def fwk-for-ex(st, s) = fwk-for-start(st, s, nothing?(s[1]) ? 0 : fwk-eval(st, s[1]));
+  def fwk-for-start(st, s, z) = fwk-err?(st) ? "exit" : fwk-for-test(st, s);
+  def fwk-for-test(st, s) = fwk-for-at(st, s, nothing?(s[2]) ? 1 : fwk-cond(st, s[2]));
+  def fwk-for-at(st, s, c) = c == 2 ? "exit" : c == 0 ? "" : fwk-for-body(st, s, fwk-exec(st, s[4]));
+  def fwk-for-body(st, s, sig) = fwk-is?(sig, "break") ? "" : fwk-leaves?(sig) ? sig : fwk-for-step(st, s, nothing?(s[3]) ? 0 : fwk-eval(st, s[3]));
+  def fwk-for-step(st, s, z) = fwk-err?(st) ? "exit" : fwk-for-again(st, s, fwk-step(st));
+  def fwk-for-again(st, s, g) = fwk-is?(g, "") ? fwk-for-test(st, s) : g;
+  def fwk-forin-ex(st, s) = fwk-forin-keys(st, s, fwk-live-keys(fwk-arr(st, s[2])));
+  def fwk-forin-keys(st, s, keys) = nil?(keys) ? "" : fwk-forin-body(st, s, keys, fwk-forin-one(st, s, keys[0]));
+  def fwk-forin-one(st, s, k) {
+   let z = fwk-set-var(st, s[1], k);
+   fwk-exec(st, s[3]);
+  }
+  def fwk-forin-body(st, s, keys, sig) = fwk-is?(sig, "break") ? "" : fwk-leaves?(sig) ? sig : fwk-forin-keys(st, s, keys[1:]);
+  def fwk-exit-ex(st, e) = nothing?(e) ? "exit" : fwk-exit-code(st, fwk-trunc(fwk-num(fwk-eval(st, e))));
+  def fwk-exit-code(st, k) {
+   let z = record_set(st, "code", k);
+   "exit";
+  }
+  def fwk-print(st, args) = fwk-emit-held(st, (String) (nil?(args) ? record_get(st, "f0") : fat-join(map(e => fwk-str(fwk-eval(st, e)), args), fwk-vstr(st, "OFS"))) + fwk-vstr(st, "ORS"));
+  def fwk-printf(st, args) = fwk-emit-held(st, fwk-format(fwk-str(fwk-eval(st, args[0])), fwk-vals(st, args[1:])));
+  // a line whose values met an ending is not printed
+  def fwk-emit-held(st, text) = fwk-err?(st) ? 0 : fwk-emit(st, text);
+
+  // ---- Form's choice: an option is offered from a checkpoint; one that does not land is undone, and its finding kept ----------------------
+  def fwk-failing(st, why) {
+   let z = record_set(st, "finding", why);
+   "fail";
+  }
+  def fwk-fail-ex(st, e) = nothing?(e) ? fwk-failing(st, "fail") : fwk-failing(st, fwk-str(fwk-eval(st, e)));
+  def fwk-cut-ex(st) {
+   let z = nil?(record_get(st, "cuts")) ? 0 : record_set(st, "cuts", cons(true, record_get(st, "cuts")[1:]));
+   "";
+  }
+  // one offer: an ending inside it (not the step limit) is the option's failure, its text the finding
+  def fwk-offer(st, stmt) {
+   let z = record_set(st, "finding", "");
+   let sig = fwk-exec(st, stmt);
+   fwk-offered(st, sig);
+  }
+  def fwk-offered(st, sig) = (fwk-err?(st) && record_get(st, "dead") != 1) ? fwk-caught(st, record_get(st, "err")) : sig;
+  def fwk-caught(st, why) {
+   let z = record_set(st, "err", "");
+   fwk-failing(st, why);
+  }
+  def fwk-choice-ex(st, s) {
+   let mark = fwk-mark(st);
+   let z1 = record_set(st, "cuts", cons(false, record_get(st, "cuts")));
+   let z2 = record_set(record_get(st, "a"), "FINDINGS", record_new(0));
+   let sig = fwk-choice-go(st, s[1], mark, 1);
+   let z3 = record_set(st, "cuts", record_get(st, "cuts")[1:]);
+   let z4 = fwk-unmark(st);
+   sig;
+  }
+  def fwk-choice-go(st, alts, mark, k) = nil?(alts) ? "fail" : fwk-choice-after(st, alts, mark, k, fwk-offer(st, alts[0]));
+  def fwk-choice-after(st, alts, mark, k, sig) = fwk-is?(sig, "fail") ? fwk-choice-next(st, alts, mark, k, record_get(st, "cuts")[0], record_get(st, "finding")) : sig;
+  def fwk-choice-next(st, alts, mark, k, cut, why) {
+   let z1 = fwk-undo-to(st, mark);
+   let z2 = fwk-found(st, k, why);
+   let z3 = record_set(st, "cuts", cons(false, record_get(st, "cuts")[1:]));
+   cut ? fwk-failing(st, why) : fwk-choice-go(st, alts[1:], mark, k + 1);
+  }
+  def fwk-found(st, k, why) {
+   let z1 = record_set(record_get(record_get(st, "a"), "FINDINGS"), k.str(), why);
+   let z2 = record_set(record_get(st, "v"), "REASON", why);
+   0;
+  }
+  def fwk-try-ex(st, s) {
+   let mark = fwk-mark(st);
+   let sig = fwk-offer(st, s[1]);
+   let failed = fwk-is?(sig, "fail");
+   let z1 = failed ? fwk-undo-to(st, mark) : 0;
+   let z2 = failed ? record_set(record_get(st, "v"), "REASON", record_get(st, "finding")) : 0;
+   let z3 = fwk-unmark(st);
+   failed ? fwk-exec(st, s[2]) : sig;
+  }
+  def fwk-timeout-ex(st, s) = fwk-timeout-at(st, s, fwk-trunc(fwk-num(fwk-eval(st, s[1]))));
+  def fwk-timeout-at(st, s, n) {
+   let old = record_get(st, "deadline");
+   let want = record_get(st, "steps") + (n < 0 ? 0 : n);
+   let z1 = record_set(st, "deadline", want < old ? want : old);
+   let mark = fwk-mark(st);
+   let sig = fwk-offer(st, s[2]);
+   let z2 = record_set(st, "deadline", old);
+   let failed = fwk-is?(sig, "fail");
+   let ranout = failed && record_get(st, "steps") > want;
+   let z3 = ranout ? fwk-bump(st, "TIMEOUTS") : 0;
+   let z4 = failed ? fwk-undo-to(st, mark) : 0;
+   let z5 = failed ? record_set(record_get(st, "v"), "REASON", ranout ? "timeout" : record_get(st, "finding")) : 0;
+   let z6 = fwk-unmark(st);
+   failed ? fwk-failing(st, ranout ? "timeout" : record_get(st, "finding")) : sig;
+  }
+
+  // ---- running: BEGIN, each record through the rules, END ----------------------------------------------------------------------------
+  def fwk-run(prog, recs, env) {
+   let st = fwk-state(env);
+   let sig = fwk-run-blocks(st, filter(it => fwk-is?(it[0], "begin"), prog));
+   let mains = filter(it => fwk-is?(it[0], "main") || fwk-is?(it[0], "range"), prog);
+   let ends = filter(it => fwk-is?(it[0], "end"), prog);
+   let read = (fwk-is?(sig, "exit") || fwk-is?(sig, "stop") || (nil?(mains) && nil?(ends))) ? sig : fwk-records(st, mains, recs, "");
+   let fin = (fwk-err?(st) || fwk-is?(read, "stop")) ? read : fwk-run-blocks(st, ends);
+   [fwk-err?(st) ? 2 : record_get(st, "code"), fat-join(reverse(record_get(st, "out")), ""), record_get(st, "err")];
+  }
+  def fwk-run-blocks(st, items) = nil?(items) ? "" : fwk-run-blocks-next(st, items, fwk-exec-list(st, items[0][1]));
+  def fwk-run-blocks-next(st, items, sig) = (fwk-is?(sig, "exit") || fwk-is?(sig, "stop")) ? sig : fwk-run-blocks(st, fwk-failed(st, sig, items[1:]));
+  def fwk-failed(st, sig, rest) {
+   let z = fwk-is?(sig, "fail") ? fwk-bump(st, "FAILS") : 0;
+   rest;
+  }
+  def fwk-records(st, items, recs, file) = nil?(recs) ? "" : fwk-records-next(st, items, recs, fwk-record(st, items, recs[0], file));
+  def fwk-records-next(st, items, recs, sig) = (fwk-is?(sig, "exit") || fwk-is?(sig, "stop")) ? sig : fwk-records(st, items, recs[1:], recs[0][2]);
+  def fwk-record(st, items, rec, file) {
+   let v = record_get(st, "v");
+   let z1 = record_set(v, "NR", fwk-num(record_get(v, "NR")) + 1);
+   let z2 = record_set(v, "FNR", fwk-is?(rec[2], file) ? fwk-num(record_get(v, "FNR")) + 1 : 1);
+   let z3 = record_set(v, "FILENAME", rec[2]);
+   let z4 = record_set(st, "attrs", rec[1]);
+   let z5 = fwk-set-record(st, rec[0]);
+   fwk-items(st, items);
+  }
+  def fwk-items(st, items) = nil?(items) ? "" : fwk-items-next(st, items, fwk-item(st, items[0]));
+  def fwk-items-next(st, items, sig) = fwk-is?(sig, "next") ? "" : (fwk-is?(sig, "exit") || fwk-is?(sig, "stop")) ? sig : fwk-items(st, fwk-failed(st, sig, items[1:]));
+  def fwk-item(st, it) = fwk-is?(it[0], "range") ? fwk-range(st, it) : fwk-item-hit(st, it, nothing?(it[1]) ? 1 : fwk-cond(st, it[1]));
+  def fwk-item-hit(st, it, c) = c == 2 ? "exit" : c == 0 ? "" : fwk-action(st, it[2]);
+  def fwk-action(st, a) = nothing?(a) ? fwk-done(st, fwk-print(st, [])) : fwk-exec(st, a);
+  def fwk-range(st, it) = record_get(record_get(st, "rg"), it[4]) == 1 ? fwk-range-in(st, it, fwk-cond(st, it[2])) : fwk-range-start(st, it, fwk-cond(st, it[1]));
+  def fwk-range-start(st, it, c) = c == 2 ? "exit" : c == 0 ? "" : fwk-range-in(st, it, fwk-cond(st, it[2]));
+  def fwk-range-in(st, it, c) = c == 2 ? "exit" : fwk-range-act(st, it, fwk-jput(st, record_get(st, "rg"), it[4], c == 1 ? 0 : 1, 0));
+  def fwk-range-act(st, it, z) = fwk-action(st, it[3]);
+
+  // ---- the lexer: [tokens, why]; a token is [kind, text, at] ------------------------------------------------------------------------------
+  def fwk-keywords() = ["BEGIN", "END", "if", "else", "while", "do", "for", "in", "next", "nextfile", "exit", "break", "continue", "delete", "print", "printf", "getline", "function", "func", "return", "choice", "or", "try", "catch", "timeout", "fail", "stop", "cut"];
+  def fwk-tok(kind, text, at) = [kind, text, at];
+  def fwk-lex(s) = fwk-lx(s, 0, len(s), [], false);
+  def fwk-lx(s, i, n, acc, opnd) = i >= n ? [reverse(cons(fwk-tok("eof", "", n), acc)), ""] : fwk-lx-at(s, i, n, acc, opnd, str_byte_at(s, i));
+  def fwk-lx-at(s, i, n, acc, opnd, c) = (c == 32 || c == 9 || c == 13) ? fwk-lx(s, i + 1, n, acc, opnd)
+   : (c == 92 && fwk-at(s, i + 1) == 10) ? fwk-lx(s, i + 2, n, acc, opnd)
+   : c == 35 ? fwk-lx(s, fwk-eol(s, i, n), n, acc, opnd)
+   : c == 10 ? fwk-lx(s, i + 1, n, fwk-nl(acc, i), false)
+   : c == 34 ? fwk-lx-str(s, i + 1, n, acc, i)
+   : (c == 47 && !opnd) ? fwk-lx-re(s, i + 1, n, acc, i)
+   : (fwk-digit?(c) || (c == 46 && fwk-digit?(fwk-at(s, i + 1)))) ? fwk-lx-num(s, i, fwk-num-end(s, i, n), n, acc)
+   : fwk-alpha?(c) ? fwk-lx-name(s, i, fwk-name-end(s, i, n), n, acc)
+   : (c == 64 && fwk-digit?(fwk-at(s, i + 1))) ? fwk-lx-node(s, i, fwk-nodeid-end(s, i + 1, n), n, acc)
+   : (c == 64 && fwk-alpha?(fwk-at(s, i + 1))) ? fwk-lx-attr(s, i, fwk-name-end(s, i + 1, n), n, acc)
+   : fwk-lx-op(s, i, n, acc);
+  def fwk-eol(s, i, n) = i >= n ? n : str_byte_at(s, i) == 10 ? i : fwk-eol(s, i + 1, n);
+  def fwk-nl(acc, i) = nil?(acc) ? acc : fwk-is?(acc[0][0], "nl") ? acc : cons(fwk-tok("nl", "", i), acc);
+  def fwk-name-end(s, i, n) = i >= n ? i : fwk-word?(str_byte_at(s, i)) ? fwk-name-end(s, i + 1, n) : i;
+  def fwk-nodeid-end(s, i, n) = i >= n ? i : (fwk-digit?(str_byte_at(s, i)) || (str_byte_at(s, i) == 46 && fwk-digit?(fwk-at(s, i + 1)))) ? fwk-nodeid-end(s, i + 1, n) : i;
+  def fwk-lx-num(s, i, j, n, acc) = fwk-lx(s, j, n, cons(fwk-tok("num", substring(s, i, j), i), acc), true);
+  def fwk-lx-name(s, i, j, n, acc) = fwk-lx-named(s, j, n, acc, substring(s, i, j), i);
+  def fwk-lx-named(s, j, n, acc, w, i) = fwk-has?(fwk-keywords(), w) ? fwk-lx(s, j, n, cons(fwk-tok("kw", w, i), acc), false)
+   : fwk-lx(s, j, n, cons(fwk-tok(fwk-at(s, j) == 40 ? "fname" : "name", w, i), acc), true);
+  def fwk-lx-node(s, i, j, n, acc) = fwk-lx(s, j, n, cons(fwk-tok("str", substring(s, i, j), i), acc), true);
+  def fwk-lx-attr(s, i, j, n, acc) = fwk-lx(s, j, n, cons(fwk-tok("attr", substring(s, i + 1, j), i), acc), true);
+  def fwk-lx-str(s, i, n, acc, start) = fwk-lx-str-end(s, i, n, acc, start, fwk-str-close(s, i, n));
+  def fwk-str-close(s, i, n) = i >= n ? 0 - 1 : str_byte_at(s, i) == 34 ? i : str_byte_at(s, i) == 10 ? 0 - 1 : str_byte_at(s, i) == 92 ? fwk-str-close(s, i + 2, n) : fwk-str-close(s, i + 1, n);
+  def fwk-lx-str-end(s, i, n, acc, start, e) = e < 0 ? [[], "awk-syntax: unterminated string at byte " + start.str()] : fwk-lx(s, e + 1, n, cons(fwk-tok("str", fwk-unescape(substring(s, i, e)), start), acc), true);
+  def fwk-lx-re(s, i, n, acc, start) = fwk-lx-re-end(s, i, n, acc, start, fwk-re-close(s, i, n));
+  def fwk-re-close(s, i, n) = i >= n ? 0 - 1 : str_byte_at(s, i) == 10 ? 0 - 1 : str_byte_at(s, i) == 92 ? fwk-re-close(s, i + 2, n) : str_byte_at(s, i) == 91 ? fwk-re-close(s, fwk-class-end(s, i + 1, n), n) : str_byte_at(s, i) == 47 ? i : fwk-re-close(s, i + 1, n);
+  def fwk-class-end(s, i, n) = fwk-class-scan(s, fwk-class-first(s, fwk-at(s, i) == 94 ? i + 1 : i), n);
+  def fwk-class-first(s, i) = fwk-at(s, i) == 93 ? i + 1 : i;
+  def fwk-class-scan(s, i, n) = i >= n ? n : str_byte_at(s, i) == 93 ? i + 1 : (str_byte_at(s, i) == 91 && fwk-at(s, i + 1) == 58) ? fwk-class-scan(s, fwk-posix-close(s, i + 2, n), n) : str_byte_at(s, i) == 92 ? fwk-class-scan(s, i + 2, n) : str_byte_at(s, i) == 10 ? n : fwk-class-scan(s, i + 1, n);
+  def fwk-posix-close(s, i, n) = i + 1 >= n ? n : (str_byte_at(s, i) == 58 && str_byte_at(s, i + 1) == 93) ? i + 2 : fwk-posix-close(s, i + 1, n);
+  def fwk-lx-re-end(s, i, n, acc, start, e) = e < 0 ? [[], "awk-syntax: unterminated regular expression at byte " + start.str()] : fwk-lx(s, e + 1, n, cons(fwk-tok("ere", substring(s, i, e), start), acc), true);
+  def fwk-ops2() = ["+=", "-=", "*=", "/=", "%=", "^=", "==", "<=", ">=", "!=", "!~", "&&", "||", "++", "--", ">>", "**"];
+  def fwk-ops1() = "+-*/%^!><|?:~$={}()[];,";
+  def fwk-lx-op(s, i, n, acc) = fwk-is?(substring(s, i, fwk-min(i + 3, n)), "**=") ? fwk-lx-opt(s, i + 3, n, acc, "^=", i)
+   : fwk-has?(fwk-ops2(), substring(s, i, fwk-min(i + 2, n))) ? fwk-lx-opt(s, i + 2, n, acc, fwk-op-name(substring(s, i, i + 2)), i)
+   : str_find(fwk-ops1(), substring(s, i, i + 1), 0) >= 0 ? fwk-lx-opt(s, i + 1, n, acc, substring(s, i, i + 1), i)
+   : [[], "awk-syntax: unexpected character " + substring(s, i, i + 1) + " at byte " + i.str()];
+  def fwk-op-name(o) = fwk-is?(o, "**") ? "^" : o;
+  def fwk-lx-opt(s, j, n, acc, o, i) = fwk-lx(s, j, n, cons(fwk-tok("op", o, i), acc), fwk-has?([")", "]", "++", "--"], o));
+  // the escapes of an awk string (and of -v and -F at the door): \n \t \r \\ \" \/ \a \b \f \v and \ooo; any other \x stays \x
+  def fwk-unescape(s) = str_find(s, "\\", 0) < 0 ? s : fat-join(fwk-unesc-go(s, 0, len(s), []), "");
+  def fwk-unesc-go(s, i, n, acc) = i >= n ? reverse(acc) : (str_byte_at(s, i) != 92 || i + 1 >= n) ? fwk-unesc-go(s, i + 1, n, cons(substring(s, i, i + 1), acc)) : fwk-unesc-at(s, i + 1, n, acc, str_byte_at(s, i + 1));
+  def fwk-unesc-at(s, j, n, acc, c) = fwk-oct?(c) ? fwk-unesc-oct(s, j, n, acc, 0, 0) : fwk-unesc-go(s, j + 1, n, cons(fwk-esc-of(c, substring(s, j - 1, j + 1)), acc));
+  def fwk-esc-of(c, pair) = c == 110 ? byte_to_str(10) : c == 116 ? byte_to_str(9) : c == 114 ? byte_to_str(13) : c == 92 ? "\\" : c == 34 ? byte_to_str(34) : c == 47 ? "/" : c == 97 ? byte_to_str(7) : c == 98 ? byte_to_str(8) : c == 102 ? byte_to_str(12) : c == 118 ? byte_to_str(11) : pair;
+  def fwk-oct?(c) = c >= 48 && c <= 55;
+  def fwk-unesc-oct(s, j, n, acc, k, v) = (k < 3 && fwk-oct?(fwk-at(s, j))) ? fwk-unesc-oct(s, j + 1, n, acc, k + 1, v * 8 + str_byte_at(s, j) - 48) : fwk-unesc-go(s, j, n, cons(byte_to_str(v), acc));
+
+  // ---- the parser: [node, next, why] over the tokens held by index --------------------------------------------------------------------------
+  def fwk-r(node, i) = [node, i, ""];
+  def fwk-e(msg, i) = [nothing(), i, msg];
+  def fwk-bad?(r) = !fwk-is?(r[2], "");
+  def fwk-index-tokens(ts) = fwk-index-go(record_new(0), ts, 0);
+  def fwk-index-go(r, ts, i) = nil?(ts) ? r : fwk-index-go(fwk-put-r(r, i.str(), ts[0]), ts[1:], i + 1);
+  def fwk-tk(ts, i) = record_has(ts, i.str()) ? record_get(ts, i.str()) : ["eof", "", 0];
+  def fwk-k(ts, i) = fwk-tk(ts, i)[0];
+  def fwk-t(ts, i) = fwk-tk(ts, i)[1];
+  def fwk-tok?(ts, i, kind, text) = fwk-is?(fwk-k(ts, i), kind) && fwk-is?(fwk-t(ts, i), text);
+  def fwk-op?(ts, i, o) = fwk-tok?(ts, i, "op", o);
+  def fwk-kw?(ts, i, w) = fwk-tok?(ts, i, "kw", w);
+  def fwk-eof?(ts, i) = fwk-is?(fwk-k(ts, i), "eof");
+  def fwk-nl?(ts, i) = fwk-is?(fwk-k(ts, i), "nl");
+  def fwk-skip-nl(ts, i) = fwk-nl?(ts, i) ? fwk-skip-nl(ts, i + 1) : i;
+  def fwk-skip-term(ts, i) = (fwk-nl?(ts, i) || fwk-op?(ts, i, ";")) ? fwk-skip-term(ts, i + 1) : i;
+  def fwk-ends?(ts, i) = fwk-op?(ts, i, ";") || fwk-nl?(ts, i) || fwk-op?(ts, i, "}") || fwk-eof?(ts, i);
+  def fwk-near(ts, i) = fwk-eof?(ts, i) ? "the end" : fwk-nl?(ts, i) ? "a newline" : (String) fwk-t(ts, i);
+  def fwk-wrap1(tag, r) = fwk-bad?(r) ? r : fwk-r([tag, r[0]], r[1]);
+  // the program: its items
+  def fwk-program(ts) = fwk-prog-items(ts, fwk-skip-term(ts, 0), [], 0);
+  def fwk-prog-items(ts, i, acc, k) = fwk-eof?(ts, i) ? fwk-r(reverse(acc), i) : fwk-prog-next(ts, acc, k, fwk-item-parse(ts, i, k));
+  def fwk-prog-next(ts, acc, k, r) = fwk-bad?(r) ? r : fwk-prog-items(ts, fwk-skip-term(ts, r[1]), cons(r[0], acc), k + 1);
+  def fwk-item-parse(ts, i, k) = fwk-kw?(ts, i, "BEGIN") ? fwk-item-block(fwk-block(ts, fwk-skip-nl(ts, i + 1)), "begin")
+   : fwk-kw?(ts, i, "END") ? fwk-item-block(fwk-block(ts, fwk-skip-nl(ts, i + 1)), "end")
+   : (fwk-kw?(ts, i, "function") || fwk-kw?(ts, i, "func")) ? fwk-e("awk-user-functions-not-supported", i)
+   : fwk-op?(ts, i, "{") ? fwk-item-main(nothing(), fwk-block(ts, i))
+   : fwk-item-pattern(ts, k, fwk-expr(ts, i, false));
+  def fwk-item-block(r, tag) = fwk-bad?(r) ? r : fwk-r([tag, r[0][1]], r[1]);
+  def fwk-item-main(pat, r) = fwk-bad?(r) ? r : fwk-r(["main", pat, r[0]], r[1]);
+  def fwk-item-pattern(ts, k, p) = fwk-bad?(p) ? p
+   : fwk-op?(ts, p[1], ",") ? fwk-item-range(ts, k, p[0], fwk-expr(ts, fwk-skip-nl(ts, p[1] + 1), false))
+   : fwk-op?(ts, p[1], "{") ? fwk-item-main(p[0], fwk-block(ts, p[1]))
+   : fwk-ends?(ts, p[1]) ? fwk-r(["main", p[0], nothing()], p[1])
+   : fwk-e("awk-syntax: unexpected " + fwk-near(ts, p[1]) + " after a pattern", p[1]);
+  def fwk-item-range(ts, k, p1, p2) = fwk-bad?(p2) ? p2
+   : fwk-op?(ts, p2[1], "{") ? fwk-item-range-made(p1, p2[0], k, fwk-block(ts, p2[1]))
+   : fwk-ends?(ts, p2[1]) ? fwk-r(["range", p1, p2[0], nothing(), "r" + k.str()], p2[1])
+   : fwk-e("awk-syntax: unexpected " + fwk-near(ts, p2[1]) + " after a range", p2[1]);
+  def fwk-item-range-made(p1, p2, k, b) = fwk-bad?(b) ? b : fwk-r(["range", p1, p2, b[0], "r" + k.str()], b[1]);
+  // statements
+  def fwk-block(ts, i) = !fwk-op?(ts, i, "{") ? fwk-e("awk-syntax: expected { and found " + fwk-near(ts, i), i) : fwk-stmts(ts, fwk-skip-term(ts, i + 1), []);
+  def fwk-stmts(ts, i, acc) = fwk-op?(ts, i, "}") ? fwk-r(["block", reverse(acc)], i + 1)
+   : fwk-eof?(ts, i) ? fwk-e("awk-syntax: a { is not closed", i)
+   : fwk-stmts-next(ts, acc, fwk-stmt(ts, i));
+  def fwk-stmts-next(ts, acc, r) = fwk-bad?(r) ? r : fwk-stmts(ts, fwk-skip-term(ts, r[1]), cons(r[0], acc));
+  def fwk-stmt(ts, i) = fwk-op?(ts, i, "{") ? fwk-block(ts, i)
+   : fwk-op?(ts, i, ";") ? fwk-r(["block", []], i + 1)
+   : fwk-kw?(ts, i, "if") ? fwk-if-p(ts, fwk-paren(ts, i + 1))
+   : fwk-kw?(ts, i, "while") ? fwk-while-p(ts, fwk-paren(ts, i + 1))
+   : fwk-kw?(ts, i, "do") ? fwk-do-p(ts, fwk-stmt(ts, fwk-skip-nl(ts, i + 1)))
+   : fwk-kw?(ts, i, "for") ? fwk-for-p(ts, i + 1)
+   : (fwk-kw?(ts, i, "choice") && !fwk-op?(ts, i + 1, "(")) ? fwk-choice-p(ts, fwk-block(ts, fwk-skip-nl(ts, i + 1)), [])
+   : fwk-kw?(ts, i, "try") ? fwk-try-p(ts, fwk-block(ts, fwk-skip-nl(ts, i + 1)))
+   : fwk-kw?(ts, i, "timeout") ? fwk-timeout-p(ts, fwk-expr(ts, i + 1, false))
+   : fwk-simple-end(ts, fwk-simple(ts, i));
+  def fwk-simple(ts, i) = fwk-kw?(ts, i, "print") ? fwk-print-p(ts, i + 1, "print")
+   : fwk-kw?(ts, i, "printf") ? fwk-print-p(ts, i + 1, "printf")
+   : fwk-kw?(ts, i, "next") ? fwk-r(["next"], i + 1)
+   : fwk-kw?(ts, i, "break") ? fwk-r(["break"], i + 1)
+   : fwk-kw?(ts, i, "continue") ? fwk-r(["continue"], i + 1)
+   : fwk-kw?(ts, i, "exit") ? (fwk-ends?(ts, i + 1) ? fwk-r(["exit", nothing()], i + 1) : fwk-wrap1("exit", fwk-expr(ts, i + 1, false)))
+   : fwk-kw?(ts, i, "fail") ? (fwk-ends?(ts, i + 1) ? fwk-r(["fail", nothing()], i + 1) : fwk-wrap1("fail", fwk-expr(ts, i + 1, false)))
+   : fwk-kw?(ts, i, "stop") ? fwk-r(["stop"], i + 1)
+   : fwk-kw?(ts, i, "cut") ? fwk-r(["cut"], i + 1)
+   : fwk-kw?(ts, i, "delete") ? fwk-delete-p(ts, i + 1)
+   : fwk-kw?(ts, i, "nextfile") ? fwk-e("awk-nextfile-not-supported", i)
+   : fwk-kw?(ts, i, "getline") ? fwk-e("awk-getline-not-supported", i)
+   : fwk-kw?(ts, i, "return") ? fwk-e("awk-user-functions-not-supported", i)
+   : fwk-wrap1("expr", fwk-expr(ts, i, false));
+  def fwk-simple-end(ts, r) = fwk-bad?(r) ? r : fwk-ends?(ts, r[1]) ? r : fwk-e("awk-syntax: unexpected " + fwk-near(ts, r[1]), r[1]);
+  def fwk-paren(ts, i) = !fwk-op?(ts, i, "(") ? fwk-e("awk-syntax: expected ( and found " + fwk-near(ts, i), i) : fwk-paren-close(ts, fwk-expr(ts, fwk-skip-nl(ts, i + 1), false));
+  def fwk-paren-close(ts, r) = fwk-bad?(r) ? r : fwk-op?(ts, fwk-skip-nl(ts, r[1]), ")") ? fwk-r(r[0], fwk-skip-nl(ts, r[1]) + 1) : fwk-e("awk-syntax: expected ) and found " + fwk-near(ts, r[1]), r[1]);
+  def fwk-if-p(ts, c) = fwk-bad?(c) ? c : fwk-if-then(ts, c[0], fwk-stmt(ts, fwk-skip-nl(ts, c[1])));
+  def fwk-if-then(ts, cond, t) = fwk-bad?(t) ? t : fwk-if-else(ts, cond, t, fwk-skip-term(ts, t[1]));
+  def fwk-if-else(ts, cond, t, j) = !fwk-kw?(ts, j, "else") ? fwk-r(["if", cond, t[0], nothing()], t[1]) : fwk-if-made(cond, t[0], fwk-stmt(ts, fwk-skip-nl(ts, j + 1)));
+  def fwk-if-made(cond, then, e) = fwk-bad?(e) ? e : fwk-r(["if", cond, then, e[0]], e[1]);
+  def fwk-while-p(ts, c) = fwk-bad?(c) ? c : fwk-while-made(c[0], fwk-stmt(ts, fwk-skip-nl(ts, c[1])));
+  def fwk-while-made(cond, b) = fwk-bad?(b) ? b : fwk-r(["while", cond, b[0]], b[1]);
+  def fwk-do-p(ts, b) = fwk-bad?(b) ? b : fwk-do-while(ts, b[0], fwk-skip-term(ts, b[1]));
+  def fwk-do-while(ts, body, j) = !fwk-kw?(ts, j, "while") ? fwk-e("awk-syntax: do needs while", j) : fwk-do-made(body, fwk-paren(ts, j + 1));
+  def fwk-do-made(body, c) = fwk-bad?(c) ? c : fwk-r(["do", body, c[0]], c[1]);
+  def fwk-for-p(ts, i) = !fwk-op?(ts, i, "(") ? fwk-e("awk-syntax: expected ( after for", i)
+   : (fwk-is?(fwk-k(ts, i + 1), "name") && fwk-kw?(ts, i + 2, "in") && fwk-is?(fwk-k(ts, i + 3), "name") && fwk-op?(ts, i + 4, ")")) ? fwk-forin-made(fwk-t(ts, i + 1), fwk-t(ts, i + 3), fwk-stmt(ts, fwk-skip-nl(ts, i + 5)))
+   : fwk-for-a(ts, fwk-opt-expr(ts, fwk-skip-nl(ts, i + 1), ";"));
+  def fwk-forin-made(k, a, b) = fwk-bad?(b) ? b : fwk-r(["forin", k, a, b[0]], b[1]);
+  def fwk-opt-expr(ts, i, close) = fwk-op?(ts, i, close) ? fwk-r(nothing(), i) : fwk-expr(ts, i, false);
+  def fwk-for-a(ts, a) = fwk-bad?(a) ? a : !fwk-op?(ts, a[1], ";") ? fwk-e("awk-syntax: expected ; in for", a[1]) : fwk-for-b(ts, a[0], fwk-opt-expr(ts, fwk-skip-nl(ts, a[1] + 1), ";"));
+  def fwk-for-b(ts, a, b) = fwk-bad?(b) ? b : !fwk-op?(ts, b[1], ";") ? fwk-e("awk-syntax: expected ; in for", b[1]) : fwk-for-c(ts, a, b[0], fwk-opt-expr(ts, fwk-skip-nl(ts, b[1] + 1), ")"));
+  def fwk-for-c(ts, a, b, c) = fwk-bad?(c) ? c : !fwk-op?(ts, c[1], ")") ? fwk-e("awk-syntax: expected ) in for", c[1]) : fwk-for-made(a, b, c[0], fwk-stmt(ts, fwk-skip-nl(ts, c[1] + 1)));
+  def fwk-for-made(a, b, c, body) = fwk-bad?(body) ? body : fwk-r(["for", a, b, c, body[0]], body[1]);
+  def fwk-delete-p(ts, i) = !fwk-is?(fwk-k(ts, i), "name") ? fwk-e("awk-syntax: delete needs an array", i)
+   : fwk-op?(ts, i + 1, "[") ? fwk-delete-key(fwk-t(ts, i), fwk-subs(ts, i + 2))
+   : fwk-r(["delall", fwk-t(ts, i)], i + 1);
+  def fwk-delete-key(name, r) = fwk-bad?(r) ? r : fwk-r(["del", name, r[0]], r[1]);
+  def fwk-subs(ts, i) = fwk-subs-go(ts, fwk-expr(ts, i, false), []);
+  def fwk-subs-go(ts, r, acc) = fwk-bad?(r) ? r
+   : fwk-op?(ts, r[1], ",") ? fwk-subs-go(ts, fwk-expr(ts, fwk-skip-nl(ts, r[1] + 1), false), cons(r[0], acc))
+   : fwk-op?(ts, r[1], "]") ? fwk-r(reverse(cons(r[0], acc)), r[1] + 1)
+   : fwk-e("awk-syntax: expected ] and found " + fwk-near(ts, r[1]), r[1]);
+  def fwk-choice-p(ts, r, acc) = fwk-bad?(r) ? r : fwk-kw?(ts, fwk-skip-term(ts, r[1]), "or") ? fwk-choice-p(ts, fwk-block(ts, fwk-skip-nl(ts, fwk-skip-term(ts, r[1]) + 1)), cons(r[0], acc)) : fwk-r(["choice", reverse(cons(r[0], acc))], r[1]);
+  def fwk-try-p(ts, a) = fwk-bad?(a) ? a : fwk-kw?(ts, fwk-skip-term(ts, a[1]), "catch") ? fwk-try-made(a[0], fwk-block(ts, fwk-skip-nl(ts, fwk-skip-term(ts, a[1]) + 1))) : fwk-e("awk-syntax: try needs catch", a[1]);
+  def fwk-try-made(a, b) = fwk-bad?(b) ? b : fwk-r(["try", a, b[0]], b[1]);
+  def fwk-timeout-p(ts, e) = fwk-bad?(e) ? e : fwk-timeout-made(e[0], fwk-block(ts, fwk-skip-nl(ts, e[1])));
+  def fwk-timeout-made(e, b) = fwk-bad?(b) ? b : fwk-r(["timeout", e, b[0]], b[1]);
+  // print and printf: a list; > >> | after it would send output elsewhere, which the body's awk does not do
+  def fwk-print-p(ts, i, tag) = fwk-print-made(ts, tag, fwk-print-end?(ts, i) ? fwk-r([], i) : fwk-print-args(ts, i));
+  def fwk-print-made(ts, tag, r) = fwk-bad?(r) ? r
+   : (fwk-op?(ts, r[1], ">") || fwk-op?(ts, r[1], ">>") || fwk-op?(ts, r[1], "|")) ? fwk-e("awk-output-redirection-not-supported", r[1])
+   : (fwk-is?(tag, "printf") && nil?(r[0])) ? fwk-e("awk-syntax: printf needs a format", r[1])
+   : fwk-r([tag, r[0]], r[1]);
+  def fwk-print-args(ts, i) = fwk-op?(ts, i, "(") ? fwk-print-paren(ts, i, fwk-exprlist(ts, fwk-skip-nl(ts, i + 1), false)) : fwk-exprlist(ts, i, true);
+  def fwk-print-paren(ts, i, r) = (!fwk-bad?(r) && fwk-op?(ts, r[1], ")") && fwk-print-end?(ts, r[1] + 1)) ? fwk-r(r[0], r[1] + 1) : fwk-exprlist(ts, i, true);
+  def fwk-print-end?(ts, i) = fwk-ends?(ts, i) || fwk-op?(ts, i, ">") || fwk-op?(ts, i, ">>") || fwk-op?(ts, i, "|");
+  def fwk-exprlist(ts, i, g) = fwk-exprlist-go(ts, fwk-expr(ts, i, g), [], g);
+  def fwk-exprlist-go(ts, r, acc, g) = fwk-bad?(r) ? r : fwk-op?(ts, r[1], ",") ? fwk-exprlist-go(ts, fwk-expr(ts, fwk-skip-nl(ts, r[1] + 1), g), cons(r[0], acc), g) : fwk-r(reverse(cons(r[0], acc)), r[1]);
+  // expressions, lowest first; g holds > back for print's redirection
+  def fwk-expr(ts, i, g) = fwk-assign-p(ts, g, fwk-ternary(ts, i, g));
+  def fwk-assign-ops() = ["=", "+=", "-=", "*=", "/=", "%=", "^="];
+  def fwk-assign-p(ts, g, r) = fwk-bad?(r) ? r
+   : (fwk-is?(fwk-k(ts, r[1]), "op") && fwk-has?(fwk-assign-ops(), fwk-t(ts, r[1]))) ? (fwk-lvalue?(r[0]) ? fwk-assign-made(fwk-t(ts, r[1]), r[0], fwk-expr(ts, fwk-skip-nl(ts, r[1] + 1), g)) : fwk-e("awk-syntax: only a variable, field or element takes " + fwk-t(ts, r[1]), r[1]))
+   : r;
+  def fwk-assign-made(op, lv, r) = fwk-bad?(r) ? r : fwk-r(["assign", op, lv, r[0]], r[1]);
+  def fwk-ternary(ts, i, g) = fwk-ternary-q(ts, g, fwk-binl(ts, g, ["||"], (t, j, h) => fwk-and(t, j, h), fwk-and(ts, i, g)));
+  def fwk-ternary-q(ts, g, c) = (fwk-bad?(c) || !fwk-op?(ts, c[1], "?")) ? c : fwk-ternary-a(ts, g, c[0], fwk-ternary(ts, fwk-skip-nl(ts, c[1] + 1), g));
+  def fwk-ternary-a(ts, g, cond, a) = fwk-bad?(a) ? a : !fwk-op?(ts, fwk-skip-nl(ts, a[1]), ":") ? fwk-e("awk-syntax: expected : in ?:", a[1]) : fwk-ternary-b(cond, a[0], fwk-ternary(ts, fwk-skip-nl(ts, fwk-skip-nl(ts, a[1]) + 1), g));
+  def fwk-ternary-b(cond, a, b) = fwk-bad?(b) ? b : fwk-r(["cond", cond, a, b[0]], b[1]);
+  def fwk-binl(ts, g, ops, below, r) = fwk-bad?(r) ? r
+   : (fwk-is?(fwk-k(ts, r[1]), "op") && fwk-has?(ops, fwk-t(ts, r[1]))) ? fwk-binl-rhs(ts, g, ops, below, r[0], fwk-t(ts, r[1]), below(ts, fwk-skip-nl(ts, r[1] + 1), g))
+   : r;
+  def fwk-binl-rhs(ts, g, ops, below, left, op, rr) = fwk-bad?(rr) ? rr : fwk-binl(ts, g, ops, below, fwk-r(["bin", op, left, rr[0]], rr[1]));
+  def fwk-and(ts, i, g) = fwk-binl(ts, g, ["&&"], (t, j, h) => fwk-in-p(t, j, h), fwk-in-p(ts, i, g));
+  def fwk-in-p(ts, i, g) = fwk-in-after(ts, fwk-match-p(ts, i, g));
+  def fwk-in-after(ts, r) = (fwk-bad?(r) || !fwk-kw?(ts, r[1], "in")) ? r : !fwk-is?(fwk-k(ts, r[1] + 1), "name") ? fwk-e("awk-syntax: in needs an array name", r[1] + 1) : fwk-in-after(ts, fwk-r(["in", [r[0]], fwk-t(ts, r[1] + 1)], r[1] + 2));
+  def fwk-match-p(ts, i, g) = fwk-binl(ts, g, ["~", "!~"], (t, j, h) => fwk-rel(t, j, h), fwk-rel(ts, i, g));
+  def fwk-rel(ts, i, g) = fwk-binl(ts, g, g ? ["<", "<=", "==", "!=", ">="] : ["<", "<=", "==", "!=", ">", ">="], (t, j, h) => fwk-cat-p(t, j, h), fwk-cat-p(ts, i, g));
+  def fwk-cat-p(ts, i, g) = fwk-cat-more(ts, g, fwk-add(ts, i, g));
+  def fwk-cat-more(ts, g, r) = (fwk-bad?(r) || !fwk-operand?(ts, r[1])) ? r : fwk-cat-rhs(ts, g, r[0], fwk-add(ts, r[1], g));
+  def fwk-cat-rhs(ts, g, left, rr) = fwk-bad?(rr) ? rr : fwk-cat-more(ts, g, fwk-r(["cat", left, rr[0]], rr[1]));
+  def fwk-operand?(ts, i) = fwk-has?(["num", "str", "ere", "name", "fname", "attr"], fwk-k(ts, i)) || fwk-op?(ts, i, "$") || fwk-op?(ts, i, "(") || fwk-op?(ts, i, "!") || fwk-op?(ts, i, "++") || fwk-op?(ts, i, "--") || fwk-kw?(ts, i, "choice");
+  def fwk-add(ts, i, g) = fwk-binl(ts, g, ["+", "-"], (t, j, h) => fwk-mul(t, j, h), fwk-mul(ts, i, g));
+  def fwk-mul(ts, i, g) = fwk-binl(ts, g, ["*", "/", "%"], (t, j, h) => fwk-unary(t, j, h), fwk-unary(ts, i, g));
+  def fwk-unary(ts, i, g) = fwk-op?(ts, i, "!") ? fwk-wrap1("not", fwk-unary(ts, i + 1, g))
+   : fwk-op?(ts, i, "-") ? fwk-wrap1("neg", fwk-unary(ts, i + 1, g))
+   : fwk-op?(ts, i, "+") ? fwk-wrap1("pos", fwk-unary(ts, i + 1, g))
+   : fwk-pow-p(ts, i, g);
+  def fwk-pow-p(ts, i, g) = fwk-pow-after(ts, g, fwk-postfix(ts, i, g));
+  def fwk-pow-after(ts, g, r) = (fwk-bad?(r) || !fwk-op?(ts, r[1], "^")) ? r : fwk-pow-made(r[0], fwk-unary(ts, r[1] + 1, g));
+  def fwk-pow-made(base, rr) = fwk-bad?(rr) ? rr : fwk-r(["bin", "^", base, rr[0]], rr[1]);
+  def fwk-postfix(ts, i, g) = fwk-post(ts, fwk-primary(ts, i, g));
+  def fwk-post(ts, r) = fwk-bad?(r) ? r : ((fwk-op?(ts, r[1], "++") || fwk-op?(ts, r[1], "--")) && fwk-lvalue?(r[0])) ? fwk-r(["post", fwk-t(ts, r[1]), r[0]], r[1] + 1) : r;
+  def fwk-primary(ts, i, g) = fwk-prim(ts, i, g, fwk-k(ts, i), fwk-t(ts, i));
+  def fwk-prim(ts, i, g, k, t) = fwk-is?(k, "num") ? fwk-r(["num", fwk-num-of(t)], i + 1)
+   : fwk-is?(k, "str") ? fwk-r(["str", t], i + 1)
+   : fwk-is?(k, "ere") ? fwk-prim-re(t, i, fwk-compile-re(t))
+   : fwk-is?(k, "attr") ? fwk-r(["attr", t], i + 1)
+   : fwk-op?(ts, i, "$") ? fwk-wrap1("field", fwk-primary(ts, i + 1, g))
+   : fwk-op?(ts, i, "(") ? fwk-group(ts, fwk-expr(ts, fwk-skip-nl(ts, i + 1), false))
+   : (fwk-op?(ts, i, "++") || fwk-op?(ts, i, "--")) ? fwk-pre(t, fwk-primary(ts, i + 1, g))
+   : fwk-op?(ts, i, "-") ? fwk-wrap1("neg", fwk-primary(ts, i + 1, g))
+   : fwk-op?(ts, i, "!") ? fwk-wrap1("not", fwk-primary(ts, i + 1, g))
+   : (fwk-kw?(ts, i, "choice") && fwk-op?(ts, i + 1, "(")) ? fwk-call-p(ts, i, "choice")
+   : fwk-kw?(ts, i, "getline") ? fwk-e("awk-getline-not-supported", i)
+   : fwk-is?(k, "fname") ? fwk-call-p(ts, i, t)
+   : (fwk-is?(k, "name") && fwk-has?(fwk-builtins(), t)) ? (fwk-op?(ts, i + 1, "(") ? fwk-call-p(ts, i, t) : fwk-is?(t, "length") ? fwk-r(["call", "length", []], i + 1) : fwk-e("awk-syntax: " + t + " needs (", i + 1))
+   : fwk-is?(k, "name") ? (fwk-op?(ts, i + 1, "[") ? fwk-idx(t, fwk-subs(ts, i + 2)) : fwk-r(["var", t], i + 1))
+   : fwk-e("awk-syntax: unexpected " + fwk-near(ts, i), i);
+  def fwk-prim-re(t, i, c) = !fwk-is?(c[1], "") ? fwk-e("awk-regex: " + c[1] + ": /" + t + "/", i) : fwk-r(["re", t, c[0]], i + 1);
+  def fwk-group(ts, r) = fwk-bad?(r) ? r : fwk-op?(ts, fwk-skip-nl(ts, r[1]), ")") ? fwk-r(r[0], fwk-skip-nl(ts, r[1]) + 1) : fwk-e("awk-syntax: expected ) and found " + fwk-near(ts, r[1]), r[1]);
+  def fwk-pre(op, r) = fwk-bad?(r) ? r : fwk-lvalue?(r[0]) ? fwk-r(["pre", op, r[0]], r[1]) : fwk-e("awk-syntax: " + op + " needs a variable, field or element", r[1]);
+  def fwk-idx(name, r) = fwk-bad?(r) ? r : fwk-r(["idx", name, r[0]], r[1]);
+  def fwk-call-p(ts, i, name) = fwk-op?(ts, fwk-skip-nl(ts, i + 2), ")") ? fwk-r(["call", name, []], fwk-skip-nl(ts, i + 2) + 1) : fwk-call-args(ts, name, fwk-exprlist(ts, fwk-skip-nl(ts, i + 2), false));
+  def fwk-call-args(ts, name, r) = fwk-bad?(r) ? r : fwk-op?(ts, fwk-skip-nl(ts, r[1]), ")") ? fwk-r(["call", name, r[0]], fwk-skip-nl(ts, r[1]) + 1) : fwk-e("awk-syntax: expected ) after the arguments of " + name, r[1]);
+
+  // ---- compiling: lex, parse, and every call checked against the functions this run has ------------------------------------------------
+  def fwk-compile(src, ext) = fwk-compile-lexed(fwk-lex(src), ext);
+  def fwk-compile-lexed(lx, ext) = !fwk-is?(lx[1], "") ? [[], lx[1]] : fwk-compile-parsed(fwk-program(fwk-index-tokens(lx[0])), ext);
+  def fwk-compile-parsed(r, ext) = fwk-bad?(r) ? [[], r[2]] : fwk-compile-checked(r[0], fwk-check(fwk-calls(r[0], []), ext));
+  def fwk-compile-checked(prog, why) = !fwk-is?(why, "") ? [[], why] : [prog, ""];
+  // an expression alone, for a predicate a host evaluates per node (form-path's {...} step test)
+  def fwk-compile-expr(src, ext) = fwk-compile-lexed-expr(fwk-lex(src), ext);
+  def fwk-compile-lexed-expr(lx, ext) = !fwk-is?(lx[1], "") ? [[], lx[1]] : fwk-compile-expr-at(fwk-index-tokens(lx[0]), ext);
+  def fwk-compile-expr-at(ts, ext) = fwk-compile-expr-parsed(ts, fwk-expr(ts, fwk-skip-term(ts, 0), false), ext);
+  def fwk-compile-expr-parsed(ts, r, ext) = fwk-bad?(r) ? [[], r[2]] : !fwk-eof?(ts, fwk-skip-term(ts, r[1])) ? [[], "awk-syntax: unexpected " + fwk-near(ts, r[1]) + " after the expression"] : fwk-compile-checked(r[0], fwk-check(fwk-calls(r[0], []), ext));
+  def fwk-calls(n, acc) = !fwk-is?(value_kind(n), "list") ? acc : nil?(n) ? acc : fwk-calls-node(n, acc, fwk-is?(value_kind(n[0]), "string") ? n[0] : "");
+  def fwk-calls-node(n, acc, tag) = fwk-is?(tag, "re") ? acc : foldl((a, x) => fwk-calls(x, a), fwk-is?(tag, "call") ? cons(n, acc) : acc, n);
+  def fwk-check(calls, ext) = nil?(calls) ? "" : fwk-check-next(calls, ext, fwk-check-call(calls[0][1], calls[0][2], ext));
+  def fwk-check-next(calls, ext, why) = !fwk-is?(why, "") ? why : fwk-check(calls[1:], ext);
+  def fwk-arity(name) = fwk-is?(name, "length") ? [0, 1] : fwk-is?(name, "substr") ? [2, 3] : fwk-is?(name, "index") ? [2, 2] : fwk-is?(name, "split") ? [2, 3]
+   : (fwk-is?(name, "sub") || fwk-is?(name, "gsub")) ? [2, 3] : fwk-is?(name, "match") ? [2, 2] : fwk-is?(name, "sprintf") ? [1, 1000] : fwk-is?(name, "nodeid") ? [4, 4]
+   : fwk-is?(name, "choice") ? [1, 1000] : fwk-is?(name, "store") ? [0, 0] : fwk-is?(name, "undo") ? [0, 1] : fwk-is?(name, "path") ? [2, 2] : [1, 1];
+  def fwk-check-call(name, args, ext) = fwk-has?(fwk-refused-fns(), name) ? fwk-refused-why(name)
+   : fwk-has?(ext, name) ? ""
+   : !fwk-has?(fwk-builtins(), name) ? "awk-unknown-function: " + name
+   : (len(args) < fwk-arity(name)[0] || len(args) > fwk-arity(name)[1]) ? "awk-syntax: " + name + " takes " + fwk-arity(name)[0].str() + (fwk-arity(name)[1] > fwk-arity(name)[0] ? " to " + fwk-arity(name)[1].str() : "") + " arguments"
+   : ((fwk-is?(name, "split") || fwk-is?(name, "path")) && !fwk-is?(args[1][0], "var")) ? "awk-syntax: " + name + "'s second argument is an array name"
+   : (fwk-is?(name, "path") && !fwk-has?(ext, "path")) ? "awk-path-needs-the-index: path() is form-find's awk"
+   : ((fwk-is?(name, "sub") || fwk-is?(name, "gsub")) && len(args) > 2 && !fwk-lvalue?(args[2])) ? "awk-syntax: " + name + "'s third argument is a variable, field or element"
+   : "";
+  def fwk-refused-why(name) = fwk-is?(name, "system") ? "awk-system-not-supported: the body begins no child" : fwk-is?(name, "getline") ? "awk-getline-not-supported" : "awk-function-not-supported: " + name;
+
+  // ---- one record against a compiled expression: a host's predicate (form-path's {...}) -----------------------------------------------
+  def fwk-pred-state(env) = fwk-state(env);
+  // [held, why]: why is the ending the expression met ("" when none); an ended test does not hold
+  def fwk-pred(st, expr, text, attrs) {
+   let z1 = record_set(st, "attrs", attrs);
+   let z2 = fwk-set-record(st, text);
+   let v = fwk-eval(st, expr);
+   let why = record_get(st, "err");
+   let z3 = record_set(st, "err", "");
+   [fwk-is?(why, "") ? fwk-true?(v) : false, why];
+  }
+
+  // ---- the door's words: -F FS, -v NAME=VALUE, -P XPATH, -B, -C LEDGER, --, the program, then files --------------------------------------
+  def fwk-set(o, k, v) {
+   let z = record_set(o, k, v);
+   o;
+  }
+  def fwk-door(args) = fwk-door-go(args, record_new(0, "err", "", "prog", nothing(), "files", [], "vars", [], "P", "", "B", 0, "C", "", "form", 0));
+  def fwk-door-go(args, o) = !fwk-is?(record_get(o, "err"), "") ? o
+   : nil?(args) ? fwk-door-end(o)
+   : !nothing?(record_get(o, "prog")) ? fwk-door-go(args[1:], fwk-set(o, "files", append(record_get(o, "files"), [args[0]])))
+   : fwk-is?(args[0], "--") ? fwk-door-take(args[1:], o)
+   : fwk-is?(args[0], "-B") ? fwk-door-go(args[1:], fwk-set(fwk-set(o, "B", 1), "form", record_get(o, "form") + 1))
+   : (len(args[0]) >= 2 && fwk-has?(["-F", "-v", "-P", "-C", "-f"], substring(args[0], 0, 2))) ? fwk-door-value(args, o, substring(args[0], 0, 2), len(args[0]) > 2 ? substring(args[0], 2, len(args[0])) : nothing())
+   : (len(args[0]) > 1 && fwk-at(args[0], 0) == 45) ? fwk-set(o, "err", "awk-unknown-option: " + args[0])
+   : fwk-door-take(args, o);
+  def fwk-door-value(args, o, opt, glued) = !nothing?(glued) ? fwk-door-go(args[1:], fwk-door-opt(o, opt, glued))
+   : nil?(args[1:]) ? fwk-set(o, "err", "awk-option-needs-a-value: " + opt)
+   : fwk-door-go(args[2:], fwk-door-opt(o, opt, args[1]));
+  def fwk-door-opt(o, opt, v) = fwk-is?(opt, "-F") ? fwk-set(o, "vars", append(record_get(o, "vars"), [["FS", fwk-unescape(v)]]))
+   : fwk-is?(opt, "-v") ? fwk-door-assign(o, v, str_find(v, "=", 0))
+   : fwk-is?(opt, "-P") ? fwk-set(fwk-set(o, "P", v), "form", record_get(o, "form") + 1)
+   : fwk-is?(opt, "-C") ? fwk-set(fwk-set(o, "C", v), "form", record_get(o, "form") + 1)
+   : fwk-set(o, "err", "awk-program-files-not-supported: give the program as one argument");
+  def fwk-door-assign(o, v, eq) = (eq <= 0 || !fwk-name?(substring(v, 0, fwk-min(eq, len(v))))) ? fwk-set(o, "err", "awk-v-needs-name=value: " + v) : fwk-set(o, "vars", append(record_get(o, "vars"), [[substring(v, 0, eq), fwk-unescape(substring(v, eq + 1, len(v)))]]));
+  def fwk-door-take(args, o) = nil?(args) ? fwk-door-end(o) : fwk-door-go(args[1:], fwk-set(o, "prog", args[0]));
+  def fwk-door-end(o) = !fwk-is?(record_get(o, "err"), "") ? o
+   : nothing?(record_get(o, "prog")) ? fwk-set(o, "err", "awk-needs-a-program")
+   : record_get(o, "form") > 1 ? fwk-set(o, "err", "awk-one-record-source: -P, -B and -C each name the records alone")
+   : (record_get(o, "form") == 1 && !nil?(record_get(o, "files"))) ? fwk-set(o, "err", "awk-files-and-form-records: name files or a Form record source, not both")
+   : o;
+  def fwk-env(o, ext) = record_new(0, "vars", record_get(o, "vars"), "ext", ext);
+
+  // ---- help awk: the guide a model reads before it reaches for the tool --------------------------------------------------------------------
+  def fwk-guidance() = "awk is the body's own (form-awk.bml): pattern { action } over records, one a line. $0 is the line, $1..$NF its fields (-F sets FS), NR NF FNR FILENAME.\n"
+   + "Read and count: awk '{ n[$1]++ } END { for (k in n) print n[k], k }' PATH | awk -F: '$3 > 100 { print $1 }' PATH | awk 'NR==10, NR==20' PATH\n"
+   + "Transform: awk '{ gsub(/old/, \"new\"); print }' PATH | awk '{ printf \"%-20s %5d\\n\", $1, $2 }' PATH | awk '{ $2 = toupper($2); print }' PATH\n"
+   + "Functions: length substr index split sub gsub match sprintf tolower toupper int kind attr nodeid. Values compare as numbers when both read as numbers.\n"
+   + "Form's choice: every option is offered from the same state, and a failed option is undone (variables, elements, fields, printed lines).\n"
+   + "  choice { if ($2 !~ /^[0-9]+$/) fail \"not a number\"; s += $2 } or { bad[NR] = REASON }   the first option that lands wins; FINDINGS[k] says why option k failed\n"
+   + "  fail [finding]: this option did not land. Outside any choice the rule ends for this record, and FAILS counts it.\n"
+   + "  cut: commit to this option; a later fail fails the whole choice. stop: make no further offer (the run ends here, END is not run).\n"
+   + "  try { A } catch { B }: B decides the recovery, REASON says why A did not land. timeout 1000 { A }: A within 1000 statements; running out fails, counted in TIMEOUTS.\n"
+   + "  k = store() ... undo(k): return to a checkpoint, output included. choice(a, b, \"default\"): the first value that is set and does not end.\n"
+   + "An ending (1/0, a regex that does not compile) inside an option is that option's failure; outside every option awk ends with exit 2 and names it.\n"
+   + "Over the body's own nodes (form-find's awk and path): awk -P '//def[@arity>2]' '{ print @name, @path \":\" @line }' gives recipes as records (@kind @name @arity @path @line @lines @id @node, $0 the source);\n"
+   + "awk -B gives blueprints (@name @id @meaning), awk -C LEDGER gives cells (@FIELD, @node); bp(name) bpname(id) defined(name) callers(name) path(xpath, arr) node(id, attr).\n"
+   + "path '//def[{ callers(@name) == 0 }]' selects with a computed test; path 'A ?? B' takes the first set that is not empty; path 'XPATH => PROGRAM' transforms and computes over it.";
+ }
+ 0;
+}
