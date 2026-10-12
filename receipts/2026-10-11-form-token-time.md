@@ -69,6 +69,16 @@ single reading attributes nothing and only a back-to-back pair does; and a resid
 after-training check and the same call alone (tokenizing is not it: 87 ms for 24 rows). That residual is worth about 10 s of a
 short run and is left unread; the evaluation stage (449 s of the cycle) is the larger target.
 
+Decode, 2026-10-12: a token was 28.3 ms of which the device was busy 16.5; a token's 621 dispatches were encoded into one batch and
+committed at the sync, so host (about 12 ms of encoding; buffer allocation is 2 of it) and device ran one after the other. The
+decode forward now submits each layer's batch as it fills (`nll-flow`, `metal_submit`; the closing sync drains them in order):
+20.7 ms a token (every 4th layer 21.6, every 2nd 20.9, every layer 20.7), device busy 16.9, the numbers unmoved. Eight held-out
+questions asked of the bare voice with and without it gave the same 565 IDs, answers, controls and forged counts, 50.9 s to 47.3 s
+(that arm spends most of a question on the teaching prompt's prefill, not on decode). A second find on the way: the epsilon head check
+of 2026-10-11 left every correct head reading raising a false surprise (its expectation was the bound, its observation the
+difference); `native-lora-resume-band.fk`, which no gate runs, had gone red on that and read 7 again after the reading's
+expectation became "a difference within the bound" with the bound in its evidence.
+
 Still open (named, not hidden): early stopping on a held-out check (the training loss wanders between 0.003 and 0.4 from
 round 60 on while the held-out loss ends at 0.03 to 0.04, so some of the 100 steps are spent past the gain); the day-turn and the band sweeps do not take the GPU lease, so their time-slices still
 inflate timings; the corpus digest is a 4 s Form SHA-256; the 17 MB tokenizer JSON parses in 3 s; forward and backward
