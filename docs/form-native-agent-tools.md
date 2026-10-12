@@ -270,6 +270,12 @@ another operand errored. A grep error with partial output keeps that output in
 `stdout` and names the error on `stderr` (`grep: nope.txt: No such file or
 directory`).
 
+Native `rg` value options accept separate or attached arguments (`-C 2`, `-C2`,
+`-nC2`, `-epattern`, `-g'*.bml'`, `-m1`). Context also accepts
+`--after-context`, `--before-context` and `--context`, with a separate value or
+`=value`. Unknown options name the supplied argument and available native choices;
+invalid numeric values remain errors and preserve the admitted documents.
+
 ### grep as a function
 
 Any BML cell can call grep over held text, with no process and no documents
