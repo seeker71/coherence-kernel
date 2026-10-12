@@ -277,16 +277,17 @@ section [form.bml] {
     // q||gate projection and the linear block's wider one. Writing at `rows`
     // there lays each token down at the wrong pitch and everything downstream
     // reads the token before it.
-    // Quantization and output pitch both belong to the producer. Q4_K, Q6_K,
-    // Q8_0 and F32 use the common tiled fold with their own weight decoder.
-    def q38-mv-batch-y(ps, tv, xh, yh, ntok, ystride, barrier) = q38pq-index(kth-tv-ty(tv)) < 0 ? form_error("qwen prefill: unsupported matrix quantization") :     // Q8_0 goes through the matrix unit: the 64 x 32-tile kernel at pipeline 62 (q38-mm64-msl), dispatched as threadgroups. It is the
-    // old matrix-unit kernel's (qmb-q80-mma, pipeline 56: 32 x 32 tiles, within the lane's named bound of the batched sum and a tenth to
-    // a twentieth of the scalar time on this model's FFN, the span matmul probe of 2026-09-11) with a bigger tile and the loads
-    // overlapped: ~1.5x its speed, and the same bits (the same 8-wide accumulate chain in the same k order: the probe's
-    // old-vs-new comparison reads a largest gap of 0 on an FFN gate tensor).
-(Comparable) kth-tv-ty(tv) == 8 ? q38-mm-q80(ps, tv, xh, yh, ntok, ystride, barrier) : metal_enqueue(nth(ps, q38pq-index(kth-tv-ty(tv))), md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv), ntok, ystride], 256, 0, 0, barrier),     // rows rounded up to a group of eight: the Q8_0 twin gives each group eight rows, and the
-    // batched kernels answer a row past the end by returning
-((Number) kth-tv-r(tv) + (Number) 7) / 8 * 8 * qmb-ntile(ntok) * 32);
+    // Quantization and output pitch belong to the producer. Each K-quant
+    // supplies its decoder to the shared matrix-unit tile; Q8 uses its wider tile.
+    def q38-mv-batch-y(ps, tv, xh, yh, ntok, ystride, barrier) {
+        let type=kth-tv-ty(tv); let rows=kth-tv-r(tv); let cols=kth-tv-c(tv);
+        q38pq-index(type) < 0 ? form_error("qwen prefill: unsupported matrix quantization") : type==8 ? q38-mm-q80(ps,tv,xh,yh,ntok,ystride,barrier) : {
+            let matrix=q38pq-k-mma-index(type);
+            let pipeline=matrix >= 0 ? matrix : q38pq-index(type);
+            let grid=matrix >= 0 ? qmb-mma-groups(rows,ntok) : (rows + 7)/8*8*qmb-ntile(ntok)*32;
+            metal_enqueue(ps[pipeline],md-bind16([kth-tv-h(tv),xh,yh],[rows,cols,ntok,ystride],256,0,matrix >= 0 ? 1 : 0,barrier),grid);
+        };
+    };
     def q38-mv-batch(ps, tv, xh, yh, ntok, barrier) = q38-mv-batch-y(ps, tv, xh, yh, ntok, kth-tv-r(tv), barrier);
     // Independent identities for the three token-major linear-attention rows.
     // bs2 uses the producer-bound output pitch; gates are nv-wide, and delta
