@@ -133,9 +133,9 @@ the missing denominator.
 `form/form-stdlib/adapters/llama-3.2-3b-form-tokens` is a Llama-3.2-3B-Instruct 4-bit LoRA (rank 8, eight
 layers) trained 100 steps (batch 4, learning rate 1e-4) from `llama-3.2-3b-voice-native` on the replayed rows
 of `learn/form-token-traces.jsonl`, exported through the checkpoint door. The ledger row
-(`receipts/form-token-lora.jsonl`, `lane: llama`) reads held-out loss 2935 milli before and 42 after; the
+(`receipts/form-token-lora.rows`, `lane: llama`) reads held-out loss 2935 milli before and 42 after; the
 commit that landed it rounds the first to 2.936. The held-out questions were asked in stream, the grammar
-answering each closed control (`receipts/form-token-eval.jsonl`, the row at 1790897633574):
+answering each closed control (`receipts/form-token-eval.rows`, the row at 1790897633574):
 
 | arm | model | exact of 64 | of 62 without the two repeats |
 |---|---|---|---|
@@ -152,7 +152,7 @@ answering each closed control (`receipts/form-token-eval.jsonl`, the row at 1790
   adapter's run drew on, and the two the `recipe-import` family (18 rows, written after the run) holds out,
   which the adapter was never asked. Twelve `eval-refusal` rows (eleven train rows and the held-out
   `ftr-eval-refusal-7`) were rewritten in place under their old ids when the sandbox was lifted, and
-  `receipts/form-token-eval.jsonl` lines 4 and 5, the adapter's run, cite those ids, so the adapter
+  `receipts/form-token-eval.rows` lines 4 and 5, the adapter's run, cite those ids, so the adapter
   answered those twelve questions as the corpus then worded them, not as it words them now. The adapter was trained before that change (on 514 rows, the two
   repeats' train copies among them) and has not been retrained or re-asked.
 - taught-by-prompt: 16 of 64 stopped at eos after a successful observation. The arm is limited by the
@@ -164,7 +164,7 @@ answering each closed control (`receipts/form-token-eval.jsonl`, the row at 1790
   training with Form in stream on the same base weights, so 55 against 5 reads the training and the earlier
   adapter together.
 - The Qwen3.8 rank-one opening fit reads a held-out separation of 10.0 over a scrambled floor of 2.2
-  (10025 and 2212 milli, `receipts/form-token-lora.jsonl`, `lane: qwen`) on n=7 held-out sites (4 openings, 3
+  (10025 and 2212 milli, `receipts/form-token-lora.rows`, `lane: qwen`) on n=7 held-out sites (4 openings, 3
   opened). The 24 sites were drawn from all 578 rows, the corpus's held-out rows among them, so a site of a
   row the corpus keeps for evaluation could have been fitted. `ftlr-trace-sites` now leaves heldout rows out
   (the lora band pins it); the reading predates that and was not refitted.
