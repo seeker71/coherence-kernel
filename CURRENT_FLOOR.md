@@ -1247,6 +1247,11 @@ fingerprints. The fingerprint has two lanes that agree byte for byte:
 The native form-cli answers its identity in a 16-byte frame, and its challenge is the fingerprint of the domain and the
 nonce. A 64-hex digest is refused as an identity.
 
+Bulk identity stays SHA-256 because the M4 has it in hardware. Over a 2.02 GB model file with the page cache warm, the
+fingerprint lane reads in 1979 ms (1.0 GB/s), which is the ceiling of one chained multiply per byte. The CPU's SHA-256
+instructions read the same file in 659 ms (3.1 GB/s). So the fingerprint names what the body writes and reads, model
+seals take the hardware's digest, and the keyed receipts keep HMAC-SHA-256 because a MAC needs it.
+
 SHA-256 has two lanes, and they agree byte for byte over the whole seed file:
 
 - **The meaning, in Form** (`form/form-stdlib/sha256.fk`): 256 KB in 54 ms, 5.5 MB in 210 ms, about 26 MB/s.
@@ -1258,8 +1263,6 @@ SHA-256 has two lanes, and they agree byte for byte over the whole seed file:
   door for CPU images (`jit_cpu_run`, leaf mode 58). It takes the image through the one page door, a string where it
   lies, and a file as spans mapped for their run. The 1.39 MB seed file hashes in 1 ms. No Metal carrier is asked, so
   the lane stands in every checkout, a fresh worktree included.
-  - The lane is ready when the empty message's digest, computed through the door in this process, is the one FIPS
-    180-4 states.
   - `sho-file` and the model seals walk files in 4 GiB spans.
   - kernel_stat 77 and 78 count the images run and the microseconds inside them, and the board names that time
     `cpu-image`.
