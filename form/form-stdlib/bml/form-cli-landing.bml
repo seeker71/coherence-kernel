@@ -1,28 +1,17 @@
-// The landing: what a movement writes, gates and carries to origin.
-// one native call closes a movement: witness, gates, commit, push.
+// Native publication: owned changes, retained local effects and current evidence.
 //
 // stdin: one JSON object
 //   {"witness":"<a command to run and show, or empty>",
 //    "paths":["file", ...], "subject":"<commit subject>", "body":"<commit body>",
 //    "restart":"origin/main" (optional), "main":1 (optional: the landed commit also fast-forwards main)}
-// The witness runs first, its output is shown, and its exit is read: a named
-// witness that does not exit 0, or whose launch was refused at birth, lands nothing. The
-// drift gates run next as a cell called in this process (cell_run); a refused gate lands nothing. Then git adds each named
-// path that is present, or tracked and gone (a path that is neither is named and left unstaged, since
-// one unmatched pathspec would stage nothing), commits with exactly subject, blank line, body, and pushes the
-// current branch to its own name on origin; the push answers with its own
-// exit, so a commit that did not reach origin reads held, never landed. The witness, every git step and the
-// restart are argv children spawned through form-stdlib/bml/host-child.bml, and their exit is the one the host
-// answers: the witness runs as `/bin/sh -c <witness>` (a witness is shell text by contract), git runs by argv
-// (each step with a half-hour deadline), and the paths to add reach git as a NUL-separated file
-// (--pathspec-from-file), so the number of paths is bounded by no argv. The full output of each step stays under
-// .hearth/walk-io/land-*.out. The one crossing that passes through a shell is the witness, by contract. The reunion
-// after a push behind origin is git by argv through host-child.bml (form-cli-reunion.bml), with the redraw a cell
-// called in this process (fcr-redraw-cell), and its rounds are the one settling the walk's sync shares. Every crossing
-// to a child process happens inside this call's census window and is printed at the end,
-// so what left the body is counted, never hidden: each argv child is reaped once through host_wait, which the
-// census counts as local-process, and a shell line is counted as host-exec. The message file lives under
-// .form-heal, which git forgets.
+// A native request and receipt stay nodes. The continuation and Git evidence live
+// under .form-heal/landing-*/. Owned paths are committed; unrelated tracked edits
+// retain a private Git ref while rebase and current-source observation run.
+// The original task witness and assertions, and existing affected release checks,
+// supply native results. An advanced main resumes this same continuation.
+// Publication uses an ordinary atomic push and confirms every requested ref.
+// Changed runtime inputs renew the artifact and resume from the native checkpoint.
+// Terminal text and an explicitly supplied shell witness have their own boundary.
 // preflight-exec: forbidden
 import form-stdlib/bml/form-cli-reunion.bml;
 import form-stdlib/bml/host-child.bml;
@@ -30,6 +19,9 @@ import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/meaning-codes.bml;
 import observe/form-membrane-runtime-census.fk;
 import form-stdlib/bml/string-join.bml;
+import form-stdlib/bml/form-cli-code-memory.bml;
+import form-stdlib/bml/form-cli-check-witness.bml;
+import gate/drift-gates.bml;
 section [form.bml] {
  class Land {
   def ld-source() = "observe/land-run.bml";
@@ -120,31 +112,183 @@ section [form.bml] {
   def ld-reunited(r) = (String) r[0] == "joined" ? [ld-push-line(r[2]), "joined"] : ["[push] exit=1 the rows did not join", r[1]];
   def ld-push-line(out) = str_find(out, "[ok] exit=0", 0) >= 0 ? "[push] exit=0 after the reunion" : "[push] exit=1 " ++ trim(out);
   def ld-organ() = "landing";
-  def ld-gates-ok(status, output) = ((String) status == "0") && (str_find(output, " refused=0 ", 0) >= 0);
-  def ld-gates() {
-   let root = fhn-root();
-   (String) root == "" ? ["refused:gate-root", "", ""] : ld-gates-open(root);
+  // Publication owns the operation, its retained effects and its native results.
+  // Text is projected only by ld-land/ld-run for existing terminal callers.
+  def ld-state(s) = record_get(s,"state");
+  def ld-field(s,key) = json-object-get(ld-state(s),key);
+  def ld-text(s,key) = fhn-text(ld-state(s),key);
+  def ld-save(s) = fcam-write(record_get(s,"checkpoint"),ld-state(s)) ? s : form_error("publication checkpoint could not be retained");
+  def ld-set(s,key,value) { record_set(s,"state",oh-set(ld-state(s),key,value)); ld-save(s); }
+  def ld-say(s,key,value) = ld-set(s,key,json-node-string(value));
+  def ld-attention(s,why) {
+   ld-say(s,"stage","attention"); ld-say(s,"reason",why);
+   oh-voice(ld-health(ld-text(s,"owner"),why,false)); s;
   }
-  def ld-gates-open(root) {
-   let spool = fhn-at(root, ".form-heal");
-   let made = fs_mkdir(spool);
-   let job = fhn-unique(spool, "landing-gates-");
-   nothing?(job) ? ["refused:gate-evidence", "", ""] : ld-gates-run(root, job);
+  def ld-step(s,name,args) {
+   ld-say(s,"next",name);
+   let began=host_monotonic_ms();
+   let run=hch-git-in(ld-text(s,"io"),ld-text(s,"directory"),name,args);
+   let row=json-node-object([fhn-s("step",name),json-node-pair("exit",nothing?(run[0]) ? json-node-null() : json-node-int(run[0])),fhn-s("reason",run[2]),fhn-n("ms",host_monotonic_ms() - began),fhn-s("evidence",hch-out-path(ld-text(s,"io"),name))]);
+   ld-set(s,"steps",json-node-array(ld-nodes(ld-state(s),"steps") + [row]));
+   fb_record(intern_node(bp("form-publication-step"),[json-node-string(ld-text(s,"owner")),row]),"form-cli-landing.bml",132);
+   run;
   }
-  // The gates are a cell called in this process (cell_run: no child, no shell, no exit to wait for), from the root the
-  // landing stands in. The status is the cell's own ("0": it ran to its end with no compile error; "1": it stopped or its
-  // compile counted an error; "none": this fkwu has no cell_run door), the output what it printed and said, and the
-  // evidence stands under the job as it did for a child: <job>/gates.out and <job>/gates.err.
-  def ld-gates-cell() = "gate/drift-gates-run.bml";
-  def ld-gates-status(r) = nothing?(hch-cell-status(r)) ? "none" : hch-cell-status(r).str();
-  def ld-gates-err(r) = nothing?(r) ? "" : (String) (record_get(r, "err") ?? "");
-  def ld-gates-run(root, job) {
-   let saved = fhn-write-json(fhn-at(job, "snapshot.json"), json-node-object([fhn-s("root", root)]));
-   let r = cell_run(ld-gates-cell(), 0, nothing(), nothing());
-   let said = hch-cell-text(r);
-   let kept = write_file_text(fhn-stage-path(job, "gates", ".out"), said);
-   let heard = write_file_text(fhn-stage-path(job, "gates", ".err"), ld-gates-err(r));
-   [ld-gates-status(r), said ++ ld-gates-err(r), job];
+  def ld-rev(s,ref) { let r=ld-step(s,"read-" + fcam-hash(ref),["rev-parse","--verify",ref]); hch-ok?(r) ? trim(r[1]) : ""; }
+  def ld-changed(s,args) { let r=ld-step(s,"changed",args); hch-ok?(r) ? ld-names(r[1]) : form_error("publication path observation " + args.join(" ") + ": " + hch-said(r)); }
+  def ld-owned(s) = ld-paths(ld-field(s,"request"));
+  def ld-receipt(s) = intern_node(bp("form-native-publication-v1"),[ld-state(s),record_get(s,"checks")]);
+  def ld-admit(request,dir) {
+   let owner=fhn-text(request,"owner") == "" ? fcam-hash(fhn-text(request,"subject") + ld-paths(request).join("\n")) : fhn-text(request,"owner");
+   let root=fcr-abs(dir) + "/.form-heal/landing-" + fcam-hash(owner);
+   hch-mkdirs(root + "/io");
+   let checkpoint=root + "/continuation.fkb"; let prior=fcam-read(checkpoint);
+   let contract=json-node-object(json-object-pairs(request) |> filter(pair => json-pair-key(pair) != "rented_usage"));
+   let same=!nothing?(prior) && node_eq(json-object-get(prior,"contract"),contract);
+   let state=same ? oh-set(prior,"request",request) : json-node-object([fhn-s("schema","form-native-publication-v1"),fhn-s("owner",owner),fhn-s("directory",dir),fhn-s("io",root + "/io"),json-node-pair("request",request),json-node-pair("contract",contract),fhn-s("stage","admitted"),fhn-s("reason",""),fhn-s("stash",""),fhn-s("verified_head",""),fhn-s("verified_contract",""),json-node-pair("steps",json-node-array([])),json-node-pair("aside",json-node-array([]))]);
+   let s=record_new(0); record_set(s,"state",state); record_set(s,"checkpoint",checkpoint);
+   !same && !nothing?(prior) && fhn-text(prior,"stash") != "" ? form_error("publication request changed while retained effects still own a stash") : ld-save(s);
+  }
+  def ld-commit-owned(s) {
+   let foreign=ld-changed(s,["diff","--cached","--name-only","-z"]) |> filter(p => !ld-has?(ld-owned(s),p));
+   !nil?(foreign) ? ld-attention(s,"The index contains another owner's paths: " + foreign.join(", ")) : {
+    let path=ld-text(s,"io") + "/paths";
+    write_file_text(path,ld-nul-join(ld-owned(s))) == len(ld-nul-join(ld-owned(s))) ? 1 : form_error("publication path list was not retained");
+    let add=ld-step(s,"add",["--literal-pathspecs","add","--pathspec-from-file=" + path,"--pathspec-file-nul"]);
+    !hch-ok?(add) ? ld-attention(s,hch-said(add)) : {
+     let changed=ld-changed(s,["diff","--cached","--name-only","-z"]);
+     nil?(changed) ? s : {
+      let request=ld-field(s,"request"); let message=ld-text(s,"io") + "/message";
+      let text=fhn-text(request,"subject") + "\n\n" + fhn-text(request,"body") + "\n";
+      write_file_text(message,text) == len(text) ? 1 : form_error("publication message was not retained");
+      let commit=ld-step(s,"commit",["commit","-q","-F",message]);
+      hch-ok?(commit) ? s : ld-attention(s,hch-said(commit));
+     };
+    };
+   };
+  }
+  def ld-source-hash(dir,path) = fcam-hash(read_file(fcr-abs(dir) + "/" + path) ?? "");
+  def ld-aside(s) = ld-text(s,"stash") != "" ? ld-aside-clean(s) : {
+   let paths=ld-changed(s,["diff","--name-only","-z"]);
+   nil?(paths) ? s : {
+    let rows=paths |> map(p => json-node-object([fhn-s("path",p),fhn-s("hash",ld-source-hash(ld-text(s,"directory"),p)),fhn-s("base",ld-rev(s,"HEAD:" + p))]));
+    ld-set(s,"aside",json-node-array(rows));
+    let pathfile=ld-text(s,"io") + "/aside-paths"; let text=ld-nul-join(paths);
+    write_file_text(pathfile,text) == len(text) ? 1 : form_error("set-aside paths were not retained");
+    let run=ld-step(s,"aside-create",["stash","create","Form publication " + ld-text(s,"owner")]);
+    let oid=hch-ok?(run) ? trim(run[1]) : "";
+    oid == "" ? ld-attention(s,"Working edits did not acquire their retained Git identity: " + hch-said(run)) : {
+     ld-say(s,"stash",oid); ld-say(s,"stash_ref","refs/form/publication/" + fcam-hash(fcr-abs(ld-text(s,"directory")) + ":" + ld-text(s,"owner")));
+     let held=ld-step(s,"aside-retain",["update-ref",ld-text(s,"stash_ref"),oid,""]);
+     hch-ok?(held) ? ld-aside-clean(s) : ld-attention(s,hch-said(held));
+    };
+   };
+  };
+  def ld-aside-clean(s) = fhn-count(ld-state(s),"aside_clean") == 1 ? s : {
+   let same=all?(row => fhn-text(row,"hash") == ld-source-hash(ld-text(s,"directory"),fhn-text(row,"path")),ld-nodes(ld-state(s),"aside"));
+   !same ? ld-attention(s,"Working edits changed while being retained; their current bytes remain in place.") : {
+    let run=ld-step(s,"aside-clean",["--literal-pathspecs","restore","--worktree","--pathspec-from-file=" + ld-text(s,"io") + "/aside-paths","--pathspec-file-nul"]);
+    hch-ok?(run) ? ld-set(s,"aside_clean",json-node-int(1)) : ld-attention(s,hch-said(run));
+   };
+  };
+  def ld-restore(s) = ld-text(s,"stash") == "" ? s : {
+   let stash=ld-text(s,"stash"); let cleaned=fhn-count(ld-state(s),"aside_clean") == 1;
+   let applied=fhn-count(ld-state(s),"aside_applied") == 1;
+   let run=!cleaned || applied ? [0,"",""] : ld-step(s,"restore",["stash","apply",stash]);
+   let restored=hch-ok?(run) && (!cleaned || all?(row => fhn-text(row,"base") != ld-rev(s,"HEAD:" + fhn-text(row,"path")) || fhn-text(row,"hash") == ld-source-hash(ld-text(s,"directory"),fhn-text(row,"path")),ld-nodes(ld-state(s),"aside")));
+   !restored ? ld-attention(s,"Set-aside work still needs care: " + hch-said(run)) : {
+    ld-set(s,"aside_applied",json-node-int(1));
+    let released=ld-step(s,"release-aside",["update-ref","-d",ld-text(s,"stash_ref"),stash]);
+    hch-ok?(released) ? { ld-say(s,"stash",""); ld-set(s,"aside_clean",json-node-int(0)); ld-set(s,"aside_applied",json-node-int(0)); } : ld-attention(s,"Working edits are restored; their private reference still needs release: " + hch-said(released));
+   };
+  };
+  def ld-renew(s) {
+   let dir=ld-text(s,"directory"); let seed="runtime/fkwu-uni.c"; let carrier="form/native/metal/fk-metal-carrier.m";
+   let seedHash=ld-source-hash(dir,seed); let carrierHash=ld-source-hash(dir,carrier);
+   let seedChanged=seedHash != ld-text(s,"seed"); let carrierChanged=carrierHash != ld-text(s,"carrier");
+   !seedChanged && !carrierChanged ? false : {
+    let output="fkwu.publication-" + host_pid().str();
+    let built=!seedChanged ? [0,"",""] : hch-run-at(ld-text(s,"io"),"seed-build",dir,["cc","-O2","-o",output,seed],"",nothing());
+    let moved=!seedChanged || (hch-ok?(built) && fs-rename(fcr-abs(dir) + "/" + output,fcr-abs(dir) + "/fkwu") == 0);
+    let metal=!carrierChanged || hch-read(["uname","-s"]) != "Darwin" ? [0,"",""] : hch-run-at(ld-text(s,"io"),"carrier-build",dir,["cc","-O2","-dynamiclib","-o","form/native/metal/fk-metal-carrier.dylib",carrier,"-framework","Metal","-framework","Foundation","-fobjc-arc"],"",nothing());
+    !moved || !hch-ok?(metal) ? ld-attention(s,"Runtime renewal retains its compiler evidence: " + hch-said(built) + hch-said(metal)) : {
+     ld-say(s,"seed",seedHash); ld-say(s,"carrier",carrierHash); ld-say(s,"stage","renewing");
+     let resumed=hch-run-at(ld-text(s,"io"),"renewed-entry",dir,["./fkwu",ld-source()],"@" + record_get(s,"checkpoint") + "\n",nothing());
+     let next=fcam-read(record_get(s,"checkpoint"));
+     hch-ok?(resumed) && !nothing?(next) && (fhn-text(next,"stage") == "published" || fhn-text(next,"stage") == "attention") ? record_set(s,"state",next) : ld-attention(s,"Renewed runtime retains its continuation: " + hch-said(resumed));
+    };
+    true;
+   };
+  }
+  def ld-task-witness(s) {
+   let gap=json-object-get(ld-field(s,"request"),"task"); let band=fhn-text(gap,"band");
+   band == "" ? true : {
+    let rec=hch-cell-observe(ld-text(s,"owner"),"publication-witness",cell_call(band,nothing(),nothing()));
+    record_set(s,"checks",rec);
+    let paths=ld-nodes(gap,"writable") + ld-nodes(gap,"sources");
+    let docs=paths |> map(json-string-value) |> map(p => [p,p,read_file(p) ?? ""]);
+    hch-cell-status(rec) == 0 && record_get(rec,"value") == fhn-count(gap,"full") && all?(check => fccw-eval(check,docs)[0],ld-nodes(gap,"checks"));
+   };
+  }
+  def ld-verify(s,moved) {
+   let request=ld-field(s,"request"); let witness=fhn-text(request,"witness");
+   let run=ld-witness-run(witness);
+   !ld-witness-ok?(witness,run[1]) || !ld-task-witness(s) ? false : {
+    let rows=dg-rows-for(moved); let pass=dg-run(rows);
+    ld-set(s,"verification",json-node-object([fhn-n("pass",pass),fhn-n("full",dg-full(rows)),json-node-pair("paths",json-node-array(moved |> map(json-node-string)))]));
+    dg-green?(pass,rows);
+   };
+  }
+  def ld-verified(s,verify) {
+   let head=ld-rev(s,"HEAD"); let old=ld-text(s,"verified_head");
+   let task=json-object-get(ld-field(s,"request"),"task");
+   let contract=fcam-hash(read_file(fhn-text(task,"band")) ?? "");
+   head == old && contract == ld-text(s,"verified_contract") ? true : {
+    let base=old == "" ? ld-text(s,"base") : old;
+    let moved=ld-owned(s) + ld-changed(s,["diff","--name-only","-z",base,head]);
+    let good=verify(s,moved);
+    if good then { ld-say(s,"verified_head",head); ld-say(s,"verified_contract",contract); } else 0;
+    good;
+   };
+  }
+  def ld-remote(s) {
+   let request=ld-field(s,"request"); let branch=ld-text(s,"branch"); let head=ld-rev(s,"HEAD");
+   let refs=["refs/heads/" + branch] + (fhn-count(request,"main") == 1 && branch != "main" ? ["refs/heads/main"] : []);
+   let run=ld-step(s,"remote",["ls-remote","--heads","origin"] + refs);
+   let lines=split-on(run[1],"\n");
+   hch-ok?(run) && all?(ref => any?(line => line == head + byte_to_str(9) + ref,lines),refs);
+  }
+  def ld-sync(s,verify) {
+   let fetched=ld-step(s,"fetch",["fetch","-q","origin"]);
+   !hch-ok?(fetched) ? ld-attention(s,hch-said(fetched)) : {
+    let main=ld-rev(s,"refs/remotes/origin/main");
+    let rebased=ld-step(s,"rebase",["rebase","origin/main"]);
+    let joined=hch-ok?(rebased) ? true : fcr-rounds-in(ld-text(s,"io"),ld-text(s,"directory"),[])[0] == "joined";
+    !joined ? ld-attention(s,"Rebase retains its source and conflict evidence: " + hch-said(rebased)) : ld-renew(s) ? s : !ld-verified(s,verify) ? ld-attention(s,"Current-source verification needs local care; native results and framebuffer retain the reading.") : {
+     let branch=ld-text(s,"branch");
+     let specs=["HEAD:refs/heads/" + branch] + (fhn-count(ld-field(s,"request"),"main") == 1 && branch != "main" ? ["HEAD:refs/heads/main"] : []);
+     let pushed=ld-step(s,"push",["push","--atomic","origin"] + specs);
+     hch-ok?(pushed) && ld-remote(s) ? { ld-say(s,"commit",ld-rev(s,"HEAD")); ld-say(s,"reason",""); ld-say(s,"stage","published"); } : {
+      let refreshed=ld-step(s,"refresh",["fetch","-q","origin"]);
+      hch-ok?(refreshed) && ld-rev(s,"refs/remotes/origin/main") != main ? ld-sync(s,verify) : ld-attention(s,"Publication has not reached the requested refs: " + hch-said(pushed));
+     };
+    };
+   };
+  }
+  def ld-publish-in(request,dir,verify) {
+   let s=ld-admit(request,dir);
+   let observed=hch-git-in(ld-text(s,"io"),dir,"branch",["branch","--show-current"]);
+   let branch=hch-ok?(observed) ? trim(observed[1]) : "";
+   if nil?(ld-owned(s)) || fhn-text(request,"subject") == "" || branch == "" then ld-attention(s,"Publication needs its owned paths, subject and current branch.") else {
+    ld-say(s,"branch",branch);
+    if ld-text(s,"base") == "" then ld-say(s,"base",ld-rev(s,"HEAD")) else 0;
+    if ld-text(s,"seed") == "" then { ld-say(s,"seed",ld-source-hash(dir,"runtime/fkwu-uni.c")); ld-say(s,"carrier",ld-source-hash(dir,"form/native/metal/fk-metal-carrier.m")); } else 0;
+    ld-say(s,"stage","working");
+    ld-commit-owned(s);
+    if ld-text(s,"stage") != "attention" then ld-aside(s) else 0;
+    if ld-text(s,"stage") != "attention" then ld-sync(s,verify) else 0;
+    ld-restore(s);
+   };
+   ld-receipt(s);
   }
   // The witness: the named command runs as `/bin/sh -c <witness>` (a witness is shell text by contract) with its
   // stderr folded into its stdout, and its exit is the host's own answer (host_wait), so a witness that prints
@@ -186,46 +330,24 @@ section [form.bml] {
    let written = ld-write-all(ld-nodes(request, "files"));
    let appendedFiles = ld-append-all(ld-nodes(request, "append"));
    let misses = ld-edit-all(ld-nodes(request, "edits"), 0);
-   let witness = fhn-text(request, "witness");
-   let paths = ld-paths(request);
-   let subject = fhn-text(request, "subject");
-   let witnessRun = ld-witness-run(witness);
-   let witnessOut = witnessRun[0];
-   let witnessRc = witnessRun[1];
-   let witnessOk = ld-witness-ok?(witness, witnessRc);
-   let gateRun = ld-gates();
-   let gateStatus = gateRun[0];
-   let gates = gateRun[1];
-   let green = ld-gates-ok(gateStatus, gates);
-   let ready = witnessOk && (green && (((Comparable) misses == 0) && ((!nil?(paths)) && (!((String) subject == "")))));
-   // the message lives under .form-heal, which a fresh checkout does not have yet: make it before writing
-   let spool = fs_mkdir(".form-heal");
-   let saved0 = write_file_text(ld-message-path(), subject ++ "\n\n" ++ fhn-text(request, "body") ++ "\n");
-   let saved = saved0 ?? 0;
-   let addable = ready ? ld-addable(paths) : [];
-   let added = ready ? ld-unstaged-line(ld-unstaged(paths, addable)) ++ (nil?(addable) ? "" : ld-add-at(hch-dir(), ".", ld-paths-path(), addable)) : "";
-   let committed = ready ? ld-commit-at(hch-dir(), ".", ld-message-path()) : "";
-   let commitOk = str_find(committed, "[commit] exit=0", 0) >= 0;
-   // the push answers with its own exit: a commit that did not reach origin is held, never landed
-   let pushed = commitOk ? ld-push-at(hch-dir(), ".", "land-push", "[push]", ["push", "-u", "origin", "HEAD"]) : "";
-   let pushFirst = str_find(pushed, "[push] exit=0", 0) >= 0;
-   let rejoined = pushFirst ? [pushed, "not-asked"] : ld-reunion(pushed);
-   let pushed2 = rejoined[0];
-   let reunion = rejoined[1];
-   let pushOk = str_find(pushed2, "[push] exit=0", 0) >= 0;
-   // optional "main": 1 carries a landed commit onto main as a fast-forward, so a landing no session watches still
-   // reaches main; a main that moved meanwhile answers non-fast-forward, and the branch landing stands
-   let mained = pushOk && ((Comparable) fhn-count(request, "main") == 1) ? ld-push-at(hch-dir(), ".", "land-main", "[main]", ["push", "origin", "HEAD:main"]) : "";
-   let why = ld-held-why(witnessOk, green, misses, paths, subject, ready, commitOk, pushOk);
-   let readings = oh-voice-all([ld-health(subject, why, ready && (commitOk && pushOk))]);
-   [((String) witness == "" ? "" : "[witness] " ++ witness ++ "\n" ++ witnessOut ++ "\n") ++ ((String) restarted == "" ? "" : "[restart] " ++ restarted ++ "\n") ++ "[files] written=" ++ written.str() ++ " appended=" ++ appendedFiles.str() ++ " edit-misses=" ++ misses.str() ++ "\n" ++ "[gates] exit=" ++ gateStatus ++ " evidence=" ++ gateRun[2] ++ "\n" ++ ld-tail(gates, 120) ++ "\n" ++ "[landing] " ++ ld-landing-line(why, witnessRc) ++ "\n" ++ (ready ? added ++ committed ++ "\n" ++ pushed2 ++ "\n" ++ ((String) reunion == "not-asked" ? "" : "[reunion] " ++ reunion ++ "\n") ++ mained : ""), readings];
+   let receipt=misses == 0 ? ld-publish-in(request,".",ld-verify) : ld-receipt(ld-attention(ld-admit(request,"."),"An edit did not find its unique source span."));
+   let state=node_children(receipt)[0]; let landed=fhn-text(state,"stage") == "published";
+   let readings=oh-voice-all([ld-health(fhn-text(request,"subject"),fhn-text(state,"reason"),landed)]);
+   ["[files] written=" + written.str() + " appended=" + appendedFiles.str() + " edit-misses=" + misses.str() + "\n[landing] " + (landed ? "landed" : fhn-text(state,"reason")) + "\n[commit] " + fhn-text(state,"commit") + "\n[continuation] " + fhn-text(state,"io") + "\n",readings,receipt];
   }
   def ld-run() {
-   let window = fmrc-open("land", "witness gates commit push", ld-source(), 1, 1);
-   let report = ld-land(parse-json("land-request", read_line()))[0];
-   let result = fmrc-close(window, str_find(report, "[landing] landed", 0) >= 0 ? "landed" : "held", ld-source(), 2, 1);
-   let rows = fmrc-result-deltas(result);
-   print_str(report ++ "[crossings of this call] census-status=" ++ fmrc-result-status(result) ++ " dispatches=" ++ fmrc-delta-total(rows).str() ++ "\n" ++ ld-planes(ld-plane-names(), rows));
+   let input=cell_input();
+   value_kind(input) == "node_id" ? ld-land(input)[2] : {
+    let window=fmrc-open("land","witness commit rebase publish",ld-source(),1,1);
+    let line=read_line() ?? "";
+    let resume=fat-starts(line,"@");
+    let prior=resume ? read_form_binary(trim(substring(line,1,len(line)))) : nothing();
+    let receipt=resume ? ld-publish-in(json-object-get(prior,"request"),fhn-text(prior,"directory"),ld-verify) : nothing();
+    let landed=resume ? ["[landing] " + fhn-text(node_children(receipt)[0],"stage") + "\n",[],receipt] : ld-land(parse-json("land-request",line));
+    let result=fmrc-close(window,fhn-text(node_children(landed[2])[0],"stage"),ld-source(),2,1);
+    print_str(landed[0] + "[crossings of this call] census-status=" + fmrc-result-status(result) + " dispatches=" + fmrc-delta-total(fmrc-result-deltas(result)).str() + "\n");
+    landed[2];
+   };
   }
  }
 }

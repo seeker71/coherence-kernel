@@ -5,6 +5,7 @@ import form-stdlib/bml/form-cli-check-witness.bml;
 import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
 import control/offer-ack-core.fk;
+import form-stdlib/bml/rented-work.bml;
 section [form.bml] {
  class FormCliTask {
   def fct-string(obj,key) = fat-wire-string?(json-object-get(obj,key)) ? json-string-value(json-object-get(obj,key)) : "";
@@ -60,7 +61,9 @@ section [form.bml] {
   }
   def fct-render(report) {
    let parts=node_children(report);
-   json-emit(json-node-object(json-object-pairs(parts[0])+[json-node-pair("plan",fct-render-cell(parts[1])),json-node-pair("execution",fct-render-cell(parts[2]))]));
+   let publication=len(parts) > 3 ? record_get(parts[3],"value") : nothing();
+   let metadata=!nothing?(publication) && value_kind(publication) == "node_id" && node_eq(node_category(publication),bp("form-native-publication-v1")) ? node_children(publication)[0] : json-node-null();
+   json-emit(json-node-object(json-object-pairs(parts[0])+[json-node-pair("plan",fct-render-cell(parts[1])),json-node-pair("execution",fct-render-cell(parts[2])),json-node-pair("publication",metadata)]));
   }
   def fct-completed(gap,io) {
    let id=fct-string(gap,"id");
@@ -74,9 +77,37 @@ section [form.bml] {
     hch-cell-status(band)==0 && record_get(band,"value")==json-int-value(json-object-get(gap,"full")) && !any?(check=>!fccw-eval(check,docs)[0],checks);
    };
   }
-  def fct-command(goal) {
+  def fct-command(request) {
+   let text=value_kind(request) == "string";
+   let raw=text ? request : fct-string(request,"goal");
+   let resume=text ? "" : fct-string(request,"resume");
+   let publish=text ? fat-starts(raw,"--publish ") : json-object-has?(request,"publication");
+   let goal=text && publish ? substring(raw,len("--publish "),len(raw)) : raw;
    let paths=fct-paths(goal);
-   len(trim(goal))==0 || nil?(paths) ? fct-report(fct-id(goal),"attention","","Name the task and its existing repository file in the prompt; Form owns source discovery and checks.",nothing(),nothing()) : fct-run(goal,paths);
+   let result=resume != "" ? fct-resume(resume) : len(trim(goal))==0 || nil?(paths) ? fct-report(fct-id(goal),"attention","","Name the task and its existing repository file in the prompt; Form owns source discovery and checks.",nothing(),nothing()) : fct-run(goal,paths);
+   publish && fct-string(node_children(result)[0],"stage") == "completed" ? fct-publish(goal,result,text ? json-node-object([]) : json-object-get(request,"publication")) : result;
+  }
+  def fct-resume(id) {
+   let gap=fct-queued(id); let io=".hearth/tasks/" + id;
+   fct-string(gap,"id") == "" ? fct-report(id,"attention",io,"The requested task has no retained native queue entry.",nothing(),nothing()) : fct-completed(gap,io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing(),nothing()) : {
+    let turn=hch-cell-observe(io,"turn",cell_call("observe/native-turn-run.bml",json-node-object([json-node-pair("gap",gap),fct-pair("session",id)]),nothing()));
+    fct-report(id,fct-completed(gap,io) ? "completed" : "attention",io,hch-cell-why(turn),nothing(),turn);
+   };
+  }
+  def fct-publish(goal,result,publication) {
+   let parts=node_children(result); let id=fct-string(parts[0],"task"); let gap=fct-queued(id);
+   let session=fct-string(publication,"rented_session");
+   let work=session == "" ? nothing() : rw-read(session);
+   let meter=nothing?(work) ? nothing() : rw-close(rw-save(rw-step(work,ru-read(work[2]),"work")));
+   let extra=json-array-elements(json-object-get(publication,"paths"));
+   let body=fct-string(publication,"body");
+   let request=json-node-object([fct-pair("owner",id),fct-pair("subject",fct-string(publication,"subject") == "" ? "Form task " + id : fct-string(publication,"subject")),fct-pair("body",body != "" ? body : goal == "" ? fct-string(gap,"goal") : goal),json-node-pair("paths",json-node-array(json-array-elements(json-object-get(gap,"writable")) + extra + (session == "" ? [] : [json-node-string(rw-ledger())]))),json-node-pair("task",gap),json-node-pair("main",json-node-int(1)),json-node-pair("rented_usage",nothing?(meter) ? json-node-null() : jv-materialize(rw-measure(meter)))]);
+   let landed=hch-cell-observe(id,"publication",cell_call("observe/land-run.bml",request,nothing()));
+   let receipt=record_get(landed,"value");
+   let native=value_kind(receipt) == "node_id" && node_eq(node_category(receipt),bp("form-native-publication-v1"));
+   let done=hch-cell-status(landed) == 0 && native && fct-string(node_children(receipt)[0],"stage") == "published" && fct-completed(gap,fct-string(parts[0],"trace_owner"));
+   let report=fct-report(id,done ? "completed" : "attention",fct-string(parts[0],"trace_owner"),native ? fct-string(node_children(receipt)[0],"reason") : hch-cell-why(landed),parts[1],parts[2]);
+   intern_node(bp("form-native-task-v1"),node_children(report) + [landed]);
   }
   def fct-run(goal,paths) {
    let id=fct-id(goal); let io=".hearth/tasks/" + id;
