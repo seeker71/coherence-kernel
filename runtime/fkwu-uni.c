@@ -18033,7 +18033,11 @@ FK_PHASED(FK_PHASE_FILE, long long, fk_fb_door, (long long mode, long long x), (
         fk_cstr(FK_HH(q), p, FK_PATH_CAP);
         long long start = 0, n = 0;
         if (!fk_fb_serialize(FK_HT(q), &start, &n)) { return -2; }
-        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        /* the file appears whole or not at all: written beside, then renamed over (a ledger held as one node is rewritten
+         * on every append, so a write that dies midway must leave the last whole file, never a truncated one) */
+        static char tmp[FK_PATH_CAP + 8];
+        { size_t pl = 0; while (p[pl] != 0 && pl < FK_PATH_CAP - 1) { tmp[pl] = p[pl]; pl = pl + 1; } tmp[pl] = '.'; tmp[pl + 1] = 't'; tmp[pl + 2] = 'm'; tmp[pl + 3] = 'p'; tmp[pl + 4] = 0; }
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { fk_sbp = start; return -2; }
         long long wr = 0;
         while (wr < n) {
@@ -18041,9 +18045,9 @@ FK_PHASED(FK_PHASE_FILE, long long, fk_fb_door, (long long mode, long long x), (
             if (w <= 0) { break; }
             wr = wr + w;
         }
-        close(fd);
+        int closed = close(fd);
         fk_sbp = start;
-        if (wr < n) { return -2; }
+        if (wr < n || closed != 0 || rename(tmp, p) != 0) { unlink(tmp); return -2; }
         return n << 1;
     }
     /* mode 26: read_file_bytes path -- the whole file as a list of ints 0..255, one per byte,

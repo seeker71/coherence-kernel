@@ -51,6 +51,13 @@ validation 93 s, 100 rounds 178 s + Adam 27 s; a row's forward 0.2 s and backwar
 2.700 to about 0.03. The train stage is now 15 times faster than the 4,700 s it began the day at, and the evaluation (449 s,
 81 questions) is the largest stage left.
 
+A correction, 2026-10-12, from reading a run's events on nodes: the time door summed every `validation` event under "baseline
+validation". A run holds two, the baseline before training (0.5 s when remembered) and the held-out check after the last round,
+and the figures above that read "baseline validation" (282, 148, 69 and 93 s) were those two together; once the baseline is
+remembered they are the after-training check, 81 rows scored forward-only. A 2-step run beside a day-turn on a shared GPU reads
+0.5 s and 53.7 s. The door now says them apart. The after-training check is the largest part of a short train stage and costs
+about 0.66 s a row where a training row's forward costs 0.2 s: the next thing to read (does validation take the fast path?).
+
 Still open (named, not hidden): early stopping on a held-out check (the training loss wanders between 0.003 and 0.4 from
 round 60 on while the held-out loss ends at 0.03 to 0.04, so some of the 100 steps are spent past the gain); the day-turn and the band sweeps do not take the GPU lease, so their time-slices still
 inflate timings; the corpus digest is a 4 s Form SHA-256; the 17 MB tokenizer JSON parses in 3 s; forward and backward
