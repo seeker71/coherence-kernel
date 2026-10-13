@@ -94,6 +94,19 @@ train stage read 4.66 ms a token forward at every row length (4.4 to 5.4 from th
 percentile 1.7 s, worst 7.0 s): the sustained rate, not a stall, and not length. The 1.7 ms a token of the table above is a burst
 reading. The time door now shows the median, the 90th percentile and the cost by row length.
 
+The kernels, 2026-10-13 (landed 5035bdc90 to 8cc285a53). The decode profile named three groups of single-simdgroup kernels, each a chain of
+dependent loads: the LoRA input product `nam_matmul` (20% of a token's device time) and the norm `nam_rms` (10%), the argmax and top-3
+over the 128256-entry vocabulary (1.2 ms each, once a token), and attention (`nll_scores`, `nll_attend`, 12%). Each was rewritten so
+that its result is the same: loads eight ahead, the adds in the old order (matmul, rms, attention: 14 and 9 shapes hash identically
+against the old build), and a 1024-thread merge for the order-independent max and top-3 (value descending, lowest index among equals;
+`nll-top3-band` reads 15 against the three older selects, on ties, a small vocabulary, a NaN and the 3B vocabulary). Per dispatch,
+alternating old and new builds and taking minima: matmul 29 to 10 us, rms 44 to 10, argmax 1194 to 39, top-3 1263 to 44, scores 67 to 39,
+attend 83 to 22. A matvec unroll was tried and gained nothing, so the 4-bit matvec (36 to 42% of the device time) is unchanged. The
+400 decoded ids checksum identically on the old and the new build in all three alternating pairs; with each run's wall per token
+divided by its own mean candle (the machine was 2 to 3.5 times slow throughout), the new build reads 0.80, 0.67 and 0.72 of the old
+build's cost: about 30% less time a token, held for 400 tokens. At burst (40 tokens, calm machine) the matmul and rms alone took the
+device time from 16.8 to 14.6 ms a token.
+
 Decode, 2026-10-12: a token was 28.3 ms of which the device was busy 16.5; a token's 621 dispatches were encoded into one batch and
 committed at the sync, so host (about 12 ms of encoding; buffer allocation is 2 of it) and device ran one after the other. The
 decode forward now submits each layer's batch as it fills (`nll-flow`, `metal_submit`; the closing sync drains them in order):
