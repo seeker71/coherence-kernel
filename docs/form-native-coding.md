@@ -39,6 +39,11 @@ publication. The framebuffer retains each attempted choice and its check result;
 the native receipt binds source hashes and zero model tokens. This is one native
 repair family, with quality bounded by the original checks.
 
+Unreadable cases retain the proposal's plan, goal and reference bytes. The same
+local choice repairs only the cases block, with its raw answer and assembled
+proposal retained separately. The complete planner verifier runs before queue
+publication. Task publication includes the generated executable witness.
+
 Reference repair retains the proposal's local model unless the caller selects
 another. An interrupted, fingerprint-matched coding checkpoint resumes before
 another whole-plan generation; its original request, witness and sources remain owned.
