@@ -277,6 +277,7 @@ engine's ERE dialect), then run over records. One language stands behind three d
 | an agent in a shell (the rented model, a person) | `./fkwu observe/form-find-ask.bml <<'EOF' ... EOF` (the command itself; `----` before its input), or the spool when the service stands | yes, over indexed files or the input after `----` | yes |
 | a Form cell | `fnd-serve(fpa-open(""), json)` for the index; `fwk-compile` + `fwk-run` for the language alone | yes | yes, through the index |
 | the local voice in the code lane | `<|form:tool|>awk 'PROGRAM' PATH \| sort<|/form:tool|>` over its resident documents (native pipes); `help awk` | yes | not yet: the lane holds its documents, not form-find's index |
+| the local voice in the form-token lane | `<|form:awk|>PROGRAM<|/form:awk|>` over the session's held context lines, `<|form:path|>EXPR<|/form:path|>` over the body's index (`form-token-verbs.bml`, `ftv-awk`, `ftv-path`) | yes | `path` yes; `-P -B -C` not through these controls |
 
 **When awk is the right tool.** Arithmetic over lines (a sum, a count, a total per key, a mean), choosing columns, filtering by a
 field, or reshaping rows is one awk call, and the answer is exact. Reading the lines and adding them in the head is not.
