@@ -69,12 +69,30 @@ single reading attributes nothing and only a back-to-back pair does; and a resid
 after-training check and the same call alone (tokenizing is not it: 87 ms for 24 rows). That residual is worth about 10 s of a
 short run and is left unread; the evaluation stage (449 s of the cycle) is the larger target.
 
-The residual above was read from the body's own counters on 2026-10-13, once the trainer's validation events carried them
-(`device_busy_ms`, this process's busy time, and `host_gpu_busy_ms`, the whole GPU's, `host_gpu_busy_us`): of an after-training
-validation of 22.2 s the process kept the device busy 14.7 s (66%), the whole GPU was busy 20.8 s (93.5%), and a neighbour's share of
-that was 6.0 s; about 1.4 s of the wall was nobody's. The "1.9 times" was a shared device, not the trainer's state, and an idle
-machine reading (`host_gpu_busy_us` climbing 70% with this process at 0) had been there to read before any of it was timed. The
-time door, the eval line and the decode bench now print wall, this process's busy time and the whole GPU's with every run.
+The residual above was read from the body's own counters on 2026-10-13, once the trainer's validation events carried this
+process's device busy time (`device_busy_ms`): of an after-training validation of 22.2 s the device was busy 14.7 s (66%) for this
+process; the time door, the eval line and the decode bench print wall and busy time with every run. A first reading of that gap as
+"a neighbour's 6.0 s" used a whole-GPU gauge that does not integrate a phase (corrected just below); the gap is read by the machine
+candle and the sustained-load curve below.
+
+A correction to the paragraph above, same day, from the first full cycle with the counters (14:21 to 14:38, 979 s: refresh 9 s, train
+613 s, evaluation 354 s, usage 1.5 s): the "neighbours' share" it names (6.0 s of 22.2) was an artifact. The whole-GPU figure is
+`host_gpu_busy_us`, the accelerator's level integrated over the gaps between reads, and the level is the mean since the previous read
+by anyone: read at the start and the end of a phase it is the last instant's level spread over the whole phase (it read 99.6% for
+validation and 0 ms for an evaluation that kept this process's device busy 86% of 354 s). Another reader (the glass's machine frame,
+started that afternoon) also takes the level from whoever asks second. It is removed from the trainer, the time door and the
+benches. What stays are this process's busy time (`device_busy_ms`, `metal_live` word 11) and a standard candle (`nam-candle`): a
+fixed product (128 by 3072 by 3072, twice) timed by the device's own counter, 27.4 to 29.1 ms a product at rest, in the trainer's
+`admitted`, `validation` and `finished` events, the eval line and the decode bench.
+
+What the candle read, 2026-10-13 (tenths of a ms a product): at rest 27.6 to 29.1; after 30 s of continuous work 70.7, 72.8, 76.0;
+3 s of rest later 28.7 again. The device runs 2.6 times slower under sustained load within seconds and is back within seconds of rest,
+which is a clock or power governor, not a neighbour and not heat. Every burst benchmark of a few seconds therefore overstates what a
+long run gets: decode held for 400 tokens reads 37, 53, 42, 42, 41, 62, 50, 60, 64, 58 ms a token by windows of 40 (mean 50.8, the
+burst figure was 20.7), the device's busy time climbing from 21 to 39.5 ms a token and the candle from 27.5 to 39.5. The cycle's
+train stage read 4.66 ms a token forward at every row length (4.4 to 5.4 from the shortest rows to the longest, median row 0.4 s, 90th
+percentile 1.7 s, worst 7.0 s): the sustained rate, not a stall, and not length. The 1.7 ms a token of the table above is a burst
+reading. The time door now shows the median, the 90th percentile and the cost by row length.
 
 Decode, 2026-10-12: a token was 28.3 ms of which the device was busy 16.5; a token's 621 dispatches were encoded into one batch and
 committed at the sync, so host (about 12 ms of encoding; buffer allocation is 2 of it) and device ran one after the other. The
