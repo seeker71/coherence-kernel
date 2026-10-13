@@ -50,6 +50,25 @@ the independent task witness remains outside the candidate's writable sources.
 Completed native turns are reused only while their source, caller contracts and
 witness fingerprints still agree. Changed evidence reopens the same task.
 The queued task retains the original caller goal and typed definition manifest.
+Source observations preserve punctuation. Text containing literal Form controls
+stays in its authoritative native cell. Native tool arguments and input accept
+text cells directly; the control spelling also accepts their addresses.
+Markdown fences quote examples, including across decoding chunks; source inside
+an executing control remains verbatim. Implementation guidance travels with each returned action.
+An executed coding action returns to the local task controller immediately;
+pure Form queries and recipes can continue within decoding.
+Coding admission and resume observe their existing native checks before generation, giving
+local repair the actual expectation and result. Paging preserves the task phase,
+candidate and complete native repair evidence. Private receipt paths are for the
+owner; the coder reads admitted observation and failure fields in `code_context`.
+`original_context.documents` holds the unchanged source snapshot as native
+cells from the initial prompt throughout repair. The coder can restore or compose from those cells
+without emitting a whole module as model text.
+When a failed, unfinished candidate is malformed BML, native source care can
+backtrack that document to its admitted runnable bytes. It retains the exact
+rejected source with the failing check, leaves other documents in place, and
+re-observes the original caller checks before local guidance continues.
+Completed task effects remain with their model-directed repair.
 Coding admission includes those definitions' native API observations and the
 actual behavior witness as a read-only source document, so diagnosis starts
 with the failing operation rather than a sequential scan of the whole module.

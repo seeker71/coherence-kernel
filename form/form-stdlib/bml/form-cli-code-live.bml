@@ -54,7 +54,8 @@ section [form.bml] {
   field CodeSpecQuantum = 16;
   def fcac-quantum(session) = if (fcms-spec?(session, CodeSpecQuantum()) == 1) then CodeSpecQuantum() else CodeProgressQuantum();
   def fcac-decode-width(state,session,count) = fat-max(0,fat-min(fcac-quantum(session),fat-min((fcms-maxpos(session) - fcms-pos(session)),if (fcap-reply-token-limit(state) <= 0) then fcac-quantum(session) else (fcap-reply-token-limit(state) - count))));
-  def fcac-bootstrap-budget(state,turns) = fcap-bootstrap(state) + "\nCALLER REPLY BUDGET: " + fcap-model-packet(json-node-object(fcac-budget-pairs(state,turns)));
+  def fcac-original-context(state) = fcap-model-bind("original_context",json-node-object([json-node-pair("documents",json-node-array(fcap-model-documents(state[2])))]));
+  def fcac-bootstrap-budget(state,turns) = fcap-bootstrap(state) + "\nORIGINAL SOURCE: original_context = " + ftw-coord(fcac-original-context(state)) + "\nThis read-only native cell holds the complete admitted source before edits. Current tools read the working candidate. fcap-context-field(original_context,[\"documents\",0,\"text\"]) returns the original text cell. fcap-native-tool accepts text cells directly as arguments or input; the tool control also accepts their @address. Restore or compose from those exact bytes when a candidate has lost source. Use focused native source operations; reading the whole module into decoding is unnecessary.\nCALLER REPLY BUDGET: " + fcap-model-packet(json-node-object(fcac-budget-pairs(state,turns)));
   def fcac-observation-budget(state,turns) = fcap-model-packet(json-node-object(append(json-object-pairs(fcap-observation-node(state)),fcac-budget-pairs(state,turns)))) + "\nCURRENT REPLY: " + fcap-work-instruction(state);
   // The final-stage request carries current work and full failed-check evidence.
   // A reference to an earlier observation must not replace the active correction.
@@ -297,14 +298,13 @@ section [form.bml] {
   // The note that stands in for an observation the stream did not take whole (fcap-observation-detail), and the swerve
   // record marked unsighted: nothing of the call's bytes reached a context, so the next context's repeat of the call is
   // the same experiment, not fresh sight (form-cli-code-swerve.bml).
-  // A read that worked but is bounded (the cap) is no failure: the state keeps its stage, turns and repair count and
-  // only its note changes. An observation the context could not take (the window) is the failure the lane repairs.
+  // Paging changes the visible observation, never the task's phase or repair
+  // evidence. The complete failure remains in the native code_context cell.
   // json-serves: the model. text: the bounded note is the sentence the next context reads; the document stays whole.
   def fcac-observation-capacity-state(state,evidence,cause,capBytes) {
-   let note=fcap-observation-capacity-prefix() + json-emit(fcap-observation-detail(state,evidence,cause,capBytes));
-   let moved=if ((String) cause == fcap-cause-cap()) then fcsw-with-note(state,note) else fcap-rework(state,note);
-   let next=fcsw-mark-unsighted(fcap-with-held-signature(fcap-bounded-failure(state,moved,note,capBytes)));
-   fcap-stage(state) == "review" && ((String) cause != fcap-cause-cap()) && !fcap-repeat(next) ? append(["review"],next[1:]) : next;
+   let detail=oh-set(fcap-observation-detail(state,evidence,cause,capBytes),"change",json-node-string("Paging preserves the original goal, candidate, phase and repair evidence. Read admitted observation_excerpt in code_context's observation detail, and failure_evidence for the original repair. Use fcap-context-field on these native fields. Private evidence paths are owner receipts, not admitted source documents. Original source remains available through focused native read and rg."));
+   let note=fcap-observation-capacity-prefix() + json-emit(detail);
+   fcsw-mark-unsighted(fcap-with-held-signature(fcsw-with-note(state,note)));
   }
   def fcac-focus-observation(session,state,cause,checker,turns,started,seams) {
    let raw=fcac-observation-budget(state,turns); let evidence=fcac-retain-reply(raw);
@@ -365,6 +365,7 @@ section [form.bml] {
   // Construction remains pure; only the control's actual returned cell acts.
   def fcac-stream-bind(lane,state,checker,turns) {
    record_set(lane,"coding-state",state); record_set(lane,"coding-checker",checker); record_set(lane,"coding-turns",turns);
+   record_set(lane,"coding-originals",fcac-original-context(state));
    record_set(lane,"control-result",observed=>fcac-stream-returned(lane,observed));
    lane;
   }
@@ -376,7 +377,7 @@ section [form.bml] {
   }
   def fcac-stream-release() {
    let lane=ftg-lane-session("code");
-   ["control-result","coding-state","coding-checker","coding-turns"] |> map(key=>record_set(lane,key,nothing()));
+   ["control-result","coding-state","coding-checker","coding-turns","coding-originals"] |> map(key=>record_set(lane,key,nothing()));
    record_set(lane,"coding-steps",0); 0;
   }
   def fcac-stream-returned(lane,observed) {
@@ -390,9 +391,12 @@ section [form.bml] {
      record_set(lane,"coding-state",next); record_set(lane,"coding-steps",fcac-stream-steps()+1);
      let context=fcap-model-bind("code_context",json-node-object(append(json-object-pairs(fcap-observation-node(next)),fcac-budget-pairs(next,turns))));
      let value=ftv-hold(lane,fcap-note-cell(next));
-     let packet=fcap-model-visible(value)+"\ncode_context = "+ftw-coord(context)+"\nrole: "+fcap-stage(next)+(fcap-stage(next)==fcap-stage(state) ? "" : "\n"+fcap-work-instruction(next));
+     let data=fcap-model-visible(value);
+     let shown=ftv-carries-control?(data) ? ftv-node-result(value)+"\nLiteral control text remains in this native observation cell. Use fcap-context-field on its fields; held text cells are @address tool arguments. Source bytes are unchanged." : data;
+     let instruction=fcap-stage(next)=="repair" ? fcap-work-instruction(next)+"\nOriginal source remains in original_context.documents. Use fcap-context-field on its text cells, and pass held text cells as @address tool arguments. Compose replacements from those cells rather than rewriting the module." : fcap-observation-instruction(next);
+     let packet=shown+"\ncode_context = "+ftw-coord(context)+"\noriginal_context = "+ftw-coord(record_get(lane,"coding-originals"))+"\nrole: "+fcap-stage(next)+"\n"+ftv-defang(instruction);
      fb_record(value,"coding-tool-result",fcap-calls(next));
-     [ftv-defang(packet),observed[1],value];
+     [packet,observed[1],value];
     };
    };
   }
@@ -452,7 +456,7 @@ section [form.bml] {
     let limit=fcap-reply-token-limit(state);
     let answerable=(limit<=0 || len(ids)<=limit) && fcms-pos(session)<fcms-maxpos(session)-1;
     let next = !nil?(fresh) && answerable ? fcac-control-answer(session, stops, fresh) : room && !fcms-stopped?(session) ? fcacs-next(session, stops) : session;
-    if (!room || fcac-stream-ended() || !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) || fcms-stopped?(next) || !fcms-live?(next)) then fcms-generation(fcmo-text(session,ids), ids, next) else fcac-decode(next, fcac-stream-state(state), started, stops, ids);
+    if (!room || fcac-stream-ended() || fcac-stream-steps()>0 || !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) || fcms-stopped?(next) || !fcms-live?(next)) then fcms-generation(fcmo-text(session,ids), ids, next) else fcac-decode(next, fcap-with-reply-token-limit(fcac-stream-state(state),limit), started, stops, ids);
   }
  }
  0;
