@@ -244,7 +244,26 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   def nam-zero(a, n) = nam-run("nam_zero", [a], [n], n, 0);
   def nam-rms(x, gain, y, inv, d, t, eps) = nam-run("nam_rms", [x, gain, y, inv], [d, t, md-f32-bits(eps)], t, 1);
   def nam-swiglu(g, u, y, n) = nam-run("nam_swiglu", [g, u, y], [n], n, 0);
-  def nam-write(h, bytes) = !((Comparable) metal_buf_write(h, 0, bytes) == len(bytes)) ? form_error("native affine buffer write incomplete") : h;
+  // The standard candle: a fixed amount of matrix work (a 128 by 3072 by 3072 product, twice), timed by the device's own busy counter
+  // (metal_live word 11). The work never changes, so the microseconds a run of it takes are the machine's state and nothing else:
+  // its clocks, its neighbours, its heat. It does not depend on the accelerator's utilization gauge, which hands its level to whoever
+  // reads first (the glass, Activity Monitor) and so cannot be shared. Read at the start and the end of a phase (about 60 ms each),
+  // a longer candle means a slower machine, whatever the phase did. Answers microseconds a product; it was 27.9 to 28.4 ms on
+  // 2026-10-13 14:50 (12 reads within 2%).
+  def nam-candle() {
+   let a = nam-alloc(128 * 3072); let b = nam-alloc(3072 * 3072); let y = nam-alloc(128 * 3072);
+   let warm = nam-candle-run(a, b, y, 1);
+   let busy = nam-candle-run(a, b, y, 2);
+   let freed = nam-free([a, b, y]);
+   busy / 2;
+  }
+  def nam-candle-run(a, b, y, reps) {
+   let before = metal_live()[11];
+   let runs = map(i => nam-mm(a, b, y, 128, 3072, 3072, 0, 0, 1.0, 0), range(0, reps));
+   let done = nam-sync();
+   metal_live()[11] - before;
+  }
+  def nam-write(h, bytes) =!((Comparable) metal_buf_write(h, 0, bytes) == len(bytes)) ? form_error("native affine buffer write incomplete") : h;
   // iterative: one frame per float stopped a 393 thousand float input on the walker's stack (2026-10-11)
   def nam-f32s(xs) = str-join(map(v => md-le32(md-f32-bits(v)), xs));
   def nam-buffer(xs) = nam-write(nam-alloc(len(xs)), nam-f32s(xs));
