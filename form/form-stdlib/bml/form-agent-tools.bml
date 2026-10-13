@@ -42,7 +42,16 @@ section [form.bml] {
         def fat-input(docs, paths, input, consume) = nil?(paths) ? consume([input, ""]) : fat-source(docs,paths,sources=>consume(fat-input-files(sources,paths,"")));
         def fat-input-files(docs, paths, out) = if nil?(paths) then [out, ""] else fat-input-doc(docs, paths, out, fat-find-doc(docs, paths[0]));
         def fat-input-doc(docs, paths, out, doc) = if nil?(doc) then ["", "resident-document-not-found"] else fat-input-files(docs, paths[1:], ((String) out + doc[2]));
-        def fat-call(docs, tool, args, input) {
+        // A | B: a bare | word that a tool's name follows joins two native calls; B reads A's stdout as its input and the documents A
+        // leaves. A '|' that no tool name follows stays an argument (tr '|' ':', cut -d '|'). A later stage only reads (edit and write
+        // stand alone, so a caller's permission for the first tool covers the line); a stage that errs (exit 2) ends the line.
+        def fat-pipe-at(args, i) = nil?(args) ? 0 - 1 : ((String) args[0] == "|" && !nil?(args[1:]) && fat-tool?(args[1])) ? i : fat-pipe-at(args[1:], i + 1);
+        def fat-call(docs, tool, args, input) = fat-pipe-call(docs, tool, args, input, (fat-text?(tool) && value_kind(args) == "list") ? fat-pipe-at(args, 0) : 0 - 1);
+        def fat-pipe-call(docs, tool, args, input, k) = k < 0 ? fat-call-one(docs, tool, args, input)
+            : !fat-readonly(fat-drop(args, k + 1)[0]) ? fat-fail("pipe-stage-writes: edit and write stand alone, not after |", docs)
+            : fat-pipe-next(fat-drop(args, k + 1), fat-call-one(docs, tool, fat-take(args, k), input));
+        def fat-pipe-next(rest, result) = fat-exit(result) == 2 ? result : fat-call(fat-documents(result), rest[0], rest[1:], fat-out(result));
+        def fat-call-one(docs, tool, args, input) {
             let started=host_monotonic_ms();
             let result=if (!(fat-text?(input) && fat-text?(tool) && value_kind(args)=="list" && all?(fat-text?,args) && fat-docs-valid(docs, []))) then fat-fail("invalid-resident-values", docs)
             else if (!fat-tool?(tool)) then fat-fail("unsupported-tool", docs)
@@ -325,8 +334,11 @@ section [form.bml] {
             let start = fat-max(0,(at - 32));
             json-node-object([json-node-pair("scope",json-node-string("old argument compared with the whole resident document at equal byte offsets; approximate landing is unique-or-refuse and named")),json-node-pair("first_difference_byte",if ((String) source == old) then json-node-null() else json-node-int(at)),json-node-pair("old_byte",fat-guard-byte(old,at)),json-node-pair("resident_byte",fat-guard-byte(source,at)),json-node-pair("context_start_byte",json-node-int(start)),json-node-pair("old_context",json-node-string(substring(old,start,fat-min(len(old),(at + 48))))),json-node-pair("resident_context",json-node-string(substring(source,start,fat-min(len(source),(at + 48)))))]);
         }
+        // the words a call named as documents that no admitted document answers (a pattern tool's first word is its pattern or program)
+        def fat-missing-operands(docs,tool,args) = (fat-has(["grep","rg","awk","sed","jq"],tool) ? fat-drop(args |> filter(a=>!fat-starts(a,"-")),1) : args |> filter(a=>!fat-starts(a,"-"))) |> filter(a=>nil?(fat-find-doc(docs,a)));
         def fat-guard-evidence(docs,tool,args,result) = fat-error(result)=="resident-document-not-found" ? json-node-object([
             json-node-pair("needed",json-node-string("admitted document id or path")),json-node-pair("observed",json-node-array(args |> map(json-node-string))),
+            json-node-pair("missing",json-node-array(fat-missing-operands(docs,tool,args) |> map(json-node-string))),
             json-node-pair("offers",json-node-array(docs |> map(doc=>json-node-object([json-node-pair("id",json-node-string(doc[0])),json-node-pair("path",json-node-string(doc[1]))])))),
             json-node-pair("next",json-node-string("Choose an admitted id or path exactly. Native tools read resident documents, not host scratch paths; original documents and checks remain unchanged."))]) : if (nil?(args) || (!fat-has(["edit-not-found","edit-ambiguous","document-exists-use-guarded-edit","edit-sha256-mismatch"],fat-error(result)))) then nothing() else {
             let doc = fat-find-doc(docs,args[0]);

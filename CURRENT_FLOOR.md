@@ -1118,6 +1118,13 @@ The body's own awk (`form/form-stdlib/bml/form-awk.bml`) selects, transforms and
   - the long recipes per file (`-P '//def[@lines>60]'`) in 3.9 s with the trees parsed cold.
 - **On the way.** form-find's `callers` read a negated call `!name(` as a different name, so every negated use went uncounted. The
   leading `!` is now a boundary.
+- **Native pipes.** `A | B` joins native calls in every door: the wire, the local voice's tool control, and form-find's own verbs.
+  `awk -P '//def' '{ print @lines }' | sort -n | uniq -c` is one command. `edit` and `write` stand alone. `observe/form-find-ask.bml`
+  takes the command itself on stdin (a quoted heredoc, `----` before its input) and answers as the command.
+- **`find PATH`.** It searches only under PATH, and form-find's band reads path operands by its own test, never form-find's.
+- **The local voice, end to end.** A 60-line table and a review goal (total per category). It completes in 177 s, 8 turns and 0
+  repairs, using `awk ... | sort`. Before native pipes and the review guide's two sentences it ran 18 turns, 9 repairs, with
+  hand-summed totals that were wrong (docs/form-native-agent-tools.md, "What the local voice did with it").
 
 ```text
 form/form-stdlib/tests/form-awk-band 4095   (a planted wrong expectation reads 4087)

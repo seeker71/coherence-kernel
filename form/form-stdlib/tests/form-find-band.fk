@@ -10,8 +10,9 @@
 ;
 ;   1      the index builds over this tree: the same held files as an independent walk (size <= 2 MiB, no NUL), thousands of definitions,
 ;          import edges and band headers, and the build time is read
-;   2      find: twenty fixed patterns (literals, -F, alternation, anchors, -w, -x, -m, a path operand, one that matches nothing) answer exactly
-;          the rows of the unindexed grep engine, each literal read only its candidate files, and -l and -c agree with the rows
+;   2      find: twenty-one fixed patterns (literals, -F, alternation, anchors, -w, -x, -m, path operands, one that matches nothing) answer exactly
+;          the rows of the unindexed grep engine, each literal read only its candidate files, and -l and -c agree with the rows. The oracle reads
+;          a path operand by its own test (fbd-under?), never form-find's, and find -F fcaq-command observe is a spec whose path excludes hits
 ;   4      defs: twenty names answer exactly the rows of a regex scan of every source file
 ;   8      callers: twenty names answer exactly an independent line-by-line scan (whole names only, definitions left out)
 ;   16     bands: twenty names answer exactly the band files an independent scan finds, with expected, verdict and mentions
@@ -21,8 +22,9 @@
 ;   128    an incremental refresh on this tree: nothing changed reads nothing; a touched file is read once and no other, and the next refresh is quiet
 ;   256    a fixture tree: .gitignore, a binary and a file over the limit honoured; a modified, an added, a removed file, a new directory and a
 ;          changed .gitignore followed, every answer and the cached postings staying right, each file read as often as it changed
-;   512    refusals: an unknown command, edit and write, a search with nothing to narrow it, context flags, a bad request are named
-;          refusals; the wire's read, head, wc and rg answer over indexed files and refuse an absent one; nothing falls back to a host
+;   512    refusals: an unknown command, edit and write, a search with nothing to narrow it, context flags, a redirection, a bad request
+;          are named refusals; find alpha | head -n 1 is find's first row through a native stage; the wire's read, head, wc and rg answer
+;          over indexed files and refuse an absent one; nothing falls back to a host
 ;   1024   the spool: an ask file is answered by an ans file written whole and the ask removed; a half-written ask is left, a stale one refused;
 ;          the service is alive when service.pid names a living process (this one), not when it names a dead one or is absent
 ;   2048   five questions: the warm indexed answer is at least five times faster than the unindexed scan for each, and the cold door (a
@@ -86,10 +88,13 @@ section [form.bml] {
     ["find 'zzzz-no-such-(literal)-zzzz'", ["-n", "-E", "-e", "zzzz-no-such-(literal)-zzzz"], []],
     ["find -F fnd-serve", ["-n", "-F", "-e", "fnd-serve"], []],
     ["find forbidden-tool", ["-n", "-E", "-e", "forbidden-tool"], []],
-    ["find '^ class (FormFind|FormHearth|FormAgentGrep) \\{' form/form-stdlib", ["-n", "-E", "-e", "^ class (FormFind|FormHearth|FormAgentGrep) \\{"], ["form/form-stdlib"]]
+    ["find '^ class (FormFind|FormHearth|FormAgentGrep) \\{' form/form-stdlib", ["-n", "-E", "-e", "^ class (FormFind|FormHearth|FormAgentGrep) \\{"], ["form/form-stdlib"]],
+    ["find -F fcaq-command observe", ["-n", "-F", "-e", "fcaq-command"], ["observe"]]
   ];
+  // the oracle's own reading of a path operand (not form-find's): the operand itself, or a file under it
+  def fbd-under?(p, dirs) = any?(d => (String) d == "." || (String) d == p || (len(p) > len(d) && (String) substring(p, 0, len(d) + 1) == d ++ "/"), dirs);
   def fbd-find-one(s, held, spec) {
-    let paths = nil?(spec[2]) ? held : (held |> filter(p => fnd-path-ok?(p, spec[2])));
+    let paths = nil?(spec[2]) ? held : (held |> filter(p => fbd-under?(p, spec[2])));
     let want = fbd-join(stw-grep-rows(spec[1], paths));
     let got = fbd-ask(s, spec[0]);
     let cands = fnd-c(s, "last_cands");
@@ -289,12 +294,15 @@ section [form.bml] {
 
   // ---- claim 512 and 16384: refusals, tools, the wire's shape ----
   def fbd-refused?(r, fragment) = (Comparable) r[0] == 2 && (String) r[1] == "" && fbd-has(r[2], fragment);
+  // a verb's answer piped into a native tool: find alpha | head -n 1 is the first row of find alpha, no shell between them
+  def fbd-piped?(fx) = fbd-piped-first(fbd-ask(fx, "find alpha | head -n 1"), fbd-ask(fx, "find alpha")[1]);
+  def fbd-piped-first(r, whole) = (Comparable) r[0] == 0 && len(whole) > 0 && (String) r[1] == substring(whole, 0, str_find(whole, "\n", 0) + 1);
   def fbd-tools(fx) {
     let unknown = fbd-refused?(fbd-ask(fx, "frobnicate x"), "unknown-command: frobnicate");
     let edit = fbd-refused?(fbd-ask(fx, "edit a.fk old new"), "form-find-reads-only") && fbd-refused?(fbd-ask(fx, "write n.txt held"), "form-find-reads-only");
     let nolit = fbd-refused?(fbd-ask(fx, "find -i alpha"), "find-needs-a-literal-or-paths") && fbd-refused?(fbd-ask(fx, "find '[a-z]+'"), "find-needs-a-literal-or-paths");
     let shape = fbd-refused?(fbd-ask(fx, "find"), "find-needs-pattern") && fbd-refused?(fbd-ask(fx, "find -A 2 alpha"), "find-context-not-supported") && fbd-refused?(fbd-ask(fx, "rg alpha"), "use find") && fbd-refused?(fbd-ask(fx, "find -Z alpha"), "unsupported-find-option") && fbd-refused?(fbd-ask(fx, "find 'a(' sub"), "find:");
-    let pipe = fbd-refused?(fbd-ask(fx, "find alpha | head"), "shell-syntax-not-supported");
+    let pipe = fbd-refused?(fbd-ask(fx, "find alpha > out.txt"), "shell-syntax-not-supported") && fbd-piped?(fx);
     let bad = fbd-refused?(fbd-decode(fnd-serve(fx, "{\"command\":")), "invalid-wire-json") && fbd-refused?(fbd-decode(fnd-serve(fx, "[1]")), "wire-request-needs-object") && fbd-refused?(fbd-decode(fnd-serve(fx, "{\"input\":\"x\"}")), "wire-field-required:command");
     let read = (String) fbd-out(fx, "read a.fk") == "(defn alpha2 (x) x)\n(defn delta (y) y)\n" && (String) fbd-out(fx, "head -n 1 a.fk") == "(defn alpha2 (x) x)\n" && (String) fbd-out(fx, "rg -nH delta a.fk") == "a.fk:2:(defn delta (y) y)\n";
     let wc = (String) fbd-out(fx, "wc -l b.bml") == "5\n" && (String) fbd-out(fx, "rg -nH beta b.bml") == "b.bml:4: def beta(x) = alpha(x);\n";

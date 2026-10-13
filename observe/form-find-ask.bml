@@ -1,23 +1,56 @@
-// form-find-ask.bml — ask the form-find service one question: one wire JSON on stdin, the wire's JSON answer on stdout.
+// form-find-ask.bml — ask the form-find service one question: the command itself, or one wire JSON, on stdin.
+//
+// THE COMMAND ITSELF (what an agent writes): stdin that does not begin with { is the command line, and the answer is the command's own:
+// its stdout, its stderr, exit 0 when it answered 0 and exit 1 (naming the code) otherwise. A quoted heredoc carries a command whose own
+// quotes and backslashes need no second escaping:
+//
+//   ./fkwu observe/form-find-ask.bml <<'EOF'
+//   path '/file[@path~"form-(awk|path)\.bml"]//def[{ callers(@name) == 0 }]'
+//   EOF
+//
+// THE WIRE JSON (what a program writes): stdin that begins with { is one request, {"command": ..., "input": ...}, and stdout is the wire's
+// JSON answer, as the spool's.
 //
 // This is the cold-start client: `./fkwu observe/form-find-ask.bml` is a whole process (the runtime opened, the closure read), which is the
-// cost the zero-process form avoids. The agents' normal lookup is the shell's own redirect into the spool, with no process begun:
+// cost the zero-process form avoids. The agents' zero-process lookup is the shell's own redirect into the spool when the service stands:
 //
 //   SP=/tmp/form-find/$UID; printf '%s' '{"command":"defs fat-wire-call"}' > $SP/ask.$$.json
 //   until [ -s $SP/ans.$$.json ]; do :; done; cat $SP/ans.$$.json; rm -f $SP/ans.$$.json     (docs/form-native-agent-tools.md)
 //
 // This door does the same in Form: it writes ask.<pid>-<ms>.json into the spool and rests on host_watch over the spool until
-// ans.<pid>-<ms>.json arrives (the answer is renamed in, an event) or the deadline passes (FORM_FIND_DEADLINE_MS, default 3000), prints it
-// and removes it. A service that is not alive (service.pid names no living process) is not waited for: the question is answered by the
-// cold door, an index this process builds for itself (fpa-cold: form-find's index with the `path` verb taught; seconds, once), never by a
-// host tool. A living service that does not answer in time is a named refusal.
+// ans.<pid>-<ms>.json arrives (the answer is renamed in, an event) or the deadline passes (FORM_FIND_DEADLINE_MS, default 3000), and
+// removes it. A service that is not alive (service.pid names no living process) is not waited for: the question is answered by the
+// cold door, an index this process builds for itself (fpa-cold: form-find's index with the `path`, `awk` and `memory` verbs taught;
+// seconds, once), never by a host tool. A living service that does not answer in time is a named refusal.
 // preflight-exec: forbidden
-// preludes: form-stdlib/bml/form-path.bml form-stdlib/bml/stdin-source.bml
+// preludes: form-stdlib/bml/form-path.bml form-stdlib/bml/stdin-source.bml form-stdlib/spool-bell-transport.fk
 import form-stdlib/bml/form-path.bml;
 import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/spool-bell-transport.fk;
 section [form.bml] {
  class FormFindAsk {
-  def ffa-run() = print_str(fpa-one(fat-trim(stdin-text())));
+  def ffa-json?(t) = len(t) > 0 && str_byte_at(t, 0) == 123;
+  // the command, then optionally a line ---- and the input the command reads (awk's records, a path expression, jq's JSON)
+  def ffa-request(t) = ffa-json?(t) ? t : ffa-request-at(t, str_find(t, "\n----\n", 0));
+  def ffa-request-at(t, k) = k < 0 ? "{\"command\":" ++ json-quote-string(fat-trim(t)) ++ "}" : "{\"command\":" ++ json-quote-string(fat-trim(substring(t, 0, k))) ++ ",\"input\":" ++ json-quote-string(substring(t, k + 6, len(t))) ++ "}";
+  def ffa-run() = ffa-asked(ffa-held(stdin-text()));
+  // a request is read whole; only a command alone is trimmed, so the input after ---- keeps its last newline
+  def ffa-held(t) = str_find(t, "\n----\n", 0) < 0 ? fat-trim(t) : t;
+  def ffa-asked(t) = ffa-json?(t) ? print_str(fpa-one(t)) : ffa-said(faj-json("form-find-ask", fpa-one(ffa-request(t))));
+  // the command's own answer: its stderr as it is, and its stdout as this door's value (the seed prints a door's value and one
+  // newline, so the value is the stdout without its last newline); a code other than 0 is this process's ending, named
+  def ffa-said(n) {
+   let out = node_value(json-object-get(n, "stdout"));
+   let err = node_value(json-object-get(n, "stderr"));
+   let said = len(err) > 0 ? sbt-append("/dev/stderr", err ++ "\n") : 0;
+   let code = node_value(json-object-get(n, "exit"));
+   code == 0 ? ffa-value(out) : ffa-ended(out, code);
+  }
+  def ffa-value(out) = (len(out) > 0 && str_byte_at(out, len(out) - 1) == 10) ? substring(out, 0, len(out) - 1) : out;
+  def ffa-ended(out, code) {
+   let z = len(out) > 0 ? sbt-append("/dev/stdout", out) : 0;
+   form_error("form-find: exit " ++ code.str());
+  }
  }
  ffa-run();
 }

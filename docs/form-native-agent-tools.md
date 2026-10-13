@@ -21,8 +21,8 @@ sends every copyable command below as one JSON request to `fat-wire-call`, the
 function form-cli's text face hands a raw JSON object to (`fc-tool-wire` in
 `form/form-stdlib/form-cli.fk`), and reads the response back through the wire's
 own JSON reader: the sixteen tool rows, the edit → write → read handoff, a
-pipeline through held input, a pipe refused as `shell-syntax-not-supported`
-with the corpus unchanged, `jq --arg`, and grep's proof: selection, output
+pipeline through held input, `A | B` joined as native calls, a redirection refused as
+`shell-syntax-not-supported` with the corpus unchanged, `jq --arg`, and grep's proof: selection, output
 shape, context, the regular-expression dialects, `-F`, several documents, exit
 codes, held input, the old `grep | head | grep -o | tr | tr` shell pipeline
 reproduced as five calls, the library door and the catalog row (`; Verdict
@@ -178,6 +178,21 @@ printf '%s' '{"command":"defs fat-wire-call"}' > $SP/ask.$n.json
 until [ -s $SP/ans.$n.json ]; do zselect -t 2; done; cat $SP/ans.$n.json; rm -f $SP/ans.$n.json
 ```
 
+**The command itself, no JSON.** `observe/form-find-ask.bml` reads the command line on stdin, when stdin does not begin with `{`. It
+answers as the command: its stdout as text, its stderr as text, and exit 0 or exit 1 with the code named. A quoted heredoc carries a
+command whose own quotes and backslashes need no second escaping. This is the form to reach for first:
+
+```sh
+./fkwu observe/form-find-ask.bml <<'EOF'
+awk -P '//class[@name="FormAwk"]/def[@lines>12]' '{ print @lines, @name }'
+EOF
+```
+
+A line `----` divides the command from the input it reads (awk's records, jq's JSON, a path expression):
+`{ printf '%s\n' "awk '{ n[\$1]++ } END { for (k in n) print n[k], k }'" ----; cat table.txt; } | ./fkwu observe/form-find-ask.bml`.
+With no service standing, each call builds an index of its own (2 to 13 s on this machine, 2026-10-13). A run of questions belongs in one
+cell that opens the index once: `let s = fpa-open("");` then `print(fnd-serve(s, "{\"command\":...}"))` per question.
+
 The service rests on `host_watch` (kqueue on Darwin, inotify on Linux) over the spool and the memory notes: an ask wakes it, a note written, added
 or removed wakes it and the notes' index is rewritten, and nothing runs on a clock (measured: 0.00 s of CPU over ten idle seconds; a note added, edited in
 place or removed is in the index within a second). It writes `$SP/service.pid` once. Fallbacks, in order: (1) the pid names a living process: the index
@@ -255,6 +270,35 @@ engine's ERE dialect), then run over records. One language stands behind three d
 - **form-find's `awk` verb**: indexed files by path, and the body's own substrate as records (`-P`, `-B`, `-C`, below) with functions over the index;
 - **form-path**: a `{...}` computed test inside a step, and `path 'XPATH => PROGRAM'` over the selection.
 
+**Who can reach what** (2026-10-13):
+
+| caller | how | lines and Form's choice | `-P` `-B` `-C`, `path`, index functions |
+| --- | --- | --- | --- |
+| an agent in a shell (the rented model, a person) | `./fkwu observe/form-find-ask.bml <<'EOF' ... EOF` (the command itself; `----` before its input), or the spool when the service stands | yes, over indexed files or the input after `----` | yes |
+| a Form cell | `fnd-serve(fpa-open(""), json)` for the index; `fwk-compile` + `fwk-run` for the language alone | yes | yes, through the index |
+| the local voice in the code lane | `<|form:tool|>awk 'PROGRAM' PATH \| sort<|/form:tool|>` over its resident documents (native pipes); `help awk` | yes | not yet: the lane holds its documents, not form-find's index |
+
+**When awk is the right tool.** Arithmetic over lines (a sum, a count, a total per key, a mean), choosing columns, filtering by a
+field, or reshaping rows is one awk call, and the answer is exact. Reading the lines and adding them in the head is not.
+
+**What the local voice did with it** (2026-10-13). The task was one review request: a 60-line table, "total per category, one
+line per category", four report checks, `evaluation=1`. The same request ran four times, and each run changed one thing:
+
+| run | what stood | what the voice did | outcome |
+| --- | --- | --- | --- |
+| 1 | `awk` in the tool list, `help awk` in the guide list | read the file, summed by hand (alpha 2199, true 3635); one `awk ... \| sort` call failed on the pipe | 18 turns, 9 repairs, stopped after 15 min |
+| 2 | the hint at the tool list (`fcap-awk-hint`) | planned "use awk", called `awk ... \| sort` three times; `\|` and `sort` were read as document names | stopped |
+| 3 | native pipes (`A \| B`) | `awk ... \| sort` answered the exact totals; the report was prose on one line; the same report came back unchanged | checks failed, stopped |
+| 4 | the review guide: a number is observed, and the report is the asked form alone; a Form call sent as a tool is answered with where it goes | read, `awk ... \| sort`, report `alpha 3635` ... `gamma 3312` | **complete**: 8 turns, 2 tool calls, 0 repairs, 177 s |
+
+What it taught:
+- The model reached for awk unprompted. It failed on what every caller writes after awk: `| sort`.
+- A refusal that names the wrong cause gets the same call repeated. `resident-document-not-found` never said that `|` was the
+  missing document; the guard now lists `missing`.
+- An exact number is not yet an answer: the report has to be in the asked form.
+
+The crossings ledger (`.hearth/form-tokens/crossings.rows`) holds every call a run made, word for word. That is where this was read.
+
 **The language.** `BEGIN { }` `END { }` `pattern { action }` `pattern` `{ action }` and ranges `p1, p2`; `print` `printf` `if`/`else` `while` `do`/`while`
 `for (;;)` `for (k in a)` `next` `exit [code]` `break` `continue` `delete a[k]` `delete a`; assignment and `+= -= *= /= %= ^=`, `?:` `|| && in ~ !~ < <= == != > >=`,
 concatenation, `+ - * / % ^`, `! -`, `++ --`, `$e`, `a[k]`, `a[i, j]` (joined by `SUBSEP`), `/re/` (matches `$0`). Functions: `length substr index split sub gsub
@@ -323,7 +367,9 @@ path '//def[@name="fpa-awk-verb"] ?? //defn[@name="fpa-awk-verb"]'
 path '//def[calls("host_spawn_at")] => { n[@path]++ } END { for (p in n) print n[p], p }'
 ```
 
-Quote the program and any path in single quotes: the wire's argv reader takes `>`, `|`, `{` and a bare `"` as shell syntax and refuses them (`shell-syntax-not-supported`).
+Quote the program and any path in single quotes. The wire's argv reader refuses `>`, `<` and `;`
+(`shell-syntax-not-supported`) and drops a bare `"`, and an unquoted `|` joins native calls:
+`awk -P '//def' '{ print @lines }' | sort -n | uniq -c` is three native stages in one command.
 A local voice reads the same guide as `help awk` (`fwk-guidance`).
 
 **Named endings, never a guess:** `awk-syntax: ...` (with what was found), `awk-regex: ...`, `awk-unknown-function: NAME`, `awk-function-not-supported: NAME`
@@ -396,9 +442,11 @@ The `head` and `tail` tools also read the older `-N` spelling (`head -2`) as
 `-n N`, so a shell pipeline's stages become calls with the same argv.
 
 `fc-tool-command(docs, command, input)` is a convenience argv reader, not a
-shell. Single/double quotes and backslash quoting are supported. Unquoted
-pipeline, redirection and semicolon syntax is rejected; variables, substitutions
-and executable lookup are never evaluated. Pass intermediate output as a Form
+shell. Single/double quotes and backslash quoting are supported. An unquoted `|`
+that a tool's name follows joins two native calls: the second reads the first's
+`stdout` as its input, no shell between them. `edit` and `write` stand alone
+(`pipe-stage-writes`). Redirection and semicolon syntax is rejected; variables, substitutions
+and executable lookup are never evaluated. In process, pass intermediate output as a Form
 value to the next call. For `rg`, nonempty held input replaces the search corpus;
 pass the explicit `-` path to search an empty held input without selecting the
 resident corpus. The returned document state always remains the caller's corpus.
@@ -431,8 +479,8 @@ wire and see the same result as `form/form-stdlib/tests/form-agent-tools-band.bm
 
 Each row is the value of JSON `command`. Where the row shows held text, send
 it as JSON `input`; a command without paths operates on it, and resident paths
-select documents. The parser supports quoted argv values but rejects pipes,
-redirection, semicolons, expansions and executable lookup.
+select documents. The parser supports quoted argv values and native pipes (`rg alpha | head -n 1`),
+and rejects redirection, semicolons, expansions and executable lookup.
 
 | Tool | JSON `command` | JSON `input` | Expected `stdout` |
 | --- | --- | --- | --- |
@@ -468,8 +516,8 @@ response.stdout: "created\n"
 response.stdout: "held note\n"
 ```
 
-A native pipeline passes a response's `stdout` as the next request's `input`,
-rather than spelling `|`. For example, to take the first matched line:
+A native pipeline is spelled `A | B` in one command, or across requests by passing a response's `stdout` as the
+next request's `input`. For example, to take the first matched line across two requests:
 
 ```text
 {"command":"rg -nF 'alpha 1'","documents":[...the corpus above...]}
