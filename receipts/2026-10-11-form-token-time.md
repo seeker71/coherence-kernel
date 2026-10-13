@@ -69,6 +69,13 @@ single reading attributes nothing and only a back-to-back pair does; and a resid
 after-training check and the same call alone (tokenizing is not it: 87 ms for 24 rows). That residual is worth about 10 s of a
 short run and is left unread; the evaluation stage (449 s of the cycle) is the larger target.
 
+The residual above was read from the body's own counters on 2026-10-13, once the trainer's validation events carried them
+(`device_busy_ms`, this process's busy time, and `host_gpu_busy_ms`, the whole GPU's, `host_gpu_busy_us`): of an after-training
+validation of 22.2 s the process kept the device busy 14.7 s (66%), the whole GPU was busy 20.8 s (93.5%), and a neighbour's share of
+that was 6.0 s; about 1.4 s of the wall was nobody's. The "1.9 times" was a shared device, not the trainer's state, and an idle
+machine reading (`host_gpu_busy_us` climbing 70% with this process at 0) had been there to read before any of it was timed. The
+time door, the eval line and the decode bench now print wall, this process's busy time and the whole GPU's with every run.
+
 Decode, 2026-10-12: a token was 28.3 ms of which the device was busy 16.5; a token's 621 dispatches were encoded into one batch and
 committed at the sync, so host (about 12 ms of encoding; buffer allocation is 2 of it) and device ran one after the other. The
 decode forward now submits each layer's batch as it fills (`nll-flow`, `metal_submit`; the closing sync drains them in order):
