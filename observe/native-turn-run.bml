@@ -103,7 +103,12 @@ section [form.bml] {
   def nt-nonempty(xs) = if nil?(xs) then [] else if ((Comparable) len(trim(xs[0])) == 0) then nt-nonempty(xs[1:]) else cons(xs[0], nt-nonempty(xs[1:]));
   def nt-parse(xs) = if nil?(xs) then [] else cons(parse-json("native-turn-row", xs[0]), nt-parse(xs[1:]));
   def nt-rows(path) = if (file_size(path) < 1) then [] else nt-parse(nt-nonempty(split-on(fhn-read(path), "\n")));
-  def nt-green?(id, rows) = if nil?(rows) then 0 else if (((String) nt-str(rows[0], "gap") == id) && ((Comparable) nt-int(rows[0], "band_green", 0) == 1)) then 1 else nt-green?(id, rows[1:]);
+  def nt-green?(gap, rows) {
+   let latest=nt-latest-real(nt-str(gap,"id"),rows,[]);
+   !nil?(latest) && nt-int(latest[0],"band_green",0)==1 &&
+    nt-str(latest[0],"band_digest")==nt-band-digest(gap) &&
+    nt-str(latest[0],"checks_digest")==nt-checks-digest(gap);
+  }
   // the open gap with the fewest real attempts, in queue order among equals, so one gap the lane cannot yet
   // close does not hold the others
   // an attempt is a row that tried something: a lane that gave its memory back, was refused it, or found the seat taken, tried nothing
@@ -149,8 +154,8 @@ section [form.bml] {
   }
   // A queue row is a gap when it names itself and names a band or a goal. A verified task record in the same file is not a turn.
   def nt-gap?(row) = ((String) nt-str(row, "id") != "") && (((String) nt-str(row, "band") != "") || ((String) nt-str(row, "goal") != ""));
-  def nt-open(queue, done, want, opts) = if nil?(queue) then [] else if (nt-gap?(queue[0]) && (((String) want == "") || ((String) nt-str(queue[0], "id") == want)) && ((Comparable) nt-green?(nt-str(queue[0], "id"), done) == 0) && (((String) want != "") || !nt-waits?(queue[0], done, opts))) then cons(queue[0], nt-open(queue[1:], done, want, opts)) else nt-open(queue[1:], done, want, opts);
-  def nt-waiting(queue, done, opts) = if nil?(queue) then [] else if (((Comparable) nt-green?(nt-str(queue[0], "id"), done) == 0) && nt-waits?(queue[0], done, opts)) then cons(nt-str(queue[0], "id"), nt-waiting(queue[1:], done, opts)) else nt-waiting(queue[1:], done, opts);
+  def nt-open(queue, done, want, opts) = if nil?(queue) then [] else if (nt-gap?(queue[0]) && (((String) want == "") || ((String) nt-str(queue[0], "id") == want)) && !nt-green?(queue[0], done) && (((String) want != "") || !nt-waits?(queue[0], done, opts))) then cons(queue[0], nt-open(queue[1:], done, want, opts)) else nt-open(queue[1:], done, want, opts);
+  def nt-waiting(queue, done, opts) = if nil?(queue) then [] else if (!nt-green?(queue[0], done) && nt-waits?(queue[0], done, opts)) then cons(nt-str(queue[0], "id"), nt-waiting(queue[1:], done, opts)) else nt-waiting(queue[1:], done, opts);
   def nt-none-open(queue, done, opts) {
    let waiting = nt-waiting(queue, done, opts);
    if nil?(waiting) then "[native-turn] no open gap" else mc-cat(["[native-turn] no open gap: ", nt-comma(waiting), " wait(s) on its contract (the lane refused a caller check no candidate can meet, the band reads above its full or names another verdict than its full, or every way of the ladder already stands with a non-green outcome; and nothing that contract reads has changed since)"]);
@@ -216,7 +221,9 @@ section [form.bml] {
   def nt-claim-lines(rows, aspects) = if nil?(aspects) then "" else ((String) nt-claim-line(rows, aspects[0]) + nt-claim-lines(rows, aspects[1:]));
   def nt-band-claims() {
    let rows = nt-band-rows(split-on(nt-read(nt-err()), "\n"));
-   trim(nt-claim-lines(rows, nt-aspects(rows, [])));
+   let claims=nt-claim-lines(rows, nt-aspects(rows, []));
+   let actual=nt-read(nt-out());
+   trim(claims + (len(trim(actual))==0 ? "" : "\nNative witness execution observations:\n" + actual));
   }
   // who began this turn
   def nt-row-of(value) = if ((String) value_kind(value) == "int") then [] else value;
@@ -245,8 +252,13 @@ section [form.bml] {
   def nt-balances(paths) = if nil?(paths) then [] else cons(nt-balance(paths[0]), if nt-fk?(paths[0]) then cons(nt-arity(paths[0]), nt-balances(paths[1:])) else nt-balances(paths[1:]));
   // Catalog admission keeps source resident; focused reads supply missing evidence.
   def nt-context(gap) = if json-object-has?(gap,"document_context") then nt-str(gap,"document_context") else "catalog";
-  def nt-sources(gap) = foldl((paths,path) => nt-has(paths,path) ? paths : append(paths,[path]),nt-strs(gap,"writable"),nt-strs(gap,"sources"));
-  def nt-request(gap, opts, goal) = json-node-object([fhn-s("goal",goal),json-node-pair("documents",json-node-array(nt-docs(nt-sources(gap)))),json-node-pair("writable",json-node-array(nt-strings(nt-strs(gap,"writable")))),json-node-pair("checks",json-node-array(append(if json-object-has?(gap,"checks") then json-array-elements(json-object-get(gap,"checks")) else [],nt-balances(nt-strs(gap,"writable"))))),fhn-s("model",nt-model(opts)),fhn-n("context",nt-int(opts,"context",16384)),fhn-n("turns",nt-int(opts,"turns",64)),fhn-s("document_context",nt-context(gap)),fhn-s("code_entry","direct"),fhn-n("weight_training",0),fhn-n("native_rehearsal_checks",ntl-rehearsal-checks())]);
+  def nt-sources(gap) = foldl((paths,path) => path=="" || nt-has(paths,path) ? paths : append(paths,[path]),nt-strs(gap,"writable"),nt-strs(gap,"sources") + [nt-str(gap,"band")]);
+  def nt-source-queries(gap) {
+   let definitions=json-object-has?(gap,"definitions") ? json-array-elements(json-object-get(gap,"definitions")) |> map(d=>nt-str(d,"name")) |> filter(name=>name != "") : [];
+   let band=nt-str(gap,"band");
+   (nil?(definitions) ? [] : [json-node-object([fhn-s("tool","bml-api"),json-node-pair("arguments",json-node-array(nt-strings(definitions)))])]) + (band=="" ? [] : [json-node-object([fhn-s("tool","cat"),json-node-pair("arguments",json-node-array([json-node-string(band)]))])]);
+  }
+  def nt-request(gap, opts, goal) = json-node-object([fhn-s("goal",nt-str(gap,"original_goal")=="" ? goal : "Original caller goal:\n" + nt-str(gap,"original_goal") + "\nCurrent implementation task and observations:\n" + goal),json-node-pair("documents",json-node-array(nt-docs(nt-sources(gap)))),json-node-pair("source_queries",json-node-array(nt-source-queries(gap))),json-node-pair("writable",json-node-array(nt-strings(nt-strs(gap,"writable")))),json-node-pair("checks",json-node-array(append(if json-object-has?(gap,"checks") then json-array-elements(json-object-get(gap,"checks")) else [],nt-balances(nt-strs(gap,"writable"))))),fhn-s("model",nt-model(opts)),fhn-n("context",nt-int(opts,"context",16384)),fhn-n("turns",nt-int(opts,"turns",64)),fhn-s("document_context",nt-context(gap)),fhn-s("code_entry","direct"),fhn-n("weight_training",0),fhn-n("native_rehearsal_checks",ntl-rehearsal-checks())]);
   // the ladder: the model, the voice that follows it and the ways, each a distinct approach
   def nt-chain() = mr-chain-names("write-code");
   def nt-model(opts) = if json-object-has?(opts,"model") then nt-str(opts,"model") else nt-chain()[0];

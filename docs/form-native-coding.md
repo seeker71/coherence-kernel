@@ -42,7 +42,20 @@ repair family, with quality bounded by the original checks.
 Unreadable cases retain the proposal's plan, goal and reference bytes. The same
 local choice repairs only the cases block, with its raw answer and assembled
 proposal retained separately. The complete planner verifier runs before queue
-publication. Task publication includes the generated executable witness.
+publication. Generated task witnesses stay in the private task tissue; published
+behavior extends the existing owner's tests. Case calls have their own native
+block scope, including local bindings. Source changes recheck a retained complete
+proposal before another model admission. Existing owner tests may be edited;
+the independent task witness remains outside the candidate's writable sources.
+Completed native turns are reused only while their source, caller contracts and
+witness fingerprints still agree. Changed evidence reopens the same task.
+The queued task retains the original caller goal and typed definition manifest.
+Coding admission includes those definitions' native API observations and the
+actual behavior witness as a read-only source document, so diagnosis starts
+with the failing operation rather than a sequential scan of the whole module.
+The initial failure also carries the witness's actual execution output,
+including generated cases' observed and expected values. A final zero alone
+does not describe which behavior needs repair.
 
 Reference repair retains the proposal's local model unless the caller selects
 another. An interrupted, fingerprint-matched coding checkpoint resumes before
