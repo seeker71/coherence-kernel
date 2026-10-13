@@ -255,7 +255,10 @@ host-walk-band 8796093022207  (a walk door that claims the checkout stamps its s
                                 standing is joined by union, each row once, and the sync says `healed:` before sync=0; a branch
                                 of any length heals, only a round that comes back with the rebase no further on stops; a file
                                 the body does not know, a river one side deleted, or a page it could not settle aborts the
-                                rebase and names its files;
+                                rebase and names its files; tracked work that is not a union row (a turn's unlanded source, a
+                                drawn page, a row whose ledger main deleted or reads as binary) and an untracked file at a path
+                                main tracks wait whole in `.hearth/walk-aside/<ms>/` (aside.patch, untracked/, rows.txt;
+                                host-walk-aside.bml), the paths return to HEAD and the walk follows main, said as `set-aside:`;
                                 a walk runs the host-walk parts of its own checkout, so a checkout that stands behind main on a
                                 conflict the landed sync heals cannot heal itself (2026-10-03 12:30: the day turn held every turn
                                 on docs/rent-ladder.html): observe/walk-sync-run.bml runs the landed sync once on a named checkout
