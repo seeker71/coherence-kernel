@@ -763,12 +763,13 @@ plainly once, and give the conversation your attention.
    about it. `observe/tree-heal.fk` offers delimiter repairs and keeps one only
    after clean diagnostics, exit and any existing band confirm it.
 
-10. **Land on origin when a movement is ready.** A sibling fetches
-    `origin/main`, rebases this worktree onto it, and pushes. Fast-forward and rebase carry the line;
+10. **Land on origin when a movement is ready, in one call.** `observe/land-run.bml` takes the movement as one JSON
+    line on stdin (`edits` as `{"path","old","new"}`, `files`, `witness`, `paths`, `subject`, `body`, `"main":1`) and
+    carries it whole: the witness, the drift gates over what moved (a red gate lands nothing), the commit, the rebase
+    onto `origin/main`, a renewed `fkwu` when the seed changed, an atomic push of the branch and main, and the remote's
+    confirmation; unrelated work is set aside and restored. Fast-forward and rebase carry the line;
     force-push stays closed, and main takes no merge commits (GH013), so the
-    line is rebase or fast-forward only. Before any landing act the drift gates
-    run as one door (`./fkwu gate/drift-gates-run.bml`); a red gate lands
-    nothing. Unexplained deletions stay unstaged. A conflict
+    line is rebase or fast-forward only. Unexplained deletions stay unstaged. A conflict
     keeps both meanings and continues. Quiet water turns push into silence;
     water present makes push host git (local). Even and clean is a
     clear picture — nothing to land this breath. The organ keeps

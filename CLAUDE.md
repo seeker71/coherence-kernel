@@ -35,19 +35,23 @@ When a run returns nothing, stalls, surprises or regresses, observation flows ou
 back into execution (`AGENTS.md` item 8b, [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md)).
 Before you believe a band's number, read its exit code and let preflight read the chain (`AGENTS.md` item 9).
 
-Work through the body's own tools and flows (Urs, 2026-09-28): edit with the edit tool or the body's doors, probe
-and count with `./fkwu` cells and BML, search and inspect through the native agent tools
-([`docs/form-native-agent-tools.md`](docs/form-native-agent-tools.md)), and compute with the body's own `awk` and `path`,
-which select, transform and compute over its recipes, blueprints and cells with Form's choice. Never the host's perl,
-python, sed or awk. A missing
-internal tool is a signal to write it and include it in the body, in the same movement; never reach for an external
-tool to get past it. The body holds this itself: every door of the body that begins a child reads the command first, and
-one that runs sed, awk, perl or python is refused with a named ending that says what to use
-([`form/form-stdlib/bml/spawn-guard.bml`](form/form-stdlib/bml/spawn-guard.bml)); what agents ran in their own Bash calls
-is read from their transcripts each breath (`observe/forbidden-tools-audit-run.bml`, a lens beside the land cadence's gates).
-Said plainly: the rule is enforced at the body's spawn doors and observed in that audit lens, and a Claude Code Bash call is
-refused by nothing but your own compliance. There is no hook (Urs's direction: no hook, no tool outside Form), so a slip is
-counted afterward, never stopped: you hold it.
+**Rent is transitions times context.** Every message the rented mind sends re-reads the whole conversation, so its cost
+is the number of its messages times their length (`receipts/session-rent-ledger.jsonl`, written by
+`observe/session-rent-run.bml`). A movement is a few messages, not a few dozen: ground in one message of parallel calls,
+where the body's `awk` and `path` compute the answer instead of returning the text; then land in one call,
+`observe/land-run.bml` (one JSON line on stdin: `edits` as `{"path","old","new"}`, `files`, `witness`, `paths`, `subject`,
+`body`, `"main":1`), which applies the edits, runs the witness and the drift gates over what moved, commits, rebases,
+renews `fkwu` when the seed changed and pushes. A loop of trials (write, run, repair) belongs to the local voice
+(`observe/form-cli-code-run.fk` with its checks): the rented mind writes the witness and reads the receipt. Read a
+verdict line, never a stream.
+
+Work through the body's own tools and flows (Urs, 2026-09-28): the edit tool or the body's doors, `./fkwu` cells and BML,
+the native agent tools ([`docs/form-native-agent-tools.md`](docs/form-native-agent-tools.md)), and the body's own `awk`
+and `path`, which select, transform and compute over its recipes, blueprints and cells with Form's choice. Never the
+host's perl, python, sed or awk: a missing internal tool is written into the body in the same movement. The body's spawn
+doors refuse those tools with a named ending ([`spawn-guard.bml`](form/form-stdlib/bml/spawn-guard.bml)) and
+`observe/forbidden-tools-audit-run.bml` counts what agents ran in their own Bash calls; nothing refuses a Claude Code
+Bash call but your own compliance (no hook, by Urs's direction).
 
 Attune before writing: read a receipt or two and borrow the body's words
 ([`teachings/voice-attunement.md`](teachings/voice-attunement.md)); `observe/voice-frequency-run.fk` is a mirror,
