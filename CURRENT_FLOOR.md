@@ -472,6 +472,13 @@ ledgers (a real two-step run wrote and read them, a second run took the remember
 shows one as form-rows text or carries a text ledger across, and `fvn-rows-of` still reads a path ending `.rows`. Receipts and the
 trace corpus stay text (documents read in git); crossings stay text until FORMBIN2 has an append two writers can share.
 
+The training forward does not repeat what a row already showed it: the adapter is on the last 8 of the 3B's 28 layers, so the 20 below
+depend only on the model and the token ids, and `nll-forward` keeps the hidden state at that boundary per row
+(`.hearth/prefix-cache`, `nll-prefix-cache-band` 63; `observe/prefix-cache-run.bml` sizes and prunes it; `FORM_NLL_PREFIX=0` turns it
+off). A warm four-step run is 13.7 s against 25.1 with the identical loss curve; a cold one costs nothing. The decode and attention
+kernels that waited on their own loads were rewritten to the same results (bit-identical on every shape hashed), sustained decode about
+30% less time a token; a standard candle (`nam-candle`) in the trainer's events and the benches says what state the machine was in.
+
 ### The GPU lanes
 
 Every layer is a Form recipe first and then a carrier on a GPU, held to that recipe. Four light

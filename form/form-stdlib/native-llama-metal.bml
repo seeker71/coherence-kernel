@@ -3,7 +3,10 @@
 import form-stdlib/native-affine-metal.bml;
 import form-stdlib/model-registry.bml;
 import form-stdlib/native-adapter-generation.bml;
+import form-stdlib/sha256.fk;
 section [form.bml] {
+ // the frozen-prefix cache's counts for the process
+ let NLL-PREFIX = record_new(0, "hits", 0, "misses", 0, "saved", 0, "spoiled", 0);
  class NativeLlamaMetal {
   def nll-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" + "
 kernel void nll_rope(device float* x [[buffer(0)]],device const float* freq [[buffer(1)]],constant uint& heads [[buffer(2)]],constant uint& hd [[buffer(3)]],constant uint& tokens [[buffer(4)]],constant uint& offset [[buffer(5)]],constant uint& inverse [[buffer(6)]],uint i [[thread_position_in_grid]]) {uint hw=hd/2;if(i>=tokens*heads*hw)return;uint j=i%hw;uint h=i/hw;uint at=h*hd+j;float angle=float(offset+h/heads)*freq[j]*(inverse?-1.0f:1.0f);float c=cos(angle),s=sin(angle),a=x[at],b=x[at+hw];x[at]=a*c-b*s;x[at+hw]=a*s+b*c;}
@@ -213,21 +216,114 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
    ((Comparable) t == 0) || ((!nll-ids-valid(ids,g[5])) || ((pos < 0) || ((pos + t) > ctx[0]))) ? form_error("native Llama token/context admission refused") : nll-forward-admitted(model,ctx,ids,pos,allRows,g,t);
   }
   def nll-forward-admitted(model,ctx,ids,pos,allRows,g,t) {
+   let p = nll-prefix-count(model,ctx,allRows,pos,t);
+   p > 0 ? nll-forward-prefixed(model,ctx,ids,pos,allRows,g,t,p) : nll-forward-whole(model,ctx,ids,pos,allRows,g,t);
+  }
+  def nll-forward-whole(model,ctx,ids,pos,allRows,g,t) {
    let ib = nam-write(nam-alloc(t),md-le32-list(ids,""));
    let x = nam-alloc(t * g[0]);
    let scratch = nam-alloc(t * nll-rank(model[1]));
    let emb = nam-embed(model[2],ib,x,t);
    let blocks = nll-blocks(g,model[1],x,ctx[1],ctx[2],t,pos,scratch,[]);
+   let head = nll-forward-head(model,g,blocks[0],t,allRows);
+   [head[0],blocks[1],head[1],head[2],head[3],[ib,x,scratch,head[2],head[1],head[3],head[0]],t,head[4]];
+  }
+  // the last block's output to the logits: [logits, normalized, head input, inverse, logit rows]
+  def nll-forward-head(model,g,last,t,allRows) {
    let ht = allRows ? t : 1;
    let hx = nam-alloc(ht * g[0]);
    let hn = nam-alloc(ht * g[0]);
    let inv = nam-alloc(ht);
    let logits = nam-alloc(ht * g[5]);
-   let copied = nll-last(blocks[0],hx,ht * g[0],allRows ? 0 : ((t - 1) * g[0]));
+   let copied = nll-last(last,hx,ht * g[0],allRows ? 0 : ((t - 1) * g[0]));
    let norm = nam-rms(hx,model[3],hn,inv,g[0],ht,g[7]);
    let out = nam-linear(model[2],hn,logits,ht,0);
    let done = nam-sync();
-   [logits,blocks[1],hn,hx,inv,[ib,x,scratch,hx,hn,inv,logits],t,ht];
+   [logits,hn,hx,inv,ht];
+  }
+  // ── the frozen prefix ──
+  // The adapter sits on the top layers (the 3B voice's on the last 8 of 28): the layers below the first one that carries LoRA
+  // depend on the model and the token ids and on nothing the trainer changes, so a whole row that is forwarded again (the next
+  // round, the validation after the validation, the next cycle on the same corpus) meets the same hidden state at that boundary
+  // every time. It is kept in a file under .hearth/prefix-cache named by a hash of the model, the kernels' numerics, the boundary
+  // and the ids; a row that finds it maps the file as the input of the first adapter layer (no copy, no embed, no frozen layer)
+  // and the tape holds only the layers the backward walks. A miss runs the whole forward as before and keeps the boundary after.
+  // Only a whole row at position zero that wants every logit row (training and validation) takes part; generation never does.
+  // FORM_NLL_PREFIX=0 turns it off. The bytes are what the same kernels wrote, so a hit equals a recomputation bit for bit.
+  def nll-numerics() = "affine-numerics-3-mma";
+  def nll-prefix-on?() = (host_getenv("FORM_NLL_PREFIX") ?? "") != "0";
+  def nll-first-lora(layers,i) = nil?(layers) ? i : nll-rank-layer(layers[0]) > 0 ? i : nll-first-lora(layers[1:],i + 1);
+  def nll-prefix-count(model,ctx,allRows,pos,t) {
+   let p = (allRows && pos == 0 && t == ctx[0] && nll-prefix-on?()) ? nll-first-lora(model[1],0) : 0;
+   p < len(model[1]) ? p : 0;
+  }
+  def nll-hex-digit(n) = substring("0123456789abcdef",n,n + 1);
+  def nll-hex(bytes) = nil?(bytes) ? "" : nll-hex-digit(bytes[0] / 16) ++ nll-hex-digit(bytes[0] % 16) ++ nll-hex(bytes[1:]);
+  def nll-prefix-key(model,ids,p) = nll-hex(sha256-stream-string(model[4] ++ "|" ++ nll-numerics() ++ "|" ++ p.str() ++ "|" ++ str-join-with(map(i => i.str(),ids),",")));
+  def nll-prefix-path(key) = ".hearth/prefix-cache/" ++ key ++ ".f32";
+  def nll-prefix-note(kind) = record_set(NLL-PREFIX,kind,record_get(NLL-PREFIX,kind) + 1);
+  // [hits, misses, rows saved, files that failed their trailer] since the process began
+  def nll-prefix-stats() = [record_get(NLL-PREFIX,"hits"),record_get(NLL-PREFIX,"misses"),record_get(NLL-PREFIX,"saved"),record_get(NLL-PREFIX,"spoiled")];
+  // The file is the activation (tokens * width floats) and a trailer of three floats: the activation's own squared norm and maximum
+  // (nam-stats, one kernel, one association) and a signature. A mapped file whose pages never reached the disk (a crash between the rename and
+  // the write-back leaves the right size and zeros) or that was torn does not match its trailer, and its row is recomputed.
+  // The third float is a fixed nonzero signature: an all-zero activation has a zero norm and a zero maximum, so a zeroed file's zero
+  // trailer would otherwise match it.
+  def nll-prefix-bytes(t,g) = (t * g[0] + 3) * 4;
+  def nll-prefix-trailer(h,n) {
+   let s = nam-stats(h,n);
+   nam-f32s([s[1],s[2],0.15625]);
+  }
+  def nll-prefix-sound?(x,n) = (String) metal_buf_read(x,n * 4,12) == (String) nll-prefix-trailer(x,n);
+  def nll-forward-prefixed(model,ctx,ids,pos,allRows,g,t,p) {
+   let path = nll-prefix-path(nll-prefix-key(model,ids,p));
+   (file_size(path) == nll-prefix-bytes(t,g)) ? nll-forward-hit(model,ctx,ids,pos,allRows,g,t,p,path) : nll-forward-miss(model,ctx,ids,pos,allRows,g,t,p,path);
+  }
+  def nll-forward-hit(model,ctx,ids,pos,allRows,g,t,p,path) {
+   let x = metal_buf_from_file(path,0,nll-prefix-bytes(t,g));
+   x <= 0 ? nll-forward-whole(model,ctx,ids,pos,allRows,g,t) : nll-prefix-sound?(x,t * g[0]) ? nll-forward-used(model,ctx,pos,allRows,g,t,p,x,path) : nll-forward-spoiled(model,ctx,ids,pos,allRows,g,t,p,path,x);
+  }
+  // a hit renews the entry's time, so that observe/prefix-cache-run.bml prunes what has not been used, not what is old
+  def nll-forward-used(model,ctx,pos,allRows,g,t,p,x,path) {
+   let renewed = host_utimes(path,now_unix_ms());
+   nll-forward-hit-from(model,ctx,pos,allRows,g,t,p,x);
+  }
+  def nll-forward-spoiled(model,ctx,ids,pos,allRows,g,t,p,path,x) {
+   let freed = metal_buf_free(x);
+   let removed = host_path_remove(path);
+   let noted = nll-prefix-note("spoiled");
+   nll-forward-miss(model,ctx,ids,pos,allRows,g,t,p,path);
+  }
+  def nll-forward-hit-from(model,ctx,pos,allRows,g,t,p,x) {
+   let noted = nll-prefix-note("hits");
+   let scratch = nam-alloc(t * nll-rank(model[1]));
+   let blocks = nll-blocks(g,drop(p,model[1]),x,drop(p,ctx[1]),drop(p,ctx[2]),t,pos,scratch,[]);
+   let head = nll-forward-head(model,g,blocks[0],t,allRows);
+   [head[0],blocks[1],head[1],head[2],head[3],[x,scratch,head[2],head[1],head[3],head[0]],t,head[4]];
+  }
+  def nll-forward-miss(model,ctx,ids,pos,allRows,g,t,p,path) {
+   let r = nll-forward-whole(model,ctx,ids,pos,allRows,g,t);
+   let noted = nll-prefix-note("misses");
+   let kept = nll-prefix-save(path,r[1][p - 1][0],t * g[0]);
+   r;
+  }
+  // the boundary activation to a temp file mapped writable, one GPU copy, then renamed over: whole or absent
+  def nll-prefix-save(path,h,n) {
+   let dir = host_dir_mkdir(".hearth");
+   let dir2 = host_dir_mkdir(".hearth/prefix-cache");
+   let tmp = path ++ ".tmp-" ++ host_pid().str();
+   let touched = write_file_text(tmp,"");
+   let dest = metal_buf_from_file(tmp,0,0 - (n + 3) * 4);
+   dest <= 0 ? 0 : nll-prefix-saved(path,tmp,h,dest,n);
+  }
+  def nll-prefix-saved(path,tmp,h,dest,n) {
+   let copied = nam-run("nam_copy",[h,dest],[n],n,0);
+   let done = nam-sync();
+   let trailed = metal_buf_write(dest,n * 4,nll-prefix-trailer(h,n));
+   let freed = metal_buf_free(dest);
+   let moved = fs-rename(tmp,path);
+   let noted = nll-prefix-note("saved");
+   moved;
   }
   def nll-forward-handles(blocks) = nil?(blocks) ? [] : append(blocks[0][1],nll-forward-handles(blocks[1:]));
   def nll-forward-close(r) = nam-free(append(r[5],nll-forward-handles(r[1])));

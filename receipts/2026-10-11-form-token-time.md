@@ -107,6 +107,37 @@ divided by its own mean candle (the machine was 2 to 3.5 times slow throughout),
 build's cost: about 30% less time a token, held for 400 tokens. At burst (40 tokens, calm machine) the matmul and rms alone took the
 device time from 16.8 to 14.6 ms a token.
 
+Measured and not built, 2026-10-13/14. (1) The 4-bit matvec is not bandwidth-bound: on a gate-sized weight (8192 by 3072) rotated over 24
+sets (300 MB, past the system cache) it takes 6.6 to 15 times as long as a streaming read of the same weight bytes in the same
+machine state; dequantizing eight nibbles and multiplying is the cost, and the one exact restructuring tried (four chunks computed ahead)
+changed nothing. (2) Batching is exact and large: a block of 8 tokens costs a third to a quarter of eight single steps (busy 327, 171,
+156 ms against 1085, 450, 703; wall 359, 197, 175 against 1154, 498, 771), because the 2 to 15 token kernels dequantize each weight once
+for eight tokens and the decode kernel is bit-equal to them. Decoding several evaluation questions in lockstep would use it; it needs a
+trampolined walk (the voice's feed is the one model call) and a multi-sequence forward, and is not built. (3) Lookup drafting is not
+worth building: `observe/spec-lookup-sim-run.bml` replays the 81 recorded streams (the voice's tokens apart from Form's injected
+observations), proposes the continuation of the longest earlier match of the last one to three ids, and charges a verify block 1.0 plus
+0.2 a token: 1.06 to 1.21 times at best (k 2, minimum match 2: 3,341 forwards and 3,888 single steps for 4,731 tokens; k 4: 1.55 tokens
+a forward). An incident worth keeping: a first version of that door mapped over the integer in `questions` (a count) instead of
+`questions_judged` and wrote its diagnostics until a 39 GB file stood in the scratch directory; it is bounded now (a list check, and a
+run that is piped through `head -c`).
+
+The frozen prefix, 2026-10-14. The train stage's device time is 86% one kernel, `nam_affine_mma` (23.8 of 27.7 s in a four-step
+profile), and that kernel runs at 7.7 to 8.0 TFLOPs on every shape tried (3072 square, 8192 by 3072, 3072 by 8192, 165 tokens): the
+matrix unit's fp32 rate. Two exact restructurings were measured in a lab and changed nothing: aligned 32-bit and 16-bit loads for the
+packed word and the scale (402 against 405 us), and a 64-token by 32-row tile with four loads for four MACs (421 against 406). What
+the profile did show is work that need not be done twice: the adapter is on the last 8 of 28 layers, the 20 below depend only on the
+model and the token ids, and a whole row forwarded for training or validation meets the same hidden state at that boundary every
+time. `nll-forward` now keeps it (`.hearth/prefix-cache/<hash>.f32`, the hash of the model, the numerics tag, the boundary layer and
+the ids; the activation and a trailer of its own squared norm, maximum and a signature) and a later forward of the row maps the file as
+the input of the first adapter layer, so the embed and the frozen layers are skipped and the tape holds the top layers only (the
+backward already began at the first adapter layer). Real model, four training steps, three runs: the loss curve and the held-out result
+are identical to the last digit with the cache off, cold and warm; cold costs nothing (25.6 s against 25.1) and saves 85 rows; warm hits
+all 85 and the run takes 13.7 s, the after-training validation 8.1 s instead of 19.1; scoring 12 rows on the bench goes from 125 to 50 ms
+a row. A zeroed file of the right size (a write-back that never came) fails its trailer and the row is recomputed
+(`nll-prefix-cache-band` 63). A cycle's first pass fills the cache (about 1.5 GB for 728 rows) and every later pass on the same rows
+skips the frozen forward: the train stage's 0.7 s forward a row falls toward 0.2 s. `observe/prefix-cache-run.bml` shows its size and
+prunes by days unused or by size; a hit renews an entry's time. `FORM_NLL_PREFIX=0` turns it off.
+
 Decode, 2026-10-12: a token was 28.3 ms of which the device was busy 16.5; a token's 621 dispatches were encoded into one batch and
 committed at the sync, so host (about 12 ms of encoding; buffer allocation is 2 of it) and device ran one after the other. The
 decode forward now submits each layer's batch as it fills (`nll-flow`, `metal_submit`; the closing sync drains them in order):
