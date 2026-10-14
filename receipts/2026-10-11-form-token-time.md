@@ -138,6 +138,25 @@ a row. A zeroed file of the right size (a write-back that never came) fails its 
 skips the frozen forward: the train stage's 0.7 s forward a row falls toward 0.2 s. `observe/prefix-cache-run.bml` shows its size and
 prunes by days unused or by size; a hit renews an entry's time. `FORM_NLL_PREFIX=0` turns it off.
 
+The first full cycles after the kernel wave and the prefix cache (2026-10-14, 16:45 to 17:01, defaults, `shared` because the day-turn
+sits on the machine; the candle at rest 27.5 ms). Cold, the cache empty: 358 s in all (refresh 1.4 s, train 245.8, evaluation 109.7,
+usage 0.5); the train stage reads 1.63 ms a token forward and 0.90 backward, 3 cache hits and 462 misses (462 entries, 866 MB written),
+the after-training validation 33.4 s. Warm, the same cycle again: 365 s (train 218.2, evaluation 145.1); 465 of 465 row forwards hit, the
+after-training validation 10.4 s (3.2 times faster), a training row's forward 0.1 s against 0.2, the train stage 11% shorter. The
+whole-cycle pair does not show the saving because the evaluation, which does not touch the cache, ran 32% longer in the second pass:
+the same 81 questions kept the device busy 89.7 s over a 109.3 s wall the first time and 125.4 s over 144.8 s the second, and its own
+candle rose from 27.3 to 39.6 ms in the first and from 27.5 to 51.1 ms in the second. The governor's state moved the same work by
+40%, which is the size of the effect being looked for; the controlled evidence for the cache is the four-step trio above (25.1 s off,
+25.6 cold, 13.7 warm, the loss curve identical to the last digit). What the pair also says, and this is the cycle-level check of exactness: the two cycles trained to the same adapter, since the 100
+evaluation lines of each (the 81 questions, the family lines, the comparison) are identical, 67 of 81 exact, 4,735 local IDs, 142
+controls, 139 observations, 12 refusals, none forged, with the first trained over an empty cache and the second over 462 hits.
+What the pair says plainly: with the machine calm, a full cycle
+(census, 100 steps on 400 rows, 81 questions answered in stream with 67 of 81 exact earlier today) takes about six minutes, against 16
+on 2026-10-13 at a candle of 70 to 90, and no way yet to split that between the machine's state and the kernels without a back-to-back
+pair of builds at one state (the decode pairs above give about 30% for the kernels). A backward that read 0.90 ms a token cold and
+1.28 warm is not explained by the cache (the hit path hands the backward the same tape); the long rows read 1.3 to 2.6 ms warm, which
+is the throttle again, and is left as read.
+
 Decode, 2026-10-12: a token was 28.3 ms of which the device was busy 16.5; a token's 621 dispatches were encoded into one batch and
 committed at the sync, so host (about 12 ms of encoding; buffer allocation is 2 of it) and device ran one after the other. The
 decode forward now submits each layer's batch as it fills (`nll-flow`, `metal_submit`; the closing sync drains them in order):
