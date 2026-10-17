@@ -395,7 +395,19 @@ Each publisher prints how long ago it last gave and its samples (owner, lane, st
 lanes are `qwen.coding.<pid>`: tools, generated ids, repairs, checks and lessons recalled, by stage. A lane that stands
 in `attention` after one tool and a few dozen generated ids is the signature of a lane that stopped after its first
 observation; a lane that moves through `split`, `implement`, `review` with growing tools is working. An empty line
-keeps every publisher (the machine, sensors, ear and organ frames too).
+keeps every publisher in the telemetry space.
+
+A sensor frame (ear, machine, organs, host, jungle, prosody and the others the glass reads by name) is watched over
+time with `observe/glass-watch-run.bml`, which prints a row only when its value changes and ends with the frame's own
+cadence against the interval its gives were seen at. The glass marks a frame stale after three cadences with no give,
+so a sensor that gives slower than it declares flips between its value and stale on the surface:
+
+```bash
+printf 'ear ear.state 6000' | ./fkwu observe/glass-watch-run.bml
+```
+
+Run it from the checkout the glass runs in: a body-local sensor's frame is named for that checkout. One reading of a
+frame is a moment; a flip is only seen across several.
 
 ## In-process Form API
 
