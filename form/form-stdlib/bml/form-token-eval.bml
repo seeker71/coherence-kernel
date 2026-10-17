@@ -522,27 +522,43 @@ section [form.bml] {
   def fte-loop-repeats() = 4;
   def fte-stream(voice, observe, prompt, limit, crossings) {
    let s = voice[0](prompt);
-   let r = fte-stream-go(voice, observe, s, "", "", 0, limit, crossings <= 0 ? fte-crossing-ceiling() : crossings, 0, 0);
+   let r = fte-walk-drive(voice, observe, limit, fte-walk-open(s, crossings));
    let ended = voice[4](r[6]);
    take(6, r);
   }
+  // ── the walk as a machine ──
+  // The walk below is one question's stream, and the only thing in it that costs the device is the voice's feed (voice[2]): a
+  // token, or Form's seam and observation, entering the stream. So the walk is written as a step that RETURNS that feed instead of
+  // making it: a walker is [state, seg, stream, n, crossings left, crossings made, IDs Form injected, the feed it waits for, its
+  // result]; fte-walk-run goes on from a state that holds the voice's prediction until the walk needs a feed (it answers the walker
+  // with the ids to feed) or ends (it answers the walker with its result); fte-walk-fed hands it the state after the feed. The
+  // sequential driver feeds at once, exactly as the recursion did; a scheduler (fte-stream-many) holds several walkers and feeds
+  // the one-token feeds of all of them in one forward.
+  def fte-walk-open(s, crossings) = [s, "", "", 0, crossings <= 0 ? fte-crossing-ceiling() : crossings, 0, 0, [], nothing()];
+  def fte-walk-drive(voice, observe, limit, w) {
+   let w2 = fte-walk-run(voice, observe, limit, w);
+   nothing?(w2[8]) ? fte-walk-drive(voice, observe, limit, fte-walk-fed(w2, voice[2](w2[0], w2[7]))) : w2[8];
+  }
+  def fte-walk-fed(w, s) = [s, w[1], w[2], w[3], w[4], w[5], w[6], [], w[8]];
+  def fte-walk-done(w, r) = [w[0], w[1], w[2], w[3], w[4], w[5], w[6], [], r];
+  def fte-walk-waits(w, seg, stream, n, left, made, injected, feed) = [w[0], seg, stream, n, left, made, injected, feed, nothing()];
   // pick reads the voice's own words since Form last answered, never the stream before it: a voice's loop
   // guard (native-llama-voice.bml nlg-stuck folds digits and case) reads two node-make blocks Form answered as
   // one block written twice, and on 2026-10-02 it ended the trained voice with eos after the second of four
   // controls a node-select needs. A loop is the voice repeating itself; a stream Form answers between is
   // building, bounded by crossings.
-  def fte-stream-go(voice, observe, s, seg, stream, n, limit, left, made, injected) {
-   let picked = voice[1](s, seg);
-   if !((String) picked[2] == "") then fte-stream-end(stream, seg, n, picked[2], made, injected, s)
-   else if n >= limit * (made + 1) then fte-stream-end(stream, seg, n, "token-limit", made, injected, s)
-   else fte-stream-step(voice, observe, s, mc-cat([seg, picked[1]]), stream, n + 1, limit, left, made, injected, picked[0]);
+  def fte-walk-run(voice, observe, limit, w) {
+   let picked = voice[1](w[0], w[1]);
+   if !((String) picked[2] == "") then fte-walk-done(w, fte-stream-end(w[2], w[1], w[3], picked[2], w[5], w[6], w[0]))
+   else if w[3] >= limit * (w[5] + 1) then fte-walk-done(w, fte-stream-end(w[2], w[1], w[3], "token-limit", w[5], w[6], w[0]))
+   else fte-walk-step(voice, observe, w, mc-cat([w[1], picked[1]]), w[3] + 1, picked[0]);
   }
   def fte-stream-end(stream, seg, n, stop, made, injected, s) = [mc-cat([stream, fte-unforge(seg)]), n, stop, made, [], injected, s];
-  def fte-stream-step(voice, observe, s, seg, stream, n, limit, left, made, injected, id) {
-   let found = (left <= 0) || nothing?(observe) ? nothing() : fte-first-control(seg);
-   if nothing?(found) then fte-stream-go(voice, observe, voice[2](s, [id]), seg, stream, n, limit, left, made, injected)
-   else if fte-looping?(mc-cat([stream, seg]), found) then fte-stream-end(stream, seg, n, "control-loop", made, injected, s)
-   else fte-stream-cross(voice, observe, s, seg, stream, n, limit, left, made, injected, id, found);
+  def fte-walk-step(voice, observe, w, seg, n, id) {
+   let found = (w[4] <= 0) || nothing?(observe) ? nothing() : fte-first-control(seg);
+   if nothing?(found) then fte-walk-waits(w, seg, w[2], n, w[4], w[5], w[6], [id])
+   else if fte-looping?(mc-cat([w[2], seg]), found) then fte-walk-done(w, fte-stream-end(w[2], seg, n, "control-loop", w[5], w[6], w[0]))
+   else fte-walk-cross(voice, observe, w, seg, n, id, found);
   }
   // the voice has closed this very control fte-loop-repeats() times in this stream
   def fte-looping?(text, found) {
@@ -555,11 +571,72 @@ section [form.bml] {
    at < 0 ? n : fte-occurrences(text, needle, at + len(needle), n + 1);
   }
   def fte-ends-newline?(t) = (len(t) > 0) && ((Comparable) str_byte_at(t, len(t) - 1) == 10);
-  def fte-stream-cross(voice, observe, s, seg, stream, n, limit, left, made, injected, id, found) {
+  def fte-walk-cross(voice, observe, w, seg, n, id, found) {
    let envelope = ftcn-control(ftcn-observation(), fte-contract(observe(found[0], found[1])));
    let seam = fte-ends-newline?(seg) ? "" : byte_to_str(10);
    let ids = append((String) seam == "" ? [] : voice[3](seam), voice[3](envelope));
-   fte-stream-go(voice, observe, voice[2](s, cons(id, ids)), "", mc-cat([stream, fte-unforge(seg), seam, envelope]), n, limit, left - 1, made + 1, injected + len(ids));
+   fte-walk-waits(w, "", mc-cat([w[2], fte-unforge(seg), seam, envelope]), n, w[4] - 1, w[5] + 1, w[6] + len(ids), cons(id, ids));
+  }
+  // ── several questions at once ──
+  // fte-stream-many holds up to `width` walkers. Each round it advances every walker to what it waits for (fte-walk-run), ends the
+  // ones that are done (the voice's end, the observer's release: exactly as one question's reply does) and feeds the rest: the
+  // one-token feeds of all of them in ONE call of the voice's optional sixth function, voice[5](states, ids lists) answering the
+  // states after (a voice without it feeds each walker by voice[2], as before), and the multi-token feeds (Form's observation
+  // entering a stream) one by one. A walker that ends frees its place for the next question, which starts in order, so a run cut
+  // by its deadline has still asked a prefix of the questions. A question's reply does not depend on the others: its walker, its
+  // state and its observer are its own, and a batched feed answers each stream what its own feed would. items are [prompt,
+  // observer] (observer: a function answering [observe, release], or nothing for the plain arm); the replies come back in the
+  // order of the items asked, in fte-stream-shaped's shape.
+  def fte-stream-many(voice, items, limit, crossings, width, deadline) {
+   let r = fte-many-round(voice, items, 0, [], [], limit, crossings, width, deadline);
+   map(i => foldl((found, d) => d[0] == i ? d[1] : found, nothing(), r[1]), range(0, r[0]));
+  }
+  // answers [items started, [[index, reply] a finished question]]
+  def fte-many-round(voice, items, next, active, done, limit, crossings, width, deadline) {
+   let filled = fte-many-fill(voice, items, next, active, crossings, width, deadline);
+   nil?(filled[1]) ? [filled[0], done] : fte-many-advance(voice, items, filled[0], filled[1], done, limit, crossings, width, deadline);
+  }
+  def fte-many-fill(voice, items, next, active, crossings, width, deadline) {
+   let room = len(active) < width && next < len(items) && (nothing?(deadline) || now_unix_ms() <= deadline);
+   room ? fte-many-fill(voice, items, next + 1, append(active, [fte-many-start(voice, items[next], next, crossings)]), crossings, width, deadline) : [next, active];
+  }
+  // a slot: [index, walker, observe, form]
+  def fte-many-start(voice, item, index, crossings) {
+   let form = nothing?(item[1]) ? nothing() : item[1]();
+   let s = voice[0](item[0]);
+   [index, fte-walk-open(s, nothing?(form) ? 0 : crossings), nothing?(form) ? nothing() : form[0], form];
+  }
+  def fte-many-advance(voice, items, next, active, done, limit, crossings, width, deadline) {
+   let ran = map(slot => [slot, fte-walk-run(voice, slot[2], limit, slot[1])], active);
+   let ended = filter(p => !nothing?(p[1][8]), ran);
+   let waiting = filter(p => nothing?(p[1][8]), ran);
+   let replies = map(p => [p[0][0], fte-many-finish(voice, p[0], p[1])], ended);
+   let states = fte-many-feed(voice, map(p => p[1], waiting));
+   fte-many-round(voice, items, next, fte-many-fed(waiting, states, 0, []), append(done, replies), limit, crossings, width, deadline);
+  }
+  def fte-many-finish(voice, slot, w) {
+   let r = w[8];
+   let ended = voice[4](r[6]);
+   let reply = take(6, r);
+   nothing?(slot[3]) ? fte-stream-shaped(reply, nothing()) : fte-stream-shaped(reply, slot[3][1]() ? 1 : 0);
+  }
+  def fte-many-fed(waiting, states, i, acc) = i >= len(waiting) ? reverse(acc) : fte-many-fed(waiting, states, i + 1, cons([waiting[i][0][0], fte-walk-fed(waiting[i][1], states[i]), waiting[i][0][2], waiting[i][0][3]], acc));
+  // the states after each waiting walker's feed, in order: one-token feeds together when the voice can, the rest by voice[2]
+  def fte-many-feed(voice, ws) {
+   let ones = filter(w => len(w[7]) == 1, ws);
+   let together = len(voice) > 5 && len(ones) > 1 ? voice[5](map(w => w[0], ones), map(w => w[7], ones)) : [];
+   fte-many-feed-go(voice, ws, together, 0, []);
+  }
+  def fte-many-feed-go(voice, ws, together, k, acc) {
+   if nil?(ws) then reverse(acc)
+   else if !nil?(together) && len(ws[0][7]) == 1 then fte-many-feed-go(voice, ws[1:], together, k + 1, cons(together[k], acc))
+   else fte-many-feed-go(voice, ws[1:], together, k, cons(voice[2](ws[0][0], ws[0][7]), acc));
+  }
+  // an arm over several questions at once: replies(arm, rows) answers one reply per row it asked (a prefix of rows)
+  def fte-arm-many(rows, arm, replies, deadline) {
+   let asked = replies(arm, rows, deadline);
+   let judged = map(i => fte-judged(rows[i], asked[i]), range(0, len(asked)));
+   [arm, fte-fold(map(j => j[1], judged)), judged];
   }
   // One arm's reply over the walk: walk(prompt, observe, crossings) answers fte-stream's shape. The plain arm
   // opens no Form; every other arm opens its own observer for the question and releases it after.
