@@ -34,8 +34,10 @@
 // stdin, optional, one `name value` a line (form-rows.bml frw-options; the defaults shown):
 //   questions 64   from 0   per_family 0   limit 96   crossings 0   arms plain,taught,lora
 //   adapter form/form-stdlib/adapters/llama-3.2-3b-form-tokens   traces learn/form-token-traces.rows
-//   deadline_ms 0   dry 0   shared 0
-// (from: the held-out rows passed over before the first one asked; per_family k > 0: the first k of each family;
+//   deadline_ms 0   dry 0   shared 0   batch 1
+// (batch N, 2 to 8: N questions walk at once and their one-token feeds go in one forward (form-token-eval.bml fte-stream-many;
+// native-llama-metal.bml nll-forward-multi), each question to the bits it would have alone; 1 asks one at a time;
+// from: the held-out rows passed over before the first one asked; per_family k > 0: the first k of each family;
 // deadline_ms > 0: no question is begun that long after the door started, and each arm reads only what it asked;
 // dry 1: what a run would ask, read with no model opened and no row written — on a quiet GPU any other line is a
 // physical run)
@@ -64,7 +66,7 @@ section [form.bml] {
   // ── the Llama voice as fte-stream's voice: state [ctx, pos, choice, stop, capacity] ──
   // Room past the prompt and the voice's own IDs for Form's seams and observations.
   def ftev-reserve() = 512;
-  def ftev-voice-of(session, limit) = [p => ftev-begin(session, limit, p), (s, text) => ftev-pick(session, s, text), (s, ids) => ftev-feed(session, s, ids), text => nlt-encode(session[1], text), s => ftev-end(s)];
+  def ftev-voice-of(session, limit) = [p => ftev-begin(session, limit, p), (s, text) => ftev-pick(session, s, text), (s, ids) => ftev-feed(session, s, ids), text => nlt-encode(session[1], text), s => ftev-end(s), (sts, idss) => ftev-feed-many(session, sts, idss)];
   def ftev-begin(session, limit, prompt) {
    let model = session[0];
    let ids = nlt-chat(session[1], prompt);
@@ -89,6 +91,28 @@ section [form.bml] {
    else ftev-fed(s, nlg-prefill(session[0], s[0], ids, s[1], ""));
   }
   def ftev-fed(s, pre) = [s[0], pre[1], pre[0], pre[2], s[4]];
+  // The feeds of several streams at once (fte-stream-many): each stream's state after its own feed, as ftev-feed makes it. A stream
+  // that has stopped keeps its state, one that would pass its capacity stops, a memory refusal is the same refusal, and a feed of
+  // one token that fits goes with the others in ONE forward (nll-forward-multi, eight streams at most, each to the bits of its own
+  // step); a feed of several tokens (Form's seam and observation) is the ordinary prefill.
+  def ftev-feed-plan(model, s, ids) = (Comparable) len(s[3]) > 0 ? "keep" : (s[1] + len(ids)) > s[4] ? "capacity" : len(ids) == 1 ? ((Comparable) nlg-chunk(model, 1, s[1]) == 0 ? "pressure" : "one") : "block";
+  def ftev-feed-many(session, sts, idss) {
+   let model = session[0];
+   let plans = map(i => ftev-feed-plan(model, sts[i], idss[i]), range(0, len(sts)));
+   let ones = filter(i => (String) plans[i] == "one", range(0, len(sts)));
+   let tops = ftev-multi-tops(model, map(i => sts[i][0], ones), map(i => idss[i][0], ones), map(i => sts[i][1], ones));
+   map(i => ftev-fed-by(session, plans[i], sts[i], idss[i], tops, ftev-place(ones, i, 0)), range(0, len(sts)));
+  }
+  def ftev-place(ones, i, k) = nil?(ones) ? 0 - 1 : ones[0] == i ? k : ftev-place(ones[1:], i, k + 1);
+  def ftev-fed-by(session, plan, s, ids, tops, k) {
+   if (String) plan == "keep" then s
+   else if (String) plan == "capacity" then [s[0], s[1], s[2], "context-capacity", s[4]]
+   else if (String) plan == "pressure" then ftev-fed(s, [-1, s[1], "memory-pressure"])
+   else if (String) plan == "one" then [s[0], s[1] + 1, tops[k], "", s[4]]
+   else ftev-feed(session, s, ids);
+  }
+  // the best three of each stream, eight streams to a forward
+  def ftev-multi-tops(model, ctxs, ids, poss) = nil?(ctxs) ? [] : append(nll-forward-multi(model, take(8, ctxs), take(8, ids), take(8, poss)), ftev-multi-tops(model, drop(8, ctxs), drop(8, ids), drop(8, poss)));
   def ftev-end(s) = nothing?(s[0]) ? 0 : nll-context-close(s[0]);
   def ftev-walk(session, limit) {
    let voice = ftev-voice-of(session, limit);
@@ -100,22 +124,26 @@ section [form.bml] {
   }
   // ── the arms: plain and taught wear no adapter, lora wears the trained one; one voice open at a time ──
   def ftev-arm-names(o) = filter(a => ftcn-member?(a, ["plain", "taught", "lora"]), split-on(ftev-str(o, "arms", "plain,taught,lora"), ","));
-  def ftev-arms-of(rows, names, adapter, limit, crossings, deadline) {
+  def ftev-arms-of(rows, names, adapter, limit, crossings, deadline, width) {
    let bare = filter(a => !((String) a == "lora"), names);
    let worn = filter(a => (String) a == "lora", names);
-   append(ftev-asked(rows, bare, "", limit, crossings, deadline), ftev-asked(rows, worn, adapter, limit, crossings, deadline));
+   append(ftev-asked(rows, bare, "", limit, crossings, deadline, width), ftev-asked(rows, worn, adapter, limit, crossings, deadline, width));
   }
-  def ftev-asked(rows, names, adapter, limit, crossings, deadline) = nil?(names) ? [] : ftev-asked-open(rows, names, limit, crossings, deadline, nlg-open(mr-path(mr-find(ftev-voice())), adapter));
+  def ftev-asked(rows, names, adapter, limit, crossings, deadline, width) = nil?(names) ? [] : ftev-asked-open(rows, names, limit, crossings, deadline, width, nlg-open(mr-path(mr-find(ftev-voice())), adapter));
   // The taught arm reads the body's own in-stream teaching (form-token-grammar.bml ftg-teaching, the words
   // the voice and microthought lanes carry), naming the verbs as the grammar runs them; plain and lora read
   // fte-prompt's.
   def ftev-prompt(arm, question) = (String) arm == "taught" ? mc-cat([ftg-teaching(), "\n\nQuestion: ", question, "\n", fte-instruction()]) : fte-prompt(arm, question);
-  def ftev-asked-open(rows, names, limit, crossings, deadline, session) {
+  def ftev-asked-open(rows, names, limit, crossings, deadline, width, session) {
    let walk = ftev-walk(session, limit);
-   let arms = map(a => fte-arm-until(rows, a, (arm, q) => fte-stream-reply-to(walk, ftev-observer, arm, ftev-prompt(arm, q), crossings), deadline), names);
+   let voice = ftev-voice-of(session, limit);
+   let arms = width > 1 ? map(a => fte-arm-many(rows, a, (arm, rs, until) => ftev-replies-many(voice, arm, rs, limit, crossings, width, until), deadline), names) : map(a => fte-arm-until(rows, a, (arm, q) => fte-stream-reply-to(walk, ftev-observer, arm, ftev-prompt(arm, q), crossings), deadline), names);
    let closed = nlg-close(session);
    arms;
   }
+  // `batch N` (2 to 8): N questions walk at once, their one-token feeds in one forward (fte-stream-many); 1 asks one at a time.
+  def ftev-batch-width(n) = n < 1 ? 1 : n > 8 ? 8 : n;
+  def ftev-replies-many(voice, arm, rows, limit, crossings, width, deadline) = fte-stream-many(voice, map(r => [ftev-prompt(arm, fte-question(r)), (String) arm == "plain" ? nothing() : ftev-observer], rows), limit, crossings, width, deadline);
   def ftev-arm-named(arms, name) = foldl((found, a) => (String) a[0] == name ? a : found, nothing(), arms);
   def ftev-compare(arms, name) {
    let plain = ftev-arm-named(arms, "plain");
@@ -138,7 +166,7 @@ section [form.bml] {
    let busy0 = metal_live()[11];
    let candle0 = nam-candle();
    let budget = ftev-num(o, "deadline_ms", 0);
-   let arms = ftev-arms-of(rows, names, adapter, ftev-num(o, "limit", 96), ftev-num(o, "crossings", 0), budget > 0 ? started + budget : nothing());
+   let arms = ftev-arms-of(rows, names, adapter, ftev-num(o, "limit", 96), ftev-num(o, "crossings", 0), budget > 0 ? started + budget : nothing(), ftev-batch-width(ftev-num(o, "batch", 1)));
    let questions = map(a => map(q => print_str(fte-question-line(a, q)), a[2]), arms);
    let families = map(a => map(f => print_str(fte-family-line(a[0], f)), fte-families(a)), arms);
    let lines = map(a => print_str(fte-line(a)), arms);
