@@ -16,9 +16,9 @@ kernel void nll_scores(device const float* q [[buffer(0)]],device const float* k
 kernel void nll_attend(device const float* p [[buffer(0)]],device const float* v [[buffer(1)]],device float* out [[buffer(2)]],constant uint& t [[buffer(3)]],constant uint& nq [[buffer(4)]],constant uint& nk [[buffer(5)]],constant uint& d [[buffer(6)]],constant uint& offset [[buffer(7)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint row=g/nq,h=g%nq,nh=offset+t;if(row>=t)return;uint kh=h/(nq/nk);for(uint c=lane;c<d;c+=32){float a=0;uint s=0;uint last=offset+row;for(;s+7<=last;s+=8){float p0=p[g*nh+s],p1=p[g*nh+s+1],p2=p[g*nh+s+2],p3=p[g*nh+s+3],p4=p[g*nh+s+4],p5=p[g*nh+s+5],p6=p[g*nh+s+6],p7=p[g*nh+s+7];float v0=v[(s*nk+kh)*d+c],v1=v[((s+1)*nk+kh)*d+c],v2=v[((s+2)*nk+kh)*d+c],v3=v[((s+3)*nk+kh)*d+c],v4=v[((s+4)*nk+kh)*d+c],v5=v[((s+5)*nk+kh)*d+c],v6=v[((s+6)*nk+kh)*d+c],v7=v[((s+7)*nk+kh)*d+c];a+=p0*v0;a+=p1*v1;a+=p2*v2;a+=p3*v3;a+=p4*v4;a+=p5*v5;a+=p6*v6;a+=p7*v7;}for(;s<=last;s++)a+=p[g*nh+s]*v[(s*nk+kh)*d+c];out[(row*nq+h)*d+c]=a;}}
 kernel void nll_argmax(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint tid [[thread_index_in_threadgroup]],uint lane [[thread_index_in_simdgroup]],uint sg [[simdgroup_index_in_threadgroup]],threadgroup uint* tm [[threadgroup(0)]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=tid;i<n;i+=1024){bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0){tm[sg]=as_type<uint>(best);tm[32+sg]=win;tm[64+sg]=bad;}threadgroup_barrier(mem_flags::mem_threadgroup);if(sg==0){float v=as_type<float>(tm[lane]);uint w=tm[32+lane];uint b=tm[64+lane];float best2=simd_max(v);uint win2=simd_min(v==best2?w:0xffffffff);b=simd_sum(b);if(lane==0)out[0]=b?0xffffffff:win2;}}
 kernel void nll_argmax_except(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& skip [[buffer(3)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=lane;i<n;i+=32){if(i==skip)continue;bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0)out[0]=bad?0xffffffff:win;}
-kernel void nll_top3(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint tid [[thread_index_in_threadgroup]],uint lane [[thread_index_in_simdgroup]],uint sg [[simdgroup_index_in_threadgroup]],threadgroup uint* tm [[threadgroup(0)]]) {
+kernel void nll_top3(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& row [[buffer(3)]],uint tid [[thread_index_in_threadgroup]],uint lane [[thread_index_in_simdgroup]],uint sg [[simdgroup_index_in_threadgroup]],threadgroup uint* tm [[threadgroup(0)]]) {
  float v0=-INFINITY,v1=-INFINITY,v2=-INFINITY;uint i0=0xffffffff,i1=0xffffffff,i2=0xffffffff,bad=0;
- for(uint i=tid;i<n;i+=1024){float v=x[i];bad+=uint(!isfinite(v));
+ for(uint i=tid;i<n;i+=1024){float v=x[ulong(row)*ulong(n)+i];bad+=uint(!isfinite(v));
   if(v>v0){v2=v1;i2=i1;v1=v0;i1=i0;v0=v;i0=i;}else if(v>v1){v2=v1;i2=i1;v1=v;i1=i;}else if(v>v2){v2=v;i2=i;}}
  bad=simd_sum(bad);
  for(uint k=0;k<3;k++){float m=simd_max(v0);uint w=simd_min(v0==m?i0:0xffffffff);if(lane==0){tm[sg*3+k]=as_type<uint>(m);tm[96+sg*3+k]=w;}if(i0==w){v0=v1;i0=i1;v1=v2;i1=i2;v2=-INFINITY;i2=0xffffffff;}}
@@ -27,8 +27,14 @@ kernel void nll_top3(device const float* x [[buffer(0)]],device uint* out [[buff
  if(sg==0){
   float a0=as_type<float>(tm[lane*3]),a1=as_type<float>(tm[lane*3+1]),a2=as_type<float>(tm[lane*3+2]);uint j0=tm[96+lane*3],j1=tm[96+lane*3+1],j2=tm[96+lane*3+2];uint b=simd_sum(tm[192+lane]);uint r[3];
   for(uint k=0;k<3;k++){float m=simd_max(a0);uint w=simd_min(a0==m?j0:0xffffffff);r[k]=w;if(j0==w){a0=a1;j0=j1;a1=a2;j1=j2;a2=-INFINITY;j2=0xffffffff;}}
-  if(lane==0){out[0]=b?0xffffffff:r[0];out[1]=b?0xffffffff:r[1];out[2]=b?0xffffffff:r[2];}}}
+  if(lane==0){out[row*3]=b?0xffffffff:r[0];out[row*3+1]=b?0xffffffff:r[1];out[row*3+2]=b?0xffffffff:r[2];}}}
 kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& skip [[buffer(3)]],constant uint& skip2 [[buffer(4)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=lane;i<n;i+=32){if(i==skip||i==skip2)continue;bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0)out[0]=bad?0xffffffff:win;}
+inline device const float* nll_pick8(uint i,device const float* c0,device const float* c1,device const float* c2,device const float* c3,device const float* c4,device const float* c5,device const float* c6,device const float* c7){return i==0?c0:i==1?c1:i==2?c2:i==3?c3:i==4?c4:i==5?c5:i==6?c6:c7;}
+inline device float* nll_pickw8(uint i,device float* c0,device float* c1,device float* c2,device float* c3,device float* c4,device float* c5,device float* c6,device float* c7){return i==0?c0:i==1?c1:i==2?c2:i==3?c3:i==4?c4:i==5?c5:i==6?c6:c7;}
+kernel void nll_rope_pos(device float* x [[buffer(0)]],device const float* freq [[buffer(1)]],device const uint* positions [[buffer(2)]],constant uint& heads [[buffer(3)]],constant uint& hd [[buffer(4)]],constant uint& tokens [[buffer(5)]],constant uint& inverse [[buffer(6)]],uint i [[thread_position_in_grid]]) {uint hw=hd/2;if(i>=tokens*heads*hw)return;uint j=i%hw;uint h=i/hw;uint at=h*hd+j;float angle=float(positions[h/heads])*freq[j]*(inverse?-1.0f:1.0f);float c=cos(angle),s=sin(angle),a=x[at],b=x[at+hw];x[at]=a*c-b*s;x[at+hw]=a*s+b*c;}
+kernel void nll_store8(device const float* x [[buffer(0)]],device float* c0 [[buffer(1)]],device float* c1 [[buffer(2)]],device float* c2 [[buffer(3)]],device float* c3 [[buffer(4)]],device float* c4 [[buffer(5)]],device float* c5 [[buffer(6)]],device float* c6 [[buffer(7)]],device float* c7 [[buffer(8)]],device const uint* positions [[buffer(9)]],constant uint& kd [[buffer(10)]],constant uint& total [[buffer(11)]],uint i [[thread_position_in_grid]]){if(i>=total)return;uint tok=i/kd;uint r=i%kd;device float* c=nll_pickw8(tok,c0,c1,c2,c3,c4,c5,c6,c7);c[positions[tok]*kd+r]=x[i];}
+kernel void nll_scores8(device const float* q [[buffer(0)]],device const float* k0 [[buffer(1)]],device const float* k1 [[buffer(2)]],device const float* k2 [[buffer(3)]],device const float* k3 [[buffer(4)]],device const float* k4 [[buffer(5)]],device const float* k5 [[buffer(6)]],device const float* k6 [[buffer(7)]],device const float* k7 [[buffer(8)]],device float* p [[buffer(9)]],device const uint* positions [[buffer(10)]],constant uint& nq [[buffer(11)]],constant uint& nk [[buffer(12)]],constant uint& d [[buffer(13)]],constant uint& nhm [[buffer(14)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint tok=g/nq,h=g%nq;uint last=positions[tok];uint kh=h/(nq/nk);device const float* k=nll_pick8(tok,k0,k1,k2,k3,k4,k5,k6,k7);float m=-INFINITY;for(uint s=lane;s<nhm;s+=32){float z=-INFINITY;if(s<=last){z=0;uint qb=(tok*nq+h)*d,kb=(s*nk+kh)*d;uint c=0;for(;c+7<d;c+=8){float q0=q[qb+c],q1=q[qb+c+1],q2=q[qb+c+2],q3=q[qb+c+3],q4=q[qb+c+4],q5=q[qb+c+5],q6=q[qb+c+6],q7=q[qb+c+7];float k0v=k[kb+c],k1v=k[kb+c+1],k2v=k[kb+c+2],k3v=k[kb+c+3],k4v=k[kb+c+4],k5v=k[kb+c+5],k6v=k[kb+c+6],k7v=k[kb+c+7];z+=q0*k0v;z+=q1*k1v;z+=q2*k2v;z+=q3*k3v;z+=q4*k4v;z+=q5*k5v;z+=q6*k6v;z+=q7*k7v;}for(;c<d;c++)z+=q[qb+c]*k[kb+c];z*=rsqrt(float(d));}p[g*nhm+s]=z;m=max(m,z);}m=simd_max(m);threadgroup_barrier(mem_flags::mem_device);float sum=0;for(uint s=lane;s<nhm;s+=32){float e=exp(p[g*nhm+s]-m);p[g*nhm+s]=e;sum+=e;}sum=simd_sum(sum);for(uint s=lane;s<nhm;s+=32)p[g*nhm+s]/=sum;}
+kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* v0 [[buffer(1)]],device const float* v1 [[buffer(2)]],device const float* v2 [[buffer(3)]],device const float* v3 [[buffer(4)]],device const float* v4 [[buffer(5)]],device const float* v5 [[buffer(6)]],device const float* v6 [[buffer(7)]],device const float* v7 [[buffer(8)]],device float* out [[buffer(9)]],device const uint* positions [[buffer(10)]],constant uint& nq [[buffer(11)]],constant uint& nk [[buffer(12)]],constant uint& d [[buffer(13)]],constant uint& nhm [[buffer(14)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint tok=g/nq,h=g%nq;uint last=positions[tok];uint kh=h/(nq/nk);device const float* v=nll_pick8(tok,v0,v1,v2,v3,v4,v5,v6,v7);for(uint c=lane;c<d;c+=32){float a=0;uint s=0;for(;s+7<=last;s+=8){float p0=p[g*nhm+s],p1=p[g*nhm+s+1],p2=p[g*nhm+s+2],p3=p[g*nhm+s+3],p4=p[g*nhm+s+4],p5=p[g*nhm+s+5],p6=p[g*nhm+s+6],p7=p[g*nhm+s+7];float w0=v[(s*nk+kh)*d+c],w1=v[((s+1)*nk+kh)*d+c],w2=v[((s+2)*nk+kh)*d+c],w3=v[((s+3)*nk+kh)*d+c],w4=v[((s+4)*nk+kh)*d+c],w5=v[((s+5)*nk+kh)*d+c],w6=v[((s+6)*nk+kh)*d+c],w7=v[((s+7)*nk+kh)*d+c];a+=p0*w0;a+=p1*w1;a+=p2*w2;a+=p3*w3;a+=p4*w4;a+=p5*w5;a+=p6*w6;a+=p7*w7;}for(;s<=last;s++)a+=p[g*nhm+s]*v[(s*nk+kh)*d+c];out[(tok*nq+h)*d+c]=a;}}
 ";
   def nll-run(name, handles, values, count, grouped) {
    let p = nam-held-pipe(metal_pipeline(nll-msl(), name));
@@ -339,7 +345,7 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
   def nll-select3(logits,vocab) {
    let out = nam-alloc(3);
    defer NativeAffineBuffer_dispose(out);
-   let rc = nll-run-wide("nll_top3",[logits,out],[vocab]);
+   let rc = nll-run-wide("nll_top3",[logits,out],[vocab,0]);
    let bytes = metal_buf_read(out,0,12);
    [ln-u32-le(bytes,0),ln-u32-le(bytes,4),ln-u32-le(bytes,8)];
   }
@@ -356,6 +362,77 @@ kernel void nll_argmax_except2(device const float* x [[buffer(0)]],device uint* 
    defer NativeAffineBuffer_dispose(out);
    let rc = nll-run-wide(kernel,[logits,out],values);
    ln-u32-le(metal_buf_read(out,0,4),0);
+  }
+  // The best three of every row of `rows` logit rows, one dispatch a row and one read back: [[best, second, third] a row].
+  def nll-select3-rows(logits,vocab,rows) {
+   let out = nam-alloc(3 * rows);
+   defer NativeAffineBuffer_dispose(out);
+   let sent = map(r => nll-run-wide("nll_top3",[logits,out],[vocab,r]),range(0,rows));
+   let bytes = metal_buf_read(out,0,12 * rows);
+   map(r => [ln-u32-le(bytes,12 * r),ln-u32-le(bytes,12 * r + 4),ln-u32-le(bytes,12 * r + 8)],range(0,rows));
+  }
+  // ── one token each for up to eight streams ──
+  // A decoded token is 620 dispatches and moves the 3B's 1.8 GB of weights for one token's worth of arithmetic; the 2 to 15 token
+  // kernels dequantize each weight once for eight tokens, and the one-token kernel was built to equal them bit for bit. So eight
+  // independent streams (eight evaluation questions) take their next token in ONE forward: the projections, norms and LoRA run on a
+  // block of eight, and the five things that differ by stream run once for all (rope at each stream's own position, the KV store into
+  // each stream's own cache, the scores and the attend over each stream's own history). Each of those kernels does the single stream's
+  // arithmetic in the single stream's order, so a stream's logits and caches equal its own one-token step's. The streams' contexts
+  // are the ordinary ones (nll-context); a stream is [its context, the position of the token it feeds]. Answers each stream's best
+  // three ids, as nlg-forward-choice does.
+  def nll-multi-max() = 8;
+  def nll-pad8(xs) = nil?(xs) ? [] : take(8,append(xs,map(i => xs[0],range(0,8))));
+  def nll-forward-multi(model,ctxs,ids,poss) = nll-forward-multi-mode(model,ctxs,ids,poss,0);
+  // the same step answering the logits' bytes (every stream's row, in order) instead of the best three: what the band compares
+  def nll-forward-multi-logits(model,ctxs,ids,poss) = nll-forward-multi-mode(model,ctxs,ids,poss,1);
+  def nll-forward-multi-mode(model,ctxs,ids,poss,logitsToo) {
+   let g = model[0]; let b = len(ids);
+   b < 1 || b > nll-multi-max() || len(ctxs) != b || len(poss) != b || !nll-ids-valid(ids,g[5]) || any?(p => p < 0, poss) || !nll-multi-room?(ctxs,poss,0) ? form_error("native Llama multi-stream admission refused") : nll-forward-multi-admitted(model,ctxs,ids,poss,g,b,logitsToo);
+  }
+  def nll-multi-room?(ctxs,poss,i) = i >= len(ctxs) ? 1 : (poss[i] < ctxs[i][0] && nll-multi-room?(ctxs,poss,i + 1)) ? 1 : 0;
+  def nll-forward-multi-admitted(model,ctxs,ids,poss,g,b,logitsToo) {
+   let ib = nam-write(nam-alloc(b),md-le32-list(ids,""));
+   let pb = nam-write(nam-alloc(b),md-le32-list(poss,""));
+   let x = nam-alloc(b * g[0]);
+   let scratch = nam-alloc(b * nll-rank(model[1]));
+   let emb = nam-embed(model[2],ib,x,b);
+   let nhm = foldl((m,p) => p + 1 > m ? p + 1 : m,1,poss);
+   let blocks = nll-multi-blocks(g,model[1],x,ctxs,0,pb,nhm,b,scratch,[]);
+   let head = nll-forward-head(model,g,blocks[0],b,1);
+   let tops = nll-select3-rows(head[0],g[5],b);
+   let bytes = logitsToo == 1 ? metal_buf_read(head[0],0,b * g[5] * 4) : "";
+   let freed = nam-free(append([ib,pb,x,scratch,head[0],head[1],head[2],head[3]],blocks[1]));
+   logitsToo == 1 ? [tops,bytes] : tops;
+  }
+  def nll-multi-blocks(g,layers,x,ctxs,i,pb,nhm,b,scratch,owned) = nil?(layers) ? [x,owned] : nll-multi-blocks-next(g,layers[1:],ctxs,i,pb,nhm,b,scratch,owned,nll-multi-block(g,layers[0],x,ctxs,i,pb,nhm,b,scratch));
+  def nll-multi-blocks-next(g,layers,ctxs,i,pb,nhm,b,scratch,owned,r) {
+   let flowed = metal_submit();
+   nll-multi-blocks(g,layers,r[0],ctxs,i + 1,pb,nhm,b,scratch,append(r[1],owned));
+  }
+  def nll-multi-buffers(g,b,nhm) = [nam-alloc(b * g[0]),nam-alloc(b * g[0]),nam-alloc(b * (g[3] * g[4])),nam-alloc(b * (g[3] * g[4])),nam-alloc(b * g[0]),nam-alloc(b * g[0]),nam-alloc(b * g[0]),nam-alloc(b * g[1]),nam-alloc(b * g[1]),nam-alloc(b * g[1]),nam-alloc(b * g[0]),nam-alloc(b),nam-alloc(b),nam-alloc(b * (g[2] * nhm))];
+  def nll-rope-pos(x,g,heads,b,pb,inverse) = nll-run("nll_rope_pos",[x,g[10],pb],[heads,g[4],b,inverse],b * (heads * (g[4] / 2)),0);
+  def nll-multi-block(g,l,x,ctxs,i,pb,nhm,b,scratch) {
+   let u = nll-multi-buffers(g,b,nhm); let d = g[0]; let kd = g[3] * g[4];
+   let ks = nll-pad8(map(c => c[1][i],ctxs)); let vs = nll-pad8(map(c => c[2][i],ctxs));
+   let norm = nam-rms(x,l[0],u[0],u[11],d,b,g[7]);
+   let q = nll-linear(l[1],u[0],u[1],b,scratch);
+   let k = nll-linear(l[2],u[0],u[2],b,scratch);
+   let v = nll-linear(l[3],u[0],u[3],b,scratch);
+   let rq = nll-rope-pos(u[1],g,g[2],b,pb,0);
+   let rk = nll-rope-pos(u[2],g,g[3],b,pb,0);
+   let sk = nll-run("nll_store8",append([u[2]],append(ks,[pb])),[kd,b * kd],b * kd,0);
+   let sv = nll-run("nll_store8",append([u[3]],append(vs,[pb])),[kd,b * kd],b * kd,0);
+   let scores = nll-run("nll_scores8",append([u[1]],append(ks,[u[13],pb])),[g[2],g[3],g[4],nhm],b * g[2],1);
+   let att = nll-run("nll_attend8",append([u[13]],append(vs,[u[4],pb])),[g[2],g[3],g[4],nhm],b * g[2],1);
+   let o = nll-linear(l[4],u[4],u[5],b,scratch);
+   let residual = nam-add(x,u[5],u[5],b * d,1.0);
+   let fn = nam-rms(u[5],l[5],u[6],u[12],d,b,g[7]);
+   let gate = nll-linear(l[6],u[6],u[7],b,scratch);
+   let up = nll-linear(l[7],u[6],u[8],b,scratch);
+   let act = nam-swiglu(u[7],u[8],u[9],b * g[1]);
+   let down = nll-linear(l[8],u[9],u[10],b,scratch);
+   let end = nam-add(u[5],u[10],u[10],b * d,1.0);
+   [u[10],u];
   }
   def nll-select(logits,vocab) = nll-pick-wide("nll_argmax",logits,[vocab]);
   def nll-select-except(logits,vocab,skip) = nll-pick("nll_argmax_except",logits,[vocab,skip]);
