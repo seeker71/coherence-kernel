@@ -330,7 +330,7 @@ the session's actual numeric counters; generated model IDs remain a separate lis
 
 `form/form-stdlib/lora-lanes.bml` names a frozen-base rank-one lane for every
 registry model and for the mouth. Each lane has its own adapter file and its
-own role prompt (`form/form-stdlib/role-prompts.bml`). The native voice wears that prompt for the model it is asking. It does not wear the adapter. The observed public fcnv-ask-run passes the explicit caller packet without an implicit role prefix, and does not automatically wear a lane adapter. Qwen
+own role prompt (`form/form-stdlib/role-prompts.bml`). The observed public fcnv-ask-run passes the explicit caller packet without an implicit role prefix, and does not automatically wear a lane adapter. Qwen
 uses the rank-one head's width, kat-coder uses its embedding width, and
 whisper-tiny uses the ear's tiny width. A model whose shape has not been read
 keeps width 0, so no adapter bytes are invented for it.
