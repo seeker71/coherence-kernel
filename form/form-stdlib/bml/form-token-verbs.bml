@@ -1413,7 +1413,32 @@ section [form.bml] {
    let clipped = len(body) > ftv-max-render() - 16 ? substring(body, 0, ftv-max-render() - 16) : body;
    len(clipped) == 0 ? ftv-nothing("empty") : ftv-value-result(clipped);
   }
-  def ftv-awk-ran(r) = (Comparable) r[0] == 0 ? ftv-said(r[1]) : ftv-nothing(len(r[2]) > 0 ? r[2] : "awk-exit");
+  def ftv-nl-before(text, i, max, at) {
+   if i >= max || i >= len(text) then at else if str_byte_at(text, i) == 10 then ftv-nl-before(text, i + 1, max, i) else ftv-nl-before(text, i + 1, max, at);
+  }
+  def ftv-count-nl(text, from, n) {
+   let at = str_find(text, "\n", from);
+   if at < 0 then n else ftv-count-nl(text, at + 1, n + 1);
+  }
+  def ftv-more-rows(text, from) {
+   if from >= len(text) then 0 else {
+    let tail = substring(text, from, len(text));
+    ftv-count-nl(tail, 0, 0) + ((len(tail) > 0) && (str_byte_at(tail, len(tail) - 1) != 10) ? 1 : 0);
+   }
+  }
+  def ftv-said-cut(body, max) {
+   let at = ftv-nl-before(body, 0, max, -1);
+   if at <= 0 then ftv-value-result(substring(body, 0, max)) else {
+    let more = ftv-more-rows(body, at + 1);
+    ftv-value-result(trim(substring(body, 0, at)) ++ "\n+" ++ more.str() ++ " more");
+   }
+  }
+  def ftv-said-lines(text) {
+   let body = trim(text);
+   let max = ftv-max-render() - 32;
+   if len(body) == 0 then ftv-nothing("empty") else if len(body) <= max then ftv-value-result(body) else ftv-said-cut(body, max);
+  }
+  def ftv-awk-ran(r) = (Comparable) r[0] == 0 ? ftv-said-lines(r[1]) : ftv-nothing(len(r[2]) > 0 ? r[2] : "awk-exit");
   def ftv-awk(session, program) {
    let compiled = fwk-compile(program, []);
    if (String) compiled[1] != "" then ftv-nothing(compiled[1]) else ftv-awk-ran(fwk-run(compiled[0], ftv-awk-records(session), fwk-env(record_new(0, "vars", []), record_new(0))));
@@ -1425,8 +1450,9 @@ section [form.bml] {
     opened;
    }
   }
-  def ftv-path-ran(r) = (Comparable) r[0] == 2 ? ftv-nothing(len(r[2]) > 0 ? r[2] : "path-exit") : ftv-said(r[1]);
-  def ftv-path(session, expr) = ftv-path-ran(fpa-verb(ftv-path-index(session), ["path", "--rows"], expr));
+  def ftv-path-ran(r) = (Comparable) r[0] == 2 ? ftv-nothing(len(r[2]) > 0 ? r[2] : "path-exit") : ftv-said-lines(r[1]);
+  def ftv-path-mode(session, expr, mode) = ftv-path-ran(fpa-verb(ftv-path-index(session), ["path", mode], expr));
+  def ftv-path(session, expr) = ftv-path-mode(session, expr, "--rows");
   def ftv-run-lane(session, verb, rest) {
    if verb == "eval" then ftv-eval(session, rest)
    else if verb == "node-get" then ftv-node-get(session, rest)
@@ -1463,21 +1489,30 @@ section [form.bml] {
   }
   def ftv-tools(session) = record_has(session, "tools") ? record_get(session, "tools") : fwk-situations();
   def ftv-doc-holds?(payload, needle) = all?(w => any?(p => p == w, ftv-raw-words(payload)), ftv-raw-words(needle));
-  def ftv-doc-skip?(w) = any?(s => s == ftv-lower(w), ["definitions", "definition", "call", "calls", "many", "lines", "line", "held", "how", "are"]);
+  def ftv-doc-call?(payload) = any?(w => w == "call" || w == "calls" || w == "callers", ftv-raw-words(payload));
+  def ftv-doc-place?(payload) = any?(w => w == "defined" || w == "definition", ftv-raw-words(payload)) && any?(w => w == "where" || w == "which", ftv-raw-words(payload));
+  def ftv-doc-skip?(w) = any?(s => s == ftv-lower(w), ["definitions", "definition", "defined", "call", "calls", "callers", "many", "lines", "line", "held", "how", "are"]);
   def ftv-doc-name-at(words) = nil?(words) ? "" : (len(words[0]) >= 2) && !any?(s => s == ftv-lower(words[0]), ftv-stopwords()) && !ftv-doc-skip?(words[0]) ? words[0] : ftv-doc-name-at(words[1:]);
   def ftv-doc-name(payload) = ftv-doc-name-at(reverse(ftv-words(payload)));
+  def ftv-doc-fit?(session, payload, row) {
+   let kind = row[2];
+   if (String) kind == "lines" then ftv-doc-holds?(payload, row[0]) && ftv-threaded?(ftv-thread(session))
+   else if (String) kind == "count-calls" then ftv-doc-holds?(payload, row[0]) && ftv-doc-call?(payload) && len(ftv-doc-name(payload)) > 0
+   else if (String) kind == "calls" then ftv-doc-call?(payload) && len(ftv-doc-name(payload)) > 0 && !ftv-doc-holds?(payload, "how many")
+   else if (String) kind == "defined" then ftv-doc-place?(payload) && len(ftv-doc-name(payload)) > 0
+   else 0;
+  }
   def ftv-doc-row(session, payload, rows) {
-   if nil?(rows) then []
-   else if !ftv-doc-holds?(payload, rows[0][0]) then ftv-doc-row(session, payload, rows[1:])
-   else if (String) rows[0][1] == "awk" && !ftv-threaded?(ftv-thread(session)) then ftv-doc-row(session, payload, rows[1:])
-   else if (String) rows[0][2] == "calls" && len(ftv-doc-name(payload)) == 0 then ftv-doc-row(session, payload, rows[1:])
-   else rows[0];
+   if nil?(rows) then [] else if ftv-doc-fit?(session, payload, rows[0]) then rows[0] else ftv-doc-row(session, payload, rows[1:]);
   }
   def ftv-doc-choice(session, payload) {
    let row = ftv-doc-row(session, payload, ftv-tools(session));
+   let name = ftv-doc-name(payload);
    if nil?(row) then []
-   else if (String) row[2] == "calls" then ["path", "//def[calls(\"" ++ ftv-doc-name(payload) ++ "\")]"]
-   else if (String) row[2] == "count" then ["awk", "END { print NR }"]
+   else if (String) row[2] == "lines" then ["awk", "END { print NR }"]
+   else if (String) row[2] == "count-calls" then ["count", "//def[calls(\"" ++ name ++ "\")]"]
+   else if (String) row[2] == "calls" then ["path", "//def[calls(\"" ++ name ++ "\")] => { print @path \":\" @line \" \" @name }"]
+   else if (String) row[2] == "defined" then ["path", "//def[@name=\"" ++ name ++ "\"] => { print @path \":\" @line }"]
    else [];
   }
   def ftv-doc-begin(session, payload, said) {
@@ -1485,12 +1520,13 @@ section [form.bml] {
    let kept = ftv-thread-put(session, take(6, ftv-terms(payload)), [], [], len(piece) > 0 ? [piece] : [said]);
    ftv-starts?(said, "value=") ? ftv-value-result(ftv-spoken([piece])) : said;
   }
+  def ftv-doc-finish(session, payload, said) = ftv-threaded?(ftv-thread(session)) ? ftv-join-follow(session, said) : ftv-doc-begin(session, payload, said);
   def ftv-doc-run(session, payload) {
    let chosen = ftv-doc-choice(session, payload);
    if nil?(chosen) then ftv-nothing("no-terms")
    else if (String) chosen[0] == "awk" then ftv-join-follow(session, ftv-awk(session, chosen[1]))
-   else if ftv-threaded?(ftv-thread(session)) then ftv-join-follow(session, ftv-path(session, chosen[1]))
-   else ftv-doc-begin(session, payload, ftv-path(session, chosen[1]));
+   else if (String) chosen[0] == "count" then ftv-doc-finish(session, payload, ftv-path-mode(session, chosen[1], "--count"))
+   else ftv-doc-finish(session, payload, ftv-path(session, chosen[1]));
   }
   def ftv-knowledge(session, payload) {
    let terms = ftv-control?(payload) ? [] : take(6, ftv-terms(payload));

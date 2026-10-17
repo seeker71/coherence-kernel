@@ -279,6 +279,8 @@ engine's ERE dialect), then run over records. One language stands behind three d
 | the local voice in the code lane | `<|form:tool|>awk 'PROGRAM' PATH \| sort<|/form:tool|>` over its resident documents (native pipes); `help awk` | yes | not yet: the lane holds its documents, not form-find's index |
 | the local voice in the form-token lane | `<|form:awk|>PROGRAM<|/form:awk|>` over the session's held context lines, `<|form:path|>EXPR<|/form:path|>` over the body's index (`form-token-verbs.bml`, `ftv-awk`, `ftv-path`) | yes | `path` yes; `-P -B -C` not through these controls |
 
+A question that does not name the verb still uses those doors when it is one of the situations `help awk` states: how many lines are already held, how many definitions call a name (the count), who calls a name (whole `path:line name` rows, and how many did not fit), and where a name is defined.
+
 **When awk is the right tool.** Arithmetic over lines (a sum, a count, a total per key, a mean), choosing columns, filtering by a
 field, or reshaping rows is one awk call, and the answer is exact. Reading the lines and adding them in the head is not.
 
