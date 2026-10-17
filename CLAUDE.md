@@ -42,8 +42,10 @@ where the body's `awk` and `path` compute the answer instead of returning the te
 `observe/land-run.bml` (one JSON line on stdin: `edits` as `{"path","old","new"}`, `files`, `witness`, `paths`, `subject`,
 `body`, `"main":1`), which applies the edits, runs the witness and the drift gates over what moved, commits, rebases,
 renews `fkwu` when the seed changed and pushes. A loop of trials (write, run, repair) belongs to the local voice
-(`observe/form-cli-code-run.fk` with its checks): the rented mind writes the witness and reads the receipt. Read a
-verdict line, never a stream.
+(`observe/form-cli-code-run.fk` with its checks): the rented mind writes the witness and reads the receipt. While a
+lane works, watch it through the glass (`printf 'qwen.coding' | ./fkwu observe/glass-read-run.bml`: tools, generated
+ids, repairs and checks by stage), so a stall is read while it happens, not in a ledger days later. Read a verdict
+line, never a stream.
 
 Work through the body's own tools and flows (Urs, 2026-09-28): the edit tool or the body's doors, `./fkwu` cells and BML,
 the native agent tools ([`docs/form-native-agent-tools.md`](docs/form-native-agent-tools.md)), and the body's own `awk`
