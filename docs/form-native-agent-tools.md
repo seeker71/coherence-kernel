@@ -381,6 +381,22 @@ A local voice reads the same guide as `help awk` (`fwk-guidance`).
 `awk-v-needs-name=value`, `awk-one-record-source`, `awk-files-and-form-records`, and on the wire `awk-form-records-need-the-index` (`-P -B -C` are form-find's).
 Witness: `form/form-stdlib/tests/form-awk-band.bml`.
 
+## The glass, read as text
+
+The glass's telemetry is shared memory: each working lane gives its snapshot into a frame of the live telemetry space,
+and the glass window and its organs read the roster of frames. `observe/glass-read-run.bml` reads the same frames as
+text, so an agent watches a lane while it works instead of reading a ledger afterwards:
+
+```bash
+printf 'qwen.coding' | ./fkwu observe/glass-read-run.bml
+```
+
+Each publisher prints how long ago it last gave and its samples (owner, lane, stage and value). The voice's coding
+lanes are `qwen.coding.<pid>`: tools, generated ids, repairs, checks and lessons recalled, by stage. A lane that stands
+in `attention` after one tool and a few dozen generated ids is the signature of a lane that stopped after its first
+observation; a lane that moves through `split`, `implement`, `review` with growing tools is working. An empty line
+keeps every publisher (the machine, sensors, ear and organ frames too).
+
 ## In-process Form API
 
 `fc-tool-call` remains the embedding API for a Form organ. It is not the
