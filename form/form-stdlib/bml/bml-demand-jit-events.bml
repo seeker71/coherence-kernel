@@ -1,0 +1,170 @@
+// Resource events resume care in its existing JIT owner. The event lifetime
+// borrows that owner; closing it releases watches, not the caller's native pages.
+import form-stdlib/bml/bml-demand-jit-owner.bml;
+import form-stdlib/bml/native-events-darwin.bml;
+section [form.bml] {
+ class BmlDemandJitEvents {
+  def bdje-open(owner) = bdje-open-at(owner,BDJGRoot());
+  def bdje-open-at(owner,root) = bdje-open-events(owner,root,nve-open(),1);
+  def bdje-open-with(owner,root,events) = !nve-ready(events) ? nothing() : bdje-open-events(owner,root,events,0);
+  def bdje-open-events(owner,root,events,owned) {
+   let engine = record_new(0,"kind","bml-demand-jit-events","pid",host_pid(),"active",1,"owner",owner,"events",events,"owns-events",owned,"root",root,"bindings",[],"last",nothing(),"actions",0);
+   bdje-sync(engine); engine;
+  }
+  def bdje-active(engine) = record?(engine) && ((String) record_get(engine,"kind") == "bml-demand-jit-events") && ((Comparable) record_get(engine,"pid") == host_pid()) && record_get(engine,"active");
+  def bdje-owner(engine) = record_get(engine,"owner");
+  def bdje-events(engine) = record_get(engine,"events");
+  def bdje-last(engine) = record_get(engine,"last");
+  def bdje-care-id(care) = oh-str(bdj-care-observation(care),"id");
+  def bdje-cares(engine) = bdj-state-care(bdjo-state(bdje-owner(engine)));
+  def bdje-find-care(cares,id) = nil?(cares) ? nothing() : (String) bdje-care-id(cares[0]) == id ? cares[0] : bdje-find-care(cares[1:],id);
+  def bdje-waiting?(care) = !nothing?(care) && ((String) bdj-fault-disposition(bdj-care-fault(care)) == "waiting");
+  def bdje-find-binding(bindings,id) = nil?(bindings) ? nothing() : (String) record_get(bindings[0],"id") == id ? bindings[0] : bdje-find-binding(bindings[1:],id);
+  def bdje-nearest(path) {
+   fs-exists?(path) ? path : {
+    let parent = fs-path-dirname(path);
+    (String) parent == path ? nothing() : bdje-nearest(parent);
+   };
+  }
+  def bdje-paths(care) {
+   let pending = bdj-care-pending(care); let source = bdj-pending-source(pending); let cache = bdj-pending-cache(pending);
+   bdje-existing([source,fs-path-dirname(source),cache,fs-path-dirname(cache),bdj-publish-lock-path(cache)],[]);
+  }
+  def bdje-existing(paths,held) {
+   nil?(paths) ? held : {
+    let path = bdje-nearest(paths[0]);
+    bdje-existing(paths[1:],nothing?(path) || oh-has(held,path) ? held : cons(path,held));
+   };
+  }
+  def bdje-watch-path(events,path) {
+   let watch = nve-path(events,path);
+   // A path may disappear between lookup and open. Watch its surviving
+   // ancestor, then re-observe after enrollment to close that race.
+   !nothing?(watch) || fs-exists?(path) ? watch : {
+    let next = bdje-nearest(fs-path-dirname(path));
+    nothing?(next) || ((String) next == path) ? nothing() : bdje-watch-path(events,next);
+   };
+  }
+  def bdje-watch-paths(events,paths,held) {
+   nil?(paths) ? held : {
+    let watch = bdje-watch-path(events,paths[0]);
+    bdje-watch-paths(events,paths[1:],undo(watch,held,cons(watch,held)));
+   };
+  }
+  def bdje-attach(engine,care) {
+   let events = bdje-events(engine); let watches = bdje-watch-paths(events,bdje-paths(care),[]);
+   let busy = (String) oh-str(bdj-care-observation(care),"observed") == "publish-busy";
+   let deadline = busy ? ((fs-stat-mtime(bdj-publish-lock-path(bdj-pending-cache(bdj-care-pending(care)))) + BDJPublishLeaseSeconds()) * 1000) : 0;
+   let timer = busy ? nve-timer(events,max2(1,deadline - now_unix_ms())) : nothing();
+   let binding = record_new(0,"id",bdje-care-id(care),"watches",undo(timer,watches,cons(timer,watches)));
+   record_set(engine,"bindings",cons(binding,record_get(engine,"bindings")));
+   bdje-bind(engine,record_get(binding,"watches"));
+   bdj-care-resource-changed?(care) ? bdje-hear(engine,care) : 0;
+  }
+  def bdje-bind(engine,watches) {
+   nil?(watches) ? 1 : { nve-bind(bdje-events(engine),watches[0],bdje-resource-event,engine); bdje-bind(engine,watches[1:]); };
+  }
+  def bdje-resource-event(engine,event) {
+   !bdje-active(engine) ? 0 : { bdje-deliver(engine,event); bdje-sync(engine); };
+  }
+  def bdje-drop(engine,binding) {
+   let closed = nve-close-watches(bdje-events(engine),record_get(binding,"watches"));
+   closed ? record_set(engine,"bindings",nve-forget(record_get(engine,"bindings"),binding)) : 0;
+   closed;
+  }
+  def bdje-prune(engine,bindings) {
+   nil?(bindings) ? 1 : {
+    let binding = bindings[0]; let care = bdje-find-care(bdje-cares(engine),record_get(binding,"id"));
+    !bdje-waiting?(care) ? bdje-drop(engine,binding) : 0;
+    bdje-prune(engine,bindings[1:]);
+   };
+  }
+  def bdje-enroll(engine,cares) {
+   nil?(cares) ? 1 : {
+    let care = cares[0];
+    bdje-waiting?(care) && nothing?(bdje-find-binding(record_get(engine,"bindings"),bdje-care-id(care))) ? bdje-attach(engine,care) : 0;
+    bdje-enroll(engine,cares[1:]);
+   };
+  }
+  def bdje-sync(engine) {
+   !(bdje-active(engine) && nve-ready(bdje-events(engine))) ? 0 : {
+    bdje-prune(engine,record_get(engine,"bindings")); let before = bdje-cares(engine);
+    bdje-enroll(engine,before);
+    (Value) before == bdje-cares(engine) ? 1 : bdje-sync(engine);
+   };
+  }
+  def bdje-retain(engine,result) {
+   record_set(engine,"owner",bdjo-progress-owner(result)); record_set(engine,"last",result); result;
+  }
+  def bdje-hear(engine,care) {
+   let response = oh-response(bdj-care-observation(care),"publish-retained-image");
+   let result = bdjo-hear-at(bdje-owner(engine),response,record_get(engine,"root"));
+   (String) bdjo-progress-status(result) != "event-unmatched" ? record_set(engine,"actions",record_get(engine,"actions") + 1) : 0;
+   bdje-retain(engine,result);
+  }
+  def bdje-adopt(engine,owner) {
+   !bdje-active(engine) ? nothing() : { record_set(engine,"owner",owner); bdje-sync(engine); bdje-owner(engine); };
+  }
+  def bdje-request(engine,source,cache,program,root,argument) {
+   !bdje-active(engine) ? nothing() : {
+    let result = bdjo-request(bdje-owner(engine),source,cache,program,root,argument);
+    record_set(engine,"owner",bdjo-request-owner(result)); result;
+   };
+  }
+  // Explicit progress handles compilation and observation delivery. Waiting
+  // cache care is owned by notifications; quiet progress does not stat it.
+  def bdje-progress(engine) {
+   !bdje-active(engine) ? nothing() : {
+    let owner = bdje-owner(engine); let state = bdjo-state(owner);
+    let result = (!nothing?(bdjo-awaiting(owner)) || !nothing?(bdj-state-pending(state)) || bdj-state-faulted?(state)) ? bdjo-progress-at(owner,record_get(engine,"root"))
+     : bdjo-progress-result(nil?(bdj-state-care(state)) ? "idle" : "cache-care-waiting",nothing(),nothing(),nothing(),1,owner);
+    bdje-retain(engine,result); bdje-sync(engine); bdje-last(engine);
+   };
+  }
+  def bdje-binding-has(binding,watch) = bdje-watch-has(record_get(binding,"watches"),watch);
+  def bdje-watch-has(watches,watch) = any?((item: Comparable) => item == watch,watches);
+  def bdje-event-binding(bindings,watch) = nil?(bindings) ? nothing() : bdje-binding-has(bindings[0],watch) ? bindings[0] : bdje-event-binding(bindings[1:],watch);
+  def bdje-wakes?(care,event) {
+   let result = oh-str(bdj-care-observation(care),"observed");
+   let availability = ((String) result == "withheld-source-missing") || ((String) result == "publish-parent-unavailable") || ((String) result == "publish-busy");
+   // Directory writes may concern another child. Re-observe only the named
+   // resources. An attribute event can expose a permission repair that the
+   // existing metadata carrier cannot represent.
+   let notes = nve-event-notes(event);
+   bdj-care-resource-changed?(care) || (!availability && (nve-bit(notes,1) || nve-bit(notes,8) || nve-bit(notes,32) || nve-bit(notes,64)));
+  }
+  def bdje-deliver(engine,event) {
+   let binding = bdje-event-binding(record_get(engine,"bindings"),nve-event-watch(event));
+   (nothing?(binding) || !nve-live(bdje-events(engine),nve-event-watch(event))) ? 0 : {
+    let care = bdje-find-care(bdje-cares(engine),record_get(binding,"id"));
+    nve-event-error(event) > 0 ? nve-note(bdje-events(engine),"resource-event",nve-event-error(event).str())
+    : {
+     bdje-waiting?(care) && bdje-wakes?(care,event) ? bdje-hear(engine,care) : 0;
+     bdje-drop(engine,binding);
+    };
+   };
+  }
+  def bdje-wait(engine,millis) {
+   !bdje-active(engine) ? nothing() : {
+    let before = record_get(engine,"actions"); bdje-sync(engine);
+    record_get(engine,"actions") > before ? (record_get(engine,"actions") - before) : {
+     let received = nve-turn(bdje-events(engine),millis);
+     nothing?(received) ? nothing() : {
+      bdje-sync(engine); record_get(engine,"actions") - before;
+     };
+    };
+   };
+  }
+  def bdje-release-bindings(engine,bindings) {
+   nil?(bindings) ? 1 : { let first = bdje-drop(engine,bindings[0]); let rest = bdje-release-bindings(engine,bindings[1:]); first && rest; };
+  }
+  def bdje-close(engine) {
+   !bdje-active(engine) ? 0 : {
+    let bindings = bdje-release-bindings(engine,record_get(engine,"bindings"));
+    let closed = !bindings ? 0 : record_get(engine,"owns-events") ? nve-close(bdje-events(engine)) : 1;
+    closed ? { record_set(engine,"active",0); record_set(engine,"bindings",[]); } : 0; closed;
+   };
+  }
+ }
+ 0;
+}

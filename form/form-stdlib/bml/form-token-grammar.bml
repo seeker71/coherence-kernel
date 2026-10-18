@@ -1,0 +1,420 @@
+// form-token-grammar.bml — the one table of in-stream Form controls.
+//
+// A model writes <|form:VERB|>PAYLOAD<|/form:VERB|>; when the stream closes the control, Form
+// runs the verb (form-token-verbs.bml) and answers in the same stream
+// with <|form:observation|>RESULT<|/form:observation|>. RESULT is value=<v>; recipe=@<p.l.t.i>;
+// node=@<p.l.t.i>; or nothing=<reason>;. A refusal is an observation, never a stop.
+//
+// The opening bytes of recipe-birth, recipe-exec and knowledge-query are the ones
+// form-recipe-birth-token.fk, form-recipe-exec-token.fk and form-knowledge-query-token.fk read;
+// nodeid-knowledge-query runs the same source lookup as knowledge-query.
+//
+// Any local decode loop carries the verbs in one of two shapes. A token walk passes ftg-feed and
+// ftg-inject to frxs-run-protocol-with-injector (form-cli-recipe-exec-session.fk), as
+// ftg-generate does for the voice: the observation follows the closing ID. A quantum walk asks
+// ftg-quantum-next where it would forward its pending ID, as the coding lane does: the
+// observation follows at the end of the quantum the control closed in. Both commit the pending
+// ID once and prefill the observation into the same KV stream (fcms-inline-bml-observation-ids).
+//
+// The lanes share one workspace (form-token-workspace.bml) under the checkout's
+// .hearth/form-tokens/workspace. FTG-DEFAULT is this process's request. Its lineage is the lane's
+// own, one per lane and checkout (code, voice, reasoning; lanes for a process that names none), so
+// every earlier request of the lane is reachable today; a lane that knows its conversation or task
+// binds it (ftg-bind: the coding lane binds its managed task as the request, so a resumed task
+// reads its own request scope). Each control is numbered before it runs, and the crossing ledger
+// keeps, per crossing, whether the control touched what an earlier control or an earlier request
+// made (touched); ftg-ledger-reading reads the ledger back for the census.
+import form-stdlib/bml/form-rows-bridge.bml;
+import form-stdlib/bml/form-token-kinds.bml;
+import form-stdlib/bml/form-token-verbs.bml;
+import form-stdlib/bml/form-token-tool.bml;
+import form-stdlib/form-cli-recipe-exec-session.fk;
+import form-stdlib/json.fk;
+import form-stdlib/hearth.bml;
+section [form.bml] {
+ let FTG-DEFAULT = ftv-session-in(ftw-open(ftw-hearth-root(), "lanes", ""));
+ class FormTokenGrammar {
+  def ftg-verbs() = ftk-verbs();
+  // tool is the coding lane's call (form-token-tool.bml): the contract's nine stay the table's, this one is the lane's
+  def ftg-stream-verbs() = append(ftg-verbs(), ["nodeid-knowledge-query", "tool"]);
+  def ftg-verb?(verb) = any?(v => v == verb, ftg-stream-verbs());
+  def ftg-open(verb) = "<|form:" ++ verb ++ "|>";
+  def ftg-close(verb) = "<|/form:" ++ verb ++ "|>";
+  def ftg-render(verb, payload) = ftg-open(verb) ++ payload ++ ftg-close(verb);
+  def ftg-observation-open() = "<|form:observation|>";
+  def ftg-observation-close() = "<|/form:observation|>";
+  def ftg-observation(result) = ftg-observation-open() ++ result ++ ftg-observation-close();
+  // a source observation already carries its own envelope (nodeid-knowledge-query)
+  def ftg-envelope(text) = ftv-starts?(text, "<|form:") ? text : ftg-observation(text);
+  def ftg-result-kind(result) = ftv-starts?(result, "value=") ? "value" : ftv-starts?(result, "recipe=") ? "recipe" : ftv-starts?(result, "node=") ? "node" : ftv-starts?(result, "nothing=") ? "nothing" : "";
+  def ftg-result-body(result) {
+   let at = str_find(result, "=", 0);
+   let end = ftv-ends?(result, ";") ? len(result) - 1 : len(result);
+   at < 0 ? "" : substring(result, at + 1, end);
+  }
+  def ftg-session() = FTG-DEFAULT;
+  def ftg-session-fresh() = ftv-session();
+  // a lane's workspace under root: the lane is the lineage, this process a fresh request in it
+  def ftg-lane-ws(root, lane) = ftw-open(root, lane, "");
+  // The process's session in the lane's lineage. Unless a lane bound it, the first lane to ask
+  // names the lineage; the request stays the process's own.
+  def ftg-lane-session(lane) {
+   let ws = ftv-ws(FTG-DEFAULT);
+   if (record_get(FTG-DEFAULT, "bound") == 1) || (ftw-lineage(ws) == ftw-safe(lane)) then 0 else record_set(FTG-DEFAULT, "ws", ftw-open(ftw-root(ws), lane, ftw-request(ws)));
+   FTG-DEFAULT;
+  }
+  // a lane that knows its request's lineage (a conversation, a task) binds the lanes' workspace to
+  // it; "" for the request starts a fresh one in that lineage
+  def ftg-bind(lineage, request) {
+   record_set(FTG-DEFAULT, "ws", ftw-open(ftw-hearth-root(), lineage, request));
+   record_set(FTG-DEFAULT, "bound", 1);
+   FTG-DEFAULT;
+  }
+  // binds once per (lineage, request): a lane asks at every quantum, and only a change rebinds
+  def ftg-bind-once(lineage, request) {
+   let key = lineage ++ "|" ++ request;
+   if record_get(FTG-DEFAULT, "bound-key") == key then FTG-DEFAULT else ftg-bind-keyed(lineage, request, key);
+  }
+  def ftg-bind-keyed(lineage, request, key) {
+   let bound = ftg-bind(lineage, request);
+   record_set(FTG-DEFAULT, "bound-key", key);
+   FTG-DEFAULT;
+  }
+  // one control in a lane's workspace under root, as the lane runs it: plain values in and out, so
+  // another process reaches it as a body function
+  def ftg-lane-observe(root, lane, verb, payload) = ftg-observe-with(ftv-session-in(ftg-lane-ws(root, lane)), verb, payload);
+
+  // ── running a verb ───────────────────────────────────────────────────
+  def ftg-observe(verb, payload) = ftg-observe-with(FTG-DEFAULT, verb, payload);
+  def ftg-observe-with(session, verb, payload) {
+   record_set(session, "observed", nothing());
+   record_set(session, "returned", nothing());
+   let begun = ftw-begin(ftv-ws(session));
+   let held = try [ftg-dispatch(session, verb, payload)] catch [ftv-nothing("verb-stopped")];
+   record_set(session, "touched", ftw-touched(ftv-ws(session)));
+   let consume=ftw-get(session,"control-result");
+   let observed=[held[0],record_get(session,"touched"),record_get(session,"returned")];
+   let result=nothing?(consume) ? observed : consume(observed);
+   record_set(session,"returned",result[2]);
+   ftg-count(session, verb, payload, result[0]);
+   result[0];
+  }
+  // [RESULT, touched]: what the control answered and what it touched
+  def ftg-observe-touched(session, verb, payload) {
+   let result = ftg-observe-with(session, verb, payload);
+    [result, record_get(session, "touched"), record_get(session,"returned")];
+  }
+  def ftg-nodeid-payload(payload) = ftv-starts?(payload, "concept=") ? substring(payload, 8, len(payload)) : ftv-starts?(payload, "nodeid=") ? substring(payload, 7, len(payload)) : payload;
+  def ftg-dispatch(session, verb, payload) {
+   if verb == "eval" then ftv-eval(session, payload)
+   else if verb == "knowledge-query" then ftv-knowledge(session, payload)
+   else if verb == "node-get" then ftv-node-get(session, payload)
+   else if verb == "node-make" then ftv-node-make(session, payload)
+   else if verb == "node-select" then ftv-node-select(session, payload)
+   else if verb == "recipe-birth" then ftv-recipe-birth(session, payload)
+   else if verb == "recipe-exec" then ftv-recipe-exec(session, payload)
+   else if verb == "recipe-import" then ftv-library-import(session, payload)
+   else if verb == "choice" then ftv-choice(session, payload)
+   else if verb == "tool" then ftt-call(session, payload)
+   else if verb == "nodeid-knowledge-query" then ftv-knowledge(session, ftg-nodeid-payload(payload))
+   else if verb == "observation" then ftv-nothing("observations-come-from-form")
+   else ftv-nothing("unknown-verb:" ++ ftv-cap(verb));
+  }
+  def ftg-count(session, verb, payload, result) {
+   record_set(session, "calls", record_get(session, "calls") + 1);
+   if ftg-result-kind(result) == "nothing" then {
+    record_set(session, "refusals", record_get(session, "refusals") + 1);
+    let observed = json-node-string(result);
+    let evidence = json-node-object([oh-s("verb", verb), oh-s("payload", ftv-cap(payload)), oh-s("observation", result)]);
+    oh-voice(oh-reading("form-token", host_pid().str(), verb, json-node-string("delivered native observation"), observed, json-node-null(), [oh-need("inspect-native-observation", observed)], ["revise-input", "choose-alternative", "discover-library"], evidence));
+   } else 0;
+   record_set(session, "events", take(64, cons([verb, payload, result, record_get(session, "touched"), record_get(session, "returned")], record_get(session, "events"))));
+   0;
+  }
+
+  // ── reading controls out of text ─────────────────────────────────────
+  // every complete control of a known verb, in order: [verb, payload, start, end]
+  def ftg-scan(text) = ftg-scan-from(text, 0, [], 0);
+  // every complete <|form:NAME|>...<|/form:NAME|>, known verb or not, so a lane can answer an
+  // unknown verb with its nothing instead of passing over it
+  def ftg-scan-any(text) = ftg-scan-from(text, 0, [], 1);
+  def ftg-name?(verb) = (len(verb) > 0) && (str_find(verb, "<", 0) < 0);
+  // Markdown fences quote examples. Once a control opens, its payload stays
+  // verbatim; a fence in source carried by that control has no lexical role.
+  // [next control, unfinished quotation, prose start], byte offsets in text.
+  def ftg-next-opening(text,from) {
+   let at=str_find(text,"<|form:",from);
+   let fence=str_find(text,"```",from);
+   if fence<0 || (at>=0 && at<fence) then [at,-1,from] else {
+    let close=str_find(text,"```",fence+3);
+    close<0 ? [-1,fence,from] : ftg-next-opening(text,close+3);
+   };
+  }
+  def ftg-scan-from(text, from, out, any) {
+   let at = ftg-next-opening(text,from)[0];
+   if at < 0 then reverse(out) else ftg-scan-at(text, at, out, any);
+  }
+  // an opening that is not wanted, or never closes, is passed over and the scan reads on
+  def ftg-scan-at(text, at, out, any) {
+   let verbEnd = str_find(text, "|>", at + 7);
+   let verb = verbEnd < 0 ? "" : substring(text, at + 7, verbEnd);
+   let wanted = any == 1 ? ftg-name?(verb) : ftg-verb?(verb);
+   let close = (verbEnd < 0) || !wanted ? -1 : str_find(text, ftg-close(verb), verbEnd + 2);
+   if verbEnd < 0 then reverse(out)
+   else if close < 0 then ftg-scan-from(text, at + 7, out, any)
+   else ftg-scan-from(text, close + len(ftg-close(verb)), cons([verb, substring(text, verbEnd + 2, close), at, close + len(ftg-close(verb))], out), any);
+  }
+  // ── the stream window ────────────────────────────────────────────────
+  // One step over a decoded chunk: [window, status, verb, frame, payload]. Until a control
+  // starts only an opening-prefix suffix is kept. status is held, control, too-long (the open
+  // control outgrew the reserve) or multiple (a second control opened in the same chunk).
+  def ftg-window(window, chunk, reserve) {
+   let prefix = "<|form:";
+   let joined = window ++ chunk;
+   let opening=ftg-next-opening(joined,0);
+   let at=opening[0];
+   let held = at < 0 ? substring(joined, opening[1]>=0 ? opening[1] : max2(opening[2],len(joined) >= len(prefix) ? len(joined) - len(prefix) + 1 : 0), len(joined)) : substring(joined, at, len(joined));
+   let verbEnd = str_find(held, "|>", len(prefix));
+   let verb = verbEnd < 0 ? "" : substring(held, len(prefix), verbEnd);
+   let close = "<|/form:" ++ verb ++ "|>";
+   let end = verbEnd < 0 ? -1 : str_find(held, close, verbEnd + 2);
+   let tooLong = len(held) > reserve;
+   let frame = end < 0 ? "" : substring(held, 0, end + len(close));
+   if (at < 0) || ((end < 0) && !tooLong) then [held, "held", verb, "", ""]
+   else if tooLong then ["", "too-long", verb, frame, ""]
+   else if ftg-next-opening(held,end+len(close))[0] >= 0 then ["", "multiple", verb, frame, ""]
+   else ["", "control", verb, frame, substring(held, verbEnd + 2, end)];
+  }
+
+  // ── the token-walk interceptor ───────────────────────────────────────
+  // Each crossing keeps its frame, its RESULT and an injected flag, paired by index; the flag
+  // turns 1 only when the session resumed live after the observation (ftg-inject). fed counts
+  // the IDs the walk decoded; a pulsing interceptor publishes fcms-generate's decode checkpoints
+  // at the same counts, 1, 2, 4, 8 and on.
+  def ftg-intercept(reserve) = ftg-intercept-with(reserve, ftv-session());
+  def ftg-intercept-with(reserve, session) = record_new(0, "window", "", "reserve", reserve, "session", session, "crossings", 0, "frames", [], "results", [], "injected", [], "touched", [], "fed", 0, "pulse", 0);
+  def ftg-pulsing(icpt) {
+   record_set(icpt, "pulse", 1);
+   icpt;
+  }
+  def ftg-power-of-two?(n) = n < 1 ? 0 : n == 1 ? 1 : (n % 2) == 1 ? 0 : ftg-power-of-two?(n / 2);
+  def ftg-checkpoint?(icpt) = (record_get(icpt, "pulse") == 1) && ftg-power-of-two?(record_get(icpt, "fed"));
+  def ftg-feed(icpt, cursor, chunk) {
+   record_set(icpt, "fed", record_get(icpt, "fed") + 1);
+   if ftg-checkpoint?(icpt) then fcms-decode-pulse(record_get(icpt, "fed")) else 0;
+   let w = ftg-window(record_get(icpt, "window"), chunk, record_get(icpt, "reserve"));
+   record_set(icpt, "window", w[0]);
+   let result = ftg-window-result(record_get(icpt, "session"), w);
+   if len(result) > 0 then ftg-note(icpt, w[3], result, w[1] == "control" ? record_get(record_get(icpt, "session"), "touched") : "") else 0;
+   [cursor, chunk, result];
+  }
+  def ftg-window-result(session, w) = w[1] == "held" ? "" : w[1] == "too-long" ? ftv-nothing("control-exceeds-observation-reserve") : w[1] == "multiple" ? ftv-nothing("multiple-controls-in-one-model-id") : ftg-observe-with(session, w[2], w[4]);
+  def ftg-note(icpt, frame, result, touched) {
+   record_set(icpt, "crossings", record_get(icpt, "crossings") + 1);
+   record_set(icpt, "frames", cons(frame, record_get(icpt, "frames")));
+   record_set(icpt, "results", cons(result, record_get(icpt, "results")));
+   record_set(icpt, "injected", cons(0, record_get(icpt, "injected")));
+   record_set(icpt, "touched", cons(touched, record_get(icpt, "touched")));
+   0;
+  }
+  // The pending ID is committed once, then the observation; the session answers the first
+  // prediction after it. No room for the observation ends the reply with its reason. The
+  // newest crossing's flag reads whether the observation entered the stream.
+  def ftg-inject(icpt, session, text) {
+   let resumed = ftg-inject-ids(session, text);
+   let flags = record_get(icpt, "injected");
+   if !nil?(flags) then record_set(icpt, "injected", cons(fcms-live?(resumed) ? 1 : 0, flags[1:])) else 0;
+   resumed;
+  }
+  def ftg-inject-ids(session, text) {
+   let ids = fcms-inline-bml-observation-ids(session, ftg-envelope(text));
+   if nothing?(ids) then fcms-refuse(session, "form-token-codec-unavailable")
+   else if (fcms-pos(session) + len(ids)) >= fcms-maxpos(session) then fcms-refuse(session, "form-token-observation-reserve-exhausted")
+   else fcms-observe-ids(session, ids, "form-token-observation-refused");
+  }
+  // fcms-generate with the verbs carried: model text and IDs only in the generation; what Form
+  // answered stays in the crossing ledger. The voice builds in the lanes' workspace, each
+  // generation a reply of its own. A sampled session keeps its own walk.
+  def ftg-generate(session, budget) = !nil?(fcsam-owner(session)) ? fcms-generate(session, budget) : ftg-generate-with(ftg-pulsing(ftg-intercept-with(512, ftg-next-reply())), session, budget, "voice");
+  def ftg-next-reply() {
+   let session = ftg-lane-session("voice");
+   ftw-next-reply(ftv-ws(session));
+   session;
+  }
+  def ftg-generate-with(icpt, session, budget, lane) {
+   let moved = frxs-run-protocol-with-injector(session, budget, 0, icpt, ftg-feed, frxs-observe-none, (s, text) => ftg-inject(icpt, s, text));
+   let ids = append(frxs-before-ids(moved), frxs-after-ids(moved));
+   ftg-retain-with(lane, reverse(record_get(icpt, "frames")), reverse(record_get(icpt, "results")), reverse(record_get(icpt, "injected")), reverse(record_get(icpt, "touched")));
+   fcms-generation(ftdb-text(fcms-src(session), ids), ids, frxs-session(moved));
+  }
+
+  // ── the quantum-walk hook ────────────────────────────────────────────
+  // A walk that decodes a few IDs at a time asks here instead of forwarding its pending ID.
+  // A control whose close fell in the newest quantum is answered and its observation prefilled
+  // at the quantum's end, so up to width-1 IDs the voice wrote after the close precede it;
+  // otherwise nextf forwards as before. The scanner retains an unfinished control
+  // and consumes only newly decoded bytes; allocated context bounds the stream.
+  def ftg-quantum-next(session, stops, before, ids, nextf) {
+   let fresh = ftg-quantum-controls(session, before, ids);
+   nil?(fresh) ? nextf(session, stops) : ftg-quantum-answer(session, stops, fresh, nextf);
+  }
+  def ftg-quantum-controls(session, before, ids) {
+   ftg-coding-chunk(ftg-lane-session("code"),len(before),fcmo-text(session,drop(len(before),ids)));
+  }
+  def ftg-coding-chunk(lane,prior,chunk) {
+   record_set(lane,"coding-previous-chunk",prior==0 ? "" : record_get(lane,"coding-chunk") ?? "");
+   record_set(lane,"coding-chunk",chunk);
+   let held=prior==0 ? "" : record_get(lane,"coding-window") ?? "";
+   let joined=held + chunk;
+   let complete=ftg-scan-any(joined);
+   let rest=nil?(complete) ? joined : substring(joined,complete[-1][3],len(joined));
+   let w=ftg-window("",rest,len(rest));
+   record_set(lane,"coding-window",w[0]);
+   complete |> map(c=>[c[0],c[1],ftg-render(c[0],c[1]),""]);
+  }
+   // Exact token admission follows execution once. A large observation keeps
+   // its actual value in a native cell; an exhausted owner ends with a reason.
+  // The ledger's flag is what happened: 1 only when the observation entered and the session
+  // resumed live. The stdout line names verbs and byte counts, never the control bytes, so a
+  // reader of the lane's transcript counts the voice's controls once, in the reply.
+   // json-serves: a log reader outside this process. text: one crossing line is the share; the observation enters the stream as ids.
+   def ftg-quantum-answer(session, stops, items, nextf) {
+     let lane = ftg-lane-session("code");
+     record_set(lane,"render-room",max2(0,fcms-maxpos(session)-fcms-pos(session)));
+     let started=host_monotonic_ms();
+     let answered = map(c => len(c[3]) > 0 ? [c[3], "",nothing()] : ftg-observe-touched(lane, c[0], c[1]), items);
+     let executed=host_monotonic_ms();
+     record_set(lane,"render-room",nothing());
+     let admitted=ftg-admit-observations(session,lane,answered,text=>fcms-inline-bml-observation-ids(session,text));
+     let encoded=host_monotonic_ms();
+    let results=admitted[0]; let ids=admitted[1];
+    let room=ftg-observation-fits(session,ids);
+    let resumed = room ? fcms-observe-ids(session, ids, "form-token-observation-refused") : fcms-refuse(session,nothing?(ids) ? "form-token-codec-unavailable" : "form-token-observation-reserve-exhausted");
+   let injected = (room && fcms-live?(resumed)) ? 1 : 0;
+    let timing=[oh-n("execution_ms",executed - started),oh-n("encoding_ms",encoded - executed),oh-n("prefill_ms",host_monotonic_ms() - encoded)];
+    let crossing=json-node-object(append(json-object-pairs(ftg-crossing-line("code",items,results,injected)),timing));
+    fb_record(intern_node(intern_trivial_string("native-control"),[intern_trivial_int(executed - started),intern_trivial_int(encoded - executed),intern_trivial_int(host_monotonic_ms() - encoded)]),"form-token-grammar.bml",0);
+    print_str("form-token-crossing " ++ frw-emit(frb-of-node(crossing)));
+   ftg-retain-with("code", map(c => c[2], items), results, map(c => injected, items), map(a => a[1], answered));
+    resumed;
+   }
+   def ftg-observation-fits(session,ids) = !nothing?(ids) && (fcms-pos(session)+len(ids)+2)<fcms-maxpos(session);
+   def ftg-admit-observations(session,lane,answered,encode) {
+    let results=answered |> map(a=>a[0]);
+    let ids=encode(ftv-join(results |> map(ftg-observation),byte_to_str(10)));
+    if ftg-observation-fits(session,ids) then [results,ids] else {
+     let held=answered |> map(a=>nothing?(a[2]) ? a[0] : value_kind(a[2])=="node_id" ? ftv-node-result(ftv-hold(lane,a[2])) : ftv-large(lane,a[2]));
+     [held,encode(ftv-join(held |> map(ftg-observation),byte_to_str(10)))];
+    };
+   }
+  // Native BML strings keep their own escapes. JSON-wrapped eval payloads have
+  // an invalid raw grammar and cross the unescaping edge before evaluation.
+  def ftg-crossing-line(lane, items, results, injected) = json-node-object([json-node-pair("lane", json-node-string(lane)), json-node-pair("verbs", json-node-array(map(c => json-node-string(c[0]), items))), json-node-pair("control_bytes", json-node-array(map(c => json-node-int(len(c[2])), items))), json-node-pair("results", json-node-array(map(r => json-node-string(ftg-ledger-result(r)), results))), json-node-pair("injected", json-node-int(injected))]);
+
+  // ── the crossing ledger ──────────────────────────────────────────────
+  // One row per reply that crossed, in HearthDir(): the controls the voice wrote (model bytes),
+  // the RESULT bodies Form answered, the envelope each answer came in, and per crossing whether
+  // its observation entered the stream. A source observation (nodeid-knowledge-query) keeps its
+  // body and names its envelope in sources, so no result carries an opening and a reader never
+  // counts Form's words as the voice's. Every lane writes here: voice, code and reasoning.
+  def ftg-ledger-dir() = HearthDir() ++ "/form-tokens";
+  def ftg-ledger() = ftg-ledger-dir() ++ "/crossings.rows";
+  def ftg-source-kind(text) = ftv-starts?(text, "<|form:") && (str_find(text, "|>", 7) > 7) ? substring(text, 7, str_find(text, "|>", 7)) : "observation";
+  def ftg-ledger-result(text) {
+   let open = str_find(text, "|>", 7);
+   let close = ftv-last-index(text, "<|/form:");
+   ftv-starts?(text, "<|form:") && (open > 7) && (close > open) ? substring(text, open + 2, close) : text;
+  }
+  // flags paired with n crossings: a crossing whose injection was never asked reads 0
+  def ftg-pad(flags, n) = n <= 0 ? [] : cons(nil?(flags) ? 0 : flags[0], ftg-pad(nil?(flags) ? [] : flags[1:], n - 1));
+  // marks paired with n crossings: a crossing with no mark touched nothing earlier
+  def ftg-pad-marks(marks, n) = n <= 0 ? [] : cons(nil?(marks) ? "" : marks[0], ftg-pad-marks(nil?(marks) ? [] : marks[1:], n - 1));
+  def ftg-crossing-row(lane, frames, results, injected) = ftg-crossing-row-with(lane, frames, results, injected, nothing());
+  // touched, when the lane kept it: per crossing "request" (the control touched what an earlier
+  // request made), "control" (what an earlier control of this request made) or ""
+  def ftg-crossing-row-with(lane, frames, results, injected, touched) = json-node-object(append([json-node-pair("at_unix_ms", json-node-int(now_unix_ms())), json-node-pair("lane", json-node-string(lane)), json-node-pair("controls", json-node-array(map(f => json-node-string(f), frames))), json-node-pair("results", json-node-array(map(r => json-node-string(ftg-ledger-result(r)), results))), json-node-pair("sources", json-node-array(map(r => json-node-string(ftg-source-kind(r)), results))), json-node-pair("injected", json-node-array(map(f => json-node-int(f == 1 ? 1 : 0), ftg-pad(injected, len(frames)))))], nothing?(touched) ? [] : [json-node-pair("touched", json-node-array(map(t => json-node-string(t), ftg-pad-marks(touched, len(frames)))))]));
+  def ftg-retain(lane, frames, results, injected) = ftg-retain-with(lane, frames, results, injected, nothing());
+  // json-serves: a later process reading the crossing ledger. text: one line per crossing is that file; a node does not outlive this process.
+  def ftg-retain-with(lane, frames, results, injected, touched) {
+   if nil?(frames) then 0 else {
+    fs_mkdir(HearthDir());
+    fs_mkdir(ftg-ledger-dir());
+    sbt-append-count(ftg-ledger(), frb-row-text(ftg-crossing-row-with(lane, frames, results, injected, touched)));
+   };
+  }
+
+  // ── reading the crossing ledger ──────────────────────────────────────
+  // One reading over every row: [rows, controls, injected, value, recipe, node, nothing, other,
+  // controls that touched an earlier control's making, controls that touched an earlier
+  // request's]. Every RESULT is an observation, node=@ and nothing= as much as value=.
+  def ftg-ledger-reading(path) {
+   let text = read_file(path) ?? "";
+   let lines = filter(l => len(trim(l)) > 0, split-on(text, byte_to_str(10)));
+   foldl((acc, l) => ftg-ledger-add(acc, ftg-ledger-doc(l)), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], lines);
+  }
+  // json-serves: the crossing ledger. text: the file is lines written for a later process, and this reads one line back.
+  def ftg-ledger-doc(line) = ftg-ledger-doc-of(frw-parse(line));
+  def ftg-ledger-doc-of(r) = ((String) r[0] == "ok" && (String) value_kind(r[1]) == "record") ? frb-to-node(r[1]) : nothing();
+  def ftg-json-strings(doc, key) = json-object-has?(doc, key) ? map(n => json-string-value(n), json-array-elements(json-object-get(doc, key))) : [];
+  def ftg-json-ints(doc, key) = json-object-has?(doc, key) ? map(n => json-int-value(n), json-array-elements(json-object-get(doc, key))) : [];
+  def ftg-kind-count(results, kind) = len(filter(r => ftg-result-kind(r) == kind, results));
+  def ftg-ledger-add(acc, doc) = nothing?(doc) ? acc : ftg-ledger-add-row(acc, ftg-json-strings(doc, "controls"), ftg-json-strings(doc, "results"), ftg-json-ints(doc, "injected"), ftg-json-strings(doc, "touched"));
+  def ftg-ledger-add-row(acc, controls, results, injected, touched) {
+   let reuse = ftg-row-reuse(controls, results, touched);
+   [acc[0] + 1, acc[1] + len(controls), acc[2] + foldl((s, x) => s + x, 0, injected), acc[3] + ftg-kind-count(results, "value"), acc[4] + ftg-kind-count(results, "recipe"), acc[5] + ftg-kind-count(results, "node"), acc[6] + ftg-kind-count(results, "nothing"), acc[7] + ftg-kind-count(results, ""), acc[8] + len(filter(r => r == "control", reuse)), acc[9] + len(filter(r => r == "request", reuse))];
+  }
+  // Per control of one row: "request" when its mark says it touched an earlier request's making;
+  // "control" when its mark says an earlier control's, or when its payload names, as a whole
+  // token, an address an earlier observation of the row answered or a name an earlier control of
+  // the row gave (let, def, NAME =); else "".
+  def ftg-row-reuse(controls, results, touched) = ftg-reuse-at(controls, results, touched, [], [], []);
+  def ftg-reuse-at(controls, results, touched, addrs, names, out) {
+   if nil?(controls) then reverse(out) else {
+    let payload = ftg-frame-payload(controls[0]);
+    let mark = nil?(touched) ? "" : touched[0];
+    let seen = any?(a => ftg-token-in?(payload, a, 0), addrs) || any?(w => ftg-token-in?(payload, w, 0), names);
+    let reuse = mark == "request" ? "request" : ((mark == "control") || seen) ? "control" : "";
+    let made = nil?(results) ? [] : ftg-made-address(results[0]);
+    ftg-reuse-at(controls[1:], nil?(results) ? [] : results[1:], nil?(touched) ? [] : touched[1:], append(addrs, made), append(names, ftg-given-names(payload)), cons(reuse, out));
+   };
+  }
+  def ftg-frame-payload(frame) {
+   let found = ftg-scan-any(frame);
+   nil?(found) ? "" : found[0][1];
+  }
+  // the address a node= or recipe= observation answered
+  def ftg-made-address(result) {
+   let body = ftg-result-body(result);
+   let sp = str_find(body, " ", 0);
+   (ftg-result-kind(result) == "node") || (ftg-result-kind(result) == "recipe") ? [sp < 0 ? body : substring(body, 0, sp)] : [];
+  }
+  def ftg-given-names(payload) {
+   let named = ftv-named(ftv-header(payload)[1])[0];
+   append(len(named) > 0 ? [named] : [], append(ftg-names-after(payload, "let ", 0, []), ftg-names-after(payload, "def ", 0, [])));
+  }
+  def ftg-names-after(text, kw, from, out) {
+   let at = str_find(text, kw, from);
+   let end = at < 0 ? -1 : ftg-name-end(text, at + len(kw), len(text));
+   if at < 0 then reverse(out)
+   else if !ftg-boundary?(text, at) || (end <= at + len(kw)) then ftg-names-after(text, kw, at + len(kw), out)
+   else ftg-names-after(text, kw, end, cons(substring(text, at + len(kw), end), out));
+  }
+  def ftg-name-end(text, i, n) = (i < n) && ftv-name-byte?(str_byte_at(text, i)) ? ftg-name-end(text, i + 1, n) : i;
+  def ftg-word-byte?(b) = ftv-name-byte?(b) || ((b >= 65) && (b <= 90)) || (b == 64) || (b == 46);
+  def ftg-boundary?(text, at) = at == 0 ? 1 : !ftg-word-byte?(str_byte_at(text, at - 1));
+  def ftg-token-in?(text, word, from) {
+   let at = str_find(text, word, from);
+   if (at < 0) || (len(word) == 0) then 0
+   else if ftg-boundary?(text, at) && (((at + len(word)) >= len(text)) || !ftg-word-byte?(str_byte_at(text, at + len(word)))) then 1
+   else ftg-token-in?(text, word, at + 1);
+  }
+  // the census's line and row fields for a reading
+  def ftg-ledger-line(x) = "[form-token-census] crossings: rows " ++ x[0].str() ++ ", controls " ++ x[1].str() ++ ", injected " ++ x[2].str() ++ ", observations value " ++ x[3].str() ++ ", recipe " ++ x[4].str() ++ ", node " ++ x[5].str() ++ ", nothing " ++ x[6].str() ++ ", other " ++ x[7].str() ++ "; reuse: " ++ x[8].str() ++ " control(s) touched an earlier control's making, " ++ x[9].str() ++ " an earlier request's";
+  def ftg-ledger-pairs(x) = [json-node-pair("crossing_rows", json-node-int(x[0])), json-node-pair("crossing_controls", json-node-int(x[1])), json-node-pair("crossing_injected", json-node-int(x[2])), json-node-pair("crossing_value", json-node-int(x[3])), json-node-pair("crossing_recipe", json-node-int(x[4])), json-node-pair("crossing_node", json-node-int(x[5])), json-node-pair("crossing_nothing", json-node-int(x[6])), json-node-pair("crossing_other", json-node-int(x[7])), json-node-pair("reuse_earlier_control", json-node-int(x[8])), json-node-pair("reuse_earlier_request", json-node-int(x[9]))];
+
+  // ── teaching ─────────────────────────────────────────────────────────
+  def ftg-bml-teaching() = " BML names can contain hyphens. Space infix and conditional operators, as in c * c - e * e and flag ? yes : no. unknown-name identifies a missing binding; inspect spelling and operator spacing before changing numerical inputs. Discover reusable native libraries with <|form:recipe-import|>?<|/form:recipe-import|>, then import an observed name with the same verb. Callable exports supply recipe names and executable addresses. A node-get address identifies data, not a callable; node(\"actual-coordinate-from-enquiry\") reads that data. Its functions are callable as recipe(\"LIBRARY.EXPORT\")(input). In eval, syntax(name,children) builds semantic program nodes; recipe-make(params,body,captures) creates a callable graph with ordered [name,value] captures. recipe-bml(node,name) renders BML; execution does not require that view. In recipe-exec, input is one BML expression; group several arguments in one list [first,second,third]. Replace catalog example names with the enquiry's actual values and coordinates. Reuse an available verified library before constructing another implementation; its output can pass directly into another call.";
+  def ftg-teaching() = "Form answers controls inside your stream. Write <|form:VERB|>PAYLOAD<|/form:VERB|> and stop there: before your next token Form adds <|form:observation|>RESULT<|/form:observation|>, where RESULT is value=...; recipe=@...; node=@...; or nothing=reason;. A nothing is evidence, not an answer. Whatever you make stays in your workspace: every later control, and every later request of this lane, reaches it by name or by its @address. eval runs BML with the body's whole environment, its functions, its doors (files, processes, the clock, nodes) and every name you made: <|form:eval|>17 * 23 + 4<|/form:eval|>, <|form:eval|>let xs = [1,2,3]; xs |> map(x => x * x) |> sum<|/form:eval|>, then <|form:eval|>len(xs) + it<|/form:eval|>, where it is your last value. A let or def is a name; begin a payload with global: to share it beyond this lane or local: to keep it to this reply. knowledge-query reads this body's sources: <|form:knowledge-query|>microthought codec<|/form:knowledge-query|>. node-make interns a node from a category and children, named or not: <|form:node-make|>p = pair;3,4<|/form:node-make|>. node-get reads one: <|form:node-get|>p<|/form:node-get|> answers value=[kind, value, [children]];, and <|form:node-get|>@p.l.t.i;100..200<|/form:node-get|> reads a window of a large one. node-select answers the first candidate n whose predicate holds: <|form:node-select|>kids(n)[0] > 3;p,@p.l.t.i<|/form:node-select|>. recipe-birth makes a recipe, also from a BML function: <|form:recipe-birth|>sq = bml;x => x * x + 1<|/form:recipe-birth|>, run with <|form:recipe-exec|>sq;input=5;carrier=auto<|/form:recipe-exec|> or as sq(5) in eval; <|form:choice|>@p.l.t.i,sq;input=5;carrier=auto<|/form:choice|> runs the first that answers a value. tool names a coding tool and its words, <|form:tool|>rg -n -F word path<|/form:tool|>, and answers node=@address of the call cell the coding lane runs (a lane that runs no tools leaves it unrun); a call that does not read answers nothing=tool-... naming what failed. A value too large to show answers node=@address with a summary; reach its parts with node-get. A name you made comes before any word of the body's, so choose names you mean to keep using. What print writes is the observation's first words. A control answers within a minute: past it the walk answers nothing=eval-stopped:deadline, a body function still running is stopped (nothing=body-call-timeout:NAME) and so is a process or network door still waiting (nothing=door-timeout:DOOR); only socket_accept, socket_recv and a fifo opened with file_open wait without a deadline, so leave those alone. Your stream's stdin and stdout are Form's own channel, never yours: read_line or a path that names /dev/stdin answers nothing=stdin-is-the-lanes, a write to /dev/stdout answers nothing=stdout-is-the-lanes, and a process you start reads nothing and speaks into your observation. carrier=metal runs only while reasoning; elsewhere it answers nothing=carrier-unavailable. field_reset resets the field every live kernel shares, so while another kernel lives it answers [field-shared, pids] and changes nothing. Copy addresses exactly from observations. One control at a time; prefer Form's observation to a guess, then answer the enquiry." + ftg-bml-teaching();
+ }
+ 0;
+}

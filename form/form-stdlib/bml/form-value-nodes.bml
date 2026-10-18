@@ -1,0 +1,58 @@
+// form-value-nodes.bml — a Form value as a Form node, and a ledger as one node at rest.
+//
+// A row of knowledge is a node: content-addressed (the same row twice is one node), native (built and held by the kernel, no
+// text between), and kept on disk as FORMBIN2 (read_form_binary / write_form_binary), where it comes back as the same node ids.
+// The text of form-rows.bml is the view of a node a person reads (fvn-text), not the thing the body keeps.
+//
+//   42  2.5  "x"   ->  trivial int, float64 and string nodes (the kids a record or list holds are always nodes, so a row
+//                      that went to disk and came back is the same node it was)
+//   nothing        ->  the FVN-NULL node (no kids)
+//   [a b]          ->  the FVN-LIST node, kids in order
+//   {k v ...}      ->  the FVN-RECORD node, kids  key v key v ...  (key order kept)
+//
+//   fvn-of(value) / fvn-to(node)        value <-> node; fvn-to of fvn-of is the value, fvn-of of fvn-to is the same node
+//   fvn-field(node, key)                the kid after key in a record node (no decode of the rest); nothing when absent
+//   fvn-int/num/str(node, key, fallback)  typed field reads on a record node, like frw-int/num/str on a record
+//   fvn-text(node)                      the node as one line of form-rows text (the derived view)
+//   fvn-ledger(path)                    the row nodes a ledger file holds ([] when the file is absent)
+//   fvn-ledger-values(path)             the same rows as Form values
+//   fvn-rows-of(path)                   `["ok" rows]` like frw-rows: a node ledger, or form-rows text when the path ends .rows
+//   fvn-ledger-append(path, value)      the row added at the end; the file is rewritten whole and swapped in (write_form_binary
+//                                       renames over), one writer at a time; answers the bytes written
+//   fvn-ledger-write(path, nodes)       a ledger from nodes in hand (a migration, a compaction)
+// preflight-exec: forbidden
+import form-stdlib/bml/form-rows.bml;
+section [form.bml] {
+ class FormValueNodes {
+  def FVN-LIST() = bp("FVN-LIST");
+  def FVN-RECORD() = bp("FVN-RECORD");
+  def FVN-NULL() = bp("FVN-NULL");
+  def FVN-LEDGER() = bp("FVN-LEDGER");
+  def fvn-of(v) = fvn-of-kind(v, (String) value_kind(v));
+  def fvn-of-kind(v, k) = k == "int" ? intern_trivial_int(v) : k == "float" ? make_float64(v) : k == "string" ? intern_trivial_string(v) : k == "null" ? intern_node(FVN-NULL(), []) : k == "list" ? intern_node(FVN-LIST(), map(x => fvn-of(x), v)) : k == "record" ? intern_node(FVN-RECORD(), fvn-pairs(v, record_keys(v))) : form_error("form-value-nodes: a value of kind " ++ k ++ " has no node");
+  def fvn-pairs(v, keys) = nil?(keys) ? [] : cons(intern_trivial_string(keys[0]), cons(fvn-of(record_get(v, keys[0])), fvn-pairs(v, keys[1:])));
+  def fvn-to(n) = fvn-to-cat(n, node_category(n));
+  def fvn-to-cat(n, c) = node_eq(c, FVN-RECORD()) ? fvn-record-of(node_children(n), record_new(0)) : node_eq(c, FVN-LIST()) ? map(x => fvn-to(x), node_children(n)) : node_eq(c, FVN-NULL()) ? nothing() : node_value(n);
+  def fvn-record-of(kids, rec) = nil?(kids) ? rec : fvn-record-of(kids[2:], record_set(rec, node_value(kids[0]), fvn-to(kids[1])));
+  def fvn-field(n, key) = node_eq(node_category(n), FVN-RECORD()) ? fvn-kid-after(node_children(n), key) : nothing();
+  def fvn-kid-after(kids, key) = nil?(kids) ? nothing() : (String) node_value(kids[0]) == key ? kids[1] : fvn-kid-after(kids[2:], key);
+  def fvn-int(n, key, fallback) = fvn-leaf(fvn-field(n, key), "int", fallback);
+  def fvn-num(n, key, fallback) = fvn-numeric(fvn-field(n, key), fallback);
+  def fvn-str(n, key, fallback) = fvn-leaf(fvn-field(n, key), "string", fallback);
+  def fvn-leaf(f, kind, fallback) = (String) value_kind(f) == "null" ? fallback : fvn-leaf-of(node_value(f), kind, fallback);
+  def fvn-leaf-of(x, kind, fallback) = (String) value_kind(x) == kind ? x : fallback;
+  def fvn-numeric(f, fallback) = (String) value_kind(f) == "null" ? fallback : fvn-numeric-of(node_value(f), fallback);
+  def fvn-numeric-of(x, fallback) = ((String) value_kind(x) == "int" || (String) value_kind(x) == "float") ? x : fallback;
+  def fvn-text(n) = frw-emit(fvn-to(n));
+  def fvn-ledger(path) = fvn-ledger-of(read_form_binary(path));
+  def fvn-ledger-of(book) = (String) value_kind(book) == "null" ? [] : node_children(book);
+  def fvn-ledger-values(path) = map(n => fvn-to(n), fvn-ledger(path));
+  // a reader's one door: `["ok" rows]` like frw-rows, from a node ledger, or from a ledger kept as form-rows text (a path ending
+  // .rows: an older checkout's, or one a person wrote by hand); an absent file is the empty ledger either way
+  def fvn-rows-of(path) = fvn-text-path?(path) ? frw-rows(read_file(path) ?? "") : ["ok", fvn-ledger-values(path)];
+  def fvn-text-path?(path) = len(path) > 5 && (String) substring(path, len(path) - 5, len(path)) == ".rows";
+  def fvn-ledger-write(path, nodes) = write_form_binary(path, intern_node(FVN-LEDGER(), nodes));
+  def fvn-ledger-append(path, v) = fvn-ledger-write(path, append(fvn-ledger(path), [fvn-of(v)]));
+ }
+ 0;
+}

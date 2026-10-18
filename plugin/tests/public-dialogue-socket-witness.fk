@@ -1,0 +1,145 @@
+; public-dialogue-socket-witness.fk — the persistent dialogue crosses the real plugin socket.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/json.fk form-stdlib/relationship-store.fk form-stdlib/circle-recognition.fk cognition/text-frequency.fk plugin/public-dialogue.fk plugin/chatgpt-plugin.fk
+;
+; Verdict 16383 when two independently removable turns cross TCP, remain readable
+; from the reply, retain their directed edge after release, and the MCP door is
+; served by the same Form listener.
+
+(do
+    (defn pdsw-score (condition bit) (if condition bit 0))
+    (defn pdsw-contains? (text needle) (ge (str_find text needle 0) 0))
+    (defn pdsw-recv-all (handle acc)
+        (do
+            (let chunk (socket_recv handle 65536))
+            (if (eq (str_len chunk) 0) acc
+                (pdsw-recv-all handle (str_concat acc chunk)))))
+    (defn pdsw-request (method path content-type body)
+        (str_concat method
+            (str_concat " "
+                (str_concat path
+                    (str_concat " HTTP/1.1\r\nHost: form-native-witness\r\nContent-Type: "
+                        (str_concat content-type
+                            (str_concat "\r\nContent-Length: "
+                                (str_concat (int_to_str (str_len body))
+                                    (str_concat "\r\nConnection: close\r\n\r\n" body)))))))))
+    (defn pdsw-exchange (srv request)
+        (do
+            (let client (socket_connect "127.0.0.1" (socket_port srv)))
+            (let sent (socket_send client request))
+            (let accepted (socket_accept srv))
+            (let served (cp-serve-conn accepted))
+            (let received (pdsw-recv-all client ""))
+            (let closed (socket_close client))
+            (list served received)))
+    (defn pdsw-wire-body (wire) (pd-body-of wire))
+    (defn pdsw-json (wire) (parse-json "public-dialogue-socket-witness" (pdsw-wire-body wire)))
+    (defn pdsw-jstr (object key) (json-string-value (json-object-get object key)))
+    (defn pdsw-purge-turn (dir id)
+        (do
+            (pd-forget dir id "state")
+            (pd-forget dir id "question")
+            (pd-forget dir id "point")
+            (pd-forget dir id "locale")
+            (pd-forget dir id "parent")
+            (pd-forget dir id "root")
+            (pd-forget dir id "disclosure")
+            (pd-forget dir id "token-digest")
+            (pd-forget dir id "created")
+            (pd-forget dir id "turns")))
+
+    (let srv (socket_listen 0))
+    (let port (socket_port srv))
+    (let disclosure "public-unlisted-thread-v2")
+
+    (let root-body
+        "question=How+does+water+remember+the+forest%3F&point_of_view=river&locale=en&public_disclosure_ack=public-unlisted-thread-v2")
+    (let root-wire
+        (pdsw-exchange srv
+            (pdsw-request "POST" "/dialogues"
+                "application/x-www-form-urlencoded" root-body)))
+    (let root-served (nth root-wire 0))
+    (let root-received (nth root-wire 1))
+    (let root-json (pdsw-json root-received))
+    (let root-id (pdsw-jstr root-json "id"))
+    (let root-token (pdsw-jstr root-json "removal_token"))
+
+    (let reply-body
+        "question=The+sea+returns+what+the+cloud+can+carry.&point_of_view=sea&locale=en&public_disclosure_ack=public-unlisted-thread-v2")
+    (let reply-path (str_concat "/dialogues/" (str_concat root-id "/replies")))
+    (let reply-wire
+        (pdsw-exchange srv
+            (pdsw-request "POST" reply-path
+                "application/x-www-form-urlencoded" reply-body)))
+    (let reply-served (nth reply-wire 0))
+    (let reply-received (nth reply-wire 1))
+    (let reply-json (pdsw-json reply-received))
+    (let reply-id (pdsw-jstr reply-json "id"))
+    (let reply-token (pdsw-jstr reply-json "removal_token"))
+
+    (let thread-path (str_concat "/dialogues/" (str_concat reply-id "/thread")))
+    (let thread-wire
+        (pdsw-exchange srv
+            (pdsw-request "GET" thread-path "application/json" "")))
+    (let thread-served (nth thread-wire 0))
+    (let thread-received (nth thread-wire 1))
+
+    (let mcp-body "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")
+    (let mcp-wire
+        (pdsw-exchange srv
+            (pdsw-request "POST" "/mcp" "application/json" mcp-body)))
+    (let mcp-received (nth mcp-wire 1))
+
+    (let root-release-body (str_concat "removal_token=" root-token))
+    (let root-release-wire
+        (pdsw-exchange srv
+            (pdsw-request "DELETE" (str_concat "/dialogues/" root-id)
+                "application/x-www-form-urlencoded" root-release-body)))
+    (let reply-release-body (str_concat "removal_token=" reply-token))
+    (let reply-release-wire
+        (pdsw-exchange srv
+            (pdsw-request "DELETE" (str_concat "/dialogues/" reply-id)
+                "application/x-www-form-urlencoded" reply-release-body)))
+
+    (let tombstone-wire
+        (pdsw-exchange srv
+            (pdsw-request "GET" thread-path "application/json" "")))
+    (let tombstone-received (nth tombstone-wire 1))
+    (let srv-closed (socket_close srv))
+
+    (let c1 (pdsw-score (gt port 0) 1))
+    (let c2 (pdsw-score (pdsw-contains? root-served "HTTP/1.1 202") 2))
+    (let c3 (pdsw-score (str_eq root-served root-received) 4))
+    (let c4 (pdsw-score (and (pdsw-contains? reply-served "HTTP/1.1 202")
+                              (str_eq reply-served reply-received)) 8))
+    (let c5 (pdsw-score (if (str_eq root-id reply-id) false true) 16))
+    (let c6 (pdsw-score (if (str_eq root-token reply-token) false true) 32))
+    (let c7 (pdsw-score
+        (and (pdsw-contains? thread-received root-id)
+            (and (pdsw-contains? thread-received reply-id)
+                (pdsw-contains? thread-received "directed_edges"))) 64))
+    (let c8 (pdsw-score
+        (and (pdsw-contains? thread-received
+                (str_concat "\"from\":\"" (str_concat root-id "\"")))
+             (pdsw-contains? thread-received
+                (str_concat "\"to\":\"" (str_concat reply-id "\"")))) 128))
+    (let c9 (pdsw-score
+        (and (if (pdsw-contains? thread-received root-token) false true)
+             (if (pdsw-contains? thread-received "token-digest") false true)) 256))
+    (let c10 (pdsw-score
+        (and (pdsw-contains? mcp-received "start_dialogue")
+             (pdsw-contains? mcp-received "get_dialogue_thread")) 512))
+    (let c11 (pdsw-score
+        (and (pdsw-contains? (nth root-release-wire 1) "\"released\":true")
+             (pdsw-contains? (nth reply-release-wire 1) "\"released\":true")) 1024))
+    (let c12 (pdsw-score
+        (and (pdsw-contains? tombstone-received "\"state\":\"tombstoned\"")
+            (and (pdsw-contains? tombstone-received "directed_edges")
+                (if (pdsw-contains? tombstone-received "water remember") false true))) 2048))
+    (let c13 (pdsw-score (eq srv-closed 0) 4096))
+    (let c14 (pdsw-score (eq (cp-send-all -1 "closed" 0) -1) 8192))
+
+    (pdsw-purge-turn (pd-dir) root-id)
+    (pdsw-purge-turn (pd-dir) reply-id)
+    (fs_rmdir (pd-dir))
+    (sum (list c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14)))

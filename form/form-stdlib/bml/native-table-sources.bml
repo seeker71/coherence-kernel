@@ -1,0 +1,143 @@
+// Ordered source assembly for the native table compiler. Authored paths own
+// relative dependencies; an explicit read path can carry a source override.
+// Dependencies absent from the explicit order enter once, before their user.
+// Explicit modules retain their supplied order, including repeated overrides.
+import form-stdlib/source-compiler.fk;
+import form-stdlib/source-compiler-text-lens.fk;
+import form-stdlib/form-fs.fk;
+import gate/lens-text.bml;
+import form-stdlib/bml-source.fk;
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+ class NativeTableSources {
+  def nts-refuse(reason, path) = form_error("[native-table-source] " + (reason + (": " + path)));
+  def nts-path(path) {
+   !((String) value_kind(path) == "string") ? nts-refuse("path-type", "")
+   : ((Comparable) len(path) == 0) || (str_find(path, byte_to_str(0), 0) >= 0) ? nts-refuse("path-bytes", path)
+   : nts-parts(split-on(path, "/"), []);
+  }
+  def nts-parts(parts, held) =
+   nil?(parts) ? ("/" + str-join-with(reverse(held),"/"))
+   : ((String) parts[0] == ".") || ((String) parts[0] == "") ? nts-parts(parts[1:], held)
+   : (String) parts[0] == ".." ? (nil?(held) ? nts-refuse("path-above-root", "") : nts-parts(parts[1:], held[1:]))
+   : nts-parts(parts[1:], cons(parts[0], held));
+  def nts-absolute(path) = nts-path((String) substring(path, 0, 1) == "/" ? path : fs-path-join(host_cwd(), path));
+  def nts-text(parts) = str-spans(parts);
+  def nts-read(path) {
+   let size = file_size(path);
+   let source = read_file(path);
+   (size < 0) || (nothing?(source) || (!((Comparable) len(source) == size))) ? nts-refuse("incomplete-read", path)
+   : !((Comparable) file_size(path) == size) ? nts-refuse("changed-extent", path) : source;
+  }
+  // fkwu's own reader names the edges in every spelling it reads; plain Form
+  // drops its bare import lines and keeps their line breaks, as fkwu does.
+  def nts-declarations(source, semi) = [bml-source-dependencies(source, semi), semi ? nts-body(source, 0, 0, []) : source];
+  def nts-bare-import?(line) {
+   let stripped = bml-source-trim(line);
+   let imported = (String) substring(stripped, 0, 1) == ";" ? nothing() : bml-source-import-line(stripped);
+   nothing?(imported) ? 0 : bml-source-path-token?(imported);
+  }
+  def nts-body(source, at, quoted, text) {
+   at >= len(source) ? nts-text(reverse(text)) : {
+    let found = str_find(source, "\n", at);
+    let end = found < 0 ? len(source) : found;
+    let line = substring(source, at, end);
+    let kept = quoted ? line : nts-bare-import?(line) ? "" : line;
+    nts-body(source, end + 1, bml-source-quote-state(line, 0, quoted, 1), cons((String) kept + (found < 0 ? "" : "\n"), text));
+   };
+  }
+  // A sealed source runtime resolves names from this exact registry. Carry
+  // every declared home and its dependencies, including homes not yet called.
+  def nts-home-index?(owner) {
+   let suffix = "/form-stdlib/home-index.txt";
+   (len(owner) >= len(suffix)) && ((String) substring(owner, len(owner) - len(suffix), len(owner)) == suffix);
+  }
+  def nts-home-declarations(source) = str_find(source, byte_to_str(0), 0) >= 0 ? nts-refuse("home-index-nul", "") : nts-home-lines(lx-lines(source), []);
+  def nts-home-lines(lines, held) {
+   nil?(lines) ? reverse(held) : {
+    let line = lx-strip(lines[0]);
+    ((Comparable) len(line) == 0) || lx-at?(line, 0, "#") ? nts-home-lines(lines[1:], held)
+    : nts-home-row(lines[1:], held, bml-source-words(line));
+   }
+  }
+  def nts-home-row(rest, held, words) =
+   !((Comparable) len(words) == 2) ? nts-refuse("home-index-row", nts-text(words))
+   : !bml-source-path-token?(words[1]) ? nts-refuse("home-index-unit", words[1])
+   : nts-home-lines(rest, cons(words[1], held));
+  def nts-source-declarations(owner, source) =
+   nts-home-index?(owner) ? [nts-home-declarations(source), source]
+   : bml-source-path-token?(owner) ? nts-declarations(source, fsc-find-section-open(source, 0) < 0)
+   : [[], source];
+  def nts-open(modules, entry) {
+   let state = record_new(0, "explicit", record_new(0), "seen", record_new(0), "rows", [], "lower", 1);
+   nts-explicit(state, append(modules, [entry]));
+   state;
+  }
+  def nts-explicit(state, rows) {
+   nil?(rows) ? 1 : {
+    let path = nts-absolute(rows[0][0]);
+    let explicit = record_get(state, "explicit");
+    record_has(explicit, path) ? 1 : record_set(explicit, path, nts-absolute(rows[0][1]));
+    nts-explicit(state, rows[1:]);
+   }
+  }
+  def nts-deps(state, owner, deps) {
+   nil?(deps) ? 1 : {
+    let resolved = bml-source-resolve(owner, deps[0]);
+    let path = nothing?(resolved) ? nts-refuse("missing-dependency", owner + (" -> " + deps[0])) : nts-absolute(resolved);
+    record_has(record_get(state, "explicit"), path) ? 1 : nts-add(state, path, path, 0);
+    nts-deps(state, owner, deps[1:]);
+   }
+  }
+  def nts-add(state, ownerPath, readPath, force) {
+   let owner = nts-absolute(ownerPath);
+   let path = nts-absolute(readPath);
+   let seen = record_get(state, "seen");
+   (!force) && record_has(seen, owner) ? 1 : {
+    record_set(seen, owner, 1);
+    let source = nts-read(path);
+    let high = bml-source-path-token?(owner) ? (fsc-find-section-open(source, 0) >= 0) : 0;
+    let declaration = nts-source-declarations(owner, source);
+    nts-deps(state, owner, declaration[0]);
+    let lowered = high && record_get(state, "lower") ? form-source-compile-text(source, owner) : declaration[1];
+    nothing?(lowered) ? nts-refuse("lowering-refused", owner) : 1;
+    record_set(state, "rows", cons([owner, path, source, lowered], record_get(state, "rows")));
+    1;
+   }
+  }
+  def nts-modules(state, modules) {
+   nil?(modules) ? 1 : {
+    nts-add(state, modules[0][0], modules[0][1], 1);
+    nts-modules(state, modules[1:]);
+   }
+  }
+  def nts-assemble(modules, entry) {
+   let state = nts-open(modules, entry);
+   nts-modules(state, modules);
+   nts-add(state, entry[0], entry[1], 1);
+   reverse(record_get(state, "rows"));
+  }
+  def nts-held(rows) {
+   nil?(rows) ? 1 : {
+    let row = rows[0];
+    !((String) nts-read(row[1]) == row[2]) ? nts-refuse("source-changed", row[0]) : 1;
+    nts-held(rows[1:]);
+   }
+  }
+  def nts-root-pairs(paths) = paths |> map(path => [path, path]);
+  def nts-owner-paths(rows) = rows |> map(row => row[0]);
+  // Read-only closure for source identity. Non-Form roots remain in the list
+  // but have no interpreted dependencies. No source text is lowered or run.
+  def nts-closure-records(paths) {
+   let modules = nts-root-pairs(paths);
+   let state = record_new(0, "explicit", record_new(0), "seen", record_new(0), "rows", [], "lower", 0);
+   nts-explicit(state, modules);
+   nts-modules(state, modules);
+   let rows = reverse(record_get(state, "rows"));
+   nts-held(rows);
+   rows;
+  }
+  def nts-closure-paths(paths) = nts-owner-paths(nts-closure-records(paths));
+ }
+ 0;
+}

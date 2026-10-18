@@ -1,0 +1,365 @@
+//////////////////////////////////////////////////////////////////////
+// lora-backward.bml — the body's own reverse walk over a low-rank pair.
+//
+// A forward pass is a walk. A backward pass is a second walk in reverse,
+// holding what the first one saw. This cell is that second walk for the
+// one shape LoRA training is made of: a projection's delta
+//
+//     u = A x            (A is rank x in,  row-major)
+//     y = scale * B u    (B is out x rank, row-major)
+//
+// Given the gradient arriving at y, it hands back the gradient of A, of
+// B, and of x, by the chain rule written out:
+//
+//     dB = scale * dy (x) u        dA = du (x) x
+//     du = scale * B^T dy          dx = A^T du
+//
+// The head that turns a projection into a loss lives here too — softmax
+// cross-entropy, whose gradient is p - onehot — and the step that moves
+// the weights.
+//
+// Nothing here asks the graphics chip for anything. Every number is the
+// body's own arithmetic, and every gradient can be checked against the
+// body's own finite differences (lbw-fd-*): the body perturbs one weight
+// by +eps and -eps, recomputes the whole loss twice, and divides. That
+// check needs no oracle and no crossing; it is the arithmetic asking
+// itself.
+//
+// A mis-shaped call refuses. A matvec whose vector is not the matrix's
+// width answers nothing rather than folding over what it was given: a
+// silent partial in a gradient is a wrong direction that still descends
+// somewhere, which is worse than a stop.
+import form/form-stdlib/core.fk;
+import form-stdlib/bml/form-token-kinds.bml;
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraBackwardVec {
+        // ---- vector arithmetic, all consuming walks (no nth in a hot loop) ----
+        def lbw-revonto(xs, acc) = if nil?(xs) then acc else lbw-revonto(xs[1:], cons(xs[0], acc));
+        def lbw-zeros(n, acc) = if (n <= 0) then acc else lbw-zeros((n - 1), cons(0.0, acc));
+        def lbw-scale-go(xs, k, acc) = if nil?(xs) then reverse(acc) else lbw-scale-go(xs[1:], k, cons((xs[0] * k), acc));
+        def lbw-scale(xs, k) = lbw-scale-go(xs, k, []);
+        def lbw-dot-go(xs, ys, acc) = if (nil?(xs) || nil?(ys)) then acc else lbw-dot-go(xs[1:], ys[1:], (acc + (xs[0] * ys[0])));
+        def lbw-dot(xs, ys) = if ((Comparable) len(xs) == len(ys)) then lbw-dot-go(xs, ys, 0.0) else nothing();
+        // ys scaled by k added onto xs, elementwise
+        def lbw-axpy-go(xs, ys, k, acc) = if (nil?(xs) || nil?(ys)) then reverse(acc) else lbw-axpy-go(xs[1:], ys[1:], k, cons((xs[0] + (ys[0] * k)), acc));
+        def lbw-axpy(xs, ys, k) = if ((Comparable) len(xs) == len(ys)) then lbw-axpy-go(xs, ys, k, []) else nothing();
+        def lbw-sub-go(xs, ys, acc) = if (nil?(xs) || nil?(ys)) then reverse(acc) else lbw-sub-go(xs[1:], ys[1:], cons((xs[0] - ys[0]), acc));
+        def lbw-sub(xs, ys) = if ((Comparable) len(xs) == len(ys)) then lbw-sub-go(xs, ys, []) else nothing();
+        def lbw-maxabs-go(xs, m) = if nil?(xs) then m else lbw-maxabs-go(xs[1:], if (abs(xs[0]) > m) then abs(xs[0]) else m);
+        def lbw-maxabs(xs) = lbw-maxabs-go(xs, 0.0);
+        // how far two gradients stand apart, relative to the larger of them:
+        // the number a finite-difference check is read by
+        def lbw-reldiff(xs, ys) {
+            let d = lbw-sub(xs, ys);
+            if nothing?(d) then nothing() else lbw-reldiff-of(lbw-maxabs(d), lbw-maxabs(xs), lbw-maxabs(ys));
+        }
+        def lbw-reldiff-of(dm, am, bm) {
+            let scale = if (am > bm) then am else bm;
+            if (scale <= 0.0) then dm else (dm / scale);
+        }
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraBackwardMat {
+        // M is rows x cols, row-major and flat. y[i] = sum_j M[i][j] x[j]
+        def lbw-mv-go(m, rows, cols, x, acc) = if (rows <= 0) then reverse(acc) else lbw-mv-go(drop(cols, m), (rows - 1), cols, x, cons(lbw-dot-go(take(cols, m), x, 0.0), acc));
+        def lbw-mv(m, rows, cols, x) = if (((Comparable) len(x) == cols) && ((Comparable) len(m) == (rows * cols))) then lbw-mv-go(m, rows, cols, x, []) else nothing();
+        // z[j] = sum_i M[i][j] g[i] — the transposed walk, accumulated a row at a time
+        def lbw-tmv-go(m, rows, cols, g, acc) = if (rows <= 0) then acc else lbw-tmv-go(drop(cols, m), (rows - 1), cols, g[1:], lbw-axpy-go(acc, take(cols, m), g[0], []));
+        def lbw-tmv(m, rows, cols, g) = if (((Comparable) len(g) == rows) && ((Comparable) len(m) == (rows * cols))) then lbw-tmv-go(m, rows, cols, g, lbw-zeros(cols, [])) else nothing();
+        // O[i][j] = g[i] x[j] — the rank-one outer product a weight gradient is
+        def lbw-outer-go(g, x, acc) = if nil?(g) then reverse(acc) else lbw-outer-go(g[1:], x, lbw-revonto(lbw-scale(x, g[0]), acc));
+        def lbw-outer(g, x) = lbw-outer-go(g, x, []);
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraBackwardHead {
+        // softmax cross-entropy over a logit vector, and its gradient.
+        // The max comes off first so exp never overflows.
+        def lbw-max-go(xs, m) = if nil?(xs) then m else lbw-max-go(xs[1:], if (xs[0] > m) then xs[0] else m);
+        def lbw-max(xs) = if nil?(xs) then nothing() else lbw-max-go(xs[1:], xs[0]);
+        def lbw-sumexp-go(xs, m, acc) = if nil?(xs) then acc else lbw-sumexp-go(xs[1:], m, (acc + math_exp((xs[0] - m))));
+        def lbw-lse(xs) = lbw-lse-of(xs, lbw-max(xs));
+        def lbw-lse-of(xs, m) = if nothing?(m) then nothing() else (m + math_log(lbw-sumexp-go(xs, m, 0.0)));
+        def lbw-softmax-go(xs, lse, acc) = if nil?(xs) then reverse(acc) else lbw-softmax-go(xs[1:], lse, cons(math_exp((xs[0] - lse)), acc));
+        def lbw-softmax(xs) = lbw-softmax-go(xs, lbw-lse(xs), []);
+        // the loss: -log p[target] written as logsumexp minus the target logit
+        def lbw-ce(z, t) = if ((t < 0) || (t >= len(z))) then nothing() else (lbw-lse(z) - z[t]);
+        // its gradient: p minus the one-hot at the target
+        def lbw-dce-go(p, t, i, acc) = if nil?(p) then reverse(acc) else lbw-dce-go(p[1:], t, (i + 1), cons(if ((Comparable) i == t) then (p[0] - 1.0) else p[0], acc));
+        def lbw-dce(z, t) = if ((t < 0) || (t >= len(z))) then nothing() else lbw-dce-go(lbw-softmax(z), t, 0, []);
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraBackwardStep {
+        // ---- the pair, forward and reverse ----
+        // state: (u y) — u is what A read, y is what B wrote
+        def lbw-forward(a, b, rank, din, dout, x, scale) {
+            let u = lbw-mv(a, rank, din, x);
+            if nothing?(u) then nothing() else lbw-forward-y(u, lbw-mv(b, dout, rank, u), scale);
+        }
+        def lbw-forward-y(u, bu, scale) = if nothing?(bu) then nothing() else [u, lbw-scale(bu, scale)];
+        def lbw-u(st) = st[0];
+        def lbw-y(st) = st[1];
+        // the reverse walk: (dA dB dx)
+        def lbw-backward(a, b, rank, din, dout, x, u, dy, scale) {
+            let dys = lbw-scale(dy, scale);
+            let dB = lbw-outer(dys, u);
+            let du = lbw-tmv(b, dout, rank, dys);
+            if nothing?(du) then nothing() else lbw-backward-rest(a, rank, din, x, dB, du);
+        }
+        def lbw-backward-rest(a, rank, din, x, dB, du) {
+            let dA = lbw-outer(du, x);
+            let dx = lbw-tmv(a, rank, din, du);
+            if nothing?(dx) then nothing() else [dA, dB, dx];
+        }
+        def lbw-dA(g) = g[0];
+        def lbw-dB(g) = g[1];
+        def lbw-dx(g) = g[2];
+        // one plain descent step: theta <- theta - lr * grad
+        def lbw-sgd(theta, grad, lr) = lbw-axpy(theta, grad, (0.0 - lr));
+        // ---- the whole small step, base logits included ----
+        // z = z0 + scale * B (A x); loss = cross entropy at target
+        def lbw-logits(z0, a, b, rank, din, dout, x, scale) = lbw-logits-of(z0, lbw-forward(a, b, rank, din, dout, x, scale));
+        def lbw-logits-of(z0, st) = if nothing?(st) then nothing() else lbw-axpy(z0, lbw-y(st), 1.0);
+        def lbw-loss(z0, a, b, rank, din, dout, x, scale, t) = lbw-loss-of(lbw-logits(z0, a, b, rank, din, dout, x, scale), t);
+        def lbw-loss-of(z, t) = if nothing?(z) then nothing() else lbw-ce(z, t);
+        // the analytic gradient of that loss with respect to A, B and x
+        def lbw-grad(z0, a, b, rank, din, dout, x, scale, t) = lbw-grad-of(z0, a, b, rank, din, dout, x, scale, t, lbw-forward(a, b, rank, din, dout, x, scale));
+        def lbw-grad-of(z0, a, b, rank, din, dout, x, scale, t, st) {
+            if nothing?(st) then nothing() else lbw-grad-dy(a, b, rank, din, dout, x, scale, st, lbw-dce(lbw-axpy(z0, lbw-y(st), 1.0), t));
+        }
+        def lbw-grad-dy(a, b, rank, din, dout, x, scale, st, dy) = if nothing?(dy) then nothing() else lbw-backward(a, b, rank, din, dout, x, lbw-u(st), dy, scale);
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraBackwardFinite {
+        // ---- the check the body computes itself ----
+        // One entry of one parameter moved by +eps and by -eps, the whole
+        // loss recomputed both times, the difference over 2 eps. Form holds
+        // no first-class functions, so which parameter is bumped is named
+        // rather than passed: A, B, or the input.
+        def lbw-bump-go(xs, i, eps, k, acc) = if nil?(xs) then reverse(acc) else lbw-bump-go(xs[1:], i, eps, (k + 1), cons(if ((Comparable) k == i) then (xs[0] + eps) else xs[0], acc));
+        def lbw-bump(xs, i, eps) = lbw-bump-go(xs, i, eps, 0, []);
+        def lbw-fd-of(lplus, lminus, eps) = if (nothing?(lplus) || nothing?(lminus)) then nothing() else ((lplus - lminus) / (2.0 * eps));
+        def lbw-fd-a(z0, a, b, rank, din, dout, x, scale, t, i, eps) = lbw-fd-of(lbw-loss(z0, lbw-bump(a, i, eps), b, rank, din, dout, x, scale, t), lbw-loss(z0, lbw-bump(a, i, (0.0 - eps)), b, rank, din, dout, x, scale, t), eps);
+        def lbw-fd-b(z0, a, b, rank, din, dout, x, scale, t, i, eps) = lbw-fd-of(lbw-loss(z0, a, lbw-bump(b, i, eps), rank, din, dout, x, scale, t), lbw-loss(z0, a, lbw-bump(b, i, (0.0 - eps)), rank, din, dout, x, scale, t), eps);
+        def lbw-fd-x(z0, a, b, rank, din, dout, x, scale, t, i, eps) = lbw-fd-of(lbw-loss(z0, a, b, rank, din, dout, lbw-bump(x, i, eps), scale, t), lbw-loss(z0, a, b, rank, din, dout, lbw-bump(x, i, (0.0 - eps)), scale, t), eps);
+        // the whole finite-difference gradient of a parameter, entry by entry
+        def lbw-fd-vec-a-go(z0, a, b, rank, din, dout, x, scale, t, eps, i, n, acc) = if (i >= n) then reverse(acc) else lbw-fd-vec-a-go(z0, a, b, rank, din, dout, x, scale, t, eps, (i + 1), n, cons(lbw-fd-a(z0, a, b, rank, din, dout, x, scale, t, i, eps), acc));
+        def lbw-fd-vec-a(z0, a, b, rank, din, dout, x, scale, t, eps) = lbw-fd-vec-a-go(z0, a, b, rank, din, dout, x, scale, t, eps, 0, len(a), []);
+        def lbw-fd-vec-b-go(z0, a, b, rank, din, dout, x, scale, t, eps, i, n, acc) = if (i >= n) then reverse(acc) else lbw-fd-vec-b-go(z0, a, b, rank, din, dout, x, scale, t, eps, (i + 1), n, cons(lbw-fd-b(z0, a, b, rank, din, dout, x, scale, t, i, eps), acc));
+        def lbw-fd-vec-b(z0, a, b, rank, din, dout, x, scale, t, eps) = lbw-fd-vec-b-go(z0, a, b, rank, din, dout, x, scale, t, eps, 0, len(b), []);
+        def lbw-fd-vec-x-go(z0, a, b, rank, din, dout, x, scale, t, eps, i, n, acc) = if (i >= n) then reverse(acc) else lbw-fd-vec-x-go(z0, a, b, rank, din, dout, x, scale, t, eps, (i + 1), n, cons(lbw-fd-x(z0, a, b, rank, din, dout, x, scale, t, i, eps), acc));
+        def lbw-fd-vec-x(z0, a, b, rank, din, dout, x, scale, t, eps) = lbw-fd-vec-x-go(z0, a, b, rank, din, dout, x, scale, t, eps, 0, len(x), []);
+    }
+    0;
+}
+//////////////////////////////////////////////////////////////////////
+// THE OPENING FIT. A rank-one head adapter h' = h + B (A·h) can learn one
+// decision: open a Form control here. The sites are hidden states h_i —
+// the output-normalized activation the head reads — with labels y_i: 1
+// where the voice opened a control, 0 where it chose otherwise.
+//
+//   A detects: the ridge least-squares direction with A·h_i ≈ y_i, solved
+//   in the sites' own span (the dual form, n x n, never width x width):
+//       K = H H^T + lambda I,   K c = y,   A = sum_i c_i h_i
+//   B emits: w * gain / |w|^2, where w is the head's row for the opening
+//   token, so w·B = gain.
+//
+// The opening logit then moves by gain * (A·h): the gain where a control
+// opens, about nothing where none does. Every other logit j moves by
+// gain * (A·h) * (w_j·w) / |w|^2 — the tokens that share the opening's
+// direction move with it, which is why the effect is read back, never
+// assumed. K is symmetric positive definite, so elimination needs no pivot.
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraOpeningFit {
+        def lbw-of-gram-row(hs, h) = map(g => lbw-dot-go(g, h, 0.0), hs);
+        def lbw-of-gram(hs) = map(h => lbw-of-gram-row(hs, h), hs);
+        def lbw-of-diag-go(k, i, acc) = if nil?(k) then acc else lbw-of-diag-go(k[1:], (i + 1), (acc + k[0][i]));
+        def lbw-of-ridge-go(k, lambda, i, acc) = if nil?(k) then reverse(acc) else lbw-of-ridge-go(k[1:], lambda, (i + 1), cons(lbw-bump(k[0], i, lambda), acc));
+        def lbw-of-ridge(k, ridge) = lbw-of-ridge-go(k, (ridge * (lbw-of-diag-go(k, 0, 0.0) / (len(k) + 0.0))), 0, []);
+        def lbw-of-aug(k, y) = if nil?(k) then [] else cons(append(k[0], [y[0]]), lbw-of-aug(k[1:], y[1:]));
+        def lbw-of-reduce(r, p) = lbw-axpy(r, p, (0.0 - (r[0] / p[0])))[1:];
+        def lbw-of-eliminate(rows) = if nil?(rows) then [] else cons(rows[0], lbw-of-eliminate(map(r => lbw-of-reduce(r, rows[0]), rows[1:])));
+        def lbw-of-back-row(r, rest) = cons(((r[(len(r) - 1)] - lbw-dot-go(take(len(rest), r[1:]), rest, 0.0)) / r[0]), rest);
+        def lbw-of-back(tri) = if nil?(tri) then [] else lbw-of-back-row(tri[0], lbw-of-back(tri[1:]));
+        def lbw-of-solve(k, y) = lbw-of-back(lbw-of-eliminate(lbw-of-aug(k, y)));
+        def lbw-of-combine(hs, c, acc) = if nil?(hs) then acc else lbw-of-combine(hs[1:], c[1:], lbw-axpy-go(acc, hs[0], c[0], []));
+        // A: the detector, ridge relative to the mean squared norm of the sites. The ridged Gram
+        // matrix k depends on the sites alone, so every labelling of the same sites shares it.
+        def lbw-of-detector-k(hs, k, ys) = if nil?(hs) then [] else lbw-of-combine(hs, lbw-of-solve(k, ys), lbw-zeros(len(hs[0]), []));
+        def lbw-of-detector(hs, ys, ridge) = if nil?(hs) then [] else lbw-of-detector-k(hs, lbw-of-ridge(lbw-of-gram(hs), ridge), ys);
+        // B: the emitter along the opening token's head row
+        def lbw-of-emitter(w, gain) = if (lbw-dot-go(w, w, 0.0) <= 0.0) then nothing() else lbw-scale(w, (gain / lbw-dot-go(w, w, 0.0)));
+        def lbw-of-scores(a, hs) = map(h => lbw-dot-go(a, h, 0.0), hs);
+        // The gain: the least lift that puts the opening above the base winner by `margin`
+        // at every opening site, read from that site's base gap (winner minus opening logit)
+        // and its detector score s. A site whose score is not positive cannot be lifted by
+        // any gain and is left to the reading, never forced.
+        def lbw-of-gain(gaps, scores, ys, margin, best) = if nil?(gaps) then best else lbw-of-gain(gaps[1:], scores[1:], ys[1:], margin, if ((ys[0] > 0.5) && (scores[0] > 0.0)) then (if (((gaps[0] + margin) / scores[0]) > best) then ((gaps[0] + margin) / scores[0]) else best) else best);
+        // [A, B, scores, gain] for sites hs, labels ys, base gaps, the opening row w
+        def lbw-of-fit(hs, ys, gaps, w, ridge, margin) {
+            let a = lbw-of-detector(hs, ys, ridge);
+            let scores = lbw-of-scores(a, hs);
+            let gain = lbw-of-gain(gaps, scores, ys, margin, 0.0);
+            [a, lbw-of-emitter(w, gain), scores, gain];
+        }
+        // the adapted activation the head reads: h + B (alpha A·h)
+        def lbw-of-adapt(h, a, b, alpha) = lbw-axpy-go(h, b, (alpha * lbw-dot-go(a, h, 0.0)), []);
+        def lbw-of-argmax-go(xs, i, best, value) = if nil?(xs) then best else if (xs[0] > value) then lbw-of-argmax-go(xs[1:], (i + 1), i, xs[0]) else lbw-of-argmax-go(xs[1:], (i + 1), best, value);
+        def lbw-of-argmax(xs) = if nil?(xs) then (0 - 1) else lbw-of-argmax-go(xs[1:], 1, 0, xs[0]);
+        // the winner's gap over the opening: how far the opening logit stands below the top
+        def lbw-of-gap(z, o) = (lbw-max(z) - z[o]);
+        // ---- the selective emitter ----
+        // Along w alone, B lifts every token whose head row leans on w: a rival j moves by
+        // (w_j·w)/|w|^2 of the opening's lift, and a rival whose row is longer than w's along
+        // it outruns the opening. The head's view of B (W·B, one matvec) names the rivals;
+        // taking their directions out of w leaves w·B = gain and c·B = 0 for every rival c.
+        // Modified Gram-Schmidt; a row already in the span drops out.
+        def lbw-of-residual(v, basis) = foldl((r, q) => lbw-axpy-go(r, q, (0.0 - lbw-dot-go(r, q, 0.0)), []), v, basis);
+        def lbw-of-basis-add(r, scale, acc) = if (lbw-dot-go(r, r, 0.0) <= (0.000000000001 * scale)) then acc else cons(lbw-scale(r, (1.0 / math_sqrt(lbw-dot-go(r, r, 0.0)))), acc);
+        def lbw-of-basis(rows, acc) = if nil?(rows) then acc else lbw-of-basis(rows[1:], lbw-of-basis-add(lbw-of-residual(rows[0], acc), lbw-dot-go(rows[0], rows[0], 0.0), acc));
+        def lbw-of-selective(w, rivals, gain) {
+            let r = lbw-of-residual(w, lbw-of-basis(rivals, []));
+            let wr = lbw-dot-go(w, r, 0.0);
+            if (wr <= 0.0) then nothing() else lbw-scale(r, (gain / wr));
+        }
+        // the k tokens other than o that the view lifts most, each [id, lift], lifts above floor only.
+        // A rival matters once its lift passes the margin: the base winner is beaten by exactly
+        // the margin, so any lift beyond it at a winner gives the opening back.
+        def lbw-of-insert-go(top, v, j) = if nil?(top) then [[j, v]] else if (v > top[0][1]) then cons([j, v], top) else cons(top[0], lbw-of-insert-go(top[1:], v, j));
+        def lbw-of-keeps?(top, v, k) = if (len(top) < k) then 1 else if (v > top[(len(top) - 1)][1]) then 1 else 0;
+        def lbw-of-rivals-go(xs, i, o, k, floor, top) = if nil?(xs) then top else lbw-of-rivals-go(xs[1:], (i + 1), o, k, floor, if (((Comparable) i == o) || ((xs[0] <= floor) || (!lbw-of-keeps?(top, xs[0], k)))) then top else take(k, lbw-of-insert-go(top, xs[0], i)));
+        def lbw-of-rivals(view, o, k, floor) = lbw-of-rivals-go(view, 0, o, k, floor, []);
+        // Rounds of: name the rivals B lifts (rivals-of(B) -> [[id, lift]]), fetch their rows
+        // (row-of(id)), take every rival direction so far out of w. The head may be Form's own
+        // list (a band) or the device's (one matvec and k argmax folds per round); the
+        // arithmetic is the same. Answers [B, [[id, row], ...]]; stops early when no new rival.
+        def lbw-of-refine(w, gain, b, rows, rounds, rivals-of, row-of) = if ((rounds <= 0) || nothing?(b)) then [b, rows] else lbw-of-refine-with(w, gain, b, rows, rounds, rivals-of, row-of, filter(r => !any?(q => (Comparable) q[0] == r[0], rows), rivals-of(b)));
+        def lbw-of-refine-with(w, gain, b, rows, rounds, rivals-of, row-of, fresh) = if nil?(fresh) then [b, rows] else lbw-of-refine-next(w, gain, rounds, rivals-of, row-of, append(rows, map(r => [r[0], row-of(r[0])], fresh)));
+        def lbw-of-refine-next(w, gain, rounds, rivals-of, row-of, rows) = lbw-of-refine(w, gain, lbw-of-selective(w, map(r => r[1], rows), gain), rows, (rounds - 1), rivals-of, row-of);
+    }
+    0;
+}
+//////////////////////////////////////////////////////////////////////
+// WHAT A FIT KNOWS. With n sites in d dimensions and n no larger than d,
+// the dual ridge above interpolates ANY labelling: on the sites it was
+// fitted on, the separation (mean score at the openings minus mean score
+// elsewhere) comes out near 1 for the true labels and for labels that mean
+// nothing alike. That number is a property of the problem's shape, never a
+// reading of the voice.
+//
+// What the activation knows is read where the fit never looked. The sites
+// split by group (a trace row: sites of one row share its prompt, so they
+// stay together); the detector is fitted on the kept groups and scored on
+// the held-out ones. The same solver is fitted on the kept sites with their
+// labels scrambled — each scramble a permutation, so the count of openings
+// is kept — and scored on the held-out sites against their true labels.
+// The floor is the largest held-out separation any scramble reaches. A
+// yieldpoint is read only when the true held-out separation stands above
+// it; labels with no relation to the activation clear it by chance about
+// once in (scrambles + 1), so the scrambles are many. A held-out side with
+// fewer than two sites cannot be measured and answers nothing.
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraOpeningKnowing {
+        def lbw-of-iota-go(i, acc) = if (i < 0) then acc else lbw-of-iota-go((i - 1), cons(i, acc));
+        def lbw-of-iota(n) = lbw-of-iota-go((n - 1), []);
+        def lbw-of-at(xs, idx) = map(i => xs[i], idx);
+        def lbw-of-mean(xs) = if nil?(xs) then nothing() else (foldl((acc, x) => acc + x, 0.0, xs) / (len(xs) + 0.0));
+        def lbw-of-side(scores, ys, positive) = if nil?(scores) then [] else if ((Comparable) (if (ys[0] > 0.5) then 1 else 0) == positive) then cons(scores[0], lbw-of-side(scores[1:], ys[1:], positive)) else lbw-of-side(scores[1:], ys[1:], positive);
+        def lbw-of-separation-of(at, off) = if nothing?(at) then nothing() else if nothing?(off) then nothing() else (at - off);
+        def lbw-of-separation(scores, ys) = lbw-of-separation-of(lbw-of-mean(lbw-of-side(scores, ys, 1)), lbw-of-mean(lbw-of-side(scores, ys, 0)));
+        // The held-out reading is standardized: the separation over the pooled spread of the two
+        // sides. A detector fitted to labels that mean nothing has a larger norm, so its raw
+        // separation can outgrow the true one while its spread grows faster; in spread units the
+        // comparison holds whatever the detector's scale.
+        def lbw-of-variance(xs) = lbw-of-variance-of(xs, lbw-of-mean(xs));
+        def lbw-of-variance-of(xs, m) = if nothing?(m) then nothing() else (foldl((acc, x) => acc + ((x - m) * (x - m)), 0.0, xs) / (len(xs) + 0.0));
+        def lbw-of-spread(at, off) = math_sqrt(((lbw-of-variance(at) + lbw-of-variance(off)) / 2.0));
+        def lbw-of-standardized-of(at, off, spread) = if (spread <= 0.0) then nothing() else ((lbw-of-mean(at) - lbw-of-mean(off)) / spread);
+        def lbw-of-standardized(scores, ys) = lbw-of-standardized-at(lbw-of-side(scores, ys, 1), lbw-of-side(scores, ys, 0));
+        // A side of fewer than two sites has no spread of its own: one held-out opening against
+        // two other sites cleared the floor with labels that meant nothing, so such a split is
+        // not measured.
+        def lbw-of-standardized-at(at, off) = if ((len(at) < 2) || (len(off) < 2)) then nothing() else lbw-of-standardized-of(at, off, lbw-of-spread(at, off));
+        // groups in order of first appearance
+        def lbw-of-distinct(gs, seen) = if nil?(gs) then reverse(seen) else lbw-of-distinct(gs[1:], if any?(s => (Comparable) s == gs[0], seen) then seen else cons(gs[0], seen));
+        def lbw-of-index-go(xs, x, i) = if nil?(xs) then (0 - 1) else if ((Comparable) xs[0] == x) then i else lbw-of-index-go(xs[1:], x, (i + 1));
+        // held out: every third group in order (the third, the sixth, ...); with two groups, the second
+        def lbw-of-held-group?(k, n) = if (n >= 3) then (if ((Comparable) (k % 3) == 2) then 1 else 0) else if (((Comparable) n == 2) && ((Comparable) k == 1)) then 1 else 0;
+        // [kept site indices, held-out site indices] for one group id per site
+        def lbw-of-split(gs) {
+            let groups = lbw-of-distinct(gs, []);
+            let held = map(g => lbw-of-held-group?(lbw-of-index-go(groups, g, 0), len(groups)), gs);
+            let idx = lbw-of-iota(len(gs));
+            [filter(i => (Comparable) held[i] == 0, idx), filter(i => (Comparable) held[i] == 1, idx)];
+        }
+        // The j-th scramble: the labels reordered by a key hashed from (site, j) — an odd multiplier
+        // modulo 2^32 is a bijection, so the keys are distinct and the order is a permutation; the
+        // count of openings is kept. A stride walk would not do: on labels with a period (one
+        // opening per row) a stride can give the true labels back.
+        def lbw-of-key(i, j) = (((i * 7919) + (j * 104729)) * 2654435761) % 4294967296;
+        def lbw-of-insert-by(x, sorted) = if nil?(sorted) then [x] else if (x[0] < sorted[0][0]) then cons(x, sorted) else cons(sorted[0], lbw-of-insert-by(x, sorted[1:]));
+        def lbw-of-scramble(ys, j) = map(p => p[1], foldl((acc, i) => lbw-of-insert-by([lbw-of-key(i, j), ys[i]], acc), [], lbw-of-iota(len(ys))));
+        def lbw-of-larger(m, x) = if nothing?(x) then m else if nothing?(m) then x else if (x > m) then x else m;
+        def lbw-of-largest(xs) = foldl((m, x) => lbw-of-larger(m, x), nothing(), xs);
+        def lbw-of-above(x, floor) = if nothing?(x) then 0 else if nothing?(floor) then 0 else if (x > floor) then 1 else 0;
+        // one labelling of the kept sites: [its separation on them, its standardized separation on
+        // the held-out sites read against their true labels]
+        def lbw-of-labelling(khs, k, labels, hhs, hys) {
+            let a = lbw-of-detector-k(khs, k, labels);
+            [lbw-of-separation(lbw-of-scores(a, khs), labels), lbw-of-standardized(lbw-of-scores(a, hhs), hys)];
+        }
+        // [in-sample separation, held-out standardized separation, in-sample floor, held-out floor,
+        //  scrambles, kept sites, held-out sites, read] for sites hs, labels ys, one group id per site
+        def lbw-of-knowing(hs, ys, gs, ridge, scrambles) {
+            let split = lbw-of-split(gs);
+            let khs = lbw-of-at(hs, split[0]);
+            if nil?(khs) then [nothing(), nothing(), nothing(), nothing(), scrambles, 0, len(split[1]), 0] else lbw-of-knowing-k(khs, lbw-of-at(ys, split[0]), lbw-of-at(hs, split[1]), lbw-of-at(ys, split[1]), lbw-of-ridge(lbw-of-gram(khs), ridge), scrambles);
+        }
+        def lbw-of-knowing-k(khs, kys, hhs, hys, k, scrambles) {
+            let truth = lbw-of-labelling(khs, k, kys, hhs, hys);
+            let floors = map(j => lbw-of-labelling(khs, k, lbw-of-scramble(kys, (j + 1)), hhs, hys), lbw-of-iota(scrambles));
+            let inner = lbw-of-largest(map(f => f[0], floors));
+            let outer = lbw-of-largest(map(f => f[1], floors));
+            [truth[0], truth[1], inner, outer, scrambles, len(khs), len(hhs), lbw-of-above(truth[1], outer)];
+        }
+    }
+    0;
+}
+//////////////////////////////////////////////////////////////////////
+// THE CONTROLS AN OPENING LEADS TO. The contract's in-stream verbs, the
+// one list the training lanes read: the dataset door admits a control
+// only under one of them, and the Qwen head's learned control IDs are
+// this list in order after the control-open ID. "observation" is never
+// among them: Form writes observations, the voice never does.
+//
+// A learned control-open ID expands to the bare "<|form:" and the voice
+// spells the verb itself. What it spells joins the stream like any text;
+// lbw-of-after-open names what Form answers in place of a control whose
+// verb is not the contract's, with the reasons the grammar's dispatch
+// gives, so a voice-spelled observation never enters the stream as Form's.
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraControls {
+        // the Form tokens, once (form-token-kinds.bml): a verb's control-ID row is its index here
+        def lbw-of-verbs() = ftk-verbs();
+        def lbw-of-verb?(verb) = any?(v => (String) v == verb, lbw-of-verbs());
+        def lbw-of-control-open(verb) = "<|form:" ++ verb ++ "|>";
+        // "" when the verb is the contract's; otherwise the observation Form writes in its place
+        def lbw-of-refusal(verb) = if ((String) verb == "observation") then "observations-come-from-form" else ("unknown-verb:" ++ verb);
+        def lbw-of-after-open(verb) = if lbw-of-verb?(verb) then "" else ("<|form:observation|>nothing=" ++ lbw-of-refusal(verb) ++ ";<|/form:observation|>");
+        // the text Form writes for an emitted control ID: first (the control-open ID) is the bare
+        // opening, first + 1 + k the opening of the k-th verb, and any other id is nothing
+        def lbw-of-control-text-at(first, id) = if ((Comparable) id == first) then "<|form:" else if ((id > first) && (id <= (first + len(lbw-of-verbs())))) then lbw-of-control-open(lbw-of-verbs()[((id - first) - 1)]) else nothing();
+    }
+    0;
+}

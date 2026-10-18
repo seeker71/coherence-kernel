@@ -1,0 +1,183 @@
+// Native Form lens for the compiler and walker operation surface: form-cli's flt-ops
+// (form-stdlib/form-flatten.fk, from the manifest) against the serializer arms its
+// emitted walker carries, and the table fkwu runs (runtime/fkwu-optable.h, from
+// flatten/form-flatten.fk) against the walker arms in runtime/fkwu-uni.c.
+// Historical implementation comparisons live in git.
+// preludes: form-stdlib/core.fk form-stdlib/table.bml gate/lens-text.bml form-stdlib/form-parse.fk form-stdlib/form-flatten.fk form-stdlib/native-op-manifest.fk
+import form-stdlib/source-compiler.fk;
+section [form.bml] {
+    class FormNativeSurfaceGate {
+        thought native-surface-pattern = ["every-row-has-its-arm", "alias-or-conflict", "or-groups-are-read", "warnings-count-never-refuse", "twin-voice-byte-for-byte"];
+
+        def nsf-name() = "native-surface";
+        def nsf-emit() = "form/form-stdlib/fkc-table-serialize.fk";
+        def nsf-fs-emit() = "form/form-stdlib/host-io-fs-fkwu-emit.fk";
+        def nsf-runtime() = "runtime/fkwu-uni.c";
+        def nsf-optable() = "runtime/fkwu-optable.h";
+        def nsf-host-io-floor() = 55;
+        def nsf-shared-arms() = [80, 106];
+
+        // ---- reading the emitter ----
+        def nsf-arm-slots(emit) {
+            let at = str_find(emit, "(defn fkc-arm-slots ()", 0);
+            at < 0 ? (0 - 1) : nsf-arm-slots-at(emit, lx-skip-ws(emit, at + len("(defn fkc-arm-slots ()")));
+        }
+        def nsf-arm-slots-at(emit, a) {
+            let b = lx-digits-end(emit, a);
+            (Comparable) b == a ? (0 - 1) : (Comparable) lx-at?(emit, b, ")") == 1 ? lx-int-span(emit, a, b) : (0 - 1);
+        }
+        // the fkc-flat block: after the first "(defn fkc-flat", before the next "(defn fkc-call2"
+        def nsf-flat-block(emit) {
+            let a = str_find(emit, "(defn fkc-flat", 0);
+            a < 0 ? "" : nsf-flat-block-from(emit, a + len("(defn fkc-flat"));
+        }
+        def nsf-flat-block-from(emit, a) {
+            let b = str_find(emit, "(defn fkc-call2", a);
+            substring(emit, a, b < 0 ? len(emit) : b);
+        }
+        def nsf-explicit(flat) = lx-int-uniq(lx-ints-after(flat, "(eq (fk-tag n) ", ")"));
+        def nsf-tri(flat) = lx-int-uniq(lx-ints-after(flat, "(if (eq (fk-tag n) ", ") (fkc-tri2"));
+        // or-groups: the paren block after "(if (or", then the arm that follows it
+        def nsf-or-tags(flat, arm) = lx-int-uniq(nsf-or-tags-go(flat, arm, 0, []));
+        def nsf-or-tags-go(flat, arm, from, acc) {
+            let i = str_find(flat, "(if (or", from);
+            i < 0 ? acc : nsf-or-tags-at(flat, arm, i + len("(if "), acc);
+        }
+        def nsf-or-tags-at(flat, arm, s, acc) {
+            let e = lx-block-end(flat, s, 0);
+            let k = lx-skip-ws(flat, e);
+            (Comparable) lx-at?(flat, k, arm) == 1 ? nsf-or-tags-go(flat, arm, e, append(acc, lx-ints-after(substring(flat, s, e), "(eq (fk-tag n) ", ")"))) : nsf-or-tags-go(flat, arm, e, acc);
+        }
+        def nsf-dyn-unary(flat) = nsf-or-tags(flat, "(fkc-un2 (fk-tag n)");
+        def nsf-dyn-binary(flat) = nsf-or-tags(flat, "(fkc-bin2 (fk-tag n)");
+        def nsf-c-tags(texts) = lx-int-uniq(nsf-c-tags-go(texts, []));
+        def nsf-c-tags-go(texts, acc) = (Comparable) len(texts) == 0 ? acc : nsf-c-tags-go(texts[1:], append(acc, lx-ints-after(texts[0], "if (t == ", ")")));
+        // Internal walker tags that exist only as a name: `#define FK_TAG_<NAME> <int>`.
+        // No optable row and no `if (t == N)` site names them, so every scan above is
+        // blind to them -- FK_TAG_CONST_HOLD (190) swallowed a manifest row on 2026-09-05,
+        // walking the call as a once-hold and answering its first child.
+        def nsf-define-tags(texts) = lx-int-uniq(nsf-define-tags-go(texts, []));
+        def nsf-define-tags-go(texts, acc) = (Comparable) len(texts) == 0 ? acc : nsf-define-tags-go(texts[1:], append(acc, nsf-define-tags-in(texts[0], 0, [])));
+        def nsf-define-tags-in(text, from, acc) {
+            let i = str_find(text, "#define FK_TAG_", from);
+            i < 0 ? reverse(acc) : nsf-define-tags-at(text, i + len("#define FK_TAG_"), acc);
+        }
+        def nsf-define-tags-at(text, nameStart, acc) {
+            let sp = str_find(text, " ", nameStart);
+            let a = sp + 1;
+            let b = sp < 0 ? a : lx-digits-end(text, a);
+            (sp < 0) || ((Comparable) b == a) ? nsf-define-tags-in(text, nameStart, acc) : nsf-define-tags-in(text, b, cons(lx-int-span(text, a, b), acc));
+        }
+
+        // ---- a reading: list("ok", slots, explicit, dyn-unary, dyn-binary, tri, c-tags) or list("refused", message) ----
+        def nsf-read(root) {
+            let emit = read_file(root ++ nsf-emit());
+            nothing?(emit) ? ["refused", "missing input: " ++ root ++ nsf-emit()] : nsf-read-emit(root, form-source-compile-text(emit,root + nsf-emit()));
+        }
+        def nsf-read-emit(root, emit) {
+            let slots = nsf-arm-slots(emit);
+            let flat = nsf-flat-block(emit);
+            slots < 0 ? ["refused", "fkc-arm-slots not found"]
+            : (Comparable) len(flat) == 0 ? ["refused", "fkc-flat not found"]
+            : nsf-read-texts(slots, flat, [emit, lx-host-text(read_file(root ++ nsf-fs-emit())), lx-host-text(read_file(root ++ nsf-runtime()))], nom-fkwu-rows(read_file(root ++ nsf-optable())));
+        }
+        def nsf-read-texts(slots, flat, texts, fkrows) {
+            ["ok", slots, nsf-explicit(flat), nsf-dyn-unary(flat), nsf-dyn-binary(flat), nsf-tri(flat), nsf-c-tags(texts), nsf-define-tags(texts), fkrows, nsf-c-tags([texts[2]])];
+        }
+        // fkwu's own table and the tags its walker answers (if (t == N) in fkwu-uni.c)
+        def nsf-r-fk-rows(r) = len(r) >= 10 ? r[8] : [];
+        def nsf-r-fk-arms(r) = len(r) >= 10 ? r[9] : [];
+        def nsf-fk-errors(r) {
+            let rows = nsf-r-fk-rows(r);
+            (Comparable) len(rows) == 0 ? ["no fk_optab rows in " ++ nsf-optable()]
+            : tb-map(filter(op => (Comparable) lx-int-in?(nsf-r-fk-arms(r), nsf-op-tag(op)) == 0, rows), op => nsf-voice(op, "fkwu row tag " ++ nsf-op-tag(op).str() ++ " has no walker arm (if (t == " ++ nsf-op-tag(op).str() ++ ")) in " ++ nsf-runtime()));
+        }
+        def nsf-r-slots(r) = r[1];
+        def nsf-r-explicit(r) = r[2];
+        def nsf-r-dyn-unary(r) = r[3];
+        def nsf-r-dyn-binary(r) = r[4];
+        def nsf-r-define-tags(r) = len(r) >= 8 ? r[7] : [];
+        def nsf-r-tri(r) = r[5];
+        def nsf-r-c-tags(r) = r[6];
+
+        // ---- rows ----
+        def nsf-op-name(op) = op[0];
+        def nsf-op-arity(op) = op[1];
+        def nsf-op-tag(op) = op[2];
+        def nsf-tags(ops) = tb-map(ops, nsf-op-tag);
+        def nsf-max-tag(ops) = lx-int-max(nsf-tags(ops), 0);
+        def nsf-rows-with-tag(ops, tag) = filter(op => (Comparable) nsf-op-tag(op) == tag, ops);
+
+        // ---- conflicts and aliases: tags carried by several rows, ascending ----
+        def nsf-shared-tags(ops) = filter(tag => len(nsf-rows-with-tag(ops, tag)) > 1, lx-int-sort(lx-int-uniq(nsf-tags(ops))));
+        // answers list(errors, aliases)
+        def nsf-conflicts(ops) = nsf-conflicts-go(nsf-shared-tags(ops), ops, [], 0);
+        def nsf-conflicts-go(tags, ops, errors, aliases) {
+            (Comparable) len(tags) == 0 ? [errors, aliases] : nsf-conflicts-one(tags[0], tags[1:], ops, errors, aliases);
+        }
+        def nsf-conflicts-one(tag, rest, ops, errors, aliases) {
+            let rows = nsf-rows-with-tag(ops, tag);
+            let arities = lx-int-uniq(tb-map(rows, nsf-op-arity));
+            len(arities) > 1 ? nsf-conflicts-go(rest, ops, append(errors, ["conflicting flt-ops tag " ++ tag.str() ++ " (mixed arity " ++ lx-py-int-list(lx-int-sort(arities)) ++ "): " ++ lx-py-str-list(tb-map(rows, nsf-op-name))]), aliases)
+            : nsf-conflicts-go(rest, ops, errors, aliases + 1);
+        }
+
+        // ---- one row's errors and warnings ----
+        def nsf-voice(op, rest) = nsf-op-name(op) ++ ": " ++ rest;
+        def nsf-tag-voice(op, kind, rest) = nsf-voice(op, kind ++ " tag " ++ nsf-op-tag(op).str() ++ rest);
+        def nsf-when(cond, msg) = cond ? [msg] : [];
+        def nsf-op-errors(op, r) {
+            let tag = nsf-op-tag(op);
+            let arity = nsf-op-arity(op);
+            let explicit = lx-int-in?(nsf-r-explicit(r), tag);
+            append(nsf-when(tag >= nsf-r-slots(r), nsf-voice(op, "tag " ++ tag.str() ++ " out of arm slots range 0.." ++ (nsf-r-slots(r) - 1).str())),
+                   append(nsf-when(lx-int-in?(nsf-r-define-tags(r), tag), nsf-voice(op, "tag " ++ tag.str() ++ " is an internal walker tag (#define FK_TAG_*): a call here is walked as that form and answers its first child, never this op")),
+                          nsf-arity-errors(op, r, arity, tag, explicit)));
+        }
+        def nsf-arity-errors(op, r, arity, tag, explicit) {
+            (Comparable) arity == 0 ? nsf-when((Comparable) explicit == 0, nsf-tag-voice(op, "nullary", " missing explicit fkc-flat row"))
+            : (Comparable) arity == 1 ? nsf-when(((Comparable) explicit == 0) && ((Comparable) lx-int-in?(nsf-r-dyn-unary(r), tag) == 0), nsf-tag-voice(op, "unary", " not in fkc-flat (would hit binary fallback — flatten crash or wrong arity)"))
+            : (Comparable) arity == 2 ? []
+            : (Comparable) arity == 3 ? nsf-when(((Comparable) lx-int-in?(nsf-r-tri(r), tag) == 0) && ((Comparable) explicit == 0), nsf-tag-voice(op, "ternary", " missing fkc-tri2 / explicit fkc-flat"))
+            : (Comparable) arity == 4 ? []
+            : [nsf-voice(op, "unsupported arity " ++ arity.str())];
+        }
+        def nsf-op-warnings(op, r) {
+            let tag = nsf-op-tag(op);
+            append(nsf-when(((Comparable) nsf-op-arity(op) == 4) && ((Comparable) lx-int-in?(nsf-r-explicit(r), tag) == 0), nsf-tag-voice(op, "quad", " — verify fkc-quad4 coverage manually")),
+                   nsf-when(nsf-walker-blind?(tag, r), nsf-voice(op, "tag " ++ tag.str() ++ " not found in C walker if (t == N) strings")));
+        }
+        def nsf-walker-blind?(tag, r) = (tag >= nsf-host-io-floor()) && (((Comparable) lx-int-in?(nsf-r-c-tags(r), tag) == 0) && (((Comparable) lx-int-in?(nsf-r-dyn-unary(r), tag) == 0) && (((Comparable) lx-int-in?(nsf-r-dyn-binary(r), tag) == 0) && ((Comparable) lx-int-in?(nsf-shared-arms(), tag) == 0))));
+        def nsf-rows-errors(ops, r) = (Comparable) len(ops) == 0 ? [] : append(nsf-op-errors(ops[0], r), nsf-rows-errors(ops[1:], r));
+        def nsf-rows-warnings(ops, r) = (Comparable) len(ops) == 0 ? [] : append(nsf-op-warnings(ops[0], r), nsf-rows-warnings(ops[1:], r));
+
+        // ---- the analysis: list(warnings, errors, aliases, max-tag, slots) ----
+        def nsf-analysis(ops, root) {
+            let r = nsf-read(root);
+            (String) r[0] == "refused" ? [[], [r[1]], 0, 0, 0] : nsf-analysis-with(ops, r);
+        }
+        def nsf-analysis-with(ops, r) {
+            let conflicts = nsf-conflicts(ops);
+            let maxtag = nsf-max-tag(ops);
+            [nsf-rows-warnings(ops, r),
+                 append(conflicts[0], append(nsf-when(maxtag >= nsf-r-slots(r), "max flt-ops tag " ++ maxtag.str() ++ " >= fkc-arm-slots " ++ nsf-r-slots(r).str()), append(nsf-rows-errors(ops, r), nsf-fk-errors(r)))),
+                 conflicts[1], maxtag, nsf-r-slots(r), len(nsf-r-fk-rows(r))];
+        }
+        def nsf-a-warnings(a) = a[0];
+        def nsf-a-errors(a) = a[1];
+        def nsf-a-aliases(a) = a[2];
+        def nsf-a-max(a) = a[3];
+        def nsf-a-slots(a) = a[4];
+        def nsf-a-fk-rows(a) = len(a) >= 6 ? a[5] : 0;
+
+        // ---- the voice ----
+        def nsf-ok-line(ops, a) = "(" ++ len(ops).str() ++ " form-cli flt-ops rows, max_tag=" ++ nsf-a-max(a).str() ++ ", arm_slots=" ++ nsf-a-slots(a).str() ++ ", aliases=" ++ nsf-a-aliases(a).str() ++ ", " ++ len(nsf-a-warnings(a)).str() ++ " warning(s); fkwu's " ++ nsf-a-fk-rows(a).str() ++ " rows each with a walker arm)";
+        def nsf-fail-line(ops, a) = "(" ++ len(nsf-a-errors(a)).str() ++ " error(s), " ++ len(ops).str() ++ " flt-ops rows, arm_slots=" ++ nsf-a-slots(a).str() ++ ")";
+        def nsf-judge(ops, root) {
+            let a = nsf-analysis(ops, root);
+            lx-verdict-full(nsf-name(), nsf-a-warnings(a), nsf-a-errors(a), nsf-ok-line(ops, a), nsf-fail-line(ops, a));
+        }
+        def nsf-run() = nsf-judge(flt-ops(), "");
+    }
+    nsf-run();
+}

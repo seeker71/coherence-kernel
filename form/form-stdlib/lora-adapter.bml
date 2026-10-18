@@ -1,0 +1,168 @@
+//////////////////////////////////////////////////////////////////////
+// lora-adapter.bml — the body reads its own adapter. A safetensors file is
+// eight little-endian bytes of header length, a JSON header naming every
+// tensor with dtype, shape and byte span, then the bytes. Read natively:
+// the low-rank pairs, the layers they touch, the rank, the dtype, and
+// whether header + spans equal the file (structurally whole, axiom-3).
+// The training log's last iteration is read the same way. Native numeric
+// readers and writers supply measured tensors to their training and serving
+// owners; the census describes the artifact rather than its answer quality.
+import form/form-stdlib/core.fk;
+import form/form-stdlib/form-fs.fk;
+import form/form-stdlib/line-grammar.fk;
+import form-stdlib/bml/parse.bml;
+import form/form-stdlib/form-glass-telemetry-membrane.bml;
+import form/form-stdlib/hearth.bml;
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraAdapter {
+        field LAPublisher = "voice.lora";
+        def la-cat(parts) = if ((Comparable) len(parts) == 0) then "" else ((String) parts[0] + la-cat(parts[1:]));
+        def la-q() = byte_to_str(34);
+        def la-text(t) = if nothing?(t) then "" else t;
+        def la-count(text, needle, from, acc) {
+            let at = str_find(text, needle, from);
+            if (at < 0) then acc else la-count(text, needle, (at + len(needle)), (acc + 1));
+        }
+        def la-digit?(c) = if ((c >= 48) && (c <= 57)) then 1 else 0;
+        def la-int-at(s, i) = if ((i >= len(s)) || ((Comparable) digits-end(s, i) == i)) then (0 - 1) else str_to_int(substring(s, i, digits-end(s, i)));
+        def la-int-after(s, marker, from) {
+            let at = str_find(s, marker, from);
+            if (at < 0) then (0 - 1) else la-int-at(s, (at + len(marker)));
+        }
+        def la-text-after(s, marker, stop) {
+            let at = str_find(s, marker, 0);
+            if (at < 0) then "" else substring(s, (at + len(marker)), str_find(s, stop, (at + len(marker))));
+        }
+        // header length: eight little-endian bytes
+        def la-u64-go(bytes, i, scale, acc) = if (i >= 8) then acc else la-u64-go(bytes, (i + 1), (scale * 256), (acc + (str_byte_at(bytes, i) * scale)));
+        def la-header-len(path) {
+            let b = la-text(read_file_slice(path, 0, 8));
+            if (len(b) < 8) then (0 - 1) else la-u64-go(b, 0, 1, 0);
+        }
+        def la-header(path) {
+            let n = la-header-len(path);
+            if (n < 0) then "" else la-text(read_file_slice(path, 8, n));
+        }
+        // the census over the header text
+        def la-pairs(h) = la-count(h, ".lora_a" , 0, 0);
+        def la-rank(h) = la-int-after(h, ((("lora_a" + la-q()) + ":{") + la-cat([la-q(), "dtype", la-q(), ":", la-q()])), 0);
+        // lora_a is stored (input, rank): the rank is the second number of its shape
+        def la-rank-of(h) {
+            let at = str_find(h, ".lora_a", 0);
+            let shape = if (at < 0) then (0 - 1) else str_find(h, la-cat([la-q(), "shape", la-q(), ":["]), at);
+            if (shape < 0) then (0 - 1) else la-int-at(h, (str_find(h, ",", shape) + 1));
+        }
+        def la-lower(s, i, acc) = if (i >= len(s)) then acc else la-lower(s, (i + 1), ((String) acc + byte_to_str(if ((str_byte_at(s, i) >= 65) && (str_byte_at(s, i) <= 90)) then (str_byte_at(s, i) + 32) else str_byte_at(s, i))));
+        def la-dtype(h) = la-lower(la-text-after(h, la-cat([la-q(), "dtype", la-q(), ":", la-q()]), la-q()), 0, "");
+        def la-max-end-go(h, from, best) {
+            let at = str_find(h, la-cat([la-q(), "data_offsets", la-q(), ":["]), from);
+            if (at < 0) then best else la-max-end-next(h, (at + 17), best);
+        }
+        def la-max-end-next(h, i, best) {
+            let comma = str_find(h, ",", i);
+            let e = if (comma < 0) then (0 - 1) else la-int-at(h, (comma + 1)); la-max-end-go(h, i, if (e > best) then e else best);
+        }
+        def la-max-end(h) = la-max-end-go(h, 0, 0);
+        def la-layer-go(h, from, lo, hi) {
+            let at = str_find(h, "model.layers.", from);
+            if (at < 0) then [lo, hi] else la-layer-next(h, (at + 13), la-int-at(h, (at + 13)), lo, hi);
+        }
+        def la-layer-next(h, i, n, lo, hi) = la-layer-go(h, i, if ((lo < 0) || (n < lo)) then n else lo, if (n > hi) then n else hi);
+        def la-layers(h) = la-layer-go(h, 0, (0 - 1), (0 - 1));
+        def la-whole?(path) {
+            let n = la-header-len(path);
+            if (n < 0) then 0 else if ((Comparable) (8 + (n + la-max-end(la-header(path)))) == file_size(path)) then 1 else 0;
+        }
+        // census row: (pairs rank dtype layer-lo layer-hi bytes whole)
+        def la-census(path) {
+            let h = la-header(path);
+            let ls = la-layers(h); ["lora-census-v1", la-pairs(h), la-rank-of(h), la-dtype(h), ls[0], ls[1], file_size(path), la-whole?(path)];
+        }
+        // the training log's last iteration line: iter, loss text, tokens/sec
+        def la-last-iter-go(log, from, best) {
+            let at = str_find(log, "Iter ", from);
+            if (at < 0) then best else la-last-iter-go(log, (at + 5), if (str_find(log, "Train loss", at) >= 0) then at else best);
+        }
+        def la-last-iter-line(log) {
+            let at = la-last-iter-go(log, 0, (0 - 1));
+            if (at < 0) then "" else substring(log, at, str_find(log, byte_to_str(10), at));
+        }
+        def la-iter(line) = la-int-after(line, "Iter ", 0);
+        def la-loss(line) = la-text-after(line, "Train loss ", ",");
+        def la-tokens-sec(line) = la-int-after(line, "Tokens/sec ", 0);
+        def la-loss-label(loss) = if ((Comparable) len(loss) == 0) then "loss-unknown" else ("loss-" + loss);
+        def la-tags() = ["all", "we", "mesh", "voice"];
+        def la-samples(census, line, epoch) = [
+            fgtm-sample("voice.lora.adapter", fgtm-absent(), "lora-adapter", "form", LAPublisher(), "voice", la-cat(["rank-", census[2].str(), "-", census[3], "-layers-", census[4].str(), "-", census[5].str()]), fgtm-present(census[6]), fgtm-present(census[1]), if ((Comparable) census[7] == 1) then "stored" else "failed", fgtm-absent(), fgtm-present(epoch), fgtm-absent(), fgtm-absent(), "never", "physical-live", "safetensors.header", la-tags()),
+            fgtm-sample("voice.lora.train", fgtm-absent(), "lora-train", "form", LAPublisher(), "voice", la-loss-label(la-loss(line)), fgtm-absent(), fgtm-present(if (la-iter(line) < 0) then 0 else la-iter(line)), if ((Comparable) len(line) == 0) then "idle" else "active", fgtm-absent(), fgtm-present(epoch), fgtm-present(if (la-tokens-sec(line) < 0) then 0 else la-tokens-sec(line)), fgtm-absent(), "never", "physical-live", "train.log", la-tags())
+        ];
+        def la-publish(root, census, line, epoch) = fgtm-publish-snapshot(root, LAPublisher(), epoch, la-samples(census, line, epoch));
+    }
+    0;
+}
+//////////////////////////////////////////////////////////////////////
+// THE NUMBERS, AND THE WRITER. Below the header census: the body decodes
+// the adapter's float32 tensors natively (sign, exponent, mantissa by
+// integer arithmetic; powers of two by native math), computes a
+// low-rank delta B(A x) itself, and writes an adapter file in the same
+// format — header JSON plus little-endian floats — that it reads back
+// whole. That round trip is the LoRA writer HOMECOMING names.
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraNumbers {
+        def ln-pow2(n) = math_pow(2.0,n + 0.0);
+        def ln-u32-le(bytes, i) = (str_byte_at(bytes, i) + ((str_byte_at(bytes, (i + 1)) * 256) + ((str_byte_at(bytes, (i + 2)) * 65536) + (str_byte_at(bytes, (i + 3)) * 16777216))));
+        def ln-f32-sign-bit() = 2147483648;
+        def ln-f32-mantissa-scale() = 8388608;
+        def ln-f32-special-exponent() = 255;
+        def ln-f32-bias() = 127;
+        def ln-f32-subnormal-exponent() = -149;
+        def ln-f32-decode(u) {
+            let negative = u >= ln-f32-sign-bit(); let body = negative ? u - ln-f32-sign-bit() : u;
+            let e = body / ln-f32-mantissa-scale(); let m = body % ln-f32-mantissa-scale();
+            let mag = e == 0 ? (m + 0.0) * ln-pow2(ln-f32-subnormal-exponent()) : e == ln-f32-special-exponent() ? nothing : (1.0 + (m + 0.0) / (ln-f32-mantissa-scale() + 0.0)) * ln-pow2(e - ln-f32-bias());
+            nothing?(mag) ? nothing : negative ? -1.0 * mag : mag;
+        }
+        def ln-exp-of(a, e) = if (a < 1.0) then ln-exp-of((a * 2.0), (e - 1)) else if (a >= 2.0) then ln-exp-of((a / 2.0), (e + 1)) else e;
+        def ln-round-even(x) { let whole = float_to_int(x); let part = x - (whole + 0.0); whole + (part > 0.5 || part == 0.5 && whole % 2 == 1 ? 1 : 0); }
+        def ln-f32-encode(x) {
+            let negative = x < 0.0; let a = negative ? - x : x; let scale = ln-f32-mantissa-scale();
+            let body = !(x >= 0.0 || x < 0.0) ? ln-f32-special-exponent() * scale + scale / 2 : a >= ln-pow2(128) ? ln-f32-special-exponent() * scale : a == 0.0 ? 0 : a < ln-pow2(1 - ln-f32-bias()) ? ln-round-even(a / ln-pow2(ln-f32-subnormal-exponent())) : {
+                let e = ln-exp-of(a,0); let m = ln-round-even((a / ln-pow2(e) - 1.0) * (scale + 0.0));
+                (e + ln-f32-bias()) * scale + m;
+            };
+            body + (negative ? ln-f32-sign-bit() : 0);
+        }
+        def ln-f32-finite?(x) = (value_kind(x) == "int" || value_kind(x) == "float") && ln-f32-encode(x) / ln-f32-mantissa-scale() % (ln-f32-special-exponent() + 1) != ln-f32-special-exponent();
+        def ln-u32-bytes(u) = [(u % 256), ((u / 256) % 256), ((u / 65536) % 256), ((u / 16777216) % 256)];
+        def ln-floats-bytes(xs) = if ((Comparable) len(xs) == 0) then [] else append(ln-u32-bytes(ln-f32-encode(xs[0])), ln-floats-bytes(xs[1:]));
+        // read n floats of a tensor at byte offset `begin` past the header
+        def ln-floats-go(bytes, i, n, acc) = if (i >= (n * 4)) then reverse(acc) else ln-floats-go(bytes, (i + 4), n, cons(ln-f32-decode(ln-u32-le(bytes, i)), acc));
+        def ln-floats(path, hlen, begin, n) {
+            let bytes = read_file_slice(path, (8 + (hlen + begin)), (n * 4));
+            if nothing?(bytes) then [] else if (len(bytes) < (n * 4)) then [] else ln-floats-go(bytes, 0, n, []);
+        }
+        def ln-tensor-begin(h, name) {
+            let at = str_find(h, ((String) la-q() + name), 0);
+            if (at < 0) then (0 - 1) else la-int-after(h, la-cat([la-q(), "data_offsets", la-q(), ":["]), at);
+        }
+        def ln-dot(xs, ys) = if (((Comparable) len(xs) == 0) || ((Comparable) len(ys) == 0)) then 0.0 else ((xs[0] * ys[0]) + ln-dot(xs[1:], ys[1:]));
+        def ln-norm2(xs) = ln-dot(xs, xs);
+        // an adapter file: tensors as (name shape floats); header JSON then bytes
+        def ln-shape-text(shape) = if ((Comparable) len(shape) == 0) then "" else if ((Comparable) len(shape[1:]) == 0) then shape[0].str() else (shape[0].str() + ("," + ln-shape-text(shape[1:])));
+        def ln-entry(t, begin) = la-cat([la-q(), t[0], la-q(), ":{", la-q(), "dtype", la-q(), ":", la-q(), "F32", la-q(), ",", la-q(), "shape", la-q(), ":[", ln-shape-text(t[1]), "],", la-q(), "data_offsets", la-q(), ":[", begin.str(), ",", (begin + (4 * len(t[2]))).str(), "]}"]);
+        def ln-entries(ts, begin) = if ((Comparable) len(ts) == 0) then "" else ((String) ln-entry(ts[0], begin) + (if ((Comparable) len(ts[1:]) == 0) then "" else ("," + ln-entries(ts[1:], (begin + (4 * len(ts[0][2])))))));
+        def ln-header(ts) = la-cat(["{", ln-entries(ts, 0), "}"]);
+        def ln-pad(s) = if ((Comparable) (len(s) % 8) == 0) then s else ln-pad((s + " "));
+        def ln-text-bytes(s, i, acc) = if (i >= len(s)) then reverse(acc) else ln-text-bytes(s, (i + 1), cons(str_byte_at(s, i), acc));
+        def ln-body-bytes(ts) = if ((Comparable) len(ts) == 0) then [] else append(ln-floats-bytes(ts[0][2]), ln-body-bytes(ts[1:]));
+        def ln-write(path, ts) {
+            let h = ln-pad(ln-header(ts));
+            let cleared = fs-remove-file(path);
+            let wrote = host_file_append_bytes(path, append(ln-u32-bytes(len(h)), append([0, 0, 0, 0], append(ln-text-bytes(h, 0, []), ln-body-bytes(ts)))));
+            file_size(path);
+        }
+    }
+    0;
+}

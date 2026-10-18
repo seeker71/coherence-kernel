@@ -1,26 +1,22 @@
 # form-samples
 
-Real `.fk` source files in Form's S-expression bootstrap syntax. The Go, Rust, and TypeScript kernels ([`../form-kernel-go/`](../form-kernel-go/), [`../form-kernel-rust/`](../form-kernel-rust/), and [`../form-kernel-ts/`](../form-kernel-ts/)) read these files end-to-end and produce identical results.
+Real `.fk` source files in Form's S-expression bootstrap syntax. `fkwu`, the runtime, reads these files end-to-end and produces the expected output below.
 
 | Sample | What it exercises | Expected output |
 |---|---|---|
 | [`fact.fk`](fact.fk) | Recursive factorial — `defn`, `if/else`, recursion | `3628800` |
 | [`fib.fk`](fib.fk) | Naive Fibonacci — double-recursion, the tree-walker's worst case | `6765` |
 | [`closure.fk`](closure.fk) | Closure captures defining frame, called later with different arg | `15` |
-| [`list-sum.fk`](list-sum.fk) | Native `list`/`head`/`tail`/`len` + recursion over a list | `15` |
-| [`string-walk.fk`](string-walk.fk) | Char-by-char string scan (`char_at`, `ord`) — shape Form-on-top's lexer will use | `5` |
-| [`native-kernel-dogfood.fk`](native-kernel-dogfood.fk) | Form-level contract that grammar/parser proof uses Go, Rust, or TypeScript kernels, not Python bridges | `1` |
+| [`float-artifact-roundtrip.fk`](float-artifact-roundtrip.fk) | A float survives the `.fkb` wire format, bare and nested in a composite recipe | `0.8125` |
 
 ```bash
-# Run any sample through a sibling kernel
-./form-kernel-go      form-samples/fact.fk   # → 3628800
-./form-kernel-rust    form-samples/fact.fk   # → 3628800
-npx --yes tsx form-kernel-ts/src/main.ts form-samples/fact.fk
+# From the repo root: the runtime
+./fkwu form/form-samples/fact.fk                                          # → 3628800
 ```
 
 ## S-expression verb vocabulary (bootstrap)
 
-The kernels read S-expression syntax that maps directly onto substrate recipes:
+fkwu reads S-expression syntax that maps directly onto substrate recipes:
 
 | Verb | Recipe category | Notes |
 |---|---|---|
@@ -34,12 +30,10 @@ The kernels read S-expression syntax that maps directly onto substrate recipes:
 | `(defn <name> (params...) <body>)` | FNDEF | |
 | `(<name> <args>...)` | FNCALL | shorthand for both user fns and natives |
 
-Natives (called via `(<name> ...)` when no user binding shadows): `print`, `list`, `cons`, `head`, `tail`, `len`, `nth`, `empty`, `str_len`, `substring`, `char_at`, `str_concat`, `str_eq`, `int_to_str`, `str_to_int`, `ord`, `read_file`, `read_file_bytes`.
+A native answers `(<name> ...)` on fkwu: the pure core in [`../../docs/kernel-interface.md`](../../docs/kernel-interface.md) (`list`, `cons`, `head`, `tail`, `len`, `nth`, `empty`, `str_len`, `str_concat`, `str_eq`, ...), measured natives such as `substring`, and doors such as `print`, `read_file` and `read_file_bytes`. `char_at`, `int_to_str`, `str_to_int` and `ord` are not natives: they live in `form-stdlib/core.fk`, and a file that calls them names it with `; preludes: form-stdlib/core.fk`.
 
-Binary fixtures live alongside the `.fk` samples: [`tiny.png`](tiny.png) is a 45-byte 1x1 PNG (signature + IHDR + IEND) that exercises `read_file_bytes` and `form/form-stdlib/grammars/png.fk`.
+Binary fixtures live alongside the `.fk` samples: [`tiny.png`](tiny.png) is a 45-byte 1x1 PNG (signature + IHDR + IEND) that exercises `read_file_bytes`.
 
 ## Cross-modal experiments
 
-See [`cross-modal/`](cross-modal/) for four small demos exploring how Form recipes carry semantic content across modalities — image-as-recipe (SVG), cross-language content-addressing (Python/TS/Form factorial NodeID convergence), recipe-as-compression (honest finding: ice is *larger* than water at small scale), and universal diff (structural NodeID diff vs textual diff).
-
-The Form-surface-syntax parser written in Form (next turn) will sugar these into the `1 + 2` / `if x then a else b` / `defn f(x) = ...` syntax the Python kernel currently accepts. The recipes produced are identical either way.
+See [`cross-modal/`](cross-modal/) for two small demos exploring how Form recipes carry semantic content across modalities — image-as-recipe (`01-image-as-recipe/gen-circles-254.svg`) and natural-language-to-recipe (`05-nl-to-recipe/nl-arithmetic-demo.fk`, where a character grammar reads four English sentences and each parsed recipe is `node_eq` to the hand-built one: NL and S-expression are two source tongues pointing at one substrate identity).

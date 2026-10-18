@@ -1,0 +1,495 @@
+// form-cli-model-session.fk — one resident Qwen context across executable
+// Form observations, without re-encoding model output the body already holds.
+// A session opens only after the machine grants its memory as a lease (fcms-open-context: memory-governor.bml
+// mg-lease, keyed by the model file), and gives the lease back where it closes (fcms-release-ok?).
+//
+// A Qwen transformer consumes integer embedding IDs. That boundary remains the
+// model's physical shape. What this cell removes is the avoidable round trip:
+//
+//   generated ids -> decoded bytes -> whole transcript -> generated ids again
+//
+// The initial user turn is encoded once. Generation then returns both decoded
+// text and the exact IDs that produced it while retaining the same q38 stream
+// state and KV rows. A Form observation encodes only its newly born bytes plus
+// the small ChatML role crossing, prefills those IDs at the current position,
+// and resumes from the first predicted reply ID. BML/BMF still consumes the
+// decoded bytes directly through its own cursor; no tokenizer pre-step shapes
+// that grammar.
+//
+// The final generated ID is deliberately held pending. q38-forward consumes an
+// ID at a position and predicts the next one, so the newest prediction has not
+// entered KV yet. Before an observation is injected, that pending ID is placed
+// exactly once. If it is already a stop ID, it supplies the assistant close;
+// otherwise the close ID is appended after it. This is the same seed boundary
+// whose earlier omission the live heed cursor exposed.
+//
+// This cell owns stream state, not weights: the surrounding q38 context and the
+// per-conversation state are both explicit and both released. No persistence,
+// model weight update, or remote call is implied.
+//
+import form-stdlib/form-cli-model-generate.fk;
+import form-stdlib/model-registry.bml;
+import form-stdlib/form-cli-model-ds4.fk;
+import form-stdlib/dsv4-lease.fk;
+import form-stdlib/bml/form-cli-model-admission.bml;
+import form-stdlib/bml/model-admission.bml;
+import form-stdlib/bml/form-cli-model-observation.bml;
+import form-stdlib/bml/form-cli-model-adapter.bml;
+import form-stdlib/bml/form-cli-model-sampling.bml;
+import form-stdlib/bml/form-cli-model-draft.bml;
+import form-stdlib/bml/memory-governor.bml;
+import form-stdlib/form-cli-model-spec.fk;
+section [form.bml] {
+    // session = tag status reason path src ctx sts maxpos pos pending
+    //           stopped prompt-ids generated-ids injected-ids observation-count
+    def fcms-session(status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations) = ["form-cli-model-session-v1", status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations];
+    def fcms-status(s) = s[1];
+    def fcms-reason(s) = s[2];
+    def fcms-path(s) = s[3];
+    def fcms-src(s) = s[4];
+    def fcms-ctx(s) = s[5];
+    def fcms-sts(s) = s[6];
+    def fcms-maxpos(s) = s[7];
+    def fcms-pos(s) = s[8];
+    def fcms-pending(s) = s[9];
+    def fcms-stopped?(s) = s[10];
+    def fcms-prompt-ids(s) = s[11];
+    def fcms-generated-ids(s) = s[12];
+    def fcms-injected-ids(s) = s[13];
+    def fcms-observations(s) = s[14];
+    def fcms-live?(s) = (String) fcms-status(s) == "live" ? 1 : 0;
+    def fcms-pending?(s) = fcms-pending(s) >= 0 ? 1 : 0;
+    // Status and ownership are deliberately separate. A context-window refusal
+    // can make the conversational operation `nothing` while the already-opened
+    // context and stream state still need their physical release.
+    def fcms-resident?(s) = len(fcms-ctx(s)) > 0 && len(fcms-sts(s)) > 0 ? 1 : 0;
+    def fcms-none(reason) = fcms-session("nothing", reason, "", "", [], [], 0, 0, -1, 0, 0, 0, 0, 0);
+    def fcms-with-stream(s, pos, pending, stopped, generated, injected, observations) = fcmd-inherit(s, fcms-session(fcms-status(s), fcms-reason(s), fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), pos, pending, stopped, fcms-prompt-ids(s), generated, injected, observations));
+    def fcms-refuse(s, reason) = fcmd-inherit(s, fcms-session("nothing", reason, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    // A DeepSeek-V4 session holds the driver's context (thirteen slots, the layout RECORD in slot 2; Qwen's slot 2 is a list) and the driver's state rows: its step is the driver's decode
+    // (form-cli-model-ds4.fk). Every other session takes the step it always took.
+    def fcms-ds4?(s) = len(fcms-ctx(s)) == 13 && (String) value_kind(fcms-ctx(s)[2]) == "record";
+    def fcms-forward(s, id, pos) = fcms-ds4?(s) ? fcds-forward(fcms-ctx(s), fcms-sts(s), id, pos) : fcmd-forward(fcms-ctx(s), fcms-sts(s), fcmd-carrier(s), id, pos);
+    def fcms-refresh-head(s) = {
+        let pending = fcmd-pending(fcms-ctx(s), fcmd-carrier(s), fcms-pending(s));
+        let next = fcms-with-stream(s, fcms-pos(s), pending, 0, fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s));
+        pending < 0 ? fcms-refuse(next, "adapter-head-refused") : next;
+    };
+    def fcms-attach-adapter(s, path) = !fcms-live?(s) ? s : !nil?(fcmd-carrier(s)) ? fcms-refuse(s, "adapter-already-attached") : fcms-generated-ids(s) > 0 || fcms-observations(s) > 0 ? fcms-refuse(s, "adapter-admission-requires-fresh-session") : {
+        let admitted = fcmd-admit(fcms-ctx(s), path);
+        let owned = fcmd-with-carrier(s, admitted[2]);
+        (Comparable) admitted[0] == 1 ? fcms-refresh-head(owned) : fcms-refuse(owned, admitted[1]);
+    };
+    def fcms-open-adapted(path, prompt, maxpos, profile, adapter-path) = fcms-attach-adapter(fcms-open-with-profile(path, prompt, maxpos, profile), adapter-path);
+    // The API names what is and is not encoded. A live observation can report
+    // these strings without reproducing model or user content.
+    def fcms-initial-encode-scope() = "initial-user-turn-once";
+    def fcms-resume-encode-scope() = "new-observation-bytes-and-role-crossing-only";
+    def fcms-inline-bml-encode-scope() = "pending-generated-id-then-new-bml-bytes-no-role-replay";
+    def fcms-generated-id-policy() = "carry-original-generated-ids-and-kv";
+    def fcms-model-executed-form?() = 0;
+    def fcms-rejection-pending-policy() = "discard-uncommitted-pending-id-before-typed-observation";
+    // The living peer does not receive a made-up context width.  Its ceiling is
+    // read from the selected sealed GGUF, the same source that the carrier will
+    // open.  Absence is a typed local refusal, never an occasion to use remote.
+    def fcms-artifact-context-capacity-from-src(src) = {
+        let arch = fcmg-arch(src);
+        (String) arch == "" ? 0 : gmt-u32(src, q38-key(arch, "context_length"));
+    };
+    def fcms-open-resident-agent(path, prompt) = (String) path == "" ? fcms-none("model-path-absent") : {
+        let src = fcmg-src(path);
+        let capacity = fcms-artifact-context-capacity-from-src(src);
+        capacity <= 0 ? fcms-none("artifact-declared-context-absent") : fcms-open(path, prompt, capacity);
+    };
+    // A session takes the weights' pages (mapped from the file, one physical copy for every kernel that maps it) and
+    // a KV state and scratch of its own: the machine is asked first (memory-governor.bml), and a held answer opens
+    // nothing, named host-memory-held with its reason, so the caller backs off instead of the host falling over.
+    // The grant is a lease (mg-lease): a promise other processes see before the pages show in the machine's reading,
+    // keyed by the model file so a second process mapping the same weights is charged its own bytes only. The
+    // lease goes where the session closes (fcms-release-ok?) or where this open gives up.
+    // The shared bytes the lease promises: the file's size for every file but a DeepSeek-V4 GGUF (dsv4-lease.fk: that file is mapped and touched in part, so its figure is the derived working
+    // set, derived and not measured). The call below keeps its text; what it is asked changes only for a deepseek4 file.
+    def fcms-weights-bytes(path) = dls-weights-bytes(path);
+    // The bytes this Qwen open allocates besides the mapped file. An unreadable
+    // geometry keeps the unread margin, so a missing header never asks for less.
+    def fcms-qwen-own(src, maxpos) = {
+        let geo = q38-geo(src, maxpos);
+        geo[0] <= 0 || geo[21] <= 0 ? mg-kv-margin() : q38-own-bytes(geo, fcma-span(maxpos));
+    };
+    def fcms-admit-own(path, maxpos) = maxpos <= 0 ? mg-kv-margin() : {
+        let src = fcmg-src(path);
+        (String) fcmg-arch(src) == "" || (String) fcmg-arch(src) == "deepseek4" ? mg-kv-margin() : fcms-qwen-own(src, maxpos);
+    };
+    def fcms-memory-need(path) = fcms-weights-bytes(path) + mg-kv-margin();
+    def fcms-memory-held(path, v, need) = {
+        let said = print_str(mg-line("model session " ++ path, mg-need-of(v, need), v));
+        fcms-none("host-memory-held:" ++ v[1]);
+    };
+    def fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) = {
+        let own = fcms-qwen-own(src, maxpos);
+        let granted = mg-lease("model session " ++ path, path, fcms-weights-bytes(path), own);
+        mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) : fcms-memory-held(path, granted, fcms-weights-bytes(path) + own);
+    };
+    // A DeepSeek-V4 file, reached past the lane gate below (mr-wired? reads the registry's row for the arch: deepseek4 dsv4, wired): the chat template's ids from the file's own tokenizer, the lease
+    // for the derived working set at this session's capacity (cut to the positions the driver serves), the driver's arena open, state and prefill (form-cli-model-ds4.fk). A refusal before the context exists
+    // gave the lease back there; after it, the context and state stay in the record for fcms-release-ok?, as the Qwen door leaves them.
+    // The open is announced as the Qwen open is (the same two progress stages around the lease, the open and the prefill: print_str lines and framebuffer records, no prompt or path in them).
+    def fcms-open-ds4-staged(path, src, prompt, requested-maxpos, reserve) = {
+        let _admit-begin = fcmg-live-stage("model-session-open-prefill-begin", 8388611);
+        let opened = fcms-open-ds4(path, src, prompt, requested-maxpos, reserve);
+        let _admit-complete = fcmg-live-stage("model-session-open-prefill-complete", 8388612);
+        opened;
+    };
+    def fcms-open-ds4(path, src, prompt, requested-maxpos, reserve) = fcms-ds4-session(path, src, fcds-open-parts(path, src, prompt, requested-maxpos, reserve));
+    def fcms-ds4-session(path, src, parts) = (String) parts[0] == "live" ? fcms-session("live", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : len(parts[2]) > 0 ? fcms-session("nothing", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : fcms-none(parts[1]);
+    def fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced) = {
+        let span = fcma-span(prompt-count);
+        let _span = q38oo-stage(("model-session-prefill-span-" + span.str()), 8388624);
+        let _open-begin = q38oo-stage("model-session-context-open-begin", 8388620);
+        let ctx = (Comparable) iced == 1 ? qsx-open-span(path, maxpos, x, span) : q38-open-span(path, maxpos, span);
+        let _open-ready = q38oo-stage("model-session-context-open-ready", 8388620);
+        !((Comparable) q38-context-ok?(ctx) == 1) ? {
+            let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
+            let unleased = mg-release();
+            fcms-none("model-context-open-refused");
+        } : {
+            let _state-begin = q38oo-stage("model-session-state-begin", 8388621);
+            let sts = q38-new-state(ctx[2]);
+            let _state-ready = q38oo-stage("model-session-state-ready", 8388621);
+            !((Comparable) q38-state-ok?(sts) == 1) ? {
+                let state-closed = q38-free-state(sts);
+                let context-closed = q38-close(ctx, []);
+                let unleased = mg-release();
+                fcms-none("model-stream-state-refused");
+            } : {
+                // The speculative drafter opens before the prompt's prefill, so the prefill's own batches capture what it reads (form-cli-model-spec.fk).
+                // A refusal names its reason in the owner and the session opens plain.
+                let _spec-begin = q38oo-stage("model-session-spec-open-begin", 8388626);
+                let spec = fcsp-open(path, ctx, maxpos);
+                let _spec-ready = q38oo-stage((Comparable) q38x-on?(spec) == 1 ? "model-session-spec-open-ready" : "model-session-spec-off", 8388626);
+                fcms-open-prefilled(path, src, maxpos, prompt-count, cursor, ids, live-cursor, ctx, sts, span, spec);
+            };
+        };
+    };
+    def fcms-open-prefilled(path, src, maxpos, prompt-count, cursor, ids, live-cursor, ctx, sts, span, spec) = (Comparable) live-cursor == 1 ? {
+        let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
+        let pf = fcmg-live-prefill-span-t(ctx, sts, cursor, q38x-tap(spec));
+        let _prefill-ready = q38oo-stage((String) pf[1] == "ok" ? "model-session-prefill-ready" : "model-session-prefill-refused", 8388622);
+        !((String) pf[1] == "ok") ? fcsp-attach(fcms-session("nothing", pf[5], path, src, ctx, sts, maxpos, pf[3], -1, 0, prompt-count, 0, 0, 0), spec, sts) : fcsp-attach(fcms-session("live", "opened-live-cursor", path, src, ctx, sts, maxpos, pf[3], pf[2], 0, prompt-count, 0, 0, 0), spec, sts);
+    } : {
+        let _prefill-begin = q38oo-stage("model-session-prefill-begin", 8388622);
+        let pf = q38-prefill-span-sliced-t(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, span, q38x-tap(spec));
+        let complete = pf[0] >= 0 && (Comparable) pf[1] == prompt-count;
+        let _prefill-ready = q38oo-stage(complete ? "model-session-prefill-ready" : "model-session-prefill-refused", 8388622);
+        fcsp-attach(fcms-session(complete ? "live" : "nothing", complete ? "opened-scanner-fallback" : "model-prefill-refused", path, src, ctx, sts, maxpos, pf[1], pf[0], 0, prompt-count, 0, 0, 0), spec, sts);
+    };
+    // The PROFILE names which chat shape wraps the prompt: "full" arms
+    // the teach-layer control grammar (its <FAIL> is a typed decline, not
+    // model failure); "knowledge-query" is the plain chat segments with
+    // no control overlay — the shape for probes and comparisons that
+    // want the model's own words. fcms-open keeps "full", the served
+    // default; fcms-open-with-profile is the same door with the shape
+    // chosen by the caller as data.
+    def fcms-open(path, prompt, maxpos) = fcms-open-with-profile(path, prompt, maxpos, "full");
+    def fcms-open-with-profile(path, prompt, maxpos, profile) = fcms-open-sized(path, prompt, maxpos, profile, 0);
+    // Allocate from the counted prompt plus the caller's output/observation
+    // reserve. Artifact capacity is still checked before model admission.
+    def fcms-open-reserved(path, prompt, reserve, profile) = reserve <= 0 ? fcms-none("session-output-reserve-refused") : fcms-open-sized(path, prompt, 0, profile, reserve);
+    // Every open queues for its weights at this one place (model-admission.bml), so the voice, the code lane, learning,
+    // prompt lookup and every probe share one queue: oldest first, admitted when the OS has headroom for what the load adds
+    // (a file a live process already holds is shared, not loaded again). The load slot frees when the open completes; the
+    // residency note stays until the session is closed (fcms-release-ok?). Not admitted within the wait: a typed refusal.
+    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, adm-admit-for("fcms-open", path, adm-wait-ms(), fcms-admit-own(path, requested-maxpos)));
+    def fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, claim) = (Comparable) claim[0] == 1 ? fcms-open-held(path, prompt, requested-maxpos, profile, reserve, claim[2]) : fcms-none(("model-queued: " + claim[1]));
+    def fcms-open-held(path, prompt, requested-maxpos, profile, reserve, ticket) = {
+        let opened = fcms-open-body(path, prompt, requested-maxpos, profile, reserve);
+        let loaded = adm-loaded(ticket);
+        (Comparable) fcms-resident?(opened) == 1 ? opened : fcms-open-refused(opened, path);
+    };
+    def fcms-open-refused(opened, path) = {
+        let dropped = adm-drop(path);
+        opened;
+    };
+    def fcms-open-body(path, prompt, requested-maxpos, profile, reserve) = {
+        let _seal-begin = fcmg-live-stage("model-session-seal-begin", 8388609);
+        let verdict = qaf-seal-verdict(path);
+        let _seal-complete = fcmg-live-stage("model-session-seal-complete", 8388610);
+        !((Comparable) verdict == 1) ? fcms-none(fcmg-seal-refusal(verdict)) : {
+            let _header-begin = fcmg-live-stage("model-session-header-begin", 8388614);
+            let src = fcmg-src(path);
+            let _header-complete = fcmg-live-stage("model-session-header-complete", 8388615);
+            let arch = fcmg-arch(src);
+            // admission by the lane table, never a literal: an arch
+            // whose lane is not yet wired into this door refuses
+            // TYPED, naming the lane that would serve it.
+            !((Comparable) mr-wired?(arch) == 1) ? fcms-none(("lane-unwired:" + (mr-lane-for(arch) + (":" + arch)))) : (String) arch == "deepseek4" ? fcms-open-ds4-staged(path, src, prompt, requested-maxpos, reserve) : {
+                let _crystal-begin = fcmg-live-stage("model-session-tokenizer-crystal-begin", 8388616);
+                let x = qsx-load(path);
+                let _crystal-complete = fcmg-live-stage("model-session-tokenizer-crystal-complete", 8388617);
+                let iced = (Comparable) x[0] == 1 ? 1 : 0;
+                let _cursor-begin = fcmg-live-stage("model-session-prompt-cursor-begin", 8388618);
+                let cursor0 = (Comparable) iced == 1 ? fcmg-chat-cursor-profile(path, prompt, profile, x) : qtlc-open-index(["absent", "crystal-absent", "", 0, 0, 0, 0, 0, 0, 0], []);
+                let live-cursor = (String) qtlc-status(cursor0) == "open" ? 1 : 0;
+                // Exact count without a retained prompt-ID list.
+                // The immutable cursor is then reopened for prefill.
+                let counted = (Comparable) live-cursor == 1 ? qtlc-count(cursor0) : ["fallback", cursor0];
+                let count-ok = (Comparable) live-cursor == 1 ? (String) counted[0] == "done" ? 1 : 0 : 1;
+                let _cursor-complete = fcmg-live-stage("model-session-prompt-cursor-complete", 8388619);
+                let ids = (Comparable) live-cursor == 1 ? [] : fcmg-chat-ids-profile(src, prompt, profile);
+                let _count-begin = fcmg-live-stage("model-session-prompt-count-begin", 8388620);
+                let prompt-count = (Comparable) live-cursor == 1 ? qtlc-token-count(counted[1]) : len(ids);
+                let maxpos = reserve > 0 ? prompt-count + reserve : requested-maxpos;
+                let _count-complete = fcmg-live-stage("model-session-prompt-count-complete", 8388621);
+                let _positions = q38oo-stage(("model-session-prompt-positions-" + prompt-count.str()), 8388625);
+                let _reopen-begin = fcmg-live-stage("model-session-prompt-cursor-reopen-begin", 8388622);
+                let cursor = cursor0;
+                let _reopen-complete = fcmg-live-stage("model-session-prompt-cursor-reopen-complete", 8388623);
+                !((Comparable) count-ok == 1) ? {
+                    qtlc-release-index(qtlc-index(cursor));
+                    fcms-none(("live-prompt-count-refused:" + qtlc-reason(counted[1])));
+                } : prompt-count <= 0 ? {
+                    qtlc-release-index(qtlc-index(cursor));
+                    fcms-none("initial-turn-encoded-no-ids");
+                } : maxpos <= prompt-count || maxpos > gmt-u32(src, q38-key(arch, "context_length")) ? {
+                    qtlc-release-index(qtlc-index(cursor));
+                    fcms-none("session-context-window-refused");
+                } : {
+                    let _admit-begin = fcmg-live-stage("model-session-open-prefill-begin", 8388611);
+                    let opened = fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced);
+                    let _admit-complete = fcmg-live-stage("model-session-open-prefill-complete", 8388612);
+                    (Comparable) live-cursor == 1 ? fcms-resident?(opened) ? fcmo-with-index(opened, qtlc-index(cursor)) : {
+                        qtlc-release-index(qtlc-index(cursor));
+                        opened;
+                    } : opened;
+                };
+            };
+        };
+    };
+    // Decoder progress is observable without disclosing its token or text.
+    // Checkpoints arrive after 1, 2, 4, 8... local steps: O(log n) terminal
+    // frames retain liveness for an unbounded turn without turning a long
+    // answer into a second token stream.
+    def fcms-decode-checkpoint?(steps-to-checkpoint) = steps-to-checkpoint <= 1 ? 1 : 0;
+    def fcms-decode-next-left(steps-to-checkpoint, checkpoint-width) = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? checkpoint-width : steps-to-checkpoint - 1;
+    def fcms-decode-next-width(steps-to-checkpoint, checkpoint-width) = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? checkpoint-width * 2 : checkpoint-width;
+    def fcms-decode-pulse(completed-steps) = fcmg-live-stage(("model-session-decode-checkpoint-" + completed-steps.str()), 8388613);
+    // result = (ids pending pos stopped). Returned ids are model speech only;
+    // the stop/control prediction is retained separately for the next crossing.
+    // The forward is the caller's step, as fcsam-walk takes its own: fcms-walk is this walk with the session's
+    // token-wise forward, and the draft lane's band (tests/form-cli-model-draft-band.bml) holds its walk to
+    // this one's contract by running the same scripted predictions through both.
+    def fcms-walk-by(step, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = id < 0 ? [out, -1, pos, 1] : (Comparable) q38-stop?(id, stops) == 1 ? [out, id, pos, 1] : left <= 0 ? [out, id, pos, 0] : {
+        let out2 = append(out, [id]);
+        let completed2 = completed-steps + 1;
+        let pulse = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? fcms-decode-pulse(completed2) : 0;
+        let next-left = fcms-decode-next-left(steps-to-checkpoint, checkpoint-width);
+        let next-width = fcms-decode-next-width(steps-to-checkpoint, checkpoint-width);
+        (Comparable) left == 1 ? [out2, id, pos, 0] : {
+            let nid = step(s, id, pos);
+            nid < 0 ? [out2, -1, pos + 1, 1] : (Comparable) q38-stop?(nid, stops) == 1 ? [out2, nid, pos + 1, 1] : fcms-walk-by(step, s, nid, pos + 1, left - 1, stops, out2, next-left, next-width, completed2);
+        };
+    };
+    // THE PLANNED STEP. A walk of n tokens builds the token's position-independent dispatch records ONCE for this session's state
+    // (q38-plan: ~50-80 ms, about a token) and every step then runs them, building only the full-attention layers' position records: the
+    // same dispatches in the same order with the same bytes as fcms-forward, without rebuilding ~1200 binding strings a token. On a machine
+    // whose cores are held by other work that building was 170-200 ms a token against 90-100 for the device (the walker, not the GPU,
+    // set the speed); planned, the host is ~25 ms and the device sets it. Only the plain Qwen session takes it (no adapter carrier, not
+    // DeepSeek-V4) and only for a walk long enough to repay the build; every other session, and a short walk, takes fcms-forward as it was.
+    def fcms-plan-min() = 6;
+    def fcms-plannable?(s, n) = n >= fcms-plan-min() && !fcms-ds4?(s) && nil?(fcmd-carrier(s)) && len(fcms-sts(s)) > 0 && len(fcms-ctx(s)) > 10;
+    def fcms-planned-step(ctx, sts, plan) = (s2, id2, pos2) => q38-forward-planned(ctx, plan, sts, id2, pos2);
+    def fcms-step-for(s, n) = fcms-plannable?(s, n) ? fcms-planned-step(fcms-ctx(s), fcms-sts(s), q38-plan(fcms-ctx(s), fcms-sts(s))) : fcms-forward;
+    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-by(fcms-step-for(s, left), s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps);
+    // generation = tag text ids updated-session. No generated text is needed to
+    // resume; the bytes are exposed only for the Form/BMF boundary that asks.
+    def fcms-generation(text, ids, session) = ["form-cli-model-session-generation-v1", text, ids, session];
+    def fcms-generation-text(g) = g[1];
+    def fcms-generation-ids(g) = g[2];
+    def fcms-generation-session(g) = g[3];
+    def fcms-generate(s, n) = !((Comparable) fcms-live?(s) == 1) || n <= 0 ? fcms-generation("", [], s) : fcms-ds4?(s) ? fcms-generate-ds4(s, n) : !nil?(fcsam-owner(s)) ? fcms-generate-sampled(s, n) : fcms-generate-greedy(s, n);
+    // THE GREEDY WALK of a plain Qwen session is speculative while its owner is ready (form-cli-model-spec.fk): the same generation (text, ids, session) and a fifth
+    // element naming what happened: the walk's report, or the reason it was the plain planned walk. A session with no owner (opened before the lane had one) is plain and says nothing.
+    def fcms-generation-spec(g) = len(g) > 4 ? g[4] : "";
+    def fcms-generation-with-spec(g, note) = append(g, [note]);
+    // a session may take the speculative step when its drafter holds every position the stream holds (q38x-ready-why: "" means ready)
+    // An attached adapter changes the head's logits and the verify path does not apply it: such a session is plain, and says so.
+    def fcms-spec-why(s, n) = fcsp-has?(s) != 1 ? "" : !nil?(fcmd-carrier(s)) ? "spec-off:adapter-attached" : !nil?(fcsam-owner(s)) ? "spec-off:sampled" : !nothing?(fcmdr-owner(s)) ? "spec-off:draft-lane" : n < fcsp-min-walk() ? "spec-off:short-walk" : q38x-ready-why(fcsp-owner(s), fcms-sts(s), fcms-pos(s));
+    def fcms-spec?(s, n) = fcsp-has?(s) == 1 && (String) fcms-spec-why(s, n) == "" ? 1 : 0;
+    def fcms-generate-greedy(s, n) = (Comparable) fcms-spec?(s, n) == 1 ? fcms-generate-spec(s, n) : fcms-generate-plain(s, n);
+    def fcms-generate-plain(s, n) = {
+        let stops = fcmo-stops(s);
+        let t0 = host_monotonic_ms();
+        let walked = fcms-walk(s, fcms-pending(s), fcms-pos(s), n, stops, [], 1, 1, 0);
+        let ms = host_monotonic_ms() - t0;
+        let ids = walked[0];
+        let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        let g = fcms-generation(ftdb-text(fcms-src(s), ids), ids, next);
+        let note = fcms-spec-why(s, n) == "" ? "spec-off:plain-walk" : fcms-spec-why(s, n);
+        fcsp-has?(s) == 1 ? fcms-generation-with-spec(g, fcsp-announce("plain", len(ids), ms, note)) : g;
+    };
+    // The speculative walk: the plain walk's contract (ids said, pending token and position, stopped) from steps that check a drafted block in one weight pass.
+    def fcms-generate-spec(s, n) = {
+        let o = fcsp-owner(s);
+        let t0 = host_monotonic_ms();
+        let walked = q38x-walk(o, fcms-sts(s), fcms-pending(s), fcms-pos(s), n, fcmo-stops(s), fcms-decode-pulse);
+        let ids = walked[0];
+        let judged = q38x-judge(o, walked[4]);
+        let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        let ms = host_monotonic_ms() - t0;
+        fcms-generation-with-spec(fcms-generation(ftdb-text(fcms-src(s), ids), ids, next), fcsp-announce("spec", len(ids), ms, fcsp-report(o, walked, ms)));
+    };
+    // The DeepSeek-V4 walk: the same walk (fcms-walk takes the session's own step, which is the driver's decode), the header's own stop ids, the DeepSeek tokenizer's decode. Greedy: the sampler is not wired here.
+    // A walk ends with a NAMED ending (form-cli-model-ds4.fk fcds-ending-of: eos, max-tokens, context-limit, step-refused) and the session keeps it as its reason (fcms-ending): the driver serves positions 0 through 2047,
+    // so a long walk stops at the limit and says so. A session whose last walk already ended (no pending id) answers nothing new and keeps its ending.
+    def fcms-generate-ds4(s, n) = fcms-pending(s) < 0 ? fcms-generation("", [], s) : fcms-generate-ds4-with(fcms-forward, s, n);
+    // THE UNWIND. A stop inside the walk (a step that raises, a text that cannot render) is a surprise with live resources: the walk is offered once under try, and when it answers nothing the session's context, expert
+    // arena and state are released in synced rounds and its lease given back, here, where they are owned, before anything else runs; the session that comes back is a named ending (walk-stopped), not resident, and its
+    // own release has nothing left to free. The Qwen walk is as it was. `step` is the session's step (fcms-forward), the seam a band hands a step that raises.
+    def fcms-generate-ds4-with(step, s, n) = {
+        let g = try fcms-generate-ds4-by(step, s, n) catch nothing();
+        nothing?(g) ? fcms-ds4-unwind(s, "walk-stopped") : g;
+    };
+    def fcms-generate-ds4-by(step, s, n) = fcms-generate-ds4-walk(step, s, n, fcds-stops(fcms-src(s)));
+    def fcms-generate-ds4-walk(step, s, n, stops) = fcms-generate-ds4-done(s, stops, fcms-walk-by(step, s, fcms-pending(s), fcms-pos(s), n, stops, [], 1, 1, 0));
+    def fcms-ds4-unwind(s, why) = {
+        let left = fcds-release(fcms-ctx(s), fcms-sts(s));
+        fcms-generation("", [], fcms-ds4-unwound(s, left == 0 ? why : why ++ "-release-incomplete"));
+    };
+    def fcms-ds4-unwound(s, reason) = fcmd-inherit(s, fcms-session("nothing", reason, fcms-path(s), fcms-src(s), [], [], fcms-maxpos(s), fcms-pos(s), 0 - 1, 1, fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-generate-ds4-done(s, stops, walked) = {
+        let ids = walked[0];
+        let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        fcms-generation(fcds-text(fcms-src(s), ids), ids, fcms-ends(next, fcds-ending-of(fcms-ctx(s), stops, walked)));
+    };
+    // The session with its ending named: the status stays what it was (a session at its limit is live and finished, not refused).
+    def fcms-ends(s, ending) = fcmd-inherit(s, fcms-session(fcms-status(s), ending, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-ending(s) = fcms-reason(s);
+    // the line a DeepSeek session reports its usage in: the prompt, what it generated, how its last walk ended and the last position the driver serves for it
+    def fcms-usage-line-ds4(s) = fcds-usage-line(fcms-prompt-ids(s), fcms-generated-ids(s), fcms-ending(s), fcds-consumed(fcms-pos(s), fcms-maxpos(s)), fcms-maxpos(s), fcds-driver-limit(fcms-src(s)));
+    def fcms-generate-sampled(s, n) = {
+        let walked = fcsam-run(s, fcsam-owner(s), fcms-ctx(s)[1][28], fcms-step-for(s, n),fcms-decode-pulse, fcms-pos(s), n, fcmo-stops(s));
+        let ids = walked[0];
+        let owned = fcsam-with-owner(s, walked[4]);
+        let next = fcms-with-stream(owned, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        fcms-generation(ftdb-text(fcms-src(s), ids), ids, (String) walked[5] == "" ? next : fcms-refuse(next, walked[5]));
+    };
+    // Direct questions are not tool observations.  Preserve the completed
+    // assistant token and enter the ordinary no-thinking user/assistant template.
+    // Recipe/source effects use the admitted model's cursor and tool envelope.
+    def fcms-direct-user-role() = "user";
+    def fcms-direct-answer-tail-ids(src, text) = fcmo-direct-reference-ids(src, text);
+    // The ordinary observation crossing commits the pending model token exactly
+    // once.  A rejection crossing does the opposite: that pending prediction
+    // has not entered KV, so it is discarded and only the assistant close is
+    // placed at its position.  Keeping this as one pure helper makes token 0/1
+    // testable without opening a model.
+    def fcms-crossing-prefix-ids(pending, pending-is-stop, close-id, retain-pending) = (Comparable) retain-pending == 0 ? [close-id] : {
+        let prefix = pending >= 0 ? [pending] : [];
+        let close-needed = pending >= 0 && (Comparable) pending-is-stop == 1 ? 0 : 1;
+        (Comparable) close-needed == 1 ? tkz-cat(prefix, [close-id]) : prefix;
+    };
+    def fcms-observation-ids(s, text) = {
+        let stops = fcmo-stops(s);
+        let pending = fcms-pending(s);
+        let closed = fcms-crossing-prefix-ids(pending, pending >= 0 ? q38-stop?(pending, stops) : 0, fcmo-end-id(s), 1);
+        let tail = fcmo-session-tail-ids(s, fcmo-tool-content(text));
+        nothing?(tail) ? nothing() : tkz-cat(closed, tail);
+    };
+    def fcms-direct-answer-observation-ids(s, text) = {
+        let src = fcms-src(s);
+        let stops = fcmo-stops(s);
+        let pending = fcms-pending(s);
+        let closed = fcms-crossing-prefix-ids(pending, pending >= 0 ? q38-stop?(pending, stops) : 0, fcmo-end-id(s), 1);
+        let indexed = fcmo-session-tail-ids(s, text);
+        tkz-cat(closed, nothing?(indexed) ? fcms-direct-answer-tail-ids(src, text) : indexed);
+    };
+    def fcms-rejection-observation-ids(s, text) = {
+        let closed = fcms-crossing-prefix-ids(fcms-pending(s), 0, fcmo-end-id(s), 0);
+        let tail = fcmo-session-tail-ids(s, fcmo-tool-content(text));
+        nothing?(tail) ? nothing() : tkz-cat(closed, tail);
+    };
+    // A Form execution result may continue the current assistant stream as BML
+    // instead of opening another ChatML tool/assistant pair. The pending model
+    // ID is still committed exactly once. If it is already an assistant stop,
+    // the ordinary role crossing remains the honest shape; bytes cannot be
+    // appended inside a turn that has already ended.
+    def fcms-inline-bml-observation-ids(s, text) = {
+        let src = fcms-src(s);
+        let pending = fcms-pending(s);
+        let stops = fcmo-stops(s);
+        pending >= 0 && (Comparable) q38-stop?(pending, stops) == 1 ? fcms-observation-ids(s, text) : {
+            let prefix = pending >= 0 ? [pending] : [];
+            let encoded = fcmo-text-ids(s, ("\n" + (text + "\n")));
+            nothing?(encoded) ? nothing() : tkz-cat(prefix, encoded);
+        };
+    };
+    def fcms-observe-ids(s, ids, refusal-reason) = !((Comparable) fcms-live?(s) == 1) ? s : nothing?(ids) || ((Comparable) len(ids) == 0 || fcms-pos(s) + len(ids) > fcms-maxpos(s)) ? fcms-refuse(s, refusal-reason) : {
+        let ctx = fcms-ctx(s);
+        // All IDs retain their order and the same stream state.
+        // Submission width, unlike observation length, is bounded.
+        // the speculative drafter reads the observation's hidden states in the observation's own batches (fcsp-tap: nothing for a session without a drafter)
+        let pf = fcmo-prefill-t(ctx, fcms-sts(s), ids, fcms-pos(s), fcsp-tap(s));
+        !fcmo-shape(pf, fcms-pos(s), len(ids)) ?         // No retry may resume this state: a completed prefix or
+        // a partially executed failing submission can be present.
+        // Counters retain the last completed observation, not a
+        // claim that physical KV was rolled back. Keep ownership
+        // so the original context can still be released.
+fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stream(s, pf[1], pf[0], 0, fcms-generated-ids(s), fcms-injected-ids(s) + len(ids), fcms-observations(s) + 1));
+    };
+    // Injects one typed Form observation into the SAME q38 state. It returns a
+    // session whose pending ID is the first prediction after the observation.
+    // A DeepSeek-V4 session takes no observation yet (the crossing is Qwen's ChatML; the driver has no template here): a typed refusal that keeps the context for its release.
+    def fcms-ds4-observation-refused(s) = fcms-refuse(s, "ds4-observation-not-wired");
+    def fcms-observe(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-observation-ids(s, text), "observation-context-window-refused");
+    def fcms-observe-direct-answer(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-direct-answer-observation-ids(s, text), "direct-answer-context-window-refused");
+    // Form-native execution-token shape: compact BML enters the same generated
+    // stream without paying a second role template. It remains a named choice,
+    // not a replacement for ordinary tool-role observations.
+    def fcms-observe-inline-bml(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-inline-bml-observation-ids(s, text), "inline-bml-observation-context-window-refused");
+    // Grammar/execution rejection enters at the pending token's exact position.
+    // The rejected prediction is not included in ids and never reaches q38-forward.
+    def fcms-observe-rejection(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-rejection-observation-ids(s, text), "rejection-observation-context-window-refused");
+    // A DeepSeek session's handles go through the driver's own close (dsv4-close: the work is settled first, every handle of the context and its expert arena and of the state is freed in synced rounds, and the
+    // handles still held are answered): the carrier refuses metal_buf_free while work naming the buffer is unsettled and the native wrapper reads that refusal as 0, and Qwen's closer does not reach the arena's buffers.
+    // Released is every handle freed; the lease goes back either way.
+    def fcms-release-ds4(s, ok) = {
+        let left = fcds-release(fcms-ctx(s), fcms-sts(s));
+        ok && left == 0 ? 1 : 0;
+    };
+    def fcms-release-ok?(s) = {
+        let dropped = adm-drop(fcms-path(s));
+        let cursor-released = fcmo-release-index(s);
+        let sampler-expected = fcsam-owned(fcsam-owner(s));
+        let sampler-closed = fcsam-close(fcsam-owner(s));
+        let sampler-ok = cursor-released && (Comparable) sampler-closed == sampler-expected;
+        let adapter-expected = fcmd-owned(fcmd-carrier(s));
+        adapter-expected > 0 ? metal_sync() : 0;
+        let adapter-closed = fcmd-close(fcmd-carrier(s));
+        let adapter-ok = sampler-ok && (Comparable) adapter-closed == adapter-expected;
+        // Slot 18 owns the draft lane's spare recurrent state (form-cli-model-draft.bml); the same expected-against-closed
+        // count. The owner settles the device before it frees (fcmdr-close).
+        let draft-expected = fcmdr-owned(fcmdr-owner(s));
+        let draft-closed = fcmdr-close(fcmdr-owner(s));
+        let draft-ok = adapter-ok && (Comparable) draft-closed == draft-expected;
+        // Slot 19 owns the speculative drafter and its scratch (form-cli-model-spec.fk): closed before the context its weights sit beside, the same count.
+        let spec-expected = fcsp-owned(s);
+        let spec-closed = fcsp-close(s);
+        let spec-ok = draft-ok && (Comparable) spec-closed == spec-expected;
+        (Comparable) fcms-resident?(s) == 0 ? spec-ok : fcms-ds4?(s) ? fcms-release-ds4(s, spec-ok) : {
+            let state-expected = q38-state-handle-count(fcms-sts(s));
+            let state-closed = q38-free-state(fcms-sts(s));
+            let context-expected = q38-close-expected(fcms-ctx(s), []);
+            let context-closed = q38-close(fcms-ctx(s), []);
+            let unleased = mg-release();
+            let observed = [["cursor", cursor-released, 1], ["sampler", sampler-closed, sampler-expected], ["adapter", adapter-closed, adapter-expected], ["draft", draft-closed, draft-expected], ["spec", spec-closed, spec-expected], ["state", state-closed, state-expected], ["context", context-closed, context-expected]];
+            let unease = filter(row => row[1] != row[2], observed);
+            nil?(unease) ? 0 : {
+                let signal = intern_node(intern_trivial_string("model-release"), map(row => intern_node(intern_trivial_string(row[0]), [intern_trivial_int(row[1]), intern_trivial_int(row[2])]), unease));
+                fb_record(signal, "model-session-release", len(unease));
+                print_str("form-model-release unease " + unease.str());
+            };
+            spec-ok &&((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
+        };
+    };
+    0;
+}

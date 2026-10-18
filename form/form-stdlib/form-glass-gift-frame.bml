@@ -1,0 +1,136 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-gift-frame.bml — a frame in process shared memory, offered
+// as a gift: no latency, no filesystem poll, live data guaranteed.
+//
+// Authority: form-stdlib/bml/form-glass-gift-frame.bml
+import form/form-stdlib/core.fk;
+import form/form-stdlib/crc32.fk;
+import form/form-stdlib/sovereignty-as-gift.fk;
+//
+// The shape is sovereignty-as-gift (Urs, 2026-09-04): survive AND receive
+// AND unique-offer. A publisher OFFERS its frame into shared memory and asks
+// nothing back -- no ack, no reader required, no block. A reader RECEIVES
+// when the frame stands and SURVIVES when it does not: an absent gift is
+// named absent, never invented, and the reader keeps its own ground.
+//
+// Six seed doors carry the frame (shm_offer, shm_receive, shm_write,
+// shm_read, shm_seq, shm_release): a 16-byte seqlock header ahead of the
+// payload, so a reader never takes a torn frame; release unmaps and never
+// unlinks, so the gift stays for the next receiver.
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassGiftFrameAuthority {
+        field GGFAuthorityPath = "form/form-stdlib/bml/form-glass-gift-frame.bml";
+        field GGFAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class FormGlassGiftFrame {
+        field GGFSchema = "form-glass-gift-frame-v1";
+        field GGFNamePrefix = "/fg-";
+        field GGFNameBound = 31;
+        field GGFDefaultBytes = 1048576;
+        ref ggf-authority = FormGlassGiftFrameAuthority;
+        thought ggf-law = ["offered-not-demanded", "receive-open", "survive-without", "absent-says-absent", "never-torn", "release-never-unlinks", "name-within-the-host-bound"];
+
+        // --- the gift name: short, stable, collision-resistant --------------
+        // POSIX shm names on this host hold 31 bytes; a publisher id is
+        // longer and free-form, so the frame is named by the CRC-32 of the
+        // publisher's bytes rendered as eight hex digits: "/fg-" + 8 = 12 bytes.
+        def ggf-hex-digit(v) = if (v < 10) then byte_to_str((48 + v)) else byte_to_str((87 + v));
+        def ggf-hex8-go(n, k, acc) = if ((Comparable) k == 0) then acc else ggf-hex8-go((n / 16), (k - 1), ((String) ggf-hex-digit((n - ((n / 16) * 16))) + acc));
+        def ggf-hex8(n) = ggf-hex8-go(n, 8, "");
+        def ggf-bytes-go(text, i, acc) = if (i < 0) then acc else ggf-bytes-go(text, (i - 1), cons(str_byte_at(text, i), acc));
+        def ggf-bytes(text) = ggf-bytes-go(text, (len(text) - 1), []);
+        def ggf-name(publisher) = ((String) GGFNamePrefix() + ggf-hex8(crc32(ggf-bytes(publisher))));
+        def ggf-name-within-bound?(name) = if (len(name) <= GGFNameBound()) then 1 else 0;
+
+        // Exact node-gift extent for flat native strings, integers and lists.
+        def ggf-flat-size(value) = (String) value_kind(value) == "string" ? (len(value) > 4294967295 ? -1 : (5 + len(value))) : (String) value_kind(value) == "int" ? 9 : (String) value_kind(value) == "list" ? (len(value) >= 100000000 ? -1 : ggf-flat-list(value,6)) : -1;
+        def ggf-flat-list(rows,size) = nil?(rows) ? size : ggf-flat-next(rows[1:],size,ggf-flat-size(rows[0]));
+        def ggf-flat-next(rows,size,n) = (n < 0) || (n > (4611686018427387887 - size)) ? -1 : ggf-flat-list(rows,size + n);
+
+        // --- offer, give, receive, take ---------------------------------------
+        def ggf-offer(publisher, bytes) = shm_offer(ggf-name(publisher), bytes);
+        def ggf-give(handle, text) = if nothing?(handle) then nothing() else shm_write(handle, text);
+        def ggf-receive(publisher) = shm_receive(ggf-name(publisher));
+        def ggf-taken(handle) = if nothing?(handle) then nothing() else shm_read(handle);
+        def ggf-seq(handle) = if nothing?(handle) then -1 else shm_seq(handle);
+        def ggf-release(handle) = if nothing?(handle) then 0 else shm_release(handle);
+        def ggf-offer-and-give(publisher, bytes, text) {
+            let handle = ggf-offer(publisher, bytes);
+            let seq = ggf-give(handle, text);
+            let released = ggf-release(handle);
+            if nothing?(seq) then [GGFSchema(), "refused", publisher, ggf-name(publisher), -1] else [GGFSchema(), "given", publisher, ggf-name(publisher), seq];
+        }
+        def ggf-given-seq(result) = result[4];
+        def ggf-given?(result) = ((String) result[1] == "given");
+
+        // --- a reading: receive when it stands, survive when it does not ------
+        // list(schema, carrier, text-or-nothing, seq, shape) where carrier is
+        // "gift" or "absent" and shape is the sovereignty-as-gift six-tuple:
+        // depend-to-live 0 (the reader lives either way), receive-open 1,
+        // unique-offer 1, gift-received 0|1, vitality before/after.
+        def ggf-reading(publisher) {
+            let handle = ggf-receive(publisher);
+            let text = ggf-taken(handle);
+            let seq = ggf-seq(handle);
+            let released = ggf-release(handle);
+            let received = if nothing?(text) then 0 else 1;
+            let shape = sag-shape(0, 1, 1, received, 1, if ((Comparable) received == 1) then 2 else 1);
+            [GGFSchema(), if ((Comparable) received == 1) then "gift" else "absent", text, seq, shape];
+        }
+        def ggf-reading-carrier(r) = r[1];
+        def ggf-reading-text(r) = r[2];
+        def ggf-reading-seq(r) = r[3];
+        def ggf-reading-shape(r) = r[4];
+        def ggf-reading-received?(r) = if ((String) ggf-reading-carrier(r) == "gift") then 1 else 0;
+        def ggf-reading-proven?(r) = sag-proven?(ggf-reading-shape(r));
+
+        // --- kept handles: the name computed once, the frame opened once, held for a loop's life ---
+        // A loop that meets the same frames every tick keeps one handle per (publisher, mode): mode
+        // "take" is a receive (read-only), mode "give" an offer (read-write, sized by bytes). An absent
+        // frame is held as a nothing handle and asked for again only when the caller says retry (the
+        // loop's roster cadence); a standing handle is never reopened -- no door here unlinks a gift
+        // frame, so a mapping cannot go stale while the loop lives. entry = list(publisher, name, handle, mode, bytes).
+        def ggf-kept-empty() = [];
+        def ggf-kept-publisher(e) = e[0];
+        def ggf-kept-name(e) = e[1];
+        def ggf-kept-handle-of(e) = e[2];
+        def ggf-kept-mode(e) = e[3];
+        def ggf-kept-bytes(e) = e[4];
+        def ggf-kept-open(publisher, mode, bytes) {
+            let name = ggf-name(publisher);
+            let handle = if ((String) mode == "give") then shm_offer(name, bytes) else shm_receive(name);
+            [publisher, name, handle, mode, bytes];
+        }
+        def ggf-kept-entry?(e, publisher, mode) = if (!((String) ggf-kept-publisher(e) == publisher)) then 0 else if ((String) ggf-kept-mode(e) == mode) then 1 else 0;
+        def ggf-kept-find(kept, publisher, mode) = if ((Comparable) len(kept) == 0) then [] else if ((Comparable) ggf-kept-entry?(kept[0], publisher, mode) == 1) then kept[0] else ggf-kept-find(kept[1:], publisher, mode);
+        def ggf-kept-without(kept, publisher, mode) = if ((Comparable) len(kept) == 0) then [] else if ((Comparable) ggf-kept-entry?(kept[0], publisher, mode) == 1) then ggf-kept-without(kept[1:], publisher, mode) else cons(kept[0], ggf-kept-without(kept[1:], publisher, mode));
+        def ggf-kept-handle(kept, publisher, mode) {
+            let entry = ggf-kept-find(kept, publisher, mode);
+            if ((Comparable) len(entry) == 0) then nothing() else ggf-kept-handle-of(entry);
+        }
+        def ggf-kept-name-for(kept, publisher, mode) {
+            let entry = ggf-kept-find(kept, publisher, mode);
+            if ((Comparable) len(entry) == 0) then ggf-name(publisher) else ggf-kept-name(entry);
+        }
+        // ensure: an entry for (publisher, mode) stands after this; a missing one is opened now, an absent one is asked for again when retry is 1
+        def ggf-kept-ensure(kept, publisher, mode, bytes, retry) {
+            let entry = ggf-kept-find(kept, publisher, mode);
+            if ((Comparable) len(entry) == 0) then cons(ggf-kept-open(publisher, mode, bytes), kept) else if (((Comparable) retry == 1) && nothing?(ggf-kept-handle-of(entry))) then cons(ggf-kept-open(publisher, mode, bytes), ggf-kept-without(kept, publisher, mode)) else kept;
+        }
+        // wants = list of list(publisher, mode, bytes)
+        def ggf-kept-ensure-all(kept, wants, retry) = if ((Comparable) len(wants) == 0) then kept else ggf-kept-ensure-all(ggf-kept-ensure(kept, wants[0][0], wants[0][1], wants[0][2], retry), wants[1:], retry);
+        def ggf-kept-wanted?(wants, publisher, mode) = if ((Comparable) len(wants) == 0) then 0 else if (((String) wants[0][0] == publisher) && ((String) wants[0][1] == mode)) then 1 else ggf-kept-wanted?(wants[1:], publisher, mode);
+        // prune: entries no want names any more are released and dropped
+        def ggf-kept-prune(kept, wants) = if ((Comparable) len(kept) == 0) then [] else if ((Comparable) ggf-kept-wanted?(wants, ggf-kept-publisher(kept[0]), ggf-kept-mode(kept[0])) == 1) then cons(kept[0], ggf-kept-prune(kept[1:], wants)) else ggf-kept-prune-released(ggf-release(ggf-kept-handle-of(kept[0])), kept[1:], wants);
+        def ggf-kept-prune-released(released, rest, wants) = ggf-kept-prune(rest, wants);
+        def ggf-kept-handles(kept, publishers, mode) = if ((Comparable) len(publishers) == 0) then [] else cons(ggf-kept-handle(kept, publishers[0], mode), ggf-kept-handles(kept, publishers[1:], mode));
+        def ggf-kept-standing(kept) = if ((Comparable) len(kept) == 0) then 0 else ((if nothing?(ggf-kept-handle-of(kept[0])) then 0 else 1) + ggf-kept-standing(kept[1:]));
+        def ggf-kept-release-all(kept) = if ((Comparable) len(kept) == 0) then 0 else (ggf-release(ggf-kept-handle-of(kept[0])) + ggf-kept-release-all(kept[1:]));
+    }
+    0;
+}

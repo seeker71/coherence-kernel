@@ -1,0 +1,175 @@
+// bml-cursor-coverage-run.bml — how much of the body's BML the cursor reads whole, and where it stops.
+//
+// The cursor (grammars/form-bml.fk) is the one reader of a form.bml, form.route or form.action section: it
+// reads the body as one source with direct backtracking and the compiler lowers what it read. This mirror
+// walks every .bml and .fk under a root with the kernel's own source_inventory, finds each such section
+// with the compiler's own section finder, and asks the cursor to admit the body whole. An admitted body is
+// lowered and passed through the comparison contract pass; a body that reads and lowers is `read`. A
+// refused body is read again by the traced grammar (form-bml-refusal.fk), and the word it could not
+// read is counted with the form wanted there (`bogus<member>`), so the next rule is chosen by what the
+// body actually writes. The cursor's own time
+// over the admitted sections rides beside the counts (wall-clock: read it on a quiet machine). A count
+// is attention; the writer decides. A body this same cursor already read is not read again: its reading
+// is kept under its bytes' fingerprint (.hearth/bml-cursor-coverage.memo, named by the pin of this door's
+// closure), and `kept=` counts the readings that came from there, each with the time it took then.
+// stdin: nothing, or one line: the root to walk (default "."), how many first words to show
+// (default 16), and `all` to print every section the cursor does not read and lower whole.
+// The word `gate`, anywhere on the line, makes the door a gate: it answers the sections the cursor
+// does not read and lower whole (refused plus stops) instead of the read count, and the drift row
+// bml-cursor-coverage (gate/drift-gates.bml) wants 0.
+// preludes: form-stdlib/source-compiler.fk form-stdlib/meaning-codes.bml form-stdlib/bml/stdin-source.bml
+section [form.bml] {
+ class BmlCursorCoverage {
+  def bcc-skips() = [".git", ".hearth", ".claude", ".cache", ".obsidian", "node_modules", "target", "dist"];
+  def bcc-read(path) = file_size(path) < 1 ? "" : read_file(path);
+  def bcc-path(root, rel) = str_eq(root, ".") ? rel : (root ++ "/" ++ rel);
+
+  // every section body the cursor reads (form.bml, form.route, form.action), found the way the
+  // compiler finds it, in a .bml or a .fk that carries one
+  def bcc-bodies(src, i) {
+   let pos = fsc-find-section-open(src, i);
+   pos < 0 ? [] : bcc-body-at(src, pos);
+  }
+  def bcc-body-at(src, pos) {
+   let dend = fsc-find-char-from(src, "]", pos + 9);
+   let dialect = fsc-sub(src, pos + 9, dend);
+   let brace = fsc-find-char-from(src, "{", dend);
+   let close = fsc-high-level-form-dialect?(dialect) ? fsc-bml-block-end(src, brace + 1, 0) : fsc-section-end(src, brace + 1);
+   let rest = bcc-bodies(src, fsc-section-after(src, close));
+   fsc-bml-contract-dialect?(dialect) ? cons(fsc-sub(src, brace + 1, close), rest) : rest;
+  }
+
+  def bcc-failed?(n) = node_eq(n, intern_trivial_string("PARSE-FAIL"));
+  def bcc-snippet(body, pos) {
+   let nl = str_find(body, "\n", pos);
+   let e = (nl < 0) || (nl > (pos + 72)) ? min2(str_len(body), pos + 72) : nl;
+   fsc-sub(body, pos, e);
+  }
+  def min2(a, b) = a < b ? a : b;
+
+  // one section's reading: (kind word snippet cursor-ms) — kind 2 read whole, 1 admitted but stops
+  // in lowering, 0 refused
+  def bcc-reading(body) {
+   let t0 = host_monotonic_ms();
+   let parsed = try g-parse-full(form-bml-section-grammar(), body) else intern_trivial_string("PARSE-FAIL");
+   let t1 = host_monotonic_ms();
+   bcc-failed?(parsed) ? append(bcc-refusal(body), [0]) : bcc-admitted(body, parsed, t1 - t0);
+  }
+  // the refusal's own reading: the word the cursor could not read and the form it wanted there
+  def bcc-refusal(body) {
+   let r = fbr-refusal(body);
+   nothing?(r) ? [0, "(end)", ""] : [0, r[1] ++ bcc-wanted(r[2]), bcc-snippet(body, r[3])];
+  }
+  def bcc-wanted(want) = nil?(want) ? "" : "<" ++ head(want) ++ ">";
+  // the cursor's lowering passes through the comparison-contract pass, where a contract's spelling
+  // (x: Number or x:Number) has become its meaning; a body that reaches its typed tree is read
+  def bcc-typed(recipe) = head(fsc-bml-typed(recipe, [], []));
+  def bcc-typed-or(parsed) = try bcc-typed(fbl-lower(parsed)) else nothing;
+  def bcc-admitted(body, parsed, parse-ms) {
+   let t0 = host_monotonic_ms();
+   let typed = bcc-typed-or(parsed);
+   let t1 = host_monotonic_ms();
+   append(bcc-verdict(body, typed), [parse-ms + (t1 - t0)]);
+  }
+  def bcc-verdict(body, typed) = nothing?(typed) ? [1, "(cursor-stops)", bcc-snippet(body, fsc-bml-skip-trivia(body, 0, str_len(body)))] : [2, "", ""];
+
+  // tallies: (files sections read stops refused cursor-ms) and (word count path snippet) rows
+  def bcc-tally(t, r) = [t[0], t[1] + 1, t[2] + (eq(r[0], 2) ? 1 : 0), t[3] + (eq(r[0], 1) ? 1 : 0), t[4] + (eq(r[0], 0) ? 1 : 0), t[5] + r[3]];
+  def bcc-word-row(words, word, path, snippet) = nil?(words) ? [[word, 1, path, snippet]] : str_eq(head(words)[0], word) ? cons([word, head(words)[1] + 1, head(words)[2], head(words)[3]], tail(words)) : cons(head(words), bcc-word-row(tail(words), word, path, snippet));
+  def bcc-sections(v, path, bodies, t, words, kept) = nil?(bodies) ? [t, words] : bcc-section-then(v, path, bcc-kept-reading(kept, head(bodies)), tail(bodies), t, words, kept);
+  def bcc-section-then(v, path, r, rest, t, words, kept) {
+   let shown = (v && !eq(r[0], 2)) ? print_str("  " ++ r[1] ++ "  " ++ path ++ "\n      " ++ r[2]) : 0;
+   bcc-sections(v, path, rest, bcc-tally(t, r), eq(r[0], 2) ? words : bcc-word-row(words, r[1], path, r[2]), kept);
+  }
+  def bcc-files(v, root, rows, t, words, kept) = nil?(rows) ? [t, words] : bcc-file-then(v, root, bcc-path(root, head(head(rows))), tail(rows), t, words, kept);
+  // a source whose sections the compiler's own finder cannot bound is one refused reading
+  def bcc-file-then(v, root, path, rest, t, words, kept) {
+   let bodies = try bcc-bodies(bcc-read(path), 0) else nothing;
+   let t1 = [t[0] + 1, t[1], t[2], t[3], t[4], t[5]];
+   let got = nothing?(bodies) ? bcc-section-then(v, path, [0, "(unbounded)", "the compiler's section finder stops here too", 0], [], t1, words, kept) : bcc-sections(v, path, bodies, t1, words, kept);
+   bcc-files(v, root, rest, head(got), got[1], kept);
+  }
+
+  // ---- what the same cursor already read is not read again ----
+  // A section's reading is its bytes read by the cursor: this door's own closure as the compiler walks it (the grammar,
+  // the lowering, the typed pass, the refusal reader, this door). The closure is pinned (fsc-bml-pin-read / -write, the
+  // floor's own pin) and named by one fingerprint of its files' fingerprints; every reading is kept under its body's
+  // fingerprint in .hearth/bml-cursor-coverage.memo beside that name. A closure that changed reads every body again, and a
+  // body that changed is read again. A kept reading carries the cursor-ms it took when it was read.
+  // kept: {"old": the readings the last run kept, by fingerprint; "rows": this run's [fingerprint, reading] rows;
+  // "reused": how many came from old}. The memo is text: the name's line, then a line a reading,
+  // "<fingerprint> <kind> <ms> <n>:<word><m>:<snippet>", its word and snippet carried by their lengths.
+  def bcc-self() = "observe/bml-cursor-coverage-run.bml";
+  def bcc-memo-path() = ".hearth/bml-cursor-coverage.memo";
+  def bcc-memo-line(row) = row[0] ++ " " ++ int_to_str(row[1][0]) ++ " " ++ int_to_str(row[1][3]) ++ " " ++ int_to_str(str_len(row[1][1])) ++ ":" ++ row[1][1] ++ int_to_str(str_len(row[1][2])) ++ ":" ++ row[1][2] ++ "\n";
+  def bcc-memo-text(name, rows) = name ++ "\n" ++ foldl((acc, row) => acc ++ bcc-memo-line(row), "", rows);
+  // the readings of a memo text from at, into rec; a line that does not read whole ends the reading
+  def bcc-memo-rows(text, at, rec) {
+   let sp1 = str_find(text, " ", at);
+   let sp2 = sp1 < 0 ? -1 : str_find(text, " ", sp1 + 1);
+   let sp3 = sp2 < 0 ? -1 : str_find(text, " ", sp2 + 1);
+   let c1 = sp3 < 0 ? -1 : str_find(text, ":", sp3 + 1);
+   sp3 < 0 || c1 < 0 ? rec : bcc-memo-word(text, at, sp1, sp2, sp3, c1, rec);
+  }
+  def bcc-memo-word(text, at, sp1, sp2, sp3, c1, rec) {
+   let wend = c1 + 1 + (str_to_int(fsc-sub(text, sp3 + 1, c1)) ?? 0);
+   let c2 = str_find(text, ":", wend);
+   let send = c2 < 0 ? -1 : c2 + 1 + (str_to_int(fsc-sub(text, wend, c2)) ?? 0);
+   c2 < 0 || send > str_len(text) ? rec : bcc-memo-rows(text, send + 1, record_set(rec, fsc-sub(text, at, sp1), [str_to_int(fsc-sub(text, sp1 + 1, sp2)) ?? 0, fsc-sub(text, c1 + 1, wend), fsc-sub(text, c2 + 1, send), str_to_int(fsc-sub(text, sp2 + 1, sp3)) ?? 0]));
+  }
+  def bcc-pin() {
+   let held = fsc-bml-pin-read(bcc-self());
+   nothing?(held) ? bcc-pin-walk() : held;
+  }
+  def bcc-pin-walk() {
+   let homes = fsc-bml-home-context(bcc-self());
+   let read = fsc-bml-file-signatures(bcc-self(), fsc-bml-read-source(bcc-self()), [bcc-self()], [], homes[1], homes[0]);
+   fsc-bml-pin-write(bcc-self(), read[2]);
+  }
+  def bcc-cursor-name(pin) = bml-source-fingerprint(foldl((acc, row) => acc ++ row[0] ++ "=" ++ row[2] ++ "\n", "", pin));
+  def bcc-memo-read(name) {
+   let text = file_size(bcc-memo-path()) > 0 ? (read_file(bcc-memo-path()) ?? "") : "";
+   let nl = str_find(text, "\n", 0);
+   nl > 0 && str_eq(fsc-sub(text, 0, nl), name) ? bcc-memo-rows(text, nl + 1, record_new(0)) : record_new(0);
+  }
+  def bcc-kept-reading(kept, body) {
+   let fp = bml-source-fingerprint(body);
+   let had = record_has(record_get(kept, "old"), fp);
+   let r = had ? record_get(record_get(kept, "old"), fp) : bcc-reading(body);
+   let rows = record_set(kept, "rows", cons([fp, r], record_get(kept, "rows")));
+   let counted = had ? record_set(kept, "reused", record_get(kept, "reused") + 1) : 0;
+   r;
+  }
+
+  def bcc-insert(row, top) = nil?(top) ? [row] : row[1] > head(top)[1] ? cons(row, top) : cons(head(top), bcc-insert(row, tail(top)));
+  def bcc-top(words, top) = nil?(words) ? top : bcc-top(tail(words), bcc-insert(head(words), top));
+  def bcc-lines(top, n) = nil?(top) || (n < 1) ? "" : ("\n  " ++ int_to_str(head(top)[1]) ++ "  " ++ head(top)[0] ++ "  " ++ head(top)[2] ++ "  | " ++ head(top)[3] ++ bcc-lines(tail(top), n - 1));
+
+  // the stdin line's space-separated words
+  def bcc-args(s) {
+   let sp = str_find(s, " ", 0);
+   str_len(s) == 0 ? [] : sp < 0 ? [s] : cons(fsc-sub(s, 0, sp), bcc-args(trim(fsc-sub(s, sp + 1, str_len(s)))));
+  }
+  def bcc-gate?(words) = nil?(words) ? false : str_eq(head(words), "gate") ? true : bcc-gate?(tail(words));
+  def bcc-plain(words) = words |> filter(w => !str_eq(w, "gate"));
+  def bcc-run() {
+   let given = bcc-args(trim(stdin-text()));
+   let gate = bcc-gate?(given);
+   let words = bcc-plain(given);
+   let root = nil?(words) ? "." : head(words);
+   let n = len(words) < 2 ? 16 : str_to_int(words[1]);
+   let v = len(words) < 3 ? false : str_eq(words[2], "all");
+   let name = bcc-cursor-name(bcc-pin());
+   let kept = record_new(0, "old", bcc-memo-read(name), "rows", [], "reused", 0);
+   let got = bcc-files(v, root, append(source_inventory(root, ".bml", bcc-skips()), source_inventory(root, ".fk", bcc-skips())), [0, 0, 0, 0, 0, 0], [], kept);
+   // the memo is the whole body's readings: a run over the root keeps them, a run over a part reads them and leaves them
+   let room = str_eq(root, ".") ? host_dir_mkdir(".hearth") : 0;
+   let wrote = str_eq(root, ".") ? write_file_text(bcc-memo-path(), bcc-memo-text(name, record_get(kept, "rows"))) : 0;
+   let t = head(got);
+   print_str("[bml-cursor-coverage] files=" ++ int_to_str(t[0]) ++ " sections=" ++ int_to_str(t[1]) ++ " read=" ++ int_to_str(t[2]) ++ " stops=" ++ int_to_str(t[3]) ++ " refused=" ++ int_to_str(t[4]) ++ " cursor-ms=" ++ int_to_str(t[5]) ++ " kept=" ++ int_to_str(record_get(kept, "reused")));
+   print_str("[bml-cursor-coverage] first words the cursor does not read (count word first-path | there):" ++ bcc-lines(bcc-top(got[1], []), n));
+   gate ? t[3] + t[4] : t[2];
+  }
+ }
+ bcc-run();
+}

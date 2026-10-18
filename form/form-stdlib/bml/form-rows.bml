@@ -1,0 +1,147 @@
+// form-rows.bml — Form's own data text: a value on a line, read back whole. No JSON.
+//
+// The body's doors, ledgers, events and options were JSON text (parse-json, json-emit, json nodes): a foreign dialect that Form
+// values had to be dressed in and parsed out of at every boundary, with floats rendered twice and a second value model (json nodes)
+// beside Form's own. A Form value already has a shape: int, float, string, list, record, nothing. This writes that shape as text
+// and reads it back:
+//
+//   42   -7   2.5   1.0   1e21        numbers; a float always carries a '.' or an 'e', so an int never reads as one
+//   "text"                            a string; \" \\ \n \r \t and \xHH for any other control byte, so a value is ONE line
+//   _                                 nothing
+//   [1 2.5 "x" [3]]                   a list, elements apart by white space
+//   {lane "llama" steps 100}          a record, key then value; a key is a bare word ([A-Za-z_][A-Za-z0-9_.-]*) or a string
+//
+// A row file holds one value a line (frw-rows): blank lines and lines that begin with ';' are skipped, so a person can annotate
+// it. An options text holds one `name value` a line (frw-options): `steps 100`, `lane llama`, `export path/to/dir` (a value that is
+// no number, string, list, record or `_` is the line's bare text), so a door's input is written the way its output lines are.
+//
+// Reads answer with data, never a stop: ["ok", value] or ["refused", reason, byte index]. Records keep the order of their keys.
+// Floats are emitted with float-precise-str (the shortest text that reads back to the same bits).
+// preflight-exec: forbidden
+import form-stdlib/json-precise.bml;
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class FormRows {
+  // ── emit ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  def frw-emit(v) = frw-emit-kind(v, (String) value_kind(v));
+  def frw-emit-kind(v, k) = k == "int" ? v.str() : k == "float" ? frw-float(v) : k == "string" ? frw-quote(v) : k == "null" ? "_" : k == "list" ? "[" ++ str-join-with(map(x => frw-emit(x), v), " ") ++ "]" : k == "record" ? "{" ++ str-join-with(map(key => frw-key(key) ++ " " ++ frw-emit(record_get(v, key)), record_keys(v)), " ") ++ "}" : form_error("form-rows: a value of kind " ++ k ++ " has no text");
+  def frw-float(v) = frw-float-text(float-precise-str(v));
+  def frw-float-text(t) = (str_find(t, ".", 0) >= 0 || str_find(t, "e", 0) >= 0 || str_find(t, "E", 0) >= 0) ? t : t ++ ".0";
+  def frw-bare-start?(b) = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+  def frw-bare-char?(b) = frw-bare-start?(b) || (b >= 48 && b <= 57) || b == 46 || b == 45;
+  def frw-bare-all?(t, i) = i >= len(t) ? 1 : frw-bare-char?(str_byte_at(t, i)) ? frw-bare-all?(t, i + 1) : 0;
+  def frw-bare?(t) = len(t) > 0 && frw-bare-start?(str_byte_at(t, 0)) && frw-bare-all?(t, 1) == 1;
+  def frw-key(k) = frw-bare?(k) ? k : frw-quote(k);
+  // a string with nothing to escape is its bytes between quotes
+  def frw-plain?(t, i) = i >= len(t) ? 1 : frw-plain-byte?(str_byte_at(t, i)) ? frw-plain?(t, i + 1) : 0;
+  def frw-plain-byte?(b) = b >= 32 && b != 34 && b != 92 && b != 127;
+  def frw-quote(t) = frw-plain?(t, 0) == 1 ? "\"" ++ t ++ "\"" : "\"" ++ str-join(frw-escapes(t, 0, [])) ++ "\"";
+  def frw-escapes(t, i, acc) = i >= len(t) ? reverse(acc) : frw-escapes(t, i + 1, cons(frw-escape(str_byte_at(t, i)), acc));
+  def frw-escape(b) = b == 34 ? "\\\"" : b == 92 ? "\\\\" : b == 10 ? "\\n" : b == 13 ? "\\r" : b == 9 ? "\\t" : (b < 32 || b == 127) ? "\\x" ++ frw-hex2(b) : byte_to_str(b);
+  def frw-hex2(b) = substring("0123456789abcdef", b / 16, b / 16 + 1) ++ substring("0123456789abcdef", b % 16, b % 16 + 1);
+  // ── read ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  // ["ok", value] or ["refused", reason, index]: the whole text is one value, white space around it
+  def frw-parse(text) {
+   let r = frw-value(text, frw-skip(text, 0));
+   (String) r[0] != "ok" ? r : (frw-skip(text, r[2]) == len(text) ? ["ok", r[1]] : ["refused", "text after the value", frw-skip(text, r[2])]);
+  }
+  def frw-ws?(b) = b == 32 || b == 9 || b == 10 || b == 13;
+  def frw-skip(t, i) = i >= len(t) ? i : frw-ws?(str_byte_at(t, i)) ? frw-skip(t, i + 1) : i;
+  def frw-refuse(why, i) = ["refused", why, i];
+  // one value from index i (white space already skipped): ["ok", value, next index] or a refusal
+  def frw-value(t, i) {
+   if i >= len(t) then frw-refuse("a value was expected", i)
+   else frw-value-at(t, i, str_byte_at(t, i));
+  }
+  def frw-value-at(t, i, b) = b == 34 ? frw-string(t, i + 1, i + 1, []) : b == 91 ? frw-list(t, frw-skip(t, i + 1), []) : b == 123 ? frw-record(t, frw-skip(t, i + 1), record_new(0)) : b == 95 && frw-token-end?(t, i + 1) ? ["ok", nothing(), i + 1] : (b == 45 || b == 43 || (b >= 48 && b <= 57)) ? frw-number(t, i) : frw-refuse("not a value", i);
+  def frw-token-end?(t, i) = i >= len(t) ? 1 : (frw-ws?(str_byte_at(t, i)) || str_byte_at(t, i) == 93 || str_byte_at(t, i) == 125) ? 1 : 0;
+  def frw-token-stop(t, i) = frw-token-end?(t, i) == 1 ? i : frw-token-stop(t, i + 1);
+  // numbers: an int, or a float when the token holds '.', 'e' or 'E'
+  def frw-number(t, i) {
+   let stop = frw-token-stop(t, i);
+   let token = substring(t, i, stop);
+   frw-number-token(token, stop, i);
+  }
+  def frw-numeric?(token, k) = k >= len(token) ? 1 : frw-numeric-char?(str_byte_at(token, k)) ? frw-numeric?(token, k + 1) : 0;
+  def frw-numeric-char?(b) = (b >= 48 && b <= 57) || b == 45 || b == 43 || b == 46 || b == 101 || b == 69;
+  def frw-float-token?(token) = str_find(token, ".", 0) >= 0 || str_find(token, "e", 0) >= 0 || str_find(token, "E", 0) >= 0;
+  def frw-number-token(token, stop, i) = frw-numeric?(token, 0) == 0 ? frw-refuse("a number holds digits, '-', '+', '.', 'e'", i) : frw-float-token?(token) ? ["ok", str_to_float(token), stop] : ["ok", str_to_int(token), stop];
+  // strings: from the byte after the opening quote; seg is the start of the plain run being copied
+  def frw-string(t, i, seg, acc) {
+   if i >= len(t) then frw-refuse("a string is not closed", i)
+   else frw-string-at(t, i, seg, acc, str_byte_at(t, i));
+  }
+  def frw-string-at(t, i, seg, acc, b) = b == 34 ? ["ok", str-join(reverse(cons(substring(t, seg, i), acc))), i + 1] : b == 92 ? frw-string-escape(t, i, seg, acc) : frw-string(t, i + 1, seg, acc);
+  def frw-string-escape(t, i, seg, acc) {
+   if i + 1 >= len(t) then frw-refuse("a string ends in a backslash", i)
+   else frw-string-escaped(t, i, seg, cons(substring(t, seg, i), acc), str_byte_at(t, i + 1));
+  }
+  def frw-string-escaped(t, i, seg, acc, e) = e == 34 ? frw-string(t, i + 2, i + 2, cons("\"", acc)) : e == 92 ? frw-string(t, i + 2, i + 2, cons("\\", acc)) : e == 110 ? frw-string(t, i + 2, i + 2, cons(byte_to_str(10), acc)) : e == 114 ? frw-string(t, i + 2, i + 2, cons(byte_to_str(13), acc)) : e == 116 ? frw-string(t, i + 2, i + 2, cons(byte_to_str(9), acc)) : e == 120 ? frw-string-hex(t, i, acc) : frw-refuse("an escape of a string is \\\" \\\\ \\n \\r \\t or \\xHH", i);
+  def frw-hex-digit(b) = (b >= 48 && b <= 57) ? b - 48 : (b >= 97 && b <= 102) ? b - 87 : (b >= 65 && b <= 70) ? b - 55 : -1;
+  def frw-string-hex(t, i, acc) {
+   if i + 3 >= len(t) then frw-refuse("a \\x escape needs two hex digits", i)
+   else frw-string-hexed(t, i, acc, frw-hex-digit(str_byte_at(t, i + 2)), frw-hex-digit(str_byte_at(t, i + 3)));
+  }
+  def frw-string-hexed(t, i, acc, hi, lo) = (hi < 0 || lo < 0) ? frw-refuse("a \\x escape needs two hex digits", i) : frw-string(t, i + 4, i + 4, cons(byte_to_str(hi * 16 + lo), acc));
+  // lists: elements until ']'
+  def frw-list(t, i, acc) {
+   if i >= len(t) then frw-refuse("a list is not closed", i)
+   else if str_byte_at(t, i) == 93 then ["ok", reverse(acc), i + 1]
+   else frw-list-element(t, i, acc, frw-value(t, i));
+  }
+  def frw-list-element(t, i, acc, r) = (String) r[0] != "ok" ? r : frw-list(t, frw-skip(t, r[2]), cons(r[1], acc));
+  // records: key value pairs until '}'
+  def frw-record(t, i, rec) {
+   if i >= len(t) then frw-refuse("a record is not closed", i)
+   else if str_byte_at(t, i) == 125 then ["ok", rec, i + 1]
+   else frw-record-key(t, i, rec, frw-key-read(t, i));
+  }
+  def frw-key-read(t, i) = str_byte_at(t, i) == 34 ? frw-string(t, i + 1, i + 1, []) : frw-bare-start?(str_byte_at(t, i)) ? frw-bare-read(t, i, i) : frw-refuse("a record key is a bare word or a string", i);
+  def frw-bare-read(t, i, start) = (i < len(t) && frw-bare-char?(str_byte_at(t, i))) ? frw-bare-read(t, i + 1, start) : ["ok", substring(t, start, i), i];
+  def frw-record-key(t, i, rec, k) = (String) k[0] != "ok" ? k : frw-record-value(t, rec, k[1], frw-value(t, frw-skip(t, k[2])), k[2]);
+  def frw-record-value(t, rec, key, v, at) = (String) v[0] != "ok" ? v : frw-record(t, frw-skip(t, v[2]), record_set(rec, key, v[1]));
+  // ── rows and options ──────────────────────────────────────────────────────────────────────────────────────────────────
+  def frw-lines(text) = split-on(text, byte_to_str(10));
+  def frw-blank?(line) = len(trim(line)) == 0 || str_byte_at(trim(line), 0) == 59;
+  // every value of a row text, one a line: ["ok", [value ...]] or ["refused", reason, line number]
+  def frw-rows(text) = frw-rows-go(frw-lines(text), 1, []);
+  def frw-rows-go(lines, n, acc) {
+   if nil?(lines) then ["ok", reverse(acc)]
+   else if frw-blank?(lines[0]) then frw-rows-go(lines[1:], n + 1, acc)
+   else frw-rows-line(lines, n, acc, frw-parse(lines[0]));
+  }
+  def frw-rows-line(lines, n, acc, r) = (String) r[0] != "ok" ? ["refused", r[1], n] : frw-rows-go(lines[1:], n + 1, cons(r[1], acc));
+  // an options text: `name value` a line, into one record; the last of a repeated name wins
+  def frw-options(text) = frw-options-go(frw-lines(text), 1, record_new(0));
+  def frw-options-go(lines, n, rec) {
+   if nil?(lines) then ["ok", rec]
+   else if frw-blank?(lines[0]) then frw-options-go(lines[1:], n + 1, rec)
+   else frw-options-line(lines, n, rec, trim(lines[0]));
+  }
+  def frw-options-line(lines, n, rec, line) {
+   let cut = frw-token-cut(line, 0);
+   let key = substring(line, 0, cut);
+   let rest = trim(substring(line, cut, len(line)));
+   frw-bare?(key) ? frw-options-set(lines, n, rec, key, rest) : ["refused", "an option line starts with a bare name", n];
+  }
+  def frw-token-cut(line, i) = (i >= len(line) || frw-ws?(str_byte_at(line, i))) ? i : frw-token-cut(line, i + 1);
+  def frw-options-set(lines, n, rec, key, rest) = len(rest) == 0 ? ["refused", "the option " ++ key ++ " has no value", n] : frw-options-go(lines[1:], n + 1, record_set(rec, key, frw-option-value(rest)));
+  // a value that reads as a Form value is that value; any other text is the line's bare text
+  def frw-option-value(rest) {
+   let r = frw-parse(rest);
+   (String) r[0] == "ok" ? r[1] : rest;
+  }
+  // a record from [key, value] pairs, in that order; the row of a ledger is frw-emit(frw-rec([...])) ++ "\n"
+  def frw-rec(pairs) = foldl((rec, p) => record_set(rec, p[0], p[1]), record_new(0), pairs);
+  // ── access: an absent key reads as nothing, not a stop ────────────────────────────────────────────────────────────────
+  def frw-get(rec, key) = (String) value_kind(rec) == "record" && record_has(rec, key) ? record_get(rec, key) : nothing();
+  def frw-has?(rec, key) = (String) value_kind(rec) == "record" && record_has(rec, key);
+  def frw-int(rec, key, fallback) = frw-int-of(frw-get(rec, key), fallback);
+  def frw-int-of(v, fallback) = (String) value_kind(v) == "int" ? v : fallback;
+  def frw-num(rec, key, fallback) = frw-num-of(frw-get(rec, key), fallback);
+  def frw-num-of(v, fallback) = ((String) value_kind(v) == "int" || (String) value_kind(v) == "float") ? v : fallback;
+  def frw-str(rec, key, fallback) = frw-str-of(frw-get(rec, key), fallback);
+  def frw-str-of(v, fallback) = (String) value_kind(v) == "string" ? v : fallback;
+ }
+ 0;
+}

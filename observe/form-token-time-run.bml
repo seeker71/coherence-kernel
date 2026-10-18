@@ -1,0 +1,114 @@
+// form-token-time-run.bml — where a training run's time goes, read from the run's own events.
+//
+//   printf 'events .hearth/form-token-lora/llama-1791695568140/training-events.fkb\n' | ./fkwu observe/form-token-time-run.bml
+//   printf 'events EVENTS.fkb\nledger LEDGER.fkb\n' | ./fkwu observe/form-token-time-run.bml        the cycle's stage walls as well
+//
+// The trainer writes an event for every phase it walks (training-events.fkb, a ledger of Form nodes, form-value-nodes.bml; a path
+// ending .rows is read as form-rows text, the older checkouts' and a person's): the open of
+// the model, the baseline validation, the assessment, and for every row its forward and backward milliseconds and the device's own
+// busy microseconds, for every round its tokenize, training, update and checkpoint milliseconds. This reads them back and says,
+// in one block, where the wall clock went: each phase's milliseconds and its share of the run, a row's forward and backward
+// against the device's busy time (the rest is dispatch, sync and the walker's own work), and the milliseconds a token costs each
+// way. The cycle's ledger (ledger.rows), when given, adds each stage's wall (refresh, census, carrier, train, evaluation, usage).
+// stdin: `events PATH` and, optionally, `ledger PATH` (frw-options). Reads only; opens no model.
+// preflight-exec: forbidden
+import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/form-value-nodes.bml;
+import form-stdlib/bml/order.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class FormTokenTimeRun {
+  def ftt-of(rows, stage) = filter(r => (String) frw-str(r, "stage", "") == stage, rows);
+  def ftt-n(r, key) = frw-int(r, key, 0);
+  def ftt-sum(rows, key) = foldl((a, r) => a + ftt-n(r, key), 0, rows);
+  def ftt-max(rows, key) = foldl((m, r) => ftt-n(r, key) > m ? ftt-n(r, key) : m, 0, rows);
+  def ftt-mean(rows, key) = len(rows) == 0 ? 0 : ftt-sum(rows, key) / len(rows);
+  // a mean hides a stall: the median and the 90th percentile of a column (sorted by zero-padded text, order.bml)
+  def ftt-zeros(k) = k <= 0 ? "" : "0" ++ ftt-zeros(k - 1);
+  def ftt-key(n) = ftt-zeros(12 - len(n.str())) ++ n.str();
+  def ftt-quantile(rows, key, num, den) = ftt-quantile-of(sort-keyed(map(r => [ftt-key(ftt-n(r, key)), ftt-n(r, key)], rows)), num, den);
+  def ftt-quantile-of(xs, num, den) = len(xs) == 0 ? 0 : xs[ftt-min(len(xs) - 1, len(xs) * num / den)][1];
+  def ftt-min(a, b) = a < b ? a : b;
+  def ftt-minimum(rows, key) = foldl((m, r) => ftt-n(r, key) < m ? ftt-n(r, key) : m, ftt-max(rows, key), rows);
+  def ftt-ms1(us) = (us / 1000).str() ++ "." ++ ((us % 1000) / 100).str();
+  def ftt-ratio(big, small) = small <= 0 ? "-" : (big * 100 / small / 100).str() ++ "." ++ (((big * 100 / small) % 100) / 10).str() ++ ((big * 100 / small) % 10).str();
+  // cost by the length of the row: whether the milliseconds a token cost follow the row's length (attention reads the whole
+  // history) or are stalls (a short row that took long)
+  def ftt-buckets() = [[0, 100], [100, 200], [200, 400], [400, 100000]];
+  def ftt-in?(r, b) = ftt-n(r, "input_tokens") > b[0] && ftt-n(r, "input_tokens") <= b[1];
+  def ftt-bucket-line(walks, b) {
+   let rows = filter(r => ftt-in?(r, b), walks);
+   let tokens = ftt-sum(rows, "input_tokens");
+   len(rows) == 0 ? 0 : ftt-say("rows of " ++ (b[0] + 1).str() ++ " to " ++ (b[1] > 99999 ? "more" : b[1].str()) ++ " tokens: " ++ len(rows).str() ++ " rows, forward " ++ ftt-s(ftt-mean(rows, "forward_ms")) ++ " mean " ++ (ftt-sum(rows, "forward_ms") * 100 / tokens).str() ++ " centi-ms a token, backward " ++ ftt-s(ftt-mean(rows, "backward_ms")) ++ " mean " ++ (ftt-sum(rows, "backward_ms") * 100 / tokens).str() ++ " centi-ms a token, worst forward " ++ ftt-s(ftt-max(rows, "forward_ms")));
+  }
+  def ftt-pct(part, whole) = whole <= 0 ? "-" : ((part * 1000) / whole / 10).str() ++ "." ++ (((part * 1000) / whole) % 10).str() ++ "%";
+  def ftt-s(ms) = (ms / 1000).str() ++ "." ++ ((ms % 1000) / 100).str() ++ " s";
+  def ftt-say(t) = print_str("[form-token-time] " ++ t);
+  def ftt-span(rows) = ftt-max(rows, "at_ms") - foldl((m, r) => ftt-n(r, "at_ms") < m ? ftt-n(r, "at_ms") : m, ftt-max(rows, "at_ms"), rows);
+  def ftt-phase(name, ms, whole) = ftt-say(name ++ ": " ++ ftt-s(ms) ++ " (" ++ ftt-pct(ms, whole) ++ " of the run)");
+  // the rows of a file, or none (said) when it is absent or refused
+  def ftt-rows(path) = ftt-rows-of(path, fvn-rows-of(path));
+  def ftt-rows-of(path, r) = (String) r[0] == "ok" ? r[1] : ftt-refused(path, r);
+  def ftt-refused(path, r) {
+   let said = ftt-say(path ++ " was refused at line " ++ r[2].str() ++ ": " ++ r[1]);
+   [];
+  }
+  def ftt-report(rows) {
+   let opened = ftt-sum(ftt-of(rows, "admitted"), "open_ms");
+   let checks = ftt-of(rows, "validation");
+   let validBefore = ftt-sum(filter(r => ftt-n(r, "optimizer_step") == 0, checks), "wall_ms");
+   let validAfter = ftt-sum(filter(r => ftt-n(r, "optimizer_step") != 0, checks), "wall_ms");
+   let valid = validBefore + validAfter;
+   let assess = ftt-sum(ftt-of(rows, "assessment-before"), "wall_ms") + ftt-sum(ftt-of(rows, "assessment-after"), "wall_ms");
+   let rounds = ftt-of(rows, "round");
+   let walks = ftt-of(rows, "row");
+   let run = ftt-span(rows) + opened;
+   let training = ftt-sum(rounds, "training_ms");
+   let update = ftt-sum(rounds, "update_ms");
+   let token = ftt-sum(rounds, "tokenize_ms");
+   let check = ftt-sum(rounds, "checkpoint_ms");
+   let fwd = ftt-sum(walks, "forward_ms");
+   let bwd = ftt-sum(walks, "backward_ms");
+   let fgpu = ftt-sum(walks, "forward_gpu_us") / 1000;
+   let bgpu = ftt-sum(walks, "backward_gpu_us") / 1000;
+   let tokens = ftt-sum(walks, "input_tokens");
+   let said = ftt-say("run " ++ ftt-s(run) ++ ": " ++ len(rounds).str() ++ " round(s), " ++ len(walks).str() ++ " row(s), " ++ tokens.str() ++ " input tokens");
+   let a = ftt-phase("open the model", opened, run);
+   let b = ftt-phase("held-out validation before training (the baseline, remembered when nothing moved)", validBefore, run);
+   let b2 = ftt-phase("held-out validation after training", validAfter, run);
+   // the device's own busy milliseconds against the phase's wall (events written before 2026-10-13 carry none)
+   let b3 = any?(r => frw-has?(r, "device_busy_ms"), checks) ? ftt-say("validation: the device busy " ++ ftt-s(ftt-sum(checks, "device_busy_ms")) ++ " of " ++ ftt-s(valid) ++ " (" ++ ftt-pct(ftt-sum(checks, "device_busy_ms"), valid) ++ "); the rest is the host and the sync") : 0;
+   let candles = filter(r => frw-has?(r, "candle_us"), rows);
+   let b5 = nil?(candles) ? 0 : ftt-say("the machine candle (a fixed matrix product, ms a product, at admission, after each validation, at the end): " ++ str-join-with(map(r => ftt-ms1(ftt-n(r, "candle_us")), candles), ", ") ++ "; the slowest read " ++ ftt-ratio(ftt-max(candles, "candle_us"), ftt-minimum(candles, "candle_us")) ++ " times the fastest");
+   // the frozen-prefix cache (native-llama-metal.bml): a hit skips the embed and the layers below the first adapter layer
+   let finished = filter(r => frw-has?(r, "prefix_hits"), rows);
+   let b6 = nil?(finished) ? 0 : ftt-say("frozen-prefix cache: " ++ ftt-max(finished, "prefix_hits").str() ++ " row forwards hit it, " ++ ftt-max(finished, "prefix_misses").str() ++ " missed (a hit runs only the layers the adapter is on)");
+   let c = ftt-phase("assessments", assess, run);
+   let d = ftt-phase("rounds: training", training, run);
+   let e = ftt-phase("rounds: update (Adam, adapter write)", update, run);
+   let f = ftt-phase("rounds: tokenize + checkpoint", token + check, run);
+   let g = ftt-phase("not accounted (between phases)", run - opened - valid - assess - training - update - token - check, run);
+   let h = ftt-say("a row: forward " ++ ftt-s(ftt-mean(walks, "forward_ms")) ++ " mean, " ++ ftt-s(ftt-quantile(walks, "forward_ms", 1, 2)) ++ " median, " ++ ftt-s(ftt-quantile(walks, "forward_ms", 9, 10)) ++ " 90th, " ++ ftt-s(ftt-max(walks, "forward_ms")) ++ " worst; backward " ++ ftt-s(ftt-mean(walks, "backward_ms")) ++ " mean, " ++ ftt-s(ftt-quantile(walks, "backward_ms", 1, 2)) ++ " median, " ++ ftt-s(ftt-quantile(walks, "backward_ms", 9, 10)) ++ " 90th, " ++ ftt-s(ftt-max(walks, "backward_ms")) ++ " worst");
+   let h2 = map(b => ftt-bucket-line(walks, b), ftt-buckets());
+   let i = ftt-say("the device's own busy time: forward " ++ ftt-pct(fgpu, fwd) ++ " of its wall, backward " ++ ftt-pct(bgpu, bwd) ++ " (the rest is dispatch, sync and the walker)");
+   let j = ftt-say("per input token: forward " ++ (tokens == 0 ? 0 : fwd * 100 / tokens).str() ++ " centi-ms, backward " ++ (tokens == 0 ? 0 : bwd * 100 / tokens).str() ++ " centi-ms; dispatches a row " ++ ftt-mean(walks, "dispatches").str());
+   0;
+  }
+  def ftt-ledger(path) {
+   let rows = ftt-rows(path);
+   let said = map(r => ftt-say("stage " ++ frw-str(r, "stage", "") ++ ": " ++ ftt-s(ftt-n(r, "wall_ms")) ++ ((String) frw-str(r, "stopped", "") == "" ? "" : " STOPPED " ++ frw-str(r, "stopped", ""))), rows);
+   0;
+  }
+  def ftt-run() = ftt-with(frw-options(stdin-text() ?? ""));
+  def ftt-with(o) {
+   if (String) o[0] != "ok" then ftt-say("the options were refused at line " ++ o[2].str() ++ ": " ++ o[1])
+   else if !frw-has?(o[1], "events") then ftt-say("give `events PATH` (a run's training-events.fkb) and, after it, `ledger PATH` for the cycle's stage walls")
+   else {
+    let r = ftt-report(ftt-rows(frw-str(o[1], "events", "")));
+    frw-has?(o[1], "ledger") ? ftt-ledger(frw-str(o[1], "ledger", "")) : 0;
+   };
+  }
+ }
+ ftt-run();
+}

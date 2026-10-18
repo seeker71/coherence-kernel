@@ -1,0 +1,317 @@
+// resident-async-ingress.fk — cooperative many-channel ingress for one living
+// resident Form process.
+//
+// This organ does not claim kernel threads or nonblocking sockets.  The current
+// fkwu socket_accept/socket_recv and read_line doors wait.  Instead the resident
+// flow calls rai-poll-file once between bounded token/JIT/recipe quanta.  A poll
+// is one file_size metadata read; only newly appended bytes cross through
+// read_file_slice.  Thus an idle channel costs O(1), movement costs O(delta), no
+// digest is paid for bookkeeping, and model/KV residence never restarts.
+//
+// Channels are ordinary dynamic Form data addressed by caller-supplied NodeID
+// values.  There is no fixed function/operation table.  capacity and gas are
+// explicit live resource choices, not compiler-seat limits.  Inspection is a
+// pure projection: looking at state/gas/water consumes no gas and changes no
+// channel.  gas is remaining admitted ingress work; water is queued movement.
+//
+// One append-only file can carry one logical channel.  The current physical
+// contract is one writer per channel: that writer appends framed BMF/BML bytes;
+// the recipient gets exactly the new byte suffix. Parsing those scannerless
+// frames remains the receiving recipe's work. File truncation is a visible
+// rotation signal, never silently read as the old stream. Socket and stdin
+// carriers can enqueue through the same rai-offer door when their caller
+// already has bytes; this organ deliberately never calls their blocking reads.
+//
+// Correlated framebuffer control uses the same envelope shape as the canonical
+// bidirectional channel without importing its blueprint-only recording helper.
+// A stale/mismatched control resolves to the outbound alternative action.  0 continues; 3/8 cut the named
+// channel; 7 defers without consuming its queue; all other admitted actions are
+// preserved as an observed no-op for the higher recipe to interpret.
+//
+// Signals stay distinct:
+//   nothing       no channel / no queued movement
+//   accepted=0    observed backpressure or a closed channel
+//   accepted=1    bytes entered water
+//   value         one envelope yielded
+//   timeout       expired envelope released without becoming value
+//   cut/release   explicit channel transitions
+//
+import form-stdlib/core.fk;
+import form-stdlib/substrate-phase.fk;
+import form-stdlib/form-eval-full.fk;
+//
+section [form.bml] {
+    // Envelope: channel, sequence, exchange, kind, payload, alternative,
+    // deadline-ms.  A negative deadline means no wall-clock deadline.
+    def rai-envelope(channel, sequence, exchange, kind, payload, alternative, deadline) = [channel, sequence, exchange, kind, payload, alternative, deadline];
+    def rai-env-channel(e) = e[0];
+    def rai-env-sequence(e) = e[1];
+    def rai-env-exchange(e) = e[2];
+    def rai-env-kind(e) = e[3];
+    def rai-env-payload(e) = e[4];
+    def rai-env-alternative(e) = e[5];
+    def rai-env-deadline(e) = e[6];
+    // Channel: identity, state, capacity, gas, byte-cursor, queue, accepted,
+    // backpressured, cuts, timeouts, releases, last-exchange.
+    def rai-channel(identity, capacity, gas, byte-cursor) = [identity, "open", capacity, gas, byte-cursor, [], 0, 0, 0, 0, 0, nothing()];
+    def rai-channel-id(c) = c[0];
+    def rai-channel-state(c) = c[1];
+    def rai-channel-capacity(c) = c[2];
+    def rai-channel-gas(c) = c[3];
+    def rai-channel-cursor(c) = c[4];
+    def rai-channel-water(c) = c[5];
+    def rai-channel-accepted(c) = c[6];
+    def rai-channel-backpressure(c) = c[7];
+    def rai-channel-cuts(c) = c[8];
+    def rai-channel-timeouts(c) = c[9];
+    def rai-channel-releases(c) = c[10];
+    def rai-channel-last-exchange(c) = c[11];
+    def rai-channel-with(c, state, gas, cursor, water, accepted, backpressure, cuts, timeouts, releases, last-exchange) = [rai-channel-id(c), state, rai-channel-capacity(c), gas, cursor, water, accepted, backpressure, cuts, timeouts, releases, last-exchange];
+    // A small phase projection over live movement.  Empty/open is gas, flowing
+    // is water, full/backpressured is ice.  Closure stays explicit in state and
+    // projects gas because it carries no queued movement.
+    def rai-channel-phase(c) = !((String) rai-channel-state(c) == "open") ? st-gas() : (Comparable) len(rai-channel-water(c)) == 0 ? st-gas() : len(rai-channel-water(c)) >= rai-channel-capacity(c) ? st-ice() : st-water();
+    // Organ: dynamic channels, next round-robin seat, logical tick, bounded
+    // event rows, observation capacity, next sequence.
+    def rai-organ(channels, event-capacity) = [channels, 0, 0, [], event-capacity, 1];
+    def rai-channels(o) = o[0];
+    def rai-next(o) = o[1];
+    def rai-tick(o) = o[2];
+    def rai-events(o) = o[3];
+    def rai-event-capacity(o) = o[4];
+    def rai-next-sequence(o) = o[5];
+    def rai-organ-with(o, channels, next, tick, events, sequence) = [channels, next, tick, events, rai-event-capacity(o), sequence];
+    // NodeID identities cross this membrane in their canonical text form.
+    def rai-id-eq?(a, b) = (String) a == b ? 1 : 0;
+    def rai-find-channel(channels, identity) = (Comparable) len(channels) == 0 ? nothing() : (Comparable) rai-id-eq?(rai-channel-id(channels[0]), identity) == 1 ? channels[0] : rai-find-channel(channels[1:], identity);
+    def rai-replace-channel(channels, identity, replacement) = (Comparable) len(channels) == 0 ? [] : (Comparable) rai-id-eq?(rai-channel-id(channels[0]), identity) == 1 ? cons(replacement, channels[1:]) : cons(channels[0], rai-replace-channel(channels[1:], identity, replacement));
+    def rai-drop-first(xs) = (Comparable) len(xs) == 0 ? [] : xs[1:];
+    def rai-bounded-events(events, capacity) = capacity <= 0 ? [] : len(events) <= capacity ? events : rai-bounded-events(rai-drop-first(events), capacity);
+    def rai-event(o, channel, exchange, kind, signal) = {
+        let c = rai-find-channel(rai-channels(o), channel);
+        nothing?(c) ? [rai-tick(o), channel, exchange, kind, signal, "absent", 0, 0, st-gas()] : [rai-tick(o), channel, exchange, kind, signal, rai-channel-state(c), rai-channel-gas(c), len(rai-channel-water(c)), rai-channel-phase(c)];
+    };
+    def rai-observe-event(o, event) = rai-organ-with(o, rai-channels(o), rai-next(o), rai-tick(o), rai-bounded-events(append(rai-events(o), [event]), rai-event-capacity(o)), rai-next-sequence(o));
+    // Pure, free inspection.  Calling it does not advance tick, gas, cursor,
+    // queue, counters, or the bounded event window.
+    def rai-inspect-channel(o, identity) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? nothing() : ["resident-async-channel", rai-channel-id(c), rai-channel-state(c), "phase", rai-channel-phase(c), "gas", rai-channel-gas(c), "water", len(rai-channel-water(c)), "capacity", rai-channel-capacity(c), "byte-cursor", rai-channel-cursor(c), "accepted", rai-channel-accepted(c), "backpressure", rai-channel-backpressure(c), "cuts", rai-channel-cuts(c), "timeouts", rai-channel-timeouts(c), "releases", rai-channel-releases(c), "last-exchange", rai-channel-last-exchange(c)];
+    };
+    def rai-inspection-cost() = 0;
+    // Offer returns [organ, accepted, signal].  Missing is nothing, a closed or
+    // full channel is observed 0, and admitted water is observed 1.
+    def rai-offer(o, envelope) = {
+        let identity = rai-env-channel(envelope);
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? [o, nothing(), "nothing"] : !((String) rai-channel-state(c) == "open") || (rai-channel-gas(c) <= 0 || len(rai-channel-water(c)) >= rai-channel-capacity(c)) ? {
+            let c2 = rai-channel-with(c, rai-channel-state(c), rai-channel-gas(c), rai-channel-cursor(c), rai-channel-water(c), rai-channel-accepted(c), rai-channel-backpressure(c) + 1, rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-env-exchange(envelope));
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, c2), rai-next(o), rai-tick(o) + 1, rai-events(o), rai-next-sequence(o));
+            let o3 = rai-observe-event(o2, rai-event(o2, identity, rai-env-exchange(envelope), rai-env-kind(envelope), "backpressure"));
+            [o3, 0, "backpressure"];
+        } : {
+            let c2 = rai-channel-with(c, "open", rai-channel-gas(c) - 1, rai-channel-cursor(c), append(rai-channel-water(c), [envelope]), rai-channel-accepted(c) + 1, rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-env-exchange(envelope));
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, c2), rai-next(o), rai-tick(o) + 1, rai-events(o), rai-next-sequence(o) + 1);
+            let o3 = rai-observe-event(o2, rai-event(o2, identity, rai-env-exchange(envelope), rai-env-kind(envelope), "accepted"));
+            [o3, 1, "accepted"];
+        };
+    };
+    // Immediate channel movements.  Cut drops queued water but can be refilled;
+    // release closes the channel and drops queued water.
+    def rai-cut-channel(o, identity, exchange) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? o : {
+            let c2 = rai-channel-with(c, "open", rai-channel-gas(c), rai-channel-cursor(c), [], rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c) + 1, rai-channel-timeouts(c), rai-channel-releases(c), exchange);
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, c2), rai-next(o), rai-tick(o) + 1, rai-events(o), rai-next-sequence(o));
+            rai-observe-event(o2, rai-event(o2, identity, exchange, "cut", "cut"));
+        };
+    };
+    def rai-release-channel(o, identity, exchange) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? o : {
+            let c2 = rai-channel-with(c, "released", rai-channel-gas(c), rai-channel-cursor(c), [], rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c) + 1, exchange);
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, c2), rai-next(o), rai-tick(o) + 1, rai-events(o), rai-next-sequence(o));
+            rai-observe-event(o2, rai-event(o2, identity, exchange, "release", "release"));
+        };
+    };
+    def rai-refuel-channel(o, identity, gas) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? o : rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, rai-channel-with(c, rai-channel-state(c), gas, rai-channel-cursor(c), rai-channel-water(c), rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-channel-last-exchange(c))), rai-next(o), rai-tick(o), rai-events(o), rai-next-sequence(o));
+    };
+    // One round-robin cooperative yield.  At most one envelope moves, so the
+    // resident flow chooses the observation cadence between compute quanta.
+    // Returns [organ, envelope-or-nothing, signal].
+    def rai-step-channel(c, now) = (Comparable) len(rai-channel-water(c)) == 0 ? [c, nothing(), "nothing"] : {
+        let e = rai-channel-water(c)[0];
+        let rest = rai-channel-water(c)[1:];
+        rai-env-deadline(e) >= 0 && now >= rai-env-deadline(e) ? [rai-channel-with(c, "open", rai-channel-gas(c), rai-channel-cursor(c), rest, rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c) + 1, rai-channel-releases(c), rai-env-exchange(e)), e, "timeout"] : (String) rai-env-kind(e) == "cut" ? [rai-channel-with(c, "open", rai-channel-gas(c), rai-channel-cursor(c), [], rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c) + 1, rai-channel-timeouts(c), rai-channel-releases(c), rai-env-exchange(e)), e, "cut"] : (String) rai-env-kind(e) == "release" ? [rai-channel-with(c, "released", rai-channel-gas(c), rai-channel-cursor(c), [], rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c) + 1, rai-env-exchange(e)), e, "release"] : [rai-channel-with(c, "open", rai-channel-gas(c), rai-channel-cursor(c), rest, rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-env-exchange(e)), e, "value"];
+    };
+    def rai-yield-go(o, now, attempts, index) = attempts <= 0 || (Comparable) len(rai-channels(o)) == 0 ? [o, nothing(), "nothing"] : {
+        let count = len(rai-channels(o));
+        let seat = index % count;
+        let c = rai-channels(o)[seat];
+        let moved = rai-step-channel(c, now);
+        let c2 = moved[0];
+        let e = moved[1];
+        let signal = moved[2];
+        nothing?(e) ? rai-yield-go(o, now, attempts - 1, seat + 1) : {
+            let o2 = rai-organ-with(o, rai-replace-channel(rai-channels(o), rai-channel-id(c), c2), (seat + 1) % count, rai-tick(o) + 1, rai-events(o), rai-next-sequence(o));
+            let o3 = rai-observe-event(o2, rai-event(o2, rai-channel-id(c), rai-env-exchange(e), rai-env-kind(e), signal));
+            [o3, e, signal];
+        };
+    };
+    def rai-yield(o, now) = rai-yield-go(o, now, len(rai-channels(o)), rai-next(o));
+    // O(1) idle stat + O(delta) append-only byte crossing.  Missing file is
+    // nothing.  Shrink is a visible rotation and resets the byte cursor to 0;
+    // it does not fabricate old bytes as a new request.
+    // Returns [organ, accepted-or-nothing, signal, delta-bytes].
+    def rai-channel-with-cursor(o, identity, cursor) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? o : rai-organ-with(o, rai-replace-channel(rai-channels(o), identity, rai-channel-with(c, rai-channel-state(c), rai-channel-gas(c), cursor, rai-channel-water(c), rai-channel-accepted(c), rai-channel-backpressure(c), rai-channel-cuts(c), rai-channel-timeouts(c), rai-channel-releases(c), rai-channel-last-exchange(c))), rai-next(o), rai-tick(o), rai-events(o), rai-next-sequence(o));
+    };
+    // Admission owns the file cursor commit. The observed file size is only an
+    // upper bound: a concurrent append or short host read may return fewer
+    // bytes. Positive partial reads enter water as ordinary deltas and advance
+    // only by their actual byte count. Backpressure, closure, exhausted gas,
+    // empty short reads and malformed over-reads leave the cursor unchanged.
+    // Returns [organ, accepted-or-nothing, signal, actual-read-bytes].
+    def rai-poll-admit(o, identity, observed-size, exchange, kind, bytes, alternative, deadline) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? [o, nothing(), "nothing", 0] : {
+            let cursor = rai-channel-cursor(c);
+            let available = observed-size - cursor;
+            let received = len(bytes);
+            available <= 0 ? [o, nothing(), "nothing", 0] : received > available ? {
+                let o2 = rai-observe-event(o, rai-event(o, identity, exchange, kind, "read-beyond-observed-size"));
+                [o2, 0, "failure", 0];
+            } : (Comparable) received == 0 ? {
+                let o2 = rai-observe-event(o, rai-event(o, identity, exchange, kind, "short-read"));
+                [o2, 0, "short-read", 0];
+            } : {
+                let offered = rai-offer(o, rai-envelope(identity, rai-next-sequence(o), exchange, kind, bytes, alternative, deadline));
+                !((Comparable) offered[1] == 1) ? [offered[0], offered[1], offered[2], received] : {
+                    let committed = rai-channel-with-cursor(offered[0], identity, cursor + received);
+                    let observed = received < available ? rai-observe-event(committed, rai-event(committed, identity, exchange, kind, "short-read")) : committed;
+                    [observed, 1, offered[2], received];
+                };
+            };
+        };
+    };
+    def rai-poll-file(o, identity, path, exchange, kind, alternative, deadline) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? [o, nothing(), "nothing", 0] : {
+            let size = file_size(path);
+            size < 0 ? [o, nothing(), "nothing", 0] : size < rai-channel-cursor(c) ? {
+                let reset = rai-channel-with-cursor(o, identity, 0);
+                let reset2 = rai-observe-event(reset, rai-event(reset, identity, exchange, kind, "rotated"));
+                [reset2, 0, "rotated", 0];
+            } : (Comparable) size == rai-channel-cursor(c) ? [o, nothing(), "nothing", 0] : {
+                let delta = size - rai-channel-cursor(c);
+                let bytes = read_file_slice(path, rai-channel-cursor(c), delta);
+                rai-poll-admit(o, identity, size, exchange, kind, bytes, alternative, deadline);
+            };
+        };
+    };
+    // Correlated framebuffer observation/control.  Shape is
+    // [direction,exchange,kind,payload,alternative], matching the canonical
+    // channel.  The payload carries measurements/actions, never task bytes.
+    def rai-control-message(direction, exchange, kind, payload, alternative) = [direction, exchange, kind, payload, alternative];
+    def rai-control-direction(m) = m[0];
+    def rai-control-exchange(m) = m[1];
+    def rai-control-kind(m) = m[2];
+    def rai-control-payload(m) = m[3];
+    def rai-control-alternative(m) = m[4];
+    def rai-control(outbound, action) = nothing?(outbound) || !((Comparable) rai-control-direction(outbound) == 0) ? nothing() : rai-control-message(1, rai-control-exchange(outbound), 1, action, rai-control-alternative(outbound));
+    def rai-control-action(outbound, inbound) = nothing?(inbound) || (!((Comparable) rai-control-direction(inbound) == 1) || (!((Comparable) rai-control-kind(inbound) == 1) || !((Comparable) rai-control-exchange(outbound) == rai-control-exchange(inbound)))) ? rai-control-alternative(outbound) : rai-control-payload(inbound);
+    def rai-control-outbound(o, identity, exchange, alternative-action) = {
+        let view = rai-inspect-channel(o, identity);
+        nothing?(view) ? nothing() : rai-control-message(0, exchange, 0, [view[8], view[6]], alternative-action);
+    };
+    def rai-control-apply(o, identity, outbound, inbound) = nothing?(outbound) ? o : {
+        let action = rai-control-action(outbound, inbound);
+        (Comparable) action == 3 || (Comparable) action == 8 ? rai-cut-channel(o, identity, rai-control-exchange(outbound)) : o;
+    };
+    // Optional attributed carrier event.  The bounded structural event window
+    // is primary; this projects one opaque sequence into the kernel framebuffer.
+    def rai-record-framebuffer(o, identity, step) = {
+        let c = rai-find-channel(rai-channels(o), identity);
+        nothing?(c) ? nothing() : fb_record(intern_trivial_int(rai-tick(o)), "resident-async-ingress.fk", step);
+    };
+    // ── state-threaded scannerless recipe life ─────────────────────────────
+    // A definition is not imported into the resident source/prelude.  It
+    // arrives as bytes after the session exists and is parsed by fef-expr into
+    // a dynamic environment binding.  We add the defining source, stable
+    // NodeID and observed version to that binding; invocation then evaluates
+    // the stored body source rather than looking for an fk_fn seat.
+    //
+    // Extended binding: name, kind, params, retained-body-source,
+    // defining-source, nodeid, version.  Its first four fields intentionally
+    // remain fef-compatible.  Recursive and cross-source calls therefore use
+    // the existing full Form tree walker and its state-threaded environment.
+    def rai-binding-source(b) = b[4];
+    def rai-binding-nodeid(b) = b[5];
+    def rai-binding-version(b) = b[6];
+    def rai-extend-binding(b, source, nodeid, version) = [fef-bname(b), fef-bkind(b), fef-ba(b), fef-bb(b), source, nodeid, version];
+    def rai-lookup-binding(name, env) = (Comparable) len(env) == 0 ? nothing() : (String) fef-bname(env[0]) == name ? env[0] : rai-lookup-binding(name, env[1:]);
+    // Session: environment, current version, bounded correlation events.
+    def rai-session() = [fef-empty-env(), 0, []];
+    def rai-session-env(s) = s[0];
+    def rai-session-version(s) = s[1];
+    def rai-session-events(s) = s[2];
+    def rai-session-with(env, version, events) = [env, version, events];
+    def rai-session-event(exchange, nodeid, version, movement, symbol, value, signal) = [exchange, nodeid, version, movement, symbol, value, signal];
+    def rai-session-observe(s, event) = rai-session-with(rai-session-env(s), rai-session-version(s), append(rai-session-events(s), [event]));
+    def rai-source-defn?(source) = {
+        let p = fef-skip(source, 0);
+        p >= len(source) ? 0 : !((Comparable) str_byte_at(source, p) == 40) ? 0 : {
+            let n = fef-skip(source, p + 1);
+            (String) substring(source, n, fef-sym-end(source, n)) == "defn" ? 1 : 0;
+        };
+    };
+    def rai-source-call-name(source) = {
+        let p = fef-skip(source, 0);
+        p >= len(source) || !((Comparable) str_byte_at(source, p) == 40) ? "" : {
+            let n = fef-skip(source, p + 1);
+            substring(source, n, fef-sym-end(source, n));
+        };
+    };
+    // Result: session, value-or-nothing, signal, nodeid, version, exchange,
+    // symbol.  Definitions return observed 0 as their value; failure returns
+    // first-class nothing rather than borrowing 0.
+    def rai-session-result(session, value, signal, nodeid, version, exchange, symbol) = [session, value, signal, nodeid, version, exchange, symbol];
+    def rai-session-result-session(r) = r[0];
+    def rai-session-result-value(r) = r[1];
+    def rai-session-result-signal(r) = r[2];
+    def rai-session-result-nodeid(r) = r[3];
+    def rai-session-result-version(r) = r[4];
+    def rai-session-result-exchange(r) = r[5];
+    def rai-session-result-symbol(r) = r[6];
+    def rai-session-define(session, nodeid, source, exchange) = (Comparable) rai-source-defn?(source) == 0 ? rai-session-result(session, nothing(), "malformed", nodeid, rai-session-version(session), exchange, "") : {
+        let parsed = fef-expr(source, 0, rai-session-env(session));
+        let raw = fef-e(parsed)[0];
+        let version = rai-session-version(session) + 1;
+        let binding = rai-extend-binding(raw, source, nodeid, version);
+        let next = rai-session-with(cons(binding, fef-e(parsed)[1:]), version, rai-session-events(session));
+        let event = rai-session-event(exchange, nodeid, version, "define", fef-bname(binding), 0, "defined");
+        rai-session-result(rai-session-observe(next, event), 0, "defined", nodeid, version, exchange, fef-bname(binding));
+    };
+    def rai-session-eval-source(session, source) = fef-eval-state(source, rai-session-env(session));
+    def rai-session-invoke(session, nodeid, source, exchange) = {
+        let symbol = rai-source-call-name(source);
+        let binding = rai-lookup-binding(symbol, rai-session-env(session));
+        nothing?(binding) ? rai-session-result(session, nothing(), "nothing", nodeid, rai-session-version(session), exchange, symbol) : !((String) rai-binding-nodeid(binding) == nodeid) ? rai-session-result(session, nothing(), "nodeid-mismatch", nodeid, rai-binding-version(binding), exchange, symbol) : {
+            let evaluated = rai-session-eval-source(session, source);
+            let value = fef-v(evaluated);
+            let event = rai-session-event(exchange, nodeid, rai-binding-version(binding), "invoke", symbol, value, "value");
+            let carried = rai-session-with(fef-e(evaluated), rai-session-version(session), rai-session-events(session));
+            let next = rai-session-observe(carried, event);
+            rai-session-result(next, value, "value", nodeid, rai-binding-version(binding), exchange, symbol);
+        };
+    };
+    // A yielded ingress envelope selects definition or invocation.  The stable
+    // recipe NodeID travels in alternative; the source bytes travel in payload.
+    def rai-session-step(session, envelope) = nothing?(envelope) ? rai-session-result(session, nothing(), "nothing", "", rai-session-version(session), 0, "") : (String) rai-env-kind(envelope) == "recipe" ? rai-session-define(session, rai-env-alternative(envelope), rai-env-payload(envelope), rai-env-exchange(envelope)) : (String) rai-env-kind(envelope) == "invoke" ? rai-session-invoke(session, rai-env-alternative(envelope), rai-env-payload(envelope), rai-env-exchange(envelope)) : rai-session-result(session, nothing(), "nothing", rai-env-alternative(envelope), rai-session-version(session), rai-env-exchange(envelope), "");
+    def rai-string-bytes-go(s, i, out) = i >= len(s) ? reverse(out) : rai-string-bytes-go(s, i + 1, cons(str_byte_at(s, i), out));
+    def rai-string-bytes(s) = rai-string-bytes-go(s, 0, []);
+    0;
+}

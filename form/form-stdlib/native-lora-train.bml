@@ -1,0 +1,366 @@
+// One resident model and tokenizer serve a training run. Sequence microbatches
+// accumulate a token-weighted batch gradient; every completed round updates LoRA.
+// Parameters and Adam moments publish together, after device health and byte checks.
+import form-stdlib/native-lora-dataset.bml;
+import form-stdlib/native-lora-checkpoint.bml;
+import form-stdlib/native-llama-voice.bml;
+import form-stdlib/native-lora-recompute.bml;
+import observe/bidirectional-framebuffer-channel.fk;
+import form-stdlib/json-precise.bml;
+import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/form-rows-bridge.bml;
+import form-stdlib/bml/form-value-nodes.bml;
+import form-stdlib/sha256.fk;
+import form-stdlib/native-lora-progress.bml;
+section [form.bml] {
+ class NativeLoraTrain {
+  def ntr-int(k,v) = json-node-pair(k,json-node-int(v));
+  def ntr-text(k,v) = json-node-pair(k,json-node-string(v));
+  def ntr-real(k,v) = json-node-pair(k,json-precise-float(v));
+  def ntr-get(r,k) = node_value(json-object-get(r,k));
+  def ntr-activation-policy() = "memory-selected-whole-tape-or-layer-input-checkpoints;whole-sequence";
+  def ntr-row-policy(checkpointed) = if checkpointed then "layer-input-checkpoints;whole-sequence-recompute" else "whole-tape;whole-sequence";
+  def ntr-request(model,adapter,data,out,steps,batch,lr,masked,layers) = json-node-object([ntr-text("schema","native-lora-training-v1"),ntr-text("model",model),ntr-text("adapter",adapter),ntr-text("data",data),ntr-text("output",out),ntr-int("steps",steps),ntr-int("batch",batch),ntr-real("learning_rate",lr),ntr-int("mask_prompt",masked),ntr-int("layers",layers)]);
+  def ntr-event(out,kind,fields) {
+   let row = frb-of-node(json-node-object(append([ntr-text("stage",kind),ntr-int("at_ms",host_monotonic_ms()),ntr-int("pid",host_pid()),ntr-text("owner","Form-native-Metal")],fields)));
+   let wrote = fvn-ledger-append((out + "/training-events.fkb"),row);
+   let shown = print_str(frw-emit(row) + "\n");
+   wrote;
+  }
+  def ntr-health-event(out,kind,reading,fields) {
+   let voice = oh-voice(reading);
+   ntr-event(out,kind,append(fields,[json-node-pair("health",reading)]));
+  }
+  def ntr-progress-observe(out,checkpoint,expected,step) {
+   let config = parse-json("native-checkpoint-configuration",read_file((checkpoint + "/adapter_config.json")));
+   let marker = parse-json("native-checkpoint-completion",read_file((checkpoint + "/complete.json")));
+   let actual = json-object-get(config,"training_progress");
+   let valid = (nlp-checkpoint(config,marker) && nlp-same(expected,actual));
+   let reading = oh-reading("native-lora",out,"dataset-continuity",expected,actual,json-node-int(valid),if valid then [] else [oh-need("checkpoint-progress-agreement",oh-reference(checkpoint))],["continue-checkpoint","inspect-checkpoint"],oh-reference(checkpoint));
+   let observed = ntr-health-event(out,"dataset-progress",reading,[ntr-int("optimizer_step",step),json-node-pair("training_progress",actual),ntr-int("next_row_index",nlp-cursor(expected)),ntr-text("checkpoint",checkpoint)]);
+   if valid then 1 else form_error("published native dataset progress disagrees");
+  }
+  def ntr-config(model,r,step) = json-node-object([ntr-text("model",model[4]),ntr-text("fine_tune_type","lora"),ntr-int("num_layers",ntr-get(r,"layers")),json-node-pair("lora_parameters",json-object-get(model[5],"lora_parameters")),ntr-text("optimizer","adam"),ntr-real("learning_rate",ntr-get(r,"learning_rate")),ntr-int("batch_size",ntr-get(r,"batch")),ntr-int("mask_prompt",ntr-get(r,"mask_prompt")),ntr-int("native_step",step),ntr-text("data",ntr-get(r,"data")),ntr-text("sequence_policy","whole-row; memory admission; no silent truncation")]);
+  def ntr-save(model,state,r,step) {
+   let out = ntr-get(r,"output"); let made = fs-mkdir((out + "/generations"));
+   let gen = (out + ("/generations/" + (step.str() + ("-" + (host_pid().str() + ("-" + host_monotonic_ms().str()))))));
+   let mkdir = fs-mkdir(gen);
+   let a = nlc-save((gen + "/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(model[1])),model[4],step);
+   let o = nlc-save((gen + "/optimizer.safetensors"),nlc-optimizer-rows(state),model[4],step);
+   let progress = json-object-get(r,"training_progress");
+   let config = oh-set(ntr-config(model,r,step),"activation_policy",json-node-string(ntr-activation-policy()));
+   let c = if nlp-valid(progress) then nag-write((gen + "/adapter_config.json"),json-emit-precise(oh-set(config,"training_progress",progress))) else form_error("native checkpoint requires dataset progress");
+   let complete = nag-write((gen + "/complete.json"),json-emit-precise(json-node-object([ntr-int("step",step),ntr-int("adapter_bytes",a[1]),ntr-int("adapter_tensors",a[2]),ntr-int("optimizer_bytes",o[1]),ntr-int("optimizer_tensors",o[2]),json-node-pair("training_progress",progress)])));
+   let sync = nlc-sync-host(host_sync());
+   nag-publish(out,gen);
+  }
+  // A finished run's adapter leaves the run directory through the same checkpoint door the
+  // generations use (nlc-save: one GPU copy, byte-verified, published by rename) into a serving
+  // directory the request names as "export". Its configuration carries the lineage (the parent
+  // adapter) and how far it trained, but no native_step, no Adam state and no path to the run's
+  // or the data's scratch directories (those are ephemeral; the lane's ledger row names them): a
+  // later run that starts from it starts fresh moments, as from any served adapter.
+  def ntr-export-config(model,r,step) = json-node-object([ntr-text("model",model[4]),ntr-text("fine_tune_type","lora"),ntr-int("num_layers",ntr-get(r,"layers")),json-node-pair("lora_parameters",json-object-get(model[5],"lora_parameters")),ntr-text("optimizer","adam"),ntr-real("learning_rate",ntr-get(r,"learning_rate")),ntr-int("batch_size",ntr-get(r,"batch")),ntr-int("mask_prompt",ntr-get(r,"mask_prompt")),ntr-int("trained_native_steps",step),ntr-text("parent",ntr-get(r,"adapter")),ntr-text("owner","Form-native-Metal")]);
+  def ntr-export(model,r,step) {
+   if (!json-object-has?(r,"export")) then 0 else {
+    let dest = ntr-get(r,"export");
+    let made = fs-mkdir(dest);
+    let a =nlc-save((dest + "/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(model[1])),model[4],step);
+    let c = nag-write((dest + "/adapter_config.json"),json-emit-precise(ntr-export-config(model,r,step)));
+    ntr-event(ntr-get(r,"output"),"exported",[ntr-text("adapter",dest),ntr-int("optimizer_step",step),ntr-int("adapter_bytes",a[1]),ntr-int("adapter_tensors",a[2]),ntr-int("verified_rows",a[4])]);
+   };
+  }
+  def ntr-resume(model,state,adapter) {
+   let config = model[5];
+   if (!json-object-has?(config,"native_step")) then [0,"new Adam state; historical adapter has no optimizer checkpoint"] else ntr-resume-native(state,nag-resolve(adapter),ntr-get(config,"native_step"),config);
+  }
+  def ntr-resume-native(state,dir,step,config) {
+   let marker = parse-json("native-generation",read_file((dir + "/complete.json")));
+   if ((step < 0) || (!((Comparable) step == ntr-get(marker,"step")))) then form_error("native checkpoint step disagreement") else if (!nlp-checkpoint(config,marker)) then form_error("native checkpoint dataset progress disagreement") else ntr-resume-checked(state,dir,step);
+  }
+  def ntr-resume-checked(state,dir,step) {
+   let restore = nlc-load-optimizer(state,(dir + "/optimizer.safetensors"));
+   [step,"Adam moments and step restored from the same published generation"];
+  }
+  def ntr-whole-tape-bytes(model,t) = (nlg-cache-bytes(model,t) + ((3 * nlg-forward-bytes(model,t,0)) + (12 * (t * model[0][5]))));
+  def ntr-checkpointed?(model,t) = (!nlg-slice-fits?(ntr-whole-tape-bytes(model,t)));
+  def ntr-policy-bytes(model,t,checkpointed) = if checkpointed then nlrc-bytes(model,t) else ntr-whole-tape-bytes(model,t);
+  def ntr-row-bytes(model,t) = ntr-policy-bytes(model,t,ntr-checkpointed?(model,t));
+  // Assessment retains the complete KV and releases each forward tape. Include
+  // all head rows and masked-loss buffers in the slice admission estimate.
+  def ntr-score-bytes(model,t,pos) {
+   let g = model[0];
+   (nlg-forward-bytes(model,t,pos) + (4 * ((5 * t) + (((t - 1) * (g[5] + (2 * g[0]))) + (t * g[5])))));
+  }
+  def ntr-score-chunk(model,t,pos) = if (t <= 0) then 0 else if nlg-slice-fits?(ntr-score-bytes(model,t,pos)) then t else ntr-score-chunk(model,(t / 2),pos);
+  // Totals: weighted loss, supervised tokens, input tokens, slices, peak estimate.
+  // A zero-mask slice still advances every prompt token through the same KV.
+  def ntr-score-slices(model,ctx,ids,targets,mask,pos,limit,loss,tokens,slices,peak) {
+   if nil?(ids) then [loss,tokens,pos,slices,peak] else {
+    let t = ntr-score-chunk(model,nlg-min(limit,len(ids)),pos);
+    if ((Comparable) t == 0) then form_error("native assessment awaits memory for one token") else {
+     let estimate = ntr-score-bytes(model,t,pos); let weights = take(t,mask); let count = sum(weights);
+     let r = if (count > 0.0) then nll-forward-evaluation(model,ctx,take(t,ids),pos) else nll-forward(model,ctx,take(t,ids),pos,0);
+     let value = if (count > 0.0) then nlb-loss-masked(model,r,take(t,targets),weights) else 0.0;
+     let released = nll-forward-close(r);
+     if (!released) then form_error("native assessment forward release incomplete") else ntr-score-slices(model,ctx,drop(t,ids),drop(t,targets),drop(t,mask),(pos + t),limit,(loss + (value * count)),(tokens + count),(slices + 1),nlg-max(peak,estimate));
+    };
+   };
+  }
+  def ntr-score(model,sample) {
+   let ids = sample[0]; let t = len(ids); let targets = sample[1]; let mask = sample[2];
+   if (!((t > 0) && (((Comparable) t == len(targets)) && (((Comparable) t == len(mask)) && (nlb-mask-valid(mask) && (((Comparable) sum(mask) == sample[3]) && (sample[3] > 0.0))))))) then form_error("native assessment token/mask shape refused")
+   else if (!(nll-ids-valid(ids,model[0][5]) && nll-ids-valid(targets,model[0][5]))) then form_error("native assessment token IDs refused")
+   else if (t > model[0][9]) then form_error("native assessment row exceeds model positions")
+   else if (!nlg-room((nlg-cache-bytes(model,t) + ntr-score-bytes(model,1,(t - 1))))) then form_error("native assessment awaits complete KV and one token")
+   else {
+    let ctx = nll-context(model,t);
+    let limit = ntr-score-chunk(model,t,0);
+    let totals = if (limit < t) then ntr-score-care(model,ctx,sample,limit) else ntr-score-slices(model,ctx,ids,targets,mask,0,t,0.0,0.0,0,0);
+    let freed = nll-context-close(ctx);
+    if (!(freed && (((Comparable) totals[2] == t) && ((Comparable) totals[1] == sample[3])))) then form_error("native assessment coverage or release incomplete") else totals;
+   };
+  }
+  def ntr-score-care(model,ctx,sample,limit) {
+   let t = len(sample[0]); let expected = json-node-int(t);
+   let reading = oh-reading("native-lora",model[4],"assessment-memory",expected,json-node-int(limit),json-node-int(0),[oh-need("bounded-complete-assessment",expected)],["slice-assessment","defer"],json-node-int(sample[4]));
+   let sent = oh-voice(reading); let response = oh-response(reading,"slice-assessment"); let received = oh-voice(response);
+   if (!((String) oh-select(reading,response,"defer") == "slice-assessment")) then form_error("native assessment response did not correlate") else {
+    let applied = oh-voice(oh-applied(reading,"slice-assessment",json-node-int(limit)));
+    let totals = ntr-score-slices(model,ctx,sample[0],sample[1],sample[2],0,limit,0.0,0.0,0,0);
+    let covered = (((Comparable) totals[2] == t) && ((Comparable) totals[1] == sample[3]));
+    let fresh = oh-reading("native-lora",model[4],"assessment-memory",expected,json-node-int(totals[2]),json-node-int(covered),if covered then [] else [oh-need("bounded-complete-assessment",expected)],["inspect-assessment"],json-node-object([ntr-int("line",sample[4]),ntr-int("slices",totals[3]),ntr-int("peak_slice_estimated_bytes",totals[4])]));
+    let observed = oh-voice(oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id"))));
+    totals;
+   };
+  }
+  def ntr-score-loss(totals) = (totals[0] / totals[1]);
+  // The held-out rows are scored once a phase. Validation keeps each row's sample and its totals in `held`; the grading of the same
+  // rows takes a row's totals from there when its sample is the same token for token (ids, targets, mask) and scores only a row it
+  // does not find. Before this the two passes scored the same 81 rows twice before training and twice after: half of a run's scoring.
+  def ntr-validation(model,tk,rows,masked,out,step,held) {
+   let start = host_monotonic_ms();
+   let busy0 = metal_live()[11];
+   let totals = ntr-validation-rows(model,tk,rows,masked,0.0,0.0,0,held);
+   // device_busy_ms beside wall_ms: what this process kept the device busy of the time the phase took (the rest is the host and
+   // the sync); candle_us is the machine's state at the end of the phase (nam-candle: a fixed product, its device microseconds)
+   if (totals[1] <= 0.0) then form_error("native validation has no supervised tokens") else ntr-event(out,"validation",[ntr-int("optimizer_step",step),ntr-int("rows",totals[2]),ntr-real("supervised_tokens",totals[1]),ntr-real("loss",(totals[0] / totals[1])),ntr-int("cached",nil?(record_get(held,"cached")) ? 0 : 1),ntr-int("wall_ms",(host_monotonic_ms() - start)),ntr-int("device_busy_ms",(metal_live()[11] - busy0) / 1000),ntr-int("candle_us",nam-candle()),ntr-int("prefix_hits",nll-prefix-stats()[0]),ntr-int("prefix_misses",nll-prefix-stats()[1])]);
+  }
+  // ── the baseline, remembered ──
+  // The baseline validation scores the held-out rows under the parent adapter before any step. The adapter, the rows, the mask
+  // policy and the kernels' numerics are the same run after run, and a baseline of 81 rows cost 282 s and 388 s beside neighbours
+  // (2026-10-11), 88% of a two-step run. Each row's totals are kept under a key of those four; a run with the same key takes
+  // them back and scores nothing. A change of adapter (its size, its first and last 4096 bytes), of the rows' text, of the mask
+  // policy or of ntr-numerics() is a different key: nothing stale is read. ntr-numerics() is bumped when a kernel change moves a loss.
+  def ntr-numerics() = nll-numerics();
+  def ntr-baseline-key(adapter,validText,masked) {
+   let file = nag-resolve(adapter) ++ "/adapters.safetensors";
+   let bytes = read_file(file) ?? "";
+   nlp-hex(sha256-stream-string(nag-resolve(adapter) ++ "|" ++ file_size(file).str() ++ "|" ++ substring(bytes,0,4096) ++ "|" ++ substring(bytes,nlg-max(0,len(bytes) - 4096),len(bytes)) ++ "|" ++ validText ++ "|" ++ masked.str() ++ "|" ++ ntr-numerics()));
+  }
+  // one row a scored sample, in order: its totals as a list node, with each number keeping its kind (form-value-nodes.bml)
+  def ntr-baseline-path(key) = ".hearth/form-token-lora/baseline-" ++ substring(key,0,16) ++ ".fkb";
+  def ntr-baseline-load(path,count) = ntr-baseline-rows(fvn-rows-of(path),count);
+  def ntr-baseline-rows(r,count) = ((String) r[0] == "ok" && (Comparable) len(r[1]) == count) ? r[1] : [];
+  def ntr-baseline-save(path,held) {
+   let totals = reverse(map(p => p[1],record_get(held,"scored")));
+   nil?(totals) ? 0 : fvn-ledger-write(path,map(t => fvn-of(t),totals));
+  }
+  def ntr-score-or-cached(model,sample,held,count) {
+   let cached = record_get(held,"cached");
+   (nil?(cached) || (count >= len(cached))) ? ntr-score(model,sample) : cached[count];
+  }
+  def ntr-validation-rows(model,tk,rows,masked,loss,tokens,count,held) {
+   if nil?(rows) then [loss,tokens,count] else ntr-validation-row(model,tk,nld-prepare(tk,[rows[0]],masked)[0],rows[1:],masked,loss,tokens,count,held);
+  }
+  def ntr-validation-row(model,tk,sample,rest,masked,loss,tokens,count,held) {
+   let totals = ntr-score-or-cached(model,sample,held,count);
+   let kept = ntr-hold(held,sample,totals);
+   let value = ntr-score-loss(totals);
+   ntr-validation-rows(model,tk,rest,masked,(loss + (value * sample[3])),(tokens + sample[3]),(count + 1),held);
+  }
+  def ntr-hold(held,sample,totals) {
+   let set = record_set(held,"scored",cons([sample,totals],record_get(held,"scored")));
+   1;
+  }
+  def ntr-same-sample?(a,b) = ((Comparable) a[3] == b[3]) && bml-value-equal(a[0],b[0]) && bml-value-equal(a[1],b[1]) && bml-value-equal(a[2],b[2]);
+  def ntr-held-find(scored,sample) = nil?(scored) ? nothing() : ntr-same-sample?(scored[0][0],sample) ? scored[0][1] : ntr-held-find(scored[1:],sample);
+  def ntr-scored(model,held,sample) {
+   let hit = ntr-held-find(record_get(held,"scored"),sample);
+   nothing?(hit) ? ntr-score(model,sample) : hit;
+  }
+  def ntr-grade-hex(bytes) = nlp-hex(bytes);
+  // what a row is hashed as: its Form row in a rows run, its JSON text in the session subsystem's dialect (which hashes its own rows
+  // the same way and compares, native-session-evidence.bml); the run says which in `held`
+  def ntr-row-digest-text(row,held) = (record_has(held,"rows") && (Comparable) record_get(held,"rows") == 1) ? frw-emit(frb-of-node(row)) : json-emit-precise(row);
+  def ntr-grade-rows(model,tk,rows,index,held) = if nil?(rows) then [] else cons(ntr-grade-row(model,tk,rows[0],index,held),ntr-grade-rows(model,tk,rows[1:],(index + 1),held));
+  def ntr-grade-row(model,tk,row,index,held) {
+   let sample = nld-row(tk,row,1,(index + 1)); let totals = ntr-scored(model,held,sample);
+   json-node-object([ntr-int("index",index),ntr-text("row_sha256",ntr-grade-hex(sha256-stream-string(ntr-row-digest-text(row,held)))),ntr-real("loss",ntr-score-loss(totals)),ntr-real("supervised_tokens",totals[1]),ntr-int("input_tokens",totals[2]),ntr-int("assessment_slices",totals[3]),ntr-int("peak_slice_estimated_bytes",totals[4])]);
+  }
+  def ntr-assessment(model,tk,r,phase,held) {
+   if (!json-object-has?(r,"assessment")) then 0 else ntr-assessment-at(model,tk,r,phase,host_monotonic_ms(),held);
+  }
+  // The dialect of a run is the dataset it was given: Form rows (train.rows, and an assessment that ends .rows) or the JSON
+  // documents of the session-learning subsystem (train.jsonl, assessment.json). The assessment rows are read, and the scores are
+  // written, in that dialect, so the subsystem that reads its own JSON back keeps reading it until it holds Form rows.
+  def ntr-rows-path?(path) = (Comparable) len(path) > 5 && (String) substring(path,len(path) - 5,len(path)) == ".rows";
+  def ntr-data-path(dir,name) = file_size(dir + "/" + name + ".rows") > 0 ? (dir + "/" + name + ".rows") : (dir + "/" + name + ".jsonl");
+  def ntr-assessment-nodes(path) = ntr-rows-path?(path) ? frb-nodes-of(path) : json-array-elements(parse-json("native-assessment",read_file(path)));
+  def ntr-assessment-at(model,tk,r,phase,started,held) {
+   let rows = ntr-assessment-nodes(ntr-get(r,"assessment"));
+   let dialect = record_set(held,"rows",ntr-rows-path?(ntr-get(r,"assessment")) ? 1 : 0);
+   if nil?(rows) then form_error("native assessment has no rows") else ntr-assessment-save(r,phase,ntr-grade-rows(model,tk,rows,0,held),started);
+  }
+  def ntr-assessment-save(r,phase,scores,started) {
+   let out = ntr-get(r,"output"); let rowsRun = ntr-rows-path?(ntr-get(r,"assessment"));
+   let path = (out + ("/assessment-" + (phase + (rowsRun ? ".rows" : ".json"))));
+   let saved = nag-write(path,rowsRun ? str-join(map(s => frb-row-text(s),scores)) : json-emit-precise(json-node-array(scores)));
+   ntr-event(out,("assessment-" + phase),[ntr-int("rows",len(scores)),ntr-int("wall_ms",(host_monotonic_ms() - started)),ntr-text("scores",path)]);
+  }
+  def ntr-admit(model,sample) {
+   ntr-admit-policy(model,sample,ntr-checkpointed?(model,len(sample[0])));
+  }
+  def ntr-admit-policy(model,sample,checkpointed) {
+   let t = len(sample[0]); let bytes = ntr-policy-bytes(model,t,checkpointed);
+   if (t > model[0][9]) then form_error(("native training row exceeds model positions; line=" + sample[4].str())) else if (!nlg-room(bytes)) then form_error(("native training checkpointed row awaits memory; line=" + (sample[4].str() + (" required_additional_bytes=" + bytes.str())))) else 1;
+  }
+  def ntr-recompute-event(context,stage,index,t,elapsed) = ntr-event(context[0],("row-" + (stage + "-layer")),[ntr-int("line",context[1]),ntr-int("layer",index),ntr-int("input_tokens",t),ntr-int("wall_ms",elapsed),ntr-int("device_bytes",metal_live()[18])]);
+  // Compare the final projected row with an independent one-row projection.
+  // This checks that boundary, not the transformer's earlier activations.
+  def ntr-head-equality(model,r) {
+   let g = model[0]; let d = g[0]; let v = g[5]; let row = (r[7] - 1);
+   let x = nam-alloc(d); let actual = nam-alloc(v); let expected = nam-alloc(v); let delta = nam-alloc(v);
+   nll-last(r[2],x,d,(row * d)); nll-last(r[0],actual,v,(row * v));
+   nam-linear(model[2],x,expected,1,0); nam-add(actual,expected,delta,v,-1.0); nam-sync();
+   let stats = nam-stats(delta,v); let scale = nam-stats(actual,v); let released = nam-free([x,actual,expected,delta]);
+   let bound = ntr-head-bound(scale[2]);
+   [(released && (((Comparable) stats[0] == 0.0) && ((Comparable) scale[0] == 0.0) && (stats[2] <= bound))),row,stats[2],stats[0],bound];
+  }
+  // The block product runs on the matrix unit, whose hardware picks the association of a sum, and the one-row projection is the
+  // scalar walk: they agree to an epsilon of the row's own magnitude, not to the bit (a bound of 1e-4 of the largest logit; the
+  // measured difference is a few 1e-6). A broken projection (a wrong row, a NaN, a mapped buffer unread) is orders above it.
+  def ntr-head-bound(maxabs) = 0.0001 * (maxabs + 1.0);
+  def ntr-head-reading(out,line,checked) {
+   let valid = checked[0];
+   let detail = json-node-object([ntr-int("line",line),ntr-int("row",checked[1]),ntr-real("max_absolute_difference",checked[2]),ntr-real("bound",checked[4]),ntr-real("nonfinite",checked[3]),ntr-text("scope","final output row versus independent projection of the same normalized activation")]);
+   // The expectation is a difference within the bound (in the evidence), not a difference equal to it: a difference inside the
+   // bound is the expected reading, one outside it (or non-finite) is read against the bound and raises the surprise.
+   let expected = valid ? checked[2] : checked[4];
+   oh-reading("native-lora",out,"head-projection",json-precise-float(expected),json-precise-float(checked[2]),json-node-int(valid),if valid then [] else [oh-need("faithful-output-projection",detail)],["continue-gradient","abstain"],detail);
+  }
+  def ntr-head-observe(model,r,out,line) = if ((r[7] * model[0][5]) <= AffineDispatchGroups()) then 1 else {
+   let checked = ntr-head-equality(model,r); let valid = checked[0];
+   let reading = ntr-head-reading(out,line,checked);
+   ntr-health-event(out,"row-head-check",reading,[ntr-int("line",line)]);
+   let control = oh-response(reading,if valid then "continue-gradient" else "abstain"); oh-voice(control);
+   (valid && ((String) oh-select(reading,control,"abstain") == "continue-gradient"));
+  };
+  def ntr-batch(model,state,rows,total,out,loss) {
+   if nil?(rows) then loss else ntr-batch-row(model,state,rows[0],rows[1:],total,out,loss);
+  }
+  def ntr-batch-row(model,state,sample,rest,total,out,loss) {
+   let checkpointed = ntr-checkpointed?(model,len(sample[0]));
+   let entering = ntr-event(out,"row-start",[ntr-int("line",sample[4]),ntr-int("input_tokens",len(sample[0])),ntr-real("supervised_tokens",sample[3]),ntr-int("required_additional_bytes",ntr-policy-bytes(model,len(sample[0]),checkpointed)),ntr-int("whole_tape_estimated_bytes",ntr-whole-tape-bytes(model,len(sample[0]))),ntr-text("activation_policy",ntr-row-policy(checkpointed))]);
+   let admitted = ntr-admit-policy(model,sample,checkpointed); let start = host_monotonic_ms(); let live = metal_live();
+   let ctx = nll-context(model,len(sample[0])); let r = if checkpointed then nlrc-forward-observed(model,ctx,sample[0],[out,sample[4]],ntr-recompute-event) else nll-forward(model,ctx,sample[0],0,1);
+   let forward = host_monotonic_ms(); let fg = metal_live();
+   let forwardObserved = ntr-event(out,"row-forward-complete",[ntr-int("line",sample[4]),ntr-int("wall_ms",(forward - start)),ntr-int("dispatches",(fg[7] - live[7]))]);
+   let headChecked = ntr-head-observe(model,r,out,sample[4]);
+   if (!headChecked) then { nll-forward-close(r); nll-context-close(ctx); form_error("native training output projection disagrees; gradient update withheld"); } else 0;
+   let weight = (sample[3] / total);
+   let value = if checkpointed then nlrc-backward-observed(model,r,sample[1],sample[2],state,weight,[out,sample[4]],ntr-recompute-event) else nlb-backward-masked(model,r,sample[1],sample[2],state,weight);
+   let backward = host_monotonic_ms(); let bg = metal_live();
+   let backwardObserved = ntr-event(out,"row-backward-complete",[ntr-int("line",sample[4]),ntr-int("wall_ms",(backward - forward)),ntr-int("dispatches",(bg[7] - fg[7]))]);
+   let release = nll-forward-close(r); let close = nll-context-close(ctx);
+   let event = ntr-event(out,"row",[ntr-int("line",sample[4]),ntr-int("input_tokens",len(sample[0])),ntr-real("supervised_tokens",sample[3]),ntr-real("batch_weight",weight),ntr-real("sequence_loss",value),ntr-int("forward_ms",(forward - start)),ntr-int("backward_ms",(backward - forward)),ntr-int("forward_gpu_us",(fg[11] - live[11])),ntr-int("backward_gpu_us",(bg[11] - fg[11])),ntr-int("dispatches",(bg[7] - live[7]))]);
+   ntr-batch(model,state,rest,total,out,(loss + (value * weight)));
+  }
+  def ntr-cycle-rows(rows,cursor,batch) = take(batch,append(drop(cursor,rows),rows));
+  // A generation (adapter, Adam moments, progress) is published every save_every optimizer steps
+  // and always after the last round: a long run keeps its resume points without writing one per
+  // round. Without save_every, every round publishes, as before.
+  def ntr-save-every(r) = if json-object-has?(r,"save_every") then nlg-max(1,ntr-get(r,"save_every")) else 1;
+  def ntr-saving?(r,round,step) = ((round + 1) >= ntr-get(r,"steps")) || ((Comparable) ((step + 1) % ntr-save-every(r)) == 0);
+  def ntr-round(model,tk,state,rows,r,round,step) {
+   let out = ntr-get(r,"output"); let steps = ntr-get(r,"steps");
+   if (round >= steps) then [step,round,"completed"] else if (file_size((out + "/cancel")) > 0) then [step,round,"cancelled"] else ntr-round-ready(model,tk,state,rows,r,round,step);
+  }
+  def ntr-round-ready(model,tk,state,rows,r,round,step) {
+   let out = ntr-get(r,"output"); let start = host_monotonic_ms();
+   let batch = nlg-min(ntr-get(r,"batch"),len(rows));
+   let progress = json-object-get(r,"training_progress");
+   let selected = ntr-cycle-rows(rows,nlp-cursor(progress),batch);
+   let prepared = nld-prepare(tk,selected,ntr-get(r,"mask_prompt"));
+   let tokensAt = host_monotonic_ms(); let zero = nlb-clear(state);
+   let loss = ntr-batch(model,state,prepared,nld-weight(prepared),out,0.0);
+   let beforeUpdate = host_monotonic_ms();
+   let health = nlb-health(state,1,0,0.0);
+   let observation = bfc-envelope(0,(920000 + step),0,[round,nld-tokens(prepared),health[0],health[1]],3);
+   let sent = bfc-record-out(observation,0);
+   let control = bfc-control(observation,if ((Comparable) health[0] == 0) then 6 else 3);
+   let received = bfc-record-in(control,1);
+   let update = if ((Comparable) bfc-payload(control) == 6) then nlb-safe-step(state,ntr-get(r,"learning_rate"),(step + 1),1.0) else form_error("native training non-finite gradient; update abstained");
+   let after = bfc-record-out(bfc-envelope(0,(920000 + step),0,append(update,nlb-health(state,0,0,0.0)),3),2);
+   let updated = host_monotonic_ms();
+   let nextProgress = nlp-advance(progress,len(prepared));
+   let nextRequest = nlp-request(r,nextProgress);
+   let saving = ntr-saving?(r,round,step);
+   let checkpoint = if saving then ntr-save(model,state,nextRequest,(step + 1)) else "";
+   let coverage = if saving then ntr-progress-observe(out,checkpoint,nextProgress,(step + 1)) else 1;
+   let end = host_monotonic_ms(); let live = metal_live();
+   let event = ntr-event(out,"round",[ntr-int("round",(round + 1)),ntr-int("optimizer_step",(step + 1)),ntr-int("rows",len(prepared)),ntr-int("input_tokens",nld-tokens(prepared)),ntr-real("supervised_tokens",nld-weight(prepared)),ntr-real("loss",loss),ntr-real("gradient_norm",update[1]),ntr-real("gradient_clip",update[2]),ntr-int("lora_pairs_updated",update[3]),ntr-int("tokenize_ms",(tokensAt - start)),ntr-int("training_ms",(beforeUpdate - tokensAt)),ntr-int("update_ms",(updated - beforeUpdate)),ntr-int("checkpoint_ms",(end - updated)),ntr-int("wall_ms",(end - start)),ntr-int("device_bytes",live[18]),ntr-text("checkpoint",checkpoint),ntr-text("selected","whole-row sequence microbatches; token-weighted gradient; Adam; atomic generation")]);
+   ntr-round(model,tk,state,rows,nextRequest,(round + 1),(step + 1));
+  }
+  def ntr-run(r) {
+   if ((ntr-get(r,"steps") <= 0) || ((ntr-get(r,"batch") <= 0) || ((ntr-get(r,"learning_rate") <= 0.0) || (!(((Comparable) ntr-get(r,"mask_prompt") == 0) || ((Comparable) ntr-get(r,"mask_prompt") == 1)))))) then form_error("native training request values refused") else ntr-run-ready(r);
+  }
+  def ntr-run-ready(r) {
+   let out = ntr-get(r,"output"); let made = fs-mkdir(out); let start = host_monotonic_ms();
+   let text = read_file(ntr-data-path(ntr-get(r,"data"),"train"));
+   if nothing?(text) then form_error("native training corpus unreadable") else ntr-run-text(r,text,start);
+  }
+  def ntr-run-text(r,text,start) {
+   let rows = nld-lines(text);
+   if nil?(rows) then form_error("native training corpus has no rows") else ntr-run-data(nlp-request(r,nlp-bind(text,len(rows),ntr-get(r,"mask_prompt"))),rows,start);
+  }
+  def ntr-run-data(r,rows,start) {
+   let out = ntr-get(r,"output");
+   let adapter = if (file_size((out + "/native-current")) > 0) then out else ntr-get(r,"adapter");
+   let session = nlg-open(ntr-get(r,"model"),adapter); let model = session[0]; let tk = session[1];
+   if (!((Comparable) ntr-get(model[5],"num_layers") == ntr-get(r,"layers"))) then form_error("native training adapter layer lineage mismatch") else ntr-run-model(r,rows,start,session,adapter);
+  }
+  def ntr-run-model(r,rows,start,session,adapter) {
+   let out = ntr-get(r,"output"); let model = session[0]; let tk = session[1]; let state = nlb-state(model);
+   let resumed = ntr-resume(model,state,adapter);
+   let traversal = nlp-restore(model[5],json-object-get(r,"training_progress"));
+   let event = ntr-event(out,"admitted",[ntr-text("model",model[4]),ntr-text("adapter",nag-resolve(adapter)),ntr-int("rows",len(rows)),ntr-int("steps_requested",ntr-get(r,"steps")),ntr-int("batch",ntr-get(r,"batch")),ntr-int("lora_pairs",len(state)),ntr-int("optimizer_step",resumed[0]),ntr-text("optimizer_resume",resumed[1]),ntr-int("open_ms",(host_monotonic_ms() - start)),ntr-int("candle_us",nam-candle()),ntr-text("sequence_policy","whole-row, device-memory admission, no token truncation")]);
+   let validationRows = nld-file(ntr-data-path(ntr-get(r,"data"),"valid"));
+   let baselinePath = ntr-baseline-path(ntr-baseline-key(adapter,read_file(ntr-data-path(ntr-get(r,"data"),"valid")) ?? "",ntr-get(r,"mask_prompt")));
+   let remembered = ntr-baseline-load(baselinePath,len(validationRows));
+   let heldBefore = record_new(0,"scored",[],"cached",remembered);
+   let baseline = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,resumed[0],heldBefore);
+   let kept = nil?(remembered) ? ntr-baseline-save(baselinePath,heldBefore) : 0;
+   let assessedBefore = ntr-assessment(model,tk,r,"before",heldBefore);
+   let progress = traversal[0];
+   let continuing = ((String) traversal[1] == "same dataset; continue checkpointed examples");
+   let reading = oh-reading("native-lora",out,"dataset-continuity",json-node-string("same dataset; continue checkpointed examples"),json-node-string(traversal[1]),json-node-int(continuing),if continuing then [] else [oh-need("observed-dataset-traversal",json-node-string("start at first row; retain optimizer"))],["continue-checkpoint","start-first-row"],oh-reference(nag-resolve(adapter)));
+   let progressEvent = ntr-health-event(out,"dataset-resume",reading,[json-node-pair("training_progress",progress),ntr-text("reason",traversal[1]),ntr-int("next_row_index",nlp-cursor(progress))]);
+   let response = oh-response(reading,if continuing then "continue-checkpoint" else "start-first-row");
+   let selected = oh-select(reading,response,"defer");
+   let received = ntr-health-event(out,"dataset-response",response,[]);
+   let ready = if ((String) selected == "defer") then form_error("native dataset response did not correlate") else nlp-request(r,progress);
+   let applied = ntr-health-event(out,"dataset-applied",oh-applied(reading,selected,progress),[]);
+   let result = ntr-round(model,tk,state,rows,ready,0,resumed[0]);
+   let heldAfter = record_new(0,"scored",[],"cached",[]);
+   let validation = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,result[0],heldAfter);
+   let assessedAfter = ntr-assessment(model,tk,r,"after",heldAfter);
+   let profiled = nam-profile?() ? map(p => print(["kernel", p[0], "device ms", p[1] / 1000, "dispatches", p[2], "mean us", p[1] / p[2]]), nam-profile-report()) : [];
+   let exported = ntr-export(model,r,result[0]);
+   let done = nam-sync(); let closeState = nlb-state-close(state); let closeModel = nlg-close(session);
+   let final = ntr-event(out,"finished",[ntr-int("optimizer_step",result[0]),ntr-int("rounds_completed",result[1]),ntr-text("reason",result[2]),ntr-int("wall_ms",(host_monotonic_ms() - start)),ntr-int("candle_us",nam-candle()),ntr-int("prefix_hits",nll-prefix-stats()[0]),ntr-int("prefix_misses",nll-prefix-stats()[1]),ntr-int("retained_buffers",metal_live()[2])]);
+   result;
+  }
+ }
+ 0;
+}

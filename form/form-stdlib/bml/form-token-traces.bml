@@ -1,0 +1,472 @@
+// form-token-traces.bml — Form writes the training traces it has verified itself.
+//
+// A trace is a question, the controls a local voice would write for it, the exact observations
+// Form answered in stream, and the answer those observations support. Every case runs twice, in
+// two fresh sessions, and the second run must reproduce every observation byte for byte; its
+// answer is then checked against an oracle computed apart from the verb (compiled BML
+// arithmetic for eval, the receipt's own name and file for knowledge-query, a fresh node-get
+// readback for node work, the affine formula for recipes). Only cases that pass are written to
+// learn/form-token-traces.rows (Form rows, one record a line: form-rows.bml). No model, provider or network is asked: zero rented tokens.
+//
+// A row carries prompt (the question) and completion (the first control, the bytes a voice
+// authors); observation text is Form's and is kept apart in observations and in stream, the
+// same-KV shape a voice sees (control, then the injected observation, then the answer). One
+// case in eight of each family is marked split=heldout, except a case whose question a train row also
+// asks (that row trains).
+//
+// Run from the repository root:  print -r -- write | ./fkwu form/form-stdlib/bml/form-token-traces.bml
+// One family re-verified in place, every other row kept byte for byte:
+//   print -r -- refresh eval-refusal | ./fkwu form/form-stdlib/bml/form-token-traces.bml
+// A family the file does not hold yet follows its last line the same way (recipe-import did); the
+// split of its rows reads the other families' train questions from the file as it stands.
+// Without either on stdin the module only defines its functions.
+import form-stdlib/bml/form-rows-bridge.bml;
+import form-stdlib/bml/form-token-grammar.bml;
+section [form.bml] {
+ class FormTokenTraces {
+  def ftr-corpus() = "learn/form-token-traces.rows";
+  // The eighth row of each family is held out, unless a row that trains asks the same question: a
+  // held-out question that a train row also asks is taught under another id, so that row trains
+  // (it stays in the corpus; nothing is dropped). `trained` is the questions of the rows in a train
+  // slot over every family (ftr-trained-questions).
+  def ftr-held-slot?(i) = (i % 8) == 7;
+  def ftr-split(i, question, trained) = ftr-held-slot?(i) && !any?(q => q == question, trained) ? "heldout" : "train";
+  def ftr-next(seed) = ((seed * 1103515245) + 12345) % 2147483648;
+  def ftr-pick(seed, lo, hi) = lo + (ftr-next(seed) % ((hi - lo) + 1));
+  def ftr-nums(seed, k, lo, hi) = k <= 0 ? [] : cons(ftr-pick(seed, lo, hi), ftr-nums(ftr-next(seed), k - 1, lo, hi));
+  def ftr-list-text(xs) = "[" ++ ftv-join(map(x => x.str(), xs), ", ") ++ "]";
+  def ftr-q(s) = byte_to_str(34) ++ s ++ byte_to_str(34);
+
+  // case = [family, question, steps, answerf, checkf]; a step reads the observations so far
+  // and answers [verb, payload]
+  def ftr-case(family, question, steps, answerf, checkf) = [family, question, steps, answerf, checkf];
+  def ftr-one(family, question, verb, payload, answerf, checkf) = ftr-case(family, question, [obs => [verb, payload]], answerf, checkf);
+  def ftr-eval(family, question, payload, expected) = ftr-one(family, question, "eval", payload, obs => ftg-result-body(obs[0]), obs => obs[0] == ftv-value-result(value_str(expected)));
+  def ftr-body(obs, k) = ftg-result-body(obs[k]);
+
+  // ── running and checking a case ──────────────────────────────────────
+  // [verbs, controls, observations]
+  def ftr-run(c) = ftr-walk(ftv-session(), c[2], [], [], []);
+  def ftr-walk(session, steps, verbs, controls, obs) {
+   if nil?(steps) then [reverse(verbs), reverse(controls), reverse(obs)] else {
+    let vp = steps[0](reverse(obs));
+    let result = ftg-observe-with(session, vp[0], vp[1]);
+    ftr-walk(session, steps[1:], cons(vp[0], verbs), cons(ftg-render(vp[0], vp[1]), controls), cons(result, obs));
+   };
+  }
+  def ftr-same(a, b) = nil?(a) ? nil?(b) : nil?(b) ? 0 : a[0] == b[0] ? ftr-same(a[1:], b[1:]) : 0;
+  // [run, answer, verified]
+  def ftr-verify(c) {
+   let first = ftr-run(c);
+   let again = ftr-run(c);
+   let answer = c[3](first[2]);
+   let held = try [c[4](first[2])] catch [0];
+   [first, answer, ftr-same(first[1], again[1]) && ftr-same(first[2], again[2]) && (held[0] == 1) && (len(answer) > 0)];
+  }
+  def ftr-stream(controls, obs, answer) = nil?(controls) ? answer : controls[0] ++ byte_to_str(10) ++ ftg-observation(obs[0]) ++ byte_to_str(10) ++ ftr-stream(controls[1:], obs[1:], answer);
+  def ftr-strings(xs) = json-node-array(map(x => json-node-string(x), xs));
+  def ftr-row(c, run, answer, i, split) = json-node-object([json-node-pair("id", json-node-string("ftr-" ++ c[0] ++ "-" ++ i.str())), json-node-pair("family", json-node-string(c[0])), json-node-pair("verb", json-node-string(run[0][0])), json-node-pair("verbs", ftr-strings(run[0])), json-node-pair("split", json-node-string(split)), json-node-pair("question", json-node-string(c[1])), json-node-pair("controls", ftr-strings(run[1])), json-node-pair("observations", ftr-strings(map(r => ftg-observation(r), run[2]))), json-node-pair("answer", json-node-string(answer)), json-node-pair("prompt", json-node-string(c[1])), json-node-pair("completion", json-node-string(run[1][0])), json-node-pair("stream", json-node-string(ftr-stream(run[1], run[2], answer))), json-node-pair("verified", json-node-int(1)), json-node-pair("replayed", json-node-int(1)), json-node-pair("rented_tokens", json-node-int(0))]);
+  // [picks, rejected] for one family's cases; a pick is [case, run, answer] for a case that verified
+  def ftr-family(cases) = ftr-family-at(cases, [], 0);
+  def ftr-family-at(cases, picks, rejected) {
+   if nil?(cases) then [reverse(picks), rejected] else {
+    let v = ftr-verify(cases[0]);
+    if v[2] then ftr-family-at(cases[1:], cons([cases[0], v[0], v[1]], picks), rejected) else ftr-family-at(cases[1:], picks, rejected + 1);
+   };
+  }
+  // the questions of the picks that sit in a train slot, numbered from 0 within the family
+  def ftr-slot-questions(picks, i) = nil?(picks) ? [] : ftr-held-slot?(i) ? ftr-slot-questions(picks[1:], i + 1) : cons(picks[0][0][1], ftr-slot-questions(picks[1:], i + 1));
+  def ftr-trained-questions(families) = foldl((acc, picks) => append(acc, ftr-slot-questions(picks, 0)), [], families);
+  // a family's picks as written lines, numbered from 0, each with the split its question allows
+  def ftr-lines(picks, i, trained) = nil?(picks) ? [] : cons(frw-emit(frb-of-node(ftr-row(picks[0][0], picks[0][1], picks[0][2], i, ftr-split(i, picks[0][0][1], trained)))), ftr-lines(picks[1:], i + 1, trained));
+
+  // ── eval: arithmetic, comparison, text, lists, recursion, floats, refusals ──
+  def ftr-arith(i) {
+   let h = (i * 7919) + 17;
+   let a = ftr-pick(h, 2, 999);
+   let b = ftr-pick(ftr-next(h), 2, 99);
+   let c = ftr-pick(ftr-next(ftr-next(h)), 0, 999);
+   let t = i % 6;
+   if t == 0 then ftr-eval("eval-arith", "What is " ++ a.str() ++ " * " ++ b.str() ++ " + " ++ c.str() ++ "?", a.str() ++ " * " ++ b.str() ++ " + " ++ c.str(), (a * b) + c)
+   else if t == 1 then ftr-eval("eval-arith", "What is (" ++ a.str() ++ " + " ++ b.str() ++ ") * " ++ c.str() ++ "?", "(" ++ a.str() ++ " + " ++ b.str() ++ ") * " ++ c.str(), (a + b) * c)
+   else if t == 2 then ftr-eval("eval-arith", "What is " ++ a.str() ++ " - " ++ b.str() ++ " * " ++ c.str() ++ "?", a.str() ++ " - " ++ b.str() ++ " * " ++ c.str(), a - (b * c))
+   else if t == 3 then ftr-eval("eval-arith", "What is " ++ a.str() ++ " modulo " ++ b.str() ++ "?", a.str() ++ " % " ++ b.str(), a % b)
+   else if t == 4 then ftr-eval("eval-arith", "What is " ++ a.str() ++ " divided by " ++ b.str() ++ ", rounded toward zero?", a.str() ++ " / " ++ b.str(), a / b)
+   else ftr-eval("eval-arith", "What is " ++ a.str() ++ " squared minus " ++ b.str() ++ "?", a.str() ++ " * " ++ a.str() ++ " - " ++ b.str(), (a * a) - b);
+  }
+  def ftr-yes(obs) = ftr-body(obs, 0) == "1" ? "yes" : "no";
+  def ftr-compare(i) {
+   let h = (i * 6151) + 3;
+   let a = ftr-pick(h, 1, 500);
+   let b = (i % 3) == 0 ? a : ftr-pick(ftr-next(h), 1, 500);
+   let c = ftr-pick(ftr-next(ftr-next(h)), 2, 9);
+   let t = i % 3;
+   if t == 0 then ftr-one("eval-compare", "Is " ++ a.str() ++ " equal to " ++ b.str() ++ "?", "eval", a.str() ++ " == " ++ b.str(), obs => ftr-yes(obs), obs => obs[0] == ftv-value-result(a == b ? "1" : "0"))
+   else if t == 1 then ftr-one("eval-compare", "Is " ++ a.str() ++ " greater than " ++ b.str() ++ "?", "eval", a.str() ++ " > " ++ b.str(), obs => ftr-yes(obs), obs => obs[0] == ftv-value-result(a > b ? "1" : "0"))
+   else ftr-one("eval-compare", "Is " ++ (a * c).str() ++ " divisible by " ++ c.str() ++ " and greater than " ++ b.str() ++ "?", "eval", (a * c).str() ++ " % " ++ c.str() ++ " == 0 && " ++ (a * c).str() ++ " > " ++ b.str(), obs => ftr-yes(obs), obs => obs[0] == ftv-value-result((a * c) > b ? "1" : "0"));
+  }
+  def ftr-words() = ["coherence", "kernel", "sema", "recipe", "observation", "choice", "backtrack", "substrate", "sovereign", "frequency", "resonance", "homecoming", "microthought", "interceptor", "grammar", "lantern", "harvest", "threshold", "covenant", "listening"];
+  def ftr-text(i) {
+   let ws = ftr-words();
+   let w = ws[i % len(ws)];
+   let v = ws[(i * 7 + 3) % len(ws)];
+   let k = 1 + ((i * 5) % (len(w) - 1));
+   let ch = substring(w, k, k + 1);
+   let t = i % 4;
+   if t == 0 then ftr-eval("eval-text", "How many letters are in the word " ++ w ++ "?", "len(" ++ ftr-q(w) ++ ")", len(w))
+   else if t == 1 then ftr-eval("eval-text", "Join " ++ w ++ " and " ++ v ++ " with a dash.", ftr-q(w) ++ " ++ " ++ ftr-q("-") ++ " ++ " ++ ftr-q(v), w ++ "-" ++ v)
+   else if t == 2 then ftr-eval("eval-text", "What are the first " ++ k.str() ++ " letters of " ++ w ++ "?", "substring(" ++ ftr-q(w) ++ ", 0, " ++ k.str() ++ ")", substring(w, 0, k))
+   else ftr-eval("eval-text", "At which position does the letter " ++ ch ++ " first appear in " ++ w ++ ", counting from zero?", "str_find(" ++ ftr-q(w) ++ ", " ++ ftr-q(ch) ++ ", 0)", str_find(w, ch, 0));
+  }
+  def ftr-max(xs) = foldl((m, x) => x > m ? x : m, xs[0], xs[1:]);
+  def ftr-lists(i) {
+   let h = (i * 4099) + 11;
+   let xs = ftr-nums(h, 3 + (i % 5), 1, 50);
+   let a = ftr-pick(h, 1, 40);
+   let b = a + ftr-pick(ftr-next(h), 5, 60);
+   let t = i % 5;
+   if t == 0 then ftr-eval("eval-lists", "What is the sum of " ++ ftr-list-text(xs) ++ "?", ftr-list-text(xs) ++ " |> sum", sum(xs))
+   else if t == 1 then ftr-eval("eval-lists", "What is the sum of the squares of " ++ ftr-list-text(xs) ++ "?", ftr-list-text(xs) ++ " |> map(x => x * x) |> sum", sum(map(x => x * x, xs)))
+   else if t == 2 then ftr-eval("eval-lists", "How many even numbers are in " ++ ftr-list-text(xs) ++ "?", ftr-list-text(xs) ++ " |> filter(x => x % 2 == 0) |> len", len(filter(x => (x % 2) == 0, xs)))
+   else if t == 3 then ftr-eval("eval-lists", "What is the sum of the integers from " ++ a.str() ++ " to " ++ b.str() ++ "?", "range(" ++ a.str() ++ ", " ++ b.str() ++ " + 1) |> sum", sum(range(a, b + 1)))
+   else ftr-eval("eval-lists", "What is the largest number in " ++ ftr-list-text(xs) ++ "?", "max(" ++ ftr-list-text(xs) ++ ")", ftr-max(xs));
+  }
+  def ftr-fact(n) = n <= 1 ? 1 : n * ftr-fact(n - 1);
+  def ftr-fib(n) = n < 2 ? n : ftr-fib(n - 1) + ftr-fib(n - 2);
+  def ftr-gcd(a, b) = b == 0 ? a : ftr-gcd(b, a % b);
+  def ftr-recursion(i) {
+   let h = (i * 3001) + 7;
+   let t = i % 3;
+   let n = t == 0 ? ftr-pick(h, 3, 15) : ftr-pick(h, 5, 12);
+   let a = ftr-pick(h, 12, 999);
+   let b = ftr-pick(ftr-next(h), 12, 999);
+   if t == 0 then ftr-eval("eval-recursion", "What is " ++ n.str() ++ " factorial?", "def fact(n) = n <= 1 ? 1 : n * fact(n - 1); fact(" ++ n.str() ++ ")", ftr-fact(n))
+   else if t == 1 then ftr-eval("eval-recursion", "What is Fibonacci number " ++ n.str() ++ ", counting fib(0) = 0 and fib(1) = 1?", "def fib(n) = n < 2 ? n : fib(n - 1) + fib(n - 2); fib(" ++ n.str() ++ ")", ftr-fib(n))
+   else ftr-eval("eval-recursion", "What is the greatest common divisor of " ++ a.str() ++ " and " ++ b.str() ++ "?", "def gcd(a, b) = b == 0 ? a : gcd(b, a % b); gcd(" ++ a.str() ++ ", " ++ b.str() ++ ")", ftr-gcd(a, b));
+  }
+  def ftr-fractions() = ["0", "25", "5", "75"];
+  def ftr-float-text(whole, k) = whole.str() ++ "." ++ ftr-fractions()[k % 4];
+  def ftr-float(text) = node_value(intern_trivial_float(text));
+  def ftr-floats(i) {
+   let h = (i * 2003) + 5;
+   let x = ftr-float-text(ftr-pick(h, 1, 40), i);
+   let y = ftr-float-text(ftr-pick(ftr-next(h), 1, 20), i + 1);
+   let n = ftr-pick(h, 2, 30);
+   if (i % 2) == 0 then ftr-eval("eval-float", "What is " ++ x ++ " times " ++ y ++ "?", x ++ " * " ++ y, ftr-float(x) * ftr-float(y))
+   else ftr-eval("eval-float", "What is the square root of " ++ (n * n).str() ++ "?", "sqrt(" ++ (n * n).str() ++ ")", math_sqrt(n * n));
+  }
+  // [question, payload, observation, answer]: eval reaches the body's whole environment (its
+  // doors, its functions, the workspace), so what answers nothing here is a failure observed,
+  // never a refusal: an absent file, a door asked with the wrong arity, a name nothing holds, a
+  // kind that does not fit, a recursion the runtime's depth guard stops
+  def ftr-refusal-rows() = [
+   ["Use eval to read the file /nonexistent/form-token/hosts.", "read_file(" ++ ftr-q("/nonexistent/form-token/hosts") ++ ")", "nothing=absent-value;", "Form reached the file door: there is no such file, so there is no value."],
+   ["Call the door file_size with no argument.", "file_size()", "nothing=arity:file_size;", "file_size takes one path; called with none it answers no value."],
+   ["Call the body's function frobnicate on 3.", "frobnicate(3)", "nothing=unknown-name:frobnicate;", "Nothing the workspace, the doors or the body define is called frobnicate, so there is no value."],
+   ["Read the node at address @0.2.0.0.", "node-at(" ++ ftr-q("@0.2.0.0") ++ ")", "nothing=unknown-node;", "No node lives at @0.2.0.0, so there is no value."],
+   ["What are the children of the number 42?", "kids(42)", "nothing=kind:kids;", "42 is a number, not a node, so it has no children."],
+   ["Multiply the word ab by 3.", ftr-q("ab") ++ " * 3", "nothing=kind:mul;", "A word and a number do not multiply; there is no value."],
+   ["What is the largest number in an empty list?", "max([])", "nothing=empty:max;", "The list is empty, so it has no largest number."],
+   ["What are the letters 2 to 9 of the word form?", "substring(" ++ ftr-q("form") ++ ", 2, 9)", "nothing=index:substring;", "The word form has four letters; 2 to 9 runs past its end."],
+   ["Turn the word five into text with int_to_str.", "int_to_str(" ++ ftr-q("five") ++ ")", "nothing=kind:int_to_str;", "int_to_str turns a number into text; five is already text, so there is no value."],
+   ["What is the square root of the word nine?", "sqrt(" ++ ftr-q("nine") ++ ")", "nothing=kind:sqrt;", "A word has no square root; there is no value."],
+   ["What is 10 divided by 0?", "10 / 0", "nothing=division-by-zero;", "There is no value: division by zero."],
+   ["What is 7 modulo 0?", "7 % 0", "nothing=division-by-zero;", "There is no value: modulo by zero."],
+   ["Run a function that calls itself forever.", "def loop(n) = loop(n + 1); loop(0)", "nothing=eval-stopped;", "The recursion never returns; the runtime's depth guard stopped it, and there is no value."],
+   ["Divide each of 1, 2 and 3 by zero.", "[1, 2, 3] |> map(x => x / 0)", "nothing=division-by-zero;", "Dividing by zero has no value, so the whole map has none."],
+   ["What is y + 1?", "y + 1", "nothing=unknown-name:y;", "y is not bound, so there is no value."],
+   ["Add the word ten to the number 10.", ftr-q("ten") ++ " + 10", "nothing=kind:add;", "A word and a number do not add; there is no value."],
+   ["What is the first element of an empty list?", "[][0]", "nothing=absent-value;", "The list is empty; there is no first element."],
+   ["What is the square root of -4?", "sqrt(-4)", "nothing=domain:sqrt;", "There is no real square root of -4."],
+   ["What is the logarithm of 0?", "log(0)", "nothing=domain:log;", "The logarithm of 0 is undefined."],
+   ["What is 2 +?", "2 +", "nothing=parse-refused;", "The expression is incomplete, so Form could not read it."]];
+  def ftr-refusals() = map(r => ftr-one("eval-refusal", r[0], "eval", r[1], obs => r[3], obs => obs[0] == r[2]), ftr-refusal-rows());
+
+  // ── knowledge-query: this checkout's receipts and the enrich resources ──
+  def ftr-sorted(xs) = nil?(xs) ? [] : ftr-insert(xs[0], ftr-sorted(xs[1:]));
+  def ftr-insert(x, ys) = nil?(ys) ? [x] : ftv-text-after?(x, ys[0]) ? cons(ys[0], ftr-insert(x, ys[1:])) : cons(x, ys);
+  def ftr-receipt-term(name) {
+   let words = filter(w => (len(w) >= 6) && !any?(s => s == w, ftv-stopwords()) && (ftv-digits?(w) == 0), split-on(substring(name, 0, len(name) - 3), "-"));
+   nil?(words) ? "" : foldl((best, w) => len(w) > len(best) ? w : best, words[0], words[1:]);
+  }
+  def ftr-receipt-terms(names, seen) {
+   if nil?(names) then [] else {
+    let term = ftr-receipt-term(names[0]);
+    if (len(term) == 0) || any?(s => s == term, seen) then ftr-receipt-terms(names[1:], seen) else cons(term, ftr-receipt-terms(names[1:], cons(term, seen)));
+   };
+  }
+  def ftr-first-receipt(obs) {
+   let rows = filter(r => ftv-starts?(r, "receipts/"), split-on(ftr-body(obs, 0), " | "));
+   nil?(rows) ? "" : substring(rows[0], 0, str_find(rows[0], ": ", 0));
+  }
+  def ftr-receipt-case(term) = ftr-one("knowledge-receipts", "Which receipt in this body speaks of " ++ term ++ "?", "knowledge-query", term, obs => ftr-first-receipt(obs), obs => (len(ftr-first-receipt(obs)) > 0) && (str_find(ftv-lower(ftr-first-receipt(obs)), term, 0) >= 0) && (file_size(ftr-first-receipt(obs)) > 0));
+  def ftr-receipts() = map(t => ftr-receipt-case(t), ftr-receipt-terms(ftr-sorted(filter(n => ftv-ends?(n, ".md") && ftv-digits?(substring(n, 0, 4)), fs_list("receipts") ?? [])), []));
+  def ftr-sense(obs, w) {
+   let row = split-on(ftr-body(obs, 0), " | ")[0];
+   let cut = str_find(row, " [", 0);
+   ftv-starts?(row, w ++ ": ") && (cut > len(w) + 2) ? substring(row, len(w) + 2, cut) : "";
+  }
+  def ftr-enrich-case(w) = ftr-one("knowledge-enrich", "What does " ++ w ++ " mean in this body's own sources?", "knowledge-query", w, obs => ftr-sense(obs, w), obs => len(ftr-sense(obs, w)) > 0);
+  def ftr-enrich() = map(w => ftr-enrich-case(w), append(map(s => fwf-surface(s), fwf-seeds()), filter(m => (len(m) >= 3) && !any?(s => s == ftv-lower(m), ftv-stopwords()), mc-meanings())));
+
+  // ── node-make, node-get, node-select ─────────────────────────────────
+  def ftr-categories() = ["pair", "point", "edge", "span", "link", "tuple", "cell", "triple"];
+  def ftr-address(obs, k) = ftr-body(obs, k);
+  def ftr-readback(make, expected) {
+   let s = ftv-session();
+   let made = ftg-observe-with(s, "node-make", make);
+   ftv-ends?(ftg-observe-with(s, "node-get", ftg-result-body(made)), ", " ++ expected ++ "];");
+  }
+  def ftr-node-make(i) {
+   let h = (i * 1777) + 29;
+   let cat = ftr-categories()[i % len(ftr-categories())];
+   let a = ftr-pick(h, 0, 99);
+   let b = (i % 3) == 0 ? ftr-q(ftr-words()[i % len(ftr-words())]) : ftr-pick(ftr-next(h), 0, 99).str();
+   let payload = cat ++ ";" ++ a.str() ++ "," ++ b;
+   let shown = "[" ++ a.str() ++ ", " ++ ((i % 3) == 0 ? ftr-words()[i % len(ftr-words())] : b) ++ "]";
+   ftr-one("node-make", "Make a " ++ cat ++ " node with children " ++ a.str() ++ " and " ++ b ++ ".", "node-make", payload, obs => ftr-address(obs, 0), obs => (ftg-result-kind(obs[0]) == "node") && ftr-readback(payload, shown));
+  }
+  def ftr-node-get(i) {
+   let h = (i * 2311) + 41;
+   let cat = ftr-categories()[(i + 3) % len(ftr-categories())];
+   let xs = ftr-nums(h, 3, 0, 99);
+   let payload = cat ++ ";" ++ ftv-join(map(x => x.str(), xs), ",");
+   let shown = ftr-list-text(xs);
+   ftr-case("node-get", "Make a " ++ cat ++ " node holding " ++ ftv-join(map(x => x.str(), xs), ", ") ++ ", then read its children back.", [obs => ["node-make", payload], obs => ["node-get", ftr-address(obs, 0)]], obs => shown, obs => obs[1] == ftv-value-result("[" ++ cat ++ ", " ++ ftv-coord(intern_node(FTV-CATEGORY-ROOT, [intern_trivial_string(cat)])) ++ ", " ++ shown ++ "]"));
+  }
+  def ftr-first-above(pairs, k, i) = nil?(pairs) ? -1 : pairs[0][0] > k ? i : ftr-first-above(pairs[1:], k, i + 1);
+  def ftr-node-select(i) {
+   let h = (i * 3571) + 13;
+   let firsts = ftr-nums(h, 3, 1, 90);
+   let seconds = ftr-nums(ftr-next(h) + 5, 3, 1, 90);
+   let pairs = map(j => [firsts[j], seconds[j]], range(0, 3));
+   let k = firsts[i % 3] - 1;
+   let want = ftr-first-above(pairs, k, 0);
+   let make = j => obs => ["node-make", "pair;" ++ firsts[j].str() ++ "," ++ seconds[j].str()];
+   let texts = map(p => "(" ++ p[0].str() ++ ", " ++ p[1].str() ++ ")", pairs);
+   ftr-case("node-select", "Among the pairs " ++ texts[0] ++ ", " ++ texts[1] ++ " and " ++ texts[2] ++ ", which is the first whose first element is greater than " ++ k.str() ++ "?", [make(0), make(1), make(2), obs => ["node-select", "kids(n)[0] > " ++ k.str() ++ ";" ++ ftr-address(obs, 0) ++ "," ++ ftr-address(obs, 1) ++ "," ++ ftr-address(obs, 2)]], obs => "the pair " ++ texts[want] ++ ", node " ++ ftr-address(obs, 3), obs => (want >= 0) && (ftr-address(obs, 3) == ftr-address(obs, want)));
+  }
+
+  // ── recipe-birth, recipe-exec, choice ────────────────────────────────
+  def ftr-recipe-affine(i) {
+   let h = (i * 5003) + 19;
+   let m = ftr-pick(h, -9, 9);
+   let a = ftr-pick(ftr-next(h), -50, 50);
+   let x = ftr-pick(ftr-next(ftr-next(h)), -999, 999);
+   ftr-case("recipe-affine", "Make the recipe x * " ++ m.str() ++ " + " ++ a.str() ++ " and run it on " ++ x.str() ++ ".", [obs => ["recipe-birth", "affine-i32;mul=" ++ m.str() ++ ";add=" ++ a.str()], obs => ["recipe-exec", ftr-address(obs, 0) ++ ";input=" ++ x.str() ++ ";carrier=auto"]], obs => ftr-body(obs, 1), obs => obs[1] == ftv-value-result(((x * m) + a).str()));
+  }
+  def ftr-recipe-choice(i) {
+   let h = (i * 6007) + 23;
+   let m = ftr-pick(h, 2, 9);
+   let a = ftr-pick(ftr-next(h), 0, 50);
+   let x = ftr-pick(ftr-next(ftr-next(h)), 2, 999);
+   ftr-case("recipe-choice", "Try the recipe x * 2147483647 first and x * " ++ m.str() ++ " + " ++ a.str() ++ " second, on input " ++ x.str() ++ "; which value holds?", [obs => ["recipe-birth", "affine-i32;mul=2147483647;add=0"], obs => ["recipe-birth", "affine-i32;mul=" ++ m.str() ++ ";add=" ++ a.str()], obs => ["choice", ftr-address(obs, 0) ++ "," ++ ftr-address(obs, 1) ++ ";input=" ++ x.str() ++ ";carrier=auto"]], obs => ftr-body(obs, 2), obs => obs[2] == ftv-value-result(((x * m) + a).str()));
+  }
+  def ftr-recipe-bml(i) {
+   let h = (i * 7001) + 31;
+   let k = ftr-pick(h, 1, 30);
+   let x = ftr-pick(ftr-next(h), -40, 40);
+   let w = ftr-words()[i % len(ftr-words())];
+   let xs = ftr-nums(ftr-next(h), 3, 1, 20);
+   let t = i % 3;
+   let source = t == 0 ? "x => x * x + " ++ k.str() : t == 1 ? "s => s ++ " ++ ftr-q("!") : "xs => xs |> map(x => x * " ++ k.str() ++ ") |> sum";
+   let input = t == 0 ? x.str() : t == 1 ? ftr-q(w) : ftr-list-text(xs);
+   let expected = t == 0 ? ((x * x) + k).str() : t == 1 ? w ++ "!" : (sum(xs) * k).str();
+   ftr-case("recipe-bml", "Make the BML recipe " ++ source ++ " and run it on " ++ input ++ ".", [obs => ["recipe-birth", "bml;" ++ source], obs => ["recipe-exec", ftr-address(obs, 0) ++ ";input=" ++ input ++ ";carrier=form"]], obs => ftr-body(obs, 1), obs => obs[1] == ftv-value-result(expected));
+  }
+
+  // ── recipe-import: discover a native library, import it, call its exports ─
+  // The catalog names the library (recipe-import ?); the import answers its callable exports as
+  // LIB.EXPORT with their addresses; an export runs through recipe-exec by name or inside eval as
+  // recipe("LIB.EXPORT")(input). The numbers are exact: a matrix is L times its transpose with an
+  // integer L, so the library's own Cholesky solve returns the integers that built the right side.
+  def ftr-import-library() = "training-cost";
+  def ftr-catalog-name(obs) {
+   let body = ftr-body(obs, 0);
+   substring(body, 2, str_find(body, ",", 0));
+  }
+  def ftr-imported?(obs, k, export) = ftv-starts?(ftr-body(obs, k), "library=" ++ ftr-import-library() ++ "; callable-exports=[[") && (str_find(ftr-body(obs, k), ftr-import-library() ++ "." ++ export ++ ", @", 0) > 0);
+  def ftr-catalogued?(obs) = ftv-starts?(ftr-body(obs, 0), "[[" ++ ftr-import-library() ++ ", form/form-stdlib/recipes/training-cost.bml, ");
+  def ftr-dot(xs, ys) = sum(map(j => xs[j] * ys[j], range(0, len(xs))));
+  def ftr-recipe-import(i) {
+   let h = (i * 8009) + 37;
+   let t = i % 6;
+   let n = 2 + (i % 3);
+   let xs = ftr-nums(h, n, 1, 9);
+   let ys = ftr-nums(ftr-next(h), n, 1, 9);
+   let k = ftr-pick(ftr-next(ftr-next(h)), 1, 9);
+   let l1 = ftr-pick(h, 1, 4);
+   let l2 = ftr-pick(ftr-next(h), -3, 3);
+   let l3 = ftr-pick(ftr-next(ftr-next(h)), 1, 4);
+   let sol = ftr-nums(ftr-next(ftr-next(ftr-next(h))), 2, -5, 5);
+   let a = l1 * l1;
+   let b = l1 * l2;
+   let c = (l2 * l2) + (l3 * l3);
+   let rhs = [(a * sol[0]) + (b * sol[1]), (b * sol[0]) + (c * sol[1])];
+   let matrix = "[" ++ ftr-list-text([a, b]) ++ ", " ++ ftr-list-text([b, c]) ++ "]";
+   let lib = ftr-import-library();
+   let words = ["lantern", "harvest", "sovereign", "threshold", "covenant", "resonance"];
+   let w = words[(i / 6) % len(words)];
+   let exec = (export, input) => obs => ["recipe-exec", lib ++ "." ++ export ++ ";input=" ++ input ++ ";carrier=form"];
+   let imported = obs => ["recipe-import", lib];
+   if t == 0 then ftr-case("recipe-import", "Import the native " ++ lib ++ " library and take the dot product of " ++ ftr-list-text(xs) ++ " and " ++ ftr-list-text(ys) ++ ".", [imported, exec("dot", "[" ++ ftr-list-text(xs) ++ ", " ++ ftr-list-text(ys) ++ "]")], obs => ftr-body(obs, 1), obs => ftr-imported?(obs, 0, "dot") && (obs[1] == ftv-value-result(ftr-dot(xs, ys).str())))
+   else if t == 1 then ftr-case("recipe-import", "List the native libraries Form can import, import the one you find, and compute its features of " ++ (k * 100).str() ++ " tokens.", [obs => ["recipe-import", "?"], obs => ["recipe-import", ftr-catalog-name(obs)], exec("features", (k * 100).str())], obs => ftr-body(obs, 2), obs => ftr-catalogued?(obs) && ftr-imported?(obs, 1, "features") && (obs[2] == ftv-value-result(ftr-list-text([1, k, k * k]))))
+   else if t == 2 then ftr-case("recipe-import", "With the native " ++ lib ++ " library, solve the symmetric system with matrix " ++ matrix ++ " and right side " ++ ftr-list-text(rhs) ++ ".", [imported, exec("solve", "[" ++ matrix ++ ", " ++ ftr-list-text(rhs) ++ "]")], obs => ftr-body(obs, 1), obs => ftr-imported?(obs, 0, "solve") && (obs[1] == ftv-value-result(ftr-list-text(sol))))
+   else if t == 3 then ftr-case("recipe-import", "With the native " ++ lib ++ " library, how many gibibytes are " ++ (k * 1073741824).str() ++ " bytes?", [imported, exec("gibibytes", (k * 1073741824).str())], obs => ftr-body(obs, 1), obs => ftr-imported?(obs, 0, "gibibytes") && (obs[1] == ftv-value-result(k.str())))
+   else if t == 4 then ftr-one("recipe-import", "Import the native library named " ++ w ++ ".", "recipe-import", w, obs => "Form has no native library called " ++ w ++ "; recipe-import with ? lists the ones it has.", obs => obs[0] == "nothing=unknown-library:use-recipe-import-?;")
+   else ftr-case("recipe-import", "Import the native " ++ lib ++ " library, then in eval call its dot function on " ++ ftr-list-text(xs) ++ " and " ++ ftr-list-text(ys) ++ ".", [imported, obs => ["eval", "recipe(" ++ ftr-q(lib ++ ".dot") ++ ")([" ++ ftr-list-text(xs) ++ ", " ++ ftr-list-text(ys) ++ "])"]], obs => ftr-body(obs, 1), obs => ftr-imported?(obs, 0, "dot") && (obs[1] == ftv-value-result(ftr-dot(xs, ys).str())));
+  }
+
+  // ── replaying a written row ──────────────────────────────────────────
+  // A composite's coordinate is its cell in the host field and moves when the field is reset.
+  // A replay maps each recorded coordinate to the one the fresh run answered, in order of
+  // appearance, carries the map into the next control, and then compares byte for byte.
+  def ftr-coord-byte?(b) = ((b >= 48) && (b <= 57)) || (b == 46);
+  def ftr-coord-end(text, i, n) = i >= n ? i : ftr-coord-byte?(str_byte_at(text, i)) ? ftr-coord-end(text, i + 1, n) : i;
+  def ftr-coords(text) = ftr-coords-from(text, 0, []);
+  def ftr-coords-from(text, from, out) {
+   let at = str_find(text, "@", from);
+   let end = at < 0 ? 0 : ftr-coord-end(text, at + 1, len(text));
+   if at < 0 then reverse(out) else ftr-coords-from(text, end, end > at + 1 ? cons(substring(text, at, end), out) : out);
+  }
+  def ftr-subst(text, table) = ftr-subst-from(text, 0, table, "");
+  def ftr-subst-from(text, from, table, out) {
+   let at = str_find(text, "@", from);
+   let end = at < 0 ? 0 : ftr-coord-end(text, at + 1, len(text));
+   let coord = at < 0 ? "" : substring(text, at, end);
+   if at < 0 then out ++ substring(text, from, len(text)) else ftr-subst-from(text, end, table, out ++ substring(text, from, at) ++ (record_has(table, coord) ? record_get(table, coord) : coord));
+  }
+  def ftr-align(table, recorded, fresh) = nil?(recorded) || nil?(fresh) ? 0 : ftr-align-one(table, recorded, fresh);
+  def ftr-align-one(table, recorded, fresh) {
+   if record_has(table, recorded[0]) then 0 else record_set(table, recorded[0], fresh[0]);
+   ftr-align(table, recorded[1:], fresh[1:]);
+  }
+  // 1 when every recorded observation comes back from a fresh session
+  def ftr-replay(controls, observations) = ftr-replay-at(ftv-session(), controls, observations, record_new(0));
+  def ftr-replay-at(session, controls, obs, table) {
+   let found = nil?(controls) ? [] : ftg-scan(ftr-subst(controls[0], table));
+   let result = nil?(found) ? "" : ftg-observation(ftg-observe-with(session, found[0][0], found[0][1]));
+   if nil?(controls) then 1
+   else if nil?(found) then 0
+   else if ftr-subst(obs[0], ftr-aligned(table, ftr-coords(obs[0]), ftr-coords(result))) == result then ftr-replay-at(session, controls[1:], obs[1:], table)
+   else 0;
+  }
+  def ftr-aligned(table, recorded, fresh) {
+   ftr-align(table, recorded, fresh);
+   table;
+  }
+
+  // ── contrast and reuse: more of what Form offers ─────────────────────
+  // recipe-both: two recipes, each run on its own (recipe-exec twice), never a choice. Taught choice well, a voice reaches
+  // for it where one recipe runs (the 2026-10-09 evaluation: recipe-exec expected 9, written 0); these cases keep
+  // recipe-exec where each recipe is to be run, and the values are used by a third control.
+  def ftr-recipe-both(i) {
+   let h = (i * 9001) + 43;
+   let m1 = ftr-pick(h, -9, 9);
+   let a1 = ftr-pick(ftr-next(h), -40, 40);
+   let m2 = ftr-pick(ftr-next(ftr-next(h)), -9, 9);
+   let a2 = ftr-pick(ftr-next(ftr-next(ftr-next(h))), -40, 40);
+   let x = ftr-pick(ftr-next(ftr-next(ftr-next(ftr-next(h)))), -99, 99);
+   let v1 = (x * m1) + a1;
+   let v2 = (x * m2) + a2;
+   ftr-case("recipe-both", "Make the recipes x * " ++ m1.str() ++ " + " ++ a1.str() ++ " and x * " ++ m2.str() ++ " + " ++ a2.str() ++ ", run each on " ++ x.str() ++ ", and add the two values.",
+    [obs => ["recipe-birth", "affine-i32;mul=" ++ m1.str() ++ ";add=" ++ a1.str()],
+     obs => ["recipe-birth", "affine-i32;mul=" ++ m2.str() ++ ";add=" ++ a2.str()],
+     obs => ["recipe-exec", ftr-address(obs, 0) ++ ";input=" ++ x.str() ++ ";carrier=auto"],
+     obs => ["recipe-exec", ftr-address(obs, 1) ++ ";input=" ++ x.str() ++ ";carrier=auto"],
+     obs => ["eval", "(" ++ ftr-body(obs, 2) ++ ") + (" ++ ftr-body(obs, 3) ++ ")"]],
+    obs => ftr-body(obs, 4), obs => obs[4] == ftv-value-result((v1 + v2).str()));
+  }
+  // eval-reuse: what the stream made is still there for the next control: a let or a def is a name in the lane's
+  // workspace, and `it` is the last value. The second control reads what the first made.
+  def ftr-eval-reuse(i) {
+   let h = (i * 7507) + 29;
+   let xs = ftr-nums(h, 3 + (i % 3), 1, 40);
+   let a = ftr-pick(ftr-next(h), 2, 30);
+   let b = ftr-pick(ftr-next(ftr-next(h)), 2, 30);
+   let k = ftr-pick(ftr-next(ftr-next(ftr-next(h))), 2, 9);
+   let m = ftr-pick(ftr-next(ftr-next(ftr-next(ftr-next(h)))), 0, 50);
+   let t = i % 3;
+   if t == 0 then ftr-case("eval-reuse", "Take the list " ++ ftr-list-text(xs) ++ ". What is its sum plus its length?", [obs => ["eval", "let xs = " ++ ftr-list-text(xs) ++ "; xs |> sum"], obs => ["eval", "len(xs) + it"]], obs => ftr-body(obs, 1), obs => obs[1] == ftv-value-result((sum(xs) + len(xs)).str()))
+   else if t == 1 then ftr-case("eval-reuse", "Define sq as squaring, then add sq(" ++ a.str() ++ ") and sq(" ++ b.str() ++ ").", [obs => ["eval", "def sq(x) = x * x"], obs => ["eval", "sq(" ++ a.str() ++ ") + sq(" ++ b.str() ++ ")"]], obs => ftr-body(obs, 1), obs => obs[1] == ftv-value-result(((a * a) + (b * b)).str()))
+   else ftr-case("eval-reuse", "Let base be " ++ a.str() ++ ". What is base times " ++ k.str() ++ " plus " ++ m.str() ++ "?", [obs => ["eval", "let base = " ++ a.str()], obs => ["eval", "base * " ++ k.str() ++ " + " ++ m.str()]], obs => ftr-body(obs, 1), obs => obs[1] == ftv-value-result(((a * k) + m).str()));
+  }
+
+  // ── the corpus ───────────────────────────────────────────────────────
+  def ftr-families() = [
+   ["eval-arith", map(i => ftr-arith(i), range(0, 120))],
+   ["eval-compare", map(i => ftr-compare(i), range(0, 30))],
+   ["eval-text", map(i => ftr-text(i), range(0, 40))],
+   ["eval-lists", map(i => ftr-lists(i), range(0, 60))],
+   ["eval-recursion", map(i => ftr-recursion(i), range(0, 30))],
+   ["eval-float", map(i => ftr-floats(i), range(0, 20))],
+   ["eval-refusal", ftr-refusals()],
+   ["knowledge-receipts", ftr-receipts()],
+   ["knowledge-enrich", ftr-enrich()],
+   ["node-make", map(i => ftr-node-make(i), range(0, 30))],
+   ["node-get", map(i => ftr-node-get(i), range(0, 30))],
+   ["node-select", map(i => ftr-node-select(i), range(0, 45))],
+   ["recipe-affine", map(i => ftr-recipe-affine(i), range(0, 30))],
+   ["recipe-choice", map(i => ftr-recipe-choice(i), range(0, 40))],
+   ["recipe-bml", map(i => ftr-recipe-bml(i), range(0, 30))],
+   ["recipe-import", map(i => ftr-recipe-import(i), range(0, 36))],
+   ["recipe-both", map(i => ftr-recipe-both(i), range(0, 32))],
+   ["eval-reuse", map(i => ftr-eval-reuse(i), range(0, 32))]];
+  // [family, written, rejected, rows]
+  def ftr-build() {
+   let done = map(f => [f[0], ftr-family(f[1])], ftr-families());
+   let trained = ftr-trained-questions(map(d => d[1][0], done));
+   map(d => ftr-built(d[0], d[1], trained), done);
+  }
+  def ftr-built(name, done, trained) {
+   let lines = ftr-lines(done[0], 0, trained);
+   [name, len(lines), done[1], lines];
+  }
+  def ftr-write() {
+   let built = ftr-build();
+   let lines = foldl((acc, f) => append(acc, f[3]), [], built);
+   let text = ftv-join(lines, byte_to_str(10)) ++ byte_to_str(10);
+   let wrote = write_file(ftr-corpus(), text);
+   map(f => print_str("[form-token-traces] " ++ f[0] ++ ": written " ++ f[1].str() ++ ", rejected " ++ f[2].str()), built);
+   print_str("[form-token-traces] total: " ++ len(lines).str() ++ " rows, " ++ foldl((acc, f) => acc + f[2], 0, built).str() ++ " rejected, " ++ wrote.str() ++ " bytes -> " ++ ftr-corpus());
+   len(lines);
+  }
+  // Re-verify one family in place: every other line stays byte for byte, and the family's lines
+  // are rebuilt from its cases (each run twice, checked against its oracle) where they stood.
+  def ftr-family-cases(name) {
+   let found = filter(f => f[0] == name, ftr-families());
+   nil?(found) ? nothing() : found[0][1];
+  }
+  def ftr-line-family?(line, name) = str_find(line, "family \"" ++ name ++ "\"", 0) >= 0;
+  // The held-out rule reads every family's train slots (ftr-trained-questions). A family refreshed
+  // alone takes the other families' from the file as it stands; its own come from its fresh picks.
+  def ftr-line-question(line) = frw-str(frw-parse(line)[1], "question", "");
+  def ftr-line-slot-questions(ls, i) = nil?(ls) ? [] : ftr-held-slot?(i) ? ftr-line-slot-questions(ls[1:], i + 1) : cons(ftr-line-question(ls[0]), ftr-line-slot-questions(ls[1:], i + 1));
+  def ftr-file-trained(lines, name) = foldl((acc, f) => f[0] == name ? acc : append(acc, ftr-line-slot-questions(filter(l => ftr-line-family?(l, f[0]), lines), 0)), [], ftr-families());
+  def ftr-refresh(name) {
+   let cases = ftr-family-cases(name);
+   let lines = filter(l => len(trim(l)) > 0, split-on(read_file(ftr-corpus()) ?? "", byte_to_str(10)));
+   let done = nothing?(cases) ? [[], 0] : ftr-family(cases);
+   let trained = append(ftr-file-trained(lines, name), ftr-slot-questions(done[0], 0));
+   let merged = ftr-merge(lines, name, ftr-lines(done[0], 0, trained), []);
+   let wrote = nothing?(cases) ? 0 : write_file(ftr-corpus(), ftv-join(merged, byte_to_str(10)) ++ byte_to_str(10));
+   print_str("[form-token-traces] refresh " ++ name ++ ": rebuilt " ++ len(done[0]).str() ++ ", rejected " ++ done[1].str() ++ ", " ++ len(merged).str() ++ " rows, " ++ wrote.str() ++ " bytes -> " ++ ftr-corpus());
+   len(done[0]);
+  }
+  // the family's lines replaced in order where they stood; rows left over follow its last line
+  def ftr-merge(lines, name, rows, out) {
+   if nil?(lines) then append(reverse(out), rows)
+   else if ftr-line-family?(lines[0], name) then ftr-merge-at(lines, name, rows, out)
+   else ftr-merge(lines[1:], name, rows, cons(lines[0], out));
+  }
+  def ftr-merge-at(lines, name, rows, out) {
+   let rest = lines[1:];
+   let last = nil?(rest) || !ftr-line-family?(rest[0], name);
+   if nil?(rows) then ftr-merge(rest, name, rows, out)
+   else if last then ftr-merge(rest, name, [], append(reverse(rows), out))
+   else ftr-merge(rest, name, rows[1:], cons(rows[0], out));
+  }
+  def ftr-door(line) = nothing?(line) ? 0 : trim(line) == "write" ? ftr-write() : ftv-starts?(trim(line), "refresh ") ? ftr-refresh(trim(substring(trim(line), 8, len(trim(line))))) : 0;
+ }
+ ftr-door(read_line());
+}

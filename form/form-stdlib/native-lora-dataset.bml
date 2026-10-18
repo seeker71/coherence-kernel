@@ -1,0 +1,107 @@
+// Chat, prompt/completion, segment and plain-text rows (Form rows, or the JSON lines of the session subsystem) become teacher-forced token rows.
+// Prompt masking supervises the final assistant response, including its end marker.
+// A segment row holds the response as ordered spans, each with its own supervise
+// mark: a span Form injected into the stream (an observation it answered) is read
+// as context and never taught as a prediction.
+// Rows retain their line number; malformed data never vanishes from the denominator.
+import form-stdlib/native-llama-tokenizer.bml;
+import form-stdlib/bml/form-rows-bridge.bml;
+section [form.bml] {
+ class NativeLoraDataset {
+  def nld-string(o,k) {
+   let value = json-object-get(o,k);
+   !((Comparable) node_type(value) == 2) ? form_error("native training requires a string: " + k) : node_value(value);
+  }
+  def nld-message(role,text) = json-node-object([json-node-pair("role",json-node-string(role)),json-node-pair("content",json-node-string(text))]);
+  def nld-system(t,text) = append([nlt-special(t,"<|begin_of_text|>")],append(nlt-header(t,"system"),append(nlt-encode(t,"Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n" + trim(text)),[nlt-special(t,"<|eot_id|>")])));
+  def nld-messages(t,messages) = nil?(messages) ? [] : append(nld-one(t,messages[0]),nld-messages(t,messages[1:]));
+  def nld-one(t,m) {
+   let role = nld-string(m,"role");
+   json-object-has?(m,"tool_calls") || (!(((String) role == "user") || ((String) role == "assistant"))) ? form_error("native training chat role/tool payload requires a matching template") : nlt-message(t,role,nld-string(m,"content"));
+  }
+  def nld-chat(t,messages) = nil?(messages) ? nld-system(t,"") : (String) nld-string(messages[0],"role") == "system" ? append(nld-system(t,nld-string(messages[0],"content")),nld-messages(t,messages[1:])) : append(nld-system(t,""),nld-messages(t,messages));
+  def nld-chat-row(t,messages,masked,line) {
+   nil?(messages) ? form_error("native training chat is empty") : nld-chat-ready(t,messages,masked,line);
+  }
+  def nld-chat-ready(t,messages,masked,line) {
+   let final = messages[len(messages) - 1]; let assistant = (String) nld-string(final,"role") == "assistant";
+   masked && (!assistant) ? form_error("native prompt-masked row must end in an assistant response") : nld-sample(nld-chat(t,messages),masked ? len(append(nld-chat(t,take(len(messages) - 1,messages)),nlt-header(t,"assistant"))) : 0,line);
+  }
+  def nld-row(t,row,masked,line) {
+   json-object-has?(row,"tools") && (!((Comparable) node_category(json-object-get(row,"tools")) == JSON-NULL())) ? form_error("native training tools require a matching tool template")
+   : json-object-has?(row,"segments") ? nld-segment-row(t,row,masked,line)
+   : json-object-has?(row,"messages") ? nld-chat-row(t,json-array-elements(json-object-get(row,"messages")),masked,line)
+   : json-object-has?(row,"prompt") ? nld-chat-row(t,[nld-message("user",nld-string(row,"prompt")),nld-message("assistant",nld-string(row,"completion"))],masked,line)
+   : json-object-has?(row,"text") ? nld-sample(append([nlt-special(t,"<|begin_of_text|>")],append(nlt-encode(t,nld-string(row,"text")),[nlt-special(t,"<|eot_id|>")])),0,line)
+   : form_error("native training row has no supported text field at line " + line.str());
+  }
+  def nld-mask(n,offset,i) = i >= n ? [] : cons((i + 1) >= offset ? 1.0 : 0.0,nld-mask(n,offset,i + 1));
+  // Sample: input ids, target ids, target mask, supervised count, source line.
+  def nld-sample(tokens,offset,line) {
+   let n = len(tokens) - 1; let mask = nld-mask(n,offset,0);
+   (n <= 0) || (sum(mask) <= 0) ? form_error("native training has no supervised targets at line " + line.str()) : [take(n,tokens),tokens[1:],mask,sum(mask),line];
+  }
+  // Segment rows: {"system"?, "prompt", "segments":[{"text", "role"?, "supervise"?:0|1, ...}]}.
+  // The prompt frames the turn exactly as a chat row does; each span is encoded on
+  // its own, the way Form appends an injected span to the stream, so a span's
+  // tokens never merge across its boundary and its mark covers exactly them.
+  // marks[i] says whether token i is a target; the first token is context only.
+  // The role decides before any flag: an observation (Form's answer) or a seam (the
+  // blank where the voice yields to Form) is never a target, whatever a writer marked.
+  // A prose or control span is a target unless marked 0. Any other span must carry its
+  // mark as 0 or 1, or the row stops with its line: a mark is never guessed.
+  def nld-repeat(n,x) = n <= 0 ? [] : cons(x,nld-repeat(n - 1,x));
+  def nld-segment-role(s) = !json-object-has?(s,"role") ? "" : (Comparable) node_type(json-object-get(s,"role")) == 2 ? node_value(json-object-get(s,"role")) : "";
+  def nld-segment-flag(s,line) {
+   let v = node_value(json-object-get(s,"supervise"));
+   !((String) value_kind(v) == "int") ? nld-segment-bad-flag(line) : (Comparable) v == 1 ? 1.0 : (Comparable) v == 0 ? 0.0 : nld-segment-bad-flag(line);
+  }
+  def nld-segment-bad-flag(line) = form_error("native training segment supervise must be 0 or 1 at line " + line.str());
+  def nld-segment-mark(s,line) {
+   let role = nld-segment-role(s);
+   (String) role == "observation" || (String) role == "seam" ? 0.0
+   : json-object-has?(s,"supervise") ? nld-segment-flag(s,line)
+   : (String) role == "prose" || (String) role == "control" ? 1.0
+   : form_error("native training segment has no supervise mark and no known role at line " + line.str());
+  }
+  def nld-segment-span(t,s,line) {
+   let ids = nlt-encode(t,nld-string(s,"text"));
+   [ids,nld-repeat(len(ids),nld-segment-mark(s,line))];
+  }
+  def nld-spans-ids(spans) = nil?(spans) ? [] : append(spans[0][0],nld-spans-ids(spans[1:]));
+  def nld-spans-marks(spans) = nil?(spans) ? [] : append(spans[0][1],nld-spans-marks(spans[1:]));
+  def nld-segment-prefix(t,row) = append(nld-system(t,json-object-has?(row,"system") ? nld-string(row,"system") : ""),append(nlt-message(t,"user",nld-string(row,"prompt")),nlt-header(t,"assistant")));
+  def nld-segment-row(t,row,masked,line) {
+   let segments = json-array-elements(json-object-get(row,"segments"));
+   nil?(segments) ? form_error("native training segment row is empty at line " + line.str()) : nld-segment-ready(t,nld-segment-prefix(t,row),segments |> map(s => nld-segment-span(t,s,line)),masked,line);
+  }
+  def nld-segment-ready(t,prefix,spans,masked,line) {
+   let tokens = append(prefix,append(nld-spans-ids(spans),[nlt-special(t,"<|eot_id|>")]));
+   let marks = append(nld-repeat(len(prefix),masked ? 0.0 : 1.0),append(nld-spans-marks(spans),[1.0]));
+   nld-sample-marked(tokens,marks,line);
+  }
+  def nld-sample-marked(tokens,marks,line) {
+   let n = len(tokens) - 1; let mask = marks[1:];
+   (n <= 0) || (!((Comparable) len(marks) == len(tokens))) || (sum(mask) <= 0) ? form_error("native training has no supervised targets at line " + line.str()) : [take(n,tokens),tokens[1:],mask,sum(mask),line];
+  }
+  def nld-lines(text) = nld-nonempty(split-on(text,"\n"),1);
+  def nld-nonempty(lines,i) = nil?(lines) ? [] : (Comparable) len(trim(lines[0])) == 0 ? nld-nonempty(lines[1:],i + 1) : cons([lines[0],i],nld-nonempty(lines[1:],i + 1));
+  def nld-file(path) {
+   let text = read_file(path);
+   nothing?(text) ? form_error("native training data absent: " + path) : nld-lines(text);
+  }
+  def nld-prepare(t,rows,masked) = rows |> map(row => nld-row(t,nld-node-of-line(row[0],row[1]),masked,row[1]));
+  // A training row is a Form row (form-rows.bml: `{prompt "..." completion "..."}`, a bare key right after the brace) or, in the
+  // dataset of the session-learning subsystem which still keeps JSON documents, a JSON object (`{"prompt":"..."}`): the first bytes
+  // tell them apart, and the JSON reader named here is the dataset boundary that goes when that subsystem holds Form rows.
+  def nld-rows-line?(text) {
+   let t = trim(text);
+   len(t) > 1 && str_byte_at(t,0) == 123 && frw-bare-start?(str_byte_at(t,1));
+  }
+  def nld-node-of-line(text,line) = nld-rows-line?(text) ? nld-node-of-row(frw-parse(text),line) : parse-json("native-training-row",text);
+  def nld-node-of-row(r,line) = (String) r[0] == "ok" && (String) value_kind(r[1]) == "record" ? frb-to-node(r[1]) : form_error("native training row is no Form row at line " + line.str() + ": " + (String) r[1]);
+  def nld-weight(rows) = nil?(rows) ? 0.0 : (rows[0][3] + nld-weight(rows[1:]));
+  def nld-tokens(rows) = nil?(rows) ? 0 : (len(rows[0][0]) + nld-tokens(rows[1:]));
+ }
+ 0;
+}

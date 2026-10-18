@@ -1,0 +1,185 @@
+// dense-multi.fk — M sequences through the dense lane in ONE decode step: every weight read once.
+//
+// dense-token-handle.fk's fused block dispatches eight kernels a layer for one sequence, and a token
+// costs 13 ms against the 4 ms floor of one pass over the weights. Four tongues offered for one heard
+// line are four such passes, one after another. This cell is the same block over M sequences at once:
+// the Q8_0 matvecs become matmats over M input columns (q8-0-matmat-msl.fk — the tg4 fold per column,
+// byte for byte), and rmsnorm, rope, attention, argmax and the embedding read run their single-sequence
+// text once per sequence on that sequence's own rows. Each sequence owns a bank of every layer's KV
+// cache (bank = maxpos * kvd floats) and its own position, so sequences of different lengths share a
+// step: at step s sequence m feeds its s-th prompt id while it has one and its last answer after.
+//
+// WHAT IS REUSED, not re-read: dth-open walks the file's header once and answers the geometry, the
+// layer views, the rope frequencies and the single-lane pipes; this cell compiles its own unit (the
+// spine q80_w / q6k_s8 / the transcendental helpers, then the M-kernels) and allocates M-row buffers
+// and M-bank caches beside it. The dispatch count a step is the fused lane's own — 1 + 8 per layer + 4
+// — so the Form-side dispatch loop is paid once for M sequences, not M times.
+//
+// RADIUS, asked of the file: every layer must satisfy dth-fusable? (Q8_0 projections, cols a
+// multiple of 128, adjacent-pair rope, no qkv bias), the embedding and the head must be Q8_0, and M
+// in 1..8 (the kernels' xs[2][8][...] staging). A file outside it is refused at open, loudly (dm-ok?
+// false and the reason printed), never walked numb. THE POOL IS NOT IN THE RADIUS: a live transcript
+// may hand this lane any maxpos its KV banks fit, because past 1024 positions the attention dispatches
+// the device-scratch twin instead of the threadgroup-staged one — the same folds, the same bytes.
+//
+import native/metal/dense-token-handle.fk;
+import form-stdlib/q8-0-matmat-msl.fk;
+//
+// Proven by: form/native/metal/tests/dense-multi-band.fk
+section [form.bml] {
+    // ================= the unit and its pipes =================
+    // mps: 0 matmat 1 matmat-add 2 matmat-x3 3 glu 4 rmsnorm-m 5 rope-m 6 attn-m 7 argmax-part-m
+    //      8 argmax-comb-m 9 embed-m 10 glu (two columns a lane) 11 glu (four)
+    def dm-msl() = ("#include <metal_stdlib>\n#pragma clang fp contract(off)\n" + (q80-msl-spine() + (q80-msl-weight() + ((String) ldm-msl-helpers() + q8mm-msl-appendix()))));
+    def dm-pipes(msl) = [metal_pipeline(msl, "form_q80_matmat_f32"), metal_pipeline(msl, "form_q80_matmat_add_f32"), metal_pipeline(msl, "form_q80_matmat_x3_f32"), metal_pipeline(msl, "form_q80_matmat_glu_f32"), metal_pipeline(msl, "form_rmsnorm_m_f32"), metal_pipeline(msl, "form_rope_pair2_m_f32"), metal_pipeline(msl, "form_gqa_decode_m_f32"), metal_pipeline(msl, "form_argmax_part_m_f32"), metal_pipeline(msl, "form_argmax_comb_m_f32"), metal_pipeline(msl, "form_q80_embed_m_f32"), metal_pipeline(msl, "form_q80_matmat_glu_c2_f32"), metal_pipeline(msl, "form_q80_matmat_glu_c4_f32"), metal_pipeline(msl, "form_gqa_decode_m_dev_f32")];
+    // HOW MANY COLUMNS A FOLDING LANE CARRIES. The matmats keep one: their lane count is
+    // 32 * ceil(M / 2), so M=8 dispatches 192 threads a group against M=1's 96, and they measured
+    // 1.0 to 1.5x from M=1 to M=8 — in stride. Folding columns there measured WORSE at every width:
+    // the 128256-row head paid 3.5x at C=2 and 6x at C=4, and it paid them at M=1 too, where C moves
+    // not one thread of the geometry — so what the matmats cannot afford is the longer emitted body,
+    // not the lanes. The room the receipt named is not in them. The GLU is the one that broke stride,
+    // 3x from M=4 to M=8, and the one whose lanes grow 32 * M unbounded: 320 threads a group at M=8.
+    // Its fold is half as deep, it can afford the body, and two columns a lane is what it measured
+    // best at (7775 µs to 1950 at M=8; four columns gave 3850).
+    def dm-glu-C(m) = m > 4 ? 2 : 1;
+    def dm-ng(m, c) = ((Number) m + (Number) (c - 1)) / c;
+    // folding lanes for M columns: 32 * ceil(M / 2); the matmat group is that plus 64 loaders
+    def dm-F(m) = 32 * (((Number) m + (Number) 1) / 2);
+    def dm-tpg(m) = (Number) dm-F(m) + (Number) 64;
+    def dm-glu-tpg(m, c) = (Number) (32 * dm-ng(m, c)) + (Number) 64;
+    // the GLU's pipe for a column width: C=1 at 3, C=2 at 10, C=4 at 11
+    def dm-glu-pipe(mps, c) = (Comparable) c == 2 ? mps[10] : (Comparable) c == 4 ? mps[11] : mps[3];
+    def dm-groups(rows) = ((Number) rows + (Number) 15) / 16;
+    // ================= buffers =================
+    // bs: 0 X [M][d] 1 Xb [M][d] 2 Q [M][qOut] 3 Attn [M][qOut] 4 Act [M][dFF] 5 Logits [M][vocab]
+    //     6 OutI [M] 7 OutV [M] 8 ArgI [M][512] 9 ArgV [M][512] 10 ids [M] 11 pos [M]
+    //     12 the attention scratch: 2 rows of maxpos floats for each of the M * nHead groups, where
+    //        threadgroup memory holds them below 1024 and cannot above
+    def dm-scratch(m, nq, maxpos) = metal_buf_alloc(2 * m * nq * maxpos * 4);
+    def dm-bufs(m, dModel, dFF, qOut, vocabN) = [metal_buf_alloc(m * dModel * 4), metal_buf_alloc(m * dModel * 4), metal_buf_alloc(m * qOut * 4), metal_buf_alloc(m * qOut * 4), metal_buf_alloc(m * dFF * 4), metal_buf_alloc(m * vocabN * 4), metal_buf_alloc(m * 4), metal_buf_alloc(m * 4), metal_buf_alloc(m * dth-argmax-parts() * 4), metal_buf_alloc(m * dth-argmax-parts() * 4), metal_buf_alloc(m * 4), metal_buf_alloc(m * 4)];
+    // M banks a cache: sequence m's rows at m * maxpos * kvd
+    def dm-cache(n, floats, acc) = n <= 0 ? acc : dm-cache(n - 1, floats, append(acc, [metal_buf_alloc(floats * 4)]));
+    // ================= the radius =================
+    // dth-fusable?'s last clause is `maxpos <= 1024`, and it is there for ONE reason: the single lane's
+    // cooperative attention stages a sequence's scores in threadgroup memory, which holds 32 KB. This
+    // lane answers that question itself — past 1024 it dispatches the device-scratch twin, the same
+    // kernel with ss and ee in a buffer instead of a threadgroup — so it asks the rest of the question
+    // with the pool clamped, and refuses on maxpos only where its own scratch would not fit.
+    def dm-geo-1k(geo) = [geo[0], geo[1], geo[2], geo[3], geo[4], geo[5], geo[6] > 1024 ? 1024 : geo[6], geo[7], geo[8], geo[9], geo[10], geo[11], geo[12], geo[13], geo[14], geo[15], geo[16]];
+    def dm-layers-fusable?(lays, geo) = (Comparable) len(lays) == 0 ? true : dth-fusable?(lays[0], dm-geo-1k(geo)) ? dm-layers-fusable?(lays[1:], geo) : false;
+    def dm-q8-128?(tv) = (Comparable) dth-tv-ty(tv) == 8 ? (Comparable) (dth-tv-c(tv) % 128) == 0 : false;
+    def dm-reason(m, geo, lays, embTv, projTv) = m < 1 ? "M below 1" : m > 8 ? "M above 8 (the kernels stage eight columns)" : !dm-layers-fusable?(lays, geo) ? "a layer outside the fused block's radius" : !((Comparable) dth-tv-ty(embTv) == 8) ? "the embedding is not Q8_0" : !dm-q8-128?(projTv) ? "the head is not Q8_0 with cols a multiple of 128" : "";
+    // ================= open =================
+    // st: 0 ps 1 mps 2 bs 3 geo 4 lays 5 cks 6 cvs 7 embTv 8 onormTv 9 projTv 10 src 11 M 12 arch 13 ok
+    def dm-open(path, maxpos, m) = {
+        let st = dth-open(path, maxpos, 0 - 1);
+        let geo = st[2];
+        let lays = st[3];
+        let embTv = st[6];
+        let onormTv = st[7];
+        let projTv = st[8];
+        let why = dm-reason(m, geo, lays, embTv, projTv);
+        let ok = (Comparable) len(why) == 0;
+        ok ? 0 : print_str(("dense-multi: refused at open: " + why));
+        let mps = ok ? dm-pipes(dm-msl()) : [];
+        let bs0 = ok ? dm-bufs(m, geo[0], geo[1], geo[13], geo[7]) : [];
+        let bs = ok ? append(bs0, [dm-scratch(m, geo[2], geo[6])]) : [];
+        let nbank = geo[12] * geo[16] * 1;
+        let cks = ok ? dm-cache(nbank, m * geo[6] * geo[5], []) : [];
+        let cvs = ok ? dm-cache(nbank, m * geo[6] * geo[5], []) : [];
+        [st[0], mps, bs, geo, lays, cks, cvs, embTv, onormTv, projTv, st[10], m, st[9], ok];
+    };
+    def dm-ok?(st) = st[13] ? dth-pipe-ok?(st[1]) : false;
+    def dm-bank(geo) = geo[6] * geo[5];
+    // ================= dispatches =================
+    def dm-rms(mps, bs, xh, gtv, yh, n, epsBits, m) = metal_enqueue(mps[4], md-bind16([xh, dth-tv-h(gtv), yh], [n, epsBits], 256, 0, 1, 0), m);
+    def dm-mm(mps, tv, xh, yh, m) = metal_enqueue(mps[0], md-bind16([dth-tv-h(tv), xh, yh], [dth-tv-r(tv), dth-tv-c(tv), m], dm-tpg(m), 0, 1, 0), dm-groups(dth-tv-r(tv)));
+    def dm-mm-add(mps, tv, xh, rh, m) = metal_enqueue(mps[1], md-bind16([dth-tv-h(tv), xh, rh, rh], [dth-tv-r(tv), dth-tv-c(tv), m], dm-tpg(m), 0, 1, 0), dm-groups(dth-tv-r(tv)));
+    def dm-mm-x3(mps, qtv, ktv, vtv, xh, qh, ck, cv, posH, m, bank) = metal_enqueue(mps[2], md-bind16([dth-tv-h(qtv), dth-tv-h(ktv), dth-tv-h(vtv), xh, qh, ck, cv, posH], [dth-tv-r(qtv), dth-tv-r(ktv), dth-tv-r(vtv), dth-tv-c(qtv), m, bank], dm-tpg(m), 0, 1, 0), (Number) dm-groups(dth-tv-r(qtv)) + (Number) ((Number) dm-groups(dth-tv-r(ktv)) + (Number) dm-groups(dth-tv-r(vtv))));
+    // the GLU at a named column width — the driver measures C, the block below spends what was measured
+    def dm-glu-at(mps, gtv, utv, xh, yh, m, c) = metal_enqueue(dm-glu-pipe(mps, c), md-bind16([dth-tv-h(gtv), dth-tv-h(utv), xh, yh], [dth-tv-r(gtv), dth-tv-c(gtv), m], dm-glu-tpg(m, c), 0, 1, 0), dm-groups(dth-tv-r(gtv)));
+    def dm-glu(mps, gtv, utv, xh, yh, m) = dm-glu-at(mps, gtv, utv, xh, yh, m, dm-glu-C(m));
+    def dm-rope(mps, qh, kh, ropeH, posH, nq, nkv, hd, baseBits, m, bank) = metal_enqueue(mps[5], md-bind([qh, kh, ropeH, posH], [nq, nkv, hd, baseBits, m, bank]), m * (((Number) nq + (Number) nkv) * (hd / 2)));
+    // the staged attention below 1024 positions, the device-scratch twin above it — the same folds
+    def dm-attn(mps, qh, kh, vh, yh, posH, nq, nkv, hd, scaleBits, m, bank, ssh, maxpos) = maxpos <= 1024 ? metal_enqueue(mps[6], md-bind16([qh, kh, vh, yh, posH], [nq, nkv, hd, scaleBits, m, bank], 256, 0, 1, 0), m * nq) : metal_enqueue(mps[12], md-bind16([qh, kh, vh, yh, posH, ssh], [nq, nkv, hd, scaleBits, m, bank, maxpos], 256, 0, 1, 0), m * nq);
+    def dm-argmax(mps, lh, pih, pvh, oih, ovh, n, m) = {
+        metal_enqueue(mps[7], md-bind([lh, pih, pvh], [n, dth-argmax-parts(), m]), m * dth-argmax-parts());
+        metal_enqueue(mps[8], md-bind16([pih, pvh, oih, ovh], [dth-argmax-parts()], 256, 0, 1, 0), m);
+    };
+    def dm-embed(mps, embTv, xh, idsH, d, m) = metal_enqueue(mps[9], md-bind([dth-tv-h(embTv), xh, idsH], [d, m]), m * d);
+    // ================= one block, eight dispatches, M sequences =================
+    // geo: 0 dModel 1 dFF 2 nHead 3 nKV 4 headDim 5 kvd 6 maxpos 7 vocabN 8 epsBits 9 baseBits
+    //      10 scaleBits 11 ropeH 12 nLayer 13 qOut 14 ropeStyle 15 ropeDim 16 nLoop
+    def dm-block(mps, bs, geo, lay, ck, cv, m, c) = {
+        dm-rms(mps, bs, bs[0], lay[0], bs[1], geo[0], geo[8], m);
+        dm-mm-x3(mps, lay[1], lay[2], lay[3], bs[1], bs[2], ck, cv, bs[11], m, dm-bank(geo));
+        dm-rope(mps, bs[2], ck, geo[11], bs[11], geo[2], geo[3], geo[4], geo[9], m, dm-bank(geo));
+        dm-attn(mps, bs[2], ck, cv, bs[3], bs[11], geo[2], geo[3], geo[4], geo[10], m, dm-bank(geo), bs[12], geo[6]);
+        dm-mm-add(mps, lay[4], bs[3], bs[0], m);
+        dm-rms(mps, bs, bs[0], lay[5], bs[1], geo[0], geo[8], m);
+        dm-glu-at(mps, lay[6], lay[7], bs[1], bs[4], m, c);
+        dm-mm-add(mps, lay[8], bs[4], bs[0], m);
+        1;
+    };
+    def dm-blocks(mps, bs, geo, lays, cks, cvs, m, c, l, n, loopoff) = l >= n ? 1 : {
+        dm-block(mps, bs, geo, nth(lays, l), nth(cks, (Number) l + (Number) loopoff), nth(cvs, (Number) l + (Number) loopoff), m, c);
+        dm-blocks(mps, bs, geo, lays, cks, cvs, m, c, (Number) l + (Number) 1, n, loopoff);
+    };
+    def dm-passes(mps, bs, geo, lays, cks, cvs, onormTv, m, c, lp, nLoop) = lp >= nLoop ? 1 : {
+        dm-blocks(mps, bs, geo, lays, cks, cvs, m, c, 0, geo[12], lp * geo[12]);
+        (Number) lp + (Number) 1 < nLoop ? dm-rms(mps, bs, bs[0], onormTv, bs[0], geo[0], geo[8], m) : 0;
+        dm-passes(mps, bs, geo, lays, cks, cvs, onormTv, m, c, (Number) lp + (Number) 1, nLoop);
+    };
+    def dm-head(mps, bs, geo, onormTv, projTv, m) = {
+        dm-rms(mps, bs, bs[0], onormTv, bs[1], geo[0], geo[8], m);
+        dm-mm(mps, projTv, bs[1], bs[5], m);
+        dm-argmax(mps, bs[5], bs[8], bs[9], bs[6], bs[7], geo[7], m);
+        0;
+    };
+    // ================= one step =================
+    // ids: M token ids (one per sequence); poss: M positions. Answers the M argmax ids.
+    def dm-u32s(s, i, n, acc) = i >= n ? acc : dm-u32s(s, (Number) i + (Number) 1, n, append(acc, [dth-u32(substring(s, i * 4, (Number) (i * 4) + (Number) 4))]));
+    // the step at a named GLU column width, so a driver can put two widths side by side in ONE process
+    // — three other agents measure on this GPU and a number taken alone is that moment's contention
+    def dm-step-c(st, ids, poss, c) = {
+        let mps = st[1];
+        let bs = st[2];
+        let geo = st[3];
+        let m = st[11];
+        metal_buf_write(bs[10], 0, md-le32-list(ids, ""));
+        metal_buf_write(bs[11], 0, md-le32-list(poss, ""));
+        dm-embed(mps, st[7], bs[0], bs[10], geo[0], m);
+        dm-passes(mps, bs, geo, st[4], st[5], st[6], st[8], m, c, 0, geo[16]);
+        dm-head(mps, bs, geo, st[8], st[9], m);
+        dm-u32s(metal_buf_read(bs[6], 0, m * 4), 0, m, []);
+    };
+    def dm-step(st, ids, poss) = dm-step-c(st, ids, poss, dm-glu-C(st[11]));
+    // the logits of sequence m after the last step, as bytes
+    def dm-logits(st, m) = metal_buf_read(st[2][5], m * st[3][7] * 4, st[3][7] * 4);
+    // ================= the lock-step run over M prompts =================
+    def dm-fill(v, n, acc) = n <= 0 ? acc : dm-fill(v, n - 1, append(acc, [v]));
+    def dm-maxlen(ps, acc) = (Comparable) len(ps) == 0 ? acc : dm-maxlen(ps[1:], len(ps[0]) > acc ? len(ps[0]) : acc);
+    // what sequence m feeds at step s: its s-th prompt id while it has one, else its last answer
+    def dm-feed(prompts, lasts, s, acc) = (Comparable) len(prompts) == 0 ? acc : dm-feed(prompts[1:], lasts[1:], s, append(acc, [s < len(prompts[0]) ? nth(prompts[0], s) : lasts[0]]));
+    // the answers that count: from the step that consumed the last prompt id on, ngen of them
+    def dm-collect(gens, outs, prompts, s, ngen, acc) = (Comparable) len(gens) == 0 ? acc : dm-collect(gens[1:], outs[1:], prompts[1:], s, ngen, append(acc, [s >= len(prompts[0]) - 1 && len(gens[0]) < ngen ? append(gens[0], [outs[0]]) : gens[0]]));
+    // sequence m's logits at the step that produces its ngen-th answer, else the ones already held
+    def dm-collect-logits(st, logs, prompts, s, ngen, i, acc) = (Comparable) len(logs) == 0 ? acc : dm-collect-logits(st, logs[1:], prompts[1:], s, ngen, (Number) i + (Number) 1, append(acc, [(Comparable) s == (Number) len(prompts[0]) + (Number) ngen - 2 ? dm-logits(st, i) : logs[0]]));
+    def dm-run-steps(st, prompts, lasts, gens, logs, s, nsteps, ngen, rec) = s >= nsteps ? [gens, logs] : {
+        let outs = dm-step(st, dm-feed(prompts, lasts, s, []), dm-fill(s, st[11], []));
+        dm-run-steps(st, prompts, outs, dm-collect(gens, outs, prompts, s, ngen, []), rec ? dm-collect-logits(st, logs, prompts, s, ngen, 0, []) : logs, (Number) s + (Number) 1, nsteps, ngen, rec);
+    };
+    // prompts: M id lists. Answers (list gens logits): gens[m] the first ngen ids sequence m generates,
+    // logits[m] the bytes of its logits at the step of its ngen-th answer (when rec), else "".
+    def dm-run(st, prompts, ngen, rec) = {
+        let m = st[11];
+        dm-run-steps(st, prompts, dm-fill(0, m, []), dm-fill([], m, []), dm-fill("", m, []), 0, (Number) dm-maxlen(prompts, 0) + (Number) ngen - 1, ngen, rec);
+    };
+    // ================= timing: n steps warm, every sequence feeding one id at rising positions =================
+    def dm-time-steps-c(st, ids, pos, n, c) = n <= 0 ? 0 : {
+        let outs = dm-step-c(st, ids, dm-fill(pos, st[11], []), c);
+        dm-time-steps-c(st, outs, (Number) pos + (Number) 1, n - 1, c);
+    };
+    def dm-time-steps(st, ids, pos, n) = dm-time-steps-c(st, ids, pos, n, dm-glu-C(st[11]));
+    0;
+}

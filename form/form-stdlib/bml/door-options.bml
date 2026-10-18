@@ -1,0 +1,49 @@
+// door-options.bml — a door's stdin options, read strictly: a request that does not read is refused by name, never made into the default.
+//
+// A door whose stdin is one JSON object with every key optional used to read a malformed line or a typo'd key as `{}` and do its default
+// action (`{bad json` began a four-minute regeneration; `{"lst":1}` was ignored). dop-doc is the one reader:
+//   dop-doc(door, text, spec)   spec is rows [key, kind], kind "int" | "str" | "strs" (an array of strings)
+// an empty stdin is {}; anything else must be one well-formed JSON object (json-wire-admission, the body's complete syntax admission),
+// every key must be in the spec with its kind, and a key given twice is refused. A refusal prints `<door>: <why>` and ends the door in a
+// form_error (exit non-zero) before any flow begins. dop-refusal(door, text, spec) is the reading alone: "" when the request reads, else the why.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/json-wire-admission.bml
+section [form.bml] {
+ class DoorOptions {
+  def dop-keys-line(spec) = foldl((acc, row) => len(acc) == 0 ? row[0] : acc ++ ", " ++ row[0], "", spec);
+  def dop-spec-row(spec, key) = foldl((acc, row) => (String) row[0] == key ? row : acc, nothing(), spec);
+  def dop-object?(text) = len(text) > 0 && (Comparable) str_byte_at(text, 0) == 123;
+  // a leaf's type is the reader's own: 1 and 5 an integer, 2 a string (3 bool, 4 null, 6 and 7 numbers with a point never read as an integer)
+  def dop-int-node?(node) = (Comparable) node_level(node) == 1 && ((Comparable) node_type(node) == 1 || (Comparable) node_type(node) == 5);
+  def dop-str-node?(node) = (Comparable) node_level(node) == 1 && (Comparable) node_type(node) == 2;
+  def dop-kind-ok?(kind, node) = (String) kind == "int" ? dop-int-node?(node)
+   : (String) kind == "str" ? dop-str-node?(node)
+   : node_eq(node_category(node), JSON-ARRAY()) && all?(n => dop-str-node?(n), json-array-elements(node));
+  def dop-key-why(doc, spec, key) {
+   let row = dop-spec-row(spec, key);
+   nothing?(row) ? "unknown key \"" ++ key ++ "\" (the keys are: " ++ dop-keys-line(spec) ++ ")"
+   : dop-kind-ok?(row[1], json-object-get(doc, key)) ? "" : "key \"" ++ key ++ "\" must be " ++ (String) (row[1] == "int" ? "an integer" : row[1] == "str" ? "a string" : "an array of strings");
+  }
+  def dop-first-why(whys) = foldl((acc, w) => len(acc) > 0 ? acc : w, "", whys);
+  def dop-dup-why(keys) = foldl((acc, k) => len(acc) > 0 ? acc : len(filter(x => (String) x == (String) k, keys)) > 1 ? "key \"" ++ k ++ "\" is given twice" : "", "", keys);
+  def dop-doc-why(doc, spec) {
+   let keys = json-object-keys(doc);
+   let dup = dop-dup-why(keys);
+   len(dup) > 0 ? dup : dop-first-why(map(k => dop-key-why(doc, spec, k), keys));
+  }
+  def dop-refusal(door, text, spec) {
+   let t = trim(text);
+   len(t) == 0 ? ""
+   : !jwa-valid(t) ? "stdin is not well-formed JSON (one object, or nothing)"
+   : !dop-object?(t) ? "stdin must be one JSON object, not another JSON value"
+   : dop-doc-why(parse-json(door ++ "-options", t), spec);
+  }
+  def dop-refuse(door, why) {
+   let said = print_str(door ++ ": " ++ why);
+   form_error(door ++ ": " ++ why);
+  }
+  def dop-doc(door, text, spec) {
+   let why = dop-refusal(door, text, spec);
+   len(why) > 0 ? dop-refuse(door, why) : len(trim(text)) == 0 ? json-node-object([]) : parse-json(door ++ "-options", trim(text));
+  }
+ }
+}

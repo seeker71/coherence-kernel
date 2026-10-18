@@ -1,0 +1,371 @@
+// stage-vitality.bml — what the body is waiting on, folded from the stage opens and closes on the bus.
+//
+// A row is 13 ints: idx pid t_us stage key phase depth link dur outcome amount body digest. Phase 1
+// opens a stage (its link is the parent open's idx, -1 for none), 2 closes it, 3 closes it unwound, 4
+// says it died; an outcome of StvHeld is a held close. A close finds its open by pid, stage and depth,
+// newest first. The fold calls no door, and a state taken again stays what it was: every map is a
+// persistent km trie, whose get measured twice as fast as a record keyed by rendered ids.
+//
+// The bound, first rung that applies: the key's own p95 (StvLeastCloses closes); kinbound, the stage's
+// p95 of dur per unit of amount times the open's amount (StvLeastCloses amount-bearing closes); the
+// stage's p95; the widest close times StvSlack (two closes, the key's before the stage's); else
+// unlearned, which claims nothing. Kinbound stands above the stage's p95: an amount says more about one
+// open than the stage's spread does, and beneath it no state could reach it. A p95 is the upper edge
+// of its log2 bucket, never past the widest close seen.
+//
+// A finding's stake is microseconds of body time. overstay: age past the bound, stake age - bound,
+// quiet when an overstaying child's age covers it. stall: past StvStall bounds. died: phase 4, or an
+// open whose pid is no longer alive, stake its age. lockstep: one stage and key of one body in several
+// pids at once, stake the overlap once per extra pid, quiet for a child whose parent is in lockstep;
+// across bodies it is contention, drawn dim. retread: the same close StvRepeat times in the window with
+// no differing close between, stake (r - 1) x mean dur. loop: a period of 2..StvLoopMax closes repeated
+// whole in one pid, not all held, stake the cycle. Every close and death accrues its stake to its
+// organ (the stage name's prefix before '.') at its tick; an organ's wane is that stake over the last
+// StvWindowTicks ticks per second, open overstays included, and the highest wane is the body's need.
+import form-stdlib/core.fk;
+import form-stdlib/keyed-map.fk;
+section [form.bml] {
+ class StageVitality {
+  def StvLeastCloses() = 20;
+  def StvSlack() = 3;
+  def StvStall() = 3;
+  def StvRepeat() = 3;
+  def StvLoopMax() = 8;
+  def StvWindowTicks() = 240;
+  def StvRingTicks() = 64;
+  def StvBuckets() = 32;
+  def StvTickUs() = 250000;
+  def StvSpanKeep() = 8;
+  def StvHeld() = 1;
+  def StvUnit() = 1024;
+  def StvPrime() = 16777213;
+  def stv-window-us() = StvWindowTicks() * StvTickUs();
+  def stv-tick(t) = t / StvTickUs();
+
+  def stv-idx(r) = r[0];
+  def stv-pid(r) = r[1];
+  def stv-t(r) = r[2];
+  def stv-stage(r) = r[3];
+  def stv-key(r) = r[4];
+  def stv-phase(r) = r[5];
+  def stv-depth(r) = r[6];
+  def stv-link(r) = r[7];
+  def stv-dur(r) = r[8];
+  def stv-outcome(r) = r[9];
+  def stv-amount(r) = r[10];
+  def stv-body(r) = r[11];
+  def stv-digest(r) = r[12];
+
+  // stats: km of [stage] and [stage key]; opens: rows, newest first; events: died, lockstep and
+  // contention, newest first; pids: [pid last-t closes looping], closes the 2 x StvLoopMax a loop
+  // reads; rings: [organ ticks]; names: km of [id] -> [name organ]; clock: the latest t heard;
+  // alive: pids, or nothing when unknown; retreads: [stage key body pid] whose run reached StvRepeat
+  def stv-state(stats, opens, events, pids, rings, names, clock, alive, retreads) = [stats, opens, events, pids, rings, names, clock, alive, retreads];
+  def stv-empty() = stv-state(km-new(3), [], [], [], [], km-new(2), 0, nothing(), []);
+  def stv-stats(s) = s[0];
+  def stv-opens(s) = s[1];
+  def stv-events(s) = s[2];
+  def stv-pids(s) = s[3];
+  def stv-rings(s) = s[4];
+  def stv-names(s) = s[5];
+  def stv-clock(s) = s[6];
+  def stv-alive(s) = s[7];
+  def stv-retreads(s) = s[8];
+  def stv-set(xs, i, v) = i == 0 ? cons(v, xs[1:]) : cons(xs[0], stv-set(xs[1:], i - 1, v));
+
+  // ids may be any int: the hash folds them into the trie's non-negative 24 bits on every kernel
+  def stv-mod(x) = x >= 0 ? x % StvPrime() : (x % StvPrime() + StvPrime()) % StvPrime();
+  def stv-hash(ids) = stv-mod(stv-mod(ids[0]) * 4099 + stv-mod(len(ids) > 1 ? ids[1] : 0 - 1));
+  def stv-get(m, ids, d) = km-get-h(m, stv-hash(ids), ids, d);
+  def stv-put(m, ids, v) = km-put-h(m, stv-hash(ids), ids, v);
+
+  def stv-organ-of-name(name) {
+   let dot = str_find(name, ".", 0);
+   dot < 0 ? name : substring(name, 0, dot);
+  }
+  def stv-named(s, pairs) = stv-set(s, 5, foldl((m, p) => stv-put(m, [p[0]], [p[1], stv-organ-of-name(p[1])]), stv-names(s), pairs));
+  def stv-name(s, id) {
+   let named = stv-get(stv-names(s), [id], nothing());
+   nothing?(named) ? "#" ++ id.str() : named[0];
+  }
+  def stv-organ(names, stage) {
+   let named = stv-get(names, [stage], nothing());
+   nothing?(named) ? "#" ++ stage.str() : named[1];
+  }
+  // a key reads by its name when the bus named it, else as its id
+  def stv-key-text(s, key) {
+   let named = stv-get(stv-names(s), [key], nothing());
+   nothing?(named) ? key.str() : named[0];
+  }
+
+  // a log2 histogram, sparse: [bucket count] ascending; bucket b holds [2^b, 2^(b+1)), bucket 0 [0, 2)
+  def stv-log2(d, b) = d < 2 || b == StvBuckets() - 1 ? b : stv-log2(d / 2, b + 1);
+  def stv-bucket(d) = stv-log2(d, 0);
+  def stv-count-in(h, b) = nil?(h) || h[0][0] > b ? cons([b, 1], h) : h[0][0] == b ? cons([b, h[0][1] + 1], h[1:]) : cons(h[0], stv-count-in(h[1:], b));
+  def stv-count-of(h, b) = nil?(h) || h[0][0] > b ? 0 : h[0][0] == b ? h[0][1] : stv-count-of(h[1:], b);
+  def stv-pow2(b) = b == 0 ? 1 : 2 * stv-pow2(b - 1);
+  def stv-pct-walk(h, rank, below) = nil?(h) ? nothing() : below + h[0][1] >= rank ? h[0][0] : stv-pct-walk(h[1:], rank, below + h[0][1]);
+  def stv-pct-bucket(h, n, q) = stv-pct-walk(h, (q * n + 99) / 100, 0);
+  def stv-pct(h, n, q, widest) {
+   let b = stv-pct-bucket(h, n, q);
+   nothing?(b) ? widest : min2(widest, stv-pow2(b + 1));
+  }
+
+  // a key's stat: n widest hist outcome digest run-n run-sum run-ticks spans; run-ticks [tick count sum]
+  // newest first, spans [pid body start end idx link] of its last StvSpanKeep closes
+  def stv-key-zero() = [0, 0, [], 0, 0, 0, 0, [], []];
+  // a stage's stat: n widest hist amount-n amount-widest amount-hist, the amount ones over dur per unit
+  def stv-stage-zero() = [0, 0, [], 0, 0, []];
+  def stv-ratio(dur, amount) = dur * StvUnit() / amount;
+  def stv-run-tick(ticks, tick, dur) = !nil?(ticks) && ticks[0][0] == tick ? cons([tick, ticks[0][1] + 1, ticks[0][2] + dur], ticks[1:]) : cons([tick, 1, dur], filter(e => e[0] > tick - StvWindowTicks(), ticks));
+  def stv-learn-key(ks, dur, bucket, outcome, digest, tick, span) {
+   let [n, widest, hist, was, wasdigest, runs, runsum, runticks, spans] = ks;
+   let same = n > 0 && was == outcome && wasdigest == digest;
+   [n + 1, max2(widest, dur), stv-count-in(hist, bucket), outcome, digest,
+    same ? runs + 1 : 1, same ? runsum + dur : dur, stv-run-tick(same ? runticks : [], tick, dur), take(StvSpanKeep(), cons(span, spans))];
+  }
+  def stv-learn-stage(gs, dur, bucket, amount) {
+   let [n, widest, hist, an, awidest, ahist] = gs;
+   amount <= 0 ? [n + 1, max2(widest, dur), stv-count-in(hist, bucket), an, awidest, ahist]
+   : [n + 1, max2(widest, dur), stv-count-in(hist, bucket), an + 1, max2(awidest, stv-ratio(dur, amount)), stv-count-in(ahist, stv-bucket(stv-ratio(dur, amount)))];
+  }
+
+  // [bound rung]; the bound is nothing when the rung is unlearned
+  def stv-bound-of(stats, stage, key, amount) {
+   let [kn, kwidest, khist, _, _, _, _, _, _] = stv-get(stats, [stage, key], stv-key-zero());
+   let [gn, gwidest, ghist, an, awidest, ahist] = stv-get(stats, [stage], stv-stage-zero());
+   kn >= StvLeastCloses() ? [stv-pct(khist, kn, 95, kwidest), "key"]
+   : amount > 0 && an >= StvLeastCloses() ? [(stv-pct(ahist, an, 95, awidest) * amount + StvUnit() - 1) / StvUnit(), "kin"]
+   : gn >= StvLeastCloses() ? [stv-pct(ghist, gn, 95, gwidest), "stage"]
+   : kn >= 2 ? [kwidest * StvSlack(), "widest"]
+   : gn >= 2 ? [gwidest * StvSlack(), "widest"]
+   : [nothing(), "unlearned"];
+  }
+  def stv-bound(s, stage, key, amount) = stv-bound-of(stv-stats(s), stage, key, amount);
+
+  // an organ's ticks: [tick busy closes worst stake] newest first
+  def stv-ring-add(ticks, tick, busy, closes, tone, stake) = nil?(ticks) || ticks[0][0] < tick ? cons([tick, busy, closes, tone, stake], ticks)
+   : ticks[0][0] == tick ? cons([tick, ticks[0][1] + busy, ticks[0][2] + closes, max2(ticks[0][3], tone), ticks[0][4] + stake], ticks[1:])
+   : cons(ticks[0], stv-ring-add(ticks[1:], tick, busy, closes, tone, stake));
+  def stv-organ-ticks(rings, organ) = nil?(rings) ? [] : rings[0][0] == organ ? rings[0][1] : stv-organ-ticks(rings[1:], organ);
+  def stv-with-organ(rings, organ, ticks) = cons([organ, ticks], !nil?(rings) && rings[0][0] == organ ? rings[1:] : filter(e => e[0] != organ, rings));
+  def stv-accrue(rings, organ, tick, closes, tone, stake) = stv-with-organ(rings, organ, stv-ring-add(stv-organ-ticks(rings, organ), tick, 0, closes, tone, stake));
+  def stv-busy-from(ticks, a, b, k, last) = k > last ? ticks : stv-busy-from(stv-ring-add(ticks, k, min2(b, (k + 1) * StvTickUs()) - max2(a, k * StvTickUs()), 0, 0, 0), a, b, k + 1, last);
+  def stv-busy(ticks, a, b) = stv-busy-from(ticks, a, b, max2(stv-tick(a), stv-tick(b) - StvRingTicks() + 1), stv-tick(b));
+
+  // the length of the union of [a b ...] intervals
+  def stv-by-start(iv, ivs) = nil?(ivs) || iv[0] <= ivs[0][0] ? cons(iv, ivs) : cons(ivs[0], stv-by-start(iv, ivs[1:]));
+  def stv-union-walk(ivs, reach, total) = nil?(ivs) ? total : stv-union-walk(ivs[1:], max2(reach, ivs[0][1]), total + max2(0, ivs[0][1] - max2(reach, ivs[0][0])));
+  def stv-union(ivs) {
+   let sorted = foldl((out, iv) => stv-by-start(iv, out), [], ivs);
+   nil?(sorted) ? 0 : stv-union-walk(sorted, sorted[0][0], 0);
+  }
+  def stv-clip(spans, a, b) = spans |> map(sp => [max2(a, sp[2]), min2(b, sp[3]), sp[0], sp[1]]) |> filter(iv => iv[0] < iv[1]);
+  def stv-distinct(xs) = len(foldl((seen, x) => any?(y => y == x, seen) ? seen : cons(x, seen), [], xs));
+
+  // a pid's closes, newest first: [stage key outcome t body]; a loop is [period cycle-us]
+  def stv-same-close?(a, b) = a[0] == b[0] && a[1] == b[1];
+  def stv-loop-at?(cs, p) = all?(i => stv-same-close?(cs[i], cs[i + p]), 0 .. p) && any?(c => !stv-same-close?(c, cs[0]), take(p, cs)) && any?(c => c[2] != StvHeld(), take(2 * p, cs));
+  def stv-loop-from(cs, p) = p > StvLoopMax() || len(cs) < 2 * p ? nothing() : stv-loop-at?(cs, p) ? [p, cs[0][3] - cs[p][3]] : stv-loop-from(cs, p + 1);
+  def stv-loop(cs) = stv-loop-from(cs, 2);
+
+  def stv-take(s, rows, alive) {
+   let folded = foldl(stv-step, s, rows);
+   stv-trim(nothing?(alive) ? folded : stv-bury(stv-set(folded, 7, alive), alive));
+  }
+  def stv-step(s, r) {
+   let [stats, opens, events, pids, rings, names, clock, alive, retreads] = s;
+   let [_, pid, t, _, _, phase, _, _, _, _, _, _, _] = r;
+   let heard = stv-state(stats, opens, events, stv-heard(pids, pid, t), rings, names, max2(clock, t), alive, retreads);
+   phase == 1 ? stv-set(heard, 1, cons(r, opens))
+   : phase >= 2 && phase <= 4 ? stv-ended(heard, r, stv-match(opens, r))
+   : heard;
+  }
+  // [entry rest]: the pid's entry pulled out of the list in one walk, a fresh one when it is new
+  def stv-pull(pids, pid) = nil?(pids) ? [[pid, 0, [], 0], []] : pids[0][0] == pid ? [pids[0], pids[1:]] : stv-pulled(pids[0], stv-pull(pids[1:], pid));
+  def stv-pulled(p, m) = [m[0], cons(p, m[1])];
+  def stv-heard(pids, pid, t) {
+   let [entry, rest] = stv-pull(pids, pid);
+   let [_, last, closes, looping] = entry;
+   cons([pid, max2(last, t), closes, looping], rest);
+  }
+  // [open rest]: the newest open of the close's pid, stage and depth, and the opens without it
+  def stv-match(opens, r) = nil?(opens) ? [nothing(), opens]
+   : stv-pid(opens[0]) == stv-pid(r) && stv-stage(opens[0]) == stv-stage(r) && stv-depth(opens[0]) == stv-depth(r) ? [opens[0], opens[1:]]
+   : stv-matched(opens, stv-match(opens[1:], r));
+  def stv-matched(opens, m) = nothing?(m[0]) ? [nothing(), opens] : [m[0], cons(opens[0], m[1])];
+  def stv-ended(s, r, m) {
+   let rest = stv-set(s, 1, m[1]);
+   stv-phase(r) == 4 ? stv-died(rest, r, m[0]) : stv-closed(rest, r, m[0]);
+  }
+  def stv-died(s, r, open) = nothing?(open) ? stv-death(s, r, stv-t(r), stv-dur(r)) : stv-death(s, open, stv-t(r), stv-t(r) - stv-t(open));
+  def stv-death(s, o, t, age) {
+   let event = ["died", stv-stage(o), stv-key(o), stv-body(o), stv-pid(o), t, age, 1, stv-idx(o), stv-link(o)];
+   stv-set(stv-set(s, 2, cons(event, stv-events(s))), 4, stv-accrue(stv-rings(s), stv-organ(stv-names(s), stv-stage(o)), stv-tick(t), 0, 3, age));
+  }
+  def stv-parent-in(opens, link) = nil?(opens) ? nothing() : stv-idx(opens[0]) == link ? opens[0] : stv-parent-in(opens[1:], link);
+  def stv-parent(opens, link) = link < 0 ? nothing() : stv-parent-in(opens, link);
+  // another pid of o's body sat in o's stage and key while o ran (closed in its spans, or open now)
+  def stv-shared?(stats, opens, o, until) = any?(sp => sp[0] != stv-pid(o) && sp[1] == stv-body(o) && sp[3] > stv-t(o) && sp[2] < until, stv-get(stats, [stv-stage(o), stv-key(o)], stv-key-zero())[8])
+   || any?(x => stv-pid(x) != stv-pid(o) && stv-body(x) == stv-body(o) && stv-stage(x) == stv-stage(o) && stv-key(x) == stv-key(o), opens);
+  def stv-noted(events, kind, stake, k, r, from) = stake <= 0 ? events : cons([kind, stv-stage(r), stv-key(r), stv-body(r), stv-pid(r), stv-t(r), stake, k, stv-idx(from), stv-link(from)], events);
+  def stv-retread-stake(ks, dur) = ks[5] == StvRepeat() ? (ks[5] - 1) * ks[6] / ks[5] : ks[5] > StvRepeat() ? dur : 0;
+  def stv-retreads-after(list, before, after, entry) = after[5] >= StvRepeat() ? (before[5] >= StvRepeat() ? list : cons(entry, list))
+   : before[5] >= StvRepeat() ? filter(e => !(e[0] == entry[0] && e[1] == entry[1]), list) : list;
+  def stv-closed(s, r, open) {
+   let [stats, opens, events, pids, rings, names, clock, alive, retreads] = s;
+   let [_, pid, t, stage, key, _, _, _, said, outcome, spent, body, digest] = r;
+   let from = nothing?(open) ? r : open;
+   let [idx, _, _, _, _, _, _, link, _, _, asked, _, _] = from;
+   let dur = nothing?(open) || said > 0 ? said : t - open[2];
+   let start = t - dur;
+   let bound = stv-bound-of(stats, stage, key, asked)[0];
+   let ks = stv-get(stats, [stage, key], stv-key-zero());
+   let parent = stv-parent(opens, link);
+   let mates = stv-clip(filter(sp => sp[0] != pid && sp[1] == body, ks[8]), start, t);
+   let rivals = stv-clip(filter(sp => sp[1] != body, ks[8]), start, t);
+   let lock = nil?(mates) || (!nothing?(parent) && stv-shared?(stats, opens, parent, t)) ? 0 : stv-union(mates);
+   let bucket = stv-bucket(dur);
+   let learned = stv-learn-key(ks, dur, bucket, outcome, digest, stv-tick(t), [pid, body, start, t, idx, link]);
+   let retread = stv-retread-stake(learned, dur);
+   let [_, last, before, looping] = pids[0];
+   let closes = take(2 * StvLoopMax(), cons([stage, key, outcome, t, body], before));
+   let loop = stv-loop(closes);
+   let looped = nothing?(loop) ? 0 : looping > 0 ? t - before[0][3] : loop[1];
+   let excess = nothing?(bound) ? 0 : max2(0, dur - bound);
+   let tone = nothing?(bound) ? 0 : dur > StvStall() * bound ? 2 : dur > bound ? 1 : 0;
+   let stake: Number = excess + lock + retread + looped;
+   let organ = stv-organ(names, stage);
+   let accrued = stv-accrue(rings, organ, stv-tick(t), 1, max2(tone, stake > excess ? 1 : 0), stake);
+   let top = nothing?(parent) || stv-organ(names, stv-stage(parent)) != organ;
+   let noted = stv-noted(stv-noted(events, "lockstep", lock, 1 + stv-distinct(map(m => m[2], mates)), r, from), "contention", stv-union(rivals), 1 + stv-distinct(map(m => m[3], rivals)), r, from);
+   stv-state(stv-put(stv-put(stats, [stage, key], learned), [stage], stv-learn-stage(stv-get(stats, [stage], stv-stage-zero()), dur, bucket, spent > 0 ? spent : asked)),
+    opens, noted, cons([pid, last, closes, nothing?(loop) ? 0 : loop[0]], pids[1:]),
+    top ? stv-with-organ(accrued, organ, stv-busy(stv-organ-ticks(accrued, organ), start, t)) : accrued,
+    names, clock, alive, stv-retreads-after(retreads, ks, learned, [stage, key, body, pid]));
+  }
+  // an open whose pid is gone died at the clock
+  def stv-bury(s, alive) = foldl((st, o) => any?(p => p == stv-pid(o), alive) ? st
+   : stv-death(stv-set(st, 1, filter(x => stv-idx(x) != stv-idx(o), stv-opens(st))), o, stv-clock(st), stv-clock(st) - stv-t(o)), s, stv-opens(s));
+  def stv-trim(s) {
+   let horizon = stv-clock(s) - stv-window-us();
+   let oldest = stv-tick(stv-clock(s)) - StvWindowTicks() + 1;
+   let alive = stv-alive(s);
+   let rings = stv-rings(s) |> map(e => [e[0], filter(k => k[0] >= oldest, e[1])]) |> filter(e => !nil?(e[1]));
+   let pids = filter(p => p[1] >= horizon || (!nothing?(alive) && any?(x => x == p[0], alive)), stv-pids(s));
+   stv-set(stv-set(stv-set(s, 2, filter(e => e[5] >= horizon, stv-events(s))), 3, pids), 4, rings);
+  }
+
+  // a finding: kind dim stake stage key body pid age bound rung n idx link
+  def stv-overstay(s, o, now) {
+   let [idx, pid, t, stage, key, _, _, link, _, _, amount, body, _] = o;
+   let [bound, rung] = stv-bound(s, stage, key, amount);
+   let age = now - t;
+   nothing?(bound) || age <= bound ? nothing()
+   : [age > StvStall() * bound ? "stall" : "overstay", 0, age - bound, stage, key, body, pid, age, bound, rung, 1, idx, link];
+  }
+  def stv-overstays(s, now) {
+   let overs = stv-opens(s) |> map(o => stv-overstay(s, o, now)) |> filter(f => !nothing?(f));
+   let eldest = foldl((m, c) => c[12] < 0 ? m : stv-put(m, [c[12]], max2(c[7], stv-get(m, [c[12]], 0))), km-new(2), overs);
+   filter(f => f[2] > stv-get(eldest, [f[11]], 0), overs);
+  }
+  // open lockstep: one stage and key in several pids of a body; each joiner after the first adds its time.
+  // Opens sorted by stage and key fall into their groups in one walk.
+  def stv-key-before?(a, b) = stv-stage(a) < stv-stage(b) || (stv-stage(a) == stv-stage(b) && stv-key(a) < stv-key(b));
+  def stv-group(groups, o) = !nil?(groups) && groups[0][0] == stv-stage(o) && groups[0][1] == stv-key(o) ? cons([groups[0][0], groups[0][1], cons(o, groups[0][2])], groups[1:])
+   : cons([stv-stage(o), stv-key(o), [o]], groups);
+  def stv-keep-earliest(firsts, id, t) = nil?(firsts) ? [[id, t]] : firsts[0][0] == id ? cons([id, min2(t, firsts[0][1])], firsts[1:]) : cons(firsts[0], stv-keep-earliest(firsts[1:], id, t));
+  def stv-earliest(ms, by) = foldl((firsts, o) => stv-keep-earliest(firsts, by(o), stv-t(o)), [], ms);
+  def stv-joined(firsts, now) = sum(map(f => now - f[1], firsts)) - (now - minimum(map(f => f[1], firsts)));
+  def stv-body-locks(g) = map(b => [g[0], g[1], b, filter(o => stv-body(o) == b, g[2])], stv-earliest(g[2], stv-body) |> map(f => f[0]))
+   |> filter(c => len(stv-earliest(c[3], stv-pid)) >= 2);
+  def stv-quiet?(c, cands) = all?(m => any?(d => !(d[0] == c[0] && d[1] == c[1] && d[2] == c[2]) && any?(x => stv-idx(x) == stv-link(m), d[3]), cands), c[3]);
+  def stv-lock-event(kind, stage, key, body, ms, firsts, now) = [kind, stage, key, body, stv-pid(ms[0]), now, stv-joined(firsts, now), len(firsts), stv-idx(ms[0]), stv-link(ms[0])];
+  def stv-open-locks(s, now) {
+   let groups = foldl(stv-group, [], stv-sort(stv-key-before?, stv-opens(s))) |> filter(g => len(g[2]) >= 2);
+   let cands = foldl((all, g) => append(stv-body-locks(g), all), [], groups);
+   let locks = cands |> filter(c => !stv-quiet?(c, cands)) |> map(c => stv-lock-event("lockstep", c[0], c[1], c[2], c[3], stv-earliest(c[3], stv-pid), now));
+   let rivals = groups |> filter(g => len(stv-earliest(g[2], stv-body)) >= 2) |> map(g => stv-lock-event("contention", g[0], g[1], stv-body(g[2][0]), g[2], stv-earliest(g[2], stv-body), now));
+   append(locks, rivals);
+  }
+  def stv-alike?(a, b) = a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && (a[0] != "died" || a[4] == b[4]);
+  def stv-gather(out, e) = nil?(out) ? [e]
+   : stv-alike?(out[0], e) ? cons([e[0], e[1], e[2], e[3], e[4], max2(e[5], out[0][5]), e[6] + out[0][6], max2(e[7], out[0][7]), e[8], e[9]], out[1:])
+   : cons(out[0], stv-gather(out[1:], e));
+  def stv-gathered(s, now) {
+   let horizon = now - stv-window-us();
+   let events = append(filter(e => e[5] >= horizon && e[5] <= now, stv-events(s)), stv-open-locks(s, now));
+   foldl(stv-gather, [], events) |> map(e => [e[0], e[0] == "contention" ? 1 : 0, e[6], e[1], e[2], e[3], e[4], e[0] == "died" ? e[6] : 0, 0, "", e[7], e[8], e[9]]);
+  }
+  def stv-retread-now(ks, e, now) {
+   let last = stv-tick(now);
+   let inside = filter(k => k[0] > last - StvWindowTicks() && k[0] <= last, ks[7]);
+   let r = sum(map(k => k[1], inside));
+   r < StvRepeat() ? nothing() : ["retread", 0, (r - 1) * sum(map(k => k[2], inside)) / r, e[0], e[1], e[2], e[3], 0, 0, "", r, 0, 0];
+  }
+  def stv-retreads-now(s, now) = stv-retreads(s) |> map(e => stv-retread-now(stv-get(stv-stats(s), [e[0], e[1]], stv-key-zero()), e, now)) |> filter(f => !nothing?(f));
+  def stv-loop-now(p, now) {
+   let loop = stv-loop(p[2]);
+   nothing?(loop) ? nothing() : p[2][0][3] < now - stv-window-us() ? nothing()
+   : ["loop", 0, loop[1], p[2][0][0], p[2][0][1], p[2][0][4], p[0], 0, 0, "", loop[0], 0, 0];
+  }
+  def stv-loops-now(s, now) = stv-pids(s) |> map(p => stv-loop-now(p, now)) |> filter(f => !nothing?(f));
+  // a stable merge sort: what before? puts first, ties in the order given
+  def stv-merge(before?, a, b, out) = nil?(a) ? reverse-onto(out, b) : nil?(b) ? reverse-onto(out, a)
+   : before?(b[0], a[0]) ? stv-merge(before?, a, b[1:], cons(b[0], out)) : stv-merge(before?, a[1:], b, cons(a[0], out));
+  def stv-sort(before?, xs) = len(xs) < 2 ? xs : stv-merge(before?, stv-sort(before?, take(len(xs) / 2, xs)), stv-sort(before?, drop(len(xs) / 2, xs)), []);
+  // ranked: the bright before the dim, then by stake
+  def stv-before?(a, b) = a[1] < b[1] || (a[1] == b[1] && a[2] > b[2]);
+  // the readers share one pass over the opens: stv-overstays feeds findings, organs and the need
+  def stv-ranked(s, now, overs) = stv-sort(stv-before?, append(overs, append(stv-gathered(s, now), append(stv-retreads-now(s, now), stv-loops-now(s, now)))));
+  def stv-findings(s, now) = stv-ranked(s, now, stv-overstays(s, now));
+
+  // an organ: organ wane stake busy closes worst; wane in us of stake per s, the rings dense over
+  // StvRingTicks ticks ending at now, oldest first
+  def stv-dense-walk(ticks, k, first, field, out) = k < first ? out
+   : !nil?(ticks) && ticks[0][0] > k ? stv-dense-walk(ticks[1:], k, first, field, out)
+   : stv-dense-walk(ticks, k - 1, first, field, cons(!nil?(ticks) && ticks[0][0] == k ? ticks[0][field] : 0, out));
+  def stv-dense(ticks, last, field) = stv-dense-walk(ticks, last, last - StvRingTicks() + 1, field, []);
+  def stv-organ-row(s, organ, overs, now) {
+   let last = stv-tick(now);
+   let ticks = stv-organ-ticks(stv-rings(s), organ);
+   let ringed = sum(map(k => k[4], filter(k => k[0] > last - StvWindowTicks() && k[0] <= last, ticks)));
+   let open = sum(map(f => min2(f[2], stv-window-us()), filter(f => stv-organ(stv-names(s), f[3]) == organ, overs)));
+   let stake: Number = ringed + open;
+   [organ, stake / (stv-window-us() / 1000000), stake, stv-dense(ticks, last, 1), stv-dense(ticks, last, 2), stv-dense(ticks, last, 3)];
+  }
+  def stv-wane-before?(a, b) = a[1] > b[1];
+  def stv-organs-of(s, now, overs) {
+   let named = foldl((seen, o) => any?(x => x == o, seen) ? seen : append(seen, [o]), [], append(map(e => e[0], stv-rings(s)), map(f => stv-organ(stv-names(s), f[3]), overs)));
+   stv-sort(stv-wane-before?, map(o => stv-organ-row(s, o, overs, now), named));
+  }
+  def stv-organs(s, now) = stv-organs-of(s, now, stv-overstays(s, now));
+  def stv-ms(us) = (us / 1000).str() ++ "." ++ (us % 1000 / 100).str();
+  def stv-need-of(s, organs, findings) = nil?(organs) || organs[0][1] <= 0 ? "need=none" : stv-need-line(s, organs[0], filter(f => stv-organ(stv-names(s), f[3]) == organs[0][0], findings));
+  def stv-need(s, now) {
+   let overs = stv-overstays(s, now);
+   stv-need-of(s, stv-organs-of(s, now, overs), stv-ranked(s, now, overs));
+  }
+  def stv-need-line(s, organ, fs) = "need=" ++ organ[0] ++ " " ++ stv-ms(organ[1]) ++ "ms/s" ++ (nil?(fs) ? "" : " " ++ fs[0][0] ++ " " ++ stv-name(s, fs[0][3]) ++ " " ++ stv-key-text(s, fs[0][4]));
+  // [pids that spoke in the window, alive pids]
+  def stv-coverage(s, now) {
+   let alive = nothing?(stv-alive(s)) ? map(p => p[0], stv-pids(s)) : stv-alive(s);
+   [len(filter(pid => any?(p => p[0] == pid && p[1] >= now - stv-window-us(), stv-pids(s)), alive)), len(alive)];
+  }
+
+  // a glass row per ranked finding: kind dim organ name key stake age bound rung n strip p50 p95 spark;
+  // the strip is the key's log2 histogram (the stage's while the key has none), p50 and p95 its bucket
+  // ticks, the spark its organ's closes per tick
+  def stv-glass-row(s, f, now) {
+   let ks = stv-get(stv-stats(s), [f[3], f[4]], stv-key-zero());
+   let gs = stv-get(stv-stats(s), [f[3]], stv-stage-zero());
+   let h = ks[0] > 0 ? ks[2] : gs[2];
+   let n = ks[0] > 0 ? ks[0] : gs[0];
+   let organ = stv-organ(stv-names(s), f[3]);
+   [f[0], f[1], organ, stv-name(s, f[3]), stv-key-text(s, f[4]), f[2], f[7], f[8], f[9], f[10], 0 .. StvBuckets() |> map(b => stv-count-of(h, b)),
+    stv-pct-bucket(h, n, 50), stv-pct-bucket(h, n, 95), stv-dense(stv-organ-ticks(stv-rings(s), organ), stv-tick(now), 2)];
+  }
+  def stv-rows-of(s, now, findings) = findings |> map(f => stv-glass-row(s, f, now));
+  def stv-rows(s, now) = stv-rows-of(s, now, stv-findings(s, now));
+ }
+}

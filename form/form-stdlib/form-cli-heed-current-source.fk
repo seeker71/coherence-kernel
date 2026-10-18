@@ -1,0 +1,156 @@
+// form-cli-heed-current-source.fk — one current-body knowledge substrate for the
+// live heed cursor.  It parses the Form knowledge-query envelope, derives a
+// small bounded set of query atoms through the repository's Form byte scanner.
+// A named, validated repo-relative path takes the interactive one-file lane;
+// an explicitly fuelled caller may instead perform one source_inventory plus
+// bounded-window lookup over the body that is present now.
+//
+// This is deliberately parallel to nodeid-rag-v2, not disguised as it.  A
+// current source file is a source artifact with a fresh Form SHA-256; it is not
+// a registered NamedCell REF or CTOR.  The observation therefore leaves those
+// fields empty and names provenance-schema=source-artifact-stream-v1.  A
+// stronger nodeid-rag-v2 adapter is a carrier's own lookup.
+//
+// One complete envelope causes at most one search.  Invalid, partial, nested,
+// trailing, empty, or over-budget envelopes return `nothing` before source IO.
+// A completed search with no match returns `miss`, which is distinct from
+// `nothing` and enters the model as a typed observation so it cannot silently
+// invent a source row.  `model-executed` is always 0: the cursor recognizes the
+// decoded bytes, this Form cell performs the lookup, and the carrier prefills
+// the resulting observation before the next model step.
+//
+// This is live retrieval, not learned weights and not proof of model reasoning.
+// It makes the current body available on demand while held-out model evaluation
+// and weight training remain separate axes in the integration census.
+//
+import form-stdlib/core.fk;
+import form-stdlib/form-cli-heedmark.bml;
+import form-stdlib/form-knowledge-query-token.fk;
+import form-stdlib/form-knowledge-source-search.fk;
+//
+section [form.bml] {
+    def fhcs-schema() = "source-artifact-stream-v1";
+    // The live root is discovered from repo-native marker files, walking upward
+    // from the process directory. An arbitrary cwd is never silently accepted as
+    // the body. Twelve parent edges cover the repo's own nested doors; failure is
+    // an explicit `body-root-unresolved` nothing before source IO.
+    def fhcs-body-root-fuel() = 12;
+    def fhcs-body-root-ok?(root) = (Comparable) fs-is-file?(fs-path-join(root, "AGENTS.md")) == 1 && (Comparable) fs-is-file?(fs-path-join(root, "HOMECOMING.md")) == 1 ? (Comparable) fs-is-file?(fs-path-join(root, "bootstrap/ground.fk")) == 1 && (Comparable) fs-is-file?(fs-path-join(root, "form/form-stdlib/core.fk")) == 1 ? 1 : 0 : 0;
+    def fhcs-body-root-go(root, fuel) = (Comparable) fhcs-body-root-ok?(root) == 1 ? root : fuel <= 0 ? "" : fhcs-body-root-go(fs-path-join(root, ".."), fuel - 1);
+    def fhcs-default-root() = fhcs-body-root-go(".", fhcs-body-root-fuel());
+    def fhcs-root-status() = (String) fhcs-default-root() == "" ? "body-root-unresolved" : "body-root-anchored-upward-v1";
+    def fhcs-max-atoms() = 8;
+    def fhcs-model-executed() = 0;
+    // One authority owns the per-turn bound.  The live source door and the BML
+    // cursor cannot drift into one-query/two-query versions of the same turn.
+    def fhcs-lookup-limit() = MaxHeeds();
+    // The observed 823MB body took longer than ten minutes through a whole-tree
+    // files×atoms walk. Live lookup therefore has no implicit global-scan fuel.
+    // Explicit test/tool callers may offer one bounded traversal themselves.
+    def fhcs-live-global-scan-fuel() = 0;
+    // Query words are scanned byte-by-byte by re-words (already in fkqt's
+    // grounded RAG prelude).  Stop words carry little retrieval evidence and
+    // are removed; at most eight content atoms cross into the source walk.
+    def fhcs-atoms-loop(words, fuel) = nil?(words) || fuel <= 0 ? empty() : (Comparable) re-stop-word?(words[0]) == 1 ? fhcs-atoms-loop(words[1:], fuel) : cons(words[0], fhcs-atoms-loop(words[1:], fuel - 1));
+    def fhcs-atoms(query) = fhcs-atoms-loop(re-words(query), fhcs-max-atoms());
+    // A query may name one exact repo-relative knowledge path. This is the
+    // interactive fast lane: one eligible file, one bounded atom observation,
+    // one whole-file stream hash, one bounded answer window. Absolute paths,
+    // parent traversal, backslashes, and non-knowledge extensions never cross.
+    def fhcs-path-byte?(b) = b >= 48 && b <= 57 || (b >= 65 && b <= 90 || (b >= 97 && b <= 122 || ((Comparable) b == 45 || ((Comparable) b == 46 || ((Comparable) b == 47 || (Comparable) b == 95))))) ? 1 : 0;
+    def fhcs-path-skip(s, i) = i >= len(s) ? i : (Comparable) fhcs-path-byte?(str_byte_at(s, i)) == 1 ? i : fhcs-path-skip(s, i + 1);
+    def fhcs-path-end(s, i) = i >= len(s) ? i : (Comparable) fhcs-path-byte?(str_byte_at(s, i)) == 1 ? fhcs-path-end(s, i + 1) : i;
+    def fhcs-relative-source-path?(path) = (Comparable) len(path) == 0 || len(path) > fkqt-max-source-bytes() ? 0 : (Comparable) str_byte_at(path, 0) == 47 || str_find(path, "..", 0) >= 0 ? 0 : str_find(path, "/", 0) >= 0 && (Comparable) fkss-knowledge-extension?(path) == 1 ? 1 : 0;
+    def fhcs-query-source-path-go(query, at) = {
+        let start = fhcs-path-skip(query, at);
+        start >= len(query) ? "" : {
+            let end = fhcs-path-end(query, start);
+            let candidate = substring(query, start, end);
+            (Comparable) fhcs-relative-source-path?(candidate) == 1 ? candidate : fhcs-query-source-path-go(query, end + 1);
+        };
+    };
+    def fhcs-query-source-path(query) = fhcs-query-source-path-go(query, 0);
+    def fhcs-path-result-with-reason(root, relative, atoms, hit-reason) = {
+        let full = fs-path-join(root, relative);
+        let size = fs-stat-size(full);
+        (Comparable) fhcs-relative-source-path?(relative) == 0 || (size < 0 || !((Comparable) fs-is-file?(full) == 1)) ? fkss-result("miss", "direct-source-path-unavailable", "", relative, 0, -1, "", 1, 1, 0, -1, 0) : {
+            let observed = fkss-observe-atoms(full, atoms);
+            let candidate = fkss-candidate(relative, full, observed[0], observed[1], size);
+            let answer-start = fkss-answer-start(observed[1], size);
+            fkss-result("hit", hit-reason, fkss-source-id(full), relative, observed[0], observed[1], fkss-answer-for(candidate), 1, 1, 1, size, answer-start);
+        };
+    };
+    def fhcs-path-result(root, relative, atoms) = fhcs-path-result-with-reason(root, relative, atoms, "current-source-path-hit");
+    def fhcs-answer-key(answer) = (String) answer == "" ? "" : hex-encode(sha256-stream-string(answer));
+    def fhcs-confidence(matched, atom-count) = atom-count <= 0 ? 0 : matched * 100 / atom-count;
+    // A separate content-addressed observation family.  Its children name the
+    // exact query token, Form executor, source artifact, bounded path and answer
+    // hash.  No substrate REF/CTOR is synthesized.
+    def fhcs-observation-category() = make_nodeid(31, 2, 0, 55);
+    def fhcs-observation-token(request, result, path, answer, answer-key, lane) = intern_node(fhcs-observation-category(), [fkqt-request-token(request), fkqt-executor-token(), intern_trivial_string(fhcs-schema()), intern_trivial_string(fkss-source-id-of(result)), intern_trivial_string(path), intern_trivial_string(answer-key), intern_trivial_string(answer), intern_trivial_int(lane), intern_trivial_int(1), intern_trivial_int(0)]);
+    def fhcs-cat(parts) = nil?(parts) ? "" : ((String) parts[0] + fhcs-cat(parts[1:]));
+    def fhcs-render-prefix(request, result, atom-count, local-ready, answer-cut, render-cut) = {
+        let status = fkss-status(result);
+        let hit? = (String) status == "hit" ? 1 : 0;
+        let raw-path = fkss-source-path(result);
+        let path = fkqt-clip(raw-path, fkqt-max-source-bytes());
+        let answer = fkss-answer(result);
+        let answer-key = fhcs-answer-key(answer);
+        let lane = fkqt-route-lane(status, local-ready);
+        let observation = fhcs-observation-token(request, result, path, answer, answer-key, lane);
+        fhcs-cat([fkqt-observation-open(), "\nstatus=", status, "\nreason=", fkss-reason(result), "\nrequest-node=@", fkqt-node-key(fkqt-request-token(request)), "\nobservation-node=@", fkqt-node-key(observation), "\nexecutor-node=@", fkqt-node-key(fkqt-executor-token()), "\nprovenance-schema=", fhcs-schema(), "\nsource-ref=", "\ncontent-ref=", "\nsource-artifact=", fkss-source-id-of(result), "\nsource-path=", path, "\nanswer-key=", answer-key, "\nretrieval-matched-atoms=", fkss-matched(result).str(), "\nretrieval-query-atoms=", atom-count.str(), "\nretrieval-confidence=", fhcs-confidence(fkss-matched(result), atom-count).str(), "\nsource-inventory=", fkss-inventory-count(result).str(), "\nsource-eligible=", fkss-eligible-count(result).str(), "\nsource-accessible=", fkss-accessible-count(result).str(), "\nsource-access-percent=", fkss-coverage-percent(result).str(), "\nlane=", lane.str(), "\nexecuted=1", "\nmodel-executed=0", "\nlookup-count=1", "\nhit-count=", hit?.str(), "\nanswer-encoding=", fkqt-observation-encoding(), "\nanswer-truncated=", answer-cut.str(), "\nanswer-source-truncated=", fkss-answer-cut?(result).str(), "\nanswer-render-truncated=", render-cut.str(), "\nsource-truncated=", fkqt-cut?(raw-path, fkqt-max-source-bytes()).str(), "\nanswer-byte-length=", len(answer).str(), "\nanswer:"]);
+    };
+    def fhcs-render(request, result, atom-count, local-ready) = {
+        let provisional = fhcs-render-prefix(request, result, atom-count, local-ready, fkss-answer-cut?(result), 0);
+        let fuel = fkqt-max-render-bytes() - (len(provisional) + (1 + len(fkqt-observation-close())));
+        let escaped = fkqt-observation-take(fkss-answer(result), fuel);
+        let render-cut = escaped[1] < len(fkss-answer(result)) ? 1 : 0;
+        let answer-cut = (Comparable) fkss-answer-cut?(result) == 1 || (Comparable) render-cut == 1 ? 1 : 0;
+        let prefix = fhcs-render-prefix(request, result, atom-count, local-ready, answer-cut, render-cut);
+        fhcs-cat([prefix, escaped[0], "\n", fkqt-observation-close()]);
+    };
+    // Cursor adapter result: (status rendered-span reason).  `nothing` carries
+    // no span; hit and miss carry a typed observation.
+    def fhcs-refused(reason) = ["nothing", "", reason];
+    def fhcs-of-result(request, result, atom-count, local-ready) = !((Comparable) fkss-model-executed(result) == 0) ? fhcs-refused("model-executed-refused") : (String) fkss-status(result) == "nothing" ? fhcs-refused(fkss-reason(result)) : [fkss-status(result), fhcs-render(request, result, atom-count, local-ready), fkss-reason(result)];
+    // A carrier may know a validated repo-relative source independently of the
+    // model stream. Interactive prompts use it as a hint: an explicit emitted
+    // path still wins. Dataset/source-bound callers use the separate `bound`
+    // door below: their already-sealed source wins while the streamed query
+    // still owns the discriminative atoms. The two authorities are never
+    // collapsed into one ambiguous precedence rule.
+    def fhcs-lookup-at-fuel-source(root, ctx, surface, local-ready, global-fuel, source-path, source-bound) = {
+        let request = fkqt-parse(surface);
+        (Comparable) fkqt-request-ready?(request) == 0 ? fhcs-refused(fkqt-request-reason(request)) : {
+            let atoms = fhcs-atoms(fkqt-request-query(request));
+            nil?(atoms) ? fhcs-refused("no-query-atoms") : {
+                let emitted-relative = fhcs-query-source-path(fkqt-request-query(request));
+                let carried-relative = (Comparable) fhcs-relative-source-path?(source-path) == 1 ? source-path : "";
+                let use-bound = (Comparable) source-bound == 1 && !((String) carried-relative == "") ? 1 : 0;
+                let relative = (Comparable) use-bound == 1 ? carried-relative : !((String) emitted-relative == "") ? emitted-relative : carried-relative;
+                !((String) relative == "") ? fhcs-of-result(request, fhcs-path-result-with-reason(root, relative, atoms, (Comparable) use-bound == 1 || (String) emitted-relative == "" ? "current-source-context-path-hit" : "current-source-path-hit"), len(atoms), local-ready) : global-fuel <= 0 ? fhcs-refused("global-source-scan-fuel-exhausted") : fhcs-of-result(request, fkss-search-at(root, atoms), len(atoms), local-ready);
+            };
+        };
+    };
+    def fhcs-lookup-at-fuel-hinted(root, ctx, surface, local-ready, global-fuel, path-hint) = fhcs-lookup-at-fuel-source(root, ctx, surface, local-ready, global-fuel, path-hint, 0);
+    def fhcs-lookup-at-fuel-bound(root, ctx, surface, local-ready, global-fuel, source-path) = !((Comparable) fhcs-relative-source-path?(source-path) == 1) ? fhcs-refused("bound-source-path-invalid") : fhcs-lookup-at-fuel-source(root, ctx, surface, local-ready, global-fuel, source-path, 1);
+    def fhcs-lookup-at-fuel(root, ctx, surface, local-ready, global-fuel) = fhcs-lookup-at-fuel-hinted(root, ctx, surface, local-ready, global-fuel, "");
+    // Explicit lookup-at callers authorize one whole-tree scan when no exact
+    // path is present. The live default does not.
+    def fhcs-lookup-at(root, ctx, surface, local-ready) = fhcs-lookup-at-fuel(root, ctx, surface, local-ready, 1);
+    def fhcs-lookup-hinted(ctx, surface, local-ready, path-hint) = {
+        let root = fhcs-default-root();
+        (String) root == "" ? fhcs-refused("body-root-unresolved") : fhcs-lookup-at-fuel-hinted(root, ctx, surface, local-ready, fhcs-live-global-scan-fuel(), path-hint);
+    };
+    def fhcs-lookup-bound(ctx, surface, local-ready, source-path) = {
+        let root = fhcs-default-root();
+        (String) root == "" ? fhcs-refused("body-root-unresolved") : fhcs-lookup-at-fuel-bound(root, ctx, surface, local-ready, fhcs-live-global-scan-fuel(), source-path);
+    };
+    def fhcs-lookup(ctx, surface, local-ready) = fhcs-lookup-hinted(ctx, surface, local-ready, "");
+    def fhcs-grammar-agrees-at(open, close) = (String) fkqt-open() == open && (String) fkqt-close() == close ? 1 : 0;
+    // Compatibility witness for callers that do not prelude a cursor. The
+    // end-to-end cursor band calls grammar-agrees-at with HeedOpen/HeedClose so
+    // a drift between the two live cells is observed rather than assumed.
+    def fhcs-grammar-agrees() = fhcs-grammar-agrees-at("<|form:knowledge-query|>", "<|/form:knowledge-query|>");
+    0;
+}

@@ -1,0 +1,70 @@
+; form-rows-band.bml — Form's own data text reads back exactly what it wrote.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/form-rows.bml
+;
+; form-rows.bml writes a Form value as one line of text (ints, floats, strings, lists, records, nothing) and reads it back; the
+; doors' options, events and ledgers use it instead of JSON. This band proves the round trip over awkward values, that a value is
+; always one line, that malformed text is refused with data and not a stop, that row files and option texts read as written, and
+; that a ledger of thousands of rows is written and read in seconds.
+;
+; Verdict 63 when every claim lands:
+;   1   round trip: ints (0, negative, past 2^31), floats (0.1, 1.0, 1e21, a third, negative), strings (empty, quotes, backslashes,
+;       newline, tab, a control byte, UTF-8), nothing, lists (empty, nested), records (empty, nested, keys needing quotes): the
+;       value read back renders as the value written
+;   2   a floating point number reads back as the very same bits (its text is the shortest that does) and 1.0 stays a float
+;   4   every emitted value is one line: no raw newline or carriage return in the text
+;   8   refusals, as data: an unclosed string, list and record, a stray ']', a number with letters, a bare word as a value, a record
+;       with a key and no value, text after the value, an empty text: ["refused" ...], never a stop
+;   16  rows and options: a row text with comments and blank lines reads its values in order and names the line of a bad one; an
+;       options text reads `steps 100`, `lane llama`, `export some/dir-name`, `rows [1 2 3]`, `name "two words"` into a record,
+;       the last of a repeated name wins, and a line with no value is refused with its line number
+;   32  a ledger of 3000 records with floats and strings is written and read back whole in under 20 seconds
+section [form.bml] {
+ class FormRowsBand {
+  def frb-bit(ok, bit) = ok ? bit : 0;
+  def frb-same?(v) {
+   let text = frw-emit(v);
+   let r = frw-parse(text);
+   (String) r[0] == "ok" && (String) value_str(r[1]) == (String) value_str(v);
+  }
+  def frb-record(pairs) = foldl((rec, p) => record_set(rec, p[0], p[1]), record_new(0), pairs);
+  def frb-values() = [0, -5, 2147483648, 9007199254740991, 0.1, 1.0, 1e21, 3.0 / 7.0, -2.5, 0.000001, "", "plain", "a \"quote\" and a \\ slash", "line one\nline two\ttabbed\r", "bell" ++ byte_to_str(7) ++ "end", "caf" ++ byte_to_str(195) ++ byte_to_str(169), nothing(), [], [1, [2, [3]]], ["a", 1, 2.5, nothing()], frb-record([]), frb-record([["lane", "llama"], ["steps", 100]]), frb-record([["has space", 1], ["9starts", 2], ["", 3]]), frb-record([["nested", frb-record([["list", [1, 2, 3]], ["text", "x y"]])]])];
+  def frb-all-same?(vs) = all?(v => frb-same?(v), vs);
+  def frb-floats-exact?() = all?(x => frb-float-same?(x), [0.1, 1.0, 1e21, 3.0 / 7.0, -2.5, 0.000001, 123456789.123456, 2.2250738585072014e-308, 1.7976931348623157e308]);
+  def frb-float-same?(x) {
+   let r = frw-parse(frw-emit(x));
+   (String) r[0] == "ok" && (String) value_kind(r[1]) == "float" && (String) float-precise-str(r[1]) == (String) float-precise-str(x);
+  }
+  def frb-one-line?(v) = str_find(frw-emit(v), byte_to_str(10), 0) < 0 && str_find(frw-emit(v), byte_to_str(13), 0) < 0;
+  def frb-refused?(text) = (String) frw-parse(text)[0] == "refused";
+  def frb-refusals?() = all?(t => frb-refused?(t), ["\"unclosed", "[1 2", "{a 1", "]", "1x2", "word", "{a}", "{a 1 b}", "1 2", "", "   ", "[1 2}", "\"bad \\q escape\"", "\"short \\x4\"", "{9a 1}"]);
+  def frb-rows-ok?() {
+   let good = frw-rows("; a ledger\n{a 1}\n\n[1 2]\n   \n\"s\"\n");
+   let bad = frw-rows("{a 1}\n; note\n[1 2\n{b 2}\n");
+   (String) good[0] == "ok" && len(good[1]) == 3 && (String) value_str(good[1][1]) == (String) value_str([1, 2]) && (String) bad[0] == "refused" && bad[2] == 3;
+  }
+  def frb-options-ok?() {
+   let r = frw-options("; the door's options\nlane llama\nsteps 100\nexport some/dir-name\nrows [1 2 3]\nname \"two words\"\nsteps 7\nratio 0.5\n");
+   let bad = frw-options("lane llama\nsteps\n");
+   let o = r[1];
+   (String) r[0] == "ok" && (String) frw-str(o, "lane", "") == "llama" && frw-int(o, "steps", 0) == 7 && (String) frw-str(o, "export", "") == "some/dir-name" && (String) value_str(frw-get(o, "rows")) == (String) value_str([1, 2, 3]) && (String) frw-str(o, "name", "") == "two words" && frw-num(o, "ratio", 0.0) == 0.5 && nothing?(frw-get(o, "absent")) && frw-int(o, "absent", 9) == 9 && (String) bad[0] == "refused" && bad[2] == 2;
+  }
+  def frb-row(i) = frb-record([["stage", "round"], ["round", i], ["loss", (i + 1.0) / 7.0], ["note", "row " ++ i.str() ++ " \"q\"\n"], ["tags", [i, i * 2, nothing()]]]);
+  def frb-ledger?() {
+   let t0 = host_monotonic_ms();
+   let rows = map(i => frb-row(i), range(0, 3000));
+   let text = str-join(map(r => frw-emit(r) ++ byte_to_str(10), rows));
+   let back = frw-rows(text);
+   (String) back[0] == "ok" && len(back[1]) == 3000 && (String) value_str(back[1][2999]) == (String) value_str(rows[2999]) && (host_monotonic_ms() - t0) < 20000;
+  }
+  def frb-score() {
+   frb-bit(frb-all-same?(frb-values()), 1)
+   + frb-bit(frb-floats-exact?() && (String) value_kind(frw-parse("1.0")[1]) == "float" && (String) value_kind(frw-parse("1")[1]) == "int", 2)
+   + frb-bit(all?(v => frb-one-line?(v), frb-values()), 4)
+   + frb-bit(frb-refusals?(), 8)
+   + frb-bit(frb-rows-ok?() && frb-options-ok?(), 16)
+   + frb-bit(frb-ledger?(), 32);
+  }
+ }
+ frb-score();
+}

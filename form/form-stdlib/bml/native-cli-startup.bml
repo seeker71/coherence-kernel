@@ -1,0 +1,175 @@
+// Native CLI startup uses the source runtime and its native program image.
+// The executable, .fkb and .sym travel together. Explicit runtime arguments
+// retain the source runner's output, cache admission and exit behavior.
+import form-stdlib/core.fk;
+import form-stdlib/json.fk;
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class NativeCLIStartup {
+  def ncs-need(ok, reason) = ok ? 1 : form_error("[native-cli-startup] " + reason);
+  def ncs-replace-one(text, old, next) {
+   let at = str_find(text, old, 0);
+   ncs-need((at >= 0) && (str_find(text, old, at + len(old)) < 0), "runtime-anchor-count");
+   substring(text, 0, at) + ((String) next + substring(text, at + len(old), len(text)));
+  }
+  def ncs-replace-count(text, old, next, count) {
+   let parts = split-on(text, old);
+   ncs-need((Comparable) len(parts) == (count + 1), "runtime-evaluation-anchor-count");
+   ncs-join(parts, next);
+  }
+  def ncs-join(parts, separator) = nil?(parts[1:]) ? parts[0] : (parts[0] + ((String) separator + ncs-join(parts[1:], separator)));
+  def ncs-hex(text, at) = (Comparable) at == len(text) ? 1 : {
+   let b = str_byte_at(text, at);
+   ((b >= 48) && (b <= 57)) || ((b >= 97) && (b <= 102)) ? ncs-hex(text, at + 1) : 0;
+  };
+  // the source identity the executable answers for: the body's fingerprint, 16 lowercase hex
+  def ncs-binding(sourceId) {
+   ncs-need((String) value_kind(sourceId) == "string", "identity-type");
+   ncs-need(((Comparable) len(sourceId) == 16) && ncs-hex(sourceId, 0), "identity-bytes");
+   "const char fk_cli_source_id[] = " + (json-emit(json-node-string(sourceId)) + ";\n");
+  }
+  def ncs-entry() = "
+#undef main
+extern const char fk_cli_source_id[];
+extern const unsigned char fk_genesis[];
+extern const long long fk_genesis_len;
+#if defined(_WIN32)
+extern unsigned long __attribute__((stdcall)) GetModuleFileNameA(void *, char *, unsigned long);
+#elif defined(__linux__)
+extern long readlink(const char *, char *, unsigned long);
+#endif
+static int fk_cli_executable(char *path, long long cap) {
+    long long n = 0;
+#if defined(__APPLE__)
+    n = proc_pidpath((int)getpid(), path, (unsigned int)cap);
+#elif defined(_WIN32)
+    n = GetModuleFileNameA(0, path, (unsigned long)cap);
+#elif defined(__linux__)
+    n = readlink(\"/proc/self/exe\", path, (unsigned long)cap);
+#else
+    (void)path; (void)cap;
+    return 0;
+#endif
+    if (n <= 0 || n + 5 >= cap) { return 0; }
+    path[n] = 0;
+    return 1;
+}
+/* Read the entire symbol record. The three header lines are exact; later
+ * diagnostic-header duplicates, NUL and an incomplete final line refuse.
+ * Symbol/dependency row meaning remains owned by the native image compiler. */
+static int fk_cli_clean_symbols(const char *path) {
+#if defined(_WIN32)
+    int fd = open(path, 0x8000);
+#else
+    int fd = open(path, 0);
+#endif
+    if (fd < 0) { return 0; }
+    unsigned char bytes[4096];
+    char line[32];
+    int phase = 0, used = 0, ok = 1;
+    while (ok) {
+        long long got = read(fd, bytes, sizeof(bytes));
+        if (got < 0) { ok = 0; break; }
+        if (got == 0) { ok = phase == 3 && used == 0; break; }
+        for (long long i = 0; i < got && ok; i = i + 1) {
+            unsigned char ch = bytes[i];
+            if (ch == 0) { ok = 0; break; }
+            if (ch == 10) {
+                line[used] = 0;
+                if (phase == 0) { ok = fk_cstr_eq(line, \"program-image-sym-lens-v1\"); }
+                else if (phase == 1) { ok = fk_cstr_eq(line, \"compile-errors 0\"); }
+                else if (phase == 2) { ok = fk_cstr_eq(line, \"unrunnable 0\"); }
+                else if (fk_starts(line, \"compile-errors\") || fk_starts(line, \"unrunnable\") || fk_starts(line, \"program-image-sym-lens-v1\")) { ok = 0; }
+                if (phase < 3) { phase = phase + 1; }
+                used = 0;
+            } else if (used < 31) {
+                line[used++] = (char)ch;
+            }
+        }
+    }
+    if (close(fd) != 0) { ok = 0; }
+    return ok;
+}
+/* A one-shot argv command is native CLI input, not a source-file argument.
+ * Stage it in the same value-backed line reader used by cell_run so the
+ * Form REPL remains the only verb router and reaches EOF after one turn. */
+static int fk_cli_stage_argv(int argc, char **argv) {
+    long long bytes = 1;
+    int i;
+    char *command;
+    long long at = 0;
+    for (i = 1; i < argc; i = i + 1) {
+        const char *p = argv[i];
+        if (i > 1) { bytes = bytes + 1; }
+        while (*p) { bytes = bytes + 1; p = p + 1; }
+    }
+    command = (char *)malloc((unsigned long)bytes);
+    if (command == 0) { return 0; }
+    for (i = 1; i < argc; i = i + 1) {
+        const char *p = argv[i];
+        if (i > 1) { command[at++] = ' '; }
+        while (*p) { command[at++] = *p; p = p + 1; }
+    }
+    command[at++] = '\\n';
+    fk_in_buf = command;
+    fk_in_n = at;
+    fk_in_pos = 0;
+    fk_cell_in_on = 1;
+    return 1;
+}
+int main(int argc, char **argv) {
+    if (argc > 1 && fk_cstr_eq(argv[1], \"--compile-source\")) {
+        if (argc != 3 || !(fk_path_has_suffix(argv[2], \".fk\") || fk_path_has_suffix(argv[2], \".bml\"))) {
+            fk_diag_path(\"error\", \"form-cli\", \"--compile-source requires one Form source path\");
+            return 2;
+        }
+        fk_cli_compile_only = 1;
+        char *compile_args[3];
+        compile_args[0] = argv[0]; compile_args[1] = argv[2]; compile_args[2] = 0;
+        return fk_cli_seed_main(2, compile_args);
+    }
+    if (argc > 1 && (fk_path_has_suffix(argv[1], \".fk\") || fk_path_has_suffix(argv[1], \".bml\") || fk_path_has_suffix(argv[1], \".fkb\") || fk_path_has_suffix(argv[1], \".dylib\"))) {
+        return fk_cli_seed_main(argc, argv);
+    }
+    if (argc > 1 && !fk_cli_stage_argv(argc, argv)) {
+        fk_diag_path(\"error\", \"form-cli\", \"cannot stage argv command\");
+        return 2;
+    }
+    char executable[FK_PATH_CAP];
+    char image[FK_PATH_CAP];
+    char symbols[FK_PATH_CAP];
+    if (!fk_cli_executable(executable, FK_PATH_CAP)) {
+        fk_diag_path(\"error\", \"form-cli\", \"cannot locate native image companion\");
+        return 2;
+    }
+    long long n = 0;
+    while (executable[n] != 0) { image[n] = executable[n]; symbols[n] = executable[n]; n = n + 1; }
+    symbols[n] = '.'; symbols[n + 1] = 's'; symbols[n + 2] = 'y'; symbols[n + 3] = 'm'; symbols[n + 4] = 0;
+    image[n++] = '.'; image[n++] = 'f'; image[n++] = 'k'; image[n++] = 'b'; image[n] = 0;
+    if (!fk_cli_clean_symbols(symbols)) {
+        fk_diag_path(\"error\", image, \"native image requires a clean companion symbol record\");
+        return 2;
+    }
+    fk_gen = fk_genesis;
+    fk_gen_len = fk_genesis_len;
+    fk_cli_default_entry = 1;
+    char *args[4];
+    args[0] = executable;
+    args[1] = image;
+    args[2] = (char *)fk_cli_source_id;
+    args[3] = 0;
+    return fk_cli_seed_main(3, args);
+}
+";
+  def ncs-image(runtimeText, sourceId) {
+   ncs-need((String) value_kind(runtimeText) == "string", "runtime-type");
+   ncs-binding(sourceId);
+   let root = ncs-replace-one(runtimeText, "static void fk_pv_root(long long v) {", "static void fk_pv_root(long long v) {\n    if (fk_cli_default_entry) { return; }");
+   let dylib = ncs-replace-one(root, "    fk_pv(fn(arg << 1));", "    if (fk_cli_compile_only) { return 1; }\n    long long result = fn(arg << 1);\n    if (!fk_cli_default_entry) { fk_pv(result); }");
+   let selected = ncs-replace-one(dylib, "    long long dylib_mtime = fk_check_only ? -1 : fk_path_mtime_raw(dylib_path);", "    long long dylib_mtime = (fk_check_only || fk_cli_compile_only) ? -1 : fk_path_mtime_raw(dylib_path);");
+   let guarded = ncs-replace-count(selected, "    fk_pv_root(fk_walk(fk_fn[0], 0));", "    if (!fk_cli_compile_only) { fk_pv_root(fk_walk(fk_fn[0], 0)); }", 3);
+   "/* Generated by native-cli-startup.bml from the current source runtime. */\nstatic int fk_cli_default_entry;\nstatic int fk_cli_compile_only;\n#define main fk_cli_seed_main\n" + ((String) guarded + ncs-entry());
+  }
+ }
+ 0;
+}

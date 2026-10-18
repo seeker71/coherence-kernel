@@ -1,0 +1,93 @@
+// form-cli-peer-heldout-direct-learning.fk — caller-owned held-out evaluation
+// for a returned local direct answer.
+//
+// The direct-answer effect sees only its task text and held model/KV session.
+// This adapter runs after that effect has returned, in the turnwheel caller,
+// and keeps the sealed expected answer inside the existing v3 evaluator.  It
+// neither opens a model nor changes its session.  A single row becomes durable
+// learning evidence, never an automatic promotion: a champion comparison needs
+// more than one independently retained observation.
+//
+import form-stdlib/form-cli-peer-append-turnwheel.fk;
+import form-stdlib/form-knowledge-qwen-heldout-v3-eval.fk;
+section [form.bml] {
+    // result = state reason row-id family score observation equivalent decision
+    //          direct-signal generated-tokens.  Score and observation carry
+    // hashes/scalars only; answer and expected bytes remain evaluator-local.
+    def fcphtl-version() = "form-cli-peer-heldout-direct-learning-v1";
+    def fcphtl-result(state, reason, row-id, family, score, observation, equivalent, decision, direct-signal, generated-tokens) = [fcphtl-version(), state, reason, row-id, family, score, observation, equivalent, decision, direct-signal, generated-tokens];
+    def fcphtl-state(r) = r[1];
+    def fcphtl-reason(r) = r[2];
+    def fcphtl-row-id(r) = r[3];
+    def fcphtl-family(r) = r[4];
+    def fcphtl-score(r) = r[5];
+    def fcphtl-observation(r) = r[6];
+    def fcphtl-equivalent(r) = r[7];
+    def fcphtl-decision(r) = r[8];
+    def fcphtl-direct-signal(r) = r[9];
+    def fcphtl-generated-tokens(r) = r[10];
+    def fcphtl-result?(r) = nothing?(r) ? 0 : (Comparable) len(r) == 11 ? (String) r[0] == fcphtl-version() : 0;
+    // A task may be direct without belonging to the sealed denominator.  The
+    // matching step is exact and local; task bytes never nominate a row id,
+    // expected answer, source path, or verifier.
+    def fcphtl-direct-task?(task) = (String) fcpsi-task-kind(task) == "direct-answer" ? 1 : 0;
+    def fcphtl-direct-peer?(peer) = !((String) fcpa-route(peer) == "direct-answer") ? 0 : nothing?(fcpa-cursor(peer)) ? 0 : fcpdaa-result?(fcpa-cursor(peer));
+    def fcphtl-prompt-count(prompt, rows) = (Comparable) len(rows) == 0 ? 0 : ((String) prompt == fkh3-prompt(rows[0]) ? 1 : 0) + fcphtl-prompt-count(prompt, rows[1:]);
+    def fcphtl-prompt-row(prompt, rows) = (Comparable) len(rows) == 0 ? [] : (String) prompt == fkh3-prompt(rows[0]) ? rows[0] : fcphtl-prompt-row(prompt, rows[1:]);
+    def fcphtl-model-failure?(raw) = (String) raw == "<FAIL>" ? 1 : fkh3-refusal?(raw);
+    // The existing v3 score validates an effective source-assisted prompt. A
+    // direct answer intentionally receives the sealed raw prompt instead, so
+    // it has its own score identity rather than borrowing a provenance it did
+    // not traverse. The common row/verifier/observation remain unchanged.
+    // score = tag id family source-sha prompt-sha answer-sha verifier-sha
+    //         direct-prompt-sha raw-output-sha actual-sha refusal observation
+    def fcphtl-direct-score(row, parsed, latency) = ["form-cli-peer-heldout-direct-score-v1", fkh3-id(row), fkh3-family(row), fkh3-source-sha(row), nmfe-sha256(fkh3-prompt(row)), fkh3-answer-sha(row), fkh3-verifier-sha(fkh3-row-verifier(row)), nmfe-sha256(fkh3-prompt(row)), fkh3-output-raw-sha(parsed), nmfe-sha256(fkh3-output-answer(parsed)), fkh3-output-refusal(parsed), fkh3-observation(fkh3-prompt(row), fkh3-expected(row), fkh3-output-answer(parsed), fkh3-row-verifier(row), latency, fkh3-output-error(parsed))];
+    def fcphtl-score-observation(score) = score[11];
+    def fcphtl-score-valid?(score, rows) = !((Comparable) len(score) == 12 && (String) score[0] == "form-cli-peer-heldout-direct-score-v1") ? 0 : {
+        let row = fkh3-find-row(score[1], rows);
+        (Comparable) len(row) == 0 ? 0 : {
+            let observation = fcphtl-score-observation(score);
+            fkh3-all-one?([(String) score[2] == fkh3-family(row), (String) score[3] == fkh3-source-sha(row), (String) score[4] == nmfe-sha256(fkh3-prompt(row)), (String) score[5] == fkh3-answer-sha(row), (String) score[6] == fkh3-verifier-sha(fkh3-row-verifier(row)), (String) score[7] == nmfe-sha256(fkh3-prompt(row)), nmfe-sha256?(score[8]), nmfe-sha256?(score[9]), fkh3-obs?(observation), (String) score[7] == observation[1], (String) fkh3-answer-sha(row) == observation[2], (String) score[9] == observation[3]]);
+        };
+    };
+    def fcphtl-equivalent?(observation) = nothing?(observation) ? 0 : (Comparable) fkh3-obs?(observation) == 1 ? (Comparable) fkh3-obs-exact(observation) == 1000000 ? 1 : 0 : 0;
+    def fcphtl-decision-for(state, equivalent) = (String) state == "value" ? (Comparable) equivalent == 1 ? "record-equivalent-heldout" : "record-heldout-mismatch" : (String) state == "nothing" ? "record-heldout-nothing" : "record-heldout-choice";
+    def fcphtl-unbound(reason) = fcphtl-result("nothing", reason, "", "", nothing(), nothing(), 0, "nothing", "nothing", 0);
+    def fcphtl-bound-nonvalue(row, direct) = {
+        let state = fcpdaa-signal(direct);
+        fcphtl-result(state, fcpdaa-reason(direct), fkh3-id(row), fkh3-family(row), nothing(), nothing(), 0, fcphtl-decision-for(state, 0), state, fcpdaa-generated-tokens(direct));
+    };
+    def fcphtl-score-direct(row, direct) = {
+        let response = fcpdaa-response(direct);
+        let parsed = fkh3-output(nmfe-sha256(response), response, fcphtl-model-failure?(response), fkh3-refusal?(response));
+        let score = fcphtl-direct-score(row, parsed, fcpdaa-elapsed-ms(direct));
+        let observation = fcphtl-score-observation(score);
+        let equivalent = fcphtl-equivalent?(observation);
+        fcphtl-result("value", "heldout-answer-scored", fkh3-id(row), fkh3-family(row), score, observation, equivalent, fcphtl-decision-for("value", equivalent), fcpdaa-signal(direct), fcpdaa-generated-tokens(direct));
+    };
+    // The source-current check is one sealed source hash, performed after the
+    // local model has returned.  It is the same per-row freshness proof used
+    // by the existing one-row scorer, not a repeated all-corpus audit.
+    def fcphtl-run(task, peer) = (Comparable) fcphtl-direct-task?(task) == 0 ? fcphtl-unbound("task-not-direct-answer") : (Comparable) fcphtl-direct-peer?(peer) == 0 ? fcphtl-unbound("direct-result-absent") : {
+        let rows = fkh3-rows();
+        let prompt = fcpsi-task-text(task);
+        let matches = fcphtl-prompt-count(prompt, rows);
+        !((String) fkh3-dataset-sha256(rows) == fkh3-dataset-seal()) ? fcphtl-unbound("heldout-dataset-seal-mismatch") : (Comparable) matches == 0 ? fcphtl-unbound("direct-prompt-not-heldout") : matches > 1 ? fcphtl-unbound("heldout-prompt-ambiguous") : {
+            let row = fcphtl-prompt-row(prompt, rows);
+            let direct = fcpa-cursor(peer);
+            (Comparable) fkh3-row-current?(row) == 0 ? fcphtl-result("choice", "heldout-row-stale", fkh3-id(row), fkh3-family(row), nothing(), nothing(), 0, "record-heldout-choice", fcpdaa-signal(direct), fcpdaa-generated-tokens(direct)) : (String) fcpdaa-signal(direct) == "value" ? fcphtl-score-direct(row, direct) : fcphtl-bound-nonvalue(row, direct);
+        };
+    };
+    // The terminal evidence intentionally carries only row identity, scalar
+    // evaluation, and the learning disposition.  No task, expected, source,
+    // answer, or hash bytes enter durable egress.
+    def fcphtl-field(name, value) = ("\n" + (name + ("=" + value)));
+    def fcphtl-frame(task, peer) = {
+        let result = fcphtl-run(task, peer);
+        (String) fcphtl-row-id(result) == "" ? "" : {
+            let observation = fcphtl-observation(result);
+            ("<|form:heldout-local-answer|>" + (fcphtl-field("task-node", fcpat-node-text(fcpsi-task-node(task))) + (fcphtl-field("task-key", (fcpsi-task-exchange(task).str() + ("/" + fcpsi-task-turn(task).str()))) + (fcphtl-field("row", fcphtl-row-id(result)) + (fcphtl-field("family", fcphtl-family(result)) + (fcphtl-field("signal", fcphtl-state(result)) + (fcphtl-field("reason", fcphtl-reason(result)) + (fcphtl-field("direct-signal", fcphtl-direct-signal(result)) + (fcphtl-field("generated-tokens", fcphtl-generated-tokens(result).str()) + (fcphtl-field("scored", (String) fcphtl-state(result) == "value" ? "1" : "0") + (fcphtl-field("exact-ppm", nothing?(observation) ? "" : fkh3-obs-exact(observation).str()) + (fcphtl-field("f1-ppm", nothing?(observation) ? "" : fkh3-obs-f1(observation).str()) + (fcphtl-field("sequence-ppm", nothing?(observation) ? "" : fkh3-obs-sequence(observation).str()) + (fcphtl-field("semantic-ppm", nothing?(observation) ? "" : fkh3-obs-semantic(observation).str()) + (fcphtl-field("promotion-ppm", nothing?(observation) ? "" : fkh3-obs-promotion(observation).str()) + (fcphtl-field("error", nothing?(observation) ? "" : fkh3-obs-error(observation).str()) + (fcphtl-field("equivalent", fcphtl-equivalent(result).str()) + (fcphtl-field("learning-decision", fcphtl-decision(result)) + "\n<|/form:heldout-local-answer|>"))))))))))))))))));
+        };
+    };
+    0;
+}
