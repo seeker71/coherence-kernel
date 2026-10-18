@@ -1,0 +1,61 @@
+// spool-bell-transport.fk — the physical non-blocking transport under the
+// scannerless ingress organs: writers APPEND and never wait (O_APPEND,
+// witnessed atomic); the reader drains DELTAS by offset watermark and never
+// re-reads or blocks on data; a fifo bell is the wake edge, so idle costs
+// nothing and no one sleeps in a poll. The peer-stream cursor (fcpsi) does
+// all framing: a frame split across appends is ITS held state — this cell
+// only promises that bytes cross exactly once, in order, without blocking
+// either side.
+//
+// nothing-yet vs present-empty at the byte layer: sbt-delta answers NOTHING
+// when the spool holds no new bytes (no delivery happened), and "" can never
+// be returned — a zero-length delta is not a delivery. The watermark
+// advances only over bytes actually handed out.
+//
+// THE API SHAPE THIS GIVES THE AGENT: the spool file IS the endpoint. Any
+// local client appends a framed task and rings the bell; replies append to a
+// reply spool the client drains the same way. A loopback HTTP edge can wrap
+// this 1:1 later; it is a disposable skin over these two files, never the
+// model API itself.
+//
+import form-stdlib/core.fk;
+//
+section [form.bml] {
+    // ── reader side: (path watermark) threaded as data ─────────────────────
+    def sbt-reader(path) = [path, 0];
+    def sbt-path(r) = r[0];
+    def sbt-mark(r) = r[1];
+    // nothing when no new bytes; else (list delta reader'). The mark advances
+    // by the bytes ACTUALLY HANDED OUT — str_len of the delta — never by the
+    // earlier stat size: a slice returning short between stat and read would
+    // otherwise lose the unread tail forever, the exact class a sibling had
+    // just healed in rai-poll-file and caught here on first reading.
+    def sbt-delta(r) = {
+        let sz = file_size(sbt-path(r));
+        sz <= sbt-mark(r) ? nothing() : {
+            let d = read_file_slice(sbt-path(r), sbt-mark(r), sz - sbt-mark(r));
+            (Comparable) len(d) == 0 ? nothing() : [d, [sbt-path(r), sbt-mark(r) + len(d)]];
+        };
+    };
+    // ── writer side: append is the whole protocol ──────────────────────────
+    def sbt-append-str-go(path, s, i, n) = i >= n ? n : {
+        let a = host_file_append_bytes(path, [str_byte_at(s, i)]);
+        sbt-append-str-go(path, s, i + 1, n);
+    };
+    // one atomic append per string via byte list
+    def sbt-bytes-of(s, i, n, out) = i >= n ? reverse(out) : sbt-bytes-of(s, i + 1, n, cons(str_byte_at(s, i), out));
+    def sbt-append(path, s) = host_file_append_bytes(path, sbt-bytes-of(s, 0, len(s), []));
+    // The carrier returns a file's resulting extent, or accepted bytes for a
+    // nonseekable stream. Every nonnegative result confirms the complete write.
+    // Byte-count consumers use this door; extent consumers keep sbt-append.
+    def sbt-append-count(path, s) = {
+        let result = sbt-append(path, s);
+        nothing?(result) || result < 0 ? result : len(s);
+    };
+    // ── the bell: block on the kernel's read, never sleep in a poll ────────
+    def sbt-bell-wait(bell) = read_file(bell);
+    // A FIFO is already a host-file carrier. Ring it through Form's native
+    // file write rather than recursively asking a shell to call printf.
+    def sbt-ring(bell) = write_file(bell, "x");
+    0;
+}

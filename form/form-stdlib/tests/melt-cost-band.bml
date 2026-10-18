@@ -1,0 +1,56 @@
+; melt-cost-band.bml — a melt costs the live heap, never the shared field.
+;
+; preludes: form-stdlib/core.fk
+; REQUIRES: fkwu's melt counter (kernel_stat 69) and the clock (host_monotonic_ms)
+;
+; With the shared field on, the string melt walked every field node and every field pair for a local string to
+; keep. A field word is always a shared string (fk_field_share_value shares each one, the bank growing by
+; segments) and the mark takes no shared string, so the walk marked nothing and cost the whole field: with
+; 2.2 million cells in the field, seconds a melt. A lowering melts often. On 2026-10-08 one ordinary spelling of a
+; lambda in form-token-tool.bml never returned (the tool band sat silent for sixteen minutes on three builds);
+; the same logic spelt another way melted less and returned. The spelling was not the fault; the melt was.
+;
+; This band drives melts the way string-holes-band does (a thousand cons pairs dropped per turn) and reads what a
+; melt costs. The claim is the shape of the cost, so it holds on a host with a small field too: the mean must stay
+; far under what a walk of a large field costs, and what the churn kept must read as it was built. The churn runs
+; until eight melts have come (or two minutes have passed): a process that ran other work first has grown its heap,
+; and a fixed count of turns melted three times there (and 400,000 turns seven times in one holding 32 million).
+;
+; Verdict 15 when every claim lands:
+;   1     the pressure ran: at least eight melts between the two readings of kernel_stat 69
+;   2     the mean cost of a melt (the turns' milliseconds over the melts they made) stayed under 400 ms and 100 ns for
+;         each pair the heap holds live and each string the string melt reads (kernel_live words 8 and 7, noted at the
+;         melt): a sweep's process holds what its earlier bands left live, and a melt copies that; a walk of the field
+;         costs a microsecond a cell across millions of cells, far past it
+;   4     the eight strings the churn kept read as they were built (a melt took nothing live)
+;   8     a string minted before the churn and held only by the field reads as it was minted after it
+section [form.bml] {
+    class MeltCostBand {
+        def mcb-bit(ok, bit) = ok ? bit : 0;
+        def mcb-junk(n) = n <= 0 ? [] : cons(n, mcb-junk(n - 1));
+        def mcb-name(k) = "melt-cost-" + k.str() + "-" + (k * 7919).str();
+        // eight kept; the rest of each turn is dropped so the cons heap fills and melts. [keep, the last k built]
+        def mcb-turns(k, end, keep, m0) = (host_monotonic_ms() >= end) || (kernel_stat(69) - m0 >= 8) ? [keep, k - 1] : mcb-turn(k, end, cons(mcb-name(k), take(7, keep)), mcb-junk(1000), m0);
+        def mcb-turn(k, end, keep, junk, m0) = mcb-turns(k + 1, end, keep, m0);
+        def mcb-intact(k, keep) = nil?(keep) ? 1 : (String) keep[0] == mcb-name(k) ? mcb-intact(k - 1, keep[1:]) : 0;
+        def mcb-score() {
+            let before = mcb-name(999999);
+            let held = intern_trivial_string(before);
+            let m0 = kernel_stat(69);
+            let t0 = host_monotonic_ms();
+            let ran = mcb-turns(0, t0 + 120000, [], m0);
+            let keep = ran[0];
+            let t1 = host_monotonic_ms();
+            let m1 = kernel_stat(69);
+            let melts = m1 - m0;
+            let page = kernel_live(host_pid());
+            let live = page[8] + page[7];
+            print_str("melt-cost melts " + melts.str() + " ms " + (t1 - t0).str() + " live " + live.str() + " field nodes " + kernel_stat(4).str());
+            mcb-bit(melts >= 8, 1)
+              + mcb-bit(melts > 0 && (t1 - t0) < (400 + live / 10000) * melts, 2)
+              + mcb-bit(mcb-intact(ran[1], keep) == 1, 4)
+              + mcb-bit((String) node_value(held) == mcb-name(999999), 8);
+        }
+    }
+    mcb-score();
+}

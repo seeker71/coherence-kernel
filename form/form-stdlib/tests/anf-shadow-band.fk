@@ -1,0 +1,102 @@
+; anf-shadow-band.fk -- rung R2's shadow: a pure scalar defn, read from its own nodes (kernel_ast), put in ordered rows
+; (anf-lower.bml), turned into form-lower's op-tagged tree (anf-shadow.bml), lowered to arm64 by the EXISTING
+; lo-compile-fn-n, born as a page through jit_leaf_inram, and called -- its answers held against the walker's on the
+; same inputs, cold (first calls) and hot (3000 calls of each). Nothing is wired into the runtime; this is the pipeline
+; proven end to end on the shapes it covers, and the coverage written down: which defns lower, and which decline and why.
+;
+;   1   coverage: every defn in the lowerable family lowers (rows -> tree -> image)
+;   2   declines: a call, a compare of two parameters, a float, a literal out of range, five arguments, a list
+;       primitive, a division by a parameter or by zero, a modulo -- each answers a reason, none a tree
+;       (the walker stops on a zero divisor; a page has no way to stop, so only a nonzero literal divisor lowers)
+;   4   cold: the first 12 inputs of each lowered defn answer what the walker answers (signed, low 32 bits)
+;   8   hot: 3000 calls of each lowered defn, every answer equal to the walker's
+;   16  the page is really native: every cold call answered a number from jit_leaf_inram (route "native")
+;
+; Verdict 31 when every claim lands.
+; REQUIRES: (kernel_ast and jit_leaf_inram are fkwu's own; under the siblings the names fold to nothing)
+; preflight-exec: forbidden
+import form-stdlib/bml/anf-shadow.bml;
+section [form.bml] {
+    def shd-bit(ok, bit) = ok ? bit : 0;
+    // the lowerable family
+    def sh-sum(a, b) = a + b * 2 - 1;
+    def sh-sub(a) = 100 - a;
+    def sh-div(a) = a / 3;
+    def sh-div2(a, b) = (a + b) / 4;
+    def sh-sel(a) = a <= 3 ? a * 2 : a - 1;
+    def sh-nest(a) = a <= 10 ? (a <= 5 ? a + 1 : a + 2) : a - 3;
+    def sh-let(a, b, c) {
+        let t = a + b;
+        t * c;
+    }
+    def sh-gt(a) = a > 3 ? 1 : 0;
+    def sh-eq(a) = a == 4 ? 7 : 9;
+    def sh-ne(a) = a != 4 ? 7 : 9;
+    def sh-ge(a) = a >= 4 ? 7 : 9;
+    def sh-lt(a) = a < 4 ? 7 : 9;
+    def sh-const(a) = 7;
+    // what declines
+    def sd-call(a) = sh-sum(a, 1);
+    def sd-two(a, b) = a <= b ? 1 : 0;
+    def sd-flt(a) = a * 1.5;
+    def sd-big(a) = a + 100000;
+    def sd-five(a, b, c, d, e) = a + b + c + d + e;
+    def sd-list(m) = m[0];
+    // a division the page cannot answer as the walker does: the walker STOPS on a zero divisor, a page cannot stop
+    def sd-divv(a, b) = a / b;
+    def sd-div0(a) = a / 0;
+    def sd-divl(a) = 100 / a;
+    def sd-mod(a) = a % 3;
+
+    def shd-names() = ["sh-sum", "sh-sub", "sh-div", "sh-div2", "sh-sel", "sh-nest", "sh-let", "sh-gt", "sh-eq", "sh-ne", "sh-ge", "sh-lt", "sh-const"];
+    def shd-declines() = ["sd-call", "sd-two", "sd-flt", "sd-big", "sd-five", "sd-list", "sd-divv", "sd-div0", "sd-divl", "sd-mod"];
+    // the walker, by index in shd-names
+    def shd-walk(w, a, b, c) = (Comparable) w == 0 ? sh-sum(a, b) : (Comparable) w == 1 ? sh-sub(a) : (Comparable) w == 2 ? sh-div(a) : (Comparable) w == 3 ? sh-div2(a, b) : (Comparable) w == 4 ? sh-sel(a) : (Comparable) w == 5 ? sh-nest(a) : (Comparable) w == 6 ? sh-let(a, b, c) : (Comparable) w == 7 ? sh-gt(a) : (Comparable) w == 8 ? sh-eq(a) : (Comparable) w == 9 ? sh-ne(a) : (Comparable) w == 10 ? sh-ge(a) : (Comparable) w == 11 ? sh-lt(a) : sh-const(a);
+    // inputs for call k: negatives and positives; the divisor stays 1..20
+    def shd-a(k) = (k * 37 % 601) - 300;
+    def shd-b(k) = k % 20 + 1;
+    def shd-c(k) = k % 7 + 1;
+    // the page's answer at call k: the argument list is the defn's arity long
+    def shd-args(arity, k) = (Comparable) arity == 1 ? [shd-a(k)] : (Comparable) arity == 2 ? [shd-a(k), shd-b(k)] : [shd-a(k), shd-b(k), shd-c(k)];
+    // count calls k in [from, to) where the page and the walker disagree, or the page answered nothing
+    def shd-bad(w, low, ident, img, from, to, bad) {
+        from >= to ? bad : shd-bad(w, low, ident, img, from + 1, to, bad + shd-differs(w, anf-shadow-answer(low, ident, img, from), walker-answer(w, from)));
+    }
+    def anf-shadow-answer(low, ident, img, k) = ans-run(img, ident, shd-args(low[2], k));
+    def walker-answer(w, k) = shd-walk(w, shd-a(k), shd-b(k), shd-c(k));
+    def shd-differs(w, native, walker) = nothing?(native) ? 1 : ((Comparable) native == walker ? 0 : 1);
+    // for each lowered defn in names order: list(ok?, bad-cold, bad-hot, native-answered?)
+    def shd-check(names, w, acc) {
+        nil?(names) ? reverse(acc) : shd-check-one(names, w, acc, ans-lower(names[0]));
+    }
+    def shd-check-one(names, w, acc, r) {
+        let low = anf-ok?(r) ? anf-val(r) : nothing();
+        let img = nothing?(low) ? nothing() : ans-image(low);
+        let ident = nothing?(low) ? 0 : ans-ident(low);
+        let ok = !nothing?(img);
+        let cold = ok ? shd-bad(w, low, ident, img, 0, 12, 0) : 99;
+        let hot = ok ? shd-bad(w, low, ident, img, 12, 3012, 0) : 99;
+        let native = ok ? (!nothing?(ans-run(img, ident, shd-args(low[2], 5)))) : 0;
+        let rel = ok ? ans-release(ident) : 0;
+        shd-check(names[1:], w + 1, cons([ok, cold, hot, native, ok ? len(img) : 0, ok ? low[2] : -1], acc));
+    }
+    def shd-reasons(ns, acc) = nil?(ns) ? reverse(acc) : shd-reasons(ns[1:], cons([ns[0], ans-lower(ns[0])], acc));
+    // every row of the family passes: column 0 lowered, 1 zero bad cold, 2 zero bad hot, 3 native answered
+    def shd-all-lowered(rows) = nil?(rows) ? 1 : rows[0][0] ? shd-all-lowered(rows[1:]) : 0;
+    def shd-all-cold(rows) = nil?(rows) ? 1 : (Comparable) rows[0][1] == 0 ? shd-all-cold(rows[1:]) : 0;
+    def shd-all-hot(rows) = nil?(rows) ? 1 : (Comparable) rows[0][2] == 0 ? shd-all-hot(rows[1:]) : 0;
+    def shd-all-native(rows) = nil?(rows) ? 1 : rows[0][3] ? shd-all-native(rows[1:]) : 0;
+    def shd-all-declined(ps) = nil?(ps) ? 1 : (Comparable) ps[0][1][0] == 0 ? shd-all-declined(ps[1:]) : 0;
+
+    let rows = shd-check(shd-names(), 0, []);
+    let reasons = shd-reasons(shd-declines(), []);
+    let shown = print(["anf-shadow", "defn: [lowered? bad-cold bad-hot native? image-bytes arity]", shd-names(), rows]);
+    let shown2 = print(["anf-shadow", "declines", reasons]);
+    let verdict = shd-bit((Comparable) shd-all-lowered(rows) == 1, 1)
+        + shd-bit((Comparable) shd-all-declined(reasons) == 1, 2)
+        + shd-bit((Comparable) shd-all-cold(rows) == 1, 4)
+        + shd-bit((Comparable) shd-all-hot(rows) == 1, 8)
+        + shd-bit((Comparable) shd-all-native(rows) == 1, 16);
+    let end = print(["anf-shadow-band", "verdict", verdict]);
+    verdict;
+}

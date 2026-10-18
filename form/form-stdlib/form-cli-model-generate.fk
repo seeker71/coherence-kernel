@@ -1,0 +1,813 @@
+// form-cli-model-generate.fk — selected GGUF to Form-native Qwen3.5/Qwen3.8 generation.
+//
+// The selected path is admitted by a whole-file Form/M4 SHA-256 seal before any
+// tensor is mapped.  Architecture, context, tensor geometry, tokenizer, stop ids,
+// and required byte extent are read from that GGUF.  Form emits the MSL at runtime;
+// the dynamic Metal carrier JIT-compiles it for the device that answered metal_status.
+//
+// The compatibility qfl wrappers add no behavior here; this generator and the
+// REPL call the canonical form-teach-layer API directly.
+//
+import form-stdlib/qwen35-tokfast-v2.fk;
+import form-stdlib/qwen35-encode-indexed.fk;
+import form-stdlib/qwen35-tokenizer.fk;
+import form-stdlib/qwen35-tokenizer-live-cursor.fk;
+import form-stdlib/form-teach-layer.fk;
+import form-stdlib/local-model-choice.fk;
+import form-stdlib/local-generate-organ.fk;
+import form-stdlib/qwen35-artifact-seal-reader.fk;
+import form-stdlib/bml/model-admission.bml;
+import native/metal/qwen35-dense-token-handle.fk;
+import native/metal/qwen35-crystal.fk;
+import native/metal/model-bandwidth.fk;
+import form-stdlib/form-cli-model-ds4.fk;
+import form-stdlib/form-cli-qwen-teach-layer.fk;
+import form-stdlib/knowledge-rest-answer.fk;
+import form-stdlib/language-template.fk;
+import form-stdlib/bml/form-cli-resident-continuity.bml;
+import form-stdlib/form-cli-heedmark.bml;
+import form-stdlib/form-cli-heed-cursor.fk;
+import form-stdlib/form-cli-heed-telemetry.fk;
+import form-stdlib/form-cli-heed-current-source.fk;
+import form-stdlib/form-cli-heed-grounded.fk;
+import form-stdlib/bml/form-cli-reasoning-template.bml;
+import form-stdlib/bml/form-cli-model-admission.bml;
+import form-stdlib/bml/form-cli-source-affinity.bml;
+import form-stdlib/bml/form-token-decode-batch.bml;
+section [form.bml] {
+    def fcmg-src(path) = eqr-of-file(path, 0, 40000000);
+    // a file that is not a GGUF has no architecture: the metadata reader walks the bytes it is handed as key-value pairs and, over text, never returns (found 2026-10-04 by the lane band's text file), so the magic is read first
+    def fcmg-arch(src) = egg-magic-ok?(src) == 1 ? gmt-str(src, "general.architecture") : "";
+    def fcmg-q35-stops(src) = [gmt-u32(src, "tokenizer.ggml.eos_token_id"), q35-special-id(src, "<|im_end|>")];
+    def fcmg-field(name, value) = (name + ("=" + value));
+    def fcmg-line(name, value) = (fcmg-field(name, value) + "\n");
+    // A local generation has long carrier calls. Speak the bounded stage before
+    // entering one, and retain the same opaque stage in this process's
+    // framebuffer. These are progress coordinates, never prompt, answer, path,
+    // or model bytes. `print_str` is the kernel's flushed event door, so a
+    // form-run reader can see the admitted next wait while the call is still
+    // executing; `fb_record` leaves the attributed post-turn trace available to
+    // Form itself. A synchronous Metal primitive cannot be inspected from this
+    // evaluator thread while it is inside the primitive — that future/poll seam
+    // remains named rather than being dressed up as an asynchronous event.
+    def fcmg-live-stage(stage, source-coordinate) = {
+        fb_record(intern_trivial_string(stage), "form-cli-model-generate.fk", source-coordinate);
+        print_str(frc-stage-line(stage, now_unix_ms()));
+        print_str(("<|form:stage|>" + (stage + "<|/form:stage|>\n")));
+        0;
+    };
+    def fcmg-name(src) = {
+        let n = gmt-str(src, "general.name");
+        (String) n == "" ? "(header names no model)" : n;
+    };
+    def fcmg-status-count(statuses, wanted) = nil?(statuses) ? 0 : ((String) statuses[0] == wanted ? 1 : 0) + fcmg-status-count(statuses[1:], wanted);
+    def fcmg-source-search-record?(record) = (String) fhc-record-status(record) == "hit" || (String) fhc-record-status(record) == "miss" ? 1 : (String) fhc-record-reason(record) == "observation-budget-exceeded-after-source-search" ? 1 : 0;
+    def fcmg-source-searches(records) = nil?(records) ? 0 : fcmg-source-search-record?(records[0]) + fcmg-source-searches(records[1:]);
+    def fcmg-empty-heed-record() = fhc-record("", "", "", "");
+    def fcmg-first-record(records) = nil?(records) ? fcmg-empty-heed-record() : records[0];
+    def fcmg-source-record(records) = nil?(records) ? fcmg-empty-heed-record() : (Comparable) fcmg-source-search-record?(records[0]) == 1 ? records[0] : fcmg-source-record(records[1:]);
+    def fcmg-evidence-record(records) = {
+        let source = fcmg-source-record(records);
+        (String) fhc-record-status(source) == "" ? fcmg-first-record(records) : source;
+    };
+    def fcmg-span-field(span, name) = {
+        let marker = ("\n" + (name + "="));
+        let at = str_find(span, marker, 0);
+        at < 0 ? "" : {
+            let start = at + len(marker);
+            let end = str_find(span, "\n", start);
+            substring(span, start, end < 0 ? len(span) : end);
+        };
+    };
+    def fcmg-record-bound-source?(record, source-path, source-artifact) = (Comparable) fcmg-source-search-record?(record) == 0 ? 0 : (String) fcmg-span-field(fhc-record-span(record), "source-path") == source-path && (String) fcmg-span-field(fhc-record-span(record), "source-artifact") == source-artifact ? 1 : 0;
+    def fcmg-bound-source-matches(records, source-path, source-artifact) = nil?(records) ? 0 : fcmg-record-bound-source?(records[0], source-path, source-artifact) + fcmg-bound-source-matches(records[1:], source-path, source-artifact);
+    def fcmg-heed-budget() = fhcs-lookup-limit();
+    // q35 byte fallback cannot produce more ids than input bytes. Reserve the
+    // bounded rendered observation once, plus the small ChatML role crossing
+    // that closes the querying assistant turn, carries the Form observation as
+    // a tool turn, and opens a fresh assistant answer.
+    def fcmg-heed-context-reserve() = fcmg-heed-budget() * (fkqt-max-render-bytes() + 96);
+    def fcmg-current-source-query-budget() = fhm-query-budget();
+    def fcmg-current-source-answer-reserve() = fhm-answer-reserve();
+    // `n` is the old fungible tail. query and answer are the explicit two-ledger
+    // tail. A recursive query consumes the current answer reserve, then a typed
+    // observation opens a fresh reserve, so every allowed heed is bounded here.
+    def fcmg-context-tail-reserve(n, query, answer) = n + (query + (fcmg-heed-budget() * answer + fcmg-heed-context-reserve()));
+    def fcmg-tail-budget-ok?(n, query, answer) = n > 0 && ((Comparable) query == 0 && (Comparable) answer == 0) ? 1 : (Comparable) n == 0 && (query > 0 && answer > 0) ? 1 : 0;
+    def fcmg-context-need(prompt-n, thought-n, gap-total, n, query, answer) = prompt-n + thought-n + gap-total + fcmg-context-tail-reserve(n, query, answer);
+    def fcmg-heed-ledger-report(c) = (fcmg-line("heed_phase", fhc-phase(c).str()) + (fcmg-line("heed_query_budget", (fhc-query-tokens(c) + (fhc-query-left(c) + fhc-cut(c))).str()) + (fcmg-line("heed_answer_reserve", fhc-answer-cap(c).str()) + (fcmg-line("heed_query_tokens", fhc-query-tokens(c).str()) + (fcmg-line("heed_answer_tokens", fhc-answer-tokens(c).str()) + (fcmg-line("heed_query_left", fhc-query-left(c).str()) + (fcmg-line("heed_answer_left", fhc-answer-left(c).str()) + (fcmg-line("heed_query_fuel_cut", fhc-cut(c).str()) + (fcmg-line("heed_answer_fuel_cut", fhc-answer-cut(c).str()) + (fcmg-line("heed_stream_bytes", fhc-bytes(c).str()) + (fcmg-line("heed_decode_timeout", fhc-timeout?(c).str()) + ((String) fcmg-line("heed_stopped", fhc-stopped?(c).str()) + fcmg-line("heed_frame_refusals", fhc-frame-refusals(c).str())))))))))))));
+    def fcmg-heed-report-at(c, root, root-status) = {
+        let records = fhc-records(c);
+        let evidence = fcmg-evidence-record(records);
+        let searches = fcmg-source-searches(records);
+        let evidence-path = fcmg-span-field(fhc-record-span(evidence), "source-path");
+        let evidence-artifact = fcmg-span-field(fhc-record-span(evidence), "source-artifact");
+        let bound-matches = fcmg-bound-source-matches(records, evidence-path, evidence-artifact);
+        (fcmg-line("heed_cursor", "bounded-current-source-v1") + (fcmg-line("heed_lookup_budget", fcmg-heed-budget().str()) + (fcmg-line("heed_lookup_budget_remaining", fhc-budget(c).str()) + (fcmg-line("heed_honor_attempts", fhc-attempts(c).str()) + (fcmg-line("heed_lookups", searches.str()) + (fcmg-line("heed_source_searches", searches.str()) + (fcmg-line("heed_bound_source_matches", bound-matches.str()) + (fcmg-line("heed_bound_source_mismatches", (searches - bound-matches).str()) + (fcmg-line("heed_honored", len(fhc-honored(c)).str()) + (fcmg-line("heed_hits", fcmg-status-count(fhc-honored(c), "hit").str()) + (fcmg-line("heed_misses", fcmg-status-count(fhc-honored(c), "miss").str()) + (fcmg-line("heed_nothings", fcmg-status-count(fhc-honored(c), "nothing").str()) + (fcmg-line("heed_spent", fcmg-status-count(fhc-honored(c), "spent").str()) + (fcmg-line("heed_injected_tokens", fhc-injected(c).str()) + (fcmg-line("heed_close_commits", fhc-close-commits(c).str()) + (fcmg-line("heed_terminal_forwards", fhc-terminal-forwards(c).str()) + (fcmg-line("heed_injection_refusals", fhc-injection-refusals(c).str()) + (fcmg-line("heed_window_bytes", len(fhc-window(c)).str()) + (fcmg-line("heed_evidence_status", fhc-record-status(evidence)) + (fcmg-line("heed_evidence_reason", fhc-record-reason(evidence)) + (fcmg-line("heed_source_path", fkqt-clip(evidence-path, fkqt-max-source-bytes())) + (fcmg-line("heed_source_artifact", fkqt-clip(evidence-artifact, 96)) + (fcmg-line("heed_answer_key", fkqt-clip(fcmg-span-field(fhc-record-span(evidence), "answer-key"), 80)) + (fcmg-line("heed_source_root_status", root-status) + (fcmg-line("heed_source_root", fkqt-clip(root, 192)) + ((String) fcmg-heed-ledger-report(c) + fcmg-line("heed_model_executed", fhc-model-executed().str())))))))))))))))))))))))))));
+    };
+    def fcmg-heed-report(c) = fcmg-heed-report-at(c, fhcs-default-root(), fhcs-root-status());
+    def fcmg-report-count(model, arch, prompt-n, out, text, thought-eval, thought-offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed) = {
+        let effective-gbps-x10 = busy-us > 0 ? weight-bytes * forwards * 10 / (busy-us * 1000) : 0;
+        let decode-forwards = (len(out) > thought-n ? len(out) - thought-n - 1 : 0) + fhc-injected(heed) + (fhc-close-commits(heed) + fhc-terminal-forwards(heed));
+        let prefill-tokps-x1000 = prefill-us > 0 ? (prompt-n + thought-n) * 1000000000 / prefill-us : 0;
+        let decode-tokps-x1000 = decode-us > 0 && decode-forwards > 0 ? decode-forwards * 1000000000 / decode-us : 0;
+        let end-to-end-tokps-x1000 = busy-us > 0 ? len(out) * 1000000000 / busy-us : 0;
+        // the walker's own heat total, printed so the two walkers'
+        // visit counts can be compared for the same work (kernel_stat 3
+        // is the hottest arm's count — identical metric on both arms).
+        (fcmg-line("hottest_arm_count", kernel_stat(3).str()) + (fcmg-line("backend", "form-native-metal-jit") + (fcmg-line("form-layer", (Comparable) ftl-armed?() == 1 ? "on" : "off") + (fcmg-line("model", model) + (fcmg-line("architecture", arch) + (fcmg-line("mode", lmc-mode(arch)) + (fcmg-line("thought-kernel", "source-resonance-stream") + (fcmg-line("thought-eval", thought-eval) + (fcmg-line("thought-offers", thought-offers.str()) + (fcmg-line("thought-tokens", thought-n.str()) + (fcmg-line("prompt_tokens", prompt-n.str()) + (fcmg-line("generated_tokens", len(out).str()) + (fcmg-line("forward_passes", forwards.str()) + (fcmg-line("weight_bytes_per_forward", weight-bytes.str()) + (fcmg-line("gpu_busy_us", busy-us.str()) + (fcmg-line("prefill_gpu_busy_us", prefill-us.str()) + (fcmg-line("decode_gpu_busy_us", decode-us.str()) + (fcmg-line("decode_forward_passes", decode-forwards.str()) + (fcmg-line("prefill_tokps_x1000", prefill-tokps-x1000.str()) + (fcmg-line("decode_tokps_x1000", decode-tokps-x1000.str()) + (fcmg-line("effective_weight_gbps_x10", effective-gbps-x10.str()) + (fcmg-line("end_to_end_tokps_x1000", end-to-end-tokps-x1000.str()) + (fcmg-heed-report(heed) + ("text:\n" + text))))))))))))))))))))))));
+    };
+    def fcmg-report(model, arch, ids, out, text, thought-eval, thought-offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed) = fcmg-report-count(model, arch, len(ids), out, text, thought-eval, thought-offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed);
+    // ── residence ─────────────────────────────────────────────────────────────
+    // A model admitted once should not be admitted again to answer a second
+    // sentence.  Measured on this M4 Max against Qwen3.8-27B-Q8_0 (2026-08-19):
+    // re-verifying the whole-file SHA-256 seal is 13.4 s, opening the tensor views
+    // and compiling the kernels is 15.6 s, and the GPU work of a 54-token prompt
+    // with ten generated tokens is 7.1 s.  Setup was four times the inference, and
+    // it was paid again on every single call.
+    //
+    // A residence is that admission, held: the sealed path, the position ceiling it
+    // was opened for, the opened context, and the header window and architecture
+    // read from it.  Nothing here is a mode or a switch — a caller that has no
+    // residence hands `fcmr-none` and gets the old open-run-close exactly, and a
+    // caller that keeps what it is handed back reuses it whenever the same file can
+    // still hold the next prompt.  The stream state is NOT part of it: state is what
+    // one conversation writes, so it is made and released per generation.
+    def fcmr-mark() = "fcmg-resident1";
+    def fcmr(path, maxpos, ctx, src, arch) = [fcmr-mark(), path, maxpos, ctx, src, arch];
+    def fcmr-none() = [];
+    def fcmr-live?(r) = (Comparable) len(r) == 6 ? (String) r[0] == fcmr-mark() ? 1 : 0 : 0;
+    def fcmr-path(r) = r[1];
+    def fcmr-maxpos(r) = r[2];
+    def fcmr-ctx(r) = r[3];
+    def fcmr-src(r) = r[4];
+    def fcmr-arch(r) = r[5];
+    // The same file, and a ceiling this residence can still reach.  A longer prompt
+    // than the one it was opened for is not refused — it reopens, because the KV
+    // extent was derived from that first need and there is no knob to raise.
+    def fcmr-fits?(r, path, need) = (Comparable) fcmr-live?(r) == 1 ? (String) fcmr-path(r) == path ? need <= fcmr-maxpos(r) ? 1 : 0 : 0 : 0;
+    def fcmr-release-ok?(r) = (Comparable) fcmr-live?(r) == 1 ? {
+        let freed = adm-drop(fcmr-path(r));
+        (Comparable) q38-close(fcmr-ctx(r), []) == q38-close-expected(fcmr-ctx(r), []) ? 1 : 0;
+    } : 1;
+    // Closing is part of the result.  A run that generated text but did not
+    // release every model/state handle is reported as refused, never hidden.
+    def fcmg-close-result(ctx, sts, report) = {
+        let expected = q38-close-expected(ctx, sts);
+        let closed = q38-close(ctx, sts);
+        (Comparable) closed == expected ? report : ("generation refused: model handle close mismatch; closed=" + (closed.str() + (";expected=" + expected.str())));
+    };
+    def fcmg-open-refusal(ctx, detail) = fcmg-close-result(ctx, [], ("generation refused: " + (detail + ("; " + metal_status()))));
+    // The state half of the same honesty: a generation that ran but did not release
+    // every state handle is reported as refused.  The model handles are not touched
+    // here — they belong to the residence, which outlives this sentence.
+    def fcmg-state-close-result(sts, report) = {
+        let expected = q38-state-handle-count(sts);
+        let closed = q38-free-state(sts);
+        let release-report = ("\nstate_released=" + (((Comparable) closed == expected ? "1" : "0") + ("\nstate_handles_closed=" + (closed.str() + ("\nstate_handles_expected=" + (expected.str() + "\n"))))));
+        (Comparable) closed == expected ? ((String) release-report + report) : (release-report + ("generation refused: state handle close mismatch; closed=" + (closed.str() + (";expected=" + expected.str()))));
+    };
+    // Encode every evaluated thought into tokenizer ids (left-to-right).
+    def fcmg-encode-thoughts(src, thoughts, acc) = (Comparable) len(thoughts) == 0 ? lg-rev(acc, []) : fcmg-encode-thoughts(src, thoughts[1:], cons(q35-encode(src, lg-thought-text(thoughts[0])), acc));
+    def fcmg-id-count(lists, n) = (Comparable) len(lists) == 0 ? n : fcmg-id-count(lists[1:], n + len(lists[0]));
+    def fcmg-flat-ids(lists, acc) = (Comparable) len(lists) == 0 ? acc : fcmg-flat-ids(lists[1:], tkz-cat(acc, lists[0]));
+    // ── resident live heed tail ───────────────────────────────────────────
+    // The thought offers above remain the prefill/gap source. This tail is
+    // only the model's final resident decode: decoded ids stream through one
+    // bounded cursor, a complete query may spend one current-source lookup, and
+    // the typed observation re-enters through incremental prefill.
+    // The resident current-source cursor and the experimental prefill carrier
+    // share one context. Source identity and carrier chunk are separate fields:
+    // neither is smuggled through model prose or collapsed into the other.
+    def fcmg-heed-ctx-full(ps, bs, geo, lays, sts, embTv, onormTv, projTv, src, source-hint, chunk, tfx) = [ps, bs, geo, lays, sts, embTv, onormTv, projTv, src, source-hint, chunk, tfx];
+    def fcmg-heed-ctx(ps, bs, geo, lays, sts, embTv, onormTv, projTv, src, tfx) = fcmg-heed-ctx-full(ps, bs, geo, lays, sts, embTv, onormTv, projTv, src, "", 1, tfx);
+    def fcmg-heed-ctx-hinted(ps, bs, geo, lays, sts, embTv, onormTv, projTv, src, source-hint, tfx) = fcmg-heed-ctx-full(ps, bs, geo, lays, sts, embTv, onormTv, projTv,     // The live three-way witness kept output SHA, hit, 26/32 answer
+    // shape and 385 injected ids identical at chunk 0 while reducing
+    // carrier settlements 506 -> 61. Current-source observations use
+    // that measured span node; explicit probes can still choose 1/-1.
+src, source-hint, 0, tfx);
+    // The tokenizer index rides the handle; a handle built before the index
+    // existed answers an absent one and every encode falls back to the
+    // reference lane — ice is a speed, never a gate.
+    def fcmg-heed-index(ctx) = len(ctx) > 11 ? ctx[11] : qtf2-index-empty("absent", "unthreaded", "");
+    def fcmg-heed-source-hint(ctx) = fcsa-path(fcmg-heed-source-affinity(ctx));
+    def fcmg-heed-source-affinity(ctx) = len(ctx) > 9 ? ctx[9] : "";
+    def fcmg-heed-chunk(ctx) = len(ctx) > 10 ? ctx[10] : 1;
+    def fcmg-heed-step(ctx, id, pos) = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], ctx[7], id, pos);
+    def fcmg-heed-prefill(ctx, ids, pos) = q38-prefill-chunked(ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], ctx[7], ids, pos, fcmg-heed-chunk(ctx));
+    def fcmg-heed-decode(ctx, ids) = ftdb-text(ctx[8], ids);
+    // The cursor stays model-neutral; this encoder owns Qwen's role grammar.
+    // Raw observation bytes appended inside the assistant turn made the live
+    // model emit its end token immediately after a successful source hit. Close
+    // that turn, offer the typed Form observation as a tool message, then open a
+    // fresh assistant turn with the same no-think prefix used by q35-chat-ids.
+    def fcmg-heed-encode(ctx, text) = {
+        let src = ctx[8];
+        let tfx = fcmg-heed-index(ctx);
+        let ims = qei-special-id(src, tfx, "<|im_start|>");
+        let ime = qei-special-id(src, tfx, "<|im_end|>");
+        let ths = qei-special-id(src, tfx, "<think>");
+        let the = qei-special-id(src, tfx, "</think>");
+        tkz-cat(q35-one(ime), tkz-cat(qei-encode(src, tfx, "\n"), tkz-cat(q35-one(ims), tkz-cat(qei-encode(src, tfx, "tool\n"), tkz-cat(qei-encode(src, tfx, text), tkz-cat(q35-one(ime), tkz-cat(qei-encode(src, tfx, "\n"), tkz-cat(q35-one(ims), tkz-cat(qei-encode(src, tfx, "assistant\n"), tkz-cat(q35-one(ths), tkz-cat(qei-encode(src, tfx, "\n\n"), tkz-cat(q35-one(the), qei-encode(src, tfx, "\n\n")))))))))))));
+    };
+    def fcmg-heed-bound-honor(h) = len(h[1]) > fkqt-max-render-bytes() ?     // The span remains only as bounded report evidence. `nothing` makes
+    // fhc-span-of inject no bytes, while the reason retains that one
+    // real source search already occurred.
+["nothing", h[1], "observation-budget-exceeded-after-source-search"] : h;
+    // A query surface the body already holds as a resting answer is honored
+    // from the registry BEFORE any source search: the observation injected is
+    // the recipe and its forced value ("(add 40 2)=42") — compact, exact, and
+    // costing no source IO. The force here is the pure tree-walk; the heat
+    // gate's home is the resident's durable state, where repeated demand can
+    // actually accumulate (rest-force-jit carries that door). An unknown
+    // surface falls through to the existing source lookup unchanged.
+    // The lookup receives the FULL marked frame; the rest registries match
+    // BARE inner text. Without this strip the rest lanes were a numb-green:
+    // wired, banded, and unable to fire on the live door (caught 2026-08-30
+    // by reading fhc-honor's frame contract, not by any band).
+    def fcmg-heed-frame-inner(surface) = {
+        let o = str_find(surface, HeedOpen(), 0);
+        o < 0 ? surface : {
+            let start = o + len(HeedOpen());
+            let c = str_find(surface, HeedClose(), start);
+            c < 0 ? substring(surface, start, len(surface)) : substring(surface, start, c);
+        };
+    };
+    def fcmg-heed-rest-honor(surface-frame) = {
+        let surface = fcmg-heed-frame-inner(surface-frame);
+        let p = kra-answer(surface);
+        (Comparable) nothing?(p) == 0 ? ["hit", (lg-defer-text(p) + ("=" + lg-force(p).str())), "rest-answer"] : {
+            let w = kra-corpus-word(surface);
+            nothing?(w) ? nothing() : ["hit", w, "corpus-rest-answer"];
+        };
+    };
+    def fcmg-heed-lookup(ctx, surface, local-ready) = {
+        let rest = fcmg-heed-rest-honor(surface);
+        (Comparable) nothing?(rest) == 0 ? rest : {
+            let source = fcmg-heed-source-affinity(ctx);
+            fcmg-heed-bound-honor(fcsa-lookup(ctx, surface, local-ready, source));
+        };
+    };
+    def fcmg-heed-tail(src, ps, bs, geo, lays, sts, embTv, onormTv, projTv, first, pos, n, stops, tfx) = {
+        let ctx = fcmg-heed-ctx(ps, bs, geo, lays, sts, embTv, onormTv, projTv, src, tfx);
+        fhc-run-decoded-first(ctx, fcmg-heed-step, fcmg-heed-prefill, fcmg-heed-decode, fcmg-heed-encode, fcmg-heed-lookup, 1, first, pos, n, stops, fhc-fresh(fcmg-heed-budget()), []);
+    };
+    def fcmg-heed-tail-2p(src, ps, bs, geo, lays, sts, embTv, onormTv, projTv, first, pos, stops, query, reserve, source-hint, tfx) = {
+        let ctx = fcmg-heed-ctx-hinted(ps, bs, geo, lays, sts, embTv, onormTv, projTv, src, source-hint, tfx);
+        fhc-run-seeded-2p(ctx, fcmg-heed-step, fcmg-heed-prefill, fcmg-heed-decode, fcmg-heed-encode, fcmg-heed-lookup, 1, first, pos, stops, fcmg-heed-budget(), query, reserve);
+    };
+    // Offer → commit → optional gap decode → next offer.
+    // Returns (first pos stream-ids thought-n offers).
+    // stream-ids is chronological: thought, gap, thought, ...
+    def fcmg-offer-stream(ps, bs, geo, lays, sts, embTv, onormTv, projTv, thought-lists, pos, gap-n, stops, stream, thought-n, offers) = (Comparable) len(thought-lists) == 0 ? [0 - 1, pos, stream, thought-n, offers] : {
+        let ids = thought-lists[0];
+        let pf = (Comparable) len(ids) == 0 ? [0 - 1, pos] : q38-prefill(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos);
+        let first = pf[0];
+        let next-pos = pf[1];
+        let rest = thought-lists[1:];
+        let more = len(rest) > 0;
+        let after-thought = tkz-cat(stream, ids);
+        let thought-n2 = thought-n + len(ids);
+        more && gap-n > 0 ? {
+            let gap-out = first < 0 || q38-stop?(first, stops) ? [] : cons(first, q38-generate(ps, bs, geo, lays, sts, embTv, onormTv, projTv, first, next-pos, gap-n - 1, stops, []));
+            let gap-pos = next-pos + len(gap-out);
+            fcmg-offer-stream(ps, bs, geo, lays, sts, embTv, onormTv, projTv, rest, gap-pos, gap-n, stops, tkz-cat(after-thought, gap-out), thought-n2, offers + 1);
+        } : (Comparable) len(rest) == 0 ? [first, next-pos, after-thought, thought-n2, offers + 1] : fcmg-offer-stream(ps, bs, geo, lays, sts, embTv, onormTv, projTv, rest, next-pos, gap-n, stops, after-thought, thought-n2, offers + 1);
+    };
+    // ── the heedmark lane: knowledge lookup from the model's own stream ───────
+    // fcmg-offer-stream above injects spans, but its thought-lists are computed
+    // BEFORE generation begins — nothing the model emits can choose them. This
+    // lane closes that gap. form-cli-heed-cursor.fk drives one forward pass at a
+    // time, transmutes each emitted id to bytes in a bounded window, and when a
+    // complete <|form:knowledge-query|> envelope closes it offers the surface to
+    // a lookup and prefills the typed observation at the current position.
+    //
+    // NO LOGIT EXECUTED THE LOOKUP. q38-forward returns an argmax over a
+    // distribution and nothing else. The cursor recognized bytes; Form looked up;
+    // the answer re-entered as prefill. fhc-model-executed is 0 by construction.
+    //
+    // The five function values need the pipelines, buffers, geometry, layers,
+    // decode state and tensor views, and this dialect has no lambda — so they
+    // travel as one opaque ctx the cursor never opens.
+    // slot 9 is `chunk`: how many prefill positions may be in flight before the
+    // carrier is asked to settle. 1 is the barrier-per-position the lane has
+    // always had; larger is the question this body can answer about itself.
+    // This adapter receives the already-open model ctx. Its names stay distinct
+    // from the resident current-source ctx above: redefining the same functions
+    // silently changed their arities after a rebase and left each lane compiling
+    // only when the other one was absent.
+    def fcmg-heed-bound-ctx(ctx, sts, src, chunk) = [ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], src, chunk, q38-ctx-span(ctx)];
+    def fcmg-heed-bound-step(h, id, pos) = q38-forward(h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], id, pos);
+    def fcmg-heed-bound-prefill(h, ids, pos) = q38-prefill-chunked-span(h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], ids, pos, h[9], h[10]);
+    def fcmg-heed-bound-decode(h, ids) = ftdb-text(h[8], ids);
+    def fcmg-heed-bound-encode(h, text) = q35-encode(h[8], text);
+    // The default substrate answers `nothing` for every envelope — axiom-1, and
+    // it is what an unconfigured host honestly holds. It performs no IO, so this
+    // file names no index and no ABI and preflights clean. A carrier that has a
+    // knowledge substrate passes its own lookupf instead: a function value for the typed
+    // form-knowledge-query-token ABI.
+    def fcmg-heed-lookup-nothing(h, surface, local-ready) = ["nothing", "", "no-knowledge-substrate"];
+    // Prefill the prompt ONCE and carry both of its answers: the first token and
+    // the position after the prompt. An earlier draft took the first token from
+    // the prefill and the position from a parameter — the cursor then walked
+    // from a position the KV rows had never been written at.
+    // Two ledgers, not one. `query` is what the model may spend composing a
+    // knowledge query; `reserve` opens only after a typed observation has
+    // actually been injected, and query verbosity can never reach it. A valid
+    // query that closes on its last query slot still gets a full reserve to
+    // answer from — which one fungible budget could not give it.
+    def fcmg-heed-generate-2p(src, ctx, sts, ids, stops, lookupf, local-ready, heeds, query, reserve, chunk) = {
+        let pf = q38-prefill-chunked-span(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, chunk, q38-ctx-span(ctx));
+        fhc-run-seeded-2p(fcmg-heed-bound-ctx(ctx, sts, src, chunk), fcmg-heed-bound-step, fcmg-heed-bound-prefill, fcmg-heed-bound-decode, fcmg-heed-bound-encode, lookupf, local-ready, pf[0], pf[1], stops, heeds, query, reserve);
+    };
+    // Compatibility delegate: the old fungible signature, unchanged in meaning.
+    def fcmg-heed-generate(src, ctx, sts, ids, n, stops, lookupf, local-ready, budget) = {
+        let pf = q38-prefill(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+        fhc-run-seeded(fcmg-heed-bound-ctx(ctx, sts, src, 1), fcmg-heed-bound-step, fcmg-heed-bound-prefill, fcmg-heed-bound-decode, fcmg-heed-bound-encode, lookupf, local-ready, pf[0], pf[1], n, stops, budget);
+    };
+    // ── the live witness ──────────────────────────────────────────────────────
+    // Real weights, real forward passes, real tokenizer bytes through the cursor.
+    // Effectful: opens a sealed GGUF and drives the GPU. Do not preflight.
+    def fcmg-heed-line(name, value) = print_str(("heed " + (name + ("=" + (value + "\n")))));
+    def fcmg-heed-int(name, value) = fcmg-heed-line(name, value.str());
+    def fcmg-heed-names(xs, acc) = (Comparable) len(xs) == 0 ? acc : fcmg-heed-names(xs[1:], (acc + ((String) ((String) acc == "" ? "" : ",") + xs[0])));
+    // Standalone live-witness printer. Kept distinct from fcmg-heed-report(c),
+    // which returns the structured current-source fields embedded in the normal
+    // generation report. Sharing the name made the two-argument printer shadow
+    // the one-argument reporter and collapsed an otherwise valid run to -1. It
+    // remains bounded and non-content: the held-out reply crosses only as the
+    // SHA-256 and byte count emitted by form-cli-heed-telemetry.fk.
+    def fcmg-heed-witness-report(src, r) = {
+        let c = fhc-cursor-of(r);
+        fcmg-heed-int("model-tokens", len(fhc-out(r)));
+        fcmg-heed-int("end-pos", fhc-pos(r));
+        fcmg-heed-line("honored", fcmg-heed-names(fhc-honored(c), ""));
+        fht-report(c, ftdb-text(src, fhc-out(r)));
+        0;
+    };
+    def fcmg-heed-report-with-content(src, r) = {
+        fcmg-heed-witness-report(src, r);
+        fcmg-heed-line("output-content-NOT-HELD-OUT", ftdb-text(src, fhc-out(r)));
+        0;
+    };
+    def fcmg-heed-witness-with(path, prompt, query, reserve, lookupf, chunk) = {
+        let t-enter = now_unix_ms();
+        let gpu-enter = mbw-status-int(metal_status(), "gpu_busy_us_total");
+        let verdict = qaf-seal-verdict(path);
+        let t-sealed = now_unix_ms();
+        !((Comparable) verdict == 1) ? fcmg-heed-line("refused", fcmg-seal-refusal(verdict)) : {
+            let src = fcmg-src(path);
+            let arch = fcmg-arch(src);
+            let ids = fcmg-chat-ids(src, prompt);
+            !((String) arch == "qwen35") ? fcmg-heed-line("refused", ("architecture=" + arch)) : (Comparable) len(ids) == 0 ? fcmg-heed-line("refused", "tokenizer produced no prompt tokens") : {
+                let model-max = gmt-u32(src, q38-key(arch, "context_length"));
+                // both ledgers plus room for what gets injected
+                let need = len(ids) + (query + reserve + 512);
+                let maxpos = need < model-max ? need : model-max;
+                let t-pre-open = now_unix_ms();
+                // a layer-major walk holds every position of the span
+                let span = chunk < 0 - 1 ? 512 : 1;
+                let turn = adm-admit("heed", path, adm-wait-ms());
+                let ctx = (Comparable) turn[0] == 1 ? q38-open-span(path, maxpos, span) : [];
+                let freed = adm-loaded(turn[2]);
+                let t-opened = now_unix_ms();
+                len(ctx) < 10 ? fcmg-heed-line("refused", ((Comparable) turn[0] == 1 ? ("model context did not open; " + metal_status()) : turn[1])) : {
+                    let sts = q38-new-state(ctx[2]);
+                    !((Comparable) q38-state-ok?(sts) == 1) ? fcmg-heed-line("refused", ("state allocation failed; " + metal_status())) : {
+                        fcmg-heed-int("prompt-tokens", len(ids));
+                        fcmg-heed-int("query-budget", query);
+                        fcmg-heed-int("answer-reserve", reserve);
+                        fcmg-heed-int("prefill-chunk", chunk);
+                        fcmg-heed-int("scratch-span", span);
+                        let t-pre-run = now_unix_ms();
+                        let gpu-pre-run = mbw-status-int(metal_status(), "gpu_busy_us_total");
+                        let syncs-pre-run = mbw-status-int(metal_status(), "total_sync");
+                        let disp-pre-run = mbw-status-int(metal_status(), "total_dispatch");
+                        let r = fcmg-heed-generate-2p(src, ctx, sts, ids, fcmg-q35-stops(src), lookupf, 1, MaxHeeds(), query, reserve, chunk);
+                        metal_sync();
+                        let t-done = now_unix_ms();
+                        let gpu-done = mbw-status-int(metal_status(), "gpu_busy_us_total");
+                        fcmg-heed-witness-report(src, r);
+                        fcmg-heed-int("ms-seal", t-sealed - t-enter);
+                        fcmg-heed-int("ms-header-read", t-pre-open - t-sealed);
+                        fcmg-heed-int("ms-open", t-opened - t-pre-open);
+                        fcmg-heed-int("ms-state", t-pre-run - t-opened);
+                        fcmg-heed-int("ms-decode", t-done - t-pre-run);
+                        fcmg-heed-int("ms-total", t-done - t-enter);
+                        fcmg-heed-int("gpu-busy-us-decode", gpu-done - gpu-pre-run);
+                        fcmg-heed-int("gpu-busy-us-setup", gpu-pre-run - gpu-enter);
+                        // the stall, counted directly: how many
+                        // times the carrier was asked to settle,
+                        // and how many dispatches it carried.
+                        fcmg-heed-int("carrier-syncs", mbw-status-int(metal_status(), "total_sync") - syncs-pre-run);
+                        fcmg-heed-int("carrier-dispatches", mbw-status-int(metal_status(), "total_dispatch") - disp-pre-run);
+                        fcmg-heed-int("positions-walked", fhc-pos(r));
+                        q38-free-state(sts);
+                        0;
+                    };
+                };
+            };
+        };
+    };
+    // ── live prompt cursor -> bounded Metal prefill ───────────────────────
+    // The cursor keeps at most one pre-tokenized piece.  Prefill keeps one token
+    // of lookahead so only the true final prompt position asks the LM head.
+    // Every `chunk` advanced positions settle and reopen the command buffer;
+    // neither prompt ids nor an unbounded command stream must exist first.
+    def fcmg-live-pf(status, first, pos, cursor, reason) = ["fcmg-live-prefill", status, first, pos, cursor, reason];
+    def fcmg-live-prefill-go(ctx, sts, cursor, held, pos, in-batch, chunk) = {
+        let one = qtlc-next(cursor);
+        (Comparable) qtlc-next-present?(one) == 1 ? {
+            q38-forward-state-after(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], held, pos, 1);
+            let filled = in-batch + 1;
+            filled >= chunk ? {
+                metal_sync();
+                q38oo-stage(("model-prefill-positions-" + (pos + 1).str()), 8388623);
+                metal_batch_concurrent();
+            } : 0;
+            fcmg-live-prefill-go(ctx, sts, qtlc-next-cursor(one), qtlc-next-value(one), pos + 1, filled >= chunk ? 0 : filled, chunk);
+        } : (String) qtlc-next-status(one) == "done" ? {
+            q38-forward-state-after(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], held, pos, 1);
+            let first = q38-head-only(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6]);
+            fcmg-live-pf("ok", first, pos + 1, qtlc-next-cursor(one), "complete");
+        } : {
+            // Any already-enqueued prefix is made observable before
+            // state release; a refusal never leaves an open batch.
+            metal_sync();
+            fcmg-live-pf(qtlc-next-status(one), 0 - 1, pos, qtlc-next-cursor(one), qtlc-reason(qtlc-next-cursor(one)));
+        };
+    };
+    def fcmg-live-prefill(ctx, sts, cursor, chunk) = {
+        let first = qtlc-next(cursor);
+        !((Comparable) qtlc-next-present?(first) == 1) ? fcmg-live-pf(qtlc-next-status(first), 0 - 1, 0, qtlc-next-cursor(first), qtlc-reason(qtlc-next-cursor(first))) : {
+            metal_batch_concurrent();
+            fcmg-live-prefill-go(ctx, sts, qtlc-next-cursor(first), qtlc-next-value(first), 0, 0, chunk);
+        };
+    };
+    // Admission prefill, span-batched: materialize the live cursor to its
+    // id list first (a token walk with no forwards, no dispatches), then
+    // advance slices bounded by the admitted scratch width. Generation and
+    // model sessions share this route and the BML admission-width authority.
+    // The prompt id list remains live during prefill; model scratch is bounded
+    // by q38-ctx-span, including scalar residents admitted by older callers.
+    // Prefill returns the first generated token and the position after the
+    // prompt, matching q38-prefill's contract (the seedslip witness).
+    def fcmg-live-ids-go(cursor, acc) = {
+        let one = qtlc-next(cursor);
+        (Comparable) qtlc-next-present?(one) == 1 ? fcmg-live-ids-go(qtlc-next-cursor(one), cons(qtlc-next-value(one), acc)) : [qtlc-next-status(one), qtlc-next-cursor(one), acc];
+    };
+    def fcmg-live-prefill-span(ctx, sts, cursor) = fcmg-live-prefill-span-t(ctx, sts, cursor, nothing());
+    // with a tap (q38-lm-layers-span-t): the session's open hands its own, so the speculative drafter learns the prompt in the prompt's own batches
+    def fcmg-live-prefill-span-t(ctx, sts, cursor, tap) = {
+        let walked = fcmg-live-ids-go(cursor, []);
+        !((String) walked[0] == "done") ? fcmg-live-pf(walked[0], 0 - 1, 0, walked[1], qtlc-reason(walked[1])) : {
+            let ids = reverse(walked[2]);
+            let pf = q38-prefill-span-sliced-t(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, q38-ctx-span(ctx), tap);
+            pf[0] < 0 || (Comparable) pf[1] != len(ids) ? fcmg-live-pf("nothing", -1, pf[1], walked[1], "model-prefill-refused") : fcmg-live-pf("ok", pf[0], pf[1], walked[1], "complete");
+        };
+    };
+    def fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, ctx, n, query, reserve, gap-n, source-hint, tfx) = {
+        let geo = ctx[2];
+        let _state-begin = fcmg-live-stage("model-state-begin", 4456449);
+        let sts = q38-new-state(geo);
+        !((Comparable) q38-state-ok?(sts) == 1) ? fcmg-state-close-result(sts, ("generation refused: state allocation failed; " + metal_status())) : {
+            let before-status = metal_status();
+            let _prefill-begin = fcmg-live-stage("model-prefill-begin", 4587521);
+            let live-pf = fcmg-live-prefill-span(ctx, sts, cursor);
+            let _prefill-complete = fcmg-live-stage("model-prefill-complete", 4653057);
+            !((String) live-pf[1] == "ok") ? fcmg-state-close-result(sts, ("generation refused: live prompt cursor=" + (live-pf[1] + (";reason=" + live-pf[5])))) : {
+                let final-cursor = live-pf[4];
+                let prompt-n = qtlc-token-count(final-cursor);
+                let stops = fcmg-q35-stops(src);
+                let offered = (Comparable) len(thought-lists) == 0 ? [live-pf[2], live-pf[3], [], 0, 0] : fcmg-offer-stream(ctx[0], ctx[1], geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], thought-lists, live-pf[3], gap-n, stops, [], 0, 0);
+                let prefill-status = metal_status();
+                let first = offered[0];
+                let pos = offered[1];
+                let stream-ids = offered[2];
+                let thought-n = offered[3];
+                let offers = offered[4];
+                let model-extra = len(stream-ids) - thought-n;
+                let remain = n - model-extra;
+                let _decode-begin = fcmg-live-stage("model-decode-begin", 4849665);
+                let heed-run = query > 0 && reserve > 0 ? fcmg-heed-tail-2p(src, ctx[0], ctx[1], geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], first, pos, stops, query, reserve, source-hint, tfx) : fcmg-heed-tail(src, ctx[0], ctx[1], geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], first, pos, remain, stops, tfx);
+                let _decode-complete = fcmg-live-stage("model-decode-complete", 4980737);
+                let model-tail = fhc-out(heed-run);
+                let heed = fhc-cursor-of(heed-run);
+                let out = tkz-cat(stream-ids, model-tail);
+                metal_sync();
+                let after-status = metal_status();
+                let busy-us = mbw-status-int(after-status, "gpu_busy_us_total") - mbw-status-int(before-status, "gpu_busy_us_total");
+                let prefill-us = mbw-status-int(prefill-status, "gpu_busy_us_total") - mbw-status-int(before-status, "gpu_busy_us_total");
+                let decode-us = mbw-status-int(after-status, "gpu_busy_us_total") - mbw-status-int(prefill-status, "gpu_busy_us_total");
+                let forwards = prompt-n + thought-n + (model-extra + len(model-tail) > 0 ? model-extra + len(model-tail) - 1 : 0) + (fhc-injected(heed) + (fhc-close-commits(heed) + fhc-terminal-forwards(heed)));
+                let weight-bytes = q38-forward-weight-bytes(ctx);
+                fcmg-state-close-result(sts, ((String) fcmg-line("prompt_cursor", "bmf-qtf2-live-v1") + fcmg-report-count(model, arch, prompt-n, out, ftdb-text(src, out), thought-eval, offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed)));
+            };
+        };
+    };
+    def fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, ctx, n, query, reserve, gap-n, source-hint, tfx) = {
+        let geo = ctx[2];
+        let sts = q38-new-state(geo);
+        !((Comparable) q38-state-ok?(sts) == 1) ? fcmg-state-close-result(sts, ("generation refused: state allocation failed; " + metal_status())) : {
+            let before-status = metal_status();
+            let pf = q38-prefill(ctx[0], ctx[1], geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+            let stops = fcmg-q35-stops(src);
+            let offered = (Comparable) len(thought-lists) == 0 ? [pf[0], pf[1], [], 0, 0] : fcmg-offer-stream(ctx[0], ctx[1], geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], thought-lists, pf[1], gap-n, stops, [], 0, 0);
+            let prefill-status = metal_status();
+            let first = offered[0];
+            let pos = offered[1];
+            let stream-ids = offered[2];
+            let thought-n = offered[3];
+            let offers = offered[4];
+            let model-extra = len(stream-ids) - thought-n;
+            let remain = n - model-extra;
+            let heed-run = query > 0 && reserve > 0 ? fcmg-heed-tail-2p(src, ctx[0], ctx[1], geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], first, pos, stops, query, reserve, source-hint, tfx) : fcmg-heed-tail(src, ctx[0], ctx[1], geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], first, pos, remain, stops, tfx);
+            let model-tail = fhc-out(heed-run);
+            let heed = fhc-cursor-of(heed-run);
+            let out = tkz-cat(stream-ids, model-tail);
+            metal_sync();
+            let after-status = metal_status();
+            let busy-us = mbw-status-int(after-status, "gpu_busy_us_total") - mbw-status-int(before-status, "gpu_busy_us_total");
+            let prefill-us = mbw-status-int(prefill-status, "gpu_busy_us_total") - mbw-status-int(before-status, "gpu_busy_us_total");
+            let decode-us = mbw-status-int(after-status, "gpu_busy_us_total") - mbw-status-int(prefill-status, "gpu_busy_us_total");
+            let forwards = len(ids) + thought-n + (model-extra + len(model-tail) > 0 ? model-extra + len(model-tail) - 1 : 0) + (fhc-injected(heed) + (fhc-close-commits(heed) + fhc-terminal-forwards(heed)));
+            let weight-bytes = q38-forward-weight-bytes(ctx);
+            fcmg-state-close-result(sts, fcmg-report(model, arch, ids, out, ftdb-text(src, out), thought-eval, offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed));
+        };
+    };
+    // Compatibility: every existing caller remains on the fungible tail.
+    def fcmg-run-context(src, arch, model, ids, thought-lists, thought-eval, ctx, n, gap-n) = fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, ctx, n, 0, 0, gap-n, "", qtf2-index-empty("absent", "unthreaded", ""));
+    def fcmg-run-context-2p(src, arch, model, ids, thought-lists, thought-eval, ctx, query, reserve, gap-n) = fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, ctx, 0, query, reserve, gap-n, "", qtf2-index-empty("absent", "unthreaded", ""));
+    def fcmg-chat-ids(src, prompt) = (Comparable) ftl-armed?() == 1 ? {
+        let ims = q35-special-id(src, "<|im_start|>");
+        let ime = q35-special-id(src, "<|im_end|>");
+        tkz-cat(q35-one(ims), tkz-cat(q35-encode(src, "system\n"), tkz-cat(q35-encode(src, ftl-system-text()), tkz-cat(q35-one(ime), tkz-cat(q35-encode(src, "\n"), q35-chat-ids(src, prompt))))));
+    } : q35-chat-ids(src, prompt);
+    // Knowledge-query profile: the compact fqt prompt already carries the exact
+    // execution grammar, so do not replay the large general system glossary.
+    // The ordinary form-cli generation door remains byte-identical on `full`.
+    def fcmg-chat-ids-profile(src, prompt, profile) = fcrt-profile?(profile) ? fcrt-profile-ids(src, qtf2-index-empty("absent", "reference-profile", ""), prompt, (Comparable) ftl-armed?() == 1 ? ftl-system-text() : "", profile) : (String) profile == "knowledge-query" ? q35-chat-ids(src, prompt) : fcmg-chat-ids(src, prompt);
+    def fcmg-indexed-chat-ids-profile(src, index, prompt, profile) = fcrt-profile?(profile) ? fcrt-profile-ids(src, index, prompt, (Comparable) ftl-armed?() == 1 ? ftl-system-text() : "", profile) : qei-chat-ids-profile(src, index, prompt, profile);
+    def fcmg-chat-segments-profile(prompt, profile, x) = fcrt-profile?(profile) ? fcrt-profile-segments(prompt, (Comparable) ftl-armed?() == 1 ? ftl-system-text() : "", x, profile) : (String) profile == "knowledge-query" ? qtlc-chat-segments(prompt, x) : (Comparable) ftl-armed?() == 1 ? qtlc-full-chat-segments(prompt, ftl-system-text(), x) : qtlc-chat-segments(prompt, x);
+    def fcmg-chat-cursor-profile(path, prompt, profile, x) = qtlc-open(path, qsx-seal-line(path), fcmg-chat-segments-profile(prompt, profile, x));
+    // A first admission: the seal is verified before a single byte of the file is
+    // read for meaning, exactly as before.  What changed is only what is answered —
+    // the text AND the residence the admission earned, so a caller that keeps it
+    // does not pay this again.
+    // A refusal must name what actually refused.  Verdict 2 is the digest engine
+    // declining to run, which is a fact about this binary, not about the file —
+    // and it carries metal_status so the reason is in the sentence rather than in
+    // a later investigation.
+    def fcmg-seal-refusal(verdict) = (Comparable) verdict == 2 ? ("generation refused: the Form-native SHA-256 digest engine did not answer — this says nothing about the artifact; " + metal_status()) : "generation refused: selected artifact has no current Form-native SHA-256 seal";
+    def fcmg-noted(prompt, arch, model, msg) = (lmc-say(prompt, arch, model) + ("\n" + msg));
+    def fcmg-arch-door(arch, model) = ("generate for architecture=" + (arch + (" model=" + (((String) model == "" ? "unnamed" : model) + " is unfinished on this door; choose and route still name the file."))));
+    // DEEPSEEK-V4 AT THIS DOOR (form-cli-model-ds4.fk): fcds-lane-wired? reads 1, so a deepseek4 file takes the driver before the Qwen path touches it: the seal verdict first (the same refusal words), then
+    // admission (arch-keyed bytes, model-admission.bml), the run (chat-templated prompt, prefill, greedy steps to a named ending, close), the same key=value report with the text after "text:".
+    // A prompt that arrives through the plain ledger carries its allowance as `query` (n is 0 there): the driver's one allowance is whichever of the two the caller set (fcmg-ds4-tokens).
+    def fcmg-ds4-door-with?(path, wired) = (Comparable) wired == 1 && dls-ds4?(path);
+    def fcmg-ds4-door?(path) = fcmg-ds4-door-with?(path, fcds-lane-wired?());
+    def fcmg-ds4-tokens(n, query) = n > 0 ? n : query;
+    def fcmg-ds4-report(model, arch, run) = (fcmg-line("backend", "form-native-metal-dsv4-driver") + (fcmg-line("model", model) + (fcmg-line("architecture", arch) + (fcmg-line("mode", lmc-mode(arch)) + (fcmg-line("prompt_tokens", run[1].str()) + (fcmg-line("generated_tokens", len(run[2]).str()) + (fcmg-line("ending", run[4]) + (fcmg-line("capacity", run[5].str()) + (fcmg-line("position_limit", run[6].str()) + ("text:\n" + run[3]))))))))));
+    def fcmg-ds4-door(path, prompt, n) {
+        let src = fcmg-src(path);
+        let arch = fcmg-arch(src);
+        let model = fcmg-name(src);
+        let turn = adm-admit("generate", path, adm-wait-ms());
+        (Comparable) turn[0] != 1 ? [fcmg-noted(prompt, arch, model, ("generation refused: model admission; " + turn[1])), fcmr-none()] : {
+            let run = fcds-run(path, prompt, n, () => adm-loaded(turn[2]));
+            let dropped = adm-drop(path);
+            (String) run[0] == "ok" ? [fcmg-noted(prompt, arch, model, fcmg-ds4-report(model, arch, run)), fcmr-none()] : [fcmg-noted(prompt, arch, model, ("generation refused: " + run[1])), fcmr-none()];
+        };
+    }
+    def fcmg-ds4-sealed(path, prompt, n) {
+        let verdict = qaf-seal-verdict(path);
+        !((Comparable) verdict == 1) ? [fcmg-noted(prompt, "", "", fcmg-seal-refusal(verdict)), fcmr-none()] : fcmg-ds4-door(path, prompt, n);
+    }
+    def fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) = (Comparable) fcmg-ds4-door?(path) == 1 ? fcmg-ds4-sealed(path, prompt, fcmg-ds4-tokens(n, query)) : fcmg-fresh-at-budgeted-hinted-q(path, prompt, n, query, reserve, profile, source-hint);
+    def fcmg-fresh-at-budgeted-hinted-q(path, prompt, n, query, reserve, profile, source-hint) = {
+        let _seal-begin = fcmg-live-stage("model-seal-begin", 5963777);
+        let verdict = qaf-seal-verdict(path);
+        let _seal-complete = fcmg-live-stage("model-seal-complete", 6029313);
+        !((Comparable) verdict == 1) ? [fcmg-noted(prompt, "", "", fcmg-seal-refusal(verdict)), fcmr-none()] : {
+            let src = fcmg-src(path);
+            // The crystal, both doors (2026-08-24): load the seal-keyed
+            // recording if present; otherwise this first ask IS the heat —
+            // freeze, then load. If even that fails, the scan path answers:
+            // ice is a speed, never a gate. Measured: open 16.3 s -> 0.45 s.
+            let x0 = qsx-load(path);
+            let x = (Comparable) x0[0] == 1 ? x0 : {
+                let heat = qsx-freeze(path);
+                qsx-load(path);
+            };
+            let iced = x[0];
+            let thoughts = lg-think-all(prompt);
+            let thought-lists = fcmg-encode-thoughts(src, thoughts, []);
+            let thought-eval = lg-values-line(thoughts);
+            let thought-n = fcmg-id-count(thought-lists, 0);
+            let gap-n = len(thoughts) > 1 ? lg-gap-default() : 0;
+            let segments = (Comparable) iced == 1 ? fcmg-chat-segments-profile(prompt, profile, x) : [];
+            let cursor = (Comparable) iced == 1 ? fcmg-chat-cursor-profile(path, prompt, profile, x) : qtlc-open-index(["absent", "crystal-absent", "", 0, 0, 0, 0, 0, 0, 0], []);
+            let live-cursor = (String) qtlc-status(cursor) == "open" ? 1 : 0;
+            // When the live cursor is absent the sorted-row index encodes
+            // (10x the scanner, byte-identical); the reference scanner
+            // remains the last lane inside qei itself. Cursor admission
+            // sizes from segment bounds; span prefill materializes ids.
+            let tfx = qtf2-load(qtf2-root-for(path), qsx-seal-line(path));
+            let ids = (Comparable) live-cursor == 1 ? [] : fcmg-indexed-chat-ids-profile(src, tfx, prompt, profile);
+            let prompt-bound = (Comparable) live-cursor == 1 ? qtlc-segments-upper-bound(segments, 0) : len(ids);
+            let arch = fcmg-arch(src);
+            let model = fcmg-name(src);
+            let model-max = gmt-u32(src, q38-key(arch, "context_length"));
+            let need = fcmg-context-need(prompt-bound, thought-n, gap-n * (len(thoughts) > 1 ? len(thoughts) - 1 : 0), n, query, reserve);
+            let maxpos = fcmg-open-ceiling(profile, need, model-max);
+            let required = (Comparable) iced == 1 ? qsx-required(x) : q38-required-size(src, egg-data-base(src, 32));
+            let actual = file_size(path);
+            !((String) arch == "qwen35") ? [fcmg-noted(prompt, arch, model, fcmg-arch-door(arch, model)), fcmr-none()] : prompt-bound <= 0 ? [fcmg-noted(prompt, arch, model, "generation refused: tokenizer produced no prompt tokens"), fcmr-none()] : (Comparable) fcmg-tail-budget-ok?(n, query, reserve) == 0 || need > model-max ? [fcmg-noted(prompt, arch, model, ("generation refused: requested context exceeds model limit=" + model-max.str())), fcmr-none()] : required <= 0 || actual < required ? [fcmg-noted(prompt, arch, model, ("generation refused: incomplete tensor extent; required=" + (required.str() + (";actual=" + actual.str())))), fcmr-none()] : {
+                let _open-begin = fcmg-live-stage("model-open-begin", 6356993);
+                let span = (Comparable) live-cursor == 1 ? fcma-span(prompt-bound) : 1;
+                let _span = q38oo-stage(("model-prefill-span-" + span.str()), 8388624);
+                let turn = adm-admit("generate", path, adm-wait-ms());
+                let ctx = (Comparable) turn[0] != 1 ? [] : (Comparable) iced == 1 ? qsx-open-span(path, maxpos, x, span) : q38-open-span(path, maxpos, span);
+                let freed = adm-loaded(turn[2]);
+                let _open-complete = fcmg-live-stage("model-open-complete", 6422529);
+                len(ctx) < 10 ? [fcmg-noted(prompt, arch, model, ("generation refused: model context did not open; " + ((Comparable) turn[0] == 1 ? metal_status() : turn[1]))), fcmr-none()] : !((Comparable) q38-context-ok?(ctx) == 1) ? [fcmg-noted(prompt, arch, model, fcmg-open-refusal(ctx, "model context contains an invalid handle")), fcmr-none()] : [fcmg-noted(prompt, arch, model, (Comparable) live-cursor == 1 ? fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, ctx, n, query, reserve, gap-n, source-hint, tfx) : fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, ctx, n, query, reserve, gap-n, source-hint, tfx)), fcmr(path, maxpos, ctx, src, arch)];
+            };
+        };
+    };
+    // Ordinary callers may carry an exact path in prose. Dataset-backed callers
+    // already hold a sealed source path separately and use the explicit hinted
+    // door below, so evidence identity need not be smuggled into prompt text.
+    def fcmg-fresh-at-budgeted(path, prompt, n, query, reserve, profile) = fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, fcsa-infer(prompt));
+    // Existing doors are fungible delegates; two-phase callers name both
+    // ledgers explicitly.
+    def fcmg-fresh-at(path, prompt, n, profile) = fcmg-fresh-at-budgeted(path, prompt, n, 0, 0, profile);
+    def fcmg-fresh-at-2p(path, prompt, query, reserve, profile) = fcmg-fresh-at-budgeted(path, prompt, 0, query, reserve, profile);
+    def fcmg-fresh(path, prompt, n) = fcmg-fresh-at(path, prompt, n, "full");
+    // A living local agent opens at the selected GGUF's declared context. A
+    // later fitting capsule then reuses the exact sealed residence instead of
+    // paying a second seal/open merely because it is longer than the first.
+    def fcmg-open-ceiling(profile, required, artifact-declared) = (Comparable) frc-is-agent-profile?(profile) == 1 ? artifact-declared : required < artifact-declared ? required : artifact-declared;
+    def fcmg-stale-close() = ["generation refused: previous model handle close mismatch", fcmr-none()];
+    // Generation against whatever the caller is already holding.  An empty
+    // residence, a residence for a different file, or a prompt that outgrows the
+    // ceiling this one was opened for all end in the same place — release, then
+    // admit — so there is one path and no mode to be in.
+    def fcmg-generate-with-at-budgeted-hinted(r, path, prompt, n, query, reserve, profile, source-hint) = (Comparable) fcmr-live?(r) == 0 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : !((String) fcmr-path(r) == path) ? (Comparable) fcmr-release-ok?(r) == 1 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : fcmg-stale-close() : {
+        let src = fcmr-src(r);
+        let arch = fcmr-arch(r);
+        let model = fcmg-name(src);
+        let thoughts = lg-think-all(prompt);
+        let thought-lists = fcmg-encode-thoughts(src, thoughts, []);
+        let thought-eval = lg-values-line(thoughts);
+        let thought-n = fcmg-id-count(thought-lists, 0);
+        let gap-n = len(thoughts) > 1 ? lg-gap-default() : 0;
+        let x = qsx-load(path);
+        let iced = (Comparable) x[0] == 1 ? 1 : 0;
+        let segments = (Comparable) iced == 1 ? fcmg-chat-segments-profile(prompt, profile, x) : [];
+        let cursor = (Comparable) iced == 1 ? fcmg-chat-cursor-profile(path, prompt, profile, x) : qtlc-open-index(["absent", "crystal-absent", "", 0, 0, 0, 0, 0, 0, 0], []);
+        let live-cursor = (String) qtlc-status(cursor) == "open" ? 1 : 0;
+        let tfx = qtf2-load(qtf2-root-for(path), qsx-seal-line(path));
+        let ids = (Comparable) live-cursor == 1 ? [] : fcmg-indexed-chat-ids-profile(src, tfx, prompt, profile);
+        let prompt-bound = (Comparable) live-cursor == 1 ? qtlc-segments-upper-bound(segments, 0) : len(ids);
+        let model-max = gmt-u32(src, q38-key(arch, "context_length"));
+        let need = fcmg-context-need(prompt-bound, thought-n, gap-n * (len(thoughts) > 1 ? len(thoughts) - 1 : 0), n, query, reserve);
+        prompt-bound <= 0 ? [fcmg-noted(prompt, arch, model, "generation refused: tokenizer produced no prompt tokens"), r] : (Comparable) fcmg-tail-budget-ok?(n, query, reserve) == 0 || need > model-max ? [fcmg-noted(prompt, arch, model, ("generation refused: requested context exceeds model limit=" + model-max.str())), r] : need <= fcmr-maxpos(r) ? [fcmg-noted(prompt, arch, model, (Comparable) live-cursor == 1 ? fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, fcmr-ctx(r), n, query, reserve, gap-n, source-hint, tfx) : fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, fcmr-ctx(r), n, query, reserve, gap-n, source-hint, tfx)), r] : (Comparable) fcmr-release-ok?(r) == 1 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : fcmg-stale-close();
+    };
+    def fcmg-generate-with-at-budgeted(r, path, prompt, n, query, reserve, profile) = fcmg-generate-with-at-budgeted-hinted(r, path, prompt, n, query, reserve, profile, fcsa-infer(prompt));
+    def fcmg-generate-with-at(r, path, prompt, n, profile) = fcmg-generate-with-at-budgeted(r, path, prompt, n, 0, 0, profile);
+    def fcmg-generate-with-at-2p(r, path, prompt, query, reserve, profile) = fcmg-generate-with-at-budgeted(r, path, prompt, 0, query, reserve, profile);
+    def fcmg-generate-with(r, path, prompt, n) = fcmg-generate-with-at(r, path, prompt, n, "full");
+    // The one-shot door, byte-identical in what it answers: admit, generate,
+    // release.  A caller with nothing to hold on to loses nothing and keeps the
+    // close check that was always here.
+    def fcmg-q35-run(path, prompt, n) = {
+        let out = fcmg-generate-with(fcmr-none(), path, prompt, n);
+        (Comparable) fcmr-release-ok?(out[1]) == 1 ? out[0] : "generation refused: model handle close mismatch";
+    };
+    // The generate door carries the Form teach overlay. Raw fcmg-q35-run
+    // stays for probes that need an exact prompt.
+    def fcmg-teach(prompt) = fqt-prompt(prompt);
+    // The ordinary local door may answer directly or may first emit a bounded
+    // knowledge-query.  Its old fungible tail made the latter shape consume the
+    // last output slot, so a valid typed observation arrived with no room for
+    // the local answer.  This ledger gives the pre-observation turn exactly the
+    // caller's requested budget and holds a separate answer reserve.  Direct
+    // prose never opens or spends that reserve; a hit or miss opens it through
+    // the existing cursor at the precise observation boundary.
+    //
+    // This is data at the Form call boundary, not a new model session, server,
+    // tokenizer pre-pass, or static operation table.
+    def fcmg-plain-ledger-mark() = "form-cli-plain-answer-ledger-v1";
+    def fcmg-plain-ledger(query) = [fcmg-plain-ledger-mark(), query, fhm-caller-answer-reserve(query)];
+    def fcmg-plain-ledger-query(ledger) = ledger[1];
+    def fcmg-plain-ledger-reserve(ledger) = ledger[2];
+    def fcmg-plain-ledger-valid?(ledger) = !((Comparable) len(ledger) == 3 && (String) ledger[0] == fcmg-plain-ledger-mark()) ? 0 : fcmg-tail-budget-ok?(0, fcmg-plain-ledger-query(ledger), fcmg-plain-ledger-reserve(ledger));
+    def fcmg-generate-plain-resident(r, path, prompt, n) = {
+        let ledger = fcmg-plain-ledger(n);
+        fcmg-generate-with-at-budgeted(r, path, prompt, 0, fcmg-plain-ledger-query(ledger), fcmg-plain-ledger-reserve(ledger), "full");
+    };
+    // The recurring rented cost in the 2026-08-26 session census was not tool
+    // execution; it was the speaker choosing the next tool. This is that turn
+    // inside the resident local Qwen lane. Its grammar is deliberately small:
+    // one move, one line, no transcript replay, no frontier option. Frontier
+    // admission remains the separate exact membrane in form-cli-sufficiency.
+    def fcmg-local-plan-budget() = 24;
+    def fcmg-local-plan-prompt(task) = ("Form next-step. Reply with exactly one line: NEXT:<move>. Moves: ground-first, knowledge-query, source-read, preflight, execute, observe, revise, land, stop. Rules: changed or uncompiled source -> preflight; preflight clean -> execute; complete focused band -> land; error -> observe. Keep nothing, 0, and 1 distinct. Task: " + task);
+    def fcmg-local-plan-text(report) = {
+        let mark = "text:\n";
+        let at = str_find(report, mark, 0);
+        at < 0 ? "" : {
+            let generated-text = substring(report, at + len(mark), len(report));
+            len(generated-text) > 512 ? substring(generated-text, 0, 512) : generated-text;
+        };
+    };
+    def fcmg-local-plan-trim-last(s, byte) = {
+        let n = len(s);
+        n > 0 && (Comparable) str_byte_at(s, n - 1) == byte ? substring(s, 0, n - 1) : s;
+    };
+    def fcmg-local-plan-trim(s) = fcmg-local-plan-trim-last(fcmg-local-plan-trim-last(s, 10), 13);
+    def fcmg-local-plan-moves() = ["ground-first", "knowledge-query", "source-read", "preflight", "execute", "observe", "revise", "land", "stop"];
+    def fcmg-local-plan-known?(move, moves) = (Comparable) len(moves) == 0 ? 0 : (String) move == moves[0] ? 1 : fcmg-local-plan-known?(move, moves[1:]);
+    // A typed offer, not an operations table: ready carries the exact Form move
+    // symbol; malformed or unoffered speech becomes nothing. A later recipe
+    // execution door may bind that symbol to an addressed recipe without
+    // changing this local-model grammar.
+    def fcmg-local-plan-offer(text) = {
+        let clean = fcmg-local-plan-trim(text);
+        let prefix = "NEXT:";
+        !((Comparable) str_find(clean, prefix, 0) == 0) ? ["nothing", ""] : {
+            let move = substring(clean, len(prefix), len(clean));
+            (Comparable) fcmg-local-plan-known?(move, fcmg-local-plan-moves()) == 1 ? ["ready", move] : ["nothing", ""];
+        };
+    };
+    // The session result retains what was offered instead of making a later
+    // parser reconstruct it from prose.  Indices 0 and 1 remain speech and
+    // residence, so every existing REPL caller stays byte-compatible; index 2
+    // is the typed ready/nothing offer for an addressed action binder.
+    def fcmg-local-plan-result(speech, residence, offer) = [speech, residence, offer];
+    def fcmg-local-plan-result-speech(result) = result[0];
+    def fcmg-local-plan-result-residence(result) = result[1];
+    def fcmg-local-plan-result-offer(result) = result[2];
+    def fcmg-local-plan-from-generated(residence, report) = {
+        let generated-text = fcmg-local-plan-text(report);
+        let offer = fcmg-local-plan-offer(generated-text);
+        fcmg-local-plan-result((String) offer[0] == "ready" ? ("local-plan-status=ready\nlocal-plan-move=" + (offer[1] + "\nlocal-plan-source=form-native-qwen")) : "local-plan-status=nothing\nreason=malformed-or-refused-local-move", residence, offer);
+    };
+    def fcmg-local-plan-resident(r, path, task) = (String) path == "" ? fcmg-local-plan-result("local-plan=nothing\nreason=no-local-model-selected\nnext=models-use", r, ["nothing", ""]) : (String) task == "" ? fcmg-local-plan-result("usage: local-plan <task>", r, ["nothing", ""]) : {
+        let generated = fcmg-generate-with-at(r, path, fcmg-local-plan-prompt(task), fcmg-local-plan-budget(), frc-profile());
+        fcmg-local-plan-from-generated(generated[1], generated[0]);
+    };
+    // The door a session speaks through: it is handed what the session holds and
+    // answers the text together with what it should keep holding.
+    def fcmg-generate-resident(r, path, prompt, n) = (String) path == "" ? ["no model is picked — run `models <dir>`, then `use <n>`, then `generate <prompt>`", r] : (String) prompt == "" ? ["usage: generate <prompt>", r] : fcmg-generate-plain-resident(r, path, (fcmg-teach(prompt) + ("\n" + fhm-caller-budget-text(n))), n);
+    // The same door for a caller that holds nothing: admit, generate, release.
+    def fcmg-generate(path, prompt, n) = {
+        let out = fcmg-generate-resident(fcmr-none(), path, prompt, n);
+        let _turn-returned = fcmg-live-stage("model-turn-returned", 7864321);
+        (Comparable) fcmr-release-ok?(out[1]) == 1 ? out[0] : "generation refused: model handle close mismatch";
+    };
+    // Compact current-source door for held-out evaluation and direct knowledge
+    // questions. Same resident model, cursor, lookup budget and KV injection;
+    // only the repeated prompt profile is smaller.
+    def fcmg-generate-knowledge-resident(r, path, prompt, n) = (String) path == "" ? ["no model is picked — current-source generation needs a selected model", r] : (String) prompt == "" ? ["usage: knowledge-generate <prompt>", r] : fcmg-generate-with-at(r, path, fqt-knowledge-prompt(prompt), n, "knowledge-query");
+    def fcmg-generate-knowledge-resident-2p(r, path, prompt, query, reserve) = (String) path == "" ? ["no model is picked — current-source generation needs a selected model", r] : (String) prompt == "" ? ["usage: knowledge-generate <prompt>", r] : fcmg-generate-with-at-2p(r, path, fqt-knowledge-prompt(prompt), query, reserve, "knowledge-query");
+    def fcmg-generate-knowledge-resident-2p-hinted(r, path, prompt, query, reserve, source-hint) = (String) path == "" ? ["no model is picked — current-source generation needs a selected model", r] : (String) prompt == "" ? ["usage: knowledge-generate <prompt>", r] : fcmg-generate-with-at-budgeted-hinted(r, path, fqt-bound-source-knowledge-prompt(prompt), 0, query, reserve, "knowledge-query", source-hint);
+    // The current configured production current-source door. 48/32 is a
+    // hypothesis until a live hit observes the reserve-opening path; nothing here
+    // legislates. The older n-argument entry remains a fungible delegate.
+    def fcmg-generate-current-source-resident(r, path, prompt) = fcmg-generate-knowledge-resident-2p(r, path, prompt, fcmg-current-source-query-budget(), fcmg-current-source-answer-reserve());
+    def fcmg-generate-current-source-resident-at(r, path, prompt, source-hint) = fcmg-generate-knowledge-resident-2p-hinted(r, path, prompt, fcmg-current-source-query-budget(), fcmg-current-source-answer-reserve(), source-hint);
+    def fcmg-generate-knowledge(path, prompt, n) = {
+        let out = fcmg-generate-knowledge-resident(fcmr-none(), path, prompt, n);
+        (Comparable) fcmr-release-ok?(out[1]) == 1 ? out[0] : "generation refused: model handle close mismatch";
+    };
+    // Soft mouth: Metal proposes text; kernel parses Form cells and admits only
+    // when held-out structure is equivalent. Empty held-out does not authorize.
+    // Invite spells the shape without paren cells so structure-think cannot
+    // contaminate the propose pass. On commit, inject re-runs generate with the
+    // admitted cells so those tokens enter the Metal offer stream.
+    def fcmg-soft-invite(prompt) = ("Emit one Form call. Operator word mul. Both operands the digit seven. Use call parentheses around operator and operands. One cell only. No prose. No bare result.\n" + prompt);
+    def fcmg-soft-tail(soft, injected) = (fcmg-line("soft-status", lg-soft-status(soft)) + (fcmg-line("soft-equivalent", lg-soft-equivalent(soft).str()) + (fcmg-line("soft-eval", lg-values-line(lg-soft-thoughts(soft))) + (fcmg-line("soft-commit", lg-soft-commit?(soft).str()) + ((String) fcmg-line("soft-wins", ll-wins(lg-soft-events(soft), lg-cand-soft()).str()) + fcmg-line("soft-injected", injected.str()))))));
+    def fcmg-soft-inject(path, soft, n) = (Comparable) lg-soft-commit?(soft) == 0 ? fcmg-soft-tail(soft, 0) : {
+        let cells = lg-cells-prompt(lg-soft-thoughts(soft));
+        let inject-report = fcmg-q35-run(path, cells, n);
+        (inject-report + ("\n" + fcmg-soft-tail(soft, 1)));
+    };
+    def fcmg-soft-mouth(path, prompt, heldout, n) = {
+        let propose-report = fcmg-q35-run(path, fcmg-soft-invite(prompt), n);
+        let proposal = fcmg-local-plan-text(propose-report);
+        let soft = lg-soft(proposal, heldout);
+        (Comparable) lg-soft-commit?(soft) == 0 ? (propose-report + ("\n" + fcmg-soft-tail(soft, 0))) : fcmg-soft-inject(path, soft, n);
+    };
+    def fcmg-bandwidth(path) = (String) path == "" ? "no model is picked — run `models <dir>`, then `use <n>`, then `model-bandwidth`" : (Comparable) qaf-verify-sealed-file(path) == 1 ? mbw-run(path) : "bandwidth refused: selected artifact has no current Form-native SHA-256 seal";
+    // The default witness answers `nothing` for every envelope — an unconfigured
+    // host honestly holds no knowledge. The grounded witness names the substrate
+    // this checkout DOES hold, so a hit can open the answer reserve for real.
+    // chunk 0 — one batch for the span — is the default because the body said so:
+    // the same prompt through chunk 1 and chunk 0 produced output-sha256
+    // 88bd9b9a...7fe1487f both times, with carrier syncs falling 506 -> 61.
+    def fcmg-heed-witness(path, prompt, query, reserve) = fcmg-heed-witness-with(path, prompt, query, reserve, fcmg-heed-lookup-nothing, 0);
+    def fcmg-heed-witness-grounded(path, prompt, query, reserve) = fcmg-heed-witness-with(path, prompt, query, reserve, fhg-lookup, 0);
+    def fcmg-heed-witness-grounded-chunk(path, prompt, query, reserve, chunk) = fcmg-heed-witness-with(path, prompt, query, reserve, fhg-lookup, chunk);
+    0;
+}

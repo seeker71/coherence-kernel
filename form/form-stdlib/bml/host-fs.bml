@@ -1,0 +1,103 @@
+// host-fs.bml — the host doors that end a borrowed program, under Form names a caller reads.
+//
+// The body borrowed /bin/chmod, /bin/ln, /bin/mkdir -m, /bin/sync, /bin/cp, printenv, date, uname and lsof for want of a
+// seed door. The doors exist now (runtime/fkwu-uni.c, leaf-door modes 35-49; the notes above fk_host_door are the
+// contract): host_chmod, host_symlink, host_link, host_sync, host_getenv, host_mkdir_mode, host_localtime, host_os,
+// host_file_holders, host_file_mode, host_file_copy, host_file_identity, host_utimes, host_realpath, host_pwrite. This file gives each an honest answer as data, so a caller migrates
+// by changing one name:
+//
+//   /bin/chmod 700 p            hfs-private-chmod(p)         true when the mode changed
+//   /bin/mkdir -m 700 p         hfs-private-dir(p)           1 THIS call made it, 0 it stood or could not be made
+//   /bin/ln -s target p         hfs-symlink(target, p)       true when the link was made
+//   /bin/ln stage p             hfs-publish(stage, p)        1 published, 0 p already stood (its first bytes stand), -1 refused
+//   /bin/sync                   hfs-sync()                   0
+//   /bin/cp from to             hfs-copy(from, to)           bytes copied, -1 when it did not; `to` appears whole or not at all
+//   printenv NAME               hfs-env(name, default)       the value, or the default when unset
+//   date '+%Y-%m-%d %H:%M:%S %Z'  hfs-date-line(ms)          the local time of a unix ms
+//   uname -s                    hfs-os()                     "Darwin" / "Linux"
+//   lsof -t path                hfs-holders(path)            pids holding the path open ([] none, nothing() this host cannot tell)
+//   stat -f %z:%m:%i path       hfs-identity(path)           [size mtime_ms inode birth_ms]; hfs-seal-text(path) is "size:mtime_ms:inode"
+//   stat -f %p / test -p        hfs-mode(path) permission bits; hfs-kind(path) "fifo" "dir" "file" ...; hfs-fifo?(path)
+//   touch -t                    hfs-touch(path, ms)          true when the mtime (and atime) were set
+//   cd -P dir && pwd -P         hfs-realpath(path)           the physical path, nothing() when it does not exist
+//   printf X | dd conv=notrunc  hfs-pwrite(path, off, bytes) bytes written in place, no truncation
+//
+// A binary without the doors answers nothing() from every one of them (the call names no native): hfs-door?() asks, and
+// the caller decides; no fallback to a program is carried here.
+//
+// Why hfs-copy is a door and not a Form loop: the only append a Form walk has (file_append_bytes) takes a byte LIST, and a
+// 4 MiB slice through it measured 79 s (2026-10-04); one read_file holds the whole file in the append-only, 2 GiB-capped
+// string pool. host_file_copy streams through a fixed 1 MiB buffer (a 10 MiB file in 17 ms, byte-equal).
+//
+// PROOF: form-stdlib/tests/host-fs-band.fk.
+// preludes: form-stdlib/bml/parse.bml
+import form-stdlib/bml/parse.bml;
+section [form.bml] {
+ class HostFs {
+  // whether this fkwu carries the doors (a bad argument answers -2 on a binary that has them, nothing() on one that does not)
+  def hfs-door?() = nothing?(host_chmod("", 0)) ? 0 : 1;
+  def hfs-private-mode() = 448;
+  // host_file_mode is the whole st_mode: the permission bits are `% 4096`, the type is the S_IFMT nibble `/ 4096`
+  def hfs-mode(path) = hfs-mode-perm(host_file_mode(path));
+  def hfs-mode-perm(m) = (Comparable) m < 0 ? m : m % 4096;
+  def hfs-kind(path) = hfs-kind-of(host_file_mode(path));
+  def hfs-kind-of(m) = (Comparable) m < 0 ? nothing() : hfs-kind-name((m / 4096) % 16);
+  def hfs-kind-name(t) = (Comparable) t == 1 ? "fifo" : (Comparable) t == 2 ? "char" : (Comparable) t == 4 ? "dir" : (Comparable) t == 6 ? "block" : (Comparable) t == 8 ? "file" : (Comparable) t == 10 ? "symlink" : (Comparable) t == 12 ? "socket" : "other";
+  def hfs-fifo?(path) = (String) hfs-kind(path) == "fifo";
+  // [size mtime_ms inode birth_ms], or nothing() when the path does not stat
+  def hfs-identity(path) = host_file_identity(path);
+  // `stat -f %z:%m:%i`, with the mtime in ms: "size:mtime_ms:inode"
+  def hfs-seal-text(path) = hfs-seal-of(host_file_identity(path));
+  def hfs-seal-of(row) = (String) value_kind(row) != "list" ? nothing() : row[0].str() ++ ":" ++ row[1].str() ++ ":" ++ row[2].str();
+  // `touch -t`: the modification and access time set to a unix ms
+  def hfs-touch(path, ms) = (Comparable) host_utimes(path, ms) == 0;
+  // `cd -P -- dir && pwd -P`: the physical absolute path, nothing() when it does not exist (host_cwd is already physical)
+  def hfs-realpath(path) = host_realpath(path);
+  // `printf X | dd of=path seek=N conv=notrunc`: bytes (a string, or a list of ints) written in place; the count, or a refusal
+  def hfs-pwrite(path, offset, bytes) = host_pwrite(path, offset, bytes);
+  def hfs-chmod(path, mode) = (Comparable) host_chmod(path, mode) == 0;
+  def hfs-private-chmod(path) = hfs-chmod(path, hfs-private-mode());
+  def hfs-private-dir(path) = host_mkdir_mode(path, hfs-private-mode());
+  def hfs-symlink(target, path) = (Comparable) host_symlink(target, path) == 0;
+  // link(2) answers -1 for EEXIST and for every other refusal; the path telling them apart is whether it stands now
+  def hfs-publish(stage, path) {
+   let linked = host_link(stage, path);
+   (Comparable) linked == 0 ? 1 : (Comparable) host_path_exists(path) == 1 ? 0 : -1;
+  }
+  def hfs-sync() = host_sync();
+  def hfs-env(name, default) = host_getenv(name) ?? default;
+  def hfs-env-int(name, default) = parse-int(host_getenv(name) ?? "") ?? default;
+  def hfs-home() = hfs-env("HOME", "");
+  def hfs-os() = host_os();
+  def hfs-darwin?() = (String) host_os() == "Darwin";
+  // the pids holding a file open, ascending; the peers of a pid are those that are not it
+  def hfs-holders(path) = host_file_holders(path);
+  def hfs-peers(path, me) {
+   let all = host_file_holders(path);
+   nothing?(all) ? nothing() : all |> filter(p => (Comparable) p != me);
+  }
+  // staged beside its destination and renamed into place: a copy that stops short leaves no half file at `to`
+  def hfs-copy(from, to) {
+   let stage = to ++ ".hfs-copy-" ++ host_pid().str();
+   let want = host_file_size(from);
+   let n = host_file_copy(from, stage);
+   let whole = (Comparable) n >= 0 && (Comparable) n == want && (Comparable) host_path_rename(stage, to) == 0;
+   let cleaned = whole ? 0 : host_path_remove(stage);
+   whole ? n : -1;
+  }
+  // the local time of a unix ms, as the host's zone reads it
+  def hfs-zeros(k) = k <= 0 ? "" : "0" ++ hfs-zeros(k - 1);
+  def hfs-pad(n, width) = hfs-zeros(width - len(n.str())) ++ n.str();
+  def hfs-date(row) = hfs-pad(row[0], 4) ++ "-" ++ hfs-pad(row[1], 2) ++ "-" ++ hfs-pad(row[2], 2);
+  def hfs-clock(row) = hfs-pad(row[3], 2) ++ ":" ++ hfs-pad(row[4], 2) ++ ":" ++ hfs-pad(row[5], 2);
+  // `date '+%Y-%m-%d %H:%M:%S %Z'`
+  def hfs-date-line(ms) = hfs-date-line-of(host_localtime(ms));
+  def hfs-date-line-of(row) = (String) value_kind(row) != "list" ? nothing() : hfs-date(row) ++ " " ++ hfs-clock(row) ++ " " ++ row[8];
+  // `date +%Y-%m-%d`, and `date +%Y-%m-%d-%H:%M`
+  def hfs-day(ms) = hfs-day-of(host_localtime(ms));
+  def hfs-day-of(row) = (String) value_kind(row) != "list" ? nothing() : hfs-date(row);
+  def hfs-minute(ms) = hfs-minute-of(host_localtime(ms));
+  def hfs-minute-of(row) = (String) value_kind(row) != "list" ? nothing() : hfs-date(row) ++ "-" ++ hfs-pad(row[3], 2) ++ ":" ++ hfs-pad(row[4], 2);
+ }
+ 0;
+}

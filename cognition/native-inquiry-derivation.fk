@@ -1,208 +1,123 @@
-; native-inquiry-derivation.fk — replayable, recursively queryable inquiry receipts.
-;
-; A node id is a base-8 derivation path rooted at 1. Digits 0..6 are the
-; what/where/when/who/how/which/why lanes; digit 7 is invalid. Therefore an
-; emitted answer or alternative is accepted directly as the subject of every
-; subsequent lane without a stored answer table.
-;
-; Every proof vector is:
-;   [nothing, 0, 1, alternative-node, acknowledgement, reason, receipt, steps]
-; acknowledgement: nothing=no completed answer, 0=rejected, 1=confirmed,
-;                  any other valid node id=derived answer.
-; reason: 0=complete, 1=unknown node, 2=budget exhausted,
-;         3=tampered derivation, 4=unknown lane.
-; witnessed: 2026-07-22 -> seven first nodes, 49/49 follow-up enquiries,
-; 56/56 exact receipt replays, 56/56 valid alternatives, tamper rejected
-; as 0/reason 3, unknown/budget/lane return nothing/reasons 1/2/4,
-; four live runtime framebuffer events, success 1.
+// native-inquiry-derivation.fk — replayable, recursively queryable inquiry receipts.
+//
+// A node id is a base-8 derivation path rooted at 1. Digits 0..6 are the
+// what/where/when/who/how/which/why lanes; digit 7 is invalid. Therefore an
+// emitted answer or alternative is accepted directly as the subject of every
+// subsequent lane without a stored answer table.
+//
+// Every proof vector is:
+//   [nothing, 0, 1, alternative-node, acknowledgement, reason, receipt, steps]
+// acknowledgement: nothing=no completed answer, 0=rejected, 1=confirmed,
+//                  any other valid node id=derived answer.
+// reason: 0=complete, 1=unknown node, 2=budget exhausted,
+//         3=tampered derivation, 4=unknown lane.
+// witnessed: 2026-07-22 -> seven first nodes, 49/49 follow-up enquiries,
+// 56/56 exact receipt replays, 56/56 valid alternatives, tamper rejected
+// as 0/reason 3, unknown/budget/lane return nothing/reasons 1/2/4,
+// four live runtime framebuffer events, success 1.
 import "../observe/thought-framebuffer.fk"
-
-(do
-  (defn nid-lane? (lane) (if (and (ge lane 0) (le lane 6)) 1 0))
-
-  (defn nid-valid-loop (node)
-    (if (eq node 1) 1
-      (if (lt node 8) 0
-        (if (eq (mod node 8) 7) 0 (nid-valid-loop (div node 8))))))
-  (defn nid-valid? (node) (if (lt node 1) 0 (nid-valid-loop node)))
-  (defn nid-depth (node)
-    (if (eq node 1) 0 (add 1 (nid-depth (div node 8)))))
-  (defn nid-child (parent lane) (add (mul parent 8) lane))
-  (defn nid-parent (node) (div node 8))
-  (defn nid-last-lane (node) (mod node 8))
-  (defn nid-alternative (parent lane)
-    (if (and (eq (nid-valid? parent) 1) (eq (nid-lane? lane) 1))
-      (nid-child parent (mod (add lane 1) 7))
-      1))
-
-  ; Receipt fields are all derived from parent+lane. Replay compares every
-  ; field with this derivation, so a checksum collision cannot admit a change.
-  ; [node,parent,lane,depth,interface,channel,relationship,shape,seal]
-  (defn nid-interface (lane) (add 2000 lane))
-  (defn nid-channel (parent lane)
-    (add 3000 (add (mul (mod parent 97) 7) lane)))
-  (defn nid-relationship (parent lane)
-    (add 4000 (mod (add (mul parent 11) (mul lane 13)) 1000003)))
-  (defn nid-shape (node parent lane depth interface channel relationship)
-    (mod (add node (add (mul parent 3) (add (mul lane 5)
-      (add (mul depth 7) (add (mul interface 11)
-        (add (mul channel 13) (mul relationship 17))))))) 1000000007))
-  (defn nid-seal (node parent lane depth interface channel relationship shape)
-    (mod (add 97 (add (mul node 19) (add (mul parent 23)
-      (add (mul lane 29) (add (mul depth 31) (add (mul interface 37)
-        (add (mul channel 41) (add (mul relationship 43) (mul shape 47)))))))))
-      1000000007))
-  (defn nid-receipt (parent lane)
-    (do (let node (nid-child parent lane))
-      (let depth (add (nid-depth parent) 1))
-      (let interface (nid-interface lane))
-      (let channel (nid-channel parent lane))
-      (let relationship (nid-relationship parent lane))
-      (let shape (nid-shape node parent lane depth interface channel relationship))
-      (let seal (nid-seal node parent lane depth interface channel relationship shape))
-      (list node parent lane depth interface channel relationship shape seal)))
-
-  (defn nid-r-node (r) (nth r 0))
-  (defn nid-r-parent (r) (nth r 1))
-  (defn nid-r-lane (r) (nth r 2))
-  (defn nid-r-depth (r) (nth r 3))
-  (defn nid-r-interface (r) (nth r 4))
-  (defn nid-r-channel (r) (nth r 5))
-  (defn nid-r-relationship (r) (nth r 6))
-  (defn nid-r-shape (r) (nth r 7))
-  (defn nid-r-seal (r) (nth r 8))
-
-  (defn nid-proof (ack reason alternative receipt steps)
-    (list (nothing) 0 1 alternative ack reason receipt steps))
-  (defn nid-p-alt (p) (nth p 3))
-  (defn nid-p-ack (p) (nth p 4))
-  (defn nid-p-reason (p) (nth p 5))
-  (defn nid-p-receipt (p) (nth p 6))
-  (defn nid-proof-arms? (p)
-    (if (and (nothing? (nth p 0)) (and (eq (nth p 1) 0)
-      (and (eq (nth p 2) 1) (eq (nid-valid? (nth p 3)) 1)))) 1 0))
-
-  (defn nid-receipt-valid? (receipt)
-    (if (not (eq (len receipt) 9)) 0
-      (do (let parent (nid-r-parent receipt))
-        (let lane (nid-r-lane receipt))
-        (if (and (eq (nid-valid? parent) 1) (eq (nid-lane? lane) 1))
-          (do (let expected (nid-receipt parent lane))
-            (if (and (eq (nid-r-node receipt) (nid-r-node expected))
-              (and (eq (nid-r-parent receipt) (nid-r-parent expected))
-              (and (eq (nid-r-lane receipt) (nid-r-lane expected))
-              (and (eq (nid-r-depth receipt) (nid-r-depth expected))
-              (and (eq (nid-r-interface receipt) (nid-r-interface expected))
-              (and (eq (nid-r-channel receipt) (nid-r-channel expected))
-              (and (eq (nid-r-relationship receipt) (nid-r-relationship expected))
-              (and (eq (nid-r-shape receipt) (nid-r-shape expected))
-                   (eq (nid-r-seal receipt) (nid-r-seal expected)))))))))) 1 0))
-          0))))
-
-  (defn nid-replay (receipt)
-    (if (eq (nid-receipt-valid? receipt) 1)
-      (nid-proof 1 0 (nid-alternative (nid-r-parent receipt) (nid-r-lane receipt)) receipt 1)
-      (nid-proof 0 3 1 receipt 1)))
-
-  (defn nid-inquire (subject lane fuel)
-    (if (eq (nid-valid? subject) 0)
-      (nid-proof (nothing) 1 1 (list) 0)
-      (if (eq (nid-lane? lane) 0)
-        (nid-proof (nothing) 4 1 (list) 0)
-        (if (le fuel 0)
-          (nid-proof (nothing) 2 (nid-alternative subject lane) (list) 0)
-          (do (let receipt (nid-receipt subject lane))
-            (nid-proof (nid-r-node receipt) 0
-              (nid-alternative subject lane) receipt 1))))))
-
-  (defn nid-first-loop (lane acc)
-    (if (ge lane 7) acc
-      (nid-first-loop (add lane 1) (cons (nid-inquire 1 lane 1) acc))))
-  (defn nid-reverse-loop (xs acc)
-    (if (eq (len xs) 0) acc (nid-reverse-loop (tail xs) (cons (head xs) acc))))
-  (defn nid-first () (nid-reverse-loop (nid-first-loop 0 (list)) (list)))
-  (defn nid-follow-one (node lane acc)
-    (if (ge lane 7) acc
-      (nid-follow-one node (add lane 1) (cons (nid-inquire node lane 1) acc))))
-  (defn nid-follow-loop (firsts acc)
-    (if (eq (len firsts) 0) acc
-      (nid-follow-loop (tail firsts)
-        (nid-follow-one (nid-p-ack (head firsts)) 0 acc))))
-  (defn nid-follow (firsts)
-    (nid-reverse-loop (nid-follow-loop firsts (list)) (list)))
-
-  (defn nid-success-count (proofs n)
-    (if (eq (len proofs) 0) n
-      (do (let p (head proofs))
-        (nid-success-count (tail proofs)
-          (add n (if (and (eq (nid-proof-arms? p) 1)
-            (and (eq (nid-p-reason p) 0)
-                 (eq (nid-valid? (nid-p-ack p)) 1))) 1 0))))))
-  (defn nid-replay-count (proofs n)
-    (if (eq (len proofs) 0) n
-      (do (let replay (nid-replay (nid-p-receipt (head proofs))))
-        (nid-replay-count (tail proofs)
-          (add n (if (and (eq (nid-proof-arms? replay) 1)
-            (and (eq (nid-p-ack replay) 1) (eq (nid-p-reason replay) 0))) 1 0))))))
-  (defn nid-alt-count (proofs n)
-    (if (eq (len proofs) 0) n
-      (nid-alt-count (tail proofs)
-        (add n (if (eq (nid-valid? (nid-p-alt (head proofs))) 1) 1 0)))))
-
-  (defn nid-tamper-shape (receipt)
-    (list (nid-r-node receipt) (nid-r-parent receipt) (nid-r-lane receipt)
-      (nid-r-depth receipt) (nid-r-interface receipt) (nid-r-channel receipt)
-      (nid-r-relationship receipt) (add (nid-r-shape receipt) 1)
-      (nid-r-seal receipt)))
-
-  (defn nid-witness ()
-    (do (let firsts (nid-first))
-      (let follows (nid-follow firsts))
-      (let first-ok (nid-success-count firsts 0))
-      (let follow-ok (nid-success-count follows 0))
-      (let replay-ok (add (nid-replay-count firsts 0) (nid-replay-count follows 0)))
-      (let alternatives-ok (add (nid-alt-count firsts 0) (nid-alt-count follows 0)))
-      (let sample (head firsts))
-      (let sample-follow (head follows))
-      (let tampered (nid-replay (nid-tamper-shape (nid-p-receipt sample))))
-      (let unknown (nid-inquire 2 0 1))
-      (let exhausted (nid-inquire 1 0 0))
-      (let bad-lane (nid-inquire 1 7 1))
-
-      ; Four observations enter the live runtime framebuffer: offered root,
-      ; completed first layer, completed follow-up layer, rejected tamper.
-      (framebuffer-clear)
-      (let event0 (fb_record (intern_trivial_int 1) "native-inquiry-derivation.fk" 1))
-      (let event1 (fb_record (intern_trivial_int first-ok) "native-inquiry-derivation.fk" 2))
-      (let event2 (fb_record (intern_trivial_int follow-ok) "native-inquiry-derivation.fk" 3))
-      (let event3 (fb_record (intern_trivial_int (nid-p-reason tampered))
-        "native-inquiry-derivation.fk" 4))
-      (let runtime-frames (len (framebuffer-events)))
-      (let success (if (and (eq first-ok 7) (and (eq follow-ok 49)
-        (and (eq replay-ok 56) (and (eq alternatives-ok 56)
-        (and (eq (nid-p-ack tampered) 0) (and (eq (nid-p-reason tampered) 3)
-        (and (nothing? (nid-p-ack unknown)) (and (eq (nid-p-reason unknown) 1)
-        (and (nothing? (nid-p-ack exhausted)) (and (eq (nid-p-reason exhausted) 2)
-        (and (nothing? (nid-p-ack bad-lane)) (and (eq (nid-p-reason bad-lane) 4)
-             (eq runtime-frames 4))))))))))))) 1 0))
-      ; [proof arms..., first/follow/replay/alternative counts,
-      ;  tamper ack/reason, unknown reason, exhausted reason, bad-lane reason,
-      ;  runtime framebuffer events, sample proof, sample follow-up, success]
-      (list (nothing) 0 1 (nid-p-alt sample)
-        first-ok follow-ok replay-ok alternatives-ok
-        (nid-p-ack tampered) (nid-p-reason tampered)
-        (nid-p-reason unknown) (nid-p-reason exhausted) (nid-p-reason bad-lane)
-        runtime-frames sample sample-follow success)))
-
-  (defn nid-tamper-witness ()
-    (do (let original (nid-p-receipt (nid-inquire 1 0 1)))
-      (let replayed (nid-replay original))
-      (let rejected (nid-replay (nid-tamper-shape original)))
-      (list (nothing) 0 1 (nid-p-alt rejected)
-        (nid-p-ack replayed) (nid-p-reason replayed)
-        (nid-p-ack rejected) (nid-p-reason rejected)
-        (if (and (eq (nid-p-ack replayed) 1)
-          (and (eq (nid-p-reason replayed) 0)
-          (and (eq (nid-p-ack rejected) 0)
-               (eq (nid-p-reason rejected) 3)))) 1 0))))
-)
+section [form.bml] {
+    def nid-lane?(lane) = lane >= 0 && lane <= 6 ? 1 : 0;
+    def nid-valid-loop(node) = (Comparable) node == 1 ? 1 : node < 8 ? 0 : (Comparable) (node % 8) == 7 ? 0 : nid-valid-loop(node / 8);
+    def nid-valid?(node) = node < 1 ? 0 : nid-valid-loop(node);
+    def nid-depth(node) = (Comparable) node == 1 ? 0 : (Number) 1 + (Number) nid-depth(node / 8);
+    def nid-child(parent, lane) = (Number) (parent * 8) + (Number) lane;
+    def nid-parent(node) = node / 8;
+    def nid-last-lane(node) = node % 8;
+    def nid-alternative(parent, lane) = (Comparable) nid-valid?(parent) == 1 && (Comparable) nid-lane?(lane) == 1 ? nid-child(parent, ((Number) lane + (Number) 1) % 7) : 1;
+    // Receipt fields are all derived from parent+lane. Replay compares every
+    // field with this derivation, so a checksum collision cannot admit a change.
+    // [node,parent,lane,depth,interface,channel,relationship,shape,seal]
+    def nid-interface(lane) = (Number) 2000 + (Number) lane;
+    def nid-channel(parent, lane) = (Number) 3000 + (Number) ((Number) (parent % 97 * 7) + (Number) lane);
+    def nid-relationship(parent, lane) = (Number) 4000 + (Number) (((Number) (parent * 11) + (Number) (lane * 13)) % 1000003);
+    def nid-shape(node, parent, lane, depth, interface, channel, relationship) = ((Number) node + (Number) ((Number) (parent * 3) + (Number) ((Number) (lane * 5) + (Number) ((Number) (depth * 7) + (Number) ((Number) (interface * 11) + (Number) ((Number) (channel * 13) + (Number) (relationship * 17))))))) % 1000000007;
+    def nid-seal(node, parent, lane, depth, interface, channel, relationship, shape) = ((Number) 97 + (Number) ((Number) (node * 19) + (Number) ((Number) (parent * 23) + (Number) ((Number) (lane * 29) + (Number) ((Number) (depth * 31) + (Number) ((Number) (interface * 37) + (Number) ((Number) (channel * 41) + (Number) ((Number) (relationship * 43) + (Number) (shape * 47))))))))) % 1000000007;
+    def nid-receipt(parent, lane) = {
+        let node = nid-child(parent, lane);
+        let depth = (Number) nid-depth(parent) + (Number) 1;
+        let interface = nid-interface(lane);
+        let channel = nid-channel(parent, lane);
+        let relationship = nid-relationship(parent, lane);
+        let shape = nid-shape(node, parent, lane, depth, interface, channel, relationship);
+        let seal = nid-seal(node, parent, lane, depth, interface, channel, relationship, shape);
+        [node, parent, lane, depth, interface, channel, relationship, shape, seal];
+    };
+    def nid-r-node(r) = r[0];
+    def nid-r-parent(r) = r[1];
+    def nid-r-lane(r) = r[2];
+    def nid-r-depth(r) = r[3];
+    def nid-r-interface(r) = r[4];
+    def nid-r-channel(r) = r[5];
+    def nid-r-relationship(r) = r[6];
+    def nid-r-shape(r) = r[7];
+    def nid-r-seal(r) = r[8];
+    def nid-proof(ack, reason, alternative, receipt, steps) = [nothing(), 0, 1, alternative, ack, reason, receipt, steps];
+    def nid-p-alt(p) = p[3];
+    def nid-p-ack(p) = p[4];
+    def nid-p-reason(p) = p[5];
+    def nid-p-receipt(p) = p[6];
+    def nid-proof-arms?(p) = nothing?(p[0]) && ((Comparable) p[1] == 0 && ((Comparable) p[2] == 1 && (Comparable) nid-valid?(p[3]) == 1)) ? 1 : 0;
+    def nid-receipt-valid?(receipt) = !((Comparable) len(receipt) == 9) ? 0 : {
+        let parent = nid-r-parent(receipt);
+        let lane = nid-r-lane(receipt);
+        (Comparable) nid-valid?(parent) == 1 && (Comparable) nid-lane?(lane) == 1 ? {
+            let expected = nid-receipt(parent, lane);
+            (Comparable) nid-r-node(receipt) == nid-r-node(expected) && ((Comparable) nid-r-parent(receipt) == nid-r-parent(expected) && ((Comparable) nid-r-lane(receipt) == nid-r-lane(expected) && ((Comparable) nid-r-depth(receipt) == nid-r-depth(expected) && ((Comparable) nid-r-interface(receipt) == nid-r-interface(expected) && ((Comparable) nid-r-channel(receipt) == nid-r-channel(expected) && ((Comparable) nid-r-relationship(receipt) == nid-r-relationship(expected) && ((Comparable) nid-r-shape(receipt) == nid-r-shape(expected) && (Comparable) nid-r-seal(receipt) == nid-r-seal(expected)))))))) ? 1 : 0;
+        } : 0;
+    };
+    def nid-replay(receipt) = (Comparable) nid-receipt-valid?(receipt) == 1 ? nid-proof(1, 0, nid-alternative(nid-r-parent(receipt), nid-r-lane(receipt)), receipt, 1) : nid-proof(0, 3, 1, receipt, 1);
+    def nid-inquire(subject, lane, fuel) = (Comparable) nid-valid?(subject) == 0 ? nid-proof(nothing(), 1, 1, [], 0) : (Comparable) nid-lane?(lane) == 0 ? nid-proof(nothing(), 4, 1, [], 0) : fuel <= 0 ? nid-proof(nothing(), 2, nid-alternative(subject, lane), [], 0) : {
+        let receipt = nid-receipt(subject, lane);
+        nid-proof(nid-r-node(receipt), 0, nid-alternative(subject, lane), receipt, 1);
+    };
+    def nid-first-loop(lane, acc) = lane >= 7 ? acc : nid-first-loop((Number) lane + (Number) 1, cons(nid-inquire(1, lane, 1), acc));
+    def nid-reverse-loop(xs, acc) = (Comparable) len(xs) == 0 ? acc : nid-reverse-loop(xs[1:], cons(xs[0], acc));
+    def nid-first() = nid-reverse-loop(nid-first-loop(0, []), []);
+    def nid-follow-one(node, lane, acc) = lane >= 7 ? acc : nid-follow-one(node, (Number) lane + (Number) 1, cons(nid-inquire(node, lane, 1), acc));
+    def nid-follow-loop(firsts, acc) = (Comparable) len(firsts) == 0 ? acc : nid-follow-loop(firsts[1:], nid-follow-one(nid-p-ack(firsts[0]), 0, acc));
+    def nid-follow(firsts) = nid-reverse-loop(nid-follow-loop(firsts, []), []);
+    def nid-success-count(proofs, n) = (Comparable) len(proofs) == 0 ? n : {
+        let p = proofs[0];
+        nid-success-count(proofs[1:], (Number) n + (Number) ((Comparable) nid-proof-arms?(p) == 1 && ((Comparable) nid-p-reason(p) == 0 && (Comparable) nid-valid?(nid-p-ack(p)) == 1) ? 1 : 0));
+    };
+    def nid-replay-count(proofs, n) = (Comparable) len(proofs) == 0 ? n : {
+        let replay = nid-replay(nid-p-receipt(proofs[0]));
+        nid-replay-count(proofs[1:], (Number) n + (Number) ((Comparable) nid-proof-arms?(replay) == 1 && ((Comparable) nid-p-ack(replay) == 1 && (Comparable) nid-p-reason(replay) == 0) ? 1 : 0));
+    };
+    def nid-alt-count(proofs, n) = (Comparable) len(proofs) == 0 ? n : nid-alt-count(proofs[1:], (Number) n + (Number) ((Comparable) nid-valid?(nid-p-alt(proofs[0])) == 1 ? 1 : 0));
+    def nid-tamper-shape(receipt) = [nid-r-node(receipt), nid-r-parent(receipt), nid-r-lane(receipt), nid-r-depth(receipt), nid-r-interface(receipt), nid-r-channel(receipt), nid-r-relationship(receipt), (Number) nid-r-shape(receipt) + (Number) 1, nid-r-seal(receipt)];
+    def nid-witness() = {
+        let firsts = nid-first();
+        let follows = nid-follow(firsts);
+        let first-ok = nid-success-count(firsts, 0);
+        let follow-ok = nid-success-count(follows, 0);
+        let replay-ok = (Number) nid-replay-count(firsts, 0) + (Number) nid-replay-count(follows, 0);
+        let alternatives-ok = (Number) nid-alt-count(firsts, 0) + (Number) nid-alt-count(follows, 0);
+        let sample = firsts[0];
+        let sample-follow = follows[0];
+        let tampered = nid-replay(nid-tamper-shape(nid-p-receipt(sample)));
+        let unknown = nid-inquire(2, 0, 1);
+        let exhausted = nid-inquire(1, 0, 0);
+        let bad-lane = nid-inquire(1, 7, 1);
+        // Four observations enter the live runtime framebuffer: offered root,
+        // completed first layer, completed follow-up layer, rejected tamper.
+        framebuffer-clear();
+        let event0 = fb_record(intern_trivial_int(1), "native-inquiry-derivation.fk", 1);
+        let event1 = fb_record(intern_trivial_int(first-ok), "native-inquiry-derivation.fk", 2);
+        let event2 = fb_record(intern_trivial_int(follow-ok), "native-inquiry-derivation.fk", 3);
+        let event3 = fb_record(intern_trivial_int(nid-p-reason(tampered)), "native-inquiry-derivation.fk", 4);
+        let runtime-frames = len(framebuffer-events());
+        let success = (Comparable) first-ok == 7 && ((Comparable) follow-ok == 49 && ((Comparable) replay-ok == 56 && ((Comparable) alternatives-ok == 56 && ((Comparable) nid-p-ack(tampered) == 0 && ((Comparable) nid-p-reason(tampered) == 3 && (nothing?(nid-p-ack(unknown)) && ((Comparable) nid-p-reason(unknown) == 1 && (nothing?(nid-p-ack(exhausted)) && ((Comparable) nid-p-reason(exhausted) == 2 && (nothing?(nid-p-ack(bad-lane)) && ((Comparable) nid-p-reason(bad-lane) == 4 && (Comparable) runtime-frames == 4))))))))))) ? 1 : 0;
+        // [proof arms..., first/follow/replay/alternative counts,
+        //  tamper ack/reason, unknown reason, exhausted reason, bad-lane reason,
+        //  runtime framebuffer events, sample proof, sample follow-up, success]
+        [nothing(), 0, 1, nid-p-alt(sample), first-ok, follow-ok, replay-ok, alternatives-ok, nid-p-ack(tampered), nid-p-reason(tampered), nid-p-reason(unknown), nid-p-reason(exhausted), nid-p-reason(bad-lane), runtime-frames, sample, sample-follow, success];
+    };
+    def nid-tamper-witness() = {
+        let original = nid-p-receipt(nid-inquire(1, 0, 1));
+        let replayed = nid-replay(original);
+        let rejected = nid-replay(nid-tamper-shape(original));
+        [nothing(), 0, 1, nid-p-alt(rejected), nid-p-ack(replayed), nid-p-reason(replayed), nid-p-ack(rejected), nid-p-reason(rejected), (Comparable) nid-p-ack(replayed) == 1 && ((Comparable) nid-p-reason(replayed) == 0 && ((Comparable) nid-p-ack(rejected) == 0 && (Comparable) nid-p-reason(rejected) == 3)) ? 1 : 0];
+    };
+}

@@ -1,0 +1,194 @@
+// form-knowledge-query-token.fk — a bounded Form-native knowledge-query
+// envelope that may occur inside a local model's decoded stream.
+//
+// THE HONEST SEAM.  Model logits may emit the query envelope.  They do not
+// execute a tool.  A carrier recognizes a COMPLETE envelope, pauses decoding,
+// and offers it to fkqt-execute/fkqt-execute-at.  fkwu then parses the request,
+// performs at most one native RAG lookup, and returns a typed observation.  The
+// carrier may append that observation as a tool/observation turn before the next
+// model token.  `model-executed` is therefore always 0; `executor-node` names
+// the Form cell that actually crossed the boundary.
+//
+// STREAM SURFACE (a tokenizer may split these into many BPE pieces):
+//   <|form:knowledge-query|>question<|/form:knowledge-query|>
+//
+// The surface is evidence, not identity.  A successfully parsed request is an
+// interned query TOKEN whose NodeID includes the exact question and its fixed
+// fuel/answer budget.  A result is a second interned observation TOKEN whose
+// NodeID includes status, request, executor, source attribution, bounded answer,
+// and reason.  Same request/observation shape therefore converges by content.
+//
+// BOUNDS.  One envelope, one lookup, one hit, query <= 256 bytes, returned
+// answer <= 768 bytes, rendered source path <= 192 bytes.  Ordinary prose,
+// quotation, partial/nested envelopes, trailing bytes, and over-budget requests
+// ack `nothing` and execute no lookup.  A complete lookup with no grounded cell
+// is `miss`, distinct from `nothing`.  A hit carries NamedCell REF NodeID,
+// current content CTOR NodeID, source path/key, answer key, retrieval score and
+// confidence.  No result dresses a cache row as model reasoning.
+//
+// ROUTING.  hit -> native; miss -> local when the local reasoning lane is ready,
+// otherwise remote; nothing -> continue/no-offer.  The formula delegates the
+// first three lanes to form-cli-router.fk and adds only the no-offer state.
+//
+import form-stdlib/core.fk;
+import form-stdlib/form-cli-router.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+import form-stdlib/text-tokenize.fk;
+import form-stdlib/rag-embed.fk;
+import form-stdlib/rag-index-codec.fk;
+import form-stdlib/rag-retrieve.fk;
+import form-stdlib/rag-ask.fk;
+//
+section [form.bml] {
+    // ── fixed stream grammar and budgets ───────────────────────────────
+    def fkqt-open() = "<|form:knowledge-query|>";
+    def fkqt-close() = "<|/form:knowledge-query|>";
+    def fkqt-observation-open() = "<|form:knowledge-observation|>";
+    def fkqt-observation-close() = "<|/form:knowledge-observation|>";
+    def fkqt-max-query-bytes() = 256;
+    def fkqt-max-answer-bytes() = 768;
+    def fkqt-max-source-bytes() = 192;
+    def fkqt-max-render-bytes() = 2048;
+    def fkqt-max-lookups() = 1;
+    def fkqt-max-hits() = 1;
+    def fkqt-fuel() = 1;
+    def fkqt-max-frame-bytes() = len(fkqt-open()) + (fkqt-max-query-bytes() + len(fkqt-close()));
+    // Source text is data inside an observation, never observation grammar.
+    // This byte-stream transducer makes that distinction structural: every '&'
+    // and '<' in a payload becomes an ASCII entity as it crosses the cursor.
+    // The rendered payload therefore contains no '<' byte and cannot speak an
+    // open or close control mark of its own. The transform is incremental and
+    // fuelled; it neither tokenizes nor materializes a source-byte table.
+    def fkqt-observation-encoding() = "form-stream-entity-v1";
+    def fkqt-observation-piece(text, at) = {
+        let b = str_byte_at(text, at);
+        (Comparable) b == 38 ? "&amp;" : (Comparable) b == 60 ? "&lt;" : substring(text, at, at + 1);
+    };
+    // Returns (rendered-bytes consumed-source-bytes). A piece is indivisible:
+    // exhaustion stops before it, so an entity is never clipped into ambiguity.
+    def fkqt-observation-take-loop(text, at, fuel, rendered) = at >= len(text) ? [rendered, at] : {
+        let piece = fkqt-observation-piece(text, at);
+        len(piece) > fuel ? [rendered, at] : fkqt-observation-take-loop(text, at + 1, fuel - len(piece), ((String) rendered + piece));
+    };
+    def fkqt-observation-take(text, fuel) = fkqt-observation-take-loop(text, 0, fuel < 0 ? 0 : fuel, "");
+    def fkqt-observation-escape(text) = fkqt-observation-take(text, len(text) * 5)[0];
+    def fkqt-observation-boundary-safe?(rendered) = str_find(rendered, "<", 0) < 0 ? 1 : 0;
+    def fkqt-observation-mark-at?(text, mark, at) = (Comparable) str_find(text, mark, at) == at ? 1 : 0;
+    def fkqt-observation-decode-loop(text, at, decoded) = at >= len(text) ? decoded : (Comparable) fkqt-observation-mark-at?(text, "&lt;", at) == 1 ? fkqt-observation-decode-loop(text, at + 4, (decoded + "<")) : (Comparable) fkqt-observation-mark-at?(text, "&amp;", at) == 1 ? fkqt-observation-decode-loop(text, at + 5, (decoded + "&")) : fkqt-observation-decode-loop(text, at + 1, ((String) decoded + substring(text, at, at + 1)));
+    def fkqt-observation-decode(text) = fkqt-observation-decode-loop(text, 0, "");
+    // Reserved Form-neutral categories.  The composed children carry content
+    // identity; the integer category slots only keep this token family apart.
+    def fkqt-query-category() = make_nodeid(31, 2, 0, 51);
+    def fkqt-executor-category() = make_nodeid(31, 2, 0, 52);
+    def fkqt-observation-category() = make_nodeid(31, 2, 0, 53);
+    def fkqt-absent-category() = make_nodeid(31, 2, 0, 54);
+    def fkqt-absent-token() = intern_node(fkqt-absent-category(), [intern_trivial_string("nothing")]);
+    def fkqt-node-key(node) = (node_pkg(node).str() + ("." + (node_level(node).str() + ("." + (node_type(node).str() + ("." + node_inst(node).str()))))));
+    def fkqt-query-token(query) = intern_node(fkqt-query-category(), [intern_trivial_string(query), intern_trivial_int(fkqt-max-answer-bytes()), intern_trivial_int(fkqt-fuel())]);
+    def fkqt-query-token-valid?(token) = nothing?(token) ? 0 : !node_eq(node_category(token), fkqt-query-category()) ? 0 : !((Comparable) len(node_children(token)) == 3) ? 0 : len(node_value(node_children(token)[0])) > fkqt-max-query-bytes() ? 0 : !((Comparable) node_value(node_children(token)[1]) == fkqt-max-answer-bytes()) ? 0 : (Comparable) node_value(node_children(token)[2]) == fkqt-fuel() ? 1 : 0;
+    def fkqt-query-of-token(token) = (Comparable) fkqt-query-token-valid?(token) == 1 ? node_value(node_children(token)[0]) : "";
+    def fkqt-executor-token() = intern_node(fkqt-executor-category(), [intern_trivial_string("form/form-stdlib/form-knowledge-query-token.fk"), intern_trivial_string("fkwu-after-stream-parse"), intern_trivial_int(1)]);
+    // ── parser: surface -> ready/nothing request ───────────────────────
+    // request = (state reason query query-token).  Only state=ready may execute.
+    def fkqt-request(state, reason, query, token) = [state, reason, query, token];
+    def fkqt-request-state(r) = r[0];
+    def fkqt-request-reason(r) = r[1];
+    def fkqt-request-query(r) = r[2];
+    def fkqt-request-token(r) = r[3];
+    def fkqt-request-ready?(r) = (String) fkqt-request-state(r) == "ready" ? 1 : 0;
+    def fkqt-nothing-request(reason) = fkqt-request("nothing", reason, "", nothing());
+    def fkqt-parse(surface) = !((Comparable) str_find(surface, fkqt-open(), 0) == 0) ? fkqt-nothing-request("no-query-token") : {
+        let close-at = str_find(surface, fkqt-close(), len(fkqt-open()));
+        close-at < 0 ? len(surface) > fkqt-max-frame-bytes() ? fkqt-nothing-request("query-budget-exceeded") : fkqt-nothing-request("held-incomplete") : !((Comparable) (close-at + len(fkqt-close())) == len(surface)) ? fkqt-nothing-request("trailing-bytes") : {
+            let query = substring(surface, len(fkqt-open()), close-at);
+            str_find(query, fkqt-open(), 0) >= 0 ? fkqt-nothing-request("nested-query-token") : (Comparable) len(query) == 0 ? fkqt-nothing-request("empty-query") : len(query) > fkqt-max-query-bytes() ? fkqt-nothing-request("query-budget-exceeded") : fkqt-request("ready", "ready", query, fkqt-query-token(query));
+        };
+    };
+    // ── typed result and routing ───────────────────────────────────────
+    // result fields:
+    //  0 status       hit | miss | nothing
+    //  1 reason       grounded-hit | grounded-miss | parser reason
+    //  2 request      query token or absent token
+    //  3 observation  content-addressed observation token
+    //  4 executor     Form executor token
+    //  5 source-ref   NamedCell REF NodeID string (hit only)
+    //  6 content-ref  current CTOR NodeID string (hit only)
+    //  7 source-path  bounded, inspectable source path
+    //  8 source-key   substrate source key/hash
+    //  9 answer-key   SHA-256 binding for the exact indexed answer
+    // 10 answer       bounded decoded answer
+    // 11 answer-cut   1 when the indexed answer exceeded the stream budget
+    // 12 source-cut   1 when source path exceeded the render budget
+    // 13 score
+    // 14 confidence
+    // 15 lane         0 native | 1 local | 2 remote | 3 continue/no-offer
+    // 16 executed     1 only after the RAG offer actually ran
+    // 17 model-executed (always 0)
+    // 18 lookup-count 0 or 1
+    // 19 hit-count    0 or 1
+    def fkqt-route-lane(status, local-ready) = (String) status == "hit" ? fcr-walk(1, local-ready) : (String) status == "miss" ? fcr-walk(0, local-ready) : 3;
+    def fkqt-clip(s, max-bytes) = len(s) <= max-bytes ? s : substring(s, 0, max-bytes);
+    def fkqt-cut?(s, max-bytes) = len(s) > max-bytes ? 1 : 0;
+    def fkqt-request-or-absent(request) = (Comparable) fkqt-request-ready?(request) == 1 ? fkqt-request-token(request) : fkqt-absent-token();
+    def fkqt-observation-token(status, reason, request, source-ref, content-ref, source-path, source-key, answer-key, answer, lane, executed) = intern_node(fkqt-observation-category(), [intern_trivial_string(status), intern_trivial_string(reason), fkqt-request-or-absent(request), fkqt-executor-token(), intern_trivial_string(source-ref), intern_trivial_string(content-ref), intern_trivial_string(source-path), intern_trivial_string(source-key), intern_trivial_string(answer-key), intern_trivial_string(answer), intern_trivial_int(lane), intern_trivial_int(executed), intern_trivial_int(0)]);
+    def fkqt-result(status, reason, request, source-ref, content-ref, source-path, source-key, answer-key, answer, answer-cut, source-cut, score, confidence, lane, executed, lookup-count, hit-count) = {
+        let observation = fkqt-observation-token(status, reason, request, source-ref, content-ref, source-path, source-key, answer-key, answer, lane, executed);
+        [status, reason, fkqt-request-or-absent(request), observation, fkqt-executor-token(), source-ref, content-ref, source-path, source-key, answer-key, answer, answer-cut, source-cut, score, confidence, lane, executed, 0, lookup-count, hit-count];
+    };
+    def fkqt-status(r) = r[0];
+    def fkqt-reason(r) = r[1];
+    def fkqt-result-request-token(r) = r[2];
+    def fkqt-observation(r) = r[3];
+    def fkqt-executor(r) = r[4];
+    def fkqt-source-ref(r) = r[5];
+    def fkqt-content-ref(r) = r[6];
+    def fkqt-source-path(r) = r[7];
+    def fkqt-source-key(r) = r[8];
+    def fkqt-answer-key(r) = r[9];
+    def fkqt-answer(r) = r[10];
+    def fkqt-answer-cut?(r) = r[11];
+    def fkqt-source-cut?(r) = r[12];
+    def fkqt-score(r) = r[13];
+    def fkqt-confidence(r) = r[14];
+    def fkqt-lane(r) = r[15];
+    def fkqt-executed?(r) = r[16];
+    def fkqt-model-executed?(r) = r[17];
+    def fkqt-lookup-count(r) = r[18];
+    def fkqt-hit-count(r) = r[19];
+    def fkqt-nothing-result(request, local-ready) = fkqt-result("nothing", fkqt-request-reason(request), request, "", "", "", "", "", "", 0, 0, 0, 0, fkqt-route-lane("nothing", local-ready), 0, 0, 0);
+    def fkqt-miss-result(request, local-ready) = fkqt-result("miss", "grounded-miss", request, "", "", "", "", "", "", 0, 0, 0, 0, fkqt-route-lane("miss", local-ready), 1, 1, 0);
+    def fkqt-hit-admissible?(hit) = (Comparable) ra-hit?(hit) == 1 && ((Comparable) ra-hit-resolves?(hit) == 1 && ((Comparable) ra-hit-sufficient?(hit) == 1 && ((Comparable) ric-node-id-valid?(ra-hit-node-id(hit)) == 1 && ((Comparable) ric-node-id-valid?(ra-hit-content-node-id(hit)) == 1 && len(ra-hit-source-path(hit)) > 0)))) ? 1 : 0;
+    def fkqt-result-from-hit(request, hit, local-ready) = (Comparable) fkqt-hit-admissible?(hit) == 0 ? fkqt-miss-result(request, local-ready) : {
+        let raw-source = ra-hit-source-path(hit);
+        let raw-answer = ra-hit-answer(hit);
+        let source = fkqt-clip(raw-source, fkqt-max-source-bytes());
+        let answer = fkqt-clip(raw-answer, fkqt-max-answer-bytes());
+        fkqt-result("hit", "grounded-hit", request, ra-hit-node-id(hit), ra-hit-content-node-id(hit), source, ra-hit-key(hit), ra-hit-answer-key(hit), answer, fkqt-cut?(raw-answer, fkqt-max-answer-bytes()), fkqt-cut?(raw-source, fkqt-max-source-bytes()), ra-hit-score(hit), ra-hit-confidence(hit), fkqt-route-lane("hit", local-ready), 1, 1, 1);
+    };
+    // This is the live offer.  Parsing must complete before file IO begins.
+    def fkqt-execute-at(index-path, surface, local-ready) = {
+        let request = fkqt-parse(surface);
+        (Comparable) fkqt-request-ready?(request) == 0 ? fkqt-nothing-result(request, local-ready) : fkqt-result-from-hit(request, ra-grounded-hit-at(index-path, fkqt-request-query(request)), local-ready);
+    };
+    def fkqt-execute(surface, local-ready) = fkqt-execute-at(ra-default-index(), surface, local-ready);
+    // ── inspectable rendering ─────────────────────────────────────────
+    // Render is for witnesses/debugging.  Integration should pass the typed
+    // result as a tool/observation role, not splice it into assistant prose.
+    def fkqt-cat(parts) = (Comparable) len(parts) == 0 ? "" : ((String) parts[0] + fkqt-cat(parts[1:]));
+    def fkqt-render-prefix(result, answer-cut, render-cut) = fkqt-cat([fkqt-observation-open(), "\nstatus=", fkqt-status(result), "\nreason=", fkqt-reason(result), "\nrequest-node=@", fkqt-node-key(fkqt-result-request-token(result)), "\nobservation-node=@", fkqt-node-key(fkqt-observation(result)), "\nexecutor-node=@", fkqt-node-key(fkqt-executor(result)), "\nsource-ref=", fkqt-source-ref(result), "\ncontent-ref=", fkqt-content-ref(result), "\nsource-path=", fkqt-source-path(result), "\nsource-key=", fkqt-source-key(result), "\nanswer-key=", fkqt-answer-key(result), "\nretrieval-score=", fkqt-score(result).str(), "\nretrieval-confidence=", fkqt-confidence(result).str(), "\nlane=", fkqt-lane(result).str(), "\nexecuted=", fkqt-executed?(result).str(), "\nmodel-executed=", fkqt-model-executed?(result).str(), "\nlookup-count=", fkqt-lookup-count(result).str(), "\nhit-count=", fkqt-hit-count(result).str(), "\nanswer-encoding=", fkqt-observation-encoding(), "\nanswer-truncated=", answer-cut.str(), "\nanswer-source-truncated=", fkqt-answer-cut?(result).str(), "\nanswer-render-truncated=", render-cut.str(), "\nsource-truncated=", fkqt-source-cut?(result).str(), "\nanswer-byte-length=", len(fkqt-answer(result)).str(), "\nanswer:"]);
+    def fkqt-render(result) = {
+        // Both truncation digits are one byte, so the provisional prefix has
+        // exactly the same width as the final one. The payload receives the
+        // remaining render fuel; the close mark is reserved before it runs.
+        let provisional = fkqt-render-prefix(result, fkqt-answer-cut?(result), 0);
+        let fuel = fkqt-max-render-bytes() - (len(provisional) + (1 + len(fkqt-observation-close())));
+        let escaped = fkqt-observation-take(fkqt-answer(result), fuel);
+        let render-cut = escaped[1] < len(fkqt-answer(result)) ? 1 : 0;
+        let answer-cut = (Comparable) fkqt-answer-cut?(result) == 1 || (Comparable) render-cut == 1 ? 1 : 0;
+        let prefix = fkqt-render-prefix(result, answer-cut, render-cut);
+        fkqt-cat([prefix, escaped[0], "\n", fkqt-observation-close()]);
+    };
+    0;
+}

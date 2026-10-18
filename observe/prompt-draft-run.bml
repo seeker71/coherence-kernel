@@ -1,0 +1,121 @@
+// prompt-draft-run.bml — the body's own agent drafts what it would answer to the person's own prompts.
+//
+// Reads the prompts the harness captured (prompt-capture.jsonl in the main checkout's hearth, hearth-home():
+// cwd, prompt, session, t), keeps the person's own words (system-reminder blocks removed; notifications, hook
+// feedback and prompts under 16 characters left out), and drafts the newest `count` not yet drafted through the
+// registry's answer model in this process (form-stdlib/bml/form-cli-native-voice.bml), given the turn before the
+// prompt from its own session transcript (form-stdlib/bml/session-transcript.bml, found under the person's home: the
+// HOME this process was given, or fkwu.conf HEARTH_PERSON_HOME over it; with neither, one need line says so and
+// each draft goes without the turn before). Each draft lands
+// under that same hearth, .hearth/drafts/<id>.md, and one row in receipts/draft-ledger.jsonl with reading
+// "pending"; our reading is recorded beside it by observe/draft-reading-run.bml. The draft text never enters the
+// ledger.
+// stdin, optional: {"count":2,"max_reply_tokens":900,"redraft":0,"repair":0}; redraft 1 rewrites pending drafts
+// written without the turn before them. repair 1 rewrites drafts whose latest reading is revised, and the packet
+// carries that reading's note so the next draft can remove the miss.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/session-transcript.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
+section [form.bml] {
+ class PromptDraft {
+  // one hearth for every checkout: the capture and the drafts live beside each other in the main checkout
+  def pd-hearth() = hearth-home();
+  def pd-capture() = pd-hearth() ++ "/prompt-capture.jsonl";
+  def pd-ledger() = "receipts/draft-ledger.jsonl";
+  def pd-dir() = pd-hearth() ++ "/drafts";
+  def pd-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def pd-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
+  def pd-strip(s) {
+   let a = str_find(s, "<system-reminder>", 0);
+   let b = a < 0 ? -1 : str_find(s, "</system-reminder>", a);
+   (a < 0) || (b < 0) ? s : pd-strip(substring(s, 0, a) ++ substring(s, b + 18, len(s)));
+  }
+  def pd-own(raw) {
+   let s = trim(pd-strip(raw));
+   (len(s) < 16) || (pd-starts?(s, "<") || (pd-starts?(s, "Stop hook feedback") || (str_find(s, "<task-notification>", 0) >= 0))) ? "" : s;
+  }
+  def pd-nonempty(xs) = nil?(xs) ? [] : (Comparable) len(trim(xs[0])) == 0 ? pd-nonempty(xs[1:]) : cons(xs[0], pd-nonempty(xs[1:]));
+  def pd-parse(xs) = xs |> map(x => parse-json("capture-row", x));
+  def pd-rows(path) = file_size(path) < 1 ? [] : pd-parse(pd-nonempty(split-on(fhn-read(path), "\n")));
+  def pd-id(r) = fhn-text(r, "session") ++ "-" ++ fhn-count(r, "t").str();
+  def pd-drafted?(id, rows) = nil?(rows) ? 0 : (String) fhn-text(rows[0], "draft") == id ? 1 : pd-drafted?(id, rows[1:]);
+  // the latest row of a draft that carries its path, and the latest reading naming it
+  def pd-draft-row(id, rows, acc) = nil?(rows) ? acc : pd-draft-row(id, rows[1:], ((String) fhn-text(rows[0], "draft") == id) && (len(fhn-text(rows[0], "path")) > 0) ? rows[0] : acc);
+  def pd-reading(id, rows, acc) = nil?(rows) ? acc : pd-reading(id, rows[1:], (String) fhn-text(rows[0], "draft") == id ? fhn-text(rows[0], "reading") : acc);
+  def pd-note(id, rows, acc) = nil?(rows) ? acc : pd-note(id, rows[1:], ((String) fhn-text(rows[0], "draft") == id) && (len(fhn-text(rows[0], "note")) > 0) ? fhn-text(rows[0], "note") : acc);
+  def pd-revised?(id, rows) = (String) pd-reading(id, rows, "") == "revised";
+  // redraft: a draft still pending that was written blind, or that was cut or missed its turn before under an older
+  // packet, or cut before cut answers were kept (its row carries no "cut"); a whole grounded answer stands
+  def pd-redraft?(id, rows) = (String) pd-reading(id, rows, "") == "pending" ? pd-stale?(pd-draft-row(id, rows, json-node-object([]))) : 0;
+  def pd-stale?(row) = pd-version(row) < 3 ? 1 : !json-object-has?(row, "cut") ? ((String) fhn-text(row, "voice") == "incomplete" ? 1 : 0) : (pd-version(row) < pd-packet-version()) && (((String) fhn-text(row, "voice") == "incomplete") || ((Comparable) json-int-value(json-object-get(row, "context_chars")) == 0)) ? 1 : 0;
+  def pd-want?(r, done, mode) = (Comparable) mode == 2 ? pd-revised?(pd-id(r), done) : (Comparable) mode == 1 ? pd-redraft?(pd-id(r), done) : (Comparable) pd-drafted?(pd-id(r), done) == 0 ? 1 : 0;
+  // newest first: the capture rows reversed, the person's own words, not yet drafted (or, redrafting, drafted blind)
+  def pd-pick(rows, done, n, redraft, acc) = nil?(rows) || (n <= 0) ? reverse(acc) : (len(pd-own(fhn-text(rows[0], "prompt"))) > 0) && ((Comparable) pd-want?(rows[0], done, redraft) == 1) ? pd-pick(rows[1:], done, n - 1, redraft, cons(rows[0], acc)) : pd-pick(rows[1:], done, n, redraft, acc);
+  def pd-tail(s, n) = len(s) <= n ? s : substring(s, len(s) - n, len(s));
+  // the files a prompt names, read so the voice answers from the body rather than asking for it
+  def pd-root() = hearth-home-root();
+  // a named file is read from the checkout the person asked in, else from the checkout this door runs in
+  def pd-in?(c, set) = str_find(set, c, 0) >= 0;
+  def pd-ltrim(w) = (len(w) > 0) && pd-in?(substring(w, 0, 1), "`'\"([{<") ? pd-ltrim(substring(w, 1, len(w))) : w;
+  def pd-rtrim(w) = (len(w) > 0) && pd-in?(substring(w, len(w) - 1, len(w)), "`'\")]}>,.:;!?") ? pd-rtrim(substring(w, 0, len(w) - 1)) : w;
+  def pd-word(w) = pd-rtrim(pd-ltrim(trim(w)));
+  def pd-at(root, w) = pd-starts?(w, "/") ? w : root ++ "/" ++ w;
+  def pd-find(w, roots) = nil?(roots) ? "" : file_size(pd-at(roots[0], w)) > 0 ? pd-at(roots[0], w) : pd-find(w, roots[1:]);
+  def pd-named?(w) = (len(w) > 3) && ((str_find(w, "/", 0) >= 0) && ((!pd-starts?(w, "/")) || pd-starts?(w, pd-root())));
+  def pd-words(lines) = nil?(lines) ? [] : append(split-on(lines[0], " "), pd-words(lines[1:]));
+  def pd-has?(w, xs) = nil?(xs) ? 0 : (String) xs[0] == w ? 1 : pd-has?(w, xs[1:]);
+  def pd-files(words, roots, n, acc) = nil?(words) || (n <= 0) ? reverse(acc) : pd-files-at(pd-word(words[0]), words[1:], roots, n, acc);
+  def pd-files-at(w, rest, roots, n, acc) = pd-named?(w) ? pd-files-found(pd-find(w, roots), rest, roots, n, acc) : pd-files(rest, roots, n, acc);
+  def pd-files-found(p, rest, roots, n, acc) = (len(p) > 0) && ((Comparable) pd-has?(p, acc) == 0) ? pd-files(rest, roots, n - 1, cons(p, acc)) : pd-files(rest, roots, n, acc);
+  def pd-head(s, n) = len(s) <= n ? s : substring(s, 0, n);
+  def pd-lines(xs) = nil?(xs) ? "" : xs[0] ++ "\n" ++ pd-lines(xs[1:]);
+  def pd-file-text(ws) = nil?(ws) ? "" : ("The file " ++ ws[0] ++ " reads (its first 2500 characters):\n" ++ pd-head(fhn-read(ws[0]), 2500) ++ "\n\n" ++ pd-file-text(ws[1:]));
+  def pd-read-if(path) = (Comparable) len(path) == 0 ? "" : file_size(path) > 0 ? fhn-read(path) : "";
+  // the packet's form: 0 blind, 1 the turn before, 3 the turn before and the files the prompt names (read from the
+  // checkout the person asked in), 4 with a word budget and only the files shown named, 5 with prompts given mid-turn
+  // found in the transcript
+  def pd-packet-version() = 5;
+  def pd-version(row) = json-object-has?(row, "packet") ? json-int-value(json-object-get(row, "packet")) : 0;
+  // the turn before the prompt in its own conversation, so a short prompt keeps its meaning
+  def pd-context(before) = ((Comparable) len(before[0]) == 0) && ((Comparable) len(trim(before[1])) == 0) ? "" : ("The person asked just before: " ++ pd-tail(before[0], 800) ++ "\n\nThe answer they received: " ++ pd-tail(before[1], 3000));
+  def pd-packet(prompt, context, files) = "You are this body's own agent, speaking for the coherence-kernel body on its own Mac. The person below asked the body to do something or to answer something. Write the answer or the concrete plan you would give them, as the body would act on it: plainly, specifically, naming the files, doors or steps you would use when the request is about the body's work, and saying what you do not know rather than guessing. You cannot run anything while you draft: when the request asks for something to be run or checked, name the door you would run and the reading that would mean it is done. Keep the answer or plan within about 250 words. Name only files and doors you were shown here or that the conversation names; where you would need to look something up, say what you would look for instead of naming a file you have not seen.\n\n" ++ ((Comparable) len(context) == 0 ? "" : context ++ "\n\n") ++ files ++ "The person asks now:\n" ++ prompt ++ "\n\nYour answer or plan:";
+  def pd-repair-packet(prompt, context, files, note, prior) = pd-packet(prompt, context, files) ++ "\n\nA reading of your previous draft said revised. The miss: " ++ note ++ "\nWrite the answer again. Keep what heard the person. Remove that miss. Name only files and doors already in the turn before, the files above, or your previous draft. About 250 words.\n\nPrevious draft:\n" ++ pd-tail(prior, 1600) ++ "\n";
+  def pd-one(r, opts, root) {
+   let id = pd-id(r);
+   let prompt = pd-own(fhn-text(r, "prompt"));
+   let started = now_unix_ms();
+   let context = pd-context(st-before(st-find-under(root, fhn-text(r, "session")), prompt));
+   let named = pd-files(pd-words(split-on(prompt, "\n")), [fhn-text(r, "cwd"), fhn-root()], 2, []);
+   let files = pd-file-text(named);
+   let ledger = pd-rows(pd-ledger());
+   let note = (Comparable) pd-int(opts, "repair", 0) == 1 ? pd-note(id, ledger, "") : "";
+   let prior-path = fhn-text(pd-draft-row(id, ledger, json-node-object([])), "path");
+   let prior = (Comparable) len(note) == 0 ? "" : pd-read-if(prior-path);
+   let packet = len(note) > 0 ? pd-repair-packet(prompt, context, files, note, prior) : pd-packet(prompt, context, files);
+   let v = fcnv-ask(packet, json-node-object([fhn-n("max_reply_tokens", pd-int(opts, "max_reply_tokens", 900))]));
+   // an answer cut at the reply budget is still what the voice would say; it is kept and marked as cut
+   let text = (String) v[0] == "answered" ? v[1] : ((String) v[0] == "incomplete") && (len(trim(v[8])) > 0) ? (trim(v[8]) ++ "\n\n(cut at the reply budget of " ++ pd-int(opts, "max_reply_tokens", 900).str() ++ " tokens)") : "";
+   let path = pd-dir() ++ "/" ++ id ++ ".md";
+   let seen = ((Comparable) len(context) == 0 ? "" : ("\n# The turn before (what the voice was given)\n\n" ++ context ++ "\n")) ++ (nil?(named) ? "" : ("\n# Files the voice read\n\n" ++ pd-lines(named) ++ "\n"));
+   let wrote = write_file_text(path, "# The person asked\n\n" ++ prompt ++ "\n\n# The body's draft\n\n" ++ text ++ "\n" ++ seen);
+   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("draft", id), fhn-n("prompt_t", fhn-count(r, "t")), fhn-s("session", fhn-text(r, "session")), fhn-s("path", path), fhn-n("packet", len(note) > 0 ? 6 : pd-packet-version()), fhn-n("context_chars", len(context)), fhn-n("files", len(named)), fhn-n("cut", (String) v[0] == "incomplete" ? 1 : 0), fhn-s("voice", v[0]), fhn-n("generated", v[3]), fhn-n("wall_ms", now_unix_ms() - started), fhn-s("reading", "pending")]);
+   let appended = fhn-append(pd-ledger(), json-emit(row) ++ "\n");
+   print_str("[draft] " ++ id ++ " voice=" ++ v[0] ++ " generated=" ++ v[3].str() ++ " -> " ++ path ++ "\n");
+  }
+  def pd-all(rows, opts, root) = nil?(rows) ? 0 : pd-all-next(pd-one(rows[0], opts, root), rows[1:], opts, root);
+  def pd-all-next(done, rest, opts, root) = pd-all(rest, opts, root);
+  def pd-run() {
+   let line0 = read_line();
+   let line = nothing?(line0) ? "" : trim(line0);
+   let opts = (String) line == "" ? json-node-object([]) : parse-json("draft-options", line);
+   let made = fs_mkdir(pd-dir());
+   let mode = (Comparable) pd-int(opts, "repair", 0) == 1 ? 2 : pd-int(opts, "redraft", 0);
+   let picked = pd-pick(reverse(pd-rows(pd-capture())), pd-rows(pd-ledger()), pd-int(opts, "count", 2), mode, []);
+   // the transcripts' root is read once for every draft (the person's home is a host read)
+   let root = st-root();
+   let blind = nothing?(root) ? print_str("[draft] need the person's home (no HOME given to this process, no HEARTH_PERSON_HOME in fkwu.conf): drafts carry no turn-before context") : 0;
+   let done = pd-all(picked, opts, root);
+   print_str("[draft] drafted " ++ len(picked).str() ++ "\n");
+  }
+ }
+ pd-run();
+}

@@ -7,14 +7,12 @@ commands should use this address directly.
 
 ## Contents
 
-- `form-kernel-go/` - Go sibling kernel.
-- `form-kernel-rust/` - Rust sibling kernel.
-- `form-kernel-ts/` - TypeScript sibling kernel.
 - `form-stdlib/` - Form stdlib, BMF engine, source compiler, language/media/natural-language grammars, and tests.
 - `form-samples/` - small runnable Form workloads.
-- `validate.sh` - sibling-kernel source and binary parity runner.
-- `kernel-roadmap.md` and `kernel-comparison.md` - current runtime roadmap and
-  performance notes.
+- `native/` - the Metal carrier and the Form recipes that drive it.
+- `conformance/` - the pinned canonical expressions and malformed FORMBIN2 artifacts `gate/canonical-conformance.bml` holds fkwu to.
+- `band-verdicts.txt` - the registered verdicts; the band sweep (`../gate/band-sweep-run.bml`) runs every band on fkwu and judges it against its pins.
+- `kernel-roadmap.md` - current runtime roadmap.
 
 ## Current Compiler Path
 
@@ -24,17 +22,18 @@ The active source path is BMF cursor -> layer grammar -> semantic/data lowering
 `form-definition-language` modules into `source-compiler-emission` only after
 scannerless grammar parse and lowering to the current top-level Form floor.
 
-The full present map is
-[`../docs/coherence-substrate/current-language-artifact-path.md`](../docs/coherence-substrate/current-language-artifact-path.md).
-
 ## Proof
 
+From the repository root (the doors read their paths from there; from `form/` they refuse):
+
 ```sh
-cd form
-./validate.sh form-stdlib/core.fk form-stdlib/engine.fk form-stdlib/source-compiler.fk form-stdlib/tests/form-action-bmf-rulebook.fk
-./validate.sh --binary form-stdlib/core.fk form-stdlib/engine.fk form-stdlib/source-compiler.fk form-stdlib/tests/form-action-bmf-rulebook.fk
-./validate.sh form-stdlib/tests/source-compiler-grammar-bridge-band.fk
+./fkwu form/form-stdlib/tests/source-compiler-grammar-bridge-band.fk        # fkwu reads 32767, 2026-09-29
+printf '{"files":["form-stdlib/tests/source-compiler-grammar-bridge-band.fk"]}' | ./fkwu gate/band-sweep-run.bml   # fkwu answers its head pin
 ```
+
+A band is named alone: fkwu resolves its `; preludes:` closure, so a hand-typed file
+list is not only unnecessary but wrong when it omits a prelude. The bridge band is
+not registered in `band-verdicts.txt`; its head pins its verdict.
 
 The kernel stays small: source sections, BMF rules, dialect migration,
 reverse emission, module bundling, locale/context lenses, and language/media
@@ -50,7 +49,7 @@ observation/control protocol and actuator live above them in Form at
 band after grounding when changing the carrier or protocol:
 
 ```sh
-./fkwu --src observe/tests/bidirectional-framebuffer-channel-band.fk
+./fkwu observe/tests/bidirectional-framebuffer-channel-band.fk
 ```
 
 For usage during failures, surprises, and model changes, including bounds on
@@ -59,18 +58,17 @@ retained content, see
 
 ## Consumer Submodule
 
-Repositories that already address the runtime as `form/` consume a generated,
-path-preserving branch rather than mounting this repository root (which would
-introduce an extra `form/form/` level). The `form-submodule` branch is generated
-from `main` and contains this directory at its repository root:
+Repositories that already address the runtime as `form/` consume the `form-submodule`
+distribution branch on origin: a curated lineage that carries this repository's root
+(the runtime, `observe/`, `cognition/`, `teachings/`, `form/`, and the rest of the body)
+and leaves out what belongs to one machine only (session launchers, `.coherence-network/`,
+`.cursor/`, the LoRA voice trees). It is not a mechanical copy of `main`. Each carry is one
+single-parent commit on the lineage, authored by the owner, whose message names the `main`
+commit it carries ("Distribution carry of coherence-kernel main <sha> (PR #n) onto the
+form-submodule lineage"). The lineage keeps its own shape of the orientation docs
+(`AGENTS.md`, `MANIFEST.md`, `WELCOME.md`), so a carry resolves those by hand, rebuilds
+`fkwu` at the lineage root, runs the bands there, and pushes. `main` remains the only source
+of authored kernel changes; the lineage is a distribution artifact.
 
-```sh
-git switch main
-git pull --ff-only
-split_sha="$(git subtree split --prefix=form main)"
-git push origin "${split_sha}:refs/heads/form-submodule"
-```
-
-Consumers pin the resulting commit as their `form/` gitlink and initialize it
-with `git submodule update --init --recursive`. `main` remains the only source
-of authored kernel changes; the split branch is a distribution artifact.
+Consumers pin the resulting commit as their `form/` gitlink and initialize it with
+`git submodule update --init --recursive`.

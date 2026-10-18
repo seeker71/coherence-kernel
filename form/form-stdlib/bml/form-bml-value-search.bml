@@ -1,0 +1,59 @@
+// Bounded one-edit search. Wrap a bare value expression with a unary call
+// already used in this source. The caller owns admission, execution and cost
+// of checker(contract, source) -> [0|1, observation]. No IO or model calls.
+// Result: [status, source, attempts, reason]. Each attempt is
+// [start-byte, end-byte, wrapper, passed, observation, source-sha256].
+// A passing original is unchanged; exhaustion/refusal preserves the original.
+import form-stdlib/bml/form-bml-boolean-repair.bml;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+import form-stdlib/hearth.bml;
+section [form.bml] {
+ class FormBmlValueSearch {
+  def fbvs-limit() = hearth-code-value-search-check-limit();
+  def fbvs-has(xs,x) = any?((item: String) => item == x,xs);
+  def fbvs-name(t) = if ((Comparable) len(t) == 0) then 0 else {
+   let c = str_byte_at(t,0);
+   ((((c >= 65) && (c <= 90)) || (((c >= 97) && (c <= 122)) || ((Comparable) c == 95))) && (fsc-bml-expression-name?(t) && ((str_find(t,".",0) < 0) && ((str_find(t,":",0) < 0) && (!fbvs-has(["if","then","else","def","fn","let","do","end","class","section","true","false","nothing"],t))))));
+  };
+  def fbvs-group-end(ts,i,stop) = if (i >= len(ts)) then i else if ((String) fbr-at(ts,i) == stop) then (i + 1) else if (!((String) fbr-closer(fbr-at(ts,i)) == "")) then fbvs-group-end(ts,fbvs-group-end(ts,(i + 1),fbr-closer(fbr-at(ts,i))),stop) else fbvs-group-end(ts,(i + 1),stop);
+  def fbvs-arity(ts,i,count,value) = if (i >= len(ts)) then -1 else if ((String) fbr-at(ts,i) == ")") then (count + value) else if ((String) fbr-at(ts,i) == ",") then fbvs-arity(ts,(i + 1),(count + 1),0) else if (!((String) fbr-closer(fbr-at(ts,i)) == "")) then fbvs-arity(ts,fbvs-group-end(ts,(i + 1),fbr-closer(fbr-at(ts,i))),count,1) else fbvs-arity(ts,(i + 1),count,1);
+  def fbvs-value-site(ts,i) = (fbvs-name(fbr-at(ts,i)) && (fbvs-has(["then","else","=","{",";"],if ((Comparable) i == 0) then "" else fbr-at(ts,(i - 1))) && fbvs-has(["else",";", ")","}"],fbr-at(ts,(i + 1)))));
+  def fbvs-unary(ts,i) = (fbvs-name(fbr-at(ts,i)) && (((String) fbr-at(ts,(i + 1)) == "(") && ((!fbvs-has(["def","fn",".","::"],if ((Comparable) i == 0) then "" else fbr-at(ts,(i - 1)))) && ((Comparable) fbvs-arity(ts,(i + 2),0,0) == 1))));
+  def fbvs-scan(ts,i,depth,active,sites,wrappers) = if (i >= len(ts)) then [reverse(sites),reverse(wrappers)] else {
+   let token = fbr-at(ts,i);
+   if (((Comparable) depth == 0) && ((String) token == "section")) then fbvs-scan(ts,(i + 5),1,((String) fbr-at(ts,(i + 2)) == "form.bml"),sites,wrappers) else {
+    let nextSites = if (active && fbvs-value-site(ts,i)) then cons(ts[i],sites) else sites;
+    let nextWrappers = if (active && (fbvs-unary(ts,i) && (!fbvs-has(wrappers,token)))) then cons(token,wrappers) else wrappers;
+    let nextDepth = if (!((String) fbr-closer(token) == "")) then (depth + 1) else if fbr-closing(token) then (depth - 1) else depth;
+    fbvs-scan(ts,(i + 1),nextDepth,if ((Comparable) nextDepth == 0) then 0 else active,nextSites,nextWrappers);
+   };
+  };
+  def fbvs-shape(r) = if (!((String) value_kind(r) == "list")) then 0 else if (!((Comparable) len(r) == 2)) then 0 else ((((Value) r[0] == 0) || ((Value) r[0] == 1)) && ((String) value_kind(r[1]) == "string"));
+  def fbvs-result(status,source,attempts,reason) = [status,source,reverse(attempts),reason];
+  def fbvs-malformed() = "caller-checker-returned-malformed-result";
+  def fbvs-row(start,end,wrapper,result,source) = [start,end,wrapper,result[0],result[1],hex-encode(sha256-stream-string(source))];
+  def fbvs-wrap(source,site,wrapper) = (substring(source,0,site[1]) + (wrapper + ("(" + (substring(source,site[1],site[2]) + (")" + substring(source,site[2],len(source)))))));
+  def fbvs-search(source,checker,contract,budget) = if (!(((String) value_kind(budget) == "int") && ((budget > 0) && (budget <= fbvs-limit())))) then fbvs-result("refused",source,[],"check-budget-must-be-integer-in-range") else {
+   let syntax = fbr-repair(source);
+   if (!syntax[0]) then fbvs-result("refused",source,[],syntax[3]) else if (!nil?(syntax[2])) then fbvs-result("refused",source,[],"boolean-syntax-repair-required") else {
+    let prepared = fbvs-scan(fbr-lex(source,0,[])[1],0,0,0,[],[]);
+    let checked = checker(contract,source);
+    let attempts = [fbvs-row(0,0,"",if fbvs-shape(checked) then checked else [0,fbvs-malformed()],source)];
+    if (!fbvs-shape(checked)) then fbvs-result("refused",source,attempts,fbvs-malformed()) else {
+     if checked[0] then fbvs-result("unchanged",source,attempts,checked[1]) else fbvs-next(source,checker,contract,budget,prepared[0],prepared[1],prepared[1],attempts);
+    };
+   };
+  };
+  def fbvs-next(source,checker,contract,budget,sites,wrappers,remaining,attempts) = if (len(attempts) >= budget) then fbvs-result("exhausted",source,attempts,"check-budget-exhausted") else if nil?(sites) then fbvs-result("exhausted",source,attempts,"no-passing-single-value-wrapper") else if nil?(remaining) then fbvs-next(source,checker,contract,budget,sites[1:],wrappers,wrappers,attempts) else {
+   let site = sites[0]; let wrapper = remaining[0];
+   let candidate = fbvs-wrap(source,site,wrapper);
+   let checked = checker(contract,candidate);
+   let next = cons(fbvs-row(site[1],site[2],wrapper,if fbvs-shape(checked) then checked else [0,fbvs-malformed()],candidate),attempts);
+   if (!fbvs-shape(checked)) then fbvs-result("refused",source,next,fbvs-malformed()) else {
+    if checked[0] then fbvs-result("repaired",candidate,next,checked[1]) else fbvs-next(source,checker,contract,budget,sites,wrappers,remaining[1:],next);
+   };
+  };
+ }
+ 0;
+}

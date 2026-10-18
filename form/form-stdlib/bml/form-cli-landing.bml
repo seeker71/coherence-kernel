@@ -1,0 +1,353 @@
+// Native publication: owned changes, retained local effects and current evidence.
+//
+// stdin: one JSON object
+//   {"witness":"<a command to run and show, or empty>",
+//    "paths":["file", ...], "subject":"<commit subject>", "body":"<commit body>",
+//    "restart":"origin/main" (optional), "main":1 (optional: the landed commit also fast-forwards main)}
+// A native request and receipt stay nodes. The continuation and Git evidence live
+// under .form-heal/landing-*/. Owned paths are committed; unrelated tracked edits
+// retain a private Git ref while rebase and current-source observation run.
+// The original task witness and assertions, and existing affected release checks,
+// supply native results. An advanced main resumes this same continuation.
+// Publication uses an ordinary atomic push and confirms every requested ref.
+// Changed runtime inputs renew the artifact and resume from the native checkpoint.
+// Terminal text and an explicitly supplied shell witness have their own boundary.
+// preflight-exec: forbidden
+import form-stdlib/bml/form-cli-reunion.bml;
+import form-stdlib/bml/host-child.bml;
+import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/meaning-codes.bml;
+import observe/form-membrane-runtime-census.fk;
+import form-stdlib/bml/string-join.bml;
+import form-stdlib/bml/form-cli-code-memory.bml;
+import form-stdlib/bml/form-cli-check-witness.bml;
+import gate/drift-gates.bml;
+section [form.bml] {
+ class Land {
+  def ld-source() = "observe/land-run.bml";
+  def ld-message-path() = ".form-heal/land-message.txt";
+  def ld-paths(doc) = json-object-has?(doc, "paths") ? oh-values(json-array-elements(json-object-get(doc, "paths"))) : [];
+  // git add stages nothing at all when one named path matches no file (fatal: pathspec did not match), so a path is
+  // added when it is present, or tracked and gone (its removal is staged); any other is named and left unstaged
+  def ld-has?(xs, x) = nil?(xs) ? false : ((String) xs[0] == x) || ld-has?(xs[1:], x);
+  def ld-absent(paths) = filter(p => file_size(p) < 0, paths);
+  // Each absent path git still tracks, in the spelling it was named: git lists the tracked names under the absent
+  // paths (ls-files -z, so no name is quoted), a chunk at a time because an argv holds 32 words, and Form matches a
+  // name that is the path or lies under it (a path git tracks as a directory). Paths are literal, never globs.
+  def ld-chunk-size() = 24;
+  def ld-head(xs, n) = nil?(xs) || n <= 0 ? [] : cons(xs[0], ld-head(xs[1:], n - 1));
+  def ld-rest(xs, n) = nil?(xs) || n <= 0 ? xs : ld-rest(xs[1:], n - 1);
+  def ld-nul() = byte_to_str(0);
+  def ld-names(text) = filter(name => (Comparable) len(name) > 0, split-on(text ?? "", ld-nul()));
+  def ld-listed(io, dir, chunk) = ld-names(hch-git-quiet-in(io, dir, "land-tracked", append(["--literal-pathspecs", "ls-files", "-z", "--"], chunk))[1]);
+  def ld-listed-all(io, dir, paths) = nil?(paths) ? [] : append(ld-listed(io, dir, ld-head(paths, ld-chunk-size())), ld-listed-all(io, dir, ld-rest(paths, ld-chunk-size())));
+  def ld-bare(p) = len(p) > 1 && (Comparable) str_byte_at(p, len(p) - 1) == 47 ? ld-bare(substring(p, 0, len(p) - 1)) : p;
+  def ld-under?(names, p) = nil?(names) ? false : ((String) names[0] == p) || (len(names[0]) > len(p) && ((String) substring(names[0], 0, len(p) + 1) == p ++ "/")) || ld-under?(names[1:], p);
+  def ld-tracked-in(io, dir, absent) {
+   let named = filter(p => (Comparable) len(p) > 0, absent);
+   let names = nil?(named) ? [] : ld-listed-all(io, dir, named);
+   filter(p => ld-under?(names, ld-bare(p)), named);
+  }
+  def ld-addable-in(io, dir, paths) = append(filter(p => file_size(p) >= 0, paths), ld-tracked-in(io, dir, ld-absent(paths)));
+  def ld-addable(paths) = ld-addable-in(hch-dir(), ".", paths);
+  def ld-unstaged(paths, addable) = filter(p => !ld-has?(addable, p), ld-absent(paths));
+  def ld-unstaged-line(left) = nil?(left) ? "" : "[paths] neither present nor tracked, left unstaged: " ++ str-join-with(left, " ") ++ "\n";
+  def ld-tail(text, n) = len(text) <= n ? text : substring(text, len(text) - n, len(text));
+  def ld-planes(planes, rows) = nil?(planes) ? "" : "  " ++ planes[0] ++ "=" ++ fmrc-delta-plane-total(rows, planes[0]).str() ++ "\n" ++ ld-planes(planes[1:], rows);
+  def ld-plane-names() = ["stdio", "filesystem", "local-process", "network-address-unknown", "mesh"];
+  // optional "files": [{"path","text"}] are written whole and "append":
+  // [{"path","text"}] are appended, natively, before the witness runs; so a
+  // small movement needs no host write at all.
+  def ld-nodes(doc, key) = json-object-has?(doc, key) ? json-array-elements(json-object-get(doc, key)) : [];
+  def ld-write-all(nodes) { nil?(nodes) ? 0 : ld-write-one(nodes[0], nodes[1:]); }
+  def ld-write-one(node, rest) { let w = write_file_text(fhn-text(node, "path"), fhn-text(node, "text")); 1 + ld-write-all(rest); }
+  def ld-append-all(nodes) { nil?(nodes) ? 0 : ld-append-one(nodes[0], nodes[1:]); }
+  def ld-append-one(node, rest) { let a = fhn-append(fhn-text(node, "path"), fhn-text(node, "text")); 1 + ld-append-all(rest); }
+  // optional "edits": [{"path","old","new"}] replace one exact occurrence of
+  // old with new; an old that is absent or not unique is a miss, and a miss
+  // holds the landing. Optional "restart": "origin/main" first fetches main,
+  // restarts the current branch on it (keeping uncommitted work), and pushes
+  // the restarted branch with force-with-lease: the move after a merge.
+  def ld-edit-all(nodes, misses) { nil?(nodes) ? misses : ld-edit-all(nodes[1:], misses + ld-edit-one(nodes[0])); }
+  def ld-edit-one(node) {
+   let path = fhn-text(node, "path");
+   let old = fhn-text(node, "old");
+   let text = fhn-read(path);
+   let at = str_find(text, old, 0);
+   let again = at < 0 ? -1 : str_find(text, old, at + 1);
+   (at < 0) || ((again >= 0) || ((String) old == "")) ? 1 : ld-edit-write(path, text, at, old, fhn-text(node, "new"));
+  }
+  def ld-edit-write(path, text, at, old, new) {
+   let w = write_file_text(path, substring(text, 0, at) ++ new ++ substring(text, at + len(old), len(text)));
+   0;
+  }
+  // The restart is three git steps by argv, each saying its last line; a step that fails ends the restart with its
+  // own exit named, so the branch is never moved onto an origin/main that did not fetch.
+  def ld-restart(base) = ld-restart-at(hch-dir(), ".", base);
+  def ld-restart-at(io, dir, base) = (String) base == "" ? "" : ld-restart-fetch(io, dir, base);
+  def ld-step-line(run) = hch-tail-line(hch-said(run)) ++ (hch-ok?(run) ? "" : " (exit " ++ hch-status-text(run) ++ ")");
+  def ld-restart-fetch(io, dir, base) {
+   let fetched = hch-git-in(io, dir, "land-restart-fetch", ["fetch", "origin", "main"]);
+   hch-ok?(fetched) ? ld-restart-checkout(io, dir, base, ld-step-line(fetched)) : ld-step-line(fetched) ++ "\n";
+  }
+  def ld-restart-checkout(io, dir, base, said) {
+   let branch = hch-read(hch-git-argv(dir, ["rev-parse", "--abbrev-ref", "HEAD"]));
+   let moved = hch-git-in(io, dir, "land-restart-checkout", ["checkout", "-B", branch, base]);
+   hch-ok?(moved) ? ld-restart-push(io, dir, said ++ "\n" ++ ld-step-line(moved)) : said ++ "\n" ++ ld-step-line(moved) ++ "\n";
+  }
+  def ld-restart-push(io, dir, said) {
+   let pushed = hch-git-in(io, dir, "land-restart-push", ["push", "--force-with-lease", "-u", "origin", "HEAD"]);
+   said ++ "\n" ++ ld-step-line(pushed) ++ "\n";
+  }
+  // A landing that is held says so as a reading with the reason it was held and
+  // what would carry it: the hold is a signal into the body, not a silent stop.
+  // A push refused for want of a fast-forward is not a reason to hold: origin
+  // holds commits this checkout does not, and the body can go and get them. The
+  // reunion rebases onto origin, settles its own ledgers as the union of both
+  // banks, redraws what is drawn from them, and pushes the new ground. This is
+  // not the failed push repeated — that push could not have succeeded, and the
+  // ground under this one is different.
+  def ld-behind?(pushed) = str_find(pushed, "fast-forward", 0) >= 0;
+  def ld-reunion(pushed) = !ld-behind?(pushed) ? [pushed, "not-asked"] : ld-reunited(fcr-reunion());
+  def ld-reunited(r) = (String) r[0] == "joined" ? [ld-push-line(r[2]), "joined"] : ["[push] exit=1 the rows did not join", r[1]];
+  def ld-push-line(out) = str_find(out, "[ok] exit=0", 0) >= 0 ? "[push] exit=0 after the reunion" : "[push] exit=1 " ++ trim(out);
+  def ld-organ() = "landing";
+  // Publication owns the operation, its retained effects and its native results.
+  // Text is projected only by ld-land/ld-run for existing terminal callers.
+  def ld-state(s) = record_get(s,"state");
+  def ld-field(s,key) = json-object-get(ld-state(s),key);
+  def ld-text(s,key) = fhn-text(ld-state(s),key);
+  def ld-save(s) = fcam-write(record_get(s,"checkpoint"),ld-state(s)) ? s : form_error("publication checkpoint could not be retained");
+  def ld-set(s,key,value) { record_set(s,"state",oh-set(ld-state(s),key,value)); ld-save(s); }
+  def ld-say(s,key,value) = ld-set(s,key,json-node-string(value));
+  def ld-attention(s,why) {
+   ld-say(s,"stage","attention"); ld-say(s,"reason",why);
+   oh-voice(ld-health(ld-text(s,"owner"),why,false)); s;
+  }
+  def ld-step(s,name,args) {
+   ld-say(s,"next",name);
+   let began=host_monotonic_ms();
+   let run=hch-git-in(ld-text(s,"io"),ld-text(s,"directory"),name,args);
+   let row=json-node-object([fhn-s("step",name),json-node-pair("exit",nothing?(run[0]) ? json-node-null() : json-node-int(run[0])),fhn-s("reason",run[2]),fhn-n("ms",host_monotonic_ms() - began),fhn-s("evidence",hch-out-path(ld-text(s,"io"),name))]);
+   ld-set(s,"steps",json-node-array(ld-nodes(ld-state(s),"steps") + [row]));
+   fb_record(intern_node(bp("form-publication-step"),[json-node-string(ld-text(s,"owner")),row]),"form-cli-landing.bml",132);
+   run;
+  }
+  def ld-rev(s,ref) { let r=ld-step(s,"read-" + fcam-hash(ref),["rev-parse","--verify",ref]); hch-ok?(r) ? trim(r[1]) : ""; }
+  def ld-changed(s,args) { let r=ld-step(s,"changed",args); hch-ok?(r) ? ld-names(r[1]) : form_error("publication path observation " + args.join(" ") + ": " + hch-said(r)); }
+  def ld-owned(s) = ld-paths(ld-field(s,"request"));
+  def ld-receipt(s) = intern_node(bp("form-native-publication-v1"),[ld-state(s),record_get(s,"checks")]);
+  def ld-admit(request,dir) {
+   let owner=fhn-text(request,"owner") == "" ? fcam-hash(fhn-text(request,"subject") + ld-paths(request).join("\n")) : fhn-text(request,"owner");
+   let root=fcr-abs(dir) + "/.form-heal/landing-" + fcam-hash(owner);
+   hch-mkdirs(root + "/io");
+   let checkpoint=root + "/continuation.fkb"; let prior=fcam-read(checkpoint);
+   let contract=json-node-object(json-object-pairs(request) |> filter(pair => json-pair-key(pair) != "rented_usage"));
+   let same=!nothing?(prior) && node_eq(json-object-get(prior,"contract"),contract);
+   let state=same ? oh-set(prior,"request",request) : json-node-object([fhn-s("schema","form-native-publication-v1"),fhn-s("owner",owner),fhn-s("directory",dir),fhn-s("io",root + "/io"),json-node-pair("request",request),json-node-pair("contract",contract),fhn-s("stage","admitted"),fhn-s("reason",""),fhn-s("stash",""),fhn-s("verified_head",""),fhn-s("verified_contract",""),json-node-pair("steps",json-node-array([])),json-node-pair("aside",json-node-array([]))]);
+   let s=record_new(0); record_set(s,"state",state); record_set(s,"checkpoint",checkpoint);
+   !same && !nothing?(prior) && fhn-text(prior,"stash") != "" ? form_error("publication request changed while retained effects still own a stash") : ld-save(s);
+  }
+  def ld-commit-owned(s) {
+   let foreign=ld-changed(s,["diff","--cached","--name-only","-z"]) |> filter(p => !ld-has?(ld-owned(s),p));
+   !nil?(foreign) ? ld-attention(s,"The index contains another owner's paths: " + foreign.join(", ")) : {
+    let path=ld-text(s,"io") + "/paths";
+    write_file_text(path,ld-nul-join(ld-owned(s))) == len(ld-nul-join(ld-owned(s))) ? 1 : form_error("publication path list was not retained");
+    let add=ld-step(s,"add",["--literal-pathspecs","add","--pathspec-from-file=" + path,"--pathspec-file-nul"]);
+    !hch-ok?(add) ? ld-attention(s,hch-said(add)) : {
+     let changed=ld-changed(s,["diff","--cached","--name-only","-z"]);
+     nil?(changed) ? s : {
+      let request=ld-field(s,"request"); let message=ld-text(s,"io") + "/message";
+      let text=fhn-text(request,"subject") + "\n\n" + fhn-text(request,"body") + "\n";
+      write_file_text(message,text) == len(text) ? 1 : form_error("publication message was not retained");
+      let commit=ld-step(s,"commit",["commit","-q","-F",message]);
+      hch-ok?(commit) ? s : ld-attention(s,hch-said(commit));
+     };
+    };
+   };
+  }
+  def ld-source-hash(dir,path) = fcam-hash(read_file(fcr-abs(dir) + "/" + path) ?? "");
+  def ld-aside(s) = ld-text(s,"stash") != "" ? ld-aside-clean(s) : {
+   let paths=ld-changed(s,["diff","--name-only","-z"]);
+   nil?(paths) ? s : {
+    let rows=paths |> map(p => json-node-object([fhn-s("path",p),fhn-s("hash",ld-source-hash(ld-text(s,"directory"),p)),fhn-s("base",ld-rev(s,"HEAD:" + p))]));
+    ld-set(s,"aside",json-node-array(rows));
+    let pathfile=ld-text(s,"io") + "/aside-paths"; let text=ld-nul-join(paths);
+    write_file_text(pathfile,text) == len(text) ? 1 : form_error("set-aside paths were not retained");
+    let run=ld-step(s,"aside-create",["stash","create","Form publication " + ld-text(s,"owner")]);
+    let oid=hch-ok?(run) ? trim(run[1]) : "";
+    oid == "" ? ld-attention(s,"Working edits did not acquire their retained Git identity: " + hch-said(run)) : {
+     ld-say(s,"stash",oid); ld-say(s,"stash_ref","refs/form/publication/" + fcam-hash(fcr-abs(ld-text(s,"directory")) + ":" + ld-text(s,"owner")));
+     let held=ld-step(s,"aside-retain",["update-ref",ld-text(s,"stash_ref"),oid,""]);
+     hch-ok?(held) ? ld-aside-clean(s) : ld-attention(s,hch-said(held));
+    };
+   };
+  };
+  def ld-aside-clean(s) = fhn-count(ld-state(s),"aside_clean") == 1 ? s : {
+   let same=all?(row => fhn-text(row,"hash") == ld-source-hash(ld-text(s,"directory"),fhn-text(row,"path")),ld-nodes(ld-state(s),"aside"));
+   !same ? ld-attention(s,"Working edits changed while being retained; their current bytes remain in place.") : {
+    let run=ld-step(s,"aside-clean",["--literal-pathspecs","restore","--worktree","--pathspec-from-file=" + ld-text(s,"io") + "/aside-paths","--pathspec-file-nul"]);
+    hch-ok?(run) ? ld-set(s,"aside_clean",json-node-int(1)) : ld-attention(s,hch-said(run));
+   };
+  };
+  def ld-restore(s) = ld-text(s,"stash") == "" ? s : {
+   let stash=ld-text(s,"stash"); let cleaned=fhn-count(ld-state(s),"aside_clean") == 1;
+   let applied=fhn-count(ld-state(s),"aside_applied") == 1;
+   let run=!cleaned || applied ? [0,"",""] : ld-step(s,"restore",["stash","apply",stash]);
+   let restored=hch-ok?(run) && (!cleaned || all?(row => fhn-text(row,"base") != ld-rev(s,"HEAD:" + fhn-text(row,"path")) || fhn-text(row,"hash") == ld-source-hash(ld-text(s,"directory"),fhn-text(row,"path")),ld-nodes(ld-state(s),"aside")));
+   !restored ? ld-attention(s,"Set-aside work still needs care: " + hch-said(run)) : {
+    ld-set(s,"aside_applied",json-node-int(1));
+    let released=ld-step(s,"release-aside",["update-ref","-d",ld-text(s,"stash_ref"),stash]);
+    hch-ok?(released) ? { ld-say(s,"stash",""); ld-set(s,"aside_clean",json-node-int(0)); ld-set(s,"aside_applied",json-node-int(0)); } : ld-attention(s,"Working edits are restored; their private reference still needs release: " + hch-said(released));
+   };
+  };
+  def ld-renew(s) {
+   let dir=ld-text(s,"directory"); let seed="runtime/fkwu-uni.c"; let carrier="form/native/metal/fk-metal-carrier.m";
+   let seedHash=ld-source-hash(dir,seed); let carrierHash=ld-source-hash(dir,carrier);
+   let seedChanged=seedHash != ld-text(s,"seed"); let carrierChanged=carrierHash != ld-text(s,"carrier");
+   !seedChanged && !carrierChanged ? false : {
+    let output="fkwu.publication-" + host_pid().str();
+    let built=!seedChanged ? [0,"",""] : hch-run-at(ld-text(s,"io"),"seed-build",dir,["cc","-O2","-o",output,seed],"",nothing());
+    let moved=!seedChanged || (hch-ok?(built) && fs-rename(fcr-abs(dir) + "/" + output,fcr-abs(dir) + "/fkwu") == 0);
+    let metal=!carrierChanged || hch-read(["uname","-s"]) != "Darwin" ? [0,"",""] : hch-run-at(ld-text(s,"io"),"carrier-build",dir,["cc","-O2","-dynamiclib","-o","form/native/metal/fk-metal-carrier.dylib",carrier,"-framework","Metal","-framework","Foundation","-fobjc-arc"],"",nothing());
+    !moved || !hch-ok?(metal) ? ld-attention(s,"Runtime renewal retains its compiler evidence: " + hch-said(built) + hch-said(metal)) : {
+     ld-say(s,"seed",seedHash); ld-say(s,"carrier",carrierHash); ld-say(s,"stage","renewing");
+     let resumed=hch-run-at(ld-text(s,"io"),"renewed-entry",dir,["./fkwu",ld-source()],"@" + record_get(s,"checkpoint") + "\n",nothing());
+     let next=fcam-read(record_get(s,"checkpoint"));
+     hch-ok?(resumed) && !nothing?(next) && (fhn-text(next,"stage") == "published" || fhn-text(next,"stage") == "attention") ? record_set(s,"state",next) : ld-attention(s,"Renewed runtime retains its continuation: " + hch-said(resumed));
+    };
+    true;
+   };
+  }
+  def ld-task-witness(s) {
+   let gap=json-object-get(ld-field(s,"request"),"task"); let band=fhn-text(gap,"band");
+   band == "" ? true : {
+    let rec=hch-cell-observe(ld-text(s,"owner"),"publication-witness",cell_call(band,nothing(),nothing()));
+    record_set(s,"checks",rec);
+    let paths=ld-nodes(gap,"writable") + ld-nodes(gap,"sources");
+    let docs=paths |> map(json-string-value) |> map(p => [p,p,read_file(p) ?? ""]);
+    hch-cell-status(rec) == 0 && record_get(rec,"value") == fhn-count(gap,"full") && all?(check => fccw-eval(check,docs)[0],ld-nodes(gap,"checks"));
+   };
+  }
+  def ld-verify(s,moved) {
+   let request=ld-field(s,"request"); let witness=fhn-text(request,"witness");
+   let run=ld-witness-run(witness);
+   !ld-witness-ok?(witness,run[1]) || !ld-task-witness(s) ? false : {
+    let rows=dg-rows-for(moved); let pass=dg-run(rows);
+    ld-set(s,"verification",json-node-object([fhn-n("pass",pass),fhn-n("full",dg-full(rows)),json-node-pair("paths",json-node-array(moved |> map(json-node-string)))]));
+    dg-green?(pass,rows);
+   };
+  }
+  def ld-verified(s,verify) {
+   let head=ld-rev(s,"HEAD"); let old=ld-text(s,"verified_head");
+   let task=json-object-get(ld-field(s,"request"),"task");
+   let contract=fcam-hash(read_file(fhn-text(task,"band")) ?? "");
+   head == old && contract == ld-text(s,"verified_contract") ? true : {
+    let base=old == "" ? ld-text(s,"base") : old;
+    let moved=ld-owned(s) + ld-changed(s,["diff","--name-only","-z",base,head]);
+    let good=verify(s,moved);
+    if good then { ld-say(s,"verified_head",head); ld-say(s,"verified_contract",contract); } else 0;
+    good;
+   };
+  }
+  def ld-remote(s) {
+   let request=ld-field(s,"request"); let branch=ld-text(s,"branch"); let head=ld-rev(s,"HEAD");
+   let refs=["refs/heads/" + branch] + (fhn-count(request,"main") == 1 && branch != "main" ? ["refs/heads/main"] : []);
+   let run=ld-step(s,"remote",["ls-remote","--heads","origin"] + refs);
+   let lines=split-on(run[1],"\n");
+   hch-ok?(run) && all?(ref => any?(line => line == head + byte_to_str(9) + ref,lines),refs);
+  }
+  def ld-sync(s,verify) {
+   let fetched=ld-step(s,"fetch",["fetch","-q","origin"]);
+   !hch-ok?(fetched) ? ld-attention(s,hch-said(fetched)) : {
+    let main=ld-rev(s,"refs/remotes/origin/main");
+    let rebased=ld-step(s,"rebase",["rebase","origin/main"]);
+    let joined=hch-ok?(rebased) ? true : fcr-rounds-in(ld-text(s,"io"),ld-text(s,"directory"),[])[0] == "joined";
+    !joined ? ld-attention(s,"Rebase retains its source and conflict evidence: " + hch-said(rebased)) : ld-renew(s) ? s : !ld-verified(s,verify) ? ld-attention(s,"Current-source verification needs local care; native results and framebuffer retain the reading.") : {
+     let branch=ld-text(s,"branch");
+     let specs=["HEAD:refs/heads/" + branch] + (fhn-count(ld-field(s,"request"),"main") == 1 && branch != "main" ? ["HEAD:refs/heads/main"] : []);
+     let pushed=ld-step(s,"push",["push","--atomic","origin"] + specs);
+     hch-ok?(pushed) && ld-remote(s) ? { ld-say(s,"commit",ld-rev(s,"HEAD")); ld-say(s,"reason",""); ld-say(s,"stage","published"); } : {
+      let refreshed=ld-step(s,"refresh",["fetch","-q","origin"]);
+      hch-ok?(refreshed) && ld-rev(s,"refs/remotes/origin/main") != main ? ld-sync(s,verify) : ld-attention(s,"Publication has not reached the requested refs: " + hch-said(pushed));
+     };
+    };
+   };
+  }
+  def ld-publish-in(request,dir,verify) {
+   let s=ld-admit(request,dir);
+   let observed=hch-git-in(ld-text(s,"io"),dir,"branch",["branch","--show-current"]);
+   let branch=hch-ok?(observed) ? trim(observed[1]) : "";
+   if nil?(ld-owned(s)) || fhn-text(request,"subject") == "" || branch == "" then ld-attention(s,"Publication needs its owned paths, subject and current branch.") else {
+    ld-say(s,"branch",branch);
+    if ld-text(s,"base") == "" then ld-say(s,"base",ld-rev(s,"HEAD")) else 0;
+    if ld-text(s,"seed") == "" then { ld-say(s,"seed",ld-source-hash(dir,"runtime/fkwu-uni.c")); ld-say(s,"carrier",ld-source-hash(dir,"form/native/metal/fk-metal-carrier.m")); } else 0;
+    ld-say(s,"stage","working");
+    ld-commit-owned(s);
+    if ld-text(s,"stage") != "attention" then ld-aside(s) else 0;
+    if ld-text(s,"stage") != "attention" then ld-sync(s,verify) else 0;
+    ld-restore(s);
+   };
+   ld-receipt(s);
+  }
+  // The witness: the named command runs as `/bin/sh -c <witness>` (a witness is shell text by contract) with its
+  // stderr folded into its stdout, and its exit is the host's own answer (host_wait), so a witness that prints
+  // "[witness] exit=0" itself cannot answer for its own exit. The shown text ends with the exit's own line. No
+  // witness named reads [shown "", exit nothing] and holds nothing; a named witness whose launch host_spawn_at
+  // refused at birth has no exit, and an exit that did not arrive is never a pass.
+  def ld-witness-mark() = "[witness] exit=";
+  def ld-witness-read(run) = nothing?(run[0]) ? ["[witness] the launch was refused at birth: no exit arrived (" ++ run[2] ++ ")", nothing()] : [run[1] ++ "\n" ++ ld-witness-mark() ++ run[0].str() ++ "\n", run[0]];
+  def ld-witness-at(io, shell, witness) = (String) witness == "" ? ["", nothing()] : ld-witness-read(hch-run-in(io, "land-witness", [shell, "-c", witness], "", nothing()));
+  def ld-witness-run(witness) = ld-witness-at(hch-dir(), "/bin/sh", witness);
+  def ld-witness-ok?(witness, rc) = ((String) witness == "") || ((!nothing?(rc)) && ((Comparable) rc == 0));
+  def ld-witness-said(rc) = nothing?(rc) ? "no exit arrived" : "exit " ++ rc.str();
+  // Staging, the commit and the pushes, each a git step by argv whose exit is the host's own. The paths to add
+  // reach git as a NUL-separated file named by --pathspec-from-file, so no argv bounds how many a landing carries.
+  def ld-paths-path() = ".form-heal/land-paths";
+  def ld-nul-join(paths) = nil?(paths) ? "" : paths[0] ++ ld-nul() ++ ld-nul-join(paths[1:]);
+  def ld-add-at(io, dir, listpath, paths) {
+   let wrote = write_file_text(listpath, ld-nul-join(paths));
+   hch-said(hch-git-in(io, dir, "land-add", ["--literal-pathspecs", "add", "--pathspec-from-file=" ++ listpath, "--pathspec-file-nul"]));
+  }
+  def ld-rc(run) = nothing?(run[0]) ? "none" : run[0].str();
+  def ld-commit-at(io, dir, message) {
+   let run = hch-git-in(io, dir, "land-commit", ["-c", "user.name=Claude", "-c", "user.email=noreply@anthropic.com", "commit", "-q", "-F", message]);
+   "[commit] exit=" ++ ld-rc(run) ++ " " ++ hch-read(hch-git-argv(dir, ["log", "--oneline", "-1"])) ++ "\n";
+  }
+  // "<label> exit=<exit> <the push's last line>"
+  def ld-push-at(io, dir, step, label, args) {
+   let run = hch-git-in(io, dir, step, args);
+   label ++ " exit=" ++ ld-rc(run) ++ " " ++ hch-tail-line(hch-said(run)) ++ "\n";
+  }
+  def ld-held-why(witnessOk, green, misses, paths, subject, ready, commitOk, pushOk) = ready && (commitOk && pushOk) ? "landed" : ready && commitOk ? "push-did-not-reach-origin" : ready ? "the-commit-did-not-take" : !witnessOk ? "the-witness-refused" : !green ? "a-gate-refused" : misses > 0 ? "an-edit-found-no-place" : nil?(paths) ? "no-paths" : (String) subject == "" ? "no-subject" : "held";
+  def ld-landing-line(why, witnessRc) = (String) why == "landed" ? "landed" : (String) why == "push-did-not-reach-origin" ? "held: the push did not reach origin" : (String) why == "the-commit-did-not-take" ? "held: the commit did not take" : (String) why == "the-witness-refused" ? "held: the witness refused (" ++ ld-witness-said(witnessRc) ++ ")" : (String) why == "a-gate-refused" ? "held: a gate refused" : (String) why == "an-edit-found-no-place" ? "held: an edit missed" : "held: no paths or no subject";
+  def ld-health(subject, why, landed) = oh-reading(ld-organ(), (String) subject == "" ? "landing" : subject, "origin", json-node-string("landed"), json-node-string(landed ? "landed" : why), json-node-int(landed ? 1 : 0), landed ? [] : [oh-need(why, json-node-string(ld-message-path()))], ["retry-push", "heal-the-tree", "name-the-paths"], oh-reference(ld-message-path()));
+  // Answers list(report, readings): the landing's own report text and the health
+  // it spoke. A caller already inside a census window lands without a child
+  // kernel; git is the crossing the landing needs.
+  def ld-land(request) {
+   let restarted = ld-restart(fhn-text(request, "restart"));
+   let written = ld-write-all(ld-nodes(request, "files"));
+   let appendedFiles = ld-append-all(ld-nodes(request, "append"));
+   let misses = ld-edit-all(ld-nodes(request, "edits"), 0);
+   let receipt=misses == 0 ? ld-publish-in(request,".",ld-verify) : ld-receipt(ld-attention(ld-admit(request,"."),"An edit did not find its unique source span."));
+   let state=node_children(receipt)[0]; let landed=fhn-text(state,"stage") == "published";
+   let readings=oh-voice-all([ld-health(fhn-text(request,"subject"),fhn-text(state,"reason"),landed)]);
+   ["[files] written=" + written.str() + " appended=" + appendedFiles.str() + " edit-misses=" + misses.str() + "\n[landing] " + (landed ? "landed" : fhn-text(state,"reason")) + "\n[commit] " + fhn-text(state,"commit") + "\n[continuation] " + fhn-text(state,"io") + "\n",readings,receipt];
+  }
+  def ld-run() {
+   let input=cell_input();
+   value_kind(input) == "node_id" ? ld-land(input)[2] : {
+    let window=fmrc-open("land","witness commit rebase publish",ld-source(),1,1);
+    let line=read_line() ?? "";
+    let resume=fat-starts(line,"@");
+    let prior=resume ? read_form_binary(trim(substring(line,1,len(line)))) : nothing();
+    let receipt=resume ? ld-publish-in(json-object-get(prior,"request"),fhn-text(prior,"directory"),ld-verify) : nothing();
+    let landed=resume ? ["[landing] " + fhn-text(node_children(receipt)[0],"stage") + "\n",[],receipt] : ld-land(parse-json("land-request",line));
+    let result=fmrc-close(window,fhn-text(node_children(landed[2])[0],"stage"),ld-source(),2,1);
+    print_str(landed[0] + "[crossings of this call] census-status=" + fmrc-result-status(result) + " dispatches=" + fmrc-delta-total(fmrc-result-deltas(result)).str() + "\n");
+    landed[2];
+   };
+  }
+ }
+}

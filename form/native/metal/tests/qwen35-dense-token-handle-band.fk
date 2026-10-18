@@ -1,0 +1,87 @@
+; qwen35-dense-token-handle-band.fk (verdict 2147483647) — the observed Qwen3.8 GGUF declares the
+; geometry and Form emits every Metal pipeline the dense hybrid walker needs.
+;
+; It reads configuration from the sealed GGUF header; no Qwen3.8 geometry is
+; admitted from this test as runtime config.
+;
+; The first 31 handles retain their established order. Handles 31..33 are the
+; generated Q8_0 batched matmul, source-offset copy, and width-independent span
+; RMS. Handles 34..39 add the full-attention span operations and cooperative
+; decode GQA. Handles 40..44 append the linear-attention span operations;
+; measured folded recurrence alternatives append at 45..46.
+;
+; Verdict 2147483647. This band reads the GGUF header and creates pipeline
+; handles in its own carrier. It admits no model weights and dispatches no
+; inference work; it establishes pipeline availability, not serving latency.
+;
+; REQUIRES: a live Metal device (metal_pipeline and the other metal_* doors)
+;
+; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/model-registry.bml
+(do
+    (let path (mr-path (mr-find "qwen38-q8")))
+    (let src (eqr-of-file path 0 40000000))
+    (let geo (q38-geo src 128))
+    (let msl (q38-msl))
+    (let span-msl (q38-rmsspan-msl "form_rmsnorm_span_f32"))
+    (let gqa-msl (q38-gqa-tg-msl "form_gqa_decode_tg_f32"))
+    (let pipes (q38-pipes msl))
+    (sum (list
+        (if (str_eq (gmt-str src "general.architecture") "qwen35") 1 0)
+        (if (eq (nth geo 0) 5120) 2 0)
+        (if (eq (nth geo 1) 10240) 4 0)
+        (if (eq (nth geo 2) 16) 8 0)
+        (if (eq (nth geo 3) 48) 16 0)
+        (if (eq (nth geo 4) 128) 32 0)
+        (if (eq (nth geo 10) 17408) 64 0)
+        (if (eq (nth geo 12) 24) 128 0)
+        (if (eq (nth geo 13) 4) 256 0)
+        (if (eq (nth geo 14) 256) 512 0)
+        (if (eq (nth geo 15) 64) 1024 0)
+        (if (eq (nth geo 19) 248320) 2048 0)
+        (if (eq (nth geo 21) 64) 4096 0)
+        (if (eq (nth geo 22) 4) 8192 0)
+        (if (eq (nth geo 23) 4) 16384 0)
+        ; Folded conv/delta occupy 45/46; the rank-one output-head adapter
+        ; occupies 47/48. Typed Q4_K/Q6_K/F32 embedding rows occupy 49..51;
+        ; their batched matrix projections occupy 52..54. The Q8 shared-tile
+        ; and matrix-unit alternatives occupy 55/56; exact Q4/Q6 decode
+        ; scale hoists append at 57/58; ordered cooperative span attention is
+        ; appended at 59 without moving any existing slot.
+        (if (and (eq (len pipes) 67) (gt (nth pipes (q38pa-index)) 0)) 32768 0)
+        (if (kth-pipes-ok? pipes) 65536 0)
+        (if (gt (nth pipes 31) 0) 131072 0)
+        (if (gt (nth pipes 32) 0) 262144 0)
+        (if (gt (nth pipes 33) 0) 524288 0)
+        (if (and (ge (str_find span-msl "uint tok [[thread_position_in_grid]]" 0) 0)
+                 (and (ge (str_find span-msl "if (tok >= ntok) return" 0) 0)
+                      (lt (str_find span-msl "threadgroup float sq[4096]" 0) 0)))
+            1048576 0)
+        ; the decode norm is the parallel threadgroup kernel, appended last at pipeline 60 (any width, a strided loop;
+        ; the serial one-thread fold cost ~1 ms a norm at this model's width, the cooperative twin's ~0.4 ms, this ~40 us)
+        (if (and (and (eq (q38-rmspar-index) 60) (gt (nth pipes (q38-rmspar-index)) 0))
+                 (and (and (eq (q38-rmspar-span-index) 61) (gt (nth pipes (q38-rmspar-span-index)) 0))
+                      (and (and (eq (q38-mm64-index) 62) (gt (nth pipes (q38-mm64-index)) 0))
+                           (and (and (eq (q38-gdnsg-index) 63) (gt (nth pipes (q38-gdnsg-index)) 0))
+                                (and (and (eq (q38-t64-index) 64) (gt (nth pipes (q38-t64-index)) 0))
+                                     ; the planar Q8_0 decode matvec and its repack, appended after the 64 x 64 tile: 65 and 66
+                                     (and (and (eq (q38-plv-index) 65) (gt (nth pipes (q38-plv-index)) 0))
+                                          (and (eq (q38-rpk-index) 66) (gt (nth pipes (q38-rpk-index)) 0)))))))) 2097152 0)
+        (if (and (ge (str_find msl "form_q38_rmsnorm_par_f32" 0) 0)
+                 (and (ge (str_find msl "form_q38_rmsnorm_par_span_f32" 0) 0)
+                      (and (ge (str_find msl "form_q38_q8_mm64_f32" 0) 0)
+                           (and (ge (str_find msl "form_q38_gdn_delta_sg_f32" 0) 0)
+                                (and (ge (str_find msl "form_q38_q8_mm64e_f32" 0) 0)
+                                     (ge (str_find msl "metal::simd_sum(ss)" 0) 0)))))) 4194304 0)
+        ; the union's added pipeline: cooperative GQA decode follows all
+        ; span pipelines at index 39.
+        (if (and (gt (nth pipes 39) 0)
+                 (and (ge (str_find gqa-msl "threadgroup float sh[16]" 0) 0)
+                      (ge (str_find gqa-msl "threadgroup_position_in_grid" 0) 0)))
+            8388608 0)
+        (if (gt (nth pipes 40) 0) 16777216 0)
+        (if (gt (nth pipes 41) 0) 33554432 0)
+        (if (gt (nth pipes 42) 0) 67108864 0)
+        (if (gt (nth pipes 43) 0) 134217728 0)
+        (if (gt (nth pipes 44) 0) 268435456 0)
+        (if (gt (nth pipes 45) 0) 536870912 0)
+        (if (gt (nth pipes 46) 0) 1073741824 0))))

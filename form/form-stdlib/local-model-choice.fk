@@ -1,0 +1,100 @@
+// local-model-choice.fk — DeepSeek and Qwen live side by side; the branch is learned.
+//
+// Native / local / remote is already alt-route (active-learning-tier-cycle.fk).
+// This cell is the next fork: which local architecture answers this task.
+// The pair on this host is deepseek4 and qwen35. Any later local arch joins
+// the present list and can win by observation — the prior does not lock them out.
+//
+// Prediction is Laplace win-rate among the arches that are present:
+//   (wins+1)*100 / (attempts+2)
+// Ties keep the home arch for that task. Home is a prior, not a switch:
+//   control, reason  -> deepseek4  (reserved CONTROL bank at 128000)
+//   form, generate   -> qwen35     (Form-native generate door)
+// choose-observe updates the ledger; the next predict reads it. That is the
+// active-learning update of the branch-choice prediction.
+//
+// The ledger is session memory (.form-model-choice.tsv), not the commons.
+// The band never opens it.
+//
+import form-stdlib/core.fk;
+import form-stdlib/active-learning-tier-cycle.fk;
+// witnessed: 2026-09-16 -> 2047
+section [form.bml] {
+    def lmc-ledger-path() = ".form-model-choice.tsv";
+    def lmc-pair() = ["deepseek4", "qwen35"];
+    def lmc-row(arch, task, wins, attempts) = [arch, task, wins, attempts];
+    def lmc-arch(r) = r[0];
+    def lmc-task(r) = r[1];
+    def lmc-wins(r) = r[2];
+    def lmc-attempts(r) = r[3];
+    def lmc-home(task) = (String) task == "control" || (String) task == "reason" ? "deepseek4" : "qwen35";
+    // How this host runs an architecture. A new local arch joins as local-generic
+    // until a door is witnessed — the name of the file is never this string.
+    def lmc-mode(arch) = (String) arch == "deepseek4" ? "dsv4-native-generate" : (String) arch == "llama" ? "llama-metal-ask" : (String) arch == "qwen35moe" ? "qwen35moe-kat" : (String) arch == "qwen35" ? "form-native-generate" : (String) arch == "" ? "none" : "local-generic";
+    def lmc-in?(name, xs) = (Comparable) len(xs) == 0 ? 0 : (String) name == xs[0] ? 1 : lmc-in?(name, xs[1:]);
+    def lmc-present-with(arch) = (String) arch == "" || (Comparable) lmc-in?(arch, lmc-pair()) == 1 ? lmc-pair() : cons(arch, lmc-pair());
+    def lmc-has?(s, w) = str_find(s, w, 0) >= 0 ? 1 : 0;
+    def lmc-task-of(prompt) = (Comparable) lmc-has?(prompt, "<CHOICE>") == 1 || ((Comparable) lmc-has?(prompt, "<CUT>") == 1 || ((Comparable) lmc-has?(prompt, "<FAIL>") == 1 || (Comparable) lmc-has?(prompt, "<TIMEOUT>") == 1)) ? "control" : (Comparable) lmc-has?(prompt, "Recipe") == 1 || ((Comparable) lmc-has?(prompt, "Blueprint") == 1 || ((Comparable) lmc-has?(prompt, "form-cli") == 1 || (Comparable) lmc-has?(prompt, "NL-to-form") == 1)) ? "form" : (Comparable) lmc-has?(prompt, "reason") == 1 || (Comparable) lmc-has?(prompt, "think") == 1 ? "reason" : "generate";
+    def lmc-find(rows, arch, task) = (Comparable) len(rows) == 0 ? [] : (String) lmc-arch(rows[0]) == arch && (String) lmc-task(rows[0]) == task ? rows[0] : lmc-find(rows[1:], arch, task);
+    def lmc-drop(rows, arch, task) = (Comparable) len(rows) == 0 ? [] : (String) lmc-arch(rows[0]) == arch && (String) lmc-task(rows[0]) == task ? lmc-drop(rows[1:], arch, task) : cons(rows[0], lmc-drop(rows[1:], arch, task));
+    def lmc-score-of(rows, arch, task) = {
+        let r = lmc-find(rows, arch, task);
+        (Comparable) len(r) == 0 ? 1 * 100 / 2 : (lmc-wins(r) + 1) * 100 / (lmc-attempts(r) + 2);
+    };
+    def lmc-better(task, arch-a, score-a, arch-b, score-b) = score-b > score-a ? arch-b : score-a > score-b ? arch-a : (String) arch-b == lmc-home(task) ? arch-b : arch-a;
+    def lmc-best(rows, task, present, best-arch, best-score) = (Comparable) len(present) == 0 ? best-arch : {
+        let arch = present[0];
+        let score = lmc-score-of(rows, arch, task);
+        lmc-best(rows, task, present[1:], lmc-better(task, best-arch, best-score, arch, score), (String) lmc-better(task, best-arch, best-score, arch, score) == arch ? score : best-score);
+    };
+    def lmc-predict(rows, task, present) = (Comparable) len(present) == 0 ? "" : lmc-best(rows, task, present[1:], present[0], lmc-score-of(rows, present[0], task));
+    def lmc-observe(rows, task, arch, win) = {
+        let old = lmc-find(rows, arch, task);
+        (Comparable) len(old) == 0 ? cons(lmc-row(arch, task, win, 1), rows) : cons(lmc-row(arch, task, lmc-wins(old) + win, lmc-attempts(old) + 1), lmc-drop(rows, arch, task));
+    };
+    // Native first (alt-route). When the local tier answers, pick an arch.
+    def lmc-branch(rows, task, present, native-ready, local-ready) = {
+        let tier = alt-route(native-ready, local-ready);
+        let arch = (Comparable) tier == alt-local() ? lmc-predict(rows, task, present) : "";
+        [tier, arch, task];
+    };
+    def lmc-row-line(r) = (lmc-arch(r) + ("|" + (lmc-task(r) + ("|" + (lmc-wins(r).str() + ("|" + lmc-attempts(r).str()))))));
+    def lmc-dump(rows) = (Comparable) len(rows) == 0 ? "" : (lmc-row-line(rows[0]) + ("\n" + lmc-dump(rows[1:])));
+    def lmc-parse-line(s) = (Comparable) len(s) == 0 ? [] : {
+        let a = str_find(s, "|", 0);
+        a < 0 ? [] : {
+            let b = str_find(s, "|", a + 1);
+            b < 0 ? [] : {
+                let c = str_find(s, "|", b + 1);
+                c < 0 ? [] : lmc-row(substring(s, 0, a), substring(s, a + 1, b), str_to_int(substring(s, b + 1, c)), str_to_int(substring(s, c + 1, len(s))));
+            };
+        };
+    };
+    def lmc-parse-text(s) =     // A new session has no optional choice ledger. read_file answers
+    // nothing there; the prediction starts from its existing empty prior.
+nothing?(s) ? [] : (Comparable) len(s) == 0 ? [] : {
+        let at = str_find(s, "\n", 0);
+        at < 0 ? {
+            let row = lmc-parse-line(s);
+            (Comparable) len(row) == 0 ? [] : [row];
+        } : {
+            let row = lmc-parse-line(substring(s, 0, at));
+            let rest = lmc-parse-text(substring(s, at + 1, len(s)));
+            (Comparable) len(row) == 0 ? rest : cons(row, rest);
+        };
+    };
+    def lmc-load() = lmc-parse-text(read_file(lmc-ledger-path()));
+    def lmc-save(rows) = write_file_text(lmc-ledger-path(), lmc-dump(rows));
+    def lmc-say(prompt, arch, model) = {
+        let task = lmc-task-of(prompt);
+        let pick = lmc-predict(lmc-load(), task, lmc-present-with(arch));
+        ("choice-task=" + (task + ("\nchoice-arch=" + (pick + ("\nchoice-mode=" + (lmc-mode(pick) + ("\nchoice-home=" + (lmc-home(task) + ("\nselected-model=" + (((String) model == "" ? "none" : model) + ("\nselected-arch=" + (((String) arch == "" ? "none" : arch) + ("\nselected-mode=" + (lmc-mode(arch) + ("\nchoice-match=" + ((String) pick == arch ? "1" : "0"))))))))))))))));
+    };
+    def lmc-cli-observe(task, arch, outcome) = {
+        let win = (String) outcome == "win" || (String) outcome == "win\n" ? 1 : 0;
+        let rows = lmc-observe(lmc-load(), task, arch, win);
+        lmc-save(rows);
+        ("observed task=" + (task + (" arch=" + (arch + (" win=" + (win.str() + (" next=" + lmc-predict(rows, task, lmc-present-with(arch)))))))));
+    };
+    0;
+}

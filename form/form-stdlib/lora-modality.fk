@@ -1,0 +1,80 @@
+// lora-modality.fk — the low-rank diff at any width, over any modality.
+//
+// THE GENERAL FORM. (W + B·A)·x == W·x + B·(A·x) is easiest to prove at the
+// smallest honest size: rank-1, d = 3, fixed arity. The chunked/general-d form
+// is the stone over that. This is that stone.
+//
+// WHY THE WIDTH WAS THE WHOLE POINT. Yes named it: the LoRA layer adapts to
+// sound and image, to generation AND perception. That is true because B·A is
+// linear algebra and linear algebra does not know what x means — a token
+// hidden state, a frame of samples, an energy envelope, a patch. But a cell
+// that hardcodes nth 0, nth 1, nth 2 cannot express any of them. The claim was
+// modality-free while the proof was three-dimensional, which is a `we` read as
+// a `WE`. Nothing here names a dimension.
+//
+// GENERATION AND PERCEPTION ARE THE SAME MECHANISM, POINTED TWO WAYS. An
+// adapter on a path that produces samples changes what the body says. An
+// adapter on a path that reads them changes what the body hears. The band
+// drives both with the SAME functions over a real waveform from voice-synth
+// and a real envelope taken from it — not two implementations that resemble
+// each other, one applied twice.
+//
+// COMPUTED THE RIGHT WAY, AT ANY RANK. Never form the d×d diff. A·x is an
+// r-vector, B·that is a d-vector: O(d·r) against O(d·d). Rank is the length of
+// the adapter list, so rank 1, rank 8 and rank 0 are the same code path, and
+// rank 0 is exactly the unadapted base.
+//
+// NOTHING IS NOT ZERO HERE EITHER. Vectors whose widths disagree do not have a
+// dot product, and answering 0 would be a number where there is no answer. A
+// mismatch reads nothing, and a fold over nothing never silently becomes a
+// small number that looks like a weak signal.
+//
+// Integer fixed point, scale 1000, over nth/list/add/sub/mul/div only — the
+// ops chosen because all of them are proven.
+//
+import form-stdlib/core.fk;
+//
+// Proven by: form-stdlib/tests/lora-modality-band.fk
+section [form.bml] {
+    def lm-scale-one() = 1000;
+    // ── vectors of any width ───────────────────────────────────────────────
+    def lm-dot-loop(a, b, i, n, acc) = i >= n ? acc : lm-dot-loop(a, b, i + 1, n, acc + a[i] * b[i] / lm-scale-one());
+    // widths that disagree have no dot product — that is nothing, not zero
+    def lm-dot(a, b) = (Comparable) len(a) == len(b) ? lm-dot-loop(a, b, 0, len(a), 0) : nothing();
+    def lm-scale-loop(v, s, i, n, out) = i >= n ? out : lm-scale-loop(v, s, i + 1, n, append(out, [v[i] * s / lm-scale-one()]));
+    def lm-scale(v, s) = lm-scale-loop(v, s, 0, len(v), []);
+    def lm-add-loop(a, b, i, n, out) = i >= n ? out : lm-add-loop(a, b, i + 1, n, append(out, [a[i] + b[i]]));
+    def lm-add(a, b) = (Comparable) len(a) == len(b) ? lm-add-loop(a, b, 0, len(a), []) : nothing();
+    def lm-zeros(n) = n <= 0 ? [] : cons(0, lm-zeros(n - 1));
+    // ── W·x for a W of any shape: W is a list of rows ──────────────────────
+    def lm-matvec-loop(W, x, i, n, out) = i >= n ? out : lm-matvec-loop(W, x, i + 1, n, append(out, [lm-dot(W[i], x)]));
+    def lm-matvec(W, x) = lm-matvec-loop(W, x, 0, len(W), []);
+    // ── the low-rank part: Σ Bk·(Ak·x), rank = the list's length ───────────
+    // Rank 0 is an empty list and contributes a zero vector, so an unadapted
+    // base is not a special case in the code — it is a rank.
+    def lm-lowrank-loop(Bs, As, x, k, r, acc) = k >= r ? acc : lm-lowrank-loop(Bs, As, x, k + 1, r, lm-add(acc, lm-scale(Bs[k], lm-dot(As[k], x))));
+    def lm-lowrank(Bs, As, x, d) = (Comparable) len(Bs) == len(As) ? lm-lowrank-loop(Bs, As, x, 0, len(Bs), lm-zeros(d)) : nothing();
+    // ── adapter_forward, the way it is actually computed ───────────────────
+    def lm-forward(W, Bs, As, x) = {
+        let base = lm-matvec(W, x);
+        let low = lm-lowrank(Bs, As, x, len(W));
+        nothing?(low) ? nothing() : lm-add(base, low);
+    };
+    def lm-rank(Bs) = len(Bs);
+    // ── the full diff, formed ONLY to show the low-rank form reconstructs it ─
+    def lm-outer-loop(B, A, i, n, out) = i >= n ? out : lm-outer-loop(B, A, i + 1, n, append(out, [lm-scale(A, B[i])]));
+    def lm-outer(B, A) = lm-outer-loop(B, A, 0, len(B), []);
+    def lm-madd-loop(W, M, i, n, out) = i >= n ? out : lm-madd-loop(W, M, i + 1, n, append(out, [lm-add(W[i], M[i])]));
+    def lm-madd(W, M) = lm-madd-loop(W, M, 0, len(W), []);
+    // ── what the low rank buys, said as numbers ────────────────────────────
+    def lm-cost-low(d, r) = 2 * d * r;
+    def lm-cost-full(d) = d * d;
+    // ── a perception feature taken from a real signal ──────────────────────
+    // Rectified magnitude — the cheap envelope a wave-sensing lane reads. Present so
+    // the band can adapt a SENSE vector with the same functions that adapt a
+    // generated one, rather than two paths that merely resemble each other.
+    def lm-abs(n) = n < 0 ? 0 - n : n;
+    def lm-envelope-loop(v, i, n, out) = i >= n ? out : lm-envelope-loop(v, i + 1, n, append(out, [lm-abs(v[i])]));
+    def lm-envelope(v) = lm-envelope-loop(v, 0, len(v), []);
+    0;
+}

@@ -1,0 +1,68 @@
+// rented-turn-meter-run.fk — the body reads the rented mind's own spend:
+// retains one caller-bound BML cursor and sums only appended output_tokens
+// after its first baseline. Receipts record the figure; consecutive readings
+// give the per-prompt delta. Measure, observe, optimize — pointed at the mind
+// that is costing.
+// stdin line 1: transcript path — a Codex rollout or a Claude Code transcript.
+// decided-through-byte trails rollout-bytes while a row is still being written;
+// the next reading starts there and counts that row once, whole.
+// The count is this one transcript. A Claude Code transcript with subagent
+// transcripts beside it says how many: the whole session, subagents included,
+// is observe/session-rent-run.bml, and the turn and flow meters read that same set.
+import form-stdlib/form-cli-movement.bml;
+import form-stdlib/bml/rented-usage.bml;
+import form-stdlib/bml/session-rent.bml;
+section [form.bml] {
+    def rtmr-keys() = ru-keys();
+    def rtmr-usage(path) {
+        let sample=ru-read(path);
+        nothing?(sample) ? nothing : [sample[0],jv-materialize(ru-object(sample[1]))];
+    }
+    def rtmr-delta(prior,path,usage) {
+        let before = json-object-get(prior,"counters");
+        let same = json-string-value(json-object-get(prior,"transcript")) == path;
+        let forward = same && foldl((held,key) => held && json-object-has?(before,key) && json-int-value(json-object-get(usage,key)) >= json-int-value(json-object-get(before,key)),true,rtmr-keys());
+        forward ? json-node-object(map(key => json-node-pair(key,json-node-int(json-int-value(json-object-get(usage,key)) - json-int-value(json-object-get(before,key)))),rtmr-keys())) : json-node-null();
+    }
+    def rtmr-usage-measure(path,statePath) {
+        let reading = rtmr-usage(path);
+        if nothing?(reading) then print_str("rented-usage=unavailable; no complete cumulative usage row in transcript tail") else {
+            let prior = file_size(statePath) > 0 ? read_form_binary(statePath) : json-node-object([]);
+            let report = json-node-object([json-node-pair("schema",json-node-string("rented-session-usage-v1")),json-node-pair("transcript",json-node-string(path)),json-node-pair("through",json-node-string(reading[0])),json-node-pair("counters",reading[1]),json-node-pair("since_previous_reading",rtmr-delta(prior,path,reading[1]))]);
+            write_form_binary(statePath,report) > 0 ? print_str(json-emit(report)) : form_error("rented usage reading could not be retained");
+        };
+    }
+    def rtmr-state-path() = ".form-cli-rented-turn-meter-state";
+    def rtmr-codex-measure(path) {
+        let sample=ru-read(path);
+        nothing?(sample) ? print_str("rented-usage=unavailable; no admitted cumulative Codex sample") : {
+            print("session-output-tokens=" + sample[1][2].str());
+            print("meter-mode=cumulative-codex-usage");
+            print("rollout-bytes=" + file_size(path).str());
+            rtmr-usage-measure(path,".hearth/rented-session-usage.fkb");
+        };
+        0;
+    }
+    def rtmr-measure(path) = ru-codex?(path) ? rtmr-codex-measure(path) : rtmr-transcript-measure(path);
+    def rtmr-transcript-measure(path) {
+        let size = file_size(path);
+        let prior = rtm-state-from-text(read_file(rtmr-state-path()));
+        let start = rtm-state-scan-start(prior, path, size);
+        let read = rtm-file-go(path, size, start, rtm-state-base-total(prior, path, size), rtm-state-base-seen(prior, path, size), rtm-chunk());
+        let total = read[0];
+        let mode = (Comparable) start == 0 ? "baseline" : "delta";
+        let saved = write_file_text(rtmr-state-path(), rtm-state-text(rtm-state(path, read[1], total, read[2])));
+        print(("session-output-tokens=" + total.str()));
+        print(("meter-mode=" + mode));
+        print(("scanned-from-byte=" + start.str()));
+        print(("decided-through-byte=" + read[1].str()));
+        print(("rollout-bytes=" + size.str()));
+        let beside = if sr-jsonl?(path) then (len(sr-files(path)) - 1) else 0;
+        if (beside > 0) then print(("subagent-transcripts=" + (beside.str() + " (not in this count; the whole session is observe/session-rent-run.bml)"))) else 0;
+        fs_mkdir(".hearth");
+        rtmr-usage-measure(path,".hearth/rented-session-usage.fkb");
+        0;
+    };
+    let path = read_line();
+    nothing?(path) ? print_str("signal=nothing reason=transcript-path-required") : (String) path == "" || !fs_exists(path) ? print_str("signal=nothing reason=transcript-unavailable") : rtmr-measure(path);
+}

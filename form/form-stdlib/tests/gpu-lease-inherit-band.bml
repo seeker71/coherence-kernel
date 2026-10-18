@@ -1,0 +1,40 @@
+; gpu-lease-inherit-band.bml — a model open inside a door that holds the GPU lease inherits it instead of waiting on itself.
+;
+; preludes: form-stdlib/core.fk form/form-stdlib/gpu-lease.bml
+;
+; The cycle takes the machine's one GPU lease for its train, evaluation and usage stages, run as cells in one process, and each
+; stage opens the Llama voice (native-llama-voice.bml nlg-open), which holds the lease for the model's life. A second take by the
+; process that already owns the lease is refused (gpu-lease-take: already-held-by-this-process); gpu-lease-hold answers
+; ["inherited" token] there and gpu-lease-unhold gives nothing back for it. This band runs on a lock of its own, never the
+; machine's.
+;
+; Verdict 15 when every claim lands:
+;   1   a hold on a free lock is taken: ["held" token]
+;   2   a second hold by the same process is inherited with the same token, and does not wait
+;   4   giving back what was inherited leaves the lease standing; giving back what was taken removes it
+;   8   after that, the lock is free again: a hold takes it afresh
+section [form.bml] {
+ class GpuLeaseInheritBand {
+  def gib-lock() = ".hearth/gpu-lease-inherit-band.lock";
+  def gib-bit(ok, bit) = ok ? bit : 0;
+  def gib-score() {
+   let made = host_dir_mkdir(".hearth");
+   let clean = host_path_remove(gib-lock());
+   let first = gpu-lease-hold-at(gib-lock(), "inherit-band", 5000);
+   let t0 = host_monotonic_ms();
+   let second = gpu-lease-hold-at(gib-lock(), "inherit-band-nested", 5000);
+   let quick = (host_monotonic_ms() - t0) < 1000;
+   let gave-inherited = gpu-lease-unhold-at(gib-lock(), second);
+   let standing = host_path_exists(gib-lock()) == 1;
+   let gave-taken = gpu-lease-unhold-at(gib-lock(), first);
+   let gone = host_path_exists(gib-lock()) == 0;
+   let again = gpu-lease-hold-at(gib-lock(), "inherit-band-again", 5000);
+   let tidy = gpu-lease-unhold-at(gib-lock(), again);
+   gib-bit((String) first[0] == "held", 1)
+   + gib-bit((String) second[0] == "inherited" && (String) second[1] == (String) gpu-lease-token(first) && quick, 2)
+   + gib-bit((String) gave-inherited[0] == "inherited" && standing && (String) gave-taken[0] == "released" && gone, 4)
+   + gib-bit((String) again[0] == "held", 8);
+  }
+ }
+ gib-score();
+}

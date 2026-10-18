@@ -1,0 +1,304 @@
+; dsv4-ledger-band.bml -- the DeepSeek-V4 driver's op ledger, held as ceilings: what a token costs in dispatches, barriers, command buffers, waits, host reads and buffers, on both fixtures, serial and concurrent.
+;
+; WHAT THIS PINS. native/metal/dsv4-ledger.fk reads ONE row per decode token from the carrier's own counters (metal_live: dispatches, waits, standing buffers, device busy) and the driver's plan (barriers placed, batches
+; handed to the queue, host reads, plans that ran short), and ONE row per block (its enqueue count, the weight bytes it reads). The Swift reference runner (history 93154a720) was held to such a count every run; this lane is a
+; Form cell, where a dispatch costs about 20 us of host, so the count is the thing to hold: a token that grows an op, a wait, an allocation or a barrier past its ceiling fails here.
+;
+; Verdict 2047 when every claim lands:
+;   1     the dispatch count is the layout's own formula (dll-token-count: 22 + the compressor's 3 + 5 or 6 at a window boundary, 18 or 19 for the FFN, embed 2, head and NaN scan 8) at every one of eight decode steps,
+;         on the MXFP fixture and on the real-types fixture (Q8_0 dense, IQ2_XXS gate and up, Q2_K down), serial and concurrent
+;   2     one wait a token (the head's argmax, the NaN scan and the logits settle in ONE sync), no buffer made or freed (allocs 0), two host reads (the count and the id), and the command buffers are floor(layers / 2) + 1 when
+;         concurrent (a batch handed to the queue every second block by default, then the one the wait drains) and 1 when serial
+;   4     the barrier plan: concurrent rows carry barriers (at least one a block and a stage, below the dispatch count: the plan overlaps some work and holds the rest), no plan ran short or long (miss 0), and a serial row
+;         carries none
+;   8     the concurrent walk is the serial walk: the eight ids and every logit's bits equal, on both fixtures (an overlap that moved a value would show here and in the oracle bands). The real-types fixture's greedy
+;         ids are all 3, so its ids cannot tell one walk from another: the LOGITS' bits discriminate, and the claim also requires the logits of consecutive steps to differ (on both fixtures)
+;   16    the stage rows: one per block in ascending order, their dispatches plus the embedding's 2 and the head's 8 equal the token's, their bytes plus the embedding row and the head equal dll-token-bytes
+;   32    the ceilings: every concurrent row on each fixture is within the pinned ceilings (dispatches, barriers, command buffers, waits, reads, allocs, bytes), and the checks can fail: a ceiling one below the first row's
+;         dispatches is breached, a serial row is below the barrier floor, and two plants put into the token's path through the counted doors fail the ceilings: two extra host reads (readbacks 4 over 2: the
+;         count is dkr-rd's, not a constant) and a second dsv4-argmax (a second wait and two more reads)
+;   64    the real-file lanes: on the real-types fixture the gate and up stacks take the four-row IQ2_XXS kernel and the down stack the four-row Q2_K one (dkl-lane-expert?), the dense Q8_0 tensors read the Metal-order matvec,
+;         and the MXFP4 stacks of the other fixture keep the id kernels
+;   128   release: dsv4-close in synced rounds leaves no handle on either context and metal_live reads what it read before the opens
+;   256   a token that does not arrive closes its batch: with the pipeline handle of the FFN's slot sum planted 0 in the context's record, block 0's dispatch is refused and dsv4-decode answers nothing; the carrier then
+;         reads no open batch (metal_live words 15 and 5: none, nothing pending) and the driver is disarmed; with the handle restored the SAME position answers the control's id and its logits' bits, on both fixtures.
+;         (Without the sync in dth-token-fail the batch stays open and the claim reads 0: the review's plant.)
+;   512   the ARENA MODE (dsv4-arena.fk: the routed experts read through a slot arena of three slots a layer, a sync a block between the router and the experts): on both fixtures every one of the eight decode rows is within
+;         dll-arena-ceil: dispatches the formula's plus the copies (fills = 3 x the experts missed, and the lookups of a row are blocks x used), syncs = blocks + 1, host reads = blocks + 2 (one id read a block, the head's two),
+;         command buffers = blocks + blocks / 2 + 1, no buffer made, no plan short or long; the road the fills took is named by the ledger (dll-road: door, view or none; the door's fills are fills - fdisp) and agrees with the row's copy dispatches; the walk's ids and every logit's bits equal the whole-stack walk's; the stage rows sum to the token; and three plants put into the
+;         token's path through the counted doors fail the arena ceilings (a dkr-hz-sync after block 0: one sync more; one more dkr-read-u32: one read more; a buffer made: allocs 1) while the control passes
+;   1024  the ATTRIBUTION ROW (dkr-attr-begin, dll-attribute-decode: one decode token, every dispatch its own command buffer, enqueued, synced and read; the device's microseconds kept with the dispatch's pipeline, first buffer and
+;         stage): on both fixtures, whole-stack and arena, the token's id and its logits' bits equal a plain decode's from the same prefill; the rows' sum, the sum of the family tally, of the kernel tally and of the stage tally
+;         EQUAL the growth of metal_live word 11 over the token read on its own (no device work escapes the attribution), and each tally counts every dispatch; the dispatches are the layout's formula plus the fills' copy
+;         dispatches; the families count what the graph runs (experts gate/up 3 a block, experts down 1, shared expert 5, head 8 with the scan, embedding 2, every family named present); the blocks are one per layer with
+;         the arena's two halves both nonzero; the driver is left as it was (mode 0, armed 0, the standing switch, no rows) and a plain decode runs after it; and a row one microsecond short of the device's growth fails the sum check
+;
+; REQUIRES: a live Metal device -- needs one behind the handle door; plain fkwu answers 0 (bit 1 needs a context). Light GPU: two 1.5 MB fixtures, twelve positions each, four walks. Writes only under temp_dir.
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk native/metal/dsv4-ledger.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk
+section [form.bml] {
+ class Dsv4LedgerBand {
+  def dlb-bit(held, bit) = held ? bit : 0;
+  def dlb-prompt() = [5, 17, 3, 22];
+  def dlb-cap() = 16;
+  def dlb-steps() = 8;
+  def dlb-layers(ctx) = record_get(dso-geo(ctx), "layers-n");
+  // one walk: the prefill's id, then eight decode steps' [id, row, stages, logits bits]
+  def dlb-more(ctx, sts, id, pos, left, acc) {
+   left == 0 ? acc : {
+    let s = dsv4-decode-staged(ctx, sts, id, pos);
+    let logits = dsv4-logits(ctx);
+    nothing?(s[0]) ? acc : dlb-more(ctx, sts, s[0], pos + 1, left - 1, append(acc, [[s[0], s[1], s[2], dlb-bits(logits), pos]]));
+   };
+  }
+  def dlb-bits(xs) = len(xs) == 0 ? [] : cons(md-f32-bits(xs[0]), dlb-bits(xs[1:]));
+  def dlb-walk(ctx) {
+   let sts = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let pf = dsv4-prefill-span-sliced(ctx, sts, dlb-prompt(), 0);
+   let steps = nothing?(pf) ? [] : dlb-more(ctx, sts, pf[0], pf[1], dlb-steps(), []);
+   let left = dsv4-free-state(sts);
+   [steps, len(left) == 0, nothing?(pf) ? nothing() : pf[0]];
+  }
+  // ---- the plants: the same observed token with extra work PUT IN ITS PATH, through the counted doors (a hand-set constant could not be failed) ----
+  // mode "reads": two more host reads of the id buffer after the token's own; mode "argmax": a second dsv4-argmax (a scan enqueue, a sync, two reads)
+  def dlb-extra(ctx, mode) = mode == "reads" ? [dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1), dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1)] : [dsv4-argmax(ctx)];
+  def dlb-observe-extra(ctx, mode) {
+   let sts = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let pf = dsv4-prefill-span-sliced(ctx, sts, dlb-prompt(), 0);
+   let a = dll-mark();
+   let nid = nothing?(pf) ? nothing() : dsv4-decode(ctx, sts, pf[0], pf[1]);
+   let more = mode == "none" ? [] : dlb-extra(ctx, mode);
+   let b = dll-mark();
+   let left = dsv4-free-state(sts);
+   dll-row(a, b, dll-token-bytes(ctx));
+  }
+  // ---- a token whose block is refused, then a good one: the refused token must leave NO batch open, and the good token must be the control's, bit for bit ----
+  // a pipeline handle of 0 in the context's record for the FFN's slot sum (dispatched in block 0, after its attention half and the first of its FFN): the dispatch is refused, the block answers nothing, the token is nothing
+  def dlb-refused-then-good(ctx, control) {
+   let sts = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let pf = dsv4-prefill-span-sliced(ctx, sts, dlb-prompt(), 0);
+   let name = "form_dsv4_sum_slots";
+   let saved = record_get(ctx[0], name);
+   let planted = record_set(ctx[0], name, 0);
+   let failed = dsv4-decode(ctx, sts, pf[0], pf[1]);
+   let live = metal_live();
+   let closed = live[15] == 0 && live[5] == 0 && dkr-hz-get("armed") == 0;
+   let restored = record_set(ctx[0], name, saved);
+   let again = dsv4-decode(ctx, sts, pf[0], pf[1]);
+   let bits = nothing?(again) ? [] : dlb-bits(dsv4-logits(ctx));
+   let left = dsv4-free-state(sts);
+   nothing?(failed) && closed && !nothing?(again) && again == control[0] && bits == control[3] && len(left) == 0;
+  }
+  def dlb-rows-vary?(rows) = len(rows) > 1 && rows[0] != rows[1];
+  def dlb-ids(steps) = len(steps) == 0 ? [] : cons(steps[0][0], dlb-ids(steps[1:]));
+  def dlb-rows(steps) = len(steps) == 0 ? [] : cons(steps[0][1], dlb-rows(steps[1:]));
+  def dlb-bitrows(steps) = len(steps) == 0 ? [] : cons(steps[0][3], dlb-bitrows(steps[1:]));
+  def dlb-all(xs) = len(xs) == 0 ? true : (xs[0] && dlb-all(xs[1:]));
+  def dlb-field(row, k) = record_get(row, k);
+  // claim 1: every row's dispatches are the formula at its position
+  def dlb-count-ok?(ctx, steps) = len(steps) == 0 ? true : (dlb-field(steps[0][1], "dispatches") == dll-token-count(ctx, steps[0][4]) && dlb-count-ok?(ctx, steps[1:]));
+  // claim 2: waits, allocations, reads, command buffers
+  def dlb-cbs-want(ctx, concurrent) = concurrent ? (dlb-layers(ctx) / 2) + 1 : 1;
+  def dlb-cost-ok?(ctx, steps, concurrent) = len(steps) == 0 ? true : (dlb-field(steps[0][1], "syncs") == 1 && dlb-field(steps[0][1], "allocs") == 0 && dlb-field(steps[0][1], "readbacks") == 2 && dlb-field(steps[0][1], "cbs") == dlb-cbs-want(ctx, concurrent) && dlb-cost-ok?(ctx, steps[1:], concurrent));
+  // claim 4: the barrier plan
+  def dlb-plan-ok?(ctx, steps, concurrent) = len(steps) == 0 ? true : (concurrent
+    ? (dlb-field(steps[0][1], "barriers") >= dlb-layers(ctx) + 2 && dlb-field(steps[0][1], "barriers") < dlb-field(steps[0][1], "dispatches") && dlb-field(steps[0][1], "miss") == 0)
+    : (dlb-field(steps[0][1], "barriers") == 0)) && dlb-plan-ok?(ctx, steps[1:], concurrent);
+  // claim 16: the stage rows
+  def dlb-sum-disp(stages) = len(stages) == 0 ? 0 : stages[0][1] + dlb-sum-disp(stages[1:]);
+  def dlb-sum-bytes(stages) = len(stages) == 0 ? 0 : stages[0][2] + dlb-sum-bytes(stages[1:]);
+  def dlb-asc?(stages, i) = len(stages) == 0 ? true : (stages[0][0] == i && dlb-asc?(stages[1:], i + 1));
+  def dlb-stages-ok?(ctx, steps) = len(steps) == 0 ? true : (len(steps[0][2]) == dlb-layers(ctx) && dlb-asc?(steps[0][2], 0)
+    && dlb-sum-disp(steps[0][2]) + 10 == dlb-field(steps[0][1], "dispatches") && dlb-sum-bytes(steps[0][2]) + 2 * record_get(dso-geo(ctx), "e") + dll-head-bytes(ctx) == dlb-field(steps[0][1], "bytes")
+    && dlb-stages-ok?(ctx, steps[1:]));
+  // claim 32: ceilings (the pinned figures are the fixtures' measured rows, rounded up to the formula's largest step)
+  def dlb-ceil(d, b, c, by) = record_new(0, "dispatches", d, "barriers", b, "cbs", c, "syncs", 1, "readbacks", 2, "allocs", 0, "bytes", by, "miss", 0);
+  def dlb-within-all?(steps, ceil) = len(steps) == 0 ? true : (dll-within?(steps[0][1], ceil) && dlb-within-all?(steps[1:], ceil));
+  def dlb-max-field(steps, k) = len(steps) == 0 ? 0 : (dlb-field(steps[0][1], k) > dlb-max-field(steps[1:], k) ? dlb-field(steps[0][1], k) : dlb-max-field(steps[1:], k));
+  def dlb-str-rows(steps) = len(steps) == 0 ? "" : (dll-line("pos " ++ steps[0][4].str(), steps[0][1]) ++ " | " ++ dlb-str-rows(steps[1:]));
+  // claim 64: the lanes
+  def dlb-lane-gate?(ctx, il) = dkl-lane-expert?(dkl-type(dkl-view(ctx, il, "ffn_gate_exps.weight")), dkl-l(ctx, il, "hidden"), record_get(dso-geo(ctx), "e"), 0);
+  def dlb-lane-down?(ctx, il) = dkl-lane-expert?(dkl-type(dkl-view(ctx, il, "ffn_down_exps.weight")), record_get(dso-geo(ctx), "e"), dkl-l(ctx, il, "hidden"), dkl-l(ctx, il, "hidden"));
+  def dlb-any-lane?(ctx, il, n, gate) = il == n ? false : ((gate ? dlb-lane-gate?(ctx, il) : dlb-lane-down?(ctx, il)) || dlb-any-lane?(ctx, il + 1, n, gate));
+  def dlb-dense-q8?(ctx) = dkl-type(dkl-view(ctx, 0, "attn_q_a.weight")) == 8 && dkr-pipe(ctx[0], "form_dsv4_q80_matvec_ds4") > 0;
+  // ---- claim 512: the ARENA MODE's rows (dsv4-arena.fk: routed experts read through a slot arena, a sync a block) held to dll-arena-ceil, and equal to the whole-stack walk -----------------------------------------------------
+  def dlb-arena-slots() = 3;
+  // one decode row of an arena walk against its own ceilings: the span fills are three a missed expert, the dispatches are the formula's plus the fills' copy dispatches (none through the fill door, at most one a fill),
+  // one wait a block and one at the close, one id read a block and the head's two, the derived command buffers, no buffer made, no plan short or long
+  def dlb-arena-row-ok?(m, row, pos) = dlb-field(row, "fills") == 3 * dlb-field(row, "emiss") && dlb-field(row, "fdisp") >= 0 && dlb-field(row, "fdisp") <= dlb-field(row, "fills") && dlb-field(row, "dispatches") == dll-token-count-m(m, pos) + dlb-field(row, "fdisp")
+   && dlb-field(row, "syncs") == dll-arena-syncs(m) && dlb-field(row, "readbacks") == dll-arena-reads(m, true) && dlb-field(row, "cbs") == dll-arena-cbs(m) && dlb-field(row, "allocs") == 0 && dlb-field(row, "miss") == 0
+   && dll-within?(row, dll-arena-ceil(m, pos, true, dlb-field(row, "fdisp"), dll-token-bytes-m(m)));
+  def dlb-arena-rows-ok?(m, steps) = len(steps) == 0 ? true : (dlb-arena-row-ok?(m, steps[0][1], steps[0][4]) && dlb-arena-rows-ok?(m, steps[1:]));
+  // the lookups of a row are the layers x the experts a layer uses: hits + misses
+  // the road a walk's fills took: the view road (true) makes one copy dispatch a fill, the fill door (false) none
+  // and the ledger names it (dll-road): "view" when every fill dispatched, "door" when none did, "none" for a row that filled nothing; the door's fills are fills - fdisp
+  def dlb-road?(steps, view) = len(steps) == 0 ? true : ((view ? dlb-field(steps[0][1], "fdisp") == dlb-field(steps[0][1], "fills") : dlb-field(steps[0][1], "fdisp") == 0)
+   && (dlb-field(steps[0][1], "fills") == 0 ? dll-road(steps[0][1]) == "none" : dll-road(steps[0][1]) == (view ? "view" : "door")) && dll-fills-door(steps[0][1]) == (view ? 0 : dlb-field(steps[0][1], "fills")) && dlb-road?(steps[1:], view));
+  def dlb-arena-lookups-ok?(m, steps) = len(steps) == 0 ? true : (dlb-field(steps[0][1], "emiss") + dlb-field(steps[0][1], "ehit") == dll-layers-n(m) * record_get(m, "used") && dlb-arena-lookups-ok?(m, steps[1:]));
+  // the plants through the counted doors: the control row passes the arena ceilings, and a tap that syncs once, one that reads the device once more, and one that makes a buffer each fail them
+  def dlb-arena-plant-at(ctx, plant, il, box) {
+   let s = (plant == 1 && il == 0) ? dkr-hz-sync() : 0;
+   let r = (plant == 2 && il == 0) ? dkr-read-u32(dkl-b(ctx, "argmax-idx"), 1) : 0;
+   let a = (plant == 3 && il == 0) ? record_set(box, "h", metal_buf_alloc(64)) : 0;
+   "";
+  }
+  // the plant's buffer is the band's to free once the row is read (the row counts it standing at the close of the token)
+  def dlb-arena-plant-row(ctx, sts, id, pos, plant) {
+   let box = record_new(0, "h", 0);
+   let set = plant == 0 ? 0 : dkr-hz-tap-set((kind, a) => kind == "layer" ? dlb-arena-plant-at(ctx, plant, a, box) : "");
+   let seen = dsv4-decode-observed(ctx, sts, id, pos);
+   let cleared = dkr-hz-tap-clear();
+   let freed = record_get(box, "h") > 0 ? metal_buf_free(record_get(box, "h")) : 0;
+   nothing?(seen[0]) ? nothing() : seen[1];
+  }
+  def dlb-arena-plants(ctx) {
+   let m = dso-geo(ctx);
+   let sts = dsv4-new-state(m, ctx[0], dlb-cap());
+   let pf = dsv4-prefill-span-sliced(ctx, sts, dlb-prompt(), 0);
+   let ctl = nothing?(pf) ? nothing() : dlb-arena-plant-row(ctx, sts, pf[0], pf[1], 0);
+   let p1 = nothing?(pf) ? nothing() : dlb-arena-plant-row(ctx, sts, pf[0], pf[1] + 1, 1);
+   let p2 = nothing?(pf) ? nothing() : dlb-arena-plant-row(ctx, sts, pf[0], pf[1] + 2, 2);
+   let p3 = nothing?(pf) ? nothing() : dlb-arena-plant-row(ctx, sts, pf[0], pf[1] + 3, 3);
+   let left = dsv4-free-state(sts);
+   let said = print_str("arena plants: control " ++ (nothing?(ctl) ? "none" : dll-line("control", ctl)) ++ " | a sync after block 0 " ++ (nothing?(p1) ? "none" : dll-line("sync", p1)) ++ " | one more read " ++ (nothing?(p2) ? "none" : dll-line("read", p2))
+    ++ " | a buffer made " ++ (nothing?(p3) ? "none" : dll-line("alloc", p3)));
+   !nothing?(ctl) && !nothing?(p1) && !nothing?(p2) && !nothing?(p3) && dlb-arena-row-ok?(m, ctl, pf[1]) && !dlb-arena-row-ok?(m, p1, pf[1] + 1) && !dlb-arena-row-ok?(m, p2, pf[1] + 2) && !dlb-arena-row-ok?(m, p3, pf[1] + 3)
+    && dlb-field(p1, "syncs") == dll-arena-syncs(m) + 1 && dlb-field(p2, "readbacks") == dll-arena-reads(m, true) + 1 && dlb-field(p3, "allocs") == 1 && len(left) == 0;
+  }
+  // ---- claim 1024: the ATTRIBUTION ROW (dsv4-ledger.fk dll-attribute-decode): one decode token, every dispatch its own command buffer, the device's microseconds kept per dispatch --------------------------------
+  def dlb-count-of(t, key) = len(t) == 0 ? 0 : (t[0][0] == key ? t[0][1] : dlb-count-of(t[1:], key));
+  def dlb-us-of(t, key) = len(t) == 0 ? 0 : (t[0][0] == key ? t[0][2] : dlb-us-of(t[1:], key));
+  def dlb-has-key?(t, key) = len(t) == 0 ? false : (t[0][0] == key || dlb-has-key?(t[1:], key));
+  def dlb-all-positive?(t, keys) = len(keys) == 0 ? true : (dlb-count-of(t, keys[0]) > 0 && dlb-us-of(t, keys[0]) >= 0 && dlb-all-positive?(t, keys[1:]));
+  def dlb-families() = ["attention (MLA)", "dense matvecs (attention)", "compressor", "router", "experts gate/up", "experts down", "shared expert", "hyper-connection", "norms", "head", "embedding"];
+  def dlb-blocks-ok?(bs, arena) = len(bs) == 0 ? true : (bs[0][1] > 0 && (arena ? bs[0][2] > 0 : bs[0][2] == 0) && dlb-blocks-ok?(bs[1:], arena));
+  // the token run twice from the same prefill on two states of ONE context: plainly (the control) and in the attribution mode; the same id and the same logits' bits, the row's sums, its counts, its blocks, and the mode left as it was
+  def dlb-attr-claim(ctx, label, arena) {
+   let m = dso-geo(ctx);
+   let n = record_get(m, "layers-n");
+   let sC = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let sO = dsv4-new-state(ctx[2], ctx[0], dlb-cap());
+   let pC = dsv4-prefill-span-sliced(ctx, sC, dlb-prompt(), 0);
+   let pO = dsv4-prefill-span-sliced(ctx, sO, dlb-prompt(), 0);
+   let idC = (nothing?(pC) || nothing?(pO)) ? nothing() : dsv4-decode(ctx, sC, pC[0], pC[1]);
+   let bitsC = nothing?(idC) ? [] : dlb-bits(dsv4-logits(ctx));
+   let fd0 = dkr-hz-get("fdisp");
+   let seen = nothing?(idC) ? [nothing(), record_new(0)] : dll-attribute-decode(ctx, sO, pO[0], pO[1]);
+   let fd = dkr-hz-get("fdisp") - fd0;
+   let bitsO = nothing?(seen[0]) ? [] : dlb-bits(dsv4-logits(ctx));
+   let a = seen[1];
+   let lines = nothing?(seen[0]) ? 0 : print_str(dlb-join-lines(dll-attr-lines(a)));
+   let sumsOk = !nothing?(seen[0]) && dll-attr-sums-ok?(a);
+   let fam = nothing?(seen[0]) ? [] : record_get(a, "families");
+   let counts = !nothing?(seen[0]) && record_get(a, "dispatches") == dll-token-count-m(m, pO[1]) + fd && dlb-all-positive?(fam, dlb-families()) && dlb-count-of(fam, "experts gate/up") == 3 * n && dlb-count-of(fam, "experts down") == n
+    && dlb-count-of(fam, "head") == 8 && dlb-count-of(fam, "embedding") == 2 && dlb-count-of(fam, "shared expert") == 5 * n && dlb-count-of(fam, "hyper-connection") > 8 * n && dlb-count-of(fam, "norms") >= 2 * n;
+   let blocks = !nothing?(seen[0]) && len(record_get(a, "blocks")) == n && dlb-blocks-ok?(record_get(a, "blocks"), arena)
+    && dlb-has-key?(record_get(a, "stages"), arena ? "layer-a:0" : "layer:0") && dlb-has-key?(record_get(a, "stages"), "embed:0") && dlb-has-key?(record_get(a, "stages"), "head:0") && dlb-has-key?(record_get(a, "stages"), "scan:0");
+   let same = !nothing?(idC) && !nothing?(seen[0]) && idC == seen[0] && bitsC == bitsO && len(bitsC) > 0;
+   let restored = dkr-hz-get("mode") == 0 && dkr-hz-get("enabled") == 1 && len(dkr-hz-get("attr-rows")) == 0 && dkr-hz-get("armed") == 0;
+   let after = nothing?(idC) ? nothing() : dsv4-decode(ctx, sC, idC, pC[1] + 1);
+   // the plants: a row whose sum is one short of the device's growth fails the sum check, and a tally that lost a family fails the counts
+   let planted = !nothing?(seen[0]) ? record_set(a, "us", record_get(a, "us") + 1) : 0;
+   let plantedFails = !nothing?(seen[0]) && !dll-attr-sums-ok?(a);
+   let unplant = !nothing?(seen[0]) ? record_set(a, "us", record_get(a, "us") - 1) : 0;
+   let said = print_str("  attribution " ++ label ++ ": id " ++ (nothing?(idC) ? "none" : idC.str()) ++ "/" ++ (nothing?(seen[0]) ? "none" : seen[0].str()) ++ " bits equal " ++ same.str() ++ ", sums " ++ sumsOk.str() ++ ", counts " ++ counts.str() ++ ", blocks " ++ blocks.str() ++ ", mode restored " ++ restored.str() ++ ", a decode after it " ++ (nothing?(after) ? "none" : "ran") ++ ", the one-short plant fails " ++ plantedFails.str());
+   let left = dsv4-free-state(append(sC, sO));
+   same && sumsOk && counts && blocks && restored && !nothing?(after) && plantedFails && len(left) == 0;
+  }
+  def dlb-join-lines(ls) = len(ls) == 0 ? "" : (len(ls) == 1 ? ls[0] : ls[0] ++ "\n" ++ dlb-join-lines(ls[1:]));
+  def dlb-arena-ok?(ctx, arena, whole) {
+   let m = dso-geo(ctx);
+   let steps = arena[0];
+   len(steps) == 8 && arena[1] && dlb-arena-rows-ok?(m, steps) && dlb-arena-lookups-ok?(m, steps) && dlb-ids(steps) == dlb-ids(whole[0]) && dlb-bitrows(steps) == dlb-bitrows(whole[0]) && dxa-get(ctx, "fills") > 0 && dxa-get(ctx, "fills") == 3 * dxa-misses(ctx)
+    && dlb-stages-arena-ok?(ctx, steps);
+  }
+  // the stage rows of an arena token: one per block, ascending, each block's count includes its copies; the blocks' dispatches plus the embedding's 2 and the head's 8 are the token's
+  def dlb-stages-arena-ok?(ctx, steps) = len(steps) == 0 ? true : (len(steps[0][2]) == dlb-layers(ctx) && dlb-asc?(steps[0][2], 0) && dlb-sum-disp(steps[0][2]) + 10 == dlb-field(steps[0][1], "dispatches") && dlb-stages-arena-ok?(ctx, steps[1:]));
+ }
+ let root = temp_dir() ++ "/dsv4-ledger-band-" ++ now_unix_ms().str();
+ let pathA = root ++ "-mx.gguf";
+ let pathB = root ++ "-v.gguf";
+ let wroteA = dfx-write(pathA);
+ let wroteB = dfx-v-write(pathB);
+ let live0 = dvb-live();
+ let mapped0 = dvb-mapped();
+ let ctxA = dsv4-open-span(pathA, 16, 1);
+ let ctxB = dsv4-open-span(pathB, 16, 1);
+ let openedA = len(ctxA) == 13;
+ let openedB = len(ctxB) == 13;
+ let prepA = openedA ? dsv4-prepare(ctxA) : 0;
+ let prepB = openedB ? dsv4-prepare(ctxB) : 0;
+ let onA = dkr-hz-enable(true);
+ let concA = openedA ? dlb-walk(ctxA) : [[], false, nothing()];
+ let concB = openedB ? dlb-walk(ctxB) : [[], false, nothing()];
+ let offA = dkr-hz-enable(false);
+ let serA = openedA ? dlb-walk(ctxA) : [[], false, nothing()];
+ let serB = openedB ? dlb-walk(ctxB) : [[], false, nothing()];
+ let backOn = dkr-hz-enable(true);
+ let said1 = print_str("concurrent MX: " ++ dlb-str-rows(concA[0]));
+ let said2 = print_str("concurrent V: " ++ dlb-str-rows(concB[0]));
+ let said3 = print_str("serial MX first: " ++ (len(serA[0]) > 0 ? dll-line("serial", serA[0][0][1]) : "none"));
+ let said4 = print_str("ids MX " ++ dlb-ids(concA[0]).str() ++ " V " ++ dlb-ids(concB[0]).str());
+ let r1 = try openedA && openedB && len(concA[0]) == 8 && len(concB[0]) == 8 && len(serA[0]) == 8 && len(serB[0]) == 8 && dlb-count-ok?(ctxA, concA[0]) && dlb-count-ok?(ctxB, concB[0]) && dlb-count-ok?(ctxA, serA[0]) && dlb-count-ok?(ctxB, serB[0]) catch false;
+ let r2 = try r1 && dlb-cost-ok?(ctxA, concA[0], true) && dlb-cost-ok?(ctxB, concB[0], true) && dlb-cost-ok?(ctxA, serA[0], false) && dlb-cost-ok?(ctxB, serB[0], false) catch false;
+ let r4 = try r1 && dlb-plan-ok?(ctxA, concA[0], true) && dlb-plan-ok?(ctxB, concB[0], true) && dlb-plan-ok?(ctxA, serA[0], false) && dlb-plan-ok?(ctxB, serB[0], false) catch false;
+ let r8 = try r1 && dlb-ids(concA[0]) == dlb-ids(serA[0]) && dlb-bitrows(concA[0]) == dlb-bitrows(serA[0]) && dlb-ids(concB[0]) == dlb-ids(serB[0]) && dlb-bitrows(concB[0]) == dlb-bitrows(serB[0]) && dlb-rows-vary?(dlb-bitrows(concA[0])) && dlb-rows-vary?(dlb-bitrows(concB[0])) catch false;
+ let r16 = try r1 && dlb-stages-ok?(ctxA, concA[0]) && dlb-stages-ok?(ctxB, concB[0]) && dlb-stages-ok?(ctxA, serA[0]) catch false;
+ // the fixtures' measured maxima over the eight steps (2026-10-03): 148 dispatches (137, 142 or 148 by the window boundaries of the ratio-4 and ratio-2 blocks), 121 barriers, 2 command buffers; 1,285,844 bytes of
+ // weight a token on the MXFP fixture and 1,422,804 on the real-types one
+ let ceilA = dlb-ceil(148, 121, 2, 1285844);
+ let ceilB = dlb-ceil(148, 121, 2, 1422804);
+ let tooLow = dlb-ceil(dlb-field(concA[0][0][1], "dispatches") - 1, 121, 2, 1285844);
+ let plantNone = openedA ? dlb-observe-extra(ctxA, "none") : record_new(0);
+ let plantReads = openedA ? dlb-observe-extra(ctxA, "reads") : record_new(0);
+ let plantArgmax = openedA ? dlb-observe-extra(ctxA, "argmax") : record_new(0);
+ let said5 = print_str("plants: control " ++ dll-line("control", plantNone) ++ " | two extra reads " ++ dll-line("reads", plantReads) ++ " | a second argmax " ++ dll-line("argmax", plantArgmax));
+ let r32 = try r1 && dlb-within-all?(concA[0], ceilA) && dlb-within-all?(concB[0], ceilB) && !dll-within?(concA[0][0][1], tooLow) && dlb-field(serA[0][0][1], "barriers") < dlb-max-field(concA[0], "barriers")
+  && dll-within?(plantNone, ceilA) && !dll-within?(plantReads, ceilA) && dlb-field(plantReads, "readbacks") == 4 && !dll-within?(plantArgmax, ceilA) && dlb-field(plantArgmax, "syncs") == 2 catch false;
+ let r256 = try r1 && dlb-refused-then-good(ctxA, concA[0][0]) && dlb-refused-then-good(ctxB, concB[0][0]) catch false;
+ let r64 = try r1 && dlb-any-lane?(ctxB, 0, 3, true) && dlb-any-lane?(ctxB, 0, 3, false) && dlb-dense-q8?(ctxB) && !dlb-any-lane?(ctxA, 1, 3, true) && !dlb-any-lane?(ctxA, 1, 3, false) catch false;
+ let arenaA = openedA ? dsv4-open-arena(pathA, 16, 1, dlb-arena-slots()) : [];
+ let arenaB = openedB ? dsv4-open-arena(pathB, 16, 1, dlb-arena-slots()) : [];
+ let openedAA = len(arenaA) == 13;
+ let openedAB = len(arenaB) == 13;
+ let prepAA = openedAA ? dsv4-prepare(arenaA) : 0;
+ let prepAB = openedAB ? dsv4-prepare(arenaB) : 0;
+ let walkAA = openedAA ? dlb-walk(arenaA) : [[], false, nothing()];
+ let walkAB = openedAB ? dlb-walk(arenaB) : [[], false, nothing()];
+ let said6 = print_str("arena MX: " ++ dlb-str-rows(walkAA[0]));
+ let said7 = print_str("arena V: " ++ dlb-str-rows(walkAB[0]));
+ let said8 = print_str("arena ids MX " ++ dlb-ids(walkAA[0]).str() ++ " V " ++ dlb-ids(walkAB[0]).str() ++ "; " ++ (openedAA ? dxa-stat-line(arenaA) : "no arena"));
+ let okAA = try openedAA && dlb-arena-ok?(arenaA, walkAA, concA) catch false;
+ let okAB = try openedAB && dlb-arena-ok?(arenaB, walkAB, concB) catch false;
+ let plAA = try okAA && dlb-arena-plants(arenaA) catch false;
+ let plAB = try okAB && dlb-arena-plants(arenaB) catch false;
+ // the VIEW ROAD of the fill (a no-copy view of the span and a copy kernel: what a carrier without the fill door takes): the same walks on contexts whose arena takes it first, held to the same ceilings and to the control's ids and bits
+ let arenaVA = openedA ? dsv4-open-arena(pathA, 16, 1, dlb-arena-slots()) : [];
+ let arenaVB = openedB ? dsv4-open-arena(pathB, 16, 1, dlb-arena-slots()) : [];
+ let roadA = len(arenaVA) == 13 ? record_set(dxa-of(arenaVA), "native", 0) : 0;
+ let roadB = len(arenaVB) == 13 ? record_set(dxa-of(arenaVB), "native", 0) : 0;
+ let prepVA = len(arenaVA) == 13 ? dsv4-prepare(arenaVA) : 0;
+ let prepVB = len(arenaVB) == 13 ? dsv4-prepare(arenaVB) : 0;
+ let walkVA = len(arenaVA) == 13 ? dlb-walk(arenaVA) : [[], false, nothing()];
+ let walkVB = len(arenaVB) == 13 ? dlb-walk(arenaVB) : [[], false, nothing()];
+ let okVA = try len(arenaVA) == 13 && dlb-arena-ok?(arenaVA, walkVA, concA) && dlb-road?(walkVA[0], true) catch false;
+ let okVB = try len(arenaVB) == 13 && dlb-arena-ok?(arenaVB, walkVB, concB) && dlb-road?(walkVB[0], true) catch false;
+ let doorA = try okAA && dlb-road?(walkAA[0], false) catch false;
+ let doorB = try okAB && dlb-road?(walkAB[0], false) catch false;
+ let said9 = print_str("arena claims: walk MX " ++ okAA.str() ++ " V " ++ okAB.str() ++ ", plants MX " ++ plAA.str() ++ " V " ++ plAB.str() ++ "; the fill door took no copy dispatch " ++ [doorA, doorB].str() ++ "; the view road walks " ++ [okVA, okVB].str() ++ " (copy dispatches " ++ (len(arenaVA) == 13 ? dxa-get(arenaVA, "fills").str() : "none") ++ " fills)");
+ let r512 = try r1 && okAA && okAB && plAA && plAB && okVA && okVB && doorA && doorB catch false;
+ let attrA = try openedA && dlb-attr-claim(ctxA, "MX whole-stack", false) catch false;
+ let attrB = try openedB && dlb-attr-claim(ctxB, "V whole-stack", false) catch false;
+ let attrAA = try openedAA && dlb-attr-claim(arenaA, "MX arena", true) catch false;
+ let attrAB = try openedAB && dlb-attr-claim(arenaB, "V arena", true) catch false;
+ let r1024 = try r1 && attrA && attrB && attrAA && attrAB catch false;
+ let leftVA = len(arenaVA) == 13 ? dsv4-close(arenaVA, []) : [0];
+ let leftVB = len(arenaVB) == 13 ? dsv4-close(arenaVB, []) : [0];
+ let leftAA = openedAA ? dsv4-close(arenaA, []) : [0];
+ let leftAB = openedAB ? dsv4-close(arenaB, []) : [0];
+ let leftA = openedA ? dsv4-close(ctxA, []) : [0];
+ let leftB = openedB ? dsv4-close(ctxB, []) : [0];
+ let c128 = dlb-bit(try openedA && openedB && len(leftA) == 0 && len(leftB) == 0 && len(leftAA) == 0 && len(leftAB) == 0 && len(leftVA) == 0 && len(leftVB) == 0 && dvb-live() == live0 && dvb-mapped() == mapped0 catch false, 128);
+ let removed = host_path_remove(pathA) + host_path_remove(pathB);
+ print_str("dsv4-ledger-band claims " ++ dlb-bit(r1, 1).str() ++ " " ++ dlb-bit(r2, 2).str() ++ " " ++ dlb-bit(r4, 4).str() ++ " " ++ dlb-bit(r8, 8).str() ++ " " ++ dlb-bit(r16, 16).str() ++ " " ++ dlb-bit(r32, 32).str() ++ " " ++ dlb-bit(r64, 64).str() ++ " " ++ c128.str() ++ " " ++ dlb-bit(r256, 256).str() ++ " " ++ dlb-bit(r512, 512).str() ++ " " ++ dlb-bit(r1024, 1024).str() ++ " live " ++ live0.str() ++ "/" ++ dvb-live().str() ++ " removed " ++ removed.str());
+ dlb-bit(r1, 1) + dlb-bit(r2, 2) + dlb-bit(r4, 4) + dlb-bit(r8, 8) + dlb-bit(r16, 16) + dlb-bit(r32, 32) + dlb-bit(r64, 64) + c128 + dlb-bit(r256, 256) + dlb-bit(r512, 512) + dlb-bit(r1024, 1024);
+}

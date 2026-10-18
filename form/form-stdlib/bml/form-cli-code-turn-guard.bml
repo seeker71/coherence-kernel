@@ -1,0 +1,78 @@
+// form-cli-code-turn-guard.bml — the lane reads its own tool turns before it spends another reply on them.
+//
+// A window of the last FcctgWindow tool turns, each three digests and a context: the call (tool, arguments,
+// input), its result (exit, stdout, stderr), the resident documents after it, and the model context the call
+// was made in. The call is read as the edit ladder reads an old text, at its whitespace-run rung: an echocall
+// (a reply that spells the same call in other whitespace and gets the same result) is the same experiment,
+// however a seeded decode respelled it. stillstreak counts the turns of the current span whose call and
+// result already stood earlier in that same span, so read A, edit E, edit E, read A, edit E reads 0 0 1 2 3:
+// an interleaved repeat counts. A span is the run of turns over the same documents in the same context: a
+// changed document opens a new one (an edit and then the same read is a new experiment), and so does every
+// context admission (renewal, a resumed option), since a fresh context holds none of the bytes an earlier
+// context read, and its first re-read gives it back its sight rather than repeating an experiment.
+// The count is a reading of that window. The call's result stands.
+//
+// A JSON tool reply is not read. A tool call is the cell the lane steps.
+//
+// A failed caller assertion's counterexample is the row and its actual result. The documents it was
+// checked against are not part of it: they stand beside it in checked_documents, so the same failure over
+// changed bytes still reads as the same failure (fcctg-assertion-core, the policy's one hook).
+import form-stdlib/bml/form-agent-tool-wire.bml;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+section [form.bml] {
+ class FormCliCodeTurnGuard {
+  field FcctgWindow = 30;
+  def fcctg-sha(text) = hex-encode(sha256-stream-string(text));
+  def fcctg-strings(xs) = xs |> map(json-node-string);
+
+  // ── the window ──────────────────────────────────────────────────────────
+  def fcctg-canonical(text) = fael-norm(text, 3)[0];
+  def fcctg-docs-digest(docs) = fcctg-sha(str-join(docs |> map(d => d[1] ++ "\n" ++ fcctg-sha(d[2]) ++ "\n")));
+  def fcctg-entry(tool, args, input, exit, out, err, docs, context) = [
+   fcctg-sha(json-emit(json-node-array([json-node-string(tool), json-node-array(fcctg-strings(args |> map(fcctg-canonical))), json-node-string(fcctg-canonical(input))]))),
+   fcctg-sha(json-emit(json-node-array([json-node-int(exit), json-node-string(out), json-node-string(err)]))),
+   fcctg-docs-digest(docs), context];
+  def fcctg-push(window, entry) = drop(max2(0, len(window) + 1 - FcctgWindow()), append(window, [entry]));
+  def fcctg-context(e) = len(e) > 3 ? e[3] : 0;
+  def fcctg-same-span?(a, b) = a[2] == b[2] && fcctg-context(a) == fcctg-context(b);
+  // the trailing run of entries that share the newest entry's documents digest and context
+  def fcctg-span(window) = nil?(window) ? [] : fcctg-span-of(reverse(window), reverse(window)[0], []);
+  def fcctg-span-of(rev, newest, out) = nil?(rev) || !fcctg-same-span?(rev[0], newest) ? out : fcctg-span-of(rev[1:], newest, cons(rev[0], out));
+  def fcctg-stillstreak(window) = max2(fcctg-streak(fcctg-span(window), [], 0), fcctg-returns(window));
+  // the turns whose documents came back to a state an earlier turn of the same context left, after another state between
+  // (an edit and its undo, again): the span above restarts at every changed document, so this is the loop it cannot see
+  def fcctg-returns(window) = fcctg-return-go(window, [], "", 0 - 1, 0);
+  def fcctg-return-go(w, seen, prev, ctx, n) = nil?(w) ? n : fcctg-return-go(w[1:], fcctg-context(w[0]) == ctx ? cons(w[0][2], seen) : [w[0][2]], w[0][2], fcctg-context(w[0]), n + (fcctg-context(w[0]) == ctx && w[0][2] != prev && fat-has(seen, w[0][2]) ? 1 : 0));
+  def fcctg-seen?(seen, e) = any?(p => p[0] == e[0] && p[1] == e[1], seen);
+  def fcctg-streak(span, seen, n) = nil?(span) ? n : fcctg-streak(span[1:], cons(span[0], seen), fcctg-seen?(seen, span[0]) ? n + 1 : n);
+
+  // the reply that repeats the observation it was given (role, mode, instruction first) is input, not an action
+  def fcctg-echo?(t) = fat-starts(fat-trim(t), "{\"role\":\"") && str_find(t, "\"mode\":\"", 0) > 0 && str_find(t, "\"mode\":\"", 0) < 48;
+
+  // ── the bounded note ────────────────────────────────────────────────────
+  // What a fresh context carries of earlier turns is bounded: a text over its cap keeps its head and its tail (an ending, a
+  // total, a closing brace live there), cut on code points, the middle named by its size.
+  def fcctg-cont?(b) = b >= 128 && b <= 191;
+  def fcctg-back(t, i) = (i > 0 && fcctg-cont?(str_byte_at(t, i))) ? fcctg-back(t, i - 1) : i;
+  def fcctg-fwd(t, i) = (i < len(t) && fcctg-cont?(str_byte_at(t, i))) ? fcctg-fwd(t, i + 1) : i;
+  def fcctg-squeeze(t, cap) = len(t) <= cap ? t : fcctg-squeezed(t, fcctg-back(t, (cap * 2) / 3), fcctg-fwd(t, len(t) - (cap / 3)));
+  def fcctg-squeezed(t, h, e) = substring(t, 0, h) ++ "\n[... " ++ (e - h).str() ++ " bytes omitted ...]\n" ++ substring(t, e, len(t));
+  def fcctg-has(s, mark) = str_find(s, mark, 0) >= 0;
+  def fcctg-after(s, mark) = substring(s, str_find(s, mark, 0) + len(mark), len(s));
+  def fcctg-before(s, mark) = fcctg-has(s, mark) ? substring(s, 0, str_find(s, mark, 0)) : s;
+
+  // ── the counterexample ──────────────────────────────────────────────────
+  def fcctg-assertion-prefix() = "Failed caller assertion: ";
+  def fcctg-assertion-core(node) = !fat-wire-string?(node) ? node : fcctg-assertion-text(node, node_value(node));
+  def fcctg-assertion-text(node, text) = !fat-starts(text, fcctg-assertion-prefix()) ? node : fcctg-assertion-at(node, text, str_find(text, " actual=", 0));
+  // the first " actual=" whose remainder is one whole JSON value: a row's own strings cannot end there
+  // json-serves: the counterexample sentence. text: the assertion tail is already that sentence; the catalog is not part of the identity.
+  def fcctg-assertion-at(node, text, at) = at < 0 ? node : faj-valid(substring(text, at + 8, len(text))) ? fcctg-assertion-of(node, text, at, parse-json("failed-assertion-actual", substring(text, at + 8, len(text))))
+   : fcctg-assertion-at(node, text, str_find(text, " actual=", at + 1));
+  // json-serves: the counterexample sentence. text: dropping the catalog keeps two failures of the same assertion one identity.
+  def fcctg-assertion-of(node, text, at, actual) = !(fat-wire-object?(actual) && json-object-has?(actual, "document_catalog")) ? node
+   : json-node-string(substring(text, 0, at + 8) ++ json-emit(json-node-object(filter(p => json-pair-key(p) != "document_catalog", json-object-pairs(actual)))));
+ }
+ 0;
+}

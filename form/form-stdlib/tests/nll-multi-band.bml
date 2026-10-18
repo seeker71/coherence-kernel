@@ -1,0 +1,76 @@
+; nll-multi-band.bml — several streams take their next token in one forward, each to the bits its own one-token step gives.
+;
+; preludes: form-stdlib/core.fk form-stdlib/tests/native-llama-fixture.bml
+; REQUIRES: the Metal carrier (a fresh worktree builds it: form-stdlib/metal-carrier.bml)
+;
+; nll-forward-multi feeds one token to each of up to eight streams (each its own context and position) as one block: the
+; projections, norms and LoRA on a block of eight, rope at each stream's position, the KV store into each stream's cache, the scores
+; and the attend over each stream's history, the best three of each stream's logits. This band takes the two-layer fixture and three
+; streams of different lengths (prompts of 3, 6 and 4 tokens), prefilled the same way twice, once to be stepped one stream at a time
+; (nll-forward, one token) and once to be stepped together.
+;
+; Verdict 31 when every claim lands:
+;   1   the best three of every stream equal those of its own one-token step
+;   2   every stream's logits row equals its own one-token step's, to the byte
+;   4   every layer's K and V cache of every stream, whole, equals the stepped-alone stream's: the token was written at the stream's
+;       own position and nothing else moved
+;   8   a second step (each stream feeding what it picked) agrees again in the picks, the logits and the caches: the positions
+;       the first step wrote are the history the second reads
+;   16  a request that does not fit is refused by name, not run: nine streams, a position past a stream's context, a token off the
+;       vocabulary
+section [form.bml] {
+ class NllMultiBand {
+  def nmb-bit(ok, bit) = ok ? bit : 0;
+  def nmb-prompts() = [[1, 5, 9], [2, 6, 10, 14, 18, 22], [3, 7, 11, 15]];
+  def nmb-cap() = 16;
+  // a context prefilled with a prompt, the tape released
+  def nmb-ready(m, prompt) {
+   let c = nll-context(m, nmb-cap());
+   let r = nll-forward(m, c, prompt, 0, 0);
+   let freed = nll-forward-close(r);
+   c;
+  }
+  def nmb-bytes(h, n) = (String) metal_buf_read(h, 0, n * 4);
+  // one stream stepped alone: [best three, logits bytes]
+  def nmb-alone(m, c, id, pos) {
+   let g = m[0];
+   let r = nll-forward(m, c, [id], pos, 0);
+   let tops = nll-select3(r[0], g[5]);
+   let bytes = nmb-bytes(r[0], g[5]);
+   let freed = nll-forward-close(r);
+   [tops, bytes];
+  }
+  def nmb-caches-equal?(m, a, b, i) {
+   let g = m[0]; let n = nmb-cap() * g[3] * g[4];
+   i >= len(a[1]) ? 1 : (nmb-bytes(a[1][i], n) == nmb-bytes(b[1][i], n) && nmb-bytes(a[2][i], n) == nmb-bytes(b[2][i], n) && nmb-caches-equal?(m, a, b, i + 1) == 1) ? 1 : 0;
+  }
+  def nmb-all-caches-equal?(m, as, bs) = len(filter(i => nmb-caches-equal?(m, as[i], bs[i], 0) == 0, range(0, len(as)))) == 0;
+  // the three streams' logits differ from one another (a comparison of empty or repeated rows would prove nothing)
+  def nmb-distinct?(single) = (String) single[0][1] != (String) single[1][1] && (String) single[1][1] != (String) single[2][1] && (String) single[0][1] != (String) single[2][1];
+  def nmb-score() {
+   let m = nlf-model(); let g = m[0]; let vocab = g[5];
+   let prompts = nmb-prompts();
+   let alone = map(p => nmb-ready(m, p), prompts);
+   let together = map(p => nmb-ready(m, p), prompts);
+   let ids = [7, 11, 13]; let poss = map(p => len(p), prompts);
+   let single = map(i => nmb-alone(m, alone[i], ids[i], poss[i]), range(0, 3));
+   let multi = nll-forward-multi-logits(m, together, ids, poss);
+   let c1 = (String) value_str(multi[0]) == (String) value_str(map(s => s[0], single));
+   let c2 = (String) multi[1] == (String) str-join(map(s => s[1], single)) && len(multi[1]) == 3 * vocab * 4 && nmb-distinct?(single);
+   let c3 = nmb-all-caches-equal?(m, alone, together);
+   // the second step: each stream feeds the id it picked
+   let next = map(s => s[0][0], single);
+   let poss2 = map(p => p + 1, poss);
+   let single2 = map(i => nmb-alone(m, alone[i], next[i], poss2[i]), range(0, 3));
+   let multi2 = nll-forward-multi-logits(m, together, next, poss2);
+   let c4 = (String) value_str(multi2[0]) == (String) value_str(map(s => s[0], single2)) && (String) multi2[1] == (String) str-join(map(s => s[1], single2)) && nmb-all-caches-equal?(m, alone, together);
+   let refused9 = try nll-forward-multi(m, map(i => together[0], range(0, 9)), map(i => 1, range(0, 9)), map(i => 0, range(0, 9))) catch "refused";
+   let refusedPos = try nll-forward-multi(m, [together[0]], [1], [nmb-cap()]) catch "refused";
+   let refusedId = try nll-forward-multi(m, [together[0]], [vocab], [3]) catch "refused";
+   let c5 = (String) refused9 == "refused" && (String) refusedPos == "refused" && (String) refusedId == "refused";
+   let closed = map(c => nll-context-close(c), append(alone, together));
+   nmb-bit(c1, 1) + nmb-bit(c2, 2) + nmb-bit(c3, 4) + nmb-bit(c4, 8) + nmb-bit(c5, 16);
+  }
+ }
+ nmb-score();
+}

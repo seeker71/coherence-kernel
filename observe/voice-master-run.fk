@@ -1,0 +1,48 @@
+// voice-master-run.fk — the body masters a sleep track, or measures one, on its own metal.
+//
+//   master <lang>    sentence chunks in .hearth/voice-track/pcm-<lang>/ (raw s16le, NNNN.pcm; else wav-<lang>/NNNN.wav)
+//                    joined by <lang>-map.txt (0 clause 0.5 s, 1 sentence 1.2 s, 2 paragraph 3.4 s), toned, compressed,
+//                    roomed, faded, set to -30 LUFS, written to .hearth/voice-track/native-master-<lang>.wav
+//   measure <path>   a mono 16-bit WAV read as the master reads its own: integrated LUFS, loudness range, peaks, centroid
+//
+// What it runs is chosen by one line in .hearth/voice-master-target (default `master en`). The door takes the
+// GPU lease (/tmp/form-gpu.lock, machine-wide, form/form-stdlib/gpu-lease.bml) before it touches the device and gives it back
+// after, so a second client waits instead of wedging the first. The lease names its holder: a client that finds
+// a live holder waits (20 minutes), one that finds a dead holder takes the lease over and says so, and the give
+// removes only a lease this run holds.
+//
+// preflight-exec: forbidden
+import form/form-stdlib/voice-master.bml;
+section [form.bml] {
+    def vr-dir() = ".hearth/voice-track";
+    def vr-strip(s) = (Comparable) len(s) == 0 ? "" : (str_byte_at(s, len(s) - 1) <= 32 ? vr-strip(substring(s, 0, len(s) - 1)) : s);
+    def vr-target() {
+        let t = read_file(".hearth/voice-master-target");
+        nothing?(t) ? "master en" : ((Comparable) len(vr-strip(t)) == 0 ? "master en" : vr-strip(t));
+    }
+    def vr-split-at(s, i) = i >= len(s) ? [s, ""] : ((Comparable) str_byte_at(s, i) == 32 ? [substring(s, 0, i), vr-strip(substring(s, i + 1, len(s)))] : vr-split-at(s, i + 1));
+    def vr-row(r) = print(r[0] ++ "  " ++ (value_str(r[1])));
+    def vr-rows(rows) = nil?(rows) ? 1 : (vr-row(rows[0]) + vr-rows(rows[1:]));
+    // `master <lang> [profile]`: the profile (gentle, the default, or lift) names the compression curve; a profile other
+    // than the default is part of the file's name so the two can stand side by side
+    def vr-master(ps, rest) {
+        let lp = vr-split-at(rest, 0);
+        let lang = lp[0];
+        let profile = (Comparable) len(lp[1]) == 0 ? "gentle" : lp[1];
+        let plan = vmm-plan(vr-dir() ++ "/pcm-" ++ lang, vr-dir() ++ "/wav-" ++ lang, vr-dir() ++ "/" ++ lang ++ "-map.txt", 22050);
+        let out = vr-dir() ++ "/native-master-" ++ lang ++ ((String) profile == "gentle" ? "" : "-" ++ profile) ++ ".wav";
+        let hd = print("plan  " ++ len(plan).str() ++ " chunks, " ++ vmm-plan-total(plan, 22050).str() ++ " samples before the tails, profile " ++ profile ++ " -> " ++ out);
+        vr-rows(vmm-master-profile(ps, plan, out, 22050, profile));
+    }
+    def vr-go(tgt, lease) {
+        let ps = vmm-open();
+        let did = (String) tgt[0] == "measure" ? vr-rows(vmm-measure-wav(ps, tgt[1])) : vr-master(ps, tgt[1]);
+        let unlocked = vmm-gpu-unlock(lease);
+        let gave = print(gpu-lease-line(unlocked));
+        print("voice-master-run  done");
+    }
+    let tgt = vr-split-at(vr-target(), 0);
+    let lease = vmm-gpu-lock("voice-master-run");
+    let said = print(gpu-lease-line(lease));
+    (Comparable) vmm-gpu-held?(lease) == 1 ? vr-go(tgt, lease) : print("voice-master-run  not run");
+}

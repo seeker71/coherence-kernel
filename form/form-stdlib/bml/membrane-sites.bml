@@ -1,0 +1,587 @@
+// membrane-sites.bml — the static census of the places the body's source crosses the membrane to run a program.
+//
+// A SITE is a call to a crossing primitive (host-exec, host_capture, host_spawn, host_spawn_quiet, host_spawn_at) or to a
+// WRAPPER of one, found to a fixed point (mbs-discover): a def whose call hands its command on from its own parameters
+// ("pass": the callers decide what runs), or a thin def (a body of at most mbs-thin() bytes) that runs a command of its own
+// ("fixed": callers choose to run it). A thin def that only calls a fixed wrapper delegates and is a site, not a new wrapper;
+// a large def that merely contains a crossing is where a site sits. Fixtures and the token verbs make no wrappers.
+// Each site says what runs. The source is read as text, never run:
+//   an argv list literal       its first element (and, through env, nohup, sh -c ..., what command-words reads past it)
+//   a shell-line string        the command word of every command in the line, each separately, read by command-words.bml
+//                              (`ps | grep | head` is three words); the line may be built from pieces: a piece that is not a
+//                              literal reads as a hole, and the line is then PARTIAL (its words are those the literals name)
+//   a command built at run time  (computed): the def and the literal fragments the reading can see
+// A wrapper call reads through the chain: the call's arguments replace the wrapper's parameters in the wrapper's own inner
+// call, link by link, down to the primitive. A call whose command is still a parameter of the def that holds it is a
+// PASS-THROUGH (the def is a wrapper, the command is decided by its callers) and is not counted as a site of its own.
+//
+// Each word gets a VERDICT from one data table (mbs-rows), readable and editable by the next migration:
+//   internal-tool          the native catalog does it (docs/form-native-agent-tools.md)
+//   internal-tool-pending  a catalog tool being added
+//   door                   a seed door does it; the row names the doors, and the table asks runtime/fkwu-optable.h whether each
+//                          STANDS: a door that is not there yet reads door-planned
+//   self                   the body's own program (fkwu): a child of itself; via-shell when it is begun through a shell string
+//   exception              cc, the seed's build (AGENTS.md);  exception-git: git, the repository's own tool (one row flips it)
+//   shell                  sh/bash/zsh ...; shell-by-design inside the token verbs, whose verb exists to run a command
+//   builtin                a shell builtin, no program of its own (echo, true, cd ...)
+//   form                   Form already does it as a value (basename, expr, seq ...)
+//   unknown                anything else: the list Urs wants to see;  forbidden: perl, python (never)
+//   computed               the command is built at run time and the reading cannot name it
+// A site's verdict is the worst verdict of its words (mbs-rank).
+//
+// What it cannot see (said plainly): a command that is assembled across defs (a def that returns a fragment); a wrapper whose
+// name is also defined in another file (listed as ambiguous and not followed); a primitive reached through a table of lambdas
+// (`v => host_spawn(v[0])`), which reads as computed; Lisp-style `(host-exec ...)` forms (only fixtures use them: counted by
+// mbs-lisp-count); anything the shell does after it is handed the line. Strings are bytes; `//` and a leading `;` open a comment.
+//
+// PROOF: form-stdlib/tests/membrane-sites-band.fk.  The reading: observe/membrane-sites-run.bml.
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/command-words.bml
+section [form.bml] {
+ class MembraneSites {
+  // ================================================================ DATA (edit here)
+  // the crossing primitives and the kind of their first argument: a shell line or an argv list
+  def mbs-prims() = [["host-exec", "line"], ["host_capture", "argv"], ["host_spawn", "argv"], ["host_spawn_quiet", "argv"], ["host_spawn_at", "argv"]];
+  // directories the walk does not enter (documents, receipts, the hearth's state, version control)
+  def mbs-skip-dirs() = [".git", ".hearth", ".claude", "node_modules", "receipts", "docs", "teachings"];
+  // the guard's own tables and readers: they name tools on purpose
+  def mbs-guard-files() = ["spawn-guard.bml", "command-words.bml", "forbidden-tools-audit.bml", "membrane-sites.bml"];
+  // files whose verb exists to run a command
+  def mbs-by-design-files() = ["form-token-verbs.bml", "form-token-workspace.bml"];
+  // the file that says which doors the seed has
+  def mbs-optable-path() = "runtime/fkwu-optable.h";
+  // [word, verdict, what replaces it, the doors that must stand for "door"]
+  def mbs-rows() = [
+   ["rg", "internal-tool", "rg", []], ["jq", "internal-tool", "jq", []], ["read", "internal-tool", "read", []], ["cat", "internal-tool", "cat", []],
+   ["head", "internal-tool", "head", []], ["tail", "internal-tool", "tail", []], ["wc", "internal-tool", "wc", []], ["sort", "internal-tool", "sort", []],
+   ["uniq", "internal-tool", "uniq", []], ["tr", "internal-tool", "tr", []], ["cut", "internal-tool", "cut", []], ["awk", "internal-tool", "awk (catalog subset)", []],
+   ["sed", "internal-tool", "sed (catalog subset)", []], ["edit", "internal-tool", "edit", []], ["write", "internal-tool", "write", []],
+   ["grep", "internal-tool", "grep", []],
+   ["sleep", "door", "host_sleep_ms", ["host_sleep_ms"]],
+   ["kill", "door", "host_signal / host_kill", ["host_signal", "host_kill"]],
+   ["ps", "door", "host_processes / host_alive / host_process", ["host_processes", "host_alive", "host_process"]],
+   ["pgrep", "door", "host_processes", ["host_processes"]],
+   ["pkill", "door", "host_processes + host_signal", ["host_processes", "host_signal"]],
+   ["vm_stat", "door", "host_vm_stat", ["host_vm_stat"]],
+   ["uptime", "door", "host_load_avg", ["host_load_avg"]],
+   ["df", "door", "host_disk_stat", ["host_disk_stat"]],
+   ["mkdir", "door", "fs_mkdir (one level; a path is made level by level)", ["fs_mkdir"]],
+   ["mkdir -m", "door", "host_mkdir_mode", ["host_mkdir_mode"]],
+   ["rm", "door", "fs_remove / fs_rmdir", ["fs_remove", "fs_rmdir"]],
+   ["rmdir", "door", "fs_rmdir", ["fs_rmdir"]],
+   ["mv", "door", "fs_rename", ["fs_rename"]],
+   ["cp", "door", "read_file_slice + write_file", ["read_file_slice", "write_file"]],
+   ["ls", "door", "fs_list", ["fs_list"]],
+   ["find", "door", "fs_list + fs_is_dir recursion", ["fs_list", "fs_is_dir"]],
+   ["test", "door", "fs_exists / fs_is_dir", ["fs_exists", "fs_is_dir"]],
+   ["[", "door", "fs_exists / fs_is_dir (a fifo test has no door)", ["fs_exists", "fs_is_dir"]],
+   ["stat", "door", "file_size / file_mtime", ["file_size", "file_mtime"]],
+   ["touch", "door", "write_file", ["write_file"]],
+   ["tee", "door", "write_file twice", ["write_file"]],
+   ["mktemp", "door", "temp_dir + now_unix_ms", ["temp_dir", "now_unix_ms"]],
+   ["pwd", "door", "host_cwd", ["host_cwd"]],
+   ["chmod", "door", "host_chmod", ["host_chmod"]],
+   ["ln -s", "door", "host_symlink", ["host_symlink"]],
+   ["ln", "door", "host_link", ["host_link"]],
+   ["sync", "door", "host_sync", ["host_sync"]],
+   ["printenv", "door", "host_getenv", ["host_getenv"]],
+   ["date", "door", "host_localtime", ["host_localtime"]],
+   ["uname", "door", "host_os", ["host_os"]],
+   ["lsof", "door", "host_file_holders", ["host_file_holders"]],
+   ["fkwu", "self", "the body's own program", []],
+   ["cc", "exception", "the seed's build (AGENTS.md)", []],
+   ["git", "exception-git", "the repository's own tool (one row flips it)", []],
+   ["sh", "shell", "a verb that runs a command", []], ["bash", "shell", "a verb that runs a command", []], ["zsh", "shell", "a verb that runs a command", []],
+   ["dash", "shell", "a verb that runs a command", []], ["ksh", "shell", "a verb that runs a command", []], ["csh", "shell", "a verb that runs a command", []],
+   ["echo", "builtin", "a Form value", []], ["printf", "builtin", "a Form value", []], ["true", "builtin", "a Form value", []], ["false", "builtin", "a Form value", []],
+   ["exit", "builtin", "a Form value", []], ["cd", "builtin", "host_cwd / a path argument", []], ["export", "builtin", "an argument of the child", []],
+   ["set", "builtin", "none needed", []],["wait", "builtin", "host_wait", []], ["unset", "builtin", "none needed", []],
+   ["umask", "builtin", "none needed", []], ["trap", "builtin", "none needed", []], [":", "builtin", "none needed", []],
+   ["basename", "form", "string operation", []], ["dirname", "form", "string operation", []], ["expr", "form", "arithmetic", []], ["seq", "form", "a range", []]
+  ];
+  // the severity of a verdict, worst first: the verdict of a site is its worst word's
+  def mbs-ranks() = [["forbidden", 12], ["unknown", 11], ["computed", 10], ["door-planned", 9], ["door", 8], ["internal-tool-pending", 7], ["internal-tool", 6], ["form", 5], ["exception-git", 4], ["exception", 4], ["self", 3], ["builtin", 2], ["shell", 1], ["shell-by-design", 0]];
+  def mbs-verdict-names() = ["forbidden", "unknown", "computed", "door-planned", "door", "internal-tool-pending", "internal-tool", "builtin", "form", "exception-git", "exception", "self", "shell", "shell-by-design"];
+
+  // ================================================================ BYTES AND TEXT
+  def mbs-b(s, i) = i >= 0 && i < len(s) ? str_byte_at(s, i) : -1;
+  def mbs-alpha?(b) = (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 95;
+  def mbs-digit?(b) = b >= 48 && b <= 57;
+  def mbs-ident-char?(b) = mbs-alpha?(b) || mbs-digit?(b) || b == 45 || b == 63 || b == 33;
+  def mbs-idch?(b) = mbs-ident-char?(b) || b == 46;
+  def mbs-ws?(b) = b == 32 || b == 9 || b == 10 || b == 13;
+  def mbs-id-end(s, i) = mbs-ident-char?(mbs-b(s, i)) ? mbs-id-end(s, i + 1) : i;
+  def mbs-trim-end(s, e) = e > 0 && mbs-ws?(str_byte_at(s, e - 1)) ? mbs-trim-end(s, e - 1) : e;
+  def mbs-trim(s) {
+   let a = scan_run(s, 0, 0);
+   let e = mbs-trim-end(s, len(s));
+   e <= a ? "" : substring(s, a, e);
+  }
+  def mbs-has-sub?(s, part) = str_find(s, part, 0) >= 0;
+  def mbs-starts?(s, part) = len(s) >= len(part) && (String) substring(s, 0, len(part)) == part;
+  def mbs-ends?(s, part) = len(s) >= len(part) && (String) substring(s, len(s) - len(part), len(s)) == part;
+  def mbs-has?(xs, w) = nil?(xs) ? false : (String) xs[0] == w ? true : mbs-has?(xs[1:], w);
+  def mbs-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ mbs-join(xs[1:], sep);
+  def mbs-clip(s, n) = len(s) <= n ? s : substring(s, 0, n);
+  def mbs-rslash(p, i) = i < 0 ? -1 : str_byte_at(p, i) == 47 ? i : mbs-rslash(p, i - 1);
+  def mbs-base(p) = substring(p, mbs-rslash(p, len(p) - 1) + 1, len(p));
+  def mbs-nth(xs, k) = k == 0 ? xs[0] : mbs-nth(xs[1:], k - 1);
+  def mbs-index-from(xs, w, k) = nil?(xs) ? -1 : (String) xs[0] == w ? k : mbs-index-from(xs[1:], w, k + 1);
+  def mbs-index-of(xs, w) = mbs-index-from(xs, w, 0);
+  def mbs-uniq(xs, acc) = nil?(xs) ? reverse(acc) : mbs-has?(acc, xs[0]) ? mbs-uniq(xs[1:], acc) : mbs-uniq(xs[1:], cons(xs[0], acc));
+  def mbs-str-lt?(a, b) = mbs-str-lt-at(a, b, 0, len(a), len(b));
+  def mbs-str-lt-at(a, b, i, na, nb) = i >= na ? i < nb : i >= nb ? false : str_byte_at(a, i) < str_byte_at(b, i) ? true : str_byte_at(a, i) > str_byte_at(b, i) ? false : mbs-str-lt-at(a, b, i + 1, na, nb);
+  def mbs-i(n) = n.str();
+  def mbs-count-from(s, part, from, n) {
+   let q = str_find(s, part, from);
+   q < 0 ? n : mbs-count-from(s, part, q + len(part), n + 1);
+  }
+  def mbs-count-substr(s, part) = mbs-count-from(s, part, 0, 0);
+  def mbs-sorted?(xs) = nil?(xs) || nil?(xs[1:]) ? true : mbs-str-lt?(xs[1], xs[0]) ? false : mbs-sorted?(xs[1:]);
+  def mbs-pad(s, w) = len(s) >= w ? s : mbs-pad(s ++ " ", w);
+  def mbs-padl(s, w) = len(s) >= w ? s : mbs-padl(" " ++ s, w);
+  // a stable merge sort by a less-than function
+  def mbs-sort(xs, before) = len(xs) < 2 ? xs : mbs-sort-halves(take(len(xs) / 2, xs), xs[len(xs) / 2:], before);
+  def mbs-sort-halves(a, b, before) = mbs-merge(mbs-sort(a, before), mbs-sort(b, before), before, []);
+  def mbs-merge(a, b, before, acc) = nil?(a) ? append(reverse(acc), b) : nil?(b) ? append(reverse(acc), a) : before(b[0], a[0]) ? mbs-merge(a, b[1:], before, cons(b[0], acc)) : mbs-merge(a[1:], b, before, cons(a[0], acc));
+
+  // ================================================================ LITERALS, ARGUMENTS, SPANS
+  // a string literal: the index after its closing quote (i is the opening quote's)
+  def mbs-str-body(s, j) {
+   let k = scan_run(s, j, 4);
+   let c = mbs-b(s, k);
+   c == 34 ? k + 1 : c == 92 ? mbs-str-body(s, k + 2) : len(s);
+  }
+  def mbs-str-end(s, i) = mbs-str-body(s, i + 1);
+  def mbs-esc-char(c) = c == 110 ? byte_to_str(10) : c == 116 ? byte_to_str(9) : c == 114 ? byte_to_str(13) : c < 0 ? "" : byte_to_str(c);
+  def mbs-unesc(t) = mbs-unesc-from(t, 0, []);
+  def mbs-unesc-from(t, i, acc) {
+   let j = str_find(t, "\\", i);
+   j < 0 ? str-spans(reverse(cons(substring(t, i, len(t)), acc)))
+   : mbs-unesc-from(t, j + 2 > len(t) ? len(t) : j + 2, cons(mbs-esc-char(mbs-b(t, j + 1)), cons(substring(t, i, j), acc)));
+  }
+  // the arguments of the call (or the elements of the literal) whose opener is at o: [the texts, the index after its closer]
+  def mbs-arg-push(s, a, e, acc) {
+   let t = e > a ? mbs-trim(substring(s, a, e)) : "";
+   len(t) > 0 ? cons(t, acc) : acc;
+  }
+  def mbs-args(s, o) = mbs-args-walk(s, o + 1, 0, o + 1, []);
+  def mbs-args-walk(s, i, depth, a, acc) {
+   let b = mbs-b(s, i);
+   b < 0 ? [reverse(mbs-arg-push(s, a, i, acc)), i]
+   : b == 34 ? mbs-args-walk(s, mbs-str-end(s, i), depth, a, acc)
+   : b == 47 && mbs-b(s, i + 1) == 47 ? mbs-args-walk(s, scan_run(s, i, 5), depth, a, acc)
+   : b == 40 || b == 91 || b == 123 ? mbs-args-walk(s, i + 1, depth + 1, a, acc)
+   : b == 41 || b == 93 || b == 125 ? (depth == 0 ? [reverse(mbs-arg-push(s, a, i, acc)), i + 1] : mbs-args-walk(s, i + 1, depth - 1, a, acc))
+   : b == 44 && depth == 0 ? mbs-args-walk(s, i + 1, 0, i + 1, mbs-arg-push(s, a, i, acc))
+   : mbs-args-walk(s, i + 1, depth, a, acc);
+  }
+  // the index of the first `;` at depth 0 (semi) or of the closer that ends the enclosing group
+  def mbs-scan-to(s, i, depth, semi) {
+   let b = mbs-b(s, i);
+   b < 0 ? i
+   : b == 34 ? mbs-scan-to(s, mbs-str-end(s, i), depth, semi)
+   : b == 47 && mbs-b(s, i + 1) == 47 ? mbs-scan-to(s, scan_run(s, i, 5), depth, semi)
+   : b == 40 || b == 91 || b == 123 ? mbs-scan-to(s, i + 1, depth + 1, semi)
+   : b == 41 || b == 93 || b == 125 ? (depth == 0 ? i : mbs-scan-to(s, i + 1, depth - 1, semi))
+   : b == 59 && depth == 0 && semi ? i
+   : mbs-scan-to(s, i + 1, depth, semi);
+  }
+  // the operands of a + / ++ chain at depth 0
+  def mbs-split-plus(t) = mbs-plus-walk(t, 0, 0, 0, []);
+  def mbs-plus-walk(s, i, depth, a, acc) {
+   let b = mbs-b(s, i);
+   b < 0 ? reverse(mbs-arg-push(s, a, i, acc))
+   : b == 34 ? mbs-plus-walk(s, mbs-str-end(s, i), depth, a, acc)
+   : b == 40 || b == 91 || b == 123 ? mbs-plus-walk(s, i + 1, depth + 1, a, acc)
+   : b == 41 || b == 93 || b == 125 ? mbs-plus-walk(s, i + 1, depth > 0 ? depth - 1 : 0, a, acc)
+   : b == 43 && depth == 0 ? mbs-plus-walk(s, mbs-b(s, i + 1) == 43 ? i + 2 : i + 1, 0, mbs-b(s, i + 1) == 43 ? i + 2 : i + 1, mbs-arg-push(s, a, i, acc))
+   : mbs-plus-walk(s, i + 1, depth, a, acc);
+  }
+  // an expression without the parentheses (and the cast) that wrap all of it
+  def mbs-wrapped?(t) = len(t) >= 2 && mbs-b(t, 0) == 40 && mbs-args(t, 0)[1] == len(t);
+  def mbs-uncast(t) = mbs-starts?(t, "(String) ") ? mbs-trim(substring(t, 9, len(t))) : mbs-starts?(t, "(Comparable) ") ? mbs-trim(substring(t, 13, len(t))) : t;
+  def mbs-strip(e) {
+   let t = mbs-uncast(mbs-trim(e));
+   mbs-wrapped?(t) ? mbs-strip(substring(t, 1, len(t) - 1)) : t;
+  }
+  // a template of an operand chain: literals as themselves, every other piece as a hole (byte 1)
+  def mbs-hole() = byte_to_str(1);
+  def mbs-template(e, dt, k) {
+   let t = mbs-open(e, dt, k > 0 ? 1 : 0);
+   mbs-b(t, 0) == 34 && mbs-str-end(t, 0) == len(t) ? mbs-unesc(substring(t, 1, len(t) - 1))
+   : k > 0 && len(mbs-split-plus(t)) > 1 ? str-spans(map(op => mbs-template(op, dt, k - 1), mbs-split-plus(t)))
+   : mbs-hole();
+  }
+  // a call of a small def that only builds a value (an argv, a line) is read as the value it builds: its parameters replaced by the arguments
+  // dt is the def table: name -> [file, position, text when the source is held in memory]; a name defined twice reads position -1 and is not followed
+  def mbs-dt-add(dt, src, text, p) {
+   let name = substring(text, p + 4, mbs-id-end(text, p + 4));
+   record_has(dt, name) ? record_set(dt, name, ["", -1, ""]) : record_set(dt, name, [src[0], p, len(src[1]) > 0 ? src[1] : ""]);
+  }
+  def mbs-dt-src(dt, src) {
+   let text = mbs-text(src);
+   mbs-has-sub?(text, "def ") ? foldl((d, p) => mbs-dt-add(d, src, text, p), dt, mbs-defs(text)) : dt;
+  }
+  def mbs-def-table(srcs) = foldl((dt, src) => mbs-dt-src(dt, src), record_new(0), srcs);
+  def mbs-expand-body(ent, args, t) {
+   let text = mbs-text([ent[0], ent[2]]);
+   let info = mbs-def-info(text, ent[1]);
+   let body = mbs-trim(substring(text, info[2], info[3]));
+   len(body) > 700 || mbs-has-any?(body, mbs-prim-names()) ? t : mbs-subst(body, info[1], args);
+  }
+  def mbs-inline(t, dt) {
+   let id = mbs-alpha?(mbs-b(t, 0)) ? substring(t, 0, mbs-id-end(t, 0)) : "";
+   len(id) > 0 && mbs-b(t, len(id)) == 40 && record_has(dt, id) && record_get(dt, id)[1] >= 0 && mbs-args(t, len(id))[1] == len(t) ? mbs-expand-body(record_get(dt, id), mbs-args(t, len(id))[0], t) : t;
+  }
+  def mbs-open(e, dt, k) {
+   let t = mbs-strip(e);
+   k <= 0 ? t : mbs-open-next(t, mbs-inline(t, dt), dt, k);
+  }
+  def mbs-open-next(t, u, dt, k) = (String) u == t ? t : mbs-open(u, dt, k - 1);
+  // the leading elements an argv expression names: a list literal, cons(x, rest), append(head, rest), list(a, b); [] when it names none
+  def mbs-list-elems(e, dt, k) {
+   let t = mbs-open(e, dt, 3);
+   mbs-b(t, 0) == 91 ? mbs-args(t, 0)[0]
+   : k <= 0 ? []
+   : mbs-starts?(t, "cons(") ? mbs-cons-elems(mbs-args(t, 4)[0], dt, k)
+   : mbs-starts?(t, "append(") ? (nil?(mbs-args(t, 6)[0]) ? [] : mbs-list-elems(mbs-args(t, 6)[0][0], dt, k - 1))
+   : mbs-starts?(t, "list(") ? mbs-args(t, 4)[0]
+   : [];
+  }
+  def mbs-cons-elems(a, dt, k) = nil?(a) ? [] : cons(a[0], nil?(a[1:]) ? [] : mbs-list-elems(a[1], dt, k - 1));
+  // the string literals an expression carries, decoded and clipped
+  def mbs-literals(e) = mbs-literals-from(e, 0, [], 6);
+  def mbs-literals-from(e, i, acc, left) {
+   let q = left <= 0 ? -1 : str_find(e, "\"", i);
+   q < 0 ? reverse(acc) : mbs-literals-from(e, mbs-str-end(e, q), cons(mbs-clip(mbs-unesc(substring(e, q + 1, mbs-str-end(e, q) - 1)), 48), acc), left - 1);
+  }
+
+  // ================================================================ LIVE CODE: not a comment, not inside a string
+  def mbs-line-start(s, p) = p <= 0 ? 0 : str_byte_at(s, p - 1) == 10 ? p : mbs-line-start(s, p - 1);
+  def mbs-live?(s, p) = mbs-live-walk(s, mbs-line-start(s, p), p, true);
+  def mbs-live-walk(s, i, p, first) {
+   let b = mbs-b(s, i);
+   i >= p ? true
+   : b == 34 ? (mbs-str-end(s, i) > p ? false : mbs-live-walk(s, mbs-str-end(s, i), p, false))
+   : b == 47 && mbs-b(s, i + 1) == 47 ? false
+   : b == 59 && first ? false
+   : mbs-ws?(b) ? mbs-live-walk(s, i + 1, p, first)
+   : mbs-live-walk(s, i + 1, p, false);
+  }
+  def mbs-line-of(text, p) = mbs-line-count(text, p, 0, 1);
+  def mbs-line-count(text, p, from, n) {
+   let q = str_find(text, "\n", from);
+   q < 0 || q >= p ? n : mbs-line-count(text, p, q + 1, n + 1);
+  }
+
+  // ================================================================ DEFS: where a call sits
+  def mbs-def-prev-ok?(s, p) {
+   let c = mbs-b(s, p - 1);
+   p == 0 || c == 10 || c == 32 || c == 9 || c == 123 || c == 59 || c == 13;
+  }
+  def mbs-def-open(s, p) {
+   let e = mbs-id-end(s, p + 4);
+   let k = scan_run(s, e, 0);
+   e > p + 4 && mbs-b(s, k) == 40 ? k : -1;
+  }
+  def mbs-def-ok?(s, p) = mbs-def-prev-ok?(s, p) && mbs-def-open(s, p) >= 0 && mbs-live?(s, p);
+  def mbs-defs(s) = mbs-defs-from(s, 0, []);
+  def mbs-defs-from(s, from, acc) {
+   let p = str_find(s, "def ", from);
+   p < 0 ? reverse(acc) : mbs-defs-from(s, p + 4, mbs-def-ok?(s, p) ? cons(p, acc) : acc);
+  }
+  def mbs-last-space(t, i) = i < 0 ? -1 : mbs-ws?(str_byte_at(t, i)) ? i : mbs-last-space(t, i - 1);
+  def mbs-param-name(t) {
+   let u = mbs-trim(t);
+   substring(u, mbs-last-space(u, len(u) - 1) + 1, len(u));
+  }
+  // [name, params, body start, body end, position]
+  def mbs-def-info(s, p) {
+   let o = mbs-def-open(s, p);
+   let ar = mbs-args(s, o);
+   let k = scan_run(s, ar[1], 0);
+   let b = mbs-b(s, k);
+   let block = b == 123;
+   let start = block || b == 61 ? k + 1 : k;
+   [substring(s, p + 4, mbs-id-end(s, p + 4)), map(t => mbs-param-name(t), ar[0]), start, mbs-scan-to(s, start, 0, !block), p];
+  }
+  def mbs-def-before-walk(defs, p, best) = nil?(defs) || defs[0] >= p ? best : mbs-def-before-walk(defs[1:], p, defs[0]);
+  def mbs-enclosing(s, defs, p) {
+   let d = mbs-def-before-walk(defs, p, -1);
+   d < 0 ? nothing() : mbs-enclosing-of(mbs-def-info(s, d), p);
+  }
+  def mbs-enclosing-of(info, p) = p >= info[2] && p < info[3] ? info : nothing();
+  // the let bindings of a body before p, the latest first: [[name, right side], ...]
+  def mbs-lets-from(s, from, p, acc) {
+   let q = str_find(s, "let ", from);
+   q < 0 || q >= p ? acc : mbs-lets-from(s, q + 4, p, mbs-let-take(s, q, p, acc));
+  }
+  def mbs-let-take(s, q, p, acc) {
+   let e = mbs-id-end(s, q + 4);
+   let k = scan_run(s, e, 0);
+   e > q + 4 && mbs-b(s, k) == 61 && mbs-b(s, k + 1) != 61 && mbs-def-prev-ok?(s, q) && mbs-live?(s, q) ? mbs-let-bind(s, substring(s, q + 4, e), k + 1, p, acc) : acc;
+  }
+  def mbs-let-bind(s, name, a, p, acc) {
+   let e = mbs-scan-to(s, a, 0, true);
+   e > p ? acc : cons([name, mbs-trim(substring(s, a, e))], acc);
+  }
+
+  // ================================================================ SUBSTITUTION: a name by its binding, a parameter by its argument
+  def mbs-join-pieces(e, acc, from, n) = str-spans(reverse(cons(substring(e, from, n), acc)));
+  def mbs-subst(e, names, args) = nil?(names) ? e : mbs-subst-walk(e, 0, len(e), names, len(args), args, [], 0);
+  def mbs-subst-walk(e, i, n, names, na, args, acc, from) {
+   let b = mbs-b(e, i);
+   i >= n ? mbs-join-pieces(e, acc, from, n)
+   : b == 34 ? mbs-subst-walk(e, mbs-str-end(e, i), n, names, na, args, acc, from)
+   : mbs-alpha?(b) && mbs-b(e, i - 1) != 46 ? mbs-subst-id(e, i, mbs-id-end(e, i), n, names, na, args, acc, from)
+   : mbs-subst-walk(e, i + 1, n, names, na, args, acc, from);
+  }
+  def mbs-subst-id(e, i, j, n, names, na, args, acc, from) {
+   let k = mbs-index-of(names, substring(e, i, j));
+   k >= 0 && k < na ? mbs-subst-walk(e, j, n, names, na, args, cons("(" ++ mbs-nth(args, k) ++ ")", cons(substring(e, from, i), acc)), j) : mbs-subst-walk(e, j, n, names, na, args, acc, from);
+  }
+  def mbs-mentions?(e, names) = nil?(names) ? false : mbs-mention-walk(e, 0, len(e), names);
+  def mbs-mention-walk(e, i, n, names) {
+   let b = mbs-b(e, i);
+   i >= n ? false
+   : b == 34 ? mbs-mention-walk(e, mbs-str-end(e, i), n, names)
+   : mbs-alpha?(b) && mbs-b(e, i - 1) != 46 ? (mbs-index-of(names, substring(e, i, mbs-id-end(e, i))) >= 0 ? true : mbs-mention-walk(e, mbs-id-end(e, i), n, names))
+   : mbs-mention-walk(e, i + 1, n, names);
+  }
+  // a bound name replaced by its binding, up to three links deep
+  def mbs-norm(e, lets) = mbs-norm-n(e, lets, 3);
+  def mbs-norm-n(e, lets, k) {
+   let e2 = k <= 0 || nil?(lets) ? e : mbs-subst(e, map(l => l[0], lets), map(l => l[1], lets));
+   len(e2) > 6000 ? e : (String) e2 == e ? e : mbs-norm-n(e2, lets, k - 1);
+  }
+
+  // ================================================================ WHAT RUNS: the words of one command expression
+  def mbs-prim-kind(name) = mbs-kind-in(mbs-prims(), name);
+  def mbs-kind-in(rows, name) = nil?(rows) ? nothing() : (String) rows[0][0] == name ? rows[0][1] : mbs-kind-in(rows[1:], name);
+  def mbs-prim-names() = map(r => r[0], mbs-prims());
+  def mbs-self-fix(w, raw) = (String) w == cw-unknown() && (mbs-has-sub?(raw, "fkwu") || mbs-has-sub?(raw, "FKWU")) ? "fkwu" : w;
+  // [words, computed, partial]
+  def mbs-finish(words, partial, raw) {
+   let w2 = map(w => mbs-self-fix(w, raw), words);
+   [w2, nil?(w2) || mbs-has?(w2, cw-unknown()) ? 1 : 0, partial ? 1 : 0];
+  }
+  def mbs-classify(kind, expr, dt) {
+   let t = mbs-open(expr, dt, 3);
+   let elems = (String) kind == "argv" ? mbs-list-elems(t, dt, 3) : [];
+   nil?(elems) ? mbs-classify-line(t, dt) : mbs-classify-list(t, elems, dt);
+  }
+  def mbs-classify-list(t, elems, dt) {
+   let literal = mbs-b(t, 0) == 91 && mbs-args(t, 0)[1] == len(t);
+   mbs-finish(cw-resolve(map(e => mbs-template(e, dt, 4), elems), [], [[], 0]), !literal, t);
+  }
+  def mbs-classify-line(t, dt) {
+   let tpl = mbs-template(t, dt, 6);
+   mbs-finish(cw-words(tpl), mbs-has-sub?(tpl, mbs-hole()), t);
+  }
+
+  // ================================================================ WRAPPERS: found to a fixed point
+  def mbs-text(src) = len(src[1]) > 0 ? src[1] : (read_file(src[0]) ?? "");
+  def mbs-calls-from(text, key, from, acc) {
+   let p = str_find(text, key, from);
+   p < 0 ? reverse(acc) : mbs-calls-from(text, key, p + len(key), mbs-call-ok?(text, p) ? cons(p, acc) : acc);
+  }
+  def mbs-calls(text, name) = mbs-calls-from(text, name ++ "(", 0, []);
+  def mbs-def-before?(text, p) = p >= 4 && (String) substring(text, p - 4, p) == "def ";
+  def mbs-call-ok?(text, p) = !mbs-idch?(mbs-b(text, p - 1)) && !mbs-def-before?(text, p) && mbs-live?(text, p);
+  def mbs-has-any?(text, names) = nil?(names) ? false : mbs-has-sub?(text, names[0] ++ "(") ? true : mbs-has-any?(text, names[1:]);
+  // a call fed by a lambda parameter (`v => host_spawn(v[0])`) is a table of verbs, not a wrapper
+  def mbs-lambda-fed?(text, p, cmd) {
+   let ls = mbs-line-start(text, p);
+   let lead = mbs-b(cmd, 0);
+   mbs-has-sub?(substring(text, ls, p), "=>") && lead != 34 && lead != 91;
+  }
+  // known: a record, wrapper name -> [file, name, params, inner callee, inner arguments]; fresh: the names found this round
+  def mbs-disc-one(path, text, defs, name, st, p) {
+   let enc = mbs-enclosing(text, defs, p);
+   nothing?(enc) ? st
+   : record_has(st[0], enc[0]) || !nothing?(mbs-prim-kind(enc[0])) ? st
+   : mbs-disc-take(path, text, name, enc, p, st);
+  }
+  // a def is a wrapper when a call in it hands the command on (the command it resolves to is still computed AND names the def's
+  // parameters: callers decide what runs: kind "pass") or when the def is a thin runner of its own (a body of at most mbs-thin()
+  // bytes: callers choose to run THIS command: kind "fixed"). Larger defs that merely contain a crossing are where a site sits, not
+  // wrappers, and a thin def that only calls a "fixed" wrapper delegates (it is a site, not a new wrapper): without those bounds
+  // every caller up the call graph would become one. Fixtures and the token verbs (whose verb exists to run a command) make none.
+  def mbs-thin() = 360;
+  def mbs-wrapper-file?(path) = (String) mbs-class-of(path) != "fixture" && !mbs-by-design?(path);
+  def mbs-disc-take(path, text, name, enc, p, st) {
+   let ar = mbs-args(text, p + len(name));
+   let lets = mbs-lets-from(text, enc[2], p, []);
+   let args = map(a => mbs-norm(a, lets), ar[0]);
+   nil?(args) || !mbs-wrapper-file?(path) || mbs-lambda-fed?(text, p, args[0]) ? st : mbs-disc-pass(path, name, enc, args, st, mbs-resolve(st[0], name, args, [], 0));
+  }
+  def mbs-disc-pass(path, name, enc, args, st, r) {
+   let cl = nothing?(r) ? [[], 0, 0] : mbs-classify(mbs-prim-kind(r[0]), r[1], st[3]);
+   let passes = !nothing?(r) && cl[1] == 1 && mbs-mentions?(r[1], enc[1]);
+   let delegating = record_has(st[0], name) && (String) record_get(st[0], name)[5] == "fixed";
+   let thin = !nothing?(r) && !delegating && enc[3] - enc[2] <= mbs-thin();
+   !passes && !thin ? st
+   : [record_set(st[0], enc[0], [path, enc[0], enc[1], name, args, passes ? "pass" : "fixed"]), cons(enc[0], st[1]), cons(enc[0], st[2]), st[3]];
+  }
+  def mbs-disc-name(path, text, defs, st, found) = foldl((s, p) => mbs-disc-one(path, text, defs, found[0], s, p), st, found[1]);
+  def mbs-found(text, names) = filter(f => !nil?(f[1]), map(nm => [nm, mbs-calls(text, nm)], names));
+  def mbs-disc-src(frontier, st, src) {
+   let text = mbs-text(src);
+   let found = mbs-has-any?(text, frontier) ? mbs-found(text, frontier) : [];
+   nil?(found) ? st : mbs-disc-found(src[0], text, mbs-defs(text), found, st);
+  }
+  def mbs-disc-found(path, text, defs, found, st) = foldl((s, f) => mbs-disc-name(path, text, defs, s, f), st, found);
+  def mbs-disc-round(srcs, frontier, known, order, dt, k) {
+   let st = foldl((s, src) => mbs-disc-src(frontier, s, src), [known, order, [], dt], srcs);
+   mbs-disc-loop(srcs, reverse(st[2]), st[0], st[1], dt, k + 1);
+  }
+  def mbs-disc-loop(srcs, frontier, known, order, dt, k) = nil?(frontier) || k > 10 ? [known, reverse(order)] : mbs-disc-round(srcs, frontier, known, order, dt, k);
+  // [known, wrapper names in the order found]
+  def mbs-discover(srcs, dt) = mbs-disc-loop(srcs, mbs-prim-names(), record_new(0), [], dt, 0);
+  // wrapper names defined in more than one file (not followed)
+  def mbs-ambiguous(srcs, order) {
+   let counts = foldl((c, src) => mbs-count-defs(c, mbs-text(src), order), record_new(0), srcs);
+   filter(n => record_has(counts, n) && record_get(counts, n) > 1, order);
+  }
+  def mbs-count-defs(c, text, order) = foldl((cc, n) => mbs-has-sub?(text, "def " ++ n ++ "(") ? record_set(cc, n, (record_has(cc, n) ? record_get(cc, n) : 0) + 1) : cc, c, order);
+
+  // ================================================================ SITES
+  def mbs-resolve(known, name, args, chain, k) {
+   let pk = mbs-prim-kind(name);
+   !nothing?(pk) ? [name, nil?(args) ? "" : args[0], chain]
+   : k > 12 || !record_has(known, name) ? nothing()
+   : mbs-resolve-wrapper(known, record_get(known, name), name, args, chain, k);
+  }
+  def mbs-resolve-wrapper(known, info, name, args, chain, k) = mbs-resolve(known, info[3], map(a => mbs-subst(a, info[2], args), info[4]), cons(name, chain), k + 1);
+  def mbs-chain-text(chain, prim) = mbs-join(append(reverse(chain), [prim]), ">");
+  def mbs-flag?(raw, f) = mbs-has-sub?(raw, " " ++ f) || mbs-has-sub?(raw, "\"" ++ f);
+  def mbs-refine(w, raw) = (String) w == "ln" && mbs-flag?(raw, "-s") ? "ln -s" : (String) w == "mkdir" && mbs-flag?(raw, "-m") ? "mkdir -m" : w;
+  def mbs-class-of(path) = mbs-has-sub?(path, "/tests/") || mbs-starts?(path, "tests/") || mbs-has-sub?(path, "fixture") ? "fixture" : mbs-has?(mbs-guard-files(), mbs-base(path)) ? "guard" : "product";
+  // a site: [file, line, kind, def, chain, route, words, computed, partial, fragments, pass, class, position, command]
+  def mbs-site(path, text, defs, p, name, known, dt) {
+   let ar = mbs-args(text, p + len(name));
+   let enc = mbs-enclosing(text, defs, p);
+   let lets = nothing?(enc) ? [] : mbs-lets-from(text, enc[2], p, []);
+   let r = mbs-resolve(known, name, map(a => mbs-norm(a, lets), ar[0]), [], 0);
+   nothing?(r) ? nothing() : mbs-site-of(path, text, p, name, enc, r, dt);
+  }
+  def mbs-site-of(path, text, p, name, enc, r, dt) {
+   let kind = mbs-prim-kind(r[0]);
+   let cl = mbs-classify(kind, r[1], dt);
+   let params = nothing?(enc) ? [] : enc[1];
+   [path, mbs-line-of(text, p), nothing?(mbs-prim-kind(name)) ? "call" : "prim", nothing?(enc) ? "(top)" : enc[0], mbs-chain-text(r[2], r[0]), (String) kind == "line" ? "line" : "argv", map(w => mbs-refine(w, r[1]), cl[0]), cl[1], cl[2], cl[1] == 1 ? mbs-literals(r[1]) : [], cl[1] == 1 && mbs-mentions?(r[1], params) ? 1 : 0, mbs-class-of(path), p, mbs-clip(r[1], 300)];
+  }
+  def mbs-src-sites(src, names, known, dt, acc) {
+   let text = mbs-text(src);
+   let found = mbs-has-any?(text, names) ? mbs-found(text, names) : [];
+   nil?(found) ? acc : mbs-src-collect(src[0], text, mbs-defs(text), found, known, dt, acc);
+  }
+  def mbs-src-collect(path, text, defs, found, known, dt, acc) {
+   let flat = foldl((a, f) => foldl((b, p) => cons([p, f[0]], b), a, f[1]), [], found);
+   let ordered = mbs-sort(flat, (x, y) => x[0] < y[0]);
+   foldl((a, pn) => mbs-site-add(a, mbs-site(path, text, defs, pn[0], pn[1], known, dt)), acc, ordered);
+  }
+  def mbs-site-add(acc, site) = nothing?(site) ? acc : cons(site, acc);
+  // [sites in file then position order, wrapper names, ambiguous wrapper names, the wrapper record]
+  def mbs-census(srcs) {
+   let dt = mbs-def-table(srcs);
+   let d = mbs-discover(srcs, dt);
+   let amb = mbs-ambiguous(srcs, d[1]);
+   let order = filter(n => !mbs-has?(amb, n), d[1]);
+   let names = append(mbs-prim-names(), order);
+   [reverse(foldl((acc, src) => mbs-src-sites(src, names, d[0], dt, acc), [], srcs)), order, amb, d[0]];
+  }
+  // the Lisp-style crossings of a source (only fixtures use them)
+  def mbs-lisp-count(text) = foldl((n, nm) => n + mbs-lisp-hits(text, "(" ++ nm ++ " ", 0, 0), 0, mbs-prim-names());
+  def mbs-lisp-hits(text, key, from, n) {
+   let p = str_find(text, key, from);
+   p < 0 ? n : mbs-lisp-hits(text, key, p + len(key), mbs-live?(text, p) ? n + 1 : n);
+  }
+
+  // ================================================================ THE TREE
+  def mbs-skip-name?(n) = mbs-has?(mbs-skip-dirs(), n) || mbs-ends?(n, ".app");
+  def mbs-src-file?(n) = mbs-ends?(n, ".bml") || mbs-ends?(n, ".fk");
+  def mbs-walk(dir, depth, acc) {
+   let names = fs_list(dir);
+   nothing?(names) || depth > 12 ? acc : foldl((a, n) => mbs-walk-entry(dir, depth, a, n), acc, names);
+  }
+  def mbs-walk-entry(dir, depth, acc, n) {
+   let path = (String) dir == "." ? n : dir ++ "/" ++ n;
+   mbs-skip-name?(n) ? acc : fs_is_dir(path) ? mbs-walk(path, depth + 1, acc) : mbs-src-file?(n) ? cons([path, ""], acc) : acc;
+  }
+  def mbs-tree(root) = mbs-sort(mbs-walk(root, 0, []), (a, b) => mbs-str-lt?(a[0], b[0]));
+
+  // ================================================================ VERDICTS
+  def mbs-find-row(rows, w) = nil?(rows) ? nothing() : (String) rows[0][0] == w ? rows[0] : mbs-find-row(rows[1:], w);
+  def mbs-door-stands?(optable, d) = mbs-has-sub?(optable, "\"" ++ d ++ "\"");
+  def mbs-doors-stand?(optable, ds) = all?(d => mbs-door-stands?(optable, d), ds);
+  def mbs-shell-word?(w) = mbs-has?(cw-shells(), w);
+  def mbs-by-design?(path) = mbs-has?(mbs-by-design-files(), mbs-base(path));
+  // [verdict, what replaces it]
+  def mbs-word-verdict(w, optable, path) {
+   let row = mbs-find-row(mbs-rows(), w);
+   (String) w == cw-unknown() ? (mbs-by-design?(path) ? ["shell-by-design", "the verb runs the command it is given"] : ["computed", "read the def"])
+   : !nothing?(row) ? mbs-row-verdict(row, optable, path)
+   : cw-bad?(w) ? ["forbidden", "the edit door, read_file, ./fkwu cells and BML"]
+   : ["unknown", "name the replacement"];
+  }
+  def mbs-row-verdict(row, optable, path) {
+   let v = row[1];
+   (String) v == "door" ? [mbs-doors-stand?(optable, row[3]) ? "door" : "door-planned", row[2]]
+   : (String) v == "shell" && mbs-by-design?(path) ? ["shell-by-design", row[2]]
+   : [v, row[2]];
+  }
+  def mbs-rank(v) = mbs-kind-in(mbs-ranks(), v);
+  def mbs-worse(a, b) = mbs-rank(a) >= mbs-rank(b) ? a : b;
+  def mbs-word-verdicts(site, optable) = map(w => mbs-word-verdict(w, optable, site[0])[0], site[6]);
+  def mbs-site-verdict(site, optable) = nil?(site[6]) ? "computed" : foldl((acc, v) => mbs-worse(acc, v), "shell-by-design", mbs-word-verdicts(site, optable));
+  // fkwu begun through a shell string (or through sh -c) rather than an argv
+  def mbs-self-via-shell?(site) = mbs-has?(site[6], "fkwu") && ((String) site[5] == "line" || any?(w => mbs-shell-word?(w), site[6]));
+  def mbs-word-label(w) = (String) w == cw-unknown() ? "(computed)" : w;
+  def mbs-counted(sites) = filter(s => s[10] == 0, sites);
+
+  // ================================================================ THE READING
+  def mbs-count-in(rec, k) = record_has(rec, k) ? record_get(rec, k) : 0;
+  def mbs-by-key(items, keyf) = foldl((acc, it) => record_set(acc, keyf(it), cons(it, record_has(acc, keyf(it)) ? record_get(acc, keyf(it)) : [])), record_new(0), items);
+  def mbs-files-of(sites) = mbs-uniq(map(s => s[0], sites), []);
+  def mbs-words-of(sites) = mbs-uniq(map(w => mbs-word-label(w), foldl((acc, s) => append(acc, s[6]), [], sites)), []);
+  // one line per file with sites: file, count, words
+  def mbs-file-lines(sites) {
+   let by = mbs-by-key(sites, s => s[0]);
+   map(f => mbs-pad(f, 62) ++ " " ++ mbs-padl(mbs-i(len(record_get(by, f))), 3) ++ "  " ++ mbs-join(mbs-words-of(reverse(record_get(by, f))), " "), mbs-files-of(sites));
+  }
+  // the per-word rows: [word, verdict, replacement, count, files]
+  def mbs-word-rows(sites, optable) {
+   let flat = foldl((acc, s) => foldl((a, w) => cons([w, s[0]], a), acc, s[6]), [], sites);
+   let by = mbs-by-key(flat, x => x[0]);
+   let words = mbs-uniq(map(x => x[0], reverse(flat)), []);
+   let rows = map(w => mbs-word-row(w, record_get(by, w), optable), words);
+   mbs-sort(rows, (a, b) => a[3] > b[3]);
+  }
+  def mbs-word-row(w, hits, optable) {
+   let files = mbs-uniq(map(h => h[1], reverse(hits)), []);
+   let v = mbs-word-verdict(w, optable, nil?(files) ? "" : files[0]);
+   [w, v[0], v[1], len(hits), files];
+  }
+  def mbs-files-text(files) = len(files) <= 4 ? mbs-join(map(f => mbs-base(f), files), " ") : mbs-join(map(f => mbs-base(f), take(4, files)), " ") ++ " +" ++ mbs-i(len(files) - 4);
+  def mbs-word-line(r) = mbs-pad(mbs-word-label(r[0]), 12) ++ " " ++ mbs-pad(r[1], 21) ++ " " ++ mbs-padl(mbs-i(r[3]), 4) ++ "  " ++ mbs-files-text(r[4]);
+  // totals by verdict over sites (the worst word) and over words
+  def mbs-site-totals(sites, optable) {
+   let vs = map(s => mbs-site-verdict(s, optable), sites);
+   map(n => [n, len(filter(v => (String) v == n, vs))], mbs-verdict-names());
+  }
+  def mbs-word-totals(rows) = map(n => [n, foldl((a, r) => (String) r[1] == n ? a + r[3] : a, 0, rows)], mbs-verdict-names());
+  def mbs-total-line(r) = mbs-pad(r[0], 24) ++ mbs-padl(mbs-i(r[1]), 5);
+  // site lines: file:line [chain] words verdict
+  def mbs-site-line(s, optable) = s[0] ++ ":" ++ mbs-i(s[1]) ++ "  " ++ s[2] ++ "  " ++ s[4] ++ "  " ++ s[5] ++ "  [" ++ mbs-join(map(w => mbs-word-label(w), s[6]), " ") ++ "]  " ++ mbs-site-verdict(s, optable) ++ (s[8] == 1 ? "  partial" : "") ++ (mbs-self-via-shell?(s) ? "  self-via-shell" : "");
+  def mbs-computed-line(s) = s[0] ++ ":" ++ mbs-i(s[1]) ++ "  in " ++ s[3] ++ "  " ++ s[4] ++ "  fragments " ++ mbs-join(map(f => "\"" ++ f ++ "\"", s[9]), " ");
+
+  // ================================================================ THE MACHINE ROW
+  def mbs-jstr(s) = "\"" ++ json-escape-string(s) ++ "\"";
+  def mbs-jbool(n) = n == 1 ? "true" : "false";
+  def mbs-row-json(s, optable) = "{\"file\":" ++ mbs-jstr(s[0]) ++ ",\"line\":" ++ mbs-i(s[1]) ++ ",\"kind\":" ++ mbs-jstr(s[10] == 1 ? "pass" : s[2]) ++ ",\"def\":" ++ mbs-jstr(s[3]) ++ ",\"chain\":" ++ mbs-jstr(s[4]) ++ ",\"route\":" ++ mbs-jstr(s[5]) ++ ",\"words\":[" ++ mbs-join(map(w => mbs-jstr(mbs-word-label(w)), s[6]), ",") ++ "],\"verdicts\":[" ++ mbs-join(map(v => mbs-jstr(v), mbs-word-verdicts(s, optable)), ",") ++ "],\"verdict\":" ++ mbs-jstr(mbs-site-verdict(s, optable)) ++ ",\"computed\":" ++ mbs-jbool(s[7]) ++ ",\"partial\":" ++ mbs-jbool(s[8]) ++ ",\"self_via_shell\":" ++ (mbs-self-via-shell?(s) ? "true" : "false") ++ ",\"class\":" ++ mbs-jstr(s[11]) ++ ",\"fragments\":[" ++ mbs-join(map(f => mbs-jstr(f), s[9]), ",") ++ "],\"command\":" ++ mbs-jstr(mbs-clip(s[13], 200)) ++ "}";
+  // a site line with the command it reads (clipped), for the listings by word and by verdict
+  def mbs-site-detail(s, optable) = mbs-site-line(s, optable) ++ "\n    " ++ mbs-clip(s[13], 160);
+  def mbs-site-has-verdict?(s, optable, v) = (String) mbs-site-verdict(s, optable) == v || mbs-has?(mbs-word-verdicts(s, optable), v);
+ }
+}

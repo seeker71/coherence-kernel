@@ -1,0 +1,229 @@
+; git-native-write-band.fk — the local WRITE commands of git in Form (git-write.bml, git-wcmd.bml), run in a SCRATCH repository under the temp
+; directory and proved by the phase-1 readers and by fsck-style self-verification: every object on disk hashes to its own name, every
+; commit's tree and parents exist, every ref resolves, the reflogs hold git's line format, and the working tree and index are what the
+; command meant. No git program runs; nothing outside the scratch directory is written. The identity is the product's own
+; (`-c user.name=Claude -c user.email=noreply@anthropic.com`).
+;
+;   1    init (-q, -b, the Reinitialized line), add of files and a directory, the staged status, the first commit (the "(root-commit)" line,
+;        -q), the clean status after it, log / rev-list / ls-files / cat-file reading what was written
+;   2    fsck over the whole scratch repository after the first cycle and again at the end: every loose object hashes to its name, every
+;        commit/tree/blob reachable from every ref exists and verifies; logs/HEAD and logs/refs/heads/main carry git's line
+;        (old new Name <email> seconds zone TAB "commit (initial): first")
+;   4    commit variants: -F with a messy message (normalised to a title, a blank line, a body), -m twice (two paragraphs), --amend
+;        --no-edit (a new id, the same parent, tree and message), --amend -m, --allow-empty, "nothing to commit" (exit 1; -q silent), --author,
+;        `-c` identity beating the global config, add -A (modified, deleted, new), a path-limited commit (-- a.txt) that leaves the other
+;        change in the working tree, commit -a
+;   8    branch / tag / update-ref: create, the "already exists" refusal, -f, -d (merged) and the "not fully merged" refusal, -D, a branch checked
+;        out refusing deletion, lightweight and annotated tags, tag -d, update-ref with an old-value check, update-ref -d
+;   16   checkout / switch: -b, switching away and back rewrites the working files exactly, a local change in the way blocks the switch (exit 1,
+;        HEAD and files untouched), -B, a detached checkout, `checkout <rev> -- path`, `checkout -- path`, switch -c, an unknown branch
+;   32   restore (--staged, --worktree, --source) / reset (--soft, --mixed, --hard, -- path) / rm (--cached, the modified-file refusal, a plain rm):
+;        the index, HEAD and the files after each are asserted
+;   64   the gate and the refusals: a repository that is not under the temp directory refuses a write (exit 128, nothing touched) unless
+;        `-c native.allow-write=true`; merge, rebase, cherry-pick, stash and the other write commands this phase does not carry answer 129
+;        by name; an unknown flag of a write command answers 129
+;   128  hash-object -w (the id, then cat-file -p), a hand-built pack with an OFS_DELTA written into the scratch repository and read through its
+;        index, and the final fsck of the scratch repository with the pack in it
+;
+; Expected: 255
+; Verdict 255
+; REQUIRES: (host doors: host_utimes, host_chmod, host_file_mode, host_temp_dir, host_dir_rmdir, host_path_rename)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-rev.bml;
+import form-stdlib/bml/git-diff.bml;
+import form-stdlib/bml/git-cmd.bml;
+import form-stdlib/bml/git-write.bml;
+import form-stdlib/bml/git-wcmd.bml;
+section [form.bml] {
+  def gwb-bit(ok, bit) = ok ? bit : 0;
+  def gwb-say(label, v) = print([label, v]);
+  def gwb-eq(a, b) = (String) a == (String) b;
+  def gwb-id() = "-c user.name=Claude -c user.email=noreply@anthropic.com ";
+  def gwb-run(top, line) = git-run-all-line(top, gwb-id() ++ line);
+  def gwb-is(top, line, want, code) {
+    let r = gwb-run(top, line);
+    gwb-eq(r[0], want) && r[1] == code;
+  }
+  def gwb-rc(top, line, code) = gwb-run(top, line)[1] == code;
+  def gwb-err(top, line, code, needle) {
+    let r = gwb-run(top, line);
+    r[1] == code && str_find(r[2], needle, 0) >= 0;
+  }
+  def gwb-out(top, line) = gwb-run(top, line)[0];
+  def gwb-trim(s) = gs-trim(s);
+  def gwb-put(top, rel, content) {
+    let d = gw-mkdirs(gs-parent(top ++ "/" ++ rel));
+    write_file(top ++ "/" ++ rel, content);
+  }
+  def gwb-read(top, rel) = read_file(top ++ "/" ++ rel) ?? "<absent>";
+  def gwb-exists?(top, rel) = host_path_exists(top ++ "/" ++ rel) == 1;
+  def gwb-head(top) = gs-trim(gwb-out(top, "rev-parse HEAD"));
+  def gwb-h7(x) = substring(x, 0, 7);
+  def gwb-st(top) = gwb-out(top, "status --porcelain");
+  // ---- fsck ---------------------------------------------------------------------------------------------------------------------
+  def gwb-loose-names(gitdir) = gs-flatten(map(d => map(f => d ++ f, filter(f => len(f) == 38, host_dir_list(gitdir ++ "/objects/" ++ d) ?? [])), filter(d => len(d) == 2, host_dir_list(gitdir ++ "/objects") ?? [])));
+  def gwb-obj-ok(r, hex) {
+    let o = git-read(r, hex);
+    !nothing?(o) && gs-verify(gsha-raw-of-hex(hex), o[0], o[1]);
+  }
+  def gwb-tree-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gwb-eq(o[0], "tree") && gs-verify(raw, o[0], o[1]) && all?(e => gs-tree?(e[0]) ? gwb-tree-ok(r, e[2]) : (gs-gitlink?(e[0]) || (gs-has?(r, e[2]) && gwb-blob-ok(r, e[2]))), gs-tree-entries(o[1]));
+  }
+  def gwb-blob-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gs-verify(raw, o[0], o[1]);
+  }
+  def gwb-commit-ok(r, info) {
+    let o = gs-read(r, info[0]);
+    !nothing?(o) && gwb-eq(o[0], "commit") && gs-verify(info[0], o[0], o[1]) && gwb-tree-ok(r, info[3]) && all?(p => gs-has?(r, p), info[1]);
+  }
+  def gwb-ref-tips(r) = filter(x => !nothing?(x), map(row => grv-peel(r, gsha-raw-of-hex(row[1]), "commit"), gr-list(r, "refs/")));
+  // every loose object verifies, every ref resolves, every commit reachable from a ref closes
+  def gwb-fsck(top) {
+    let r = git-open(top);
+    let g = nothing?(r) ? "" : gs-gitdir(r);
+    let names = nothing?(r) ? [] : gwb-loose-names(g);
+    let tips = nothing?(r) ? [] : gwb-ref-tips(r);
+    let refs_ok = !nothing?(r) && all?(row => gs-has?(r, gsha-raw-of-hex(row[1])), gr-list(r, "refs/"));
+    let infos = nil?(tips) ? [] : grv-walk(r, tips, [], [false, false, 0 - 1, 0], nothing());
+    !nothing?(r) && len(names) > 0 && all?(h => gwb-obj-ok(r, h), names) && refs_ok && all?(i => gwb-commit-ok(r, i), infos);
+  }
+  def gwb-fsck-count(top) = len(gwb-loose-names(top ++ "/.git"));
+  def gwb-reflog-line?(text, newhex, tail) = str_find(text, " " ++ newhex ++ " Claude <noreply@anthropic.com> ", 0) >= 0 && str_find(text, "\t" ++ tail ++ "\n", 0) >= 0;
+  def gwb-lines(s) = filter(l => len(l) > 0, gs-lines(s));
+  def gwb-run-all() {
+    let t0 = host_monotonic_ms();
+    let top = host_realpath(host_temp_dir()) ++ "/gwb-" ++ host_pid().str();
+    let mk = gw-mkdirs(top);
+    // ---- 1 init, add, commit
+    let i1 = gwb-is(top, "init -q", "", 0) && gwb-is(top, "init", "Reinitialized existing Git repository in " ++ top ++ "/.git/\n", 0);
+    let other = top ++ "-trunk";
+    let om = gw-mkdirs(other);
+    let i2 = gwb-is(other, "init -b trunk", "Initialized empty Git repository in " ++ other ++ "/.git/\n", 0) && gwb-eq(gs-trim(read_file(other ++ "/.git/HEAD") ?? ""), "ref: refs/heads/trunk") && gwb-is(top, "branch --show-current", "main\n", 0) && gwb-rc(top, "rev-parse --verify -q HEAD", 1);
+    let w1 = gwb-put(top, "a.txt", "alpha\n");
+    let w2 = gwb-put(top, "dir/b.txt", "bravo\n");
+    let a1 = gwb-is(top, "add -- a.txt dir/b.txt", "", 0);
+    let st1 = gwb-is(top, "status --porcelain", "A  a.txt\nA  dir/b.txt\n", 0);
+    let cm = gwb-run(top, "commit -m first");
+    let h1 = gwb-head(top);
+    let c1 = gwb-eq(cm[0], "[main (root-commit) " ++ gwb-h7(h1) ++ "] first\n") && cm[1] == 0 && len(h1) == 40;
+    let st2 = gwb-is(top, "status --porcelain", "", 0) && gwb-is(top, "log --format=%s", "first\n", 0) && gwb-is(top, "log -1 --format=%an,%ae", "Claude,noreply@anthropic.com\n", 0) && gwb-is(top, "rev-list --count HEAD", "1\n", 0) && gwb-is(top, "ls-files", "a.txt\ndir/b.txt\n", 0) && gwb-is(top, "cat-file -t HEAD", "commit\n", 0) && gwb-is(top, "cat-file -p HEAD:a.txt", "alpha\n", 0) && gwb-is(top, "diff --quiet", "", 0);
+    let b1 = gwb-bit(i1 && i2 && a1 && st1 && c1 && st2, 1);
+    // ---- 2 fsck and the reflog line
+    let fs1 = gwb-fsck(top);
+    let lh = read_file(top ++ "/.git/logs/HEAD") ?? "";
+    let lb = read_file(top ++ "/.git/logs/refs/heads/main") ?? "";
+    let z = "0000000000000000000000000000000000000000";
+    let b2 = gwb-bit(fs1 && gs-starts?(lh, z ++ " " ++ h1 ++ " ") && gwb-reflog-line?(lh, h1, "commit (initial): first") && gs-starts?(lb, z ++ " " ++ h1 ++ " ") && gwb-reflog-line?(lb, h1, "commit (initial): first"), 2);
+    // ---- 4 commit variants
+    let w3 = gwb-put(top, "a.txt", "alpha two\n");
+    let w4 = gwb-put(top, "u.txt", "untracked-then-added\n");
+    let rm1 = host_path_remove(top ++ "/dir/b.txt");
+    let s1 = gwb-is(top, "status --porcelain", " M a.txt\n D dir/b.txt\n?? u.txt\n", 0);
+    let a2 = gwb-is(top, "add -A", "", 0) && gwb-is(top, "status --porcelain", "M  a.txt\nD  dir/b.txt\nA  u.txt\n", 0);
+    let mf = host_temp_dir() ++ "/gwb-msg-" ++ host_pid().str();
+    let wm = write_file(mf, "\n\nTitle line   \n\n\n\nBody line one  \nBody line two\n\n\n");
+    let c2 = gwb-is(top, "commit -q -F " ++ mf, "", 0);
+    let h2 = gwb-head(top);
+    let m2 = gwb-is(top, "log -1 --format=%B", "Title line\n\nBody line one\nBody line two\n\n", 0) && gwb-is(top, "log -1 --format=%s", "Title line\n", 0) && gwb-is(top, "rev-list --count HEAD", "2\n", 0) && gwb-is(top, "ls-files", "a.txt\nu.txt\n", 0) && gwb-is(top, "log -1 --format=%P", h1 ++ "\n", 0);
+    let nap = host_sleep_ms(1100);
+    let am = gwb-rc(top, "commit -q --amend --no-edit", 0);
+    let h3 = gwb-head(top);
+    let am_ok = am && !gwb-eq(h3, h2) && gwb-is(top, "log -1 --format=%P", h1 ++ "\n", 0) && gwb-is(top, "log -1 --format=%s", "Title line\n", 0) && gwb-eq(gs-trim(gwb-out(top, "rev-parse HEAD^{tree}")), gs-trim(gwb-out(top, "rev-parse " ++ h2 ++ "^{tree}"))) && gwb-is(top, "rev-list --count HEAD", "2\n", 0);
+    let am2 = gwb-rc(top, "commit -q --amend -m retitled", 0) && gwb-is(top, "log -1 --format=%s", "retitled\n", 0) && gwb-is(top, "rev-list --count HEAD", "2\n", 0);
+    let hret = gwb-head(top);
+    let nothing_ok = gwb-run(top, "commit -m x")[1] == 1 && str_find(gwb-run(top, "commit -m x")[0] ++ gwb-run(top, "commit -m x")[2], "nothing to commit", 0) >= 0 && gwb-is(top, "commit -q -m x", "", 1) && gwb-rc(top, "commit -q --allow-empty -m empty", 0) && gwb-is(top, "rev-list --count HEAD", "3\n", 0) && gwb-eq(gs-trim(gwb-out(top, "rev-parse HEAD^{tree}")), gs-trim(gwb-out(top, "rev-parse HEAD~1^{tree}")));
+    let two = gwb-rc(top, "commit -q --allow-empty -m one -m two", 0) && gwb-is(top, "log -1 --format=%B", "one\n\ntwo\n\n", 0) && gwb-rc(top, "commit -q --allow-empty -m by --author=\"Pat <pat@example.test>\"", 0) && gwb-is(top, "log -1 --format=%an,%ae,%cn", "Pat,pat@example.test,Claude\n", 0);
+    let w5 = gwb-put(top, "a.txt", "alpha three\n");
+    let w6 = gwb-put(top, "u.txt", "changed too\n");
+    let only = gwb-rc(top, "commit -q -m only -- a.txt", 0) && gwb-is(top, "show HEAD:a.txt", "alpha three\n", 0) && gwb-is(top, "show HEAD:u.txt", "untracked-then-added\n", 0) && gwb-is(top, "status --porcelain", " M u.txt\n", 0) && gwb-is(top, "diff --name-only HEAD", "u.txt\n", 0);
+    let ca = gwb-rc(top, "commit -q -a -m all", 0) && gwb-is(top, "status --porcelain", "", 0) && gwb-is(top, "show HEAD:u.txt", "changed too\n", 0);
+    let b4 = gwb-bit(s1 && a2 && c2 && m2 && am_ok && am2 && nothing_ok && two && only && ca, 4);
+    // ---- 8 branch / tag / update-ref
+    let hh = gwb-head(top);
+    let hp = gs-trim(gwb-out(top, "rev-parse HEAD~1"));
+    let br1 = gwb-is(top, "branch feat", "", 0) && gwb-is(top, "branch", "  feat\n* main\n", 0) && gwb-err(top, "branch feat", 128, "already exists") && gwb-is(top, "rev-parse feat", hh ++ "\n", 0) && gwb-is(top, "branch -f feat HEAD~1", "", 0) && gwb-is(top, "rev-parse feat", hp ++ "\n", 0);
+    let br2 = gwb-is(top, "branch -d feat", "Deleted branch feat (was " ++ gwb-h7(hp) ++ ").\n", 0) && gwb-rc(top, "branch -d feat", 1) && gwb-err(top, "branch -d main", 1, "Cannot delete branch") && gwb-is(top, "branch feat2 HEAD~3", "", 0);
+    let w7 = gwb-put(top, "side.txt", "side\n");
+    let br3 = gwb-rc(top, "checkout -q feat2", 0) && gwb-rc(top, "branch -d feat2", 1);
+    let back = gwb-rc(top, "checkout -q main", 0) && gwb-rc(top, "branch -d feat2", 0);
+    let tg1 = gwb-rc(top, "tag v1", 0) && gwb-rc(top, "tag -a -m \"annotated message\" v2", 0) && gwb-is(top, "tag", "v1\nv2\n", 0) && gwb-is(top, "cat-file -t v2", "tag\n", 0) && gwb-is(top, "cat-file -t v1", "commit\n", 0) && gwb-is(top, "rev-parse v2^{commit}", hh ++ "\n", 0) && gwb-err(top, "tag v1", 128, "already exists") && gwb-is(top, "tag -d v1", "Deleted tag 'v1' (was " ++ gwb-h7(hh) ++ ")\n", 0) && gwb-is(top, "tag", "v2\n", 0) && gwb-rc(top, "tag -d nope", 1);
+    let ur = gwb-rc(top, "update-ref refs/heads/x HEAD", 0) && gwb-is(top, "rev-parse x", hh ++ "\n", 0) && gwb-err(top, "update-ref refs/heads/x HEAD~1 " ++ hp, 128, "expected") && gwb-rc(top, "update-ref -m moved refs/heads/x HEAD~1 " ++ hh, 0) && gwb-is(top, "rev-parse x", hp ++ "\n", 0) && gwb-rc(top, "update-ref -d refs/heads/x", 0) && gwb-rc(top, "rev-parse --verify -q x", 1);
+    let b8 = gwb-bit(br1 && br2 && br3 && back && tg1 && ur, 8);
+    // ---- 16 checkout / switch
+    let base = gwb-head(top);
+    let co1 = gwb-run(top, "checkout -b work");
+    let w8 = gwb-put(top, "a.txt", "alpha on work\n");
+    let w9 = gwb-put(top, "w.txt", "work file\n");
+    let wk = gwb-rc(top, "add -A", 0) && gwb-rc(top, "commit -q -m workcommit", 0);
+    let hw = gwb-head(top);
+    let co2 = gwb-rc(top, "checkout -q main", 0) && gwb-is(top, "rev-parse --abbrev-ref HEAD", "main\n", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha three\n") && !gwb-exists?(top, "w.txt") && gwb-is(top, "status --porcelain", "", 0);
+    let co3 = gwb-rc(top, "checkout -q work", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha on work\n") && gwb-eq(gwb-read(top, "w.txt"), "work file\n") && gwb-is(top, "status --porcelain", "", 0) && gwb-rc(top, "checkout -q main", 0);
+    let w10 = gwb-put(top, "a.txt", "local edit in the way\n");
+    let blocked = gwb-err(top, "checkout work", 1, "would be overwritten") && gwb-is(top, "rev-parse --abbrev-ref HEAD", "main\n", 0) && gwb-eq(gwb-read(top, "a.txt"), "local edit in the way\n") && !gwb-exists?(top, "w.txt");
+    let fixed = gwb-rc(top, "checkout -- a.txt", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha three\n") && gwb-rc(top, "checkout -q work", 0) && gwb-rc(top, "checkout -q main", 0);
+    let co4 = gwb-rc(top, "checkout -q -B work main", 0) && gwb-is(top, "rev-parse --abbrev-ref HEAD", "work\n", 0) && gwb-is(top, "rev-parse HEAD", base ++ "\n", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha three\n") && !gwb-exists?(top, "w.txt") && gwb-rc(top, "checkout -q main", 0);
+    let det = gwb-rc(top, "checkout -q " ++ hp, 0) && gwb-is(top, "rev-parse --abbrev-ref HEAD", "HEAD\n", 0) && gwb-rc(top, "symbolic-ref -q HEAD", 1) && gwb-is(top, "rev-parse HEAD", hp ++ "\n", 0) && gwb-rc(top, "checkout -q main", 0) && gwb-is(top, "rev-parse HEAD", base ++ "\n", 0);
+    let w11 = gwb-put(top, "a.txt", "scribbled\n");
+    let fromrev = gwb-rc(top, "checkout HEAD -- a.txt", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha three\n") && gwb-is(top, "status --porcelain", "", 0) && gwb-rc(top, "checkout " ++ hret ++ " -- a.txt", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha two\n") && gwb-is(top, "status --porcelain", "M  a.txt\n", 0) && gwb-rc(top, "checkout HEAD -- a.txt", 0) && gwb-is(top, "status --porcelain", "", 0);
+    let sw = gwb-rc(top, "switch -c s1", 0) && gwb-is(top, "rev-parse --abbrev-ref HEAD", "s1\n", 0) && gwb-rc(top, "switch main", 0) && gwb-err(top, "switch nope", 128, "nope") && gwb-rc(top, "branch -d s1", 0) && gwb-rc(top, "switch -c s2 work", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha three\n") && gwb-rc(top, "switch main", 0) && gwb-rc(top, "branch -D s2", 0);
+    let b16 = gwb-bit(co1[1] == 0 && wk && co2 && co3 && blocked && fixed && co4 && det && fromrev && sw, 16);
+    // ---- 32 restore / reset / rm
+    let w12 = gwb-put(top, "a.txt", "staged edit\n");
+    let rs1 = gwb-rc(top, "add a.txt", 0) && gwb-is(top, "status --porcelain", "M  a.txt\n", 0) && gwb-rc(top, "restore --staged a.txt", 0) && gwb-is(top, "status --porcelain", " M a.txt\n", 0) && gwb-rc(top, "restore a.txt", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha three\n") && gwb-is(top, "status --porcelain", "", 0);
+    let rs2 = gwb-rc(top, "restore --source=" ++ hret ++ " a.txt", 0) && gwb-eq(gwb-read(top, "a.txt"), "alpha two\n") && gwb-is(top, "status --porcelain", " M a.txt\n", 0) && gwb-rc(top, "restore --staged --worktree --source=HEAD a.txt", 0) && gwb-is(top, "status --porcelain", "", 0);
+    let w13 = gwb-put(top, "r.txt", "reset me\n");
+    let ra = gwb-rc(top, "add r.txt", 0) && gwb-rc(top, "commit -q -m resetbase", 0);
+    let rb = gwb-head(top);
+    let w14 = gwb-put(top, "r.txt", "reset me twice\n");
+    let rc1 = gwb-rc(top, "commit -q -a -m second-r", 0) && gwb-rc(top, "reset --soft HEAD~1", 0) && gwb-is(top, "rev-parse HEAD", rb ++ "\n", 0) && gwb-is(top, "status --porcelain", "M  r.txt\n", 0) && gwb-rc(top, "reset -q", 0) && gwb-is(top, "status --porcelain", " M r.txt\n", 0) && gwb-eq(gwb-read(top, "r.txt"), "reset me twice\n");
+    let rc2 = gwb-rc(top, "reset --hard", 0) && gwb-eq(gwb-read(top, "r.txt"), "reset me\n") && gwb-is(top, "status --porcelain", "", 0);
+    let w15 = gwb-put(top, "r.txt", "again\n");
+    let rc3 = gwb-rc(top, "add r.txt", 0) && gwb-rc(top, "reset -- r.txt", 0) && gwb-is(top, "status --porcelain", " M r.txt\n", 0) && gwb-rc(top, "reset --hard HEAD~1", 0) && !gwb-exists?(top, "r.txt") && gwb-is(top, "rev-parse HEAD", base ++ "\n", 0) && gwb-is(top, "status --porcelain", "", 0);
+    let rm1x = gwb-is(top, "rm --cached u.txt", "rm 'u.txt'\n", 0) && gwb-is(top, "status --porcelain", "D  u.txt\n?? u.txt\n", 0) && gwb-exists?(top, "u.txt") && gwb-rc(top, "reset -q", 0) && gwb-is(top, "status --porcelain", "", 0);
+    let w16 = gwb-put(top, "u.txt", "dirty before rm\n");
+    let rm2x = gwb-err(top, "rm u.txt", 1, "local modifications") && gwb-exists?(top, "u.txt") && gwb-rc(top, "rm -f -q u.txt", 0) && !gwb-exists?(top, "u.txt") && gwb-is(top, "status --porcelain", "D  u.txt\n", 0) && gwb-rc(top, "reset --hard -q", 0) && gwb-exists?(top, "u.txt") && gwb-is(top, "status --porcelain", "", 0);
+    let b32 = gwb-bit(rs1 && rs2 && ra && rc1 && rc2 && rc3 && rm1x && rm2x, 32);
+    // ---- 64 the gate and the refusals
+    let fake = [host_realpath(".") ?? "/nonexistent-top", "g", "c", [], [], nothing(), nothing()];
+    let gate = !gwc-scratch?(fake) && !gwc-allowed?(fake, ["x=y"]) && gwc-allowed?(fake, ["native.allow-write=true"]) && gwc-allowed?(git-open(top), []);
+    let refused = all?(c => gwb-err(top, c, 129, "native-git") || gwb-err(top, c, 129, "is not a git command"), ["merge feat", "rebase main", "cherry-pick HEAD", "stash", "revert HEAD", "clean -f", "mv a b", "am x.patch", "gc"]) && gwb-err(top, "commit --gpg-sign -m x", 129, "--gpg-sign") && gwb-err(top, "add --interactive", 129, "--interactive") && gwb-err(top, "reset --bogus", 129, "--bogus") && gwb-err(top, "checkout --orphan x", 129, "--orphan");
+    let noedit = gwb-err(top, "commit", 128, "no commit message");
+    let b64 = gwb-bit(gate && refused && noedit, 64);
+    // ---- 128 hash-object -w, a pack, the final fsck
+    let hf = host_temp_dir() ++ "/gwb-ho-" ++ host_pid().str();
+    let wh = write_file(hf, "written by hash-object -w\n");
+    let ho = gwb-run(top, "hash-object -w " ++ hf);
+    let hid = gs-trim(ho[0]);
+    let ho_ok = ho[1] == 0 && len(hid) == 40 && gwb-is(top, "cat-file -p " ++ hid, "written by hash-object -w\n", 0) && gwb-is(top, "cat-file -t " ++ hid, "blob\n", 0) && gwb-eq(hid, gsha-hex-of-raw(gs-hash("blob", "written by hash-object -w\n")));
+    let base_text = "the quick brown fox jumps over the lazy dog, again and again and again\n";
+    let delta = gw-delta(base_text, [["copy", 0, 20], ["insert", "SLOW "], ["copy", 20, len(base_text) - 20]]);
+    let pk = gw-pack([["plain", "blob", base_text], ["ofs", 0, delta]]);
+    let pn = gw-put-pack(top ++ "/.git", pk);
+    let r2 = git-open(top);
+    let ids = map(row => gsha-hex-of-raw(row[0]), pk[1]);
+    let pk_ok = !nothing?(pn) && !nothing?(r2) && all?(h => gwb-obj-ok(r2, h), ids) && gwb-eq(git-read(r2, ids[1])[1], substring(base_text, 0, 20) ++ "SLOW " ++ substring(base_text, 20, len(base_text)));
+    let fs2 = gwb-fsck(top);
+    let nloose = gwb-fsck-count(top);
+    let s9 = gwb-say("scratch repository", [nloose, "loose objects, fsck", fs2, "commits on main", gwb-out(top, "rev-list --count main")]);
+    let b128 = gwb-bit(ho_ok && pk_ok && fs2, 128);
+    let rm_a = host_dir_rmdir(top);
+    let rm_b = host_dir_rmdir(other);
+    let rm_c = host_path_remove(mf);
+    let rm_d = host_path_remove(hf);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+    let groups = gwb-say("groups", [i1, i2, a1, st1, c1, st2, fs1, s1, a2, c2, m2, am_ok, am2, nothing_ok, two, only, ca, br1, br2, br3, back, tg1, ur, wk, co2, co3, blocked, fixed, co4, det, fromrev, sw, rs1, rs2, rc1, rc2, rc3, rm1x, rm2x, gate, refused, noedit, ho_ok, pk_ok, fs2]);
+    let shown = print(["git-native-write-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  gwb-run-all();
+}

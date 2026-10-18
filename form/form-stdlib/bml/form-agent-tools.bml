@@ -1,0 +1,448 @@
+// The resident coding-agent workload, directly callable from form-cli.
+// Existing sh-bi helpers below are pure Form functions. No shell AST is parsed
+// or executed, and the file-reading sh-bi-cat branch is never called.
+import form-stdlib/core.fk;
+import form-stdlib/tool-channel.fk;
+import form-stdlib/native-edit.fk;
+import form-stdlib/shell-exec.fk;
+import form-stdlib/bml/form-agent-search.bml;
+import form-stdlib/bml/form-agent-grep.bml;
+import form-stdlib/bml/form-agent-json-query.bml;
+import form-stdlib/bml/form-agent-edit-ladder.bml;
+import form-stdlib/bml/form-awk.bml;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+import form-stdlib/fkwu-op-arity.fk;
+import form-stdlib/source-compiler.fk;
+import form-stdlib/bml/source-abstraction.bml;
+import form-stdlib/organ-health.bml;
+section [form.bml] {
+    class FormAgentTools {
+        field FatByteTab = 9;
+        field FatByteLf = 10;
+        field FatByteCr = 13;
+        field FatByteSpace = 32;
+        field FatByteQuote = 34;
+        field FatByteOpen = 40;
+        field FatByteClose = 41;
+        field FatByteDash = 45;
+        field FatByteSemi = 59;
+        field FatByteSlash = 92;
+        field FatByteBracket = 91;
+        field FatByteN = 110;
+        field FatByteR = 114;
+        field FatByteT = 116;
+        field FatByteBraceOpen = 123;
+        field FatByteBraceClose = 125;
+        field FatHeadTailLines = 10;
+        def fat-fk-suffix() = ".fk";
+        def fat-tools() = append(tc-agent-tool-names(), ["balance", "arity", "bml-syntax", "bml-api"]);
+        def fat-tool?(name) = fat-has(fat-tools(), name);
+        def fat-readonly(name) = fat-tool?(name) && !fat-has(["edit","write"],name);
+        def fat-input(docs, paths, input, consume) = nil?(paths) ? consume([input, ""]) : fat-source(docs,paths,sources=>consume(fat-input-files(sources,paths,"")));
+        def fat-input-files(docs, paths, out) = if nil?(paths) then [out, ""] else fat-input-doc(docs, paths, out, fat-find-doc(docs, paths[0]));
+        def fat-input-doc(docs, paths, out, doc) = if nil?(doc) then ["", "resident-document-not-found"] else fat-input-files(docs, paths[1:], ((String) out + doc[2]));
+        // A | B: a bare | word that a tool's name follows joins two native calls; B reads A's stdout as its input and the documents A
+        // leaves. A '|' that no tool name follows stays an argument (tr '|' ':', cut -d '|'). A later stage only reads (edit and write
+        // stand alone, so a caller's permission for the first tool covers the line); a stage that errs (exit 2) ends the line.
+        def fat-pipe-at(args, i) = nil?(args) ? 0 - 1 : ((String) args[0] == "|" && !nil?(args[1:]) && fat-tool?(args[1])) ? i : fat-pipe-at(args[1:], i + 1);
+        def fat-call(docs, tool, args, input) = fat-pipe-call(docs, tool, args, input, (fat-text?(tool) && value_kind(args) == "list") ? fat-pipe-at(args, 0) : 0 - 1);
+        def fat-pipe-call(docs, tool, args, input, k) = k < 0 ? fat-call-one(docs, tool, args, input)
+            : !fat-readonly(fat-drop(args, k + 1)[0]) ? fat-fail("pipe-stage-writes: edit and write stand alone, not after |", docs)
+            : fat-pipe-next(fat-drop(args, k + 1), fat-call-one(docs, tool, fat-take(args, k), input));
+        def fat-pipe-next(rest, result) = fat-exit(result) == 2 ? result : fat-call(fat-documents(result), rest[0], rest[1:], fat-out(result));
+        def fat-call-one(docs, tool, args, input) {
+            let started=host_monotonic_ms();
+            let result=if (!(fat-text?(input) && fat-text?(tool) && value_kind(args)=="list" && all?(fat-text?,args) && fat-docs-valid(docs, []))) then fat-fail("invalid-resident-values", docs)
+            else if (!fat-tool?(tool)) then fat-fail("unsupported-tool", docs)
+            else fat-checked(fat-dispatch(docs, tool, args, input),docs);
+            fb_record(json-node-object([oh-s("kind","native-tool"),oh-s("tool",fat-text?(tool) ? tool : value_kind(tool)),oh-n("elapsed_ms",host_monotonic_ms() - started),oh-n("exit",fat-exit(result)),oh-n("crossings",fat-crossings(result))]),"form-agent-tools.bml",0);
+            result;
+        }
+        // Read operations consume their evidence once. Imported sources belong
+        // to the reading, while writable documents remain with their owner.
+        def fat-source(docs,paths,consume) = nil?(paths) || all?(path=>far-path-present(docs,path),paths) ? consume(docs) : {
+            let started=host_monotonic_ms(); let flow=host_pid().str();
+            let reading=oh-reading("native-source",flow,"catalog",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("declared-source",json-node-string("requested source is outside resident documents"))],["resolve-imports"],json-node-object([oh-n("resident_documents",len(docs))]));
+            oh-frame(reading);
+            let observed=fat-source-catalog(docs,paths);
+            let sources=append(docs,observed[0] |> filter(source=>!nothing?(source[1]) && nil?(fat-find-doc(docs,source[0]))) |> map(source=>[source[0],source[0],source[1]]));
+            oh-frame(oh-set(oh-applied(reading,"resolve-imports",json-node-object([oh-n("source_reads",observed[1])])),"elapsed_ms",json-node-int(host_monotonic_ms() - started)));
+            let available=all?(path=>far-path-present(sources,path),paths);
+            oh-frame(oh-reading("native-source",flow,"catalog",json-node-int(1),json-node-int(available),json-node-int(available),available ? [] : [oh-need("source",json-node-string("requested source is absent from resident documents and their declared imports"))],[],json-node-object([oh-n("source_reads",observed[1])])));
+            let result=fat-with-docs(consume(sources),docs);
+            append(result[0:5],cons(fat-crossings(result)+observed[1],result[6:]));
+        };
+        def fat-checked(result,docs) = fat-output?(result[2]) && (fat-text?(result[2]) || fat-has-value?(result)) && fat-docs-valid(fat-documents(result), []) ? result : fat-fail("invalid-resident-output", docs);
+        def fat-with-docs(result, docs) = append(result[0:4], cons(docs, result[5:]));
+        def fat-dispatch(docs, tool, args, input) = if ((String) tool == "rg") then {
+                let parsed=far-parse(args,[],0);
+                let paths=parsed[1] != "" || input != "" || fat-has(far-get(parsed[0],"paths",[]),"-") ? [] : far-get(parsed[0],"paths",[]);
+                fat-source(docs,paths,sources=>fat-with-docs(far-parsed-input(sources,input,parsed),docs));
+            }
+            else if ((String) tool == "grep") then {
+                let parsed=fag-parse(args,[],[],0);
+                let files=fag-get(parsed[0],"pfiles",[]);
+                let paths=parsed[2] != "" ? [] : append(files,nil?(files) && nil?(fag-get(parsed[0],"patterns",[])) ? parsed[1][1:] : parsed[1]) |> filter(path=>path != "-");
+                fat-source(docs,paths,sources=>fag-parsed(sources,input,parsed));
+            }
+            else if ((String) tool == "jq") then fat-jq(docs, args, input)
+            else if ((String) tool == "edit") then fat-edit(docs, args)
+            else if ((String) tool == "write") then fat-write(docs, args, input)
+            else if ((String) tool == "read") then fat-read(docs, args, input)
+            else if ((String) tool == "cat") then fat-input(docs,args,input,r=>fat-read-result(docs,r))
+            else if (((String) tool == "head") || ((String) tool == "tail")) then fat-window(docs, tool, args, input, "lines", FatHeadTailLines())
+            else if ((String) tool == "sed") then fat-sed(docs, args, input)
+            else if ((String) tool == "tr") then fat-tr(docs, args, input)
+            else if ((String) tool == "cut") then fat-cut(docs, args, input)
+            else if ((String) tool == "awk") then fat-awk(docs, args, input)
+            else if ((String) tool == "balance") then fat-balance(docs, args, input)
+            else if ((String) tool == "arity") then fat-arity(docs, args, input)
+            else if ((String) tool == "bml-syntax") then fat-bml-syntax(docs, args, input)
+            else if ((String) tool == "bml-api") then fat-bml-api(docs,args,input)
+            else fat-text-options(docs, tool, args, input, []);
+        def fat-command(docs, command, input) = if (!fat-text?(command)) then fat-fail("invalid-command-value", docs) else fat-command-argv(docs, input, fat-argv(command));
+        def fat-command-argv(docs, input, parsed) = if (!((String) parsed[1] == "")) then fat-fail(parsed[1], docs) else if nil?(parsed[0]) then fat-fail("missing-tool", docs) else fat-call(docs, parsed[0][0], parsed[0][1:], input);
+        // One-based offset/count paging. Whole reads and multi-path concatenation
+        // retain their byte contract; only a numeric offset selects paging.
+        def fat-read-range?(args) = len(args)>=3 && fat-natural-shape?(args[1]);
+        def fat-read(docs,args,input) = !fat-read-range?(args) ? fat-input(docs,args,input,r=>fat-read-result(docs,r))
+            : len(args)>5 || !fat-natural(args[1]) || str_to_int(args[1])<=0 || !fat-natural(args[2]) ? fat-fail("read-needs-path-positive-offset-nonnegative-limit-optional-unit-and-sha256",docs)
+            : len(args)>=4 && !fat-has(["lines","bytes"],args[3]) ? fat-fail("read-unit-is-lines-or-bytes",docs)
+            : fat-source(docs,[args[0]],sources=>{
+            let doc=fat-find-doc(sources,args[0]);
+            nil?(doc) ? fat-fail("resident-document-not-found",docs) : len(args)==5 && args[4]!=fat-document-sha(doc) ? fat-fail("read-source-changed; current resident_sha256="+fat-document-sha(doc),docs) : {
+            let span=fat-read-span(doc[2],str_to_int(args[1]),str_to_int(args[2]),len(args)>=4 ? args[3] : "lines");
+            fat-utf8-boundary?(doc[2],span[0]) && fat-utf8-boundary?(doc[2],span[1]) ? fat-ok(substring(doc[2],span[0],span[1]),docs) : fat-fail("read-byte-range-splits-utf8",docs);
+        }; });
+        def fat-read-span(text,offset,count,unit) = unit=="bytes" ? { let start=min2(len(text),offset - 1); [start,start + min2(len(text) - start,count)]; } : {
+            let start=fat-line-at(text,0,offset - 1);
+            [start,fat-line-at(text,start,count)];
+        };
+        def fat-utf8-boundary?(text,at) = at>=len(text) || !(str_byte_at(text,at)>=128 && str_byte_at(text,at)<192);
+        def fat-read-result(docs, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-ok(r[0], docs);
+        // balance: a document's open-minus-close count of parens and of braces, "parens braces\n"; an edit that leaves
+        // a form open reads a count its source did not, so a caller's check can hold the count the source had
+        def fat-balance(docs, args, input) = len(args)>1 ? fat-fail("balance-needs-at-most-one-path",docs) : fat-input(docs,args,input,r=>fat-balance-result(docs,r));
+        def fat-balance-result(docs, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-ok(fat-balance-text(r[0]), docs);
+        def fat-balance-text(text) = (fat-balance-count(text, 0, len(text), FatByteOpen(), FatByteClose(), 0).str() + (" " + (fat-balance-count(text, 0, len(text), FatByteBraceOpen(), FatByteBraceClose(), 0).str() + "\n")));
+        def fat-balance-count(text, i, n, open, close, d) = if (i >= n) then d else fat-balance-count(text, (i + 1), n, open, close, if ((Comparable) str_byte_at(text, i) == open) then (d + 1) else if ((Comparable) str_byte_at(text, i) == close) then (d - 1) else d);
+        // arity: every call in a Form source whose head fkwu answers itself, read against the argument count the
+        // reader demands (form-stdlib/fkwu-op-arity.fk, generated from runtime/fkwu-optable.h); one line per call
+        // that would not compile, "" when every call is whole. Strings and ; comments are read as themselves, and a
+        // defn's parameter list (a fn or lambda's too) is a list of names, never a call.
+        def fat-arity(docs, args, input) = len(args)>1 ? fat-fail("arity-needs-at-most-one-path",docs) : len(args)==1 && !fat-fk-path?(args[0]) ? fat-fail("arity-reads-fk-sources",docs) : fat-input(docs,args,input,r=>fat-arity-result(docs,r));
+        def fat-fk-path?(p) = ((len(p) > len(fat-fk-suffix())) && ((String) substring(p, (len(p) - len(fat-fk-suffix())), len(p)) == fat-fk-suffix()));
+        // a source carrying a section [ block on a line of its own is BML surface, whatever its extension (the kernel
+        // lowers it through the BML lane); rehearse-bml reads it, arity declines it
+        def fat-arity-result(docs, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if fat-ar-bml-surface?(r[0]) then fat-fail("arity-reads-direct-source-not-bml-surface", docs) else fat-ok(fat-ar-text(r[0]), docs);
+        def fat-ar-bml-surface?(t) = fsc-find-section-open(t,0)>=0;
+        // Parse resident source with the actual BML compiler. This admits grammar,
+        // not imported bindings or execution, and preserves every document.
+        def fat-bml-syntax(docs,args,input) = len(args)>1 ? fat-fail("bml-syntax-needs-at-most-one-path",docs) : fat-input(docs,args,input,r=>fat-bml-syntax-input(docs,r));
+        def fat-bml-syntax-input(docs,r) = r[1] != "" ? fat-fail(r[1],docs) : fsc-find-section-open(r[0],0) < 0 ? fat-fail("bml-syntax-needs-executable-section",docs) : {
+          kernel_stat(0); let start=kernel_stat(13);
+          try {
+            let parsed=form-source-compile-loop(r[0],"resident",0,nothing());
+            fat-ok("bml-syntax: admitted\n",docs);
+          } catch fat-bml-syntax-refused(docs,start);
+        };
+        def fat-bml-syntax-refused(docs,start) {
+            kernel_stat(0); let roots=framebuffer-events();
+            let errors=drop(max2(0,len(roots) - (kernel_stat(13) - start)),roots) |> filter(n => node_eq(node_category(n),fsc-compiler-error-cat));
+            fat-fail(nil?(errors) ? "bml-syntax-refused; original documents preserved" : "bml-syntax-refused: " + node_value(node_children(errors[-1])[0]),docs);
+        }
+        // Current declarations answer library questions; the caller's execution
+        // checks establish whether its program imports and uses them correctly.
+        def fat-api-paths() = ["form/form-stdlib/core.fk","form/form-stdlib/line-grammar.fk","form/form-stdlib/bml/string-join.bml"];
+        def fat-api-surface(text,row) {
+            let prefix=str-join-with(split-on(text,"\n")[0:row[2] - 1],"\n");
+            let cursor=cur-advance(cursor-str(text),len(prefix) + (row[2] > 1 ? 1 : 0));
+            fat-api-surface-at(text,row,cursor,row[1]=="form");
+        }
+        def fat-api-surface-at(text,row,cursor,raw) {
+            let token=sa-next(cursor,raw);
+            let declared=raw && token[0]=="(" ? sa-next(token[2],true) : token;
+            let named=sa-next(declared[2],raw);
+            if cur-eof?(cursor) then nothing()
+            else if declared[0]!=(raw ? "defn" : "def") || named[0]!=row[0] then fat-api-surface-at(text,row,token[2],raw)
+            else { let header=sa-header(named[2],raw,[]);
+             if nothing?(header) then nothing() else {
+                let body=sa-body(header[0],raw,header[1],0,0,"",raw ? ")" : nil?(header[1]) ? ";" : "}");
+                [substring(text,token[1],cur-pos(header[0])),substring(text,token[1],body[0])];
+             };
+            };
+        }
+        def fat-api-reading(path,text,prior,current) = nothing?(text) ? nothing() : {
+            let cached=record_has(prior,path) ? record_get(prior,path) : [];
+            let reading=!nil?(cached) && cached[0]==text ? cached : [text,nothing(),nothing(),bml-source-dependencies(text,!fat-ar-bml-surface?(text))];
+            record_set(current,path,reading);
+            reading;
+        };
+        def fat-source-catalog(docs,paths) {
+            let prior=record_has(fat-api-held,"current") ? record_get(fat-api-held,"current") : record_new(0);
+            let current=record_new(0);
+            let floor=nil?(paths) || any?(doc=>fat-fk-path?(doc[1]) || fat-ar-bml-surface?(doc[2]),docs) ? fat-api-paths() : [];
+            let roots=append(docs |> map(doc=>[doc[1],doc[2],0]),floor |> map(path=>[path,nothing(),1]));
+            let observed=fat-source-providers(roots,prior,current,[],0,paths);
+            record_set(fat-api-held,"current",current);
+            [observed[0],observed[1],current];
+        }
+        def fat-source-complete(sources,paths) = !nil?(paths) && all?(path=>any?(source=>source[0]==path && !nothing?(source[1]),sources),paths);
+        // Prior edges guide attention only. Admission still reads current bytes
+        // and resolves current imports before adding anything to the frontier.
+        def fat-source-route(path,paths,prior,seen) = fat-has(paths,path) ? 1 : fat-has(seen,path) || !record_has(prior,path) ? 0 : {
+            let reading=record_get(prior,path);
+            len(reading)<5 ? 0 : any?(source=>fat-source-route(source[0],paths,prior,cons(path,seen)),reading[4]);
+        };
+        def fat-source-providers(todo,prior,current,found,reads,paths) = nil?(todo) || fat-source-complete(found,paths) ? [found,reads] : {
+            let requested=nil?(paths) ? [] : todo |> filter(source=>fat-source-route(source[0],paths,prior,[]));
+            let pending=nil?(requested) ? todo[0] : requested[0]; let path=pending[0];
+            let rest=path==todo[0][0] ? todo[1:] : todo |> filter(source=>source[0] != path);
+            if record_has(current,path) then fat-source-providers(rest,prior,current,found,reads,paths) else {
+                let source=[path,pending[2] ? read_file(path) : pending[1]];
+                let reading=fat-api-reading(path,source[1],prior,current);
+                if nothing?(reading) then record_set(current,path,[]) else 0;
+                let dependencies=nothing?(reading) ? [] : reading[3] |> map(token=>{ let resolved=bml-source-resolve(path,token); nothing?(resolved) ? [path+":"+token,nothing(),0] : [resolved,nothing(),1]; });
+                if nothing?(reading) then 0 else record_set(current,path,append(reading[0:4],[dependencies]));
+                fat-source-providers(append(rest,dependencies),prior,current,append(found,[source]),reads+pending[2],paths);
+            };
+        };
+        def fat-api-source(path,text,names,prior,current) = nothing?(text) ? [] : {
+            let reading=fat-api-reading(path,text,prior,current);
+            let definitions=reading[2] ?? sa-cached-file(path,text)[4];
+            record_set(current,path,append([text,reading[1],definitions,reading[3]],reading[4:]));
+            let matches=definitions |> filter(row => fat-has(names,row[0]));
+            if nil?(matches) then [] else {
+                let digest=reading[1] ?? hex-encode(sha256-stream-string(text));
+                record_set(current,path,append([text,digest,definitions,reading[3]],reading[4:]));
+                matches |> map(row => { let surface=fat-api-surface(text,row); nothing?(surface) ? [] : [row[0],path,row[2],digest,surface[0],surface[1]]; }) |> filter(row => !nil?(row));
+            };
+        };
+        def fat-api-declaration(row) = json-node-object([json-node-pair("path",json-node-string(row[1])),json-node-pair("line",json-node-int(row[2])),json-node-pair("source_sha256",json-node-string(row[3])),json-node-pair("declaration",json-node-string(row[4])),json-node-pair("definition",json-node-string(row[5]))]);
+        def fat-api-related(providers,current,name) {
+            let dash=str_find(name,"-",0); let underscore=str_find(name,"_",0);
+            let prefix=substring(name,0,min2(dash<0 ? len(name) : dash,underscore<0 ? len(name) : underscore));
+            foldl((names,source)=>nothing?(source[1]) ? names : foldl((held,row)=>str_find(row[0],prefix,0)==0 && !fat-has(held,row[0]) ? append(held,[row[0]]) : held,names,record_get(current,source[0])[2]),[],providers);
+        }
+        def fat-bml-api(docs,args,input) = nil?(args) || input != "" ? fat-fail("bml-api-needs-symbol-arguments-and-empty-input",docs) : {
+            let started=host_monotonic_ms();
+            let indexReads=sa-read-count();
+            let observed=fat-source-catalog(docs,[]); let providers=observed[0]; let current=observed[2];
+            let found=providers |> map(source => fat-api-source(source[0],source[1],args,current,current));
+            let rows=foldl((all,one) => append(all,one),[],found);
+            let symbols=args |> map(name => { let exact=rows |> filter(row => row[0]==name);
+                json-node-object([json-node-pair("symbol",json-node-string(name)),json-node-pair("declarations",json-node-array(exact |> map(fat-api-declaration))),json-node-pair("related_names",json-node-array(nil?(exact) ? fat-api-related(providers,current,name) |> map(n=>json-node-string(n)) : []))]);
+            });
+            let missing=providers |> filter(source => nothing?(source[1])) |> map(source => json-node-string(source[0]));
+            let result=json-node-object([json-node-pair("scope",json-node-string("current resident sources, their declared import closure and floor libraries; exact definitions and fingerprints; bindings and behavior require execution")),json-node-pair("symbols",json-node-array(symbols)),json-node-pair("unavailable_sources",json-node-array(missing)),json-node-pair("index_reads",json-node-int(sa-read-count() - indexReads)),json-node-pair("crossings_scope",json-node-string("source file reads; retained-index reads are separate; loader resolution probes are not included"))]);
+            fb_record(intern_node(intern_trivial_string("bml-api"),[intern_trivial_int(host_monotonic_ms() - started),intern_trivial_int(len(rows)),intern_trivial_int(len(providers))]),"form-agent-tools",0);
+            fat-with-value(append(fat-result(0,[[result],0,"\n"],"",docs)[0:5],[observed[1]]),result);
+        };
+        def fat-ar-text(t) = fat-ar-lines(t, reverse(fat-ar-forms(t, 0, len(t), [])[1]));
+        def fat-ar-lines(t, found) = if nil?(found) then "" else ((String) fat-ar-line-of(t, found[0]) + fat-ar-lines(t, found[1:]));
+        def fat-ar-line-of(t, f) = ("line " + (fat-ar-line(t, 0, f[0], 1).str() + (": (" + (f[1] + (" ...) takes " + (f[2].str() + (", given " + (f[3].str() + "\n"))))))));
+        def fat-ar-line(t, i, stop, line) = if (i >= stop) then line else fat-ar-line(t, (i + 1), stop, if ((Comparable) str_byte_at(t, i) == FatByteLf()) then (line + 1) else line);
+        def fat-ar-space?(b) = (((Comparable) b == FatByteSpace()) || (((Comparable) b == FatByteTab()) || (((Comparable) b == FatByteLf()) || ((Comparable) b == FatByteCr()))));
+        def fat-ar-delim?(b) = (fat-ar-space?(b) || (((Comparable) b == FatByteOpen()) || (((Comparable) b == FatByteClose()) || (((Comparable) b == FatByteSemi()) || ((Comparable) b == FatByteQuote())))));
+        def fat-ar-eol(t, i, n) = if ((i >= n) || ((Comparable) str_byte_at(t, i) == FatByteLf())) then i else fat-ar-eol(t, (i + 1), n);
+        def fat-ar-ws(t, i, n) = if (i >= n) then n else if fat-ar-space?(str_byte_at(t, i)) then fat-ar-ws(t, (i + 1), n) else if ((Comparable) str_byte_at(t, i) == FatByteSemi()) then fat-ar-ws(t, fat-ar-eol(t, i, n), n) else i;
+        def fat-ar-atom-end(t, i, n) = if ((i >= n) || fat-ar-delim?(str_byte_at(t, i))) then i else fat-ar-atom-end(t, (i + 1), n);
+        def fat-ar-str-end(t, i, n) = if (i >= n) then n else if ((Comparable) str_byte_at(t, i) == FatByteSlash()) then fat-ar-str-end(t, (i + 2), n) else if ((Comparable) str_byte_at(t, i) == FatByteQuote()) then (i + 1) else fat-ar-str-end(t, (i + 1), n);
+        // the top level: every form in turn; answers (list end findings)
+        def fat-ar-forms(t, i, n, acc) = fat-ar-forms-at(t, fat-ar-ws(t, i, n), n, acc);
+        def fat-ar-forms-at(t, j, n, acc) = if (j >= n) then [n, acc] else fat-ar-forms-next(t, fat-ar-form(t, j, n, acc, 0), n);
+        def fat-ar-forms-next(t, r, n) = fat-ar-forms(t, r[0], n, r[1]);
+        // one form at i; quiet reads a list of names without checking it; answers (list end findings)
+        def fat-ar-form(t, i, n, acc, quiet) = if ((Comparable) str_byte_at(t, i) == FatByteOpen()) then fat-ar-list(t, fat-ar-ws(t, (i + 1), n), n, acc, i, quiet) else if ((Comparable) str_byte_at(t, i) == FatByteQuote()) then [fat-ar-str-end(t, (i + 1), n), acc] else if ((Comparable) str_byte_at(t, i) == FatByteClose()) then [(i + 1), acc] else [fat-ar-atom-end(t, i, n), acc];
+        def fat-ar-list(t, j, n, acc, open, quiet) = if (j >= n) then [n, acc] else if ((Comparable) str_byte_at(t, j) == FatByteClose()) then [(j + 1), acc] else if (((Comparable) str_byte_at(t, j) == FatByteOpen()) || ((Comparable) str_byte_at(t, j) == FatByteQuote())) then fat-ar-args-from(t, fat-ar-form(t, j, n, acc, quiet), n, "", open, quiet) else fat-ar-headed(t, substring(t, j, fat-ar-atom-end(t, j, n)), fat-ar-args(t, fat-ar-atom-end(t, j, n), n, acc, 0, quiet, substring(t, j, fat-ar-atom-end(t, j, n))), open, quiet);
+        def fat-ar-args-from(t, r, n, name, open, quiet) = fat-ar-close(fat-ar-args(t, r[0], n, r[1], 0, quiet, name));
+        def fat-ar-close(r) = [r[0], r[1]];
+        // a call with a head: its arguments read, then its count held to the table
+        // a negative arity in the table is a variadic head (list, append ...): any count stands
+        def fat-ar-headed(t, name, r, open, quiet) = if (((Comparable) quiet == 1) || (nothing?(fkwu-op-arity(name)) || ((fkwu-op-arity(name) < 0) || ((Comparable) fkwu-op-arity(name) == r[2])))) then [r[0], r[1]] else [r[0], cons([open, name, fkwu-op-arity(name), r[2]], r[1])];
+        def fat-ar-names?(name, count) = ((((String) name == "defn") && ((Comparable) count == 1)) || ((((String) name == "fn") || ((String) name == "lambda")) && ((Comparable) count == 0)));
+        // the arguments of one list; answers (list end findings count)
+        def fat-ar-args(t, i, n, acc, count, quiet, name) = fat-ar-args-at(t, fat-ar-ws(t, i, n), n, acc, count, quiet, name);
+        def fat-ar-args-at(t, j, n, acc, count, quiet, name) = if (j >= n) then [n, acc, count] else if ((Comparable) str_byte_at(t, j) == FatByteClose()) then [(j + 1), acc, count] else fat-ar-args-next(t, fat-ar-form(t, j, n, acc, if fat-ar-names?(name, count) then 1 else quiet), n, count, quiet, name);
+        def fat-ar-args-next(t, r, n, count, quiet, name) = fat-ar-args(t, r[0], n, r[1], (count + 1), quiet, name);
+        def fat-edit-guidance() = "Existing documents require edit: arguments [path,exact unique old text,new text]. For several focused changes, use [path,old1,new1,old2,new2,...]; literal replacements run in order, each old text must match exactly once at its step, and any failure rolls back the whole call. Guard a literal batch with [path,resident_sha256,old1,new1,old2,new2,...]; the hash checks the initial document once before the same atomic edits. For a whole-document replacement use [path,\"sha256\",expected resident_sha256,new whole-document text]. The shorter [path,resident_sha256,new whole-document text] also works when the hash has no literal match and equals the current document identity. Literal matches keep their text-edit meaning. Obtain resident_sha256 from the current document, successful mutation result, read, cat or guard_evidence. An edit changes that identity; use the new resident_sha256 for the next edit. write only creates an absent path; it cannot overwrite an existing document. ";
+        def fat-document-sha(doc) = hex-encode(sha256-stream-string(doc[2]));
+        def fat-sha-bytes?(text,at) = if (at >= len(text)) then 1 else ((str_find(hex-alphabet(),substring(text,at,(at + 1)),0) >= 0) && fat-sha-bytes?(text,(at + 1)));
+        def fat-sha?(text) = (((Comparable) len(text) == 64) && fat-sha-bytes?(text,0));
+        def fat-edit-batch?(args) = ((len(args) >= 5) && ((Comparable) (len(args) % 2) == 1));
+        def fat-edit-guarded-batch?(args) = (len(args) >= 4) && ((len(args) % 2) == 0) && fat-sha?(args[1]);
+        def fat-edit(docs, args) = if fat-edit-guarded-batch?(args) then fat-edit-guarded(docs,args[0],args[1],doc => fat-edit-batch(docs,docs,args[0],fat-drop(args,2),1,[])) else if ((Comparable) len(args) == 4) then fat-edit-sha(docs,args) else if fat-edit-batch?(args) then fat-edit-batch(docs,docs,args[0],args[1:],1,[]) else if (!((Comparable) len(args) == 3)) then fat-fail("edit-needs-path-old-new", docs) else if ((String) args[1] == "") then fat-fail("empty-edit-pattern", docs) else fat-edit-doc(docs, args, fat-find-doc(docs, args[0]));
+        // Intermediate documents stay local to this call. A later failure
+        // returns the original set, including when an earlier step succeeded.
+        // rungs: [step rung] for each step that landed past the exact bytes.
+        def fat-edit-batch(original,docs,path,pairs,step,rungs) {
+            if nil?(pairs) then
+            if ((Value) original == docs) then fat-fail("edit-unchanged: old and new text are identical; no source changed",original) else fat-ok(fat-edit-batch-out(rungs,(step - 1)),docs)
+            else {
+                let result = fat-edit-literal(docs,[path,pairs[0],pairs[1]],fat-find-doc(docs,path));
+                if ((Comparable) fat-exit(result) == 0) then fat-edit-batch(original,fat-documents(result),path,fat-drop(pairs,2),(step + 1),fat-edit-rungs(rungs,step,fat-out(result)))
+                else {
+                    let failed = json-node-object(append([json-node-pair("failed_edit",json-node-int(step)),json-node-pair("documents_changed",json-node-int(0)),json-node-pair("scope",json-node-string("The numbered literal replacement failed against the intermediate text; all replacements in this call were rolled back."))],fat-edit-step-detail(result)));
+                    fat-with-value(fat-result(fat-exit(result),[[failed],0,""],fat-error(result),original),failed);
+                };
+            };
+        }
+        def fat-edit-literal(docs,args,doc) = if ((String) args[1] == "") then fat-fail("empty-edit-pattern",docs)
+            else if nil?(doc) then fat-fail("resident-document-not-found",docs)
+            else {
+                let count = ne-count(doc[2],args[1]);
+                if ((Comparable) count == 0) then fat-edit-ladder(docs,args,doc) else fat-edit-count(docs,args,doc,count);
+            };
+        // Past the exact bytes, form-agent-edit-ladder.bml lands the old text where exactly one place
+        // matches at its strictest rung, names that rung, and refuses two places with their count.
+        def fat-edit-ladder(docs,args,doc) = fat-edit-landed(docs,doc,fael-approximate(doc[2],args[1],args[2]));
+        def fat-edit-landed(docs,doc,landing) = if ((String) landing[0] == "landed") then (if ((String) landing[3] == doc[2]) then fat-fail("edit-unchanged: old and new text are identical; no source changed",docs) else fat-ok(fat-rung-out(landing[1]),fat-put-doc(docs,[doc[0],doc[1],landing[3]])))
+            else if ((String) landing[0] == "ambiguous") then fat-edit-ambiguous(docs,landing)
+            else fat-fail("edit-not-found",docs);
+        def fat-rung-out(rung) = ("edited\nrung=" + (rung + "\n"));
+        def fat-edit-rungs(rungs,step,out) = if fat-starts(out,"edited\nrung=") then append(rungs,[[step,substring(out,12,(len(out) - 1))]]) else rungs;
+        def fat-edit-batch-out(rungs,steps) = if nil?(rungs) then "edited\n" else if ((Comparable) steps == 1) then fat-rung-out(rungs[0][1]) else ("edited\n" + (fat-join(rungs |> map(r => ("rung=" + (r[1] + (" step=" + r[0].str())))),"\n") + "\n"));
+        def fat-edit-ambiguous(docs, landing) {
+            let node = json-node-object([json-node-pair("rung",json-node-string(landing[1])),json-node-pair("matches",json-node-int(landing[2])),json-node-pair("scope",json-node-string("The old text matched more than one place at this rung; nothing changed. Supply a longer span that occurs once."))]);
+            fat-with-value(fat-result(2,[[node],0,""],"edit-ambiguous",docs),node);
+        }
+        // json-serves: an edit result that arrived as stdout only. text: a value cell is used when the result holds one; the text is the residue.
+        def fat-edit-step-detail(result) {
+            if fat-has-value?(result) then fat-edit-step-pairs(fat-value(result)) else if (!faj-valid(fat-out(result))) then [] else fat-edit-step-pairs(faj-json("edit-step",fat-out(result)));
+        }
+        def fat-edit-step-pairs(obj) = if (!(fat-edit-object?(obj) && json-object-has?(obj,"rung"))) then [] else [json-node-pair("rung",json-object-get(obj,"rung")),json-node-pair("matches",json-object-get(obj,"matches"))];
+        def fat-edit-object?(node) = faj-is(node, JSON-OBJECT());
+        def fat-edit-guarded(docs,path,digest,apply) = !fat-sha?(digest) ? fat-fail("edit-invalid-sha256",docs) : {
+            let doc=fat-find-doc(docs,path);
+            nil?(doc) ? fat-fail("resident-document-not-found",docs) : ((String) digest != fat-document-sha(doc)) ? fat-fail("edit-sha256-mismatch",docs) : apply(doc);
+        };
+        def fat-edit-sha(docs,args) = ((String) args[1] != "sha256") ? fat-fail("edit-needs-path-sha256-digest-new-text",docs) : fat-edit-guarded(docs,args[0],args[2],doc => ((String) doc[2] == args[3]) ? fat-fail("edit-unchanged: old and new text are identical; no source changed",docs) : fat-ok("edited\n",fat-put-doc(docs,[doc[0],doc[1],args[3]])));
+        def fat-edit-doc(docs, args, doc) = if nil?(doc) then fat-fail("resident-document-not-found", docs) else fat-edit-count(docs, args, doc, ne-count(doc[2], args[1]));
+        def fat-edit-count(docs, args, doc, count) = if ((Comparable) count == 0) then fat-edit-identity(docs,args,doc) else if (!((Comparable) count == 1)) then fat-fail("edit-ambiguous", docs) else if ((String) args[1] == args[2]) then fat-fail("edit-unchanged: old and new text are identical; no source changed",docs) else fat-ok("edited\n", fat-put-doc(docs, [doc[0], doc[1], ne-replace-first(doc[2], args[1], args[2])]));
+        // A missing literal may name the complete current document instead.
+        // Existing literal matches and ambiguous edits retain their meaning.
+        def fat-edit-identity(docs,args,doc) = if (!(fat-sha?(args[1]) && ((String) args[1] == fat-document-sha(doc)))) then fat-edit-ladder(docs,args,doc) else fat-edit-sha(docs,[args[0],"sha256",args[1],args[2]]);
+        def fat-write(docs, args, input) = if (!(((Comparable) len(args) == 1) || ((Comparable) len(args) == 2))) then fat-fail("write-needs-new-path-and-text", docs) else if ((String) args[0] == "") then fat-fail("empty-document-path", docs) else if (!nil?(fat-find-doc(docs, args[0]))) then fat-fail("document-exists-use-guarded-edit", docs) else fat-ok("created\n", append(docs, [[("resident:" + args[0]), args[0], if ((Comparable) len(args) == 2) then args[1] else input]]));
+
+        // Private tool evidence, derived from the same resident documents the
+        // guard inspected. Error codes and mutation authority stay unchanged.
+        def fat-guard-prefix(a,b,at) = if ((at >= len(a)) || (at >= len(b))) then at else if (!((Comparable) fat-char(a,at) == fat-char(b,at))) then at else fat-guard-prefix(a,b,(at + 1));
+        def fat-guard-byte(text,at) = if (at >= len(text)) then json-node-null() else json-node-int(fat-char(text,at));
+        def fat-guard-comparison(source,old) {
+            let at = fat-guard-prefix(source,old,0);
+            let start = fat-max(0,(at - 32));
+            json-node-object([json-node-pair("scope",json-node-string("old argument compared with the whole resident document at equal byte offsets; approximate landing is unique-or-refuse and named")),json-node-pair("first_difference_byte",if ((String) source == old) then json-node-null() else json-node-int(at)),json-node-pair("old_byte",fat-guard-byte(old,at)),json-node-pair("resident_byte",fat-guard-byte(source,at)),json-node-pair("context_start_byte",json-node-int(start)),json-node-pair("old_context",json-node-string(substring(old,start,fat-min(len(old),(at + 48))))),json-node-pair("resident_context",json-node-string(substring(source,start,fat-min(len(source),(at + 48)))))]);
+        }
+        // the words a call named as documents that no admitted document answers (a pattern tool's first word is its pattern or program)
+        def fat-missing-operands(docs,tool,args) = (fat-has(["grep","rg","awk","sed","jq"],tool) ? fat-drop(args |> filter(a=>!fat-starts(a,"-")),1) : args |> filter(a=>!fat-starts(a,"-"))) |> filter(a=>nil?(fat-find-doc(docs,a)));
+        def fat-guard-evidence(docs,tool,args,result) = fat-error(result)=="resident-document-not-found" ? json-node-object([
+            json-node-pair("needed",json-node-string("admitted document id or path")),json-node-pair("observed",json-node-array(args |> map(json-node-string))),
+            json-node-pair("missing",json-node-array(fat-missing-operands(docs,tool,args) |> map(json-node-string))),
+            json-node-pair("offers",json-node-array(docs |> map(doc=>json-node-object([json-node-pair("id",json-node-string(doc[0])),json-node-pair("path",json-node-string(doc[1]))])))),
+            json-node-pair("next",json-node-string("Choose an admitted id or path exactly. Native tools read resident documents, not host scratch paths; original documents and checks remain unchanged."))]) : if (nil?(args) || (!fat-has(["edit-not-found","edit-ambiguous","document-exists-use-guarded-edit","edit-sha256-mismatch"],fat-error(result)))) then nothing() else {
+            let doc = fat-find-doc(docs,args[0]);
+            if (nil?(doc) || (!((((String) tool == "edit") && (((Comparable) len(args) == 3) || (((Comparable) len(args) == 4) || fat-edit-guarded-batch?(args)))) || ((String) tool == "write")))) then nothing() else {
+                let source = doc[2];
+                let base = [json-node-pair("scope",json-node-string("caller-supplied resident documents; tools do not write the filesystem")),json-node-pair("path",json-node-string(doc[1])),json-node-pair("documents_changed",json-node-int((!((Value) docs == fat-documents(result))))),json-node-pair("resident_bytes",json-node-int(len(source))),json-node-pair("resident_sha256",json-node-string(fat-document-sha(doc))),json-node-pair("next",json-node-string(fat-edit-guidance()))];
+                json-node-object(append(base,if ((String) tool == "write") then [] else if (fat-edit-guarded-batch?(args) || ((Comparable) len(args) == 4)) then append([json-node-pair("expected_sha256",json-node-string(args[if fat-edit-guarded-batch?(args) then 1 else 2]))],fat-nearest-pairs(source,args,result)) else append([json-node-pair("exact_matches",json-node-int(ne-count(source,args[1]))),json-node-pair("old_bytes",json-node-int(len(args[1]))),json-node-pair("whole_document_comparison",fat-guard-comparison(source,args[1]))],fat-nearest-pairs(source,args,result))));
+            };
+        };
+        // A miss at every rung carries the resident line window closest to the failed old text; a
+        // guarded batch names its failed step, whose old text is read against the resident document.
+        def fat-nearest-pairs(source,args,result) = if (!((String) fat-error(result) == "edit-not-found")) then [] else {
+            let old = fat-failed-old(args,result);
+            if ((String) old == "") then [] else [json-node-pair("nearest_span",fat-nearest-node(source,old))];
+        };
+        // json-serves: an edit failure that arrived as stdout only. text: the value cell is the result when it exists; this reads a cell-less failure line.
+        def fat-failed-step(out) = if (!faj-valid(out)) then 1 else {
+            let obj = faj-json("edit-failure",out);
+            if (fat-edit-object?(obj) && json-object-has?(obj,"failed_edit")) then node_value(json-object-get(obj,"failed_edit")) else 1;
+        };
+        def fat-failed-old(args,result) = if ((Comparable) len(args) == 3) then args[1] else if (!fat-edit-guarded-batch?(args)) then "" else {
+            let at = (2 + (2 * (fat-failed-step(fat-out(result)) - 1)));
+            if ((at < 2) || (at >= len(args))) then "" else args[at];
+        };
+        def fat-nearest-node(source,old) {
+            let near = fael-nearest(source,old);
+            json-node-object([json-node-pair("scope",json-node-string("the resident line window closest to the old text; offsets and text are the resident's own bytes")),json-node-pair("start_byte",json-node-int(near[0])),json-node-pair("end_byte",json-node-int(near[1])),json-node-pair("first_line",json-node-int(near[2])),json-node-pair("lines",json-node-int(near[3])),json-node-pair("equal_lines",json-node-int(near[4])),json-node-pair("text",json-node-string(near[5]))]);
+        }
+
+        // the older spelling -N (head -2, tail -5) is -n N
+        def fat-window-count?(arg) = ((len(arg) > 1) && fat-starts(arg, "-") && fat-natural(substring(arg, 1, len(arg))));
+        def fat-window(docs,tool,args,input,unit,amount) = nil?(args) ? fat-window-input(docs,tool,unit,amount,[input,""])
+            : fat-window-count?(args[0]) ? fat-window(docs,tool,args[1:],input,"lines",str_to_int(substring(args[0],1,len(args[0]))))
+            : fat-has(["-n","-c"],args[0]) ? (len(args)<2 || !fat-natural(args[1]) ? fat-fail("window-needs-nonnegative-count",docs) : fat-window(docs,tool,args[2:],input,args[0]=="-c" ? "bytes" : "lines",str_to_int(args[1])))
+            : fat-starts(args[0],"-") ? fat-fail("unsupported-window-option",docs) : fat-input(docs,args,input,r=>fat-window-input(docs,tool,unit,amount,r));
+        def fat-window-input(docs, tool, unit, amount, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if ((String) unit == "bytes") then fat-ok(if ((String) tool == "head") then substring(r[0], 0, fat-min(amount, len(r[0]))) else substring(r[0], fat-max(0, (len(r[0]) - amount)), len(r[0])), docs) else fat-ok(fat-line-window(r[0], if ((String) tool == "head") then 0 else fat-max(0, (fat-line-count(r[0]) - amount)), amount), docs);
+        def fat-line-count(s) = ne-count(s,"\n") + (len(s)>0 && fat-char(s,len(s) - 1)!=FatByteLf() ? 1 : 0);
+        def fat-line-at(s, at, count) = count<=0 || at>=len(s) ? at : {
+            let end=str_find(s,"\n",at);
+            end<0 ? len(s) : fat-line-at(s,end + 1,count - 1);
+        };
+        def fat-line-window(s, start, count) {
+            let at=fat-line-at(s,0,start);
+            substring(s,at,fat-line-at(s,at,count));
+        }
+        def fat-sed(docs, args, input) = if (len(args) < 2) then fat-fail("sed-supports-only-numeric-print-range", docs) else if (!((String) args[0] == "-n")) then fat-fail("sed-supports-only-numeric-print-range", docs) else if (!fat-ends(args[1], "p")) then fat-fail("sed-supports-only-numeric-print-range", docs) else fat-sed-range(docs, fat-drop(args, 2), input, split-on(substring(args[1], 0, (len(args[1]) - 1)), ","));
+        def fat-sed-range(docs,paths,input,range) = !(len(range)==1 || len(range)==2) || !fat-natural(range[0]) || (len(range)==2 && !fat-natural(range[1])) ? fat-fail("invalid-print-range",docs) : fat-input(docs,paths,input,r=>fat-sed-ready(docs,str_to_int(range[0]),str_to_int(range[-1]),r));
+        def fat-sed-ready(docs, first, last, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if ((first <= 0) || (last < first)) then fat-fail("invalid-print-range", docs) else fat-ok(fat-line-window(r[0], (first - 1), ((last - first) + 1)), docs);
+        def fat-text-options(docs,tool,args,input,flags) = nil?(args) ? fat-text-ready(docs,tool,flags,[input,""]) : fat-starts(args[0],"-") ? (fat-valid-text-flag(tool,args[0]) ? fat-text-options(docs,tool,args[1:],input,cons(args[0],flags)) : fat-fail("unsupported-text-option",docs)) : fat-input(docs,args,input,r=>fat-text-ready(docs,tool,flags,r));
+        def fat-valid-text-flag(tool, flag) = if ((String) tool == "wc") then fat-has(["-l", "-w", "-c", "-lw", "-lc", "-wc", "-lwc"], flag) else if ((String) tool == "sort") then fat-has(["-r", "-u", "-n", "-rn", "-nr", "-ru", "-ur", "-nu", "-un", "-nru"], flag) else if ((String) tool == "uniq") then fat-has(["-c", "-d", "-u"], flag) else 0;
+        def fat-flag(flags, letter) = (str_find(fat-join(flags, ""), letter, 0) >= 0);
+        def fat-text-ready(docs, tool, flags, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else if ((String) tool == "wc") then fat-ok((fat-join(fat-counts(r[0], flags), " ") + "\n"), docs) else if ((String) tool == "sort") then fat-sort-ready(docs, sh-lines(r[0]), flags) else fat-ok(fat-uniq-lines(sh-lines(r[0]), flags), docs);
+        def fat-sort-ready(docs, lines, flags) = fat-flag(flags,"n") && !fat-numeric-lines(lines) ? fat-fail("numeric-sort-needs-number-lines",docs) : fat-ok(sh-join-nl(fat-sort-lines(lines,flags)),docs);
+        def fat-numeric-lines(lines) = all?(line=>{ let text=fat-trim(line); faj-valid-end(text,faj-number(text,0)); },lines);
+        def fat-counts(s, flags) = append(if (nil?(flags) || fat-flag(flags, "l")) then [ne-count(s, "\n").str()] else [], append(if (nil?(flags) || fat-flag(flags, "w")) then [sh-count-words(s).str()] else [], if (nil?(flags) || fat-flag(flags, "c")) then [len(s).str()] else []));
+        def fat-sort-lines(lines, flags) {
+            let numeric=fat-flag(flags,"n");
+            let rows=numeric ? sort-with((a,b)=>a[0]<=b[0],nothing(),lines |> map(line=>[parse-number(fat-trim(line)),line])) : sh-sort(lines);
+            let selected=fat-sort-final(rows,flags);
+            numeric ? selected |> map(row=>row[1]) : selected;
+        }
+        def fat-sort-final(lines, flags) = if fat-flag(flags, "r") then fat-reverse(fat-sort-unique(lines, flags)) else fat-sort-unique(lines, flags);
+        def fat-sort-unique(lines, flags) = if (!fat-flag(flags, "u")) then lines else if fat-flag(flags, "n") then fat-num-unique(lines) else sh-uniq(lines);
+        def fat-num-unique(rows) = nil?(rows) ? [] : cons(rows[0],fat-num-unique(fat-num-drop(rows[1:],rows[0][0])));
+        def fat-num-drop(rows, key) = nil?(rows) || rows[0][0]!=key ? rows : fat-num-drop(rows[1:],key);
+        def fat-uniq-lines(lines, flags) = if nil?(lines) then "" else fat-uniq-group(lines[1:], lines[0], 1, flags);
+        def fat-uniq-group(rest, line, count, flags) = if nil?(rest) then fat-uniq-emit(line, count, flags) else if ((String) rest[0] == line) then fat-uniq-group(rest[1:], line, (count + 1), flags) else ((String) fat-uniq-emit(line, count, flags) + fat-uniq-lines(rest, flags));
+        def fat-uniq-emit(line, count, flags) = if ((fat-flag(flags, "d") && ((Comparable) count == 1)) || (fat-flag(flags, "u") && (count > 1))) then "" else ((if fat-flag(flags, "c") then (count.str() + " ") else "") + (line + "\n"));
+        def fat-tr(docs, args, input) = if (!((Comparable) len(args) == 2)) then fat-fail("tr-needs-two-literal-sets", docs) else fat-tr-sets(docs, input, ((String) args[0] == "-d"), if ((String) args[0] == "-d") then ["", ""] else fat-tr-set(args[0], 0, ""), fat-tr-set(args[1], 0, ""));
+        def fat-tr-set(s, i, out) = if (i >= len(s)) then [out, ""] else if ((Comparable) fat-char(s, i) == FatByteSlash()) then fat-tr-escape(s, i, out) else if (((Comparable) fat-char(s, i) == FatByteDash()) || ((Comparable) fat-char(s, i) == FatByteBracket())) then ["", "tr-ranges-not-supported"] else fat-tr-set(s, (i + 1), ((String) out + byte_to_str(fat-char(s, i))));
+        def fat-tr-escape(s, i, out) = if (!fat-has(["n", "r", "t", "\\"], byte_to_str(fat-char(s, (i + 1))))) then ["", "unsupported-tr-escape"] else fat-tr-set(s, (i + 2), ((String) out + byte_to_str(if ((Comparable) fat-char(s, (i + 1)) == FatByteN()) then FatByteLf() else if ((Comparable) fat-char(s, (i + 1)) == FatByteR()) then FatByteCr() else if ((Comparable) fat-char(s, (i + 1)) == FatByteT()) then FatByteTab() else FatByteSlash())));
+        def fat-tr-sets(docs, input, remove, from, to) = if (!((String) from[1] == "")) then fat-fail(from[1], docs) else if (!((String) to[1] == "")) then fat-fail(to[1], docs) else if remove then fat-ok(fat-delete-chars(input, to[0], 0), docs) else if (!((Comparable) len(from[0]) == len(to[0]))) then fat-fail("tr-supports-equal-length-literal-sets", docs) else fat-ok(sh-tr-str(input, from[0], to[0]), docs);
+        def fat-delete-chars(s, chars, i) = if (i >= len(s)) then "" else ((String) (if (str_find(chars, byte_to_str(fat-char(s, i)), 0) >= 0) then "" else byte_to_str(fat-char(s, i))) + fat-delete-chars(s, chars, (i + 1)));
+        def fat-cut(docs,args,input) = len(args)<4 || args[0]!="-d" || args[2]!="-f" ? fat-fail("cut-needs-d-delimiter-f-field",docs) : len(args[1])!=1 || !fat-natural(args[3]) || str_to_int(args[3])<=0 ? fat-fail("invalid-cut-field",docs) : fat-input(docs,args[4:],input,r=>fat-cut-ready(docs,args[1],str_to_int(args[3]),r));
+        def fat-cut-ready(docs, delimiter, field, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-ok(fat-cut-lines(sh-lines(r[0]), delimiter, field), docs);
+        def fat-cut-lines(lines, delimiter, field) = if nil?(lines) then "" else (fat-cut-line(lines[0], delimiter, field) + ("\n" + fat-cut-lines(lines[1:], delimiter, field)));
+        def fat-cut-line(line, delimiter, field) = str_find(line,delimiter,0)<0 ? line : { let fields=split-on(line,delimiter); field>len(fields) ? "" : fields[field - 1]; };
+        // awk: the body's awk (form-awk.bml) over held input or resident documents, a record a line; the Form records (-P -B -C) and
+        // the functions over the index are form-find's awk verb (form-path.bml)
+        def fat-awk(docs, args, input) = fat-awk-door(docs, input, fwk-door(args));
+        def fat-awk-door(docs, input, o) = record_get(o, "err") != "" ? fat-fail(record_get(o, "err"), docs)
+            : record_get(o, "form") > 0 ? fat-fail("awk-form-records-need-the-index: -P, -B and -C are form-find's awk verb", docs)
+            : fat-awk-compiled(docs, input, o, fwk-compile(record_get(o, "prog"), []));
+        def fat-awk-compiled(docs, input, o, c) = c[1] != "" ? fat-fail(c[1], docs)
+            : nil?(record_get(o, "files")) ? fat-awk-ran(docs, fwk-run(c[0], fwk-line-records(input, ""), fwk-env(o, record_new(0))))
+            : fat-source(docs, record_get(o, "files"), sources => fat-awk-docs(docs, o, c[0], sources, record_get(o, "files"), []));
+        def fat-awk-docs(docs, o, prog, sources, paths, acc) = nil?(paths) ? fat-awk-ran(docs, fwk-run(prog, fwk-flat(reverse(acc)), fwk-env(o, record_new(0)))) : fat-awk-doc(docs, o, prog, sources, paths, acc, fat-find-doc(sources, paths[0]));
+        def fat-awk-doc(docs, o, prog, sources, paths, acc, doc) = nil?(doc) ? fat-fail("resident-document-not-found", docs) : fat-awk-docs(docs, o, prog, sources, paths[1:], cons(fwk-line-records(doc[2], paths[0]), acc));
+        def fat-awk-ran(docs, r) = fat-result(r[0], r[1], r[2], docs);
+
+        def fat-jq(docs, args, input) = fat-jq-args(docs, args, input, []);
+        def fat-jq-args(docs, args, input, options) = if nil?(args) then fat-fail("jq-needs-filter", docs) else if (((String) args[0] == "--arg") || ((String) args[0] == "--argjson")) then fat-jq-bind(docs, args, input, options) else if fat-starts(args[0], "-") then fat-jq-flags(docs, args, input, options, 1) else fat-jq-compiled(docs, options, args[1:], input, faj-compile(args[0]));
+        def fat-jq-flags(docs, args, input, options, i) = if (i >= len(args[0])) then if ((Comparable) i == 1) then fat-fail("unsupported-jq-option", docs) else fat-jq-args(docs, args[1:], input, options) else if fat-has(["r", "c", "e", "s", "n"], byte_to_str(fat-char(args[0], i))) then fat-jq-flags(docs, args, input, far-set(options, byte_to_str(fat-char(args[0], i)), 1), (i + 1)) else fat-fail("unsupported-jq-option", docs);
+        // json-serves: a jq expression the caller wrote. text: --argjson is that expression's own text binding; a name and a string stay cells.
+        def fat-jq-bind(docs, args, input, options) = if (len(args) < 3) then fat-fail("jq-binding-needs-name-value", docs) else if (!faj-name(args[1])) then fat-fail("invalid-jq-variable-name", docs) else if (((String) args[0] == "--argjson") && (!faj-valid(args[2]))) then fat-fail("invalid-json-binding", docs) else fat-jq-args(docs, fat-drop(args, 3), input, far-push(options, "vars", [args[1], if ((String) args[0] == "--argjson") then faj-json("resident-variable", args[2]) else intern_trivial_string(args[2])]));
+        def fat-jq-compiled(docs,options,paths,input,compiled) = compiled[1] != "" ? fat-fail(compiled[1],docs) : !faj-bound(compiled[0],far-get(options,"vars",[])) ? fat-fail("unbound-variable",docs) : far-get(options,"n",0) ? fat-jq-input(docs,options,compiled[0],["null",""]) : nil?(paths) ? fat-jq-input(docs,options,compiled[0],[input,""]) : fat-source(docs,paths,sources=>fat-jq-input(docs,options,compiled[0],fat-json-files(sources,paths,"")));
+        def fat-json-files(docs, paths, out) = if nil?(paths) then [out, ""] else fat-json-file(docs, paths, out, fat-find-doc(docs, paths[0]));
+        def fat-json-file(docs, paths, out, doc) = if nil?(doc) then ["", "resident-document-not-found"] else fat-json-files(docs, paths[1:], (out + (doc[2] + "\n")));
+        def fat-jq-input(docs, options, ast, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-jq-parsed(docs, options, ast, fat-json-stream(r[0], 0, []));
+        def fat-json-stream(s, at, out) = if (fat-skip(s, at) >= len(s)) then faj-values(fat-reverse(out)) else fat-json-value(s, fat-skip(s, at), out, faj-end(s, at, 0));
+        // json-serves: a jq program whose input is text. text: the input language is JSON, so the value is admitted once from those bytes.
+        def fat-json-value(s, start, out, end) = if (end <= start) then faj-bad("invalid-json-input") else if ((end < len(s)) && (!fat-ws(fat-char(s, end)))) then faj-bad("invalid-json-input") else fat-json-stream(s, end, cons(faj-json("resident-json-input", substring(s, start, end)), out));
+        def fat-jq-parsed(docs, options, ast, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-jq-evaluated(docs, options, faj-each(ast, if far-get(options, "s", 0) then [faj-array(r[0])] else r[0], far-get(options, "vars", [])));
+        def fat-jq-evaluated(docs, options, r) = if (!((String) r[1] == "")) then fat-fail(r[1], docs) else fat-with-value(fat-result(if far-get(options, "e", 0) then if nil?(r[0]) then 4 else if faj-truth(fat-reverse(r[0])[0]) then 0 else 1 else 0, [r[0], far-get(options, "r", 0), "\n"], "", docs),faj-array(r[0]));
+    }
+    let fat-api-held=record_new(0);
+}

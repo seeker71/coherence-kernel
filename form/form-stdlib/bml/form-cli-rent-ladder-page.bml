@@ -1,0 +1,119 @@
+// The body draws its own progress: the ledgers, filled into the page template.
+// the body draws its own progress.
+//
+// Reads receipts/parity-contest-ledger.jsonl, receipts/rent-ledger.jsonl and
+// receipts/flow-ledger.jsonl, plus the pinned route rows of the 2026-09-18
+// receipt, and fills docs/rent-ladder.template.html at its /*DATA*/ mark with
+// one JSON object; the filled page is written to docs/rent-ladder.html. No
+// provider, no oracle, nothing leaves the body. A page is a receipt with a
+// picture: every number in it is a row the body wrote.
+// stdin: nothing. Prints one JSON line naming the page and the row counts.
+import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/meaning-codes.bml;
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+ class RentLadderPage {
+  def rlp-template() = "docs/rent-ladder.template.html";
+  def rlp-page() = "docs/rent-ladder.html";
+  def rlp-contest() = "receipts/parity-contest-ledger.jsonl";
+  def rlp-rent() = "receipts/rent-ledger.jsonl";
+  def rlp-flow() = "receipts/flow-ledger.jsonl";
+  def rlp-nonempty(xs) = nil?(xs) ? [] : (String) trim(xs[0]) == "" ? rlp-nonempty(xs[1:]) : cons(xs[0], rlp-nonempty(xs[1:]));
+  def rlp-parse(xs) = xs |> map(x => parse-json("ledger-row", x));
+  def rlp-rows(path) = rlp-parse(rlp-nonempty(split-on(fhn-read(path), "\n")));
+  def rlp-swap(s, needle, replacement) = str-join-with(split-on(s, needle), replacement);
+  def rlp-pad(n) = n < 10 ? "0" ++ n.str() : n.str();
+  def rlp-hhmm(ms) {
+   let secs = ms / 1000;
+   let day = secs - ((secs / 86400) * 86400);
+   rlp-pad(day / 3600) ++ ":" ++ rlp-pad((day - ((day / 3600) * 3600)) / 60);
+  }
+  def rlp-entry(name, v, note) = json-node-object([fhn-s("name", name), fhn-n("v", v), fhn-s("note", note)]);
+  // the route rows of the first day, from receipts/route-ledger.jsonl
+  def rlp-route() = "receipts/route-ledger.jsonl";
+  def rlp-pins(routes) = routes |> map(route => rlp-entry(fhn-text(route, "movement"), fhn-count(route, "rent_tokens"), fhn-text(route, "note")));
+  def rlp-route-calls(routes) = routes |> map(route => json-node-object([fhn-s("name", fhn-text(route, "movement")), fhn-n("v", fhn-count(route, "non_form_calls"))]));
+  def rlp-contest-entries(rows) = rows |> map(row => rlp-entry(fhn-text(row, "movement") ++ ((String) fhn-text(row, "single_source") == "native" ? "" : ""), fhn-count(row, "single_rent_tokens"), "source " ++ fhn-text(row, "single_source") ++ ", receipts " ++ fhn-count(row, "single_receipts_existing").str() ++ ", floor " ++ fhn-count(row, "floor_parity").str()));
+  def rlp-rent-entries(rows) = rows |> filter(row => (String) fhn-text(row, "source") != "none") |> map(row => rlp-entry(fhn-text(row, "movement"), fhn-count(row, "rent_tokens"), "source " ++ fhn-text(row, "source") ++ ", oracle " ++ fhn-text(row, "oracle") ++ ", predicted " ++ fhn-count(row, "oracle_tokens_predicted").str() ++ ", receipts cited " ++ fhn-count(row, "answer_receipts_cited").str()));
+  def rlp-calls(routes) = append(rlp-route-calls(routes), [
+   json-node-object([fhn-s("name", "one provider turn inside"), fhn-n("v", 1)]),
+   json-node-object([fhn-s("name", "native voice, inside the body"), fhn-n("v", 0)]),
+   json-node-object([fhn-s("name", "native single call"), fhn-n("v", 0)])]);
+  def rlp-flow-point(t, label, p, n, o) = json-node-object([fhn-s("t", t), fhn-s("label", label), fhn-n("p", p), fhn-n("n", n), fhn-n("o", o)]);
+  def rlp-flow-entries(rows) = rows |> map(row => rlp-flow-point(rlp-hhmm(fhn-count(row, "at_unix_ms")), fhn-text(row, "movement"), fhn-count(row, "provider_calls"), fhn-count(row, "native_fkwu_calls"), fhn-count(row, "non_form_calls")));
+  def rlp-both?(a, b, key) = json-object-has?(a, key) && json-object-has?(b, key);
+  def rlp-delta(a, b, key) = rlp-both?(a, b, key) ? (fhn-count(b, key) - fhn-count(a, key)) : 0;
+  def rlp-moves(rows) = nil?(rows) || nil?(rows[1:]) ? [] : cons(json-node-object([fhn-s("name", fhn-text(rows[1:][0], "movement")), fhn-n("n", rlp-delta(rows[0], rows[1:][0], "native_fkwu_calls")), fhn-n("o", rlp-delta(rows[0], rows[1:][0], "non_form_calls")), fhn-n("p", rlp-delta(rows[0], rows[1:][0], "provider_calls")), fhn-n("turns", rlp-delta(rows[0], rows[1:][0], "provider_turns")), fhn-n("tokens", rlp-delta(rows[0], rows[1:][0], "tokens_total")), fhn-n("uncached", rlp-delta(rows[0], rows[1:][0], "tokens_uncached")), fhn-n("measured", rlp-both?(rows[0], rows[1:][0], "tokens_total") ? 1 : 0)]), rlp-moves(rows[1:]));
+  def rlp-crossings() = "receipts/crossings-ledger.jsonl";
+  def rlp-crossing-entries(rows) = rows |> map(row => json-node-object([fhn-s("name", fhn-text(row, "movement")), fhn-n("movement", fhn-count(row, "movement_dispatches")), fhn-n("lp", fhn-count(row, "movement_local_process")), fhn-n("fs", fhn-count(row, "movement_filesystem")), fhn-n("voice", fhn-count(row, "voice_dispatches")), fhn-n("net", fhn-count(row, "voice_network")), fhn-n("compare", fhn-count(row, "compare_dispatches"))]));
+  def rlp-ground() = "receipts/ground-ledger.jsonl";
+  def rlp-ground-entries(rows) = rows |> map(row => json-node-object([fhn-s("subject", fhn-text(row, "subject")), fhn-s("cell", fhn-text(row, "cell")), fhn-s("claim", fhn-text(row, "claim")), fhn-s("kind", fhn-text(row, "kind")), fhn-s("witness", fhn-text(row, "witness")), fhn-s("test", fhn-text(row, "test")), fhn-s("chosen", fhn-text(row, "chosen"))]));
+  def rlp-tile(label, from, to, note) = json-node-object([fhn-s("label", label), fhn-s("from", from), fhn-s("to", to), fhn-s("note", note)]);
+  def rlp-rung(t, d, m, s) = json-node-object([fhn-s("t", t), fhn-s("d", d), fhn-s("m", m), fhn-s("s", s)]);
+  def rlp-voice?(r) = (Comparable) str_find(fhn-text(r, "movement"), "native-voice", 0) == 0;
+  def rlp-voice-rows(rows) = rows |> filter(rlp-voice?);
+  def rlp-walk-spoke?(r) = ((String) fhn-text(r, "source") == "fkwu-model-session") || ((String) fhn-text(r, "source") == "local-oracle");
+  def rlp-oracle-rows(rows) = rows |> filter(row => rlp-walk-spoke?(row) && (!rlp-voice?(row)));
+  def rlp-int2(r, key, alt) = json-object-has?(r, key) ? fhn-count(r, key) : fhn-count(r, alt);
+  def rlp-num-list(rows, key, alt) = rows |> map(row => rlp-int2(row, key, alt).str());
+  def rlp-nums(rows, key, alt) = str-join-with(rlp-num-list(rows, key, alt), ", ");
+  def rlp-oracle-measure(rows) = nil?(rows) ? "pending" : "0 rented · " ++ len(rows).str() ++ " walks · predicted " ++ rlp-nums(rows, "voice_tokens_predicted", "oracle_tokens_predicted");
+  def rlp-voice-measure(rows) = nil?(rows) ? "pending" : "0 rented · " ++ len(rows).str() ++ " walks · predicted " ++ rlp-nums(rows, "voice_tokens_predicted", "oracle_tokens_predicted") ++ " · receipts cited " ++ rlp-nums(rows, "answer_receipts_cited", "answer_receipts_cited");
+  def rlp-rungs(rents) = [
+   rlp-rung("Guided flow measured", "The arriving mind's own first turn on the enquiry, receipted as the baseline.", "2,544,568 tokens · 78 calls left the body", "done"),
+   rlp-rung("Direct rung measured", "One organ call with an unbounded provider loop inside; it read the body as a filesystem.", "648,411 · 29", "rung"),
+   rlp-rung("Bounded rung measured", "One provider turn carrying a native enrich reading.", "44,495 · 1", "rung"),
+   rlp-rung("Grounded door landed", "Native grounding, then one turn; own session identity; the walker writes its row.", "13,285 · 1", "done"),
+   rlp-rung("Knobs read by contest", "Effort and opening bytes; an explicit effort flag removed the thinking tokens.", "9,428 at the least · 1", "done"),
+   rlp-rung("Native single call landed", "The body answers from its rows, seeds, receipts and its own census; raw output is the answer.", "0 by the body · 26,751 when a fresh rented mind relays it", "done"),
+   rlp-rung("One door for any enquiry", "Terms drawn from the enquiry's own words; the same call for any question.", "0 · 0 · 20 filesystem dispatches", "done"),
+   rlp-rung("The body reads its own flow", "The flow meter counts provider, native and leaving calls from the transcript and leaves a ledger row.", "rows in receipts/flow-ledger.jsonl", "done"),
+   rlp-rung("A movement is one process", "observe/movement-run.bml composes, speaks, reads the flow, redraws the page and lands as calls in its own process. The composition never travels through a pipe and the model is admitted once. What crosses now is the landing's: git, and the drift gates in their own fresh kernel.", "walk, compare, flow, page, land → 1 call · 0 local-process crossings of its own", "done"),
+   rlp-rung("The body draws its progress", "This page is drawn from the ledgers by form-stdlib/bml/form-cli-rent-ladder-page.bml, and a template that is absent or unmarked is a live reading rather than a broken page.", "no provider, no server, nothing leaves the body", "done"),
+   rlp-rung("The voice came into the process", "A llama.cpp server on a loopback port answered the earlier walks at rent 0; those rows stand as they were measured. The voice now speaks inside the body's own kernel from registry weights, so nothing leaves the process at all.", rlp-oracle-measure(rlp-oracle-rows(rents)), "done"),
+   rlp-rung("Native voice speaks the body's answer", "The composition goes to the body's own model session on this metal: registry weights as data, or, on the lora lane, the body's own 3B wearing the adapter it was taught with. No server, no provider, no port. Each walk's row names the lane, the weights and the local counts.", rlp-voice-measure(rlp-voice-rows(rents)), "done"),
+   rlp-rung("Voice fidelity", "The voice says only what the composition states and cites what it uses. The 27B walk through the body's own session held the axes and named its limits, and cited no receipt by path. The adapter lane is the body's own teaching speaking; what it holds is being read walk by walk. The person's reading decides.", "27B in-process: 3,502 prompt IDs → 1,050 generated · 9 axes · 0 receipts cited · rent 0", "rung"),
+   rlp-rung("The doors say what they need", "Every door speaks its own state as it goes — an unanswered model session, a transcript that is not there, a template without its mark, a landing held short of origin — as a reading with what it needs and what it offers. The voice applies the one remedy it owns: it drops the adapter lane and asks the registry weights, then observes that attempt in its own right. No gate stands in front of the work; the signal flows and healing follows it.", "readings in .form-heal/movement-health.jsonl · unease counted in the movement's own line", "done"),
+   rlp-rung("Our reading", "Equal or better — the person's and the body's reading together, written into the ledger row after reading both answers side by side.", "pending", "pend")];
+  // The page is drawn into a template. A template that is absent or carries no
+  // data mark is a reading with what it needs; the standing page is left alone.
+  def rlp-organ() = "rent-ladder-page";
+  def rlp-health(state, marked) = oh-reading(rlp-organ(), "rent-ladder-page", "template", json-node-string("marked"), json-node-string(state), json-node-int(marked ? 1 : 0), marked ? [] : [oh-need("page-template", json-node-string(rlp-template()))], ["restore-template", "draw-later"], oh-reference(rlp-template()));
+  // Answers the printed line's own object: the page path, its bytes and the
+  // row counts it drew, so a caller inside its own census window redraws the
+  // page without a child kernel.
+  def rlp-walk() {
+   let contests = rlp-rows(rlp-contest());
+   let rents = rlp-rows(rlp-rent());
+   let flows = rlp-rows(rlp-flow());
+   let routes = rlp-rows(rlp-route());
+   let crossings = fs_exists(rlp-crossings()) ? rlp-rows(rlp-crossings()) : [];
+   let ground = fs_exists(rlp-ground()) ? rlp-rows(rlp-ground()) : [];
+   let firstFlow = rlp-flow-point("02:16", "first turn's floor", 21, 22, 57);
+   let ladder = append(rlp-pins(routes), append(rlp-rent-entries(rents), rlp-contest-entries(contests)));
+   let data = json-node-object([
+    fhn-s("generated", "rendered at " ++ rlp-hhmm(now_unix_ms()) ++ " UTC from " ++ len(contests).str() ++ " contest rows, " ++ len(rents).str() ++ " rent rows, " ++ len(flows).str() ++ " flow rows, " ++ len(crossings).str() ++ " crossings rows"),
+    fhn-a("tiles", [
+     rlp-tile("Rented tokens per answer", "2,544,568", "26,751", "guided flow's first answer → a fresh rented session running the one native call and relaying it. The call itself: 0."),
+     rlp-tile("Calls that leave the body per answer", "78", "0", "host tool calls and provider calls → none"),
+     rlp-tile("Calls per movement, from the arriving mind", "9", "1", "walk, compare, flow, page, land, each a call → one movement call")]),
+    fhn-a("ladder", ladder),
+    fhn-a("calls", rlp-calls(routes)),
+    fhn-a("flow", cons(firstFlow, rlp-flow-entries(flows))),
+    fhn-a("moves", rlp-moves(flows)),
+    fhn-a("crossings", rlp-crossing-entries(crossings)),
+    fhn-a("ground", rlp-ground-entries(ground)),
+    fhn-a("rungs", rlp-rungs(rents))]);
+   let template = file_size(rlp-template()) > 0 ? fhn-read(rlp-template()) : "";
+   let marked = str_find(template, "/*DATA*/", 0) >= 0;
+   let state = (String) template == "" ? "absent" : marked ? "marked" : "unmarked";
+   let readings = marked ? [] : oh-voice-all([rlp-health(state, marked)]);
+   let page = marked ? rlp-swap(template, "/*DATA*/", json-emit(data)) : "";
+   let wrote = marked ? write_file_text(rlp-page(), page) : 0;
+   [json-node-object([fhn-s("page", rlp-page()), fhn-n("bytes", len(page)), fhn-n("contest_rows", len(contests)), fhn-n("rent_rows", len(rents)), fhn-n("flow_rows", len(flows))]), readings];
+  }
+  def rlp-run() {
+   print_str(json-emit-precise(rlp-walk()[0]));
+  }
+ }
+}

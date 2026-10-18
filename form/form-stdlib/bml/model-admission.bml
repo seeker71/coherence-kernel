@@ -1,0 +1,175 @@
+//////////////////////////////////////////////////////////////////////
+// model-admission.bml — large weight loads queue; decode does not. The GPU and the weights are shared.
+//
+// Loads are ordered until their memory is reserved; decode and prefill can proceed together. The session's atomic
+// memory lease accounts for shared weights and private context before allocation. Admission's live framebuffer
+// reading carries its reason, required bytes, available bytes, wired bytes and total memory.
+//
+//   queue   a ticket per large load, oldest first. A ticket is admitted only when it is first in line AND the OS reports
+//           headroom for the bytes the load would add. A live matching memory lease lets the next load proceed while
+//           this owner opens or prefills; the atomic session lease still checks every allocation. The ticket remains
+//           until the open completes (adm-loaded),
+//           so the next load can begin while this one decodes; a ticket whose process is gone is cleared as it is met.
+//   shared  a file another live process already maps costs the asker its context, not the weights again: the pages are the
+//           OS's, shared by every mapper. A file nobody maps costs its bytes, and must leave the reserve free.
+//
+//   adm-admit(door, path, wait_ms)   [1, line, ticket] when admitted, [0, line, ""] naming why not once wait_ms has passed
+//   adm-loaded(ticket)               the open is complete (or refused): free the load slot, keep the residency note
+//   adm-drop(path)                   the session is closed: one line of this process's residency note goes
+//   adm-wait-ms()                    the turn's wait, FORM_MODEL_ADMISSION_WAIT_MS (ten minutes when unset)
+//
+// It stands at the one place every model session is opened (fcms-open-sized, form-cli-model-session.fk), so the voice, the
+// code lane, learning, prompt lookup and every probe queue alike. A process holding several sessions keeps one note line
+// per file; a file this process already holds is shared with itself, never waited on.
+//
+// Room is the memory governor's to say (memory-governor.bml reads Mach's own count of every process's pages): this queue
+// supplies the order, the shared-file rule and the lease the governor lists as pending, since loads are admitted one at a
+// time and the next sees the pages of the one before. Decode contention is the GPU time-slicing between live
+// processes; batching many requests through one resident owner is the next structural step (the body's resident owner,
+// observe/native-model-dual-resident-live-run.fk, is its seed).
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/bml/parse.bml form-stdlib/bml/order.bml form-stdlib/bml/memory-governor.bml form-stdlib/dsv4-lease.fk form-stdlib/bml/host-fs.bml
+section [form.bml] {
+ class ModelAdmission {
+  // ---- the queue on disk: one directory per ticket, named by when and by whom, so byte order is arrival order ---------
+  def adm-home() = trim(hfs-home());
+  def adm-root() = adm-home() ++ "/.cache/form-model";
+  def adm-queue(root) = root ++ "/queue";
+  def adm-resident(root) = root ++ "/resident";
+  def adm-zeros(k) = k <= 0 ? "" : ("0" ++ adm-zeros(k - 1));
+  def adm-pad(n) = adm-zeros(15 - len(int_to_str(n))) ++ int_to_str(n);
+  def adm-name(stamp, pid) = adm-pad(stamp) ++ "-" ++ int_to_str(pid);
+  def adm-name-pid(name) {
+   let at = str_find(name, "-", 0);
+   at < 0 ? nothing() : parse-int(substring(name, at + 1, len(name)));
+  }
+  def adm-alive?(pid) = !nothing?(pid) && ((Comparable) host_alive(pid) == 1);
+  def adm-dirs(root) {
+   let a = host_dir_mkdir(root);
+   let b = host_dir_mkdir(adm-queue(root));
+   host_dir_mkdir(adm-resident(root));
+  }
+  // the tickets still waiting, oldest first; one whose process is gone is cleared as it is met
+  // a ticket is held for the wait and the open, minutes at most; one older than an hour belongs to a process that stopped
+  // between its admission and the end of its open and is still alive (a long walk), and must not block every load behind it
+  def adm-ticket-ttl-ms() = 3600000;
+  def adm-name-stamp(name) {
+   let at = str_find(name, "-", 0);
+   at < 0 ? nothing() : parse-int(substring(name, 0, at));
+  }
+  def adm-ticket-live?(name, now) = adm-alive?(adm-name-pid(name)) && ((now - (adm-name-stamp(name) ?? now)) < adm-ticket-ttl-ms());
+  def adm-tickets(root) {
+   let names = (Comparable) fs_is_dir(adm-queue(root)) == 1 ? sort-strings(fs_list(adm-queue(root))) : [];
+   let now = now_unix_ms();
+   let swept = names |> filter(n => !adm-ticket-live?(n, now)) |> map(n => host_dir_rmdir(adm-queue(root) ++ "/" ++ n));
+   names |> filter(n => adm-ticket-live?(n, now));
+  }
+  def adm-enter-at(root, pid, now) {
+   let dirs = adm-dirs(root);
+   let name = adm-name(now, pid);
+   let made = host_dir_mkdir(adm-queue(root) ++ "/" ++ name);
+   name;
+  }
+  // A verified memory reservation permits the next load to proceed while its
+  // owner opens or prefills. Keep that owner's ticket and continuation intact.
+  def adm-load-reserved?(root,pid,leases) = any?(r=>r[0]==pid && r[3]+r[4]>0 && any?(path=>trim(path)==r[2],adm-note-lines(root,pid)),leases);
+  def adm-position(root,ticket) = adm-position-with(root,ticket,mg-lease-view(mg-lease-dir()));
+  def adm-position-with(root, ticket, leases) {
+   let live = adm-tickets(root);
+   let hits = (0 .. len(live)) |> filter(i => live[i] == ticket);
+   nil?(hits) ? nothing() : len(live[0:hits[0]] |> filter(name=>!adm-load-reserved?(root,adm-name-pid(name),leases)));
+  }
+  // ---- what is already resident: one note per live process, naming the file it holds ----------------------------------
+  // a process may hold several sessions: its note is one line per file it holds, and a close drops one line
+  def adm-note-path(root, pid) = adm-resident(root) ++ "/" ++ int_to_str(pid);
+  def adm-note-lines(root, pid) = split-on(read_file(adm-note-path(root, pid)) ?? "", "\n") |> filter(line => len(trim(line)) > 0);
+  def adm-note-add(root, pid, path) = write_file_text(adm-note-path(root, pid), str-join-with(append(adm-note-lines(root, pid), [path]), "\n"));
+  def adm-without-one(lines, path) = nil?(lines) ? [] : (lines[0] == path ? lines[1:] : cons(lines[0], adm-without-one(lines[1:], path)));
+  def adm-note-drop(root, pid, path) {
+   let kept = adm-without-one(adm-note-lines(root, pid), path);
+   nil?(kept) ? host_path_remove(adm-note-path(root, pid)) : write_file_text(adm-note-path(root, pid), str-join-with(kept, "\n"));
+  }
+  def adm-residents(root) {
+   let names = (Comparable) fs_is_dir(adm-resident(root)) == 1 ? fs_list(adm-resident(root)) : [];
+   let swept = names |> filter(n => !adm-alive?(parse-int(n))) |> map(n => host_path_remove(adm-resident(root) ++ "/" ++ n));
+   names |> filter(n => adm-alive?(parse-int(n))) |> map(n => [parse-int(n), adm-note-lines(root, parse-int(n))]);
+  }
+  // the file is already held by a live process, this one included: its pages are the OS's, shared, not loaded again
+  def adm-peer-resident?(root, pid, path) = adm-residents(root) |> any?(r => r[1] |> any?(line => trim(line) == path));
+
+  // ---- the decision ----------------------------------------------------------------------------------------------------------
+  // What a load takes beyond the page cache: the weights are one physical copy however many processes map them (measured
+  // 2026-10-02, a second mapper of a 6 GiB file added 0.0 GiB), so a file a live process already holds costs only the
+  // session's own KV state and scratch. A caller that has read the geometry passes
+  // those bytes; everyone else is asked the unread margin.
+  def adm-need(bytes, held) = adm-need-for(bytes, held, 0);
+  def adm-need-for(bytes, held, own) = (held ? 0 : bytes) + (own > 0 ? own : mg-kv-margin());
+  // [1, line] admitted: first in line and the machine has room (the memory governor, memory-governor.bml, is the one
+  // authority on room: it reads every process's pages); [0, line] still waiting, with the reason
+  def adm-try-at(root, ticket, door, pid, path, bytes, granted, reason, held) {
+   let at = adm-position(root, ticket);
+   nothing?(at) ? [0, door ++ " has no ticket in the queue"] :
+   at > 0 ? [0, door ++ " queued at " ++ int_to_str(at + 1) ++ " of " ++ int_to_str(len(adm-tickets(root))) ++ ": a load is ahead of it"] :
+   !granted ? [0, door ++ " waits for memory: " ++ reason] :
+   adm-admitted(root, door, pid, path, held);
+  }
+  def adm-admitted(root, door, pid, path, peerMapped) {
+   let noted = adm-note-add(root, pid, path);
+   [1, door ++ " admitted, pid " ++ int_to_str(pid) ++ (peerMapped ? " (the weights are already held by a live process: shared)" : "")];
+  }
+  def adm-loaded-at(root, ticket) = host_dir_rmdir(adm-queue(root) ++ "/" ++ ticket);
+
+  // ---- who else holds the file -----------------------------------------------------------------------------------------------
+  // another live process maps this very file: its pages are shared, not loaded again
+  // (host_file_holders: the live processes that hold the file open, by device and inode; nothing() when the path does not stat)
+  def adm-peers-of(holders, pid) = (String) value_kind(holders) != "list" ? [] : holders |> filter(p => !nothing?(p) && (p != pid) && adm-alive?(p));
+  def adm-peers(path, pid) = adm-peers-of(host_file_holders(path), pid);
+  // the file is held by some other live process, by its notes or by the OS's own list of who has it open
+  def adm-held-elsewhere?(root, pid, path) = (adm-residents(root) |> any?(r => (r[0] != pid) && (r[1] |> any?(line => trim(line) == path)))) || !nil?(adm-peers(path, pid));
+
+  // ---- the process's own turn in the queue -----------------------------------------------------------------------------------
+  def adm-wait-at(root, ticket, door, pid, path, bytes, deadline, own) {
+   let held = adm-peer-resident?(root, pid, path) || !nil?(adm-peers(path, pid));
+   let verdict = mg-ask(adm-need-for(bytes, held, own));
+   let tried = adm-try-at(root, ticket, door, pid, path, bytes, mg-granted?(verdict), verdict[1], held);
+   fb_record(intern_node(intern_trivial_string("model-admission"),[intern_trivial_string(tried[1]),intern_trivial_int(tried[0]),intern_trivial_int(adm-need-for(bytes,held,own)),intern_trivial_int(verdict[2]),intern_trivial_int(verdict[3]),intern_trivial_int(verdict[4])]),"model-admission.bml",0);
+   tried[0] == 1 ? tried : (now_unix_ms() >= deadline ? tried : adm-pause(root, ticket, door, pid, path, bytes, deadline, own));
+  }
+  // for the open's own governor ask: the weights cost nothing when another process holds the file, or this process
+  // already holds it for an earlier session; this open's own note is one line, so two lines mean an earlier holder
+  def adm-held-already?(path) = adm-held-elsewhere?(adm-root(), host_pid(), path) || (len(adm-note-lines(adm-root(), host_pid()) |> filter(line => trim(line) == path)) >= 2);
+  def adm-pause(root, ticket, door, pid, path, bytes, deadline, own) {
+   let slept = host_sleep_ms(2000);
+   adm-wait-at(root, ticket, door, pid, path, bytes, deadline, own);
+  }
+  // how long an open waits its turn: FORM_MODEL_ADMISSION_WAIT_MS, ten minutes when unset; 0 asks once
+  def adm-wait-ms() = hfs-env-int("FORM_MODEL_ADMISSION_WAIT_MS", 600000);
+  // [1, line, ticket] admitted (hold the ticket until the open completes, then adm-loaded-at), [0, line, ""] not admitted.
+  // A file that is not there has no weights to admit; the open that follows says so itself.
+  // The bytes asked for are dls-weights-bytes(path) (dsv4-lease.fk): the file's size for every file but a DeepSeek-V4 GGUF, whose weights are mapped and
+  // touched in part, so its ask is the derived working set (dense tensors + an expert cache + KV), derived and not measured, and not its 80 GiB.
+  def adm-admit(door, path, wait_ms) = adm-admit-for(door, path, wait_ms, 0);
+  // own is the session's scratch and KV when the caller has derived it.
+  // Zero keeps the unread margin.
+  def adm-admit-for(door, path, wait_ms, own) {
+   let root = adm-root();
+   let pid = host_pid();
+   let bytes = dls-weights-bytes(path);
+   bytes <= 0 ? [1, door ++ " has no weights file to admit", ""] :
+   adm-note-lines(root, pid) |> any?(line => trim(line) == path) ? [1, door ++ " shares weights this process already holds", ""] : adm-queued(root, door, pid, path, bytes, wait_ms, own, adm-enter-at(root, pid, now_unix_ms()));
+  }
+  def adm-queued(root, door, pid, path, bytes, wait_ms, own, ticket) {
+   let verdict = adm-wait-at(root, ticket, door, pid, path, bytes, now_unix_ms() + wait_ms, own);
+   verdict[0] == 1 ? [1, verdict[1], ticket] : adm-declined(root, ticket, verdict);
+  }
+  def adm-declined(root, ticket, verdict) {
+   let gone = adm-loaded-at(root, ticket);
+   [0, verdict[1], ""];
+  }
+  // the open is complete, or refused: the load slot frees. An empty ticket (nothing was queued) frees nothing.
+  def adm-loaded(ticket) = len(ticket) == 0 ? 0 : adm-loaded-at(adm-root(), ticket);
+  // the session is closed: one line of this process's residency note goes
+  def adm-drop(path) = len(path) == 0 ? 0 : adm-note-drop(adm-root(), host_pid(), path);
+ }
+ 0;
+}
