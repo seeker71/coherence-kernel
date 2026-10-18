@@ -1,0 +1,342 @@
+; form-token-lora-band.bml — the voice learns Form's in-stream controls by LoRA, read model-free.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/form-token-lora.bml form-stdlib/lora-backward.bml form-stdlib/lora-adapter.bml
+;
+; Fifteen trace lines in the shared contract's shape (four streams Form answered, eleven that break
+; it) are written by Form, converted into the native LoRA lane's segment rows with a fixture
+; replayer (Form asked again: eval 6*7 answers value=42;, eval 1+1 value=2;, every other control
+; cannot be asked twice) and read back through the lane's own door (nld-prepare) with a
+; byte-level fixture tokenizer: the real splitter, the real Unicode categories, no merges. The
+; Qwen head's opening fit is solved on a small synthetic head and its adapter is written as
+; safetensors by Form and read back.
+;
+; Verdict 32767 when every claim lands:
+;   1    a stream reads into prose, control, observation, prose spans, the verb and the answer exact
+;   2    the eleven refusals carry their reasons: control-unanswered, no-control, row (a line that is no Form row),
+;        observation-without-control, unknown-verb:shell, off-contract-result (an answer that is
+;        no RESULT), observation-mismatch (6*7 recorded as value=41;), mark-in-payload (a nested
+;        open; a foreign close), unknown-verb:eval x, off-contract-result (a three-part node);
+;        none stops the reading of the others. With no replayer the mismatched row is admitted
+;        and counted unverified, never trusted
+;   4    the census: 15 lines, 4 admitted, 11 refused, five verbs once each, 5 observations masked,
+;        1 replayed and 4 unverified, 3 train rows and 1 held out, nothing short; census.rows,
+;        train.rows and valid.rows read back whole, every observation and seam span carrying
+;        supervise 0, every control and prose span 1; the held-out row reads control, seam,
+;        observation, prose (the blank between a control and its answer is Form's seam: the
+;        voice yields at the close)
+;   8    through nld-prepare (the trainer's door): every observation and seam target is masked,
+;        every control target supervised, the prompt masked, and the decoded row carries the stream
+;   16   with prompt masking off the prompt becomes a target and the observation still is not
+;   32   sites: one positive per control, none right after a control or before an observation
+;   64   the opening fit: no site opens before; after the rank-one adapter every opening site's
+;        argmax is the opening token, every other site keeps its winner, and A·h reads the labels
+;   128  the fitted A and B written as a safetensors adapter by Form and read back to f32
+;   256  a segment row of one prose span is the chat row's sample, token for token and mask for mask
+;   512  the selective emitter: on a head whose row 3 leans on the opening's row twice over, the
+;        plain emitter lets row 3 steal an opening; the head's view of B names row 3 as the first
+;        rival, and B with the rival's direction taken out opens all three sites, opens none
+;        elsewhere, and lifts row 3 by nothing
+;   1024 a segment's mark: an observation or a seam is masked whatever its flag says or when it
+;        has none; prose and control are taught unless marked 0; a span with neither a known role
+;        nor a mark, or with a mark that is not 0 or 1, stops its row; a segment row whose
+;        observation carries no flag reaches the trainer masked
+;   2048 the writes read back: data two levels deep is made level by level and the census is
+;        ready; data under a file is refused whole — no-directory and every file write-short —
+;        and ready reads 0
+;   4096 what a fit knows: on 18 sites in 32 dimensions the detector scores the openings it was
+;        fitted on near 1 for the true labels and for scrambled ones alike (the shape, not a
+;        sense); held out, sites with no planted direction stay under the floor 63 scrambles
+;        reach and sites with one stand above it; a held-out split with one opening (the
+;        review's meaningless labels on 15 sites, which cleared a 15-scramble floor) is not
+;        measured; a scramble keeps the count of openings; two groups hold out the second, one
+;        group holds out none
+;   8192 the control IDs: the bare opening, the eight contract verbs in order, nothing outside;
+;        after the bare opening, a contract verb passes, an "observation" or any other verb is
+;        answered in place with nothing=observations-come-from-form; or nothing=unknown-verb:V;
+;  16384 a corpus that names its split, written the trace corpus's way (a completion holding only the first
+;        control, a stream holding the whole reply): every row is read from its stream and admitted; the
+;        rows marked heldout are held out and never taught, the rest are taught in a stride through the
+;        list (four rows go out t0, t5, t3, t2), so a short run still meets every family; the first
+;        taught row reaches the trainer's door with supervised targets; the Qwen head's sites come from the
+;        rows that are not held out (twelve sites from q0, q2, q3 and q5, none from q1 or q4); a stride is the first of the
+;        listed primes below the length and coprime with it, 1 when none is
+section [form.bml] {
+ class FormTokenLoraBand {
+  def ftlb-bit(ok, bit) = ok ? bit : 0;
+  // ---- the byte-level fixture tokenizer ----
+  def ftlb-bytes(b, acc) = b < 0 ? acc : ftlb-bytes(b - 1, cons(b, acc));
+  def ftlb-specials() = [["<|begin_of_text|>", 256], ["<|end_of_text|>", 257], ["<|start_header_id|>", 258], ["<|end_header_id|>", 259], ["<|eot_id|>", 260]];
+  def ftlb-tk() {
+   let bytes = ftlb-bytes(255, []);
+   let vocab = foldl((t, b) => record_set(t, nlt-symbol(b), b), record_new(0), bytes);
+   let decoder = foldl((t, b) => record_set(t, md-le32(b), nlt-symbol(b)), record_new(0), bytes);
+   let specials = foldl((t, r) => record_set(t, r[0], r[1]), record_new(0), ftlb-specials());
+   let added = foldl((t, r) => record_set(t, md-le32(r[1]), r[0]), record_new(0), ftlb-specials());
+   let categories = nlt-category-lines(split-on(read_file("form/form-stdlib/data/DerivedGeneralCategory-15.1.0.txt"), byte_to_str(10)), []);
+   [vocab, decoder, record_new(0), specials, categories, "fixture", added];
+  }
+  // ---- the fixture traces, written by Form ----
+  def ftlb-o(pairs) = frw-emit(frb-of-node(json-node-object(pairs)));
+  def ftlb-msg(role, text) = json-node-object([ftlr-s("role", role), ftlr-s("content", text)]);
+  def ftlb-c1() = "Let me compute. <|form:eval|>6*7<|/form:eval|><|form:observation|>value=42;<|/form:observation|> It is 42.";
+  def ftlb-c2() = "<|form:recipe-birth|>affine-i32;mul=3;add=7<|/form:recipe-birth|><|form:observation|>recipe=@1.2.3.4;<|/form:observation|> <|form:recipe-exec|>@1.2.3.4;input=5;carrier=metal<|/form:recipe-exec|><|form:observation|>value=22;<|/form:observation|> The recipe answers 22.";
+  def ftlb-c3() = "<|form:knowledge-query|>current floor<|/form:knowledge-query|><|form:observation|>nothing=no-grounded-row;<|/form:observation|> I hold no grounded row for that.";
+  def ftlb-c4() = "<|form:node-select|>even?;@1.0.0.1,@1.0.0.2<|/form:node-select|> <|form:observation|>node=@1.0.0.2;<|/form:observation|> The second one holds.";
+  def ftlb-lines() = [
+   ftlb-o([ftlr-s("prompt", "What is 6 times 7?"), ftlr-s("completion", ftlb-c1())]),
+   ftlb-o([json-node-pair("messages", json-node-array([ftlb-msg("system", "You are Sema."), ftlb-msg("user", "Make a recipe that triples and adds seven, then run it on 5."), ftlb-msg("assistant", ftlb-c2())]))]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "<|form:eval|>1+1<|/form:eval|> two")]),
+   ftlb-o([ftlr-s("prompt", "Where is the floor named?"), ftlr-s("stream", ftlb-c3())]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "just prose")]),
+   "{not a row",
+   ftlb-o([ftlr-s("prompt", "Pick the first even node."), ftlr-s("completion", ftlb-c4())]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "<|form:observation|>value=1;<|/form:observation|> y")]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "<|form:shell|>rm -rf /<|/form:shell|><|form:observation|>value=0;<|/form:observation|> done")]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "<|form:eval|>6*7<|/form:eval|><|form:observation|>anything at all<|/form:observation|> ok")]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", ftlb-c11())]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "<|form:eval|>1+<|form:eval|>2<|/form:eval|><|form:observation|>value=3;<|/form:observation|> three")]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "<|form:eval|>1<|/form:observation|>2<|/form:eval|><|form:observation|>value=1;<|/form:observation|> one")]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "<|form:eval x|>1<|/form:eval x|><|form:observation|>value=1;<|/form:observation|> one")]),
+   ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", "<|form:node-make|>pair;1,2<|/form:node-make|><|form:observation|>node=@1.2.3;<|/form:observation|> made")])];
+  def ftlb-c11() = "<|form:eval|>6*7<|/form:eval|><|form:observation|>value=41;<|/form:observation|> It is 41.";
+  // Form asked again, as a fixture: two evals answer, every other control cannot be asked twice
+  def ftlb-answer(p) = (String) p[0] == "eval" && (String) p[1] == "6*7" ? "value=42;" : (String) p[0] == "eval" && (String) p[1] == "1+1" ? "value=2;" : nothing();
+  def ftlb-replay(pairs, recorded) = map(p => ftlb-answer(p), pairs);
+  def ftlb-root() = temp_dir() ++ "/form-token-lora-band-" ++ host_pid().str();
+  def ftlb-roles(spans) = map(s => s[0], spans);
+  // ---- bit 1 ----
+  def ftlb-spans-read() {
+   let r = ftlr-spans(ftlb-c1());
+   let s = r[1];
+   (String) r[0] == "ok" && (Value) ftlb-roles(s) == ["prose", "control", "observation", "prose"] && (String) s[1][1] == "eval" && (String) s[2][2] == "<|form:observation|>value=42;<|/form:observation|>" && (String) s[0][2] == "Let me compute. " && (String) ftlr-answered(s, 0) == "";
+  }
+  // ---- bit 2 ----
+  def ftlb-reasons(read) = map(r => r[1], filter(r => !ftlr-ok?(r), read));
+  def ftlb-refusals(read) {
+   let open = ftlr-read-line([ftlb-o([ftlr-s("prompt", "x"), ftlr-s("completion", ftlb-c11())]), 11]);
+   (Value) ftlb-reasons(read) == ["control-unanswered", "no-control", "row", "observation-without-control", "unknown-verb:shell", "off-contract-result", "observation-mismatch", "mark-in-payload", "mark-in-payload", "unknown-verb:eval x", "off-contract-result"] && (Value) map(r => r[0], read) == ["ok", "ok", "refused", "ok", "refused", "refused", "ok", "refused", "refused", "refused", "refused", "refused", "refused", "refused", "refused"] && (String) open[0] == "ok" && (Value) [open[4], open[5]] == [0, 1];
+  }
+  // ---- bit 4 ----
+  def ftlb-count(counts, key) = foldl((acc, c) => (String) c[0] == key ? c[1] : acc, 0, counts);
+  def ftlb-file-rows(path) = frb-nodes-of(path);
+  def ftlb-read?(role) = (String) role == "observation" || (String) role == "seam";
+  def ftlb-marks-held(rows) = foldl((acc, r) => acc && foldl((ok, s) => ok && (ftlb-read?(nld-string(s, "role")) ? (Comparable) node_value(json-object-get(s, "supervise")) == 0 : (Comparable) node_value(json-object-get(s, "supervise")) == 1), 1, json-array-elements(json-object-get(r, "segments"))), 1, rows);
+  def ftlb-roles-of(row) = map(s => nld-string(s, "role"), json-array-elements(json-object-get(row, "segments")));
+  def ftlb-census(c, data) {
+   let census = ftlb-file-rows(data ++ "/census.rows")[0];
+   let train = ftlb-file-rows(data ++ "/train.rows");
+   let valid = ftlb-file-rows(data ++ "/valid.rows");
+   let verbs = c[4];
+   (Value) [c[0], c[1], c[2], c[5], c[6], c[7], c[8], c[11], c[12]] == [15, 4, 11, 5, 3, 1, 1, 1, 4] && nil?(c[9]) && (String) c[10] == "fixture"
+   && (Comparable) len(verbs) == 5 && ftlb-count(verbs, "eval") == 1 && ftlb-count(verbs, "recipe-birth") == 1 && ftlb-count(verbs, "recipe-exec") == 1 && ftlb-count(verbs, "knowledge-query") == 1 && ftlb-count(verbs, "node-select") == 1
+   && ftlb-count(c[3], "mark-in-payload") == 2 && ftlb-count(c[3], "off-contract-result") == 2 && ftlb-count(c[3], "observation-mismatch") == 1
+   && (Comparable) node_value(json-object-get(census, "admitted")) == 4 && (Comparable) node_value(json-object-get(census, "observations_masked")) == 5
+   && (Comparable) node_value(json-object-get(census, "observations_replayed")) == 1 && (Comparable) node_value(json-object-get(census, "observations_unverified")) == 4 && (Comparable) node_value(json-object-get(census, "ready")) == 1
+   && (Comparable) node_value(json-object-get(json-object-get(census, "refusals"), "unknown-verb:shell")) == 1
+   && (Comparable) node_value(json-object-get(train[0], "observations_replayed")) == 1
+   && (Comparable) len(train) == 3 && (Comparable) len(valid) == 1 && (Comparable) node_value(json-object-get(valid[0], "source_line")) == 7
+   && ftlb-marks-held(train) && ftlb-marks-held(valid)
+   && (Value) ftlb-roles-of(valid[0]) == ["control", "seam", "observation", "prose"];
+  }
+  // ---- bit 8 and 16 ----
+  def ftlb-span-list(row) = map(s => [nld-string(s, "role"), "", nld-string(s, "text")], json-array-elements(json-object-get(row, "segments")));
+  def ftlb-masked-row(tk, row) {
+   let reading = ftlr-mask-reading(tk, row);
+   let spans = ftlb-span-list(row);
+   let obs = ftlr-role-total(tk, spans, "observation");
+   let ctl = ftlr-role-total(tk, spans, "control");
+   let seam = ftlr-role-total(tk, spans, "seam");
+   let sample = nld-row(tk, row, 1, 1);
+   let text = nlt-decode(tk, append(sample[0], [sample[1][len(sample[1]) - 1]]));
+   let completion = foldl((acc, s) => acc ++ s[2], "", spans);
+   obs > 0 && ctl > 0 && (Comparable) reading[2] == obs && (Comparable) reading[3] == ctl && (Comparable) reading[4] == seam && str_find(text, completion, 0) >= 0 && str_find(text, nld-string(row, "prompt"), 0) >= 0 && sample[2][0] == 0.0;
+  }
+  def ftlb-trainer-door(tk, data) {
+   let samples = nld-prepare(tk, nld-file(data ++ "/train.rows"), 1);
+   let rows = append(ftlb-file-rows(data ++ "/train.rows"), ftlb-file-rows(data ++ "/valid.rows"));
+   let seamed = ftlr-mask-reading(tk, rows[3]);
+   (Comparable) len(samples) == 3 && nld-weight(samples) > 0.0 && foldl((ok, r) => ok && ftlb-masked-row(tk, r), 1, rows) && (Comparable) seamed[4] == 1;
+  }
+  def ftlb-unmasked(tk, data) {
+   let row = ftlb-file-rows(data ++ "/train.rows")[0];
+   let masked = nld-row(tk, row, 1, 1);
+   let open = nld-row(tk, row, 0, 1);
+   let obs = ftlr-role-total(tk, ftlb-span-list(row), "observation");
+   let tail = drop(len(open[1]) - (len(ftlr-role-marks(tk, ftlb-span-list(row))) + 1), open[2]);
+   open[3] > masked[3] && (Comparable) ftlr-marked(ftlr-role-marks(tk, ftlb-span-list(row)), tail, "observation", 0.0) == obs && open[2][0] == 1.0;
+  }
+  // ---- bit 32 ----
+  def ftlb-sites(read) {
+   let ok = filter(r => ftlr-ok?(r), read);
+   let sites = foldl((acc, r) => append(acc, ftlr-row-sites(r)), [], ok);
+   let positives = len(filter(s => (Comparable) s[3] == 1, sites));
+   let controls = foldl((acc, r) => acc + ftlr-count(r[2], "control"), 0, ok);
+   let r2 = ftlr-row-sites(ok[1]);
+   positives == controls && (Value) map(s => s[3], r2) == [1, 0, 1, 0, 0] && (Value) map(s => s[4], filter(s => (Comparable) s[3] == 1, r2)) == ["recipe-birth", "recipe-exec"] && (Comparable) len(r2[0][2]) == 0 && (Comparable) len(r2[2][2]) == 3;
+  }
+  // ---- bit 64: a small synthetic head, d 8, vocabulary 6, opening token 1 ----
+  def ftlb-d() = 8;
+  def ftlb-v() = 6;
+  def ftlb-open() = 1;
+  def ftlb-row(j) = map(k => ((((j * 7) + (k * 3)) % 11) - 5) / 5.0, ftlb-bytes(ftlb-d() - 1, []));
+  def ftlb-w() = foldl((acc, j) => append(acc, ftlb-row(j)), [], ftlb-bytes(ftlb-v() - 1, []));
+  def ftlb-h(i) = map(k => (((((i * 7) + (k * 13)) + 3) % 17) - 8) / 4.0, ftlb-bytes(ftlb-d() - 1, []));
+  def ftlb-hs() = map(i => ftlb-h(i), [0, 1, 2, 3, 4, 5]);
+  def ftlb-ys() = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+  def ftlb-z(h) = lbw-mv(ftlb-w(), ftlb-v(), ftlb-d(), h);
+  def ftlb-fit() = lbw-of-fit(ftlb-hs(), ftlb-ys(), map(h => lbw-of-gap(ftlb-z(h), ftlb-open()), ftlb-hs()), ftlb-row(ftlb-open()), 0.000001, 1.0);
+  def ftlb-opens?(h, a, b) = (Comparable) lbw-of-argmax(ftlb-z(lbw-of-adapt(h, a, b, 1.0))) == ftlb-open();
+  def ftlb-opened(hs, ys, a, b) = foldl((acc, i) => acc + (if ((ys[i] > 0.5) && ftlb-opens?(hs[i], a, b)) then 1 else 0), 0, [0, 1, 2, 3, 4, 5]);
+  def ftlb-wrong(hs, ys, a, b) = foldl((acc, i) => acc + (if ((ys[i] < 0.5) && ftlb-opens?(hs[i], a, b)) then 1 else 0), 0, [0, 1, 2, 3, 4, 5]);
+  def ftlb-kept(hs, ys, a, b) = foldl((acc, i) => acc && (ys[i] > 0.5 || (Comparable) lbw-of-argmax(ftlb-z(lbw-of-adapt(hs[i], a, b, 1.0))) == lbw-of-argmax(ftlb-z(hs[i]))), 1, [0, 1, 2, 3, 4, 5]);
+  def ftlb-scores-read(scores, ys) = foldl((acc, i) => acc && abs(scores[i] - ys[i]) < 0.001, 1, [0, 1, 2, 3, 4, 5]);
+  def ftlb-opening-fit(fit) {
+   let hs = ftlb-hs();
+   let ys = ftlb-ys();
+   let before = foldl((acc, h) => acc + ((Comparable) lbw-of-argmax(ftlb-z(h)) == ftlb-open() ? 1 : 0), 0, hs);
+   let opened = ftlb-opened(hs, ys, fit[0], fit[1]);
+   let wrong = ftlb-wrong(hs, ys, fit[0], fit[1]);
+   let shown = print(["opening-fit", "before", before, "opened", opened, "wrong", wrong, "gain", fit[3], "scores", fit[2]]);
+   (Comparable) before == 0 && (Comparable) opened == 3 && (Comparable) wrong == 0 && ftlb-kept(hs, ys, fit[0], fit[1]) && ftlb-scores-read(fit[2], ys) && fit[3] > 0.0;
+  }
+  // ---- bit 512: a head whose row 3 leans on the opening's row twice over ----
+  def ftlb-w2() = append(take(3 * ftlb-d(), ftlb-w()), append(lbw-axpy-go(lbw-scale(ftlb-row(ftlb-open()), 2.0), ftlb-row(3), 0.1, []), drop(4 * ftlb-d(), ftlb-w())));
+  def ftlb-z2(h) = lbw-mv(ftlb-w2(), ftlb-v(), ftlb-d(), h);
+  def ftlb-opens2?(h, a, b) = (Comparable) lbw-of-argmax(ftlb-z2(lbw-of-adapt(h, a, b, 1.0))) == ftlb-open();
+  def ftlb-count2(hs, ys, a, b, positive) = foldl((acc, i) => acc + (if (((positive && ys[i] > 0.5) || ((!positive) && ys[i] < 0.5)) && ftlb-opens2?(hs[i], a, b)) then 1 else 0), 0, [0, 1, 2, 3, 4, 5]);
+  def ftlb-row2(j) = take(ftlb-d(), drop(j * ftlb-d(), ftlb-w2()));
+  def ftlb-selective() {
+   let hs = ftlb-hs();
+   let ys = ftlb-ys();
+   let plain = lbw-of-fit(hs, ys, map(h => lbw-of-gap(ftlb-z2(h), ftlb-open()), hs), ftlb-row(ftlb-open()), 0.000001, 1.0);
+   let first = lbw-of-rivals(lbw-mv(ftlb-w2(), ftlb-v(), ftlb-d(), plain[1]), ftlb-open(), 2, 0.5);
+   let refined = lbw-of-refine(ftlb-row(ftlb-open()), plain[3], plain[1], [], 4, b => lbw-of-rivals(lbw-mv(ftlb-w2(), ftlb-v(), ftlb-d(), b), ftlb-open(), 2, 0.5), j => ftlb-row2(j));
+   let b = refined[0];
+   let before = ftlb-count2(hs, ys, plain[0], plain[1], 1);
+   let opened = ftlb-count2(hs, ys, plain[0], b, 1);
+   let wrong = ftlb-count2(hs, ys, plain[0], b, 0);
+   let shown = print(["selective-emitter", "first-rivals", first, "rivals-taken", map(r => r[0], refined[1]), "plain-opened", before, "selective-opened", opened, "wrong", wrong, "opening-lift", lbw-dot-go(ftlb-row(ftlb-open()), b, 0.0), "row3-lift", lbw-dot-go(ftlb-row2(3), b, 0.0)]);
+   before < 3 && (Comparable) opened == 3 && (Comparable) wrong == 0 && (Comparable) first[0][0] == 3 && abs(lbw-dot-go(ftlb-row2(3), b, 0.0)) < 0.000001 && abs(lbw-dot-go(ftlb-row(ftlb-open()), b, 0.0) - plain[3]) < 0.000001;
+  }
+  // ---- bit 128 ----
+  def ftlb-close(xs, ys) = (Comparable) len(xs) == len(ys) && foldl((acc, i) => acc && abs(xs[i] - ys[i]) <= (0.000001 * abs(xs[i])) + 0.000000000001, 1, ftlb-bytes(len(xs) - 1, []));
+  def ftlb-artifact(fit, root) {
+   let path = root ++ "/opening.safetensors";
+   let wrote = ln-write(path, [["model.output.weight.lora_a", [ftlb-d(), 1], fit[0]], ["model.output.weight.lora_b", [1, ftlb-d()], fit[1]]]);
+   let c = la-census(path);
+   let h = la-header(path);
+   let a = ln-floats(path, la-header-len(path), ln-tensor-begin(h, "model.output.weight.lora_a"), ftlb-d());
+   let b = ln-floats(path, la-header-len(path), ln-tensor-begin(h, "model.output.weight.lora_b"), ftlb-d());
+   wrote > 0 && (Comparable) c[1] == 1 && (Comparable) c[2] == 1 && (String) c[3] == "f32" && (Comparable) c[7] == 1 && ftlb-close(fit[0], a) && ftlb-close(fit[1], b);
+  }
+  // ---- bit 256 ----
+  def ftlb-same-as-chat(tk) {
+   let chat = nld-node-of-line(ftlb-o([ftlr-s("prompt", "What is 6 times 7?"), ftlr-s("completion", "It is 42.")]), 1);
+   let seg = nld-node-of-line(ftlb-o([ftlr-s("prompt", "What is 6 times 7?"), json-node-pair("segments", json-node-array([json-node-object([ftlr-s("role", "prose"), ftlr-s("text", "It is 42."), ftlr-n("supervise", 1)])]))]), 1);
+   let a = nld-row(tk, chat, 1, 1);
+   let b = nld-row(tk, seg, 1, 1);
+   (Value) a[0] == b[0] && (Value) a[1] == b[1] && (Value) a[2] == b[2] && (Comparable) a[3] == len(nlt-encode(tk, "It is 42.")) + 1;
+  }
+  // ---- bit 1024 ----
+  def ftlb-mark(pairs) = try nld-segment-mark(nld-node-of-line(ftlb-o(pairs), 1), 3) else "stopped";
+  def ftlb-obs() = "<|form:observation|>value=1;<|/form:observation|>";
+  def ftlb-marks() = map(p => ftlb-mark(p), [
+   [ftlr-s("role", "observation"), ftlr-s("text", ftlb-obs())],
+   [ftlr-s("role", "observation"), ftlr-s("text", ftlb-obs()), ftlr-n("supervise", 1)],
+   [ftlr-s("role", "seam"), ftlr-s("text", " ")],
+   [ftlr-s("role", "prose"), ftlr-s("text", "x")],
+   [ftlr-s("role", "control"), ftlr-s("text", "<|form:eval|>1<|/form:eval|>")],
+   [ftlr-s("role", "prose"), ftlr-s("text", "x"), ftlr-n("supervise", 0)],
+   [ftlr-s("text", "x"), ftlr-n("supervise", 1)],
+   [ftlr-s("role", "note"), ftlr-s("text", "x")],
+   [ftlr-s("role", "prose"), ftlr-s("text", "x"), ftlr-s("supervise", "1")],
+   [ftlr-s("role", "prose"), ftlr-s("text", "x"), ftlr-n("supervise", 2)]]);
+  def ftlb-segment-marks(tk) {
+   let row = nld-node-of-line(ftlb-o([ftlr-s("prompt", "q"), json-node-pair("segments", json-node-array([json-node-object([ftlr-s("role", "prose"), ftlr-s("text", "It is ")]), json-node-object([ftlr-s("role", "observation"), ftlr-s("text", ftlb-obs())])]))]), 1);
+   let reading = ftlr-mask-reading(tk, row);
+   (Value) ftlb-marks() == [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, "stopped", "stopped", "stopped"] && (Comparable) reading[2] == len(nlt-encode(tk, ftlb-obs())) && (Comparable) reading[1] == len(nlt-encode(tk, "It is ")) + 1;
+  }
+  // ---- bit 2048 ----
+  def ftlb-writes(traces, root) {
+   let deep = ftlr-convert(traces, root ++ "/deep/er/data");
+   let under = ftlr-convert(traces, traces ++ "/data");
+   (Comparable) deep[8] == 1 && nil?(deep[9]) && (Comparable) file_size(root ++ "/deep/er/data/census.rows") > 0 && (Comparable) under[8] == 0 && (Value) under[9] == ["no-directory", "write-short:train.rows", "write-short:valid.rows", "write-short:census.rows"] && (Comparable) under[1] == 5 && (Comparable) under[11] == 0 && (Comparable) under[12] == 6;
+  }
+  // ---- bit 4096: 18 sites in 32 dimensions, an opening first in every row of three ----
+  def ftlb-kh(i, d) = map(k => ((((i * 131) + (k * 197) + ((i * k) % 89)) % 251) - 125) / 50.0, lbw-of-iota(d));
+  def ftlb-ku(d) = map(k => (if ((Comparable) (k % 2) == 0) then 1.0 else (0.0 - 1.0)), lbw-of-iota(d));
+  def ftlb-kys() = map(i => (if ((Comparable) (i % 3) == 0) then 1.0 else 0.0), lbw-of-iota(18));
+  def ftlb-kgs() = map(i => i / 3, lbw-of-iota(18));
+  def ftlb-sum(xs) = foldl((acc, x) => acc + x, 0.0, xs);
+  def ftlb-knowing() {
+   let ys = ftlb-kys();
+   let noise = map(i => ftlb-kh(i, 32), lbw-of-iota(18));
+   let planted = map(i => lbw-axpy-go(ftlb-kh(i, 32), ftlb-ku(32), 2.0 * ys[i], []), lbw-of-iota(18));
+   let none = lbw-of-knowing(noise, ys, ftlb-kgs(), 0.001, 63);
+   let some = lbw-of-knowing(planted, ys, ftlb-kgs(), 0.001, 63);
+   let thin = lbw-of-knowing(take(15, noise), [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0], take(15, ftlb-kgs()), 0.001, 63);
+   let shown = print(["knowing", "no-signal", none, "planted", some, "one-held-out-opening", thin]);
+   let kept = lbw-of-at(ys, lbw-of-split(ftlb-kgs())[0]);
+   let kept-sums = map(j => ftlb-sum(lbw-of-scramble(kept, j)), [1, 2, 3]);
+   none[0] > 0.99 && none[2] > 0.99 && (Comparable) none[7] == 0 && none[1] < none[3] && (Comparable) none[5] == 12 && (Comparable) none[6] == 6
+   && (Comparable) some[7] == 1 && some[1] > some[3]
+   && nothing?(thin[1]) && (Comparable) thin[7] == 0 && thin[0] > 0.99
+   && (Value) kept-sums == [4.0, 4.0, 4.0] && !((Value) lbw-of-scramble(kept, 1) == kept)
+   && (Value) lbw-of-split([7, 7, 9]) == [[0, 1], [2]] && (Value) lbw-of-split([5, 5]) == [[0, 1], []];
+  }
+  // ---- bit 8192 ----
+  def ftlb-control-ids() {
+   let first = 248077;
+   let texts = map(i => lbw-of-control-text-at(first, i) ?? "<nothing>", [first - 1, first, first + 1, first + 4, first + 8, first + 9]);
+   (Value) texts == ["<nothing>", "<|form:", "<|form:recipe-birth|>", "<|form:eval|>", "<|form:node-select|>", "<|form:recipe-import|>"]
+   && (Comparable) len(lbw-of-verbs()) == 9 && (String) lbw-of-after-open("eval") == ""
+   && (String) lbw-of-after-open("observation") == "<|form:observation|>nothing=observations-come-from-form;<|/form:observation|>"
+   && (String) lbw-of-after-open("shell") == "<|form:observation|>nothing=unknown-verb:shell;<|/form:observation|>";
+  }
+  // ---- bit 16384: a corpus that names its split, written the way the trace corpus writes it ----
+  def ftlb-split-names() = ["train", "heldout", "train", "train", "heldout", "train"];
+  def ftlb-split-line(i) = ftlb-o([ftlr-s("id", "t" ++ i.str()), ftlr-s("family", "f" ++ (i % 2).str()), ftlr-s("split", ftlb-split-names()[i]), ftlr-s("prompt", "q" ++ i.str()), ftlr-s("completion", "<|form:eval|>" ++ i.str() ++ "+1<|/form:eval|>"), ftlr-s("stream", "<|form:eval|>" ++ i.str() ++ "+1<|/form:eval|>\n<|form:observation|>value=" ++ (i + 1).str() ++ ";<|/form:observation|>\n" ++ (i + 1).str())]);
+  def ftlb-ids(path) = map(l => nld-string(nld-node-of-line(l[0], l[1]), "id"), nld-lines(read_file(path) ?? ""));
+  def ftlb-named-split(root) {
+   let traces = root ++ "/named.rows";
+   let wrote = write_file_text(traces, foldl((acc, i) => acc ++ ftlb-split-line(i) ++ "\n", "", [0, 1, 2, 3, 4, 5]));
+   let c = ftlr-convert(traces, root ++ "/named");
+   let first = nld-row(ftlb-tk(), nld-node-of-line(nld-lines(read_file(root ++ "/named/train.rows") ?? "")[0][0], 1), 1, 1);
+   let shown = print(["named-split", ftlr-census-line(c), ftlb-ids(root ++ "/named/train.rows"), ftlb-ids(root ++ "/named/valid.rows"), "sites", map(s => s[0], ftlr-trace-sites(traces))]);
+   (Comparable) c[1] == 6 && (Comparable) c[6] == 4 && (Comparable) c[7] == 2 && (Comparable) c[5] == 6
+   && (Value) ftlb-ids(root ++ "/named/valid.rows") == ["t1", "t4"]
+   && (Value) ftlb-ids(root ++ "/named/train.rows") == ["t0", "t5", "t3", "t2"]
+   && (Comparable) first[3] > 0.0
+   && (Comparable) len(ftlr-trace-sites(traces)) == 12 && all?(s => (String) s[0] != "q1" && (String) s[0] != "q4", ftlr-trace-sites(traces))
+   && (Value) map(n => ftlr-stride(n), [1, 4, 6, 97, 514, 9409]) == [1, 3, 5, 89, 97, 89]
+   && (Value) ftlr-interleave([1, 2, 3, 4, 5]) == [1, 4, 2, 5, 3];
+  }
+ }
+ let root = ftlb-root();
+ let made = fs_mkdir(root);
+ let traces = root ++ "/form-token-traces.rows";
+ let wrote = write_file_text(traces, foldl((acc, l) => acc ++ l ++ "\n", "", ftlb-lines()));
+ let data = root ++ "/data";
+ let census = ftlr-convert-with(traces, data, "fixture", ftlb-replay);
+ let read = ftlr-read-traces-with(traces, ftlb-replay);
+ let tk = ftlb-tk();
+ let fit = ftlb-fit();
+ let verdict = ftlb-bit(ftlb-spans-read(), 1)
+  + ftlb-bit(ftlb-refusals(read), 2)
+  + ftlb-bit(ftlb-census(census, data), 4)
+  + ftlb-bit(ftlb-trainer-door(tk, data), 8)
+  + ftlb-bit(ftlb-unmasked(tk, data), 16)
+  + ftlb-bit(ftlb-sites(read), 32)
+  + ftlb-bit(ftlb-opening-fit(fit), 64)
+  + ftlb-bit(ftlb-artifact(fit, root), 128)
+  + ftlb-bit(ftlb-same-as-chat(tk), 256)
+  + ftlb-bit(ftlb-selective(), 512)
+  + ftlb-bit(ftlb-segment-marks(tk), 1024)
+  + ftlb-bit(ftlb-writes(traces, root), 2048)
+  + ftlb-bit(ftlb-knowing(), 4096)
+  + ftlb-bit(ftlb-control-ids(), 8192)
+  + ftlb-bit(ftlb-named-split(root), 16384);
+ let shown = print(["form-token-lora-band", ftlr-census-line(census), "verdict", verdict]);
+ let cleared = fs-remove-tree(root);
+ verdict;
+}

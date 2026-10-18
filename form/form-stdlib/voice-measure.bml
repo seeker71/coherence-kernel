@@ -1,0 +1,311 @@
+// voice-measure.bml — acoustic measures of a whole spoken track, taken by the body on its own Metal.
+//
+// One RIFF WAV in (any rate up to 48 kHz, any channel count: native-wav.bml reads and mixes), one list
+// of named measures out. The WAV stays in shared file pages (metal_buf_from_file); every per-sample and
+// per-frame loop is a kernel, so a 46-minute track (60 million samples) is a handful of dispatches and
+// Form only reads back small buffers and short lists. Nothing here steps through samples in the
+// interpreter.
+//
+// The measures, each named for what it is:
+//   duration_s              frames / rate
+//   sample_peak_dbfs        the largest |sample|, 20 log10
+//   true_peak_dbfs          the same over a 4x oversampled signal (32-tap Hann-windowed sinc per phase)
+//   lufs_integrated         ITU-R BS.1770 K-weighted loudness, 400 ms blocks every 100 ms, absolute gate
+//                           -70 LUFS then relative gate -10 LU (the K filters are re-derived for this
+//                           rate; each 100 ms block's filter is warmed up over the 200 ms before it)
+//   lra_lu                  EBU R128 loudness range: 3 s short-term windows every 1 s, absolute gate -70,
+//                           relative gate -20 LU, 95th minus 10th percentile (linear interpolation)
+//   frames                  50 ms windows every 25 ms (rate-rounded) with the whole window inside the file
+//   frame_ref_db            the level a pause is measured from: the loudest frame's RMS level in dBFS
+//   pause_ratio             frames whose RMS level is more than 40 dB under frame_ref_db / frames
+//   pause_median_s, pause_max_s, pause_count
+//                           runs of consecutive such frames, a run of L frames lasting L * 25 ms
+//   centroid_hz             power-weighted spectral centroid over the active frames (2048-point Hann FFT
+//                           starting at each frame, DC and Nyquist bins left out)
+//   centroid_hz_framemean   the mean of the active frames' own centroids
+//   share_below_300hz, share_above_4khz
+//                           the active frames' FFT power under 300 Hz / over 4 kHz, as a fraction
+//   f0_median_hz, f0_semitone_sd, f0_voiced_frames
+//                           per active frame the normalised autocorrelation over 70..500 Hz; a frame is
+//                           voiced at a peak >= 0.6, and the lag taken is the first local maximum within
+//                           90 % of the highest (no octave drop); parabolic refinement; the median is read
+//                           from a 0.02 semitone histogram, the SD is two-pass in semitones
+//   jump_p95_db             the 95th percentile of |level(f) - level(f-1)| over consecutive active frames
+//                           (0.1 dB histogram) — the startle metric
+//   rms_dbfs                the whole file's RMS level
+// "Active" is a frame not under the pause threshold.
+import form-stdlib/native-wav.bml;
+import form-stdlib/native-adapter-generation.bml;
+section [form.bml] {
+ class VoiceMeasure {
+  // ---------------------------------------------------------------- the kernels
+  def vmz-msl() = "
+kernel void vmz_frames(device const uchar* src [[buffer(0)]],device float* fr [[buffer(1)]],constant uint& channels [[buffer(2)]],constant uint& bits [[buffer(3)]],constant uint& encoding [[buffer(4)]],constant uint& frames [[buffer(5)]],constant uint& hop [[buffer(6)]],constant uint& win [[buffer(7)]],constant uint& first [[buffer(8)]],constant uint& count [[buffer(9)]],uint i [[thread_position_in_grid]]){
+ if(i>=count)return;uint f=first+i;ulong s=ulong(f)*hop;float ss=0,pk=0;
+ for(uint k=0;k<win;k++){float v=nwa_mono(src,long(s+k),channels,bits,encoding,frames);ss+=v*v;pk=max(pk,fabs(v));}
+ float ms=ss/float(win);device float* o=fr+ulong(f)*8;o[0]=ms;o[1]=pk;o[2]=10.0f*log10(ms+1e-12f);o[3]=-1.0f;o[4]=0.0f;o[5]=0.0f;o[6]=0.0f;o[7]=0.0f;
+}
+kernel void vmz_max(device const float* fr [[buffer(0)]],device float* out [[buffer(1)]],constant uint& nf [[buffer(2)]],uint t [[thread_position_in_threadgroup]]){
+ threadgroup float a[256];threadgroup float b[256];float p=0.0f,l=-1000.0f;
+ for(uint f=t;f<nf;f+=256){p=max(p,fr[ulong(f)*8+1]);l=max(l,fr[ulong(f)*8+2]);}
+ a[t]=p;b[t]=l;threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(t==0){float P=0.0f,L=-1000.0f;for(uint k=0;k<256;k++){P=max(P,a[k]);L=max(L,b[k]);}out[0]=P;out[1]=L;}
+}
+kernel void vmz_sums(device const float* fr [[buffer(0)]],device float* out [[buffer(1)]],constant uint& nf [[buffer(2)]],constant float& thr [[buffer(3)]],constant uint& mode [[buffer(4)]],constant float& mean [[buffer(5)]],uint t [[thread_position_in_threadgroup]]){
+ threadgroup float red[2560];float s[10];for(uint k=0;k<10;k++)s[k]=0.0f;
+ for(uint f=t;f<nf;f+=256){device const float* o=fr+ulong(f)*8;s[9]+=o[0];
+  if(o[2]>=thr){s[0]+=1.0f;
+   if(mode==0){if(o[7]>0.0f){s[1]+=o[4]/o[7];s[2]+=o[7];s[3]+=o[4];s[4]+=o[5];s[5]+=o[6];}if(o[3]>=0.0f){s[6]+=1.0f;s[7]+=o[3];}}
+   else{if(o[3]>=0.0f){float d=o[3]-mean;s[6]+=d*d;}}
+  }else s[8]+=1.0f;
+ }
+ for(uint k=0;k<10;k++)red[k*256+t]=s[k];threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(t<10){float a=0.0f;for(uint j=0;j<256;j++)a+=red[t*256+j];out[t]=a;}
+}
+kernel void vmz_spec(device const uchar* src [[buffer(0)]],device float* fr [[buffer(1)]],constant uint& channels [[buffer(2)]],constant uint& bits [[buffer(3)]],constant uint& encoding [[buffer(4)]],constant uint& frames [[buffer(5)]],constant uint& hop [[buffer(6)]],constant uint& rate [[buffer(7)]],constant float& thr [[buffer(8)]],constant uint& first [[buffer(9)]],constant uint& count [[buffer(10)]],uint g [[threadgroup_position_in_grid]],uint t [[thread_position_in_threadgroup]]){
+ if(g>=count)return;uint f=first+g;device float* o=fr+ulong(f)*8;if(o[2]<thr)return;
+ threadgroup float re[2048];threadgroup float im[2048];ulong s=ulong(f)*hop;
+ for(uint k=t;k<2048;k+=256){float w=0.5f-0.5f*cos(2.0f*M_PI_F*float(k)/2048.0f);uint r=0;for(uint b=0;b<11;b++)r|=((k>>b)&1u)<<(10-b);re[r]=w*nwa_mono(src,long(s+k),channels,bits,encoding,frames);im[r]=0.0f;}
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ for(uint len=2;len<=2048;len<<=1){uint h=len>>1;for(uint b=t;b<1024;b+=256){uint j=b&(h-1);uint i0=((b/h)*len)+j;uint i1=i0+h;float ang=-2.0f*M_PI_F*float(j)/float(len);float wr=cos(ang),wi=sin(ang);float xr=re[i1]*wr-im[i1]*wi,xi=re[i1]*wi+im[i1]*wr;re[i1]=re[i0]-xr;im[i1]=im[i0]-xi;re[i0]+=xr;im[i0]+=xi;}threadgroup_barrier(mem_flags::mem_threadgroup);}
+ float P=0.0f,F=0.0f,Lo=0.0f,Hi=0.0f;
+ for(uint k=t+1;k<1024;k+=256){float p=re[k]*re[k]+im[k]*im[k];float hz=float(k)*float(rate)/2048.0f;P+=p;F+=p*hz;if(hz<300.0f)Lo+=p;if(hz>4000.0f)Hi+=p;}
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ re[t]=P;im[t]=F;re[256+t]=Lo;im[256+t]=Hi;threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(t==0){float a=0.0f,b=0.0f,c=0.0f,d=0.0f;for(uint k=0;k<256;k++){a+=re[k];b+=im[k];c+=re[256+k];d+=im[256+k];}o[4]=b;o[5]=c;o[6]=d;o[7]=a;}
+}
+kernel void vmz_f0(device const uchar* src [[buffer(0)]],device float* fr [[buffer(1)]],constant uint& channels [[buffer(2)]],constant uint& bits [[buffer(3)]],constant uint& encoding [[buffer(4)]],constant uint& frames [[buffer(5)]],constant uint& hop [[buffer(6)]],constant uint& win [[buffer(7)]],constant uint& rate [[buffer(8)]],constant float& thr [[buffer(9)]],constant float& vthr [[buffer(10)]],constant uint& first [[buffer(11)]],constant uint& count [[buffer(12)]],uint g [[threadgroup_position_in_grid]],uint t [[thread_position_in_threadgroup]]){
+ if(g>=count)return;uint f=first+g;device float* o=fr+ulong(f)*8;if(o[2]<thr)return;
+ uint lo=rate/500,hi=rate/70;uint n=win;uint tot=n+hi+2;
+ threadgroup float xs[3200];threadgroup float pe[3200];threadgroup float nac[640];ulong s=ulong(f)*hop;
+ for(uint k=t;k<tot;k+=64)xs[k]=nwa_mono(src,long(s+k),channels,bits,encoding,frames);
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(t==0){float a=0.0f;pe[0]=0.0f;for(uint k=0;k<tot;k++){a+=xs[k]*xs[k];pe[k+1]=a;}}
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ float e1=pe[n];
+ for(uint l=lo+t;l<=hi;l+=64){float c=0.0f;for(uint i=0;i<n;i++)c+=xs[i]*xs[i+l];float e2=pe[l+n]-pe[l];nac[l-lo]=c/sqrt(e1*e2+1e-9f);}
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(t==0){uint m=hi-lo+1;float best=-2.0f;for(uint k=0;k<m;k++)best=max(best,nac[k]);float st=-1.0f;
+  if(best>=vthr&&e1>1e-9f){for(uint k=1;k+1<m;k++){if(nac[k]>=nac[k-1]&&nac[k]>=nac[k+1]&&nac[k]>=0.9f*best){float y0=nac[k-1],y1=nac[k],y2=nac[k+1];float d=y0-2.0f*y1+y2;float dl=fabs(d)>1e-9f?0.5f*(y0-y2)/d:0.0f;float lag=float(lo+k)+dl;st=12.0f*log2(float(rate)/lag/55.0f);break;}}}
+  o[3]=st;}
+}
+kernel void vmz_hjump(device const float* fr [[buffer(0)]],device atomic_uint* h [[buffer(1)]],constant uint& nf [[buffer(2)]],constant float& thr [[buffer(3)]],constant uint& first [[buffer(4)]],constant uint& count [[buffer(5)]],uint i [[thread_position_in_grid]]){
+ if(i>=count)return;uint f=first+i;if(f==0||f>=nf)return;float a=fr[ulong(f)*8+2],b=fr[ulong(f-1)*8+2];if(a<thr||b<thr)return;
+ uint bin=min(uint(fabs(a-b)*10.0f),999u);atomic_fetch_add_explicit(h+bin,1u,memory_order_relaxed);
+}
+kernel void vmz_hf0(device const float* fr [[buffer(0)]],device atomic_uint* h [[buffer(1)]],constant uint& nf [[buffer(2)]],constant uint& first [[buffer(3)]],constant uint& count [[buffer(4)]],uint i [[thread_position_in_grid]]){
+ if(i>=count)return;uint f=first+i;if(f>=nf)return;float st=fr[ulong(f)*8+3];if(st<0.0f)return;
+ uint bin=min(uint(st*50.0f),1999u);atomic_fetch_add_explicit(h+bin,1u,memory_order_relaxed);
+}
+kernel void vmz_hpause(device const float* fr [[buffer(0)]],device atomic_uint* h [[buffer(1)]],constant uint& nf [[buffer(2)]],constant float& thr [[buffer(3)]],constant uint& first [[buffer(4)]],constant uint& count [[buffer(5)]],uint i [[thread_position_in_grid]]){
+ if(i>=count)return;uint f=first+i;if(f>=nf)return;if(fr[ulong(f)*8+2]>=thr)return;if(f>0&&fr[ulong(f-1)*8+2]<thr)return;
+ uint run=1;while(f+run<nf&&fr[ulong(f+run)*8+2]<thr)run++;
+ atomic_fetch_add_explicit(h+min(run,4095u),1u,memory_order_relaxed);atomic_fetch_max_explicit(h+4096,run,memory_order_relaxed);
+}
+kernel void vmz_kw(device const uchar* src [[buffer(0)]],device float* out [[buffer(1)]],constant uint& channels [[buffer(2)]],constant uint& bits [[buffer(3)]],constant uint& encoding [[buffer(4)]],constant uint& frames [[buffer(5)]],constant uint& rate [[buffer(6)]],constant uint& blk [[buffer(7)]],constant uint& pre [[buffer(8)]],constant uint& first [[buffer(9)]],constant uint& count [[buffer(10)]],uint i [[thread_position_in_grid]]){
+ if(i>=count)return;uint j=first+i;ulong start=ulong(j)*blk;ulong p=min(ulong(pre),start);ulong begin=start-p;float fs=float(rate);
+ float K=tan(M_PI_F*1681.974450955533f/fs);float Vh=pow(10.0f,3.999843853973347f/20.0f);float Vb=pow(Vh,0.4996667741545416f);float Q=0.7071752369554196f;
+ float a0=1.0f+K/Q+K*K;float b0=(Vh+Vb*K/Q+K*K)/a0,b1=2.0f*(K*K-Vh)/a0,b2=(Vh-Vb*K/Q+K*K)/a0,a1=2.0f*(K*K-1.0f)/a0,a2=(1.0f-K/Q+K*K)/a0;
+ float K2=tan(M_PI_F*38.13547087602444f/fs);float Q2=0.5003270373238773f;float c0=1.0f+K2/Q2+K2*K2;float d1=2.0f*(K2*K2-1.0f)/c0,d2=(1.0f-K2/Q2+K2*K2)/c0;
+ float x1=0.0f,x2=0.0f,y1=0.0f,y2=0.0f,u1=0.0f,u2=0.0f,acc=0.0f;
+ for(ulong k=begin;k<start+blk;k++){float x=nwa_mono(src,long(k),channels,bits,encoding,frames);
+  float y=b0*x+b1*x1+b2*x2-a1*y1-a2*y2;float w=(y-2.0f*y1+y2)-d1*u1-d2*u2;
+  x2=x1;x1=x;y2=y1;y1=y;u2=u1;u1=w;if(k>=start)acc+=w*w;}
+ out[j]=acc/float(blk);
+}
+kernel void vmz_tpeak(device const uchar* src [[buffer(0)]],device atomic_uint* out [[buffer(1)]],constant uint& channels [[buffer(2)]],constant uint& bits [[buffer(3)]],constant uint& encoding [[buffer(4)]],constant uint& frames [[buffer(5)]],constant uint& first [[buffer(6)]],constant uint& count [[buffer(7)]],uint i [[thread_position_in_grid]]){
+ if(i>=count)return;ulong start=ulong(first+i)*256ul;if(start>=ulong(frames))return;uint len=uint(min(ulong(256),ulong(frames)-start));
+ float x[288];for(uint k=0;k<len+31;k++)x[k]=nwa_mono(src,long(start)+long(k)-15,channels,bits,encoding,frames);
+ float w[3][32];for(uint p=0;p<3;p++){float ph=0.25f*float(p+1);float sum=0.0f;for(int j=0;j<32;j++){float u=float(j-15)-ph;float kk=rint(u);float sg=(int(kk)&1)!=0?-1.0f:1.0f;float sn=fabs(u)<1e-6f?1.0f:sg*sin(M_PI_F*(u-kk))/(M_PI_F*u);float wd=0.5f+0.5f*cos(M_PI_F*u/16.0f);w[p][j]=sn*wd;sum+=w[p][j];}for(int j=0;j<32;j++)w[p][j]/=sum;}
+ float sp=0.0f,tp=0.0f;
+ for(uint n=0;n<len;n++){sp=max(sp,fabs(x[n+15]));for(uint p=0;p<3;p++){float v=0.0f;for(uint j=0;j<32;j++)v+=w[p][j]*x[n+j];tp=max(tp,fabs(v));}}
+ tp=max(tp,sp);atomic_fetch_max_explicit(out,as_type<uint>(sp),memory_order_relaxed);atomic_fetch_max_explicit(out+1,as_type<uint>(tp),memory_order_relaxed);
+}
+kernel void vmz_synth(device short* dst [[buffer(0)]],constant uint& rate [[buffer(1)]],constant uint& fmhz [[buffer(2)]],constant float& ampA [[buffer(3)]],constant float& ampB [[buffer(4)]],constant uint& onlen [[buffer(5)]],constant uint& period [[buffer(6)]],constant uint& steplen [[buffer(7)]],constant uint& ramp [[buffer(8)]],constant uint& count [[buffer(9)]],uint i [[thread_position_in_grid]]){
+ if(i>=count)return;ulong n=ulong(i);float amp=(steplen>0&&((n/ulong(steplen))&1ul)==1ul)?ampB:ampA;bool on=period==0||(n%ulong(period))<ulong(onlen);
+ if(ramp>0)amp*=min(1.0f,float(min(n,ulong(count-1)-n))/float(ramp));
+ ulong den=ulong(rate)*1000ul;float ph=float((n*ulong(fmhz))%den)/float(den);float v=on?amp*sin(2.0f*M_PI_F*ph):0.0f;
+ dst[i]=short(clamp(rint(v*32767.0f),-32767.0f,32767.0f));
+}
+";
+  def vmz-src() = nwa-msl() ++ vmz-msl();
+  def vmz-pipe(name) = nam-held-pipe(metal_pipeline(vmz-src(),name));
+
+  // ---------------------------------------------------------------- dispatch in batches, each synced
+  // total items launched `batch` at a time; a group kernel is launched one group per item with `tpg` threads
+  def vmz-launch(pipe,bufs,prefix,total,batch,grouped,tpg) = vmz-launch-go(pipe,bufs,prefix,total,batch,grouped,tpg,0);
+  def vmz-launch-go(pipe,bufs,prefix,total,batch,grouped,tpg,first) = first >= total ? 1 : vmz-launch-one(pipe,bufs,prefix,total,batch,grouped,tpg,first,(total - first) > batch ? batch : (total - first));
+  def vmz-launch-one(pipe,bufs,prefix,total,batch,grouped,tpg,first,cnt) {
+   let consts = append(prefix,[first,cnt]);
+   let rc = metal_enqueue(pipe,(Comparable) grouped == 1 ? md-bind16(bufs,consts,tpg,0,1,0) : md-bind(bufs,consts),cnt);
+   let synced = nam-sync();
+   rc < 0 ? form_error("voice-measure dispatch refused") : vmz-launch-go(pipe,bufs,prefix,total,batch,grouped,tpg,first + cnt);
+  }
+  // a kernel with no first/count tail: one launch of `threads` threads or `groups` groups
+  def vmz-once(pipe,bufs,consts,n,grouped,tpg) {
+   let rc = metal_enqueue(pipe,(Comparable) grouped == 1 ? md-bind16(bufs,consts,tpg,0,1,0) : md-bind(bufs,consts),n);
+   let synced = nam-sync();
+   rc < 0 ? form_error("voice-measure dispatch refused") : 1;
+  }
+  def vmz-u32s(b,i,n,acc) = i >= n ? reverse(acc) : vmz-u32s(b,i + 1,n,cons(ln-u32-le(b,i * 4),acc));
+  def vmz-hist(h,n) = vmz-u32s(metal_buf_read(h,0,n * 4),0,n,[]);
+  def vmz-zero(h,n) {
+   let z = nam-zero(h,n);
+   let s = nam-sync();
+   h;
+  }
+
+  // ---------------------------------------------------------------- numbers
+  def vmz-ln10() = math_log(10.0);
+  def vmz-db10(x) = x <= 0.0 ? -200.0 : 10.0 * (math_log(x) / vmz-ln10());
+  def vmz-db20(x) = x <= 0.0 ? -200.0 : 20.0 * (math_log(x) / vmz-ln10());
+  def vmz-lk(z) = z <= 0.0 ? -200.0 : -0.691 + vmz-db10(z);
+  def vmz-f(x) = x + 0.0;
+  def vmz-sum-hist(xs,acc) = nil?(xs) ? acc : vmz-sum-hist(xs[1:],acc + xs[0]);
+  // index of the bin where the running count first reaches `target`
+  def vmz-hist-at(xs,target,i,acc) = nil?(xs) ? i - 1 : (acc + xs[0]) >= target ? i : vmz-hist-at(xs[1:],target,i + 1,acc + xs[0]);
+  def vmz-target(total,pct) = (((total * pct) + 99) / 100) < 1 ? 1 : (((total * pct) + 99) / 100);
+
+  // ---------------------------------------------------------------- loudness over the 100 ms mean squares
+  def vmz-has?(t,k) = nil?(t) ? false : (Comparable) k <= 1 ? true : vmz-has?(t[1:],k - 1);
+  def vmz-blocks(t,acc) = vmz-has?(t,4) ? vmz-blocks(t[1:],cons((t[0] + t[1] + t[2] + t[3]) / 4.0,acc)) : reverse(acc);
+  def vmz-sum-k(t,k,acc) = k <= 0 ? acc : vmz-sum-k(t[1:],k - 1,acc + t[0]);
+  def vmz-shorts(t,acc) = vmz-has?(t,30) ? vmz-shorts(t[10:],cons(vmz-sum-k(t,30,0.0) / 30.0,acc)) : reverse(acc);
+  // [sum, count] of the powers whose loudness is above a gate
+  def vmz-gate(zs,gate,sum,n) = nil?(zs) ? [sum,n] : vmz-lk(zs[0]) > gate ? vmz-gate(zs[1:],gate,sum + zs[0],n + 1) : vmz-gate(zs[1:],gate,sum,n);
+  def vmz-gated-mean(g) = g[1] <= 0 ? 0.0 : g[0] / vmz-f(g[1]);
+  def vmz-lufs(zs) {
+   let a = vmz-gate(zs,-70.0,0.0,0);
+   let b = vmz-gate(zs,vmz-lk(vmz-gated-mean(a)) - 10.0,0.0,0);
+   (Comparable) a[1] == 0 ? -120.0 : vmz-lk(vmz-gated-mean(b));
+  }
+  def vmz-gate-keep(zs,gate,acc) = nil?(zs) ? reverse(acc) : vmz-lk(zs[0]) >= gate ? vmz-gate-keep(zs[1:],gate,cons(vmz-lk(zs[0]),acc)) : vmz-gate-keep(zs[1:],gate,acc);
+  def vmz-merge(a,b,acc) = nil?(a) ? append(reverse(acc),b) : nil?(b) ? append(reverse(acc),a) : a[0] <= b[0] ? vmz-merge(a[1:],b,cons(a[0],acc)) : vmz-merge(a,b[1:],cons(b[0],acc));
+  def vmz-sort(xs) = nil?(xs) ? xs : nil?(xs[1:]) ? xs : vmz-sort-halves(xs,len(xs) / 2);
+  def vmz-sort-halves(xs,h) = vmz-merge(vmz-sort(take(h,xs)),vmz-sort(xs[h:]),[]);
+  // linear-interpolated percentile of a sorted list
+  def vmz-pct(xs,p) {
+   let n = len(xs);
+   let pos = (p / 100.0) * vmz-f(n - 1);
+   let i = float_to_int(math_floor(pos));
+   let frac = pos - vmz-f(i);
+   (Comparable) n == 0 ? 0.0 : i + 1 >= n ? xs[n - 1] : xs[i] + (frac * (xs[i + 1] - xs[i]));
+  }
+  def vmz-lra(shorts) {
+   let a = vmz-gate(shorts,-70.0,0.0,0);
+   let kept = vmz-sort(vmz-gate-keep(shorts,vmz-lk(vmz-gated-mean(a)) - 20.0,[]));
+   (Comparable) a[1] == 0 ? 0.0 : vmz-pct(kept,95.0) - vmz-pct(kept,10.0);
+  }
+
+  // ---------------------------------------------------------------- the measure
+  // [[name, value], ...]; values are floats (counts too)
+  // 0.6, read off the reference: on the 46-minute sleep track the semitone SD is 3.50 at 0.5, 3.17 at 0.6,
+  // 2.91 at 0.7 and the Python reference measured 3.19; the median stays 211.4..212.1 Hz across them
+  def vmz-voicing() = 0.6;
+  def vmz-measure(path) = vmz-measure-with(path,vmz-voicing());
+  // vthr: the normalised-autocorrelation peak a frame needs to count as voiced
+  def vmz-measure-with(path,vthr) {
+   let wav = nwa-open(path);
+   let m = wav[2]; let rate = m[0]; let channels = m[1]; let bits = m[2]; let encoding = m[3]; let frames = m[5] / m[6];
+   rate > 48000 ? form_error("voice-measure supports rates up to 48000 Hz") : vmz-measure-open(wav,rate,channels,bits,encoding,frames,vthr);
+  }
+  def vmz-measure-open(wav,rate,channels,bits,encoding,frames,vthr) {
+   let hop = ((rate * 25) + 500) / 1000; let win = ((rate * 50) + 500) / 1000;
+   let nf = frames < win ? 0 : ((frames - win) / hop) + 1;
+   let src = wav[1];
+   let wprefix = [channels,bits,encoding,frames];
+   // --- the frames' levels and the loudest
+   let fr = nam-alloc(nf * 8 + 8);
+   let a = vmz-launch(vmz-pipe("vmz_frames"),[src,fr],append(wprefix,[hop,win]),nf,8192,0,0);
+   let mxb = nam-alloc(2);
+   let b = vmz-once(vmz-pipe("vmz_max"),[fr,mxb],[nf],1,1,256);
+   let mx = nam-read(mxb,2);
+   let refdb = mx[1]; let thr = refdb - 40.0;
+   // --- spectrum and pitch on the active frames
+   let c = vmz-launch(vmz-pipe("vmz_spec"),[src,fr],append(wprefix,[hop,rate,md-f32-bits(thr)]),nf,2048,1,256);
+   let d = vmz-launch(vmz-pipe("vmz_f0"),[src,fr],append(wprefix,[hop,win,rate,md-f32-bits(thr),md-f32-bits(vthr)]),nf,1024,1,64);
+   let sumb = nam-alloc(10);
+   let e = vmz-once(vmz-pipe("vmz_sums"),[fr,sumb],[nf,md-f32-bits(thr),0,0],1,1,256);
+   let s0 = nam-read(sumb,10);
+   let stmean = s0[6] > 0.0 ? s0[7] / s0[6] : 0.0;
+   let e2 = vmz-once(vmz-pipe("vmz_sums"),[fr,sumb],[nf,md-f32-bits(thr),1,md-f32-bits(stmean)],1,1,256);
+   let s1 = nam-read(sumb,10);
+   // --- histograms: jumps, pitch, pauses
+   let hj = vmz-zero(nam-alloc(1000),1000); let hf = vmz-zero(nam-alloc(2000),2000); let hp = vmz-zero(nam-alloc(4097),4097);
+   let f1 = vmz-launch(vmz-pipe("vmz_hjump"),[fr,hj],[nf,md-f32-bits(thr)],nf,65536,0,0);
+   let f2 = vmz-launch(vmz-pipe("vmz_hf0"),[fr,hf],[nf],nf,65536,0,0);
+   let f3 = vmz-launch(vmz-pipe("vmz_hpause"),[fr,hp],[nf,md-f32-bits(thr)],nf,65536,0,0);
+   let jh = vmz-hist(hj,1000); let fh = vmz-hist(hf,2000); let ph = vmz-hist(hp,4097);
+   // --- loudness over 100 ms blocks, and the peaks
+   let blk = rate / 10; let nb = frames / blk;
+   let kwb = nam-alloc(nb + 1);
+   let g = vmz-launch(vmz-pipe("vmz_kw"),[src,kwb],[channels,bits,encoding,frames,rate,blk,rate / 5],nb,4096,0,0);
+   let ms = nb < 1 ? [] : nam-read(kwb,nb);
+   let tpb = nam-alloc(2); let tz = vmz-zero(tpb,2);
+   let nblk = (frames + 255) / 256;
+   let h = vmz-launch(vmz-pipe("vmz_tpeak"),[src,tpb],wprefix,nblk,65536,0,0);
+   let pk = nam-read(tpb,2);
+   let freed = nam-free([fr,mxb,sumb,hj,hf,hp,kwb,tpb]);
+   let closed = nwa-close(wav);
+   vmz-rows(rate,frames,nf,hop,refdb,s0,s1,jh,fh,ph,ms,pk);
+  }
+  // the peak buffer is two f32 words that only ever grew (atomic max over positive float bits)
+  def vmz-rows(rate,frames,nf,hop,refdb,s0,s1,jh,fh,ph,ms,pk) {
+   let secs = vmz-f(frames) / vmz-f(rate);
+   let active = s0[0]; let voiced = s0[6];
+   let runs = vmz-sum-hist(take(4096,ph),0); let maxrun = ph[4096];
+   let medrun = runs <= 0 ? 0 : vmz-hist-at(take(4096,ph),vmz-target(runs,50),0,0);
+   let jumps = vmz-sum-hist(jh,0);
+   let jidx = jumps <= 0 ? 0 : vmz-hist-at(jh,vmz-target(jumps,95),0,0);
+   let fcount = vmz-sum-hist(fh,0);
+   let fidx = fcount <= 0 ? 0 : vmz-hist-at(fh,vmz-target(fcount,50),0,0);
+   let fst = (fidx + 0.5) * 0.02;
+   let hopS = vmz-f(hop) / vmz-f(rate);
+   let zs = vmz-blocks(ms,[]);
+   [["duration_s",secs],
+    ["sample_peak_dbfs",vmz-db20(pk[0])],
+    ["true_peak_dbfs",vmz-db20(pk[1])],
+    ["lufs_integrated",vmz-lufs(zs)],
+    ["lra_lu",vmz-lra(vmz-shorts(ms,[]))],
+    ["frames",vmz-f(nf)],
+    ["frame_ref_db",refdb],
+    ["pause_ratio",nf <= 0 ? 0.0 : s0[8] / vmz-f(nf)],
+    ["pause_median_s",medrun * hopS],
+    ["pause_max_s",maxrun * hopS],
+    ["pause_count",vmz-f(runs)],
+    ["centroid_hz",s0[2] > 0.0 ? s0[3] / s0[2] : 0.0],
+    ["centroid_hz_framemean",active > 0.0 ? s0[1] / active : 0.0],
+    ["share_below_300hz",s0[2] > 0.0 ? s0[4] / s0[2] : 0.0],
+    ["share_above_4khz",s0[2] > 0.0 ? s0[5] / s0[2] : 0.0],
+    ["f0_median_hz",fcount <= 0 ? 0.0 : 55.0 * math_pow(2.0,fst / 12.0)],
+    ["f0_semitone_sd",voiced > 0.0 ? math_sqrt(s1[6] / voiced) : 0.0],
+    ["f0_voiced_frames",voiced],
+    ["jump_p95_db",(jidx + 0.5) * 0.1],
+    ["rms_dbfs",vmz-db10(s0[9] / vmz-f(nf))]];
+  }
+  def vmz-row-value(rows,name) = nil?(rows) ? nothing : (String) rows[0][0] == name ? rows[0][1] : vmz-row-value(rows[1:],name);
+
+  // ---------------------------------------------------------------- the report
+  def vmz-line(row) = row[0] ++ "  " ++ float_to_str(row[1]);
+  def vmz-report(rows) = nil?(rows) ? 1 : vmz-report-next(print_str(vmz-line(rows[0])),rows[1:]);
+  def vmz-report-next(shown,rest) = vmz-report(rest);
+
+  // ---------------------------------------------------------------- synthetic truth
+  // A mono s16 WAV made on the device: a sine of `fmhz` millihertz whose amplitude is ampA (and ampB in
+  // every other `steplen` block when steplen > 0), faded in and out over `ramp` samples when ramp > 0
+  // (a sine cut hard at the file's ends rings in any band-limited reading — the true peak sees it),
+  // gated on for `onlen` samples of every `period`
+  // samples when period > 0. Returns the path.
+  def vmz-wav-header(n,rate) = enw-bytes-str(append([82,73,70,70],append(ln-u32-bytes(36 + (n * 2)),append([87,65,86,69,102,109,116,32],append(ln-u32-bytes(16),append([1,0,1,0],append(ln-u32-bytes(rate),append(ln-u32-bytes(rate * 2),append([2,0,16,0,100,97,116,97],ln-u32-bytes(n * 2))))))))));
+  def vmz-synth(path,rate,n,fmhz,ampA,ampB,onlen,period,steplen,ramp) {
+   let buf = nam-held(metal_buf_alloc(n * 2));
+   let rc = metal_enqueue(vmz-pipe("vmz_synth"),md-bind([buf],[rate,fmhz,md-f32-bits(ampA),md-f32-bits(ampB),onlen,period,steplen,ramp,n]),n);
+   let synced = nam-sync();
+   let pcm = metal_buf_read(buf,0,n * 2);
+   let freed = nam-free([buf]);
+   let written = nag-write(path,(String) vmz-wav-header(n,rate) + pcm);
+   rc < 0 ? form_error("voice-measure synthesis refused") : path;
+  }
+ }
+ 0;
+}

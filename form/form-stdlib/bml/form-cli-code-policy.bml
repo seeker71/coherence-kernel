@@ -1,0 +1,965 @@
+// A coding movement over resident documents. Model messages are values, never
+// host commands. The caller owns writable paths and the verification callback.
+import form-stdlib/bml/form-agent-tool-wire.bml;
+import form-stdlib/bml/form-cli-code-turn-guard.bml;
+import observe/bidirectional-framebuffer-channel.fk;
+import form-stdlib/bml/form-cli-review-guidance.bml;
+import form-stdlib/bml/form-cli-report-amend.bml;
+import form-stdlib/bml/form-cli-code-bml-repair.bml;
+import form-stdlib/bml/form-cli-code-value-search.bml;
+import form-stdlib/bml/form-cli-qwen-meaning.bml;
+import form-stdlib/form-lift.bml;
+import form-stdlib/bml/form-token-grammar.bml;
+section [form.bml] {
+ class FormCliCodePolicy {
+  def fcap-string(obj, key) = fcap-string-value(fat-wire-field-string(obj, key, ""));
+  def fcap-string-value(result) = if ((String) fat-wire-error(result) == "") then fat-wire-value(result) else "";
+  def fcap-strings(nodes) = nodes |> map(node => node_value(node));
+  def fcap-string-array(node) = if (!fat-wire-array?(node)) then 0 else fcap-string-nodes(node_children(node));
+  def fcap-string-nodes(nodes) = if nil?(nodes) then 1 else (fat-wire-string?(nodes[0]) && fcap-string-nodes(nodes[1:]));
+  def fcap-nonempty(strings) = if nil?(strings) then 1 else ((len(fat-trim(strings[0])) > 0) && fcap-nonempty(strings[1:]));
+  def fcap-array(obj, key) = fcap-strings(node_children(json-object-get(obj, key)));
+  // state: stage, goal, originals, documents, writable, pending tasks,
+  // refined brief, plan, observation, model turns, tool calls, completed tasks,
+  // repair memory [failures, latest evidence, repair reflections, check runs,
+  // repeated counterexample]. It is working memory, never a weight update.
+  def fcap-state(stage, goal, originals, docs, writable, pending, brief, plan, note, turns, calls, completed) = [stage, goal, originals, docs, writable, pending, brief, plan, note, turns, calls, completed, [0, "", [], 0, 0]];
+  def fcap-memory(s) = s[12];
+  // Checkpoint identity is shared state; reading it needs no storage organ.
+  def fcam-context(s) = len(s) >= 14 ? s[13] : [];
+  def fcam-managed(s) = (Comparable) len(fcam-context(s)) == 4;
+  def fcam-id(s) = fcam-context(s)[1];
+  // Preserve the tool history and caller-owned work kind when a repair updates
+  // the earlier memory slots. Model JSON cannot change the kind.
+  def fcap-with-memory(s, memory) = append(append(fat-take(s, 12), [append(memory, fat-drop(fcap-memory(s), len(memory)))]), if (len(s) >= 14) then [s[13]] else []);
+  def fcap-mode(s) = if (len(fcap-memory(s)) >= 7) then fcap-memory(s)[6] else "code";
+  def fcap-reviewing(s) = ((String) fcap-mode(s) == "review");
+  def fcap-report(s) = if (len(fcap-memory(s)) >= 8) then fcap-memory(s)[7] else "";
+  // This snapshot belongs to one admitted model context. Reset it at admission,
+  // including checkpoint resume; source edits do not update it implicitly.
+  def fcap-context-docs(s) = if (len(fcap-memory(s)) >= 9) then fcap-memory(s)[8] else [];
+  def fcap-context-instructions(s) = if (len(fcap-memory(s)) >= 10) then fcap-memory(s)[9] else [];
+  def fcap-native-repairs(s) = if (len(fcap-memory(s)) >= 11) then fcap-memory(s)[10] else [];
+  def fcap-report-source(s) = if (len(fcap-memory(s)) >= 12) then fcap-memory(s)[11] else "submitted";
+  def fcap-context-native-review(s) = if (len(fcap-memory(s)) >= 13) then fcap-memory(s)[12] else 0;
+  def fcap-context-native-submission(s) = if (len(fcap-memory(s)) >= 14) then fcap-memory(s)[13] else 0;
+  // Holding source bytes does not attest that a model has received them.
+  // This caller-owned admission choice survives transitions and checkpoints.
+  def fcap-document-context(s) = if (len(fcap-memory(s)) >= 15) then fcap-memory(s)[14] else "full";
+  def fcap-catalog?(s) = ((String) fcap-document-context(s) == "catalog");
+  def fcap-with-document-context(s,mode) {
+   let padded = fcap-with-native-submission(s,fcap-context-native-submission(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),14),[mode]));
+  }
+  def fcap-admission-docs(s) = if fcap-catalog?(s) then [] else fcap-docs(s);
+  // Caller-selected source queries retain their commands, never supplied output.
+  // This predicate was authored by native Qwen and checked on 39 behavior cases.
+  def fcap-source-query-valid(row) = if ((((fat-wire-object?(row) && fcap-readonly(fcap-string(row,"tool"))) && fcap-string-array(json-object-get(row,"arguments"))) && (!json-object-has?(row,"input"))) && (!json-object-has?(row,"stdout"))) then 1 else 0;
+  def fcap-source-query-rows-valid(rows) = if nil?(rows) then 1 else (fcap-source-query-valid(rows[0]) && fcap-source-query-rows-valid(rows[1:]));
+  def fcap-source-query-rows(rows) = rows |> map(row => [fcap-string(row,"tool"),fcap-array(row,"arguments")]);
+  def fcap-source-queries(s) = if (len(fcap-memory(s)) >= 16) then fcap-memory(s)[15] else [];
+  def fcap-with-source-queries(s,queries) {
+   let padded = fcap-with-document-context(s,fcap-document-context(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),15),[queries]));
+  }
+  def fcap-source-observations(docs,queries) = if nil?(queries) then [] else {
+   let query = queries[0];
+   if (!fcap-readonly(query[0])) then form_error("source query must be read-only") else 0;
+   let result = fcap-readonly-call(docs,query[0],query[1],"");
+   if (!((Value) docs == fat-documents(result))) then form_error("source query changed its documents") else 0;
+   cons(json-node-object(append([json-node-pair("tool",json-node-string(query[0])),json-node-pair("arguments",json-node-array(fcap-string-json(query[1])))],json-object-pairs(fcap-result-node(result)))),fcap-source-observations(docs,queries[1:]));
+  };
+  def fcap-source-context(s) = nil?(fcap-source-queries(s)) ? "" : "\nNATIVE SOURCE OBSERVATIONS: Actual read-only query results, including exit and diagnostics. Inside Form eval, read fcap-context-field(source_context,[\"source_observations\",index,\"stdout\"]) with an integer index. source_context is the bound native cell, not a quoted name. Query tool, arguments, stderr or value along the same path as needed. Original documents and checks remain whole.\n" + fcap-model-packet(json-node-object([json-node-pair("source_observations",json-node-array(fcap-source-observations(fcap-docs(s),fcap-source-queries(s))))]));
+  def fcap-document-identity(doc) = [json-node-pair("id",json-node-string(doc[0])),json-node-pair("path",json-node-string(doc[1])),json-node-pair("bytes",json-node-int(len(doc[2]))),json-node-pair("resident_sha256",json-node-string(fat-document-sha(doc)))];
+  def fcap-document-catalog(docs) = docs |> map(doc => json-node-object(fcap-document-identity(doc)));
+  def fcap-model-documents(docs) = docs |> map(doc => json-node-object(append(fcap-document-identity(doc),[json-node-pair("text",json-node-string(doc[2]))])));
+  def fcap-with-native-submission(s,count) {
+   let padded = fcap-with-native-context(s,fcap-context-native-review(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),13),[count]));
+  }
+  // Only the live controller can attest that this exact rejected report was
+  // generated in the current context. A replay or bootstrap cannot infer it.
+  // json-serves: a caller who submits the rejected report as bytes. text: those bytes are the submission; a cell address is read as pairs.
+  def fcap-native-submission-admitted(s,raw) = if (!fcap-awaiting-native-review(s)) then s else if (fcap-node-address?(raw)) then fcap-native-submission-fields(s, fcap-cell-fields(fcap-address-node(raw))) else if (faj-valid(raw)) then fcap-native-submission-text(s, parse-json("native-submission", raw)) else s;
+  def fcap-native-submission-fields(s, fields) = nothing?(fields) ? s : {
+   let report = fcap-has-field(fields, "report") ? fcap-field-report(fields) : fcap-fields-text(fields);
+   ((String) report == fcap-last-native(s)[4][0]) ? fcap-with-native-submission(s, len(fcap-native-repairs(s))) : s;
+  };
+  // json-serves: that caller's report string. text: the last native repair stored the report as the string the checker re-reads.
+  def fcap-native-submission-text(s, obj) = nothing?(obj) ? s : {
+   let report = if json-object-has?(obj, "report") then fcap-report-text(obj) else json-emit(obj);
+   ((String) report == fcap-last-native(s)[4][0]) ? fcap-with-native-submission(s, len(fcap-native-repairs(s))) : s;
+  };
+  def fcap-with-native-context(s,count) {
+   let padded = fcap-provenance(s,fcap-native-repairs(s),fcap-report-source(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),12),[count]));
+  }
+  def fcap-last-native(s) = reverse(fcap-native-repairs(s))[0];
+  def fcap-awaiting-native-review(s) = if (!(fcap-reviewing(s) && (((String) fcap-stage(s) == "review") && ((String) fcap-report-source(s) == "caller-native-repair")))) then 0 else if nil?(fcap-native-repairs(s)) then 0 else ((String) fcap-last-native(s)[1] == "accepted-for-review");
+  def fcap-native-context-start(s) = if nil?(fcap-native-repairs(s)) then s else fcap-with-native-submission(fcap-with-native-context(s,len(fcap-native-repairs(s))),0);
+  def fcap-native-context-admitted(s) = if fcap-awaiting-native-review(s) then fcap-with-native-context(s,len(fcap-native-repairs(s))) else s;
+  def fcap-provenance(s,events,source) = fcap-with-memory(s,[fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-context-docs(s),fcap-context-instructions(s),events,source]);
+  def fcap-record-native(s,method,status,observation,source) = fcap-provenance(s,append(fcap-native-repairs(s),[[method,status,observation,fcap-checks(s)]]),source);
+  // Exact reports and their own checker results stay paired. These records are
+  // returned to the caller. An explicit continuation also admits the newest
+  // pair once per resident context, with full evidence again after resume.
+  def fcap-report-check-evidence(report,result) = [report,if fcap-check-shape?(result) then result else []];
+  def fcap-record-native-evidence(s,method,status,observation,source,before,after) = fcap-provenance(s,append(fcap-native-repairs(s),[[method,status,observation,fcap-checks(s),before,after]]),source);
+  // Continuing a direct task after native calls without a document change or
+  // completed step invites local decomposition, with its evidence intact.
+  def fcap-context-guide(s) = fcap-calls(s)>0 && !fcap-reviewing(s) && fat-has(["implement","repair"],fcap-stage(s)) && ((Value) s[5]==[fcap-direct-task()]) && ((Value) fcap-docs(s)==s[2]) && s[11]==0 ? cons("split",s[1:]) : s;
+  def fcap-begin-context(s) {
+   let s=fcap-context-guide(s);
+   let begun = fcap-native-context-start(fcap-with-memory(s,[fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),fcap-report(s),fcap-admission-docs(s),[fcap-work-instruction(s)]]));
+   fcap-admit-evidence(fcap-with-context-evidence(begun,""));
+  }
+  // Only a completed observation admits its instruction to this context.
+  // Bootstrap always carries full instructions, including after resume.
+  def fcap-observation-admitted(s,before,after,live) = if (live && ((Comparable) after == (before + 1))) then fcap-native-context-admitted(fcap-admit-evidence(fcap-admit-instruction(s))) else s;
+  def fcap-admit-instruction(s) = if ((len(fcap-memory(s)) < 9) || fat-has(fcap-context-instructions(s),fcap-work-instruction(s))) then s else fcap-with-memory(s,append(fat-take(fcap-memory(s),9),[append(fcap-context-instructions(s),[fcap-work-instruction(s)])]));
+  def fcap-observation-instruction(s) {
+   let full = fcap-work-instruction(s);
+   let reference = "Continue the supplied instructions for this role and the original caller requirements.";
+   if (!fcap-reviewing(s) && fcap-stage(s) == "implement") then full else if (fat-has(fcap-context-instructions(s),full) && (len(reference) < len(full))) then reference else full;
+  }
+  def fcap-with-report(s, report) = fcap-provenance(fcap-with-memory(s,[fcap-failures(s),fcap-evidence(s),fcap-reflections(s),fcap-checks(s),fcap-repeat(s),fcap-tool-history(s),fcap-mode(s),report]),fcap-native-repairs(s),"submitted");
+  def fcap-inherit(s, next) = append(fat-take(fcap-with-memory(next, fcap-memory(s)), 13), if (len(s) >= 14) then [s[13]] else []);
+  def fcap-failures(s) = fcap-memory(s)[0];
+  def fcap-evidence(s) = fcap-memory(s)[1];
+  def fcap-reflections(s) = fcap-memory(s)[2];
+  def fcap-checks(s) = fcap-memory(s)[3];
+  def fcap-repeat(s) = fcap-memory(s)[4];
+  def fcap-count-check(s) = fcap-with-memory(s, [fcap-failures(s), fcap-evidence(s), fcap-reflections(s), (fcap-checks(s) + 1), fcap-repeat(s)]);
+  def fcap-stage(s) = s[0];
+  def fcap-docs(s) = s[3];
+  // The state owns the observation cell. Text is produced only for a text caller.
+  // json-serves: the model packet and the counterexample. text: a cell note and a string note become one sentence for readers that compare text.
+  def fcap-note(s) = value_kind(s[8])=="node_id" ? json-emit(s[8]) : s[8];
+  def fcap-note-cell(s) = value_kind(s[8])=="node_id" ? s[8] : json-node-string(fcap-evidence-reference(s,s[8]));
+  def fcap-turns(s) = s[9];
+  def fcap-calls(s) = s[10];
+  def fcap-done(s) = (((String) fcap-stage(s) == "complete") || ((String) fcap-stage(s) == "attention"));
+  def fcap-move(s, stage, docs, pending, brief, plan, note, calls, completed) = fcap-inherit(s, fcap-state(stage, s[1], s[2], docs, s[4], pending, brief, plan, note, (fcap-turns(s) + 1), calls, completed));
+  def fcap-note-at(s, stage, note) = fcap-move(s, stage, fcap-docs(s), s[5], s[6], s[7], note, fcap-calls(s), s[11]);
+  def fcap-open(goal, docs, writable) = fcap-state("refine", goal, docs, docs, writable, [], "", "", "Ground first; keep the original goal authoritative.", 0, 0, 0);
+  def fcap-direct-task() = "Complete the original caller goal supplied in this context, including its explicitly requested tool calls.";
+  def fcap-open-direct-code(goal,docs,writable) = fcap-state("implement",goal,docs,docs,writable,[fcap-direct-task()],"","","Implement the caller's supplied task. Review and native checks still decide completion; failed checks retain the existing repair and replanning path.",0,0,0);
+  def fcap-open-review(goal, docs) {
+   let state = fcap-open(goal, docs, []);
+   fcap-with-memory(state, append(fcap-memory(state), [[[], 0], "review", ""]));
+  }
+  def fcap-open-direct-review(goal,docs) = fcap-inherit(fcap-open-review(goal,docs),fcap-state("review",goal,docs,docs,[],[],"","","Inspect the supplied evidence and submit the report. Read-only tools and verify are available.",0,0,0));
+  def fcap-terminal(s, reason) = fcap-inherit(s, fcap-state("attention", s[1], s[2], fcap-docs(s), s[4], s[5], s[6], s[7], reason, fcap-turns(s), fcap-calls(s), s[11]));
+  def fcap-control(id, observation, action) {
+   let out = bfc-envelope(0, id, 0, observation, 3);
+   let sent = bfc-record-out(out, 0);
+   let reply = bfc-control(out, action);
+   let received = bfc-record-in(reply, 0);
+   if (((Comparable) bfc-exchange(reply) == id) && (((Comparable) bfc-direction(reply) == 1) && ((Comparable) bfc-kind(reply) == 1))) then bfc-payload(reply) else 3;
+  }
+  def fcap-revise(s, reason) {
+   let action = fcap-control((now_unix_ms() + fcap-turns(s)), [fcap-turns(s), fcap-calls(s)], 2);
+   if ((Comparable) action == 2) then fcap-note-at(s, fcap-stage(s), reason) else fcap-terminal(s, "diagnostic-control-unavailable");
+  }
+  def fcap-readonly(tool) = tool=="help" || fat-readonly(tool);
+  def fcap-readonly-call(docs,tool,args,input) = tool=="help" ? fcap-help(docs,args) : fat-call(docs,tool,args,input);
+  def fcap-guides() = [["workflow",fl-local-work],["form",ftg-teaching],["meaning",fqt-meaning-prefix],["bml",fl-guidance],["edit",fat-edit-guidance],["awk",fwk-guidance],["repair-bml",fcbmr-guidance],["lift-bml",fcbl-guidance],["rehearse-bml",fcbvs-guidance]];
+  def fcap-help(docs,args) {
+   let guides=fcap-guides();
+   let found=len(args)==1 ? guides |> filter(row=>row[0]==args[0]) : [];
+   if nil?(found) then fat-fail("help needs one guide: " + str-join-with(guides |> map(row=>row[0]),", "),docs) else {
+    let read=found[0][1];
+    fat-ok(read(),docs);
+   };
+  }
+  def fcap-tool-allowed(s, tool, args) = if fcap-readonly(tool) then 1 else if fcap-reviewing(s) then 0 else if (!fat-has(["edit", "write", "repair-bml", "rehearse-bml","lift-bml"], tool)) then 0 else if nil?(args) then 0 else fat-has(s[4], args[0]);
+  def fcap-readonly-preserved(originals, docs, writable) = if nil?(originals) then 1 else ((if fat-has(writable, originals[0][1]) then 1 else ((Value) originals[0] == fat-find-doc(docs, originals[0][1]))) && fcap-readonly-preserved(originals[1:], docs, writable));
+  def fcap-tool(s, obj) = if (!fcap-string-array(json-object-get(obj, "arguments"))) then fcap-revise(s, "Tool arguments must be an array of strings.") else if (json-object-has?(obj, "input") && (!fat-wire-string?(json-object-get(obj, "input")))) then fcap-revise(s, "Tool input must be a string.") else fcap-tool-ready(s, fcap-string(obj, "tool"), fcap-array(obj, "arguments"), fcap-string(obj, "input"));
+  def fcap-tool-ready(s, tool, args, input) = if (!fcap-tool-allowed(s, tool, args)) then fcap-tool-observed(s, tool, args, input, fat-fail(fcap-reviewing(s) ? "caller-review-read-only" : "caller-writable-set", fcap-docs(s))) else fcap-tool-observed(s, tool, args, input, if tool=="help" then fcap-help(fcap-docs(s),args) else if ((String) tool == "repair-bml") then fcbmr-call(fcap-docs(s),args,input) else if tool == "lift-bml" then fcbl-call(fcap-docs(s),args,input) else fat-call(fcap-docs(s), tool, args, input));
+  def fcap-tool-history(s) = if (len(fcap-memory(s)) >= 6) then fcap-memory(s)[5] else [[], 0];
+  // The signature identifies a call and its result for same-call detection; it is not where a result is kept. A stdout
+  // over fcap-signature-max() bytes is held as [sha256, bytes] (the same result digests the same, a different one does
+  // not), and a stderr over it as its first 200 bytes and its digest, so a checkpoint's tool history never carries a
+  // whole read (the note carries it, or its bounded form when the lane bounds it). The bound stands under every
+  // observation cap (a fifth of the window, at least 1024 IDs at 3 bytes: 3072), so any bounded result is held digested.
+  def fcap-signature-max() = 2048;
+   def fcap-held-stdout(out) = if (!fat-text?(out) || len(out) <= fcap-signature-max()) then out else [hex-encode(sha256-stream-string(out)),len(out)];
+  def fcap-held-stderr(err) = if (len(err) <= fcap-signature-max()) then err else (fcap-clip(err,fcap-excerpt-line()) + (" [stderr sha256 " + (hex-encode(sha256-stream-string(err)) + (" bytes " + (len(err).str() + "]")))));
+  def fcap-held-signature(signature) = if (!((Comparable) len(signature) == 6)) then signature else [signature[0],signature[1],signature[2],signature[3],if ((String) value_kind(signature[4]) == "string") then fcap-held-stdout(signature[4]) else signature[4],if ((String) value_kind(signature[5]) == "string") then fcap-held-stderr(signature[5]) else signature[5]];
+   // The guard reads identity, never a rendered native payload. A deferred view
+   // has emitted zero stdout bytes; its complete nodes remain in the result.
+   def fcap-signature-out(signature) = if fat-text?(signature[4]) then signature[4] else len(signature[4]) == 3 ? "node:" + ftw-coord(ftw-encode(signature[4])) : ("sha256:" + (signature[4][0] + ("/" + signature[4][1].str())));
+   def fcap-signature-bytes(signature) = if fat-text?(signature[4]) then len(signature[4]) else len(signature[4]) == 3 ? 0 : signature[4][1];
+  def fcap-tool-observed(s, tool, args, input, result) {
+    let signature = [tool, args, input, fat-exit(result), fcap-held-stdout(result[2]), fcap-held-stderr(fat-error(result))];
+    let view = fat-text?(result[2]) ? 0 : fb_record(intern_node(intern_trivial_string("native-tool-result"), [intern_trivial_string(ftw-coord(fat-value(result))), intern_trivial_int(len(result[2][0])), intern_trivial_int(0)]), "form-cli-code-policy.bml", 189);
+   let history = fcap-tool-history(s);
+   let same = (((Value) signature == history[0]) && ((Value) fcap-docs(s) == fat-documents(result)));
+   let count = if same then (history[1] + 1) else 1;
+   let next = fcap-tool-result-noted(s,result,fcap-tool-note(s,tool,args,result));
+   fcap-with-memory(next, append(fat-take(fcap-memory(next), 5), [[signature, count]]));
+  }
+   def fcap-result-node(result) = json-node-object(append([json-node-pair("exit",json-node-int(fat-exit(result))),json-node-pair("stdout",json-node-string(fat-text?(result[2]) ? result[2] : "")),json-node-pair("stderr",json-node-string(fat-error(result))),json-node-pair("crossings",json-node-int(fat-crossings(result)))],fat-has-value?(result) ? [json-node-pair("value",fat-value(result))] : []));
+  def fcap-note-with(node, pairs) = json-node-object(append(json-object-pairs(node), pairs));
+  def fcap-checked-documents(docs) = if nil?(docs) then [] else {
+   let doc = docs[0];
+   let digest = hex-encode(sha256-stream-string(doc[2]));
+   let fields = [json-node-pair("id",json-node-string(doc[0])),json-node-pair("path",json-node-string(doc[1])),json-node-pair("bytes",json-node-int(len(doc[2]))),json-node-pair("sha256",json-node-string(digest))];
+   cons(json-node-object(fields),fcap-checked-documents(docs[1:]));
+  };
+  // The callback has just received these resident bytes. Identical failures
+  // after a source edit retain their new source identity; no success is inferred.
+  def fcap-verification-node(s,result) {
+   let source = [json-node-pair("checked_documents",json-node-array(fcap-checked-documents(fcap-docs(s)))),json-node-pair("verification_scope",json-node-string("Exact resident documents supplied to this native verification call. The caller's result remains authoritative."))];
+   fcap-note-with(fcap-result-node(result), source);
+  }
+  def fcap-guard-node(s,tool,args,result) {
+   let evidence = fat-guard-evidence(fcap-docs(s),tool,args,result);
+   let base = fcap-result-node(result);
+   nothing?(evidence) ? base : fcap-note-with(base, [json-node-pair("guard_evidence",evidence)]);
+  }
+  def fcap-guard-read?(s,path) {
+   let prior = fcap-tool-history(s)[0];
+   if (!((Comparable) len(prior) == 6)) then 0 else {
+    let args = prior[1];
+    (fat-has(["edit","write"],prior[0]) && ((!nil?(args)) && (((String) args[0] == path) && fat-has(["edit-not-found","edit-ambiguous","document-exists-use-guarded-edit","edit-sha256-mismatch"],prior[5]))));
+   };
+  }
+  def fcap-read-sha-note(args,result,note) {
+   let doc = fat-find-doc(fat-documents(result),args[0]);
+   if (!(((Comparable) fat-exit(result) == 0) && ((!nil?(doc)) && ((String) fat-out(result) == doc[2])))) then note else fcap-note-with(note, [json-node-pair("path",json-node-string(doc[1])),json-node-pair("resident_sha256",json-node-string(fat-document-sha(doc)))]);
+  }
+  def fcap-paged-read-note(args,result,note) {
+   let doc=fat-find-doc(fat-documents(result),args[0]);
+   if fat-exit(result)!=0 || nil?(doc) then note else {
+    let span=fat-read-span(doc[2],str_to_int(args[1]),str_to_int(args[2]),len(args)>=4 ? args[3] : "lines");
+    let identity=[fcap-shape-s("path",doc[1]),fcap-shape-s("resident_sha256",fat-document-sha(doc)),fcap-shape-n("start_byte",span[0]),fcap-shape-n("end_byte",span[1])];
+    substring(doc[2],span[0],span[1])!=fat-out(result) ? note : fcap-note-with(note, identity);
+   };
+  }
+  // Publish the identity of the bytes just accepted, before another model
+  // action or context renewal. A successful acknowledgement is not a check.
+  def fcap-mutation-note(s,args,result,note) = if (nil?(args) || ((!((Comparable) fat-exit(result) == 0)) || (!((String) fat-error(result) == "")))) then note else {
+   let before = fat-find-doc(fcap-docs(s),args[0]);
+   let after = fat-find-doc(fat-documents(result),args[0]);
+   let preserved = fcap-readonly-preserved(s[2],fat-documents(result),s[4]);
+   if ((!preserved) || (nil?(after) || ((Value) before == after))) then note else {
+    let identity = append(fcap-document-identity(after),[json-node-pair("documents_changed",json-node-int(1)),json-node-pair("before_sha256",if nil?(before) then json-node-null() else json-node-string(fat-document-sha(before)))]);
+    fcap-note-with(note, identity);
+   };
+  };
+  def fcap-tool-note(s,tool,args,result) {
+   let note = if ((String) tool == "verify") then fcap-verification-node(s,result) else if fat-error(result)=="resident-document-not-found" then fcap-guard-node(s,tool,args,result) else if (((String) tool == "read") && ((Comparable) len(args) == 1)) then if fcap-guard-read?(s,args[0]) then fcap-result-node(result) else fcap-read-node(fat-find-doc(fcap-context-docs(s),args[0]),result) else fcap-guard-node(s,tool,args,result);
+   if (fat-has(["read","cat"],tool) && ((Comparable) len(args) == 1)) then fcap-read-sha-note(args,result,note) else if tool=="read" && fat-read-range?(args) then fcap-paged-read-note(args,result,note) else if fat-has(["edit","write","repair-bml","rehearse-bml","lift-bml"],tool) then fcap-mutation-note(s,args,result,note) else note;
+  }
+  def fcap-read-node(provided,result) = if nil?(provided) then fcap-result-node(result) else if (!(((Comparable) fat-exit(result) == 0) && ((String) fat-error(result) == ""))) then fcap-result-node(result) else if (!((String) fat-out(result) == provided[2])) then fcap-read-changed(provided,result) else json-node-object([json-node-pair("exit",json-node-int(0)),json-node-pair("stderr",json-node-string("")),json-node-pair("stdout_reference",fcap-context-reference(provided)),json-node-pair("observation",json-node-string("The native read verified these exact bytes match the document already supplied to this model context. Use its provided text. cat or a focused native query remains available to inspect content again."))]);
+  def fcap-context-reference(provided) = json-node-object([json-node-pair("id",json-node-string(provided[0])),json-node-pair("path",json-node-string(provided[1])),json-node-pair("bytes",json-node-int(len(provided[2]))),json-node-pair("scope",json-node-string("current-model-context"))]);
+  // One exact line splice against the admission snapshot, never against a
+  // prior patch. Reconstruct and compare the actual read before emitting it.
+  def fcap-common-lines(a,b,n) = if (nil?(a) || nil?(b)) then n else if (!((String) a[0] == b[0])) then n else fcap-common-lines(a[1:],b[1:],(n + 1));
+  def fcap-read-splice(before,after) {
+   let prefix = fcap-common-lines(before,after,0);
+   let a = fat-drop(before,prefix);
+   let b = fat-drop(after,prefix);
+   let suffix = fcap-common-lines(reverse(a),reverse(b),0);
+   [prefix,(len(a) - suffix),fat-take(b,(len(b) - suffix))];
+  }
+  def fcap-read-rebuild(before,splice) = fat-join(append(fat-take(before,splice[0]),append(splice[2],fat-drop(before,(splice[0] + splice[1])))),"\n");
+  // json-serves: the model attention window. text: the chooser keeps the shorter of the two renderings that window would read.
+  def fcap-read-changed(provided,result) {
+   let before = split-on(provided[2],"\n");
+   let splice = fcap-read-splice(before,split-on(fat-out(result),"\n"));
+   let full = fcap-result-node(result);
+   let patch = json-node-object([json-node-pair("exit",json-node-int(0)),json-node-pair("stderr",json-node-string("")),json-node-pair("stdout_patch",json-node-object([json-node-pair("base",fcap-context-reference(provided)),json-node-pair("first_line",json-node-int((splice[0] + 1))),json-node-pair("remove_lines",json-node-int(splice[1])),json-node-pair("current_lines",json-node-array(fcap-string-json(splice[2]))),json-node-pair("current_bytes",json-node-int(len(fat-out(result))))])),json-node-pair("observation",json-node-string("Exact current read, encoded as one line splice against the original document supplied at admission. Split that base on newline, replace remove_lines at the one-based first_line with current_lines, then join with newline. All other lines are unchanged. Native reconstruction matched the actual read byte-for-byte. cat returns the current text, bounded beyond the observation cap."))]);
+   if (((String) fcap-read-rebuild(before,splice) == fat-out(result)) && (len(json-emit(patch)) < len(json-emit(full)))) then patch else full;
+  }
+  def fcap-tool-result(s,result) = fcap-tool-result-noted(s,result,fcap-result-node(result));
+  def fcap-tool-result-noted(s, result, note) {
+   let next = if fcap-readonly-preserved(s[2], fat-documents(result), s[4]) then fat-documents(result) else fcap-docs(s);
+   let moved = fcap-move(s, fcap-stage(s), next, s[5], s[6], s[7], note, (fcap-calls(s) + 1), s[11]);
+   if ((fat-exit(result) > 1) || (!((String) fat-error(result) == ""))) then {
+    let repaired=fcap-repair-state(moved,"Native tool failed: " + fcap-note(moved));
+    append(repaired[0:8],cons(note,repaired[9:]));
+   } else moved;
+  }
+  // Slot 16 retains model-authored amendments separately from native repairs.
+  // Primitive lists/strings survive the existing FORMBIN checkpoint codec.
+  def fcap-amendments(s) = if (len(fcap-memory(s)) >= 17) then fcap-memory(s)[16] else [];
+  def fcap-with-amendments(s,events) {
+   let padded = fcap-with-source-queries(s,fcap-source-queries(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),16),[events]));
+  }
+  // Caller-owned generation allowance; zero preserves the context-only default.
+  def fcap-reply-token-limit(s) = if (len(fcap-memory(s)) >= 18) then fcap-memory(s)[17] else 0;
+  def fcap-with-reply-token-limit(s,limit) {
+   let padded = fcap-with-amendments(s,fcap-amendments(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),17),[limit]));
+  }
+  // Caller-owned total automatic-search allowance; model JSON cannot set it.
+  def fcap-rehearsal-budget(s) = if (len(fcap-memory(s)) >= 19) then fcap-memory(s)[18] else 0;
+  def fcap-rehearsals(s) = if (len(fcap-memory(s)) >= 20) then fcap-memory(s)[19] else [];
+  // json-serves: the public result. text: a rehearsal row is retained as the bytes that result already emits.
+  def fcap-rehearsals-json(rows) = rows |> map(row => parse-json("native-rehearsal",row));
+  def fcap-rehearsal-budget-valid(n) = (((String) value_kind(n) == "int") && ((n >= 0) && (n <= fbvs-limit())));
+  def fcap-with-rehearsal-budget(s,n) = if (!fcap-rehearsal-budget-valid(n)) then form_error("native rehearsal allowance outside range") else {
+   let padded = fcap-with-reply-token-limit(s,fcap-reply-token-limit(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),18),[n]));
+  };
+  def fcap-with-rehearsals(s,rows) {
+   let padded = fcap-with-rehearsal-budget(s,fcap-rehearsal-budget(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),19),[rows]));
+  }
+  // Syntax repair receipts occupy slot 20 and survive owned checkpoints.
+  // The live caller retains raw replies; hashes and one-byte deltas identify
+  // the native correction without repeating private reply contents.
+  def fcap-json-repairs(s) = if (len(fcap-memory(s)) >= 21) then fcap-memory(s)[20] else [];
+  def fcap-with-json-repairs(s,rows) {
+   let padded = fcap-with-rehearsals(s,fcap-rehearsals(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),20),[rows]));
+  }
+  // json-serves: the request door. text: a repair row is retained as the bytes that door already returns.
+  def fcap-json-repairs-json(rows) = rows |> map(row => parse-json("native-json-repair",row));
+  // Slot 21 names failure bytes already delivered in this model context.
+  // Bootstrap is always full; partial feedback never admits a new identity.
+  def fcap-context-evidence(s) = if (len(fcap-memory(s)) >= 22) then fcap-memory(s)[21] else "";
+  // Caller-owned reasoning remains available through repair and context renewal.
+  def fcap-reasoning(s) = if (len(fcap-memory(s)) >= 23) then fcap-memory(s)[22] else [0,0];
+  def fcap-with-reasoning(s,limits) {
+   let padded = fcap-with-context-evidence(s,fcap-context-evidence(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),22),[limits]));
+  }
+  // A failed source check remains open across diagnosis, planning and renewal.
+  // A fresh passing source check closes it; a role change cannot do so.
+  def fcap-source-repair-open(s) = if (len(fcap-memory(s)) >= 24) then fcap-memory(s)[23] else 0;
+  def fcap-source-check-memory(s) {
+   let padded = fcap-with-reasoning(s,fcap-reasoning(s));
+   let checked=fcap-with-memory(padded,append(fat-take(fcap-memory(padded),23),[fcap-source-repair-open(s)]));
+   let feedback=fcap-with-memory(checked,append(fat-take(fcap-memory(checked),24),[fcap-caller-feedback(s)]));
+   len(fcap-memory(feedback)) < fcap-source-reading-slot() ? fcap-with-memory(feedback,append(fcap-memory(feedback),[[]])) : feedback;
+  }
+  // json-serves: the next process that reads this checkpoint. text: the catalog is canonical bytes, so the match does not depend on a node that dies with this process.
+  def fcap-track-source-check(s,result) = if fcap-reviewing(s) then s else {
+   let padded=fcap-source-check-memory(s);
+   let checked=fcap-with-memory(padded,append(fat-take(fcap-memory(padded),23),[(!result[0])]));
+   let reading=json-emit(json-node-object([json-node-pair("passed",json-node-int(result[0])),json-node-pair("document_catalog",json-node-array(fcap-document-catalog(fcap-docs(s)))),json-node-pair("observation",json-node-string(result[0] ? result[1] : "Failed source assertion; exact evidence remains in the failure observation."))]));
+   fcap-with-memory(checked,append(fat-take(fcap-memory(checked),fcap-source-reading-slot()),[reading]));
+  };
+  // Slot 25 belongs to the live turn guard and its retained decoding history.
+  def fcap-source-reading-slot() = 26;
+  // json-serves: the model packet. text: the retained reading is those checkpoint bytes, compared with the catalog this context would render.
+  def fcap-source-reading(s) = len(fcap-memory(s)) <= fcap-source-reading-slot() ? json-node-null() : {
+   let reading=parse-json("retained-source-check",fcap-memory(s)[fcap-source-reading-slot()]);
+   let same=json-emit(json-object-get(reading,"document_catalog"))==json-emit(json-node-array(fcap-document-catalog(fcap-docs(s))));
+   json-node-object(append(json-object-pairs(reading),[json-node-pair("matches_current_documents",json-node-int(same)),json-node-pair("scope",json-node-string("Named caller assertions on the retained source identities; inspect current execution and any uncovered finding separately."))]));
+  };
+  def fcap-with-context-evidence(s,digest) {
+   let padded = fcap-with-json-repairs(s,fcap-json-repairs(s));
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),21),[digest]));
+  }
+  def fcap-evidence-id(s) = hex-encode(sha256-stream-string(fcap-evidence(s)));
+  def fcap-admit-evidence(s) = if (fcap-awaiting-native-review(s) || ((Comparable) fcap-failures(s) == 0)) then s else fcap-with-context-evidence(s,fcap-evidence-id(s));
+  // json-serves: the rehearsal record. text: the row was stored as the bytes the public result emits, and this reads that same row back.
+  def fcap-rehearsed(rows,path,digest) = if nil?(rows) then 0 else {
+   let row = parse-json("native-rehearsal",rows[0]);
+   ((((String) fcap-string(row,"path") == path) && ((String) fcap-string(row,"before_sha256") == digest)) || fcap-rehearsed(rows[1:],path,digest));
+  };
+  def fcap-tools-assisted(s,obj,checker) {
+   let next = fcap-repair-edit-checked(s,fcap-tool(s,obj),obj,checker);
+   let args = fcap-array(obj,"arguments");
+   if (!((fcap-rehearsal-budget(s) > 0) && (((String) fcap-string(obj,"tool") == "edit") && (((Comparable) len(args) == 3) && (fcap-tool-allowed(s,"edit",args) && (((String) fcap-stage(next) == "repair") && (str_find(fcap-note(next),"edit-unchanged:",0) >= 0))))))) then next else {
+    let doc = fat-find-doc(fcap-docs(s),args[0]);
+    let digest = hex-encode(sha256-stream-string(doc[2]));
+    if ((!fcbmr-relevant([doc])) || fcap-rehearsed(fcap-rehearsals(s),args[0],digest)) then next else fcap-auto-rehearse(next,doc,digest,checker);
+   };
+  }
+  // A real repair edit is already an action. Record its observed provenance
+  // and check the changed candidate now, without a role-only model round trip.
+  // Failed/no-op tools and repeated counterexamples retain their own boundary.
+  def fcap-repair-edit-checked(s,next,obj,checker) = if (!((((String) fcap-stage(s) == "repair") || fcap-source-repair-open(s)) && ((!fcap-reviewing(s)) && (fat-has(["implement","repair"],fcap-stage(next)) && (((Comparable) fcap-failures(s) == fcap-failures(next)) && (!((Value) fcap-docs(s) == fcap-docs(next)))))))) then next else {
+   let applied = ("Native controller observed the model tool apply: " + (fcap-string(obj,"tool") + (" " + fcap-array(obj,"arguments")[0])));
+   let recorded = if ((String) fcap-stage(s) == "repair") then fcap-repaired(next,"Native controller retained the failure evidence; no model diagnosis was supplied with this action.",applied,"implement") else next;
+   let checked = fcap-verify-observed(recorded,fcap-source-check(recorded,checker));
+   append(fat-take(checked,9),cons(fcap-turns(next),fat-drop(checked,10)));
+  };
+  // json-serves: a search whose stdout is text, and the model note. text: a returned value cell is used; text is only a cell-less stdout, and the summary is the sentence the model reads.
+  def fcap-auto-rehearse(s,doc,digest,checker) {
+   let sourceChecker = if (len(checker) >= 4) then [checker[2],checker[3]] else checker;
+   let action = fcap-control((now_unix_ms() + fcap-turns(s)),[fcap-checks(s),fcap-rehearsal-budget(s)],1);
+   if (!((Comparable) action == 1)) then s else {
+    let searched = fcbvs-call(fcap-docs(s),[doc[1],fcap-rehearsal-budget(s).str()],"",sourceChecker);
+    let result = searched[0]; let used = searched[1];
+    let trace = if fat-has-value?(result) then fat-value(result) else if faj-valid(fat-out(result)) then parse-json("native-search",fat-out(result)) else json-node-object([]);
+    let attempts = node_children(json-object-get(trace,"attempts"));
+    let passed = (((Comparable) fat-exit(result) == 0) && ((String) fat-error(result) == ""));
+    let summary = json-node-object([json-node-pair("source",json-node-string("caller-enabled-native-rehearsal")),json-node-pair("path",json-node-string(doc[1])),json-node-pair("before_sha256",json-node-string(digest)),json-node-pair("status",json-node-string(if passed then fcap-string(trace,"status") else "failed")),json-node-pair("checks_run",json-node-int(used)),json-node-pair("exit",json-node-int(fat-exit(result))),json-node-pair("stderr",json-node-string(fat-error(result))),json-node-pair("last_check",if nil?(attempts) then json-node-null() else reverse(attempts)[0]),json-node-pair("current_source",fcap-read-node(doc,fat-ok(fat-find-doc(fat-documents(result),doc[1])[2],fat-documents(result)))),json-node-pair("next",json-node-string(if passed then "Native candidate passed the caller source checks. Inspect the actual change, finish the original task, and retain review and final verification." else "Native rehearsal did not repair this source. Inspect the retained failure and choose a different approach; the original source remains."))]);
+    let event = json-node-object([json-node-pair("path",json-node-string(doc[1])),json-node-pair("before_sha256",json-node-string(digest)),json-node-pair("trigger",json-node-string(fcap-note(s))),json-node-pair("summary",summary),json-node-pair("result",fcap-result-node(result))]);
+    let counted = fcap-with-rehearsal-budget(fcap-count-checks(s,used),(fcap-rehearsal-budget(s) - used));
+    let recorded = fcap-with-rehearsals(counted,append(fcap-rehearsals(s),[json-emit(event)]));
+    fcap-control((now_unix_ms() + fcap-turns(s)),[used,fat-exit(result)],0);
+    fcap-inherit(recorded,fcap-state(if passed then "implement" else "repair",s[1],s[2],fat-documents(result),s[4],s[5],s[6],s[7],json-emit(summary),fcap-turns(s),fcap-calls(s),s[11]));
+   };
+  }
+  // A failed implementation verify already supplies a real repair trigger.
+  // A single writable BML document identifies the search target without
+  // guessing which source an arbitrary caller diagnostic refers to.
+  def fcap-rehearsal-targets(s,docs) = if nil?(docs) then [] else {
+   let doc = docs[0];
+   let rest = fcap-rehearsal-targets(s,docs[1:]);
+   if (fcbmr-relevant([doc]) && fcap-tool-allowed(s,"rehearse-bml",[doc[1]])) then cons(doc,rest) else rest;
+  };
+  def fcap-verify-assisted(s,result,checker) {
+   let next = fcap-verify-observed(s,result);
+   if (!((fcap-rehearsal-budget(s) > 0) && (((String) fcap-stage(s) == "implement") && ((!fcap-reviewing(s)) && (fcap-check-shape?(result) && ((!result[0]) && ((String) fcap-stage(next) == "repair"))))))) then next else {
+    let targets = fcap-rehearsal-targets(s,fcap-docs(s));
+    if (!((Comparable) len(targets) == 1)) then next else {
+     let doc = targets[0]; let digest = hex-encode(sha256-stream-string(doc[2]));
+     if fcap-rehearsed(fcap-rehearsals(s),doc[1],digest) then next else fcap-auto-rehearse(next,doc,digest,checker);
+    };
+   };
+  }
+  // json-serves: the caller checker. text: the retained report is the string that checker was given.
+  def fcap-amendable(s) = (fcap-reviewing(s) && (((String) fcap-stage(s) == "repair") && faj-valid(fcap-report(s))));
+  def fcap-amend-pairs(s) = if (!fcap-amendable(s)) then [] else [json-node-pair("report_amend",json-node-object([json-node-pair("base",json-node-string(fcra-id(fcap-report(s)))),json-node-pair("instruction",json-node-string("For a small correction, submit fcap-native-reply([[\"report_amend\",record_new(0,\"base\",base,\"text_edits\",[record_new(0,\"path\",[\"answer\"],\"old\",exact_unique_text,\"new\",corrected_text)])]]). Empty new text deletes it. For a whole value, use replacements with path and value instead of text_edits. Paths select existing keys or integer array indexes and must not overlap. Original checks rerun on the complete report. You choose edits; Form applies them."))]))];
+  // json-serves: the caller checker. text: an amendment is an edit of the report string that checker re-reads.
+  def fcap-amend(s,obj,checker) = if (!fcap-amendable(s)) then fcap-revise(s,"Report amendments require a retained JSON report in review repair. Submit the full report for native review continuation.") else if (!((Value) s[2] == fcap-docs(s))) then fcap-terminal(s,"read-only-review-documents-changed") else {
+   let result = fcra-apply(fcap-report(s),obj);
+   if (!result[0]) then fcap-revise(s,("Report amendment refused: " + result[2])) else fcap-amend-submit(s,obj,json-emit(result[1]),checker);
+  };
+  // json-serves: the public amendment receipt. text: the receipt is the before, the edit, and the candidate the checker stored.
+  def fcap-amend-submit(s,obj,candidate,checker) {
+   let submitted = fcap-count-check(fcap-provenance(fcap-with-report(s,candidate),fcap-native-repairs(s),"model-amendment"));
+   let checked = fcap-check-state(submitted,checker);
+   let recorded = fcap-with-amendments(submitted,append(fcap-amendments(s),[[fcap-report(s),json-emit(obj),candidate,if fcap-check-shape?(checked) then checked else []]]));
+   fcap-submitted(recorded,checker,checked);
+  }
+  def fcap-amendments-json(rows) = if nil?(rows) then [] else {
+   let row = rows[0];
+   let check = if nil?(row[3]) then json-node-null() else json-node-object([json-node-pair("passed",json-node-int(row[3][0])),json-node-pair("observation",json-node-string(row[3][1]))]);
+   let event = json-node-object([json-node-pair("before",json-node-string(row[0])),json-node-pair("message",json-node-string(row[1])),json-node-pair("candidate",json-node-string(row[2])),json-node-pair("check",check)]);
+   cons(event,fcap-amendments-json(rows[1:]));
+  };
+  // Recipes construct semantic Form nodes. The existing dispatch reads their
+  // fields directly; JSON text is confined to the external source/result doors.
+  // The call cell has one constructor, form-token-tool.bml's: eval and the tool control build the same cell.
+  def fcap-native-tool(tool,args,input) = ftt-action(tool,args,input);
+  def fcap-native-reply(fields) = intern_node(ftw-cat("form-code-reply"),[ftw-encode(fields)]);
+  def fcap-node-reference(raw) {
+   let controls=ftg-scan(raw);
+   let tail=fat-trim(nil?(controls) ? raw : substring(raw,controls[-1][3],len(raw)));
+   fat-starts(tail,"@") ? tail : nothing();
+  }
+  def fcap-node-address?(raw) = !nothing?(fcap-node-reference(raw));
+  def fcap-address-node(raw) = try ftv-held(ftg-lane-session("code"),fcap-node-reference(raw)) catch nothing();
+  def fcap-native-value(value) = value_kind(value)=="string" ? json-node-string(value) : value_kind(value)=="int" ? json-node-int(value) : value_kind(value)=="list" ? json-node-array(value |> map(v=>fcap-native-value(v))) : value_kind(value)=="record" ? json-node-object(record_keys(value) |> map(k=>json-node-pair(k,fcap-native-value(record_get(value,k))))) : value_kind(value)=="node_id" ? value : nothing?(value) ? json-node-null() : nothing();
+  def fcap-native-fields?(fields) = value_kind(fields)=="list" && all?(pair=>value_kind(pair)=="list" && len(pair)==2 && value_kind(pair[0])=="string" && !nothing?(fcap-native-value(pair[1])),fields);
+  // The cell's pairs are the share. A JSON object is built only for a reader that asked for text.
+  def fcap-share?(value) = (String) value_kind(value) == "string" || (String) value_kind(value) == "int" || (String) value_kind(value) == "node_id" || nothing?(value) || ((String) value_kind(value) == "list" && all?(fcap-share?, value)) || ((String) value_kind(value) == "record" && all?(k => fcap-share?(record_get(value, k)), record_keys(value)));
+  def fcap-pairs?(fields) = (String) value_kind(fields) == "list" && all?(pair => (String) value_kind(pair) == "list" && (Comparable) len(pair) == 2 && (String) value_kind(pair[0]) == "string" && fcap-share?(pair[1]), fields);
+  def fcap-cell-fields(node) = nothing?(node) ? nothing() : {
+   let kids = node_children(node);
+   let category = ftw-cat-name(node_category(node));
+   let fields = category == "form-code-action" && (Comparable) len(kids) == 3 ? [["tool", ftw-decode(kids[0])], ["arguments", ftw-decode(kids[1])], ["input", ftw-decode(kids[2])]] : category == "form-code-reply" && (Comparable) len(kids) == 1 ? ftw-decode(kids[0]) : nothing();
+   fcap-pairs?(fields) ? fields : nothing();
+  };
+  def fcap-has-field(fields, key) = any?(p => (String) p[0] == key, fields);
+  def fcap-field-go(fields, key) = nil?(fields) ? nothing() : (String) fields[0][0] == key ? fields[0][1] : fcap-field-go(fields[1:], key);
+  def fcap-field(fields, key) = fcap-field-go(fields, key);
+  def fcap-field-string(fields, key) {
+   let v = fcap-field(fields, key);
+   !nothing?(v) && (String) value_kind(v) == "string" ? v : "";
+  }
+  def fcap-field-strings?(fields, key) {
+   let v = fcap-field(fields, key);
+   (String) value_kind(v) == "list" && all?(a => (String) value_kind(a) == "string", v);
+  }
+  def fcap-node-object(node) = nothing?(node) ? nothing() : {
+   let kids=node_children(node); let category=ftw-cat-name(node_category(node));
+   let fields=category=="form-code-action" && len(kids)==3 ? [["tool",ftw-decode(kids[0])],["arguments",ftw-decode(kids[1])],["input",ftw-decode(kids[2])]] : category=="form-code-reply" && len(kids)==1 ? ftw-decode(kids[0]) : nothing();
+   !fcap-native-fields?(fields) ? nothing() : json-node-object(fields |> map(pair=>json-node-pair(pair[0],fcap-native-value(pair[1]))));
+  };
+  def fcap-response-object(s,obj,checker) = if (fat-wire-object?(obj) && json-object-has?(obj,"report_amend")) then fcap-amend(s,obj,checker) else fcap-object(s,faj-normalize(obj),checker);
+  def fcap-args-text?(args) = (String) value_kind(args) == "list" && all?(a => (String) value_kind(a) == "string", args);
+  def fcap-act(s, tool, args, input, checker) = if !((String) value_kind(tool) == "string" && fcap-args-text?(args) && (String) value_kind(input) == "string") then fcap-revise(s, "Tool arguments must be an array of strings.") else if (String) tool == "verify" then (nil?(args) && (String) input == "" ? fcap-verify-assisted(s, fcap-source-check(s, checker), checker) : fcap-revise(s, nil?(args) ? "verify takes no input; the caller owns its checks." : "verify takes no arguments; the caller owns its checks.")) else if (String) tool == "rehearse-bml" then ((String) input == "" ? fcap-rehearse-values(s, args, checker) : fcap-revise(s, "rehearse-bml takes empty input.")) else fcap-assisted(s, tool, args, input, checker);
+  def fcap-rehearse-values(s, args, checker) = if !fcap-tool-allowed(s, "rehearse-bml", args) then fcap-tool-observed(s, "rehearse-bml", args, "", fat-fail(fcap-reviewing(s) ? "caller-review-read-only" : "caller-writable-set", fcap-docs(s))) else {
+   let sourceChecker = if (len(checker) >= 4) then [checker[2], checker[3]] else checker;
+   let action = fcap-control((now_unix_ms() + fcap-turns(s)), [fcap-checks(s), fcap-failures(s)], 1);
+   let result = if ((Comparable) action == 1) then fcbvs-call(fcap-docs(s), args, "", sourceChecker) else [fat-fail("native-rehearsal-branch-unavailable", fcap-docs(s)), 0];
+   fcap-control((now_unix_ms() + fcap-turns(s)), [result[1], fat-exit(result[0])], 0);
+   fcap-tool-observed(fcap-count-checks(s, result[1]), "rehearse-bml", args, "", result[0]);
+  };
+  def fcap-repair-applied(s, next, tool, args, checker) = if (!((((String) fcap-stage(s) == "repair") || fcap-source-repair-open(s)) && ((!fcap-reviewing(s)) && (fat-has(["implement", "repair"], fcap-stage(next)) && (((Comparable) fcap-failures(s) == fcap-failures(next)) && (!((Value) fcap-docs(s) == fcap-docs(next)))))))) then next else {
+   let applied = "Native controller observed the model tool apply: " + (tool + (" " + args[0]));
+   let recorded = if ((String) fcap-stage(s) == "repair") then fcap-repaired(next, "Native controller retained the failure evidence; no model diagnosis was supplied with this action.", applied, "implement") else next;
+   let checked = fcap-verify-observed(recorded, fcap-source-check(recorded, checker));
+   append(fat-take(checked, 9), cons(fcap-turns(next), fat-drop(checked, 10)));
+  };
+  def fcap-assisted(s, tool, args, input, checker) {
+   let next = fcap-repair-applied(s, fcap-tool-ready(s, tool, args, input), tool, args, checker);
+   if (!((fcap-rehearsal-budget(s) > 0) && (((String) tool == "edit") && (((Comparable) len(args) == 3) && (fcap-tool-allowed(s, "edit", args) && (((String) fcap-stage(next) == "repair") && (str_find(fcap-note(next), "edit-unchanged:", 0) >= 0))))))) then next else {
+    let doc = fat-find-doc(fcap-docs(s), args[0]);
+    let digest = hex-encode(sha256-stream-string(doc[2]));
+    if ((!fcbmr-relevant([doc])) || fcap-rehearsed(fcap-rehearsals(s), args[0], digest)) then next else fcap-auto-rehearse(next, doc, digest, checker);
+   };
+  };
+  def fcap-object(s, obj, checker) = if (!fat-wire-object?(obj)) then fcap-revise(s, "Response must be an object.") else if json-object-has?(obj, "tool") then if ((String) fcap-string(obj, "tool") == "verify") then fcap-verify-tool(s, obj, checker) else if ((String) fcap-string(obj,"tool") == "rehearse-bml") then fcap-rehearse(s,obj,checker) else fcap-tools-assisted(s,obj,checker) else fcap-role(s, obj, checker);
+  def fcap-count-checks(s,n) = if (n <= 0) then s else fcap-count-checks(fcap-count-check(s),(n - 1));
+  def fcap-rehearse(s,obj,checker) = if (!fcap-string-array(json-object-get(obj,"arguments"))) then fcap-revise(s,"rehearse-bml arguments must be strings.") else if (json-object-has?(obj,"input") && (!(fat-wire-string?(json-object-get(obj,"input")) && ((String) fcap-string(obj,"input") == "")))) then fcap-revise(s,"rehearse-bml takes empty input.") else {
+   let args = fcap-array(obj,"arguments");
+   if (!fcap-tool-allowed(s,"rehearse-bml",args)) then fcap-tool-observed(s,"rehearse-bml",args,"",fat-fail(fcap-reviewing(s) ? "caller-review-read-only" : "caller-writable-set", fcap-docs(s))) else {
+    let sourceChecker = if (len(checker) >= 4) then [checker[2],checker[3]] else checker;
+    let action = fcap-control((now_unix_ms() + fcap-turns(s)),[fcap-checks(s),fcap-failures(s)],1);
+    let result = if ((Comparable) action == 1) then fcbvs-call(fcap-docs(s),args,"",sourceChecker) else [fat-fail("native-rehearsal-branch-unavailable",fcap-docs(s)),0];
+    fcap-control((now_unix_ms() + fcap-turns(s)),[result[1],fat-exit(result[0])],0);
+    fcap-tool-observed(fcap-count-checks(s,result[1]),"rehearse-bml",args,"",result[0]);
+   };
+  };
+  def fcap-check-shape?(result) = if (!((String) value_kind(result) == "list")) then 0 else if (!((Comparable) len(result) == 2)) then 0 else ((((Value) result[0] == 0) || ((Value) result[0] == 1)) && ((String) value_kind(result[1]) == "string"));
+  def fcap-check-passed?(result) = (fcap-check-shape?(result) && ((Value) result[0] == 1));
+  // verify invokes only the caller's already-bound callback. It accepts no
+  // source, command, path or replacement contract from the model.
+  def fcap-verify-tool(s, obj, checker) = if (!fcap-string-array(json-object-get(obj, "arguments"))) then fcap-revise(s, "verify arguments must be an empty array.") else if (!nil?(fcap-array(obj, "arguments"))) then fcap-revise(s, "verify takes no arguments; the caller owns its checks.") else if (json-object-has?(obj, "input") && (!(fat-wire-string?(json-object-get(obj, "input")) && ((String) fcap-string(obj, "input") == "")))) then fcap-revise(s, "verify takes no input; the caller owns its checks.") else fcap-verify-assisted(s, fcap-source-check(s, checker),checker);
+  def fcap-source-check(s, checker) = if (len(checker) >= 4) then fcap-check(checker[2], checker[3], fcap-docs(s)) else if fcap-reviewing(s) then [0, "No source-only verification callback was supplied; the report checker runs on submission."] else fcap-check(checker[0], checker[1], fcap-docs(s));
+  def fcap-verify-observed(s, result) = fcap-verify-counted(fcap-count-check(s), result);
+  def fcap-verify-counted(s, result) = if (!fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else fcap-tool-observed(fcap-track-source-check(s,result), "verify", [], "", fat-result(if result[0] then 0 else 2, result[1], if result[0] then "" else "caller verification refused", fcap-docs(s)));
+  def fcap-role(s, obj, checker) = if ((String) fcap-stage(s) == "refine") then fcap-refine(s, fcap-string(obj, "brief")) else if ((String) fcap-stage(s) == "plan") then fcap-plan(s, fcap-string(obj, "plan")) else if ((String) fcap-stage(s) == "split") then fcap-split(s, obj) else if ((String) fcap-stage(s) == "implement") then fcap-implemented-checked(s, obj, checker) else if ((String) fcap-stage(s) == "review") then fcap-review(s, obj, checker) else if ((String) fcap-stage(s) == "repair") then fcap-review-repair(s, obj, checker) else fcap-terminal(s, "unknown-stage");
+  // The reply cell is already the pairs. The checker that still takes a report string is the emit.
+  def fcap-reply(s, fields, checker) = if ((String) fcap-stage(s) == "refine") then fcap-refine(s, fcap-field-string(fields, "brief")) else if ((String) fcap-stage(s) == "plan") then fcap-plan(s, fcap-field-string(fields, "plan")) else if ((String) fcap-stage(s) == "split") then fcap-split-fields(s, fields) else if ((String) fcap-stage(s) == "implement") then fcap-implemented-checked-fields(s, fields, checker) else if ((String) fcap-stage(s) == "review") then fcap-review-fields(s, fields, checker) else if ((String) fcap-stage(s) == "repair") then fcap-review-repair-fields(s, fields, checker) else fcap-terminal(s, "unknown-stage");
+  def fcap-review-repair(s,obj,checker) = if (fcap-reviewing(s) && json-object-has?(obj,"report")) then fcap-review(s,obj,checker) else fcap-repair(s,obj);
+  def fcap-review-repair-fields(s, fields, checker) = if (fcap-reviewing(s) && fcap-has-field(fields, "report")) then fcap-review-fields(s, fields, checker) else fcap-repair-fields(s, fields);
+  def fcap-refine(s, brief) = if ((Comparable) len(fat-trim(brief)) == 0) then fcap-revise(s, "Return a nonempty brief preserving the original goal and constraints.") else fcap-move(s, "plan", fcap-docs(s), [], brief, "", "Now plan from the original goal, brief and evidence.", fcap-calls(s), 0);
+  // Direct coding already has the caller's complete task. Replanning changes
+  // its approach; it does not require inventing that same task again.
+  // Planned task lists still pass through split so new dependencies can land.
+  def fcap-plan(s, plan) = if ((Comparable) len(fat-trim(plan)) == 0) then fcap-revise(s, "Return a nonempty plan including verification and dependencies.") else if ((Value) s[5] == [fcap-direct-task()]) then fcap-move(s, "implement", fcap-docs(s), s[5], s[6], plan, "Apply the revised plan to the pending caller task, then review and run the unchanged caller checks.", fcap-calls(s), s[11]) else fcap-move(s, "split", fcap-docs(s), [], s[6], plan, "Split into ordered, concrete tasks; avoid unnecessary fragmentation.", fcap-calls(s), s[11]);
+  def fcap-split(s, obj) = if (!fcap-string-array(json-object-get(obj, "tasks"))) then fcap-revise(s, "tasks must be a nonempty array of task strings in dependency order.") else fcap-split-tasks(s, fcap-array(obj, "tasks"));
+  def fcap-split-fields(s, fields) = if (!fcap-field-strings?(fields, "tasks")) then fcap-revise(s, "tasks must be a nonempty array of task strings in dependency order.") else fcap-split-tasks(s, fcap-field(fields, "tasks"));
+  def fcap-split-tasks(s, tasks) = if (nil?(tasks) || (!fcap-nonempty(tasks))) then fcap-revise(s, "No empty tasks; each task must name observable work.") else fcap-move(s, "implement", fcap-docs(s), tasks, s[6], s[7], if fcap-reviewing(s) then "Inspect the first pending task using read-only native tools; preserve every document." else "Implement the first pending task using native tools.", fcap-calls(s), s[11]);
+  def fcap-implemented-done(s, task) = if (!((String) task == "done")) then fcap-revise(s, "Use a native tool or return task=done after this task is implemented.") else if nil?(s[5]) then fcap-revise(s, "Pending task state is absent.") else fcap-move(s, if nil?(s[5][1:]) then "review" else "implement", fcap-docs(s), s[5][1:], s[6], s[7], if nil?(s[5][1:]) then "Review the actual documents against the original goal; inspect edge cases." else "Continue with the next pending task.", fcap-calls(s), (s[11] + 1));
+  def fcap-implemented(s, obj) = fcap-implemented-done(s, fcap-string(obj, "task"));
+  def fcap-implemented-fields(s, fields) = fcap-implemented-done(s, fcap-field-string(fields, "task"));
+  // Closing the last coding task observes today's candidate before review.
+  // This is one model reply and one caller check, never a fabricated tool call.
+  def fcap-implemented-checked(s,obj,checker) = fcap-implemented-next(s, fcap-implemented(s,obj), checker);
+  def fcap-implemented-checked-fields(s, fields, checker) = fcap-implemented-next(s, fcap-implemented-fields(s, fields), checker);
+  def fcap-implemented-next(s, next, checker) = if (fcap-reviewing(s) || (!((String) fcap-stage(next) == "review"))) then next else fcap-before-review(fcap-count-check(next), fcap-source-check(next, checker));
+  // json-serves: the model. text: the failure sentence is what the model reads; the note cell stays in the checkpoint.
+  def fcap-before-review(s,result) = if (!fcap-check-shape?(result)) then fcap-terminal(s,"caller-checker-returned-malformed-result") else {
+   let wire = fat-result(if result[0] then 0 else 2,result[1],if result[0] then "" else "caller verification refused",fcap-docs(s));
+   let message = if result[0] then "Current implementation passed the caller source checks. Earlier failures describe earlier observations; review this candidate against the original goal. Final acceptance still runs the caller checks. " else "Current implementation failed the caller source checks before review. Repair this observed failure; earlier diagnostics may describe older source. ";
+   let detail=fcap-verification-node(s,wire);
+   let note=json-node-object([json-node-pair("message",json-node-string(message)),json-node-pair("detail",detail)]);
+   let observed = fcap-inherit(fcap-track-source-check(s,result),fcap-state(fcap-stage(s),s[1],s[2],fcap-docs(s),s[4],s[5],s[6],s[7],note,fcap-turns(s),fcap-calls(s),s[11]));
+   if result[0] then observed else {
+    let repaired=fcap-repair-state(observed,message+json-emit(detail));
+    append(repaired[0:8],cons(note,repaired[9:]));
+   };
+  };
+  def fcap-check(callback, contract, docs) = callback(contract, docs);
+  // json-serves: the review checker. text: that checker takes a report string, so an object report is rendered once here.
+  def fcap-report-text(obj) = if (fat-wire-object?(json-object-get(obj,"report")) || fat-wire-array?(json-object-get(obj,"report"))) then json-emit(json-object-get(obj,"report")) else fcap-string(obj,"report");
+  // json-serves: the review checker. text: only the report field is rendered; the rest of the reply stays pairs.
+  def fcap-field-report(fields) {
+   let v = fcap-field(fields, "report");
+   nothing?(v) ? "" : (String) value_kind(v) == "string" ? v : json-emit(fcap-native-value(v));
+  }
+  // json-serves: the review checker, when the reply has no separate report. text: the checker takes one string, so the pairs are rendered once at that handoff.
+  def fcap-fields-text(fields) = json-emit(json-node-object(fields |> map(pair => json-node-pair(pair[0], fcap-native-value(pair[1])))));
+  // json-serves: the review checker. text: a reply that is itself the report is rendered once for the checker that stores a string.
+  def fcap-review(s, obj, checker) = if (fcap-reviewing(s) && (!json-object-has?(obj,"verdict"))) then fcap-review-report(s,if json-object-has?(obj,"report") then fcap-report-text(obj) else json-emit(obj),checker) else if ((String) fcap-string(obj, "verdict") == "reject") then if ((Comparable) len(fat-trim(fcap-string(obj, "reason"))) == 0) then fcap-revise(s, "A rejection needs concrete findings.") else fcap-review-findings(s,fcap-string(obj,"reason")) else if (!((String) fcap-string(obj, "verdict") == "accept")) then fcap-revise(s, "Return verdict=accept or reject and a concrete reason.") else if fcap-reviewing(s) then fcap-review-report(s,fcap-report-text(obj),checker) else fcap-code-accept(s,obj,checker);
+  def fcap-review-fields(s, fields, checker) = if (fcap-reviewing(s) && (!fcap-has-field(fields, "verdict"))) then fcap-review-report(s, if fcap-has-field(fields, "report") then fcap-field-report(fields) else fcap-fields-text(fields), checker) else if ((String) fcap-field-string(fields, "verdict") == "reject") then if ((Comparable) len(fat-trim(fcap-field-string(fields, "reason"))) == 0) then fcap-revise(s, "A rejection needs concrete findings.") else fcap-review-findings(s, fcap-field-string(fields, "reason")) else if (!((String) fcap-field-string(fields, "verdict") == "accept")) then fcap-revise(s, "Return verdict=accept or reject and a concrete reason.") else if fcap-reviewing(s) then fcap-review-report(s, fcap-field-report(fields), checker) else fcap-code-accept-reason(s, fcap-field-string(fields, "reason"), checker);
+  // json-serves: the coding checker. text: the retained review is the string that checker stores and re-reads.
+  def fcap-coding-review-reason(s, reason) = json-emit(json-node-object([json-node-pair("schema",json-node-string("native-coding-review-v1")),json-node-pair("verdict",json-node-string("accept")),json-node-pair("reason",json-node-string(reason)),json-node-pair("goal_sha256",json-node-string(hex-encode(sha256-stream-string(s[1])))),json-node-pair("documents",json-node-array(fcap-document-catalog(fcap-docs(s)))),json-node-pair("scope",json-node-string("submitted review of these documents; its explanation and caller checks have separate scope"))]));
+  def fcap-coding-review(s,obj) = fcap-coding-review-reason(s, fcap-string(obj, "reason"));
+  def fcap-code-accept-reason(s, reason, checker) = if ((Value) s[2] == fcap-docs(s)) then fcap-rework(s,"No implementation change exists; a verbal acceptance is not completion.") else if ((Comparable) len(fat-trim(reason)) == 0) then fcap-revise(s,"An acceptance needs concrete findings against the original goal. Supply a nonempty reason; passing caller checks alone does not establish every requested behavior.") else fcap-submit(fcap-with-report(s, fcap-coding-review-reason(s, reason)), checker);
+  def fcap-code-accept(s,obj,checker) = fcap-code-accept-reason(s, fcap-string(obj, "reason"), checker);
+  def fcap-review-findings(s,reason) = if (!fcap-reviewing(s)) then fcap-rework(s,("Review findings: " + reason)) else fcap-revise(s,("Read-only finding retained: " + (reason + "\nThe inspected source stays unchanged. Negative findings belong in your native report cell with any proposed correction. Submit that report to run caller checks; this does not approve the inspected source.")));
+  def fcap-review-report(s, report, checker) = if (!((Value) s[2] == fcap-docs(s))) then fcap-terminal(s, "read-only-review-documents-changed") else if ((Comparable) len(fat-trim(report)) == 0) then fcap-revise(s, "Submit a nonempty report; a phase verdict is not the review result.") else fcap-submit(fcap-with-report(s, report), checker);
+  // A review checker receives [documents, report]; a coding checker retains
+  // its original documents-only signature. Neither is supplied by the model.
+  def fcap-check-state(s, checker) = fcap-check(checker[0], checker[1], if fcap-reviewing(s) then [fcap-docs(s), fcap-report(s)] else fcap-docs(s));
+  def fcap-submit(s, checker) = fcap-submitted(fcap-count-check(s),checker,fcap-check-state(s,checker));
+  // Optional checker entries 4/5 are a caller-owned native repair callback and
+  // contract. The model cannot supply either. One attempt per failed submission;
+  // every changed report runs the original complete checker again.
+  def fcap-submitted(s,checker,result) = if (fcap-reviewing(s) && ((len(checker) >= 6) && (fcap-check-shape?(result) && (!result[0])))) then fcap-native-attempt(fcap-verified(s,result),checker,result) else fcap-verified(s,result);
+  def fcap-native-attempt(s,checker,failed) = if fcap-done(s) then s else {
+   let callback = checker[4];
+   let proposal = callback(checker[5],[fcap-docs(s),fcap-report(s),failed[1]]);
+   let next = fcap-native-proposed(s,checker,proposal,fcap-report-check-evidence(fcap-report(s),failed));
+   // Native work stays inside this submitted turn; its checks have their own count.
+   append(append(fat-take(next,9),[fcap-turns(s)]),fat-drop(next,10));
+  };
+  def fcap-native-shape(proposal) = if (!((String) value_kind(proposal) == "list")) then 0 else if (!(((Comparable) len(proposal) == 4) || ((Comparable) len(proposal) == 5))) then 0 else ((if ((Comparable) len(proposal) == 5) then ((Value) proposal[4] == "review") else 1) && ((((Value) proposal[0] == 0) || ((Value) proposal[0] == 1)) && (((String) value_kind(proposal[1]) == "string") && (((String) value_kind(proposal[2]) == "string") && ((len(proposal[2]) > 0) && ((String) value_kind(proposal[3]) == "string"))))));
+  def fcap-native-continue(proposal) = (((Comparable) len(proposal) == 5) && ((Value) proposal[4] == "review"));
+  def fcap-native-review-task() = "Complete the original report from the verified native proposal and its paired evidence.";
+   def fcap-native-review-instruction() = "The native candidate passed the supplied checks. Use native_review to distinguish the rejected submission, verified candidate and each check's scope. Complete the original report and causal explanation, preserving the proposal and source documents. " + fcrg-submit("[[\"report\",complete_report]]") + "; unchanged caller checks run again. These checks do not prove general semantic quality.";
+  def fcap-native-proposed(s,checker,proposal,before) = if (!fcap-native-shape(proposal)) then fcap-terminal(fcap-record-native-evidence(s,"caller-native-repair","malformed","native repair callback returned a malformed proposal",fcap-report-source(s),before,[]),"caller-native-repair-returned-malformed-proposal") else if (!proposal[0]) then fcap-record-native-evidence(s,proposal[2],"declined",proposal[3],fcap-report-source(s),before,[]) else if (((Comparable) len(fat-trim(proposal[1])) == 0) || ((String) proposal[1] == fcap-report(s))) then fcap-record-native-evidence(s,proposal[2],"unchanged",proposal[3],fcap-report-source(s),before,[]) else fcap-native-recheck(fcap-count-check(fcap-with-report(s,proposal[1])),checker,proposal,before);
+  def fcap-native-recheck(s,checker,proposal,before) {
+   let checked = fcap-check-state(s,checker);
+   let continue = (fcap-check-passed?(checked) && fcap-native-continue(proposal));
+   let observed = fcap-record-native-evidence(s,proposal[2],if continue then "accepted-for-review" else if fcap-check-passed?(checked) then "accepted" else "rejected",proposal[3],"caller-native-repair",before,fcap-report-check-evidence(fcap-report(s),checked));
+   if continue then fcap-move(observed,"review",fcap-docs(observed),[fcap-native-review-task()],observed[6],observed[7],fcap-native-review-task(),fcap-calls(observed),observed[11]) else fcap-verified(observed,checked);
+  }
+  def fcap-native-evidence-json(row,index) = if ((len(row) <= index) || nil?(row[index])) then json-node-null() else {
+   let evidence = row[index];
+   let result = evidence[1];
+   let valid = fcap-check-shape?(result);
+   json-node-object([json-node-pair("report",json-node-string(evidence[0])),json-node-pair("check_status",json-node-string(if valid then "observed" else "malformed")),json-node-pair("check",if valid then json-node-object([json-node-pair("passed",json-node-int(result[0])),json-node-pair("observation",json-node-string(result[1]))]) else json-node-null())]);
+  };
+  def fcap-native-event-json(row,before) = json-node-object([json-node-pair("method",json-node-string(row[0])),json-node-pair("status",json-node-string(row[1])),json-node-pair("observation",json-node-string(row[2])),json-node-pair("check_runs",json-node-int(row[3])),json-node-pair("before",before),json-node-pair("after",fcap-native-evidence-json(row,5))]);
+  def fcap-native-repairs-json(rows) = rows |> map(row => fcap-native-event-json(row,fcap-native-evidence-json(row,4)));
+  def fcap-native-review-before(s,bootstrap) {
+   let before = fcap-native-evidence-json(fcap-last-native(s),4);
+   if (bootstrap || (!((Comparable) fcap-context-native-submission(s) == len(fcap-native-repairs(s))))) then before else json-node-object([json-node-pair("report_reference",json-node-string("preceding-submission")),json-node-pair("check_status",json-object-get(before,"check_status")),json-node-pair("check",json-object-get(before,"check"))]);
+  }
+  def fcap-verified(s, result) = if (!fcap-check-shape?(result)) then fcap-terminal(s, "caller-checker-returned-malformed-result") else if (!((Comparable) result[0] == 1)) then fcap-rework(fcap-track-source-check(s,result), ("Native verification failed: " + result[1])) else fcap-note-at(fcap-track-source-check(s,result), "complete", result[1]);
+  def fcap-rework(s, reason) = fcap-repair-state(fcap-note-at(s, fcap-stage(s), reason), reason);
+  def fcap-incomplete-prefix() = "Incomplete local reply: ";
+  def fcap-observation-capacity-prefix() = "Native observation capacity: ";
+  // A native tool's result is bounded, never dropped. When the lane does not let it into the decoder whole (larger
+  // than the observation cap, or larger than the room the context has left: form-cli-code-live.bml
+  // fcac-focus-observation), an exact source page carries byte coordinates,
+  // resident identity and an executable continuation. Other query results
+  // retain counts, identity and clipped first/last lines. The exact bytes
+  // stay in the private evidence the caller names, and the document stays whole in the tools. A verification or
+  // check note (it carries verification_scope) is never read as a tool result here: failed-check evidence stays
+  // complete.
+  def fcap-cause-window() = "observation-exceeds-live-context";
+  def fcap-cause-cap() = "observation-exceeds-note-cap";
+  def fcap-excerpt-head() = 12;
+  def fcap-excerpt-tail() = 6;
+  def fcap-excerpt-line() = 200;
+  // a clip never splits a UTF-8 sequence: the cut steps back over continuation bytes
+  def fcap-clip-at(text,i) = if ((i > 0) && ((str_byte_at(text,i) >= 128) && (str_byte_at(text,i) < 192))) then fcap-clip-at(text,(i - 1)) else i;
+  def fcap-clip(text,n) = if (len(text) <= n) then text else substring(text,0,fcap-clip-at(text,n));
+  // the tool result a note carries: its object (the note itself, or the observation a repaired call wrapped), or nothing()
+  // json-serves: an older checkpoint whose note is still text. text: a note that is already a cell is used as that cell; the parse is only the older string.
+  def fcap-observation-result(s) {
+   let obj = value_kind(s[8])=="node_id" ? s[8] : {
+    let note=s[8]; let at=str_find(note,"{",0);
+    let raw=at<0 ? "" : substring(note,at,len(note));
+    at<0 || !faj-valid(raw) ? json-node-object([]) : parse-json("retained-observation-result",raw);
+   };
+   let inner = if (fat-wire-object?(obj) && (json-object-has?(obj,"observation") && fat-wire-object?(json-object-get(obj,"observation")))) then json-object-get(obj,"observation") else obj;
+   if (fat-wire-object?(inner) && (json-object-has?(inner,"exit") && (json-object-has?(inner,"stdout") && (fat-wire-string?(json-object-get(inner,"stdout")) && (!json-object-has?(inner,"verification_scope")))))) then inner else nothing();
+  }
+  def fcap-result-stdout(result) = node_value(json-object-get(result,"stdout"));
+  def fcap-result-stderr(result) = if (json-object-has?(result,"stderr") && fat-wire-string?(json-object-get(result,"stderr"))) then node_value(json-object-get(result,"stderr")) else "";
+  def fcap-clip-lines(lines) = lines |> map(line => fcap-clip(line,fcap-excerpt-line()));
+  def fcap-lines-count(lines) = if ((len(lines) > 0) && ((String) lines[len(lines) - 1] == "")) then (len(lines) - 1) else len(lines);
+  // the document the last native call named (one of the lane's own documents), or ""
+  def fcap-excerpt-path(s) {
+   let signature = fcap-tool-history(s)[0];
+   let hits = if ((Comparable) len(signature) == 6) then filter(doc => fat-has(signature[1],doc[1]) || fat-has(signature[1],doc[0]),fcap-docs(s)) else [];
+   if nil?(hits) then "" else hits[0][1];
+  }
+  def fcap-read-call(path,offset,count,unit,digest) = json-node-object([fcap-shape-s("tool","read"),json-node-pair("arguments",json-node-array(fcap-string-json([path,offset.str(),count.str(),unit,digest]))),fcap-shape-s("input","")]);
+  def fcap-query-path(path) = path=="" ? [] : [fcap-shape-s("path",path),json-node-pair("find",json-node-object([fcap-shape-s("tool","rg"),json-node-pair("arguments",json-node-array(fcap-string-json(["-n","-F","SYMBOL",path]))),fcap-shape-s("input","")]))];
+  // a failed call's diagnostics ride in the bounded note, clipped: the stderr is what makes the failure intelligible
+  def fcap-stderr-pairs(result) {
+   let err = fcap-result-stderr(result);
+   if ((String) err == "") then [] else [fcap-shape-n("stderr_bytes",len(err)),fcap-shape-s("stderr",fcap-clip(err,800))];
+  }
+  // Source coordinates come from the executed call, never from searching for
+  // similar text. Check reconstruction before presenting a source continuation.
+  def fcap-source-span(s,result) {
+   let signature=fcap-tool-history(s)[0];
+   if len(signature)!=6 || node_value(json-object-get(result,"exit"))!=0 then [] else {
+    let tool=signature[0]; let args=signature[1];
+    let path=fcap-excerpt-path(s); let doc=fat-find-doc(fcap-docs(s),path);
+    if nil?(doc) then [] else {
+     let range=tool=="read" && fat-read-range?(args) ? fat-read-span(doc[2],str_to_int(args[1]),str_to_int(args[2]),len(args)>=4 ? args[3] : "lines") : fat-has(["read","cat"],tool) && len(args)==1 ? [0,len(doc[2])] : tool=="sed" && len(args)==3 && args[0]=="-n" && fat-ends(args[1],"p") ? fcap-sed-span(doc[2],args[1]) : [];
+     nil?(range) || substring(doc[2],range[0],range[1])!=fcap-result-stdout(result) ? [] : [doc,range[0],range[1]];
+    };
+   };
+  }
+  def fcap-sed-span(text,printed) {
+   let range=split-on(substring(printed,0,len(printed) - 1),",");
+   !(len(range)==1 || len(range)==2) || !all?(part=>fat-natural(part),range) ? [] : fat-read-span(text,str_to_int(range[0]),(len(range)==1 ? 1 : str_to_int(range[1]) - str_to_int(range[0]) + 1),"lines");
+  }
+  def fcap-source-page(span,result,capBytes) = fcap-source-page-fit(span,result,capBytes,min2(span[2] - span[1],max2(1,capBytes / 2)));
+  // json-serves: the model attention window. text: the cap is a byte cap on the page that window reads, so the fit is measured on that rendering.
+  def fcap-source-page-fit(span,result,capBytes,bytes) {
+   let text=fcap-result-stdout(result); let shown=fcap-clip(text,bytes); let end=span[1] + len(shown);
+   let digest=fat-document-sha(span[0]);
+   let page=json-node-object(append([json-node-pair("exit",json-object-get(result,"exit")),fcap-shape-s("path",span[0][1]),fcap-shape-s("resident_sha256",digest),fcap-shape-n("source_bytes",len(span[0][2])),fcap-shape-n("start_byte",span[1]),fcap-shape-n("end_byte",end),fcap-shape-n("requested_end_byte",span[2]),fcap-shape-s("stdout",shown),json-node-pair("next",end<span[2] ? fcap-read-call(span[0][1],end + 1,span[2] - end,"bytes",digest) : json-node-null())],fcap-stderr-pairs(result)));
+   len(json-emit(page))>capBytes && bytes>1 ? fcap-source-page-fit(span,result,capBytes,max2(1,bytes / 2)) : page;
+  }
+  def fcap-observation-excerpt(s,capBytes) {
+   let result = fcap-observation-result(s);
+   let span=fcap-source-span(s,result);
+   // Leave room for the task, retained evidence and source catalog around the page.
+   !nil?(span) ? fcap-source-page(span,result,capBytes / 2) : fcap-query-excerpt(s,result);
+  }
+  def fcap-query-excerpt(s,result) {
+   let stdout = fcap-result-stdout(result);
+   let lines = split-on(stdout,"\n");
+   let count = fcap-lines-count(lines);
+   let headCount = fat-min(count,fcap-excerpt-head());
+   let tailFrom = fat-max(headCount,(count - fcap-excerpt-tail()));
+   let shown = [json-node-pair("exit",json-object-get(result,"exit")),fcap-shape-n("stdout_bytes",len(stdout)),fcap-shape-n("stdout_lines",count),fcap-shape-s("stdout_sha256",hex-encode(sha256-stream-string(stdout))),json-node-pair("head",json-node-array(fcap-string-json(fcap-clip-lines(fat-take(lines,headCount))))),fcap-shape-n("tail_from_line",(tailFrom + 1)),json-node-pair("tail",json-node-array(fcap-string-json(fcap-clip-lines(fat-take(fat-drop(lines,tailFrom),(count - tailFrom))))))];
+   json-node-object(append(shown,append(fcap-stderr-pairs(result),fcap-query-path(fcap-excerpt-path(s)))));
+  }
+  // what the note says of the exact bytes depends on whether any were kept; what it says of the way on depends on whether
+  // the excerpt's lines are the document's own (a whole read or cat) or a query result's
+  def fcap-bounded-change(excerpted,held,cause) {
+   let lead = if ((String) cause == fcap-cause-cap()) then "The renewal prompt could not admit the complete observation and the caller's reply contract, so it carries a focused page. " else "The last observation did not enter the decoder. ";
+   let kept = if held then "Its exact bytes remain in private evidence and source remains available through native tools. " else "Its exact bytes were not retained (the private evidence write failed); source remains available through native tools. ";
+   let how = if excerpted then "A source page carries exact stdout, source byte coordinates and resident_sha256; execute next to continue, or read [path,offset,count] for one-based source lines. Query excerpts carry result counts and clipped head/tail; those line numbers describe the result. Choose a narrower query with rg -n -F for the missing symbol rather than repeating a whole read." else "Retrieve the needed symbols with focused native read or rg queries instead of repeating a whole-file read.";
+   (lead + (kept + ("Keep the original goal, candidate and completed effects. " + (how + " No weights or context were replaced."))));
+  }
+  // the tool history of a state written before fcap-signature-max held a whole stdout: its signature is digested
+  def fcap-with-held-signature(s) {
+   let history = fcap-tool-history(s);
+   fcap-with-memory(s,append(fat-take(fcap-memory(s),5),[[fcap-held-signature(history[0]),history[1]]]));
+  }
+  // The note that stands in for a bounded observation: cause, role, the private evidence (when it was retained), the
+  // document catalog, the excerpt when the observation is a tool result, and the way on.
+  def fcap-observation-detail(s,evidence,cause,capBytes) {
+   let result = fcap-observation-result(s);
+   let excerpted = (!nothing?(result));
+   let held = if ((String) evidence == "") then [] else [fcap-shape-s("private_observation_evidence",evidence)];
+   let note = fcap-note(s);
+   let at = str_find(note,"{",0);
+   let preface = if (at > 0) then [fcap-shape-s("note_preface",fcap-clip(substring(note,0,at),800))] else [];
+   let shown = if excerpted then append([json-node-pair("observation_excerpt",fcap-observation-excerpt(s,capBytes))],preface) else [];
+   json-node-object(append([fcap-shape-s("cause",cause),fcap-shape-s("role",fcap-stage(s))],append(held,append([json-node-pair("document_catalog",json-node-array(fcap-document-catalog(fcap-docs(s))))],append(shown,[fcap-shape-s("change",fcap-bounded-change(excerpted,(!((String) evidence == "")),cause))])))));
+  }
+  // Verification retains the checked source hashes, but those hashes are not
+  // the counterexample. A changed file can still produce the same failure.
+  // json-serves: the stillstreak. text: the reason is already the model's sentence; the identity is a shorter rendering of that sentence.
+  def fcap-counterexample(reason) {
+   let at = str_find(reason,"{",0);
+   let incomplete = fat-starts(reason,fcap-incomplete-prefix());
+   let capacity=fat-starts(reason,fcap-observation-capacity-prefix());
+   let known = capacity || (incomplete || (fat-starts(reason,"Native tool failed: ") || fat-starts(reason,"Current implementation failed the caller source checks before review. ")));
+   if ((!known) || (at < 0)) then reason else {
+    let raw = substring(reason,at,len(reason));
+    if (!faj-valid(raw)) then reason else {
+     let obj = parse-json("retained-verification",raw);
+     if capacity then json-emit(json-node-array([json-object-get(obj,"cause"),json-object-get(obj,"document_catalog")]))
+     else if (incomplete && (json-object-has?(obj,"cause") && json-object-has?(obj,"reply_limit"))) then json-emit(json-node-array([json-object-get(obj,"cause"),json-object-get(obj,"reply_limit"),if json-object-has?(obj,"role") then json-object-get(obj,"role") else json-node-null()]))
+     else if (!(json-object-has?(obj,"checked_documents") && json-object-has?(obj,"verification_scope"))) then reason else json-emit(json-node-array([json-object-get(obj,"exit"),fcctg-assertion-core(json-object-get(obj,"stdout")),json-object-get(obj,"stderr")]));
+    };
+   };
+  };
+  def fcap-repair-state(s, reason) {
+   let action = fcap-control((now_unix_ms() + fcap-turns(s)), [fcap-turns(s), fcap-calls(s), fcap-failures(s), fcap-checks(s)], 2);
+   let next = fcap-state("repair", s[1], s[2], fcap-docs(s), s[4], if nil?(s[5]) then [reason] else s[5], s[6], s[7], reason, fcap-turns(s), fcap-calls(s), s[11]);
+   if (!((Comparable) action == 2)) then fcap-terminal(s, "diagnostic-control-unavailable") else fcap-with-memory(fcap-inherit(s, next), [(fcap-failures(s) + 1), reason, fcap-reflections(s), fcap-checks(s), (((String) fcap-counterexample(reason) == fcap-counterexample(fcap-evidence(s))) && ((!nil?(fcap-reflections(s))) || fat-starts(reason,fcap-incomplete-prefix()) || fat-starts(reason,fcap-observation-capacity-prefix())))]);
+  }
+  def fcap-repair-named(s, diagnosis, change, route) = len(trim(diagnosis))==0 || len(trim(change))==0 ? fcap-revise(s,"Name the observed cause in diagnosis and a changed approach in change; choose next=implement, plan, split or attention.")
+    : !fat-has(["implement","plan","split","attention"],route) ? fcap-revise(s,"Repair may choose implement, plan, split or attention, preserving the original constraints and native checks.")
+    : fcap-repeat(s) && !fat-has(["plan","split","attention"],route) ? fcap-revise(s,"The same counterexample survived the previous repair. Revise the plan, split it into dependent tasks or return attention to the caller before more edits.")
+    : fcap-repaired(s,diagnosis,change,route);
+  def fcap-repair(s, obj) = fcap-repair-named(s, fcap-string(obj,"diagnosis"), fcap-string(obj,"change"), fcap-string(obj,"next"));
+  def fcap-repair-fields(s, fields) = fcap-repair-named(s, fcap-field-string(fields, "diagnosis"), fcap-field-string(fields, "change"), fcap-field-string(fields, "next"));
+  def fcap-repaired(s, diagnosis, change, route) {
+   let reflection = [fcap-failures(s), fcap-evidence(s), diagnosis, change, route];
+   let remembered = fcap-with-memory(s, [fcap-failures(s), fcap-evidence(s), append(fcap-reflections(s), [reflection]), fcap-checks(s), fcap-repeat(s)]);
+   fcap-move(remembered, route, fcap-docs(s), s[5], s[6], s[7], route=="attention" ? "Native repair needs its caller: "+diagnosis+"; next choice: "+change : "Apply the changed approach, then review and run the unchanged caller checks: "+change, fcap-calls(s), s[11]);
+  }
+  def fcap-correction-review(s) = if nil?(fcap-caller-feedback(s)) then "" else " Assess retained caller_feedback against current documents and native_source_verification. Feedback records earlier observations; a later repair can resolve them. Use current native source or execution for each finding and cite the observation in the reason. A check establishes only its named conditions on its recorded document identities. Return reject when a correction remains unresolved in the current source.";
+   def fcap-instruction(s) = fcap-stage(s)=="refine" ? fcrg-submit("[[\"brief\",\"precise goal, constraints and observable acceptance\"]]") + "."
+    : fcap-stage(s)=="plan" ? fcrg-submit("[[\"plan\",\"approach, dependencies, checks and edge cases\"]]") + "."
+    : fcap-stage(s)=="split" ? fcrg-submit("[[\"tasks\",[value_kind(fcap-context-field(task_context,\"goal\")) == \"node_id\" ? node_value(fcap-context-field(task_context,\"goal\")) : fcap-context-field(task_context,\"goal\")]]]") + ". Keep every original requirement; tasks are observable steps in this owned checkpoint."
+    : fcap-stage(s)=="review" ? "Review current documents against every original requirement; checks establish their named conditions only. " + fcrg-submit("[[\"verdict\",\"accept\"],[\"reason\",\"concrete findings from the current documents\"]]") + " only when requirements hold. Otherwise use verdict reject with actionable findings and relevant text. A nonempty reason is retained with reviewed source identities. This is same-model review; inspect caller corrections and retained report amendments."
+    : fcap-stage(s)=="repair" ? "Inspect actual failure evidence. Native read/edit tools can repair caller-writable documents; changed repairs run unchanged checks and still need review. " + fcrg-submit("[[\"diagnosis\",\"observed cause\"],[\"change\",\"different approach and verification\"],[\"next\",\"implement\"]]") + ". Choose next plan to revise the approach, or next split for dependent tasks. Choose next attention when the original constraints conflict or needed work belongs to the caller; retain the exact cause and its next action. When replan_required=1, choose plan, split or attention before editing. Keep original checks."
+    : "Implement the first pending task using current source observations. Read missing evidence, then use current source bytes or held text cells for a focused native edit. Use help edit when needed. " + fcrg-submit("[[\"task\",\"done\"]]") + " only when implemented; caller checks and review follow.";
+   def fcap-work-instruction(s) = !fcap-reviewing(s) ? fcap-instruction(s) : fcap-awaiting-native-review(s) ? fcap-native-review-instruction() : fcap-stage(s)=="review" ? fcrg-review() : fcap-stage(s)=="repair" ? "Read the failed check, actual result and original evidence. A wrong number is recomputed with a tool (awk over the document's lines), never corrected by hand. " + fcrg-submit("[[\"report\",complete_corrected_report]]") + " to rerun unchanged source and report checks. Read-only tools remain available. For further inspection, submit diagnosis, change and next plan. Preserve source documents and constraints." : fcap-stage(s)=="implement" ? "Inspect the first pending review task with read-only native tools. Preserve documents. " + fcrg-submit("[[\"task\",\"done\"]]") + " when inspected." : fcap-instruction(s);
+  // Reply diagnostics contain shape and control counters, never answer text.
+  def fcap-shape-s(key,value) = json-node-pair(key,json-node-string(value));
+  def fcap-shape-n(key,value) = json-node-pair(key,json-node-int(value));
+  def fcap-reply-shape(s,raw,next) {
+   let base = fcap-reply-shape-base(s,raw,next);
+   json-node-object(append(json-object-pairs(base),[fcap-shape-n("native_json_repairs",(len(fcap-json-repairs(next)) - len(fcap-json-repairs(s))))]));
+  }
+  // json-serves: the reply-shape log. text: the counters are a line about the reply, and a text submission is still the caller's bytes.
+  def fcap-reply-shape-base(s,raw,next) {
+   let native=fcap-node-address?(raw);
+   let addressed=native ? fcap-node-object(fcap-address-node(raw)) : nothing();
+   let valid = native ? !nothing?(addressed) : faj-valid(raw);
+   let obj = native && valid ? addressed : if valid then faj-json("reply-shape",raw) else json-node-object([]);
+   let verdict = fcap-string(obj,"verdict");
+   json-node-object([fcap-shape-s("mode",fcap-mode(s)),fcap-shape-s("before",fcap-stage(s)),fcap-shape-s("after",fcap-stage(next)),fcap-shape-n("turn",fcap-turns(next)),fcap-shape-n("reply_bytes",len(raw)),fcap-shape-n("valid_reply",valid),fcap-shape-n("native_node",native),json-node-pair("valid_json",native ? json-node-null() : json-node-int(valid)),fcap-shape-n("tool_present",json-object-has?(obj,"tool")),fcap-shape-n("tool_calls",fcap-calls(next)),fcap-shape-n("verdict_kind",if (!json-object-has?(obj,"verdict")) then 0 else if ((String) verdict == "accept") then 1 else if ((String) verdict == "reject") then 2 else 3),fcap-shape-n("report_present",json-object-has?(obj,"report")),fcap-shape-s("report_type",if json-object-has?(obj,"report") then faj-type(json-object-get(obj,"report")) else "absent"),fcap-shape-n("checks",fcap-checks(next)),fcap-shape-n("repairs",fcap-failures(next))]);
+  }
+  // The complete current failure travels once in this same observation. Keep
+  // distinct notes/tasks and all retained state; shorten exact duplicate fields.
+  def fcap-evidence-reference-text() = "See failure_evidence.";
+  def fcap-evidence-reference(s,text) = if ((fcap-failures(s) > 0) && ((len(fcap-evidence(s)) > len(fcap-evidence-reference-text())) && ((String) text == fcap-evidence(s)))) then fcap-evidence-reference-text() else text;
+  def fcap-pending-observation(s,rows) = if nil?(rows) then [] else {
+   let reference=fcap-evidence-reference(s,rows[0]);
+   let historical=fcap-prior-evidence(reference);
+   let task=if ((String) reference == historical) then reference else ("Repair the retained failure: " + historical);
+   cons(json-node-string(task),fcap-pending-observation(s,rows[1:]));
+  };
+  // json-serves: the model attention window. text: the shorter of the reference and the evidence is the rendering that window reads.
+  def fcap-failure-pairs(s,full) = if ((Comparable) fcap-failures(s) == 0) then [] else {
+   let evidence = json-node-string(fcap-evidence(s));
+   let digest = fcap-evidence-id(s);
+   let reference = json-node-object([json-node-pair("reference",json-node-string(digest)),json-node-pair("scope",json-node-string("current-model-context"))]);
+   let smaller = (len(json-emit(reference)) < len(json-emit(evidence)));
+   let present = ((!full) && (smaller && ((String) fcap-context-evidence(s) == digest)));
+   let identity = if (smaller && (!present)) then [json-node-pair("failure_evidence_id",json-node-string(digest))] else [];
+   append([json-node-pair("failure_evidence",if present then reference else evidence),json-node-pair("repair_attempts",json-node-int(fcap-failures(s))),json-node-pair("replan_required",json-node-int(fcap-repeat(s)))],identity);
+  };
+  def fcap-observation-with-instruction(s,instruction,full) = json-node-object(append(fcap-amend-pairs(s),append([json-node-pair("role", json-node-string(fcap-stage(s))), json-node-pair("mode", json-node-string(fcap-mode(s))), json-node-pair("instruction", json-node-string(instruction)), json-node-pair("observation", fcap-note-cell(s)), json-node-pair("pending", json-node-array(fcap-pending-observation(s,s[5])))],fcap-failure-pairs(s,full))));
+  def fcap-native-review-observation(s,instruction,full) = json-node-object(append([json-node-pair("role",json-node-string(fcap-stage(s))),json-node-pair("mode",json-node-string(fcap-mode(s))),json-node-pair("instruction",json-node-string(instruction)),json-node-pair("observation",fcap-note-cell(s)),json-node-pair("pending",json-node-array(fcap-string-json(s[5])))],if full then [json-node-pair("native_review",fcap-native-event-json(fcap-last-native(s),fcap-native-review-before(s,((Comparable) full == 2))))] else [json-node-pair("native_review_reference",json-node-int(len(fcap-native-repairs(s))))]));
+  def fcap-observation-node(s) = if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-native-review-instruction(),2) else fcap-observation-with-instruction(s,fcap-work-instruction(s),1);
+  // json-serves: the model tokenizer. text: the observation cells stay in the checkpoint; this string is what the decoder reads.
+  def fcap-observation(s) = json-emit(if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-observation-instruction(s),(len(fcap-native-repairs(s)) > fcap-context-native-review(s))) else fcap-observation-with-instruction(s,fcap-observation-instruction(s),0));
+  def fcap-reflection-json(row,evidence) = json-node-object([json-node-pair("attempt",json-node-int(row[0])),json-node-pair("evidence",json-node-string(evidence)),json-node-pair("diagnosis",json-node-string(row[2])),json-node-pair("change",json-node-string(row[3])),json-node-pair("next",json-node-string(row[4]))]);
+  def fcap-reflections-json(rows) = rows |> map(row => fcap-reflection-json(row,row[1]));
+  // Historical tool and verification failures keep their outcomes; identities at that
+  // earlier check stay in continuity and the public result. Admission supplies
+  // current document identities separately for guarded edits.
+  // json-serves: the stillstreak. text: the historical failure was stored as the sentence the model saw, and the identity drops the catalog from that sentence.
+  def fcap-prior-evidence(reason) {
+   let normalized=fcap-counterexample(reason);
+   let at=str_find(reason,"{",0);
+   if (!((String) normalized == reason)) then normalized else if ((!fat-starts(reason,"Native tool failed: ")) || (at < 0)) then reason else {
+    let raw=substring(reason,at,len(reason));
+    if (!faj-valid(raw)) then reason else {
+     let obj=parse-json("historical-tool-result",raw);
+     if (!(json-object-has?(obj,"guard_evidence") && (json-object-has?(obj,"exit") && (json-object-has?(obj,"stdout") && json-object-has?(obj,"stderr"))))) then reason else json-emit(json-node-array([json-object-get(obj,"exit"),json-object-get(obj,"stdout"),json-object-get(obj,"stderr")]));
+    };
+   };
+  }
+  def fcap-prior-repairs-json(rows) = rows |> map(row => fcap-reflection-json([row[0],row[1],fcctg-squeeze(row[2],800),fcctg-squeeze(row[3],800),row[4]],fcctg-squeeze(fcap-prior-evidence(row[1]),1600)));
+  def fcap-string-json(xs) = xs |> map(json-node-string);
+  // Legacy retained text is admitted once as cells. Current cells keep their identity.
+  def fcap-model-cell(node) = fat-wire-object?(node) ? json-node-object(json-object-pairs(node) |> map(p=>{
+   let key=json-pair-key(p); let v=json-pair-value(p);
+   json-node-pair(key,key=="value" ? v : fat-wire-string?(v) && fat-has(["observation","failure_evidence","retained_report","evidence"],key) ? fcap-model-observation(node_value(v)) : fcap-model-cell(v));
+  })) : fat-wire-array?(node) ? json-node-array(json-array-elements(node) |> map(fcap-model-cell)) : node;
+  // Old checkpoints keep their evidence bytes. Decode that internal envelope at
+  // admission; the model receives the evidence as native values, not JSON text.
+  // json-serves: an older checkpoint. text: its evidence bytes are admitted once as cells; a current cell is not rendered back to text here.
+  def fcap-model-observation(text) {
+   if faj-valid(text) then parse-json("retained-model-value",text) else {
+   let at=str_find(text,"{",0);
+   let raw=at<0 ? "" : substring(text,at,len(text));
+    at<0 || !faj-valid(raw) ? json-node-string(text) : json-node-object([json-node-pair("message",json-node-string(substring(text,0,at))),json-node-pair("detail",parse-json("retained-model-evidence",raw))]);
+   };
+  }
+  def fcap-context-field(address,key) {
+     let lane=ftg-lane-session("code");
+     let node=value_kind(address)=="node_id" ? address : value_kind(address)=="string" ? ftv-held(lane,address) : nothing();
+     let root=nothing?(node) ? ftw-encode(address) : node;
+     let exact=value_kind(key)=="list" ? nothing() : fcap-context-child(root,key);
+      let found=value_kind(key)=="list" ? fcap-context-path(root,key) : !nothing?(exact) ? exact : value_kind(key)=="string" && str_find(key,".",0)>=0 ? fcap-context-path(root,split-on(key,".")) : nothing();
+     if nothing?(found) then fcap-context-unease("existing field or index",record_new(0,"path",key,"shape",ftv-node-result(root))) else {
+      let name=kind(found);
+      let value=name=="ftw-record" || name=="ftw-list" || fat-wire-object?(found) || fat-wire-array?(found) ? found : fat-wire-string?(found) || faj-type(found)=="number" || faj-type(found)=="boolean" ? node_value(found) : node_eq(found,json-node-null()) ? nothing() : ftw-decode(found);
+       value_kind(value)=="node_id" ? ftv-hold(lane,value) : value_kind(value)=="string" && (len(value)>ftv-max-render() || ftv-carries-control?(value)) ? ftv-hold(lane,found) : value;
+     };
+  }
+  // Walk the existing cells: decode keys and leaves, never the whole context.
+  def fcap-context-child(node,key) {
+   if nothing?(node) then nothing() else {
+    let name=kind(node); let kids=node_children(node);
+    if name=="ftw-record" then fcap-context-pair(kids,key)
+    else if fat-wire-object?(node) then value_kind(key)!="string" ? fcap-context-unease("string record key",key) : json-object-has?(node,key) ? json-object-get(node,key) : nothing()
+    else if name=="ftw-list" || fat-wire-array?(node) then value_kind(key)!="int" ? fcap-context-unease("integer list index",key) : key>=-len(kids) && key<len(kids) ? kids[key] : nothing()
+    else if name=="ftw-node" then fcap-context-child(kids[0],key)
+    else if name=="ftw-nothing" then nothing()
+    else fcap-context-unease("record or list",name);
+   };
+  }
+  def fcap-context-pair(kids,key) = nil?(kids) ? nothing() : ftw-decode(kids[0])==key ? kids[1] : fcap-context-pair(kids[2:],key);
+  def fcap-context-unease?(node) = value_kind(node)=="node_id" && kind(node)=="ftw-record" && !nothing?(fcap-context-pair(node_children(node),"kind")) && ftw-decode(fcap-context-pair(node_children(node),"kind"))=="context-unease";
+  def fcap-context-path(node,path) = fcap-context-path-at(node,path,path);
+  def fcap-context-path-at(node,path,original) {
+   if nil?(path) || nothing?(node) || fcap-context-unease?(node) then node else {
+    let part=path[0];
+    let key=(kind(node)=="ftw-list" || fat-wire-array?(node)) && value_kind(part)=="string" && str_to_int(part).str()==part ? str_to_int(part) : part;
+    let child=fcap-context-child(node,key);
+    let next=nothing?(child) ? fcap-context-unease("existing field or index",record_new(0,"path",original,"at",key,"shape",ftv-node-result(node))) : fcap-context-unease?(child) ? fcap-context-failed-path(child,original) : child;
+    fcap-context-path-at(next,path[1:],original);
+   };
+  }
+  def fcap-context-failed-path(node,path) {
+   let reading=ftw-decode(node);
+   record_set(reading,"path",path);
+   ftw-encode(reading);
+  }
+  def fcap-context-unease(needed,observed) {
+   let node=ftw-encode(record_new(0,"kind","context-unease","needed",needed,"observed",observed,"current","Each path component descends into the preceding value; query peer fields separately. Use code_context for current role, pending and observation; task_context holds admitted sources and goal. Choose a valid path or submit a focused read action. List indexes are integers. Do not traverse this diagnostic as source data."));
+   fb_record(node,"coding-context-unease",1);
+   node;
+  }
+  def fcap-model-organs(lane) {
+    ftv-offer(lane,"fcap-context-field",2,a=>fcap-context-field(a[0],a[1]));
+   ftv-offer(lane,"fcap-native-tool",3,a=>fcap-native-tool(a[0],a[1],a[2]));
+   ftv-offer(lane,"fcap-native-reply",1,a=>fcap-native-reply(a[0]));
+   lane;
+  }
+  // json-serves: the model packet. text: an object is shared by coordinate; a leftover scalar is rendered once into the sentence the packet already is.
+  def fcap-model-visible(node) {
+   if fat-wire-object?(node) then {
+   let fields=["path","resident_sha256","start_byte","end_byte","message","needed","next","stdout_reference","observation","stdout","stderr","detail","guard_evidence"] |> filter(k=>json-object-has?(node,k)) |> map(k=>{
+     let value=json-object-get(node,k);
+      let whole=k=="stdout" && json-object-has?(node,"path") && !json-object-has?(node,"start_byte");
+      let structured=k=="stdout" && json-object-has?(node,"value");
+      k + ": " + (fat-wire-string?(value) && len(node_value(value))>ftv-max-render() && (whole || structured) ? ftv-node-result(ftv-hold(ftg-lane-session("code"),value)) : fcap-model-visible(value));
+    });
+    ftv-node-result(ftv-hold(ftg-lane-session("code"),node)) + (json-object-has?(node,"change") ? "\nAttention: " + fcap-string(node,"change") : "") + (nil?(fields) ? "" : "\n"+fields.join("\n"));
+   } else if fat-wire-array?(node) then ftv-node-result(ftv-hold(ftg-lane-session("code"),node)) else fat-wire-string?(node) ? node_value(node) : json-emit(node);
+  }
+  def fcap-model-bind(name,obj) {
+     let lane=fcap-model-organs(ftg-lane-session("code"));
+     let node=ftv-hold(lane,fcap-model-cell(obj));
+     ftw-put(ftv-ws(lane),"local",name,"node",node);
+     node;
+  }
+  def fcap-model-packet(obj) {
+     let name=json-object-has?(obj,"goal") ? "task_context" : json-object-has?(obj,"role") ? "code_context" : json-object-has?(obj,"source_observations") ? "source_context" : "code_budget";
+     let node=fcap-model-bind(name,obj);
+    let address=ftw-coord(node);
+    let fields=(json-object-pairs(node) |> map(json-pair-key)).join(", ");
+    let visible=["goal","brief","plan","role","instruction","observation","replan_required","repair_attempts","budget_instruction"] |> filter(k=>json-object-has?(node,k)) |> map(k=>k + ": " + fcap-model-visible(json-object-get(node,k)));
+    let catalog=json-object-get(node,"document_catalog");
+    let paths=fat-wire-array?(catalog) ? node_children(catalog) |> map(doc=>fcap-string(doc,"path") + " (" + node_value(json-object-get(doc,"bytes")).str() + " bytes)") : [];
+    let writable=json-object-get(node,"writable");
+   name + " = " + address + ";\nfields: " + fields + "\n" + visible.join("\n") + (nil?(paths) ? "" : "\nResident paths:\n"+paths.join("\n")) + (fat-wire-array?(writable) ? "\nWritable: " + (node_children(writable) |> map(value=>node_value(value))).join(", ") : "") + "\n";
+  }
+  // Caller corrections outlive the transient tool/check failure at the cursor.
+  // Admission restores every retained event, including after context renewal.
+  def fcap-caller-feedback(s) = if (len(fcap-memory(s)) >= 25) then fcap-memory(s)[24] else [];
+  // the newest four, each bounded; the older ones are named by their count, never carried whole
+  def fcap-caller-feedback-json(rows) = append(len(rows) > 4 ? [json-node-object([json-node-pair("id",json-node-string("omitted")),json-node-pair("text",json-node-string(((len(rows) - 4).str() + " earlier observations are omitted; a later repair may have resolved them.")))])] : [],drop(max2(0,len(rows) - 4),rows) |> map(row => json-node-object([json-node-pair("id",json-node-string(row[0])),json-node-pair("text",json-node-string(fcctg-squeeze(row[1],1200)))])));
+  def fcap-caller-feedback-pairs(s) = if nil?(fcap-caller-feedback(s)) then [] else [json-node-pair("caller_feedback",json-node-array(fcap-caller-feedback-json(fcap-caller-feedback(s)))),json-node-pair("caller_feedback_scope",json-node-string("Retained observations from earlier source states. Later repairs can resolve them. Compare each with current source and native verification before asserting that the reported condition still holds."))];
+  def fcap-model-lane(s) = fcap-reviewing(s) ? ftg-bind-once("", "") : ftg-bind-once("code",fcam-managed(s) ? fcam-id(s) : "");
+  // How the lane teaches a tool call. "tool" is the control table's own verb (form-token-tool.bml): the call is spoken as
+  // words and a verbatim block and read by one cursor into the call cell. "eval" is the constructor spelled in a BML eval.
+  // FORM_CODE_CALL_FORM names the form (tool | eval). The default is tool: measured on the local Qwen3.8-27B-Q8_0 through
+  // this lane (docs/form-native-agent-tools.md), every tool call it wrote in that form read and ran at the first try, and the
+  // turns the eval spelling spent on reading context fields before its first call were not spent. eval stays for comparison.
+  // A JSON reply is not a form: the live lane answers it with the no-action note.
+  def fcap-call-form() = fcap-call-named((host_getenv("FORM_CODE_CALL_FORM") ?? ""));
+  def fcap-call-named(name) = name == "eval" ? "eval" : "tool";
+  def fcap-call-name(tool,word) = fcap-call-form() == "tool" ? ftg-render("tool",tool + " " + word) : "fcap-native-tool(\"" + tool + "\",[\"" + word + "\"],\"\")";
+  def fcap-call-head() = fcap-call-form() == "tool"
+   ? "A tool call is " + ftg-render("tool","read path 1 20") + ": the tool's name, its words (bare, \"quoted\" or an @address of a text cell), and for edit and write a block on the lines after, written exactly as the file holds it, nothing escaped: " + ftg-render("tool","edit path\n<<<<\nspan to replace\n====\nnew text\n>>>>\n") + " The span is the file's own bytes: a quote or a backslash in it is written as the file holds it. A whole-document replacement guarded by the resident hash names the hash as a word and carries the new text alone: " + ftg-render("tool","edit path sha256 HASH\n<<<<\nthe whole new text\n>>>>\n") + " The control executes the call inside this decode stream; Form saves its effects and returns the actual result cell with refreshed code_context. Continue from that observation with another needed tool or the current role reply; no outside caller reads or guides the next step. A call that does not read answers nothing=tool-... naming what failed; send the corrected call. "
+   : ftg-render("eval","fcap-native-tool(\"read\",[\"path\",\"1\",\"20\"],\"\")") + " executes the returned tool cell immediately inside this decode stream. Form saves its effects and returns the actual result cell with refreshed code_context. Continue from that observation with another needed tool or the current role reply; no outside caller reads or guides the next step. ";
+  def fcap-call-missing() = fcap-call-form() == "tool" ? "a complete Form tool call, or a Form eval returning fcap-native-reply" : "a complete Form eval returning fcap-native-tool or fcap-native-reply";
+  def fcap-call-whole-read() = fcap-call-form() == "tool" ? "A whole read is the path alone. " : "A whole read uses [path]. ";
+  // the moment of choice: arithmetic over lines is one awk call, spelled in the lane's own call form
+  def fcap-awk-call(prog, path) = fcap-call-form() == "tool" ? ftg-render("tool", "awk '" + prog + "' " + path) : "fcap-native-tool(\"awk\",[\"" + prog + "\",\"" + path + "\"],\"\")";
+  def fcap-awk-hint() = "Sums, counts, per-key totals, columns and filters over lines are one awk call, exact: " + fcap-awk-call("{ s[$1] += $2 } END { for (k in s) print k, s[k] }", "PATH") + ". Never add numbers by hand. awk carries Form's choice too (help awk). ";
+  def fcap-bootstrap(s) {
+   let lane=fcap-model-lane(s);
+   let source = if fcap-catalog?(s) then json-node-pair("document_catalog",json-node-array(fcap-document-catalog(fcap-docs(s)))) else json-node-pair("documents",json-node-array(fcap-model-documents(fcap-docs(s))));
+   let retained = append(fcap-caller-feedback-pairs(s),if fcap-amendable(s) then [json-node-pair("retained_report",json-node-string(fcap-report(s)))] else []);
+   let body = json-node-object(append(retained,[json-node-pair("goal", json-node-string(s[1])), json-node-pair("writable", json-node-array(fcap-string-json(s[4]))), source, json-node-pair("brief", json-node-string(s[6])), json-node-pair("plan", json-node-string(s[7])), json-node-pair("prior_repairs", json-node-array(fcap-prior-repairs-json(fat-take(reverse(fcap-reflections(s)), 3)))),json-node-pair("native_source_verification",fcap-source-reading(s))]));
+     let protocol = "You are the local Qwen coding member inside Form. Submit one native node for the CURRENT role. " + fcap-call-head() + fcrg-submit("[[\"task\",\"done\"]]") + " for role fields, following the current role instruction. Stop after the complete role reply. Do not echo its address. Use native BML strings, no markdown fences. Original goal and caller constraints stay authoritative. Read fields with fcap-context-field(code_context,\"field-name\"). The second argument may be a dotted path or a nested path list; no third argument. Query peer fields separately. Current work is code_context: [\"pending\",0] or [\"observation\",\"stdout\"]. task_context holds goal and sources. Exact dotted keys take precedence. List indexes are integers. Large text stays a native cell. An @address already reads its value: use substring(@address,start,end) for focused text, without node_value. A cell returned directly into a variable uses node_value(cell). Bound names follow current context; historical coordinates belong to earlier observations. Context/data reads supply evidence; they do not submit tasks. Native tools: " + str-join-with(fat-tools(),", ") + ". " + fcap-awk-hint() + "Read offset is one-based, count is lines, optional fourth argument bytes. " + fcap-call-whole-read();
+    let authority = "Tools read caller-supplied resident documents by exact catalog id or path, not host scratch paths. write creates absent paths; arguments=[path], input=new text. Existing documents, including empty ones, use edit. For whole replacement, edit arguments=[path,\"sha256\",resident_sha256,new_text], input=\"\"; the catalog or a read supplies that guard. Read-only tools are allowed in every role. Implement and repair may edit caller-writable paths; a changed repair runs caller checks immediately. Repeated counterexamples require next=plan or next=split before more edits. Failed tools/checks enter repair: act on the evidence or name a changed approach and route. failure_evidence may reference its matching failure_evidence_id already supplied in this context; use those exact earlier bytes. Keep replies concise and tasks few. Do not invent successful checks. ";
+   let guidance = fcap-call-name("bml-api","function-name") + " supplies native declaration, path, line and source fingerprint cells under code_context.observation.value.symbols. Use fcap-context-field to read them; rg -n finds related calls. Read the relevant function, callers and ownership contract. Retain the learned design in your plan before context renewal. Ask " + fcap-call-name("help","bml") + " for guidance: " + str-join-with(fcap-guides() |> map(row=>row[0]),", ") + ". Form owns tools, choices, checkpoints, checks and release. edit arguments are [path,old,new], input is empty: replace a resident span. Read help edit for matching details, help bml for authoring, help form for native controls and help meaning for shared Form meanings. ";
+   let rules = protocol + "Structured tool results live in code_context.observation.value. Read those native fields directly. stdout is text already produced and stays empty when no text was rendered. " + guidance + authority;
+   let verification = "The native verify tool takes arguments=[] and no input. It runs the caller's existing source checks; it cannot execute a command supplied by you. Review mode is read-only and returns a report, never a source edit. Documents below are already present in this context. A read may return stdout_reference for identical bytes or stdout_patch with exact changed lines against the original supplied document. Native reconstruction verifies the current bytes before either compact result is emitted. Resolve each against its original supplied text. Oversized source reads return exact stdout in observation_excerpt with source byte coordinates, resident_sha256 and next: an executable continuation. Read that content and call next only for missing evidence. Query excerpts use clipped head/tail, not whole source.\n";
+   let catalogVerification = "The native verify tool takes arguments=[] and no input. It runs the caller's existing source checks; it cannot execute a command supplied by you. Review mode is read-only and returns a report, never a source edit. The document catalog lists source identities. NATIVE SOURCE OBSERVATIONS supply actual admitted query results. Use evidence already supplied and retrieve a specific missing fact. Oversized source reads return exact stdout in observation_excerpt with source byte coordinates, resident_sha256 and next: an executable continuation. Read that content and call next only for missing evidence. All original documents stay whole for native tools and unchanged caller checks.\n";
+    rules + (fcap-reviewing(s) || !fcbmr-relevant(fcap-docs(s)) ? "" : "BML repair-bml, lift-bml and rehearse-bml tools remain available. Read their native help before use. ") + (fcap-catalog?(s) ? catalogVerification : verification) + fcap-model-packet(body) + fcap-model-packet(fcap-observation-node(s)) + fcap-source-context(s) + "\nCURRENT REPLY: " + fcap-work-instruction(s);
+  }
+ }
+ 0;
+}

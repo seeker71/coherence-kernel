@@ -1,0 +1,227 @@
+// qwen35-dense-session-spec-band.bml — the model session's greedy walk is speculative by default, and it says what the verify path says, through the SESSION API.
+//
+// A plain Qwen3.8-27B session (fcms-open-reserved) opens its DFlash2 drafter beside the target, the prompt's own prefill batches capture the tapped hidden states (the tap),
+// and fcms-generate takes speculative steps (form-cli-model-spec.fk, qwen35-dense-session-spec.fk). Every id such a walk says is the argmax of the verify logits at its position
+// (the field's meaning of lossless: the verify path R, batch invariant, one-row checks on the same matrix-unit arithmetic), so what the band holds the session to is R:
+//   1   five prompts (sky, code, prose, long code, counting) x 64 tokens, each said by fcms-generate of its own fresh session: the ids are R's, every one of the 320
+//   2   the AGREEMENT with the plain decode: R and the plain decode over the same five prompts agree on at least 99 percent of the positions and every disagreement is
+//       a near-tie (both margins under 0.15 nats); the session's ids are R's (bit 1), so the session agrees with the plain decode as R does. And the walk SPOKE speculatively
+//       (the generation's fifth element reports it, fewer steps than tokens) with the drafter's context equal to the stream's (committed = pos) after the ask
+//   4   MULTI-TURN, one session: ask 1 (64 tokens), an observation (a Form result entering the same stream), ask 2 (24 tokens): the second ask's ids are those of the plain
+//       walks of a second session through the same three calls; the drafter's context held every position before each ask (the observation's prefill tapped it)
+//   8   a NATURAL stop: a one-word answer ends on its stop id inside the walk: ids = R's up to it (the stop id never in them), the stop id held pending, stopped, the position
+//       the plain walk would report, the drafter's context equal to the stream's
+//   16  a stop INSIDE an accepted run: a token of R's own sequence added to the session's stops ends the walk exactly there although drafts were accepted across it (fewer steps
+//       than tokens): ids = R's up to it, the stop held pending at its position, stopped; the session then takes an observation and a second ask whose ids are the plain walk's
+//       through the same calls (the state was restored to after the token before the stop)
+//   32  every session released everything it opened (the count of handles closed against the count owned, drafter and scratch included)
+//   64  NAMED reasons, never a silent downgrade: a drafter file that is not there opens the session plain and says spec-off:drafter-file-missing; a plain walk's session that
+//       then asks again is plain and says spec-off:drafter-context-behind; the speculative walk reports itself
+// The band prints each comparison for the record. It needs the 29 GB file, the 2 GB drafter and a Metal device; run it inside the GPU quiet window like every timed lane.
+// Verdict 127
+// REQUIRES: a live Metal device, Qwen3.8-27B-Q8_0.gguf and Qwen3.8-27B-DFlash2-Q8_0.gguf
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen38-spec-witness.bml form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class Q38SessionSpecBand {
+  def qsb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qsb-say(s) = print_str("[q38-session-spec-band] " ++ s);
+  def qsb-idstr(xs) = foldl((acc, x) => acc ++ x.str() ++ " ", "", xs);
+  def qsb-prompts() = ["Explain in two sentences why the sky is blue.", "Write a Python function that checks whether a number is prime.", "Write a short paragraph about autumn in a quiet mountain village.", "Write a Python class that implements a binary search tree with insert, search and in-order traversal methods.", "Count from 1 to 40, separated by commas."];
+  def qsb-names() = ["sky", "code", "prose", "long code", "counting"];
+  def qsb-observation() = "The tool answered: ok. Now continue with a few more sentences of detail.";
+  def qsb-open(path, prompt, n) = fcms-open-reserved(path, prompt, n + 200, "knowledge-query");
+  def qsb-live?(s) = (Comparable) fcms-live?(s) == 1;
+  // the verify path's greedy decode of the session's prompt on a fresh state of its own context: the lane prefill's first token, then n - 1 one-row checks
+  def qsb-ref(s, ids, n) {
+   let o = fcsp-owner(s);
+   let ctx = fcms-ctx(s);
+   let sx = q38s-open(ctx, 8, 8);
+   let sts = q38-new-state(ctx[2]);
+   let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
+   let a = q38sw-ref-go(ctx, record_get(o, "qs"), sts, sx, r[0], len(ids), n - 1, [], []);
+   let f1 = q38-free-state(sts);
+   let f2 = q38s-close(sx);
+   cons(r[0], a[0]);
+  }
+  def qsb-same?(a, b) = (String) qsb-idstr(a) == qsb-idstr(b) ? 1 : 0;
+  def qsb-tie?(d) = d[3] < 0.15 && d[4] < 0.15;
+  def qsb-ties(bad) = len(filter(d => qsb-tie?(d), bad));
+  // one prompt, one session: [spec ids == R (0/1), agreement R vs plain [positions, disagreements, ties], speculated (0/1), committed == pos (0/1), released (0/1)]
+  def qsb-prompt(path, src, prompt, name) {
+   let ids = q35-chat-ids(src, prompt);
+   let s = qsb-open(path, prompt, 64);
+   !qsb-live?(s) ? qsb-refused(name, s) : qsb-prompt-live(path, s, ids, name);
+  }
+  def qsb-refused(name, s) {
+   qsb-say(name ++ ": the session did not open: " ++ fcms-reason(s));
+   [0, [64, 64, 0], 0, 0, 0];
+  }
+  def qsb-prompt-live(path, s, ids, name) {
+   let g = fcms-generate(s, 64);
+   let spec = fcms-generation-ids(g);
+   let next = fcms-generation-session(g);
+   let o = fcsp-owner(next);
+   let ref = qsb-ref(next, ids, 64);
+   let ctx = fcms-ctx(next);
+   let sxb = q38s-open(ctx, 8, 64);
+   let ag = q38sw-agree(ctx, record_get(o, "qs"), sxb, ids, 64, 8);
+   let closed = q38s-close(sxb);
+   let bad = ag[2];
+   let last = record_get(o, "last");
+   let report = fcms-generation-spec(g);
+   let spoke = (String) substring(report, 0, 12) == "spec dflash:" && last[0] < len(spec) && last[0] > 0 ? 1 : 0;
+   let aligned = record_get(o, "committed") == fcms-pos(next) && fcms-generated-ids(next) == len(spec) ? 1 : 0;
+   qsb-say(name ++ ": " ++ report);
+   // the walk ends at 64 ids or at a stop id (never in the ids, held pending): R is the reference's first len(spec) ids, and where the walk ended early R's next token is that stop
+   let early = len(spec) < 64 ? 1 : 0;
+   let exact = qsb-same?(spec, take(len(spec), ref)) == 1 && (early == 0 || (fcms-pending(next) == ref[len(spec)] && fcms-stopped?(next) == 1 && (Comparable) q38-stop?(ref[len(spec)], fcmo-stops(next)) == 1)) ? 1 : 0;
+   qsb-say(name ++ ": ids " ++ (exact == 1 ? "IDENTICAL to R" : "DIFFER from R") ++ (early == 1 ? " (ended at its stop id after " ++ len(spec).str() ++ ")" : "") ++ "; R vs plain decode " ++ (64 - len(bad)).str() ++ " of 64 positions" ++ (len(bad) == 0 ? "" : "; " ++ q38sw-bad-text(bad)));
+   let released = fcms-release-ok?(next);
+   [exact, [64, len(bad), qsb-ties(bad)], spoke, aligned, released];
+  }
+  def qsb-all-go(path, src, ps, ns, acc) = len(ps) == 0 ? acc : qsb-all-go(path, src, ps[1:], ns[1:], append(acc, [qsb-prompt(path, src, ps[0], ns[0])]));
+  def qsb-sum-col(rows, k) = foldl((a, r) => a + r[k], 0, rows);
+  // ── multi-turn: the speculative session and the plain-walk session through the same three calls ──
+  // [ask 2 ids (spec), aligned before ask 1 / after the observation / after ask 2 (0..3), released]
+  def qsb-turns-spec(path, prompt) {
+   let s = qsb-open(path, prompt, 64);
+   !qsb-live?(s) ? [[], 0, 0] : qsb-turns-spec-live(s);
+  }
+  def qsb-turns-spec-live(s) {
+   let o = fcsp-owner(s);
+   let a0 = record_get(o, "committed") == fcms-pos(s) ? 1 : 0;
+   let g1 = fcms-generate(s, 64);
+   let s1 = fcms-observe(fcms-generation-session(g1), qsb-observation());
+   let a1 = q38x-on?(fcsp-owner(s1)) == 1 && record_get(fcsp-owner(s1), "committed") == fcms-pos(s1) ? 1 : 0;
+   let g2 = fcms-generate(s1, 24);
+   let s2 = fcms-generation-session(g2);
+   let a2 = record_get(fcsp-owner(s2), "committed") == fcms-pos(s2) ? 1 : 0;
+   qsb-say("turns: ask 1 " ++ fcms-generation-spec(g1));
+   qsb-say("turns: ask 2 " ++ fcms-generation-spec(g2));
+   let released = fcms-release-ok?(s2);
+   [fcms-generation-ids(g2), a0 + a1 + a2, released, fcms-generation-ids(g1)];
+  }
+  // the plain walks of the same calls; the second ask is fcms-generate on a session whose drafter fell behind, so it is plain and names why
+  def qsb-turns-plain(path, prompt) {
+   let s = qsb-open(path, prompt, 64);
+   !qsb-live?(s) ? [[], "", 0, []] : qsb-turns-plain-live(s);
+  }
+  def qsb-turns-plain-live(s) {
+   let g1 = fcms-generate-plain(s, 64);
+   let s1 = fcms-observe(fcms-generation-session(g1), qsb-observation());
+   let g2 = fcms-generate(s1, 24);
+   let s2 = fcms-generation-session(g2);
+   qsb-say("turns (plain walks): ask 2 " ++ fcms-generation-spec(g2));
+   let released = fcms-release-ok?(s2);
+   [fcms-generation-ids(g2), fcms-generation-spec(g2), released, fcms-generation-ids(g1)];
+  }
+  // ── stops ──
+  def qsb-first-stop(ref, stops, i) = i >= len(ref) ? -1 : (Comparable) q38-stop?(ref[i], stops) == 1 ? i : qsb-first-stop(ref, stops, i + 1);
+  // a token of the reference that no earlier token repeats, from index j on
+  def qsb-fresh-from(ref, j) = j >= len(ref) ? -1 : len(filter(t => t == ref[j], take(j, ref))) == 0 ? j : qsb-fresh-from(ref, j + 1);
+  // a natural stop: [ids said == R up to the stop (0/1), the stop held pending, stopped, the position, aligned, released, the stop's index]
+  def qsb-natural(path, src) {
+   let prompt = "Reply with exactly one word: yes";
+   let ids = q35-chat-ids(src, prompt);
+   let s = qsb-open(path, prompt, 64);
+   !qsb-live?(s) ? [0, 0, 0, 0, 0, 0, -1] : qsb-natural-live(s, ids);
+  }
+  def qsb-natural-live(s, ids) {
+   let n0 = fcms-pos(s);
+   let ref = qsb-ref(s, ids, 64);
+   let stops = fcmo-stops(s);
+   let at = qsb-first-stop(ref, stops, 0);
+   let g = fcms-generate(s, 64);
+   let next = fcms-generation-session(g);
+   qsb-say("natural stop: " ++ fcms-generation-spec(g) ++ "; reference stops at index " ++ at.str() ++ ", walk said " ++ len(fcms-generation-ids(g)).str() ++ " ids, stopped " ++ fcms-stopped?(next).str() ++ ", pending " ++ fcms-pending(next).str() ++ " at " ++ fcms-pos(next).str());
+   let same = at >= 0 && qsb-same?(fcms-generation-ids(g), take(at, ref)) == 1 ? 1 : 0;
+   let held = at >= 0 && fcms-pending(next) == ref[at] && fcms-stopped?(next) == 1 && fcms-pos(next) == n0 + at ? 1 : 0;
+   let aligned = record_get(fcsp-owner(next), "committed") == fcms-pos(next) ? 1 : 0;
+   let released = fcms-release-ok?(next);
+   [same, held, aligned, released, at];
+  }
+  // a stop inside an accepted run: [ids == R up to it, held at its position, fewer steps than ids, the session's second ask, released, j]
+  def qsb-inside(path, src) {
+   let prompt = "Write a Python function that checks whether a string is a palindrome.";
+   let ids = q35-chat-ids(src, prompt);
+   let s = qsb-open(path, prompt, 64);
+   !qsb-live?(s) ? [0, 0, 0, [], 0, -1, []] : qsb-inside-live(path, s, ids, prompt);
+  }
+  def qsb-inside-live(path, s, ids, prompt) {
+   let n0 = fcms-pos(s);
+   let ref = qsb-ref(s, ids, 64);
+   let j = qsb-fresh-from(ref, 12);
+   let owner = fcmo-owner(s);
+   let w = record_set(owner, "stops", append(fcmo-stops(s), [ref[j]]));
+   let g = fcms-generate(s, 64);
+   let next = fcms-generation-session(g);
+   let last = record_get(fcsp-owner(next), "last");
+   qsb-say("stop inside a run: " ++ fcms-generation-spec(g) ++ "; the stop is R[" ++ j.str() ++ "] = " ++ ref[j].str() ++ ", walk said " ++ len(fcms-generation-ids(g)).str() ++ " ids in " ++ last[0].str() ++ " speculative steps, stopped " ++ fcms-stopped?(next).str() ++ ", pending " ++ fcms-pending(next).str() ++ " at " ++ fcms-pos(next).str());
+   let same = qsb-same?(fcms-generation-ids(g), take(j, ref));
+   let held = fcms-pending(next) == ref[j] && fcms-stopped?(next) == 1 && fcms-pos(next) == n0 + j && record_get(fcsp-owner(next), "committed") == fcms-pos(next) ? 1 : 0;
+   let fewer = last[0] < j ? 1 : 0;
+   let s1 = fcms-observe(next, qsb-observation());
+   let g2 = fcms-generate(s1, 16);
+   let released = fcms-release-ok?(fcms-generation-session(g2));
+   [same, held, fewer, fcms-generation-ids(g2), released, j, ref];
+  }
+  // the plain walks through the same calls with the same extra stop
+  def qsb-inside-plain(path, prompt, stopid) {
+   let s = qsb-open(path, prompt, 64);
+   !qsb-live?(s) ? [[], [], 0] : qsb-inside-plain-live(s, stopid);
+  }
+  def qsb-inside-plain-live(s, stopid) {
+   let w = record_set(fcmo-owner(s), "stops", append(fcmo-stops(s), [stopid]));
+   let g = fcms-generate-plain(s, 64);
+   let s1 = fcms-observe(fcms-generation-session(g), qsb-observation());
+   let g2 = fcms-generate-plain(s1, 16);
+   let released = fcms-release-ok?(fcms-generation-session(g2));
+   [fcms-generation-ids(g), fcms-generation-ids(g2), released];
+  }
+  // a drafter file that is not there: the reason, from a live context
+  def qsb-missing(path, prompt) {
+   let s = qsb-open(path, prompt, 16);
+   !qsb-live?(s) ? "" : qsb-missing-live(path, s);
+  }
+  def qsb-missing-live(path, s) {
+   let o = fcsp-open-for(path, fcms-ctx(s), fcms-maxpos(s), "/nonexistent/drafter.gguf");
+   let released = fcms-release-ok?(s);
+   (String) record_get(o, "reason");
+  }
+  def qsb-run(path) {
+   let src = fcmg-src(path);
+   let rows = qsb-all-go(path, src, qsb-prompts(), qsb-names(), []);
+   let sky = qsb-prompts()[0];
+   let tspec = qsb-turns-spec(path, sky);
+   let tplain = qsb-turns-plain(path, sky);
+   let nat = qsb-natural(path, src);
+   let ins = qsb-inside(path, src);
+   let insp = len(ins[6]) > 0 && ins[5] >= 0 ? qsb-inside-plain(path, "Write a Python function that checks whether a string is a palindrome.", ins[6][ins[5]]) : [[], [], 0];
+   let gone = qsb-missing(path, sky);
+   let exact = qsb-sum-col(rows, 0);
+   let bad = qsb-sum-col(map(r => r[1], rows), 1);
+   let ties = qsb-sum-col(map(r => r[1], rows), 2);
+   let total = qsb-sum-col(map(r => r[1], rows), 0);
+   let spoke = qsb-sum-col(rows, 2);
+   let aligned = qsb-sum-col(rows, 3);
+   let released = qsb-sum-col(rows, 4);
+   qsb-say("five prompts: ids identical to R " ++ exact.str() ++ " of 5; R vs plain decode " ++ (total - bad).str() ++ " of " ++ total.str() ++ " positions, " ++ bad.str() ++ " disagreements, " ++ ties.str() ++ " near-ties; speculated " ++ spoke.str() ++ " of 5; drafter context = stream " ++ aligned.str() ++ " of 5");
+   qsb-say("multi-turn: ask 2 ids spec " ++ qsb-idstr(tspec[0]));
+   qsb-say("multi-turn: ask 2 ids plain " ++ qsb-idstr(tplain[0]));
+   let b1 = exact == 5 ? 1 : 0;
+   let b2 = (total - bad) * 100 >= total * 99 && ties == bad && spoke == 5 && aligned == 5 ? 2 : 0;
+   qsb-say("multi-turn: " ++ len(tspec[0]).str() ++ " ids spec, " ++ len(tplain[0]).str() ++ " ids plain, drafter context held before ask 1 / after the observation / after ask 2: " ++ tspec[1].str() ++ " of 3");
+   qsb-say("stop inside a run: ask 2 after it: " ++ len(ins[3]).str() ++ " ids spec, " ++ len(insp[1]).str() ++ " ids plain; first ask by the plain walk " ++ len(insp[0]).str() ++ " ids");
+   let b4 = len(tspec[0]) >= 12 && qsb-same?(tspec[0], tplain[0]) == 1 && tspec[1] == 3 ? 4 : 0;
+   let b8 = nat[0] == 1 && nat[1] == 1 && nat[2] == 1 && nat[4] >= 1 ? 8 : 0;
+   let b16 = ins[0] == 1 && ins[1] == 1 && ins[2] == 1 && len(ins[3]) >= 8 && qsb-same?(ins[3], insp[1]) == 1 && qsb-same?(take(ins[5], ins[6]), insp[0]) == 1 ? 16 : 0;
+   let b32 = released == 5 && tspec[2] == 1 && tplain[2] == 1 && nat[3] == 1 && ins[4] == 1 && insp[2] == 1 ? 32 : 0;
+   let b64 = (String) gone == "spec-off:drafter-file-missing" && len(tplain[1]) >= 31 && (String) substring(tplain[1], 0, 31) == "spec-off:drafter-context-behind" ? 64 : 0;
+   qsb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ "; missing-drafter reason: " ++ gone ++ "; plain session reason: " ++ tplain[1]);
+   b1 + b2 + b4 + b8 + b16 + b32 + b64;
+  }
+  def qsb-main() = qsb-run(qsb-file());
+ }
+ qsb-main();
+}

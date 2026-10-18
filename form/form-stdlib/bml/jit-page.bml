@@ -1,0 +1,367 @@
+// jit-page.bml — a hot defn's own machine code, written in Form: the walker's transparent JIT.
+// The seed offers a defn whose heat reaches a multiple of FK_JIT_HEAT (runtime/fkwu-uni.c, fk_jit_offer). This unit runs as a
+// resident cell of that process with [fn, body, arity] as its argument, reads the defn's nodes where they live (kernel_ast of
+// its own pid), writes AArch64 words and binds them (jit_fn_bind). From then on the walker's tag-194 arm runs the page in the
+// frame the call built, and nothing the caller sees changes but the time.
+//
+// The page keeps the walker's frame and the walker's meaning. Parameters and lets stay in fk_vs[fp + slot]; the page's own
+// temporaries sit above the lets (slots t0 ..), reserved and zeroed at entry, so a melt sees and moves every value the page
+// holds. x19 holds the helper table, x20 fp, x21 the frame's address (reloaded after every helper, because a helper can grow
+// the value stack). A value is in x0; nothing lives in a register across a helper.
+//   in its own words  an int literal, a string literal (its pinned word), (empty), a parameter or let read, a let, a do,
+//                     an if, the int paths of add sub mul div mod band bor bxor lt le eq (and eq against nil) and of the
+//                     u32 doors shl_u32 shr_u32 rotr_u32 add_u32 bnot_u32, and a self tail call, which is a loop
+//   one meaning       an operand that is not an int, or a zero divisor, goes to the op's own function, the one the
+//                     walker's arm calls (fk_op_*); head tail len str_len str_eq str_byte_at cons nth byte_to_str and
+//                     value_kind (the leaf door's mode 4) always do
+//   the call          a call evaluates its arguments here, then THE CALL (value position) or THE TAIL CALL runs it
+//   in place          a callee whose body makes no call is written in place of its call, its frame among the temporaries
+//   the mirror        a strict node the seed names (jit_node: str_concat chains, record_get and record_set, value_eq,
+//                     str_find, the node natives, the leaf doors but attempt): its value children are made here, into
+//                     temporaries, and the walker runs only the node's mirror, whose children read them
+//   through walk      any other node in value position: the walker walks it in this frame
+//   given back        any other node in tail position: the walker continues there in this frame (a tail call keeps it)
+// An if reads the branch law (fk_truth) in tail and value position alike, as both walkers do. A compare whose side is a
+// len against a literal is walked whole, so it stays the walker's bounded len.
+// A defn whose page would do nothing in its own words is not bound.
+import form-stdlib/core.fk;
+section [form.bml] {
+    class JitPage {
+        // ---- the defn's nodes, read where they live ----
+        def jp-node(k) = kernel_ast(host_pid(), k);
+        def jp-lit(k) {
+            let n = jp-node(k);
+            nothing?(n) ? nothing() : (Comparable) n[0] == 1 ? n[1] : nothing();
+        }
+        def jp-max(a, b) = a > b ? a : b;
+
+        // ---- AArch64 words (the base words were converted from their hex by fkwu itself) ----
+        def jp-ldr(rt, rn, slot) = 4181721088 + slot * 1024 + rn * 32 + rt;     // ldr x<rt>, [x<rn>, #slot*8]   f9400000
+        def jp-str(rt, rn, slot) = 4177526784 + slot * 1024 + rn * 32 + rt;     // str x<rt>, [x<rn>, #slot*8]   f9000000
+        def jp-mov(rd, rm) = 2852127712 + rm * 65536 + rd;                      // mov x<rd>, x<rm>              aa0003e0
+        def jp-r3(base, rd, rn, rm) = base + rm * 65536 + rn * 32 + rd;
+        def jp-add(rd, rn, rm) = jp-r3(2332033024, rd, rn, rm);                 // add                           8b000000
+        def jp-sub(rd, rn, rm) = jp-r3(3405774848, rd, rn, rm);                 // sub                           cb000000
+        def jp-and(rd, rn, rm) = jp-r3(2315255808, rd, rn, rm);                 // and                           8a000000
+        def jp-orr(rd, rn, rm) = jp-r3(2852126720, rd, rn, rm);                 // orr                           aa000000
+        def jp-eor(rd, rn, rm) = jp-r3(3388997632, rd, rn, rm);                 // eor                           ca000000
+        def jp-mul(rd, rn, rm) = jp-r3(2600500224, rd, rn, rm);                 // mul                           9b007c00
+        def jp-sdiv(rd, rn, rm) = jp-r3(2596277248, rd, rn, rm);                // sdiv                          9ac00c00
+        def jp-msub(rd, rn, rm, ra) = 2600501248 + rm * 65536 + ra * 1024 + rn * 32 + rd; // x<ra> - x<rn>*x<rm>  9b008000
+        // the u32 doors: a 32-bit op writes w<rd> and clears the word's upper half, the u32 the door answers
+        def jp-addw(rd, rn, rm) = jp-r3(184549376, rd, rn, rm);                 // add w<rd>, w<rn>, w<rm>       0b000000
+        def jp-rorw(rd, rn, rm) = jp-r3(448801792, rd, rn, rm);                 // ror w<rd>, w<rn>, w<rm>       1ac02c00
+        def jp-lslw(rd, rn, rm) = jp-r3(448798720, rd, rn, rm);                 // lsl w<rd>, w<rn>, w<rm>       1ac02000
+        def jp-lsrw(rd, rn, rm) = jp-r3(448799744, rd, rn, rm);                 // lsr w<rd>, w<rn>, w<rm>       1ac02400
+        def jp-mvnw(rd, rm) = 706741216 + rm * 65536 + rd;                      // mvn w<rd>, w<rm>              2a2003e0
+        def jp-asr1(rd, rn) = 2470575104 + rn * 32 + rd;                        // asr x<rd>, x<rn>, #1          9341fc00
+        def jp-addi(rd, rn, imm) = 2432696320 + imm * 1024 + rn * 32 + rd;      // add x<rd>, x<rn>, #imm        91000000
+        def jp-subi(rd, rn, imm) = 3506438144 + imm * 1024 + rn * 32 + rd;      // sub x<rd>, x<rn>, #imm        d1000000
+        def jp-strw-lsl2(rt, rn, rm) = 3089135616 + rm * 65536 + rn * 32 + rt;  // str w<rt>, [x<rn>, x<rm>, lsl #2]  b8207800
+        def jp-lsl1(rd, rn) = 3548379136 + rn * 32 + rd;                        // lsl x<rd>, x<rn>, #1          d37ff800
+        def jp-cmp(rn, rm) = 3942645791 + rm * 65536 + rn * 32;                 // cmp x<rn>, x<rm>              eb00001f
+        def jp-cmpi(rn, imm) = 4043309087 + imm * 1024 + rn * 32;               // cmp x<rn>, #imm               f100001f
+        def jp-inv(cond) = (Comparable) cond % 2 == 0 ? cond + 1 : cond - 1;
+        def jp-cset(rd, cond) = 2594113504 + jp-inv(cond) * 4096 + rd;          // cset x<rd>, cond              9a9f07e0
+        def jp-s19(off) = off < 0 ? off + 524288 : off;
+        def jp-tbnz0(rt, off) = 922746880 + off * 32 + rt;                      // tbnz x<rt>, #0, +off          37000000
+        def jp-cbz(rt, off) = 3019898880 + jp-s19(off) * 32 + rt;               // cbz x<rt>, off                b4000000
+        def jp-bcond(cond, off) = 1409286144 + jp-s19(off) * 32 + cond;         // b.cond off                    54000000
+        def jp-b(off) = 335544320 + (off < 0 ? off + 67108864 : off);           // b off                         14000000
+        def jp-blr(rn) = 3594452992 + rn * 32;                                  // blr x<rn>                     d63f0000
+        def jp-movz(rd, imm, hw) = 3531603968 + hw * 2097152 + imm * 32 + rd;   // movz x<rd>, #imm, lsl #16hw   d2800000
+        def jp-movk(rd, imm, hw) = 4068474880 + hw * 2097152 + imm * 32 + rd;   // movk                          f2800000
+        def jp-movn(rd, imm, hw) = 2457862144 + hw * 2097152 + imm * 32 + rd;   // movn                          92800000
+        def jp-add-lsl3(rd, rn, rm) = 2332033024 + rm * 65536 + 3072 + rn * 32 + rd; // add x<rd>, x<rn>, x<rm>, lsl #3
+        // conditions
+        def jp-eq() = 0;
+        def jp-ge() = 10;
+        def jp-lt() = 11;
+        def jp-le() = 13;
+
+        // ---- a 64-bit constant into x<rd>: movz (or movn for a negative word) and a movk per halfword that differs ----
+        def jp-pow(k) = (Comparable) k == 0 ? 1 : (Comparable) k == 1 ? 65536 : (Comparable) k == 2 ? 4294967296 : 281474976710656;
+        def jp-hw(v, k) = (v / jp-pow(k)) % 65536;
+        def jp-imm(rd, v) = v >= 0 ? cons(jp-movz(rd, jp-hw(v, 0), 0), jp-movk-pos(rd, v, 1)) : cons(jp-movn(rd, jp-hw(0 - v - 1, 0), 0), jp-movk-neg(rd, 0 - v - 1, 1));
+        def jp-movk-pos(rd, v, k) = k > 3 ? [] : (Comparable) jp-hw(v, k) == 0 ? jp-movk-pos(rd, v, k + 1) : cons(jp-movk(rd, jp-hw(v, k), k), jp-movk-pos(rd, v, k + 1));
+        def jp-movk-neg(rd, nv, k) = k > 3 ? [] : (Comparable) jp-hw(nv, k) == 0 ? jp-movk-neg(rd, nv, k + 1) : cons(jp-movk(rd, 65535 - jp-hw(nv, k), k), jp-movk-neg(rd, nv, k + 1));
+
+        // ---- the helper table (x19), in words (struct fk_jit_cx in runtime/fkwu-uni.c): vs 0, next 1, walk 2, truth 3,
+        //      tick 4, enter 5, call 6, tail 7, then the one-meaning ops from 8: head tail len str_len str_eq str_byte_at
+        //      cons, add sub mul div mod le lt eq, band bor bxor shl_u32 shr_u32, nth byte_to_str, value_kind (30),
+        //      rotr_u32 add_u32 bnot_u32, then the frame chain: cur_fn 34, fr_depth 35, fr_fn 36, fr_cap 37 ----
+        def jp-op-word(tag) = (Comparable) tag == 20 ? 8 : (Comparable) tag == 21 ? 9 : (Comparable) tag == 22 ? 10 : (Comparable) tag == 25 ? 11 : (Comparable) tag == 26 ? 12 : (Comparable) tag == 28 ? 13 : (Comparable) tag == 19 ? 14 : (Comparable) tag == 3 ? 15 : (Comparable) tag == 4 ? 16 : (Comparable) tag == 42 ? 17 : (Comparable) tag == 10 ? 18 : (Comparable) tag == 11 ? 19 : (Comparable) tag == 5 ? 20 : (Comparable) tag == 103 ? 21 : (Comparable) tag == 102 ? 22 : (Comparable) tag == 34 ? 23 : (Comparable) tag == 35 ? 24 : (Comparable) tag == 36 ? 25 : (Comparable) tag == 37 ? 26 : (Comparable) tag == 38 ? 27 : (Comparable) tag == 23 ? 28 : (Comparable) tag == 33 ? 29 : (Comparable) tag == 39 ? 31 : (Comparable) tag == 40 ? 32 : (Comparable) tag == 41 ? 33 : nothing();
+        def jp-reload() = [jp-ldr(9, 19, 0), jp-ldr(9, 9, 0), jp-add-lsl3(21, 9, 20)];
+        def jp-call(slot) = append([jp-ldr(9, 19, slot), jp-blr(9)], jp-reload());
+        // stp x29,x30,[sp,#-48]!  mov x29,sp  stp x19,x20,[sp,#16]  stp x21,x22,[sp,#32]  x19 = table  x20 = fp  enter(fp, need)
+        def jp-prologue(need) = append([2847767549, 2432697341, 2835436531, 2835504117, jp-mov(19, 1), jp-mov(20, 0), jp-mov(0, 20), jp-movz(1, need, 0)], jp-call(5));
+        // ldp x21,x22,[sp,#32]  ldp x19,x20,[sp,#16]  ldp x29,x30,[sp],#48  ret
+        def jp-leave() = [2839698421, 2839630835, 2831383549, 3596551104];
+        def jp-return() = cons(jp-str(31, 19, 1), jp-leave());
+        def jp-handoff(k) = append(jp-imm(9, k), cons(jp-str(9, 19, 1), jp-leave()));
+        // the walker walks k in the frame of the code that holds it: the page's own at fp, a body written in place of its
+        // call at fp + off (add x1, x20, #off   91000000)
+        def jp-walk(cx, k) = append(jp-imm(0, k), cons((Comparable) cx[2] == 0 ? jp-mov(1, 20) : 2432696320 + cx[2] * 1024 + 20 * 32 + 1, jp-call(2)));
+        def jp-callee(c, t, n, slot) = append(jp-imm(0, c), append([jp-mov(1, 20), jp-movz(2, t, 0), jp-movz(3, n, 0)], jp-call(slot)));
+
+        // ---- an emission: [words, slots used, nodes taken in the page's own words] ----
+        // a word -1 is the self tail call's branch to the loop top, placed when the page is linked
+        def jp-r(ws, hi, nat) = [ws, hi, nat];
+        def jp-poison() = 99999;
+        def jp-walked(cx, k, t, tail) = tail ? jp-r(jp-handoff(k), t, 0) : jp-r(jp-walk(cx, k), t, 0);
+        def jp-valued(r, tail) = tail ? jp-r(append(r[0], jp-return()), r[1], r[2]) : r;
+
+        // a literal or a frame read lands in any register without a temporary
+        def jp-simple?(cx, k) {
+            let n = jp-node(k);
+            nothing?(n) ? 0 : (Comparable) n[0] == 1 ? jp-small?(n[1]) : (Comparable) n[0] == 2 ? 1 : (Comparable) n[0] == 110 ? jp-slot-in?(cx, jp-lit(n[1])) : 0;
+        }
+        def jp-small?(v) = (v < 2305843009213693952) && (v > 0 - 2305843009213693952);
+        def jp-slot-ok?(s) = nothing?(s) ? 0 : (s >= 0) && (s < 4096);
+        // a slot of the frame in hand, where it stands among the page's slots (its offset added) and inside the 4096 a load reaches
+        def jp-slot-in?(cx, s) = jp-slot-ok?(s) ? s + cx[2] < 4096 : 0;
+        def jp-simple-into(cx, rd, k) {
+            let n = jp-node(k);
+            (Comparable) n[0] == 1 ? jp-imm(rd, n[1] * 2) : (Comparable) n[0] == 2 ? [jp-ldr(rd, 21, cx[2])] : [jp-ldr(rd, 21, jp-lit(n[1]) + cx[2])];
+        }
+
+        // cx: [the defn whose self tail call is the loop (-1 in a body written in place), the frame's slot count, where the
+        // frame's slot 0 stands among the page's slots, how many bodies written in place enclose this code, the defn it
+        // stands in]
+        def jp-emit(cx, k, t, tail) {
+            let n = jp-node(k);
+            let tag = nothing?(n) ? 0 - 1 : n[0];
+            (Comparable) tag == 1 ? (jp-small?(n[1]) ? jp-valued(jp-r(jp-imm(0, n[1] * 2), t, 0), tail) : jp-walked(cx, k, t, tail)) : (Comparable) tag == 18 ? jp-valued(jp-r([jp-movz(0, 1, 0)], t, 0), tail) : (Comparable) tag == 24 ? jp-text(cx, k, t, tail) : (Comparable) tag == 2 ? jp-valued(jp-r([jp-ldr(0, 21, cx[2])], t, 0), tail) : (Comparable) tag == 110 ? jp-read(cx, k, n, t, tail) : (Comparable) tag == 109 ? jp-let(cx, k, n, t, tail) : (Comparable) tag == 69 ? jp-do(cx, n, t, tail) : (Comparable) tag == 6 ? jp-if(cx, n, t, tail) : jp-op(cx, k, n, tag, t, tail);
+        }
+        // a string literal is its constant word (the seed pins its index): four halves into x0
+        def jp-text(cx, k, t, tail) {
+            let h = jit_node(["word", k]);
+            nothing?(h) ? jp-walked(cx, k, t, tail) : jp-valued(jp-r([jp-movz(0, h[0], 0), jp-movk(0, h[1], 1), jp-movk(0, h[2], 2), jp-movk(0, h[3], 3)], t, 1), tail);
+        }
+        // a node the page has no words for: the seed names its value children (the ones its arm walks once each, in
+        // order); the page makes each into a temporary, and the walker runs only the node's mirror over them (jit_node)
+        def jp-strict(cx, k, t, tail) {
+            let kids = jit_node(["kids", k]);
+            nothing?(kids) ? jp-walked(cx, k, t, tail) : jp-strict-at(cx, k, kids, t, tail);
+        }
+        // the mirror is walked in the frame of the code that holds it, so its reads of the temporaries count from that frame
+        def jp-strict-at(cx, k, kids, t, tail) {
+            let a = len(kids);
+            let ev = jp-args(cx, kids, t, 0, t + a, jp-r([], t + a, 0));
+            let m = jit_node(["mint", k, t - cx[2]]);
+            nothing?(m) ? jp-walked(cx, k, t, tail) : jp-r(append(ev[0], tail ? jp-handoff(m) : jp-walk(cx, m)), ev[1], ev[2] + 1);
+        }
+        def jp-read(cx, k, n, t, tail) {
+            let s = jp-lit(n[1]);
+            !jp-slot-in?(cx, s) ? jp-walked(cx, k, t, tail) : s >= cx[1] ? jp-r([], jp-poison(), 0) : jp-valued(jp-r([jp-ldr(0, 21, s + cx[2])], t, 0), tail);
+        }
+        def jp-let(cx, k, n, t, tail) {
+            let s = jp-lit(n[1]);
+            !jp-slot-in?(cx, s) ? jp-walked(cx, k, t, tail) : s >= cx[1] ? jp-r([], jp-poison(), 0) : jp-let-at(cx, n, s, t, tail);
+        }
+        def jp-let-at(cx, n, s, t, tail) {
+            let v = jp-emit(cx, n[2], t, 0);
+            let b = jp-emit(cx, n[3], t, tail);
+            jp-r(append(v[0], cons(jp-str(0, 21, s + cx[2]), b[0])), jp-max(v[1], b[1]), v[2] + b[2] + 1);
+        }
+        def jp-do(cx, n, t, tail) {
+            let a = jp-emit(cx, n[1], t, 0);
+            let b = jp-emit(cx, n[2], t, tail);
+            jp-r(append(a[0], b[0]), jp-max(a[1], b[1]), a[2] + b[2] + 1);
+        }
+        // the branch law (fk_truth), in tail and value position alike: 0 and 2 read in place, any other word asked. In tail
+        // position each arm ends the page itself, so no branch joins them after the then-arm
+        def jp-if(cx, n, t, tail) {
+            let c = jp-emit(cx, n[1], t, 0);
+            let th = jp-emit(cx, n[2], t, tail);
+            let el = jp-emit(cx, n[3], t, tail);
+            let lth = len(th[0]);
+            let hi = jp-max(c[1], jp-max(th[1], el[1]));
+            let nat = c[2] + th[2] + el[2] + 1;
+            let tr = jp-call(3);
+            let lt = len(tr);
+            let join = tail ? 0 : 1;
+            let head = append(c[0], [jp-cbz(0, lt + lth + 4 + join), jp-cmpi(0, 2), jp-bcond(jp-eq(), lt + 2)]);
+            let arms = tail ? append(th[0], el[0]) : append(th[0], cons(jp-b(len(el[0]) + 1), el[0]));
+            jp-r(append(head, append(tr, cons(jp-cbz(0, lth + 1 + join), arms))), hi, nat);
+        }
+
+        // ---- operators ----
+        def jp-int-op(tag) = (Comparable) tag == 3 ? 1 : (Comparable) tag == 4 ? 1 : (Comparable) tag == 42 ? 1 : (Comparable) tag == 10 ? 1 : (Comparable) tag == 11 ? 1 : (Comparable) tag == 34 ? 1 : (Comparable) tag == 35 ? 1 : (Comparable) tag == 36 ? 1 : (Comparable) tag == 5 ? 1 : (Comparable) tag == 103 ? 1 : (Comparable) tag == 102 ? 1 : (Comparable) tag == 37 ? 1 : (Comparable) tag == 38 ? 1 : (Comparable) tag == 39 ? 1 : (Comparable) tag == 40 ? 1 : 0;
+        def jp-cmp-op?(tag) = ((Comparable) tag == 5) || (((Comparable) tag == 103) || ((Comparable) tag == 102));
+        // the ops the page always hands to their one meaning: [table word, operand count]
+        def jp-unary?(tag) = ((Comparable) tag == 20) || (((Comparable) tag == 21) || (((Comparable) tag == 22) || (((Comparable) tag == 25) || ((Comparable) tag == 33))));
+        def jp-binary?(tag) = ((Comparable) tag == 26) || (((Comparable) tag == 28) || (((Comparable) tag == 19) || ((Comparable) tag == 23)));
+        def jp-direct(tag) = jp-unary?(tag) ? [jp-op-word(tag), 1] : jp-binary?(tag) ? [jp-op-word(tag), 2] : nothing();
+        def jp-call-tag?(tag) = ((Comparable) tag == 12) || (((Comparable) tag == 240) || ((Comparable) tag == 241));
+        // the walker's bounded len: (op (len X) K) or (op K (len X)) with K a literal at or above 0
+        def jp-len-lit?(a, b) {
+            let na = jp-node(a);
+            let nb = jp-node(b);
+            (Comparable) na[0] == 22 ? ((Comparable) nb[0] == 1 ? nb[1] >= 0 : 0) : 0;
+        }
+        def jp-len-shape?(n) = jp-len-lit?(n[1], n[2]) || jp-len-lit?(n[2], n[1]);
+        def jp-op(cx, k, n, tag, t, tail) {
+            (Comparable) jp-int-op(tag) == 1 ? (jp-cmp-op?(tag) && jp-len-shape?(n) ? jp-strict(cx, k, t, tail) : jp-valued(jp-bin(cx, k, n, tag, t), tail)) : (Comparable) tag == 41 ? jp-valued(jp-bnot(cx, n, t), tail) : !nothing?(jp-direct(tag)) ? jp-valued(jp-op-call(cx, n, jp-direct(tag), t), tail) : jp-call-tag?(tag) ? jp-call-node(cx, k, n, tag, t, tail) : jp-kind?(n) ? jp-valued(jp-kind(cx, n, t), tail) : jp-strict(cx, k, t, tail);
+        }
+        // value_kind (the leaf door's mode 4): the operand made here, the kind asked of the table's own op (word 30)
+        def jp-kind?(n) = (Comparable) n[0] == 201 ? jp-mode?(jp-lit(n[1]), 4) : 0;
+        def jp-mode?(m, want) = nothing?(m) ? 0 : (Comparable) m == want;
+        def jp-kind(cx, n, t) {
+            let a = jp-emit(cx, n[2], t, 0);
+            jp-r(append(a[0], jp-call(30)), a[1], a[2] + 1);
+        }
+        // bnot_u32: an int's low word complemented in place, anything else to the op's one meaning (word 33)
+        def jp-bnot(cx, n, t) {
+            let a = jp-emit(cx, n[1], t, 0);
+            let slow = jp-call(33);
+            jp-r(append(a[0], append([jp-tbnz0(0, 5), jp-asr1(0, 0), jp-mvnw(0, 0), jp-lsl1(0, 0), jp-b(len(slow) + 1)], slow)), a[1], a[2] + 1);
+        }
+        // a one-meaning op: x0 = the first operand, x1 = the second; the first waits in slot t while the second is made
+        def jp-op-call(cx, n, d, t) = (Comparable) d[1] == 1 ? jp-op-call1(cx, n, d[0], t) : jp-op-call2(cx, n, d[0], t);
+        def jp-op-call1(cx, n, w, t) {
+            let a = jp-emit(cx, n[1], t, 0);
+            jp-r(append(a[0], jp-call(w)), a[1], a[2] + 1);
+        }
+        def jp-op-call2(cx, n, w, t) {
+            let sa = jp-simple?(cx, n[1]);
+            let ra = sa ? jp-r([], t, 0) : jp-emit(cx, n[1], t, 0);
+            let ta = sa ? t : t + 1;
+            let rb = jp-emit(cx, n[2], ta, 0);
+            let stash = sa ? [] : [jp-str(0, 21, t)];
+            let geta = sa ? jp-simple-into(cx, 0, n[1]) : [jp-ldr(0, 21, t)];
+            jp-r(append(ra[0], append(stash, append(rb[0], cons(jp-mov(1, 0), append(geta, jp-call(w)))))), jp-max(jp-max(ra[1], rb[1]), ta), ra[2] + rb[2] + 1);
+        }
+
+        // x1 = a, x0 = b; the int path in place, anything else through the op's one meaning (x0 = a, x1 = b there)
+        def jp-fast(tag) {
+            (Comparable) tag == 3 ? [jp-add(0, 1, 0)] : (Comparable) tag == 4 ? [jp-sub(0, 1, 0)] : (Comparable) tag == 42 ? [jp-asr1(1, 1), jp-mul(0, 1, 0)] : (Comparable) tag == 34 ? [jp-and(0, 1, 0)] : (Comparable) tag == 35 ? [jp-orr(0, 1, 0)] : (Comparable) tag == 36 ? [jp-eor(0, 1, 0)] : (Comparable) tag == 5 ? [jp-cmp(1, 0), jp-cset(0, jp-le()), jp-lsl1(0, 0)] : (Comparable) tag == 103 ? [jp-cmp(1, 0), jp-cset(0, jp-lt()), jp-lsl1(0, 0)] : (Comparable) tag == 102 ? [jp-cmp(1, 0), jp-cset(0, jp-eq()), jp-lsl1(0, 0)] : (Comparable) tag == 10 ? [jp-asr1(1, 1), jp-asr1(2, 0), jp-sdiv(0, 1, 2), jp-lsl1(0, 0)] : (Comparable) tag == 40 ? [jp-asr1(1, 1), jp-asr1(2, 0), jp-addw(0, 1, 2), jp-lsl1(0, 0)] : (Comparable) tag == 39 ? [jp-asr1(1, 1), jp-asr1(2, 0), jp-rorw(0, 1, 2), jp-lsl1(0, 0)] : (Comparable) tag == 37 ? [jp-asr1(1, 1), jp-asr1(2, 0), jp-lslw(0, 1, 2), jp-lsl1(0, 0)] : (Comparable) tag == 38 ? [jp-asr1(1, 1), jp-asr1(2, 0), jp-lsrw(0, 1, 2), jp-lsl1(0, 0)] : [jp-asr1(1, 1), jp-asr1(2, 0), jp-sdiv(3, 1, 2), jp-msub(0, 3, 2, 1), jp-lsl1(0, 0)];
+        }
+        def jp-divides?(tag) = ((Comparable) tag == 10) || ((Comparable) tag == 11);
+        // the int test jumps past the int path to the not-int words: for eq, an identity read when either side is nil
+        // (nil equals only nil, whatever the other word is), then the op's one meaning
+        def jp-guard(tag, lf) = jp-divides?(tag) ? [jp-orr(9, 1, 0), jp-tbnz0(9, lf + 3), jp-cbz(0, lf + 2)] : [jp-orr(9, 1, 0), jp-tbnz0(9, lf + 2)];
+        def jp-not-int(tag, lslow) = (Comparable) tag == 102 ? [jp-cmpi(1, 1), jp-bcond(jp-eq(), 3), jp-cmpi(0, 1), jp-bcond(1, 5), jp-cmp(1, 0), jp-cset(0, jp-eq()), jp-lsl1(0, 0), jp-b(lslow + 1)] : [];
+        def jp-bin(cx, k, n, tag, t) {
+            let sa = jp-simple?(cx, n[1]);
+            let ra = sa ? jp-r([], t, 0) : jp-emit(cx, n[1], t, 0);
+            let ta = sa ? t : t + 1;
+            let rb = jp-emit(cx, n[2], ta, 0);
+            let geta = sa ? jp-simple-into(cx, 1, n[1]) : [jp-ldr(1, 21, t)];
+            let stash = sa ? [] : [jp-str(0, 21, t)];
+            let fast = jp-fast(tag);
+            let slow = append([jp-mov(2, 0), jp-mov(0, 1), jp-mov(1, 2)], jp-call(jp-op-word(tag)));
+            let other = append(jp-not-int(tag, len(slow)), slow);
+            let tailws = append(fast, cons(jp-b(len(other) + 1), other));
+            let ws = append(ra[0], append(stash, append(rb[0], append(geta, append(jp-guard(tag, len(fast)), tailws)))));
+            jp-r(ws, jp-max(jp-max(ra[1], rb[1]), ta), ra[2] + rb[2] + 1);
+        }
+
+        // a call's arguments into t .. t+n-1, each evaluated with temporaries above them
+        def jp-args(cx, kids, t, i, top, acc) {
+            nil?(kids) ? acc : jp-args-at(cx, kids, t, i, top, acc, jp-emit(cx, kids[0], top, 0));
+        }
+        def jp-args-at(cx, kids, t, i, top, acc, r) = jp-args(cx, kids[1:], t, i + 1, top, jp-r(append(acc[0], append(r[0], [jp-str(0, 21, t + i)])), jp-max(acc[1], r[1]), acc[2] + r[2]));
+        def jp-chain(cell, acc) {
+            let n = cell < 0 ? nothing() : jp-node(cell);
+            nothing?(n) ? reverse(acc) : (Comparable) n[0] == 242 ? jp-chain(n[2], cons(n[1], acc)) : reverse(acc);
+        }
+        def jp-call-kids(n, tag) = (Comparable) tag == 12 ? [n[2]] : (Comparable) tag == 240 ? [n[2], n[3]] : jp-chain(n[2], []);
+        // a self tail call is the loop: the arguments evaluated, then moved into the parameters, the deadline ticked.
+        // Another call evaluates its arguments here too: in value position the call helper runs the walker's call arm
+        // over them; in tail position the tail helper moves them into this frame and names the callee's body, and the
+        // walker continues there
+        def jp-call-node(cx, k, n, tag, t, tail) {
+            let kids = jp-call-kids(n, tag);
+            (tail && ((Comparable) n[1] == cx[0])) ? jp-self-loop(cx, kids, t) : jp-call-in(cx, n[1], kids, t, tail);
+        }
+        // a callee whose tail spine holds no call is written in place of the call (its own such callees too, two deep): its
+        // arguments made into t .. t+a-1 are its frame's first slots, its lets follow, its temporaries above them, and it
+        // enters and leaves as the call would (the frame chain and the running defn, in the page's own words). Its body is
+        // written in value position; a call it makes there was a value call already and stays one
+        def jp-call-in(cx, c, kids, t, tail) {
+            let inl = cx[3] < 2 ? jp-inline(cx, c, kids, t) : nothing();
+            !nothing?(inl) ? jp-valued(inl, tail) : jp-call-other(cx, c, kids, t, tail);
+        }
+        // the callee as the kernel holds it: its body and arity (kernel_ast ["fn", c]), nothing for a capturing closure
+        def jp-fn(c) = kernel_ast(host_pid(), ["fn", c]);
+        def jp-inline(cx, c, kids, t) {
+            let f = jp-fn(c);
+            nothing?(f) ? nothing() : (Comparable) len(kids) != f[1] ? nothing() : !jp-spine-ok?(f[0], 1) ? nothing() : jp-inline-body(cx, c, kids, t, f[0], f[1]);
+        }
+        // the tail spine: the positions the walker's tail loop continues through (fk_walk_body: the frame's 111, a let's
+        // body, a do's last, an if's arms). A call standing there is a tail call, which a body written in value position
+        // makes a call. That costs one frame when the callee's own spine holds no call (it answers without tail-calling on:
+        // core's nil? speaking through core-nil-heard); a callee that tail-calls on may be one of a pair that tail-call
+        // each other, whose stack would grow, so a spine call is taken only one deep (deep 1) and only to a defn by name
+        def jp-spine-ok?(k, deep) {
+            let n = jp-node(k);
+            let tag = nothing?(n) ? 0 - 1 : n[0];
+            (Comparable) tag == 111 ? jp-spine-ok?(n[2], deep) : (Comparable) tag == 109 ? jp-spine-ok?(n[3], deep) : (Comparable) tag == 69 ? jp-spine-ok?(n[2], deep) : (Comparable) tag == 6 ? (jp-spine-ok?(n[2], deep) && jp-spine-ok?(n[3], deep)) : jp-named-call?(tag) ? ((Comparable) deep == 1 && jp-spine-bare?(n[1])) : !jp-tail-call?(tag);
+        }
+        def jp-spine-bare?(c) {
+            let f = jp-fn(c);
+            nothing?(f) ? 0 : jp-spine-ok?(f[0], 0);
+        }
+        def jp-named-call?(tag) = ((Comparable) tag == 12) || (((Comparable) tag == 240) || ((Comparable) tag == 241));
+        def jp-tail-call?(tag) = jp-named-call?(tag) || (((Comparable) tag == 244) || (((Comparable) tag == 44) || (((Comparable) tag == 7) || ((Comparable) tag == 194))));
+        def jp-inline-body(cx, c, kids, t, body, arity) {
+            let top = jp-node(body);
+            let wrapped = (Comparable) top[0] == 111;
+            let k111 = wrapped ? jp-lit(top[1]) : 0 - 1;
+            nothing?(k111) ? nothing() : jp-inline-at(cx, c, kids, t, wrapped ? top[2] : body, jp-max(arity, k111 + 1));
+        }
+        def jp-inline-at(cx, c, kids, t, inner, lim) {
+            let a = len(kids);
+            let ev = jp-args(cx, kids, t, 0, t + a, jp-r([], t + a, 0));
+            let r = jp-emit([0 - 1, lim, t, cx[3] + 1, c], inner, t + lim, 0);
+            (r[1] > 4095) || (len(r[0]) > 768) ? nothing() : jp-inline-made(c, jp-r(append(ev[0], append(jp-enter-in-place(c), append(r[0], jp-leave-in-place(cx[4])))), jp-max(ev[1], jp-max(r[1], t + lim)), ev[2] + r[2] + 1));
+        }
+        // the frame chain kept in the page's own words, as the call keeps it (FK_FR_PUSH): the running defn is pushed as the
+        // callee's caller while the chain has room, the depth rises, the callee runs; leaving lowers the depth and names the
+        // defn the page stands in again. Table words 34 cur_fn, 35 fr_depth, 36 fr_fn, 37 fr_cap; x0 is not touched
+        def jp-enter-in-place(c) = append([jp-ldr(9, 19, 34), jp-ldr(10, 9, 0), jp-ldr(11, 19, 35), jp-ldr(12, 11, 0), jp-ldr(13, 19, 37), jp-cmp(12, 13), jp-bcond(jp-ge(), 3), jp-ldr(13, 19, 36), jp-strw-lsl2(10, 13, 12), jp-addi(12, 12, 1), jp-str(12, 11, 0)], append(jp-imm(10, c), [jp-str(10, 9, 0)]));
+        def jp-leave-in-place(n) = append([jp-ldr(11, 19, 35), jp-ldr(12, 11, 0), jp-subi(12, 12, 1), jp-str(12, 11, 0), jp-ldr(9, 19, 34)], append(jp-imm(10, n), [jp-str(10, 9, 0)]));
+        // the seed is told (jit_node ["inline", c]): a callee's own time is then its callers' pages' time, never an offer
+        def jp-inline-made(c, r) {
+            let told = jit_node(["inline", c]);
+            r;
+        }
+        def jp-call-other(cx, c, kids, t, tail) {
+            let a = len(kids);
+            let ev = jp-args(cx, kids, t, 0, t + a, jp-r([], t + a, 0));
+            let go = tail ? append(jp-callee(c, t, a, 7), cons(jp-str(0, 19, 1), jp-leave())) : jp-callee(c, t, a, 6);
+            jp-r(append(ev[0], go), ev[1], ev[2] + 1);
+        }
+        def jp-moves(t, i, a) = i >= a ? [] : cons(jp-ldr(0, 21, t + i), cons(jp-str(0, 21, i), jp-moves(t, i + 1, a)));
+        def jp-self-loop(cx, kids, t) {
+            let a = len(kids);
+            let ev = jp-args(cx, kids, t, 0, t + a, jp-r([], t + a, 0));
+            jp-r(append(ev[0], append(jp-moves(t, 0, a), append(jp-call(4), [0 - 1]))), ev[1], ev[2] + 1);
+        }
+
+        // ---- the page: prologue, body, the loop's branches placed ----
+        def jp-link(ws, top, i) = nil?(ws) ? [] : cons((Comparable) ws[0] == 0 - 1 ? jp-b(top - i) : ws[0], jp-link(ws[1:], top, i + 1));
+        def jp-page(c, body, arity) {
+            let top = jp-node(body);
+            let wrapped = (Comparable) top[0] == 111;
+            let k111 = wrapped ? jp-lit(top[1]) : 0 - 1;
+            let inner = wrapped ? top[2] : body;
+            nothing?(k111) ? nothing() : jp-page-at(c, inner, jp-max(arity, k111 + 1));
+        }
+        def jp-page-at(c, inner, t0) {
+            let r = jp-emit([c, t0, 0, 0, c], inner, t0, 1);
+            let pro = jp-prologue(r[1]);
+            (r[1] > 4095) || ((Comparable) r[2] == 0) ? nothing() : jp-link(append(pro, r[0]), len(pro), 0);
+        }
+        // the helper table's layout this emitter writes for (FK_JIT_ABI in runtime/fkwu-uni.c): a seed that offers
+        // another layout is declined, never bound to words that would name the wrong helpers
+        def jp-abi() = 4;
+        def jp-offer(input) {
+            let fits = !nothing?(input) && ((len(input) > 3) && ((Comparable) input[3] == jp-abi()));
+            let words = fits ? jp-page(input[0], input[1], input[2]) : nothing();
+            nothing?(words) ? 0 : jit_fn_bind(input[0], cons(jp-abi(), words));
+        }
+    }
+    jp-offer(cell_input());
+}

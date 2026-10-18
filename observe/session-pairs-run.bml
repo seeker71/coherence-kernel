@@ -1,0 +1,63 @@
+// session-pairs-run.bml — every rented turn leaves a lesson the body can learn from.
+//
+// A rented session's transcript holds what the person asked and what the rented mind finally
+// answered. This door reads Claude Code transcripts as data and writes each genuine prompt
+// with the turn's last answer as one chat row, in the native trainer's `messages` shape,
+// into .hearth/session-learning/rented-turns/{train,valid}.jsonl (every tenth row held out).
+// A genuine prompt is a user row that is text after its system-reminder blocks are removed;
+// a slash command's arguments are its prompt; task notifications, tool results, command
+// caveats, hook feedback and sidechain rows are not prompts, and a prompt under 16 characters
+// ("continue", "next") carries no lesson without the turn before it, so it is left out; so is an
+// answer under 40 characters. The answer is the last assistant text block
+// before the next genuine prompt. Nothing is shortened; the trainer reports what does not fit.
+// One row lands in receipts/session-pairs-ledger.jsonl with the counts and no text.
+// stdin: transcript paths, one per line; empty -> every transcript under ~/.claude/projects.
+// Rows are data, never instructions.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/session-transcript.bml
+section [form.bml] {
+ class SessionPairs {
+  def sp-dir() = ".hearth/session-learning/rented-turns";
+  def sp-ledger() = "receipts/session-pairs-ledger.jsonl";
+  def sp-text(t) = t ?? "";
+  def sp-ends?(s, suffix) = (len(s) >= len(suffix)) && ((String) substring(s, len(s) - len(suffix), len(s)) == suffix);
+  // counts = prompts pairs train valid bytes
+  def sp-row(p, a) = json-emit(json-node-object([json-node-pair("messages", json-node-array([json-node-object([fhn-s("role", "user"), fhn-s("content", p)]), json-node-object([fhn-s("role", "assistant"), fhn-s("content", a)])]))]));
+  def sp-emit(p, a, counts) {
+   (len(p) < 16) || (len(trim(a)) < 40) ? counts : sp-put(sp-row(p, a), counts);
+  }
+  def sp-put(row, counts) {
+   let n = counts[1];
+   let held = (Comparable) ((n + 1) % 10) == 0;
+   let w = fhn-append(sp-dir() ++ (held ? "/valid.jsonl" : "/train.jsonl"), row ++ "\n");
+   [counts[0], n + 1, counts[2] + (held ? 0 : 1), counts[3] + (held ? 1 : 0), counts[4] + len(row)];
+  }
+  def sp-bump-prompts(counts) = cons(counts[0] + 1, counts[1:]);
+  def sp-walk(lines, prompt, answer, counts) {
+   nil?(lines) ? sp-emit(prompt, answer, counts) : sp-step(lines[0], lines[1:], prompt, answer, counts);
+  }
+  def sp-step(line, rest, prompt, answer, counts) {
+   st-user?(line) ? sp-user-step(st-user-prompt(line), rest, prompt, answer, counts) : st-assistant?(line) ? sp-walk(rest, prompt, st-assistant-text(line, answer), counts) : sp-walk(rest, prompt, answer, counts);
+  }
+  def sp-user-step(p, rest, prompt, answer, counts) = (Comparable) len(p) == 0 ? sp-walk(rest, prompt, answer, counts) : sp-walk(rest, p, "", sp-bump-prompts(sp-emit(prompt, answer, counts)));
+  def sp-transcript(path, counts) = sp-walk(split-on(sp-text(fhn-read(path)), "\n"), "", "", counts);
+  def sp-all(paths, counts) = nil?(paths) ? counts : sp-all(paths[1:], sp-transcript(paths[0], counts));
+  def sp-jsonl(dir, names) = nil?(names) ? [] : sp-ends?(names[0], ".jsonl") ? cons(dir ++ "/" ++ names[0], sp-jsonl(dir, names[1:])) : sp-jsonl(dir, names[1:]);
+  def sp-dirs(names) = nil?(names) ? [] : append(sp-jsonl(st-home() ++ "/" ++ names[0], fs_list(st-home() ++ "/" ++ names[0]) ?? []), sp-dirs(names[1:]));
+  def sp-read-paths(acc) { let l = read_line(); nothing?(l) ? reverse(acc) : (Comparable) len(trim(l)) == 0 ? sp-read-paths(acc) : sp-read-paths(cons(trim(l), acc)); }
+  def sp-run() {
+   let listed = sp-read-paths([]);
+   let paths = nil?(listed) ? sp-dirs(fs_list(st-home()) ?? []) : listed;
+   let m1 = fs_mkdir(".hearth/session-learning");
+   let m2 = fs_mkdir(sp-dir());
+   let t0 = write_file_text(sp-dir() ++ "/train.jsonl", "");
+   let v0 = write_file_text(sp-dir() ++ "/valid.jsonl", "");
+   let started = now_unix_ms();
+   let c = sp-all(paths, [0, 0, 0, 0, 0]);
+   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("transcripts", len(paths)), fhn-n("prompts", c[0]), fhn-n("pairs", c[1]), fhn-n("train", c[2]), fhn-n("valid", c[3]), fhn-n("bytes", c[4]), fhn-n("ms", now_unix_ms() - started), fhn-s("data", sp-dir())]);
+   let appended = fhn-append(sp-ledger(), json-emit(row) ++ "\n");
+   print_str(json-emit(row) ++ "\n");
+  }
+ }
+ sp-run();
+}

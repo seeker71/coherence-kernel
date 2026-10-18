@@ -1,0 +1,86 @@
+// arg-order-shapes-fixture.bml -- the recipe shapes the argument-order bands run, defined once.
+// An effect is one append of a byte to a scratch file; every call site appends its own byte, so the bytes read back
+// tell the ORDER the effects ran in, not only how many. tests/anf-lower-band.fk runs these through the cold walker
+// and the ANF evaluator; tests/arg-order-lane-parity-band.fk runs the same defns hot, past the C loop lane's heat.
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+    def alb-bit(ok, bit) = ok ? bit : 0;
+    def alb-path(name) = temp_dir() ++ "/alb-" ++ host_pid().str() ++ "-" ++ name;
+    // a scratch slot is a path, or the list [path] the shapes take as their m
+    def alb-slot(name) = [alb-path(name)];
+    def alb-file(p) = (String) value_kind(p) == "list" ? p[0] : p;
+    def alb-read(p) {
+        let t = host_file_read_text(alb-file(p));
+        nothing?(t) ? "" : t;
+    }
+    def alb-reset(p) = host_path_remove(alb-file(p));
+    def alb-eff(p, b) = host_file_append_bytes(p, [b]);
+    // The scratch path rides in a list, m = [path ...], read as m[0] at the call into the effect: that is the shape the
+    // native-t5 pass has and the one the C loop lane's inliner took (a path passed bare is never inlined, so a bare path
+    // would make the hot half of the parity band green by never meeting the bug).
+    // an argument that is itself a call: two effects, answers 1
+    def alb-two(m, i) {
+        let a = alb-eff(m[0], 65 + i % 20);
+        let b = alb-eff(m[0], 97 + i % 20);
+        1;
+    }
+    // an effect that answers its own byte, so a callee that reads it shows which position it read
+    def s6-eff(m, b) {
+        let r = alb-eff(m[0], b);
+        b;
+    }
+
+    // 1: the native-t5 shape -- a mutually recursive pair, the next ignoring its first parameter
+    def s1-nx(rc, m, Ls, T) = s1-run(m, Ls, T);
+    def s1-run(m, Ls, T) = nil?(Ls) ? 1 : s1-nx(alb-two(m, Ls[0]), m, Ls[1:], T);
+    def s1-enc(m, T) {
+        let a = alb-eff(m[0], 49);
+        let b = s1-run(m, m[1], T);
+        let c = alb-eff(m[0], 50);
+        T;
+    }
+    def s1-outer(m, i, n) = i >= n ? 0 : s1-outer-next(s1-enc(m, 5), m, i, n);
+    def s1-outer-next(rc, m, i, n) = s1-outer(m, i + 1, n);
+    // 2: the callee never reads its first parameter
+    def s2-ign(rc, m, i, n) = s2-go(m, i, n);
+    def s2-go(m, i, n) = i >= n ? 0 : s2-ign(alb-two(m, i), m, i + 1, n);
+    // 3: the callee reads it twice
+    def s3-tw(x, m, i, n) = x + x > 100 ? 0 : s3-go(m, i, n);
+    def s3-go(m, i, n) = i >= n ? 0 : s3-tw(alb-two(m, i), m, i + 1, n);
+    // 4: the callee reads it only in a branch never taken
+    def s4-br(c, x, m, i, n) = c > 2 ? x : s4-go(m, i, n);
+    def s4-go(m, i, n) = i >= n ? 0 : s4-br(1, alb-two(m, i), m, i + 1, n);
+    // 5: an unread let
+    def s5-un(m, i) {
+        let a = alb-two(m, i);
+        1;
+    }
+    def s5-go(m, i, n) = i >= n ? 0 : s5-next(s5-un(m, i), m, i, n);
+    def s5-next(rc, m, i, n) = s5-go(m, i + 1, n);
+    // 6: nested pairs, the effect carried by each leaf argument and its value kept
+    def s6-pair(a, b) = a * 1000 + b;
+    def s6-unit(m) = s6-pair(s6-pair(s6-eff(m, 67), s6-eff(m, 68)), s6-eff(m, 69));
+    def s6-go(m, i, n, acc) = i >= n ? acc : s6-go(m, i + 1, n, acc + s6-unit(m));
+    // 7: pure arguments
+    def s7-add(a, b) = a + b;
+    def s7-go(i, n, acc) = i >= n ? acc : s7-go(i + 1, n, s7-add(acc, s7-add(i, 1)));
+    // 8: an effect in an arm
+    def s8-arm(c, m) = c > 2 ? alb-eff(m[0], 65) : 0;
+    // 9: three effectful arguments, the callee reads only the middle one
+    def s9-pick(a, b, c, m, i, n, acc) = i >= n ? acc : s9-pick(s6-eff(m, 65), s6-eff(m, 66), s6-eff(m, 67), m, i + 1, n, acc + b);
+    // what the rows do not name
+    def d1-closure(xs) = map(x => x + 1, xs);
+    def d2-sqrt(a) = math_sqrt(a);
+    def d3-before(p) {
+        let a = alb-eff(p, 65);
+        math_sqrt(2.0);
+    }
+    def d4-native(a) = value_kind(a);
+
+    // ---- the contract's byte sequences, built without any lane ----
+    def alb-two-seq(i, n, acc) = i >= n ? str-join(reverse(acc)) : alb-two-seq(i + 1, n, cons(byte_to_str(65 + i % 20) + byte_to_str(97 + i % 20), acc));
+    def alb-layers(k, acc) = k > 12 ? reverse(acc) : alb-layers(k + 1, cons(k, acc));
+    def alb-round-text(ls, acc) = nil?(ls) ? "1" + (str-join(reverse(acc)) + "2") : alb-round-text(ls[1:], cons(byte_to_str(65 + ls[0] % 20) + byte_to_str(97 + ls[0] % 20), acc));
+    def alb-rounds(r, n, acc) = r >= n ? str-join(acc) : alb-rounds(r + 1, n, cons(alb-round-text(alb-layers(1, []), []), acc));
+    def alb-repeat(s, k, acc) = k <= 0 ? str-join(acc) : alb-repeat(s, k - 1, cons(s, acc));
+}

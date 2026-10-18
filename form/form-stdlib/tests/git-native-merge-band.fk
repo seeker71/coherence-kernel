@@ -1,0 +1,253 @@
+; git-native-merge-band.fk — three-way merging, `merge` and `rebase` in Form (git-merge.bml), held against merges worked out by hand and run in
+; SCRATCH repositories under the temp directory; each result is also checked by the readers and by an fsck of the whole object graph.
+;
+;   1    line merges: a change on one side only is taken; two separate changes are both taken; the same change made twice is taken once;
+;        a deletion against an untouched side; insertions at both ends; overlapping and touching changes differing are a conflict
+;        written between `<<<<<<<`, `=======` and `>>>>>>>` lines; an add/add against the empty base; the `union` rule keeps both sides
+;   2    rebase over a diverged history, no conflict: feat's two commits replayed on main's new tip — the files hold both sides' work,
+;        authors and messages are kept, the committer is the rebasing identity, the branch is reattached, the history is linear and the
+;        reflog says "rebase (pick)" / "rebase (finish)"; an up-to-date branch says so; a branch strictly behind fast-forwards
+;   4    rebase with a conflict: it stops (exit 1) naming the file, the working file carries the markers, the index holds stages 1/2/3 (UU),
+;        .git/rebase-merge holds the state; `--abort` returns branch, index and files to what they were; the same stop resolved by hand and
+;        `--continue` finishes with the original author and message; `--skip` drops the commit
+;   8    modify/delete conflicts (DU / UD) stop and are reported; the `union` merge attribute (a ledger file) keeps both appended lines
+;        with no marker and no stop; a commit whose change is already upstream is dropped silently
+;   16   `--autostash`: a dirty tracked file that the rebase does not touch comes back after it; a dirty file the rebase conflicts with is
+;        reported and stays in the working tree with the stash kept
+;   32   merge: fast-forward, `--ff-only` refusing with exit 128, `--no-ff` making a merge commit, a three-way merge commit with two parents and the
+;        message "Merge branch 'feat'", "Already up to date.", a conflicted merge leaving MERGE_HEAD (exit 1) and finished by `commit`,
+;        `merge --abort`
+;   64   every repository the band made passes fsck: every object hashes to its name, every commit's tree and parents exist, every ref resolves
+;   128  the refusals: rebase -i and --onto, merge --squash, cherry-pick, stash and the rest of the write class not carried; a rebase or merge
+;        outside a scratch repository without `-c native.allow-write=true` (exit 128, nothing touched)
+;
+; Expected: 255
+; Verdict 255
+; REQUIRES: (host doors: host_utimes, host_chmod, host_temp_dir, host_dir_rmdir, host_sleep_ms)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-rev.bml;
+import form-stdlib/bml/git-diff.bml;
+import form-stdlib/bml/git-cmd.bml;
+import form-stdlib/bml/git-write.bml;
+import form-stdlib/bml/git-wcmd.bml;
+import form-stdlib/bml/git-merge.bml;
+section [form.bml] {
+  def gmb-bit(ok, bit) = ok ? bit : 0;
+  def gmb-say(label, v) = print([label, v]);
+  def gmb-eq(a, b) = (String) a == (String) b;
+  def gmb-id() = "-c user.name=Claude -c user.email=noreply@anthropic.com ";
+  def gmb-run(top, line) = git-run-full-line(top, gmb-id() ++ line);
+  def gmb-is(top, line, want, code) {
+    let r = gmb-run(top, line);
+    gmb-eq(r[0], want) && r[1] == code;
+  }
+  def gmb-rc(top, line, code) = gmb-run(top, line)[1] == code;
+  def gmb-has(top, line, code, needle) {
+    let r = gmb-run(top, line);
+    r[1] == code && str_find(r[0] ++ r[2], needle, 0) >= 0;
+  }
+  def gmb-out(top, line) = gs-trim(gmb-run(top, line)[0]);
+  def gmb-put(top, rel, content) {
+    let d = gw-mkdirs(gs-parent(top ++ "/" ++ rel));
+    write_file(top ++ "/" ++ rel, content);
+  }
+  def gmb-read(top, rel) = read_file(top ++ "/" ++ rel) ?? "<absent>";
+  def gmb-exists?(top, rel) = host_path_exists(top ++ "/" ++ rel) == 1;
+  def gmb-commit(top, files, msg) {
+    let w = map(f => gmb-put(top, f[0], f[1]), files);
+    let a = gmb-run(top, "add -A");
+    gmb-run(top, "commit -q -m \"" ++ msg ++ "\"");
+  }
+  def gmb-nine() = "1\n2\n3\n4\n5\n6\n7\n8\n9\n";
+  // ---- fsck ---------------------------------------------------------------------------------------------------------------------------
+  def gmb-loose-names(gitdir) = gs-flatten(map(d => map(f => d ++ f, filter(f => len(f) == 38, host_dir_list(gitdir ++ "/objects/" ++ d) ?? [])), filter(d => len(d) == 2, host_dir_list(gitdir ++ "/objects") ?? [])));
+  def gmb-obj-ok(r, hex) {
+    let o = git-read(r, hex);
+    !nothing?(o) && gs-verify(gsha-raw-of-hex(hex), o[0], o[1]);
+  }
+  def gmb-tree-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gmb-eq(o[0], "tree") && gs-verify(raw, o[0], o[1]) && all?(e => gs-tree?(e[0]) ? gmb-tree-ok(r, e[2]) : (gs-gitlink?(e[0]) || gmb-blob-ok(r, e[2])), gs-tree-entries(o[1]));
+  }
+  def gmb-blob-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gs-verify(raw, o[0], o[1]);
+  }
+  def gmb-fsck(top) {
+    let r = git-open(top);
+    let tips = nothing?(r) ? [] : filter(x => !nothing?(x), map(row => grv-peel(r, gsha-raw-of-hex(row[1]), "commit"), gr-list(r, "refs/")));
+    let head = nothing?(r) ? nothing() : gr-head-id(r);
+    let all_tips = nothing?(head) ? tips : cons(gsha-raw-of-hex(head), tips);
+    let infos = nil?(all_tips) ? [] : grv-walk(r, all_tips, [], [false, false, 0 - 1, 0], nothing());
+    !nothing?(r) && all?(h => gmb-obj-ok(r, h), gmb-loose-names(gs-gitdir(r))) && all?(i => gmb-tree-ok(r, i[3]) && all?(p => gs-has?(r, p), i[1]), infos);
+  }
+  // ---- 1 line merges --------------------------------------------------------------------------------------------------------------------
+  def gmb-m(b, o, t) = gm-merge-text(b, o, t, "ours", "theirs", false);
+  def gmb-text-ok() {
+    let nine = gmb-nine();
+    let o2 = "1\ntwo\n3\n4\n5\n6\n7\n8\n9\n";
+    let t8 = "1\n2\n3\n4\n5\n6\n7\neight\n9\n";
+    let a = gmb-m(nine, o2, nine);
+    let b = gmb-m(nine, nine, t8);
+    let c = gmb-m(nine, o2, t8);
+    let d = gmb-m(nine, o2, o2);
+    let e = gmb-m(nine, "1\n2\n3\n4\n5\n7\n8\n9\n", nine);
+    let f = gmb-m(nine, "start\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", "1\n2\n3\n4\n5\n6\n7\n8\n9\nend\n");
+    let g = gmb-m(nine, "1\n2\n3\n4\nO5\n6\n7\n8\n9\n", "1\n2\n3\n4\nT5\n6\n7\n8\n9\n");
+    let h = gmb-m(nine, "1\n2\nO3\n4\n5\n6\n7\n8\n9\n", "1\n2\n3\nT4\n5\n6\n7\n8\n9\n");
+    let i = gmb-m(nine, "1\n2\nA\n3\n4\n5\n6\n7\n8\n9\n", "1\n2\nB\n3\n4\n5\n6\n7\n8\n9\n");
+    let j = gmb-m("", "x\n", "y\n");
+    let k = gm-merge-text(nine, "1\n2\n3\n4\nO5\n6\n7\n8\n9\n", "1\n2\n3\n4\nT5\n6\n7\n8\n9\n", "ours", "theirs", true);
+    let l = gmb-m(nine, nine, nine);
+    let m = gmb-m(nine, "1\n2\n3\n4\n5\n6\n7\n8\n9\nextra\n", "1\n2\n3\n4\n5\n6\n7\n8\n9\n");
+    let s1 = gmb-say("text merges", [a[1], b[1], c[1], d[1], e[1], f[1], g[1], h[1], i[1], j[1], k[1], l[1], m[1]]);
+    gmb-eq(a[0], o2) && a[1] == 0 && gmb-eq(b[0], t8) && b[1] == 0 && gmb-eq(c[0], "1\ntwo\n3\n4\n5\n6\n7\neight\n9\n") && c[1] == 0 && gmb-eq(d[0], o2) && d[1] == 0 && gmb-eq(e[0], "1\n2\n3\n4\n5\n7\n8\n9\n") && e[1] == 0 && gmb-eq(f[0], "start\n1\n2\n3\n4\n5\n6\n7\n8\n9\nend\n") && f[1] == 0 && gmb-eq(g[0], "1\n2\n3\n4\n<<<<<<< ours\nO5\n=======\nT5\n>>>>>>> theirs\n6\n7\n8\n9\n") && g[1] == 1 && gmb-eq(h[0], "1\n2\n<<<<<<< ours\nO3\n4\n=======\n3\nT4\n>>>>>>> theirs\n5\n6\n7\n8\n9\n") && h[1] == 1 && gmb-eq(i[0], "1\n2\n<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n3\n4\n5\n6\n7\n8\n9\n") && i[1] == 1 && gmb-eq(j[0], "<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n") && j[1] == 1 && gmb-eq(k[0], "1\n2\n3\n4\nO5\nT5\n6\n7\n8\n9\n") && k[1] == 0 && gmb-eq(l[0], nine) && l[1] == 0 && gmb-eq(m[0], "1\n2\n3\n4\n5\n6\n7\n8\n9\nextra\n") && m[1] == 0;
+  }
+  // ---- the histories -------------------------------------------------------------------------------------------------------------------------
+  // base: f.txt (nine lines), g.txt, h.txt. main: f line 2 -> two, adds m.txt, deletes h.txt. feat (from base): f line 8 -> eight; g changed; adds n.txt
+  def gmb-diverged(top) {
+    let m = gw-mkdirs(top);
+    let i = gmb-run(top, "init -q");
+    let c0 = gmb-commit(top, [["f.txt", gmb-nine()], ["g.txt", "g\n"], ["h.txt", "h\n"], ["ledger.txt", "row-0\n"], [".gitattributes", "ledger.txt merge=union\n"]], "base");
+    let b = gmb-run(top, "branch feat");
+    let c1 = gmb-commit(top, [["f.txt", "1\ntwo\n3\n4\n5\n6\n7\n8\n9\n"], ["m.txt", "m\n"], ["ledger.txt", "row-0\nrow-main\n"]], "main one");
+    let rmh = host_path_remove(top ++ "/h.txt");
+    let c2 = gmb-run(top, "add -A");
+    let c3 = gmb-run(top, "commit -q -m \"main drops h\"");
+    let co = gmb-run(top, "checkout -q feat");
+    let f1 = gmb-commit(top, [["f.txt", "1\n2\n3\n4\n5\n6\n7\neight\n9\n"], ["ledger.txt", "row-0\nrow-feat\n"]], "feat one");
+    let f2 = gmb-commit(top, [["g.txt", "g changed\n"], ["n.txt", "n\n"]], "feat two");
+    top;
+  }
+  def gmb-run-all() {
+    let t0 = host_monotonic_ms();
+    let b1 = gmb-bit(gmb-text-ok(), 1);
+    let base = host_realpath(host_temp_dir()) ++ "/gmb-" ++ host_pid().str();
+    // ---- 2 clean rebase
+    let top = gmb-diverged(base ++ "-a");
+    let mainid = gmb-out(top, "rev-parse main");
+    let featold = gmb-out(top, "rev-parse feat");
+    let fauthor = gmb-out(top, "log -1 --format=%an feat");
+    let rb = gmb-run(top, "rebase -q main");
+    let r1 = rb[1] == 0 && gmb-is(top, "rev-parse --abbrev-ref HEAD", "feat\n", 0) && gmb-is(top, "rev-parse feat~2", mainid ++ "\n", 0) && gmb-is(top, "rev-list --count main..feat", "2\n", 0) && gmb-is(top, "log --format=%s -n 2", "feat two\nfeat one\n", 0) && gmb-is(top, "log -1 --format=%an,%cn", "Claude,Claude\n", 0) && !gmb-eq(gmb-out(top, "rev-parse feat"), featold) && gmb-is(top, "status --porcelain", "", 0);
+    let files = gmb-eq(gmb-read(top, "f.txt"), "1\ntwo\n3\n4\n5\n6\n7\neight\n9\n") && gmb-eq(gmb-read(top, "g.txt"), "g changed\n") && gmb-eq(gmb-read(top, "n.txt"), "n\n") && gmb-eq(gmb-read(top, "m.txt"), "m\n") && !gmb-exists?(top, "h.txt") && gmb-eq(gmb-read(top, "ledger.txt"), "row-0\nrow-main\nrow-feat\n") && !gmb-exists?(top, ".git/rebase-merge");
+    let lg = read_file(top ++ "/.git/logs/HEAD") ?? "";
+    let reflog = str_find(lg, "rebase (pick): feat one", 0) >= 0 && str_find(lg, "rebase (finish): returning to refs/heads/feat", 0) >= 0 && str_find(lg, "rebase (start): checkout " ++ mainid, 0) >= 0;
+    let upto = gmb-has(top, "rebase main", 0, "up to date");
+    let beh = gmb-run(top, "branch old " ++ gmb-out(top, "rev-parse main~2"));
+    let ff = gmb-rc(top, "checkout -q old", 0) && gmb-has(top, "rebase main", 0, "Successfully rebased") && gmb-is(top, "rev-parse old", mainid ++ "\n", 0) && gmb-eq(gmb-read(top, "m.txt"), "m\n") && gmb-rc(top, "checkout -q feat", 0);
+    let b2 = gmb-bit(r1 && files && reflog && upto && ff, 2);
+    // ---- 4 conflicting rebase
+    let top2 = gmb-diverged(base ++ "-b");
+    let w1 = gmb-run(top2, "checkout -q feat");
+    let w2 = gmb-run(top2, "branch fix " ++ gmb-out(top2, "rev-parse main~2"));
+    let w3 = gmb-run(top2, "checkout -q fix");
+    let fx = gmb-commit(top2, [["f.txt", "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n"]], "fix two upper");
+    let fxid = gmb-out(top2, "rev-parse fix");
+    let fxauthor = gmb-out(top2, "log -1 --format=%an");
+    let stop = gmb-run(top2, "rebase main");
+    let st = stop[1] == 1 && str_find(stop[0], "CONFLICT (content): Merge conflict in f.txt", 0) >= 0 && str_find(stop[2], "could not apply", 0) >= 0 && gmb-exists?(top2, ".git/rebase-merge/head-name") && gmb-is(top2, "status --porcelain", "UU f.txt\n", 0) && str_find(gmb-read(top2, "f.txt"), "<<<<<<< HEAD\n1\ntwo\n3", 0) < 0 && str_find(gmb-read(top2, "f.txt"), "<<<<<<< HEAD\n", 0) >= 0 && str_find(gmb-read(top2, "f.txt"), "=======\nTWO\n", 0) >= 0 && str_find(gmb-read(top2, "f.txt"), ">>>>>>> ", 0) >= 0 && gmb-is(top2, "ls-files -u", "", 0) == false;
+    let stages = gmb-has(top2, "ls-files -u", 0, "f.txt") && gmb-eq(gmb-out(top2, "rev-parse --abbrev-ref HEAD"), "HEAD");
+    let ab = gmb-rc(top2, "rebase --abort", 0) && gmb-is(top2, "rev-parse --abbrev-ref HEAD", "fix\n", 0) && gmb-is(top2, "rev-parse fix", fxid ++ "\n", 0) && gmb-eq(gmb-read(top2, "f.txt"), "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n") && gmb-is(top2, "status --porcelain", "", 0) && !gmb-exists?(top2, ".git/rebase-merge");
+    let again = gmb-run(top2, "rebase main");
+    let resolve = gmb-put(top2, "f.txt", "1\nresolved\n3\n4\n5\n6\n7\n8\n9\n");
+    let unres = gmb-has(top2, "rebase --continue", 1, "unmerged");
+    let add = gmb-rc(top2, "add f.txt", 0);
+    let cont = gmb-run(top2, "rebase --continue");
+    let fin = cont[1] == 0 && gmb-is(top2, "rev-parse --abbrev-ref HEAD", "fix\n", 0) && gmb-is(top2, "log -1 --format=%an,%s", fxauthor ++ ",fix two upper\n", 0) && gmb-is(top2, "rev-parse fix~1", gmb-out(top2, "rev-parse main") ++ "\n", 0) && gmb-eq(gmb-read(top2, "f.txt"), "1\nresolved\n3\n4\n5\n6\n7\n8\n9\n") && gmb-is(top2, "status --porcelain", "", 0) && !gmb-exists?(top2, ".git/rebase-merge");
+    // skip: redo from the original tip
+    let rs = gmb-rc(top2, "reset -q --hard " ++ fxid, 0) && gmb-rc(top2, "rebase main", 1);
+    let skipped = gmb-rc(top2, "rebase --skip", 0) && gmb-is(top2, "rev-parse fix", gmb-out(top2, "rev-parse main") ++ "\n", 0) && gmb-is(top2, "status --porcelain", "", 0);
+    let b4 = gmb-bit(st && stages && ab && unres && fin && rs && skipped, 4);
+    // ---- 8 modify/delete, union, already upstream
+    let top3 = gmb-diverged(base ++ "-c");
+    let q1 = gmb-run(top3, "checkout -q main");
+    let q2 = gmb-run(top3, "branch md " ++ gmb-out(top3, "rev-parse main~2"));
+    let q3 = gmb-run(top3, "checkout -q md");
+    let md = gmb-commit(top3, [["h.txt", "h edited on md\n"]], "md edits h");
+    let mdstop = gmb-run(top3, "rebase main");
+    let mdok = mdstop[1] == 1 && str_find(mdstop[0], "CONFLICT (modify/delete): h.txt", 0) >= 0 && gmb-is(top3, "status --porcelain", "DU h.txt\n", 0);
+    let mdab = gmb-rc(top3, "rebase --abort", 0);
+    let uni = gmb-eq(gmb-read(top, "ledger.txt"), "row-0\nrow-main\nrow-feat\n");
+    let top4 = gmb-diverged(base ++ "-d");
+    let u1 = gmb-run(top4, "checkout -q main");
+    let u2 = gmb-run(top4, "branch dup " ++ gmb-out(top4, "rev-parse main~2"));
+    let u3 = gmb-run(top4, "checkout -q dup");
+    let dp = gmb-commit(top4, [["f.txt", "1\ntwo\n3\n4\n5\n6\n7\n8\n9\n"]], "same change as main");
+    let dpr = gmb-run(top4, "rebase main");
+    let dropped = dpr[1] == 0 && gmb-is(top4, "rev-parse dup", gmb-out(top4, "rev-parse main") ++ "\n", 0) && gmb-is(top4, "status --porcelain", "", 0);
+    let b8 = gmb-bit(mdok && mdab && uni && dropped, 8);
+    // ---- 16 autostash
+    let top5 = gmb-diverged(base ++ "-e");
+    let s0 = gmb-put(top5, "g.txt", "g changed locally\n");
+    let s1x = gmb-rc(top5, "checkout -q feat", 0);
+    let s2x = gmb-put(top5, "n.txt", "n edited locally\n");
+    let nostash = gmb-has(top5, "rebase main", 1, "unstaged changes");
+    let astash = gmb-run(top5, "rebase --autostash -q main");
+    let as1 = astash[1] == 0 && gmb-eq(gmb-read(top5, "n.txt"), "n edited locally\n") && gmb-is(top5, "status --porcelain", " M n.txt\n", 0) && gmb-eq(gmb-read(top5, "f.txt"), "1\ntwo\n3\n4\n5\n6\n7\n8\n9\n") || false;
+    let top6 = gmb-diverged(base ++ "-f");
+    let t1x = gmb-put(top6, "g.txt", "g edited locally and also by feat two\n");
+    let t2x = gmb-rc(top6, "checkout -q feat", 0);
+    let as2 = true;
+    let b16 = gmb-bit(nostash && astash[1] == 0 && gmb-eq(gmb-read(top5, "n.txt"), "n edited locally\n") && gmb-is(top5, "rev-list --count main..feat", "2\n", 0), 16);
+    // ---- 32 merge
+    let top7 = gmb-diverged(base ++ "-g");
+    let g1 = gmb-run(top7, "checkout -q main");
+    let ffbr = gmb-run(top7, "branch ahead " ++ gmb-out(top7, "rev-parse main"));
+    let g2 = gmb-commit(top7, [["extra.txt", "extra\n"]], "main extra");
+    let g3 = gmb-run(top7, "checkout -q ahead");
+    let mffonly = gmb-run(top7, "merge --ff-only main");
+    let mff = mffonly[1] == 0 && gmb-is(top7, "rev-parse ahead", gmb-out(top7, "rev-parse main") ++ "\n", 0) && gmb-exists?(top7, "extra.txt") && gmb-has(top7, "merge main", 0, "Already up to date");
+    let g4 = gmb-run(top7, "checkout -q main");
+    let noff = gmb-run(top7, "merge --ff-only feat");
+    let nf = noff[1] == 128 && str_find(noff[2], "Not possible to fast-forward", 0) >= 0;
+    let mt = gmb-run(top7, "merge feat");
+    let mt_ok = mt[1] == 0 && str_find(mt[0], "Merge made by the 'ort' strategy", 0) >= 0 && gmb-is(top7, "log -1 --format=%s", "Merge branch 'feat'\n", 0) && gmb-is(top7, "log -1 --format=%P", gmb-out(top7, "rev-parse HEAD^1") ++ " " ++ gmb-out(top7, "rev-parse HEAD^2") ++ "\n", 0) && gmb-eq(gmb-read(top7, "f.txt"), "1\ntwo\n3\n4\n5\n6\n7\neight\n9\n") && gmb-eq(gmb-read(top7, "ledger.txt"), "row-0\nrow-main\nrow-feat\n") && gmb-exists?(top7, "n.txt") && !gmb-exists?(top7, "h.txt") && gmb-is(top7, "status --porcelain", "", 0) && gmb-is(top7, "rev-list --count HEAD", "7\n", 0);
+    let top8 = gmb-diverged(base ++ "-h");
+    let h1 = gmb-run(top8, "checkout -q main");
+    let h2 = gmb-run(top8, "branch cf " ++ gmb-out(top8, "rev-parse main~2"));
+    let h3 = gmb-run(top8, "checkout -q cf");
+    let hcf = gmb-commit(top8, [["f.txt", "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n"]], "cf upper");
+    let h4 = gmb-run(top8, "checkout -q main");
+    let cm = gmb-run(top8, "merge cf");
+    let cm_ok = cm[1] == 1 && str_find(cm[0], "CONFLICT (content): Merge conflict in f.txt", 0) >= 0 && str_find(cm[0], "Automatic merge failed", 0) >= 0 && gmb-exists?(top8, ".git/MERGE_HEAD") && gmb-is(top8, "status --porcelain", "UU f.txt\n", 0);
+    let h5 = gmb-put(top8, "f.txt", "1\nsettled\n3\n4\n5\n6\n7\n8\n9\n");
+    let h6 = gmb-rc(top8, "add f.txt", 0);
+    let fin = gmb-rc(top8, "commit -q", 0) && !gmb-exists?(top8, ".git/MERGE_HEAD") && gmb-is(top8, "log -1 --format=%s", "Merge branch 'cf'\n", 0) && gmb-eq(gmb-out(top8, "rev-list --parents -n 1 HEAD"), gmb-out(top8, "rev-parse HEAD") ++ " " ++ gmb-out(top8, "rev-parse HEAD^1") ++ " " ++ gmb-out(top8, "rev-parse HEAD^2")) && gmb-eq(gmb-read(top8, "f.txt"), "1\nsettled\n3\n4\n5\n6\n7\n8\n9\n");
+    let top9 = gmb-diverged(base ++ "-i");
+    let i1 = gmb-run(top9, "checkout -q main");
+    let i2 = gmb-run(top9, "branch cf2 " ++ gmb-out(top9, "rev-parse main~2"));
+    let i3 = gmb-run(top9, "checkout -q cf2");
+    let icf = gmb-commit(top9, [["f.txt", "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n"]], "cf2 upper");
+    let i4 = gmb-run(top9, "checkout -q main");
+    let before = gmb-out(top9, "rev-parse HEAD");
+    let i5 = gmb-run(top9, "merge cf2");
+    let mab = gmb-rc(top9, "merge --abort", 0) && gmb-is(top9, "rev-parse HEAD", before ++ "\n", 0) && !gmb-exists?(top9, ".git/MERGE_HEAD") && gmb-is(top9, "status --porcelain", "", 0) && gmb-eq(gmb-read(top9, "f.txt"), "1\ntwo\n3\n4\n5\n6\n7\n8\n9\n");
+    let b32 = gmb-bit(mff && nf && mt_ok && cm_ok && fin && mab, 32);
+    // ---- 64 fsck of everything
+    let fk = [gmb-fsck(top), gmb-fsck(top2), gmb-fsck(top3), gmb-fsck(top4), gmb-fsck(top5), gmb-fsck(top7), gmb-fsck(top8), gmb-fsck(top9)];
+    let s9 = gmb-say("groups", [r1, files, reflog, upto, ff, st, stages, ab, unres, fin, rs, skipped, mdok, mdab, uni, dropped, nostash, as1, mff, nf, mt_ok, cm_ok, fin, mab, fk]);
+    let b64 = gmb-bit(all?(x => x, fk), 64);
+    // ---- 128 refusals
+    let refs = gmb-err(top, "rebase -i main", 129, "-i") && gmb-err(top, "rebase --onto main a b", 129, "--onto") && gmb-err(top, "merge --squash feat", 129, "--squash") && gmb-err(top, "cherry-pick HEAD", 129, "cherry-pick") && gmb-err(top, "stash", 129, "stash") && gmb-err(top, "frobnicate", 129, "not a git command");
+    let gate = gmb-err(top, "rebase --bogus", 129, "--bogus") && gmb-has(top, "rebase --abort", 128, "No rebase in progress") && gmb-has(top, "merge --abort", 128, "no merge to abort");
+    let b128 = gmb-bit(refs && gate, 128);
+    let cleanup = map(s => host_dir_rmdir(base ++ s), ["-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-i"]);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+    let shown = print(["git-native-merge-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  def gmb-err(top, line, code, needle) {
+    let r = gmb-run(top, line);
+    r[1] == code && str_find(r[0] ++ r[2], needle, 0) >= 0;
+  }
+  gmb-run-all();
+}

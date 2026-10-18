@@ -1,0 +1,822 @@
+// findings-requests.bml — a review's findings become local work requests, read by the body with no model.
+//
+// A rented review is free; writing its findings as work is not. This door reads any findings document the
+// body's reviews emit, whole (form-stdlib/json.fk), and gives each finding one request row for the local
+// planner, which writes it as a band-first gap. These arrays give requests wherever they stand:
+//   issues[]       {severity, where, problem, evidence, fix}                         a workflow's review lenses
+//   findings[]     {id, title, kind, where[], claim, truth, evidence, fix, owner_files[]}   a survey's finders
+//   missed[]       {id, title, evidence, fix, owner_files[]}                          what a verifier found beside them
+//   deferred[]     {id, why, needs}                                                   what an implementer handed on
+//   open_issues[]  strings                                                            what an implementer left open
+// verified[] {id, verdict, evidence, refined_fix} joins the finding of the same id in its unit: a refuted finding
+// gives no request, a confirmed or partial one carries the refined fix as its needs. A verdict no finding claims
+// stands as its own request.
+// A unit is the document, or an object inside an array (a lens, a face, a group), named by the first of face,
+// lens, group, label or name it carries, else by its parent and its place. A request row is
+//   {id, title, problem, needs, where, files, evidence, severity, origin, ref, verdict, seen, status, answers}
+// and, once read, a fixborn or a moot object (below). origin is <document>/<unit>/<path to the array>. where is
+// every file:line the finding names: its where, else its needs, problem and evidence. files are the paths found in
+// the tree among where's, the paths its where (else its needs) names, and owner_files; a bare name is looked for
+// under the body's homes. needs is the fix exactly as the
+// review wrote it. id is a content hash of origin, where and problem (two 32-bit folds, 16 hex digits), so every
+// row recomputes its own id and a finding read twice is one row. A field the review did not write reads null.
+// seen is the tree the finding was written against (its seentip): a unit's commits[] name it, and the tip is the
+// listed commit every other listed commit is an ancestor of. A review read its unit's impl.commits; impl.* and
+// repair.* read their own section's commits. A document that lists no commits leaves seen null.
+//
+// Answers. done[] {id, what} and deferred[] answer requests. Inside a unit, a repair's entry answers the review
+// issue its id names: by ordinal (R1-, review-1-, blocking-1, "review note #4"), by ordinal within a severity
+// (B1, S2, N3), or by the words of its topic among that severity's issues (review-note-commit-split). Across
+// documents, an entry answers the finding of another document whose id it names (K1, docs/F12, docs-M5): a face
+// it names, else the one finding that carries the id, else the face most of its unit's ids land in, else the one
+// finding whose files it names. Each answer stands on the row as {by, kind, row, text}; row is the deferred
+// request that carries the work on.
+// status is read from the row itself, so it never lies about its fields:
+//   closed      a witness was read in the tree (below)
+//   no-action   the needs say None, or every done answer says no change is needed
+//   answered    a done answer stands: an implementer says the work is done, and a witness must still close it
+//   handed      only a deferral answers it: the deferred request carries the work
+//   moot        the planner proposed it and the gate confirms it: a "moot" witness stands (a band the planner kept reads
+//               its full today and below it under every stub, and names the definition the row's fixborn stands in)
+//               beside a fixborn that stands. The row reads moot only while both do
+//   context     no needs or no file: a reading for the planner's documents, not a request
+//   statement   an open_issues string with no needs: an implementer's report, not open work; its files are the
+//               file names its words carry (a bare name under the body's homes)
+//   moved       a request whose "fixborn" field stands: the code its where cites changed since the tree its review
+//               read, and a code line of that change passed the closing gate. The planner takes it after every
+//               pending request. A change shows that the code moved, not that it healed: moved never closes a row
+//   pending     a request the planner writes as a band-first gap
+//
+// Sight. A row cites code: its where is path:span refs, its seen the tree they were read in (the row's own, else a
+// reviewed map by document, as a closure's). frq-sight reads each ref through git by argv: a hunk of
+// `git diff -U0 <seen> HEAD -- <path>` whose old range overlaps the span (an insertion at line s counts when the span
+// holds s) reads moved; a path absent at HEAD reads gone; a path the seentip never held, or a seentip that is no
+// commit of HEAD's history, reads unseen; a row reads standing only when every ref does. For a moved row the longest
+// code line the overlapping hunks added (never a comment) is offered to the closing gate below as a needle; the gate
+// proves it stands at HEAD, did not stand in the seentip, stands on a code line and was written by a commit outside
+// the reviewed tree, and the row then keeps {commit, path, needle, span, seen, def} as its fixborn; def is the
+// definition the needle stands in at HEAD (the nearest `def NAME(` or `(defn NAME ` line at or above it in a .bml or .fk
+// file, else ""). A pass keeps a fixborn it proved earlier while the sight cannot read (unseen: no reviewed map, a
+// seentip outside HEAD's history) and drops it only when the sight reads standing or gone, or the cited span moved and no
+// added line passes the gate now; it counts the moved and moot rows it turns back as demoted.
+//
+// Moot. The planner (form-stdlib/bml/form-cli-local-plan.bml) proposes it: its walk ends moot when the band a voice wrote
+// reads full on today's files and below full under each stub, and the plan names the definition the request's fixborn
+// stands in. frq-record-moot then writes the witness {kind, band, band_sha, band_text, defs, full, today, stubs, voice,
+// option} on the row, and the row reads moot while its fixborn stands (the closing gate proved a code line of the change)
+// and defs holds the fixborn's path:def. A request with no standing fixborn, or whose band measures another definition,
+// keeps its row as it was: the walk ends gap-closed. {"check":1} reads each moot row again: the fixborn through the gate,
+// the band's text against its sha, and the band on fkwu over today's files.
+//
+// A save rewrites the whole ledger beside itself and moves it over: it writes nothing when a line of the ledger on disk
+// is not whole (a half-written append) or the disk holds a row the caller never read (an append landed since).
+//
+// Closing. A closure {id, witness:{path, needle, present, band, bit}, commit, reviewed, note} closes a row only
+// when the gate reads, through git by argv: the seentip (the row's seen, else the closure's reviewed, else the
+// closures' map by document) is a commit, related to HEAD when the document named it and an ancestor of HEAD
+// when a caller did; the witness path is repo-relative and tracked at HEAD, and the needle holds there (stands,
+// or is gone when present is 0); the file stood in the seentip and the needle did not hold there; a needle in a
+// code file stands on a code line (a comment shows a sentence, not a behavior) unless a band witness beside it
+// runs the band on fkwu and reads its bit set; the closing commit is the newest that moved the needle (git log
+// -S), a commit the closure names must be that one, and it lies outside the tree the review read.
+import form-stdlib/bml/form-cli-heal-native-io.bml;
+import form-stdlib/bml/spawn-guard.bml;
+import form-stdlib/bml/string-join.bml;
+import form-stdlib/bml/form-agent-json-query.bml;
+import form-stdlib/line-grammar.fk;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+import form-stdlib/bml/parse.bml;
+section [form.bml] {
+ class FindingsRequests {
+  def frq-ledger() = "learn/local-requests.jsonl";
+  def frq-request-keys() = ["issues", "findings", "missed", "deferred", "open_issues"];
+  def frq-tagged-keys() = ["verified", "done", "commits"];
+  def frq-unit-keys() = ["face", "lens", "group", "label", "name"];
+  // ── the document's nodes: a field that is not there reads "" ──
+  def frq-obj?(n) = node_eq(node_category(n), JSON-OBJECT());
+  def frq-arr?(n) = node_eq(node_category(n), JSON-ARRAY());
+  def frq-str?(n) = ((Comparable) node_level(n) == 1) && ((Comparable) node_type(n) == 2);
+  def frq-int?(n) = ((Comparable) node_level(n) == 1) && ((Comparable) node_type(n) == 1);
+  def frq-has(xs, x) = if nil?(xs) then false else if ((String) xs[0] == x) then true else frq-has(xs[1:], x);
+  def frq-get(o, k) = if frq-obj?(o) then (if json-object-has?(o, k) then json-object-get(o, k) else json-node-null()) else json-node-null();
+  def frq-strings(ns) = if nil?(ns) then [] else if frq-str?(ns[0]) then cons(json-string-value(ns[0]), frq-strings(ns[1:])) else frq-strings(ns[1:]);
+  def frq-text-of(n) = if frq-str?(n) then json-string-value(n) else if frq-arr?(n) then str-join-with(frq-strings(json-array-elements(n)), "\n") else "";
+  def frq-text(o, k) = frq-text-of(frq-get(o, k));
+  def frq-list(o, k) = if frq-arr?(frq-get(o, k)) then frq-strings(json-array-elements(frq-get(o, k))) else if frq-str?(frq-get(o, k)) then [frq-text(o, k)] else [];
+  def frq-int(o, k, d) = if frq-int?(frq-get(o, k)) then json-int-value(frq-get(o, k)) else d;
+  def frq-nodes(o, k) = if frq-arr?(frq-get(o, k)) then json-array-elements(frq-get(o, k)) else [];
+  def frq-some?(s) = (Comparable) len(s) > 0;
+  def frq-first-of(o, keys) = if nil?(keys) then "" else if frq-some?(frq-text(o, keys[0])) then frq-text(o, keys[0]) else frq-first-of(o, keys[1:]);
+  def frq-flat(xss) = foldl((acc, xs) => append(acc, xs), [], xss);
+  def frq-count-of(xs, x) = len(filter(y => (String) y == x, xs));
+  def frq-at?(s, i, p) = if ((Comparable) (i + len(p)) > len(s)) then false else ((String) substring(s, i, (i + len(p))) == p);
+  def frq-ends?(s, t) = if ((Comparable) len(s) < len(t)) then false else ((String) substring(s, (len(s) - len(t)), len(s)) == t);
+  def frq-last-at(s, b, i) = if (i <= 0) then -1 else if ((Comparable) str_byte_at(s, (i - 1)) == b) then (i - 1) else frq-last-at(s, b, (i - 1));
+  def frq-after-last(s, b) = substring(s, (frq-last-at(s, b, len(s)) + 1), len(s));
+  // ── the walk: every entry as [kind, unit, path, node, ordinal]; kind is item, verified, done or commits ──
+  def frq-sub(parent, leaf) = if frq-some?(parent) then parent ++ "/" ++ leaf else leaf;
+  def frq-unit(o, parent, i) {
+   let named = frq-first-of(o, frq-unit-keys());
+   if frq-some?(named) then named else frq-sub(parent, i.str());
+  }
+  def frq-walk(n, unit, path) = if frq-obj?(n) then frq-walk-pairs(json-object-pairs(n), unit, path) else if frq-arr?(n) then frq-walk-units(json-array-elements(n), unit, 0) else [];
+  def frq-walk-pairs(ps, unit, path) = if nil?(ps) then [] else append(frq-walk-pair(json-pair-key(ps[0]), json-pair-value(ps[0]), unit, path), frq-walk-pairs(ps[1:], unit, path));
+  def frq-walk-pair(k, v, unit, path) = if (frq-arr?(v) && frq-has(frq-request-keys(), k)) then frq-tag("item", unit, path ++ k, json-array-elements(v), 1) else if (frq-arr?(v) && frq-has(frq-tagged-keys(), k)) then frq-tag(k, unit, path ++ k, json-array-elements(v), 1) else frq-walk(v, unit, path ++ k ++ ".");
+  def frq-tag(kind, unit, role, es, i) = if nil?(es) then [] else cons([kind, unit, role, es[0], i], frq-tag(kind, unit, role, es[1:], (i + 1)));
+  def frq-walk-units(es, unit, i) = if nil?(es) then [] else append(if frq-obj?(es[0]) then frq-walk(es[0], frq-unit(es[0], unit, i), "") else [], frq-walk-units(es[1:], unit, (i + 1)));
+  def frq-of-kind(es, kind) = filter(e => (String) e[0] == kind, es);
+  def frq-ref(e) = frq-text(e[3], "id");
+  // the verdict a unit holds for a finding's id, or nothing
+  def frq-verdict(vs, unit, ref) = if (nil?(vs) || (!frq-some?(ref))) then nothing() else if (((String) vs[0][1] == unit) && ((String) frq-ref(vs[0]) == ref)) then vs[0][3] else frq-verdict(vs[1:], unit, ref);
+  def frq-refuted?(v) = if nothing?(v) then false else ((String) frq-text(v, "verdict") == "refuted");
+  def frq-claimed?(items, v) = any?(e => (((String) e[1] == v[1]) && ((String) frq-ref(e) == frq-ref(v))), items);
+  def frq-verdict-of(vs, e) = frq-verdict(vs, e[1], frq-ref(e));
+  // ── seen: the tree a unit's section was written against ──
+  def frq-hex-byte?(b) = ((b >= 48) && (b <= 57)) || ((b >= 97) && (b <= 102));
+  def frq-hex-run?(c, i) = if (i >= len(c)) then true else if frq-hex-byte?(str_byte_at(c, i)) then frq-hex-run?(c, (i + 1)) else false;
+  def frq-hex?(c) = if (((Comparable) len(c) < 7) || ((Comparable) len(c) > 40)) then false else frq-hex-run?(c, 0);
+  def frq-commit-word(s) = if frq-hex?(frq-cut(s, " ")) then frq-cut(s, " ") else "";
+  // a review read its unit's impl; every other section read its own commits; a top-level array names none
+  def frq-commits-role(path) = if (str_find(path, ".", 0) < 0) then "" else if ((String) frq-cut(path, ".") == "review") then "impl.commits" else frq-cut(path, ".") ++ ".commits";
+  def frq-hashes(cs, unit, role) = filter(h => frq-some?(h), map(e => frq-commit-word(frq-text-of(e[3])), filter(e => ((String) e[1] == unit) && ((String) e[2] == role), cs)));
+  def frq-groups(cs, acc) = if nil?(cs) then acc else frq-groups(cs[1:], if any?(g => ((String) g[0] == cs[0][1]) && ((String) g[1] == cs[0][2]), acc) then acc else append(acc, [[cs[0][1], cs[0][2]]]));
+  // tip-of answers the tip of a commit list, or "" when no listed commit is the one the others lead to
+  def frq-tips(cs, tip-of) = map(g => [g[0], g[1], tip-of(frq-hashes(cs, g[0], g[1]))], frq-groups(cs, []));
+  def frq-tip-for(tips, unit, role) = if nil?(tips) then "" else if (((String) tips[0][0] == unit) && ((String) tips[0][1] == role)) then tips[0][2] else frq-tip-for(tips[1:], unit, role);
+  def frq-seen-of(tips, e) = if frq-some?(frq-commits-role(e[2])) then frq-tip-for(tips, e[1], frq-commits-role(e[2])) else "";
+  // ── one request ──
+  def frq-truth(o) = if frq-some?(frq-text(o, "claim")) then frq-text(o, "truth") ++ "\nThe claim it breaks: " ++ frq-text(o, "claim") else frq-text(o, "truth");
+  def frq-problem(o) = if frq-str?(o) then json-string-value(o) else if frq-some?(frq-text(o, "problem")) then frq-text(o, "problem") else if frq-some?(frq-text(o, "truth")) then frq-truth(o) else frq-first-of(o, ["claim", "why", "title", "evidence"]);
+  def frq-refined(v) = if nothing?(v) then "" else frq-text(v, "refined_fix");
+  def frq-needs(o, v) = if frq-some?(frq-refined(v)) then frq-refined(v) else frq-first-of(o, ["fix", "needs", "refined_fix"]);
+  def frq-seen-text(v) = if nothing?(v) then "" else frq-text(v, "evidence");
+  def frq-evidence(o, v) {
+   let own = frq-text(o, "evidence");
+   let seen = frq-seen-text(v);
+   let said = if frq-some?(seen) then "Verified " ++ frq-text(v, "verdict") ++ ": " ++ seen else "";
+   if (!frq-some?(said)) then own else if frq-some?(own) then own ++ "\n" ++ said else said;
+  }
+  def frq-severity(o, v) = if frq-some?(frq-text(o, "severity")) then frq-text(o, "severity") else if nothing?(v) then "" else frq-text(v, "severity");
+  def frq-cut(s, sep) {
+   let at = str_find(s, sep, 0);
+   if (at < 0) then s else substring(s, 0, at);
+  }
+  def frq-cut-after(s, sep) {
+   let at = str_find(s, sep, 0);
+   if (at < 0) then s else substring(s, 0, (at + 1));
+  }
+  def frq-at-space(s, i) = if (i <= 0) then substring(s, 0, 160) else if ((Comparable) str_byte_at(s, i) == 32) then substring(s, 0, i) else frq-at-space(s, (i - 1));
+  def frq-head-sentence(s) {
+   let sentence = frq-cut-after(frq-cut(s, "\n"), ". ");
+   if ((Comparable) len(sentence) <= 160) then sentence else frq-at-space(sentence, 160) ++ " ...";
+  }
+  def frq-title(o, problem) = if frq-some?(frq-text(o, "title")) then frq-text(o, "title") else frq-head-sentence(problem);
+  // ── where: every file:line a text names ──
+  def frq-letter?(b) = ((b >= 97) && (b <= 122)) || ((b >= 65) && (b <= 90));
+  def frq-digit?(b) = (b >= 48) && (b <= 57);
+  def frq-path-byte?(b) = frq-letter?(b) || frq-digit?(b) || ((Comparable) b == 95) || ((Comparable) b == 46) || ((Comparable) b == 47) || ((Comparable) b == 45);
+  def frq-back(s, i) = if (i <= 0) then 0 else if frq-path-byte?(str_byte_at(s, (i - 1))) then frq-back(s, (i - 1)) else i;
+  def frq-lead(s, i, end) = if (i >= end) then i else if (((Comparable) str_byte_at(s, i) == 46) || ((Comparable) str_byte_at(s, i) == 47)) then frq-lead(s, (i + 1), end) else i;
+  def frq-span-on?(s, i, n) = if frq-digit?(str_byte_at(s, i)) then true else if (((i + 1) < n) && (((Comparable) str_byte_at(s, i) == 45) || ((Comparable) str_byte_at(s, i) == 44))) then frq-digit?(str_byte_at(s, (i + 1))) else false;
+  def frq-span-end(s, i, n) = if (i >= n) then i else if frq-span-on?(s, i, n) then frq-span-end(s, (i + 1), n) else i;
+  def frq-alnum-run?(p, i, n) = if (i >= n) then true else if (frq-letter?(str_byte_at(p, i)) || frq-digit?(str_byte_at(p, i))) then frq-alnum-run?(p, (i + 1), n) else false;
+  // a file name: a stem, then an extension of one to five letters and digits that begins with a letter, at most 255
+  // bytes (a longer token is no file name, and no git argv carries it)
+  def frq-file-name?(p) {
+   let d = frq-last-at(p, 46, len(p));
+   let e = ((len(p) - d) - 1);
+   if ((len(p) > 255) || (d <= 0) || (e < 1) || (e > 5)) then false else if frq-letter?(str_byte_at(p, (d + 1))) then frq-alnum-run?(p, (d + 1), len(p)) else false;
+  }
+  def frq-add(xs, x) = if frq-has(xs, x) then xs else append(xs, [x]);
+  // the colon at c begins a line span when a digit follows it and a file name stands before it (not a URL's host)
+  def frq-ref-at(s, c, n, acc) {
+   let from = frq-back(s, c);
+   let start = frq-lead(s, from, c);
+   let path = substring(s, start, c);
+   let url = if (from > 0) then ((Comparable) str_byte_at(s, (from - 1)) == 58) else false;
+   if (url || (!frq-digit?(str_byte_at(s, (c + 1)))) || (!frq-file-name?(path))) then acc else frq-add(acc, path ++ ":" ++ substring(s, (c + 1), frq-span-end(s, (c + 1), n)));
+  }
+  def frq-refs-from(s, i, n, acc) {
+   let c = str_find(s, ":", i);
+   if (c < 0) then acc else frq-refs-from(s, (c + 1), n, frq-ref-at(s, c, n, acc));
+  }
+  def frq-refs(s) = frq-refs-from(s, 0, len(s), []);
+  // every path a text names with a slash and a file name, line or not
+  def frq-fwd(s, i, n) = if (i >= n) then i else if frq-path-byte?(str_byte_at(s, i)) then frq-fwd(s, (i + 1), n) else i;
+  def frq-trail(s, start, end) = if ((end > start) && (((Comparable) str_byte_at(s, (end - 1)) == 46) || ((Comparable) str_byte_at(s, (end - 1)) == 45))) then frq-trail(s, start, (end - 1)) else end;
+  def frq-path-at(s, from, end, acc) {
+   let start = frq-lead(s, from, end);
+   let path = substring(s, start, frq-trail(s, start, end));
+   let url = if (from > 0) then ((Comparable) str_byte_at(s, (from - 1)) == 58) else false;
+   if (url || (str_find(path, "/", 0) < 0) || (!frq-file-name?(path))) then acc else frq-add(acc, path);
+  }
+  def frq-paths-from(s, i, n, acc) {
+   let slash = str_find(s, "/", i);
+   let end = if (slash < 0) then n else frq-fwd(s, slash, n);
+   if (slash < 0) then acc else frq-paths-from(s, (end + 1), n, frq-path-at(s, frq-back(s, slash), end, acc));
+  }
+  def frq-paths(s) = frq-paths-from(s, 0, len(s), []);
+  // ── files: the named paths that stand in the tree ──
+  def frq-homes() = ["", "form/", "form/form-stdlib/", "form/form-stdlib/bml/", "form/form-stdlib/tests/", "runtime/", "observe/", "gate/"];
+  def frq-found?(p) = if (file_size(p) < 0) then false else ((Comparable) fs_is_dir(p) == 0);
+  def frq-resolve(p, homes) = if nil?(homes) then "" else if frq-found?(homes[0] ++ p) then homes[0] ++ p else frq-resolve(p, homes[1:]);
+  def frq-path-of(ref) = frq-cut(ref, ":");
+  def frq-files(paths, acc) = if nil?(paths) then acc else frq-files(paths[1:], frq-file-add(acc, frq-resolve(paths[0], frq-homes())));
+  def frq-file-add(acc, p) = if frq-some?(p) then frq-add(acc, p) else acc;
+  // ── id: a content hash of origin, where and problem ──
+  def frq-hex-digit(d) = if (d < 10) then byte_to_str((48 + d)) else byte_to_str((87 + d));
+  def frq-hex(n, k) = if (k <= 0) then "" else frq-hex((n / 16), (k - 1)) ++ frq-hex-digit((n % 16));
+  def frq-fold(s, i, n, a, b) = if (i >= n) then frq-hex(a, 8) ++ frq-hex(b, 8) else frq-fold(s, (i + 1), n, add_u32(add_u32(shl_u32(a, 5), a), str_byte_at(s, i)), ((((b * 131) + str_byte_at(s, i)) + 1) % 4294967291));
+  def frq-hash(s) = frq-fold(s, 0, len(s), 5381, 7);
+  def frq-id(origin, where, problem) = "frq-" ++ frq-hash(origin ++ "\n" ++ str-join-with(where, "\n") ++ "\n" ++ problem);
+  // ── the row ──
+  def frq-opt(k, s) = if frq-some?(s) then json-node-pair(k, json-node-string(s)) else json-node-pair(k, json-node-null());
+  def frq-strs(k, xs) = json-node-pair(k, json-node-array(map(x => json-node-string(x), xs)));
+  def frq-owners(o, v) = append(frq-list(o, "owner_files"), if nothing?(v) then [] else frq-list(v, "owner_files"));
+  def frq-where(o, v) {
+   let named = frq-text(o, "where");
+   if frq-some?(named) then frq-refs(named) else frq-refs(frq-needs(o, v) ++ "\n" ++ frq-problem(o) ++ "\n" ++ frq-evidence(o, v));
+  }
+  def frq-files-of(o, v) {
+   let named = frq-text(o, "where");
+   frq-files(append(map(frq-path-of, frq-where(o, v)), append(frq-paths(if frq-some?(named) then named else frq-needs(o, v)), frq-owners(o, v))), []);
+  }
+  def frq-row-id(o, v, origin) = frq-id(origin, frq-where(o, v), frq-problem(o));
+  def frq-row(o, v, origin, seen) {
+   let problem = frq-problem(o);
+   let where = frq-where(o, v);
+   let verdict = if nothing?(v) then frq-text(o, "verdict") else frq-text(v, "verdict");
+   let row = json-node-object([fhn-s("id", frq-id(origin, where, problem)), fhn-s("title", frq-title(o, problem)), fhn-s("problem", problem), frq-opt("needs", frq-needs(o, v)), frq-strs("where", where), frq-strs("files", frq-files-of(o, v)), frq-opt("evidence", frq-evidence(o, v)), frq-opt("severity", frq-severity(o, v)), fhn-s("origin", origin), frq-opt("ref", frq-text(o, "id")), frq-opt("verdict", verdict), frq-opt("seen", seen), fhn-s("status", "pending"), json-node-pair("answers", json-node-array([]))]);
+   frq-restatus(row);
+  }
+  def frq-origin(label, e) = label ++ "/" ++ frq-sub(e[1], e[2]);
+  // ── status: read from the row's own fields ──
+  // needs that open with the word None ask for no change
+  def frq-none?(s) = if (!frq-at?(s, 0, "None")) then false else if ((Comparable) len(s) == 4) then true else frq-has([" ", ".", ";", ",", ":"], substring(s, 4, 5));
+  def frq-no-change?(t) = (str_find(t, "o change needed", 0) >= 0) || (str_find(t, "o change is needed", 0) >= 0);
+  // a moot witness {kind, band, band_sha, band_text, defs, full, today, stubs}: the band read its full today and below it
+  // under every stub, and its defs ("path:name") hold the definition the row's fixborn stands in. The planner proposes
+  // the witness; the row reads moot only beside a fixborn that stands (the gate's proof that the cited code changed)
+  def frq-moot-stands?(r) {
+   let m = frq-get(r, "moot");
+   let f = frq-get(r, "fixborn");
+   let full = frq-int(m, "full", 0);
+   frq-obj?(m) && (full > 0) && ((Comparable) frq-int(m, "today", -1) == full) && (!nil?(frq-nodes(m, "stubs"))) && all?(s => frq-int?(s) && ((Comparable) json-int-value(s) < full), frq-nodes(m, "stubs")) && frq-fixborn-stands?(r) && frq-some?(frq-text(f, "def")) && frq-has(frq-list(m, "defs"), (frq-text(f, "path") ++ ":" ++ frq-text(f, "def")));
+  }
+  // a fixborn {commit, path, needle, span, seen, def}: a code line of the change, proven by the closing gate
+  def frq-fixborn-stands?(r) {
+   let f = frq-get(r, "fixborn");
+   frq-obj?(f) && frq-hex?(frq-text(f, "commit")) && frq-some?(frq-text(f, "path")) && frq-some?(frq-text(f, "needle"));
+  }
+  def frq-statement?(r) = frq-ends?(frq-text(r, "origin"), "open_issues");
+  def frq-status-of(r) {
+   let answers = frq-nodes(r, "answers");
+   let dones = filter(a => (String) frq-text(a, "kind") == "done", answers);
+   let needs = frq-text(r, "needs");
+   if ((String) frq-text(r, "status") == "closed") then "closed" else if frq-none?(needs) then "no-action" else if frq-moot-stands?(r) then "moot" else if (!nil?(dones)) then (if all?(a => frq-no-change?(frq-text(a, "text")), dones) then "no-action" else "answered") else if (!nil?(answers)) then "handed" else if (!frq-some?(needs)) then (if frq-statement?(r) then "statement" else "context") else if nil?(frq-list(r, "files")) then "context" else if frq-fixborn-stands?(r) then "moved" else "pending";
+  }
+  def frq-restatus(r) = frq-put(r, "status", json-node-string(frq-status-of(r)));
+  // a document's requests: [rows, items read, refuted, verdicts read, verdicts joined]
+  def frq-requests(doc, label, tip-of) {
+   let entries = frq-walk(doc, "", "");
+   let items = frq-of-kind(entries, "item");
+   let verdicts = frq-of-kind(entries, "verified");
+   let tips = frq-tips(frq-of-kind(entries, "commits"), tip-of);
+   let kept = filter(e => !frq-refuted?(frq-verdict-of(verdicts, e)), items);
+   let alone = filter(v => (!frq-claimed?(items, v)) && (!frq-refuted?(v[3])), verdicts);
+   let rows = append(map(e => frq-row(e[3], frq-verdict-of(verdicts, e), frq-origin(label, e), frq-seen-of(tips, e)), kept), map(v => frq-row(v[3], nothing(), frq-origin(label, v), ""), alone));
+   [rows, len(items), (len(items) - len(kept)), len(verdicts), len(filter(v => frq-claimed?(items, v), verdicts))];
+  }
+  // a document's label: its file name without the extension
+  def frq-base(p, i) = if (i <= 0) then p else if ((Comparable) str_byte_at(p, (i - 1)) == 47) then substring(p, i, len(p)) else frq-base(p, (i - 1));
+  def frq-label-of(path) {
+   let b = frq-base(path, len(path));
+   let d = frq-last-at(b, 46, len(b));
+   if (d > 0) then substring(b, 0, d) else b;
+  }
+  // ── answers: [target kind, target, kind, text, by, row, label, unit] ──
+  def frq-answering?(e) = ((String) e[0] == "done") || (((String) e[0] == "item") && frq-ends?(e[2], "deferred"));
+  def frq-answer-kind(e) = if ((String) e[0] == "done") then "done" else "deferred";
+  def frq-answer-text(e) = if ((String) e[0] == "done") then frq-text(e[3], "what") else frq-first-of(e[3], ["needs", "why"]);
+  def frq-by(label, e) = frq-origin(label, e) ++ " " ++ frq-ref(e);
+  def frq-answer-row(label, e, vs) = if ((String) e[0] == "done") then "" else frq-row-id(e[3], frq-verdict-of(vs, e), frq-origin(label, e));
+  def frq-record(target-kind, target, label, e, vs) = [target-kind, target, frq-answer-kind(e), frq-answer-text(e), frq-by(label, e), frq-answer-row(label, e, vs), label, e[1]];
+  // a repair entry's id names a review issue: [severity, mode, n, topic words]
+  def frq-sevs() = ["blocking", "should-fix", "note"];
+  def frq-sev-at(s, i) = if frq-at?(s, i, "blocking") then "blocking" else if frq-at?(s, i, "should-fix") then "should-fix" else if frq-at?(s, i, "note") then "note" else "";
+  def frq-num(s, i, j) = if (j <= i) then 0 else str_to_int(substring(s, i, j));
+  def frq-skip-back(s, j) = if (j <= 0) then 0 else if ((Comparable) str_byte_at(s, (j - 1)) == 32) then frq-skip-back(s, (j - 1)) else j;
+  def frq-word-back(s, j) = if (j <= 0) then 0 else if (frq-letter?(str_byte_at(s, (j - 1))) || ((Comparable) str_byte_at(s, (j - 1)) == 45)) then frq-word-back(s, (j - 1)) else j;
+  def frq-word-before(s, at) {
+   let end = frq-skip-back(s, at);
+   let w = substring(s, frq-word-back(s, end), end);
+   if frq-has(frq-sevs(), w) then w else "";
+  }
+  def frq-issue-ref(id) = frq-ref-hash(id, str_find(id, "#", 0));
+  // "(review note #4)": the n-th issue, of the severity the word before it names
+  def frq-ref-hash(id, at) = if ((at >= 0) && (digits-end(id, (at + 1)) > (at + 1))) then [frq-word-before(id, at), "all", frq-num(id, (at + 1), digits-end(id, (at + 1))), []] else frq-ref-r(id);
+  // R1-blocking-...: the n-th issue, of the severity named right after it
+  def frq-ref-r(id) = if (frq-at?(id, 0, "R") && (digits-end(id, 1) > 1)) then [frq-sev-at(id, (digits-end(id, 1) + 1)), "all", frq-num(id, 1, digits-end(id, 1)), []] else frq-ref-review(id);
+  // review-3-...: the n-th issue
+  def frq-ref-review(id) = if (frq-at?(id, 0, "review-") && (digits-end(id, 7) > 7)) then [frq-sev-at(id, (digits-end(id, 7) + 1)), "all", frq-num(id, 7, digits-end(id, 7)), []] else frq-ref-sevn(id);
+  // blocking-1, should-fix-3, note-6: the n-th issue, of that severity
+  def frq-ref-sevn(id) {
+   let sev = frq-sev-at(id, 0);
+   let from = len(sev) + 1;
+   if (frq-some?(sev) && frq-at?(id, len(sev), "-") && (digits-end(id, from) > from)) then [sev, "all", frq-num(id, from, digits-end(id, from)), []] else frq-ref-letter(id);
+  }
+  // B1, S2, N3: the n-th issue within its severity
+  def frq-letter-sev(id) = if frq-at?(id, 0, "B") then "blocking" else if frq-at?(id, 0, "S") then "should-fix" else if frq-at?(id, 0, "N") then "note" else "";
+  def frq-ref-letter(id) {
+   let end = digits-end(id, 1);
+   let bounded = if (end >= len(id)) then true else (!frq-letter?(str_byte_at(id, end)));
+   if (frq-some?(frq-letter-sev(id)) && (end > 1) && bounded) then [frq-letter-sev(id), "sev", frq-num(id, 1, end), []] else frq-ref-topic(id);
+  }
+  // review-note-commit-split: the one issue of that severity its words name most
+  def frq-ref-topic(id) {
+   let sev = if frq-at?(id, 0, "review-") then frq-sev-at(id, 7) else "";
+   let rest = if frq-some?(sev) then substring(id, (8 + len(sev)), len(id)) else "";
+   if (frq-some?(sev) && frq-at?(id, (7 + len(sev)), "-")) then [sev, "topic", 0, filter(w => (Comparable) len(w) >= 3, split-on(rest, "-"))] else ["", "", 0, []];
+  }
+  def frq-low-byte(b) = if ((b >= 65) && (b <= 90)) then (b + 32) else b;
+  def frq-lower-from(w, i, acc) = if (i >= len(w)) then str-join(reverse(acc)) else frq-lower-from(w, (i + 1), cons(byte_to_str(frq-low-byte(str_byte_at(w, i))), acc));
+  def frq-lower(w) = frq-lower-from(w, 0, []);
+  def frq-capital(w) = if (!frq-some?(w)) then w else byte_to_str(if ((str_byte_at(w, 0) >= 97) && (str_byte_at(w, 0) <= 122)) then (str_byte_at(w, 0) - 32) else str_byte_at(w, 0)) ++ substring(w, 1, len(w));
+  def frq-mentions?(text, w) = (str_find(text, w, 0) >= 0) || (str_find(text, frq-lower(w), 0) >= 0) || (str_find(text, frq-capital(frq-lower(w)), 0) >= 0);
+  def frq-score(words, text) = len(filter(w => frq-mentions?(text, w), words));
+  // issues: [ordinal, severity, text, row id]
+  def frq-pick-all(ref, issues) {
+   let at = filter(x => (Comparable) x[0] == ref[2], issues);
+   if nil?(at) then "" else if (frq-some?(ref[0]) && (!((String) at[0][1] == ref[0]))) then "" else at[0][3];
+  }
+  def frq-pick-topic(words, mine) {
+   let best = foldl((m, x) => if ((Comparable) frq-score(words, x[2]) > m) then frq-score(words, x[2]) else m, 0, mine);
+   let tops = filter(x => (Comparable) frq-score(words, x[2]) == best, mine);
+   if ((best >= 1) && ((Comparable) len(tops) == 1)) then tops[0][3] else "";
+  }
+  def frq-issue-pick(ref, issues) {
+   let mine = filter(x => (String) x[1] == ref[0], issues);
+   let n = ref[2];
+   if ((String) ref[1] == "all") then frq-pick-all(ref, issues) else if ((String) ref[1] == "sev") then (if ((n >= 1) && ((Comparable) len(mine) >= n)) then mine[(n - 1)][3] else "") else if ((String) ref[1] == "topic") then frq-pick-topic(ref[3], mine) else "";
+  }
+  def frq-issue-text(o) = str-join-with([frq-text(o, "where"), frq-text(o, "problem"), frq-text(o, "evidence"), frq-text(o, "fix")], "\n");
+  def frq-issues-of(items, unit, label, vs) = map(e => [e[4], frq-text(e[3], "severity"), frq-issue-text(e[3]), frq-row-id(e[3], frq-verdict-of(vs, e), frq-origin(label, e))], filter(e => ((String) e[1] == unit) && ((String) e[2] == "review.issues"), items));
+  def frq-within(label, e, items, vs) {
+   let target = if frq-at?(e[2], 0, "repair.") then frq-issue-pick(frq-issue-ref(frq-ref(e)), frq-issues-of(items, e[1], label, vs)) else "";
+   if frq-some?(target) then [frq-record("id", target, label, e, vs)] else [];
+  }
+  // an entry's id names one or more findings: "docs/F12 + M1"
+  def frq-tokens(id) = filter(t => frq-some?(t), map(t => trim(frq-cut(t, " (")), split-on(id, " + ")));
+  def frq-across(label, e, vs) = map(t => frq-record("ref", t, label, e, vs), frq-tokens(frq-ref(e)));
+  // a document's answers
+  def frq-answers(doc, label) {
+   let entries = frq-walk(doc, "", "");
+   let items = frq-of-kind(entries, "item");
+   let vs = frq-of-kind(entries, "verified");
+   let answering = filter(frq-answering?, entries);
+   append(frq-flat(map(e => frq-within(label, e, items, vs), answering)), frq-flat(map(e => frq-across(label, e, vs), answering)));
+  }
+  // ── a finding another document answers: [face, key, row id, document, files] ──
+  def frq-key-end(s, i) = if (i >= len(s)) then i else if frq-has(["-", " ", "("], substring(s, i, (i + 1))) then i else frq-key-end(s, (i + 1));
+  def frq-key(s) = substring(s, 0, frq-key-end(s, 0));
+  def frq-unit-of(origin) {
+   let first = str_find(origin, "/", 0);
+   let last = frq-last-at(origin, 47, len(origin));
+   if ((first < 0) || (last <= first)) then "" else substring(origin, (first + 1), last);
+  }
+  def frq-finding?(r) = frq-has(["findings", "missed", "verified"], frq-after-last(frq-after-last(frq-text(r, "origin"), 47), 46)) && frq-some?(frq-text(r, "ref"));
+  def frq-target(r) = [frq-unit-of(frq-text(r, "origin")), frq-key(frq-text(r, "ref")), frq-text(r, "id"), frq-cut(frq-text(r, "origin"), "/"), frq-list(r, "files")];
+  def frq-targets(rows) = map(frq-target, filter(frq-finding?, rows));
+  def frq-faces(ts) = foldl((acc, t) => frq-add(acc, t[0]), [], ts);
+  // a token names its face as face/id or face-id, when the findings carry that face
+  def frq-token-face(t, faces) {
+   let slash = str_find(t, "/", 0);
+   let dash = str_find(t, "-", 0);
+   if ((slash > 0) && frq-has(faces, substring(t, 0, slash))) then [substring(t, 0, slash), frq-key(substring(t, (slash + 1), len(t)))] else if ((dash > 0) && frq-has(faces, substring(t, 0, dash))) then [substring(t, 0, dash), frq-key(substring(t, (dash + 1), len(t)))] else ["", frq-key(t)];
+  }
+  // the findings a token names, never in the answering document
+  def frq-candidates(ts, faces, rec) {
+   let tok = frq-token-face(rec[1], faces);
+   filter(t => ((String) t[1] == tok[1]) && (!((String) t[3] == rec[6])) && ((!frq-some?(tok[0])) || ((String) t[0] == tok[0])), ts);
+  }
+  def frq-sure(ts, faces, rec) {
+   let cs = frq-candidates(ts, faces, rec);
+   if ((Comparable) len(cs) == 1) then cs[0] else nothing();
+  }
+  def frq-plural(xs) = foldl((best, x) => if ((Comparable) frq-count-of(xs, x) > frq-count-of(xs, best)) then x else best, "", xs);
+  // the face more than half of a unit's surely named findings stand in
+  def frq-home(sures, rec) {
+   let faces = map(s => s[1][0], filter(s => ((String) s[0][6] == rec[6]) && ((String) s[0][7] == rec[7]) && (!nothing?(s[1])), sures));
+   let best = frq-plural(faces);
+   if ((2 * frq-count-of(faces, best)) > len(faces)) then best else "";
+  }
+  def frq-names-file?(text, t) = any?(f => str_find(text, frq-base(f, len(f)), 0) >= 0, t[4]);
+  def frq-resolve-ref(ts, faces, sures, s) {
+   let cs = frq-candidates(ts, faces, s[0]);
+   let home = if ((Comparable) len(cs) > 1) then frq-home(sures, s[0]) else "";
+   let homed = filter(t => frq-some?(home) && ((String) t[0] == home), cs);
+   let filed = filter(t => frq-names-file?(s[0][3], t), cs);
+   if (!nothing?(s[1])) then s[1][2] else if ((Comparable) len(homed) == 1) then homed[0][2] else if ((Comparable) len(filed) == 1) then filed[0][2] else "";
+  }
+  def frq-retarget(rec, id) = ["id", id, rec[2], rec[3], rec[4], rec[5], rec[6], rec[7]];
+  def frq-resolved(rows, recs) {
+   let ts = frq-targets(rows);
+   let faces = frq-faces(ts);
+   let sures = map(r => [r, frq-sure(ts, faces, r)], filter(r => (String) r[0] == "ref", recs));
+   let across = map(s => frq-retarget(s[0], frq-resolve-ref(ts, faces, sures, s)), sures);
+   append(filter(r => (String) r[0] == "id", recs), filter(r => frq-some?(r[1]), across));
+  }
+  // ── answers stand on their rows ──
+  def frq-answer-node(rec) = json-node-object([fhn-s("by", rec[4]), fhn-s("kind", rec[2]), frq-opt("row", rec[5]), frq-opt("text", rec[3])]);
+  def frq-has-by?(r, by) = any?(a => (String) frq-text(a, "by") == by, frq-nodes(r, "answers"));
+  def frq-unique-by(recs, seen) = if nil?(recs) then [] else if frq-has(seen, recs[0][4]) then frq-unique-by(recs[1:], seen) else cons(recs[0], frq-unique-by(recs[1:], cons(recs[0][4], seen)));
+  def frq-take(r, recs) {
+   let mine = frq-unique-by(filter(x => ((String) x[1] == frq-text(r, "id")) && (!frq-has-by?(r, x[4])), recs), []);
+   if (((String) frq-text(r, "status") == "closed") || nil?(mine)) then r else frq-restatus(frq-put(r, "answers", json-node-array(append(frq-nodes(r, "answers"), map(frq-answer-node, mine)))));
+  }
+  def frq-answers-total(rows) = foldl((n, r) => n + len(frq-nodes(r, "answers")), 0, rows);
+  // rows with every answer the records give them: [rows, answers added]
+  def frq-apply(rows, recs) {
+   let byid = frq-resolved(rows, recs);
+   let after = map(r => frq-take(r, byid), rows);
+   [after, (frq-answers-total(after) - frq-answers-total(rows))];
+  }
+  def frq-statuses() = ["pending", "context", "answered", "handed", "no-action", "closed", "moved", "moot", "statement"];
+  def frq-status-counts(rows) = map(s => len(filter(r => (String) frq-text(r, "status") == s, rows)), frq-statuses());
+  // ── the ledger: one row per id ──
+  def frq-rows-of(text) = map(l => parse-json("local-request", l), filter(l => frq-some?(trim(l)), split-on(text, "\n")));
+  def frq-rows(path) = if (file_size(path) < 1) then [] else frq-rows-of(fhn-read(path));
+  def frq-ids(rows) = map(r => frq-text(r, "id"), rows);
+  def frq-fresh(rows, have) = if nil?(rows) then [] else if frq-has(have, frq-text(rows[0], "id")) then frq-fresh(rows[1:], have) else cons(rows[0], frq-fresh(rows[1:], cons(frq-text(rows[0], "id"), have)));
+  def frq-append(ledger, rows, n) = if nil?(rows) then n else frq-append(ledger, rows[1:], if ((String) fhn-append(ledger, json-emit(rows[0]) ++ "\n") == "appended") then (n + 1) else n);
+  // feed one document: [requests, new, items read, refuted, verdicts, joined, appended]
+  def frq-feed(ledger, doc, label, tip-of) {
+   let made = frq-requests(doc, label, tip-of);
+   let fresh = frq-fresh(made[0], frq-ids(frq-rows(ledger)));
+   let wrote = frq-append(ledger, fresh, 0);
+   [len(made[0]), len(fresh), made[1], made[2], made[3], made[4], wrote];
+  }
+  def frq-lines(rows) = str-join(map(r => json-emit(r) ++ "\n", rows));
+  // a line is whole when it is one valid JSON object; a ledger is sound when every line is whole and the last ends in a
+  // newline (a half-written append does neither). The line number of the first line that is not, else 0
+  def frq-line-whole?(l) = faj-valid(l) && frq-at?(trim(l), 0, "{");
+  def frq-unsound-at(ls, i) = if nil?(ls) then 0 else if (frq-some?(trim(ls[0])) && (!frq-line-whole?(ls[0]))) then i else frq-unsound-at(ls[1:], (i + 1));
+  def frq-unsound-line(path) {
+   let text = if (file_size(path) < 1) then "" else fhn-read(path);
+   let ls = split-on(text, "\n");
+   let bad = frq-unsound-at(ls, 1);
+   if (bad > 0) then bad else if (frq-some?(text) && (!frq-ends?(text, "\n"))) then len(ls) else 0;
+  }
+  // the rows on disk the caller's rows do not hold: an append that landed after the caller read the ledger
+  def frq-appended-since(ledger, rows) {
+   let have = frq-ids(rows);
+   filter(r => !frq-has(have, frq-text(r, "id")), frq-rows(ledger));
+  }
+  // the whole ledger written beside itself, then moved over it: 1 when the moved ledger stands, else 0. Nothing is
+  // written over a ledger with a line that is not whole, nor over a row the caller never read
+  def frq-save(ledger, rows) = if (frq-unsound-line(ledger) > 0) then 0 else if (!nil?(frq-appended-since(ledger, rows))) then 0 else frq-write(ledger, rows);
+  def frq-write(ledger, rows) {
+   let tmp = ledger ++ ".tmp-" ++ host_pid().str();
+   let wrote = write_file(tmp, frq-lines(rows));
+   let moved = if (wrote < 0) then -1 else fs_rename(tmp, ledger);
+   if ((Comparable) moved == 0) then 1 else 0;
+  }
+  // a ledger answered by its documents' records: [answers added, saved, rows]
+  def frq-answer-ledger(ledger, recs) {
+   let rows = frq-rows(ledger);
+   let made = frq-apply(rows, recs);
+   let saved = if ((Comparable) made[1] > 0) then frq-save(ledger, made[0]) else 0;
+   [made[1], saved, made[0]];
+  }
+  // ── closing: the gate reads the witness through a reader g = [commit?, ancestor?, related?, blob, pickaxe,
+  //    full, band, hunks, exists?, run]: commit?(c), ancestor?(a, b), related?(c) to HEAD, blob(rev, path) the file's text
+  //    or nothing, pickaxe(needle, path) the newest commit that moved the needle or "", full(c) a commit's full
+  //    name or "", band(path) the verdict fkwu reads from a tracked, unchanged band, or nothing, hunks(seen, path)
+  //    the text of `git diff -U0 seen HEAD -- path` or nothing, exists?(rev, path) whether the rev holds the path,
+  //    run(name, text) the verdict fkwu reads from a band given as text, or nothing.
+  //    "HEAD" in a reader is the head it was made for (frq-git-at) ──
+  def frq-relative?(p) {
+   let parts = split-on(p, "/");
+   if (!frq-some?(p)) then false else if (((Comparable) str_byte_at(p, 0) == 47) || ((Comparable) str_byte_at(p, 0) == 45)) then false else (str_find(p, "\n", 0) < 0) && (!frq-has(parts, "..")) && (!frq-has(parts, ".git")) && (!frq-has(parts, "")) && (!frq-has(parts, "."));
+  }
+  def frq-present?(w) = (Comparable) frq-int(w, "present", 1) == 1;
+  // a witness holds over a text when its needle stands there (present 1) or is gone from it (present 0);
+  // a text that is not there holds nothing
+  def frq-holds-in?(w, text) = if nothing?(text) then false else if (!frq-some?(frq-text(w, "needle"))) then false else if frq-present?(w) then (str_find(text, frq-text(w, "needle"), 0) >= 0) else (str_find(text, frq-text(w, "needle"), 0) < 0);
+  def frq-doc-of(row) = frq-cut(frq-text(row, "origin"), "/");
+  // the seentip: the row's own (its document named it), else the closure's, else the closures' map
+  def frq-seen-for(row, c, reviews) = if frq-some?(frq-text(row, "seen")) then frq-text(row, "seen") else if frq-some?(frq-text(c, "reviewed")) then frq-text(c, "reviewed") else frq-text(reviews, frq-doc-of(row));
+  // a document's seentip may be a branch tip a rebase left beside main, so it need only share HEAD's history;
+  // a seentip a caller names must stand in HEAD's own history
+  def frq-seen-ok?(row, seen, g) = if (!frq-hex?(seen)) then false else if (!g[0](seen)) then false else if frq-some?(frq-text(row, "seen")) then g[2](seen) else g[1](seen, "HEAD");
+  // a comment line shows that someone wrote a sentence: in a code file the needle must stand on a code line,
+  // or on a directive head the body reads (PROOF LEVEL, Verdict, preludes)
+  def frq-ext(p) {
+   let b = frq-base(p, len(p));
+   if (frq-last-at(b, 46, len(b)) > 0) then frq-after-last(b, 46) else "";
+  }
+  def frq-marks(ext) = if frq-has(["c", "h", "m", "mm", "go", "rs", "ts", "js", "mjs", "swift", "metal"], ext) then ["//", "/*", "* ", "*/"] else if ((String) ext == "fk") then [";"] else if ((String) ext == "bml") then ["//", ";", "/*", "* ", "*/"] else if frq-has(["sh", "zsh", "py"], ext) then ["#"] else [];
+  def frq-directive?(rest) = any?(d => frq-at?(rest, 0, d), ["PROOF LEVEL", "Verdict", "preludes:", "STAGED CARRIER", "preflight-exec:"]);
+  def frq-mark-of(line, marks) = foldl((m, k) => if (frq-some?(m) || (!frq-at?(line, 0, k))) then m else k, "", marks);
+  def frq-code-line?(line, marks) {
+   let t = trim(line);
+   let mark = if ((String) t == "*") then "*" else frq-mark-of(t, marks);
+   if (!frq-some?(t)) then false else if (!frq-some?(mark)) then true else frq-directive?(trim(substring(t, len(mark), len(t))));
+  }
+  def frq-line-end(t, i) {
+   let nl = str_find(t, "\n", i);
+   if (nl < 0) then len(t) else nl;
+  }
+  def frq-line-start(t, i) = if (i <= 0) then 0 else if ((Comparable) str_byte_at(t, (i - 1)) == 10) then i else frq-line-start(t, (i - 1));
+  def frq-lines-code?(t, s, e, marks) = if (s >= e) then false else if frq-code-line?(substring(t, s, frq-line-end(t, s)), marks) then true else frq-lines-code?(t, (frq-line-end(t, s) + 1), e, marks);
+  def frq-code-at?(t, n, from, marks) {
+   let at = str_find(t, n, from);
+   if (at < 0) then false else if frq-lines-code?(t, frq-line-start(t, at), (at + len(n)), marks) then true else frq-code-at?(t, n, (at + 1), marks);
+  }
+  def frq-comment-only?(path, text, needle) = if nil?(frq-marks(frq-ext(path))) then false else (!frq-code-at?(text, needle, 0, frq-marks(frq-ext(path))));
+  // a band witness: the band runs on fkwu and its verdict carries the bit
+  def frq-pow2?(b) = if ((Comparable) b == 1) then true else if ((b < 2) || ((Comparable) (b % 2) == 1)) then false else frq-pow2?((b / 2));
+  def frq-band-holds?(w, g) {
+   let bit = frq-int(w, "bit", 0);
+   let v = if (frq-relative?(frq-text(w, "band")) && frq-pow2?(bit)) then g[6](frq-text(w, "band")) else nothing();
+   if nothing?(v) then false else ((Comparable) ((v / bit) % 2) == 1);
+  }
+  def frq-witness-node(w) = json-node-object(append([fhn-s("path", frq-text(w, "path")), fhn-s("needle", frq-text(w, "needle")), fhn-n("present", frq-int(w, "present", 1))], if frq-some?(frq-text(w, "band")) then [fhn-s("band", frq-text(w, "band")), fhn-n("bit", frq-int(w, "bit", 0))] else []));
+  def frq-put(o, k, v) = if json-object-has?(o, k) then json-node-object(map(p => if ((String) json-pair-key(p) == k) then json-node-pair(k, v) else p, json-object-pairs(o))) else json-node-object(append(json-object-pairs(o), [json-node-pair(k, v)]));
+  def frq-note(c) = if frq-some?(frq-text(c, "note")) then json-node-string(frq-text(c, "note")) else json-node-null();
+  def frq-closed(row, c, w, commit, seen) = frq-put(frq-put(frq-put(frq-put(frq-put(row, "status", json-node-string("closed")), "closed_by", json-node-string(substring(commit, 0, 9))), "witness", frq-witness-node(w)), "reviewed", json-node-string(seen)), "closed_note", frq-note(c));
+  def frq-closure-of(closures, id) = if nil?(closures) then nothing() else if ((String) frq-text(closures[0], "id") == id) then closures[0] else frq-closure-of(closures[1:], id);
+  // one row through the gate: [row, outcome]. check reads a closed row again: its stored commit stands in for
+  // the pickaxe, and must still stand under HEAD and outside the reviewed tree
+  def frq-gate(row, c, reviews, g, check) {
+   let w = frq-get(c, "witness");
+   let path = frq-text(w, "path");
+   let seen = frq-seen-for(row, c, reviews);
+   if (!frq-relative?(path)) then [row, "refused:path"] else if (!frq-seen-ok?(row, seen, g)) then [row, "refused:unseen"] else frq-gate-now(row, c, w, path, seen, g, check);
+  }
+  def frq-gate-now(row, c, w, path, seen, g, check) {
+   let now = g[3]("HEAD", path);
+   let needle = frq-text(w, "needle");
+   if nothing?(now) then [row, "refused:path"] else if ((!frq-some?(needle)) || ((Comparable) len(needle) > 1000)) then [row, "refused:witness"] else if (!frq-holds-in?(w, now)) then [row, "refused:witness"] else frq-gate-before(row, c, w, path, seen, now, g, check);
+  }
+  def frq-gate-before(row, c, w, path, seen, now, g, check) {
+   let before = g[3](seen, path);
+   let shown = if frq-present?(w) then now else before;
+   if nothing?(before) then [row, "refused:unseen"] else if frq-holds-in?(w, before) then [row, "refused:stood-before"] else if frq-some?(frq-text(w, "band")) then (if frq-band-holds?(w, g) then frq-gate-commit(row, c, w, path, seen, g, check) else [row, "refused:band"]) else if frq-comment-only?(path, shown, frq-text(w, "needle")) then [row, "refused:comment"] else frq-gate-commit(row, c, w, path, seen, g, check);
+  }
+  def frq-gate-commit(row, c, w, path, seen, g, check) {
+   let named = frq-text(c, "commit");
+   let derived = if check then g[5](named) else g[4](frq-text(w, "needle"), path);
+   let agrees = if (check || (!frq-some?(named))) then true else ((String) g[5](named) == derived);
+   if (!frq-hex?(derived)) then [row, "refused:commit"] else if (!agrees) then [row, "refused:commit"] else if (!g[1](derived, "HEAD")) then [row, "refused:commit"] else if g[1](derived, seen) then [row, "refused:inside-review"] else [frq-closed(row, c, w, derived, seen), "closed"];
+  }
+  def frq-close-row(row, closures, reviews, g) {
+   let c = frq-closure-of(closures, frq-text(row, "id"));
+   if nothing?(c) then [row, "untouched"] else if ((String) frq-text(row, "status") == "closed") then [row, "already"] else frq-gate(row, c, reviews, g, false);
+  }
+  def frq-count(outcomes, want) = len(filter(o => (String) o == want, outcomes));
+  def frq-refusals() = ["refused:path", "refused:unseen", "refused:witness", "refused:stood-before", "refused:comment", "refused:band", "refused:commit", "refused:inside-review"];
+  // close a ledger's rows: [rows, outcomes, closures naming no row]
+  def frq-close(rows, closures, reviews, g) {
+   let done = map(r => frq-close-row(r, closures, reviews, g), rows);
+   let ids = frq-ids(rows);
+   [map(d => d[0], done), map(d => d[1], done), len(filter(c => !frq-has(ids, frq-text(c, "id")), closures))];
+  }
+  // every closed row read again through the gate: [id, outcome]
+  def frq-as-closure(r) = json-node-object([fhn-s("id", frq-text(r, "id")), json-node-pair("witness", frq-get(r, "witness")), fhn-s("commit", frq-text(r, "closed_by")), fhn-s("reviewed", frq-text(r, "reviewed"))]);
+  def frq-recheck(rows, g) = map(r => [frq-text(r, "id"), frq-gate(r, frq-as-closure(r), json-node-object([]), g, true)[1]], filter(r => (String) frq-text(r, "status") == "closed", rows));
+  // a row is whole when its id recomputes from its origin, where and problem, its status is the one its fields
+  // read, and a closed row names its commit, witness and reviewed tree
+  def frq-closed-whole?(r) = if (!((String) frq-text(r, "status") == "closed")) then true else (frq-hex?(frq-text(r, "closed_by")) && frq-some?(frq-text(frq-get(r, "witness"), "needle")) && frq-hex?(frq-text(r, "reviewed")));
+  def frq-whole?(r) = ((String) frq-text(r, "id") == frq-id(frq-text(r, "origin"), frq-list(r, "where"), frq-text(r, "problem"))) && ((String) frq-text(r, "status") == frq-status-of(r)) && frq-closed-whole?(r);
+  // ── sight: did the code a row cites change since the tree its review read? ──
+  // hunks(seen, path) of a reader answers `git diff -U0 seen HEAD -- path` as text, or nothing when git could not
+  // say. frq-diff-hunks reads that text as [[old start, old count, [lines the hunk added]]]: an insertion has old
+  // count 0 and stands after its old start
+  def frq-hunk-head(l) {
+   let e = digits-end(l, 4);
+   let n = if ((e < len(l)) && ((Comparable) str_byte_at(l, e) == 44)) then frq-num(l, (e + 1), digits-end(l, (e + 1))) else 1;
+   [frq-num(l, 4, e), n, []];
+  }
+  def frq-hunk-add(acc, l) = append(take((len(acc) - 1), acc), [[acc[-1][0], acc[-1][1], append(acc[-1][2], [substring(l, 1, len(l))])]]);
+  def frq-hunks-step(acc, l) = if frq-at?(l, 0, "@@ -") then append(acc, [frq-hunk-head(l)]) else if (frq-at?(l, 0, "+") && (!nil?(acc))) then frq-hunk-add(acc, l) else acc;
+  def frq-diff-hunks(text) = foldl((acc, l) => frq-hunks-step(acc, l), [], split-on(text, "\n"));
+  // a ref's spans: "path:11870-11877" holds [[11870, 11877]], "path:3,9-10" holds [[3, 3], [9, 10]]
+  def frq-span-text(ref) = substring(ref, (str_find(ref, ":", 0) + 1), len(ref));
+  def frq-piece-range(piece) {
+   let dash = str_find(piece, "-", 0);
+   let a = if (dash < 0) then piece else substring(piece, 0, dash);
+   let b = if (dash < 0) then piece else substring(piece, (dash + 1), len(piece));
+   if (frq-some?(a) && frq-some?(b) && frq-all-digits?(a, 0) && frq-all-digits?(b, 0)) then [str_to_int(a), str_to_int(b)] else nothing();
+  }
+  def frq-spans(ref) = filter(x => !nothing?(x), map(frq-piece-range, split-on(frq-span-text(ref), ",")));
+  def frq-touches?(h, a, b) = if ((Comparable) h[1] == 0) then ((h[0] >= a) && (h[0] <= b)) else ((h[0] <= b) && (((h[0] + h[1]) - 1) >= a));
+  def frq-hunks-over(hs, spans) = filter(h => any?(sp => frq-touches?(h, sp[0], sp[1]), spans), hs);
+  def frq-first-where(xs, f) = if nil?(xs) then "" else if f(xs[0]) then xs[0] else frq-first-where(xs[1:], f);
+  // the path a ref names, as the seentip held it: the row's own file of that name, the ref's path, a bare name under the homes
+  def frq-ref-file(row, p, seen, g) {
+   let named = filter(f => ((String) f == p) || frq-ends?(f, ("/" ++ p)), frq-list(row, "files"));
+   let homed = if (str_find(p, "/", 0) < 0) then map(h => h ++ p, frq-homes()) else [];
+   frq-first-where(append(named, append([p], homed)), c => g[8](seen, c));
+  }
+  // one ref: [reading, the path at the seentip, the hunks over its span, the ref]; the reading is standing, moved,
+  // gone (the path is absent at HEAD) or unseen (the seentip never held the path, or git could not say)
+  def frq-ref-read(row, ref, seen, g) {
+   let path = frq-ref-file(row, frq-path-of(ref), seen, g);
+   let spans = frq-spans(ref);
+   let there = frq-some?(path) && g[8]("HEAD", path);
+   let diff = if (there && (!nil?(spans))) then g[7](seen, path) else nothing();
+   let over = if nothing?(diff) then [] else frq-hunks-over(frq-diff-hunks(diff), spans);
+   if ((!frq-some?(path)) || nil?(spans)) then ["unseen", path, [], ref] else if (!there) then ["gone", path, [], ref] else if nothing?(diff) then ["unseen", path, [], ref] else if nil?(over) then ["standing", path, [], ref] else ["moved", path, over, ref];
+  }
+  // a row reads moved when any ref moved, standing when every ref stands, gone when a ref is gone, else unseen
+  def frq-sight-word(reads) = if nil?(reads) then "unseen" else if any?(r => (String) r[0] == "moved", reads) then "moved" else if all?(r => (String) r[0] == "standing", reads) then "standing" else if any?(r => (String) r[0] == "gone", reads) then "gone" else "unseen";
+  // [reading, seentip, the refs read]
+  def frq-sight(row, reviews, g) {
+   let seen = frq-seen-for(row, json-node-object([]), reviews);
+   let refs = frq-list(row, "where");
+   let reads = if (frq-seen-ok?(row, seen, g) && (!nil?(refs))) then map(r => frq-ref-read(row, r, seen, g), refs) else [];
+   [frq-sight-word(reads), seen, reads];
+  }
+  // ── fixborn: the line the change added, proven by the closing gate ──
+  def frq-added-code(over, ext) = filter(l => ((Comparable) len(l) >= 12) && ((Comparable) len(l) <= 400) && frq-code-line?(l, frq-marks(ext)), map(trim, frq-flat(map(h => h[2], over))));
+  def frq-longest(xs) = foldl((best, x) => if ((Comparable) len(x) > len(best)) then x else best, "", xs);
+  def frq-needles(xs, n) = if ((n <= 0) || nil?(xs)) then [] else cons(frq-longest(xs), frq-needles(filter(x => !((String) x == frq-longest(xs)), xs), (n - 1)));
+  def frq-fix-try(row, path, needle, reviews, g) = frq-gate(row, json-node-object([fhn-s("id", frq-text(row, "id")), json-node-pair("witness", json-node-object([fhn-s("path", path), fhn-s("needle", needle), fhn-n("present", 1)]))]), reviews, g, false);
+  def frq-fix-node(m, needle, got, g) = json-node-object([fhn-s("commit", frq-text(got[0], "closed_by")), fhn-s("path", m[1]), fhn-s("needle", needle), fhn-s("span", frq-span-text(m[3])), fhn-s("seen", frq-text(got[0], "reviewed")), fhn-s("def", frq-fix-def(g, m[1], needle))]);
+  def frq-fix-in(row, m, needles, reviews, g) {
+   let got = if nil?(needles) then ["", "none"] else frq-fix-try(row, m[1], needles[0], reviews, g);
+   if nil?(needles) then nothing() else if ((String) got[1] == "closed") then frq-fix-node(m, needles[0], got, g) else frq-fix-in(row, m, needles[1:], reviews, g);
+  }
+  // the definition a line stands in: the nearest line at or above it that opens `def NAME(` (.bml) or `(defn NAME ` (.fk)
+  def frq-name-end(s, i) = if (i >= len(s)) then i else if ((str_byte_at(s, i) <= 32) || ((Comparable) str_byte_at(s, i) == 40) || ((Comparable) str_byte_at(s, i) == 61)) then i else frq-name-end(s, (i + 1));
+  def frq-def-word(t) = if frq-at?(t, 0, "def ") then 4 else if frq-at?(t, 0, "(defn ") then 6 else 0;
+  def frq-def-of-line(line) {
+   let t = trim(line);
+   let from = frq-def-word(t);
+   if ((Comparable) from == 0) then "" else substring(t, from, frq-name-end(t, from));
+  }
+  def frq-def-above(t, ls) {
+   let named = frq-def-of-line(substring(t, ls, frq-line-end(t, ls)));
+   if frq-some?(named) then named else if (ls <= 0) then "" else frq-def-above(t, frq-line-start(t, (ls - 1)));
+  }
+  def frq-fix-def(g, path, needle) {
+   let text = if frq-has(["bml", "fk"], frq-ext(path)) then g[3]("HEAD", path) else nothing();
+   let at = if nothing?(text) then -1 else str_find(text, needle, 0);
+   if (at < 0) then "" else frq-def-above(text, frq-line-start(text, at));
+  }
+  // a fixborn proven earlier, given its definition when it carries none
+  def frq-fix-defined(f, g) {
+   let named = frq-fix-def(g, frq-text(f, "path"), frq-text(f, "needle"));
+   if (frq-some?(frq-text(f, "def")) || (!frq-some?(named))) then f else frq-put(f, "def", json-node-string(named));
+  }
+  def frq-fix-first(row, moved, reviews, g) = if nil?(moved) then nothing() else (frq-fix-in(row, moved[0], frq-needles(frq-added-code(moved[0][2], frq-ext(moved[0][1])), 3), reviews, g) ?? frq-fix-first(row, moved[1:], reviews, g));
+  // the fixborn of a moved row, or nothing when no added code line passes the gate
+  def frq-fixborn(row, reads, reviews, g) = frq-fix-first(row, filter(r => (String) r[0] == "moved", reads), reviews, g);
+  // ── statements: an open_issues string is an implementer's report, so it names its files and stays a statement ──
+  // (no cue in its words tells a report from a request; the work an implementer hands on is a deferred[] entry,
+  // which the feeder already reads as a request)
+  def frq-skip-off(s, i, n) = if (i >= n) then n else if frq-path-byte?(str_byte_at(s, i)) then i else frq-skip-off(s, (i + 1), n);
+  def frq-token-add(acc, t) = if frq-file-name?(t) then frq-add(acc, t) else acc;
+  def frq-tokens-from(s, i, n, acc) {
+   let start = frq-skip-off(s, i, n);
+   let end = if (start >= n) then n else frq-fwd(s, start, n);
+   let from = frq-lead(s, start, end);
+   if (start >= n) then acc else frq-tokens-from(s, end, n, frq-token-add(acc, substring(s, from, frq-trail(s, from, end))));
+  }
+  // every file name a text carries, as the reader's HEAD tracks it: a bare name is looked for under the body's homes
+  // (fkwu's file doors also read a bare name under form/, so only the reader tells a bare path is under form/)
+  def frq-tracked(p, g) = frq-first-where(map(h => h ++ p, frq-homes()), c => g[8]("HEAD", c));
+  def frq-named-files(text, g) = frq-unique(filter(frq-some?, map(p => frq-tracked(p, g), frq-tokens-from(text, 0, len(text), []))), []);
+  def frq-name-files(row, g) = if ((String) frq-text(row, "status") == "statement") then frq-put(row, "files", json-node-array(map(f => json-node-string(f), frq-named-files(frq-text(row, "problem"), g)))) else row;
+  // ── the pass: every open row read again; [rows, readings, fixborns found, rows turned back] ──
+  // The fixborn a row keeps: the one found now; else, while the sight cannot read (unseen), the one it already proved; a
+  // sight that reads standing or gone, or a moved span no added line of which passes the gate, drops it
+  def frq-drop(o, k) = json-node-object(filter(p => !((String) json-pair-key(p) == k), json-object-pairs(o)));
+  def frq-pass-keep(row, s, found, g) = if (!nothing?(found)) then found else if (((String) s[0] == "unseen") && frq-obj?(frq-get(row, "fixborn"))) then frq-fix-defined(frq-get(row, "fixborn"), g) else nothing();
+  def frq-turned-back?(row, after) = frq-has(["moved", "moot"], frq-text(row, "status")) && (!frq-has(["moved", "moot"], frq-text(after, "status")));
+  def frq-pass-row(was, reviews, g) {
+   let row = frq-name-files(frq-restatus(was), g);
+   let open = frq-has(["pending", "moved", "moot"], frq-text(row, "status"));
+   let s = if open then frq-sight(row, reviews, g) else ["", "", []];
+   let found = if (open && ((String) s[0] == "moved")) then frq-fixborn(row, s[2], reviews, g) else nothing();
+   let kept = if open then frq-pass-keep(row, s, found, g) else nothing();
+   let after = if open then frq-restatus(if nothing?(kept) then frq-drop(row, "fixborn") else frq-put(row, "fixborn", kept)) else row;
+   [after, s[0], if nothing?(found) then 0 else 1, if frq-turned-back?(row, after) then 1 else 0];
+  }
+  def frq-pass(rows, reviews, g) {
+   let done = map(r => frq-pass-row(r, reviews, g), rows);
+   [map(d => d[0], done), map(d => d[1], done), foldl((n, d) => n + d[2], 0, done), foldl((n, d) => n + d[3], 0, done)];
+  }
+  // ── moot: the planner's proposal, a band that reads full on today's files and below full under each stub ──
+  def frq-with-moot(rows, id, node) = map(r => if (((String) frq-text(r, "id") == id) && frq-has(["pending", "moved"], frq-text(r, "status"))) then frq-restatus(frq-put(r, "moot", node)) else r, rows);
+  // 1 when the ledger now holds the witness on that row and the row reads moot, else 0
+  def frq-record-moot(ledger, id, node) {
+   let rows = frq-rows(ledger);
+   let after = frq-with-moot(rows, id, node);
+   if ((Comparable) len(filter(r => (String) frq-text(r, "status") == "moot", after)) > len(filter(r => (String) frq-text(r, "status") == "moot", rows))) then frq-save(ledger, after) else 0;
+  }
+  // ── moot, read again: the fixborn through the closing gate, the band's text against its sha, the band on today's files ──
+  // the reader's band-text run(name, text) answers the verdict fkwu reads from that text as a band, or nothing
+  def frq-sha(text) = hex-encode(sha256-stream-string(text));
+  def frq-fix-closure(r) {
+   let f = frq-get(r, "fixborn");
+   json-node-object([fhn-s("id", frq-text(r, "id")), json-node-pair("witness", json-node-object([fhn-s("path", frq-text(f, "path")), fhn-s("needle", frq-text(f, "needle")), fhn-n("present", 1)])), fhn-s("commit", frq-text(f, "commit")), fhn-s("reviewed", frq-text(f, "seen"))]);
+  }
+  def frq-moot-band-name(m) = frq-base(frq-text(m, "band"), len(frq-text(m, "band")));
+  def frq-moot-text-ok?(m) = frq-some?(frq-text(m, "band_text")) && ((String) frq-sha(frq-text(m, "band_text")) == frq-text(m, "band_sha")) && frq-file-name?(frq-moot-band-name(m));
+  def frq-moot-reads(m, g) = g[9](frq-moot-band-name(m), frq-text(m, "band_text"));
+  // holds, or why the row's moot no longer stands: refused:witness (its fields), refused:fixborn (the gate), refused:band-text
+  // (the text is missing or is not the band the sha names), refused:band-run (fkwu read no number) or refused:band-reads
+  def frq-moot-outcome(r, g) {
+   let m = frq-get(r, "moot");
+   let gate = if frq-moot-stands?(r) then frq-gate(r, frq-fix-closure(r), json-node-object([]), g, true)[1] else "";
+   let reading = if (((String) gate == "closed") && frq-moot-text-ok?(m)) then frq-moot-reads(m, g) else nothing();
+   if (!frq-moot-stands?(r)) then "refused:witness" else if (!((String) gate == "closed")) then "refused:fixborn" else if (!frq-moot-text-ok?(m)) then "refused:band-text" else if nothing?(reading) then "refused:band-run" else if ((Comparable) reading == frq-int(m, "full", 0)) then "holds" else "refused:band-reads";
+  }
+  // every moot row read again: [id, outcome]
+  def frq-moot-recheck(rows, g) = map(r => [frq-text(r, "id"), frq-moot-outcome(r, g)], filter(r => (String) frq-text(r, "status") == "moot", rows));
+  // ── git, asked by argv only: the reader the door gives the gate ──
+  def frq-scratch() = temp_dir() ++ "/frq-git-" ++ host_pid().str();
+  // a child's stdout lands in a fresh file (host_capture holds one megabyte; a runtime file is larger)
+  def frq-run-out(argv, out) {
+   let made = host_dir_mkdir(frq-scratch());
+   let gone = host_path_remove(out);
+   let pid = sg-spawn-at(argv, ["/dev/null", out, "/dev/null"]);
+   if (pid <= 0) then -1 else host_wait(pid);
+  }
+  def frq-git-ok?(argv) = (Comparable) fhn-command(argv) == 0;
+  def frq-git-commit?(c) = if frq-hex?(c) then frq-git-ok?(["git", "cat-file", "-e", c ++ "^{commit}"]) else false;
+  def frq-git-ancestor?(a, b) = frq-git-ok?(["git", "merge-base", "--is-ancestor", a, b]);
+  def frq-git-related?(head, c) = frq-some?(fhn-capture(["git", "merge-base", c, head]));
+  def frq-git-blob(rev, path) {
+   let out = frq-scratch() ++ "/blob";
+   let rc = frq-run-out(["git", "cat-file", "blob", rev ++ ":" ++ path], out);
+   if ((Comparable) rc == 0) then (read_file(out) ?? "") else nothing();
+  }
+  def frq-git-pickaxe-at(head, needle, path) = fhn-capture(["git", "log", "-1", "--format=%H", "-S", needle, head, "--", path]);
+  def frq-git-pickaxe(needle, path) = frq-git-pickaxe-at("HEAD", needle, path);
+  def frq-git-exists?(rev, path) = frq-git-ok?(["git", "cat-file", "-e", rev ++ ":" ++ path]);
+  // the old ranges and added lines between a seentip and a head, as `git diff -U0` writes them
+  def frq-git-hunks(seen, head, path) {
+   let out = frq-scratch() ++ "/diff";
+   let rc = frq-run-out(["git", "diff", "-U0", "--no-color", seen, head, "--", path], out);
+   if ((Comparable) rc == 0) then (read_file(out) ?? "") else nothing();
+  }
+  def frq-git-full(c) = if frq-hex?(c) then fhn-capture(["git", "rev-parse", "--verify", "--quiet", c ++ "^{commit}"]) else "";
+  def frq-last-line(t) {
+   let s = trim(t);
+   substring(s, (frq-last-at(s, 10, len(s)) + 1), len(s));
+  }
+  def frq-all-digits?(s, i) = if (i >= len(s)) then true else if frq-digit?(str_byte_at(s, i)) then frq-all-digits?(s, (i + 1)) else false;
+  def frq-last-int(t) {
+   let l = frq-last-line(t);
+   if (frq-some?(l) && frq-all-digits?(l, 0)) then str_to_int(l) else nothing();
+  }
+  // a band runs only as HEAD holds it: tracked, and unchanged in the working tree
+  def frq-git-band(band) {
+   let tracked = frq-git-ok?(["git", "cat-file", "-e", "HEAD:" ++ band]);
+   let clean = if tracked then frq-git-ok?(["git", "diff", "--quiet", "HEAD", "--", band]) else false;
+   if clean then frq-run-band(band) else nothing();
+  }
+  // a band runs in this process (cell_run, docs/in-process-cells.md): its value comes back as a value, with no child begun and
+  // no file read back. A stop, a compile error or the budget reads nothing; the value is read as the program prints its last
+  // line, so a band answers a number or nothing
+  def frq-band-deadline-ms() = 600000;
+  def frq-render(v) = (String) value_kind(v) == "int" ? v.str() : (String) value_kind(v) == "string" ? v : value_str(v);
+  def frq-cell-int(r) = if (nothing?(record_get(r, "stopped")) && ((Comparable) record_get(r, "errors") == 0)) then frq-last-int(frq-render(record_get(r, "value"))) else nothing();
+  def frq-run-band(path) = frq-cell-int(cell_run(path, 0, frq-band-deadline-ms(), nothing()));
+  // a band kept as text (a moot witness's): written where fkwu looks for the form/ root nearest a band, run on the
+  // checkout's files, its last line read as a number
+  def frq-mkdirs-at(path, i) {
+   let sp = str_find(path, "/", i);
+   if (sp < 0) then fs_mkdir(path) else frq-mkdirs-next(path, sp);
+  }
+  def frq-mkdirs-next(path, sp) {
+   let made = if (sp > 0) then fs_mkdir(substring(path, 0, sp)) else 0;
+   frq-mkdirs-at(path, (sp + 1));
+  }
+  def frq-git-band-text(name, text) {
+   let dir = frq-scratch() ++ "/moot/form/form-stdlib/tests";
+   let made = frq-mkdirs-at(dir, 0);
+   let path = dir ++ "/" ++ name;
+   let wrote = write_file(path, text);
+   if (wrote < 0) then nothing() else frq-run-band(path);
+  }
+  // the reader for a head: "HEAD" in the gate's questions is that head (a caller reading a past state of the tree
+  // asks as of a commit); the band witness always runs the checkout's own HEAD
+  def frq-head-of(head, rev) = if ((String) rev == "HEAD") then head else rev;
+  def frq-git-at(head) = [frq-git-commit?, (a, b) => frq-git-ancestor?(frq-head-of(head, a), frq-head-of(head, b)), c => frq-git-related?(head, c), (rev, path) => frq-git-blob(frq-head-of(head, rev), path), (needle, path) => frq-git-pickaxe-at(head, needle, path), frq-git-full, frq-git-band, (seen, path) => frq-git-hunks(seen, head, path), (rev, path) => frq-git-exists?(frq-head-of(head, rev), path), frq-git-band-text];
+  def frq-git() = frq-git-at("HEAD");
+  // the tip of a unit's commits: the listed commit every other listed commit is an ancestor of
+  def frq-git-tip(hashes) {
+   let real = frq-unique(filter(frq-git-commit?, hashes), []);
+   let tips = filter(h => all?(o => frq-git-ancestor?(o, h), real), real);
+   if ((Comparable) len(tips) == 1) then tips[0] else "";
+  }
+  def frq-unique(xs, seen) = if nil?(xs) then [] else if frq-has(seen, xs[0]) then frq-unique(xs[1:], seen) else cons(xs[0], frq-unique(xs[1:], cons(xs[0], seen)));
+  def frq-git-done() = host_dir_rmdir(frq-scratch());
+ }
+ 0;
+}

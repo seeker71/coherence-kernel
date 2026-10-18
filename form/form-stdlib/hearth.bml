@@ -1,0 +1,293 @@
+//////////////////////////////////////////////////////////////////////
+//
+// hearth.bml
+//
+// Executable BML. The HEARTH: the serving floor that outlives sessions.
+//
+// THE INTERFACE, AS IT IS. One resident form-cli process is the agent
+// server (observe/form-cli-peer-contribution-live.fk): startup stdin
+// names the sealed GGUF, task spool, reply spool, fifo bell, channel,
+// and budgets; born capabilities are ANNOUNCED BEFORE model admission
+// (source-action-v1, direct-answer-v1); one model admission per
+// lifetime; a hot-swappable JIT policy may select any born capability
+// without reopening the model. Clients are just cells: append ONE
+// length-safe task frame (fcpa-task-frame turn kind body) to the task
+// spool, ring the bell once (observe/peer-ask-send.fk). The bell wake
+// DRAINS ALL WORK PRESENT — that drain, not threads, is what serves many
+// parallel requests: concurrent appends interleave safely and replies
+// land durable in arrival order, keyed by turn. A single `release`
+// byte on the bell closes model and state handles cleanly. Witnessed
+// 2026-08-31: six clients in one breath, one PID, zero typed errors —
+// and the witnessed crowdfade capacity (answers thin as shared context fills;
+// the named stone is per-turn context recycling in the turnwheel).
+//
+// NO REBUILD, EVERYTHING WARM. A new session rebuilds nothing except
+// when the freshness band refuses (binary-freshness-band != 31 is the
+// ONLY rebuild trigger). Every unit rides its .fkb ice keyed to builder
+// and source; .bml surfaces lower in memory and freeze beside the
+// source as .bml.fkb; warm runs are milliseconds; hot leaf recipes
+// crystallize to native through the heat gate — INTO RAM PAGES of the
+// running process (the MAP_JIT door), always and unconditionally; the
+// crystallized page MAY also be saved as an optional disk cache so a
+// second start loads instead of re-JITting — a second speed-up,
+// byte-keyed, whose absence or staleness simply means JIT again in
+// RAM, never a refusal or requirement (Urs, 2026-09-01). The
+// universality witness (alldown) points the rest of the way.
+//
+// OPEN CHANNELS, ANY REQUEST. The hearth paths below are STABLE and
+// session-free, so any session, sibling, or cell can speak to the same
+// living server without knowing who birthed it. The board file names
+// what stands: pid, spools, capabilities, born-at. Any request kind a
+// birth announced is allowed; an unknown kind rides the direct-answer
+// route and is served (witnessed 2026-08-31, turn 9005: kind
+// direct-answer-never-announced answered in 20s, signal=candidate) —
+// the open channel is openness in the flesh; a typed per-kind verdict
+// is a named stone. New patterns that recur become doors with faces
+// and corpus rows — that is how access generalizes across sessions:
+// crystallize, don't re-explain.
+//
+import form-stdlib/core.fk;
+import form-stdlib/form-cli-movement.bml;
+import form-stdlib/spool-bell-transport.fk;
+import form-stdlib/peer-task-frame.fk;
+import form-stdlib/bml/host-fs.bml;
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormHearth {
+        field HearthDir = ".hearth";
+        field HearthTelemetryRoot = "/tmp/form-glass-telemetry";
+        field HearthCapabilities = "direct-answer-v1 source-action-v1 bml-direct-fast-route-v1 embodied-goal-bml-v1 terminal-answer-v1 hearth-telemetry-v2 repo-patch-v1";
+        thought hearth-pattern = ["stable-paths", "board", "one-admission", "drain-all", "typed-release"];
+
+        def hearth-task() = HearthDir() + "/task.spool";
+        def hearth-reply() = HearthDir() + "/reply.spool";
+        def hearth-bell() = HearthDir() + "/bell";
+        def hearth-board() = HearthDir() + "/board";
+        def hearth-out() = HearthDir() + "/server.out";
+        def hearth-ledger() = HearthDir() + "/ledger";
+        def hearth-stones() = HearthDir() + "/stones";
+        // The land cadence's memory of its last readings (land-cadence-live.fk):
+        // name=value lines, one per lens, so the next breath can say moved or steady.
+        def hearth-readings() = HearthDir() + "/readings";
+        // The glass telemetry bus lives on disk here; every publisher and
+        // reader of the bus asks this door for the root (eight cells spelled
+        // it themselves before 2026-09-03).
+        def hearth-telemetry-root() = HearthTelemetryRoot();
+        def hearth-capabilities() = HearthCapabilities();
+        // The person's places are read, never spelled in a tracked file.
+        // hearth-home-root: the checkout whose .hearth every checkout of this
+        // repository shares, the main worktree. A linked worktree's .git file
+        // reads "gitdir: <main>/.git/worktrees/<name>"; a main worktree's .git
+        // is a directory, and the root is this checkout.
+        def hearth-worktrees-mark() = "/.git/worktrees/";
+        def hearth-home-root-of(git) = value_kind(git) != "string" ? host_cwd() : str_find(git, hearth-worktrees-mark(), 0) < 8 ? host_cwd() : substring(git, 8, str_find(git, hearth-worktrees-mark(), 0));
+        def hearth-home-root() = hearth-home-root-of(read_file(".git"));
+        def hearth-home() = hearth-home-root() + "/" + HearthDir();
+        // hearth-conf: one row of fkwu.conf in the run's directory, read as the
+        // seed reads it (KEY value, KEY=value, or a bare KEY for "1"; # opens a
+        // comment line; the first row wins). An absent key, or one set to "0" or
+        // "", answers nothing.
+        def hearth-conf-sep?(b) = b == 32 || b == 9 || b == 61;
+        def hearth-conf-key-end(s, i) = i >= len(s) || hearth-conf-sep?(str_byte_at(s, i)) ? i : hearth-conf-key-end(s, i + 1);
+        def hearth-conf-skip(s, i) = i < len(s) && hearth-conf-sep?(str_byte_at(s, i)) ? hearth-conf-skip(s, i + 1) : i;
+        def hearth-conf-value(v) = v == "" ? "1" : v;
+        def hearth-conf-row(line, key) = len(line) == 0 || str_byte_at(line, 0) == 35 || substring(line, 0, hearth-conf-key-end(line, 0)) != key ? nothing() : hearth-conf-value(trim(substring(line, hearth-conf-skip(line, hearth-conf-key-end(line, 0)), len(line))));
+        def hearth-conf-in(lines, key) = nil?(lines) ? nothing() : hearth-conf-row(trim(lines[0]), key) ?? hearth-conf-in(lines[1:], key);
+        def hearth-conf-text(t) = value_kind(t) == "string" ? split-on(t, "\n") : [];
+        def hearth-conf-on(v) = nothing?(v) || v == "0" ? nothing() : v;
+        def hearth-conf(key) = hearth-conf-on(hearth-conf-in(hearth-conf-text(read_file("fkwu.conf")), key));
+        // The person's home directory, where the harness keeps the person's own
+        // transcripts: the home the host gave this process (HOME, read with no
+        // shell), and fkwu.conf HEARTH_PERSON_HOME over it when a row names one.
+        // With neither, it is nothing.
+        def hearth-home-word(h) = h == "" ? nothing() : h;
+        def hearth-host-home() = hearth-home-word(trim(hfs-home()));
+        def hearth-person-home() = hearth-conf("HEARTH_PERSON_HOME") ?? hearth-host-home();
+        // A shell that feeds the resident's birth packet also contains the
+        // recipe name in its command line. `pgrep -f` consequently counted
+        // the feeder and the real fkwu image as two peers, then published the
+        // feeder PID on the board. The process image is the identity here:
+        // argv[0] must itself be fkwu and argv[1] the resident entry. This is
+        // a present host observation, not a guessed parent/child relation.
+        // The listing is the host's process table read through the seed's own doors, no `ps` and no shell:
+        // host_processes("fkwu*") names the fkwu images (rows [pid rss cpu elapsed nice ppid]) and host_process(pid) gives one
+        // image's argv. It is rendered as the lines the readers below take, `pid argv...` (and `pid etime argv...` for the census),
+        // in ascending pid order. A line is a resident when its second
+        // field (argv[0]) is fkwu, bare or by a path, and its third (argv[1]) ends in the resident entry.
+        def hearth-rows-of(rows) = (String) value_kind(rows) == "list" ? rows : [];
+        def hearth-fkwu-rows() = hearth-rows-sort(hearth-rows-of(host_processes("fkwu*")));
+        def hearth-rows-ins(row, sorted) = (Comparable) len(sorted) == 0 ? [row] : (Comparable) row[0] <= sorted[0][0] ? cons(row, sorted) : cons(sorted[0], hearth-rows-ins(row, sorted[1:]));
+        def hearth-rows-sort(rows) = (Comparable) len(rows) == 0 ? [] : hearth-rows-ins(rows[0], hearth-rows-sort(rows[1:]));
+        // one image's argv, [] when the host withholds it or the process is gone
+        def hearth-argv-of(pid) {
+            let row = host_process(pid);
+            (String) value_kind(row) == "list" && (Comparable) len(row) >= 5 && (String) value_kind(row[4]) == "list" ? row[4] : [];
+        }
+        def hearth-argv-join(argv) = (Comparable) len(argv) == 0 ? "" : (Comparable) len(argv) == 1 ? argv[0] : argv[0] ++ " " ++ hearth-argv-join(argv[1:]);
+        def hearth-command-of(pid) = hearth-argv-join(hearth-argv-of(pid));
+        // ps's elapsed-time spelling, [[dd-]hh:]mm:ss, from elapsed seconds (nothing, when the host did not tell, reads 00:00)
+        def hearth-pad2(n) = n < 10 ? "0" ++ n.str() : n.str();
+        def hearth-etime(secs) {
+            let s = (String) value_kind(secs) == "int" && secs > 0 ? secs : 0;
+            let d = s / 86400;
+            let h = (s % 86400) / 3600;
+            let m = (s % 3600) / 60;
+            let tail = hearth-pad2(m) ++ ":" ++ hearth-pad2(s % 60);
+            d > 0 ? d.str() ++ "-" ++ hearth-pad2(h) ++ ":" ++ tail : h > 0 ? hearth-pad2(h) ++ ":" ++ tail : tail;
+        }
+        def hearth-row-elapsed(row) = (Comparable) len(row) >= 4 ? row[3] : 0;
+        // `pid argv...` (mode 0), `pid etime argv...` (mode 1) or `argv...` (mode 2); an image whose argv the host withholds has no line
+        def hearth-ps-line(row, mode) {
+            let cmd = hearth-command-of(row[0]);
+            (Comparable) len(cmd) == 0 ? "" : (Comparable) mode == 1 ? row[0].str() ++ " " ++ hearth-etime(hearth-row-elapsed(row)) ++ " " ++ cmd ++ "\n" : (Comparable) mode == 2 ? cmd ++ "\n" : row[0].str() ++ " " ++ cmd ++ "\n";
+        }
+        def hearth-ps-lines-of(rows, mode, acc) = (Comparable) len(rows) == 0 ? acc : hearth-ps-lines-of(rows[1:], mode, acc ++ hearth-ps-line(rows[0], mode));
+        def hearth-ps-text() = hearth-ps-lines-of(hearth-fkwu-rows(), 0, "");
+        def hearth-ws?(l, i) = i >= len(l) ? 0 : ((Comparable) ord(char_at(l, i)) == 32 || (Comparable) ord(char_at(l, i)) == 9) ? 1 : 0;
+        def hearth-skip-ws(l, i) = i >= len(l) ? i : (Comparable) hearth-ws?(l, i) == 1 ? hearth-skip-ws(l, i + 1) : i;
+        def hearth-word-end(l, i) = i >= len(l) ? i : (Comparable) hearth-ws?(l, i) == 1 ? i : hearth-word-end(l, i + 1);
+        def hearth-field-from(l, i, n) {
+            let a = hearth-skip-ws(l, i);
+            a >= len(l) ? ""
+            : (Comparable) n == 1 ? substring(l, a, hearth-word-end(l, a))
+            : hearth-field-from(l, hearth-word-end(l, a), n - 1);
+        }
+        def hearth-field(l, n) = hearth-field-from(l, 0, n);
+        def hearth-ends-with?(s, tail) = (Comparable) len(s) >= len(tail) && (String) substring(s, len(s) - len(tail), len(s)) == tail;
+        def hearth-fkwu-word?(w) = (Comparable) hearth-ends-with?(w, "fkwu") && ((Comparable) len(w) == 4 || (String) substring(w, len(w) - 5, len(w) - 4) == "/");
+        def hearth-resident-line?(l) = (Comparable) hearth-fkwu-word?(hearth-field(l, 2)) && (Comparable) hearth-ends-with?(hearth-field(l, 3), "form-cli-peer-contribution-live.fk");
+        def hearth-ps-lines(text, from, acc) {
+            let nl = str_find(text, "\n", from);
+            nl < 0 ? ((Comparable) from < len(text) ? cons(substring(text, from, len(text)), acc) : acc)
+            : hearth-ps-lines(text, nl + 1, cons(substring(text, from, nl), acc));
+        }
+        def hearth-resident-pids-go(ls, acc) = (Comparable) len(ls) == 0 ? acc : (Comparable) hearth-resident-line?(ls[0]) == 1 ? hearth-resident-pids-go(ls[1:], cons(hearth-field(ls[0], 1), acc)) : hearth-resident-pids-go(ls[1:], acc);
+        // the pids in listing order
+        def hearth-resident-pids-of(text) = reverse(hearth-resident-pids-go(reverse(hearth-ps-lines(text, 0, [])), []));
+        def hearth-resident-pids() = hearth-resident-pids-of(hearth-ps-text());
+        def hearth-resident-pid-of(text) {
+            let pids = hearth-resident-pids-of(text);
+            (Comparable) len(pids) == 0 ? 0 : str_to_int(pids[0]);
+        }
+        def hearth-resident-pid() = hearth-resident-pid-of(hearth-ps-text());
+        def hearth-resident-count() = len(hearth-resident-pids());
+        // How many fkwu processes run one of these entries: the argv text, a line counting when its
+        // first word is fkwu (bare or by a path) and its second word holds one of the entry names.
+        def hearth-ps-commands() = hearth-ps-lines-of(hearth-fkwu-rows(), 2, "");
+        def hearth-has-any?(s, names) = (Comparable) len(names) == 0 ? 0 : str_find(s, names[0], 0) >= 0 ? 1 : hearth-has-any?(s, names[1:]);
+        def hearth-fkwu-entry-line?(l, names) = (Comparable) hearth-fkwu-word?(hearth-field(l, 1)) && (Comparable) hearth-has-any?(hearth-field(l, 2), names) == 1;
+        def hearth-fkwu-count-go(ls, names, n) = (Comparable) len(ls) == 0 ? n : hearth-fkwu-count-go(ls[1:], names, (Comparable) hearth-fkwu-entry-line?(ls[0], names) == 1 ? n + 1 : n);
+        def hearth-fkwu-count-of(text, names) = hearth-fkwu-count-go(hearth-ps-lines(text, 0, []), names, 0);
+        def hearth-fkwu-count(names) = hearth-fkwu-count-of(hearth-ps-commands(), names);
+        // The census of running fkwu: `pid+etime lastword; ` for each process whose argv[0] is fkwu, from
+        // the host's rows (pid, elapsed time, argv), cut to the first 190 bytes (the board's width).
+        def hearth-rstrip-end(l, n) = (Comparable) n <= 0 ? 0 : (Comparable) hearth-ws?(l, n - 1) == 1 ? hearth-rstrip-end(l, n - 1) : n;
+        def hearth-last-start(l, e) = (Comparable) e <= 0 ? 0 : (Comparable) hearth-ws?(l, e - 1) == 1 ? e : hearth-last-start(l, e - 1);
+        def hearth-last-field(l) {
+            let e = hearth-rstrip-end(l, len(l));
+            substring(l, hearth-last-start(l, e), e);
+        }
+        def hearth-ps-times() = hearth-ps-lines-of(hearth-fkwu-rows(), 1, "");
+        def hearth-census-go(ls, acc) = (Comparable) len(ls) == 0 ? acc : (Comparable) hearth-fkwu-word?(hearth-field(ls[0], 3)) == 1 ? hearth-census-go(ls[1:], acc ++ hearth-field(ls[0], 1) ++ "+" ++ hearth-field(ls[0], 2) ++ " " ++ hearth-last-field(ls[0]) ++ "; ") : hearth-census-go(ls[1:], acc);
+        def hearth-census-cut(s) = (Comparable) len(s) > 190 ? substring(s, 0, 190) : s;
+        def hearth-fkwu-census-of(text) = hearth-census-cut(hearth-census-go(reverse(hearth-ps-lines(text, 0, [])), ""));
+        def hearth-fkwu-census() = hearth-fkwu-census-of(hearth-ps-times());
+        def hearth-board-mend-needed?(listed, resident) = resident > 0 ? ((Comparable) listed == resident ? 0 : 1) : 0;
+        // The model a resident holds is the one its residency note names (model-admission.bml: one note per live process,
+        // ~/.cache/form-model/resident/<pid>, a line per file it holds): the first .gguf line, by its file name.
+        def hearth-resident-note(pid) = hfs-home() ++ "/.cache/form-model/resident/" ++ pid.str();
+        def hearth-after-slash(s, from) {
+            let at = str_find(s, "/", from);
+            at < 0 ? substring(s, from, len(s)) : hearth-after-slash(s, at + 1);
+        }
+        def hearth-gguf-line?(l) = (Comparable) hearth-ends-with?(l, ".gguf");
+        def hearth-model-in-lines(ls) = (Comparable) len(ls) == 0 ? "" : hearth-gguf-line?(trim(ls[0])) ? hearth-after-slash(trim(ls[0]), 0) : hearth-model-in-lines(ls[1:]);
+        def hearth-model-of-note(text) = hearth-model-in-lines(split-on(text, "\n"));
+        def hearth-model-of(name) = (Comparable) len(name) == 0 ? "nothing" : name;
+        def hearth-resident-model(pid) = pid <= 0 ? "nothing" : hearth-model-of(hearth-model-of-note(read_file(hearth-resident-note(pid)) ?? ""));
+        def hearth-board-current?(listed, resident, capabilities) = (Comparable) hearth-board-mend-needed?(listed, resident) == 1 ? 0 : ((String) capabilities == hearth-capabilities());
+        def hearth-maxpos() = 4096;
+        def hearth-counsel() = HearthDir() + "/counsel.last";
+        def hearth-native-authoring-guide() = HearthDir() + "/native-authoring-current.json";
+        def hearth-code-memory() = HearthDir() + "/code-memory";
+        def hearth-code-replies() = hearth-code-memory() + "/replies";
+        def hearth-response-sessions() = HearthDir() + "/response-sessions";
+        def hearth-generate-replies() = hearth-response-sessions() + "/generation";
+        def hearth-response-resources() = hearth-response-sessions() + "/resources";
+        def hearth-response-syntheses() = hearth-response-sessions() + "/syntheses";
+        def hearth-response-process-limit() = 8;
+        def hearth-code-initial-reasoning-limit() = 8192;
+        def hearth-code-value-search-check-limit() = 64;
+        def hearth-process-final-drain-chunks() = 1;
+        def hearth-response-resource-work-parent() = "/tmp";
+        def hearth-response-resource-work-prefix() = "form-response-resource-";
+        def hearth-session-learning() = HearthDir() + "/session-learning";
+        def hearth-lat-lo() = 1000;
+        def hearth-lat-hi() = 5000;
+        def hearth-fill-lo() = 50;
+        def hearth-fill-hi() = 80;
+        // THE CALLER'S PATIENCE, AS DATA (Urs, 2026-09-03: remove limits and
+        // workarounds; more dynamic flow). Every fixed timing an organ once
+        // held as a literal in C or in a cell lives here as one row, and is
+        // HANDED to the organ by its caller — the organ holds no number of
+        // its own. The body's model for time is spool-bell-transport (block
+        // on the kernel's read, never sleep in a poll) and the live loop (the
+        // deadline is the caller's parameter); a beat below is a cadence, a
+        // deadline is a patience, and neither is a switch.
+        //
+        // metal: the resident hands this to the carrier before admission
+        // (metal_deadline); every command-buffer wait in that process then
+        // ends in a typed frame the Form side reads as data through
+        // metal_status — wait_frame=completed|error|timeout|released — and a
+        // process that hands none blocks on the kernel's own wait, as the
+        // bell does. The argument for the number, moved here from the
+        // carrier: the longest witnessed legitimate wait on this host is a
+        // 27 GB residency-cold open at 41-56 s (2026-08-25; 142.6 s once in a
+        // successor birth, 2026-08-30) and identical runs vary ~20%; 300 s
+        // stands a factor of ~4 above that spread, so a healthy contended open
+        // cannot fire it while a lost buffer answers in five minutes, not never.
+        def hearth-metal-deadline-ms() = 300000;
+        // one HTTP range read of a model artifact
+        def hearth-fetch-deadline-ms() = 300000;
+        // field patrol: one census per beat; hot = burning half a beat
+        def hearth-patrol-beat-s() = 20;
+        // hearth glass: one sample per tick
+        def hearth-glass-tick-s() = 1;
+        // review panel: the flag-check cadence and the whole wait budget
+        // (a reviewer can take many minutes, so the wait budget is generous)
+        def hearth-review-tick-s() = 2;
+        def hearth-review-wait-s() = 1200;
+        // hot-crossing: the external offer window, from its door line
+        def hearth-crossing-window-s() = 60;
+        // cell channel: a live cell's patience for one heard symbol crossing the
+        // evaluation membrane (cell-channel.bml cc-hear-through); spent is nothing
+        def hearth-channel-eval-s() = 20;
+        // A cadence rest, its length always the caller's argument, held by the seed's own sleep (host_sleep_ms).
+        // Answers 1 when the rest held and 0 when the door said nothing — a beat that did not hold is
+        // named, never mistaken for one that did.
+        def hearth-rest-s(secs) = nothing?(host_sleep_ms(secs * 1000)) ? 0 : 1;
+        // The bell is a wake edge only when it is a fifo; a regular file at
+        // that path would answer every read at once and turn a block into a spin.
+        def hearth-bell-fifo?() = hfs-fifo?(hearth-bell()) ? 1 : 0;
+        def hearth-kind-answer() = "direct-answer";
+        def hearth-send(turn, kind, body) = (Comparable) hearth-standing() == 0 ? 0 : hearth-send-go(turn, kind, body);
+        def hearth-send-go(turn, kind, body) = hearth-send-rung(sbt-append(hearth-task(), (String) fcpa-task-frame(turn, kind, body) + byte_to_str(10)), sbt-ring(hearth-bell()));
+        def hearth-send-rung(appended, rung) = 1;
+
+        def hearth-kv(k, v) = k + ("=" + ((String) v + byte_to_str(10)));
+        def hearth-board-text(pid, capabilities) = hearth-kv("pid", pid.str()) + (hearth-kv("task", hearth-task()) + (hearth-kv("reply", hearth-reply()) + ((String) hearth-kv("bell", hearth-bell()) + hearth-kv("capabilities", capabilities))));
+        def hearth-board-write(pid, capabilities) = write_file_text(hearth-board(), hearth-board-text(pid, capabilities));
+        // Missing durable state is typed nothing in the native file lane.
+        // Normalize only at the text grammar boundary; callers still derive
+        // standing=0 rather than mistaking absence for a live empty board.
+        def hearth-board-read-value(text) = text ?? "";
+        def hearth-board-read() = hearth-board-read-value(read_file(hearth-board()));
+        def hearth-board-pid() = fmv-field(hearth-board-read(), "pid");
+        // a pid is alive when the host's own table holds it (host_alive: kill(0), a zombie excluded)
+        def hearth-alive(pid) = pid <= 0 ? 0 : (Comparable) host_alive(pid) == 1 ? 1 : 0;
+        def hearth-standing() = hearth-alive(hearth-board-pid());
+    }
+    0;
+}

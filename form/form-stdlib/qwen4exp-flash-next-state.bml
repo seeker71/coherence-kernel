@@ -1,0 +1,140 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen4exp-flash-next-state.bml — executable resident state lookup/evaluate.
+//
+// Authority: form-stdlib/qwen4exp-flash-next-state.bml
+import form/native/metal/qwen4exp-flash-next-token-handle.fk;
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Qwen4ExpFlashNextStateAuthority {
+        field Q4SAuthorityPath = "form/form-stdlib/qwen4exp-flash-next-state.bml";
+        field Q4SAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class Qwen4ExpFlashNextState {
+        field Q4SSchema = "qwen4exp-resident-state-v1";
+        field Q4SEos = 248046;
+        field Q4SLayers = 48;
+
+        ref q4s-authority = Qwen4ExpFlashNextStateAuthority;
+        thought q4s-law = ["one-slot-one-prefix", "exact-reuse", "append-reuse", "divergence-reset", "explicit-substate"];
+
+        // slot: tag, model prefix, token handle context, maxpos, next position,
+        // prev1, prev2, resident input tokens, last predicted token, status.
+        def q4s-slot(prefix, ctx, maxpos, pos, prev1, prev2, tokens, output, status) {
+            ["qwen4exp-resident-state", prefix, ctx, maxpos, pos, prev1, prev2, tokens, output, status];
+        }
+        def q4s-prefix(slot) = slot[1];
+        def q4s-ctx(slot) = slot[2];
+        def q4s-maxpos(slot) = slot[3];
+        def q4s-pos(slot) = slot[4];
+        def q4s-prev1(slot) = slot[5];
+        def q4s-prev2(slot) = slot[6];
+        def q4s-tokens(slot) = slot[7];
+        def q4s-output(slot) = slot[8];
+        def q4s-status(slot) = slot[9];
+
+        // The embedding tensor is an mmap-backed weight view.  Its positive
+        // Metal handle is the physical residency witness carried to glass;
+        // an artifact path or a route decision can never synthesize it.
+        def q4s-residency-handle(slot) = q4tv-h(q4s-ctx(slot)[5][0]);
+        def q4s-resident?(slot) {
+            let ctx = q4s-ctx(slot);
+            if (!((Comparable) len(ctx) == 8)) then 0
+            else if (!((Comparable) len(ctx[4]) == Q4SLayers())) then 0
+            else if (!((Comparable) len(ctx[6]) == Q4SLayers())) then 0
+            else if (q4s-residency-handle(slot) <= 0) then 0
+            else if (ctx[3][0] <= 0) then 0
+            else 1;
+        }
+
+        def q4s-open(prefix, maxpos) = q4s-slot(prefix, q4t-open(prefix, maxpos), maxpos, 0, Q4SEos(), Q4SEos(), [], Q4SEos(), "open");
+        def q4s-close(slot) = q4t-close(q4s-ctx(slot));
+
+        def q4s-prefix-list?(resident, incoming) {
+            if ((Comparable) len(resident) == 0) then 1
+            else if ((Comparable) len(incoming) == 0) then 0
+            else if ((Comparable) resident[0] == incoming[0]) then q4s-prefix-list?(resident[1:], incoming[1:]) else 0;
+        }
+        def q4s-drop(xs, n) = if (n <= 0) then xs else if ((Comparable) len(xs) == 0) then [] else q4s-drop(xs[1:], (n - 1));
+        def q4s-list-eq?(a, b) = if ((Comparable) len(a) == 0) then if ((Comparable) len(b) == 0) then 1 else 0 else if ((Comparable) len(b) == 0) then 0 else if ((Comparable) a[0] == b[0]) then q4s-list-eq?(a[1:], b[1:]) else 0;
+
+        // lookup: tag, status, reused token count, delta tokens.
+        def q4s-prefix-lookup(slot, incoming) {
+            let resident = q4s-tokens(slot);
+            if q4s-list-eq?(resident, incoming) then ["qwen4exp-prefix-lookup", "exact", len(resident), []]
+            else if q4s-prefix-list?(resident, incoming) then ["qwen4exp-prefix-lookup", "append", len(resident), q4s-drop(incoming, len(resident))]
+            else ["qwen4exp-prefix-lookup", "miss", 0, incoming];
+        }
+        def q4s-lookup-status(lookup) = lookup[1];
+        def q4s-lookup-reused(lookup) = lookup[2];
+        def q4s-lookup-delta(lookup) = lookup[3];
+
+        // State lookup never reads a buffer. It returns the resident handle and
+        // exact ownership coordinates so diagnostics can inspect deliberately.
+        def q4s-substate-row(status, layer, kind, handle) = ["qwen4exp-substate", status, layer, kind, handle];
+        def q4s-layer-substate(ctx, layer, kind) {
+            let state = ctx[6][layer];
+            if ((String) kind == "conv") then q4s-substate-row(if (state[0] > 0) then "hit" else "absent", layer, kind, state[0])
+            else if ((String) kind == "gdn") then q4s-substate-row(if (state[1] > 0) then "hit" else "absent", layer, kind, state[1])
+            else if ((String) kind == "key") then q4s-substate-row(if (state[2] > 0) then "hit" else "absent", layer, kind, state[2])
+            else if ((String) kind == "value") then q4s-substate-row(if (state[3] > 0) then "hit" else "absent", layer, kind, state[3])
+            else q4s-substate-row("miss", layer, kind, 0);
+        }
+        def q4s-state-lookup(slot, layer, kind) {
+            let ctx = q4s-ctx(slot);
+            if ((String) kind == "position") then q4s-substate-row("hit", (0 - 1), kind, q4s-pos(slot))
+            else if ((String) kind == "tokens") then ["qwen4exp-substate", "hit", (0 - 1), kind, q4s-tokens(slot)]
+            else if ((String) kind == "ple-history") then q4s-substate-row("hit", (0 - 1), kind, ctx[3][48])
+            else if ((layer < 0) || (layer >= Q4SLayers())) then q4s-substate-row("miss", layer, kind, 0)
+            else q4s-layer-substate(ctx, layer, kind);
+        }
+        def q4s-substate-status(row) = row[1];
+        def q4s-substate-handle(row) = row[4];
+
+        def q4s-evaluate-one(slot, token) {
+            let output = q4t-forward(q4s-ctx(slot), token, q4s-pos(slot), q4s-prev1(slot), q4s-prev2(slot));
+            q4s-slot(q4s-prefix(slot), q4s-ctx(slot), q4s-maxpos(slot), (q4s-pos(slot) + 1), token, q4s-prev1(slot), append(q4s-tokens(slot), [token]), output, "evaluated");
+        }
+        def q4s-ingest-one(slot, token) {
+            let ingested = q4t-ingest(q4s-ctx(slot), token, q4s-pos(slot), q4s-prev1(slot), q4s-prev2(slot));
+            q4s-slot(q4s-prefix(slot), q4s-ctx(slot), q4s-maxpos(slot), (q4s-pos(slot) + ingested), token, q4s-prev1(slot), append(q4s-tokens(slot), [token]), q4s-output(slot), "ingested");
+        }
+        def q4s-evaluate-delta(slot, tokens) = if ((Comparable) len(tokens) == 0) then slot else q4s-evaluate-delta(q4s-evaluate-one(slot, tokens[0]), tokens[1:]);
+        def q4s-prefill-delta(slot, tokens) {
+            if ((Comparable) len(tokens) == 0) then slot
+            else if ((Comparable) len(tokens) == 1) then q4s-evaluate-one(slot, tokens[0])
+            else q4s-prefill-delta(q4s-ingest-one(slot, tokens[0]), tokens[1:]);
+        }
+
+        // result: tag, new slot, lookup status, reused, evaluated, output.
+        def q4s-result(slot, status, reused, evaluated) = ["qwen4exp-state-evaluate", slot, status, reused, evaluated, q4s-output(slot)];
+        def q4s-result-slot(result) = result[1];
+        def q4s-result-status(result) = result[2];
+        def q4s-result-reused(result) = result[3];
+        def q4s-result-evaluated(result) = result[4];
+        def q4s-result-output(result) = result[5];
+
+        def q4s-evaluate-append(slot, lookup) {
+            let delta = q4s-lookup-delta(lookup);
+            let next = q4s-prefill-delta(slot, delta);
+            q4s-result(next, "append", q4s-lookup-reused(lookup), len(delta));
+        }
+        def q4s-evaluate-miss(slot, incoming) {
+            q4s-close(slot);
+            let fresh = q4s-open(q4s-prefix(slot), q4s-maxpos(slot));
+            let next = q4s-prefill-delta(fresh, incoming);
+            q4s-result(next, "miss", 0, len(incoming));
+        }
+        def q4s-evaluate(slot, incoming) {
+            let lookup = q4s-prefix-lookup(slot, incoming);
+            let status = q4s-lookup-status(lookup);
+            if ((String) status == "exact") then q4s-result(slot, status, q4s-lookup-reused(lookup), 0)
+            else if ((String) status == "append") then q4s-evaluate-append(slot, lookup)
+            else q4s-evaluate-miss(slot, incoming);
+        }
+    }
+    0;
+}

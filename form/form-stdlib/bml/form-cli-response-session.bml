@@ -1,0 +1,240 @@
+// One native invocation owns a set of frozen assessments and all their results.
+// Each member selects the native agent or a full-source review voice. A caller may offer
+// one bounded session resource for failed read-only reports after local release.
+import form-stdlib/bml/form-cli-response-shared.bml;
+import form-stdlib/bml/form-cli-response-resource.bml;
+import form-stdlib/bml/form-cli-response-voice.bml;
+section [form.bml] {
+ class FormCliResponseSession {
+  def frss-file(path) = if (nothing?(path) || ((file_size(path) <= 0) || (file_size(path) > FatMaxBytes()))) then form_error("response session manifest file unavailable or oversized") else frss-text(read_file(path));
+  def frss-text(raw) = if ((len(raw) > FatMaxBytes()) || (!faj-valid(raw))) then form_error("response session manifest JSON invalid or oversized") else frss-admit(parse-json("response-session",raw),raw);
+  def frss-member-valid(member) = (fat-wire-object?(member) && ((len(fcap-string(member,"id")) > 0) && (frsh-request-valid(json-object-get(member,"request")) && frsv-member-valid(member))));
+  def frss-members-valid(members,seen) = if nil?(members) then 1 else (frss-member-valid(members[0]) && ((!fat-has(seen,fcap-string(members[0],"id"))) && frss-members-valid(members[1:],cons(fcap-string(members[0],"id"),seen))));
+  def frss-provider-allowed(manifest) = (fat-wire-object?(json-object-get(manifest,"provider")) && node_eq(json-object-get(json-object-get(manifest,"provider"),"allowed"),intern_trivial_bool(true)));
+  def frss-provider-contract(provider) = (((String) fcap-string(provider,"interface") == "codex-exec") && ((fcaq-number(provider,"max_processes",0) > 0) && ((fcaq-number(provider,"max_processes",0) <= hearth-response-process-limit()) && frsh-supervision-valid(provider))));
+  def frss-provider-valid(manifest) = if (!json-object-has?(manifest,"provider")) then 1 else if (!fat-wire-object?(json-object-get(manifest,"provider"))) then 0 else if (!frss-provider-allowed(manifest)) then 1 else frss-provider-contract(json-object-get(manifest,"provider"));
+  def frss-run-id-valid(manifest) = if (!json-object-has?(manifest,"run_id")) then 1 else (fat-wire-string?(json-object-get(manifest,"run_id")) && (len(trim(fcap-string(manifest,"run_id"))) > 0));
+  def frss-valid(manifest) = (fat-wire-object?(manifest) && ((len(fcap-string(manifest,"session")) > 0) && (frss-run-id-valid(manifest) && (frss-provider-valid(manifest) && (fat-wire-array?(json-object-get(manifest,"cases")) && ((len(node_children(json-object-get(manifest,"cases"))) > 0) && frss-members-valid(node_children(json-object-get(manifest,"cases")),[])))))));
+  def frss-originals-kept(original,returned,writable) = if nil?(original) then 1 else frss-original-next(original,returned,writable,fat-find-doc(returned,original[0][1]));
+  def frss-original-next(original,returned,writable,found) = if nil?(found) then 0 else (((String) found[0] == original[0][0]) && ((if fat-has(writable,original[0][1]) then 1 else ((Value) original[0] == found)) && frss-originals-kept(original[1:],returned,writable)));
+  def frss-new-paths(rows,original,writable) = if nil?(rows) then 1 else (((!nil?(fat-find-doc(original,rows[0][1]))) || fat-has(writable,rows[0][1])) && frss-new-paths(rows[1:],original,writable));
+  def frss-doc-contract(request,returned) {
+   let original = fat-wire-value(fat-wire-documents(request));
+   let writable = fcap-array(request,"writable");
+   if (!((String) fat-wire-error(returned) == "")) then 0 else (frss-originals-kept(original,fat-wire-value(returned),writable) && frss-new-paths(fat-wire-value(returned),original,writable));
+  }
+  def frss-recheck(request,result) {
+   let admitted = fat-wire-documents(request);
+   let returned = fat-wire-documents(result);
+   let review = ((String) fcaq-mode(request) == "review");
+   let docs = fat-wire-value(returned);
+   let source = if ((String) fat-wire-error(returned) == "") then fcaq-check(node_children(json-object-get(request,"checks")),docs) else [0,"returned documents unavailable"];
+   let report = if review then fcaq-report-check(node_children(json-object-get(request,"report_checks")),fcap-string(result,"report")) else [1,"not a report task"];
+   let unchanged = (((String) fat-wire-error(returned) == "") && ((Value) fat-wire-value(admitted) == docs));
+   let contract = frss-doc-contract(request,returned);
+   let outcome = (contract && (((String) fcap-string(result,"status") == "complete") && (((Comparable) nsm-num(result,"release_ok") == 1) && (((Comparable) source[0] == 1) && (((Comparable) report[0] == 1) && (if review then unchanged else (!unchanged)))))));
+   json-node-object([nsm-n("checked_behavior_passed",outcome),nsm-n("document_contract_passed",contract),nsm-n("source_checks_passed",source[0]),nsm-s("source_evidence",source[1]),nsm-n("report_checks_passed",report[0]),nsm-s("report_evidence",report[1]),nsm-n("documents_unchanged",unchanged),json-node-pair("semantic_quality",json-node-null()),json-node-pair("frequency_and_resonance",json-node-null())]);
+  }
+  def frss-assistance-reason(manifest,request,result,checked,reportPresent,remaining) = if (!((String) fcaq-mode(request) == "review")) then "code-case-native-only" else if ((Comparable) nsm-num(checked,"checked_behavior_passed") == 1) then "native-review-passed" else if (!((Comparable) nsm-num(checked,"source_checks_passed") == 1)) then "source-check-failed" else if (!((Comparable) nsm-num(checked,"documents_unchanged") == 1)) then "review-documents-changed" else if (!((Comparable) nsm-num(result,"release_ok") == 1)) then "local-model-not-released" else if ((Comparable) nsm-num(checked,"report_checks_passed") == 1) then "local-report-assertions-passed" else if (!reportPresent) then "local-report-missing" else if (!frss-provider-allowed(manifest)) then "provider-not-offered" else if (remaining <= 0) then "provider-budget-exhausted" else "provider-repair";
+  def frss-resource-provider(manifest) = json-node-object([json-node-pair("allowed",intern_trivial_bool(true)),nsm-s("interface","codex-exec"),nsm-n("max_processes",1),nsm-n("seconds",fcaq-number(json-object-get(manifest,"provider"),"seconds",0))]);
+  def frss-resource-request(manifest,member,request,reportPath) = json-node-object([nsm-s("id",fcam-hash((fcap-string(manifest,"session") + (":" + fcap-string(member,"id"))))),json-node-pair("assessment",request),json-node-pair("local_reports",json-node-array([json-node-string(reportPath)])),json-node-pair("provider",frss-resource-provider(manifest))]);
+  def frss-assistance(reason,result) = json-node-object([nsm-s("selection",reason),nsm-s("status",if ((String) reason == "provider-repair") then fcap-string(result,"status") else "not-used"),nsm-s("answer_source",if ((String) reason == "provider-repair") then fcap-string(result,"answer_source") else "none"),nsm-n("provider_processes_new",if ((String) reason == "provider-repair") then nsm-num(result,"provider_processes_new") else 0),nsm-n("verified_repair",if ((String) reason == "provider-repair") then nsm-num(result,"verified_repair") else 0),json-node-pair("resource",if ((String) reason == "provider-repair") then result else json-node-null())]);
+  def frss-case-status(checked,assistance) = if ((Comparable) nsm-num(checked,"checked_behavior_passed") == 1) then "native-only-success" else if ((Comparable) nsm-num(assistance,"verified_repair") == 1) then "assisted-success" else "unresolved";
+  def frss-event-has(rows,event) = any?(row => (String) fcap-string(row,"usage_event") == event,rows);
+  def frss-usage-add(rows,assistance) {
+   let resource = json-object-get(assistance,"resource");
+   let event = fcap-string(resource,"usage_event");
+   if (((String) event == "") || frss-event-has(rows,event)) then rows else append(rows,[json-node-object([nsm-s("usage_event",event),json-node-pair("provider_usage",json-object-get(resource,"provider_usage"))])]);
+  }
+  def frss-member(root,manifest,member,index,remaining) {
+   let request = json-object-get(member,"request");
+   let text = json-emit(request);
+   let digest = fcam-hash(text);
+   let dir = frsh-path(root,(index.str() + ("-" + digest)));
+   let made = fs-mkdir(dir);
+   let frozen = frsh-frozen(frsh-path(dir,"request.json"),text);
+   print_str(("form-response-session " + json-emit(json-node-object([nsm-s("event","case-started"),nsm-s("id",fcap-string(member,"id")),nsm-s("evidence",dir)]))));
+   let started = now_unix_ms();
+   let resultText = if ((String) frsv-path(member) == "voice") then frsv-run(request) else fcaq-call(text);
+   let elapsed = (now_unix_ms() - started);
+   let retained = frsh-frozen(frsh-path(dir,"result.json"),resultText);
+   let result = parse-json("response-session-result",resultText);
+   let checked = frss-recheck(request,result);
+   let reportText = fcap-string(result,"report");
+   let reportPath = frsh-path(dir,"local-report.json");
+   let reportPresent = (len(reportText) > 0);
+   let reportRetained = if reportPresent then frsh-frozen(reportPath,reportText) else 0;
+   let reason = frss-assistance-reason(manifest,request,result,checked,(reportPresent && fs-exists?(reportPath)),remaining);
+   let resource = if ((String) reason == "provider-repair") then frr-run(frss-resource-request(manifest,member,request,reportPath)) else json-node-object([]);
+   let assistance = frss-assistance(reason,resource);
+   let receipt = json-node-object([nsm-s("id",fcap-string(member,"id")),nsm-s("request_sha256",digest),nsm-s("result_sha256",fcam-hash(resultText)),nsm-s("local_report_sha256",if reportPresent then fcam-hash(reportText) else ""),nsm-s("evidence",dir),nsm-s("status",fcap-string(result,"status")),nsm-s("native_status",fcap-string(result,"status")),nsm-s("case_status",frss-case-status(checked,assistance)),nsm-n("elapsed_ms",elapsed),nsm-n("native_elapsed_ms",elapsed),json-node-pair("generated_ids",json-object-get(result,"generated_ids")),json-node-pair("injected_ids",json-object-get(result,"injected_ids")),json-node-pair("check",checked),json-node-pair("native_check",checked),json-node-pair("provider_assistance",assistance),nsm-n("provider_processes_new",nsm-num(assistance,"provider_processes_new")),nsm-n("rented_provider_calls",nsm-num(assistance,"provider_processes_new")),nsm-s("attribution_basis","native result retained intact;provider assistance separate;coordinator excluded")]);
+   let selectedReceipt = oh-set(receipt,"response_path",json-node-string(frsv-path(member)));
+   let sealedReceipt = oh-set(selectedReceipt,"resource_seal",frss-resource-seal(assistance));
+   let written = frsh-frozen(frsh-path(dir,"receipt.json"),json-emit(sealedReceipt));
+   let casePassed = if ((String) fcap-string(sealedReceipt,"case_status") == "unresolved") then 0 else 1;
+   let health = oh-emit(frsh-path(root,"events.jsonl"),oh-reading("response-session",root,fcap-string(member,"id"),json-node-int(1),json-node-int(casePassed),json-node-int(casePassed),[],["inspect-evidence","continue-assessment"],oh-reference(frsh-path(dir,"receipt.json"))));
+   let response = fcap-control((now_unix_ms() + index),[index,nsm-num(checked,"checked_behavior_passed")],0);
+   if (!((Comparable) response == 0)) then form_error("response session continuation control unavailable") else 0;
+   print_str(("form-response-session " + json-emit(sealedReceipt)));
+   [sealedReceipt,(remaining - nsm-num(assistance,"provider_processes_new")),assistance];
+  }
+  def frss-loop(root,manifest,members,index,completed,remaining,usage) {
+   if nil?(members) then [reverse(completed),remaining,usage] else {
+    let member = frss-member(root,manifest,members[0],index,remaining);
+    frss-loop(root,manifest,members[1:],(index + 1),cons(member[0],completed),member[1],frss-usage-add(usage,member[2]));
+   };
+  }
+  def frss-status-one(row,status) = if ((String) fcap-string(row,"case_status") == status) then 1 else 0;
+  def frss-status-count(rows,status) = if nil?(rows) then 0 else (frss-status-one(rows[0],status) + frss-status-count(rows[1:],status));
+  def frss-process-count(rows) = if nil?(rows) then 0 else (nsm-num(rows[0],"provider_processes_new") + frss-process-count(rows[1:]));
+  def frss-brief(status,root,digest) = json-node-object([nsm-s("schema","form-response-session-v1"),nsm-s("status",status),nsm-s("evidence",root),nsm-s("manifest_sha256",digest),nsm-n("native_executions_new",0),nsm-n("provider_processes_new",0),nsm-n("rented_provider_calls",0),json-node-pair("overall_session_quality",json-node-null())]);
+  def frss-observe(root,aspect,healthy,reference) {
+   let evidence = if fs-exists?(reference) then oh-reference(reference) else json-node-null();
+   oh-emit(frsh-path(root,"events.jsonl"),oh-reading("response-session",root,aspect,json-node-int(1),json-node-int(healthy),json-node-int(healthy),if healthy then [] else [oh-need("retained-session-evidence",evidence)],["inspect-evidence","retain-unresolved"],evidence));
+  }
+  def frss-file-seal(path) = if (((String) path == "") || (!fs-exists?(path))) then "" else fcam-hash(read_file(path));
+  def frss-resource-seal(assistance) {
+   if (!((String) fcap-string(assistance,"selection") == "provider-repair")) then json-node-null() else {
+    let resource = json-object-get(assistance,"resource"); let root = fcap-string(resource,"evidence");
+    let path = if ((String) root == "") then "" else frsh-path(root,"process.json");
+    let process = if (fs-exists?(path) && faj-valid(read_file(path))) then parse-json("resource-seal",read_file(path)) else json-node-object([]);
+    let job = fcap-string(process,"job");
+    json-node-object([nsm-s("request",frss-file-seal(if ((String) root == "") then "" else frsh-path(root,"request.json"))),nsm-s("process",frss-file-seal(path)),nsm-s("lifecycle",frss-file-seal(if ((String) job == "") then "" else fhn-stage-path(job,"resource",".process.json")))]);
+   };
+  }
+  def frss-resource-intact(assistance) {
+   if (!((String) fcap-string(assistance,"selection") == "provider-repair")) then 1 else {
+    let resource = json-object-get(assistance,"resource");
+    let root = fcap-string(resource,"evidence");
+    let processPath = frsh-path(root,"process.json");
+    if (((String) root == "") || (!fs-exists?(processPath))) then ((Comparable) nsm-num(assistance,"verified_repair") == 0) else if (!faj-valid(read_file(processPath))) then 0 else {
+     let process = parse-json("retained-session-resource",read_file(processPath));
+     let answerPath = fcap-string(process,"answer_path");
+     let usagePath = fcap-string(process,"usage_path");
+     (fs-exists?(answerPath) && (fs-exists?(usagePath) && frr-intact(read_file(answerPath),read_file(usagePath),process)));
+    };
+   };
+  }
+  def frss-row-intact(row) {
+   let dir = fcap-string(row,"evidence");
+   let requestPath = frsh-path(dir,"request.json");
+   let resultPath = frsh-path(dir,"result.json");
+   let receiptPath = frsh-path(dir,"receipt.json");
+   let reportPath = frsh-path(dir,"local-report.json");
+   if (((String) dir == "") || ((!fs-exists?(requestPath)) || ((!fs-exists?(resultPath)) || (!fs-exists?(receiptPath))))) then 0 else {
+    let requestText = read_file(requestPath);
+    let resultText = read_file(resultPath);
+    let reportDigest = fcap-string(row,"local_report_sha256");
+    let pathMatches = if faj-valid(resultText) then frsv-result-path-valid(row,parse-json("retained-result-path",resultText)) else 0;
+    (pathMatches && (((String) fcam-hash(requestText) == fcap-string(row,"request_sha256")) && (((String) fcam-hash(resultText) == fcap-string(row,"result_sha256")) && (((String) read_file(receiptPath) == json-emit(row)) && ((if ((String) reportDigest == "") then (!fs-exists?(reportPath)) else (fs-exists?(reportPath) && ((String) fcam-hash(read_file(reportPath)) == reportDigest))) && (faj-valid(requestText) && (faj-valid(resultText) && (node_eq(frss-recheck(parse-json("retained-session-request",requestText),parse-json("retained-session-result",resultText)),json-object-get(row,"native_check")) && frss-resource-intact(json-object-get(row,"provider_assistance"))))))))));
+   };
+  }
+  def frss-rows-intact(rows) = if nil?(rows) then 1 else (node_eq(json-object-get(rows[0],"resource_seal"),frss-resource-seal(json-object-get(rows[0],"provider_assistance"))) && (frss-row-intact(rows[0]) && frss-rows-intact(rows[1:])));
+  def frss-rows-bound(rows,members,root,index) {
+   if nil?(members) then nil?(rows) else if nil?(rows) then 0 else {
+    let row = rows[0]; let member = members[0]; let digest = fcam-hash(json-emit(json-object-get(member,"request")));
+    let dir = frsh-path(root,(index.str() + ("-" + digest)));
+    (((String) frsv-path(row) == frsv-path(member)) && (((String) fcap-string(row,"id") == fcap-string(member,"id")) && (((String) fcap-string(row,"request_sha256") == digest) && (((String) fcap-string(row,"evidence") == dir) && frss-rows-bound(rows[1:],members[1:],root,(index + 1))))));
+   };
+  }
+  def frss-summary-bound(report,manifest,root,digest) {
+   let rows = node_children(json-object-get(report,"results")); let members = node_children(json-object-get(manifest,"cases"));
+   (((String) fcap-string(report,"schema") == "form-response-session-v1") && (((String) fcap-string(report,"status") == "terminal") && (((String) fcap-string(report,"session") == fcap-string(manifest,"session")) && (((String) fcap-string(report,"manifest_sha256") == digest) && (((String) fcap-string(report,"evidence") == root) && (fat-wire-array?(json-object-get(report,"results")) && (((Comparable) nsm-num(report,"cases") == len(members)) && (frss-rows-bound(rows,members,root,0) && frss-rows-intact(rows)))))))));
+  }
+  def frss-replay-report(report) {
+   let historicalNative = if json-object-has?(report,"native_executions_historical") then nsm-num(report,"native_executions_historical") else nsm-num(report,"cases");
+   let historicalProvider = if json-object-has?(report,"provider_processes_historical") then nsm-num(report,"provider_processes_historical") else nsm-num(report,"provider_processes_new");
+   let replayed = oh-set(oh-set(oh-set(oh-set(oh-set(report,"status",json-node-string("terminal-replay")),"replay",json-node-int(1)),"native_executions_new",json-node-int(0)),"provider_processes_new",json-node-int(0)),"rented_provider_calls",json-node-int(0));
+   oh-set(oh-set(oh-set(replayed,"native_executions_historical",json-node-int(historicalNative)),"provider_processes_historical",json-node-int(historicalProvider)),"replay_scope",json-node-string("verified retained work; no fresh task execution and no fresh semantic-quality claim"));
+  }
+  def frss-remembered(root,text,digest) {
+   let manifestPath = frsh-path(root,"manifest.json");
+   let ownerPath = frsh-path(root,"owner.json");
+   let summaryPath = frsh-path(root,"summary.json");
+   let sealPath = frsh-path(root,"summary.sha256");
+   if (!fs-exists?(manifestPath)) then frss-unresolved(root,"admission-incomplete;no-restart",digest,ownerPath) else if (!((String) read_file(manifestPath) == text)) then frss-conflict(root,digest,manifestPath) else if ((!fs-exists?(summaryPath)) || (!fs-exists?(sealPath))) then frss-unresolved(root,"admitted-unresolved;no-restart",digest,ownerPath) else {
+    let summaryText = read_file(summaryPath);
+    if (!((String) read_file(sealPath) == fcam-hash(summaryText))) then frss-unresolved(root,"terminal-summary-corrupt;no-restart",digest,summaryPath) else if (!faj-valid(summaryText)) then frss-unresolved(root,"terminal-summary-malformed;no-restart",digest,summaryPath) else {
+     let report = parse-json("retained-session-summary",summaryText);
+     if (!frss-summary-bound(report,parse-json("retained-manifest",text),root,digest)) then frss-unresolved(root,"terminal-evidence-corrupt;no-restart",digest,summaryPath) else {
+      let observed = frss-observe(root,"terminal-replay",1,summaryPath);
+      frss-replay-report(report);
+     };
+    };
+   };
+  }
+  def frss-conflict(root,digest,reference) {
+   let observed = frss-observe(root,"manifest-conflict",0,reference);
+   frss-brief("run-identity-conflict",root,digest);
+  }
+  def frss-artifact(path) = json-node-object([nsm-s("path",path),nsm-n("present",fs-exists?(path)),json-node-pair("bytes",if fs-exists?(path) then json-node-int(file_size(path)) else json-node-null())]);
+  def frss-retained-cases(root,members,index) = if nil?(members) then [] else {
+   let member = members[0];
+   let requestText = json-emit(json-object-get(member,"request"));
+   let dir = frsh-path(root,(index.str() + ("-" + fcam-hash(requestText))));
+   let requestPath = frsh-path(dir,"request.json");
+   let matches = if (!fs-exists?(requestPath)) then json-node-null() else if (!((Comparable) file_size(requestPath) == len(requestText))) then json-node-int(0) else json-node-int(((String) read_file(requestPath) == requestText));
+   let artifacts = [frss-artifact(requestPath),frss-artifact(frsh-path(dir,"result.json")),frss-artifact(frsh-path(dir,"local-report.json")),frss-artifact(frsh-path(dir,"receipt.json"))];
+   let row = json-node-object([nsm-s("id",fcap-string(member,"id")),nsm-s("response_path",frsv-path(member)),nsm-s("evidence",dir),json-node-pair("request_matches_manifest",matches),json-node-pair("artifacts",json-node-array(artifacts))]);
+   cons(row,frss-retained-cases(root,members[1:],(index + 1)));
+  };
+  def frss-retained-reading(root,owner) {
+   let manifestPath = frsh-path(root,"manifest.json");
+   let manifest = if (fs-exists?(manifestPath) && faj-valid(read_file(manifestPath))) then parse-json("retained-progress-manifest",read_file(manifestPath)) else json-node-null();
+   let valid = frss-valid(manifest);
+   let pid = nsm-num(owner,"owner_pid");
+   let alive = if (pid > 0) then host_alive(pid) else nothing;
+   let state = if nothing?(alive) then "" else if ((Comparable) alive == 1) then "alive" else "";
+   let ownerObservation = json-node-object([json-node-pair("recorded_pid",if (pid > 0) then json-node-int(pid) else json-node-null()),nsm-s("pid_observation",if nothing?(alive) then "unavailable" else if ((String) state == "") then "absent" else "present"),nsm-s("process_state",state),nsm-s("scope","Current PID presence only; a present PID may belong to another lifetime. Admission evidence and current observation remain separate.")]);
+   let cases = if valid then json-node-array(frss-retained-cases(root,node_children(json-object-get(manifest,"cases")),0)) else json-node-null();
+   json-node-object([nsm-n("observed_unix_ms",now_unix_ms()),nsm-n("manifest_valid",valid),json-node-pair("owner",ownerObservation),json-node-pair("cases",cases),nsm-s("scope","Artifact presence and request identity only; no case execution, automatic resume, inferred model release, historical usage total or answer-quality claim")]);
+  }
+  def frss-unresolved(root,status,digest,reference) {
+   let source = if fs-exists?(reference) then oh-reference(reference) else json-node-null();
+   let observation = oh-reading("response-session",root,"admitted-unresolved",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("retained-session-evidence",source)],["inspect-evidence","retain-unresolved"],source);
+   let flow = frsh-path(root,"events.jsonl");
+   oh-emit(flow,observation);
+   let response = oh-response(observation,"inspect-evidence");
+   oh-emit(flow,response);
+   let brief = frss-brief(status,root,digest);
+   let report = oh-set(oh-set(oh-set(brief,"native_executions_historical",json-node-null()),"provider_processes_historical",json-node-null()),"provider_usage_events",json-node-null());
+   let ownerPath = frsh-path(root,"owner.json");
+   let owner = if (fs-exists?(ownerPath) && faj-valid(read_file(ownerPath))) then parse-json("response-session-owner",read_file(ownerPath)) else json-node-null();
+   let progress = if ((String) oh-select(observation,response,"retain-unresolved") == "inspect-evidence") then frss-retained-reading(root,owner) else json-node-null();
+   oh-emit(flow,oh-applied(observation,"inspect-evidence",progress));
+   let readable = nsm-num(progress,"manifest_valid");
+   oh-emit(flow,oh-reading("response-session",root,"retained-manifest-readable",json-node-int(1),json-node-int(readable),json-node-int(readable),[],["inspect-evidence","retain-unresolved"],progress));
+   oh-set(oh-set(report,"owner_evidence",owner),"retained_progress",progress);
+  }
+  def frss-root(base,manifest,digest) = if json-object-has?(manifest,"run_id") then frsh-path(base,("run-" + fcam-hash(json-emit(json-node-array([json-object-get(manifest,"session"),json-object-get(manifest,"run_id")]))))) else frsh-path(base,(digest + ("-" + (host_pid().str() + ("-" + now_unix_ms().str())))));
+  def frss-run(manifest) = frss-admit(manifest,json-emit(manifest));
+  def frss-admit(manifest,text) {
+   if (!frss-valid(manifest)) then form_error("response session requires unique case ids and valid evaluation=1 requests") else 0;
+   if (len(text) > FatMaxBytes()) then form_error("response session manifest oversized") else 0;
+   let base = hearth-response-sessions();
+   let parent = fs-mkdir(fs-path-dirname(base));
+   let made = fs-mkdir(base);
+   let digest = fcam-hash(text);
+   let keyed = json-object-has?(manifest,"run_id");
+   let root = frss-root(base,manifest,digest);
+   let opened = host_dir_mkdir(root);
+   if (keyed && (!((Comparable) opened == 1))) then json-emit(frss-remembered(root,text,digest)) else if (!((Comparable) opened == 1)) then form_error("response-session evidence directory already exists") else frss-held(root,manifest,text,digest);
+  }
+  def frss-held(root,manifest,text,digest) {
+   let frozen = frsh-frozen(frsh-path(root,"manifest.json"),text);
+   let owner = frsh-frozen(frsh-path(root,"owner.json"),json-emit(json-node-object([nsm-n("owner_pid",host_pid()),nsm-n("admitted_unix_ms",now_unix_ms()),nsm-s("ownership_scope","admission evidence only; not a liveness claim")])));
+   let admitted = frss-observe(root,"admission",1,frsh-path(root,"manifest.json"));
+   let started = now_unix_ms();
+   let budget = if frss-provider-allowed(manifest) then fcaq-number(json-object-get(manifest,"provider"),"max_processes",0) else 0;
+   let state = frss-loop(root,manifest,node_children(json-object-get(manifest,"cases")),0,[],budget,[]);
+   let rows = state[0];
+   let report = json-node-object([nsm-s("schema","form-response-session-v1"),nsm-s("status","terminal"),nsm-s("session",fcap-string(manifest,"session")),nsm-s("manifest_sha256",digest),nsm-s("evidence",root),nsm-n("cases",len(rows)),nsm-n("checked_behavior_passed",frss-status-count(rows,"native-only-success")),nsm-n("native_only_success",frss-status-count(rows,"native-only-success")),nsm-n("assisted_success",frss-status-count(rows,"assisted-success")),nsm-n("unresolved",frss-status-count(rows,"unresolved")),nsm-n("elapsed_ms",(now_unix_ms() - started)),nsm-n("native_executions_new",len(rows)),nsm-n("native_executions_historical",len(rows)),nsm-n("provider_process_budget",budget),nsm-n("provider_processes_new",frss-process-count(rows)),nsm-n("provider_processes_historical",frss-process-count(rows)),nsm-n("rented_provider_calls",frss-process-count(rows)),nsm-n("provider_processes_remaining",state[1]),json-node-pair("provider_usage_events",json-node-array(state[2])),nsm-s("rented_basis","actual new response-resource processes;coordinator excluded"),nsm-s("attribution_basis","native results and failed checks retained;provider events deduplicated by usage_event;coordinator excluded"),json-node-pair("results",json-node-array(rows)),json-node-pair("overall_session_quality",json-node-null()),json-node-pair("frequency_and_resonance",json-node-null()),nsm-n("goal_complete",0)]);
+   let summaryText = json-emit(report);
+   let retained = frsh-frozen(frsh-path(root,"summary.json"),summaryText);
+   let sealed = frsh-frozen(frsh-path(root,"summary.sha256"),fcam-hash(summaryText));
+   let terminal = frss-observe(root,"terminal",1,frsh-path(root,"summary.json"));
+   json-emit(report);
+  }
+ }
+ 0;
+}

@@ -1,0 +1,83 @@
+// ignored-argument-scan.bml — a lint for the bug class dd397a892 closed in the hot walker: a CALL whose result is passed
+// as an argument to a callee that never reads that parameter.
+//
+// The shape: `callee(rc, hs) = hs` (nws-free-after) called as `callee(prior-call(...), hs)`. The walker evaluates the
+// argument once, in order, and the effect inside the prior call happens whether or not callee reads it. A lane that
+// substitutes the argument EXPRESSION at the callee's reads (the hot loop's inline did) drops the call that was meant to
+// run first. The call is bound to a temporary BEFORE the call row in anf-lower's rows, so the shape is visible there:
+// a call row whose argument i is a temporary defined by another call row (or an append-bytes effect), while the callee's
+// rows never use parameter i.
+//
+// Standing check, not a one-off: ias-scan walks every defn the process holds, lowers it through anf-lower-row and answers
+//   [scanned, skipped, sites]   skipped = defns anf-lower declines (a closure, a short-circuit, a node it has no row for)
+//   a site is [caller callee parameter-index defined-by]
+// An empty site list is the clean answer. A site is not always a wound -- the argument may be bound on purpose, to order
+// an effect -- but it is the place a lane that inlines by substitution loses the effect, and the repair keeps the
+// result flowing: the callee reads it (the next link takes the previous link's result), so no lane can drop the call.
+//
+// observe/ignored-argument-scan-run.fk imports the standing set and prints the sites.
+import form-stdlib/bml/anf-lower.bml;
+section [form.bml] {
+    class IgnoredArgumentScan {
+        def ias-member?(xs, x) = nil?(xs) ? 0 : (Comparable) xs[0] == x ? 1 : ias-member?(xs[1:], x);
+
+        // ---- the temporaries a defn's rows read (a block's result counts: it is returned) ----
+        def ias-uses(rows, acc) = nil?(rows) ? acc : ias-uses(rows[1:], ias-row-uses(rows[0], acc));
+        def ias-row-uses(row, acc) = (String) row[0] == "let" ? cons(row[3], acc) : (String) row[0] == "prim" ? append(row[3], acc) : (String) row[0] == "call" ? append(row[3], acc) : (String) row[0] == "if" ? ias-uses(row[3][0], ias-uses(row[4][0], cons(row[2], cons(row[3][1], cons(row[4][1], acc))))) : acc;
+        def ias-used(f) = cons(f[4], ias-uses(f[3], []));
+        // the parameters 0 .. arity-1 no row reads
+        def ias-ignored-from(f, used, k) = k >= f[2] ? [] : (Comparable) ias-member?(used, k) == 1 ? ias-ignored-from(f, used, k + 1) : cons(k, ias-ignored-from(f, used, k + 1));
+        def ias-ignored-of(r) = anf-ok?(r) ? ias-ignored-from(anf-val(r), ias-used(anf-val(r)), 0) : [];
+        def ias-callee-ignored(idx) {
+            let row = anf-callee-row(idx);
+            nothing?(row) ? [] : ias-ignored-of(attempt(anf-lower-row(row)));
+        }
+
+        // ---- what defines each temporary: [temp, op, callee-idx-or-primitive] ----
+        def ias-defs(rows, acc) = nil?(rows) ? acc : ias-defs(rows[1:], ias-row-defs(rows[0], acc));
+        def ias-row-defs(row, acc) = (String) row[0] == "if" ? ias-defs(row[3][0], ias-defs(row[4][0], cons([row[1], "if", 0], acc))) : cons([row[1], row[0], ((String) row[0] == "call") || ((String) row[0] == "prim") ? row[2] : 0], acc);
+        def ias-def-of(defs, t) = nil?(defs) ? nothing() : (Comparable) defs[0][0] == t ? defs[0] : ias-def-of(defs[1:], t);
+        // bound from a CALL, or from the one effect primitive the rows name (append-bytes): the argument carries a side effect
+        def ias-risky?(d) = nothing?(d) ? 0 : (String) d[1] == "call" ? 1 : ((String) d[1] == "prim") && ((String) d[2] == "append-bytes") ? 1 : 0;
+        def ias-def-text(d) = (String) d[1] == "call" ? "call " + anf-name-of(d[2]) : "effect " + d[2];
+
+        // ---- the call rows of a defn, arms included (an arm's call is a call) ----
+        def ias-calls(rows, acc) = nil?(rows) ? acc : ias-calls(rows[1:], ias-row-calls(rows[0], acc));
+        def ias-row-calls(row, acc) = (String) row[0] == "call" ? cons(row, acc) : (String) row[0] == "if" ? ias-calls(row[3][0], ias-calls(row[4][0], acc)) : acc;
+
+        // ---- the sites ----
+        def ias-sites(f, name, defs) = ias-sites-calls(ias-calls(f[3], []), name, defs, []);
+        def ias-sites-calls(calls, name, defs, acc) = nil?(calls) ? acc : ias-sites-calls(calls[1:], name, defs, ias-call-sites(calls[0], name, defs, acc));
+        def ias-call-sites(call, name, defs, acc) = ias-args-sites(call, call[3], 0, ias-callee-ignored(call[2]), name, defs, acc);
+        def ias-args-sites(call, args, i, ign, name, defs, acc) = nil?(args) ? acc : ias-args-sites(call, args[1:], i + 1, ign, name, defs, ias-arg-site(call, args[0], i, ign, name, defs, acc));
+        def ias-arg-site(call, t, i, ign, name, defs, acc) = (Comparable) ias-member?(ign, i) == 0 ? acc : (Comparable) ias-risky?(ias-def-of(defs, t)) == 0 ? acc : cons([name, anf-name-of(call[2]), i, ias-def-text(ias-def-of(defs, t))], acc);
+
+        // ---- the defns of a prelude set: the names its files define, read from their text ----
+        // (the process holds core.fk's thousands of defns too, and a data table of a few thousand cells costs minutes to
+        // walk; a scan "over these files" walks the defns these files name. A word that merely follows "def " in prose adds
+        // a name no row has, which costs nothing.)
+        def ias-name-char?(b) = !(((Comparable) b == 32) || (((Comparable) b == 40) || (((Comparable) b == 61) || (((Comparable) b == 10) || (((Comparable) b == 13) || ((Comparable) b == 123))))));
+        def ias-name-end(text, i, n) = i >= n ? i : (ias-name-char?(str_byte_at(text, i)) ? ias-name-end(text, i + 1, n) : i);
+        def ias-names-after(text, key, from, set) {
+            let at = str_find(text, key, from);
+            (Comparable) at < 0 ? set : ias-names-take(text, key, at + len(key), set);
+        }
+        def ias-names-take(text, key, start, set) {
+            let e = ias-name-end(text, start, len(text));
+            ias-names-after(text, key, e, e > start ? record_set(set, substring(text, start, e), 1) : set);
+        }
+        def ias-names-of(path, set) {
+            let text = read_file(path);
+            nothing?(text) ? set : ias-names-after(text, "(defn ", 0, ias-names-after(text, "def ", 0, set));
+        }
+        def ias-names-files(paths, set) = nil?(paths) ? set : ias-names-files(paths[1:], ias-names-of(paths[0], set));
+
+        // ---- the walk: every defn the process holds (set = nothing()), or the defns a name set holds ----
+        def ias-wanted?(set, row) = nothing?(set) ? 1 : (record_has(set, anf-row-name(row)) ? 1 : 0);
+        def ias-scan-from(j, n, set, scanned, skipped, sites) = j >= n ? [scanned, skipped, reverse(sites)] : ias-scan-at(j, n, set, scanned, skipped, sites, anf-row(j));
+        def ias-scan-at(j, n, set, scanned, skipped, sites, row) = nothing?(row) ? ias-scan-from(j + 1, n, set, scanned, skipped, sites) : (Comparable) ias-wanted?(set, row) == 0 ? ias-scan-from(j + 1, n, set, scanned, skipped, sites) : ias-scan-lowered(j, n, set, scanned, skipped, sites, row, attempt(anf-lower-row(row)));
+        def ias-scan-lowered(j, n, set, scanned, skipped, sites, row, r) = nothing?(r) ? ias-scan-from(j + 1, n, set, scanned, skipped + 1, sites) : anf-ok?(r) ? ias-scan-from(j + 1, n, set, scanned + 1, skipped, append(ias-sites(anf-val(r), anf-row-name(row), ias-defs(anf-val(r)[3], [])), sites)) : ias-scan-from(j + 1, n, set, scanned, skipped + 1, sites);
+        def ias-scan() = ias-scan-from(0, anf-fn-count(), nothing(), 0, 0, []);
+        def ias-scan-files(paths) = ias-scan-from(0, anf-fn-count(), ias-names-files(paths, record_new(0)), 0, 0, []);
+    }
+}

@@ -1,0 +1,413 @@
+// local-flow-reading.bml — the reading observe/local-flow-review.bml prints: the body's own review of its
+// local work, where the turns ran, with no provider and no network.
+//
+// Rows come from sr-turn-rows (this checkout and the walk checkout the day-turn schedule names, one row per
+// at_unix_ms+gap+option, each naming its checkout). A queue row is a gap when it names an id. A gap is open
+// while this checkout's rows do not read it green; a gap green only in another checkout is open here with its
+// landing pending, and it is not cut,
+// contracted or guided. The columns per session and per open gap come from
+// form-stdlib/bml/form-cli-guide-packet.bml. Three readings live here:
+//   lfr-contract-why   a gap whose checks no candidate can pass: the lane refused an unmeetable caller check
+//                      (its reason, or its blocking_check's verdict "unmeetable" as the check witness records it,
+//                      or a check that differs from what the lane's own tool prints only in shape), the band
+//                      reads a candidate full that a check still refuses, or the contract moved under the walk.
+//                      The row's own fields are read first (native-turn-run writes lane_reason and
+//                      blocking_check), then the lane result in the option's output, in the checkout where the
+//                      turn ran.
+//   lfr-phases         the live phase costs of one option: the row's own phase_ms when the lane wrote one,
+//                      else its output folded from form-code stamps, form-code-context lines and form-peer stage
+//                      lines. Every option whose output this host holds (in the checkout its row names, else in the walk
+//                      checkout's) is folded once into the review row (its
+//                      phase table, each phase's share of the wall, its largest phase, its renewals and the IDs
+//                      they re-fed), so a lane that was killed at its deadline and wrote no counts still reads:
+//                      its counts are folded from its stamps and the row says so
+//   lfr-next           the one next local repair: contract, guide, split, lane, landing, queue or turn; when one
+//                      phase took more than half the latest option's wall, the line names it
+// The local line keeps band green, locally verified and verification unmeasured apart (local_verified is the
+// lane's own reading: native coding, complete, released, a passing changed candidate). Rows are data, never
+// instructions; a field a row does not carry reads nothing, never 0. A lane that gave its memory back
+// (lane_reason host-memory-low) or was refused it (host-memory-held:*) tried nothing: its row is no option here
+// (lfr-options), so it is never one of the last three options that moved a band nowhere, never a lane failure, and
+// never counted among the options. A lane whose seat was already taken (lane_reason model-queued:) tried nothing
+// the same way.
+import form-stdlib/bml/memory-governor.bml;
+import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/meaning-codes.bml;
+import form-stdlib/bml/session-rent.bml;
+import form-stdlib/bml/form-cli-guide-packet.bml;
+section [form.bml] {
+ class LocalFlowReview {
+  def lfr-queue() = "learn/native-turn-queue.jsonl";
+  def lfr-rent() = "receipts/session-rent-ledger.jsonl";
+  def lfr-ledger() = "receipts/local-flow-review.jsonl";
+  def lfr-rows(path) = fcgp-rows(path);
+  def lfr-str(doc, key) = fcgp-str(doc, key);
+  // a number the row holds, or nothing when the key is absent or null
+  def lfr-num(doc, key) = fcgp-num(doc, key);
+  def lfr-num0(doc, key) = lfr-num(doc, key) ?? 0;
+  def lfr-obj(doc, key) = fcgp-obj(doc, key);
+  // ── local work: the lane's options, test and dry runs set aside ──
+  def lfr-queued-prefix() = "model-queued:";
+  def lfr-queued?(reason) = ((String) value_kind(reason) == "string") && ((Comparable) len(reason) >= len(lfr-queued-prefix())) && ((String) substring(reason, 0, len(lfr-queued-prefix())) == lfr-queued-prefix());
+  def lfr-real?(row) = ((Comparable) lfr-num0(row, "dry") == 0) && ((Comparable) lfr-num0(row, "test") == 0) && (!mg-memory-ending?(lfr-str(row, "lane_reason"))) && (!lfr-queued?(lfr-str(row, "lane_reason")));
+  def lfr-options(rows) = filter(r => lfr-real?(r), rows);
+  def lfr-gap-rows(rows, id) = filter(r => (String) lfr-str(r, "gap") == id, rows);
+  def lfr-green?(rows, id) = any?(r => (Comparable) lfr-num0(r, "band_green") == 1, lfr-gap-rows(rows, id));
+  def lfr-named?(row) = (String) lfr-str(row, "id") != "";
+  def lfr-verified?(row) = (Comparable) lfr-num0(row, "local_verified") == 1;
+  def lfr-unmeasured?(row) = nothing?(lfr-num(row, "local_verified"));
+  def lfr-sum(rows, key) = foldl((acc, r) => acc + lfr-num0(r, key), 0, rows);
+  // ── where a gap stands: this checkout's rows decide; another checkout's green waits to land ──
+  def lfr-here(rows) = filter(r => (String) lfr-str(r, "checkout") == "", rows);
+  def lfr-green-where(rows, id) = foldl((found, r) => if (((String) found == "") && ((Comparable) lfr-num0(r, "band_green") == 1)) then lfr-where(r) else found, "", lfr-gap-rows(rows, id));
+  // the remote tokens the lane's work required: unknown over no rows, never the empty fold's 0
+  def lfr-work(rows, guides) = if nil?(rows) then nothing() else fcgp-work-tokens(rows, guides);
+  // the best band reading among the rows, or nothing when no band has read yet
+  def lfr-max-maybe(a, b) = nothing?(a) ? b : (nothing?(b) ? a : max2(a, b));
+  def lfr-best(rows) = foldl((acc, r) => lfr-max-maybe(acc, lfr-num(r, "band_after")), nothing(), rows);
+  def lfr-show(v) = nothing?(v) ? "none" : v.str();
+  def lfr-moved?(row) = !nothing?(lfr-num(row, "band_after")) && (!nothing?(lfr-num(row, "band_before")) && (lfr-num(row, "band_after") > lfr-num(row, "band_before")));
+  def lfr-last(xs, n) = if (len(xs) <= n) then xs else lfr-last(xs[1:], n);
+  def lfr-stuck?(rows) = (len(rows) >= 3) && !any?(r => lfr-moved?(r), lfr-last(rows, 3));
+  // a lane the walk stopped at its window's deadline did not fail; the walk chose to end it
+  def lfr-lane-failed?(row) = !((String) lfr-str(row, "lane") == "lane-exit=0" || (String) lfr-str(row, "lane") == "not-run" || (String) lfr-str(row, "lane") == "lane-deadline");
+  def lfr-where(row) = if ((String) lfr-str(row, "checkout") == "") then "this checkout" else lfr-str(row, "checkout");
+  // ── the lane's own output for a row, in the checkout where its turn ran ──
+  // A row both checkouts hold is tagged with the first one named (this checkout), though its turn ran in the walk
+  // checkout: when the output is not where the row says, the walk checkout's own is read (read only), so a row
+  // landed here still folds from the output of the turn that wrote it.
+  def lfr-out-at(dir, stem) = if ((String) dir == "") then mc-cat([stem, ".out"]) else mc-cat([dir, "/", stem, ".out"]);
+  def lfr-out-path-in(row, walk) {
+   let req = lfr-str(row, "request");
+   let stem = if fhn-suffix(req, ".json") then substring(req, 0, len(req) - 5) else req;
+   let own = lfr-out-at(lfr-str(row, "checkout"), stem);
+   let other = lfr-out-at(walk, stem);
+   if ((String) stem == "") then "" else if ((file_size(own) > 0) || ((String) walk == "") || ((String) walk == lfr-str(row, "checkout")) || (file_size(other) < 1)) then own else other;
+  }
+  def lfr-out-path(row) = lfr-out-path-in(row, sr-walk-dir());
+  def lfr-out-text(row) {
+   let p = lfr-out-path(row);
+   if (((String) p == "") || (file_size(p) < 1)) then "" else fhn-read(p);
+  }
+  def lfr-result-line(lines, found) = if nil?(lines) then found else lfr-result-line(lines[1:], if ((str_find(lines[0], "\"schema\":\"form-native-code-v1\"", 0) >= 0) || ((Comparable) str_find(lines[0], "{\"status\":\"attention\"", 0) == 0)) then lines[0] else found);
+  def lfr-lane-result(text) {
+   let r = trim(lfr-result-line(split-on(text, "\n"), ""));
+   if fcgp-object-line?(r) then parse-json("lane-result", r) else json-node-object([]);
+  }
+  // ── contract: a gap whose checks no candidate can pass ──
+  def lfr-blocking(row, result) = if fcgp-present?(row, "blocking_check") then lfr-obj(row, "blocking_check") else lfr-obj(result, "blocking_check");
+  def lfr-pair(block) = if nil?(json-object-pairs(block)) then "" else mc-cat([" (expected ", json-emit(fcgp-node(block, "expected")), ", actual ", json-emit(fcgp-node(block, "actual")), ")"]);
+  def lfr-unmeetable?(row, result) = ((String) lfr-str(result, "reason") == "caller-check-unmeetable") || ((String) lfr-str(row, "lane_reason") == "caller-check-unmeetable");
+  def lfr-contract-why(gap, row, result) {
+   let block = lfr-blocking(row, result);
+   let full = lfr-num(gap, "full");
+   if lfr-unmeetable?(row, result) then mc-cat(["the lane refused a caller check no candidate can meet", lfr-pair(block)])
+   else if ((String) lfr-str(block, "verdict") == "unmeetable") then mc-cat(["its caller check cannot be met", lfr-pair(block)])
+   else if ((Comparable) (lfr-num(block, "shape_only") ?? 0) == 1) then mc-cat(["its caller check differs from what the lane's own tool prints only in shape", lfr-pair(block)])
+   else if ((!nothing?(full)) && ((Comparable) (lfr-num(row, "candidate_band") ?? (0 - 1)) == full) && ((Comparable) lfr-num0(row, "band_green") == 0)) then "its checks refuse a candidate the band reads full"
+   else if ((Comparable) lfr-num0(row, "contract_moved") == 1) then "its contract moved under the walk"
+   else "";
+  }
+  // ── live phase costs of one lane option ──
+  // form-code lines carry elapsed_ms from admission with the session's generated and injected IDs; between
+  // two lines the time went to decode when IDs were generated, to injection when only observation IDs were
+  // prefilled (the tool's own time rides inside it), to renewal when a fresh stream restarted the counters,
+  // and otherwise to the host. form-peer stage lines carry stamp-ms: the lane's first stage, its seal and its
+  // opening prefill. spawn runs from the option's start to the first stage; tail from the last stamp to the
+  // row; open is the rest of admission.
+  def lfr-digits(s, i, acc) = if ((i < len(s)) && (str_byte_at(s, i) >= 48) && (str_byte_at(s, i) <= 57)) then lfr-digits(s, (i + 1), ((acc * 10) + (str_byte_at(s, i) - 48))) else acc;
+  def lfr-int-from(text, key, from) {
+   let at = str_find(text, key, from);
+   if (at < 0) then nothing() else lfr-digits(text, (at + len(key)), 0);
+  }
+  def lfr-stamp(text, phase) {
+   let at = str_find(text, mc-cat(["phase=", phase, " "]), 0);
+   if (at < 0) then nothing() else lfr-int-from(text, "stamp-ms=", at);
+  }
+  def lfr-code?(line) = (Comparable) str_find(line, "form-code {", 0) == 0;
+  def lfr-context?(line) = (Comparable) str_find(line, "form-code-context {", 0) == 0;
+  // Fold state, by slot: 0 elapsed (the output's own, as the last line read it), 1 generated, 2 injected,
+  // 3 decode ms, 4 decode IDs, 5 inject ms, 6 inject IDs, 7 renew ms, 8 host ms, 9 first elapsed, 10 last
+  // elapsed (admission-relative: rebased across an admit restart), 11 stamps, 12 position, 13 renewal pending
+  // (a form-code-context line said renewed and no form-code line has followed it), 14 opening IDs (the
+  // position at the first stamp of each admission), 15 renewals, 16 IDs the renewals re-fed (each renewal's
+  // new stream starts at its prompt: the position at its first stamp), 17 each renewal's prompt IDs, 18 admit
+  // restarts, 19 the elapsed rebase, 20 the context_prompt_ids of each form-code-context line.
+  // A step is a renewal when the lane's context line said so for the line that follows it, when a counter fell,
+  // or when both counters read 0 before and after and the position fell (a renewal before any ID was generated).
+  // The contexts field of a stamp is not the marker: it rises one stamp after the renewal's first.
+  // A step whose elapsed_ms fell is a second admission restarting the lane's clock: it bills no time (its dt would
+  // be negative), rebases the elapsed so the tail stays honest, counts its position as an opening and its counters
+  // as new; the unread time between the two admissions reads in the tail.
+  def lfr-fold-zero() = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [], 0, 0, []];
+  def lfr-fold(st, line) = if lfr-context?(line) then lfr-fold-context(st, line) else lfr-fold-code(st, line);
+  def lfr-fold-context(st, line) = [st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11], st[12], (if ((Comparable) (lfr-int-from(line, "\"renewed\":", 0) ?? 0) == 1) then 1 else st[13]), st[14], st[15], st[16], st[17], st[18], st[19], append(st[20], [(lfr-int-from(line, "\"context_prompt_ids\":", 0) ?? 0)])];
+  def lfr-fold-code(st, line) {
+   let e = lfr-int-from(line, "\"elapsed_ms\":", 0) ?? 0;
+   let g = lfr-int-from(line, "\"generated_ids\":", 0) ?? 0;
+   let i = lfr-int-from(line, "\"injected_ids\":", 0) ?? 0;
+   let pos = lfr-int-from(line, "\"position\":", 0) ?? 0;
+   if ((Comparable) st[11] == 0) then [e, g, i, 0, 0, 0, 0, 0, 0, e, e, 1, pos, 0, pos, 0, 0, [], 0, 0, st[20]] else lfr-fold-step(st, e, g, i, pos);
+  }
+  def lfr-fold-step(st, e, g, i, pos) {
+   let raw = e - st[0];
+   let restart = raw < 0;
+   let dt = if restart then 0 else raw;
+   let dg = g - st[1];
+   let di = i - st[2];
+   let renewed = (!restart) && (((Comparable) st[13] == 1) || (dg < 0) || (di < 0) || ((dg == 0) && (di == 0) && (g == 0) && (i == 0) && (pos < st[12])));
+   let fresh = restart || renewed;
+   let base = if restart then (st[10] - e) else st[19];
+   [e, g, i, (st[3] + (if ((!fresh) && (dg > 0)) then dt else 0)), (st[4] + (if fresh then max2(0, g) else max2(0, dg))), (st[5] + (if ((!fresh) && (dg <= 0) && (di > 0)) then dt else 0)), (st[6] + (if fresh then max2(0, i) else max2(0, di))), (st[7] + (if renewed then dt else 0)), (st[8] + (if ((!fresh) && (dg <= 0) && (di <= 0)) then dt else 0)), st[9], (e + base), (st[11] + 1), pos, 0, (st[14] + (if restart then pos else 0)), (st[15] + (if renewed then 1 else 0)), (st[16] + (if renewed then pos else 0)), (if renewed then append(st[17], [pos]) else st[17]), (st[18] + (if restart then 1 else 0)), base, st[20]];
+  }
+  def lfr-fold-lines(lines) = foldl((s, line) => lfr-fold(s, line), lfr-fold-zero(), filter(line => (lfr-code?(line) || lfr-context?(line)), lines));
+  def lfr-fold-text(text) = lfr-fold-lines(split-on(text, "\n"));
+  // renewals whose prompt is as long as the renewal's before it: a repeat, though not proof the prompt was the same
+  def lfr-same-length(prompts) = if (len(prompts) < 2) then 0 else (if ((Comparable) prompts[0] == prompts[1]) then 1 else 0) + lfr-same-length(prompts[1:]);
+  // the lane's own context lines against the fold's positions: context 1 closes the opening stream and carries its
+  // prompt IDs, context k+1 the prompt renewal k fed. 1 when every context line agrees (a renewal with no closing
+  // context line yet is not compared), 0 when one differs, nothing when the lane wrote no context line.
+  def lfr-prefix-agree?(a, b) = nil?(a) || ((!nil?(b)) && ((Comparable) a[0] == b[0]) && lfr-prefix-agree?(a[1:], b[1:]));
+  def lfr-refed-agree(st) = if nil?(st[20]) then nothing() else if (lfr-prefix-agree?(st[20][1:], st[17]) && (((Comparable) st[18] > 0) || ((Comparable) st[20][0] == st[14]))) then 1 else 0;
+  def lfr-span(a, b) = if (nothing?(a) || nothing?(b)) then nothing() else max2(0, (b - a));
+  def lfr-or0(v) = v ?? 0;
+  // the option's phase costs: the row's own phase_ms when the lane wrote one, else its output folded
+  def lfr-phases(row, text) = if fcgp-present?(row, "phase_ms") then lfr-row-phases(row) else lfr-folded(row, text);
+  def lfr-row-phases(row) = json-node-object([json-node-pair("phase_ms", lfr-obj(row, "phase_ms")), fcgp-maybe("decode_ids", lfr-num(row, "local_generated_ids")), fcgp-maybe("inject_ids", lfr-num(row, "local_injected_ids")), fhn-s("source", "row")]);
+  def lfr-folded(row, text) {
+   let st = lfr-fold-text(text);
+   let first = lfr-int-from(text, "stamp-ms=", 0);
+   let wall = lfr-num(row, "wall_ms");
+   let start = if (nothing?(wall) || nothing?(lfr-num(row, "at_unix_ms"))) then nothing() else (lfr-num(row, "at_unix_ms") - wall);
+   let spawn = lfr-span(start, first);
+   let seal = lfr-span(lfr-stamp(text, "model-session-seal-begin"), lfr-stamp(text, "model-session-seal-complete"));
+   let prefill = lfr-span(lfr-stamp(text, "model-session-open-prefill-begin"), lfr-stamp(text, "model-session-open-prefill-complete"));
+   let open = max2(0, ((st[9] - lfr-or0(seal)) - lfr-or0(prefill)));
+   let tail = if (nothing?(spawn) || nothing?(wall)) then nothing() else max2(0, ((wall - spawn) - st[10]));
+   let ms = json-node-object([fcgp-maybe("spawn", spawn), fcgp-maybe("seal", seal), fhn-n("open", open), fcgp-maybe("prefill", prefill), fhn-n("decode", st[3]), fhn-n("inject", st[5]), fhn-n("renew", st[7]), fhn-n("host", st[8]), fcgp-maybe("tail", tail)]);
+   if ((Comparable) st[11] == 0) then json-node-object([]) else json-node-object([json-node-pair("phase_ms", ms), fhn-n("decode_ids", st[4]), fhn-n("inject_ids", st[6]), fhn-n("open_ids", st[14]), fhn-n("renewals", st[15]), fhn-n("refed_ids", st[16]), json-node-pair("renew_prompt_ids", json-node-array(map(p => json-node-int(p), st[17]))), fhn-n("same_length_renewals", lfr-same-length(st[17])), fhn-n("renewal_pending", st[13]), fhn-n("admit_restarts", st[18]), fcgp-maybe("refed_agree", lfr-refed-agree(st)), fhn-n("stamps", st[11]), fhn-s("source", "form-code stamps")]);
+  }
+  def lfr-secs(ms) = mc-cat([(ms / 1000).str(), ".", ((ms - ((ms / 1000) * 1000)) / 100).str(), " s"]);
+  def lfr-phase-names() = ["spawn", "seal", "open", "prefill", "decode", "inject", "renew", "host", "tail"];
+  def lfr-largest(ms) = foldl((best, k) => if ((lfr-num(ms, k) ?? (0 - 1)) > (lfr-num(ms, best) ?? (0 - 1))) then k else best, "decode", lfr-phase-names());
+  def lfr-per-id(ms, ids) = if (nothing?(ms) || (nothing?(ids) || (ids <= 0))) then nothing() else (ms / ids);
+  // a part's share of a whole in permille (a share of nothing, or of a whole that is not positive, is unread)
+  def lfr-pm(part, whole) = if (nothing?(part) || (nothing?(whole) || (whole <= 0))) then nothing() else ((part * 1000) / whole);
+  def lfr-pct(pm) = if nothing?(pm) then "unread" else mc-cat([(pm / 10).str(), ".", (pm - ((pm / 10) * 10)).str(), "%"]);
+  def lfr-phase-part(ms, k, ids, wall) = if nothing?(lfr-num(ms, k)) then mc-cat([k, " unread"]) else mc-cat([k, " ", lfr-secs(lfr-num(ms, k)), if nothing?(ids) then "" else mc-cat([" over ", ids.str(), " IDs"]), if nothing?(lfr-pm(lfr-num(ms, k), wall)) then "" else mc-cat([" (", lfr-pct(lfr-pm(lfr-num(ms, k), wall)), ")"])]);
+  // this host's own earlier decode reading: the latest review row whose phase came from another option
+  def lfr-earlier(reviews, key) = foldl((found, r) => if (fcgp-present?(r, "phase") && (!((String) lfr-str(lfr-obj(r, "phase"), "option_key") == key)) && (!nothing?(lfr-num(lfr-obj(r, "phase"), "decode_ms_per_id")))) then lfr-num(lfr-obj(r, "phase"), "decode_ms_per_id") else found, nothing(), reviews);
+  def lfr-option-key(row) = mc-cat([lfr-show(lfr-num(row, "at_unix_ms")), "|", lfr-str(row, "gap"), "|", lfr-show(lfr-num(row, "option"))]);
+  // The phases always sum to the wall (tail and open are what is left), so the sum proves nothing. What can
+  // fail is the split: the fold's decode and inject IDs against the lane's own final counters in the row.
+  // 1 when both agree, 0 when either differs, nothing when the row carries no counters or the phases are
+  // the row's own (they agree by construction).
+  def lfr-ids-match(row, phases) {
+   let g = lfr-num(row, "local_generated_ids");
+   let i = lfr-num(row, "local_injected_ids");
+   if (nothing?(g) || (nothing?(i) || ((String) lfr-str(phases, "source") == "row"))) then nothing() else if (((Comparable) lfr-num0(phases, "decode_ids") == g) && ((Comparable) lfr-num0(phases, "inject_ids") == i)) then 1 else 0;
+  }
+  // The IDs the GPU prefilled for an option: the opening prompt, the observations injected and the prompts the
+  // renewals re-fed. The lane's own injected counter holds only the second: a renewal frees the stream and
+  // prefills its whole new prompt again, which no counter the lane writes counts.
+  def lfr-prefilled(phases) = if nothing?(lfr-num(phases, "refed_ids")) then nothing() else (lfr-num0(phases, "open_ids") + lfr-num0(phases, "inject_ids") + lfr-num0(phases, "refed_ids"));
+  def lfr-refed-text(phases) {
+   let ms = lfr-obj(phases, "phase_ms");
+   let n = lfr-num(phases, "renewals");
+   let refed = lfr-num(phases, "refed_ids");
+   let all = lfr-prefilled(phases);
+   if (nothing?(n) || nothing?(refed)) then "; renewals unread (these phases are the row's own)" else mc-cat(["; renewals ", n.str(), ", re-fed IDs ", refed.str(), if (nothing?(all) || (all <= 0)) then "" else mc-cat([" (", lfr-pct(lfr-pm(refed, all)), " of the ", all.str(), " IDs prefilled: ", lfr-num0(phases, "open_ids").str(), " opening + ", lfr-num0(phases, "inject_ids").str(), " injected + ", refed.str(), " re-fed)"]), if (refed > 0) then mc-cat([", ", fcgp-show(lfr-per-id(lfr-num(ms, "renew"), refed)), " ms per re-fed ID"]) else "", if ((Comparable) lfr-num0(phases, "same_length_renewals") > 0) then mc-cat([", ", lfr-num0(phases, "same_length_renewals").str(), " at the length of the renewal before it"]) else "", if ((Comparable) lfr-num0(phases, "renewal_pending") == 1) then ", a renewal began and the lane ended before its first stamp: its prompt IDs are unread" else "", if ((Comparable) lfr-num0(phases, "admit_restarts") > 0) then mc-cat([", ", lfr-num0(phases, "admit_restarts").str(), " admit restart(s): the elapsed is rebased and the time between admissions reads in the tail"]) else ""]);
+  }
+  // where the option's counts came from: the lane's own row, the row's own phases, or its stamps
+  def lfr-counts-source(row, phases) = if ((String) lfr-str(phases, "source") == "row") then "row" else if nothing?(lfr-num(row, "local_generated_ids")) then "folded from stamps" else "written";
+  def lfr-ids-text(row, phases) {
+   let m = lfr-ids-match(row, phases);
+   if nothing?(m) then (if ((String) lfr-counts-source(row, phases) == "folded from stamps") then mc-cat(["; the lane wrote no counts: ", lfr-show(lfr-num(phases, "decode_ids")), " generated and ", lfr-show(lfr-num(phases, "inject_ids")), " injected IDs are folded from its stamps, not written"]) else "") else if ((Comparable) m == 1) then mc-cat(["; the fold reads the lane's own counters (", lfr-show(lfr-num(row, "local_generated_ids")), " generated, ", lfr-show(lfr-num(row, "local_injected_ids")), " injected)"]) else mc-cat(["; the fold reads ", lfr-show(lfr-num(phases, "decode_ids")), " generated and ", lfr-show(lfr-num(phases, "inject_ids")), " injected where the lane's counters say ", lfr-show(lfr-num(row, "local_generated_ids")), " and ", lfr-show(lfr-num(row, "local_injected_ids")), ": the split is unproven"]);
+  }
+  def lfr-phase-line(row, phases, earlier) {
+   let ms = lfr-obj(phases, "phase_ms");
+   let wall = lfr-num(row, "wall_ms");
+   let big = lfr-largest(ms);
+   let share = lfr-pm(lfr-num(ms, big), wall);
+   let perId = lfr-per-id(lfr-num(ms, "decode"), lfr-num(phases, "decode_ids"));
+   let parts = map(k => lfr-phase-part(ms, k, if ((String) k == "decode") then lfr-num(phases, "decode_ids") else if ((String) k == "inject") then lfr-num(phases, "inject_ids") else nothing(), wall), lfr-phase-names());
+   mc-cat(["[local-flow-review] phases: ", lfr-str(row, "gap"), " option ", lfr-show(lfr-num(row, "option")), " (", lfr-where(row), "): ", foldl((acc, p) => if ((String) acc == "") then p else mc-cat([acc, ", ", p]), "", parts), "; decode ", fcgp-show(perId), " ms/ID against ", if nothing?(earlier) then "no earlier reading" else mc-cat(["the earlier ", earlier.str(), " ms/ID"]), "; the largest is ", big, if nothing?(share) then "" else mc-cat([" (", lfr-pct(share), " of the wall)"]), lfr-refed-text(phases), lfr-ids-text(row, phases)]);
+  }
+  // The review row's phase table for one option, a standing column (fold 2): the nine phases in ms and their
+  // shares of the wall in permille, the largest, the option's wall, the counts and where they came from, the
+  // renewals with the prompt IDs each re-fed and the share of the prefilled IDs that was re-feeding. A reading
+  // the output did not carry is null, never 0.
+  def lfr-phase-row(row, phases) {
+   let ms = lfr-obj(phases, "phase_ms");
+   let wall = lfr-num(row, "wall_ms");
+   let big = lfr-largest(ms);
+   json-node-object([fhn-s("option_key", lfr-option-key(row)), fhn-s("gap", lfr-str(row, "gap")), fcgp-maybe("option", lfr-num(row, "option")), fhn-s("checkout", lfr-str(row, "checkout")), json-node-pair("phase_ms", ms), json-node-pair("share_pm", json-node-object(map(k => fcgp-maybe(k, lfr-pm(lfr-num(ms, k), wall)), lfr-phase-names()))), fhn-s("largest", big), fcgp-maybe("largest_share_pm", lfr-pm(lfr-num(ms, big), wall)), fcgp-maybe("wall_ms", wall), fcgp-maybe("decode_ids", lfr-num(phases, "decode_ids")), fcgp-maybe("inject_ids", lfr-num(phases, "inject_ids")), fcgp-maybe("decode_ms_per_id", lfr-per-id(lfr-num(ms, "decode"), lfr-num(phases, "decode_ids"))), fcgp-maybe("ids_match", lfr-ids-match(row, phases)), fhn-s("counts", lfr-counts-source(row, phases)), fcgp-maybe("open_ids", lfr-num(phases, "open_ids")), fcgp-maybe("renewals", lfr-num(phases, "renewals")), fcgp-maybe("refed_ids", lfr-num(phases, "refed_ids")), json-node-pair("renew_prompt_ids", fcgp-node(phases, "renew_prompt_ids")), fcgp-maybe("same_length_renewals", lfr-num(phases, "same_length_renewals")), fcgp-maybe("prefilled_ids", lfr-prefilled(phases)), fcgp-maybe("refed_share_pm", lfr-pm(lfr-num(phases, "refed_ids"), lfr-prefilled(phases))), fcgp-maybe("renew_ms_per_id", lfr-per-id(lfr-num(ms, "renew"), lfr-num(phases, "refed_ids"))), fcgp-maybe("refed_agree", lfr-num(phases, "refed_agree")), fcgp-maybe("admit_restarts", lfr-num(phases, "admit_restarts")), fcgp-maybe("renewal_pending", lfr-num(phases, "renewal_pending")), fhn-s("source", lfr-str(phases, "source")), fhn-n("fold", 2)]);
+  }
+  // The next line names the phase that took more than half the latest option's wall, with the renewals it fed.
+  def lfr-phase-note(row, phases) {
+   let ms = lfr-obj(phases, "phase_ms");
+   let big = lfr-largest(ms);
+   let share = lfr-pm(lfr-num(ms, big), lfr-num(row, "wall_ms"));
+   if (nothing?(share) || (share <= 500)) then "" else mc-cat(["; the latest option's wall went mostly to ", big, " (", lfr-pct(share), if (((String) big == "renew") && (!nothing?(lfr-num(phases, "refed_ids")))) then mc-cat([": ", lfr-num0(phases, "renewals").str(), " renewal(s) re-fed ", lfr-num0(phases, "refed_ids").str(), " IDs"]) else "", ")"]);
+  }
+  // ── the phase rows the review already holds ──
+  // every phase table an earlier review row recorded (its phase and its phase_also), one per option, the latest
+  // reading of each; a table an earlier fold wrote is current when it carries fold 2
+  def lfr-phase-tables(review) = append(if fcgp-present?(review, "phase") then [lfr-obj(review, "phase")] else [], if fcgp-array?(fcgp-node(review, "phase_also")) then json-array-elements(fcgp-node(review, "phase_also")) else []);
+  def lfr-put-phase(acc, p) = append(filter(x => !((String) lfr-str(x, "option_key") == lfr-str(p, "option_key")), acc), [p]);
+  def lfr-recorded(reviews) = foldl((acc, r) => foldl((a, p) => if ((String) lfr-str(p, "option_key") == "") then a else lfr-put-phase(a, p), acc, lfr-phase-tables(r)), [], reviews);
+  def lfr-current?(tables, row) = any?(p => ((String) lfr-str(p, "option_key") == lfr-option-key(row)) && ((Comparable) lfr-num0(p, "fold") == 2), tables);
+  def lfr-merge-phases(tables, fresh) = foldl((acc, p) => lfr-put-phase(acc, p), tables, fresh);
+  // ── the pool: every option's phase table read together ──
+  def lfr-poolable(tables) = filter(p => fcgp-present?(p, "phase_ms") && (!nothing?(lfr-num(p, "wall_ms"))) && (!nothing?(lfr-num(p, "refed_ids"))), tables);
+  def lfr-pool-sum(tables, k) = foldl((acc, p) => acc + lfr-num0(lfr-obj(p, "phase_ms"), k), 0, tables);
+  def lfr-pool(tables) {
+   let rows = lfr-poolable(tables);
+   let wall = lfr-sum(rows, "wall_ms");
+   let refed = lfr-sum(rows, "refed_ids");
+   let prefilled = lfr-sum(rows, "prefilled_ids");
+   json-node-object([fhn-n("options", len(rows)), fhn-n("wall_ms", wall), json-node-pair("share_pm", json-node-object(map(k => fcgp-maybe(k, lfr-pm(lfr-pool-sum(rows, k), wall)), lfr-phase-names()))), fhn-n("renewals", lfr-sum(rows, "renewals")), fhn-n("refed_ids", refed), fhn-n("inject_ids", lfr-sum(rows, "inject_ids")), fhn-n("prefilled_ids", prefilled), fcgp-maybe("refed_share_pm", lfr-pm(refed, prefilled))]);
+  }
+  def lfr-pool-line(pool) = if ((Comparable) lfr-num0(pool, "options") == 0) then "[local-flow-review] phase pool: no option's phase table carries its wall and renewals yet" else mc-cat(["[local-flow-review] phase pool: ", lfr-num0(pool, "options").str(), " option(s) over ", lfr-secs(lfr-num0(pool, "wall_ms")), " of wall: ", foldl((acc, k) => if ((String) acc == "") then mc-cat([k, " ", lfr-pct(lfr-num(lfr-obj(pool, "share_pm"), k))]) else mc-cat([acc, ", ", k, " ", lfr-pct(lfr-num(lfr-obj(pool, "share_pm"), k))]), "", lfr-phase-names()), "; ", lfr-num0(pool, "renewals").str(), " renewal(s) re-fed ", lfr-num0(pool, "refed_ids").str(), " IDs against ", lfr-num0(pool, "inject_ids").str(), " injected, ", lfr-pct(lfr-num(pool, "refed_share_pm")), " of the ", lfr-num0(pool, "prefilled_ids").str(), " IDs prefilled"]);
+  // ── the counts a lane did not write ──
+  // A lane the walk stopped at its deadline, or one that crashed, writes no count (its row carries null). Its
+  // stamps hold them: the fold's decode and inject IDs are its generated and injected IDs. The local line counts
+  // them apart from the lane's own counts and counts the wall of the option with them; an option with no count
+  // and no held output is unread, and its wall is named rather than dropped. Reads
+  // [written generated, written injected, written wall, folded options, folded generated, folded injected,
+  //  folded wall, unread options, unread wall].
+  def lfr-hit(tables, row) = fcgp-of(tables, "option_key", lfr-option-key(row));
+  def lfr-folded-count?(tables, row) = (!nil?(lfr-hit(tables, row))) && (!nothing?(lfr-num(lfr-hit(tables, row)[0], "decode_ids"))) && (!nothing?(lfr-num(lfr-hit(tables, row)[0], "inject_ids")));
+  def lfr-counts(rows, tables) {
+   let written = filter(r => !nothing?(lfr-num(r, "local_generated_ids")), rows);
+   let unwritten = filter(r => nothing?(lfr-num(r, "local_generated_ids")), rows);
+   let folds = filter(r => lfr-folded-count?(tables, r), unwritten);
+   let unread = filter(r => !lfr-folded-count?(tables, r), unwritten);
+   [lfr-sum(written, "local_generated_ids"), lfr-sum(written, "local_injected_ids"), lfr-sum(written, "wall_ms"), len(folds), foldl((acc, r) => acc + lfr-num0(lfr-hit(tables, r)[0], "decode_ids"), 0, folds), foldl((acc, r) => acc + lfr-num0(lfr-hit(tables, r)[0], "inject_ids"), 0, folds), lfr-sum(folds, "wall_ms"), len(unread), lfr-sum(unread, "wall_ms")];
+  }
+  def lfr-count-text(c) = mc-cat([(c[0] + c[4]).str(), " generated and ", (c[1] + c[5]).str(), " injected IDs over ", ((c[2] + c[6]) / 60000).str(), " min of lane wall", if (((Comparable) c[3] == 0) && ((Comparable) c[7] == 0)) then "" else mc-cat([" (", if ((Comparable) c[3] == 0) then "" else mc-cat([c[3].str(), " option(s) wrote no count: ", c[4].str(), " generated and ", c[5].str(), " injected IDs over ", (c[6] / 60000).str(), " min are folded from their stamps, not written by the lane"]), if (((Comparable) c[3] > 0) && ((Comparable) c[7] > 0)) then "; " else "", if ((Comparable) c[7] == 0) then "" else mc-cat([c[7].str(), " option(s) wrote no count and this host holds no stamps for them: unread, their ", (c[8] / 60000).str(), " min of wall are not counted"]), ")"])]);
+  // the latest real option whose lane output this host still holds
+  def lfr-has-out?(row) = (!((String) lfr-out-path(row) == "")) && (file_size(lfr-out-path(row)) > 0);
+  def lfr-first-out(rows) = if nil?(rows) then [] else if lfr-has-out?(rows[0]) then [rows[0]] else lfr-first-out(rows[1:]);
+  def lfr-latest-out(rows) = lfr-first-out(reverse(rows));
+  // ── one open gap: its state line and its columns ──
+  def lfr-gap-line(gap, rows, contract, landing) {
+   let id = lfr-str(gap, "id");
+   let mine = lfr-gap-rows(rows, id);
+   let last = if nil?(mine) then json-node-object([]) else mine[-1];
+   mc-cat(["[local-flow-review] gap ", id, ": ", len(mine).str(), " option(s), band best ", lfr-show(lfr-best(mine)), " of ", lfr-num0(gap, "full").str(), if nil?(mine) then "" else mc-cat([", last lane ", lfr-str(last, "lane"), " ", lfr-str(last, "lane_status")]), if ((String) landing == "") then (if lfr-stuck?(mine) then ", stuck" else "") else mc-cat([", green in ", landing, ", landing pending"]), if ((String) contract == "") then "" else ", contract"]);
+  }
+  // f: the gap's counts as lfr-counts reads them; an option whose lane wrote none adds the IDs its stamps fold to
+  def lfr-columns-line(id, c, gate, f) = mc-cat(["[local-flow-review] gap ", id, " columns: local tokens ", fcgp-show(fcgp-plus(lfr-num(c, "local_generated_ids"), f[4])), " generated + ", fcgp-show(fcgp-plus(lfr-num(c, "local_injected_ids"), f[5])), " injected + ", fcgp-show(lfr-num(c, "local_review_ids")), " review IDs", if ((Comparable) f[3] == 0) then "" else mc-cat([" (", f[4].str(), " generated + ", f[5].str(), " injected of them folded from the stamps of ", f[3].str(), " option(s) whose lane wrote no count)"]), "; local_verified ", fcgp-show(lfr-num(c, "local_verified")), ", band full ", fcgp-show(lfr-num(c, "band_full")), "; remote guide prompts ", fcgp-show(lfr-num(c, "remote_guide_prompts")), " (tokens ", fcgp-show(lfr-num(c, "remote_guide_tokens")), "); remote work tokens ", fcgp-show(lfr-num(c, "required_remote_tokens")), "; remote review ", fcgp-show(lfr-num(c, "remote_review_rows")), " row(s) (tokens ", fcgp-show(lfr-num(c, "remote_review_tokens")), "); guide gate: swervecount ", fcgp-show(lfr-num(gate, "swervecount")), " of ", fcgp-k().str(), ", ", len(json-array-elements(json-object-get(gate, "swerve_kinds"))).str(), " kind(s), ", fcgp-show(lfr-num(gate, "local_guides")), " local guide(s) of ", fcgp-g().str(), if ((Comparable) lfr-num0(gate, "earned") == 1) then ": earned" else mc-cat(["; it waits: ", lfr-str(gate, "why")])]);
+  // ── the next local repair: contract, guide, split, lane, landing, queue, turn ──
+  // gaps: [gap, contract why, guide reading, landing] for each gap open in this checkout; landing names the
+  // checkout whose rows read it green, "" when none does. A gap waiting to land is not cut, contracted or
+  // guided: its work is done where it ran.
+  def lfr-next(gaps, rows) {
+   let open = filter(g => (String) g[3] == "", gaps);
+   let landing = filter(g => !((String) g[3] == ""), gaps);
+   let contract = filter(g => !((String) g[1] == ""), open);
+   let earned = filter(g => (Comparable) lfr-num0(g[2], "earned") == 1, open);
+   let stuck = filter(g => lfr-stuck?(lfr-gap-rows(rows, lfr-str(g[0], "id"))), open);
+   let failed = len(filter(r => lfr-lane-failed?(r), lfr-last(rows, 6)));
+   if (!nil?(contract)) then ["contract", mc-cat(["contract ", lfr-str(contract[0][0], "id"), ": ", contract[0][1], "; heal the contract, not the lane"])]
+   else if (!nil?(earned)) then ["guide", mc-cat(["guide ", lfr-str(earned[0][0], "id"), ": its local guides failed as distinct experiments (swervecount ", fcgp-show(lfr-num(earned[0][2], "swervecount")), "); one light remote guide may answer one question from fcgp-packet, admitted only as feedback for the next local rung"])]
+   else if (!nil?(stuck)) then ["split", mc-cat(["split ", lfr-str(stuck[0][0], "id"), " into smaller band-first gaps; its last three options moved its band nowhere"])]
+   else if (failed >= 2) then ["lane", mc-cat([failed.str(), " of the last six options ended with no lane result; read their .out.err under .hearth/native-turns and heal the lane"])]
+   else if (!nil?(landing)) then ["landing", mc-cat(["land ", lfr-str(landing[0][0], "id"), ": its band reads green in ", landing[0][3], " and this checkout's rows do not carry it yet; land that candidate"])]
+   else if nil?(open) then ["queue", "no open gap: write the next band-first gap from the work the last rented session did"]
+   else ["turn", mc-cat([len(open).str(), " open gap(s) the lane can take; keep it turning"])];
+  }
+  // [gap, contract why, guide reading, landing]: the lane result is read from the gap's last option only,
+  // and only for a gap no checkout reads green
+  def lfr-gap-reading(gap, rows) {
+   let mine = lfr-gap-rows(rows, lfr-str(gap, "id"));
+   let landing = lfr-green-where(rows, lfr-str(gap, "id"));
+   let read = (!nil?(mine)) && ((String) landing == "");
+   let last = if nil?(mine) then json-node-object([]) else mine[-1];
+   let result = if read then lfr-lane-result(lfr-out-text(last)) else json-node-object([]);
+   [gap, if read then lfr-contract-why(gap, last, result) else "", fcgp-reading(mine), landing];
+  }
+  def lfr-print-gap(g, rows, guides, reviews, tables) {
+   let id = lfr-str(g[0], "id");
+   let mine = lfr-gap-rows(rows, id);
+   let line = print_str(lfr-gap-line(g[0], rows, g[1], g[3]));
+   print_str(lfr-columns-line(id, fcgp-gap-columns(mine, fcgp-of(guides, "gap", id), fcgp-of(reviews, "gap", id)), g[2], lfr-counts(mine, tables)));
+  }
+  // ── sessions: the latest row of each, the last three ──
+  def lfr-sessions(rents) = foldl((acc, r) => append(filter(x => !((String) lfr-str(x, "session") == lfr-str(r, "session")), acc), [r]), [], rents);
+  // a turn row names its session only when the session that began it said so; while no row names any, which
+  // options a session began is unknown, and its lane columns read null, never 0
+  def lfr-lane-keys() = ["lane_options", "lane_generated_ids", "lane_injected_ids"];
+  def lfr-lane-known(c, rows) = if any?(r => fcgp-present?(r, "session"), rows) then c else json-node-object(map(p => if fcgp-member?(lfr-lane-keys(), json-pair-key(p)) then json-node-pair(json-pair-key(p), json-node-null()) else p, json-object-pairs(c)));
+  def lfr-session-line(rent, rows, guides, reviews) {
+   let id = lfr-str(rent, "session");
+   let c = lfr-lane-known(fcgp-session-columns(id, rent, fcgp-of(rows, "session", id), fcgp-of(guides, "session", id), fcgp-of(reviews, "session", id)), rows);
+   let r = lfr-obj(rent, "rented");
+   mc-cat(["[local-flow-review] session ", id, ": local tokens: drafts ", fcgp-show(lfr-num(c, "draft_generated_ids")), " generated, lane ", fcgp-show(lfr-num(c, "lane_options")), " option(s) ", fcgp-show(lfr-num(c, "lane_generated_ids")), " generated + ", fcgp-show(lfr-num(c, "lane_injected_ids")), " injected; local_verified ", fcgp-show(lfr-num(c, "gaps_local_verified")), " of ", fcgp-show(lfr-num(c, "gaps_attempted")), " gap(s) attempted (", fcgp-show(lfr-num(c, "gaps_unread")), " unread); remote guide prompts ", fcgp-show(lfr-num(c, "remote_guide_prompts")), "; remote work tokens ", fcgp-show(lfr-num(c, "required_remote_tokens")), "; remote review ", fcgp-show(lfr-num(c, "remote_review_rows")), " row(s); whole-session remote reading: output ", fcgp-show(lfr-num(r, "output")), ", uncached input ", fcgp-show(fcgp-plus(lfr-num(r, "input"), lfr-num(r, "cache_write"))), ", cache read ", fcgp-show(lfr-num(r, "cache_read")), "; required remote prompts ", fcgp-show(lfr-num(rent, "required_remote_prompts")), ", tokens ", fcgp-show(lfr-num(rent, "required_remote_tokens")), "; optional review tokens ", fcgp-show(lfr-num(rent, "optional_remote_review_tokens"))]);
+  }
+  // [verified, unmeasured]: rows whose local_verified reads 1, and rows that carry no reading of it
+  def lfr-verification(rows) = [len(filter(r => lfr-verified?(r), rows)), len(filter(r => lfr-unmeasured?(r), rows))];
+  // the review's last line: lfr-run answers it as its value (host-walk takes it from the cell's record, no prefix to scan for);
+  // the phase note, when one phase took more than half the latest option's wall, follows the repair
+  def lfr-next-line(next, note) = mc-cat(["[local-flow-review] next: ", next[0], " — ", next[1], note]);
+  // The options to fold now: every real option whose lane output this host holds and whose phase table is not
+  // current in the ledger, and the latest one whose output is held (read again to be printed). A fold reads one
+  // output once; a table the ledger already holds is not folded again.
+  def lfr-to-fold(held, latest, tables) = filter(r => (!lfr-current?(tables, r)) || ((!nil?(latest)) && ((String) lfr-option-key(r) == lfr-option-key(latest[0]))), held);
+  // [row, phases] for each folded option whose output carries stamps
+  def lfr-folded-options(rows) = filter(x => fcgp-present?(x[1], "phase_ms"), map(r => [r, lfr-phases(r, lfr-out-text(r))], rows));
+  // what the review prints about phases: the four newest folded options, a count of the older ones, the pool, and
+  // the latest option's own gap when its output is not held here
+  def lfr-phase-lines(read, newest, held, reviewed, pool) {
+   let shown = lfr-last(read, 4);
+   let older = if (len(read) > len(shown)) then [mc-cat(["[local-flow-review] phases: ", (len(read) - len(shown)).str(), " older option(s) folded into the row, not printed"])] else [];
+   let own = map(x => lfr-phase-line(x[0], x[1], lfr-earlier(reviewed, lfr-option-key(x[0]))), shown);
+   let unread = if (nil?(newest) || held) then [] else [mc-cat(["[local-flow-review] phases: the latest option (", lfr-option-key(newest[0]), ") has no lane output on this host: its phases are unread"])];
+   let none = if (nil?(read) && nil?(unread)) then ["[local-flow-review] phases: no lane output on this host carries form-code stamps"] else [];
+   append(append(append(append(older, own), unread), none), [lfr-pool-line(pool)]);
+  }
+  // the whole review: printed, and one row appended to receipts/local-flow-review.jsonl
+  def lfr-run() {
+   let all = lfr-options(sr-turn-rows());
+   let mineHere = lfr-here(all);
+   let here = len(mineHere);
+   let walk = sr-walk-dir();
+   let queue = lfr-rows(lfr-queue());
+   let open = filter(g => lfr-named?(g) && !lfr-green?(mineHere, lfr-str(g, "id")), queue);
+   let guides = lfr-rows(fcgp-guide-ledger());
+   let reviews = lfr-rows(fcgp-review-ledger());
+   let gaps = map(g => lfr-gap-reading(g, all), open);
+   let pending = len(filter(g => !((String) g[3] == ""), gaps));
+   let green = len(filter(r => (Comparable) lfr-num0(r, "band_green") == 1, all));
+   let verification = lfr-verification(all);
+   let success = fcgp-success(all);
+   let work = lfr-work(all, guides);
+   let next = lfr-next(gaps, all);
+   let reviewed = lfr-rows(lfr-ledger());
+   let tables = lfr-recorded(reviewed);
+   let held = filter(r => lfr-has-out?(r), all);
+   let latest = lfr-latest-out(all);
+   let read = lfr-folded-options(lfr-to-fold(held, latest, tables));
+   let fresh = map(x => lfr-phase-row(x[0], x[1]), read);
+   let merged = lfr-merge-phases(tables, fresh);
+   let counts = lfr-counts(all, merged);
+   let pool = lfr-pool(merged);
+   let newest = if nil?(all) then [] else [all[-1]];
+   let latestKey = if nil?(latest) then "" else lfr-option-key(latest[0]);
+   let latestRead = filter(x => (String) lfr-option-key(x[0]) == latestKey, read);
+   let note = if nil?(latestRead) then "" else lfr-phase-note(latestRead[0][0], latestRead[0][1]);
+   print_str(mc-cat(["[local-flow-review] local: ", len(all).str(), " option(s) (", here.str(), " in this checkout, ", (len(all) - here).str(), " only in ", if ((String) walk == "") then "no walk checkout" else walk, "), ", green.str(), " band green, ", verification[0].str(), " locally verified, ", verification[1].str(), " with verification unmeasured; ", lfr-count-text(counts), "; local tokens are welcome and never a target"]));
+   print_str(mc-cat(["[local-flow-review] success: local_verified ", success[1].str(), " of ", success[0].str(), " gap(s) attempted, ", success[2].str(), " unread (their rows carry no local_verified)"]));
+   print_str(mc-cat(["[local-flow-review] remote: guide prompts ", len(guides).str(), "; whole-task work tokens ", fcgp-show(work), " (null is unknown); optional review ", len(reviews).str(), " row(s), separate from required work"]));
+   map(s => print_str(lfr-session-line(s, all, guides, reviews)), lfr-last(lfr-sessions(lfr-rows(lfr-rent())), 3));
+   map(g => lfr-print-gap(g, all, guides, reviews, merged), gaps);
+   map(l => print_str(l), lfr-phase-lines(read, newest, (!nil?(newest)) && lfr-has-out?(newest[0]), reviewed, pool));
+   let line = lfr-next-line(next, note);
+   let said = print_str(line);
+   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("options", len(all)), fhn-n("options_here", here), fhn-s("walk_checkout", walk), fhn-n("green", green), fhn-n("local_verified", verification[0]), fhn-n("local_verification_unknown", verification[1]), fhn-n("open_gaps", len(open)), fhn-n("landing_pending", pending), fhn-n("local_generated_ids", counts[0] + counts[4]), fhn-n("local_injected_ids", counts[1] + counts[5]), fhn-n("lane_wall_ms", counts[2] + counts[6]), fhn-n("folded_options", counts[3]), fhn-n("folded_generated_ids", counts[4]), fhn-n("folded_injected_ids", counts[5]), fhn-n("folded_wall_ms", counts[6]), fhn-n("unread_options", counts[7]), fhn-n("unread_wall_ms", counts[8]), fhn-n("gaps_attempted", success[0]), fhn-n("gaps_local_verified", success[1]), fhn-n("gaps_unread", success[2]), fhn-n("remote_guide_prompts", len(guides)), fcgp-maybe("required_remote_tokens", work), fhn-n("remote_review_rows", len(reviews)), json-node-pair("phase", if nil?(latestRead) then json-node-null() else lfr-phase-row(latestRead[0][0], latestRead[0][1])), json-node-pair("phase_also", json-node-array(filter(p => !((String) lfr-str(p, "option_key") == latestKey), fresh))), json-node-pair("phase_unread", if (nil?(newest) || lfr-has-out?(newest[0])) then json-node-null() else json-node-string(lfr-option-key(newest[0]))), json-node-pair("phase_pool", pool), fhn-s("next", next[0]), fhn-s("next_text", mc-cat([next[1], note]))]);
+   let kept = fhn-append(lfr-ledger(), json-emit(row) + "\n");
+   line;
+  }
+ }
+}

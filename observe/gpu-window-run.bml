@@ -1,0 +1,65 @@
+// gpu-window-run.bml — run a measurement in a proven GPU window, or sweep the windows that were left.
+//
+//   printf 'with observe/q38-prefill-run.bml\n' | ./fkwu observe/gpu-window-run.bml
+//   printf 'with observe/q38-prefill-run.bml\nstdin-file.txt\n' | ./fkwu observe/gpu-window-run.bml
+//   printf 'sweep\n' | ./fkwu observe/gpu-window-run.bml        resume the peers of windows whose holder is gone or whose time is over
+//   printf 'status\n' | ./fkwu observe/gpu-window-run.bml       the lease, its judgement, the window file
+//
+// `with` takes the machine-wide GPU lease, pauses the Metal peers the lease names, reads the gauge, runs the cell IN THIS PROCESS (cell_run:
+// no child process, nothing parsed back from a pipe), reads the gauge again, resumes exactly the peers it paused and gives the lease back.
+// The cell's own output comes first, then one line: `gpu window  PROVEN | NOT PROVEN | NOT HELD  gauge a -> b ...`. A number printed
+// beside NOT PROVEN is a reading of the device's weather. Input is plain lines, not JSON: line one the verb (and the cell for `with`),
+// line two, for `with`, a file given to the cell as its stdin. The window lives as long as this process: a door killed mid-window leaves a
+// dead lease and its window file, and the next open or `sweep` resumes the peers it recorded (gpu-window.bml).
+//
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/bml/stdin-source.bml form-stdlib/gpu-window.bml
+section [form.bml] {
+ class GpuWindowRun {
+  def gwr-lines() = filter(l => (Comparable) len(l) > 0, map(l => trim(l), split-on(stdin-text() ?? "", byte_to_str(10))));
+  def gwr-say(text) = print_str(text);
+  def gwr-deadline-ms() = 3600000;
+  def gwr-input(lines) = (Comparable) len(lines) > 1 ? read_file(lines[1]) : nothing();
+  def gwr-cell(lines) = trim(substring(lines[0], 5, len(lines[0])));
+  def gwr-run-cell(path, input) = cell_run(path, 0, gwr-deadline-ms(), input);
+  def gwr-show(r) {
+   let out = record_get(r, "out");
+   let said = (String) out == "" ? 0 : gwr-say(out);
+   let stopped = record_get(r, "stopped");
+   nothing?(stopped) ? gwr-say("value  " ++ value_str(record_get(r, "value"))) : gwr-say("stopped  " ++ value_str(stopped));
+  }
+  def gwr-with(lines) {
+   let path = gwr-cell(lines);
+   let res = gpw-with("gpu-window-run " ++ path, () => gwr-run-cell(path, gwr-input(lines)));
+   let shown = nothing?(res[0]) ? 0 : gwr-show(res[0]);
+   gwr-say(gpw-report-line(res[1]));
+   (String) res[1][0] == "closed" ? ((res[1][5]) ? 0 : 2) : 1;
+  }
+  def gwr-status() {
+   let lock = gpu-lease-path();
+   let j = gpl-judge(lock);
+   let w = gpw-read(lock);
+   gwr-say("lease  " ++ value_str(j) ++ "  window  " ++ (nothing?(w) ? "none" : "token " ++ gpw-token-of(w) ++ ", " ++ len(gpw-rows(w)).str() ++ " peers recorded"));
+   0;
+  }
+  def gwr-run() {
+   let lines = gwr-lines();
+   (Comparable) len(lines) == 0 ? gwr-say("need: with <cell> | sweep | status") : 0;
+   (Comparable) len(lines) == 0 ? 1 : gwr-verb(lines);
+  }
+  def gwr-verb(lines) {
+   let verb = split-on(lines[0], " ")[0];
+   (String) verb == "sweep" ? gwr-sweep() : ((String) verb == "status" ? gwr-status() : ((String) verb == "with" ? gwr-with(lines) : gwr-unknown(verb)));
+  }
+  def gwr-sweep() {
+   let r = gpw-sweep(gpu-lease-path());
+   gwr-say("swept  " ++ r[1].str() ++ " peers resumed");
+   0;
+  }
+  def gwr-unknown(verb) {
+   let said = gwr-say("unknown verb  " ++ verb ++ "  (with <cell> | sweep | status)");
+   1;
+  }
+ }
+ gwr-run();
+}

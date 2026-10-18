@@ -1,0 +1,227 @@
+// public-source-concept-index.fk -- a small Form-native index over public body
+// sources, addressed by their current bytes rather than by a flattened table.
+//
+// A registry entry binds one repository-relative source coordinate to its
+// streamed SHA-256 identity, a content-addressed source NodeID, its census
+// family, and at most six bounded concept keys.  Lookup accepts only a concept
+// key: it does not need or guess a path.  A registered key returns `hit` only
+// while the source bytes still reconstruct the held NodeID.  An absent,
+// changed, malformed, unknown, or ambiguous source returns exact `nothing`
+// with a reason and a rebuild signal where one is owed.
+//
+// This is an index organ, not model-weight evidence.  Coverage therefore keeps
+// three numerators separate: registered sources, current index-integrated
+// sources, and independently observed model-integrated sources (zero here).
+// The 30-source seed below is a two-per-family witness, not a 95% claim.
+//
+// No source payload is rendered, no operation registry is present, and no
+// flattening is needed.  File identity is folded through bounded byte windows
+// by form-knowledge-source-search.fk.
+//
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/form-fs.fk;
+import form-stdlib/file-byte-window.fk;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+import form-stdlib/form-knowledge-source-search.fk;
+section [form.bml] {
+    def psci-schema() = "public-source-concept-index-v1";
+    def psci-source-schema() = "public-source-artifact-node-v1";
+    def psci-entry-schema() = "public-source-concept-entry-v1";
+    def psci-max-concept-keys() = 6;
+    def psci-max-concept-key-bytes() = 64;
+    def psci-max-source-path-bytes() = 320;
+    // Reserved Form-neutral categories.  Identity comes from the children;
+    // these slots only keep this protocol's node families separate.
+    def psci-source-category() = make_nodeid(31, 2, 0, 86);
+    def psci-entry-category() = make_nodeid(31, 2, 0, 87);
+    def psci-index-category() = make_nodeid(31, 2, 0, 88);
+    def psci-observation-category() = make_nodeid(31, 2, 0, 89);
+    def psci-absent-category() = make_nodeid(31, 2, 0, 90);
+    def psci-absent-node() = intern_node(psci-absent-category(), [intern_trivial_string("nothing")]);
+    def psci-node-key(node) = (node_pkg(node).str() + ("." + (node_level(node).str() + ("." + (node_type(node).str() + ("." + node_inst(node).str()))))));
+    // ---- the same fifteen public source families as the live census -------
+    def psci-family(id, root) = [id, root];
+    def psci-family-id(f) = f[0];
+    def psci-family-root(f) = f[1];
+    def psci-families() = [psci-family("axioms", "axioms"), psci-family("bootstrap", "bootstrap"), psci-family("form-stdlib", "form/form-stdlib"), psci-family("grammars", "grammars"), psci-family("cognition", "cognition"), psci-family("learn", "learn"), psci-family("observe", "observe"), psci-family("teachings", "teachings"), psci-family("receipts", "receipts"), psci-family("model", "model"), psci-family("gate", "gate"), psci-family("control", "control"), psci-family("ingest", "ingest"), psci-family("presence", "presence"), psci-family("docs", "docs")];
+    def psci-find-family(id, families) = nil?(families) ? [] : (String) id == psci-family-id(families[0]) ? families[0] : psci-find-family(id, families[1:]);
+    def psci-family-valid?(id) = (Comparable) len(psci-find-family(id, psci-families())) == 2 ? 1 : 0;
+    def psci-ends-with?(s, suffix) = len(s) < len(suffix) ? 0 : (String) substring(s, len(s) - len(suffix), len(s)) == suffix ? 1 : 0;
+    def psci-source-extension?(path) = (Comparable) psci-ends-with?(path, ".fk") == 1 || ((Comparable) psci-ends-with?(path, ".bml") == 1 || ((Comparable) psci-ends-with?(path, ".bmf") == 1 || ((Comparable) psci-ends-with?(path, ".form") == 1 || (Comparable) psci-ends-with?(path, ".md") == 1))) ? 1 : 0;
+    def psci-generated-source?(path) = (Comparable) psci-ends-with?(path, "-xtal.fk") == 1 ? 1 : 0;
+    def psci-path-under-root?(path, root) = len(path) <= len(root) ? 0 : !((String) substring(path, 0, len(root)) == root) ? 0 : (String) substring(path, len(root), len(root) + 1) == "/" ? 1 : 0;
+    def psci-path-valid-for-family?(path, family) = {
+        let f = psci-find-family(family, psci-families());
+        !((Comparable) len(f) == 2) ? 0 : (Comparable) len(path) == 0 || len(path) > psci-max-source-path-bytes() ? 0 : str_find(path, "..", 0) >= 0 ? 0 : (Comparable) psci-path-under-root?(path, psci-family-root(f)) == 0 ? 0 : (Comparable) psci-source-extension?(path) == 0 ? 0 : (Comparable) psci-generated-source?(path) == 0 ? 1 : 0;
+    };
+    // Concept keys are scannerless bounded ASCII coordinates.  They are not
+    // tokenizer vocabulary and may be streamed or generated one byte at a time.
+    def psci-concept-byte-valid?(b) = b >= 97 && b <= 122 || (b >= 48 && b <= 57 || (Comparable) b == 45) ? 1 : 0;
+    def psci-concept-key-loop(key, at) = at >= len(key) ? 1 : (Comparable) psci-concept-byte-valid?(str_byte_at(key, at)) == 1 ? psci-concept-key-loop(key, at + 1) : 0;
+    def psci-concept-key-valid?(key) = (Comparable) len(key) == 0 || len(key) > psci-max-concept-key-bytes() ? 0 : psci-concept-key-loop(key, 0);
+    def psci-concept-keys-valid-loop(keys, count) = nil?(keys) ? count > 0 && count <= psci-max-concept-keys() ? 1 : 0 : (Comparable) psci-concept-key-valid?(keys[0]) == 0 ? 0 : psci-concept-keys-valid-loop(keys[1:], count + 1);
+    def psci-concept-keys-valid?(keys) = psci-concept-keys-valid-loop(keys, 0);
+    def psci-key-nodes(keys) = nil?(keys) ? [] : cons(intern_trivial_string(keys[0]), psci-key-nodes(keys[1:]));
+    // ---- content-addressed source and incremental index entries -----------
+    def psci-source-id-valid?(source-id) = !((Comparable) len(source-id) == 71) ? 0 : !((String) substring(source-id, 0, 7) == "sha256:") ? 0 : hex-valid?(substring(source-id, 7, 71));
+    def psci-source-node(family, path, source-id, size) = intern_node(psci-source-category(), [intern_trivial_string(psci-source-schema()), intern_trivial_string(family), intern_trivial_string(path), intern_trivial_string(source-id), intern_trivial_int(size)]);
+    def psci-source-node-valid?(source) = nothing?(source) ? 0 : !node_eq(node_category(source), psci-source-category()) ? 0 : !((Comparable) len(node_children(source)) == 5) ? 0 : !((String) node_value(node_children(source)[0]) == psci-source-schema()) ? 0 : (Comparable) psci-family-valid?(node_value(node_children(source)[1])) == 0 ? 0 : (Comparable) psci-path-valid-for-family?(node_value(node_children(source)[2]), node_value(node_children(source)[1])) == 0 ? 0 : (Comparable) psci-source-id-valid?(node_value(node_children(source)[3])) == 0 ? 0 : node_value(node_children(source)[4]) >= 0 ? 1 : 0;
+    def psci-source-family(source) = node_value(node_children(source)[1]);
+    def psci-source-path(source) = node_value(node_children(source)[2]);
+    def psci-source-id(source) = node_value(node_children(source)[3]);
+    def psci-source-size(source) = node_value(node_children(source)[4]);
+    def psci-entry(source, keys) = intern_node(psci-entry-category(), cons(source, psci-key-nodes(keys)));
+    def psci-entry-key-nodes-valid?(nodes, count) = nil?(nodes) ? count > 0 && count <= psci-max-concept-keys() ? 1 : 0 : (Comparable) psci-concept-key-valid?(node_value(nodes[0])) == 0 ? 0 : psci-entry-key-nodes-valid?(nodes[1:], count + 1);
+    def psci-entry-valid?(entry) = nothing?(entry) ? 0 : !node_eq(node_category(entry), psci-entry-category()) ? 0 : len(node_children(entry)) < 2 || len(node_children(entry)) > psci-max-concept-keys() + 1 ? 0 : (Comparable) psci-source-node-valid?(node_children(entry)[0]) == 0 ? 0 : psci-entry-key-nodes-valid?(node_children(entry)[1:], 0);
+    def psci-entry-source(entry) = node_children(entry)[0];
+    def psci-entry-key-nodes(entry) = node_children(entry)[1:];
+    def psci-entry-keys-loop(nodes) = nil?(nodes) ? [] : cons(node_value(nodes[0]), psci-entry-keys-loop(nodes[1:]));
+    def psci-entry-keys(entry) = psci-entry-keys-loop(psci-entry-key-nodes(entry));
+    def psci-index-empty() = intern_node(psci-index-category(), []);
+    def psci-index-entries-valid?(entries) = nil?(entries) ? 1 : (Comparable) psci-entry-valid?(entries[0]) == 0 ? 0 : psci-index-entries-valid?(entries[1:]);
+    def psci-index-valid?(index) = nothing?(index) ? 0 : !node_eq(node_category(index), psci-index-category()) ? 0 : psci-index-entries-valid?(node_children(index));
+    def psci-index-entries(index) = node_children(index);
+    def psci-entry-member?(entry, entries) = nil?(entries) ? 0 : node_eq(entry, entries[0]) ? 1 : psci-entry-member?(entry, entries[1:]);
+    def psci-same-coordinate?(a, b) = (String) psci-source-family(psci-entry-source(a)) == psci-source-family(psci-entry-source(b)) && (String) psci-source-path(psci-entry-source(a)) == psci-source-path(psci-entry-source(b)) ? 1 : 0;
+    def psci-without-coordinate(entries, entry) = nil?(entries) ? [] : (Comparable) psci-same-coordinate?(entries[0], entry) == 1 ? psci-without-coordinate(entries[1:], entry) : cons(entries[0], psci-without-coordinate(entries[1:], entry));
+    def psci-add-entry(index, entry) = (Comparable) psci-index-valid?(index) == 0 || (Comparable) psci-entry-valid?(entry) == 0 ? nothing() : (Comparable) psci-entry-member?(entry, psci-index-entries(index)) == 1 ? index : intern_node(psci-index-category(), cons(entry, psci-without-coordinate(psci-index-entries(index), entry)));
+    // Registering observes current bytes.  The source is never materialized as
+    // one string: fkss-source-id folds it through the shared bounded cursor.
+    def psci-register-at(root, family, path, keys) = (Comparable) len(root) == 0 || ((Comparable) psci-path-valid-for-family?(path, family) == 0 || (Comparable) psci-concept-keys-valid?(keys) == 0) ? nothing() : {
+        let full = fs-path-join(root, path);
+        let size = fs-stat-size(full);
+        size < 0 ? nothing() : psci-entry(psci-source-node(family, path, fkss-source-id(full), size), keys);
+    };
+    def psci-entry-from-observed(family, path, source-id, size, keys) = (Comparable) psci-path-valid-for-family?(path, family) == 0 || ((Comparable) psci-source-id-valid?(source-id) == 0 || (size < 0 || (Comparable) psci-concept-keys-valid?(keys) == 0)) ? nothing() : psci-entry(psci-source-node(family, path, source-id, size), keys);
+    def psci-rebuild-entry-at(root, entry) = (Comparable) psci-entry-valid?(entry) == 0 ? nothing() : psci-register-at(root, psci-source-family(psci-entry-source(entry)), psci-source-path(psci-entry-source(entry)), psci-entry-keys(entry));
+    def psci-rebuild-index-entry-at(root, index, entry) = {
+        let rebuilt = psci-rebuild-entry-at(root, entry);
+        nothing?(rebuilt) ? nothing() : psci-add-entry(index, rebuilt);
+    };
+    // ---- exact concept lookup and typed freshness observation -------------
+    def psci-entry-has-key?(entry, key) = psci-entry-has-key-nodes?(psci-entry-key-nodes(entry), key);
+    def psci-entry-has-key-nodes?(nodes, key) = nil?(nodes) ? 0 : (String) node_value(nodes[0]) == key ? 1 : psci-entry-has-key-nodes?(nodes[1:], key);
+    def psci-matching-entries(entries, key, acc) = nil?(entries) ? acc : psci-matching-entries(entries[1:], key, (Comparable) psci-entry-has-key?(entries[0], key) == 1 ? cons(entries[0], acc) : acc);
+    def psci-current-source-at(root, entry) = {
+        let held = psci-entry-source(entry);
+        let full = fs-path-join(root, psci-source-path(held));
+        let size = fs-stat-size(full);
+        size < 0 ? nothing() : psci-source-node(psci-source-family(held), psci-source-path(held), fkss-source-id(full), size);
+    };
+    def psci-entry-current-at?(root, entry) = {
+        let current = psci-current-source-at(root, entry);
+        nothing?(current) ? 0 : node_eq(current, psci-entry-source(entry)) ? 1 : 0;
+    };
+    def psci-observation(status, reason, index, key, held, current, fresh, rebuild) = intern_node(psci-observation-category(), [intern_trivial_string(status), intern_trivial_string(reason), index, intern_trivial_string(key), held, current, intern_trivial_int(fresh), intern_trivial_int(rebuild), intern_trivial_int(0)]);
+    // result = (schema status reason observation concept family path held-id
+    //           current-id held-source current-source fresh rebuild lookup-count
+    //           hit-count model-executed match-count index-id)
+    def psci-result(status, reason, index, key, entry, current, fresh, rebuild, lookup-count, hit-count, match-count) = {
+        let has-entry = psci-entry-valid?(entry);
+        let held = (Comparable) has-entry == 1 ? psci-entry-source(entry) : psci-absent-node();
+        let now = nothing?(current) ? psci-absent-node() : current;
+        let family = (Comparable) has-entry == 1 ? psci-source-family(held) : "";
+        let path = (Comparable) has-entry == 1 ? psci-source-path(held) : "";
+        let held-id = (Comparable) has-entry == 1 ? psci-source-id(held) : "";
+        let current-id = nothing?(current) ? "" : psci-source-id(current);
+        let index-node = (Comparable) psci-index-valid?(index) == 1 ? index : psci-absent-node();
+        let observation = psci-observation(status, reason, index-node, key, held, now, fresh, rebuild);
+        [psci-schema(), status, reason, observation, key, family, path, held-id, current-id, held, now, fresh, rebuild, lookup-count, hit-count, 0, match-count, psci-node-key(index-node)];
+    };
+    def psci-result-status(r) = r[1];
+    def psci-result-reason(r) = r[2];
+    def psci-result-observation(r) = r[3];
+    def psci-result-concept(r) = r[4];
+    def psci-result-family(r) = r[5];
+    def psci-result-path(r) = r[6];
+    def psci-result-held-id(r) = r[7];
+    def psci-result-current-id(r) = r[8];
+    def psci-result-held-source(r) = r[9];
+    def psci-result-current-source(r) = r[10];
+    def psci-result-fresh?(r) = r[11];
+    def psci-result-rebuild-needed?(r) = r[12];
+    def psci-result-lookup-count(r) = r[13];
+    def psci-result-hit-count(r) = r[14];
+    def psci-result-model-executed?(r) = r[15];
+    def psci-result-match-count(r) = r[16];
+    def psci-result-index-id(r) = r[17];
+    def psci-lookup-at(root, index, key) = (Comparable) psci-index-valid?(index) == 0 ? psci-result("nothing", "invalid-index", index, key, nothing(), nothing(), 0, 0, 0, 0, 0) : (Comparable) psci-concept-key-valid?(key) == 0 ? psci-result("nothing", "invalid-concept-key", index, "", nothing(), nothing(), 0, 0, 0, 0, 0) : {
+        let matches = psci-matching-entries(psci-index-entries(index), key, []);
+        (Comparable) len(matches) == 0 ? psci-result("nothing", "concept-not-registered", index, key, nothing(), nothing(), 0, 0, 1, 0, 0) : len(matches) > 1 ? psci-result("nothing", "ambiguous-concept-key", index, key, matches[0], nothing(), 0, 0, 1, 0, len(matches)) : {
+            let entry = matches[0];
+            let current = psci-current-source-at(root, entry);
+            nothing?(current) ? psci-result("nothing", "source-unavailable", index, key, entry, nothing(), 0, 1, 1, 0, 1) : !node_eq(current, psci-entry-source(entry)) ? psci-result("nothing", "source-rebuild-needed", index, key, entry, current, 0, 1, 1, 0, 1) : psci-result("hit", "current-content-addressed-source", index, key, entry, current, 1, 0, 1, 1, 1);
+        };
+    };
+    // ---- coverage: repository denominator never disappears ----------------
+    def psci-count-entry-keys(entries) = nil?(entries) ? 0 : len(psci-entry-key-nodes(entries[0])) + psci-count-entry-keys(entries[1:]);
+    def psci-count-registered-family(entries, family) = nil?(entries) ? 0 : ((String) psci-source-family(psci-entry-source(entries[0])) == family ? 1 : 0) + psci-count-registered-family(entries[1:], family);
+    def psci-count-current-family-at(root, entries, family) = nil?(entries) ? 0 : ((String) psci-source-family(psci-entry-source(entries[0])) == family && (Comparable) psci-entry-current-at?(root, entries[0]) == 1 ? 1 : 0) + psci-count-current-family-at(root, entries[1:], family);
+    // Count one family at a time.  Holding source_inventory for the whole body
+    // beside the content-addressed index exhausted the bounded checkout heap;
+    // this census-shaped walk observes the same extension boundary without
+    // materializing thousands of paths as one retained list.
+    def psci-hidden-name?(name) = (Comparable) len(name) == 0 ? 1 : (String) substring(name, 0, 1) == "." ? 1 : 0;
+    def psci-count-source-names-at(dir, names) = nil?(names) ? 0 : {
+        let name = names[0];
+        let path = fs-path-join(dir, name);
+        let source = (Comparable) psci-source-extension?(path) == 1 && (Comparable) psci-generated-source?(path) == 0 ? 1 : 0;
+        let nested = (Comparable) source == 1 || (Comparable) psci-hidden-name?(name) == 1 ? 0 : {
+            let children = fs-list(path);
+            nil?(children) ? 0 : psci-count-source-names-at(path, children);
+        };
+        source + (nested + psci-count-source-names-at(dir, names[1:]));
+    };
+    def psci-count-repository-family-at(root, family) = {
+        let f = psci-find-family(family, psci-families());
+        !((Comparable) len(f) == 2) ? 0 : {
+            let dir = fs-path-join(root, psci-family-root(f));
+            psci-count-source-names-at(dir, fs-list(dir));
+        };
+    };
+    def psci-percent(part, whole) = whole <= 0 ? 0 : part * 100 / whole;
+    // family row = (schema family registered current repository current-percent)
+    def psci-family-coverage-rows-at(root, entries, families) = nil?(families) ? [] : {
+        let family = psci-family-id(families[0]);
+        let registered = psci-count-registered-family(entries, family);
+        let current = psci-count-current-family-at(root, entries, family);
+        let repository = psci-count-repository-family-at(root, family);
+        cons(["public-source-family-coverage-v1", family, registered, current, repository, psci-percent(current, repository)], psci-family-coverage-rows-at(root, entries, families[1:]));
+    };
+    def psci-sum-row-field(rows, at) = nil?(rows) ? 0 : rows[0][at] + psci-sum-row-field(rows[1:], at);
+    def psci-count-families-at-least-two(rows) = nil?(rows) ? 0 : (rows[0][2] >= 2 && rows[0][3] >= 2 ? 1 : 0) + psci-count-families-at-least-two(rows[1:]);
+    // coverage = (schema index-id families families-at-least-two registered
+    //             index-integrated repository registered-percent
+    //             index-integrated-percent model-integrated
+    //             model-integrated-percent concept-keys family-rows)
+    def psci-coverage-at(root, index) = (Comparable) psci-index-valid?(index) == 0 ? nothing() : {
+        let rows = psci-family-coverage-rows-at(root, psci-index-entries(index), psci-families());
+        let registered = psci-sum-row-field(rows, 2);
+        let integrated = psci-sum-row-field(rows, 3);
+        let repository = psci-sum-row-field(rows, 4);
+        ["public-source-concept-coverage-v1", psci-node-key(index), len(rows), psci-count-families-at-least-two(rows), registered, integrated, repository, psci-percent(registered, repository), psci-percent(integrated, repository), 0, 0, psci-count-entry-keys(psci-index-entries(index)), rows];
+    };
+    def psci-coverage-family-count(c) = c[2];
+    def psci-coverage-families-at-least-two(c) = c[3];
+    def psci-coverage-registered(c) = c[4];
+    def psci-coverage-index-integrated(c) = c[5];
+    def psci-coverage-repository(c) = c[6];
+    def psci-coverage-registered-percent(c) = c[7];
+    def psci-coverage-index-integrated-percent(c) = c[8];
+    def psci-coverage-model-integrated(c) = c[9];
+    def psci-coverage-model-integrated-percent(c) = c[10];
+    def psci-coverage-concept-keys(c) = c[11];
+    def psci-coverage-family-rows(c) = c[12];
+    // ---- bounded public seed: two sources per family, nothing more ----------
+    def psci-seed-spec(family, path, keys) = [family, path, keys];
+    def psci-public-sample-specs() = [psci-seed-spec("axioms", "axioms/core-axioms.form", ["axiom-nothing-whole", "nothing-zero-one-distinct"]), psci-seed-spec("axioms", "axioms/host-kernel.form", ["axiom-host-resources"]), psci-seed-spec("bootstrap", "bootstrap/ground.fk", ["bootstrap-direct-source"]), psci-seed-spec("bootstrap", "bootstrap/ground-recursive.fk", ["bootstrap-recursion"]), psci-seed-spec("form-stdlib", "form/form-stdlib/core.fk", ["form-core-primitives", "one-form-kernel"]), psci-seed-spec("form-stdlib", "form/form-stdlib/form-knowledge-query-token.fk", ["form-query-token", "scannerless-query-envelope"]), psci-seed-spec("grammars", "grammars/grammar-loader.fk", ["grammar-loader-bmf"]), psci-seed-spec("grammars", "grammars/form-eval.fk", ["grammar-source-eval"]), psci-seed-spec("cognition", "cognition/text-frequency.fk", ["cognition-frequency-sense"]), psci-seed-spec("cognition", "cognition/dialogue-covenant.fk", ["cognition-dialogue-covenant"]), psci-seed-spec("learn", "learn/homecoming-distillation-corpus.fk", ["learn-homecoming-distillation"]), psci-seed-spec("learn", "form/form-stdlib/sema-reason-multistep.fk", ["learn-multistep-reasoning"]), psci-seed-spec("observe", "observe/preflight.fk", ["observe-preflight-verdict"]), psci-seed-spec("observe", "observe/belief-freshness.fk", ["observe-belief-freshness"]), psci-seed-spec("teachings", "teachings/uplifting-dialogue.md", ["teaching-uplifting-dialogue"]), psci-seed-spec("teachings", "teachings/concepts/lc-trust-over-fear.md", ["teaching-trust-over-fear"]), psci-seed-spec("receipts", "receipts/2026-08-23-share-is-computed-apply-is-one.md", ["receipt-share-computed"]), psci-seed-spec("receipts", "receipts/2026-07-18-jit-bands-closure-parity.md", ["receipt-jit-closure-parity"]), psci-seed-spec("model", "model/form-neutral-token-space.fk", ["model-neutral-token-space"]), psci-seed-spec("model", "model/form-neutral-language-world-model.fk", ["model-language-world"]), psci-seed-spec("gate", "gate/canonical-conformance.bml", ["gate-canonical-conformance"]), psci-seed-spec("gate", "gate/canonical-conformance-run.bml", ["gate-canonical-conformance-door"]), psci-seed-spec("control", "control/choice-lane-core.fk", ["control-choice-lane"]), psci-seed-spec("control", "control/session-recording-lifecycle.fk", ["control-recording-lifecycle"]), psci-seed-spec("ingest", "ingest/name-build-observe.fk", ["ingest-name-build-observe"]), psci-seed-spec("ingest", "ingest/satsang-transmute.fk", ["ingest-satsang-transmute"]), psci-seed-spec("presence", "presence/inquiry-planes.fk", ["presence-inquiry-planes"]), psci-seed-spec("presence", "presence/device-identity.fk", ["presence-device-identity"]), psci-seed-spec("docs", "docs/local-reasoning-homecoming-lanes.md", ["docs-reasoning-homecoming"]), psci-seed-spec("docs", "docs/live-dynamic-diagnostics.md", ["docs-dynamic-diagnostics"])];
+    def psci-build-specs-at(root, specs, index) = nil?(specs) ? index : {
+        let spec = specs[0];
+        let entry = psci-register-at(root, spec[0], spec[1], spec[2]);
+        nothing?(entry) ? nothing() : psci-build-specs-at(root, specs[1:], psci-add-entry(index, entry));
+    };
+    def psci-public-sample-index-at(root) = psci-build-specs-at(root, psci-public-sample-specs(), psci-index-empty());
+    0;
+}

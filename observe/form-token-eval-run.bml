@@ -1,0 +1,195 @@
+// form-token-eval-run.bml — does the local voice speak Form correctly in its own stream? Asked, not claimed.
+//
+// Each held-out question of learn/form-token-traces.rows (the fixtures in form-stdlib/bml/form-token-eval.bml until
+// the corpus holds held-out rows) is asked of the local voice (Llama-3.2-3B, the voice lane the native LoRA trainer
+// teaches) in up to three arms, with the same question and the same Form-checked answer:
+//   plain   the question and the answer line; Form answers nothing.
+//   taught  the body's own Form-token teaching in the prompt (form-token-grammar.bml ftg-teaching), then the
+//           question and the answer line.
+//   lora    the question alone, the way the trace rows ask it, with the trained adapter worn
+//           (form/form-stdlib/adapters/llama-3.2-3b-form-tokens unless "adapter" names another): taught by its
+//           weights, not its prompt.
+// What the arms compare: plain and taught run the bare instruct model (no adapter); lora wears an adapter chain that
+// starts from llama-3.2-3b-voice-native. The taught arm is limited by the continuation seam: the untrained voice
+// often writes eos right after Form's envelope and answers nothing (the 2026-10-02 row: 32 of 64 answers empty, 16 of
+// 64 stopped at eos after a successful observation). No arm isolates the new training with Form in stream on the same
+// base weights; lora against taught reads the training and the adapter chain together.
+// The taught and lora arms are answered in stream (form-token-eval.bml fte-stream): after each ID the voice writes,
+// a control it has closed is run by Form (form-token-grammar.bml ftg-observe-with, a fresh session per question,
+// every verb: eval, knowledge-query, node-make/get/select, recipe-birth/exec, choice), and Form's seam and
+// observation enter the same KV stream, each encoded on its own as the trained rows encode them; the voice predicts
+// on from there, at most `crossings` times. Nothing is re-asked. A voice's own observation envelope reads forged.
+// The expected answer is Form-checked in the reply's own coordinates (fte-expected-here): a recorded node or recipe
+// address maps to the one Form answered in this stream.
+// Before the voice opens, the door reads the host's fkwu and form-cli processes: while a door that holds a model
+// runs (form-cli-code-run, native-turn-run, day-turn, scheduled-walk, native-lora, another form-token-eval-run) or a
+// form-cli verb that asks a local model, it names them and asks nothing.
+// Prints a line per question, per arm and per family, and the comparison, and appends one row to
+// receipts/form-token-eval.rows; each judged question keeps its stream, so observe/form-token-census.bml counts the
+// voice's controls over the same words and IDs. form-stdlib/tests/form-token-eval-band.bml proves the walk and the
+// comparison model-free over scripted voices.
+// limit is the voice's room to write between two of Form's answers (each control answered earns another limit); crossings 0, the
+// default, answers every control the voice closes (to a ceiling of 32 and the stop of a control closed four times over), a positive
+// number is a fixed bound: nothing about the question has to be known beforehand.
+// stdin, optional, one `name value` a line (form-rows.bml frw-options; the defaults shown):
+//   questions 64   from 0   per_family 0   limit 96   crossings 0   arms plain,taught,lora
+//   adapter form/form-stdlib/adapters/llama-3.2-3b-form-tokens   traces learn/form-token-traces.rows
+//   deadline_ms 0   dry 0   shared 0   batch 1
+// (batch N, 2 to 8: N questions walk at once and their one-token feeds go in one forward (form-token-eval.bml fte-stream-many;
+// native-llama-metal.bml nll-forward-multi), each question to the bits it would have alone; 1 asks one at a time;
+// from: the held-out rows passed over before the first one asked; per_family k > 0: the first k of each family;
+// deadline_ms > 0: no question is begun that long after the door started, and each arm reads only what it asked;
+// dry 1: what a run would ask, read with no model opened and no row written — on a quiet GPU any other line is a
+// physical run)
+// preflight-exec: forbidden
+import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/bml/form-token-eval.bml;
+import form-stdlib/bml/form-token-grammar.bml;
+import form-stdlib/model-registry.bml;
+import form-stdlib/native-llama-voice.bml;
+section [form.bml] {
+ class FormTokenEvalRun {
+  def ftev-voice() = "llama32-3b-mlx-4bit";
+  def ftev-adapter-default() = "form/form-stdlib/adapters/llama-3.2-3b-form-tokens";
+  // the options are Form's own text, read once (stdin drains at the first read); a refused text stops the door aloud, with its line
+  def ftev-options() = ftev-options-read(frw-options(stdin-text() ?? ""));
+  def ftev-options-read(r) = (String) r[0] == "ok" ? r[1] : form_error("form-token-eval-run: the options were refused at line " ++ r[2].str() ++ ": " ++ r[1]);
+  def ftev-num(o, key, fallback) = frw-num(o, key, fallback);
+  def ftev-drop(xs, n) = (n <= 0) || nil?(xs) ? xs : ftev-drop(xs[1:], n - 1);
+  def ftev-str(o, key, fallback) = (String) frw-str(o, key, "") == "" ? fallback : frw-str(o, key, "");
+  // Form for one question: a fresh token session, every verb answered by the grammar
+  def ftev-observer() {
+   let session = ftg-session-fresh();
+   [(v, x) => ftg-observe-with(session, v, x), () => 1];
+  }
+  // ── the Llama voice as fte-stream's voice: state [ctx, pos, choice, stop, capacity] ──
+  // Room past the prompt and the voice's own IDs for Form's seams and observations.
+  def ftev-reserve() = 512;
+  def ftev-voice-of(session, limit) = [p => ftev-begin(session, limit, p), (s, text) => ftev-pick(session, s, text), (s, ids) => ftev-feed(session, s, ids), text => nlt-encode(session[1], text), s => ftev-end(s), (sts, idss) => ftev-feed-many(session, sts, idss)];
+  def ftev-begin(session, limit, prompt) {
+   let model = session[0];
+   let ids = nlt-chat(session[1], prompt);
+   let cap = nlg-admit-capacity(len(ids) + limit + ftev-reserve(), model[0][9]);
+   if len(ids) >= cap then [nothing(), 0, [], "context-admission-refused", cap]
+   else if !nlg-room(nlg-cache-bytes(model, cap)) then [nothing(), 0, [], "memory-pressure", cap]
+   else ftev-begun(model, nll-context(model, cap), ids, cap);
+  }
+  def ftev-begun(model, ctx, ids, cap) {
+   let pre = nlg-prefill(model, ctx, ids, 0, "");
+   [ctx, pre[1], pre[0], pre[2], cap];
+  }
+  def ftev-pick(session, s, text) {
+   let tk = session[1];
+   let c = s[2];
+   if (Comparable) len(s[3]) > 0 then [-1, "", s[3]] else ftev-picked(tk, nlg-pick-id(tk, text, c[0], c[1], c[2]));
+  }
+  def ftev-picked(tk, p) = p[0] < 0 ? [-1, "", p[1]] : nlg-eos(tk, p[0]) ? [p[0], "", "eos"] : !nlt-known-id(tk, p[0]) ? [-1, "", "tokenizer-id-absent"] : [p[0], nlt-decode-id(tk, p[0]), ""];
+  def ftev-feed(session, s, ids) {
+   if (Comparable) len(s[3]) > 0 then s
+   else if (s[1] + len(ids)) > s[4] then [s[0], s[1], s[2], "context-capacity", s[4]]
+   else ftev-fed(s, nlg-prefill(session[0], s[0], ids, s[1], ""));
+  }
+  def ftev-fed(s, pre) = [s[0], pre[1], pre[0], pre[2], s[4]];
+  // The feeds of several streams at once (fte-stream-many): each stream's state after its own feed, as ftev-feed makes it. A stream
+  // that has stopped keeps its state, one that would pass its capacity stops, a memory refusal is the same refusal, and a feed of
+  // one token that fits goes with the others in ONE forward (nll-forward-multi, eight streams at most, each to the bits of its own
+  // step); a feed of several tokens (Form's seam and observation) is the ordinary prefill.
+  def ftev-feed-plan(model, s, ids) = (Comparable) len(s[3]) > 0 ? "keep" : (s[1] + len(ids)) > s[4] ? "capacity" : len(ids) == 1 ? ((Comparable) nlg-chunk(model, 1, s[1]) == 0 ? "pressure" : "one") : "block";
+  def ftev-feed-many(session, sts, idss) {
+   let model = session[0];
+   let plans = map(i => ftev-feed-plan(model, sts[i], idss[i]), range(0, len(sts)));
+   let ones = filter(i => (String) plans[i] == "one", range(0, len(sts)));
+   let tops = ftev-multi-tops(model, map(i => sts[i][0], ones), map(i => idss[i][0], ones), map(i => sts[i][1], ones));
+   map(i => ftev-fed-by(session, plans[i], sts[i], idss[i], tops, ftev-place(ones, i, 0)), range(0, len(sts)));
+  }
+  def ftev-place(ones, i, k) = nil?(ones) ? 0 - 1 : ones[0] == i ? k : ftev-place(ones[1:], i, k + 1);
+  def ftev-fed-by(session, plan, s, ids, tops, k) {
+   if (String) plan == "keep" then s
+   else if (String) plan == "capacity" then [s[0], s[1], s[2], "context-capacity", s[4]]
+   else if (String) plan == "pressure" then ftev-fed(s, [-1, s[1], "memory-pressure"])
+   else if (String) plan == "one" then [s[0], s[1] + 1, tops[k], "", s[4]]
+   else ftev-feed(session, s, ids);
+  }
+  // the best three of each stream, eight streams to a forward
+  def ftev-multi-tops(model, ctxs, ids, poss) = nil?(ctxs) ? [] : append(nll-forward-multi(model, take(8, ctxs), take(8, ids), take(8, poss)), ftev-multi-tops(model, drop(8, ctxs), drop(8, ids), drop(8, poss)));
+  def ftev-end(s) = nothing?(s[0]) ? 0 : nll-context-close(s[0]);
+  def ftev-walk(session, limit) {
+   let voice = ftev-voice-of(session, limit);
+   (prompt, observe, crossings) => fte-stream(voice, observe, prompt, limit, crossings);
+  }
+  def ftev-wait(held) {
+   print_str(fte-held-line("form-token-eval", held) ++ "; form-stdlib/tests/form-token-eval-band.bml reads the comparison model-free");
+   0;
+  }
+  // ── the arms: plain and taught wear no adapter, lora wears the trained one; one voice open at a time ──
+  def ftev-arm-names(o) = filter(a => ftcn-member?(a, ["plain", "taught", "lora"]), split-on(ftev-str(o, "arms", "plain,taught,lora"), ","));
+  def ftev-arms-of(rows, names, adapter, limit, crossings, deadline, width) {
+   let bare = filter(a => !((String) a == "lora"), names);
+   let worn = filter(a => (String) a == "lora", names);
+   append(ftev-asked(rows, bare, "", limit, crossings, deadline, width), ftev-asked(rows, worn, adapter, limit, crossings, deadline, width));
+  }
+  def ftev-asked(rows, names, adapter, limit, crossings, deadline, width) = nil?(names) ? [] : ftev-asked-open(rows, names, limit, crossings, deadline, width, nlg-open(mr-path(mr-find(ftev-voice())), adapter));
+  // The taught arm reads the body's own in-stream teaching (form-token-grammar.bml ftg-teaching, the words
+  // the voice and microthought lanes carry), naming the verbs as the grammar runs them; plain and lora read
+  // fte-prompt's.
+  def ftev-prompt(arm, question) = (String) arm == "taught" ? mc-cat([ftg-teaching(), "\n\nQuestion: ", question, "\n", fte-instruction()]) : fte-prompt(arm, question);
+  def ftev-asked-open(rows, names, limit, crossings, deadline, width, session) {
+   let walk = ftev-walk(session, limit);
+   let voice = ftev-voice-of(session, limit);
+   let arms = width > 1 ? map(a => fte-arm-many(rows, a, (arm, rs, until) => ftev-replies-many(voice, arm, rs, limit, crossings, width, until), deadline), names) : map(a => fte-arm-until(rows, a, (arm, q) => fte-stream-reply-to(walk, ftev-observer, arm, ftev-prompt(arm, q), crossings), deadline), names);
+   let closed = nlg-close(session);
+   arms;
+  }
+  // `batch N` (2 to 8): N questions walk at once, their one-token feeds in one forward (fte-stream-many); 1 asks one at a time.
+  def ftev-batch-width(n) = n < 1 ? 1 : n > 8 ? 8 : n;
+  def ftev-replies-many(voice, arm, rows, limit, crossings, width, deadline) = fte-stream-many(voice, map(r => [ftev-prompt(arm, fte-question(r)), (String) arm == "plain" ? nothing() : ftev-observer], rows), limit, crossings, width, deadline);
+  def ftev-arm-named(arms, name) = foldl((found, a) => (String) a[0] == name ? a : found, nothing(), arms);
+  def ftev-compare(arms, name) {
+   let plain = ftev-arm-named(arms, "plain");
+   let other = ftev-arm-named(arms, name);
+   nothing?(plain) || nothing?(other) ? 0 : print_str(fte-compare-line(plain, other));
+  }
+  def ftev-rows-of(o, source) {
+   let k = ftev-num(o, "per_family", 0);
+   let pool = ftev-drop(source[1], ftev-num(o, "from", 0));
+   take(ftev-num(o, "questions", len(pool)), fte-round-robin(k > 0 ? fte-per-family(pool, k) : pool));
+  }
+  // what the device did of the wall clock, read with every run (the gap between them is the host, the sync and the neighbours)
+  def ftev-busy-share(busy_us, wall_ms) = (busy_us / 1000).str() ++ " ms" ++ (wall_ms <= 0 ? "" : " (" ++ ((busy_us / 10) / wall_ms).str() ++ "% of the wall)");
+  def ftev-ask-all(o) {
+   let source = fte-rows(ftev-str(o, "traces", fte-traces()));
+   let rows = ftev-rows-of(o, source);
+   let adapter = ftev-str(o, "adapter", ftev-adapter-default());
+   let names = ftev-arm-names(o);
+   let started = now_unix_ms();
+   let busy0 = metal_live()[11];
+   let candle0 = nam-candle();
+   let budget = ftev-num(o, "deadline_ms", 0);
+   let arms = ftev-arms-of(rows, names, adapter, ftev-num(o, "limit", 96), ftev-num(o, "crossings", 0), budget > 0 ? started + budget : nothing(), ftev-batch-width(ftev-num(o, "batch", 1)));
+   let questions = map(a => map(q => print_str(fte-question-line(a, q)), a[2]), arms);
+   let families = map(a => map(f => print_str(fte-family-line(a[0], f)), fte-families(a)), arms);
+   let lines = map(a => print_str(fte-line(a)), arms);
+   let compared = map(n => ftev-compare(arms, n), ["taught", "lora"]);
+   print_str(mc-cat(["[form-token-eval] ", source[0], ", ", len(rows).str(), " held-out question(s), voice ", ftev-voice(), ftcn-member?("lora", names) ? mc-cat([", the lora arm wearing ", adapter]) : "", ", crossing in-stream, ", (now_unix_ms() - started).str(), " ms, the device busy ", ftev-busy-share(metal_live()[11] - busy0, now_unix_ms() - started), "; the machine candle (a fixed matrix product) ", (candle0 / 100).str(), " then ", (nam-candle() / 100).str(), " tenths of a ms"]));
+   let appended = fhn-append(fte-ledger(), frb-row-text(fte-row(now_unix_ms(), source[0], ftev-voice(), ftcn-member?("lora", names) ? adapter : "", 1, "in-stream", arms)));
+   len(arms);
+  }
+  // "dry":1 reads what a run would ask (the rows in order, the arms, each arm's first prompt) and opens no model
+  def ftev-dry(o) {
+   let source = fte-rows(ftev-str(o, "traces", fte-traces()));
+   let rows = ftev-rows-of(o, source);
+   let names = ftev-arm-names(o);
+   print_str(mc-cat(["[form-token-eval] dry: ", source[0], ", ", len(rows).str(), " question(s) in order ", str-join-with(map(r => fte-id(r), rows), ","), "; arms ", str-join-with(names, ","), "; adapter for lora ", ftev-str(o, "adapter", ftev-adapter-default())]));
+   let prompts = map(a => print_str(mc-cat(["[form-token-eval] dry ", a, " prompt: ", nil?(rows) ? "" : ftev-prompt(a, fte-question(rows[0]))])), names);
+   0;
+  }
+  def ftev-run() {
+   let o = ftev-options();
+   // "shared":1 accepts the neighbours the gate names (a measurement; the cycle passes it when told to)
+   let held = (Comparable) ftev-num(o, "shared", 0) == 1 ? [] : fte-held();
+   (Comparable) ftev-num(o, "dry", 0) == 1 ? ftev-dry(o) : nil?(held) ? ftev-ask-all(o) : ftev-wait(held);
+  }
+ }
+ ftev-run();
+}

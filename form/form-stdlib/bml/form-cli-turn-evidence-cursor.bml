@@ -1,0 +1,286 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-cli-turn-evidence-cursor.bml — scannerless, cursor-owned discovery
+// for a completed local evidence row.
+//
+// The rollout stays private.  This cell moves only byte coordinates, task
+// identifiers, and the existing collector's typed status; prompt and answer
+// text never leave the reader.  It carries its own durable cursor so a live
+// Form turnwheel can re-enter one bounded slice without a shell loop or an
+// unbounded evaluator stack.
+//
+//////////////////////////////////////////////////////////////////////
+
+import form-stdlib/form-cli-turn-evidence-live.fk;
+
+section [form.bml] {
+    class FormCliTurnEvidenceCursor {
+        field Rule = "scannerless-backward-cursor-yields-a-durable-next-slice";
+        field PrivacyRule = "only-coordinates-turn-id-and-status-leave-the-reader";
+        field NoTargetRule = "empty-target-selects-the-nearest-completed-turn-without-emitting-its-content";
+        field ProgressPrefix = "turn-evidence-refresh=progress";
+        field CollectorRule = "typed-prefix-selects-rows-output-span-stays-coordinate-owned";
+        field StaleExpiryRule = "latestness-disproved-expires-current-row-before-next-cursor-step";
+        field OneMovementRule = "one-invocation-owns-one-bounded-evidence-movement";
+        field PhaseResumeRule = "physically-valid-progress-or-start-resumes-before-any-terminal-rediscovery";
+        field ValidationRangeRule = "each-persisted-append-snapshot-resumes-to-its-checked-floor-before-growth-rolls-forward";
+        field ProcessingBytes = 2097152;
+        field AttentionMs = 5000;
+        field LatestTag = "form-cli-turn-evidence-latest-v1";
+        field ValidationLegacyTag = "turn-evidence-latest-validation-v1";
+        field ValidationTag = "turn-evidence-latest-validation-v2";
+
+        def fctec-rule() = Rule();
+        def fctec-privacy-rule() = PrivacyRule();
+        def fctec-no-target-rule() = NoTargetRule();
+        def fctec-progress-prefix() = ProgressPrefix();
+        def fctec-collector-rule() = CollectorRule();
+        def fctec-stale-expiry-rule() = StaleExpiryRule();
+        def fctec-one-movement-rule() = OneMovementRule();
+        def fctec-phase-resume-rule() = PhaseResumeRule();
+        def fctec-validation-range-rule() = ValidationRangeRule();
+        def fctec-processing-bytes() = ProcessingBytes();
+        def fctec-attention-ms() = AttentionMs();
+        def fctec-attention-state(elapsed) = elapsed <= fctec-attention-ms() ? "within" : "over";
+        def fctec-invocation-action(valid, validating, staleExpired) = (Comparable) valid == 1 ? "already-observed" : (Comparable) validating == 1 ? "validating-latest" : (Comparable) staleExpired == 1 ? "expired-stale-current-row" : "advance";
+        def fctec-invocation-status(action) = "turn-evidence-refresh=" + action;
+        def fctec-progress?(status) = str_find(status, fctec-progress-prefix(), 0) >= 0 ? 1 : 0;
+
+        // result = found? absolute-event-offset window-end.  `found?=0` and
+        // `offset=-1` are a whole answer, distinct from the numeric offset 0.
+        def fctec-result(found, at, end) = ["form-cli-turn-evidence-cursor-v1", found, at, end];
+        def fctec-found?(result) = result[1];
+        def fctec-at(result) = result[2];
+        def fctec-end(result) = result[3];
+        def fctec-result?(result) = nothing?(result) ? 0 : !((Comparable) len(result) == 4) ? 0 : ((String) result[0] == "form-cli-turn-evidence-cursor-v1");
+
+        // Latest-complete validation is a separate append-range cursor.  A
+        // collector cursor may be targeting an older selected turn, so it can
+        // never certify latestness for a cached percentage.
+        def fctec-latest-result(status, next, found, size) = [LatestTag(), status, next, found, size];
+        def fctec-latest-status(result) = result[1];
+        def fctec-latest-next(result) = result[2];
+        def fctec-latest-found(result) = result[3];
+        def fctec-latest-size(result) = result[4];
+        def fctec-latest?(result) = (Comparable) fctec-latest-status(result) == 1;
+        def fctec-latest-progress?(result) = (Comparable) fctec-latest-status(result) == 2;
+
+        def fctec-expire-stale(rowPath, validationPath) {
+            let validationCleared = write_file_text(validationPath, "");
+            let rowCleared = write_file_text(rowPath, "");
+            ["turn-evidence-stale-expiry-v1", validationCleared, rowCleared];
+        }
+        def fctec-expire-current-stale() = fctec-expire-stale(fctel-observed-row-path(), fctel-latest-validation-path());
+
+        // status: 0 stale/error, 1 this frozen range is clear, 2 bounded
+        // validation is in motion.  A terminal at or above `floor` is newer;
+        // a terminal below it belongs to an already checked generation.
+        def fctec-latest-range-step(path, floor, end, size) {
+            let found = fctec-seek(path, "", end);
+            (Comparable) fctec-found?(found) == 1 ?
+                (fctec-at(found) >= floor ? fctec-latest-result(0, fctec-end(found), fctec-at(found), size)
+                : fctec-latest-result(1, floor, -1, size))
+            : fctec-end(found) <= floor ? fctec-latest-result(1, floor, -1, size)
+            : fctec-latest-result(2, fctec-end(found), -1, size);
+        }
+        def fctec-latest-step(path, carrier_size, complete_at, end) {
+            let size = file_size(path);
+            size < carrier_size ? fctec-latest-result(0, 0, -1, size)
+            : (Comparable) size == carrier_size ? fctec-latest-result(1, size, complete_at, size)
+            : fctec-latest-range-step(path, carrier_size, end, size);
+        }
+
+        def fctec-read-validation() = file_size(fctel-latest-validation-path()) > 0 ? split-on(fctel-trim-end(read_file(fctel-latest-validation-path())), "|") : [];
+        // v2 appends the checked floor without moving any v1 field.  A valid
+        // v1 row migrates with floor=carrier, preserving its already consumed
+        // cursor instead of restarting the private scan.
+        def fctec-validation-shape?(parts) = ((Comparable) len(parts) == 10) && ((String) parts[0] == ValidationTag()) ? 1 : ((Comparable) len(parts) == 9) && ((String) parts[0] == ValidationLegacyTag()) ? 1 : 0;
+        def fctec-validation-floor(parts, e) = ((Comparable) len(parts) == 10) && ((String) parts[0] == ValidationTag()) ? str_to_int(parts[9]) : fcte-carrier-size(e);
+        def fctec-validation-snapshot(parts, e, size) = (Comparable) fctec-validation-matches?(parts, e, size) == 1 ? str_to_int(parts[5]) : size;
+        def fctec-validation-row(e, path, snapshot, cursor, floor) = fctel-join([ValidationTag(), "|", fcte-thread-id(e), "|", fcte-turn-id(e), "|", fcte-carrier-size(e).str(), "|", fcte-complete-at(e).str(), "|", snapshot.str(), "|", cursor.str(), "|", fcte-model-provider(e), "|", fcte-model(e), "|", floor.str()]);
+        def fctec-validation-range-valid?(parts, e, size) {
+            let carrier = fcte-carrier-size(e);
+            let snapshot = str_to_int(parts[5]);
+            let cursor = str_to_int(parts[6]);
+            let floor = fctec-validation-floor(parts, e);
+            floor < carrier ? 0 : floor > snapshot ? 0 : snapshot > size ? 0 : cursor <= floor ? 0 : cursor > snapshot ? 0 : 1;
+        }
+        def fctec-validation-matches?(parts, e, size) = !((Comparable) fctec-validation-shape?(parts) == 1) ? 0 : !((String) parts[1] == fcte-thread-id(e)) ? 0 : !((String) parts[2] == fcte-turn-id(e)) ? 0 : !((Comparable) str_to_int(parts[3]) == fcte-carrier-size(e)) ? 0 : !((Comparable) str_to_int(parts[4]) == fcte-complete-at(e)) ? 0 : !((Comparable) fctec-validation-range-valid?(parts, e, size) == 1) ? 0 : !((String) parts[7] == fcte-model-provider(e)) ? 0 : !((String) parts[8] == fcte-model(e)) ? 0 : 1;
+        def fctec-validation-cursor(parts, e, size) = (Comparable) fctec-validation-matches?(parts, e, size) == 1 ? str_to_int(parts[6]) : size;
+        def fctec-validation-keep(e, path, snapshot, floor, step) {
+            let kept = write_file_text(fctel-latest-validation-path(), fctec-validation-row(e, path, snapshot, fctec-latest-next(step), floor));
+            step;
+        }
+        def fctec-validation-clear(step) {
+            let cleared = write_file_text(fctel-latest-validation-path(), "");
+            step;
+        }
+        def fctec-validation-roll-forward(e, path, snapshot, current) {
+            let rolled = write_file_text(fctel-latest-validation-path(), fctec-validation-row(e, path, current, current, snapshot));
+            fctec-latest-result(2, current, -1, current);
+        }
+        def fctec-validation-finish-clear(e, path, snapshot, step) {
+            let current = file_size(path);
+            current < snapshot ? fctec-validation-clear(fctec-latest-result(0, 0, -1, current))
+            : current > snapshot ? fctec-validation-roll-forward(e, path, snapshot, current)
+            : fctec-validation-clear(step);
+        }
+        def fctec-validation-finish(e, path, snapshot, floor, step) {
+            (Comparable) fctec-latest-progress?(step) == 1 ? fctec-validation-keep(e, path, snapshot, floor, step)
+            : (Comparable) fctec-latest?(step) == 0 ? fctec-validation-clear(step)
+            : fctec-validation-finish-clear(e, path, snapshot, step);
+        }
+        def fctec-validation-continue(e, path, snapshot, floor, cursor) = fctec-validation-finish(e, path, snapshot, floor, fctec-latest-range-step(path, floor, cursor, snapshot));
+        // Once the entire unchecked tail fits one slice, check that union
+        // against the current snapshot. Otherwise each invocation's own
+        // carrier output makes the next generation lag forever. Large tails
+        // keep their frozen cursor; no unchecked bytes or terminals are skipped.
+        def fctec-validation-coalescible?(matched, size, floor) = ((Comparable) matched == 1) && ((size >= floor) && ((size - floor) <= fctec-processing-bytes()));
+        def fctec-advance-latest(e, path) {
+            let size = file_size(path);
+            let prior = fctec-read-validation();
+            let matched = fctec-validation-matches?(prior, e, size);
+            let floor = (Comparable) matched == 1 ? fctec-validation-floor(prior, e) : fcte-carrier-size(e);
+            let coalesce = fctec-validation-coalescible?(matched, size, floor);
+            let snapshot = coalesce ? size : fctec-validation-snapshot(prior, e, size);
+            let cursor = coalesce ? size : fctec-validation-cursor(prior, e, size);
+            size < fcte-carrier-size(e) ? fctec-validation-finish(e, path, snapshot, floor, fctec-latest-result(0, 0, -1, size))
+            : (Comparable) size == fcte-carrier-size(e) ? fctec-validation-finish(e, path, snapshot, floor, fctec-latest-result(1, size, fcte-complete-at(e), size))
+            : fctec-validation-continue(e, path, snapshot, floor, cursor);
+        }
+
+        // One invocation reads one aligned bounded 2 MiB slice. A miss returns the
+        // next durable byte cursor; it never recursively consumes the rollout.
+        def fctec-seek(path, target, end) {
+            let window = fctel-discovery-window(path, end);
+            let [base, body, start] = window;
+            let found = fctel-find-last-terminal-line(body, target, 0, -1);
+            found >= 0 ? fctec-result(1, base + found, end) : fctec-result(0, -1, start);
+        }
+
+        def fctec-turn-id-at(path, at) = at < 0 ? "" : fctel-json-payload-string(read_file_slice(path, at, 512), "turn_id");
+        def fctec-codex-source-reconciled?(e, path) {
+            let size = file_size(path);
+            let meta = fctel-first-line(read_file_slice(path, 0, fctel-min(size, 1048576)));
+            let start_prefix = read_file_slice(path, fcte-start-at(e), 4096);
+            // Physical reads may include later rows in this living carrier.
+            // Frame exactly one row before the strict whole-document decoder.
+            let complete_prefix = fctel-first-line(read_file_slice(path, fcte-complete-at(e), 4096));
+            // Earlier readers omitted structured tool results. Their rows
+            // remain historical data, but must be recollected for live share.
+            let c1 = ((String) e[0] == fcte-tag-current()) && (((Comparable) fcte-provenance-shape?(e) == 1) && (size >= fcte-carrier-size(e)));
+            let c2 = (String) fctec-turn-id-at(path, fcte-complete-at(e)) == fcte-turn-id(e);
+            let c3 = (String) fctel-session-meta-thread-id(meta) == fcte-thread-id(e);
+            let c4 = (String) fctel-session-meta-provider(meta) == fcte-model-provider(e);
+            let c5 = (Comparable) fctel-line-event?(start_prefix, "task_started", fcte-turn-id(e)) == 1;
+            let c6 = (Comparable) fctel-terminal-line?(complete_prefix, fcte-turn-id(e)) == 1;
+            let c7 = (Comparable) fctel-timestamp-ms(start_prefix) == fcte-started-ms(e);
+            let c8 = (Comparable) fctel-timestamp-ms(complete_prefix) == fcte-ended-ms(e);
+            c1 && (c2 && (c3 && (c4 && (c5 && (c6 && (c7 && c8)))))) ? 1 : 0;
+        }
+        def fctec-start-cursor(path, size) = fctel-discovery-cursor(fctel-read-discovery(), path, size);
+        def fctec-start-size(path, size) = fctel-discovery-size(fctel-read-discovery(), path, size);
+
+        // Land the one discovered coordinate back into the existing collector
+        // before asking it to parse the selected task.  The collector selects
+        // typed rows from a bounded 2 MiB window; output size and @form receipt
+        // are read from coordinates and a 512-byte tail. Validation and the
+        // durable observed-row ABI remain unchanged.
+        def fctec-refresh-no-complete() {
+            write_file_text(fctel-discovery-path(), "");
+            write_file_text(fctel-candidate-row-path(), "");
+            "turn-evidence-refresh=unavailable reason=no-complete-turn";
+        }
+        def fctec-refresh-discovering(path, size, cursor) {
+            let progressCleared = write_file_text(fctel-progress-path(), "");
+            let startCleared = write_file_text(fctel-start-discovery-path(), "");
+            write_file_text(fctel-candidate-row-path(), "");
+            write_file_text(fctel-discovery-path(), fctel-discovery-row(path, size, cursor));
+            "turn-evidence-refresh=discovering cursor=" + (cursor.str() + ("/" + size.str()));
+        }
+        def fctec-refresh-missing-turn() {
+            write_file_text(fctel-candidate-row-path(), "");
+            "turn-evidence-refresh=unavailable reason=missing-turn-id";
+        }
+        // Exactly one bounded collector slice per invocation.  `progress` is
+        // not a failure: its on-disk cursor is the continuation owned by this
+        // BML authority and can be scheduled as a later resident row.
+        def fctec-refresh-selected(path, size, found, turn) {
+            write_file_text(fctel-discovery-path(), "");
+            fctel-refresh-coordinate-once(path, size, fctec-at(found), turn);
+        }
+        def fctec-refresh-found(path, size, found) {
+            let turn = fctec-turn-id-at(path, fctec-at(found));
+            (String) turn == "" ? fctec-refresh-missing-turn() : fctec-refresh-selected(path, size, found, turn);
+        }
+        def fctec-refresh-nonempty(path, size, target) {
+            let snapshot = fctec-start-size(path, size);
+            let found = fctec-seek(path, target, fctec-start-cursor(path, size));
+            (Comparable) fctec-found?(found) == 1 ? fctec-refresh-found(path, snapshot, found) : (Comparable) fctec-end(found) == 0 ? fctec-refresh-no-complete() : fctec-refresh-discovering(path, snapshot, fctec-end(found));
+        }
+
+        // A selected turn already owns its terminal coordinate in the start
+        // row, and a collecting turn owns all three coordinates in progress.
+        // Re-searching the append tail for that same terminal made two phases
+        // coexist and paid the same backward slices again.  These pure
+        // predicates keep phase choice testable without touching the live
+        // spool; their effectful doors clear the superseded discovery row
+        // before continuing exactly one bounded movement.
+        def fctec-phase-action(path, size, progress, start) =
+            (Comparable) fctel-progress-active?(progress, start, path, size) == 1 ? "resume-progress"
+            : (Comparable) fctel-start-discovery-active?(start, path, size) == 1 ? "resume-start"
+            : "discover";
+        def fctec-clear-discovery-candidate() {
+            let discoveryCleared = write_file_text(fctel-discovery-path(), "");
+            let candidateCleared = write_file_text(fctel-candidate-row-path(), "");
+            1;
+        }
+        def fctec-resume-progress(path, progress) {
+            let cleared = fctec-clear-discovery-candidate();
+            fctel-collect-once(path, str_to_int(progress[1]),
+                str_to_int(progress[4]), progress[2],
+                str_to_int(progress[3]));
+        }
+        def fctec-resume-start(path, start) {
+            let cleared = fctec-clear-discovery-candidate();
+            fctel-refresh-coordinate-once(path, str_to_int(start[1]),
+                str_to_int(start[3]), start[2]);
+        }
+        def fctec-stale-selected-turn(progress, start) =
+            (Comparable) len(start) == 8 ? start[2]
+            : (Comparable) len(progress) == 28 ? progress[2]
+            : "";
+        def fctec-clear-stale-target(progress, start) {
+            let staleTurn = fctec-stale-selected-turn(progress, start);
+            let target = file_size(fctel-target-turn-path()) > 0 ? fctel-trim-end(read_file(fctel-target-turn-path())) : "";
+            (!((String) staleTurn == "")) && ((String) staleTurn == target) ? write_file_text(fctel-target-turn-path(), "") : 1;
+        }
+        def fctec-reset-stale-phase(progress, start) {
+            let targetCleared = fctec-clear-stale-target(progress, start);
+            let progressCleared = write_file_text(fctel-progress-path(), "");
+            let startCleared = write_file_text(fctel-start-discovery-path(), "");
+            1;
+        }
+        def fctec-refresh-discover(path, size, progress, start) {
+            let reset = fctec-reset-stale-phase(progress, start);
+            let target = file_size(fctel-target-turn-path()) > 0 ? fctel-trim-end(read_file(fctel-target-turn-path())) : "";
+            fctec-refresh-nonempty(path, size, target);
+        }
+        def fctec-refresh(path) {
+            let size = file_size(path);
+            let progress = fctel-read-progress();
+            let start = fctel-read-start-discovery();
+            let action = fctec-phase-action(path, size, progress, start);
+            size <= 0 ? "turn-evidence-refresh=unavailable reason=empty-source"
+            : (String) action == "resume-progress" ? fctec-resume-progress(path, progress)
+            : (String) action == "resume-start" ? fctec-resume-start(path, start)
+            : fctec-refresh-discover(path, size, progress, start);
+        }
+
+        def fctec-refresh-bound() {
+            let path = fctel-bound-path();
+            (String) path == "" ? "turn-evidence-refresh=unavailable reason=no-bound-path" : fctec-refresh(path);
+        }
+    }
+    0;
+}

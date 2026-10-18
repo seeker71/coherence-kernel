@@ -1,0 +1,106 @@
+// ear-glass-live.fk — the room transcribed live on glass, three tongues at
+// once, in milliseconds, the body's own: the live lane (observe/ear-live-native.fk:
+// the native microphone stream and the native whisper-tiny pass) and the tongue
+// lane (observe/ear-tongue-native.fk: the native llama lane for the tongues not
+// heard) are Form processes; each writes frames to the ear spool; the
+// door drains the spool by watermark (a 20 ms rest when it is dry), paints the newest frame — one lane per chosen tongue (dim while the
+// line still grows and its renderings are "saying", plain once it closed and they
+// are "said"), level, live line, heard line, the reference's own doubt, and three
+// latencies measured from the last audio sample — and publishes voice.ear.
+// Full screen is the terminal that runs it: `printf '600\n\n' | ./fkwu observe/ear-glass-live.fk`
+// (a double-click file once did this; it was a shell script and left the tree).
+// stdin line 1: run seconds (blank -> 30); line 2: the tongues to offer, whisper codes separated by spaces (blank -> "en pt fa id").
+// preflight-exec: forbidden
+import form/form-stdlib/hearth.bml;
+import form/form-stdlib/spool-bell-transport.fk;
+import form/form-stdlib/form-fs.fk;
+import form/form-stdlib/line-grammar.fk;
+import form/form-stdlib/form-glass-telemetry-membrane.bml;
+import form/form-stdlib/term-graphics.bml;
+section [form.bml] {
+    def eg-trim(s) = nothing?(s) ? "" : trim(s);
+    def eg-text(t) = nothing?(t) ? "" : t;
+    def eg-cat(parts) = (Comparable) len(parts) == 0 ? "" : ((String) parts[0] + eg-cat(parts[1:]));
+    def eg-spool() = ".hearth/ear.spool";
+    def eg-line-end(s, i) = i >= len(s) ? i : (Comparable) str_byte_at(s, i) == 10 ? i : eg-line-end(s, (Number) i + (Number) 1);
+    def eg-field(s, key) = {
+        let at = str_find(s, (byte_to_str(10) + (key + "=")), 0);
+        at < 0 ? "" : substring(s, (Number) at + (Number) ((Number) len(key) + (Number) 2), eg-line-end(s, (Number) at + (Number) ((Number) len(key) + (Number) 2)));
+    };
+    def eg-int(s, key) = {
+        let v = eg-field(s, key);
+        (Comparable) len(v) == 0 ? 0 : str_to_int(v);
+    };
+    // only the newest whole frame matters to a live panel
+    def eg-through(text, from, last) = {
+        let c = str_find(text, "<|/ear:frame|>", from);
+        c < 0 ? last : eg-through(text, (Number) c + (Number) 14, (Number) c + (Number) 14);
+    };
+    def eg-drain(r) = {
+        let sz = file_size(sbt-path(r));
+        sz <= sbt-mark(r) ? [[], r] : {
+            let text = eg-text(read_file_slice(sbt-path(r), sbt-mark(r), sz - sbt-mark(r)));
+            let th = eg-through(text, 0, 0);
+            (Comparable) th == 0 ? [[], r] : [eg-frames(substring(text, 0, th), 0, []), [sbt-path(r), (Number) sbt-mark(r) + (Number) th]];
+        };
+    };
+    def eg-bar(db) = tg-bar(((Number) db + (Number) 60) / 6, 10);
+    def eg-tongue(l) = (Comparable) len(l) == 0 ? "" : eg-cat([l, "  "]);
+    // one lane per chosen tongue: the said frame names them (tongues=) and carries t_<code> fields; before any said frame, the chosen set
+    def eg-pad(s) = len(s) >= 8 ? s : eg-pad((s + " "));
+    // the renderings come from the newest said or saying frame: dim while the line still grows, plain once it closed
+    def eg-tongue-lanes(s, codes, style) = (Comparable) len(codes) == 0 ? [] : cons(tg-lane(eg-pad(codes[0]), eg-field(s, ("t_" + codes[0])), style, 0 - 1), eg-tongue-lanes(s, codes[1:], style));
+    def eg-saying?(s) = (String) eg-field(s, "kind") == "saying";
+    def eg-lanes(f, h, s, nowms, n, codes) = append(eg-tongue-lanes(s, (Comparable) len(eg-field(s, "tongues")) == 0 ? codes : split-on(eg-field(s, "tongues"), " "), eg-saying?(s) ? "dim" : "plain"), [tg-lane("EAR     ", eg-cat(["the room live, the tongues as the words land; frame #", n.str(), " ", eg-field(f, "kind")]), "dim", 0 - 1), tg-lane("level   ", eg-cat([eg-bar(eg-int(f, "db")), " ", eg-int(f, "db").str(), " dBFS"]), eg-int(f, "db") < 0 - 55 ? "dim" : "good", 0 - 1), tg-lane("live    ", eg-cat([eg-tongue(eg-field(f, "livelang")), eg-field(f, "live")]), "plain", nowms - eg-int(f, "t")), tg-lane("heard   ", eg-cat([eg-tongue(eg-field(h, "lang")), eg-field(h, "heard")]), "plain", 0 - 1), tg-lane("phantom?", eg-cat([eg-bar(eg-int(h, "nsp") - 60), " ", eg-int(h, "nsp").str(), "% the reference doubts speech was here"]), tg-scale(eg-int(h, "nsp"), 30, 60), 0 - 1), tg-lane("stages  ", eg-cat(["mic slice ≤100 ms · encode ", eg-int(f, "encms").str(), " ms · decode ", eg-int(f, "decms").str(), " ms for ", eg-int(f, "ntok").str(), " tokens · emit→glass ", (nowms - eg-int(f, "t")).str(), " ms"]), "dim", 0 - 1), tg-lane("latency ", eg-cat(["live ", ((Number) eg-int(f, "livems") + (Number) (nowms - eg-int(f, "t"))).str(), " ms · heard ", eg-int(h, "heardms").str(), " ms · ", eg-saying?(s) ? "saying " : "said ", eg-int(s, "saidms").str(), " ms, from the last sample to this glass"]), tg-scale((Number) eg-int(f, "livems") + (Number) (nowms - eg-int(f, "t")), 500, 1000), 0 - 1)]);
+    def eg-publish(f, h, epoch) = fgtm-publish-snapshot(hearth-telemetry-root(), "voice.ear", epoch, [fgtm-sample("ear.level", fgtm-absent(), "ear", "form", "voice.ear", "voice", "dbfs-below-zero", fgtm-absent(), fgtm-present(0 - eg-int(f, "db")), eg-int(f, "db") < 0 - 55 ? "idle" : "active", fgtm-absent(), fgtm-present(epoch), fgtm-absent(), fgtm-absent(), "never", "physical-live", "ear-organ", ["all", "we", "mesh", "voice"]), fgtm-sample("ear.latency", fgtm-absent(), "ear", "form", "voice.ear", "voice", (Comparable) len(eg-field(h, "lang")) == 0 ? "silence" : eg-field(h, "lang"), fgtm-absent(), fgtm-present(eg-int(h, "heardms")), "completed", fgtm-absent(), fgtm-present(epoch), fgtm-absent(), fgtm-absent(), "never", "physical-live", "ear-organ", ["all", "we", "mesh", "voice"])]);
+    // two lanes write the spool: live/quiet/born/done frames from the live lane, heard from its close, said and saying
+    // from the tongue lane; the panel keeps the newest live, the newest heard-or-said, and the newest said-or-saying
+    def eg-frames(text, from, acc) = {
+        let o = str_find(text, "<|ear:frame|>", from);
+        o < 0 ? reverse(acc) : {
+            let c = str_find(text, "<|/ear:frame|>", o);
+            c < 0 ? reverse(acc) : eg-frames(text, (Number) c + (Number) 14, cons(substring(text, o, (Number) c + (Number) 14), acc));
+        };
+    };
+    def eg-heard?(f) = (String) eg-field(f, "kind") == "heard" || (String) eg-field(f, "kind") == "said";
+    def eg-said?(f) = (String) eg-field(f, "kind") == "saying" || (String) eg-field(f, "kind") == "said";
+    def eg-merge(frames, live, heard, said) = (Comparable) len(frames) == 0 ? [live, heard, said] : eg-merge(frames[1:], eg-heard?(frames[0]) || eg-said?(frames[0]) ? live : frames[0], eg-heard?(frames[0]) ? frames[0] : heard, eg-said?(frames[0]) ? frames[0] : said);
+    def eg-paint(live, heard, said, n, codes) = {
+        let now = now_unix_ms();
+        let put = print_str(tg-frame(eg-lanes(live, heard, said, now, n, codes)));
+        (Comparable) (n % 5) == 0 ? eg-publish(live, heard, now) : 0;
+        n;
+    };
+    def eg-loop(r, live, heard, said, n, deadline, codes) = {
+        let d = eg-drain(r);
+        let m = eg-merge(d[0], live, heard, said);
+        let shown = (Comparable) len(d[0]) == 0 ? n : eg-paint(m[0], m[1], m[2], (Number) n + (Number) 1, codes);
+        (String) eg-field(m[0], "kind") == "done" || now_unix_ms() > deadline ? shown : len(d[0]) > 0 ? eg-loop(d[1], m[0], m[1], m[2], shown, deadline, codes) : {
+            let woke = host_sleep_ms(20);
+            eg-loop(d[1], m[0], m[1], m[2], shown, deadline, codes);
+        };
+    };
+    let secs = str_to_int({
+        let l = eg-trim(read_line());
+        (Comparable) len(l) == 0 ? "30" : l;
+    });
+    let tongues = {
+        let l = eg-trim(read_line());
+        (Comparable) len(l) == 0 ? "en pt fa id" : l;
+    };
+    let codes = split-on(tongues, " ");
+    let mk = fs-mkdir(".hearth");
+    let cleared = fs-remove-file((eg-spool() + ".stop"));
+    // The door reads the spool by watermark and rests 20 ms between reads (eg-loop): the lanes do not wait at a bell, so no fifo is made,
+    // and the deadline below is this loop's own patience (a dead organ cannot hold the door) — no deferred ring is owed.
+    let r0 = [eg-spool(), file_size(eg-spool()) < 0 ? 0 : file_size(eg-spool())];
+    // the two lanes, begun by argv with their first stdin line(s) from a file and their stdout and stderr in one log each
+    let liveIn = write_file_text(".hearth/ear-live.in", eg-cat([secs.str(), "\n"]));
+    let tongueIn = write_file_text(".hearth/ear-tongue.in", eg-cat([secs.str(), "\n", tongues, "\n"]));
+    let liveLane = host_spawn_at(["./fkwu", "observe/ear-live-native.fk"], [".hearth/ear-live.in", ".hearth/ear-live.log", ".hearth/ear-live.log"]);
+    let tongueLane = host_spawn_at(["./fkwu", "observe/ear-tongue-native.fk"], [".hearth/ear-tongue.in", ".hearth/ear-tongue.log", ".hearth/ear-tongue.log"]);
+    let shown = eg-loop(r0, "", "", "", 0, (Number) now_unix_ms() + (Number) (1000 * ((Number) secs + (Number) 40)), codes);
+    let stop = write_file_text((eg-spool() + ".stop"), "stop");
+    print_str(("\near frames shown=" + (shown.str() + "\n")));
+    0;
+}

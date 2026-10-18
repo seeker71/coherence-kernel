@@ -1,0 +1,71 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen4exp-flash-next-generate.bml — executable native response loop.
+//
+// Authority: form-stdlib/qwen4exp-flash-next-generate.bml
+import form/form-stdlib/qwen4exp-flash-next-tokenizer.bml;
+import form/form-stdlib/qwen4exp-flash-next-state.bml;
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Qwen4ExpFlashNextGenerateAuthority {
+        field Q4XAuthorityPath = "form/form-stdlib/qwen4exp-flash-next-generate.bml";
+        field Q4XAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class Qwen4ExpFlashNextGenerate {
+        field Q4XSchema = "qwen4exp-native-generation-v1";
+        field Q4XEos = 248046;
+
+        ref q4x-authority = Qwen4ExpFlashNextGenerateAuthority;
+        thought q4x-flow = ["gguf-tokenize", "prefix-evaluate", "resident-decode", "eos-stop", "gguf-decode"];
+
+        // result: tag, resident slot, generated ids, decoded text, stop reason,
+        // evaluated prompt tokens, generated token count.
+        def q4x-result(slot, ids, text, reason, promptTokens) {
+            ["qwen4exp-native-generation", slot, ids, text, reason, promptTokens, len(ids)];
+        }
+        def q4x-result-slot(result) = result[1];
+        def q4x-result-ids(result) = result[2];
+        def q4x-result-text(result) = result[3];
+        def q4x-result-reason(result) = result[4];
+        def q4x-result-prompt-tokens(result) = result[5];
+        def q4x-result-generated(result) = result[6];
+
+        def q4x-stop-reason(token, remaining) = (Comparable) token == Q4XEos() ? "eos" : remaining <= 0 ? "budget" : "continue";
+        def q4x-finish(src, slot, ids, reason, promptTokens) = q4x-result(slot, ids, q4tk-decode(src, ids), reason, promptTokens);
+
+        def q4x-decode-continue(src, slot, next, remaining, ids, promptTokens) {
+            let grown = append(ids, [next]);
+            let advanced = q4s-evaluate-one(slot, next);
+            q4x-decode-loop(src, advanced, q4s-output(advanced), remaining - 1, grown, promptTokens);
+        }
+        def q4x-decode-loop(src, slot, next, remaining, ids, promptTokens) {
+            let reason = q4x-stop-reason(next, remaining);
+            (String) reason == "eos" ? q4x-finish(src, slot, ids, reason, promptTokens)
+            : (String) reason == "budget" ? q4x-finish(src, slot, ids, reason, promptTokens)
+            : q4x-decode-continue(src, slot, next, remaining, ids, promptTokens);
+        }
+
+        def q4x-from-prefill(src, prefill, budget, promptTokens) {
+            let slot = q4s-result-slot(prefill);
+            q4x-decode-loop(src, slot, q4s-output(slot), budget, [], promptTokens);
+        }
+        def q4x-evaluate-ids(src, slot, ids, budget) {
+            let prefill = q4s-evaluate(slot, ids);
+            q4x-from-prefill(src, prefill, budget, len(ids));
+        }
+        def q4x-evaluate-text(src, slot, text, budget) = q4x-evaluate-ids(src, slot, q4tk-encode(src, text), budget);
+        def q4x-evaluate-chat(src, slot, prompt, budget) = q4x-evaluate-ids(src, slot, q4tk-chat-ids(src, prompt), budget);
+
+        def q4x-generate(prefix, maxpos, prompt, budget) {
+            let path = prefix + "00001-of-00003.gguf";
+            let src = eqr-of-file(path, 0, 12000000);
+            let slot = q4s-open(prefix, maxpos);
+            q4x-evaluate-chat(src, slot, prompt, budget);
+        }
+        def q4x-close(result) = q4s-close(q4x-result-slot(result));
+    }
+    0;
+}

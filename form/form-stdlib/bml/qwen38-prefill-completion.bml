@@ -1,0 +1,69 @@
+// Completion belongs to the executing prefill slice. Positions advance only
+// after the carrier settles its work; refusal leaves the owning session intact.
+import form-stdlib/bml/qwen38-open-observation.bml;
+import form-stdlib/hearth.bml;
+import form-stdlib/organ-health.bml;
+import form-stdlib/form-glass-gift-frame.bml;
+section [form.bml] {
+ class Qwen38PrefillCompletion {
+  field ProgressCoordinate = 8388623;
+  def q38pc-wait-policy() {
+   let live = metal_live();
+   // Preserve an existing caller deadline. Sessions without one receive the
+   // body's deadline for this carrier lifetime, including subsequent release.
+   if ((len(live) >= 14) && (live[13] < 0)) then metal_deadline(hearth-metal-deadline-ms()) else 0;
+  }
+  def q38pc-stage(pos,phase) = q38oo-stage(("model-prefill-positions-" + (pos.str() + ("-" + phase))),ProgressCoordinate());
+  def q38pc-settled(live) = if (len(live) < 15) then 0 else (((Comparable) live[5] == 0) && (((Comparable) live[6] == 0) && ((Comparable) live[14] == 0)));
+  def q38pc-frame(status) = if (str_find(status,"wait_frame=timeout\n",0) >= 0) then "timeout" else if (str_find(status,"wait_frame=error\n",0) >= 0) then "error" else if (str_find(status,"wait_frame=completed\n",0) >= 0) then "completed" else if (str_find(status,"wait_frame=released\n",0) >= 0) then "released" else "unobserved";
+  def q38pc-error(status) {
+   let key="last_error=";
+   let at=str_find("\n"+status,"\n"+key,0);
+   let end=len(status);
+   let error=at<0 ? nothing() : substring(status,at+len(key),end>0 && substring(status,end - 1,end)=="\n" ? end - 1 : end);
+   nothing?(error) || error=="" || error=="none" ? nothing() : error;
+  }
+  def q38pc-sync(pos,count) {
+   q38pc-stage(pos,"sync-begin");
+   let began=host_monotonic_ms();
+   q38pc-progress(pos,count,"waiting",0,began);
+   let drained = metal_sync();
+   let frame = q38pc-frame(metal_status());
+   let live = metal_live();
+   let complete = ((drained > 0) && (q38pc-settled(live) && (((String) frame == "completed") || ((String) frame == "released"))));
+   q38pc-progress(pos,count,complete ? "completed" : "refused",drained,began);
+   if complete then 1 else q38pc-refuse(pos,count,drained,frame,live);
+  }
+  def q38pc-publisher(pid,root) = root+":qwen-prefill:"+pid.str();
+  // The same native values remain visible while a containing cell captures
+  // stdout. No prompt, answer or model bytes enter this observation frame.
+  def q38pc-progress(pos,count,phase,drained,began) {
+   let elapsed=host_monotonic_ms() - began;
+   let live=metal_live();
+   let frame=["qwen-prefill-v1",host_pid(),host_cwd(),phase,pos,count,now_unix_ms(),elapsed,drained,live];
+   let publisher=q38pc-publisher(host_pid(),host_cwd());
+   let handle=ggf-offer(publisher,ggf-flat-size(frame));
+   let sequence=ggf-seq(handle);
+   let prior=sequence > 0 ? node_gift_read(handle) : nothing();
+   let owned=sequence==0 || (value_kind(prior)=="list" && len(prior)==10 && prior[0]==frame[0] && prior[1]==frame[1] && prior[2]==frame[2]);
+   let given=!owned ? nothing() : node_gift_write(handle,frame);
+   let released=ggf-release(handle);
+   nothing?(given) || released != 1 ? oh-voice(oh-reading("qwen-prefill","native-model-session","progress-publication",json-node-int(1),json-node-int(0),json-node-int(0),[],[],json-node-object([oh-s("publisher",publisher),oh-n("release_ok",released),json-node-pair("handle",nothing?(handle) ? json-node-null() : json-node-int(handle))]))) : gift_roster_register(publisher);
+   fb_record(intern_node(intern_trivial_string(phase),[intern_trivial_int(pos),intern_trivial_int(count),intern_trivial_int(elapsed),intern_trivial_int(drained)]),q38oo-source(),ProgressCoordinate());
+   frame;
+  }
+  def q38pc-refuse(pos,count,drained,frame,live) {
+   let error=q38pc-error(metal_status());
+   let evidence = json-node-object([oh-n("completed_positions",pos),oh-n("slice_positions",count),oh-n("drained_dispatches",drained),oh-s("wait_frame",frame),json-node-pair("carrier",json-node-array(oh-ints(live))),json-node-pair("carrier_error",nothing?(error) ? json-node-null() : json-node-string(error))]);
+   let reading = oh-reading("qwen-prefill","native-model-session","slice-completion",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("settled-gpu-work",evidence)],["stop-prefill"],evidence);
+   oh-voice(reading);
+   let response = oh-response(reading,"stop-prefill");
+   oh-voice(response);
+   let action = oh-select(reading,response,"");
+   q38pc-stage(pos,"refused");
+   oh-voice(oh-applied(reading,action,json-node-object([oh-n("next_slice_admitted",0),oh-n("prediction_accepted",0)])));
+   0;
+  }
+  def q38pc-head-bytes?(bytes) = if nothing?(bytes) then 0 else if (!((String) value_kind(bytes) == "string")) then 0 else ((Comparable) len(bytes) == 4);
+ }
+}

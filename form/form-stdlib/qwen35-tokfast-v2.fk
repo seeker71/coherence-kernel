@@ -1,0 +1,392 @@
+// qwen35-tokfast-v2.fk — a seal-keyed, fixed-row tokenizer index whose
+// runtime lookup reads one bounded slice per binary-search probe.
+//
+// This is deliberately not one joined blob: an 11 MB joined blob is
+// correct-shaped but priced out on the present fkwu string waist, and lookup
+// must not depend on a whole-blob str_find.  V2 records two independently
+// sorted artifacts instead:
+//
+//   vocab.rows   V|LLLLLL|VVVVVVVVVV|<hex key, dot padded>\n
+//   merge.rows   M|LLLLLL|RRRRRR|VVVVVVVVVV|<hex left><hex right, padded>\n
+// Each file has one constant row width named by manifest.row.  A lookup reads
+// exactly that row with fs-read-slice, parses it through an immutable raw-byte
+// BMF cursor, compares the recovered bytes, and chooses the next half.  No
+// token list, merge list, flattened Form table, C seed, or operation registry
+// participates.
+//
+// The recorder accepts rows only in strict key order.  Until finish publishes
+// the manifest by rename, the artifact is absent to readers.  The manifest is
+// keyed by the caller's exact live artifact-seal line.  Missing, stale,
+// malformed, and size-mismatched indexes return an explicit fallback outcome;
+// a present value of 0 or 1 remains distinct from nothing.
+//
+// This cell is only the recording/lookup organ.  It is not wired into model
+// generation and does not freeze or open a GGUF.
+//
+import form-stdlib/core.fk;
+import form-stdlib/form-fs.fk;
+import form-stdlib/bmf-core.fk;
+// Proven by: form-stdlib/tests/qwen35-tokfast-v2-band.fk
+section [form.bml] {
+    def qtf2-version() = 2;
+    def qtf2-magic() = "QTF2|";
+    def qtf2-manifest-name() = "manifest.row";
+    def qtf2-manifest-candidate-name() = "manifest.candidate";
+    def qtf2-vocab-name() = "vocab.rows";
+    def qtf2-merge-name() = "merge.rows";
+    def qtf2-root-for(path) = (path + ".form-tokfast-v2");
+    def qtf2-manifest-path(root) = fs-path-join(root, qtf2-manifest-name());
+    def qtf2-manifest-candidate-path(root) = fs-path-join(root, qtf2-manifest-candidate-name());
+    def qtf2-vocab-path(root) = fs-path-join(root, qtf2-vocab-name());
+    def qtf2-merge-path(root) = fs-path-join(root, qtf2-merge-name());
+    // ---- byte, hex, and fixed integer waist ------------------------------
+    def qtf2-repeat(s, n, acc) = n <= 0 ? acc : qtf2-repeat(s, n - 1, ((String) acc + s));
+    def qtf2-string-bytes-go(s, i, n, acc) = i >= n ? reverse(acc) : qtf2-string-bytes-go(s, i + 1, n, cons(str_byte_at(s, i), acc));
+    def qtf2-string-bytes(s) = qtf2-string-bytes-go(s, 0, len(s), []);
+    def qtf2-bytes-string(bs, acc) = nil?(bs) ? acc : qtf2-bytes-string(bs[1:], ((String) acc + byte_to_str(bs[0])));
+    def qtf2-hex-digit(n) = substring("0123456789abcdef", n, n + 1);
+    def qtf2-byte-hex(b) = ((String) qtf2-hex-digit(b / 16) + qtf2-hex-digit(b % 16));
+    def qtf2-bytes-hex(bs, acc) = nil?(bs) ? acc : qtf2-bytes-hex(bs[1:], ((String) acc + qtf2-byte-hex(bs[0])));
+    def qtf2-hex-value(b) = b >= 48 && b <= 57 ? b - 48 : b >= 65 && b <= 70 ? 10 + (b - 65) : b >= 97 && b <= 102 ? 10 + (b - 97) : -1;
+    def qtf2-fixed-nat(n, width) = n < 0 ? "" : {
+        let s = n.str();
+        len(s) > width ? "" : ((String) qtf2-repeat("0", width - len(s), "") + s);
+    };
+    def qtf2-bytes-cmp(a, b) = nil?(a) ? nil?(b) ? 0 : -1 : nil?(b) ? 1 : a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : qtf2-bytes-cmp(a[1:], b[1:]);
+    def qtf2-merge-key-cmp(al, ar, bl, br) = {
+        let left = qtf2-bytes-cmp(al, bl);
+        (Comparable) left == 0 ? qtf2-bytes-cmp(ar, br) : left;
+    };
+    // ---- fixed row text ---------------------------------------------------
+    def qtf2-vocab-width(cap) = 21 + 2 * cap;
+    def qtf2-merge-width(lcap, rcap) = 28 + 2 * (lcap + rcap);
+    def qtf2-padded-hex(bs, cap) = len(bs) > cap ? "" : ((String) qtf2-bytes-hex(bs, "") + qtf2-repeat(".", 2 * (cap - len(bs)), ""));
+    def qtf2-vocab-row-text(cap, key, value) = {
+        let ls = qtf2-fixed-nat(len(key), 6);
+        let vs = qtf2-fixed-nat(value, 10);
+        let hs = qtf2-padded-hex(key, cap);
+        (String) ls == "" || ((String) vs == "" || (String) hs == "") ? "" : ("V|" + (ls + ("|" + (vs + ("|" + (hs + "\n"))))));
+    };
+    def qtf2-merge-row-text(lcap, rcap, left, right, rank) = {
+        let ls = qtf2-fixed-nat(len(left), 6);
+        let rs = qtf2-fixed-nat(len(right), 6);
+        let vs = qtf2-fixed-nat(rank, 10);
+        let lh = qtf2-padded-hex(left, lcap);
+        let rh = qtf2-padded-hex(right, rcap);
+        (String) ls == "" || ((String) rs == "" || ((String) vs == "" || ((String) lh == "" || (String) rh == ""))) ? "" : ("M|" + (ls + ("|" + (rs + ("|" + (vs + ("|" + (lh + (rh + "\n")))))))));
+    };
+    // ---- scannerless fixed-field parsing ---------------------------------
+    def qtf2-step(status, value, cursor) = [status, value, cursor];
+    def qtf2-step-status(r) = r[0];
+    def qtf2-step-value(r) = r[1];
+    def qtf2-step-cursor(r) = r[2];
+    def qtf2-expect-byte(c, byte) = cur-eof?(c) ? qtf2-step("malformed", 0, c) : (Comparable) cur-peek(c) == byte ? qtf2-step("ok", byte, cur-advance(c, 1)) : qtf2-step("malformed", 0, c);
+    def qtf2-expect-text-go(c, s, i, n) = i >= n ? qtf2-step("ok", 1, c) : {
+        let one = qtf2-expect-byte(c, str_byte_at(s, i));
+        !((String) qtf2-step-status(one) == "ok") ? one : qtf2-expect-text-go(qtf2-step-cursor(one), s, i + 1, n);
+    };
+    def qtf2-expect-text(c, s) = qtf2-expect-text-go(c, s, 0, len(s));
+    def qtf2-read-fixed-nat-go(c, remain, value) = (Comparable) remain == 0 ? qtf2-step("ok", value, c) : cur-eof?(c) ? qtf2-step("malformed", 0, c) : {
+        let b = cur-peek(c);
+        b >= 48 && b <= 57 ? qtf2-read-fixed-nat-go(cur-advance(c, 1), remain - 1, value * 10 + (b - 48)) : qtf2-step("malformed", 0, c);
+    };
+    def qtf2-read-fixed-nat(c, width) = qtf2-read-fixed-nat-go(c, width, 0);
+    def qtf2-read-field(c, width) = {
+        let n = qtf2-read-fixed-nat(c, width);
+        !((String) qtf2-step-status(n) == "ok") ? n : {
+            let bar = qtf2-expect-byte(qtf2-step-cursor(n), 124);
+            !((String) qtf2-step-status(bar) == "ok") ? bar : qtf2-step("ok", qtf2-step-value(n), qtf2-step-cursor(bar));
+        };
+    };
+    def qtf2-read-hex-go(c, remain, acc) = (Comparable) remain == 0 ? qtf2-step("ok", reverse(acc), c) : cur-eof?(c) ? qtf2-step("malformed", [], c) : {
+        let hi = qtf2-hex-value(cur-peek(c));
+        let c1 = cur-advance(c, 1);
+        hi < 0 || cur-eof?(c1) ? qtf2-step("malformed", [], c1) : {
+            let lo = qtf2-hex-value(cur-peek(c1));
+            lo < 0 ? qtf2-step("malformed", [], c1) : qtf2-read-hex-go(cur-advance(c1, 1), remain - 1, cons(hi * 16 + lo, acc));
+        };
+    };
+    def qtf2-read-hex(c, n) = qtf2-read-hex-go(c, n, []);
+    def qtf2-skip-byte-go(c, byte, remain) = (Comparable) remain == 0 ? qtf2-step("ok", 1, c) : {
+        let one = qtf2-expect-byte(c, byte);
+        !((String) qtf2-step-status(one) == "ok") ? one : qtf2-skip-byte-go(qtf2-step-cursor(one), byte, remain - 1);
+    };
+    // row result = status left right value
+    def qtf2-row-result(status, left, right, value) = [status, left, right, value];
+    def qtf2-row-status(r) = r[0];
+    def qtf2-row-left(r) = r[1];
+    def qtf2-row-right(r) = r[2];
+    def qtf2-row-value(r) = r[3];
+    def qtf2-row-failure() = qtf2-row-result("malformed", [], [], 0);
+    def qtf2-row-end-ok?(c) = {
+        let nl = qtf2-expect-byte(c, 10);
+        (String) qtf2-step-status(nl) == "ok" ? 1 : 0;
+    };
+    def qtf2-document-end-ok?(c) = {
+        let nl = qtf2-expect-byte(c, 10);
+        !((String) qtf2-step-status(nl) == "ok") ? 0 : cur-eof?(qtf2-step-cursor(nl)) ? 1 : 0;
+    };
+    def qtf2-parse-vocab-row(c, cap) = {
+        let pre = qtf2-expect-text(c, "V|");
+        !((String) qtf2-step-status(pre) == "ok") ? qtf2-row-failure() : {
+            let kl = qtf2-read-field(qtf2-step-cursor(pre), 6);
+            !((String) qtf2-step-status(kl) == "ok") || qtf2-step-value(kl) > cap ? qtf2-row-failure() : {
+                let val = qtf2-read-field(qtf2-step-cursor(kl), 10);
+                !((String) qtf2-step-status(val) == "ok") ? qtf2-row-failure() : {
+                    let key = qtf2-read-hex(qtf2-step-cursor(val), qtf2-step-value(kl));
+                    !((String) qtf2-step-status(key) == "ok") ? qtf2-row-failure() : {
+                        let pad = qtf2-skip-byte-go(qtf2-step-cursor(key), 46, 2 * (cap - qtf2-step-value(kl)));
+                        !((String) qtf2-step-status(pad) == "ok") || !((Comparable) qtf2-row-end-ok?(qtf2-step-cursor(pad)) == 1) ? qtf2-row-failure() : qtf2-row-result("ok", qtf2-step-value(key), [], qtf2-step-value(val));
+                    };
+                };
+            };
+        };
+    };
+    def qtf2-parse-merge-row(c, lcap, rcap) = {
+        let pre = qtf2-expect-text(c, "M|");
+        !((String) qtf2-step-status(pre) == "ok") ? qtf2-row-failure() : {
+            let ll = qtf2-read-field(qtf2-step-cursor(pre), 6);
+            !((String) qtf2-step-status(ll) == "ok") || qtf2-step-value(ll) > lcap ? qtf2-row-failure() : {
+                let rl = qtf2-read-field(qtf2-step-cursor(ll), 6);
+                !((String) qtf2-step-status(rl) == "ok") || qtf2-step-value(rl) > rcap ? qtf2-row-failure() : {
+                    let val = qtf2-read-field(qtf2-step-cursor(rl), 10);
+                    !((String) qtf2-step-status(val) == "ok") ? qtf2-row-failure() : {
+                        let left = qtf2-read-hex(qtf2-step-cursor(val), qtf2-step-value(ll));
+                        !((String) qtf2-step-status(left) == "ok") ? qtf2-row-failure() : {
+                            let lpad = qtf2-skip-byte-go(qtf2-step-cursor(left), 46, 2 * (lcap - qtf2-step-value(ll)));
+                            !((String) qtf2-step-status(lpad) == "ok") ? qtf2-row-failure() : {
+                                let right = qtf2-read-hex(qtf2-step-cursor(lpad), qtf2-step-value(rl));
+                                !((String) qtf2-step-status(right) == "ok") ? qtf2-row-failure() : {
+                                    let rpad = qtf2-skip-byte-go(qtf2-step-cursor(right), 46, 2 * (rcap - qtf2-step-value(rl)));
+                                    !((String) qtf2-step-status(rpad) == "ok") || !((Comparable) qtf2-row-end-ok?(qtf2-step-cursor(rpad)) == 1) ? qtf2-row-failure() : qtf2-row-result("ok", qtf2-step-value(left), qtf2-step-value(right), qtf2-step-value(val));
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    // ---- seal-keyed manifest ---------------------------------------------
+    // manifest = seal vcount vcap vwidth mcount lcap rcap mwidth
+    def qtf2-manifest(seal, vcount, vcap, vwidth, mcount, lcap, rcap, mwidth) = ["qtf2-manifest", seal, vcount, vcap, vwidth, mcount, lcap, rcap, mwidth];
+    def qtf2-manifest-seal(m) = m[1];
+    def qtf2-manifest-vcount(m) = m[2];
+    def qtf2-manifest-vcap(m) = m[3];
+    def qtf2-manifest-vwidth(m) = m[4];
+    def qtf2-manifest-mcount(m) = m[5];
+    def qtf2-manifest-lcap(m) = m[6];
+    def qtf2-manifest-rcap(m) = m[7];
+    def qtf2-manifest-mwidth(m) = m[8];
+    def qtf2-manifest-field(text, value, width) = (text + (qtf2-fixed-nat(value, width) + "|"));
+    def qtf2-manifest-text(m) = {
+        let seal-bs = qtf2-string-bytes(qtf2-manifest-seal(m));
+        let a = qtf2-manifest-field(qtf2-magic(), len(seal-bs), 6);
+        let b = qtf2-manifest-field(a, qtf2-manifest-vcount(m), 10);
+        let c = qtf2-manifest-field(b, qtf2-manifest-vcap(m), 6);
+        let d = qtf2-manifest-field(c, qtf2-manifest-vwidth(m), 6);
+        let e = qtf2-manifest-field(d, qtf2-manifest-mcount(m), 10);
+        let f = qtf2-manifest-field(e, qtf2-manifest-lcap(m), 6);
+        let g = qtf2-manifest-field(f, qtf2-manifest-rcap(m), 6);
+        let h = qtf2-manifest-field(g, qtf2-manifest-mwidth(m), 6);
+        (h + (qtf2-bytes-hex(seal-bs, "") + "\n"));
+    };
+    // parse result = status manifest reason
+    def qtf2-manifest-result(status, manifest, reason) = [status, manifest, reason];
+    def qtf2-manifest-result-status(r) = r[0];
+    def qtf2-manifest-result-value(r) = r[1];
+    def qtf2-manifest-result-reason(r) = r[2];
+    def qtf2-parse-manifest(text) = {
+        let pre = qtf2-expect-text(cursor-str(text), qtf2-magic());
+        !((String) qtf2-step-status(pre) == "ok") ? qtf2-manifest-result("failure", [], "manifest-magic") : {
+            let sl = qtf2-read-field(qtf2-step-cursor(pre), 6);
+            let vc = (String) qtf2-step-status(sl) == "ok" ? qtf2-read-field(qtf2-step-cursor(sl), 10) : sl;
+            let vp = (String) qtf2-step-status(vc) == "ok" ? qtf2-read-field(qtf2-step-cursor(vc), 6) : vc;
+            let vw = (String) qtf2-step-status(vp) == "ok" ? qtf2-read-field(qtf2-step-cursor(vp), 6) : vp;
+            let mc = (String) qtf2-step-status(vw) == "ok" ? qtf2-read-field(qtf2-step-cursor(vw), 10) : vw;
+            let lp = (String) qtf2-step-status(mc) == "ok" ? qtf2-read-field(qtf2-step-cursor(mc), 6) : mc;
+            let rp = (String) qtf2-step-status(lp) == "ok" ? qtf2-read-field(qtf2-step-cursor(lp), 6) : lp;
+            let mw = (String) qtf2-step-status(rp) == "ok" ? qtf2-read-field(qtf2-step-cursor(rp), 6) : rp;
+            !((String) qtf2-step-status(mw) == "ok") ? qtf2-manifest-result("failure", [], "manifest-fields") : {
+                let seal = qtf2-read-hex(qtf2-step-cursor(mw), qtf2-step-value(sl));
+                !((String) qtf2-step-status(seal) == "ok") || !((Comparable) qtf2-document-end-ok?(qtf2-step-cursor(seal)) == 1) ? qtf2-manifest-result("failure", [], "manifest-seal") : qtf2-manifest-result("ok", qtf2-manifest(qtf2-bytes-string(qtf2-step-value(seal), ""), qtf2-step-value(vc), qtf2-step-value(vp), qtf2-step-value(vw), qtf2-step-value(mc), qtf2-step-value(lp), qtf2-step-value(rp), qtf2-step-value(mw)), "parsed");
+            };
+        };
+    };
+    // index = status reason root manifest
+    def qtf2-index(status, reason, root, manifest) = ["qtf2-index", status, reason, root, manifest];
+    def qtf2-index-status(x) = x[1];
+    def qtf2-index-reason(x) = x[2];
+    def qtf2-index-root(x) = x[3];
+    def qtf2-index-manifest(x) = x[4];
+    def qtf2-index-current?(x) = (String) qtf2-index-status(x) == "current" ? 1 : 0;
+    def qtf2-index-empty(status, reason, root) = qtf2-index(status, reason, root, []);
+    def qtf2-index-from-text(root, text, live-seal, vocab-size, merge-size) = {
+        let parsed = qtf2-parse-manifest(text);
+        !((String) qtf2-manifest-result-status(parsed) == "ok") ? qtf2-index-empty("failure", qtf2-manifest-result-reason(parsed), root) : {
+            let m = qtf2-manifest-result-value(parsed);
+            !((String) qtf2-manifest-seal(m) == live-seal) ? qtf2-index("stale", "seal-mismatch", root, m) : !((Comparable) qtf2-manifest-vwidth(m) == qtf2-vocab-width(qtf2-manifest-vcap(m))) ? qtf2-index("failure", "vocab-width", root, m) : !((Comparable) qtf2-manifest-mwidth(m) == qtf2-merge-width(qtf2-manifest-lcap(m), qtf2-manifest-rcap(m))) ? qtf2-index("failure", "merge-width", root, m) : !((Comparable) vocab-size == qtf2-manifest-vcount(m) * qtf2-manifest-vwidth(m)) ? qtf2-index("failure", "vocab-size", root, m) : !((Comparable) merge-size == qtf2-manifest-mcount(m) * qtf2-manifest-mwidth(m)) ? qtf2-index("failure", "merge-size", root, m) : qtf2-index("current", "seal-and-extents-current", root, m);
+        };
+    };
+    def qtf2-load(root, live-seal) = (Comparable) fs-exists?(qtf2-manifest-path(root)) == 0 ? qtf2-index-empty("absent", "manifest-absent", root) : (Comparable) fs-exists?(qtf2-vocab-path(root)) == 0 || (Comparable) fs-exists?(qtf2-merge-path(root)) == 0 ? qtf2-index-empty("absent", "row-artifact-absent", root) : qtf2-index-from-text(root, fs-read-text(qtf2-manifest-path(root)), live-seal, fs-stat-size(qtf2-vocab-path(root)), fs-stat-size(qtf2-merge-path(root)));
+    // ---- explicit lookup outcome -----------------------------------------
+    // A present bit owns presence. value may honestly be 0 or 1.
+    def qtf2-outcome(status, value, present, reason, probes) = ["qtf2-outcome", status, value, present, reason, probes];
+    def qtf2-outcome-status(o) = o[1];
+    def qtf2-outcome-value(o) = o[2];
+    def qtf2-outcome-present?(o) = o[3];
+    def qtf2-outcome-reason(o) = o[4];
+    def qtf2-outcome-probes(o) = o[5];
+    def qtf2-hit(value, probes) = qtf2-outcome("hit", value, 1, "exact", probes);
+    def qtf2-miss(probes) = qtf2-outcome("miss", nothing(), 0, "absent", probes);
+    def qtf2-refusal(status, reason) = qtf2-outcome(status, nothing(), 0, reason, 0);
+    // ---- in-memory binary search: same row codec, synthetic proof door ----
+    def qtf2-vocab-find-in-go(text, count, cap, width, key, lo, hi, probes) = lo >= hi ? qtf2-miss(probes) : {
+        let mid = (lo + hi) / 2;
+        let c = cur-advance(cursor-str(text), mid * width);
+        let row = qtf2-parse-vocab-row(c, cap);
+        !((String) qtf2-row-status(row) == "ok") ? qtf2-refusal("failure", "malformed-vocab-row") : {
+            let cmp = qtf2-bytes-cmp(qtf2-row-left(row), key);
+            (Comparable) cmp == 0 ? qtf2-hit(qtf2-row-value(row), probes + 1) : cmp < 0 ? qtf2-vocab-find-in-go(text, count, cap, width, key, mid + 1, hi, probes + 1) : qtf2-vocab-find-in-go(text, count, cap, width, key, lo, mid, probes + 1);
+        };
+    };
+    def qtf2-vocab-find-in(text, count, cap, key) = qtf2-vocab-find-in-go(text, count, cap, qtf2-vocab-width(cap), key, 0, count, 0);
+    def qtf2-merge-find-in-go(text, count, lcap, rcap, width, left, right, lo, hi, probes) = lo >= hi ? qtf2-miss(probes) : {
+        let mid = (lo + hi) / 2;
+        let c = cur-advance(cursor-str(text), mid * width);
+        let row = qtf2-parse-merge-row(c, lcap, rcap);
+        !((String) qtf2-row-status(row) == "ok") ? qtf2-refusal("failure", "malformed-merge-row") : {
+            let cmp = qtf2-merge-key-cmp(qtf2-row-left(row), qtf2-row-right(row), left, right);
+            (Comparable) cmp == 0 ? qtf2-hit(qtf2-row-value(row), probes + 1) : cmp < 0 ? qtf2-merge-find-in-go(text, count, lcap, rcap, width, left, right, mid + 1, hi, probes + 1) : qtf2-merge-find-in-go(text, count, lcap, rcap, width, left, right, lo, mid, probes + 1);
+        };
+    };
+    def qtf2-merge-find-in(text, count, lcap, rcap, left, right) = qtf2-merge-find-in-go(text, count, lcap, rcap, qtf2-merge-width(lcap, rcap), left, right, 0, count, 0);
+    // ---- bounded file-slice binary search: production lookup door --------
+    def qtf2-file-row-cursor(path, width, index) = {
+        let s = fs-read-slice(path, index * width, width);
+        (Comparable) len(s) == width ? [1, cursor-str(s)] : [0, cursor-str("")];
+    };
+    def qtf2-vocab-find-file-go(x, key, lo, hi, probes) = lo >= hi ? qtf2-miss(probes) : {
+        let m = qtf2-index-manifest(x);
+        let mid = (lo + hi) / 2;
+        let got = qtf2-file-row-cursor(qtf2-vocab-path(qtf2-index-root(x)), qtf2-manifest-vwidth(m), mid);
+        (Comparable) got[0] == 0 ? qtf2-refusal("failure", "short-vocab-slice") : {
+            let row = qtf2-parse-vocab-row(got[1], qtf2-manifest-vcap(m));
+            !((String) qtf2-row-status(row) == "ok") ? qtf2-refusal("failure", "malformed-vocab-row") : {
+                let cmp = qtf2-bytes-cmp(qtf2-row-left(row), key);
+                (Comparable) cmp == 0 ? qtf2-hit(qtf2-row-value(row), probes + 1) : cmp < 0 ? qtf2-vocab-find-file-go(x, key, mid + 1, hi, probes + 1) : qtf2-vocab-find-file-go(x, key, lo, mid, probes + 1);
+            };
+        };
+    };
+    def qtf2-vocab-find-file(x, key) = !((Comparable) qtf2-index-current?(x) == 1) ? qtf2-refusal(qtf2-index-status(x), qtf2-index-reason(x)) : qtf2-vocab-find-file-go(x, key, 0, qtf2-manifest-vcount(qtf2-index-manifest(x)), 0);
+    def qtf2-merge-find-file-go(x, left, right, lo, hi, probes) = lo >= hi ? qtf2-miss(probes) : {
+        let m = qtf2-index-manifest(x);
+        let mid = (lo + hi) / 2;
+        let got = qtf2-file-row-cursor(qtf2-merge-path(qtf2-index-root(x)), qtf2-manifest-mwidth(m), mid);
+        (Comparable) got[0] == 0 ? qtf2-refusal("failure", "short-merge-slice") : {
+            let row = qtf2-parse-merge-row(got[1], qtf2-manifest-lcap(m), qtf2-manifest-rcap(m));
+            !((String) qtf2-row-status(row) == "ok") ? qtf2-refusal("failure", "malformed-merge-row") : {
+                let cmp = qtf2-merge-key-cmp(qtf2-row-left(row), qtf2-row-right(row), left, right);
+                (Comparable) cmp == 0 ? qtf2-hit(qtf2-row-value(row), probes + 1) : cmp < 0 ? qtf2-merge-find-file-go(x, left, right, mid + 1, hi, probes + 1) : qtf2-merge-find-file-go(x, left, right, lo, mid, probes + 1);
+            };
+        };
+    };
+    def qtf2-merge-find-file(x, left, right) = !((Comparable) qtf2-index-current?(x) == 1) ? qtf2-refusal(qtf2-index-status(x), qtf2-index-reason(x)) : qtf2-merge-find-file-go(x, left, right, 0, qtf2-manifest-mcount(qtf2-index-manifest(x)), 0);
+    // Pure index-aware mirrors let the band prove stale/absent fallback
+    // without touching a filesystem. A current in-memory index uses the same
+    // fixed-row parser and comparison as the file-slice door above.
+    def qtf2-vocab-find-index-in(x, text, key) = !((Comparable) qtf2-index-current?(x) == 1) ? qtf2-refusal(qtf2-index-status(x), qtf2-index-reason(x)) : {
+        let m = qtf2-index-manifest(x);
+        qtf2-vocab-find-in(text, qtf2-manifest-vcount(m), qtf2-manifest-vcap(m), key);
+    };
+    def qtf2-merge-find-index-in(x, text, left, right) = !((Comparable) qtf2-index-current?(x) == 1) ? qtf2-refusal(qtf2-index-status(x), qtf2-index-reason(x)) : {
+        let m = qtf2-index-manifest(x);
+        qtf2-merge-find-in(text, qtf2-manifest-mcount(m), qtf2-manifest-lcap(m), qtf2-manifest-rcap(m), left, right);
+    };
+    // ---- leftmost minimum-rank choice ------------------------------------
+    // choice = status position rank present probes
+    def qtf2-pair-choice(status, position, rank, present, probes) = [status, position, rank, present, probes];
+    def qtf2-pair-choice-status(c) = c[0];
+    def qtf2-pair-choice-position(c) = c[1];
+    def qtf2-pair-choice-rank(c) = c[2];
+    def qtf2-pair-choice-present?(c) = c[3];
+    def qtf2-pair-choice-probes(c) = c[4];
+    def qtf2-best-pair-in-go(text, count, lcap, rcap, syms, i, found, best-pos, best-rank, probes) = i + 1 >= len(syms) ? qtf2-pair-choice("ok", best-pos, best-rank, found, probes) : {
+        let one = qtf2-merge-find-in(text, count, lcap, rcap, syms[i], syms[i + 1]);
+        (String) qtf2-outcome-status(one) == "failure" || (String) qtf2-outcome-status(one) == "stale" ? qtf2-pair-choice(qtf2-outcome-status(one), 0, 0, 0, probes + qtf2-outcome-probes(one)) : {
+            let hit = qtf2-outcome-present?(one);
+            let rank = hit ? qtf2-outcome-value(one) : 0;
+            // Strictly lower only: equality retains the earlier
+            // position, which is the reference BPE's leftmost tie.
+            let better = hit && ((Comparable) found == 0 || rank < best-rank);
+            qtf2-best-pair-in-go(text, count, lcap, rcap, syms, i + 1, hit ? 1 : found, better ? i : best-pos, better ? rank : best-rank, probes + qtf2-outcome-probes(one));
+        };
+    };
+    def qtf2-best-pair-in(text, count, lcap, rcap, syms) = qtf2-best-pair-in-go(text, count, lcap, rcap, syms, 0, 0, 0, 0, 0);
+    def qtf2-best-pair-file-go(x, syms, i, found, best-pos, best-rank, probes) = i + 1 >= len(syms) ? qtf2-pair-choice("ok", best-pos, best-rank, found, probes) : {
+        let one = qtf2-merge-find-file(x, syms[i], syms[i + 1]);
+        !((String) qtf2-outcome-status(one) == "hit" || (String) qtf2-outcome-status(one) == "miss") ? qtf2-pair-choice(qtf2-outcome-status(one), 0, 0, 0, probes + qtf2-outcome-probes(one)) : {
+            let hit = qtf2-outcome-present?(one);
+            let rank = hit ? qtf2-outcome-value(one) : 0;
+            let better = hit && ((Comparable) found == 0 || rank < best-rank);
+            qtf2-best-pair-file-go(x, syms, i + 1, hit ? 1 : found, better ? i : best-pos, better ? rank : best-rank, probes + qtf2-outcome-probes(one));
+        };
+    };
+    def qtf2-best-pair-file(x, syms) = !((Comparable) qtf2-index-current?(x) == 1) ? qtf2-pair-choice(qtf2-index-status(x), 0, 0, 0, 0) : qtf2-best-pair-file-go(x, syms, 0, 0, 0, 0, 0);
+    // ---- ordered, crash-refusing recorder --------------------------------
+    // recorder = status reason root seal caps phase counts previous keys
+    def qtf2-recorder(status, reason, root, seal, vcap, lcap, rcap, phase, vcount, mcount, has-v, last-v, has-m, last-l, last-r) = ["qtf2-recorder", status, reason, root, seal, vcap, lcap, rcap, phase, vcount, mcount, has-v, last-v, has-m, last-l, last-r];
+    def qtf2-rec-status(r) = r[1];
+    def qtf2-rec-reason(r) = r[2];
+    def qtf2-rec-root(r) = r[3];
+    def qtf2-rec-seal(r) = r[4];
+    def qtf2-rec-vcap(r) = r[5];
+    def qtf2-rec-lcap(r) = r[6];
+    def qtf2-rec-rcap(r) = r[7];
+    def qtf2-rec-phase(r) = r[8];
+    def qtf2-rec-vcount(r) = r[9];
+    def qtf2-rec-mcount(r) = r[10];
+    def qtf2-rec-has-v?(r) = r[11];
+    def qtf2-rec-last-v(r) = r[12];
+    def qtf2-rec-has-m?(r) = r[13];
+    def qtf2-rec-last-l(r) = r[14];
+    def qtf2-rec-last-r(r) = r[15];
+    def qtf2-rec-fail(r, reason) = qtf2-recorder("failure", reason, qtf2-rec-root(r), qtf2-rec-seal(r), qtf2-rec-vcap(r), qtf2-rec-lcap(r), qtf2-rec-rcap(r), qtf2-rec-phase(r), qtf2-rec-vcount(r), qtf2-rec-mcount(r), qtf2-rec-has-v?(r), qtf2-rec-last-v(r), qtf2-rec-has-m?(r), qtf2-rec-last-l(r), qtf2-rec-last-r(r));
+    def qtf2-rec-begin(root, seal, vcap, lcap, rcap) = vcap <= 0 || (lcap <= 0 || rcap <= 0) ? qtf2-recorder("failure", "invalid-cap", root, seal, vcap, lcap, rcap, "vocab", 0, 0, 0, [], 0, [], []) : {
+        let made = fs-mkdir(root);
+        (Comparable) fs-exists?(qtf2-manifest-path(root)) == 1 || ((Comparable) fs-exists?(qtf2-vocab-path(root)) == 1 || (Comparable) fs-exists?(qtf2-merge-path(root)) == 1) ? qtf2-recorder("failure", "artifact-exists", root, seal, vcap, lcap, rcap, "vocab", 0, 0, 0, [], 0, [], []) : {
+            let vw = fs-write-text(qtf2-vocab-path(root), "");
+            let mw = fs-write-text(qtf2-merge-path(root), "");
+            qtf2-recorder(vw >= 0 && mw >= 0 ? "open" : "failure", vw >= 0 && mw >= 0 ? "recording" : "row-file-create", root, seal, vcap, lcap, rcap, "vocab", 0, 0, 0, [], 0, [], []);
+        };
+    };
+    def qtf2-rec-vocab(r, key, value) = !((String) qtf2-rec-status(r) == "open") ? r : !((String) qtf2-rec-phase(r) == "vocab") ? qtf2-rec-fail(r, "vocab-after-merge") : (Comparable) qtf2-rec-has-v?(r) == 1 && !(qtf2-bytes-cmp(qtf2-rec-last-v(r), key) < 0) ? qtf2-rec-fail(r, "vocab-not-strictly-sorted") : {
+        let row = qtf2-vocab-row-text(qtf2-rec-vcap(r), key, value);
+        (String) row == "" ? qtf2-rec-fail(r, "vocab-row-shape") : {
+            let wrote = fs-append-bytes(qtf2-vocab-path(qtf2-rec-root(r)), qtf2-string-bytes(row));
+            // append-bytes answers the resulting file extent, not
+            // the bytes added by this call.
+            let expected = (qtf2-rec-vcount(r) + 1) * qtf2-vocab-width(qtf2-rec-vcap(r));
+            !((Comparable) wrote == expected) ? qtf2-rec-fail(r, "vocab-append") : qtf2-recorder("open", "recording", qtf2-rec-root(r), qtf2-rec-seal(r), qtf2-rec-vcap(r), qtf2-rec-lcap(r), qtf2-rec-rcap(r), "vocab", qtf2-rec-vcount(r) + 1, qtf2-rec-mcount(r), 1, key, qtf2-rec-has-m?(r), qtf2-rec-last-l(r), qtf2-rec-last-r(r));
+        };
+    };
+    def qtf2-rec-begin-merges(r) = !((String) qtf2-rec-status(r) == "open") ? r : qtf2-recorder("open", "recording", qtf2-rec-root(r), qtf2-rec-seal(r), qtf2-rec-vcap(r), qtf2-rec-lcap(r), qtf2-rec-rcap(r), "merge", qtf2-rec-vcount(r), qtf2-rec-mcount(r), qtf2-rec-has-v?(r), qtf2-rec-last-v(r), qtf2-rec-has-m?(r), qtf2-rec-last-l(r), qtf2-rec-last-r(r));
+    def qtf2-rec-merge(r, left, right, rank) = !((String) qtf2-rec-status(r) == "open") ? r : !((String) qtf2-rec-phase(r) == "merge") ? qtf2-rec-fail(r, "merge-before-phase") : (Comparable) qtf2-rec-has-m?(r) == 1 && !(qtf2-merge-key-cmp(qtf2-rec-last-l(r), qtf2-rec-last-r(r), left, right) < 0) ? qtf2-rec-fail(r, "merge-not-strictly-sorted") : {
+        let row = qtf2-merge-row-text(qtf2-rec-lcap(r), qtf2-rec-rcap(r), left, right, rank);
+        (String) row == "" ? qtf2-rec-fail(r, "merge-row-shape") : {
+            let wrote = fs-append-bytes(qtf2-merge-path(qtf2-rec-root(r)), qtf2-string-bytes(row));
+            let expected = (qtf2-rec-mcount(r) + 1) * qtf2-merge-width(qtf2-rec-lcap(r), qtf2-rec-rcap(r));
+            !((Comparable) wrote == expected) ? qtf2-rec-fail(r, "merge-append") : qtf2-recorder("open", "recording", qtf2-rec-root(r), qtf2-rec-seal(r), qtf2-rec-vcap(r), qtf2-rec-lcap(r), qtf2-rec-rcap(r), "merge", qtf2-rec-vcount(r), qtf2-rec-mcount(r) + 1, qtf2-rec-has-v?(r), qtf2-rec-last-v(r), 1, left, right);
+        };
+    };
+    def qtf2-rec-stage-manifest(r) = !((String) qtf2-rec-status(r) == "open") ? r : !((String) qtf2-rec-phase(r) == "merge") ? qtf2-rec-fail(r, "finish-before-merge") : {
+        let m = qtf2-manifest(qtf2-rec-seal(r), qtf2-rec-vcount(r), qtf2-rec-vcap(r), qtf2-vocab-width(qtf2-rec-vcap(r)), qtf2-rec-mcount(r), qtf2-rec-lcap(r), qtf2-rec-rcap(r), qtf2-merge-width(qtf2-rec-lcap(r), qtf2-rec-rcap(r)));
+        let candidate = qtf2-manifest-candidate-path(qtf2-rec-root(r));
+        let text = qtf2-manifest-text(m);
+        let wrote = fs-write-text(candidate, text);
+        !((Comparable) wrote == len(text)) ? qtf2-rec-fail(r, "manifest-write") : qtf2-recorder("candidate", "manifest-staged", qtf2-rec-root(r), qtf2-rec-seal(r), qtf2-rec-vcap(r), qtf2-rec-lcap(r), qtf2-rec-rcap(r), "publish", qtf2-rec-vcount(r), qtf2-rec-mcount(r), qtf2-rec-has-v?(r), qtf2-rec-last-v(r), qtf2-rec-has-m?(r), qtf2-rec-last-l(r), qtf2-rec-last-r(r));
+    };
+    def qtf2-rec-publish(r) = !((String) qtf2-rec-status(r) == "candidate") ? r : !((Comparable) fs-rename(qtf2-manifest-candidate-path(qtf2-rec-root(r)), qtf2-manifest-path(qtf2-rec-root(r))) == 0) ? qtf2-rec-fail(r, "manifest-publish") : qtf2-recorder("sealed", "published", qtf2-rec-root(r), qtf2-rec-seal(r), qtf2-rec-vcap(r), qtf2-rec-lcap(r), qtf2-rec-rcap(r), "done", qtf2-rec-vcount(r), qtf2-rec-mcount(r), qtf2-rec-has-v?(r), qtf2-rec-last-v(r), qtf2-rec-has-m?(r), qtf2-rec-last-l(r), qtf2-rec-last-r(r));
+    def qtf2-rec-finish(r) = (String) qtf2-rec-status(r) == "candidate" ? qtf2-rec-publish(r) : !((String) qtf2-rec-status(r) == "open") ? r : qtf2-rec-publish(qtf2-rec-stage-manifest(r));
+    0;
+}

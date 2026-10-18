@@ -1,0 +1,56 @@
+// prefix-cache-run.bml — the frozen-prefix cache's size, and its prune.
+//
+//   printf 'status 1\n' | ./fkwu observe/prefix-cache-run.bml                    entries, bytes, the age of the oldest and the newest
+//   printf 'prune_days 14\n' | ./fkwu observe/prefix-cache-run.bml               remove the entries not used for 14 days
+//   printf 'limit_mib 4096\n' | ./fkwu observe/prefix-cache-run.bml              remove the least recently used until it holds 4096 MiB
+//   printf 'clear 1\n' | ./fkwu observe/prefix-cache-run.bml                      remove every entry
+//
+// native-llama-metal.bml keeps the hidden state at the boundary of the first adapter layer for each whole row it forwards for
+// training or validation (.hearth/prefix-cache/<hash>.f32, a few MB a row; a corpus of 728 rows is ~1.5 GB). The name is a hash of the
+// model, the numerics, the boundary and the ids, so a row that changed leaves its old entry unused, never wrong: this door is where
+// the unused ones go. A hit renews an entry's time (host_utimes), so "not used for N days" means what it says. `prune_days` and
+// `limit_mib` may be given together. Prints one line: the entries and bytes before, what was removed, what is left.
+// stdin: `status 1` | `prune_days N` | `limit_mib N` | `clear 1`   (frw-options)
+// preflight-exec: forbidden
+import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/order.bml;
+import form-stdlib/bml/stdin-source.bml;
+section [form.bml] {
+ class PrefixCacheRun {
+  def pcr-dir() = ".hearth/prefix-cache";
+  def pcr-say(t) = print_str("[prefix-cache] " ++ t);
+  def pcr-entries() = filter(e => e[3] > 0, map(n => [pcr-dir() ++ "/" ++ n, file_mtime(pcr-dir() ++ "/" ++ n), n, file_size(pcr-dir() ++ "/" ++ n)], filter(n => str_find(n, ".f32", 0) > 0 && str_find(n, ".tmp-", 0) < 0, fs_list(pcr-dir()) ?? [])));
+  def pcr-bytes(es) = foldl((a, e) => a + e[3], 0, es);
+  def pcr-run() = pcr-with(frw-options(stdin-text() ?? ""));
+  def pcr-with(o) {
+   if (String) o[0] != "ok" then pcr-say("the options were refused at line " ++ o[2].str() ++ ": " ++ o[1])
+   else pcr-go(o[1], pcr-entries());
+  }
+  def pcr-go(o, es) {
+   let now = now_unix_ms() / 1000;
+   let days = frw-int(o, "prune_days", 0);
+   let clear = frw-int(o, "clear", 0) == 1;
+   let stale = filter(e => clear || (days > 0 && now - e[1] > days * 86400), es);
+   let removed = map(e => host_path_remove(e[0]), stale);
+   let left = filter(e => !(clear || (days > 0 && now - e[1] > days * 86400)), es);
+   let limit = frw-int(o, "limit_mib", 0) * 1048576;
+   let trimmed = limit > 0 ? pcr-trim(left, limit) : [];
+   pcr-say(len(es).str() ++ " entries, " ++ (pcr-bytes(es) / 1048576).str() ++ " MiB; removed " ++ (len(stale) + len(trimmed)).str() ++ ", " ++ ((pcr-bytes(stale) + pcr-bytes(trimmed)) / 1048576).str() ++ " MiB; " ++ (len(left) - len(trimmed)).str() ++ " left, " ++ ((pcr-bytes(left) - pcr-bytes(trimmed)) / 1048576).str() ++ " MiB" ++ (len(es) == 0 ? "" : "; the newest used " ++ ((now - foldl((m, e) => e[1] > m ? e[1] : m, 0, es)) / 3600).str() ++ " h ago, the oldest " ++ ((now - foldl((m, e) => e[1] < m ? e[1] : m, now, es)) / 86400).str() ++ " days ago"));
+  }
+  // the least recently used first, until the rest fits the limit: the entries to remove
+  def pcr-trim(es, limit) {
+   let order = map(r => r[1], sort-keyed(map(e => [pcr-key(e[1]), e], es)));
+   pcr-trim-go(order, pcr-bytes(es), limit, []);
+  }
+  def pcr-key(secs) = pcr-zeros(12 - len(secs.str())) ++ secs.str();
+  def pcr-zeros(k) = k <= 0 ? "" : "0" ++ pcr-zeros(k - 1);
+  def pcr-trim-go(order, total, limit, out) {
+   if total <= limit || nil?(order) then reverse(out)
+   else {
+    let r = host_path_remove(order[0][0]);
+    pcr-trim-go(order[1:], total - order[0][3], limit, cons(order[0], out));
+   };
+  }
+ }
+ pcr-run();
+}

@@ -1,0 +1,93 @@
+// membrane-sites-run.bml — every place the body's source crosses the membrane to run a program, and what each one runs.
+//
+//   ./fkwu observe/membrane-sites-run.bml </dev/null                              the reading: files, words, unknowns, totals
+//   printf '{"json":1}' | ./fkwu observe/membrane-sites-run.bml                    one JSON row per site on stdout, nothing else
+//   printf '{"file":"scratch/sites.jsonl"}' | ./fkwu observe/membrane-sites-run.bml   the reading, and the rows written to that path
+//   printf '{"word":"grep"}' | ./fkwu observe/membrane-sites-run.bml                every site of one word (a refined word: "ln -s", "mkdir -m"; "(computed)")
+//   printf '{"verdict":"door-planned"}' | ./fkwu observe/membrane-sites-run.bml     every site with a word of that verdict, and the command it reads
+//   printf '{"route":"line"}' | ./fkwu observe/membrane-sites-run.bml              every shell-string site ("argv" for the argv sites), with the command it reads
+//   printf '{"scope":"all"}' | ./fkwu observe/membrane-sites-run.bml                tables over fixtures and the guard too (the default: product only)
+//
+// stdin is one JSON object, every key optional: json (1: the machine rows only), file (a path the rows are written to, JSON lines),
+// word (list the sites of one word), verdict (list the sites with a word of that verdict), route (line | argv), scope ("product", the default, or "all"), root (the tree to read, "." by default). A request that
+// does not read is refused by name with exit 1 (door-options.bml).
+//
+// The reading is a STATIC census of the source tree: the .bml and .fk files found with fs_list and read with read_file, every call of
+// a crossing primitive (host-exec, host_capture, host_spawn, host_spawn_quiet, host_spawn_at) and of a wrapper of one (a def that hands
+// its command on), each resolved to what runs. Nothing is run. The verdict table, the primitives, the files that are guard or
+// by-design and what the reading cannot see are in form-stdlib/bml/membrane-sites.bml; the runtime counter census is its
+// sibling (observe/form-membrane-runtime-census.fk). A row is
+//   {file, line, kind (prim | call | pass), def, chain, route (line | argv), words, verdicts, verdict, computed, partial, self_via_shell,
+//    class (product | fixture | guard), fragments}
+// and a `pass` row is a def handing its command on (the def is a wrapper; its callers decide the command), counted nowhere.
+//
+// The last value is the number of product sites, which falls as migrations land.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/membrane-sites.bml
+section [form.bml] {
+ class MembraneSitesRun {
+  def msr-has(doc, key) = json-object-has?(doc, key);
+  def msr-str(doc, key, fallback) = msr-has(doc, key) ? json-string-value(json-object-get(doc, key)) : fallback;
+  def msr-int(doc, key, fallback) = msr-has(doc, key) ? json-int-value(json-object-get(doc, key)) : fallback;
+  def msr-why(doc) = msr-has(doc, "scope") && (String) msr-str(doc, "scope", "") != "product" && (String) msr-str(doc, "scope", "") != "all" ? "key \"scope\" must be \"product\" or \"all\""
+   : msr-int(doc, "json", 0) != 0 && msr-int(doc, "json", 0) != 1 ? "key \"json\" must be 1 (or absent)"
+   : msr-has(doc, "file") && len(msr-str(doc, "file", "")) == 0 ? "key \"file\" must name a path"
+   : "";
+  def msr-print(lines) = foldl((acc, l) => print_str(l), 0, lines);
+  def msr-heading(text) = print_str("== " ++ text);
+  def msr-class-count(sites, cls) = len(filter(s => (String) s[11] == cls, sites));
+  def msr-class-line(srcs, sites, cls) = mbs-pad(cls, 9) ++ mbs-padl(mbs-i(len(filter(s => (String) mbs-class-of(s[0]) == cls, srcs))), 6) ++ " files " ++ mbs-padl(mbs-i(msr-class-count(sites, cls)), 5) ++ " sites";
+  // the sites of one word
+  def msr-has-word?(s, word) = any?(w => (String) mbs-word-label(w) == word, s[6]);
+  def msr-rows-text(sites, optable) = str-spans(map(s => mbs-row-json(s, optable) ++ "\n", sites));
+  def msr-unknown-word-line(r) = "unknown " ++ mbs-pad(mbs-word-label(r[0]), 14) ++ mbs-padl(mbs-i(r[3]), 4) ++ " sites  " ++ mbs-join(map(f => mbs-base(f), take(8, r[4])), " ");
+  def msr-wrappers-line(known, name) = name ++ "  (" ++ record_get(known, name)[0] ++ ")  hands its command to " ++ record_get(known, name)[3];
+ }
+ let doc = dop-doc("membrane-sites", stdin-text(), [["json", "int"], ["file", "str"], ["word", "str"], ["verdict", "str"], ["route", "str"], ["scope", "str"], ["root", "str"]]);
+ let why = msr-why(doc);
+ let refused = len(why) > 0 ? dop-refuse("membrane-sites", why) : 0;
+ let root = msr-str(doc, "root", ".");
+ let srcs = mbs-tree(root);
+ let optable = read_file(mbs-optable-path()) ?? "";
+ let census = mbs-census(srcs);
+ let everything = census[0];
+ let counted = mbs-counted(everything);
+ let shown = (String) msr-str(doc, "scope", "product") == "all" ? counted : filter(s => (String) s[11] == "product", counted);
+ let rows = msr-rows-text(everything, optable);
+ let wrote = msr-has(doc, "file") ? write_file(msr-str(doc, "file", ""), rows) : 0;
+ let machine = msr-int(doc, "json", 0) == 1;
+ let word = msr-str(doc, "word", "");
+ let by_word = len(word) > 0;
+ let w0 = machine ? print_str(rows) : 0;
+ let verdict = msr-str(doc, "verdict", "");
+ let by_verdict = len(verdict) > 0;
+ let w1 = !machine && by_word ? msr-print(map(s => mbs-site-detail(s, optable), filter(s => msr-has-word?(s, word), shown))) : 0;
+ let w2 = !machine && by_verdict ? msr-print(map(s => mbs-site-detail(s, optable), filter(s => mbs-site-has-verdict?(s, optable, verdict), shown))) : 0;
+ let route = msr-str(doc, "route", "");
+ let by_route = len(route) > 0;
+ let w3 = !machine && by_route ? msr-print(map(s => mbs-site-detail(s, optable), filter(s => (String) s[5] == route, shown))) : 0;
+ let plain = !machine && !by_word && !by_verdict && !by_route;
+ let h1 = plain ? msr-heading("sites by file (" ++ msr-str(doc, "scope", "product") ++ "): file, sites, words") : 0;
+ let t1 = plain ? msr-print(mbs-file-lines(shown)) : 0;
+ let wrows = mbs-word-rows(shown, optable);
+ let h2 = plain ? msr-heading("words: word, verdict, sites, files") : 0;
+ let t2 = plain ? msr-print(map(r => mbs-word-line(r), wrows)) : 0;
+ let h3 = plain ? msr-heading("unknown words, and sites whose command is computed") : 0;
+ let t3 = plain ? msr-print(map(r => msr-unknown-word-line(r), filter(r => (String) r[1] == "unknown" || (String) r[1] == "forbidden", wrows))) : 0;
+ let t3b = plain ? msr-print(map(s => "computed " ++ mbs-computed-line(s), filter(s => s[7] == 1 && (String) mbs-site-verdict(s, optable) == "computed", shown))) : 0;
+ let h4 = plain ? msr-heading("shell-line sites (a shell string, not an argv): " ++ mbs-i(len(filter(s => (String) s[5] == "line", shown)))) : 0;
+ let t4 = plain ? msr-print(map(s => mbs-site-line(s, optable), filter(s => (String) s[5] == "line", shown))) : 0;
+ let h5 = plain ? msr-heading("fkwu children begun through a shell string") : 0;
+ let t5 = plain ? msr-print(map(s => mbs-site-line(s, optable), filter(s => mbs-self-via-shell?(s), shown))) : 0;
+ let h6 = plain ? msr-heading("totals by verdict: sites (the worst word of each), then word occurrences") : 0;
+ let t6 = plain ? msr-print(map(r => mbs-total-line(r), mbs-site-totals(shown, optable))) : 0;
+ let t6b = plain ? msr-print(map(r => "  words " ++ mbs-total-line(r), mbs-word-totals(wrows))) : 0;
+ let h7 = plain ? msr-heading("classes") : 0;
+ let t7 = plain ? msr-print(map(c => msr-class-line(srcs, counted, c), ["product", "fixture", "guard"])) : 0;
+ let h8 = plain ? msr-heading("wrappers (defs that hand their command on): " ++ mbs-i(len(census[1]))) : 0;
+ let t8 = plain ? msr-print(map(n => msr-wrappers-line(census[3], n), census[1])) : 0;
+ let h9 = plain ? msr-heading("ambiguous wrapper names (defined in more than one file, not followed): " ++ mbs-i(len(census[2]))) : 0;
+ let t9 = plain ? msr-print(census[2]) : 0;
+ let note = plain && msr-has(doc, "file") ? print_str("rows written: " ++ msr-str(doc, "file", "") ++ " (" ++ mbs-i(len(everything)) ++ ")") : 0;
+ len(filter(s => (String) s[11] == "product", counted));
+}

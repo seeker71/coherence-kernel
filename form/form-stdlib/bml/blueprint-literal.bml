@@ -1,0 +1,400 @@
+//////////////////////////////////////////////////////////////////////
+// blueprint-literal.bml — composite blueprints, their literals, and the core blueprints they rest on.
+//
+// Urs, 2026-10-02: "we also need an intrinsic literal for a complex blueprint that is built with other blueprints
+// and support natively map and other NUMS core blueprints."
+//
+// NUMS (the Go reference whose package.level.type.instance shape the body kept, operator-type-id.bml) names the
+// core shapes a program is made of: list, map, set, pair, tuple, option. Here each is a blueprint of the body's
+// own (codec.bml core-id: LIST MAP PAIR SET TUPLE SOME NONE BOOL DECL FIELD), and each value of one is a cell:
+// the same composition is the same NodeID (axiom 3).
+//
+// A composite blueprint is declared from other blueprints and the core ones, and the declaration is itself a
+// cell: its name and its fields' names and types are its children, and a field's cell carries the declarations
+// of the blueprints its type names, so the declaration's own NodeID is the category of every value built from it
+// and a changed LineItem is a changed Order.
+//
+//   blueprint LineItem { sku: string, qty: int }
+//   blueprint Order {
+//     id: int, items: list<LineItem>, meta: map<string,float>, tags: set<string>,
+//     note: option<string>, at: tuple<int,int>
+//   }
+//   Order{id: 7, items: [LineItem{sku: "a", qty: 2}], meta: map{"w": 1.5}, tags: set["y", "x"],
+//         note: some("rush"), at: tuple[3, 4]}
+//
+// That is BML. The grammar (grammars/form-bml.fk) reads the declaration and the literal in a program; the same
+// grammar reads them out of stored text, so a literal has one syntax and there is no second parser. Reading text is
+// not running it: only the literal constructors (list, bl-make, bl-map, bl-set, bl-tuple, bl-some, bl-ty, nothing)
+// answer; any other call in the text, and any statement beyond the one expression, reads as nothing().
+//
+// A map's pairs and a set's members are put in byte order of their canonical text before the cell is built, so
+// the same map is the same cell whatever order it was written in; a record's fields are put in declared order and
+// an absent option field is nothing(). A literal that does not fit its declaration, or repeats a map key, is
+// nothing(). bl-show writes a cell back as its canonical literal, so text -> cell -> text is a fixed point.
+//
+//   bl-defs(declarations)        the declarations -> defs, in any order; nothing() while one names what is not declared
+//   bl-read(text, defs)          a literal -> its cell, or nothing()
+//   bl-read-as(type, text, defs) the same, the literal read as that type text, e.g. "list<Order>"
+//   bl-show(cell, defs)          a cell -> its canonical literal text, or nothing()
+//   bl-registry(defs)            the Blueprint registry for encode/decode (codec.bml) of these cells
+//   bl-cast-cell / bl-cast-run   a conversion held as a cell (the kernels' CAST-* blueprints), and its running
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk form-stdlib/grammars/form-bml.fk form-stdlib/bml/codec.bml form-stdlib/bml/order.bml
+section [form.bml] {
+ let BL-STATE = record_new(0);
+ class FormBlueprint {
+  // ---- small shapes the rest is said in -----------------------------------------------------------------
+  def bl-first(xs) = nil?(xs) ? nothing() : xs[0];
+  // a list is whole only if every member arrived
+  def bl-sequence(xs) = any?(x => nothing?(x), xs) ? nothing() : xs;
+  def bl-tag(tag, x) = nothing?(x) ? nothing() : [tag, x];
+  def bl-pair-of(a, b) = (nothing?(a) || nothing?(b)) ? nothing() : [a, b];
+  def bl-kind(v) = nothing?(v) ? "none" : value_kind(v);
+  def bl-core-name(tag) = match tag { "list" => "LIST", "set" => "SET", "tuple" => "TUPLE", _ => "" };
+
+  // ---- types and declarations ------------------------------------------------------------------------------
+  // a type is [name, [argument types]]: int, list<LineItem>, map<string,float>
+  def bl-ty(name, args) = [name, args];
+  def bl-core-type?(n) = ["int", "float", "string", "bool", "any", "list", "set", "option", "map", "tuple"] |> any?(core => core == n);
+  def bl-arity-ok?(t) = match t[0] { "list" | "set" | "option" => len(t[1]) == 1, "map" => len(t[1]) == 2, _ => true };
+  def bl-type-refs(t) = bl-core-type?(t[0]) ? bl-args-refs(t[1]) : cons(t[0], bl-args-refs(t[1]));
+  def bl-args-refs(ts) = nil?(ts) ? [] : append(bl-type-refs(ts[0]), bl-args-refs(ts[1:]));
+  def bl-names-dedupe(ns) = nil?(ns) ? [] : cons(ns[0], bl-names-dedupe(ns[1:] |> filter(n => n != ns[0])));
+  def bl-type-text(t) = nil?(t[1]) ? t[0] : (t[0] ++ "<" ++ str-join-with(t[1] |> map(a => bl-type-text(a)), ",") ++ ">");
+
+  // defs: [[name, declaration cell, [[field, type]...]]...]
+  def bl-find(name, defs) = bl-first(defs |> filter(d => d[0] == name));
+  def bl-find-cell(cat, defs) = bl-first(defs |> filter(d => eq(d[1], cat)));
+  def bl-without(name, defs) = defs |> filter(d => d[0] != name);
+  def bl-pin(name, defs) {
+   let d = bl-find(name, defs);
+   nothing?(d) ? nothing() : d[1];
+  }
+  // A declaration pins what it is built from: a field's cell carries the declaration cells of the blueprints its
+  // type names, so a changed LineItem is a changed Order, not only a changed LineItem.
+  def bl-field-cell(f, pins) = intern_node(core-id("FIELD"), append([intern_trivial_string(f[0]), intern_trivial_string(bl-type-text(f[1]))], pins));
+  def bl-field-of(f, defs) {
+   let pins = bl-sequence(bl-names-dedupe(bl-type-refs(f[1])) |> map(n => bl-pin(n, defs)));
+   nothing?(pins) ? nothing() : bl-field-cell(f, pins);
+  }
+  // one declaration against the defs so far: its entry, or nothing() while a blueprint it names is undeclared
+  def bl-decl-try(name, fields, defs) {
+   let cells = bl-sequence(fields |> map(f => bl-field-of(f, defs)));
+   nothing?(cells) ? nothing() : [name, intern_node(core-id("DECL"), cons(intern_trivial_string(name), cells)), fields];
+  }
+  // misses counts the declarations tried in a row without one resolving; when every one waiting has missed in a
+  // row, none can ever resolve (an undeclared name, or a cycle)
+  def bl-defs-fold(pending, done, misses) = nil?(pending) ? done : bl-defs-step(pending, done, misses, bl-decl-try(pending[0][0], pending[0][1], done));
+  def bl-defs-step(pending, done, misses, entry) = !nothing?(entry) ? bl-defs-fold(pending[1:], append(done, [entry]), 0) : bl-defs-wait(pending, done, misses + 1);
+  def bl-defs-wait(pending, done, misses) = misses >= len(pending) ? nothing() : bl-defs-fold(append(pending[1:], [pending[0]]), done, misses);
+  def bl-defs(text) {
+   let decls = bl-parse-decls(text);
+   nothing?(decls) ? nothing() : bl-defs-fold(decls, [], 0);
+  }
+
+  // ---- reading text: the body's own grammar, then only the literal constructors ------------------------------
+  def bl-failed?(parsed) = node_eq(parsed, intern_trivial_string("PARSE-FAIL"));
+  def bl-leaf?(n) = (Comparable) node_level(n) == 1;
+  def bl-callee(n) = node_eq(node_category(n), bmf-bp("ident")) ? node_value(node_children(n)[0]) : "";
+  def bl-eval-leaf(n) = node_type(n) == 3 ? intern_node(core-id("BOOL"), [intern_trivial_int(node_value(n) ? 1 : 0)]) : node_value(n);
+  def bl-eval(n) = bl-leaf?(n) ? bl-eval-leaf(n) : bl-eval-node(node_category(n), node_children(n));
+  def bl-eval-node(cat, kids) {
+   node_eq(cat, bmf-bp("do")) ? (len(kids) == 1 ? bl-eval(kids[0]) : nothing()) :
+   node_eq(cat, bmf-bp("fncall")) ? bl-apply(bl-callee(kids[0]), kids[1:] |> map(k => bl-eval(k))) : nothing();
+  }
+  def bl-apply(name, args) = match name {
+   "list" => args,
+   "nothing" => nothing(),
+   "bl-some" => len(args) == 1 ? bl-some(args[0]) : nothing(),
+   "bl-make" => len(args) == 2 ? bl-make(args[0], args[1]) : nothing(),
+   "bl-map" => len(args) == 1 ? bl-map(args[0]) : nothing(),
+   "bl-set" => len(args) == 1 ? bl-set(args[0]) : nothing(),
+   "bl-tuple" => len(args) == 1 ? bl-tuple(args[0]) : nothing(),
+   "bl-ty" => len(args) == 2 ? bl-ty(args[0], args[1]) : nothing(),
+   _ => nothing()
+  };
+  // one expression: the text is the body of one definition the cursor reads whole
+  def bl-parse-expr(text) {
+   let parsed = g-parse-full(form-bml-grammar(), "def bl-lit() = { " ++ text ++ " };");
+   bl-failed?(parsed) ? nothing() : node_children(parsed)[2];
+  }
+  def bl-parse-type(text) {
+   let parsed = g-parse-full(grammar("bptype", form-bml-rules()), trim(text));
+   bl-failed?(parsed) ? nothing() : bl-eval(parsed);
+  }
+  // declarations: each statement is one blueprint declaration, collected and not run
+  def bl-decl-of(stmt) {
+   let kids = node_children(stmt);
+   (node_eq(node_category(stmt), bmf-bp("fncall")) && (len(kids) == 3) && (bl-callee(kids[0]) == "bl-declare")) ? [bl-eval(kids[1]), bl-eval(kids[2])] : nothing();
+  }
+  def bl-parse-decls(text) {
+   let parsed = g-parse-full(form-bml-section-grammar(), text);
+   bl-failed?(parsed) ? nothing() : bl-sequence(node_children(parsed) |> map(stmt => bl-decl-of(stmt)));
+  }
+
+  // ---- the declarations a program holds ---------------------------------------------------------------------------
+  def bl-now() {
+   let held = record_get(BL-STATE, "defs");
+   value_kind(held) == "list" ? held : [];
+  }
+  // the declarations in force for the body, and back as they were whatever the body does
+  def bl-using(defs, body) {
+   let saved = bl-now();
+   let held = record_set(BL-STATE, "defs", defs);
+   defer record_set(BL-STATE, "defs", saved);
+   body();
+  }
+  def bl-declare(name, fields) {
+   let entry = bl-decl-try(name, fields, bl-without(name, bl-now()));
+   nothing?(entry) ? nothing() : bl-declared(entry);
+  }
+  def bl-declared(entry) {
+   let stored = record_set(BL-STATE, "defs", append(bl-without(entry[0], bl-now()), [entry]));
+   entry[1];
+  }
+  def bl-registry(defs) = append(core-registry(), append(bl-cast-entries(), defs |> map(d => wr-entry(d[0], d[1]))));
+  def bl-registry-now() = bl-registry(bl-now());
+
+  // ---- does a literal fit its type? ------------------------------------------------------------------------------------
+  def bl-declared?(name, fields) = fields |> any?(f => f[0] == name);
+  def bl-field-ok?(f, pairs, defs) {
+   let v = bl-fget(pairs, f[0]);
+   nothing?(v) ? f[1][0] == "option" : bl-check(v, f[1], defs);
+  }
+  def bl-fget(pairs, name) {
+   let hit = bl-first(pairs |> filter(p => p[0] == name));
+   nothing?(hit) ? nothing() : hit[1];
+  }
+  def bl-rec-ok?(a, d, defs) = !nothing?(d) && all?(f => bl-field-ok?(f, a[2], defs), d[2]) && all?(p => bl-declared?(p[0], d[2]), a[2]);
+  def bl-check(a, t, defs) = bl-arity-ok?(t) && bl-check-by(a, t[0], t[1], defs);
+  def bl-check-by(a, n, args, defs) = match n {
+   "any" => bl-valid(a, defs),
+   "int" => a[0] == "int",
+   "float" => a[0] == "float",
+   "string" => a[0] == "str",
+   "bool" => a[0] == "bool",
+   "list" | "set" => (a[0] == n) && all?(m => bl-check(m, args[0], defs), a[1]),
+   "option" => (a[0] == "none") || ((a[0] == "some") && bl-check(a[1], args[0], defs)),
+   "map" => (a[0] == "map") && all?(p => bl-check(p[0], args[0], defs) && bl-check(p[1], args[1], defs), a[1]),
+   "tuple" => (a[0] == "tuple") && (len(a[1]) == len(args)) && all?(i => bl-check(a[1][i], args[i], defs), 0 .. len(args)),
+   _ => (a[0] == "rec") && (a[1] == n) && bl-rec-ok?(a, bl-find(n, defs), defs)
+  };
+  // a literal that fits its own declarations wherever it names one
+  def bl-valid(a, defs) = match a[0] {
+   "list" | "set" | "tuple" => all?(m => bl-valid(m, defs), a[1]),
+   "some" => bl-valid(a[1], defs),
+   "map" => all?(p => bl-valid(p[0], defs) && bl-valid(p[1], defs), a[1]),
+   "rec" => bl-rec-ok?(a, bl-find(a[1], defs), defs),
+   _ => true
+  };
+
+  // ---- canonical text: valid BML, the one way a value is written -----------------------------------------------------
+  def bl-text-all(xs) = str-join-with(xs |> map(x => bl-text(x)), ", ");
+  def bl-text(a) = match a[0] {
+   "int" => value_str(a[1]),
+   "float" => float-text(a[1]),
+   "str" => json-quote-string(a[1]),
+   "bool" => a[1] == 1 ? "true" : "false",
+   "none" => "nothing()",
+   "some" => "some(" ++ bl-text(a[1]) ++ ")",
+   "list" => "[" ++ bl-text-all(a[1]) ++ "]",
+   "set" => "set[" ++ bl-text-all(a[1]) ++ "]",
+   "tuple" => "tuple[" ++ bl-text-all(a[1]) ++ "]",
+   "map" => "map{" ++ str-join-with(a[1] |> map(p => bl-text(p[0]) ++ ": " ++ bl-text(p[1])), ", ") ++ "}",
+   "rec" => a[1] ++ "{" ++ str-join-with(a[2] |> map(p => p[0] ++ ": " ++ bl-text(p[1])), ", ") ++ "}",
+   _ => ""
+  };
+
+  // ---- canonical order: the same value is written one way --------------------------------------------------------------
+  def bl-norm-all(xs, defs) = bl-sequence(xs |> map(x => bl-norm(x, defs)));
+  def bl-unique(xs) = nil?(xs) || nil?(xs[1:]) ? xs : (bl-text(xs[0]) == bl-text(xs[1]) ? bl-unique(xs[1:]) : cons(xs[0], bl-unique(xs[1:])));
+  def bl-by-text(xs) = sort-keyed(xs |> map(x => [bl-text(x), x])) |> map(row => row[1]);
+  def bl-has-repeat?(rows) = (len(rows) >= 2) && ((rows[0][0] == rows[1][0]) || bl-has-repeat?(rows[1:]));
+  def bl-norm-set(xs) = nothing?(xs) ? nothing() : ["set", bl-unique(bl-by-text(xs))];
+  def bl-norm-map(ps, defs) {
+   let normed = bl-sequence(ps |> map(p => bl-pair-of(bl-norm(p[0], defs), bl-norm(p[1], defs))));
+   nothing?(normed) ? nothing() : bl-map-finish(sort-keyed(normed |> map(p => [bl-text(p[0]), p])));
+  }
+  def bl-map-finish(rows) = bl-has-repeat?(rows) ? nothing() : ["map", rows |> map(row => row[1])];
+  def bl-norm-field(f, pairs, defs) {
+   let v = bl-fget(pairs, f[0]);
+   bl-pair-of(f[0], nothing?(v) ? ["none"] : bl-norm(v, defs));
+  }
+  def bl-norm-rec(a, d, defs) {
+   let fields = nothing?(d) ? nothing() : bl-sequence(d[2] |> map(f => bl-norm-field(f, a[2], defs)));
+   nothing?(fields) ? nothing() : ["rec", a[1], fields];
+  }
+  def bl-norm(a, defs) = match a[0] {
+   "some" => bl-tag("some", bl-norm(a[1], defs)),
+   "list" | "tuple" => bl-tag(a[0], bl-norm-all(a[1], defs)),
+   "set" => bl-norm-set(bl-norm-all(a[1], defs)),
+   "map" => bl-norm-map(a[1], defs),
+   "rec" => bl-norm-rec(a, bl-find(a[1], defs), defs),
+   _ => a
+  };
+
+  // ---- a normalized literal becomes one cell ------------------------------------------------------------------------------
+  def bl-build(a, defs) = match a[0] {
+   "int" => intern_trivial_int(a[1]),
+   "float" => make_float64(a[1]),
+   "str" => intern_trivial_string(a[1]),
+   "bool" => intern_node(core-id("BOOL"), [intern_trivial_int(a[1])]),
+   "none" => intern_node(core-id("NONE"), []),
+   "some" => intern_node(core-id("SOME"), [bl-build(a[1], defs)]),
+   "list" | "set" | "tuple" => intern_node(core-id(bl-core-name(a[0])), a[1] |> map(m => bl-build(m, defs))),
+   "map" => intern_node(core-id("MAP"), a[1] |> map(p => intern_node(core-id("PAIR"), [bl-build(p[0], defs), bl-build(p[1], defs)]))),
+   "rec" => intern_node(bl-find(a[1], defs)[1], a[2] |> map(p => bl-build(p[1], defs))),
+   _ => nothing()
+  };
+  // a literal tree, checked against the declarations, put in canonical order, built to its cell
+  def bl-seal(a, defs) = nothing?(a) ? nothing() : (bl-valid(a, defs) ? bl-built(bl-norm(a, defs), defs) : nothing());
+  def bl-built(n, defs) = nothing?(n) ? nothing() : bl-build(n, defs);
+
+  // ---- a value the program holds, read by the type it is declared to be: its literal tree, or nothing() -----------------
+  def bl-native-all(vs, t, defs) = bl-sequence(vs |> map(m => bl-native(m, t, defs)));
+  def bl-native-pair(p, kt, vt, defs) = (bl-kind(p) == "list") && (len(p) == 2) ? bl-pair-of(bl-native(p[0], kt, defs), bl-native(p[1], vt, defs)) : nothing();
+  def bl-native(v, t, defs) = bl-kind(v) == "node_id" ? bl-cell-ast(v, defs) : (bl-arity-ok?(t) ? bl-native-typed(v, t[0], t[1], defs) : nothing());
+  def bl-native-typed(v, n, args, defs) = match n {
+   "int" => bl-kind(v) == "int" ? ["int", v] : nothing(),
+   "float" => bl-kind(v) == "float" ? ["float", v] : nothing(),
+   "string" => bl-kind(v) == "string" ? ["str", v] : nothing(),
+   "bool" => bl-kind(v) == "int" ? ["bool", v == 0 ? 0 : 1] : nothing(),
+   "option" => nothing?(v) ? ["none"] : bl-tag("some", bl-native(v, args[0], defs)),
+   "list" | "set" => bl-kind(v) == "list" ? bl-tag(n, bl-native-all(v, args[0], defs)) : nothing(),
+   "tuple" => (bl-kind(v) == "list") && (len(v) == len(args)) ? bl-tag("tuple", bl-sequence((0 .. len(args)) |> map(i => bl-native(v[i], args[i], defs)))) : nothing(),
+   "map" => bl-kind(v) == "list" ? bl-tag("map", bl-sequence(v |> map(p => bl-native-pair(p, args[0], args[1], defs)))) : nothing(),
+   "any" => bl-native-any(v, defs),
+   _ => nothing()
+  };
+  def bl-native-any(v, defs) = match bl-kind(v) {
+   "int" => ["int", v],
+   "float" => ["float", v],
+   "string" => ["str", v],
+   "none" => ["none"],
+   "list" => bl-tag("list", bl-native-all(v, ["any", []], defs)),
+   "node_id" => bl-cell-ast(v, defs),
+   _ => nothing()
+  };
+
+  // ---- the program's own source: blueprint declarations, literals, conversions ----------------------------------------
+  def bl-field-type(d, fname) {
+   let f = bl-first(d[2] |> filter(f => f[0] == fname));
+   nothing?(f) ? nothing() : f[1];
+  }
+  def bl-field-ast(p, d, defs) {
+   let ft = bl-field-type(d, p[0]);
+   nothing?(ft) ? nothing() : bl-pair-of(p[0], bl-native(p[1], ft, defs));
+  }
+  def bl-rec-ast(name, d, pairs, defs) {
+   let fields = bl-sequence(pairs |> map(p => bl-field-ast(p, d, defs)));
+   nothing?(fields) ? nothing() : ["rec", name, fields];
+  }
+  def bl-make(name, pairs) {
+   let defs = bl-now();
+   let d = bl-find(name, defs);
+   nothing?(d) ? nothing() : bl-seal(bl-rec-ast(name, d, pairs, defs), defs);
+  }
+  def bl-map(pairs) = bl-seal(bl-tag("map", bl-sequence(pairs |> map(p => bl-native-pair(p, ["any", []], ["any", []], bl-now())))), bl-now());
+  def bl-set(items) = bl-seal(bl-tag("set", bl-native-all(items, ["any", []], bl-now())), bl-now());
+  def bl-tuple(items) = bl-seal(bl-tag("tuple", bl-native-all(items, ["any", []], bl-now())), bl-now());
+  def bl-some(v) = bl-seal(bl-tag("some", bl-native(v, ["any", []], bl-now())), bl-now());
+  // (as int) e, (as float) e, (as bool) e, (as string) e, (as text) e, (as any) e, (as list) e, (as cell) e
+  def bl-convert(kind, v) = convert(v, kind, bl-registry-now());
+
+  // ---- reading and showing --------------------------------------------------------------------------------------------------
+  def bl-read-now(text) {
+   let expr = bl-parse-expr(text);
+   let v = nothing?(expr) ? nothing() : bl-eval(expr);
+   nothing?(v) ? nothing() : (bl-kind(v) == "node_id" ? v : bl-seal(bl-native-any(v, bl-now()), bl-now()));
+  }
+  def bl-read(text, defs) = bl-using(defs, () => bl-read-now(text));
+  def bl-read-as-now(typeText, text) {
+   let t = bl-parse-type(typeText);
+   let expr = bl-parse-expr(text);
+   (nothing?(t) || nothing?(expr)) ? nothing() : bl-fit(bl-native(bl-eval(expr), t, bl-now()), t, bl-now());
+  }
+  def bl-fit(a, t, defs) = nothing?(a) ? nothing() : (bl-check(a, t, defs) ? bl-built(bl-norm(a, defs), defs) : nothing());
+  def bl-read-as(typeText, text, defs) = bl-using(defs, () => bl-read-as-now(typeText, text));
+
+  // a cell back to its literal tree: leaves by their value, core blueprints by their category, a record by its declaration
+  def bl-cell-all(cs, defs) = bl-sequence(cs |> map(c => bl-cell-ast(c, defs)));
+  def bl-pair-ast(p, defs) = bl-cell-all(node_children(p), defs);
+  def core-name-of(cat) {
+   let hit = bl-first(core-names() |> filter(n => eq(cat, core-id(n))));
+   nothing?(hit) ? "" : hit;
+  }
+  def bl-cell-leaf(c) {
+   let v = node_value(c);
+   match value_kind(v) { "int" => ["int", v], "float" => ["float", v], "string" => ["str", v], _ => nothing() };
+  }
+  def bl-cell-rec(d, kids, defs) {
+   let fields = (nothing?(d) || (len(kids) != len(d[2]))) ? nothing() : bl-sequence((0 .. len(kids)) |> map(i => bl-pair-of(d[2][i][0], bl-cell-ast(kids[i], defs))));
+   nothing?(fields) ? nothing() : ["rec", d[0], fields];
+  }
+  def bl-cell-composite(name, c, defs) {
+   let kids = node_children(c);
+   match name {
+    "LIST" => bl-tag("list", bl-cell-all(kids, defs)),
+    "SET" => bl-tag("set", bl-cell-all(kids, defs)),
+    "TUPLE" => bl-tag("tuple", bl-cell-all(kids, defs)),
+    "MAP" => bl-tag("map", bl-sequence(kids |> map(p => bl-pair-ast(p, defs)))),
+    "SOME" => bl-tag("some", bl-cell-ast(kids[0], defs)),
+    "NONE" => ["none"],
+    "BOOL" => ["bool", node_value(kids[0])],
+    _ => bl-cell-rec(bl-find-cell(node_category(c), defs), kids, defs)
+   };
+  }
+  def bl-cell-ast(c, defs) {
+   value_kind(c) != "node_id" ? nothing() :
+   (Comparable) node_level(c) == 1 ? bl-cell-leaf(c) : bl-cell-composite(core-name-of(node_category(c)), c, defs);
+  }
+  def bl-show(c, defs) {
+   let a = bl-cell-ast(c, defs);
+   nothing?(a) ? nothing() : bl-text(a);
+  }
+
+  // ---- one field of a record cell, by name -------------------------------------------------------------------------------------
+  // The declaration is found by the cell's category and only the named field's child is read: a row's cost to answer a
+  // field is the length of its field list, not the size of the row. An option field that is none, a missing field and a
+  // cell that is no record of the program's declarations all read nothing().
+  //   bl-get(row, "name")    the field as the program's own value: a scalar as itself, a list/set/tuple as a list,
+  //                          a nested record or a map as its cell
+  def bl-ast-native(a) = match a[0] {
+   "int" | "float" | "str" | "bool" => a[1],
+   "none" => nothing(),
+   "some" => bl-ast-native(a[1]),
+   "list" | "set" | "tuple" => a[1] |> map(m => bl-ast-native(m)),
+   _ => bl-built(a, bl-now())
+  };
+  def bl-get-field(k, defs) {
+   let a = bl-cell-ast(k, defs);
+   nothing?(a) ? nothing() : ((a[0] == "rec") || (a[0] == "map")) ? k : bl-ast-native(a);
+  }
+  def bl-get-at(kids, fields, name, defs) = (nil?(fields) || nil?(kids)) ? nothing() : (String) fields[0][0] == name ? bl-get-field(kids[0], defs) : bl-get-at(kids[1:], fields[1:], name, defs);
+  def bl-get(c, name) {
+   let defs = bl-now();
+   let d = (String) bl-kind(c) == "node_id" ? bl-find-cell(node_category(c), defs) : nothing();
+   nothing?(d) ? nothing() : bl-get-at(node_children(c), d[2], name, defs);
+  }
+
+  // ---- a conversion as a cell ----------------------------------------------------------------------------------------------------
+  // The kernels carry a blueprint for each scalar conversion (CAST-INT-STRING ... CAST-STRING-BOOL, type 98).
+  // bl-cast-cell(v, from, to) is that conversion held as a cell: the cast blueprint over the value it converts. It
+  // stores and streams like any cell (its names are in bl-registry), and bl-cast-run(cell) reads the cell and does the
+  // conversion, so what was meant is kept apart from when it is done. nothing() where the body names no such cast.
+  def bl-cast-rows() = [["bool", "int", 10, "CAST-BOOL-INT"], ["int", "bool", 11, "CAST-INT-BOOL"], ["int", "float", 12, "CAST-INT-FLOAT"], ["float", "int", 13, "CAST-FLOAT-INT"], ["int", "string", 14, "CAST-INT-STRING"], ["string", "int", 15, "CAST-STRING-INT"], ["float", "string", 16, "CAST-FLOAT-STRING"], ["string", "float", 17, "CAST-STRING-FLOAT"], ["bool", "string", 18, "CAST-BOOL-STRING"], ["string", "bool", 19, "CAST-STRING-BOOL"]];
+  def bl-cast-id(row) = make_nodeid(1, 2, 98, row[2]);
+  def bl-cast-entries() = bl-cast-rows() |> map(row => wr-entry(row[3], bl-cast-id(row)));
+  def bl-cast-leaf(v, from) = match from { "int" | "bool" => intern_trivial_int(v), "float" => make_float64(v), "string" => intern_trivial_string(v), _ => nothing() };
+  def bl-cast-cell(v, from, to) {
+   let row = bl-first(bl-cast-rows() |> filter(r => (r[0] == from) && (r[1] == to)));
+   let leaf = nothing?(row) ? nothing() : bl-cast-leaf(v, from);
+   nothing?(leaf) ? nothing() : intern_node(bl-cast-id(row), [leaf]);
+  }
+  def bl-cast-run(c) {
+   let row = value_kind(c) == "node_id" ? bl-first(bl-cast-rows() |> filter(r => eq(bl-cast-id(r), node_category(c)))) : nothing();
+   nothing?(row) ? nothing() : convert(node_value(node_children(c)[0]), row[1], []);
+  }
+ }
+ 0;
+}

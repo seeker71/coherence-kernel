@@ -1,0 +1,250 @@
+// host-child.bml — the one door a walk's children go through: an argv, a stdin file, one out file, an exit read
+// from the host, and a deadline that stops a child that hung.
+//
+// A walk begins children: a native turn, a planner, a review, the drift gates, a movement, git. Each was a shell
+// line handed to the host's shell door, and a pipeline through grep or tail kept one line of what the child said and threw the
+// rest away: a turn, review or gate that failed left nothing a reader could open, and the exit was whatever the last
+// stage of the pipeline answered. hch-run spawns the child itself (host_spawn_at: execvp on the argv, no shell reads
+// it). Its stdin is a file the door writes (<io>/<step>.in, or /dev/null for no input), its stdout and stderr share
+// one file (<io>/<step>.out, which is the whole of what `2>&1` ever meant; hch-run-quiet sends stderr to /dev/null
+// instead), and the step's name is the file's name: the full output and the exact input of the last run of each step
+// stay under .hearth/walk-io, where the findings feeder and the native-turn queue can read them, and a failed step
+// can be replayed by hand with the very bytes it read. The exit comes from host_wait, never from a printed mark. The
+// out file opens in append mode, so the door removes the step's last .out before the child starts: a step never
+// reads the previous run's lines.
+//
+// Every run answers [status, text, why]:
+//   status  the child's exit (a signal death reads 128 + the signal), or nothing() when no exit arrived: the child
+//           was never born, or it was stopped at its deadline. Never -1 read as an exit.
+//   text    everything the child printed (read from the out file; "" when nothing was printed). A child that ended by a signal
+//           has its finding at the text's end (and in <io>/<step>.finding): the signal, the cell and the frames its
+//           fatal-signal row named (fatal-signal.bml), never the bare number.
+//   why     "" when an exit arrived, else the reason, named: "birth refused: ..." for the four refusals host_spawn_at
+//           answers at birth (-1 the argv, -2 a redirect, -3 the fork, -4 the binary), "deadline: ..." when the child
+//           ran past its deadline and was stopped
+// <io>/<step>.exit holds the same reading as one line, so the evidence of a step stands whole beside its output.
+// The run before the last stays beside it as <step>.prev.{in,out,exit}: a window runs several turns under one step
+// name, and the turn before the last is not lost to the next.
+//
+// A deadline (until) is a time on host_monotonic_ms, the clock every process on this host shares; nothing() blocks
+// on host_wait. With a deadline the door waits on host_wait [pid, ms]: the host wakes it at the child's end, so the
+// end is read the moment it comes and a running child costs nothing to wait on, however long the deadline is. At the
+// deadline (host_wait answers nothing()) it stops the child's whole lineage: it reads the descendants among the fkwu
+// kernels (the lanes and sessions a turn begins are fkwu kernels, and a stopped parent's children are orphans no later
+// read finds), asks each to stop (host_kill), gives them hch-grace-ms, and ends the survivors with SIGKILL.
+//
+// Which children carry a deadline: a turn and a plan (the window's end plus hw-backstop-ms), the review, the gates,
+// the movement, the drafts and the page (hch-step-backstop-ms, two hours), and every git step (hch-git-backstop-ms,
+// half an hour). A hung one of these no longer holds the walk's lock. Not covered, said plainly: a witness the
+// landing names (it runs inside the movement's child, so the movement's backstop reaches it), the one-line reads
+// (hch-read, host_capture, which only the kernel can bound), and the two shell crossings form-cli-landing.bml names.
+//
+// PROOF: form-stdlib/tests/host-walk-band.bml (claim "spawn").
+import form-stdlib/line-grammar.fk;
+import form-stdlib/bml/spawn-guard.bml;
+import form-stdlib/bml/cell-said.bml;
+import form-stdlib/bml/fatal-signal.bml;
+section [form.bml] {
+ class HostChild {
+  def hch-dir() = ".hearth/walk-io";
+  def hch-out-path(io, step) = io ++ "/" ++ step ++ ".out";
+  def hch-in-path(io, step) = io ++ "/" ++ step ++ ".in";
+  def hch-exit-path(io, step) = io ++ "/" ++ step ++ ".exit";
+  def hch-grace-ms() = 5000;
+  // a deadline is a time on host_monotonic_ms; hch-by names one that far from now
+  def hch-by(ms) = host_monotonic_ms() + ms;
+  def hch-step-backstop-ms() = 7200000;
+  def hch-git-backstop-ms() = 1800000;
+  // the directories of a path, outermost first (host_dir_mkdir makes one level)
+  def hch-prefixes(dir, from) {
+   let at = str_find(dir, "/", from);
+   at < 0 ? [dir] : at == 0 ? hch-prefixes(dir, 1) : cons(substring(dir, 0, at), hch-prefixes(dir, at + 1));
+  }
+  def hch-mkdirs(dir) = foldl((acc, one) => host_dir_mkdir(one), 0, hch-prefixes(dir, 0));
+  // the stdin a child reads: the input written to <io>/<step>.in, or /dev/null for none
+  def hch-input(io, step, input) {
+   let path = hch-in-path(io, step);
+   let put = (String) (input ?? "") == "" ? host_path_remove(path) : write_file_text(path, input);
+   (String) (input ?? "") == "" ? "/dev/null" : path;
+  }
+  def hch-birth-why(pid) = nothing?(pid) ? "birth refused: no pid arrived" : pid == -1 ? "birth refused: the argv cannot be run (-1)" : pid == -2 ? "birth refused: a redirect would not open (-2)" : pid == -3 ? "birth refused: the host refused to fork (-3)" : pid == -4 ? "birth refused: the binary did not exec (-4)" : pid == -5 ? "birth refused: forbidden-tool (-5)" : "birth refused: host_spawn_at answered " ++ pid.str();
+  def hch-reaped(status) = nothing?(status) ? [nothing(), "no exit: no exit arrived"] : (Comparable) status < 0 ? [nothing(), "no exit: host_wait answered " ++ status.str()] : [status, ""];
+  def hch-wait(pid, until) = nothing?(until) ? hch-reaped(host_wait(pid)) : hch-until(pid, host_wait([pid, hch-left(until)]));
+  def hch-left(until) = until - host_monotonic_ms() < 1 ? 1 : until - host_monotonic_ms();
+  def hch-until(pid, status) = nothing?(status) ? hch-stop(pid) : hch-reaped(status);
+  // The child's lineage: the child and every descendant that is an fkwu kernel (host_processes names kernels by
+  // prefix and answers each row's parent), read before any signal because a stopped parent's children are no longer
+  // found through it. A pass adds the rows whose parent is already in the set, until a pass adds none.
+  def hch-roster() {
+   let rows = host_processes("fkwu*");
+   (String) value_kind(rows) == "list" ? rows : [];
+  }
+  def hch-row-ok?(row) = (String) value_kind(row) == "list" && len(row) > 5 && (String) value_kind(row[0]) == "int" && (String) value_kind(row[5]) == "int";
+  def hch-in?(xs, x) = nil?(xs) ? false : ((Comparable) xs[0] == x) || hch-in?(xs[1:], x);
+  def hch-grow(rows, set) {
+   let more = filter(row => hch-row-ok?(row) && !hch-in?(set, row[0]) && hch-in?(set, row[5]), rows);
+   nil?(more) ? set : hch-grow(rows, append(set, more |> map(row => row[0])));
+  }
+  def hch-lineage(pid) = hch-grow(hch-roster(), [pid]);
+  def hch-asked(family) = foldl((acc, one) => host_kill(one), 0, family);
+  def hch-gone-all?(family, until) = nil?(filter(one => (Comparable) host_alive(one) == 1, family)) ? true : host_monotonic_ms() >= until ? false : hch-gone-again(family, until, host_sleep_ms(50));
+  def hch-gone-again(family, until, rested) = hch-gone-all?(family, until);
+  def hch-standing(family) = filter(one => (Comparable) host_alive(one) == 1, family);
+  // The survivors are ended with SIGKILL through the host_signal door, one signal each. The answer is how many the host
+  // refused (0: every one was sent), or nothing() when this fkwu has no such door: it names the missing binding when
+  // the file is lowered and answers nothing for the call, and a deadline that cannot end its child says so below
+  // rather than waiting on a child it did not end.
+  def hch-door?() = !nothing?(host_signal(0, 9));
+  def hch-ended(family) = hch-door?() ? foldl((acc, one) => host_signal(one, 9) < 0 ? acc + 1 : acc, 0, hch-standing(family)) : nothing();
+  // past its deadline: the lineage is asked to stop, given its grace, and the survivors ended; the child's exit is read
+  // for the reaping, never believed
+  def hch-stop(pid) {
+   let family = hch-lineage(pid);
+   let asked = hch-asked(family);
+   let gone = hch-gone-all?(family, host_monotonic_ms() + hch-grace-ms());
+   let forced = gone ? 0 : hch-ended(family);
+   let reaped = nothing?(forced) ? 0 : host_wait(pid);
+   [nothing(), "deadline: the child ran past its deadline and was stopped" ++ (len(family) > 1 ? " with " ++ (len(family) - 1).str() ++ " descendant(s)" : "") ++ (gone ? "" : nothing?(forced) ? " (NOT ended: this fkwu has no host_signal door; rebuild it from runtime/fkwu-uni.c)" : " (ended with SIGKILL)")];
+  }
+  // the step's reading, one line beside its output
+  def hch-exit-line(status, why) = nothing?(status) ? "none " ++ why : status.str();
+  def hch-answer(io, step, out, waited) {
+   let text = read_file(out) ?? "";
+   let found = hch-signal-finding(io, step, waited[0], text);
+   let noted = write_file_text(hch-exit-path(io, step), hch-exit-line(waited[0], waited[1]) ++ "\n");
+   [waited[0], text ++ found, waited[1]];
+  }
+  // A child that ended by a signal (an exit of 128 + n) is a finding, never the bare number: the fatal-signal row the seed wrote at the moment of
+  // death (fatal-signal.bml) names the signal, the cell and the frames, and is read here and set at the text's end and in <io>/<step>.finding.
+  def hch-signal-finding(io, step, status, text) {
+   let lines = fsg-signalled?(status) ? fsg-leg-finding("[host-child] " ++ step, status, fsg-path(), now_unix_ms()) : [];
+   len(lines) == 0 ? "" : hch-signal-keep(io, step, (len(text) == 0 || hch-ends-nl?(text) ? "" : "\n") ++ hch-join(lines, "\n") ++ "\n");
+  }
+  def hch-signal-keep(io, step, said) {
+   let kept = write_file_text(io ++ "/" ++ step ++ ".finding", said);
+   said;
+  }
+  // a child never born leaves its reason where its output would have stood
+  def hch-unborn(io, step, out, pid) = hch-unborn-why(io, step, out, hch-birth-why(pid));
+  def hch-unborn-why(io, step, out, why) {
+   let noted = write_file_text(out, "[host-child] " ++ why ++ "\n");
+   let marked = write_file_text(hch-exit-path(io, step), "none " ++ why ++ "\n");
+   [nothing(), "", why];
+  }
+  // The run before this one stays beside it (<step>.prev.{in,out,exit}), so a window of turns keeps the evidence
+  // of the turn before the last. A file that is not there is not carried.
+  def hch-carry(io, step, ext) {
+   let from = io ++ "/" ++ step ++ ext;
+   (Comparable) host_path_exists(from) == 1 ? host_path_rename(from, io ++ "/" ++ step ++ ".prev" ++ ext) : 0;
+  }
+  def hch-rotate(io, step) {
+   let fed = hch-carry(io, step, ".in");
+   let said = hch-carry(io, step, ".out");
+   let heard = hch-carry(io, step, ".err");
+   hch-carry(io, step, ".exit");
+  }
+  // ── a cell, called in this process (docs/in-process-cells.md) ──
+  // hch-cell-in(io, step, path, input, until) runs the cell at path through cell_run: no child, no exit to read, no stream
+  // to parse. It answers what hch-run answers, [status, text, why], and the cell's own record after them:
+  //   status  0 when the cell ran to its end with no compile error, 1 when its compile counted an error or it stopped
+  //           (the exit a spawned fkwu gave), nothing() when it never ran (the unit would not read as a program, the call was
+  //           refused, or this fkwu has no cell_run door) or ended at its deadline
+  //   text    what the cell printed (the value it ended on is the record's, not a last line to be read back); a stop is named
+  //           on the text's last line, as a spawned run's stderr named it
+  //   why     "" when it ran, else the reason, named as hch-run names one ("birth refused: ...", "deadline: ...")
+  //   [3]     the record {value, out, err, diag, stopped, errors, resident, ms, cpu_us}, nothing() when no record came
+  // The step's evidence stands as it does for a child: <io>/<step>.{in,out,err,exit} (err is the stderr text the cell said:
+  // its diagnostics and organ-health rows, cs-stderr of cell-said.bml; the exit line is the reading above), the run before
+  // it beside it as .prev.*. `until` is a time on
+  // host_monotonic_ms as it is for hch-run; the cell's budget is what is left of it (a deadline instead of a kill).
+  def hch-cell-left(until) = nothing?(until) ? nothing() : until - host_monotonic_ms() < 1 ? 1 : until - host_monotonic_ms();
+  def hch-cell-input-lines(input) {
+   let lines = split-on(input, "\n");
+   len(lines) > 0 && (String) lines[len(lines) - 1] == "" ? take(len(lines) - 1, lines) : lines;
+  }
+  def hch-cell-stdin(input) = (String) (input ?? "") == "" ? nothing() : hch-cell-input-lines(input);
+  def hch-cell-field(rec, key) = nothing?(rec) ? nothing() : record_get(rec, key);
+  def hch-cell-stop(rec) = hch-cell-field(rec, "stopped");
+  def hch-cell-kind(rec) = nothing?(hch-cell-stop(rec)) ? "" : (String) record_get(hch-cell-stop(rec), "kind");
+  def hch-cell-message(rec) = nothing?(hch-cell-stop(rec)) ? "" : (String) record_get(hch-cell-stop(rec), "message");
+  def hch-cell-status(rec) = nothing?(rec) ? nothing() : (String) hch-cell-kind(rec) == "" ? ((Comparable) record_get(rec, "errors") > 0 ? 1 : 0) : ((String) hch-cell-kind(rec) == "stop" || (String) hch-cell-kind(rec) == "stack-depth") ? 1 : nothing();
+  def hch-cell-why(rec) = nothing?(rec) ? "birth refused: this fkwu has no cell_run door; rebuild it from runtime/fkwu-uni.c" : (String) hch-cell-kind(rec) == "deadline" ? "deadline: the cell ran past its deadline and was stopped" : ((String) hch-cell-kind(rec) == "unrunnable" || (String) hch-cell-kind(rec) == "refused") ? "birth refused: " ++ hch-cell-message(rec) : hch-cell-kind(rec)!="" ? hch-cell-kind(rec) + ": " + hch-cell-message(rec) : record_get(rec,"errors")>0 ? cs-stderr(rec) : "";
+  def hch-cell-printed(rec) = nothing?(rec) ? "" : (String) (record_get(rec, "out") ?? "");
+  def hch-cell-text(rec) = (String) hch-cell-kind(rec) == "stop" ? hch-cell-printed(rec) ++ (hch-ends-nl?(hch-cell-printed(rec)) || (String) hch-cell-printed(rec) == "" ? "" : "\n") ++ "[cell] stopped: " ++ hch-cell-message(rec) ++ "\n" : (String) hch-cell-kind(rec) == "stack-depth" ? hch-cell-printed(rec) ++ (hch-ends-nl?(hch-cell-printed(rec)) || (String) hch-cell-printed(rec) == "" ? "" : "\n") ++ hch-join(fsg-stopped-lines("[cell]", hch-cell-stop(rec)), "\n") ++ "\n" : hch-cell-printed(rec);
+  def hch-cell-in(io, step, path, input, until) {
+   let made = hch-mkdirs(io);
+   let rotated = hch-rotate(io, step);
+   let out = hch-out-path(io, step);
+   let cleared = host_path_remove(out);
+   let from = hch-input(io, step, input);
+   let rec = cell_run(path, 0, hch-cell-left(until), hch-cell-stdin(input));
+   hch-cell-answer(io, step, out, rec);
+  }
+  def hch-cell-answer(io, step, out, rec) {
+   let status = hch-cell-status(rec);
+   let why = hch-cell-why(rec);
+   let text = hch-cell-text(rec);
+   let observed = hch-cell-observe(io, step, rec);
+   let wrote = write_file_text(out, nothing?(rec) ? "[host-child] " ++ why ++ "\n" : text);
+   let heard = write_file_text(hch-err-path(io, step), cs-stderr(rec));
+   let noted = write_file_text(hch-exit-path(io, step), hch-exit-line(status, why) ++ "\n");
+   [status, text, why, rec];
+  }
+  def hch-cell-observe(owner, step, rec) {
+   let observed = nothing?(rec) ? 0 : fb_record(intern_node(intern_trivial_string("in-process-cell-return"), [intern_trivial_string(owner), intern_trivial_string(step), intern_trivial_string(hch-cell-field(hch-cell-field(rec,"stopped"),"kind") ?? ""), intern_trivial_int(record_get(rec,"resident")), intern_trivial_int(record_get(rec,"ms")), intern_trivial_int(record_get(rec,"cpu_us")), intern_trivial_int(record_get(rec,"errors")), intern_trivial_string(value_kind(record_get(rec,"value"))),hch-cell-stop(rec),record_get(rec,"diag")]), "host-child.bml", 201);
+   rec;
+  }
+  def hch-err-path(io, step) = io ++ "/" ++ step ++ ".err";
+  def hch-cell(step, path, input, until) = hch-cell-in(hch-dir(), step, path, input, until);
+  // the line a cell ended on, as the value it is ("" when it stopped, never ran or ended on anything but a string): a caller asks the record, not the text for its last line
+  def hch-cell-line(run) = nothing?(run[3]) || (String) value_kind(record_get(run[3], "value")) != "string" ? "" : record_get(run[3], "value");
+  // err: "" shares the out file; any other path takes stderr there
+  // A command that runs a forbidden tool (sed, awk, perl, python: spawn-guard.bml) is never begun: its ending is the
+  // step's [nothing(), "", "birth refused: forbidden-tool <names>: ..."], written beside the step like any refusal at birth.
+  def hch-run-with(io, step, argv, input, until, err) = hch-run-with-at(io, step, "", argv, input, until, err);
+  def hch-run-with-at(io, step, cwd, argv, input, until, err) {
+   let made = hch-mkdirs(io);
+   let rotated = hch-rotate(io, step);
+   let out = hch-out-path(io, step);
+   let cleared = host_path_remove(out);
+   let refused = sg-argv-reason(argv, (String) (input ?? ""));
+   (String) refused != "" ? hch-unborn-why(io, step, out, "birth refused: " ++ refused) : hch-run-born(io, step, cwd, argv, input, until, err, out);
+  }
+  // cwd "" keeps this process's directory; any other is the directory the child begins in (the spawn door's fourth element:
+  // chdir in the child after the fork, so no program stands between to change it)
+  def hch-run-born(io, step, cwd, argv, input, until, err, out) {
+   let from = hch-input(io, step, input);
+   let pid = host_spawn_at(argv, [from, out, (String) err == "" ? out : err, cwd]);
+   nothing?(pid) || pid <= 0 ? hch-unborn(io, step, out, pid) : hch-answer(io, step, out, hch-wait(pid, until));
+  }
+  def hch-run-in(io, step, argv, input, until) = hch-run-with(io, step, argv, input, until, "");
+  def hch-run-at(io, step, cwd, argv, input, until) = hch-run-with-at(io, step, cwd, argv, input, until, "");
+  def hch-run-quiet-in(io, step, argv, input, until) = hch-run-with(io, step, argv, input, until, "/dev/null");
+  def hch-run(step, argv, input, until) = hch-run-in(hch-dir(), step, argv, input, until);
+  def hch-run-quiet(step, argv, input, until) = hch-run-quiet-in(hch-dir(), step, argv, input, until);
+  // git has no cwd argument here: -C names the checkout
+  def hch-git-argv(dir, args) = cons("git", cons("-C", cons(dir, args)));
+  def hch-git-in(io, dir, step, args) = hch-run-in(io, step, hch-git-argv(dir, args), "", hch-by(hch-git-backstop-ms()));
+  def hch-git-quiet-in(io, dir, step, args) = hch-run-quiet-in(io, step, hch-git-argv(dir, args), "", hch-by(hch-git-backstop-ms()));
+  def hch-ok?(run) = !nothing?(run[0]) && (Comparable) run[0] == 0;
+  def hch-status-text(run) = nothing?(run[0]) ? "nothing" : run[0].str();
+  // the text of a run, with a child that never exited named on its last line (a reader of the text sees why)
+  def hch-said(run) = nothing?(run[0]) && (String) run[2] != "" ? (String) run[1] ++ ((String) run[1] == "" || hch-ends-nl?(run[1]) ? "" : "\n") ++ "[host-child] " ++ run[2] : run[1];
+  def hch-ends-nl?(s) = len(s) > 0 && (Comparable) str_byte_at(s, len(s) - 1) == 10;
+  // a one-line read: stdout of an argv child, trimmed; "" when it printed nothing or was not born
+  def hch-read(argv) = trim(sg-capture(argv) ?? "");
+  // ── the readers that replace `grep -F ... | tail -1` and `grep -F -e ... -e ...` ──
+  def hch-lines(text) = split-on(text ?? "", "\n");
+  def hch-any-in?(line, needles) = nil?(needles) ? false : str_find(line, needles[0], 0) >= 0 ? true : hch-any-in?(line, needles[1:]);
+  def hch-matching(text, needles) = filter(line => hch-any-in?(line, needles), hch-lines(text));
+  def hch-join(lines, sep) = nil?(lines) ? "" : nil?(lines[1:]) ? lines[0] : lines[0] ++ sep ++ hch-join(lines[1:], sep);
+  // the last line holding the needle ("" when none does)
+  def hch-last(text, needle) = hch-last-of(hch-matching(text, [needle]));
+  def hch-last-of(lines) = nil?(lines) ? "" : lines[len(lines) - 1];
+  // every line holding any needle, in order, joined by newlines
+  def hch-with(text, needles) = hch-join(hch-matching(text, needles), "\n");
+  // the last line of the text, as `printf '%s\n' "$out" | tail -1` read it: `$( )` had dropped the trailing newlines
+  def hch-tail-line(text) = hch-last-of(hch-lines(hch-trim-nl(text ?? "")));
+  def hch-trim-nl(s) = len(s) > 0 && (Comparable) str_byte_at(s, len(s) - 1) == 10 ? (len(s) > 1 && (Comparable) str_byte_at(s, len(s) - 2) == 13 ? hch-trim-nl(substring(s, 0, len(s) - 2)) : hch-trim-nl(substring(s, 0, len(s) - 1))) : s;
+ }
+}

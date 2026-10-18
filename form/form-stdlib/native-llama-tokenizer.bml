@@ -1,0 +1,113 @@
+// Local Hugging Face tokenizer JSON supplies every vocabulary id and merge rank.
+// The Llama alternation is Form; Unicode categories are versioned input data.
+import form-stdlib/native-ordered-index.bml;
+import form-stdlib/json.fk;
+import form-stdlib/line-grammar.fk;
+import form-stdlib/dsv4-tokenizer.fk;
+import form-stdlib/llama3-pretokenize.fk;
+import form-stdlib/metal-door.fk;
+section [form.bml] {
+ class NativeLlamaTokenizer {
+  def nlt-value(o,k) = node_value(json-object-get(o,k));
+  // The vocabulary, the decoder, the merge ranks and the specials are records: fkwu finds a record's key by a hash of its bytes
+  // (fk_rfind), so building 128 thousand vocabulary and 280 thousand merge keys is one pass of native sets, where the Form-level
+  // ordered index spent 41 seconds on them at every door start (observe/model-open-time-run.bml). A record answers 0 for an absent
+  // key, and 0 is a token id: nlt-get asks record_has first. Only the Unicode ranges stay ordered: they are asked for the range
+  // at or below a code point (noi-floor).
+  def nlt-get(tab,k) = record_has(tab,k) ? record_get(tab,k) : nothing();
+  def nlt-vocab(ps,t) = nil?(ps) ? t : nlt-vocab(ps[1:],record_set(t,json-pair-key(ps[0]),node_value(json-pair-value(ps[0]))));
+  def nlt-decoder(ps,t) = nil?(ps) ? t : nlt-decoder(ps[1:],record_set(t,md-le32(node_value(json-pair-value(ps[0]))),json-pair-key(ps[0])));
+  def nlt-merges(rows,i,t) = nil?(rows) ? t : nlt-merges(rows[1:],i + 1,record_set(t,nlt-merge-key(rows[0]),i));
+  def nlt-merge-key(node) {
+   let pair = json-array-elements(node);
+   (Comparable) len(pair) == 2 ? (node_value(pair[0]) + (" " + node_value(pair[1]))) : node_value(node);
+  }
+  def nlt-specials(rows,t) = nil?(rows) ? t : nlt-specials(rows[1:],record_set(t,nlt-value(rows[0],"content"),nlt-value(rows[0],"id")));
+  def nlt-added-decoder(rows,t) = nil?(rows) ? t : nlt-added-decoder(rows[1:],record_set(t,md-le32(nlt-value(rows[0],"id")),nlt-value(rows[0],"content")));
+  def nlt-hex(s,i,n) = i >= len(s) ? n : nlt-hex(s,i + 1,(n * 16) + str_find("0123456789ABCDEF",substring(s,i,i + 1),0));
+  def nlt-number-key(n) = substring("0000000" + n.str(),len(n.str()),len(n.str()) + 7);
+  def nlt-category-lines(lines,t) = nil?(lines) ? t : nlt-category-lines(lines[1:],nlt-category-line(lines[0],t));
+  def nlt-category-line(line,t) {
+   let fields = split-on(line,";");
+   (len(fields) < 2) || ((String) substring(trim(line),0,1) == "#") ? t : nlt-category-fields(fields,t);
+  }
+  def nlt-category-fields(fields,t) {
+   let cat = trim(split-on(fields[1],"#")[0]);
+   let k = (String) substring(cat,0,1) == "L" ? 1 : (String) substring(cat,0,1) == "N" ? 2 : 0;
+   let range = split-on(trim(fields[0]),"..");
+   let lo = nlt-hex(range[0],0,0); let hi = (Comparable) len(range) == 1 ? lo : nlt-hex(range[1],0,0);
+   noi-put(t,nlt-number-key(lo),[hi,k]);
+  }
+  def nlt-open(dir) {
+   let path = dir + "/tokenizer.json"; let root = parse-json(path,read_file(path));
+   let model = json-object-get(root,"model");
+   !((String) nlt-value(model,"type") == "BPE") ? form_error("native Llama tokenizer requires BPE") : nlt-open-model(dir,root,model);
+  }
+  // tokenizer: vocab, decoder, merge index, special index, Unicode index, model dir, added-token decoder.
+  def nlt-open-model(dir,root,model) {
+   let vocab = json-object-pairs(json-object-get(model,"vocab"));
+   let categories = read_file("form/form-stdlib/data/DerivedGeneralCategory-15.1.0.txt");
+   nothing?(categories) ? form_error("native tokenizer Unicode categories absent") : [nlt-vocab(vocab,record_new(0)),nlt-decoder(vocab,record_new(0)),nlt-merges(json-array-elements(json-object-get(model,"merges")),0,record_new(0)),nlt-specials(json-array-elements(json-object-get(root,"added_tokens")),record_new(0)),nlt-category-lines(split-on(categories,byte_to_str(10)),[]),dir,nlt-added-decoder(json-array-elements(json-object-get(root,"added_tokens")),record_new(0))];
+  }
+  def nlt-class(t,s,i) {
+   let cp = tkz-uval(s,i); let row = noi-floor(t[4],nlt-number-key(cp),nothing());
+   nothing?(row) ? 0 : cp <= row[0] ? row[1] : 0;
+  }
+  def nlt-ws(cp) = ((cp >= 9) && (cp <= 13)) || (((Comparable) cp == 32) || (((Comparable) cp == 133) || (((Comparable) cp == 160) || (((Comparable) cp == 5760) || (((cp >= 8192) && (cp <= 8202)) || (((Comparable) cp == 8232) || (((Comparable) cp == 8233) || (((Comparable) cp == 8239) || (((Comparable) cp == 8287) || ((Comparable) cp == 12288))))))))));
+  // kind: 1 letters, 2 numbers, 3 other, 4 whitespace, 5 CR/LF.
+  def nlt-kind(t,s,i,kind) = i >= len(s) ? 0 : (Comparable) kind == 4 ? nlt-ws(tkz-uval(s,i)) : (Comparable) kind == 5 ? tkz-newline(str_byte_at(s,i)) : (Comparable) kind == 3 ? (((Comparable) nlt-class(t,s,i) == 0) && (!nlt-ws(tkz-uval(s,i)))) : ((Comparable) nlt-class(t,s,i) == kind);
+  def nlt-run(t,s,i,kind,remaining) = ((Comparable) remaining == 0) || (!nlt-kind(t,s,i,kind)) ? i : nlt-run(t,s,i + tkz-ulen(s,i),kind,remaining - 1);
+  def nlt-lastnl(s,i,end,prior) = i >= end ? prior : nlt-lastnl(s,i + tkz-ulen(s,i),end,tkz-newline(str_byte_at(s,i)) ? (i + 1) : prior);
+  def nlt-prev(s,i,end,prev) = i >= end ? prev : nlt-prev(s,i + tkz-ulen(s,i),end,i);
+  def nlt-space-end(t,s,i) {
+   let end = nlt-run(t,s,i,4,-1); let nl = nlt-lastnl(s,i,end,-1);
+   nl >= 0 ? nl : (end < len(s)) && (end > (i + tkz-ulen(s,i))) ? nlt-prev(s,i,end,i) : end;
+  }
+  def nlt-end(t,s,i) {
+   let cp = tkz-uval(s,i); let next = i + tkz-ulen(s,i);
+   let contraction = (Comparable) cp == 39 ? l3-contract-len(s,len(s),i) : 0;
+   contraction > 0 ? (i + contraction)
+   : nlt-kind(t,s,i,1) ? nlt-run(t,s,i,1,-1)
+   : (!tkz-newline(cp)) && (((Comparable) nlt-class(t,s,i) == 0) && nlt-kind(t,s,next,1)) ? nlt-run(t,s,next,1,-1)
+   : nlt-kind(t,s,i,2) ? nlt-run(t,s,i,2,3)
+   : nlt-kind(t,s,i,3) ? nlt-run(t,s,nlt-run(t,s,i,3,-1),5,-1)
+   : ((Comparable) cp == 32) && nlt-kind(t,s,next,3) ? nlt-run(t,s,nlt-run(t,s,next,3,-1),5,-1)
+   : nlt-space-end(t,s,i);
+  }
+  def nlt-symbol(b) {
+   let cp = tkz-b2cp(b);
+   cp < 128 ? byte_to_str(cp) : ((String) byte_to_str(192 + (cp / 64)) + byte_to_str(128 + (cp % 64)));
+  }
+  def nlt-symbols(s,i,end) = i >= end ? [] : cons(nlt-symbol(str_byte_at(s,i)),nlt-symbols(s,i + 1,end));
+  def nlt-best(table,syms,i,bestRank,bestIndex) {
+   len(syms) < 2 ? bestIndex : nlt-best-next(table,syms,i,bestRank,bestIndex,nlt-get(table,syms[0] + (" " + syms[1])));
+  }
+  def nlt-best-next(table,syms,i,rank,at,found) = nothing?(found) ? nlt-best(table,syms[1:],i + 1,rank,at) : found < rank ? nlt-best(table,syms[1:],i + 1,found,i) : nlt-best(table,syms[1:],i + 1,rank,at);
+  def nlt-merge(syms,at) = (Comparable) at == 0 ? cons((String) syms[0] + syms[1],syms[1:][1:]) : cons(syms[0],nlt-merge(syms[1:],at - 1));
+  def nlt-bpe(table,syms) = nlt-bpe-at(table,syms,nlt-best(table,syms,0,2147483647,-1));
+  def nlt-bpe-at(table,syms,at) = at < 0 ? syms : nlt-bpe(table,nlt-merge(syms,at));
+  def nlt-ids(vocab,syms) = syms |> map(sym => nlt-required(nlt-get(vocab,sym)));
+  def nlt-required(v) = v ?? form_error("native tokenizer vocabulary entry absent");
+  def nlt-encode-from(t,s,i,acc) {
+   i >= len(s) ? reverse(acc) : nlt-piece(t,s,i,nlt-end(t,s,i),acc);
+  }
+  def nlt-piece(t,s,i,end,acc) = end <= i ? form_error("native tokenizer splitter made no progress") : nlt-encode-from(t,s,end,append(reverse(nlt-ids(t[0],nlt-bpe(t[2],nlt-symbols(s,i,end)))),acc));
+  def nlt-encode(t,s) = nlt-encode-from(t,s,0,[]);
+  def nlt-special(t,text) = nlt-required(nlt-get(t[3],text));
+  def nlt-decode-piece(s,i,acc) = i >= len(s) ? acc : nlt-decode-next(s,i,acc,tkz-cp2b(tkz-secp-val(s,i)));
+  def nlt-decode-next(s,i,acc,b) = b < 0 ? form_error("native tokenizer byte alphabet invalid") : nlt-decode-piece(s,i + tkz-secp-len(str_byte_at(s,i)),(String) acc + byte_to_str(b));
+  def nlt-added-text(t,id) = len(t) < 7 ? nothing() : nlt-get(t[6],md-le32(id));
+  def nlt-known-id(t,id) = (id >= 0) && ((!nothing?(nlt-get(t[1],md-le32(id)))) || (!nothing?(nlt-added-text(t,id))));
+  def nlt-decode-id(t,id) {
+   let added = nlt-added-text(t,id);
+   !nothing?(added) ? added : nlt-decode-piece(nlt-required(nlt-get(t[1],md-le32(id))),0,"");
+  }
+  def nlt-decode(t,ids) = nil?(ids) ? "" : ((String) nlt-decode-id(t,ids[0]) + nlt-decode(t,ids[1:]));
+  def nlt-header(t,role) = append([nlt-special(t,"<|start_header_id|>")],append(nlt-encode(t,role),append([nlt-special(t,"<|end_header_id|>")],nlt-encode(t,"\n\n"))));
+  def nlt-message(t,role,text) = append(nlt-header(t,role),append(nlt-encode(t,trim(text)),[nlt-special(t,"<|eot_id|>")]));
+  // Explicit date matches the tokenizer template's deterministic no-strftime branch.
+  def nlt-chat-start(t) = append([nlt-special(t,"<|begin_of_text|>")],append(nlt-header(t,"system"),append(nlt-encode(t,"Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n"),[nlt-special(t,"<|eot_id|>")])));
+  def nlt-chat(t,prompt) = append(nlt-chat-start(t),append(nlt-message(t,"user",prompt),nlt-header(t,"assistant")));
+ }
+ 0;
+}
