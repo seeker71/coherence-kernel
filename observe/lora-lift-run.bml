@@ -1,0 +1,64 @@
+// lora-lift-run.bml — the body teaches itself from the lessons its rented turns left, offline, and keeps the
+// result only if it is better.
+//
+// Builds a bounded dataset from .hearth/session-learning/rented-turns (observe/session-pairs-run.bml): the
+// first train_rows training pairs and the first valid_rows held-out pairs whose text is under max_chars. Trains
+// the native 3B's LoRA lane (form-stdlib/native-lora-train.bml, in this process, no crossing) from the parent
+// adapter for `steps` rounds into a fresh output directory. The trainer scores the held-out rows before it
+// trains (the parent) and after (the child), on the same rows; this door reads those two validation events
+// and lands one row in receipts/lora-promotion-ledger.jsonl: parent, child, both losses (x1000), the scores
+// (lower loss is higher score), rows, steps, rent 0. A child that does not beat its parent is recorded too.
+// Serving is not changed here: the lane's adapter moves only by a separate, witnessed decision.
+// stdin, optional: {"train_rows":8,"valid_rows":12,"max_chars":6000,"steps":8,"batch":1,"learning_rate":0.0001}
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-rows.bml form-stdlib/bml/form-value-nodes.bml form-stdlib/native-lora-train.bml form-stdlib/model-registry.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
+section [form.bml] {
+ class LoraLift {
+  def ll-src() = ".hearth/session-learning/rented-turns";
+  def ll-root() = ".hearth/session-learning/lift";
+  def ll-parent() = "form/form-stdlib/adapters/llama-3.2-3b-voice";
+  def ll-num(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def ll-real(doc, key, d) = json-object-has?(doc, key) ? node_value(json-object-get(doc, key)) : d;
+  def ll-nonempty(xs) = xs |> filter(x => (Comparable) len(trim(x)) != 0);
+  def ll-take(xs, n, maxc, acc) = nil?(xs) || (n <= 0) ? reverse(acc) : len(xs[0]) > maxc ? ll-take(xs[1:], n, maxc, acc) : ll-take(xs[1:], n - 1, maxc, cons(xs[0], acc));
+  def ll-join(xs) = nil?(xs) ? "" : xs[0] ++ "\n" ++ ll-join(xs[1:]);
+  def ll-lines(path) = ll-nonempty(split-on(fhn-read(path), "\n"));
+  // the trainer's events are a node ledger (training-events.fkb)
+  def ll-stage(ev) = frw-str(ev, "stage", "");
+  def ll-validations(rows) = rows |> filter(row => (String) ll-stage(row) == "validation");
+  def ll-events(out) = ll-events-of(fvn-rows-of(out ++ "/training-events.fkb"));
+  def ll-events-of(r) = (String) r[0] == "ok" ? r[1] : [];
+  def ll-loss(ev) = frw-num(ev, "loss", -1.0);
+  def ll-milli(x) = float_to_int(x * 1000.0);
+  def ll-run() {
+   let line = read_line();
+   let opts = nothing?(line) || ((Comparable) len(trim(line ?? "")) == 0) ? json-node-object([]) : parse-json("lift-options", line);
+   let trainN = ll-num(opts, "train_rows", 8);
+   let validN = ll-num(opts, "valid_rows", 12);
+   let maxc = ll-num(opts, "max_chars", 6000);
+   let steps = ll-num(opts, "steps", 8);
+   let batch = ll-num(opts, "batch", 1);
+   let lr = ll-real(opts, "learning_rate", 0.0001);
+   let m1 = fs_mkdir(".hearth/session-learning");
+   let m2 = fs_mkdir(ll-root());
+   let data = ll-root() ++ "/data-" ++ now_unix_ms().str();
+   let m3 = fs_mkdir(data);
+   let train = ll-take(ll-lines(ll-src() ++ "/train.jsonl"), trainN, maxc, []);
+   let valid = ll-take(ll-lines(ll-src() ++ "/valid.jsonl"), validN, maxc, []);
+   let wt = write_file_text(data ++ "/train.jsonl", ll-join(train));
+   let wv = write_file_text(data ++ "/valid.jsonl", ll-join(valid));
+   let out = ll-root() ++ "/out-" ++ now_unix_ms().str();
+   let request = ntr-request(mr-path(mr-find("llama32-3b-mlx-4bit")), ll-parent(), data, out, steps, batch, lr, 1, 8);
+   let started = now_unix_ms();
+   let result = ntr-run(request);
+   let events = ll-validations(ll-events(out));
+   let before = nil?(events) ? -1.0 : ll-loss(events[0]);
+   let after = len(events) < 2 ? -1.0 : ll-loss(reverse(events)[0]);
+   let child = nag-resolve(out);
+   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("parent", ll-parent()), fhn-s("child", child), fhn-s("data", data), fhn-n("train_rows", len(train)), fhn-n("valid_rows", len(valid)), fhn-n("steps", steps), fhn-n("parent_loss_milli", ll-milli(before)), fhn-n("child_loss_milli", ll-milli(after)), fhn-n("parent_score_milli", 0 - ll-milli(before)), fhn-n("child_score_milli", 0 - ll-milli(after)), fhn-n("better", (before > 0.0) && ((after > 0.0) && (after < before)) ? 1 : 0), fhn-n("rent_tokens", 0), fhn-n("wall_ms", now_unix_ms() - started)]);
+   let appended = fhn-append("receipts/lora-promotion-ledger.jsonl", json-emit(row) ++ "\n");
+   print_str("[lift] " ++ json-emit(row) ++ "\n");
+  }
+ }
+ ll-run();
+}

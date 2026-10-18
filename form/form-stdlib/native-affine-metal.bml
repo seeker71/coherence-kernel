@@ -1,0 +1,281 @@
+// Form owns affine quantization and linear/LoRA arithmetic on shared Metal buffers.
+// The immutable checkpoint has U32 packed nibbles and per-group scales/biases.
+// No interpreter, subprocess, or host weight expansion participates.
+import form-stdlib/safetensors-index.bml;
+import form-stdlib/lora-adapter.bml;
+import form-stdlib/backprop-msl.bml;
+import form-stdlib/metal-carrier.bml;
+import form-stdlib/bml/disposable.bml;
+section [form.bml] {
+ // the per-kernel device time of a profiled run (FORM_NAM_PROFILE=1)
+ let NAM-PROFILE = record_new(0, "names", []);
+ // The unit's source and the pipelines minted from it, kept for the process: nam-msl() concatenated the unit's 25 KB of text on every
+ // call, 115 us, three quarters of a dispatch's 150 us of host work, and a one-token forward is 620 dispatches (the voice decoded at
+ // 6 tokens a second, 2026-10-11, observe/dispatch-cost-probe-run.bml).
+ let NAM-CACHE = record_new(0, "msl", "");
+ // A Metal buffer is given back by its holder: `defer NativeAffineBuffer_dispose(h);` right after acquiring.
+ class NativeAffineBuffer : Disposable<Int> {
+  def dispose(h) = nam-free([h]);
+ }
+ class NativeAffineMetal {
+  field AffineDispatchGroups = 16777216;
+  field AffineIndexWord = 4294967296;
+  // The affine products round every multiply and every add on its own (contraction off, as the backward unit has it): the compiler
+  // fuses a multiply-add in one kernel's shape and not in another's, so a token alone, in a block, in a one-row or four-row walk
+  // differed in the last bit (1e-5) by the compiler's choice, never by the arithmetic. With contraction off the arithmetic IS the
+  // expression, and the kernels agree wherever they fold the same terms in the same order.
+  def nam-msl() = (String) record_get(NAM-CACHE, "msl") != "" ? record_get(NAM-CACHE, "msl") : nam-msl-kept(nam-msl-build());
+  def nam-msl-kept(text) {
+   let set = record_set(NAM-CACHE, "msl", text);
+   text;
+  }
+  def nam-msl-build() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" + ((String) nam-linear-msl() + "\n#pragma clang fp contract(fast)\n" + nam-basic-msl());
+  def nam-linear-msl() = "
+inline float nam_read(device const uchar* p, uint i, uint ty) {uint at=i*(ty==0?4:2);uint bits=uint(p[at])|(uint(p[at+1])<<8);if(ty==0)return as_type<float>(bits|(uint(p[at+2])<<16)|(uint(p[at+3])<<24));if(ty==1)return float(as_type<half>(ushort(bits)));return as_type<float>(bits<<16);}
+inline uint nam_g(uint r, uint cols, uint c, uint group) { return r*(cols/group)+c/group; }
+inline float nam_w(device const uchar* w, device const uchar* s, device const uchar* b, uint i, uint group, uint ty) { return float((w[i/2] >> ((i%2)*4))&15)*nam_read(s,i/group,ty)+nam_read(b,i/group,ty); }
+kernel void nam_affine(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& transpose [[buffer(10)]], constant uint& first_lo [[buffer(11)]], constant uint& first_hi [[buffer(12)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+ ulong index=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gid); uint width=transpose?cols:rows; ulong token=index/width; uint r=uint(index%width); if(token>=tokens) return; float a=0; uint n=transpose?rows:cols; for(uint c=lane;c<n;c+=32) { uint wi=transpose?c*cols+r:r*cols+c; a+=nam_w(w,s,b,wi,group,ty)*x[token*n+c]; } a=simd_sum(a); if(lane==0) y[index]=a;
+}
+kernel void nam_affine_mt(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& first_lo [[buffer(10)]], constant uint& first_hi [[buffer(11)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+ ulong index=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gid); uint r=uint(index%rows); uint tb=uint(index/rows)*8; if(tb>=tokens) return;
+ float acc[8]={0,0,0,0,0,0,0,0}; ulong rowbase=ulong(r)*ulong(cols);
+ for(uint c=lane*8;c<cols;c+=256) {
+  ulong wi=rowbase+c; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
+  uint g=nam_g(r,cols,c,group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty); float wv[8];
+  for(uint j=0;j<8;j++) wv[j]=float((word>>(4*j))&15)*sc+bi;
+  for(uint t=0;t<8;t++) { if(tb+t<tokens) { device const float* xp=x+ulong(tb+t)*cols+c; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4); acc[t]+=wv[0]*x0.x+wv[1]*x0.y+wv[2]*x0.z+wv[3]*x0.w+wv[4]*x1.x+wv[5]*x1.y+wv[6]*x1.z+wv[7]*x1.w; } }
+ }
+ for(uint t=0;t<8;t++) { float v=simd_sum(acc[t]); if(lane==0 && tb+t<tokens) y[ulong(tb+t)*rows+r]=v; }
+}
+kernel void nam_affine_mt4(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& first_lo [[buffer(10)]], constant uint& first_hi [[buffer(11)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+ ulong index=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gid); uint rq=rows/4; uint rb=uint(index%rq)*4; uint tb=uint(index/rq)*8; if(tb>=tokens) return;
+ float acc[4][8]; for(uint q=0;q<4;q++) for(uint t=0;t<8;t++) acc[q][t]=0;
+ for(uint c=lane*8;c<cols;c+=256) {
+  float xv[8][8];
+  for(uint t=0;t<8;t++) { if(tb+t<tokens) { device const float* xp=x+ulong(tb+t)*cols+c; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4); xv[t][0]=x0.x; xv[t][1]=x0.y; xv[t][2]=x0.z; xv[t][3]=x0.w; xv[t][4]=x1.x; xv[t][5]=x1.y; xv[t][6]=x1.z; xv[t][7]=x1.w; } else { for(uint j=0;j<8;j++) xv[t][j]=0; } }
+  for(uint q=0;q<4;q++) {
+   ulong wi=ulong(rb+q)*ulong(cols)+c; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
+   uint g=nam_g(rb+q,cols,c,group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty); float wv[8];
+   for(uint j=0;j<8;j++) wv[j]=float((word>>(4*j))&15)*sc+bi;
+   for(uint t=0;t<8;t++) { acc[q][t]+=wv[0]*xv[t][0]+wv[1]*xv[t][1]+wv[2]*xv[t][2]+wv[3]*xv[t][3]+wv[4]*xv[t][4]+wv[5]*xv[t][5]+wv[6]*xv[t][6]+wv[7]*xv[t][7]; }
+  }
+ }
+ for(uint q=0;q<4;q++) for(uint t=0;t<8;t++) { float v=simd_sum(acc[q][t]); if(lane==0 && tb+t<tokens) y[ulong(tb+t)*rows+rb+q]=v; }
+}
+kernel void nam_affine_mma(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& first_lo [[buffer(10)]], constant uint& first_hi [[buffer(11)]], uint gr [[threadgroup_position_in_grid]], uint lt [[thread_index_in_threadgroup]]) {
+ threadgroup float xs[2048]; threadgroup float ws[2048];
+ ulong gi=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gr); uint tilesN=(rows+31u)/32u; uint tgx=uint(gi%ulong(tilesN)); uint tgy=uint(gi/ulong(tilesN)); uint n0=tgx*32u; uint t0=tgy*32u;
+ uint sg=lt/32u; uint r4=sg/2u; uint c2=sg-r4*2u;
+ simdgroup_float8x8 acc0=simdgroup_float8x8(0.0f); simdgroup_float8x8 acc1=simdgroup_float8x8(0.0f);
+ uint xr=lt/8u; uint xc=(lt%8u)*8u; uint xt=t0+xr; uint wn=lt/8u; uint wc=(lt%8u)*8u; uint wrow=n0+wn;
+ uint gpr=cols/group; uint gshift=ctz(group); bool gpow2=(group&(group-1u))==0u; uint gbase=wrow*gpr;
+ for(uint k0=0u;k0<cols;k0+=64u) {
+  if(xt<tokens) { device const float* xp=x+ulong(xt)*ulong(cols)+k0+xc; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4); xs[xr*64u+xc]=x0.x; xs[xr*64u+xc+1u]=x0.y; xs[xr*64u+xc+2u]=x0.z; xs[xr*64u+xc+3u]=x0.w; xs[xr*64u+xc+4u]=x1.x; xs[xr*64u+xc+5u]=x1.y; xs[xr*64u+xc+6u]=x1.z; xs[xr*64u+xc+7u]=x1.w; }
+  else { for(uint j=0u;j<8u;j++) { xs[xr*64u+xc+j]=0.0f; } }
+  if(wrow<rows) {
+   ulong wi=ulong(wrow)*ulong(cols)+k0+wc; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
+   uint kk=k0+wc; uint g=gbase+(gpow2?(kk>>gshift):(kk/group)); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty);
+   for(uint j=0u;j<8u;j++) { ws[(wc+j)*32u+wn]=float((word>>(4u*j))&15u)*sc+bi; }
+  } else { for(uint j=0u;j<8u;j++) { ws[(wc+j)*32u+wn]=0.0f; } }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for(uint kb=0u;kb<8u;kb++) {
+   simdgroup_float8x8 a; simdgroup_float8x8 b0m; simdgroup_float8x8 b1m;
+   simdgroup_load(a,xs+(r4*8u)*64u+kb*8u,64); simdgroup_load(b0m,ws+(kb*8u)*32u+c2*16u,32); simdgroup_load(b1m,ws+(kb*8u)*32u+c2*16u+8u,32);
+   simdgroup_multiply_accumulate(acc0,a,b0m,acc0); simdgroup_multiply_accumulate(acc1,a,b1m,acc1);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+ }
+ simdgroup_store(acc0,xs+(r4*8u)*32u+c2*16u,32); simdgroup_store(acc1,xs+(r4*8u)*32u+c2*16u+8u,32);
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ uint tx=lt%16u; uint ty2=lt/16u;
+ for(uint i=0u;i<2u;i++) { uint t=t0+ty2*2u+i; if(t>=tokens) continue; for(uint j=0u;j<2u;j++) { uint n=n0+tx*2u+j; if(n>=rows) continue; y[ulong(t)*ulong(rows)+n]=xs[(ty2*2u+i)*32u+tx*2u+j]; } }
+}
+inline float nam_chunk(device const uchar* w, device const uchar* s, device const uchar* b, device const float* x, uint r, uint cols, uint c, uint group, uint ty) {
+ ulong wi=ulong(r)*ulong(cols)+c; ulong at=wi/2; uint word=uint(w[at])|(uint(w[at+1])<<8)|(uint(w[at+2])<<16)|(uint(w[at+3])<<24);
+ uint g=nam_g(r,cols,c,group); float sc=nam_read(s,g,ty); float bi=nam_read(b,g,ty);
+ device const float* xp=x+c; float4 x0=*(device const float4*)xp; float4 x1=*(device const float4*)(xp+4);
+ float w0=float(word&15)*sc+bi; float w1=float((word>>4)&15)*sc+bi; float w2=float((word>>8)&15)*sc+bi; float w3=float((word>>12)&15)*sc+bi; float w4=float((word>>16)&15)*sc+bi; float w5=float((word>>20)&15)*sc+bi; float w6=float((word>>24)&15)*sc+bi; float w7=float((word>>28)&15)*sc+bi;
+ return w0*x0.x+w1*x0.y+w2*x0.z+w3*x0.w+w4*x1.x+w5*x1.y+w6*x1.z+w7*x1.w;
+}
+kernel void nam_affine_v1(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& first_lo [[buffer(10)]], constant uint& first_hi [[buffer(11)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+ ulong r=(ulong(first_hi)<<32)+ulong(first_lo)+ulong(gid); if(r>=rows) return; float acc=0; ulong rowbase=r*ulong(cols);
+ for(uint c=lane*8;c<cols;c+=256) {
+  acc+=nam_chunk(w,s,b,x,uint(r),cols,c,group,ty);
+ }
+ acc=simd_sum(acc); if(lane==0) y[r]=acc;
+}
+kernel void nam_matmul_sk(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* y [[buffer(2)]], constant uint& m [[buffer(3)]], constant uint& k [[buffer(4)]], constant uint& n [[buffer(5)]], constant uint& ta [[buffer(6)]], constant uint& tb [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& add [[buffer(9)]], uint gid [[thread_position_in_grid]]) { if(gid>=m*n) return; uint r=gid/n,c=gid%n; float v=0; for(uint j=0;j<k;j++) v+=a[ta?j*m+r:r*k+j]*b[tb?c*k+j:j*n+c]; v*=scale; if(add) y[gid]+=v; else y[gid]=v; }
+kernel void nam_embed(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const uint* ids [[buffer(3)]], device float* y [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& tokens [[buffer(6)]], constant uint& group [[buffer(7)]], constant uint& ty [[buffer(8)]], uint i [[thread_position_in_grid]]) { if(i<tokens*cols) y[i]=nam_w(w,s,b,ids[i/cols]*cols+i%cols,group,ty); }
+kernel void nam_matmul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* y [[buffer(2)]], constant uint& m [[buffer(3)]], constant uint& k [[buffer(4)]], constant uint& n [[buffer(5)]], constant uint& ta [[buffer(6)]], constant uint& tb [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& add [[buffer(9)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r=gid/n,c=gid%n; if(r>=m) return; float v=0; uint j=lane; for(;j+224<k;j+=256) { float a0=a[ta?j*m+r:r*k+j]; float b0=b[tb?c*k+j:j*n+c]; float a1=a[ta?(j+32)*m+r:r*k+j+32]; float b1=b[tb?c*k+j+32:(j+32)*n+c]; float a2=a[ta?(j+64)*m+r:r*k+j+64]; float b2=b[tb?c*k+j+64:(j+64)*n+c]; float a3=a[ta?(j+96)*m+r:r*k+j+96]; float b3=b[tb?c*k+j+96:(j+96)*n+c]; float a4=a[ta?(j+128)*m+r:r*k+j+128]; float b4=b[tb?c*k+j+128:(j+128)*n+c]; float a5=a[ta?(j+160)*m+r:r*k+j+160]; float b5=b[tb?c*k+j+160:(j+160)*n+c]; float a6=a[ta?(j+192)*m+r:r*k+j+192]; float b6=b[tb?c*k+j+192:(j+192)*n+c]; float a7=a[ta?(j+224)*m+r:r*k+j+224]; float b7=b[tb?c*k+j+224:(j+224)*n+c]; v+=a0*b0; v+=a1*b1; v+=a2*b2; v+=a3*b3; v+=a4*b4; v+=a5*b5; v+=a6*b6; v+=a7*b7; } for(;j<k;j+=32) v+=a[ta?j*m+r:r*k+j]*b[tb?c*k+j:j*n+c]; v=simd_sum(v)*scale; if(lane==0) { if(add) y[gid]+=v; else y[gid]=v; } }
+kernel void nam_cast(device const uchar* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& ty [[buffer(3)]], uint i [[thread_position_in_grid]]) { if(i<n) y[i]=nam_read(x,i,ty); }
+";
+  def nam-basic-msl() = "
+kernel void nam_add(device const float* a [[buffer(0)]],device const float* b [[buffer(1)]],device float* y [[buffer(2)]],constant uint& n [[buffer(3)]],constant float& scale [[buffer(4)]],uint i [[thread_position_in_grid]]) {if(i<n)y[i]=a[i]+scale*b[i];}
+kernel void nam_swiglu(device const float* g [[buffer(0)]],device const float* u [[buffer(1)]],device float* y [[buffer(2)]],constant uint& n [[buffer(3)]],uint i [[thread_position_in_grid]]) {if(i<n)y[i]=g[i]/(1+exp(-g[i]))*u[i];}
+kernel void nam_rms(device const float* x [[buffer(0)]],device const float* g [[buffer(1)]],device float* y [[buffer(2)]],device float* inv [[buffer(3)]],constant uint& d [[buffer(4)]],constant uint& t [[buffer(5)]],constant float& eps [[buffer(6)]],uint row [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {if(row>=t)return;float ss=0;uint j=lane;for(;j+224<d;j+=256){float x0=x[row*d+j];float x1=x[row*d+j+32];float x2=x[row*d+j+64];float x3=x[row*d+j+96];float x4=x[row*d+j+128];float x5=x[row*d+j+160];float x6=x[row*d+j+192];float x7=x[row*d+j+224];ss+=x0*x0;ss+=x1*x1;ss+=x2*x2;ss+=x3*x3;ss+=x4*x4;ss+=x5*x5;ss+=x6*x6;ss+=x7*x7;}for(;j<d;j+=32)ss+=x[row*d+j]*x[row*d+j];float r=rsqrt(simd_sum(ss)/d+eps);if(lane==0)inv[row]=r;j=lane;for(;j+224<d;j+=256){float x0=x[row*d+j];float x1=x[row*d+j+32];float x2=x[row*d+j+64];float x3=x[row*d+j+96];float x4=x[row*d+j+128];float x5=x[row*d+j+160];float x6=x[row*d+j+192];float x7=x[row*d+j+224];float g0=g[j];float g1=g[j+32];float g2=g[j+64];float g3=g[j+96];float g4=g[j+128];float g5=g[j+160];float g6=g[j+192];float g7=g[j+224];y[row*d+j]=x0*r*g0;y[row*d+j+32]=x1*r*g1;y[row*d+j+64]=x2*r*g2;y[row*d+j+96]=x3*r*g3;y[row*d+j+128]=x4*r*g4;y[row*d+j+160]=x5*r*g5;y[row*d+j+192]=x6*r*g6;y[row*d+j+224]=x7*r*g7;}for(;j<d;j+=32)y[row*d+j]=x[row*d+j]*r*g[j];}
+kernel void nam_zero(device float* x [[buffer(0)]],constant uint& n [[buffer(1)]],uint i [[thread_position_in_grid]]) {if(i<n)x[i]=0;}
+kernel void nam_copy(device const float* x [[buffer(0)]],device float* y [[buffer(1)]],constant uint& n [[buffer(2)]],uint i [[thread_position_in_grid]]) {if(i<n)y[i]=x[i];}
+kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint lane [[thread_index_in_simdgroup]]) {uint bad=0;float ss=0,m=0;for(uint i=lane;i<n;i+=32){float v=x[i];if(!isfinite(v)){bad++;}else{ss+=v*v;m=max(m,abs(v));}}bad=simd_sum(bad);ss=simd_sum(ss);m=simd_max(m);if(lane==0){out[0]=float(bad+uint(!isfinite(ss)));out[1]=isfinite(ss)?ss:0;out[2]=m;}}
+";
+  def nam-type(dtype) = (String) dtype == "F32" ? 0 : (String) dtype == "F16" ? 1 : (String) dtype == "BF16" ? 2 : form_error("native affine scalar dtype refused");
+  def nam-pipe(name) = record_has(NAM-CACHE, "pipe:" ++ name) ? record_get(NAM-CACHE, "pipe:" ++ name) : nam-pipe-kept(name, nam-held-pipe(metal_pipeline(nam-msl(), name)));
+  def nam-pipe-kept(name, p) {
+   let set = record_set(NAM-CACHE, "pipe:" ++ name, p);
+   p;
+  }
+  def nam-held-pipe(p) = p <= 0 ? nam-refused("Metal compile") : p;
+  // A 0 handle from an unloaded carrier is an absence, not a device refusal.
+  def nam-refused(what) = nam-refused-in(what, metal_status());
+  def nam-refused-in(what, status) = str_find(status, "metal_loaded=false", 0) >= 0 ? form_error("native affine Metal carrier not admitted: " + mca-reason(status)) : form_error("native affine " + (what + (" refused: " + mca-reason(status))));
+  def nam-run(name, handles, values, count, grouped) {
+   let p = nam-pipe(name);
+   let rc = nam-enqueue(name, p, grouped ? md-bind16(handles, values, 32, 0, 1, 0) : md-bind(handles, values), count);
+   rc < 0 ? form_error("native affine dispatch refused: " + name) : rc;
+  }
+  // threadgroups of `tpg` threads, `groups` of them (nam-run's grouped mode fixes 32)
+  def nam-run-tg(name, handles, values, groups, tpg) {
+   let p = nam-pipe(name);
+   let rc = nam-enqueue(name, p, md-bind16(handles, values, tpg, 0, 1, 0), groups);
+   rc < 0 ? form_error("native affine dispatch refused: " + name) : rc;
+  }
+  // FORM_NAM_PROFILE=1: every dispatch is waited for and the device's own busy time (metal_live word 11, the command buffer's
+  // GPUEndTime - GPUStartTime) is totalled under the kernel's name; nam-profile-report answers [name, microseconds, dispatches]
+  // rows, the most expensive first. The run is slower for it (a sync a dispatch) and its totals are the device's, not the wall's.
+  def nam-profile?() = (host_getenv("FORM_NAM_PROFILE") ?? "") == "1";
+  def nam-enqueue(name, p, bind, count) = nam-profile?() ? nam-enqueue-timed(name, p, bind, count) : metal_enqueue(p, bind, count);
+  def nam-enqueue-timed(name, p, bind, count) {
+   let g0 = metal_live()[11];
+   let rc = metal_enqueue(p, bind, count);
+   let settled = metal_sync();
+   let g1 = metal_live()[11];
+   let added = nam-profile-add(name, g1 - g0);
+   rc;
+  }
+  def nam-profile-add(name, us) {
+   let seen = record_get(NAM-PROFILE, "names");
+   let prev = record_has(NAM-PROFILE, name) ? record_get(NAM-PROFILE, name) : nothing();
+   let known = nothing?(prev) ? record_set(NAM-PROFILE, "names", cons(name, seen)) : 0;
+   record_set(NAM-PROFILE, name, nothing?(prev) ? [us, 1] : [prev[0] + us, prev[1] + 1]);
+  }
+  def nam-profile-rows() = map(n => [n, record_get(NAM-PROFILE, n)[0], record_get(NAM-PROFILE, n)[1]], record_get(NAM-PROFILE, "names"));
+  def nam-profile-report() = nam-profile-order(nam-profile-rows());
+  def nam-profile-top(rows) = foldl((best, r) => r[1] > best[1] ? r : best, rows[0], rows[1:]);
+  def nam-profile-order(rows) = nil?(rows) ? [] : cons(nam-profile-top(rows), nam-profile-order(filter(r => (String) r[0] != (String) nam-profile-top(rows)[0], rows)));
+  def nam-alloc(n) = n <= 0 ? form_error("native affine empty allocation") : nam-held(metal_buf_alloc(n * 4));
+  def nam-held(h) = h <= 0 ? nam-refused("allocation") : h;
+  def nam-sync() = metal_sync() < 0 ? form_error("native affine GPU completion refused") : 1;
+  def nam-free(handles) = nil?(handles) ? 1 : nam-free-next(metal_buf_free(handles[0]), handles[1:]);
+  def nam-free-next(rc, rest) = rc < 0 ? form_error("native affine release refused") : nam-free(rest);
+  def nam-floats(mapped) {
+   let n = sti-product(mapped[1]);
+   defer NativeAffineBuffer_dispose(mapped[0]);
+   let out = nam-alloc(n);
+   let rc = nam-run("nam_cast", [mapped[0], out], [n, nam-type(mapped[2])], n, 0);
+   let done = nam-sync();
+   out;
+  }
+  // affine view: W, scales, biases, rows, cols, group, scalar type
+  def nam-view(index, prefix, group) {
+   let w = sti-find(index, prefix + ".weight");
+   let s = sti-find(index, prefix + ".scales");
+   let b = sti-find(index, prefix + ".biases");
+   (group <= 0) || (!((Comparable) (group % 8) == 0)) ? form_error("native affine group size refused") : nil?(w) || (nil?(s) || nil?(b)) ? form_error("native affine tensors missing: " + prefix) : nam-view-shaped(index, prefix, group, w, s, b);
+  }
+  def nam-view-shaped(index, prefix, group, w, s, b) {
+   let ws = w[2]; let ss = s[2]; let bs = b[2];
+   !(((String) w[1] == "U32") && (((Comparable) len(ws) == 2) && (((Comparable) len(ss) == 2) && (((Comparable) len(bs) == 2) && (((Comparable) ws[0] == ss[0]) && (((Comparable) ss[0] == bs[0]) && (((Comparable) ss[1] == bs[1]) && (((Comparable) (ws[1] * 8) == (ss[1] * group)) && ((String) s[1] == b[1]))))))))) ? form_error("native affine shape/group mismatch") : [sti-map-row(index, w)[0], sti-map-row(index, s)[0], sti-map-row(index, b)[0], ws[0], ws[1] * 8, group, nam-type(s[1])];
+  }
+  // The transposed product walks columns (form_affine4_t_f32, backprop-msl.bml): adjacent threads read
+  // adjacent nibbles of one row. nam-linear-lanes is the simdgroup-per-output walk, in both directions.
+  // FORM_NAM_REFERENCE=1 selects the reference kernel for an A/B on real rows (observe/native-lora-score-bench-run.bml)
+  def nam-reference?() = (host_getenv("FORM_NAM_REFERENCE") ?? "") == "1";
+  def nam-linear(view, x, y, tokens, transpose) = transpose ? bpm-affine4-t(view, x, y, tokens) : nam-reference?() ? nam-linear-ref(view, x, y, tokens) : nam-linear-mt(view, x, y, tokens);
+  // The product y = W x for a block of 8 tokens at once: one simdgroup per (row, block of 8 tokens), each lane taking 8
+  // contiguous columns, so a packed word, a scale and a bias are fetched once for 8 weights and every dequantized weight
+  // serves all 8 tokens. nam_affine (below) dequantized every weight again for every token, five byte loads each: the
+  // forward of a 3B row cost tokens times the parameters in scalar work (50 ms a token, 2026-10-11). It stays as the
+  // reference, nam-linear-ref, which the band compares this against.
+  def nam-linear-ref(view, x, y, tokens) = nam-linear-lanes(view, x, y, tokens, 0);
+  // Four rows a simdgroup when the row count allows (every projection of the 3B model does): the block of 8 tokens' activations is
+  // read once into registers and serves four rows, a quarter of the activation traffic that bound the one-row kernel.
+  def nam-mt-four?(view) = (view[3] % 4) == 0;
+  // One token (the voice's decode): a block of 8 tokens wastes seven of its lanes of work, so one row a simdgroup, each lane taking 8
+  // contiguous columns at a time in the order the block kernels take them. The arithmetic is the block kernels' own, dequantize then
+  // multiply, so a token decoded alone equals the same token inside a block bit for bit: the trainer's head check holds that
+  // equality (a first decode kernel that factored the scale out of the sum differed by 3e-6 and the check stopped the trainer,
+  // 2026-10-11). The group index of a weight is computed in 32 bits (nam_g): the 64-bit division by the runtime group size that
+  // every lane did each step was most of the kernel (eight products of the 3B shape at one token: 3,426 us of device time -> 598;
+  // the block kernel 4,879 -> 2,384; observe/decode-matvec-probe-run.bml reads it).
+  def nam-dec8?(view) = (view[4] % 8) == 0 && (view[5] % 8) == 0;
+  def nam-decode?(view, tokens) = tokens == 1 && nam-dec8?(view);
+  // Sixteen tokens and more, on the matrix unit: a 32-token by 32-row output tile a threadgroup of 256 threads, the weights
+  // dequantized (the same dequantize-then-multiply) into threadgroup memory 32 columns a step beside the activations, the product
+  // taken by simdgroup_multiply_accumulate over 8x8 float tiles. The hardware chooses the association, so this answers to an
+  // epsilon of the scalar walk, not to its bits (the Qwen prefill's matrix unit stands on the same bound). It needs the columns
+  // and the group a multiple of 32, which every projection of the 3B model is.
+  def nam-mma?(view, tokens) = tokens >= 16 && (view[4] % 64) == 0 && (view[5] % 8) == 0;
+  def nam-mt-kernel(view, tokens) = nam-mma?(view, tokens) ? "nam_affine_mma" : nam-decode?(view, tokens) ? "nam_affine_v1" : nam-mt-four?(view) ? "nam_affine_mt4" : "nam_affine_mt";
+  def nam-mt-groups(view,tokens) = nam-mma?(view, tokens) ? ((tokens + 31) / 32) * ((view[3] + 31) / 32) : nam-decode?(view, tokens) ? view[3] : (nam-mt-four?(view) ? view[3] / 4 : view[3]) * ((tokens + 7) / 8);
+  def nam-linear-mt(view,x,y,tokens) = tokens <= 0 ? form_error("native affine token count must be positive") : nam-linear-mt-grid(view,x,y,tokens,0,nam-mt-groups(view,tokens));
+  def nam-linear-mt-grid(view,x,y,tokens,first,count) = first >= count ? 1 : {
+   let width = (count - first) < AffineDispatchGroups() ? (count - first) : AffineDispatchGroups();
+   let sent = nam-run-tg(nam-mt-kernel(view,tokens),[view[0],view[1],view[2],x,y],[view[3],view[4],tokens,view[5],view[6],first % AffineIndexWord(),first / AffineIndexWord()],width,nam-mma?(view,tokens) ? 256 : 32);
+   nam-linear-mt-grid(view,x,y,tokens,first + width,count);
+  };
+  // Bound each cooperative grid while retaining every output's global index.
+  def nam-linear-lanes(view,x,y,tokens,transpose) = tokens <= 0 ? form_error("native affine token count must be positive") : nam-linear-grid(view,x,y,tokens,transpose,0,tokens * (transpose ? view[4] : view[3]));
+  def nam-linear-grid(view,x,y,tokens,transpose,first,count) = first >= count ? 1 : {
+   let width = (count - first) < AffineDispatchGroups() ? (count - first) : AffineDispatchGroups();
+   let sent = nam-linear-span(view,x,y,tokens,transpose,first,width);
+   nam-linear-grid(view,x,y,tokens,transpose,first + width,count);
+  };
+  def nam-linear-span(view,x,y,tokens,transpose,first,count) = nam-run("nam_affine",[view[0],view[1],view[2],x,y],[view[3],view[4],tokens,view[5],view[6],transpose,first % AffineIndexWord(),first / AffineIndexWord()],count,1);
+  def nam-embed(view, ids, out, tokens) = nam-run("nam_embed", [view[0], view[1], view[2], ids, out], [view[4], tokens, view[5], view[6]], tokens * view[4], 0);
+  // A product whose inner dimension is small (a LoRA's rank, 8) is one thread an output: nam_matmul gave each output a simdgroup of
+  // 32 lanes of which k worked, 729 thousand simdgroups for one projection's second half (the profile: 17% of a scored row).
+  // The best-case device time of the LoRA products, 30 single dispatches each, minimum (the profile under neighbours read 14 to 22 ms
+  // a dispatch: that was time-slices handed to other processes, not the kernel). With the inner dimension at most 128 one thread an
+  // output wins: the rank-8 product 847 us -> 25 us, the gradient over 91 tokens 104 -> 72. The long reductions (3072 deep, 91 by 8
+  // outputs) cost 81 to 157 us with nam_matmul as it is, and a group of 256 threads an output was slower (256 us), so those stay.
+  def nam-mm(a, b, y, m, k, n, ta, tb, scale, accumulate) = k <= 128 ? nam-run("nam_matmul_sk", [a, b, y], [m, k, n, ta, tb, md-f32-bits(scale), accumulate], m * n, 0) : nam-run("nam_matmul", [a, b, y], [m, k, n, ta, tb, md-f32-bits(scale), accumulate], m * n, 1);
+  def nam-add(a, b, y, n, scale) = nam-run("nam_add", [a, b, y], [n, md-f32-bits(scale)], n, 0);
+  def nam-copy(a, y, n) = nam-run("nam_copy", [a, y], [n], n, 0);
+  def nam-zero(a, n) = nam-run("nam_zero", [a], [n], n, 0);
+  def nam-rms(x, gain, y, inv, d, t, eps) = nam-run("nam_rms", [x, gain, y, inv], [d, t, md-f32-bits(eps)], t, 1);
+  def nam-swiglu(g, u, y, n) = nam-run("nam_swiglu", [g, u, y], [n], n, 0);
+  // The standard candle: a fixed amount of matrix work (a 128 by 3072 by 3072 product, twice), timed by the device's own busy counter
+  // (metal_live word 11). The work never changes, so the microseconds a run of it takes are the machine's state and nothing else:
+  // its clocks, its neighbours, its heat. It does not depend on the accelerator's utilization gauge, which hands its level to whoever
+  // reads first (the glass, Activity Monitor) and so cannot be shared. Read at the start and the end of a phase (about 60 ms each),
+  // a longer candle means a slower machine, whatever the phase did. Answers microseconds a product; it was 27.9 to 28.4 ms on
+  // 2026-10-13 14:50 (12 reads within 2%).
+  def nam-candle() {
+   let a = nam-alloc(128 * 3072); let b = nam-alloc(3072 * 3072); let y = nam-alloc(128 * 3072);
+   let warm = nam-candle-run(a, b, y, 1);
+   let busy = nam-candle-run(a, b, y, 2);
+   let freed = nam-free([a, b, y]);
+   busy / 2;
+  }
+  def nam-candle-run(a, b, y, reps) {
+   let before = metal_live()[11];
+   let runs = map(i => nam-mm(a, b, y, 128, 3072, 3072, 0, 0, 1.0, 0), range(0, reps));
+   let done = nam-sync();
+   metal_live()[11] - before;
+  }
+  def nam-write(h, bytes) =!((Comparable) metal_buf_write(h, 0, bytes) == len(bytes)) ? form_error("native affine buffer write incomplete") : h;
+  // iterative: one frame per float stopped a 393 thousand float input on the walker's stack (2026-10-11)
+  def nam-f32s(xs) = str-join(map(v => md-le32(md-f32-bits(v)), xs));
+  def nam-buffer(xs) = nam-write(nam-alloc(len(xs)), nam-f32s(xs));
+  def nam-read(h, n) = nam-read-bytes(metal_buf_read(h, 0, n * 4), n);
+  def nam-read-bytes(bytes, n) = nothing?(bytes) || (!((Comparable) len(bytes) == (n * 4))) ? form_error("native affine read incomplete") : ln-floats-go(bytes, 0, n, []);
+  // Non-finite count, squared norm, maximum absolute value. Values never leave the GPU.
+  def nam-stats(h,n) {
+   let out = nam-alloc(3);
+   defer NativeAffineBuffer_dispose(out);
+   let rc = nam-run("nam_stats",[h,out],[n],1,1);
+   nam-read(out,3);
+  }
+ }
+ 0;
+}

@@ -1,0 +1,218 @@
+// Agent-shaped JSON door. Checks are caller-owned read-only native tool calls;
+// applications may instead supply a richer in-process callback to fcac-run.
+import form-stdlib/bml/form-cli-code-answer-reserve.bml;
+import form-stdlib/bml/form-cli-code-definition.bml;
+import form-stdlib/bml/native-session-code.bml;
+import form-stdlib/bml/form-cli-boolean-report.bml;
+import form-stdlib/bml/form-cli-provider-usage-replay.bml;
+import form-stdlib/bml/form-cli-answer-length.bml;
+import form-stdlib/bml/form-cli-check-witness.bml;
+import form-stdlib/bml/form-token-verbs.bml;
+section [form.bml] {
+ class FormCliCodeRequest {
+  def fcaq-number(obj, key, fallback) = if (!json-object-has?(obj, key)) then fallback else if (!fcad-int(json-object-get(obj, key))) then 0 else json-int-value(json-object-get(obj, key));
+  def fcaq-mode(obj) = if json-object-has?(obj, "mode") then fcap-string(obj, "mode") else "code";
+  def fcaq-evaluation(obj) = ((Comparable) fcaq-number(obj, "evaluation", 0) == 1);
+  def fcaq-flag-valid(obj,key) = if (!json-object-has?(obj,key)) then 1 else (fcad-int(json-object-get(obj,key)) && (((Comparable) fcaq-number(obj,key,-1) == 0) || ((Comparable) fcaq-number(obj,key,-1) == 1)));
+  def fcaq-training-excluded(obj) = (fcaq-evaluation(obj) || (((String) fcaq-mode(obj) == "review") || ((Comparable) fcaq-number(obj,"weight_training",1) == 0)));
+  // A caller can return an observed failure to the same owned checkpoint.
+  // Stable event IDs distinguish delivery retries from new observations.
+  def fcaq-feedback-valid(obj) = if (!json-object-has?(obj,"feedback")) then 1 else {
+   let feedback = json-object-get(obj,"feedback");
+   (((String) fcaq-mode(obj) == "code") && ((!fcaq-evaluation(obj)) && (fat-wire-string?(json-object-get(obj,"resume")) && (fcam-id-valid(fcap-string(obj,"resume")) && (fat-wire-object?(feedback) && (((Comparable) len(json-object-pairs(feedback)) == 2) && ((len(fat-trim(fcap-string(feedback,"id"))) > 0) && (len(fat-trim(fcap-string(feedback,"text"))) > 0))))))));
+  };
+  def fcaq-feedback-events(s) = fcap-caller-feedback(s);
+  def fcaq-feedback-find(rows,id) = if nil?(rows) then [] else if ((String) rows[0][0] == id) then rows[0] else fcaq-feedback-find(rows[1:],id);
+  def fcaq-with-feedback(s,rows) {
+   let padded = fcap-source-check-memory(s);
+   fcap-with-memory(padded,append(fat-take(fcap-memory(padded),24),[rows]));
+  }
+  def fcaq-feedback-state(obj,s) = if ((!json-object-has?(obj,"feedback")) || ((String) fcap-stage(s) == "attention")) then s else {
+   let feedback = json-object-get(obj,"feedback");
+   let id = fcap-string(feedback,"id"); let text = fcap-string(feedback,"text");
+   let seen = fcaq-feedback-find(fcaq-feedback-events(s),id);
+   if (!nil?(seen)) then if ((String) seen[1] == text) then s else fcap-terminal(s,"caller-feedback-id-content-conflict") else {
+     let reason="Caller-observed failure (assess against the original evidence and constraints): " + text;
+     let prior=fcap-note-cell(s);
+     let previous=fat-wire-object?(prior) && json-object-has?(prior,"previous_observation") ? json-object-get(prior,"previous_observation") : prior;
+     let repaired=fcap-repair-state(s,reason);
+     let retained=json-node-object([oh-s("message",reason),json-node-pair("previous_observation",previous),oh-s("change","The caller's finding accompanies the retained source/tool evidence. Read code_context.observation.previous_observation for that exact native cell; follow the current role and unchanged goal and checks.")]);
+     let revised=fcap-stage(repaired)=="attention" ? repaired : fcsw-with-note(repaired,retained);
+    if ((String) fcap-stage(revised) == "attention") then revised else fcaq-with-feedback(revised,append(fcaq-feedback-events(s),[[id,text]]));
+   };
+  };
+  def fcaq-observe(obj,home,result,checker) = nsc-observe(home,result,checker,fcaq-training-excluded(obj));
+  def fcaq-initial-reasoning-valid(obj) = if (!json-object-has?(obj,"initial_reasoning_tokens")) then 1 else (fcad-int(json-object-get(obj,"initial_reasoning_tokens")) && fcacr-limit-valid(fcaq-number(obj,"initial_reasoning_tokens",0)));
+  def fcaq-answer-reserve-valid(obj) = if (!json-object-has?(obj,"reasoning_answer_tokens")) then 1 else ((json-object-has?(obj,"initial_reasoning_tokens") || json-object-has?(obj,"reasoning_tokens")) && (fcad-int(json-object-get(obj,"reasoning_answer_tokens")) && fcacr-limit-valid(fcaq-number(obj,"reasoning_answer_tokens",0))));
+  def fcaq-continuing-reasoning-valid(obj) = if (!json-object-has?(obj,"reasoning_tokens")) then 1 else ((!json-object-has?(obj,"initial_reasoning_tokens")) && (json-object-has?(obj,"reasoning_answer_tokens") && (fcad-int(json-object-get(obj,"reasoning_tokens")) && fcacr-limit-valid(fcaq-number(obj,"reasoning_tokens",0)))));
+  def fcaq-reasoning-valid(obj) = (fcaq-continuing-reasoning-valid(obj) && (fcaq-initial-reasoning-valid(obj) && fcaq-answer-reserve-valid(obj)));
+  def fcaq-reply-limit-valid(obj) = if (!json-object-has?(obj,"max_reply_tokens")) then 1 else (fcad-int(json-object-get(obj,"max_reply_tokens")) && (fcaq-number(obj,"max_reply_tokens",0) > 0));
+  // json-serves: a caller outside this process. text: the rehearsal count must be the canonical digits that caller sent.
+  def fcaq-rehearsal-valid(obj) = if (!json-object-has?(obj,"native_rehearsal_checks")) then 1 else (((String) fcaq-mode(obj) == "code") && (((String) json-emit(json-object-get(obj,"native_rehearsal_checks")) == fcaq-number(obj,"native_rehearsal_checks",-1).str()) && fcap-rehearsal-budget-valid(fcaq-number(obj,"native_rehearsal_checks",-1))));
+  def fcaq-entry-for(obj,key,mode) = if (!json-object-has?(obj,key)) then 1 else (((String) fcaq-mode(obj) == mode) && fat-has(["staged","direct"],fcap-string(obj,key)));
+  def fcaq-document-context(obj) = if json-object-has?(obj,"document_context") then fcap-string(obj,"document_context") else "full";
+  def fcaq-context-valid(obj) = if ((String) fcaq-document-context(obj) == "full") then 1 else (fat-has(["code","review"],fcaq-mode(obj)) && ((String) fcaq-document-context(obj) == "catalog"));
+  def fcaq-source-queries-valid(obj) = if (!json-object-has?(obj,"source_queries")) then 1 else (((String) fcaq-document-context(obj) == "catalog") && (fat-wire-array?(json-object-get(obj,"source_queries")) && fcap-source-query-rows-valid(node_children(json-object-get(obj,"source_queries")))));
+  def fcaq-entry-valid(obj) = (fcaq-feedback-valid(obj) && (fcaq-rehearsal-valid(obj) && (fcaq-source-queries-valid(obj) && (fcaq-context-valid(obj) && (fcaq-entry-for(obj,"review_entry","review") && fcaq-entry-for(obj,"code_entry","code"))))));
+  def fcaq-replay-check?(row) = ((String) fcap-string(row,"kind") == "provider-usage-sequences");
+  def fcaq-word-check?(row) = ((String) fcap-string(row,"kind") == "word-range");
+  def fcaq-word-check-valid(row) = (((Comparable) len(json-object-pairs(row)) == 4) && ((len(fcap-string(row,"path")) > 0) && (fcad-int(json-object-get(row,"minimum")) && (fcad-int(json-object-get(row,"maximum")) && ((fcaq-number(row,"minimum",-1) >= 0) && (fcaq-number(row,"maximum",-1) >= fcaq-number(row,"minimum",0)))))));
+  // The existing response counter is also the editing contract's counter.
+  // Missing source is distinct from a present document containing zero words.
+  def fcaq-word-care(words,lower,upper) = if fal-within(words,lower,upper) then [] else {
+   let shorten = (words > upper);
+   [json-node-pair("repair",json-node-object([nsm-s("direction",if shorten then "shorten" else "expand"),nsm-n("minimum_word_change",if shorten then (words - upper) else (lower - words)),nsm-n("target_words",fal-target(lower,upper)),nsm-s("instruction","Revise toward the target while preserving the required content and source conditions. The caller's minimum and maximum remain the acceptance bounds.")]))];
+  };
+  // json-serves: the caller. text: the word-range receipt is the line that caller reads.
+  def fcaq-word-check(row,docs) {
+   let path = fcap-string(row,"path"); let doc = fat-find-doc(docs,path);
+   if (!fcaq-word-check-valid(row)) then [0,"invalid-word-range-check"] else if nil?(doc) then [0,("word-range-source-absent: " + path)] else {
+    let words = fal-count(doc[2]); let lower = fcaq-number(row,"minimum",0); let upper = fcaq-number(row,"maximum",0);
+    [fal-within(words,lower,upper),("word-range " + json-emit(json-node-object(append([nsm-s("path",path),nsm-n("observed_words",words),nsm-n("minimum",lower),nsm-n("maximum",upper),nsm-s("basis","ASCII-whitespace-delimited words; includes headings")],fcaq-word-care(words,lower,upper)))))];
+   };
+  }
+  def fcaq-report-word-spec(row) = json-node-object([nsm-s("kind","word-range"),nsm-s("path",fcap-string(row,"field")),json-node-pair("minimum",json-object-get(row,"minimum")),json-node-pair("maximum",json-object-get(row,"maximum"))]);
+  def fcaq-report-word-valid(row) = (((Comparable) len(json-object-pairs(row)) == 4) && fcaq-word-check-valid(fcaq-report-word-spec(row)));
+  // A report field is one exact top-level JSON key, never a source path or
+  // model-supplied replacement input. Reuse the document counter and bounds.
+  // json-serves: the caller. text: the report is the string that caller stored, and the word check reads that string.
+  def fcaq-report-word-check(row,report) = if (!fcaq-report-word-valid(row)) then [0,"invalid-report-word-range-check"] else if (!faj-valid(report)) then [0,"report-word-range-invalid-json"] else {
+   let parsed = parse-json("word-range-report",report);
+   let field = fcap-string(row,"field");
+   let value = json-object-get(parsed,field);
+   if (!(fat-wire-object?(parsed) && (json-object-has?(parsed,field) && fat-wire-string?(value)))) then [0,("report-word-range-string-field-absent: " + field)] else fcaq-word-check(fcaq-report-word-spec(row),[["report",field,node_value(value)]]);
+  };
+  def fcaq-report-check-valid(row) = if fcaq-replay-check?(row) then (fat-wire-object?(row) && ((Comparable) len(json-object-pairs(row)) == 1)) else if fcaq-word-check?(row) then fcaq-report-word-valid(row) else (fcaq-check-valid(row) && fcap-readonly(fcap-string(row,"tool")));
+  def fcaq-report-checks-valid(rows) = if nil?(rows) then 1 else ((!json-object-has?(rows[0],"input")) && (fcaq-report-check-valid(rows[0]) && fcaq-report-checks-valid(rows[1:])));
+  def fcaq-work-valid(obj) = if (!fat-has(["code", "review"], fcaq-mode(obj))) then 0 else if (!(fcaq-flag-valid(obj,"evaluation") && fcaq-flag-valid(obj,"weight_training"))) then 0 else if (fcaq-evaluation(obj) && (!((String) fcap-string(obj, "resume") == ""))) then 0 else if (!((String) fcaq-mode(obj) == "review")) then 1 else (nil?(fcap-array(obj, "writable")) && (fat-wire-array?(json-object-get(obj, "report_checks")) && ((len(node_children(json-object-get(obj, "report_checks"))) > 0) && fcaq-report-checks-valid(node_children(json-object-get(obj, "report_checks"))))));
+  // json-serves: a caller outside this process. text: the exit must be the canonical digits that caller sent.
+  def fcaq-exit-valid(row) = if (!json-object-has?(row,"exit")) then 1 else (fcad-int(json-object-get(row,"exit")) && ((fcaq-number(row,"exit",-1) >= 0) && ((String) json-emit(json-object-get(row,"exit")) == fcaq-number(row,"exit",-1).str())));
+  def fcaq-check-valid(row) = if (!fat-wire-object?(row)) then 0 else if fcaq-word-check?(row) then fcaq-word-check-valid(row) else if ((String) fcap-string(row, "kind") == "definition") then fcad-check-valid(row) else (fcap-readonly(fcap-string(row, "tool")) && (fcap-string-array(json-object-get(row, "arguments")) && (json-object-has?(row, "stdout") && (fat-wire-string?(json-object-get(row, "stdout")) && fcaq-exit-valid(row)))));
+  def fcaq-checks-valid(rows) = if nil?(rows) then 1 else (fcaq-check-valid(rows[0]) && fcaq-checks-valid(rows[1:]));
+  def fcaq-check(rows, docs) = if nil?(rows) then [1, "All caller-owned native assertions passed. This proves these assertions only, not arbitrary program behavior."] else if fcaq-word-check?(rows[0]) then fcaq-definition-next(rows,docs,fcaq-word-check(rows[0],docs)) else if ((String) fcap-string(rows[0], "kind") == "definition") then fcaq-definition-next(rows, docs, fcad-check(rows[0], docs)) else fcaq-check-row(rows, docs, fcap-readonly-call(docs, fcap-string(rows[0], "tool"), fcap-array(rows[0], "arguments"), fcap-string(rows[0], "input")));
+  def fcaq-definition-next(rows, docs, result) = if ((Comparable) result[0] == 1) then fcaq-check(rows[1:], docs) else result;
+  // A native search no-match is an ordinary result. Expected status never
+  // suppresses diagnostics or substitutes for checking the returned bytes.
+  def fcaq-tool-matches(row,result) = (fcaq-exit-valid(row) && (((Comparable) fat-exit(result) == fcaq-number(row,"exit",0)) && (((String) fat-error(result) == "") && ((String) fat-out(result) == fcap-string(row,"stdout")))));
+  // Report the actual result and checked identities. Resident source stays
+  // available through tools instead of being copied into every failure.
+  def fcaq-source-observation(result) = json-node-object([nsm-s("schema","form-native-source-check-v1"),nsm-n("exit",fat-exit(result)),nsm-s("stdout",fat-out(result)),nsm-s("stderr",fat-error(result)),json-node-pair("document_catalog",json-node-array(fcap-document-catalog(fat-documents(result)))),nsm-n("crossings",fat-crossings(result))]);
+  // json-serves: the repair. text: the failed assertion and the actual result are the sentence that repair reads.
+  def fcaq-check-row(rows, docs, result) = if fcaq-tool-matches(rows[0],result) then fcaq-check(rows[1:], docs) else [0, ("Failed caller assertion: " + (json-emit(rows[0]) + (" actual=" + json-emit(fcaq-source-observation(result)))))];
+  def fcaq-request-valid(obj) = if (!fat-wire-object?(obj)) then 0 else if (!(fcaq-reply-limit-valid(obj) && (fcaq-reasoning-valid(obj) && (fcaq-work-valid(obj) && fcaq-entry-valid(obj))))) then 0 else ((len(fcap-string(obj, "goal")) > 0) && (fcap-string-array(json-object-get(obj, "writable")) && (fat-wire-array?(json-object-get(obj, "checks")) && ((len(node_children(json-object-get(obj, "checks"))) > 0) && fcaq-checks-valid(node_children(json-object-get(obj, "checks")))))));
+  def fcaq-review-check(contract, subject) = fcaq-review-source(contract, subject, fcaq-check(contract[0], subject[0]));
+  def fcaq-review-source(contract, subject, checked) = if (!((Comparable) checked[0] == 1)) then checked else fcaq-report-check(node_children(contract[1]), subject[1]);
+  def fcaq-report-check(rows, report) = if nil?(rows) then [1, "Caller-owned source and report assertions passed. This establishes those assertions, not general semantic correctness."] else if fcaq-word-check?(rows[0]) then fcaq-replay-check-next(rows,report,fcaq-report-word-check(rows[0],report)) else if fcaq-replay-check?(rows[0]) then fcaq-replay-check-next(rows,report,fpur-check-text(report)) else fcaq-report-next(rows, report, fcap-readonly-call([], fcap-string(rows[0], "tool"), fcap-array(rows[0], "arguments"), report));
+  def fcaq-replay-check-next(rows,report,result) = if ((Comparable) result[0] == 1) then fcaq-report-check(rows[1:],report) else result;
+  def fcaq-report-next(rows, report, result) = if fcaq-tool-matches(rows[0],result) then fcaq-report-check(rows[1:], report) else [0, fcaq-report-failure(rows[0],result)];
+  // json-serves: the caller. text: the failure names the check and the result that caller can read.
+  def fcaq-report-failure(row,result) {
+   let query = json-node-object([json-node-pair("tool",json-object-get(row,"tool")),json-node-pair("arguments",json-object-get(row,"arguments"))]);
+   let ran = ((String) fat-error(result) == "");
+   ((if ran then "Report value mismatch: the native check completed and returned the exit status and value below. It did not report a tool or parse error. Compare this check's subject with the supplied rule and evidence before changing response structure. " else "Report check tool failed; inspect its exit and diagnostics. ") + ("check=" + (json-emit(query) + (" actual=" + ((String) fat-wire-render(result) + (if ran then fcaq-report-type-hint(fcap-string(row,"stdout"),fat-out(result)) else ""))))));
+  }
+  // json-serves: the caller. text: the hint names the type that caller's check asked for, without disclosing the value.
+  def fcaq-report-type-hint(expected,actual) {
+   if (!(faj-valid(expected) && faj-valid(actual))) then "" else {
+    let wanted = faj-type(faj-json("expected-result-type",expected));
+    let found = faj-type(faj-json("actual-result-type",actual));
+    if ((String) wanted == found) then "" else (" result-types=" + json-emit(json-node-object([nsm-s("expected",wanted),nsm-s("actual",found),nsm-s("instruction","Return the expected JSON type while deriving its value from the supplied sources. The expected value is not disclosed.")])));
+   };
+  }
+  def fcaq-checker(obj) {
+   let source = node_children(json-object-get(obj, "checks"));
+   if ((String) fcaq-mode(obj) == "review") then [fcaq-review-check, [source, json-object-get(obj, "report_checks")], fcaq-check, source] else [fcaq-check, source];
+  }
+  def fcaq-live-checker(obj) = if ((String) fcaq-mode(obj) == "review") then append(fcaq-checker(obj),[fcbr-repair,node_children(json-object-get(obj,"report_checks"))]) else fcaq-checker(obj);
+  def fcaq-context-state(obj,state) = fcap-with-reasoning(fcap-with-rehearsal-budget(fcap-with-reply-token-limit(fcap-with-source-queries(fcap-with-document-context(state,fcaq-document-context(obj)),fcap-source-query-rows(node_children(json-object-get(obj,"source_queries")))),fcaq-number(obj,"max_reply_tokens",0)),fcaq-number(obj,"native_rehearsal_checks",0)),[fcaq-number(obj,"reasoning_tokens",0),if json-object-has?(obj,"reasoning_tokens") then fcaq-number(obj,"reasoning_answer_tokens",0) else 0]);
+  def fcaq-initial(obj,docs) = fcaq-context-state(obj,fcaq-initial-work(obj,docs));
+  def fcaq-initial-work(obj, docs) = if ((String) fcaq-mode(obj) == "review") then if ((String) fcap-string(obj,"review_entry") == "direct") then fcap-open-direct-review(fcap-string(obj,"goal"),docs) else fcap-open-review(fcap-string(obj, "goal"), docs) else if ((String) fcap-string(obj,"code_entry") == "direct") then fcap-open-direct-code(fcap-string(obj,"goal"),docs,fcap-array(obj,"writable")) else fcap-open(fcap-string(obj, "goal"), docs, fcap-array(obj, "writable"));
+  // Evaluation begins before continuity preparation, not after recall. It
+  // cannot resume or consult learned repairs, and writes no coding checkpoint.
+  def fcaq-prepare(obj,docs,checker,root) = fcaq-feedback-state(obj,fcaq-context-state(obj,fcaq-prepare-work(obj,docs,checker,root)));
+  // json-serves: the next process that reads this checkpoint. text: the checks are stored as the canonical bytes that process hashes.
+  def fcaq-prepare-work(obj, docs, checker, root) = if fcaq-evaluation(obj) then fcaq-initial(obj, docs) else fcam-prepare(root, fcaq-initial(obj, docs), if ((String) fcaq-mode(obj) == "review") then json-emit(json-node-array([json-object-get(obj, "checks"), json-object-get(obj, "report_checks")])) else json-emit(json-object-get(obj, "checks")), fcap-string(obj, "resume"), checker);
+  // The result is a node for the whole of this process. Text is emitted once, at the stdin door.
+  def fcaq-result-base(result) {
+   let state = result[0];
+   json-node-object([json-node-pair("schema", json-node-string("form-native-code-v1")), json-node-pair("mode", json-node-string(fcap-mode(state))), json-node-pair("report", json-node-string(fcap-report(state))), json-node-pair("status", json-node-string(if ((Comparable) result[1] == 1) then fcap-stage(state) else "release-incomplete")), json-node-pair("reason", json-node-string(fcap-note(state))), json-node-pair("turns", json-node-int(fcap-turns(state))), json-node-pair("tool_calls", json-node-int(fcap-calls(state))), json-node-pair("completed_tasks", json-node-int(state[11])), json-node-pair("repair_attempts", json-node-int(fcap-failures(state))), json-node-pair("check_runs", json-node-int(fcap-checks(state))), json-node-pair("repair_notes", json-node-array(fcap-reflections-json(fcap-reflections(state)))), json-node-pair("learning_basis", json-node-string(if fcam-managed(state) then "verified-contract-scoped-memory;not-weight-training" else "within-run-reflection;not-weight-training")), json-node-pair("checkpoint_id", json-node-string(if fcam-managed(state) then fcam-id(state) else "")), json-node-pair("lessons_recalled", json-node-int(fcam-hits(state))), json-node-pair("release_ok", json-node-int(result[1])), json-node-pair("generated_ids", json-node-int(result[2])), json-node-pair("injected_ids", json-node-int(result[3])), json-node-pair("observations", json-node-int(result[4])), json-node-pair("documents", fat-wire-documents-node(fcap-docs(state))), json-node-pair("persistence", json-node-string(if fcam-managed(state) then "native-continuity-cache;caller-owns-source-file-publication" else "fresh-run;no-coding-checkpoint-or-recall"))]);
+  }
+  def fcaq-result-core(result) {
+   let state = result[0];
+   let detail = [json-node-pair("document_context",json-node-string(fcap-document-context(state))),json-node-pair("report_source",json-node-string(fcap-report-source(state))),json-node-pair("native_repairs",json-node-array(fcap-native-repairs-json(fcap-native-repairs(state)))),json-node-pair("model_amendments",json-node-array(fcap-amendments-json(fcap-amendments(state)))),json-node-pair("max_reply_tokens",json-node-int(fcap-reply-token-limit(state))),json-node-pair("reasoning_tokens",json-node-int(fcap-reasoning(state)[0]))];
+   let rehearsal = [json-node-pair("native_rehearsal_checks_remaining",json-node-int(fcap-rehearsal-budget(state))),json-node-pair("native_rehearsals",json-node-array(fcap-rehearsals-json(fcap-rehearsals(state)))),json-node-pair("native_json_repairs",json-node-array(fcap-json-repairs-json(fcap-json-repairs(state))))];
+   json-node-object(append(json-object-pairs(fcaq-result-base(result)),append(detail,append(rehearsal,[json-node-pair("caller_feedback",fcam-pack(fcaq-feedback-events(state)))]))));
+  }
+  def fcaq-result(result) {
+   let learning = if (len(result) > 5) then result[5] else ["not-recorded","no-session-owner"];
+   json-node-object(append(json-object-pairs(fcaq-result-core(result)),[nsm-s("session_learning_example",learning[0]),nsm-s("session_learning_worker",learning[1]),nsm-s("session_learning_status","inspect-session-status;queued-is-not-trained")]));
+  }
+  def fcaq-refused(reason) = json-node-object([json-node-pair("status", json-node-string("attention")), json-node-pair("reason", json-node-string(reason))]);
+  // json-serves: a caller outside this process. text: the result leaves as bytes; the cell was the work.
+  def fcaq-emit(node) = json-emit(node);
+  // json-serves: a caller outside this process. text: the request arrives as bytes and is admitted once; the cell is built at this door.
+  def fcaq-call(raw) = fcaq-emit(if ((len(raw) > FatMaxBytes()) || (!faj-valid(raw))) then fcaq-refused("invalid-or-oversized-request-json") else fcaq-decoded(faj-json("native-code-request", raw)));
+  def fcaq-request-refusal(obj) = if (fat-wire-object?(obj) && (json-object-has?(obj,"reasoning_tokens") && (!json-object-has?(obj,"reasoning_answer_tokens")))) then "reasoning_tokens requires reasoning_answer_tokens: retain the reasoning allowance and supply a separate positive integer answer allowance." else {
+   let missing = filter((k) => (!json-object-has?(obj, k)) || (node_eq(json-object-get(obj, k), json-node-null())), ["goal", "writable", "checks"]);
+   if (len(missing) > 0) then "missing:" + missing.join(",") else "valid goal,writable,documents,checks required; review needs empty writable and report_checks; evaluation cannot resume";
+  };
+  def fcaq-documents-entry(node) = if (!fat-wire-object?(node)) then fat-wire-bad("wire-document-needs-object") else fcaq-documents-id(node, fat-wire-required-string(node, "id"));
+  def fcaq-documents-id(node, id) = !((String) fat-wire-error(id) == "") ? id : fcaq-documents-path(node, id, fat-wire-required-string(node, "path"));
+  def fcaq-documents-path(node, id, path) = !((String) fat-wire-error(path) == "") ? path : fcaq-documents-text(node, id, path);
+  def fcaq-documents-text(node, id, path) = if (json-object-has?(node, "text")) then (fat-wire-string?(json-object-get(node, "text")) ? fat-wire-good([fat-wire-value(id), fat-wire-value(path), fat-wire-value(fat-wire-required-string(node, "text"))]) : fat-wire-bad("wire-field-needs-string:text")) else fcaq-documents-file(id, path);
+  def fcaq-documents-file(id, path) = if (file_size(fat-wire-value(path)) < 0) then fat-wire-bad("file-missing-or-unreadable:" + fat-wire-value(path)) else if (file_size(fat-wire-value(path)) > FatMaxBytes()) then fat-wire-bad("file-oversized:" + fat-wire-value(path)) else fat-wire-good([fat-wire-value(id), fat-wire-value(path), read_file(fat-wire-value(path))]);
+  def fcaq-documents-loop(nodes, out) = nil?(nodes) ? fat-wire-good(fat-reverse(out)) : fcaq-documents-next(nodes, out, fcaq-documents-entry(nodes[0]));
+  def fcaq-documents-next(nodes, out, doc) = !((String) fat-wire-error(doc) == "") ? doc : fcaq-documents-loop(nodes[1:], cons(fat-wire-value(doc), out));
+  def fcaq-documents(obj) = !json-object-has?(obj, "documents") ? fat-wire-good([]) : !fat-wire-array?(json-object-get(obj, "documents")) ? fat-wire-bad("wire-field-needs-array:documents") : fcaq-documents-loop(node_children(json-object-get(obj, "documents")), []);
+  def fcaq-question?(obj) = fat-wire-object?(obj) && (len(fcap-string(obj, "goal")) > 0) && !json-object-has?(obj, "writable") && !json-object-has?(obj, "checks") && !json-object-has?(obj, "documents") && !json-object-has?(obj, "mode");
+  def fcaq-followed(goal, thread, offered, deepened, context) = fcaq-followed-rows(goal, thread, offered, deepened, context, []);
+  def fcaq-followed-rows(goal, thread, offered, deepened, context, rows) {
+   let session = ftv-session();
+   let seeded = (len(thread) > 0) ? ftv-thread-seed(session, thread, offered, deepened, nil?(rows) ? context : rows) : 0;
+   let answer = ftv-knowledge(session, goal);
+   let terms = take(6, ftv-terms(goal));
+   let carries = (len(thread) > 0) && (ftv-follows?(terms) || ftv-mentions?(take(6, ftv-terms(thread)), terms) || any?(ftv-lane-word?, map(ftv-lower, terms)) || ftv-asks?(goal) || ftv-lane?(goal));
+   let kept = if carries && ftv-threaded?(ftv-thread(session)) then ftv-join(ftv-thread-field(session, 0), " ") else goal;
+   [answer, ftv-join(ftv-thread-field(session, 1), ","), ftv-join(ftv-thread-field(session, 2), ","), kept, ftv-context-of(session), ftv-context-list(session)];
+  }
+  def fcaq-question(goal) = fcaq-followed(goal, "", "", "", "")[0];
+  def fcaq-question-node(held) = json-node-object([json-node-pair("status", json-node-string("complete")), json-node-pair("lane", json-node-string("query")), json-node-pair("answer", json-node-string(held[0])), json-node-pair("thread", json-node-string(held[3])), json-node-pair("offered", json-node-string(held[1])), json-node-pair("deepened", json-node-string(held[2])), json-node-pair("context", json-node-string(held[4]))]);
+  def fcaq-decoded(obj) = if fcaq-question?(obj) then fcaq-question-node(fcaq-followed(fcap-string(obj, "goal"), fcap-string(obj, "thread"), fcap-string(obj, "offered"), fcap-string(obj, "deepened"), fcap-string(obj, "context"))) else if (!fcaq-feedback-valid(obj)) then fcaq-refused("feedback requires ordinary code resume and exactly nonempty string id,text; reuse its id only with identical text") else if (!fcaq-request-valid(obj)) then fcaq-refused(fcaq-request-refusal(obj)) else fcaq-docs(obj, fcaq-documents(obj));
+  def fcaq-docs(obj, docs) = if (!((String) fat-wire-error(docs) == "")) then fcaq-refused(fat-wire-error(docs)) else if ((fcaq-number(obj, "context", 8192) <= 0) || (fcaq-number(obj, "turns", 64) <= 0)) then fcaq-refused("positive-context-and-turns-required") else if (json-object-has?(obj, "resume") && (!fat-wire-string?(json-object-get(obj, "resume")))) then fcaq-refused("resume-must-be-checkpoint-id") else fcaq-rehearsed(obj, fat-wire-value(docs));
+  // Rung 0: every caller check meets its witness before any model opens
+  // (form-cli-check-witness.bml). An unmeetable check returns to its author.
+  def fcaq-rehearsed(obj, docs) {
+   let records = fccw-rehearse(obj, docs);
+   if fccw-refused?(records) then oh-set(oh-set(fccw-refusal(obj, docs, records),"evaluation",json-node-int(fcaq-evaluation(obj))),"weight_training_excluded",json-node-int(fcaq-training-excluded(obj))) else fcaq-managed(obj, docs);
+  }
+  def fcaq-managed(obj,docs) = fcaq-managed-with(obj,docs,fcaq-live-checker(obj));
+  // A rejected nonprogram can backtrack to its admitted source without asking
+  // a model to reconstruct it. Other edits stay; exact rejected cells remain
+  // beside the failed check so the next choice retains what was learned.
+  
+  // Native embedding supplies its checker; model output cannot select it.
+  def fcaq-managed-with(obj,docs,checker) {
+   let state = fcaq-prepare(obj, docs, checker, hearth-code-memory());
+   // Observe the admitted source before generation; a real failed expectation
+   // supplies local repair with its cause rather than another blind read loop.
+   let observed=!fcap-reviewing(state) && !fcap-done(state) && (fcap-checks(state)==0 || json-object-has?(obj,"resume")) && fat-has(["implement","repair"],fcap-stage(state)) ? fcac-source-care(state,checker) : state;
+   let state=append(append(fat-take(observed,9),[fcap-turns(state),fcap-calls(state)]),fat-drop(observed,11));
+   // Completed work is saved by nsc-finish, including its fresh resume check.
+   let saved = (String) fcap-stage(state) == "complete" ? 1 : fcam-save(state);
+   let evaluation = fcaq-evaluation(obj);
+   let proposed = if (saved && (!(fcap-reviewing(state) || (evaluation || json-object-has?(obj,"model"))))) then nsc-propose(hearth-session-learning(),state,checker) else [state,0];
+   let model = if json-object-has?(obj,"model") then fcap-string(obj,"model") else "qwen38-q8";
+   let limit = fcaq-number(obj,"initial_reasoning_tokens",0);
+   let answerReserve = fcaq-number(obj,"reasoning_answer_tokens",0);
+   let result = if (!saved) then [fcap-terminal(state,"checkpoint-write-refused"),1,0,0,0] else if ((String) fcap-stage(proposed[0]) == "complete") then nsc-finish(proposed) else if ((answerReserve > 0) && (limit > 0)) then fcacr-reserved-admit(model,proposed[0],checker,fcaq-number(obj,"context",8192),(fcap-turns(state) + fcaq-number(obj,"turns",64)),limit,answerReserve) else if (limit > 0) then fcacr-admit(model,proposed[0],checker,fcaq-number(obj,"context",8192),(fcap-turns(state) + fcaq-number(obj,"turns",64)),limit) else fcac-admit(model,proposed[0],checker,fcaq-number(obj,"context",8192),(fcap-turns(state) + fcaq-number(obj,"turns",64)));
+   let learned = fcaq-observe(obj,hearth-session-learning(),result,checker);
+   let publicResult = oh-set(oh-set(fcaq-result(append(result,[learned])),"requested_initial_reasoning_tokens",json-node-int(limit)),"requested_reasoning_answer_tokens",json-node-int(answerReserve));
+   oh-set(oh-set(oh-set(publicResult,"blocking_check",fccw-blocking(obj,fcap-docs(result[0]))),"evaluation",json-node-int(evaluation)),"weight_training_excluded",json-node-int(fcaq-training-excluded(obj)));
+  }
+  def fcaq-help() = ("code <JSON object>: local Qwen over caller-provided resident documents. Fields: goal, documents [{id,path,text}], writable [path], checks [{tool,arguments,input,stdout}], optional model, context, turns, resume, evaluation, weight_training, review_entry, code_entry. code_entry=staged is the default; code_entry=direct begins implementing the caller's supplied task and retains review, source checks, repair and replanning. Entry selects fresh state; resume retains its saved phase. mode=review requires writable=[] and nonempty report_checks; their native tools receive the report on stdin with no document access. review_entry=staged is the default; review_entry=direct preserves read-only documents, source/report checks and repair. Review returns report and preserves all documents. verify runs caller-owned source checks, with no model-supplied commands. evaluation=1 starts fresh without recall, resume, checkpoint writes or LoRA proposals and excludes its answers from weight training. Ordinary coding retains verified continuity and can use its checked session LoRA proposal. weight_training=0 excludes this request's answer from gradients while retaining ordinary continuity and existing learned proposals; omitted or 1 preserves the ordinary training policy. Evaluation and review answers remain excluded for either value. Review reports are retained as assessment experience, never implementation targets. Every caller check first meets a witness; an unmeetable check returns status attention, reason caller-check-unmeetable and its blocking_check pair before any model opens. Results carry blocking_check: the first caller check that refuses the delivered documents, or null. See docs/form-native-coding.md." + fcacr-reserved-help());
+  def fcaq-feedback-help() = " Coding resume may add feedback={id,text}, two nonempty strings describing a caller-observed failure. It reopens repair under the unchanged contract. Reuse the stable id only for identical delivery retries; new observations use new ids. Applied events persist as caller_feedback. Evaluated response repair keeps weight_training=0.";
+  def fcaq-from-file(path) = if ((file_size(path) <= 0) || (file_size(path) > FatMaxBytes())) then fcaq-emit(fcaq-refused("request-file-unavailable-or-oversized")) else fcaq-call(read_file(path));
+  def fcaq-command(arg) = if (nothing?(arg) || (((String) arg == "") || ((String) arg == "help"))) then (((String) fcaq-help() + fcaq-feedback-help()) + " Coding and review document_context=catalog keep source text available through tools. Optional source_queries=[{tool,arguments}] admits actual read-only query observations before generation; no input or stdout fields. Full documents and original checks remain unchanged. Coding may set native_rehearsal_checks=0..64 to allow bounded native BML repair after an unchanged edit or failed implementation verify with one eligible writable BML document; default 0. Native attempts, remaining allowance and original failed actions are returned separately from model calls. Large requests: code @request.json reads the complete native file; the standalone stdin door accepts the same @path.") else if fat-starts(arg,"@") then fcaq-from-file(substring(arg,1,len(arg))) else fcaq-call(arg);
+ }
+ 0;
+}

@@ -1,0 +1,148 @@
+; http-client.bml - Form-native HTTP client surface.
+;
+import form-stdlib/core.fk;
+;
+; Authored in the source-level Form/BML maintenance grammar. Kernel execution
+; receives lowered Form recipes from source-compiler.fk.
+;
+; Plain HTTP verbs are recipes over the host socket floor:
+; socket_connect / socket_send / socket_recv / socket_close. http_get remains a
+; compatibility native outside the method layer. sock_request is retained only as
+; a native fallback when the decomposed socket_connect path cannot open the peer.
+
+section [form.bml] {
+    def kh-render-request(method, path, host, body) {
+        let blen = len(body);
+        let target = (method + " ") + path;
+        let request_line = target + " HTTP/1.0\r\nHost: ";
+        let host_line = ((String) request_line + host) + "\r\nConnection: close\r\n";
+        blen > 0 ?
+            ((((host_line + "Content-Type: application/json\r\nContent-Length: ") + blen.str()) + "\r\n\r\n") + body)
+        :
+            (host_line + "\r\n");
+    }
+
+    def http-open(host, port) = socket_connect(host, str_to_int(port));
+
+    def http-send-all-step(conn, bytes, from) {
+        let n = socket_send(conn, substring(bytes, from, len(bytes)));
+        n <= 0 ? from : http-send-all(conn, bytes, from + n);
+    }
+
+    def http-send-all(conn, bytes, from) = from >= len(bytes) ? from : http-send-all-step(conn, bytes, from);
+
+    def http-send-on-socket(conn, method, path, host, body) {
+        let req = kh-render-request(method, path, host, body);
+        http-send-all(conn, req, 0);
+    }
+
+    def http-body-offset(msg) {
+        let crlf = str_find(msg, "\r\n\r\n", 0);
+        let lf = str_find(msg, "\n\n", 0);
+        crlf >= 0 ? (crlf + 4) : lf >= 0 ? (lf + 2) : -1;
+    }
+
+    def http-header-end-from(msg, start) {
+        let crlf = str_find(msg, "\r\n", start);
+        crlf >= 0 ? crlf : str_find(msg, "\n", start);
+    }
+
+    def http-content-length-from(msg, key, at) {
+        let start = at + len(key);
+        let stop = http-header-end-from(msg, start);
+        str_to_int(substring(msg, start, stop < 0 ? len(msg) : stop));
+    }
+
+    def http-content-length(msg) {
+        let key = "Content-Length: ";
+        let at = str_find(msg, key, 0);
+        at < 0 ? -1 : http-content-length-from(msg, key, at);
+    }
+
+    def http-response-complete-at(msg, body-start) {
+        let expected = http-content-length(msg);
+        expected < 0 ? true : ((len(msg) - body-start) >= expected);
+    }
+
+    def http-response-complete?(msg) {
+        let body-start = http-body-offset(msg);
+        body-start < 0 ? false : http-response-complete-at(msg, body-start);
+    }
+
+    def http-recv-response-next(conn, acc, chunk) {
+        let next = (String) acc + chunk;
+        http-response-complete?(next) ? next : http-recv-response-into(conn, next);
+    }
+
+    // a recv that measured no byte for a REASON (dead handle, read error)
+    // answers nothing (2026-08-27) — the response died mid-stream and must not
+    // pass as complete; the nothing travels up to the request boundary.
+    // "" stays the peer's orderly close: the accumulated reply is whole.
+    def http-recv-response-into(conn, acc) {
+        let chunk = socket_recv(conn, 65536);
+        nothing?(chunk) ? chunk : (Comparable) len(chunk) == 0 ? acc : http-recv-response-next(conn, acc, chunk);
+    }
+
+    def http-recv-response(conn) = socket_recv(conn, 65536);
+
+    def http-plain-request-connected(conn, req) {
+        let sent = http-send-all(conn, req, 0);
+        let response = sent > 0 ? http-recv-response(conn) : "";
+        socket_close(conn);
+        response;
+    }
+
+    // a peer never reached answers nothing (2026-08-27); this boundary names
+    // the absence, then "" keeps this cell's no-body meaning downstream.
+    def http-answer-or-empty(r) = r ?? "";
+
+    def http-plain-request-response-or-fallback(host, port, conn, req) {
+        let response = http-plain-request-connected(conn, req);
+        nothing?(response) ? http-answer-or-empty(sock_request(host, port, req)) : len(response) > 0 ? response : http-answer-or-empty(sock_request(host, port, req));
+    }
+
+    def http-plain-request(host, port, req) {
+        let conn = http-open(host, port);
+        conn < 0 ? http-answer-or-empty(sock_request(host, port, req)) : http-plain-request-response-or-fallback(host, port, conn, req);
+    }
+
+    def http-fetch(method, url, body) {
+        let https = (Comparable) str_find(url, "https://", 0) == 0;
+        let after = substring(url, https ? 8 : 7, len(url));
+        let slash = str_find(after, "/", 0);
+        let hostport = (Comparable) slash == -1 ? after : substring(after, 0, slash);
+        let path = (Comparable) slash == -1 ? "/" : substring(after, slash, len(after));
+        let colon = str_find(hostport, ":", 0);
+        let host = (Comparable) colon == -1 ? hostport : substring(hostport, 0, colon);
+        let port = (Comparable) colon == -1 ? (https ? "443" : "80") : substring(hostport, colon + 1, len(hostport));
+        let req = kh-render-request(method, path, host, body);
+        https ? http-answer-or-empty(tls_request(host, port, req)) : http-plain-request(host, port, req);
+    }
+
+    def kh-msg-body-framed(msg, body-start, body-len) {
+        let body-end = body-len < 0 ? len(msg) : (body-start + body-len);
+        substring(msg, body-start, body-end);
+    }
+
+    def kh-msg-body(msg) {
+        let body-start = http-body-offset(msg);
+        let body-len = http-content-length(msg);
+        body-start < 0 ? "" : kh-msg-body-framed(msg, body-start, body-len);
+    }
+
+    def kh-msg-start-line(msg) {
+        let nl = str_find(msg, "\r\n", 0);
+        nl > -1 ? substring(msg, 0, nl) : msg;
+    }
+
+    def kh-status-of-rest(rest) {
+        let sp2 = str_find(rest, " ", 0);
+        str_to_int((Comparable) sp2 == -1 ? rest : substring(rest, 0, sp2));
+    }
+
+    def kh-status-of(response) {
+        let line = kh-msg-start-line(response);
+        let sp = str_find(line, " ", 0);
+        (Comparable) sp == -1 ? 0 : kh-status-of-rest(substring(line, sp + 1, len(line)));
+    }
+}

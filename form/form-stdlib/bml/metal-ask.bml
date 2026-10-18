@@ -1,0 +1,193 @@
+// A GGUF ask remains in one fkwu process: metadata, tokenizer, program emission,
+// mapped weights, decoding, costs, identity and publication are owned by Form.
+// The current executable model is the registry's llama32-3b content identity.
+// Tokenization is the existing longest-vocabulary-match algorithm.
+import form-stdlib/llama32-3b-resident-state.bml;
+import form-stdlib/llama3-tokenize.fk;
+import form-stdlib/model-registry.bml;
+import form-stdlib/ask-native-lane.fk;
+import native/metal/ask-declared-cost.fk;
+import form-stdlib/bml/sha256-owned.bml;
+import form-stdlib/metal-door.fk;
+import form-stdlib/bml/metal-jit.bml;
+import form-stdlib/organ-health.bml;
+import form-stdlib/form-fs.fk;
+section [form.bml] {
+ class MetalAsk {
+  def ma-cat(xs) = nil?(xs) ? "" : ((String) xs[0] + ma-cat(xs[1:]));
+  def ma-put(owner,pairs) = nil?(pairs) ? owner : ma-put-next(owner,pairs,record_set(owner,pairs[0][0],pairs[0][1]));
+  def ma-put-next(owner,pairs,kept) = ma-put(owner,pairs[1:]);
+  def ma-model() = "llama3.2:3b";
+  def ma-blob() = mr-path(mr-find("llama32-3b"));
+  def ma-identity() = substring(fs-path-basename(ma-blob()),7,71);
+  def ma-hex(raw,i) = i >= len(raw) ? "" : ((String) hex-byte-to-pair(str_byte_at(raw,i)) + ma-hex(raw,i + 1));
+  // the file's identity through the CPU's SHA-256 lane (sho-file): it holds no handle, so nothing joins the owner's release
+  def ma-hash(owner,path) {
+   let digest = record_get(sho-file(path),"digest");
+   (Comparable) len(digest) == 32 ? ma-hex(digest,0) : "";
+  }
+  def ma-input-reason(model,prompt,cap) = !((String) model == ma-model()) ? "model-not-admitted" : (Comparable) len(prompt) == 0 ? "empty-prompt" : (!((String) value_kind(cap) == "int")) || (cap <= 0) ? "positive-integer-token-cap-required" : "";
+  def ma-eos(src,id) = ((Comparable) id == gmt-u32(src,"tokenizer.ggml.eos_token_id")) || (((Comparable) id == 128001) || ((Comparable) id == 128009));
+  def ma-stop(src,id,remaining) = ma-eos(src,id) ? "eos" : remaining <= 0 ? "cap" : "";
+  // A record is its own kind, not a number: the owner carries an integer id.
+  def ma-owner-id(owner) = (String) value_kind(record_get(owner,"id")) == "int" ? record_get(owner,"id") : 0;
+  def ma-health(owner,aspect,why,ok) {
+   let reading = oh-reading("metal-ask",ma-owner-id(owner).str(),aspect,json-node-string("ready"),json-node-string(why),json-node-int(ok),ok ? [] : [oh-need(why,json-node-null())],ok ? ["continue"] : ["abstain","request-evidence"],json-node-object([oh-n("owner",ma-owner-id(owner))]));
+   let kept = record_set(owner,"health",reading);
+   let framed = oh-frame(reading);
+   reading;
+  }
+  def ma-refuse(owner,why) {
+   let health = ma-health(owner,"admission",why,0);
+   let response = oh-response(health,"abstain");
+   let selected = oh-select(health,response,"request-evidence");
+   let applied = oh-applied(health,selected,json-node-string("answer-withheld"));
+   let held = ma-put(owner,[["health-response",response],["health-applied",applied],["ok",0],["reason",why],["text",""]]);
+   let framed = oh-frame(applied);
+   owner;
+  }
+  def ma-voice-refusal(owner) {
+   let observed = oh-voice(record_get(owner,"health"));
+   let response = oh-voice(record_get(owner,"health-response"));
+   let applied = oh-voice(record_get(owner,"health-applied"));
+   form_error("metal ask refused: " + record_get(owner,"reason"));
+  }
+  def ma-positive(xs) = nil?(xs) ? 1 : ((xs[0] > 0) && ma-positive(xs[1:]));
+  def ma-handles(slot) = append(l3rs-scratch(slot),append(lth-layer-handles(l3rs-layers(slot)),append(l3rs-keys(slot),append(l3rs-values(slot),lth-list-handles(l3rs-model-tvs(slot))))));
+  def ma-release(xs,pipeline,remaining) {
+   nil?(xs) ? reverse(remaining) : xs[0] <= 0 ? ma-release(xs[1:],pipeline,remaining) : ma-release-next(xs,pipeline,remaining,pipeline ? mj-release-handle(xs[0]) : metal_buf_free(xs[0]));
+  }
+  def ma-release-next(xs,pipeline,remaining,rc) = ma-release(xs[1:],pipeline,(Comparable) rc == 1 ? remaining : cons(xs[0],remaining));
+  def ma-close(owner) {
+   let buffers = ma-release(record_get(owner,"buffers"),0,[]);
+   let pipelines = ma-release(record_get(owner,"pipelines"),1,[]);
+   let saved = ma-put(owner,[["buffers",buffers],["pipelines",pipelines]]);
+   let ok = nil?(buffers) && nil?(pipelines);
+   let observed = ma-health(owner,"release",ok ? "ready" : "native-release-confirmation",ok);
+   ok;
+  }
+  def ma-geometry?(src) {
+   let d = gmt-u32(src,"llama.embedding_length");
+   let h = gmt-u32(src,"llama.attention.head_count");
+   let k = gmt-u32(src,"llama.attention.head_count_kv");
+   let hd = gmt-u32(src,"llama.rope.dimension_count");
+   ((String) gmt-str(src,"general.architecture") == "llama") && ((k > 0) && (((Comparable) (h % k) == 0) && (((Comparable) (h * hd) == d) && ((gmt-u32(src,"llama.block_count") > 0) && ((Comparable) gmt-vocab-n(src) == gmt-u32(src,"llama.vocab_size"))))));
+  }
+  def ma-ask(path,model,prompt,cap) {
+   let owner = record_new(0,"id",host_monotonic_ms(),"ok",0,"reason","","text","","ids",[],"buffers",[],"pipelines",[],"prompt-sha256",anl-question-key(prompt),"path",path,"model",model,"cap",cap);
+   let why = ma-input-reason(model,prompt,cap);
+   len(why) > 0 ? ma-refuse(owner,why) : file_size(path) <= 0 ? ma-refuse(owner,"model-file-absent") : !md-door-live?() ? ma-refuse(owner,"dynamic-metal-device-absent") : ma-identify(owner,path,prompt,cap,ma-hash(owner,path));
+  }
+  def ma-identify(owner,path,prompt,cap,digest) {
+   let kept = record_set(owner,"blob-sha256",digest);
+   !((String) digest == ma-identity()) ? ma-refuse(owner,"model-content-identity-mismatch") : ma-tokenize(owner,path,prompt,cap,lth-src(path));
+  }
+  def ma-tokenize(owner,path,prompt,cap,src) {
+   !ma-geometry?(src) ? ma-refuse(owner,"model-geometry-refused") : ma-tokenized(owner,path,cap,src,l3t-encode(src,prompt));
+  }
+  def ma-tokenized(owner,path,cap,src,ids) {
+   let capacity = len(ids) + cap;
+   nil?(ids) ? ma-refuse(owner,"tokenizer-refused") : capacity > gmt-u32(src,"llama.context_length") ? ma-refuse(owner,"model-position-limit") : ma-open(owner,path,cap,src,ids,capacity);
+  }
+  def ma-open(owner,path,cap,src,ids,capacity) {
+   let started = host_monotonic_ms();
+   let slot = l3rs-open(path,capacity);
+   let kept = ma-put(owner,[["buffers",ma-handles(slot)],["pipelines",l3rs-pipes(slot)],["prompt-tokens",len(ids)],["open-ms",host_monotonic_ms() - started]]);
+   !(ma-positive(record_get(owner,"buffers")) && ma-positive(record_get(owner,"pipelines"))) ? ma-open-refused(owner) : ma-run(owner,slot,src,ids,cap);
+  }
+  def ma-open-refused(owner) {
+   let closed = ma-close(owner);
+   ma-refuse(owner,"native-admission-refused");
+  }
+  def ma-forward(slot,id,pos) {
+   let before = metal_live();
+   let token = lth-forward(l3rs-pipes(slot),l3rs-scratch(slot),l3rs-geometry(slot),l3rs-layers(slot),l3rs-keys(slot),l3rs-values(slot),l3rs-embedding(slot),l3rs-output-norm(slot),l3rs-projection(slot),id,pos);
+   let after = metal_live();
+   let expected = (l3rs-geometry(slot)[12] * 17) + 5;
+   (Comparable) (after[7] - before[7]) == expected ? token : -1;
+  }
+  def ma-prefill(slot,ids,pos) {
+   let token = ma-forward(slot,ids[0],pos);
+   (token < 0) || nil?(ids[1:]) ? [token,pos + 1] : ma-prefill(slot,ids[1:],pos + 1);
+  }
+  def ma-collect(slot,src,id,pos,remaining,acc) {
+   let stop = ma-stop(src,id,remaining);
+   len(stop) > 0 ? [acc,stop,pos] : (id < 0) || (id >= gmt-vocab-n(src)) ? [acc,"invalid-token",pos]
+   : (Comparable) remaining == 1 ? [append(acc,[id]),"cap",pos] : ma-collect(slot,src,ma-forward(slot,id,pos),pos + 1,remaining - 1,append(acc,[id]));
+  }
+  def ma-run(owner,slot,src,ids,cap) {
+   let before = metal_live(); let start = host_monotonic_ms();
+   let prefilled = ma-prefill(slot,ids,0);
+   let prefillMs = host_monotonic_ms() - start; let decodeStart = host_monotonic_ms();
+   let result = ma-collect(slot,src,prefilled[0],prefilled[1],cap,[]);
+   let decodeMs = host_monotonic_ms() - decodeStart; let after = metal_live();
+   let sync = metal_sync();
+   let text = l3d-text(src,result[0]);
+   let identityAfter = ma-hash(owner,l3rs-path(slot));
+   let saved = ma-put(owner,[
+    ["ids",result[0]],["text",text],["reason",result[1]],["forwards",result[2]],
+    ["prefill-ms",prefillMs],["decode-ms",decodeMs],
+    ["dispatches",after[7] - before[7]],["syncs",after[8] - before[8]],
+    ["gpu-busy-us",after[11] - before[11]],
+    ["identity-stable",(String) identityAfter == record_get(owner,"blob-sha256")]]);
+   let receipt = record_set(owner,"receipt",ma-receipt(owner,slot,src));
+   let closed = ma-close(owner);
+   let ok = (sync >= 0) && (closed && (record_get(owner,"identity-stable") && ((len(text) > 0) && (((String) result[1] == "cap") || ((String) result[1] == "eos")))));
+   !ok ? ma-refuse(owner,!closed ? "native-release-confirmation" : !record_get(owner,"identity-stable") ? "model-changed-during-generation" : "generation-refused") : record_set(owner,"ok",1);
+  }
+  def ma-kv(name,value) = ma-cat(["MEASURED ",name," ",value.str(),"\n"]);
+  def ma-receipt(owner,slot,src) {
+   let g = l3rs-geometry(slot); let n = record_get(owner,"forwards");
+   let touched = adc-sum-touched(src,egg-tinfo-start(src),egg-tensor-count(src),0);
+   let rowbytes = acr-type-bytes(lth-tv-ty(l3rs-embedding(slot)),g[0]);
+   let traffic = acr-bytes-run(touched,rowbytes,g[12],g[3],g[4],n);
+   let macs = acr-macs-run(g[12],g[0],g[1],g[2],g[3],g[4],g[7],n);
+   ma-cat(["EXECUTION form-native-gguf\nTOKENIZER longest-vocabulary-match\n",ma-kv("forwards",n),ma-kv("prefill_wall_ms",record_get(owner,"prefill-ms")),ma-kv("decode_wall_ms",record_get(owner,"decode-ms")),ma-kv("admission_wall_ms",record_get(owner,"open-ms")),ma-kv("gpu_busy_us",record_get(owner,"gpu-busy-us")),ma-kv("dispatches",record_get(owner,"dispatches")),ma-kv("syncs",record_get(owner,"syncs")),"DERIVED bytes_touched ",traffic.str(),"\nDERIVED macs ",macs.str(),"\nMEASUREMENT joules absent\nMEASUREMENT external_denominator absent\n"]);
+  }
+  def ma-artifact(owner) = ma-cat(["ASK-NATIVE v1\nLANE metal-gguf-native\nQUESTION-SHA256 ",record_get(owner,"prompt-sha256"),"\nMODEL ",record_get(owner,"model"),"\nBLOB-SHA256 ",record_get(owner,"blob-sha256"),"\nGATES execution-observed\nGATE-MODE native-runtime\nSTOP-REASON ",record_get(owner,"reason"),"\nKERNEL-PATH form-native-handle\nRECEIPT-BEGIN\n",record_get(owner,"receipt"),"RECEIPT-END\nANSWER-BEGIN\n",record_get(owner,"text"),"\nANSWER-END\n"]);
+  def ma-publish(owner,path) {
+   !((Comparable) record_get(owner,"ok") == 1) ? 0 : ((Comparable) len(path) == 0) || (str_find(path,byte_to_str(0),0) >= 0) ? ma-publish-refused(owner,"") : ma-publish-ready(owner,(Comparable) str_byte_at(path,0) == 47 ? path : fs-path-join(host_cwd(),path),ma-artifact(owner));
+  }
+  // The seed's doors carry the mode-aware mkdir (host_mkdir_mode: 1 only for the call that made the directory)
+  // and chmod. Form owns path traversal, admission, naming, writing and rename.
+  def ma-private-dir(path) = fs-is-dir?(path) ? 1 : fs-exists?(path) ? 0 : ma-private-child(path,ma-private-dir(fs-path-dirname(path)));
+  def ma-private-child(path,parent) = !parent ? 0 : ((Comparable) host_mkdir_mode(path,448) == 1);
+  // A private 0600 temporary beside the artifact. The name is made unique by claiming it: the call that makes
+  // the directory `<name>.claim` owns `<name>` (mkdir answers 1 once per name, whoever else is racing); the empty
+  // file is then made at 0600 and the claim is released.
+  def ma-temp-name(path,attempt) = path ++ ".native." ++ host_pid().str() ++ "-" ++ now_unix_ms().str() ++ "-" ++ attempt.str();
+  def ma-private-temp(path) = ma-temp-try(path,0);
+  def ma-temp-try(path,attempt) = attempt >= 32 ? nothing() : ma-temp-claim(path,attempt,ma-temp-name(path,attempt));
+  def ma-temp-claim(path,attempt,name) = (Comparable) host_mkdir_mode(name ++ ".claim",448) == 1 ? ma-temp-owned(path,attempt,name) : ma-temp-try(path,attempt + 1);
+  // a name whose file stands already (an earlier call of this process in the same millisecond) is not ours: the claim goes back and the next attempt is tried
+  def ma-temp-owned(path,attempt,name) = (Comparable) fs_exists(name) == 0 ? ma-temp-made(path,name) : ma-temp-skip(path,attempt,name);
+  def ma-temp-skip(path,attempt,name) {
+   let released = fs_rmdir(name ++ ".claim");
+   ma-temp-try(path,attempt + 1);
+  }
+  def ma-temp-made(path,name) {
+   let created = write_file(name,"");
+   let private = host_chmod(name,384);
+   let released = fs_rmdir(name ++ ".claim");
+   (Comparable) private == 0 ? ma-check-temp(path,name) : nothing();
+  }
+  def ma-check-temp(path,temporary) = ((Comparable) str_find(temporary,path ++ ".native.",0) == 0) && ((Comparable) file_size(temporary) == 0) ? temporary : nothing();
+  def ma-publish-ready(owner,path,text) {
+   let made = ma-private-dir(fs-path-dirname(path));
+   made ? ma-publish-temp(owner,path,text,ma-private-temp(path)) : ma-publish-refused(owner,"");
+  }
+  def ma-publish-temp(owner,path,text,temporary) = nothing?(temporary) ? ma-publish-refused(owner,"") : ma-publish-write(owner,path,text,temporary);
+  def ma-publish-write(owner,path,text,temporary) {
+   let wrote = write_file(temporary,text);
+   let moved = ma-publish-move((Comparable) wrote == len(text),temporary,path);
+   (Comparable) moved == 0 ? 1 : ma-publish-refused(owner,temporary);
+  }
+  def ma-publish-move(wrote,temporary,path) = wrote ? fs_rename(temporary,path) : -1;
+  def ma-publish-refused(owner,path) {
+   let removed = ma-remove-temp(path); let refused = ma-refuse(owner,"artifact-publication-refused");
+   0;
+  }
+  def ma-remove-temp(path) = len(path) > 0 ? fs_remove(path) : 0;
+ }
+ 0;
+}

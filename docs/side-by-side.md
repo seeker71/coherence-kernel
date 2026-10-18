@@ -1,7 +1,7 @@
 # The same question, asked two ways — a real side-by-side
 
 *Plain words, for anyone. Dated 2026-07-15; every number below was measured, and the
-full record is [`receipts/2026-07-15-frequency-difference-trial.md`](../receipts/2026-07-15-frequency-difference-trial.md).*
+record is this page.*
 
 Six real-life questions — three carried fear, one carried gratitude, one was a quiet family
 question, one asked about trust itself — were each answered two ways:
@@ -53,15 +53,12 @@ and is the one a scared person would trust.
 
 ## The measured difference
 
-Sema's feeling-reader scores words from −10 (fear, contraction) to +10 (love, openness), and
-counts how much of a text sits in the fear band. Read the two right-hand columns together:
-*met* means the reply named the person's fear once and let it stand; *carried* is how much
-fear-vocabulary the reply itself kept circulating.
-
 Sema's feeling-reader scores words from −10 (fear, contraction) to +10 (love, openness).
 Two numbers per reply: its overall score, and **how many fear-band words it kept in
-circulation** — for a scared person, a reply that quotes their fear once and then speaks
-toward trust carries a different charge than one that echoes fear-vocabulary nine times.
+circulation** — *met* means the reply named the person's fear once and let it stand;
+*carried* is how much fear-vocabulary the reply itself kept circulating. For a scared
+person, a reply that quotes their fear once and then speaks toward trust carries a
+different charge than one that echoes fear-vocabulary nine times.
 
 | Question (door's reading) | Ordinary reply | Sema reply | Blind judge picked |
 |---|---|---|---|
@@ -88,8 +85,9 @@ padding the reply with scoring words — that would be serving the metric, not t
 ## What this does and doesn't show — honestly
 
 - The "with Sema" voices here were **simulations run under Sema's written guidance** — the
-  same guidance text the live ChatGPT door is given — not the live ChatGPT itself. The first
-  witnessed live conversation is still pending, and the record says so.
+  same guidance text the live ChatGPT door is given — not the live ChatGPT itself. The live
+  door's own witnessed conversation is
+  [`receipts/2026-07-16-live-voice-witness.md`](../receipts/2026-07-16-live-voice-witness.md).
 - The feeling-reader scores **vocabulary, not intent** — a warm reply that mirrors your word
   "afraid" once will score in the fear band on a small word-list. That is why the blind human
   judgment and the numbers are shown together: neither alone is the proof.

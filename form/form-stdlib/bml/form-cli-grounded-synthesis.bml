@@ -1,0 +1,188 @@
+//////////////////////////////////////////////////////////////////////
+// form-cli-grounded-synthesis.bml — the body grounds first, then the
+// cheapest voice that answers.
+//
+// Grounding is native: one in-process enrich reading of the enquiry's exact
+// terms and an index of receipts whose names carry those terms, ranked by
+// terms matched and then by date, newest first, each with its opening bytes.
+// The packet then goes, in this order, to:
+//   0. a short question the substrate already holds, or a retained local
+//      reply of that same question: answered here, model not admitted;
+//   1. the registry's answer model through the in-process fkwu model session;
+//      complete generation and observed release are required;
+//   2. one provider turn through the native process organ, no tools, in the
+//      job's owned empty directory with its own config home and session
+//      identity — only when explicitly allowed and local generation did not answer.
+//      A first answer under fgs-min-answer-bytes opens one additional turn
+//      carrying that length observation; both answers and costs are retained.
+//      Length alone establishes neither the cause nor the answer's quality.
+// The report carries the provider's own usage over all attempts, the oracle's
+// token counts, and the answer's path. Answer quality stays with the reader.
+// Every quantity that was not observed stays 0 with its source named "none";
+// nothing is inferred.
+//
+import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/bml/form-cli-enrich.bml;
+import form-stdlib/bml/form-cli-native-voice.bml;
+import form-stdlib/query-lane-resolve.bml;
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+ class FormCliGroundedSynthesis {
+  def fgs-opening-bytes() = 400;
+  def fgs-uuid-source() = "/proc/sys/kernel/random/uuid";
+  def fgs-min(a, b) = a < b ? a : b;
+  def fgs-clean(parts) = nil?(parts) ? [] : (String) trim(parts[0]) == "" ? fgs-clean(parts[1:]) : cons(trim(parts[0]), fgs-clean(parts[1:]));
+  def fgs-hits(name, terms) = nil?(terms) ? 0 : ((str_find(name, terms[0], 0) < 0 ? 0 : 1) + fgs-hits(name, terms[1:]));
+  def fgs-md?(name) = (len(name) > 3) && ((String) substring(name, len(name) - 3, len(name)) == ".md");
+  def fgs-path(name) = str_find(name, "/", 0) < 0 ? ("receipts/" ++ name) : name;
+  def fgs-date(path) = len(path) < 19 ? 0 : ((str_to_int(substring(path, 9, 13)) * 10000) + ((str_to_int(substring(path, 14, 16)) * 100) + str_to_int(substring(path, 17, 19))));
+  def fgs-row(name, terms) = [(fgs-hits(name, terms) * 100000000) + fgs-date(fgs-path(name)), fgs-path(name), fgs-hits(name, terms)];
+  def fgs-rank(names, terms) = nil?(names) ? [] : fgs-md?(names[0]) && (fgs-hits(names[0], terms) > 0) ? cons(fgs-row(names[0], terms), fgs-rank(names[1:], terms)) : fgs-rank(names[1:], terms);
+  def fgs-best(rows, best) = nil?(rows) ? best : fgs-best(rows[1:], nil?(best) || (rows[0][0] > best[0]) ? rows[0] : best);
+  def fgs-without(rows, row) = nil?(rows) ? [] : (String) rows[0][1] == row[1] ? rows[1:] : cons(rows[0], fgs-without(rows[1:], row));
+  def fgs-top(rows, limit) = nil?(rows) || ((Comparable) limit == 0) ? [] : fgs-take(rows, limit, fgs-best(rows, []));
+  def fgs-take(rows, limit, best) = cons(best, fgs-top(fgs-without(rows, best), limit - 1));
+  def fgs-opening(path, opening) {
+   let text = read_file(path);
+   substring(text, 0, fgs-min(len(text), opening));
+  }
+  // Each receipt carries a key beside its path. A path is sixty characters of
+  // date and title; a voice that cannot reproduce it cites nothing at all, and
+  // the body reads that as an answer with no evidence. A key is four characters,
+  // and the door resolves it back to the path it stands for — so the citation is
+  // the body's own mapping rather than the voice's memory of a filename.
+  def fgs-index(rows, opening) = fgs-index-at(rows, opening, 1);
+  def fgs-index-at(rows, opening, k) = nil?(rows) ? "" : ("--- [R" ++ k.str() ++ "] " ++ rows[0][1] ++ " (terms matched: " ++ rows[0][2].str() ++ ")\n" ++ fgs-opening(rows[0][1], opening) ++ "\n" ++ fgs-index-at(rows[1:], opening, k + 1));
+  def fgs-packet(enquiry, enrichment, index) = enquiry ++ "\n\n[Native Form grounding: one in-process enrich reading of the enquiry's exact terms. Use the observed definitions and relations.]\n" ++ enrichment ++ "\n[Receipts in this body whose names carry the terms, with their opening bytes. Cite by path only what these openings support; name what would need the full receipt.]\n" ++ index ++ "\nThis turn has no tools and no file access; everything usable is in this message. Answer the enquiry itself, point by point, from the material above, citing a receipt by its path wherever its opening supports the point. After the answer, say plainly what the material does not establish.\n";
+  def fgs-min-answer-bytes() = 1200;
+  def fgs-repair-packet(packet, thin) = packet ++ "\n[The previous attempt returned " ++ len(thin).str() ++ " bytes, below this door's length threshold. That observation establishes neither why it was short nor its quality. Use the supplied material to complete the enquiry; this turn has no tools or file access.]\n";
+  def fgs-names(rows) = rows |> map(row => json-node-string(row[1]));
+  def fgs-flag(doc, key, fallback) = json-object-has?(doc, key) ? ((Comparable) json-int-value(json-object-get(doc, key)) == 1) : fallback;
+  def fgs-uuid() {
+   let text = fs_exists(fgs-uuid-source()) ? trim(read_file(fgs-uuid-source())) : "";
+   (Comparable) len(text) == 36 ? text : nothing();
+  }
+  def fgs-argv(home, uuid, effort) = append(["env", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_CHILD_SESSION", "-u", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CONFIG_DIR=" ++ home, "claude", "-p"], append(nothing?(uuid) ? [] : ["--session-id", uuid], append((String) effort == "" ? [] : ["--effort", effort], ["--output-format", "json", "--max-turns", "1", "--tools", ""])));
+
+  def fgs-provider-allowed(request) = json-object-has?(request,"provider") ? fgs-flag(json-object-get(request,"provider"),"allowed",false) : false;
+  // A second turn is a second rent. The body observes a thin answer either way and
+  // says so; spending again on it is the caller's word, never the door's habit.
+  def fgs-repair-allowed(request) = json-object-has?(request,"provider") ? fgs-flag(json-object-get(request,"provider"),"repair",false) : false;
+
+  // provider result = status doc; doc is the provider's own result JSON or an empty object
+  def fgs-ask-provider(job, stage, seconds, packetPath, effort) {
+   let emptyDir = fs_mkdir(fhn-at(job, "empty"));
+   let home = fhn-at(job, "claude-home");
+   let homeDir = fs_mkdir(home);
+   let status = fhn-run(job, stage, seconds, "empty", packetPath, fgs-argv(home, fgs-uuid(), effort));
+   let raw = fhn-read(fhn-stage-path(job, stage, ".out"));
+   [status, ((String) status == "0") && (len(raw) > 0) ? parse-json("provider-result", raw) : json-node-object([])];
+  }
+  def fgs-not-asked() = ["not-asked", json-node-object([])];
+  def fgs-ledger() = "learn/query-recipes.jsonl";
+  def fgs-question?(enquiry) = (Comparable) len(enquiry) <= 240 && (Comparable) len(qlr-lane-of(qlr-tokens(enquiry))) > 0 ? 1 : 0;
+  def fgs-remembered(enquiry) = {
+   let raw = read_file(fgs-ledger());
+   let step = qlr-serve(raw ?? "", enquiry);
+   (String) step[0][3] == "local-voice" || (String) step[0][3] == "substrate" ? step[0][4] : "";
+  };
+  def fgs-substrate-text(enquiry) = (Comparable) fgs-question?(enquiry) == 0 ? "" : {
+   let held = qlr-held(enquiry);
+   (Comparable) len(held) > 0 ? held : fgs-remembered(enquiry);
+  };
+  def fgs-substrate-oracle(text) = ["answered", text, 0, 0, "substrate", 1, 1, "substrate", text, [], ""];
+  def fgs-doc-usage(doc) = json-object-has?(doc, "usage") ? json-object-get(doc, "usage") : json-node-object([]);
+  def fgs-usage2(doc1, doc2, key) = fhn-count(fgs-doc-usage(doc1), key) + fhn-count(fgs-doc-usage(doc2), key);
+  def fgs-details(doc) = json-object-has?(fgs-doc-usage(doc), "output_tokens_details") ? json-object-get(fgs-doc-usage(doc), "output_tokens_details") : json-node-object([]);
+
+  // The one public door. request: enquiry, terms, seconds, receipts, oracle (1/0), provider {allowed}.
+  def fgs-answer(request) {
+   let enquiry = fhn-text(request, "enquiry");
+   let terms = fhn-text(request, "terms");
+   let seconds = json-object-has?(request, "seconds") ? fhn-number(request, "seconds") : 600;
+   let limit = json-object-has?(request, "receipts") ? fhn-number(request, "receipts") : 8;
+   let askOracle = fgs-flag(request, "oracle", true);
+   let allowProvider = fgs-provider-allowed(request);
+   let allowRepair = fgs-repair-allowed(request);
+   let effort = fhn-text(request, "effort");
+   let opening = json-object-has?(request, "opening_bytes") ? fhn-number(request, "opening_bytes") : fgs-opening-bytes();
+   ((String) trim(enquiry) == "") || ((String) trim(terms) == "") ? form_error("grounded synthesis needs enquiry and terms") : fgs-start(enquiry, terms, seconds, limit, askOracle, allowProvider, allowRepair, effort, opening, request);
+  }
+  def fgs-start(enquiry, terms, seconds, limit, askOracle, allowProvider, allowRepair, effort, opening, request) {
+   let started = now_unix_ms();
+   let root = fhn-root();
+   let spool = fhn-at(root, ".form-heal");
+   let made = fs_mkdir(spool);
+   let job = fhn-unique(spool, "grounded-");
+   nothing?(job) ? form_error("grounded synthesis evidence directory unavailable") : 0;
+   let saved = fhn-write-json(fhn-at(job, "snapshot.json"), json-node-object([fhn-s("root", root)]));
+   let enrichment = fce-command(terms);
+   let rows = fgs-top(fgs-rank(fs_list(fhn-at(root, "receipts")) ?? [], fgs-clean(split-on(terms, " "))), limit);
+   let packet = fgs-packet(enquiry, enrichment, fgs-index(rows, opening));
+   let packetPath = fhn-at(job, "packet.txt");
+   let wrote = write_file_text(packetPath, packet);
+   let grounded = now_unix_ms();
+   let prior = fgs-substrate-text(enquiry);
+   let usePrior = askOracle && ((Comparable) len(prior) > 0);
+   let oracle = usePrior ? fgs-substrate-oracle(prior) : askOracle ? fcnv-ask(packet,request) : fcnv-not-asked();
+   let nativeEvidence = askOracle ? fcnv-retain(job,oracle) : 0;
+   let oracleDone = now_unix_ms();
+   let oracleAnswered = (String) oracle[0] == "answered";
+   let askProvider = allowProvider && (!oracleAnswered);
+   let first = askProvider ? fgs-ask-provider(job, "synthesis", seconds, packetPath, effort) : fgs-not-asked();
+   let firstAnswer = fhn-text(first[1], "result");
+   let thin = askProvider && (len(trim(firstAnswer)) < fgs-min-answer-bytes());
+   let repairing = thin && allowRepair;
+   let keptFirst = repairing ? write_file_text(fhn-at(job, "answer-1.md"), firstAnswer) : 0;
+   let repairPath = fhn-at(job, "packet-repair.txt");
+   let wroteRepair = repairing ? write_file_text(repairPath, fgs-repair-packet(packet, firstAnswer)) : 0;
+   let second = repairing ? fgs-ask-provider(job, "synthesis-repair", seconds, repairPath, effort) : fgs-not-asked();
+   let ended = now_unix_ms();
+   let doc1 = first[1];
+   let doc2 = second[1];
+   let secondAnswer = fhn-text(doc2, "result");
+   let providerAnswer = repairing && (len(trim(secondAnswer)) > 0) ? secondAnswer : firstAnswer;
+   let doc = repairing && (len(trim(secondAnswer)) > 0) ? doc2 : doc1;
+   let source = usePrior ? "substrate" : oracleAnswered ? "fkwu-model-session" : (String) trim(providerAnswer) == "" ? "none" : "provider";
+   let answer = oracleAnswered ? oracle[1] : providerAnswer;
+   let answerPath = fhn-at(job, "answer.md");
+   let kept = write_file_text(answerPath, answer);
+   let input = fgs-usage2(doc1, doc2, "input_tokens");
+   let cacheWrite = fgs-usage2(doc1, doc2, "cache_creation_input_tokens");
+   let cacheRead = fgs-usage2(doc1, doc2, "cache_read_input_tokens");
+   let output = fgs-usage2(doc1, doc2, "output_tokens");
+   json-node-object([
+    fhn-s("source", source),
+    fhn-s("status", thin ? second[0] : first[0]),
+    fhn-n("provider_attempts", repairing ? 2 : askProvider ? 1 : 0),
+    fhn-n("answer_thin", thin ? 1 : 0),
+    fhn-n("repair_allowed", allowRepair ? 1 : 0),
+    fhn-s("effort", effort),
+    fhn-n("opening_bytes", opening),
+    fhn-n("thinking_tokens", fhn-count(fgs-details(doc1), "thinking_tokens") + fhn-count(fgs-details(doc2), "thinking_tokens")),
+    fhn-s("evidence", job),
+    fhn-s("packet", packetPath),
+    fhn-s("answer", answerPath),
+    fhn-s("oracle", oracle[0]),
+    json-node-pair("native_generation",fcnv-metadata(oracle)),
+    fhn-n("oracle_ms", oracleDone - grounded),
+    fhn-n("oracle_tokens_evaluated", oracle[2]),
+    fhn-n("oracle_tokens_predicted", oracle[3]),
+    fhn-s("oracle_model", oracle[4]),
+    fhn-s("provider_session", fhn-text(doc, "session_id")),
+    fhn-a("receipts", fgs-names(rows)),
+    fhn-n("enrichment_bytes", len(enrichment)),
+    fhn-n("packet_bytes", len(packet)),
+    fhn-n("answer_bytes", len(answer)),
+    fhn-n("grounding_ms", grounded - started),
+    fhn-n("provider_ms", ended - oracleDone),
+    fhn-n("provider_turns", fhn-count(doc1, "num_turns") + fhn-count(doc2, "num_turns")),
+    fhn-n("input_tokens", input),
+    fhn-n("cache_write_input_tokens", cacheWrite),
+    fhn-n("cache_read_input_tokens", cacheRead),
+    fhn-n("output_tokens", output),
+    fhn-n("rent_tokens", (input + cacheWrite) + (cacheRead + output))]);
+  }
+ }
+}

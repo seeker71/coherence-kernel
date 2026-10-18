@@ -1,0 +1,249 @@
+// git-status.bml — `git status` in Form: HEAD against the index, the index against the working tree, the untracked and the ignored.
+//
+//   gst-rows(r, opts)     [[xy, path, extra] ...] sorted by path (extra: the old path of an index rename, else ""),
+//                         then the untracked, then (opts.ignored) the ignored, as git prints them
+//   gst-lines(r, opts)    the `--porcelain=v1` / `--short` lines (a leading `## branch` line with opts.branch)
+//   opts                  [untracked-mode, ignored, branch, nul]: "normal" | "all" | "no"; 1/0; 1/0; 1 for -z
+//
+// How each question is answered without reading the world:
+//  * HEAD against the index walks the HEAD tree and the sorted index entries together; a directory whose cache-tree id (the TREE
+//    extension, valid when its entry count is not -1) equals the HEAD subtree's id is skipped whole, without reading that tree
+//    or touching its index entries — so a clean index reads one commit and one tree.
+//  * the index against the working tree trusts a stat match (size and the mtime to the millisecond, the file older than the
+//    index file: git's "racily clean" rule), and hashes the content (sha1 of "blob <n>\0" ++ bytes) only when the stat differs.
+//  * untracked files are found by walking the working tree against the sorted-names string of the index; an ignored directory
+//    (gitignore rules, git-ignore.bml) is never entered; a directory with no tracked file under it collapses to `dir/`.
+//  * an index rename is a deleted path and an added path with the same blob id (exact renames), as git's default detection finds.
+//
+// Codes: M modified, A added, D deleted, T type change, R renamed, U unmerged (UU AA DD AU UA DU UD), ? untracked, ! ignored.
+//
+// PROOF: form-stdlib/tests/git-native-status-band.fk — a synthetic working tree: added, modified (same size with a changed
+// mtime, same mtime with changed content), deleted, untracked, ignored, renamed-in-index, unmerged; and this checkout.
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml form-stdlib/bml/git-refs.bml form-stdlib/bml/git-index.bml form-stdlib/bml/git-ignore.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+section [form.bml] {
+ class GitStatus {
+  // ---- modes ---------------------------------------------------------------------------------------------------------------
+  def gst-class(mode) = mode / 4096;
+  def gst-exec?(mode) = band(mode, 64) != 0 ? 1 : 0;
+  def gst-tree-raw-of(r, commitraw) {
+   let o = gs-read(r, commitraw);
+   nothing?(o) || !str_eq(o[0], "commit") ? nothing() : gsha-raw-of-hex(gs-commit-parse(o[1])[0]);
+  }
+  def gst-head-tree(r) {
+   let id = gr-head-id(r);
+   nothing?(id) ? nothing() : gst-tree-raw-of(r, gsha-raw-of-hex(id));
+  }
+  def gst-tree-ents(r, raw) {
+   let o = gs-read(r, raw);
+   nothing?(o) || !str_eq(o[0], "tree") ? [] : gs-tree-entries(o[1]);
+  }
+  // every file under a tree as [path, mode int, raw id]
+  def gst-flatten(r, raw, prefix) = gs-flatten(map(e => gs-tree?(e[0]) ? gst-flatten(r, e[2], prefix ++ e[1] ++ "/") : [[prefix ++ e[1], gs-mode-int(e[0]), e[2]]], gst-tree-ents(r, raw)));
+  // ---- HEAD against the index ----------------------------------------------------------------------------------------------
+  def gst-tkey(e) = gs-tree?(e[0]) ? e[1] ++ "/" : e[1];
+  // the key of an index entry below prefix: a file name, or "dir/" for the first component of a deeper path
+  def gst-ikey(path, prefix) {
+   let rel = substring(path, len(prefix), len(path));
+   let sl = gs-index-of(rel, 47, 0);
+   sl < 0 ? rel : substring(rel, 0, sl + 1);
+  }
+  def gst-under?(ents, prefix) = !nil?(ents) && gs-starts?(ents[0][0], prefix);
+  def gst-ct-find(ct, dir) = nil?(ct) ? nothing() : str_eq(ct[0][0], dir) ? ct[0] : gst-ct-find(ct[1:], dir);
+  // skip the index entries of one directory (they all start with dir)
+  def gst-skip-dir(ents, dir) = nil?(ents) || !gs-starts?(ents[0][0], dir) ? ents : gst-skip-dir(ents[1:], dir);
+  // one entry that exists only in the index
+  def gst-added(acc, e) = cons(["A", e[0], e[1], e[2]], acc);
+  def gst-added-dir(ents, dir, acc) = nil?(ents) || !gs-starts?(ents[0][0], dir) ? [acc, ents] : gst-added-dir(ents[1:], dir, gst-added(acc, ents[0]));
+  def gst-deleted-all(r, e, prefix, acc) = foldl((a, f) => cons(["D", f[0], f[1], f[2]], a), acc, gst-flatten(r, e[2], prefix ++ e[1] ++ "/"));
+  def gst-code-of(tmode, imode, tid, iid) = gst-class(tmode) != gst-class(imode) ? "T" : (tmode != imode || !str_eq(tid, iid)) ? "M" : "";
+  // [acc, rest of the index entries]; acc rows are [code, path, mode, raw id], newest first
+  def gst-walk(r, tents, ents, prefix, ct, acc) {
+   let ie = gst-under?(ents, prefix) ? ents[0] : nothing();
+   let tk = nil?(tents) ? nothing() : gst-tkey(tents[0]);
+   let ik = nothing?(ie) ? nothing() : gst-ikey(ie[0], prefix);
+   nothing?(tk) && nothing?(ik) ? [acc, ents] : nothing?(ik) ? gst-tree-only(r, tents, ents, prefix, ct, acc) : nothing?(tk) ? gst-index-only(r, tents, ents, prefix, ct, acc, ik) : str_eq(tk, ik) ? gst-both(r, tents, ents, prefix, ct, acc, tk) : gr-lt(tk, ik) ? gst-tree-only(r, tents, ents, prefix, ct, acc) : gst-index-only(r, tents, ents, prefix, ct, acc, ik);
+  }
+  def gst-tree-only(r, tents, ents, prefix, ct, acc) = gs-tree?(tents[0][0]) ? gst-walk(r, tents[1:], ents, prefix, ct, gst-deleted-all(r, tents[0], prefix, acc)) : gst-walk(r, tents[1:], ents, prefix, ct, cons(["D", prefix ++ tents[0][1], gs-mode-int(tents[0][0]), tents[0][2]], acc));
+  def gst-index-only(r, tents, ents, prefix, ct, acc, ik) {
+   let isdir = str_byte_at(ik, len(ik) - 1) == 47;
+   let run = isdir ? gst-added-dir(ents, prefix ++ ik, acc) : [gst-added(acc, ents[0]), ents[1:]];
+   gst-walk(r, tents, run[1], prefix, ct, run[0]);
+  }
+  def gst-both(r, tents, ents, prefix, ct, acc, key) {
+   let te = tents[0];
+   gs-tree?(te[0]) ? gst-both-dir(r, tents, ents, prefix, ct, acc, prefix ++ key) : gst-both-file(r, tents, ents, prefix, ct, acc, ents[0], gst-code-of(gs-mode-int(te[0]), ents[0][1], te[2], ents[0][2]));
+  }
+  def gst-both-file(r, tents, ents, prefix, ct, acc, ie, code) = gst-walk(r, tents[1:], ents[1:], prefix, ct, str_eq(code, "") ? acc : cons([code, ie[0], ie[1], ie[2], "", gs-mode-int(tents[0][0]), tents[0][2]], acc));
+  def gst-both-dir(r, tents, ents, prefix, ct, acc, dir) {
+   let node = gst-ct-find(ct, dir);
+   let same = !nothing?(node) && node[1] >= 0 && str_eq(node[2], tents[0][2]);
+   same ? gst-walk(r, tents[1:], drop(node[1], ents), prefix, ct, acc) : gst-both-descend(r, tents, ents, prefix, ct, acc, dir);
+  }
+  def gst-both-descend(r, tents, ents, prefix, ct, acc, dir) {
+   let sub = gst-walk(r, gst-tree-ents(r, tents[0][2]), ents, dir, ct, acc);
+   gst-walk(r, tents[1:], sub[1], prefix, ct, sub[0]);
+  }
+  // ---- renames in the index ------------------------------------------------------------------------------------------------
+  def gst-find-id(rows, id) = nil?(rows) ? nothing() : str_eq(rows[0][3], id) ? rows[0] : gst-find-id(rows[1:], id);
+  def gst-without(rows, path) = filter(x => !str_eq(x[1], path), rows);
+  // pair each added path with a deleted path of the same blob id: [staged rows with renames as "R" + old path in slot 4]
+  def gst-pair-renames(adds, dels, out) {
+   nil?(adds) ? append(ginf-reverse(out, []), dels) : gst-pair-one(adds, dels, out, gst-find-id(dels, adds[0][3]));
+  }
+  def gst-pair-one(adds, dels, out, hit) = nothing?(hit) ? gst-pair-renames(adds[1:], dels, cons(append(adds[0], [""]), out)) : gst-pair-renames(adds[1:], gst-without(dels, hit[1]), cons(["R", adds[0][1], adds[0][2], adds[0][3], hit[1], hit[2], hit[3]], out));
+  def gst-renames(rows) = gst-pair-renames(filter(x => str_eq(x[0], "A"), rows), filter(x => str_eq(x[0], "D"), rows), []);
+  // ---- the staged side -----------------------------------------------------------------------------------------------------
+  // rows [code, path, mode, raw id, old path] for HEAD against the stage-0 index entries
+  def gst-staged(r, ix) = gst-staged-tree(r, ix, gst-head-tree(r));
+  // the same against any tree (nothing() reads as the empty tree)
+  def gst-staged-tree(r, ix, headtree) {
+   let ents = filter(e => e[6] == 0, ix[0]);
+   let res = gst-walk(r, nothing?(headtree) ? [] : gst-tree-ents(r, headtree), ents, "", ix[1], []);
+   let rest = ginf-reverse(res[0], []);
+   let plain = filter(x => !str_eq(x[0], "A") && !str_eq(x[0], "D"), rest);
+   append(plain, gst-renames(rest));
+  }
+  // ---- the working-tree side -----------------------------------------------------------------------------------------------
+  def gst-blob-hex-raw(full) {
+   let s = read_file(full);
+   nothing?(s) ? nothing() : gs-hash("blob", s);
+  }
+  // whether the stat the index remembers still describes the file (and the file is older than the index: not racily clean)
+  def gst-stat-clean?(e, idn, imtime) = idn[0] == e[3] && idn[1] == (e[4] * 1000) + (e[5] / 1000000) && idn[1] < imtime;
+  def gst-state(top, e, imtime) {
+   let full = top ++ "/" ++ e[0];
+   let m = host_file_mode(full);
+   m < 0 ? "D" : gst-state-mode(full, e, imtime, m);
+  }
+  def gst-state-mode(full, e, imtime, m) {
+   let tp = (m / 4096) % 16;
+   let want = gst-class(e[1]);
+   want == 14 ? "" : want == 10 ? (tp == 10 ? "" : "T") : tp == 10 || tp == 4 ? "T" : gst-state-file(full, e, imtime, m);
+  }
+  def gst-state-file(full, e, imtime, m) {
+   let xbit = gst-exec?(m) != gst-exec?(e[1]);
+   let idn = host_file_identity(full);
+   xbit ? "M" : nothing?(idn) ? "D" : idn[0] != e[3] && !gst-smudged?(e) ? "M" : gst-stat-clean?(e, idn, imtime) ? "" : (str_eq(gst-blob-hex-raw(full), e[2]) ? "" : "M");
+  }
+  // an entry written without stat data (size 0, time 0) says nothing about the file: its content is compared, as git does for a smudged entry
+  def gst-smudged?(e) = e[3] == 0 && e[4] == 0;
+  def gst-skip-entry?(e) = e[6] != 0 || band(e[7], 16384) != 0 || band(e[12], 32768) != 0;
+  def gst-unstaged(top, ents, imtime, acc) = nil?(ents) ? ginf-reverse(acc, []) : gst-skip-entry?(ents[0]) ? gst-unstaged(top, ents[1:], imtime, acc) : gst-unstaged-one(top, ents, imtime, acc, gst-state(top, ents[0], imtime));
+  def gst-unstaged-one(top, ents, imtime, acc, code) = gst-unstaged(top, ents[1:], imtime, str_eq(code, "") ? acc : cons([code, ents[0][0]], acc));
+  // ---- unmerged paths ------------------------------------------------------------------------------------------------------
+  def gst-stage-codes(stages) {
+   let s1 = any?(x => x == 1, stages);
+   let s2 = any?(x => x == 2, stages);
+   let s3 = any?(x => x == 3, stages);
+   s1 && s2 && s3 ? "UU" : s2 && s3 ? "AA" : s1 && s2 ? "UD" : s1 && s3 ? "DU" : s2 ? "AU" : s3 ? "UA" : "DD";
+  }
+  def gst-unmerged(ents, acc) {
+   nil?(ents) ? ginf-reverse(acc, []) : ents[0][6] == 0 ? gst-unmerged(ents[1:], acc) : gst-unmerged-path(ents, acc);
+  }
+  def gst-unmerged-path(ents, acc) {
+   let p = ents[0][0];
+   let same = filter(x => str_eq(x[0], p), take(3, ents));
+   gst-unmerged(drop(len(same), ents), cons([gst-stage-codes(map(x => x[6], same)), p], acc));
+  }
+  // ---- untracked and ignored -----------------------------------------------------------------------------------------------
+  def gst-dir?(full) = ((host_file_mode(full) / 4096) % 16) == 4;
+  def gst-item(dir, n) = gst-dir?(dir ++ "/" ++ n) ? [n ++ "/", n] : [n, n];
+  // the directory's entries as [key, name] sorted in the index's own order: a directory sorts as "name/"
+  def gst-items(dir) = gr-msort(map(n => gst-item(dir, n), filter(n => !str_eq(n, ".git"), host_dir_list(dir) ?? [])));
+  // the entries of `slice` that live under dir (a prefix ending in "/"): [run, rest]
+  def gst-take-run(slice, dir, acc) = nil?(slice) || !gs-starts?(slice[0][0], dir) ? [ginf-reverse(acc, []), slice] : gst-take-run(slice[1:], dir, cons(slice[0], acc));
+  // [untracked paths, ignored paths] under rel (a prefix ending in "/", or ""), given the index entries below it (sorted)
+  def gst-scan(top, rel, rules, slice, mode, wantign) {
+   let dir = len(rel) == 0 ? top : top ++ "/" ++ substring(rel, 0, len(rel) - 1);
+   let here = gx-push(rules, gx-load(rel, gs-text-or(dir ++ "/.gitignore", "")));
+   gst-scan-items(top, rel, here, slice, mode, wantign, gst-items(dir), [], []);
+  }
+  def gst-scan-items(top, rel, rules, slice, mode, wantign, items, un, ig) {
+   nil?(items) ? [ginf-reverse(un, []), ginf-reverse(ig, [])] : gst-scan-cmp(top, rel, rules, slice, mode, wantign, items, un, ig, nil?(slice) || !gs-starts?(slice[0][0], rel) ? nothing() : gst-ikey(slice[0][0], rel));
+  }
+  def gst-scan-cmp(top, rel, rules, slice, mode, wantign, items, un, ig, ik) {
+   let key = items[0][0];
+   nothing?(ik) || gr-lt(key, ik) ? gst-scan-new(top, rel, rules, slice, mode, wantign, items, un, ig) : str_eq(key, ik) ? gst-scan-tracked(top, rel, rules, slice, mode, wantign, items, un, ig, ik) : gst-scan-items(top, rel, rules, gst-drop-group(slice, rel, ik), mode, wantign, items, un, ig);
+  }
+  // an index group the working tree no longer has (the unstaged side reports it as deleted)
+  def gst-drop-group(slice, rel, ik) = str_byte_at(ik, len(ik) - 1) == 47 ? gst-take-run(slice, rel ++ ik, [])[1] : slice[1:];
+  def gst-scan-tracked(top, rel, rules, slice, mode, wantign, items, un, ig, ik) {
+   let isdir = str_byte_at(ik, len(ik) - 1) == 47;
+   isdir ? gst-scan-tracked-dir(top, rel, rules, mode, wantign, items, un, ig, rel ++ items[0][1], gst-take-run(slice, rel ++ ik, [])) : gst-scan-items(top, rel, rules, slice[1:], mode, wantign, items[1:], un, ig);
+  }
+  def gst-scan-tracked-dir(top, rel, rules, mode, wantign, items, un, ig, path, run) {
+   let sub = gst-scan(top, path ++ "/", rules, run[0], mode, wantign);
+   gst-scan-items(top, rel, rules, run[1], mode, wantign, items[1:], append(ginf-reverse(sub[0], []), un), append(ginf-reverse(sub[1], []), ig));
+  }
+  // an item the index does not hold
+  def gst-scan-new(top, rel, rules, slice, mode, wantign, items, un, ig) {
+   let it = items[0];
+   let path = rel ++ it[1];
+   let isdir = str_byte_at(it[0], len(it[0]) - 1) == 47;
+   gx-ign(rules, path, it[1], isdir) == 1 ? gst-scan-items(top, rel, rules, slice, mode, wantign, items[1:], un, wantign == 1 ? cons(isdir ? path ++ "/" : path, ig) : ig) : isdir ? gst-scan-untracked-dir(top, rel, rules, slice, mode, wantign, items, un, ig, path) : gst-scan-items(top, rel, rules, slice, mode, wantign, items[1:], str_eq(mode, "no") ? un : cons(path, un), ig);
+  }
+  // a wholly untracked directory: `dir/` when it holds an untracked file (mode normal), else the files inside
+  def gst-scan-untracked-dir(top, rel, rules, slice, mode, wantign, items, un, ig, path) {
+   let sub = str_eq(mode, "no") ? [[], []] : gst-scan(top, path ++ "/", rules, [], mode, wantign);
+   let un2 = str_eq(mode, "normal") ? (nil?(sub[0]) ? un : cons(path ++ "/", un)) : append(ginf-reverse(sub[0], []), un);
+   gst-scan-items(top, rel, rules, slice, mode, wantign, items[1:], un2, append(ginf-reverse(sub[1], []), ig));
+  }
+  // ---- the whole status ----------------------------------------------------------------------------------------------------
+  def gst-row-lt(a, b) = gr-lt(a[1], b[1]);
+  def gst-msort(rows) = len(rows) <= 1 ? rows : gst-merge(gst-msort(take(len(rows) / 2, rows)), gst-msort(drop(len(rows) / 2, rows)), []);
+  def gst-merge(a, b, acc) = nil?(a) ? append(ginf-reverse(acc, []), b) : nil?(b) ? append(ginf-reverse(acc, []), a) : gst-row-lt(b[0], a[0]) ? gst-merge(a, b[1:], cons(b[0], acc)) : gst-merge(a[1:], b, cons(a[0], acc));
+  // combine the staged and unstaged rows by path into [xy, path, oldpath]
+  def gst-combine(staged, unstaged, unmerged) {
+   let paths = append(map(x => x[1], staged), append(map(x => x[1], unstaged), map(x => x[1], unmerged)));
+   let uniq = gs-uniq-str(paths, []);
+   gst-msort(map(p => gst-xy(p, staged, unstaged, unmerged), uniq));
+  }
+  def gs-uniq-str(xs, acc) = gs-uniq(xs, acc);
+  def gst-find(rows, path) = nil?(rows) ? nothing() : str_eq(rows[0][1], path) ? rows[0] : gst-find(rows[1:], path);
+  def gst-xy(p, staged, unstaged, unmerged) {
+   let um = gst-find(unmerged, p);
+   let s = gst-find(staged, p);
+   let u = gst-find(unstaged, p);
+   nothing?(um) ? [(nothing?(s) ? " " : s[0]) ++ (nothing?(u) ? " " : u[0]), p, nothing?(s) || !str_eq(s[0], "R") ? "" : s[4]] : [um[0], p, ""];
+  }
+  def gst-index-mtime(r) = (host_file_identity(gs-gitdir(r) ++ "/index") ?? [0, 0])[1];
+  def gst-rows(r, opts) {
+   let ix = gi-read(r);
+   nothing?(ix) ? [] : gst-rows-ix(r, opts, ix);
+  }
+  def gst-rows-ix(r, opts, ix) {
+   let staged = gst-staged(r, ix);
+   let unstaged = gst-unstaged(gs-top(r), ix[0], gst-index-mtime(r), []);
+   let unmerged = gst-unmerged(ix[0], []);
+   let changes = gst-combine(staged, unstaged, unmerged);
+   let mode = opts[0];
+   let scan = str_eq(mode, "no") && opts[1] == 0 ? [[], []] : gst-scan(gs-top(r), "", gx-stack(r), ix[0], mode, opts[1]);
+   append(changes, append(map(p => ["??", p, ""], scan[0]), map(p => ["!!", p, ""], scan[1])));
+  }
+  // ---- printing -----------------------------------------------------------------------------------------------------------
+  def gst-octal(b) = "\\" ++ substring("01234567", b / 64, (b / 64) + 1) ++ substring("01234567", (b / 8) % 8, ((b / 8) % 8) + 1) ++ substring("01234567", b % 8, (b % 8) + 1);
+  def gst-quote-byte(b) = b == 34 ? "\\\"" : b == 92 ? "\\\\" : b == 9 ? "\\t" : b == 10 ? "\\n" : b == 13 ? "\\r" : b < 32 || b >= 127 ? gst-octal(b) : byte_to_str(b);
+  def gst-needs-quote?(s) = any?(i => str_byte_at(s, i) < 33 || str_byte_at(s, i) >= 127 || str_byte_at(s, i) == 34 || str_byte_at(s, i) == 92, range(0, len(s)));
+  // quote_path as git's short format does it (QUOTE_PATH_QUOTE_SP)
+  def gst-quote(s) = gst-needs-quote?(s) ? "\"" ++ foldl((acc, i) => acc ++ gst-quote-byte(str_byte_at(s, i)), "", range(0, len(s))) ++ "\"" : s;
+  def gst-line(row, nul) = nul == 1 ? row[0] ++ " " ++ row[1] ++ byte_to_str(0) ++ (len(row[2]) > 0 ? row[2] ++ byte_to_str(0) : "") : len(row[2]) > 0 ? row[0] ++ " " ++ gst-quote(row[2]) ++ " -> " ++ gst-quote(row[1]) : row[0] ++ " " ++ gst-quote(row[1]);
+  // ## branch...upstream [ahead N, behind M]
+  def gst-branch-line(r) {
+   let h = gr-head(r);
+   str_eq(h[0], "detached") ? "## HEAD (no branch)" : str_eq(h[0], "unborn") ? "## No commits yet on " ++ gr-short-branch(h[1]) : "## " ++ gr-short-branch(h[1]);
+  }
+  def gst-lines(r, opts) {
+   let rows = gst-rows(r, opts);
+   let body = map(row => gst-line(row, opts[3]), rows);
+   opts[2] == 1 ? cons(gst-branch-line(r), body) : body;
+  }
+ }
+ 0;
+}

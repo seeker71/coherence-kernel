@@ -1,0 +1,681 @@
+// form-cli-turn-evidence-live.fk — Form reads one explicitly bound Codex
+// rollout and measures the most recent completed turn.
+// preflight-exec: forbidden
+//
+import form-stdlib/core.fk;
+import form-stdlib/line-grammar.fk;
+import form-stdlib/json.fk;
+import form-stdlib/form-fs.fk;
+import form-stdlib/form-cli-turn-evidence.fk;
+import form-stdlib/bml/form-cli-remote-token-evidence.bml;
+import form-stdlib/bml/form-cli-transcript-discovery.bml;
+import form-stdlib/bml/form-cli-tool-output-evidence.bml;
+import form-stdlib/bml/form-cli-turn-row-window.bml;
+//
+// Nothing here asks Python, SQLite, a shell, or another parser to interpret
+// the evidence. The private binding is an explicit capability: absence,
+// unreadability, an incomplete turn, or failed reconciliation leaves the
+// completed-turn share unavailable, and the line says which.
+// Prompt, reasoning, answer, and tool-output text are never emitted.
+//
+// The token counters have a second source: where no binding stands, the body
+// finds its own agent transcript through form-cli-transcript-discovery.bml.
+section [form.bml] {
+    def fctel-binding-path() = ".form-cli-turn-rollout";
+    def fctel-target-turn-path() = ".form-cli-turn-evidence-target";
+    def fctel-progress-path() = ".form-cli-turn-evidence-progress";
+    def fctel-discovery-path() = ".form-cli-turn-evidence-discovery";
+    def fctel-start-discovery-path() = ".form-cli-turn-evidence-start-discovery";
+    def fctel-latest-validation-path() = ".form-cli-turn-evidence-latest-validation";
+    def fctel-observed-row-path() = ".form-cli-turn-evidence-row";
+    def fctel-candidate-row-path() = ".form-cli-turn-evidence-candidate";
+    def fctel-source-kind() = "codex-rollout-jsonl+explicit-form-binding";
+    // One 4 MiB discovery slice physically took 8.2 s on this carrier while
+    // locating the completed turn in a 135 MiB rollout. Keep each continuation
+    // below the five-second close-attention boundary: the durable cursor, not one
+    // blocking invocation, owns the whole traversal.
+    def fctel-chunk-bytes() = 2097152;
+    def fctel-processing-bytes() = 2097152;
+    def fctel-overlap-bytes() = 4096;
+    def fctel-progress-max-bytes() = 1048576;
+    def fctel-max-pending-calls() = 256;
+    def fctel-max-call-id-bytes() = 256;
+    def fctel-join(parts) = (Comparable) len(parts) == 0 ? "" : ((String) parts[0] + fctel-join(parts[1:]));
+    def fctel-min(a, b) = a < b ? a : b;
+    def fctel-max(a, b) = a > b ? a : b;
+    def fctel-trim-end-loop(s, n) = (Comparable) n == 0 ? "" : {
+        let cp = ord(char_at(s, n - 1));
+        (Comparable) cp == 10 || ((Comparable) cp == 13 || (Comparable) cp == 32) ? fctel-trim-end-loop(s, n - 1) : substring(s, 0, n);
+    };
+    def fctel-trim-end(s) = fctel-trim-end-loop(s, len(s));
+    // Direct-field cursor for bounded JSONL rows.  It walks object structure and
+    // skips quoted strings with JSON escape semantics; a same-named field nested
+    // in metadata or carried as tool content is never a direct root/payload key.
+    // Unlike the full typed parser this cursor can read the compact header of a
+    // multi-megabyte tool-output row without interning its private output string.
+    def fctel-json-string-closed?(s, end) = end > 0 && (end <= len(s) && (Comparable) ord(char_at(s, end - 1)) == 34);
+    def fctel-json-composite-end-loop(s, i, depth) = i >= len(s) ? -1 : {
+        let cp = ord(char_at(s, i));
+        (Comparable) cp == 34 ? {
+            let end = json-scan-string-end-pos(s, i);
+            (Comparable) fctel-json-string-closed?(s, end) == 0 ? -1 : fctel-json-composite-end-loop(s, end, depth);
+        } : (Comparable) cp == 123 || (Comparable) cp == 91 ? fctel-json-composite-end-loop(s, i + 1, depth + 1) : (Comparable) cp == 125 || (Comparable) cp == 93 ? (Comparable) depth == 1 ? i + 1 : fctel-json-composite-end-loop(s, i + 1, depth - 1) : fctel-json-composite-end-loop(s, i + 1, depth);
+    };
+    def fctel-json-primitive-end(s, i) = i >= len(s) ? i : {
+        let cp = ord(char_at(s, i));
+        (Comparable) cp == 44 || ((Comparable) cp == 125 || (Comparable) cp == 93) ? i : json-is-ws-cp(cp) ? i : fctel-json-primitive-end(s, i + 1);
+    };
+    def fctel-json-value-end(s, at) = at < 0 || at >= len(s) ? -1 : {
+        let cp = ord(char_at(s, at));
+        (Comparable) cp == 34 ? {
+            let end = json-scan-string-end-pos(s, at);
+            (Comparable) fctel-json-string-closed?(s, end) == 1 ? end : -1;
+        } : (Comparable) cp == 123 || (Comparable) cp == 91 ? fctel-json-composite-end-loop(s, at + 1, 1) : fctel-json-primitive-end(s, at);
+    };
+    def fctel-json-object-field-next(s, after-value, key) = after-value < 0 ? -1 : {
+        let next = json-next-token(s, after-value);
+        (String) json-tok-kind(next) == "COMMA" ? fctel-json-object-field-start-loop(s, json-token-end(s, next), key) : -1;
+    };
+    def fctel-json-object-field-value(s, key-token, colon, key) = !((String) json-tok-kind(colon) == "COLON") ? -1 : {
+        let value-at = json-skip-ws(s, json-token-end(s, colon));
+        (String) json-tok-val(key-token) == key ? value-at : fctel-json-object-field-next(s, fctel-json-value-end(s, value-at), key);
+    };
+    def fctel-json-object-field-start-loop(s, i, key) = {
+        let at = json-skip-ws(s, i);
+        at >= len(s) || (Comparable) ord(char_at(s, at)) == 125 ? -1 : {
+            let key-token = json-next-token(s, at);
+            !((String) json-tok-kind(key-token) == "STRING") ? -1 : fctel-json-object-field-value(s, key-token, json-next-token(s, json-token-end(s, key-token)), key);
+        };
+    };
+    def fctel-json-object-field-start(s, object-at, key) = object-at < 0 || object-at >= len(s) ? -1 : !((Comparable) ord(char_at(s, object-at)) == 123) ? -1 : fctel-json-object-field-start-loop(s, object-at + 1, key);
+    def fctel-json-root-at(s) = {
+        let at = json-skip-ws(s, 0);
+        at >= len(s) ? -1 : (Comparable) ord(char_at(s, at)) == 123 ? at : -1;
+    };
+    // Range forms walk the already-loaded bounded segment from a row coordinate.
+    // They do not copy a multi-megabyte private row merely because a direct field
+    // follows a large output/metadata value.
+    def fctel-json-root-at-from(s, from) = {
+        let at = json-skip-ws(s, from);
+        at >= len(s) ? -1 : (Comparable) ord(char_at(s, at)) == 123 ? at : -1;
+    };
+    def fctel-json-root-field-start(s, key) = fctel-json-object-field-start(s, fctel-json-root-at(s), key);
+    def fctel-json-root-field-start-from(s, from, key) = fctel-json-object-field-start(s, fctel-json-root-at-from(s, from), key);
+    def fctel-json-payload-at(s) = {
+        let at = fctel-json-root-field-start(s, "payload");
+        at < 0 ? -1 : at >= len(s) ? -1 : (Comparable) ord(char_at(s, at)) == 123 ? at : -1;
+    };
+    def fctel-json-payload-at-from(s, from) = {
+        let at = fctel-json-root-field-start-from(s, from, "payload");
+        at < 0 ? -1 : at >= len(s) ? -1 : (Comparable) ord(char_at(s, at)) == 123 ? at : -1;
+    };
+    def fctel-json-payload-field-start(s, key) = fctel-json-object-field-start(s, fctel-json-payload-at(s), key);
+    def fctel-json-payload-field-start-from(s, from, key) = fctel-json-object-field-start(s, fctel-json-payload-at-from(s, from), key);
+    def fctel-json-string-at-field(s, at) = at < 0 || at >= len(s) ? "" : {
+        let token = json-next-token(s, at);
+        (String) json-tok-kind(token) == "STRING" && (Comparable) json-tok-start(token) == at ? json-tok-val(token) : "";
+    };
+    def fctel-json-int-at-field(s, at, fallback) = at < 0 || at >= len(s) ? fallback : {
+        let token = json-next-token(s, at);
+        (String) json-tok-kind(token) == "NUMBER" && ((Comparable) json-tok-start(token) == at && (Comparable) json-number-float?(json-tok-val(token)) == 0) ? str_to_int(json-tok-val(token)) : fallback;
+    };
+    def fctel-json-root-string(s, key) = fctel-json-string-at-field(s, fctel-json-root-field-start(s, key));
+    def fctel-json-payload-string(s, key) = fctel-json-string-at-field(s, fctel-json-payload-field-start(s, key));
+    def fctel-json-root-string-from(s, from, key) = fctel-json-string-at-field(s, fctel-json-root-field-start-from(s, from, key));
+    def fctel-json-payload-string-from(s, from, key) = fctel-json-string-at-field(s, fctel-json-payload-field-start-from(s, from, key));
+    def fctel-json-payload-int(s, key, fallback) = fctel-json-int-at-field(s, fctel-json-payload-field-start(s, key), fallback);
+    // ISO-8601 UTC timestamps in Codex rollouts have millisecond precision.
+    def fctel-slice-int(s, a, b) = str_to_int(substring(s, a, b));
+    def fctel-leaps-through(year) = year / 4 - year / 100 + year / 400;
+    def fctel-days-before-month(month, leap) = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][month] + ((Comparable) leap == 1 && month > 2 ? 1 : 0);
+    def fctel-leap-year?(year) = (Comparable) (year % 400) == 0 || (Comparable) (year % 4) == 0 && !((Comparable) (year % 100) == 0) ? 1 : 0;
+    def fctel-iso-ms(s) = len(s) < 24 ? 0 : {
+        let year = fctel-slice-int(s, 0, 4);
+        let month = fctel-slice-int(s, 5, 7);
+        let day = fctel-slice-int(s, 8, 10);
+        let hour = fctel-slice-int(s, 11, 13);
+        let minute = fctel-slice-int(s, 14, 16);
+        let second = fctel-slice-int(s, 17, 19);
+        let millis = fctel-slice-int(s, 20, 23);
+        let days = (year - 1970) * 365 + (fctel-leaps-through(year - 1) - fctel-leaps-through(1969) + (fctel-days-before-month(month, fctel-leap-year?(year)) + (day - 1)));
+        ((days * 24 + hour) * 60 + minute) * 60000 + (second * 1000 + millis);
+    };
+    def fctel-timestamp-ms(line) = fctel-iso-ms(fctel-json-root-string(line, "timestamp"));
+    def fctel-find-last-text(s, needle, from, last) = {
+        let p = str_find(s, needle, from);
+        p < 0 ? last : fctel-find-last-text(s, needle, p + 1, p);
+    };
+    // Rollouts are JSONL. scan_run class 5 reaches the next LF in one native
+    // carrier step. The payload type begins near the front of every event; read it
+    // once, then compare typed values instead of searching each whole line for
+    // every possible marker.
+    def fctel-next-json-string(s, from) = scan_run(s, from, 6);
+    def fctel-json-string-end(s, open) = json-scan-string-end-pos(s, open);
+    def fctel-json-string-at(s, open) = {
+        let end = fctel-json-string-end(s, open);
+        open >= len(s) || end <= open + 1 ? "" : substring(s, open + 1, end - 1);
+    };
+    def fctel-top-type(prefix) =     // `ordinal` and future envelope keys may sit before `type`.  The key is
+    // stable; its string ordinal is not.
+fctel-json-root-string(prefix, "type");
+    def fctel-payload-type(prefix) = {
+        let top-type = fctel-top-type(prefix);
+        (String) top-type == "event_msg" || (String) top-type == "response_item" ? {
+            fctel-json-payload-string(prefix, "type");
+        } : "";
+    };
+    // Codex binds carrier identity inside the session_meta payload.  Root-level
+    // fields with the same names are unrelated envelope data and cannot identify
+    // the rollout consumed by a turn-evidence row.
+    def fctel-session-meta-string(prefix, key) = (String) fctel-top-type(prefix) == "session_meta" ? fctel-json-payload-string(prefix, key) : "";
+    def fctel-session-meta-thread-id(prefix) = fctel-session-meta-string(prefix, "session_id");
+    def fctel-session-meta-provider(prefix) = fctel-session-meta-string(prefix, "model_provider");
+    def fctel-top-type-from(segment, from) = fctel-json-root-string-from(segment, from, "type");
+    def fctel-payload-type-from(segment, from) = {
+        let top-type = fctel-top-type-from(segment, from);
+        (String) top-type == "event_msg" || (String) top-type == "response_item" ? fctel-json-payload-string-from(segment, from, "type") : "";
+    };
+    def fctel-line-event?(prefix, event-type, turn-id) = (String) fctel-payload-type(prefix) == event-type ? (String) turn-id == "" ? 1 : (String) fctel-json-payload-string(prefix, "turn_id") == turn-id ? 1 : 0 : 0;
+    def fctel-find-last-line-event(s, event-type, turn-id, from, last) = from >= len(s) ? last : {
+        let end = scan_run(s, from, 5);
+        let prefix-end = fctel-min(end, from + 256);
+        let prefix = substring(s, from, prefix-end);
+        let last2 = (Comparable) fctel-line-event?(prefix, event-type, turn-id) == 1 ? from : last;
+        end >= len(s) ? last2 : fctel-find-last-line-event(s, event-type, turn-id, end + 1, last2);
+    };
+    // Completion is a semantic BML relation, not one historical transport label.
+    // The terminal payload remains private; this helper returns only its byte
+    // coordinate to the existing bounded collector.
+    def fctel-terminal-line?(prefix, turn-id) = (Comparable) frte-terminal-completion-line?(prefix) == 0 ? 0 : (String) turn-id == "" ? 1 : (String) fctel-json-payload-string(prefix, "turn_id") == turn-id ? 1 : 0;
+    def fctel-find-last-terminal-line(s, turn-id, from, last) = from >= len(s) ? last : {
+        let end = scan_run(s, from, 5);
+        let prefix-end = fctel-min(end, from + 4096);
+        let prefix = substring(s, from, prefix-end);
+        let last2 = (Comparable) fctel-terminal-line?(prefix, turn-id) == 1 ? from : last;
+        end >= len(s) ? last2 : fctel-find-last-terminal-line(s, turn-id, end + 1, last2);
+    };
+    // A discovery window never presents a partial JSONL row as a row beginning.
+    // The small prefix overlap is used only to find the preceding LF.  When a row
+    // is larger than the overlap, this slice deliberately skips its partial tail;
+    // a later bounded slice reaches the row's true beginning instead of accepting
+    // an envelope whose identity was cut away at the byte boundary.
+    def fctel-discovery-window(path, end) = {
+        let start = fctel-max(0, end - fctel-chunk-bytes());
+        let read-start = fctel-max(0, start - fctel-overlap-bytes());
+        let raw = read_file_slice(path, read-start, end - read-start);
+        (Comparable) read-start == 0 ? [0, raw, start] : {
+            let nl = scan_run(raw, 0, 5);
+            nl >= len(raw) ? [end, "", start] : [read-start + (nl + 1), substring(raw, nl + 1, len(raw)), start];
+        };
+    };
+    // Result: found?, absolute coordinate, next bounded cursor.  Start lookup uses
+    // this one slice at a time just like terminal discovery; no share invocation
+    // recursively walks an arbitrarily large rollout.
+    def fctel-find-line-event-window(path, event-type, turn-id, end) = end <= 0 ? [0, -1, 0] : {
+        let window = fctel-discovery-window(path, end);
+        let base = window[0];
+        let body = window[1];
+        let next = window[2];
+        let found = fctel-find-last-line-event(body, event-type, turn-id, 0, -1);
+        found >= 0 ? [1, base + found, next] : [0, -1, next];
+    };
+    def fctel-line-start(path, marker) = {
+        let a = fctel-max(0, marker - 4096);
+        let before = read_file_slice(path, a, marker - a);
+        let nl = fctel-find-last-text(before, "\n", 0, -1);
+        nl < 0 ? a : a + (nl + 1);
+    };
+    // A row boundary is found in one finite read.  A row wider than the collector
+    // slice is a visible refusal, never a recursive walk that silently expands one
+    // invocation beyond its attention and memory bound.
+    def fctel-line-end-from-body(body, size, offset) = {
+        let nl = scan_run(body, 0, 5);
+        nl < len(body) ? offset + (nl + 1) : offset + len(body) >= size ? size : -1;
+    };
+    def fctel-line-end(path, size, marker) = marker >= size ? size : {
+        let width = fctel-min(fctel-processing-bytes(), size - marker);
+        fctel-line-end-from-body(read_file_slice(path, marker, width), size, marker);
+    };
+    // Result: exact end coordinate and its already-read complete-row body.  A
+    // non-final slice retreats to its last LF, keeping both I/O and parsing at or
+    // below ProcessingBytes. A single larger physical row extends through bounded
+    // small reads up to the explicit row cap; it is never skipped or truncated.
+    def fctel-chunk(end, body) = [end, body];
+    def fctel-chunk-end(chunk) = chunk[0];
+    def fctel-chunk-body(chunk) = chunk[1];
+    def fctel-bounded-chunk(path, cursor, segment-end) = {
+        let target = fctel-min(segment-end, cursor + fctel-processing-bytes());
+        let body = read_file_slice(path, cursor, target - cursor);
+        target >= segment-end ? fctel-chunk(target, body) : {
+            let nl = fctel-find-last-text(body, "\n", 0, -1);
+            nl < 0 ? fctr-extend(path, cursor, segment-end, body, fctr-row-limit(fctel-processing-bytes())) : fctel-chunk(cursor + (nl + 1), substring(body, 0, nl + 1));
+        };
+    };
+    def fctel-first-line(text) = {
+        let nl = scan_run(text, 0, 5);
+        nl >= len(text) ? text : substring(text, 0, nl);
+    };
+    // Per-string Form row measurement:
+    // bytes, rows, failures, stdout, stderr, shown, native rows, native failures.
+    def fctel-zero-output-measure() = [0, 0, 0, 0, 0, 0, 0, 0];
+    def fctel-measure-add(a, b) = [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4], a[5] + b[5], a[6] + b[6], a[7] + b[7]];
+    def fctel-form-line-measure(line) = {
+        let parts = split-on(line, " ");
+        (Comparable) len(parts) == 6 && (String) parts[0] == "@form" ? {
+            let kind = parts[1];
+            let exit-code = str_to_int(parts[2]);
+            let stdout = str_to_int(parts[3]);
+            let stderr = str_to_int(parts[4]);
+            let shown = str_to_int(parts[5]);
+            let native = (String) kind == "fkwu" ? 1 : 0;
+            [0, 1, (Comparable) exit-code == 0 ? 0 : 1, stdout, stderr, shown, native, (Comparable) native == 1 && !((Comparable) exit-code == 0) ? 1 : 0];
+        } : fctel-zero-output-measure();
+    };
+    // The @form receipt is emitted at the end of a tool output. Rollout JSON keeps
+    // that ASCII row literal even while escaping its newline. A bounded tail is
+    // enough to hold the receipt and avoids materializing private output as a JSON
+    // recipe merely to count its public measurement row.
+    def fctel-raw-form-tail-loop(tail, from, acc) = {
+        let p = str_find(tail, "@form ", from);
+        p < 0 ? acc : {
+            let escaped-nl = str_find(tail, "\\n", p);
+            let end = escaped-nl < 0 ? len(tail) : escaped-nl;
+            let row = fctel-form-line-measure(substring(tail, p, end));
+            fctel-raw-form-tail-loop(tail, p + 6, fctel-measure-add(acc, row));
+        };
+    };
+    def fctel-raw-output-measure(line, scan-receipt) = {
+        let at = fctel-json-payload-field-start(line, "output");
+        at < 0 || !((Comparable) ord(char_at(line, at)) == 34) ? fctel-zero-output-measure() : {
+            let close = json-scan-string-end-pos(line, at);
+            (Comparable) fctel-json-string-closed?(line, close) == 0 ? fctel-zero-output-measure() : {
+                let content-at = at + 1;
+                let content-end = close - 1;
+                let raw-bytes = content-end - content-at;
+                let tail-start = fctel-max(content-at, content-end - 512);
+                let rows = (Comparable) scan-receipt == 1 ? fctel-raw-form-tail-loop(substring(line, tail-start, content-end), 0, fctel-zero-output-measure()) : fctel-zero-output-measure();
+                [raw-bytes, rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7]];
+            };
+        };
+    };
+    // A tool output may be megabytes long.  Its lane accounting needs only the
+    // byte coordinate of `output`, the call id in the typed prefix, and the public
+    // @form row in the bounded tail.  Keeping the whole private line as another
+    // Form string made evidence cost proportional to output size twice.
+    def fctel-raw-output-measure-range(segment, from, end, prefix, scan-receipt) = {
+        let at = fctel-json-payload-field-start-from(segment, from, "output");
+        at < 0 ? fctel-zero-output-measure() : {
+            at >= end || !((Comparable) ord(char_at(segment, at)) == 34) ? fctel-zero-output-measure() : {
+                let close = json-scan-string-end-pos(segment, at);
+                close > end || (Comparable) fctel-json-string-closed?(segment, close) == 0 ? fctel-zero-output-measure() : {
+                    let content-at = at + 1;
+                    let content-end = close - 1;
+                    let raw-bytes = content-end - content-at;
+                    let tail-start = fctel-max(content-at, content-end - 512);
+                    let rows = (Comparable) scan-receipt == 1 ? fctel-raw-form-tail-loop(substring(segment, tail-start, content-end), 0, fctel-zero-output-measure()) : fctel-zero-output-measure();
+                    [raw-bytes, rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7]];
+                };
+            };
+        };
+    };
+    // Collector state fields 0..21: provider usage, tool and Form metrics,
+    // call timestamps, then the selected model.
+    def fctel-state() = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [], ""];
+    def fctel-set(xs, i, value) = (Comparable) i == 0 ? cons(value, xs[1:]) : cons(xs[0], fctel-set(xs[1:], i - 1, value));
+    def fctel-add-at(xs, i, value) = fctel-set(xs, i, xs[i] + value);
+    def fctel-call-native-request?(calls, call-id) = (Comparable) len(calls) == 0 ? 0 : (String) calls[0][0] == call-id ? calls[0][1] : fctel-call-native-request?(calls[1:], call-id);
+    // Native attribution is tied to the executable spelling, not any occurrence
+    // of the letters `fkwu` in an argument, filename, grep pattern, or payload.
+    def fctel-native-command?(command) = {
+        let value = trim(command);
+        (String) value == "fkwu" ? 1 : (Comparable) str_find(value, "./fkwu", 0) == 0 ? 1 : str_find(value, "form-run ./fkwu", 0) >= 0 ? 1 : str_find(value, "form-run sh -c", 0) >= 0 ? str_find(value, " ./fkwu", 0) >= 0 ? 1 : 0 : 0;
+    };
+    // Only unmatched call identities are needed.  Completed calls retire on their
+    // output boundary.  A burst wider than the explicit cap leaves one sentinel;
+    // the sentinel then names the overflow so the turn reads unreconciled, rather
+    // than a row standing as though its native/local attribution were complete.
+    def fctel-call-overflow-entry() = ["", -1];
+    def fctel-call-overflow-entry?(entry) = !((Comparable) len(entry) == 2) ? 0 : !((String) entry[0] == "") ? 0 : (Comparable) entry[1] == -1;
+    def fctel-calls-overflow?(calls) = (Comparable) len(calls) == 0 ? 0 : (Comparable) fctel-call-overflow-entry?(calls[0]) == 1 ? 1 : fctel-calls-overflow?(calls[1:]);
+    def fctel-calls-remove(calls, call-id) = (Comparable) len(calls) == 0 ? [] : !((String) call-id == "") && (String) calls[0][0] == call-id ? fctel-calls-remove(calls[1:], call-id) : cons(calls[0], fctel-calls-remove(calls[1:], call-id));
+    def fctel-calls-add(calls, call-id, native-request) = (Comparable) fctel-calls-overflow?(calls) == 1 ? calls : len(call-id) > fctel-max-call-id-bytes() || len(calls) >= fctel-max-pending-calls() ? cons(fctel-call-overflow-entry(), calls) : cons([call-id, native-request], calls);
+    // A provider emits one token_count event before a call with info=null, then
+    // another after it with the per-call `last_token_usage` object.  Event presence
+    // and token volume are distinct facts: retain both.  `last` is deliberately
+    // chosen over `total_token_usage`, whose value is cumulative over a rollout.
+    // This keeps a multi-call turn additive without rereading earlier calls.
+    def fctel-usage-present?(line) = frte-call-local-usage-line?(line);
+    def fctel-last-usage-int(line, key) = frte-call-local-usage-int-or(line, key, 0);
+    def fctel-add-last-usage(state, line) = {
+        let s1 = fctel-add-at(state, 1, fctel-last-usage-int(line, "input_tokens"));
+        let s2 = fctel-add-at(s1, 2, fctel-last-usage-int(line, "cached_input_tokens"));
+        let s3 = fctel-add-at(s2, 3, fctel-last-usage-int(line, "cache_write_input_tokens"));
+        let s4 = fctel-add-at(s3, 4, fctel-last-usage-int(line, "output_tokens"));
+        let s5 = fctel-add-at(s4, 5, fctel-last-usage-int(line, "reasoning_output_tokens"));
+        fctel-add-at(s5, 6, fctel-last-usage-int(line, "total_tokens"));
+    };
+    def fctel-add-usage(state, line) = (Comparable) fctel-usage-present?(line) == 1 ? fctel-add-last-usage(fctel-add-at(state, 0, 1), line) : state;
+    // An open task has no settled total.  Its last completed provider call is still
+    // an exact, bounded remote-token pressure signal; content never leaves here.
+    def fctel-find-last-usage-line(s, from, last) = from >= len(s) ? last : {
+        let end = scan_run(s, from, 5);
+        let line = substring(s, from, fctel-min(end, len(s)));
+        let last2 = (Comparable) fctel-usage-present?(line) == 1 ? from : last;
+        end >= len(s) ? last2 : fctel-find-last-usage-line(s, end + 1, last2);
+    };
+    def fctel-last-usage-state-from-segment(segment) = {
+        let at = fctel-find-last-usage-line(segment, 0, -1);
+        at < 0 ? fctel-state() : {
+            let end = scan_run(segment, at, 5);
+            fctel-add-usage(fctel-state(), substring(segment, at, fctel-min(end, len(segment))));
+        };
+    };
+    def fctel-last-usage-state(path) = {
+        let size = file_size(path);
+        size <= 0 ? fctel-state() : {
+            let start = fctel-max(0, size - fctel-chunk-bytes());
+            fctel-last-usage-state-from-segment(read_file_slice(path, start, size - start));
+        };
+    };
+    def fctel-add-call(state, line) = {
+        let call-id = fctel-json-payload-string(line, "call_id");
+        (String) call-id == "" ? state : {
+            let native-request = fcto-request(line, 0);
+            let calls = fctel-calls-add(state[20], call-id, native-request);
+            fctel-set(fctel-add-at(state, 7, 1), 20, calls);
+        };
+    };
+    def fctel-add-call-range(state, segment, from) = {
+        let call-id = fctel-json-payload-string-from(segment, from, "call_id");
+        (String) call-id == "" ? state : {
+            let native-request = fcto-request(segment, from);
+            let calls = fctel-calls-add(state[20], call-id, native-request);
+            fctel-set(fctel-add-at(state, 7, 1), 20, calls);
+        };
+    };
+    def fctel-add-output-measure(state, measure) = {
+        let s1 = state[10] < 0 || measure[0] < 0 ? fctel-set(state, 10, -1) : fctel-add-at(state, 10, measure[0]);
+        let s2 = fctel-add-at(s1, 11, measure[1]);
+        let s3 = fctel-add-at(s2, 12, measure[2]);
+        let s4 = fctel-add-at(s3, 13, measure[3]);
+        let s5 = fctel-add-at(s4, 14, measure[4]);
+        let s6 = fctel-add-at(s5, 15, measure[5]);
+        let s7 = fctel-add-at(s6, 16, measure[6]);
+        let s8 = fctel-add-at(s7, 17, measure[7]);
+        (Comparable) measure[1] == 0 ? fctel-add-at(s8, 18, 1) : fctel-add-at(s8, 18, measure[1] - measure[6]);
+    };
+    def fctel-add-output(state, line) = {
+        let call-id = fctel-json-payload-string(line, "call_id");
+        let measure = fcto-output-range(line, 0, len(line), line, fctel-call-native-request?(state[20], call-id));
+        let measured = fctel-add-output-measure(fctel-add-at(state, 8, 1), measure);
+        fctel-set(measured, 20, fctel-calls-remove(state[20], call-id));
+    };
+    def fctel-add-output-range(state, segment, from, end, prefix) = {
+        let call-id = fctel-json-payload-string-from(segment, from, "call_id");
+        let measure = fcto-output-range(segment, from, end, prefix, fctel-call-native-request?(state[20], call-id));
+        let measured = fctel-add-output-measure(fctel-add-at(state, 8, 1), measure);
+        fctel-set(measured, 20, fctel-calls-remove(state[20], call-id));
+    };
+    def fctel-process-line(state, line) = {
+        let prefix = substring(line, 0, fctel-min(256, len(line)));
+        let top-type = fctel-top-type(prefix);
+        let event-type = fctel-payload-type(prefix);
+        // A transport token_count without a complete call-local usage object
+        // is not a completed remote model-call boundary.
+        (Comparable) fctel-usage-present?(line) == 1 ? fctel-add-usage(state, line) : (String) event-type == "custom_tool_call" || (String) event-type == "function_call" ? fctel-add-call(state, line) : (String) event-type == "custom_tool_call_output" || (String) event-type == "function_call_output" ? fctel-add-output(state, line) : (String) event-type == "patch_apply_end" ? fctel-add-at(state, 19, 1) : (String) top-type == "turn_context" ? fctel-set(state, 21, fctel-json-payload-string(line, "model")) : state;
+    };
+    // Classify directly in the bounded segment. Large values are skipped by JSON
+    // structure and never copied into a second whole-row string; direct keys may
+    // appear anywhere in their object without a 4 KiB ordering assumption.
+    def fctel-process-range(state, segment, from, end) = {
+        let prefix-end = fctel-min(end, from + 4096);
+        let prefix = substring(segment, from, prefix-end);
+        let top-type = fctel-top-type-from(segment, from);
+        let event-type = fctel-payload-type-from(segment, from);
+        (Comparable) frte-call-local-usage-line?(prefix) == 1 ? fctel-add-usage(state, substring(segment, from, end)) : (String) event-type == "custom_tool_call" || (String) event-type == "function_call" ? fctel-add-call-range(state, segment, from) : (String) event-type == "custom_tool_call_output" || (String) event-type == "function_call_output" ? fctel-add-output-range(state, segment, from, end, prefix) : (String) event-type == "patch_apply_end" ? fctel-add-at(state, 19, 1) : (String) top-type == "turn_context" ? fctel-set(state, 21, fctel-json-payload-string-from(segment, from, "model")) : state;
+    };
+    def fctel-process-segment(segment, from, state) = from >= len(segment) ? state : {
+        let nl = scan_run(segment, from, 5);
+        let end = fctel-min(nl, len(segment));
+        let state2 = fctel-process-range(state, segment, from, end);
+        nl >= len(segment) ? state2 : fctel-process-segment(segment, nl + 1, state2);
+    };
+    def fctel-final-output-bytes(complete-line) = len(fctel-json-payload-string(complete-line, "last_agent_message"));
+    def fctel-row-from(thread-id, provider, turn-id, start-line, complete-line, state, stream-size, start-at, complete-at) = {
+        let started = fctel-timestamp-ms(start-line);
+        let ended = fctel-timestamp-ms(complete-line);
+        let measured-duration = ended - started;
+        let duration = measured-duration;
+        let input = state[1];
+        let cached = state[2];
+        let uncached = input - cached;
+        let native = state[16];
+        let local = state[18];
+        let remote = state[0];
+        let events = native + (local + remote);
+        fctel-join([fcte-tag-current(), "|", thread-id, "|", turn-id, "|", provider, "|", state[21], "|", started.str(), "|", ended.str(), "|", duration.str(), "|", fctel-json-payload-int(complete-line, "time_to_first_token_ms", 0).str(), "|", fctel-final-output-bytes(complete-line).str(), "|", remote.str(), "|", input.str(), "|", cached.str(), "|", uncached.str(), "|", state[3].str(), "|", state[4].str(), "|", state[5].str(), "|", state[6].str(), "|", state[7].str(), "|", state[8].str(), "|", state[9].str(), "|", state[10].str(), "|", state[11].str(), "|", state[12].str(), "|", state[13].str(), "|", state[14].str(), "|", state[15].str(), "|", native.str(), "|", state[17].str(), "|", local.str(), "|", remote.str(), "|", events.str(), "|", state[19].str(), "|", fctel-source-kind(), "|1|", frte-unattributed(state[1], state[4], state[6]).str(), "|", stream-size.str(), "|", start-at.str(), "|", complete-at.str()]);
+    };
+    def fctel-calls-emit(calls) = (Comparable) len(calls) == 0 ? "" : fctel-join([calls[0][0], ",", calls[0][1].str(), (Comparable) len(calls[1:]) == 0 ? "" : ";", fctel-calls-emit(calls[1:])]);
+    def fctel-calls-parse-loop(rows, acc, remaining) = (Comparable) len(rows) == 0 ? acc : remaining <= 0 ? cons(fctel-call-overflow-entry(), acc) : {
+        let fields = split-on(rows[0], ",");
+        (Comparable) len(fields) == 2 ? fctel-calls-parse-loop(rows[1:], cons([fields[0], str_to_int(fields[1])], acc), remaining - 1) : fctel-calls-parse-loop(rows[1:], acc, remaining - 1);
+    };
+    def fctel-calls-parse(text) = (String) text == "" ? [] : fctel-calls-parse-loop(split-on(text, ";"), [], fctel-max-pending-calls() + 1);
+    def fctel-progress-tag() = "turn-evidence-progress-v3";
+    def fctel-progress-row(carrier-size, turn-id, segment-start, complete-at, cursor, state) = fctel-join([fctel-progress-tag(), "|", carrier-size.str(), "|", turn-id, "|", segment-start.str(), "|", complete-at.str(), "|", cursor.str(), "|", state[0].str(), "|", state[1].str(), "|", state[2].str(), "|", state[3].str(), "|", state[4].str(), "|", state[5].str(), "|", state[6].str(), "|", state[7].str(), "|", state[8].str(), "|", state[9].str(), "|", state[10].str(), "|", state[11].str(), "|", state[12].str(), "|", state[13].str(), "|", state[14].str(), "|", state[15].str(), "|", state[16].str(), "|", state[17].str(), "|", state[18].str(), "|", state[19].str(), "|", state[21], "|", fctel-calls-emit(state[20])]);
+    def fctel-progress-state(parts) = [str_to_int(parts[6]), str_to_int(parts[7]), str_to_int(parts[8]), str_to_int(parts[9]), str_to_int(parts[10]), str_to_int(parts[11]), str_to_int(parts[12]), str_to_int(parts[13]), str_to_int(parts[14]), str_to_int(parts[15]), str_to_int(parts[16]), str_to_int(parts[17]), str_to_int(parts[18]), str_to_int(parts[19]), str_to_int(parts[20]), str_to_int(parts[21]), str_to_int(parts[22]), str_to_int(parts[23]), str_to_int(parts[24]), str_to_int(parts[25]), fctel-calls-parse(parts[27]), parts[26]];
+    def fctel-progress-matches?(parts, carrier-size, turn-id, segment-start, complete-at) = (Comparable) len(parts) == 28 && ((String) parts[0] == fctel-progress-tag() && (str_to_int(parts[1]) <= carrier-size && ((String) parts[2] == turn-id && ((Comparable) str_to_int(parts[3]) == segment-start && ((Comparable) str_to_int(parts[4]) == complete-at && (str_to_int(parts[5]) >= segment-start && str_to_int(parts[5]) <= carrier-size)))))) ? 1 : 0;
+    def fctel-read-progress() = {
+        let size = file_size(fctel-progress-path());
+        size <= 0 || size > fctel-progress-max-bytes() ? [] : split-on(fctel-trim-end(read_file_slice(fctel-progress-path(), 0, size)), "|");
+    };
+    // The rollout is append-only and can be much larger than a single turn. A
+    // backward search retains its next byte cursor: each refresh scans one native
+    // byte window and the next reaches older bytes instead of paying the same tail.
+    // The bound stream size travels with that cursor. An append keeps the older
+    // cursor alive; only a shrink (or an explicit rebind) begins at a new tail.
+    def fctel-read-discovery() = host_file_size(fctel-discovery-path()) > 0 ? split-on(fctel-trim-end(read_file(fctel-discovery-path())), "|") : [];
+    def fctel-carrier-thread-id(path, size) = fctel-session-meta-thread-id(fctel-first-line(read_file_slice(path, 0, fctel-min(size, 1048576))));
+    def fctel-carrier-provider(path, size) = fctel-session-meta-provider(fctel-first-line(read_file_slice(path, 0, fctel-min(size, 1048576))));
+    def fctel-discovery-state-valid?(parts, path, size) = (Comparable) len(parts) == 5 && ((String) parts[0] == "turn-evidence-discovery-v2" && (size >= str_to_int(parts[1]) && ((String) parts[3] == fctel-carrier-thread-id(path, size) && (String) parts[4] == fctel-carrier-provider(path, size)))) ? 1 : 0;
+    def fctel-discovery-size(parts, path, size) = (Comparable) fctel-discovery-state-valid?(parts, path, size) == 1 ? str_to_int(parts[1]) : size;
+    def fctel-discovery-cursor(parts, path, size) = (Comparable) fctel-discovery-state-valid?(parts, path, size) == 1 ? {
+        let cursor = str_to_int(parts[2]);
+        let snapshot = str_to_int(parts[1]);
+        cursor > 0 && cursor <= snapshot ? cursor : snapshot;
+    } : size;
+    def fctel-discovery-row(path, size, cursor) = fctel-join(["turn-evidence-discovery-v2|", size.str(), "|", cursor.str(), "|", fctel-carrier-thread-id(path, size), "|", fctel-carrier-provider(path, size)]);
+    // Result: (found complete-byte turn-id next-cursor stream-size).
+    def fctel-discover-latest-complete(path) = {
+        let size = file_size(path);
+        let target = file_size(fctel-target-turn-path()) > 0 ? fctel-trim-end(read_file(fctel-target-turn-path())) : "";
+        let discovery = fctel-read-discovery();
+        let snapshot = fctel-discovery-size(discovery, path, size);
+        size <= 0 ? [0, -1, "", 0, size] : {
+            let end = fctel-discovery-cursor(discovery, path, size);
+            let window = fctel-discovery-window(path, end);
+            let base = window[0];
+            let body = window[1];
+            let start = window[2];
+            let found = fctel-find-last-terminal-line(body, target, 0, -1);
+            found >= 0 ? {
+                let at = base + found;
+                let turn-id = fctel-json-payload-string(read_file_slice(path, at, 512), "turn_id");
+                write_file_text(fctel-discovery-path(), "");
+                [1, at, turn-id, end, snapshot];
+            } : {
+                let next = start;
+                write_file_text(fctel-discovery-path(), fctel-discovery-row(path, snapshot, next));
+                [0, -1, "", next, snapshot];
+            };
+        };
+    };
+    def fctel-latest-complete-turn(path) = {
+        let found = fctel-discover-latest-complete(path);
+        [found[1], found[2]];
+    };
+    def fctel-read-start-discovery() = host_file_size(fctel-start-discovery-path()) > 0 ? split-on(fctel-trim-end(read_file(fctel-start-discovery-path())), "|") : [];
+    def fctel-start-discovery-row(path, size, turn-id, complete-at, cursor, start-at) = fctel-join(["turn-evidence-start-discovery-v1|", size.str(), "|", turn-id, "|", complete-at.str(), "|", cursor.str(), "|", start-at.str(), "|", fctel-carrier-thread-id(path, size), "|", fctel-carrier-provider(path, size)]);
+    def fctel-start-discovery-matches?(parts, path, size, turn-id, complete-at) = !((Comparable) len(parts) == 8) ? 0 : {
+        let snapshot = str_to_int(parts[1]);
+        let cursor = str_to_int(parts[4]);
+        let start-at = str_to_int(parts[5]);
+        let shape-ok = (String) parts[0] == "turn-evidence-start-discovery-v1" && (snapshot <= size && ((String) parts[2] == turn-id && ((Comparable) str_to_int(parts[3]) == complete-at && (complete-at >= 0 && (complete-at < snapshot && (cursor >= 0 && cursor <= complete-at))))));
+        let start-ok = (Comparable) start-at == -1 || start-at >= 0 && start-at < complete-at;
+        let identity-ok = (String) parts[6] == fctel-carrier-thread-id(path, size) && (String) parts[7] == fctel-carrier-provider(path, size);
+        let terminal-ok = (Comparable) fctel-terminal-line?(fctel-first-line(read_file_slice(path, complete-at, 4096)), turn-id) == 1;
+        shape-ok && (start-ok && (identity-ok && terminal-ok)) ? 1 : 0;
+    };
+    // Durable phase rows are resumable only while their carrier identity and
+    // selected task coordinates still exist physically.  Progress deliberately
+    // keeps the matching start row as its identity anchor; accumulated counts can
+    // therefore never cross a rebind into another rollout of a coincidental size.
+    def fctel-start-discovery-active?(parts, path, size) = !((Comparable) len(parts) == 8) ? 0 : {
+        let turn-id = parts[2];
+        let complete-at = str_to_int(parts[3]);
+        (Comparable) fctel-start-discovery-matches?(parts, path, size, turn-id, complete-at) == 0 ? 0 : {
+            let start-at = str_to_int(parts[5]);
+            start-at < 0 ? 1 : fctel-line-event?(read_file_slice(path, start-at, 4096), "task_started", turn-id);
+        };
+    };
+    def fctel-progress-active?(progress, start, path, size) = !((Comparable) len(progress) == 28) || !((Comparable) len(start) == 8) ? 0 : {
+        let snapshot = str_to_int(progress[1]);
+        let turn-id = progress[2];
+        let segment-start = str_to_int(progress[3]);
+        let complete-at = str_to_int(progress[4]);
+        (Comparable) snapshot == str_to_int(start[1]) && ((Comparable) segment-start == str_to_int(start[5]) && ((Comparable) fctel-progress-matches?(progress, snapshot, turn-id, segment-start, complete-at) == 1 && (Comparable) fctel-start-discovery-active?(start, path, size) == 1)) ? 1 : 0;
+    };
+    // Result: found?, start coordinate, next cursor.  A resolved coordinate stays
+    // durable while the selected turn is collected in later bounded invocations.
+    def fctel-resolve-start-once(path, size, turn-id, complete-at) = {
+        let prior = fctel-read-start-discovery();
+        let matched = fctel-start-discovery-matches?(prior, path, size, turn-id, complete-at);
+        let resolved = (Comparable) matched == 1 ? str_to_int(prior[5]) : -1;
+        resolved >= 0 ? [1, resolved, resolved] : {
+            let end = (Comparable) matched == 1 ? str_to_int(prior[4]) : complete-at;
+            let found = fctel-find-line-event-window(path, "task_started", turn-id, end);
+            (Comparable) found[0] == 1 ? {
+                write_file_text(fctel-start-discovery-path(), fctel-start-discovery-row(path, size, turn-id, complete-at, found[2], found[1]));
+                found;
+            } : found[2] <= 0 ? {
+                write_file_text(fctel-start-discovery-path(), "");
+                found;
+            } : {
+                write_file_text(fctel-start-discovery-path(), fctel-start-discovery-row(path, size, turn-id, complete-at, found[2], -1));
+                found;
+            };
+        };
+    };
+    def fctel-collector-refuse(reason) = {
+        write_file_text(fctel-candidate-row-path(), fctel-join(["turn-evidence-collector-refused-v1|", reason]));
+        write_file_text(fctel-progress-path(), "");
+        write_file_text(fctel-start-discovery-path(), "");
+        fctel-join(["turn-evidence-refresh=unavailable reason=", reason, "\n"]);
+    };
+    def fctel-collect-finish(path, size, complete-at, turn-id, segment-start, segment-end, state) = len(state[20]) > 0 ? fctel-collector-refuse((Comparable) fctel-calls-overflow?(state[20]) == 1 ? "pending-call-cap-exceeded" : "unmatched-tool-call") : {
+        let meta-line = fctel-first-line(read_file_slice(path, 0, fctel-min(size, 1048576)));
+        let thread-id = fctel-session-meta-thread-id(meta-line);
+        let provider = fctel-session-meta-provider(meta-line);
+        let start-line = read_file_slice(path, segment-start, 512);
+        let complete-line = fctel-first-line(read_file_slice(path, complete-at, segment-end - complete-at));
+        let row = fctel-row-from(thread-id, provider, turn-id, start-line, complete-line, state, size, segment-start, complete-at);
+        write_file_text(fctel-candidate-row-path(), row);
+        (Comparable) fcte-valid?(fcte-parse(row)) == 1 ? {
+            write_file_text(fctel-progress-path(), "");
+            write_file_text(fctel-observed-row-path(), row);
+            write_file_text(fctel-candidate-row-path(), "");
+            write_file_text(fctel-discovery-path(), "");
+            write_file_text(fctel-start-discovery-path(), "");
+            write_file_text(fctel-latest-validation-path(), "");
+            write_file_text(fctel-target-turn-path(), "");
+            "turn-evidence-refresh=observed\n";
+        } : {
+            // The failed candidate is the current health signal.
+            // A stale progress row must not conceal it.
+            write_file_text(fctel-progress-path(), "");
+            write_file_text(fctel-start-discovery-path(), "");
+            "turn-evidence-refresh=unreconciled\n";
+        };
+    };
+    def fctel-collect-continue(size, complete-at, turn-id, segment-start, segment-end, chunk-end, state) = {
+        write_file_text(fctel-candidate-row-path(), "");
+        write_file_text(fctel-progress-path(), fctel-progress-row(size, turn-id, segment-start, complete-at, chunk-end, state));
+        fctel-join(["turn-evidence-refresh=progress cursor=", (chunk-end - segment-start).str(), "/", (segment-end - segment-start).str(), "\n"]);
+    };
+    def fctel-collect-bounded(path, size, complete-at, turn-id, segment-start, segment-end, cursor, state) = {
+        let chunk = fctel-bounded-chunk(path, cursor, segment-end);
+        let chunk-end = fctel-chunk-end(chunk);
+        chunk-end < 0 ? fctel-collector-refuse("jsonl-row-unreadable-or-exceeds-row-cap") : {
+            let state2 = fctel-process-segment(fctel-chunk-body(chunk), 0, state);
+            chunk-end >= segment-end ? fctel-collect-finish(path, size, complete-at, turn-id, segment-start, segment-end, state2) : fctel-collect-continue(size, complete-at, turn-id, segment-start, segment-end, chunk-end, state2);
+        };
+    };
+    def fctel-collect-once(path, size, complete-at, turn-id, segment-start) = {
+        let segment-end = fctel-line-end(path, size, complete-at);
+        segment-end < 0 ? fctel-collector-refuse("terminal-jsonl-row-exceeds-slice") : {
+            let progress = fctel-read-progress();
+            let resume = fctel-progress-matches?(progress, size, turn-id, segment-start, complete-at);
+            let cursor = (Comparable) resume == 1 ? str_to_int(progress[5]) : segment-start;
+            let state = (Comparable) resume == 1 ? fctel-progress-state(progress) : fctel-state();
+            fctel-collect-bounded(path, size, complete-at, turn-id, segment-start, segment-end, cursor, state);
+        };
+    };
+    def fctel-refresh-coordinate-once(path, size, complete-at, turn-id) = {
+        let start = fctel-resolve-start-once(path, size, turn-id, complete-at);
+        (Comparable) start[0] == 1 ? fctel-collect-once(path, size, complete-at, turn-id, start[1]) : {
+            write_file_text(fctel-candidate-row-path(), "");
+            start[2] <= 0 ? "turn-evidence-refresh=unavailable reason=missing-task-start\n" : fctel-join(["turn-evidence-refresh=locating-start cursor=", start[2].str(), "/", complete-at.str(), "\n"]);
+        };
+    };
+    def fctel-refresh-once(path) = {
+        let size = file_size(path);
+        let discovery = fctel-discover-latest-complete(path);
+        let complete-at = discovery[1];
+        let turn-id = discovery[2];
+        size <= 0 || (complete-at < 0 || (String) turn-id == "") ? size <= 0 ? "turn-evidence-refresh=unavailable reason=empty-source\n" : fctel-join(["turn-evidence-refresh=discovering cursor=", discovery[3].str(), "/", discovery[4].str(), "\n"]) : fctel-refresh-coordinate-once(path, size, complete-at, turn-id);
+    };
+    def fctel-bound-path() =     // The private explicit binding is a host-ABI capability.  `file_size` is
+    // a compatibility alias; the canonical metadata door keeps the binding
+    // visible to the same carrier that wrote it.
+host_file_size(fctel-binding-path()) > 0 ? fctel-trim-end(read_file(fctel-binding-path())) : "";
+    // The token reading's source.  The explicit binding wins wherever it stands;
+    // where nobody has written one, the body finds its own agent transcript, so the
+    // six counters are a reading that exists on this host rather than an absence
+    // waiting on a human step.
+    //
+    // This is deliberately a second door rather than a widening of the one above.
+    // The completed-turn lane above reads Codex turn boundaries — turn_id, the
+    // terminal payload, the tool and native-command events that make a boundary
+    // share.  An agent transcript carries none of those, so handing it to that lane
+    // buys no reading and costs a durable cursor walking a growing file: measured
+    // here at 2.6 s per invocation to answer complete-at=-1.  The token counters,
+    // by contrast, this body can read from either provider exactly.
+    def fctel-cursor-transcript-path() = host_file_size(".form-cli-turn-cursor-transcript") > 0 ? fctel-trim-end(read_file(".form-cli-turn-cursor-transcript")) : "";
+    def fctel-token-source-path() = {
+        let bound = fctel-bound-path();
+        let cursor = fctel-cursor-transcript-path();
+        (String) bound == "" ? (String) cursor == "" ? fctd-discovered-path() : cursor : bound;
+    };
+    // The reading and the name of what answered it, taken together in one pass, so
+    // a caller pays for one traversal of the session store rather than three.
+    // This host's own cursor transcript, written by the attendance above, is read
+    // before another agent's store. A number from a different session is not this
+    // turn.
+    def fctel-token-reading() = {
+        let path = fctel-token-source-path();
+        let kind = (String) path == "" ? "unavailable" : !((String) fctel-bound-path() == "") ? "explicit-binding" : (String) fctel-cursor-transcript-path() == "" ? "discovered-agent-transcript" : "cursor-session-transcript";
+        (String) path == "" ? [path, kind, fctel-state()] : [path, kind, fctel-last-usage-state(path)];
+    };
+    def fctel-token-reading-path(reading) = reading[0];
+    def fctel-token-reading-kind(reading) = reading[1];
+    def fctel-token-reading-state(reading) = reading[2];
+    def fctel-row() = file_size(fctel-observed-row-path()) <= 0 ? "unmeasured" : {
+        let cached = fctel-trim-end(read_file(fctel-observed-row-path()));
+        let evidence = fcte-parse(cached);
+        (Comparable) fcte-valid?(evidence) == 1 && ((String) fcte-source(evidence) == fcte-source-kind() && (Comparable) fcte-provenance-shape?(evidence) == 1) ? {
+            let path = fctel-bound-path();
+            (String) path == "" ? "unmeasured" : (String) fcte-turn-id(evidence) == fctel-latest-complete-turn(path)[1] ? cached : "unmeasured";
+        } : "unmeasured";
+    };
+    def fctel-evidence() = fcte-parse(fctel-row());
+}

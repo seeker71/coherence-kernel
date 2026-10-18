@@ -1,7 +1,7 @@
 ; core.fk - direct Form core stdlib.
 ;
-; This file is executable by the current `fkwu --src` reader. The older BML
-; class surface still lives at surface/core.fk as the high-grammar reference;
+; This file is executable by the current `fkwu` reader. The older BML
+; class surface still lives at surface/core-class-surface.bml as the high-grammar reference;
 ; this executable core keeps the same public vocabulary while carrying the
 ; Num/List/Cell/Task abstraction as inspectable Form data.
 ;
@@ -15,50 +15,18 @@
     ; The string "narrow waist" — str_len / str_byte_at / byte_to_str (plus
     ; str_concat) are the native composition floor for string behavior built in
     ; Form: measure, decompose (one raw byte, 0-255), construct (the exact
-    ; dual), join. str_eq remains an orthogonal compare primitive. Confirmed
-    ; present, byte-identical, on fkwu, Go,
-    ; Rust, and TS (receipts/2026-07-01-narrow-waist-string-cleanup.md).
+    ; dual), join. str_eq remains an orthogonal compare primitive.
     ;
-    ; RE-WITNESSED 2026-07-26, and the sentence above holds for only three of the
-    ; four names. `byte_to_str` is NOT byte-identical across the arms, and the
-    ; "exact dual" is exact on one of them:
+    ; A string is bytes: byte_to_str is the exact dual of
+    ; str_byte_at for every n in 0..255, and every cut is a byte cut, one that
+    ; severs a multi-byte character included — 206 and 169 for the two bytes of
+    ; a lambda (tests/byte-waist-band.fk).
     ;
-    ;   (str_len (byte_to_str n))          n=65  127  128  169  206  255
-    ;     fkwu                                1    1    1    1    1    1
-    ;     go / rust / ts                      1    1    2    2    2    2
-    ;
-    ;   (str_byte_at (byte_to_str n) 0)    n=65  127  128  169  206  255
-    ;     fkwu                               65  127  128  169  206  255   <- the dual
-    ;     go / rust / ts                     65  127  194  194  195  195   <- a lead byte
-    ;
-    ; Above 127 the three walkers read n as a CODEPOINT and hand back its two-byte
-    ; UTF-8 encoding, so decompose-then-construct is not the identity there for
-    ; half the byte range. `str_len` and `str_byte_at` ARE four-way sound on the
-    ; same inputs — 206 and 169 for the two bytes of a lambda on every arm — so
-    ; the waist can take a string apart everywhere and put it back together in
-    ; exactly one place.
-    ;
-    ; This is why `substring` below cannot be trusted to be byte-indexed off fkwu
-    ; even though it is written over the waist: it constructs through byte_to_str.
-    ; Measured, with the loop under a private name so the dispatch override noted
-    ; below could not shadow it, over "Ω+1":
-    ;
-    ;   (str_len (substring "Ω+1" a b))   (0,1) (1,2) (2,3) (0,2) (0,4)
-    ;     fkwu                               1     1     1     2     4    raw bytes
-    ;     the recipe on go/rust/ts           2     2     1     4     6    re-encoded
-    ;     the NATIVE on go/rust/ts           0     2     1     2     4    char-floored
-    ;
-    ; The native the override keeps floors each byte offset to the start of the
-    ; character containing it and then slices whole characters — which is what
-    ; "return the whole char at a start and nothing inside it" means, measured.
-    ;
-    ; Is the capability missing, or only the name? Only the name, on the walkers:
-    ; (write_file_bytes p (list 206 169 65)) then (read_file_slice p 0 3) gives a
-    ; 3-byte string reading 206, 169, 65 on go, rust and ts. On fkwu those two
-    ; names are unbound and recover to `nothing` — no file is written. So each
-    ; side has exactly one door to a raw byte above 127 inside a string, and it is
-    ; a different door on each side. No door is open on all four.
-    ; Pinned by: tests/byte-waist-band.fk.
+    ; The door to a raw byte above 127 is open: write_file_bytes puts
+    ; an int list on disk byte for byte, read_file_bytes gives it back as the same
+    ; list, and (read_file_slice p 0 3) after (write_file_bytes p (list 206 169 65))
+    ; is a 3-byte string reading 206, 169, 65.
+    ; Pinned by: tests/byte-waist-band.fk, tests/file-bytes-band.fk.
     ; Everything below is Form composition over that floor — substring,
     ; char_at, ord, int_to_str — kept as the portable fallback shape. The
     ; kernel dispatch override is intentionally narrow: byte-string/cursor
@@ -67,101 +35,259 @@
     ; routing through slower fallback string reconstruction. Other same-named
     ; Form bindings remain ordinary user definitions.
 
+    ; substring — the same bytes, joined as a BALANCED TREE instead of grown one
+    ; byte at a time. Measured on fkwu, 2026-08-25:
+    ;
+    ;         bytes     one-at-a-time      halved
+    ;        20,000          0.36 s        0.07 s
+    ;        80,000          4.85 s        0.09 s
+    ;       200,000         31.23 s        0.11 s
+    ;       800,000        (~500 s)        0.28 s
+    ;
+    ; The first form was n^1.94 — quadratic. It appended byte i to an
+    ; accumulator already i bytes long, so building n bytes copied about n*n/2
+    ; of them, and `substring` sits under char_at and 847 call sites here.
+    ;
+    ; Halving changes NOTHING about which bytes are read or in what order:
+    ; the same `str_byte_at`/`byte_to_str` pair runs at each of the n leaves,
+    ; left to right, and str_concat is associative on bytes. Only the shape of
+    ; the joins changes, from a comb to a balanced tree, which takes the bytes
+    ; copied from n*n/2 to about n*log2(n).
+    ;
+    ; Depth is log2(n) rather than n, so a megabyte slice nests about twenty
+    ; deep instead of a million.
+    ;
+    ; NOTHING REACHES THIS THROUGH THE NAME `substring` ANY MORE (2026-09-07).
+    ; fkwu carries a native. It is mode 9 of the leaf door (tag 201: every
+    ; tag 0..255 already had an arm and 150 is the native-surface probe), taken
+    ; because the cost was here: 4.59 MB/s, where str_concat moves the same bytes
+    ; through the same pool at 566 MB/s. Native, the same cut runs at 660 MB/s —
+    ; 144x.
+    ;
+    ; THE ONE MEANING OF THE CUT — BYTES, CLAMPED, NEVER DIES.
+    ; witnessed: 2026-10-03 -> substring-one-meaning-band 4095 on fkwu
+    ;
+    ;   substring(s, start, end) answers the BYTES of s from max(start,0) up to
+    ;   min(end, str_len(s)); "" when that range is empty or reversed; "" when s
+    ;   is not a string. It refuses nothing and it FLOORS nothing.
+    ;
+    ; WHY BYTES: this body indexes bytes everywhere. str_byte_at is the waist
+    ; above; str_find, split-on, trim and char_at are recipes over this door; the
+    ; frame readers and row walkers count bytes. A cut that floors its ends to
+    ; character starts hands those same indices a SHORTER, SHIFTED window and
+    ; says nothing — it re-cuts every Persian, Hebrew, Chinese and Japanese row.
+    ; Flooring keeps the adjacency law among floored indices; what it cannot keep
+    ; is the content, and content is what a caller asked for.
+    ;
+    ; WHY CLAMPED: an out-of-range index is the ordinary end of a scan, not a
+    ; fault. A reversed range, a negative start, or an end past the length
+    ; clamps, in the native and in this recipe.
+    ;
+    ; fkwu answers the exact bytes of every cut: never a floored window, never
+    ; a silent "". Guarded by tests/substring-one-meaning-band.fk (4095, a
+    ; drift gate), which walks every byte offset of the locale rows.
+    ;
+    ; THE RECIPE STAYS, AND STAYS REACHABLE BY ITS OWN NAME. It is this body's
+    ; statement of what the door means, and both bands ask it rather than a
+    ; stored answer: core-substring-equivalence-band.fk holds `substring` against
+    ; `fstr-substring-loop` (2047, an exhaustive start/end sweep on ASCII and
+    ; multi-byte, negative and past-the-end bounds, real bytes off disk) and
+    ; substring-native-band.fk holds it against `fstr-substring-halve` on the
+    ; locale rows (511, including the byte adjacency law at every byte offset of
+    ; a Persian/Romanian/German file — the one law character flooring cannot
+    ; keep). Both still answer what they answered before the native landed.
+    ;
+    ; The defn below is therefore the portable fallback, exactly like the rest of
+    ; this file: a walker without the native falls through to it and gets the
+    ; same bytes. ONE EDGE THE NATIVE ANSWERS AND THE RECIPE DOES NOT: a
+    ; `nothing` start. (sub 2 nothing) is 8999999999999999999, so the halving
+    ; below divides a range of nine quintillion and never returns — an 8 s probe
+    ; printed nothing at all. The native clamps and answers.
     (defn fstr-substring-loop (s i end acc)
         (if (ge i end) acc
             (fstr-substring-loop s (add i 1) end (str_concat acc (byte_to_str (str_byte_at s i))))))
-    (defn substring (s start end) (fstr-substring-loop s start end ""))
+    (defn fstr-substring-halve (s start end)
+        (do (let n (sub end start))
+            (if (le n 0) ""
+                (if (eq n 1) (byte_to_str (str_byte_at s start))
+                    (do (let mid (add start (div n 2)))
+                        (str_concat (fstr-substring-halve s start mid)
+                                    (fstr-substring-halve s mid end)))))))
+    (defn substring (s start end) (fstr-substring-halve s start end))
 
     (defn char_at (s i) (substring s i (add i 1)))
     (defn ord (c) (if (eq (str_len c) 0) -1 (str_byte_at c 0)))
 
-    ; int_to_str — decimal rendering, built from byte_to_str + arithmetic
-    ; (ASCII '0' is byte 48), not a digit-lookup string. Handles 0 and
-    ; negative numbers explicitly; every existing caller in this codebase
-    ; (HTTP status/content-length, JSON encoding, counts — grep int_to_str
-    ; under form/form-stdlib/) passes an integer, never a bool/null/string,
-    ; so this covers the load-bearing surface; the native's bool/null/string
-    ; pass-through fallback is not reproduced here.
-    ;
-    ; A NON-INTEGER ARGUMENT DIVERGES THREE WAYS — measured 2026-07-26:
-    ;
-    ;     (int_to_str 10.5)     fkwu ""      go "10"     rust "10"     ts "10.5"
-    ;
-    ; fkwu answers the EMPTY STRING, which is the dangerous one: it makes no error and
-    ; the caller's output is simply missing a piece. Found by having four kernels each
-    ; emit the same SVG and hashing the results — three hashes, and the diff was two
-    ; font-size attributes. Every band over that cell read 1023 on all four while the
-    ; pictures differed, because a band folds to a scalar and cannot compare documents.
-    ; The header above says every caller passes an integer; that was true and stayed
-    ; true only by luck the moment someone wrote a font size of 11.5.
-    ; See receipts/2026-07-26-navier-stokes-comes-home.md.
-    (defn fstr-digit-char (d) (byte_to_str (add d 48)))
-    (defn fstr-int-to-str-pos (n)
-        (if (lt n 10)
-            (fstr-digit-char n)
-            (str_concat (fstr-int-to-str-pos (div n 10)) (fstr-digit-char (mod n 10)))))
+    ; int_to_str writes a value as text. An integer reads as its decimal digits, in the loop lane's
+    ; shape: two loops prepend one byte per digit onto an accumulator, the last digit (and the sign) at
+    ; the exit, so fkwu crystallizes each as a leaf storing into scratch the door reserves. A negative
+    ; number keeps its sign through the digits (its remainders are negative), the minimum tagged value
+    ; among them. Nothing reads "nothing". Only an int takes the digits; every other kind -- a string, a
+    ; list, a float, a node id, a record, a bool -- reads as value_str writes it, so a string passes
+    ; through as itself, which the emit engine's leaf walker relies on, and a node id reads @pkg.level.type.inst.
+    ; The kind is asked of value_kind, never of arithmetic, which stops on a non-number: a digit loop
+    ; handed a node id died with "only numbers have an order".
+    (defn fstr-digits (n acc)
+        (if (lt n 10) (str_concat (byte_to_str (add 48 n)) acc)
+            (fstr-digits (div n 10) (str_concat (byte_to_str (add 48 (mod n 10))) acc))))
+    (defn fstr-neg-digits (n acc)
+        (if (lt -10 n) (str_concat (byte_to_str 45) (str_concat (byte_to_str (sub 48 n)) acc))
+            (fstr-neg-digits (div n 10) (str_concat (byte_to_str (sub 48 (mod n 10))) acc))))
+    (defn fstr-int-kind? (k) (if (str_eq k "int") 1 0))
+    (defn fstr-int-str (n) (if (lt n 0) (fstr-neg-digits n "") (fstr-digits n "")))
+    ; Typed serializers share the same native decimal loop.
+    (defn fstr-int-to-str (n) (fstr-int-str n))
     (defn int_to_str (n)
-        (if (eq n 0) "0"
-            (if (lt n 0) (str_concat "-" (fstr-int-to-str-pos (sub 0 n)))
-                (fstr-int-to-str-pos n))))
+        (if (nothing? n) "nothing"
+            (if (eq (fstr-int-kind? (value_kind n)) 1) (fstr-int-str n) (value_str n))))
 
     ; str_to_int — the inverse of int_to_str. Same digit arithmetic in
-    ; reverse (ASCII '0' is byte 48); leading whitespace is skipped and a
-    ; leading "-" negates. The digit loop STOPS at the first non-digit
-    ; rather than folding its byte into the accumulator.
-    ;
-    ; 2026-07-22 — the unguarded loop answered wrongly, not loudly. Every
-    ; shell-exec builtin returns its stdout with a trailing "\n"; the old
-    ; loop read that newline as a digit and folded (10 - 48) in, so the
-    ; form-native `grep -c` over the corpus came back 2442 instead of 248
-    ; (248*10 - 38). Nothing refused; a plausible integer came out. The
-    ; guard is what makes the body's own shell answerable at all. Kept
-    ; TOTAL (no form_error) because the three sibling kernels ship
-    ; str_to_int as a total native; see receipts/2026-07-22-the-body-
-    ; answers-itself.md for the parity spread across the four arms.
-    (defn fstr-digit-cp? (b) (if (ge b 48) (le b 57) false))
-    (defn fstr-space-cp? (b)
-        (if (eq b 32) true (if (eq b 9) true (if (eq b 10) true (eq b 13)))))
+    ; reverse (ASCII '0' is byte 48); leading space, tab, LF and CR are
+    ; skipped and one leading "-" negates. The digit loop STOPS at the first
+    ; non-digit rather than folding its byte into the accumulator, so shell
+    ; output's trailing "\n" reads as nothing. Total: text with no digits
+    ; reads 0.
+    ; The whitespace skip is written in the loop lane's shape, so it crystallizes on fkwu: one exit at the
+    ; end of the text, then four ways on -- a space, a tab, a newline, a return -- and the last way out.
     (defn fstr-skip-ws (s i len)
-        (if (ge i len) i
-            (if (fstr-space-cp? (str_byte_at s i)) (fstr-skip-ws s (add i 1) len) i)))
+        (if (le len i) i
+            (do (let b (str_byte_at s i))
+                (if (eq b 32) (fstr-skip-ws s (add i 1) len)
+                    (if (eq b 9) (fstr-skip-ws s (add i 1) len)
+                        (if (eq b 10) (fstr-skip-ws s (add i 1) len)
+                            (if (eq b 13) (fstr-skip-ws s (add i 1) len) i)))))))
+    ; The digit loop is written in the loop lane's shape -- a chain of compares, each an exit, ending in
+    ; the self tail call -- so it crystallizes on fkwu: three exits (the end of the text, a byte under
+    ; '0', a byte over '9') and one continuation, over le and lt, the lane's own compares.
     (defn fstr-to-int-loop (s i len acc)
-        (if (ge i len) acc
-            (if (fstr-digit-cp? (str_byte_at s i))
-                (fstr-to-int-loop s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48)))
-                acc)))
+        (if (le len i) acc
+            (do (let b (str_byte_at s i))
+                (if (lt b 48) acc
+                    (if (lt 57 b) acc
+                        (fstr-to-int-loop s (add i 1) len (add (mul acc 10) (sub b 48))))))))
+    ; The reading itself is written in the expression leaf's shape: two lets, then ifs over compares,
+    ; each arm a call to a loop that is already hot -- so the whole reading is one leaf calling two
+    ; leaves, with no walker step between them. A "-" right after the whitespace negates; anything else
+    ; reads from there.
     (defn str_to_int (s)
         (do (let flen (str_len s))
             (let fi (fstr-skip-ws s 0 flen))
-            (if (if (lt fi flen) (eq (str_byte_at s fi) 45) false)
-                (sub 0 (fstr-to-int-loop s (add fi 1) flen 0))
+            (if (lt fi flen)
+                (if (eq (str_byte_at s fi) 45)
+                    (sub 0 (fstr-to-int-loop s (add fi 1) flen 0))
+                    (fstr-to-int-loop s fi flen 0))
                 (fstr-to-int-loop s fi flen 0))))
 
-    ; str_find — naive substring search from `from`, over the floor.
-    ; O(n*m); nothing in this codebase calls it in a hot loop over long
-    ; strings. -1 when not found, matching fkwu's native convention exactly
-    ; (verified: an empty needle matches immediately at `from`, same as the
-    ; native).
-    (defn fstr-find-loop (h n hlen nlen i)
+    ; str_find — substring search from `from`, over the floor, comparing BYTES.
+    ; -1 when not found. 1,596 call sites here.
+    ;
+    ; NOTHING REACHES THIS THROUGH THE NAME `str_find` ANY MORE (2026-09-08).
+    ; fkwu carries a native. It is tag 30 — and that arm is OLDER than this
+    ; recipe: it never left runtime/fkwu-uni.c when the name left flt-ops on
+    ; 2026-07-01, and neither did its fkc-tri2 arm in fkc-table-serialize.fk. Four
+    ; mirrors hold a native here; three of them still held this one. What the
+    ; bearing census read as "fstr-find-loop, 35.1M calls, 64.3% of the locale
+    ; walk, mint-a-native" was one missing row, and an orphaned arm reads exactly
+    ; like an absent one from the call site. Read every mirror before you mint.
+    ;
+    ; THE ONE MEANING OF THE SEARCH — BYTES, CLAMPED, NEVER DIES.
+    ; witnessed: 2026-10-03 -> str-find-one-meaning-band 8191 on fkwu
+    ;
+    ;   str_find(h, n, from) answers the BYTE INDEX of the first occurrence of n
+    ;   in h at or after max(from, 0), or -1. An empty needle answers max(from,0);
+    ;   a `from` past str_len(h) answers -1, the empty needle included; a needle
+    ;   longer than what is left answers -1; overlapping occurrences answer the
+    ;   first. It refuses nothing and it FLOORS nothing.
+    ;
+    ; WHY CLAMPED, AND THE ONE ANSWER THAT MOVED. Until 2026-09-08 this recipe
+    ; handed a negative `from` straight to the loop: for a non-empty needle that
+    ; was harmless (no byte matches below 0, so it walked up to the same answer),
+    ; but for an EMPTY needle it answered the negative number itself — a position
+    ; that is not in the string: `(str_find "abcdefghij" "" -3)` read -3 here, and
+    ; reads 0 now. The clamp is written down in the native, in this recipe and in
+    ; the band, and line-grammar.fk's `find-from` has clamped at the caller since 2026-09-08.
+    ;
+    ; WHY BYTES: every index in this dialect is a byte offset. str_byte_at indexes
+    ; bytes, substring cuts bytes, the locale rows are Persian, Hebrew, Chinese and
+    ; Japanese. A search that snapped `from` UP to the nearest
+    ; character start would be a no-op for any needle that is well-formed UTF-8, and a
+    ; skipped match for a needle that begins on a continuation byte, which fkwu
+    ; can hold. No ASCII band can see that; the sweep in
+    ; tests/str-find-one-meaning-band.fk walks every byte offset of the real rows.
+    ;
+    ; A needle that is a fragment of a multi-byte character is bytes like any
+    ; other, so fkwu answers its byte index.
+    ;
+    ; THE RECIPE STAYS, AND STAYS REACHABLE BY ITS OWN NAME (`fstr-find`), exactly
+    ; as fstr-substring-halve does. It is this body's statement of what the door
+    ; MEANS, and core-str-find-equivalence-band.fk (2047) asks it rather than a
+    ; stored answer. TWO EDGES THE NATIVE ANSWERS AND THE RECIPE DOES NOT: a
+    ; `nothing` from — which reads as a hugely negative int, so the loop walks up
+    ; from nine quintillion below zero and never returns (measured: a 120 s probe
+    ; printed nothing at all) — and a non-string h or n, where the native answers
+    ; -1 and str_len's 0 makes this recipe answer 0 for an absent NEEDLE. An
+    ; absence is not a needle found at position 0; the native is right.
+    ;
+    ; WHY IT NO LONGER ALLOCATES. The first form of this loop cut
+    ; `(substring h i (add i nlen))` at EVERY position and compared the piece.
+    ; Its header said "nothing in this codebase calls it in a hot loop over long
+    ; strings", which was true when written and quietly stopped being true. A
+    ; whole-file scan measured 3.30 s for one call over 1 MB, 8.04 s over 2 MB
+    ; and 21.92 s over 3.7 MB — 3.3, 3.9 then 5.9 seconds per megabyte, so not
+    ; merely slow but DEGRADING with length, which is the signature of the
+    ; per-position allocation filling the intern pool rather than of the search.
+    ;
+    ; Now the scan reads one byte per position through the `str_byte_at` native
+    ; and only compares further when that byte matches the needle's first, so a
+    ; miss costs one native call and nothing is interned. The comparison is
+    ; byte-for-byte, which is exactly what the old one did: `str_len "a—b"` is
+    ; 5, `str_byte_at s 1` is 226, and `substring` slices bytes — every index in
+    ; this dialect is a byte offset, so multi-byte UTF-8 behaves identically
+    ; under both forms and a needle can still land mid-codepoint if a caller
+    ; asks for that.
+    ;
+    ; The worst case is still O(n*m); this removes the constant and the
+    ; degradation, not the asymptote.
+    (defn fstr-find-eq-at (h n i j nlen)
+        (if (ge j nlen) 1
+            (if (eq (str_byte_at h (add i j)) (str_byte_at n j))
+                (fstr-find-eq-at h n i (add j 1) nlen)
+                0)))
+    (defn fstr-find-loop (h n hlen nlen i b0)
         (if (gt (add i nlen) hlen) -1
-            (if (str_eq (substring h i (add i nlen)) n)
-                i
-                (fstr-find-loop h n hlen nlen (add i 1)))))
-    (defn str_find (h n from)
-        (fstr-find-loop h n (str_len h) (str_len n) from))
+            (if (eq (str_byte_at h i) b0)
+                (if (eq (fstr-find-eq-at h n i 0 nlen) 1) i
+                    (fstr-find-loop h n hlen nlen (add i 1) b0))
+                (fstr-find-loop h n hlen nlen (add i 1) b0))))
+    ; An empty needle matches immediately at `from`, and past the end matches
+    ; nowhere — both readings taken from the loop this replaced, not assumed.
+    ;
+    ; THE GUARD MUST STAY AHEAD OF `(str_byte_at n 0)`, and that is not a
+    ; nicety. fkwu ANSWERS an out-of-bounds byte read: the single expression
+    ; `(str_byte_at "" 0)` with no prelude reads -1, rc 0, at top level and
+    ; inside a `defn` alike.
+    ;
+    ; A str_find that read the needle's first byte before checking whether the
+    ; needle has one would answer a plausible 3 from `(str_find s "" 0)`, a
+    ; reading of a byte that is not there; the guard keeps the search
+    ; independent of how an out-of-bounds read is answered.
+    ;
+    ; Witnessed 2026-08-25, the shipped form below on fkwu:
+    ;   [0, 3, -1, 0, -1, -1, 5, 1, 2]
+    ;   for ("abc" "" 0) ("abc" "" 3) ("abc" "" 99) ("" "" 0) ("" "abc" 0)
+    ;       ("" "" 5) ("a—b中c" "中" 0) ("aΩb" "Ω" 0) ("abc" "c" 0)
+    (defn fstr-find (h n from)
+        (do (let hlen (str_len h))
+            (let nlen (str_len n))
+            (let start (if (lt from 0) 0 from))
+            (if (gt start hlen) -1
+                (if (eq nlen 0) start
+                    (fstr-find-loop h n hlen nlen start (str_byte_at n 0))))))
+    (defn str_find (h n from) (fstr-find h n from))
 
-    ; float_to_str — the missing dual of the native str_to_float. Scoped
-    ; honestly: fixed 6 fractional digits, trailing zeros trimmed, decimal
-    ; notation only — NOT a replacement for fkwu's retired native int_to_str
-    ; float fallback (`sprintf(tmp, "%.15g", ...)`, arbitrary precision,
-    ; switches to scientific notation for extreme magnitudes). Built because
-    ; form-stdlib/json.fk's json-emit-leaf calls int_to_str uniformly for
-    ; every numeric node type, including node_type 7 (a trivial float,
-    ; confirmed: `(node_type (intern_trivial_float "3.14"))` -> `7`) — that
-    ; silently broke the moment int_to_str stopped auto-detecting floats
-    ; (receipts/2026-07-01-c-seed-shrink-substring-int-to-str.md retired the
-    ; native that used to do that detection). json.fk itself is fixed
-    ; separately to dispatch ty 7 here instead of to int_to_str.
+    ; float_to_str renders finite values with six fractional decimal digits,
+    ; trailing zeros trimmed. Large values use a six-place scientific mantissa.
+    ; This display format is not the exact binary64 serialization door.
     (defn fstr-pow10 (n) (if (eq n 0) 1 (mul 10 (fstr-pow10 (sub n 1)))))
     (defn fstr-pad-left (s n)
         (if (ge (str_len s) n) s (fstr-pad-left (str_concat "0" s) n)))
@@ -170,30 +296,47 @@
             (if (str_eq (substring s (sub (str_len s) 1) (str_len s)) "0")
                 (fstr-trim-trailing-zeros (substring s 0 (sub (str_len s) 1)))
                 s)))
-    ; Rounds the WHOLE scaled value (integer-part-and-fraction together) to
-    ; one integer BEFORE splitting it back with div/mod — not the fractional
-    ; digits alone. Splitting first and rounding the fraction independently
-    ; breaks on carry (verified: 2.9999999 rounded that way gave "80",
-    ; garbage — mod/pad-left on an unrounded fractional int can overflow its
-    ; own width when the carry should have bumped the integer part instead).
-    ; div/mod on the pre-rounded combined integer carries correctly for free.
-    (defn float_to_str (f)
+    ; Conversion is bounded by Form's tagged integer, not the host int64 ABI.
+    ; The exclusive limit 2^62 is itself a float, so rounding that limit cannot
+    ; admit it as an integer. Binary64 has no fractional bits at or above 2^52.
+    ; Round only the fractional part and carry its quotient into the separately
+    ; admitted whole. Scaling the whole binary64 can invent fractional digits
+    ; even while the resulting integer remains inside the tagged range.
+    (defn fstr-frac-limit () 4503599627370496.0)
+    (defn fstr-int-limit () 4611686018427387904.0)
+    (defn fstr-sci-exp (x e) (if (lt x 10.0) e (fstr-sci-exp (div x 10.0) (add e 1))))
+    (defn fstr-sci-man (x) (if (lt x 10.0) x (fstr-sci-man (div x 10.0))))
+    (defn fstr-fixed (ip fp)
         (do
-            (let neg (lt f 0))
-            (let af (if neg (sub 0 f) f))
-            (let scale (fstr-pow10 6))
-            (let scaled (float_to_int (add 0.5 (mul af scale))))
-            (let ip (div scaled scale))
-            (let fp (mod scaled scale))
             (let frac (fstr-trim-trailing-zeros (fstr-pad-left (int_to_str fp) 6)))
-            (let body (if (eq (str_len frac) 0) (int_to_str ip) (str_concat (int_to_str ip) (str_concat "." frac))))
-            (if neg (str_concat "-" body) body)))
+            (if (eq (str_len frac) 0) (int_to_str ip) (str_concat (int_to_str ip) (str_concat "." frac)))))
+    (defn fstr-fraction (af scale)
+        (do
+            (let ip (float_to_int af))
+            (let rounded (float_to_int (add 0.5 (mul (sub af ip) scale))))
+            (fstr-fixed (add ip (div rounded scale)) (mod rounded scale))))
+    (defn fstr-six (af)
+        (fstr-fraction af (fstr-pow10 6)))
+    (defn fstr-scientific (af)
+        (do
+            (let mantissa (fstr-six (fstr-sci-man af)))
+            (let exponent (fstr-sci-exp af 0))
+            (if (str_eq mantissa "10") (str_concat "1e" (int_to_str (add exponent 1)))
+                (str_concat mantissa (str_concat "e" (int_to_str exponent))))))
+    (defn fstr-abs (af)
+        (if (lt af (fstr-frac-limit)) (fstr-six af)
+            (if (lt af (fstr-int-limit)) (int_to_str (float_to_int af))
+                (fstr-scientific af))))
+    (defn float_to_str (f)
+        (if (str_eq (value_kind f) "int") (int_to_str f)
+            (if (not (eq (sub f f) 0)) (form_error "float_to_str requires a finite value")
+                (if (lt f 0) (str_concat "-" (fstr-abs (sub 0 f))) (fstr-abs f)))))
 
     ; intern_node_at — intern_node plus source attribution, over the native
     ; fb_record (record cell provenance: file + packed line/col). Was
-    ; previously reachable only via surface/fourth-shim.fk (the flatten
-    ; lane's own standing prelude, never auto-injected for bare `--src`) —
-    ; confirmed unbound on `fkwu --src` directly: `(intern_node_at (bp "X")
+    ; previously reachable only via form-stdlib/fourth-shim.fk (the flatten
+    ; lane's own standing prelude, never auto-injected for bare the source door) —
+    ; confirmed unbound on `fkwu` directly: `(intern_node_at (bp "X")
     ; (list 1 2) "f" 1 1)` -> nothing. json.fk uses this for every composite
     ; JSON node it builds; without it, every JSON-OBJECT/ARRAY/PAIR/NULL
     ; construction silently produced nothing. See receipts/2026-07-01-
@@ -217,27 +360,44 @@
 
     ; List<T> public vocabulary.
     ;
-    ; `nil?` IS A LIST CELL AND ONLY A LIST CELL. It reads `len`, and `len` counts cons cells; the
-    ; one honest question it answers is "does this list have no elements". Handed a STRING it does
-    ; not answer "is this string empty" on any arm: go, rust and ts return the string's byte length,
-    ; so `(nil? "a")` is 0 and `(nil? "")` is 1 — an emptiness test by coincidence, not by contract.
-    ; fkwu cannot answer at all: its words carry no type (an int is `n << 1`, a string handle is
-    ; `poolidx << 1`), so `len` has nothing to read a string-ness from and returns 0 for every
-    ; non-list. That gap does not close by making one arm behave like the other three — it closes by
-    ; asking the right cell. For "is this string empty", use `(eq (str_len s) 0)`, which agrees
-    ; four-way. For "is there a file", use `fs_exists`, before `read_file` can hand back a null.
-    ; ask-native-lane.fk carries the worked example, and the receipt carries how it was found.
-    (defn nil? (xs) (eq (len xs) 0))
-    (defn map (f xs)
+    ; `nil?` asks one question: is this the empty list. It answers 1 for the empty list, 0 for a
+    ; list that holds elements, and 0 for every value that is not a list: an int, a string, a node,
+    ; a record, and `nothing`. The answer is `(eq xs (empty))`, and the loop lane takes it as the
+    ; list word against 1.
+    ;
+    ; `nothing` is absence (never-was) and `(empty)` is a collection with no elements (empty); they
+    ; are two values, and each has its own question. "Is anything here" is `nothing?`. "Is this
+    ; string empty" is `(eq (str_len s) 0)`. "Is there a file" is `fs_exists`.
+    ;
+    ; A value that is not a list reaching nil? is a caller asking a list question of something else.
+    ; It gets its 0, and the organ speaks: one organ-health-v1 line on stdout (organ form-core,
+    ; aspect nil?:non-list:<kind>, the value's kind as evidence), read the way organ-health.bml
+    ; reads any reading. Form code cannot name its caller; the form
+    ; stack a stopped run prints is how a caller is found.
+    (defn nil? (xs) (if (eq xs (empty)) 1 (if (str_eq (value_kind xs) "list") 0 (core-nil-heard (value_kind xs)))))
+    (defn core-nil-heard (kind)
+        (do (print_str
+                (str_concat "form-organ health {\"schema\":\"organ-health-v1\",\"id\":\"nil?:"
+                (str_concat kind
+                (str_concat "\",\"organ\":\"form-core\",\"flow\":\"nil?\",\"aspect\":\"nil?:non-list:"
+                (str_concat kind
+                (str_concat "\",\"stage\":\"observe\",\"expected\":\"list\",\"observed\":\""
+                (str_concat kind
+                (str_concat "\",\"health\":null,\"surprise\":1,\"needs\":[],\"offers\":[\"heal-caller\"],\"selected\":\"\",\"evidence\":{\"kind\":\""
+                (str_concat kind "\"}}")))))))))
+            0))
+    ; map and filter as a loop onto an accumulator and one reversal: the lane's shape, so fkwu crystallizes them
+    ; with the defn they carry called through its word (2026-09-12); the same list, two runs over the pairs
+    (defn map-onto (f xs acc)
         (if (nil? xs)
-            (empty)
-            (cons (f (head xs)) (map f (tail xs)))))
-    (defn filter (pred xs)
+            acc
+            (map-onto f (tail xs) (cons (f (head xs)) acc))))
+    (defn map (f xs) (reverse-onto (map-onto f xs (empty)) (empty)))
+    (defn filter-onto (pred xs acc)
         (if (nil? xs)
-            (empty)
-            (if (pred (head xs))
-                (cons (head xs) (filter pred (tail xs)))
-                (filter pred (tail xs)))))
+            acc
+            (filter-onto pred (tail xs) (if (pred (head xs)) (cons (head xs) acc) acc))))
+    (defn filter (pred xs) (reverse-onto (filter-onto pred xs (empty)) (empty)))
     (defn foldl (f init xs)
         (if (nil? xs)
             init
@@ -246,18 +406,20 @@
         (if (nil? xs)
             init
             (f (head xs) (foldr f init (tail xs)))))
-    (defn range (start end)
-        (if (ge start end)
-            (empty)
-            (cons start (range (add start 1) end))))
-    (defn append (xs ys)
-        (if (nil? xs)
-            ys
-            (cons (head xs) (append (tail xs) ys))))
-    (defn take (n xs)
-        (if (or (le n 0) (nil? xs))
-            (empty)
-            (cons (head xs) (take (sub n 1) (tail xs)))))
+    ; range as a count-down loop that conses: consing from end-1 down to start builds start..end-1 in order,
+    ; a tail loop the lane crystallizes -- no reversal needed, since the walk runs downward onto the front
+    (defn range-down (i start acc)
+        (if (lt i start) acc (range-down (sub i 1) start (cons i acc))))
+    (defn range (start end) (range-down (sub end 1) start (empty)))
+    ; append as two reversals, each a tail loop that conses: the lane's shape, so fkwu crystallizes both
+    ; (the C twin of the recursive shape left the seed 2026-09-12); the same list, two runs over the pairs
+    (defn append (xs ys) (reverse-onto (reverse-onto xs (empty)) ys))
+    ; take as a tail loop onto an accumulator and one reversal: the lane's shape, so fkwu crystallizes it
+    (defn take-onto (n xs acc)
+        (if (le n 0) acc
+            (if (nil? xs) acc
+                (take-onto (sub n 1) (tail xs) (cons (head xs) acc)))))
+    (defn take (n xs) (reverse-onto (take-onto n xs (empty)) (empty)))
     (defn drop (n xs)
         (if (le n 0)
             xs
@@ -268,22 +430,27 @@
             acc
             (reverse-onto (tail xs) (cons (head xs) acc))))
     (defn reverse (xs) (reverse-onto xs (empty)))
-    (defn sum (xs)
-        (if (nil? xs)
-            0
-            (add (head xs) (sum (tail xs)))))
-    (defn product (xs)
-        (if (nil? xs)
-            1
-            (mul (head xs) (product (tail xs)))))
-    (defn maximum (xs)
-        (if (nil? (tail xs))
-            (head xs)
-            (max2 (head xs) (maximum (tail xs)))))
-    (defn minimum (xs)
-        (if (nil? (tail xs))
-            (head xs)
-            (min2 (head xs) (minimum (tail xs)))))
+    ; Shared by source-only compilation and the BML string-join interface.
+    ; Pair adjacent spans so a growing prefix is never copied per element.
+    (defn str-spans-pair (xs acc)
+        (if (nil? xs) (reverse acc)
+            (if (nil? (tail xs)) (reverse (cons (head xs) acc))
+                (str-spans-pair (tail (tail xs))
+                    (cons (str_concat (head xs) (head (tail xs))) acc)))))
+    (defn str-spans (parts)
+        (if (nil? parts) ""
+            (if (nil? (tail parts)) (head parts)
+                (str-spans (str-spans-pair parts (empty))))))
+    ; the reductions as tail loops onto an accumulator: the lane's shape, so fkwu crystallizes each. Left fold,
+    ; which for add/mul agrees with the old right fold (associative), and for max2/min2 is order-independent.
+    (defn sum-onto (xs acc) (if (nil? xs) acc (sum-onto (tail xs) (add acc (head xs)))))
+    (defn sum (xs) (sum-onto xs 0))
+    (defn product-onto (xs acc) (if (nil? xs) acc (product-onto (tail xs) (mul acc (head xs)))))
+    (defn product (xs) (product-onto xs 1))
+    (defn maximum-onto (xs acc) (if (nil? xs) acc (maximum-onto (tail xs) (max2 acc (head xs)))))
+    (defn maximum (xs) (maximum-onto (tail xs) (head xs)))
+    (defn minimum-onto (xs acc) (if (nil? xs) acc (minimum-onto (tail xs) (min2 acc (head xs)))))
+    (defn minimum (xs) (minimum-onto (tail xs) (head xs)))
     (defn any? (pred xs)
         (if (nil? xs)
             false
@@ -474,5 +641,117 @@
                     (add
                         (if (core-has-class? "Cell" (core-classes)) 8 0)
                         (if (core-has-class? "Task" (core-classes)) 16 0))))))
+
+    ; float-repr — value_str's exact float rendering as a BML recipe, byte-identical to Go's
+    ; strconv.FormatFloat(f,'g',-1,64) (the native value_str float arm), standing on a small
+    ; arbitrary-precision integer kit (bn-*) and Dragon4 (d4), no dtoa primitive. A bn value is
+    ; a list of base-10^9 limbs LEAST-significant first (1024 is (1024); 10^9 + 5 is (5 1)); the
+    ; empty list is zero; "normalized" means no leading (most-significant) zero limb. Every limb
+    ; product here stays under 2^53, so each kernel carries it exactly. Only what Dragon4 needs is
+    ; here: of-int, add, sub, cmp, multiply by a small factor, and powers of two; the decimal
+    ; digits themselves are Dragon4's quotients.
+    (defn bn-rev-go (xs acc) (if (nil? xs) acc (bn-rev-go (tail xs) (cons (head xs) acc))))
+    (defn bn-rev (xs) (bn-rev-go xs (list)))
+    (defn bn-zeros (k acc) (if (le k 0) acc (bn-zeros (sub k 1) (cons 0 acc))))
+    (defn bn-len (xs n) (if (nil? xs) n (bn-len (tail xs) (add n 1))))
+    (defn bn-max (a b) (if (lt a b) b a))
+    (defn bn-pad (xs L) (bn-rev (bn-zeros (sub L (bn-len xs 0)) (bn-rev xs))))
+    (defn bn-strip0 (ds) (if (nil? ds) (list) (if (eq (head ds) 0) (bn-strip0 (tail ds)) ds)))
+    (defn bn-of-go (n acc) (if (le n 0) acc (bn-of-go (div n 1000000000) (cons (mod n 1000000000) acc))))
+    (defn bn-of-int (n) (bn-rev (bn-of-go n (list))))
+    (defn bn-mul-go (ds k carry acc) (if (nil? ds) (if (eq carry 0) acc (bn-mul-go (list) k (div carry 1000000000) (cons (mod carry 1000000000) acc))) (bn-mul-go (tail ds) k (div (add (mul (head ds) k) carry) 1000000000) (cons (mod (add (mul (head ds) k) carry) 1000000000) acc))))
+    (defn bn-mul (ds k) (bn-rev (bn-mul-go ds k 0 (list))))
+    (defn bn-zipsum (a b acc) (if (nil? a) acc (bn-zipsum (tail a) (tail b) (cons (add (head a) (head b)) acc))))
+    (defn bn-carry (ds c acc) (if (nil? ds) acc (bn-carry (tail ds) (div (add (head ds) c) 1000000000) (cons (mod (add (head ds) c) 1000000000) acc))))
+    (defn bn-add (a b) (do (let L (add 1 (bn-max (bn-len a 0) (bn-len b 0)))) (bn-rev (bn-strip0 (bn-carry (bn-rev (bn-zipsum (bn-pad a L) (bn-pad b L) (list))) 0 (list))))))
+    (defn bn-zipdiff (a b acc) (if (nil? a) acc (bn-zipdiff (tail a) (tail b) (cons (sub (head a) (head b)) acc))))
+    (defn bn-borrow (ds b acc) (if (nil? ds) acc (bn-borrow (tail ds) (if (lt (sub (head ds) b) 0) 1 0) (cons (mod (add (sub (head ds) b) 1000000000) 1000000000) acc))))
+    (defn bn-sub (a b) (do (let L (bn-max (bn-len a 0) (bn-len b 0))) (bn-rev (bn-strip0 (bn-borrow (bn-rev (bn-zipdiff (bn-pad a L) (bn-pad b L) (list))) 0 (list))))))
+    (defn bn-cmp-go (a b acc) (if (nil? a) acc (bn-cmp-go (tail a) (tail b) (if (eq (head a) (head b)) acc (if (lt (head a) (head b)) -1 1)))))
+    (defn bn-cmp (a b) (do (let L (bn-max (bn-len a 0) (bn-len b 0))) (bn-cmp-go (bn-pad a L) (bn-pad b L) 0)))
+    (defn bn-two-to (k acc) (if (le k 0) acc (bn-two-to (sub k 1) (mul acc 2))))
+    ; b times 2^k, twenty-three bits a step: a limb times 2^23 stays under 2^53
+    (defn bn-pow2-mul (b k) (if (lt k 23) (bn-mul b (bn-two-to k 1)) (bn-pow2-mul (bn-mul b 8388608) (sub k 23))))
+    (defn bn-pow2 (k) (bn-pow2-mul (list 1) k))
+    ; exact m*2^e from the double, m in [2^52,2^53); then clamp subnormals to emin so gaps stay even
+    (defn d4-mant (x e) (if (lt x 4503599627370496.0) (d4-mant (mul x 2.0) (sub e 1)) (if (ge x 9007199254740992.0) (d4-mant (div x 2.0) (add e 1)) (list (float_to_int x) e))))
+    (defn d4-sub (m e) (if (lt e -1074) (d4-sub (div m 2) (add e 1)) (list m e)))
+    (defn d4-dig (R S d) (if (ge (bn-cmp R S) 0) (do (let R2 (bn-sub R S)) (d4-dig R2 S (add d 1))) (list d R)))
+    ; scaling: S grows tenfold while R + M+ passes it; R and both margins grow tenfold while ten times R + M+ stays within it
+    (defn d4-scale (R S mp mm k)
+        (if (gt (bn-cmp (bn-add R mp) S) 0) (d4-scale R (bn-mul S 10) mp mm (add k 1))
+            (if (le (bn-cmp (bn-mul (bn-add R mp) 10) S) 0) (d4-scale (bn-mul R 10) S (bn-mul mp 10) (bn-mul mm 10) (sub k 1))
+                (list R S mp mm k))))
+    ; the last digit: when both roundings are in reach, twice the remainder against S decides, and a tie goes to even
+    (defn d4-tie (d c) (if (lt c 0) d (if (gt c 0) (add d 1) (if (eq (mod d 2) 0) d (add d 1)))))
+    (defn d4-final (d R2 S low high) (if (if high (if low 1 0) 0) (d4-tie d (bn-cmp (bn-mul R2 2) S)) (if high (add d 1) d)))
+    ; the digit loop: dr is the current digit and its remainder, mp and mm the margins already scaled for it; the digits
+    ; gather least significant first
+    (defn d4-low? (R mm ev) (if (eq ev 1) (le (bn-cmp R mm) 0) (lt (bn-cmp R mm) 0)))
+    (defn d4-high? (R mp S ev) (if (eq ev 1) (ge (bn-cmp (bn-add R mp) S) 0) (gt (bn-cmp (bn-add R mp) S) 0)))
+    (defn d4-stops? (dr S mp mm ev) (if (d4-low? (head (tail dr)) mm ev) 1 (d4-high? (head (tail dr)) mp S ev)))
+    (defn d4-end (dr S mp mm ev acc) (cons (d4-final (head dr) (head (tail dr)) S (d4-low? (head (tail dr)) mm ev) (d4-high? (head (tail dr)) mp S ev)) acc))
+    (defn d4-run (dr S mp mm ev acc) (if (d4-stops? dr S mp mm ev) (d4-end dr S mp mm ev acc) (d4-run (d4-dig (bn-mul (head (tail dr)) 10) S 0) S (bn-mul mp 10) (bn-mul mm 10) ev (cons (head dr) acc))))
+    (defn d4-carry (ds c) (if (nil? ds) (if (eq c 0) (list) (list c)) (do (let v (add (head ds) c)) (if (ge v 10) (cons (sub v 10) (d4-carry (tail ds) 1)) (cons v (d4-carry (tail ds) 0))))))
+    (defn d4-digits (ds acc) (if (nil? ds) acc (d4-digits (tail ds) (str_concat acc (byte_to_str (add 48 (head ds)))))))
+    ; d4-from m e ev bdy -> (digit-string, exp10) for the positive double m*2^e, in bignums; ev: m is even (the rounding
+    ; interval is closed), bdy: m sits at its binade's lower boundary (M+ is twice M-); exp10 is the power of the first digit
+    (defn d4-from (m e ev bdy)
+        (do (let RR (if (ge e 0) (bn-pow2-mul (bn-of-int m) (if (eq bdy 1) (add e 2) (add e 1))) (bn-mul (bn-of-int m) (if (eq bdy 1) 4 2))))
+            (let S (if (ge e 0) (bn-of-int (if (eq bdy 1) 4 2)) (bn-pow2 (if (eq bdy 1) (sub 2 e) (sub 1 e)))))
+            (let mp (if (ge e 0) (bn-pow2 (if (eq bdy 1) (add e 1) e)) (if (eq bdy 1) (list 2) (list 1))))
+            (let mm (if (ge e 0) (bn-pow2 e) (list 1)))
+            (let sc (d4-scale RR S mp mm 0)) (let k (nth sc 4)) (let S1 (nth sc 1))
+            (let lsb (d4-run (d4-dig (bn-mul (nth sc 0) 10) S1 0) S1 (bn-mul (nth sc 2) 10) (bn-mul (nth sc 3) 10) ev (list)))
+            (let lsb2 (d4-carry lsb 0)) (let bump (sub (bn-len lsb2 0) (bn-len lsb 0)))
+            (let clean (bn-rev (bn-strip0 lsb2)))
+            (list (d4-digits clean "") (add (sub k 1) bump))))
+    (defn fr-zeros (n) (if (le n 0) "" (str_concat "0" (fr-zeros (sub n 1)))))
+    (defn fr-fixed (sign digits ndigits dp) (str_concat sign (if (le dp 0) (str_concat "0." (str_concat (fr-zeros (sub 0 dp)) digits)) (if (ge dp ndigits) (str_concat digits (fr-zeros (sub dp ndigits))) (str_concat (substring digits 0 dp) (str_concat "." (substring digits dp ndigits)))))))
+    (defn fr-sci (sign digits exp10) (do (let d0 (substring digits 0 1)) (let n (str_len digits)) (let mant (if (eq n 1) d0 (str_concat d0 (str_concat "." (substring digits 1 n))))) (let es (if (lt exp10 0) "-" "+")) (let ea (if (lt exp10 0) (sub 0 exp10) exp10)) (let e0 (int_to_str ea)) (let eds (if (lt (str_len e0) 2) (str_concat "0" e0) e0)) (str_concat sign (str_concat mant (str_concat "e" (str_concat es eds))))))
+    ; a whole double below 2^53 prints its own digits: every integer there is a double, and any shorter decimal
+    ; differs from it by at least one unit, more than the half unit that rounds back; trailing zeros become the exponent
+    (defn fr-tz (s i z) (if (lt i 0) z (if (eq (str_byte_at s i) 48) (fr-tz s (sub i 1) (add z 1)) z)))
+    (defn fr-pair (s n z) (list (substring s 0 (sub n z)) (sub n 1)))
+    (defn fr-cut (s) (fr-pair s (str_len s) (fr-tz s (sub (str_len s) 1) 0)))
+    (defn fr-whole? (af) (if (lt af 9007199254740992.0) (eq (mul (float_to_int af) 1.0) af) false))
+    ; Dragon4 in machine words: while R, S and the margins stay under 2^59, every product of ten and every sum stays
+    ; under 2^63, so the same digits come from plain integers. fl packs the two flags (bit 0: m is even; bit 1: m sits
+    ; at its binade's boundary, M+ = 2 M-). A scaling that would pass the bound answers the empty list, and the value
+    ; goes to the bignums. The digits gather in acc as one integer, so the last digit's carry is plain addition.
+    (defn d4w-fits (v) (lt v 576460752303423488))
+    (defn d4w-mp (mm fl) (if (ge fl 2) (mul mm 2) mm))
+    (defn d4w-low? (r mm fl) (if (eq (mod fl 2) 1) (le r mm) (lt r mm)))
+    (defn d4w-high? (r mm fl S) (if (eq (mod fl 2) 1) (ge (add r (d4w-mp mm fl)) S) (gt (add r (d4w-mp mm fl)) S)))
+    (defn d4w-stops? (r S mm fl) (if (d4w-low? r mm fl) 1 (d4w-high? r mm fl S)))
+    (defn d4w-tie (d r S) (if (lt (mul r 2) S) d (if (gt (mul r 2) S) (add d 1) (if (eq (mod d 2) 0) d (add d 1)))))
+    (defn d4w-last (d r S low high) (if (if high (if low 1 0) 0) (d4w-tie d r S) (if high (add d 1) d)))
+    ; the digit loop: r is the remainder before the next digit, mm the lower margin at its scale, n the digits so far
+    (defn d4w-end (r S mm fl n acc) (list (add (mul acc 10) (d4w-last (div (mul r 10) S) (mod (mul r 10) S) S (d4w-low? (mod (mul r 10) S) (mul mm 10) fl) (d4w-high? (mod (mul r 10) S) (mul mm 10) fl S))) (add n 1)))
+    (defn d4w-run (r S mm fl n acc) (if (d4w-stops? (mod (mul r 10) S) S (mul mm 10) fl) (d4w-end r S mm fl n acc) (d4w-run (mod (mul r 10) S) S (mul mm 10) fl (add n 1) (add (mul acc 10) (div (mul r 10) S)))))
+    (defn d4w-up? (R S mp) (if (gt (add R mp) S) (d4w-fits (mul S 10)) false))
+    (defn d4w-down? (R S mp) (le (mul (add R mp) 10) S))
+    (defn d4w-scaled (R S mm fl k) (if (gt (add R (d4w-mp mm fl)) S) (list) (list R S mm fl k)))
+    (defn d4w-scale (R S mm fl k) (if (d4w-up? R S (d4w-mp mm fl)) (d4w-scale R (mul S 10) mm fl (add k 1)) (if (d4w-down? R S (d4w-mp mm fl)) (d4w-scale (mul R 10) S (mul mm 10) fl (sub k 1)) (d4w-scaled R S mm fl k))))
+    ; the words start under the bound: S = 2^(1+bdy-e) when e < 0, R = m 2^(e+1+bdy) when e >= 0
+    (defn d4w-range? (e bdy) (if (ge e 0) (le e 3) (le (sub (add bdy 1) e) 58)))
+    (defn d4w-out2 (s n k) (list (substring s 0 (sub (str_len s) (fr-tz s (sub (str_len s) 1) 0))) (add (sub k 1) (sub (str_len s) n))))
+    (defn d4w-out (res k) (d4w-out2 (int_to_str (head res)) (head (tail res)) k))
+    (defn d4w (m e ev bdy)
+        (do (let fl (add ev (mul bdy 2)))
+            (let R (if (ge e 0) (mul m (bn-two-to (add e (add bdy 1)) 1)) (mul m (add (mul bdy 2) 2))))
+            (let S (if (ge e 0) (add (mul bdy 2) 2) (bn-two-to (sub (add bdy 1) e) 1)))
+            (let mm (if (ge e 0) (bn-two-to e 1) 1))
+            (let sc (d4w-scale R S mm fl 0))
+            (if (nil? sc) (list) (d4w-out (d4w-run (head sc) (nth sc 1) (nth sc 2) fl 0 0) (nth sc 4)))))
+    ; the digits: a whole double from its own digits; the rest from the exact m*2^e, in machine words while they fit,
+    ; else in bignums
+    (defn fr-or (res m e ev bdy) (if (nil? res) (d4-from m e ev bdy) res))
+    (defn fr-route2 (m e ev bdy) (if (d4w-range? e bdy) (fr-or (d4w m e ev bdy) m e ev bdy) (d4-from m e ev bdy)))
+    (defn fr-route (m e) (fr-route2 m e (if (eq (mod m 2) 0) 1 0) (if (eq m 4503599627370496) (if (gt e -1074) 1 0) 0)))
+    (defn fr-me (af) (do (let me0 (d4-mant af 0)) (d4-sub (head me0) (head (tail me0)))))
+    (defn fr-from-me (me) (fr-route (head me) (head (tail me))))
+    (defn fr-digits (af) (if (fr-whole? af) (fr-cut (int_to_str (float_to_int af))) (fr-from-me (fr-me af))))
+    (defn float-repr (f) (do (let neg (lt (div 1.0 f) 0.0)) (let af (if neg (sub 0.0 f) f)) (let sign (if neg "-" "")) (if (eq af 0.0) (str_concat sign "0") (do (let de (fr-digits af)) (let digits (head de)) (let exp10 (head (tail de))) (let nd (str_len digits)) (if (if (lt exp10 -4) 1 (if (ge exp10 6) 1 0)) (fr-sci sign digits exp10) (fr-fixed sign digits nd (add exp10 1)))))))
 
     0)

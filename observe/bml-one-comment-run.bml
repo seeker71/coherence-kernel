@@ -1,0 +1,71 @@
+// bml-one-comment-run.bml — inside a BML section (form.bml, form.route, form.action) BML speaks one comment: //.
+//
+// A section line whose first byte past its indentation is `;` is Form's comment carried into
+// BML. This door rewrites each such line's run of `;` as `//`, keeping the indentation and the
+// words, so the cursor and the compiler read the section alike. Outside a section `;` stays
+// Form's comment, and a line that begins inside a string literal is data and stays as it is.
+// stdin: paths separated by spaces, then optionally the word `write`; without it the door
+// only counts what it would rewrite.
+// preludes: form-stdlib/source-compiler.fk form-stdlib/meaning-codes.bml form-stdlib/bml/stdin-source.bml
+section [form.bml] {
+ class BmlOneComment {
+  def boc-words(s) {
+   let sp = str_find(s, " ", 0);
+   str_len(s) == 0 ? [] : sp < 0 ? [s] : cons(fsc-sub(s, 0, sp), boc-words(trim(fsc-sub(s, sp + 1, str_len(s)))));
+  }
+  def boc-byte(s, i) = str_byte_at(s, i);
+  def boc-line-end(s, i, end) = i >= end ? end : eq(boc-byte(s, i), 10) ? (i + 1) : boc-line-end(s, i + 1, end);
+  def boc-indent-end(s, i, end) = (i < end) && (eq(boc-byte(s, i), 32) || eq(boc-byte(s, i), 9)) ? boc-indent-end(s, i + 1, end) : i;
+  def boc-semis-end(s, i, end) = (i < end) && eq(boc-byte(s, i), 59) ? boc-semis-end(s, i + 1, end) : i;
+  // whether a string literal is still open at the end of a code line
+  def boc-scan(s, i, end, instr) {
+   i >= end ? instr
+   : instr ? (eq(boc-byte(s, i), 92) ? boc-scan(s, i + 2, end, true) : eq(boc-byte(s, i), 34) ? boc-scan(s, i + 1, end, false) : boc-scan(s, i + 1, end, true))
+   : eq(boc-byte(s, i), 34) ? boc-scan(s, i + 1, end, true)
+   : eq(boc-byte(s, i), 47) && ((i + 1) < end) && eq(boc-byte(s, i + 1), 47) ? false
+   : boc-scan(s, i + 1, end, false);
+  }
+  // the rewritten lines of s[i, end) as reversed pieces, with the count of lines rewritten
+  def boc-span(s, i, end, instr, pieces, n) {
+   i >= end ? [pieces, n] : boc-line(s, i, boc-line-end(s, i, end), end, instr, pieces, n);
+  }
+  def boc-line(s, i, le, end, instr, pieces, n) {
+   let ind = boc-indent-end(s, i, le);
+   let comment = (!instr) && (ind < le) && eq(boc-byte(s, ind), 59);
+   comment ? boc-span(s, le, end, false, cons(fsc-sub(s, i, ind) ++ "//" ++ fsc-sub(s, boc-semis-end(s, ind, le), le), pieces), n + 1)
+   : boc-span(s, le, end, boc-scan(s, i, le, instr), cons(fsc-sub(s, i, le), pieces), n);
+  }
+  // the whole source: every form.bml section body rewritten, everything else as it was
+  def boc-source(src, i, pieces, n) {
+   let pos = fsc-find-section-open(src, i);
+   pos < 0 ? [cons(fsc-sub(src, i, str_len(src)), pieces), n] : boc-section(src, i, pos, pieces, n);
+  }
+  def boc-section(src, i, pos, pieces, n) {
+   let dend = fsc-find-char-from(src, "]", pos + 9);
+   let dialect = fsc-sub(src, pos + 9, dend);
+   let brace = fsc-find-char-from(src, "{", dend);
+   let close = fsc-high-level-form-dialect?(dialect) ? fsc-bml-block-end(src, brace + 1, 0) : fsc-section-end(src, brace + 1);
+   let head = cons(fsc-sub(src, i, brace + 1), pieces);
+   let body = fsc-bml-contract-dialect?(dialect) ? boc-span(src, brace + 1, close, false, head, n) : [cons(fsc-sub(src, brace + 1, close), head), n];
+   boc-source(src, close, body[0], body[1]);
+  }
+  def boc-file(path, write) {
+   let src = read_file(path);
+   let got = boc-source(src, 0, [], 0);
+   let out = str-join-reversed(got[0]);
+   let n = got[1];
+   let wrote = write && (n > 0) ? write_file(path, out) : 0;
+   let kept = write && (n > 0) ? str_eq(read_file(path), out) : true;
+   print_str("[bml-one-comment] " ++ path ++ " lines=" ++ int_to_str(n) ++ (write && (n > 0) ? (kept ? " written" : " WRITE-DIFFERS") : ""));
+   n;
+  }
+  def boc-files(paths, write) = nil?(paths) ? 0 : (boc-file(head(paths), write) + boc-files(tail(paths), write));
+  def boc-run() {
+   let words = boc-words(trim(stdin-text()));
+   let write = nil?(words) ? false : str_eq(words[len(words) - 1], "write");
+   let paths = write ? take(len(words) - 1, words) : words;
+   boc-files(paths, write);
+  }
+ }
+ boc-run();
+}

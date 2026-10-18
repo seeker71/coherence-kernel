@@ -1,0 +1,105 @@
+# A provider resource owned by Form
+
+For native grounding followed directly by one explicitly offered provider
+response, use the separate [synthesis path](form-response-synthesis.md).
+The repair resource below retains its failed-local-report condition.
+
+`form/form-stdlib/bml/form-cli-response-resource.bml` repairs a retained, failing
+read-only report through one optional provider CLI process. The caller owns
+the question, source documents, assertions and provider permission. Ordinary
+native `code` remains local-only. Response sessions also remain native-only by
+default; a manifest can explicitly offer this resource with a small
+session-wide process allowance.
+
+Supply inline JSON or a request file to the source-backed form-cli
+(`form-run ./fkwu form/form-stdlib/form-cli-repl.fk`):
+
+```sh
+form-run sh -c 'printf "%s\n" "response-repair @request.json" | ./fkwu form/form-stdlib/form-cli-repl.fk'
+```
+
+`response-repair help` describes the request surface.
+File input uses the native reader and the same request-size and permission
+checks as inline input. It retains the identical request identity, so a file
+containing an already checked request reuses its answer and usage event.
+
+The JSON object contains:
+
+- `id`: a nonempty identifier containing letters, digits or hyphens.
+- `assessment`: an existing `code` request with `mode=review`, `evaluation=1`,
+  read-only documents, source `checks` and `report_checks`.
+- `local_reports`: paths to actual retained local reports, in chronological
+  order. Form freezes their bytes and rechecks the latest report. The caller
+  supplies their execution provenance; a file path alone does not prove which
+  model generated it.
+- `provider`: `{"allowed":true,"interface":"codex-exec","max_processes":1,
+  "seconds":180}`. This permission belongs to the caller, not model output.
+
+`seconds` is an explicit nonnegative integer. Use `0` for the native process
+organ's progress-aware supervision without a lifetime deadline; positive values
+set a caller-owned deadline. Process ownership, stop control, release checks and
+the one-process claim apply in either mode.
+
+Form first runs the source and report assertions. A source failure needs repair
+before a provider request. A passing local report requires no provider. Missing
+permission leaves the request local. For an eligible failure, Form sends the
+question, source documents, latest report and actual failed-check observation;
+it does not send expected report-check values.
+
+The provider runs through the existing native process organ in an owned empty
+directory outside the repository. It is asked for one final JSON report. Form
+retains its process evidence, answer and actual reported usage, then runs the
+unchanged source/report assertions. Form requires observed process completion
+and release before accepting the repair.
+Responses retain the process duration, name their provider origin and leave
+overall semantic quality unassessed. Assessment answers are not sent to
+session learning.
+
+Process release and successful completion are separate observations. A process
+that exits nonzero can still have released all its owned resources; that release
+does not make its answer an accepted repair. Missing completed provider usage
+remains unknown, including after interruption.
+
+Native callers that explicitly need a provider to operate a stateful Form tool
+can use `frr-execute-tool-session(root, prompt, seconds)`. It adds that caller's
+owned evidence directory to the isolated workspace's writable roots through
+`codex exec --add-dir`. The caller supplies the tool command and its working
+directory. Ordinary `frr-execute` calls retain their existing scope. This is an
+internal execution option; it does not enable provider tools in the bounded
+report-repair or synthesis prompts, or enable a provider for ordinary native
+code sessions.
+
+An atomic claim keyed by the complete request and retained report bytes admits
+one provider process. Repeating the same request rechecks the retained answer
+and reports zero new processes. Answer and usage bytes are frozen and their
+hashes checked before reuse; changed evidence does not trigger another call.
+Its original usage remains attached to the
+same `usage_event`; do not add it again. A claim interrupted before process
+completion remains unresolved and never silently launches another provider.
+Inspect its owned evidence before deciding the next action.
+
+The deadline bounds the process lifetime, not token usage. Usage is read from
+the completed CLI transcript; absent usage is never treated as zero. Provider
+CLI availability is needed only when the caller explicitly offers this resource.
+This repair path is one part of the wider native/session comparison, not proof
+of whole-session parity.
+
+Positive process budgets also travel in the provider's prompt. The notice asks
+the worker to finish within the enforced duration and preserve completed work
+if the task remains unfinished. Process evidence records the budget and both
+the caller's prompt hash and the sent prompt hash. The notice does not establish
+that a worker will finish in time; the process organ still enforces the deadline.
+
+The usage reader exposes `completed_prefix_usage` separately from whole-stream
+totals. If one turn completed before a later turn failed or was interrupted,
+its validated usage remains visible with `unobserved_remainder=1`. Parsing
+stops accepting usage at the first invalid or failed event. Whole-stream totals
+stay null. With no completed turn, or a failed file read, prefix quantities also
+remain null. Do not add the prefix to a complete total from the same stream:
+these are two scopes over the same usage events, not separate spending.
+
+`form/form-stdlib/bml/form-cli-provider-notification.bml` reads the exact
+position of usage updates from an interface that exposes them during a task, and
+`form/form-stdlib/bml/form-cli-provider-usage-replay.bml` executes proposed
+notification sequences through that reader. Its integration into this execution
+resource remains open.

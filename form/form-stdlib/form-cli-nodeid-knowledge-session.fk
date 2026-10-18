@@ -1,0 +1,246 @@
+// form-cli-nodeid-knowledge-session.fk — one resident local-Qwen context can
+// emit a path-free concept/NodeID query, receive the current Form source as a
+// typed observation, and continue without rebuilding its transcript or KV.
+//
+// Each predicted model ID is decoded to its exact raw byte chunk and offered
+// directly to this cell's bounded scannerless cursor. BPE remains only the
+// transformer's embedding boundary; it is not a grammar pre-pass. The cursor
+// retains at most one split opener or one bounded frame. A complete canonical
+// frame is offered once to a generic executor. The public executor composes the
+// existing `fknq-execute-at` door, whose persisted shard walk is bounded to one
+// lookup and whose unique path opens one bounded current-source observation.
+//
+// The returned bytes keep the original PSCI source/entry NodeIDs, the bridge
+// source/entry/request/executor/observation NodeIDs, and the existing FHCS
+// observation NodeID. They enter `fcms-observe` as NEW observation bytes plus
+// one role crossing. The already-generated IDs and q38 state/KV rows remain in
+// place; generation resumes from the prediction born after that prefill.
+//
+// hit, miss, nothing, stale, ambiguous, timeout and failure remain distinct.
+// Their choice/cut/undo/refine/release traces cross as data. Retrieval always
+// says model-executed=0: the model requests; Form reads and observes.
+//
+// No top-level model, registry, source, carrier, or remote work occurs here.
+// No C seed, tokenizer pre-step, flattening, or operations table participates.
+//
+import form-stdlib/form-cli-model-session.fk;
+import form-stdlib/form-nodeid-knowledge-query.fk;
+section [form.bml] {
+    // ---- bounded raw-byte recognition ---------------------------------
+    def fknsc-state-none() = "none";
+    def fknsc-state-held() = "held";
+    def fknsc-state-complete() = "complete";
+    def fknsc-state-over() = "over";
+    def fknsc-detect-cap() = len(fknq-open()) - 1;
+    def fknsc-hold-cap() = fknq-max-frame-bytes();
+    def fknsc-injection-cap() = fkqt-max-render-bytes();
+    def fknsc-max-offers() = 1;
+    def fknsc-clip-left(text, cap) = len(text) <= cap ? text : substring(text, len(text) - cap, len(text));
+    def fknsc-feed-window(window, chunk) = {
+        let joined = ((String) window + chunk);
+        let at = str_find(joined, fknq-open(), 0);
+        at < 0 ? fknsc-clip-left(joined, fknsc-detect-cap()) : substring(joined, at, len(joined));
+    };
+    def fknsc-close-at(window, open-at) = str_find(window, fknq-close(), open-at + len(fknq-open()));
+    def fknsc-scan(window) = {
+        let open-at = str_find(window, fknq-open(), 0);
+        open-at < 0 ? fknsc-state-none() : {
+            let close-at = fknsc-close-at(window, open-at);
+            close-at >= 0 ? close-at + len(fknq-close()) - open-at > fknsc-hold-cap() ? fknsc-state-over() : fknsc-state-complete() : len(window) > fknsc-hold-cap() ? fknsc-state-over() : fknsc-state-held();
+        };
+    };
+    def fknsc-frame(window) = {
+        let open-at = str_find(window, fknq-open(), 0);
+        open-at < 0 ? "" : {
+            let close-at = fknsc-close-at(window, open-at);
+            close-at < 0 ? "" : substring(window, open-at, close-at + len(fknq-close()));
+        };
+    };
+    // cursor = window scan terminal offered refused injections injected-bytes
+    //          model-bytes model-chunks result status reason observation
+    def fknsc-cursor(window, scan, terminal, offered, refused, injections, injected-bytes, model-bytes, model-chunks, result, status, reason, observation) = [window, scan, terminal, offered, refused, injections, injected-bytes, model-bytes, model-chunks, result, status, reason, observation];
+    def fknsc-window(c) = c[0];
+    def fknsc-scan-state(c) = c[1];
+    def fknsc-terminal(c) = c[2];
+    def fknsc-offered(c) = c[3];
+    def fknsc-refused(c) = c[4];
+    def fknsc-injections(c) = c[5];
+    def fknsc-injected-bytes(c) = c[6];
+    def fknsc-model-bytes(c) = c[7];
+    def fknsc-model-chunks(c) = c[8];
+    def fknsc-result(c) = c[9];
+    def fknsc-status(c) = c[10];
+    def fknsc-reason(c) = c[11];
+    def fknsc-observation(c) = c[12];
+    def fknsc-open?(c) = (String) fknsc-terminal(c) == "open" ? 1 : 0;
+    def fknsc-model-executed?(c) = 0;
+    def fknsc-callback-calls(c) = fknsc-offered(c);
+    def fknsc-lookup-count(c) = nothing?(fknsc-result(c)) ? 0 : fknq-lookup-count(fknsc-result(c));
+    def fknsc-fresh() = fknsc-cursor("", fknsc-state-none(), "open", 0, 0, 0, 0, 0, 0, nothing(), "nothing", "waiting", "");
+    // The two byte lanes never alias. Model bytes are returned exactly as the
+    // decoder offered them. Only a validated typed observation is injected.
+    def fknsc-transfer(cursor, model-delta, injection-delta) = [cursor, model-delta, injection-delta];
+    def fknsc-transfer-cursor(x) = x[0];
+    def fknsc-transfer-model(x) = x[1];
+    def fknsc-transfer-injected(x) = x[2];
+    def fknsc-streamed(c, window, scan, chunk) = fknsc-cursor(window, scan, fknsc-terminal(c), fknsc-offered(c), fknsc-refused(c), fknsc-injections(c), fknsc-injected-bytes(c), fknsc-model-bytes(c) + len(chunk), fknsc-model-chunks(c) + 1, fknsc-result(c), fknsc-status(c), fknsc-reason(c), fknsc-observation(c));
+    // ---- identity/result validation -----------------------------------
+    def fknsc-status?(status) = (String) status == "hit" || ((String) status == "miss" || ((String) status == "nothing" || ((String) status == "stale" || ((String) status == "ambiguous" || ((String) status == "timeout" || (String) status == "failure"))))) ? 1 : 0;
+    def fknsc-source-continuity?(result) = (Comparable) psci-source-node-valid?(fknq-source-original-of(result)) == 1 ? (Comparable) fknq-source-token-valid?(fknq-source(result)) == 1 && node_eq(fknq-source-original(fknq-source(result)), fknq-source-original-of(result)) ? 1 : 0 : node_eq(fknq-source(result), fknq-absent()) && node_eq(fknq-source-original-of(result), fknq-absent()) ? 1 : 0;
+    def fknsc-entry-continuity?(result) = (Comparable) psci-entry-valid?(fknq-entry-original-of(result)) == 1 ? (Comparable) fknq-entry-token-valid?(fknq-entry(result)) == 1 && node_eq(fknq-entry-original(fknq-entry(result)), fknq-entry-original-of(result)) ? 1 : 0 : node_eq(fknq-entry(result), fknq-absent()) && node_eq(fknq-entry-original-of(result), fknq-absent()) ? 1 : 0;
+    def fknsc-current-observation-continuity?(result) = node_eq(fknq-existing-current-observation(result), fknq-absent()) ? 1 : node_eq(node_category(fknq-existing-current-observation(result)), fhcs-observation-category()) ? 1 : 0;
+    def fknsc-result-valid?(request, result) = nothing?(result) ? 0 : !((Comparable) len(result) == 22) ? 0 : !((Comparable) fknsc-status?(fknq-status(result)) == 1) ? 0 : !((Comparable) fknq-request-valid?(request) == 1) ? 0 : !node_eq(request, fknq-request(result)) ? 0 : !node_eq(fknq-executor(result), fknq-executor-token()) ? 0 : !node_eq(node_category(fknq-observation(result)), fknq-observation-category()) ? 0 : !((Comparable) fknq-model-executed?(result) == 0) ? 0 : !((Comparable) fknq-pretokenized?(result) == 0 && (Comparable) fknq-scannerless?(result) == 1) ? 0 : fknq-lookup-count(result) < 0 || fknq-lookup-count(result) > fknq-max-lookups() ? 0 : !((Comparable) fknq-executed?(result) == fknq-lookup-count(result)) ? 0 : !((String) fknq-trace-actions(fknq-trace(result)) == fknq-trace-actions(fknq-trace-for(fknq-status(result)))) ? 0 : !((Comparable) fknsc-source-continuity?(result) == 1) ? 0 : !((Comparable) fknsc-entry-continuity?(result) == 1) ? 0 : fknsc-current-observation-continuity?(result);
+    // ---- bounded typed observation bytes ------------------------------
+    def fknsc-node-key(node) = fknq-node-key(node);
+    def fknsc-source-id(result) = (Comparable) psci-source-node-valid?(fknq-source-original-of(result)) == 1 ? psci-source-id(fknq-source-original-of(result)) : "";
+    def fknsc-render-prefix(result, answer-cut, render-cut) = {
+        let raw-path = fknq-source-path(result);
+        let path = fkqt-clip(raw-path, fkqt-max-source-bytes());
+        fhcs-cat([fknq-observation-open(), "\nstatus=", fknq-status(result), "\nreason=", fknq-reason(result), "\nsource-node=@", fknsc-node-key(fknq-source-original-of(result)), "\nentry-node=@", fknsc-node-key(fknq-entry-original-of(result)), "\nbridge-source-node=@", fknsc-node-key(fknq-source(result)), "\nbridge-entry-node=@", fknsc-node-key(fknq-entry(result)), "\nrequest-node=@", fknsc-node-key(fknq-request(result)), "\nexecutor-node=@", fknsc-node-key(fknq-executor(result)), "\nobservation-node=@", fknsc-node-key(fknq-observation(result)), "\ncurrent-source-observation-node=@", fknsc-node-key(fknq-existing-current-observation(result)), "\nprovenance-schema=", fhcs-schema(), "\nsource-artifact=", fknsc-source-id(result), "\nsource-path=", path, "\nfresh=", fknq-fresh?(result).str(), "\nrebuild-needed=", fknq-rebuild?(result).str(), "\nmatch-count=", fknq-match-count(result).str(), "\nlookup-count=", fknq-lookup-count(result).str(), "\nhit-count=", fknq-hit-count(result).str(), "\nexecuted=", fknq-executed?(result).str(), "\nmodel-executed=", fknq-model-executed?(result).str(), "\npretokenized=", fknq-pretokenized?(result).str(), "\nscannerless=", fknq-scannerless?(result).str(), "\nlifecycle=", fknq-trace-actions(fknq-trace(result)), "\nanswer-encoding=", fkqt-observation-encoding(), "\nanswer-truncated=", answer-cut.str(), "\nanswer-render-truncated=", render-cut.str(), "\nsource-truncated=", fkqt-cut?(raw-path, fkqt-max-source-bytes()).str(), "\nanswer-byte-length=", len(fknq-answer(result)).str(), "\nanswer:"]);
+    };
+    def fknsc-render(result) = {
+        let provisional = fknsc-render-prefix(result, 0, 0);
+        let fuel = fknsc-injection-cap() - (len(provisional) + (1 + len(fknq-observation-close())));
+        let escaped = fkqt-observation-take(fknq-answer(result), fuel);
+        let render-cut = escaped[1] < len(fknq-answer(result)) ? 1 : 0;
+        let prefix = fknsc-render-prefix(result, render-cut, render-cut);
+        fhcs-cat([prefix, escaped[0], "\n", fknq-observation-close()]);
+    };
+    def fknsc-observation-valid?(text) = {
+        let n = len(text);
+        let open-n = len(fknq-observation-open());
+        let close-n = len(fknq-observation-close());
+        let expected-close = n - close-n;
+        let close-at = str_find(text, fknq-observation-close(), open-n);
+        (Comparable) n == 0 || n > fknsc-injection-cap() ? 0 : !((Comparable) str_find(text, fknq-observation-open(), 0) == 0) ? 0 : !((Comparable) close-at == expected-close) ? 0 : str_find(text, fknq-observation-open(), open-n) >= 0 ? 0 : str_find(text, fknq-open(), open-n) >= 0 ? 0 : str_find(text, fknq-close(), open-n) >= 0 ? 0 : 1;
+    };
+    // ---- one offer and explicit terminal signals ----------------------
+    def fknsc-terminal-state(c, scan, terminal, result, observation, offered-add, refused-add, injection-add) = fknsc-cursor("", scan, terminal, fknsc-offered(c) + offered-add, fknsc-refused(c) + refused-add, fknsc-injections(c) + injection-add, fknsc-injected-bytes(c) + len(observation), fknsc-model-bytes(c), fknsc-model-chunks(c), result, fknq-status(result), fknq-reason(result), observation);
+    def fknsc-accept(c, result, offered-add, refused-add) = {
+        let observation = fknsc-render(result);
+        !((Comparable) fknsc-observation-valid?(observation) == 1) ? {
+            let fallback = fknq-result-from-scan(fknq-scan-row("failure", "executor-observation-refused", nothing(), "", 0));
+            let rendered = fknsc-render(fallback);
+            fknsc-terminal-state(c, fknsc-state-complete(), "refused", fallback, rendered, offered-add, 1, 1);
+        } : fknsc-terminal-state(c, fknsc-state-complete(), "complete", result, observation, offered-add, refused-add, 1);
+    };
+    def fknsc-cursor-result(status, reason) = fknq-result-from-scan(fknq-scan-row(status, reason, nothing(), "", 0));
+    def fknsc-refuse-result(c, status, reason, terminal) = {
+        let result = fknsc-cursor-result(status, reason);
+        let observation = fknsc-render(result);
+        let scan = (String) terminal == "over" ? fknsc-state-over() : (String) terminal == "timeout" ? fknsc-state-held() : fknsc-state-complete();
+        fknsc-terminal-state(c, scan, terminal, result, observation, 0, 1, 1);
+    };
+    def fknsc-offer-once(ctx, executor, c, frame) = {
+        let scan = fknq-bmf-consume-default(frame);
+        !((String) fknq-scan-status(scan) == "ready") ? fknsc-accept(c, fknq-result-from-scan(scan), 0, 1) : {
+            let result = executor(ctx, frame);
+            !((Comparable) fknsc-result-valid?(fknq-scan-request(scan), result) == 1) ? fknsc-refuse-result(c, "failure", "executor-result-invalid", "refused") : fknsc-accept(c, result, 1, 0);
+        };
+    };
+    def fknsc-over(c) = fknsc-refuse-result(c, "failure", "frame-budget-exceeded", "over");
+    def fknsc-feed(ctx, executor, cursor, chunk) = !((Comparable) fknsc-open?(cursor) == 1) ? fknsc-transfer(fknsc-streamed(cursor, fknsc-window(cursor), fknsc-scan-state(cursor), chunk), chunk, "") : {
+        let window = fknsc-feed-window(fknsc-window(cursor), chunk);
+        let scan = fknsc-scan(window);
+        let streamed = fknsc-streamed(cursor, window, scan, chunk);
+        (String) scan == fknsc-state-complete() ? {
+            let completed = fknsc-offer-once(ctx, executor, streamed, fknsc-frame(window));
+            fknsc-transfer(completed, chunk, fknsc-observation(completed));
+        } : (String) scan == fknsc-state-over() ? {
+            let over = fknsc-over(streamed);
+            fknsc-transfer(over, chunk, fknsc-observation(over));
+        } : fknsc-transfer(streamed, chunk, "");
+    };
+    def fknsc-timeout(cursor) = (Comparable) fknsc-open?(cursor) == 1 && (String) fknsc-scan-state(cursor) == fknsc-state-held() ? {
+        let timed = fknsc-refuse-result(cursor, "timeout", "held-frame-timeout", "timeout");
+        fknsc-transfer(timed, "", fknsc-observation(timed));
+    } : fknsc-transfer(cursor, "", "");
+    // This executor is dormant until a caller intentionally drives the live
+    // session. Its context carries the already-resolved body root and artifact.
+    // fknq itself enforces the one-lookup boundary.
+    def fknsc-public-context(root, artifact, local-ready, budget) = [root, artifact, local-ready, budget];
+    def fknsc-public-executor(ctx, surface) = fknq-execute-at(ctx[0], ctx[1], surface, ctx[2], ctx[3] > fknq-max-frame-bytes() ? fknq-max-frame-bytes() : ctx[3]);
+    // ---- same-residence Qwen composition ------------------------------
+    // result = tag session cursor before-text after-text injected-text
+    //              before-ids after-ids
+    def fknss-result(session, cursor, before, after, injected, before-ids, after-ids) = ["form-cli-nodeid-knowledge-session-v1", session, cursor, before, after, injected, before-ids, after-ids];
+    def fknss-session(r) = r[1];
+    def fknss-cursor(r) = r[2];
+    def fknss-before-text(r) = r[3];
+    def fknss-after-text(r) = r[4];
+    def fknss-injected-text(r) = r[5];
+    def fknss-before-ids(r) = r[6];
+    def fknss-after-ids(r) = r[7];
+    def fknss-model-bytes(r) = len(fknss-before-text(r)) + len(fknss-after-text(r));
+    def fknss-injected-bytes(r) = len(fknss-injected-text(r));
+    def fknss-crossed?(r) = (Comparable) fknsc-injections(fknss-cursor(r)) == 1 ? 1 : 0;
+    def fknss-callback-calls(r) = fknsc-callback-calls(fknss-cursor(r));
+    def fknss-lookup-count(r) = fknsc-lookup-count(fknss-cursor(r));
+    def fknss-model-executed-form?(r) = 0;
+    // Direct identity accessors make the crossing inspectable without parsing
+    // rendered prose back into structure.
+    def fknss-bridge-result(r) = fknsc-result(fknss-cursor(r));
+    def fknss-source(r) = fknq-source(fknss-bridge-result(r));
+    def fknss-entry(r) = fknq-entry(fknss-bridge-result(r));
+    def fknss-request(r) = fknq-request(fknss-bridge-result(r));
+    def fknss-executor(r) = fknq-executor(fknss-bridge-result(r));
+    def fknss-observation(r) = fknq-observation(fknss-bridge-result(r));
+    def fknss-current-observation(r) = fknq-existing-current-observation(fknss-bridge-result(r));
+    def fknss-with-generated(s, pos, pending, stopped, added) = fcms-with-stream(s, pos, pending, stopped, fcms-generated-ids(s) + added, fcms-injected-ids(s), fcms-observations(s));
+    def fknss-fail(s, reason, pos, pending, stopped, added) = fcms-refuse(fknss-with-generated(s, pos, pending, stopped, added), reason);
+    def fknss-forward(s, id, pos) = fcms-forward(s, id, pos);
+    def fknss-finish(s, c, before, after, injected, before-ids, after-ids) = fknss-result(s, c, before, after, injected, before-ids, after-ids);
+    // Observer is a function value, not a global mode or dispatcher seat.  The
+    // default stays silent.  A live residence may offer a content-free observer
+    // that streams stage/counter events while this recursive walk is still
+    // moving; no prompt, generated text, or source bytes cross this surface.
+    // `observer-ctx` is caller-born relation data (for example an append-only
+    // channel and task identity), never parsed from model or source bytes.
+    // It lets the same stage frames reach their own channel without a server,
+    // global sink, or process restart.
+    def fknss-observe-none(stage, phase, cursor, generated) = 0;
+    def fknss-observe-legacy(observer, observer-ctx, stage, phase, cursor, generated) = observer(stage, phase, cursor, generated);
+    def fknss-walk(s, c, id, pos, left, stops, phase, before, after, injected, before-ids, after-ids, exec-ctx, executor, observer, observer-ctx) = left <= 0 ? fknss-finish(s, c, before, after, injected, before-ids, after-ids) : id < 0 ? fknss-finish(fknss-fail(s, "model-forward-refused", pos, -1, 1, 0), c, before, after, injected, before-ids, after-ids) : (Comparable) q38-stop?(id, stops) == 1 ? fknss-finish(fknss-with-generated(s, pos, id, 1, 0), c, before, after, injected, before-ids, after-ids) : pos >= fcms-maxpos(s) ? fknss-finish(fknss-fail(s, "session-position-refused", pos, id, 0, 0), c, before, after, injected, before-ids, after-ids) : {
+        let generated = len(before-ids) + len(after-ids);
+        let pulse = (Comparable) (generated % 8) == 0 ? 1 : 0;
+        let progress = (Comparable) pulse == 1 ? observer(observer-ctx, "model-stream", "progress", c, generated) : 0;
+        let chunk = tkz-decode-text(fcms-src(s), [id]);
+        let transfer = fknsc-feed(exec-ctx, executor, c, chunk);
+        let c2 = fknsc-transfer-cursor(transfer);
+        let model-delta = fknsc-transfer-model(transfer);
+        let injection-delta = fknsc-transfer-injected(transfer);
+        let before2 = (Comparable) phase == 0 ? ((String) before + model-delta) : before;
+        let after2 = (Comparable) phase == 0 ? after : ((String) after + model-delta);
+        let before-ids2 = (Comparable) phase == 0 ? append(before-ids, [id]) : before-ids;
+        let after-ids2 = (Comparable) phase == 0 ? after-ids : append(after-ids, [id]);
+        let spoken = fknss-with-generated(s, pos, id, 0, 1);
+        len(injection-delta) > 0 ? {
+            // spoken holds the decoded model ID pending. Observe
+            // consumes it once, encodes only new bytes/role, and
+            // returns the first prediction after that same-KV prefill.
+            let injection-begin = observer(observer-ctx, "observation-inject", "begin", c2, generated);
+            let resumed = fcms-observe(spoken, injection-delta);
+            let injection-end = observer(observer-ctx, "observation-inject", "end", c2, generated);
+            !((Comparable) fcms-live?(resumed) == 1) ? fknss-finish(resumed, c2, before2, after2, ((String) injected + injection-delta), before-ids2, after-ids2) : fknss-walk(resumed, c2, fcms-pending(resumed), fcms-pos(resumed), left - 1, stops, 1, before2, after2, ((String) injected + injection-delta), before-ids2, after-ids2, exec-ctx, executor, observer, observer-ctx);
+        } : (Comparable) left == 1 ? fknss-finish(spoken, c2, before2, after2, injected, before-ids2, after-ids2) : {
+            let forward-begin = (Comparable) pulse == 1 ? observer(observer-ctx, "model-forward", "begin", c2, generated) : 0;
+            let next-id = fknss-forward(spoken, id, pos);
+            let forward-end = (Comparable) pulse == 1 ? observer(observer-ctx, "model-forward", "end", c2, generated) : 0;
+            let next = fknss-with-generated(spoken, pos + 1, next-id, next-id < 0 || (Comparable) q38-stop?(next-id, stops) == 1 ? 1 : 0, 0);
+            fknss-walk(next, c2, next-id, pos + 1, left - 1, stops, phase, before2, after2, injected, before-ids2, after-ids2, exec-ctx, executor, observer, observer-ctx);
+        };
+    };
+    def fknss-run-with-observer-context(session, max-generated, exec-ctx, executor, observer, observer-ctx) = !((Comparable) fcms-live?(session) == 1) || max-generated <= 0 ? fknss-result(session, fknsc-fresh(), "", "", "", empty(), empty()) : {
+        let cursor = fknsc-fresh();
+        let begin = observer(observer-ctx, "run", "begin", cursor, 0);
+        let result = fknss-walk(session, cursor, fcms-pending(session), fcms-pos(session), max-generated, fcmg-q35-stops(fcms-src(session)), 0, "", "", "", empty(), empty(), exec-ctx, executor, observer, observer-ctx);
+        let generated = len(fknss-before-ids(result)) + len(fknss-after-ids(result));
+        let end = observer(observer-ctx, "run", "end", fknss-cursor(result), generated);
+        result;
+    };
+    // Existing four-argument observers remain direct function values through
+    // this adapter. Contextual callers use the sibling door above explicitly.
+    def fknss-run-with-observer(session, max-generated, exec-ctx, executor, observer) = fknss-run-with-observer-context(session, max-generated, exec-ctx, executor, fknss-observe-legacy, observer);
+    def fknss-run-with(session, max-generated, exec-ctx, executor) = fknss-run-with-observer(session, max-generated, exec-ctx, executor, fknss-observe-none);
+    0;
+}

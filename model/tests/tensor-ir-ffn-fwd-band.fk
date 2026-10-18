@@ -5,7 +5,7 @@
 ; inlines the IR engine (tensor-ir.fk's tb-slot + tir-transcendentals + tir-ffn-* + the precision MSL table)
 ; and the PROVEN reference emitter from jit-tensor-emit.fk (jte-mlp-helpers + jte-mlp-fwd spine), then checks
 ; the IR output against it. All recipe ops are defn / str_concat / str_eq (no `let`, no `let`-bound lists),
-; so it crosses FOUR-WAY.
+; so it stays on the plain function surface.
 ;
 ; Verdict 7 when every claim lands:
 ;   1   IR-emitted MSL FFN-forward (f32)  ≡ the proven jte-mlp-fwd-msl output, BYTE-FOR-BYTE (diff=0)
@@ -14,9 +14,11 @@
 ;
 ; The transcendental block is realized ONCE in the IR (tir-transcendentals); every block kernel's helper
 ; prefix now flows through it. The FFN reduction is the same two-rounding load-widen / acc-step discipline as
-; the matvec dot, over a strided 2-D weight. Proven on metal: the FFN forward is the held-out EVAL path of
-; metal_ffn_audit (the M4 Max bit-exact reference), now flowing through this engine. f16 is the wide-store
-; lane (one RNE at the lane boundary). The whole spine is emitted with ZERO per-ISA `if`.
+; the matvec dot, over a strided 2-D weight. f16 is the wide-store lane (one RNE at the lane boundary), and the
+; whole spine is emitted with ZERO per-ISA `if`. This band inlines its two copies on purpose so it stands
+; alone, which means it proves the IR and the reference agree with EACH OTHER — never that either still
+; matches form/form-stdlib/tensor-ir.fk, and never that a compiler takes the text. form/form-stdlib/tests/msl-families-mint-band.fk
+; asks the compiler; read the two together.
 
 ; ── the IR engine (verbatim shape of model/tensor-ir.fk: tb-slot + transcendentals + FFN-fwd fragments) ──
 (defn tb-slot (tbl key)
@@ -72,7 +74,7 @@
   (str_concat (tir-acc tbl)
   (str_concat " hk = acc + "
   (str_concat (tir-ld tbl "b1[k]")
-  "; h1[k] = hk; a[k] = fgelu(hk); } threadgroup_barrier(mem_flags::mem_device); "))))))
+  "; h1[k] = hk; a[k] = fgelu(hk); } threadgroup_barrier(metal::mem_flags::mem_device); "))))))
 (defn tir-ffn-fwd-out (tbl)
   (str_concat "for (uint i = tid; i < outd; i += tgs) { "
   (str_concat (tir-ffn-dot tbl "w2" "i" "hid" "k" "a[k]")
@@ -121,7 +123,7 @@
 (defn jte-mlp-fwd-sig (fname el ac)
   (str_concat "kernel void " (str_concat fname (str_concat "(device " (str_concat el (str_concat "* w1 [[buffer(0)]], device " (str_concat el (str_concat "* b1 [[buffer(1)]], device " (str_concat el (str_concat "* w2 [[buffer(2)]], device " (str_concat el (str_concat "* b2 [[buffer(3)]], device const " (str_concat el (str_concat "* x [[buffer(4)]], device " (str_concat el (str_concat "* y [[buffer(5)]], device " (str_concat ac (str_concat "* h1 [[buffer(6)]], device " (str_concat ac "* a [[buffer(7)]], constant uint& indim [[buffer(8)]], constant uint& hid [[buffer(9)]], constant uint& outd [[buffer(10)]], uint tid [[thread_position_in_threadgroup]], uint tgs [[threads_per_threadgroup]]) { ")))))))))))))))))))
 (defn jte-mlp-fwd1 (el ac)
-  (str_concat "for (uint k = tid; k < hid; k += tgs) { " (str_concat ac (str_concat " acc = 0.0f; uint j = indim; while (j > 0) { j -= 1; acc = " (str_concat ac (str_concat "(w1[k * indim + j]) * " (str_concat ac (str_concat "(x[j]) + acc; } " (str_concat ac (str_concat " hk = acc + " (str_concat ac "(b1[k]); h1[k] = hk; a[k] = fgelu(hk); } threadgroup_barrier(mem_flags::mem_device); ")))))))))))
+  (str_concat "for (uint k = tid; k < hid; k += tgs) { " (str_concat ac (str_concat " acc = 0.0f; uint j = indim; while (j > 0) { j -= 1; acc = " (str_concat ac (str_concat "(w1[k * indim + j]) * " (str_concat ac (str_concat "(x[j]) + acc; } " (str_concat ac (str_concat " hk = acc + " (str_concat ac "(b1[k]); h1[k] = hk; a[k] = fgelu(hk); } threadgroup_barrier(metal::mem_flags::mem_device); ")))))))))))
 (defn jte-mlp-fwd-out (el ac)
   (str_concat "for (uint i = tid; i < outd; i += tgs) { " (str_concat ac (str_concat " acc = 0.0f; uint k = hid; while (k > 0) { k -= 1; acc = " (str_concat ac (str_concat "(w2[i * hid + k]) * a[k] + acc; } y[i] = " (str_concat el (str_concat "(acc + " (str_concat ac "(b2[i])); } }")))))))))
 (defn jte-mlp-fwd-msl-spine (fname el ac)

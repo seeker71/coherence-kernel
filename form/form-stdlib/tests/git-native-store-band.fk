@@ -1,0 +1,237 @@
+; git-native-store-band.fk — the object store, refs and commit-graph read in Form (git-store.bml, git-refs.bml), proven by SELF-VERIFICATION
+; and by repositories this band writes itself. No git program runs; no oracle is consulted.
+;
+; An object read must hash to its own name (sha1 of "<type> <size>\0" ++ body equals the id it was found under); a commit's parents must
+; exist; a pack's trailing checksum must equal the sha1 of the pack; an index file's trailing checksum must equal the sha1 of the index.
+;
+;   1    THIS repository opens: its `.git` is a FILE (`gitdir: ...`) when it is a linked worktree, the `commondir` file is followed to the
+;        shared store, the top is the directory holding `.git`, and HEAD names a branch (or an id) that resolves to a commit
+;   2    HEAD's commit reads and hashes to its id; its tree reads and hashes to the id the commit names; the parents exist
+;   4    the first 200 first-parent ancestors of HEAD: every commit and every root tree read hashes to its own id, and every parent exists
+;   8    forty-odd blobs of HEAD's tree (delta-compressed ones among them) and a whole subtree walked recursively: every blob and tree
+;        read hashes to its id
+;   16   every ref in packed-refs and in refs/ resolves to an object that exists, and every peeled line names one that exists; the
+;        counts are printed
+;   32   pack stats: each pack's idx is v2 with a monotone fanout whose last entry is n and with sorted names (sampled across the whole
+;        index), the pack starts "PACK" v2 with count n, the idx's recorded pack checksum equals the pack's last 20 bytes, and for the
+;        packs under 8 MB the pack's checksum equals the sha1 of the pack and the idx's own checksum equals the sha1 of the idx; objects
+;        sampled across the largest pack (OFS_DELTA chains among them) read and hash to their names
+;   64   a SYNTHETIC repository written by this band: loose blob/tree/commit read back and verified; a hand-built pack with an
+;        OFS_DELTA read back and verified; unique and ambiguous abbreviations; objects/info/alternates followed; a 64-bit idx offset
+;        (the high bit of the 32-bit field selecting the 64-bit table) decodes; refs: HEAD symbolic, a loose ref, a packed ref with a
+;        peeled line, a detached HEAD
+;   128  the commit-graph file (when one stands) agrees with the commit objects: for 60 commits spread over it, parents, commit time and
+;        tree read from the graph equal those parsed out of the commit object; a corrupted graph row would disagree
+;
+; Expected: 255
+; Verdict 255
+; REQUIRES: (the string natives, read_file_slice, the u32 bit natives, the host doors: host_dir_list, host_realpath, host_file_size)
+; preflight-exec: forbidden
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-rev.bml;
+import form-stdlib/bml/git-write.bml;
+section [form.bml] {
+  def gtb-bit(ok, bit) = ok ? bit : 0;
+  def gtb-say(label, v) = print([label, v]);
+  def gtb-eq(a, b) = (String) a == (String) b;
+  def gtb-hex(raw) = gsha-hex-of-raw(raw);
+  // an object read under hex must hash to hex
+  def gtb-read-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gs-verify(raw, o[0], o[1]);
+  }
+  def gtb-ancestors(r, raw, n, acc) {
+    let o = n <= 0 ? nothing() : gs-read(r, raw);
+    nothing?(o) || !gtb-eq(o[0], "commit") ? ginf-reverse(acc, []) : gtb-ancestors(r, gtb-first-parent(o), n - 1, cons(raw, acc));
+  }
+  def gtb-first-parent(o) {
+    let ps = gs-commit-parse(o[1])[1];
+    nil?(ps) ? nothing() : gsha-raw-of-hex(ps[0]);
+  }
+  def gtb-commit-chain-ok(r, raws) {
+    nil?(raws) ? true : gtb-one-commit-ok(r, raws[0]) && gtb-commit-chain-ok(r, raws[1:]);
+  }
+  def gtb-one-commit-ok(r, raw) {
+    let o = gs-read(r, raw);
+    let c = nothing?(o) ? nothing() : gs-commit-parse(o[1]);
+    !nothing?(o) && gs-verify(raw, o[0], o[1]) && gtb-tree-ok(r, gsha-raw-of-hex(c[0])) && all?(p => gs-has?(r, gsha-raw-of-hex(p)), c[1]);
+  }
+  def gtb-tree-ok(r, raw) {
+    let o = gs-read(r, raw);
+    !nothing?(o) && gtb-eq(o[0], "tree") && gs-verify(raw, o[0], o[1]) && !nothing?(gs-tree-entries(o[1]));
+  }
+  // every blob and subtree under a tree, verified (limit: how many objects at most)
+  def gtb-walk-tree(r, raw, budget) {
+    let o = gs-read(r, raw);
+    nothing?(o) || !gs-verify(raw, o[0], o[1]) ? [false, budget] : gtb-walk-entries(r, gs-tree-entries(o[1]), budget - 1);
+  }
+  def gtb-walk-entries(r, es, budget) {
+    nil?(es) || budget <= 0 ? [true, budget] : gtb-walk-one(r, es, budget, es[0]);
+  }
+  def gtb-walk-one(r, es, budget, e) {
+    let res = gs-tree?(e[0]) ? gtb-walk-tree(r, e[2], budget) : (gs-gitlink?(e[0]) ? [true, budget] : [gtb-read-ok(r, e[2]), budget - 1]);
+    res[0] ? gtb-walk-entries(r, es[1:], res[1]) : [false, 0];
+  }
+  def gtb-blobs-of(es, k) = take(k, filter(e => !gs-tree?(e[0]) && !gs-gitlink?(e[0]), es));
+  // ---- refs ---------------------------------------------------------------------------------------------------------------------
+  def gtb-packed-rows(r) = gr-packed-rows(gr-packed-text(r), "");
+  def gtb-loose-rows(r) = gr-loose-under(gs-common(r), "refs");
+  def gtb-peeled-hex(text) = map(l => substring(l, 1, 41), filter(l => len(l) >= 41 && str_byte_at(l, 0) == 94, gs-lines(text)));
+  // ---- packs --------------------------------------------------------------------------------------------------------------------
+  def gtb-fan-monotone?(idx, b, prev) = b >= 256 ? true : gs-idx-fan(idx, b) >= prev && gtb-fan-monotone?(idx, b + 1, gs-idx-fan(idx, b));
+  def gtb-sorted-sample?(idx, n, i, step) = i + 1 >= n ? true : gr-lt(gs-idx-raw(idx, i), gs-idx-raw(idx, i + 1)) && gtb-sorted-sample?(idx, n, i + step, step);
+  def gtb-pack-ok(p) {
+    let idx = p[1];
+    let n = p[2];
+    let head = read_file_slice(p[0], 0, 12);
+    let tail = read_file_slice(p[0], p[3] - 20, 20);
+    let recorded = substring(idx, len(idx) - 40, len(idx) - 20);
+    let small = p[3] < 4000000;
+    gtb-eq(substring(idx, 0, 8), str_concat(str_concat(byte_to_str(255), "tOc"), gsha-u32-str(2))) && gtb-fan-monotone?(idx, 0, 0) && gs-idx-fan(idx, 255) == n && gtb-sorted-sample?(idx, n, 0, n > 5000 ? 37 : 1) && gtb-eq(substring(head, 0, 4), "PACK") && gs-be32(head, 4) == 2 && gs-be32(head, 8) == n && gtb-eq(recorded, tail) && gtb-eq(gsha-raw(substring(idx, 0, len(idx) - 20)), substring(idx, len(idx) - 20, len(idx))) && (!small || gtb-eq(gsha-raw(substring(read_file(p[0]), 0, p[3] - 20)), tail));
+  }
+  def gtb-spread(idx, n, k) = map(i => gs-idx-raw(idx, (i * n) / k), range(0, k));
+  // ---- a synthetic repository ---------------------------------------------------------------------------------------------------
+  def gtb-synthetic(top) {
+    let m = gw-mkdirs(top);
+    let i = gw-init(top, "main");
+    let g = top ++ "/.git";
+    let b1 = gw-put-loose(g, "blob", "hello\n");
+    let b2 = gw-put-loose(g, "blob", "world\n");
+    let b3 = gw-put-loose(g, "blob", "nested file\n");
+    let sub = gw-put-loose(g, "tree", gw-tree-body([["100644", "n.txt", gsha-raw-of-hex(b3)]]));
+    let tree = gw-put-loose(g, "tree", gw-tree-body([["100644", "a.txt", gsha-raw-of-hex(b1)], ["100755", "run.sh", gsha-raw-of-hex(b2)], ["40000", "sub", gsha-raw-of-hex(sub)]]));
+    let c1 = gw-commit(g, tree, [], "Tess", "tess@example.test", 1700000000, "+0800", "first\n");
+    let c2 = gw-commit(g, tree, [c1], "Tess", "tess@example.test", 1700000100, "+0800", "second\n");
+    let u1 = gw-update-ref(g, "refs/heads/main", c2, nothing(), "Tess <tess@example.test>", "commit: second");
+    let u2 = gw-update-ref(g, "refs/heads/other", c1, nothing(), "Tess <tess@example.test>", "branch: Created from main");
+    [top, g, b1, b2, b3, sub, tree, c1, c2];
+  }
+  def gtb-synthetic-ok(top) {
+    let s = gtb-synthetic(top);
+    let g = s[1];
+    let r = git-open(top);
+    let c2 = s[8];
+    let o = nothing?(r) ? nothing() : git-read(r, c2);
+    let loose = !nothing?(o) && gtb-eq(o[0], "commit") && gs-verify(gsha-raw-of-hex(c2), o[0], o[1]) && gtb-eq(gs-commit-parse(o[1])[1][0], s[7]) && gtb-eq(gs-subject(gs-commit-parse(o[1])[4]), "second");
+    let tr = nothing?(r) ? nothing() : git-read(r, s[6]);
+    let es = nothing?(tr) ? [] : gs-tree-entries(tr[1]);
+    let tree_ok = len(es) == 3 && gtb-eq(es[0][1], "a.txt") && gtb-eq(es[1][1], "run.sh") && gtb-eq(es[1][0], "100755") && gtb-eq(es[2][0], "40000") && gtb-eq(gtb-hex(es[2][2]), s[5]);
+    let refs_ok = !nothing?(r) && gtb-eq(gr-head-id(r), c2) && gtb-eq(gr-head(r)[0], "branch") && gtb-eq(gr-resolve(r, "refs/heads/other"), s[7]) && gtb-eq(gr-head(r)[1], "refs/heads/main");
+    let base = "0123456789abcdefghij0123456789abcdefghij\n";
+    let pk = gw-pack([["plain", "blob", base], ["ofs", 0, gw-delta(base, [["copy", 0, 20], ["insert", "XYZ"], ["copy", 20, 21]])], ["plain", "blob", "other\n"], ["ofs", 1, gw-delta(gs-delta-apply(base, gw-delta(base, [["copy", 0, 20], ["insert", "XYZ"], ["copy", 20, 21]])), [["copy", 0, 10], ["insert", "!"], ["copy", 10, 34]])]]);
+    let nm = gw-put-pack(g, pk);
+    let r2 = git-open(top);
+    let ids = map(row => gtb-hex(row[0]), pk[1]);
+    let reads = nothing?(r2) ? [] : map(h => git-read(r2, h), ids);
+    let pack_ok = len(reads) == 4 && all?(o2 => !nothing?(o2), reads) && all?(h => gtb-read-ok(r2, gsha-raw-of-hex(h)), ids) && gtb-eq(reads[1][1], "0123456789abcdefghijXYZ0123456789abcdefghij\n") && len(reads[3][1]) == 45;
+    let pre = substring(ids[0], 0, 6);
+    let abbr_ok = !nothing?(r2) && len(gs-expand(r2, pre)) == 1 && gtb-eq(gtb-hex(gs-expand(r2, pre)[0]), ids[0]) && len(gs-expand(r2, "")) == 0 && len(gs-expand(r2, substring(s[2], 0, 4))) >= 1;
+    let alt = top ++ "-alt";
+    let a1 = gw-mkdirs(alt ++ "/.git/objects");
+    let ab = gw-put-loose(alt ++ "/.git", "blob", "only in the alternate\n");
+    let af = gw-put-file(g ++ "/objects/info/alternates", alt ++ "/.git/objects\n");
+    let r3 = git-open(top);
+    let alt_ok = !nothing?(r3) && !nothing?(git-read(r3, ab)) && gs-verify(gsha-raw-of-hex(ab), "blob", "only in the alternate\n");
+    let idx64 = gtb-idx64();
+    let off64 = gs-idx-offset(idx64, 0) == 4294967312;
+    let packed_head_ok = gtb-packed-refs-ok(top);
+    let detached_ok = gtb-detached-ok(top, s[7]);
+    let rm1 = host_dir_rmdir(top);
+    let rm2 = host_dir_rmdir(alt);
+    loose && tree_ok && refs_ok && pack_ok && abbr_ok && alt_ok && off64 && packed_head_ok && detached_ok;
+  }
+  // an idx with one object whose offset field has the high bit: the 64-bit table entry 0 is 0x0000000100000010
+  def gtb-idx64() {
+    let head = str_concat(byte_to_str(255), str_concat("tOc", gsha-u32-str(2)));
+    let fan = ginf-join(ginf-reverse(map(b => gsha-u32-str(1), range(0, 256)), []));
+    let name = gsha-zeros(20);
+    let crc = gsha-u32-str(0);
+    let off = gsha-u32-str(2147483648);
+    let big = str_concat(gsha-u32-str(1), gsha-u32-str(16));
+    str_concat(head, str_concat(fan, str_concat(name, str_concat(crc, str_concat(off, str_concat(big, gsha-zeros(40)))))));
+  }
+  // packed-refs with a peeled line, read beside a loose ref of the same name (the loose one wins)
+  def gtb-packed-refs-ok(top) {
+    let g = top ++ "/.git";
+    let tag = gw-put-loose(g, "tag", "object " ++ gsb-commit-of(top) ++ "\ntype commit\ntag v1\ntagger T <t@x> 1700000200 +0800\n\nrelease\n");
+    let c = gsb-commit-of(top);
+    let text = "# pack-refs with: peeled fully-peeled sorted\n" ++ c ++ " refs/heads/packedonly\n" ++ tag ++ " refs/tags/v1\n^" ++ c ++ "\n";
+    let w = gw-put-file(g ++ "/packed-refs", text);
+    let r = git-open(top);
+    !nothing?(r) && gtb-eq(gr-resolve(r, "refs/heads/packedonly"), c) && gtb-eq(gr-resolve(r, "refs/tags/v1"), tag) && gtb-eq(gr-peeled(r, "refs/tags/v1"), c) && nothing?(gr-peeled(r, "refs/heads/packedonly")) && len(gr-list(r, "refs/heads/")) == 3 && gtb-eq(grv-hex(grv-peel(r, gsha-raw-of-hex(tag), "commit")), c);
+  }
+  def gsb-commit-of(top) = gs-trim(gs-text-or(top ++ "/.git/refs/heads/main", ""));
+  def gtb-detached-ok(top, c1) {
+    let w = gw-put-file(top ++ "/.git/HEAD", c1 ++ "\n");
+    let r = git-open(top);
+    !nothing?(r) && gtb-eq(gr-head(r)[0], "detached") && gtb-eq(gr-head-id(r), c1);
+  }
+  // ---- the commit-graph ----------------------------------------------------------------------------------------------------------
+  def gtb-graph-agrees?(r, raws) = nil?(raws) ? true : gtb-graph-one(r, raws[0]) && gtb-graph-agrees?(r, raws[1:]);
+  def gtb-graph-one(r, raw) {
+    let g = gcg-commit(r, raw);
+    let o = gs-read(r, raw);
+    let c = nothing?(o) ? nothing() : gs-commit-parse(o[1]);
+    nothing?(g) ? true : !nothing?(c) && g[1] == gs-person(c[3])[2] && gtb-eq(gtb-hex(g[2]), c[0]) && gtb-eq(grv-join(map(p => gtb-hex(p), g[0]), " "), grv-join(c[1], " "));
+  }
+  def gtb-graph-oids(cg, n, k) = map(i => gcg-oid(cg, (i * n) / k), range(0, k));
+  def gtb-run() {
+    let t0 = host_monotonic_ms();
+    let r = git-open(".");
+    let h = nothing?(r) ? nothing() : gr-head(r);
+    let head = nothing?(r) ? nothing() : gr-head-id(r);
+    let dotgit = read_file(host_realpath(".") ++ "/.git");
+    let s1 = gtb-say("open", nothing?(r) ? "nothing" : [gs-top(r), gs-gitdir(r), gs-common(r), len(gs-packs(r)), "packs", h]);
+    let linked = !nothing?(dotgit) && gs-starts?(dotgit, "gitdir:");
+    let b1 = gtb-bit(!nothing?(r) && !nothing?(head) && gtb-eq(gs-top(r), host_realpath(".")) && host_path_exists(gs-common(r) ++ "/objects") == 1 && (!linked || (!gtb-eq(gs-gitdir(r), gs-common(r)) && host_path_exists(gs-gitdir(r) ++ "/commondir") == 1)), 1);
+    let hraw = nothing?(head) ? "" : gsha-raw-of-hex(head);
+    let ho = nothing?(head) ? nothing() : gs-read(r, hraw);
+    let hc = nothing?(ho) ? nothing() : gs-commit-parse(ho[1]);
+    let b2 = gtb-bit(!nothing?(ho) && gtb-eq(ho[0], "commit") && gs-verify(hraw, ho[0], ho[1]) && gtb-tree-ok(r, gsha-raw-of-hex(hc[0])) && all?(p => gs-has?(r, gsha-raw-of-hex(p)), hc[1]), 2);
+    let t1 = host_monotonic_ms();
+    let chain = nothing?(head) ? [] : gtb-ancestors(r, hraw, 200, []);
+    let chain_ok = len(chain) == 200 && gtb-commit-chain-ok(r, chain);
+    let t2 = host_monotonic_ms();
+    let s2 = gtb-say("ancestors verified", [len(chain), "commits and root trees, ms", t2 - t1]);
+    let b4 = gtb-bit(chain_ok, 4);
+    let tree = nothing?(hc) ? nothing() : gs-read(r, gsha-raw-of-hex(hc[0]));
+    let es = nothing?(tree) ? [] : gs-tree-entries(tree[1]);
+    let blobs = gtb-blobs-of(es, 40);
+    let blobs_ok = len(blobs) >= 10 && all?(e => gtb-read-ok(r, e[2]), blobs);
+    let subs0 = filter(e => gs-tree?(e[0]) && (gtb-eq(e[1], "axioms") || gtb-eq(e[1], "teachings") || gtb-eq(e[1], "docs")), es);
+    let subs = nil?(subs0) ? filter(e => gs-tree?(e[0]), es) : subs0;
+    let walked = nil?(subs) ? [true, 0] : gtb-walk-tree(r, subs[0][2], 150);
+    let s3 = gtb-say("blobs and subtree", [len(blobs), "blobs verified, subtree", subs[0][1], "walked: ok and budget left", walked]);
+    let b8 = gtb-bit(blobs_ok && walked[0], 8);
+    let packed = nothing?(r) ? [] : gtb-packed-rows(r);
+    let loose = nothing?(r) ? [] : gtb-loose-rows(r);
+    let peeled = nothing?(r) ? [] : gtb-peeled-hex(gr-packed-text(r));
+    let refs_ok = !nothing?(r) && all?(row => gs-has?(r, gsha-raw-of-hex(row[1])), packed) && all?(row => gs-has?(r, gsha-raw-of-hex(row[1])), loose) && all?(p => gs-has?(r, gsha-raw-of-hex(p)), peeled);
+    let s4 = gtb-say("refs", ["packed", len(packed), "loose", len(loose), "peeled", len(peeled)]);
+    let b16 = gtb-bit(refs_ok && len(packed) + len(loose) > 0, 16);
+    let t3 = host_monotonic_ms();
+    let packs = nothing?(r) ? [] : gs-packs(r);
+    let packs_ok = len(packs) >= 1 && all?(p => gtb-pack-ok(p), packs);
+    let largest = foldl((best, p) => nil?(best) || p[3] > best[3] ? p : best, [], packs);
+    let ids = nil?(largest) ? [] : gtb-spread(largest[1], largest[2], 24);
+    let sampled_ok = !nil?(ids) && all?(raw => gtb-read-ok(r, raw), ids);
+    let t4 = host_monotonic_ms();
+    let s5 = gtb-say("packs", [map(p => [p[2], "objects", p[3], "bytes"], packs), "sampled in the largest", len(ids), "ms", t4 - t3]);
+    let b32 = gtb-bit(packs_ok && sampled_ok, 32);
+    let b64 = gtb-bit(gtb-synthetic-ok(host_temp_dir() ++ "/gtb-store-" ++ host_pid().str()), 64);
+    let cg = nothing?(r) ? nothing() : r[5];
+    let gids = nothing?(cg) ? [] : gtb-graph-oids(cg, cg[5], 60);
+    let b128 = gtb-bit(nothing?(cg) || (len(gids) == 60 && gtb-graph-agrees?(r, gids)), 128);
+    let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+    let shown = print(["git-native-store-band", "verdict", verdict, "ms", host_monotonic_ms() - t0]);
+    verdict;
+  }
+  gtb-run();
+}

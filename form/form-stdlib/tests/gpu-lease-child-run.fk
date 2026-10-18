@@ -1,0 +1,42 @@
+// gpu-lease-child-run.fk — a short-lived stand-in for a Metal client, spawned by gpu-lease-band.
+//
+// It touches no device. It takes a lease on a SCRATCH lock (never .hearth/gpu.lock), writes what the take
+// answered, and then does one of three things:
+//   exit   leaves without giving the lease back (a client that died on a form_error)
+//   hold   keeps it hold-ms, then gives it back and writes what the give answered
+//   hang   sleeps hold-ms holding it (the band kills it mid-hold)
+// The band cannot pass arguments to a cell, so it writes the request to .hearth/lease-probe/req-<this pid>
+// after the spawn, one value per line: mode, lock, tag, hold-ms, wait-ms, go-path (a file to wait for, or empty).
+//
+// preflight-exec: forbidden
+import form/form-stdlib/gpu-lease.bml;
+section [form.bml] {
+  def gpc-dir() = ".hearth/lease-probe";
+  def gpc-again(path, n, ms) {
+   let s = host_sleep_ms(ms);
+   gpc-await(path, n - 1, ms);
+  }
+  def gpc-await(path, n, ms) {
+   let t = read_file(path);
+   (nothing?(t) && (n > 0)) ? gpc-again(path, n, ms) : t;
+  }
+  // the gate lets two children start their takes in the same few milliseconds
+  def gpc-gate(go) = (Comparable) len(go) == 0 ? 0 : (nothing?(gpc-await(go, 4000, 5)) ? 0 : 1);
+  def gpc-write(tag, name, ans) {
+   let tok = gpu-lease-token(ans);
+   write_file(gpc-dir() ++ "/" ++ name ++ "-" ++ tag, ans[0] ++ gpl-nl() ++ (nothing?(tok) ? "" : tok) ++ gpl-nl() ++ value_str(ans));
+  }
+  def gpc-hold(ls, ans) {
+   let s = host_sleep_ms(gpl-num(ls[3]));
+   gpc-write(ls[2], "rel", gpu-lease-give(ls[1], ans));
+  }
+  def gpc-run(ls) {
+   let gated = gpc-gate(ls[5]);
+   let ans = gpu-lease-take-with(ls[1], "child-" ++ ls[2], [gpl-num(ls[4]), 100, 1500, gpl-markers()]);
+   let w = gpc-write(ls[2], "ans", ans);
+   (String) ls[0] == "hold" ? gpc-hold(ls, ans) : ((String) ls[0] == "hang" ? host_sleep_ms(gpl-num(ls[3])) : 0);
+  }
+  let req = gpc-await(gpc-dir() ++ "/req-" ++ host_pid().str(), 200, 50);
+  let taken = host_path_remove(gpc-dir() ++ "/req-" ++ host_pid().str());
+  nothing?(req) ? 0 : gpc-run(gpl-lines(req));
+}

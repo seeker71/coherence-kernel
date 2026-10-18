@@ -1,0 +1,274 @@
+# Native care from organ signals
+
+The current source execution observes 13
+resource scenarios, actual diagnostic care while children run, and two resident
+CLI reads that preserve open needs. The
+installed CLI execution reaches the
+same care flow through its compiled default entry, without a source argument.
+Its two reads consume 44,397 event bytes and then zero, preserving three signals,
+two open needs and one supplied resource. The child exits zero with empty stderr;
+its process group and both declarations are released. These observations bind
+the actual runtime, source and companion artifact bytes.
+Field recovery must be launched from a dedicated working directory with
+`FK_FIELD_OFF 1` in its `fkwu.conf`, keeping working memory outside the shared
+field. The door does not set or enforce that configuration. Every other
+kernel must settle before reset. The Form admission predicate accepts only a
+singleton roster containing this process's positive integer PID. Empty readings,
+missing self, additional owners and malformed values refuse. The
+pure admission observations exercise
+that predicate without resetting a field. The registered-kernel roster remains
+bounded; it cannot prove complete host liveness. A refusal prints the observed
+roster and exits nonzero. Recovery
+does not change the normal runtime's shared-memory configuration.
+
+Shared string bytes use expandable sparse segments in field version 4. String
+words, source attribution and foreign cell reads retain shared identity across
+growth and garbage collection. Older owners retain their own field;
+incompatible foreign mappings refuse admission. `kernel_stat(70)` observes
+claimed string bytes and `kernel_stat(71)` observes string slots (65 and 66 read the local string holes and the
+standing closure rows; the field readings once took those two numbers and hid them). Node, pair and
+string metadata columns still have their current capacities. Resource refusal
+cannot publish a private string word into a shared node.
+
+Compiled image identity follows the admitted executable. On macOS it uses the
+loaded image's UUID and text fingerprint, so replacing its pathname cannot
+change an existing owner's identity. Identical rebuilds reuse their compiled
+images; a different executable still requires fresh compilation. This carrier
+belongs in the native artifact layer as the seed's image reader and writer shrink.
+
+Executing organs send signals when they encounter unease, uncertainty or a
+needed resource. `organ-care.bml` receives those signals at their execution
+boundaries, directs attention to each need, and calls an available native
+provider whose action the asking organ offered. The asking organ observes what
+arrived and what remains needed. Care follows the signal without a central
+schedule of health checks.
+
+The core `care` command and `./fkwu observe/form-core-care-run.bml` show this
+exchange: current unease, directed attention, needed resources and supply
+outcomes. Glass uses the same view. Viewing the exchange does not invoke an
+actuator, a model or a remote service. The `health` command retains the underlying
+observation format. Care policy lives in Form; this interface adds no
+handwritten C.
+
+An organ emits its observation and calls
+`oc-hear(context, reading, providers, emit, observe)`. Providers and callbacks
+are supplied by executing Form code. Resource names and offered actions are
+open data; the care organ has no fixed list of organs, errors or verdicts.
+Each declared need receives attention. An unmatched need stays open. Actual
+supply, a correlated new observation and recovery remain distinct. Current
+observations retain their provider and delivery evidence so the interface can
+show what nourishment reached its owner.
+
+`supply_outcomes` retains the requested need, provider and actual callback
+result. `awaiting-organ-observation` means supply returned but the organ has
+not supplied a fresh reading; `organ-reobserved` means it has. Neither state
+interprets an arbitrary provider result as successful delivery or recovery.
+Attention annotations bind to their original observation identity. A late
+annotation cannot replace the organ's newer reading.
+
+An organ declares its event-file reference when it creates that flow. The native
+process runner and session memory do this at their existing lifecycle boundaries.
+Other organs can use the same `organ-health-discovery.bml` API:
+
+```text
+ohd-register(root, source, capabilities)
+ohd-renew(root, source, capabilities)
+ohd-retire(root, source)
+```
+
+Registration returns its actual publisher, generation and carrier outcome.
+Retained callers can pass an explicit `ohd-open()` owner to the corresponding
+`*-with` functions. The short lifecycle API recovers its exact process-birth
+frame when called again; allocator compaction cannot silently discard it.
+Explicit owners add the observed record-constructor dispatch counter to that birth
+identity. They do not derive identity from a record's display string.
+Tail dispatch can count one construction twice; this monotonic clock supplies
+identity and does not measure the number of allocated records.
+The shared `native-owner-clock.bml` owns that counter reading. Lifetime health
+retains its own birth-and-construction identity on the resource owner, so
+releasing one context cannot replace another context's unresolved observation.
+These identities are cooperative within the current process; they do not
+establish concurrent record access or an address-space boundary.
+Unchanged explicit-owner registration performs no shared-memory operation.
+The short API reads the shared frame but skips an unchanged publication.
+
+Discovery transports references and capability strings, not event contents.
+The existing local shared-memory roster has 511 entries, 119-byte names and
+least-recent-registration eviction. Reports expose those limits and any carrier
+refusal. Coverage is **currently advertised**, not every organ. Retained frames
+can outlive their publisher; PID existence, source availability and observation
+age remain separate. Cooperative declarations are not an isolation boundary.
+
+The resident CLI holds an explicit reader context across commands. Each source
+gets a positive, caller-adjustable work budget, 65536 bytes by default. JSONL
+records enter the current reading only after their terminating newline arrives.
+An unchanged flow reads zero history bytes. Backlog, incomplete records,
+malformed records and absent sources remain visible needs. A reader retains the
+unfinished record and current organ map; the work budget is not a memory cap.
+
+```text
+care status
+care {"sources":["/absolute/events.jsonl"],"budget_bytes":262144}
+```
+
+Explicit `sources` selects paths under a declared append-only stream contract;
+the reader does not verify ownership of those paths. Otherwise discovery
+uses the current working directory as its root. A standalone invocation opens a
+new snapshot; retained native callers use `ohc-open()` and `occ-command-at`.
+The reported elapsed time covers discovery, event reading and projection up to
+the timing field. Request parsing and final JSON serialization sit outside that
+interval. Read-byte counters
+describe event payload consumption, not shared-memory discovery traffic.
+
+Health and care share the retained reader. Complete event records, current
+observations, ages and report composition use collector-visible Form values
+through `json-view.bml`. The shared JSON parser selects value constructors;
+strict wire admission, ordered duplicate pairs and typed scalar meanings stay
+intact. `organ-health-values.bml` owns validation, observation replacement,
+attention and response correlation for both value and node APIs. Health, care
+and Glass serialize values directly. `form-core-health-values.bml` owns their
+shared source projection, attention order and source needs.
+`ohc-view-request-at` and `occ-view-request-at` return these views;
+`ohc-request-at` and `occ-request-at` explicitly materialize primary nodes for
+a caller requesting content identity. Custom `ohc-read-with` and
+`ohc-request-with` callbacks continue to receive node source reports.
+The working lists and strings remain visible to the current
+collector. Current-state updates copy surviving pairs, so obsolete revisions
+leave the reader's roots; deliberately held snapshots keep their own values.
+A view creates no new record owner; callers retaining a view in a record
+release that reference explicitly because seed records remain roots.
+
+The core keeps readers in one ordinary Form list; each reader holds publisher
+generations as value pairs. `ohc-close` clears every reader field and drops the
+list; `ohs-close` closes a standalone reader. Held views remain valid. One-shot
+commands, Glass, CLI exit and owning learner calls close their readers. Borrowed
+reader calls leave lifetime with their caller. Missing sources or temporary
+source selections preserve cursors until close. Closed readers cannot be
+updated or restarted. The reader and its identity marker still occupy seed
+record slots; closing releases their payload roots, not those slots.
+
+Retained views remain exact through observed collection while temporary strings
+are reclaimed. The changing-event witness below measures event consumption
+and serialization, with discovery declarations prepared outside its intervals.
+Its finite collection exercise does not constrain the reader's lifetime.
+
+Request parsing, discovery and explicit node-returning APIs still admit primary
+nodes. Reader records, the collector, boxed floats and framebuffer timestamp
+publication remain seed-backed. Three floating inputs in the
+value-contract observation create
+three float boxes and no primary nodes. The same observation compares twelve
+protocol transitions and a real 44,397-byte organ exchange against the parent
+implementation. Complete native ownership and signaling when ordinary
+allocation cannot grow remain open.
+
+The health command observation alternates health-first and care-first consumption of actual local write/readback
+events through 32 cycles. Warmed explicit-source commands include request
+parsing and serialization in their measured intervals; event production and
+reply decoding are outside. Those intervals mint no primary nodes. Partial
+records share the same cursor; a held health view remains exact through actual
+collection. Initial admission is recorded separately. This workload does not
+establish allocation-free execution or the cost of changing discovery.
+The projection comparison preserves typed nested data, duplicate fields, source states, pain-first order,
+request messages and custom node callbacks against the preceding implementation.
+
+Shrinking files reset the reader. A known publisher's renewed generation also
+resets it, including replacements of equal or greater size. A new publisher at
+an already read path resets by default. The declared
+`append-only-shared-source` capability permits a new writer to join an unchanged
+shared append flow without rereading history; session memory uses that contract.
+Unannounced equal-size replacement, inode aliases and undeclared writers remain
+outside this append protocol.
+
+Each source keeps the same mutable reader across declared generations.
+Renewal clears its cursor, unfinished text, current readings, state, byte counts
+and invalid-record count. Previously returned views retain their own values.
+Truncation preserves the generation and accumulated invalid-record count while
+emitting a source-reset observation. Shared-append joins preserve pending bytes;
+a known shared writer renewing its generation still starts a fresh reading.
+
+The changing-event observation executes local writes, observes their readback and carries fresh events through
+32 append/renewal cycles. It includes malformed and unfinished records,
+equal-size replacements, another live source, shared-writer joins, truncation
+and an old view held across actual collection. Its append and renewal intervals
+mint no primary nodes; they still allocate temporary lists and strings. Reader
+restart and repeated admission diagnostics invoke no record constructor.
+One reader identity and a monotonic diagnostic sequence outlive publisher
+generations. Framebuffer timestamps are measured in each admission diagnostic
+row, separately from event parsing. Per-stage costs
+include reading and serialization; declaration preparation and event production
+are outside those intervals. Heap slots include garbage and are not retained
+RAM or total allocation.
+
+The result keeps pain first and unknown health or open resource needs visible.
+Every projected organ includes its source state and observation age. Applied
+care preserves the original observation's health and time. Recovery requires
+the owning organ to re-observe its actual result. Offered responses are data;
+the core never executes a command supplied by an event.
+
+Every newly read nonempty stderr span in the process organ produces a live
+`diagnostic-availability` signal asking for evidence and interpretation. Its
+local provider supplies owned diagnostic bytes, and the organ reads them again
+to observe delivery. Evidence received does not establish interpretation,
+semantic progress or recovery. Exit, release and the child's own observations
+keep their meanings. Raw diagnostic text stays private, outside the framebuffer.
+
+Verified session memory uses the same care entry when the learner needs
+admitted training evidence. Receipt of eligible evidence leaves loss recovery
+to a subsequent measured learning outcome. Assessment exclusions remain active.
+
+Healing defaults to local routes and requires an explicit `remote` field before
+even probing an external assistant. Each retained attempt has an actual local
+experience identity; frontier returns bind that evidence and real execution
+outcome. Retention, checked success, a learner update and serving improvement
+remain distinct. See [healing](form-cli-healing.md) and
+[session learning](native-session-learning.md).
+
+The view's zero model/remote counts describe that read only. They are
+not global crossing totals. Full discovery of every organ, interpretation of
+every diagnostic, comprehensive resource-cost routing and measured outward
+gifts remain the north star. The active care
+callbacks run synchronously in their owning process. Cross-process declarations
+make their exchange visible; they do not grant the view remote actuators.
+
+## Coding reply syntax
+
+The coding organ observes malformed reply syntax through `organ-health.bml`.
+The shared JSON validator retains the first failing byte and expected token.
+Its live boundary emits the need, applied action and a correlated observation;
+reply content stays in the retained reply file.
+
+For a typed tool command, an extra mismatched closing delimiter immediately
+before the expected delimiter can be removed, or the missing expected closer
+can be inserted before the mismatched closer. Exactly one of these single-byte
+candidates must pass strict JSON admission. Every other byte stays unchanged;
+unfinished output at end-of-input is never completed. The command
+then enters the existing role, writable-path, guarded-edit and verification
+rules. `native_json_repairs` in the result and checkpoint identifies the byte,
+before/after hashes and actual tool/check counts. This establishes syntax
+recovery; completion still depends on the original caller checks.
+
+Other malformed replies receive precise correction feedback. Repeated syntax
+failures are counted; rejected replies execute no tools. A later valid reply
+clears that syntax need. Ordinary valid replies emit no syntax-health rows.
+A retained native coding failure showed an actual tool recovery and the
+remaining implementation refusal.
+
+## Guarded edit care
+
+Resident edit failures carry `guard_evidence`: actual match count, whether the
+resident documents changed, and a bounded byte comparison of the old argument
+against the whole resident source. The comparison identifies its alignment;
+it does not select an approximate edit. Existing error codes stay intact.
+An existing-path `write` refusal repeats the create-only contract. After either
+guard failure, the next `read` of that same path supplies full current bytes
+even when those bytes were already supplied at admission. Other reads retain
+their normal context references. Tool evidence stays in the private coding
+context and does not assert a filesystem mutation.
+
+`edit` also accepts `[path, "sha256", expected_hash, new_whole_document_text]`.
+Single-document `read`, `cat` and guard failures supply `resident_sha256` for the
+exact resident bytes. The tool checks that hash before changing any byte; a
+stale identity returns `edit-sha256-mismatch` and preserves the document. This
+form avoids repeating the old source inside a whole-document replacement.
+The same role, writable-path, review and caller-verification checks still apply.
+It edits the resident document; publication remains the caller's responsibility.

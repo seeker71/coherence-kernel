@@ -1,0 +1,213 @@
+// FCSC1: form base, new output directory, then roots.
+// FCSI1/FCSV1: seal path, expected seal fingerprint, END. Every field is one line.
+// Checked files carry publication; stdout is never completion evidence.
+import form-stdlib/bml/native-table-source-seal.bml;
+import form-stdlib/bml/native-cli-startup.bml;
+import observe/framebuffer-runtime-observation.fk;
+section [form.bml] {
+ class FormCliSourceClosure {
+  def fcsc-observe(stage,metric,value,work) {
+   let before = fbro-snapshot();
+   let result = work();
+   fbro-stage-observed-stream("cli-source",stage,"source-closure","cli-source","held-bytes","native-publication","observe-cost",before,fbro-snapshot(),metric,value,"ready","form/form-stdlib/bml/form-cli-source-closure.bml",1,1);
+   result;
+  }
+  def fcsc-input(rows) {
+   let line = read_line();
+   nothing?(line) ? reverse(rows)
+   : ((Comparable) len(line) == 0) || ((len(line) >= 4096) || (str_find(line,byte_to_str(0),0) >= 0)) ? nts-refuse("closure-root-line","")
+   : fcsc-input(cons(line,rows));
+  }
+  def fcsc-relative(base,root,path) {
+   (str_find(path,"\n",0) >= 0) || (str_find(path,"\r",0) >= 0) ? nts-refuse("manifest-path-line",path)
+   : (Comparable) str_find(path,base + "/",0) == 0 ? substring(path,len(base) + 1,len(path))
+   : (Comparable) str_find(path,root + "/",0) == 0 ? ("../" + substring(path,len(root) + 1,len(path)))
+   : nts-refuse("manifest-outside-body",path);
+  }
+  def fcsc-lines(base,root,paths) = paths |> map(path => fcsc-relative(base,root,path) + "\n");
+  def fcsc-roots-at(base,paths) = nil?(paths) ? [] : cons((String) substring(paths[0],0,1) == "/" ? paths[0] : fs-path-join(base,paths[0]),fcsc-roots-at(base,paths[1:]));
+  def fcsc-line() {
+   let line = read_line();
+   nothing?(line) ? nts-refuse("closure-request-incomplete","")
+   : (len(line) >= 4096) || (str_find(line,byte_to_str(0),0) >= 0) ? nts-refuse("closure-request-line","") : line;
+  }
+  def fcsc-manifest-name() = "form-stdlib/bootstrap/form-cli.dependencies";
+  def fcsc-frame(path,bytes) = nts-text(["path:",path,"\nbytes:",len(bytes).str(),"\n",bytes,"\n"]);
+  def fcsc-digest(base,rows,manifest) {
+   let framed = rows |> map(row => fcsc-frame(fcsc-relative(base,fs-path-dirname(base),row[0]),row[2]));
+   ntss-hash(nts-text(cons(fcsc-frame(fcsc-manifest-name(),manifest),framed)));
+  }
+  def fcsc-originals(base,rows) = rows |> map(row => json-node-object([ntss-s("owner",row[0]),ntss-s("identity_path",fcsc-relative(base,fs-path-dirname(base),row[0])),ntss-n("bytes",len(row[2])),ntss-s("fingerprint",ntss-hash(row[2]))]));
+  def fcsc-genesis-row(path,text) = nts-text([";;;; ==== FILE: ",path," ====\n",text]);
+  def fcsc-genesis-rows(base,rows) = rows |> map(row => fcsc-genesis-row(fcsc-relative(base,fs-path-dirname(base),row[0]),row[2]));
+  def fcsc-genesis(base,rows,manifest) = nts-text(cons(fcsc-genesis-row(fcsc-manifest-name(),manifest),fcsc-genesis-rows(base,rows)));
+  def fcsc-write(path,text) {
+   ntss-need((Comparable) write_file(path,text) == len(text),"publication-write",path);
+   ntss-need((String) ntss-read(path) == text,"publication-readback",path);
+   path;
+  }
+  def fcsc-mkdir(path) {
+   ntss-need(!fs-exists?(path),"publication-directory-exists",path);
+   ntss-need((Comparable) host_mkdir_mode(path,448) == 1,"publication-directory",path);
+   path;
+  }
+  def fcsc-tree-directory(path) {
+   fs-exists?(path) ? 1 : {
+    fcsc-tree-directory(fs-path-dirname(path));
+    fcsc-mkdir(path);
+   };
+  }
+  def fcsc-portable-deps(owner,deps) = nil?(deps) ? 1 : {
+   ntss-need(!((String) substring(deps[0],0,1) == "/"),"snapshot-absolute-dependency",owner);
+   fcsc-portable-deps(owner,deps[1:]);
+  };
+  def fcsc-snapshot-rows(root,directory,rows,identities) = nil?(rows) ? [] : {
+   let owner = rows[0][0]; let text = rows[0][2]; let identity = identities[0];
+   fcsc-portable-deps(owner,nts-source-declarations(owner,text)[0]);
+   let path = fs-path-join(directory,fcsc-relative(root,root,owner));
+   fcsc-tree-directory(fs-path-dirname(path));
+   fcsc-write(path,text);
+   cons(json-node-object([ntss-s("owner",owner),ntss-s("read",path),ntss-n("bytes",ntss-num(identity,"bytes")),ntss-s("fingerprint",ntss-str(identity,"fingerprint"))]),fcsc-snapshot-rows(root,directory,rows[1:],identities[1:]));
+  };
+  def fcsc-create(base,directory,roots) {
+   ntss-need(!nil?(roots),"manifest-roots-empty",base);
+   let rows = fcsc-observe("source-read","roots",len(roots),() => nts-closure-records(fcsc-roots-at(base,roots)));
+   let manifest = nts-text(fcsc-lines(base,fs-path-dirname(base),nts-owner-paths(rows)));
+   let bytes = rows |> foldl((total,row) => total + len(row[2]),0);
+   let digest = fcsc-observe("closure-digest","bytes",bytes,() => fcsc-digest(base,rows,manifest));
+   let originalRows = fcsc-observe("source-digests","bytes",bytes,() => fcsc-originals(base,rows));
+   let genesis = fcsc-genesis(base,rows,manifest);
+   fcsc-mkdir(directory);
+   let snapshotRoot = fs-path-join(directory,"body");
+   fcsc-mkdir(snapshotRoot);
+   let boundaryPath = fcsc-write(fs-path-join(snapshotRoot,".git"),"sealed source lookup boundary\n");
+   let snapshotRows = fcsc-observe("snapshot-write","bytes",bytes,() => fcsc-snapshot-rows(fs-path-dirname(base),snapshotRoot,rows,originalRows));
+   let snapshotManifest = fs-path-join(snapshotRoot,"form/" + fcsc-manifest-name());
+   fcsc-tree-directory(fs-path-dirname(snapshotManifest));
+   fcsc-write(snapshotManifest,manifest);
+   let manifestRead = fcsc-write(fs-path-join(directory,"form-cli.dependencies"),manifest);
+   let digestPath = fcsc-write(fs-path-join(directory,"source.id"),digest + "\n");
+   let genesisPath = fcsc-write(fs-path-join(directory,"genesis.txt"),genesis);
+   let manifestRow = json-node-object([ntss-s("path",fs-path-join(base,fcsc-manifest-name())),ntss-s("read",manifestRead),ntss-n("bytes",len(manifest)),ntss-s("fingerprint",ntss-hash(manifest))]);
+   let snapshot = json-node-object([ntss-s("root",snapshotRoot),json-node-pair("manifest",ntss-reference(snapshotManifest,manifest)),json-node-pair("boundary",ntss-reference(boundaryPath,"sealed source lookup boundary\n")),json-node-pair("sources",json-node-array(snapshotRows))]);
+   let seal = json-node-object([ntss-s("schema","native-table-source-seal-v2"),ntss-s("base",base),ntss-s("source_id",digest),json-node-pair("manifest",manifestRow),json-node-pair("digest",ntss-reference(digestPath,digest + "\n")),ntss-n("bytes",bytes),json-node-pair("genesis",ntss-reference(genesisPath,genesis)),json-node-pair("snapshot",snapshot),json-node-pair("sources",json-node-array(originalRows))]);
+   let encoded = json-emit(seal);
+   fcsc-write(fs-path-join(directory,"sources.json"),encoded);
+   nts-held(rows);
+   fcsc-write(fs-path-join(directory,"ready"),ntss-hash(encoded) + "\n");
+   1;
+  }
+  def fcsc-current-originals(rows) = nil?(rows) ? 1 : {
+   ntss-need(ntss-file-current(rows[0],ntss-str(rows[0],"owner")),"sealed-source-changed",ntss-str(rows[0],"owner"));
+   fcsc-current-originals(rows[1:]);
+  };
+  def fcsc-current-reads(rows) = nil?(rows) ? 1 : {
+   ntss-need(ntss-file-current(rows[0],ntss-str(rows[0],"read")),"sealed-snapshot-source-changed",ntss-str(rows[0],"owner"));
+   fcsc-current-reads(rows[1:]);
+  };
+  def fcsc-load(path,expected) {
+   let text = ntss-read(path);
+   ntss-need((String) ntss-hash(text) == expected,"seal-identity-changed",path);
+   ntss-parse(path,text);
+  }
+  def fcsc-verify(seal,installed) = fcsc-observe("source-verify","bytes",ntss-num(seal,"bytes"),() => fcsc-check(seal,installed));
+  def fcsc-check(seal,installed) {
+   fcsc-current-originals(json-array-elements(ntss-get(seal,"sources")));
+   let manifest = ntss-get(seal,"manifest");
+   ntss-need(ntss-file-current(manifest,ntss-str(manifest,"read")),"sealed-manifest-changed",ntss-str(manifest,"read"));
+   installed ? ntss-need(ntss-file-current(manifest,ntss-str(manifest,"path")),"published-manifest-changed",ntss-str(manifest,"path")) : 1;
+   let digest = ntss-get(seal,"digest");
+   ntss-need(ntss-file-current(digest,ntss-str(digest,"path")) && ((String) ntss-read(ntss-str(digest,"path")) == (ntss-str(seal,"source_id") + "\n")),"sealed-digest-changed",ntss-str(digest,"path"));
+   let snapshot = ntss-get(seal,"snapshot"); let snapshotManifest = ntss-get(snapshot,"manifest"); let genesis = ntss-get(seal,"genesis");
+   let boundary = ntss-get(snapshot,"boundary");
+   ntss-need(ntss-file-current(boundary,ntss-str(boundary,"path")),"sealed-snapshot-boundary-changed",ntss-str(boundary,"path"));
+   fcsc-current-reads(json-array-elements(ntss-get(snapshot,"sources")));
+   ntss-need(ntss-file-current(snapshotManifest,ntss-str(snapshotManifest,"path")),"sealed-snapshot-manifest-changed",ntss-str(snapshotManifest,"path"));
+   ntss-need(ntss-file-current(genesis,ntss-str(genesis,"path")),"sealed-genesis-changed",ntss-str(genesis,"path"));
+   1;
+  }
+  def fcsc-install(seal) {
+   fcsc-verify(seal,0);
+   let manifest = ntss-get(seal,"manifest"); let target = ntss-str(manifest,"path");
+   let stage = target + (".writing-" + host_pid().str());
+   ntss-need(!fs-exists?(stage),"manifest-stage-exists",stage);
+   let text = ntss-read(ntss-str(manifest,"read"));
+   fcsc-write(stage,text);
+   ntss-need((Comparable) host_path_rename(stage,target) == 0,"manifest-rename",target);
+   ntss-need((String) ntss-read(target) == text,"manifest-installed-readback",target);
+   1;
+  }
+  def fcsc-sealed(mode) {
+   let path = fcsc-line(); let expected = fcsc-line();
+   ntss-need(((String) fcsc-line() == "END") && nothing?(read_line()),"closure-request-end",path);
+   let seal = fcsc-load(path,expected);
+   let result = (String) mode == "FCSI1" ? fcsc-install(seal) : fcsc-verify(seal,1);
+   ntss-need((String) ntss-hash(ntss-read(path)) == expected,"seal-identity-changed",path);
+   result;
+  }
+  def fcsc-original-read(seal,path) {
+   let owner = nts-absolute(path);
+   let row = ntss-find(json-array-elements(ntss-get(ntss-get(seal,"snapshot"),"sources")),owner);
+   ntss-need(!nothing?(row),"unsealed-emission-source",owner);
+   let text = ntss-read(ntss-str(row,"read"));
+   ntss-need(ntss-content-current(row,text),"sealed-emission-source-changed",owner);
+   text;
+  }
+  def fcsc-c-hex(text,at,end,held,alphabet) = at == end ? nts-text(reverse(held)) : {
+   let start = str_byte_at(text,at) * 4;
+   fcsc-c-hex(text,at + 1,end,cons(substring(alphabet,start,start + 4),held),alphabet);
+  };
+  def fcsc-c-strings(text,at,held,alphabet) = (Comparable) at == len(text) ? nts-text(reverse(held)) : {
+   let end = len(text) < (at + 1024) ? len(text) : (at + 1024);
+   fcsc-c-strings(text,end,cons(nts-text(["\"",fcsc-c-hex(text,at,end,[],alphabet),"\"\n"]),held),alphabet);
+  };
+  def fcsc-genesis-c(text) {
+   let alphabet = 0 .. 256 |> map(byte => nts-text(["\\x",json-hex-digit(byte / 16),json-hex-digit(byte % 16)])) |> nts-text();
+   nts-text(["\nconst unsigned char fk_genesis[] =\n",len(text) == 0 ? "\"\"\n" : fcsc-c-strings(text,0,[],alphabet),";\nconst long long fk_genesis_len = ",len(text).str(),";\n"]);
+  }
+  def fcsc-emission() {
+   let path = fcsc-line(); let expected = fcsc-line(); let directory = nts-absolute(fcsc-line());
+   ntss-need(((String) fcsc-line() == "END") && nothing?(read_line()),"closure-emission-end",path);
+   let seal = fcsc-load(path,expected);
+   fcsc-verify(seal,1);
+   let runtimePath = fs-path-join(fs-path-dirname(ntss-str(seal,"base")),"runtime/fkwu-uni.c");
+   let runtimeText = fcsc-original-read(seal,runtimePath);
+   let sourceId = ntss-str(seal,"source_id");
+   let genesisRow = ntss-get(seal,"genesis"); let genesis = ntss-read(ntss-str(genesisRow,"path"));
+   ntss-need(ntss-content-current(genesisRow,genesis),"sealed-genesis-changed",ntss-str(genesisRow,"path"));
+   let startup = fcsc-observe("startup-emission","bytes",len(genesis),() => nts-text([ncs-binding(sourceId),ncs-image(runtimeText,sourceId),fcsc-genesis-c(genesis)]));
+   fcsc-mkdir(directory);
+   let startupPath = fcsc-write(fs-path-join(directory,"form-cli-native.c"),startup);
+   let heldRuntime = fcsc-write(fs-path-join(directory,"runtime-source.c"),runtimeText);
+   let report = json-node-object([ntss-s("schema","form-cli-native-emission-v2"),ntss-s("source_id",sourceId),ntss-s("seal_id",expected),json-node-pair("runtime",ntss-reference(heldRuntime,runtimeText)),json-node-pair("startup",ntss-reference(startupPath,startup))]);
+   fcsc-write(fs-path-join(directory,"emission.json"),json-emit(report));
+   fcsc-verify(seal,1);
+   ntss-need((String) ntss-hash(ntss-read(path)) == expected,"seal-identity-changed",path);
+   fcsc-write(fs-path-join(directory,"ready"),ntss-hash(json-emit(report)) + "\n");
+   1;
+  }
+  def fcsc-emitted(mode) {
+   let path = fcsc-line(); let expected = fcsc-line(); let target = fcsc-line();
+   ntss-need(((String) fcsc-line() == "END") && nothing?(read_line()),"emission-request-end",path);
+   let held = ntss-read(path);
+   ntss-need((String) ntss-hash(held) == expected,"emission-record-changed",path);
+   let report = parse-json(path,held);
+   ntss-need((String) ntss-str(report,"schema") == "form-cli-native-emission-v2","emission-schema",path);
+   let startup = ntss-get(report,"startup"); let runtime = ntss-get(report,"runtime");
+   ntss-need(ntss-file-current(runtime,ntss-str(runtime,"path")),"emitted-runtime-changed",ntss-str(runtime,"path"));
+   let bytes = ntss-read((String) mode == "FCEP1" ? ntss-str(startup,"path") : target);
+   ntss-need(ntss-content-current(startup,bytes),"emitted-startup-changed",target);
+   (String) mode == "FCEP1" ? fcsc-write(target,bytes) : 1;
+   ntss-need((String) ntss-read(path) == held,"emission-record-changed",path);
+   1;
+  }
+  def fcsc-run() {
+   let mode = read_line();
+   nothing?(mode) ? 0 : (String) mode == "FCSC1" ? {
+    let base = nts-absolute(fcsc-line()); let directory = nts-absolute(fcsc-line());
+    fcsc-create(base,directory,fcsc-input([]));
+   } : ((String) mode == "FCSI1") || ((String) mode == "FCSV1") ? fcsc-sealed(mode) : (String) mode == "FCSE1" ? fcsc-emission() : ((String) mode == "FCEP1") || ((String) mode == "FCEV1") ? fcsc-emitted(mode) : nts-refuse("closure-request-version",mode);
+  }
+ }
+ fcsc-run();
+}

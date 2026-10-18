@@ -1,0 +1,285 @@
+; form-cli-heal-native-band.bml — the native heal organ's snapshot and process supervision, held against the host itself.
+;
+; The organ (form-cli-heal-native-io.bml, -process.bml, -eval.bml) keeps a repair attempt in a snapshot copy of the body, supervises one
+; child process at a time, and replaces a source file only when the snapshot still matches. It used to ask the host's programs for
+; the filesystem work (tar, cp, rm, chmod, pwd, a generated inventory.sh and links-check.sh) and for the process work (ps, kill, and a
+; generated .launch.sh under `sh` with job control). Every one of those is a seed door or Form now. This band runs the real organ on
+; the real body: a real snapshot of the tree, real children, real signals.
+;
+; Expected: 65535
+; Verdict 65535 when every claim lands:
+;   1     a child runs to its end under supervision: a Form cell prints a line and its working directory; the organ answers "0", the
+;         output file holds the line, the .status file reads 0, the .process.json reads state finished and returncode 0, and the
+;         child's working directory is the body root
+;   2     a deadline stops a sleeping child: the organ answers 124 within 25 s of a 4 s deadline (a cold cell lowers first),
+;         .process.json says reason timeout, and the child's pid is no longer alive
+;   4     a deadline stops the child's descendants with it: a cell that begins a grandchild sleeper is stopped at six seconds, and
+;         the grandchild (its pid printed first) is not alive afterwards
+;   8     a child can be run in the job's own work directory: the cell prints that directory's physical path
+;   16    a snapshot is made of the body: fhn-prepare answers a job directory, every name in names.txt arrives byte for byte with its
+;         mode (fkwu executable) in job/work, snapshot.json holds the manifest and the live source stands unchanged
+;   32    reset: a changed file and a removed file in the work copy are restored by fhn-reset ("ready"), and the copy equals the
+;         snapshot again
+;   64    guard: a fresh snapshot is "clean"; a changed file in the work copy reads "changed:<name>"
+;   128   commit: a proposal equal to the work copy's candidate replaces the live target and answers "applied"; a proposal that is not
+;         the candidate answers "refused:stale-or-mutated-input" and leaves the live target alone
+;   256   finish: the work copy and the archive are released ("snapshot-released;evidence-retained") and the evidence stays
+;   512   a snapshot refuses a symbolic link in its names ("refused:snapshot-inventory-or-symlink"), a name with `..`
+;         ("refused:invalid-relative-source"), a test as target and a target that is its own checker
+;   1024  no program was asked: the organ's four files hold none of the program names they used to run (tar, cp, rm, chmod, ps,
+;         kill, sh, pwd, and the generated script names)
+;   2048  plant: the comparison used for claim 16 sees a flipped byte and a changed mode in the work copy
+;   4096  speed: preparing the snapshot of the whole body (2100 files, 89 MB: inventory, link scan, a SHA-256 of every file, the copy,
+;         a second SHA-256 of the copy) takes under 200 s; the archive-and-extract it replaced alone took 16 s of it
+;   8192  the references the healer offers its guide are read in process (fh-references, which ran `rg -n -F` as a program): the lines
+;         naming a symbol come as `path:line:text` with the line number true to the file, only .fk and .bml files of the source
+;         directories are read and hidden entries are not entered, a symbol nothing names answers exit 1 and no lines, a symbol
+;         everything names stops at 200 lines, and the whole search takes under 15 s (the stage's old deadline)
+;   16384 signals go by name to the host's own numbers (/bin/kill took the name): HUP 1, INT 2, QUIT 3, KILL 9, TERM 15, and STOP and
+;         CONT as this host numbers them (Darwin 17 and 19, Linux 19 and 18); a name the table does not know is 0 and is refused; a real
+;         sleeper stopped and continued is still alive, and then dies of TERM (wait reads 143), of KILL (137) and of HUP (129, or, when
+;         the band was started by nohup and so inherits the ignoring of HUP, survives it and ends of KILL)
+;   32768 the evaluation's body copy (fne-copy, with no case to run): the named files arrive in the disposable work directory, body.manifest
+;         holds one `name<TAB>sha256` line per file with the digest of that file, summary.json reads status measured with a
+;         snapshot_sha256 equal to the digest of body.manifest, the work directory is released and the evidence stays
+;
+; REQUIRES: the seed doors host_realpath, host_file_identity, host_utimes, host_chmod, host_file_copy, host_file_mode, host_mkdir_mode, host_signal, host_alive, host_processes, host_process, and the spawn directory (a fourth element of the host_spawn_at redirect list); git on the path (the inventory is `git ls-files`); the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/copy-by-names.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-heal-native-eval.bml form-stdlib/bml/form-cli-heal-references.bml
+section [form.bml] {
+ class FormCliHealNativeBand {
+  def hnb-fresh() {
+   let root = fhn-root();
+   let spool = fhn-at(root, ".form-heal");
+   let made = fs_mkdir(spool);
+   let job = fhn-unique(spool, "band-native-");
+   nothing?(job) ? nothing() : hnb-started(job, root);
+  }
+  def hnb-started(job, root) {
+   let snapshot = fhn-write-json(fhn-at(job, "snapshot.json"), json-node-object([fhn-s("root", root)]));
+   let scratch = fhn-at(job, "scratch");
+   let made = fs_mkdir(scratch);
+   ["heal-native", job, root, record_new(0)];
+  }
+  def hnb-job(ctx) = ctx[1];
+  def hnb-root(ctx) = ctx[2];
+  def hnb-state(ctx) = ctx[3];
+  def hnb-out(ctx, stage) = fhn-read(fhn-stage-path(hnb-job(ctx), stage, ".out"));
+  def hnb-process(ctx, stage) = fhn-json(fhn-stage-path(hnb-job(ctx), stage, ".process.json"));
+  def hnb-field(text, prefix) = fhn-field(split-on(text, "\n"), prefix);
+  def hnb-gone?(pid) = (Comparable) pid > 0 && (Comparable) host_alive(pid) != 1;
+  // ---- 1 a child runs to its end
+  def hnb-c-run(ctx) {
+   let status = fhn-run(hnb-job(ctx), "quick", 0, "root", "-", ["./fkwu", "form/form-stdlib/tests/fixtures/heal-native/quick-cell.fk"]);
+   let doc = hnb-process(ctx, "quick");
+   (String) status == "0" && fh-has(hnb-out(ctx, "quick"), "heal-native-quick") && (String) hnb-field(hnb-out(ctx, "quick"), "cwd=") == hnb-root(ctx) && (String) fh-trim(fhn-read(fhn-stage-path(hnb-job(ctx), "quick", ".status"))) == "0"
+   && (String) fhn-string(doc, "state") == "finished" && (Comparable) fhn-number(doc, "returncode") == 0 && (Comparable) fhn-number(doc, "pid") > 0;
+  }
+  // ---- 2 a deadline
+  def hnb-c-deadline(ctx) {
+   let t0 = host_monotonic_ms();
+   let status = fhn-run(hnb-job(ctx), "sleeper", 4, "root", "-", ["./fkwu", "form/form-stdlib/tests/host-sleeper-run.fk"]);
+   let doc = hnb-process(ctx, "sleeper");
+   (String) status == "124" && host_monotonic_ms() - t0 < 25000 && (String) fhn-string(doc, "reason") == "timeout" && hnb-gone?(fhn-number(doc, "pid"));
+  }
+  // ---- 4 descendants
+  def hnb-c-descendants(ctx) {
+   let status = fhn-run(hnb-job(ctx), "parent", 6, "root", "-", ["./fkwu", "form/form-stdlib/tests/fixtures/heal-native/parent-cell.bml"]);
+   let doc = hnb-process(ctx, "parent");
+   let grandchild = str_to_int(hnb-field(hnb-out(ctx, "parent"), "grandchild="));
+   (String) status == "124" && (Comparable) grandchild > 0 && hnb-gone?(grandchild) && hnb-gone?(fhn-number(doc, "pid"));
+  }
+  // ---- 8 the job's work directory
+  def hnb-c-work(ctx) {
+   let work = fhn-at(hnb-job(ctx), "work");
+   let made = fs_mkdir(work);
+   let held = host_file_copy("fkwu", fhn-at(work, "fkwu")) > 0;
+   let cell = host_file_copy("form/form-stdlib/tests/fixtures/heal-native/quick-cell.fk", fhn-at(work, "cell.fk")) > 0;
+   let status = fhn-run(hnb-job(ctx), "scratch", 0, "work", "-", ["./fkwu", "cell.fk"]);
+   (String) status == "0" && held && cell && (String) hnb-field(hnb-out(ctx, "scratch"), "cwd=") == (host_realpath(work) ?? "x");
+  }
+  // ---- 16.. the snapshot
+  def hnb-target() = ".hearth/heal-native-band/target.fk";
+  def hnb-checker() = ".hearth/heal-native-band/checker.fk";
+  def hnb-prepare-sources() {
+   let made = cbn-ensure(".hearth/heal-native-band", record_new(0));
+   let a = write_file(hnb-target(), "; the target before\n");
+   let b = write_file(hnb-checker(), "; the checker\n");
+   (Comparable) a > 0 && (Comparable) b > 0;
+  }
+  def hnb-names(snap) = filter(n => len(n) > 0, split-on(fhn-read(fhn-at(snap, "names.txt")), "\n"));
+  def hnb-same-bytes?(root, work, names) = nil?(names) ? true : (Comparable) file_size(fhn-at(work, names[0])) == file_size(fhn-at(root, names[0])) && (String) (read_file(fhn-at(work, names[0])) ?? "x") == (read_file(fhn-at(root, names[0])) ?? "y") && hnb-same-bytes?(root, work, names[1:]);
+  def hnb-refused?(text) = (Comparable) str_find(text, "refused", 0) == 0;
+  def hnb-same-modes?(root, work, names) = nil?(names) ? true : (Comparable) (host_file_mode(fhn-at(work, names[0])) % 4096) == (host_file_mode(fhn-at(root, names[0])) % 4096) && hnb-same-modes?(root, work, names[1:]);
+  def hnb-c-prepare(ctx) {
+   let ready = hnb-prepare-sources();
+   let t0 = host_monotonic_ms();
+   let snap = fhn-prepare(hnb-target(), hnb-checker());
+   record_set(hnb-state(ctx), "snap", snap);
+   record_set(hnb-state(ctx), "prepare_ms", host_monotonic_ms() - t0);
+   let names = hnb-refused?(snap) ? [] : hnb-names(snap);
+   let doc = fhn-json(fhn-at(snap, "snapshot.json"));
+   ready && !hnb-refused?(snap) && (Comparable) len(names) > 1500 && cw-in?(names, "fkwu") && cw-in?(names, hnb-target()) && hnb-same-bytes?(hnb-root(ctx), fhn-at(snap, "work"), names) && hnb-same-modes?(hnb-root(ctx), fhn-at(snap, "work"), names)
+   && (Comparable) (((host_file_mode(fhn-at(fhn-at(snap, "work"), "fkwu")) % 4096) / 64) % 8) >= 5 && (String) fhn-string(doc, "target") == hnb-target() && (Comparable) len(json-object-keys(json-object-get(doc, "manifest"))) == len(names)
+   && (String) fhn-read(hnb-target()) == "; the target before\n";
+  }
+  def hnb-snap(ctx) = record_get(hnb-state(ctx), "snap");
+  // ---- 32 reset
+  def hnb-c-reset(ctx) {
+   let snap = hnb-snap(ctx);
+   let work = fhn-at(snap, "work");
+   let names = hnb-names(snap);
+   let one = names[3];
+   let two = names[7];
+   let changed = write_file(fhn-at(work, one), "not the original\n");
+   let removed = host_path_remove(fhn-at(work, two));
+   let reset = fhn-reset(snap);
+   (String) reset == "ready" && hnb-same-bytes?(hnb-root(ctx), work, [one, two]) && hnb-same-bytes?(hnb-root(ctx), work, names) && hnb-same-modes?(hnb-root(ctx), work, names);
+  }
+  // ---- 64 guard
+  def hnb-c-guard(ctx) {
+   let snap = hnb-snap(ctx);
+   let work = fhn-at(snap, "work");
+   let fresh = fhn-guard(snap);
+   let one = hnb-names(snap)[5];
+   let kept = fhn-read(fhn-at(work, one));
+   let changed = write_file(fhn-at(work, one), "changed in the copy\n");
+   let seen = fhn-guard(snap);
+   let restored = write_file(fhn-at(work, one), kept);
+   (String) fresh == "clean" && (String) seen == "changed:" ++ one && (String) fhn-guard(snap) == "clean";
+  }
+  // ---- 128 commit
+  def hnb-c-commit(ctx) {
+   let snap = hnb-snap(ctx);
+   let candidate = fhn-at(fhn-at(snap, "work"), hnb-target());
+   let proposal = fhn-at(snap, "proposal.fk");
+   let a = write_file(candidate, "; the target after\n");
+   let b = write_file(proposal, "; something else\n");
+   let stale = fhn-commit(snap, proposal);
+   let live-kept = fhn-read(hnb-target()) == "; the target before\n";
+   let c = write_file(proposal, "; the target after\n");
+   let applied = fhn-commit(snap, proposal);
+   live-kept && (String) stale == "refused:stale-or-mutated-input" && (String) applied == "applied" && (String) fhn-read(hnb-target()) == "; the target after\n" && !fs_exists(hnb-target() ++ ".heal-" ++ host_pid().str());
+  }
+  // ---- 256 finish
+  def hnb-c-finish(ctx) {
+   let snap = hnb-snap(ctx);
+   let finished = fhn-finish(snap);
+   (String) finished == "snapshot-released;evidence-retained" && !fs_is_dir(fhn-at(snap, "work")) && (Comparable) file_size(fhn-at(snap, "snapshot.json")) > 0 && (Comparable) file_size(fhn-at(snap, "names.txt")) > 0;
+  }
+  // ---- 512 refusals
+  def hnb-c-refusals(ctx) {
+   let linked = host_symlink("target.fk", ".hearth/heal-native-band/linked.fk");
+   let r1 = fhn-prepare(".hearth/heal-native-band/linked.fk", hnb-checker());
+   let r2 = fhn-prepare("../outside.fk", hnb-checker());
+   let r3 = fhn-prepare("form/form-stdlib/tests/copy-by-names-band.bml", hnb-checker());
+   let r4 = fhn-prepare(hnb-target(), hnb-target());
+   let gone = host_path_remove(".hearth/heal-native-band/linked.fk");
+   (Comparable) linked == 0 && (String) r1 == "refused:snapshot-inventory-or-symlink" && (String) r2 == "refused:invalid-relative-source" && (String) r3 == "refused:production-source-and-separate-checker-required" && (String) r4 == "refused:production-source-and-separate-checker-required";
+  }
+  // ---- 1024 no program is asked
+  def hnb-files() = ["form/form-stdlib/bml/form-cli-heal-native-io.bml", "form/form-stdlib/bml/form-cli-heal-native-process.bml", "form/form-stdlib/bml/form-cli-heal-native-eval.bml", "form/form-stdlib/bml/form-cli-heal.bml"];
+  def hnb-banned() = ["/usr/bin/tar", "/bin/cp", "/bin/rm", "/bin/chmod", "/bin/ps", "/bin/kill", "/bin/sh", "/bin/pwd", "inventory.sh", "links-check.sh", ".launch.sh", "set -m"];
+  def hnb-hits(text, words) = filter(w => str_find(text, w, 0) >= 0, words);
+  def hnb-c-noprogram(ctx) = all?(f => nil?(hnb-hits(read_file(f) ?? "", hnb-banned())), hnb-files());
+  // ---- 2048 the comparison is not vacuous
+  def hnb-c-plant(ctx) {
+   let snap = hnb-snap(ctx);
+   let work = fhn-at(snap, "work");
+   let names = hnb-names(snap);
+   let one = names[11];
+   let kept = fhn-read(fhn-at(work, one));
+   let bits = host_file_mode(fhn-at(work, one)) % 4096;
+   let flipped = write_file(fhn-at(work, one), "Z" ++ substring(kept, 1, len(kept)));
+   let byte-seen = !hnb-same-bytes?(hnb-root(ctx), work, [one]) || len(kept) == 0;
+   let restored = write_file(fhn-at(work, one), kept);
+   let moved = host_chmod(fhn-at(work, one), bits == 420 ? 384 : 420);
+   let mode-seen = !hnb-same-modes?(hnb-root(ctx), work, [one]);
+   let back = host_chmod(fhn-at(work, one), bits);
+   byte-seen && mode-seen;
+  }
+  // ---- 4096 speed
+  def hnb-c-speed(ctx) = (Comparable) record_get(hnb-state(ctx), "prepare_ms") < 200000;
+  // ---- 32768 the evaluation's body copy
+  def hnb-eval-names() = [".gitignore", "fkwu", "form/form-stdlib/bml/copy-by-names.bml", "form/form-stdlib/bml/tar-ustar.bml", "form/form-stdlib/tests/fixtures/heal-native/quick-cell.fk"];
+  def hnb-manifest-ok?(job, names) = (String) fhn-read(fhn-at(job, "body.manifest")) == str-spans(names |> map(name => name + "\t" + fhn-hash(fhn-at(hnb-root-of(job), name)) + "\n"));
+  def hnb-root-of(job) = fhn-string(fhn-json(fhn-at(job, "snapshot.json")), "root");
+  def hnb-c-evaluation(ctx) {
+   let root = hnb-root(ctx);
+   let job = fhn-unique(fhn-at(root, ".form-heal"), "eval-native-band-");
+   let names = hnb-eval-names();
+   let snapshot = fhn-write-json(fhn-at(job, "snapshot.json"), json-node-object([fhn-s("root", root)]));
+   let work = fs_mkdir(fhn-at(job, "work"));
+   let listed = write_file(fhn-at(job, "names.txt"), fhn-lines(names));
+   let said = fne-copy(job, root, "deterministic", "", [], fhn-hash(fhn-at(root, ".form-heal/learned.tsv")));
+   let summary = fhn-json(fhn-at(job, "summary.json"));
+   (Comparable) str_find(said, "heal evaluation measured", 0) == 0 && hnb-manifest-ok?(job, names) && (String) fhn-string(summary, "status") == "measured" && (String) fhn-string(summary, "snapshot_sha256") == fhn-hash(fhn-at(job, "body.manifest"))
+   && fhn-valid-hash(fhn-string(summary, "snapshot_sha256")) && !fs_is_dir(fhn-at(job, "work")) && (Comparable) file_size(fhn-at(job, "summary.json")) > 0;
+  }
+  // ---- 16384 signals
+  def hnb-sleeper() = ["./fkwu", "form/form-stdlib/tests/host-sleeper-run.fk"];
+  def hnb-begin() = sg-spawn-at(hnb-sleeper(), ["/dev/null", "/dev/null", "/dev/null"]);
+  def hnb-ended-by(signal) {
+   let pid = hnb-begin();
+   let sent = fhn-send(pid, signal);
+   let status = host_wait(pid);
+   [sent, status];
+  }
+  def hnb-c-signals(ctx) {
+   let darwin = (String) (host_os() ?? "") == "Darwin";
+   let numbers = (Comparable) fhn-signal-number("HUP") == 1 && (Comparable) fhn-signal-number("INT") == 2 && (Comparable) fhn-signal-number("QUIT") == 3 && (Comparable) fhn-signal-number("KILL") == 9 && (Comparable) fhn-signal-number("TERM") == 15
+    && (Comparable) fhn-signal-number("STOP") == (darwin ? 17 : 19) && (Comparable) fhn-signal-number("CONT") == (darwin ? 19 : 18);
+   let unknown = (Comparable) fhn-signal-number("BOGUS") == 0 && (Comparable) fhn-signal-number("") == 0 && (Comparable) fhn-send(host_pid(), "BOGUS") == 1;
+   let pid = hnb-begin();
+   let stopped = fhn-send(pid, "STOP");
+   let aliveStopped = fhn-alive(pid);
+   let continued = fhn-send(pid, "CONT");
+   let aliveContinued = fhn-alive(pid);
+   let termed = fhn-send(pid, "TERM");
+   let termStatus = host_wait(pid);
+   let killed = hnb-ended-by("KILL");
+   let hupped = hnb-hup();
+   numbers && unknown && (Comparable) stopped == 0 && aliveStopped && (Comparable) continued == 0 && aliveContinued && (Comparable) termed == 0 && (Comparable) termStatus == 143 && (Comparable) killed[0] == 0 && (Comparable) killed[1] == 137 && hupped;
+  }
+  // A band started by nohup (or by a daemon) ignores SIGHUP and its children inherit the ignoring: the sleeper then outlives the HUP
+  // and ends of KILL. Both are the host answering the number; neither is the table being wrong.
+  def hnb-hup() {
+   let pid = hnb-begin();
+   let sent = fhn-send(pid, "HUP");
+   let waited = wait-until(() => !fhn-alive(pid), host_monotonic_ms() + 2000, 20);
+   let ignoring = fhn-alive(pid);
+   let killed = ignoring ? fhn-send(pid, "KILL") : 0;
+   let status = host_wait(pid);
+   (Comparable) sent == 0 && (ignoring ? ((Comparable) killed == 0 && (Comparable) status == 137) : (Comparable) status == 129);
+  }
+  // ---- 8192 references, in process
+  def hnb-line-of(text, n) = split-on(text, "\n")[n - 1];
+  def hnb-c-references(ctx) {
+   let t0 = host_monotonic_ms();
+   let symbol = "fhn-cwd-door?";
+   let found = fh-references(symbol);
+   let lines = filter(l => len(l) > 0, split-on(found[1], "\n"));
+   let mine = filter(l => (Comparable) str_find(l, "form/form-stdlib/bml/form-cli-heal-native-process.bml:", 0) == 0, lines);
+   let first = nil?(mine) ? "" : mine[0];
+   let after = (Comparable) len(first) > 0 ? substring(first, len("form/form-stdlib/bml/form-cli-heal-native-process.bml:"), len(first)) : "";
+   let number = (Comparable) len(after) > 0 ? str_to_int(substring(after, 0, str_find(after, ":", 0))) : 0;
+   let text = read_file("form/form-stdlib/bml/form-cli-heal-native-process.bml") ?? "";
+   let true-line = number > 0 && (Comparable) str_find(hnb-line-of(text, number), symbol, 0) >= 0 && (String) substring(after, str_find(after, ":", 0) + 1, len(after)) == hnb-line-of(text, number);
+   let nonce = "zz" ++ host_pid().str() ++ "-" ++ now_unix_ms().str() ++ "qq";
+   let none = fh-references(nonce);
+   let many = fh-references("def");
+   let leaves = fh-source-leaf?("a.fk") && fh-source-leaf?("a.bml") && !fh-source-leaf?("a.fkb") && !fh-source-leaf?("a.bml.lowfk") && !fh-source-leaf?("a.txt") && !fh-source-leaf?("fk");
+   let hidden = nil?(fh-ref-entry("form/.hidden", ".hidden")) && !nil?(fh-ref-entry("form/form-stdlib/bml/copy-by-names.bml", "copy-by-names.bml"));
+   (Comparable) found[0] == 0 && (Comparable) len(lines) >= 2 && true-line && (Comparable) none[0] == 1 && (String) none[1] == "" && (Comparable) many[0] == 0 && (Comparable) len(filter(l => len(l) > 0, split-on(many[1], "\n"))) == 200 && leaves && hidden && host_monotonic_ms() - t0 < 15000;
+  }
+ }
+ let spoolBefore = fs_list(".form-heal") ?? [];
+ let ctx = hnb-fresh();
+ nothing?(ctx) ? form_error("native heal band needs a fresh job directory") : 0;
+ let verdict = live-claims("form-cli-heal-native-band", ctx, [["run", 1, 1, hnb-c-run], ["deadline", 2, 1, hnb-c-deadline], ["descendants", 4, 1, hnb-c-descendants], ["work", 8, 1, hnb-c-work], ["prepare", 16, 1, hnb-c-prepare], ["reset", 32, 1, hnb-c-reset], ["guard", 64, 1, hnb-c-guard], ["commit", 128, 1, hnb-c-commit], ["plant", 2048, 1, hnb-c-plant], ["finish", 256, 1, hnb-c-finish], ["refusals", 512, 1, hnb-c-refusals], ["noprogram", 1024, 1, hnb-c-noprogram], ["speed", 4096, 1, hnb-c-speed], ["references", 8192, 1, hnb-c-references], ["signals", 16384, 1, hnb-c-signals], ["evaluation", 32768, 1, hnb-c-evaluation]]);
+ host_path_remove(hnb-target());
+ host_path_remove(hnb-checker());
+ host_dir_rmdir(".hearth/heal-native-band");
+ host_dir_rmdir(hnb-job(ctx));
+ map(leaf => host_dir_rmdir(".form-heal/" ++ leaf), filter(leaf => ((Comparable) str_find(leaf, "attempt-native-", 0) == 0 || (Comparable) str_find(leaf, "eval-native-band-", 0) == 0) && !cw-in?(spoolBefore, leaf), fs_list(".form-heal") ?? []));
+ verdict;
+}

@@ -1,0 +1,62 @@
+//////////////////////////////////////////////////////////////////////
+// dsv4-chat-template.bml -- the DeepSeek-V4 chat template, native: a system line and a prompt become the ids ds4 hands its engine, read from the GGUF header alone.
+//
+// THE TEMPLATE IS ds4's OWN (ds4.c encode_chat_prompt, :36195, in the checkout at /Users/ursmuff/models/ds4-engine; the binary built from it carries the one default system string):
+//   BOS, the system text (no marker of its own on this family), the User marker, the prompt, the Assistant marker, then <think> when thinking is on or </think> when it is off.
+// Thinking is on by default (ds4_cli.c :1774 think_mode HIGH); Think Max would put a long reasoning prefix before the system text and applies only from a 393,216-token context, so a 32,768 context
+// reads HIGH. `ds4 -p TEXT` with no --raw-prompt takes this path with the default system "You are a helpful assistant" (ds4_cli.c :1767); `--raw-prompt` is the other path: the tokenizer's ids and nothing else.
+//
+// THE MARKERS ARE FOUND IN THE FILE, never written down as numbers. A special token's piece is stored as its literal UTF-8 (not in the gpt2 byte alphabet the BPE pieces use), so the lookup compares the
+// piece's own bytes with the marker's bytes (the fullwidth bar U+FF5C is EF BD 9C, the lower one-eighth block U+2581 is E2 96 81: bytes, because a string of them is a rune path this body does not trust).
+// The BOS read this way is held to the header's own key (tokenizer.ggml.bos_token_id) by the band.
+//
+// DETOKENIZE: a marker id reads as its piece's bytes as stored; every other id as the tokenizer's decode. The band holds the round trip to the template's text, built here from the template alone.
+//
+// Proven by: form-stdlib/tests/ds4-recorded-references-band.bml (the recorded logits' 14 prompt ids, derived here from the IQ2XXS header and held to the pinned row), dsv4-validate-band.bml (the door's default).
+//////////////////////////////////////////////////////////////////////
+// preludes: form-stdlib/core.fk form-stdlib/dsv4-tokenizer.fk
+section [form.bml] {
+ class Dsv4ChatTemplate {
+  // ---- the template's own words, as bytes -------------------------------------------------------------------------------------
+  def dct-system-default() = "You are a helpful assistant";
+  def dct-bar() = [239, 189, 156];
+  def dct-eighth() = [226, 150, 129];
+  def dct-ascii-go(s, i) = i == str_len(s) ? [] : cons(str_byte_at(s, i), dct-ascii-go(s, i + 1));
+  def dct-ascii(s) = dct-ascii-go(s, 0);
+  def dct-cat(xs) = len(xs) == 0 ? [] : append(xs[0], dct-cat(xs[1:]));
+  def dct-wrap(name) = dct-cat([[60], dct-bar(), name, dct-bar(), [62]]);
+  def dct-m-bos() = dct-wrap(dct-cat([dct-ascii("begin"), dct-eighth(), dct-ascii("of"), dct-eighth(), dct-ascii("sentence")]));
+  def dct-m-user() = dct-wrap(dct-ascii("User"));
+  def dct-m-assistant() = dct-wrap(dct-ascii("Assistant"));
+  def dct-m-think() = dct-ascii("<think>");
+  def dct-m-think-end() = dct-ascii("</think>");
+  def dct-m-last(thinking) = thinking ? dct-m-think() : dct-m-think-end();
+  // the template's text, as bytes: what detokenizing its ids must give
+  def dct-text-bytes(system, prompt, thinking) = dct-cat([dct-m-bos(), dct-ascii(system), dct-m-user(), dct-ascii(prompt), dct-m-assistant(), dct-m-last(thinking)]);
+
+  // ---- a marker's id, from the file's own vocabulary ------------------------------------------------------------------------------
+  def dct-bytes-eq(src, at, bs, j) = j == len(bs) ? true : (gmt-token-byte(src, at, j) == bs[j] && dct-bytes-eq(src, at, bs, j + 1));
+  def dct-tok-is(src, at, bs) = gmt-token-len(src, at) == len(bs) && dct-bytes-eq(src, at, bs, 0);
+  def dct-id-scan(src, at, id, n, bs) = id == n ? 0 - 1 : (dct-tok-is(src, at, bs) ? id : dct-id-scan(src, gmt-token-next(src, at), id + 1, n, bs));
+  def dct-id-of(src, bs) = dct-id-scan(src, gmt-tokens-first(src), 0, tkz-vocab-n(src), bs);
+  def dct-bos(src) = dct-id-of(src, dct-m-bos());
+  def dct-user(src) = dct-id-of(src, dct-m-user());
+  def dct-assistant(src) = dct-id-of(src, dct-m-assistant());
+  def dct-think(src, thinking) = dct-id-of(src, dct-m-last(thinking));
+  // the header's own BOS key (-1 when absent)
+  def dct-bos-meta(src) = gmt-u32(src, "tokenizer.ggml.bos_token_id");
+
+  // ---- the ids: nothing (never a guess) when the file holds no marker ----------------------------------------------------------
+  def dct-system-ids(src, system) = str_len(system) > 0 ? tkz-encode(src, system) : [];
+  def dct-assemble(bos, user, assistant, last, systemIds, promptIds) = (bos < 0 || user < 0 || assistant < 0 || last < 0) ? nothing() : append(append(append([bos], systemIds), append([user], promptIds)), [assistant, last]);
+  def dct-ids(src, system, prompt, thinking) = dct-assemble(dct-bos(src), dct-user(src), dct-assistant(src), dct-think(src, thinking), dct-system-ids(src, system), tkz-encode(src, prompt));
+
+  // ---- detokenize -----------------------------------------------------------------------------------------------------------------
+  def dct-piece-go(src, at, j, n) = j == n ? [] : cons(gmt-token-byte(src, at, j), dct-piece-go(src, at, j + 1, n));
+  def dct-piece(src, id) { let at = gmt-token-off(src, id); dct-piece-go(src, at, 0, gmt-token-len(src, at)); }
+  def dct-marker?(id, markers) = len(markers) == 0 ? false : (id == markers[0] || dct-marker?(id, markers[1:]));
+  def dct-decode-go(src, ids, markers) = len(ids) == 0 ? [] : append(dct-marker?(ids[0], markers) ? dct-piece(src, ids[0]) : tkz-decode-id-bytes(src, ids[0]), dct-decode-go(src, ids[1:], markers));
+  def dct-decode(src, ids, thinking) = dct-decode-go(src, ids, [dct-bos(src), dct-user(src), dct-assistant(src), dct-think(src, thinking)]);
+ }
+ 0;
+}

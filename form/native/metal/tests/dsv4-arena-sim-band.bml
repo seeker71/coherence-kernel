@@ -1,0 +1,114 @@
+; dsv4-arena-sim-band.bml -- the arena's sizing evidence: the experts a walk picked are kept in its rows, and replayed through the arena's cache at another slot count they answer what a walk at that size missed.
+;
+; WHAT THIS PINS. The token door's rows carry the experts each token's layers picked ("picks": [[layer, [ids]]...], recorded by dsv4-arena.fk's boundary when the plan record's picks-on is 1; the door's {"picks":0} turns
+; it off). form-stdlib/bml/dsv4-arena-sim.bml replays them through the cache the arena runs (dsv4-expert-cache.bml, every layer's table seated at min(slots, stored experts) as dsv4-arena.fk seats it) at any slot count,
+; and reports the arena's bytes, the hit rate, the experts missed and the megabytes filled a token. The replay is only evidence if it is EXACT, so this band holds it to the real arena: the same eleven-token walk
+; (prompt [5 17 3 22], seven greedy decodes) is run on each fixture at several slot counts through dtr-walk, and the replay of the picks of ONE of them reproduces every other walk's hits, misses and bytes filled, row by row.
+;
+; Verdict 31 when every claim lands (each at both fixtures):
+;   1    the picks are in the rows: with the option on every one of the eleven rows carries one pick for each layer (in layer order), each of the model's used experts within [0, the layer's experts), and the row's JSON
+;        round-trips through the sim's reader (das-row-picks) to the same picks; with it off every row carries none and its JSON reads "picks":[]
+;   2    the replay at the walk's own slot count (3) equals the walk's rows: hits, misses and bytes missed of every row against the row's ehit, emiss and ebytes, and no pick is refused
+;   4    the replay at OTHER slot counts equals real walks at those counts: walks on fresh contexts at 2, 4 and 6 slots a layer, every row's hits, misses and bytes against the replay of the 3-slot walk's picks (the router's picks do
+;        not depend on the arena's size: the logits and the ids are the same walk's)
+;   8    the replay can fail: the same picks replayed with the cache's pin rule OFF (a miss may evict a slot a hit of its own top-k reads) at 2 slots differ from the real walk at 2 slots in at least one row; and the
+;        report lines carry the arena's bytes, the percent of experts, the warm hit rate and the per-token misses, the fit reads a line exactly (wall 5 + 2 a miss: slope 2, fixed 5), a row without picks reads none
+;   16   the cost of the picks is bounded: a row's picks add no dispatch, wait or read (the counts of a walk with the option on equal the same walk with it off), and the option's state is put back
+;
+; REQUIRES: a live Metal device (the walks); the fixtures are written and read as binary files; light GPU: a few eleven-token walks over two 1.5 MB fixtures; writes only under temp_dir and removes what it made.
+// preludes: form-stdlib/core.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/bml/dsv4-token-run.bml form-stdlib/bml/dsv4-arena-sim.bml
+section [form.bml] {
+ class Dsv4ArenaSimBand {
+  def dsb-bit(held, bit) = held ? bit : 0;
+  def dsb-cap() = 16;
+  def dsb-prompt() = [5, 17, 3, 22];
+  def dsb-g(row, k) = record_get(row, k);
+  def dsb-col(rows, k) = nil?(rows) ? [] : cons(rows[0][k], dsb-col(rows[1:], k));
+  // a walk through the door's own functions on a fresh arena context at `slots`, the picks on or off; answers [the rows, why it ended]; the context is closed
+  def dsb-walk(path, slots, picks) {
+   let ctx = dsv4-open-arena(path, dsb-cap(), 1, slots);
+   let ok = len(ctx) == 13 && dxa-on?(ctx);
+   let m = ok ? dso-geo(ctx) : nothing();
+   let p = ok ? dsv4-prepare(ctx) : 0;
+   let sts = ok ? dsv4-new-state(m, ctx[0], dsb-cap()) : nothing();
+   let on = dkr-hz-put("picks-on", picks);
+   let clear = dkr-hz-put("picks", []);
+   let env = dtr-env(60, 0, host_monotonic_ms(), 0);
+   let marked = record_set(env, "arena", 1);
+   let why = ok ? dtr-walk(env, ctx, sts, dsb-prompt(), 7) : "not opened";
+   let off = dkr-hz-put("picks-on", 0);
+   let left = ok ? dsv4-close(ctx, sts) : [0];
+   [record_get(env, "rows"), why, len(left) == 0];
+  }
+  // the rows as the sim reads them: the receipt's JSON of each, read back
+  def dsb-json-rows(rows) = "{\"rows\":[" ++ dvr-join(map(r => dtr-row-json(r), rows), ",") ++ "]}";
+  def dsb-sim-rows(rows) = das-rows(parse-json("rows", dsb-json-rows(rows)));
+  def dsb-stats-eq?(stats, rows) = nil?(rows) ? true : (stats[0][0] == dsb-g(rows[0], "ehit") && stats[0][1] == dsb-g(rows[0], "emiss") && stats[0][2] == dsb-g(rows[0], "ebytes") && stats[0][3] == 0 && dsb-stats-eq?(stats[1:], rows[1:]));
+  def dsb-picks-ok-go(m, ps, il) = nil?(ps) ? true : (ps[0][0] == il && len(ps[0][1]) == record_get(m, "used") && dsb-ids-ok?(ps[0][1], dvl-l(m, il, "nexp")) && dsb-picks-ok-go(m, ps[1:], il + 1));
+  def dsb-ids-ok?(ids, nexp) = nil?(ids) ? true : (ids[0] >= 0 && ids[0] < nexp && dsb-ids-ok?(ids[1:], nexp));
+  def dsb-rows-picks-ok?(m, srows) = nil?(srows) ? true : (len(srows[0][1]) == record_get(m, "layers-n") && dsb-picks-ok-go(m, srows[0][1], 0) && dsb-rows-picks-ok?(m, srows[1:]));
+  def dsb-none?(srows) = nil?(srows) ? true : (len(srows[0][1]) == 0 && dsb-none?(srows[1:]));
+  // the same picks, the cache's pin rule off (the plant): the cache record carries the rule
+  def dsb-replay-nopin(m, srows, slots) { let c = das-cache(m, slots); let off = record_set(c, "pin", 0); das-replay-go(c, m, srows); }
+  def dsb-counts-eq?(a, b) = nil?(a) ? true : (dsb-g(a[0], "dispatches") == dsb-g(b[0], "dispatches") && dsb-g(a[0], "syncs") == dsb-g(b[0], "syncs") && dsb-g(a[0], "readbacks") == dsb-g(b[0], "readbacks") && dsb-g(a[0], "cbs") == dsb-g(b[0], "cbs") && dsb-counts-eq?(a[1:], b[1:]));
+  // synthetic rows on a line: wall = 5 + 2 x misses over eight decode tokens
+  def dsb-line-row(k) = ["decode", [], 5 + 2 * (k * 3 % 11), k * 3 % 11];
+  def dsb-line-rows(k) = k == 9 ? [] : cons(dsb-line-row(k), dsb-line-rows(k + 1));
+  def dsb-fit-ok?() {
+   let f = das-fit(dsb-line-rows(1));
+   !nothing?(f) && f[0] > 1.999999 && f[0] < 2.000001 && f[1] > 4.999999 && f[1] < 5.000001 && nothing?(das-fit([["decode", [], 7, 3], ["decode", [], 7, 3], ["decode", [], 7, 3]]));
+  }
+  def dsb-has?(s, part) = str_find(s, part, 0) >= 0;
+  def dsb-fixture(path, label) {
+   let hdr = dvl-open(eqr-of-file(path, 0, file_size(path)));
+   let w3 = dsb-walk(path, 3, 1);
+   let w3off = dsb-walk(path, 3, 0);
+   let w2 = dsb-walk(path, 2, 1);
+   let w4 = dsb-walk(path, 4, 1);
+   let w6 = dsb-walk(path, 6, 1);
+   let rows3 = w3[0];
+   let srows3 = dsb-sim-rows(rows3);
+   let srowsOff = dsb-sim-rows(w3off[0]);
+   let walked = w3[1] == "" && w3off[1] == "" && w2[1] == "" && w4[1] == "" && w6[1] == "" && len(rows3) == 11 && len(w3off[0]) == 11 && w3[2] && w3off[2] && w2[2] && w4[2] && w6[2];
+   // 1
+   let json0 = dtr-row-json(rows3[5]);
+   let back = das-row-picks(parse-json("row", json0));
+   let c1 = walked && dsb-rows-picks-ok?(hdr, srows3) && back == dsb-g(rows3[5], "picks") && len(back) == record_get(hdr, "layers-n") && dsb-none?(srowsOff) && dsb-has?(dtr-row-json(w3off[0][5]), "\"picks\":[]");
+   // 2
+   let st3 = das-replay(hdr, srows3, 3);
+   let c2 = walked && len(st3) == 11 && dsb-stats-eq?(st3, rows3);
+   // 4
+   let st2 = das-replay(hdr, srows3, 2);
+   let st4 = das-replay(hdr, srows3, 4);
+   let st6 = das-replay(hdr, srows3, 6);
+   let c4 = walked && dsb-stats-eq?(st2, w2[0]) && dsb-stats-eq?(st4, w4[0]) && dsb-stats-eq?(st6, w6[0]);
+   // 8
+   let np2 = dsb-replay-nopin(hdr, srows3, 2);
+   let nopinDiffers = !dsb-stats-eq?(np2, w2[0]);
+   let lineA = das-report-line(hdr, srows3, 4);
+   let report = dsb-has?(lineA, "slots 4 a layer: arena ") && dsb-has?(lineA, " percent of the layer's experts); warm decode hit ") && dsb-has?(lineA, " experts missed and ") && dsb-has?(lineA, " MB filled a token over 6 tokens") && dsb-has?(lineA, "the prefill missed ")
+    && len(das-report(hdr, srows3)) == 1 + len(das-slot-list()) && !das-has-picks?(srowsOff) && das-has-picks?(srows3);
+   let c8 = walked && nopinDiffers && report && dsb-fit-ok?();
+   // 16
+   let c16 = walked && dsb-counts-eq?(rows3, w3off[0]) && dkr-hz-get("picks-on") == 0;
+   let said = print_str(label ++ ": " ++ str_len(dsb-col(srows3, 1).str()).str() ++ " chars of picks over 11 rows; own slots 3 equal " ++ c2.str() ++ "; replay at 2/4/6 slots equals real walks " ++ c4.str() ++ " (misses " ++ dsb-col(st2, 1).str() ++ " / " ++ dsb-col(st4, 1).str() ++ " / " ++ dsb-col(st6, 1).str() ++ "); pin-off plant differs " ++ nopinDiffers.str() ++ "; " ++ lineA);
+   [c1, c2, c4, c8, c16];
+  }
+ }
+ let root = temp_dir() ++ "/dsv4-arena-sim-band-" ++ now_unix_ms().str();
+ let path1 = root ++ "-a.gguf";
+ let path2 = root ++ "-b.gguf";
+ let wrote1 = dfx-write(path1);
+ let wrote2 = dfx-v-write(path2);
+ let fx1 = try dsb-fixture(path1, "fixture 1 (MXFP8, MXFP4, IQ2_XXS)") catch [false, false, false, false, false];
+ let fx2 = try dsb-fixture(path2, "fixture 2 (Q8_0, IQ2_XXS, Q2_K)") catch [false, false, false, false, false];
+ let both = len(fx1) == 5 && len(fx2) == 5;
+ let b1 = dsb-bit(both && fx1[0] && fx2[0], 1);
+ let b2 = dsb-bit(both && fx1[1] && fx2[1], 2);
+ let b4 = dsb-bit(both && fx1[2] && fx2[2], 4);
+ let b8 = dsb-bit(both && fx1[3] && fx2[3], 8);
+ let b16 = dsb-bit(both && fx1[4] && fx2[4], 16);
+ let removed = host_path_remove(path1) + host_path_remove(path2);
+ print_str("dsv4-arena-sim-band claims " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " fixture1 " ++ fx1.str() ++ " fixture2 " ++ fx2.str() ++ " removed " ++ removed.str());
+ b1 + b2 + b4 + b8 + b16;
+}

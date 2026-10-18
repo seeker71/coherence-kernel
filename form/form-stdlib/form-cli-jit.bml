@@ -1,0 +1,91 @@
+import form-stdlib/native-tensor.bml;
+//////////////////////////////////////////////////////////////////////
+//
+// form-cli-jit.bml
+//
+// High-grammar authority: form-stdlib/form-cli-jit.bml
+//
+// One thought f(n)=n*Mul+Add. Backends are data (Tensor/Metal/Cpu).
+// Apply(backend, n) emits and runs. Host leaves are not fields.
+//
+//
+import form-stdlib/bml/bml-demand-jit-events.bml;
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    template BackendCell<TImage> {
+        member image: TImage;
+    }
+
+    class FormJit<T> {
+        field Mul = 3;
+        field Add = 7;
+        field Sample = 5;
+        field Expect = 22;
+        field Tensor = 0;
+        field Metal = 1;
+        field Cpu = 2;
+        field FJitDemandSource = "form/form-stdlib/form-cli-jit.bml";
+        field FJitDemandCache = "form/form-stdlib/form-cli-jit.bml.demand.fkb";
+
+        thought fjit-pattern = ["tensor", "metal", "cpu"];
+
+        def fjit-spc() = " ";
+        def fjit-nl() = byte_to_str(10);
+
+        def fjit-tensor(n) = (n.str() + (fjit-spc() + (Mul().str() + (" mul " + (Add().str() + " add")))));
+
+        def fjit-msl() {
+            let n = fjit-nl();
+            ("#include <metal_stdlib>" + (n + ("using namespace metal;" + (n + ("kernel void form_jit_f(device uint *a [[buffer(0)]], uint gid [[thread_position_in_grid]]) { if (gid == 0) a[0] = a[0] * " + (Mul().str() + (" + " + (Add().str() + "; }"))))))));
+        }
+
+        def fjit-ssa() = [[1, Add()], [2], [1, Mul()], [5, 1, 2], [3, 3, 0]];
+
+        def fjit-apply-tensor(n) = nt-eval(fjit-tensor(n));
+        def fjit-apply-cpu(n) = jit_leaf_inram(lo-compile-fn(fjit-ssa(), 4), n);
+
+        // Generic state-threaded CPU offer. Any program reaches this gate;
+        // lowerable heat may crystallize, while an unsupported shape remains
+        // an explicit Form route with the same returned value vocabulary.
+        def fjit-gate(epoch) = hg-gate(epoch);
+        def fjit-request(gate, program, root, n) = hg-request(gate, program, root, n);
+        def fjit-request-cpu(gate, n) = fjit-request(gate, fjit-ssa(), 4, n);
+        def fjit-heat-next(response, n, count) = if ((Comparable) count == 1) then response else fjit-heat-run(response[2], n, (count - 1));
+        def fjit-heat-run(gate, n, count) = if ((Comparable) count == 0) then [0, "", gate, 0] else fjit-heat-next(fjit-request-cpu(gate, n), n, count);
+
+        // The production demand surface is deliberately separate from the
+        // heat-gate proof above. Request returns the Form answer without doing
+        // JIT work. Progress owns compilation and Glass delivery; host events
+        // resume retained cache care. The caller closes its event lifetime.
+        def fjit-demand-owner(epoch) = bdje-open(bdjo-owner(epoch));
+        def fjit-demand-request(owner, n) = bdje-request(owner, FJitDemandSource(), FJitDemandCache(), fjit-ssa(), 4, n);
+
+        def fjit-apply-metal(n) {
+            let buf = metal_buf_alloc(4);
+            if (buf <= 0) then form_error(metal_status()) else fjit-metal-buffer(buf, n);
+        }
+        def fjit-metal-buffer(buf, n) {
+            let wrote = metal_buf_write(buf, 0, nt-i32-bytes([n]));
+            let pipe = metal_pipeline(fjit-msl(), "form_jit_f");
+            let enq = if (((Comparable) wrote == 4) && (pipe > 0)) then metal_enqueue(pipe, md-bind([buf], empty()), 1) else 0;
+            let sync = metal_sync();
+            let res = if ((enq > 0) && (sync >= 0)) then metal_buf_read(buf, 0, 4) else "";
+            let diagnostic = metal_status();
+            let shut = metal_buf_free(buf);
+            if ((Comparable) len(res) == 4) then nt-signed(nt-u32(res)) else form_error(diagnostic);
+        }
+
+        def fjit-apply(backend, n) = if ((Comparable) backend == Tensor()) then fjit-apply-tensor(n) else if ((Comparable) backend == Metal()) then fjit-apply-metal(n) else fjit-apply-cpu(n);
+
+        def fjit-check() {
+            let b0 = if ((Comparable) Mul() == 3) then if ((Comparable) Add() == 7) then 1 else 0 else 0;
+            let b1 = if ((Comparable) Sample() == 5) then if ((Comparable) Expect() == 22) then 2 else 0 else 0;
+            let b2 = if ((String) fjit-tensor(Sample()) == "5 3 mul 7 add") then 4 else 0;
+            let b3 = if ((Comparable) Tensor() == 0) then if ((Comparable) Metal() == 1) then if ((Comparable) Cpu() == 2) then 8 else 0 else 0 else 0;
+            (b0 + (b1 + (b2 + b3)));
+        }
+    }
+    0;
+}

@@ -1,0 +1,123 @@
+// copy-by-names.bml — a tree copied by a list of names, without an archive and without a program.
+//
+// The body borrowed `tar -c -T names | tar -x -p` for this: pack the named files into an archive, unpack the archive
+// somewhere else. Nothing here needs an archive. A name is a path under a root; the copy makes each directory level
+// (fs_mkdir, one level, remembered so a directory is asked once), copies the file's bytes through a fixed 1 MiB buffer
+// (host_file_copy: no string holds the file, and the permission bits of the source arrive with it), reads the mode back
+// and sets it again when it differs (host_chmod), and gives the copy the source's modification time (host_utimes), as an
+// extracted archive does. A name that is a directory is copied whole, as tar -T does. A name that is a symbolic link to
+// a regular file arrives as that file's bytes (the link itself is not carried: a snapshot of bytes is the purpose).
+//
+//   cbn-copy(root, names, dest)        "" when every name arrived, else the first reason
+//   cbn-copy-file(src, dst)            "" when one regular file arrived with its bytes, mode and time (cp -p), else the reason
+//   cbn-copy-tree(src, dst)            "" when a whole directory arrived at a path that was not there (cp -R), else the reason
+//   cbn-link-free?(root, names)        true when no name, and no directory above a name inside root, is a symbolic link
+//   cbn-symlink?(path)                 true when the last component of path is a symbolic link (the physical path of the whole
+//                                      is not the physical path of its directory plus its name)
+//   cbn-private-dir(path)              1 THIS call made path owner-only (mode 448), 0 it stood or could not be made
+//   cbn-door?()                        whether this fkwu carries the doors it needs (a binary without them answers nothing())
+//
+// A name is relative, has no `..` and no empty component. root and dest may be absolute or relative to the working
+// directory. A destination file that already stands is replaced.
+//
+// PROOF: form-stdlib/tests/copy-by-names-band.bml.
+import form-stdlib/line-grammar.fk;
+section [form.bml] {
+ class CopyByNames {
+  def cbn-door?() = !(nothing?(host_realpath("")) || nothing?(host_file_identity("")) || nothing?(host_utimes("", 0)) || nothing?(host_chmod("", 0)) || nothing?(host_file_copy("", "")) || nothing?(host_file_mode("")) || nothing?(host_mkdir_mode("", 0)));
+  def cbn-join(dir, leaf) = dir ++ "/" ++ leaf;
+  // where the last "/" of a path stands (-1 when none)
+  def cbn-last-slash(path, at, found) = at >= len(path) ? found : cbn-last-slash(path, at + 1, (Comparable) str_byte_at(path, at) == 47 ? at : found);
+  // the directory a path stands in: "" for a bare name, "/" for a name at the root
+  def cbn-parent(path) = cbn-parent-at(path, cbn-last-slash(path, 0, -1));
+  def cbn-parent-at(path, at) = at < 0 ? "" : at == 0 ? "/" : substring(path, 0, at);
+  def cbn-leaf(path) = substring(path, cbn-last-slash(path, 0, -1) + 1, len(path));
+  // ---- names
+  def cbn-parts-ok?(parts) = nil?(parts) ? true : ((String) parts[0] == "..") || ((String) parts[0] == "") ? false : cbn-parts-ok?(parts[1:]);
+  def cbn-relative?(name) = len(name) > 0 && (Comparable) str_byte_at(name, 0) != 47 && cbn-parts-ok?(split-on(name, "/"));
+  // ---- directories: every level, each asked once
+  def cbn-ensure(dir, made) = (Comparable) record_has(made, dir) == 1 ? true : cbn-ensure-new(dir, cbn-parent(dir), made);
+  def cbn-ensure-new(dir, parent, made) {
+   let up = (len(parent) == 0) || ((String) parent == dir) ? true : cbn-ensure(parent, made);
+   let stands = (Comparable) fs_is_dir(dir) == 1;
+   let created = up && !stands ? fs_mkdir(dir) : 0;
+   let ok = up && (Comparable) fs_is_dir(dir) == 1;
+   let noted = ok ? record_set(made, dir, 1) : 0;
+   ok;
+  }
+  def cbn-private-dir(path) = host_mkdir_mode(path, 448);
+  // ---- symbolic links (the host has stat but no lstat: the physical path tells)
+  def cbn-symlink?(path) = cbn-symlink-of?(path, host_realpath(path), cbn-parent(path), cbn-leaf(path));
+  def cbn-symlink-of?(path, whole, parent, leaf) {
+   let held = len(parent) == 0 ? host_realpath(".") : host_realpath(parent);
+   let joined = nothing?(held) ? "" : (String) held == "/" ? "/" ++ leaf : (String) held ++ "/" ++ leaf;
+   nothing?(whole) || nothing?(held) || ((String) leaf == ".") || ((String) leaf == "..") ? false : (String) whole != joined;
+  }
+  def cbn-link-free?(root, names) = cbn-scan(root, names, record_new(0));
+  def cbn-scan(root, names, seen) = nil?(names) ? true : cbn-probe(root, names[0], seen) && cbn-scan(root, names[1:], seen);
+  // a name and every directory above it, up to the root: none may be a link
+  def cbn-probe(root, rel, seen) {
+   (String) rel == "." || (String) rel == "" || ((Comparable) record_has(seen, rel) == 1) ? true : cbn-probe-new(root, rel, seen);
+  }
+  def cbn-probe-new(root, rel, seen) {
+   let clean = !cbn-symlink?(cbn-join(root, rel));
+   let parent = cbn-parent(rel);
+   let noted = clean ? record_set(seen, rel, 1) : 0;
+   clean && cbn-probe(root, len(parent) == 0 ? "." : parent, seen);
+  }
+  // ---- the copy
+  def cbn-copy(root, names, dest) = !cbn-door?() ? "copy doors are missing: rebuild fkwu from runtime/fkwu-uni.c" : cbn-each(root, dest, names, record_new(0));
+  // one regular file to a path (its directory made when it is not there): bytes, mode and modification time, as `cp -p` carried them
+  def cbn-copy-file(src, dst) {
+   let mode = host_file_mode(src);
+   !cbn-door?() ? "copy doors are missing: rebuild fkwu from runtime/fkwu-uni.c"
+   : (Comparable) mode < 0 ? "absent: " ++ src
+   : !((Comparable) (mode / 4096) == 8) ? "not a regular file: " ++ src
+   : cbn-file(src, dst, src, mode % 4096, record_new(0));
+  }
+  // a whole directory tree to a path that is not there yet, as `cp -R src dst` made it
+  def cbn-copy-tree(src, dst) {
+   let kids = fs_list(src);
+   !cbn-door?() ? "copy doors are missing: rebuild fkwu from runtime/fkwu-uni.c"
+   : !((Comparable) fs_is_dir(src) == 1) || nothing?(kids) ? "not a readable directory: " ++ src
+   : !cbn-ensure(dst, record_new(0)) ? "directory could not be made: " ++ dst
+   : cbn-each(src, dst, kids, record_new(0));
+  }
+  def cbn-each(root, dest, names, made) = nil?(names) ? "" : cbn-then(cbn-one(root, dest, names[0], made), root, dest, names[1:], made);
+  def cbn-then(why, root, dest, rest, made) = (String) why != "" ? why : cbn-each(root, dest, rest, made);
+  def cbn-one(root, dest, name, made) {
+   let src = cbn-join(root, name);
+   let mode = host_file_mode(src);
+   !cbn-relative?(name) ? "not a relative name inside the tree: " ++ name
+   : (Comparable) mode < 0 ? "absent: " ++ name
+   : (Comparable) (mode / 4096) == 4 ? cbn-dir(root, dest, name, mode % 4096, made)
+   : cbn-file(src, cbn-join(dest, name), name, mode % 4096, made);
+  }
+  def cbn-dir(root, dest, name, bits, made) {
+   let dst = cbn-join(dest, name);
+   let ensured = cbn-ensure(dst, made);
+   let kids = fs_list(cbn-join(root, name));
+   !ensured ? "directory could not be made: " ++ name
+   : nothing?(kids) ? "directory could not be read: " ++ name
+   : cbn-dir-held(cbn-each(root, dest, kids |> map(kid => name ++ "/" ++ kid), made), dst, bits, name);
+  }
+  def cbn-dir-held(why, dst, bits, name) = (String) why != "" ? why : (Comparable) host_chmod(dst, bits) == 0 ? "" : "directory mode could not be set: " ++ name;
+  def cbn-file(src, dst, name, bits, made) {
+   let ensured = cbn-ensure(cbn-parent(dst), made);
+   let cleared = ensured && (Comparable) host_path_exists(dst) == 1 ? host_path_remove(dst) : 0;
+   let copied = ensured ? host_file_copy(src, dst) : -1;
+   (Comparable) copied < 0 ? "copy refused: " ++ name : cbn-file-mode(src, dst, name, bits);
+  }
+  def cbn-file-mode(src, dst, name, bits) {
+   let now = host_file_mode(dst);
+   let moded = (Comparable) now >= 0 && (Comparable) (now % 4096) == bits ? 0 : host_chmod(dst, bits);
+   let again = host_file_mode(dst);
+   (Comparable) moded != 0 || (Comparable) again < 0 || (Comparable) (again % 4096) != bits ? "mode could not be set: " ++ name : cbn-file-time(src, dst, name);
+  }
+  def cbn-file-time(src, dst, name) {
+   let id = host_file_identity(src);
+   nothing?(id) ? "source vanished: " ++ name : (Comparable) host_utimes(dst, id[1]) == 0 ? "" : "time could not be set: " ++ name;
+  }
+ }
+ 0;
+}

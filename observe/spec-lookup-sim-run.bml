@@ -1,0 +1,111 @@
+// spec-lookup-sim-run.bml — how far would lookup drafting speed the in-stream walk? Read from the streams already recorded.
+//
+//   printf 'k 4\nmin_match 2\nblock_slope 20\n' | ./fkwu observe/spec-lookup-sim-run.bml
+//
+// Lossless speculative decoding by lookup: after each token the voice writes, find the longest suffix of the history (the prompt and
+// the stream so far, Form's injected observations included) that occurred earlier, propose the k tokens that followed it there, and
+// verify them in ONE block forward (the block kernels give logits bit-equal to a single step's, so the accepted prefix is exactly
+// what greedy decoding writes, and the block's last position gives the next token at once). This door does not run the model: it
+// takes the latest evaluation row of receipts/form-token-eval.rows (each question's recorded stream), tokenizes the prompt and the
+// stream, marks the tokens Form injected (an observation envelope and its seam) apart from the voice's own, and replays the walk:
+// at each generated position it proposes, counts how many proposals the recorded stream accepts, and charges the block its cost.
+// A block of n tokens costs 100 + block_slope * (n - 1) hundredths of a single decode step (the 2026-10-13 measurement: a block of 8
+// cost 2.0 to 2.7 single steps; slope 20 to 30). Prints, for the options asked (k, min_match, block_slope) and for a grid of k and
+// min_match: the voice's generated tokens, the forwards a lookup walk would need, the cost in single steps, the speedup.
+// The history is indexed by the last one to three ids (a record: key -> the position after the latest earlier occurrence), a suffix
+// noted one token late so a lookup never finds itself.
+// stdin: `k N` `min_match N` `block_slope N` `questions N` (frw-options; defaults 4, 2, 20, all). Reads only; opens only the tokenizer.
+// preflight-exec: forbidden
+import form-stdlib/native-llama-tokenizer.bml;
+import form-stdlib/model-registry.bml;
+import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/stdin-source.bml;
+section [form.bml] {
+ class SpecLookupSimRun {
+  def sls-say(t) = print_str("[spec-lookup-sim] " ++ t);
+  def sls-open-tag() = "<|form:observation|>";
+  def sls-close-tag() = "<|/form:observation|>";
+  // the stream as [text, injected?] pieces in order: the voice's own words, and each observation envelope with the newline seam
+  // that precedes it (Form injected both)
+  def sls-pieces(text) = sls-pieces-at(text, 0, []);
+  def sls-pieces-at(text, from, acc) {
+   let open = str_find(text, sls-open-tag(), from);
+   if open < 0 then reverse(len(text) > from ? cons([substring(text, from, len(text)), 0], acc) : acc)
+   else sls-pieces-open(text, from, open, acc);
+  }
+  def sls-pieces-open(text, from, open, acc) {
+   let close = str_find(text, sls-close-tag(), open);
+   let seam = open > from && (Comparable) str_byte_at(text, open - 1) == 10 ? 1 : 0;
+   let end = close < 0 ? len(text) : close + len(sls-close-tag());
+   let own = substring(text, from, open - seam);
+   let acc1 = len(own) > 0 ? cons([own, 0], acc) : acc;
+   let acc2 = seam == 1 ? cons(["\n", 1], acc1) : acc1;
+   sls-pieces-at(text, end, cons([substring(text, open, end), 1], acc2));
+  }
+  // [id, injected?] for every token of the stream
+  def sls-tokens(tk, text) = foldl((acc, p) => append(acc, map(i => [i, p[1]], nlt-encode(tk, p[0]))), [], sls-pieces(text));
+  // the index: key = the last n ids joined, value = the position just after the latest earlier occurrence of them
+  def sls-key(ids) = str-join-with(map(i => i.str(), ids), ",");
+  def sls-note(idx, last, at) = foldl((r, n) => len(last) >= n ? record_set(r, sls-key(drop(len(last) - n, last)), at) : r, idx, [1, 2, 3]);
+  // the history, its index and its last three ids after more tokens arrive (each new token notes the suffix before it)
+  def sls-grow(state, ids) = nil?(ids) ? state : sls-grow(sls-grow-one(state, ids[0]), ids[1:]);
+  def sls-grow-one(state, id) {
+   let h = state[0]; let idx = state[1]; let last = state[2];
+   let idx2 = nil?(last) ? idx : sls-note(idx, last, len(h));
+   [append(h, [id]), idx2, len(last) >= 3 ? append(last[1:], [id]) : append(last, [id])];
+  }
+  def sls-propose(state, nmax, nmin, k) = nmax < nmin || len(state[2]) < nmax ? [] : sls-propose-at(state, nmax, nmin, k, sls-lookup(state, nmax));
+  def sls-lookup(state, n) {
+   let key = sls-key(drop(len(state[2]) - n, state[2]));
+   record_has(state[1], key) ? record_get(state[1], key) : 0 - 1;
+  }
+  def sls-propose-at(state, nmax, nmin, k, at) = (at >= 0 && at < len(state[0])) ? take(k, drop(at, state[0])) : sls-propose(state, nmax - 1, nmin, k);
+  // leading proposals equal to the generated tokens that follow (stopping at an injected token)
+  def sls-accept(prop, rest) = nil?(prop) || nil?(rest) || rest[0][1] == 1 || prop[0] != rest[0][0] ? 0 : 1 + sls-accept(prop[1:], rest[1:]);
+  def sls-gen-run(rest) = nil?(rest) || rest[0][1] == 1 ? 0 : 1 + sls-gen-run(rest[1:]);
+  // replay one question: [generated tokens, forwards, cost in hundredths of a single step]
+  def sls-walk(toks, state, k, nmin, slope, gen, fwd, cost) {
+   if nil?(toks) then [gen, fwd, cost]
+   else if toks[0][1] == 1 then sls-walk(toks[1:], sls-grow(state, [toks[0][0]]), k, nmin, slope, gen, fwd, cost)
+   else sls-walk-gen(toks, state, k, nmin, slope, gen, fwd, cost, sls-propose(state, 3, nmin, k));
+  }
+  def sls-walk-gen(toks, state, k, nmin, slope, gen, fwd, cost, prop) {
+   let m = sls-accept(prop, toks);
+   let avail = sls-gen-run(toks);
+   let took = (m + 1) < avail ? m + 1 : avail;
+   sls-walk(drop(took, toks), sls-grow(state, map(t => t[0], take(took, toks))), k, nmin, slope, gen + took, fwd + 1, cost + 100 + slope * len(prop));
+  }
+  // each question once: [prompt ids, stream tokens]
+  def sls-prepare(tk, rows, q) {
+   let row = foldl((found, r) => (String) frw-str(r, "id", "") == (String) frw-str(q, "id", "") ? r : found, nothing(), rows);
+   [nlt-chat(tk, frw-str(row, "question", "")), sls-tokens(tk, frw-str(q, "stream", ""))];
+  }
+  def sls-one(p, k, nmin, slope) = sls-walk(p[1], sls-grow([[], record_new(0), []], p[0]), k, nmin, slope, 0, 0, 0);
+  def sls-total(prepared, k, nmin, slope) = foldl((acc, p) => sls-add(acc, sls-one(p, k, nmin, slope)), [0, 0, 0], prepared);
+  def sls-add(a, b) = [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  def sls-line(label, t) = sls-say(label ++ ": " ++ t[0].str() ++ " generated tokens, " ++ t[1].str() ++ " forwards, cost " ++ (t[2] / 100).str() ++ " single steps, speedup " ++ (t[0] * 10000 / t[2]).str() ++ " hundredths (100 is none)");
+  def sls-run() = sls-with(frw-options(stdin-text() ?? ""));
+  def sls-with(o) {
+   let ledger = frw-rows(read_file("receipts/form-token-eval.rows") ?? "");
+   let traces = frw-rows(read_file("learn/form-token-traces.rows") ?? "");
+   if (String) ledger[0] != "ok" || (String) traces[0] != "ok" || nil?(ledger[1]) then sls-say("the ledger or the corpus did not read")
+   else sls-go(o[1], ledger[1][len(ledger[1]) - 1], traces[1]);
+  }
+  def sls-go(o, last, rows) {
+   let arm = record_get(last, "arms")[0];
+   let judged = record_get(arm, "questions_judged");
+   if (String) value_kind(judged) != "list" then sls-say("the latest row holds no questions_judged list: nothing replayed")
+   else sls-replay(o, arm, take(frw-int(o, "questions", 1000), judged), rows);
+  }
+  def sls-replay(o, arm, qs, rows) {
+   let tk = nlt-open(mr-path(mr-find("llama32-3b-mlx-4bit")));
+   let prepared = map(q => sls-prepare(tk, rows, q), qs);
+   let k = frw-int(o, "k", 4); let nmin = frw-int(o, "min_match", 2); let slope = frw-int(o, "block_slope", 20);
+   let said = sls-say("the latest evaluation row: arm " ++ frw-str(arm, "arm", "?") ++ ", " ++ len(qs).str() ++ " questions, " ++ foldl((a, p) => a + len(p[1]), 0, prepared).str() ++ " stream tokens");
+   let asked = sls-line("k " ++ k.str() ++ ", min_match " ++ nmin.str() ++ ", block_slope " ++ slope.str(), sls-total(prepared, k, nmin, slope));
+   let grid = map(g => sls-line("k " ++ g[0].str() ++ ", min_match " ++ g[1].str() ++ ", block_slope " ++ slope.str(), sls-total(prepared, g[0], g[1], slope)), [[2, 1], [2, 2], [4, 1], [4, 2], [4, 3], [6, 2], [8, 2]]);
+   0;
+  }
+ }
+ sls-run();
+}

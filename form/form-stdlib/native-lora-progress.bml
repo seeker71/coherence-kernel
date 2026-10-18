@@ -1,0 +1,52 @@
+// Corpus traversal and Adam age are different identities. This state publishes
+// in the same generation as the update it describes; no separate cursor file.
+import form-stdlib/organ-health.bml;
+import form-stdlib/sha256.fk;
+import form-stdlib/json-precise.bml;
+section [form.bml] {
+ class NativeLoraProgress {
+  def nlp-get(o,k) = node_value(json-object-get(o,k));
+  def nlp-natural(v) = if ((String) value_kind(v) == "int") then (v >= 0) else 0;
+  def nlp-hex(bytes) = if nil?(bytes) then "" else (((String) json-hex-digit((bytes[0] / 16)) + json-hex-digit((bytes[0] % 16))) + nlp-hex(bytes[1:]));
+  def nlp-digest?(s,i) = if ((Comparable) i == len(s)) then ((Comparable) i == 64) else if (str_find("0123456789abcdef",substring(s,i,(i + 1)),0) < 0) then 0 else nlp-digest?(s,(i + 1));
+  def nlp-valid(p) {
+   let hash = nlp-get(p,"dataset_sha256"); let rows = nlp-get(p,"dataset_rows"); let seen = nlp-get(p,"examples_seen"); let masked = nlp-get(p,"mask_prompt");
+   if (!((String) nlp-get(p,"schema") == "native-training-progress-v1")) then 0
+   else if (!((String) value_kind(hash) == "string")) then 0
+   else if ((Comparable) len(hash) != 64) then 0
+   else if (!(nlp-natural(rows) && (nlp-natural(seen) && nlp-natural(masked)))) then 0
+   else (nlp-digest?(hash,0) && ((rows > 0) && (((Comparable) masked == 0) || ((Comparable) masked == 1))));
+  }
+  def nlp-bind(text,rows,masked) {
+   let progress = json-node-object([oh-s("schema","native-training-progress-v1"),oh-s("dataset_sha256",nlp-hex(sha256-stream-string(text))),oh-n("dataset_rows",rows),oh-n("mask_prompt",masked),oh-n("examples_seen",0)]);
+   if nlp-valid(progress) then progress else form_error("native dataset progress binding refused");
+  }
+  def nlp-seen(progress) = nlp-get(progress,"examples_seen");
+  def nlp-cursor(progress) = (nlp-seen(progress) % nlp-get(progress,"dataset_rows"));
+  def nlp-restore(config,binding) {
+   if (!nlp-valid(binding)) then form_error("native dataset progress binding invalid")
+   else if (!json-object-has?(config,"training_progress")) then [binding,"coverage-unmeasured; restart at first row"]
+   else nlp-restore-saved(json-object-get(config,"training_progress"),binding);
+  }
+  def nlp-restore-saved(saved,binding) {
+   if (!nlp-valid(saved)) then form_error("native checkpoint dataset progress invalid")
+   else if (!((String) nlp-get(saved,"dataset_sha256") == nlp-get(binding,"dataset_sha256"))) then [binding,"new dataset; start at first row"]
+   else if ((Comparable) nlp-get(saved,"dataset_rows") != nlp-get(binding,"dataset_rows")) then form_error("native checkpoint dataset row count disagrees")
+   else if ((Comparable) nlp-get(saved,"mask_prompt") != nlp-get(binding,"mask_prompt")) then [binding,"new supervision policy; start at first row"]
+   else [saved,"same dataset; continue checkpointed examples"];
+  }
+  def nlp-same(a,b) = if (!(nlp-valid(a) && nlp-valid(b))) then 0 else (((String) nlp-get(a,"dataset_sha256") == nlp-get(b,"dataset_sha256")) && (((Comparable) nlp-get(a,"dataset_rows") == nlp-get(b,"dataset_rows")) && (((Comparable) nlp-get(a,"mask_prompt") == nlp-get(b,"mask_prompt")) && ((Comparable) nlp-seen(a) == nlp-seen(b)))));
+  def nlp-checkpoint(config,marker) {
+   let configHas = json-object-has?(config,"training_progress"); let markerHas = json-object-has?(marker,"training_progress");
+   if (!(configHas || markerHas)) then 1 else if (!(configHas && markerHas)) then 0 else nlp-same(json-object-get(config,"training_progress"),json-object-get(marker,"training_progress"));
+  }
+  def nlp-advance(progress,count) {
+   if (!(nlp-valid(progress) && nlp-natural(count))) then form_error("native dataset progress advance invalid")
+   else if ((count <= 0) || (count > nlp-get(progress,"dataset_rows"))) then form_error("native dataset progress batch refused")
+   else if ((nlp-seen(progress) + count) <= nlp-seen(progress)) then form_error("native dataset progress overflow")
+   else oh-set(progress,"examples_seen",json-node-int((nlp-seen(progress) + count)));
+  }
+  def nlp-request(r,progress) = oh-set(r,"training_progress",progress);
+ }
+ 0;
+}

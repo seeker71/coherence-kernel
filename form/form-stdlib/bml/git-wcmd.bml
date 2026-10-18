@@ -1,0 +1,669 @@
+// git-wcmd.bml — the local WRITE commands of git in Form (phase 2): init, hash-object -w, add, rm, commit, update-ref, branch, tag,
+// checkout, switch, restore, reset. They ride on git-write.bml (loose objects, trees, commits, the index file, refs with reflog lines)
+// and on the readers of phase 1, and they answer [stdout, exit code, stderr] like git-cmd.bml.
+//
+//   git-run-all(cwd, argv)       the whole command line: a write command here, everything else through git-run (git-cmd.bml)
+//   git-run-all-line(cwd, line)  the same from one command line
+//
+// A write is allowed only where the owner says so: the repository's top must lie under host_temp_dir() (a scratch repository), or the
+// command line must carry `-c native.allow-write=true`. Anything else answers exit 128 and touches nothing. Hooks are not run. Nothing
+// here reads credentials; transport (fetch, pull, push) is phase 3 and is refused by name in git-cmd.bml.
+//
+// Supported (the flags the product's sites use, and their near neighbours):
+//   init        [-q] [-b <branch> | --initial-branch=<branch>] [<dir>]
+//   hash-object [-t <type>] -w <file>
+//   add         [-A|--all] [-u|--update] [-f|--force] [-n|--dry-run] [--pathspec-from-file=<f> [--pathspec-file-nul]] [--] <pathspec>...
+//   rm          [--cached] [-f] [-r] [-q] [--] <path>...
+//   commit      [-q] [-m <msg>]... [-F <file>] [-a] [--amend [--no-edit]] [--allow-empty] [--author=<n <e>>] [-- <path>...]
+//   update-ref  [-m <msg>] [-d] <ref> <new> [<old>]       (and `-d <ref> [<old>]`)
+//   branch      <name> [<start>] | -f <name> [<start>] | -d/-D <name>... | -m <old> <new>     (listing stays in git-cmd.bml)
+//   tag         <name> [<rev>] | -a -m <msg> <name> [<rev>] | -f | -d <name>...             (listing: `tag` / `tag -l`)
+//   checkout    <branch|rev> | -b/-B <name> [<start>] | <rev> -- <path>... | -- <path>... | --ours/--theirs -- <path>...
+//   switch      <branch> | -c/-C <name> [<start>] | --detach <rev>
+//   restore     [--staged] [--worktree] [--source=<rev>] [--] <path>...
+//   reset       [--soft|--mixed|--hard] [<rev>] | [<rev>] -- <path>...
+// Refused by name (exit 129): merge, rebase, cherry-pick, revert, stash, clean, mv, apply, am, gc and the rest of the write class that this
+// phase does not carry; `commit -S`/--gpg-sign; `commit --interactive`/--patch; an editor is never started (a commit without -m/-F/--amend
+// --no-edit answers exit 128 "no message").
+//
+// PROOF: form-stdlib/tests/git-native-write-band.fk — every command runs in a scratch repository, then the whole graph is checked by
+// self-verification (every object hashes to its name, every commit's tree and parents exist, every ref resolves) and by the readers.
+// preludes: form-stdlib/core.fk form-stdlib/bml/git-sha1.bml form-stdlib/bml/git-inflate.bml form-stdlib/bml/git-store.bml form-stdlib/bml/git-refs.bml form-stdlib/bml/git-index.bml form-stdlib/bml/git-ignore.bml form-stdlib/bml/git-status.bml form-stdlib/bml/git-rev.bml form-stdlib/bml/git-diff.bml form-stdlib/bml/git-cmd.bml form-stdlib/bml/git-write.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/git-sha1.bml;
+import form-stdlib/bml/git-inflate.bml;
+import form-stdlib/bml/git-store.bml;
+import form-stdlib/bml/git-refs.bml;
+import form-stdlib/bml/git-index.bml;
+import form-stdlib/bml/git-ignore.bml;
+import form-stdlib/bml/git-status.bml;
+import form-stdlib/bml/git-rev.bml;
+import form-stdlib/bml/git-diff.bml;
+import form-stdlib/bml/git-cmd.bml;
+import form-stdlib/bml/git-write.bml;
+section [form.bml] {
+ class GitWcmd {
+  // ---- the gate ----------------------------------------------------------------------------------------------------------------
+  def gwc-scratch?(r) = gs-starts?(gs-top(r), host_realpath(host_temp_dir()) ?? "/nonexistent");
+  def gwc-cfg-pairs(cfg) = map(c => [substring(c, 0, gs-index-of(c, 61, 0)), substring(c, gs-index-of(c, 61, 0) + 1, len(c))], filter(c => gs-index-of(c, 61, 0) > 0, cfg));
+  def gwc-cfg-get(r, cfg, key) {
+   let hits = filter(p => str_eq(p[0], key), gwc-cfg-pairs(cfg));
+   nil?(hits) ? gc-get(r, key) : hits[len(hits) - 1][1];
+  }
+  def gwc-allowed?(r, cfg) = gwc-scratch?(r) || any?(c => str_eq(c, "native.allow-write=true"), cfg);
+  def gwc-refused() = ["", 128, "fatal: native-git: writes are refused outside a scratch repository under the temp directory; pass -c native.allow-write=true to allow them here\n"];
+  def gwc-fatal(msg) = ["", 128, "fatal: " ++ msg ++ "\n"];
+  def gwc-err(code, msg) = ["", code, msg ++ "\n"];
+  def gwc-ok(out) = [out, 0, ""];
+  def gwc-note(out, err) = [out, 0, err];
+  // ---- entry ---------------------------------------------------------------------------------------------------------------
+  def git-run-all-line(cwd, line) = git-run-all(cwd, gcm-words(line));
+  def git-run-all(cwd, argv) {
+   let g = gcm-global(argv, cwd, false, []);
+   len(g[4]) > 0 || nil?(g[2]) ? git-run(cwd, argv) : gwc-route(cwd, argv, g, g[2][0], g[2][1:]);
+  }
+  def gwc-w-cmds() = ["add", "rm", "commit", "update-ref", "branch", "tag", "checkout", "switch", "restore", "reset"];
+  def gwc-route(cwd, argv, g, cmd, rest) =
+   str_eq(cmd, "init") ? gwc-init(g[0], rest)
+   : str_eq(cmd, "hash-object") && gwc-has-flag?(rest, "-w") ? gwc-with(argv, g, cmd, rest)
+   : any?(c => str_eq(c, cmd), gwc-w-cmds()) ? gwc-with(argv, g, cmd, rest)
+   : git-run(cwd, argv);
+  def gwc-has-flag?(args, f) = any?(a => str_eq(a, f), args);
+  def gwc-with(argv, g, cmd, rest) {
+   let r = git-open(g[0]);
+   nothing?(r) ? gcm-not-repo() : !gwc-allowed?(r, g[3]) ? gwc-refused() : gwc-dispatch(argv, g, r, cmd, rest);
+  }
+  def gwc-dispatch(argv, g, r, cmd, rest) =
+   str_eq(cmd, "hash-object") ? gwc-hash-object(r, g[0], rest)
+   : str_eq(cmd, "add") ? gwc-add(r, g[0], g[1], rest)
+   : str_eq(cmd, "rm") ? gwc-rm(r, g[1], rest)
+   : str_eq(cmd, "commit") ? gwc-commit(r, g[0], g[1], g[3], rest)
+   : str_eq(cmd, "update-ref") ? gwc-update-ref(r, g[3], rest)
+   : str_eq(cmd, "branch") ? gwc-branch(r, g[3], argv, g, rest)
+   : str_eq(cmd, "tag") ? gwc-tag(r, g[3], argv, g, rest)
+   : str_eq(cmd, "checkout") ? gwc-checkout(r, g[0], g[1], g[3], rest)
+   : str_eq(cmd, "switch") ? gwc-switch(r, g[1], g[3], rest)
+   : str_eq(cmd, "restore") ? gwc-restore(r, g[1], rest)
+   : gwc-reset(r, g[1], g[3], rest);
+  // ---- small things --------------------------------------------------------------------------------------------------------------
+  def gwc-index-of(r) = gi-read(r);
+  def gwc-rows(r) = nothing?(gi-read(r)) ? [] : gi-read(r)[0];
+  def gwc-before?(a, b) = gr-lt(a[0], b[0]) || (str_eq(a[0], b[0]) && a[6] < b[6]);
+  def gwc-sort(rows) = len(rows) <= 1 ? rows : gwc-merge(gwc-sort(take(len(rows) / 2, rows)), gwc-sort(drop(len(rows) / 2, rows)), []);
+  def gwc-merge(a, b, acc) = nil?(a) ? append(ginf-reverse(acc, []), b) : nil?(b) ? append(ginf-reverse(acc, []), a) : gwc-before?(b[0], a[0]) ? gwc-merge(a, b[1:], cons(b[0], acc)) : gwc-merge(a[1:], b, cons(a[0], acc));
+  def gwc-save(r, rows) = gw-put-file(gs-gitdir(r) ++ "/index", gw-index(gwc-sort(rows)));
+  def gwc-now-ms() = now_unix_ms();
+  def gwc-exec?(m) = band(m, 64) != 0;
+  def gwc-link?(full) = ((host_file_mode(full) / 4096) % 16) == 10;
+  // an index row for a working file; its blob is written to the store. nothing() when the file is not there
+  def gwc-file-row(r, rel) {
+   let full = gs-top(r) ++ "/" ++ rel;
+   let m = host_file_mode(full);
+   let idn = m < 0 ? nothing() : host_file_identity(full);
+   let body = nothing?(idn) ? nothing() : read_file(full);
+   nothing?(body) ? nothing() : gwc-file-row2(r, rel, m, idn, body);
+  }
+  def gwc-file-row2(r, rel, m, idn, body) {
+   let hex = gw-put-loose(gs-gitdir(r), "blob", body);
+   [rel, gwc-exec?(m) ? 33261 : 33188, gsha-raw-of-hex(hex), len(body), idn[1] / 1000, (idn[1] % 1000) * 1000000, 0, 0, idn[1] / 1000, 0, idn[2], 16777220, 0];
+  }
+  def gwc-find(rows, rel) = nil?(rows) ? nothing() : str_eq(rows[0][0], rel) && rows[0][6] == 0 ? rows[0] : gwc-find(tail(rows), rel);
+  def gwc-without(rows, rel) = filter(x => !str_eq(x[0], rel), rows);
+  def gwc-replace(rows, row) = cons(row, gwc-without(rows, row[0]));
+  // the branch HEAD names, or nothing() when detached
+  def gwc-branch-ref(r) {
+   let h = gr-head(r);
+   str_eq(h[0], "detached") ? nothing() : str_eq(h[0], "unborn") ? (len(h[1]) == 0 ? "refs/heads/main" : h[1]) : h[1];
+  }
+  def gwc-head-raw(r) = nothing?(gr-head-id(r)) ? nothing() : gsha-raw-of-hex(gr-head-id(r));
+  // [name, email] for author or committer
+  def gwc-ident(r, cfg, kind) {
+   let n = host_getenv("GIT_" ++ kind ++ "_NAME") ?? gwc-cfg-get(r, cfg, "user.name");
+   let e = host_getenv("GIT_" ++ kind ++ "_EMAIL") ?? gwc-cfg-get(r, cfg, "user.email");
+   nothing?(n) || nothing?(e) || len(n) == 0 ? nothing() : [n, e];
+  }
+  def gwc-who(id) = id[0] ++ " <" ++ id[1] ++ ">";
+  def gwc-stamp(id, ms) = id[0] ++ " <" ++ id[1] ++ "> " ++ (ms / 1000).str() ++ " " ++ gw-local-tz(ms);
+  // append a reflog line to logs/<name> (both HEAD's and the branch's are kept by callers)
+  def gwc-log(r, name, old, new, id, ms, msg) {
+   let d = gw-mkdirs(gs-parent(gs-gitdir(r) ++ "/logs/" ++ name));
+   gw-append-file(gs-gitdir(r) ++ "/logs/" ++ name, gw-reflog-line(old, new, gwc-who(id), ms / 1000, gw-local-tz(ms), msg));
+  }
+  def gwc-zero() = "0000000000000000000000000000000000000000";
+  // moves the ref HEAD names (or HEAD itself when detached) and keeps both reflogs
+  def gwc-move-head(r, new, id, ms, msg) {
+   let br = gwc-branch-ref(r);
+   let old = gr-head-id(r) ?? gwc-zero();
+   let a = nothing?(br) ? gw-put-file(gs-gitdir(r) ++ "/HEAD", new ++ "\n") : gwc-set-ref(r, br, new);
+   let l1 = nothing?(br) ? 0 : gwc-log(r, br, old, new, id, ms, msg);
+   let l2 = gwc-log(r, "HEAD", old, new, id, ms, msg);
+   a;
+  }
+  def gwc-set-ref(r, name, hex) {
+   let path = gs-common(r) ++ "/" ++ name;
+   let d = gw-mkdirs(gs-parent(path));
+   gw-put-file(path, hex ++ "\n");
+  }
+  // ---- init ----------------------------------------------------------------------------------------------------------------------
+  def gwc-init(dir, args) {
+   let p = gcm-parse(args, [["-q", "flag"], ["--quiet", "flag"], ["-b", "val"], ["--initial-branch", "val"], ["--bare", "flag"]]);
+   let target = nil?(p[1]) ? dir : gs-abs(dir, p[1][0]);
+   !nil?(p[3]) ? gcm-usage("init", p[3][0]) : gcm-opt?(p[0], "--bare") ? ["", 129, "native-git: init --bare is refused by name\n"] : gwc-init-go(target, gcm-opt-val(p[0], "-b", gcm-opt-val(p[0], "--initial-branch", "main")), gcm-opt?(p[0], "-q") || gcm-opt?(p[0], "--quiet"));
+  }
+  def gwc-init-go(target, branch, quiet) {
+   let existed = host_path_exists(target ++ "/.git/HEAD") == 1;
+   let ok = gw-mkdirs(target) == 1 && (existed ? 1 : gw-init(target, branch)) == 1;
+   !ok ? gwc-fatal("cannot create the repository in " ++ target) : gwc-ok(quiet ? "" : (existed ? "Reinitialized existing Git repository in " : "Initialized empty Git repository in ") ++ target ++ "/.git/\n");
+  }
+  // ---- hash-object -w -----------------------------------------------------------------------------------------------------------
+  def gwc-hash-object(r, dir, args) {
+   let p = gcm-parse(args, [["-t", "val"], ["-w", "flag"], ["--stdin", "flag"]]);
+   let body = len(p[1]) == 1 ? read_file(gs-abs(dir, p[1][0])) : nothing();
+   !nil?(p[3]) ? gcm-usage("hash-object", p[3][0]) : nothing?(body) ? gwc-fatal("could not open the file for reading") : gwc-ok(gw-put-loose(gs-gitdir(r), gcm-opt-val(p[0], "-t", "blob"), body) ++ "\n");
+  }
+  // ---- add -----------------------------------------------------------------------------------------------------------------------
+  def gwc-add-spec() = [["-A", "flag"], ["--all", "flag"], ["-u", "flag"], ["--update", "flag"], ["-f", "flag"], ["--force", "flag"], ["-n", "flag"], ["--dry-run", "flag"], ["-v", "flag"], ["--verbose", "flag"], ["--pathspec-from-file", "val"], ["--pathspec-file-nul", "flag"]];
+  def gwc-nul-split(s) = gs-split(s, 0);
+  def gwc-specs-from-file(p, nul) {
+   let f = gcm-opt-val(p[0], "--pathspec-from-file", "");
+   let text = len(f) == 0 ? "" : (read_file(f) ?? "");
+   filter(x => len(x) > 0, nul ? gwc-nul-split(text) : gs-lines(text));
+  }
+  def gwc-add(r, dir, lit, args) {
+   let p = gcm-parse(args, gwc-add-spec());
+   let specs = append(p[1], append(p[2], gwc-specs-from-file(p, gcm-opt?(p[0], "--pathspec-file-nul"))));
+   !nil?(p[3]) ? gcm-usage("add", p[3][0]) : gwc-add-go(r, lit, p[0], specs);
+  }
+  def gwc-add-go(r, lit, o, specs) {
+   let all = gcm-opt?(o, "-A") || gcm-opt?(o, "--all");
+   let upd = gcm-opt?(o, "-u") || gcm-opt?(o, "--update");
+   let force = gcm-opt?(o, "-f") || gcm-opt?(o, "--force");
+   let dry = gcm-opt?(o, "-n") || gcm-opt?(o, "--dry-run");
+   nil?(specs) && !all && !upd ? gwc-err(0, "Nothing specified, nothing added.\nhint: Maybe you wanted to say 'git add .'?") : gwc-add-run(r, lit, all, upd, force, dry, nil?(specs) ? ["."] : specs);
+  }
+  def gwc-add-run(r, lit, all, upd, force, dry, specs) {
+   let ix = gi-read(r) ?? [[], [], 2, ""];
+   let top = gs-top(r);
+   let rows = ix[0];
+   let stage0 = filter(e => e[6] == 0, rows);
+   let imtime = gst-index-mtime(r);
+   let scan = gst-scan(top, "", gx-stack(r), rows, "all", 1);
+   let fresh = filter(pth => gdf-match-all?(specs, pth, lit), scan[0]);
+   let ignored = filter(pth => gdf-match-all?(specs, pth, lit), scan[1]);
+   let tracked = filter(e => gdf-match-all?(specs, e[0], lit), stage0);
+   let named_ignored = filter(pth => any?(sp => str_eq(sp, pth), specs), ignored);
+   let unmerged = filter(e => e[6] > 0 && gdf-match-all?(specs, e[0], lit), rows);
+   nil?(fresh) && nil?(tracked) && nil?(ignored) && nil?(unmerged) && !all && !upd ? gwc-fatal("pathspec '" ++ specs[0] ++ "' did not match any files") : !nil?(named_ignored) && !force ? ["", 1, "The following paths are ignored by one of your .gitignore files:\n" ++ gcm-text(named_ignored) ++ "hint: Use -f if you really want to add them.\n"] : gwc-add-apply(r, rows, stage0, tracked, upd ? [] : append(fresh, force ? ignored : []), unmerged, imtime, dry);
+  }
+  def gwc-add-apply(r, rows, stage0, tracked, fresh, unmerged, imtime, dry) {
+   let top = gs-top(r);
+   let touched = append(map(e => e[0], tracked), append(fresh, map(e => e[0], unmerged)));
+   let kept = filter(e => !any?(t => str_eq(t, e[0]), touched), rows);
+   let updated = filter(x => !nothing?(x), map(p => gwc-add-one(r, rows, imtime, p), gs-uniq-str(touched, [])));
+   dry ? gwc-ok(gcm-text(map(p => "add '" ++ p ++ "'", touched))) : gwc-add-save(r, append(kept, updated));
+  }
+  // the row a path becomes: the old row when the stat still vouches for it, a new one when the file changed, none when it is gone
+  def gwc-add-one(r, rows, imtime, rel) {
+   let old = gwc-find(rows, rel);
+   let full = gs-top(r) ++ "/" ++ rel;
+   host_file_mode(full) < 0 ? nothing() : (!nothing?(old) && str_eq(gst-state(gs-top(r), old, imtime), "") ? old : gwc-file-row(r, rel));
+  }
+  def gwc-add-save(r, rows) {
+   let w = gwc-save(r, rows);
+   w == 1 ? gwc-ok("") : gwc-fatal("unable to write the index");
+  }
+  // ---- rm --------------------------------------------------------------------------------------------------------------------------
+  def gwc-rm(r, lit, args) {
+   let p = gcm-parse(args, [["--cached", "flag"], ["-f", "flag"], ["-r", "flag"], ["-q", "flag"], ["--force", "flag"], ["--quiet", "flag"]]);
+   let specs = append(p[1], p[2]);
+   !nil?(p[3]) ? gcm-usage("rm", p[3][0]) : nil?(specs) ? ["", 129, "usage: git rm [--cached] [-f] [-r] [-q] [--] <file>...\n"] : gwc-rm-go(r, lit, p[0], specs);
+  }
+  def gwc-rm-go(r, lit, o, specs) {
+   let rows = gwc-rows(r);
+   let hit = filter(e => e[6] == 0 && gdf-match-all?(specs, e[0], lit), rows);
+   let imtime = gst-index-mtime(r);
+   let dirty = filter(e => !str_eq(gst-state(gs-top(r), e, imtime), "") && !str_eq(gst-state(gs-top(r), e, imtime), "D"), hit);
+   nil?(hit) ? gwc-fatal("pathspec '" ++ specs[0] ++ "' did not match any files") : !nil?(dirty) && !(gcm-opt?(o, "-f") || gcm-opt?(o, "--force") || gcm-opt?(o, "--cached")) ? ["", 1, "error: the following file has local modifications:\n    " ++ dirty[0][0] ++ "\n(use --cached to keep the file, or -f to force removal)\n"] : gwc-rm-apply(r, rows, hit, gcm-opt?(o, "--cached"), gcm-opt?(o, "-q") || gcm-opt?(o, "--quiet"));
+  }
+  def gwc-rm-apply(r, rows, hit, cached, quiet) {
+   let gone = map(e => e[0], hit);
+   let kept = filter(e => !any?(g => str_eq(g, e[0]), gone), rows);
+   let rm = cached ? [] : map(g => gwc-unlink(gs-top(r), g), gone);
+   let w = gwc-save(r, kept);
+   gwc-ok(quiet ? "" : gcm-text(map(g => "rm '" ++ g ++ "'", gone)));
+  }
+  // remove a file and the directories it leaves empty (never the top)
+  def gwc-unlink(top, rel) {
+   let rm = host_path_remove(top ++ "/" ++ rel);
+   gwc-prune(top, gs-parent(rel));
+  }
+  def gwc-prune(top, rel) = len(rel) <= 1 || str_eq(rel, "/") || str_eq(rel, ".") ? 0 : (nil?(host_dir_list(top ++ "/" ++ rel) ?? ["x"]) && host_dir_rmdir(top ++ "/" ++ rel) == 0 ? gwc-prune(top, gs-parent(rel)) : 0);
+  // ---- commit ----------------------------------------------------------------------------------------------------------------------
+  def gwc-commit-spec() = [["-q", "flag"], ["--quiet", "flag"], ["-m", "val"], ["-F", "val"], ["-a", "flag"], ["--amend", "flag"], ["--no-edit", "flag"], ["--allow-empty", "flag"], ["--author", "val"], ["--no-verify", "flag"], ["-n", "flag"], ["--allow-empty-message", "flag"], ["--no-gpg-sign", "flag"]];
+  def gwc-clean-message(msg) = gwc-collapse(map(l => gs-trim(l), gs-split(msg, 10)), [], false);
+  // drop leading blanks, collapse runs of blank lines, drop trailing blanks; one newline at the end
+  def gwc-collapse(ls, acc, blank) = nil?(ls) ? (nil?(acc) ? "" : grv-join(ginf-reverse(acc, []), "\n") ++ "\n") : len(head(ls)) == 0 ? gwc-collapse(tail(ls), acc, !nil?(acc)) : gwc-collapse(tail(ls), cons(head(ls), blank ? cons("", acc) : acc), false);
+  def gwc-message(o) {
+   let ms = gcm-opt-all(o, "-m");
+   let f = gcm-opt-val(o, "-F", "");
+   !nil?(ms) ? gwc-clean-message(grv-join(ms, "\n\n")) : len(f) > 0 ? gwc-clean-message(read_file(f) ?? "") : nothing();
+  }
+  // the message of a merge in progress, without its `#` comment lines
+  def gwc-merge-msg(r) {
+   let text = gs-text-or(gs-gitdir(r) ++ "/MERGE_MSG", "");
+   len(text) == 0 ? nothing() : gwc-clean-message(grv-join(filter(l => !gs-starts?(l, "#"), gs-lines(text)), "\n"));
+  }
+  def gwc-commit(r, dir, lit, cfg, args) {
+   let p = gcm-parse(args, gwc-commit-spec());
+   !nil?(p[3]) ? gcm-usage("commit", p[3][0]) : gwc-commit-go(r, dir, lit, cfg, p[0], append(p[1], p[2]));
+  }
+  def gwc-commit-go(r, dir, lit, cfg, o, paths) {
+   let amend = gcm-opt?(o, "--amend");
+   let msg = gwc-message(o) ?? gwc-merge-msg(r);
+   let author = gwc-ident(r, cfg, "AUTHOR");
+   let committer = gwc-ident(r, cfg, "COMMITTER");
+   nothing?(committer) || (nothing?(author) && !amend) ? gwc-fatal("Author identity unknown\n\n*** Please tell me who you are.\n\nRun\n\n  git config user.email \"you@example.com\"\n  git config user.name \"Your Name\"\n\nto set your account's default identity.") : nothing?(msg) && !(amend && gcm-opt?(o, "--no-edit")) ? gwc-fatal("no commit message was given (an editor is never started here: use -m, -F, or --amend --no-edit)") : gwc-commit-tree(r, lit, cfg, o, paths, amend, msg, author, committer);
+  }
+  def gwc-commit-tree(r, lit, cfg, o, paths, amend, msg, author, committer) {
+   let a = gcm-opt?(o, "-a") ? gwc-add-run(r, lit, false, true, false, false, ["."]) : gwc-ok("");
+   let ix = gi-read(r) ?? [[], [], 2, ""];
+   let rows = ix[0];
+   let unmerged = len(filter(e => e[6] > 0, rows));
+   unmerged > 0 ? ["", 128, "error: Committing is not possible because you have unmerged files.\nfatal: Exiting because of an unresolved conflict.\n"] : gwc-commit-build(r, lit, cfg, o, paths, amend, msg, author, committer, rows);
+  }
+  def gwc-commit-build(r, lit, cfg, o, paths, amend, msg, author, committer, rows) {
+   let headraw = gwc-head-raw(r);
+   let hinfo = nothing?(headraw) ? nothing() : grv-info-full(r, headraw);
+   let only = !nil?(paths);
+   let base_rows = only ? gwc-only-rows(r, lit, paths, rows) : rows;
+   let treeraw = gw-write-tree(gs-gitdir(r), base_rows);
+   let parent_tree = nothing?(hinfo) ? nothing() : hinfo[3];
+   let mh = gs-trim(gs-text-or(gs-gitdir(r) ++ "/MERGE_HEAD", ""));
+   let merging = len(mh) == 40;
+   let parents = append(amend ? (nothing?(hinfo) ? [] : hinfo[1]) : (nothing?(headraw) ? [] : [headraw]), merging ? [gsha-raw-of-hex(mh)] : []);
+   let parent_tree_for_empty = amend ? (nil?(parents) ? nothing() : grv-peel(r, parents[0], "tree")) : parent_tree;
+   let same = !nothing?(parent_tree_for_empty) && str_eq(parent_tree_for_empty, treeraw);
+   same && !gcm-opt?(o, "--allow-empty") && !amend && !merging ? gwc-nothing(r, gcm-opt?(o, "-q") || gcm-opt?(o, "--quiet")) : gwc-commit-write(r, lit, cfg, o, paths, amend, msg, author, committer, rows, base_rows, treeraw, hinfo, parents, headraw);
+  }
+  def gwc-nothing(r, quiet) = ["", 1, quiet ? "" : "On branch " ++ gr-short-branch(gwc-branch-ref(r) ?? "HEAD") ++ "\nnothing to commit, working tree clean\n"];
+  // --only: the tree is HEAD's with just the named paths taken from the working tree
+  def gwc-only-rows(r, lit, paths, rows) {
+   let head = gst-head-tree(r);
+   let headrows = nothing?(head) ? [] : map(f => [f[0], f[1], f[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], gst-flatten(r, head, ""));
+   let names = gs-uniq-str(append(map(e => e[0], filter(e => e[6] == 0 && gdf-match-all?(paths, e[0], lit), rows)), map(e => e[0], filter(e => gdf-match-all?(paths, e[0], lit), headrows))), []);
+   let kept = filter(e => !any?(n => str_eq(n, e[0]), names), headrows);
+   append(kept, filter(x => !nothing?(x), map(n => gwc-file-row(r, n), names)));
+  }
+  def gwc-commit-write(r, lit, cfg, o, paths, amend, msg, author, committer, rows, base_rows, treeraw, hinfo, parents, headraw) {
+   let ms = gwc-now-ms();
+   let au = amend && !nothing?(hinfo) && !gcm-opt?(o, "--author") ? (hinfo[4][2] ?? gwc-stamp(author, ms)) : gwc-author-line(o, author, ms);
+   let text = nothing?(msg) ? hinfo[4][4] : msg;
+   let body = gw-commit-body(gsha-hex-of-raw(treeraw), map(p => gsha-hex-of-raw(p), parents), au, gwc-stamp(committer, ms), text);
+   let hex = gw-put-loose(gs-gitdir(r), "commit", body);
+   let kind = amend ? "commit (amend)" : (nothing?(headraw) ? "commit (initial)" : "commit");
+   let mv = gwc-move-head(r, hex, committer, ms, kind ++ ": " ++ gs-subject(text));
+   let c1 = host_path_remove(gs-gitdir(r) ++ "/MERGE_HEAD");
+   let c2 = host_path_remove(gs-gitdir(r) ++ "/MERGE_MSG");
+   let c3 = host_path_remove(gs-gitdir(r) ++ "/MERGE_MODE");
+   let ix2 = nil?(paths) ? 0 : gwc-save(r, gwc-merge-only(rows, base_rows, paths, lit));
+   gwc-commit-out(r, o, hex, nothing?(headraw) && !amend, text);
+  }
+  def gwc-author-line(o, author, ms) {
+   let a = gcm-opt-val(o, "--author", "");
+   len(a) > 0 && gs-index-of(a, 60, 0) > 0 ? substring(a, 0, gs-index-of(a, 60, 0) - 1) ++ " " ++ substring(a, gs-index-of(a, 60, 0), len(a)) ++ " " ++ (ms / 1000).str() ++ " " ++ gw-local-tz(ms) : gwc-stamp(author, ms);
+  }
+  // after a path-limited commit the index takes the named paths too
+  def gwc-merge-only(rows, base_rows, paths, lit) = append(filter(e => !gdf-match-all?(paths, e[0], lit), rows), filter(e => gdf-match-all?(paths, e[0], lit), base_rows));
+  def gwc-commit-out(r, o, hex, root, text) = gcm-opt?(o, "-q") || gcm-opt?(o, "--quiet") ? gwc-ok("") : gwc-ok("[" ++ gr-short-branch(gwc-branch-ref(r) ?? "HEAD") ++ (root ? " (root-commit) " : " ") ++ grv-short(r, gsha-raw-of-hex(hex), 7) ++ "] " ++ gs-subject(text) ++ "\n");
+  // ---- update-ref ------------------------------------------------------------------------------------------------------------------
+  def gwc-ur-spec() = [["-m", "val"], ["-d", "flag"], ["--no-deref", "flag"], ["--create-reflog", "flag"]];
+  def gwc-update-ref(r, cfg, args) {
+   let p = gcm-parse(args, gwc-ur-spec());
+   !nil?(p[3]) ? gcm-usage("update-ref", p[3][0]) : gcm-opt?(p[0], "-d") ? gwc-ur-delete(r, p[1]) : len(p[1]) < 2 ? ["", 129, "usage: git update-ref [-m <reason>] (-d <ref> [<oldvalue>] | <ref> <newvalue> [<oldvalue>])\n"] : gwc-ur-set(r, cfg, gcm-opt-val(p[0], "-m", "update-ref"), p[1]);
+  }
+  def gwc-ur-set(r, cfg, msg, a) {
+   let name = a[0];
+   let raw = grv-resolve(r, a[1]);
+   let old = len(a) > 2 ? (len(a[2]) == 0 ? gwc-zero() : a[2]) : nothing();
+   let cur = gr-resolve(r, name) ?? gwc-zero();
+   nothing?(raw) ? gwc-fatal(a[1] ++ ": not a valid SHA1") : !nothing?(old) && !str_eq(old, cur) ? gwc-fatal("cannot lock ref '" ++ name ++ "': is at " ++ cur ++ " but expected " ++ old) : gwc-ur-write(r, cfg, msg, name, gsha-hex-of-raw(raw), cur);
+  }
+  def gwc-ur-write(r, cfg, msg, name, hex, cur) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let w = name == "HEAD" ? gwc-move-head(r, hex, id, ms, msg) : gwc-set-ref(r, name, hex);
+   let l = name == "HEAD" ? 0 : gwc-log(r, name, cur, hex, id, ms, msg);
+   w == 1 ? gwc-ok("") : gwc-fatal("cannot update the ref '" ++ name ++ "'");
+  }
+  def gwc-ur-delete(r, a) = nil?(a) ? ["", 129, "usage: git update-ref -d <ref> [<oldvalue>]\n"] : gwc-delete-ref(r, a[0], len(a) > 1 ? a[1] : nothing());
+  def gwc-delete-ref(r, name, old) {
+   let cur = gr-resolve(r, name);
+   nothing?(cur) ? gwc-ok("") : !nothing?(old) && !str_eq(old, cur) ? gwc-fatal("cannot lock ref '" ++ name ++ "': is at " ++ cur ++ " but expected " ++ old) : gwc-delete-go(r, name);
+  }
+  def gwc-delete-go(r, name) {
+   let a = host_path_remove(gs-common(r) ++ "/" ++ name);
+   let b = host_path_remove(gs-gitdir(r) ++ "/logs/" ++ name);
+   let packed = gr-packed-text(r);
+   let w = gr-packed-find(packed, name) ?? "" ;
+   len(w) == 0 ? gwc-ok("") : gwc-pack-drop(r, packed, name);
+  }
+  // rewrite packed-refs without the lines of one ref (and its peeled line)
+  def gwc-pack-drop(r, packed, name) {
+   let ls = gs-lines(packed);
+   let kept = gwc-drop-lines(ls, name, []);
+   gw-put-file(gs-common(r) ++ "/packed-refs", gcm-text(kept)) == 1 ? gwc-ok("") : gwc-fatal("cannot rewrite packed-refs");
+  }
+  def gwc-drop-lines(ls, name, acc) = nil?(ls) ? ginf-reverse(acc, []) : gs-ends?(head(ls), " " ++ name) ? gwc-drop-lines(skip-peeled(tail(ls)), name, acc) : gwc-drop-lines(tail(ls), name, cons(head(ls), acc));
+  def skip-peeled(ls) = !nil?(ls) && len(head(ls)) > 0 && str_byte_at(head(ls), 0) == 94 ? tail(ls) : ls;
+  // ---- branch -----------------------------------------------------------------------------------------------------------------------
+  def gwc-br-spec() = [["-f", "flag"], ["--force", "flag"], ["-d", "flag"], ["-D", "flag"], ["--delete", "flag"], ["-m", "flag"], ["-M", "flag"], ["--move", "flag"], ["--list", "flag"], ["-l", "flag"], ["-a", "flag"], ["-r", "flag"], ["--all", "flag"], ["--remotes", "flag"], ["--show-current", "flag"], ["-u", "val"], ["--set-upstream-to", "val"]];
+  def gwc-branch(r, cfg, argv, g, args) {
+   let p = gcm-parse(args, gwc-br-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("branch", p[3][0]) : gcm-opt?(o, "-u") || gcm-opt?(o, "--set-upstream-to") ? gwc-set-upstream(r, cfg, gcm-opt-val(o, "-u", gcm-opt-val(o, "--set-upstream-to", "")), p[1]) : gcm-opt?(o, "-d") || gcm-opt?(o, "-D") || gcm-opt?(o, "--delete") ? gwc-br-delete(r, gcm-opt?(o, "-D"), p[1]) : gcm-opt?(o, "-m") || gcm-opt?(o, "-M") || gcm-opt?(o, "--move") ? gwc-br-move(r, cfg, gcm-opt?(o, "-M"), p[1]) : gcm-opt?(o, "--list") || gcm-opt?(o, "-l") || gcm-opt?(o, "-a") || gcm-opt?(o, "-r") || gcm-opt?(o, "--all") || gcm-opt?(o, "--remotes") || gcm-opt?(o, "--show-current") || nil?(p[1]) ? git-run(g[0], argv) : gwc-br-create(r, cfg, gcm-opt?(o, "-f") || gcm-opt?(o, "--force"), p[1]);
+  }
+  def gwc-valid-ref-name?(n) = len(n) > 0 && !gs-starts?(n, "-") && !gs-starts?(n, "/") && !gs-ends?(n, "/") && !gs-ends?(n, ".lock") && str_find(n, "..", 0) < 0 && str_find(n, " ", 0) < 0 && str_find(n, "~", 0) < 0 && str_find(n, "^", 0) < 0 && str_find(n, ":", 0) < 0 && str_find(n, "//", 0) < 0 && str_find(n, "@{", 0) < 0;
+  def gwc-br-create(r, cfg, force, a) {
+   let name = a[0];
+   let start = len(a) > 1 ? a[1] : "HEAD";
+   let raw = grv-resolve(r, start);
+   let c = nothing?(raw) ? nothing() : grv-peel(r, raw, "commit");
+   let exists = !nothing?(gr-resolve(r, "refs/heads/" ++ name));
+   !gwc-valid-ref-name?(name) ? gwc-fatal("'" ++ name ++ "' is not a valid branch name") : nothing?(c) ? gwc-fatal("not a valid object name: '" ++ start ++ "'") : exists && !force ? gwc-fatal("a branch named '" ++ name ++ "' already exists") : gwc-br-write(r, cfg, name, c, start);
+  }
+  def gwc-br-write(r, cfg, name, c, start) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let old = gr-resolve(r, "refs/heads/" ++ name) ?? gwc-zero();
+   let w = gwc-set-ref(r, "refs/heads/" ++ name, gsha-hex-of-raw(c));
+   let l = gwc-log(r, "refs/heads/" ++ name, old, gsha-hex-of-raw(c), id, ms, "branch: Created from " ++ start);
+   w == 1 ? gwc-ok("") : gwc-fatal("cannot create the branch");
+  }
+  def gwc-br-delete(r, force, names) {
+   nil?(names) ? gwc-fatal("branch name required") : gwc-br-del-one(r, force, names, "", "");
+  }
+  def gwc-br-del-one(r, force, names, out, err) {
+   nil?(names) ? [out, len(err) > 0 ? 1 : 0, err] : gwc-br-del-step(r, force, names, out, err, "refs/heads/" ++ head(names), gr-resolve(r, "refs/heads/" ++ head(names)));
+  }
+  def gwc-br-del-step(r, force, names, out, err, ref, tip) {
+   let cur = gwc-branch-ref(r);
+   let name = head(names);
+   nothing?(tip) ? gwc-br-del-one(r, force, tail(names), out, err ++ "error: branch '" ++ name ++ "' not found.\n") : !nothing?(cur) && str_eq(cur, ref) ? gwc-br-del-one(r, force, tail(names), out, err ++ "error: Cannot delete branch '" ++ name ++ "' checked out at '" ++ gs-top(r) ++ "'\n") : !force && !gwc-merged?(r, tip) ? gwc-br-del-one(r, force, tail(names), out, err ++ "error: The branch '" ++ name ++ "' is not fully merged.\nIf you are sure you want to delete it, run 'git branch -D " ++ name ++ "'.\n") : gwc-br-del-one(r, force, tail(names), out ++ "Deleted branch " ++ name ++ " (was " ++ substring(tip, 0, 7) ++ ").\n" ++ (gwc-delete-go(r, ref)[0]), err);
+  }
+  def gwc-merged?(r, tip) {
+   let head = gr-head-id(r);
+   !nothing?(head) && grv-ancestor?(r, gsha-raw-of-hex(tip), gsha-raw-of-hex(head));
+  }
+  def gwc-br-move(r, cfg, force, a) {
+   let cur = gwc-branch-ref(r);
+   let oldname = len(a) > 1 ? a[0] : gr-short-branch(cur ?? "refs/heads/main");
+   let newname = len(a) > 1 ? a[1] : (len(a) == 1 ? a[0] : "");
+   let tip = gr-resolve(r, "refs/heads/" ++ oldname);
+   nothing?(tip) ? gwc-fatal("no branch named '" ++ oldname ++ "'") : !gwc-valid-ref-name?(newname) ? gwc-fatal("'" ++ newname ++ "' is not a valid branch name") : !nothing?(gr-resolve(r, "refs/heads/" ++ newname)) && !force ? gwc-fatal("a branch named '" ++ newname ++ "' already exists") : gwc-br-move-go(r, oldname, newname, tip, cur);
+  }
+  def gwc-br-move-go(r, oldname, newname, tip, cur) {
+   let w = gwc-set-ref(r, "refs/heads/" ++ newname, tip);
+   let d = gwc-delete-go(r, "refs/heads/" ++ oldname);
+   let h = !nothing?(cur) && str_eq(cur, "refs/heads/" ++ oldname) ? gw-put-file(gs-gitdir(r) ++ "/HEAD", "ref: refs/heads/" ++ newname ++ "\n") : 1;
+   w == 1 && h == 1 ? gwc-ok("") : gwc-fatal("cannot rename the branch");
+  }
+  def gwc-set-upstream(r, cfg, up, a) {
+   let branch = nil?(a) ? gr-short-branch(gwc-branch-ref(r) ?? "refs/heads/main") : a[0];
+   let remote_ref = nothing?(gr-resolve(r, "refs/remotes/" ++ up)) ? nothing() : "refs/remotes/" ++ up;
+   nothing?(remote_ref) ? gwc-fatal("the requested upstream branch '" ++ up ++ "' does not exist") : gwc-cfg-append(r, "[branch \"" ++ branch ++ "\"]\n\tremote = " ++ substring(up, 0, gs-index-of(up, 47, 0)) ++ "\n\tmerge = refs/heads/" ++ substring(up, gs-index-of(up, 47, 0) + 1, len(up)) ++ "\n");
+  }
+  def gwc-cfg-append(r, text) = gw-put-file(gs-common(r) ++ "/config", (read_file(gs-common(r) ++ "/config") ?? "") ++ text) == 1 ? gwc-ok("") : gwc-fatal("could not write the config");
+  // ---- tag ---------------------------------------------------------------------------------------------------------------------------
+  def gwc-tg-spec() = [["-a", "flag"], ["-m", "val"], ["-f", "flag"], ["-d", "flag"], ["-l", "flag"], ["--list", "flag"], ["--force", "flag"], ["--delete", "flag"], ["-s", "flag"]];
+  def gwc-tag(r, cfg, argv, g, args) {
+   let p = gcm-parse(args, gwc-tg-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("tag", p[3][0]) : gcm-opt?(o, "-s") ? ["", 129, "native-git: tag -s (signing) is refused by name\n"] : gcm-opt?(o, "-d") || gcm-opt?(o, "--delete") ? gwc-tag-delete(r, p[1]) : gcm-opt?(o, "-l") || gcm-opt?(o, "--list") || nil?(p[1]) ? gwc-ok(gcm-text(map(x => substring(x[0], 10, len(x[0])), gr-list(r, "refs/tags/")))) : gwc-tag-create(r, cfg, o, p[1]);
+  }
+  def gwc-tag-delete(r, names) {
+   nil?(names) ? gwc-fatal("tag name required") : gwc-tag-del-go(r, names, "");
+  }
+  def gwc-tag-del-go(r, names, out) {
+   let tip = nil?(names) ? "" : gr-resolve(r, "refs/tags/" ++ head(names));
+   nil?(names) ? gwc-ok(out) : nothing?(tip) ? ["", 1, out ++ "error: tag '" ++ head(names) ++ "' not found.\n"] : gwc-tag-del-go(r, tail(names), out ++ "Deleted tag '" ++ head(names) ++ "' (was " ++ substring(tip, 0, 7) ++ ")\n" ++ (gwc-delete-go(r, "refs/tags/" ++ head(names))[0]));
+  }
+  def gwc-tag-create(r, cfg, o, a) {
+   let name = a[0];
+   let start = len(a) > 1 ? a[1] : "HEAD";
+   let raw = grv-resolve(r, start);
+   let exists = !nothing?(gr-resolve(r, "refs/tags/" ++ name));
+   !gwc-valid-ref-name?(name) ? gwc-fatal("'" ++ name ++ "' is not a valid tag name.") : nothing?(raw) ? gwc-fatal("Failed to resolve '" ++ start ++ "' as a valid ref.") : exists && !gcm-opt?(o, "-f") ? gwc-fatal("tag '" ++ name ++ "' already exists") : gwc-tag-write(r, cfg, o, name, raw);
+  }
+  def gwc-tag-write(r, cfg, o, name, raw) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER");
+   let annotated = gcm-opt?(o, "-a") || gcm-opt?(o, "-m");
+   let obj = gs-read(r, raw);
+   let msg = gwc-clean-message(gcm-opt-val(o, "-m", ""));
+   let body = nothing?(obj) || nothing?(id) ? nothing() : "object " ++ gsha-hex-of-raw(raw) ++ "\ntype " ++ obj[0] ++ "\ntag " ++ name ++ "\ntagger " ++ gwc-stamp(id, ms) ++ "\n\n" ++ msg;
+   annotated && nothing?(id) ? gwc-fatal("unable to auto-detect a tagger identity") : annotated && len(msg) == 0 ? gwc-fatal("no tag message?") : gwc-tag-put(r, name, annotated ? gw-put-loose(gs-gitdir(r), "tag", body) : gsha-hex-of-raw(raw));
+  }
+  def gwc-tag-put(r, name, hex) = nothing?(hex) ? gwc-fatal("cannot write the tag") : gwc-set-ref(r, "refs/tags/" ++ name, hex) == 1 ? gwc-ok("") : gwc-fatal("cannot write the tag");
+  // ---- moving the working tree to a tree: checkout, switch, reset --hard -------------------------------------------------------------
+  def gwc-blob-of(r, raw) = (gs-read(r, raw)[1] ?? "");
+  def gwc-write-out(r, row) {
+   let full = gs-top(r) ++ "/" ++ row[0];
+   let d = gw-mkdirs(gs-parent(full));
+   let rm = host_path_remove(full);
+   let w = write_file(full, gwc-blob-of(r, row[2]));
+   row[1] == 33261 ? host_chmod(full, 493) : 0;
+  }
+  // new index rows for a set of rows just written out
+  def gwc-fresh-row(r, row) {
+   let idn = host_file_identity(gs-top(r) ++ "/" ++ row[0]);
+   nothing?(idn) ? row : [row[0], row[1], row[2], len(gwc-blob-of(r, row[2])), idn[1] / 1000, (idn[1] % 1000) * 1000000, 0, 0, idn[1] / 1000, 0, idn[2], 16777220, 0];
+  }
+  // local changes that moving from `from` (a tree or nothing) to the diff `rows` would lose
+  def gwc-blockers(r, rows, drows, fromrows) {
+   let top = gs-top(r);
+   let imtime = gst-index-mtime(r);
+   filter(d => gwc-blocks?(r, top, imtime, rows, fromrows, d), drows);
+  }
+  def gwc-blocks?(r, top, imtime, rows, fromrows, d) {
+   let e = gwc-find(rows, d[1]);
+   let exists = host_file_mode(top ++ "/" ++ d[1]) >= 0;
+   str_eq(d[0], "A") ? (exists && nothing?(e)) || (!nothing?(e) && !str_eq(e[2], d[5])) : (!nothing?(e) && !str_eq(e[2], d[3])) || (!nothing?(e) && !str_eq(gst-state(top, e, imtime), "") && !(str_eq(d[0], "D") && str_eq(gst-state(top, e, imtime), "D")));
+  }
+  def gwc-apply-diff(r, rows, drows) {
+   let top = gs-top(r);
+   let dels = filter(d => str_eq(d[0], "D"), drows);
+   let puts = filter(d => !str_eq(d[0], "D"), drows);
+   let a = map(d => gwc-unlink(top, d[1]), dels);
+   let b = map(d => gwc-write-out(r, [d[1], d[4], d[5]]), puts);
+   let kept = filter(e => !any?(d => str_eq(d[1], e[0]), drows), rows);
+   append(kept, map(d => gwc-fresh-row(r, [d[1], d[4], d[5], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), puts));
+  }
+  // switch HEAD's checkout to commit `target` (raw), refusing when local changes are in the way unless force
+  def gwc-move-to(r, target, force) = force ? gwc-hard-to(r, target) : gwc-move-soft(r, target);
+  // every tracked file, the index and the working tree become the tree of `target`; untracked files stay
+  def gwc-hard-to(r, target) {
+   let tree = grv-peel(r, target, "tree");
+   nothing?(tree) ? gwc-fatal("not a tree object") : gwc-hard-go(r, gwc-rows(r), map(f => [f[0], f[1], f[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], gst-flatten(r, tree, "")));
+  }
+  def gwc-hard-go(r, rows, trows) {
+   let top = gs-top(r);
+   let imtime = gst-index-mtime(r);
+   let names = gi-names(trows);
+   let stale = filter(e => !gi-has?(names, e[0]), rows);
+   let rm = map(e => gwc-unlink(top, e[0]), stale);
+   let writes = filter(f => gwc-needs-write?(top, imtime, rows, f), trows);
+   let wr = map(f => gwc-write-out(r, f), writes);
+   let newrows = map(f => gwc-hard-row(r, rows, writes, f), trows);
+   gwc-save(r, newrows) == 1 ? gwc-ok("") : gwc-fatal("unable to write the index");
+  }
+  def gwc-needs-write?(top, imtime, rows, f) {
+   let old = gwc-find(rows, f[0]);
+   nothing?(old) || !str_eq(old[2], f[2]) || old[1] != f[1] || !str_eq(gst-state(top, old, imtime), "");
+  }
+  def gwc-hard-row(r, rows, writes, f) = any?(w => str_eq(w[0], f[0]), writes) ? gwc-fresh-row(r, f) : gwc-find(rows, f[0]);
+  def gwc-move-soft(r, target) {
+   let rows = gwc-rows(r);
+   let fromtree = gst-head-tree(r);
+   let totree = grv-peel(r, target, "tree");
+   let drows = nothing?(totree) ? [] : gdf-trees(r, fromtree, totree);
+   let blockers = gwc-blockers(r, rows, drows, []);
+   nothing?(totree) ? gwc-fatal("not a tree object") : !nil?(blockers) ? ["", 1, "error: Your local changes to the following files would be overwritten by checkout:\n" ++ gcm-text(map(b => "\t" ++ b[1], blockers)) ++ "Please commit your changes or stash them before you switch branches.\nAborting\n"] : gwc-move-apply(r, rows, drows);
+  }
+  def gwc-move-apply(r, rows, drows) {
+   let newrows = gwc-apply-diff(r, rows, drows);
+   gwc-save(r, newrows) == 1 ? gwc-ok("") : gwc-fatal("unable to write the index");
+  }
+  // ---- checkout ------------------------------------------------------------------------------------------------------------------------
+  def gwc-co-spec() = [["-b", "val"], ["-B", "val"], ["-f", "flag"], ["--force", "flag"], ["--ours", "flag"], ["--theirs", "flag"], ["-q", "flag"], ["--quiet", "flag"], ["--detach", "flag"], ["-d", "flag"], ["--", "flag"]];
+  def gwc-checkout(r, dir, lit, cfg, args) {
+   let p = gcm-parse(args, gwc-co-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("checkout", p[3][0]) : !nil?(p[2]) || (gcm-opt?(o, "--ours") || gcm-opt?(o, "--theirs")) ? gwc-co-paths(r, lit, o, p[1], p[2]) : gwc-co-branch(r, cfg, o, p[1]);
+  }
+  def gwc-co-paths(r, lit, o, pos, paths) {
+   let src = gcm-opt?(o, "--ours") || gcm-opt?(o, "--theirs") ? nothing() : (nil?(pos) ? nothing() : pos[0]);
+   gcm-opt?(o, "--ours") || gcm-opt?(o, "--theirs") ? gwc-co-stage(r, lit, gcm-opt?(o, "--ours") ? 2 : 3, paths) : gwc-restore-paths(r, lit, src, true, true, paths);
+  }
+  // the version of a conflicted path from stage 2 (ours) or 3 (theirs), into the working file
+  def gwc-co-stage(r, lit, stage, paths) {
+   let rows = filter(e => e[6] == stage && gdf-match-all?(paths, e[0], lit), gwc-rows(r));
+   nil?(rows) ? gwc-fatal("path '" ++ (nil?(paths) ? "" : paths[0]) ++ "' does not have " ++ (stage == 2 ? "our" : "their") ++ " version") : gwc-ok(grv-join(map(e => (gwc-write-out(r, e)).str(), rows), "") == "" ? "" : "");
+  }
+  def gwc-co-branch(r, cfg, o, pos) {
+   let nb = gcm-opt-val(o, "-b", gcm-opt-val(o, "-B", ""));
+   let force = gcm-opt?(o, "-f") || gcm-opt?(o, "--force");
+   len(nb) > 0 ? gwc-co-new(r, cfg, nb, gcm-opt?(o, "-B") || force, force, nil?(pos) ? "HEAD" : pos[0]) : nil?(pos) ? gwc-fatal("you must specify a branch or revision") : gwc-co-existing(r, cfg, o, pos[0], force);
+  }
+  def gwc-co-new(r, cfg, name, overwrite, force, start) {
+   let c = gwc-commit-of(r, start);
+   nothing?(c) ? gwc-fatal("'" ++ start ++ "' is not a commit and a branch '" ++ name ++ "' cannot be created from it") : !gwc-valid-ref-name?(name) ? gwc-fatal("'" ++ name ++ "' is not a valid branch name") : !overwrite && !nothing?(gr-resolve(r, "refs/heads/" ++ name)) ? gwc-fatal("a branch named '" ++ name ++ "' already exists") : gwc-co-new-go(r, cfg, name, c, force, start);
+  }
+  def gwc-commit-of(r, spec) {
+   let raw = grv-resolve(r, spec);
+   nothing?(raw) ? nothing() : grv-peel(r, raw, "commit");
+  }
+  def gwc-co-new-go(r, cfg, name, c, force, start) {
+   let moved = gwc-move-to(r, c, force);
+   moved[1] != 0 ? moved : gwc-co-finish(r, cfg, name, c, start);
+  }
+  def gwc-co-finish(r, cfg, name, c, start) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let old = gr-head-id(r) ?? gwc-zero();
+   let prev = gr-short-branch(gwc-branch-ref(r) ?? "HEAD");
+   let w = gwc-set-ref(r, "refs/heads/" ++ name, gsha-hex-of-raw(c));
+   let h = gw-put-file(gs-gitdir(r) ++ "/HEAD", "ref: refs/heads/" ++ name ++ "\n");
+   let l1 = gwc-log(r, "refs/heads/" ++ name, gwc-zero(), gsha-hex-of-raw(c), id, ms, "branch: Created from " ++ start);
+   let l2 = gwc-log(r, "HEAD", old, gsha-hex-of-raw(c), id, ms, "checkout: moving from " ++ prev ++ " to " ++ name);
+   gwc-note("", "Switched to a new branch '" ++ name ++ "'\n");
+  }
+  def gwc-co-existing(r, cfg, o, spec, force) {
+   let ref = "refs/heads/" ++ spec;
+   let tip = gr-resolve(r, ref);
+   !nothing?(tip) && !gcm-opt?(o, "--detach") ? gwc-co-to-branch(r, cfg, spec, ref, gsha-raw-of-hex(tip), force) : gwc-co-detach(r, cfg, spec, force);
+  }
+  def gwc-co-to-branch(r, cfg, name, ref, tip, force) {
+   let cur = gwc-branch-ref(r);
+   !nothing?(cur) && str_eq(cur, ref) ? gwc-note("", "Already on '" ++ name ++ "'\n") : gwc-co-to-branch-go(r, cfg, name, tip, force);
+  }
+  def gwc-co-to-branch-go(r, cfg, name, tip, force) {
+   let moved = gwc-move-to(r, tip, force);
+   moved[1] != 0 ? moved : gwc-co-head(r, cfg, name, tip, "Switched to branch '" ++ name ++ "'\n");
+  }
+  def gwc-co-head(r, cfg, name, tip, said) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let old = gr-head-id(r) ?? gwc-zero();
+   let prev = gr-short-branch(gwc-branch-ref(r) ?? "HEAD");
+   let h = gw-put-file(gs-gitdir(r) ++ "/HEAD", "ref: refs/heads/" ++ name ++ "\n");
+   let l = gwc-log(r, "HEAD", old, gsha-hex-of-raw(tip), id, ms, "checkout: moving from " ++ prev ++ " to " ++ name);
+   gwc-note("", said);
+  }
+  def gwc-co-detach(r, cfg, spec, force) {
+   let c = gwc-commit-of(r, spec);
+   nothing?(c) ? gwc-fatal("pathspec '" ++ spec ++ "' did not match any file(s) known to git") : gwc-co-detach-go(r, cfg, spec, c, force);
+  }
+  def gwc-co-detach-go(r, cfg, spec, c, force) {
+   let moved = gwc-move-to(r, c, force);
+   moved[1] != 0 ? moved : gwc-co-detach-head(r, cfg, spec, c);
+  }
+  def gwc-co-detach-head(r, cfg, spec, c) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let old = gr-head-id(r) ?? gwc-zero();
+   let prev = gr-short-branch(gwc-branch-ref(r) ?? "HEAD");
+   let h = gw-put-file(gs-gitdir(r) ++ "/HEAD", gsha-hex-of-raw(c) ++ "\n");
+   let l = gwc-log(r, "HEAD", old, gsha-hex-of-raw(c), id, ms, "checkout: moving from " ++ prev ++ " to " ++ spec);
+   gwc-note("", "Note: switching to '" ++ spec ++ "'.\n\nYou are in 'detached HEAD' state.\n");
+  }
+  // ---- switch -----------------------------------------------------------------------------------------------------------------------------
+  def gwc-sw-spec() = [["-c", "val"], ["-C", "val"], ["--create", "val"], ["--detach", "flag"], ["-d", "flag"], ["-f", "flag"], ["--force", "flag"], ["-q", "flag"], ["--quiet", "flag"]];
+  def gwc-switch(r, lit, cfg, args) {
+   let p = gcm-parse(args, gwc-sw-spec());
+   let o = p[0];
+   let nb = gcm-opt-val(o, "-c", gcm-opt-val(o, "-C", gcm-opt-val(o, "--create", "")));
+   !nil?(p[3]) ? gcm-usage("switch", p[3][0]) : len(nb) > 0 ? gwc-co-new(gwc-r(r), cfg, nb, gcm-opt?(o, "-C"), gcm-opt?(o, "-f") || gcm-opt?(o, "--force"), nil?(p[1]) ? "HEAD" : p[1][0]) : nil?(p[1]) ? ["", 129, "usage: git switch [<options>] <branch>\n"] : gwc-co-existing(r, cfg, o, p[1][0], gcm-opt?(o, "-f") || gcm-opt?(o, "--force"));
+  }
+  def gwc-r(r) = r;
+  // ---- restore / checkout <rev> -- paths ----------------------------------------------------------------------------------------------------
+  def gwc-rs-spec() = [["--staged", "flag"], ["-S", "flag"], ["--worktree", "flag"], ["-W", "flag"], ["--source", "val"], ["-s", "val"], ["-q", "flag"]];
+  def gwc-restore(r, lit, args) {
+   let p = gcm-parse(args, gwc-rs-spec());
+   let o = p[0];
+   let staged = gcm-opt?(o, "--staged") || gcm-opt?(o, "-S");
+   let wt = gcm-opt?(o, "--worktree") || gcm-opt?(o, "-W") || !staged;
+   let paths = append(p[1], p[2]);
+   !nil?(p[3]) ? gcm-usage("restore", p[3][0]) : nil?(paths) ? ["", 129, "usage: git restore [<options>] [--source=<branch>] <file>...\n"] : gwc-restore-paths(r, lit, gcm-opt-val(o, "--source", gcm-opt-val(o, "-s", staged ? "HEAD" : "")), staged, wt, paths);
+  }
+  // src: a rev name, "" or nothing() for the index. staged: update the index; wt: update the working files
+  def gwc-restore-paths(r, lit, src, staged, wt, paths) {
+   let rows = gwc-rows(r);
+   let from_tree = nothing?(src) || len(src) == 0 ? nothing() : gcm-tree-of(r, src);
+   let srcrows = nothing?(from_tree) ? (nothing?(src) || len(src) == 0 ? filter(e => e[6] == 0, rows) : []) : map(f => [f[0], f[1], f[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], filter(f => gdf-match-all?(paths, f[0], lit), gst-flatten(r, from_tree, "")));
+   let hit = filter(e => gdf-match-all?(paths, e[0], lit), srcrows);
+   (!nothing?(src) && len(src) > 0 && nothing?(from_tree)) ? gwc-fatal("could not resolve " ++ src) : nil?(hit) ? gwc-fatal("pathspec '" ++ paths[0] ++ "' did not match any file(s) known to git") : gwc-restore-apply(r, rows, hit, staged, wt, nothing?(from_tree) && (nothing?(src) || len(src) == 0));
+  }
+  // the working files come from `hit` when wt; the index takes the same rows when staged (and a row restored into both gets the file's stat)
+  def gwc-restore-apply(r, rows, hit, staged, wt, from_index) {
+   let w = wt ? map(e => gwc-write-out(r, e), hit) : [];
+   let newrows = append(filter(e => !any?(h => str_eq(h[0], e[0]), hit), rows), map(h => wt ? gwc-fresh-row(r, h) : h, hit));
+   staged ? (gwc-save(r, newrows) == 1 ? gwc-ok("") : gwc-fatal("unable to write the index")) : gwc-ok("");
+  }
+  // ---- reset ---------------------------------------------------------------------------------------------------------------------------------
+  def gwc-rt-spec() = [["--soft", "flag"], ["--mixed", "flag"], ["--hard", "flag"], ["--keep", "flag"], ["-q", "flag"], ["--quiet", "flag"]];
+  def gwc-reset(r, lit, cfg, args) {
+   let p = gcm-parse(args, gwc-rt-spec());
+   let o = p[0];
+   !nil?(p[3]) ? gcm-usage("reset", p[3][0]) : !nil?(p[2]) ? gwc-reset-paths(r, lit, nil?(p[1]) ? "HEAD" : p[1][0], p[2]) : gwc-reset-rev(r, cfg, o, nil?(p[1]) ? "HEAD" : p[1][0]);
+  }
+  def gwc-reset-paths(r, lit, src, paths) = gwc-restore-paths(r, lit, src, true, false, paths);
+  def gwc-reset-rev(r, cfg, o, spec) {
+   let c = gwc-commit-of(r, spec);
+   nothing?(c) ? gwc-fatal("ambiguous argument '" ++ spec ++ "': unknown revision or path not in the working tree.") : gwc-reset-go(r, cfg, o, spec, c);
+  }
+  def gwc-reset-go(r, cfg, o, spec, c) {
+   let hard = gcm-opt?(o, "--hard");
+   let soft = gcm-opt?(o, "--soft");
+   let moved = soft ? gwc-ok("") : (hard ? gwc-move-to(r, c, true) : gwc-reset-index(r, c));
+   moved[1] != 0 ? moved : gwc-reset-ref(r, cfg, c, spec, hard && !(gcm-opt?(o, "-q") || gcm-opt?(o, "--quiet")));
+  }
+  // --mixed: the index becomes the commit's tree; the working files stay as they are
+  def gwc-reset-index(r, c) {
+   let tree = grv-peel(r, c, "tree");
+   let rows = gwc-rows(r);
+   let target = map(f => gwc-keep-or-fresh(rows, f), gst-flatten(r, tree, ""));
+   gwc-save(r, target) == 1 ? gwc-ok("") : gwc-fatal("unable to write the index");
+  }
+  def gwc-keep-or-fresh(rows, f) {
+   let old = gwc-find(rows, f[0]);
+   !nothing?(old) && str_eq(old[2], f[2]) ? old : [f[0], f[1], f[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  }
+  def gwc-reset-ref(r, cfg, c, spec, hard) {
+   let ms = gwc-now-ms();
+   let id = gwc-ident(r, cfg, "COMMITTER") ?? ["native-git", "native-git@localhost"];
+   let w = gwc-move-head(r, gsha-hex-of-raw(c), id, ms, "reset: moving to " ++ spec);
+   w == 1 ? gwc-ok(hard ? "HEAD is now at " ++ grv-short(r, c, 7) ++ " " ++ gs-subject(grv-full(r, grv-info(r, c))[4][4]) ++ "\n" : "") : gwc-fatal("cannot move HEAD");
+  }
+ }
+ 0;
+}

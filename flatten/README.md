@@ -1,15 +1,14 @@
-# flatten/ — the flatten body, and an honest note on T_flat
+# flatten/ — the op manifest
 
-`form-parse.fk`, `form-flatten.fk`, `fourth-flatten-driver.fk` are the real flatten **body** — Form recipes,
-no bash, no python, no Go. They are the architecture.
+`form-flatten.fk` contains the BML `flt-ops` table: native operation names,
+arities and bootstrap tags. Run `./fkwu flatten/gen-source-walker-table.fk`
+to import that table and the native rewrite rules and emit
+`runtime/fkwu-optable.h` directly.
 
-`fourth-flatten-table.txt` (`T_flat`) is **not** the architecture. It is a ~580 KB pre-flattened blob whose
-*existence currently depends on bin-go* (the origin's `regen_t_flat.sh` builds it with the Go bootstrap). That
-contradicts the no-Go sovereignty gate, and it is exactly the opaque, marker-fragile artifact that tangled the
-flatten path in the origin repo. It sits here ONLY as a temporary bootstrap cache.
+Adding a value operation updates its manifest row, this table and the matching
+serializer arm in `form/form-stdlib/fkc-table-serialize.fk`, then regenerates
+the header. The `op-manifest` drift check reads the compiler-normalized source.
+Executable flattening lives in `form/form-stdlib/form-flatten.fk`; host-effect
+meaning lives in `form/form-stdlib/host-effect-grammar.fk`.
 
-**The clean architecture (the decision):** the flatten must be **fkwu-self-derivable** — fkwu flattens
-`form-flatten.fk` from its own C-bootstrap primitives (or a minimal flatten baked into `runtime/fkwu-uni.c`),
-with no pre-made bin-go table in the seam. Then any flatten table is a *regenerable cache fkwu makes itself*,
-never a committed Go artifact. Until that self-derivation is proven, `T_flat` is a flagged crutch, scheduled
-for replacement — not a foundation to build on.
+An op family the seed carries with no caller outside `flt-ops` wants a caller or a release.

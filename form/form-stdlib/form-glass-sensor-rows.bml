@@ -1,0 +1,161 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-sensor-rows.bml — metric rows cross a gift frame as cells.
+//
+// Authority: form-stdlib/form-glass-sensor-rows.bml
+import form/form-stdlib/core.fk;
+import form/form-stdlib/form-glass-dashboard.bml;
+import form/form-stdlib/form-glass-gift-frame.bml;
+//
+// A sensor process gathers the rows that fork or scan -- host, process, owner,
+// storage, queue -- at its own cadence and GIVES them into a gift frame per
+// sensor. The glass, on its frame path, only asks each frame's sequence
+// (microseconds) and re-reads a frame when the sequence moved. The frame holds
+// list(schema, sensor, epoch, rows) as the seed own node words -- node_gift_write
+// gives it, node_gift_read takes it, no wire and no parser between; a received
+// row is the same cell the sensor built. Every row set read from a frame carries
+// the frame own witness row (shm name, sequence). A sensor not standing is named absent.
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassSensorRowsAuthority {
+        field FGSRAuthorityPath = "form/form-stdlib/form-glass-sensor-rows.bml";
+        field FGSRAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class FormGlassSensorRows {
+        field FGSRSchema = "form-glass-sensor-rows-v1";
+        field FGSRPublisherPrefix = "glass.sensor.";
+        field FGSRFrameBytes = 262144;
+        field FGSRFieldCount = 18;
+        field FGSRDefaultCadenceMs = 1000;
+        field FGSRSilentFactor = 3;
+        ref fgsr-authority = FormGlassSensorRowsAuthority;
+        thought fgsr-law = ["rows-are-the-observer-shape", "seq-before-read", "absent-says-absent", "cells-cross-as-cells", "no-parser-on-the-frame-path"];
+
+        // A sensor is body-local when what it MEASURES is body-local. The ear's
+        // spool and owner lease belong to this body root; so do the hearth
+        // spools the queue sensor counts (`.hearth/task.spool`, relative), and
+        // so are the cache and source roots the storage sensor scans (`form/…`,
+        // `observe/`, relative). Their shared frames carry that same scope;
+        // another checkout is another hearth, not a newer publication of this
+        // one. Machine sensors — the accelerator, the host, the process table —
+        // stay shared, because the machine is what they measure.
+        //
+        // Measured 2026-09-10, three sensor fleets standing on this Mac from
+        // three checkouts, all publishing `glass.sensor.queue` into one
+        // machine-wide frame: consecutive reads of the same door alternated
+        // `queue-task-frames=1 … durable spools only` with
+        // `queue-task-frames=0 … no durable spools` — the 1 was a six-day-old
+        // task frame in /Users/ursmuff/source/coherence-kernel, the 0 was a
+        // Codex worktree with no spools at all. Forty ticks of a read-only
+        // watch: 39 word changes on the queue rows and 17–18 on each storage
+        // catalog row, none of them a change in any body. The bounded door was
+        // acquitted in the same measurement — ten runs left the task spool's
+        // size and mtime untouched and created no spool here, so the observer
+        // was never in this reading; two bodies were.
+        def fgsr-body-local?(sensor) = if ((String) sensor == "ear") then 1 else if ((String) sensor == "queue") then 1 else if ((String) sensor == "storage") then 1 else 0;
+        def fgsr-publisher-in(sensor, bodyRoot) = ((String) FGSRPublisherPrefix() + (if fgsr-body-local?(sensor) then (sensor + ("@" + bodyRoot)) else sensor));
+        def fgsr-publisher(sensor) = fgsr-publisher-in(sensor, if fgsr-body-local?(sensor) then host_cwd() else "");
+
+        // --- wire: one row per line, eighteen constructor fields joined by | -----
+        def fgsr-row-wire(row) = fgd-cat([
+            row[1], "|", row[2], "|", row[3], "|", row[4], "|", row[5].str(), "|", row[6], "|", row[7].str(), "|", row[8], "|", row[9].str(), "|", row[10].str(), "|", row[11].str(), "|", row[12].str(), "|", row[13], "|", row[14], "|", row[15], "|", row[16], "|", row[17], "|", row[18]]);
+        def fgsr-rows-wire(rows) = if ((Comparable) len(rows) == 0) then "" else if ((Comparable) len(rows) == 1) then fgsr-row-wire(rows[0]) else (fgsr-row-wire(rows[0]) + ((String) byte_to_str(10) + fgsr-rows-wire(rows[1:])));
+        def fgsr-wire(sensor, epoch, rows) = fgd-cat([FGSRSchema(), "|", sensor, "|", epoch.str(), "|", len(rows).str(), byte_to_str(10), fgsr-rows-wire(rows)]);
+
+        // --- parse -------------------------------------------------------------
+        def fgsr-split-go(text, sep, from, acc) {
+            let at = str_find(text, sep, from);
+            if (at < 0) then reverse(cons(substring(text, from, len(text)), acc)) else fgsr-split-go(text, sep, (at + len(sep)), cons(substring(text, from, at), acc));
+        }
+        def fgsr-split(text, sep) = if ((Comparable) len(text) == 0) then [] else fgsr-split-go(text, sep, 0, []);
+        def fgsr-int-of(text) = if ((Comparable) len(text) == 0) then 0 else str_to_int(text);
+        def fgsr-row-of(fields) = if (!((Comparable) len(fields) == FGSRFieldCount())) then [] else fgo-metric(fields[0], fields[1], fields[2], fields[3], fgsr-int-of(fields[4]), fields[5], fgsr-int-of(fields[6]), fields[7], fgsr-int-of(fields[8]), fgsr-int-of(fields[9]), fgsr-int-of(fields[10]), fgsr-int-of(fields[11]), fields[12], fields[13], fields[14], fields[15], fields[16], fields[17]);
+        def fgsr-rows-of(lines) = if ((Comparable) len(lines) == 0) then [] else fgsr-rows-of-next(fgsr-row-of(fgsr-split(lines[0], "|")), lines[1:]);
+        def fgsr-rows-of-next(row, rest) = if ((Comparable) len(row) == 0) then fgsr-rows-of(rest) else cons(row, fgsr-rows-of(rest));
+        // list(schema, sensor, epoch, rows) or list() when the text is not this wire
+        def fgsr-parse(text) {
+            let lines = fgsr-split(text, byte_to_str(10));
+            let header = if ((Comparable) len(lines) == 0) then [] else fgsr-split(lines[0], "|");
+            if ((len(header) < 4) || (!((String) header[0] == FGSRSchema()))) then [] else [FGSRSchema(), header[1], fgsr-int-of(header[2]), fgsr-rows-of(lines[1:])];
+        }
+        def fgsr-parsed-sensor(p) = p[1];
+        def fgsr-parsed-epoch(p) = p[2];
+        def fgsr-parsed-rows(p) = p[3];
+
+        // --- give (the sensor side): the frame carries list(schema, sensor, epoch, rows, cadence) as cells ---
+        // the cadence is the sensor's own declaration, in ms between gives; a reader that sees no new give past
+        // three cadences marks the frame silent -- a live process whose frame stopped moving is not a live number
+        def fgsr-declared-cadence(sensor) = if ((String) sensor == "jungle") then 1000 else if ((String) sensor == "prosody") then 100 else if ((String) sensor == "ear") then 100 else if ((String) sensor == "machine") then 50 else if ((String) sensor == "glass") then 50 else if ((String) sensor == "queue") then 250 else if ((String) sensor == "organs") then 500 else if ((String) sensor == "host") then 1500 else if ((String) sensor == "storage") then 5000 else if ((String) sensor == "census") then 10000 else FGSRDefaultCadenceMs();
+        def fgsr-frame-at(sensor, epoch, rows, cadence) = [FGSRSchema(), sensor, epoch, rows, cadence];
+        def fgsr-frame(sensor, epoch, rows) = fgsr-frame-at(sensor, epoch, rows, fgsr-declared-cadence(sensor));
+        def fgsr-frame-cadence(f) = if (len(f) >= 5) then f[4] else FGSRDefaultCadenceMs();
+        def fgsr-give(sensor, epoch, rows) = fgsr-give-at(sensor, epoch, rows, fgsr-declared-cadence(sensor));
+        def fgsr-give-at(sensor, epoch, rows, cadence) {
+            let handle = ggf-offer(fgsr-publisher(sensor), FGSRFrameBytes());
+            let seq = if nothing?(handle) then nothing() else node_gift_write(handle, fgsr-frame-at(sensor, epoch, rows, cadence));
+            let released = ggf-release(handle);
+            if nothing?(seq) then [GGFSchema(), "refused", fgsr-publisher(sensor), "", -1] else [GGFSchema(), "given", fgsr-publisher(sensor), "", seq];
+        }
+
+        // --- take (the glass side): seq first, read the cells only when it moved ---
+        // held = list(seq, epoch, rows, cadence); answers a new held or the same one.
+        def fgsr-held-at(seq, epoch, rows, cadence) = [seq, epoch, rows, cadence];
+        def fgsr-held(seq, epoch, rows) = fgsr-held-at(seq, epoch, rows, FGSRDefaultCadenceMs());
+        def fgsr-held-cadence(h) = if (len(h) < 4) then FGSRDefaultCadenceMs() else h[3];
+        def fgsr-held-seq(h) = if ((Comparable) len(h) == 0) then -1 else h[0];
+        def fgsr-held-epoch(h) = if ((Comparable) len(h) == 0) then -1 else h[1];
+        def fgsr-held-rows(h) = if ((Comparable) len(h) == 0) then [] else h[2];
+        def fgsr-frame-valid?(f) = if nothing?(f) then 0 else if ((!((Comparable) len(f) == 4)) && (!((Comparable) len(f) == 5))) then 0 else if (!((String) f[0] == FGSRSchema())) then 0 else 1;
+        def fgsr-take(sensor, held) {
+            let handle = ggf-receive(fgsr-publisher(sensor));
+            let seq = ggf-seq(handle);
+            let moved = if nothing?(handle) then 0 else if ((Comparable) seq == fgsr-held-seq(held)) then 0 else 1;
+            let frame = if ((Comparable) moved == 1) then node_gift_read(handle) else nothing();
+            let released = ggf-release(handle);
+            if ((Comparable) moved == 0) then held else if (!((Comparable) fgsr-frame-valid?(frame) == 1)) then held else fgsr-held-at(seq, frame[2], frame[3], fgsr-frame-cadence(frame));
+        }
+        def fgsr-standing?(sensor) {
+            let handle = ggf-receive(fgsr-publisher(sensor));
+            let standing = if nothing?(handle) then 0 else 1;
+            let released = ggf-release(handle);
+            standing;
+        }
+        // --- the kept lane: the same take and give over a handle the glass keeps open for its life (ggf-kept-*) ---
+        // held carries the frame's shm name as a fifth cell, so the frame row names its read surface without hashing the publisher again
+        def fgsr-held-named(seq, epoch, rows, cadence, name) = [seq, epoch, rows, cadence, name];
+        def fgsr-held-name(h, sensor) = if (len(h) < 5) then ggf-name(fgsr-publisher(sensor)) else h[4];
+        def fgsr-take-held(handle, name, held) {
+            let seq = ggf-seq(handle);
+            let moved = if nothing?(handle) then 0 else if ((Comparable) seq == fgsr-held-seq(held)) then 0 else 1;
+            let frame = if ((Comparable) moved == 1) then node_gift_read(handle) else nothing();
+            if ((Comparable) moved == 0) then held else if (!((Comparable) fgsr-frame-valid?(frame) == 1)) then held else fgsr-held-named(seq, frame[2], frame[3], fgsr-frame-cadence(frame), name);
+        }
+        def fgsr-give-held(handle, sensor, epoch, rows) {
+            let seq = if nothing?(handle) then nothing() else node_gift_write(handle, fgsr-frame(sensor, epoch, rows));
+            if nothing?(seq) then [GGFSchema(), "refused", fgsr-publisher(sensor), "", -1] else [GGFSchema(), "given", fgsr-publisher(sensor), "", seq];
+        }
+        // when no sensor stands, one row says so by name instead of silence
+        def fgsr-absent-row(sensor) = fgo-unavailable("sensor", ("sensor-" + sensor), ("sensor " + sensor), "rows", "membrane", ("gift:" + fgsr-publisher(sensor)), "health", "no sensor process is giving this frame; run observe/form-glass-sensors-live.fk");
+        // the read surface names itself: one row per frame read -- the shared-memory name, the sequence the rows were taken at, and
+        // whether the publisher is still giving: age past three declared cadences is silent, and every row taken from a silent frame
+        // carries that truth instead of a confident number (an alive process whose newest frame is hours old is not a live gauge)
+        def fgsr-age-at(held, epoch) = if (fgsr-held-epoch(held) < 0) then -1 else if (epoch >= fgsr-held-epoch(held)) then (epoch - fgsr-held-epoch(held)) else 0;
+        def fgsr-silent?(held, epoch) = if (fgsr-age-at(held, epoch) < 0) then 0 else if (fgsr-age-at(held, epoch) > (FGSRSilentFactor() * fgsr-held-cadence(held))) then 1 else 0;
+        def fgsr-silence-note(held, epoch) = fgd-cat(["silent: last give ", fgd-format-age-ms(fgsr-age-at(held, epoch)), " ago, declared cadence ", fgsr-held-cadence(held).str(), " ms; the publisher is alive-and-silent or gone, its numbers are not current"]);
+        def fgsr-frame-row-value(sensor, held, epoch) = if ((Comparable) fgsr-silent?(held, epoch) == 1) then fgo-int("gift", ("frame." + sensor), ("gift frame " + sensor), fgsr-held-seq(held), "sequence", 0, "unified", "silent", ("shm:" + fgsr-held-name(held, sensor)), "silent", "gift", fgsr-silence-note(held, epoch)) else fgo-int("gift", ("frame." + sensor), ("gift frame " + sensor), fgsr-held-seq(held), "sequence", 0, "unified", "physical-live", ("shm:" + fgsr-held-name(held, sensor)), "live", "gift", fgd-cat(["sequence of the shared-memory frame these rows were read from; the frame is the read surface; cadence ", fgsr-held-cadence(held).str(), " ms, age ", fgd-format-age-ms(fgsr-age-at(held, epoch))]));
+        def fgsr-frame-row-at(sensor, held, epoch) = fgo-observe-row(fgsr-frame-row-value(sensor, held, epoch), fgsr-held-epoch(held), fgsr-held-seq(held));
+        def fgsr-frame-row(sensor, held) = fgsr-frame-row-at(sensor, held, now_unix_ms());
+        // A row with its own clock keeps it. Otherwise the carried frame gives
+        // its publication age, not a newly invented sensor capture time.
+        def fgsr-publication-stamps(rows, held) = if ((Comparable) len(rows) == 0) then [] else cons(if (fgo-observed-epoch(rows[0]) < 0) then fgo-observe-row(rows[0], fgsr-held-epoch(held), fgsr-held-seq(held)) else rows[0], fgsr-publication-stamps(rows[1:], held));
+        def fgsr-rows-or-absent-at(sensor, held, epoch) {
+            let rows = fgsr-publication-stamps(fgsr-held-rows(held), held);
+            if ((Comparable) len(rows) == 0) then [fgsr-absent-row(sensor)] else if ((Comparable) fgsr-silent?(held, epoch) == 1) then cons(fgsr-frame-row-at(sensor, held, epoch), fgo-rows-with-truth(rows, "silent", "silent")) else cons(fgsr-frame-row-at(sensor, held, epoch), rows);
+        }
+        def fgsr-rows-or-absent(sensor, held) = fgsr-rows-or-absent-at(sensor, held, now_unix_ms());
+    }
+    0;
+}

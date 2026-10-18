@@ -1,0 +1,116 @@
+// form-cli-heed-grounded.fk — a knowledge substrate for the heed cursor, over the
+// nodeid-rag-v2 grounded index this checkout already holds.
+//
+// WHAT IT IS. The cursor's lookupf contract is (ctx surface local-ready) ->
+// (list status span reason) and nothing else. This cell parses the envelope the
+// cursor hands it, performs AT MOST ONE grounded retrieval, and renders a typed
+// observation. It is the adapter the live floor has been one wide since morning.
+//
+// THE CUCKOOMARK IS SANITIZED HERE, NOT LATER. A retrieved answer is a slice of
+// somebody's source and the corpus is this repository, so the slice can contain
+// the very marks that frame it. A slice carrying the observation close mark would
+// forge a premature end, and everything after it would read to the model as
+// though it were outside the observation — the reader doing the forging,
+// faithfully. Every mark of either family found inside retrieved content is
+// replaced with NeutralMark BEFORE rendering, and the substitution COUNT is
+// reported as marks-neutralized. Sanitizing in silence would be its own
+// dishonesty: a witness has to be able to see that the body altered what it
+// quotes.
+//
+// ANCHOR FIRST, PATH SECOND. The observation leads with the NodeID that fixes
+// WHICH cell answered, and only then says where a copy of it was found today. A
+// reader that leads with the path binds to a location; a reader that leads with
+// the anchor binds to the meaning and survives the file moving.
+//
+// NO LOGIT EXECUTED THIS. The model emitted bytes; the cursor recognized a frame;
+// this cell did the retrieval. model-executed is 0 in every rendering.
+//
+// BOUNDS. One complete envelope causes at most one retrieval. Query at most
+// MaxQueryBytes; answer clipped to 768 and the clipping REPORTED; source path
+// clipped to 192 and reported. An unparseable, empty, nested or over-long frame
+// returns `nothing` with a named reason and performs no retrieval at all.
+//
+// PRELUDE ORDER IS LOAD-BEARING — str-byte-at before sha256, and the retrieval
+// chain before this cell — or the chain reports a lane seam and every field
+// below is a fold over nothing.
+//
+import form-stdlib/core.fk;
+import form-stdlib/str-byte-at.fk;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+import form-stdlib/text-tokenize.fk;
+import form-stdlib/rag-embed.fk;
+import form-stdlib/rag-index-codec.fk;
+import form-stdlib/rag-retrieve.fk;
+import form-stdlib/rag-ask.fk;
+import form-stdlib/language-template.fk;
+import form-stdlib/form-cli-heedmark.bml;
+//
+section [form.bml] {
+    def fhg-max-answer() = 768;
+    def fhg-max-source() = 192;
+    // ── bounded parse of the frame the cursor hands over ───────────────────
+    // The cursor guarantees a surface that opens with HeedOpen and ends with
+    // HeedClose. What is still open to abuse is what lies BETWEEN them.
+    def fhg-query-of(surface) = {
+        let o = len(HeedOpen());
+        let c = len(surface) - len(HeedClose());
+        c <= o ? "" : substring(surface, o, c);
+    };
+    def fhg-parse-reason(surface) = !((Comparable) str_find(surface, HeedOpen(), 0) == 0) ? "no-query-token" : {
+        let q = fhg-query-of(surface);
+        (Comparable) len(q) == 0 ? "empty-query" : str_find(q, HeedOpen(), 0) >= 0 ? "nested-query-token" : len(q) > MaxQueryBytes() ? "query-budget-exceeded" : "ready";
+    };
+    // ── the sanitizer ──────────────────────────────────────────────────────
+    // BOTH OF THESE WALK AN OFFSET AND NEITHER RE-SLICES THE TAIL. The first
+    // form of each cut a fresh copy of everything after the match and handed it
+    // to the next step, so a span with k marks copied its own tail k times, and
+    // `substring` builds a string one byte at a time. fhg-marks-in calls the
+    // counter FOUR times over the same span, once per mark, and this runs on
+    // every retrieved span in the live generation path.
+    //
+    // str_find already accepts a start offset. Using it, the counter never
+    // allocates at all and the replacer copies each byte of the span exactly
+    // once. Same shape as the corpus cut that started all of this: move the
+    // offset, do not rebuild the remainder.
+    def fhg-replace-loop(s, needle, repl, from, acc) = {
+        let i = str_find(s, needle, from);
+        i < 0 ? ((String) acc + substring(s, from, len(s))) : fhg-replace-loop(s, needle, repl, i + len(needle), (acc + ((String) substring(s, from, i) + repl)));
+    };
+    def fhg-replace-all(s, needle, repl) = (Comparable) len(needle) == 0 ? s : fhg-replace-loop(s, needle, repl, 0, "");
+    def fhg-count-from(s, needle, from, acc) = {
+        let i = str_find(s, needle, from);
+        i < 0 ? acc : fhg-count-from(s, needle, i + len(needle), acc + 1);
+    };
+    def fhg-count-occ(s, needle, acc) = (Comparable) len(needle) == 0 ? acc : fhg-count-from(s, needle, 0, acc);
+    def fhg-marks() = [ObsClose(), ObsOpen(), HeedClose(), HeedOpen()];
+    def fhg-mark-count(s, marks, acc) = (Comparable) len(marks) == 0 ? acc : fhg-mark-count(s, marks[1:], acc + fhg-count-occ(s, marks[0], 0));
+    def fhg-marks-in(s) = fhg-mark-count(s, fhg-marks(), 0);
+    def fhg-scrub-loop(s, marks) = (Comparable) len(marks) == 0 ? s : fhg-scrub-loop(fhg-replace-all(s, marks[0], NeutralMark()), marks[1:]);
+    def fhg-scrub(s) = fhg-scrub-loop(s, fhg-marks());
+    // ── bounded rendering, anchor first ────────────────────────────────────
+    def fhg-clip(s, n) = len(s) <= n ? s : substring(s, 0, n);
+    def fhg-cut?(s, n) = len(s) > n ? 1 : 0;
+    def fhg-cat(parts) = (Comparable) len(parts) == 0 ? "" : ((String) parts[0] + fhg-cat(parts[1:]));
+    def fhg-render(status, reason, anchor, content-anchor, path, key, answer-key, raw-answer, score, confidence) = {
+        let clipped = fhg-clip(raw-answer, fhg-max-answer());
+        let neutralized = fhg-marks-in(clipped);
+        let answer = fhg-scrub(clipped);
+        let src = fhg-clip(path, fhg-max-source());
+        fhg-cat([ObsOpen(), "\nstatus=", status, "\nreason=", reason, "\nanchor=", anchor, "\ncontent-anchor=", content-anchor, "\nprovenance-schema=nodeid-rag-v2", "\nsource-path=", src, "\nsource-key=", key, "\nanswer-key=", answer-key, "\nretrieval-score=", score.str(), "\nretrieval-confidence=", confidence.str(), "\nmodel-executed=0", "\nlookup-count=1", "\nmarks-neutralized=", neutralized.str(), "\nanswer-truncated=", fhg-cut?(raw-answer, fhg-max-answer()).str(), "\nsource-truncated=", fhg-cut?(path, fhg-max-source()).str(), "\nanswer-byte-length=", len(answer).str(), "\nanswer:", answer, "\n", ObsClose()]);
+    };
+    def fhg-miss-span(reason) = fhg-render("miss", reason, "", "", "", "", "", "", 0, 0);
+    // A hit must resolve, be sufficient, and carry a valid anchor. Anything less
+    // is a miss — a body that cannot name which cell answered has not answered.
+    def fhg-admissible?(hit) = (Comparable) ra-hit?(hit) == 1 && ((Comparable) ra-hit-resolves?(hit) == 1 && ((Comparable) ra-hit-sufficient?(hit) == 1 && len(ra-hit-node-id(hit)) > 0)) ? 1 : 0;
+    def fhg-of-hit(hit) = (Comparable) fhg-admissible?(hit) == 0 ? ["miss", fhg-miss-span("grounded-miss"), "grounded-miss"] : ["hit", fhg-render("hit", "grounded-hit", ra-hit-node-id(hit), ra-hit-content-node-id(hit), ra-hit-source-path(hit), ra-hit-key(hit), ra-hit-answer-key(hit), ra-hit-answer(hit), ra-hit-score(hit), ra-hit-confidence(hit)), "grounded-hit"];
+    // ── the cursor's lookupf ───────────────────────────────────────────────
+    // Parsing completes before any index IO begins.
+    def fhg-lookup-at(index-path, ctx, surface, local-ready) = {
+        let reason = fhg-parse-reason(surface);
+        !((String) reason == "ready") ? ["nothing", "", reason] : fhg-of-hit(ra-grounded-hit-at(index-path, fhg-query-of(surface)));
+    };
+    def fhg-lookup(ctx, surface, local-ready) = fhg-lookup-at(ra-default-index(), ctx, surface, local-ready);
+    def fhg-model-executed() = 0;
+    0;
+}

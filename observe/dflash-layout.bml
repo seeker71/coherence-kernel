@@ -1,0 +1,51 @@
+// dflash-layout.bml — the DFlash2 drafter's GGUF, read with the body's own reader: metadata then every tensor (name, dims, type, bytes offset).
+//
+//   echo '{"go":1}' | ./fkwu observe/dflash-layout.bml
+//   echo '{"go":1,"file":"/path/x.gguf","only":"blk.0."}' | ./fkwu observe/dflash-layout.bml     only tensors whose name starts with `only`
+// stdin, one JSON line, all optional: go, file, only. Opens no Metal and no model: the header window only.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk
+section [form.bml] {
+ class DflashLayout {
+  def dfl-file() = "/Users/ursmuff/models/qwen38-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
+  def dfl-text(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def dfl-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def dfl-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("dflash-layout", line) : json-node-object([]);
+  }
+  def dfl-say(s) = print_str("[dflash-layout] " ++ s);
+  // a metadata value as text: u32 i32 f32 bool string, and the first elements of an array
+  def dfl-elems-go(src, at, et, i, n) = i >= n ? "" : (dfl-scalar(src, at, et) ++ (" " ++ dfl-elems-go(src, egg-val-next(src, at, et), et, i + 1, n)));
+  def dfl-scalar(src, at, et) = (Comparable) et == 4 ? egg-u32(src, at).str() : (Comparable) et == 5 ? ((egg-u32(src, at) >= 2147483648 ? egg-u32(src, at) - 4294967296 : egg-u32(src, at))).str() : (Comparable) et == 6 ? ewl-f32(src, at).str() : (Comparable) et == 7 ? egg-u8(src, at).str() : (Comparable) et == 8 ? substring(src, at + 8, at + 8 + egg-u64(src, at)) : (Comparable) et == 10 || (Comparable) et == 11 ? egg-u64(src, at).str() : "?";
+  def dfl-value(src, vt, at) = (Comparable) vt == 9 ? {
+   let et = egg-u32(src, at);
+   let n = egg-u64(src, at + 4);
+   "[" ++ (et.str() ++ ("x" ++ (n.str() ++ ("] " ++ dfl-elems-go(src, at + 12, et, 0, n < 12 ? n : 12)))));
+  } : dfl-scalar(src, at, vt);
+  def dfl-kv-go(src, off, n) = n == 0 ? 1 : {
+   let kl = egg-str-len(src, off);
+   let vt = egg-u32(src, off + 8 + kl);
+   let said = dfl-say("kv " ++ (substring(src, off + 8, off + 8 + kl) ++ (" = " ++ dfl-value(src, vt, off + 8 + kl + 4))));
+   dfl-kv-go(src, egg-kv-next(src, off), n - 1);
+  };
+  def dfl-dims-go(src, off, k, nd) = k >= nd ? "" : (egg-ti-dim(src, off, k).str() ++ (k + 1 < nd ? "x" : "") ++ dfl-dims-go(src, off, k + 1, nd));
+  def dfl-starts?(src, off, only) = len(only) == 0 ? 1 : (egg-ti-namelen(src, off) >= len(only) ? egg-name-bytes-eq(src, off + 8, only, 0, len(only)) : 0);
+  def dfl-ti-go(src, off, n, only) = n == 0 ? 1 : {
+   let nl = egg-ti-namelen(src, off);
+   let said = dfl-starts?(src, off, only) == 1 ? dfl-say("t " ++ (substring(src, off + 8, off + 8 + nl) ++ (" dims " ++ (dfl-dims-go(src, off, 0, egg-ti-ndims(src, off)) ++ (" type " ++ (egg-ti-type(src, off).str() ++ (" at " ++ egg-ti-dataoff(src, off).str()))))))) : 0;
+   dfl-ti-go(src, egg-ti-next(src, off), n - 1, only);
+  };
+  def dfl-run() {
+   let opts = dfl-opts();
+   (Comparable) dfl-int(opts, "go", 0) == 1 ? {
+    let path = dfl-text(opts, "file", dfl-file());
+    let src = eqr-of-file(path, 0, 40000000);
+    dfl-say("magic ok " ++ (egg-magic-ok?(src).str() ++ (" version " ++ (egg-version(src).str() ++ (" tensors " ++ (egg-tensor-count(src).str() ++ (" kv " ++ egg-kv-count(src).str())))))));
+    let kvs = dfl-text(opts, "only", "") == "" ? dfl-kv-go(src, 24, egg-kv-count(src)) : 1;
+    dfl-ti-go(src, egg-tinfo-start(src), egg-tensor-count(src), dfl-text(opts, "only", ""));
+   } : dfl-say("plan: go=1 reads the drafter's GGUF header; file and only are optional");
+  }
+ }
+ dfl-run();
+}

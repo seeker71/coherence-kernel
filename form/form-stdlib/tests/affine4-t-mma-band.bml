@@ -1,0 +1,80 @@
+; affine4-t-mma-band.bml — dx = W^T dy on the matrix unit equals the scalar walk to an epsilon, and is faster.
+;
+; preludes: form-stdlib/core.fk form-stdlib/backprop-msl.bml form-stdlib/native-affine-metal.bml
+; REQUIRES: the Metal carrier (a fresh worktree builds it: form-stdlib/metal-carrier.bml)
+;
+; bpm-affine4-t walked each (token, column) down the weight's rows one thread at a time; from sixteen tokens it takes a 32-token by
+; 32-column tile on simdgroup_multiply_accumulate (form_affine4_t_mma_f32, backprop-msl.bml). This band runs both over synthetic
+; quantized weights (a 4096-byte pattern tiled to length, never a list of millions) and compares every output to 1e-4 of the
+; largest.
+;
+; Verdict 7 when every claim lands:
+;   1   f32 scales, 128 rows by 96 columns, group 32: the matrix-unit product matches the scalar walk for 16, 17, 33 and 100 tokens
+;   2   a column count that leaves a partial tile and f16 scales (192 rows by 40 columns, group 8; 64 rows by 72 columns, group 8): the same
+;   4   the real 3B shape (8192 rows by 3072 columns, group 64) at 88 tokens, eight products to one sync: the best of three runs of the matrix unit is no slower than the
+;       scalar walk's (the size of the gain is printed, not claimed: the gates run bands beside each other)
+section [form.bml] {
+ class Affine4TMmaBand {
+  def atb-bit(ok, bit) = ok ? bit : 0;
+  def atb-pat(salt) = str-join(map(i => byte_to_str(((i * 2654435761) + (salt * 40503) + 12345) % 256), range(0, 4096)));
+  def atb-rep(pat, times) = times <= 1 ? pat : atb-rep-go(atb-rep(pat, times / 2), pat, times % 2);
+  def atb-rep-go(half, pat, odd) = odd == 0 ? half ++ half : half ++ half ++ pat;
+  def atb-fill(pat, n) = substring(atb-rep(pat, (n + len(pat) - 1) / len(pat)), 0, n);
+  def atb-f32-pat(salt) = nam-f32s(map(i => (((i * 53 + salt) % 17) + 1) / 16.0, range(0, 1024)));
+  def atb-x-pat() = nam-f32s(map(i => (((i * 37) % 101) - 50) / 25.0, range(0, 1024)));
+  def atb-half(bits) = byte_to_str(bits % 256) ++ byte_to_str(bits / 256);
+  def atb-half-pat(bitsList) = str-join(map(i => atb-half(bitsList[i % len(bitsList)]), range(0, 2048)));
+  def atb-buf(floats, bytes) = nam-write(nam-alloc(floats), bytes);
+  def atb-view-f32(rows, cols, group) {
+   let n = rows * (cols / group);
+   [atb-buf((rows * cols) / 8, atb-fill(atb-pat(1), (rows * cols) / 2)), atb-buf(n, atb-fill(atb-f32-pat(3), n * 4)), atb-buf(n, atb-fill(atb-f32-pat(7), n * 4)), rows, cols, group, 0];
+  }
+  def atb-view-f16(rows, cols, group) {
+   let n = rows * (cols / group);
+   [atb-buf((rows * cols) / 8, atb-fill(atb-pat(2), (rows * cols) / 2)), atb-buf((n + 1) / 2 + 1, atb-fill(atb-half-pat([15360, 14336, 16384, 13312]), n * 2)), atb-buf((n + 1) / 2 + 1, atb-fill(atb-half-pat([0, 47104, 14336]), n * 2)), rows, cols, group, 1];
+  }
+  def atb-max-abs(xs) = foldl((m, v) => (v < 0.0 ? 0.0 - v : v) > m ? (v < 0.0 ? 0.0 - v : v) : m, 0.0, xs);
+  def atb-max-diff(a, b) = atb-max-abs(map(i => a[i] - b[i], range(0, len(a))));
+  // the gradient dy is tokens by rows; dx is tokens by cols
+  def atb-same?(view, tokens) {
+   let rows = view[3]; let cols = view[4];
+   let dy = atb-buf(tokens * rows, atb-fill(atb-x-pat(), tokens * rows * 4));
+   let d1 = nam-alloc(tokens * cols); let d2 = nam-alloc(tokens * cols);
+   let a = bpm-affine4-t-with(bpm-pipe(), view, dy, d1, tokens);
+   let b = bpm-affine4-t(view, dy, d2, tokens);
+   let done = nam-sync();
+   let p = nam-read(d1, tokens * cols); let q = nam-read(d2, tokens * cols);
+   let freed = nam-free([dy, d1, d2]);
+   let diff = atb-max-diff(p, q);
+   let said = diff <= 0.0001 * (atb-max-abs(p) + 1.0) ? 0 : print(["affine4-t-mma", "differs from the scalar walk", rows, cols, view[5], tokens, "by", diff]);
+   diff <= 0.0001 * (atb-max-abs(p) + 1.0);
+  }
+  def atb-all(view, tokensList) = all?(t => atb-same?(view, t), tokensList);
+  def atb-time(view, tokens, mma, n) {
+   let dy = atb-buf(tokens * view[3], atb-fill(atb-x-pat(), tokens * view[3] * 4));
+   let dx = nam-alloc(tokens * view[4]);
+   let warm = atb-send(view, dy, dx, tokens, mma, 2);
+   let warmed = nam-sync();
+   let t0 = host_monotonic_ms();
+   let r = atb-send(view, dy, dx, tokens, mma, n);
+   let done = nam-sync();
+   let t1 = host_monotonic_ms();
+   let freed = nam-free([dy, dx]);
+   t1 - t0;
+  }
+  def atb-send(view, dy, dx, tokens, mma, n) = n <= 0 ? 1 : atb-send-next(view, dy, dx, tokens, mma, n, mma ? bpm-affine4-t(view, dy, dx, tokens) : bpm-affine4-t-with(bpm-pipe(), view, dy, dx, tokens));
+  def atb-send-next(view, dy, dx, tokens, mma, n, sent) = atb-send(view, dy, dx, tokens, mma, n - 1);
+  def atb-min3(a, b, c) = (a < b ? a : b) < c ? (a < b ? a : b) : c;
+  def atb-best(view, tokens, mma) = atb-min3(atb-time(view, tokens, mma, 8), atb-time(view, tokens, mma, 8), atb-time(view, tokens, mma, 8));
+  def atb-score() {
+   let big = atb-view-f32(8192, 3072, 64);
+   let scalar = atb-best(big, 88, 0 == 1);
+   let mma = atb-best(big, 88, 1 == 1);
+   print(["affine4-t-mma", "3B shape, 88 tokens, eight products: scalar walk ms", scalar, "matrix unit ms", mma]);
+   atb-bit(atb-all(atb-view-f32(128, 96, 32), [16, 17, 33, 100]), 1)
+     + atb-bit(atb-all(atb-view-f32(192, 40, 8), [16, 40]) && atb-all(atb-view-f16(64, 72, 8), [17, 65]), 2)
+     + atb-bit(mma <= scalar, 4);
+  }
+ }
+ atb-score();
+}

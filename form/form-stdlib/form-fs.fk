@@ -106,15 +106,13 @@
             ""
             (str_concat (byte_to_str (head bytes)) (host-abi-bytes-to-string (tail bytes)))))
 
+    ; the whole file as its bytes; a path that does not open is nothing
     (defn host-abi-read-bytes (path)
-        (do
-            (let n (host_file_size path))
-            (if (lt n 0)
-                (list)
-                (host-abi-string-to-bytes (host_file_read_slice path 0 n)))))
+        (read_file_bytes path))
 
+    ; the file becomes exactly these bytes; answers the count written, or -1
     (defn host-abi-write-bytes (path bytes)
-        (host_file_write_text path (host-abi-bytes-to-string bytes)))
+        (write_file_bytes path bytes))
 
     (defn host-abi-append-bytes (path bytes)
         (host_file_append_bytes path bytes))
@@ -182,6 +180,16 @@
     (defn fs-exists? (path)
         (host-fs-exists? path))
 
+    ;; the checkout that holds the working directory: the nearest directory, from the
+    ;; working directory upward, holding a .git entry (a directory in the main checkout,
+    ;; a file in a worktree) -- the boundary the host path resolver stops at. Absolute, so
+    ;; no read door walks it again; nothing when no ancestor holds one.
+    (defn fs-checkout-root-from (dir)
+        (if (eq (fs-exists? (fs-path-join dir ".git")) 1) dir
+            (do (let up (fs-path-dirname dir))
+                (if (str_eq up dir) (nothing) (fs-checkout-root-from up)))))
+    (defn fs-checkout-root () (fs-checkout-root-from (host_cwd)))
+
     (defn fs-is-file? (path)
         (if (eq (fs-exists? path) 0) 0
             (if (eq (fs-is-dir? path) 1) 0 1)))
@@ -223,11 +231,15 @@
     (defn fs-mkdir (path)
         (host-fs-mkdir path))
 
-    (defn fs-mkdir-parents (path)
-        (host-fs-mkdir path))
-
+    ;; the names a directory holds. A path that is no directory -- not there, or a file -- holds
+    ;; none, so fs-list answers []: the door (fs_list, host-fs-list) answers nothing there, and
+    ;; every walk below and in the body's listers (nil?, len, names[1:]) is a walk over a list --
+    ;; handed nothing, a nil? walk never ends, since the tail of nothing is nothing. A caller
+    ;; that asks whether the directory is there asks fs-is-dir?, or reads host-fs-list itself.
     (defn fs-list (path)
-        (host-fs-list path))
+        (do
+            (let names (host-fs-list path))
+            (if (nothing? names) (empty) names)))
 
     (defn fs-remove-file (path)
         (host-fs-remove-file path))
@@ -253,8 +265,9 @@
             (if (lt n s) 0
                 (if (str_eq (substring name (sub n s) n) suffix) 1 0))))
 
+    ;; a glob over a path that is no directory matches no name (fs-list answers [] there)
     (defn fs-glob-suffix (dir suffix)
-        (fs-glob-suffix-acc (fs_list dir) suffix (empty)))
+        (fs-glob-suffix-acc (fs-list dir) suffix (empty)))
 
     (defn fs-glob-suffix-acc (names suffix acc)
         (if (nil? names) acc
@@ -266,7 +279,7 @@
         (if (and (ge (str_find pattern "*" 0) 0)
                  (ge (str_find pattern "." 0) 0))
             (fs-glob-suffix dir (substring pattern 1 (str_len pattern)))
-            (fs_list dir)))
+            (fs-list dir)))
 
     ;; ── tree walk via source_inventory ──────────────────────────────
     (defn fs-walk (root suffix)

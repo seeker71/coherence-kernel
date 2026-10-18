@@ -1,0 +1,87 @@
+; nll-prefix-cache-band.bml — the frozen prefix of a whole-row forward is kept, and a row that finds it equals a row that does not.
+;
+; preludes: form-stdlib/core.fk form-stdlib/tests/native-llama-fixture.bml
+; REQUIRES: the Metal carrier (a fresh worktree builds it: form-stdlib/metal-carrier.bml)
+;
+; The adapter sits on the top layers, so the layers below the first one that carries LoRA depend only on the model and the token
+; ids. nll-forward keeps the hidden state at that boundary in .hearth/prefix-cache (a file named by a hash of the model, the
+; numerics, the boundary and the ids) and a later forward of the same row maps it as the input of the first adapter layer. This
+; band takes the two-layer fixture with its first layer frozen (no LoRA), so the boundary is layer 1.
+;
+; Verdict 63 when every claim lands:
+;   1   only a whole row at position zero that wants every logit row takes part (training and validation), and only when a layer
+;       has LoRA above layer zero: a one-token forward, a row at a later position and an all-adapter model take none
+;   2   the first forward of a row (a miss) answers the plain forward's logits to the byte, counts a miss, and leaves one file of
+;       (tokens * width + 3) * 4 bytes (the activation and a trailer of its norm, its maximum and a signature)
+;   4   the second (a hit) answers the same logits to the byte, counts a hit, and its tape holds one block against the plain
+;       forward's two
+;   8   the loss and every adapter gradient from the hit's tape equal those from the plain forward's, to the byte
+;   16  a model whose every layer has LoRA never touches the cache: its forward counts no hit and no miss and writes no file
+;   32  a cache file of the right size whose pages are zeros (a write-back that never came) does not match its trailer: the row is
+;       recomputed to the same logits, counted spoiled, the entry is rewritten whole, and the next forward hits it
+section [form.bml] {
+ class NllPrefixCacheBand {
+  def npb-bit(ok, bit) = ok ? bit : 0;
+  // the fixture's layer without LoRA: the same views and norms, every projection's pair absent
+  def npb-frozen(l) = [l[0], [l[1][0], []], [l[2][0], []], [l[3][0], []], [l[4][0], []], l[5], [l[6][0], []], [l[7][0], []], [l[8][0], []]];
+  def npb-model() {
+   let m = nlf-model();
+   [m[0], [npb-frozen(m[1][0]), m[1][1]], m[2], m[3], m[4], m[5]];
+  }
+  def npb-ids() = [1, 5, 9, 12];
+  def npb-path(m) = nll-prefix-path(nll-prefix-key(m, npb-ids(), 1));
+  def npb-bytes(h, n) = (String) metal_buf_read(h, 0, n * 4);
+  def npb-stats() = nll-prefix-stats();
+  def npb-grads-equal?(a, b) = nil?(a) ? 1 : (npb-bytes(a[0][1], a[0][0][3] * a[0][0][4]) == npb-bytes(b[0][1], b[0][0][3] * b[0][0][4]) && npb-bytes(a[0][2], a[0][0][4] * a[0][0][5]) == npb-bytes(b[0][2], b[0][0][4] * b[0][0][5]) && npb-grads-equal?(a[1:], b[1:])) ? 1 : 0;
+  def npb-score() {
+   let m = npb-model(); let g = m[0]; let t = 4; let vocab = g[5]; let ids = npb-ids();
+   let path = npb-path(m);
+   let cleared = host_path_remove(path);
+   let ctx = nll-context(m, t);
+   let c1 = nll-prefix-count(m, ctx, 1, 0, t) == 1 && nll-prefix-count(m, ctx, 0, 0, t) == 0 && nll-prefix-count(m, ctx, 1, 1, t) == 0 && nll-prefix-count(nlf-model(), ctx, 1, 0, t) == 0;
+   let s0 = npb-stats();
+   let whole = nll-forward-whole(m, ctx, ids, 0, 1, g, t);
+   let miss = nll-forward(m, ctx, ids, 0, 1);
+   let s1 = npb-stats();
+   let c2 = npb-bytes(miss[0], t * vocab) == npb-bytes(whole[0], t * vocab) && s1[1] == s0[1] + 1 && s1[2] == s0[2] + 1 && file_size(path) == (t * g[0] + 3) * 4;
+   let hit = nll-forward(m, ctx, ids, 0, 1);
+   let s2 = npb-stats();
+   let c3 = npb-bytes(hit[0], t * vocab) == npb-bytes(whole[0], t * vocab) && s2[0] == s1[0] + 1 && len(hit[1]) == 1 && len(whole[1]) == 2;
+   let targets = [5, 9, 12, 17]; let mask = [0.0, 0.0, 1.0, 1.0];
+   let sw = nlb-state(m); let sh = nlb-state(m);
+   let lw = nlb-backward-masked(m, whole, targets, mask, sw, 1.0);
+   let lh = nlb-backward-masked(m, hit, targets, mask, sh, 1.0);
+   let c4 = lw == lh && npb-grads-equal?(sw, sh) == 1;
+   let closed = nll-forward-close(whole) && nll-forward-close(miss) && nll-forward-close(hit);
+   let freed = nlb-state-close(sw) && nlb-state-close(sh);
+   // a file of the right size whose pages are zeros (a write-back that never came): the trailer does not match, the row is
+   // recomputed, the entry is rewritten whole, and the next forward hits it
+   let zeroed = npb-zero-file(path, t * g[0] + 3);
+   let s5 = npb-stats();
+   let spoiled = nll-forward(m, ctx, ids, 0, 1);
+   let s6 = npb-stats();
+   let again = nll-forward(m, ctx, ids, 0, 1);
+   let s7 = npb-stats();
+   let wholeAgain = nll-forward-whole(m, ctx, ids, 0, 1, g, t);
+   let c6 = npb-bytes(spoiled[0], t * vocab) == npb-bytes(wholeAgain[0], t * vocab) && s6[3] == s5[3] + 1 && s7[0] == s6[0] + 1 && npb-bytes(again[0], t * vocab) == npb-bytes(wholeAgain[0], t * vocab);
+   let closed2 = nll-forward-close(spoiled) && nll-forward-close(again) && nll-forward-close(wholeAgain);
+   let everyLayer = nlf-model();
+   let ctx2 = nll-context(everyLayer, t);
+   let s3 = npb-stats();
+   let plain = nll-forward(everyLayer, ctx2, ids, 0, 1);
+   let s4 = npb-stats();
+   let c5 = s4[0] == s3[0] && s4[1] == s3[1] && s4[2] == s3[2];
+   let done = nll-forward-close(plain) && nll-context-close(ctx2) && nll-context-close(ctx);
+   let removed = host_path_remove(path);
+   npb-bit(c1, 1) + npb-bit(c2, 2) + npb-bit(c3, 4) + npb-bit(c4, 8) + npb-bit(c5, 16) + npb-bit(c6, 32);
+  }
+  // the file's pages set to zero through a writable mapping, its size unchanged
+  def npb-zero-file(path, floats) {
+   let h = metal_buf_from_file(path, 0, 0 - floats * 4);
+   let z = nam-zero(h, floats);
+   let s = nam-sync();
+   metal_buf_free(h);
+  }
+ }
+ npb-score();
+}

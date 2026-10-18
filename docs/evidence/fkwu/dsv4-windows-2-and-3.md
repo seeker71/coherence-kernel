@@ -1,0 +1,3 @@
+# DeepSeek-V4 validation windows 2 and 3 (2026-10-03, WITA)
+
+Window 1 (06:47) and window 3 (08:17) have their receipt rows in receipts/dsv4-validation.jsonl. Window 2 (07:29:28-07:30:04) has no row there: the lead discarded it by running git reset --hard on the land tree while the file was modified and unread-for-that-purpose. The window's own stdout is kept in dsv4-window-2-2026-10-03-0729.txt (every stage line: compile, map, state, wirespan, layers 0..15, the abort at layer 16 on ask-denied:compressor); window 3's stdout is dsv4-window-3-2026-10-03-0817.txt. Both are what the door printed, unedited.

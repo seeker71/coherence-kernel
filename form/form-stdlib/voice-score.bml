@@ -1,0 +1,134 @@
+// voice-score.bml — the body's own word error and character error between the text a voice was
+// given and the text the ear heard it say.
+//
+// This is the scoring half of a spoken track: render a line, hear it back with the native Whisper,
+// count how far the two texts are apart. Nothing leaves the body: strings are bytes here, so the
+// reader decodes UTF-8 itself, folds the spelling variants that are not errors, cuts the text into
+// words, and runs a row-wise edit distance (linear in the tokens, never the three-way recursion).
+//
+// What is folded before anything is counted, named so a reader can disagree with it:
+//   case                 ASCII and Latin-1 capitals fold to lower case
+//   the curly quote      U+2019 reads as the straight apostrophe
+//   the possessive       a trailing 's is cut from the word
+//   British spellings    -ising -ised -ises -ise -isation -> -iz*, -our -> -or, -ogue -> -og, towards -> toward
+//   Persian              ZWNJ and the harakat U+064B..U+065F are dropped; Arabic ya U+064A -> Persian ya
+//                        U+06CC, Arabic kaf U+0643 -> Persian kaf U+06A9
+//   a word               a run of letters or digits with at most one apostrophe inside; every
+//                        punctuation mark (ASCII, Latin-1, general punctuation, Arabic comma/semicolon/
+//                        question mark/percent, CJK punctuation) is a separator
+// The word error rate is the edit distance over words divided by the reference words; the character
+// error rate is the same distance over the code points of the words joined without spaces.
+// A second word error rate, WERz, reads the Persian ZWNJ as a word SEPARATOR instead of dropping it (see vsc-norm-z):
+// the same folds, the same cuts, but a given پرسیده‌اید and a heard پرسیده اید are the same two words. WER keeps the
+// first reading; the summary prints both, and a tsv written before WERz existed prints WERz as null.
+section [form.bml] {
+ class VoiceScore {
+  def vsc-nl() = byte_to_str(10);
+  def vsc-tab() = byte_to_str(9);
+
+  // ---- UTF-8 in, UTF-8 out ----
+  def vsc-cont(s,i,n) = i < n ? (str_byte_at(s,i) % 64) : 0;
+  def vsc-cps(s) = vsc-cps-go(s,0,len(s),[]);
+  def vsc-cps-go(s,i,n,acc) = i >= n ? reverse(acc) : vsc-cp-at(s,i,n,acc,str_byte_at(s,i));
+  def vsc-cp-at(s,i,n,acc,b) = b < 128 ? vsc-cps-go(s,i + 1,n,cons(b,acc)) : b < 224 ? vsc-cps-go(s,i + 2,n,cons(((b % 32) * 64) + vsc-cont(s,i + 1,n),acc)) : b < 240 ? vsc-cps-go(s,i + 3,n,cons(((b % 16) * 4096) + (vsc-cont(s,i + 1,n) * 64) + vsc-cont(s,i + 2,n),acc)) : vsc-cps-go(s,i + 4,n,cons(((b % 8) * 262144) + (vsc-cont(s,i + 1,n) * 4096) + (vsc-cont(s,i + 2,n) * 64) + vsc-cont(s,i + 3,n),acc));
+  def vsc-utf8(cp) = cp < 128 ? byte_to_str(cp) : cp < 2048 ? (byte_to_str(192 + (cp / 64)) ++ byte_to_str(128 + (cp % 64))) : cp < 65536 ? (byte_to_str(224 + (cp / 4096)) ++ byte_to_str(128 + ((cp / 64) % 64)) ++ byte_to_str(128 + (cp % 64))) : (byte_to_str(240 + (cp / 262144)) ++ byte_to_str(128 + ((cp / 4096) % 64)) ++ byte_to_str(128 + ((cp / 64) % 64)) ++ byte_to_str(128 + (cp % 64)));
+
+  // ---- folding: -1 drops the code point ----
+  def vsc-fold(cp) = (Comparable) cp == 8217 ? 39 : (Comparable) cp == 8204 ? -1 : ((cp >= 1611) && (cp <= 1631)) ? -1 : (Comparable) cp == 1610 ? 1740 : (Comparable) cp == 1603 ? 1705 : ((cp >= 65) && (cp <= 90)) ? (cp + 32) : ((cp >= 192) && (cp <= 222) && (!((Comparable) cp == 215))) ? (cp + 32) : cp;
+  def vsc-fold-all(cps,acc) = nil?(cps) ? reverse(acc) : vsc-fold-all(cps[1:],vsc-fold(cps[0]) < 0 ? acc : cons(vsc-fold(cps[0]),acc));
+
+  // ---- what is a letter ----
+  def vsc-letter?(cp) = cp < 128 ? ((((cp >= 97) && (cp <= 122)) || ((cp >= 48) && (cp <= 57))) ? 1 : 0) : vsc-wide-letter?(cp);
+  def vsc-wide-letter?(cp) = cp < 192 ? ((((Comparable) cp == 170) || (((Comparable) cp == 181) || ((Comparable) cp == 186))) ? 1 : 0) : (((Comparable) cp == 215) || ((Comparable) cp == 247)) ? 0 : ((cp >= 8192) && (cp <= 8303)) ? 0 : ((cp >= 8592) && (cp <= 11263)) ? 0 : ((cp >= 12288) && (cp <= 12351)) ? 0 : (((Comparable) cp == 1548) || (((Comparable) cp == 1563) || (((Comparable) cp == 1567) || (((cp >= 1642) && (cp <= 1645)) || ((Comparable) cp == 1748))))) ? 0 : ((cp >= 64830) && (cp <= 64831)) ? 0 : ((cp >= 65024) && (cp <= 65039)) ? 0 : (Comparable) cp == 65279 ? 0 : 1;
+
+  // ---- words ----
+  def vsc-words(cps) = vsc-words-go(cps,"",0,[]);
+  def vsc-flush(cur,acc) = (Comparable) len(cur) == 0 ? acc : cons(cur,acc);
+  def vsc-words-go(cps,cur,apos,acc) = nil?(cps) ? reverse(vsc-flush(cur,acc)) : (Comparable) vsc-letter?(cps[0]) == 1 ? vsc-words-go(cps[1:],cur ++ vsc-utf8(cps[0]),apos,acc) : vsc-apos-joins?(cps,cur,apos) ? vsc-words-go(cps[1:],cur ++ "'",1,acc) : vsc-words-go(cps[1:],"",0,vsc-flush(cur,acc));
+  def vsc-apos-joins?(cps,cur,apos) = ((Comparable) cps[0] == 39) && (len(cur) > 0) && ((Comparable) apos == 0) && (!nil?(cps[1:])) && ((Comparable) vsc-letter?(cps[1:][0]) == 1);
+
+  // ---- spelling canon ----
+  def vsc-ends?(w,suf) = len(w) < len(suf) ? false : (String) substring(w,len(w) - len(suf),len(w)) == suf;
+  def vsc-swap(w,a,b) = vsc-ends?(w,a) ? (substring(w,0,len(w) - len(a)) ++ b) : w;
+  def vsc-canon(w) = vsc-swap(vsc-swap(vsc-swap(vsc-swap(vsc-swap(vsc-swap(vsc-swap(vsc-swap(vsc-swap(w,"'s",""),"ising","izing"),"ised","ized"),"ises","izes"),"ise","ize"),"isation","ization"),"our","or"),"ogue","og"),"towards","toward");
+  def vsc-canon-all(ws) = nil?(ws) ? [] : cons(vsc-canon(ws[0]),vsc-canon-all(ws[1:]));
+  def vsc-norm(s) = vsc-canon-all(vsc-words(vsc-fold-all(vsc-cps(s),[])));
+  // The second reading, for Persian: the zero-width non-joiner is a SEPARATOR, not nothing. A Persian writer puts it
+  // inside a word (می‌کنم, پرسیده‌اید) and the ear's writer often puts a space there instead (می کنم, پرسیده اید);
+  // folded away, the given word is one token and the heard words are two, and a correct hearing counts wrong. Read
+  // as a separator, both sides cut at the same places, and the spacing is normalised the same way on both (a run of
+  // separators is one cut). The first reading stays: it is the number every earlier track was scored with.
+  def vsc-fold-z(cp) = (Comparable) cp == 8204 ? 32 : vsc-fold(cp);
+  def vsc-fold-all-z(cps,acc) = nil?(cps) ? reverse(acc) : vsc-fold-all-z(cps[1:],cons(vsc-fold-z(cps[0]),acc));
+  def vsc-norm-z(s) = vsc-canon-all(vsc-words(vsc-fold-all-z(vsc-cps(s),[])));
+  def vsc-join(ws) = nil?(ws) ? "" : (ws[0] ++ vsc-join(ws[1:]));
+
+  // ---- edit distance, one row at a time ----
+  def vsc-min2(a,b) = a < b ? a : b;
+  def vsc-range(a,b,acc) = b < a ? acc : vsc-range(a,b - 1,cons(b,acc));
+  def vsc-last(xs) = nil?(xs[1:]) ? xs[0] : vsc-last(xs[1:]);
+  def vsc-dist(r,h) = vsc-last(vsc-rows(r,h,vsc-range(0,len(h),[]),1));
+  def vsc-rows(r,h,prev,i) = nil?(r) ? prev : vsc-rows(r[1:],h,vsc-row(r[0],h,prev,i,[i]),i + 1);
+  def vsc-row(x,h,p,left,acc) = nil?(h) ? reverse(acc) : vsc-row-cell(x,h,p,left,acc,vsc-min2(vsc-min2(p[1] + 1,left + 1),p[0] + ((Value) x == h[0] ? 0 : 1)));
+  def vsc-row-cell(x,h,p,left,acc,c) = vsc-row(x,h[1:],p[1:],c,cons(c,acc));
+
+  // The third reading, the TOLERANT one (WERt). Measured on the Persian track, the separator reading is not the fairer
+  // one: the ear writes the ZWNJ compound sometimes spaced (پرسیده اید), sometimes joined (میشود, no ZWNJ at all), and
+  // each single reading scores the other way as wrong. Here a reference word that holds a ZWNJ is correct when the
+  // heard text has it joined OR as its pieces in a row; everything else counts as in WER, over the same reference
+  // words. A ZWNJ is kept inside its word as a private-use letter (U+E000) while the words are cut, then read both ways.
+  def vsc-zsep() = vsc-utf8(57344);
+  def vsc-fold-t(cp) = (Comparable) cp == 8204 ? 57344 : vsc-fold(cp);
+  def vsc-fold-all-t(cps,acc) = nil?(cps) ? reverse(acc) : vsc-fold-all-t(cps[1:],cons(vsc-fold-t(cps[0]),acc));
+  def vsc-pieces(w) = vsc-pieces-go(w,0,[]);
+  def vsc-pieces-go(w,from,acc) = vsc-pieces-at(w,from,acc,str_find(w,vsc-zsep(),from));
+  def vsc-pieces-at(w,from,acc,at) = at < 0 ? reverse(vsc-keep-full(substring(w,from,len(w)),acc)) : vsc-pieces-go(w,at + 3,vsc-keep-full(substring(w,from,at),acc));
+  def vsc-keep-full(p,acc) = (Comparable) len(p) == 0 ? acc : cons(p,acc);
+  def vsc-unit(w) = [vsc-join(vsc-pieces(w)),vsc-pieces(w)];
+  def vsc-units(s) = vsc-units-of(vsc-canon-all(vsc-words(vsc-fold-all-t(vsc-cps(s),[]))));
+  def vsc-units-of(ws) = nil?(ws) ? [] : cons(vsc-unit(ws[0]),vsc-units-of(ws[1:]));
+  def vsc-nth(xs,i) = i <= 0 ? xs[0] : vsc-nth(xs[1:],i - 1);
+  def vsc-seg-eq?(h,s,ps) = nil?(ps) ? true : (((String) vsc-nth(h,s) == ps[0]) ? vsc-seg-eq?(h,s + 1,ps[1:]) : false);
+  def vsc-tsplit(u,h,p,j) = (len(u[1]) < 2) ? 1000000 : ((j < len(u[1])) ? 1000000 : (vsc-seg-eq?(h,j - len(u[1]),u[1]) ? vsc-nth(p,j - len(u[1])) : 1000000));
+  def vsc-tbest(u,h,p,j,left) = vsc-min2(vsc-min2(vsc-nth(p,j) + 1,left + 1),vsc-min2(vsc-nth(p,j - 1) + ((String) u[0] == vsc-nth(h,j - 1) ? 0 : 1),vsc-tsplit(u,h,p,j)));
+  def vsc-trow(u,h,n,p,j,left,acc) = j > n ? reverse(acc) : vsc-tcell(u,h,n,p,j,acc,vsc-tbest(u,h,p,j,left));
+  def vsc-tcell(u,h,n,p,j,acc,c) = vsc-trow(u,h,n,p,j + 1,c,cons(c,acc));
+  def vsc-trows(us,h,n,prev) = nil?(us) ? prev : vsc-trows(us[1:],h,n,vsc-trow(us[0],h,n,prev,1,vsc-nth(prev,0) + 1,[vsc-nth(prev,0) + 1]));
+  def vsc-tdist(us,h) = vsc-last(vsc-trows(us,h,len(h),vsc-range(0,len(h),[])));
+
+  // [word errors, reference words, character errors, reference characters, word errors with ZWNJ as a separator,
+  //  reference words with ZWNJ as a separator, tolerant word errors, reference words (the tolerant reading's own count)]
+  def vsc-score(reference,heard) {
+   let r = vsc-norm(reference); let h = vsc-norm(heard);
+   let rc = vsc-cps(vsc-join(r)); let hc = vsc-cps(vsc-join(h));
+   let rz = vsc-norm-z(reference); let hz = vsc-norm-z(heard);
+   let ru = vsc-units(reference);
+   [vsc-dist(r,h),len(r),vsc-dist(rc,hc),len(rc),vsc-dist(rz,hz),len(rz),vsc-tdist(ru,h),len(ru)];
+  }
+
+  // ---- rows on a tsv: idx, word errors, words, text, heard, char errors, chars ----
+  def vsc-field-end(line,i) = i >= len(line) ? i : (Comparable) str_byte_at(line,i) == 9 ? i : vsc-field-end(line,i + 1);
+  def vsc-field-start(line,k,i) = k <= 0 ? i : vsc-field-start(line,k - 1,vsc-field-end(line,i) + 1);
+  def vsc-field(line,k) = vsc-field-of(line,vsc-field-start(line,k,0));
+  def vsc-field-of(line,i) = i > len(line) ? "" : substring(line,i,vsc-field-end(line,i));
+  def vsc-int(line,k) = (Comparable) len(vsc-field(line,k)) == 0 ? 0 : str_to_int(vsc-field(line,k));
+  def vsc-row-text(i,s,reference,heard) = i.str() ++ vsc-tab() ++ s[0].str() ++ vsc-tab() ++ s[1].str() ++ vsc-tab() ++ reference ++ vsc-tab() ++ heard ++ vsc-tab() ++ s[2].str() ++ vsc-tab() ++ s[3].str() ++ vsc-tab() ++ s[4].str() ++ vsc-tab() ++ s[5].str() ++ vsc-tab() ++ s[6].str() ++ vsc-tab() ++ s[7].str() ++ vsc-nl();
+  // sums over the text of a tsv: [rows, word errors, words, char errors, chars, word errors (ZWNJ a separator), words (same)]
+  // (a row written before the second reading has no columns 7 and 8: they read 0, and the summary says so)
+  def vsc-sum(text) = vsc-sum-go(text,0,[0,0,0,0,0,0,0,0,0]);
+  def vsc-sum-go(text,from,t) = from >= len(text) ? t : vsc-sum-at(text,from,t,str_find(text,vsc-nl(),from));
+  def vsc-sum-at(text,from,t,at) = at < 0 ? t : (at == from) ? vsc-sum-go(text,at + 1,t) : vsc-sum-line(text,at,t,substring(text,from,at));
+  def vsc-sum-line(text,at,t,line) = vsc-sum-go(text,at + 1,[t[0] + 1,t[1] + vsc-int(line,1),t[2] + vsc-int(line,2),t[3] + vsc-int(line,5),t[4] + vsc-int(line,6),t[5] + vsc-int(line,7),t[6] + vsc-int(line,8),t[7] + vsc-int(line,9),t[8] + vsc-int(line,10)]);
+  def vsc-done(text) = vsc-done-go(text,0,[]);
+  def vsc-done-go(text,from,acc) = from >= len(text) ? acc : vsc-done-at(text,from,acc,str_find(text,vsc-nl(),from));
+  def vsc-done-at(text,from,acc,at) = at < 0 ? acc : (at == from) ? vsc-done-go(text,at + 1,acc) : vsc-done-go(text,at + 1,cons(vsc-int(substring(text,from,at),0),acc));
+  def vsc-has?(xs,i) = nil?(xs) ? false : (Comparable) xs[0] == i ? true : vsc-has?(xs[1:],i);
+
+  // a ratio e/n as a fixed four-decimal string, rounded half up; 0 words reads 0.0000
+  def vsc-ratio(e,n) = (n <= 0) ? "0.0000" : vsc-ratio-q(((e * 10000) + (n / 2)) / n);
+  def vsc-ratio-q(q) = (q / 10000).str() ++ "." ++ vsc-pad4(q % 10000);
+  def vsc-pad4(v) = v < 10 ? ("000" ++ v.str()) : v < 100 ? ("00" ++ v.str()) : v < 1000 ? ("0" ++ v.str()) : v.str();
+  def vsc-summary(lang,t) = "{\"lang\":\"" ++ lang ++ "\",\"chunks\":" ++ t[0].str() ++ ",\"words\":" ++ t[2].str() ++ ",\"WER\":" ++ vsc-ratio(t[1],t[2]) ++ ",\"CER\":" ++ vsc-ratio(t[3],t[4]) ++ ",\"WERz\":" ++ (t[6] <= 0 ? "null" : vsc-ratio(t[5],t[6])) ++ ",\"WERt\":" ++ (t[8] <= 0 ? "null" : vsc-ratio(t[7],t[8])) ++ "}";
+ }
+ 0;
+}

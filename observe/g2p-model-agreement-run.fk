@@ -1,0 +1,123 @@
+// g2p-model-agreement-run.fk — how far a model's phonemes sit from the body's taught phonemes.
+//
+//   printf '<taught tsv>\n<prediction tsv>\n[<label>]\n' | ./fkwu observe/g2p-model-agreement-run.fk
+//
+// The taught tsv is a form/form-stdlib/data/g2p-<tongue>-word.tsv (word TAB phonemes joined by byte 31). The
+// prediction tsv is what observe/g2p-model-run.fk wrote (word TAB phonemes). Both sides are put through ONLY the
+// trivial normalisation the first measurement asks for — espeak's stress marks (U+02C8 U+02CC), the length mark
+// (U+02D0) and the tie bars (U+0361 U+035C) are removed — then split into Unicode code points, and aligned by
+// Levenshtein distance (a diagonal step wins a tie, so a substitution is preferred to an insert plus a delete).
+// No symbol mapping is applied; that is the point: the substitutions listed ARE the distance between the two IPA
+// conventions.
+//
+// Prints, one per line: the words compared and missing, the exact-match count and rate, the symbol edit rate
+// (edits over taught symbols; rates are x10000, integers), then the 15 most frequent substitutions
+// (taught>model), and the 8 most frequent deletions (taught symbols the model left out) and insertions (model
+// symbols the taught row does not hold). Integers only: a float walk in one statement stopped fkwu on 2026-10-03.
+// preflight-exec: forbidden
+import form/form-stdlib/line-grammar.fk;
+section [form.bml] {
+    def gma-line() = {
+        let value = read_line();
+        nothing?(value) ? "" : trim(value);
+    };
+    def gma-tab() = byte_to_str(9);
+    def gma-nl() = byte_to_str(10);
+    def gma-sep() = byte_to_str(31);
+    def gma-lines(path) = file_size(path) > 0 ? split-on(read_file(path), gma-nl()) : [];
+    // ---- code points of a UTF-8 string ----
+    def gma-cp-len(lead) = lead < 128 ? 1 : (lead < 224 ? 2 : (lead < 240 ? 3 : 4));
+    def gma-cps(s, i) = i >= len(s) ? [] : cons(substring(s, i, i + gma-cp-len(str_byte_at(s, i))), gma-cps(s, i + gma-cp-len(str_byte_at(s, i))));
+    def gma-trivial?(c) = ((String) c == "ˈ") || (((String) c == "ˌ") || (((String) c == "ː") || (((String) c == "͡") || ((String) c == "͜"))));
+    def gma-norm(cs) = nil?(cs) ? [] : (gma-trivial?(cs[0]) ? gma-norm(cs[1:]) : cons(cs[0], gma-norm(cs[1:])));
+    def gma-join(xs) = nil?(xs) ? "" : (xs[0] + gma-join(xs[1:]));
+    def gma-taught(s) = gma-norm(gma-cps(gma-join(split-on(s, gma-sep())), 0));
+    def gma-pred(s) = gma-norm(gma-cps(s, 0));
+    // ---- Levenshtein with a backtrace ----
+    def gma-iota(n) = n < 0 ? [] : append(gma-iota(n - 1), [n]);
+    def gma-min3(a, b, c) = a < b ? (a < c ? a : c) : (b < c ? b : c);
+    def gma-row(ai, bs, p, left, acc) {
+        nil?(bs) ? reverse(acc) : gma-cell(ai, bs, p, left, acc, (String) ai == bs[0] ? 0 : 1);
+    }
+    def gma-cell(ai, bs, p, left, acc, cost) {
+        let v = gma-min3(p[1] + 1, left + 1, p[0] + cost);
+        gma-row(ai, bs[1:], p[1:], v, cons(v, acc));
+    }
+    // the matrix, last row first: rows[0] is the row of the final taught symbol
+    def gma-matrix(a, b, i, prev, acc) = i > len(a) ? acc : gma-matrix-next(a, b, i, gma-row(a[i - 1], b, prev, i, [i]), acc);
+    def gma-matrix-next(a, b, i, row, acc) = gma-matrix(a, b, i + 1, row, cons(row, acc));
+    def gma-mat(a, b) = gma-matrix(a, b, 1, gma-iota(len(b)), [gma-iota(len(b))]);
+    def gma-at(rows, i, j) = rows[len(rows) - 1 - i][j];
+    // events walking back from (i, j): "s" taught>model, "d" a taught symbol dropped, "i" a model symbol added
+    def gma-back(rows, a, b, i, j, acc) {
+        (i == 0 && j == 0) ? acc : gma-step(rows, a, b, i, j, acc);
+    }
+    def gma-step(rows, a, b, i, j, acc) {
+        let here = gma-at(rows, i, j);
+        let diag = (i > 0 && j > 0) ? ((String) a[i - 1] == b[j - 1] ? 0 : 1) : 0;
+        (i > 0 && j > 0 && here == gma-at(rows, i - 1, j - 1) + diag) ? gma-back(rows, a, b, i - 1, j - 1, diag == 0 ? acc : cons(["s", a[i - 1] + ">" + b[j - 1]], acc)) : ((i > 0 && here == gma-at(rows, i - 1, j) + 1) ? gma-back(rows, a, b, i - 1, j, cons(["d", a[i - 1]], acc)) : gma-back(rows, a, b, i, j - 1, cons(["i", b[j - 1]], acc)));
+    }
+    def gma-count(rec, key) = record_has(rec, key) ? record_set(rec, key, record_get(rec, key) + 1) : record_set(rec, key, 1);
+    // state: [subs dels ins edits symbols exact words]
+    def gma-events(ev, st) {
+        nil?(ev) ? st : gma-events(ev[1:], gma-event(ev[0], st));
+    }
+    def gma-event(e, st) {
+        let k = e[0];
+        (String) k == "s" ? [gma-count(st[0], e[1]), st[1], st[2], st[3] + 1, st[4], st[5], st[6]] : ((String) k == "d" ? [st[0], gma-count(st[1], e[1]), st[2], st[3] + 1, st[4], st[5], st[6]] : [st[0], st[1], gma-count(st[2], e[1]), st[3] + 1, st[4], st[5], st[6]]);
+    }
+    def gma-word(st, a, b) {
+        let rows = gma-mat(a, b);
+        let ev = gma-back(rows, a, b, len(a), len(b), []);
+        let st2 = gma-events(ev, st);
+        [st2[0], st2[1], st2[2], st2[3], st2[4] + len(a), st2[5] + (nil?(ev) ? 1 : 0), st2[6] + 1];
+    }
+    // ---- the walk over the taught rows ----
+    def gma-first-seen?(seen, w) = !record_has(seen, w);
+    def gma-rows(taught, preds, seen, st, missing, i) {
+        i >= len(taught) ? [st, missing] : gma-row-take(taught, preds, seen, st, missing, i, str_find(taught[i], gma-tab(), 0));
+    }
+    def gma-row-take(taught, preds, seen, st, missing, i, at) {
+        at < 1 ? gma-rows(taught, preds, seen, st, missing, i + 1) : gma-row-word(taught, preds, seen, st, missing, i, substring(taught[i], 0, at), substring(taught[i], at + 1, len(taught[i])));
+    }
+    def gma-row-word(taught, preds, seen, st, missing, i, w, ph) {
+        (!gma-first-seen?(seen, w)) ? gma-rows(taught, preds, seen, st, missing, i + 1) : (record_has(preds, w) ? gma-rows(taught, preds, record_set(seen, w, 1), gma-word(st, gma-taught(ph), gma-pred(record_get(preds, w))), missing, i + 1) : gma-rows(taught, preds, record_set(seen, w, 1), st, missing + 1, i + 1));
+    }
+    def gma-preds(rows, rec) {
+        nil?(rows) ? rec : gma-preds(rows[1:], gma-pred-row(rows[0], rec));
+    }
+    def gma-pred-row(row, rec) {
+        let at = str_find(row, gma-tab(), 0);
+        at < 1 ? rec : record_set(rec, substring(row, 0, at), substring(row, at + 1, len(row)));
+    }
+    // ---- the top of a count map ----
+    def gma-pairs(rec, ks) = nil?(ks) ? [] : cons([record_get(rec, ks[0]), ks[0]], gma-pairs(rec, ks[1:]));
+    def gma-best(ps, best) = nil?(ps) ? best : gma-best(ps[1:], (nil?(best) || ps[0][0] > best[0]) ? ps[0] : best);
+    def gma-without(ps, p) = nil?(ps) ? [] : (((String) ps[0][1] == p[1]) ? gma-without(ps[1:], p) : cons(ps[0], gma-without(ps[1:], p)));
+    def gma-print-top(ps, n) {
+        (n <= 0 || nil?(ps)) ? 0 : gma-print-best(ps, n, gma-best(ps, []));
+    }
+    def gma-print-best(ps, n, best) {
+        let p = print_str("  " + best[0].str() + "  " + best[1]);
+        gma-print-top(gma-without(ps, best), n - 1);
+    }
+    def gma-rate(n, d) = d <= 0 ? 0 : ((n * 10000) / d);
+    let taughtpath = gma-line();
+    let predpath = gma-line();
+    let label = gma-line();
+    (len(taughtpath) == 0 || len(predpath) == 0) ? form_error("usage: <taught tsv> / <prediction tsv> / [label] on stdin") : 0;
+    let preds = gma-preds(gma-lines(predpath), record_new(0));
+    let res = gma-rows(gma-lines(taughtpath), preds, record_new(0), [record_new(0), record_new(0), record_new(0), 0, 0, 0, 0], 0, 0);
+    let st = res[0];
+    print_str("agreement " + label + " taught=" + taughtpath + " predicted=" + predpath);
+    print_str("words_compared=" + st[6].str() + " taught_words_without_prediction=" + res[1].str());
+    print_str("exact_match=" + st[5].str() + " exact_rate_x10000=" + gma-rate(st[5], st[6]).str());
+    print_str("taught_symbols=" + st[4].str() + " edits=" + st[3].str() + " symbol_edit_rate_x10000=" + gma-rate(st[3], st[4]).str());
+    print_str("top 15 substitutions (count taught>model):");
+    let a = gma-print-top(gma-pairs(st[0], record_keys(st[0])), 15);
+    print_str("top 8 deletions (taught symbol the model left out):");
+    let b = gma-print-top(gma-pairs(st[1], record_keys(st[1])), 8);
+    print_str("top 8 insertions (model symbol the taught row lacks):");
+    let c = gma-print-top(gma-pairs(st[2], record_keys(st[2])), 8);
+    0;
+}

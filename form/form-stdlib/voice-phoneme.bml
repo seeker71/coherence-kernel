@@ -1,0 +1,91 @@
+//////////////////////////////////////////////////////////////////////
+// voice-phoneme.bml — the front of the mouth, natively: a voice's own
+// configuration read from its `.onnx.json`, and the phoneme→id lane that
+// turns what a phonemizer heard into the int64 row the model eats.
+//
+// A line travels four steps to a voice — letters to phonemes (`voice-g2p.bml`), phonemes
+// to ids (this cell), ids through the VITS graph, spectrogram to samples (`voice-pass.bml`).
+// The second step is arithmetic over a table the voice ships beside itself, and the body
+// does it exactly. All four are the body's own; `voice-say.bml` walks them.
+//
+// The convention is piper's own, the voice models' training convention, read from its source rather than guessed
+// (`piper/phoneme_ids.py`, phonemes_to_ids): the row opens with BOS then PAD,
+// each phoneme is followed by a PAD, and EOS closes it. A phoneme the voice has
+// no id for is DROPPED — piper warns and continues — so the body drops it too and
+// counts the drops, because a silent skip is how a mouth loses a sound without
+// anyone noticing.
+//
+// A voice's `phoneme_id_map` maps a phoneme to a LIST of ids, not one id: the
+// diphthong rows exist for voices that carry them. Reading it as a scalar would
+// work on almost every voice and be wrong on the ones that matter.
+import form/form-stdlib/json.fk;
+import form/form-stdlib/line-grammar.fk;
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormVoicePhoneme {
+        field VPRoot = "/Users/ursmuff/.local/share/piper-voices";
+        field VPBos = "^";
+        field VPEos = "$";
+        field VPPad = "_";
+
+        def vp-cat(xs) = if ((Comparable) len(xs) == 0) then "" else ((String) xs[0] + vp-cat(xs[1:]));
+        def vp-cfg-path(voice) = vp-cat([VPRoot(), "/", voice, ".onnx.json"]);
+        def vp-model-path(voice) = vp-cat([VPRoot(), "/", voice, ".onnx"]);
+        def vp-cfg(voice) = parse-json(vp-cfg-path(voice), read_file(vp-cfg-path(voice)));
+
+        // ---- what the voice says about itself ----
+        def vp-sub(cfg, k) = json-object-get(cfg, k);
+        def vp-int-at(cfg, k, dflt) = if json-object-has?(cfg, k) then json-int-value(json-object-get(cfg, k)) else dflt;
+        def vp-str-at(cfg, k, dflt) = if json-object-has?(cfg, k) then json-string-value(json-object-get(cfg, k)) else dflt;
+        def vp-sample-rate(cfg) = if json-object-has?(cfg, "audio") then vp-int-at(vp-sub(cfg, "audio"), "sample_rate", 0) else 0;
+        def vp-num-speakers(cfg) = vp-int-at(cfg, "num_speakers", 1);
+        def vp-num-symbols(cfg) = vp-int-at(cfg, "num_symbols", 0);
+        // an absent phoneme_type is espeak — piper's own default, not a guess
+        def vp-phoneme-type(cfg) = vp-str-at(cfg, "phoneme_type", "espeak");
+        def vp-espeak-voice(cfg) = if json-object-has?(cfg, "espeak") then vp-str-at(vp-sub(cfg, "espeak"), "voice", "") else "";
+        def vp-language(cfg) = if json-object-has?(cfg, "language") then vp-str-at(vp-sub(cfg, "language"), "code", "") else "";
+        def vp-noise-scale(cfg) = if json-object-has?(cfg, "inference") then vp-str-at(vp-sub(cfg, "inference"), "noise_scale", "") else "";
+
+        // ---- the id table ----
+        def vp-map(cfg) = vp-sub(cfg, "phoneme_id_map");
+        def vp-has?(map, ph) = if json-object-has?(map, ph) then 1 else 0;
+        def vp-ints(nodes) = if ((Comparable) len(nodes) == 0) then [] else cons(json-int-value(nodes[0]), vp-ints(nodes[1:]));
+        def vp-ids-of(map, ph) = if ((Comparable) vp-has?(map, ph) == 0) then [] else vp-ints(json-array-elements(json-object-get(map, ph)));
+        def vp-table-size(map) = len(json-object-keys(map));
+
+        // ---- piper's row shape, followed exactly ----
+        def vp-row-go(map, phs, acc) {
+            let pad = vp-ids-of(map, VPPad());
+            let here = if ((Comparable) len(phs) == 0) then [] else vp-ids-of(map, phs[0]);
+            let next = if ((Comparable) len(phs) == 0) then acc else if ((Comparable) len(here) == 0) then acc else append(acc, append(here, pad));
+            if ((Comparable) len(phs) == 0) then acc else vp-row-go(map, phs[1:], next);
+        }
+        def vp-ids(cfg, phs) {
+            let map = vp-map(cfg);
+            let open = append(vp-ids-of(map, VPBos()), vp-ids-of(map, VPPad()));
+            append(vp-row-go(map, phs, open), vp-ids-of(map, VPEos()));
+        }
+        // a phoneme with no id is dropped, exactly as piper drops it — and counted, so the
+        // loss is visible instead of silent
+        def vp-dropped(cfg, phs) {
+            let map = vp-map(cfg);
+            vp-drop-go(map, phs, 0);
+        }
+        def vp-drop-go(map, phs, n) = if ((Comparable) len(phs) == 0) then n else vp-drop-go(map, phs[1:], if ((Comparable) vp-has?(map, phs[0]) == 0) then (n + 1) else n);
+
+        // ---- phonemes arrive as text, one to a line ----
+        // A phoneme can be a combining mark or a whole diphthong, so nothing here splits on
+        // codepoints; the line IS the phoneme, and an empty line is a real phoneme only when
+        // the voice's table holds one, which none does.
+        def vp-lines-of(s) = vp-strip-tail(split-on(s, byte_to_str(10)));
+        // a trailing newline leaves one empty line behind; it is not a phoneme
+        def vp-keep-last(xs) = if ((Comparable) len(xs[0]) == 0) then [] else xs;
+        def vp-strip-tail(xs) = if ((Comparable) len(xs) == 0) then [] else if ((Comparable) len(xs[1:]) == 0) then vp-keep-last(xs) else cons(xs[0], vp-strip-tail(xs[1:]));
+        def vp-phonemes-from(path) = vp-lines-of(read_file(path));
+
+        def vp-ints-text(xs) = if ((Comparable) len(xs) == 0) then "" else vp-cat([xs[0].str(), if ((Comparable) len(xs[1:]) == 0) then "" else " ", vp-ints-text(xs[1:])]);
+        def vp-ints-eq?(a, b) = if ((Comparable) len(a) == len(b)) then vp-ints-eq-go(a, b) else 0;
+        def vp-ints-eq-go(a, b) = if ((Comparable) len(a) == 0) then 1 else if ((Comparable) a[0] == b[0]) then vp-ints-eq-go(a[1:], b[1:]) else 0;
+    }
+    0;
+}

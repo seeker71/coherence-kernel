@@ -1,0 +1,37 @@
+; f64-emit-guard-band.bml — a program whose hot function the loop lane cannot compile still runs, cold.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/form-cli-heal-native-io.bml
+;
+; The loop lane compiles a hot defn to machine code. For the float-to-bits routine md-f32-bits (metal-door.fk) the lane's
+; node graph held a multiply whose child was the multiply itself (an inlined tail-recursive `acc * 2.0`), and fk_f64_emit,
+; which recurses over that graph with no bound, ran the native stack out: SIGBUS, exit 138, on the first run of any program
+; that converted a thousand floats (a cached image of the same program ran, so a band read green on the second run). The
+; emitter now refuses a graph nested past 4096 levels as it refuses an overflow, and the recipe stays interpreted.
+;
+; The band writes a small program under a name it has never used, so it lowers cold, and runs it as a cell in this
+; process: the old emitter killed this very process. Claims:
+;
+; Verdict 7 when every claim lands:
+;   1     the cold program ran to its end (not stopped) and answered the length of 1,024 four-byte floats
+;   2     the answer is right: 4,096 bytes
+;   4     the emitter's refusal counter (kernel_stat 74) is readable and not negative (the guard is wired)
+section [form.bml] {
+ class F64EmitGuardBand {
+  def feg-bit(ok, bit) = ok ? bit : 0;
+  def feg-path() = ".hearth/f64-emit-guard-" ++ host_monotonic_ms().str() ++ ".bml";
+  def feg-source() = "// preflight-exec: forbidden\nimport form-stdlib/core.fk;\nimport form-stdlib/metal-door.fk;\nsection [form.bml] {\n print(len(str-join(map(i => md-le32(md-f32-bits((((i * 53 + 3) % 17) + 1) / 16.0)), range(0, 1024)))));\n}\n";
+  def feg-score() {
+   let made = host_dir_mkdir(".hearth");
+   let path = feg-path();
+   let wrote = fhn-append(path, feg-source());
+   let r = cell_run(path, 0, 600000, nothing());
+   let out = trim(record_get(r, "out") ?? "");
+   let stopped = record_get(r, "stopped");
+   let gone = host_path_remove(path);
+   feg-bit(nothing?(stopped) && len(out) > 0, 1)
+     + feg-bit(out == "4096", 2)
+     + feg-bit(kernel_stat(74) >= 0, 4);
+  }
+ }
+ feg-score();
+}
