@@ -49,6 +49,20 @@ proposal before another model admission. Existing owner tests may be edited;
 the independent task witness remains outside the candidate's writable sources.
 Completed native turns are reused only while their source, caller contracts and
 witness fingerprints still agree. Changed evidence reopens the same task.
+
+The registry-weight planner voice runs until the model completes its answer.
+Its compatibility field `max_reply_tokens` names a progress signal interval;
+crossing it retains the same cursor, pending ID and KV state. Signals carry
+counts, without prompt or answer bytes. Context allocations grow on demand by
+copying the used KV positions and replacing attention scratch. Weights and
+recurrent state remain in place. Native observations request that same growth
+before entering the stream. Memory pressure signals its need and waits with the
+current owner retained. Actual model capacity, memory admission, copy and
+release outcomes remain explicit resource observations; an unfinished answer
+retains its generated IDs and bytes and is never accepted as complete.
+Reference coding no longer invents a per-reply or reasoning-stage token ceiling.
+It forwards those fields only when the caller supplied them. Its ordinary native
+decoder reports progress and yields completed actions to the existing controller.
 The queued task retains the original caller goal and typed definition manifest.
 Source observations preserve punctuation. Text containing literal Form controls
 stays in its authoritative native cell. Native tool arguments and input accept
