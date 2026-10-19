@@ -100,7 +100,10 @@ it holds stays in proportion to what it was given.
 
 **Minimal disk, the same way.** Meaning is stored once in the neutral substrate, content-addressed; surfaces and
 builds are projected on demand and reclaimable without loss. A byte that cannot be regenerated from the substrate is
-meaning; every other byte is a lease.
+meaning; every other byte is a lease. The body senses its own disk and composts its leases itself — the volume read,
+each lease weighed by bytes, age and the cost of remaking it, waste gone at every tending and the rest only under
+pressure, merged own branches released, every tending a ledger row and a glass snapshot
+(`form/form-stdlib/bml/disk-steward.bml`, `./fkwu observe/disk-steward-run.bml`, the walk's heal stage).
 
 ## The household, the extension, the guide
 
