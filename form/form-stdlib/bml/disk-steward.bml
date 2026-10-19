@@ -1,0 +1,175 @@
+// disk-steward.bml — the body's awareness of its own disk, and the composting it does by itself.
+//
+// NORTH_STAR.md, "Minimal disk": a byte that cannot be regenerated from the substrate is meaning; every other byte is a
+// lease. On 2026-10-19 the host filled to 116 MiB free of 1.8 TiB and no organ had noticed: the leases were idle
+// worktrees' .hearth scratch (a 24 GB stability log among them), caches beside sources, build trees. This organ is the
+// sense and the choice, in the same shape as memory-governor.bml reads RAM: a reading of the whole disk, the body's own
+// leases weighed, and receipts for every release.
+//
+// THE READING. ds-sense asks the host (df -k, a host child, the way hearth.bml reads ps) for the volume the root stands
+// on: total and free bytes. A reading that did not arrive answers 0 and 0, and a steward that cannot see releases
+// nothing: a missing truth is never an optimistic one. The syscall-thin native (host_disk_stat, statfs) is the next
+// lowering and is filed as a request; this child is the carrier until then.
+//
+// THE LEASES. The steward walks only what the body itself makes: .hearth/ and .form-heal/ under the root, and the
+// compile images beside sources (.fkb, .sym, .lowfk, .discovery.fkb). Each lease carries what can be measured about it:
+//   kind       what made it, which says what remaking costs
+//   bytes      file_size
+//   age        days since file_mtime (the prefix cache renews mtime on a hit, so for it age is freshness too)
+//   make_ms    the cost of remaking it, by kind today (ds-make-ms), measured per artifact once creators record it
+// Meaning never enters the lease list: .hearth/companion (a person's words), drafts (pending readings), walk-aside
+// (set-aside tracked work), session-learning and response-parity (learning evidence), and anything tracked by git.
+//
+// THE CHOICE, not a gate. Waste is composted at every tending: images whose source is gone, logs past the waste age,
+// evidence and candidates past the stale age. Everything else is released only under pressure — free space below the
+// reserve the guide names — and then in the order of value: big, old and cheap to remake goes first; small, fresh and
+// costly stays. The guide (ds-guide) is data the body tends; the person's reading and the ledger teach it.
+//
+// BRANCHES AND WORKTREES. A local branch merged into main under the body's own prefixes (codex/, claude/) and attached
+// to no worktree is a lease: git branch -d (the safe delete) releases it. A worktree whose branch is merged, whose tree
+// is clean and whose .hearth has not moved for the idle age is listed; it is removed only when act asks for worktrees.
+//
+// RECEIPTS. Every tending appends one DiskStewardRow to receipts/disk-steward-ledger.jsonl (union-merged like every
+// ledger) and publishes one glass snapshot (publisher "disk"), so the glass is aware of the disk the way it is aware of
+// memory and vitals. PROOF: form-stdlib/tests/disk-steward-band.bml; the door is observe/disk-steward-run.bml; the
+// walk's heal stage calls ds-tend (observe/scheduled-walk.bml).
+// preludes: form-stdlib/core.fk form-stdlib/bml/host-child.bml form-stdlib/bml/order.bml form-stdlib/bml/ledger.bml form-stdlib/hearth.bml form-stdlib/form-glass-telemetry-membrane.bml
+section [form.bml] {
+ blueprint DiskStewardRow { at_unix_ms: int, root: string, total_bytes: int, free_bytes: int, wanted_bytes: int, leases: int, lease_bytes: int, released: int, released_bytes: int, branches_released: int, mode: string }
+ class DiskSteward {
+  def ds-gib() = 1073741824;
+  def ds-mib() = 1048576;
+  def ds-ledger() = "receipts/disk-steward-ledger.jsonl";
+  // ── the guide: data the body tends ─────────────────────────────────────────────────────────────────────────────
+  //   reserve     free space the body keeps: a tenth of the volume, at most 100 GiB
+  //   waste_days  a log older than this is waste
+  //   stale_days  evidence and turn candidates older than this are waste
+  //   idle_days   a worktree whose .hearth has not moved for this long reads idle
+  //   min_release_mib  under pressure, a lease smaller than this is not worth its remaking: composting 163 compile images
+  //                    for 25 MB chases a gap they cannot close (the first live reading, 2026-10-19)
+  def ds-guide() = [["waste_days", 7], ["stale_days", 30], ["idle_days", 7], ["min_release_mib", 8]];
+  def ds-guide-get(k) = ds-guide-find(ds-guide(), k);
+  def ds-guide-find(g, k) = nil?(g) ? 0 : (String) g[0][0] == k ? g[0][1] : ds-guide-find(g[1:], k);
+  def ds-min(a, b) = a < b ? a : b;
+  def ds-max(a, b) = a > b ? a : b;
+  def ds-reserve(total) = ds-min(total / 10, 100 * ds-gib());
+  // bytes the body wants back: free below the reserve, else 0
+  def ds-wanted(total, free) = free < ds-reserve(total) ? ds-reserve(total) - free : 0;
+  // ── the reading: df -k <root>, the last line's blocks ─────────────────────────────────────────────────────────
+  def ds-fields(s) = filter(w => len(w) > 0, split-on(s, " "));
+  def ds-last-line(text) = hch-tail-line(text);
+  // [total_bytes, free_bytes] from df -k text; [0, 0] when it did not read
+  def ds-parse-df(text) {
+   let f = ds-fields(ds-last-line(text ?? ""));
+   len(f) < 4 ? [0, 0] : [ds-int(f[1]) * 1024, ds-int(f[3]) * 1024];
+  }
+  def ds-int(s) = ds-int-go(s, 0, 0);
+  def ds-int-go(s, i, acc) = i >= len(s) ? acc : (str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57) ? ds-int-go(s, i + 1, acc * 10 + (str_byte_at(s, i) - 48)) : acc;
+  def ds-sense(root) = ds-parse-df(hch-read(["df", "-k", root]));
+  // tenths of a GiB, said with one decimal
+  def ds-gib-text(b) = ((b * 10) / ds-gib() / 10).str() ++ "." ++ (((b * 10) / ds-gib()) - (((b * 10) / ds-gib() / 10) * 10)).str() ++ " GiB";
+  // ── the leases ─────────────────────────────────────────────────────────────────────────────────────────────────
+  def ds-ends?(s, suf) = len(s) >= len(suf) && (String) substring(s, len(s) - len(suf), len(s)) == suf;
+  def ds-has?(s, part) = str_find(s, part, 0) >= 0;
+  def ds-image?(p) = ds-ends?(p, ".fkb") || ds-ends?(p, ".sym") || ds-ends?(p, ".lowfk");
+  // the source an image was compiled from: a.bml.fkb -> a.bml, a.fk.discovery.fkb -> a.fk, a.bml.sym -> a.bml
+  def ds-image-source(p) = ds-ends?(p, ".discovery.fkb") ? substring(p, 0, len(p) - 14) : ds-ends?(p, ".pin.fkb") ? substring(p, 0, len(p) - 8) : ds-ends?(p, ".fkb") ? substring(p, 0, len(p) - 4) : ds-ends?(p, ".sym") ? substring(p, 0, len(p) - 4) : ds-ends?(p, ".lowfk") ? substring(p, 0, len(p) - 6) : p;
+  def ds-log?(p) = ds-ends?(p, ".out") || ds-ends?(p, ".log") || ds-ends?(p, ".err") || ds-ends?(p, ".stream");
+  // meaning the steward never lists
+  def ds-kept?(p) = ds-has?(p, "/companion") || ds-has?(p, "/drafts") || ds-has?(p, "/walk-aside") || ds-has?(p, "/session-learning") || ds-has?(p, "/response-parity") || ds-has?(p, "/forbidden-breath") || ds-has?(p, "walk.began") || ds-has?(p, "walk-retry.jsonl") || ds-has?(p, "/leases");
+  def ds-kind(p) = ds-kept?(p) ? "kept" : ds-image?(p) ? ((Comparable) fs_exists(ds-image-source(p)) == 1 ? "image" : "orphan-image") : ds-has?(p, "/prefix-cache/") ? "prefix-row" : ds-has?(p, "/native-turns/") ? "candidate" : ds-has?(p, ".form-heal/") ? "evidence" : ds-log?(p) ? "log" : "scratch";
+  // the cost of remaking a lease, by kind, in milliseconds: a compile image is one compile; a prefix row is one forward
+  // pass over a training row (HOMECOMING: a warm four-step run 13.7 s against 25.1 s cold); the rest costs nothing to lose
+  def ds-make-ms(kind) = (String) kind == "image" ? 60 : (String) kind == "prefix-row" ? 3000 : (String) kind == "scratch" ? 10 : 0;
+  // a lease row: [path, kind, bytes, age_days, make_ms]
+  def ds-lease(p, now) = [p, ds-kind(p), file_size(p), (now - file_mtime(p)) / 86400, ds-make-ms(ds-kind(p))];
+  def ds-path(l) = l[0];
+  def ds-lkind(l) = l[1];
+  def ds-bytes(l) = l[2];
+  def ds-age(l) = l[3];
+  def ds-cost(l) = l[4];
+  // walk a directory the body makes, bounded in depth; git's own tree is never entered
+  def ds-walk(dir, depth, now) = depth <= 0 ? [] : foldl((acc, n) => append(acc, ds-walk-entry(dir ++ "/" ++ n, depth, now)), [], filter(n => (String) n != ".git", fs_list(dir) ?? []));
+  def ds-walk-entry(p, depth, now) = (Comparable) fs_is_dir(p) == 1 ? ds-walk(p, depth - 1, now) : [ds-lease(p, now)];
+  // compile images anywhere under the root, found by walking the tree for image names only
+  def ds-images(dir, depth, now) = depth <= 0 ? [] : foldl((acc, n) => append(acc, ds-images-entry(dir ++ "/" ++ n, depth, now)), [], filter(n => (String) n != ".git" && (String) n != ".hearth" && (String) n != ".form-heal" && (String) n != "node_modules", fs_list(dir) ?? []));
+  def ds-images-entry(p, depth, now) = (Comparable) fs_is_dir(p) == 1 ? ds-images(p, depth - 1, now) : ds-image?(p) ? [ds-lease(p, now)] : [];
+  def ds-leases(root, now) = append(append(ds-walk(root ++ "/.hearth", 6, now), ds-walk(root ++ "/.form-heal", 4, now)), ds-images(root, 8, now));
+  def ds-lease-bytes(ls) = foldl((a, l) => a + ds-bytes(l), 0, ls);
+  def ds-of-kind(ls, k) = filter(l => (String) ds-lkind(l) == k, ls);
+  // ── the choice ─────────────────────────────────────────────────────────────────────────────────────────────────
+  // waste: composted at every tending, pressure or none
+  def ds-waste?(l) = (String) ds-lkind(l) == "orphan-image" || ((String) ds-lkind(l) == "log" && ds-age(l) >= ds-guide-get("waste_days")) || (((String) ds-lkind(l) == "evidence" || (String) ds-lkind(l) == "candidate") && ds-age(l) >= ds-guide-get("stale_days"));
+  // the value of releasing a lease under pressure: big, old and cheap to remake scores high; kept and waste are not weighed here
+  def ds-weighable?(l) = (String) ds-lkind(l) == "image" || (String) ds-lkind(l) == "prefix-row" || (String) ds-lkind(l) == "scratch" || (String) ds-lkind(l) == "log";
+  def ds-score(l) = (ds-bytes(l) / 1024) * (ds-age(l) + 1) / (ds-cost(l) + 1);
+  def ds-key(n) = ds-zeros(14 - len(n.str())) ++ n.str();
+  def ds-zeros(k) = k <= 0 ? "" : "0" ++ ds-zeros(k - 1);
+  // highest score first
+  def ds-by-value(ls) = reverse(map(r => r[1], sort-keyed(map(l => [ds-key(ds-score(l)), l], ls))));
+  // [to release, the leases that stay]: waste always; then, while wanted bytes remain, the most valuable releases
+  def ds-choose(ls, wanted) {
+   let waste = filter(l => ds-waste?(l), ls);
+   let rest = filter(l => !ds-waste?(l), ls);
+   let still = ds-max(0, wanted - ds-lease-bytes(waste));
+   let under = ds-take-until(ds-by-value(filter(l => ds-weighable?(l) && ds-bytes(l) >= ds-guide-get("min_release_mib") * ds-mib(), rest)), still, []);
+   [append(waste, under), filter(l => !ds-in?(l, under), rest)];
+  }
+  def ds-in?(l, ls) = nil?(ls) ? false : (String) ds-path(ls[0]) == ds-path(l) ? true : ds-in?(l, ls[1:]);
+  def ds-take-until(order, still, out) = still <= 0 || nil?(order) ? reverse(out) : ds-take-until(order[1:], still - ds-bytes(order[0]), cons(order[0], out));
+  // act 1 removes; anything else only reads. Answers the bytes released.
+  // the effect is measured, not the return: a lease counts as released when its path is gone afterwards
+  def ds-release(ls, act) = act >= 1 ? foldl((a, l) => a + ds-release-one(l), 0, ls) : 0;
+  def ds-release-one(l) {
+   let removed = host_path_remove(ds-path(l));
+   (Comparable) fs_exists(ds-path(l)) == 0 ? ds-bytes(l) : 0;
+  }
+  // ── branches and worktrees ─────────────────────────────────────────────────────────────────────────────────────
+  def ds-own-branch?(b) = ds-has?(b, "codex/") && str_find(b, "codex/", 0) == 0 || ds-has?(b, "claude/") && str_find(b, "claude/", 0) == 0;
+  def ds-lines(text) = filter(l => len(l) > 0, map(l => trim(l), split-on(text ?? "", "\n")));
+  // the branches worktrees stand on, from git worktree list --porcelain ("branch refs/heads/x")
+  def ds-attached(porcelain) = map(l => substring(l, 18, len(l)), filter(l => ds-has?(l, "branch refs/heads/"), ds-lines(porcelain)));
+  // merged own branches not attached to a worktree, from `git branch --merged main` text and the porcelain text
+  def ds-merged-free(mergedText, porcelain) = filter(b => ds-own-branch?(b) && !ds-in-list?(b, ds-attached(porcelain)), map(l => trim(l), filter(l => str_find(l, "*", 0) < 0, ds-lines(mergedText))));
+  def ds-in-list?(x, xs) = nil?(xs) ? false : (String) xs[0] == x ? true : ds-in-list?(x, xs[1:]);
+  def ds-merged-branches(repo) = ds-merged-free(hch-read(["git", "-C", repo, "branch", "--merged", "main", "--format=%(refname:short)"]), hch-read(["git", "-C", repo, "worktree", "list", "--porcelain"]));
+  def ds-release-branches(repo, bs, act) = act == 1 ? len(filter(b => (String) hch-read(["git", "-C", repo, "branch", "-d", b]) != "", bs)) : 0;
+  // worktree paths from the porcelain ("worktree /path"), the main one first
+  def ds-worktrees(porcelain) = map(l => substring(l, 9, len(l)), filter(l => str_find(l, "worktree ", 0) == 0, ds-lines(porcelain)));
+  // an idle worktree: clean, and its .hearth untouched for idle_days (a worktree with no .hearth reads as idle on its own mtime)
+  // a worktree whose directory is gone is a stale registration (git worktree prune), never an idle worktree. The cheap
+  // signal is read first (the .hearth mtime, no child); git status, a child per worktree, is asked only of the quiet ones —
+  // asked of every worktree it cost the first probe more than five minutes on thirty of them (2026-10-19)
+  def ds-idle?(wt, now) = (Comparable) fs_exists(wt) == 0 ? false : (now - ds-newest(wt ++ "/.hearth")) / 86400 < ds-guide-get("idle_days") ? false : (String) hch-read(["git", "-C", wt, "status", "--porcelain"]) == "";
+  def ds-newest(dir) = (Comparable) fs_exists(dir) == 0 ? 0 : foldl((m, n) => file_mtime(dir ++ "/" ++ n) > m ? file_mtime(dir ++ "/" ++ n) : m, file_mtime(dir), fs_list(dir) ?? []);
+  def ds-idle-worktrees(repo, now) = filter(wt => (String) wt != repo && ds-idle?(wt, now), ds-worktrees(hch-read(["git", "-C", repo, "worktree", "list", "--porcelain"])));
+  // ── the glass ──────────────────────────────────────────────────────────────────────────────────────────────────
+  def ds-sample(id, purpose, bytes, capacity, now) = fgtm-sample(id, fgtm-absent(), "vital", "membrane", "disk", "steward", purpose, fgtm-present(bytes), fgtm-present(capacity), "unknown", fgtm-present(now), fgtm-present(now), fgtm-absent(), fgtm-absent(), "never", "physical-live", "self-observed", ["disk"]);
+  def ds-publish(total, free, wanted, leaseBytes, releasedBytes, now) = fgtm-publish-snapshot(hearth-telemetry-root(), "disk", now, [fgtm-with-cell(ds-sample("reading", wanted > 0 ? "pressure" : "room", free, total, now), ["disk-steward-v1", total, free, wanted, leaseBytes, releasedBytes])]);
+  // ── one tending ────────────────────────────────────────────────────────────────────────────────────────────────
+  // act 0 reads; act 1 releases waste and pressure leases and merged branches; act 2 also removes idle worktrees
+  def ds-tend(root, act) {
+   let now = now_unix_ms() / 1000;
+   let disk = ds-sense(root);
+   let total = disk[0];
+   let free = disk[1];
+   let seen = total > 0;
+   let wanted = seen ? ds-wanted(total, free) : 0;
+   let leases = filter(l => (String) ds-lkind(l) != "kept", ds-leases(root, now));
+   let chosen = seen ? ds-choose(leases, wanted) : [[], leases];
+   let releasedBytes = ds-release(chosen[0], act);
+   let branches = seen ? ds-merged-branches(root) : [];
+   let branchesReleased = ds-release-branches(root, branches, act);
+   let idle = seen ? ds-idle-worktrees(root, now) : [];
+   let removed = act >= 2 ? len(filter(wt => (String) hch-read(["git", "-C", root, "worktree", "remove", wt]) != "", idle)) : 0;
+   let given = seen ? ds-publish(total, free, wanted, ds-lease-bytes(leases), releasedBytes, now * 1000) : "unseen";
+   let published = (String) value_kind(given) == "list" && len(given) > 1 ? value_str(given[1]) : value_str(given);
+   let row = ledger-append(ds-ledger(), DiskStewardRow{at_unix_ms: now * 1000, root: root, total_bytes: total, free_bytes: free, wanted_bytes: wanted, leases: len(leases), lease_bytes: ds-lease-bytes(leases), released: len(chosen[0]), released_bytes: releasedBytes, branches_released: branchesReleased, mode: act >= 2 ? "act-worktrees" : act == 1 ? "act" : "read"});
+   seen ? "[disk] free " ++ ds-gib-text(free) ++ " of " ++ ds-gib-text(total) ++ ", wanted " ++ ds-gib-text(wanted) ++ "; leases " ++ len(leases).str() ++ " (" ++ ds-gib-text(ds-lease-bytes(leases)) ++ "); " ++ (act >= 1 ? "released " : "would release ") ++ len(chosen[0]).str() ++ " (" ++ ds-gib-text(act >= 1 ? releasedBytes : ds-lease-bytes(chosen[0])) ++ "), branches " ++ (act >= 1 ? branchesReleased.str() : len(branches).str()) ++ ", idle worktrees " ++ (act >= 2 ? removed.str() ++ " removed" : len(idle).str()) ++ "; glass " ++ value_str(published) : "[disk] the volume did not read (df -k " ++ root ++ "); nothing released";
+  }
+  // the largest leases, one line each, for a reader
+  def ds-top(ls, n) = ds-top-lines(ds-by-value(ls), n);
+  def ds-top-lines(ls, n) = n <= 0 || nil?(ls) ? "" : "  " ++ ds-gib-text(ds-bytes(ls[0])) ++ "  " ++ ds-lkind(ls[0]) ++ "  " ++ ds-age(ls[0]).str() ++ "d  " ++ ds-path(ls[0]) ++ "\n" ++ ds-top-lines(ls[1:], n - 1);
+ }
+ 0;
+}
