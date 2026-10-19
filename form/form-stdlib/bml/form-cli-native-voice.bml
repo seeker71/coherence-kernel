@@ -1,4 +1,4 @@
-// A bounded voice in the current fkwu process, using registry weights as data.
+// A voice in the current fkwu process, using registry weights as data.
 // No model server, provider, training or generated tool execution.
 import form-stdlib/form-cli-model-session.fk;
 import form-stdlib/organ-health.bml;
@@ -11,7 +11,7 @@ section [form.bml] {
   def fcnv-default-model() = mr-name(mr-for-role("answer"));
   def fcnv-limit() = 1536;
   def fcnv-profile() = "knowledge-query";
-  def fcnv-allowance-valid(context,limit) = if ((!nothing?(context) && !((String) value_kind(context) == "int")) || (!((String) value_kind(limit) == "int"))) then 0 else ((limit > 0) && ((limit <= 8192) && (nothing?(context) || context > limit)));
+  def fcnv-allowance-valid(context,limit) = value_kind(limit)=="int" && limit > 0 && (nothing?(context) || value_kind(context)=="int" && context > 0);
   // Result: status, accepted text, prompt IDs, generated IDs, artifact path,
   // completion, release, reason, raw generation text, original generated IDs,
   // adapter path when the voice wore one.
@@ -27,14 +27,31 @@ section [form.bml] {
   }
   def fcnv-run(packet,path,context,limit) {
    if ((!nothing?(context) && !((String) value_kind(context) == "int")) || (!((String) value_kind(limit) == "int"))) then fcnv-none("unavailable",path,"integer-context-and-token-allowance-required")
-   else if (!fcnv-allowance-valid(context,limit)) then fcnv-none("unavailable",path,"positive-token-allowance-up-to-8192-with-larger-context-required")
+   else if (!fcnv-allowance-valid(context,limit)) then fcnv-none("unavailable",path,"positive-progress-interval-and-initial-context-required")
    else if (((String) path == "") || (!mr-file?(path))) then fcnv-none("unavailable",path,"registry-model-artifact-absent")
    else {
-    let session = nothing?(context) ? fcms-open-reserved(path,packet,limit,fcnv-profile()) : fcms-open-with-profile(path,packet,context,fcnv-profile());
-    let generated = ftg-generate(session,limit);
+    let session = nothing?(context) ? fcms-open-reserved(path,packet,fcnv-limit(),fcnv-profile()) : fcms-open-with-profile(path,packet,context,fcnv-profile());
+    // This cursor walks one token at a time. Its unused speculative buffers
+    // are released before decoding; the coding quantum keeps its own drafter.
+    let spare = fcsp-owned(session);
+    let retired = fcsp-close(session);
+    let returned = spare > 0 && spare==retired ? mg-lease-return(record_get(fcsp-owner(session),"lease-bytes") ?? 0) : 0;
+    let cursor = ftg-pulsing(ftg-intercept-with(512,ftg-next-reply()));
+    record_set(cursor,"next-progress",limit);
+    record_set(cursor,"observer",(stage,phase,c,generated) => fcnv-progress(cursor,limit,stage,phase,generated));
+    let generated = ftg-generate-with(cursor,session,nothing(),"voice");
     let released = fcms-release-ok?(fcms-generation-session(generated));
-    fcnv-read(generated,released,path);
+    fcnv-read(generated,released && spare==retired,path);
    };
+  }
+  // The compatibility field max_reply_tokens now asks for a progress signal.
+  // Crossing it does not end a reply or open another model/session.
+  def fcnv-progress(cursor,interval,stage,phase,generated) {
+   if stage=="model-stream" && phase=="progress" && generated >= record_get(cursor,"next-progress") then {
+    let signal=oh-voice(oh-reading("native-voice",host_pid().str(),"generation-progress",json-node-int(record_get(cursor,"next-progress")),json-node-int(generated),json-node-null(),[],["continue"],json-node-object([oh-n("provider_calls",0),oh-s("continuity","same-cursor-and-kv")])));
+    record_set(cursor,"next-progress",max2(generated+interval,record_get(cursor,"next-progress")*2));
+   } else 0;
+   0;
   }
   def fcnv-number(request,key,fallback) = if (!json-object-has?(request,key)) then fallback else {
    let node = json-object-get(request,key); let value = json-int-value(node);

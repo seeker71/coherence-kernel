@@ -87,6 +87,64 @@ section [form.bml] {
     def fcms-resume-encode-scope() = "new-observation-bytes-and-role-crossing-only";
     def fcms-inline-bml-encode-scope() = "pending-generated-id-then-new-bml-bytes-no-role-replay";
     def fcms-generated-id-policy() = "carry-original-generated-ids-and-kv";
+    // Capacity is an allocation, not a generation deadline. Grow only the
+    // position-indexed KV and attention scratch; weights and recurrent state stay.
+    def fcms-capacity-bytes(s, positions) = {
+        let geo = fcms-ctx(s)[2];
+        positions * 8 * (q38-full-layers(geo[21], geo[22]) * geo[20] + geo[12] * q38-ctx-span(fcms-ctx(s)));
+    };
+    def fcms-capacity-handles(s) = {
+        let geo = fcms-ctx(s)[2];
+        foldl((out,i) => kth-full?(i,geo[22]) ? append(out,fcms-sts(s)[i][2:]) : out,[fcms-ctx(s)[1][27]],range(0,len(fcms-sts(s))));
+    };
+    def fcms-capacity-owner(s, ctx, sts, positions) = fcmd-inherit(s, fcms-session(fcms-status(s), fcms-reason(s), fcms-path(s), fcms-src(s), ctx, sts, positions, fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-capacity-signal(s, reason, positions) = oh-voice(oh-reading("model-session", host_pid().str(), "context-growth", json-node-int(positions), json-node-int(fcms-maxpos(s)), json-node-null(), [oh-need(reason, json-node-int(fcms-pos(s)))], ["grow-context", "retain-work"], json-node-object([oh-n("generated_ids", fcms-generated-ids(s)), oh-n("position", fcms-pos(s))])));
+    def fcms-ensure-room(s, needed) = !fcms-live?(s) || fcms-pos(s) + needed < fcms-maxpos(s) ? s : fcms-ensure-room(fcms-grow(s),needed);
+    def fcms-grow(s) = !fcms-live?(s) ? s : !fcms-resident?(s) ? fcms-refuse(s,"context-growth-needs-resident-owner") : {
+        let capacity = fcms-artifact-context-capacity-from-src(fcms-src(s));
+        let positions = min2(capacity, fcms-maxpos(s) * 2);
+        let signal = fcms-capacity-signal(s, "context-growth", positions);
+        fcms-ds4?(s) || positions <= fcms-maxpos(s) ? fcms-refuse(s, "model-context-capacity-needs-continuation") : fcms-grow-admitted(s, positions, signal, mg-lease("context growth", "", 0, fcms-capacity-bytes(s, positions)));
+    };
+    def fcms-grow-admitted(s, positions, signal, grant) = !mg-granted?(grant) ? {
+        let heard = fcms-capacity-signal(s, "host-memory-held:" + grant[1], positions);
+        fcms-grow-admitted(s,positions,signal,mg-lease-wait("context growth","",0,fcms-capacity-bytes(s,positions),nothing()));
+    } : {
+        let ctx = fcms-ctx(s); let geo = ctx[2];
+        let scratch = metal_buf_alloc(positions * 8 * geo[12] * q38-ctx-span(ctx));
+        let states = range(0, len(fcms-sts(s))) |> map(i => kth-full?(i, geo[22]) ? [0, 0, metal_buf_alloc(geo[20] * positions * 4), metal_buf_alloc(geo[20] * positions * 4)] : fcms-sts(s)[i]);
+        let handles = foldl((out,i) => kth-full?(i,geo[22]) ? append(out,states[i][2:]) : out,[scratch],range(0,len(states)));
+        all?(h => h > 0, handles) ? fcms-grow-copied(s, positions, signal, scratch, states) : fcms-grow-discard(s,positions,handles,"context-growth-allocation-held");
+    };
+    def fcms-grow-discard(s, positions, handles, reason) = {
+        let settled = metal_sync();
+        let freed = handles |> map(h => h > 0 ? metal_buf_free(h) : 0);
+        let retained = range(0,len(handles)) |> filter(i => handles[i] > 0 && freed[i] <= 0) |> map(i => handles[i]);
+        let returned = nil?(retained) ? mg-lease-return(fcms-capacity-bytes(s,positions)) : 0;
+        let ctx = fcms-ctx(s);
+        let owned = fcms-capacity-owner(s, append(take(1,ctx), cons(append(ctx[1],retained),drop(2,ctx))), fcms-sts(s), fcms-maxpos(s));
+        fcms-refuse(owned, reason);
+    };
+    def fcms-grow-copied(s, positions, signal, scratch, states) = {
+        let ctx = fcms-ctx(s); let geo = ctx[2];
+        let copies = range(0, len(states)) |> filter(i => kth-full?(i, geo[22])) |> map(i => [q38-copy-buf(ctx[0], fcms-sts(s)[i][2], states[i][2], fcms-pos(s) * geo[20]), q38-copy-buf(ctx[0], fcms-sts(s)[i][3], states[i][3], fcms-pos(s) * geo[20])]);
+        let settled = metal_sync();
+        let handles = foldl((out,i) => kth-full?(i,geo[22]) ? append(out,states[i][2:]) : out,[scratch],range(0,len(states)));
+        all?(pair => all?(rc => rc > 0,pair),copies) && fcmo-settled(metal_live()) ? fcms-grow-commit(s,positions,signal,scratch,states) : fcms-grow-discard(s,positions,handles,"context-growth-copy-incomplete");
+    };
+    def fcms-grow-commit(s, positions, signal, scratch, states) = {
+        let ctx = fcms-ctx(s); let geo = ctx[2];
+        let old = fcms-capacity-handles(s);
+        let freed = old |> map(h => metal_buf_free(h));
+        let retained = range(0,len(old)) |> filter(i => freed[i] <= 0) |> map(i => old[i]);
+        let bufs = append(append(take(27, ctx[1]), cons(scratch, drop(28, ctx[1]))), retained);
+        let geometry = append(take(18, geo), cons(positions, drop(19, geo)));
+        let context = append(take(1, ctx), cons(bufs, cons(geometry, drop(3, ctx))));
+        let next = fcms-capacity-owner(s, context, states, positions);
+        let returned = nil?(retained) ? mg-lease-return(fcms-capacity-bytes(s, fcms-maxpos(s))) : 0;
+        let applied = oh-voice(oh-applied(signal, "grow-context", json-node-object([oh-n("positions", positions), oh-n("copied_positions", fcms-pos(s)), oh-n("retained_release_handles", len(retained)), oh-n("weight_admissions", 0)])));
+        next;
+    };
     def fcms-model-executed-form?() = 0;
     def fcms-rejection-pending-policy() = "discard-uncommitted-pending-id-before-typed-observation";
     // The living peer does not receive a made-up context width.  Its ceiling is
