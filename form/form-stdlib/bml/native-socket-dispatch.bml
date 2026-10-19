@@ -1,0 +1,81 @@
+// Readiness and isolated execution are Form-owned RAM-JIT effects. The admitted
+// cell graph and held request pass through fork's private copy-on-write context:
+// no executable, request file, JSON bridge or second server is involved.
+import form-stdlib/bml/native-linux.bml;
+section [form.bml] {
+ class NativeSocketDispatch {
+  def nsd-open(port,handle) {
+   let fd = nli-socket();
+   fd<0 ? form_error("native listener socket birth failed") : {
+    let flags = [nli-reuse(fd),nli-cloexec(fd),nli-nonblocking(fd),nli-bind(fd,port),nli-listen(fd,str_to_int(trim(read_file("/proc/sys/net/core/somaxconn") ?? "128")))];
+    any?(n => n != 0,flags) ? { let closed = nli-close(fd); form_error("native listener admission failed"); } : record_new(0,"listener",fd,"port",nli-port(fd),"handle",handle,"connections",[],"completed",0,"failed",0);
+   };
+  }
+  def nsd-stream(fd) = record_new(0,"fd",fd,"input","","pid",0,"watch",fd,"active",1);
+  def nsd-drop(owner,conn) {
+   let closed = nli-close(record_get(conn,"watch")); record_set(conn,"active",0);
+   record_set(owner,"connections",filter(c => record_get(c,"active"),record_get(owner,"connections"))); closed;
+  }
+  def nsd-accept(owner) {
+   let fd = nli-accept(record_get(owner,"listener"));
+   fd == -11 || fd == -4 ? 0 : fd<0 ? form_error("native listener accept needs resource care: " ++ fd.str()) : {
+    let flags = [nli-cloexec(fd),nli-nonblocking(fd)];
+    any?(n => n != 0,flags) ? { let closed = nli-close(fd); form_error("native accepted socket flags failed"); } : {
+     record_set(owner,"connections",cons(nsd-stream(fd),record_get(owner,"connections"))); nsd-accept(owner);
+    };
+   };
+  }
+  def nsd-send(fd,response,at) = at>=len(response) ? 1 : {
+   let end = at+65536<len(response) ? at+65536 : len(response);
+   let sent = nli-send(fd,substring(response,at,end));
+   sent == -4 ? nsd-send(fd,response,at) : sent == -11 ? {
+    let ready = nli-poll([[fd,4]],-1);
+    ready[0]<0 && ready[0] != -4 ? 0 : nsd-send(fd,response,at);
+   } : sent<=0 ? 0 : nsd-send(fd,response,at+sent);
+  };
+  def nsd-child(owner,conn,raw) {
+   // The child owns only its peer; no listener, sibling peer or sibling pidfd
+   // can keep another owner's lifetime open after the response finishes.
+   nli-close(record_get(owner,"listener"));
+   map(c => c == conn ? 0 : nli-close(record_get(c,"watch")),record_get(owner,"connections"));
+   let handle = record_get(owner,"handle"); let response = attempt(handle(raw));
+   let detail = "{\"detail\":\"native request source needs care\"}";
+   let text = nothing?(response) ? "HTTP/1.1 500 Error\r\nContent-Type: application/json\r\nConnection: close\r\nCache-Control: no-store, no-transform\r\nContent-Length: " ++ len(detail).str() ++ "\r\n\r\n" ++ detail : response;
+   let sent = nsd-send(record_get(conn,"fd"),text,0); let closed = nli-close(record_get(conn,"fd"));
+   nli-exit(nothing?(response) || !sent || closed != 0 ? 1 : 0);
+  }
+  def nsd-begin(owner,conn,raw) {
+   let pid = nli-fork();
+   pid == 0 ? nsd-child(owner,conn,raw) : pid<0 ? form_error("native dispatch fork needs resource care: " ++ pid.str()) : {
+    let watch = nli-process(pid);
+    watch<0 ? form_error("native dispatch completion registration needs care: " ++ watch.str()) : {
+     nli-close(record_get(conn,"fd")); record_set(conn,"pid",pid); record_set(conn,"watch",watch); record_set(conn,"input",""); 1;
+    };
+   };
+  }
+  def nsd-input(owner,conn) {
+   let got = nli-recv(record_get(conn,"fd"),65536);
+   got[0] == -11 || got[0] == -4 ? 0 : got[0]<=0 ? nsd-drop(owner,conn) : {
+    let raw = record_get(conn,"input") ++ got[1]; record_set(conn,"input",raw);
+    str_find(raw,"\r\n\r\n",0)<0 ? 0 : nsd-begin(owner,conn,raw);
+   };
+  }
+  def nsd-complete(owner,conn) {
+   let status = host_wait(record_get(conn,"pid"));
+   record_set(owner,status == 0 ? "completed" : "failed",record_get(owner,status == 0 ? "completed" : "failed")+1);
+   status == 0 ? 0 : print(["native-dispatch-source",record_get(conn,"pid"),status]);
+   nsd-drop(owner,conn);
+  }
+  def nsd-turn(owner,millis) {
+   let conns = record_get(owner,"connections");
+   let events = nli-poll(cons([record_get(owner,"listener"),1],map(c => [record_get(c,"watch"),1],conns)),millis);
+   events[0] == -4 ? 0 : events[0]<0 ? form_error("native readiness wait failed") : map(event => {
+    event[0] == record_get(owner,"listener") ? nsd-accept(owner) : {
+     let matches = filter(c => record_get(c,"active") && record_get(c,"watch") == event[0],conns);
+     nil?(matches) ? 0 : { let conn = matches[0]; record_get(conn,"pid") == 0 ? nsd-input(owner,conn) : nsd-complete(owner,conn); };
+    };
+   },events[1]);
+  }
+  def nsd-serve(owner) { let turn = nsd-turn(owner,-1); nsd-serve(owner); }
+ }
+}
