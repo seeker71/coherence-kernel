@@ -26,6 +26,15 @@ The resumed command uses the same `/dev/shm` tmpfs shape as the deploy build,
 removing the rehearsal-only 1 GiB restriction. No source/compiler workaround
 or additional kernel change is inferred from this resource mismatch.
 
+The deployment-matching tmpfs run passed (exit 0). It regenerated and accepted
+the sealed native recipe and `form-cli-linux-amd64` bundle, then published the
+executable at `/build/form-cli`; source identity `6d3c117149c6ef13`. The command
+was `./fkwu gate/form-cli-build-run.bml && test -x /build/form-cli`, with the
+original explicit-out/force-link/cc request. Both the unusable Git pointer and
+the normal source seals remained in place. The earlier SIGBUS therefore stays
+with the rehearsal-only resource restriction, not a compiler workaround.
+This was one affected build path, not a kernel or sibling validation suite.
+
 OpenAI supplied reasoning (exact runtime model/task tokens unavailable); Form
 selected and copied the source set. The local form-cli lookup executable was
 absent; native source lookup, not a fabricated router hit, established the path.
