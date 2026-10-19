@@ -53,22 +53,27 @@ full lexicon of `cognition/text-frequency.fk` is. Two trials on 2026-07-15 (the 
 live, and the frequency difference measured with the door against without it) taught the
 reply floor.
 
-The landing rules above are also one card, data in the same cell (`dc-card`), printed by
+The promise above is also one card, data in the same cell (`dc-card`), printed by
 `./fkwu observe/dialogue-covenant-arrival-run.fk` and opening the companion's packet
-(`observe/companion-run.bml`), so the native voice and an arriving mind meet a person under
-one covenant; the card's byte length is a band bit, so it always arrives whole.
+(`observe/companion-run.bml`), so the native voice and an arriving mind meet a person
+carrying one promise; the card's byte length is witnessed by the band, so it always arrives
+whole.
 
-## The flow, walked
+## A question, met
 
-A personal question arrives → read its frequency and name the fear once, in their word →
-ground every claim on a cell, a source, or their words (an honest miss where none holds) →
-one teaching at most → one open lift, and rest on it → the seam named once, warmly → the
-reply held to `dc-reply-receivable?`, `dc-ends-open?`, `dc-one-teaching?` (and, when someone
-absent is in the question, `dcc-reply-lands?`) → the person's own reading is the witness
-that closes it. The same question answered the old way and this way, measured on this body,
-is [`receipts/2026-10-19-personal-advice-flow.md`](../receipts/2026-10-19-personal-advice-flow.md):
-the old shape scores *higher* on raw service and *fails* the floor — more good moves stacked
-is what a scared person cannot receive.
+The body's own voice answers first; an arriving mind reviews, and lifts into the body what
+the voice could not yet carry. Meeting a person is sensing and choosing, not a sequence:
+the voice senses the frequency that arrived and names the fear once, in their word; it
+grounds what it offers on a cell, a source, or their words, and says plainly where it holds
+nothing; it chooses one lift and rests on it, the seam named once, warmly. Afterward the
+body reads what the reply did (`dc-reply-receivable?`, `dc-ends-open?`, `dc-one-teaching?`,
+and `dcc-reply-lands?` when someone absent is in the question) — a reading of itself, while
+the person meets only the reply. The one signal that teaches it is the person's own reading
+of the reply: where it surprised the body, the body changes. One question met two ways on this
+body, with the voice's own answers, is
+[`receipts/2026-10-19-personal-advice-flow.md`](../receipts/2026-10-19-personal-advice-flow.md):
+the old shape gave *more* and could be received *less* — more good moves stacked is what a
+scared person cannot take in.
 
 ## Where the covenant lives at the doors
 
