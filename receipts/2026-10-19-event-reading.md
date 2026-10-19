@@ -72,14 +72,36 @@ The reading below is the voice the governor admitted first.
 ## The reading
 
 Four asks between 17:05 and 17:38 — Q4, Q4, 3B, 3B — each waited its full ten minutes and was
-refused: first by the compressor cap, then, with the governor reading *room* (available 19.0,
+held: first by the compressor cap, then, with the governor reading *room* (available 19.0,
 wired 40.8, compressor 13.4), by the reserve — an ask is charged its weights **and** its KV
 margin, and 19.0 − 11 leaves less than 12.7 while the sibling's round keeps 40.8 GiB wired.
-The body's own part of the reading stands in every row: 221 seeds, 14 resonant,
-`lc-anything-arrives-room` first. The voice's five layers land when a voice is admitted —
-one command, `printf '<source>\n<model>\n<ideas>\n<concepts>\n<event>\n' | ./fkwu
-observe/transmute-run.bml` — and this receipt gains them then, with the person's reading
-beside.
+The body's own part of the reading stood in every row: 221 seeds, 14 resonant,
+`lc-anything-arrives-room` first.
+
+**The fifth ask was admitted — the LoRA lane** (`lane=lora`: Llama-3.2-3B wearing
+`llama-3.2-3b-voice`, admitted through the Metal LoRA door, not the model session), 17:39:38 →
+17:40:30, rent 0. The body's first full five-layer reading of an event, and the organ's checks
+read it before anyone else did:
+
+- *Which ideas it serves* named three ids. Two — `idea-portfolio-governance`,
+  `idea-pipeline-optimization` — the field does not hold; `tm-served` dropped them. One stood:
+  `[idea-realization-engine]`, "evidence for the need for a more efficient and effective
+  public service system." The row reads *ideas served 1*.
+- The register rose 0 → 4: the small voice **added** control words the event did not carry.
+- *What happened* invented what the source never said — "a second day of protests", "public
+  services in a state of disrepair" — the covenant's one unforgivable move, a fabrication
+  under the layer that asks for facts kept whole.
+- It echoed the ask's headings back as its own, mistook the closing instruction for a sixth
+  layer, and ended by repeating the seed lines it had been shown.
+
+So the organ works end to end — seeds, resonance, packet, voice, the served check, the
+register, the row — and the 3B voice is too small for this depth, which the body measured
+rather than the rented mind judging: two counterfeits dropped, four control words counted,
+one idea kept. The receipt of 2026-09-18 had already said it of a 3B: it speaks the numbers it
+is handed and cannot hold an axis's meaning apart from them. The reading that carries the
+depth asked for is the 27B's, and it lands when the memory governor admits it — one command,
+`printf '<source>\nqwen38-q4\n<ideas>\n<concepts>\n<event>\n' | ./fkwu observe/transmute-run.bml` —
+and this receipt gains it then, with the person's reading beside.
 
 ## Honest floor
 
