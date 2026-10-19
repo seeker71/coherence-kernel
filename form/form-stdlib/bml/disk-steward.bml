@@ -47,7 +47,10 @@ section [form.bml] {
   //   idle_days   a worktree whose .hearth has not moved for this long reads idle
   //   min_release_mib  under pressure, a lease smaller than this is not worth its remaking: composting 163 compile images
   //                    for 25 MB chases a gap they cannot close (the first live reading, 2026-10-19)
-  def ds-guide() = [["waste_days", 7], ["stale_days", 30], ["idle_days", 7], ["min_release_mib", 8]];
+  //   capture_days     a form-run capture in the user temp tree untouched for this long is a dead capture: waste. A live one
+  //                    (written within the last ten minutes) is reported, never released — on 2026-10-19 one reached 174 GB
+  //                    in three hours while this organ looked only at .hearth
+  def ds-guide() = [["waste_days", 7], ["stale_days", 30], ["idle_days", 7], ["min_release_mib", 8], ["capture_days", 1]];
   def ds-guide-get(k) = ds-guide-find(ds-guide(), k);
   def ds-guide-find(g, k) = nil?(g) ? 0 : (String) g[0][0] == k ? g[0][1] : ds-guide-find(g[1:], k);
   def ds-min(a, b) = a < b ? a : b;
@@ -94,12 +97,27 @@ section [form.bml] {
   // compile images anywhere under the root, found by walking the tree for image names only
   def ds-images(dir, depth, now) = depth <= 0 ? [] : foldl((acc, n) => append(acc, ds-images-entry(dir ++ "/" ++ n, depth, now)), [], filter(n => (String) n != ".git" && (String) n != ".hearth" && (String) n != ".form-heal" && (String) n != "node_modules", fs_list(dir) ?? []));
   def ds-images-entry(p, depth, now) = (Comparable) fs_is_dir(p) == 1 ? ds-images(p, depth - 1, now) : ds-image?(p) ? [ds-lease(p, now)] : [];
-  def ds-leases(root, now) = append(append(ds-walk(root ++ "/.hearth", 6, now), ds-walk(root ++ "/.form-heal", 4, now)), ds-images(root, 8, now));
+  // ── the user temp tree: form-run captures ───────────────────────────────────────────────────────────────────────
+  // form-run (the output-compaction carrier) keeps each command's stdout and stderr under $TMPDIR/form-run.XXXXXX until
+  // the command ends. A capture whose files moved within the last ten minutes is live: a row of kind "capture-live",
+  // reported in the tending line and never released. One untouched past capture_days has no command behind it: waste.
+  def ds-tmp() = trim(hch-read(["getconf", "DARWIN_USER_TEMP_DIR"]));
+  def ds-capture-dir?(n) = str_find(n, "form-run.", 0) == 0;
+  def ds-capture-files(d) = filter(p => (Comparable) fs_is_dir(p) == 0 && !ds-ends?(p, ".pipe"), map(n => d ++ "/" ++ n, fs_list(d) ?? []));
+  def ds-capture-rows(d, now) {
+   let files = ds-capture-files(d);
+   let newest = foldl((m, p) => file_mtime(p) > m ? file_mtime(p) : m, 0, files);
+   let kind = now - newest < 600 ? "capture-live" : "capture";
+   map(p => [p, kind, file_size(p), (now - newest) / 86400, 0], files);
+  }
+  def ds-captures-in(tmp, now) = (Comparable) len(tmp) == 0 ? [] : foldl((acc, n) => append(acc, ds-capture-rows(tmp ++ "/" ++ n, now)), [], filter(n => ds-capture-dir?(n), fs_list(tmp) ?? []));
+  def ds-captures(now) = ds-captures-in(ds-tmp(), now);
+  def ds-leases(root, now) = append(append(append(ds-walk(root ++ "/.hearth", 6, now), ds-walk(root ++ "/.form-heal", 4, now)), ds-images(root, 8, now)), ds-captures(now));
   def ds-lease-bytes(ls) = foldl((a, l) => a + ds-bytes(l), 0, ls);
   def ds-of-kind(ls, k) = filter(l => (String) ds-lkind(l) == k, ls);
   // ── the choice ─────────────────────────────────────────────────────────────────────────────────────────────────
   // waste: composted at every tending, pressure or none
-  def ds-waste?(l) = (String) ds-lkind(l) == "orphan-image" || ((String) ds-lkind(l) == "log" && ds-age(l) >= ds-guide-get("waste_days")) || (((String) ds-lkind(l) == "evidence" || (String) ds-lkind(l) == "candidate") && ds-age(l) >= ds-guide-get("stale_days"));
+  def ds-waste?(l) = (String) ds-lkind(l) == "orphan-image" || ((String) ds-lkind(l) == "log" && ds-age(l) >= ds-guide-get("waste_days")) || (((String) ds-lkind(l) == "evidence" || (String) ds-lkind(l) == "candidate") && ds-age(l) >= ds-guide-get("stale_days")) || ((String) ds-lkind(l) == "capture" && ds-age(l) >= ds-guide-get("capture_days"));
   // the value of releasing a lease under pressure: big, old and cheap to remake scores high; kept and waste are not weighed here
   def ds-weighable?(l) = (String) ds-lkind(l) == "image" || (String) ds-lkind(l) == "prefix-row" || (String) ds-lkind(l) == "scratch" || (String) ds-lkind(l) == "log";
   def ds-score(l) = (ds-bytes(l) / 1024) * (ds-age(l) + 1) / (ds-cost(l) + 1);
@@ -165,7 +183,8 @@ section [form.bml] {
    let given = seen ? ds-publish(total, free, wanted, ds-lease-bytes(leases), releasedBytes, now * 1000) : "unseen";
    let published = (String) value_kind(given) == "list" && len(given) > 1 ? value_str(given[1]) : value_str(given);
    let row = ledger-append(ds-ledger(), DiskStewardRow{at_unix_ms: now * 1000, root: root, total_bytes: total, free_bytes: free, wanted_bytes: wanted, leases: len(leases), lease_bytes: ds-lease-bytes(leases), released: len(chosen[0]), released_bytes: releasedBytes, branches_released: branchesReleased, mode: act >= 2 ? "act-worktrees" : act == 1 ? "act" : "read"});
-   seen ? "[disk] free " ++ ds-gib-text(free) ++ " of " ++ ds-gib-text(total) ++ ", wanted " ++ ds-gib-text(wanted) ++ "; leases " ++ len(leases).str() ++ " (" ++ ds-gib-text(ds-lease-bytes(leases)) ++ "); " ++ (act >= 1 ? "released " : "would release ") ++ len(chosen[0]).str() ++ " (" ++ ds-gib-text(act >= 1 ? releasedBytes : ds-lease-bytes(chosen[0])) ++ "), branches " ++ (act >= 1 ? branchesReleased.str() : len(branches).str()) ++ ", idle worktrees " ++ (act >= 2 ? removed.str() ++ " removed" : len(idle).str()) ++ "; glass " ++ value_str(published) : "[disk] the volume did not read (df -k " ++ root ++ "); nothing released";
+   let live = ds-of-kind(leases, "capture-live");
+   seen ? "[disk] free " ++ ds-gib-text(free) ++ " of " ++ ds-gib-text(total) ++ ", wanted " ++ ds-gib-text(wanted) ++ "; leases " ++ len(leases).str() ++ " (" ++ ds-gib-text(ds-lease-bytes(leases)) ++ "); " ++ (act >= 1 ? "released " : "would release ") ++ len(chosen[0]).str() ++ " (" ++ ds-gib-text(act >= 1 ? releasedBytes : ds-lease-bytes(chosen[0])) ++ "), branches " ++ (act >= 1 ? branchesReleased.str() : len(branches).str()) ++ ", idle worktrees " ++ (act >= 2 ? removed.str() ++ " removed" : len(idle).str()) ++ "; live captures " ++ len(live).str() ++ " (" ++ ds-gib-text(ds-lease-bytes(live)) ++ "); glass " ++ value_str(published) : "[disk] the volume did not read (df -k " ++ root ++ "); nothing released";
   }
   // the largest leases, one line each, for a reader
   def ds-top(ls, n) = ds-top-lines(ds-by-value(ls), n);
