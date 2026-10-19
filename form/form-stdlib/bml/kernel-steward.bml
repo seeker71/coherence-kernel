@@ -1,0 +1,105 @@
+// kernel-steward.bml — the body's awareness of its own kernels on this host, and the one class it stops by itself.
+//
+// On 2026-10-19 a fkwu ran for 28 hours at 98 % CPU and 28 GB, computing a scratchpad file whose session directory
+// had been deleted a day earlier: an orphan, working for an audience that no longer existed, and the reason no voice
+// could be admitted all evening. The host guardian that once watched for this (a shell loop that SIGKILLed any kernel
+// over 16 GB) had been removed, and rightly: a 16 GB cap would kill the sibling's legitimate 55 GB model session.
+// Size is not the signal. The decisive signal is purpose: a kernel whose SOURCE FILE IS GONE is computing for no one.
+//
+// THE READING. ks-sense reads the host's process rows (ps, a host child, as the hearth reads it): pid, resident KB,
+// elapsed, command. A kernel is a row whose command runs fkwu. Its source is the first argument after fkwu that names
+// a file; its lease is the memory governor's /private/tmp/form-memory-leases/<pid>.lease (memory-governor.bml).
+//   orphan     the source file no longer exists — stopped on act 1 (TERM, then KILL after a breath)
+//   heavy      resident above the guide's cap with no lease — reported, never stopped: a sibling's live session may
+//              stand without a lease; the person or the owning session decides
+//   leased     holds a governor lease — the body's own accounting says it is legitimate
+//   working    everything else
+// This process is never a candidate. Every tending leaves a KernelStewardRow in receipts/kernel-steward-ledger.jsonl
+// and a glass snapshot (publisher "kernels"), beside the disk steward's. PROOF: form-stdlib/tests/kernel-steward-band.bml;
+// the door is observe/kernel-steward-run.bml; the walks' heal stage calls ks-tend(1); a launchd carrier runs the door
+// every two minutes (Coherence-Network scripts/install_kernel_steward.sh).
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/bml/host-child.bml form-stdlib/bml/ledger.bml form-stdlib/hearth.bml form-stdlib/form-glass-telemetry-membrane.bml
+section [form.bml] {
+ blueprint KernelStewardRow { at_unix_ms: int, kernels: int, orphans: int, heavy: int, leased: int, stopped: int, stopped_pids: list<int>, mode: string }
+ class KernelSteward {
+  def ks-ledger() = "receipts/kernel-steward-ledger.jsonl";
+  def ks-leases() = "/private/tmp/form-memory-leases";
+  def ks-guide() = [["cap_gib", 48]];
+  def ks-guide-get(k) = ks-guide-find(ks-guide(), k);
+  def ks-guide-find(g, k) = nil?(g) ? 0 : (String) g[0][0] == k ? g[0][1] : ks-guide-find(g[1:], k);
+  def ks-self() = host_pid();
+  // ── the reading: ps rows ───────────────────────────────────────────────────────────────────────────────────────
+  def ks-fields(s) = filter(w => len(w) > 0, split-on(s, " "));
+  def ks-int(s) = ks-int-go(s, 0, 0);
+  def ks-int-go(s, i, acc) = i >= len(s) ? acc : (str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57) ? ks-int-go(s, i + 1, acc * 10 + (str_byte_at(s, i) - 48)) : acc;
+  def ks-join(xs) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ " " ++ ks-join(xs[1:]);
+  // a row: [pid, rss_kb, etime, command]; a line that does not read is nothing
+  def ks-parse-line(l) {
+   let f = ks-fields(l);
+   len(f) < 4 ? nothing() : [ks-int(f[0]), ks-int(f[1]), f[2], ks-join(f[3:])];
+  }
+  def ks-rows(text) = filter(r => !nothing?(r), map(l => ks-parse-line(l), filter(l => len(trim(l)) > 0, split-on(text ?? "", "\n"))));
+  def ks-sense() = ks-rows(hch-read(["ps", "-axo", "pid=,rss=,etime=,command="]));
+  def ks-pid(r) = r[0];
+  def ks-rss(r) = r[1];
+  def ks-etime(r) = r[2];
+  def ks-cmd(r) = r[3];
+  // a kernel: a command that runs fkwu, and not this steward's own door
+  def ks-kernel?(r) = str_find(ks-cmd(r), "fkwu", 0) >= 0 && str_find(ks-cmd(r), "kernel-steward", 0) < 0 && ks-pid(r) != ks-self();
+  // the source a kernel runs: the first argument after the fkwu word that looks like a file (a .bml, .fk or .fkb path)
+  def ks-source(cmd) = ks-source-go(filter(w => len(w) > 0, split-on(cmd, " ")), 0);
+  def ks-source-go(ws, seen) = nil?(ws) ? "" : seen == 1 && ks-file-word?(ws[0]) ? ws[0] : ks-source-go(ws[1:], seen == 1 ? 1 : (str_find(ws[0], "fkwu", 0) >= 0 ? 1 : 0));
+  def ks-file-word?(w) = ks-ends?(w, ".bml") || ks-ends?(w, ".fk") || ks-ends?(w, ".fkb");
+  def ks-ends?(s, suf) = len(s) >= len(suf) && (String) substring(s, len(s) - len(suf), len(s)) == suf;
+  def ks-leased?(pid) = (Comparable) fs_exists(ks-leases() ++ "/" ++ pid.str() ++ ".lease") == 1;
+  // ── the kinds, as a pure reading over what was sensed ─────────────────────────────────────────────────────────
+  //   sourceGone 1 when the kernel's source file no longer exists; leased 1 when a governor lease stands
+  def ks-kind(sourceGone, leased, rssKb, capKb) = sourceGone == 1 ? "orphan" : leased == 1 ? "leased" : rssKb > capKb ? "heavy" : "working";
+  def ks-cap-kb() = ks-guide-get("cap_gib") * 1048576;
+  // A relative source is relative to THE KERNEL'S working directory, never this steward's: the first live reading
+  // (2026-10-19 23:40) named a sibling's live round an orphan because `.hearth/form-owned-round.bml` did not exist
+  // beside the steward. lsof answers the process's cwd (`-Fn` prints it as a line beginning with n); a cwd that does
+  // not read is unknown, and an unknown is never an orphan — the steward stops nothing it cannot see whole.
+  def ks-absolute?(p) = len(p) > 0 && (Comparable) str_byte_at(p, 0) == 47;
+  def ks-cwd-of(pid) = ks-cwd-line(split-on(hch-read(["lsof", "-a", "-p", pid.str(), "-d", "cwd", "-Fn"]) ?? "", "\n"));
+  def ks-cwd-line(ls) = nil?(ls) ? "" : len(ls[0]) > 1 && (Comparable) str_byte_at(ls[0], 0) == 110 && (Comparable) str_byte_at(ls[0], 1) == 47 ? substring(ls[0], 1, len(ls[0])) : ks-cwd-line(ls[1:]);
+  // gone: 1 when the source file does not exist where the kernel runs; 0 when it exists or cannot be placed
+  def ks-source-gone?(src, cwd) = (Comparable) len(src) == 0 ? 0 : ks-absolute?(src) ? ((Comparable) fs_exists(src) == 0 ? 1 : 0) : (Comparable) len(cwd) == 0 ? 0 : ((Comparable) fs_exists(cwd ++ "/" ++ src) == 0 ? 1 : 0);
+  def ks-read-with(r, cwdOf) {
+   let src = ks-source(ks-cmd(r));
+   let cwd = (Comparable) len(src) > 0 && !ks-absolute?(src) ? cwdOf(ks-pid(r)) : "";
+   [ks-pid(r), ks-kind(ks-source-gone?(src, cwd), ks-leased?(ks-pid(r)) ? 1 : 0, ks-rss(r), ks-cap-kb()), ks-rss(r), ks-etime(r), src, cwd];
+  }
+  def ks-read(r) = ks-read-with(r, pid => ks-cwd-of(pid));
+  def ks-readings(rows) = map(r => ks-read(r), filter(r => ks-kernel?(r), rows));
+  def ks-of(readings, k) = filter(x => (String) x[1] == k, readings);
+  // ── the stop: TERM, a breath, KILL if it stands; measured by host_alive afterwards ─────────────────────────────
+  def ks-stop(pid) {
+   let asked = host_signal(pid, 15);
+   let rested = host_sleep_ms(2000);
+   let forced = host_alive(pid) ? host_kill(pid) : 0;
+   let rested2 = host_sleep_ms(500);
+   host_alive(pid) ? 0 : 1;
+  }
+  def ks-stop-all(pids, act) = act >= 1 ? filter(p => ks-stop(p) == 1, pids) : [];
+  // ── the glass ─────────────────────────────────────────────────────────────────────────────────────────────────
+  def ks-sample(id, purpose, bytes, capacity, now) = fgtm-sample(id, fgtm-absent(), "vital", "membrane", "kernels", "steward", purpose, fgtm-present(bytes), fgtm-present(capacity), "unknown", fgtm-present(now), fgtm-present(now), fgtm-absent(), fgtm-absent(), "never", "physical-live", "self-observed", ["kernels"]);
+  def ks-publish(kernels, orphans, heavy, leased, stopped, now) = fgtm-publish-snapshot(hearth-telemetry-root(), "kernels", now, [fgtm-with-cell(ks-sample("reading", orphans > 0 ? "orphans" : heavy > 0 ? "heavy" : "working", kernels, kernels, now), ["kernel-steward-v1", kernels, orphans, heavy, leased, stopped])]);
+  def ks-word(given) = (String) value_kind(given) == "list" && len(given) > 1 ? value_str(given[1]) : value_str(given);
+  def ks-line(x) = "  " ++ x[1] ++ "  pid " ++ x[0].str() ++ "  " ++ (x[2] / 1024).str() ++ " MB  " ++ x[3] ++ "  " ++ x[4] ++ "\n";
+  def ks-lines(xs) = foldl((a, x) => a ++ ks-line(x), "", xs);
+  // ── one tending ───────────────────────────────────────────────────────────────────────────────────────────────
+  def ks-tend(act) {
+   let now = now_unix_ms();
+   let readings = ks-readings(ks-sense());
+   let orphans = ks-of(readings, "orphan");
+   let heavy = ks-of(readings, "heavy");
+   let leased = ks-of(readings, "leased");
+   let stopped = ks-stop-all(map(x => x[0], orphans), act);
+   let given = ks-publish(len(readings), len(orphans), len(heavy), len(leased), len(stopped), now);
+   let row = ledger-append(ks-ledger(), KernelStewardRow{at_unix_ms: now, kernels: len(readings), orphans: len(orphans), heavy: len(heavy), leased: len(leased), stopped: len(stopped), stopped_pids: stopped, mode: act >= 1 ? "act" : "read"});
+   "[kernels] " ++ len(readings).str() ++ " running; orphans " ++ len(orphans).str() ++ (act >= 1 ? " (stopped " ++ len(stopped).str() ++ ")" : "") ++ "; heavy without a lease " ++ len(heavy).str() ++ "; leased " ++ len(leased).str() ++ "; glass " ++ ks-word(given) ++ "\n" ++ ks-lines(append(orphans, heavy));
+  }
+ }
+ 0;
+}
