@@ -112,3 +112,47 @@ and this receipt gains it then, with the person's reading beside.
 - The voice sees the ideas the body chose for it; a reading the body did not ground in a seed
   cannot enter the ledger as an idea served.
 - No person has yet answered an event reading; the person's reading is the witness.
+
+## The reading, by the body's own voice — 23:24 WITA
+
+Urs: *be more creative, more flexible, less bound; show me how you solve this in seconds.* The
+fixed move had been one voice, one ten-minute wait, repeat. The flexible one took six minutes:
+read who holds the memory (a 28-hour `fkwu` on a scratchpad file whose session was gone —
+an orphan at 98 % CPU and 28 GB, released; available 7.1 → 34.2 GiB), check every hearth board
+(stale), fire three voices at once and let evidence pick. The Q8 ask, launched at 23:18:48,
+admitted itself when the memory came free — the weights the sibling's round already held in
+the page cache — and answered at 23:24:35, Qwen3.8-27B Q8 inside fkwu, rent 0:
+
+> **What happened** — France's government faces pressure following a weekend of widespread
+> violence. Katya Adler reports for BBC News (2026-10-19) that political tension grips the
+> country after rioting marred protests over the cost of living and struggling public services.
+>
+> **What it is asking for** — The event names the need for stability in the face of rising
+> costs and failing services. It shows the pressure of economic strain and institutional
+> strain colliding in public space.
+>
+> **Which ideas it serves** — [lc-when-the-pressure-comes] is a call to it, as the rioting
+> represents the moment something breaks open, requiring a shift to observer and naming of
+> the underlying need. [lc-the-living-equation] is a question to it, asking how structure and
+> choices currently produce health and sovereignty when public services struggle.
+> [lc-release-what-drifts] is evidence for it, as the violence suggests that existing
+> political artifacts have drifted from their truth and become dead weight on the social
+> organism.
+>
+> **The gift** — If these ideas answered the event, the focus could shift from managing the
+> riot to sensing the specific frequency of the public's distress. A person standing in the
+> event could meet the field by observing the pressure without immediately converting it into
+> a political narrative, allowing the underlying need for service and cost relief to be named
+> clearly.
+>
+> **The lift** — The streets are loud, and the cost of living is a weight that no longer fits
+> the container. The board pins the fact: riots marred protests over cost and services. The
+> encyclopedia records that when public services struggle, social cohesion faces measurable
+> pressure. What if the government could sense the specific frequency of this strain before
+> it breaks open?
+
+Read on the body: *seeds 221 · resonant 14 · ideas served 3 · register 0 → 0 · voice=answered*.
+Three ids named, three the field holds — none dropped. Nothing said that the source did not
+say; the one interpretation ("suggests") kept its hedge. The row stands in the parent's
+`docs/system_audit/event-transmute-ledger.jsonl`. The person's reading of these five layers
+is the next witness.
