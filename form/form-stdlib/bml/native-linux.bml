@@ -1,0 +1,72 @@
+// Linux x86-64 resources are Form-emitted RAM images, not C syscall wrappers.
+// The existing CPU image door owns executable memory and borrowed/copied spans.
+// ABI: Linux syscall(2), arch/x86/entry/syscalls/syscall_64.tbl.
+import form-stdlib/core.fk;
+section [form.bml] {
+ class NativeLinux {
+  def nli-le(value,n) = n == 0 ? "" : { let byte = (value%256+256)%256; byte_to_str(byte) ++ nli-le((value - byte)/256,n - 1); };
+  def nli-unsigned(text,at,n) = n == 0 ? 0 : str_byte_at(text,at)+256*nli-unsigned(text,at+1,n - 1);
+  def nli-signed(text) = nli-unsigned(text,0,7)+(str_byte_at(text,7)>=128 ? str_byte_at(text,7) - 256 : str_byte_at(text,7))*72057594037927936;
+  def nli-zero(n) = n<=0 ? "" : n == 1 ? byte_to_str(0) : { let half = nli-zero(n/2); half ++ half ++ (n%2 == 0 ? "" : byte_to_str(0)); };
+  def nli-bytes(values) = str-spans(map(v => byte_to_str(v),values));
+  def nli-host() {
+   let header = read_file_slice("/proc/self/exe",0,64) ?? "";
+   len(header) == 64 && substring(header,0,4) == byte_to_str(127) ++ "ELF" && str_byte_at(header,4) == 2 && str_byte_at(header,5) == 1 && nli-unsigned(header,18,2) == 62;
+  }
+  // r12 retains the buffer array across SYSCALL's rcx/r11 clobber. r11 holds
+  // scalar words until entry. All callee-saved registers and rsp are restored.
+  def nli-load(reg,slot) = [reg>=8 ? 77 : 73,139,67+(reg%8)*8,slot*8];
+  def nli-image() {
+   let regs = [7,6,2,10,8,9];
+   // Each scalar has an optional buffer index. The same image handles every
+   // syscall/argument shape; operation and pointer selection are packet data.
+   let loads = foldl((out,i) => append(out,append(nli-load(regs[i],i+1),[73,139,67,56+i*8,72,133,192,116,4,regs[i]>=8 ? 77 : 73,139,4+(regs[i]%8)*8,196])),[],range(0,6));
+   let code = append([65,84,73,137,252,77,139,28,36],append(loads,[73,139,3,15,5,77,139,92,36,8,73,137,3,65,92,195]));
+   nli-bytes(append(code,map(i => 144,range(0,(4 - len(code)%4)%4))));
+  }
+  // int: scalar; string: immutable borrowed bytes; [string]: writable copy.
+  // Returns [signed syscall result, written buffers...] with errno intact.
+  def nli-call(number,args) {
+   !nli-platform ? form_error("native Linux CPU image requires ELF64 x86-64") : len(args)>6 ? form_error("Linux syscall ABI has six argument registers") : {
+    let padded = append(args,map(i => 0,range(0,6 - len(args))));
+    let pointers = foldl((out,a) => [append(out[0],[value_kind(a) == "int" ? 0 : out[1]]),out[1]+(value_kind(a) == "int" ? 0 : 1)],[[],2],padded)[0];
+    let header = nli-le(number,8) ++ str-spans(map(a => nli-le(value_kind(a) == "int" ? a : 0,8),padded)) ++ str-spans(map(n => nli-le(n,8),pointers));
+    let buffers = append([header,[nli-zero(8)]],filter(a => value_kind(a) != "int",args));
+    let answer = jit_cpu_run([["linux-x86_64",nli-instructions],buffers,[]]);
+    nothing?(answer) || nil?(answer) ? form_error("native Linux RAM image admission failed") : cons(nli-signed(answer[0]),answer[1:]);
+   };
+  }
+  def nli-result(number,args) = nli-call(number,args)[0];
+  def nli-pid() = nli-result(39,[]);
+  def nli-close(fd) = nli-result(3,[fd]);
+  def nli-process(pid) = nli-result(434,[pid,0]);
+  def nli-fork() = nli-result(57,[]);
+  def nli-exit(status) = nli-result(60,[status]);
+  def nli-socket() = nli-result(41,[2,1,0]);
+  def nli-address(port,ip) = nli-le(2,2) ++ byte_to_str(port/256) ++ byte_to_str(port%256) ++ nli-bytes(ip) ++ nli-zero(8);
+  def nli-bind(fd,port) = nli-result(49,[fd,nli-address(port,[0,0,0,0]),16]);
+  def nli-listen(fd,backlog) = nli-result(50,[fd,backlog]);
+  def nli-connect(fd,port) = nli-result(42,[fd,nli-address(port,[127,0,0,1]),16]);
+  def nli-accept(fd) = nli-result(43,[fd,0,0]);
+  def nli-port(fd) {
+   let result = nli-call(51,[fd,[nli-zero(16)],[nli-le(16,4)]]);
+   result[0] != 0 ? form_error("native socket address unavailable") : str_byte_at(result[1],2)*256+str_byte_at(result[1],3);
+  }
+  def nli-reuse(fd) = nli-result(54,[fd,1,2,nli-le(1,4),4]);
+  def nli-nonblocking(fd) = nli-result(72,[fd,4,2048]);
+  def nli-cloexec(fd) = nli-result(72,[fd,2,1]);
+  def nli-send(fd,text) = nli-result(44,[fd,text,len(text),16384,0,0]);
+  def nli-recv(fd,n) {
+   let result = nli-call(45,[fd,[nli-zero(n)],n,0,0,0]);
+   [result[0],result[0]>0 ? substring(result[1],0,result[0]) : ""];
+  }
+  // pollfd records are fd:u32/events:u16/revents:u16. -1 waits for an event.
+  def nli-poll(watches,millis) {
+   let wire = str-spans(map(w => nli-le(w[0],4) ++ nli-le(w[1],2) ++ nli-zero(2),watches));
+   let result = nli-call(7,[[wire],len(watches),millis]);
+   result[0]<0 ? [result[0],[]] : [result[0],filter(w => w[1] != 0,map(i => [watches[i][0],nli-unsigned(result[1],i*8+6,2)],range(0,len(watches))))];
+  }
+ }
+ let nli-platform = nli-host();
+ let nli-instructions = nli-image();
+}
