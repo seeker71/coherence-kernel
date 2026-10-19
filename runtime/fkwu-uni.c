@@ -1521,7 +1521,7 @@ static int fk_sboard_on = -1;
 static void fk_sboard_count(void) {
     if (fk_sboard_on < 0) { fk_sboard_on = fk_conf("FK_STRING_BIRTHS") ? 1 : 0; }
     if (!fk_sboard_on || fk_cur_fn < 0 || fk_cur_fn >= (1LL << 20)) { return; }
-    if (fk_fn_smint == 0) { fk_fn_smint = (long long *)calloc((size_t)1 << 20, 8); if (fk_fn_smint == 0) { fk_sboard_on = 0; return; } }
+    if (fk_fn_smint == 0) { fk_fn_smint = (long long *)calloc((fk_size_t)1 << 20, 8); if (fk_fn_smint == 0) { fk_sboard_on = 0; return; } }
     fk_fn_smint[fk_cur_fn] = fk_fn_smint[fk_cur_fn] + 1;
 }
 static long long fk_sintern(long long off, long long len) {
@@ -1997,6 +1997,9 @@ extern void _exit(int);
 #endif
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
 #define FK_HAVE_DARWIN_ARM64_JIT_WITNESS 1
+#endif
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || (defined(__linux__) && defined(__x86_64__))
+#define FK_HAVE_CPU_IMAGE_JIT 1
 #endif
 #ifndef EINTR
 #define EINTR 4
@@ -4762,24 +4765,36 @@ static long long fk_melt_gen = 0;
 extern int munmap(void *, unsigned long);
 #endif
 extern void pthread_jit_write_protect_np(int);
-extern int getpagesize(void);
 #endif
-#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+#if defined(FK_HAVE_CPU_IMAGE_JIT)
+extern int getpagesize(void);
 /* THE PAGE, one birth for every lane that runs machine code (the in-RAM leaf, the u32 leaf, the C loop lane, the Form
  * page): span bytes PROT_READ|WRITE|EXEC, MAP_PRIVATE|ANON|JIT (this seed keeps platform ABI values local rather than
  * importing system headers), or 0. The words are written once, with this thread's JIT write protection lifted, and the
  * instruction cache is cleared over them; a lane that patches its own address into its words (the C loop lane's
  * non-tail self calls) does so between the two. A host door: the shrink path is none. */
 static void *fk_page_alloc(size_t span) {
-    void *mem = mmap(0, span, 0x7, 0x1802, -1, 0);
+    void *mem = mmap(0, span, 0x7,
+#if defined(__APPLE__)
+                    0x1802,
+#else
+                    0x22,
+#endif
+                    -1, 0);
     return mem == (void *)-1 ? 0 : mem;
 }
 static void fk_page_write(void *mem, const void *src, size_t n) {
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
     pthread_jit_write_protect_np(0);
+#endif
     memcpy(mem, src, n);
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
     pthread_jit_write_protect_np(1);
+#endif
     __builtin___clear_cache((char *)mem, (char *)mem + n);
 }
+#endif
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
 static int fk_arm64_u32_cons(long long cell, long long *head, long long *tail) {
     long long p;
     if ((cell & 1) == 0 || cell <= 1) {
@@ -10457,7 +10472,7 @@ static int fk_door_path(long long sv, char *out);
 /* a file buffer, ["file", path, offset, length]: the span mapped read only for the call (a model file of tens of GB is
  * walked in such spans, never read into the string pool) */
 static int fk_jit_cpu_file(long long cell, void **ptr, void **map, size_t *mlen) {
-#if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || defined(_WIN32)
+#if !defined(FK_HAVE_CPU_IMAGE_JIT) || defined(_WIN32)
     (void)cell; (void)ptr; (void)map; (void)mlen;
     return 0;
 #else
@@ -10490,7 +10505,7 @@ static int fk_jit_cpu_file(long long cell, void **ptr, void **map, size_t *mlen)
 #endif
 }
 FK_PHASED(FK_PHASE_CPU, long long, fk_jit_cpu_run, (long long x), (x)) {
-#if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS) || defined(_WIN32)
+#if !defined(FK_HAVE_CPU_IMAGE_JIT) || defined(_WIN32)
     (void)x;
     return fk_nothing;
 #else
@@ -10507,6 +10522,19 @@ FK_PHASED(FK_PHASE_CPU, long long, fk_jit_cpu_run, (long long x), (x)) {
     long long r = FK_HNEXT(q);
     if (r < 1 || !FK_POK(r)) { return fk_nothing; }
     long long iw = FK_HH(p), bw = FK_HH(q), cw = FK_HH(r);
+#if defined(__linux__) && defined(__x86_64__)
+    /* Linux images name their ABI explicitly. Untagged images are the
+     * existing Darwin ARM64 contract and must never execute on this ISA. */
+    long long target = (iw & 1) != 0 && !fk_is_str(iw) ? iw >> 1 : 0;
+    if (target < 1 || !FK_POK(target)) { return fk_nothing; }
+    long long image = FK_HNEXT(target);
+    const char *tp = 0;
+    long long tl = 0;
+    if (image < 1 || !FK_POK(image) || FK_HNEXT(image) != 0 ||
+        !fk_is_str(FK_HH(target)) || !fk_srange(FK_HH(target), &tp, &tl) ||
+        tl != 12 || memcmp(tp, "linux-x86_64", 12) != 0) { return fk_nothing; }
+    iw = FK_HH(image);
+#endif
     const char *ip = 0;
     long long il = 0;
     if (!fk_is_str(iw) || !fk_srange(iw, &ip, &il) || il <= 0 || il > 1048576 || (il & 3) != 0) { return fk_nothing; }
@@ -28627,10 +28655,12 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                  * very node the next run of the same unit mints, and the tombstone made every call of that second run answer nothing
                  * (anf-shadow-band read 31 the first time and 3 the second, in one process). SHRINK PATH: the tombstone moves into
                  * the cell's own frame when residency is owned per cell in Form (jit-once-born.fk), and this loop goes. */
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
                 if (fk_inram_node_released != 0) {
                     long long zi = 1;
                     while (zi <= fk_np && zi < fk_node_cap) { fk_inram_node_released[zi] = 0; zi = zi + 1; }
                 }
+#endif
                 fk_cell_deadline_ms = one_deadline;
                 fk_cell_root_path = path;
                 /* the libraries this call loaded run once, in the order their text stands */
