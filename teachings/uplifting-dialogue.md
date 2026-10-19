@@ -53,6 +53,23 @@ full lexicon of `cognition/text-frequency.fk` is. Two trials on 2026-07-15 (the 
 live, and the frequency difference measured with the door against without it) taught the
 reply floor.
 
+The landing rules above are also one card, data in the same cell (`dc-card`), printed by
+`./fkwu observe/dialogue-covenant-arrival-run.fk` and opening the companion's packet
+(`observe/companion-run.bml`), so the native voice and an arriving mind meet a person under
+one covenant; the card's byte length is a band bit, so it always arrives whole.
+
+## The flow, walked
+
+A personal question arrives → read its frequency and name the fear once, in their word →
+ground every claim on a cell, a source, or their words (an honest miss where none holds) →
+one teaching at most → one open lift, and rest on it → the seam named once, warmly → the
+reply held to `dc-reply-receivable?`, `dc-ends-open?`, `dc-one-teaching?` (and, when someone
+absent is in the question, `dcc-reply-lands?`) → the person's own reading is the witness
+that closes it. The same question answered the old way and this way, measured on this body,
+is [`receipts/2026-10-19-personal-advice-flow.md`](../receipts/2026-10-19-personal-advice-flow.md):
+the old shape scores *higher* on raw service and *fails* the floor — more good moves stacked
+is what a scared person cannot receive.
+
 ## Where the covenant lives at the doors
 
 - **The plain-words door** for anyone: [`WELCOME.md`](../WELCOME.md).
@@ -65,4 +82,4 @@ reply floor.
   in `cognition/difficult-conversation-counsel.fk`, printed as the arrival card by
   `./fkwu observe/difficult-conversation-arrival-run.fk`.
 
-; witnessed: 2026-09-18 -> band 1111111111 (fkwu)
+; witnessed: 2026-10-19 -> band 11111111111 (fkwu)
