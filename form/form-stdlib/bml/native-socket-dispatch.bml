@@ -2,6 +2,7 @@
 // cell graph and held request pass through fork's private copy-on-write context:
 // no executable, request file, JSON bridge or second server is involved.
 import form-stdlib/bml/native-linux.bml;
+import form-stdlib/line-grammar.fk;
 section [form.bml] {
  class NativeSocketDispatch {
   def nsd-open(port,handle) {
@@ -11,7 +12,57 @@ section [form.bml] {
     any?(n => n != 0,flags) ? { let closed = nli-close(fd); form_error("native listener admission failed"); } : record_new(0,"listener",fd,"port",nli-port(fd),"handle",handle,"connections",[],"completed",0,"failed",0);
    };
   }
-  def nsd-stream(fd) = record_new(0,"fd",fd,"input","","pid",0,"watch",fd,"active",1);
+  def nsd-stream(fd) = record_new(0,"fd",fd,"input-parts",[],"input-bytes",0,"tail","","frame",nothing(),"refusal","","pid",0,"watch",fd,"active",1);
+  def nsd-lower(text) = str-spans(map(i => { let b = str_byte_at(text,i); byte_to_str(b>=65 && b<=90 ? b+32 : b); },range(0,len(text))));
+  def nsd-values(lines,name) = map(line => trim(substring(line,str_find(line,":",0)+1,len(line))),filter(line => { let at = str_find(line,":",0); at>0 && nsd-lower(substring(line,0,at)) == name; },lines));
+  def nsd-token(text) = len(text)>0 && all?(i => { let b = str_byte_at(text,i); (b>=48 && b<=57) || (b>=65 && b<=90) || (b>=97 && b<=122) || str_find("!#$%&'*+-.^_`|~",substring(text,i,i+1),0)>=0; },range(0,len(text)));
+  def nsd-field(line) { let at = str_find(line,":",0); at>0 && nsd-token(substring(line,0,at)) && all?(i => { let b = str_byte_at(line,i); (b>=32 || b == 9) && b != 127; },range(at+1,len(line))); }
+  def nsd-digit(n,base,d) { let next = attempt(n*base+d); nothing?(next) || next<n || (next - d)/base != n ? nothing() : next; }
+  def nsd-decimal(text,at,n) = at>=len(text) ? n : { let d = str_byte_at(text,at) - 48; let next = d<0 || d>9 ? nothing() : nsd-digit(n,10,d); nothing?(next) ? nothing() : nsd-decimal(text,at+1,next); };
+  def nsd-hexadecimal(text,at,n) = at>=len(text) ? n : { let b = str_byte_at(text,at); let d = b>=48 && b<=57 ? b - 48 : b>=97 && b<=102 ? b - 87 : -1; let next = d<0 ? nothing() : nsd-digit(n,16,d); nothing?(next) ? nothing() : nsd-hexadecimal(text,at+1,next); };
+  def nsd-framing(head) {
+   let lines = split-on(head,"\r\n"); let fields = nsd-values(lines,"content-length"); let lengths = foldl((out,v) => append(out,map(s => trim(s),split-on(v,","))),[],fields);
+   let transfers = foldl((out,v) => append(out,map(s => nsd-lower(trim(s)),split-on(v,","))),[],nsd-values(lines,"transfer-encoding"));
+   let numbers = map(text => len(text) == 0 ? nothing() : nsd-decimal(text,0,0),lengths);
+   let bad = any?(line => len(line)>0 && !nsd-field(line),drop(1,lines)) || (!nil?(lengths) && !nil?(transfers)) || any?(n => nothing?(n),numbers) || (!nil?(numbers) && any?(n => n != numbers[0],numbers)) || (!nil?(transfers) && (reverse(transfers)[0] != "chunked" || any?(v => v == "chunked",take(len(transfers) - 1,transfers))));
+   record_new(0,"head",head,"kind",bad ? "bad" : !nil?(transfers) ? "chunked" : nil?(numbers) ? "none" : "length","expected",nil?(numbers) || nothing?(numbers[0]) ? 0 : numbers[0],"received",0,"parts",[],"phase","size","line","","left",0);
+  }
+  // Chunk framing consumes each new span once. Extensions and trailers stay
+  // in the held wire request; payload bytes are never parsed as framing.
+  def nsd-chunks(frame,text,at) = at>=len(text) || record_get(frame,"phase") == "done" || record_get(frame,"phase") == "bad" ? at : {
+   let phase = record_get(frame,"phase");
+   phase == "data" ? {
+    let left = record_get(frame,"left"); let took = left<len(text) - at ? left : len(text) - at;
+    record_set(frame,"left",left - took); left == took ? record_set(frame,"phase","crlf") : 0;
+    nsd-chunks(frame,text,at+took);
+   } : phase == "crlf" ? {
+    let held = record_get(frame,"line"); let part = held ++ substring(text,at,at+1);
+    record_set(frame,"line",part);
+    part == "\r\n" ? { record_set(frame,"phase","size"); record_set(frame,"line",""); } : (part != "\r" ? record_set(frame,"phase","bad") : 0);
+    nsd-chunks(frame,text,at+1);
+   } : {
+    let held = record_get(frame,"line"); let available = held ++ substring(text,at,len(text)); let end = str_find(available,"\r\n",0);
+    end<0 ? { record_set(frame,"line",available); len(text); } : {
+     let line = substring(available,0,end); let took = end+2 - len(held); record_set(frame,"line","");
+     phase == "trailers" ? record_set(frame,"phase",len(line) == 0 ? "done" : nsd-field(line) && nil?(nsd-values([line],"content-length")) && nil?(nsd-values([line],"transfer-encoding")) && nil?(nsd-values([line],"host")) ? "trailers" : "bad") : {
+      let size = nsd-lower(split-on(line,";")[0]); let n = len(size) == 0 ? nothing() : nsd-hexadecimal(size,0,0);
+      nothing?(n) ? record_set(frame,"phase","bad") : { record_set(frame,"left",n); record_set(frame,"phase",n == 0 ? "trailers" : "data"); };
+     };
+     nsd-chunks(frame,text,at+took);
+    };
+   };
+  };
+  def nsd-frame-input(owner,conn,frame,part) {
+   let prior = record_get(frame,"received"); record_set(frame,"parts",cons(part,record_get(frame,"parts"))); record_set(frame,"received",prior+len(part));
+   let kind = record_get(frame,"kind"); let used = kind == "chunked" ? nsd-chunks(frame,part,0) : len(part);
+   let bad = kind == "bad" || record_get(frame,"phase") == "bad";
+   let ready = bad || kind == "none" || (kind == "length" && record_get(frame,"received")>=record_get(frame,"expected")) || record_get(frame,"phase") == "done";
+   !ready ? 0 : {
+    bad ? record_set(conn,"refusal","invalid request framing") : 0;
+    let body = str-spans(reverse(record_get(frame,"parts"))); let n = kind == "none" ? 0 : kind == "length" ? record_get(frame,"expected") : prior+used;
+    nsd-begin(owner,conn,record_get(frame,"head") ++ substring(body,0,n));
+   };
+  }
   def nsd-drop(owner,conn) {
    let closed = nli-close(record_get(conn,"watch")); record_set(conn,"active",0);
    record_set(owner,"connections",filter(c => record_get(c,"active"),record_get(owner,"connections"))); closed;
@@ -38,26 +89,43 @@ section [form.bml] {
    // can keep another owner's lifetime open after the response finishes.
    nli-close(record_get(owner,"listener"));
    map(c => c == conn ? 0 : nli-close(record_get(c,"watch")),record_get(owner,"connections"));
-   let handle = record_get(owner,"handle"); let response = attempt(handle(raw));
+   let handle = record_get(owner,"handle");
+   let refused = record_get(conn,"refusal");
+   let response = len(refused)>0 ? nsd-error(400,refused) : attempt(handle(raw));
    let detail = "{\"detail\":\"native request source needs care\"}";
    let text = nothing?(response) ? "HTTP/1.1 500 Error\r\nContent-Type: application/json\r\nConnection: close\r\nCache-Control: no-store, no-transform\r\nContent-Length: " ++ len(detail).str() ++ "\r\n\r\n" ++ detail : response;
    let sent = nsd-send(record_get(conn,"fd"),text,0); let closed = nli-close(record_get(conn,"fd"));
    nli-exit(nothing?(response) || !sent || closed != 0 ? 1 : 0);
+  }
+  def nsd-error(status,detail) {
+   let body = "{\"detail\":\"" ++ detail ++ "\"}";
+   "HTTP/1.1 " ++ status.str() ++ " Error\r\nContent-Type: application/json\r\nConnection: close\r\nCache-Control: no-store, no-transform\r\nContent-Length: " ++ len(body).str() ++ "\r\n\r\n" ++ body;
   }
   def nsd-begin(owner,conn,raw) {
    let pid = nli-fork();
    pid == 0 ? nsd-child(owner,conn,raw) : pid<0 ? form_error("native dispatch fork needs resource care: " ++ pid.str()) : {
     let watch = nli-process(pid);
     watch<0 ? form_error("native dispatch completion registration needs care: " ++ watch.str()) : {
-     nli-close(record_get(conn,"fd")); record_set(conn,"pid",pid); record_set(conn,"watch",watch); record_set(conn,"input",""); 1;
+     nli-close(record_get(conn,"fd")); record_set(conn,"pid",pid); record_set(conn,"watch",watch); record_set(conn,"input-parts",[]); record_set(conn,"frame",nothing()); 1;
     };
    };
   }
   def nsd-input(owner,conn) {
    let got = nli-recv(record_get(conn,"fd"),65536);
    got[0] == -11 || got[0] == -4 ? 0 : got[0]<=0 ? nsd-drop(owner,conn) : {
-    let raw = record_get(conn,"input") ++ got[1]; record_set(conn,"input",raw);
-    str_find(raw,"\r\n\r\n",0)<0 ? 0 : nsd-begin(owner,conn,raw);
+    let frame = record_get(conn,"frame");
+    !nothing?(frame) ? nsd-frame-input(owner,conn,frame,got[1]) : {
+     let parts = cons(got[1],record_get(conn,"input-parts")); record_set(conn,"input-parts",parts);
+     let tail = record_get(conn,"tail"); let edge = tail ++ got[1]; let at = str_find(edge,"\r\n\r\n",0);
+     let prior = record_get(conn,"input-bytes"); record_set(conn,"input-bytes",prior+got[0]);
+     at<0 ? record_set(conn,"tail",substring(edge,len(edge)>3 ? len(edge) - 3 : 0,len(edge))) : {
+      let raw = str-spans(reverse(parts)); let at = prior - len(tail)+at;
+      let head = substring(raw,0,at+4); let selected = nsd-framing(head); record_set(conn,"frame",selected); record_set(conn,"input-parts",[]); record_set(conn,"tail","");
+      let expect = nsd-values(split-on(head,"\r\n"),"expect");
+      !nil?(expect) && nsd-lower(expect[0]) == "100-continue" && record_get(selected,"kind") != "bad" ? nli-send(record_get(conn,"fd"),"HTTP/1.1 100 Continue\r\n\r\n") : 0;
+      nsd-frame-input(owner,conn,selected,substring(raw,at+4,len(raw)));
+     };
+    };
    };
   }
   def nsd-complete(owner,conn) {
