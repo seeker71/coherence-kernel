@@ -1,12 +1,22 @@
 #!/bin/sh
 set -u
 
-carrier_version="form-run-posix-v1"
+carrier_version="form-run-posix-v2"
+
+# The capture is bounded. On 2026-10-19 a child in a print loop wrote 174 GB of
+# stdout through this carrier in three hours and took the host to 116 MiB free;
+# a healthy answer is never that large, and a wrapper that can fill the disk is
+# a wrapper that can stop every other process on it. Past the cap the child is
+# stopped, the captured bytes so far are kept for the accounting line, and the
+# stop is named on stderr. FORM_RUN_CAP_BYTES overrides the default of 1 GiB.
+form_cap_bytes="${FORM_RUN_CAP_BYTES:-1073741824}"
 
 if [ "${1-}" = "--self-witness" ]; then
     printf 'carrier=%s\n' "$0"
     printf 'version=%s\n' "$carrier_version"
     printf 'capture=stdout+stderr+exit\n'
+    printf 'stream=live+captured\n'
+    printf 'cap_bytes=%s\n' "$form_cap_bytes"
     printf 'compaction=transparent-pending-form-native-classifier\n'
     printf '@form self-witness 0 0 0 0\n'
     exit 0
@@ -21,16 +31,48 @@ fi
 form_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/form-run.XXXXXX") || exit 70
 form_stdout="$form_tmp_dir/stdout"
 form_stderr="$form_tmp_dir/stderr"
-"$@" >"$form_stdout" 2>"$form_stderr"
+form_stdout_pipe="$form_tmp_dir/stdout.pipe"
+form_stderr_pipe="$form_tmp_dir/stderr.pipe"
+mkfifo "$form_stdout_pipe" "$form_stderr_pipe" || exit 70
+
+# Stream both channels as they are produced while retaining byte-identical
+# copies for the final @form accounting line.  The former carrier redirected
+# straight to regular files and replayed them only after the child exited,
+# making a healthy long-running Form process indistinguishable from a stall.
+/usr/bin/tee "$form_stdout" <"$form_stdout_pipe" &
+form_stdout_tee=$!
+/usr/bin/tee "$form_stderr" <"$form_stderr_pipe" >&2 &
+form_stderr_tee=$!
+"$@" >"$form_stdout_pipe" 2>"$form_stderr_pipe" &
+form_child=$!
+
+# The watch: once a second, the captured bytes against the cap, while the child runs.
+form_capped=0
+while kill -0 "$form_child" 2>/dev/null; do
+    form_so_far=$(( $(wc -c <"$form_stdout" | tr -d ' ') + $(wc -c <"$form_stderr" | tr -d ' ') ))
+    if [ "$form_so_far" -gt "$form_cap_bytes" ]; then
+        form_capped=1
+        kill -TERM "$form_child" 2>/dev/null
+        sleep 2
+        kill -0 "$form_child" 2>/dev/null && kill -KILL "$form_child" 2>/dev/null
+        break
+    fi
+    sleep 1
+done
+wait "$form_child"
 form_exit=$?
+wait "$form_stdout_tee"
+wait "$form_stderr_tee"
 form_stdout_bytes=$(wc -c <"$form_stdout" | tr -d ' ')
 form_stderr_bytes=$(wc -c <"$form_stderr" | tr -d ' ')
 form_shown_bytes=$((form_stdout_bytes + form_stderr_bytes))
 form_kind=$(basename "$1")
-if [ -s "$form_stdout" ]; then /bin/cat "$form_stdout"; fi
-if [ -s "$form_stderr" ]; then /bin/cat "$form_stderr" >&2; fi
+if [ "$form_capped" -eq 1 ]; then
+    printf 'form-run: the capture passed %s bytes; the command was stopped (set FORM_RUN_CAP_BYTES to raise the cap)\n' "$form_cap_bytes" >&2
+fi
 printf '@form %s %s %s %s %s\n' \
     "$form_kind" "$form_exit" "$form_stdout_bytes" "$form_stderr_bytes" "$form_shown_bytes"
 /bin/rm -f "$form_stdout" "$form_stderr"
+/bin/rm -f "$form_stdout_pipe" "$form_stderr_pipe"
 /bin/rmdir "$form_tmp_dir"
 exit "$form_exit"
