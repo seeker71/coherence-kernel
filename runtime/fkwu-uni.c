@@ -15445,7 +15445,7 @@ static long long fk_field_claim(long long word, long long n) { return __atomic_f
 static int fk_field_open(void) {
     if (fk_field_on) { return 1; }
     fk_field_tried = 1;
-    if (fk_conf("FK_FIELD_OFF")) { return 0; }
+    if (fk_conf("FK_FIELD_OFF") || fk_conf("FK_STORE_PRIVATE")) { return 0; }
     void *hdr = fk_field_take('h', 4096);
     if (fk_conf("FK_FIELD_TRACE")) { dprintf(2, "[field] hdr=%p\n", hdr); }
     if (hdr == 0) { return 0; }
@@ -15702,6 +15702,7 @@ static void fk_store_unlink_pid(long long pid) {
 #endif
 }
 static void *fk_store_take(char letter, long long bytes) {
+    if (fk_conf("FK_STORE_PRIVATE")) { return 0; }
     if (!fk_field_tried) { fk_field_tried = 1; fk_field_open(); }
     if (fk_field_on) { return 0; }
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
@@ -15730,6 +15731,7 @@ static void *fk_store_take(char letter, long long bytes) {
  * they change (a defn recorded, a body bound, a unit loaded, the page noted) -- no tick, no copy of the tree. */
 #define FK_PROG_MAGIC 0x53414B46LL   /* 'FKAS' */
 static void *fk_prog_take(char letter, long long bytes) {
+    if (fk_conf("FK_STORE_PRIVATE")) { return 0; }
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
     if (fk_prog_D == 0 && letter != 'D') {
         fk_prog_D = (long long *)fk_prog_take('D', FK_PROG_D_BYTES);

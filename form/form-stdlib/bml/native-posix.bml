@@ -1,0 +1,55 @@
+// One packet ABI, native Form images and platform syscall data. Linux x86-64
+// and Darwin ARM64 keep the same resource meanings without host wrappers.
+import form-stdlib/bml/native-linux.bml;
+import form-stdlib/bml/native-pty-darwin.bml;
+section [form.bml] {
+ class NativePosix {
+  def nps-arm-args(i) = i>=6 ? [] : append([fa-ldr(i,12,i+1),fa-ldr(13,12,7+i),fa-cmp-x(13,0),fa-bcond(0,4),fa-lsl-x-imm(13,13,3),fa-add-x-r(13,19,13),fa-ldr(i,13,0)],nps-arm-args(i+1));
+  def nps-darwin-image() {
+   let rows = npd-cat([
+    [fa-sub-x-imm(31,31,16),fa-str-x(19,31,0),fa-add-x-imm(19,0,0),fa-ldr(12,19,0)],nps-arm-args(0),
+    [fa-ldr(16,12,0),fa-str-x(16,31,1),fa-movk-x-16(16,512),fa-svc(128),npd-branch(3,"result"),fa-asm(3405774848,[1,32,65536],[0,31,0]),npd-branch(14,"store"),npd-label("result"),fa-ldr(14,31,1),fa-cmp-x(14,2),npd-branch(1,"store"),fa-cmp-x(1,0),npd-branch(0,"store"),fa-movz-x(0,0),npd-label("store"),fa-ldr(12,19,1),fa-str-x(0,12,0),fa-str-x(1,12,1),fa-ldr(19,31,0),fa-add-x-imm(31,31,16),fa-ret()]]);
+   nli-bytes(fa-image(npd-emit(rows,npd-labels(rows,0,[]),0)));
+  }
+  def nps-darwin-call(number,args) {
+   !nps-darwin ? form_error("native POSIX image not admitted on this ISA") : {
+    let answer = jit_cpu_run([nps-instructions,nli-packet(number,args,16),[]]);
+    nothing?(answer) || nil?(answer) ? form_error("Darwin POSIX RAM image admission failed") : answer;
+   };
+  }
+  def nps-call(linux,darwin,args) = nli-platform ? nli-call(linux,args) : { let answer = nps-darwin-call(darwin,args); let result = nli-signed(answer[0]); cons(result == -35 ? -11 : result,answer[1:]); };
+  def nps-result(linux,darwin,args) = nps-call(linux,darwin,args)[0];
+  def nps-close(fd) = nps-result(3,6,[fd]);
+  def nps-fork() = nps-result(57,2,[]);
+  def nps-exit(status) = nps-result(60,1,[status]);
+  def nps-no-sigpipe(fd) = nli-platform ? 0 : nps-result(54,105,[fd,65535,4130,nli-le(1,4),4]);
+  def nps-socket() { let fd = nps-result(41,97,[2,1,0]); fd<0 ? fd : nps-no-sigpipe(fd) != 0 ? { nps-close(fd); form_error("native socket signal ownership failed"); } : fd; }
+  def nps-address(port,ip) = (nli-platform ? nli-le(2,2) : nli-bytes([16,2])) ++ byte_to_str(port/256) ++ byte_to_str(port%256) ++ nli-bytes(ip) ++ nli-zero(8);
+  def nps-bind(fd,port) = nps-result(49,104,[fd,nps-address(port,[0,0,0,0]),16]);
+  def nps-listen(fd,backlog) = nps-result(50,106,[fd,backlog]);
+  def nps-connect(fd,port) = nps-result(42,98,[fd,nps-address(port,[127,0,0,1]),16]);
+  def nps-accept(fd) = nps-result(43,30,[fd,0,0]);
+  def nps-port(fd) { let result = nps-call(51,32,[fd,[nli-zero(16)],[nli-le(16,4)]]); result[0] != 0 ? form_error("native socket address unavailable") : str_byte_at(result[1],2)*256+str_byte_at(result[1],3); }
+  def nps-reuse(fd) = nps-result(54,105,[fd,nli-platform ? 1 : 65535,nli-platform ? 2 : 4,nli-le(1,4),4]);
+  def nps-nonblocking(fd) = nps-result(72,92,[fd,4,nli-platform ? 2048 : 4]);
+  def nps-cloexec(fd) = nps-result(72,92,[fd,2,1]);
+  def nps-send(fd,text) = nps-result(44,133,[fd,text,len(text),nli-platform ? 16384 : 0,0,0]);
+  def nps-recv(fd,n) { let result = nps-call(45,29,[fd,[nli-zero(n)],n,0,0,0]); [result[0],result[0]>0 ? substring(result[1],0,result[0]) : ""]; }
+  def nps-poll(watches,millis) {
+   let wire = str-spans(map(w => nli-le(w[0],4) ++ nli-le(w[1],2) ++ nli-zero(2),watches));
+   let result = nps-call(7,230,[[wire],len(watches),millis]);
+   result[0]<0 ? [result[0],[]] : [result[0],filter(w => w[1] != 0,map(i => [watches[i][0],nli-unsigned(result[1],i*8+6,2)],range(0,len(watches))))];
+  }
+  def nps-pipe() {
+   let ends = nli-platform ? { let r = nli-call(293,[[nli-zero(8)],524288]); r[0] != 0 ? nothing() : [nli-unsigned(r[1],0,4),nli-unsigned(r[1],4,4)]; } : {
+    let r = nps-darwin-call(42,[]); let a = nli-signed(r[0]); let b = nli-signed(substring(r[0],8,16)); a<0 ? nothing() : [a,b];
+   };
+   nothing?(ends) ? form_error("native completion pipe birth failed") : {
+    let flags = [nps-cloexec(ends[0]),nps-cloexec(ends[1])];
+    any?(n => n != 0,flags) ? { map(fd => nps-close(fd),ends); form_error("native completion pipe flags failed"); } : ends;
+   };
+  }
+ }
+ let nps-darwin = !nli-platform && jit_arm64_u32_leaf([[1,42]],0,0) == 42;
+ let nps-instructions = nps-darwin ? nps-darwin-image() : "";
+}
