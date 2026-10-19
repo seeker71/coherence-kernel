@@ -18,6 +18,14 @@ The first remote command was started before transfer completed and failed with
 transfer-order failure, not successful source/build evidence. Build observation
 continues only after the source transfer completes.
 
+The completed snapshot passed the repaired source-copy boundary and entered
+native recipe compilation. That rehearsal used `--shm-size=1g`, unlike the
+deployment's tmpfs mount; compilation then reported `SIGBUS` (rc 135) in
+`bml-floor-compile.fk`, with resident_bytes 1291735040. It is not a build pass.
+The resumed command uses the same `/dev/shm` tmpfs shape as the deploy build,
+removing the rehearsal-only 1 GiB restriction. No source/compiler workaround
+or additional kernel change is inferred from this resource mismatch.
+
 OpenAI supplied reasoning (exact runtime model/task tokens unavailable); Form
 selected and copied the source set. The local form-cli lookup executable was
 absent; native source lookup, not a fabricated router hit, established the path.
