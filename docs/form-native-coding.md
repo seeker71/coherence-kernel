@@ -15,6 +15,8 @@ the declared definitions and callees through `bml-api`. Its structured `value`
 carries source definitions and fingerprints; stdout may be empty. Further
 source expansion is demand driven. Context is forwarded only when supplied;
 otherwise the coding organ owns its initial allocation and renewal.
+Source discovery uses actual file bytes, with read size or absence retained in
+the framebuffer; source size does not silently remove a unit from discovery.
 Generated witnesses, stubs and reference definitions run in the same owned
 Form source tree. Each observation therefore reads its staged implementation
 rather than importing the repository's predecessor into a scratch execution.
