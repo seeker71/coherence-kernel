@@ -149,7 +149,7 @@ changed: the admission registry now bound one live Qwen3.8 27B Q8_0 owner,
 PID 92437, with approximately 7 GiB process RSS. Earlier PIDs are history.
 
 The overview changes landed as 22f53eeb30d27dc48c0434eb12ecf35d53008951 after
-127/127 release checks. That release's historical-death lens also exposed the
+release pass mask 127/127 (all affected checks). That release's historical-death lens also exposed the
 earlier Glass organs crash, id `60342:1792479100673:fatal:1`. Its retained trace
 was `fgtm-gift-give -> fgtm-publish-valid-snapshot -> fgor-tick`, with C frames
 `fk_sappend <- fk_cross_emit`. This was historical evidence, not a new gate
@@ -200,5 +200,19 @@ records the original diagnostic identity and leaves other failed ids open. The
 existing identity band observes recovery, isolation and source-clock retention;
 its verdict remains 1. Historical source and failed attempts remain in their
 receipts; healthy care describes the verified new execution, not a revived PID.
+
+The runtime repair landed as 6ac048684b42ca1d3036132508d1ce56e01ab94c with
+release pass mask 32767/32767. These are bitmasks, not check counts. An advanced
+main changed the seed during publication; native care selected `rebuild-fkwu`
+and re-observed binary freshness 31 before continuing successfully.
+
+Live re-observation found two integration seams beyond the pure reducer check.
+The retained stream supplied only its same-key prior observation, so it now
+also supplies the matching correlation diagnostic through the existing shared
+reducer. The same identity band now observes this actual stream path without
+publishing state. Glass's refresh inventory also omitted the shared care units;
+the existing watcher now includes them and restarts its owned readers when they
+change. This was observed through new worker PIDs under the same public
+supervisor, preserving the selected view. It is not a new repair service.
 
 — Codex, 2026-10-20
