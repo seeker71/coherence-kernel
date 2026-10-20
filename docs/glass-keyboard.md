@@ -3,8 +3,8 @@
 Glass owns immediate input in its existing renderer process. No control command,
 newline, shell, or helper process is needed for a view change.
 
-The carrier wakes the microphone by default. A fresh renderer opens live
-transcripts with `all` published languages visible. `z` closes the ear and keeps
+The carrier wakes the microphone by default. A fresh renderer opens the plain-language
+overview; a chosen view survives restarts. Transcripts keep `all` published languages selected. `z` closes the ear and keeps
 that choice across restarts; pressing it again wakes the ear. The opening view
 does not itself activate capture, and an empty transcript says what the ear is
 waiting for instead of inventing speech.
@@ -125,3 +125,35 @@ After a successful direct input read, `glass.last.input-state` carries a
 native `glass-input-v1` observation: renderer PID, epoch, view, language filter,
 selected public identity, last control ID, terminal-active flag and byte count.
 It carries neither raw keys nor partially typed/pasted text.
+
+`o` explains current published work, request queue, local model readiness,
+listening, host and model RAM, dispatch/recipe totals over currently live kernels, and visibility
+limits. Wide terminals put current work, missing sources, change events and
+retained work beside this orientation. Retained work is newest first and never
+counted as current activity. The awareness window names rows and publishers
+outside its current reading; it is not whole-system coverage. Chat intent and
+effects without a publication remain unknown. Arrow/Tab selection and `e` keep
+the underlying source, age and evidence available.
+
+The same published samples are available to an agent through
+`observe/glass-read-run.bml` (optional publisher prefix on stdin). Its output
+keeps identity, owner, lane, purpose, reported state, value, bytes, parent,
+timestamps, source, evidence, selector and channels. `transport=current` means
+the frame was readable; the separate last-publication age never establishes
+that its owner is still alive.
+
+An arriving agent publishes public progress through the existing work owner:
+
+```sh
+form-run ./fkwu observe/rented-work-run.bml <<'EOF'
+{"action":"activity","session":"glass-care","contributor":"Codex","purpose":"Make Glass understandable","step":"Verify the live overview","completed":"Added source ages","needs":"Read the updated frame","status":"working"}
+EOF
+```
+
+Use `working`, `waiting` or `complete` at meaningful transitions. `purpose`,
+`step`, `completed` and `needs` are explicitly public summaries, never copied
+prompts or answers. The work owner retains the latest record under
+`.hearth/rented-work/` and publishes the same native cell to Glass. Its
+`declared` evidence and update age stay visible after its publishing process
+exits. Measured usage keeps its own begin/mark/read/close lifecycle and is not
+inferred from these progress declarations.

@@ -4,6 +4,8 @@
 import form-stdlib/bml/rented-usage.bml;
 import form-stdlib/form-fs.fk;
 import form-stdlib/spool-bell-transport.fk;
+import form-stdlib/hearth.bml;
+import form-stdlib/form-glass-telemetry-membrane.bml;
 section [form.bml] {
  class RentedWork {
   def rw-roles() = ["work","review","unknown"];
@@ -25,6 +27,27 @@ section [form.bml] {
   def rw-session?(name) = len(name) > 0 && all?(i => str_find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.",byte_to_str(str_byte_at(name,i)),0) >= 0,0 .. len(name)) && name != "." && name != "..";
   def rw-home() = ".hearth/rented-work";
   def rw-path(session) = rw-home() + "/" + session + ".json";
+  // Public activity is caller-declared metadata, independent of measured usage.
+  // It carries no transcript, prompt, answer, or inferred private state.
+  def rw-activity-tag() = "rented-work-activity-v1";
+  def rw-activity?(cell) = len(cell) == 9 && cell[0] == rw-activity-tag() && all?(i => value_kind(cell[i]) == "string",[1,2,3,4,5,6,8]) && value_kind(cell[7]) == "int" && cell[7] >= 0;
+  def rw-activity-sample(cell) = fgtm-with-cell(fgtm-sample("work." + cell[8],fgtm-absent(),"work-session","form","arriving-agent",cell[8],cell[6],fgtm-absent(),fgtm-absent(),cell[6] == "working" ? "active" : cell[6] == "complete" ? "completed" : "idle",fgtm-present(cell[7]),fgtm-present(cell[7]),fgtm-absent(),fgtm-absent(),"never","declared","rented-work",["work","session","public-activity"]),cell);
+  def rw-activity-request(request) {
+   let session=jv-str(request,"session"); let status=jv-str(request,"status");
+   let contributor=jv-str(request,"contributor"); let purpose=jv-str(request,"purpose"); let step=jv-str(request,"step");
+   !fgtm-channel-id?(session) || !fgtm-channel-id?("work." + session) || len(contributor) == 0 || len(purpose) == 0 || len(step) == 0 || !any?(held => held == status,["working","waiting","complete"]) ? form_error("public activity needs a Glass-safe session, contributor, purpose, step and status working/waiting/complete") : {
+    let epoch=now_unix_ms();
+    let cell=[rw-activity-tag(),contributor,purpose,step,jv-str(request,"completed"),jv-str(request,"needs"),status,epoch,session];
+    let report=jv-object([jv-s("schema",rw-activity-tag()),jv-s("session",session),jv-s("contributor",contributor),jv-s("purpose",purpose),jv-s("step",step),jv-s("completed",cell[4]),jv-s("needs",cell[5]),jv-s("status",status),jv-n("published_at_ms",epoch),jv-s("evidence","declared")]);
+    fs_mkdir(".hearth"); fs_mkdir(rw-home());
+    let text=jv-emit(report); let path=rw-home() + "/" + session + ".activity.json"; let stage=path + ".writing-" + host_pid().str();
+    let wrote=write_file(stage,text);
+    wrote == len(text) && read_file(stage) == text && fs-rename(stage,path) == 0 ? 1 : form_error("public work activity could not be retained");
+    let sample=rw-activity-sample(cell);
+    let published=fgtm-publish-snapshot(hearth-telemetry-root(),"work." + session,epoch,[sample]);
+    if ((String) published[1] == "published") then report else form_error("public work activity retained; Glass publication did not complete: " + value_str(published));
+   };
+  }
   def rw-ledger() = "receipts/rented-work-sessions.jsonl";
   def rw-pack-sample(sample) = jv-array([jv-string(sample[0]),jv-array(sample[1] |> map(jv-int))]);
   def rw-pack(state) = jv-array([jv-string(state[0]),jv-string(state[1]),jv-string(state[2]),jv-string(state[3]),rw-pack-sample(state[4]),rw-pack-sample(state[5]),jv-array(state[6] |> map(values => jv-array(values |> map(jv-int)))),jv-int(state[7]),jv-int(state[8])]);

@@ -569,6 +569,11 @@ Codex work sessions also use `observe/rented-work-run.bml`: begin in `work`,
 mark independent optional `review` before it starts, and close the measured
 interval. Required guidance and repairs remain work; unattributed usage stays
 unknown. The door and sovereignty milestones live in `docs/form-native-coding.md`.
+Publish public work updates through that same `rented-work-run` door with
+`action: "activity"`, `session`, `contributor`, `purpose`, `step`, `completed`,
+`needs` and `status` (`working`, `waiting`, `complete`). Update at meaningful
+phase changes and completion. Glass shows the declaration and its age beside
+measured native activity; keep prompts, answers and private context out of it.
 Every prompt talks to the field first (Urs, 2026-09-01): its kernel question goes to the
 hearth (`./fkwu observe/hearth-ask-send.fk`, turn/kind/body on stdin) and the
 resident's answer contributes when one stands. A `signal=nothing` reply names the
