@@ -191,6 +191,15 @@ of demanding it as a missing runtime service. Once an owner was published,
 missing/stale/mismatched ownership remains a route gap. Bounded inspection
 projects those same conditional route rows as the live renderer.
 
+The current snapshot carrier serializes the complete value through
+`node_gift_write` and reconstructs it through `node_gift_read`. Shared memory
+here does not mean that the snapshot crosses as a shared root ID. Native
+interned cells already have shared identity; `node_at` can recover that same
+cell and its children. Moving snapshots to root references also needs an
+owner/generation binding and retirement after readers release them: the
+current shared field retains admitted nodes and pairs. The serialization crash
+repair establishes memory safety, not completion of that transport change.
+
 The same published samples are available to an agent through
 `observe/glass-read-run.bml` (optional publisher prefix on stdin). Its output
 keeps identity, owner, lane, purpose, reported state, value, bytes, parent,
