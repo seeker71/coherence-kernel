@@ -27,8 +27,8 @@ no 128-sample ceiling. The viewport follows the selected field and reports rows
 above/below; open evidence stays at the bottom. With no selection, `i`/`e`
 opens an identifier prompt: Enter submits, Backspace edits, Escape cancels.
 
-Exact metric selectors include the domain: `metric.metal.allocated-bytes` and
-`metric.metal.allocated-bytes` name different readings. Legacy
+Exact metric selectors include the domain, for example
+`metric.metal.allocated-bytes`. Legacy
 `metric.blueprint-bytes` still resolves. Interaction keys are textual channels,
 not newly minted projection nodes: many readings intentionally share one
 projection shape. Sample selectors retain publisher/lane/id; typed observations
@@ -54,8 +54,10 @@ remain separate scopes. Handles are not byte budgets. Owner ledgers replace
 overlapping model-root totals; leaves are not counted again. Derived extents
 remain derived. Missing budgets stay unknown.
 
-The remaining `tensor.owner.allocated` door requires an owner-bound byte
-publication; a local inspection does not create one. Silent microphone/awareness
+Current-process tensor bytes are live owned buffer extents, excluding mapped
+views; they are neither process RSS nor device allocation. The separate
+`tensor.owner.allocated` door requires an owner-bound byte publication; a local
+inspection does not create one. Silent microphone/awareness
 sources remain silent. Inspecting their views does not activate capture.
 
 The transcript view receives original recognition and local translations from
@@ -134,6 +136,60 @@ counted as current activity. The awareness window names rows and publishers
 outside its current reading; it is not whole-system coverage. Chat intent and
 effects without a publication remain unknown. Arrow/Tab selection and `e` keep
 the underlying source, age and evidence available.
+
+The overview uses blue for the selected field and red for a named attention
+item. A native work heading and its state/age select together. Activity and
+freshness remain words, without independently changing background emphasis.
+Terminal columns account for UTF-8 text, combining marks and wide characters.
+
+An observed absent event is not a failed sensor: no open line, recognition pass
+or translation response has its own reason and source clock. Required fields
+missing from an actual response remain unavailable. Coverage counts absent
+events separately from missing and stale readings; `e` preserves the distinction.
+
+Attention has an executing owner. Before sensors start, the launcher offers a
+missing or stale native carrier to the existing checkout compiler, retains its
+build evidence and re-observes the artifact through native care. Governor
+publication runs in the sensor process as a resident cell. A failure retains
+its diagnostic and an unclaimed source-repair need; unchanged failure is held,
+and a governor, imported source, floor compiler or carrier change resumes it.
+A successful publication correlates its fresh health with the original failure.
+An optional governor failure leaves the rest of Glass running. Unconfigured
+workload, reserve and grant contracts remain unknown; inspection invents no
+grant and acquires no governor slot.
+
+`NATIVE CARE / ACTION AND RECHECK` shows the latest three retained care readings
+from this checkout's `.hearth/organ-health.jsonl`, including unclaimed needs,
+selected responses, applied work awaiting observation and re-observed health.
+The existing sensor retains the native care reader and its byte cursor; source
+backlog or missing evidence remains visible. This is an observation of the
+executing owners, and does not itself run repairs. `v` includes all published
+care readings; `e` exposes signal identity, correlation, responder and source
+state. The agent's `glass-read-run.bml` exposes the same public care metadata.
+Private need details, diagnostic contents and action results stay with the owner.
+
+The microphone lane publishes capture time and level before decoder work. This
+heartbeat neither carries audio bytes nor erases the last semantic quiet/open
+line. Captured digital silence remains silence. If a born lane answers but no
+capture arrives, the ear owns a `host-microphone-audio` continuation; it waits
+instead of reopening that same empty stream. Actual capture, including a
+decoded environmental/refusal frame, or explicit sleep re-observes the need.
+The pending identity survives sensor restart through the native care reader.
+
+Model ownership has separate scopes. The overview reads current admission notes
+through `adm-observe-residents`, binds their write epoch to each live PID's
+process start and shows admitted model files plus per-process RSS. Notes can
+include an open in progress; they establish neither completed loading nor active
+decoding. This read does not sweep the registry. Direct Whisper and other paths
+outside session admission retain their own observations, including the ear's
+worker PIDs.
+
+The Qwen Flash Next + Llama 3B dual resident is an optional token-flow seed with
+fixed startup prompts. It is separate from native answer/code/ear sessions.
+When its owner has never published, Glass names that optional absence instead
+of demanding it as a missing runtime service. Once an owner was published,
+missing/stale/mismatched ownership remains a route gap. Bounded inspection
+projects those same conditional route rows as the live renderer.
 
 The same published samples are available to an agent through
 `observe/glass-read-run.bml` (optional publisher prefix on stdin). Its output

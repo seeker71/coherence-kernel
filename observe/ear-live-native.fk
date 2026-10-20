@@ -155,14 +155,22 @@ section [form.bml] {
         let w = sbt-append(el-spool(), el-cat(["<|ear:frame|>", el-nl(), el-kv("t", now_unix_ms().str()), el-kv("kind", "phantom"), el-kv("db", db.str()), el-kv("live", ""), el-kv("livelang", ""), el-kv("livems", "0"), el-kv("heard", ""), el-kv("lang", ""), el-kv("nsp", nsp.str()), el-kv("heardms", "0"), el-kv("tags", tags), el-review-fields(review), "<|/ear:frame|>", el-nl()]));
         w;
     };
-    def el-loop(st, win, total, cut, speech, lastvoice, lastquiet, deadline, live, lasth, lang, p1, p2, stable, listening, annt, tst) = !ewl-running?(deadline) || file_size(el-stop()) >= 0 ? live : {
+    // Capture is observed before a decoder pass can wait or compile. No audio
+    // bytes or recognized words cross this heartbeat.
+    def el-capture-give(db,at,held) = record_get(held,"at") >= 0 && at - record_get(held,"at") < el-beat() ? 0 : {
+        let wrote = sbt-append(el-spool(),el-cat(["<|ear:frame|>",el-nl(),el-kv("t",at.str()),el-kv("kind","capture"),el-kv("db",db.str()),"<|/ear:frame|>",el-nl()]));
+        record_set(held,"at",at);
+        wrote;
+    };
+    def el-loop(st, win, total, cut, speech, lastvoice, lastquiet, deadline, live, lasth, lang, p1, p2, stable, listening, annt, tst, capture) = !ewl-running?(deadline) || file_size(el-stop()) >= 0 ? live : {
         let fresh = el-drain(sense_mic_stream_read(3200, 120));
         let tend = now_unix_ms();
-        (Comparable) len(fresh) == 0 ? el-loop(st, win, total, cut, speech, lastvoice, lastquiet, deadline, live, lasth, lang, p1, p2, stable, listening, annt, tst) : {
+        (Comparable) len(fresh) == 0 ? el-loop(st, win, total, cut, speech, lastvoice, lastquiet, deadline, live, lasth, lang, p1, p2, stable, listening, annt, tst, capture) : {
             let total1 = (Number) total + (Number) len(fresh);
             let w1 = el-push(win, fresh);
             let rms = el-rms(w1);
             let db = el-db(rms);
+            let captured = el-capture-give(db,tend,capture);
             let measured = elp-stats(fresh);
             let decision = elp-step(listening, measured[0], measured[1], len(fresh), speech);
             let listening1 = decision[0];
@@ -209,17 +217,17 @@ section [form.bml] {
                         // A retired owner cannot publish after its second model pass.
                         !ewl-running?(deadline) ? live : !eac-credible?(final) ? {
                             let ep = eac-words?(final) ? el-emit-refusal(db, final[1], final[7], review) : 0;
-                            el-loop(st, w1, total1, total1 - 3200, 0, lastvoice1, lq1, deadline, (Number) live + (Number) 1, [], 0 - 1, [], [], 0, listening1, "", 0);
+                            el-loop(st, w1, total1, total1 - 3200, 0, lastvoice1, lq1, deadline, (Number) live + (Number) 1, [], 0 - 1, [], [], 0, listening1, "", 0, capture);
                         } : {
                             let e2 = el-emit-heard(db, final, why1, now_unix_ms() - tend, stable1, tsil, tst1 > 0 && (String) final[1] == annt1 ? now - tst1 : 0 - 1, review);
                             let seg = sbt-append(el-segs(), el-cat([tend.str(), byte_to_str(9), final[0], byte_to_str(9), final[1], el-nl()]));
-                            el-loop(st, w1, total1, total1 - 3200, 0, lastvoice1, now_unix_ms(), deadline, (Number) live + (Number) 1, [], 0 - 1, [], [], 0, listening1, "", 0);
+                            el-loop(st, w1, total1, total1 - 3200, 0, lastvoice1, now_unix_ms(), deadline, (Number) live + (Number) 1, [], 0 - 1, [], [], 0, listening1, "", 0, capture);
                         };
-                    } : el-loop(st, w1, total1, cut, speech1, lastvoice1, lq1, deadline, (Number) live + (Number) 1, best, h[5], [h[5], h[6]], len(p1) > 0 && (Comparable) h[5] == p1[0] ? p1[1] : [], stable1, listening1, annt1, tst1);
+                    } : el-loop(st, w1, total1, cut, speech1, lastvoice1, lq1, deadline, (Number) live + (Number) 1, best, h[5], [h[5], h[6]], len(p1) > 0 && (Comparable) h[5] == p1[0] ? p1[1] : [], stable1, listening1, annt1, tst1, capture);
                 };
             } : {
                 let q = tend - lastquiet > 1000 ? el-emit-quiet(db, fl1) : 0;
-                el-loop(st, w1, total1, (Comparable) speech1 == 1 ? cut : elp-quiet-cut(total1), speech1, lastvoice1, tend - lastquiet > 1000 ? tend : lastquiet, deadline, live, lasth, lang, p1, p2, stable, listening1, annt, tst);
+                el-loop(st, w1, total1, (Comparable) speech1 == 1 ? cut : elp-quiet-cut(total1), speech1, lastvoice1, tend - lastquiet > 1000 ? tend : lastquiet, deadline, live, lasth, lang, p1, p2, stable, listening1, annt, tst, capture);
             };
         };
     };
@@ -237,7 +245,7 @@ section [form.bml] {
         // from the lane's mouth and not only from the sensor's bookkeeping
         let said = print_str(el-cat(["live lane open, pid ", host_pid().str(), ", mic ", mic.str(), ", standing ", secs.str(), " s"]));
         // The first real chunk initializes the noise estimate; pre-roll keeps its audio available.
-        let frames = el-loop(st, [], 0, 0, 0, 0, now_unix_ms(), ewl-session((Number) now_unix_ms() + (Number) (1000 * secs), owner), 0, [], 0 - 1, [], [], 0, elp-born(), "", 0);
+        let frames = el-loop(st, [], 0, 0, 0, 0, now_unix_ms(), ewl-session((Number) now_unix_ms() + (Number) (1000 * secs), owner), 0, [], 0 - 1, [], [], 0, elp-born(), "", 0,record_new(0,"at",-1));
         let stopmic = sense_mic_stream_stop();
         let done = ewl-owned?(owner) ? el-emit("done", -120, "", "", 0, "", "", 0, 0) : 0;
         let segdone = ewl-owned?(owner) ? sbt-append(el-segs(), ("done" + el-nl())) : 0;
