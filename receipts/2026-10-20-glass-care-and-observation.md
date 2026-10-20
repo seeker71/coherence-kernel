@@ -243,4 +243,31 @@ section [form.bml] {
 }
 ```
 
+Following the person's correction about serialization, an identity audit found
+that Glass still passes its complete ordinary snapshot value to
+`node_gift_write` in `fgtm-gift-give`, and reads it through `node_gift_read`.
+The actual organs gift contained 119398 bytes with first byte 76 (`L`, the
+recursive list codec marker). Thus the safety repair did not remove the
+representation crossing.
+
+The existing `field-band.fk` returned 255: after the publishing child exited,
+its cell word and the reader's word were both -5462501, with the field node
+count unchanged at 10183969. The owned native probe
+`.hearth/glass-reference-observe.bml` then recovered an interned composite using
+`node_at(node_inst(cell))`: identical native cell and children references,
+zero reader node mints (`kernel_stat(53)`), field mode 2. The shared runtime
+already supplies identity; Glass's snapshot transport does not use it.
+
+The remaining architecture work belongs to the telemetry membrane and shared
+field lifetime: publish a root identity bound to its owner/generation, resolve
+it directly, retain while readers hold it and retire after release. Ordinary
+snapshot lists contain local values until shared admission. The current field
+claims shared nodes/pairs monotonically and does not reclaim these snapshots;
+distinct observations produce distinct roots. Merely interning every refresh
+would leave permanent growth, and a retained reference must not resolve to an
+unrelated cell after a field reset. No live transport migration or bounded
+retirement is claimed by this audit. The current carrier description now says
+what actually runs. The memory-safety repair remains useful to the codec's
+current callers, including durable binary output.
+
 — Codex, 2026-10-20
