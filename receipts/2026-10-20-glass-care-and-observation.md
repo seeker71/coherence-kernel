@@ -142,7 +142,7 @@ The person was asked to relaunch the Terminal overview; computer control does
 not permit Terminal control. The retained production readings above describe
 their observation times, not proof that the stopped view remains live.
 
-The person subsequently reopened Glass. The new supervisor PID 38016 was alive;
+The person subsequently reopened Glass. The new view state keeper PID 38016 was alive;
 the presented frame was 21 ms old at the observation. A fresh 160x40 inspection
 observed 365 gauges, missing 0, absent 3, stale 0 and typed gaps 0. Ownership had
 changed: the admission registry now bound one live Qwen3.8 27B Q8_0 owner,
@@ -202,9 +202,9 @@ its verdict remains 1. Historical source and failed attempts remain in their
 receipts; healthy care describes the verified new execution, not a revived PID.
 
 The runtime repair landed as 6ac048684b42ca1d3036132508d1ce56e01ab94c with
-release pass mask 32767/32767. These are bitmasks, not check counts. An advanced
-main changed the seed during publication; native care selected `rebuild-fkwu`
-and re-observed binary freshness 31 before continuing successfully.
+release pass mask 32767/32767. These are bitmasks, not check counts. Binary
+freshness temporarily read 15 during publication; native care selected
+`rebuild-fkwu` and re-observed 31 before continuing successfully.
 
 Live re-observation found two integration seams beyond the pure reducer check.
 The retained stream supplied only its same-key prior observation, so it now
@@ -214,5 +214,33 @@ publishing state. Glass's refresh inventory also omitted the shared care units;
 the existing watcher now includes them and restarts its owned readers when they
 change. This was observed through new worker PIDs under the same public
 supervisor, preserving the selected view. It is not a new repair service.
+
+That integration landed as 7495e5df02246471316354c1e6a6de60a7a717b6 with
+release pass mask 63/63. Final live observation: view state keeper PID 79963
+alive, presentation age 49 ms; 411 gauges, missing 0, stale 0, absent events 4,
+typed gaps 0. The current model admission owner remained PID 92437, Qwen3.8
+27B Q8_0, approximately 7 GiB process RSS, source age 783 ms. Both the original
+fatal signal and its correlation diagnostic were healthy in the actual care
+publication. The source-repair row retains `care_of` the original crash; the
+correlation's clock remains the accepted control event's clock. The physical
+supervisor was PID 37952; the state file's keeper PID identifies its renderer.
+
+The retained native probe's essential source, for a fresh reproduction, is:
+
+```form
+// preludes: form/form-stdlib/core.fk
+section [form.bml] {
+ def grow(text,n) = n <= 0 ? text : grow(text + text,n - 1);
+ let text = grow("x",20);
+ let value = [text,text,text,text,text,text,text,text];
+ let handle = shm_offer("/fg-growth-observe",9437184);
+ let given = node_gift_write(handle,value);
+ let back = node_gift_read(handle);
+ let good = !nothing?(given) && len(back) == 8 && all?(item => (String) item == text,back);
+ let released = shm_release(handle);
+ print(["round-trip",good,"released",released]);
+ good && released == 1 ? 0 : form_error("Growth crossing changed the gift");
+}
+```
 
 — Codex, 2026-10-20
