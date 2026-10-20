@@ -17,8 +17,11 @@ The owner's GPT editor was read on **2026-10-20**:
 - Imported Action server: `https://sema.hati.earth`; operations: `GET /ask`
   and `GET /trace`; authentication: None.
 - Web Search, Canvas, Image Generation and Code Interpreter were enabled.
-- Instructions still carried the earlier counsel-only rules. This source
-  update does not establish that the editor or server has been updated.
+- At 06:10:51 UTC, the published instructions were read back in full and
+  matched the 5,656-character companion payload from `8676489ed`. The
+  description and four practical starters matched the parent repository's
+  `docs/integration/chatgpt-profile.json`; sharing remained Everyone and
+  the imported Action schema was unchanged.
 - The editor displayed a migration-to-plugins notice naming December 11.
   The notice is an observed migration requirement, not a verified package
   format or a completed migration.
@@ -27,6 +30,18 @@ Preserve this read-only Action profile when publishing the companion update.
 The repository's broader `openapi.json` is a source catalog, **not the approved
 hosted profile**; importing it wholesale would add memory and public-write
 operations the current GPT does not expose.
+
+A subsequent live mentorship example produced a correct written fraction
+explanation but a generated picture labeled `2/5` with only one of five
+wedges shaded. The host acknowledged the error when challenged and repaired
+the explanation with countable text blocks. The current instruction adds
+checkable diagrams and explicit label/count verification for exact quantities.
+Its fresh-conversation observation belongs beside the publication receipt;
+the earlier readback does not establish this refinement is published.
+
+Hosted response quality and native sovereignty are separate observations.
+These instructions improve an arriving mind's practice; they do not establish
+native task ownership or reduced rental.
 
 ## What the native source carries
 
