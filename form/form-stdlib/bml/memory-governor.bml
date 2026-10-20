@@ -1,81 +1,12 @@
-// memory-governor.bml — how much RAM the body may take, asked before it takes it, and given back when RAM runs low.
-//
-// On 2026-10-02 the host restarted three times while model doors ran. A model's weights live in wired Metal memory
-// (the 27B Q8 voice is about 29 GB, its KV state several more), no kernel can swap them out, and every check the body
-// had looked at its own process: nlg-room reads this process's Metal bytes (metal_live words 18 and 19) against the
-// device's recommended working set, so two or three kernels, a DeepSeek server and the page cache could each pass
-// their own check and together pass the machine's memory. The Qwen session door (fcms-open-context) asked nothing.
-//
-// This reads the whole machine, not the process: host_vm_stat() is Mach's own count of every process's pages (free,
-// speculative, purgeable, file-backed, wired, compressor), so what another process wired is already in the reading.
-//   available   free + speculative + purgeable + file-backed pages: what the system can hand over without swapping
-//   wired       pages no process can lose: the Metal buffers of every model door on the host
-// A request for `need` bytes is granted when all hold afterwards:
-//   the wired cap       wired + need <= 60 percent of the machine's memory
-//   the reserve         available - need >= the larger of 8 GiB and a tenth of the machine's memory
-//   the compressor      the compressor holds at most a quarter of the machine's memory (a machine that is already
-//                       compressing hard is paging; a new model on top of it is how it falls over)
-// A reading that did not arrive (the door answers nil off macOS, or a short list) grants nothing: a missing truth is
-// never an optimistic one. Low is a smaller set of the same facts, for loops that already hold memory and must
-// give it back: available below half the reserve, wired above 80 percent, or the compressor above 40 percent.
-//
-// The doors: mg-ask is one reading and one verdict; mg-wait asks again with growing naps (10 s, doubling to 60 s)
-// until a time on host_monotonic_ms and answers the last verdict, so a caller that cannot wait for ever backs off
-// and says why. The caller keeps the choice (oac-backtrack: a held grant is a choice point, not a stop): the walk
-// ends its window held, the planner waits, a session open answers nothing named host-memory-held.
-//
-// LEASES: one reading is not enough. The machine's wired count read 35.8, 7.3 and 35.1 GiB within 40 seconds as other
-// sessions' model work came and went, and Metal wires a buffer's pages only while the GPU uses them, so two processes
-// that start together can both see room and then collide: a model's pages show in the reading only after the open
-// has mapped and the GPU has read them. A lease is a promise another process can see before the memory shows up.
-//   the file        /private/tmp/form-memory-leases/<pid>.lease, one JSON line {pid, who, key, shared, own,
-//                   granted_unix_ms, extra, extra_unix_ms}. key names the shared thing (the model file's path for
-//                   weights, "" for none), shared is the bytes of that shared thing (the weights' file size), own
-//                   the bytes this process holds beside them (KV state, scratch, margin; it includes extra). extra is the part
-//                   of own granted later than the weights (a renewal's second KV state), stamped on its own at
-//                   extra_unix_ms. shared and own read as 0 to 2^50 bytes, and a file with any other value reads
-//                   as no lease (it is removed like a torn one). A line written before this name still carries the same
-//                   bytes under the earlier key, and it is read.
-//   live            while host_alive(pid) says so and the pid began no later than the grant (a pid the host handed
-//                   out again is not it); the file of a dead pid, or one that reads no lease, is removed by the next
-//                   ask, and so is a <pid>.lease.part a killed writer left more than a minute ago.
-//   the weights are one physical copy in the page cache for every kernel that maps the same GGUF (measured: two
-//                   kernels mapping one 6 GiB file added 6.2 GiB of file-backed pages for the first and 0.0 for the
-//                   second), so the same key is counted once: an ask whose key a live lease already holds is
-//                   charged its own bytes only.
-//   pending         a lease granted less than 180 s ago has not yet shown in the reading, so another ask is charged
-//                   its bytes too (its own bytes, and its shared bytes when it was the first holder of its key);
-//                   its extra bytes count pending for 180 s from their own stamp, never the whole lease again;
-//                   after 180 s the pages are in the reading and the lease no longer counts as pending, but it still
-//                   holds its key.
-//   the lock        the reading, the leases and the write happen under one lock (dir-lock.bml: a directory only one
-//                   maker makes, its owner's pid inside, released in a deferred step so a stop releases it too), so
-//                   two processes asking at the same moment are judged one after the other: the second sees the
-//                   first's lease. A holder that is gone is taken over at once; one that is alive is waited for (a
-//                   slow holder is not a dead one) up to 60 s of its own stamp, and a waiter whose patience (10 s) is
-//                   spent answers lease-lock-busy, which is the closed answer. Just before it writes, the grant
-//                   reads the lock's owner once more: a lock taken from it meanwhile is a held answer, not a write.
-//   no directory    when the lease directory itself cannot be made (a full or read-only /private/tmp, a directory
-//                   another user owns) the machine is still guarded by one reading: the bare verdict answers, named
-//                   lease-dir-unavailable (granted without a lease, or held with the policy's reason after it).
-//   one per process a process's lease is its whole promise: mg-lease with the same key restates it while it is
-//                   pending (a second ask of the same weights) and adds a second session's KV as extra once it is
-//                   settled; with key "" it adds own bytes to it, as extra, and keeps its key (a renewal's second
-//                   KV state); a different key restates the key and counts the old weights as own bytes;
-//                   mg-lease-return gives back what a retired stream held; mg-release removes the lease where the
-//                   session closes.
-// mg-lease answers the verdict plus [charged, pending]: granted writes the lease, held writes nothing and names why
-// (room, wired-cap, reserve, compressor, memory-unreadable, lease-lock-busy, or lease-dir-unavailable).
-// mg-lease-wait asks again with the same naps as mg-wait. The walk's own pre-check (hw-ready) stays mg-wait with no
-// lease: the child lane it begins takes the real one in its own process. The door (observe/memory-governor-run.bml)
-// judges through the same lease-aware policy without taking a lease (mg-lease-ask-read), so the verdict it prints
-// counts the leases it lists.
-//
-// The walk's readers share one word for a lane that gave memory back or was refused it: mg-memory-ending? reads the
-// reason host-memory-low (the lane saved its checkpoint and stopped: form-cli-code-live.bml fcac-memory-stop) and
-// host-memory-held:<why> (the session open or the renewal's second state was refused). Neither is a failed option.
-//
-// PROOF: form-stdlib/tests/memory-governor-band.bml; the door is observe/memory-governor-run.bml.
+// Memory admission compares requested bytes, including pending leases, with the
+// host's observed available memory. Wired pages and compression are live signals,
+// never percentage quotas. Missing readings retain their failure.
+// Shared model keys are charged once; a process owns its KV and scratch charge.
+// Lease operations serialize observation and publication, retain owner identity,
+// release at session close, and reclaim dead owners. Pending accounting currently
+// uses lease age; replacing that estimate with allocation acknowledgement remains
+// work at the session and carrier boundary. Caller deadlines remain caller data.
+// Current witness: form-stdlib/tests/memory-governor-band.bml.
 import form-stdlib/json.fk;
 import form-stdlib/bml/dir-lock.bml;
 section [form.bml] {
@@ -83,16 +14,16 @@ section [form.bml] {
   def mg-gib() = 1073741824;
   def mg-max(a, b) = a > b ? a : b;
   def mg-pct(mem, p) = (mem / 100) * p;
-  // policy, in bytes of a machine with `mem` bytes
-  def mg-reserve-of(mem) = mg-max(8 * mg-gib(), mem / 10);
-  def mg-wired-cap-of(mem) = mg-pct(mem, 60);
-  def mg-compressor-cap-of(mem) = mem / 4;
   // scratch when a session's geometry has not been read. A Qwen open asks
   // for the bytes its scratch and KV allocate (q38-own-bytes), not this figure.
   def mg-kv-margin() = 8 * mg-gib();
   // host_vm_stat(): [page, memsize, free, active, inactive, wired, speculative, purgeable, compressor, pageins,
   // pageouts, compressions, decompressions, swapins, swapouts, external, internal], pages except the first two
-  def mg-sense() = host_vm_stat();
+  def mg-sense() {
+   let vm=host_vm_stat();
+   fb_record(vm,"memory-governor",0);
+   vm;
+  }
   def mg-vm-ok?(vm) = ((String) value_kind(vm) == "list") && (len(vm) >= 17) && (vm[0] > 0) && (vm[1] > 0);
   def mg-bytes(vm, k) = vm[k] * vm[0];
   def mg-mem(vm) = vm[1];
@@ -101,24 +32,24 @@ section [form.bml] {
   def mg-available(vm) = mg-bytes(vm, 2) + mg-bytes(vm, 6) + mg-bytes(vm, 7) + mg-bytes(vm, 15);
   // tenths of a GiB, said with one decimal
   def mg-gib-text(b) = ((b * 10) / mg-gib() / 10).str() ++ "." ++ (((b * 10) / mg-gib()) - (((b * 10) / mg-gib() / 10) * 10)).str() ++ " GiB";
-  // [granted 1 or 0, reason, available, wired, mem]; reason is room, memory-unreadable, wired-cap, reserve or compressor
+  // [granted 1 or 0, reason, available, wired, mem]; reason is room, memory-unreadable, invalid-request or capacity
   def mg-verdict(vm, need) {
    let ok = mg-vm-ok?(vm);
    let mem = ok ? mg-mem(vm) : 0;
    let wired = ok ? mg-wired(vm) : 0;
    let avail = ok ? mg-available(vm) : 0;
-   let why = !ok ? "memory-unreadable" : ((wired + need) > mg-wired-cap-of(mem)) ? "wired-cap" : ((avail - need) < mg-reserve-of(mem)) ? "reserve" : (mg-compressor(vm) > mg-compressor-cap-of(mem)) ? "compressor" : "room";
+   let why = !ok ? "memory-unreadable" : need < 0 ? "invalid-request" : need > avail ? "capacity" : "room";
    [why == "room" ? 1 : 0, why, avail, wired, mem];
   }
   def mg-granted?(v) = v[0] == 1;
-  def mg-low?(vm) = mg-vm-ok?(vm) && ((mg-available(vm) < (mg-reserve-of(mg-mem(vm)) / 2)) || (mg-wired(vm) > mg-pct(mg-mem(vm), 80)) || (mg-compressor(vm) > mg-pct(mg-mem(vm), 40)));
+  def mg-low?(vm) = mg-vm-ok?(vm) && mg-available(vm) <= 0;
   def mg-ask(need) = mg-verdict(mg-sense(), need);
   // the reasons a lane's end names when the machine, not the work, ended it
   def mg-low-reason() = "host-memory-low";
   def mg-held-reason() = "host-memory-held:";
   def mg-memory-held?(reason) = ((String) value_kind(reason) == "string") && (len(reason) >= len(mg-held-reason())) && ((String) substring(reason, 0, len(mg-held-reason())) == mg-held-reason());
   def mg-memory-ending?(reason) = ((String) value_kind(reason) == "string") && (((String) reason == mg-low-reason()) || mg-memory-held?(reason));
-  def mg-status-line(vm) = !mg-vm-ok?(vm) ? "[memory] unreadable: host_vm_stat answered nothing; no heavy open is granted" : "[memory] machine " ++ mg-gib-text(mg-mem(vm)) ++ ", available " ++ mg-gib-text(mg-available(vm)) ++ ", wired " ++ mg-gib-text(mg-wired(vm)) ++ ", compressor " ++ mg-gib-text(mg-compressor(vm)) ++ ", reserve " ++ mg-gib-text(mg-reserve-of(mg-mem(vm))) ++ (mg-low?(vm) ? ", LOW: heavy work gives memory back" : ", room");
+  def mg-status-line(vm) = !mg-vm-ok?(vm) ? "[memory] unreadable: host_vm_stat answered nothing; no heavy open is granted" : "[memory] machine " ++ mg-gib-text(mg-mem(vm)) ++ ", available " ++ mg-gib-text(mg-available(vm)) ++ ", wired " ++ mg-gib-text(mg-wired(vm)) ++ ", compressor " ++ mg-gib-text(mg-compressor(vm)) ++ (mg-low?(vm) ? ", LOW: no available memory" : ", room");
   def mg-line(who, need, v) = "[memory] " ++ (mg-granted?(v) ? "granted" : "held") ++ " " ++ who ++ " needs " ++ mg-gib-text(need) ++ ": " ++ v[1] ++ " (available " ++ mg-gib-text(v[2]) ++ ", wired " ++ mg-gib-text(v[3]) ++ " of " ++ mg-gib-text(v[4]) ++ ")";
   // Ask again until granted or the caller's time arrives. nothing keeps the
   // resource continuation open. sense() answers a

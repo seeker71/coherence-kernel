@@ -5,6 +5,47 @@ the task flow. An observed native answer takes precedence over model prose;
 local models contribute where the substrate does not yet carry the task.
 Form's choices, care, checkpoints, original checks and release own both paths.
 
+Planner admission belongs to the native voice and its actual weight and KV
+geometry. The planner adds no guessed scratch lease or resource-wait cutoff.
+An omitted planner attempt allowance continues through the existing native
+repeat queue, retaining each refused proposal and choosing again locally;
+an explicit caller allowance remains bounded. Reference repair keeps complete
+source documents as native values, initially exposing the original witness and
+the declared definitions and callees through `bml-api`. Its structured `value`
+carries source definitions and fingerprints; stdout may be empty. Further
+source expansion is demand driven. Context is forwarded only when supplied;
+otherwise the coding organ owns its initial allocation and renewal.
+Generated witnesses, stubs and reference definitions run in the same owned
+Form source tree. Each observation therefore reads its staged implementation
+rather than importing the repository's predecessor into a scratch execution.
+
+Memory admission compares the requested allocation and pending leases with
+observed available host memory. Wired memory, compression, elapsed time and
+growth beyond an estimate remain live framebuffer signals, without percentage
+quotas or an invented reserve. Other resident models do not independently veto
+admission. DeepSeek resource waits retain their state until capacity arrives;
+missing host readings and failed allocations retain their native failures.
+Pending leases still estimate allocation visibility from age; replacing that
+estimate with explicit allocation acknowledgement remains work at the owning
+session boundary.
+
+Coding requests without a reply allowance continue without a reply cutoff;
+`turns: 0` has the same meaning. A positive `turns` remains the caller's explicit
+allowance. Reply counts, source checks, elapsed time and memory readings stay
+observable throughout execution. Context capacity renews the owned stream while
+retaining the current candidate and completed effects. Native search traverses
+its actual finite candidate frontier when no check allowance is supplied.
+Changing resume outcomes remain eligible without a fixed resume count; repeated
+unchanged outcomes invite another approach. Successful publication records the
+resulting source fingerprint so subsequent execution recognizes completed work.
+
+A verified local plan retains its reference as a native value. Execution applies
+it over the current source and searches its finite expression frontier before
+opening a model: one existing unary call may be added or removed. Each candidate
+meets the original checks and owning observations in a restored source window.
+Only a passing candidate reaches the ordinary publication path. The receipt
+separates native search checks, retained plan authoring and model execution.
+
 The serving goal is a local task owner that can find source, propose an approach,
 act, observe, repair and independently review until the original checks and current
 publication agree. Model size is a resource choice inside that flow. Native cells

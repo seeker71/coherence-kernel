@@ -1,5 +1,5 @@
-// Bounded one-edit search. Wrap a bare value expression with a unary call
-// already used in this source. The caller owns admission, execution and cost
+// A finite one-edit frontier: add an existing unary call to a bare value,
+// or remove a unary call around its original argument. The caller owns admission, execution and cost
 // of checker(contract, source) -> [0|1, observation]. No IO or model calls.
 // Result: [status, source, attempts, reason]. Each attempt is
 // [start-byte, end-byte, wrapper, passed, observation, source-sha256].
@@ -34,7 +34,7 @@ section [form.bml] {
   def fbvs-malformed() = "caller-checker-returned-malformed-result";
   def fbvs-row(start,end,wrapper,result,source) = [start,end,wrapper,result[0],result[1],hex-encode(sha256-stream-string(source))];
   def fbvs-wrap(source,site,wrapper) = (substring(source,0,site[1]) + (wrapper + ("(" + (substring(source,site[1],site[2]) + (")" + substring(source,site[2],len(source)))))));
-  def fbvs-search(source,checker,contract,budget) = if (!(((String) value_kind(budget) == "int") && ((budget > 0) && (budget <= fbvs-limit())))) then fbvs-result("refused",source,[],"check-budget-must-be-integer-in-range") else {
+  def fbvs-search(source,checker,contract,budget) = if (!(nothing?(budget) || value_kind(budget)=="int" && budget>0)) then fbvs-result("refused",source,[],"check-budget-must-be-positive-native-integer") else {
    let syntax = fbr-repair(source);
    if (!syntax[0]) then fbvs-result("refused",source,[],syntax[3]) else if (!nil?(syntax[2])) then fbvs-result("refused",source,[],"boolean-syntax-repair-required") else {
     let prepared = fbvs-scan(fbr-lex(source,0,[])[1],0,0,0,[],[]);
@@ -45,7 +45,7 @@ section [form.bml] {
     };
    };
   };
-  def fbvs-next(source,checker,contract,budget,sites,wrappers,remaining,attempts) = if (len(attempts) >= budget) then fbvs-result("exhausted",source,attempts,"check-budget-exhausted") else if nil?(sites) then fbvs-result("exhausted",source,attempts,"no-passing-single-value-wrapper") else if nil?(remaining) then fbvs-next(source,checker,contract,budget,sites[1:],wrappers,wrappers,attempts) else {
+  def fbvs-next(source,checker,contract,budget,sites,wrappers,remaining,attempts) = if (!nothing?(budget) && len(attempts) >= budget) then fbvs-result("exhausted",source,attempts,"check-budget-exhausted") else if nil?(sites) then fbvs-unwrappers(source,checker,contract,budget,fbr-lex(source,0,[])[1],0,attempts) else if nil?(remaining) then fbvs-next(source,checker,contract,budget,sites[1:],wrappers,wrappers,attempts) else {
    let site = sites[0]; let wrapper = remaining[0];
    let candidate = fbvs-wrap(source,site,wrapper);
    let checked = checker(contract,candidate);
@@ -53,6 +53,13 @@ section [form.bml] {
    if (!fbvs-shape(checked)) then fbvs-result("refused",source,next,fbvs-malformed()) else {
     if checked[0] then fbvs-result("repaired",candidate,next,checked[1]) else fbvs-next(source,checker,contract,budget,sites,wrappers,remaining[1:],next);
    };
+  };
+  def fbvs-unwrappers(source,checker,contract,budget,tokens,index,attempts) = !nothing?(budget) && len(attempts)>=budget ? fbvs-result("exhausted",source,attempts,"check-budget-exhausted") : index>=len(tokens) ? fbvs-result("exhausted",source,attempts,"no-passing-single-value-rewrite") : !fbvs-unary(tokens,index) ? fbvs-unwrappers(source,checker,contract,budget,tokens,index+1,attempts) : {
+   let end=fbvs-group-end(tokens,index+2,")");
+   let candidate=substring(source,0,tokens[index][1])+substring(source,tokens[index+2][1],tokens[end - 1][1])+substring(source,tokens[end - 1][2],len(source));
+   let checked=checker(contract,candidate);
+   let next=cons(fbvs-row(tokens[index][1],tokens[end - 1][2],"remove:"+fbr-at(tokens,index),fbvs-shape(checked) ? checked : [0,fbvs-malformed()],candidate),attempts);
+   !fbvs-shape(checked) ? fbvs-result("refused",source,next,fbvs-malformed()) : checked[0] ? fbvs-result("repaired",candidate,next,checked[1]) : fbvs-unwrappers(source,checker,contract,budget,tokens,index+1,next);
   };
  }
  0;

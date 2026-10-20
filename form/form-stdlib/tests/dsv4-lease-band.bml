@@ -1,34 +1,7 @@
-; dsv4-lease-band.bml -- the bytes a DeepSeek-V4 session asks the memory governor for, derived from the GGUF header: the two real files' 8 MB header windows, the fixture, the architecture key, and Qwen's path unchanged.
-;
-; WHAT THIS PINS. form-stdlib/dsv4-lease.fk answers, for a DeepSeek-V4 file, shared = dense bytes + an expert cache of C = 64 experts a layer + the KV cache, DERIVED FROM THE HEADER AND NOT MEASURED on a running model
-; (the header comment names every term). The session door leases it (fcms-weights-bytes) and model-admission.bml asks the governor for it (adm-admit); for every other file both still charge file_size. This band reads
-; the IQ2XXS and reap25 files' first 8,388,608 bytes (no tensor mapped, no weight read; the Qwen file only its first 64 KiB, for the architecture key), writes the fixture under temp_dir, and reads the two doors' sources.
-;
-; Verdict 511 when every claim lands:
-;   1     the IQ2XXS file (86,720,111,488 B): the driver's plan 86,263,310,172 B, its expert stacks 77,913,391,104, token_embd 1,059,061,760, so dense 7,290,857,308; ONE expert is 7,077,888 B by the header's own
-;         dimensions (gate and up IQ2_XXS [4096 x 2048] at 66 B a 256-block: 2,162,688 each; down Q2_K [2048 x 4096] at 84 B a block: 2,752,512), the cache of 64 a layer over 43 layers 19,478,347,776 = 64 x 7,077,888 x 43,
-;         the KV at 8,192 positions 824,068,096, the shared figure 27,593,273,180 B (25.7 GiB)
-;   2     the reap25 file (91,321,404,640 B): plan 79,849,072,476, stacks 71,693,238,272, dense 7,096,772,444, the cache 23,139,975,168 (layers 0 to 2 store 256 experts, layers 3 to 42 store 192: 64 of each, over
-;         the mixed expert types), KV 824,068,096, shared 31,060,815,708 B (28.9 GiB)
-;   4     both under the governor's wired cap: with the 8 GiB own margin each is under 60 percent of 128 GiB (82,463,372,040 B), while each FILE is over it (80.8 and 85.0 GiB); on a scripted empty machine
-;         (128 GiB, 4 GiB wired) the governor grants the derived ask and holds the file_size ask with reason wired-cap
-;   8     the fixture (1,515,232 B, three blocks, four experts a layer so the cache holds them all): dense equals the generator's own priced bytes of every non-expert, non-embedding tensor, the cache the experts'
-;         bytes, the shared figure their sum with the KV at 8 positions (34,816), each derived by the generator's offsets and not by the lease's reader
-;   16    the architecture key: the IQ2XXS, reap25 and fixture files read deepseek4, the Qwen Q8_0 file qwen35 (first 64 KiB only), a text file, a missing path and an empty answer read ""; dls-weights-bytes answers the
-;         derived figure for the three DeepSeek files and EXACTLY file_size for the Qwen file (29,047,086,048) and a text file, and 0 for a missing path (as fcms-weights-bytes answered before)
-;   32    the doors read it: form-cli-model-session.fk defines fcms-weights-bytes as dls-weights-bytes and still leases with the text memory-governor-band pins (mg-lease("model session " ++ path, path,
-;         fcms-weights-bytes(path), mg-kv-margin()), three mg-release() and no mg-ask), model-admission.bml asks for dls-weights-bytes(path) and no longer for file_size, and the session lease at a larger capacity
-;         grows by exactly the KV difference (dls-weights-bytes-at at 16,384 minus at 8,192 is dvl-kv-total's)
-;   64    the figures are the formula's and move with it: changing the cache from 64 to 128 experts moves the IQ2XXS cache by exactly 19,478,347,776 and nothing else; a layout read from a 2.5 MB window (the table
-;         ends past 5.3 MB) gives no plausible figure: the read stops (a backtrack point the band catches, the walker's own 'eval too deep' note appears in the output) or the layout reads inconsistent; the dense figure does not contain the expert stacks (dense + stacks + token_embd = the plan)
-;   128   header only: each real window is 8,388,608 bytes of an 80 or 85 GB file; no model opened, nothing mapped
-;   256   THE LEASE'S KV TERM IS THE STATE'S THREE TERMS (2026-10-03: the state stage's wired growth read 10.8 times its price on the first window and the price was right, so the lease did not move): at 64 positions the
-;         shared figure 26,787,475,292 B is dense + cache + 18,270,208 (5,636,096 raw arenas + 772,096 compressed rows + 11,862,016 compressors' state and score) and with the 8 GiB own margin the window asks
-;         35,377,409,884 B; from 64 to 8,192 positions the shared figure grows by exactly the terms that grow with the capacity (805,797,888 = 812,206,080 - 6,408,192) and the compressors' state is the same
-;         11,862,016 B at both; the cache term does not read the state. A lease that charged the state once a capacity step would read 1,506,476,032 B higher at 8,192
-;
-; REQUIRES: host-local model files -- bits 1 to 4, 16 and 128 read their headers (paths outside the tree), and the fixture goes through write_file and read_file_slice. No weight byte is read and no
-; model is opened. The band writes only under temp_dir and removes what it made.
+// DeepSeek lease geometry is derived from actual GGUF headers. Scripted
+// physical availability admits the derived working set and rejects a larger
+// file-sized request. Native callers and exact KV terms remain observed.
+// All existing claims: 511.
 // preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk form-stdlib/dsv4-lease.fk form-stdlib/bml/memory-governor.bml
 section [form.bml] {
  class Dsv4LeaseBand {
@@ -37,7 +10,7 @@ section [form.bml] {
   def dlsb-reap() = "/Users/ursmuff/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf";
   def dlsb-qwen() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
   def dlsb-gib(n) = n * 1073741824;
-  def dlsb-cap() = mg-wired-cap-of(dlsb-gib(128));
+  def dlsb-cap() = mg-available(dlsb-vm());
   def dlsb-src(path) = read_file(path) ?? "";
 
   // ---- 1 and 2: the real files' figures --------------------------------------------------------------------------------
@@ -59,13 +32,13 @@ section [form.bml] {
   // ---- 4: the cap and the governor -------------------------------------------------------------------------------------------------
   def dlsb-pages(gib) = dlsb-gib(gib) / 16384;
   // [page, mem, free, active, inactive, wired, speculative, purgeable, compressor, pageins, pageouts, compressions, decompressions, swapins, swapouts, external, internal]
-  def dlsb-vm() = [16384, dlsb-gib(128), dlsb-pages(110), 0, 0, dlsb-pages(4), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  def dlsb-vm() = [16384, dlsb-gib(128), dlsb-pages(64), 0, 0, dlsb-pages(4), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   def dlsb-under-cap(shared) = shared + mg-kv-margin() < dlsb-cap() && shared + mg-kv-margin() + dlsb-gib(4) < dlsb-cap();
   def dlsb-governor(sharedIq2) {
    let derived = mg-verdict(dlsb-vm(), sharedIq2 + mg-kv-margin());
    let byFile = mg-verdict(dlsb-vm(), file_size(dlsb-iq2()) + mg-kv-margin());
    let said = print_str("  governor: derived ask " ++ (sharedIq2 + mg-kv-margin()).str() ++ " " ++ derived[1].str() ++ "; file_size ask " ++ (file_size(dlsb-iq2()) + mg-kv-margin()).str() ++ " " ++ byFile[1].str() ++ " (cap " ++ dlsb-cap().str() ++ ")");
-   mg-granted?(derived) && derived[1] == "room" && !mg-granted?(byFile) && byFile[1] == "wired-cap";
+   mg-granted?(derived) && derived[1] == "room" && !mg-granted?(byFile) && byFile[1] == "capacity";
   }
 
   // ---- 8: the fixture ------------------------------------------------------------------------------------------------------------------

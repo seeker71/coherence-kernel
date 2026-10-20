@@ -1,65 +1,7 @@
-; memory-governor-band.bml — the body asks the whole machine before it takes memory, and backs off when it is short.
-;
-; Verdict 67108863 when every claim lands:
-;   1     a roomy 128 GiB machine (60 GiB available, 20 GiB wired, compressor small) grants a 40 GiB open
-;   2     the wired cap holds: 70 GiB already wired and 20 GiB asked is held, reason wired-cap, though 50 GiB is available
-;   4     the reserve holds: 30 GiB available and 20 GiB asked leaves 10 GiB under the 12.8 GiB reserve, held, reason reserve
-;   8     the compressor holds: a machine compressing 40 GiB of 128 holds a small ask too, reason compressor
-;   16    a reading that did not arrive grants nothing: nil, a short list and a zero memsize are held, reason memory-unreadable
-;   32    low is a smaller set of the same facts: available under half the reserve, wired over 80 percent or the compressor
-;         over 40 percent read low; the roomy machine and an unreadable reading do not
-;   64    the wait backs off: held twice then granted rests 10 s then 20 s and answers granted; a machine that stays short
-;         rests 10, 20, 40, 60, 60 s (the nap doubles to a minute and stops there) and answers held once the clock passes
-;   128   the words: 40 GiB reads "40.0 GiB", 1.5 GiB reads "1.5 GiB"; the lines say granted or held with the reason, and
-;         the status line says LOW only when low and names an unreadable machine
-;   256   this host: host_vm_stat answers a reading the governor can use, and its status line names the machine's memory
-;   512   the door: a status-only run prints the machine's line, and a run that asks for 10000 GiB prints "[memory] held"
-;         with the reason wired-cap
-;
-; The leases (cross-process promises; a scripted lease directory under temp_dir, a scripted machine, scripted clocks;
-; "other live process" is pid 1, "a process that ended" a child that was spawned and waited, as in host-walk-band):
-;   1024  the lease directory reads: a lease written reads back as its row {pid, who, key, shared, own, granted};
-;         the view lists the live lease only (a dead pid's file and a file that reads no lease are not listed) and
-;         removes nothing; the door's line names who, key, bytes, age and pending or settled
-;   2048  one key is counted once: a live lease (200 s old) already holds the weights' key, so a second ask of the same
-;         file is charged its own bytes only, an ask of another file its shared bytes too, and key "" counts
-;         everything as own
-;   4096  pending: a lease granted 10 s ago subtracts from room (own + shared when it was the first holder of its
-;         key; a second holder of the key carries own only), so an ask that fit before is held, reason reserve;
-;         a lease granted 200 s ago no longer counts as pending and still holds its key
-;   8192  two processes ask at the same moment (a second fkwu child, a file redirect, a nap inside the reading between
-;         the leases read and the lease written) where only one fits: exactly one is granted, one lease file stands
-;   16384 a dead holder's lease is removed by the next ask (and a file that reads no lease with it), and its pending
-;         bytes charge no one; the asker's own lease is written
-;   32768 release removes this pid's lease and no other's, answers -1 when it held none, and the key it held is charged
-;         again afterwards
-;   65536 a stop inside the locked section (the reading stops) releases the lock and writes no lease; the next ask runs
-;   131072 the lock: one taker holds it, a live holder is waited for (the taker gives up at its patience and the holder
-;         keeps the lock), a dead holder is taken over at once, only the pid the lock names releases it, and a directory
-;         that cannot be made is a 0
-;   262144 the door prints the live leases of a directory beside the machine's reading, and removes nothing
-;   524288 the doors are wired: the Qwen open, the renewal and the planner ask through leases, the session close
-;         releases, and the walk's own pre-check stays a bare wait (its child lane takes the lease)
-; The review's repairs:
-;   1048576 a lease directory that cannot be made (/private/var/empty/nope/leases) answers the bare reading's verdict
-;         named lease-dir-unavailable (granted with room, held with the policy's reason after the name, an unreadable
-;         machine held), in milliseconds; a lock held by a live process stays the closed answer lease-lock-busy
-;   2097152 a holder that is only slow is not taken from: a lock stolen after the reading (the owner names another pid
-;         just before the write) answers lease-lock-busy and writes no lease; a live holder is taken over only once its
-;         own stamp is a minute old (61 s old: taken at once)
-;   4194304 a lease row outside 0 to 2^50 bytes (a 26-digit own, a negative one, 2^50 + 1) reads as no lease and is
-;         removed with the torn ones; 2^50 itself reads
-;   8388608 a renewal adds its second KV state as extra, stamped on its own (the weights keep their stamp: another
-;         ask is charged the 8 GiB, not the 37 GiB again) and mg-lease-return gives it back (the lease falls to the
-;         weights' own bytes; a lease with nothing left is removed; one that held none answers -1)
-;   16777216 the door's verdict counts the leases it lists (a pending lease of 2^49 bytes holds a 1 GiB ask; the same ask over
-;         an empty directory is granted), read-only
-;   33554432 a stale <pid>.lease.part is swept (a fresh one is kept), and a take whose owner did not read back never removes a
-;         lock another pid owns (an ownerless one is removed)
-;
-; REQUIRES: host_vm_stat, host_alive, host_spawn_at and host-exec, fkwu doors.
-; The band writes only under temp_dir and removes what it made; the child it spawns is
-; form-stdlib/tests/fixtures/memory-lease-racer.bml (exactly one).
+// Memory governor: actual available capacity, missing readings, optional caller
+// deadlines, shared and pending leases, concurrent admission and release.
+// Wired memory and compression do not independently refuse an allocation.
+// All existing claims: 67108863.
 // preludes: form-stdlib/core.fk form-stdlib/bml/memory-governor.bml
 section [form.bml] {
  class MemoryGovernorBand {
@@ -174,13 +116,13 @@ section [form.bml] {
    let other = mgb-ask(diff, "/m/k2.gguf", mgb-gib(20), mgb-gib(8), vm, now);
    let rows = [[1, "a", "/m/k1.gguf", mgb-gib(20), mgb-gib(8), now - 20000], [2, "b", "/m/k1.gguf", mgb-gib(20), mgb-gib(8), now - 10000]];
    let later = [[1, "a", "/m/k1.gguf", mgb-gib(20), mgb-gib(8), now - 200000], [2, "b", "/m/k1.gguf", mgb-gib(20), mgb-gib(8), now - 10000]];
-   mgb-bit(mg-granted?(before) && (!mg-granted?(held)) && ((String) held[1] == "reserve") && (held[5] == mgb-gib(36)) && (held[6] == mgb-gib(28)) && (!mgb-there?(mg-lease-path(fresh, mgb-self()))) && mg-granted?(settled) && (settled[5] == mgb-gib(8)) && (settled[6] == 0) && mgb-there?(mg-lease-path(old, mgb-self())) && mg-granted?(keyed) && (keyed[5] == mgb-gib(8)) && (!mg-granted?(other)) && ((String) other[1] == "reserve") && (other[5] == mgb-gib(28)) && (mg-lease-pending-sum(rows, now) == mgb-gib(36)) && (mg-lease-pending-sum(later, now) == mgb-gib(8)), 4096);
+   mgb-bit(mg-granted?(before) && (!mg-granted?(held)) && ((String) held[1] == "capacity") && (held[5] == mgb-gib(36)) && (held[6] == mgb-gib(28)) && (!mgb-there?(mg-lease-path(fresh, mgb-self()))) && mg-granted?(settled) && (settled[5] == mgb-gib(8)) && (settled[6] == 0) && mgb-there?(mg-lease-path(old, mgb-self())) && mg-granted?(keyed) && (keyed[5] == mgb-gib(8)) && mg-granted?(other) && ((String) other[1] == "room") && (other[5] == mgb-gib(28)) && (mg-lease-pending-sum(rows, now) == mgb-gib(36)) && (mg-lease-pending-sum(later, now) == mgb-gib(8)), 4096);
   }
   // 8192: two processes ask at the same moment; one fits
-  def mgb-racer-options(dir, go, hold, release) =json-emit(json-node-object([json-node-pair("dir", json-node-string(dir)), json-node-pair("who", json-node-string("band-child")), json-node-pair("key", json-node-string("")), json-node-pair("shared", json-node-int(0)), json-node-pair("own", json-node-int(mgb-gib(12))), json-node-pair("mem_gib", json-node-int(128)), json-node-pair("free_gib", json-node-int(30)), json-node-pair("wired_gib", json-node-int(20)), json-node-pair("go_at", json-node-int(go)), json-node-pair("hold_ms", json-node-int(hold)), json-node-pair("release", json-node-string(release))])) ++ "\n";
+  def mgb-racer-options(dir, go, hold, release) =json-emit(json-node-object([json-node-pair("dir", json-node-string(dir)), json-node-pair("who", json-node-string("band-child")), json-node-pair("key", json-node-string("")), json-node-pair("shared", json-node-int(0)), json-node-pair("own", json-node-int(mgb-gib(12))), json-node-pair("mem_gib", json-node-int(128)), json-node-pair("free_gib", json-node-int(20)), json-node-pair("wired_gib", json-node-int(20)), json-node-pair("go_at", json-node-int(go)), json-node-pair("hold_ms", json-node-int(hold)), json-node-pair("release", json-node-string(release))])) ++ "\n";
   def mgb-nap-vm(ms) {
    let rested = host_sleep_ms(ms);
-   mgb-vm(128, 30, 0, 0, 0, 20, 4);
+   mgb-vm(128, 20, 0, 0, 0, 20, 4);
   }
   def mgb-c-race(root) {
    let dir = mgb-sub(root, "race");
@@ -195,7 +137,7 @@ section [form.bml] {
    let ended = child > 0 ? host_wait(child) : -1;
    let said = read_file(io ++ "/out.txt") ?? "";
    let theirs = mgb-has?(said, "[racer] granted ");
-   mgb-bit((child > 0) && (ended == 0) && (mg-granted?(mine) ? (!theirs) : theirs) && (mg-granted?(mine) ? mgb-has?(said, "[racer] held reserve") : theirs) && (mgb-lease-files(dir) == 1) && (!mgb-there?(mg-lease-lock(dir))), 8192);
+   mgb-bit((child > 0) && (ended == 0) && (mg-granted?(mine) ? (!theirs) : theirs) && (mg-granted?(mine) ? mgb-has?(said, "[racer] held capacity") : theirs) && (mgb-lease-files(dir) == 1) && (!mgb-there?(mg-lease-lock(dir))), 8192);
   }
   // 16384: a dead holder's lease is removed by the next ask, and charges no one
   def mgb-c-dead(root) {
@@ -281,7 +223,7 @@ section [form.bml] {
    let lock = mgb-sub(dir, "lock");
    let named = write_file_text(dl-owner-path(lock), dl-text(1, now_unix_ms()));
    let busy = mg-lease-at-wait(300, dir, mgb-self(), "band", "", 0, mgb-gib(1), () => mgb-roomy(), () => now);
-   mgb-bit(mg-granted?(roomy) && ((String) roomy[1] == "lease-dir-unavailable") && (roomy[5] == mgb-gib(10)) && (!mg-granted?(big)) && ((String) big[1] == "lease-dir-unavailable:wired-cap") && (!mg-granted?(blind)) && ((String) blind[1] == "lease-dir-unavailable:memory-unreadable") && (spent < 3000) && (!mg-granted?(busy)) && ((String) busy[1] == "lease-lock-busy") && (!mgb-there?(mg-lease-path(dir, mgb-self()))), 1048576);
+   mgb-bit(mg-granted?(roomy) && ((String) roomy[1] == "lease-dir-unavailable") && (roomy[5] == mgb-gib(10)) && (!mg-granted?(big)) && ((String) big[1] == "lease-dir-unavailable:capacity") && (!mg-granted?(blind)) && ((String) blind[1] == "lease-dir-unavailable:memory-unreadable") && (spent < 3000) && (!mg-granted?(busy)) && ((String) busy[1] == "lease-lock-busy") && (!mgb-there?(mg-lease-path(dir, mgb-self()))), 1048576);
   }
   // 2097152: a holder that is only slow is not taken from: the lock is read once more before the write (a lock taken
   // meanwhile answers held, writes nothing), a live holder is waited for until its own stamp is a minute old, and a
@@ -381,7 +323,7 @@ section [form.bml] {
    let plan = mgb-src("observe/local-plan-run.bml");
    let walk = mgb-src("form/form-stdlib/bml/host-walk-window.bml");
    let whole = mgb-walk-text(fs_list("form/form-stdlib/bml") ?? []);
-   mgb-bit(mgb-has?(session, "mg-lease(\"model session \" ++ path, path, fcms-weights-bytes(path), own)") && (mgb-count(session, "mg-release()") == 3) && (!mgb-has?(session, "mg-ask(")) && mgb-has?(renew, "mg-lease(\"renewal second KV state\",\"\",0,mg-kv-margin())") && (!mgb-has?(renew, "mg-ask(")) && mgb-has?(plan, "mg-lease-wait(\"local planner\", lpr-voice-file(name)") && mgb-has?(walk, "wait(\"walk turn\", hw-turn-need()") && mgb-has?(walk, "(who, need, by) => mg-wait(who, need, by)") && (!mgb-has?(whole, "mg-lease(")) && mgb-has?(whole, "def hw-ready("), 524288);
+   mgb-bit(mgb-has?(session, "mg-lease(\"model session \" ++ path, path, fcms-weights-bytes(path), own)") && (mgb-count(session, "mg-release()") == 3) && (!mgb-has?(session, "mg-ask(")) && mgb-has?(renew, "mg-lease(\"renewal second KV state\",\"\",0,mg-kv-margin())") && (!mgb-has?(renew, "mg-ask(")) && mgb-has?(plan, "fcnv-ask(packet, request)") && !mgb-has?(plan, "mg-lease-wait(") && mgb-has?(walk, "wait(\"walk turn\", hw-turn-need()") && mgb-has?(walk, "(who, need, by) => mg-wait(who, need, by)") && (!mgb-has?(whole, "mg-lease(")) && mgb-has?(whole, "def hw-ready("), 524288);
   }
   // 262144: the door prints the live leases and removes nothing
   def mgb-c-door(root) {
@@ -396,21 +338,21 @@ section [form.bml] {
  }
  let roomy = mgb-roomy();
  let c1 = mgb-bit(mg-granted?(mg-verdict(roomy, mgb-need(40))) && (mgb-reason(roomy, 40) == "room"), 1);
- let c2 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 40, 70, 4), 20) == "wired-cap") && (mg-available(mgb-vm(128, 8, 2, 2, 40, 70, 4)) > mgb-need(50)), 2);
- let c4 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 18, 20, 4), 20) == "reserve") && (mg-available(mgb-vm(128, 8, 2, 2, 18, 20, 4)) == mgb-need(30)), 4);
- let c8 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 48, 20, 40), 4) == "compressor") && (mgb-reason(roomy, 4) == "room"), 8);
+ let c2 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 40, 70, 4), 20) == "room") && (mg-available(mgb-vm(128, 8, 2, 2, 40, 70, 4)) > mgb-need(50)), 2);
+ let c4 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 18, 20, 4), 20) == "room") && (mgb-reason(mgb-vm(128, 8, 2, 2, 18, 20, 4), 31) == "capacity") && (mg-available(mgb-vm(128, 8, 2, 2, 18, 20, 4)) == mgb-need(30)), 4);
+ let c8 = mgb-bit((mgb-reason(mgb-vm(128, 8, 2, 2, 48, 20, 40), 4) == "room") && (mgb-reason(roomy, 4) == "room"), 8);
  let short = [16384, 1];
  let c16 = mgb-bit((mgb-reason(nothing(), 1) == "memory-unreadable") && (mgb-reason(short, 1) == "memory-unreadable") && (mgb-reason(mgb-vm(0, 8, 2, 2, 48, 20, 4), 1) == "memory-unreadable") && (!mg-granted?(mg-verdict(nothing(), 1))), 16);
- let c32 = mgb-bit(mg-low?(mgb-vm(128, 1, 0, 0, 2, 20, 4)) && mg-low?(mgb-vm(128, 8, 2, 2, 48, 105, 4)) && mg-low?(mgb-vm(128, 8, 2, 2, 48, 20, 52)) && (!mg-low?(roomy)) && (!mg-low?(nothing())) && (!mg-low?(short)), 32);
+ let c32 = mgb-bit(mg-low?(mgb-vm(128, 0, 0, 0, 0, 20, 4)) && !mg-low?(mgb-vm(128, 1, 0, 0, 2, 20, 4)) && !mg-low?(mgb-vm(128, 8, 2, 2, 48, 105, 4)) && !mg-low?(mgb-vm(128, 8, 2, 2, 48, 20, 52)) && (!mg-low?(roomy)) && (!mg-low?(nothing())) && (!mg-low?(short)), 32);
  let c64 = mgb-bit(mgb-wait-granted() == 1 && mgb-wait-short(), 64);
  let granted = mg-verdict(roomy, mgb-need(40));
- let heldv = mg-verdict(mgb-vm(128, 8, 2, 2, 40, 70, 4), mgb-need(20));
- let c128 = mgb-bit((mg-gib-text(mgb-need(40)) == "40.0 GiB") && (mg-gib-text((mg-gib() * 3) / 2) == "1.5 GiB") && mgb-has?(mg-line("w", mgb-need(40), granted), "[memory] granted w needs 40.0 GiB: room") && mgb-has?(mg-line("w", mgb-need(20), heldv), "[memory] held w needs 20.0 GiB: wired-cap") && mgb-has?(mg-status-line(mgb-vm(128, 1, 0, 0, 2, 20, 4)), "LOW") && (!mgb-has?(mg-status-line(roomy), "LOW")) && mgb-has?(mg-status-line(nothing()), "unreadable"), 128);
+ let heldv = mg-verdict(mgb-vm(128, 8, 2, 2, 1, 70, 4), mgb-need(20));
+ let c128 = mgb-bit((mg-gib-text(mgb-need(40)) == "40.0 GiB") && (mg-gib-text((mg-gib() * 3) / 2) == "1.5 GiB") && mgb-has?(mg-line("w", mgb-need(40), granted), "[memory] granted w needs 40.0 GiB: room") && mgb-has?(mg-line("w", mgb-need(20), heldv), "[memory] held w needs 20.0 GiB: capacity") && mgb-has?(mg-status-line(mgb-vm(128, 0, 0, 0, 0, 20, 4)), "LOW") && (!mgb-has?(mg-status-line(roomy), "LOW")) && mgb-has?(mg-status-line(nothing()), "unreadable"), 128);
  let live = mg-sense();
  let c256 = mgb-bit(mg-vm-ok?(live) && mgb-has?(mg-status-line(live), "[memory] machine ") && (mg-mem(live) > (4 * mg-gib())), 256);
  let status = host-exec("./fkwu observe/memory-governor-run.bml </dev/null 2>&1", "") ?? "";
  let asked = host-exec("echo '{\"need_gib\":10000,\"who\":\"band\"}' | ./fkwu observe/memory-governor-run.bml 2>&1", "") ?? "";
- let c512 = mgb-bit(mgb-has?(status, "[memory] machine ") && mgb-has?(asked, "[memory] held band needs 10000.0 GiB: wired-cap"), 512);
+ let c512 = mgb-bit(mgb-has?(status, "[memory] machine ") && mgb-has?(asked, "[memory] held band needs 10000.0 GiB: capacity"), 512);
  let root = temp_dir() ++ "/memory-governor-band-" ++ now_unix_ms().str();
  let made = host_dir_mkdir(root);
  let c1024 = mgb-c-view(root);

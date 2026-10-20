@@ -1,45 +1,7 @@
-//////////////////////////////////////////////////////////////////////
-// dsv4-token-run.bml -- the measurement door of the DeepSeek-V4 token path: the real prefill and the greedy decode loop through dsv4-token-handle.fk, ONE row a token READ FROM THE LANDED LEDGER, the machine beside the clock.
-//
-// WHAT IT ANSWERS. How fast is the token path itself, and where does a token's time go: the host that encodes the dispatches, the device that runs them, or the waits between. This door runs the path as production runs it and
-// reads it. The ledger is native/metal/dsv4-ledger.fk's (ONE AUTHORITY: dll-mark, dll-row, dll-line, dll-within?, and the formulas dll-token-count-m and dll-token-bytes-m that the dry plan prices the real header with): a row
-// is the carrier's own counts between two marks (dispatches, barriers, command buffers, waits, host reads, buffers made, the device's busy microseconds, the clock), and this door adds only what the ledger does not hold: the
-// machine (wired memory and pageins between the marks) and the device's own allocated bytes. The door keeps no counter of its own.
-//
-// THE COMMAND STRUCTURE UNDER MEASUREMENT (landed, dsv4-kernels.fk dkr-hz): one concurrent batch with barriers planned per block, handed to the queue every `submit_every` blocks (2 by default: floor(layers / 2) + 1 command buffers a token; 1 hands it over after every block), ONE wait a decode token (the argmax, the NaN scan and the
-// logits settle together), a wait between prefill positions, two host reads (the count and the id), no buffer made, no pipeline compiled. That is the WHOLE-STACK mode (arena_slots 0, the control). THE DEFAULT IS THE ARENA MODE
-// (native/metal/dsv4-arena.fk): the routed expert stacks are not mapped, each layer holds an arena of `arena_slots` experts (64: the lease's term), and a block is two planned stages with one sync between them, where the host
-// reads the router's ids (one counted read), the cache answers slots, and the missing experts' spans are copied from the file: the file gives the dense tensors once and only the experts the cache misses (a whole-stack token
-// made the device read every page of every stack a dispatch bound: on 2026-10-03 19:04 WITA the first real token read the whole 80 GiB file in 49 s and pushed 27.7 GiB of other processes' memory to swap). The ledger band
-// (native/metal/tests/dsv4-ledger-band.bml) pins both modes' ceilings on the fixtures; this door's rows are judged by the same ceilings (dll-within?, dll-arena-ceil) and by the same dispatch formula, and a real run prints each
-// row against them with the experts it hit and missed, the bytes its fills copied and the waits it made.
-//
-// THE WIRED CURVE (the tap). Metal wires the buffers a committed batch names; the first tokens of a whole-stack design may wire stack after stack and keep them. The token handle calls ONE installed function at its seams
-// (dsv4-token-handle.fk dkr-hz-tap-set: ("layer", il) after block il was enqueued, ("pos", i) before position i of a prefill), and this door's function reads the machine there, WITHOUT A SYNC: wired memory and available
-// memory after every layer of the first `watch` tokens (the receipt's curve: [token, layer, wired, available]), and stops the token the moment a hold rule holds, BEFORE the machine is at risk: memory unreadable,
-// host-memory-low, wired above `pct` percent of memory (60), available under the reserve, or the window's 20 minutes. The token then answers nothing, what was enqueued is drained (dth-token-fail), every handle is released in
-// synced rounds, the lease is given back, and the receipt names how far it got. After the watched tokens every token is read at its end by the same rules. The watched tokens' rows carry the host time of those readings
-// (watched=1) and are left out of the warm decode mean.
-//
-// WHAT THE STAGES SAY. compile, map and state run as the validation door runs them (dsv4-validate.bml dvr-stage: the governor's ask with the back-off for a reserve or compressor denial and the reading that denied whole in the
-// receipt, the wired reading, the organs of ours named by process); the layers are not staged: this door IS the layer measurement. The honest rule: wired above the lease past the baseline (the stages), host-memory-low, the
-// token's own hold rules, and back-off asks.
-//
-// ONE ROW A TOKEN (dtr-row-line: the ledger's own line plus the machine's): token index, kind (prefill or decode), position, ids, the ledger fields (dispatches barriers cbs syncs readbacks allocs bytes gpu_us wall_ms miss), wired
-// growth, pageins and the device's own bytes. A prefill position's row is the span between the marks the tap took at its seams; the last position's carries the head and the one drain. The summary: the cold first token (the
-// prefill's own ms), the warm decode's mean ms and tokens a second, and the totals.
-//
-// THE DOOR IS DRY BY DEFAULT: empty stdin, {} and {"dry":1} print the plan and the ledger arithmetic (the landed formulas over the real header) and open nothing; only {"go":1} runs. Options (one JSON line): go, dry, file (the
-// IQ2XXS build by default), cap (64), steps (decode tokens, 24), watch (tokens read after every layer, 3), pct (the wired stop, 60), bw_gbs (the bandwidth the plan prices bytes at, 546: the M4 Max's stated figure, not
-// measured), arena_slots (experts a layer's arena holds, 64; 0 maps the whole routed stacks: the control), logits_prompt_ids and prompt_ids (the prompt; the 14 pinned ids by default), logits (0; 1 reads the head's logits after the prefill against the pinned recording and every step's top-two margin, see the validation reading
-// below), attribute (0; n runs n decode tokens after the walk in the ATTRIBUTION mode: every dispatch its own command buffer, its device microseconds read and tallied by family, kernel and block: which kernels keep the
-// device busy, printed and kept in the receipt row), hc_matvec ("wide", the default, or "narrow": the hyper-connection F16 matvec's kernel, see dtr-hcmv-wide?), poison (0; 1 fills every scratch buffer with a quiet NaN before every token, 2 with 1e30: the run must read what it reads without), teacher (0; 1 FEEDS the recorded ids of the raw prompt, or of teacher_ids, to the decodes and judges every position
-// of the recording on its own: exact, tie-explained, failed), receipt (receipts/dsv4-token-runs.jsonl).
-//
-// Proven by: native/metal/tests/dsv4-token-run-band.bml (the walk on both fixtures: rows from the ledger, the ceilings and the dispatch formula, the curve and its stop, the plants through the counted doors),
-// form-stdlib/tests/dsv4-token-run-plan-band.bml (the plan on the real headers; nothing opened),
-// form-stdlib/tests/dsv4-token-run-validation-band.bml (the comparison against a recorded ds4 stream: the linear reductions against a quadratic reference, the pass rule with its tie budget, teacher forcing, the verdict lines).
-//////////////////////////////////////////////////////////////////////
+// DeepSeek token execution reads the native dispatch ledger and host resource
+// signals. Memory admission belongs to the lease governor; token observations
+// impose no percentage quota, reserve or elapsed-time cutoff. Caller-selected
+// token counts and model dimensions describe the requested work.
 // preludes: form-stdlib/bml/dsv4-validate.bml native/metal/dsv4-ledger.fk
 section [form.bml] {
  class Dsv4TokenRun {
@@ -99,7 +61,7 @@ section [form.bml] {
   // ---- the hold rules: the machine read between enqueues ----------------------------------------------------------------------------------
   // the first that holds ends the encoding: memory unreadable, low (available under half the reserve, wired over 80 percent, compressor over 40), wired past pct percent of memory, available under the reserve, the 20 minutes
   def dtr-hold-reason(vm, pct, elapsed) =
-   !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : mg-wired(vm) > mg-pct(mg-mem(vm), pct) ? "wired-cap" : mg-available(vm) < mg-reserve-of(mg-mem(vm)) ? "reserve" : elapsed > dvr-abort-ms() ? "budget" : "";
+   { let signal=fb_record([vm,pct,elapsed],"dsv4-token-resource",0); !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : ""; };
   // the walk's own record: the rows, the marks the prefill's seams took, the curve, the stop, the token the tap is reading, and the options it runs under
   def dtr-env(pct, watch, t0, base) = record_new(0, "rows", [], "marks", [], "curve", [], "stop", [], "token", 0, "pct", pct, "watch", watch, "t0", t0, "base", base, "arena", 0,
     "val", 0, "rawp", 0, "vbase", 0, "ours", [], "reads", [], "refl", [], "refarg", dtr-recorded-argmax(), "attr-n", 0, "next", [], "attr", [], "rec", [], "teacher", 0, "spread", dtr-ds4-spread(), "poison", 0, "pctx", []);
@@ -472,9 +434,7 @@ section [form.bml] {
   def dtr-lease-need(m, slots, opts) = dls-shared(m, slots, dtr-lease-cap(opts)) + mg-kv-margin();
   def dtr-lease-verdict(vm, need) { let v = mg-verdict(vm, need); mg-granted?(v) ? "granted" : "REFUSED (" ++ v[1] ++ ")"; }
   def dtr-sizing-go(m, ss, opts, vm) = nil?(ss) ? "" : ((dtr-arena-bytes(m, ss[0]) > 0 ? "; " ++ ss[0].str() ++ " slots " ++ dvr-gib(dtr-arena-bytes(m, ss[0])) ++ " (" ++ ((100 * ss[0]) / dvl-l(m, 0, "nexp")).str() ++ " percent of the experts), lease " ++ dvr-gib(dtr-lease-need(m, ss[0], opts)) ++ " " ++ dtr-lease-verdict(vm, dtr-lease-need(m, ss[0], opts)) : "") ++ dtr-sizing-go(m, ss[1:], opts, vm));
-  def dtr-sizing-line(m, opts, vm) = "[dsv4-token] the arena's size, decided: " ++ dtr-opts-arena(opts).str() ++ " slots a layer (" ++ dvr-gib(dtr-arena-bytes(m, dtr-opts-arena(opts))) ++ ") of the layer's " ++ dvl-l(m, 0, "nexp").str() ++ " experts, the lease it asks " ++ dvr-gib(dtr-lease-need(m, dtr-opts-arena(opts), opts)) ++ " (dense + arena + KV + " ++ dvr-gib(mg-kv-margin()) ++ " of its own): the governor reads it "
-   ++ dtr-lease-verdict(vm, dtr-lease-need(m, dtr-opts-arena(opts), opts)) ++ " on the machine as it is now; what other sizes take" ++ dtr-sizing-go(m, dtr-sizing-slots(), opts, vm)
-   ++ ". A miss costs a warm token 0.397 ms (the 2026-10-03 23:43 window's fit: 24 decode tokens, 14 to 129 misses, wall 94.6 ms with none) or 0.495 ms (row 10, 2026-10-04 02:12: wall 319 ms with none, measured at load average about 8 with GPU contention from the glass organs: contention-affected); about 16 of a quiet 110 ms at 64 slots. THE SIZE STAYS 64: row 10's picks replayed by observe/dsv4-arena-sim.bml read 54.1 experts missed a warm token at 64 slots, 50.3 at 80, 49.0 at 96 and 48.9 flat from 128 to 256, so most misses are compulsory and the other 36 to 72 GiB of arena would buy about 5 misses a token (picks 0 turns the recording off; the hold rule stops the encoding at wired above " ++ dtr-opts-pct(opts).str() ++ " percent of memory whatever the size)";
+  def dtr-sizing-line(m,opts,vm) = "[dsv4-token] arena " ++ dtr-opts-arena(opts).str() ++ " slots per layer, lease " ++ dvr-gib(dtr-lease-need(m,dtr-opts-arena(opts),opts)) ++ "; available " ++ dvr-gib(mg-available(vm)) ++ "; " ++ dtr-lease-verdict(vm,dtr-lease-need(m,dtr-opts-arena(opts),opts)) ++ "; alternatives" ++ dtr-sizing-go(m,dtr-sizing-slots(),opts,vm);
   def dtr-join-lines(ls) = dvr-join(ls, "\n");
   // THE PLAN HAS NO SIDE EFFECT ON THE PROCESS: the lines read the hand-over cadence the options ask (dkr-every), so it is set for them and put back when they are built
   def dtr-plan-lines(m, size, opts, organs) {
@@ -506,8 +466,8 @@ section [form.bml] {
     arena ? dtr-join-lines(dtr-arena-bytes-lines(m, opts, bw)) : ("[dsv4-token] bytes a token reads (dll-token-bytes-m, the ledger's sum over the header's rows): " ++ bytes.str() ++ " B (" ++ dvr-gib(bytes) ++ "), one embedding row " ++ (record_get(m, "e") * 2).str() ++ " and the head " ++ dll-head-bytes-m(m).str()
      ++ "; at " ++ bw.str() ++ " GB/s (stated, not measured) that is " ++ dtr-tenths-text(dtr-tenths-ms(bytes, bw)) ++ " ms a token"),
     "[dsv4-token] the Swift runner's reference (history metal_dsv4_stack.sh, receipts): 38.17 ms a token, about 1,510 barriers, 28 tokens a second warm; this row set is what the Form path reads against it",
-    "[dsv4-token] the wired curve: wired memory is read after every layer of the first " ++ dtr-opts-watch(opts).str() ++ " tokens (the tap, no sync) and the encoding stops before the machine is at risk: memory unreadable, host-memory-low, wired above " ++ dtr-opts-pct(opts).str()
-     ++ " percent of memory (" ++ dvr-gib(mg-pct(128 * mg-gib(), dtr-opts-pct(opts))) ++ " on 128 GiB), available under the reserve, 20 minutes; the receipt keeps the curve and where it stopped",
+    "[dsv4-token] the wired curve: wired memory is read after every layer of the first " ++ dtr-opts-watch(opts).str() ++ " tokens; live memory readings, elapsed time and allocation growth direct resource attention without percentage quotas or elapsed-time cutoffs",
+
     dvr-layers-line(m),
     "[dsv4-token] " ++ dvr-organs-text(organs),
     dvr-backoff-line(),
