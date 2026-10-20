@@ -33,17 +33,18 @@ section [form.bml] {
   def ks-int(s) = ks-int-go(s, 0, 0);
   def ks-int-go(s, i, acc) = i >= len(s) ? acc : (str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57) ? ks-int-go(s, i + 1, acc * 10 + (str_byte_at(s, i) - 48)) : acc;
   def ks-join(xs) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ " " ++ ks-join(xs[1:]);
-  // a row: [pid, rss_kb, etime, command]; a line that does not read is nothing
+  // a row: [pid, ppid, rss_kb, etime, command]; a line that does not read is nothing
   def ks-parse-line(l) {
    let f = ks-fields(l);
-   len(f) < 4 ? nothing() : [ks-int(f[0]), ks-int(f[1]), f[2], ks-join(f[3:])];
+   len(f) < 5 ? nothing() : [ks-int(f[0]), ks-int(f[1]), ks-int(f[2]), f[3], ks-join(f[4:])];
   }
   def ks-rows(text) = filter(r => !nothing?(r), map(l => ks-parse-line(l), filter(l => len(trim(l)) > 0, split-on(text ?? "", "\n"))));
-  def ks-sense() = ks-rows(hch-read(["ps", "-axo", "pid=,rss=,etime=,command="]));
+  def ks-sense() = ks-rows(hch-read(["ps", "-axo", "pid=,ppid=,rss=,etime=,command="]));
   def ks-pid(r) = r[0];
-  def ks-rss(r) = r[1];
-  def ks-etime(r) = r[2];
-  def ks-cmd(r) = r[3];
+  def ks-ppid(r) = r[1];
+  def ks-rss(r) = r[2];
+  def ks-etime(r) = r[3];
+  def ks-cmd(r) = r[4];
   // a kernel: a command that runs fkwu, and not this steward's own door
   def ks-kernel?(r) = str_find(ks-cmd(r), "fkwu", 0) >= 0 && str_find(ks-cmd(r), "kernel-steward", 0) < 0 && ks-pid(r) != ks-self();
   // the source a kernel runs: the first argument after the fkwu word that looks like a file (a .bml, .fk or .fkb path)
@@ -53,8 +54,12 @@ section [form.bml] {
   def ks-ends?(s, suf) = len(s) >= len(suf) && (String) substring(s, len(s) - len(suf), len(s)) == suf;
   def ks-leased?(pid) = (Comparable) fs_exists(ks-leases() ++ "/" ++ pid.str() ++ ".lease") == 1;
   // ── the kinds, as a pure reading over what was sensed ─────────────────────────────────────────────────────────
-  //   sourceGone 1 when the kernel's source file no longer exists; leased 1 when a governor lease stands
-  def ks-kind(sourceGone, leased, rssKb, capKb) = sourceGone == 1 ? "orphan" : leased == 1 ? "leased" : rssKb > capKb ? "heavy" : "working";
+  //   sourceGone 1 when the kernel's source file no longer exists; parentGone 1 when nobody waits for the kernel (its parent
+  //   ended and launchd holds it, ppid 1); leased 1 when a governor lease stands. An orphan is BOTH gone: a kernel whose
+  //   source does not resolve but whose parent still waits is a child of a live flow — the build door's private-body
+  //   child runs under a cwd its argv path no longer resolves against, and the steward stopped two of them on
+  //   2026-10-20 09:53 before this line held. A parent that waits is the evidence the work is wanted.
+  def ks-kind(sourceGone, parentGone, leased, rssKb, capKb) = sourceGone == 1 && parentGone == 1 ? "orphan" : leased == 1 ? "leased" : rssKb > capKb ? "heavy" : "working";
   def ks-cap-kb() = ks-guide-get("cap_gib") * 1048576;
   // A relative source is relative to THE KERNEL'S working directory, never this steward's: the first live reading
   // (2026-10-19 23:40) named a sibling's live round an orphan because `.hearth/form-owned-round.bml` did not exist
@@ -68,7 +73,7 @@ section [form.bml] {
   def ks-read-with(r, cwdOf) {
    let src = ks-source(ks-cmd(r));
    let cwd = (Comparable) len(src) > 0 && !ks-absolute?(src) ? cwdOf(ks-pid(r)) : "";
-   [ks-pid(r), ks-kind(ks-source-gone?(src, cwd), ks-leased?(ks-pid(r)) ? 1 : 0, ks-rss(r), ks-cap-kb()), ks-rss(r), ks-etime(r), src, cwd];
+   [ks-pid(r), ks-kind(ks-source-gone?(src, cwd), ks-ppid(r) == 1 ? 1 : 0, ks-leased?(ks-pid(r)) ? 1 : 0, ks-rss(r), ks-cap-kb()), ks-rss(r), ks-etime(r), src, cwd];
   }
   def ks-read(r) = ks-read-with(r, pid => ks-cwd-of(pid));
   def ks-readings(rows) = map(r => ks-read(r), filter(r => ks-kernel?(r), rows));
