@@ -1,8 +1,6 @@
 // local-plan-run.bml — the local planner: one request becomes a band-first gap, written by a local voice and verified
-// by Form before it is queued (form-stdlib/bml/form-cli-local-plan.bml). Before its voice opens, this process asks the
-// machine for the voice's weights and KV state and takes the lease for them (memory-governor.bml mg-lease-wait, keyed
-// by the voice's model file: another process mapping the same file is charged its private bytes only); the voice's
-// session close releases it.
+// by Form before it is queued (form-stdlib/bml/form-cli-local-plan.bml). The voice
+// owns admission and release from its actual weights and KV geometry.
 //
 // stdin, one JSON line:
 //   a request itself: {"id","title","problem","needs","where","files","evidence"}; or
@@ -21,7 +19,7 @@
 // A request the queue already carries (a row whose "request" is its id) is planned once: the door says which gap
 // carries it and opens no model. {"queue":"<path>"} reads and lands in another queue (default
 // learn/native-turn-queue.jsonl).
-// Beside either, optional: "attempts" (6), "voices" (else the registry's plan chain, each voice whose weights are on
+// Beside either, optional: "attempts" (explicit caller allowance; absent continues locally), "voices" (else the registry's plan chain, each voice whose weights are on
 // disk), "context" (initial allocation; otherwise prompt plus initial reserve), "max_reply_tokens" (3072, generation-progress signal), "deadline_ms" (600000, one band run), "until_ms" (the
 // caller's window on the host's monotonic clock: no voice opens once the time left cannot hold the median option
 // the ledger measured, and the walk ends held), "dry":1 prints the first packet the voice would read and opens no
@@ -31,9 +29,8 @@
 // before another whole-plan generation. Repair retains the proposal's local voice;
 // repair_model explicitly selects another. repair_turns (64) is the coding continuation allowance. Source and witness
 // fingerprints bind its checkpoint; only released, reverified candidates land.
-// Before opening an option, admission reads available memory and shared model leases.
-// A fitting installed voice is preferred. "yield_ms" bounds resource waiting, and
-// the caller's window may end it earlier. Process lifetime does not own GPU access.
+// Installed voices meet actual native admission at execution. A refusal returns
+// its evidence to the local choice; the caller's window still bounds new options.
 // The voice speaks in this process (form-stdlib/bml/form-cli-native-voice.bml: registry weights on this Mac), one
 // reply at a time, and the band runs begin only after its session is released. No prompt leaves the machine by
 // construction: the voice is in-process, and a declined walk's guide packet (fcgp-packet-at) is a file no door here
@@ -88,13 +85,7 @@ section [form.bml] {
   }
   def lpr-voices(opts) {
    let offered = if fcgp-present?(opts, "voices") then flp-strs(opts, "voices") else filter(n => ((Comparable) mr-file?(mr-path(mr-find(n))) == 1), mr-chain-names("plan"));
-   let leases = mg-lease-view(mg-lease-dir()); let vm = mg-sense(); let now = now_unix_ms();
-   let fitting = filter(n => lpr-fits?(n, leases, vm, now), offered);
-   nil?(fitting) ? offered : fitting;
-  }
-  def lpr-fits?(name, leases, vm, now) {
-   let path = mr-path(mr-find(name));
-   mg-granted?(mg-lease-decide(leases, host_pid(), path, file_size(path), mg-kv-margin(), vm, now)[0]);
+   offered;
   }
   // The voice opens while the caller's window ("until_ms" on the host's monotonic
   // clock; nothing when no window was given) still holds an option: the median option the ledger measured
@@ -104,38 +95,29 @@ section [form.bml] {
   // with no row
   def lpr-floor() = hw-option-floor-at(flp-dir() ++ "/ledger.jsonl");
   def lpr-latest(until, floor) = until - floor[0];
-  def lpr-bound(t, until, floor) = if nothing?(until) then t else if (lpr-latest(until, floor) < t) then lpr-latest(until, floor) else t;
   def lpr-closed?(until, floor) = (!nothing?(until)) && (host_monotonic_ms() > lpr-latest(until, floor));
   def lpr-window-line(until, floor) = mc-cat(["[local-plan:window] ", hw-minutes(hw-left(until, host_monotonic_ms())), " left cannot hold an option of ", hw-minutes(floor[0]), " (", floor[1], "); no model opens"]);
   def lpr-began(rid, name, n) = fhn-append(lpr-began-path(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", rid), fhn-n("option", n), fhn-s("voice", name)])) ++ "\n");
   // a voice whose file the registry holds is leased by its path (the weights are one promise for every process that
   // maps the file); a voice the registry does not hold is asked as the walk asks a turn
-  def lpr-voice-file(name) = mr-path(mr-find(name));
-  def lpr-room(name, by) = file_size(lpr-voice-file(name)) > 0 ? mg-lease-wait("local planner", lpr-voice-file(name), file_size(lpr-voice-file(name)), mg-kv-margin(), by) : mg-wait("local planner", hw-turn-need(), by);
-  def lpr-ask(dir, id, rid, packet, name, n, context, limit, yieldMs, until, floor) {
+  def lpr-ask(dir, id, rid, packet, name, n, context, limit, until, floor) {
    let open = !lpr-closed?(until, floor);
-   // Admission follows actual shared weights and private KV, not another process's
-   // lifetime. Native session close releases the lease; host Metal owns dispatch.
-   let mem = open ? lpr-room(name, lpr-bound((host_monotonic_ms() + yieldMs), until, floor)) : [0, "caller-window", 0, 0, 0];
-   let reason = open ? mg-line("local planner", hw-turn-need(), mem) : lpr-window-line(until, floor);
-   let spoke = (!mg-granted?(mem)) ? print_str(reason) : 0;
-   let marked = mg-granted?(mem) ? lpr-began(rid, name, n) : 0;
-   if mg-granted?(mem) then lpr-spoken(dir, id, packet, name, n, context, limit) else ["held", reason, 0, 0, ""];
+   // The voice admits its actual weights and KV geometry. A second guessed
+   // scratch lease can refuse a model whose real allocation fits.
+   let marked = open ? lpr-began(rid, name, n) : 0;
+   open ? lpr-spoken(dir, id, packet, name, n, context, limit) : ["held", lpr-window-line(until, floor), 0, 0, ""];
   }
   def lpr-spoken(dir, id, packet, name, n, context, limit) {
    let stem = mc-cat([dir, "/", id, "-", n.str(), "-", now_unix_ms().str()]);
    let kept = write_file_text(stem ++ ".packet.txt", packet);
    let request=json-node-object(append([fhn-s("model",name),fhn-n("max_reply_tokens",limit)],nothing?(context) ? [] : [fhn-n("context",context)]));
    let v = fcnv-ask(packet, request);
-   // Admission may refuse before a session owns the planner's earlier lease.
-   // Release that promise only when the voice reports complete release.
-   let returned = v[6] == 1 ? mg-release() : 0;
    let text = v[0] == "answered" ? v[1] : len(trim(v[8])) > 0 ? trim(v[8]) : v[7];
    let heard = write_file_text(stem ++ ".reply.txt", text);
    let said = print_str(mc-cat(["[local-plan:voice] ", name, " option ", n.str(), " ", v[0], " prompt_ids=", v[2].str(), " generated_ids=", v[3].str(), " reply=", stem, ".reply.txt"]));
    [v[0], text, v[2], v[3], stem ++ ".reply.txt"];
   }
-  def lpr-voice(dir, id, rid, context, limit, yieldMs, until, floor) = (packet, name, n) => lpr-ask(dir, id, rid, packet, name, n, context, limit, yieldMs, until, floor);
+  def lpr-voice(dir, id, rid, context, limit, until, floor) = (packet, name, n) => lpr-ask(dir, id, rid, packet, name, n, context, limit, until, floor);
   def lpr-read(path) = if ((String) path == "") then "" else fhn-read(path);
   // an earlier walk of this request left its refused options in the ledger; the walk resumes from them unless
   // {"fresh":1} asks for a clean start
@@ -157,10 +139,10 @@ section [form.bml] {
    let attempts = lpr-int(opts, "attempts", flp-attempts());
    let memory = lpr-memory(req, opts);
    let spent = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then 0 else lpr-spent(lpr-tried(attempts), flp-req-id(req));
-   let left = lpr-left(attempts, spent);
-    let base = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "yield_ms", 7200000), fcgp-num(opts, "until_ms"), lpr-floor()), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
+   let left = json-object-has?(opts,"attempts") ? lpr-left(attempts, spent) : nothing();
+    let base = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), fcgp-num(opts, "until_ms"), lpr-floor()), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
     let ctx=flp-with-reference-care(base,(request,context,said,refusal)=>lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor()) ? nothing() : lrpr-repair(request,context,said,refusal,opts));
-   let resumed = if ((spent == 0) && nil?(memory)) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), ": ", spent.str(), " option(s) spent, ", len(memory).str(), " refused row(s) the ledger keeps, ", left.str(), " option(s) left"]));
+   let resumed = if ((spent == 0) && nil?(memory)) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), ": ", spent.str(), " option(s) spent, ", len(memory).str(), " refused row(s) retained; ", nothing?(left) ? "native choices continue" : left.str()+" caller option(s) left"]));
    let care=lrpr-resume(req,ctx,memory);
    let r=nothing?(care) ? flp-walk-from(req,ctx,memory) : care[0]==1 ? flp-ended(["queued",care[1]],memory) : care[0]==3 ? flp-ended(["moot",care[1]],memory) : flp-walk-from(req,ctx,append(memory,[care[1]]));
    let mooted = if ((String) r[0] == "moot") then print_str(flp-record-moot(req, r, lpr-source(opts))) else 0;

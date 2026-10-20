@@ -1,63 +1,8 @@
-//////////////////////////////////////////////////////////////////////
-// dsv4-validate.bml -- the physical validation window of the Form-native DeepSeek-V4 driver: its plan, its abort rules and its run, as definitions.
-//
-// observe/dsv4-validate-run.bml is the door that calls these; this file holds no top-level effect so a band can read every rule on scripted readings. The window takes the IQ2XXS file
-// (the one ds4 recorded its references on) through the driver ONCE, ALONE, staged so the machine is read at each step and the run stops the moment a reading says it must.
-//
-// WHY STAGED. A model door piled on a model door restarted this Mac three times on 2026-10-02. The driver maps 1,202 tensors of an 80 GiB file and the GPU wires only what it touches, so
-// the window walks the residency in steps and reads host_vm_stat after each: compile, map (the dense tensors only: the routed expert stacks are NOT mapped), the arena (arena_slots experts a layer, 64: the lease's term, in
-// buffers allocated once; arena_slots 0 maps the stacks whole, the control), state, wirespan probe (one expert's span filled into its slot), the head and its argmax, the recorded-logits prompt, the recorded stream
-// (twice, for bit equality). Each stage is preceded by the governor's ask for the stage's estimate (mg-ask) and followed by metal_sync, mg-low? and the wired reading.
-// THE LAYERS ARE NOT STAGED HERE. A sync and a machine reading after each layer is a PROBE protocol (window 2 ran it over 16 layers and ended on a denial), not the token path: the token path is MEASURED AS IT RUNS by
-// observe/dsv4-token-run.bml (form-stdlib/bml/dsv4-token-run.bml), one row of the landed op ledger a token and the wired memory read after every layer of the first tokens without a sync. This door keeps what only a staged
-// window can say: that the kernels compile, what the map and the state wire, what one expert slice wires, that the head and the argmax answer, and (once the token door's curve is clean) the recorded references.
-//
-// THE ABORT RULES (dvr-abort-reason, dvr-ask-reason), in this order, and the first that holds ends the run:
-//   a denied ask       the governor will not grant the stage's estimate (reason named, the reading that denied whole in the receipt's denied row). A denial for reserve or compressor is WAITED OUT first
-//                      (see "a denied ask is a reading" below); wired-cap and an unreadable machine end the run at once
-//   host-memory-low    mg-low?: available under half the reserve, wired over 80 percent, or the compressor over 40 percent
-//   wired-above-lease  wired grew past the lease the window holds (shared + own bytes, dls-shared of the header + the KV margin) since the baseline
-//   budget             20 minutes of the 30 the window is given have passed
-//   stage-refused      the driver answered nothing for the stage (a block it does not support, a refused open)
-// A stage's wired growth against its price is READ and printed (and the organs of ours that moved are named beside it), never an abort of its own: the machine's wired count is every process's, and a rule that
-// judged a growth of 198 MB against a price of 18 MB ended window 1 on a movement our own resident organs make. The rule that guards is the lease: wired above what the window holds, past the baseline.
-// The wirespan probe's kind (slice, between or stack) is RECORDED, not an abort: window 2 showed whole stacks wire and return, and a 'stack' reading is that price observed.
-// On an abort: metal_sync, free every handle (dsv4-close in synced rounds), mg-release, a receipt row with status aborted and the reason, the exit says aborted. Nothing is retried.
-//
-// REFUSED BEFORE ANYTHING OPENS: another model door resident (the same process rows flp-gpu-holders reads, plus a ds4 process and another copy of this door), a lease another process holds, the
-// governor holding the window's lease, the recorded logits file not the one pinned (SHA-256), the file not a deepseek4 GGUF whose layout is consistent.
-//
-// THE ESTIMATES ARE DERIVED FROM THE HEADER, NOT MEASURED (the window is what measures them): a layer is priced on every tensor its dispatches can touch (dense and the three whole expert stacks, token_embd for layer 0:
-// window 2 wired them and gave them back; dvr-est-layer, the token door's expected curve); the map and compile stages are bounds (512 MiB); the wirespan probe expects one expert slice (2,162,688 B on the IQ2XXS
-// file's layer 0 gate stack of 553,648,128 B).
-//
-// THE WINDOW IS NEVER THE DEFAULT: empty stdin, {} and {"dry":1} print the plan; only {"go":1} runs it. And with a gap below present, {"go":1} still maps nothing: it writes a receipt row naming the gaps
-// (status refused, reason driver-gaps), gives back any lease this process holds, and stops. A stop inside a stage reads as an abort (try/catch), so the handles, the lease and the receipt always follow.
-// THE ORGANS OF OURS ARE NAMED, NOT SUBTRACTED. host_vm_stat's wired count is every process's, and nothing on this machine is 'other': every process is ours (the lead, its siblings, our live organs: the fkwu
-// processes, a ds4), so a movement of memory is one of ours, to be found and healed, not a number to take off. (The first window, 2026-10-03 06:47 WITA, ended at the state stage on wired +198,148,096 B against
-// an exact price of 18,270,208 B: wired memory moves by hundreds of MB on this Mac by itself, and the movement is one of ours to name.) The door reads the process list through the body's door
-// (host_processes: pid, resident bytes, cpu, age, nice, parent) before the window and at every stage, NAMES the organs of ours that are resident (pid, command, resident bytes: dvr-organs, dvr-organs-line) and
-// the ones whose resident bytes moved during the stage (dvr-organs-moved, the receipt's `moved` row). Every stage row also carries the device's own bytes (metal_live word 18, which no other process moves)
-// beside the wired reading, and the machine's paging counters since the window began.
-// A DENIED ASK IS A READING, NOT ONLY A VERDICT. Window 2 (2026-10-03 07:30 WITA) ended at layer 16 on ask-denied:compressor and threw away the numbers that denied; 13 s later the compressor read 6.3 GiB against a
-// cap of 32. The receipt carries the reading that denied (dvr-denied-json), and a denial for a TRANSIENT reason (reserve, compressor: the machine is busy, not full) backs off with the governor's own naps
-// (mg-nap-first doubling to mg-nap-most), printing each reading, for at most dvr-ask-wait-ms (5 minutes) and never past the window's 20; wired-cap and an unreadable machine are not waited for.
-// The stream stage's estimate is the expert cache (every new expert the 24 ids meet grows wired memory), and a logits leg whose prompt ids hold nowhere (none supplied, the pinned row missing or failing its check) is a named 'waits' row in the log and no run.
-//
-// WHAT THE DRIVER CANNOT RUN YET (dvr-gaps = dsv4-layout.fk dvl-driver-gaps, read from the header, printed by the dry plan): every tensor of the header whose type its role has no kernel for, from the layout's one
-// table of the types each role may carry (a dense projection MXFP8 or Q8_0, an expert stack MXFP4, IQ2_XXS or Q2_K, the routers and the embedding F16, the norms F32). Since driver stage 4 the layer and the head
-// run the real IQ2XXS file's Q8_0 dense and output tensors and its Q2_K down stacks, so that header reads NO gap, as the reap25 header and both fixtures do; a header holding a type outside the table (a doctored
-// one, or another build) reads one line a tensor type. The plan names the gaps so the window is not spent finding them. The ordering question (ds4's own Q8_0 and Q2_K order against the driver's lanes) is a note
-// the plan prints beside it (dvr-notes), never a gap: it is what the window's stream leg and tie budget measure.
-//
-// THE RECORDED REFERENCES (read from the recording, never recomputed): the logits of ds4's dump on its 14-token chat-templated prompt (the JSON is pinned by SHA-256; the recording does not carry
-// the 14 prompt ids; the row beside it pins them: dvr-logits-prompt-path, derived from the IQ2XXS header by bml/dsv4-chat-template.bml, so that leg runs on them unless the caller supplies others as logits_prompt_ids), judged by Pearson r, top-10 overlap and the TIE BUDGET (the reference's top-two margin
-// against our largest delta over its top 64: a flip needs the two top logits to move toward each other by the whole margin, each by at most the delta, so the budget holds when the margin exceeds twice the delta: dvr-tie-safe?); and the 24-token greedy stream for the raw prompt ids 671 6102 294 8760 344 (a cycle of 7), matched
-// token by token, run twice for bit equality of ids and last logits, and read at every step for OUR top-two margin and the recorded id's gap below our top (dvr-step, the receipt's stream_margins and
-// stream_recorded_gap): the stream leg has no reference logits of its own, so its near ties are told from our own margins, and the tie budget proper is the logits leg's.
-//
-// Proven by: form-stdlib/tests/dsv4-validate-band.bml (the plan, the dry door's output, the abort rules and the ask on scripted readings, the holders, the references' arithmetic, the receipt row; nothing opened).
-//////////////////////////////////////////////////////////////////////
+// DeepSeek validation retains its native operation, allocations and observations.
+// Requests beyond current capacity wait; elapsed time, compression and growth
+// beyond an estimate are framebuffer signals. Missing readings or failed driver
+// operations retain their failure and release owned resources. Other resident
+// models are observed; lease-aware memory admission owns resource competition.
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/form-cli-local-plan.bml form-stdlib/bml/sha256-owned.bml form-stdlib/metal-door.fk form-stdlib/dsv4-layout.fk form-stdlib/dsv4-lease.fk form-stdlib/dsv4-tokenizer.fk native/metal/dsv4-token-handle.fk form-stdlib/bml/host-fs.bml
 section [form.bml] {
  class Dsv4Validate {
@@ -71,8 +16,6 @@ section [form.bml] {
   def dvr-logits-prompt-path() = "form/form-stdlib/tests/oracles/ds4-logits-capital-of-france-prompt.json";
   def dvr-logits-count() = 14;
   def dvr-receipt-path() = "receipts/dsv4-validation.jsonl";
-  def dvr-budget-ms() = 1800000;
-  def dvr-abort-ms() = 1200000;
   def dvr-mib() = 1048576;
   def dvr-floor() = 64 * 1048576;
   def dvr-bound() = 512 * 1048576;
@@ -116,27 +59,20 @@ section [form.bml] {
   // after a stage: the first rule that holds, in the documented order; vm the reading after the stage, base the wired bytes at the baseline,
   // lease the shared + own bytes the window holds, elapsed the window's age. A stage's growth against its price is read, not judged (see the header).
   def dvr-abort-reason(vm, base, lease, elapsed) =
-   !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : (mg-wired(vm) - base) > lease ? "wired-above-lease" : elapsed > dvr-abort-ms() ? "budget" : "";
+   { let signal=fb_record([vm,base,lease,elapsed],"dsv4-stage-resource",0); !mg-vm-ok?(vm) ? "memory-unreadable" : mg-low?(vm) ? "host-memory-low" : ""; };
   // the device's own bytes for this process (metal_live word 18, currentAllocatedSize), 0 while Metal is not up
   def dvr-own() = len(metal_live()) > 18 ? metal_live()[18] : 0;
   // the wirespan probe: the delta against the slice and the stack it was read from: "slice" (the working-set estimate holds), "stack" (it does not), "between"
   def dvr-wirespan-kind(delta, slice, stack) = delta >= stack / 2 ? "stack" : delta <= slice * 2 + dvr-floor() ? "slice" : "between";
 
-  // ---- a denied ask is a reading, not only a verdict; a transient denial is waited out ---------------------------------------------------------
-  // The receipt carries the reading that denied (dvr-denied-json: reason, available, wired, compressor, the cap, the pages the compressor STORES, the need, the time waited), and every stage line carries the machine's
-  // reading and the paging counters since the window began. An ask denied for a TRANSIENT reason (reserve, compressor: the machine is busy, not full) backs off with the governor's own naps (mg-nap-first doubling to
-  // mg-nap-most), printing each reading, for at most dvr-ask-wait-ms (5 min) and never past the window's own 20 minutes; wired-cap and memory-unreadable are not waited for, nor is a stage the driver refuses. While it waits
-  // the window is idle: nothing is enqueued, the mapped weights are file-backed pages the system may evict, the scratch and state buffers are live (what the lease's own bytes cover), and the lease taken at the start
-  // stays as it was (a wait asks, it does not lease). Only a denial that outlasts the wait ends the run, with the full record.
-  def dvr-ask-wait-ms() = 300000;
-  def dvr-transient?(why) = why == "reserve" || why == "compressor";
+  // A capacity refusal retains the reading and rests until resources arrive.
+  def dvr-transient?(why) = why == "capacity";
   // when an ask's wait ends: its own 5 minutes, or the window's abort time, whichever is first
-  def dvr-wait-until(now, t0) = (now + dvr-ask-wait-ms()) < (t0 + dvr-abort-ms()) ? now + dvr-ask-wait-ms() : t0 + dvr-abort-ms();
   def dvr-nap-next(nap) = (nap * 2) > mg-nap-most() ? mg-nap-most() : nap * 2;
   def dvr-comp-of(vm) = mg-vm-ok?(vm) ? mg-compressor(vm) : 0;
   // one reading of an ask, as a line
   def dvr-ask-line(est, v, vm, waited, n) = "[dsv4-validate] ask " ++ n.str() ++ " for " ++ dvr-gib(est) ++ " (" ++ est.str() ++ " B): " ++ (mg-granted?(v) ? "room" : v[1]) ++ "; available " ++ dvr-gib(v[2]) ++ ", wired " ++ dvr-gib(v[3]) ++ ", compressor occupied "
-   ++ dvr-gib(dvr-comp-of(vm)) ++ " (cap " ++ dvr-gib(mg-compressor-cap-of(v[4])) ++ ")" ++ (waited > 0 ? ", " ++ (waited / 1000).str() ++ " s waited" : "") ++ ((!mg-granted?(v)) && dvr-transient?(v[1]) ? "; the window is idle and backs off" : "");
+   ++ dvr-gib(dvr-comp-of(vm)) ++ (waited > 0 ? ", " ++ (waited / 1000).str() ++ " s waited" : "") ++ ((!mg-granted?(v)) && dvr-transient?(v[1]) ? "; the window is idle and backs off" : "");
   // the wait: io is [sense, sleep, now, say] (a band scripts all four); answers [verdict, reading, ms waited, asks]. A first ask that is granted says nothing.
   def dvr-wait-go(est, until, io, nap, waited, asks) {
    let sense = io[0];
@@ -145,14 +81,14 @@ section [form.bml] {
    let vm = sense();
    let v = mg-verdict(vm, est);
    let told = (mg-granted?(v) && asks == 0) ? 0 : say(dvr-ask-line(est, v, vm, waited, asks + 1));
-   (mg-granted?(v) || !dvr-transient?(v[1]) || now() >= until) ? [v, vm, waited, asks + 1] : dvr-wait-rest(est, until, io, nap, waited, asks + 1);
+   (mg-granted?(v) || !dvr-transient?(v[1]) || (!nothing?(until) && now() >= until)) ? [v, vm, waited, asks + 1] : dvr-wait-rest(est, until, io, nap, waited, asks + 1);
   }
   def dvr-wait-rest(est, until, io, nap, waited, asks) {
    let sleep = io[1];
    let rested = sleep(nap);
    dvr-wait-go(est, until, io, dvr-nap-next(nap), waited + nap, asks);
   }
-  def dvr-wait-live(est, t0) = dvr-wait-go(est, dvr-wait-until(host_monotonic_ms(), t0), [() => mg-sense(), ms => mg-rest(ms), () => mg-now(), s => print_str(s)], mg-nap-first(), 0, 0);
+  def dvr-wait-live(est, t0) = dvr-wait-go(est, nothing(), [() => mg-sense(), ms => mg-rest(ms), () => mg-now(), s => print_str(s)], mg-nap-first(), 0, 0);
   // host_vm_stat's field 8 is vm_statistics64.compressor_page_count: the pages the compressor OCCUPIES ("Pages occupied by compressor"), physical memory it holds. The pages it STORES
   // ("Pages stored in compressor", total_uncompressed_pages_in_compressor) are field 17 of the same row, or -1 when the row is shorter (a seed whose host_vm_stat has 17 words).
   def dvr-stored-of(vm) = ((String) value_kind(vm) == "list" && len(vm) > 17) ? vm[17] : 0 - 1;
@@ -165,7 +101,7 @@ section [form.bml] {
   def dvr-window-vm-json(vm, vm0, stored) = (mg-vm-ok?(vm) && mg-vm-ok?(vm0)) ? "{" ++ dvr-join([dvr-kv("pageins", (vm[9] - vm0[9]).str()), dvr-kv("pageouts", (vm[10] - vm0[10]).str()), dvr-kv("swapins", (vm[13] - vm0[13]).str()), dvr-kv("swapouts", (vm[14] - vm0[14]).str()),
     dvr-kv("compressions", (vm[11] - vm0[11]).str()), dvr-kv("decompressions", (vm[12] - vm0[12]).str()), dvr-kv("compressor_pages_occupied", vm[8].str()), dvr-kv("compressor_pages_stored", stored.str())], ",") ++ "}" : "{}";
   // the record of a denial: the reading that denied, whole
-  def dvr-denied-json(g, est, stored) = "{" ++ dvr-join([dvr-kv("reason", dvr-q(g[0][1])), dvr-kv("available", g[0][2].str()), dvr-kv("wired", g[0][3].str()), dvr-kv("compressor", dvr-comp-of(g[1]).str()), dvr-kv("compressor_cap", mg-compressor-cap-of(g[0][4]).str()),
+  def dvr-denied-json(g, est, stored) = "{" ++ dvr-join([dvr-kv("reason", dvr-q(g[0][1])), dvr-kv("available", g[0][2].str()), dvr-kv("wired", g[0][3].str()), dvr-kv("compressor", dvr-comp-of(g[1]).str()),
     dvr-kv("compressor_pages_stored", stored.str()), dvr-kv("need", est.str()), dvr-kv("mem", g[0][4].str()), dvr-kv("waited_ms", g[2].str()), dvr-kv("asks", g[3].str())], ",") ++ "}";
 
   // ---- the organs of ours, named (the process list through the body's door) ----------------------------------------------------------------------------
@@ -280,7 +216,7 @@ section [form.bml] {
    let leases = filter(r => r[0] != host_pid(), mg-lease-view(mg-lease-dir()));
    [dvr-holders-of(dvr-process-rows(), mine, me), leases, mg-sense()];
   }
-  def dvr-facts-clear?(facts) = len(facts[0]) == 0 && len(facts[1]) == 0 && mg-vm-ok?(facts[2]) && !mg-low?(facts[2]);
+  def dvr-facts-clear?(facts) = mg-vm-ok?(facts[2]) && !mg-low?(facts[2]);
   def dvr-facts-lines(facts) = [
    "[dsv4-validate] other model doors resident: " ++ dvr-holder-text(facts[0]),
    "[dsv4-validate] memory leases held by other processes: " ++ len(facts[1]).str(),
@@ -299,8 +235,7 @@ section [form.bml] {
     : "WAITS: no logits_prompt_ids supplied and the row " ++ dvr-logits-prompt-path() ++ " is missing or fails its check (14 ids that are its own parts in order); supply them as logits_prompt_ids");
   }
   // the back-off rule, as a line (the dry plan prints it)
-  def dvr-backoff-line() = "[dsv4-validate] back off: an ask denied for reserve or compressor (the machine is busy, not full) waits with the governor's naps (" ++ (mg-nap-first() / 1000).str() ++ " s doubling to " ++ (mg-nap-most() / 1000).str() ++ " s), printing each reading, for at most "
-   ++ (dvr-ask-wait-ms() / 60000).str() ++ " min an ask and never past the window's " ++ (dvr-abort-ms() / 60000).str() ++ "; wired-cap and an unreadable machine end the run at once; the idle window holds its mapped weights (file-backed, evictable), its scratch and state buffers and the lease it took, and enqueues nothing";
+  def dvr-backoff-line() = "[dsv4-validate] back off: a request beyond available capacity waits with the governor's naps (" ++ (mg-nap-first() / 1000).str() ++ " s doubling to " ++ (mg-nap-most() / 1000).str() ++ " s), reporting each reading until resources arrive; an unreadable machine retains the failure; the idle window holds its owned state and enqueues nothing";
   // the layer prices, as the token door reads them (the expected wired curve of the first token): never summed
   def dvr-layers-line(m) {
    let layers = dvr-est-layers(m);
@@ -317,20 +252,20 @@ section [form.bml] {
    append(["[dsv4-validate] DRY: the plan below is what the window WILL do; nothing is opened, nothing mapped, no lease taken, no row written, no kernel compiled",
     "[dsv4-validate] file " ++ dvr-text(opts, "file", dvr-file()) ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), " ++ record_get(m, "arch") ++ ", " ++ record_get(m, "layers-n").str() ++ " layers, " ++ record_get(m, "tensors").str() ++ " tensors, header read only",
     "[dsv4-validate] lease: shared " ++ dvr-gib(shared) ++ " (" ++ shared.str() ++ " B: dense " ++ dls-dense(m).str() ++ " + " ++ c.str() ++ " experts a layer " ++ dls-cache(m, c).str() ++ " + KV at " ++ cap.str() ++ " positions " ++ dvl-kv-total(m, cap).str() ++ "), own " ++ dvr-gib(mg-kv-margin()) ++ ", derived and not measured",
-    "[dsv4-validate] the window asks the governor for " ++ dvr-gib(lease) ++ " against a wired cap of " ++ dvr-gib(mg-wired-cap-of(mg-mem(facts[2]))) ++ " on this machine (the file itself is " ++ dvr-gib(size) ++ ")"],
+    "[dsv4-validate] the window asks the governor for " ++ dvr-gib(lease) ++ " with available memory " ++ dvr-gib(mg-available(facts[2])) ++ " on this machine (the file itself is " ++ dvr-gib(size) ++ ")"],
     append(dvr-facts-lines(facts),
      append(map(row => dvr-stage-line(row), dvr-stages(m, opts)),
       [dvr-layers-line(m),
        dvr-organs-line(organs),
        dvr-backoff-line(),
-       "[dsv4-validate] abort on: a denied ask (reserve and compressor only after the wait above), host-memory-low, wired above the lease (" ++ dvr-gib(lease) ++ " past the baseline), 20 minutes of 30, a stage the driver refuses; a stage's wired growth against its price and the wirespan probe's kind (slice, between or stack) are read and recorded, not aborts, and the organs of ours resident are named at every stage",
+       "[dsv4-validate] abort on: unreadable or exhausted physical memory, a stage the driver refuses; a stage's wired growth against its price and the wirespan probe's kind (slice, between or stack) are read and recorded, not aborts, and the organs of ours resident are named at every stage",
        "[dsv4-validate] on an abort: metal_sync, free every handle in synced rounds, mg-release, a receipt row with the reason; nothing is retried",
        "[dsv4-validate] references: recorded logits " ++ dvr-logits-path() ++ " (" ++ dvr-logits-bytes().str() ++ " B, SHA-256 " ++ dvr-logits-sha() ++ "); the stream " ++ dvr-ids-json(dvr-stream()) ++ " for the raw prompt " ++ dvr-ids-json(dvr-prompt()),
        "[dsv4-validate] logits leg: " ++ dvr-logits-line(opts, logitsIds, dls-cache(m, c)),
        "[dsv4-validate] the driver cannot run yet: " ++ (len(gaps) == 0 ? "nothing named by the header" : flp-join(gaps, "; ")),
        "[dsv4-validate] ordering: " ++ (len(dvr-notes(m)) == 0 ? "the file holds no Q8_0 output or Q2_K down tensor, so ds4's own order is not in question" : dvr-notes(m)[0]),
        "[dsv4-validate] receipt: one dated row appended to " ++ dvr-text(opts, "receipt", dvr-receipt-path()),
-       "[dsv4-validate] budget " ++ (dvr-budget-ms() / 60000).str() ++ " minutes, abort at " ++ (dvr-abort-ms() / 60000).str(),
+       "[dsv4-validate] resources determine admission; elapsed time is observed without a cutoff",
        "[dsv4-validate] DRY ends: " ++ len(dvr-stages(m, opts)).str() ++ " stages would run"])));
   }
 

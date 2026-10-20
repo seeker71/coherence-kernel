@@ -6,6 +6,8 @@ import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
 import control/offer-ack-core.fk;
 import form-stdlib/bml/rented-work.bml;
+import form-stdlib/bml/form-cli-local-plan.bml;
+import form-stdlib/bml/form-cli-task-runtime.bml;
 section [form.bml] {
  class FormCliTask {
   def fct-string(obj,key) = fat-wire-string?(json-object-get(obj,key)) ? json-string-value(json-object-get(obj,key)) : "";
@@ -25,19 +27,18 @@ section [form.bml] {
    fct-string(row,"request")==fct-string(gap,"request") && fct-string(row,"plan_id")==fct-string(gap,"id") && fct-string(row,"verdict")=="verified" ? row : held;
   },json-node-object([]),split-on(read_file(".hearth/local-plans/ledger.jsonl") ?? "","\n"));
   def fct-plan-candidate(gap) {
-   let row=fct-plan-row(gap); let scratch=fct-string(row,"scratch");
-   scratch=="" ? "" : {
-    let paths=json-array-elements(json-object-get(gap,"writable")) |> map(json-string-value);
-    len(paths)!=1 ? "" : fct-plan-candidate-at(gap,".hearth/local-plans/scratch/" + scratch,paths[0]);
+   let row=fct-plan-row(gap);
+   let referencePath=fct-string(gap,"plan_reference_reply");
+   let retained=referencePath != "" ? referencePath : fct-string(row,"reference_reply") != "" ? fct-string(row,"reference_reply") : fct-string(row,"reply");
+   let parsed=flp-parse(read_file(retained) ?? "");
+   parsed[0]!="" ? nothing() : {
+    let plan=parsed[2];let paths=json-array-elements(json-object-get(gap,"writable")) |> map(json-string-value);
+    let owned=flp-p-writable(plan)==paths && flp-p-defs(plan)==flp-defs-of(gap,paths) && flp-p-band(plan)==fct-string(gap,"band") && flp-p-full(plan)==json-int-value(json-object-get(gap,"full")) && value_eq(flp-p-checks(plan),json-object-get(gap,"checks")) && flp-p-text(plan)==read_file(fct-string(gap,"band"));
+    !owned ? nothing() : {
+     let texts=paths |> map(path=>[path,flp-standing(plan,path,(text,definition,bml)=>flp-ref-def(text,definition,bml,flp-p-reference(plan)))]);
+     any?(pair=>nothing?(pair[1]),texts) ? nothing() : json-node-array(texts |> map(pair=>json-node-object([fct-pair("path",pair[0]),fct-pair("text",pair[1]),fct-pair("reference",flp-p-reference(plan))])));
+    };
    };
-  }
-  def fct-plan-candidate-at(gap,root,path) {
-   let candidate=root + "/reference/" + path;
-   let original=root + "/today/" + path;
-   let band=fct-string(gap,"band");
-   let docs=[[path,path,read_file(candidate) ?? ""]] + (json-array-elements(json-object-get(gap,"sources")) |> map(json-string-value) |> map(p=>[p,p,read_file(p) ?? ""]));
-   let checks=json-array-elements(json-object-get(gap,"checks"));
-   file_size(candidate)>=0 && read_file(original)==read_file(path) && read_file(root + "/reference/" + band)==read_file(band) && !any?(check=>!fccw-eval(check,docs)[0],checks) ? candidate : "";
   }
   // Native callers keep complete planning and execution cell records, including
   // its typed value, diagnostics and stop. Rendering belongs to the terminal.
@@ -68,7 +69,7 @@ section [form.bml] {
   def fct-completed(gap,io) {
    let id=fct-string(gap,"id");
    let rows=filter(line=>len(trim(line))>0,split-on(read_file("receipts/native-turn-ledger.jsonl") ?? "","\n")) |> map(line=>parse-json("owned-publication",line));
-   let published=id != "" && any?(row=>fct-string(row,"gap")==id && json-int-value(json-object-get(row,"published"))==1 && json-int-value(json-object-get(row,"band_green"))==1,rows);
+   let published=id != "" && any?(row=>fct-string(row,"gap")==id && json-int-value(json-object-get(row,"published"))>0 && json-int-value(json-object-get(row,"band_green"))==1,rows);
    !published ? false : {
     let band=hch-cell-observe(io,"completion",cell_call(fct-string(gap,"band"),nothing(),nothing()));
     let paths=json-array-elements(json-object-get(gap,"writable")) + json-array-elements(json-object-get(gap,"sources"));
@@ -100,9 +101,10 @@ section [form.bml] {
    let work=session == "" ? nothing() : rw-read(session);
    let meter=nothing?(work) ? nothing() : rw-close(rw-save(rw-step(work,ru-read(work[2]),"work")));
    let band=fct-string(gap,"band");
+   let owned=fctrt-owned(json-array-elements(json-object-get(gap,"writable")) |> map(json-string-value),band);
    let extra=(fat-starts(band,".hearth/") ? [] : [json-node-string(band)]) + json-array-elements(json-object-get(publication,"paths"));
    let body=fct-string(publication,"body");
-   let request=json-node-object([fct-pair("owner",id),fct-pair("subject",fct-string(publication,"subject") == "" ? "Form task " + id : fct-string(publication,"subject")),fct-pair("body",body != "" ? body : goal == "" ? fct-string(gap,"goal") : goal),json-node-pair("paths",json-node-array(json-array-elements(json-object-get(gap,"writable")) + extra + (session == "" ? [] : [json-node-string(rw-ledger())]))),json-node-pair("task",gap),json-node-pair("main",json-node-int(1)),json-node-pair("rented_usage",nothing?(meter) ? json-node-null() : jv-materialize(rw-measure(meter)))]);
+   let request=json-node-object([fct-pair("owner",id),fct-pair("subject",fct-string(publication,"subject") == "" ? "Form task " + id : fct-string(publication,"subject")),fct-pair("body",body != "" ? body : goal == "" ? fct-string(gap,"goal") : goal),json-node-pair("paths",json-node-array((owned |> map(json-node-string)) + extra + (session == "" ? [] : [json-node-string(rw-ledger())]))),json-node-pair("task",gap),json-node-pair("main",json-node-int(1)),json-node-pair("rented_usage",nothing?(meter) ? json-node-null() : jv-materialize(rw-measure(meter)))]);
    let landed=hch-cell-observe(id,"publication",cell_call("observe/land-run.bml",request,nothing()));
    let receipt=record_get(landed,"value");
    let native=value_kind(receipt) == "node_id" && node_eq(node_category(receipt),bp("form-native-publication-v1"));
@@ -112,7 +114,8 @@ section [form.bml] {
   }
   def fct-run(goal,paths) {
    let id=fct-id(goal); let io=".hearth/tasks/" + id;
-   fct-completed(fct-queued(id),io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing(),nothing()) : fct-plan-run(goal,paths,id,io);
+   let queued=fct-queued(id);
+   fct-completed(queued,io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing(),nothing()) : fct-string(queued,"id")!="" ? fct-resume(id) : fct-plan-run(goal,paths,id,io);
   }
   def fct-plan-run(goal,paths,id,io) {
    let plan=hch-cell-observe(io,"plan",cell_call("observe/local-plan-run.bml",fct-request(goal,paths),nothing()));
