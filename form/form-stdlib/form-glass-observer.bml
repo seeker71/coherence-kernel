@@ -92,6 +92,13 @@ section [form.bml] {
         def fgo-unavailable(domain, id, label, unit, plane, missingDoor, channel, reason) {
             fgo-metric(domain, id, label, "absent", 0, "", 0, unit, 0, 0, 0, -1, plane, "unavailable", missingDoor, "unknown", channel, reason);
         }
+        // An inspected source can establish that an event does not exist yet.
+        // Retain that answer and its clock without inventing a numeric zero.
+        def fgo-absent(domain, id, label, unit, plane, source, channel, reason) {
+            fgo-metric(domain, id, label, "absent", 0, "", 0, unit, 0, 0, 0, 0, plane, "absent", source, "inactive", channel, reason);
+        }
+        def fgo-absent?(row) = (String) fgo-evidence(row) == "absent";
+        def fgo-missing?(row) = !fgo-present?(row) && !fgo-absent?(row);
         // A gauge nobody asked for and a gauge that was asked and answered
         // nothing are different absences.  This row is the second one: the door
         // that was tried stands in `source`, and what that door said stands at
@@ -130,17 +137,17 @@ section [form.bml] {
             let source = fgo-source-node(row);
             if nothing?(source) then base else append(base, [source]);
         }
-        def fgo-observe-row(row, observedEpoch, sequence) = if ((Comparable) fgo-present?(row) == 0) then fgo-row-at(row, -1, -1, sequence) else fgo-row-at(row, 0, observedEpoch, sequence);
+        def fgo-observe-row(row, observedEpoch, sequence) = if fgo-missing?(row) then fgo-row-at(row, -1, -1, sequence) else fgo-row-at(row, 0, observedEpoch, sequence);
         // the same row under another truth: the frame it was read from fell silent, or its gauge is consumed by
         // another reader. The value and its observation stay as they were; evidence and lifecycle name the state,
         // so a lane fed by this row renders the state instead of a confident number.
         def fgo-row-with-truth(row, evidence, lifecycle) {
-            let base = ["form-glass-metric-v2", fgo-domain(row), fgo-id(row), fgo-label(row), fgo-value-kind(row), fgo-int-value(row), fgo-text-value(row), fgo-present?(row), fgo-unit(row), fgo-capacity(row), fgo-capacity-present?(row), fgo-heat(row), fgo-age(row), fgo-plane(row), evidence, fgo-source(row), lifecycle, fgo-channel(row), fgo-note(row), fgo-projection-node(row), fgo-observed-epoch(row), fgo-observation-sequence(row)];
+            let base = ["form-glass-metric-v2", fgo-domain(row), fgo-id(row), fgo-label(row), fgo-value-kind(row), fgo-int-value(row), fgo-text-value(row), fgo-present?(row), fgo-unit(row), fgo-capacity(row), fgo-capacity-present?(row), fgo-heat(row), fgo-age(row), fgo-plane(row), fgo-absent?(row) ? "absent" : evidence, fgo-source(row), lifecycle, fgo-channel(row), fgo-note(row), fgo-projection-node(row), fgo-observed-epoch(row), fgo-observation-sequence(row)];
             if ((Comparable) fgo-source-nodeid-bound?(row) == 1) then append(base, [fgo-source-node(row)]) else base;
         }
         def fgo-rows-with-truth(rows, evidence, lifecycle) = if ((Comparable) len(rows) == 0) then [] else cons(fgo-row-with-truth(rows[0], evidence, lifecycle), fgo-rows-with-truth(rows[1:], evidence, lifecycle));
         def fgo-observe-rows(rows, observedEpoch, sequence) = if ((Comparable) len(rows) == 0) then [] else cons(fgo-observe-row(rows[0], observedEpoch, sequence), fgo-observe-rows(rows[1:], observedEpoch, sequence));
-        def fgo-age-at(row, epoch) = if ((Comparable) fgo-present?(row) == 0) then -1 else fgo-age-stamp(fgo-observed-epoch(row), epoch);
+        def fgo-age-at(row, epoch) = if fgo-missing?(row) then -1 else fgo-age-stamp(fgo-observed-epoch(row), epoch);
         def fgo-age-stamp(observed, epoch) = if (observed < 0) then -1 else if (epoch >= observed) then (epoch - observed) else -2;
         // Fresh local and unavailable rows already carry their exact age.
         // Retain those native values; only changed ages need a new record.
@@ -276,16 +283,18 @@ section [form.bml] {
         // ---- host disk: every IOBlockStorageDriver's cumulative statistics; a rate is the reader's own delta ----
         def fgo-disk-count-row(id, label, value, unit, note) = fgo-int("host", id, label, value, unit, 0, "disk", "physical-live", "IOBlockStorageDriver.Statistics", "live", "health", note);
         def fgo-disk-rows(disk) = if (len(disk) < 4) then [fgo-unavailable("host", "disk-bytes-read", "disk bytes read", "bytes", "disk", "IOBlockStorageDriver.Statistics", "health", "no block storage driver answered")] else [fgo-disk-count-row("disk-bytes-read", "disk bytes read", disk[0], "bytes", "cumulative since boot over every block storage driver"), fgo-disk-count-row("disk-bytes-written", "disk bytes written", disk[1], "bytes", "cumulative since boot over every block storage driver"), fgo-disk-count-row("disk-ops", "disk operations", (disk[2] + disk[3]), "ops", "reads + writes, cumulative since boot")];
+        def fgo-host-status-row(status, key, id, label, unit, plane, source, note) = fgo-int-or-unavailable("host", id, label, fgo-status-int(status, key), unit, 0, plane, "physical-live", source, "live", "health", note, "native platform carrier did not expose this host property");
+        def fgo-host-state-rows(status) = [fgo-host-status-row(status, "host_active_processors", "active-processors", "active CPU cores", "cores", "cpu-scheduler", "NSProcessInfo.activeProcessorCount", "current active core count; not a compute grant"), fgo-host-status-row(status, "host_thermal_state", "thermal-state", "host thermal state", "thermal-state", "host-state", "NSProcessInfo.thermalState", "0 nominal; 1 fair; 2 serious; 3 critical"), fgo-host-status-row(status, "host_low_power", "low-power", "host low power mode", "ready", "host-state", "NSProcessInfo.lowPowerModeEnabled", "current OS power mode; zero means disabled")];
         def fgo-host-rows(vm) {
             let free = fgo-host-free-percent(vm);
             let total = fgo-host-total-bytes(vm);
-            append([if nothing?(free) then fgo-unavailable("host", "memory-free", "host reclaimable headroom", "percent", "os-memory", "mach.host_statistics64.vm_statistics64", "health", "the Mach VM statistics door did not answer") else fgo-sized("host", "memory-free", "host reclaimable headroom", free, "percent", 100, (100 - free), "os-memory", "derived-window", "mach.host_statistics64: 100 - (wired+active+compressor)/memsize", "live", "health", "complement of active, wired and compressor storage; includes reclaimable pages, not literal free pages"), if nothing?(total) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "sysctl.hw.memsize", "health", "the memsize door did not answer") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "physical-live", "sysctl.hw.memsize", "live", "health", "system-wide physical bytes")], append(fgo-vm-byte-rows(vm), append(fgo-loadavg-rows(host_load_avg()), append(fgo-vmstat-rows(vm), fgo-disk-rows(host_disk_stat())))));
+            append([if nothing?(free) then fgo-unavailable("host", "memory-free", "host reclaimable headroom", "percent", "os-memory", "mach.host_statistics64.vm_statistics64", "health", "the Mach VM statistics door did not answer") else fgo-sized("host", "memory-free", "host reclaimable headroom", free, "percent", 100, (100 - free), "os-memory", "derived-window", "mach.host_statistics64: 100 - (wired+active+compressor)/memsize", "live", "health", "complement of active, wired and compressor storage; includes reclaimable pages, not literal free pages"), if nothing?(total) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "sysctl.hw.memsize", "health", "the memsize door did not answer") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "physical-live", "sysctl.hw.memsize", "live", "health", "system-wide physical bytes")], append(fgo-vm-byte-rows(vm), append(fgo-loadavg-rows(host_load_avg()), append(fgo-vmstat-rows(vm), append(fgo-disk-rows(host_disk_stat()), fgo-host-state-rows(metal_status()))))));
         }
         // ---- processes: libproc, no ps, no pgrep -- tuples (pid, rss bytes, cpu microseconds, elapsed seconds, nice, ppid); a figure the host did not tell is nothing, and so is a nice a short tuple lacks ----
         def fgo-processes-from(tuples, remaining) = if (((Comparable) len(tuples) == 0) || (remaining <= 0)) then [] else if (len(tuples[0]) < 4) then fgo-processes-from(tuples[1:], remaining) else cons(append(fgo-ps-process(tuples[0][0], tuples[0][1], tuples[0][2], tuples[0][3]), [if (len(tuples[0]) >= 5) then tuples[0][4] else nothing()]), fgo-processes-from(tuples[1:], (remaining - 1)));
         def fgo-fkwu-processes() = fgo-processes-from(host_processes("fkwu"), fgo-ps-max-processes());
         def fgo-process-by-pid(processes, pid) = if ((Comparable) len(processes) == 0) then [] else if ((Comparable) fgo-ps-pid(processes[0]) == pid) then processes[0] else fgo-process-by-pid(processes[1:], pid);
-        def fgo-process-read(pid) = fgo-process-by-pid(fgo-fkwu-processes(), pid);
+        def fgo-process-read(pid) = fgo-process-by-pid(fgo-processes-from(filter(row => len(row) >= 4 && row[0] == pid, host_processes("fkwu")), 1), pid);
         def fgo-process-metrics(process) {
             let processLabel = ("fkwu " + fgo-ps-pid(process).str());
             let rss = fgo-int-or-unavailable("process", fgo-process-id(process, "rss"), (processLabel + " RSS"), fgo-ps-rss-bytes(process), "bytes", fgo-ps-rss-bytes(process), "os-memory", "physical-live", "libproc.proc_pidinfo.task.resident_size", "live", "process", "resident bytes of one fkwu process", "the host withheld this process's task info");
@@ -391,11 +400,12 @@ section [form.bml] {
         def fgo-snapshot(root) {
             let epoch = now_unix_ms();
             let events = framebuffer-events();
+            let status = metal_status();
             let metal = metal_live();
             let vm = host_vm_stat();
             let kernelRows = fgo-kernel-rows();
             let framebufferRows = fgo-framebuffer-rows(events);
-            let metalRows = fgo-metal-rows(metal, metal_status());
+            let metalRows = fgo-metal-rows(metal, status);
             let hostRows = fgo-host-rows(vm);
             let processRows = fgo-live-process-rows();
             let heatRows = fgo-primitive-heat();

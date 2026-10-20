@@ -1543,13 +1543,19 @@ long long fk_metal_fence_wait_external(long long fence) {
 // learn that the door is real before it believes a number that came through it.
 long long fk_metal_status_external(char *out, long long cap) {
     @autoreleasepool {
+        NSProcessInfo *host = [NSProcessInfo processInfo];
+        NSString *hostState = [NSString stringWithFormat:
+            @"host_active_processors=%lu\nhost_thermal_state=%ld\nhost_low_power=%d\n",
+            (unsigned long)host.activeProcessorCount, (long)host.thermalState,
+            (int)host.lowPowerModeEnabled];
         NSString *err = nil;
         if (!fk_metal_up(&err)) {
             return fk_emit(out, cap, [NSString stringWithFormat:
-                @"metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=false\nmetal_door=handle\nlast_error=%@\n", err]);
+                @"metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=false\nmetal_door=handle\nlast_error=%@\n%@", err, hostState]);
         }
         NSMutableString *r = [NSMutableString string];
         [r appendString:@"metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=true\nmetal_door=handle\n"];
+        [r appendString:hostState];
         [r appendFormat:@"device=%@\nunified_memory=%d\n", [fk_dev name], (int)[fk_dev hasUnifiedMemory]];
         [r appendFormat:@"metal_jit_target=%llu|%@|FMJ1\n",
             (unsigned long long)[fk_dev registryID], [NSProcessInfo processInfo].operatingSystemVersionString];
@@ -1565,6 +1571,16 @@ long long fk_metal_status_external(char *out, long long cap) {
         [r appendFormat:@"buffers=%lld\npipelines=%lld\n",
             (long long)[fk_buf_objs count] - fk_free_top - fk_retired_slots,
             fk_live_pipelines()];
+        // Logical live handle views, not MTLDevice allocation or physical RSS.
+        // File mappings keep their own ledger and never become owned bytes.
+        unsigned long long ownedExtents = 0, mappedExtents = 0;
+        for (NSUInteger i = 0; i < [fk_buf_objs count]; i++) {
+            if (fk_buf_objs[i] == [NSNull null]) continue;
+            if (fk_buf_meta[i].nocopy) mappedExtents += fk_buf_meta[i].view_len;
+            else ownedExtents += fk_buf_meta[i].view_len;
+        }
+        [r appendFormat:@"owned_buffer_extents_bytes=%llu\nmapped_buffer_extents_bytes=%llu\n",
+            ownedExtents, mappedExtents];
         [r appendFormat:@"metal_jit_source_compiles=%lld\nmetal_jit_ram_hits=%lld\n"
             "metal_jit_archive_reads=%lld\nmetal_jit_archive_writes=%lld\n",
             fk_metal_jit_compiles, fk_metal_jit_ram_hits,

@@ -77,6 +77,8 @@ import form/form-stdlib/spool-bell-transport.fk;
 import form/form-stdlib/line-grammar.fk;
 import form/form-stdlib/bml/ear-worker-life.bml;
 import form/form-stdlib/born-under.bml;
+import form/form-stdlib/organ-care.bml;
+import form/form-stdlib/bml/form-core-care.bml;
 section [form.bml] {
     def fge-spool() = ".hearth/ear.spool";
     def fge-wanted() = ".hearth/ear.wanted";
@@ -106,11 +108,15 @@ section [form.bml] {
     // the frames the two lanes wrote since the last watermark; the newest of each kind is the point
     def fge-drain(mark, live, heard, said, ghost) = {
         let sz = file_size(fge-spool());
-        sz <= mark ? [mark, live, heard, said, ghost] : fge-drain-text(mark, live, heard, said, ghost, ea-text(read_file_slice(fge-spool(), mark, sz - mark)));
+        sz <= mark ? [mark, live, heard, said, ghost, 0] : fge-drain-text(mark, live, heard, said, ghost, ea-text(read_file_slice(fge-spool(), mark, sz - mark)));
     };
     def fge-drain-text(mark, live, heard, said, ghost, text) = {
         let th = ea-through(text, 0, 0);
-        (Comparable) th == 0 ? [mark, live, heard, said, ghost] : fge-drain-newest(mark, th, ea-newest(ea-frames(substring(text, 0, th), 0, []), live, heard, said, ghost));
+        (Comparable) th == 0 ? [mark, live, heard, said, ghost, 0] : {
+            let frames = ea-frames(substring(text,0,th),0,[]);
+            let captured = foldl((held,frame) => (String) ea-field(frame,"kind") == "capture" && ea-int(frame,"t") > held ? ea-int(frame,"t") : held,0,frames);
+            append(fge-drain-newest(mark,th,ea-newest(frames,live,heard,said,ghost)),[captured]);
+        };
     };
     def fge-drain-newest(mark, th, n) = [(Number) mark + (Number) th, n[0], n[1], n[2], n[3]];
     def fge-wanted-text() = file_size(fge-wanted()) < 0 ? "" : trim(ea-text(read_file(fge-wanted())));
@@ -228,11 +234,41 @@ section [form.bml] {
     // The carrier that started the ear is asked after at the watch's own cadence; once it is no longer the
     // ear's parent, the lanes go down and the ear ends (born-under.bml).
     def fge-orphaned?(watch, carrier) = now_unix_ms() - fge-watch-at(watch) < fge-probe-ms() ? 0 : (Comparable) bun-held?(carrier) == 1 ? 0 : 1;
-    def fge-step(mark, live, heard, said, ghost, livePid, tonguePid, sense, born, stands, watch, owner, transcripts, carrier) = !ewl-owned?(owner) || (Comparable) fge-orphaned?(watch, carrier) == 1 ? fge-lanes-down(livePid, tonguePid) : {
+    def fge-audio-captured?(live,heard,ghost,born,capturedAt) = capturedAt > born || (fge-stamp(live) > born && ea-member?(["quiet","capture","live","stable"],ea-field(live,"kind"))) || (fge-stamp(heard) > born && (String) ea-field(heard,"kind") == "heard") || (fge-stamp(ghost) > born && ea-phantom?(ghost));
+    def fge-care-open() {
+        let reader = ohc-open();
+        let view = occ-view-request-at(reader,json-node-object([json-node-pair("sources",json-node-array([json-node-string(HearthDir() + "/organ-health.jsonl")]))]));
+        let prior = filter(row => (String) jv-str(row,"organ") == "ear" && (String) jv-str(row,"flow") == "live-audio" && (String) jv-str(row,"aspect") == "capture",jv-items(jv-get(view,"signals")));
+        ohc-close(reader);
+        record_new(0,"signal",nil?(prior) || !ohv-unease(prior[0]) ? "" : jv-str(prior[0],"id"),"observed",0,"captured-at",0,"birth",0);
+    };
+    def fge-care-emit(context,stage,row) { oh-voice(row); oh-emit(HearthDir() + "/organ-health.jsonl",row); }
+    def fge-care-reobserve(context,reading,delivery) = form_error("microphone audio is supplied by the host, not an implicit provider");
+    def fge-audio-care(awake,live,heard,ghost,born,now,watch,livePid,care) {
+        let held = record_get(care,"signal") ?? "";
+        let observed = record_get(care,"birth") == born ? record_get(care,"observed") : 0;
+        let captured = fge-audio-captured?(live,heard,ghost,born,record_get(care,"captured-at"));
+        let waiting = awake && !captured && fge-stamp(live) > born && now - fge-stamp(live) >= fge-probe-ms() && fge-alive?(watch,livePid,"L") == 1;
+        let failed = waiting && (len(held) == 0 || !observed);
+        let healed = (len(held) > 0 || !observed) && (!awake || captured);
+        let reading = !failed && !healed ? nothing() : oh-reading("ear","live-audio","capture",json-node-string(awake ? "audio-frames" : "asleep"),json-node-string(failed ? "no-audio-frames" : awake ? "audio-frames" : "asleep"),json-node-int(!failed),failed ? [oh-need("host-microphone-audio",json-node-object([oh-n("pid",livePid),oh-s("observation","lane answers but has published no captured audio")]))] : [],failed ? ["await-host-audio","inspect-input-device"] : [],oh-reference(fge-spool()));
+        let correlated = len(held) > 0 && (failed || healed) ? oh-set(reading,"care_of",json-node-string(held)) : reading;
+        let fresh = healed && len(held) > 0 ? oh-set(oh-set(correlated,"responder",json-node-string("ear-sensor")),"care_delivery",json-node-object([oh-s("observed",awake ? "captured-audio" : "explicit-sleep")])) : correlated;
+        nothing?(fresh) ? 0 : fge-care-emit("microphone","organ-health",fresh);
+        failed ? oc-hear("microphone",fresh,[],fge-care-emit,fge-care-reobserve) : 0;
+        record_set(care,"signal",failed ? oh-str(fresh,"id") : healed ? "" : held);
+        record_set(care,"observed",failed || healed ? 1 : observed);
+        record_set(care,"birth",born);
+        waiting;
+    };
+    def fge-step(mark, live, heard, said, ghost, livePid, tonguePid, sense, born, stands, watch, owner, transcripts, carrier, care) = !ewl-owned?(owner) || (Comparable) fge-orphaned?(watch, carrier) == 1 ? fge-lanes-down(livePid, tonguePid) : {
         let awake = fge-awake?();
         let now = now_unix_ms();
         let w1 = fge-watch-next(watch, livePid, tonguePid, now);
-        let gone = fge-gone?(awake, livePid, tonguePid, live, heard, born, now, w1);
+        let d = (Comparable) awake == 1 ? fge-drain(mark, live, heard, said, ghost) : [mark, live, heard, said, ghost];
+        let capturedAt = len(d) > 5 && d[5] > record_get(care,"captured-at") ? record_set(care,"captured-at",d[5]) : 0;
+        let awaitingAudio = fge-audio-care(awake,d[1],d[2],d[4],born,now,w1,livePid,care);
+        let gone = awaitingAudio && fge-alive?(w1,tonguePid,"T") == 1 ? 0 : fge-gone?(awake, livePid, tonguePid, d[1], d[2], born, now, w1);
         let closed = (Comparable) awake == 1 ? (Comparable) gone == 1 ? fge-close(livePid) : 0 : fge-close(livePid);
         let released = fge-restand(gone, livePid, tonguePid);
         let resting = fge-resting?(awake, released[0], stands, born, fge-frame-t(live, heard), now);
@@ -241,15 +277,14 @@ section [form.bml] {
         let born1 = (Comparable) resting == 1 ? born : fge-born-next(released[0], born, now);
         let stands1 = (Comparable) resting == 1 ? stands : fge-stands-next(awake, released[0], stands);
         let lanes = ea-lanes(pids[0], pids[1], now - born1, stands1, fge-watch-voice(w1));
-        let d = (Comparable) awake == 1 ? fge-drain(mark, live, heard, said, ghost) : [mark, live, heard, said, ghost];
         let next = (Comparable) awake == 1 ? ea-sense-step(sense, d[1], d[2], d[3], awake) : sense;
         let freshText = (Comparable) awake == 1 ? etr-flow(transcripts, ea-transcript-rows(d[1], d[2], d[3], fge-wanted-text())) : [];
         let rows = (Comparable) awake == 1 ? append(fgo-observe-rows(ea-rows(next, d[1], d[2], d[3], fge-wanted-text(), 1, now, lanes, d[4]), now, 0), fgo-age-rows-at(freshText, now)) : fgo-observe-rows(ea-asleep-rows(lanes), now, 0);
         let given = fgsr-give-at("ear", now, rows, fge-cadence(awake));
         let rested = host_sleep_ms(fge-cadence(awake));
-        fge-step(d[0], d[1], d[2], d[3], d[4], pids[0], pids[1], next, born1, stands1, w1, owner, freshText, carrier);
+        fge-step(d[0], d[1], d[2], d[3], d[4], pids[0], pids[1], next, born1, stands1, w1, owner, freshText, carrier, care);
     };
     // the tables are walked once, here, before the first give
     let owner = ewl-token(host_pid(), now_unix_ms());
-    ewl-claim(owner) ? fge-step(0, "", "", "", "", 0, 0, ea-sense-born(), now_unix_ms(), 0, fge-watch(0, "", ""), owner, [], bun-parent()) : print("ear owner lease could not be written");
+    ewl-claim(owner) ? fge-step(0, "", "", "", "", 0, 0, ea-sense-born(), now_unix_ms(), 0, fge-watch(0, "", ""), owner, [], bun-parent(),fge-care-open()) : print("ear owner lease could not be written");
 }

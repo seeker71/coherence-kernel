@@ -4,12 +4,12 @@
 // frame's sequence (microseconds) and re-reads a frame that moved.
 //
 //   (the machine frame -- GPU level, CPU busy, 50 ms -- is observe/form-glass-machine-live.fk, never delayed by these forks)
-//   host     every 1500 ms  memory_pressure, sysctl loadavg, vm_stat, iostat
-//   process  every 1000 ms  pgrep + ps per fkwu
+//   host     every 1500 ms  native Mach, load, disk and platform state
+//   process  every 1000 ms  native libproc metrics per fkwu
 //   storage  every 5000 ms  the catalog: fs_list over the cache roots + file_size
 //   queue    every 250 ms   the hearth spools
-//   owner    every 1000 ms  the model owner process rows (ps on the owner pid from its live sample)
-//   governor every 1000 ms  the resource governor refreshes its own publication
+//   owner    every 1000 ms  native metrics for the published model owner pid
+//   governor every 1000 ms  resident cell; a failed source waits for a changed dependency
 //   census   every 10000 ms the kernel census as its organs speak it, each take settled against the one
 //                           before it (glass-census-rows.bml); the first tick gives nothing
 //
@@ -25,7 +25,12 @@ import form/form-stdlib/form-glass-sensor-rows.bml;
 import form/form-stdlib/born-under.bml;
 import form/form-stdlib/glass-census-rows.bml;
 import form/form-stdlib/bml/role-singleton.bml;
+import gate/drift-gates.bml;
+import form/form-stdlib/bml/form-core-care.bml;
+import form/form-stdlib/sort.fk;
+import form/form-stdlib/bml/model-admission.bml;
 section [form.bml] {
+    def FGSLGovernorSource() = "observe/form-resource-governor-glass-current-run.fk";
     def fgsl-due?(now, last, every) = last < 0 ? 1 : now - last >= every ? 1 : 0;
     def fgsl-give-rows(sensor, now, rows) = {
         fgsr-give(sensor, now, rows);
@@ -34,27 +39,119 @@ section [form.bml] {
     def fgsl-owner-rows(now, frame) = {
         let inventory = fgtm-inventory(FGLRoot());
         let samples = fgl-local-samples(fgl-dedupe-samples(append(fgl-jit-current-samples(), fgl-external-samples(fgl-inventory-samples-at(inventory, now)))), now);
-        fgl-owner-rows-at(0, [], samples, now);
+        append(fgl-owner-rows-at(0, [], samples, now),fgo-observe-rows(fgsl-session-owner-rows(),now,frame));
+    };
+    def fgsl-session-owner-rows() {
+        let notes = adm-observe-residents(adm-root());
+        nothing?(notes) ? [fgo-unavailable("model","session-owner-count","Admitted native model owners","owners","process-time","model-admission.resident","model","the admission registry could not be read")] : {
+            let current = filter(row => (String) row[1] == "live",notes);
+            let unbound = filter(row => (String) row[1] == "unbound",notes);
+            let scope = "Live PIDs bound to current admission notes; an admitted open may still be in progress. Direct Whisper and the optional dual token-flow seed use separate paths. This is not a decode-activity claim.";
+            let owners = map(row => fgo-text("model","session-owner." + row[0].str(),"Model owner PID " + row[0].str(),value_str(map(path => { let parts = split-on(path,"/"); parts[len(parts) - 1]; },row[2])),"process-time","derived-window","model-admission.note+host-process-lifetime","resident","model",scope + " note-written-ms=" + row[3].str() + " process-start-ms=" + row[4].str()),current);
+            let memory = map(row => { let process = fgo-process-read(row[0]); fgo-int-or-unavailable("process","session-owner." + row[0].str() + ".rss","Model PID " + row[0].str() + " RSS",fgo-ps-rss-bytes(process),"bytes",fgo-ps-rss-bytes(process),"os-memory","physical-live","host.processes","live","model","Process RSS, not model allocation; shared pages overlap across owners.","the host did not expose this owner's RSS"); },current);
+            append([fgo-int("model","session-owner-count","Admitted native model owners",len(current),"owners",len(current),"process-time","derived-window","model-admission.notes+host-process-lifetime",nil?(current) ? "empty" : "live","model",scope)],append(owners,append(memory,nil?(unbound) ? [] : [fgo-unavailable("model","session-owner-binding","Unbound model admission notes","owners","process-time","model-admission.note+host-process-lifetime","model",len(unbound).str() + " live PID notes could not be bound to this process lifetime")])));
+        };
+    };
+    def fgsl-governor-held(last) = (String) value_kind(last) == "list" ? last : fgsl-governor-retained(fgl-last-take("governor-care"));
+    def fgsl-governor-retained(held) = nothing?(held) || (String) value_kind(held) != "list" || len(held) != 4 ? [-1, "", 1, ""] : held;
+    def fgsl-care-emit(context, stage, reading) {
+        oh-voice(reading);
+        oh-emit(HearthDir() + "/organ-health.jsonl", reading);
+    };
+    def fgsl-governor-observe(context, reading, delivery) = form_error("governor source care has no implicit provider");
+    def fgsl-governor-signature() {
+        let closure = dg-close(dg-walk-units([FGSLGovernorSource(), "form/form-stdlib/bml-floor-compile.fk"], []));
+        let sources = map(path => { let bytes = read_file(path); [path, nothing?(bytes) ? nothing() : bml-source-fingerprint(bytes)]; }, closure);
+        value_str([sources, host_file_identity(fglu-carrier-source()), host_file_identity(fglu-carrier-artifact())]);
+    };
+    def fgsl-governor-result(now, prior, result) {
+        let good = record_get(result, "errors") == 0 && nothing?(record_get(result, "stopped")) && record_get(result, "value") == 0;
+        let evidence = good ? FGSLGovernorSource() : HearthDir() + "/glass-governor-" + host_pid().str() + "-" + now.str() + ".diagnostic";
+        let retained = good ? 0 : write_file_text(evidence, cs-stderr(result) + value_str(["value",record_get(result,"value"),"errors",record_get(result,"errors"),"stopped",record_get(result,"stopped")]));
+        let reading = oh-reading("resource-governor", "glass-sensor", "publication", json-node-string("published"), json-node-string(good ? "published" : "cell-refused"), json-node-int(good), good ? [] : [oh-need("governor-source-repair", json-node-object([oh-s("source", FGSLGovernorSource()), oh-s("diagnostic", evidence)]))], good ? [] : ["revise-source", "reobserve-after-source-change"], oh-reference(evidence));
+        let bound = len(prior[3]) == 0 ? reading : oh-set(reading, "care_of", json-node-string(prior[3]));
+        let correlated = good && prior[2] == 0 ? oh-set(oh-set(bound, "responder", json-node-string("glass-sensor")), "care_delivery", json-node-object([oh-s("source", FGSLGovernorSource())])) : bound;
+        let emitted = !good || prior[2] == 0 ? fgsl-care-emit(evidence, "organ-health", correlated) : 0;
+        let attention = good ? nothing() : oc-hear(evidence, correlated, [], fgsl-care-emit, fgsl-governor-observe);
+        let state = [now, good ? "" : fgsl-governor-signature(), good, good ? "" : oh-str(correlated, "id")];
+        let saved = fgl-last-give("governor-care", state);
+        state;
+    };
+    def fgsl-governor-step(now, last) {
+        let held = fgsl-governor-held(last);
+        !fgsl-due?(now, held[0], 1000) ? held : held[2] == 0 && (String) held[1] == fgsl-governor-signature() ? [now, held[1], held[2], held[3]] : {
+            let result = cell_call(FGSLGovernorSource(), nothing(), nothing());
+            fgsl-governor-result(now, held, result);
+        };
+    };
+    // Reuse the native care reducer and its retained cursors. Only public
+    // operational metadata crosses into Glass; diagnostics stay at the owner.
+    def fgsl-care-state(row) = (String) jv-str(row,"stage") == "applied" ? "applied; awaiting observation" : (String) jv-str(row,"stage") == "response" ? "response selected" : jv-has(row,"care_delivery") ? (ohv-unease(row) ? "reobserved needs care" : ohv-is-int(jv-get(row,"health"),1) ? "reobserved healthy" : "reobserved uncertain") : (String) jv-str(jv-get(row,"attention"),"state") == "unclaimed" ? "unclaimed resource" : ohv-unease(row) ? "observed needs care" : "observed healthy";
+    def fgsl-care-sample(row,now) {
+        let state = fgsl-care-state(row);
+        let at = jv-get(row,"at_ms");
+        let organ = jv-str(row,"organ");
+        let sample = fgtm-sample("care." + bml-source-fingerprint(ohv-key(row)),fgtm-absent(),"event","membrane",fgtm-label?(organ) ? organ : "organ-care","care","native-care-reading",fgtm-absent(),fgtm-absent(),"stored",fgtm-present(now),(Comparable) jv-kind(at) == 4 ? fgtm-present(jv-value(at)) : fgtm-absent(),fgtm-absent(),fgtm-absent(),"never","derived-window","organ-health.local",["events","care"]);
+        fgtm-with-cell(sample,fgsr-care-cell(ohv-frame-view(row),jv-str(row,"source_state"),jv-str(row,"source"),state));
+    };
+    def fgsl-care-window(now,allRows,shown,gaps) {
+        let omitted = len(allRows) - len(shown);
+        let coverage = fgtm-with-cell(fgtm-sample("care.coverage",fgtm-absent(),"event","membrane","glass-sensor","care-source",nil?(gaps) && omitted == 0 ? "source-caught-up" : "source-needs-work",fgtm-absent(),fgtm-present(omitted),nil?(gaps) && omitted == 0 ? "completed" : "unknown",fgtm-present(now),fgtm-present(now),fgtm-absent(),fgtm-absent(),"never","derived-window","organ-health.local",["events","care"]),cons(["outside-published-window",omitted],map(gap => [jv-str(gap,"state"),jv-str(gap,"resource")],gaps)));
+        cons(coverage,shown);
+    };
+    def fgsl-care-publish(now,allRows,shown,gaps) {
+        let result = fgtm-publish-snapshot(FGLRoot(),"glass.care",now,fgsl-care-window(now,allRows,shown,gaps));
+        (String) result[1] == "published" || nil?(shown) ? result : fgsl-care-publish(now,allRows,take(len(shown) / 2,shown),gaps);
+    };
+    def fgsl-care-step(now,owner) = !fgsl-due?(now,record_get(owner,"glass-last-care"),1000) ? 0 : {
+        let request = json-node-object([json-node-pair("sources",json-node-array([json-node-string(HearthDir() + "/organ-health.jsonl")]))]);
+        let view = occ-view-request-at(owner,request);
+        let rows = sort-by(map(row => fgsl-care-sample(row,now),jv-items(jv-get(view,"signals"))),sample => 0 - fgtm-field-value(fgtm-sample-write-epoch(sample)));
+        let gaps = jv-items(jv-get(view,"observation_gaps"));
+        let signature = bml-source-fingerprint(value_str(map(fgtm-sample-cell,rows)) + value_str(gaps));
+        let held = record_get(owner,"glass-care-held") ?? "";
+        let published = (String) held == signature ? nothing() : fgsl-care-publish(now,rows,take(FGTMMaxSamples() - 1,rows),gaps);
+        let failed = !nothing?(published) && (String) published[1] != "published";
+        let failureId = record_get(owner,"glass-care-failure") ?? "";
+        let reading = failed && len(failureId) == 0 ? oh-reading("glass","glass-sensor","care-publication",json-node-string("published"),json-node-string(published[1]),json-node-int(0),[oh-need("glass-care-frame",oh-reference(HearthDir() + "/organ-health.jsonl"))],["reobserve-after-source-change"],oh-reference(HearthDir() + "/organ-health.jsonl")) : !nothing?(published) && !failed && len(failureId) > 0 ? oh-set(oh-reading("glass","glass-sensor","care-publication",json-node-string("published"),json-node-string("published"),json-node-int(1),[],[],oh-reference(HearthDir() + "/organ-health.jsonl")),"care_of",json-node-string(failureId)) : nothing();
+        nothing?(reading) ? 0 : fgsl-care-emit("glass.care","organ-health",reading);
+        failed && len(failureId) == 0 ? oc-hear("glass.care",reading,[],fgsl-care-emit,fgsl-governor-observe) : 0;
+        record_set(owner,"glass-care-held",nothing?(published) || failed ? signature : "");
+        record_set(owner,"glass-care-failure",failed && len(failureId) == 0 ? oh-str(reading,"id") : nothing?(published) || failed ? failureId : "");
+        record_set(owner,"glass-last-care",now);
+        published;
     };
     // the census: the take due now, given as rows settled against the take before it; with none before it, nothing
     def fgsl-census-give(now, prev, take, frame) = (Comparable) len(prev) == 0 ? now : fgsl-give-rows("census", now, fgo-observe-rows(gcr-rows(prev, take), now, frame));
-    def fgsl-step(now, lastHost, lastProcess, lastStorage, lastQueue, lastGovernor, lastOwner, lastCensus, frame, heldHost, born, censusPrev) = (Comparable) fgl-cycle?(frame, 40) == 1 && (((Comparable) bun-held?(born) == 0) || rs-yield?("observe/form-glass-sensors-live.fk")) ? 0 : {
+    def fgsl-step(now, lastHost, lastProcess, lastStorage, lastQueue, lastGovernor, lastOwner, lastCensus, frame, heldHost, born, censusPrev, careOwner) = (Comparable) fgl-cycle?(frame, 40) == 1 && (((Comparable) bun-held?(born) == 0) || rs-yield?("observe/form-glass-sensors-live.fk")) ? 0 : {
         let hostDue = fgsl-due?(now, lastHost, 1500);
         let hostRows = (Comparable) hostDue == 1 ? fgl-observe-host-rows-with-delta(heldHost) : heldHost;
         let host = (Comparable) hostDue == 1 ? fgsl-give-rows("host", now, fgo-observe-rows(hostRows, now, frame)) : lastHost;
         let process = (Comparable) fgsl-due?(now, lastProcess, 1000) == 1 ? fgsl-give-rows("process", now, fgo-observe-rows(fgo-live-process-rows(), now, frame)) : lastProcess;
         let storage = (Comparable) fgsl-due?(now, lastStorage, 5000) == 1 ? fgsl-give-rows("storage", now, fgl-storage-rows-at(0, [], now)) : lastStorage;
         let queue = (Comparable) fgsl-due?(now, lastQueue, 250) == 1 ? fgsl-give-rows("queue", now, fgo-observe-rows(fgl-hearth-queue-observe(), now, frame)) : lastQueue;
-        let governor = (Comparable) fgsl-due?(now, lastGovernor, 1000) == 1 ? {
-            host_wait(host_spawn_quiet(["./fkwu", "observe/form-resource-governor-glass-current-run.fk"]));
-            now;
-        } : lastGovernor;
+        let governor = fgsl-governor-step(now, lastGovernor);
+        let care = fgsl-care-step(now, careOwner);
         let owner = (Comparable) fgsl-due?(now, lastOwner, 1000) == 1 ? fgsl-give-rows("owner", now, fgsl-owner-rows(now, frame)) : lastOwner;
         let censusDue = fgsl-due?(now, lastCensus, GCRCadenceMs());
         let censusTake = (Comparable) censusDue == 1 ? gcr-take() : censusPrev;
         let census = (Comparable) censusDue == 1 ? fgsl-census-give(now, censusPrev, censusTake, frame) : lastCensus;
         let rested = host_sleep_ms(50);
-        fgsl-step(now_unix_ms(), host, process, storage, queue, governor, owner, census, (Number) frame + (Number) 1, hostRows, born, censusTake);
+        fgsl-step(now_unix_ms(), host, process, storage, queue, governor, owner, census, (Number) frame + (Number) 1, hostRows, born, censusTake, careOwner);
     };
-    fgsl-step(now_unix_ms(), -1, -1, -1, -1, -1, -1, -1, 0, [], bun-parent(), []);
+    def fgsl-care-open() {
+        let owner = ohc-open();
+        record_set(owner,"glass-last-care",-1);
+        record_set(owner,"glass-care-held","");
+        record_set(owner,"glass-care-failure","");
+        owner;
+    };
+    def fgsl-run() {
+        let owner = fgsl-care-open();
+        let result = fgsl-step(now_unix_ms(), -1, -1, -1, -1, -1, -1, -1, 0, [], bun-parent(), [], owner);
+        ohc-close(owner);
+        result;
+    };
+    let entry = cell_path();
+    (String) entry == "observe/form-glass-sensors-live.fk" || (String) entry == host_cwd() + "/observe/form-glass-sensors-live.fk" ? fgsl-run() : 0;
 }
