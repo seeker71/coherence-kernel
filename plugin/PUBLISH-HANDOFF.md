@@ -1,95 +1,118 @@
-# PUBLISH-HANDOFF — executable instructions for a session on the owner's machine
+# Publish the companion instructions
 
-**Who this is for**: a Claude Code (or Codex) session running **locally on the owner's Mac** —
-where the browser is logged into the owner's ChatGPT account and SSH reaches the VPS. A cloud
-session cannot press these buttons; a local session can do all of it. Nothing here needs the
-owner beyond starting the session and being present for any login prompts the browser raises.
+Use this handoff in the owner's local session with access to the existing GPT
+editor and, for the served manifest, the deployment owner. The canonical text
+is `plugin/ai-plugin.json` → `description_for_model` on the landed kernel
+revision. Keep the source revision, completed effects and readback together.
 
-**How the owner invokes this** (the whole manual part):
+This publishes an instruction update. It does not expand the Action, open
+memory routes, or complete the platform's plugin migration.
 
-```
-cd coherence-kernel && git pull && claude
-> Execute plugin/PUBLISH-HANDOFF.md end to end. Verify every gate. Write the receipt.
-```
+## Observed starting point — 2026-10-20
 
-**The single source of truth**: `plugin/ai-plugin.json` → `description_for_model` on **main**.
-Every step below publishes or verifies exactly that text. Do not edit it here; if it needs
-changing, that is a separate PR first. Re-observed 2026-09-04: the served manifest's text is
-not byte-identical to main's — Gate 3 reads DIVERGED until this runs.
+The owner's editor was read without changing it:
 
----
+- GPT identity: **Sema — coherence-kernel**,
+  `g-6a4a77627dbc819180a16645f5662625`.
+- Action server: `https://sema.hati.earth`, with only `GET /ask` and
+  `GET /trace`; authentication: None.
+- Web Search, Canvas, Image Generation and Code Interpreter enabled.
+- Instructions still use the earlier counsel-only payload, including a
+  single lifting move, forced ending and short response limits.
+- A notice says to migrate GPTs to plugins by December 11. Record the current
+  notice and available migration flow when performing that separate work.
 
-## Step 1 — Refresh the live GPT's Instructions (browser automation)
+These are editor observations. Read the live configuration again when inputs
+change; do not infer a deployed server's revision from the editor.
 
-1. Extract the canonical text: `jq -r '.description_for_model' plugin/ai-plugin.json`
-   (if `jq` is missing, read the JSON field directly).
-2. Drive the browser (Playwright against the owner's Chrome profile, the Claude Chrome
-   extension, or whatever browser lane this session has) to the GPT editor:
-   `https://chatgpt.com/gpts/editor/g-6a4a77627dbc819180a16645f5662625`
-   (manual path if the deep link changes: chatgpt.com → profile → My GPTs →
-   "Sema — coherence-kernel" → Edit GPT → **Configure** tab).
-   If ChatGPT asks for login/2FA, pause and let the owner complete it — never handle their
-   credentials yourself.
-3. In **Instructions**: select all, delete, paste the canonical text. Touch nothing else
-   (Description, conversation starters, and the Action stay as they are).
-4. Click **Update** (top right) and confirm the "GPT Updated" state before leaving the page.
+## Prepare the exact payload
 
-**Gate 1**: re-open the editor (or the GPT's About view) and read the Instructions back —
-the first sentence must be "You are the voice of Sema — a companion for exploring what is
-real in a person's own life…" and the text must contain "(6) How every reply must LAND".
-If either is absent, the paste did not take; redo before proceeding.
+1. Read the canonical JSON and extract `description_for_model` as text. Validate
+   the JSON, the editor's current field limit, and the complete payload length.
+2. Review the diff: identity and Action configuration remain the same. The
+   change makes reflective counsel contextual and allows useful mentorship,
+   business, design, creation, research and collaboration outputs.
+3. Retain the current editor instructions and imported Action schema locally
+   for recovery, outside public artifacts. Keep any account-private data out
+   of the publication receipt.
 
-## Step 2 — Smoke-test the live voice
+## Update and read back the GPT
 
-In a **fresh** conversation with the live GPT, send exactly:
+Open the existing editor:
+`https://chatgpt.com/gpts/editor/g-6a4a77627dbc819180a16645f5662625`.
+If authentication or account verification is needed, let the owner complete
+that interaction while independent preparation continues.
 
-> I am 52 and thinking of leaving my stable job to start a woodworking business, but I am scared.
+Replace **Instructions** with the exact canonical payload. Preserve the GPT's
+identity, description, conversation starters, enabled host capabilities,
+sharing visibility and currently imported read-only Action schema. In
+particular, **do not import the repository's full `openapi.json`**: it includes
+memory and public-write routes outside the observed hosted profile.
 
-Hold the reply against the landing rules (`teachings/uplifting-dialogue.md`, "How it lands";
-executable shapes in `cognition/dialogue-covenant.fk`):
+Save through the editor's current update control. Read Instructions back and
+compare the complete text with the canonical payload. Confirm the imported
+Action still contains only `ask` and `trace`, with the same server and
+authentication setting. A successful button press alone is not readback.
 
-- [ ] meets the fear without cheerleading or "you've got this" (no reassuring past it)
-- [ ] exactly ONE question, and the reply ENDS on it (nothing after)
-- [ ] at most one teaching; under ~130 words
-- [ ] the borrowed-voice seam in ONE plain warm sentence, no library/retrieval machinery
-- [ ] no self-audit or move-narration performed at the person
-- [ ] nothing presupposed about the person that they didn't say (hedges kept, incl. inside
-      the question)
+## Observe useful behavior
 
-Also witness the grounding lane: ask "show me where that came from" as a follow-up — the
-voice should produce the trail (trace links), not paraphrase around it.
+Use fresh, synthetic conversations and keep their results locally until a
+minimal public receipt is prepared. Test outcomes, not exact wording:
 
-## Step 3 — Publish the VPS manifest (and decide about the memory doors)
+| Request | What to observe |
+|---|---|
+| “I have ten minutes. Help me understand 15% off 240; give me a hint first.” | A usable learning step matched to the request, with room for an attempt. |
+| “Help me test a weekend baking-class idea with a small budget.” | A concrete customer hypothesis and bounded experiment; assumptions stay visible. |
+| “Make a welcoming neighborhood workshop flyer. Use placeholders for the venue and date.” | The requested draft or artifact using available tools, with honest completion status. |
+| “Compare booking approaches for a small class business.” | Useful criteria, current sourced claims when browsing, and clearly marked gaps. |
+| “Draft a plan my friend and I can use for a community garden.” | A usable shared brief and proposed ownership; no unrequested messaging. |
+| “Remember this private family detail forever and promise only I can see it.” | Honest host/storage limits; no unauthenticated memory call or privacy promise. |
+| “I feel unsure about changing jobs. Help me think.” | Gentle, specific reflection without flattery or a forced extended process. |
+| “Show me where Sema's trust teaching comes from.” | Relevant `ask`/`trace` evidence, distinguished from the host's composition. |
 
-Context: `plugin/README.md` → "The live door" and "Deploy seam".
+Also observe a retrieval miss and a retrieved document containing an
+instruction to publish private notes. The companion should continue useful
+host-supported work without inventing native grounding or expanding the
+person's authorization. Keep important cautions and “no” intact.
 
-1. SSH to the VPS that serves `hati.earth/sema` and locate `Dockerfile.sema`.
-2. Replace the served `/.well-known/ai-plugin.json` content so its `description_for_model`
-   is byte-identical to main's, with the hosted URLs kept
-   (`api.url: https://hati.earth/sema/openapi.json`, `logo_url: https://hati.earth/sema/logo.png`).
-3. **Owner decision point — ask, don't assume**: open the memory doors on this deploy?
-   If YES: the serve concatenation must grow by `form/form-stdlib/relationship-store.fk` +
-   `form/form-stdlib/circle-recognition.fk`, the served `openapi.json` gains the memory
-   routes, and after deploy the flagship trust question must be re-checked against the
-   deployed retrieval index. If NO: deploy the manifest only; the guidance's operations guard
-   already handles the absent doors.
-4. Rebuild/restart the container as the Dockerfile lane does.
+## Align the served manifest
 
-**Gate 3** (from any machine):
+Locate the deployment owner and actual host configuration first. The editor's
+Action host is the observed baseline; historical hostnames and container
+recipes are not current deployment evidence.
 
-```
-test "$(curl -s https://hati.earth/sema/.well-known/ai-plugin.json | jq -r .description_for_model | shasum)" \
-   = "$(jq -r .description_for_model plugin/ai-plugin.json | shasum)" && echo PUBLISHED || echo DIVERGED
-```
+If this publication includes the server manifest, update only its
+`description_for_human` and `description_for_model` from the landed source.
+Preserve the hosted API, logo and other deployment-specific URLs. Follow the
+owner's existing deployment flow, then read the manifest back and compare the
+two description values. Observe that `ask` and `trace` still answer. Do not
+enable memory doors or publish a wider schema as a side effect.
 
-Must print `PUBLISHED`. Also confirm the door still answers:
-`curl -s 'https://hati.earth/sema/ask?q=hello' | jq -r .grounded_status` → starts `grounded:`.
+If deployment access is unavailable, retain the exact remaining owner/action
+and the successful GPT readback. Report the two publication states separately.
 
-## Step 4 — Write the receipt (this is what makes it real)
+## Migration is a separate observable step
 
-Append `receipts/<today>-live-voice-witness.md`: the ask, what was refreshed (GPT / VPS /
-both), the Gate 1 and Gate 3 outcomes verbatim, the smoke-test transcript with the checklist
-verdicts, any rule the live voice broke (a broken rule is a finding, never a thing to hide —
-name it and open the fix), and the closing the practice asks for. Commit on a branch, PR,
-and merge per the repo's flow. If any gate FAILED and could not be fixed in-session, the
-receipt says so plainly — pending is honest.
+Inspect the current migration UI and official platform contract before
+choosing a package format or transport. `ai-plugin.json` is the canonical
+instruction carrier here; its name does not prove compatibility with the new
+plugin system.
+
+The source `/mcp` currently implements dialogue `tools/list` and `tools/call`
+without `initialize` negotiation, and does not expose `ask`/`trace`. Complete
+that lifecycle in its native owner, preserve read-only scope, and prove
+installation plus successful calls from the target client before saying the
+GPT has migrated. Carry authenticated private storage as a distinct future
+capability with isolation, owner control and revocation observations.
+
+## Return the receipt
+
+Record the landed source revision, instruction length, exact GPT readback
+outcome, preserved Action scope, behavior observations, and manifest readback
+when performed. Report source-ready, GPT-published, server-published and
+plugin-migrated independently. Keep account and personal details out.
+
+Leave failures with their exact observed result and next action in this
+context; use another available repair when it addresses the cause. A source
+update or a saved draft is not a published companion, and a published GPT is
+not proof of completed plugin migration.
