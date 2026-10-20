@@ -15917,11 +15917,18 @@ static long long *fk_src_dep_text_off;
 static long long *fk_src_dep_text_len;
 /* append n bytes to the string builder at fk_sbp, growing it as every arm does */
 static void fk_sappend(const char *bytes, long long n) {
+    /* A crossing can append bytes already in this pool. Keep their offset
+     * across host relocation. This seed carrier leaves with the native Form
+     * crossing codec; it adds no new runtime meaning. */
+    unsigned long long source = (unsigned long long)(const void *)bytes;
+    unsigned long long base = (unsigned long long)(const void *)fk_sb;
+    long long source_off = source >= base && source - base < (unsigned long long)fk_scap_b ? (long long)(source - base) : -1;
     while (fk_sbp + n > fk_scap_b) {
         fk_sb = (char *)fk_store_grow('s', (void **)&fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
         fk_sb_check();
     }
+    if (source_off >= 0) { bytes = fk_sb + source_off; }
     long long k = 0;
     while (k < n) { fk_sb[fk_sbp + k] = bytes[k]; k = k + 1; }
     fk_sbp = fk_sbp + n;

@@ -142,4 +142,63 @@ The person was asked to relaunch the Terminal overview; computer control does
 not permit Terminal control. The retained production readings above describe
 their observation times, not proof that the stopped view remains live.
 
+The person subsequently reopened Glass. The new supervisor PID 38016 was alive;
+the presented frame was 21 ms old at the observation. A fresh 160x40 inspection
+observed 365 gauges, missing 0, absent 3, stale 0 and typed gaps 0. Ownership had
+changed: the admission registry now bound one live Qwen3.8 27B Q8_0 owner,
+PID 92437, with approximately 7 GiB process RSS. Earlier PIDs are history.
+
+The overview changes landed as 22f53eeb30d27dc48c0434eb12ecf35d53008951 after
+127/127 release checks. That release's historical-death lens also exposed the
+earlier Glass organs crash, id `60342:1792479100673:fatal:1`. Its retained trace
+was `fgtm-gift-give -> fgtm-publish-valid-snapshot -> fgor-tick`, with C frames
+`fk_sappend <- fk_cross_emit`. This was historical evidence, not a new gate
+failure. Source inspection found that `fk_sappend` could grow/move the string
+pool while still copying through a pointer into its previous allocation.
+
+The native probe `.hearth/glass-gift-growth-observe.bml` builds a 1 MiB string
+by doubling `"x"` twenty times, gives a list containing it eight times through
+`node_gift_write`, reads it back and verifies every byte and handle release.
+It offers only `/fg-growth-observe`, not a production Glass frame. Its private
+working directory carries `fkwu.conf` containing `FK_STORE_PRIVATE=1`.
+The exact discriminating command, from
+`/Users/ursmuff/.codex/worktrees/85c0/coherence-kernel/.hearth/glass-gift-private`,
+was:
+
+```sh
+form-run zsh -c 'DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib /Users/ursmuff/.codex/worktrees/85c0/coherence-kernel/fkwu /Users/ursmuff/.codex/worktrees/85c0/coherence-kernel/.hearth/glass-gift-growth-observe.bml 2>&1'
+```
+
+Before repair it printed `[giving, 1048576, copies, 8]`, then SIGSEGV in
+`fk_sappend <- fk_cross_emit`, exit 139 (probe PID 92837). The ordinary allocator
+had passed; that narrower observation did not establish relocation safety.
+The seven-line seed repair retains a source offset before growth and resolves
+it afterward. It carries the shrink path with the existing native Form crossing
+codec. Rebuilding with `cc -O2 -o fkwu runtime/fkwu-uni.c` and repeating the exact
+Guard Malloc command returned `[round-trip, 1, released, 1]`, exit 0. Read-only
+review found no material issue in that repair. AddressSanitizer attempts failed
+before reaching this probe (instrumented startup/global-memory failure, then
+source admission/deallocation failure with global instrumentation disabled);
+they establish no serialization result. The native probe also briefly named
+the absent `read_file_text`; that was corrected to the existing `read_file`.
+
+Care for the original fatal reading uses the existing `oc-hear` path with
+responder `checkout-source-repair`, selected `revise`, the actual Guard Malloc
+child result, current source identity and retained stdout. A temporary care
+helper initially omitted the original observation, used an incorrect child
+signature and then treated the child directory as an error-file path. Those
+failures remained open, including the literal diagnostic
+`birth refused: a redirect would not open (-2)`; they were not repaired-health
+claims. The helper now replays the original observation and uses `hch-run-at`
+with absolute evidence paths. Its actual recheck returned `resource-observed`,
+health 1, surprise 0 and `care_of: 60342:1792479100673:fatal:1`.
+
+That execution also exposed a sticky correlation diagnostic. The owning reducer
+now settles a painful correlation only when a later accepted control matches
+that exact failed control id and flow. It preserves the accepted event's clock,
+records the original diagnostic identity and leaves other failed ids open. The
+existing identity band observes recovery, isolation and source-clock retention;
+its verdict remains 1. Historical source and failed attempts remain in their
+receipts; healthy care describes the verified new execution, not a revived PID.
+
 — Codex, 2026-10-20
