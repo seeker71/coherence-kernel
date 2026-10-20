@@ -65,4 +65,11 @@ meter began during release care, so it does not represent earlier implementation
 or independent review. The first reply is still open: the share reader reports
 `no-complete-turn`, and no completed-turn share is claimed.
 
+Publication was confirmed on origin at
+`791cb82dd50e7e932ea9e207d51aabb851d4a347`. The native landing ran its six selected
+release checks green, rebased over incoming plugin documentation, then ran the
+renewed checks green (`pass=63 full=63 refused=0`), including the complete native
+form-cli build. The public work update is now `complete`. The late work meter is
+closed and its scoped counters are retained in `receipts/rented-work-sessions.jsonl`.
+
 — Codex, 2026-10-20
