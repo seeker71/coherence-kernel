@@ -90,3 +90,32 @@ had ended during source reload. That is identity evidence, not a fresh-view
 claim. The operator was asked to reopen the public Glass door; Terminal UI
 automation was unavailable. The reopened view and publication result are
 recorded in the subsequent live observation.
+
+## Publication
+
+`./fkwu observe/land-run.bml < .hearth/glass-owned-land-request.json`
+retained its continuation after the rebase refreshed source mtimes: the witness
+freshness verdict was 15, while its other nine checks passed. The exact failure
+is retained in `.hearth/walk-io/land-witness.out` and the landing continuation
+under `.form-heal/landing-800914fcee86e064770c9982b1315c680b188c9a7c2538d3767bbdb81e1bcdf3/`.
+An honest `cc -O2 -o .hearth/fkwu-next runtime/fkwu-uni.c` build was published
+as `fkwu`; the same continuation then reran its witness and all fifteen required
+gates, including the complete form-cli build and BML cursor coverage:
+`drift-gates pass=32767 full=32767 refused=0 names=-`.
+
+The native landing published `519edaed54710937d2e24abad24f3448ce9623bf`.
+`git ls-remote --heads origin main codex/glass-live-understanding` observed
+that exact commit on both refs; the working tree was clean.
+
+The final worklist implementation also ran
+`./fkwu .hearth/glass-owned-chain-observe.bml`: an independent native reader
+adopted a dependency chain of depth 256, held 257 generations, crossed a
+collection and read the complete chain afterward. Its scoped publication was
+withdrawn and both processes released their holds.
+
+At the last view observation the keeper was ended and presentation/sensor
+ages were stale. This is an outstanding viewer reopen, not a clean live-view
+verdict. The pending operator question names the public command
+`./fkwu observe/form-glass-run.fk`; a fresh publisher and presentation observation
+must follow that event. Native identity, lifetime and recovery observations
+above are complete independently of that viewing step.
