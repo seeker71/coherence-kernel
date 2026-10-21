@@ -119,3 +119,52 @@ verdict. The pending operator question names the public command
 `./fkwu observe/form-glass-run.fk`; a fresh publisher and presentation observation
 must follow that event. Native identity, lifetime and recovery observations
 above are complete independently of that viewing step.
+
+## Reopened live observation
+
+The operator reopened Glass. Keeper PID 54927 was alive; presentation age was
+61 ms initially and 97 ms on a later observation. The current source frames
+adopted owned roots without reader node mints. The later overview had 392
+gauges, zero missing metrics, zero stale gauges and zero typed gaps. These are
+point observations; the Glass sensor sometimes exceeds its declared cadence.
+
+The actual `organs` publication was held in two independent processes as
+`[63,0,2,153776]`, author PID 54914/start 1792560552189, age 743 ms. Both
+readers minted zero nodes. A subsequent production replacement retired
+`[63,0,2,163817]` for `[63,0,2,163853]`: the old ID stopped resolving, its held
+root and descendant survived collection, and that reader's two holds returned
+to zero after release and collection. No production frame was changed by the
+observer. Independent lifetime, dead-reader, dependency-chain, typed-flow and
+interrupted-building probes held again on the running seed.
+
+One real obsolete owner remained: launchd's `earth.hati.day-turn`, PID 27518,
+start 1792557001594, in the walk checkout. It rebuilt the executable on disk
+but continued running the older admitted kernel. Its `qwen.coding.27518`
+frame still contained a 2664-byte serialized image, correctly refused by the
+native reader. No fallback decoder was added. The other live model owner,
+PID 96934, and the Glass source publishers use current shared roots.
+
+The owning native-turn boundary now refuses model admission when its executing
+kernel lacks owned generations and retains the original options and window.
+The day-turn manager can claim a dead owner's continuation under its existing
+checkout lock, preserving its monotonic deadline through sync and admission.
+The active continuation remains recoverable through a crash, safe start,
+conflicted sync or memory interruption. An explicit checkpoint handoff keeps
+the exact original request, model/entry settings, allowance, source/check
+contract and pending normal publication/ledger path. Before admission, both
+the current source and checkpoint must agree with that contract. Pre-renewal
+token usage that was not retained remains unknown.
+
+The actual owner's checkpoint was valid at repair, 18 of its 24 replies and
+17 calls. Its exact request, current documents, writable set, checks, saved
+state and original open window agreed in the private handoff preparation.
+The owner is still running at this preparation observation; renewal and final
+live verification follow below.
+
+An inspection helper initially entered day-turn through its unconditional
+top-level entry. Only that helper (PID 78979) was terminated, before model
+admission. Its set-aside patch was restored and its own lock released through
+the existing owner check. Day-turn imports are now effect-free. Both source
+closures check clean; the native-turn green band reads 511 and host-walk reads
+8796093022207. The renewal check preserves the exact original deadline and
+refuses an unavailable generation resource.

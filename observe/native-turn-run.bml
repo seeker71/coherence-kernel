@@ -268,7 +268,7 @@ section [form.bml] {
   def nt-ways-of(gap, opts) {
    let model = nt-model(opts);
    let all = ntl-ways(model, ntl-voice(model, nt-chain()), nt-context(gap));
-   let selected=json-object-has?(opts, "ways") ? filter(a => fcgp-member?(nt-strs(opts, "ways"), ntl-rung(a)), all) : all;
+   let selected=nt-str(opts,"resume_request") != "" ? [nt-owned-resume-way(opts)] : json-object-has?(opts, "ways") ? filter(a => fcgp-member?(nt-strs(opts, "ways"), ntl-rung(a)), all) : all;
    // An owned candidate needs publication and observation, not another search.
    json-object-has?(opts,"candidate") ? take(1,filter(a=>ntl-rung(a)!="native",selected)) : selected;
   }
@@ -320,14 +320,35 @@ section [form.bml] {
   def nt-keep(paths, cand, originals, stamp) = if nil?(paths) then 0 else (nt-keep-one(paths[0], cand[0], originals[0], stamp) + nt-keep(paths[1:], cand[1:], originals[1:], stamp));
   def nt-keep-one(path, text, original, stamp) = if (nothing?(text) || ((String) text == original)) then 0 else nt-kept(write_file_text(mc-cat([nt-dir(), "/", stamp, "-", nt-base(path), ".candidate"]), text));
   def nt-kept(wrote) = 1;
+  // A disk rebuild does not change the kernel executing an in-process turn.
+  // Return before model admission; the manager can reopen this owned window
+  // with the rebuilt executable after the current turn has settled.
+  def nt-runtime-continuation() = ".hearth/walk-runtime-continuation.fkb";
+  def nt-runtime-ready?(capacity) = value_kind(capacity) == "int" || (host_getenv("FK_FIELD_OFF") ?? "") == "1" || (host_getenv("FK_STORE_PRIVATE") ?? "") == "1";
+  def nt-runtime-hold-at(opts,path) {
+   let now=now_unix_ms();
+   let until=nt-deadline(opts);
+   let door=hw-field(hw-owner(hw-lock()),"pid=") == host_pid() ? hw-owner-door(hw-owner(hw-lock())) : "native-turn";
+   let packet=json-node-object([fhn-s("schema","native-walk-runtime-continuation-v1"),fhn-s("door",door),fhn-n("pid",host_pid()),fhn-n("started",kernel_live(host_pid())[2]),fhn-n("at_unix_ms",now),fhn-n("until_unix_ms",until > 0 ? now + fat-max(0,until - host_monotonic_ms()) : now),json-node-pair("options",opts)]);
+   let saved=fcam-write(path,packet);
+   let row=oh-reading("native-turn","native-turn","running-kernel",json-node-string("native-shared-generations"),json-node-string("running-kernel-needs-renewal"),json-node-int(0),[oh-need("running-kernel-renewal",json-node-string(path))],["finish-owned-effects","renew-executing-kernel","resume-owned-window"],oh-reference(path));
+   oh-voice(row);
+   oh-emit(".hearth/organ-health.jsonl",row);
+   !saved ? form_error("runtime renewal continuation could not be retained; no model admitted") : {
+    print_str("[native-turn:held] running-kernel-renewal; no model admitted; continuation=" + path);
+    nothing();
+   };
+  }
   def nt-run() {
    let input = cell_input();
    let line = fat-wire-object?(input) ? "" : trim(stdin-text());
    let opts = fat-wire-object?(input) ? input : (String) line == "" ? json-node-object([]) : parse-json("native-turn-options", line);
    // fs_mkdir makes one level: the hearth first, so a checkout that never held one still gets its turn directory
    let hearth = fs_mkdir(".hearth");
-   let healed = hw-say(hw-heal());
-   nt-take(opts, "", 0);
+   if !nt-runtime-ready?(kernel_stat(84)) then nt-runtime-hold-at(opts,nt-runtime-continuation()) else {
+    let healed = hw-say(hw-heal());
+    nt-take(opts, "", 0);
+   };
   }
   // The open gap with the fewest attempts takes the turn. A gap parked on its contract (a band that cannot be met)
   // takes none: its one row lands and the turn goes on to the next open gap, so the cheapest refusal in the ladder
@@ -391,6 +412,7 @@ section [form.bml] {
    row;
   }
   def nt-turn-prepared(gap, opts, notes, parked) {
+   let original=nt-str(opts,"resume_request") == "" ? nothing() : nt-owned-resume-request(gap,opts,nt-request(gap,opts,""));
    let id = nt-str(gap, "id");
    let full = nt-int(gap, "full", 0);
    let band = nt-str(gap, "band");
@@ -437,11 +459,39 @@ section [form.bml] {
   // the wall deadline the caller set (0: none); an option starts only while the time left holds the walk's option
   // floor, the median real option this checkout's ledger measured (hw-option-floor)
   def nt-deadline(opts) = nt-int(opts, "deadline_ms", 0);
+  // A renewed owner resumes the exact admitted request, never a regenerated
+  // goal or a ladder default. The executing tree and checkpoint both witness
+  // the original contract before the model can be admitted again.
+  def nt-owned-resume-way(opts) {
+   let request=parse-json("owned-turn-request",nt-read(nt-str(opts,"resume_request")));
+   ntl-approach("resume",nt-str(request,"model"),nt-str(request,"code_entry"),nt-str(request,"document_context"),"greedy",1,"owned-continuation");
+  }
+  def nt-owned-resume-request(gap,opts,current) {
+   let path=nt-str(opts,"resume_request");
+   path == "" ? current : {
+    let text=nt-read(path);
+    let request=parse-json("owned-turn-request",text);
+    let id=nt-str(opts,"resume");
+    let root=nt-str(request,"learning_root") == "" ? ".hearth/code-memory" : nt-str(request,"learning_root");
+    let initial=fcaq-initial(request,fat-wire-value(fcaq-documents(request)));
+    let packet=fcam-read(fcam-path(root,id,"checkpoint"));
+    let scope=fcam-work-scope(initial,json-emit(json-object-get(request,"checks")));
+    let valid=fcam-id-valid(id) && fcam-hash(text) == nt-str(opts,"resume_request_digest") &&
+     nt-str(request,"model") == nt-model(opts) && nt-int(request,"turns",0) == nt-int(opts,"turns",0) &&
+     nt-int(request,"context",16384) == nt-int(opts,"context",16384) &&
+     value_eq(json-object-get(request,"writable"),json-object-get(current,"writable")) &&
+     value_eq(json-object-get(request,"checks"),json-object-get(current,"checks")) &&
+     value_eq(json-object-get(request,"documents"),json-object-get(current,"documents")) &&
+     nt-checks-digest(gap) == nt-str(opts,"resume_checks_digest") && nt-band-digest(gap) == nt-str(opts,"resume_band_digest") &&
+     fcam-packet-valid(packet,"checkpoint",scope) && fcam-state-valid(fcam-state-from(packet),initial);
+    valid ? request : form_error("owned turn continuation changed or is incomplete; original request and checkpoint retained; no model admitted");
+   };
+  }
   def nt-room?(opts, floor) = ((Comparable) nt-deadline(opts) <= 0) || ((host_monotonic_ms() + floor[0]) <= nt-deadline(opts));
   def nt-window-text(opts, floor) = mc-cat(["the window's end left ", hw-minutes(hw-left(nt-deadline(opts), host_monotonic_ms())), ", short of an option of ", hw-minutes(floor[0]), " (", floor[1], ")"]);
   // The original request is one value throughout the walk; feedback never rewrites its contract.
   def nt-walk(gap, opts, id, full, band, before, coordinator, notes) {
-   let request = nt-request(gap,opts,nt-str(gap,"goal") + "\nInitial execution evidence:\n" + nt-band-errors() + "\n" + nt-band-claims());
+   let request = nt-owned-resume-request(gap,opts,nt-request(gap,opts,nt-str(gap,"goal") + "\nInitial execution evidence:\n" + nt-band-errors() + "\n" + nt-band-claims()));
    let floor = hw-option-floor();
    let w = oac-backtrack-walk(map(way => (offered => nt-way-option(way, offered)), nt-ways-of(gap, opts)),[gap,opts,id,full,band,before,coordinator,request,floor],[]);
    let landed = ((Comparable) oac-one?(oac-backtrack-ack(w)) == 1);
@@ -485,8 +535,8 @@ section [form.bml] {
    let id = a[2];
    let native = ((String) ntl-rung(way) == "native");
    let hist = ntl-hist-of(nt-ledger-rows(opts), id, nt-checks-digest(gap), nt-band-digest(gap));
-   let target = nt-resume-target(memory, hist, fcgp-str(way, "model"));
-   let verdict = nt-way-verdict(way, gap, memory, hist);
+   let target = nt-str(opts,"resume_request") != "" ? nt-str(opts,"resume") : nt-resume-target(memory, hist, fcgp-str(way, "model"));
+   let verdict = ntl-admit(way,hist,[nt-native-applies(gap),len(target) > 0 ? 1 : 0]);
    if ((Comparable) verdict[0] == 0) then nt-way-refused(id, way, verdict[2]) else if (!native && nt-local-attempts(opts)>0 && (nt-spent(memory) >= nt-local-attempts(opts))) then nt-way-refused(id, way, mc-cat(["attempts-spent: the walk's allowance of ", nt-local-attempts(opts).str(), " local model attempt(s) is spent"])) else if (native ? !nt-native-room?(opts) : !nt-room?(opts, a[8])) then oac-nothing() else nt-way-run(way, verdict, a, memory, hist, target, native);
   }
   def nt-way-refused(id, way, reason) {
@@ -510,9 +560,9 @@ section [form.bml] {
    let local = planned || nt-local-execution?(opts,said);
    let verified = green && (planned || (local && nt-str(result,"status") == "complete" && nt-int(result,"release_ok",0) == 1));
    let unknown = ["required_remote_prompts","required_remote_tokens","optional_remote_review_prompts","optional_remote_review_tokens","rented_tokens"] |> map(key => nt-reading(key,nothing()));
-   json-node-object(append(json-object-pairs(row),append([
+   json-node-object(append(json-object-pairs(row),append((json-object-has?(opts,"continuation_of") ? [json-node-pair("continuation_of",json-object-get(opts,"continuation_of"))] : []) + [
     fhn-s("checkpoint_id",nt-str(result,"checkpoint_id")),nt-reading("local_generated_ids",planned ? 0 : nt-maybe(result,"generated_ids")),nt-reading("local_injected_ids",planned ? 0 : nt-maybe(result,"injected_ids")),nt-reading("local_repairs",nt-maybe(result,"repair_attempts")),nt-reading("lane_release_ok",nt-maybe(result,"release_ok")),fhn-n("local_verified",verified),
-    nt-reading("plan_local_generated_ids",planned ? nt-maybe(gap,"plan_local_generated_ids") : nothing()),nt-reading("plan_local_injected_ids",planned ? nt-maybe(gap,"plan_local_injected_ids") : nothing()),nt-reading("execution_required_remote_prompts",local ? 0 : nothing()),nt-reading("execution_required_remote_tokens",local ? 0 : nothing()),fhn-s("candidate_origin",planned ? "verified-local-plan" : json-object-has?(opts,"candidate") ? "caller-candidate" : ""),fhn-s("usage_scope","Publication/coding usage; verified-plan authoring is reported separately. Whole-task guidance, coordinator and optional review usage require attribution."),fhn-n("source_conflict",conflict)
+    nt-reading("plan_local_generated_ids",planned ? nt-maybe(gap,"plan_local_generated_ids") : nothing()),nt-reading("plan_local_injected_ids",planned ? nt-maybe(gap,"plan_local_injected_ids") : nothing()),nt-reading("execution_required_remote_prompts",local ? 0 : nothing()),nt-reading("execution_required_remote_tokens",local ? 0 : nothing()),fhn-s("candidate_origin",planned ? "verified-local-plan" : json-object-has?(opts,"candidate") ? "caller-candidate" : ""),fhn-s("usage_scope",nt-str(opts,"resume_request") != "" ? "Resumed segment generated/injected usage only; turns, calls, checks and repair counters include inherited checkpoint progress. Pre-renewal usage is recorded in continuation_of. Whole-task guidance and review require separate attribution." : "Publication/coding usage; verified-plan authoring is reported separately. Whole-task guidance, coordinator and optional review usage require attribution."),fhn-n("source_conflict",conflict)
    ],unknown)));
   }
   // the candidate's change against its checkpoint, read in Form from the texts themselves (form-stdlib/bml/text-diff.bml)
@@ -535,7 +585,7 @@ section [form.bml] {
    let stamp = mc-cat([id, "-", now_unix_ms().str()]);
    let reqPath = mc-cat([nt-dir(), "/", stamp, ".json"]);
    let seen = ntl-model-rows(hist);
-   let requested = nt-approach-request(request, way, stamp, target, nt-memory-finding(memory, seen), seen);
+   let requested = nt-str(opts,"resume_request") != "" ? oh-set(request,"resume",json-node-string(target)) : nt-approach-request(request, way, stamp, target, nt-memory-finding(memory, seen), seen);
    let retained=json-object-has?(opts,"candidate") || json-object-has?(requested,"resume") ? nothing() : fct-plan-candidate(gap);
    let approach=nothing?(retained) ? requested : oh-set(requested,"candidate_documents",retained);
    let wrote = write_file_text(reqPath, json-emit(approach));

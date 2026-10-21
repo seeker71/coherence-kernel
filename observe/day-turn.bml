@@ -30,6 +30,7 @@
 // reading and turn, the movement's line, the carry, then the release.
 // preflight-exec: forbidden
 // preludes: form-stdlib/bml/host-walk.bml observe/form-membrane-runtime-census.fk
+import form-stdlib/bml/form-cli-code-memory.bml;
 section [form.bml] {
  class DayTurn {
   def dt-pad(n) = n < 10 ? "000" ++ n.str() : n < 100 ? "00" ++ n.str() : n < 1000 ? "0" ++ n.str() : n.str();
@@ -46,27 +47,99 @@ section [form.bml] {
   def dt-take(deadline, n) = hw-native-turn(24, deadline);
   def dt-land(day) = hw-line(hw-movement(dt-request(day, dt-pad(hw-hhmm()))));
   def dt-turns(day, until) = hw-turns(until, nothing(), hw-ready, dt-take, turn => dt-land(day));
+  def dt-owned-pending?() {
+   let packet=file_size(dt-runtime-path()) > 0 ? read_form_binary(dt-runtime-path()) : nothing();
+   fhn-count(packet,"pid") == host_pid() && fhn-count(packet,"started") == kernel_live(host_pid())[2] && fhn-text(packet,"stage") != "finished" && fhn-text(packet,"stage") != "awaiting-landing";
+  }
+  def dt-turns-owned(day,until,options) = hw-turns(until,nothing(),hw-ready,(deadline,n) => len(json-object-pairs(options)) > 0 && dt-owned-pending?() ? dt-owned-turn(day,options,deadline) : dt-take(deadline,n),turn => dt-owned-land(day));
+  def dt-owned-land(day) {
+   let packet=file_size(dt-runtime-path()) > 0 ? read_form_binary(dt-runtime-path()) : nothing();
+   let pending=fhn-count(packet,"pid") == host_pid() && fhn-text(packet,"stage") == "awaiting-landing";
+   let out=pending ? hw-line(hw-movement(json-object-get(packet,"movement_request"))) : dt-land(day);
+   let rows=filter(line=>str_find(line,"{\"movement\":",0) == 0,split-on(out,"\n"));
+   let published=!nil?(rows) && fhn-text(parse-json("owned-turn-movement",rows[-1]),"landing") == "[landing] landed";
+   !pending ? out : published && fcam-write(dt-runtime-path(),oh-set(packet,"stage",json-node-string("finished"))) ? out : form_error("owned turn awaits verified publication; continuation retained; no model rerun");
+  }
+  def dt-owned-turn(day,options,deadline) {
+   let turn=hw-turn-once-options(options,deadline);
+   let outcome=hw-row-of(turn);
+   let packet=read_form_binary(dt-runtime-path());
+   let row=outcome == "" ? json-node-object([]) : parse-json("resumed-turn-outcome",outcome);
+   let reason=fhn-text(row,"lane_reason");
+   let interrupted=hw-memory-low?(row) || str_find(reason,"model-queued:",0) == 0 || reason == "deadline";
+   let finished=outcome != "" && !interrupted && fhn-count(packet,"pid") == host_pid() && fhn-count(packet,"started") == kernel_live(host_pid())[2];
+   let saved=!finished || fcam-write(dt-runtime-path(),oh-set(oh-set(oh-set(packet,"stage",json-node-string("awaiting-landing")),"outcome",row),"movement_request",dt-request(day,dt-pad(hw-hhmm()))));
+   saved ? turn : form_error("owned turn outcome could not be retained; continuation remains active");
+  }
+  def dt-runtime-path() = ".hearth/walk-runtime-continuation.fkb";
+  def dt-runtime-packet() {
+   let packet=file_size(dt-runtime-path()) > 0 ? read_form_binary(dt-runtime-path()) : nothing();
+   dt-runtime-valid?(packet) ? packet : nothing();
+  }
+  def dt-runtime-valid?(packet) {
+   let pid=fhn-count(packet,"pid");
+   let started=fhn-count(packet,"started");
+   let observed=kernel_live(pid)[2];
+   let gone=pid > 0 && started > 0 && (host_alive(pid) == 0 || (value_kind(observed) == "int" && observed > 0 && observed != started));
+   let options=json-object-get(packet,"options");
+   fhn-text(packet,"schema") == "native-walk-runtime-continuation-v1" && fhn-text(packet,"door") == "day-turn" && gone && fat-wire-object?(options) && fhn-count(options,"deadline_ms") > 0;
+  }
+  def dt-runtime-expired() {
+   let names=fs-list(".hearth") |> filter(name=>str_find(name,"walk-runtime-continuation.fkb.expired-",0) == 0);
+   foldl((prior,name)=>{
+    let path=".hearth/" + name;
+    let packet=read_form_binary(path);
+    dt-runtime-valid?(packet) && fhn-text(packet,"stage") == "window-expired" && (nothing?(prior) || fhn-count(packet,"at_unix_ms") > fhn-count(prior[1],"at_unix_ms")) ? [path,packet] : prior;
+   },nothing(),names);
+  }
+  def dt-runtime-until(packet,now,ordinary) {
+   nothing?(packet) ? ordinary : fhn-count(json-object-get(packet,"options"),"deadline_ms");
+  }
   def dt-run() {
-   let until = host_monotonic_ms() + dt-window-ms();
-   let opts = hw-stdin();
-   let lock = hw-begin("day-turn", opts);
+   let now=host_monotonic_ms();
+   let retained=dt-runtime-packet();
+   let deferred=nothing?(retained) && file_size(dt-runtime-path()) <= 0 ? dt-runtime-expired() : nothing();
+   let until = dt-runtime-until(retained,now,now + dt-window-ms());
+   let asked = hw-stdin();
+   let opts = nothing?(retained) ? asked : "{\"again\":1}";
+   let pending=file_size(dt-runtime-path()) > 0;
+   let lock = pending && nothing?(retained) ? [0,"[day-turn] runtime continuation has a live or unidentified owner, or needs repair; no turn admitted"] : hw-begin("day-turn", opts);
    let said = print_str(lock[1]);
-   (Comparable) lock[0] == 1 ? dt-walk(until, hw-safe?(opts)) : 0;
+   if (Comparable) lock[0] == 1 then {
+    let offered=nothing?(retained) ? (nothing?(deferred) ? nothing() : oh-set(oh-set(deferred[1],"stage",json-node-string("pending")),"options",oh-set(json-object-get(deferred[1],"options"),"deadline_ms",json-node-int(until)))) : retained;
+    let unchanged=nothing?(retained) ? nothing?(deferred) || node_eq(read_form_binary(deferred[0]),deferred[1]) : node_eq(read_form_binary(dt-runtime-path()),retained);
+    let moved=nothing?(deferred) ? 1 : unchanged && fs-rename(deferred[0],dt-runtime-path()) == 0;
+    let accepted=nothing?(offered) ? 1 : unchanged && moved && fcam-write(dt-runtime-path(),oh-set(oh-set(offered,"pid",json-node-int(host_pid())),"started",json-node-int(kernel_live(host_pid())[2])));
+    let options=nothing?(offered) || fhn-text(offered,"stage") == "finished" ? json-node-object([]) : json-object-get(offered,"options");
+    !accepted ? { hw-release(); form_error("runtime continuation was not claimed; no turn admitted"); } : dt-walk-owned(until,hw-safe?(asked),options);
+   } else 0;
   }
   // a safe start (the retry door's, after a crash) begins no turn: heal, sync, build, carrier and carry stand
   def dt-walk(until, safe) {
+   dt-walk-owned(until,safe,json-node-object([]));
+  }
+  def dt-walk-owned(until,safe,options) {
    let branch = hw-branch();
    let day = hw-day();
+   let packet=file_size(dt-runtime-path()) > 0 ? read_form_binary(dt-runtime-path()) : nothing();
+   let pending=fhn-count(packet,"pid") == host_pid() && fhn-text(packet,"stage") == "awaiting-landing";
+   let prior=pending ? hw-say(dt-owned-land(day)) : 0;
    let healed = hw-say(hw-heal());
    let sync = hw-sync(branch);
    let build = hw-build();
    let carrier = hw-carrier();
    print_str("[day-turn] " ++ day ++ " branch=" ++ branch ++ " " ++ sync ++ " " ++ build ++ " " ++ carrier);
-   let landed = hw-safe-skips?(safe, "turns") ? 0 : hw-conflicted?(sync) ? hw-held-turns(sync) : dt-turns(day, until);
+   let landed = hw-safe-skips?(safe, "turns") ? 0 : hw-conflicted?(sync) ? hw-held-turns(sync) : dt-turns-owned(day,until,options);
+   let retained=file_size(dt-runtime-path()) > 0 ? read_form_binary(dt-runtime-path()) : nothing();
+   let expired=fhn-count(retained,"pid") == host_pid() && fhn-text(retained,"stage") != "finished" && host_monotonic_ms() >= until;
+   let held=!expired || fcam-write(dt-runtime-path(),oh-set(retained,"stage",json-node-string("window-expired")));
+   let archived=fhn-count(retained,"pid") == host_pid() && (fhn-text(retained,"stage") == "finished" || (expired && held)) ? fs-rename(dt-runtime-path(),dt-runtime-path() + (expired ? ".expired-" : ".finished-") + host_pid().str()) : 0;
+   let notified=expired ? print_str("[day-turn] original window expired; unfinished task and exact checkpoint retained in " + dt-runtime-path() + ".expired-" + host_pid().str() + "; next window owns any new allowance") : 0;
    print_str(hw-safe-skips?(safe, "turns") ? "[day-turn] safe: no model door was begun (turns)" : (Comparable) landed == 0 ? "[day-turn] no turn landed" : "[day-turn] turns landed " ++ landed.str());
    print_str(hw-carry(branch));
    print_str(hw-release());
   }
  }
- dt-run();
+ let entry=cell_path();
+ entry == "observe/day-turn.bml" || entry == host_cwd() + "/observe/day-turn.bml" ? dt-run() : nothing();
 }
