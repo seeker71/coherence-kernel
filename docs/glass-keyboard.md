@@ -191,14 +191,23 @@ of demanding it as a missing runtime service. Once an owner was published,
 missing/stale/mismatched ownership remains a route gap. Bounded inspection
 projects those same conditional route rows as the live renderer.
 
-The current snapshot carrier serializes the complete value through
-`node_gift_write` and reconstructs it through `node_gift_read`. Shared memory
-here does not mean that the snapshot crosses as a shared root ID. Native
-interned cells already have shared identity; `node_at` can recover that same
-cell and its children. Moving snapshots to root references also needs an
-owner/generation binding and retirement after readers release them: the
-current shared field retains admitted nodes and pairs. The serialization crash
-repair establishes memory safety, not completion of that transport change.
+Glass publishes native shared roots. A frame carries 64 bytes of identity and
+ownership metadata; readers adopt the existing graph without decoding or
+re-interning it. `node_gift_read` returns that root; `ggf-cell` reads its payload.
+`fgtm-read-root-id` and `fgtm-read-ownership` expose the same identity, owning
+frame, lifetime and originating process to inspection.
+
+The frame owns its current generation across an author's exit. Replacement
+retires the previous generation; held descendants, closures, records and
+framebuffer history keep their storage alive until the last reader releases it.
+Dead readers release their holds, and private observation frames retire with
+their process. Retired storage is reused with a new identity. `ggf-retire` and
+`fgtm-retire-snapshot` compare the held generation, so an old owner cannot
+withdraw a replacement. `node_at([package, level, type, instance])` resolves a
+currently offered root; unversioned references to reusable storage are refused.
+Private heaps refuse native publication rather than falling back to a codec.
+Typed model-flow snapshots use this same carrier; their former disk codec is
+removed. [Observed lifetimes and live verification](../receipts/2026-10-21-glass-shared-roots.md).
 
 The same published samples are available to an agent through
 `observe/glass-read-run.bml` (optional publisher prefix on stdin). Its output

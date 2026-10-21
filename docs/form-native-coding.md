@@ -150,8 +150,10 @@ attempt. Changed source or witness bytes retain their
 separate scope identity.
 Qwen prompt prefill publishes its current slice through native shared memory even
 when a containing cell captures stdout. `q38pc-publisher(pid, root)` identifies the
-frame; `ggf-receive` and `node_gift_read` return
+frame; `ggf-receive` and `ggf-cell` return
 `[schema, pid, root, phase, position, count, epoch_ms, elapsed_ms, drained, metal_live]`.
+The primitive `node_gift_read` returns its owning shared root; its first child
+is that value. Readers retain the generation through native GC.
 Join its owner and timestamp to the live model lease before treating a retained
 frame as current. Positions, completion and the carrier deadline distinguish
 slow progress from an unfinished wait. Q4_K and Q6_K prefill use the shared
