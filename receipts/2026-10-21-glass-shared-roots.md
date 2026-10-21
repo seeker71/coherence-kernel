@@ -168,3 +168,69 @@ the existing owner check. Day-turn imports are now effect-free. Both source
 closures check clean; the native-turn green band reads 511 and host-walk reads
 8796093022207. The renewal check preserves the exact original deadline and
 refuses an unavailable generation resource.
+
+## Owner renewal and final native overview
+
+The renewal repair landed as `bb2b842d0ab725f2961b414b51a9885a5a8595bc`.
+Its current required release checks, including the complete sealed-source CLI
+build, passed `pass=63 full=63 refused=0`; both remote refs agreed afterward.
+
+Before changing the real owner, the configured launchd job, executable, cwd,
+PID and kernel start were checked. It was paused in its private GPU phase,
+with no candidate publication marker. The source and latest checkpoint were
+revalidated while paused: repair, 20 of 24 replies, 19 calls. The exact request,
+checkpoint, owning gap, checks, original deadline and pending normal
+publication/ledger path were retained in the walk's private continuation.
+Pre-renewal generated/injected usage was not retained and remains unknown.
+
+PID 27518 then ended. Its still-matching old frame `/fgn-60575efc`, sequence
+560, 2664 bytes, was withdrawn only after confirmed death and matching raw
+length/digest/sequence. Sequence 562 carried zero bytes and read absent.
+No obsolete snapshot was decoded. The existing checkout lock was taken from
+the dead owner, source/binary freshness checked, and the configured launchd
+job restarted.
+
+Replacement PID 21239, kernel start 1792563059056, executes field version 6
+and resumed the same checkpoint at reply 20/call 19. Its original monotonic
+deadline remains 1637109067; neither the reply allowance nor that window was
+extended. Its actual prefill root `[63,0,2,314878]` was read in two independent
+processes with that exact ID and zero reader node mints. Its descriptor was
+64 bytes and origin matched the current owner lifetime. The observation frame
+retained the actual model root and was withdrawn after the second reader.
+The real coding task continues in its native owned pipeline.
+
+The overview now projects this native prefill source into the existing model
+owner section, including last slice phase, settled positions and positions in
+flight. It binds the root to the current admission, exact host start and
+kernel start, verifies mapping release, and retains the actual source NodeID
+in the metric. The source timestamp is preserved through owner-frame
+publication: it is an event, not a heartbeat or a prompt percentage.
+
+The live overview proof observed `session-owner.21239.prefill`, 4705 settled
+positions and 64 in flight, linked to `[63,0,2,343039]` from
+`[21239,1792563059056]`. Its original source epoch 1792563918670 remained older
+than the owner-frame epoch 1792563919954; the rendered row showed source age
+1 s. Later readings advanced to 5292 settled positions. Keeper 35015 stayed
+alive across readings, presentation age 127 ms, with zero missing gauges,
+stale gauges or typed gaps in that sample. Source changes can renew the
+viewing fleet; the open supervisor owns that renewal.
+
+After the fleet renewed, actual `organs` root `[63,0,2,308251]`, origin
+`[21028,1792563049717]`, again matched across two independent readers with
+zero mints. Its replacement `[63,0,2,308294]` made the old ID unresolvable
+while the held root and descendant survived collection. The observer's two
+holds returned to zero after release and collection.
+
+The unused sensor text encoder/parser had only its old band as a caller.
+Those definitions and their field-count authority are removed. The existing
+sensor band now observes the real 64-byte native frame, including source-node
+identity and original timestamp, and retains verdict 2047. Standalone runtime
+holds now use PID/start/task-scoped continuations; only the owning day-turn
+can write the manager continuation. Their paths have one home in `hearth.bml`.
+
+The final native witness checks freshness 31, renewal closures and scope 0,
+native-turn green 511, sensor rows 2047, observer 67108863, and fourteen Glass
+source closures clean. These are observed values/bitmasks, not test counts.
+The public final landing is invoked through `observe/land-run.bml` with
+`.hearth/glass-final-visible-land.json`; its native continuation retains the
+current gate and publication results.

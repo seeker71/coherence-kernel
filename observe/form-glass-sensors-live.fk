@@ -29,6 +29,7 @@ import gate/drift-gates.bml;
 import form/form-stdlib/bml/form-core-care.bml;
 import form/form-stdlib/sort.fk;
 import form/form-stdlib/bml/model-admission.bml;
+import form/form-stdlib/bml/qwen38-prefill-completion.bml;
 section [form.bml] {
     def FGSLGovernorSource() = "observe/form-resource-governor-glass-current-run.fk";
     def fgsl-due?(now, last, every) = last < 0 ? 1 : now - last >= every ? 1 : 0;
@@ -39,7 +40,31 @@ section [form.bml] {
     def fgsl-owner-rows(now, frame) = {
         let inventory = fgtm-inventory(FGLRoot());
         let samples = fgl-local-samples(fgl-dedupe-samples(append(fgl-jit-current-samples(), fgl-external-samples(fgl-inventory-samples-at(inventory, now)))), now);
-        append(fgl-owner-rows-at(0, [], samples, now),fgo-observe-rows(fgsl-session-owner-rows(),now,frame));
+        append(fgl-owner-rows-at(0, [], samples, now),fgsr-publication-stamps(fgsl-session-owner-rows(),fgsr-held(frame,now,[])));
+    };
+    def fgsl-prefill-owner-row(owner) {
+        let pid=owner[0];
+        let process=host_process(pid);
+        let cwd=value_kind(process) == "list" && len(process) > 3 ? process[3] : "";
+        let handle=cwd == "" ? nothing() : ggf-receive(q38pc-publisher(pid,cwd));
+        let root=ggf-root(handle);
+        let sequence=ggf-seq(handle);
+        let cell=ggf-root-cell(root);
+        let origin=ggf-root-origin(root);
+        let live=kernel_live(pid);
+        let currentProcess=host_process(pid);
+        let released=ggf-release(handle);
+        nothing?(root) ? [] : {
+            let valid=released == 1 && q38pc-progress-cell?(cell,pid,cwd) && value_kind(currentProcess) == "list" && len(currentProcess) > 5 && currentProcess[0] == pid && currentProcess[5] == owner[4] && len(live) > 19 && live[1] == pid && live[19] == 1 && origin[0] == pid && origin[1] == live[2] && origin[1] >= owner[4];
+            let id="session-owner." + pid.str() + ".prefill";
+            let label="Model PID " + pid.str() + " prefill";
+            !valid ? [fgo-unavailable("model",id,label,"positions","process-time","qwen-prefill.owner-root","model","the native prefill root did not bind to this admitted lifetime or release its mapping cleanly")] : {
+                let settled=cell[3] == "completed" ? cell[4] + cell[5] : cell[4];
+                let value="last slice " + cell[3] + "; " + settled.str() + " settled" + (cell[3] == "waiting" ? "; " + cell[5].str() + " in flight" : "");
+                let row=fgo-text("model",id,label,value,"process-time","derived-window","qwen-prefill.owner-root","stored","model","Last native slice event, not a heartbeat or total prompt percentage. Source time and the actual shared owner root are retained.");
+                [append(fgo-observe-row(row,cell[6],sequence),[root])];
+            };
+        };
     };
     def fgsl-session-owner-rows() {
         let notes = adm-observe-residents(adm-root());
@@ -49,7 +74,8 @@ section [form.bml] {
             let scope = "Live PIDs bound to current admission notes; an admitted open may still be in progress. Direct Whisper and the optional dual token-flow seed use separate paths. This is not a decode-activity claim.";
             let owners = map(row => fgo-text("model","session-owner." + row[0].str(),"Model owner PID " + row[0].str(),value_str(map(path => { let parts = split-on(path,"/"); parts[len(parts) - 1]; },row[2])),"process-time","derived-window","model-admission.note+host-process-lifetime","resident","model",scope + " note-written-ms=" + row[3].str() + " process-start-ms=" + row[4].str()),current);
             let memory = map(row => { let process = fgo-process-read(row[0]); fgo-int-or-unavailable("process","session-owner." + row[0].str() + ".rss","Model PID " + row[0].str() + " RSS",fgo-ps-rss-bytes(process),"bytes",fgo-ps-rss-bytes(process),"os-memory","physical-live","host.processes","live","model","Process RSS, not model allocation; shared pages overlap across owners.","the host did not expose this owner's RSS"); },current);
-            append([fgo-int("model","session-owner-count","Admitted native model owners",len(current),"owners",len(current),"process-time","derived-window","model-admission.notes+host-process-lifetime",nil?(current) ? "empty" : "live","model",scope)],append(owners,append(memory,nil?(unbound) ? [] : [fgo-unavailable("model","session-owner-binding","Unbound model admission notes","owners","process-time","model-admission.note+host-process-lifetime","model",len(unbound).str() + " live PID notes could not be bound to this process lifetime")])));
+            let prefill=foldl((rows,owner)=>append(rows,fgsl-prefill-owner-row(owner)),[],current);
+            append([fgo-int("model","session-owner-count","Admitted native model owners",len(current),"owners",len(current),"process-time","derived-window","model-admission.notes+host-process-lifetime",nil?(current) ? "empty" : "live","model",scope)],append(owners,append(memory,append(prefill,nil?(unbound) ? [] : [fgo-unavailable("model","session-owner-binding","Unbound model admission notes","owners","process-time","model-admission.note+host-process-lifetime","model",len(unbound).str() + " live PID notes could not be bound to this process lifetime")]))));
         };
     };
     def fgsl-governor-held(last) = (String) value_kind(last) == "list" ? last : fgsl-governor-retained(fgl-last-take("governor-care"));

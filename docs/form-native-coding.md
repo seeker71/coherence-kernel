@@ -155,7 +155,12 @@ frame; `ggf-receive` and `ggf-cell` return
 The primitive `node_gift_read` returns its owning shared root; its first child
 is that value. Readers retain the generation through native GC.
 Join its owner and timestamp to the live model lease before treating a retained
-frame as current. Positions, completion and the carrier deadline distinguish
+frame as current. Glass shows this last slice under native model owners and
+retains the actual shared root as the metric's source. Its age comes from the
+slice event, independently of sensor updates. Waiting at position N with count
+M means N settled positions and M in flight; completion means N+M settled.
+The frame carries no total prompt length or percentage.
+Positions, completion and the carrier deadline distinguish
 slow progress from an unfinished wait. Q4_K and Q6_K prefill use the shared
 matrix-unit tile with their declared decoders and output pitch; Q8 keeps its
 wider matrix tile. Numerical agreement and span invariance have separate checks.
