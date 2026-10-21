@@ -1,6 +1,10 @@
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
+#if !defined(_WIN32)
+#include <sys/file.h>
+extern int fsync(int);
+#endif
 #if defined(_WIN32)
 /* fkwu Windows port shim (mingw-w64) — guarded by _WIN32 so the mac/linux path is byte-identical.
  * mingw's <io.h> declares read/write/mkdir with int / unsigned-int signatures that clash with the
@@ -474,6 +478,7 @@ static void fk_store_unlink_pid(long long pid);
 #define FK_STR_BASE (1LL << 40)
 #define FK_FLT_BASE (1LL << 40)
 static int fk_field_on;
+static int fk_owned_reset;
 static int fk_field_tried;
 static volatile long long *fk_field_hdr;
 static long long *fk_fph;
@@ -492,6 +497,14 @@ static int fk_field_open(void);
 /* the shared pairs this process has mapped (whole segments of FK_FIELD_PAIRS); a read past them maps the next segment first */
 static long long fk_field_pair_ready;
 static long long fk_field_pair_slow(long long at, int tail);
+static int fk_owned_value(long long value);
+static void fk_owned_mark(long long value);
+static void fk_owned_mark_begin(void);
+static void fk_owned_mark_end(void);
+static long long fk_owned_promote(long long value);
+static void fk_owned_exit(void);
+static int fk_owned_lock(void);
+static void fk_owned_unlock(void);
 /* every read of a pair, a string cell or a float goes through one door, so the shared arenas can stand behind the same words */
 #define FK_HH(p) ((p) >= FK_PAIR_BASE ? ((p) - FK_PAIR_BASE < fk_field_pair_ready ? fk_fph[(p) - FK_PAIR_BASE] : fk_field_pair_slow((p) - FK_PAIR_BASE, 0)) : fk_hh[(p)])
 #define FK_HT(p) ((p) >= FK_PAIR_BASE ? ((p) - FK_PAIR_BASE < fk_field_pair_ready ? fk_fpt[(p) - FK_PAIR_BASE] : fk_field_pair_slow((p) - FK_PAIR_BASE, 1)) : fk_ht[(p)])
@@ -1736,6 +1749,7 @@ static long long fk_neq(long long a, long long b) {
  * first and is one AND: `eq` and `lt` walk integers in every loop this body
  * runs, and they must not pay for a hazard they cannot have. */
 static long long fk_movable(long long v) {
+    if (fk_owned_value(v)) { return 1; }
     if ((v & 1) == 0) {
         return 0;                       /* an int carries itself */
     }
@@ -1896,6 +1910,10 @@ static long long fk_fbentered;   /* fb_record calls entered (kernel_stat 12) */
 static long long fk_fbaccepted;  /* fb_record calls accepted (kernel_stat 13) */
 static long long fk_fblastidx;   /* the last node index fb_record saw, accepted or not (kernel_stat 14) */
 static void **fk_gift_base;      /* gift frames: mapped bases (0 = released) */
+static char (*fk_gift_names)[32];
+static int *fk_gift_writable;
+static long long *fk_gift_allowance;
+static int *fk_gift_scoped;
 static long long *fk_gift_size;  /* gift frames: mapped sizes */
 static long long fk_gift_count;
 static long long fk_gift_cap;
@@ -5329,6 +5347,7 @@ static int fk_inram_resident_request(long long request, long long *action,
 
 static void fk_nodes_grow(void);
 static int fk_inram_node_index(long long identity, long long *index) {
+    if (fk_owned_value(identity)) { return 0; }
     long long ix;
     if (identity >= 0) {
         return 0;
@@ -9117,6 +9136,7 @@ static long long fk_clo_drain(void);
 static long long fk_mlive_go(long long b) {
     long long n = 0;
     while ((b & 1) != 0) {
+        fk_owned_mark(b);
         long long p = b >> 1;
         if (b < fk_fnbase && b > fk_fnval_floor) {
             /* an fn-value: a closure row it names is reached, and keeps what it captured */
@@ -9410,6 +9430,8 @@ static void fk_melt(void) {
     long long phase0 = fk_phase;
     fk_phase = FK_PHASE_MELT;   /* the time board's phase */
     fk_melt_gen = fk_melt_gen + 1;
+    fk_owned_mark_begin();
+    for (long long owned_fb = fk_fbn > FK_FB_RING ? fk_fbn - FK_FB_RING : 0; owned_fb < fk_fbn; owned_fb++) { fk_owned_mark(fk_fbroots[owned_fb % FK_FB_RING]); }
     long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
     if (fk_fw == 0) {
@@ -9451,6 +9473,7 @@ static void fk_melt(void) {
         nlive = nlive + fk_mlive(fk_rbp[k]);
         long long rj = 0;
         while (rj < fk_rcnt[k]) {
+            fk_owned_mark(fk_strv(fk_rkey[k][rj]));
             nlive = nlive + fk_mlive(fk_rval[k][rj]);
             rj = rj + 1;
         }
@@ -9563,6 +9586,7 @@ static void fk_melt(void) {
     fk_nmelt = fk_nmelt + 1;
     fk_phase = FK_PHASE_SMELT;
     fk_smelt();
+    fk_owned_mark_end();
     fk_phase = FK_PHASE_MELT;
     fk_live_publish(0);
     fk_phase = phase0;
@@ -15302,7 +15326,7 @@ static int fk_gift_live(long long gh) {
  * P Q shared pairs; s O L X shared node-strings (bytes, offsets, lengths, hash); F Y shared floats (values, hash).
  * A kernel that cannot open the field keeps private tables and says so on its live page (word 22). */
 #define FK_FIELD_MAGIC 0x4649454C44LL
-#define FK_FIELD_VERSION 5   /* 5: shared pairs grow by segments (a binary of 4 would read past its mapping) */
+#define FK_FIELD_VERSION 6   /* 6: frame-owned generations; old readers must not borrow reusable ranges */
 #define FK_FIELD_NODES (1LL << 26)
 #define FK_FIELD_PAIRS (1LL << 27)
 #define FK_FIELD_STRB (1LL << 31)
@@ -15311,7 +15335,7 @@ static int fk_gift_live(long long gh) {
 #define FK_FIELD_HASH (1LL << 27)
 #define FK_FIELD_SHASH (1LL << 25)
 #define FK_FIELD_FHASH (1LL << 25)
-static const char fk_field_letters[] = "hkcivnfloamxPQsOLXFY";
+static const char fk_field_letters[] = "hkcivnfloamxPQsOLXFYg";
 static long long *fk_field_itab;
 static long long *fk_fstab;
 static long long *fk_fftab;
@@ -15440,7 +15464,13 @@ static long long fk_field_pair_slow(long long at, int tail) {
 static long long fk_field_pp(void) { return fk_field_on ? fk_field_hdr[2 + 3] : 0; }
 static long long fk_field_sp(void) { return fk_field_on ? fk_field_hdr[2 + 4] : 0; }
 static long long fk_field_fp(void) { return fk_field_on ? fk_field_hdr[2 + 6] : 0; }
-static long long fk_field_claim(long long word, long long n) { return __atomic_fetch_add(&fk_field_hdr[2 + word], n, __ATOMIC_ACQ_REL); }
+static long long fk_field_claim(long long word, long long n) {
+    int locked = fk_owned_lock();
+    if (!locked) { fk_die("fkwu: the shared field ownership lock is unavailable; allocation refused"); }
+    long long out = __atomic_fetch_add(&fk_field_hdr[2 + word], n, __ATOMIC_ACQ_REL);
+    if (locked) { fk_owned_unlock(); }
+    return out;
+}
 /* opens every column; answers 1 when this kernel's node tables now live in the field */
 static int fk_field_open(void) {
     if (fk_field_on) { return 1; }
@@ -15472,7 +15502,12 @@ static int fk_field_open(void) {
 }
 static void fk_field_unlink_all(void) {
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    fk_owned_reset = 1;
     if (fk_field_hdr) {
+        for (int owned_kind = 0; owned_kind < 2; owned_kind++) {
+            long long total = fk_field_hdr[owned_kind ? 11 : 10];
+            for (long long seg = 0; seg * 256 < total; seg++) { char nm[32]; sprintf(nm, "/fg-field%d-%c%llx", FK_FIELD_VERSION, owned_kind ? 'e' : 'r', (unsigned long long)seg); shm_unlink(nm); }
+        }
         long long end = fk_field_hdr[7] / FK_FIELD_STRB + 1, j = 1;
         while (j < end) { char nm[32]; fk_field_string_name(j++, nm); shm_unlink(nm); }
         long long pend = fk_field_hdr[2 + 3] / FK_FIELD_PAIRS + 1;
@@ -15568,6 +15603,7 @@ static long long fk_field_share_float(long long fv) {
 }
 /* every word a shared cell carries must itself be shared: lists copied into shared pairs, strings and floats interned */
 static long long fk_field_share_value(long long v) {
+    if (fk_owned_value(v)) { return fk_owned_promote(v); }
     if (v == fk_nothing) { return v; }
     if ((v & 1) == 0) { return v; }
     if (fk_is_str(v)) { return fk_field_share_string(v); }
@@ -15871,15 +15907,27 @@ static long long fk_gift_open(const char *gname, long long want, int writable) {
         long long nc = fk_gift_cap == 0 ? 8 : fk_gift_cap * 2;
         void **nb = realloc(fk_gift_base, sizeof(void *) * (unsigned long)nc);
         long long *ncap = realloc(fk_gift_size, sizeof(long long) * (unsigned long)nc);
-        if (nb == 0 || ncap == 0) {
+        char (*names)[32] = realloc(fk_gift_names, (unsigned long)(nc * 32));
+        int *modes = realloc(fk_gift_writable, (unsigned long)(nc * sizeof(int)));
+        long long *allowance = realloc(fk_gift_allowance, (unsigned long)(nc * 8));
+        int *scopes = realloc(fk_gift_scoped, (unsigned long)(nc * sizeof(int)));
+        if (nb == 0 || ncap == 0 || names == 0 || modes == 0 || allowance == 0 || scopes == 0) {
             fk_die("fkwu: gift table: out of memory growing");
         }
         fk_gift_base = nb;
         fk_gift_size = ncap;
+        fk_gift_names = names; fk_gift_writable = modes;
+        fk_gift_allowance = allowance;
+        fk_gift_scoped = scopes;
         fk_gift_cap = nc;
     }
     fk_gift_base[fk_gift_count] = base;
     fk_gift_size[fk_gift_count] = cap;
+    memset(fk_gift_names[fk_gift_count], 0, 32);
+    memcpy(fk_gift_names[fk_gift_count], gname, (size_t)(fk_path_len(gname) + 1));
+    fk_gift_writable[fk_gift_count] = writable;
+    fk_gift_allowance[fk_gift_count] = want;
+    fk_gift_scoped[fk_gift_count] = 0;
     fk_gift_count = fk_gift_count + 1;
     fk_gift_active = fk_gift_active + 1; fk_gift_bytes = fk_gift_bytes + cap;
     return (fk_gift_count - 1) << 1;
@@ -15917,9 +15965,9 @@ static long long *fk_src_dep_text_off;
 static long long *fk_src_dep_text_len;
 /* append n bytes to the string builder at fk_sbp, growing it as every arm does */
 static void fk_sappend(const char *bytes, long long n) {
-    /* A crossing can append bytes already in this pool. Keep their offset
-     * across host relocation. This seed carrier leaves with the native Form
-     * crossing codec; it adds no new runtime meaning. */
+    /* Durable image emission can append bytes already in this pool. Keep
+     * their offset across host relocation. This physical builder leaves
+     * with the native Form image emitter. */
     unsigned long long source = (unsigned long long)(const void *)bytes;
     unsigned long long base = (unsigned long long)(const void *)fk_sb;
     long long source_off = source >= base && source - base < (unsigned long long)fk_scap_b ? (long long)(source - base) : -1;
@@ -16134,8 +16182,8 @@ static long long fk_make_nodeid(long long p91, long long l91, long long ty91, lo
  * move for FK_GIFT_GIVE_SPINS closes it on that writer's behalf and takes its
  * own turn -- a frame heals rather than staying dark. */
 #define FK_GIFT_GIVE_SPINS 200000
-static long long fk_gift_give(long long gh, const char *bytes, long long n) {
-    if (!fk_gift_live(gh)) {
+static long long fk_gift_give_bytes(long long gh, const char *bytes, long long n) {
+    if (!fk_gift_live(gh) || !fk_gift_writable[gh]) {
         return fk_nothing;
     }
     volatile long long *gseq = (volatile long long *)fk_gift_base[gh];
@@ -16210,80 +16258,485 @@ static long long fk_gift_take_str(long long gh) {
         }
     }
 }
-/* THE CELL CROSSING: a value crosses a gift frame as itself. Words, one tag
- * byte each: N nothing, I int, F float, S string, L list (count, elements,
- * then Z for nil or the dotted tail), and the cells -- i/s/b/f the trivial
- * nodes, C a composite (category then children, re-interned on read so the
- * same category over the same children is the same cell, axiom 3), D a
- * NodeID coordinate. A function value cannot cross and refuses the give. */
-static long long fk_cross_refused;
-static void fk_cross_put_i64(long long v) { fk_sappend((const char *)&v, 8); }
-static void fk_cross_put_u32(long long v) { unsigned int u = (unsigned int)v; fk_sappend((const char *)&u, 4); }
-static void fk_cross_emit(long long v, long long depth) {
-    if (depth > 100000) { fk_cross_refused = 1; return; }
-    if (v == fk_nothing) { fk_sappend("N", 1); return; }
-    if (fk_isf(v)) { double d = fk_num(v); fk_sappend("F", 1); fk_sappend((const char *)&d, 8); return; }
-    if (fk_is_str(v)) { long long si = fk_stri(v); fk_sappend("S", 1); fk_cross_put_u32(FK_SLEN(si)); fk_sappend(FK_SBYTES(si), FK_SLEN(si)); return; }
-    if (v >= fk_fnbase && v < fk_fnbase + 8192) { fk_cross_refused = 1; fk_sappend("N", 1); return; }
-    if ((v & 1) == 0) { fk_sappend("I", 1); fk_cross_put_i64(v >> 1); return; }
-    if (v >= 0) {
-        /* a list: count the proper elements, then emit them and the tail */
-        long long p = v, count = 0;
-        while ((p & 1) && p != 1 && (p >> 1) >= 1 && FK_POK(p >> 1) && count < 100000000) { count = count + 1; p = FK_HT(p >> 1); }
-        fk_sappend("L", 1); fk_cross_put_u32(count);
-        p = v;
-        long long k = 0;
-        while (k < count) { fk_cross_emit(FK_HH(p >> 1), depth + 1); p = FK_HT(p >> 1); k = k + 1; }
-        if (p == 1) { fk_sappend("Z", 1); } else { fk_cross_emit(p, depth + 1); }
-        return;
-    }
-    if (v >= fk_fnbase && v < fk_fnbase + 8192) { fk_cross_refused = 1; fk_sappend("N", 1); return; }
-    long long ix = fk_nidx(v);
-    if (ix < 1 || ix > fk_np) { fk_cross_refused = 1; fk_sappend("N", 1); return; }
-    if (fk_nkind[ix] == 1) {
-        long long sub = fk_nid_get(fk_nid[ix], 2);
-        if (sub == 1) { fk_sappend("i", 1); fk_cross_put_i64(fk_nval[ix] >> 1); return; }
-        if (sub == 2) { long long si = fk_stri(fk_nval[ix]); fk_sappend("s", 1); if (si < 0) { fk_cross_put_u32(0); return; } fk_cross_put_u32(FK_SLEN(si)); fk_sappend(FK_SBYTES(si), FK_SLEN(si)); return; }
-        if (sub == 3) { fk_sappend("b", 1); fk_sappend(fk_nval[ix] == (0 - 9223372036854775807LL) ? "\1" : "\0", 1); return; }
-        if (sub == 7) { double d = fk_num(fk_nval[ix]); fk_sappend("f", 1); fk_sappend((const char *)&d, 8); return; }
-        fk_cross_refused = 1; fk_sappend("N", 1); return;
-    }
-    if (fk_nkind[ix] == 3) { fk_sappend("D", 1); fk_cross_put_i64(fk_nid_get(fk_nid[ix], 0)); fk_cross_put_i64(fk_nid_get(fk_nid[ix], 1)); fk_cross_put_i64(fk_nid_get(fk_nid[ix], 2)); fk_cross_put_i64(fk_nid_get(fk_nid[ix], 3)); return; }
-    fk_sappend("C", 1);
-    fk_cross_emit(fk_ncat[ix], depth + 1);
-    fk_cross_emit(fk_nkids[ix], depth + 1);
+/* Frame-owned native generations. The frame carries eight reference words,
+ * never a value encoding. Ranges are outside the permanent intern indices.
+ * A frame is a durable owner; a process is a reader only for its exact life.
+ * The local melt traces all borrowed descendants before releasing its holds.
+ * Retired ranges can be reused; their full NodeID (field incarnation, serial)
+ * never can. SHRINK: these are physical field allocation/atomicity operations;
+ * publication validation, choices and care stay in Form's gift/membrane owner.
+ * The native arena/heap replaces this carrier with the seed's field allocator. */
+#define FK_OWN_MAGIC 0x464B524546303031LL
+#define FK_OWN_SEG 256
+typedef struct {
+    long long state, generation, pid, birth, root;
+    long long pb, pc, sb, sc, bb, bc, fb, fc;
+    long long pu, su, bu, fu, mark, permanent;
+    long long process_owned;
+    char frame[32];
+    long long prior[8];
+} fk_owned_generation;
+typedef struct { long long pid, birth, slot, generation; } fk_owned_hold;
+typedef struct { long long slot, generation, hold, mark; } fk_owned_reader;
+static void **fk_owned_segments[2];
+static long long fk_owned_segment_n[2];
+static int fk_owned_fd = -1, fk_owned_depth;
+static long long *fk_owned_owner;
+static fk_owned_reader *fk_owned_readers;
+static long long fk_owned_reader_n, fk_owned_reader_cap, fk_owned_reclaimed;
+static long long fk_owned_reused, fk_owned_born;
+static long long fk_live_read_words(const char *, long long *, long long);
+static void fk_live_pid_name(long long, char *);
+static long long fk_owned_birth(long long pid) {
+    char name[32]; long long w[4]; fk_live_pid_name(pid, name);
+    return fk_live_read_words(name, w, 4) == 4 && w[1] == pid ? w[2] : 0;
 }
-static long long fk_cross_get_i64(const char *b, long long n, long long *pos) { long long v = 0; if (*pos + 8 <= n) { long long k = 0; while (k < 8) { ((char *)&v)[k] = b[*pos + k]; k = k + 1; } } *pos = *pos + 8; return v; }
-static long long fk_cross_get_u32(const char *b, long long n, long long *pos) { unsigned int u = 0; if (*pos + 4 <= n) { long long k = 0; while (k < 4) { ((char *)&u)[k] = b[*pos + k]; k = k + 1; } } *pos = *pos + 4; return (long long)u; }
-static long long fk_cross_decode(const char *b, long long n, long long *pos, long long depth) {
-    if (depth > 100000 || *pos >= n) { fk_cross_refused = 1; return fk_nothing; }
-    char tg = b[*pos]; *pos = *pos + 1;
-    if (tg == 'N') { return fk_nothing; }
-    if (tg == 'I') { return fk_cross_get_i64(b, n, pos) << 1; }
-    if (tg == 'F') { long long w = fk_cross_get_i64(b, n, pos); double d; { long long k = 0; while (k < 8) { ((char *)&d)[k] = ((char *)&w)[k]; k = k + 1; } } return fk_fbox(d); }
-    if (tg == 'S' || tg == 's') { long long len = fk_cross_get_u32(b, n, pos); if (*pos + len > n) { fk_cross_refused = 1; return fk_nothing; } long long sv = fk_sbuf(b + *pos, len); *pos = *pos + len; return tg == 'S' ? sv : fk_intern_str_node(sv); }
-    if (tg == 'i') { return fk_intern_int_node(fk_cross_get_i64(b, n, pos) << 1); }
-    if (tg == 'b') { char bv = b[*pos]; *pos = *pos + 1; return fk_intern_bool_node(bv ? 2 : 0); }
-    if (tg == 'f') { long long w = fk_cross_get_i64(b, n, pos); double d; { long long k = 0; while (k < 8) { ((char *)&d)[k] = ((char *)&w)[k]; k = k + 1; } } return fk_intern_float_node(d); }
-    if (tg == 'D') { long long p = fk_cross_get_i64(b, n, pos), l = fk_cross_get_i64(b, n, pos), ty = fk_cross_get_i64(b, n, pos), in = fk_cross_get_i64(b, n, pos); return fk_make_nodeid(p, l, ty, in); }
-    if (tg == 'C') { long long cat = fk_cross_decode(b, n, pos, depth + 1); long long kids = fk_cross_decode(b, n, pos, depth + 1); return fk_intern_composite(cat, kids); }
-    if (tg == 'L') {
-        long long count = fk_cross_get_u32(b, n, pos);
-        if (count < 0 || count > 100000000) { fk_cross_refused = 1; return fk_nothing; }
-        long long *elems = malloc(sizeof(long long) * (unsigned long)(count + 1));
-        if (elems == 0) { fk_die("fk_cross_decode: out of memory for a list"); }
-        long long k = 0;
-        while (k < count) { elems[k] = fk_cross_decode(b, n, pos, depth + 1); k = k + 1; }
-        long long tail = 1;
-        if (*pos < n && b[*pos] == 'Z') { *pos = *pos + 1; } else { tail = fk_cross_decode(b, n, pos, depth + 1); }
-        k = count;
-        while (k > 0) { k = k - 1; tail = fk_cons_val(elems[k], tail); }
-        free(elems);
-        return tail;
+static int fk_owned_alive(long long pid, long long birth) {
+    return pid > 0 && !fk_pid_gone(pid) && birth > 0 && fk_owned_birth(pid) == birth;
+}
+static int fk_owned_init(void) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    if (!fk_field_on || fk_owned_reset) { return 0; }
+    if (fk_owned_fd >= 0) { return 1; }
+    /* Darwin's POSIX shm descriptors do not support flock. This stable inode
+     * retains the host's incarnation counter across reset and is never unlinked. */
+    fk_owned_fd = open("/tmp/form-field6.lock", O_CREAT | O_RDWR, 0600);
+    if (fk_owned_fd < 0) { return 0; }
+    fcntl(fk_owned_fd, F_SETFD, FD_CLOEXEC);
+    fk_owned_owner = fk_field_take('g', FK_FIELD_NODES * 8);
+    if (!fk_owned_owner) { close(fk_owned_fd); fk_owned_fd = -1; return 0; }
+    return 1;
+#else
+    return 0;
+#endif
+}
+static void *fk_owned_row(int kind, long long index) {
+    long long seg = index / FK_OWN_SEG, count = fk_owned_segment_n[kind];
+    if (seg >= count) {
+        void **next = realloc(fk_owned_segments[kind], (unsigned long)((seg + 1) * sizeof(void *)));
+        if (!next) { fk_die("fkwu: native generation metadata needs memory"); }
+        while (count <= seg) { next[count++] = 0; }
+        fk_owned_segments[kind] = next; fk_owned_segment_n[kind] = seg + 1;
     }
-    fk_cross_refused = 1;
+    long long rowbytes = kind ? sizeof(fk_owned_hold) : sizeof(fk_owned_generation);
+    if (!fk_owned_segments[kind][seg]) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+        char name[32]; sprintf(name, "/fg-field%d-%c%llx", FK_FIELD_VERSION, kind ? 'e' : 'r', (unsigned long long)seg);
+        int fd = shm_open(name, O_CREAT | O_RDWR, 0600); struct stat st;
+        long long bytes = FK_OWN_SEG * rowbytes;
+        if (fd < 0 || fstat(fd, &st) || (st.st_size == 0 && ftruncate(fd, bytes))) { fk_die("fkwu: native generation metadata cannot open"); }
+        void *p = mmap(0, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); close(fd);
+        if (p == MAP_FAILED) { fk_die("fkwu: native generation metadata cannot map"); }
+        fk_owned_segments[kind][seg] = p;
+#else
+        fk_die("fkwu: native generation metadata has no shared carrier");
+#endif
+    }
+    return (char *)fk_owned_segments[kind][seg] + (index % FK_OWN_SEG) * rowbytes;
+}
+static fk_owned_generation *fk_owned_gen(long long slot) { return fk_owned_row(0, slot); }
+static fk_owned_hold *fk_owned_lease(long long index) { return fk_owned_row(1, index); }
+static void fk_owned_recover(void) {
+    long long pending = fk_field_hdr[14];
+    if (pending < 0) {
+        fk_owned_generation *g = fk_owned_gen(-pending - 1);
+        long long bytes = 0; char *p = fk_shm_map(g->frame, 0, 1, &bytes);
+        if (p && bytes >= 80 && (((long long *)p)[0] & 1)) {
+            memcpy(p + 16, g->prior, 64); ((long long *)p)[1] = 64;
+            __atomic_add_fetch((long long *)p, 1, __ATOMIC_RELEASE);
+        }
+        if (!p || bytes < 80 || ((long long *)p)[0] & 1 || ((long long *)p)[1] != 64 || memcmp(p + 16, g->prior, 64)) { g->state = 3; }
+        if (p) { munmap(p, (size_t)bytes); }
+        fk_field_hdr[14] = 0; return;
+    }
+    if (pending > 0) {
+        fk_owned_generation *g = fk_owned_gen(pending - 1);
+        if (fk_field_hdr[10] < pending) { fk_field_hdr[10] = pending; }
+        long long ends[7] = {0, 0, g->root, g->pb + g->pc, g->sb + g->sc, g->bb + g->bc, g->fb + g->fc};
+        for (int j = 2; j <= 6; j++) { if (fk_field_hdr[2 + j] < ends[j]) { fk_field_hdr[2 + j] = ends[j]; } }
+        long long bytes = 0; char *p = fk_shm_map(g->frame, 0, 1, &bytes);
+        int installed = p && bytes >= 80 && !(((long long *)p)[0] & 1) && ((long long *)p)[1] == 64 && ((long long *)(p + 16))[0] == FK_OWN_MAGIC && ((long long *)(p + 16))[1] == fk_field_hdr[13] && ((long long *)(p + 16))[2] == pending - 1 && ((long long *)(p + 16))[3] == g->generation;
+        if (p && (((long long *)p)[0] & 1)) {
+            /* Restore the old reference after an interrupted publication. */
+            memcpy(p + 16, g->prior, 64); ((long long *)p)[1] = g->prior[0] == FK_OWN_MAGIC ? 64 : 0;
+            __atomic_add_fetch((long long *)p, 1, __ATOMIC_RELEASE);
+        }
+        if (p) { munmap(p, (size_t)bytes); }
+        g->state = installed ? 2 : 3;
+        if (installed) {
+            for (long long j = 0; j < fk_field_hdr[10]; j++) { fk_owned_generation *old = fk_owned_gen(j); if (j != pending - 1 && old->state == 2 && !memcmp(old->frame, g->frame, 32)) { old->state = 3; } }
+        }
+        fk_field_hdr[14] = 0;
+    }
+}
+static int fk_owned_lock(void) {
+    if (!fk_owned_init()) { return 0; }
+    if (fk_owned_depth++ == 0) {
+#if !defined(_WIN32)
+        if (flock(fk_owned_fd, LOCK_EX)) { fk_owned_depth = 0; return 0; }
+#endif
+#if !defined(_WIN32)
+        if (!fk_field_hdr[13]) {
+            long long incarnation = 0;
+            lseek(fk_owned_fd, 0, 0); long long got = read(fk_owned_fd, &incarnation, 8);
+            if (got == 0) { lseek(fk_owned_fd, 0, 0); if (write(fk_owned_fd, &incarnation, 8) != 8 || fsync(fk_owned_fd)) { fk_die("fkwu: native field identity journal cannot start"); } }
+            else if (got != 8 || incarnation < 0) { fk_die("fkwu: native field identity journal is unreadable"); }
+            /* The initial word also admits the previous seed's retained
+             * counter. New incarnations append a checked, durable record.
+             * A torn unacknowledged tail cannot roll an accepted ID back. */
+            long long end = 8, entry[2];
+            for (;;) {
+                lseek(fk_owned_fd, end, 0); long long n = read(fk_owned_fd, entry, 16);
+                if (n != 16 || entry[1] != ~entry[0] || entry[0] != incarnation + 1) { break; }
+                incarnation = entry[0]; end += 16;
+            }
+            if ((unsigned long long)incarnation >= FK_NID_MASK(FK_NID_LEVEL_BITS + FK_NID_TYPE_BITS)) { fk_die("fkwu: native field incarnation storage cannot admit another identity"); }
+            entry[0] = ++incarnation; entry[1] = ~incarnation;
+            if (ftruncate(fk_owned_fd, end) || lseek(fk_owned_fd, end, 0) != end || write(fk_owned_fd, entry, 16) != 16 || fsync(fk_owned_fd)) { fk_die("fkwu: native field incarnation could not be retained"); }
+            fk_field_hdr[13] = incarnation;
+        }
+#endif
+        fk_owned_recover();
+    }
+    return 1;
+}
+static void fk_owned_unlock(void) {
+    if (fk_owned_depth > 0 && --fk_owned_depth == 0) {
+#if !defined(_WIN32)
+        flock(fk_owned_fd, LOCK_UN);
+#endif
+    }
+}
+static int fk_owned_descriptor(long long gh, long long *ref) {
+    if (!fk_gift_live(gh) || fk_gift_size[gh] < 80) { return 0; }
+    volatile long long *w = fk_gift_base[gh]; long long seq = w[0];
+    if (!seq || (seq & 1) || w[1] != 64) { return 0; }
+    memcpy(ref, (char *)fk_gift_base[gh] + 16, 64);
+    if (w[0] != seq || ref[0] != FK_OWN_MAGIC || ref[1] != fk_field_hdr[13] || ref[2] < 0 || ref[2] >= fk_field_hdr[10]) { return 0; }
+    fk_owned_generation *g = fk_owned_gen(ref[2]);
+    return ref[7] == 1 && g->state == 2 && g->generation == ref[3] && g->root == ref[4] && g->pid == ref[5] && g->birth == ref[6] && !memcmp(g->frame, fk_gift_names[gh], 32);
+}
+static long long fk_owned_hold_add(long long pid, long long birth, long long slot, long long generation) {
+    long long count = fk_field_hdr[11], at = 0;
+    while (at < count) { fk_owned_hold *h = fk_owned_lease(at); if (!h->pid) { break; } at++; }
+    if (at == count) { fk_field_hdr[11] = at + 1; }
+    fk_owned_hold *h = fk_owned_lease(at); h->birth = birth; h->slot = slot; h->generation = generation; h->pid = pid;
+    return at;
+}
+static void fk_owned_pin_one(long long slot) {
+    fk_owned_generation *g = fk_owned_gen(slot);
+    for (long long j = 0; j < fk_owned_reader_n; j++) {
+        if (fk_owned_readers[j].slot == slot && fk_owned_readers[j].generation == g->generation) { return; }
+    }
+    if (fk_owned_reader_n == fk_owned_reader_cap) {
+        long long cap = fk_owned_reader_cap ? fk_owned_reader_cap * 2 : 16;
+        fk_owned_reader *next = realloc(fk_owned_readers, (unsigned long)(cap * sizeof(*next)));
+        if (!next) { fk_die("fkwu: native reader holds need memory"); }
+        fk_owned_readers = next; fk_owned_reader_cap = cap;
+    }
+    long long pid = getpid(), birth = fk_owned_birth(pid);
+    if (!birth) { fk_die("fkwu: native reader has no process lifetime"); }
+    fk_owned_reader r = {slot, g->generation, fk_owned_hold_add(pid, birth, slot, g->generation), 1};
+    fk_owned_readers[fk_owned_reader_n++] = r;
+}
+static void fk_owned_pin(long long slot) {
+    long long first = fk_owned_reader_n; fk_owned_pin_one(slot);
+    /* New holds form a worklist: publication chains do not consume C stack. */
+    for (long long at = first; at < fk_owned_reader_n; at++) {
+        fk_owned_reader r = fk_owned_readers[at];
+        for (long long j = 0; j < fk_field_hdr[11]; j++) {
+            fk_owned_hold *h = fk_owned_lease(j);
+            if (h->pid == -r.slot - 1 && h->birth == r.generation) { fk_owned_pin_one(h->slot); }
+        }
+    }
+}
+static int fk_owned_contains(fk_owned_generation *g, long long v) {
+    if (v == fk_nothing || (v & 1) == 0) { return 0; }
+    long long at;
+    if (fk_is_str(v)) { at = fk_stri(v) - FK_STR_BASE; return at >= g->sb && at < g->sb + g->su; }
+    if (fk_isf(v)) { at = fk_fidx(v) - FK_FLT_BASE; return at >= g->fb && at < g->fb + g->fu; }
+    if (v < 0) { return fk_nidx(v) == g->root; }
+    at = (v >> 1) - FK_PAIR_BASE; return at >= g->pb && at < g->pb + g->pu;
+}
+static int fk_owned_value(long long v) {
+    if (!fk_field_on || !fk_owned_reader_n || (v & 1) == 0 || v == fk_nothing) { return 0; }
+    if (fk_is_str(v) && fk_stri(v) < FK_STR_BASE) { return 0; }
+    if (fk_isf(v) && fk_fidx(v) < FK_FLT_BASE) { return 0; }
+    if (v > 0 && (v >> 1) < FK_PAIR_BASE) { return 0; }
+    for (long long j = 0; j < fk_owned_reader_n; j++) {
+        fk_owned_reader *r = &fk_owned_readers[j]; fk_owned_generation *g = fk_owned_gen(r->slot);
+        if (g->generation == r->generation && fk_owned_contains(g, v)) { return 1; }
+    }
+    return 0;
+}
+static void fk_owned_mark_begin(void) { for (long long j = 0; j < fk_owned_reader_n; j++) { fk_owned_readers[j].mark = 0; } }
+static void fk_owned_mark_slot(long long slot, long long generation) {
+    long long *todo = 0, count = 0;
+    for (long long j = 0; j < fk_owned_reader_n; j++) {
+        fk_owned_reader *r = &fk_owned_readers[j];
+        if (r->slot != slot || r->generation != generation || r->mark) { continue; }
+        todo = malloc((size_t)fk_owned_reader_n * sizeof(*todo));
+        if (!todo) { fk_die("fkwu: native reader marking needs memory"); }
+        r->mark = 1; todo[count++] = j; break;
+    }
+    for (long long at = 0; at < count; at++) {
+        fk_owned_reader r = fk_owned_readers[todo[at]];
+        for (long long k = 0; k < fk_field_hdr[11]; k++) {
+            fk_owned_hold *h = fk_owned_lease(k);
+            if (h->pid != -r.slot - 1 || h->birth != r.generation) { continue; }
+            for (long long j = 0; j < fk_owned_reader_n; j++) {
+                fk_owned_reader *child = &fk_owned_readers[j];
+                if (child->slot == h->slot && child->generation == h->generation && !child->mark) { child->mark = 1; todo[count++] = j; }
+            }
+        }
+    }
+    free(todo);
+}
+static void fk_owned_mark(long long v) {
+    if (!fk_owned_value(v)) { return; }
+    for (long long j = 0; j < fk_owned_reader_n; j++) {
+        fk_owned_reader *r = &fk_owned_readers[j]; fk_owned_generation *g = fk_owned_gen(r->slot);
+        if (g->generation == r->generation && fk_owned_contains(g, v)) { fk_owned_mark_slot(r->slot, r->generation); }
+    }
+}
+static void fk_owned_withdraw(fk_owned_generation *g) {
+    long long bytes = 0; char *p = fk_shm_map(g->frame, 0, 1, &bytes);
+    if (p && bytes >= 80) {
+        volatile long long *w = (volatile long long *)p; long long *r = (long long *)(p + 16), seq = w[0];
+        if (!(seq & 1) && w[1] == 64 && r[0] == FK_OWN_MAGIC && r[1] == fk_field_hdr[13] && r[3] == g->generation && r[4] == g->root) {
+            memcpy(g->prior, r, 64); fk_field_hdr[14] = -fk_owned_owner[g->root];
+            __atomic_store_n(w, seq + 1, __ATOMIC_RELEASE); w[1] = 0; __atomic_store_n(w, seq + 2, __ATOMIC_RELEASE);
+            g->state = 3; fk_field_hdr[14] = 0;
+        }
+    }
+    if (p) { munmap(p, (size_t)bytes); }
+    g->state = 3;
+}
+static void fk_owned_sweep(void) {
+    long long count = fk_field_hdr[10], holds = fk_field_hdr[11];
+    for (long long j = 0; j < count; j++) {
+        fk_owned_generation *g = fk_owned_gen(j);
+        if (g->state == 2 && g->process_owned && !fk_owned_alive(g->pid, g->birth)) { fk_owned_withdraw(g); }
+        if (g->state == 2) {
+            long long bytes = 0; char *p = fk_shm_map(g->frame, 0, 0, &bytes);
+            if (!p || bytes < 80) { g->state = 3; }
+            else {
+                long long seq = ((volatile long long *)p)[0], r[8]; memcpy(r, p + 16, 64);
+                if (!(seq & 1) && ((volatile long long *)p)[0] == seq && (((long long *)p)[1] != 64 || r[0] != FK_OWN_MAGIC || r[1] != fk_field_hdr[13] || r[2] != j || r[3] != g->generation || r[4] != g->root)) { g->state = 3; }
+            }
+            if (p) { munmap(p, (size_t)bytes); }
+        }
+        g->mark = g->state == 2 || g->permanent;
+    }
+    for (long long j = 0; j < holds; j++) {
+        fk_owned_hold *h = fk_owned_lease(j);
+        if (h->pid > 0 && !fk_owned_alive(h->pid, h->birth)) { h->pid = 0; }
+        if (h->pid > 0 && h->slot >= 0 && h->slot < count) {
+            fk_owned_generation *g = fk_owned_gen(h->slot); if (g->generation == h->generation) { g->mark = 1; }
+        }
+    }
+    int moved = 1;
+    while (moved) {
+        moved = 0;
+        for (long long j = 0; j < holds; j++) {
+            fk_owned_hold *h = fk_owned_lease(j);
+            if (h->pid < 0 && -h->pid - 1 < count && h->slot >= 0 && h->slot < count) {
+                fk_owned_generation *parent = fk_owned_gen(-h->pid - 1), *child = fk_owned_gen(h->slot);
+                if (parent->generation != h->birth || child->generation != h->generation) { h->pid = 0; }
+                else if (parent->mark && !child->mark) { child->mark = 1; moved = 1; }
+            }
+        }
+    }
+    for (long long j = 0; j < count; j++) {
+        fk_owned_generation *g = fk_owned_gen(j);
+        if (g->state && !g->mark) {
+            for (long long k = 0; k < holds; k++) { fk_owned_hold *h = fk_owned_lease(k); if (h->pid == -j - 1 && h->birth == g->generation) { h->pid = 0; } }
+            g->state = 0; fk_nkind[g->root] = 0; fk_owned_reclaimed++;
+        }
+    }
+}
+static void fk_owned_mark_end(void) {
+    if (!fk_owned_reader_n || !fk_owned_lock()) { return; }
+    long long kept = 0;
+    for (long long j = 0; j < fk_owned_reader_n; j++) {
+        fk_owned_reader r = fk_owned_readers[j];
+        if (r.mark) { fk_owned_readers[kept++] = r; }
+        else { fk_owned_lease(r.hold)->pid = 0; }
+    }
+    fk_owned_reader_n = kept; fk_owned_sweep(); fk_owned_unlock();
+}
+static void fk_owned_exit(void) {
+    if (!fk_field_on || !fk_owned_lock()) { return; }
+    long long pid = getpid(), birth = fk_owned_birth(pid);
+    for (long long j = 0; j < fk_field_hdr[10]; j++) { fk_owned_generation *g = fk_owned_gen(j); if (g->state == 2 && g->process_owned && g->pid == pid && g->birth == birth) { fk_owned_withdraw(g); } }
+    fk_owned_mark_begin(); fk_owned_mark_end(); fk_owned_sweep(); fk_owned_unlock();
+}
+/* A permanent field node may retain an owned node by its actual identity.
+ * Lists/scalars promoted into permanent tissue are copied by value instead. */
+static long long fk_owned_promote(long long v) {
+    if (!fk_owned_value(v)) { return v; }
+    if (v < 0 && !fk_is_str(v) && !fk_isf(v)) {
+        if (fk_owned_lock()) { fk_owned_gen(fk_owned_owner[fk_nidx(v)] - 1)->permanent = 1; fk_owned_unlock(); }
+        return v;
+    }
+    if (fk_is_str(v)) { long long si = fk_stri(v); return fk_field_share_string(fk_sbuf(FK_SBYTES(si), FK_SLEN(si))); }
+    if (fk_isf(v)) { return fk_field_share_float(fk_fbox(fk_num(v))); }
+    long long p = v >> 1, head = 0, prev = 0;
+    while (p >= FK_PAIR_BASE && FK_POK(p)) {
+        long long at = fk_field_claim(3, 1); fk_field_pair_span(at + 1);
+        fk_fph[at] = fk_field_share_value(FK_HH(p)); fk_fpt[at] = 1;
+        if (prev) { fk_fpt[prev - 1] = ((FK_PAIR_BASE + at) << 1) | 1; } else { head = ((FK_PAIR_BASE + at) << 1) | 1; }
+        prev = at + 1;
+        long long tail = FK_HT(p); if ((tail & 1) == 0 || tail == 1 || tail < 0 || !FK_POK(tail >> 1)) { fk_fpt[at] = fk_field_share_value(tail); break; }
+        p = tail >> 1;
+    }
+    return head ? head : v;
+}
+static int fk_owned_measure(long long v, long long *n, long long depth) {
+    if (depth > 4096) { return 0; }
+    if (v == fk_nothing || (v & 1) == 0) { return 1; }
+    if (fk_is_str(v)) { n[1]++; n[2] += FK_SLEN(fk_stri(v)); return 1; }
+    if (fk_isf(v)) { n[3]++; return 1; }
+    if (v < 0) { long long ix = fk_nidx(v); return ix >= 1 && ix <= fk_np && fk_nkind[ix] >= 1 && fk_nkind[ix] <= 3; }
+    while (v != 1 && (v & 1) && (v >> 1) >= 1 && FK_POK(v >> 1)) {
+        n[0]++; if (!fk_owned_measure(FK_HH(v >> 1), n, depth + 1)) { return 0; } v = FK_HT(v >> 1);
+    }
+    return v == 1 || fk_owned_measure(v, n, depth + 1);
+}
+static long long fk_owned_copy(fk_owned_generation *g, long long slot, long long v) {
+    if (v == fk_nothing || (v & 1) == 0) { return v; }
+    if (fk_is_str(v)) {
+        long long si = fk_stri(v), at = g->sb + g->su++, len = FK_SLEN(si), off = g->bb + g->bu;
+        /* Span admission may move the byte reservation: resolve source after. */
+        fk_field_string_span(off, len); const char *src = FK_SBYTES(si); char *dst = fk_field_string_span(off, len);
+        memcpy(dst, src, (size_t)len); fk_fso[at] = off; fk_fsl[at] = len; g->bu += len; return fk_strv(FK_STR_BASE + at);
+    }
+    if (fk_isf(v)) { long long at = g->fb + g->fu++; fk_ffv[at] = fk_num(v); return fk_fbase - ((FK_FLT_BASE + at) << 1) - 1; }
+    if (v < 0) {
+        long long owner = fk_owned_owner[fk_nidx(v)];
+        if (owner > 0 && owner - 1 != slot) { fk_owned_generation *child = fk_owned_gen(owner - 1); fk_owned_hold_add(-slot - 1, g->generation, owner - 1, child->generation); }
+        return v;
+    }
+    long long head = 1, prev = 0;
+    while (v != 1 && (v & 1) && (v >> 1) >= 1 && FK_POK(v >> 1)) {
+        long long at = g->pb + g->pu++; fk_fph[at] = fk_owned_copy(g, slot, FK_HH(v >> 1)); fk_fpt[at] = 1;
+        if (prev) { fk_fpt[prev - 1] = ((FK_PAIR_BASE + at) << 1) | 1; } else { head = ((FK_PAIR_BASE + at) << 1) | 1; }
+        prev = at + 1; v = FK_HT(v >> 1);
+    }
+    if (prev) { fk_fpt[prev - 1] = fk_owned_copy(g, slot, v); }
+    return head;
+}
+static long long fk_owned_pow2(long long n) { long long cap = 1; while (cap < n && cap < (1LL << 60)) { cap *= 2; } return cap; }
+static fk_node_id fk_owned_identity(long long incarnation, long long generation) { return fk_nid_make(FK_NID_MASK(FK_NID_PACKAGE_BITS), incarnation >> FK_NID_TYPE_BITS, incarnation & FK_NID_MASK(FK_NID_TYPE_BITS), generation); }
+static long long fk_owned_publish(long long gh, long long value) {
+    long long n[4] = {5, 0, 0, 0};
+    if (!fk_gift_live(gh) || !fk_gift_writable[gh] || !fk_owned_measure(value, n, 0) || !fk_owned_lock()) { return fk_nothing; }
+    /* The caller's offered extent remains its admission allowance. */
+    if (n[0] * 16 + n[1] * 16 + n[2] + n[3] * 8 > fk_gift_allowance[gh]) { fk_owned_unlock(); return fk_nothing; }
+    fk_owned_sweep();
+    if ((unsigned long long)fk_field_hdr[12] >= FK_NID_MASK(FK_NID_INSTANCE_BITS)) { fk_owned_unlock(); return fk_nothing; }
+    long long count = fk_field_hdr[10], slot = 0;
+    while (slot < count) { fk_owned_generation *g = fk_owned_gen(slot); if (!g->state && g->pc >= n[0] && g->sc >= n[1] && g->bc >= n[2] && g->fc >= n[3]) { break; } slot++; }
+    fk_owned_generation *g = fk_owned_gen(slot);
+    if (slot == count) {
+        /* Write the complete reservation intent before advancing any column.
+         * The next holder of the stable OS lock completes an interrupted claim. */
+        memset(g, 0, sizeof(*g)); g->root = fk_np + 1;
+        g->pb = fk_field_hdr[5]; g->pc = fk_owned_pow2(n[0]);
+        g->sb = fk_field_hdr[6]; g->sc = fk_owned_pow2(n[1]);
+        g->bb = fk_field_hdr[7]; g->bc = fk_owned_pow2(n[2]);
+        g->fb = fk_field_hdr[8]; g->fc = fk_owned_pow2(n[3]);
+        if (g->root >= FK_FIELD_NODES || g->sb + g->sc >= FK_FIELD_STRS || g->fb + g->fc >= FK_FIELD_FLOATS) { fk_owned_unlock(); return fk_nothing; }
+        fk_owned_born++;
+    } else { fk_owned_reused++; }
+    g->state = 1; g->generation = ++fk_field_hdr[12]; g->pid = getpid(); g->birth = fk_owned_birth(g->pid);
+    fk_mint_total++; if (fk_fn_mint && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn]++; }
+    g->process_owned = fk_gift_scoped[gh];
+    memcpy(g->frame, fk_gift_names[gh], 32); memset(g->prior, 0, 64); fk_owned_descriptor(gh, g->prior);
+    fk_field_hdr[14] = slot + 1;
+    if (slot == count) {
+        fk_field_hdr[10] = count + 1;
+        long long ends[7] = {0, 0, g->root, g->pb + g->pc, g->sb + g->sc, g->bb + g->bc, g->fb + g->fc};
+        for (int j = 2; j <= 6; j++) { fk_field_hdr[2 + j] = ends[j]; }
+    }
+    g->pu = g->su = g->bu = g->fu = g->permanent = 0;
+    fk_field_pair_span(g->pb + g->pc); while (g->root >= fk_node_cap) { fk_nodes_grow(); }
+    long long payload = fk_owned_copy(g, slot, value);
+    long long at = g->pb + g->pu; g->pu += 5;
+    long long values[5] = {payload, g->pid << 1, g->birth << 1, g->generation << 1, g->process_owned << 1};
+    for (int j = 0; j < 5; j++) { fk_fph[at + j] = values[j]; fk_fpt[at + j] = j == 4 ? 1 : ((FK_PAIR_BASE + at + j + 1) << 1) | 1; }
+    fk_nkind[g->root] = 2; fk_ncat[g->root] = 0; fk_nkids[g->root] = ((FK_PAIR_BASE + at) << 1) | 1; fk_nval[g->root] = 0;
+    fk_nsfile[g->root] = fk_nsline[g->root] = fk_nscol[g->root] = fk_nsattr[g->root] = 0;
+    fk_nid[g->root] = fk_owned_identity(fk_field_hdr[13], g->generation); fk_nhash_memo[g->root] = 0; fk_owned_owner[g->root] = slot + 1;
+    long long r[8] = {FK_OWN_MAGIC, fk_field_hdr[13], slot, g->generation, g->root, g->pid, g->birth, 1};
+    g->state = 4;
+    long long seq = fk_gift_give_bytes(gh, (const char *)r, sizeof(r));
+    if (seq == fk_nothing) { g->state = 3; }
+    else {
+        g->state = 2;
+        if (g->prior[0] == FK_OWN_MAGIC) { fk_owned_generation *old = fk_owned_gen(g->prior[2]); if (old->generation == g->prior[3]) { old->state = 3; } }
+    }
+    fk_field_hdr[14] = 0;
+    fk_owned_unlock(); return seq;
+}
+static long long fk_owned_read(long long gh) {
+    if (!fk_owned_lock()) { return fk_nothing; }
+    long long r[8], out = fk_nothing;
+    if (fk_owned_descriptor(gh, r)) {
+        fk_owned_generation *g = fk_owned_gen(r[2]);
+        if (g->process_owned && !fk_owned_alive(g->pid,g->birth)) { fk_owned_withdraw(g); fk_owned_sweep(); }
+        else if (g->state == 2 && g->generation == r[3] && g->root == r[4] && g->pid == r[5] && g->birth == r[6] && fk_nid[g->root] == fk_owned_identity(r[1], r[3])) {
+            fk_field_pair_span(g->pb + g->pc); fk_field_string_span(g->bb, g->bu); fk_owned_pin(r[2]); out = fk_nbox(g->root);
+        }
+    }
+    fk_owned_unlock(); return out;
+}
+static long long fk_owned_adopt(long long ix) {
+    if (!fk_field_on) { return fk_nbox(ix); }
+    if (!fk_owned_init()) { return fk_nothing; }
+    if (ix < 1 || ix >= FK_FIELD_NODES || !fk_owned_owner[ix]) { return fk_nbox(ix); }
+    /* An index alone cannot identify a reusable generation. */
     return fk_nothing;
 }
+static long long fk_owned_resolve(fk_node_id id) {
+    if (!fk_owned_lock()) { return fk_nothing; }
+    fk_owned_sweep(); long long out = fk_nothing;
+    for (long long j = 0; j < fk_field_hdr[10]; j++) {
+        fk_owned_generation *g = fk_owned_gen(j);
+        if (g->state == 2 && fk_nid[g->root] == id) { fk_owned_pin(j); out = fk_nbox(g->root); break; }
+    }
+    fk_owned_unlock(); return out;
+}
+static int fk_owned_unversioned(long long v) {
+    if (!fk_owned_init() || v == fk_nothing || (v & 1) == 0) { return 0; }
+    if (v < 0 && !fk_is_str(v) && !fk_isf(v)) { long long ix = fk_nidx(v); return ix > 0 && ix < FK_FIELD_NODES && fk_owned_owner[ix]; }
+    for (long long j = 0; j < fk_field_hdr[10]; j++) {
+        fk_owned_generation *g = fk_owned_gen(j); long long at;
+        if (fk_is_str(v)) { at = fk_stri(v) - FK_STR_BASE; if (at >= g->sb && at < g->sb + g->sc) { return 1; } }
+        else if (fk_isf(v)) { at = fk_fidx(v) - FK_FLT_BASE; if (at >= g->fb && at < g->fb + g->fc) { return 1; } }
+        else { at = (v >> 1) - FK_PAIR_BASE; if (at >= g->pb && at < g->pb + g->pc) { return 1; } }
+    }
+    return 0;
+}
+static long long fk_gift_give(long long gh, const char *bytes, long long n) {
+    if (!fk_field_on) {
+        if (fk_gift_live(gh) && fk_gift_size[gh] >= 80 && ((long long *)fk_gift_base[gh])[1] == 64 && ((long long *)((char *)fk_gift_base[gh] + 16))[0] == FK_OWN_MAGIC) { return fk_nothing; }
+        return fk_gift_give_bytes(gh, bytes, n);
+    }
+    if (!fk_owned_lock()) { return fk_nothing; }
+    long long prior[8]; int owned = fk_owned_descriptor(gh, prior);
+    if (owned) { fk_owned_generation *g = fk_owned_gen(prior[2]); memcpy(g->prior, prior, 64); fk_field_hdr[14] = -prior[2] - 1; }
+    long long out = fk_gift_give_bytes(gh, bytes, n);
+    if (owned && out != fk_nothing) { fk_owned_generation *g = fk_owned_gen(prior[2]); if (g->generation == prior[3]) { g->state = 3; } }
+    fk_field_hdr[14] = 0; fk_owned_sweep(); fk_owned_unlock(); return out;
+}
+static long long fk_owned_retire_expected(long long gh, long long root) {
+    if (!fk_owned_lock()) { return fk_nothing; }
+    long long r[8], out = fk_nothing;
+    if (fk_owned_descriptor(gh, r) && root == fk_nbox(r[4]) && fk_nid[r[4]] == fk_owned_identity(r[1], r[3])) { out = fk_gift_give(gh, "", 0); }
+    fk_owned_unlock(); return out;
+}
+
 /* ---- the kernel's live page: its own counters in shared memory, written in place ----
  * Every fkwu maps /fg-k<pid> once and, every 1024 primitive dispatches and at exit, stores
  * its counters into it -- no wire, no serialization; a reader maps the same page and reads
@@ -19429,33 +19882,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 177) {
         long long gh177 = fk_walk(fk_node[i][1], fp) >> 1;
-        long long sv177 = fk_gift_take_str(gh177);
-        if (sv177 == fk_nothing) {
-            return fk_nothing;
-        }
-        long long si177 = fk_stri(sv177);
-        long long pos177 = 0;
-        fk_cross_refused = 0;
-        long long out177 = fk_cross_decode(FK_SBYTES(si177), FK_SLEN(si177), &pos177, 0);
-        return fk_cross_refused ? fk_nothing : out177;
+        return fk_owned_read(gh177);
     }
     if (t == 178) {
         long long gh178 = fk_walk(fk_node[i][1], fp) >> 1;
         long long v178 = fk_walk(fk_node[i][2], fp);
-        if (!fk_gift_live(gh178)) {
-            return fk_nothing;
-        }
-        fk_sinit();
-        long long start178 = fk_sbp;
-        fk_cross_refused = 0;
-        fk_cross_emit(v178, 0);
-        long long n178 = fk_sbp - start178;
-        fk_sbp = start178;
-        if (fk_cross_refused) {
-            /* a value that cannot cross (a function, an unknown node) refuses the give by name */
-            return fk_nothing;
-        }
-        return fk_gift_give(gh178, fk_sb + start178, n178);
+        return fk_owned_publish(gh178, v178);
     }
     /* THE FRAME PACER AND THE TERMINAL (tags 180-183): terminal_cols /
      * terminal_lines read the controlling terminal's window (ioctl, no tput
@@ -19735,16 +20167,19 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long s169 = fk_walk(fk_node[i][1], fp) >> 1;
         long long r169 = fk_cell_dec(fk_walk(fk_node[i][2], fp));
         long long k169 = fk_walk(fk_node[i][3], fp) >> 1;
-        return fk_cell_field(s169, r169, k169);
+        return fk_owned_unversioned(r169) ? fk_nothing : fk_cell_field(s169, r169, k169);
     }
     if (t == 170) {
         /* cell_value handle ref: a foreign scalar as this process's own value -- int, string, float, nothing */
         long long s170 = fk_walk(fk_node[i][1], fp) >> 1;
-        return fk_cell_value(s170, fk_cell_dec(fk_walk(fk_node[i][2], fp)));
+        long long r170 = fk_cell_dec(fk_walk(fk_node[i][2], fp));
+        return fk_owned_unversioned(r170) ? fk_nothing : fk_cell_value(s170, r170);
     }
     if (t == 171) {
         /* cell_ref value: this process's own value as its raw store word, the reference another process reads by */
-        return fk_cell_enc(fk_walk(fk_node[i][1], fp));
+        long long value171 = fk_walk(fk_node[i][1], fp);
+        /* An index-only reference cannot retain or identify a reusable epoch. */
+        return fk_owned_value(value171) ? fk_nothing : fk_cell_enc(value171);
     }
     if (t == 172) {
         fk_cell_map_close(fk_walk(fk_node[i][1], fp) >> 1);
@@ -19804,7 +20239,20 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 184) {
         static char gname184[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), gname184, FK_PATH_CAP);
-        return fk_gift_open(gname184, fk_walk(fk_node[i][2], fp) >> 1, 1);
+        long long offer184 = fk_walk(fk_node[i][2], fp);
+        if (offer184 > 1 && (offer184 & 1) && FK_POK(offer184 >> 1)) {
+            long long allowance184 = FK_HH(offer184 >> 1) >> 1;
+            if (allowance184 < 64) { return fk_nothing; }
+            long long tail184 = FK_HT(offer184 >> 1), scope184 = 0;
+            if (tail184 != 1) {
+                if (tail184 < 1 || !(tail184 & 1) || !FK_POK(tail184 >> 1) || FK_HT(tail184 >> 1) != 1 || FK_HH(tail184 >> 1) != 2) { return fk_nothing; }
+                scope184 = 1;
+            }
+            long long gh184 = fk_gift_open(gname184, 64, 1);
+            if (gh184 != fk_nothing) { fk_gift_allowance[gh184 >> 1] = allowance184; fk_gift_scoped[gh184 >> 1] = scope184; }
+            return gh184;
+        }
+        return fk_gift_open(gname184, offer184 >> 1, 1);
     }
     if (t == 185) {
         static char gname185[FK_PATH_CAP];
@@ -19814,6 +20262,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 186) {
         long long gh = fk_walk(fk_node[i][1], fp) >> 1;
         long long sv = fk_walk(fk_node[i][2], fp);
+        if (fk_owned_value(sv) && !fk_is_str(sv) && !fk_isf(sv) && sv < 0) { return fk_owned_retire_expected(gh, sv); }
         if (!fk_gift_live(gh) || !fk_is_str(sv)) {
             return fk_nothing;
         }
@@ -20594,7 +21043,15 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 127) {
         fk_live_note(0);
-        long long ks_k = fk_walk(fk_node[i][1], fp) >> 1;
+        long long ks_arg = fk_walk(fk_node[i][1], fp);
+        if (ks_arg > 1 && (ks_arg & 1) && FK_POK(ks_arg >> 1) && fk_len_upto(ks_arg,4) == 3 && FK_HH(ks_arg >> 1) == (90 << 1)) {
+            long long tail = FK_HT(ks_arg >> 1), pid = FK_HH(tail >> 1) >> 1, birth = FK_HH(FK_HT(tail >> 1) >> 1) >> 1;
+            if (!fk_owned_lock()) { return fk_nothing; }
+            long long count = 0;
+            for (long long j = 0; j < fk_field_hdr[11]; j++) { fk_owned_hold *h = fk_owned_lease(j); if (h->pid == pid && h->birth == birth) { count++; } }
+            fk_owned_unlock(); return count << 1;
+        }
+        long long ks_k = ks_arg >> 1;
         long long ks_n = 256;
         if (ks_k == 0) {
             long long ks_s = 0;
@@ -20855,6 +21312,30 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 76) { return fk_jit_offer_us << 1; }                       /* microseconds the offers took */
         if (ks_k == 77) { return fk_cpu_runs << 1; }                           /* Form-emitted CPU images run (jit_cpu_run) */
         if (ks_k == 78) { return fk_cpu_run_us << 1; }                         /* microseconds inside them */
+        if (ks_k >= 87 && ks_k <= 89) {
+            if (!fk_field_on || !fk_owned_init()) { return fk_nothing; }
+            long long pending = __atomic_load_n(&fk_field_hdr[14], __ATOMIC_ACQUIRE);
+            if (!pending) { return fk_nothing; }
+            fk_owned_generation *g = fk_owned_gen((pending < 0 ? -pending : pending) - 1);
+            long long value = ks_k == 87 ? g->pid : ks_k == 88 ? g->state : g->generation;
+            return __atomic_load_n(&fk_field_hdr[14], __ATOMIC_ACQUIRE) == pending ? value << 1 : fk_nothing;
+        }
+        if (ks_k >= 79 && ks_k <= 86) {
+            if (!fk_owned_lock()) { return fk_nothing; }
+            long long value = 0;
+            for (long long j = 0; j < fk_field_hdr[10]; j++) {
+                fk_owned_generation *g = fk_owned_gen(j);
+                if (ks_k == 79 && g->state) { value++; }
+                if (ks_k == 80 && g->state == 3) { value++; }
+                if (ks_k == 81) { value += g->pc * 16 + g->sc * 16 + g->bc + g->fc * 8; }
+            }
+            if (ks_k == 82) { value = fk_owned_reader_n; }
+            if (ks_k == 83) { value = fk_owned_reclaimed; }
+            if (ks_k == 84) { value = fk_field_hdr[10]; }
+            if (ks_k == 85) { value = fk_owned_reused; }
+            if (ks_k == 86) { value = fk_owned_born; }
+            fk_owned_unlock(); return value << 1;
+        }
         if (ks_k == 58) {
             return (fk_field_on || fk_store_shared) ? 0 : (fk_np << 1);
         }
@@ -20901,25 +21382,37 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * walk 1..kernel_stat(4) and fold their own histograms -- blueprint
          * occupancy, allocation sites via node_source -- without the kernel
          * choosing what a census means. Out of range answers nothing. */
-        long long ix147 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long value147 = fk_walk(fk_node[i][1], fp);
+        if (value147 > 1 && (value147 & 1) && FK_POK(value147 >> 1)) {
+            long long part[4], cursor = value147;
+            for (int j = 0; j < 4; j++) {
+                if (cursor <= 1 || !(cursor & 1) || !FK_POK(cursor >> 1) || (FK_HH(cursor >> 1) & 1)) { return fk_nothing; }
+                part[j] = FK_HH(cursor >> 1) >> 1; cursor = FK_HT(cursor >> 1);
+            }
+            if (cursor != 1 || !fk_nid_fits(part[0],part[1],part[2],part[3])) { return fk_nothing; }
+            return fk_owned_resolve(fk_nid_make(part[0],part[1],part[2],part[3]));
+        }
+        if (value147 & 1) { return fk_nothing; }
+        long long ix147 = value147 >> 1;
         if (ix147 < 1 || ix147 > fk_np) {
             return fk_nothing;
         }
-        return fk_nbox(ix147);
+        return fk_owned_adopt(ix147);
     }
     if (t == 128) {
         long long fr_nv = fk_walk(fk_node[i][1], fp);
+        fk_vp(fr_nv);
         long long fr_fv = fk_walk(fk_node[i][2], fp);
         fk_vp(fr_fv);   /* the file word is a local string slot while the position walks */
         long long fr_pk = fk_walk(fk_node[i][3], fp) >> 1;
         fr_fv = fk_vs[fk_vsp - 1];
-        fk_vsp = fk_vsp - 1;
+        fr_nv = fk_vs[fk_vsp - 2];
         long long fr_ni = fk_nidx(fr_nv);
         fk_fbentered = fk_fbentered + 1;
         fk_fblastidx = fr_ni;
         if (fr_ni >= 1 && fr_ni <= fk_np) {
             fk_fbaccepted = fk_fbaccepted + 1;
-            fk_nsfile[fr_ni] = fk_field_on ? fk_field_share_string(fr_fv) : fr_fv;
+            fk_nsfile[fr_ni] = fk_field_on ? fk_field_share_value(fr_fv) : fr_fv;
             fk_nsline[fr_ni] = fr_pk >> 16;
             fk_nscol[fr_ni] = fr_pk & 65535;
             fk_nsattr[fr_ni] = 1;
@@ -20928,6 +21421,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         } else {
             fk_fbrejected = fk_fbrejected + 1;
         }
+        fk_vsp = fk_vsp - 2;
         return fr_nv;
     }
     if (t == 129) {
@@ -20958,6 +21452,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ns_ni < 1 || ns_ni > fk_np || fk_nsattr[ns_ni] == 0) {
             return 1;
         }
+        fk_vp(ns_nv);
         if (fk_cap == 0) {
             fk_arena();
         }
@@ -20977,6 +21472,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_hh[fk_hp] = fk_nsfile[ns_ni];
         fk_ht[fk_hp] = ns_c;
         ns_c = (fk_hp << 1) | 1;
+        fk_vsp--;
         return ns_c;
     }
     if (t == 131) {
@@ -22147,6 +22643,7 @@ static void fk_heat_report(void) {
     if (fk_sboard_on == 1) { fk_sboard_write(); }
     fk_heat_reported = 1;
     fk_bus_unwind(0, 3, "exit");
+    fk_owned_exit();
     fk_live_publish(1);
     if (fk_store_shared) { fk_store_unlink_pid((long long)getpid()); }
     int placed = fk_heat_write();
@@ -28716,8 +29213,12 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
         stopped = fk_stopped_record("refused", refusal);
     }
     /* the answer is built from the sinks, which then give way to the caller's */
+    long long answer_roots = fk_vsp;
+    fk_vp(value); fk_vp(stopped);
     out_w = fk_sbuf(fk_sink_buf != 0 ? fk_sink_buf : "", fk_sink_n);
+    fk_vp(out_w);
     err_w = fk_sbuf(fk_err_buf != 0 ? fk_err_buf : "", fk_err_n);
+    fk_vp(err_w); fk_vp(diag_w);
     {
         /* a spawned fkwu exits 1 when its compile counted an error: the same count, read off the rows */
         long long g = 0;
@@ -28730,7 +29231,9 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
         long long g = fk_dg_n;
         while (g > 0) {
             g = g - 1;
-            diag_w = fk_cons_val(fk_dg_record(&fk_dg_rows[g]), diag_w);
+            long long row = fk_dg_record(&fk_dg_rows[g]);
+            diag_w = fk_cons_val(row, fk_vs[answer_roots + 4]);
+            fk_vs[answer_roots + 4] = diag_w;
         }
     }
     stopped_w = stopped;
@@ -28749,20 +29252,20 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     fk_dg_cur = sv_cur; fk_dg_cur_live = sv_cur_live;
     fk_in_buf = sv_in; fk_in_n = sv_in_n; fk_in_pos = sv_in_pos; fk_cell_in_on = sv_in_on;
     fk_cell_deadline_ms = sv_deadline;
-    fk_vsp = vsp0;
     fk_cell_arg_slot = sv_argument;
     fk_collect_depth = sv_cdepth;
     fk_cellrun_n = fk_cellrun_n - 1;
     r = fk_cr_new();
-    fk_cr_put(r, "value", value);
-    fk_cr_put(r, "out", out_w);
-    fk_cr_put(r, "err", err_w);
-    fk_cr_put(r, "diag", diag_w);
-    fk_cr_put(r, "stopped", stopped_w);
+    fk_cr_put(r, "value", fk_vs[answer_roots]);
+    fk_cr_put(r, "out", fk_vs[answer_roots + 2]);
+    fk_cr_put(r, "err", fk_vs[answer_roots + 3]);
+    fk_cr_put(r, "diag", fk_vs[answer_roots + 4]);
+    fk_cr_put(r, "stopped", fk_vs[answer_roots + 1]);
     fk_cr_put(r, "errors", errors << 1);
     fk_cr_put(r, "resident", (long long)(resident ? 1 : 0) << 1);
     fk_cr_put(r, "ms", (fk_mono_ns() / 1000000LL - mono0) << 1);
     fk_cr_put(r, "cpu_us", (fk_cell_cpu_us() - cpu0) << 1);
+    fk_vsp = vsp0;
     return fk_rbox(r);
 }
 #endif

@@ -952,9 +952,15 @@ One persistent process paints a retained terminal frame from the body's own obse
 `y` takes, `w` holds); `z` puts the ear to sleep or wakes it. The ear stands awake with the glass unless
 `.hearth/ear.slept` stands, and every frame opens with the ear's own state.
 
-Nothing on a glass path forks, scans a directory or parses a tool's output. Telemetry crosses as gift
-frames — POSIX shared memory with a seqlock header — and a value crosses as itself (`node_gift_write` /
-`node_gift_read`). Every `fkwu` writes its own live page (`/fg-k<pid>`: dispatches, nodes, strings,
+Painting and snapshot reads run in-process; the supervisor owns its sensor processes. Telemetry crosses as gift
+frames — POSIX shared memory with a seqlock header — containing a fixed native root reference.
+`node_gift_write` admits an immutable shared generation; `node_gift_read` adopts its existing root,
+and `ggf-cell` reads its payload. Frames own current publications; replacement retires them, readers
+retain descendants through GC, and retired ranges are reused under new full NodeIDs. Explicit
+retirement compares the held generation; private observation frames retire with their process.
+The recursive value codec and typed model-flow disk snapshot path are removed. The physical
+ownership journal and GC carrier shrink with the seed's field allocator into the native arena.
+Every `fkwu` writes its own live page (`/fg-k<pid>`: dispatches, nodes, strings,
 heat, boxes, CPU), so any process reads any kernel's hottest defns with their source. When the host
 offers shared memory every kernel opens one field store, so a cell interned in two processes is one
 cell with one word; `observe/field-reset-run.fk` starts the field over when no other kernel is alive.

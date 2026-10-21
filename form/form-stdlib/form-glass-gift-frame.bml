@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////
 //
 // form-glass-gift-frame.bml — a frame in process shared memory, offered
-// as a gift: no latency, no filesystem poll, live data guaranteed.
+// as a gift: native references, without filesystem polling.
 //
 // Authority: form-stdlib/bml/form-glass-gift-frame.bml
 import form/form-stdlib/core.fk;
@@ -10,7 +10,7 @@ import form/form-stdlib/sovereignty-as-gift.fk;
 //
 // The shape is sovereignty-as-gift (Urs, 2026-09-04): survive AND receive
 // AND unique-offer. A publisher OFFERS its frame into shared memory and asks
-// nothing back -- no ack, no reader required, no block. A reader RECEIVES
+// nothing back -- no ack or reader required. A reader RECEIVES
 // when the frame stands and SURVIVES when it does not: an absent gift is
 // named absent, never invented, and the reader keeps its own ground.
 //
@@ -29,7 +29,7 @@ section [form.bml] {
 
     class FormGlassGiftFrame {
         field GGFSchema = "form-glass-gift-frame-v1";
-        field GGFNamePrefix = "/fg-";
+        field GGFNamePrefix = "/fgn-";
         field GGFNameBound = 31;
         field GGFDefaultBytes = 1048576;
         ref ggf-authority = FormGlassGiftFrameAuthority;
@@ -43,7 +43,7 @@ section [form.bml] {
         // --- the gift name: short, stable, collision-resistant --------------
         // POSIX shm names on this host hold 31 bytes; a publisher id is
         // longer and free-form, so the frame is named by the CRC-32 of the
-        // publisher's bytes rendered as eight hex digits: "/fg-" + 8 = 12 bytes.
+        // publisher's bytes rendered as eight hex digits behind the native prefix.
         def ggf-hex-digit(v) = if (v < 10) then byte_to_str((48 + v)) else byte_to_str((87 + v));
         def ggf-hex8-go(n, k, acc) = if ((Comparable) k == 0) then acc else ggf-hex8-go((n / 16), (k - 1), ((String) ggf-hex-digit((n - ((n / 16) * 16))) + acc));
         def ggf-hex8(n) = ggf-hex8-go(n, 8, "");
@@ -52,13 +52,33 @@ section [form.bml] {
         def ggf-name(publisher) = ((String) GGFNamePrefix() + ggf-hex8(crc32(ggf-bytes(publisher))));
         def ggf-name-within-bound?(name) = if (len(name) <= GGFNameBound()) then 1 else 0;
 
-        // Exact node-gift extent for flat native strings, integers and lists.
-        def ggf-flat-size(value) = (String) value_kind(value) == "string" ? (len(value) > 4294967295 ? -1 : (5 + len(value))) : (String) value_kind(value) == "int" ? 9 : (String) value_kind(value) == "list" ? (len(value) >= 100000000 ? -1 : ggf-flat-list(value,6)) : -1;
-        def ggf-flat-list(rows,size) = nil?(rows) ? size : ggf-flat-next(rows[1:],size,ggf-flat-size(rows[0]));
-        def ggf-flat-next(rows,size,n) = (n < 0) || (n > (4611686018427387887 - size)) ? -1 : ggf-flat-list(rows,size + n);
+        // Native occupied graph bytes, including the owner root. No codec size.
+        def ggf-flat-size(value) = ggf-flat-root(ggf-flat-value-size(value));
+        def ggf-flat-root(size) = size < 0 ? -1 : size + 80;
+        def ggf-flat-value-size(value) = (String) value_kind(value) == "string" ? 16 + len(value) : (String) value_kind(value) == "int" ? 0 : (String) value_kind(value) == "list" ? ggf-flat-list(value,0) : -1;
+        def ggf-flat-list(rows,size) = nil?(rows) ? size : ggf-flat-next(rows[1:],size,ggf-flat-value-size(rows[0]));
+        def ggf-flat-next(rows,size,n) = (n < 0) || (n > (4611686018427387887 - size - 16)) ? -1 : ggf-flat-list(rows,size + n + 16);
 
         // --- offer, give, receive, take ---------------------------------------
         def ggf-offer(publisher, bytes) = shm_offer(ggf-name(publisher), bytes);
+        // A native offer allocates a reference frame and admits graph bytes
+        // separately. Private observation scopes retire with their process;
+        // ordinary frames own their current gift across an author's exit.
+        def ggf-node-allowance(bytes) = len(ggf-output-scope()) > 0 ? [bytes,1] : [bytes];
+        def ggf-node-offer(publisher, bytes) = shm_offer(ggf-name(publisher), ggf-node-allowance(bytes));
+        def ggf-root(handle) = nothing?(handle) ? nothing() : node_gift_read(handle);
+        def ggf-root-absent?(handle) {
+            let reference = nothing?(handle) ? nothing() : shm_read(handle);
+            nothing?(handle) ? 1 : nothing?(reference) ? shm_seq(handle) == 0 : len(reference) == 0;
+        }
+        def ggf-root-cell(root) = nothing?(root) ? nothing() : node_children(root)[0];
+        def ggf-cell(handle) = ggf-root-cell(ggf-root(handle));
+        def ggf-root-id(root) = nothing?(root) ? [] : [node_pkg(root),node_level(root),node_type(root),node_inst(root)];
+        def ggf-root-origin(root) = nothing?(root) ? [] : [node_children(root)[1],node_children(root)[2]];
+        def ggf-root-lifetime(root) = nothing?(root) ? "absent" : len(node_children(root)) > 4 && node_children(root)[4] == 1 ? "process" : "frame";
+        // Compare the actual held generation: a late owner cannot retire a
+        // replacement. Closing the mapping alone does not withdraw a gift.
+        def ggf-retire(handle, root) = nothing?(handle) || nothing?(root) ? nothing() : shm_write(handle,root);
         def ggf-give(handle, text) = if nothing?(handle) then nothing() else shm_write(handle, text);
         def ggf-receive(publisher) = shm_receive(ggf-name(publisher));
         def ggf-taken(handle) = if nothing?(handle) then nothing() else shm_read(handle);
