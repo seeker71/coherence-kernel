@@ -1,4 +1,4 @@
-// Prompt-only admission to the existing native planner and coding walk.
+// Prompt-only admission to native coding, owned observations and publication.
 import form-stdlib/bml/host-child.bml;
 import form-stdlib/bml/form-agent-tool-wire.bml;
 import form-stdlib/bml/form-cli-check-witness.bml;
@@ -8,6 +8,7 @@ import control/offer-ack-core.fk;
 import form-stdlib/bml/rented-work.bml;
 import form-stdlib/bml/form-cli-local-plan.bml;
 import form-stdlib/bml/form-cli-task-runtime.bml;
+import form-stdlib/bml/form-cli-code-request.bml;
 section [form.bml] {
  class FormCliTask {
   def fct-string(obj,key) = fat-wire-string?(json-object-get(obj,key)) ? json-string-value(json-object-get(obj,key)) : "";
@@ -50,7 +51,7 @@ section [form.bml] {
    report;
   }
   def fct-render-cell(execution) {
-   if nothing?(execution) then json-node-null() else {
+   if nothing?(execution) then json-node-null() else if value_kind(execution)=="node_id" then json-node-object(filter(pair=>fat-has(["schema","status","reason","checkpoint_id","turns","tool_calls","repair_attempts","check_runs","generated_ids","injected_ids","release_ok"],json-pair-key(pair)),json-object-pairs(execution))) else {
     let value=record_get(execution,"value");
     let walk=value_kind(value)=="node_id" && node_eq(node_category(value),bp("native-turn-result"));
     let parts=walk ? node_children(value) : [];
@@ -67,6 +68,7 @@ section [form.bml] {
    json-emit(json-node-object(json-object-pairs(parts[0])+[json-node-pair("plan",fct-render-cell(parts[1])),json-node-pair("execution",fct-render-cell(parts[2])),json-node-pair("publication",metadata)]));
   }
   def fct-completed(gap,io) {
+   if fct-string(gap,"entry")=="direct-code" then fct-code-completed(gap,io) else {
    let id=fct-string(gap,"id");
    let rows=filter(line=>len(trim(line))>0,split-on(read_file("receipts/native-turn-ledger.jsonl") ?? "","\n")) |> map(line=>parse-json("owned-publication",line));
    let published=id != "" && any?(row=>fct-string(row,"gap")==id && json-int-value(json-object-get(row,"published"))>0 && json-int-value(json-object-get(row,"band_green"))==1,rows);
@@ -76,6 +78,7 @@ section [form.bml] {
     let docs=paths |> map(json-string-value) |> map(path=>[path,path,read_file(path) ?? ""]);
     let checks=json-array-elements(json-object-get(gap,"checks"));
     hch-cell-status(band)==0 && record_get(band,"value")==json-int-value(json-object-get(gap,"full")) && !any?(check=>!fccw-eval(check,docs)[0],checks);
+   };
    };
   }
   def fct-command(request) {
@@ -90,7 +93,7 @@ section [form.bml] {
   }
   def fct-resume(id) {
    let gap=fct-queued(id); let io=".hearth/tasks/" + id;
-   fct-string(gap,"id") == "" ? fct-report(id,"attention",io,"The requested task has no retained native queue entry.",nothing(),nothing()) : fct-completed(gap,io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing(),nothing()) : {
+   fct-string(gap,"id") == "" ? fct-report(id,"attention",io,"The requested task has no retained native queue entry.",nothing(),nothing()) : fct-string(gap,"entry")=="direct-code" ? fct-code-run(gap,io) : fct-completed(gap,io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing(),nothing()) : {
     let turn=hch-cell-observe(io,"turn",cell_call("observe/native-turn-run.bml",json-node-object([json-node-pair("gap",gap),fct-pair("session",id)]),nothing()));
     fct-report(id,fct-completed(gap,io) ? "completed" : "attention",io,hch-cell-why(turn),nothing(),turn);
    };
@@ -115,15 +118,74 @@ section [form.bml] {
   def fct-run(goal,paths) {
    let id=fct-id(goal); let io=".hearth/tasks/" + id;
    let queued=fct-queued(id);
-   fct-completed(queued,io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",nothing(),nothing()) : fct-string(queued,"id")!="" ? fct-resume(id) : fct-plan-run(goal,paths,id,io);
+   fct-string(queued,"id")!="" ? fct-resume(id) : fct-start(goal,paths,id,io);
   }
-  def fct-plan-run(goal,paths,id,io) {
-   let plan=hch-cell-observe(io,"plan",cell_call("observe/local-plan-run.bml",fct-request(goal,paths),nothing()));
-   let queued=record_get(plan,"value"); let gap=nothing?(queued) ? "" : fct-string(queued,"id");
-   let why=hch-cell-why(plan);
-   fct-completed(queued,io) ? fct-report(id,"completed",io,"Published work and original checks still hold.",plan,nothing()) : hch-cell-status(plan)!=0 || gap=="" ? fct-report(id,"attention",io,why=="" ? "Local planner has not verified a queued task; the plan carries its outcome and latest finding." : why,plan,nothing()) : {
-    let turn=hch-cell-observe(io,"turn",cell_call("observe/native-turn-run.bml",json-node-object([json-node-pair("gap",queued),fct-pair("session",id)]),nothing()));
-    fct-report(id,fct-completed(queued,io) ? "completed" : "attention",io,hch-cell-why(turn),plan,turn);
+  def fct-code-path(io,kind) = io+"/code-"+kind+".fkb";
+  def fct-code-keep(path,value) = write_form_binary(path,value)>0 && node_eq(read_form_binary(path),value) ? value : form_error("native-task-continuity-write-refused");
+  def fct-code-docs(result) = fat-wire-value(fat-wire-documents(result));
+  def fct-code-ready?(result) = fct-string(result,"status")=="complete" && json-int-value(json-object-get(result,"release_ok"))==1;
+  def fct-code-readings(gap,io) = json-array-elements(json-object-get(gap,"observations")) |> map(contract=>{
+   let path=fct-string(contract,"path");let minimum=json-int-value(json-object-get(contract,"full"));
+   let expected=fctrt-verdict(read_file(path));
+   let reading=hch-cell-observe(io,"code-check",cell_call(path,nothing(),nothing()));
+   let row=[path,minimum,expected,record_get(reading,"value"),hch-cell-status(reading),record_get(reading,"err")];
+   fb_record(row,"task-source-observation",0);row;
+  });
+  def fct-code-holds?(rows) = !nil?(rows) && all?(row=>row[2]>=row[1] && row[2]>0 && row[3]==row[2] && row[4]==0,rows);
+  def fct-code-check(context,docs) {
+   let gap=record_get(context,"gap");let paths=flp-strs(gap,"writable");let checkpoint=record_get(context,"checkpoint");
+   let candidate=paths |> map(path=>{let doc=fat-find-doc(docs,path);nil?(doc) ? nothing() : doc[2];});
+   let changed=any?(path=>{let current=fat-find-doc(docs,path);let original=fat-find-doc(record_get(context,"originals"),path);!nil?(current) && !nil?(original) && current[2]!=original[2];},flp-strs(gap,"source_paths"));
+   any?(value=>nothing?(value),candidate) ? [0,"An owned source document did not arrive."] : !changed ? [0,"The requested implementation has not changed its owned source. Read its native declarations and implement the original task; keep the owning observations."] : !hw-all-same?(paths,checkpoint) ? [0,"Owned source moved during this retained task; preserve its candidate and obtain current source."] : {
+    let window=hw-with-published(record_get(context,"io"),paths,checkpoint,hw-over(candidate,checkpoint),()=>fct-code-readings(gap,record_get(context,"io")));
+    let held=window[1] && window[2]=="" && !nothing?(window[0]) && fct-code-holds?(window[0]);
+    [held,held ? "The implementation and original owning observations hold; source restoration completed." : "Native implementation observation or restoration remains open: "+window.str()];
+   };
+  }
+  def fct-code-completed(gap,io) {
+   let result=file_size(fct-code-path(io,"result"))>0 ? read_form_binary(fct-code-path(io,"result")) : json-node-object([]);
+   !fct-code-ready?(result) ? false : {
+    let docs=fct-code-docs(result);
+    all?(path=>{let doc=fat-find-doc(docs,path);!nil?(doc) && read_file(path)==doc[2];},flp-strs(gap,"writable")) && fct-code-holds?(fct-code-readings(gap,io));
+   };
+  }
+  def fct-code-run(gap,io) {
+   let id=fct-string(gap,"id");
+   let healed=hw-heal-publishes(io);
+   !nil?(healed[1]) ? fct-report(id,"attention",io,hch-join(healed[1],"\n"),nothing(),nothing()) : fct-code-completed(gap,io) ? fct-report(id,"completed",io,"Native implementation and owning observations hold.",nothing(),read_form_binary(fct-code-path(io,"result"))) : {
+    let request=read_form_binary(fct-code-path(io,"request"));let docs=fat-wire-value(fcaq-documents(request));let paths=flp-strs(gap,"writable");
+    let admitted=paths |> map(path=>fat-find-doc(docs,path)[2]);
+    !hw-all-same?(paths,admitted) ? fct-report(id,"attention",io,"Retained source differs from the current tree; keep the candidate and reconcile the changed source with its owner before installation.",nothing(),nothing()) : {
+    let prior=file_size(fct-code-path(io,"result"))>0 ? read_form_binary(fct-code-path(io,"result")) : json-node-object([]);
+    let checkpoint=fct-string(prior,"checkpoint_id");
+    let offered=checkpoint=="" ? request : oh-set(request,"resume",json-node-string(checkpoint));
+    let context=record_new(0,"gap",gap,"io",io,"originals",docs,"checkpoint",hw-tree(paths));
+    let result=fct-code-keep(fct-code-path(io,"result"),fcaq-managed-with(offered,docs,[fct-code-check,context]));
+    let accepted=fct-code-ready?(result) && hw-all-same?(paths,record_get(context,"checkpoint"));
+    let candidate=fct-code-docs(result);
+    let installed=accepted ? hw-install(io,paths,record_get(context,"checkpoint"),paths |> map(path=>{let doc=fat-find-doc(candidate,path);nil?(doc) ? nothing() : doc[2];})) : [false,true,""];
+    let complete=installed[0] && all?(path=>{let doc=fat-find-doc(candidate,path);!nil?(doc) && read_file(path)==doc[2];},paths);
+    let current=complete ? oh-set(gap,"full",json-node-int(fctrt-verdict(read_file(fct-string(gap,"band"))))) : gap;
+    if complete then fhn-append(flp-queue(),json-emit(current)+"\n") else 0;
+    fct-report(id,complete ? "completed" : "attention",io,complete ? "Native implementation verified, released and installed." : installed[2]!="" ? installed[2] : fct-string(result,"reason"),nothing(),result);
+    };
+   };
+  }
+  def fct-start(goal,paths,id,io) {
+   let band=fctrt-band-for(fctrt-read-tree(),paths);
+   band[0]=="" || band[1]<=0 ? fct-report(id,"attention",io,"The named source needs an owning native observation for this task.",nothing(),nothing()) : {
+    let owned=fctrt-owned(paths,band[0]);
+    let writable=fat-has(owned,band[0]) ? owned : owned+[band[0]];
+    let sources=flp-callers(fct-request(goal,paths)) |> map(row=>row[0]) |> filter(path=>!fat-has(writable,path));
+    let documents=(writable+sources) |> map(path=>[path,path,read_file(path)]);
+    any?(doc=>nothing?(doc[2]),documents) ? fct-report(id,"attention",io,"A named source did not arrive; retain the task with its source owner.",nothing(),nothing()) : {
+     let observations=( [band[0]] + (writable |> filter(path=>fctrt-band?(path) && path != band[0])) ) |> map(path=>json-node-object([fct-pair("path",path),json-node-pair("full",json-node-int(fctrt-verdict(read_file(path))))]));
+     let names=flp-focus(fct-request(goal,paths));
+     let request=json-node-object([fct-pair("goal",goal),fct-pair("code_entry","direct"),fct-pair("document_context","catalog"),json-node-pair("writable",flp-json-strings(writable)),json-node-pair("documents",fat-wire-documents-node(documents)),json-node-pair("checks",json-node-array([])),json-node-pair("source_queries",json-node-array([json-node-object([fct-pair("tool","bml-api"),json-node-pair("arguments",flp-json-strings(names))])]))]);
+     let gap=json-node-object([fct-pair("id",id),fct-pair("request",id),fct-pair("entry","direct-code"),fct-pair("goal",goal),fct-pair("band",band[0]),json-node-pair("full",json-node-int(band[1])),json-node-pair("writable",flp-json-strings(writable)),json-node-pair("source_paths",flp-json-strings(paths)),json-node-pair("sources",flp-json-strings(sources)),json-node-pair("checks",json-node-array([])),json-node-pair("observations",json-node-array(observations))]);
+     fs_mkdir(io);fct-code-keep(fct-code-path(io,"request"),request);fhn-append(flp-queue(),json-emit(gap)+"\n");
+     fct-code-run(gap,io);
+    };
    };
   }
  }

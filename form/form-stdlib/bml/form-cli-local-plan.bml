@@ -205,8 +205,11 @@ section [form.bml] {
   def flp-caller-text(text,names) {
    let defs=flp-names(text) |> map(name=>[name,flp-ref-text(text,[name,[],""],true) ?? ""]);
    let roots=defs |> filter(d=>any?(name=>str_find(d[1],name,0)>=0,names));
+   let selected=defs |> filter(d=>flp-has?(names,d[0]));
+   let closure=flp-caller-closure(defs,nil?(selected) ? roots : selected);
+   let admitted=defs |> filter(d=>any?(held=>held[0]==d[0],closure) || any?(held=>held[0]==d[0],roots));
    let section=str_find(text,"section [",0);
-   flp-module-state?(text,defs) ? text : (section<0 ? "" : substring(text,0,section)) + mc-cat(flp-caller-closure(defs,roots) |> map(d=>d[1] + "\n\n"));
+   flp-module-state?(text,defs) ? text : (section<0 ? "" : substring(text,0,section)) + mc-cat(admitted |> map(d=>d[1] + "\n\n"));
   }
   def flp-module-state?(text,defs) {
    let scope=foldl((rest,d)=>{
@@ -235,13 +238,30 @@ section [form.bml] {
    let opened = if flp-starts?(t, "```") then trim(fcgp-after-line(t)) else t;
    if flp-ends?(opened, "```") then trim(substring(opened, 0, (len(opened) - 3))) else opened;
   }
-  def flp-block(t, tag) {
-   let open = mc-cat(["<", tag, ">"]);
-   let close = mc-cat(["</", tag, ">"]);
-   let a = str_find(t, open, 0);
-   let b = if (a < 0) then -1 else str_find(t, close, (a + len(open)));
-   if ((a < 0) || (b < 0)) then nothing() else flp-unfence(substring(t, (a + len(open)), b));
+  def flp-block-open(t,open,from) {
+   let at=str_find(t,open,from);
+   at<0 ? -1 : at==0 || len(trim(substring(t,flp-line-start(t,at),at)))==0 || str_byte_at(t,at - 1)==62 ? at : flp-block-open(t,open,at+len(open));
   }
+  def flp-block-close(t,close,from,tag) = tag=="goal" ? str_find(t,close,from) : foldl((held,at)=>{
+   if held[0]>=0 || at<held[1] then held else if fsc-find-string-at?(t,close,at,0) then [at,at] else {
+    let byte=str_byte_at(t,at);
+    let quoted=byte==34 || byte==39;
+    let end=quoted ? fbr-quote(t,at+1,byte) : fsc-find-string-at?(t,"//",at,0) ? flp-line-end(t,at) : fsc-find-string-at?(t,"/*",at,0) ? { let end=str_find(t,"*/",at+2);end<0 ? len(t) : end+2; } : at+1;
+    [-1,end<0 ? at+1 : end];
+   };
+  },[-1,from],from .. len(t))[0];
+  def flp-block-span-from(t,tag,from) {
+   let next=foldl((held,key)=>{
+    let at=flp-block-open(t,"<"+key+">",from);
+    at>=0 && (held[0]<0 || at<held[0]) ? [at,key] : held;
+   },[-1,""],["plan","goal","cases","band","reference"]);
+   next[0]<0 ? nothing() : {
+    let start=next[0]+len(next[1])+2;let end=flp-block-close(t,"</"+next[1]+">",start,next[1]);
+    end<0 ? nothing() : next[1]==tag ? [start,end] : flp-block-span-from(t,tag,end+len(next[1])+3);
+   };
+  }
+  def flp-block-span(t,tag) = flp-block-span-from(t,tag,0);
+  def flp-block(t,tag) { let span=flp-block-span(t,tag);nothing?(span) ? nothing() : flp-unfence(substring(t,span[0],span[1])); }
   // a plan: [id, band, full, writable, sources, definitions, checks node, goal, band text, reference text]
   def flp-plan(id, band, full, writable, sources, defs, checks, goal, text, reference) = [id, band, full, writable, sources, defs, checks, goal, text, reference];
   def flp-p-id(p) = p[0];
@@ -280,7 +300,10 @@ section [form.bml] {
    let checks=flp-defs-of(obj,writable) |> map(flp-case-check);
    oh-set(oh-set(oh-set(oh-set(obj,"full",json-node-int(1)),"band",json-node-string(flp-witnesses() + flp-text(obj,"id") + "-band.bml")),"sources",flp-json-strings(sources)),"checks",json-node-array(checks));
   }
-  def flp-cases-parsed(obj,goal,cases,reference) = !fcgp-object?(obj) || !fcgp-array?(cases) || nil?(json-array-elements(cases)) || !all?(flp-case?,json-array-elements(cases)) ? ["cases-shape","Each case needs function, arguments and equals, or call and equals. Expected values are scalars or nested arrays; observe object properties through the function.",[]] : flp-cases-balanced(obj,goal,cases,reference);
+  def flp-cases-parsed(obj,goal,cases,reference) {
+   let missing=fcgp-object?(obj) && !nothing?(reference) ? flp-ref-missing(reference,flp-defs-of(obj,flp-strs(obj,"writable"))) : nothing();
+   !nothing?(missing) ? ["reference-missing:"+missing[0],"The retained reference has no definition of "+missing[0]+". Case-only edits cannot supply that definition; reopen the whole proposal while retaining the request and findings.",[]] : !fcgp-object?(obj) || !fcgp-array?(cases) || nil?(json-array-elements(cases)) || !all?(flp-case?,json-array-elements(cases)) ? ["cases-shape","Each case needs function, arguments and equals, or call and equals. Expected values are scalars or nested arrays; observe object properties through the function.",[]] : flp-cases-balanced(obj,goal,cases,reference);
+  }
   def flp-cases-balanced(obj,goal,cases,reference) {
    let items=json-array-elements(cases);
    let bad=flp-first(0 .. len(items),i=>len(flp-delims(flp-case-call(items[i]),true))>0);
@@ -289,9 +312,9 @@ section [form.bml] {
   def flp-cases-owned(obj,goal,cases,reference) = flp-parsed(obj,(goal ?? flp-text(obj,"goal")) + "\nDefinition manifest: " + flp-join(map(d=>d[0],flp-defs-of(obj,flp-strs(obj,"writable"))),", "),flp-cases-band(obj,json-array-elements(cases)),reference);
   def flp-case-lines(state,item) {
    let id=state[0].str(); let call=flp-case-call(item); let expected=flp-case-value(json-object-get(item,"equals"));
-   [state[0]+1,state[1] + " let result" + id + "=try [{\n" + call + (flp-ends?(trim(call),";") ? "\n" : ";\n") + "}] catch [];\n let actual" + id + "=nil?(result" + id + ") ? nothing() : result" + id + "[0];\n let expected" + id + "=" + expected + ";\n let held" + id + "=len(result" + id + ")==1 && actual" + id + "==expected" + id + ";\n print_str(json-emit(fcam-pack([" + flp-said(call) + ",value_kind(actual" + id + "),actual" + id + ",expected" + id + ",held" + id + ",len(result" + id + ")==1])));\n let all=all && held" + id + ";\n"];
+   [state[0]+1,state[1] + " let result" + id + "=try [{\n" + call + (flp-ends?(trim(call),";") ? "\n" : ";\n") + "}] catch [];\n let actual" + id + "=nil?(result" + id + ") ? nothing() : result" + id + "[0];\n let expected" + id + "=" + expected + ";\n let held" + id + "=len(result" + id + ")==1 && actual" + id + "==expected" + id + ";\n let observation" + id + "=[" + flp-said(call) + ",value_kind(actual" + id + "),actual" + id + ",expected" + id + ",held" + id + ",len(result" + id + ")==1];\n fb_record(observation" + id + ",\"native-plan-case\"," + id + ");\n print(observation" + id + ");\n let all=all && held" + id + ";\n"];
   }
-  def flp-cases-band(obj,cases) = "; Native case observations; the final reading is their conjunction.\n; Verdict 1\n; preludes: form-stdlib/core.fk form-stdlib/bml/form-cli-code-memory.bml " + flp-join(map(flp-token,append(flp-strs(obj,"writable"),flp-strs(obj,"sources")))," ") + "\nsection [form.bml] {\n let all=true;\n" + foldl(flp-case-lines,[0,""],cases)[1] + " all ? 1 : 0;\n}\n";
+  def flp-cases-band(obj,cases) = "; Native case observations; the final reading is their conjunction.\n; Verdict 1\n; preludes: form-stdlib/core.fk form-stdlib/json.fk " + flp-join(map(flp-token,append(flp-strs(obj,"writable"),flp-strs(obj,"sources")))," ") + "\nsection [form.bml] {\n let all=true;\n" + foldl(flp-case-lines,[0,""],cases)[1] + " all ? 1 : 0;\n}\n";
   def flp-parsed(obj, goal, band, reference) {
    let writable = if fcgp-object?(obj) then flp-strs(obj, "writable") else [];
    if (!fcgp-object?(obj)) then ["plan-unreadable", "The <plan> block is JSON but not an object.", []] else ["", "", flp-plan(fcgp-str(obj, "id"), fcgp-str(obj, "band"), fcgp-num(obj, "full"), writable, flp-strs(obj, "sources"), flp-defs-of(obj, writable), fcgp-node(obj, "checks"), trim(if nothing?(goal) then fcgp-str(obj, "goal") else goal), trim(band) + "\n", reference)];
@@ -704,10 +727,11 @@ section [form.bml] {
    let line = if (nothing?(n) || nothing?(named)) then nothing() else flp-line-of(named[1], n);
    if nothing?(line) then "" else mc-cat(["\nLine ", n.str(), " of ", named[0], ", with your definitions standing, reads:\n", line]);
   }
+  def flp-ref-missing(ref,defs) = flp-first(defs,d=>nothing?(flp-ref-text(ref,d,flp-file-bml?(d[2]))));
   def flp-reference(plan, ctx, tree, v) {
    let ref = flp-p-reference(plan);
    let none = (Comparable) len(trim(ref)) == 0;
-   let missing = flp-first(flp-p-defs(plan), d => nothing?(flp-ref-text(ref, d, flp-file-bml?(d[2]))));
+   let missing = flp-ref-missing(ref,flp-p-defs(plan));
    let unbalanced = if none then "" else flp-delims(ref, flp-file-bml?(flp-p-defs(plan)[0][2]));
    if none then flp-with-readings(flp-refused(7, "reference-none", "The reply has no <reference> block, or an empty one, so nothing witnesses that any candidate turns the band full. Form reads the band with your <reference> definitions standing before the gap is queued: write each definition the plan names, whole, as you expect the lane to write it, between <reference> and </reference>."), v[3], v[4])
    else if (!nothing?(missing)) then flp-with-readings(flp-refused(7, mc-cat(["reference-missing:", missing[0]]), mc-cat(["The <reference> block holds no definition of ", missing[0], ": write each definition the plan names, whole, beginning '(defn ", missing[0], " ' for a .fk file or 'def ", missing[0], "(' for a .bml file."])), v[3], v[4])
@@ -833,14 +857,17 @@ section [form.bml] {
   // A transport refusal leaves useful definitions intact. Repair the rejected
   // cases in their retained proposal, then run the complete verifier again.
   def flp-case-repair?(memory) = !nil?(memory) && (flp-has?(["cases-unreadable","cases-shape","case-delimiters"],memory[-1][1]) || flp-starts?(memory[-1][1],"band-no-number:") || memory[-1][1]=="unreachable" && flp-text(memory[-1][5],"rung")=="reference-attention") &&
-   all?(tag=>!nothing?(flp-block(memory[-1][4],tag)),["plan","goal","cases","reference"]) && faj-valid(flp-block(memory[-1][4],"plan"));
+   all?(tag=>!nothing?(flp-block(memory[-1][4],tag)),["plan","goal","cases","reference"]) && faj-valid(flp-block(memory[-1][4],"plan")) &&
+   !any?(prev=>prev[1]==memory[-1][1] && flp-block(prev[4],"reference")==flp-block(memory[-1][4],"reference"),take(len(memory)-1,memory));
   def flp-case-repair-packet(req,feedback,prior,lens) = mc-cat([flp-intro(),"\n",flp-case-words(),"\n",flp-lens-text(lens),
    "\nRepair only <cases>. Form retains every other proposal byte, including plan, goal and reference. Return <cases>...</cases> with one valid JSON array. For literal inputs and expected values use {function,arguments,equals}, for example {\"function\":\"len\",\"arguments\":[[1,2]],\"equals\":2}. Strings in arguments and equals are data, escaped once as JSON; do not embed literal expected strings in BML comparison source. Use {call,equals:true} only for a computed assertion. Never evaluate or concatenate inside equals. Derive independent expectations from the original request; a reference defect remains a useful failure. Assess the refusal against that request instead of copying an old expectation. Include empty, whitespace, boundary and large inputs when relevant.\nOriginal request:\n",flp-request-text(req),
-   "\nExact native refusal:\n",feedback,"\nRetained reference definitions:\n",flp-block(prior,"reference"),
+   "\nCurrent source and native return contracts:\n",flp-files-block(req),flp-callers-block(req),
+   "\nExact native refusal:\n",feedback,"\nCurrent cases:\n",flp-block(prior,"cases"),"\nRetained reference definitions:\n",flp-block(prior,"reference"),
    "\nReturn only the repaired cases. Keep the original requirements; literal expected values belong in equals.\n"]);
   def flp-case-repaired(prior,said) {
-   let open="<cases>"; let close="</cases>";
-   let start=str_find(prior,open,0)+len(open); let end=str_find(prior,close,start);
+   let span=flp-block-span(prior,"cases");
+   nothing?(span) ? form_error("retained-case-block-unreadable") : 0;
+   let start=span[0];let end=span[1];
    let cases=flp-block(said[1],"cases") ?? flp-unfence(said[1]);
    let proposal=substring(prior,0,start)+"\n"+cases+"\n"+substring(prior,end,len(prior));
    let path=len(said)>4 && said[4] != "" ? said[4]+".proposal.txt" : "";

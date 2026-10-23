@@ -1,7 +1,7 @@
-// host-walk-publish.bml — a candidate in the tracked tree: published inside one door, restored on every path, healed when a kill skipped it.
+// host-walk-publish.bml — owned candidate windows and recoverable installation.
 //
-// A turn's candidate stands in the tree only inside hw-with-published, which restores it on every path a process
-// lives through; hw-heal-publishes returns what a killed publish left, and each walk heals before it syncs.
+// A turn's candidate stands inside hw-with-published, which restores still-owned bytes on normal and stopped runs.
+// Recovery preserves intervening writes and their marker; each walk heals before it syncs.
 // What it holds: the publish window (hw-with-published, hw-band-after), the checkpoint of a tree (hw-tree, hw-over) and
 // the heal of a killed publish (hw-heal-publishes, hw-heal).
 // What it needs: host-walk-text.bml (hw-starts?, hw-ends?, hw-row-int) and host-walk-lock.bml (hw-holds?: a marker whose
@@ -10,11 +10,11 @@ import form-stdlib/bml/host-walk-text.bml;
 import form-stdlib/bml/host-walk-lock.bml;
 section [form.bml] {
  class HostWalkPublish {
-  // ── a candidate in the tracked tree: published inside one door, restored on every path ──
+  // A candidate in the tracked tree, with ownership-aware restoration.
   // hw-with-published(dir, paths, before, texts, run) writes a marker (<dir>/publish-<pid>.marker: the pid, its
   // stamp, the paths, their checkpoint texts and the bytes this publish writes) and reads it back, publishes the
-  // texts over the paths, answers run() while they stand, and returns the checkpoint in a deferred step, so a stop
-  // inside run restores too. Nothing is published over a tree that moved from its checkpoint, over a marker this pid
+  // texts over the paths, answers run() while they stand, and restores still-owned bytes in a deferred step, so a stop
+  // inside run restores too. Intervening writes retain the recovery marker. Nothing is published over a tree that moved from its checkpoint, over a marker this pid
   // already holds (an earlier restore that did not hold), or before the marker reads back. A kill skips the defer;
   // the marker outlives it, and hw-heal-publishes(dir) at the next start returns each path still holding the
   // killed publish's own bytes to its checkpoint. Bytes another writer left stay, and so does their marker.
@@ -35,17 +35,33 @@ section [form.bml] {
    (String) (read_file(marker) ?? "") == text;
   }
   def hw-with-published(dir, paths, before, texts, run) {
+   let why=hw-publication-why(dir,paths,before,texts);
+   why != "" ? [nothing(),hw-all-same?(paths,before),why] : hw-published-window(hw-marker(dir),paths,before,texts,run);
+  }
+  def hw-publication-why(dir,paths,before,texts) {
    let made = host_dir_mkdir(dir);
    let marker = hw-marker(dir);
-   (Comparable) host_path_exists(marker) == 1 ? [nothing(), hw-all-same?(paths, before), "marker-held: " ++ marker ++ " was left by an earlier publish under this pid"]
-   : !hw-all-same?(paths, before) ? [nothing(), true, "source-conflict: the tree moved from its checkpoint"]
-   : !hw-marked?(marker, hw-marker-text(host_pid(), now_unix_ms(), paths, before, texts)) ? [nothing(), true, "marker-unwritten: " ++ marker]
-   : hw-published-window(marker, paths, before, texts, run);
+   host_path_exists(marker)==1 ? "marker-held: "+marker+" was left by an earlier publish under this pid"
+   : !hw-all-same?(paths,before) ? "source-conflict: the tree moved from its checkpoint"
+   : !hw-marked?(marker,hw-marker-text(host_pid(),now_unix_ms(),paths,before,texts)) ? "marker-unwritten: "+marker : "";
+  }
+  // Installation shares admission and killed-write recovery with observation
+  // windows. Recovery restores only still-owned bytes and retains conflicts.
+  def hw-install(dir,paths,before,texts) {
+   let why=hw-publication-why(dir,paths,before,texts);
+   why != "" ? [false,hw-all-same?(paths,before),why] : {
+    let wrote=try {hw-put-all(paths,texts);hw-all-same?(paths,texts);} else false;
+    let cleared=wrote ? host_path_remove(hw-marker(dir)) : -1;
+    let installed=wrote && cleared==0 && host_path_exists(hw-marker(dir))!=1;
+    let restored=installed ? false : {let conflicts=hw-heal-each(paths,before,texts);nil?(conflicts);};
+    if restored then host_path_remove(hw-marker(dir)) else 0;
+    [installed,restored,installed ? "" : restored ? "installation-failed: original source restored" : "installation-incomplete: retained marker owns restoration"];
+   };
   }
   def hw-held(paths, before, texts, run) {
-   defer hw-put-all(paths, before);
+   defer hw-heal-each(paths, before, texts);
    let put = hw-put-all(paths, texts);
-   run();
+   hw-all-same?(paths,texts) ? run() : form_error("candidate-installation-incomplete");
   }
   def hw-published-window(marker, paths, before, texts, run) {
    let answer = try hw-held(paths, before, texts, run) else nothing();

@@ -20,6 +20,19 @@ the framebuffer; source size does not silently remove a unit from discovery.
 Generated witnesses, stubs and reference definitions run in the same owned
 Form source tree. Each observation therefore reads its staged implementation
 rather than importing the repository's predecessor into a scratch execution.
+Witness observations retain actual values directly in the framebuffer and
+render them with Form's native printer, including typed task-result cells.
+Case repair receives current source and caller contracts. When the same refusal
+recurs under an unchanged reference, planning reopens the whole proposal rather
+than keeping the reference frozen in a case-only repair loop.
+Proposal reading and case replacement share structural block spans. Prose tag
+mentions and tag bytes inside quoted case inputs remain content. Focused source
+packets carry the selected definitions' dependencies and direct callers; external
+caller packets retain their local dependency closure. Rejected cases travel with
+their original request, exact refusal and retained reference.
+A missing declared reference definition is reported as a reference failure
+before case shape. The planner can then revise the complete proposal instead
+of asking a case-only repair to supply code it cannot change.
 
 Memory admission compares the requested allocation and pending leases with
 observed available host memory. Wired memory, compression, elapsed time and
@@ -40,6 +53,16 @@ its actual finite candidate frontier when no check allowance is supplied.
 Changing resume outcomes remain eligible without a fixed resume count; repeated
 unchanged outcomes invite another approach. Successful publication records the
 resulting source fingerprint so subsequent execution recognizes completed work.
+
+Inline tool observations use the same owned context growth as ordinary decode;
+remaining allocation is a resource signal rather than an observation cutoff.
+An identical tool call returning the same evidence over unchanged source in the
+retained task enters native care across decoder renewals. Its result stays available, while
+the local coder receives the existing edit interface and guidance to act from
+that evidence. Changed results or source remain new observations. Care preserves
+the checkpoint, original task, current role, sources, findings and completed
+effects across decoder renewal. The caller's goal stays verbatim; harness
+instructions remain in the coding guidance.
 
 A verified local plan retains its reference as a native value. Execution applies
 it over the current source and searches its finite expression frontier before
@@ -63,9 +86,22 @@ correlated observations, unchanged task/check identities, retained effects and
 changed choices in the same checkpoint. A passing structural witness establishes
 that boundary; a completed local edit with its actual checks establishes task quality.
 
-`task <goal mentioning an existing repository file>` admits a task without a
-caller-built source packet, candidate or checks. Form reads the named source and
-discovers its direct callers in the native BML library from current repository files.
+`task <goal mentioning an existing repository file>` admits a task directly to
+the existing native coder, without a caller-built source packet or a required
+text-plan stage. Form discovers source, direct callers and owning observations.
+Complete source cells remain resident; the model receives a catalog and native
+API observations for the named definitions. The coder can edit the implementation
+and its primary owning observation, repair from actual failures and review the
+change in the same checkpoint. Verification requires a changed implementation,
+the retained owning expectations and complete source restoration after each check.
+Installation shares the source window's recovery marker: failed and stopped
+writes restore still-owned bytes. Intervening writes remain intact with recovery
+ownership retained, and resume heals interrupted writes before reading source.
+A changed source identity retains a reconciliation continuation instead of
+overwriting another writer's work. Publication uses the existing native landing
+flow and re-observes the installed code. Previously verified plans remain resumable.
+
+The retained planner also discovers its direct callers in the native BML library.
 Function names match whole request words. Focused source readings retain complete
 definitions, callers, local dependency closure and import header; broad readings
 and modules with state bindings retain the complete source. Framebuffer rows report original and admitted source
