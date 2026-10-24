@@ -86,6 +86,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "host_vm_stat", 0, 151 },
   { "host_load_avg", 0, 152 },
   { "host_disk_stat", 0, 153 },
+  { "host_volume", 1, 144 },
   { "host_processes", 1, 154 },
   { "host_spawn", 1, 155 },
   { "host_wait", 1, 156 },

@@ -19943,6 +19943,46 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fk_host_disk_stat(d153) < 0) { return 1; }
         return fk_cons_val(d153[0] << 1, fk_cons_val(d153[1] << 1, fk_cons_val(d153[2] << 1, fk_cons_val(d153[3] << 1, 1))));
     }
+    if (t == 144) {
+        /* host_volume path: list(total_bytes, free_bytes, available_bytes).
+         * free is f_bfree; available is f_bavail, the column df -k reports as Available.
+         * nothing when the volume does not answer. host_disk_stat (153) stays the IO counters.
+         * The seed names its own struct timeval, so sys/mount.h is not included. The bytes are
+         * the Darwin statfs prefix measured here (struct 2168, f_bsize u32 at 0, f_blocks u64 at 8,
+         * f_bfree at 16, f_bavail at 24) and, elsewhere, the LP64 statvfs prefix (f_frsize u64 at 8,
+         * f_blocks at 16, f_bfree at 24, f_bavail at 32). */
+#if defined(_WIN32)
+        return fk_nothing;
+#else
+        char p144[FK_PATH_CAP];
+        unsigned char raw144[2168];
+        long long z144;
+        unsigned long long scale144, blocks144, free144, avail144;
+        fk_cstr(fk_walk(fk_node[i][1], fp), p144, FK_PATH_CAP);
+        for (z144 = 0; z144 < 2168; z144 = z144 + 1) { raw144[z144] = 0; }
+#if defined(__APPLE__)
+        {
+            extern int statfs(const char *, void *);
+            if (statfs(p144, raw144) != 0) { return fk_nothing; }
+            scale144 = (unsigned long long)raw144[0] | ((unsigned long long)raw144[1] << 8) | ((unsigned long long)raw144[2] << 16) | ((unsigned long long)raw144[3] << 24);
+            blocks144 = (unsigned long long)raw144[8] | ((unsigned long long)raw144[9] << 8) | ((unsigned long long)raw144[10] << 16) | ((unsigned long long)raw144[11] << 24) | ((unsigned long long)raw144[12] << 32) | ((unsigned long long)raw144[13] << 40) | ((unsigned long long)raw144[14] << 48) | ((unsigned long long)raw144[15] << 56);
+            free144 = (unsigned long long)raw144[16] | ((unsigned long long)raw144[17] << 8) | ((unsigned long long)raw144[18] << 16) | ((unsigned long long)raw144[19] << 24) | ((unsigned long long)raw144[20] << 32) | ((unsigned long long)raw144[21] << 40) | ((unsigned long long)raw144[22] << 48) | ((unsigned long long)raw144[23] << 56);
+            avail144 = (unsigned long long)raw144[24] | ((unsigned long long)raw144[25] << 8) | ((unsigned long long)raw144[26] << 16) | ((unsigned long long)raw144[27] << 24) | ((unsigned long long)raw144[28] << 32) | ((unsigned long long)raw144[29] << 40) | ((unsigned long long)raw144[30] << 48) | ((unsigned long long)raw144[31] << 56);
+        }
+#else
+        {
+            extern int statvfs(const char *, void *);
+            if (statvfs(p144, raw144) != 0) { return fk_nothing; }
+            scale144 = (unsigned long long)raw144[8] | ((unsigned long long)raw144[9] << 8) | ((unsigned long long)raw144[10] << 16) | ((unsigned long long)raw144[11] << 24) | ((unsigned long long)raw144[12] << 32) | ((unsigned long long)raw144[13] << 40) | ((unsigned long long)raw144[14] << 48) | ((unsigned long long)raw144[15] << 56);
+            blocks144 = (unsigned long long)raw144[16] | ((unsigned long long)raw144[17] << 8) | ((unsigned long long)raw144[18] << 16) | ((unsigned long long)raw144[19] << 24) | ((unsigned long long)raw144[20] << 32) | ((unsigned long long)raw144[21] << 40) | ((unsigned long long)raw144[22] << 48) | ((unsigned long long)raw144[23] << 56);
+            free144 = (unsigned long long)raw144[24] | ((unsigned long long)raw144[25] << 8) | ((unsigned long long)raw144[26] << 16) | ((unsigned long long)raw144[27] << 24) | ((unsigned long long)raw144[28] << 32) | ((unsigned long long)raw144[29] << 40) | ((unsigned long long)raw144[30] << 48) | ((unsigned long long)raw144[31] << 56);
+            avail144 = (unsigned long long)raw144[32] | ((unsigned long long)raw144[33] << 8) | ((unsigned long long)raw144[34] << 16) | ((unsigned long long)raw144[35] << 24) | ((unsigned long long)raw144[36] << 32) | ((unsigned long long)raw144[37] << 40) | ((unsigned long long)raw144[38] << 48) | ((unsigned long long)raw144[39] << 56);
+        }
+#endif
+        if (scale144 == 0 || blocks144 > (0x7fffffffffffffffULL / scale144) || free144 > (0x7fffffffffffffffULL / scale144) || avail144 > (0x7fffffffffffffffULL / scale144)) { return fk_nothing; }
+        return fk_cons_val((long long)(blocks144 * scale144) << 1, fk_cons_val((long long)(free144 * scale144) << 1, fk_cons_val((long long)(avail144 * scale144) << 1, 1)));
+#endif
+    }
     if (t == 154) {
         /* host_processes name: list of list(pid, rss_bytes, cpu_us, elapsed_seconds, nice, ppid) for every process whose name is the argument -- libproc, no ps, no pgrep.
          * Without a '*' the name is exact, as the glass asks for fkwu and for Activity Monitor, and a process whose name or
