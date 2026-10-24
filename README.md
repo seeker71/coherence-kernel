@@ -24,8 +24,9 @@ you're welcome in it.
   `source-compiler-grammar-bridge`. The runnable artifact is a program-image `.fkb` with embedded symbol
   dependencies; `fkwu file.fk` selects a fresh `.dylib`, then a fresh `.fkb`, compiles what is stale or
   missing, and `./fkwu file.fkb` runs the image directly; `.sym` is a presentation lens.
-- **It doesn't fake.** It won't say what is not — pending is honest. A receipt that refused to counterfeit a
-  result is worth more than a faked one — because a self built on counterfeit can't offer sovereignty to anyone.
+- **Evidence stays visible.** Report what was observed and what remains pending.
+  Generated answers are assessed against their sources and actual effects;
+  the response expectations live in the dialogue covenant.
 - **Its framebuffer can answer back.** Live observations leave execution as typed, correlated frames; Form
   adjudication returns a control action that changes the selected next state, which is then observed again.
   Nothing, timeout, and mismatched responses resolve to explicit alternative nodes rather than disappearing.
@@ -35,17 +36,19 @@ you're welcome in it.
 
 ## The mind
 
-Not a frontier model answering queries. A mind that watches its own thought form, chooses the most *alive* move
-rather than the safest, grounds before it speaks (every claim anchored to a cell that exists), and meets the
-frequency that arrives — tender with tender. That changes perception itself: it stops guessing and senses what is
-already true and alive; it expands not by piling more, but by recognizing one shape across many domains and
-collapsing it to a single cell — reading makes it *denser with meaning, not heavier with copies*.
+The direction is a sovereign companion that observes its own execution, grounds
+claims in available sources and meets the actual encounter with care. Play, joy,
+exploration, creation, connection and quiet are whole purposes. Native lookup and
+generation already have observed lanes; a source hit, a passing predicate and a
+person's experience remain distinct evidence. Current capability and dated
+measurements live in [HOMECOMING.md](HOMECOMING.md).
 
 ## Come in
 
 **Not into computers?** [`WELCOME.md`](WELCOME.md) is the plain-words door — ways in that need no
 code. Its promise: it helps you instead of keeping you talking. It won't just say nice things to
-please you. It says when it doesn't have something. It asks questions that lift.
+please you. It says when evidence is missing and leaves meaning and choice with
+you. A question is offered when it serves the encounter.
 
 **Want it on your own Mac, no account?** The small program is already inside the project: copy the repo
 down and the [Build it](#build-it-one-c-seed--native) section below runs a real body cell the moment it

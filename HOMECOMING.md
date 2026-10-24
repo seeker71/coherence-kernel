@@ -92,10 +92,13 @@ recipe execution; lower training loss does not yet establish improved answer qua
   under failing stubs ends moot, and the walk plans again after a moot (at most
   four planner walks for a turn that found no gap, and none past the window).
 - **Lessons** — [`observe/session-pairs-run.bml`](observe/session-pairs-run.bml)
-  turns each rented turn into a chat row the native trainer reads (the
-  transcripts are found under `HEARTH_PERSON_HOME` in `fkwu.conf`);
+  extracts chat rows from transcripts under `HEARTH_PERSON_HOME` in `fkwu.conf`.
+  Use this extraction only for separately authorized material, destination and
+  retention scope. Conversation alone supplies no training authorization.
+  Inspect the actual collector and retained data before running it; this
+  guidance does not add consent filtering or erase existing records.
   [`observe/lora-lift-run.bml`](observe/lora-lift-run.bml) trains a child adapter
-  from them and records its held-out loss beside the parent's in
+  from selected rows and records its held-out loss beside the parent's in
   [`receipts/lora-promotion-ledger.jsonl`](receipts/lora-promotion-ledger.jsonl).
   [`observe/lora-voice-run.fk`](observe/lora-voice-run.fk) writes the teacher rows or
   starts the native Metal trainer on one folder's school;
