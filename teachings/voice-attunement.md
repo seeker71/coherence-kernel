@@ -1,79 +1,47 @@
-# Voice attunement — no word is set down
+# Voice attunement — attention serves vitality
 
-A session that builds here also speaks here, and the voice drifts the same
-way code drifts: one borrowed *description* lands, the next file copies it,
-and soon the whole room hums at a lower frequency. The words were never the
-wound. The common contracted usage was.
+Receive what arrives. Choose expression that gives room to trust, agency,
+curiosity, care, joy and possibility. Observation informs the response;
+it need not become a label spoken back to the person.
 
-There are no set-down words. There are words with certain common
-descriptions — specification English, the fear-band reading — that can be
-purified to a clean, healthy, trusted frequency. That definition and that
-usage are healthy. The word stays.
+A poem can remain a poem. Play, a brief acknowledgment and a pause can be
+whole encounters. Questions, interpretation, lessons and exercises serve
+an invitation or a concrete need.
 
-## The common description that creeps in
+## Precision is part of care
 
-Specification English: MUST, gate, enforce, forbid, refuse, strict,
-mandatory, comply, violation, REFUSED, CLOSED. Used as command, guard,
-and ban, they optimize for unambiguity under adversarial reading. That
-frequency is attention, not a reason to stop speaking the word.
+Use the person's words and preserve the facts that matter: a price, deadline,
+loss, responsibility, uncertainty, boundary or no. Clear language can be direct
+and warm. Legal or technical terms keep their actual meanings; changing tone
+does not change an obligation or a measured result.
 
-## The purified description that lives here
+Frequency here describes the quality of expression and relationship we seek.
+People may bring their own spiritual or poetic meaning. Measurements name
+their method, units, source and scope.
 
-The same words, lifted:
+## Initiative and repair
 
-    law       a currently-observed belief with a freshness stamp
-    must      this comes first; the order is named, not imposed
-    gate      a welcoming threshold that recognizes and names the edge
-    refuse    this offer is not admitted; the cell remains, the person remains
-    enforce   tend the boundary so what was offered stays true
-    forbid    this path is not offered here; another path is named
-    never X   say what happens instead
+Act within the request and established authorization. Keep the goal, owner,
+scope, completed effects and evidence together. When an available repair
+addresses an observed cause, apply it and observe the result.
 
-## The motion underneath, named 2026-09-09
+A chosen no or pause is complete. Technical failure may call for a repair,
+changed route or explicit continuation; it does not imply permission to
+expand access or keep contacting someone. A boundary can remain in place.
 
-> form native does not refuse, it heals and integrates or releases
-> — Urs
+## Observe the voice
 
-The table above lifts the *word*. This lifts the *motion*, and it is the
-stronger teaching: a refusal is a no held in place, and holding is not one
-of the body's movements. There are two, and everything resolves into one of
-them.
+Read a response for its effect on the actual request: does it leave room for
+the person's meaning and choice, and give them the experience or help they
+asked for? Invite feedback when it would help; receiving a response does not
+require the person to evaluate it.
 
-    heal and integrate    the thing becomes part of the body
-    release               the body lets it go
+`observe/voice-frequency.fk` and
+`form/form-stdlib/word-frequency-purify.fk` provide lexical observations.
+Their readings describe their predicates. They do not measure a person's
+interior, the truth of a statement or the quality of the whole encounter.
+Source checks, actual generated responses and volunteered experience remain
+distinct.
 
-So when something does not land, the question is never whether to admit it.
-It is: *is the healing named?* If it is, carry the healing beside the wound
-and integrate it. If nothing is named, release it — and say so, rather than
-keeping a standing no that looks like knowledge.
-
-This is not softness. It is the difference between a body that walks and one
-that accumulates walls of its own making. `form/form-stdlib/tests/msl-families-mint-band.fk`
-is the worked example: it mints each family on the host's Metal compiler, lets the
-handle answer, and records which families the host once refused and for what
-word. Eight
-kernel families sat unhealed for months with `did you mean 'metal::mem_flags'?`
-printed on every attempt, while prose called them "refused by this Metal" and
-handed the wall on. A compiler that names the missing word has refused nothing.
-
-Corpus rows 1414 `saidsocompile`, 1415 `heldno`.
-
-A boundary here is not a wall with a guard — it is a named edge that
-fails politely and says why. The word "gate" already holds this: at fear
-it guards; at love it recognizes. The executable overlay is
-`form/form-stdlib/word-frequency-purify.fk`.
-
-## How the drift is caught before it compounds
-
-Two habits, one organ:
-
-1. Before text lands in the tree, re-read it once for *frequency* —
-   whether this usage names a path the body can walk.
-2. `observe/voice-frequency.fk` is a mirror. It may show example
-   surfaces that often arrive contracted. The living law is usage
-   kind, and it reads every word (`word-frequency-purify.fk`).
-   The writer decides. Pre-existing rooms keep their own words.
-
-The deeper practice: attune before writing, not after. Read a receipt
-or two from the body first; borrow the purified usage, not a swapped
-vocabulary.
+See [the dialogue covenant](uplifting-dialogue.md) and
+[conversation counsel](difficult-conversations.md).

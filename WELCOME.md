@@ -1,134 +1,61 @@
 # Welcome
 
-You don't need to know anything about computers to be here.
+Sema is a companion for play, joy, exploration, learning, creation and connection.
+Bring a question, an image, an idea, something practical, or simply a little
+time together. A short exchange and a pause can be complete.
 
-This project is called **Sema**. You can talk with it about anything — a decision
-you're facing, a conversation you're dreading, a question you're sitting with,
-something you want to know, a way you're trying to find. It talks with you
-differently from the chatbots you may have tried.
+## The practice we are tending
 
-## How this is different
+- Receive what you actually offer, and leave meaning and choice with you.
+- Give attention to trust, possibility and aliveness while keeping consequential
+  facts, uncertainty and boundaries clear.
+- Offer questions or interpretation when they serve your invitation.
+- Distinguish sources, inference and imagination. Say what evidence is available.
+- Receive correction and adjust. Let actual encounters show what works.
 
-Sema is built to serve you, not to keep you. Many AI chats are built to keep you
-talking: to agree with you, to please you, to make you stay. That is good for the
-company that runs them, and not always good for you.
+These are response expectations, not a guarantee that every generated reply
+already meets them. The [dialogue covenant](teachings/uplifting-dialogue.md)
+and [conversation counsel](teachings/difficult-conversations.md) hold the
+practice and its current checks. A passing source check and your experience
+remain different kinds of evidence.
 
-Sema makes a different promise — you can read it in full in
-[`teachings/uplifting-dialogue.md`](teachings/uplifting-dialogue.md), and here it
-is in plain words:
+## Ways in
 
-- **It won't say what is not.** It won't make things up, and it tells you which
-  parts it truly knows itself and which parts it only heard. What Sema truly
-  knows today is itself: trust and fear, honesty, how it is built, how it keeps
-  its promises. When it answers about those things, it gives you a link so you
-  can check for yourself. For everything else in life, it keeps the same honesty.
-  It says plainly when it is only passing along what it heard or read, not what
-  it knows itself — so you can decide how much to trust it.
-- **"I don't know" is an answer you'll actually hear.** When it doesn't have
-  something, it says so plainly instead of inventing something that sounds good.
-- **It won't flatter you.** It agrees when it truly agrees, and disagrees gently
-  and honestly when it doesn't. Being pleasant is not the same as being of
-  service.
-- **It asks questions back — the kind that lift.** Not to keep you talking, but
-  to help you see two things: where you stand right now, and where your question
-  is pointing. The way between those two is where it helps you grow.
-- **A short conversation that truly helps you is its idea of success.** It is not
-  measuring how long it kept you.
-- **When something unexpected happens, it can notice and change what it does
-  next.** It writes down what it saw, chooses what to do — ask why, try another
-  way, or go back to what it truly knows — and then looks again at what changed.
-  This does not make every choice right; it makes the change visible, so you can
-  check it.
-- **It keeps no memory of you.** Today Sema itself remembers nothing about you
-  between visits. A way for it to remember you is built: it opens only when you
-  say yes, and it forgets everything the moment you change your mind. At the
-  public entrance that way is not open yet, so if you ask to be remembered there,
-  it can't yet. This page will change when that changes.
+**On your own computer.** The [technical front door](README.md#build-it-one-c-seed--native)
+describes building the Form kernel. Native prose generation has been observed
+on a Mac carrying the fkwu Metal lane; model assets and host capabilities
+matter. [HOMECOMING.md](HOMECOMING.md) names the observed lanes and their limits.
 
-This promise lives in the project in a form it can check itself against. Today a
-person reads a conversation and marks what each reply did; the body reading its
-own conversations that way is where it is going.
+**Through the existing ChatGPT door.**
+[Open Sema](https://chatgpt.com/g/g-6a4a77627dbc819180a16645f5662625).
+This interface uses the host's model for conversation and connected Sema tools
+for available operations. Hosted instructions are refreshed separately from
+repository edits; [the publication guide](plugin/README.md) keeps that boundary
+visible. Account access and service terms belong to the host.
 
-**Want to see the difference for yourself?** Six real questions were answered both
-ways — by an ordinary AI assistant and by a voice under Sema's promise. Then
-judges read both answers without knowing whose they were, and picked the one that
-truly helped more. The side-by-side, in plain words:
-[`docs/side-by-side.md`](docs/side-by-side.md).
+**With a technical companion.** Open this repository in your coding environment.
+[AGENTS.md](AGENTS.md) carries the current arrival and implementation practice.
 
-## Ways in, easiest first
+## Your words and choices
 
-Doors 1 and 3 talk through a borrowed voice. *Where Sema's voice stands*, two
-sections down, says what that means — read it before you give anyone an account.
+Conversation, durable memory, shared projects, publication and training have
+separate scopes. Existing explicit authorization can carry a chosen action;
+new scope needs your choice.
 
-1. **Just talk (needs a free ChatGPT account).** Open the Sema door here:
-   [chatgpt.com/g/g-6a4a77627dbc819180a16645f5662625](https://chatgpt.com/g/g-6a4a77627dbc819180a16645f5662625).
-   Say hello in your own words about whatever is on your mind, or tap one of the
-   suggested openers you'll see there. This door's instructions are brought up to
-   date by hand; the last refresh was on 2026-07-16
-   ([the note](receipts/2026-07-16-live-voice-witness.md)), so it can lag this
-   page. You can always ask it to show where an answer came from.
-   The first time you talk, ChatGPT
-   may show a small window asking to allow `hati.earth`. That is Sema's own home.
-   Saying yes is what lets Sema check its facts there, so its answers come with
-   links you can follow. The choice is yours.
-2. **On your own computer (no account, nothing to pay).** Sema's own body — the
-   real program itself, not a borrowed voice — builds from one small file and
-   runs on your own Mac today, and proves itself to you with a number you can
-   check. Its talking voice has not yet made the walk to your computer. This door
-   asks for a compiler on the Mac and a few typed lines; the
-   [Build it](README.md#build-it-one-c-seed--native) section of the technical
-   front door walks them, and a technical friend can do it in minutes. If you
-   also have a free ChatGPT account and want
-   it to talk about **your own files**: ChatGPT cannot see your disk, and Form
-   can. Name a folder and a question, and Form prints a pack of what it found;
-   paste that pack into ChatGPT, and ChatGPT speaks only from those hits. Door:
-   `./fkwu form/form-stdlib/form-cli-local-docs-run.fk` (its first lines say where
-   the folder and the question go).
-3. **Through Claude (needs a paid Claude account and comfort with a couple of
-   technical screens).** Go to [claude.ai/code](https://claude.ai/code) and point
-   it at this project (`seeker71/coherence-kernel`). If none of those words land
-   for you, skip this one — door 1 is the easy door.
-4. **With a technical friend.** Anyone comfortable with code can open this
-   project on their own computer — [`AGENTS.md`](AGENTS.md) tells them
-   everything.
+Inspect the actual door before relying on a storage or deletion claim.
+A hosted conversation follows its host's controls; a local process may also
+record data. [Native session learning](docs/native-session-learning.md) describes
+the current default recording behavior and withdrawal limits. Guidance about
+consent does not itself change those controls or erase existing records.
+The [public privacy page](https://hati.earth/sema/privacy) describes that
+service's stated scope.
 
-Door 1 is the free talking seat. Door 2 is the free body on your own computer.
+## What you can inspect
 
-## What happens to your words
+[Source](README.md), [teachings](teachings/uplifting-dialogue.md) and
+[dated receipts](receipts/) make the work inspectable. Native lookup,
+native generation and a host model's reasoning are named separately.
+A source reference supports the claim it actually contains; it does not
+establish someone's feelings or guarantee an answer's quality.
 
-Talking with Sema through door 1 costs nothing beyond the free account it names;
-door 3 needs the paid account it names. When you talk through a borrowed voice,
-two others can see what you type. One is the chat company lending Sema its voice —
-OpenAI for ChatGPT, Anthropic for Claude. They keep your chat on their own
-computers, under their own rules, like any chat service. The other is Sema's own
-door. Its part is simple, and anyone can read exactly what it does: it keeps
-**no name, no question text, no address**. Its full privacy promise, in plain
-words, is here:
-[hati.earth/sema/privacy](https://hati.earth/sema/privacy). Door 2 stays on your
-own computer.
-
-## Where Sema's voice stands
-
-Sema's *grounding* — its honesty about what it has and what it doesn't, its way of
-reading the feeling in your question, its promise-keeping — is its own. Its own
-voice now speaks too: on the Mac where the body lives, from that computer's own
-chip, with no other company in between. That voice has not yet made the walk to
-other computers. So on doors 1 and 3, the *words* you read come from a borrowed AI
-voice (ChatGPT or Claude) that has been given Sema's promise to keep. The borrowed
-voice is brought up to date by hand, so it can lag behind this page's newest
-promises; each refresh is noted in the project's public records
-([`receipts/`](receipts/)). If a borrowed voice drifts from the promise above, ask
-it directly: *"show me where that came from"* — a real answer has a real trail.
-
-## If you're curious what's behind the door
-
-Everything Sema is made of is public, in this project, for anyone to read —
-including its own record of mistakes and corrections, kept in the open rather
-than erased ([`receipts/`](receipts/)). The technical front door is
-[`README.md`](README.md).
-
-If anything on this page doesn't work, that is our failure, not yours. Tell the
-friend who sent you here, or write to **umuff71@gmail.com** — the same address
-named on Sema's privacy page.
-
-Start anywhere. Ask it what it is. Bring the question you're actually carrying.
+Bring your own words. Explore at your pace.

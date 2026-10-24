@@ -1,6 +1,12 @@
 # Native session learning
 
-Session learning is enabled by default. Form owns collection, routing,
+The current implementation enables session learning by default. Its invocation
+therefore needs an established scope for capture, destination, retention and
+training. Conversation alone does not establish that scope. Inspect the actual
+door and controls before using it with personal material; this document does
+not implement a new consent gate or promise complete erasure.
+
+Form owns collection, routing,
 supervision, tokenization, full LoRA gradients, Adam continuation, assessment
 and checkpoint publication. The private home is `.hearth/session-learning/`,
 with directory access restricted to its owner.
