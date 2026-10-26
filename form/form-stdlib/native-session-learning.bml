@@ -85,6 +85,16 @@ section [form.bml] {
    nsm-withdrawn(path) || (((String) path == "") || nse-record-overlap(record,valid)) ? [] : [json-object-get(record,"example")];
   }
   def nsl-prepare(home,dir) = nsl-prepare-scoped(home,dir,"");
+  def nsl-delivery-sources(request) = json-array-elements(oh-get(oh-get(request,"delivery"),"sources"));
+  def nsl-request-sources(requests) = nil?(requests) ? [] : append(nsl-delivery-sources(requests[0]),nsl-request-sources(requests[1:]));
+  def nsl-row-source(home,dir) = nss-source(home,fs-path-basename(dir),nss-reference(nsm-at(home,"config.json")),nss-reference(nss-absolute(host_cwd(),nsm-valid-path(home))));
+  def nsl-source-for-row(row,sources) = nil?(sources) ? json-node-null() : nss-source-current(sources[0]) && node_eq(row,oh-get(nsm-json(nsm-str(sources[0],"path")),"example")) ? sources[0] : nsl-source-for-row(row,sources[1:]);
+  def nsl-training-sources(home,dir,state,prior) {
+   let candidates = append(nsm-str(state,"replay") == "" ? [] : [nsl-row-source(home,nsm-str(state,"replay"))],append(nsl-delivery-sources(nsm-json(nsm-at(dir,"training-evidence.json"))),nsl-request-sources(json-array-elements(oh-get(nsm-json(nsm-at(home,"evidence-current.json")),"requests")))));
+   let parent = nsm-str(state,"candidate") == "" ? [] : [nsl-row-source(home,nsm-str(state,"last_row"))];
+   append([nsl-row-source(home,dir)],append(parent,prior |> map(row => nsl-source-for-row(row,candidates))));
+  }
+  def nsl-before-current(home,before) = nsm-str(before,"scope_id") == nsm-scope-id(home) && json-object-has?(before,"training_sources") && all?(source => nss-source-current(source),json-array-elements(oh-get(before,"training_sources")));
   def nsl-prepare-scoped(home,dir,scope) {
    let state = nsm-state(home); let record = nsm-json(nsm-at(dir,"record.json"));
    let example = json-object-get(record,"example"); let validPath = nsm-valid-path(home);
@@ -107,7 +117,8 @@ section [form.bml] {
    let serving = nsm-str(state,"serving");
    let servingBaseline = ((String) serving == "") || ((String) serving == parent) ? baseline : nsl-grade-cached(home,base,serving,assessment,scope);
    let before = json-node-object([nsm-s("parent",parent),nsm-s("parent_seal",nsl-adapter-seal(parent)),nsm-s("base_seal",nsl-base-seal(base)),nsm-s("validation_sha256",nsm-hash(nsl-lines(valid))),nsm-s("input_sha256",nsl-inputs(dir)),nsm-n("heldout_rows",len(valid)),nsm-n("replay_rows",len(prior)),nsm-real("learning_rate",nsm-rate(home)),json-node-pair("state",state),json-node-pair("scores",json-node-array(baseline)),json-node-pair("serving_scores",json-node-array(servingBaseline))]);
-   let saved = nsm-atomic(nsm-at(dir,"before.json"),before);
+   let bound = oh-set(oh-set(before,"scope_id",json-node-string(nsm-scope-id(home))),"training_sources",json-node-array(nsl-training-sources(home,dir,state,prior)));
+   let saved = nsm-atomic(nsm-at(dir,"before.json"),bound);
    let measured = nsm-event(home,"prepare-complete",[nsm-s("id",fs-path-basename(dir)),nsm-n("wall_ms",host_monotonic_ms() - start),nsm-n("rows",len(assessment))]);
    "prepared";
   }
@@ -128,7 +139,8 @@ section [form.bml] {
    json-node-object(append(json-object-pairs(request),[nsm-s("assessment",nsm-at(dir,"assessment.json"))]));
   }
   def nsl-one(home,dir) = nsl-one-scoped(home,dir,"");
-  def nsl-one-scoped(home,dir,scope) {
+  def nsl-one-scoped(home,dir,scope) = !nsm-enabled(home) || !nsm-row-in-scope(home,dir) ? "training-scope-held" : nsl-one-authorized(home,dir,scope);
+  def nsl-one-authorized(home,dir,scope) {
    let begin = nsm-event(home,"round-begin",[nsm-s("id",fs-path-basename(dir)),nsm-s("selected","resume-Adam;one-update-per-observation;rehearse-prior;heldout-excluded")]);
    let prepared = nsm-withdrawn(dir) ? "withdrawn" : file_size(nsm-at(dir,"before.json")) > 0 ? "prepared" : nsl-prepare-scoped(home,dir,scope);
    !((String) prepared == "prepared") ? prepared : nsl-train(home,dir,nsm-json(nsm-at(dir,"before.json")));
@@ -155,14 +167,17 @@ section [form.bml] {
    let fresh = oh-reading("session-learning",dir,"execution-continuity",json-node-string("completed-worker-exit"),json-node-string(nlw-status(dir)),json-node-int(completed),completed ? [] : json-array-elements(oh-get(reading,"needs")),oh-values(json-array-elements(oh-get(reading,"offers"))),oh-reference(nsm-at(dir,"result.json")));
    oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id")));
   }
-  def nsl-train-new(home,dir,before) {
+  def nsl-train-new(home,dir,before) = !nsm-enabled(home) || !nsm-row-in-scope(home,dir) || nsm-withdrawn(dir) ? "training-scope-held" : nsl-train-authorized(home,dir,before);
+  def nsl-train-authorized(home,dir,before) {
    let started = nsm-event(home,"training-begin",[nsm-s("id",fs-path-basename(dir)),nsm-s("events",nsm-at(nsm-at(dir,"adapter"),"training-events.fkb"))]);
-   !(((String) nsm-str(before,"input_sha256") == nsl-inputs(dir)) && (((String) nsm-str(before,"base_seal") == nsl-base-seal(nsm-model())) && ((String) nsm-str(before,"parent_seal") == nsl-adapter-seal(nsm-str(before,"parent"))))) ? nsl-refused(home,dir,"input-parent-or-base-changed-before-training") : nsl-trained(home,dir,before,nlw-run(nsl-request(home,dir,before),dir));
+   !(((String) nsm-str(before,"input_sha256") == nsl-inputs(dir)) && (((String) nsm-str(before,"base_seal") == nsl-base-seal(nsm-model())) && ((String) nsm-str(before,"parent_seal") == nsl-adapter-seal(nsm-str(before,"parent"))))) ? nsl-refused(home,dir,"input-parent-or-base-changed-before-training") : nsl-training-admit(home,dir,before);
   }
+  def nsl-training-admit(home,dir,before) = !nsm-enabled(home) || !nsm-row-in-scope(home,dir) || nsm-withdrawn(dir) ? "training-scope-held" : !nsl-before-current(home,before) ? nsl-refused(home,dir,"prepared-source-scope-or-withdrawal-changed") : nsl-trained(home,dir,before,nlw-run(nsl-request(home,dir,before),dir));
   def nsl-trained(home,dir,before,result) {
    !((Comparable) result[1] == 0) ? nsl-refused(home,dir,"training-" + result[0]) : file_size(nsm-at(nsm-at(dir,"adapter"),"native-current")) <= 0 ? nsl-refused(home,dir,"training-returned-without-generation") : nsl-evaluate(home,dir,before,nag-resolve(nsm-at(dir,"adapter")));
   }
-  def nsl-evaluate(home,dir,before,candidate) {
+  def nsl-evaluate(home,dir,before,candidate) = !nsm-training(home) || !nsm-row-in-scope(home,dir) || nsm-withdrawn(dir) ? "assessment-scope-held" : nsl-evaluate-authorized(home,dir,before,candidate);
+  def nsl-evaluate-authorized(home,dir,before,candidate) {
    let start = host_monotonic_ms();
    let beginning = nsm-event(home,"assessment-binding-begin",[nsm-s("id",fs-path-basename(dir))]);
    let assessment = json-array-elements(nsm-json(nsm-at(dir,"assessment.json")));
@@ -217,11 +232,12 @@ section [form.bml] {
    let observed = nsm-event(home,"organ-health",[json-node-pair("health",reading)]);
    cons(reading,nsl-health-rows(home,dir,restBefore,restAfter,heldout,basis));
   }
-  def nsl-publish-state(home,dir,before,candidate,scores,accepted,step,seal,serving,servingSeal,old,control) {
+  def nsl-publish-state(home,dir,before,candidate,scores,accepted,step,seal,serving,servingSeal,old,control) = !nsm-training(home) || !nsm-row-in-scope(home,dir) || nsm-withdrawn(dir) ? "publication-held;scope-or-teaching-withdrawn" : !nsl-before-current(home,before) ? nsl-refused(home,dir,"prepared-source-scope-or-withdrawal-changed") : nsl-publish-authorized(home,dir,before,candidate,scores,accepted,step,seal,serving,servingSeal,old,control);
+  def nsl-publish-authorized(home,dir,before,candidate,scores,accepted,step,seal,serving,servingSeal,old,control) {
    let record = nsm-json(nsm-at(dir,"record.json")); let skill = nsm-skill(nsm-str(record,"route")); let prior = nsm-skills(old);
    let skills = accepted && (((String) nsm-str(record,"objective") == "supervised-answer") && (!nsm-has(prior,skill))) ? append(prior,[skill]) : prior;
    let state = json-node-object([nsm-s("schema","native-session-state-v1"),nsm-s("candidate",candidate),nsm-s("candidate_seal",seal),nsm-s("serving",serving),nsm-s("serving_seal",servingSeal),nsm-s("base_seal",nsm-str(before,"base_seal")),nsm-n("optimizer_step",step),nsm-n("learned_rounds",nsm-num(old,"learned_rounds") + 1),nsm-n("promotions",nsm-num(old,"promotions") + accepted),nsm-n("withdrawals",nsm-num(old,"withdrawals")),nsm-s("replay",accepted ? dir : nsm-str(old,"replay")),nsm-s("last_row",dir),json-node-pair("skills",json-node-array(nsm-string-nodes(skills)))]);
-   let saved = nsm-atomic(nsm-at(home,"state.json"),state);
+   let saved = nsm-atomic(nsm-at(home,"state.json"),oh-set(state,"scope_id",json-node-string(nsm-scope-id(home))));
    nsl-finish(home,dir,before,candidate,scores,accepted,step,control,state);
   }
   def nsl-finish(home,dir,before,candidate,scores,accepted,step,control,state) {
@@ -231,7 +247,8 @@ section [form.bml] {
    let event = nsm-event(home,"round-complete",[nsm-s("id",fs-path-basename(dir)),nsm-n("optimizer_step",step),nsm-n("lora_rounds",1),nsm-n("promoted",accepted),nsm-s("selected",accepted ? "admit-candidate" : "defer-candidate;retain-serving"),nsm-s("choices","admit-candidate|defer-candidate;retain-serving"),nsm-s("assessment",nsm-at(dir,"result.json")),nsm-s("training_events",nsm-at(nsm-at(dir,"adapter"),"training-events.fkb")),nsm-n("retained_buffers",metal_live()[2])]);
    "completed";
   }
-  def nsl-drain(home) {
+  def nsl-drain(home) = !nsm-enabled(home) ? "training-scope-held" : nsl-drain-authorized(home);
+  def nsl-drain-authorized(home) {
    let reader = nse-reader(home);
    defer nse-reader-close(home,reader);
    nsl-drain-reader(home,reader);
@@ -243,7 +260,7 @@ section [form.bml] {
    nsl-drain-reader-scoped(home,reader,scope);
   }
   def nsl-drain-reader-scoped(home,reader,scope) {
-   let care = nse-attend-reader(home,reader);
+   let care = nsm-enabled(home) ? nse-attend-reader(home,reader) : json-node-null();
    let pending = nsm-pending(home,nsm-dirs(home));
    (!nsm-enabled(home)) || nil?(pending) ? "drained" : nsl-drained-reader-scoped(home,reader,scope,nsl-one-scoped(home,pending[0],scope));
   }
@@ -264,7 +281,7 @@ section [form.bml] {
   }
   // The newest retained reading whose prompt is this question rides beside it,
   // the way a draft carries the turn before. A question with no reading stays bare.
-  def nsl-ask-memory(home,prompt) = nsl-ask-memory-rows(nsm-at(home,"rows"),nsm-dirs(home),prompt,0,"");
+  def nsl-ask-memory(home,prompt) = nsl-ask-memory-rows(nsm-at(home,"rows"),nsm-dirs(home) |> filter(name => nsm-row-in-scope(home,nsm-at(nsm-at(home,"rows"),name))),prompt,0,"");
   def nsl-ask-memory-rows(root,names,prompt,at,text) = nil?(names) ? text : nsl-ask-memory-one(root,names[0],names[1:],prompt,at,text);
   def nsl-ask-memory-one(root,name,rest,prompt,at,text) {
    let dir = nsm-at(root,name);

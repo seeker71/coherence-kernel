@@ -11,14 +11,15 @@ section [form.bml] {
   def nsx-reference(home,path,kind) = oh-set(oh-set(nss-reference(path),"home",json-node-string(home)),"kind",json-node-string(kind));
   def nsx-names(home,names) = names |> map(name => nsx-reference(home,nsm-at(nsm-at(nsm-at(home,"experiences"),name),"record.json"),"experience"));
   def nsx-homes(homes) = nil?(homes) ? [] : append(nsx-home(nsm-str(homes[0],"home")),nsx-homes(homes[1:]));
-  def nsx-home(home) = !fs-is-dir?(nsm-at(home,"experiences")) ? [] : nsx-names(home,fs-list(nsm-at(home,"experiences")));
+  def nsx-home(home) = !nsm-retention(home) || !fs-is-dir?(nsm-at(home,"experiences")) ? [] : nsx-names(home,fs-list(nsm-at(home,"experiences")));
   def nsx-legacy(sources) = nil?(sources) ? [] : nsx-legacy-one(sources[0],sources[1:]);
   def nsx-legacy-one(source,rest) {
    let home = nsm-str(source,"home"); let id = fs-path-basename(fs-path-dirname(nsm-str(source,"path")));
    let full = nsm-at(nsm-at(nsm-at(home,"experiences"),id),"record.json");
    file_size(full) > 0 ? nsx-legacy(rest) : cons(nsx-reference(home,nsm-str(source,"path"),"training-record"),nsx-legacy(rest));
   }
-  def nsx-sources(home) {
+  def nsx-sources(home) = !nsm-retention(home) ? [] : nsx-sources-authorized(home);
+  def nsx-sources-authorized(home) {
    let made = nsm-init(home); let legacy = nss-catalog(home);
    let homes = json-array-elements(oh-get(nsm-json(nsm-at(home,"evidence-catalog.json")),"homes"));
    append(nsx-homes(homes),nsx-legacy(legacy));
@@ -26,13 +27,14 @@ section [form.bml] {
   def nsx-experience(reference,record) {
    (String) nsm-str(reference,"kind") == "experience" ? record : json-node-object([nsm-s("id",nsm-str(record,"id")),nsm-s("session",nsm-str(record,"session")),nsm-s("event",nsm-str(record,"event")),nsm-s("route",nsm-str(record,"route")),nsm-s("prompt",nsm-str(oh-get(record,"example"),"prompt")),nsm-s("attempt",(String) nsm-str(record,"objective") == "supervised-answer" ? nsm-str(oh-get(record,"example"),"completion") : ""),nsm-s("outcome",nsm-str(record,"outcome")),nsm-s("evidence",nsm-str(record,"evidence")),nsm-n("observed_at_ms",nsm-num(record,"observed_at_ms")),nsm-n("evaluation",0),nsm-s("context",(String) nsm-str(record,"objective") == "supervised-answer" ? "retained-supervised-example" : "legacy-status;original-problem-and-attempt-unavailable")]);
   }
-  def nsx-read(reference) {
+  def nsx-read(reference) = !nsm-retention(nsm-str(reference,"home")) ? json-node-null() : nsx-read-authorized(reference);
+  def nsx-read-authorized(reference) {
    let record = nsm-json(nsm-str(reference,"path"));
-   nss-current(reference) && nsx-bound(record) ? nsx-withdrawal(reference,nsx-experience(reference,record)) : json-node-null();
+   nsm-record-in-scope(nsm-str(reference,"home"),record) && nss-current(reference) && nsx-bound(record) ? nsx-withdrawal(reference,nsx-experience(reference,record)) : json-node-null();
   }
   def nsx-withdrawal(reference,record) {
    let dir = nsm-at(nsm-at(nsm-str(reference,"home"),"rows"),nsm-str(record,"id"));
-   !nsm-withdrawn(dir) ? record : oh-set(oh-set(oh-set(record,"original_outcome",oh-get(record,"outcome")),"outcome",json-node-string("withdrawn-teaching")),"withdrawal",nss-reference(nsm-withdrawal(dir)));
+   !nsm-withdrawn(dir) ? record : json-node-null();
   }
   def nsx-scan(sources,query,features,skill,rows) = nil?(sources) ? rows : nsx-scan-one(sources[0],sources[1:],query,features,skill,rows);
   def nsx-scan-one(source,rest,query,features,skill,rows) {
@@ -53,7 +55,8 @@ section [form.bml] {
    node_eq(record,json-node-null()) ? rest : nsx-order(json-node-object([json-node-pair("source",reference),json-node-pair("experience",record)]),rest);
   }
   def nsx-order(row,rows) = nil?(rows) ? [row] : nsm-num(oh-get(row,"experience"),"observed_at_ms") <= nsm-num(oh-get(rows[0],"experience"),"observed_at_ms") ? cons(row,rows) : cons(rows[0],nsx-order(row,rows[1:]));
-  def nsx-recall(home,query,skill) {
+  def nsx-recall(home,query,skill) = !nsm-retention(home) ? json-node-object([nsm-s("home",home),nsm-s("reason","retention-scope-required"),nsm-n("received",0),json-node-pair("sources",json-node-array([]))]) : nsx-recall-authorized(home,query,skill);
+  def nsx-recall-authorized(home,query,skill) {
    let started = host_monotonic_ms(); let sources = nsx-sources(home);
    let rows = nsx-scan(sources,query,re-semantic-features(query),skill,[]);
    let best = nse-best(nsx-related(rows),0,[]);
@@ -69,7 +72,8 @@ section [form.bml] {
    let saved = nsm-write(path,retained);
    retained;
   }
-  def nsx-context(result) {
+  def nsx-context(result) = !nsm-retention(nsm-str(result,"home")) ? "[]" : nsx-context-authorized(result);
+  def nsx-context-authorized(result) {
    let episodes = nsx-episodes(json-array-elements(oh-get(result,"sources")));
    let complete = (len(episodes) > 0) && ((Comparable) len(episodes) == nsm-num(result,"received"));
    let reading = oh-set(oh-reading("session-memory",nsm-str(result,"query_sha256"),"experience-consumption",json-node-int(nsm-num(result,"received")),json-node-int(len(episodes)),json-node-int(complete),complete ? [] : [oh-need("current-session-experience",oh-reference(nsm-str(result,"path")))],["consult-experience","continue-local-enquiry"],oh-reference(nsm-str(result,"path"))),"care_of",oh-get(oh-get(result,"health"),"id"));

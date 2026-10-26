@@ -1,10 +1,22 @@
 # Native session learning
 
-The current implementation enables session learning by default. Its invocation
-therefore needs an established scope for capture, destination, retention and
-training. Conversation alone does not establish that scope. Inspect the actual
-door and controls before using it with personal material; this document does
-not implement a new consent gate or promise complete erasure.
+Session content is retained only under an explicit scope in the selected home's
+`config.json`. Retention and training are separate controls; both default off.
+The local `session scope|{"owner":"…","purpose":"…","retain":1,"train":0}`
+command records established authorization for that home. Use `train:1` only for
+an authorized learning scope. A conversation, an old record or `resume` supplies
+no new authorization. `session status` exposes the scope and both allowances.
+
+The checks run before experience, training-row and inference-request writes,
+including direct collectors. A teaching offered without retention scope returns
+`not-retained;scope-required`. With retention alone, it becomes experience and
+creates no training example. Source discovery stays in the explicitly selected
+home; readable sibling worktrees are not automatically admitted.
+
+Setting both controls to zero stops new content capture and source delivery.
+The learner rechecks before each round and before publishing its candidate.
+The scope command reports whether work is in flight. Existing records and
+adapter bytes stay intact; this control makes no erasure or unlearning claim.
 
 Form owns collection, routing,
 supervision, tokenization, full LoRA gradients, Adam continuation, assessment
@@ -53,9 +65,9 @@ results and adapter bytes remain intact. `learned_rounds` retains cumulative
 work and `withdrawals` counts completed retirements in the session state; the
 serving adapter stays selected.
 
-Recalled experience labels the original attempt `withdrawn-teaching` and keeps
-its `original_outcome` beside a reference to the withdrawal
-(`nsx-withdrawal` in `form/form-stdlib/native-session-experience.bml`).
+Recalled experience excludes a withdrawn teaching, including an already-held
+reference (`nsx-withdrawal` in `form/form-stdlib/native-session-experience.bml`).
+The candidate publication boundary also checks the withdrawal marker.
 
 Withdrawal selects a checkpoint from before the lesson; it does not claim
 arbitrary unlearning. Older lessons, promoted lessons and descendants in other
@@ -230,15 +242,13 @@ Unchanged evidence under the same running program image reuses its
 response; a miss stays open. Source-compiled processes without an observed image
 identity do not reuse another process's answer. The cache reads the executing
 image identity, rather than treating current source-file bytes as running code.
-The default hearth discovers this repository's other local worktrees through
-Git and reads their retained session records by reference. A nondefault
-session home stays scoped to that home. `evidence-catalog.json` reports the
-discovered homes, absent or unreadable homes, source records, registry exit,
-and the executing image identity. Discovery emits its own health reading when
-that evidence changes. A failed registry call leaves local evidence available
-and reports incomplete coverage. Identical registry bytes share one retained
-artifact, and unchanged observations preserve their original timestamp.
-Worktree commit movement alone does not change the memory-coverage reading.
+The selected hearth supplies its own authorized records by reference.
+`evidence-catalog.json` reports that home, its source records and the executing
+image identity. Changing the scope's owner or purpose holds prior records and
+learned state; reusing a filesystem path does not adopt them. Prepared training
+also binds source and rehearsal references, rechecked at gradient admission
+and publication. Legacy unscoped records remain stored and are excluded from
+current delivery and learning. Unchanged observations preserve their timestamp.
 
 Each reference binds its donor's configuration and both current and row-bound
 held-out data. Retrieval and consumption check those bytes again and exclude
