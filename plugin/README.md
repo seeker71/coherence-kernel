@@ -1,8 +1,8 @@
 # plugin/ — Sema's hosted companion surface
 
 This directory owns the native HTTP Action used by **Sema — coherence-kernel**
-and its canonical companion instructions. The host's model helps people learn,
-explore business ideas, research, design, create and collaborate; Form supplies
+and its canonical companion instructions. The host's model welcomes play, joy,
+exploration, learning, creation and connection; Form supplies
 the evidence and operations its connected tools actually carry.
 
 `ai-plugin.json` → `description_for_model` is the canonical instruction payload.
@@ -62,8 +62,8 @@ changing a running service.
 | Public dialogue routes | Deliberately unlisted public turns, directed replies and per-turn removal capabilities; these are not imported in the current Action. |
 | `POST /mcp` | A partial JSON-RPC dialogue bridge, described below. |
 
-The grounding index is lexical and small. A hit establishes the returned
-source's relevance, not a complete answer or a measure of someone's feelings.
+The grounding index is lexical and small. A hit establishes keyword overlap with the returned source. Its relevance
+needs reading; lexical counters do not measure someone's feelings.
 A miss leaves the host free to help through its own clearly attributed
 reasoning and available tools. Ordinary task outputs need their requested
 scope; reflective counsel can stay brief without imposing that shape on every
@@ -112,9 +112,9 @@ including `chatgpt-plugin-band.fk`, `visitor-ledger-band.fk`,
 witnesses. Run the smallest relevant observation when its owner changes;
 historical verdict numbers are not current proof.
 
-Two runtime strings still need care in their owning source: `cp-seam` and the
-seed index refer to a June native-voice-pending receipt, while
-[`HOMECOMING.md`](../HOMECOMING.md) describes the body's current native lanes;
-memory responses also overstate total revocation. This instruction update
-keeps those strings from becoming hosted capability promises. A runtime repair
-must observe the changed route before claiming those source seams resolved.
+The runtime response distinguishes native retrieval from host prose and dated
+voice receipts from current capability. Lexical counters leave meaning with
+the person. Handle-memory responses name the specific store operation and its
+scope. The October 26 receipt records the focused route observation and the
+served Action's separate publication; GPT editor publication remains a distinct
+readback.
