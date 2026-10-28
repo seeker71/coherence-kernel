@@ -1018,9 +1018,16 @@ and unmeasured verification, and follows unresolved work with `split`, `lane`,
 `queue` or `turn`. Throughput remains diagnostic; it does not select the next
 repair. Local token share does not judge success.
 
-A Claude Code transcript goes to `observe/session-rent-run.bml`, one count per
-`requestId` including its subagents. Codex uses
-`observe/rented-turn-meter-run.fk` at opening and closing: cumulative input,
+A session's own transcript path goes on stdin to `observe/session-rent-run.bml`.
+Claude usage is counted once per `requestId`, including its subagents. Codex uses
+the named transcript's latest admitted cumulative sample from `rented-usage.bml`.
+Its request count and cache-write allocation stay unknown. `meter_basis` and
+`through` name the scope and sample; `provider_session` joins native work while
+the stable transcript key preserves receipt history. A missing provider identity
+leaves native usage and share unknown. Versioned measurements refresh older
+receipts even when transcript bytes have not changed.
+
+For interval costs, Codex uses `observe/rented-turn-meter-run.fk` at opening and closing: cumulative input,
 cached input, output, reasoning and total, with the comparable delta. A first
 reading, different transcript or decreasing counters starts a baseline.
 Cached input belongs to input; reasoning belongs to output. Neither is added

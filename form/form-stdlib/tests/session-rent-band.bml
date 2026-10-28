@@ -1,6 +1,6 @@
 ; session-rent-band.bml — one session read three ways agrees, and its local tokens include the lane it began.
 ; preludes: form-stdlib/bml/session-rent.bml form-stdlib/bml/form-cli-turn-meter.bml form-stdlib/bml/form-cli-flow-meter.bml
-; Verdict 127
+; Verdict 8191
 ;
 ; A scratch session: a transcript with two askings, one subagent transcript opened inside the first and one,
 ; two directories deep, inside the second. Each provider message carries its usage once per request id; the
@@ -24,6 +24,38 @@ section [form.bml] {
   def srb-bash() = "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"./fkwu observe/local-flow-review.bml\"}}";
   def srb-turn-row(at, gap, option, session, gen, inj) = "{\"at_unix_ms\":" ++ at.str() ++ ",\"gap\":\"" ++ gap ++ "\",\"option\":" ++ option.str() ++ ",\"session\":\"" ++ session ++ "\",\"local_generated_ids\":" ++ gen.str() ++ ",\"local_injected_ids\":" ++ inj.str() ++ "}\n";
   def srb-get(doc, key) = fcgp-num(doc, key) ?? (0 - 1);
+  def srb-codex-header() = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"synthetic\"}}\n";
+  def srb-codex-sample(input, cache, output, reasoning, total) = "{\"timestamp\":\"2026-10-28T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":" ++ input.str() ++ ",\"cached_input_tokens\":" ++ cache.str() ++ ",\"output_tokens\":" ++ output.str() ++ ",\"reasoning_output_tokens\":" ++ reasoning.str() ++ ",\"total_tokens\":" ++ total.str() ++ "}}}}\n";
+  def srb-codex-row(path, text) {
+   write_file_text(path, text);
+   parse-json("rent", sr-row-with(path, "", []));
+  }
+  def srb-codex-score(dir) {
+   let path = dir ++ "/codex.jsonl";
+   let last = srb-codex-sample(800, 300, 200, 50, 1000);
+   let text = srb-codex-header() ++ srb-codex-sample(100, 40, 10, 5, 110) ++ last ++ last;
+   let known = srb-codex-row(path, text);
+   let rented = fcgp-obj(known, "rented");
+   let c8 = srb-claim(srb-get(rented, "input") == 800 && srb-get(rented, "cache_read") == 300 && srb-get(rented, "output") == 200 && nothing?(fcgp-num(rented, "requests")) && nothing?(fcgp-num(rented, "cache_write")) && fcgp-str(known, "meter_basis") == "codex-cumulative-v1" && fcgp-str(known, "through") == "2026-10-28T00:00:01Z", 128);
+   let absent = srb-codex-row(path, srb-codex-header());
+   let c9 = srb-claim(nothing?(fcgp-num(fcgp-obj(absent, "rented"), "output")) && nothing?(fcgp-num(absent, "local_share_ppm")), 256);
+   let invalid = srb-codex-row(path, text ++ srb-codex-sample(800, 900, 200, 50, 1000));
+   let c10 = srb-claim(nothing?(fcgp-num(fcgp-obj(invalid, "rented"), "output")) && nothing?(fcgp-num(invalid, "local_share_ppm")), 512);
+   let partial = srb-codex-row(path, text ++ "{\"type\":\"event_msg\",\"total_token_usage\":");
+   let c11 = srb-claim(srb-get(fcgp-obj(partial, "rented"), "output") == 200, 1024);
+   let zero = srb-codex-row(path, srb-codex-header() ++ srb-codex-sample(0, 0, 0, 0, 0));
+   let c12 = srb-claim(srb-get(fcgp-obj(zero, "rented"), "output") == 0 && srb-get(fcgp-obj(zero, "rented"), "input") == 0 && nothing?(fcgp-num(fcgp-obj(zero, "rented"), "requests")), 2048);
+   let unrecognized = srb-codex-row(path, "{\"type\":\"unrecognized-fixture\"}\n");
+   write_file_text(path, text);
+   let drafts = dir ++ "/codex-drafts.jsonl";
+   write_file_text(drafts, "{\"session\":\"synthetic\",\"generated\":100}\n{\"session\":\"codex\",\"generated\":900}\n");
+   let owned = parse-json("rent", sr-row-with(path, drafts, [parse-json("turn", srb-turn-row(100, "g", 1, "synthetic", 300, 1000))]));
+   let missing = srb-codex-row(path, "{\"type\":\"session_meta\",\"payload\":{}}\n" ++ last);
+   let ownership = fcgp-str(owned, "session") == "codex" && fcgp-str(owned, "provider_session") == "synthetic" && srb-get(fcgp-obj(owned, "local"), "generated") == 100 && srb-get(fcgp-obj(owned, "local"), "lane_generated") == 300 && nothing?(fcgp-num(fcgp-obj(missing, "local"), "generated")) && nothing?(fcgp-num(missing, "local_share_ppm")) && srb-get(fcgp-obj(missing, "rented"), "output") == 200;
+   let c13 = srb-claim(ownership && nothing?(fcgp-num(fcgp-obj(unrecognized, "rented"), "output")) && fcgp-str(unrecognized, "meter_basis") == "usage-unavailable", 4096);
+   print_str("session-rent Codex claims " ++ c8.str() ++ " " ++ c9.str() ++ " " ++ c10.str() ++ " " ++ c11.str() ++ " " ++ c12.str() ++ " " ++ c13.str());
+   c8 + c9 + c10 + c11 + c12 + c13;
+  }
   def srb-score(dir) {
    let main = dir ++ "/sess.jsonl";
    let m1 = fs_mkdir(dir ++ "/sess");
@@ -69,7 +101,7 @@ section [form.bml] {
   def srb-run() {
    let dir = temp_dir() ++ "/session-rent-band-" ++ host_pid().str() ++ "-" ++ now_unix_ms().str();
    let made = fs_mkdir(dir);
-   let score = srb-score(dir);
+   let score = srb-score(dir) + srb-codex-score(dir);
    let gone = fs_rmdir(dir);
    score;
   }
