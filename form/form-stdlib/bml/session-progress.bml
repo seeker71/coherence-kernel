@@ -18,9 +18,9 @@
 //////////////////////////////////////////////////////////////////////
 // preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/session-rent.bml form-stdlib/bml/local-run.bml form-stdlib/bml/host-fs.bml
 section [form.bml] {
- blueprint SessionRented { requests: int, input: int, cache_write: int, cache_read: int, output: int, transcripts: int }
- blueprint SessionLocal { drafts: int, generated: int, lane_options: option<int>, lane_generated: option<int>, lane_injected: option<int>, runs: option<int>, run_generated: option<int> }
- blueprint SessionRent { at_unix_ms: int, session: string, rented: SessionRented, local: SessionLocal, local_share_ppm: int, began_unix_ms: option<int>, ended_unix_ms: option<int>, bytes: option<int> }
+ blueprint SessionRented { requests: option<int>, input: option<int>, cache_write: option<int>, cache_read: option<int>, output: option<int>, transcripts: int }
+ blueprint SessionLocal { drafts: option<int>, generated: option<int>, lane_options: option<int>, lane_generated: option<int>, lane_injected: option<int>, runs: option<int>, run_generated: option<int> }
+ blueprint SessionRent { at_unix_ms: int, session: string, rented: SessionRented, local: SessionLocal, local_share_ppm: option<int>, began_unix_ms: option<int>, ended_unix_ms: option<int>, bytes: option<int>, measurement_version: option<int>, meter_basis: option<string>, through: option<string>, provider_session: option<string> }
  class SessionProgress {
   def sp-ledger() = "receipts/session-rent-ledger.jsonl";
   def sp-drafts() = "receipts/draft-ledger.jsonl";
@@ -47,20 +47,20 @@ section [form.bml] {
   def sp-bytes(files) = foldl((total, file) => total + file_size(file), 0, files);
 
   // ---- one session's row ------------------------------------------------------------------------------------------------
-  def sp-share(generated, output) = (generated + output) == 0 ? 0 : (generated * 1000000) / (generated + output);
+  def sp-share(generated, output) = nothing?(generated) ? nothing() : sr-share(generated, output);
   def sp-lane-part(lane, i) = nothing?(lane) ? nothing() : lane[i];
   // The local tokens a session is known to have spent: the voice door counts every ask (local-run.bml), the drafts and
   // the coding lane count their own; the larger is the truer, since an ask a draft made is in both.
   def sp-run-generated(runs) = foldl((total, row) => total + (row-get(row, "generated_ids") ?? 0), 0, runs);
-  def sp-known-local(legacy, runs) = nil?(runs) ? legacy : max2(legacy, sp-run-generated(runs));
+  def sp-known-local(legacy, runs) = nothing?(legacy) ? nothing() : nil?(runs) ? legacy : max2(legacy, sp-run-generated(runs));
   def sp-cell(main, turnRows, runRows, bytes) {
    let measured = sr-measure(main, sp-drafts(), turnRows);
    let rented = measured[2];
    let local = measured[3];
    let lane = measured[4];
    let times = sp-times(main);
-   let runs = local-run-of(runRows, measured[0]);
-   let legacy = local[1] + (nothing?(lane) ? 0 : lane[1]);
+   let runs = nothing?(measured[7]) ? [] : local-run-of(runRows, measured[7]);
+   let legacy = fcgp-plus(local[1], nothing?(lane) ? 0 : lane[1]);
    SessionRent{
     at_unix_ms: now_unix_ms(),
     session: measured[0],
@@ -69,17 +69,22 @@ section [form.bml] {
     local_share_ppm: sp-share(sp-known-local(legacy, runs), rented[3]),
     began_unix_ms: times[0],
     ended_unix_ms: times[1],
-    bytes: bytes
+    bytes: bytes,
+    measurement_version: sr-measurement-version(),
+    meter_basis: measured[5],
+    through: measured[6],
+    provider_session: measured[7]
    };
   }
   // the sessions already held, each by the bytes it was read at
   def sp-held-key(session, bytes) = session ++ "|" ++ int_to_str(bytes);
-  def sp-held() = ledger-rows(sp-ledger(), "SessionRent") |> map(row => sp-held-key(row-get(row, "session"), row-get(row, "bytes") ?? -1));
+  def sp-held-rows(rows) = rows |> filter(row => (row-get(row, "measurement_version") ?? 0) == sr-measurement-version()) |> map(row => sp-held-key(row-get(row, "session"), row-get(row, "bytes") ?? -1));
+  def sp-held() = sp-held-rows(ledger-rows(sp-ledger(), "SessionRent"));
   def sp-held?(held, session, bytes) = held |> any?(key => key == sp-held-key(session, bytes));
 
   // ---- every session ------------------------------------------------------------------------------------------------------
   def sp-measure-one(main, held, turnRows, runRows) {
-   let bytes = sp-bytes(sr-files(main));
+   let bytes = sp-bytes(ru-codex?(main) ? [main] : sr-files(main));
    let session = sr-session(main);
    sp-held?(held, session, bytes) ? "kept" : sp-land(session, bytes, ledger-append(sp-ledger(), sp-cell(main, turnRows, runRows, bytes)));
   }
@@ -112,16 +117,17 @@ section [form.bml] {
    let sub = row-get(row, part);
    nothing?(sub) ? nothing() : row-get(sub, name);
   }
-  def sp-sum(rows, part, name) = foldl((total, row) => total + (sp-field(row, part, name) ?? 0), 0, rows);
+  def sp-sum(rows, part, name) = fcgp-strict(rows |> map(row => sp-field(row, part, name)));
+  def sp-scaled(value, scale, suffix) = nothing?(value) ? "null" : int_to_str(value / scale) ++ suffix;
   def sp-day-of(row) = sp-date(sp-when(row));
   // a row's local tokens: the larger of what the drafts and lane counted and what the voice door counted
-  def sp-local-of(row) = max2((sp-field(row, "local", "generated") ?? 0) + (sp-field(row, "local", "lane_generated") ?? 0), sp-field(row, "local", "run_generated") ?? 0);
+  def sp-local-of(row) = nothing?(sp-field(row, "local", "generated")) ? nothing() : max2(sp-field(row, "local", "generated") + (sp-field(row, "local", "lane_generated") ?? 0), sp-field(row, "local", "run_generated") ?? 0);
   def sp-padl(text, width) = len(text) >= width ? text : (sp-spaces(width - len(text)) ++ text);
   def sp-spaces(k) = k <= 0 ? "" : (" " ++ sp-spaces(k - 1));
   def sp-line(label, rows) {
    let output = sp-sum(rows, "rented", "output");
-   let generated = foldl((total, row) => total + sp-local-of(row), 0, rows);
-   str-join-with([sp-padl(label, 12), sp-padl(int_to_str(len(rows)), 9), sp-padl(int_to_str(sp-sum(rows, "rented", "requests")), 10), sp-padl(int_to_str(output / 1000) ++ "K", 10), sp-padl(int_to_str(sp-sum(rows, "rented", "cache_read") / 1000000) ++ "M", 10), sp-padl(int_to_str(generated), 10), sp-padl(int_to_str(sp-share(generated, output)), 10)], " ");
+   let generated = fcgp-strict(rows |> map(row => sp-local-of(row)));
+   str-join-with([sp-padl(label, 12), sp-padl(int_to_str(len(rows)), 9), sp-padl(fcgp-show(sp-sum(rows, "rented", "requests")), 10), sp-padl(sp-scaled(output, 1000, "K"), 10), sp-padl(sp-scaled(sp-sum(rows, "rented", "cache_read"), 1000000, "M"), 10), sp-padl(fcgp-show(generated), 10), sp-padl(fcgp-show(sp-share(generated, output)), 10)], " ");
   }
   def sp-days(rows) = nil?(rows) ? [] : sp-days-of(rows, sp-day-of(rows[0]));
   def sp-days-of(rows, day) = cons(sp-line(day, rows |> filter(r => sp-day-of(r) == day)), sp-days(rows |> filter(r => sp-day-of(r) != day)));

@@ -1,7 +1,8 @@
 // session-rent.bml — one rented session's spend beside the local tokens that served it.
-// Rented: every billed request in the session's transcript and its subagents' transcripts,
-// read once per requestId (input, cache write, cache read, output). sr-files names that set; the
-// turn meter and the flow meter read the same set, so the three agree on one session.
+// Claude: transcript and subagent usage read once per requestId. Codex: the named
+// transcript's latest admitted cumulative sample, through rented-usage.bml.
+// Codex input includes cached input and output includes reasoning; its request
+// count and cache-write allocation remain unknown. meter_basis names the scope.
 // Local: the voice's drafts for the same session (receipts/draft-ledger.jsonl, keyed by session id)
 // and the coding lane's IDs from the native-turn rows that session began (their "session" field),
 // read where turns run: this checkout and the walk checkout launchd turns in (sr-turn-rows). While
@@ -11,7 +12,12 @@
 import form-stdlib/form-cli-movement.bml;
 import form-stdlib/form-fs.fk;
 import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/rented-usage.bml;
 section [form.bml] {
+    def sr-measurement-version() = 2;
+    def sr-unknown() = [nothing(), nothing(), nothing(), nothing(), nothing()];
+    def sr-codex-rented(sample) = nothing?(sample) ? sr-unknown() : [sample[1][0], nothing(), sample[1][1], sample[1][2], nothing()];
+    def sr-share(generated, output) = nothing?(output) ? nothing() : (generated + output) == 0 ? 0 : (generated * 1000000) / (generated + output);
     def sr-fields() = ["input_tokens","cache_creation_input_tokens","cache_read_input_tokens","output_tokens"];
     def sr-field(text, usageAt, rowEnd, name) {
         let mark = rtm-mark(name);
@@ -102,11 +108,18 @@ section [form.bml] {
     // the share over what is known: with the lane unknown it counts the drafts alone, a lower bound
     // one session measured: its id, the transcripts it spans, what it rented, and the local tokens that served it
     def sr-measure(main, draftLedger, turnRows) {
-        let files = sr-files(main);
+        let header = ru-codex-header(main);
+        let codex = !nothing?(header);
+        let files = codex ? [main] : sr-files(main);
+        let sample = codex ? ru-read(main) : nothing();
+        let legacy = codex ? [0, 0, 0, 0, 0] : sr-rented(files, [0, 0, 0, 0, 0], rtm-seen-none());
         let session = sr-session(main);
-        [session, files, sr-rented(files, [0, 0, 0, 0, 0], rtm-seen-none()),
-         sr-local(session, file_size(draftLedger) < 1 ? [] : split-on(read_file(draftLedger), "\n"), 0, 0),
-         sr-lane(session, turnRows)];
+        // Keep the receipt's transcript key stable; join native work to the
+        // provider's actual session ID, which differs from a Codex filename.
+        let providerSession = codex ? ru-session-id(header) : session;
+        [session, files, codex ? sr-codex-rented(sample) : legacy[4] > 0 ? legacy : sr-unknown(),
+         nothing?(providerSession) ? [nothing(), nothing()] : sr-local(providerSession, file_size(draftLedger) < 1 ? [] : split-on(read_file(draftLedger), "\n"), 0, 0),
+         nothing?(providerSession) ? nothing() : sr-lane(providerSession, turnRows), codex ? "codex-cumulative-v1" : legacy[4] > 0 ? "claude-request-ids-v1" : "usage-unavailable", nothing?(sample) ? nothing() : sample[0], providerSession];
     }
     def sr-row-with(main, draftLedger, turnRows) {
         let measured = sr-measure(main, draftLedger, turnRows);
@@ -115,16 +128,19 @@ section [form.bml] {
         let session = measured[0];
         let local = measured[3];
         let lane = measured[4];
-        let generated = local[1] + (nothing?(lane) ? 0 : lane[1]);
-        let share = (generated + rented[3]) == 0 ? 0 : (generated * 1000000) / (generated + rented[3]);
+        let generated = fcgp-plus(local[1], nothing?(lane) ? 0 : lane[1]);
+        let share = nothing?(generated) ? nothing() : sr-share(generated, rented[3]);
         str-join(["{\"at_unix_ms\":", int_to_str(now_unix_ms()), ",\"session\":\"", session,
-            "\",\"rented\":{\"requests\":", int_to_str(rented[4]), ",\"input\":", int_to_str(rented[0]),
-            ",\"cache_write\":", int_to_str(rented[1]), ",\"cache_read\":", int_to_str(rented[2]),
-            ",\"output\":", int_to_str(rented[3]), ",\"transcripts\":", int_to_str(len(files)),
-            "},\"local\":{\"drafts\":", int_to_str(local[0]), ",\"generated\":", int_to_str(local[1]),
+            "\",\"measurement_version\":", int_to_str(sr-measurement-version()), ",\"meter_basis\":", json-quote-string(measured[5]),
+            ",\"through\":", nothing?(measured[6]) ? "null" : json-quote-string(measured[6]),
+            ",\"provider_session\":", nothing?(measured[7]) ? "null" : json-quote-string(measured[7]),
+            ",\"rented\":{\"requests\":", fcgp-show(rented[4]), ",\"input\":", fcgp-show(rented[0]),
+            ",\"cache_write\":", fcgp-show(rented[1]), ",\"cache_read\":", fcgp-show(rented[2]),
+            ",\"output\":", fcgp-show(rented[3]), ",\"transcripts\":", int_to_str(len(files)),
+            "},\"local\":{\"drafts\":", fcgp-show(local[0]), ",\"generated\":", fcgp-show(local[1]),
             ",\"lane_options\":", sr-lane-field(lane, 0), ",\"lane_generated\":", sr-lane-field(lane, 1),
             ",\"lane_injected\":", sr-lane-field(lane, 2),
-            "},\"local_share_ppm\":", int_to_str(share), "}"]);
+            "},\"local_share_ppm\":", fcgp-show(share), "}"]);
     }
     def sr-row(main, draftLedger) = sr-row-with(main, draftLedger, sr-turn-rows());
 }
