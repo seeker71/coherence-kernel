@@ -2057,6 +2057,15 @@ extern int rmdir(const char *);
 extern int unlink(const char *);
 extern int rename(const char *, const char *);
 extern int getpid(void);
+#if defined(__APPLE__)
+/* Form's native POSIX lane can fork directly from its CPU image. Darwin's
+ * libc getpid cache is not refreshed by that syscall, so an inherited cached
+ * value would give a child its parent's locks, temporary paths and receipts.
+ * Read the process identity from the host for every runtime identity use. */
+extern long syscall(long number, ...);
+static int fk_process_id(void) { return (int)syscall(20); }
+#define getpid fk_process_id
+#endif
 extern char *getcwd(char *, unsigned long);
 extern int chdir(const char *);
 extern int sprintf(char *, const char *, ...);
