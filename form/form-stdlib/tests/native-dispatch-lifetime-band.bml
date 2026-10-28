@@ -1,0 +1,62 @@
+// Real sockets witness admission, finite work, reaping and dead-owner recovery.
+// preludes: form/form-stdlib/core.fk
+import form-stdlib/bml/native-socket-dispatch.bml;
+import form-stdlib/bml/dir-lock.bml;
+section [form.bml] {
+ class NativeDispatchLifetimeBand {
+  def ndb-client(owner,text) {
+   let fd = nps-socket(); let connected = nps-connect(fd,record_get(owner,"port"));
+   connected != 0 ? form_error("dispatch band client could not connect") : {
+    let flags = nps-nonblocking(fd); let sent = nps-send(fd,text); fd;
+   };
+  }
+  def ndb-response(raw,lock) {
+   let identity = host_pid() == nps-result(39,20,[]) ? 0 : form_error("forked handler identity differs from its native PID");
+   let held = dl-take(lock,1000);
+   held != 1 ? form_error("dispatch band lock was not reclaimed") : {
+    let pause = str_find(raw,"/slow",0)>=0 ? host_sleep_ms(60000) : 0;
+    let released = dl-release(lock);
+    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok";
+   };
+  }
+  def ndb-bit(yes,weight) = yes ? weight : 0;
+  def ndb-owned(lock,pid,until) = dl-field(dl-owner(lock),"pid=") == pid ? true : host_monotonic_ms()>=until ? false : {
+   let rest = host_sleep_ms(5); ndb-owned(lock,pid,until);
+  };
+  def ndb-run() {
+   let root = "/tmp/native-dispatch-band-" ++ host_pid().str();
+   let made = host_dir_mkdir(root); let lock = root ++ "/lock";
+   let owner = nsd-bounded(nsd-open(0,raw => ndb-response(raw,lock)),1,1500);
+   let partial = ndb-client(owner,"GET /");
+   let accepted = nsd-turn(owner,0); let framed = nsd-turn(owner,0);
+   let extra = ndb-client(owner,"GET /fast HTTP/1.1\r\nHost: local\r\n\r\n");
+   let refused = nsd-turn(owner,0); let refusal = nps-recv(extra,4096);
+   let capacity = ndb-bit(len(record_get(owner,"connections")) == 1 && str_find(refusal[1],"503",0)>=0,1);
+   let extra_closed = nps-close(extra);
+   let began = host_monotonic_ms(); let expired = nsd-turn(owner,-1);
+   let spent = host_monotonic_ms()-began; let eof = nps-recv(partial,4096);
+   let framing = ndb-bit(nil?(record_get(owner,"connections")) && eof[0] == 0,2);
+   let timer = ndb-bit(spent>0 && spent<5000 && record_get(owner,"expired") == 1,4);
+   let partial_closed = nps-close(partial);
+   let tighter = nsd-bounded(owner,1,1500);
+   let slow = ndb-client(owner,"GET /slow HTTP/1.1\r\nHost: local\r\n\r\n");
+   let slow_accept = nsd-turn(owner,0); let slow_begin = nsd-turn(owner,0);
+   let child = record_get(record_get(owner,"connections")[0],"pid");
+   let owned = ndb-owned(lock,child,host_monotonic_ms()+1000);
+   let left = nps-close(slow); let ended = nsd-turn(owner,-1);
+   let reaped = ndb-bit(owned && child>0 && host_alive(child) == 0 && nil?(record_get(owner,"connections")) && record_get(owner,"expired") == 2,8);
+   let ordinary = nsd-bounded(owner,1,5000);
+   let fast = ndb-client(owner,"GET /fast HTTP/1.1\r\nHost: local\r\n\r\n");
+   // A valid HTTP client may finish writing and still receive its response.
+   let half = nps-result(48,134,[fast,1]);
+   let fast_accept = nsd-turn(owner,0); let fast_begin = nsd-turn(owner,0);
+   let complete = nsd-turn(owner,-1); let response = nps-recv(fast,4096);
+   let recovered = ndb-bit(str_find(response[1],"200 OK",0)>=0 && str_find(response[1],"\r\n\r\nok",0)>=0 && host_path_is_dir(lock) == 0,16);
+   let normal = ndb-bit(half == 0 && record_get(owner,"completed") == 1 && nil?(record_get(owner,"connections")),32);
+   let counted = ndb-bit(record_get(owner,"rejected") == 1 && record_get(owner,"failed") == 2,64);
+   let closed = [nps-close(fast),nps-close(record_get(owner,"listener")),host_dir_rmdir(root)];
+   capacity+framing+timer+reaped+recovered+normal+counted;
+  }
+ }
+ ndb-run();
+}

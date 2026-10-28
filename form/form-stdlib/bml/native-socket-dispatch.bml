@@ -9,10 +9,15 @@ section [form.bml] {
    let fd = nps-socket();
    fd<0 ? form_error("native listener socket birth failed") : {
     let flags = [nps-reuse(fd),nps-cloexec(fd),nps-nonblocking(fd),nps-bind(fd,port),nps-listen(fd,str_to_int(trim(read_file("/proc/sys/net/core/somaxconn") ?? "2147483647")))];
-    any?(n => n != 0,flags) ? { let closed = nps-close(fd); form_error("native listener admission failed"); } : record_new(0,"listener",fd,"port",nps-port(fd),"handle",handle,"connections",[],"completed",0,"failed",0);
+    any?(n => n != 0,flags) ? { let closed = nps-close(fd); form_error("native listener admission failed"); } : record_new(0,"listener",fd,"port",nps-port(fd),"handle",handle,"connections",[],"completed",0,"failed",0,"capacity",0,"lifetime-ms",0,"expired",0,"rejected",0);
    };
   }
-  def nsd-stream(fd) = record_new(0,"fd",fd,"input-parts",[],"input-bytes",0,"tail","","frame",nothing(),"refusal","","pid",0,"watch",fd,"active",1);
+  // The service supplies its finite resource budget. It covers admission,
+  // request framing and handler execution, including clients that leave.
+  def nsd-bounded(owner,capacity,millis) = capacity<=0 || millis<=0 ? form_error("native listener limits must be positive") : {
+   record_set(owner,"capacity",capacity); record_set(owner,"lifetime-ms",millis); owner;
+  };
+  def nsd-stream(fd) = record_new(0,"fd",fd,"input-parts",[],"input-bytes",0,"tail","","frame",nothing(),"refusal","","pid",0,"watch",fd,"active",1,"began",host_monotonic_ms());
   def nsd-lower(text) = str-spans(map(i => { let b = str_byte_at(text,i); byte_to_str(b>=65 && b<=90 ? b+32 : b); },range(0,len(text))));
   def nsd-values(lines,name) = map(line => trim(substring(line,str_find(line,":",0)+1,len(line))),filter(line => { let at = str_find(line,":",0); at>0 && nsd-lower(substring(line,0,at)) == name; },lines));
   def nsd-token(text) = len(text)>0 && all?(i => { let b = str_byte_at(text,i); (b>=48 && b<=57) || (b>=65 && b<=90) || (b>=97 && b<=122) || str_find("!#$%&'*+-.^_`|~",substring(text,i,i+1),0)>=0; },range(0,len(text)));
@@ -72,7 +77,12 @@ section [form.bml] {
    fd == -11 || fd == -4 ? 0 : fd<0 ? form_error("native listener accept needs resource care: " ++ fd.str()) : {
     let flags = [nps-cloexec(fd),nps-nonblocking(fd),nps-no-sigpipe(fd)];
     any?(n => n != 0,flags) ? { let closed = nps-close(fd); form_error("native accepted socket flags failed"); } : {
-     record_set(owner,"connections",cons(nsd-stream(fd),record_get(owner,"connections"))); nsd-accept(owner);
+     let limit = record_get(owner,"capacity");
+     limit>0 && len(record_get(owner,"connections"))>=limit ? {
+      // The listener never blocks sending a refusal to a saturated peer.
+      let sent = nps-send(fd,nsd-error(503,"native request capacity is occupied")); let closed = nps-close(fd);
+      record_set(owner,"rejected",record_get(owner,"rejected")+1); 0;
+     } : { record_set(owner,"connections",cons(nsd-stream(fd),record_get(owner,"connections"))); nsd-accept(owner); };
     };
    };
   }
@@ -131,15 +141,37 @@ section [form.bml] {
    status == 0 ? 0 : print(["native-dispatch-source",record_get(conn,"pid"),status]);
    nsd-drop(owner,conn);
   }
+  def nsd-expire(owner) {
+   let lifetime = record_get(owner,"lifetime-ms"); let now = host_monotonic_ms();
+   lifetime<=0 ? 0 : map(conn => {
+    let pid = record_get(conn,"pid");
+    // These are this listener's unreaped direct children, so the PID remains
+    // owned until wait completes. Partial requests own only their socket.
+    let stopped = pid>0 ? host_signal(pid,9) : 0;
+    let waited = pid>0 ? host_wait(pid) : 0;
+    print(["native-dispatch-expired",pid,now - record_get(conn,"began"),stopped,waited]);
+    record_set(owner,"expired",record_get(owner,"expired")+1);
+    record_set(owner,"failed",record_get(owner,"failed")+1); nsd-drop(owner,conn);
+   },filter(conn => now - record_get(conn,"began")>=lifetime,record_get(owner,"connections")));
+  }
+  def nsd-wait(owner,millis) {
+   let lifetime = record_get(owner,"lifetime-ms"); let now = host_monotonic_ms();
+   lifetime<=0 ? millis : foldl((wait,conn) => {
+    let left = record_get(conn,"began")+lifetime - now; let held = left>0 ? left : 0;
+    wait<0 || held<wait ? held : wait;
+   },millis,record_get(owner,"connections"));
+  }
   def nsd-turn(owner,millis) {
+   let expired = nsd-expire(owner);
    let conns = record_get(owner,"connections");
-   let events = nps-poll(cons([record_get(owner,"listener"),1],map(c => [record_get(c,"watch"),1],conns)),millis);
-   events[0] == -4 ? 0 : events[0]<0 ? form_error("native readiness wait failed") : map(event => {
+   let events = nps-poll(cons([record_get(owner,"listener"),1],map(c => [record_get(c,"watch"),1],conns)),nsd-wait(owner,millis));
+   let handled = events[0] == -4 ? 0 : events[0]<0 ? form_error("native readiness wait failed") : map(event => {
     event[0] == record_get(owner,"listener") ? nsd-accept(owner) : {
      let matches = filter(c => record_get(c,"active") && record_get(c,"watch") == event[0],conns);
      nil?(matches) ? 0 : { let conn = matches[0]; record_get(conn,"pid") == 0 ? nsd-input(owner,conn) : nsd-complete(owner,conn); };
     };
    },events[1]);
+   nsd-expire(owner);
   }
   def nsd-serve(owner) { let turn = nsd-turn(owner,-1); nsd-serve(owner); }
  }
