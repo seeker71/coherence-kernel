@@ -10,6 +10,11 @@
 //   begun                 the first slot is running (the stamp's pid alive, a live owner of its door, or launchctl state =
 //                         running), or stamped its start and ended, or its job wrote its log in the slot's window (an older
 //                         door writes no stamp): nothing to heal
+//   began-then-silent     the stamp is there, its pid is gone, the lock is released or taken over by a later door, and the
+//                         job's log holds no end line ("[walk-lock] released" or "kept") after the pid's own claim line, with
+//                         no ledger row at or after the slot (hr-silenced turns a "finished" state into "silent" from the log
+//                         tail and the ledger text): the walk began and died unspoken; launchd's last exit reason is named
+//                         beside it when its `runs` advanced past the last retry row's. The safe plan runs
 //   crashed-after-launch  the stamp is there, its pid is gone and its lock was never released; or a report in the window
 //                         with SIGSEGV, SIGBUS, SIGILL, SIGABRT or SIGTRAP that is not a launch kill
 //   launch-killed         a report in the window says CODESIGNING, a Launch Constraint Violation, Code Signature Invalid, an
@@ -54,6 +59,25 @@ section [form.bml] {
    let runs = parse-int(hr-launchd-runs(launchd));
    !nothing?(runs) && !nothing?(baseline) && runs > baseline;
   }
+  // ── began, then silent: a "finished" state whose walk never spoke its end ──
+  // A walk that ends prints "[walk-lock] released" (or "kept") as its last line and its turns land rows in the ledger. A stamp
+  // whose pid is gone with the lock released or taken over by a later door, whose job log holds no end line after its own
+  // claim line ("<door> holds this checkout, pid <pid>") and whose ledger holds no row at or after the slot is "silent": the
+  // walk began and died with nothing said (the OS killed it an hour in; 2026-10-25 to 10-28 every slot ended so), never
+  // "finished". A tail that was not read (""), one with no claim line of this pid, or one with the end line after it stays as read.
+  def hr-end-line?(l) = hw-starts?(trim(l), "[walk-lock] released") || hw-starts?(trim(l), "[walk-lock] kept") || hw-starts?(trim(l), "[walk-lock] release answered");
+  def hr-claim-line?(l, pid) = !nothing?(hw-field(l, "holds this checkout, pid ")) && (Comparable) hw-field(l, "holds this checkout, pid ") == pid;
+  // the lines after the LAST claim line of this pid; nothing when the text holds no claim line of it
+  def hr-after-claim(lines, pid, acc, seen) = nil?(lines) ? (seen ? acc : nothing()) : hr-claim-line?(lines[0], pid) ? hr-after-claim(lines[1:], pid, [], true) : hr-after-claim(lines[1:], pid, append(acc, [lines[0]]), seen);
+  def hr-log-silent?(tail, pid) {
+   let after = nothing?(pid) ? nothing() : hr-after-claim(split-on(tail ?? "", "\n"), pid, [], false);
+   !nothing?(after) && nil?(filter(l => hr-end-line?(l), after));
+  }
+  // a ledger row written at or after the slot (less the slack) says the walk spoke; "" or older rows say it did not
+  def hr-ledger-spoke?(text, slot) = any?(l => (hw-field(l, "\"at_unix_ms\":") ?? 0) >= slot - hr-report-slack-ms(), split-on(text ?? "", "\n"));
+  def hr-silenced(state, tail, spoke) = (String) state[0] == "finished" && !spoke && hr-log-silent?(tail, hw-field(state[1], "pid=")) ? ["silent", state[1]] : state;
+  // launchd's last exit reason, as evidence of how the slot before ended, only when `runs` advanced past the last retry row's
+  def hr-exit-evidence(launchd, baseline) = (String) hr-launchd-reason(launchd) != "" && hr-runs-advanced?(launchd, baseline) ? "; launchd reads last exit reason " ++ hr-launchd-reason(launchd) ++ " with runs advanced past " ++ baseline.str() : "";
   // ── the class: [class, why, evidence paths] ──
   def hr-classify(state, launchd, reports, held, logged, baseline) = hr-classify-seen(state, launchd, reports, held, logged, baseline, "");
   // died: launchd's own log line for the first job going inactive inside the slot's first minute ("" when it read none)
@@ -62,6 +86,7 @@ section [form.bml] {
    let crashed = hr-first(reports, r => hr-crashed?(r));
    (String) state[0] == "running" || (String) hr-launchd-state(launchd) == "running" ? ["begun", hr-running-why(state, launchd), []]
    : (String) state[0] == "finished" ? ["begun", "the first slot stamped its start (" ++ state[1] ++ ") and has ended", []]
+   : (String) state[0] == "silent" ? ["began-then-silent", "the first slot claimed the checkout (" ++ state[1] ++ "), its pid is gone, the lock is released or taken over, and its log holds no end line after its claim and its ledger no row in the window" ++ hr-exit-evidence(launchd, baseline), nothing?(crashed) ? [] : [hr-row-path(crashed)]]
    : (String) state[0] == "crashed" ? ["crashed-after-launch", "the first slot claimed the checkout (" ++ state[1] ++ ") and its pid is gone with the lock never released", nothing?(crashed) ? [] : [hr-row-path(crashed)]]
    : !nothing?(killed) ? ["launch-killed", "the OS killed the first launch: " ++ hr-report-line(killed), [hr-row-path(killed)]]
    : hw-has?(hr-launchd-reason(launchd), "CODESIGNING") && hr-runs-advanced?(launchd, baseline) ? ["launch-killed", "launchd reads last exit reason " ++ hr-launchd-reason(launchd) ++ " with runs advanced past " ++ baseline.str() ++ " and no report in the window", []]

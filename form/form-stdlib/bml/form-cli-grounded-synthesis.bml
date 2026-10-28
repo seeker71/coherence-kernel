@@ -21,13 +21,22 @@
 // Every quantity that was not observed stays 0 with its source named "none";
 // nothing is inferred.
 //
+// Every answer lands one coverage row (receipts/query-coverage-ledger.jsonl):
+// the enquiry's kind (lookup | structural | prose | code | plan, read from its
+// own words), the source that answered, the lane that carried it, the model,
+// whether it was answered, the rent it took and its wall clock. The row is the
+// ledger's, never the voice's; observe/query-coverage-run.bml reads the native
+// fraction by kind back from it.
+//
 import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/bml/ledger.bml;
 import form-stdlib/bml/form-cli-enrich.bml;
 import form-stdlib/bml/form-cli-native-voice.bml;
 import form-stdlib/query-lane-resolve.bml;
 //////////////////////////////////////////////////////////////////////
 
 section [form.bml] {
+ blueprint QueryCoverageRow { at_unix_ms: int, kind: string, source: string, lane: string, model: string, answered: int, rent_tokens: int, wall_ms: int }
  class FormCliGroundedSynthesis {
   def fgs-opening-bytes() = 400;
   def fgs-uuid-source() = "/proc/sys/kernel/random/uuid";
@@ -92,6 +101,37 @@ section [form.bml] {
    (Comparable) len(held) > 0 ? held : fgs-remembered(enquiry);
   };
   def fgs-substrate-oracle(text) = ["answered", text, 0, 0, "substrate", 1, 1, "substrate", text, [], ""];
+
+  // ---- the kind of an enquiry, read from its own words: the first row whose words it carries, else by shape ----
+  // (ask-lane-router's ask takes a caller-chosen lane and consent rows; it reads no text, so the smallest classifier lives here)
+  def fgs-kind-words() = [["code", ["code", "implement", "function", "patch", "fix", "compile", "band", "recipe", "write"]], ["plan", ["plan", "steps", "roadmap", "sequence", "schedule"]], ["structural", ["defined", "definition", "callers", "caller", "owner", "source", "path", "file", "import", "imports", "calls"]]];
+  def fgs-kind-hit?(ws, words) = any?(w => (Comparable) qlr-has?(ws, w) == 1, words);
+  def fgs-kind-at(rows, ws) = nil?(rows) ? "" : fgs-kind-hit?(ws, rows[0][1]) ? rows[0][0] : fgs-kind-at(rows[1:], ws);
+  def fgs-source-shaped?(enquiry) = (str_find(enquiry, "/", 0) >= 0) || (str_find(enquiry, ".bml", 0) >= 0) || (str_find(enquiry, ".fk", 0) >= 0);
+  def fgs-kind(enquiry) {
+   let hit = fgs-kind-at(fgs-kind-words(), qlr-tokens(enquiry));
+   len(hit) > 0 ? hit : fgs-source-shaped?(enquiry) ? "structural" : (Comparable) fgs-question?(enquiry) == 1 ? "lookup" : "prose";
+  }
+
+  // ---- the coverage ledger: one row per answer, read back as the native fraction by kind ----
+  def fgs-coverage-ledger() = "receipts/query-coverage-ledger.jsonl";
+  def fgs-coverage-kinds() = ["lookup", "structural", "prose", "code", "plan"];
+  def fgs-coverage-lane(source, askOracle, oracle) = (String) source == "substrate" ? "substrate" : (String) source == "provider" ? "provider" : askOracle ? lrun-lane(oracle) : "not-asked";
+  def fgs-coverage-row(kind, source, lane, model, answered, rent, wallMs) = QueryCoverageRow{at_unix_ms: now_unix_ms(), kind: kind, source: source, lane: lane, model: model, answered: answered, rent_tokens: rent, wall_ms: wallMs};
+  def fgs-coverage-record-at(path, kind, source, lane, model, answered, rent, wallMs) = ledger-append(path, fgs-coverage-row(kind, source, lane, model, answered, rent, wallMs));
+  def fgs-coverage-record(kind, source, lane, model, answered, rent, wallMs) = fgs-coverage-record-at(fgs-coverage-ledger(), kind, source, lane, model, answered, rent, wallMs);
+  def fgs-coverage-rows(path) = ledger-rows(path, "QueryCoverageRow");
+  def fgs-coverage-since(rows, since) = rows |> filter(row => row-get(row, "at_unix_ms") >= since);
+  def fgs-coverage-native?(row) = (row-get(row, "answered") == 1) && (((String) row-get(row, "source") == "substrate") || ((String) row-get(row, "source") == "fkwu-model-session"));
+  def fgs-coverage-of(rows, kind) = (String) kind == "all" ? rows : rows |> filter(row => (String) row-get(row, "kind") == kind);
+  // [kind, answered natively, all]
+  def fgs-coverage-count(rows, kind) {
+   let mine = fgs-coverage-of(rows, kind);
+   [kind, len(mine |> filter(row => fgs-coverage-native?(row))), len(mine)];
+  }
+  def fgs-coverage-table(rows) = append(fgs-coverage-kinds() |> map(k => fgs-coverage-count(rows, k)), [fgs-coverage-count(rows, "all")]);
+  // whole percent, or nothing() when there is nothing to divide
+  def fgs-coverage-percent(native, all) = all == 0 ? nothing() : (native * 100) / all;
   def fgs-doc-usage(doc) = json-object-has?(doc, "usage") ? json-object-get(doc, "usage") : json-node-object([]);
   def fgs-usage2(doc1, doc2, key) = fhn-count(fgs-doc-usage(doc1), key) + fhn-count(fgs-doc-usage(doc2), key);
   def fgs-details(doc) = json-object-has?(fgs-doc-usage(doc), "output_tokens_details") ? json-object-get(fgs-doc-usage(doc), "output_tokens_details") : json-node-object([]);
@@ -152,8 +192,13 @@ section [form.bml] {
    let cacheWrite = fgs-usage2(doc1, doc2, "cache_creation_input_tokens");
    let cacheRead = fgs-usage2(doc1, doc2, "cache_read_input_tokens");
    let output = fgs-usage2(doc1, doc2, "output_tokens");
+   let rent = (input + cacheWrite) + (cacheRead + output);
+   let kind = fgs-kind(enquiry);
+   let covered = fgs-coverage-record(kind, source, fgs-coverage-lane(source, askOracle, oracle), oracle[4], (String) source == "none" ? 0 : 1, rent, ended - started);
    json-node-object([
     fhn-s("source", source),
+    fhn-s("kind", kind),
+    fhn-s("coverage", nothing?(covered) ? "refused:row" : covered),
     fhn-s("status", thin ? second[0] : first[0]),
     fhn-n("provider_attempts", repairing ? 2 : askProvider ? 1 : 0),
     fhn-n("answer_thin", thin ? 1 : 0),
@@ -182,7 +227,7 @@ section [form.bml] {
     fhn-n("cache_write_input_tokens", cacheWrite),
     fhn-n("cache_read_input_tokens", cacheRead),
     fhn-n("output_tokens", output),
-    fhn-n("rent_tokens", (input + cacheWrite) + (cacheRead + output))]);
+    fhn-n("rent_tokens", rent)]);
   }
  }
 }

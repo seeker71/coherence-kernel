@@ -9,7 +9,8 @@
 // runs in another checkout (hw-yield). A turn also begins only once the machine has the memory for a voice (hw-memory-room,
 // a bare wait: the child lane takes the lease); hw-ready is the one question a turn asks before it begins.
 // What it holds: the option floor and the room (hw-option-floor, hw-room), the walk doors of other checkouts and the
-// yield to them (hw-walk-doors, hw-yield), the memory a turn waits for (hw-turn-need, hw-memory-room), and hw-ready.
+// yield to them (hw-walk-doors, hw-yield), the memory a turn waits for (hw-turn-need, hw-memory-room), hw-ready, and the
+// plan's voice chosen by the machine's room over the live leases (hw-plan-voices: the chain, or the fast-answer voice).
 // What it needs: host-walk-text.bml (hw-field, hw-minutes, hw-ends?, hw-say), memory-governor.bml (mg-*) and
 // model-registry.bml (mr-find, mr-path: the fast-answer weight file).
 import form-stdlib/bml/host-walk-text.bml;
@@ -76,14 +77,33 @@ section [form.bml] {
   // margin; before it begins, the machine is asked (memory-governor.bml), as it is asked about another checkout's GPU
   // door. The walk waits no longer than the window can spare, the last moment a turn could still begin, and ends held
   // with the reason said: a held walk is a window that took no turn, never a host that fell over. The walk's own check
-  // holds no lease: this process opens no model, and the child lane it begins (native-turn-run.bml, over the session
-  // door) takes the real one, keyed by the model file, in its own process; a lease taken here would be a promise by a
-  // pid that holds nothing.
+  // holds no lease: the turn and the plan are cells called in this process (host-walk-turn.bml, hch-cell-in), and the
+  // voice they open takes the real lease, keyed by the model file, under this pid; a lease taken here beforehand would be
+  // a promise of bytes not yet asked for.
   def hw-turn-need() {
    let path = mr-path(mr-find("qwen38-q4"));
    let weights = file_size(path);
    (weights > 0 ? weights : (26 * mg-gib())) + mg-kv-margin();
   }
+  // The plan's voice. The registry's plan chain opens its first voice (qwen38-q8: 27 GiB of weights, with its KV and
+  // drafter) in THIS process, so the walk's footprint is the voice's; beside a sibling checkout's session and the
+  // compressor, the OS took that walk an hour in with nothing said (JETSAM, 2026-10-25 to 10-28: every slot ended so).
+  // Before the planner is called, the machine is asked for the first voice's need over the live leases (mg-lease-ask-read,
+  // taking none); when it cannot hold that, the planner is handed the registry's fast-answer voice (qwen38-q4, 15.6 GiB)
+  // whose weights are on disk, else the chain stands. The choice is one line in the walk's log ([walk-voice]).
+  // ask(need) answers the governor's verdict; the band hands a stub in its place. Answers [voices, line]: [] is the chain.
+  def hw-voice-need(r) = (file_size(mr-path(r)) > 0 ? file_size(mr-path(r)) : (26 * mg-gib())) + mg-kv-margin();
+  def hw-plan-first() = mr-find(mr-chain-names("plan")[0]);
+  def hw-plan-fast() = mr-for-role("fast-answer");
+  def hw-plan-voices-by(ask) = hw-plan-voices-of(hw-plan-first(), hw-plan-fast(), ask);
+  def hw-plan-voices-of(first, fast, ask) {
+   let v = ask(hw-voice-need(first));
+   let lighter = (String) mr-name(fast) != "" && (String) mr-name(fast) != mr-name(first) && (Comparable) mr-file?(mr-path(fast)) == 1;
+   mg-granted?(v) ? [[], "[walk-voice] the planner opens " ++ mr-name(first) ++ ": " ++ mg-line("plan voice", hw-voice-need(first), v)]
+   : lighter ? [[mr-name(fast)], "[walk-voice] the planner opens " ++ mr-name(fast) ++ " (fast-answer) in the place of " ++ mr-name(first) ++ ": " ++ mg-line("plan voice", hw-voice-need(first), v) ++ mg-lease-note(v)]
+   : [[], "[walk-voice] the planner opens " ++ mr-name(first) ++ ", no lighter voice on disk: " ++ mg-line("plan voice", hw-voice-need(first), v) ++ mg-lease-note(v)];
+  }
+  def hw-plan-voices() = hw-plan-voices-by(need => mg-lease-ask-read(mg-lease-dir(), need));
   def hw-memory-room(until, room) = hw-memory-room-with(until, room, (who, need, by) => mg-wait(who, need, by));
   def hw-memory-room-with(until, room, wait) {
    let v = wait("walk turn", hw-turn-need(), until - hw-option-floor()[0]);
