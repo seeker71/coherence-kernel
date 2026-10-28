@@ -10,17 +10,21 @@
 // measured and its row lands. The row is a declared blueprint, so it is checked when it is written and read.
 //
 //   sp-measure-all()     measure every session that needs it; one line per session read; [measured, kept, refused]
-//   sp-progress-lines()  the progression: day by day, then earlier against later, from the whole ledger
+//   sp-progress-lines()  the progression: day by day, then all, earlier against later, and the best day, from the whole ledger
 //   sp-session-now()     this session's id, or ""
 //
 // A row keeps what the earlier ones kept (rented requests, input, cache, output; local drafts, generated, lane) and
 // adds when the session began and last moved, and the bytes of its transcripts (the key that says it has not changed).
+// Two shares stand beside each other on every row and every progression line, one engine (sr-share, session-rent.bml):
+// local_share_ppm against the rented output alone, and total_share_ppm against rented_total, every rented token
+// (input + cache_write + cache_read + output), the RENT docs/rent-to-zero-goal.form defines. Rows written before
+// 2026-10-28 carry no rented_total; the progression sums the four rented fields itself, so every row is read the same way.
 //////////////////////////////////////////////////////////////////////
 // preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/session-rent.bml form-stdlib/bml/local-run.bml form-stdlib/bml/host-fs.bml
 section [form.bml] {
  blueprint SessionRented { requests: option<int>, input: option<int>, cache_write: option<int>, cache_read: option<int>, output: option<int>, transcripts: int }
  blueprint SessionLocal { drafts: option<int>, generated: option<int>, lane_options: option<int>, lane_generated: option<int>, lane_injected: option<int>, runs: option<int>, run_generated: option<int> }
- blueprint SessionRent { at_unix_ms: int, session: string, rented: SessionRented, local: SessionLocal, local_share_ppm: option<int>, began_unix_ms: option<int>, ended_unix_ms: option<int>, bytes: option<int>, measurement_version: option<int>, meter_basis: option<string>, through: option<string>, provider_session: option<string> }
+ blueprint SessionRent { at_unix_ms: int, session: string, rented: SessionRented, local: SessionLocal, local_share_ppm: option<int>, rented_total: option<int>, total_share_ppm: option<int>, began_unix_ms: option<int>, ended_unix_ms: option<int>, bytes: option<int>, measurement_version: option<int>, meter_basis: option<string>, through: option<string>, provider_session: option<string> }
  class SessionProgress {
   def sp-ledger() = "receipts/session-rent-ledger.jsonl";
   def sp-drafts() = "receipts/draft-ledger.jsonl";
@@ -47,7 +51,10 @@ section [form.bml] {
   def sp-bytes(files) = foldl((total, file) => total + file_size(file), 0, files);
 
   // ---- one session's row ------------------------------------------------------------------------------------------------
-  def sp-share(generated, output) = nothing?(generated) ? nothing() : sr-share(generated, output);
+  // the share engine is session-rent's: local against local + a rented count (the output alone, or every rented
+  // token); unknown on either side reads nothing, never 0
+  def sp-share(generated, rentedCount) = nothing?(generated) ? nothing() : sr-share(generated, rentedCount);
+  def sp-rented-total(input, cacheWrite, cacheRead, output) = fcgp-strict([input, cacheWrite, cacheRead, output]);
   def sp-lane-part(lane, i) = nothing?(lane) ? nothing() : lane[i];
   // The local tokens a session is known to have spent: the voice door counts every ask (local-run.bml), the drafts and
   // the coding lane count their own; the larger is the truer, since an ask a draft made is in both.
@@ -61,12 +68,16 @@ section [form.bml] {
    let times = sp-times(main);
    let runs = nothing?(measured[7]) ? [] : local-run-of(runRows, measured[7]);
    let legacy = fcgp-plus(local[1], nothing?(lane) ? 0 : lane[1]);
+   let known = sp-known-local(legacy, runs);
+   let total = sr-total(rented);
    SessionRent{
     at_unix_ms: now_unix_ms(),
     session: measured[0],
     rented: SessionRented{requests: rented[4], input: rented[0], cache_write: rented[1], cache_read: rented[2], output: rented[3], transcripts: len(measured[1])},
     local: SessionLocal{drafts: local[0], generated: local[1], lane_options: sp-lane-part(lane, 0), lane_generated: sp-lane-part(lane, 1), lane_injected: sp-lane-part(lane, 2), runs: nil?(runs) ? nothing() : len(runs), run_generated: nil?(runs) ? nothing() : sp-run-generated(runs)},
-    local_share_ppm: sp-share(sp-known-local(legacy, runs), rented[3]),
+    local_share_ppm: sp-share(known, rented[3]),
+    rented_total: total,
+    total_share_ppm: sp-share(known, total),
     began_unix_ms: times[0],
     ended_unix_ms: times[1],
     bytes: bytes,
@@ -124,19 +135,28 @@ section [form.bml] {
   def sp-local-of(row) = nothing?(sp-field(row, "local", "generated")) ? nothing() : max2(sp-field(row, "local", "generated") + (sp-field(row, "local", "lane_generated") ?? 0), sp-field(row, "local", "run_generated") ?? 0);
   def sp-padl(text, width) = len(text) >= width ? text : (sp-spaces(width - len(text)) ++ text);
   def sp-spaces(k) = k <= 0 ? "" : (" " ++ sp-spaces(k - 1));
+  // a set of rows' rented total: the four rented fields summed from each row, the same for rows written before rented_total was
+  def sp-rented-total-of(rows) = sp-rented-total(sp-sum(rows, "rented", "input"), sp-sum(rows, "rented", "cache_write"), sp-sum(rows, "rented", "cache_read"), sp-sum(rows, "rented", "output"));
+  def sp-generated-of(rows) = fcgp-strict(rows |> map(row => sp-local-of(row)));
+  def sp-total-share-of(rows) = sp-share(sp-generated-of(rows), sp-rented-total-of(rows));
   def sp-line(label, rows) {
    let output = sp-sum(rows, "rented", "output");
-   let generated = fcgp-strict(rows |> map(row => sp-local-of(row)));
-   str-join-with([sp-padl(label, 12), sp-padl(int_to_str(len(rows)), 9), sp-padl(fcgp-show(sp-sum(rows, "rented", "requests")), 10), sp-padl(sp-scaled(output, 1000, "K"), 10), sp-padl(sp-scaled(sp-sum(rows, "rented", "cache_read"), 1000000, "M"), 10), sp-padl(fcgp-show(generated), 10), sp-padl(fcgp-show(sp-share(generated, output)), 10)], " ");
+   let generated = sp-generated-of(rows);
+   let total = sp-rented-total-of(rows);
+   str-join-with([sp-padl(label, 16), sp-padl(int_to_str(len(rows)), 9), sp-padl(fcgp-show(sp-sum(rows, "rented", "requests")), 10), sp-padl(sp-scaled(output, 1000, "K"), 10), sp-padl(sp-scaled(sp-sum(rows, "rented", "cache_read"), 1000000, "M"), 10), sp-padl(sp-scaled(total, 1000000, "M"), 10), sp-padl(fcgp-show(generated), 10), sp-padl(fcgp-show(sp-share(generated, output)), 10), sp-padl(fcgp-show(sp-share(generated, total)), 10)], " ");
   }
-  def sp-days(rows) = nil?(rows) ? [] : sp-days-of(rows, sp-day-of(rows[0]));
-  def sp-days-of(rows, day) = cons(sp-line(day, rows |> filter(r => sp-day-of(r) == day)), sp-days(rows |> filter(r => sp-day-of(r) != day)));
+  def sp-day-names(rows) = nil?(rows) ? [] : cons(sp-day-of(rows[0]), sp-day-names(rows |> filter(r => sp-day-of(r) != sp-day-of(rows[0]))));
+  def sp-day-rows(rows, day) = rows |> filter(r => sp-day-of(r) == day);
+  def sp-days(rows) = sp-day-names(rows) |> map(day => sp-line(day, sp-day-rows(rows, day)));
+  // the day whose total share stands highest (the first such day); "" while no row has a day
+  def sp-best-day(rows) = foldl((best, day) => (String) best == "" || (sp-total-share-of(sp-day-rows(rows, day)) ?? -1) > (sp-total-share-of(sp-day-rows(rows, best)) ?? -1) ? day : best, "", sp-day-names(rows));
+  def sp-header() = str-join-with([sp-padl("day", 16), sp-padl("sessions", 9), sp-padl("requests", 10), sp-padl("output", 10), sp-padl("cache read", 10), sp-padl("rented all", 10), sp-padl("local gen", 10), sp-padl("share ppm", 10), sp-padl("total ppm", 10)], " ");
   def sp-progress-lines() {
    let rows = sp-by-time(sp-latest(ledger-rows(sp-ledger(), "SessionRent")));
    let half = len(rows) / 2;
-   append(
-    [sp-padl("day", 12) ++ " " ++ sp-padl("sessions", 9) ++ " " ++ sp-padl("requests", 10) ++ " " ++ sp-padl("output", 10) ++ " " ++ sp-padl("cache read", 10) ++ " " ++ sp-padl("local gen", 10) ++ " " ++ sp-padl("share ppm", 10)],
-    append(sp-days(rows), [sp-line("all", rows), sp-line("earlier half", rows |> take(half)), sp-line("later half", rows |> drop(half))]));
+   let best = sp-best-day(rows);
+   append([sp-header()],
+    append(sp-days(rows), [sp-line("all", rows), sp-line("earlier half", rows |> take(half)), sp-line("later half", rows |> drop(half)), sp-line("best " ++ best, sp-day-rows(rows, best))]));
   }
   def sp-print(lines) {
    let shown = lines |> map(line => print_str(line));

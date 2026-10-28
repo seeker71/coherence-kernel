@@ -1,0 +1,101 @@
+// lora-27b-bytes-run.bml — pure arithmetic, no model: the additional bytes a LoRA on the Qwen3.8-27B voice needs
+// beside its frozen Q8 weights, and a rough seconds per step, for three designs at rank 8 and 16 and row lengths
+// 64, 158 and 289 tokens. Geometry is data (lb-geometry, read from the Q8 snapshot's config.json on 2026-10-28:
+// hidden 5120, intermediate 17408, 24 heads x head_dim 256, 4 kv heads, vocab 248320, 64 layers, every 4th a
+// full-attention layer, the rest Gated DeltaNet linear attention with 16 key heads x 128 and 48 value heads x 128,
+// untied lm_head).
+//
+//   ./fkwu observe/lora-27b-bytes-run.bml </dev/null
+//   echo '{"prefill_ms_per_token":87,"available_gib":84}' | ./fkwu observe/lora-27b-bytes-run.bml
+//
+// stdin, optional, one JSON line: prefill_ms_per_token (the voice's measured prefill cost per token on this host;
+// the step estimate scales from it), available_gib (what the memory governor reports as available right now).
+//
+// Formulas (bytes, float32 training state, the frozen weights untouched):
+//   adapter params        = rank x sum over adapted projections of (in + out)
+//   trainable bytes       = params x 16   (adapter 4 + gradient 4 + Adam moments 8)
+//   kv cache              = 8 x t x full_layers x kv_heads x head_dim           (nlrc-bytes' cache term, full layers only)
+//   retained inputs       = 4 x t x (adapted_layers + 2) x d                   (one input per layer the reverse pass crosses, plus the head's)
+//   head                  = 4 x t x (vocab + (vocab + 2d + 3))                 (logits, then the head's reverse buffers)
+//   one full layer        = 4 x t x (17d + 4kd + 6ff + 14 rank + 2) + 8 x t x t x heads   (nlrc-bytes' layer term: recompute + reverse, scores)
+//   one linear layer      = 4 x t x (17d + 2 qkvz + 6ff + 14 rank + 2) + 4 x t x v_heads x k_dim x v_dim   (the recurrent state per step kept for the reverse)
+//   activation per row    = kv cache + retained + head + the larger single-layer term the design crosses   (nlrc ownership: one recomputed layer at a time)
+//   whole tape            = kv cache + retained + head + every adapted layer's term held at once             (no recompute; the 3B rows in this file were measured so)
+//   seconds per step      = t x prefill_ms_per_token x (1 + 2 x adapted_layers / 64) / 1000   (forward all 64 frozen, reverse twice the forward of the adapted layers; the voice's inference lane)
+//   seconds per step (3B lane) = measured 3B forward+backward seconds at t x (27.0 / 3.21) x (64 + 2 x adapted_layers) / (3 x 64)   (the native training lane as it stands)
+// A design that stops at the last full-attention layer needs no reverse pass through any linear-attention layer: its
+// activation peak carries no recurrent state.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml
+section [form.bml] {
+ class Lora27bBytes {
+  // ---- geometry as data ----------------------------------------------------------------------------------------------
+  def lb-d() = 5120;
+  def lb-ff() = 17408;
+  def lb-heads() = 24;
+  def lb-kv-heads() = 4;
+  def lb-head-dim() = 256;
+  def lb-vocab() = 248320;
+  def lb-layers() = 64;
+  def lb-full-layers() = 16;
+  def lb-qkvz() = 16384;      // Gated DeltaNet fused in_proj: 2 x 16 x 128 (q, k) + 2 x 48 x 128 (v, z)
+  def lb-gdn-value() = 6144;  // 48 value heads x 128, the out_proj's input
+  def lb-gdn-state() = 48 * 128 * 128;
+  def lb-kd() = lb-kv-heads() * lb-head-dim();
+  def lb-attn-out() = lb-heads() * lb-head-dim();
+  // (in + out) over one block's adapted projections
+  def lb-full-block() = (lb-d() + 2 * lb-attn-out()) + 2 * (lb-d() + lb-kd()) + (lb-attn-out() + lb-d()) + lb-mlp();
+  def lb-linear-block() = (lb-d() + lb-qkvz()) + (lb-gdn-value() + lb-d()) + lb-mlp();
+  def lb-mlp() = 3 * (lb-d() + lb-ff());
+  def lb-head() = lb-d() + lb-vocab();
+  // ---- designs: name, adapted full layers, adapted linear layers, whether the reverse crosses a linear layer ------------
+  def lb-designs() = [["i   last full block + head", 1, 0], ["ii  last 4 layers + head", 1, 3], ["iii all 64 layers + head", lb-full-layers(), lb-layers() - lb-full-layers()]];
+  def lb-params(rank, full, linear) = rank * (full * lb-full-block() + linear * lb-linear-block() + lb-head());
+  def lb-kv(t) = 8 * t * lb-full-layers() * lb-kd();
+  def lb-retained(t, adapted) = 4 * t * (adapted + 2) * lb-d();
+  def lb-head-bytes(t) = 4 * t * (lb-vocab() + (lb-vocab() + 2 * lb-d() + 3));
+  def lb-full-layer(t, rank) = 4 * t * (17 * lb-d() + 4 * lb-kd() + 6 * lb-ff() + 14 * rank + 2) + 8 * t * t * lb-heads();
+  def lb-linear-layer(t, rank) = 4 * t * (17 * lb-d() + 2 * lb-qkvz() + 6 * lb-ff() + 14 * rank + 2) + 4 * t * lb-gdn-state();
+  def lb-activation(t, rank, full, linear) = lb-kv(t) + lb-retained(t, full + linear) + lb-head-bytes(t) + max2(lb-full-layer(t, rank), linear > 0 ? lb-linear-layer(t, rank) : 0);
+  def lb-whole-tape(t, rank, full, linear) = lb-kv(t) + lb-retained(t, full + linear) + lb-head-bytes(t) + full * lb-full-layer(t, rank) + linear * lb-linear-layer(t, rank);
+  def lb-step-ms(t, adapted, msPerToken) = t * msPerToken * (lb-layers() + 2 * adapted) / lb-layers();
+  // the second estimate scales the rows this file measured on the 3B training lane (forward + backward over all 28 layers,
+  // 3.21 G parameters: 7614 ms at 64, 16727 ms at 158, 31341 ms at 289) by the parameter ratio 27.0 / 3.21 and by the
+  // design's share of a full reverse: (64 + 2 x adapted) / (3 x 64)
+  def lb-3b-ms(t) = t == 64 ? 7614 : t == 158 ? 16727 : t == 289 ? 31341 : 0;
+  def lb-lane-ms(t, adapted) = lb-3b-ms(t) * 8411 / 1000 * (lb-layers() + 2 * adapted) / (3 * lb-layers());
+  // ---- text ---------------------------------------------------------------------------------------------------------------
+  def lb-mib(b) = (b / 1048576).str() ++ " MiB";
+  def lb-gib-tenths(b) = ((b * 10) / 1073741824 / 10).str() ++ "." ++ (((b * 10) / 1073741824) % 10).str();
+  def lb-s-tenths(ms) = (ms / 1000).str() ++ "." ++ ((ms / 100) % 10).str();
+  def lb-fit(weights, extra, available) = available <= 0 ? "available unknown" : (weights + extra <= available ? "fits (" ++ lb-gib-tenths(available - weights - extra) ++ " GiB left)" : "does not fit");
+  def lb-row(design, rank, t, msPerToken, weights, available) {
+   let full = design[1]; let linear = design[2]; let adapted = full + linear;
+   let params = lb-params(rank, full, linear);
+   let state = params * 16;
+   let act = lb-activation(t, rank, full, linear);
+   let tape = lb-whole-tape(t, rank, full, linear);
+   print_str("| " ++ design[0] ++ " | " ++ rank.str() ++ " | " ++ t.str() ++ " | " ++ params.str() ++ " | " ++ lb-mib(params * 4) ++ " | " ++ lb-mib(params * 8) ++ " | " ++ lb-mib(state) ++ " | " ++ lb-mib(act) ++ " | " ++ lb-gib-tenths(state + act) ++ " | " ++ lb-gib-tenths(state + tape) ++ " | " ++ (msPerToken > 0 ? lb-s-tenths(lb-step-ms(t, adapted, msPerToken)) : "-") ++ " | " ++ lb-s-tenths(lb-lane-ms(t, adapted)) ++ " | " ++ lb-fit(weights, state + act, available) ++ "; whole tape " ++ lb-fit(weights, state + tape, available) ++ " |");
+  }
+  def lb-rows(designs, rank, ts, msPerToken, weights, available) = designs |> map(design => ts |> map(t => lb-row(design, rank, t, msPerToken, weights, available)));
+  def lb-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def lb-options() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("lora-bytes-options", line) : json-node-object([]);
+  }
+  def lb-run() {
+   let opts = lb-options();
+   let msPerToken = lb-int(opts, "prefill_ms_per_token", 0);
+   let available = lb-int(opts, "available_gib", 0) * 1073741824;
+   let weights = 29047086048;  // Qwen3.8-27B-Q8_0.gguf on disk, 2026-10-28
+   let said = print_str("[lora-27b-bytes] geometry d=" ++ lb-d().str() ++ " ff=" ++ lb-ff().str() ++ " heads=" ++ lb-heads().str() ++ " kv=" ++ lb-kv-heads().str() ++ "x" ++ lb-head-dim().str() ++ " vocab=" ++ lb-vocab().str() ++ " layers=" ++ lb-layers().str() ++ " (" ++ lb-full-layers().str() ++ " full attention) qkvz=" ++ lb-qkvz().str() ++ " weights=" ++ lb-gib-tenths(weights) ++ " GiB prefill_ms_per_token=" ++ msPerToken.str() ++ " available=" ++ lb-gib-tenths(available) ++ " GiB");
+   let sums = print_str("[lora-27b-bytes] (in+out) per full block " ++ lb-full-block().str() ++ ", per linear block " ++ lb-linear-block().str() ++ ", head " ++ lb-head().str());
+   let head = print_str("| design | rank | row tokens | adapter params | adapter | Adam state | trainable (adapter+grad+Adam) | activation per row | extra GiB | whole-tape GiB | est. s/step (voice lane) | est. s/step (3B lane scaled) | beside Q8 weights in the available GiB |");
+   let rule = print_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |");
+   let r8 = lb-rows(lb-designs(), 8, [64, 158, 289], msPerToken, weights, available);
+   let r16 = lb-rows(lb-designs(), 16, [64, 158, 289], msPerToken, weights, available);
+   0;
+  }
+ }
+ lb-run();
+}

@@ -8,10 +8,16 @@
 ;         the host reports for that instant), for 0, a leap day, an instant at a day's last second, today and the year 2100
 ;   4     the times: sp-times-of reads [birth, mtime] from an identity row ([0 0] for a path that does not stat); the times of a scratch file whose
 ;         mtime the band sets to 1700000000123 (host_utimes) are [birth, 1700000000123] with the birth a real instant not after now
+;   8     a Codex transcript measures as version 2 with its provider session; a row written before the version is not held
+;  16     unknown is never 0: a Codex sample with no usage reads null for output and the shares, and sums stay null
+;  32     two shares beside each other: a SessionRent row over the fixture (generated 1000; output 9000, input 10000, cache_write 0,
+;         cache_read 980000) reads local_share_ppm 100000 and total_share_ppm 1000 and round-trips through the ledger's line; a row
+;         written before rented_total existed still reads, and the progression sums its four rented fields itself; the progression
+;         line carries both columns and the best day is the day whose total share stands highest
 ;
 ; The band's scratch directory is made under host_temp_dir() and removed (recursively) at the end, whatever failed.
-; Expected: 31
-; Verdict 31
+; Expected: 63
+; Verdict 63
 ; REQUIRES: the host doors host_getenv host_localtime host_file_identity host_utimes (seed doors; the sibling kernels carry no host doors)
 ; preflight-exec: forbidden
 ; preludes: form-stdlib/bml/session-progress.bml form-stdlib/bml/host-fs.bml
@@ -85,12 +91,39 @@ section [form.bml] {
    let gone = fs_rmdir(dir);
    [schema ? 8 : 0, counts ? 16 : 0];
   }
+  // a fixture row as the measure would write it: local tokens, the four rented fields, when it began
+  def spb-row(session, generated, input, cacheWrite, cacheRead, output, began) {
+   let total = sp-rented-total(input, cacheWrite, cacheRead, output);
+   SessionRent{at_unix_ms: began + 1, session: session,
+    rented: SessionRented{requests: 1, input: input, cache_write: cacheWrite, cache_read: cacheRead, output: output, transcripts: 1},
+    local: SessionLocal{drafts: 1, generated: generated, lane_options: nothing(), lane_generated: nothing(), lane_injected: nothing(), runs: nothing(), run_generated: nothing()},
+    local_share_ppm: sp-share(generated, output), rented_total: total, total_share_ppm: sp-share(generated, total),
+    began_unix_ms: began, ended_unix_ms: began + 1, bytes: 10,
+     measurement_version: nothing(), meter_basis: nothing(), through: nothing(), provider_session: nothing()};
+  }
+  def spb-c-shares() {
+   let day1 = 1700000000000;
+   let day2 = day1 + 86400000 * 3;
+   let fixture = spb-row("fix", 1000, 10000, 0, 980000, 9000, day1);
+   let line = row-json(fixture);
+   let back = nothing?(line) ? nothing() : row-cell("SessionRent", line);
+   let old = row-cell("SessionRent", "{\"at_unix_ms\":1,\"session\":\"old\",\"rented\":{\"requests\":1,\"input\":100,\"cache_write\":200,\"cache_read\":300,\"output\":400,\"transcripts\":1},\"local\":{\"drafts\":0,\"generated\":500},\"local_share_ppm\":555555}");
+   let later = spb-row("later", 10, 0, 0, 0, 90, day2);
+   let rows = [fixture, later];
+   let said = spb-say("shares", [row-get(fixture, "local_share_ppm"), row-get(fixture, "total_share_ppm"), nothing?(back) ? "no-row" : row-get(back, "rented_total"), nothing?(old) ? "no-old" : sp-rented-total-of([old]), sp-best-day(rows), sp-line("x", rows)]);
+   (Comparable) row-get(fixture, "local_share_ppm") == 100000 && (Comparable) row-get(fixture, "total_share_ppm") == 1000 && (Comparable) row-get(fixture, "rented_total") == 999000
+    && !nothing?(back) && (Comparable) row-get(back, "total_share_ppm") == 1000 && (Comparable) row-get(back, "rented_total") == 999000
+    && !nothing?(old) && nothing?(row-get(old, "rented_total")) && (Comparable) sp-rented-total-of([old]) == 1000 && (Comparable) sp-total-share-of([old]) == 333333
+    && (Comparable) sp-total-share-of(rows) == 1009 && (String) sp-best-day(rows) == sp-date(day2) && (String) sp-best-day([]) == ""
+    && str_find(sp-line("x", rows), "100000", 0) >= 0 && (String) substring(sp-line("x", rows), len(sp-line("x", rows)) - 5, len(sp-line("x", rows))) == " 1009" && str_find(sp-header(), "total ppm", 0) >= 0;
+  }
   def spb-run() {
    let b1 = spb-c-env() ? 1 : 0;
    let b2 = spb-c-day() ? 2 : 0;
    let b4 = spb-c-times() ? 4 : 0;
    let usage = spb-usage();
-   let verdict = b1 + b2 + b4 + usage[0] + usage[1];
+   let b32 = spb-c-shares() ? 32 : 0;
+   let verdict = b1 + b2 + b4 + usage[0] + usage[1] + b32;
    let shown = print(["session-progress-band", "verdict", verdict]);
    verdict;
   }

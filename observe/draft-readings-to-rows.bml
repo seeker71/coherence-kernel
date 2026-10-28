@@ -1,0 +1,97 @@
+// draft-readings-to-rows.bml — what we accepted and what we changed becomes rows the native trainer reads.
+//
+// docs/local-agent-goal.form: the body notices where it fell short with us and learns from what we accept and what we
+// change. observe/prompt-draft-run.bml lands each draft as <drafts>/<id>.md and one ledger row with its path;
+// observe/draft-reading-run.bml lands our reading beside it (draft, reading, note); the latest reading of a draft is its
+// reading. This door reads receipts/draft-ledger.jsonl and turns each read draft into a row in the `messages` shape
+// form-stdlib/native-lora-dataset.bml accepts (nld-row: the prompt the draft answered as user, the answer as assistant):
+//   accepted -> the draft's own text as the assistant            -> <out>/draft-readings.jsonl
+//   revised  -> our revised text, <drafts>/<id>.revised.md, as the assistant (the draft it replaced is not taught);
+//               without that file the draft counts in skipped_no_text
+//   rejected -> never a trainer row: <out>/draft-readings-heldout.jsonl holds the draft id, session, prompt_t, the reading's
+//               note, and the messages when the draft's text is here (a held-out negative with the reason we gave)
+// A draft file is read the way prompt-draft-run wrote it ("# The person asked", the prompt, "# The body's draft", the text;
+// the turn-before and files sections after it are context, never taught). An accepted or revised draft whose text is not
+// readable here counts in skipped_no_text; a rejected reading always lands with the ledger's own fields. Both row files are
+// rewritten whole on each run: the ledger is the source and the rows are its projection. Nothing is scheduled by this door.
+// stdin, optional: {"ledger":"receipts/draft-ledger.jsonl","drafts":"<dir>","out":"learn","receipt":"receipts/draft-readings-ledger.jsonl"}
+//   drafts defaults to hearth-home()/drafts, where prompt-draft-run lands them; a key outside these is refused by name.
+// Prints one JSON line {accepted, revised, rejected, rows_written, heldout_written, skipped_no_text} and appends one row to the
+// receipt ledger with provenance: the source ledger's path, sha256 digest and row count, the drafts dir and whether it stood,
+// the counts, the two row paths, retention "local-only" and authorization "our own readings of our own drafts".
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml form-stdlib/hearth.bml
+section [form.bml] {
+ class DraftReadingsToRows {
+  def drr-door() = "draft-readings-to-rows";
+  def drr-spec() = [["ledger", "str"], ["drafts", "str"], ["out", "str"], ["receipt", "str"]];
+  def drr-opt(opts, key, d) = json-object-has?(opts, key) && (len(fhn-text(opts, key)) > 0) ? fhn-text(opts, key) : d;
+  def drr-nonempty(xs) = nil?(xs) ? [] : (Comparable) len(trim(xs[0])) == 0 ? drr-nonempty(xs[1:]) : cons(xs[0], drr-nonempty(xs[1:]));
+  def drr-rows(path) = file_size(path) < 1 ? [] : drr-nonempty(split-on(fhn-read(path), "\n")) |> map(x => parse-json("draft-row", x));
+  def drr-id(r) = fhn-text(r, "draft");
+  def drr-path?(r) = len(fhn-text(r, "path")) > 0;
+  // the drafts: the latest path row of each id (a redraft is the same draft), in order of first appearance
+  def drr-later?(id, rows) = nil?(rows) ? 0 : ((String) drr-id(rows[0]) == id) && drr-path?(rows[0]) ? 1 : drr-later?(id, rows[1:]);
+  def drr-drafts(rows) = nil?(rows) ? [] : drr-path?(rows[0]) && ((Comparable) drr-later?(drr-id(rows[0]), rows[1:]) == 0) ? cons(rows[0], drr-drafts(rows[1:])) : drr-drafts(rows[1:]);
+  // the latest reading of a draft, and the note of its latest row carrying that reading
+  def drr-reading(id, rows, acc) = nil?(rows) ? acc : drr-reading(id, rows[1:], (String) drr-id(rows[0]) == id ? fhn-text(rows[0], "reading") : acc);
+  def drr-note(id, reading, rows, acc) = nil?(rows) ? acc : drr-note(id, reading, rows[1:], ((String) drr-id(rows[0]) == id) && ((String) fhn-text(rows[0], "reading") == reading) ? fhn-text(rows[0], "note") : acc);
+  // ---- the draft file as prompt-draft-run wrote it
+  def drr-asked() = "# The person asked\n\n";
+  def drr-mark() = "\n\n# The body's draft\n\n";
+  def drr-cut-at(s, mark) { let i = str_find(s, mark, 0); i < 0 ? s : substring(s, 0, i); }
+  def drr-body(s) = trim(drr-cut-at(drr-cut-at(s, "\n# The turn before (what the voice was given)\n"), "\n# Files the voice read\n"));
+  // [prompt, draft]; a file without its marks is a draft text with no prompt, which no row can carry
+  def drr-split(text) {
+   let a = str_find(text, drr-asked(), 0);
+   let b = str_find(text, drr-mark(), 0);
+   (a < 0) || (b < a) ? ["", trim(text)] : [trim(substring(text, a + len(drr-asked()), b)), drr-body(substring(text, b + len(drr-mark()), len(text)))];
+  }
+  def drr-file(dir, id, suffix) = read_file(dir ++ "/" ++ id ++ suffix);
+  def drr-pair(dir, id) { let t = drr-file(dir, id, ".md"); nothing?(t) ? ["", ""] : drr-split(t); }
+  def drr-revised-text(dir, id) { let t = drr-file(dir, id, ".revised.md"); nothing?(t) ? "" : trim(t); }
+  def drr-whole?(p, a) = (len(p) > 0) && (len(a) > 0);
+  // ---- rows
+  def drr-msg(role, text) = json-node-object([fhn-s("role", role), fhn-s("content", text)]);
+  def drr-messages(p, a) = json-node-pair("messages", json-node-array([drr-msg("user", p), drr-msg("assistant", a)]));
+  def drr-row(id, reading, p, a) = json-emit(json-node-object([fhn-s("draft", id), fhn-s("reading", reading), drr-messages(p, a)])) ++ "\n";
+  def drr-held(d, note, p, a) = json-emit(json-node-object(append([fhn-s("draft", drr-id(d)), fhn-s("session", fhn-text(d, "session")), fhn-n("prompt_t", fhn-count(d, "prompt_t")), fhn-s("reading", "rejected"), fhn-s("note", note)], drr-whole?(p, a) ? [drr-messages(p, a)] : []))) ++ "\n";
+  // state: [accepted, revised, rejected, rows, heldout, skipped_no_text]; rows and heldout hold the lines, newest first
+  def drr-accepted(id, pa, s) = drr-whole?(pa[0], pa[1]) ? [s[0] + 1, s[1], s[2], cons(drr-row(id, "accepted", pa[0], pa[1]), s[3]), s[4], s[5]] : [s[0] + 1, s[1], s[2], s[3], s[4], s[5] + 1];
+  def drr-revised(id, pa, rev, s) = drr-whole?(pa[0], rev) ? [s[0], s[1] + 1, s[2], cons(drr-row(id, "revised", pa[0], rev), s[3]), s[4], s[5]] : [s[0], s[1] + 1, s[2], s[3], s[4], s[5] + 1];
+  def drr-rejected(d, note, pa, s) = [s[0], s[1], s[2] + 1, s[3], cons(drr-held(d, note, pa[0], pa[1]), s[4]), s[5]];
+  def drr-one(d, all, dir, s) {
+   let id = drr-id(d);
+   let reading = drr-reading(id, all, "");
+   let read = ((String) reading == "accepted") || (((String) reading == "revised") || ((String) reading == "rejected"));
+   let pa = read ? drr-pair(dir, id) : ["", ""];
+   (String) reading == "accepted" ? drr-accepted(id, pa, s)
+   : (String) reading == "revised" ? drr-revised(id, pa, drr-revised-text(dir, id), s)
+   : (String) reading == "rejected" ? drr-rejected(d, drr-note(id, reading, all, ""), pa, s)
+   : s;
+  }
+  def drr-all(ds, all, dir, s) = nil?(ds) ? s : drr-all(ds[1:], all, dir, drr-one(ds[0], all, dir, s));
+  def drr-join(xs) = foldl((acc, x) => acc ++ x, "", xs);
+  def drr-digest(path) = file_size(path) < 1 ? "" : qaf-string-hex(saj-file-digest-any-tail(path, file_size(path)));
+  def drr-run(opts) {
+   let ledger = drr-opt(opts, "ledger", "receipts/draft-ledger.jsonl");
+   let dir = drr-opt(opts, "drafts", hearth-home() ++ "/drafts");
+   let out = drr-opt(opts, "out", "learn");
+   let receipt = drr-opt(opts, "receipt", "receipts/draft-readings-ledger.jsonl");
+   let all = drr-rows(ledger);
+   let present = (Comparable) host_path_is_dir(dir) == 1;
+   let said = present ? 0 : print_str("[readings] drafts dir absent here: " ++ dir ++ " (accepted and revised drafts are skipped; rejected readings carry the ledger's own fields)\n");
+   let s = drr-all(drr-drafts(all), all, dir, [0, 0, 0, [], [], 0]);
+   let made = fs_mkdir(out);
+   let rows-path = out ++ "/draft-readings.jsonl";
+   let held-path = out ++ "/draft-readings-heldout.jsonl";
+   let w1 = write_file_text(rows-path, drr-join(reverse(s[3])));
+   let w2 = write_file_text(held-path, drr-join(reverse(s[4])));
+   let counts = [fhn-n("accepted", s[0]), fhn-n("revised", s[1]), fhn-n("rejected", s[2]), fhn-n("rows_written", len(s[3])), fhn-n("heldout_written", len(s[4])), fhn-n("skipped_no_text", s[5])];
+   let row = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("source", ledger), fhn-s("source_digest", drr-digest(ledger)), fhn-n("source_rows", len(all)), fhn-s("drafts", dir), fhn-n("drafts_present", present ? 1 : 0)], append(counts, [fhn-s("rows", rows-path), fhn-s("heldout", held-path), fhn-s("retention", "local-only"), fhn-s("authorization", "our own readings of our own drafts")])));
+   let appended = fhn-append(receipt, json-emit(row) ++ "\n");
+   print_str(json-emit(json-node-object(counts)) ++ "\n");
+  }
+ }
+ drr-run(dop-doc(drr-door(), stdin-text(), drr-spec()));
+}
