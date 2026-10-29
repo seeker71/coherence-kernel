@@ -1,0 +1,144 @@
+// qwen-last-block-backward-band.bml — rung 2 of the last-block LoRA ladder: the backward of one rank-8 LoRA pair on block 63's
+// ffn_down, proven against central finite differences of the loss it answers to (docs/qwen-last-block-lora-design.md, sections C,
+// D and E.2; the door is qwen-last-block-backward.bml, the forward and the yardstick are rung 1's qwen-last-block-forward.bml).
+//
+// The captures rung 1 wrote (.hearth/qwen-rung-1/xin.f32, xout.f32: T x 5120 f32) are the row; nothing is prefilled. A [ff, 8] and
+// B [8, d] are filled from a device hash at small scales, the target is xout shifted by a hash vector in [-s, s), and the loss is
+// mean (x2 - target)^2 over the block's own output.
+//   1   the zero pair: with B = +0 the forward through the pair's own dot/add is rung 1's replay bit for bit (0 words differ, 0 ulp)
+//       and the loss reads finite and positive (the shift alone)
+//   2   B: the analytic dB against the finite difference on 8 sampled entries — the largest relative error is within the measured
+//       bound (qlbwb-bound-b: the reading of the first run, 2026-10-29, 5.591031080282419e-06, not a chosen number; the band prints
+//       every entry every run)
+//   4   A: the same for dA on 8 sampled entries, the rows picked where the last token's activation is largest in each of 8 windows
+//       (qlbwb-bound-a: the first run's reading, 5.163047689368592e-05)
+//   8   memory: the bytes the step holds (forward scratch + pair + gradients + target/diff, counted) are within the design's D
+//       budget at this T and rank, and every handle the step took is given back
+// Verdict 15. It needs the 27 GiB file, a Metal device and the rung-1 captures; it takes the memory lease first and holds nothing
+// when the governor says held. Epsilon: the loss is exactly quadratic in each entry, so the central difference is exact in exact
+// arithmetic; epsilon is a power of two sized so the induced change in the block's output stands far above its f32 ulp (6e-5 at
+// |x| ~ 600): 2^-1 on B (slope u ~ 0.1..1), 2^2 on A (slope act * B ~ 0.01). The perturbation is read back, never assumed.
+// REQUIRES: a live Metal device, /Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf, .hearth/qwen-rung-1/xin.f32 and xout.f32
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml
+section [form.bml] {
+ class QwenLastBlockBackwardBand {
+  def qlbwb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qlbwb-dir() = ".hearth/qwen-rung-2";
+  def qlbwb-captures() = ".hearth/qwen-rung-1";
+  def qlbwb-span() = 64;
+  def qlbwb-maxpos() = 128;
+  def qlbwb-rank() = 8;
+  def qlbwb-a-scale() = 0.02;
+  def qlbwb-b-scale() = 0.2;
+  def qlbwb-shift() = 0.5;
+  def qlbwb-eps-b() = 0.5;
+  def qlbwb-eps-a() = 4.0;
+  def qlbwb-samples() = 8;
+  // the bounds bits 2 and 4 hold the gradients to: the first run's own readings, 2026-10-29 (.hearth/qwen-rung-2/band-run-1.log;
+  // the design doc, "Rung 2 observed") — dB at the f32 relative scale (1e-7 .. 5.6e-6), dA at the f32 ulp of the block's output
+  // (6e-5 at |x| ~ 600) against a diff of order one (5e-9 .. 5.2e-5); the forward is bit-identical, the fills are hashes, so a later
+  // run reads the same numbers or names what moved
+  def qlbwb-bound-b() = 5.591031080282419e-06;
+  def qlbwb-bound-a() = 5.163047689368592e-05;
+  def qlbwb-say(s) = print_str("[qwen-last-block-backward-band] " ++ s);
+  def qlbwb-last-full(geo) = geo[21] - 1;
+  def qlbwb-dir-ready(dir) = (Comparable) host_path_is_dir(dir) == 1 ? 1 : host_mkdir_mode(dir, 493);
+  def qlbwb-ints(i, n) = i >= n ? [] : cons(i, qlbwb-ints(i + 1, n));
+  def qlbwb-max(xs) = foldl((m, x) => x > m ? x : m, 0.0, xs);
+  def qlbwb-finite?(x) = !nothing?(x) && (x >= 0.0 || x < 0.0) && x < 1.0e30 && x > -1.0e30;
+  def qlbwb-entry-text(name, idx, e) = name ++ "[" ++ idx ++ "]: analytic " ++ e[0].str() ++ ", finite difference " ++ e[1].str() ++ ", relative error " ++ e[2].str() ++ " (perturbation " ++ e[3].str() ++ ")";
+  def qlbwb-entry-json(name, idx, e) = "{\"entry\":\"" ++ name ++ "[" ++ idx ++ "]\",\"analytic\":" ++ e[0].str() ++ ",\"fd\":" ++ e[1].str() ++ ",\"rel\":" ++ e[2].str() ++ "}";
+  def qlbwb-join(xs) = foldl((acc, x) => acc ++ (len(acc) == 0 ? "" : ",") ++ x, "", xs);
+  def qlbwb-run-all(ctx) {
+   let geo = ctx[2];
+   let L = qlbwb-last-full(geo);
+   let d = geo[0];
+   let ff = geo[10];
+   let r = qlbwb-rank();
+   let lay = nth(ctx[3], L);
+   let xin = read_file(qlbwb-captures() ++ "/xin.f32") ?? "";
+   let xout = read_file(qlbwb-captures() ++ "/xout.f32") ?? "";
+   let T = len(xin) / (d * 4);
+   qlbwb-say("captures: xin " ++ len(xin).str() ++ " bytes, xout " ++ len(xout).str() ++ " bytes -> T " ++ T.str() ++ " x d " ++ d.str() ++ "; block L = " ++ L.str() ++ ", ff " ++ ff.str() ++ ", rank " ++ r.str() ++ "; gpu utilization " ++ host_gpu_utilization().str());
+   len(xin) == 0 || len(xin) % (d * 4) != 0 || len(xout) != len(xin) || T > qlbwb-span() || !kth-full?(L, geo[22]) ? {
+    qlbwb-say("refused: the rung-1 captures are absent or not T x " ++ d.str() ++ " f32 rows");
+    0;
+   } : {
+    let o = qlbw-open(geo, lay, T, r, 1.0);
+    let sx = qlbf-scratch(geo, 0, T);
+    let counted = qlbf-scratch-bytes(geo, 0, T) + qlbw-own-bytes(geo, T, r);
+    let budget = qlbw-design-budget(geo, T, r);
+    qlbwb-say("memory counted: forward scratch " ++ qlbf-scratch-bytes(geo, 0, T).str() ++ " + step " ++ qlbw-own-bytes(geo, T, r).str() ++ " = " ++ counted.str() ++ " bytes (" ++ (counted / 1048576).str() ++ " MiB); design D budget at T " ++ T.str() ++ ", r " ++ r.str() ++ ": " ++ budget.str() ++ " bytes (" ++ (budget / 1048576).str() ++ " MiB)");
+    qlbwb-say("machine before the step: " ++ mg-status-line(mg-sense()));
+    !qlbw-ok?(o) || !qlbf-ok?(sx) ? {
+     qlbwb-say("refused: the step's device state did not open");
+     let freed = qlbf-free(sx) + qlbw-free(o);
+     0;
+    } : {
+     // the zero pair: A seeded, B = +0 — the pair's dot and add run and add nothing
+     let s0 = qlbw-seed-pair(o, qlbwb-a-scale(), 0.0);
+     let st = qlbw-seed-target(o, xout, qlbwb-shift());
+     let t0 = host_monotonic_ms();
+     let f0 = qlbw-eval(ctx[0], geo, lay, sx, o, xin);
+     let t1 = host_monotonic_ms();
+     let L0 = qlbw-loss(o, f0);
+     let x2 = metal_buf_read(sx[0], 0, T * d * 4);
+     let c = qlbf-compare(x2, xout, T * d);
+     qlbwb-say("zero pair: " ++ (t1 - t0).str() ++ " ms; " ++ c[0].str() ++ " of " ++ (T * d).str() ++ " words differ from rung 1's capture, widest gap " ++ c[1].str() ++ " ulp, max |x2 - model| " ++ c[2].str() ++ "; loss " ++ L0.str() ++ " (shift in [-" ++ qlbwb-shift().str() ++ ", " ++ qlbwb-shift().str() ++ "): mean square ~ " ++ (qlbwb-shift() * qlbwb-shift() / 3.0).str() ++ ")");
+     // the seeded pair: the base point, its loss, the analytic gradient
+     let s1 = qlbw-seed-pair(o, qlbwb-a-scale(), qlbwb-b-scale());
+     let t2 = host_monotonic_ms();
+     let f1 = qlbw-eval(ctx[0], geo, lay, sx, o, xin);
+     let L1 = qlbw-loss(o, f1);
+     let g = qlbw-grad(o, sx);
+     let t3 = host_monotonic_ms();
+     qlbwb-say("seeded pair (A in [-" ++ qlbwb-a-scale().str() ++ ", " ++ qlbwb-a-scale().str() ++ "), B in [-" ++ qlbwb-b-scale().str() ++ ", " ++ qlbwb-b-scale().str() ++ ")): loss " ++ L1.str() ++ "; forward + analytic gradient " ++ (t3 - t2).str() ++ " ms");
+     let rec = record_get(o, "rec");
+     let row = qlbw-act-row(o, sx, T - 1);
+     let picks = qlbw-pick-windows(row, ff, qlbwb-samples(), 0, []);
+     qlbwb-say("A rows sampled (argmax |act| of the last token in " ++ qlbwb-samples().str() ++ " windows): " ++ qlbwb-join(map(i => i.str(), picks)) ++ "; act row read " ++ len(row).str() ++ " floats");
+     let t4 = host_monotonic_ms();
+     let eb = map(s => [s, (s * 641 + 97) % d, qlbw-fd-entry(ctx[0], geo, lay, sx, o, xin, rec[4], record_get(o, "dB"), s * d + (s * 641 + 97) % d, qlbwb-eps-b())], qlbwb-ints(0, qlbwb-samples()));
+     let said-b = map(e => qlbwb-say(qlbwb-entry-text("dB", e[0].str() ++ "," ++ e[1].str(), e[2])), eb);
+     let ea = map(s => [nth(picks, s), (s * 3) % r, qlbw-fd-entry(ctx[0], geo, lay, sx, o, xin, rec[3], record_get(o, "dA"), nth(picks, s) * r + (s * 3) % r, qlbwb-eps-a())], qlbwb-ints(0, qlbwb-samples()));
+     let said-a = map(e => qlbwb-say(qlbwb-entry-text("dA", e[0].str() ++ "," ++ e[1].str(), e[2])), ea);
+     let t5 = host_monotonic_ms();
+     let maxB = qlbwb-max(map(e => e[2][2], eb));
+     let maxA = qlbwb-max(map(e => e[2][2], ea));
+     qlbwb-say("finite differences: " ++ (4 * qlbwb-samples()).str() ++ " forwards in " ++ (t5 - t4).str() ++ " ms; max relative error dB " ++ maxB.str() ++ " (bound " ++ qlbwb-bound-b().str() ++ "), dA " ++ maxA.str() ++ " (bound " ++ qlbwb-bound-a().str() ++ ")");
+     qlbwb-say("machine after the step: " ++ mg-status-line(mg-sense()));
+     let freed = qlbf-free(sx) + qlbw-free(o);
+     let b1 = c[0] == 0 && c[1] == 0 && qlbwb-finite?(L0) && L0 > 0.0 ? 1 : 0;
+     let b2 = maxB <= qlbwb-bound-b() && qlbwb-finite?(L1) ? 2 : 0;
+     let b4 = maxA <= qlbwb-bound-a() ? 4 : 0;
+     let b8 = counted <= budget && freed == 26 ? 8 : 0;
+     let dirok = qlbwb-dir-ready(qlbwb-dir());
+     let receipt = write_file(qlbwb-dir() ++ "/rung-2-receipt.json", "{\"band\":\"qwen-last-block-backward-band\",\"layer\":" ++ L.str() ++ ",\"slot\":\"ffn_down\",\"ids\":" ++ T.str() ++ ",\"d\":" ++ d.str() ++ ",\"ff\":" ++ ff.str() ++ ",\"rank\":" ++ r.str() ++ ",\"zero_words_differ\":" ++ c[0].str() ++ ",\"zero_widest_ulp\":" ++ c[1].str() ++ ",\"loss_zero\":" ++ L0.str() ++ ",\"loss_seeded\":" ++ L1.str() ++ ",\"eps_b\":" ++ qlbwb-eps-b().str() ++ ",\"eps_a\":" ++ qlbwb-eps-a().str() ++ ",\"max_rel_b\":" ++ maxB.str() ++ ",\"max_rel_a\":" ++ maxA.str() ++ ",\"bound_b\":" ++ qlbwb-bound-b().str() ++ ",\"bound_a\":" ++ qlbwb-bound-a().str() ++ ",\"entries\":[" ++ qlbwb-join(append(map(e => qlbwb-entry-json("dB", e[0].str() ++ "," ++ e[1].str(), e[2]), eb), map(e => qlbwb-entry-json("dA", e[0].str() ++ "," ++ e[1].str(), e[2]), ea))) ++ "],\"counted_bytes\":" ++ counted.str() ++ ",\"design_budget_bytes\":" ++ budget.str() ++ ",\"freed\":" ++ freed.str() ++ ",\"forward_ms\":" ++ (t1 - t0).str() ++ ",\"fd_ms\":" ++ (t5 - t4).str() ++ ",\"bits\":" ++ (b1 + b2 + b4 + b8).str() ++ "}\n");
+     qlbwb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ "; freed " ++ freed.str() ++ " handles");
+     b1 + b2 + b4 + b8;
+    };
+   };
+  }
+  def qlbwb-leased(path, src) {
+   let ctx = q38-open-span(path, qlbwb-maxpos(), qlbwb-span());
+   let verdict = (Comparable) q38-context-ok?(ctx) == 1 ? qlbwb-run-all(ctx) : 0;
+   let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
+   let unleased = mg-release();
+   verdict;
+  }
+  def qlbwb-held(granted) {
+   qlbwb-say("held: " ++ granted[1]);
+   0;
+  }
+  def qlbwb-open(path) {
+   let src = fcmg-src(path);
+   let geo = q38-geo(src, qlbwb-maxpos());
+   let own = fcms-qwen-own(src, qlbwb-maxpos()) + qlbf-scratch-bytes(geo, 0, qlbwb-span()) + qlbw-own-bytes(geo, qlbwb-span(), qlbwb-rank());
+   let granted = mg-lease("qwen last-block backward band", path, fcms-weights-bytes(path), own);
+   !mg-granted?(granted) ? qlbwb-held(granted) : qlbwb-leased(path, src);
+  }
+  def qlbwb-run() = qlbwb-open(qlbwb-file());
+ }
+ qlbwb-run();
+}

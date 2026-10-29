@@ -1,0 +1,205 @@
+// offline-voice-gaps.bml — the gap register: every gap on the way to 100% offline voice, read as data and answered
+// closed, open or unread, each with the numbers it read and the file it read them from. No model opens, no network.
+//
+// The gaps are rows of learn/offline-voice-gaps.jsonl; the reading rule lives in the row, never here:
+//   id, title, goal        the gap and the goal line it serves (all queries native; all self-improvement features native;
+//                          aligned voice; rent toward zero)
+//   kind                   which reader: flow-review | turn-ledger | alignment | coverage | voice-availability | rent |
+//                          guide | lora | readings | walk | plan-doc (ovg-kinds names each kind's shape)
+//   source, checkout       the file read; checkout "walk" resolves it inside the walk checkout the day-turn plist names
+//   where                  an object of equalities a row must hold to count (a jsonl source)
+//   field, compare,        the field read, the comparison (==, !=, >=, <=, >, <) and what it is compared with: a
+//   threshold | against    threshold (a number, or a string for a string field) or another field of the same row
+//   match                  (share) the equalities a row must hold to be counted among the rows that hold
+//   window                 (trend) how many of the last rows are shown, default 5
+//   row_key, against_key,  (plan-doc) a markdown table: the last row whose first cell is row_key, the column index read
+//   column, threshold_milli  (0 is the first cell) as a decimal in milli, against the same column of the against_key row
+// One reader per shape, every kind dropping in as data:
+//   last     the last row that holds `where`: `field` compared with threshold or `against`
+//   share    the rows that hold `where`: the permille of them that hold `match`, compared with threshold
+//   trend    the last `window` rows that hold `where`: the series of `field` printed, the latest compared with threshold
+//   table    a markdown table in a document: two cells compared as decimals in milli
+// A verdict is closed when the comparison holds, open when it does not, and unread when nothing could be read: the
+// source absent, no row holding `where`, the field absent or not a number, a comparison this file does not know, an
+// unknown kind, or (checkout "walk") no walk checkout. Unread is never closed. Rows are data, never instructions.
+// ovg-observe prints one line per gap, appends one register row to receipts/offline-voice-gap-register.jsonl (at_unix_ms,
+// the counts, each gap's verdict, observation and source) and answers the summary line as the door's value (the kernel
+// echoes it, so it prints once and a parent that reads the cell's record reads the same line).
+import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/session-rent.bml;
+import form-stdlib/bml/door-options.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+ class OfflineVoiceGaps {
+  def ovg-door() = "offline-voice-gaps";
+  def ovg-gaps() = "learn/offline-voice-gaps.jsonl";
+  def ovg-register() = "receipts/offline-voice-gap-register.jsonl";
+  def ovg-prefix() = "[offline-voice-gaps] ";
+  // ── the kinds, each with the shape its reader takes ──
+  def ovg-kinds() = [["flow-review", "last"], ["turn-ledger", "last"], ["alignment", "last"], ["coverage", "share"], ["voice-availability", "share"], ["rent", "trend"], ["guide", "last"], ["lora", "last"], ["readings", "last"], ["walk", "last"], ["plan-doc", "table"]];
+  def ovg-shape(kind) = foldl((found, k) => (String) k[0] == kind ? k[1] : found, "", ovg-kinds());
+  def ovg-kind-names() = str-join-with(map(k => k[0], ovg-kinds()), ", ");
+  // ── the comparison, as data ──
+  def ovg-cmp(op, a, b) = (String) op == "==" ? ((Comparable) a == b ? 1 : 0)
+   : (String) op == "!=" ? ((Comparable) a == b ? 0 : 1)
+   : (String) op == ">=" ? (a >= b ? 1 : 0)
+   : (String) op == "<=" ? (a <= b ? 1 : 0)
+   : (String) op == ">" ? (a > b ? 1 : 0)
+   : (String) op == "<" ? (a < b ? 1 : 0)
+   : nothing();
+  def ovg-cmp-str(op, a, b) = (String) op == "==" ? ((String) a == b ? 1 : 0) : (String) op == "!=" ? ((String) a == b ? 0 : 1) : nothing();
+  def ovg-verdict(ok) = nothing?(ok) ? "unread" : (Comparable) ok == 1 ? "closed" : "open";
+  def ovg-op-note(ok, op) = nothing?(ok) ? "; comparison \"" ++ op ++ "\" unknown" : "";
+  // ── equalities a row must hold: `where` and `match` ──
+  def ovg-keys(obj) = map(p => json-pair-key(p), json-object-pairs(obj));
+  def ovg-same?(row, obj, key) = json-object-has?(row, key) && node_eq(json-object-get(row, key), json-object-get(obj, key));
+  def ovg-matches?(row, obj) = all?(k => ovg-same?(row, obj, k), ovg-keys(obj));
+  // a gap row may carry since_ms: rows before that instant are history, outside its reading (the text names the window)
+  def ovg-since?(gap, r) = nothing?(fcgp-num(gap, "since_ms")) ? true : ((fcgp-num(r, "at_unix_ms") ?? 0) >= fcgp-num(gap, "since_ms"));
+  def ovg-where(gap, rows) = filter(r => ovg-matches?(r, fcgp-obj(gap, "where")) && ovg-since?(gap, r), rows);
+  def ovg-obj-text(obj) = str-join-with(map(k => k ++ " " ++ json-emit(json-object-get(obj, k)), ovg-keys(obj)), ", ");
+  def ovg-since-text(gap) = nothing?(fcgp-num(gap, "since_ms")) ? "" : " since " ++ fcgp-num(gap, "since_ms").str();
+  def ovg-where-text(gap) = (nil?(ovg-keys(fcgp-obj(gap, "where"))) ? "" : " where " ++ ovg-obj-text(fcgp-obj(gap, "where"))) ++ ovg-since-text(gap);
+  def ovg-none(gap, rows) = ["unread", "no row" ++ ovg-where-text(gap) ++ " among " ++ len(rows).str() ++ " row(s)"];
+  def ovg-at(row) = nothing?(fcgp-num(row, "at_unix_ms")) ? "" : ", at " ++ fcgp-num(row, "at_unix_ms").str();
+  def ovg-place(gap, mine, rows) = " (the last of " ++ len(mine).str() ++ " row(s)" ++ ovg-where-text(gap) ++ ((Comparable) len(mine) == len(rows) ? "" : " of " ++ len(rows).str()) ++ ovg-at(mine[-1]) ++ ")";
+  // ── last: the last row that holds `where` ──
+  def ovg-read-last(gap, rows) {
+   let mine = ovg-where(gap, rows);
+   nil?(mine) ? ovg-none(gap, rows) : ovg-judge(gap, mine[-1], ovg-place(gap, mine, rows));
+  }
+  def ovg-string?(gap) = fcgp-str-node?(fcgp-node(gap, "threshold"));
+  def ovg-judge(gap, row, place) {
+   let field = fcgp-str(gap, "field");
+   let op = fcgp-str(gap, "compare");
+   !fcgp-present?(row, field) ? ["unread", "field " ++ field ++ " absent" ++ place]
+   : ovg-string?(gap) ? ovg-judge-str(gap, row, field, op, place) : ovg-judge-num(gap, row, field, op, place);
+  }
+  def ovg-judge-str(gap, row, field, op, place) {
+   let v = fcgp-str(row, field);
+   let want = fcgp-str(gap, "threshold");
+   let ok = ovg-cmp-str(op, v, want);
+   [ovg-verdict(ok), field ++ " \"" ++ v ++ "\" " ++ op ++ " \"" ++ want ++ "\"" ++ place ++ ovg-op-note(ok, op)];
+  }
+  def ovg-judge-num(gap, row, field, op, place) {
+   let v = fcgp-num(row, field);
+   let against = fcgp-str(gap, "against");
+   let want = (String) against == "" ? fcgp-num(gap, "threshold") : fcgp-num(row, against);
+   nothing?(v) ? ["unread", "field " ++ field ++ " is not a number" ++ place]
+   : nothing?(want) ? ["unread", ((String) against == "" ? "threshold absent" : "field " ++ against ++ " is not a number") ++ place]
+   : ovg-judged(ovg-cmp(op, v, want), field ++ " " ++ v.str() ++ " " ++ op ++ " " ++ ((String) against == "" ? "" : against ++ " ") ++ want.str() ++ place, op);
+  }
+  def ovg-judged(ok, text, op) = [ovg-verdict(ok), text ++ ovg-op-note(ok, op)];
+  // ── share: the permille of the rows holding `where` that also hold `match` ──
+  def ovg-pm(part, whole) = (part * 1000) / whole;
+  def ovg-read-share(gap, rows) {
+   let mine = ovg-where(gap, rows);
+   let m = fcgp-obj(gap, "match");
+   let op = fcgp-str(gap, "compare");
+   let want = fcgp-num(gap, "threshold");
+   nil?(mine) ? ovg-none(gap, rows)
+   : nil?(ovg-keys(m)) ? ["unread", "no match rule in the gap row"]
+   : nothing?(want) ? ["unread", "threshold absent in the gap row"]
+   : ovg-share-of(gap, mine, m, op, want, len(filter(r => ovg-matches?(r, m), mine)));
+  }
+  def ovg-share-of(gap, mine, m, op, want, hits) = ovg-judged(ovg-cmp(op, ovg-pm(hits, len(mine)), want), hits.str() ++ " of " ++ len(mine).str() ++ " row(s)" ++ ovg-where-text(gap) ++ " hold " ++ ovg-obj-text(m) ++ ": " ++ ovg-pm(hits, len(mine)).str() ++ " pm " ++ op ++ " " ++ want.str(), op);
+  // ── trend: the last `window` rows, the series printed, the latest compared ──
+  def ovg-last(xs, n) = len(xs) <= n ? xs : ovg-last(xs[1:], n);
+  def ovg-direction(series) = len(series) < 2 ? "one reading" : series[-1] > series[-2] ? "rising" : series[-1] < series[-2] ? "falling" : "flat";
+  def ovg-read-trend(gap, rows) {
+   let mine = ovg-where(gap, rows);
+   let field = fcgp-str(gap, "field");
+   let op = fcgp-str(gap, "compare");
+   let want = fcgp-num(gap, "threshold");
+   let tail = ovg-last(mine, fcgp-num(gap, "window") ?? 5);
+   let series = map(r => fcgp-num(r, field), tail);
+   nil?(mine) ? ovg-none(gap, rows)
+   : nothing?(want) ? ["unread", "threshold absent in the gap row"]
+   : any?(v => nothing?(v), series) ? ["unread", "field " ++ field ++ " is not a number in one of the last " ++ len(tail).str() ++ " row(s)"]
+   : ovg-judged(ovg-cmp(op, series[-1], want), field ++ " over the last " ++ len(tail).str() ++ " of " ++ len(mine).str() ++ " row(s)" ++ ovg-where-text(gap) ++ ": " ++ str-join-with(map(v => v.str(), series), ", ") ++ " (" ++ ovg-direction(series) ++ "); latest " ++ series[-1].str() ++ " " ++ op ++ " " ++ want.str() ++ ovg-at(tail[-1]), op);
+  }
+  // ── table: a markdown table in a document, two cells as decimals in milli ──
+  def ovg-drop-last(xs) = len(xs) <= 1 ? [] : cons(xs[0], ovg-drop-last(xs[1:]));
+  def ovg-cells(line) = map(c => trim(c), ovg-drop-last(split-on(line, "|")[1:]));
+  def ovg-table-row?(line) = len(line) > 0 && (Comparable) str_byte_at(line, 0) == 124;
+  def ovg-table-rows(text) = map(l => ovg-cells(l), filter(l => ovg-table-row?(l), map(l => trim(l), split-on(text, "\n"))));
+  def ovg-row-for(rows, key) = foldl((found, c) => (!nil?(c)) && (String) c[0] == key ? c : found, [], rows);
+  def ovg-cell(cells, i) = i < len(cells) ? cells[i] : "";
+  def ovg-digits(s, i, acc) = i >= len(s) ? acc : (str_byte_at(s, i) >= 48) && (str_byte_at(s, i) <= 57) ? ovg-digits(s, i + 1, acc * 10 + (str_byte_at(s, i) - 48)) : nothing();
+  def ovg-pad3(s) = len(s) >= 3 ? substring(s, 0, 3) : ovg-pad3(s ++ "0");
+  // "2.79" reads 2790, "11" reads 11000; a cell that is not an unsigned decimal reads nothing
+  def ovg-milli(text) {
+   let t = trim(text);
+   let dot = str_find(t, ".", 0);
+   let whole = dot < 0 ? ovg-digits(t, 0, 0) : ovg-digits(substring(t, 0, dot), 0, 0);
+   let frac = dot < 0 ? 0 : ovg-digits(ovg-pad3(substring(t, dot + 1, len(t))), 0, 0);
+   len(t) == 0 || nothing?(whole) || nothing?(frac) ? nothing() : whole * 1000 + frac;
+  }
+  def ovg-read-table(gap, text) {
+   let rows = ovg-table-rows(text);
+   let key = fcgp-str(gap, "row_key");
+   let akey = fcgp-str(gap, "against_key");
+   let col = fcgp-num(gap, "column");
+   let op = fcgp-str(gap, "compare");
+   let mine = ovg-row-for(rows, key);
+   let other = (String) akey == "" ? [] : ovg-row-for(rows, akey);
+   let v = nothing?(col) || nil?(mine) ? nothing() : ovg-milli(ovg-cell(mine, col));
+   let want = nothing?(col) ? nothing() : (String) akey == "" ? fcgp-num(gap, "threshold_milli") : nil?(other) ? nothing() : ovg-milli(ovg-cell(other, col));
+   nothing?(col) ? ["unread", "column absent in the gap row"]
+   : nil?(mine) ? ["unread", "no table row keyed " ++ key ++ " among " ++ len(rows).str() ++ " table row(s)"]
+   : nothing?(v) ? ["unread", "row " ++ key ++ " column " ++ col.str() ++ " holds no decimal (\"" ++ ovg-cell(mine, col) ++ "\")"]
+   : nothing?(want) ? ["unread", (String) akey == "" ? "threshold_milli absent in the gap row" : "no decimal in column " ++ col.str() ++ " of a row keyed " ++ akey ++ " among " ++ len(rows).str() ++ " table row(s)"]
+   : ovg-judged(ovg-cmp(op, v, want), key ++ " column " ++ col.str() ++ " reads " ++ ovg-cell(mine, col) ++ ((String) akey == "" ? "" : " against " ++ akey ++ " " ++ ovg-cell(other, col)) ++ ": " ++ v.str() ++ " " ++ op ++ " " ++ want.str() ++ " in milli (the last table row of each key)", op);
+  }
+  // ── where a source is: this checkout, the stdin root, or the walk checkout ──
+  def ovg-walk(opts) = fcgp-present?(opts, "walk") ? fcgp-str(opts, "walk") : sr-walk-dir();
+  def ovg-walk?(gap) = (String) fcgp-str(gap, "checkout") == "walk";
+  def ovg-path(gap, opts) {
+   let src = fcgp-str(gap, "source");
+   let root = fcgp-str(opts, "root");
+   ovg-walk?(gap) ? ((String) ovg-walk(opts) == "" ? "" : ovg-walk(opts) ++ "/" ++ src) : (String) root == "" ? src : root ++ "/" ++ src;
+  }
+  def ovg-shown(gap, path) = (String) path == "" ? "walk:" ++ fcgp-str(gap, "source") : path;
+  // ── one gap: [verdict, observation] ──
+  def ovg-read-rows(shape, gap, rows) = (String) shape == "last" ? ovg-read-last(gap, rows) : (String) shape == "share" ? ovg-read-share(gap, rows) : ovg-read-trend(gap, rows);
+  def ovg-read(gap, opts) {
+   let kind = fcgp-str(gap, "kind");
+   let shape = ovg-shape(kind);
+   let path = ovg-path(gap, opts);
+   (String) shape == "" ? ["unread", "kind \"" ++ kind ++ "\" has no reader (the kinds: " ++ ovg-kind-names() ++ ")"]
+   : (String) path == "" ? ["unread", "no walk checkout: the day-turn plist names none"]
+   : (Comparable) host_path_exists(path) != 1 ? ["unread", "absent: " ++ path]
+   : (String) shape == "table" ? ovg-read-table(gap, fhn-read(path))
+   : ovg-read-rows(shape, gap, fcgp-rows(path));
+  }
+  // [gap, verdict, observation, source shown]
+  def ovg-result(gap, opts) {
+   let r = ovg-read(gap, opts);
+   [gap, r[0], r[1], ovg-shown(gap, ovg-path(gap, opts))];
+  }
+  def ovg-line(r) = ovg-prefix() ++ fcgp-str(r[0], "id") ++ ": " ++ r[1] ++ " — " ++ fcgp-str(r[0], "title") ++ "; " ++ r[2] ++ " (" ++ fcgp-str(r[0], "kind") ++ " " ++ r[3] ++ "; serves: " ++ fcgp-str(r[0], "goal") ++ ")";
+  def ovg-count(results, verdict) = len(filter(r => (String) r[1] == verdict, results));
+  def ovg-summary(results, regPath, kept) = ovg-prefix() ++ "summary: " ++ len(results).str() ++ " gap(s): closed " ++ ovg-count(results, "closed").str() ++ ", open " ++ ovg-count(results, "open").str() ++ ", unread " ++ ovg-count(results, "unread").str() ++ "; register " ++ regPath ++ " " ++ kept;
+  def ovg-row-of(r) = json-node-object([fhn-s("id", fcgp-str(r[0], "id")), fhn-s("kind", fcgp-str(r[0], "kind")), fhn-s("verdict", r[1]), fhn-s("observation", r[2]), fhn-s("source", r[3]), fhn-s("goal", fcgp-str(r[0], "goal"))]);
+  def ovg-register-row(results, gapsPath) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("gaps_file", gapsPath), fhn-n("gaps", len(results)), fhn-n("closed", ovg-count(results, "closed")), fhn-n("open", ovg-count(results, "open")), fhn-n("unread", ovg-count(results, "unread")), json-node-pair("verdicts", json-node-array(map(r => ovg-row-of(r), results)))]);
+  // ── the door: stdin options, the gaps file, the lines, the register row ──
+  def ovg-spec() = [["gaps", "str"], ["root", "str"], ["walk", "str"], ["register", "str"]];
+  def ovg-opts() = dop-doc(ovg-door(), stdin-text(), ovg-spec());
+  def ovg-or(v, dflt) = (String) v == "" ? dflt : v;
+  def ovg-run(opts) {
+   let gapsPath = ovg-or(fcgp-str(opts, "gaps"), ovg-gaps());
+   let regPath = ovg-or(fcgp-str(opts, "register"), ovg-register());
+   let gaps = (Comparable) host_path_exists(gapsPath) == 1 ? fcgp-rows(gapsPath) : [];
+   (Comparable) host_path_exists(gapsPath) != 1 ? dop-refuse(ovg-door(), "no gaps file at " ++ gapsPath)
+   : nil?(gaps) ? dop-refuse(ovg-door(), "no gap row in " ++ gapsPath)
+   : ovg-observe(gaps, opts, gapsPath, regPath);
+  }
+  def ovg-observe(gaps, opts, gapsPath, regPath) {
+   let results = map(g => ovg-result(g, opts), gaps);
+   let printed = map(r => print_str(ovg-line(r)), results);
+   let kept = fhn-append(regPath, json-emit(ovg-register-row(results, gapsPath)) ++ "\n");
+   ovg-summary(results, regPath, kept);
+  }
+ }
+}

@@ -1,0 +1,45 @@
+// cell-deadline-observe.bml — a crystallized loop ends at its cell deadline.
+//
+// The cell deadline is a count of walker steps, checked against the clock every 16384th (FK_CELL_TICK in fk_walk and
+// fk_walk_body, runtime/fkwu-uni.c). A loop the f64 lane crystallizes (fk_fn_native 2: a self tail call over ints, hot
+// after FK_F64_HEAT passes) runs as machine words with no walker step inside it, so the deadline reaches it only where
+// the loop itself ticks. 2026-10-28 a planner candidate sent such a loop past its 600 s cell_run deadline for 902 s,
+// until the OS jettisoned the process at 119 GiB (.hearth/planner-live). This door runs that shape in this process under
+// cell_run with a 1000 ms deadline and reads whether the deadline ended it.
+//
+//   ./fkwu observe/cell-deadline-observe.bml      (from the kernel root; reads no stdin)
+//
+// Run with a cell argument it is the unit under observation: 1 spins (a counter that climbs and never meets its end, no
+// allocation), any other int n counts n passes down and answers n, so a loop that ends on its own is seen ending with
+// its value.
+// stdout: cell-deadline spin stopped=<kind> ms=<ms> value=<v> message=<m>
+//         cell-deadline count stopped=<kind> ms=<ms> value=<v> message=<m>
+//         cell-deadline held=<0|1>
+// Exit 0 (the answer 0 follows) when the spin stopped "deadline" within 1500 ms and the count answered its number; else
+// form_error names which did not hold, and the exit reads 1.
+// effects: none (prints only; no file written)
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+ class CellDeadlineObserve {
+  def cdo-self() = "observe/cell-deadline-observe.bml";
+  // the loop under observation: an int self tail call, the shape the f64 lane crystallizes into a native loop
+  def cdo-spin(n) = (Comparable) n == 0 ? 1 : cdo-spin(n + 1);
+  def cdo-count(n, acc) = (Comparable) n == 0 ? acc : cdo-count(n - 1, acc + 1);
+  def cdo-kind(rec) = nothing?(record_get(rec, "stopped")) ? "none" : (String) record_get(record_get(rec, "stopped"), "kind");
+  def cdo-message(rec) = nothing?(record_get(rec, "stopped")) ? "" : (String) record_get(record_get(rec, "stopped"), "message");
+  def cdo-value(rec) = nothing?(record_get(rec, "value")) ? "nothing" : value_str(record_get(rec, "value"));
+  def cdo-line(label, rec) = print_str("cell-deadline " ++ label ++ " stopped=" ++ cdo-kind(rec) ++ " ms=" ++ record_get(rec, "ms").str() ++ " value=" ++ cdo-value(rec) ++ " message=" ++ cdo-message(rec));
+  def cdo-run() {
+   let spin = cell_run(cdo-self(), 1, 1000, nothing());
+   let said-spin = cdo-line("spin", spin);
+   let count = cell_run(cdo-self(), 200000, 1000, nothing());
+   let said-count = cdo-line("count", count);
+   let spin-held = ((String) cdo-kind(spin) == "deadline") && (record_get(spin, "ms") < 1500);
+   let count-held = ((String) cdo-kind(count) == "none") && ((Comparable) record_get(count, "value") == 200000);
+   let said-held = print_str("cell-deadline held=" ++ ((spin-held && count-held) ? "1" : "0"));
+   (spin-held && count-held) ? 0 : form_error("cell-deadline: " ++ (spin-held ? "" : "the spin outlived its 1000 ms deadline; ") ++ (count-held ? "" : "the count did not answer its value"));
+  }
+ }
+ let arg = cell_input();
+ nothing?(arg) ? cdo-run() : (Comparable) arg == 1 ? cdo-spin(1) : cdo-count(arg, 0);
+}

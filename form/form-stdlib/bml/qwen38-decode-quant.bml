@@ -1,15 +1,70 @@
-// Q4_K/Q6_K decode reuses each superblock's scales while preserving the
-// serial descending row fold. One partition writes the output directly;
-// no reduction, temporary buffer, or extra dispatch is introduced.
+// qwen38-decode-quant.bml — the K-quant decode matvecs of the Qwen3.8 lane, and the one door that owns their
+// dispatch record (pipeline, binding, grid) so each kernel's shape and its grid are said in one place.
+//
+// Q4_K (type 12) decodes through form_qwen_q4k_decode_f32 and Q6_K (type 14) through
+// form_qwen_q6k_decode_f32: FUSED cooperative dots, shaped as the lane's Q8_0 wide matvec
+// (q80-matvec-wide-body) — one 256-thread group (eight SIMD groups) per PAIR of rows, each SIMD group walking
+// the superblocks ib = sgitg, sgitg+8, ...; inside a superblock each lane owns eight weights of one scale
+// group, folds qd = sum q*x over them (an fma chain) and lands the group's part with its scale products made
+// ONCE per eight weights:
+//     Q4_K  lane t: sub-block j = t/4, slice t mod 4;   part = (d*sc_j) * qd - (dmin*mn_j) * xs,  xs = sum x
+//     Q6_K  lane t: scale group t/2 (half h, group g, sixteen is), slice t mod 2;   part = (d*sc) * qd
+// A row-iteration reads two words of weights: Q4_K the superblock's 16-byte head (d, dmin, the twelve scale
+// bytes) as one packed_uint4 and the eight quant bytes as one packed_uint2; Q6_K the eight low-nibble bytes
+// and the eight high-bit bytes as two packed_ushort4 (the 210-byte stride is only 2-aligned), the scale byte
+// and d. sc_j / mn_j are get_scale_min_k4 on the register bytes (q38dq_sc / q38dq_mn: the same integer
+// identities q4k_sc / q4k_mn carry — x&63 = mod 64, >>6 = div 64, <<4 = mul 16, | over disjoint fields = +);
+// the Q6_K quant is q6k_wi's own nib + hi*16 - 32 with hi = (qh >> 2g) & 3; d and dmin by
+// float(as_type<half>), which the band proves bit-identical to q4k_f16 on every finite f16. The lane partials
+// fold by metal::simd_sum and the eight SIMD groups by one more simd_sum over threadgroup memory — the Q8_0
+// wide kernel's own epilogue.
+//
+// WHY. The previous kernels here (qml-hoist-msl at parts 1) were the attestant's serial fold with the
+// superblock's d/dmin hoisted: ONE thread per row, cols dependent steps each, and the per-weight scale decode
+// (three byte reads and four integer divisions for Q4_K) once per WEIGHT. On the 27B's 5120- and 17408-wide
+// rows that is a latency chain of 5120-17408 dependent adds per thread, 128x fewer threads than the Q8_0
+// wide twin — measured 0.27-0.61 tok/s against Q8_0's 2.1-2.8 (receipts/native-training-plan.md, "Voice
+// rates"). The Q4_K_M file carries BOTH types (attn_qkv, the early ffn_down and the head are Q6_K), so the
+// lane decodes at the speed its bytes allow only when both take the cooperative shape.
+//
+// WHAT THEY ANSWER TO. The fused fold reassociates, so it is not byte-equal to the serial attestant; it is
+// held within a NAMED bound of the exact (fp64) dot, the way the Q8_0 wide kernel is: with
+//     S = sum_j (|d*sc*nib_j*x_j| + |dmin*mn_j*x_j|)   for Q4_K (the unfused magnitude: the min term cancels)
+//     S = sum_j |w_j*x_j|                               for Q6_K
+// every association tree a kernel can take has depth <= 8 (fma chain) + 3 (the scale products and the
+// subtraction) + ceil(nb/8) (one thread's superblock chain) + 31 + 31 (two 32-way reductions), so
+//     |y_kernel - y_exact| <= (73 + ceil(nb/8)) * 2^-24 * S,   nb = cols/256.
+// The band form-stdlib/tests/q4k-decode-wide-band.fk measures this on the committed superblock fixtures and
+// on real rows of the Q4_K_M file against the Form fp64 references (q4m-* / q6m-flat-at of q4k-msl.fk and
+// q6k-msl.fk), and the greedy reply to .hearth/speed-prompt.txt stays the one the serial fold answered
+// (.hearth/speed-reply-qwen38-q4.txt).
+//
+// Requires cols a multiple of 256 (a K-quant row is whole superblocks by format); rows may be odd (the
+// second row of the last pair is guarded; y[rows] is never written).
 import form-stdlib/qk-matvec-lane.fk;
 import form-stdlib/metal-door.fk;
 section [form.bml] {
  class Qwen38DecodeQuant {
   def q38dq-index(type) = if ((Comparable) type == 12) then 57 else if ((Comparable) type == 14) then 58 else -1;
-  def q38dq-msl() = ((String) qml-hoist-msl("form_qwen_q4k_decode_f32","q4k","144") + qml-hoist-msl("form_qwen_q6k_decode_f32","q6k","210"));
+  def q38dq-tpg() = 256;
+  def q38dq-groups(rows) = (rows + 1) / 2;
+  // the Q8_0 wide kernel's epilogue: lane partials by simd_sum, the eight SIMD groups by one more over sh[]
+  def q38dq-epilogue-msl() = "if (sgitg == 0u) { sh[tiisg] = 0.0f; sh[32u + tiisg] = 0.0f; } sumf0 = metal::simd_sum(sumf0); sumf1 = metal::simd_sum(sumf1); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) { sh[sgitg] = sumf0; sh[32u + sgitg] = sumf1; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float t0 = metal::simd_sum(sh[tiisg]); float t1 = metal::simd_sum(sh[32u + tiisg]); if (tiisg == 0u && sgitg == 0u) { if (r0 < rows) y[r0] = t0; if (r0 + 1u < rows) y[r0 + 1u] = t1; } }";
+  def q38dq-sig-msl() = " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 ntg [[threads_per_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { threadgroup float sh[64]; uint nb = cols / 256u; uint r0 = tgpig.x * 2u; uint nsg = (uint)ntg.x / 32u; float sumf0 = 0.0f; float sumf1 = 0.0f; ";
+  // get_scale_min_k4 over the superblock head held in registers: h.x = d | dmin<<16, h.y/h.z/h.w = scales[0..11]
+  def q38dq-head-msl() = "static inline uint q38dq_sb(packed_uint4 h, uint k) { uint wv = (k < 4u) ? h.y : ((k < 8u) ? h.z : h.w); return (wv >> ((k & 3u) * 8u)) & 255u; } static inline uint q38dq_sc(packed_uint4 h, uint j) { if (j < 4u) { return q38dq_sb(h, j) & 63u; } return (q38dq_sb(h, j + 4u) & 15u) | ((q38dq_sb(h, j - 4u) >> 6u) << 4u); } static inline uint q38dq_mn(packed_uint4 h, uint j) { if (j < 4u) { return q38dq_sb(h, j + 4u) & 63u; } return (q38dq_sb(h, j + 4u) >> 4u) | ((q38dq_sb(h, j) >> 6u) << 4u); } ";
+  def q38dq-q4-wide-msl(fname) = ("kernel void " + (fname + (q38dq-sig-msl() + ("uint sub = (uint)tiisg / 4u; uint il = (uint)tiisg - sub * 4u; uint c = sub / 2u; uint nsh = (sub - c * 2u) * 4u; uint qoff = 16u + c * 32u + il * 8u; for (uint ib = (uint)sgitg; ib < nb; ib += nsg) { device const float* xp = x + ib * 256u + sub * 32u + il * 8u; packed_float4 ya = *(device const packed_float4*)(xp); packed_float4 yc = *(device const packed_float4*)(xp + 4); float xs = ((ya.x + ya.y) + (ya.z + ya.w)) + ((yc.x + yc.y) + (yc.z + yc.w)); for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; device const uchar* b = qb + ((ulong)r * (ulong)nb + (ulong)ib) * 144ul; packed_uint4 h = *(device const packed_uint4*)(b); packed_uint2 q = *(device const packed_uint2*)(b + qoff); float d = float(as_type<half>(ushort(h.x & 65535u))); float dmin = float(as_type<half>(ushort(h.x >> 16u))); float gsc = d * float(q38dq_sc(h, sub)); float gmn = dmin * float(q38dq_mn(h, sub)); uint qx = q.x >> nsh; uint qy = q.y >> nsh; float qd = 0.0f; qd = metal::fma(float(qx & 15u), ya.x, qd); qd = metal::fma(float((qx >> 8u) & 15u), ya.y, qd); qd = metal::fma(float((qx >> 16u) & 15u), ya.z, qd); qd = metal::fma(float((qx >> 24u) & 15u), ya.w, qd); qd = metal::fma(float(qy & 15u), yc.x, qd); qd = metal::fma(float((qy >> 8u) & 15u), yc.y, qd); qd = metal::fma(float((qy >> 16u) & 15u), yc.z, qd); qd = metal::fma(float((qy >> 24u) & 15u), yc.w, qd); float part = gsc * qd - gmn * xs; if (row == 0u) sumf0 = sumf0 + part; else sumf1 = sumf1 + part; } } " + q38dq-epilogue-msl()))));
+  // one Q6_K quant from its low-nibble word `a`, its high-bit word `e` and the byte shift `s` (0 or 8):
+  // q6k_wi's nib + hi*16 - 32, the nibble by nsh (low for g < 2, high for g >= 2) and hi = (qh >> 2g) & 3
+  def q38dq-q6-quant-msl() = "static inline float q38dq_q6(uint a, uint e, uint s, uint nsh, uint hsh) { return float(int(((a >> (s + nsh)) & 15u) | (((e >> (s + hsh)) & 3u) << 4u)) - 32); } ";
+  def q38dq-q6-wide-msl(fname) = ("kernel void " + (fname + (q38dq-sig-msl() + ("uint sg = (uint)tiisg / 2u; uint p = (uint)tiisg - sg * 2u; uint h = sg / 8u; uint rem = sg - h * 8u; uint g = rem / 2u; uint is = rem - g * 2u; uint l0 = is * 16u + p * 8u; uint qloff = h * 64u + l0 + (g & 1u) * 32u; uint qhoff = 128u + h * 32u + l0; uint scoff = 192u + h * 8u + is + 2u * g; uint nsh = (g / 2u) * 4u; uint hsh = 2u * g; uint xoff = h * 128u + g * 32u + l0; for (uint ib = (uint)sgitg; ib < nb; ib += nsg) { device const float* xp = x + ib * 256u + xoff; packed_float4 ya = *(device const packed_float4*)(xp); packed_float4 yc = *(device const packed_float4*)(xp + 4); for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; device const uchar* b = qb + ((ulong)r * (ulong)nb + (ulong)ib) * 210ul; packed_ushort4 ql = *(device const packed_ushort4*)(b + qloff); packed_ushort4 qh = *(device const packed_ushort4*)(b + qhoff); ushort hd = (ushort)b[208] | ((ushort)b[209] << 8); float gsc = float(as_type<half>(hd)) * float(q6k_s8(int(b[scoff]))); uint a0 = uint(ql.x); uint a1 = uint(ql.y); uint a2 = uint(ql.z); uint a3 = uint(ql.w); uint e0 = uint(qh.x); uint e1 = uint(qh.y); uint e2 = uint(qh.z); uint e3 = uint(qh.w); float qd = 0.0f; qd = metal::fma(q38dq_q6(a0, e0, 0u, nsh, hsh), ya.x, qd); qd = metal::fma(q38dq_q6(a0, e0, 8u, nsh, hsh), ya.y, qd); qd = metal::fma(q38dq_q6(a1, e1, 0u, nsh, hsh), ya.z, qd); qd = metal::fma(q38dq_q6(a1, e1, 8u, nsh, hsh), ya.w, qd); qd = metal::fma(q38dq_q6(a2, e2, 0u, nsh, hsh), yc.x, qd); qd = metal::fma(q38dq_q6(a2, e2, 8u, nsh, hsh), yc.y, qd); qd = metal::fma(q38dq_q6(a3, e3, 0u, nsh, hsh), yc.z, qd); qd = metal::fma(q38dq_q6(a3, e3, 8u, nsh, hsh), yc.w, qd); float part = gsc * qd; if (row == 0u) sumf0 = sumf0 + part; else sumf1 = sumf1 + part; } } " + q38dq-epilogue-msl()))));
+  def q38dq-msl() = ((String) q38dq-head-msl() + ((String) q38dq-q6-quant-msl() + ((String) q38dq-q4-wide-msl("form_qwen_q4k_decode_f32") + q38dq-q6-wide-msl("form_qwen_q6k_decode_f32"))));
   def q38dq-pipes(msl) = [metal_pipeline(msl,"form_qwen_q4k_decode_f32"),metal_pipeline(msl,"form_qwen_q6k_decode_f32")];
-  def q38dq-enqueue(ps,type,weight,x,y,rows,cols,barrier) =
-   metal_enqueue(ps[q38dq-index(type)],md-bind16([weight,x,y],[rows,cols,1],256,0,0,barrier),rows);
+  // the bound's coefficient for a row of `cols`: the deepest association tree the fused fold can take
+  def q38dq-bound-coeff(cols) = 73 + (cols / 256 + 7) / 8;
+  // the dispatch record [pipeline, binding, grid] (q38-enq runs it): the cooperative pair-of-rows grid
+  // (mode 1: (rows + 1) / 2 groups of 256 threads) for both K-quants
+  def q38dq-rec(ps,type,weight,x,y,rows,cols,barrier) = [ps[q38dq-index(type)],md-bind16([weight,x,y],[rows,cols],q38dq-tpg(),0,1,barrier),q38dq-groups(rows)];
  }
  0;
 }

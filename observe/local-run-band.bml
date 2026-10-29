@@ -1,7 +1,9 @@
-// local-run-band.bml — form-stdlib/bml/local-run.bml records every ask where it is made, and the session measure counts it.
-// No model runs: the results are the exact shape fcnv-ask returns, written to a scratch ledger. Last line: rows that agree.
+// local-run-band.bml — form-stdlib/bml/local-run.bml records every ask where it is made, and the session measure counts it;
+// the session's own clock (form-cli-model-session.fk fcms-clock-read) is what the rates are read from.
+// No model runs: the results are the exact shape fcnv-ask returns, written to a scratch ledger; the session records are
+// fixtures with stamped instants. Last line: rows that agree.
 // preflight-exec: forbidden
-// preludes: form-stdlib/bml/local-run.bml form-stdlib/bml/session-progress.bml
+// preludes: form-stdlib/bml/local-run.bml form-stdlib/bml/session-progress.bml form-stdlib/form-cli-model-session.fk
 section [form.bml] {
  class LocalRunBand {
   def lrb-row(label, ok) {
@@ -43,7 +45,44 @@ section [form.bml] {
    let older = ledger-rows(lrb-path(), "LocalRun");
    let r13 = lrb-row("a row from before the rates were fields reads with the rates absent", (len(older) == 6) && (row-get(older[5], "generated_ids") == 348) && nothing?(row-get(older[5], "prefill_tok_s")) && nothing?(row-get(older[5], "wall_ms")));
    let r14 = lrb-row("the rates count toward the session's local tokens as before", sp-known-local(5, older) == 958);
-   print_str("[local-run-band] " ++ value_str(r1 + r2 + r3 + r4 + r5 + r6 + r7 + r8 + r9 + r10 + r11 + r12 + r13 + r14) ++ " of 14");
+   // the reason: an ask that did not answer carries the one its lane named; an answered ask carries none
+   let r15 = lrb-row("a refused ask carries the reason its lane named; an answered ask carries none", ((String) row-get(older[2], "reason") == "registry-model-artifact-absent") && nothing?(row-get(older[0], "reason")) && nothing?(row-get(older[1], "reason")));
+   let r16 = lrb-row("a row from before the reason was a field reads with the reason absent", nothing?(row-get(older[5], "reason")));
+   let a7 = local-run-record-at(lrb-path(), ["incomplete", "", 300, 1536, "/m/model.gguf", 0, 1, "incomplete", "cut", [], ""]);
+   let ended = ledger-rows(lrb-path(), "LocalRun");
+   let r17 = lrb-row("an incomplete ask names its ending as its reason", (len(ended) == 7) && ((String) row-get(ended[6], "status") == "incomplete") && ((String) row-get(ended[6], "reason") == "incomplete"));
+   // the session's clock: a record with stamped instants reads as the spans the reader computes; one without stamps reads nothing, never 0
+   let clock = fcms-clock-new();
+   let s1 = fcms-clock-stamp-at(clock, "admission-begin", 1000);
+   let s2 = fcms-clock-stamp-at(clock, "admission-granted", 7000);
+   let s3 = fcms-clock-stamp-at(clock, "model-session-prefill-begin", 9000);
+   let s4 = fcms-clock-stamp-at(clock, "model-session-prefill-ready", 33000);
+   let s5 = fcms-clock-stamp-at(clock, "decode-ms", 150000);
+   let s6 = fcms-clock-stamp-at(clock, "decode-ids", 300);
+   let stamped = fcms-with-clock(fcms-none("fixture"), clock);
+   let read = fcms-clock-read(stamped);
+   let r18 = lrb-row("a stamped session reads admission 6000, open 2000, prefill 24000 and decode 150000 ms over 300 ids", (record_get(read, "admission_ms") == 6000) && (record_get(read, "open_ms") == 2000) && (record_get(read, "prefill_ms") == 24000) && (record_get(read, "decode_ms") == 150000) && (record_get(read, "decode_ids") == 300));
+   let bare = fcms-clock-read(fcms-none("bare"));
+   let r19 = lrb-row("a session without stamps reads every span as nothing, never 0", nothing?(record_get(bare, "admission_ms")) && nothing?(record_get(bare, "open_ms")) && nothing?(record_get(bare, "prefill_ms")) && nothing?(record_get(bare, "decode_ms")) && (record_get(bare, "decode_ids") == 0));
+   let refusedClock = fcms-clock-new();
+   let s7 = fcms-clock-stamp-at(refusedClock, "admission-begin", 1000);
+   let s8 = fcms-clock-stamp-at(refusedClock, "admission-granted", 1500);
+   let s9 = fcms-clock-stamp-at(refusedClock, "model-session-prefill-begin", 2000);
+   let s10 = fcms-clock-stamp-at(refusedClock, "model-session-prefill-refused", 2600);
+   let refusedRead = fcms-clock-read(fcms-with-clock(fcms-none("prefill-refused"), refusedClock));
+   let r20 = lrb-row("a refused prefill leaves prefill and decode absent while the admission and open spans stay", nothing?(record_get(refusedRead, "prefill_ms")) && nothing?(record_get(refusedRead, "decode_ms")) && (record_get(refusedRead, "admission_ms") == 500) && (record_get(refusedRead, "open_ms") == 500));
+   // every decode step adds its span to the clock, and the clock rides through the stream transitions a walk makes
+   let counted = fcms-decode-counted(stamped, host_monotonic_ms(), 1);
+   let moved = fcms-with-stream(stamped, 5, 7, 0, 1, 0, 0);
+   let r21 = lrb-row("a decode step is counted on the clock, which the next stream state still carries beside the other owners", (record_get(fcms-clock-read(moved), "decode_ids") == 301) && (record_get(fcms-clock-read(moved), "decode_ms") >= 150000) && !nothing?(fcms-clock-at(fcms-clock-of(moved), "decode-begin")) && (fcms-clock-slot() == 20) && nothing?(fcsp-owner(stamped)) && nil?(fcmd-carrier(stamped)));
+   // the row: the session's spans ride with the rates; a row from before they were fields reads them absent
+   let a8 = local-run-record-clocked-at(lrb-path(), answered, 200000, record_get(read, "prefill_ms"), record_get(read, "decode_ms"), record_get(read, "admission_ms"), record_get(read, "open_ms"));
+   let clocked = ledger-rows(lrb-path(), "LocalRun");
+   let r22 = lrb-row("a clocked row carries the session's spans and the rates read from them (120 / 24 s = 5 tok/s, 300 / 150 s = 2 tok/s)", (len(clocked) == 8) && (row-get(clocked[7], "admission_ms") == 6000) && (row-get(clocked[7], "open_ms") == 2000) && lrb-near?(row-get(clocked[7], "prefill_tok_s"), 5.0) && lrb-near?(row-get(clocked[7], "decode_tok_s"), 2.0) && nothing?(row-get(clocked[5], "admission_ms")) && nothing?(row-get(clocked[0], "open_ms")));
+   let a9 = local-run-record-clocked-at(lrb-path(), answered, 1200, record_get(bare, "prefill_ms"), record_get(bare, "decode_ms"), record_get(bare, "admission_ms"), record_get(bare, "open_ms"));
+   let unread = ledger-rows(lrb-path(), "LocalRun");
+   let r23 = lrb-row("a row from a session without stamps carries no rates and no spans, never 0; the wall clock stays", (len(unread) == 9) && nothing?(row-get(unread[8], "prefill_tok_s")) && nothing?(row-get(unread[8], "decode_tok_s")) && nothing?(row-get(unread[8], "admission_ms")) && nothing?(row-get(unread[8], "open_ms")) && (row-get(unread[8], "wall_ms") == 1200));
+   print_str("[local-run-band] " ++ value_str(r1 + r2 + r3 + r4 + r5 + r6 + r7 + r8 + r9 + r10 + r11 + r12 + r13 + r14 + r15 + r16 + r17 + r18 + r19 + r20 + r21 + r22 + r23) ++ " of 23");
   }
  }
  lrb-run();

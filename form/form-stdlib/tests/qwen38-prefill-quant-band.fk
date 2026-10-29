@@ -1,10 +1,14 @@
 ; Real Metal dispatch against independent per-token lane dispatches.
 ; Q4_K/Q6_K/Q8_0 committed byte fixtures; F32 deterministic weights.
 ; Nine distinct inputs cross the eight-token tile; output pitch exceeds rows.
-; Q4_K/Q6_K decode also answers to the original serial dispatch byte-for-byte,
-; across superblocks and the 256-thread boundary, with untouched output padding.
-; Q4_K, Q6_K and F32 floats must match byte-for-byte; Q8_0 runs on the matrix unit and its floats must
-; sit within the lane's named bound of the per-token lane's; padding must retain its sentinel.
+; Q4_K and Q6_K decode run the fused pair-of-rows kernels (qwen38-decode-quant.bml), across superblocks
+; and an odd row count: row 0 sits within the door's named bound of the Form fp64 dot, every row answers
+; row 0 byte for byte (identical rows, identical input), the serial reference sits within its own bound,
+; and the output padding keeps its sentinel.
+; F32 prefill floats must match byte-for-byte; Q8_0, Q4_K and Q6_K prefill run on the matrix unit
+; (qmb-q80-mma / qmb-quant-mma: simdgroup_multiply_accumulate chooses its own association) and their floats
+; must sit within the lane's named bound of the per-token lane's (each side within one bound of the exact
+; sum, |w x| from the K-quant weights through q4m-flat-at / q6m-flat-at); padding must retain its sentinel.
 ; Expected 31. Runs small fixture buffers only; no model admission or living state.
 ; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
 (do
@@ -31,7 +35,17 @@
    (if (le (qpqb-abs (sub (qpqb-f a r) (qpqb-f e r)))
            (mul (mul 2.0 (mul (qmb-bound-coeff cols) 0.000000059604644775390625)) (add (qpqb-absum ws cols r t 0 0.0) 0.000000000001)))
     (qpqb-near ws cols rows t e a (add r 1)) 0)))
- (defn qpqb-agree (type ws cols rows t e a) (if (eq type 8) (qpqb-near ws cols rows t e a 0) (if (str_eq e a) 1 0)))
+ ; the K-quant weight at flat index r*cols + j of the fixture tensor (rows contiguous, base 0), the body's own
+ ; transcriptions; and the same near-bound check over them
+ (defn qpqb-wk (type ws cols r j) (if (eq type 12) (q4m-flat-at ws 0 (add (mul r cols) j)) (q6m-flat-at ws 0 (add (mul r cols) j))))
+ (defn qpqb-absum-k (type ws cols r t j acc)
+  (if (ge j cols) acc (qpqb-absum-k type ws cols r t (add j 1) (add acc (qpqb-abs (mul (qpqb-wk type ws cols r j) (qpqb-x (add (mul t cols) j))))))))
+ (defn qpqb-near-k (type ws cols rows t e a r)
+  (if (ge r rows) 1
+   (if (le (qpqb-abs (sub (qpqb-f a r) (qpqb-f e r)))
+           (mul (mul 2.0 (mul (qmb-bound-coeff cols) 0.000000059604644775390625)) (add (qpqb-absum-k type ws cols r t 0 0.0) 0.000000000001)))
+    (qpqb-near-k type ws cols rows t e a (add r 1)) 0)))
+ (defn qpqb-agree (type ws cols rows t e a) (if (eq type 8) (qpqb-near ws cols rows t e a 0) (if (or (eq type 12) (eq type 14)) (qpqb-near-k type ws cols rows t e a 0) (if (str_eq e a) 1 0))))
  (defn qpqb-token (ps batch ref wh input rows cols pitch tokens t sentinel type ws)
   (if (ge t tokens) 1
    (do
@@ -64,6 +78,30 @@
    (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free y))))
    (print (list "type" type "tokens" tokens "rows" rows "cols" cols "pitch" pitch "same-and-padding" same))
     (if (and (gt dispatched 0) same) bit 0)))
+ ; Q4_K decode: the fused kernel's row 0 against the Form fp64 dot (q4m-* of q4k-msl.fk over the fixture row,
+ ; S the unfused magnitude, the door's coefficient), every row byte-equal to row 0, and the serial reference
+ ; within its own bound (coefficient cols, its fold depth)
+ (defn qpqb-q4-b (idx) (mul 144 (div idx 256)))
+ (defn qpqb-q4-j (i) (add (mul 2 (div i 64)) (div (mod i 64) 32)))
+ (defn qpqb-q4-nib (ws idx)
+  (do (let i (mod idx 256)) (let c (div i 64)) (let within (mod i 64)) (let hf (div within 32)) (let l (mod within 32))
+      (let qb (q4m-qsb ws (qpqb-q4-b idx) (add (mul c 32) l)))
+      (if (eq hf 0) (q4k-mod qb 16) (div qb 16))))
+ (defn qpqb-q4-sp (ws idx) (mul (mul (q4m-d ws (qpqb-q4-b idx)) (q4m-scale ws (qpqb-q4-b idx) (qpqb-q4-j (mod idx 256)))) (qpqb-q4-nib ws idx)))
+ (defn qpqb-q4-mp (ws idx) (mul (q4m-dmin ws (qpqb-q4-b idx)) (q4m-min ws (qpqb-q4-b idx) (qpqb-q4-j (mod idx 256)))))
+ ; the parts by type: Q6_K has no min term (q6m-flat-at, stride 210)
+ (defn qpqb-qk-sp (type ws idx) (if (eq type 12) (qpqb-q4-sp ws idx) (q6m-flat-at ws 0 idx)))
+ (defn qpqb-qk-mp (type ws idx) (if (eq type 12) (qpqb-q4-mp ws idx) 0.0))
+ (defn qpqb-qk-dot (type ws cols j acc) (if (ge j cols) acc (qpqb-qk-dot type ws cols (add j 1) (add acc (mul (sub (qpqb-qk-sp type ws j) (qpqb-qk-mp type ws j)) (qpqb-x j))))))
+ (defn qpqb-qk-mag (type ws cols j acc) (if (ge j cols) acc (qpqb-qk-mag type ws cols (add j 1) (add acc (add (qpqb-abs (mul (qpqb-qk-sp type ws j) (qpqb-x j))) (qpqb-abs (mul (qpqb-qk-mp type ws j) (qpqb-x j))))))))
+ (defn qpqb-qk-near? (got exact S coeff) (le (qpqb-abs (sub got exact)) (add (mul (mul coeff 0.000000059604644775390625) S) 0.000000000001)))
+ (defn qpqb-qk-agree (type ws cols rows expected actual)
+  (do (let exact (qpqb-qk-dot type ws cols 0 0.0)) (let S (qpqb-qk-mag type ws cols 0 0.0))
+      (let got (qpqb-f actual 0)) (let ref (qpqb-f expected 0))
+      (print (list "k-quant decode type" type "row 0: exact" exact "fused" got "serial" ref "fused dev/bound" (div (qpqb-abs (sub got exact)) (add (mul (mul (q38dq-bound-coeff cols) 0.000000059604644775390625) S) 0.000000000001))))
+      (and (qpqb-qk-near? got exact S (q38dq-bound-coeff cols))
+           (and (qpqb-qk-near? ref exact S cols)
+                (str_eq (substring actual 0 (mul 4 rows)) (qpqb-repeat (substring actual 0 4) rows ""))))))
  (defn qpqb-decode (ps type fixture stride rows cols refindex)
   (do
    (let row (qpqb-repeat (read_file_slice fixture 0 (mul stride 2)) (div cols 512) ""))
@@ -81,7 +119,7 @@
    (let dispatched (q38-mv ps (list wh rows cols type) x z 1))
    (let expected (metal_buf_read y 0 (mul (add rows 1) 4)))
    (let actual (metal_buf_read z 0 (mul (add rows 1) 4)))
-   (let same (and (str_eq expected actual) (str_eq (substring actual (mul rows 4) (str_len actual)) sentinel)))
+   (let same (and (if (or (eq type 12) (eq type 14)) (qpqb-qk-agree type weights cols rows expected actual) (str_eq expected actual)) (str_eq (substring actual (mul rows 4) (str_len actual)) sentinel)))
    (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free y) (metal_buf_free z))))
    (print (list "decode-type" type "rows" rows "cols" cols "same-and-padding" same "freed" freed))
    (and (and (gt reference 0) (gt dispatched 0)) (and same (eq freed 4)))))

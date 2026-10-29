@@ -274,6 +274,7 @@ static long long fk_cell_deadline_ms;   /* 0: none; else monotonic milliseconds 
 static unsigned long long fk_cell_tick;
 static void fk_cell_deadline_hit(void);
 #define FK_CELL_TICK() do { if (fk_cell_deadline_ms != 0 && ((++fk_cell_tick) & 16383ULL) == 0) { fk_cell_deadline_hit(); } } while (0)
+static void fk_cell_tick_run(void); /* the same tick from a native loop: 16384 of its passes at once, at its back-edge (fk_f64_loop_move) */
 /* the name windows: while parsing a cell, a name resolves only to what the cell's closure defines */
 static int fk_win_on;
 static unsigned char *fk_win_bits;
@@ -303,6 +304,7 @@ static void fk_cell_dep_union(long long owner, long long child);
 /* the cell door is POSIX only for now: the hooks below stand down */
 static const char *fk_cell_root_path;
 #define FK_CELL_TICK() do { } while (0)
+static void fk_cell_tick_run(void) { }
 static int fk_win_on;
 static int fk_cell_collect;
 static int fk_cell_diag_on;
@@ -13870,7 +13872,37 @@ static int fk_f64_loop_move(unsigned int *words, long long *wn, const int *argn,
         }
         k = k + 1;
     }
-    return fk_f64_put(words, wn, 0x91000508U); /* ADD X8, X8, #1 */
+    if (!fk_f64_put(words, wn, 0x91000508U)) { return 0; } /* ADD X8, X8, #1 */
+    /* the deadline's tick, at the loop's back-edge: every 16384th pass (x8 & 16383 == 0) the leaf spills what it holds -- the
+     * frame pointer, the count, the return, the parameter registers x10..x17 and d0..d7 (the temporaries died in the move) --
+     * into a call frame of its own, calls fk_cell_tick_run (the passes counted as walker steps, the clock read), and takes them
+     * back. Past the deadline the call never returns: the cell's recover point is reached over this frame. The interpreted loop
+     * ticks at every step (FK_CELL_TICK in fk_walk_body); a loop that runs here has no walker step in it, so this is the one
+     * place its deadline is read -- observe/cell-deadline-observe.bml. */
+    if (!fk_f64_put(words, wn, 0xF240351FU)) { return 0; }                                                  /* TST X8, #0x3FFF */
+    long long tick_skip = *wn;
+    if (!fk_f64_put(words, wn, 0x54000001U)) { return 0; }                                                  /* B.NE past the tick -- patched */
+    unsigned int tfr = (unsigned int)FK_F64_CALL_FRAME << 10;
+    if (!fk_f64_put(words, wn, 0xD10003FFU | tfr)) { return 0; }                                            /* SUB SP, SP, #frame */
+    if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_X0 << 10) | (31U << 5) | 0U)) { return 0; }       /* STR X0 */
+    if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_X8 << 10) | (31U << 5) | 8U)) { return 0; }       /* STR X8 */
+    if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_X30 << 10) | (31U << 5) | 30U)) { return 0; }     /* STR X30 */
+    unsigned int tj = 0;
+    while (tj < 8) { if (!fk_f64_put(words, wn, 0xF9000000U | ((FK_F64_CF_X10 + tj) << 10) | (31U << 5) | (10U + tj))) { return 0; } tj = tj + 1; } /* STR X10..X17 */
+    tj = 0;
+    while (tj < 8) { if (!fk_f64_put(words, wn, 0xFD000000U | ((FK_F64_CF_D0 + tj) << 10) | (31U << 5) | tj)) { return 0; } tj = tj + 1; }         /* STR D0..D7 */
+    if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_cell_tick_run)) { return 0; }
+    if (!fk_f64_put(words, wn, 0xD63F0200U)) { return 0; }                                                  /* BLR X16: returns under the deadline, never past it */
+    if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X0 << 10) | (31U << 5) | 0U)) { return 0; }       /* LDR X0 */
+    if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X8 << 10) | (31U << 5) | 8U)) { return 0; }       /* LDR X8 */
+    if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X30 << 10) | (31U << 5) | 30U)) { return 0; }     /* LDR X30 */
+    tj = 0;
+    while (tj < 8) { if (!fk_f64_put(words, wn, 0xF9400000U | ((FK_F64_CF_X10 + tj) << 10) | (31U << 5) | (10U + tj))) { return 0; } tj = tj + 1; } /* LDR X10..X17 */
+    tj = 0;
+    while (tj < 8) { if (!fk_f64_put(words, wn, 0xFD400000U | ((FK_F64_CF_D0 + tj) << 10) | (31U << 5) | tj)) { return 0; } tj = tj + 1; }         /* LDR D0..D7 */
+    if (!fk_f64_put(words, wn, 0x910003FFU | tfr)) { return 0; }                                            /* ADD SP, SP, #frame */
+    words[tick_skip] = words[tick_skip] | ((unsigned int)(((*wn) - tick_skip) & 0x7FFFFLL) << 5);          /* B.NE -> here */
+    return 1;
 }
 /* one pass of the loop body: each step's compare and its branch -- an exit step to its exit block, a self step to its
  * continuation block (offsets patched by the caller, patch_kind 0 exit / 1 continuation) -- then the terminal self tail
@@ -28814,6 +28846,14 @@ static void fk_cell_deadline_hit(void) {
         }
         FK_LONGJMP(*fk_cell_jb);
     }
+}
+/* a native loop's tick: the leaf fk_f64_loop_move wrote calls here every 16384th pass, its registers spilled in a frame of its
+ * own (the walker's own steps never run inside it). The passes count as walker steps and the clock is read as FK_CELL_TICK
+ * reads it; past the deadline this never returns -- the cell's recover point is reached over the leaf's frame and the door's. */
+static void fk_cell_tick_run(void) {
+    if (fk_cell_deadline_ms == 0) { return; }
+    fk_cell_tick = fk_cell_tick + 16384ULL;
+    fk_cell_deadline_hit();
 }
 /* ── records built from C ── */
 static long long fk_cr_new(void) {

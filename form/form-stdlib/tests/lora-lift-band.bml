@@ -1,0 +1,109 @@
+; lora-lift-band.bml — the lift's row selection, stdin refusal and ledger row shape (observe/lora-lift-run.bml), no model.
+;
+; The door's functions are read in place (the door runs only as the entry); fixture rows live under a scratch directory the
+; band makes and removes. No governor is asked, no tokenizer or model opens, no ledger row lands.
+;
+; Expected: 63
+; Verdict 63 when every claim lands:
+;   1   split: train is the first train_rows rows from the front, held-out the last valid_rows from the end, each under
+;       max_chars (a long last row is skipped), both in file order, disjoint by draft id, and the split stands
+;   2   overlap: a file too short for the ask puts one draft on both sides, and the split is refused naming that draft
+;   4   stdin: an unknown key (`heldout`, the key the old door read) is refused by name with the door's key list; a
+;       learning_rate that is a number instead of a string is refused by kind; a string that is no positive decimal is refused
+;   8   reading: a selected row that reads "rejected" is refused naming the draft, a row with no draft id is refused, an
+;       absent rows file is refused
+;   16  row: the ledger row carries valid_reading "accepted", judged_on, a 64-hex sha256 of each side's draft ids, better 1
+;       only when the accepted held-out loss fell; a rejected-set loss that fell while the accepted rose leaves better 0,
+;       and no rejected_* key stands when no negatives were named
+;   32  door: run as a child on an unknown key and on a short rows file, the door exits 1 with the refusal and prints no
+;       governor line (refused before anything opens)
+;
+; REQUIRES: the built ./fkwu and the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml observe/lora-lift-run.bml
+section [form.bml] {
+ class LoraLiftBand {
+  def llb-fresh() {
+   let root = temp_dir() ++ "/lora-lift-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["lora-lift", root, 0] : nothing();
+  }
+  def llb-root(ctx) = ctx[1];
+  def llb-has(s, part) = str_find(s, part, 0) >= 0;
+  def llb-pad(n) = n <= 0 ? "" : "x" ++ llb-pad(n - 1);
+  def llb-row(id, reading, body) = "{\"draft\":\"" ++ id ++ "\",\"reading\":\"" ++ reading ++ "\",\"messages\":[{\"role\":\"user\",\"content\":\"q " ++ body ++ "\"},{\"role\":\"assistant\",\"content\":\"a\"}]}";
+  def llb-accepted(id) = llb-row(id, "accepted", id);
+  // seven rows: a..f short and accepted, g long and accepted (over 400 chars)
+  def llb-lines() = [llb-accepted("a"), llb-accepted("b"), llb-accepted("c"), llb-accepted("d"), llb-accepted("e"), llb-accepted("f"), llb-row("g", "accepted", llb-pad(400))];
+  def llb-rows-path(ctx) = llb-root(ctx) ++ "/rows.jsonl";
+  def llb-write(ctx) = write_file(llb-rows-path(ctx), ll-join(llb-lines()) ++ "\n");
+  def llb-same?(a, b) = (Comparable) len(a) == len(b) && nil?(filter(p => !((String) p[0] == p[1]), llb-zip(a, b)));
+  def llb-zip(a, b) = nil?(a) || nil?(b) ? [] : cons([a[0], b[0]], llb-zip(a[1:], b[1:]));
+  def llb-c-split(ctx) {
+   let w = llb-write(ctx);
+   let lines = ll-lines(llb-rows-path(ctx));
+   let s = ll-split(lines, 4, 2, 300);
+   let wide = ll-split(lines, 4, 2, 6000);
+   (Comparable) len(lines) == 7 && llb-same?(ll-ids(s[0]), ["a", "b", "c", "d"]) && llb-same?(ll-ids(s[1]), ["e", "f"]) && llb-same?(ll-ids(wide[1]), ["f", "g"])
+   && (String) ll-split-why(llb-rows-path(ctx), lines, s[0], s[1], 300) == "" && nil?(ll-shared(ll-ids(s[0]), ll-ids(s[1])));
+  }
+  def llb-c-overlap(ctx) {
+   let lines = ll-lines(llb-rows-path(ctx));
+   let s = ll-split(lines, 5, 3, 6000);
+   let why = ll-split-why(llb-rows-path(ctx), lines, s[0], s[1], 6000);
+   llb-same?(ll-shared(ll-ids(s[0]), ll-ids(s[1])), ["e"]) && llb-has(why, "share draft e") && llb-has(why, "holds 7 rows");
+  }
+  def llb-c-stdin(ctx) {
+   let unknown = dop-refusal(ll-door(), "{\"heldout\":\"x\"}", ll-spec());
+   let kind = dop-refusal(ll-door(), "{\"learning_rate\":0.0001}", ll-spec());
+   llb-has(unknown, "unknown key \"heldout\"") && llb-has(unknown, "the keys are: train_rows, valid_rows, max_chars, steps, batch, learning_rate, rows, negatives")
+   && llb-has(kind, "key \"learning_rate\" must be a string") && (String) dop-refusal(ll-door(), "{\"train_rows\":20,\"valid_rows\":5,\"learning_rate\":\"0.0001\"}", ll-spec()) == ""
+   && (String) ll-rate-why("0.0001") == "" && llb-has(ll-rate-why("abc"), "not a positive decimal") && len(ll-rate-why("-1")) > 0;
+  }
+  def llb-c-reading(ctx) {
+   let mixed = llb-root(ctx) ++ "/mixed.jsonl";
+   let w1 = write_file(mixed, ll-join([llb-accepted("a"), llb-accepted("b"), llb-row("r", "rejected", "r")]) ++ "\n");
+   let lines = ll-lines(mixed);
+   let s = ll-split(lines, 2, 1, 6000);
+   let why = ll-split-why(mixed, lines, s[0], s[1], 6000);
+   let noid = llb-root(ctx) ++ "/noid.jsonl";
+   let w2 = write_file(noid, ll-join([llb-accepted("a"), "{\"reading\":\"accepted\",\"messages\":[{\"role\":\"user\",\"content\":\"q\"},{\"role\":\"assistant\",\"content\":\"a\"}]}"]) ++ "\n");
+   let nl = ll-lines(noid);
+   let ns = ll-split(nl, 1, 1, 6000);
+   let absent = llb-root(ctx) ++ "/absent.jsonl";
+   llb-has(why, "draft r of") && llb-has(why, "reads \"rejected\"") && llb-has(ll-split-why(noid, nl, ns[0], ns[1], 6000), "has no draft id")
+   && llb-has(ll-split-why(absent, [], [], [], 6000), "is absent");
+  }
+  def llb-c-row(ctx) {
+   let train = [llb-accepted("a"), llb-accepted("b")];
+   let valid = [llb-accepted("c")];
+   let neg = ll-negative-pairs("neg.jsonl", [llb-row("r", "rejected", "r")], 40, 2.5708, 2.2747);
+   let good = ll-row("child", "data", "rows.jsonl", train, valid, 100, 50, 10, 2, 2.5, 2.2, neg, 1, 5);
+   let worse = ll-row("child", "data", "rows.jsonl", train, valid, 100, 50, 10, 2, 2.2, 2.5, neg, 1, 5);
+   let alone = ll-row("child", "data", "rows.jsonl", train, valid, 100, 50, 10, 2, 2.5, 2.2, ll-negative-pairs("", [], 0, -1.0, -1.0), 1, 5);
+   (String) fhn-text(good, "valid_reading") == "accepted" && llb-has(fhn-text(good, "judged_on"), "accepted held-out")
+   && (Comparable) len(fhn-text(good, "train_ids_sha256")) == 64 && (String) fhn-text(good, "train_ids_sha256") == ll-digest(train) && !((String) fhn-text(good, "train_ids_sha256") == fhn-text(good, "valid_ids_sha256"))
+   && (Comparable) json-int-value(json-object-get(good, "better")) == 1 && (Comparable) json-int-value(json-object-get(good, "parent_loss_milli")) == 2500 && (Comparable) json-int-value(json-object-get(good, "child_loss_milli")) == 2200
+   && (Comparable) json-int-value(json-object-get(good, "rejected_parent_loss_milli")) == 2570 && (Comparable) json-int-value(json-object-get(good, "rejected_child_loss_milli")) == 2274 && (String) fhn-text(good, "rejected_reading") == "rejected"
+   && (Comparable) json-int-value(json-object-get(worse, "better")) == 0 && (Comparable) json-int-value(json-object-get(worse, "rejected_child_loss_milli")) == 2274
+   && !json-object-has?(alone, "rejected_source") && (Comparable) json-int-value(json-object-get(alone, "rent_tokens")) == 0;
+  }
+  // the door as a child: refused by name before the governor speaks
+  def llb-run(ctx, name, request) {
+   let base = llb-root(ctx) ++ "/" ++ name;
+   let w = write_file(base ++ ".in", request);
+   let pid = host_spawn_at(["./fkwu", "observe/lora-lift-run.bml"], [base ++ ".in", base ++ ".out", base ++ ".err"]);
+   let status = pid <= 0 ? -1 : host_wait(pid);
+   [status, read_file(base ++ ".out") ?? "", read_file(base ++ ".err") ?? ""];
+  }
+  def llb-c-door(ctx) {
+   let typo = llb-run(ctx, "typo", "{\"heldout\":\"x\"}");
+   let short = llb-run(ctx, "short", "{\"rows\":\"" ++ llb-rows-path(ctx) ++ "\",\"train_rows\":5,\"valid_rows\":3}");
+   (Comparable) typo[0] == 1 && llb-has(typo[1], "lora-lift: unknown key \"heldout\"") && !llb-has(typo[1], "[memory]")
+   && (Comparable) short[0] == 1 && llb-has(short[1], "lora-lift: train and held-out share draft e") && !llb-has(short[1], "[memory]");
+  }
+ }
+ let ctx = llb-fresh();
+ nothing?(ctx) ? form_error("lora-lift band needs a fresh directory") : 0;
+ let verdict = live-claims("lora-lift-band", ctx, [["split", 1, 1, llb-c-split], ["overlap", 2, 1, llb-c-overlap], ["stdin", 4, 1, llb-c-stdin], ["reading", 8, 1, llb-c-reading], ["row", 16, 1, llb-c-row], ["door", 32, 1, llb-c-door]]);
+ host_dir_rmdir(llb-root(ctx));
+ verdict;
+}
