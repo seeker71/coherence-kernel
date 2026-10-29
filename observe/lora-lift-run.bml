@@ -1,28 +1,114 @@
-// lora-lift-run.bml — the body teaches itself from the lessons its rented turns left, offline, and keeps the
-// result only if it is better.
+// lora-lift-run.bml — the body teaches itself from our readings of its own drafts, offline, and is judged on accepted
+// rows it never saw.
 //
-// Builds a bounded dataset from .hearth/session-learning/rented-turns (observe/session-pairs-run.bml): the
-// first train_rows training pairs and the first valid_rows held-out pairs whose text is under max_chars. Trains
-// the native 3B's LoRA lane (form-stdlib/native-lora-train.bml, in this process, no crossing) from the parent
-// adapter for `steps` rounds into a fresh output directory. The trainer scores the held-out rows before it
-// trains (the parent) and after (the child), on the same rows; this door reads those two validation events
-// and lands one row in receipts/lora-promotion-ledger.jsonl: parent, child, both losses (x1000), the scores
-// (lower loss is higher score), rows, steps, rent 0. A child that does not beat its parent is recorded too.
-// Serving is not changed here: the lane's adapter moves only by a separate, witnessed decision.
-// stdin, optional: {"train_rows":8,"valid_rows":12,"max_chars":6000,"steps":8,"batch":1,"learning_rate":0.0001}
+//   echo '{"train_rows":20,"valid_rows":5,"steps":10,"batch":2,"negatives":"learn/draft-readings-heldout.jsonl"}' | ./fkwu observe/lora-lift-run.bml
+//
+// One rows file, two ends. `rows` names accepted rows in the native trainer's shape (form-stdlib/native-lora-dataset.bml:
+// messages | prompt/completion | text | segments), each carrying a draft id and reading "accepted"
+// (observe/draft-readings-to-rows.bml lands them in learn/draft-readings.jsonl). The first train_rows rows under max_chars
+// train; the last valid_rows rows under max_chars are held out; the trainer never sees a held-out row, and the two sides
+// are disjoint by draft id. A draft that would stand on both sides (the file is too short for the ask), a selected row
+// with no draft id, and a selected row that reads anything but "accepted" are each refused by name before anything
+// opens: the lift trains on, and is judged by, what we accepted — never what we turned away. `negatives` may name the
+// rejected drafts (learn/draft-readings-heldout.jsonl): they go to the trainer as its assessment set and are scored
+// under the parent and under the child for information (rejected_parent_loss_milli, rejected_child_loss_milli); a lower
+// loss there is closeness to what we rejected and never enters `better`.
+// stdin, optional, one JSON object read strictly (form-stdlib/bml/door-options.bml): malformed JSON, an unknown key, a
+// key of the wrong kind or a key given twice is refused by name with this door's key list, before anything opens. The
+// keys: train_rows (int, 8), valid_rows (int, 12), max_chars (int, 6000), steps (int, 8), batch (int, 1), learning_rate
+// (str, "0.0001": a positive decimal the body's parse-float reads), rows (str, learn/draft-readings.jsonl), negatives
+// (str, "" is none).
+// Before anything opens on the GPU, the door asks the memory governor (read-only, lease-aware) for the model's weights
+// plus a training margin, and stops with the governor's own line when it reads held; then it opens the 3B's tokenizer
+// and passes every selected row — train, held-out, negatives — through the native dataset reader (nld-prepare,
+// prompt-masked): a row the trainer could not read stops the door here with the reader's own error and its line, and
+// the token counts land in the ledger row. Trains the native 3B's LoRA lane (form-stdlib/native-lora-train.bml, in this
+// process, no crossing) from the parent adapter for `steps` rounds of `batch` rows into a fresh output directory. The
+// trainer scores the held-out rows before it trains (the parent) and after (the child), on the same rows; this door
+// reads those two validation events and lands one row in receipts/lora-promotion-ledger.jsonl: parent, child, both
+// losses (x1000), the scores (lower loss is higher score), the rows and a sha256 of each side's draft ids (so the split
+// a row was judged on can be named again), tokens, steps, the source, valid_reading (the held-out rows' own reading,
+// "accepted" by the refusal above), judged_on, the negatives' losses when they were named, rent 0. `better` reads the
+// accepted held-out alone. A child that does not beat its parent is recorded too. Serving is not changed here: the
+// lane's adapter moves only by a separate, witnessed decision.
 // preflight-exec: forbidden
-// preludes: form-stdlib/bml/form-rows.bml form-stdlib/bml/form-value-nodes.bml form-stdlib/native-lora-train.bml form-stdlib/model-registry.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
+// preludes: form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/parse.bml form-stdlib/bml/cell-said.bml form-stdlib/bml/form-rows.bml form-stdlib/bml/form-value-nodes.bml form-stdlib/native-lora-train.bml form-stdlib/model-registry.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
 section [form.bml] {
  class LoraLift {
-  def ll-src() = ".hearth/session-learning/rented-turns";
+  def ll-door() = "lora-lift";
+  def ll-spec() = [["train_rows", "int"], ["valid_rows", "int"], ["max_chars", "int"], ["steps", "int"], ["batch", "int"], ["learning_rate", "str"], ["rows", "str"], ["negatives", "str"]];
+  def ll-rows-default() = "learn/draft-readings.jsonl";
   def ll-root() = ".hearth/session-learning/lift";
   def ll-parent() = "form/form-stdlib/adapters/llama-3.2-3b-voice";
+  def ll-model() = "llama32-3b-mlx-4bit";
+  def ll-accepted() = "accepted";
+  def ll-refuse(why) = dop-refuse(ll-door(), why);
   def ll-num(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
-  def ll-real(doc, key, d) = json-object-has?(doc, key) ? node_value(json-object-get(doc, key)) : d;
+  def ll-str(doc, key, d) = json-object-has?(doc, key) && (len(fhn-text(doc, key)) > 0) ? fhn-text(doc, key) : d;
+  // the learning rate arrives as a decimal in a string (the strict reader knows integers and strings); parse-float reads it
+  def ll-rate-why(text) = nothing?(parse-float(text)) || ((parse-float(text) ?? 0.0) <= 0.0) ? "learning_rate \"" ++ text ++ "\" is not a positive decimal" : "";
+  def ll-rate(text) = len(ll-rate-why(text)) > 0 ? ll-refuse(ll-rate-why(text)) : (parse-float(text) ?? 0.0);
   def ll-nonempty(xs) = xs |> filter(x => (Comparable) len(trim(x)) != 0);
   def ll-take(xs, n, maxc, acc) = nil?(xs) || (n <= 0) ? reverse(acc) : len(xs[0]) > maxc ? ll-take(xs[1:], n, maxc, acc) : ll-take(xs[1:], n - 1, maxc, cons(xs[0], acc));
-  def ll-join(xs) = nil?(xs) ? "" : xs[0] ++ "\n" ++ ll-join(xs[1:]);
+  def ll-join-with(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ ll-join-with(xs[1:], sep);
+  def ll-join(xs) = ll-join-with(xs, "\n");
   def ll-lines(path) = ll-nonempty(split-on(fhn-read(path), "\n"));
+  // ---- the split: train from the front, held-out from the end, each under max_chars; [train, valid], both in file order
+  def ll-split(lines, trainN, validN, maxc) = [ll-take(lines, trainN, maxc, []), reverse(ll-take(reverse(lines), validN, maxc, []))];
+  def ll-doc(x) = parse-json("lift-row", x);
+  def ll-id(x) = fhn-text(ll-doc(x), "draft");
+  def ll-ids(xs) = map(x => ll-id(x), xs);
+  def ll-reading-of(x) = fhn-text(ll-doc(x), "reading");
+  def ll-has?(ids, id) = len(filter(y => (String) y == id, ids)) > 0;
+  def ll-shared(a, b) = filter(id => ll-has?(b, id), a);
+  def ll-digest(xs) = nlp-hex(sha256-stream-string(ll-join(ll-ids(xs))));
+  // why a split does not stand ("" when it does): an empty side, a row with no draft id, a draft on both sides, a reading we did not accept
+  def ll-split-why(path, lines, train, valid, maxc) {
+   let shared = ll-shared(ll-ids(train), ll-ids(valid));
+   file_size(path) < 0 ? "rows " ++ path ++ " is absent"
+   : nil?(train) ? "no train rows under max_chars " ++ maxc.str() ++ " in " ++ path
+   : nil?(valid) ? "no held-out rows under max_chars " ++ maxc.str() ++ " in " ++ path
+   : len(filter(id => len(id) == 0, ll-ids(append(train, valid)))) > 0 ? "a selected row of " ++ path ++ " has no draft id; the split is disjoint by draft id"
+   : len(shared) > 0 ? "train and held-out share draft " ++ shared[0] ++ ": " ++ path ++ " holds " ++ len(lines).str() ++ " rows, and train_rows " ++ len(train).str() ++ " from the front meets valid_rows " ++ len(valid).str() ++ " from the end"
+   : ll-reading-why(path, append(train, valid));
+  }
+  def ll-reading-why(path, xs) {
+   let other = filter(x => !((String) ll-reading-of(x) == ll-accepted()), xs);
+   nil?(other) ? "" : "draft " ++ ll-id(other[0]) ++ " of " ++ path ++ " reads \"" ++ ll-reading-of(other[0]) ++ "\"; the lift trains on and is judged by accepted rows only";
+  }
+  // ---- the memory governor, read before the GPU opens: the weights plus a training margin for LoRA state and activations
+  def ll-margin() = 4 * 1024 * 1024 * 1024;
+  def ll-need(model) = file_size(model ++ "/model.safetensors") + ll-margin();
+  def ll-room(model) {
+   let need = ll-need(model);
+   let v = mg-lease-ask-read(mg-lease-dir(), need);
+   let line = mg-line("lora-lift", need, v) ++ mg-lease-note(v);
+   let said = print_str(line ++ "\n");
+   mg-granted?(v) ? need : form_error("lift held by the memory governor: " ++ line);
+  }
+  // ---- every selected row passes the native dataset reader with the model's own tokenizer, prompt-masked as the trainer reads it
+  def ll-numbered(xs, i) = nil?(xs) ? [] : cons([xs[0], i], ll-numbered(xs[1:], i + 1));
+  def ll-tokens(t, name, xs) {
+   let prepared = nld-prepare(t, ll-numbered(xs, 1), 1);
+   let said = print_str("[lift] " ++ name ++ " rows " ++ len(prepared).str() ++ " read by the native dataset reader: input_tokens " ++ nld-tokens(prepared).str() ++ " supervised_tokens " ++ float_to_int(nld-weight(prepared)).str() ++ "\n");
+   nld-tokens(prepared);
+  }
+  // ---- the negatives: the trainer's assessment set (a JSON array), scored before and after, read back token-weighted
+  def ll-negatives-file(data, negs) {
+   let file = data ++ "/negatives.json";
+   let w = write_file_text(file, "[" ++ ll-join-with(negs, ",") ++ "]");
+   file;
+  }
+  def ll-request(model, data, out, steps, batch, lr, negFile) {
+   let request = ntr-request(model, ll-parent(), data, out, steps, batch, lr, 1, 8);
+   len(negFile) == 0 ? request : json-node-object(append(json-object-pairs(request), [fhn-s("assessment", negFile)]));
+  }
+  def ll-real-of(row, key) = node_value(json-object-get(row, key));
+  def ll-weighted(rows, loss, toks) = nil?(rows) ? (toks > 0.0 ? loss / toks : -1.0) : ll-weighted(rows[1:], loss + (ll-real-of(rows[0], "loss") * ll-real-of(rows[0], "supervised_tokens")), toks + ll-real-of(rows[0], "supervised_tokens"));
+  def ll-assessed(out, phase) {
+   let path = out ++ "/assessment-" ++ phase ++ ".json";
+   file_size(path) < 1 ? -1.0 : ll-weighted(json-array-elements(parse-json("lift-assessment", fhn-read(path))), 0.0, 0.0);
+  }
   // the trainer's events are a node ledger (training-events.fkb)
   def ll-stage(ev) = frw-str(ev, "stage", "");
   def ll-validations(rows) = rows |> filter(row => (String) ll-stage(row) == "validation");
@@ -30,35 +116,56 @@ section [form.bml] {
   def ll-events-of(r) = (String) r[0] == "ok" ? r[1] : [];
   def ll-loss(ev) = frw-num(ev, "loss", -1.0);
   def ll-milli(x) = float_to_int(x * 1000.0);
+  // ---- the ledger row: `better` reads the accepted held-out alone; the negatives' losses stand beside it as information
+  def ll-better(before, after) = (before > 0.0) && ((after > 0.0) && (after < before)) ? 1 : 0;
+  def ll-negative-pairs(negPath, negs, negTokens, rejBefore, rejAfter) = len(negPath) == 0 ? [] : [fhn-s("rejected_source", negPath), fhn-s("rejected_reading", nil?(negs) ? "" : ll-reading-of(negs[0])), fhn-n("rejected_rows", len(negs)), fhn-n("rejected_tokens", negTokens), fhn-n("rejected_parent_loss_milli", ll-milli(rejBefore)), fhn-n("rejected_child_loss_milli", ll-milli(rejAfter))];
+  def ll-row(child, data, rowsPath, train, valid, trainTokens, validTokens, steps, batch, before, after, negPairs, need, wall) = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("parent", ll-parent()), fhn-s("child", child), fhn-s("data", data), fhn-s("train_source", rowsPath), fhn-s("valid_source", rowsPath), fhn-s("valid_reading", nil?(valid) ? "" : ll-reading-of(valid[0])), fhn-s("judged_on", "accepted held-out, disjoint from train by draft id"), fhn-n("train_rows", len(train)), fhn-n("valid_rows", len(valid)), fhn-s("train_ids_sha256", ll-digest(train)), fhn-s("valid_ids_sha256", ll-digest(valid)), fhn-n("train_tokens", trainTokens), fhn-n("valid_tokens", validTokens), fhn-n("steps", steps), fhn-n("batch", batch), fhn-n("parent_loss_milli", ll-milli(before)), fhn-n("child_loss_milli", ll-milli(after)), fhn-n("parent_score_milli", 0 - ll-milli(before)), fhn-n("child_score_milli", 0 - ll-milli(after)), fhn-n("better", ll-better(before, after))], append(negPairs, [fhn-n("memory_need_bytes", need), fhn-n("rent_tokens", 0), fhn-n("wall_ms", wall)])));
   def ll-run() {
-   let line = read_line();
-   let opts = nothing?(line) || ((Comparable) len(trim(line ?? "")) == 0) ? json-node-object([]) : parse-json("lift-options", line);
+   let opts = dop-doc(ll-door(), stdin-text(), ll-spec());
    let trainN = ll-num(opts, "train_rows", 8);
    let validN = ll-num(opts, "valid_rows", 12);
    let maxc = ll-num(opts, "max_chars", 6000);
    let steps = ll-num(opts, "steps", 8);
    let batch = ll-num(opts, "batch", 1);
-   let lr = ll-real(opts, "learning_rate", 0.0001);
+   let lr = ll-rate(ll-str(opts, "learning_rate", "0.0001"));
+   let rowsPath = ll-str(opts, "rows", ll-rows-default());
+   let negPath = ll-str(opts, "negatives", "");
+   let lines = ll-lines(rowsPath);
+   let split = ll-split(lines, trainN, validN, maxc);
+   let train = split[0];
+   let valid = split[1];
+   let why = ll-split-why(rowsPath, lines, train, valid, maxc);
+   let stands = len(why) > 0 ? ll-refuse(why) : 0;
+   let negs = len(negPath) == 0 ? [] : ll-lines(negPath);
+   let negStand = (len(negPath) > 0) && nil?(negs) ? ll-refuse("negatives " ++ negPath ++ " has no rows") : 0;
+   let said = print_str("[lift] rows " ++ rowsPath ++ " holds " ++ len(lines).str() ++ "; train " ++ len(train).str() ++ " from the front, held-out " ++ len(valid).str() ++ " from the end, disjoint by draft id; negatives " ++ len(negs).str() ++ "\n");
+   let model = mr-path(mr-find(ll-model()));
+   let need = ll-room(model);
    let m1 = fs_mkdir(".hearth/session-learning");
    let m2 = fs_mkdir(ll-root());
    let data = ll-root() ++ "/data-" ++ now_unix_ms().str();
    let m3 = fs_mkdir(data);
-   let train = ll-take(ll-lines(ll-src() ++ "/train.jsonl"), trainN, maxc, []);
-   let valid = ll-take(ll-lines(ll-src() ++ "/valid.jsonl"), validN, maxc, []);
+   let t = nlt-open(model);
+   let trainTokens = ll-tokens(t, "train", train);
+   let validTokens = ll-tokens(t, "held-out", valid);
+   let negTokens = nil?(negs) ? 0 : ll-tokens(t, "negatives", negs);
    let wt = write_file_text(data ++ "/train.jsonl", ll-join(train));
    let wv = write_file_text(data ++ "/valid.jsonl", ll-join(valid));
+   let negFile = nil?(negs) ? "" : ll-negatives-file(data, negs);
    let out = ll-root() ++ "/out-" ++ now_unix_ms().str();
-   let request = ntr-request(mr-path(mr-find("llama32-3b-mlx-4bit")), ll-parent(), data, out, steps, batch, lr, 1, 8);
+   let request = ll-request(model, data, out, steps, batch, lr, negFile);
    let started = now_unix_ms();
    let result = ntr-run(request);
    let events = ll-validations(ll-events(out));
    let before = nil?(events) ? -1.0 : ll-loss(events[0]);
    let after = len(events) < 2 ? -1.0 : ll-loss(reverse(events)[0]);
+   let rejBefore = nil?(negs) ? -1.0 : ll-assessed(out, "before");
+   let rejAfter = nil?(negs) ? -1.0 : ll-assessed(out, "after");
    let child = nag-resolve(out);
-   let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("parent", ll-parent()), fhn-s("child", child), fhn-s("data", data), fhn-n("train_rows", len(train)), fhn-n("valid_rows", len(valid)), fhn-n("steps", steps), fhn-n("parent_loss_milli", ll-milli(before)), fhn-n("child_loss_milli", ll-milli(after)), fhn-n("parent_score_milli", 0 - ll-milli(before)), fhn-n("child_score_milli", 0 - ll-milli(after)), fhn-n("better", (before > 0.0) && ((after > 0.0) && (after < before)) ? 1 : 0), fhn-n("rent_tokens", 0), fhn-n("wall_ms", now_unix_ms() - started)]);
+   let row = ll-row(child, data, rowsPath, train, valid, trainTokens, validTokens, steps, batch, before, after, ll-negative-pairs(negPath, negs, negTokens, rejBefore, rejAfter), need, now_unix_ms() - started);
    let appended = fhn-append("receipts/lora-promotion-ledger.jsonl", json-emit(row) ++ "\n");
    print_str("[lift] " ++ json-emit(row) ++ "\n");
   }
  }
- ll-run();
+ cs-entry?("observe/lora-lift-run.bml") ? ll-run() : nothing();
 }

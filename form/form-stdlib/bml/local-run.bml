@@ -1,37 +1,106 @@
 //////////////////////////////////////////////////////////////////////
-// local-run.bml — every local generation, recorded where it happens.
+// local-run.bml — every local generation, recorded where it happens; every enquiry, counted by what answered it.
 //
 // The voice door (form-cli-native-voice.bml fcnv-ask) is the one place every lane asks the model, so it is the one place
-// a generation can be counted without a caller remembering to. Each ask lands one row: when, which session asked (the
-// host's CLAUDE_CODE_SESSION_ID, or "" when the host's own schedule asked), the lane, how it ended, the IDs the
-// prompt and the answer took, and, when the caller measured them, the ask's wall clock and its rates: prefill_tok_s
-// (prompt IDs per second of prefill) and decode_tok_s (generated IDs per second of decode). receipts/session-rent-ledger.jsonl
-// reads them back per session, so a probe, a draft, a companion turn and an engineering turn all count as the local
-// tokens they were. A row written before the rates were fields reads as a row with the rates absent (null).
+// a generation can be counted without a caller remembering to. Each ask lands one LocalRun row: when, which session asked
+// (the host's CLAUDE_CODE_SESSION_ID, or "" when the host's own schedule asked), the lane, how it ended, the IDs the
+// prompt and the answer took, the ask's wall clock and its rates: prefill_tok_s (prompt IDs per second of prefill) and
+// decode_tok_s (generated IDs per second of decode), and, when the ask did not answer, the reason the lane named (the
+// governor's reading, the registry's, the carrier's). receipts/session-rent-ledger.jsonl reads the rows back per session,
+// so a probe, a draft, a companion turn and an engineering turn all count as the local tokens they were. A row written
+// before the rates or the reason were fields reads as a row with them absent (null).
 //
-//   local-run-record(result)                                  append the row for one fcnv-ask result; the answer is the ledger's, never the voice's
-//   local-run-record-timed(result, wall_ms, prefill_ms, decode_ms)   the same row with the rates the caller's clocks measured (0 ms: that rate absent)
-//   local-run-rate(ids, ms)                                   ids per second as a float, or nothing() when either is 0
-//   local-run-rows()                                          every row, as typed cells
-//   local-run-of(rows, id)                                    the rows one session asked
+// The registry-weights lane's rates come from the session's own clock (form-cli-model-session.fk fcms-clock-read: the
+// stage instants the session stamps on its record): prefill_tok_s is the prompt's IDs over the prefill alone
+// (model-session-prefill-begin to -ready), decode_tok_s the generated IDs over the decode steps alone, and the two spans
+// before the prefill are the row's own fields, admission_ms (the wait in the model admission queue) and open_ms (from the
+// grant to the prefill begin: seal, header, tokenizer, lease, weights mapped, context and state open, drafter). The LoRA
+// lane reads its own stage events back (native-llama-voice.bml nlg-event: one "prefill" row per chunk, one "decode" row
+// per step, each with its wall_ms) and sums them; it has no admission or open span of its own. A clock that did not run
+// (0 ms, or nothing) leaves its rate absent; a span the session did not stamp is absent.
+//
+//   local-run-record(result)                                        append the row for one fcnv-ask result; the answer is the ledger's, never the voice's
+//   local-run-record-timed(result, wall_ms, prefill_ms, decode_ms)  the same row with the rates the caller's clocks measured (0 ms: that rate absent)
+//   local-run-record-clocked-at(path, result, wall_ms, prefill_ms, decode_ms, admission_ms, open_ms)   the row with the session's own spans too
+//   local-run-rate(ids, ms)                                         ids per second as a float, or nothing() when either is 0 or the ms are nothing
+//   local-run-rows()                                                every row, as typed cells
+//   local-run-of(rows, id)                                          the rows one session asked
+//
+// The second ledger, receipts/query-coverage-ledger.jsonl, holds one QueryCoverageRow per ask through a lane: the enquiry's
+// kind (lookup | structural | prose | code | plan, read from its own words by qc-kind, the one classifier), the source
+// that answered, the lane that carried it, the model, whether it was answered, the rent it took and its wall clock. It is
+// written at the voice door (every fcnv-ask, source fkwu-model-session), at form-cli ask's answer seam (form-cli.fk
+// fc-session-ask-at, source form-cli-ask) and at the grounded synthesis door for what the voice did not carry (substrate,
+// provider, an ask not made; form-cli-grounded-synthesis.bml). observe/query-coverage-run.bml reads the native fraction
+// by kind back from it. A row is native when it was answered and its source is the body's own (qc-native-sources).
+//
+//   qc-kind(enquiry)                                                the kind of an enquiry, from its own words
+//   qc-enquiry-of(packet)                                           the enquiry a packet opens with (its first paragraph)
+//   qc-record(kind, source, lane, model, answered, rent, wall_ms)   one row on the ledger
+//   qc-rows(path) / qc-since(rows, ms) / qc-table(rows) / qc-percent(native, all)   the reading
 //////////////////////////////////////////////////////////////////////
-// preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/host-fs.bml
+// preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/host-fs.bml form-stdlib/query-lane-resolve.bml
 section [form.bml] {
- blueprint LocalRun { at_unix_ms: int, session: string, lane: string, status: string, prompt_ids: int, generated_ids: int, model: string, wall_ms: option<int>, prefill_tok_s: option<float>, decode_tok_s: option<float> }
+ blueprint LocalRun { at_unix_ms: int, session: string, lane: string, status: string, prompt_ids: int, generated_ids: int, model: string, wall_ms: option<int>, prefill_tok_s: option<float>, decode_tok_s: option<float>, reason: option<string>, admission_ms: option<int>, open_ms: option<int> }
+ blueprint QueryCoverageRow { at_unix_ms: int, kind: string, source: string, lane: string, model: string, answered: int, rent_tokens: int, wall_ms: int }
  class LocalRunLedger {
   def lrun-ledger() = "receipts/local-run-ledger.jsonl";
   // the host's session id (CLAUDE_CODE_SESSION_ID) from the environment door, "" when the host's own schedule asked
   def lrun-session() = trim(hfs-env("CLAUDE_CODE_SESSION_ID", ""));
   def lrun-lane(result) = result[10] == "" ? "registry-weights" : "native-metal-lora";
-  // a rate is IDs over the seconds they took; a clock that did not run (0 ms) or nothing to count leaves the rate absent
-  def local-run-rate(ids, ms) = (ms <= 0) || (ids <= 0) ? nothing() : (ids + 0.0) * 1000.0 / (ms + 0.0);
-  def lrun-row(result, wallMs, prefillMs, decodeMs) = LocalRun{at_unix_ms: now_unix_ms(), session: lrun-session(), lane: lrun-lane(result), status: result[0], prompt_ids: result[2], generated_ids: result[3], model: result[4], wall_ms: wallMs <= 0 ? nothing() : wallMs, prefill_tok_s: local-run-rate(result[2], prefillMs), decode_tok_s: local-run-rate(result[3], decodeMs)};
-  def local-run-record-timed-at(path, result, wallMs, prefillMs, decodeMs) = ledger-append(path, lrun-row(result, wallMs, prefillMs, decodeMs));
+  // an answered ask needs no reason; any other ending carries the one the lane named
+  def lrun-reason(result) = (String) result[0] == "answered" ? nothing() : result[7];
+  // a rate is IDs over the seconds they took; a clock that did not run (0 ms, or nothing) or nothing to count leaves the rate absent
+  def local-run-rate(ids, ms) = nothing?(ms) || (ms <= 0) || (ids <= 0) ? nothing() : (ids + 0.0) * 1000.0 / (ms + 0.0);
+  // a span is kept as the session read it; one it did not stamp (nothing), or that did not run (0), is absent
+  def lrun-span(ms) = nothing?(ms) || (ms <= 0) ? nothing() : ms;
+  def lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs) = LocalRun{at_unix_ms: now_unix_ms(), session: lrun-session(), lane: lrun-lane(result), status: result[0], prompt_ids: result[2], generated_ids: result[3], model: result[4], wall_ms: lrun-span(wallMs), prefill_tok_s: local-run-rate(result[2], prefillMs), decode_tok_s: local-run-rate(result[3], decodeMs), reason: lrun-reason(result), admission_ms: lrun-span(admissionMs), open_ms: lrun-span(openMs)};
+  def local-run-record-clocked-at(path, result, wallMs, prefillMs, decodeMs, admissionMs, openMs) = ledger-append(path, lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs));
+  def local-run-record-timed-at(path, result, wallMs, prefillMs, decodeMs) = local-run-record-clocked-at(path, result, wallMs, prefillMs, decodeMs, nothing(), nothing());
   def local-run-record-timed(result, wallMs, prefillMs, decodeMs) = local-run-record-timed-at(lrun-ledger(), result, wallMs, prefillMs, decodeMs);
   def local-run-record-at(path, result) = local-run-record-timed-at(path, result, 0, 0, 0);
   def local-run-record(result) = local-run-record-at(lrun-ledger(), result);
   def local-run-rows() = ledger-rows(lrun-ledger(), "LocalRun");
   def local-run-of(rows, session) = rows |> filter(row => row-get(row, "session") == session);
+
+  // ---- the kind of an enquiry, read from its own words: the first row whose words it carries, else by shape ----
+  // (ask-lane-router's ask takes a caller-chosen lane and consent rows; it reads no text, so the one classifier lives here)
+  def qc-kind-words() = [["code", ["code", "implement", "function", "patch", "fix", "compile", "band", "recipe", "write"]], ["plan", ["plan", "steps", "roadmap", "sequence", "schedule"]], ["structural", ["defined", "definition", "callers", "caller", "owner", "source", "path", "file", "import", "imports", "calls"]]];
+  def qc-kind-hit?(ws, words) = any?(w => (Comparable) qlr-has?(ws, w) == 1, words);
+  def qc-kind-at(rows, ws) = nil?(rows) ? "" : qc-kind-hit?(ws, rows[0][1]) ? rows[0][0] : qc-kind-at(rows[1:], ws);
+  def qc-source-shaped?(enquiry) = (str_find(enquiry, "/", 0) >= 0) || (str_find(enquiry, ".bml", 0) >= 0) || (str_find(enquiry, ".fk", 0) >= 0);
+  def qc-question?(enquiry) = (Comparable) len(enquiry) <= 240 && (Comparable) len(qlr-lane-of(qlr-tokens(enquiry))) > 0 ? 1 : 0;
+  def qc-kind(enquiry) {
+   let hit = qc-kind-at(qc-kind-words(), qlr-tokens(enquiry));
+   len(hit) > 0 ? hit : qc-source-shaped?(enquiry) ? "structural" : (Comparable) qc-question?(enquiry) == 1 ? "lookup" : "prose";
+  }
+  // a packet opens with the enquiry and carries its grounding after a blank line (fgs-packet); the words before that line are
+  // the enquiry's own. A packet with no blank line is its own enquiry.
+  def qc-enquiry-of(packet) {
+   let at = str_find(packet, "\n\n", 0);
+   trim(at < 0 ? packet : substring(packet, 0, at));
+  }
+
+  // ---- the coverage ledger: one row per ask through a lane, read back as the native fraction by kind ----
+  def qc-ledger() = "receipts/query-coverage-ledger.jsonl";
+  def qc-kinds() = ["lookup", "structural", "prose", "code", "plan"];
+  def qc-native-sources() = ["substrate", "fkwu-model-session", "form-cli-ask"];
+  def qc-lane(source, askOracle, oracle) = (String) source == "substrate" ? "substrate" : (String) source == "provider" ? "provider" : askOracle ? lrun-lane(oracle) : "not-asked";
+  def qc-row(kind, source, lane, model, answered, rent, wallMs) = QueryCoverageRow{at_unix_ms: now_unix_ms(), kind: kind, source: source, lane: lane, model: model, answered: answered, rent_tokens: rent, wall_ms: wallMs};
+  def qc-record-at(path, kind, source, lane, model, answered, rent, wallMs) = ledger-append(path, qc-row(kind, source, lane, model, answered, rent, wallMs));
+  def qc-record(kind, source, lane, model, answered, rent, wallMs) = qc-record-at(qc-ledger(), kind, source, lane, model, answered, rent, wallMs);
+  def qc-rows(path) = ledger-rows(path, "QueryCoverageRow");
+  def qc-since(rows, since) = rows |> filter(row => row-get(row, "at_unix_ms") >= since);
+  def qc-native?(row) = (row-get(row, "answered") == 1) && any?(s => (String) row-get(row, "source") == s, qc-native-sources());
+  def qc-of(rows, kind) = (String) kind == "all" ? rows : rows |> filter(row => (String) row-get(row, "kind") == kind);
+  // [kind, answered natively, all]
+  def qc-count(rows, kind) {
+   let mine = qc-of(rows, kind);
+   [kind, len(mine |> filter(row => qc-native?(row))), len(mine)];
+  }
+  def qc-table(rows) = append(qc-kinds() |> map(k => qc-count(rows, k)), [qc-count(rows, "all")]);
+  // whole percent, or nothing() when there is nothing to divide
+  def qc-percent(native, all) = all == 0 ? nothing() : (native * 100) / all;
  }
  0;
 }

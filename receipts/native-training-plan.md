@@ -167,8 +167,128 @@ part, and that is work in the lane, not a role change (roles untouched).
 The LocalRun row (`form/form-stdlib/bml/local-run.bml`) now carries
 `wall_ms`, `prefill_tok_s` and `decode_tok_s` (`option`, absent when the
 caller did not time the ask; `local-run-record-timed` fills them, and rows
-from before the fields read on). The voice door records those clocks:
-`q38oo-note` keeps `host_monotonic_ms` as a child of the phase node, and
-`fcnv-recorded` passes wall, the session prefill span, and the generate
-span into `local-run-record-timed`. A missing span stays 0, so that rate
-stays absent. Rows written before this hook still read with the rates absent.
+from before the fields read on). The voice door records those clocks from the
+session's own stage instants: the model session stamps each phase it prints
+on its record (`form-cli-model-session.fk`, `fcms-clock-read`), and
+`fcnv-recorded` lands prefill over prefill alone, decode over the decode
+steps, with admission and open as their own fields on the LocalRun row. An
+unstamped instant reads nothing, so that rate stays absent; rows written
+before this still read with the rates absent.
+
+## 2026-10-28 — Qwen3.8-27B last-block ladder, rung 1 (reproduction)
+
+Band `form/form-stdlib/tests/qwen-last-block-band.bml`, verdict 15 in two runs
+(`.hearth/qwen-rung-1/band-run-1.log`, `band-run-2.log`). The serving prefill's
+tap captured block 63's input, output and the final residual for a 23-id
+ChatML prompt (`xin.f32`, `xout.f32`, `xfin.f32`: `[23, 5120]` f32, 471,040
+bytes each, with JSON sidecars); the block's forward replayed natively from the
+captured input on trainer-owned scratch (`qwen-last-block-forward.bml`) with
+the body's q38 kernels and `blk.63.*` from the GGUF: 0 of 117,760 words
+differ, 0 ulp, max |reproduced − model| 0 against max |model| 621.09; head
+argmax 760 both ways. Measured tolerance 0; the band holds that reading. No
+new kernel, no tap change. Prefill 31,252 / 33,956 ms on a shared GPU, block
+forward 43 / 32 ms. Detail: `docs/qwen-last-block-lora-design.md`, "Rung 1
+observed". Rung 2 (finite differences) is next; it needs `inv` per row from the
+norms and starts from the contiguous P this forward keeps.
+
+### Q4_K decode: the K-quant lane now folds a pair of rows per threadgroup (2026-10-28, step q4-decode)
+
+The slow part named above was found in Form, not in the C seed: `form/form-stdlib/bml/qwen38-decode-quant.bml`
+dispatched Q4_K (type 12) and Q6_K (type 14) decode through `qml-hoist-msl` at parts 1 — ONE GPU thread per
+output row walking all 5120-17408 columns serially, with get_scale_min_k4 (three byte reads, four integer
+divisions) decoded once per WEIGHT, 128x fewer threads than the Q8_0 wide twin. The door now emits
+`form_qwen_q4k_decode_f32` / `form_qwen_q6k_decode_f32`: the Q8_0 wide shape (256 threads, eight SIMD groups,
+two rows a group), a fused dot over the packed block (`(d*sc)*sum(nib*x) - (dmin*mn)*sum(x)` per eight weights
+for Q4_K, `(d*sc)*sum(q*x)` for Q6_K), two register loads of weights a row-iteration, and it owns the dispatch
+record `q38dq-rec` that `q38-mv-rec` (qwen35-dense-token-handle.fk, one line) now runs. Pipeline indices
+57/58 unchanged. `runtime/fkwu-uni.c` carries no Q4_K path and was not touched; `fkwu` was rebuilt from the
+unchanged source (`cc -O2 -o fkwu runtime/fkwu-uni.c`, 3.9 s) because the checkout's binary predated the
+13:53 runtime commit.
+
+Measured through the same driver (`.hearth/speed-ask.bml`, qwen38-q4, 382 prompt ids, greedy; the 32-id
+window `decode-checkpoint-32 -> -64`; logs under `.hearth/q4-decode/`). The GPU was shared with sibling
+sessions the whole afternoon (`host_gpu_utilization` read 98-100 before every stamped run; siblings' Q8
+sessions pids 8583/29797 at 2-99% CPU), so intervals carry their load, not only the kernel:
+
+| state | run | prefill ms | prefill tok/s | decode ms (32 ids) | decode tok/s | ms per id | wall ms | reply |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| before (serial hoist) | 1 | 46984 | 8.1 | 116656 | 0.27 | 3645 | 339443 | identical |
+| before (serial hoist) | 2 | 32616 | 11.7 | 80959 | 0.40 | 2530 | 352739 | identical |
+| Q4_K fused, Q6_K serial | 1 | 38584 | 9.9 | 11569 | 2.77 | 362 | 93000 | identical |
+| Q4_K fused, Q6_K serial | 2 | 42813 | 8.9 | 17599 | 1.82 | 550 | 228619 | identical |
+| both fused | 1 | 37748 | 10.1 | 21391 | 1.50 | 668 | 342835 | identical |
+| both fused | 2 | 43319 | 8.8 | 20341 | 1.57 | 636 | 128997 | identical |
+| both fused, GPU stamped | 1 | 40622 | 9.4 | 12669 | 2.53 | 396 | 90054 | identical |
+| both fused, GPU stamped | 2 | 20863 | 18.3 | 8951 | 3.58 | 280 | 43644 | identical |
+
+Observed: the same window went from 0.27-0.40 tok/s to 1.50-3.58 tok/s; the quietest early ids of the last
+run (checkpoints 2 -> 8) ran at 90-93 ms an id (10.8 tok/s, 15.6 GiB at ~170 GB/s), which is the kernel
+when the siblings paused. Prefill is untouched (the K-quant prefill was already on the matrix unit).
+Per-kernel, under the same shared load (`q4k-decode-wide-band.fk`, best of five rounds of 20 dispatches):
+ffn_gate Q4_K 17408x5120 fused 5-24 ms vs hoist 53-172 ms; ffn_down Q4_K 5120x17408 4-21 vs 120-390;
+attn_q Q4_K 12288x5120 3-23 vs 48-168; ffn_down Q6_K 13-14 vs 190-306; attn_qkv Q6_K 10240x5120 8-32 vs
+79-125; the head Q6_K 248320x5120 (4 dispatches) 31-73 vs 284-323. The greedy reply stayed the serial fold's
+(`.hearth/speed-reply-qwen38-q4.txt`, 479 bytes) in all eight runs.
+
+What the fused fold answers to: not the byte (it reassociates) but a named bound of the exact fp64 dot,
+`(73 + ceil(nb/8)) * 2^-24 * S` with S the unfused magnitude; measured dev/bound 1e-6 to 6e-4 on the
+committed fixtures and on real rows (first and last pair) of the gate, down, q/qkv and head tensors, plus
+`float(as_type<half>)` proven bit-identical to the body's `q4k_f16` on all 63488 finite f16 patterns.
+`qwen38-prefill-quant-band.fk` now holds K-quant prefill (already on the matrix unit) and K-quant decode to
+that bound instead of a byte claim its kernels had stopped making: at HEAD it read 28 on the prefill bits
+before this step; it reads 31. Census of the Q4_K_M file through the lane's own open: linear layer 0
+`0 0 12 12 14 14 0 12 12 0 0 0 12 12`, full layer 3 `0 0 12 12 14 12 12 14 0 0 12`, head 14 — attn_qkv,
+the early ffn_down, attn_v and the head are Q6_K, which is why the lane needed both twins. Open: the Q4_K
+"fast-answer" role is now read from a measured rate, not from the file size; the next voice-rates table
+should be taken with the GPU quiet.
+
+Skeptic reading (same driver, same prompt, `.hearth/q4-decode/skeptic-q4-run1.out`, 16:41 WITA, one
+sibling alignment read on the Q8 file, `host_gpu_utilization` 99 before / 97 after): prefill 12453 ms
+(30.6 tok/s), decode-checkpoint-32 -> -64 2106 ms (15.2 tok/s, 65 ms per id), wall 29133 ms, 92 ids, reply
+byte-identical to the reference. Bands re-run on this checkout: `q4k-decode-wide-band.fk` 2047,
+`qwen38-prefill-quant-band.fk` 31, `q6k-q4k-matvec-tg-band.fk` 8191, all exit 0
+(`.hearth/q4-decode/skeptic-*.log`). The door's caller-less `q38dq-enqueue` wrapper (no caller at HEAD
+either) was removed; `q38dq-rec` is the record's only door.
+
+After table (2026-10-29, step review-and-register): the six stamped after runs of this step in the shape
+of the 12:23-12:34 voice-rates table above, so the register reads them. Every number is read from the named
+`.hearth/q4-decode/*.out`: open ms is `model-session-context-open-begin` -> `model-open-ready`, prefill ms
+`model-session-prefill-begin` -> `-ready`, decode ms `decode-checkpoint-32` -> `-64`, wall ms, prompt ids
+and generated ids the run's own `[speed-ask]` line (the arithmetic: `.hearth/review-register/q4-after-table.log`).
+No Q8_0 run was stamped in this step, so the table holds Q4_K_M rows only. The register
+(`observe/offline-voice-gaps-run.bml`, gap `q4-decode-vs-q8`) reads the last table row of each key in this
+document: **this table's last Q4_K_M row is the lane's current reading**, and the Q8_0 row it is read
+against is the last one of the 12:23-12:34 table (Q8_0 run 2, 2.79 tok/s) — a comparison across two sessions
+and two GPU loads, not one run; a Q8_0 row stamped beside the next Q4_K_M run makes it one.
+
+| quant | run | wall ms | open ms | prompt ids | prefill ms | prefill tok/s | generated ids | decode ms (32 ids) | decode tok/s | ms per decoded id |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Q4_K_M | after 1 (`after-q4-run1.out`) | 93000 | 270 | 382 | 38584 | 9.9 | 92 | 11569 | 2.77 | 362 |
+| Q4_K_M | after 2 (`after-q4-run2.out`) | 228619 | 913 | 382 | 42813 | 8.9 | 92 | 17599 | 1.82 | 550 |
+| Q4_K_M | final 1 (`final-q4-run1.out`) | 342835 | 279 | 382 | 37748 | 10.1 | 92 | 21391 | 1.50 | 668 |
+| Q4_K_M | final 2 (`final-q4-run2.out`) | 128997 | 12657 | 382 | 43319 | 8.8 | 92 | 20341 | 1.57 | 636 |
+| Q4_K_M | finalb 1 (`finalb-q4-run1.out`) | 90054 | 14270 | 382 | 40622 | 9.4 | 92 | 12669 | 2.53 | 396 |
+| Q4_K_M | finalb 2 (`finalb-q4-run2.out`) | 43644 | 3360 | 382 | 20863 | 18.3 | 92 | 8951 | 3.58 | 280 |
+
+The skeptic run (`skeptic-q4-run1.out`, 15.2 tok/s on the same window) stays in the prose above: it ran
+after the finalb pair under a lighter load, and this table keeps the step's own after/final/finalb runs.
+
+## 2026-10-29 — Qwen3.8-27B last-block ladder, rung 2 (backward, finite differences)
+
+Band `form/form-stdlib/tests/qwen-last-block-backward-band.bml`, verdict 15 in two runs
+(`.hearth/qwen-rung-2/band-run-1.log`, `band-run-2.log`, `rung-2-receipt.json`), after a rung-1
+rerun read 15 again (`rung1-before-4.log`: prefill 11,818 ms, replay 17 ms, 0 words differ). A
+rank-8 LoRA pair on `blk.63.ffn_down` (door `qwen-last-block-backward.bml`; ffn_down because its
+product lands on the residual, so the loss on the block's output reaches A and B through the
+identity alone), loss = mean (x2 − target)² with target = the captured output + a hash shift in
+[−0.5, 0.5), folded in 2⁻³⁶ fixed point. With B = +0 the forward through the pair is rung 1's replay
+(0 of 117,760 words, 0 ulp; loss 0.08293476031688939). Analytic dB/dA (`nam_matmul_sk` /
+`nam_matmul`) against central finite differences on 8 entries each, perturbations read back (1 on B,
+8 on A): max relative error dB 5.591031080282419e-06, dA 5.163047689368592e-05 — the measured
+tolerance, now the band's bounds, reproduced to the last digit in run 2 under a different GPU load.
+Memory counted 13,791,888 bytes against the design-D budget 28,609,728; 26 of 26 handles freed;
+32 finite-difference forwards in 1,228 / 1,080 ms, band wall 8.4 / 7.3 s. No kernel of section C was
+needed on this path (two new in the door: `form_hash_fill_f32`, `form_mse_fixed_f32`); the plan's
+rung-1 note about `inv` per row described the attn_output choice. Detail: `docs/qwen-last-block-lora-design.md`,
+"Rung 2 observed". Rung 3 (20 steps on 8 rows, held-out loss) is next; it needs the CE loss over the
+head and Adam on the pair.

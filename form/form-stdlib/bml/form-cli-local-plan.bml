@@ -449,31 +449,55 @@ section [form.bml] {
    else if (!nothing?(measured)) then flp-refused(6, mc-cat(["row-band-taken:", flp-p-band(plan)]), mc-cat(["The queue already holds a gap measured by ", flp-p-band(plan), "; write a new band."]))
    else flp-held();
   }
-  // ── the band on fkwu, called in this process (cell_run): [reading, timed out, what fkwu said] ──
+  // ── the band on fkwu, in its own kernel (host-child.bml's pieces, read bounded): [reading, timed out, what fkwu said] ──
   def flp-organ-prefix() = "form-organ health ";
   // the compiler's own words: its diagnostic readings (what, which name, where) and its error lines
   def flp-said-line(line) = if (flp-starts?(line, flp-organ-prefix()) && ((str_find(line, "\"stage\":\"observe\"", 0) >= 0) && fcgp-object-line?(substring(line, len(flp-organ-prefix()), len(line))))) then flp-organ-words(parse-json("band-said", substring(line, len(flp-organ-prefix()), len(line)))) else if ((str_find(line, "error", 0) >= 0) && (!flp-starts?(line, "form-organ"))) then flp-head(line, 300) else "";
   def flp-need-detail(row) = if (fcgp-present?(row, "needs") && fcgp-array?(json-object-get(row, "needs")) && (!nil?(json-array-elements(json-object-get(row, "needs"))))) then fcgp-str(json-array-elements(json-object-get(row, "needs"))[0], "detail") else "";
   def flp-organ-words(row) = if (((String) fcgp-str(row, "observed") == "clean") || ((String) fcgp-str(row, "observed") == "")) then "" else mc-cat([fcgp-str(row, "observed"), if ((Comparable) len(flp-need-detail(row)) > 0) then mc-cat([" ", flp-need-detail(row)]) else "", " at line ", flp-show(fcgp-num(fcgp-obj(row, "evidence"), "line")), " of ", fcgp-str(fcgp-obj(row, "evidence"), "unit")]);
   def flp-errors(text) = flp-join(take(8, filter(l => ((Comparable) len(l) > 0), map(l => flp-said-line(l), flp-lines(text)))), "\n");
-  // The band reads a number only when the cell ran to its end with no compile error and ended on an integer (its value, not
-  // a last line read back); a budget that ran out is the "timed out" of the answer. What it said (the compiler's lines
-  // and readings, cs-stderr) stands beside the band as <path>.err, as it did for a child.
-  def flp-band-ran?(rec) = !nothing?(rec) && nothing?(record_get(rec, "stopped")) && ((Comparable) record_get(rec, "errors") == 0);
-  def flp-band-timed?(rec) = !nothing?(rec) && !nothing?(record_get(rec, "stopped")) && (String) record_get(record_get(rec, "stopped"), "kind") == "deadline";
+  // The band runs as its own kernel, a child of this process, begun and waited on through the walk's child door's own
+  // pieces (host-child.bml: host_spawn_at, hch-wait, hch-exit-line, hch-signal-finding): its deadline is the host's, read
+  // on host_wait and enforced on the child's lineage, so a candidate whose walk never ticks ends at the deadline and the
+  // planner stands. A cell_run in this process ticks only at the walker's own steps (FK_CELL_TICK): a candidate that sent
+  // the gate into a crystallized tail loop over a value that is not a list (append over nothing: core.fk reverse-onto,
+  // whose tail of nothing is nothing and never nil, and whose nil? prints one heal-caller reading per step) passed no
+  // tick, its deadline never came, its readings filled the cell's out buffer, and it took the planner down with it
+  // (jetsam at 119 GiB resident, the voice's reply unowned, 2026-10-28). The same candidate as a child printed 30 GB
+  // in its ten minutes, and the door's whole read of a child's out file (hch-answer) grew the planner the same way: so
+  // the planner reads a child's output bounded, the last flp-band-keep bytes of its out (the band's final value is its
+  // last line) and the first of its err (the compiler's first words), and the receipt says how many bytes each had.
+  // The exit comes from host_wait: 0 when the unit ended clean (an error exits 1; a stop at the deadline has no exit,
+  // and "deadline: ..." is its why; a signal death reads 128 + the signal with its finding at the text's end). The band
+  // reads a number only when the child exited 0 and its final value, the last line fkwu printed, is an integer. What it
+  // said stands beside the band as <path>.err, its output as <path>.out, its exit as <path>.exit.
   def flp-band-number(v) = (String) value_kind(v) == "int" ? v : (String) value_kind(v) == "string" ? parse-int(trim(v)) : nothing();
+  def flp-band-last(text) = foldl((kept, line) => if ((Comparable) len(trim(line)) > 0) then trim(line) else kept, "", flp-lines(text));
+  def flp-file-name(p) = if ((String) flp-parent(p) == "") then p else substring(p, (len(flp-parent(p)) + 1), len(p));
+  def flp-band-keep() = 65536;
+  def flp-band-bytes(p) = if flp-exists?(p) then file_size(p) else 0;
+  def flp-band-tail(p, n) = if (flp-band-bytes(p) < 1) then "" else (read_file_slice(p, (flp-band-bytes(p) > n ? (flp-band-bytes(p) - n) : 0), (flp-band-bytes(p) > n ? n : flp-band-bytes(p))) ?? "");
+  def flp-band-head(p, n) = if (flp-band-bytes(p) < 1) then "" else (read_file_slice(p, 0, (flp-band-bytes(p) > n ? n : flp-band-bytes(p))) ?? "");
   def flp-band-run(path, deadline) {
-   let rec = cell_run(path, 0, deadline, nothing());
-   fb_record(intern_node(intern_trivial_string("local-plan-witness"),[path,rec]),"form-cli-local-plan.bml",0);
-   let stdout = cs-stdout(rec);
-   let stderr = cs-stderr(rec) ++ (nothing?(rec) || nothing?(record_get(rec, "stopped")) ? "" : "fkwu: " ++ (String) record_get(record_get(rec, "stopped"), "message") ++ "\n");
-   let kept = write_file_text(path ++ ".err", stderr);
-   let printed = write_file_text(path ++ ".out", stdout);
-   let timed = flp-band-timed?(rec) ? 1 : 0;
-   let status = flp-band-ran?(rec) ? 0 : (timed == 1 ? nothing() : 1);
-   let reading = flp-band-ran?(rec) ? flp-band-number(record_get(rec, "value")) : nothing();
+   let io = flp-parent(path);
+   let step = flp-file-name(path);
+   let made = hch-mkdirs(io);
+   let out = path ++ ".out";
+   let err = path ++ ".err";
+   let cleared = host_path_remove(out);
+   let gone = host_path_remove(err);
+   let pid = host_spawn_at(["./fkwu", path], ["/dev/null", out, err, ""]);
+   let waited = if (nothing?(pid) || (pid <= 0)) then [nothing(), hch-birth-why(pid)] else hch-wait(pid, (host_monotonic_ms() + deadline));
+   let status = waited[0];
+   let why = waited[1];
+   let noted = write_file_text(path ++ ".exit", hch-exit-line(status, why) ++ "\n");
+   fb_record(intern_node(intern_trivial_string("local-plan-witness"),[path,flp-show(status),why,flp-band-bytes(out),flp-band-bytes(err)]),"form-cli-local-plan.bml",0);
+   let stdout = flp-band-tail(out, flp-band-keep()) ++ hch-signal-finding(io, step, status, "");
+   let stderr = flp-band-head(err, flp-band-keep()) ++ (((String) why == "") ? "" : "fkwu: " ++ why ++ "\n");
+   let timed = flp-starts?(why, "deadline:") ? 1 : 0;
+   let reading = if (nothing?(status) || ((Comparable) status != 0)) then nothing() else flp-band-number(flp-band-last(stdout));
    let evidence=flp-dir() + "/executions/" + flp-sha(path) + ".json";
-   let receipt=json-emit(json-node-object([fhn-s("command","cell_run " + path),json-node-pair("exit",nothing?(status) ? json-node-null() : json-node-int(status)),fhn-n("timed_out",timed),fhn-s("stdout",stdout),fhn-s("stderr",stderr)]));
+   let receipt=json-emit(json-node-object([fhn-s("command","./fkwu " + path),json-node-pair("exit",nothing?(status) ? json-node-null() : json-node-int(status)),fhn-n("timed_out",timed),fhn-n("stdout_bytes",flp-band-bytes(out)),fhn-n("stderr_bytes",flp-band-bytes(err)),fhn-s("stdout",stdout),fhn-s("stderr",stderr)]));
    let written=flp-put(evidence,receipt);
    [reading, timed, mc-cat([read_file(evidence)==receipt ? "\nExecution evidence: " + evidence : "\nExecution evidence could not be retained at " + evidence,nothing?(reading) ? "\nExecution exit=" + flp-show(status) + " stderr:\n" + stderr + "stdout:\n" + stdout : "\nExecution stdout:\n" + stdout + flp-errors(stderr)])];
   }
@@ -846,7 +870,9 @@ section [form.bml] {
   }
   def flp-index(xs, x, i) = if nil?(xs) then -1 else if ((String) xs[0] == x) then i else flp-index(xs[1:], x, (i + 1));
   def flp-spent(memory, slot) = foldl((n, m) => (n + m[slot]), 0, memory);
-  def flp-ask(voice, packet, name, n) = voice(packet, name, n);
+  // the voice hears the packet with its name, the option number and the lens the way chose (the planner door keeps the
+  // lens on the reply's heard mark, lpr-heard)
+  def flp-ask(voice, packet, name, n, lens) = voice(packet, name, n, lens);
   // an approach is what an option tried: its voice, its lens and the kind of way (first, resume, lens, voice). Its
   // digest never takes the feedback the voice heard, which is evidence: the same approach repeats its digest
   def flp-approach(way) = json-node-object([fhn-s("voice", way[0]), fhn-s("lens", way[1]), fhn-s("kind", way[2])]);
@@ -887,7 +913,7 @@ section [form.bml] {
    let prior = if nil?(memory) then "" else memory[-1][4];
    let packet = repairing ? flp-case-repair-packet(req,feedback,prior,way[1]) : flp-packet(req, way[1], feedback, prior, flp-ctx-queue(ctx));
    let started = now_unix_ms();
-   let heard = flp-ask(flp-ctx-voice(ctx), packet, way[0], n);
+   let heard = flp-ask(flp-ctx-voice(ctx), packet, way[0], n, way[1]);
    let said = repairing && fat-has(["answered","incomplete"],heard[0]) ? flp-case-repaired(prior,heard) : heard;
    if ((String) said[0] == "held") then [2, said] else flp-heard(req, ctx, memory, n, way, said, started);
   }
@@ -971,7 +997,14 @@ section [form.bml] {
    fb_record(["local-plan-reference-choices",len(eligible),len(distinct[1])],"form-cli-local-plan.bml",0);
    distinct[1];
   }
-  def flp-reply-owner(rows,req,reply) = foldl((held,row)=>flp-text(row,"request")==flp-req-id(req) && flp-text(row,"reply")==reply && flp-text(row,"voice_status")=="answered" ? row : held,nothing(),rows);
+  // The reply's owner: its option row in the ledger, else the heard mark the planner door wrote the moment the voice
+  // answered (.hearth/local-plans/heard.jsonl, lpr-heard: request, option, voice, lens, voice_status, the ids, the reply's
+  // path). A planner that ended between the reply and its row (its verification never returned) left no row, and the
+  // reply is still the local voice's own; a mark no ledger row names counts among the request's rows with its ids.
+  def flp-heard-path() = flp-dir() ++ "/heard.jsonl";
+  def flp-reply-row(rows,req,reply) = foldl((held,row)=>flp-text(row,"request")==flp-req-id(req) && flp-text(row,"reply")==reply && flp-text(row,"voice_status")=="answered" ? row : held,nothing(),rows);
+  def flp-heard-rows(rows,req) = filter(m=>flp-text(m,"request")==flp-req-id(req) && flp-text(m,"voice_status")=="answered" && nothing?(flp-reply-row(rows,req,flp-text(m,"reply"))),flp-queue-rows(flp-heard-path()));
+  def flp-reply-owner(rows,req,reply) = flp-reply-row(rows,req,reply) ?? flp-reply-row(flp-heard-rows(rows,req),req,reply);
   def flp-reference-compatible(plan,raw) {
    let head=flp-block(raw,"plan");
    nothing?(head) || !faj-valid(head) ? false : {
@@ -1001,7 +1034,7 @@ section [form.bml] {
     let row=oh-set(flp-option-row(req,0,way,v,parsed[2],["retained",fhn-read(reply),0,0,reply],started,stamp),"reference_reply",json-node-string(referenceReply));
     let kept=fhn-append(flp-ctx-ledger(ctx),json-emit(row) + "\n");
     !flp-held?(v) ? ["refused",[],v[2],v[0]] : {
-     let taskRows=rows |> filter(r=>flp-text(r,"request")==flp-req-id(req));
+     let taskRows=append(rows |> filter(r=>flp-text(r,"request")==flp-req-id(req)),flp-heard-rows(rows,req));
      let generated=foldl((n,r)=>n + (fcgp-num(r,"local_generated_ids") ?? 0),0,taskRows);
      let injected=foldl((n,r)=>n + (fcgp-num(r,"local_injected_ids") ?? 0),0,taskRows);
      let planner=[fhn-s("plan_voice",way[0]),fhn-s("plan_lens",way[1]),fhn-n("plan_options",len(taskRows)),fhn-n("plan_local_generated_ids",generated),fhn-n("plan_local_injected_ids",injected),fhn-s("plan_reference_reply",referenceReply),fhn-s("plan_reference_voice",flp-text(referenceOwner,"voice")),fhn-n("reachable",1),json-node-pair("plan_solofall",flp-falls-node(v[6])),json-node-pair("plan_checkfall",flp-checkfall-node(v[6]))];
@@ -1020,10 +1053,27 @@ section [form.bml] {
   def flp-walk(req, ctx) = flp-walk-from(req, ctx, []);
   // a walk that resumes the findings an earlier walk of the same request left: nothing learned is dropped, and the
   // next option hears the last refusal, its reply, and the same swerve rule
+  // The native continuation ends when the outcome stops moving: three refused options in a row whose approaches are
+  // three (the swerve rule moved the lens or the voice twice: a resume and its repeat are one approach) and whose
+  // outcome digest is one. What does not move with the approach stands outside the plan (the request's source, or the
+  // kernel the band runs on), so another option would hear the same refusal: the walk declines with that finding.
+  // 2026-10-28: seven options over an observe door that runs at load (its top-level call, arith over nothing under
+  // every stub) read one outcome digest through first, resume, resume, lens, lens and voice, and only the caller's
+  // window was going to end the walk.
+  def flp-row-digest(m, key) = flp-text(m[5], key);
+  def flp-distinct?(xs) = if nil?(xs) then true else ((!any?(x => ((String) x == xs[0]), xs[1:])) && flp-distinct?(xs[1:]));
+  def flp-outcome-still?(memory) = (len(memory) >= 3) && {
+   let last = memory[(len(memory) - 3):];
+   let outcomes = map(m => flp-row-digest(m, "outcome_digest"), last);
+   let approaches = map(m => flp-row-digest(m, "approach_digest"), last);
+   ((Comparable) len(outcomes[0]) > 0) && all?(o => ((String) o == outcomes[0]), outcomes) && flp-distinct?(approaches);
+  };
+  def flp-still-line(req, memory) = mc-cat(["[local-plan:still] ", flp-req-id(req), ": the last three options took three approaches and read one outcome (", flp-row-digest(memory[-1], "outcome_digest"), ", ", flp-text(memory[-1][5], "kind"), "); what does not move with the approach stands outside the plan, and the walk declines"]);
   def flp-repeat(context,event) {
    let memory=record_get(record_get(nve-event-watch(event),"repeat"),"cursor");
    let ack=oac-offer(flp-option,[[context[0],context[1]],memory]);
-   oac-node?(ack) ? again(append(memory,[oac-payload(ack)])) :
+   let next=oac-node?(ack) ? append(memory,[oac-payload(ack)]) : memory;
+   oac-node?(ack) ? (flp-outcome-still?(next) ? { print_str(flp-still-line(context[0], next)); flp-declined(context[0],context[1],next); } : again(next)) :
     oac-one?(ack) ? flp-ended(oac-payload(ack),memory) : flp-declined(context[0],context[1],memory);
   }
   def flp-walk-from(req, ctx, memory) {

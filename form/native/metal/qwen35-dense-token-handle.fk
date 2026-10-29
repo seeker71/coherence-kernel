@@ -131,8 +131,9 @@ section [form.bml] {
         append(append(append(append(append(append(base, q38-lora-rank1-pipes(msl)), q38e-pipes(msl)), q38pq-pipes(msl)), q38dq-pipes(msl)), q38pa-pipes(msl)), [metal_pipeline(msl, "form_q38_rmsnorm_par_f32"), metal_pipeline(msl, "form_q38_rmsnorm_par_span_f32"), metal_pipeline(msl, "form_q38_q8_mm64_f32"), metal_pipeline(msl, "form_q38_gdn_delta_sg_f32"), metal_pipeline(msl, "form_q38_q8_mm64e_f32"), metal_pipeline(msl, "form_q38_q8_planar_mv_f32"), metal_pipeline(msl, "form_q38_q8_repack_f32")]);
     };
     def q38-embed(ps, bs, geo, embTv, id, barrier) = q38e-index(kth-tv-ty(embTv)) < 0 ? -1 : metal_enqueue(nth(ps, q38e-index(kth-tv-ty(embTv))), q38-b16([kth-tv-h(embTv), bs[0]], [id * geo[0], geo[0]], 0, barrier), geo[0]);
-    // One exact 256-thread group per output-row pair for Q8_0. Q4_K/Q6_K retain
-    // the serial fold and reuse block scales through a one-partition hoist.
+    // One exact 256-thread group per output-row pair for Q8_0, and the same pair-of-rows
+    // shape for Q4_K and Q6_K through their fused dots (qwen38-decode-quant.bml owns that
+    // record).
     // Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
     // norm type 0.  md-bind16's mode=1 makes the op's threads argument a group count.
     // A dense forward runs in the carrier's concurrent encoder.  The last bit is an explicit
@@ -163,7 +164,7 @@ section [form.bml] {
     };
     def q38-rms-rec(ps, xh, gtv, yh, n, epsBits, barrier) = [ps[q38-rmspar-index()], q38-b16([xh, kth-tv-h(gtv), yh], [n, epsBits], 1, barrier), 1];
     def q38-rms(ps, xh, gtv, yh, n, epsBits, barrier) = q38-enq(q38-rms-rec(ps, xh, gtv, yh, n, epsBits, barrier));
-    def q38-mv-rec(ps, tv, xh, yh, barrier) = q38-tv-planar?(tv) ? [ps[q38-plv-index()], md-bind16([tv[4], tv[5], xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 64, 0, 1, barrier), q38-plv-groups(kth-tv-r(tv))] : (Comparable) kth-tv-ty(tv) == 8 ? [ps[29], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 256, 0, 1, barrier), ((Number) kth-tv-r(tv) + (Number) 1) / 2] : q38dq-index(kth-tv-ty(tv)) >= 0 ? [ps[q38dq-index(kth-tv-ty(tv))], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv), 1], 256, 0, 0, barrier), kth-tv-r(tv)] : [ps[27], q38-b16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 0, barrier), kth-tv-r(tv)];
+    def q38-mv-rec(ps, tv, xh, yh, barrier) = q38-tv-planar?(tv) ? [ps[q38-plv-index()], md-bind16([tv[4], tv[5], xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 64, 0, 1, barrier), q38-plv-groups(kth-tv-r(tv))] : (Comparable) kth-tv-ty(tv) == 8 ? [ps[29], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 256, 0, 1, barrier), ((Number) kth-tv-r(tv) + (Number) 1) / 2] : q38dq-index(kth-tv-ty(tv)) >= 0 ? q38dq-rec(ps, kth-tv-ty(tv), kth-tv-h(tv), xh, yh, kth-tv-r(tv), kth-tv-c(tv), barrier) : [ps[27], q38-b16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 0, barrier), kth-tv-r(tv)];
     def q38-mv(ps, tv, xh, yh, barrier) = q38-enq(q38-mv-rec(ps, tv, xh, yh, barrier));
     // Adapter = [A-handle B-handle dot-handle width alpha-f32-bits].  Its
     // buffers are independent allocations owned by the adapter, so this is an

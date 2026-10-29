@@ -1,0 +1,97 @@
+// qwen-last-block-band.bml — rung 1 of the last-block LoRA ladder: the last full-attention block of Qwen3.8-27B, captured at its
+// input and output by the serving prefill's tap, is reproduced natively from the captured input on trainer-owned scratch with the
+// body's own q38 kernels (docs/qwen-last-block-lora-design.md, sections A, B and E.1).
+//
+// One short ChatML prompt (under 64 ids) is prefilled once from a fresh stream through q38-prefill-span-sliced-t with the capture tap
+// (qwen-last-block-capture.bml). The block's forward (qwen-last-block-forward.bml) then runs from the captured input alone, with its own
+// K/V, and the two hidden states are compared word for word.
+//   1   the capture landed: 1..64 ids, every row of the input, the output and the final residual captured (rows = ids), the tap's phase 1
+//       called once, the model's head answered, and the three captures were written under .hearth/qwen-rung-1/ (xin, xout, xfin: raw f32
+//       rows plus a JSON sidecar each) at their stated byte counts
+//   2   block 63 is the last layer: the output captured after its FFN (phase 0, l = 63) is the final residual (phase 1), byte for byte
+//   4   the native reproduction: max |reproduced - model| / max |model| over the T x 5120 hidden state is within the measured bound
+//       (qlbb-bound: the reading of the first run, 2026-10-28, not a chosen number; the band prints the reading every run)
+//   8   the head agrees: output_norm -> output.weight -> argmax over the reproduced last row says the token the model's own prefill said
+// Verdict 15. It needs the 27 GiB file and a Metal device; it takes the memory lease first and holds nothing when the governor says held.
+// REQUIRES: a live Metal device, /Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-capture.bml form-stdlib/bml/qwen-last-block-forward.bml
+section [form.bml] {
+ class QwenLastBlockBand {
+  def qlbb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qlbb-dir() = ".hearth/qwen-rung-1";
+  def qlbb-prompt() = "Explain in two sentences why the sky is blue.";
+  def qlbb-span() = 64;
+  def qlbb-maxpos() = 128;
+  // the bound bit 4 holds the reproduction to: the first run's own reading (see the design doc, "Rung 1 observed")
+  def qlbb-bound() = 0.0;
+  def qlbb-say(s) = print_str("[qwen-last-block-band] " ++ s);
+  def qlbb-last-full(geo) = geo[21] - 1;
+  def qlbb-dir-ready(dir) = (Comparable) host_path_is_dir(dir) == 1 ? 1 : host_mkdir_mode(dir, 493);
+  def qlbb-receipt(dir, text) = write_file(dir ++ "/rung-1-receipt.json", text);
+  def qlbb-run-all(ctx, src) {
+   let geo = ctx[2];
+   let L = qlbb-last-full(geo);
+   let d = geo[0];
+   let ids = q35-chat-ids(src, qlbb-prompt());
+   let T = len(ids);
+   qlbb-say("prompt ids " ++ T.str() ++ ", block L = " ++ L.str() ++ " (full attention: " ++ (kth-full?(L, geo[22]) ? "yes" : "NO") ++ "), d " ++ d.str() ++ ", heads " ++ geo[12].str() ++ "/" ++ geo[13].str() ++ " x " ++ geo[14].str() ++ ", nrot " ++ geo[15].str());
+   T < 1 || T > qlbb-span() || !kth-full?(L, geo[22]) ? 0 : {
+    let o = qlbc-open(ctx, L, qlbb-span());
+    let sts = q38-new-state(geo);
+    let t0 = host_monotonic_ms();
+    let r = qlbc-prefill(o, sts, ids);
+    let t1 = host_monotonic_ms();
+    qlbb-say("prefill: head argmax " ++ r[0].str() ++ ", end position " ++ r[1].str() ++ ", rows captured " ++ r[2].str() ++ ", phase-1 calls " ++ r[3].str() ++ ", " ++ (t1 - t0).str() ++ " ms");
+    let dirok = qlbb-dir-ready(qlbb-dir());
+    let w1 = qlbc-write(o, qlbb-dir(), "xin", ids);
+    let w2 = qlbc-write(o, qlbb-dir(), "xout", ids);
+    let w3 = qlbc-write(o, qlbb-dir(), "xfin", ids);
+    qlbb-say("written: xin " ++ w1[0].str() ++ " bytes, xout " ++ w2[0].str() ++ " bytes, xfin " ++ w3[0].str() ++ " bytes (each " ++ (T * d * 4).str() ++ " expected), sidecars " ++ w1[1].str() ++ "/" ++ w2[1].str() ++ "/" ++ w3[1].str());
+    let xin = qlbc-bytes(o, "xin");
+    let xout = qlbc-bytes(o, "xout");
+    let xfin = qlbc-bytes(o, "xfin");
+    let same = len(xout) == T * d * 4 && str_eq(xout, xfin) ? 1 : 0;
+    let t2 = host_monotonic_ms();
+    let rep = qlbf-run(ctx[0], geo, nth(ctx[3], L), xin, 0, T);
+    let t3 = host_monotonic_ms();
+    let c = qlbf-compare(rep[0], xout, T * d);
+    let rel = qlbf-rel(c);
+    qlbb-say("reproduction: " ++ (t3 - t2).str() ++ " ms; " ++ c[0].str() ++ " of " ++ (T * d).str() ++ " words differ, widest gap " ++ c[1].str() ++ " ulp, max |reproduced - model| " ++ c[2].str() ++ ", max |model| " ++ c[3].str() ++ ", relative " ++ rel.str() ++ " (bound " ++ qlbb-bound().str() ++ ")");
+    // the head over the reproduced last row: the serving head reads bs[0]
+    metal_batch_concurrent();
+    let gathered = metal_enqueue(ctx[0][32], q38-b16([rep[1][0], ctx[1][0]], [d, (T - 1) * d], 0, 1), d);
+    let head = q38-head-only(ctx[0], ctx[1], geo, ctx[5], ctx[6]);
+    qlbb-say("head over the reproduced last row: argmax " ++ head.str() ++ " (model's own " ++ r[0].str() ++ ")");
+    let b1 = r[2] == T && r[3] == 1 && r[0] >= 0 && w1[0] == T * d * 4 && w2[0] == T * d * 4 && w3[0] == T * d * 4 && w1[1] > 0 && w2[1] > 0 && w3[1] > 0 ? 1 : 0;
+    let b2 = same == 1 ? 2 : 0;
+    let b4 = rel <= qlbb-bound() ? 4 : 0;
+    let b8 = head == r[0] ? 8 : 0;
+    let receipt = qlbb-receipt(qlbb-dir(), "{\"band\":\"qwen-last-block-band\",\"layer\":" ++ L.str() ++ ",\"ids\":" ++ T.str() ++ ",\"d\":" ++ d.str() ++ ",\"prefill_ms\":" ++ (t1 - t0).str() ++ ",\"forward_ms\":" ++ (t3 - t2).str() ++ ",\"words_differ\":" ++ c[0].str() ++ ",\"widest_ulp\":" ++ c[1].str() ++ ",\"max_abs_diff\":" ++ c[2].str() ++ ",\"max_abs_model\":" ++ c[3].str() ++ ",\"relative\":" ++ rel.str() ++ ",\"bound\":" ++ qlbb-bound().str() ++ ",\"model_argmax\":" ++ r[0].str() ++ ",\"reproduced_argmax\":" ++ head.str() ++ ",\"bits\":" ++ (b1 + b2 + b4 + b8).str() ++ "}\n");
+    let freed = qlbf-free(rep[1]) + qlbc-free(o) + q38-free-state(sts);
+    qlbb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str());
+    b1 + b2 + b4 + b8;
+   };
+  }
+  def qlbb-leased(path, src) {
+   let ctx = q38-open-span(path, qlbb-maxpos(), qlbb-span());
+   let verdict = (Comparable) q38-context-ok?(ctx) == 1 ? qlbb-run-all(ctx, src) : 0;
+   let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
+   let unleased = mg-release();
+   verdict;
+  }
+  def qlbb-held(granted) {
+   qlbb-say("held: " ++ granted[1]);
+   0;
+  }
+  def qlbb-open(path) {
+   let src = fcmg-src(path);
+   let geo = q38-geo(src, qlbb-maxpos());
+   let own = fcms-qwen-own(src, qlbb-maxpos()) + qlbf-scratch-bytes(geo, 0, qlbb-span()) + qlbc-own-bytes(geo[0], qlbb-span());
+   let granted = mg-lease("qwen last-block band", path, fcms-weights-bytes(path), own);
+   !mg-granted?(granted) ? qlbb-held(granted) : qlbb-leased(path, src);
+  }
+  def qlbb-run() = qlbb-open(qlbb-file());
+ }
+ qlbb-run();
+}

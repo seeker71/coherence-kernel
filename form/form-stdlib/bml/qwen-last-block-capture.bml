@@ -1,0 +1,61 @@
+// qwen-last-block-capture.bml — the last full-attention block's input and output, captured where the serving prefill produces them.
+//
+// Intent: rung 1 of the last-block LoRA ladder (docs/qwen-last-block-lora-design.md, section A) needs the hidden state that ENTERS
+// block L (the residual after layer L-1's FFN) and the state the model itself LEAVES after block L, for every position of one prompt.
+// The span prefill already carries a tap (qwen35-dense-token-handle.fk, q38-lm-layers-span-t): phase 0 after layer l's FFN with the
+// residual in bs[33], phase 1 after the last layer. This door is a destination for that tap, not a kernel: three device buffers of
+// rows x d floats, filled by the proven copy kernel (pipeline 24, form_copy_off_f32: d[doff + i] = s[i]) inside the prefill's own batch,
+// at destination row pos0 so a prompt longer than one slice still lands whole.
+// Inputs: an open Qwen context (q38-open-span), a fresh stream state, the ids, the block index L (63 on Qwen3.8-27B: the last full
+// block, kth-full?), a row capacity. Effects: device allocations the caller frees with qlbc-free; files under a directory the caller
+// names (qlbc-write): <name>.f32 raw little-endian float32 rows, and <name>.json with shape, dtype and byte count.
+// Stdin: none. Owner: form-stdlib/bml. Nothing here reads the model's weights; the copy kernel reads only the scratch residual.
+import native/metal/qwen35-dense-token-handle.fk;
+import form-stdlib/qwen-lora-train.fk;
+section [form.bml] {
+ class QwenLastBlockCapture {
+  // the three captures: xin (block L's input), xout (block L's output, phase 0 at l = L), xfin (the final residual, phase 1)
+  def qlbc-open(ctx, L, rows) {
+   let d = ctx[2][0];
+   record_new(0, "ctx", ctx, "L", L, "d", d, "rows", rows, "count", 0, "xin", metal_buf_alloc(d * rows * 4), "xout", metal_buf_alloc(d * rows * 4), "xfin", metal_buf_alloc(d * rows * 4), "phases", 0);
+  }
+  def qlbc-ok?(o) = record_get(o, "xin") > 0 && record_get(o, "xout") > 0 && record_get(o, "xfin") > 0;
+  // one copy of the residual's n rows into a capture at row pos0, inside the open batch (barrier 1: the FFN's add wrote bs[33])
+  def qlbc-copy(o, dst, n, pos0) {
+   let ctx = record_get(o, "ctx");
+   let d = record_get(o, "d");
+   pos0 + n > record_get(o, "rows") ? 0 : metal_enqueue(ctx[0][24], q38-b16([ctx[1][33], dst], [d * n, pos0 * d], 0, 1), d * n);
+  }
+  def qlbc-tap-go(o, phase, l, n, pos0) = phase == 0 && l == record_get(o, "L") - 1 ? qlbc-copy(o, record_get(o, "xin"), n, pos0)
+   : phase == 0 && l == record_get(o, "L") ? {
+    let c = qlbc-copy(o, record_get(o, "xout"), n, pos0);
+    pos0 + n > record_get(o, "count") ? record_set(o, "count", pos0 + n) : 0;
+    c;
+   }
+   : phase == 1 ? {
+    let c = qlbc-copy(o, record_get(o, "xfin"), n, pos0);
+    record_set(o, "phases", record_get(o, "phases") + 1);
+    c;
+   }
+   : 0;
+  def qlbc-tap(o) = (phase, l, n, pos0) => qlbc-tap-go(o, phase, l, n, pos0);
+  // the serving prefill of ids from position 0 with the tap: [head argmax, end position, rows captured, phase-1 calls]
+  def qlbc-prefill(o, sts, ids) {
+   let ctx = record_get(o, "ctx");
+   let r = q38-prefill-span-sliced-t(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, q38-ctx-span(ctx), qlbc-tap(o));
+   [r[0], r[1], record_get(o, "count"), record_get(o, "phases")];
+  }
+  def qlbc-bytes(o, which) = metal_buf_read(record_get(o, which), 0, record_get(o, "d") * record_get(o, "count") * 4);
+  // the capture to disk: raw f32 rows and a one-line JSON sidecar naming shape, dtype and bytes; [bytes written, sidecar written]
+  def qlbc-sidecar(o, which, bytes, ids) = "{\"name\":\"" ++ which ++ "\",\"layer\":" ++ record_get(o, "L").str() ++ ",\"shape\":[" ++ record_get(o, "count").str() ++ "," ++ record_get(o, "d").str() ++ "],\"dtype\":\"f32\",\"layout\":\"row-major token-major little-endian\",\"bytes\":" ++ bytes.str() ++ ",\"ids\":[" ++ foldl((acc, x) => acc ++ (len(acc) == 0 ? "" : ",") ++ x.str(), "", ids) ++ "]}\n";
+  def qlbc-write(o, dir, which, ids) {
+   let raw = qlbc-bytes(o, which);
+   let wrote = len(raw) == 0 ? 0 : write_file(dir ++ "/" ++ which ++ ".f32", raw);
+   let side = qlbc-sidecar(o, which, wrote, ids);
+   [wrote, write_file(dir ++ "/" ++ which ++ ".json", side)];
+  }
+  def qlbc-free(o) = sum([metal_buf_free(record_get(o, "xin")), metal_buf_free(record_get(o, "xout")), metal_buf_free(record_get(o, "xfin"))]);
+  def qlbc-own-bytes(d, rows) = 3 * d * rows * 4;
+ }
+ 0;
+}

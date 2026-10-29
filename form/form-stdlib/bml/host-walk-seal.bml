@@ -1,0 +1,60 @@
+// host-walk-seal.bml — the kernel the walk builds is sealed under its own name before it takes fkwu's place, so the
+// exec launchd makes of it from a slot's plist is not killed for its signature.
+//
+// Why: a slot's exec of the walk checkout's fkwu died at launch on 2026-10-28 19:10 and 2026-10-29 03:30, 03:40 and
+// 12:30 (SIGKILL (Code Signature Invalid), termination CODESIGNING "Launch Constraint Violation", last exit reason
+// OS_REASON_CODESIGNING on every job), every report reading codeSigningID fkwu.next with the linker-signed flag: the
+// compiler had written fkwu.next, the linker had signed it ad hoc and minimally under that build name (flags
+// adhoc,linker-signed; Internal requirements=none; a designated requirement of one bare cdhash), and the rename over
+// fkwu kept that seal. So the build is two named steps through the child door: the compiler writes the product beside
+// itself (hw-build-argv), codesign --force --sign - --identifier <the product's name> seals it completely under its own
+// name (hw-sign-argv), and only then does it take the product's place (hw-placed).
+// A product is fresh only when it is newer than its source AND sealed (hw-fresh-sealed?: codesign -dvv, read back
+// through the child door, says Identifier=<the product's name> and a CodeDirectory without linker-signed); a product
+// that is newer but linker-signed, as every walk built before this part stood, is rebuilt and sealed. The placed
+// product is read back the same way, and hw-made-sealed refuses one by name: "<name>=refused: <what the seal read> on
+// the placed product". A sign step that fails leaves the product as it was and says so, "<name>=0 <name>-sign=<rc>";
+// a compiler that fails reads as it always did, "<name>=<rc>"; a step never born reads "nothing" in its place.
+// The carrier (hw-carrier, host-walk-sync.bml) is loaded in-process, never exec'd by launchd, and keeps the plain maker
+// (hw-make), which reads freshness and placement from here: host-walk-sync.bml imports this part, so a root that
+// preludes host-walk-sync.bml alone (band-sweep.bml) reaches hw-build through it.
+// What it needs: host-child.bml (every step is an argv child; hch-lines) and host-walk-text.bml (hw-rc-text,
+// hw-starts?, hw-has?).
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-child.bml;
+section [form.bml] {
+ class HostWalkSeal {
+  // A product is fresh when it stands and is newer than its source (file_mtime, whole seconds: a source touched in
+  // the product's own second rebuilds). The kernel is built beside itself and renamed over fkwu (a new inode, never a
+  // write into the live binary): the compiler wrote `built`; it takes the product's place (a compiler that wrote the
+  // product itself needs none)
+  def hw-mtime(path) = file_mtime(path);
+  def hw-mtime-int?(at) = (String) value_kind(at) == "int" && at > 0;
+  def hw-fresh?(product, source) = hw-mtime-int?(hw-mtime(product)) && (!hw-mtime-int?(hw-mtime(source)) || hw-mtime(product) > hw-mtime(source));
+  def hw-placed(product, built) = (String) built == product ? 0 : host_path_rename(built, product);
+  def hw-build-argv() = ["cc", "-O2", "-o", "fkwu.next", "runtime/fkwu-uni.c"];
+  // the product's own name: what follows its last slash
+  def hw-leaf(path) = hw-leaf-at(path, len(path) - 1);
+  def hw-leaf-at(path, i) = i < 0 ? path : (Comparable) str_byte_at(path, i) == 47 ? substring(path, i + 1, len(path)) : hw-leaf-at(path, i - 1);
+  def hw-sign-argv(built, id) = ["codesign", "--force", "--sign", "-", "--identifier", id, built];
+  // the seal read back: the lines codesign -dvv says (on stderr, which the child door keeps beside stdout in <io>/<name>-seal.out)
+  def hw-seal-text(io, name, path) = hch-run-in(io, name ++ "-seal", ["codesign", "-dvv", path], "", nothing())[1];
+  def hw-seal-id(text) = hw-seal-id-of(filter(l => hw-starts?(l, "Identifier="), hch-lines(text)));
+  def hw-seal-id-of(lines) = nil?(lines) ? "" : substring(lines[0], len("Identifier="), len(lines[0]));
+  def hw-seal-linker?(text) = !nil?(filter(l => hw-starts?(l, "CodeDirectory") && hw-has?(l, "linker-signed"), hch-lines(text)));
+  // "" when the seal is the product's own; else what it read, named
+  def hw-seal-why(text, name) = (String) hw-seal-id(text) == "" ? "no seal read" : hw-seal-linker?(text) ? "linker-signed, identifier " ++ hw-seal-id(text) : (String) hw-seal-id(text) != name ? "identifier " ++ hw-seal-id(text) ++ ", not " ++ name : "";
+  def hw-sealed-why(io, name, product) = hw-seal-why(hw-seal-text(io, name, product), hw-leaf(product));
+  def hw-sealed?(io, name, product) = (String) hw-sealed-why(io, name, product) == "";
+  def hw-fresh-sealed?(io, name, product, source) = hw-fresh?(product, source) && hw-sealed?(io, name, product);
+  // compile, sign, place, read back: each step named, each exit the host's
+  def hw-make-sealed(io, name, product, source, argv, sign, built) = hw-fresh-sealed?(io, name, product, source) ? name ++ "=fresh" : hw-compiled(io, name, product, sign, built, hch-run-in(io, name, argv, "", nothing()));
+  def hw-compiled(io, name, product, sign, built, run) = hch-ok?(run) ? hw-signed(io, name, product, built, hch-run-in(io, name ++ "-sign", sign, "", nothing())) : name ++ "=" ++ hw-rc-text(run[0]);
+  def hw-signed(io, name, product, built, run) = hch-ok?(run) ? hw-made-sealed(io, name, product, hw-placed(product, built)) : name ++ "=0 " ++ name ++ "-sign=" ++ hw-rc-text(run[0]);
+  def hw-made-sealed(io, name, product, placed) = nothing?(placed) || (Comparable) placed != 0 ? name ++ "=" ++ hw-rc-text(placed) : hw-made-read(name, hw-sealed-why(io, name, product));
+  def hw-made-read(name, why) = (String) why == "" ? name ++ "=0" : name ++ "=refused: " ++ why ++ " on the placed product";
+  def hw-build-sign-argv() = hw-sign-argv("fkwu.next", "fkwu");
+  def hw-build-at(io) = hw-make-sealed(io, "build", "fkwu", "runtime/fkwu-uni.c", hw-build-argv(), hw-build-sign-argv(), "fkwu.next");
+  def hw-build() = hw-build-at(hch-dir());
+ }
+}

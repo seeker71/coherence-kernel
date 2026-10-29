@@ -1,0 +1,138 @@
+; core-list-walk-band.fk — a list walk over a value that is not a list ends with its name, never runs without end.
+;
+; The head and the tail of nothing are nothing, and nil? answers 0 for nothing (its documented answer: it asks one
+; question, "is this the empty list"). A walker that continued on that answer never ended: append over nothing
+; (core.fk reverse-onto) printed nil?'s heal-caller reading once per step, 119 GiB resident in-process and 30 GB of
+; stdout as a child, 902 s past a 600 s cell deadline that could not tick (2026-10-28). The walkers now ask their own
+; question, walk-end?, which answers 1 at the empty list, 0 on a list that holds elements, and for a value that is
+; not a list stops the run at once: one reading, then "<walker>: not a list: <kind>".
+;
+; The refusal's words and the count of readings are read from a child kernel (host_spawn_at on this process's own
+; executable), because a stop ends the unit that meets it; in-band, attempt reads each stop as nothing.
+;
+; Verdict 255 when every claim lands:
+;   1     append over lists is unchanged: two lists, an empty left, an empty right, both empty, nested elements
+;   2     reverse-onto and reverse over lists are unchanged, the accumulator kept in front of the reversed walk
+;   4     the neighbouring walkers over lists are unchanged: map filter foldl foldr take drop sum product maximum
+;         minimum any? all? str-spans
+;   8     over nothing every walker refuses at once (attempt answers nothing), and the whole stretch of refusals ends
+;         within a second
+;   16    over a string and over a number the walkers refuse the same way
+;   32    the refusal names the walker and the kind: "reverse-onto: not a list: null" for append over nothing,
+;         "reverse-onto: not a list: string" for a string, "sum-onto: not a list: int" for a number; the child exits 1
+;   64    the reading is printed once, never per step: the child's stdout holds exactly one organ-health-v1 line, its
+;         aspect reverse-onto:non-list:null, and its size is bounded
+;   128   nil? keeps its documented answer: 1 for the empty list, 0 for a list that holds elements, and 0 for nothing
+;         with one reading of aspect nil?:non-list:null, the child exiting 0
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn clwb-bit (ok bit) (if ok bit 0))
+    (defn clwb-path (name) (str_concat (temp_dir) (str_concat "/core-list-walk-" (str_concat (value_str (host_pid)) (str_concat "-" name)))))
+    (defn clwb-text (p) (if (lt (file_size p) 1) "" (read_file p)))
+    ; how many times needle stands in text
+    (defn clwb-count-from (text needle from acc)
+        (do (let at (str_find text needle from))
+            (if (lt at 0) acc (clwb-count-from text needle (add at (str_len needle)) (add acc 1)))))
+    (defn clwb-count (text needle) (clwb-count-from text needle 0 0))
+    ; a child kernel on one source: answers (exit out err)
+    (defn clwb-child (name src)
+        (do (let fk (clwb-path (str_concat name ".fk")))
+            (let outp (clwb-path (str_concat name ".out")))
+            (let errp (clwb-path (str_concat name ".err")))
+            (write_file fk (str_concat "; preludes: form-stdlib/core.fk\n" src))
+            (let pid (host_spawn_at (list (nth (host_process (host_pid)) 2) fk) (list "/dev/null" outp errp)))
+            (let ex (host_wait pid))
+            (let out (clwb-text outp))
+            (let err (clwb-text errp))
+            (fs_remove fk)
+            ; the child lowers its source beside it: the .fkb image and the .sym next to the stem (fb-bus-band's shape)
+            (fs_remove (str_concat fk "b"))
+            (fs_remove (str_concat (clwb-path name) ".sym"))
+            (fs_remove outp)
+            (fs_remove errp)
+            (list ex out err)))
+    (defn clwb-stopped? (v) (if (nothing? v) 1 0))
+
+    ; 1 -- append over lists
+    (let b1 (clwb-bit (and (value_eq (append (list 1 2) (list 3 4)) (list 1 2 3 4))
+                           (and (value_eq (append (empty) (list 1)) (list 1))
+                                (and (value_eq (append (list 1) (empty)) (list 1))
+                                     (and (value_eq (append (empty) (empty)) (empty))
+                                          (value_eq (append (list (list 1) "a") (list (list 2 3))) (list (list 1) "a" (list 2 3))))))) 1))
+
+    ; 2 -- reverse-onto and reverse
+    (let b2 (clwb-bit (and (value_eq (reverse (list 1 2 3)) (list 3 2 1))
+                           (and (value_eq (reverse-onto (list 1 2) (list 9)) (list 2 1 9))
+                                (and (value_eq (reverse (empty)) (empty))
+                                     (value_eq (reverse (list (list 1) (list 2 3))) (list (list 2 3) (list 1)))))) 2))
+
+    ; 4 -- the neighbouring walkers
+    (defn clwb-double (x) (mul x 2))
+    (defn clwb-odd? (x) (eq (mod x 2) 1))
+    (defn clwb-sub (a b) (sub a b))
+    (let b4 (clwb-bit (and (value_eq (map clwb-double (list 1 2 3)) (list 2 4 6))
+                           (and (value_eq (filter clwb-odd? (list 1 2 3 4 5)) (list 1 3 5))
+                                (and (eq (foldl clwb-sub 10 (list 1 2 3)) 4)
+                                     (and (eq (foldr clwb-sub 0 (list 1 2 3)) 2)
+                                          (and (value_eq (take 2 (list 1 2 3)) (list 1 2))
+                                               (and (value_eq (drop 2 (list 1 2 3)) (list 3))
+                                                    (and (eq (sum (list 1 2 3)) 6)
+                                                         (and (eq (product (list 2 3 4)) 24)
+                                                              (and (eq (maximum (list 3 9 2)) 9)
+                                                                   (and (eq (minimum (list 3 9 2)) 2)
+                                                                        (and (eq (any? clwb-odd? (list 2 4 5)) 1)
+                                                                             (and (eq (all? clwb-odd? (list 1 3 4)) 0)
+                                                                                  (str_eq (str-spans (list "a" "b" "c")) "abc"))))))))))))) 4))
+
+    ; 8 -- over nothing, every walker refuses at once
+    (let t0 (now_unix_ms))
+    (let r8 (and (clwb-stopped? (attempt (append (nothing) (list 1 2))))
+                 (and (clwb-stopped? (attempt (reverse-onto (nothing) (empty))))
+                      (and (clwb-stopped? (attempt (map clwb-double (nothing))))
+                           (and (clwb-stopped? (attempt (filter clwb-odd? (nothing))))
+                                (and (clwb-stopped? (attempt (foldl clwb-sub 0 (nothing))))
+                                     (and (clwb-stopped? (attempt (foldr clwb-sub 0 (nothing))))
+                                          (and (clwb-stopped? (attempt (take 2 (nothing))))
+                                               (and (clwb-stopped? (attempt (drop 1 (nothing))))
+                                                    (and (clwb-stopped? (attempt (sum (nothing))))
+                                                         (and (clwb-stopped? (attempt (any? clwb-odd? (nothing))))
+                                                              (and (clwb-stopped? (attempt (all? clwb-odd? (nothing))))
+                                                                   (clwb-stopped? (attempt (str-spans (nothing))))))))))))))))
+    (let t1 (now_unix_ms))
+    (let b8 (clwb-bit (and r8 (lt (sub t1 t0) 1000)) 8))
+
+    ; 16 -- over a string and a number
+    (let b16 (clwb-bit (and (clwb-stopped? (attempt (reverse-onto "abc" (empty))))
+                            (and (clwb-stopped? (attempt (append 7 (list 1))))
+                                 (and (clwb-stopped? (attempt (map clwb-double "abc")))
+                                      (and (clwb-stopped? (attempt (sum 5)))
+                                           (value_eq (append (list 1) (list 2)) (list 1 2)))))) 16))
+
+    ; 32 -- the refusal names the walker and the kind, read from a child kernel
+    (let c-null (clwb-child "null" "(append (nothing) (list 1 2))"))
+    (let c-str (clwb-child "string" "(append \"abc\" (list 1))"))
+    (let c-int (clwb-child "int" "(sum 7)"))
+    (let b32 (clwb-bit (and (eq (nth c-null 0) 1)
+                            (and (ge (str_find (nth c-null 2) "reverse-onto: not a list: null" 0) 0)
+                                 (and (eq (nth c-str 0) 1)
+                                      (and (ge (str_find (nth c-str 2) "reverse-onto: not a list: string" 0) 0)
+                                           (and (eq (nth c-int 0) 1)
+                                                (ge (str_find (nth c-int 2) "sum-onto: not a list: int" 0) 0)))))) 32))
+
+    ; 64 -- the reading printed once, never per step
+    (let b64 (clwb-bit (and (eq (clwb-count (nth c-null 1) "organ-health-v1") 1)
+                            (and (ge (str_find (nth c-null 1) "\"aspect\":\"reverse-onto:non-list:null\"" 0) 0)
+                                 (lt (str_len (nth c-null 1)) 4096))) 64))
+
+    ; 128 -- nil? keeps its documented answer
+    (let c-nil (clwb-child "nil" "(print (nil? (nothing)))"))
+    (let b128 (clwb-bit (and (eq (nil? (empty)) 1)
+                             (and (eq (nil? (list 1)) 0)
+                                  (and (eq (nth c-nil 0) 0)
+                                       (and (eq (clwb-count (nth c-nil 1) "organ-health-v1") 1)
+                                            (and (ge (str_find (nth c-nil 1) "\"aspect\":\"nil?:non-list:null\"" 0) 0)
+                                                 (ge (str_find (nth c-nil 1) "\n0\n" 0) 0)))))) 128))
+
+    (add b1 (add b2 (add b4 (add b8 (add b16 (add b32 (add b64 b128))))))))

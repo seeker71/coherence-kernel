@@ -1,0 +1,101 @@
+// qwen-last-block-forward.bml — one full-attention block of Qwen3.8 run natively from a captured input, on trainer-owned scratch.
+//
+// Intent: rung 1 of the last-block LoRA ladder (docs/qwen-last-block-lora-design.md, section B): the forward of block L written out
+// dispatch by dispatch with the body's own q38 kernels, over scratch this door allocates (not the serving bs), from the hidden state
+// qwen-last-block-capture.bml took at the block's input. Every kernel here is the one the serving span prefill issues for the same
+// step (qwen35-dense-token-handle.fk, q38-full-attn-span and q38-ffn-span), in the same order, with the same constants from geo; what
+// differs is only the destination buffers, the block's own K/V (pos0 .. pos0 + T, not the session cache) and the attention's score
+// pitch, which is the span's own position count so P sits contiguous as [T x nq, npos] for the backward of rung 2.
+// Inputs: ps (the context's pipelines), geo, lay (the block's layer table: blk.L.* tensors from the GGUF, q38-layer), the captured
+// input bytes, pos0 and T. Effects: device allocations the caller frees with qlbf-free. Stdin: none. Owner: form-stdlib/bml.
+// The block (full layer table: 0 attn_norm, 1 post_attention_norm, 2 ffn_gate, 3 ffn_up, 4 ffn_down, 5 attn_q, 6 attn_k, 7 attn_v,
+// 8 attn_q_norm, 9 attn_k_norm, 10 attn_output):
+//   x -rms(attn_norm)-> n1 -attn_q-> qg (q and gate interleaved per head) -qsplit-> q, gate; n1 -attn_k-> k; n1 -attn_v-> v;
+//   q, k -head rms (QK-norm)-> ; q, k -partial rope nrot-> ; k, v -> K, V at pos0 + t; attention(q, K, V) -> attn, P;
+//   attn *= sigmoid(gate); attn -attn_output-> o; x += o; x -rms(post_attention_norm)-> n2; n2 -ffn_gate-> g; n2 -ffn_up-> u;
+//   act = silu(g) * u; act -ffn_down-> down; x += down.
+import native/metal/qwen35-dense-token-handle.fk;
+import form-stdlib/qwen-lora-train.fk;
+section [form.bml] {
+ class QwenLastBlockForward {
+  // scratch slots: 0 x 1 n1 2 qg 3 q 4 gate 5 k 6 v 7 attn 8 sc 9 o 10 n2 11 g 12 u 13 act 14 down 15 K 16 V
+  def qlbf-npos(pos0, T) = pos0 + T;
+  def qlbf-scratch(geo, pos0, T) {
+   let d = geo[0];
+   let ff = geo[10];
+   let nqhd = geo[12] * geo[14];
+   let kvd = geo[20];
+   let pitch = q38-bs2-stride(geo);
+   let npos = qlbf-npos(pos0, T);
+   [metal_buf_alloc(d * T * 4), metal_buf_alloc(d * T * 4), metal_buf_alloc(pitch * T * 4), metal_buf_alloc(nqhd * T * 4), metal_buf_alloc(nqhd * T * 4), metal_buf_alloc(kvd * T * 4), metal_buf_alloc(kvd * T * 4), metal_buf_alloc(nqhd * T * 4), metal_buf_alloc(2 * T * geo[12] * npos * 4), metal_buf_alloc(d * T * 4), metal_buf_alloc(d * T * 4), metal_buf_alloc(ff * T * 4), metal_buf_alloc(ff * T * 4), metal_buf_alloc(ff * T * 4), metal_buf_alloc(d * T * 4), metal_buf_alloc(kvd * npos * 4), metal_buf_alloc(kvd * npos * 4)];
+  }
+  def qlbf-scratch-bytes(geo, pos0, T) {
+   let d = geo[0];
+   let npos = qlbf-npos(pos0, T);
+   (7 * d * T + q38-bs2-stride(geo) * T + 3 * geo[12] * geo[14] * T + 2 * geo[20] * T + 2 * T * geo[12] * npos + 3 * geo[10] * T + 2 * geo[20] * npos) * 4;
+  }
+  def qlbf-ok?(sx) = q38-handles-ok?(sx);
+  def qlbf-free(sx) = q38-free-handles(sx);
+  // the block's forward over T rows whose input is already in sx[0]; the output lands in sx[0] (the residual, in place as the serving
+  // walk keeps it). One concurrent batch; the caller reads sx[0] (metal_buf_read submits and waits).
+  def qlbf-forward(ps, geo, lay, sx, pos0, T) {
+   let d = geo[0];
+   let nq = geo[12];
+   let nkv = geo[13];
+   let hd = geo[14];
+   let nqhd = nq * hd;
+   let kvd = geo[20];
+   let ff = geo[10];
+   let pitch = q38-bs2-stride(geo);
+   let npos = qlbf-npos(pos0, T);
+   q38-rms-span(ps, sx[0], lay[0], sx[1], d, geo[6], T, 1);
+   q38-mv-batch-y(ps, lay[5], sx[1], sx[2], T, pitch, 1);
+   q38-mv-batch(ps, lay[6], sx[1], sx[5], T, 0);
+   q38-mv-batch(ps, lay[7], sx[1], sx[6], T, 0);
+   metal_enqueue(ps[34], q38-b16([sx[2], sx[3]], [nqhd, hd, 0, T, pitch], 0, 1), nqhd * T);
+   metal_enqueue(ps[34], q38-b16([sx[2], sx[4]], [nqhd, hd, hd, T, pitch], 0, 0), nqhd * T);
+   metal_enqueue(ps[35], q38-b16([sx[3], kth-tv-h(lay[8]), sx[3]], [nq, hd, geo[6], T], 0, 1), nq * T);
+   metal_enqueue(ps[35], q38-b16([sx[5], kth-tv-h(lay[9]), sx[5]], [nkv, hd, geo[6], T], 0, 0), nkv * T);
+   metal_enqueue(ps[36], q38-b16([sx[3]], [nq, hd, geo[15], pos0, geo[16], T], 0, 1), nq * (geo[15] / 2) * T);
+   metal_enqueue(ps[36], q38-b16([sx[5]], [nkv, hd, geo[15], pos0, geo[16], T], 0, 0), nkv * (geo[15] / 2) * T);
+   metal_enqueue(ps[37], q38-b16([sx[5], sx[15]], [kvd, pos0, T], 0, 1), kvd * T);
+   metal_enqueue(ps[37], q38-b16([sx[6], sx[16]], [kvd, pos0, T], 0, 0), kvd * T);
+   q38pa-enqueue(nth(ps, q38pa-index()), [sx[3], sx[15], sx[16], sx[7], sx[8]], [pos0, nq, nkv, hd, geo[17], npos, T], nq * T, 1);
+   metal_enqueue(ps[17], q38-b16([sx[7], sx[4]], [nqhd * T], 0, 1), nqhd * T);
+   q38-mv-batch(ps, lay[10], sx[7], sx[9], T, 1);
+   metal_enqueue(ps[19], q38-b16([sx[0], sx[9], sx[0]], [d * T], 0, 1), d * T);
+   q38-rms-span(ps, sx[0], lay[1], sx[10], d, geo[6], T, 1);
+   q38-mv-batch(ps, lay[2], sx[10], sx[11], T, 1);
+   q38-mv-batch(ps, lay[3], sx[10], sx[12], T, 0);
+   metal_enqueue(ps[18], q38-b16([sx[11], sx[12], sx[13]], [ff * T], 0, 1), ff * T);
+   q38-mv-batch(ps, lay[4], sx[13], sx[14], T, 1);
+   metal_enqueue(ps[19], q38-b16([sx[0], sx[14], sx[0]], [d * T], 0, 1), d * T);
+   1;
+  }
+  // the whole rung-1 reproduction: input bytes (T x d f32) into fresh scratch, the forward, the output bytes back; [bytes, scratch]
+  def qlbf-run(ps, geo, lay, xin, pos0, T) {
+   let sx = qlbf-scratch(geo, pos0, T);
+   let wrote = metal_buf_write(sx[0], 0, xin);
+   metal_batch_concurrent();
+   let ran = qlbf-forward(ps, geo, lay, sx, pos0, T);
+   let out = metal_buf_read(sx[0], 0, geo[0] * T * 4);
+   [out, sx];
+  }
+  // ── the comparison, word by word over two f32 byte strings of n floats ──
+  // [words that differ, widest gap in ulp (same-sign u32 distance), max |a - b|, max |b|]
+  def qlbf-abs(v) = v < 0.0 ? 0.0 - v : v;
+  def qlbf-cmp-go(a, b, i, n, cnt, ulp, md, mb) = i >= n ? [cnt, ulp, md, mb] : {
+   let wa = ln-u32-le(a, i * 4);
+   let wb = ln-u32-le(b, i * 4);
+   let g = wa > wb ? wa - wb : wb - wa;
+   let fa = ln-f32-decode(wa);
+   let fb = ln-f32-decode(wb);
+   let dd = nothing?(fa) || nothing?(fb) ? 1.0e30 : qlbf-abs(fa - fb);
+   let ab = nothing?(fb) ? 1.0e30 : qlbf-abs(fb);
+   qlbf-cmp-go(a, b, i + 1, n, g > 0 ? cnt + 1 : cnt, g > ulp ? g : ulp, dd > md ? dd : md, ab > mb ? ab : mb);
+  };
+  def qlbf-compare(a, b, n) = len(a) != n * 4 || len(b) != n * 4 ? [n, 0, 1.0e30, 0.0] : qlbf-cmp-go(a, b, 0, n, 0, 0, 0.0, 0.0);
+  def qlbf-rel(c) = c[3] <= 0.0 ? 1.0e30 : c[2] / c[3];
+ }
+ 0;
+}

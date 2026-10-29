@@ -1,0 +1,152 @@
+// qwen-last-block-backward.bml — the backward of one rank-r LoRA pair on the last block's ffn_down, with the loss it answers to.
+//
+// Intent: rung 2 of the last-block LoRA ladder (docs/qwen-last-block-lora-design.md, sections C, D and E.2). The pair sits on
+// blk.L.ffn_down (layer-table slot 4, qlh-rr-slots): y = W act + scale * (act A) B with A [din = ff, r] and B [r, dout = d] in the
+// record shape qlh-rr-open mints and qlh-rr-apply enqueues. ffn_down is chosen over attn_output because its product lands directly
+// on the residual the block leaves: the gradient of a loss on the block's output reaches A and B through the residual add (identity)
+// and the pair alone. On attn_output the same gradient would first have to cross the FFN — rms backward, swiglu backward and two
+// frozen Q8 transposes (form_q8_tmm_f32, design C.1) — four kernels this body does not yet carry. The frozen W's own transpose is not
+// on this path at all: it carries dL/d(act), which no LoRA parameter needs.
+// The loss is mean squared distance between the block's output with the pair and a target row: the captured output shifted by a
+// known vector (loss = (1/N) sum (x2 - target)^2, N = T * d). It is exactly quadratic in every entry of A and of B, so a central
+// finite difference is exact in exact arithmetic for any epsilon; epsilon only trades against the f32 rounding of the block's own
+// output (ulp 6e-5 at |x| ~ 600). The loss is folded in fixed point (2^-36, exact 64-bit integer sums) so the difference of two
+// losses that differ in the 4th digit is read whole; a float fold would round it away.
+// Kernels: the forward is qlbf-forward (every serving kernel, rung 1) plus the pair's own dot/add (form_qwen_lora_rr_dot_f32 /
+// form_qwen_lora_rr_add_f32, qwen-lora-head.fk). The gradients are nam_matmul / nam_matmul_sk (native-affine-metal.bml; ta/tb flags):
+//   dB = u^T dy [r, dout]   du = dy B^T [T, r]   dA = act^T du [din, r]   with dy = (2 / N) * scale * diff.
+// New here, both named: form_hash_fill_f32 (a deterministic uniform fill in [-s, s) from an integer hash, so A, B and the target's
+// shift come from the device and no host list of 139,264 floats is built) and form_mse_fixed_f32 (diff = x - target written out,
+// sum of diff^2 in 2^-36 fixed point over one 256-thread group, answered as two u32 words).
+// Inputs: ps/geo/lay as qlbf-forward takes them, the captured xin and xout bytes (T x d f32), r, the fill scales. Effects: device
+// allocations the caller frees with qlbw-free. Stdin: none. Owner: form-stdlib/bml. No weight is read other than through qlbf-forward.
+// The pair's add lands on the residual after qlbf-forward's own final add (x2 = (x1 + W act) + delta rather than x1 + (W act + delta)):
+// the same function up to one f32 association, which the finite difference sees exactly as the analytic path does.
+import form-stdlib/bml/qwen-last-block-forward.bml;
+import form-stdlib/native-affine-metal.bml;
+section [form.bml] {
+ class QwenLastBlockBackward {
+  def qlbw-fixed-bits() = 36;
+  def qlbw-fixed-scale() = 68719476736;
+  def qlbw-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n"
+   ++ "kernel void form_hash_fill_f32(device float* out [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& seed [[buffer(2)]], constant float& scale [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint h = i * 2654435761u + seed * 40503u + 2654435769u; h ^= h >> 16; h *= 2146121005u; h ^= h >> 15; h *= 2221713035u; h ^= h >> 16; float u = float(h >> 8) * (1.0f / 16777216.0f); out[i] = scale * (2.0f * u - 1.0f); }\n"
+   ++ "kernel void form_mse_fixed_f32(device const float* x [[buffer(0)]], device const float* target [[buffer(1)]], device float* diff [[buffer(2)]], device uint* result [[buffer(3)]], constant uint& n [[buffer(4)]], uint t [[thread_index_in_threadgroup]]) { threadgroup ulong sums[256]; ulong s = 0; for (uint i = t; i < n; i += 256u) { float d = x[i] - target[i]; diff[i] = d; float d2 = min(d * d, 1048576.0f); s += ulong(d2 * 68719476736.0f); } sums[t] = s; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint w = 128u; w > 0u; w >>= 1u) { if (t < w) sums[t] += sums[t + w]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (t == 0u) { result[0] = uint(sums[0] & 4294967295ul); result[1] = uint(sums[0] >> 32); } }\n";
+  // ── the step's device state: a record of handles and shapes ──
+  // A [din, r], B [r, dout], u [T, r] in the qlh-rr record (slot 4), target/diff [T, d], result 2 u32, dA [din, r], dB [r, dout], du [T, r]
+  def qlbw-open(geo, lay, T, r, scale) {
+   let d = geo[0];
+   let ff = geo[10];
+   let tv = lay[4];
+   kth-tv-r(tv) != d || kth-tv-c(tv) != ff ? form_error("qwen last-block backward: ffn_down is " ++ kth-tv-r(tv).str() ++ " x " ++ kth-tv-c(tv).str() ++ ", the block's d x ff is " ++ d.str() ++ " x " ++ ff.str()) : {
+    let msl = qlbw-msl();
+    let fill = metal_pipeline(msl, "form_hash_fill_f32");
+    let mse = metal_pipeline(msl, "form_mse_fixed_f32");
+    let rmsl = qlh-rr-msl();
+    let dot = metal_pipeline(rmsl, "form_qwen_lora_rr_dot_f32");
+    let add = metal_pipeline(rmsl, "form_qwen_lora_rr_add_f32");
+    let ah = metal_buf_alloc(ff * r * 4);
+    let bh = metal_buf_alloc(r * d * 4);
+    let uh = metal_buf_alloc(r * T * 4);
+    let rec = [4, dot, add, ah, bh, uh, ff, r, d, md-f32-bits(scale), T];
+    record_new(0, "T", T, "d", d, "ff", ff, "r", r, "scale", scale, "fill", fill, "mse", mse, "rec", rec, "target", metal_buf_alloc(d * T * 4), "diff", metal_buf_alloc(d * T * 4), "result", metal_buf_alloc(16), "dA", metal_buf_alloc(ff * r * 4), "dB", metal_buf_alloc(r * d * 4), "du", metal_buf_alloc(r * T * 4));
+   };
+  }
+  def qlbw-handles(o) = [record_get(o, "rec")[3], record_get(o, "rec")[4], record_get(o, "rec")[5], record_get(o, "target"), record_get(o, "diff"), record_get(o, "result"), record_get(o, "dA"), record_get(o, "dB"), record_get(o, "du")];
+  def qlbw-ok?(o) = record_get(o, "fill") > 0 && record_get(o, "mse") > 0 && qlh-rr-valid?(record_get(o, "rec")) == 1 && q38-handles-ok?(qlbw-handles(o)) == 1;
+  def qlbw-free(o) = q38-free-handles(qlbw-handles(o));
+  // the bytes this step holds beside the forward's scratch (design D counts the pair, its gradient, the tape and the temporaries)
+  def qlbw-own-bytes(geo, T, r) = (2 * geo[10] * r + 2 * r * geo[0] + 2 * r * T + 2 * geo[0] * T) * 4 + 16;
+  // the design's D budget at this T and rank: tape + gradient temporaries per token, the pair x4 (param, grad, m, v), P + dP
+  def qlbw-design-budget(geo, T, r) = T * 2 * 139264 * 4 + 4 * 4 * r * (geo[10] + geo[0]) + 2 * geo[12] * T * T * 4;
+  // ── fills (serial batch; the caller syncs) ──
+  def qlbw-fill(o, h, n, seed, scale) = metal_enqueue(record_get(o, "fill"), md-bind([h], [n, seed, md-f32-bits(scale)]), n);
+  // A and B from the hash at their scales (a scale of 0.0 writes signed zeros; nam-zero writes +0.0 — the zero pair uses nam-zero)
+  def qlbw-seed-pair(o, aScale, bScale) {
+   let rec = record_get(o, "rec");
+   let fa = qlbw-fill(o, rec[3], rec[6] * rec[7], 11, aScale);
+   let fb = (Comparable) bScale == 0.0 ? nam-zero(rec[4], rec[7] * rec[8]) : qlbw-fill(o, rec[4], rec[7] * rec[8], 23, bScale);
+   nam-sync();
+  }
+  // target = xout + shift, shift uniform in [-s, s) from the hash (seed 37), staged through diff
+  def qlbw-seed-target(o, xout, s) {
+   let n = record_get(o, "T") * record_get(o, "d");
+   let wrote = metal_buf_write(record_get(o, "target"), 0, xout);
+   let f = qlbw-fill(o, record_get(o, "diff"), n, 37, s);
+   let a = nam-add(record_get(o, "target"), record_get(o, "diff"), record_get(o, "target"), n, 1.0);
+   let synced = nam-sync();
+   wrote;
+  }
+  // ── one loss evaluation: the block's forward from xin, the pair's add on the residual, diff and the fixed-point sum ──
+  // answers the fixed-point sum of diff^2 as an integer (exact); the loss is that / 2^36 / N
+  def qlbw-fixed(raw) = len(raw) != 8 ? nothing() : ln-u32-le(raw, 4) * 4294967296 + ln-u32-le(raw, 0);
+  def qlbw-eval(ps, geo, lay, sx, o, xin) {
+   let T = record_get(o, "T");
+   let n = T * geo[0];
+   let wrote = metal_buf_write(sx[0], 0, xin);
+   metal_batch_concurrent();
+   let ran = qlbf-forward(ps, geo, lay, sx, 0, T);
+   let applied = qlh-rr-apply(record_get(o, "rec"), sx[13], sx[0], T);
+   metal_enqueue(record_get(o, "mse"), md-bind16([sx[0], record_get(o, "target"), record_get(o, "diff"), record_get(o, "result")], [n], 256, 0, 1, 1), 1);
+   let raw = metal_buf_read(record_get(o, "result"), 0, 8);
+   applied == 1 ? qlbw-fixed(raw) : nothing();
+  }
+  def qlbw-loss(o, fixed) = nothing?(fixed) ? nothing() : (fixed + 0.0) / (qlbw-fixed-scale() + 0.0) / ((record_get(o, "T") * record_get(o, "d")) + 0.0);
+  // ── the analytic gradient at the point the last qlbw-eval left in diff and u (serial batch; reads wait) ──
+  def qlbw-grad(o, sx) {
+   let rec = record_get(o, "rec");
+   let T = record_get(o, "T");
+   let d = record_get(o, "d");
+   let ff = record_get(o, "ff");
+   let r = record_get(o, "r");
+   let dy = 2.0 * record_get(o, "scale") / ((T * d) + 0.0);
+   let gb = nam-mm(rec[5], record_get(o, "diff"), record_get(o, "dB"), r, T, d, 1, 0, dy, 0);
+   let gu = nam-mm(record_get(o, "diff"), rec[4], record_get(o, "du"), T, d, r, 0, 1, dy, 0);
+   let ga = nam-mm(sx[13], record_get(o, "du"), record_get(o, "dA"), ff, T, r, 1, 0, 1.0, 0);
+   nam-sync();
+  }
+  // ── single entries of a device buffer: read a float at index i, write one ──
+  def qlbw-read-at(h, i) {
+   let raw = metal_buf_read(h, i * 4, 4);
+   len(raw) == 4 ? ln-f32-decode(ln-u32-le(raw, 0)) : nothing();
+  }
+  def qlbw-write-at(h, i, x) = metal_buf_write(h, i * 4, [x + 0.0]) == 4 ? 1 : 0;
+  def qlbw-abs(v) = v < 0.0 ? 0.0 - v : v;
+  // the central finite difference of the loss in entry i of buffer h, against the analytic gradient g at the same entry:
+  // [analytic, finite difference, relative error, p+ - p-] with the perturbation read back from the device, not assumed
+  def qlbw-fd-entry(ps, geo, lay, sx, o, xin, h, gh, i, eps) {
+   let p = qlbw-read-at(h, i);
+   let g = qlbw-read-at(gh, i);
+   let w1 = qlbw-write-at(h, i, p + eps);
+   let pp = qlbw-read-at(h, i);
+   let fp = qlbw-eval(ps, geo, lay, sx, o, xin);
+   let w2 = qlbw-write-at(h, i, p - eps);
+   let pm = qlbw-read-at(h, i);
+   let fm = qlbw-eval(ps, geo, lay, sx, o, xin);
+   let w3 = qlbw-write-at(h, i, p);
+   let n = record_get(o, "T") * record_get(o, "d");
+   let fd = nothing?(fp) || nothing?(fm) || nothing?(pp) || nothing?(pm) || pp == pm ? nothing() : ((fp - fm) + 0.0) / (qlbw-fixed-scale() + 0.0) / (n + 0.0) / (pp - pm);
+   [g, fd, nothing?(fd) || nothing?(g) ? 1.0e30 : qlbw-rel(g, fd), nothing?(pp) || nothing?(pm) ? 0.0 : pp - pm];
+  }
+  // |g - fd| over the larger magnitude; two exact zeros agree
+  def qlbw-rel(g, fd) {
+   let big = qlbw-abs(g) > qlbw-abs(fd) ? qlbw-abs(g) : qlbw-abs(fd);
+   big <= 0.0 ? 0.0 : qlbw-abs(g - fd) / big;
+  }
+  // the windowed argmax of |xs|: the index of the largest magnitude in each of k equal windows (so a sampled A row carries activation)
+  def qlbw-pick-go(xs, i, hi, best, bestv) = nil?(xs) || i >= hi ? best : {
+   let v = qlbw-abs(xs[0]);
+   qlbw-pick-go(xs[1:], i + 1, hi, v > bestv ? i : best, v > bestv ? v : bestv);
+  };
+  def qlbw-pick-windows(xs, n, k, w, acc) = w >= k ? reverse(acc) : {
+   let lo = w * (n / k);
+   let hi = w + 1 == k ? n : (w + 1) * (n / k);
+   qlbw-pick-windows(xs, n, k, w + 1, cons(qlbw-pick-go(drop(lo, xs), lo, hi, lo, -1.0), acc));
+  };
+  // the last token's activation row, as floats (the forward left it in sx[13])
+  def qlbw-act-row(o, sx, t) {
+   let ff = record_get(o, "ff");
+   qlt-f32s(metal_buf_read(sx[13], t * ff * 4, ff * 4), ff);
+  }
+ }
+ 0;
+}

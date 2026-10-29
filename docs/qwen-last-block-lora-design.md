@@ -79,3 +79,108 @@ The last-block design wins because every gradient path is a dense op the body al
 ## Receipt
 
 Most surprising: the span prefill already carries a tap whose phase-0 call hands over exactly the activation this trainer needs (`:520-533`); the "capture" section is a destination buffer, not a kernel. Discomfort to gold: the Llama `nlb_*` kernels looked reusable until the stride and baked `rsqrt(d)` in `nlb_softmax` (`:11`) said otherwise — which forced the realization that `q38pa` already stores normalized P (`qwen38-prefill-attention.bml.lowfk:18`), so the backward can start from the serving forward's own probabilities. Frontier question, one word wide: **transpose** — does `Wᵀdy` over Q8_0 at 248,320 rows deserve a tiled kernel before rung 3, or after? Answer: after; the naive one costs 2.7 s a step at T=320 and the ladder is about correctness first, so write the tiled kernel only when the held-out loss has already fallen once.
+
+## Rung 1 observed (2026-10-28)
+
+Built and run on the worktree kernel (branch `offline-voice-iteration-2`, HEAD 829d0a670), by a rented mind over the body's own
+kernels; every number below is copied from the band's own print lines (`.hearth/qwen-rung-1/band-run-1.log`, `band-run-2.log`,
+`rung-1-receipt.json`).
+
+- **Doors.** `form/form-stdlib/bml/qwen-last-block-capture.bml` (the tap's destination: three device buffers of rows × d, filled by
+  pipeline 24 `form_copy_off_f32` at destination row `pos0` inside the prefill's own batch; `qlbc-write` lands `<name>.f32` raw
+  little-endian float32 rows plus a JSON sidecar with shape, dtype, bytes and ids) and `form/form-stdlib/bml/qwen-last-block-forward.bml`
+  (block L's forward written out dispatch by dispatch on trainer-owned scratch of 17 buffers, with the block's own K/V at
+  `pos0 .. pos0 + T` and the attention's score pitch set to `npos = pos0 + T`, so P sits contiguous as `[T × nq, npos]` in `sx[8]`).
+  The band is `form/form-stdlib/tests/qwen-last-block-band.bml`, verdict 15. **No tap was added**: the existing
+  `q38-lm-layers-span-t` tap (phase 0 at `l = 62` → input, phase 0 at `l = 63` → output, phase 1 → final residual) carried everything;
+  no kernel the design assumed was missing.
+- **Prompt.** ChatML of "Explain in two sentences why the sky is blue." through `q35-chat-ids`: 23 ids
+  (`248045 846 198 814 20139 303 1330 22157 3069 279 12515 369 6105 13 248046 198 248045 74455 198 248068 271 248069 271`). Block L = 63
+  (`kth-full?` yes), d 5120, heads 24/4 × 256, nrot 64.
+- **Captures.** `.hearth/qwen-rung-1/xin.f32`, `xout.f32`, `xfin.f32`: shape `[23, 5120]`, dtype f32, row-major token-major
+  little-endian, 471,040 bytes each, sidecars `xin.json` / `xout.json` / `xfin.json`. `xin` and `xout` differ in 416,850 of 471,040
+  bytes (the block did real work); `xout` and `xfin` are byte-identical (block 63 is the last layer: bit 2).
+- **Reproduction.** `max |reproduced − model|` = 0, `max |model|` = 621.0903930664062, relative 0; 0 of 117,760 words differ, widest
+  gap 0 ulp — in both runs. The band's bound (`qlbb-bound`) is therefore **0**: the reading, not a chosen number. The replay is
+  bit-identical because every dispatch is the serving kernel with the serving constants in the serving order (the matrix unit picks the
+  same association for the same shape), which is what E.1 set out to prove: kernel selection, the q/gate interleave by `ps[34]` at
+  offsets 0 and `hd` over the `convcap` pitch, QK-norm before partial RoPE, `nrot` 64, the output gate and the residual adds.
+- **Head.** output_norm → output.weight → argmax over the reproduced last row: 760; the model's own prefill said 760 (bit 8).
+- **Time.** prefill of 23 ids through all 64 layers with the tap: 31,252 ms (run 1), 33,956 ms (run 2); the block forward on the
+  trainer scratch: 43 ms / 32 ms; the whole band 50.9 s / 53.1 s wall, model open included. Memory: the governor read room
+  (machine 128.0 GiB, available 76.1 GiB) with a sibling lease (pid 29797) already sharing the 27.0 GiB file; the band took its own
+  lease and released it.
+- **Friction, observed and not diagnosed.** 31 s for a 23-position prefill is ~1.4 s a position, far from the lane's measured
+  204 µs/token batched (`q38-prefill-sliced-go` comment); the GPU was shared with the sibling lease during both runs. The band's
+  own number is the reading; the cause stays open and lies outside this rung's files.
+- **What rung 2 inherits.** `form_q38_rmsnorm_par_span_f32` keeps no `inv` per row (section B's `nam_rms` note stands); P is kept
+  normalized and contiguous at `sstride = npos` in `sx[8]`; the block's K/V are `sx[15]`/`sx[16]` at `kvd × npos`, the layout
+  `nlb_dkv` reads. `qlbf-compare` returns `[words differing, widest ulp, max |a − b|, max |b|]` and is the yardstick the next rung's
+  finite differences can reuse.
+
+## Rung 2 observed (2026-10-29)
+
+Door and band written by the first implementer of this step (branch `offline-voice-iteration-2`, kernel HEAD 829d0a670), first
+run here; every number below is copied from the band's own print lines (`.hearth/qwen-rung-2/band-run-1.log`, `band-run-2.log`,
+`rung-2-receipt.json`; the rung-1 rerun that preceded them is `rung1-before-4.log`).
+
+- **Doors.** `form/form-stdlib/bml/qwen-last-block-backward.bml` (the rank-r pair on `blk.63.ffn_down`, slot 4, in the
+  `qlh-rr-open` record shape: `y = W act + scale · (act A) B`, A `[ff = 17408, r]`, B `[r, d = 5120]`; the loss
+  `(1/N) Σ (x2 − target)²` with `target = xout + shift`; `qlbw-eval` = `qlbf-forward` + `qlh-rr-apply` + the loss fold, `qlbw-grad` =
+  three `nam-mm` products `dB = uᵀ dy`, `du = dy Bᵀ`, `dA = actᵀ du` with `dy = (2/N) · scale · diff`) and the band
+  `form/form-stdlib/tests/qwen-last-block-backward-band.bml`, verdict 15. **ffn_down, not attn_output**: its product lands on the
+  residual the block leaves, so the loss on the block's output reaches A and B through the identity of the residual add and the pair
+  alone; on attn_output the same gradient would first cross rms, swiglu and two frozen Q8 transposes. Two kernels are new, both in the
+  door: `form_hash_fill_f32` (a deterministic uniform fill from an integer hash, so A, B and the shift come from the device) and
+  `form_mse_fixed_f32` (diff written out; Σ diff² folded in 2⁻³⁶ fixed point over one 256-thread group as exact 64-bit integers, answered
+  as two u32 words — a float fold would round away a difference of two losses in the 4th digit). Every other dispatch is a serving or
+  affine kernel the body already carried (`qlbf-forward`, `form_qwen_lora_rr_dot/add_f32`, `nam_matmul_sk` for k ≤ 128, `nam_matmul`
+  for the 5120-deep `du`, `nam_add`, `nam_zero`).
+- **Of section C, nothing was missing and nothing was needed on this path**: `form_q8_tmm_f32`, `form_sig_mul_bwd_f32`,
+  `form_headrms_bwd_f32`, `form_partial_rope_inv_span_f32`, the strided attention backward, the qsplit scatter-back, `inv` per row and
+  the contiguous P all stay for the rungs whose pairs sit upstream of the FFN. The plan's rung-1 note that rung 2 "needs `inv` per
+  row" described the attn_output choice; the ffn_down choice needs neither.
+- **Zero pair (bit 1).** A seeded at scale 0.02, B = +0 through `nam_zero`: the forward through the pair's own dot and add is rung 1's
+  replay — 0 of 117,760 words differ from the capture, widest gap 0 ulp, max |x2 − model| 0 — and the loss reads 0.08293476031688939
+  (the hash shift in [−0.5, 0.5); s²/3 = 0.0833…). Zero-pair forward 78 ms (run 1) / 90 ms (run 2).
+- **Seeded pair.** A in [−0.02, 0.02), B in [−0.2, 0.2), scale 1.0: loss 1.0807729569247226; forward + analytic gradient 48 / 36 ms.
+  Epsilon 0.5 on B and 4.0 on A, both read back from the device: perturbations p⁺ − p⁻ of 1 (once 0.9999999701976776) on B and
+  8 (8.000000238418579, 7.999999761581421) on A. A rows sampled where the last token's |act| is largest in each of 8 windows:
+  26, 2964, 5117, 6844, 9675, 11571, 15158, 17405.
+- **Analytic against central finite difference, every entry** (analytic / fd / relative error):
+  dB[0,97] −0.001171054202131927 / −0.0011710542658598254 / 5.44e-08; dB[1,738] 0.0016831312095746398 / 0.0016831315071454888 /
+  1.77e-07; dB[2,1379] 0.001340224756859243 / 0.0013402246760842503 / 6.03e-08; dB[3,2020] 0.00021718010248150676 /
+  0.00021718008410575947 / 8.46e-08; dB[4,2661] −0.00037937716115266085 / −0.00037937716085905223 / 7.74e-10; dB[5,3302]
+  −3.0045115636312403e-05 / −3.004494765313707e-05 / 5.59e-06; dB[6,3943] −0.0003198876220267266 / −0.0003198875783947069 / 1.36e-07;
+  dB[7,4584] 6.214073073351756e-05 / 6.214075866167783e-05 / 4.49e-07. dA[26,0] −0.4170334041118622 / −0.4170200713186267 / 3.20e-05;
+  dA[2964,3] 0.1271846443414688 / 0.127190310223131 / 4.45e-05; dA[5117,6] −0.2002580165863037 / −0.20026835653705843 / 5.16e-05;
+  dA[6844,1] −0.4642181396484375 / −0.46423174989431404 / 2.93e-05; dA[9675,4] 0.053668491542339325 / 0.0536688708926823 / 7.07e-06;
+  dA[11571,7] 0.25702932476997375 / 0.2570298688052463 / 2.12e-06; dA[15158,2] 0.3902052342891693 / 0.390203753968594 / 3.79e-06;
+  dA[17405,5] −0.8856360912322998 / −0.8856360956213397 / 4.96e-09.
+  **Max relative error dB 5.591031080282419e-06, dA 5.163047689368592e-05** — the measured tolerance; the band's `qlbwb-bound-b/-a`
+  now hold exactly those readings (run 1 read them against the open bound 1e30; run 2, under a different GPU load — utilization 100
+  before run 1, 58 before run 2 — reproduced every loss, gradient and finite difference to the last printed digit, so the bound held
+  with equality). The 16 analytic values are an inspectable table, not a summary.
+- **Why dA reads 100× looser than dB (inferred, not measured).** The finite difference reads the loss through the block's f32
+  output at |x| ≈ 600 (ulp 6e-5) subtracted from a target of the same size, a diff of order one. A B entry moves one column of x2;
+  an A entry moves all 5120 columns of every token by scale · act · B · ε, so the FD's numerator is a sum of 117,760 rounded
+  differences, whose floor against the step is ~1e-5 relative. The dB path at 1e-7 .. 5e-6 shows the gradient arithmetic itself at the
+  f32 scale; dA shares that arithmetic (one more `nam_matmul_sk`) and differs only in what the yardstick can see. A base diff held
+  once (x1 + W act − target) with only the pair's delta varying would lower the floor; it is not built, since the rung's claim is
+  agreement within a measured bound, which it has.
+- **Memory (bit 8).** Counted: forward scratch 11,406,528 + step 2,385,360 = 13,791,888 bytes (13 MiB) against the design-D budget at
+  T 23, r 8 of 28,609,728 bytes (27 MiB); 26 handles taken, 26 freed. Machine around the step: available 53.1 → 51.5 GiB (run 1),
+  52.9 → 52.4 GiB (run 2), both "room"; the band's lease shared the 27.0 GiB file with a sibling drafter lease (pid 45940, own
+  9.3 GiB) beside a Q4_K_M lease (pid 44238) — the governor's reading before the step, `governor-before-2.log`: machine 128.0 GiB,
+  available 56.8 GiB, wired 51.4 GiB.
+- **Time.** 32 finite-difference forwards in 1228 / 1080 ms (34 ms a forward with the loss fold); the whole band 8.4 / 7.3 s wall,
+  model open included. The rung-1 rerun before it: verdict 15, prefill 11,818 ms (31–34 s the day before, same prompt, a different
+  neighbour load), replay 17 ms.
+- **Repaired in this step, before the first run.** `qlbw-fd-entry` took |fd| in an eager `let` before asking whether the two loss
+  readings had arrived, so a missing reading would have ended the band in an error instead of an entry that says so; the relative
+  error now goes through `qlbw-rel` only when both readings and both perturbations are present, and answers 1e30 otherwise. No
+  failure was witnessed on that path; the repair is structural.
+- **What rung 3 inherits.** The step record (`qlbw-open` / `qlbw-free`, `qlbw-own-bytes`), `qlbw-eval` as one loss evaluation,
+  `qlbw-grad` as the pair's gradient at the point the last evaluation left in `diff` and `u`, the exact loss fold and the hash fill.
+  Still unbuilt for E.3: the CE loss over the head (`nlb_ce` widened or `form_head_ce` batched), Adam on the pair (`nlb_adam` is
+  f32 and shape-free), and — only when a pair moves upstream of ffn_down — the frozen transposes of section C.
