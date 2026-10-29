@@ -14,6 +14,7 @@ section [form.bml] {
   def fcnv-default-model() = mr-name(mr-for-role("answer"));
   def fcnv-limit() = 1536;
   def fcnv-profile() = "knowledge-query";
+  def fcnv-open-by(open,packet,path,context) = open(fcsp-open-plain,path,packet,context ?? 0,fcnv-profile(),nothing?(context) ? fcnv-limit() : 0);
   def fcnv-allowance-valid(context,limit) = value_kind(limit)=="int" && limit > 0 && (nothing?(context) || value_kind(context)=="int" && context > 0);
   // Result: status, accepted text, prompt IDs, generated IDs, artifact path,
   // completion, release, reason, raw generation text, original generated IDs,
@@ -47,12 +48,9 @@ section [form.bml] {
     // stage's instant on its own record (form-cli-model-session.fk, the session's clock): the door reads the ask's
     // clocks back from it (fcms-clock-read) after the release, so prefill_ms is the prefill alone and decode_ms the
     // decode steps alone, with the admission wait and the open as their own spans.
-    let session = nothing?(context) ? fcms-open-reserved(path,packet,fcnv-limit(),fcnv-profile()) : fcms-open-with-profile(path,packet,context,fcnv-profile());
-    // This cursor walks one token at a time. Its unused speculative buffers
-    // are released before decoding; the coding quantum keeps its own drafter.
-    let spare = fcsp-owned(session);
-    let retired = fcsp-close(session);
-    let returned = spare > 0 && spare==retired ? mg-lease-return(record_get(fcsp-owner(session),"lease-bytes") ?? 0) : 0;
+    // This cursor walks one token at a time. Choose its plain owner at open so
+    // admission and prefill never carry an unused drafter or its hidden states.
+    let session = fcnv-open-by(fcms-open-sized-by,packet,path,context);
     let cursor = ftg-pulsing(ftg-intercept-with(512,ftg-next-reply()));
     record_set(cursor,"next-progress",limit);
     record_set(cursor,"observer",(stage,phase,c,generated) => fcnv-progress(cursor,limit,stage,phase,generated));
@@ -64,7 +62,7 @@ section [form.bml] {
     let ended = fcms-generation-session(generated);
     let released = fcms-release-ok?(ended);
     let clocks = fcms-clock-read(ended);
-    fcnv-admitted(fcnv-clocked(fcnv-read(generated,released && spare==retired,path),record_get(clocks,"prefill_ms") ?? 0,record_get(clocks,"decode_ms") ?? 0),record_get(clocks,"admission_ms"),record_get(clocks,"open_ms"));
+    fcnv-admitted(fcnv-clocked(fcnv-read(generated,released,path),record_get(clocks,"prefill_ms") ?? 0,record_get(clocks,"decode_ms") ?? 0),record_get(clocks,"admission_ms"),record_get(clocks,"open_ms"));
    };
   }
   // The compatibility field max_reply_tokens now asks for a progress signal.
@@ -85,8 +83,9 @@ section [form.bml] {
   def fcnv-lora-read(base,adapter,promptIds,spoken,released) {
    let text = spoken[0];
    let why = spoken[1];
-   let status = if ((String) trim(text) == "") then "empty" else "answered";
-   [status,if ((String) status == "answered") then text else "",promptIds,spoken[2],base,if ((String) why == "") then 1 else 0,released,if ((String) why == "") then status else why,text,[],adapter];
+   let complete = (String) why == "";
+   let status = !released ? "release-incomplete" : !complete ? "incomplete" : (String) trim(text) == "" ? "empty" : "answered";
+   [status,status == "answered" ? text : "",promptIds,spoken[2],base,complete,released,!released || complete ? status : why,text,[],adapter];
   }
   // The lane is chosen before it is spent, never tried and repeated. Opening the
   // weights and counting the packet's IDs costs a memory map; a forward pass costs
@@ -139,10 +138,12 @@ section [form.bml] {
    let admission = mca-admit(".hearth/voice-carrier.log",".hearth/voice-carrier.err");
    admission[0] == "standing" || admission[0] == "admitted" ? fcnv-ask-lane(packet,request) : fcnv-none("unavailable","","metal-carrier-" ++ admission[0] ++ ";exit=" ++ admission[1].str() ++ ";evidence=" ++ admission[2]);
   }
-  def fcnv-ask-lane(packet,request) = if ((String) fcnv-lane(request) == "lora") then fcnv-lora-admitted(packet,request,adm-admit("fcnv-lora",nlg-base(),adm-wait-ms())) else fcnv-ask-run(packet,request);
+  // Admission accounts for the opened weight file and releases the same key.
+  def fcnv-lora-weights() = nlg-base() ++ "/model.safetensors";
+  def fcnv-ask-lane(packet,request) = if ((String) fcnv-lane(request) == "lora") then fcnv-lora-admitted(packet,request,adm-admit("fcnv-lora",fcnv-lora-weights(),adm-wait-ms())) else fcnv-ask-run(packet,request);
   def fcnv-lora-admitted(packet,request,claim) = if (claim[0] == 1) then fcnv-lora-held(packet,request,claim[2]) else fcnv-none("unavailable",nlg-base(),("model-queued: " ++ claim[1]));
   def fcnv-lora-held(packet,request,ticket) {
-   defer adm-drop(nlg-base());
+   defer adm-drop(fcnv-lora-weights());
    let freed = adm-loaded(ticket);
    fcnv-ask-run(packet,request);
   }

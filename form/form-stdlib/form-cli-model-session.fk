@@ -221,23 +221,30 @@ section [form.bml] {
     def fcms-weights-bytes(path) = dls-weights-bytes(path);
     // The bytes this Qwen open allocates besides the mapped file. An unreadable
     // geometry keeps the unread margin, so a missing header never asks for less.
-    def fcms-qwen-own(src, maxpos) = {
+    def fcms-qwen-own(src, maxpos) = fcms-qwen-own-with(src, maxpos, fcma-span(maxpos));
+    def fcms-qwen-own-with(src, maxpos, span) = {
         let geo = q38-geo(src, maxpos);
-        geo[0] <= 0 || geo[21] <= 0 ? mg-kv-margin() : q38-own-bytes(geo, fcma-span(maxpos));
+        geo[0] <= 0 || geo[21] <= 0 ? mg-kv-margin() : q38-own-bytes(geo, span);
     };
     def fcms-admit-own(path, maxpos) = maxpos <= 0 ? mg-kv-margin() : {
         let src = fcmg-src(path);
-        (String) fcmg-arch(src) == "" || (String) fcmg-arch(src) == "deepseek4" ? mg-kv-margin() : fcms-qwen-own(src, maxpos);
+        // The load queue admits the existing minimum width. The final lease
+        // selects and accounts for the wider prefill before any allocation.
+        (String) fcmg-arch(src) == "" || (String) fcmg-arch(src) == "deepseek4" ? mg-kv-margin() : fcms-qwen-own-with(src, maxpos, fcma-floor(maxpos));
     };
     def fcms-memory-need(path) = fcms-weights-bytes(path) + mg-kv-margin();
     def fcms-memory-held(path, v, need) = {
         let said = print_str(mg-line("model session " ++ path, mg-need-of(v, need), v));
         fcms-none("host-memory-held:" ++ v[1]);
     };
-    def fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock) = {
-        let own = fcms-qwen-own(src, maxpos);
-        let granted = mg-lease("model session " ++ path, path, fcms-weights-bytes(path), own);
-        mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock) : fcms-memory-held(path, granted, fcms-weights-bytes(path) + own);
+    def fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span-lease) = {
+        let choice = span-lease(span => fcms-lease-span(path,src,maxpos,span),prompt-count);
+        let span = choice[0]; let granted = choice[1];
+        mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span) : fcms-memory-held(path, granted, fcms-weights-bytes(path) + fcms-qwen-own-with(src,maxpos,span));
+    };
+    def fcms-lease-span(path, src, maxpos, span) = {
+        let own = fcms-qwen-own-with(src,maxpos,span);
+        mg-lease("model session " ++ path, path, fcms-weights-bytes(path), own);
     };
     // A DeepSeek-V4 file, reached past the lane gate below (mr-wired? reads the registry's row for the arch: deepseek4 dsv4, wired): the chat template's ids from the file's own tokenizer, the lease
     // for the derived working set at this session's capacity (cut to the positions the driver serves), the driver's arena open, state and prefill (form-cli-model-ds4.fk). A refusal before the context exists
@@ -251,9 +258,8 @@ section [form.bml] {
     };
     def fcms-open-ds4(path, src, prompt, requested-maxpos, reserve) = fcms-ds4-session(path, src, fcds-open-parts(path, src, prompt, requested-maxpos, reserve));
     def fcms-ds4-session(path, src, parts) = (String) parts[0] == "live" ? fcms-session("live", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : len(parts[2]) > 0 ? fcms-session("nothing", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : fcms-none(parts[1]);
-    def fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock) = {
+    def fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span) = {
         let leased = fcms-clock-stamp(clock, "model-session-lease-granted");
-        let span = fcma-span(prompt-count);
         let _span = fcms-open-stage(clock, ("model-session-prefill-span-" + span.str()), 8388624);
         let _open-begin = fcms-open-stage(clock, "model-session-context-open-begin", 8388620);
         let ctx = (Comparable) iced == 1 ? qsx-open-span(path, maxpos, x, span) : q38-open-span(path, maxpos, span);
@@ -276,7 +282,7 @@ section [form.bml] {
                 // The speculative drafter opens before the prompt's prefill, so the prefill's own batches capture what it reads (form-cli-model-spec.fk).
                 // A refusal names its reason in the owner and the session opens plain.
                 let _spec-begin = fcms-open-stage(clock, "model-session-spec-open-begin", 8388626);
-                let spec = fcsp-open(path, ctx, maxpos);
+                let spec = spec-open(path, ctx, maxpos);
                 let _spec-ready = fcms-open-stage(clock, (Comparable) q38x-on?(spec) == 1 ? "model-session-spec-open-ready" : "model-session-spec-off", 8388626);
                 fcms-open-prefilled(path, src, maxpos, prompt-count, cursor, ids, live-cursor, ctx, sts, span, spec, clock);
             };
@@ -313,15 +319,20 @@ section [form.bml] {
     // The session's clock (fcms-clock-new) is born here, before the queue, so the wait for admission is its first span; the
     // session that comes back carries it (fcms-with-clock), opened or refused. An ask the queue did not admit has no grant
     // and no clock: its reading is nothing.
-    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = {
+    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = fcms-open-sized-using(fcsp-open, fcma-lease-fixed, path, prompt, requested-maxpos, profile, reserve);
+    // The voice chooses its decode owner and leases a wider prefill independently
+    // of the prompt profile. Ordinary sessions retain their fixed-width opener.
+    // Both retain the same tokenizer, complete prompt and release boundary.
+    def fcms-open-sized-by(spec-open, path, prompt, requested-maxpos, profile, reserve) = fcms-open-sized-using(spec-open, fcma-lease-span, path, prompt, requested-maxpos, profile, reserve);
+    def fcms-open-sized-using(spec-open, span-lease, path, prompt, requested-maxpos, profile, reserve) = {
         let clock = fcms-clock-new();
         let arrived = fcms-clock-stamp(clock, "admission-begin");
-        fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, clock, adm-admit-for("fcms-open", path, adm-wait-ms(), fcms-admit-own(path, requested-maxpos)));
+        fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, clock, adm-admit-for("fcms-open", path, adm-wait-ms(), fcms-admit-own(path, requested-maxpos)), spec-open, span-lease);
     };
-    def fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, clock, claim) = (Comparable) claim[0] == 1 ? fcms-open-held(path, prompt, requested-maxpos, profile, reserve, clock, claim[2]) : fcms-none(("model-queued: " + claim[1]));
-    def fcms-open-held(path, prompt, requested-maxpos, profile, reserve, clock, ticket) = {
+    def fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, clock, claim, spec-open, span-lease) = (Comparable) claim[0] == 1 ? fcms-open-held(path, prompt, requested-maxpos, profile, reserve, clock, claim[2], spec-open, span-lease) : fcms-none(("model-queued: " + claim[1]));
+    def fcms-open-held(path, prompt, requested-maxpos, profile, reserve, clock, ticket, spec-open, span-lease) = {
         let granted = fcms-clock-stamp(clock, "admission-granted");
-        let opened = fcms-open-body(path, prompt, requested-maxpos, profile, reserve, clock);
+        let opened = fcms-open-body(path, prompt, requested-maxpos, profile, reserve, clock, spec-open, span-lease);
         let loaded = adm-loaded(ticket);
         fcms-with-clock((Comparable) fcms-resident?(opened) == 1 ? opened : fcms-open-refused(opened, path), clock);
     };
@@ -329,7 +340,7 @@ section [form.bml] {
         let dropped = adm-drop(path);
         opened;
     };
-    def fcms-open-body(path, prompt, requested-maxpos, profile, reserve, clock) = {
+    def fcms-open-body(path, prompt, requested-maxpos, profile, reserve, clock, spec-open, span-lease) = {
         let _seal-begin = fcms-stage(clock, "model-session-seal-begin", 8388609);
         let verdict = qaf-seal-verdict(path);
         let _seal-complete = fcms-stage(clock, "model-session-seal-complete", 8388610);
@@ -374,7 +385,7 @@ section [form.bml] {
                     fcms-none("session-context-window-refused");
                 } : {
                     let _admit-begin = fcms-stage(clock, "model-session-open-prefill-begin", 8388611);
-                    let opened = fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock);
+                    let opened = fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span-lease);
                     let _admit-complete = fcms-stage(clock, "model-session-open-prefill-complete", 8388612);
                     (Comparable) live-cursor == 1 ? fcms-resident?(opened) ? fcmo-with-index(opened, qtlc-index(cursor)) : {
                         qtlc-release-index(qtlc-index(cursor));
