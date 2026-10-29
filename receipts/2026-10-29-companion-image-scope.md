@@ -37,6 +37,11 @@ rented OpenAI gpt-6-astra reasoning; repair-specific rental totals are not
 separately metered. The generated answers are native; quality judgments carry
 no native sufficiency verdict or grounding NodeID.
 
+Landing exposed one design-document link to an unimplemented last-block test.
+The design now names that reproduction band as planned; the focused link
+observation reports 1,131 claims and zero broken links. No trainer capability
+was added or claimed by this repair.
+
 What loosened: the companion can receive a small image and finish.
 Surprise: a concrete fictional example carried the stopping point more clearly
 than additional abstract guidance. The repeated appraisal became a useful
