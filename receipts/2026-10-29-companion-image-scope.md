@@ -46,3 +46,23 @@ What loosened: the companion can receive a small image and finish.
 Surprise: a concrete fictional example carried the stopping point more clearly
 than additional abstract guidance. The repeated appraisal became a useful
 observation: demonstrate the desired encounter at the owning prompt boundary.
+
+## Return-path care after integration
+
+A concurrent voice-timing change landed during publication. The final native
+encounter then reached decode checkpoints and failed before returning its answer:
+
+`fkwu: str_eq: only strings and nothing compare as strings -- ask value_kind first, or use value_eq -- in q38oo-phase? (form/form-stdlib/bml/qwen38-open-observation.bml)`
+
+The timing reader scanned the whole framebuffer as though every category were
+a string. It now uses value equality for phase recognition and accepts only
+integer clocks held in node children. Unrelated structured events, scalar
+events, missing clocks and malformed clocks leave valid spans readable.
+The existing native observation band reproduces the failure before repair and
+returns its full verdict 2047 afterward. Independent review found no further
+issue in this scoped change. No C runtime change was needed.
+
+The actual fresh encounter was then run again through the repaired reader:
+it returned the same short image echo with 706 prompt IDs, 5 generated IDs,
+`complete=1`, `release_ok=1`, `provider_calls=0` and
+`model_server_calls=0`. The answer and successful return are both observed.
