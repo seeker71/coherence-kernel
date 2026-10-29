@@ -5,6 +5,7 @@ import form-stdlib/organ-health.bml;
 import form-stdlib/native-llama-voice.bml;
 import form-stdlib/bml/form-token-grammar.bml;
 import form-stdlib/bml/local-run.bml;
+import form-stdlib/bml/qwen38-open-observation.bml;
 import form-stdlib/bml/model-admission.bml;
 import form-stdlib/metal-carrier.bml;
 section [form.bml] {
@@ -40,7 +41,11 @@ section [form.bml] {
     let cursor = ftg-pulsing(ftg-intercept-with(512,ftg-next-reply()));
     record_set(cursor,"next-progress",limit);
     record_set(cursor,"observer",(stage,phase,c,generated) => fcnv-progress(cursor,limit,stage,phase,generated));
+    // Decode is the generate call. The note is a stamp, not a peer line.
+    // Prefill stamps are the session's own begin and ready.
+    let _decode-begin = q38oo-note("voice-decode-begin", 0);
     let generated = ftg-generate-with(cursor,session,nothing(),"voice");
+    let _decode-ready = q38oo-note("voice-decode-ready", 0);
     let released = fcms-release-ok?(fcms-generation-session(generated));
     fcnv-read(generated,released && spare==retired,path);
    };
@@ -93,11 +98,18 @@ section [form.bml] {
   }
   def fcnv-lane(request) = if json-object-has?(request,"lane") then json-string-value(json-object-get(request,"lane")) else "";
   def fcnv-adapter(request) = if json-object-has?(request,"adapter") then json-string-value(json-object-get(request,"adapter")) else fcnv-adapter-default();
-  // Every ask is recorded where it is made (local-run.bml); the result is the voice's, unchanged. The registry-weights lane
+  // Every ask is recorded where it is made (local-run.bml), with the clocks this
+  // door can read: wall around the ask, prefill from the session's begin/ready
+  // stamps at or after `since`, decode from the generate notes. A missing span
+  // is 0, and 0 leaves that rate absent. The result is the voice's, unchanged. The registry-weights lane
   // queues for its weights at the one place every session opens (fcms-open-sized, model-admission.bml); the LoRA lane opens
   // its own small model here, so it queues at this door. Not admitted within the wait (adm-wait-ms, ten minutes unless
   // FORM_MODEL_ADMISSION_WAIT_MS says otherwise) an ask answers unavailable and names why.
-  def fcnv-ask(packet,request) = fcnv-recorded(fcnv-carrier-ready(packet,request));
+  def fcnv-ask(packet,request) {
+   let since = host_monotonic_ms();
+   let result = fcnv-carrier-ready(packet,request);
+   fcnv-recorded(result, host_monotonic_ms() - since, since);
+  }
   def fcnv-carrier-ready(packet,request) {
    let home = fs-mkdir(".hearth");
    let admission = mca-admit(".hearth/voice-carrier.log",".hearth/voice-carrier.err");
@@ -110,8 +122,10 @@ section [form.bml] {
    let freed = adm-loaded(ticket);
    fcnv-ask-run(packet,request);
   }
-  def fcnv-recorded(result) {
-   let kept = local-run-record(result);
+  def fcnv-recorded(result, wallMs, since) {
+   let prefill = q38oo-span-since("model-session-prefill-begin", "model-session-prefill-ready", since);
+   let decode = q38oo-span-since("voice-decode-begin", "voice-decode-ready", since);
+   let kept = local-run-record-timed(result, wallMs, prefill, decode);
    result;
   }
   def fcnv-ask-run(packet,request) {

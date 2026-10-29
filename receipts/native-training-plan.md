@@ -167,7 +167,8 @@ part, and that is work in the lane, not a role change (roles untouched).
 The LocalRun row (`form/form-stdlib/bml/local-run.bml`) now carries
 `wall_ms`, `prefill_tok_s` and `decode_tok_s` (`option`, absent when the
 caller did not time the ask; `local-run-record-timed` fills them, and rows
-from before the fields read on). The voice door still records untimed rows:
-its stage stamps are print lines, not values Form reads back, so the hook
-that passes them into `fcnv-recorded` is the next step and lies outside this
-step's files.
+from before the fields read on). The voice door records those clocks:
+`q38oo-note` keeps `host_monotonic_ms` as a child of the phase node, and
+`fcnv-recorded` passes wall, the session prefill span, and the generate
+span into `local-run-record-timed`. A missing span stays 0, so that rate
+stays absent. Rows written before this hook still read with the rates absent.
