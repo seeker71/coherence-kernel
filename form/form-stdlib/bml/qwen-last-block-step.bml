@@ -1,0 +1,115 @@
+// qwen-last-block-step.bml — twenty Adam steps on the last block's ffn_down pair, with a held-out loss.
+//
+// Intent: rung 3 of the last-block LoRA ladder (docs/qwen-last-block-lora-design.md, E.3). The loss and the gradient are rung 2's:
+// mean (x2 - target)^2, dA and dB through the pair alone. The step is Adam, the same update as nlb_adam (moments 0.9 / 0.999,
+// epsilon 1e-8, bias correction, clip of the pair's gradient to a max norm). Eight token-rows of the captured block are the
+// training rows; the next two are held out and never enter the gradient. The mean's N is the supervised elements, not the
+// whole capture, so a held-out row is absent rather than treated as already matched.
+// The cross-entropy over the head is not this rung. Rung 2 proved the gradient of this mean square; a step on an unproven
+// head gradient is the failure the ladder exists to catch. That kernel stays the next one.
+// Inputs: the rung-2 step record, the forward scratch, the captured xin, a learning rate and a step count. Effects: five
+// device buffers (mA, vA, mB, vB, the token gate) the caller frees with qlbs-free. Stdin: none. Owner: form-stdlib/bml.
+import form-stdlib/bml/qwen-last-block-backward.bml;
+section [form.bml] {
+ class QwenLastBlockStep {
+  def qlbs-train-rows() = 8;
+  def qlbs-held-rows() = 2;
+  def qlbs-steps() = 20;
+  // Adam's first step is a signed step of this size (nlb_adam: the bias-corrected moment cancels the gradient's
+  // magnitude). 1e-4 is the ladder's rate. A rate of 1 moved every entry by about 1 and the square sum left the
+  // fixed-point range; the loss then read negative, which is overflow, not descent.
+  def qlbs-lr() = 0.0001;
+  def qlbs-max-norm() = 1.0;
+  def qlbs-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n"
+   ++ "kernel void form_mse_gated_f32(device const float* x [[buffer(0)]], device const float* target [[buffer(1)]], device const float* gate [[buffer(2)]], device float* diff [[buffer(3)]], device uint* result [[buffer(4)]], constant uint& n [[buffer(5)]], constant uint& d [[buffer(6)]], uint t [[thread_index_in_threadgroup]]) { threadgroup ulong sums[256]; ulong s = 0; for (uint i = t; i < n; i += 256u) { float g = gate[i / d]; float dv = (x[i] - target[i]) * g; diff[i] = dv; float d2 = min(dv * dv, 1048576.0f); s += ulong(d2 * 68719476736.0f); } sums[t] = s; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint w = 128u; w > 0u; w >>= 1u) { if (t < w) sums[t] += sums[t + w]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (t == 0u) { result[0] = uint(sums[0] & 4294967295ul); result[1] = uint(sums[0] >> 32); } }\n"
+   ++ "kernel void form_lora_adam_f32(device float* p [[buffer(0)]], device const float* g [[buffer(1)]], device float* m [[buffer(2)]], device float* v [[buffer(3)]], constant uint& n [[buffer(4)]], constant float& lr [[buffer(5)]], constant float& b1 [[buffer(6)]], constant float& b2 [[buffer(7)]], constant float& c1 [[buffer(8)]], constant float& c2 [[buffer(9)]], constant float& eps [[buffer(10)]], constant float& clip [[buffer(11)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float gi = g[i] * clip; float mi = b1 * m[i] + (1.0f - b1) * gi; float vi = b2 * v[i] + (1.0f - b2) * gi * gi; m[i] = mi; v[i] = vi; p[i] -= lr * (mi / c1) / (sqrt(vi / c2) + eps); }\n";
+  def qlbs-open(o) {
+   let ff = record_get(o, "ff");
+   let r = record_get(o, "r");
+   let d = record_get(o, "d");
+   let T = record_get(o, "T");
+   let na = ff * r;
+   let nb = r * d;
+   let msl = qlbs-msl();
+   let mse = metal_pipeline(msl, "form_mse_gated_f32");
+   let adam = metal_pipeline(msl, "form_lora_adam_f32");
+   let mA = metal_buf_alloc(na * 4);
+   let vA = metal_buf_alloc(na * 4);
+   let mB = metal_buf_alloc(nb * 4);
+   let vB = metal_buf_alloc(nb * 4);
+   let mask = metal_buf_alloc(T * 4);
+   let z1 = nam-zero(mA, na);
+   let z2 = nam-zero(vA, na);
+   let z3 = nam-zero(mB, nb);
+   let z4 = nam-zero(vB, nb);
+   let synced = nam-sync();
+   record_new(0, "mse", mse, "adam", adam, "mA", mA, "vA", vA, "mB", mB, "vB", vB, "mask", mask, "na", na, "nb", nb);
+  }
+  def qlbs-handles(st) = [record_get(st, "mA"), record_get(st, "vA"), record_get(st, "mB"), record_get(st, "vB"), record_get(st, "mask")];
+  def qlbs-ok?(st) = record_get(st, "mse") > 0 && record_get(st, "adam") > 0 && q38-handles-ok?(qlbs-handles(st)) == 1;
+  def qlbs-free(st) = q38-free-handles(qlbs-handles(st));
+  def qlbs-own-bytes(geo, T, r) = (2 * geo[10] * r + 2 * r * geo[0]) * 4 + T * 4;
+  def qlbs-gate-one(i, lo, hi) = if i >= lo && i < hi then 1.0 else 0.0;
+  def qlbs-gates(i, n, lo, hi) = i >= n ? [] : cons(qlbs-gate-one(i, lo, hi), qlbs-gates(i + 1, n, lo, hi));
+  def qlbs-write-mask(st, o, lo, hi) {
+   let T = record_get(o, "T");
+   metal_buf_write(record_get(st, "mask"), 0, nam-f32s(qlbs-gates(0, T, lo, hi))) == T * 4 ? 1 : 0;
+  }
+  // the gated mean: qlbw-eval runs the block and the pair, then the gate kernel rewrites diff and the fixed-point sum
+  def qlbs-loss(ps, geo, lay, sx, o, st, xin, count) {
+   let ignored = qlbw-eval(ps, geo, lay, sx, o, xin);
+   let n = record_get(o, "T") * record_get(o, "d");
+   metal_enqueue(record_get(st, "mse"), md-bind16([sx[0], record_get(o, "target"), record_get(st, "mask"), record_get(o, "diff"), record_get(o, "result")], [n, record_get(o, "d")], 256, 0, 1, 1), 1);
+   let fixed = qlbw-fixed(metal_buf_read(record_get(o, "result"), 0, 8));
+   // A negative reconstruction is a wrapped ulong, the square sum having left the fixed-point range. That is not a loss.
+   nothing?(fixed) || fixed < 0 || count <= 0 ? nothing() : (fixed + 0.0) / (qlbw-fixed-scale() + 0.0) / ((count * record_get(o, "d")) + 0.0);
+  }
+  def qlbs-dy(o, count) = 2.0 * record_get(o, "scale") / ((count * record_get(o, "d")) + 0.0);
+  def qlbs-bias(b, step) = 1.0 - math_pow(b, step);
+  def qlbs-adam-one(st, p, g, m, v, n, lr, step, clip) = metal_enqueue(record_get(st, "adam"), md-bind([p, g, m, v], [n, md-f32-bits(lr), md-f32-bits(0.9), md-f32-bits(0.999), md-f32-bits(qlbs-bias(0.9, step)), md-f32-bits(qlbs-bias(0.999, step)), md-f32-bits(0.00000001), md-f32-bits(clip)]), n);
+  // one Adam update from the diff the last qlbs-loss left. A non-finite gradient leaves the pair where it is and answers nothing.
+  def qlbs-update(o, st, sx, lr, step, count) {
+   let sa = nam-stats(record_get(o, "dA"), record_get(st, "na"));
+   let sb = nam-stats(record_get(o, "dB"), record_get(st, "nb"));
+   let bad = sa[0] + sb[0];
+   let norm = math_sqrt(sa[1] + sb[1]);
+   let clip = norm > qlbs-max-norm() ? qlbs-max-norm() / norm : 1.0;
+   if bad > 0 then nothing() else qlbs-update-ok(o, st, lr, step, clip, norm);
+  }
+  def qlbs-update-ok(o, st, lr, step, clip, norm) {
+   let rec = record_get(o, "rec");
+   let a = qlbs-adam-one(st, rec[3], record_get(o, "dA"), record_get(st, "mA"), record_get(st, "vA"), record_get(st, "na"), lr, step, clip);
+   let b = qlbs-adam-one(st, rec[4], record_get(o, "dB"), record_get(st, "mB"), record_get(st, "vB"), record_get(st, "nb"), lr, step, clip);
+   let synced = nam-sync();
+   [norm, clip];
+  }
+  def qlbs-train-loss(ps, geo, lay, sx, o, st, xin) {
+   let wrote = qlbs-write-mask(st, o, 0, qlbs-train-rows());
+   wrote == 1 ? qlbs-loss(ps, geo, lay, sx, o, st, xin, qlbs-train-rows()) : nothing();
+  }
+  def qlbs-held-loss(ps, geo, lay, sx, o, st, xin) {
+   let wrote = qlbs-write-mask(st, o, qlbs-train-rows(), qlbs-train-rows() + qlbs-held-rows());
+   wrote == 1 ? qlbs-loss(ps, geo, lay, sx, o, st, xin, qlbs-held-rows()) : nothing();
+  }
+  // answers [train before, train after, held before, held after, steps taken, last gradient norm]
+  def qlbs-run(ps, geo, lay, sx, o, st, xin, lr) {
+   let held0 = qlbs-held-loss(ps, geo, lay, sx, o, st, xin);
+   let train0 = qlbs-train-loss(ps, geo, lay, sx, o, st, xin);
+   let walked = qlbs-walk(ps, geo, lay, sx, o, st, xin, lr, 0, train0, 0.0);
+   let train1 = qlbs-train-loss(ps, geo, lay, sx, o, st, xin);
+   let held1 = qlbs-held-loss(ps, geo, lay, sx, o, st, xin);
+   [train0, train1, held0, held1, walked[0], walked[1]];
+  }
+  def qlbs-walk(ps, geo, lay, sx, o, st, xin, lr, i, loss, norm) = if i >= qlbs-steps() || nothing?(loss) then [i, norm] else qlbs-walk-step(ps, geo, lay, sx, o, st, xin, lr, i, norm);
+  def qlbs-walk-step(ps, geo, lay, sx, o, st, xin, lr, i, norm) {
+   let g = qlbw-grad-at(o, sx, qlbs-dy(o, qlbs-train-rows()));
+   let updated = qlbs-update(o, st, sx, lr, i + 1, qlbs-train-rows());
+   if nothing?(updated) then [i, norm] else qlbs-walk-on(ps, geo, lay, sx, o, st, xin, lr, i, updated);
+  }
+  def qlbs-walk-on(ps, geo, lay, sx, o, st, xin, lr, i, updated) {
+   let next = qlbs-train-loss(ps, geo, lay, sx, o, st, xin);
+   qlbs-walk(ps, geo, lay, sx, o, st, xin, lr, i + 1, next, updated[0]);
+  }
+ }
+ 0;
+}

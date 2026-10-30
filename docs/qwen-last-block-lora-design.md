@@ -182,5 +182,27 @@ run here; every number below is copied from the band's own print lines (`.hearth
   failure was witnessed on that path; the repair is structural.
 - **What rung 3 inherits.** The step record (`qlbw-open` / `qlbw-free`, `qlbw-own-bytes`), `qlbw-eval` as one loss evaluation,
   `qlbw-grad` as the pair's gradient at the point the last evaluation left in `diff` and `u`, the exact loss fold and the hash fill.
-  Still unbuilt for E.3: the CE loss over the head (`nlb_ce` widened or `form_head_ce` batched), Adam on the pair (`nlb_adam` is
-  f32 and shape-free), and — only when a pair moves upstream of ffn_down — the frozen transposes of section C.
+  Adam on this pair is rung 3, below. Still unbuilt: the CE loss over the head (`nlb_ce` widened or `form_head_ce` batched),
+  and — only when a pair moves upstream of ffn_down — the frozen transposes of section C.
+
+## Rung 3 observed (2026-10-30)
+
+Door `form/form-stdlib/bml/qwen-last-block-step.bml`, band `form/form-stdlib/tests/qwen-last-block-step-band.bml`, verdict 7 in two
+runs (the second reproduced every printed loss and the gradient norm to the last digit; wall 185 / 192 ms for the steps, model
+open apart). The rung-1 captures were rewritten first (`qwen-last-block-band` verdict 15, prefill 12,056 ms, replay 8 ms, 0 words
+differ, head argmax 760). No new capture set: the 23-id row is the sequence. Tokens 0–7 are the eight training rows; tokens 8–9
+are held out and never enter `diff`. The loss is rung 2's mean square, the gradient is `qlbw-grad-at` with N = 8 × 5120.
+
+Adam is the `nlb_adam` update (moments 0.9 / 0.999, epsilon 1e-8, bias correction, clip to norm 1), learning rate 1e-4, twenty
+steps. A rate of 1 was run first and refused by the reading: every entry stepped by about 1, the square sum left the fixed-point
+range, and the reconstructed loss came back negative. A negative reconstruction is now `nothing()`, and the band asks for a
+non-negative descent over all twenty steps.
+
+| | before | after 20 steps |
+| --- | ---: | ---: |
+| train (8 rows) | 3.1072222511585776 | 0.27509687245846803 |
+| held out (2 rows) | 12.42888900463431 | 1.1003874898338721 |
+
+Last gradient norm 5.005819393980161. Handles freed 31 (forward scratch 17, pair and its gradient 9, Adam moments and the token
+gate 5). Events: `.hearth/qwen-rung-3/training-events.jsonl` (`round` and `validation` before step 0 and at step 20). The head's
+cross-entropy is still unbuilt; this rung steps the loss whose gradient was already checked.

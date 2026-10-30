@@ -290,5 +290,7 @@ Memory counted 13,791,888 bytes against the design-D budget 28,609,728; 26 of 26
 32 finite-difference forwards in 1,228 / 1,080 ms, band wall 8.4 / 7.3 s. No kernel of section C was
 needed on this path (two new in the door: `form_hash_fill_f32`, `form_mse_fixed_f32`); the plan's
 rung-1 note about `inv` per row described the attn_output choice. Detail: `docs/qwen-last-block-lora-design.md`,
-"Rung 2 observed". Rung 3 (20 steps on 8 rows, held-out loss) is next; it needs the CE loss over the
-head and Adam on the pair.
+"Rung 2 observed". Rung 3 is the Adam loop on that loss, observed 2026-10-30
+(`docs/qwen-last-block-lora-design.md`, "Rung 3 observed"): twenty steps, eight token-rows,
+two held out, train mean 3.1072222511585776 → 0.27509687245846803. The head's
+cross-entropy is still unbuilt.

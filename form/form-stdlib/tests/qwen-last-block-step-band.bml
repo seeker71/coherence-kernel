@@ -1,0 +1,86 @@
+// qwen-last-block-step-band.bml — rung 3: twenty Adam steps on eight token-rows of the captured last block, two rows held out.
+//
+// The captures rung 1 wrote are the sequence. The loss and the gradient are rung 2's mean square on ffn_down. Nothing is prefilled.
+//   1   the training mean falls across the twenty steps, and both readings are finite
+//   2   the held-out mean is read before the first step and after the last, both finite; those two rows never enter the gradient
+//   4   every handle the forward, the pair and the Adam state took is given back
+// Verdict 7. It needs the 27 GiB file, a Metal device and the rung-1 captures. A held lease answers 0.
+// REQUIRES: a live Metal device, /Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf, .hearth/qwen-rung-1/xin.f32 and xout.f32
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml form-stdlib/bml/qwen-last-block-step.bml
+section [form.bml] {
+ class QwenLastBlockStepBand {
+  def qlbsb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qlbsb-dir() = ".hearth/qwen-rung-3";
+  def qlbsb-captures() = ".hearth/qwen-rung-1";
+  def qlbsb-span() = 64;
+  def qlbsb-maxpos() = 128;
+  def qlbsb-rank() = 8;
+  def qlbsb-a-scale() = 0.02;
+  def qlbsb-b-scale() = 0.2;
+  def qlbsb-shift() = 0.5;
+  def qlbsb-say(s) = print_str("[qwen-last-block-step-band] " ++ s ++ "\n");
+  def qlbsb-last-full(geo) = geo[21] - 1;
+  def qlbsb-finite?(x) = !nothing?(x) && x >= 0.0 && x < 1.0e30;
+  def qlbsb-dir-ready(dir) = (Comparable) host_path_is_dir(dir) == 1 ? 1 : host_mkdir_mode(dir, 493);
+  def qlbsb-line(stage, step, rows, loss, norm) = "{\"stage\":\"" ++ stage ++ "\",\"optimizer_step\":" ++ step.str() ++ ",\"rows\":" ++ rows.str() ++ ",\"loss\":" ++ loss.str() ++ ",\"gradient_norm\":" ++ norm.str() ++ ",\"learning_rate\":" ++ qlbs-lr().str() ++ "}";
+  def qlbsb-run-all(ctx) {
+   let geo = ctx[2];
+   let L = qlbsb-last-full(geo);
+   let d = geo[0];
+   let lay = nth(ctx[3], L);
+   let xin = read_file(qlbsb-captures() ++ "/xin.f32") ?? "";
+   let xout = read_file(qlbsb-captures() ++ "/xout.f32") ?? "";
+   let T = len(xin) / (d * 4);
+   qlbsb-say("captures: T " ++ T.str() ++ " x d " ++ d.str() ++ "; block L = " ++ L.str() ++ "; train rows " ++ qlbs-train-rows().str() ++ ", held-out rows " ++ qlbs-held-rows().str() ++ ", steps " ++ qlbs-steps().str() ++ ", lr " ++ qlbs-lr().str());
+   len(xin) == 0 || len(xout) != len(xin) || T < qlbs-train-rows() + qlbs-held-rows() ? {
+    qlbsb-say("refused: the rung-1 captures are absent or shorter than the train and held-out rows");
+    0;
+   } : {
+    let o = qlbw-open(geo, lay, T, qlbsb-rank(), 1.0);
+    let st = qlbs-open(o);
+    let sx = qlbf-scratch(geo, 0, T);
+    !qlbw-ok?(o) || !qlbs-ok?(st) || !qlbf-ok?(sx) ? {
+     qlbsb-say("refused: the step's device state did not open");
+     let freed = qlbf-free(sx) + qlbw-free(o) + qlbs-free(st);
+     0;
+    } : {
+     let seeded = qlbw-seed-pair(o, qlbsb-a-scale(), qlbsb-b-scale());
+     let target = qlbw-seed-target(o, xout, qlbsb-shift());
+     let t0 = host_monotonic_ms();
+     let read = qlbs-run(ctx[0], geo, lay, sx, o, st, xin, qlbs-lr());
+     let t1 = host_monotonic_ms();
+     qlbsb-say("train loss " ++ read[0].str() ++ " -> " ++ read[1].str() ++ " over " ++ read[4].str() ++ " steps; held-out " ++ read[2].str() ++ " -> " ++ read[3].str() ++ "; last gradient norm " ++ read[5].str() ++ "; " ++ (t1 - t0).str() ++ " ms");
+     let dirok = qlbsb-dir-ready(qlbsb-dir());
+     let events = write_file(qlbsb-dir() ++ "/training-events.jsonl", qlbsb-line("round", 0, qlbs-train-rows(), read[0], 0.0) ++ "\n" ++ qlbsb-line("validation", 0, qlbs-held-rows(), read[2], 0.0) ++ "\n" ++ qlbsb-line("round", read[4], qlbs-train-rows(), read[1], read[5]) ++ "\n" ++ qlbsb-line("validation", read[4], qlbs-held-rows(), read[3], read[5]) ++ "\n");
+     let freed = qlbf-free(sx) + qlbw-free(o) + qlbs-free(st);
+     let b1 = qlbsb-finite?(read[0]) && qlbsb-finite?(read[1]) && read[1] < read[0] && read[4] == qlbs-steps() ? 1 : 0;
+     let b2 = qlbsb-finite?(read[2]) && qlbsb-finite?(read[3]) ? 2 : 0;
+     let b4 = freed == 17 + 9 + 5 ? 4 : 0;
+     let receipt = write_file(qlbsb-dir() ++ "/rung-3-receipt.json", "{\"band\":\"qwen-last-block-step-band\",\"layer\":" ++ L.str() ++ ",\"slot\":\"ffn_down\",\"ids\":" ++ T.str() ++ ",\"train_rows\":" ++ qlbs-train-rows().str() ++ ",\"held_rows\":" ++ qlbs-held-rows().str() ++ ",\"steps\":" ++ read[4].str() ++ ",\"learning_rate\":" ++ qlbs-lr().str() ++ ",\"train_before\":" ++ read[0].str() ++ ",\"train_after\":" ++ read[1].str() ++ ",\"held_before\":" ++ read[2].str() ++ ",\"held_after\":" ++ read[3].str() ++ ",\"gradient_norm\":" ++ read[5].str() ++ ",\"freed\":" ++ freed.str() ++ ",\"wall_ms\":" ++ (t1 - t0).str() ++ ",\"bits\":" ++ (b1 + b2 + b4).str() ++ "}\n");
+     qlbsb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ "; freed " ++ freed.str() ++ " handles");
+     b1 + b2 + b4;
+    };
+   };
+  }
+  def qlbsb-leased(path) {
+   let ctx = q38-open-span(path, qlbsb-maxpos(), qlbsb-span());
+   let verdict = (Comparable) q38-context-ok?(ctx) == 1 ? qlbsb-run-all(ctx) : 0;
+   let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
+   let unleased = mg-release();
+   verdict;
+  }
+  def qlbsb-open(path) {
+   let src = fcmg-src(path);
+   let geo = q38-geo(src, qlbsb-maxpos());
+   let own = fcms-qwen-own(src, qlbsb-maxpos()) + qlbf-scratch-bytes(geo, 0, qlbsb-span()) + qlbw-own-bytes(geo, qlbsb-span(), qlbsb-rank()) + qlbs-own-bytes(geo, qlbsb-span(), qlbsb-rank());
+   let granted = mg-lease("qwen last-block step band", path, fcms-weights-bytes(path), own);
+   !mg-granted?(granted) ? {
+    qlbsb-say("held: " ++ granted[1]);
+    0;
+   } : qlbsb-leased(path);
+  }
+  def qlbsb-run() = qlbsb-open(qlbsb-file());
+ }
+ qlbsb-run();
+}
