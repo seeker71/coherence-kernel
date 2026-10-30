@@ -1,0 +1,269 @@
+// qwen-last-block-train.bml — the rank-r LoRA pair on the last block's ffn_down learns from real rows through the frozen head.
+//
+// Intent: rung 3 of the last-block LoRA ladder (docs/qwen-last-block-lora-design.md, sections C, D and E.3). The pair of rung 2
+// (blk.L.ffn_down, slot 4: y = W act + scale * (act A) B) now answers to a cross-entropy loss on the next token, read through the
+// serving head — output_norm (the serving span rms kernel) and output.weight (the serving Q8_0 batched matmul) — on prompt-masked
+// readings rows: the loss counts the assistant's tokens only, as nld-prepare masks the 3B's rows. One row is one step (batch 1).
+// The new piece is the head's backward: dL/d(block output) = ((softmax - onehot) / count) through the frozen output.weight
+// transposed and then through output_norm's backward:
+//   nlb_ce            (native-llama-backward.bml, reused) dz[t, v] = (softmax(z[t]) - onehot(target[t])) * mask[t]; loss[t] per token
+//   form_q8_tmm_f32   (new, here) dh[t, c] = scale * sum_v dz[t, v] * W[v, c] over Q8_0 blocks — the batched sibling of
+//                     form_head_transpose (qwen-head-learning.bml): one threadgroup per 32 columns x 8 tokens, 8 vocab parts
+//   nlb_rms           (reused) dx = inv * dy * gain - x * inv^3 * mean(dy * gain * x), with inv per row from nam_rms (reused)
+// then the pair's gradient as rung 2 wrote it (dB = u^T dy, du = dy B^T, dA = act^T du) and Adam (nlb_adam, reused; bias-corrected,
+// clip 1.0). Adam rather than plain SGD: B starts at zero, so at step 0 dA = act^T (dy B^T) is exactly zero and dB is the only
+// signal; its entries sit orders of magnitude below A's (rung 2 read dB ~ 1e-3 at a loss of order one), so a plain step small enough
+// for A would not move B in 20 steps, while Adam's normalized step moves every entry by ~lr from the first step.
+// Rows: learn/draft-readings.jsonl, "messages" [user, assistant]; ids = ChatML prefix (qei-chat-ids: user turn, assistant header,
+// empty think block) ++ the assistant text's ids ++ <|im_end|>, cut to the cap (design D: 160); positions n = ids - 1, targets
+// ids[1:], mask 1 where the target index reaches the prefix. The assistant text is encoded through the tokfast index (qei-encode,
+// byte-identical to q35-encode and ten times cheaper) over at most qlbt-cut-bytes bytes (a UTF-8 boundary), enough for the cap.
+// Captures: the block input per row from one serving prefill with the rung-1 tap (qwen-last-block-capture.bml), written under a
+// directory as row-<k>-xin.f32 with a JSON sidecar naming the ids, and reused when the sidecar's ids are the row's.
+// Inputs: an open Qwen context (q38-open-span), the tokfast index, the rows' text. Effects: device allocations the caller frees with
+// qlbt-free; capture files; the export (qlbt-export: adapters.safetensors + adapter_config.json). Stdin: none. Owner: form-stdlib/bml.
+// No weight is written; the serving bs buffers are used only by the one-token serving-head check (qlbt-serve-loss).
+import form-stdlib/bml/qwen-last-block-backward.bml;
+import form-stdlib/bml/qwen-last-block-capture.bml;
+import form-stdlib/native-llama-backward.bml;
+import form-stdlib/q8-0-msl.fk;
+import form-stdlib/qwen35-encode-indexed.fk;
+import native/metal/qwen35-crystal.fk;
+import form-stdlib/json.fk;
+section [form.bml] {
+ class QwenLastBlockTrain {
+  def qlbt-cut-bytes() = 1200;
+  def qlbt-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" ++ q80-msl-spine() ++ q80-msl-weight()
+   ++ "kernel void form_q8_tmm_f32(device const uchar* w [[buffer(0)]], device const float* dy [[buffer(1)]], device float* dx [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant float& scale [[buffer(6)]], uint group [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) { threadgroup float sums[8][32][8]; uint cgroups = (cols + 31u) / 32u; uint cg = group % cgroups; uint tc = group / cgroups; uint c = cg * 32u + t % 32u; uint part = t / 32u; uint t0 = tc * 8u; float acc[8]; for (uint k = 0u; k < 8u; ++k) acc[k] = 0.0f; if (c < cols) { for (uint v = part; v < rows; v += 8u) { float wv = q80_w(w, v * cols + c); for (uint k = 0u; k < 8u; ++k) { uint tk = t0 + k; if (tk < ntok) acc[k] += wv * dy[tk * rows + v]; } } } for (uint k = 0u; k < 8u; ++k) sums[part][t % 32u][k] = acc[k]; threadgroup_barrier(mem_flags::mem_threadgroup); if (part == 0u && c < cols) { for (uint k = 0u; k < 8u; ++k) { uint tk = t0 + k; if (tk < ntok) { float s = 0.0f; for (uint p = 0u; p < 8u; ++p) s += sums[p][t % 32u][k]; dx[tk * cols + c] = s * scale; } } } }\n";
+  // ── rows: the readings file's lines, the first `want` accepted rows as [line, inputs, targets, mask, count, prefix, whole?, cut?] ──
+  def qlbt-lines-go(text, from, k, acc) {
+   let at = str_find(text, "\n", from);
+   at < 0 ? reverse(len(trim(substring(text, from, len(text)))) == 0 ? acc : cons([substring(text, from, len(text)), k], acc)) : qlbt-lines-go(text, at + 1, k + 1, len(trim(substring(text, from, at))) == 0 ? acc : cons([substring(text, from, at), k], acc));
+  }
+  def qlbt-lines(text) = qlbt-lines-go(text, 0, 1, []);
+  def qlbt-text(node, key) = node_value(json-object-get(node, key));
+  def qlbt-utf8-back(s, n) = n > 0 && str_byte_at(s, n) >= 128 && str_byte_at(s, n) < 192 ? qlbt-utf8-back(s, n - 1) : substring(s, 0, n);
+  def qlbt-utf8-cut(s, n) = len(s) <= n ? s : qlbt-utf8-back(s, n);
+  def qlbt-mask(n, offset, i) = i >= n ? [] : cons(i + 1 >= offset ? 1.0 : 0.0, qlbt-mask(n, offset, i + 1));
+  def qlbt-accepted?(doc) = json-object-has?(doc, "reading") && (String) qlbt-text(doc, "reading") == "accepted" && json-object-has?(doc, "messages");
+  def qlbt-row(src, x, doc, line, cap) {
+   let ms = json-array-elements(json-object-get(doc, "messages"));
+   let user = qlbt-text(ms[0], "content");
+   let asst = qlbt-text(ms[len(ms) - 1], "content");
+   let prefix = qei-chat-ids(src, x, user);
+   let body = qei-encode(src, x, qlbt-utf8-cut(asst, qlbt-cut-bytes()));
+   let all = append(prefix, append(body, [qei-special-id(src, x, "<|im_end|>")]));
+   let ids = len(all) > cap ? take(cap, all) : all;
+   let n = len(ids) - 1;
+   let mask = qlbt-mask(n, len(prefix), 0);
+   [line, take(n, ids), ids[1:], mask, float_to_int(sum(mask)), len(prefix), len(all) <= cap ? 1 : 0, len(asst) > qlbt-cut-bytes() ? 1 : 0];
+  }
+  def qlbt-rows-go(src, x, lines, cap, want, acc) = nil?(lines) || len(acc) >= want ? reverse(acc) : {
+   let doc = parse-json("readings-row", lines[0][0]);
+   qlbt-rows-go(src, x, lines[1:], cap, want, qlbt-accepted?(doc) ? cons(qlbt-row(src, x, doc, lines[0][1], cap), acc) : acc);
+  };
+  def qlbt-rows(src, x, text, cap, want) = qlbt-rows-go(src, x, qlbt-lines(text), cap, want, []);
+  def qlbt-row-n(row) = len(row[1]);
+  def qlbt-row-count(row) = row[4];
+  def qlbt-ids-text(ids) = foldl((acc, v) => acc ++ (len(acc) == 0 ? "" : ",") ++ v.str(), "", ids);
+  // ── captures: the block input per row, cached under dir by the row's ids ──
+  def qlbt-ids-of(node) = map(e => node_value(e), json-array-elements(node));
+  def qlbt-same-ids?(a, b) = len(a) != len(b) ? 0 : nil?(a) ? 1 : (Comparable) a[0] == b[0] ? qlbt-same-ids?(a[1:], b[1:]) : 0;
+  def qlbt-sidecar-matches?(text, ids) = len(text) == 0 ? 0 : qlbt-same-ids?(qlbt-ids-of(json-object-get(parse-json("capture-sidecar", text), "ids")), ids);
+  def qlbt-capture-path(dir, row) = dir ++ "/row-" ++ row[0].str() ++ "-xin.f32";
+  def qlbt-sidecar-path(dir, row) = dir ++ "/row-" ++ row[0].str() ++ "-xin.json";
+  // [bytes (n x d f32, "" when the prefill did not land), prefill ms, from cache?]
+  def qlbt-capture(ctx, L, dir, row, cap) {
+   let d = ctx[2][0];
+   let n = qlbt-row-n(row);
+   let cached = read_file(qlbt-capture-path(dir, row)) ?? "";
+   let side = read_file(qlbt-sidecar-path(dir, row)) ?? "";
+   len(cached) == n * d * 4 && qlbt-sidecar-matches?(side, row[1]) == 1 ? [cached, 0, 1] : qlbt-prefill(ctx, L, dir, row, cap);
+  }
+  def qlbt-prefill(ctx, L, dir, row, cap) {
+   let d = ctx[2][0];
+   let n = qlbt-row-n(row);
+   let o = qlbc-open(ctx, L, cap);
+   let sts = q38-new-state(ctx[2]);
+   let t0 = host_monotonic_ms();
+   let r = qlbc-prefill(o, sts, row[1]);
+   let t1 = host_monotonic_ms();
+   let raw = qlbc-bytes(o, "xin");
+   let landed = r[2] == n && len(raw) == n * d * 4 ? 1 : 0;
+   let wrote = landed == 1 ? write_file(qlbt-capture-path(dir, row), raw) : 0;
+   let sidew = landed == 1 ? write_file(qlbt-sidecar-path(dir, row), "{\"name\":\"xin\",\"line\":" ++ row[0].str() ++ ",\"layer\":" ++ L.str() ++ ",\"shape\":[" ++ n.str() ++ "," ++ d.str() ++ "],\"dtype\":\"f32\",\"layout\":\"row-major token-major little-endian\",\"bytes\":" ++ wrote.str() ++ ",\"ids\":[" ++ qlbt-ids-text(row[1]) ++ "]}\n") : 0;
+   let freed = qlbc-free(o) + q38-free-state(sts);
+   [landed == 1 ? raw : "", t1 - t0, 0];
+  }
+  // ── the step's device state ──
+  // rec: the qlh-rr record on slot 4 (A [ff, r], B [r, d], u [ncap, r]); logits/dz [ncap, vocab]; loss/mask/targets/inv [ncap];
+  // hn/nrm/dh/dres [ncap, d]; dA/mA/vA [ff, r]; dB/mB/vB [r, d]; du [ncap, r]; t1/m1/l1 one entry each and dz1 [vocab] for the
+  // one-token serving-head check
+  def qlbt-open(geo, lay, onormTv, ncap, r, scale) {
+   let d = geo[0];
+   let ff = geo[10];
+   let vocab = geo[19];
+   let tv = lay[4];
+   kth-tv-r(tv) != d || kth-tv-c(tv) != ff ? form_error("qwen last-block train: ffn_down is " ++ kth-tv-r(tv).str() ++ " x " ++ kth-tv-c(tv).str() ++ ", the block's d x ff is " ++ d.str() ++ " x " ++ ff.str())
+   : (Comparable) kth-tv-ty(onormTv) != 0 ? form_error("qwen last-block train: output_norm.weight is ggml type " ++ kth-tv-ty(onormTv).str() ++ ", the norm backward reads f32") : {
+    let tmm = metal_pipeline(qlbt-msl(), "form_q8_tmm_f32");
+    let ce = metal_pipeline(nlb-msl(), "nlb_ce");
+    let fill = metal_pipeline(qlbw-msl(), "form_hash_fill_f32");
+    let rmsl = qlh-rr-msl();
+    let dot = metal_pipeline(rmsl, "form_qwen_lora_rr_dot_f32");
+    let add = metal_pipeline(rmsl, "form_qwen_lora_rr_add_f32");
+    let ah = metal_buf_alloc(ff * r * 4);
+    let bh = metal_buf_alloc(r * d * 4);
+    let uh = metal_buf_alloc(r * ncap * 4);
+    let rec = [4, dot, add, ah, bh, uh, ff, r, d, md-f32-bits(scale), ncap];
+    record_new(0, "ncap", ncap, "d", d, "ff", ff, "r", r, "vocab", vocab, "scale", scale, "tmm", tmm, "ce", ce, "fill", fill, "rec", rec,
+     "logits", metal_buf_alloc(vocab * ncap * 4), "dz", metal_buf_alloc(vocab * ncap * 4), "loss", metal_buf_alloc(ncap * 4), "mask", metal_buf_alloc(ncap * 4), "targets", metal_buf_alloc(ncap * 4),
+     "hn", metal_buf_alloc(d * ncap * 4), "nrm", metal_buf_alloc(d * ncap * 4), "inv", metal_buf_alloc(ncap * 4), "dh", metal_buf_alloc(d * ncap * 4), "dres", metal_buf_alloc(d * ncap * 4),
+     "dA", metal_buf_alloc(ff * r * 4), "mA", metal_buf_alloc(ff * r * 4), "vA", metal_buf_alloc(ff * r * 4), "dB", metal_buf_alloc(r * d * 4), "mB", metal_buf_alloc(r * d * 4), "vB", metal_buf_alloc(r * d * 4), "du", metal_buf_alloc(r * ncap * 4),
+     "t1", metal_buf_alloc(16), "m1", metal_buf_alloc(16), "l1", metal_buf_alloc(16), "dz1", metal_buf_alloc(vocab * 4));
+   };
+  }
+  def qlbt-names() = ["logits", "dz", "loss", "mask", "targets", "hn", "nrm", "inv", "dh", "dres", "dA", "mA", "vA", "dB", "mB", "vB", "du", "t1", "m1", "l1", "dz1"];
+  def qlbt-handles(o) = append([record_get(o, "rec")[3], record_get(o, "rec")[4], record_get(o, "rec")[5]], map(k => record_get(o, k), qlbt-names()));
+  def qlbt-ok?(o) = record_get(o, "tmm") > 0 && record_get(o, "ce") > 0 && record_get(o, "fill") > 0 && qlh-rr-valid?(record_get(o, "rec")) == 1 && q38-handles-ok?(qlbt-handles(o)) == 1;
+  def qlbt-free(o) = q38-free-handles(qlbt-handles(o));
+  def qlbt-handle-count() = 24;
+  // the bytes this step holds beside the forward's scratch
+  def qlbt-own-bytes(geo, ncap, r) = (4 * geo[10] * r + 4 * r * geo[0] + 2 * r * ncap + 2 * geo[19] * ncap + 4 * ncap + 4 * geo[0] * ncap + geo[19]) * 4 + 48;
+  // design D at this T and rank: tape + gradient temporaries per token, logits + dz, P + dP, the pair x4 (param, grad, m, v)
+  def qlbt-design-budget(geo, T, r) = T * 2 * 139264 * 4 + 2 * geo[19] * T * 4 + 2 * geo[12] * T * T * 4 + 4 * 4 * r * (geo[10] + geo[0]);
+  // A from the hash at aScale, B = +0, the moments +0 (serial batch; synced)
+  def qlbt-seed(o, aScale) {
+   let rec = record_get(o, "rec");
+   let fa = metal_enqueue(record_get(o, "fill"), md-bind([rec[3]], [rec[6] * rec[7], 11, md-f32-bits(aScale)]), rec[6] * rec[7]);
+   let zb = nam-zero(rec[4], rec[7] * rec[8]);
+   let z1 = nam-zero(record_get(o, "mA"), rec[6] * rec[7]);
+   let z2 = nam-zero(record_get(o, "vA"), rec[6] * rec[7]);
+   let z3 = nam-zero(record_get(o, "mB"), rec[7] * rec[8]);
+   let z4 = nam-zero(record_get(o, "vB"), rec[7] * rec[8]);
+   nam-sync();
+  }
+  // ── one loss evaluation of a row: the block's forward from the capture, the pair, output_norm, output.weight, the token losses ──
+  // answers the per-token losses (n floats; masked tokens read 0), or nothing; dz is left on the device for the backward
+  def qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, row, xin) {
+   let n = qlbt-row-n(row);
+   let d = geo[0];
+   let vocab = geo[19];
+   let wrote = metal_buf_write(sx[0], 0, xin);
+   let wt = metal_buf_write(record_get(o, "targets"), 0, md-le32-list(row[2], ""));
+   let wm = metal_buf_write(record_get(o, "mask"), 0, nam-f32s(row[3]));
+   metal_batch_concurrent();
+   let ran = qlbf-forward(ps, geo, lay, sx, 0, n);
+   let applied = qlh-rr-apply(record_get(o, "rec"), sx[13], sx[0], n);
+   q38-rms-span(ps, sx[0], onormTv, record_get(o, "hn"), d, geo[6], n, 1);
+   q38-mv-batch(ps, projTv, record_get(o, "hn"), record_get(o, "logits"), n, 1);
+   metal_enqueue(record_get(o, "ce"), md-bind16([record_get(o, "logits"), record_get(o, "targets"), record_get(o, "dz"), record_get(o, "loss"), record_get(o, "mask")], [vocab, n, md-f32-bits(1.0), md-f32-bits(1.0)], 32, 0, 1, 1), n);
+   let raw = metal_buf_read(record_get(o, "loss"), 0, n * 4);
+   let losses = applied == 1 && wrote == len(xin) && len(raw) == n * 4 ? qlt-f32s(raw, n) : [];
+   len(losses) == n ? losses : nothing();
+  }
+  def qlbt-mean(losses, count) = nothing?(losses) || count <= 0 ? nothing() : sum(losses) / (count + 0.0);
+  // ── the backward at the point the last qlbt-eval left in sx and dz (serial batch; synced) ──
+  // inv per row (nam_rms into a scratch norm), dh = (1/count) dz W^T over Q8_0, dres = rms backward, then the pair's dB, du, dA
+  def qlbt-backward(geo, sx, o, onormTv, projTv, n, count) {
+   let d = geo[0];
+   let ff = geo[10];
+   let r = record_get(o, "r");
+   let vocab = geo[19];
+   let rec = record_get(o, "rec");
+   let scale = record_get(o, "scale");
+   let rm = nam-rms(sx[0], kth-tv-h(onormTv), record_get(o, "nrm"), record_get(o, "inv"), d, n, ln-f32-decode(geo[6]));
+   let th = metal_enqueue(record_get(o, "tmm"), md-bind16([kth-tv-h(projTv), record_get(o, "dz"), record_get(o, "dh")], [vocab, d, n, md-f32-bits(1.0 / (count + 0.0))], 256, 0, 1, 0), ((d + 31) / 32) * ((n + 7) / 8));
+   let rb = nlb-rms(sx[0], kth-tv-h(onormTv), record_get(o, "inv"), record_get(o, "dh"), record_get(o, "dres"), d, n);
+   let gb = nam-mm(rec[5], record_get(o, "dres"), record_get(o, "dB"), r, n, d, 1, 0, scale, 0);
+   let gu = nam-mm(record_get(o, "dres"), rec[4], record_get(o, "du"), n, d, r, 0, 1, scale, 0);
+   let ga = nam-mm(sx[13], record_get(o, "du"), record_get(o, "dA"), ff, n, r, 1, 0, 1.0, 0);
+   th < 0 ? form_error("qwen last-block train: the transposed head dispatch was refused") : nam-sync();
+  }
+  // the gradient's health: [non-finite entries, |g|^2] over dA and dB
+  def qlbt-grad-health(o) {
+   let rec = record_get(o, "rec");
+   let a = nam-stats(record_get(o, "dA"), rec[6] * rec[7]);
+   let b = nam-stats(record_get(o, "dB"), rec[7] * rec[8]);
+   [a[0] + b[0], a[1] + b[1]];
+  }
+  // one Adam step on A and B (step counts from 1); refuses a non-finite gradient by name, the weights unchanged
+  def qlbt-step(o, lr, step) {
+   let rec = record_get(o, "rec");
+   let health = qlbt-grad-health(o);
+   health[0] > 0 ? form_error("qwen last-block train: non-finite gradient at step " ++ step.str() ++ "; weights unchanged") : {
+    let a = nlb-adam-one(rec[3], record_get(o, "dA"), record_get(o, "mA"), record_get(o, "vA"), rec[6] * rec[7], lr, step, 1.0);
+    let b = nlb-adam-one(rec[4], record_get(o, "dB"), record_get(o, "mB"), record_get(o, "vB"), rec[7] * rec[8], lr, step, 1.0);
+    let synced = nam-sync();
+    math_sqrt(health[1]);
+   };
+  }
+  // ── the serving head's own loss on one token: the block output row t into the serving bs, output_norm, output.weight, CE ──
+  def qlbt-serve-loss(ctx, o, sx, t, target) {
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let d = geo[0];
+   let rowb = metal_buf_read(sx[0], t * d * 4, d * 4);
+   let w = metal_buf_write(bs[0], 0, rowb);
+   let wt = metal_buf_write(record_get(o, "t1"), 0, md-le32-list([target], ""));
+   let wm = metal_buf_write(record_get(o, "m1"), 0, nam-f32s([1.0]));
+   metal_batch_concurrent();
+   q38-rms(ps, bs[0], ctx[5], bs[1], d, geo[6], 1);
+   q38-mv(ps, ctx[6], bs[1], bs[28], 1);
+   metal_enqueue(record_get(o, "ce"), md-bind16([bs[28], record_get(o, "t1"), record_get(o, "dz1"), record_get(o, "l1"), record_get(o, "m1")], [geo[19], 1, md-f32-bits(1.0), md-f32-bits(1.0)], 32, 0, 1, 1), 1);
+   let raw = metal_buf_read(record_get(o, "l1"), 0, 4);
+   len(raw) == 4 && len(rowb) == d * 4 ? ln-f32-decode(ln-u32-le(raw, 0)) : nothing();
+  }
+  // the same-sign u32 distance of two f32 values (0 when they are one word)
+  def qlbt-ulp(a, b) {
+   let wa = md-f32-bits(a);
+   let wb = md-f32-bits(b);
+   wa > wb ? wa - wb : wb - wa;
+  }
+  // ── the central finite difference of the mean loss in entry i of B against the analytic dB[i] (computed at the base point) ──
+  // [analytic, finite difference, relative error, p+ - p-, loss+, loss-]
+  def qlbt-fd-b(ps, geo, lay, onormTv, projTv, sx, o, row, xin, i, eps) {
+   let h = record_get(o, "rec")[4];
+   let count = qlbt-row-count(row);
+   let p = qlbw-read-at(h, i);
+   let g = qlbw-read-at(record_get(o, "dB"), i);
+   let w1 = qlbw-write-at(h, i, p + eps);
+   let pp = qlbw-read-at(h, i);
+   let fp = qlbt-mean(qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, row, xin), count);
+   let w2 = qlbw-write-at(h, i, p - eps);
+   let pm = qlbw-read-at(h, i);
+   let fm = qlbt-mean(qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, row, xin), count);
+   let w3 = qlbw-write-at(h, i, p);
+   let fd = nothing?(fp) || nothing?(fm) || nothing?(pp) || nothing?(pm) || pp == pm ? nothing() : (fp - fm) / (pp - pm);
+   [g, fd, nothing?(fd) || nothing?(g) ? 1.0e30 : qlbw-rel(g, fd), nothing?(pp) || nothing?(pm) ? 0.0 : pp - pm, fp, fm];
+  }
+  // ── export: A and B as F32 safetensors (blk.L.ffn_down.weight.lora_a [ff, r], .lora_b [r, d]) and adapter_config.json ──
+  def qlbt-st-entry(name, shape, begin, bytes) = "\"" ++ name ++ "\":{\"dtype\":\"F32\",\"shape\":[" ++ shape ++ "],\"data_offsets\":[" ++ begin.str() ++ "," ++ (begin + bytes).str() ++ "]}";
+  def qlbt-pad8(s) = len(s) % 8 == 0 ? s : qlbt-pad8(s ++ " ");
+  def qlbt-dir-ready(dir) = (Comparable) host_path_is_dir(dir) == 1 ? 1 : host_mkdir_mode(dir, 493);
+  // [safetensors bytes written, bytes expected, config bytes written, a-name, b-name]
+  def qlbt-export(o, L, dir, config) {
+   let rec = record_get(o, "rec");
+   let ff = rec[6];
+   let r = rec[7];
+   let d = rec[8];
+   let a = metal_buf_read(rec[3], 0, ff * r * 4);
+   let b = metal_buf_read(rec[4], 0, r * d * 4);
+   let an = qlh-rr-name(L, "ffn_down", "a");
+   let bn = qlh-rr-name(L, "ffn_down", "b");
+   let h = qlbt-pad8("{" ++ qlbt-st-entry(an, ff.str() ++ "," ++ r.str(), 0, len(a)) ++ "," ++ qlbt-st-entry(bn, r.str() ++ "," ++ d.str(), len(a), len(b)) ++ "}");
+   let dirok = qlbt-dir-ready(dir);
+   let wrote = len(a) == ff * r * 4 && len(b) == r * d * 4 ? write_file(dir ++ "/adapters.safetensors", md-le32(len(h)) ++ md-le32(0) ++ h ++ a ++ b) : 0;
+   let cfg = write_file(dir ++ "/adapter_config.json", config);
+   [wrote, 8 + len(h) + ff * r * 4 + r * d * 4, cfg, an, bn];
+  }
+  // the export read back: [whole?, pairs, rank, dtype, a begins at 0?, b begins after a?, file bytes]
+  def qlbt-export-read(dir, an, bn, abytes) {
+   let path = dir ++ "/adapters.safetensors";
+   let h = la-header(path);
+   [la-whole?(path), la-pairs(h), la-rank-of(h), la-dtype(h), ln-tensor-begin(h, an) == 0 ? 1 : 0, ln-tensor-begin(h, bn) == abytes ? 1 : 0, file_size(path)];
+  }
+ }
+ 0;
+}

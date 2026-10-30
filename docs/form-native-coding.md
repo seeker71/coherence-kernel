@@ -866,8 +866,7 @@ distinct approaches (`form-stdlib/bml/native-turn-ladder.bml`), each an option o
 coherence check: a gap whose band reads above its `full`, or whose own `; Verdict n` head names another number,
 cannot be met, so the turn lands one `contract` row with zero options and the gap waits on its contract (its
 checks, its documents, its band and its `full`). Then the native rung (rung 0, no model, no local ID): the
-body's boolean-syntax repair and one-value wrapper search against the band, with `native_rehearsal_checks`
-on every model request after it. Then the model ways in order: `first` (the supplied task), `resume` (the same
+body's boolean-syntax repair and one-value wrapper search against the band. Then the model ways in order: `first` (the supplied task), `resume` (the same
 checkpoint with identified execution feedback under the unchanged original goal, documents and checks),
 `context` (a fresh checkpoint carrying the finding as text), `lens` (a smaller document view) and `voice` (the
 next model of the write-code chain). A clinamen gate stands before every way: an option whose approach

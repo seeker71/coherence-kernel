@@ -1,0 +1,253 @@
+; walk-launch-band.bml — the pair launchd names (launch/fkwu, a pinned copy of the kernel, on launch/walk-launch.fk, a pinned
+; copy of observe/walk-launch.fk): it begins a door as its child with its own stdin, stdout and stderr, ends as the child
+; ended, refuses by name what it cannot begin; the four walk plists name it; and a change to the door's source reaches
+; launch/ only through a pin that witnessed it.
+;
+; Verdict 511 = 1 pinned | 2 carries | 4 ends-1 | 8 signals | 16 other | 32 refuses | 64 plists | 128 still | 256 order
+;
+; pinned: every claim runs the pair as it stands in launch/: this checkout's launch/fkwu and launch/walk-launch.fk when both
+; stand (in the walk checkout the band so reads the very pair the jobs name, and says whether observe/walk-launch.fk moved
+; since the pin), else a pair the band pins in a scratch checkout through hw-pin-at, which says "pin=0 cdhash absent -> <h>"
+; with <h> the cdhash of the kernel it copied, and leaves the door's source byte for byte in launch/walk-launch.fk. Half a
+; pair, or a name of the stage still standing, is red: a pin was cut short. The band prints which pair it runs.
+; carries: the launcher begins a probe door as its child: the probe reads its ending from stdin (the launcher reads none of
+; its own), its stdout line reaches the launcher's stdout and its stderr line the launcher's stderr (two files, neither
+; line in the other), the launcher's line "[walk-launch] <probe> ended 0" follows the child's, and the launcher ends 0.
+; The probe's parent, read from host_process, is the launcher itself, a process named fkwu: the coordinator climb of a
+; turn (crd-climb-in, form-stdlib/bml/coordination.bml) passes a process of that name on its way to launchd.
+; ends-1: a probe that ends 1 (form_error) ends the launcher 1, with "[walk-launch] <probe> ended 1" on its stderr.
+; signals: a probe that ends by SIGTERM ends the launcher by SIGTERM (143), one that ends by SIGKILL by SIGKILL (137), each
+; after the line "... ended by signal <n>; the launcher ends by the same signal".
+; other: a door that ends 2 (fkwu refuses its extension) ends the launcher 1 with "ended 2: this kernel has no door".
+; refuses: no argument ends 1 with "[walk-launch] need:"; a door that does not stand ends 1 with "is not a door in", and so
+; does a relative door that stands only higher up the checkout (the presence doors would find it there; the launcher asks
+; host_realpath, which does not climb); a directory with no ./fkwu ends 1 with "(-4)"; none of them prints a child's line.
+; plists: docs/launchd's four walk plists each name, in order, <WorkingDirectory>/launch/fkwu, <WorkingDirectory>/
+; launch/walk-launch.fk and the job's own door (rent-walk observe/scheduled-walk.bml, day-turn observe/day-turn.bml, both
+; retries observe/walk-retry.bml) and nothing more, under one WorkingDirectory; none names <WorkingDirectory>/fkwu or
+; <WorkingDirectory>/observe/walk-launch.fk.
+; still: in a scratch checkout of its own, the door's source moves as main could move it, to a door whose spawn primitive this
+; kernel lacks. Read from observe/ as the jobs once read it, that door begins no child and ends 1: the failure the pair ends.
+; The pair keeps its bytes and identity, and still carries the probe. The pin of that door is refused by name ("pin=refused:
+; the copy ended 1") with the pair as it stood and no stage left. A door this kernel carries reaches launch/ with the next
+; pin and not before; the first launch after that pin says nothing of a stale image. Neither the build's argv nor the
+; carrier's names anything in launch/.
+; order: door first, kernel last, each over a scratch checkout. The door's rename failing (nothing staged to rename, with a
+; staged kernel ready) leaves launch/fkwu's identity as it stood: the kernel had not moved. The kernel's rename failing
+; (launch/fkwu a directory) returns the door that stood, and takes a first pin's door away again, "; the door is as it
+; was". A directory where the door stands, or a door's source that does not stand, is refused before anything moves. After
+; each the cdhash reads as it stood and no name of the stage stands.
+;
+; REQUIRES: host_spawn_at, host_wait, host_signal, host_file_copy, codesign (the pin's cdhash).
+; The band writes only under temp_dir and removes what it made; it only reads this checkout's door and launch/.
+// preludes: form-stdlib/core.fk form-stdlib/bml/host-walk.bml
+section [form.bml] {
+ class WalkLaunchBand {
+  def wlb-bit(held) = held ? 1 : 0;
+  def wlb-has?(s, part) = str_find(s ?? "", part, 0) >= 0;
+  def wlb-before?(s, a, b) = wlb-has?(s, a) && wlb-has?(s, b) && (str_find(s, a, 0) < str_find(s, b, 0));
+  def wlb-root(ctx) = ctx[0];
+  def wlb-io(ctx) = ctx[0] ++ "/io";
+  // the probe: a line on stdout and one on stderr, then the ending its stdin's first byte names (o ok, f 1, t SIGTERM, k SIGKILL)
+  def wlb-probe-text() = "(do\n    (defn p-bytes-from (s i out) (if (lt i 0) out (p-bytes-from s (sub i 1) (cons (str_byte_at s i) out))))\n    (defn p-err (s) (host_file_append_bytes \"/dev/stderr\" (p-bytes-from s (sub (str_len s) 1) (list))))\n    (let read (file_read 0 64))\n    (let word (if (nothing? read) \"\" read))\n    (let b (if (lt 0 (str_len word)) (str_byte_at word 0) 0))\n    (print_str (str_concat \"probe-out \" (value_str b)))\n    (print_str (str_concat \"probe-parent \" (value_str (nth (host_process (nth (host_process (host_pid)) 1)) 2))))\n    (p-err (str_concat \"probe-err \" (str_concat (value_str b) \"\\n\")))\n    (if (eq b 102) (form_error \"probe ends 1\") 0)\n    (if (eq b 116) (host_signal (host_pid) 15) 0)\n    (if (eq b 107) (host_signal (host_pid) 9) 0)\n    \"probe ended\")\n";
+  // where the pair runs: [root, cwd ("" keeps this checkout), the launcher's absolute path, the pinned door's absolute path, which, said, the pin's cdhash, the kernel's cdhash]
+  def wlb-fresh() {
+   let root = temp_dir() ++ "/walk-launch-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? wlb-placed(root) : nothing();
+  }
+  def wlb-placed(root) {
+   let io = root ++ "/io";
+   let made = hch-mkdirs(io);
+   let probe = write_file_text(root ++ "/probe.fk", wlb-probe-text());
+   let two = write_file_text(root ++ "/two.txt", "a door fkwu does not run\n");
+   let empty = host_dir_mkdir(root ++ "/empty");
+   let higher = hch-mkdirs(root ++ "/co/.git");
+   let higherDoor = hch-mkdirs(root ++ "/co/observe");
+   let below = hch-mkdirs(root ++ "/co/sub");
+   let wroteHigher = write_file_text(root ++ "/co/observe/x.bml", "a door that stands higher up the checkout\n");
+   !nothing?(host_realpath(hw-launcher())) && !nothing?(host_realpath(hw-pinned-door())) ? [root, "", host_realpath(hw-launcher()), host_realpath(hw-pinned-door()), "checkout", "", hw-cdhash(io, hw-launcher()), ""] : wlb-scratch-pin(root, io);
+  }
+  // a scratch checkout, as a person's pin finds one: a kernel and the door's source
+  def wlb-checkout(dir) {
+   let made = hch-mkdirs(dir ++ "/observe");
+   let kernel = host_file_copy("fkwu", dir ++ "/fkwu");
+   host_file_copy(hw-launch-door(), dir ++ "/" ++ hw-launch-door());
+  }
+  def wlb-scratch-pin(root, io) {
+   let pin = root ++ "/pin";
+   let made = wlb-checkout(pin);
+   let said = hw-pin-at(io, pin, hw-launch-door());
+   [root, pin, pin ++ "/" ++ hw-launcher(), pin ++ "/" ++ hw-pinned-door(), "scratch", said, hw-cdhash(io, pin ++ "/" ++ hw-launcher()), hw-cdhash(io, pin ++ "/fkwu")];
+  }
+  // one launcher run: [status, its stdout, its stderr]; args follow the launcher's path
+  def wlb-launch(ctx, step, cwd, launcher, args, input) {
+   let err = wlb-io(ctx) ++ "/" ++ step ++ ".stderr";
+   let run = hch-run-with-at(wlb-io(ctx), step, cwd, cons(launcher, args), input, hch-by(120000), err);
+   [run[0], run[1], read_file(err) ?? ""];
+  }
+  def wlb-run-in(ctx, step, cwd, args, input) = wlb-launch(ctx, step, cwd, ctx[2], args, input);
+  def wlb-run(ctx, step, args, input) = wlb-run-in(ctx, step, ctx[1], args, input);
+  def wlb-probe(ctx) = wlb-root(ctx) ++ "/probe.fk";
+  def wlb-probe-run(ctx, step, input) = wlb-run(ctx, step, [ctx[3], wlb-probe(ctx)], input);
+  def wlb-status?(run, n) = !nothing?(run[0]) && (Comparable) run[0] == n;
+  // no name of a pin's stage stands in this directory (absolute)
+  def wlb-stage-gone?(dir) = nil?(filter(one => (Comparable) host_path_exists(dir ++ "/" ++ one) == 1, hw-pin-stage()));
+  // one of the pair stands in this checkout and the other does not
+  def wlb-half?() = nothing?(host_realpath(hw-launcher())) ? !nothing?(host_realpath(hw-pinned-door())) : nothing?(host_realpath(hw-pinned-door()));
+  def wlb-say-source(ctx, same) = (String) ctx[4] != "checkout" ? 0 : print_str("[walk-launch-band] " ++ hw-launch-door() ++ (same ? " stands as the pair carries it" : " moved since the pin: it reaches launch/ only through a pin"));
+  // 1
+  def wlb-pinned(ctx) {
+   let said = print_str("[walk-launch-band] the launcher: " ++ ctx[4] ++ " " ++ ctx[2] ++ " on " ++ ctx[3] ++ ((String) ctx[5] == "" ? "" : " (" ++ ctx[5] ++ ")"));
+   let same = (String) (read_file(hw-launch-door()) ?? "") == (read_file(ctx[3]) ?? "");
+   let source = wlb-say-source(ctx, same);
+   let whole = wlb-half?() ? print_str("[walk-launch-band] half a pair stands in launch/: a pin was cut short") : 0;
+   let home = host_realpath((String) ctx[1] == "" ? "." : ctx[1]) ?? "";
+   (String) ctx[4] == "checkout" ? wlb-bit(((String) ctx[6] != "") && wlb-stage-gone?(home)) : wlb-bit(!wlb-half?() && hw-starts?(ctx[5], "pin=0 cdhash absent -> ") && ((String) ctx[6] != "") && ((String) ctx[6] == ctx[7]) && hw-ends?(ctx[5], ctx[6]) && same && wlb-stage-gone?(home));
+  }
+  // 2
+  def wlb-carries(ctx) {
+   let run = wlb-probe-run(ctx, "carries", "o\n");
+   let line = "[walk-launch] " ++ wlb-probe(ctx) ++ " ended 0";
+   let parent = host_realpath(ctx[2]) ?? ctx[2];
+   wlb-bit(wlb-status?(run, 0) && wlb-before?(run[1], "probe-out 111", line) && wlb-has?(run[2], "probe-err 111") && !wlb-has?(run[1], "probe-err") && !wlb-has?(run[2], "probe-out") && wlb-has?(run[1], "probe-parent " ++ parent ++ "\n") && hw-ends?(parent, "/fkwu"));
+  }
+  // 4
+  def wlb-ends-1(ctx) {
+   let run = wlb-probe-run(ctx, "ends-1", "f\n");
+   wlb-bit(wlb-status?(run, 1) && wlb-has?(run[1], "probe-out 102") && wlb-has?(run[2], "probe-err 102") && wlb-has?(run[2], "[walk-launch] " ++ wlb-probe(ctx) ++ " ended 1"));
+  }
+  // 8
+  def wlb-signals(ctx) {
+   let term = wlb-probe-run(ctx, "term", "t\n");
+   let kill = wlb-probe-run(ctx, "kill", "k\n");
+   wlb-bit(wlb-status?(term, 143) && wlb-has?(term[1], "probe-out 116") && wlb-has?(term[2], "ended by signal 15; the launcher ends by the same signal") && wlb-status?(kill, 137) && wlb-has?(kill[1], "probe-out 107") && wlb-has?(kill[2], "ended by signal 9; the launcher ends by the same signal"));
+  }
+  // 16
+  def wlb-other(ctx) {
+   let run = wlb-run(ctx, "other", [ctx[3], wlb-root(ctx) ++ "/two.txt"], "");
+   wlb-bit(wlb-status?(run, 1) && wlb-has?(run[2], "two.txt ended 2: this kernel has no door"));
+  }
+  // 32
+  def wlb-refuses(ctx) {
+   let need = wlb-run(ctx, "need", [ctx[3]], "");
+   let absent = wlb-run(ctx, "absent", [ctx[3], wlb-root(ctx) ++ "/no-such-door.bml"], "");
+   let bare = wlb-run-in(ctx, "bare", wlb-root(ctx) ++ "/empty", [ctx[3], wlb-probe(ctx)], "o\n");
+   let higher = wlb-run-in(ctx, "higher", wlb-root(ctx) ++ "/co/sub", [ctx[3], "observe/x.bml"], "");
+   wlb-bit(wlb-status?(need, 1) && wlb-has?(need[2], "[walk-launch] need:") && wlb-status?(absent, 1) && wlb-has?(absent[2], "no-such-door.bml is not a door in") && wlb-status?(bare, 1) && wlb-has?(bare[2], "(-4)") && wlb-status?(higher, 1) && wlb-has?(higher[2], "observe/x.bml is not a door in") && !wlb-has?(higher[2], "(-4)") && !wlb-has?(need[1] ++ absent[1] ++ bare[1] ++ higher[1], "probe-out"));
+  }
+  // 64: the plists the README tells a person to install
+  def wlb-plist(label) = read_file("docs/launchd/" ++ label ++ ".plist") ?? "";
+  def wlb-between(text, open, close) {
+   let at = str_find(text, open, 0);
+   let end = at < 0 ? -1 : str_find(text, close, at + len(open));
+   at < 0 || end < 0 ? "" : substring(text, at + len(open), end);
+  }
+  def wlb-strings(text) {
+   let at = str_find(text, "<string>", 0);
+   let end = at < 0 ? -1 : str_find(text, "</string>", at);
+   at < 0 || end < 0 ? [] : cons(substring(text, at + 8, end), wlb-strings(substring(text, end + 9, len(text))));
+  }
+  def wlb-args(text) = wlb-strings(wlb-between(text, "<key>ProgramArguments</key><array>", "</array>"));
+  def wlb-dir(text) = wlb-between(text, "<key>WorkingDirectory</key><string>", "</string>");
+  def wlb-plist-names?(label, door, dir) {
+   let text = wlb-plist(label);
+   let args = wlb-args(text);
+   ((String) wlb-dir(text) == dir) && ((Comparable) len(args) == 3) && ((String) args[0] == dir ++ "/" ++ hw-launcher()) && ((String) args[1] == dir ++ "/" ++ hw-pinned-door()) && ((String) args[2] == "observe/" ++ door ++ ".bml") && !wlb-has?(text, "<string>" ++ dir ++ "/fkwu</string>") && !wlb-has?(text, "<string>" ++ dir ++ "/" ++ hw-launch-door() ++ "</string>");
+  }
+  def wlb-plists(ctx) {
+   let dir = wlb-dir(wlb-plist("earth.hati.rent-walk"));
+   wlb-bit(((Comparable) len(dir) > 0) && wlb-plist-names?("earth.hati.rent-walk", "scheduled-walk", dir) && wlb-plist-names?("earth.hati.rent-walk-retry", "walk-retry", dir) && wlb-plist-names?("earth.hati.day-turn", "day-turn", dir) && wlb-plist-names?("earth.hati.day-turn-retry", "walk-retry", dir));
+  }
+  // the door as main could move it: its spawn primitive is one this kernel lacks ("" when the door no longer reads that way)
+  def wlb-needs-more(text) {
+   let word = "(wl-born door (host_spawn_at ";
+   let at = str_find(text, word, 0);
+   at < 0 ? "" : substring(text, 0, at) ++ "(wl-born door (host_spawn_later " ++ substring(text, at + len(word), len(text));
+  }
+  def wlb-same-id?(a, b) = !nothing?(a) && !nothing?(b) && ((Comparable) len(a) == 4) && ((Comparable) len(b) == 4) && ((Comparable) a[0] == b[0]) && ((Comparable) a[1] == b[1]) && ((Comparable) a[2] == b[2]) && ((Comparable) a[3] == b[3]);
+  def wlb-carried?(run) = wlb-status?(run, 0) && wlb-has?(run[1], "probe-out 111");
+  // 128
+  def wlb-still(ctx) {
+   let io = wlb-io(ctx);
+   let dir = wlb-root(ctx) ++ "/still";
+   let ready = wlb-checkout(dir);
+   let source = dir ++ "/" ++ hw-launch-door();
+   let door = dir ++ "/" ++ hw-pinned-door();
+   let kernel = dir ++ "/" ++ hw-launcher();
+   let first = hw-pin-at(io, dir, hw-launch-door());
+   let bytes = read_file(door) ?? "";
+   let doorId = host_file_identity(door);
+   let kernelId = host_file_identity(kernel);
+   let hash = hw-cdhash(io, kernel);
+   let moved = wlb-needs-more(bytes);
+   let landed = write_file_text(source, moved);
+   let direct = wlb-launch(ctx, "still-direct", dir, kernel, [source, wlb-probe(ctx)], "o\n");
+   let carried = wlb-launch(ctx, "still-carried", dir, kernel, [door, wlb-probe(ctx)], "o\n");
+   let refused = hw-pin-at(io, dir, hw-launch-door());
+   let held = ((String) (read_file(door) ?? "") == bytes) && wlb-same-id?(host_file_identity(door), doorId) && wlb-same-id?(host_file_identity(kernel), kernelId);
+   let goneRefused = wlb-stage-gone?(host_realpath(dir) ?? "");
+   let carriedStill = wlb-launch(ctx, "still-held", dir, kernel, [door, wlb-probe(ctx)], "o\n");
+   let better = bytes ++ "; a line main moved\n";
+   let landedBetter = write_file_text(source, better);
+   let notYet = (String) (read_file(door) ?? "") == bytes;
+   let second = hw-pin-at(io, dir, hw-launch-door());
+   let reached = (String) (read_file(door) ?? "") == better;
+   let goneSecond = wlb-stage-gone?(host_realpath(dir) ?? "");
+   let after = wlb-launch(ctx, "still-after", dir, kernel, [door, wlb-probe(ctx)], "o\n");
+   let builds = !wlb-has?(hch-join(hw-build-argv(), " "), hw-launch-dir() ++ "/") && !wlb-has?(hch-join(hw-carrier-argv(), " "), hw-launch-dir() ++ "/");
+   wlb-bit(hw-starts?(first, "pin=0 cdhash absent -> ") && ((String) moved != "") && wlb-status?(direct, 1) && !wlb-has?(direct[1], "probe-out") && wlb-has?(direct[2], "was not begun") && wlb-carried?(carried) && wlb-refused?(refused, "the copy ended 1", hash) && held && goneRefused && wlb-carried?(carriedStill) && notYet && ((String) second == "pin=0 cdhash " ++ hash ++ " -> " ++ hash) && reached && goneSecond && wlb-carried?(after) && !wlb-has?(after[2], ".fkb") && builds);
+  }
+  def wlb-refused?(said, why, hash) = hw-starts?(said, "pin=refused: " ++ why) && hw-ends?(said, " cdhash " ++ hash ++ " -> " ++ hash);
+  // 256
+  def wlb-order(ctx) {
+   let io = wlb-io(ctx);
+   // the door's rename fails, with a staged kernel ready to move: it does not
+   let one = wlb-root(ctx) ++ "/order-door";
+   let readyOne = wlb-checkout(one);
+   let firstOne = hw-pin-at(io, one, hw-launch-door());
+   let oneHome = host_realpath(one) ?? "";
+   let oneId = host_file_identity(one ++ "/" ++ hw-launcher());
+   let oneHash = hw-cdhash(io, one ++ "/" ++ hw-launcher());
+   let staged = host_file_copy("fkwu", one ++ "/" ++ hw-staged-kernel());
+   let doorFails = hw-pin-place(io, oneHome, oneHash);
+   let oneStill = wlb-same-id?(host_file_identity(one ++ "/" ++ hw-launcher()), oneId) && wlb-stage-gone?(oneHome);
+   // a door's source that does not stand: nothing moves
+   let noSource = hw-pin-at(io, one, "observe/no-such-door.fk");
+   let noSourceStill = wlb-same-id?(host_file_identity(one ++ "/" ++ hw-launcher()), oneId) && wlb-stage-gone?(oneHome);
+   // the kernel's rename fails (launch/fkwu a directory with something in it): the door that stood returns
+   let two = wlb-root(ctx) ++ "/order-kernel";
+   let readyTwo = wlb-checkout(two);
+   let held = hch-mkdirs(two ++ "/" ++ hw-launcher() ++ "/held");
+   let stood = write_file_text(two ++ "/" ++ hw-pinned-door(), "the door that stood\n");
+   let kernelFails = hw-pin-at(io, two, hw-launch-door());
+   let twoHome = host_realpath(two) ?? "";
+   // the same on a first pin: no door stood, so none stands
+   let three = wlb-root(ctx) ++ "/order-first";
+   let readyThree = wlb-checkout(three);
+   let heldThree = hch-mkdirs(three ++ "/" ++ hw-launcher() ++ "/held");
+   let firstFails = hw-pin-at(io, three, hw-launch-door());
+   let threeHome = host_realpath(three) ?? "";
+   // a directory where the door stands: refused before anything moves
+   let four = wlb-root(ctx) ++ "/order-dir";
+   let readyFour = wlb-checkout(four);
+   let firstFour = hw-pin-at(io, four, hw-launch-door());
+   let fourHome = host_realpath(four) ?? "";
+   let fourId = host_file_identity(four ++ "/" ++ hw-launcher());
+   let fourHash = hw-cdhash(io, four ++ "/" ++ hw-launcher());
+   let doorGone = host_path_remove(four ++ "/" ++ hw-pinned-door());
+   let doorDir = hch-mkdirs(four ++ "/" ++ hw-pinned-door() ++ "/held");
+   let dirFails = hw-pin-at(io, four, hw-launch-door());
+   let saidAll = print_str("[walk-launch-band] order: " ++ doorFails ++ " | " ++ kernelFails ++ " | " ++ firstFails ++ " | " ++ dirFails);
+   wlb-bit(hw-starts?(firstOne, "pin=0 ") && wlb-refused?(doorFails, "the rename over " ++ oneHome ++ "/" ++ hw-pinned-door() ++ " answered -1", oneHash) && oneStill
+    && wlb-refused?(noSource, oneHome ++ "/observe/no-such-door.fk does not stand", oneHash) && noSourceStill
+    && ((String) kernelFails == "pin=refused: the rename over " ++ twoHome ++ "/" ++ hw-launcher() ++ " answered -1; the door is as it was cdhash absent -> absent") && ((String) (read_file(two ++ "/" ++ hw-pinned-door()) ?? "") == "the door that stood\n") && wlb-stage-gone?(twoHome)
+    && ((String) firstFails == "pin=refused: the rename over " ++ threeHome ++ "/" ++ hw-launcher() ++ " answered -1; the door is as it was cdhash absent -> absent") && nothing?(host_realpath(three ++ "/" ++ hw-pinned-door())) && wlb-stage-gone?(threeHome)
+    && hw-starts?(firstFour, "pin=0 ") && wlb-refused?(dirFails, "the door that stands, kept aside, fell short", fourHash) && wlb-same-id?(host_file_identity(four ++ "/" ++ hw-launcher()), fourId) && wlb-stage-gone?(fourHome));
+  }
+ }
+ let ctx = wlb-fresh();
+ nothing?(ctx) ? form_error("walk-launch band needs a fresh directory under temp_dir and this checkout's kernel") : 0;
+ let verdict = live-claims("walk-launch-band", ctx, [["pinned", 1, 1, wlb-pinned], ["carries", 2, 1, wlb-carries], ["ends-1", 4, 1, wlb-ends-1], ["signals", 8, 1, wlb-signals], ["other", 16, 1, wlb-other], ["refuses", 32, 1, wlb-refuses], ["plists", 64, 1, wlb-plists], ["still", 128, 1, wlb-still], ["order", 256, 1, wlb-order]]);
+ host_dir_rmdir(wlb-root(ctx));
+ verdict;
+}

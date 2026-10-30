@@ -1,0 +1,218 @@
+// qwen-last-block-judge.bml — the last block's trained adapter is judged against its parent on accepted rows it never saw.
+//
+// Intent: rung 4 of the last-block LoRA ladder (docs/qwen-last-block-lora-design.md, E.4). An adapter the rung-3 trainer exported
+// (qwen-last-block-train.bml, qlbt-export: F32 safetensors blk.L.ffn_down.weight.lora_a [ff, r] and .lora_b [r, d] beside
+// adapter_config.json) is read back into the pair's device record and scored by the loss it descended: the prompt-masked
+// next-token cross-entropy through the frozen head (qlbt-eval: the block's forward from the captured block input, the pair,
+// output_norm, output.weight, nlb_ce), the mean of the rows' token-mean losses as rung 3 read it, on accepted rows disjoint by draft
+// id from the rows its config names, under the parent and under the child. The parent is the lane's adapter home. Absent, the lane
+// wears no adapter and the parent reads as the base 27B: the pair at +0, so the block adds +-0 to its own output (rung 2, bit 1:
+// 0 of 117,760 words differed from the model's). Present, it is read and loaded as the child is, at the child's rank, scale and
+// layer (one device record carries either pair). Rejected rows are scored beside for information: a lower loss there is closeness
+// to what we turned away and never enters `better`. A lift's shared rules are the 3B door's own, read in place from
+// observe/lora-lift-run.bml (its entry runs only as the entry): ll-digest (sha256 of a side's draft ids joined by newlines),
+// ll-better, ll-milli, ll-id, ll-reading-of, ll-doc, ll-shared, ll-negative-pairs.
+// No device: qlbj-present-why (the adapter file, then its config), qlbj-config / qlbj-config-why, qlbj-pair-why (the header
+// against the block's geometry), qlbj-pair-bytes (A and B by the header's spans), qlbj-split-why / qlbj-reading-why (held-out and
+// trained rows by line and draft id), qlbj-mean, qlbj-plan / qlbj-judged / qlbj-row (the promotion row). Device: qlbj-zero,
+// qlbj-load, qlbj-means, qlbj-cached (a capture read, never prefilled).
+// Inputs: adapter directories and readings rows; for the device part an open Qwen context and the rung-3 step record (qlbt-open).
+// Effects: device writes into the record's A and B only. Stdin: none. Owner: form-stdlib/bml.
+import form-stdlib/bml/qwen-last-block-train.bml;
+import form-stdlib/lora-adapter.bml;
+import form-stdlib/bml/json-wire-admission.bml;
+import observe/lora-lift-run.bml;
+section [form.bml] {
+ class QwenLastBlockJudge {
+  // the lane's adapter home (the parent; the gap register reads rows whose parent is this path) and the trainer's staging export
+  def qlbj-home() = "form/form-stdlib/adapters/qwen38-last-block";
+  def qlbj-next() = "form/form-stdlib/adapters/qwen38-last-block-next";
+  def qlbj-st(dir) = dir ++ "/adapters.safetensors";
+  def qlbj-cfg(dir) = dir ++ "/adapter_config.json";
+  // the block the head reads next: the only block whose output reaches output_norm directly (rung 3's L)
+  def qlbj-last-block(geo) = geo[21] - 1;
+  def qlbj-slot() = "ffn_down";
+  // ── JSON read strictly: a document is nothing unless its text is one well-formed object; a field of another kind is nothing ──
+  def qlbj-json(name, text) {
+   let t = trim(text);
+   len(t) == 0 ? nothing() : !jwa-valid(t) ? nothing() : (Comparable) str_byte_at(t, 0) != 123 ? nothing() : parse-json(name, t);
+  }
+  def qlbj-object?(n) = node_eq(node_category(n), JSON-OBJECT());
+  def qlbj-array?(n) = node_eq(node_category(n), JSON-ARRAY());
+  def qlbj-real?(n) = dop-int-node?(n) ? true : (Comparable) node_level(n) == 1 && ((Comparable) node_type(n) == 6 || (Comparable) node_type(n) == 7);
+  def qlbj-node(doc, key) = nothing?(doc) ? nothing() : !qlbj-object?(doc) ? nothing() : json-object-has?(doc, key) ? json-object-get(doc, key) : nothing();
+  def qlbj-int-of(n) = nothing?(n) ? nothing() : dop-int-node?(n) ? json-int-value(n) : nothing();
+  def qlbj-real-of(n) = nothing?(n) ? nothing() : qlbj-real?(n) ? node_value(n) + 0.0 : nothing();
+  def qlbj-str-of(n) = nothing?(n) ? nothing() : dop-str-node?(n) ? json-string-value(n) : nothing();
+  def qlbj-all(xs) = any?(x => nothing?(x), xs) ? nothing() : xs;
+  def qlbj-list-of(n, read) = nothing?(n) ? nothing() : !qlbj-array?(n) ? nothing() : qlbj-all(map(e => read(e), json-array-elements(n)));
+  def qlbj-int(doc, key) = qlbj-int-of(qlbj-node(doc, key));
+  def qlbj-real(doc, key) = qlbj-real-of(qlbj-node(doc, key));
+  def qlbj-str(doc, key) = qlbj-str-of(qlbj-node(doc, key));
+  def qlbj-ints(doc, key) = qlbj-list-of(qlbj-node(doc, key), e => qlbj-int-of(e));
+  def qlbj-strs(doc, key) = qlbj-list-of(qlbj-node(doc, key), e => qlbj-str-of(e));
+  def qlbj-pos?(x) = nothing?(x) ? false : x > 0;
+  def qlbj-is?(x, v) = nothing?(x) ? false : (Comparable) x == v;
+  def qlbj-some?(xs) = nothing?(xs) ? false : len(xs) > 0;
+  def qlbj-one?(xs) = nothing?(xs) ? false : len(xs) == 1;
+  def qlbj-only?(xs, s) = !qlbj-one?(xs) ? false : (String) xs[0] == s;
+  def qlbj-nums(xs) = "[" ++ str-join-with(map(x => x.str(), xs), ", ") ++ "]";
+  def qlbj-show(x) = nothing?(x) ? "unread" : x.str();
+  // ── the adapter directory: the file and its config first, before any geometry is known ──
+  def qlbj-present-why(who, dir) = file_size(qlbj-st(dir)) < 0 ? who ++ " adapter " ++ qlbj-st(dir) ++ " is absent"
+   : file_size(qlbj-cfg(dir)) < 0 ? who ++ " adapter config " ++ qlbj-cfg(dir) ++ " is absent" : "";
+  // the lane's adapter home is absent when nothing stands at its path: the lane wears no adapter and the parent is the base
+  def qlbj-home-absent?(dir) = (Comparable) host_path_is_dir(dir) != 1 && file_size(dir) < 0;
+  // adapter_config.json as the judge reads it (each field nothing when it does not read in its kind)
+  def qlbj-config(dir) = qlbj-config-of(qlbj-json("adapter-config", read_file(qlbj-cfg(dir)) ?? ""));
+  def qlbj-config-of(doc) = record_new(0, "doc", doc, "model", qlbj-str(doc, "model"), "rank", qlbj-int(qlbj-node(doc, "lora_parameters"), "rank"), "scale", qlbj-real(qlbj-node(doc, "lora_parameters"), "scale"), "layers", qlbj-ints(doc, "layers"), "targets", qlbj-strs(doc, "targets"), "data", qlbj-str(doc, "data"), "rows", qlbj-ints(doc, "rows"), "cap", qlbj-int(doc, "ids_cap"), "mask", qlbj-int(doc, "mask_prompt"), "steps", qlbj-int(doc, "trained_native_steps"), "batch", qlbj-int(doc, "batch_size"), "mean0", qlbj-real(doc, "mean_loss_step0"), "mean20", qlbj-real(doc, "mean_loss_step20"));
+  def qlbj-layer(c) = record_get(c, "layers")[0];
+  // why a config does not stand for one pair on ffn_down, trained prompt-masked on named lines ("" when it does)
+  def qlbj-config-why(who, dir, c) {
+   let at = who ++ " adapter config " ++ qlbj-cfg(dir);
+   nothing?(record_get(c, "doc")) ? at ++ " does not read as one JSON object"
+   : nothing?(record_get(c, "model")) ? at ++ " names no model"
+   : !qlbj-pos?(record_get(c, "rank")) ? at ++ ": lora_parameters.rank is not a positive integer"
+   : nothing?(record_get(c, "scale")) ? at ++ ": lora_parameters.scale is not a number"
+   : !qlbj-one?(record_get(c, "layers")) ? at ++ ": layers is not one block index"
+   : !qlbj-only?(record_get(c, "targets"), qlbj-slot()) ? at ++ ": targets is not [\"" ++ qlbj-slot() ++ "\"], the one slot the judge carries"
+   : nothing?(record_get(c, "data")) ? at ++ " names no training data"
+   : !qlbj-some?(record_get(c, "rows")) ? at ++ ": rows names no trained line"
+   : !qlbj-pos?(record_get(c, "cap")) ? at ++ ": ids_cap is not a positive integer"
+   : !qlbj-is?(record_get(c, "mask"), 1) ? at ++ ": mask_prompt is not 1; the judge reads the prompt-masked loss the trainer descended"
+   : "";
+  }
+  // why a present parent home does not stand beside the child ("" when it does): read as the child is, at the child's rank, scale, layer
+  def qlbj-parent-why(dir, c) = len(qlbj-present-why("parent", dir)) > 0 ? qlbj-present-why("parent", dir) : qlbj-parent-config-why(dir, qlbj-config(dir), c);
+  def qlbj-parent-config-why(dir, p, c) {
+   let w = qlbj-config-why("parent", dir, p);
+   let at = "parent adapter config " ++ qlbj-cfg(dir);
+   len(w) > 0 ? w
+   : (Comparable) record_get(p, "rank") != record_get(c, "rank") ? at ++ ": rank " ++ record_get(p, "rank").str() ++ " beside the child's " ++ record_get(c, "rank").str() ++ "; one device record carries either pair"
+   : !(record_get(p, "scale") == record_get(c, "scale")) ? at ++ ": scale " ++ record_get(p, "scale").str() ++ " beside the child's " ++ record_get(c, "scale").str()
+   : (Comparable) qlbj-layer(p) != qlbj-layer(c) ? at ++ ": layer " ++ qlbj-layer(p).str() ++ " beside the child's " ++ qlbj-layer(c).str()
+   : "";
+  }
+  // ── the header against the block: one JSON object naming exactly the pair, F32, [ff, r] at 0 and [r, d] right after, whole ──
+  // one tensor entry: [dtype, shape, begin, end], or nothing when it does not read
+  def qlbj-tensor(h, name) = qlbj-tensor-of(qlbj-node(h, name));
+  def qlbj-tensor-of(t) = nothing?(t) ? nothing() : !qlbj-object?(t) ? nothing() : qlbj-tensor-read(qlbj-str(t, "dtype"), qlbj-ints(t, "shape"), qlbj-ints(t, "data_offsets"));
+  def qlbj-tensor-read(dt, shape, offs) = nothing?(dt) || nothing?(shape) || nothing?(offs) ? nothing() : len(offs) != 2 ? nothing() : [dt, shape, offs[0], offs[1]];
+  def qlbj-names(h) = filter(k => !((String) k == "__metadata__"), json-object-keys(h));
+  def qlbj-header(path) = qlbj-json("adapter-header", la-header(path));
+  def qlbj-pair-why(who, dir, L, ff, r, d) = qlbj-header-why(who ++ " adapter " ++ qlbj-st(dir), qlbj-st(dir), qlbj-header(qlbj-st(dir)), qlh-rr-name(L, qlbj-slot(), "a"), qlh-rr-name(L, qlbj-slot(), "b"), ff, r, d);
+  def qlbj-header-why(at, path, h, an, bn, ff, r, d) = nothing?(h) ? at ++ ": the safetensors header does not read as one JSON object"
+   : (Comparable) la-whole?(path) != 1 ? at ++ ": header and tensor spans do not cover the file's " ++ file_size(path).str() ++ " bytes"
+   : qlbj-tensors-why(at, h, an, bn, ff, r, d);
+  def qlbj-tensors-why(at, h, an, bn, ff, r, d) {
+   let a = qlbj-tensor(h, an);
+   let b = qlbj-tensor(h, bn);
+   let names = qlbj-names(h);
+   nothing?(a) ? at ++ " carries no tensor " ++ an ++ " (it names " ++ str-join-with(names, ", ") ++ ")"
+   : nothing?(b) ? at ++ " carries no tensor " ++ bn ++ " (it names " ++ str-join-with(names, ", ") ++ ")"
+   : len(names) != 2 ? at ++ " carries " ++ len(names).str() ++ " tensors; the judge reads the one pair " ++ an ++ ", " ++ bn
+   : len(qlbj-span-why(at, an, a, ff, r, 0)) > 0 ? qlbj-span-why(at, an, a, ff, r, 0)
+   : qlbj-span-why(at, bn, b, r, d, ff * r * 4);
+  }
+  def qlbj-shape?(s, rows, cols) = len(s) != 2 ? false : (Comparable) s[0] == rows && (Comparable) s[1] == cols;
+  def qlbj-span-why(at, name, t, rows, cols, begin) = !((String) t[0] == "F32") ? at ++ ": " ++ name ++ " is " ++ t[0] ++ "; the pair is F32"
+   : !qlbj-shape?(t[1], rows, cols) ? at ++ ": " ++ name ++ " has shape " ++ qlbj-nums(t[1]) ++ "; the block's pair wants " ++ qlbj-nums([rows, cols])
+   : (Comparable) t[2] != begin || (Comparable) t[3] != begin + rows * cols * 4 ? at ++ ": " ++ name ++ " spans [" ++ t[2].str() ++ ", " ++ t[3].str() ++ "); its place is [" ++ begin.str() ++ ", " ++ (begin + rows * cols * 4).str() ++ ")"
+   : "";
+  // A and B as the file holds them, by the header's spans: [a bytes, b bytes] ("" for a span that does not read whole)
+  def qlbj-pair-bytes(dir, L) {
+   let path = qlbj-st(dir);
+   let h = qlbj-header(path);
+   let off = 8 + la-header-len(path);
+   [qlbj-span-bytes(path, off, qlbj-tensor(h, qlh-rr-name(L, qlbj-slot(), "a"))), qlbj-span-bytes(path, off, qlbj-tensor(h, qlh-rr-name(L, qlbj-slot(), "b")))];
+  }
+  def qlbj-span-bytes(path, off, t) = nothing?(t) ? "" : qlbj-whole(read_file_slice(path, off + t[2], t[3] - t[2]) ?? "", t[3] - t[2]);
+  def qlbj-whole(s, n) = len(s) == n ? s : "";
+  // ── the rows by line: [[text, line], ...] for a file's non-empty lines (qlbt-lines counts every line) ──
+  def qlbj-lines(path) = qlbt-lines(read_file(path) ?? "");
+  def qlbj-last(xs, k) = len(xs) <= k ? xs : qlbj-last(xs[1:], k);
+  def qlbj-at(lines, wanted) = filter(p => any?(w => (Comparable) w == p[1], wanted), lines);
+  def qlbj-ids(ps) = map(p => ll-id(p[0]), ps);
+  def qlbj-line-nums(ps) = map(p => p[1], ps);
+  def qlbj-texts(ps) = map(p => p[0], ps);
+  // why the split does not stand ("" when it does): the rows, the held-out count, the trained lines the config names, a draft id
+  // on every selected row, no held-out draft among the trained ones, and held-out rows that read "accepted" with messages
+  def qlbj-split-why(rowsPath, lines, k, valid, trainPath, wanted, train) {
+   let shared = ll-shared(qlbj-ids(valid), qlbj-ids(train));
+   file_size(rowsPath) < 0 ? "rows " ++ rowsPath ++ " is absent"
+   : k <= 0 ? "valid_rows " ++ k.str() ++ " asks for no held-out row"
+   : len(valid) < k ? "rows " ++ rowsPath ++ " holds " ++ len(lines).str() ++ " rows; valid_rows asks " ++ k.str()
+   : file_size(trainPath) < 0 ? "the child's training rows " ++ trainPath ++ " are absent"
+   : len(train) != len(wanted) ? "the child's config names lines " ++ qlbj-nums(wanted) ++ " of " ++ trainPath ++ "; " ++ len(train).str() ++ " of them are rows there"
+   : any?(id => len(id) == 0, qlbj-ids(append(valid, train))) ? "a selected row has no draft id; the split is disjoint by draft id"
+   : len(shared) > 0 ? "held-out draft " ++ shared[0] ++ " of " ++ rowsPath ++ " is among the rows the child trained on (" ++ trainPath ++ " lines " ++ qlbj-nums(wanted) ++ ")"
+   : qlbj-reading-why(rowsPath, valid, "accepted", "the judge reads accepted held-out rows only");
+  }
+  // why a set of rows does not all read `want` with messages ("" when it does)
+  def qlbj-reading-why(path, ps, want, rule) {
+   let other = filter(p => !((String) ll-reading-of(p[0]) == want) || !json-object-has?(ll-doc(p[0]), "messages"), ps);
+   nil?(other) ? "" : "line " ++ other[0][1].str() ++ " of " ++ path ++ " (draft " ++ ll-id(other[0][0]) ++ ") reads \"" ++ ll-reading-of(other[0][0]) ++ "\"" ++ (json-object-has?(ll-doc(other[0][0]), "messages") ? "" : " and carries no messages") ++ "; " ++ rule;
+  }
+  // a selected row in the trainer's shape (qlbt-row: ChatML through the tokfast index, prompt-masked, cut at the cap)
+  def qlbj-row-of(src, x, p, cap) = qlbt-row(src, x, parse-json("readings-row", p[0]), p[1], cap);
+  def qlbj-unsupervised(rows) = filter(row => qlbt-row-count(row) <= 0, rows);
+  def qlbj-positions(rows) = foldl((acc, row) => acc + qlbt-row-n(row), 0, rows);
+  def qlbj-supervised(rows) = foldl((acc, row) => acc + qlbt-row-count(row), 0, rows);
+  // ── the device: the pair at +0 (the base), an adapter's pair loaded, every row's mean under the pair the record holds ──
+  def qlbj-zero(o) {
+   let rec = record_get(o, "rec");
+   let za = nam-zero(rec[3], rec[6] * rec[7]);
+   let zb = nam-zero(rec[4], rec[7] * rec[8]);
+   nam-sync();
+  }
+  // an adapter's A and B into the record's pair: 1 when both landed whole, else 0
+  def qlbj-load(o, dir, L) {
+   let rec = record_get(o, "rec");
+   let ab = qlbj-pair-bytes(dir, L);
+   let wa = len(ab[0]) == rec[6] * rec[7] * 4 ? metal_buf_write(rec[3], 0, ab[0]) : 0;
+   let wb = len(ab[1]) == rec[7] * rec[8] * 4 ? metal_buf_write(rec[4], 0, ab[1]) : 0;
+   wa == rec[6] * rec[7] * 4 && wb == rec[7] * rec[8] * 4 ? 1 : 0;
+  }
+  // every prepared [row, xin]'s token-mean loss under the pair the record holds now (nothing for a row whose loss did not arrive)
+  def qlbj-means(ps, geo, lay, onormTv, projTv, sx, o, prep) = map(p => qlbt-mean(qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, p[0], p[1]), qlbt-row-count(p[0])), prep);
+  // the mean of the rows' token means (rung 3's mean); unknown when any row's did not arrive
+  def qlbj-mean(xs) = nil?(xs) ? nothing() : any?(x => nothing?(x), xs) ? nothing() : sum(xs) / (len(xs) + 0.0);
+  // a capture read from a directory another step owns: its bytes when the sidecar names the row's ids, else "" (never prefilled)
+  def qlbj-cached(dir, row, d) {
+   let raw = read_file(qlbt-capture-path(dir, row)) ?? "";
+   let side = read_file(qlbt-sidecar-path(dir, row)) ?? "";
+   len(raw) == qlbt-row-n(row) * d * 4 && qlbt-sidecar-matches?(side, row[1]) == 1 ? raw : "";
+  }
+  // ── the promotion row ──
+  // plan: what was judged (identity, split, sides); judged: what the passes read
+  def qlbj-plan(parent, parentReads, child, sha, bytes, model, L, r, cap, steps, batch, trainPath, train, rowsPath, valid, negPath, negs) = record_new(0, "parent", parent, "parent_reads", parentReads, "child", child, "child_sha256", sha, "child_bytes", bytes, "model", model, "layer", L, "rank", r, "cap", cap, "steps", steps, "batch", batch, "train_source", trainPath, "train", train, "valid_source", rowsPath, "valid", valid, "neg_source", negPath, "negs", negs);
+  // validRows / negRows: qlbt rows; parentMeans / childMeans: per held-out row; negJudged: the judged rejected [text, line]s; negParent /
+  // negChild: their means; excluded: [line, why] for each rejected row set aside; inRows / inParent / inChild: the in-sample witness
+  // (0 rows when it was not read)
+  def qlbj-judged(validRows, parentMeans, childMeans, negJudged, negRows, negParent, negChild, excluded, inRows, inParent, inChild, need, wall) = record_new(0, "valid_rows", validRows, "parent", parentMeans, "child", childMeans, "neg_judged", negJudged, "neg_rows", negRows, "neg_parent", negParent, "neg_child", negChild, "excluded", excluded, "in_rows", inRows, "in_parent", inParent, "in_child", inChild, "need", need, "wall", wall);
+  def qlbj-maybe(key, v) = nothing?(v) ? json-node-pair(key, json-node-null()) : fhn-n(key, v);
+  def qlbj-millis(key, xs) = fhn-a(key, map(x => json-node-int(ll-milli(x)), xs));
+  def qlbj-excluded-node(e) = json-node-object([fhn-n("line", e[0]), fhn-s("why", e[1])]);
+  // the rejected side: the 3B lift's fields (ll-negative-pairs) over the judged rows, then the total and every row set aside, by line
+  def qlbj-negative-pairs(plan, j) {
+   let negPath = record_get(plan, "neg_source");
+   let judged = record_get(j, "neg_judged");
+   let rest = [fhn-n("rejected_rows_total", len(record_get(plan, "negs"))), fhn-a("rejected_excluded", map(e => qlbj-excluded-node(e), record_get(j, "excluded")))];
+   len(negPath) == 0 ? [] : nil?(judged) ? append([fhn-s("rejected_source", negPath), fhn-n("rejected_rows", 0)], rest)
+   : append(ll-negative-pairs(negPath, qlbj-texts(judged), qlbj-positions(record_get(j, "neg_rows")), record_get(j, "neg_parent"), record_get(j, "neg_child")), append([fhn-n("rejected_supervised_tokens", qlbj-supervised(record_get(j, "neg_rows")))], rest));
+  }
+  def qlbj-in-sample-pairs(j) = record_get(j, "in_rows") <= 0 ? [] : [fhn-n("in_sample_rows", record_get(j, "in_rows")), fhn-n("in_sample_parent_loss_milli", ll-milli(record_get(j, "in_parent"))), fhn-n("in_sample_child_loss_milli", ll-milli(record_get(j, "in_child"))), fhn-n("in_sample_reproduced", 1)];
+  def qlbj-parent-mean(j) = qlbj-mean(record_get(j, "parent"));
+  def qlbj-child-mean(j) = qlbj-mean(record_get(j, "child"));
+  // the row the gap register reads (where parent, field better): `better` reads the accepted held-out alone (ll-better)
+  def qlbj-row(plan, j) {
+   let pm = qlbj-parent-mean(j);
+   let cm = qlbj-child-mean(j);
+   let valid = record_get(plan, "valid");
+   let vrows = record_get(j, "valid_rows");
+   json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("parent", record_get(plan, "parent")), fhn-s("parent_reads", record_get(plan, "parent_reads")), fhn-s("child", record_get(plan, "child")), fhn-s("child_sha256", record_get(plan, "child_sha256")), fhn-n("child_bytes", record_get(plan, "child_bytes")), fhn-s("model", record_get(plan, "model")), fhn-n("layer", record_get(plan, "layer")), fhn-s("slot", qlbj-slot()), fhn-n("rank", record_get(plan, "rank")), fhn-n("ids_cap", record_get(plan, "cap")), fhn-s("train_source", record_get(plan, "train_source")), fhn-s("valid_source", record_get(plan, "valid_source")), fhn-s("valid_reading", ll-reading-of(valid[0][0])), fhn-s("judged_on", "accepted held-out, disjoint from train by draft id"), fhn-n("train_rows", len(record_get(plan, "train"))), fhn-n("valid_rows", len(valid)), fhn-s("train_ids_sha256", ll-digest(qlbj-texts(record_get(plan, "train")))), fhn-s("valid_ids_sha256", ll-digest(qlbj-texts(valid))), fhn-a("valid_lines", map(n => json-node-int(n), qlbj-line-nums(valid))), fhn-n("valid_tokens", qlbj-positions(vrows)), fhn-n("valid_supervised_tokens", qlbj-supervised(vrows)), qlbj-maybe("steps", record_get(plan, "steps")), qlbj-maybe("batch", record_get(plan, "batch")), fhn-n("parent_loss_milli", ll-milli(pm)), fhn-n("child_loss_milli", ll-milli(cm)), fhn-n("parent_score_milli", 0 - ll-milli(pm)), fhn-n("child_score_milli", 0 - ll-milli(cm)), fhn-n("better", ll-better(pm, cm)), qlbj-millis("valid_parent_milli", record_get(j, "parent")), qlbj-millis("valid_child_milli", record_get(j, "child"))],
+    append(qlbj-negative-pairs(plan, j), append(qlbj-in-sample-pairs(j), [fhn-n("memory_need_bytes", record_get(j, "need")), fhn-n("rent_tokens", 0), fhn-n("wall_ms", record_get(j, "wall"))]))));
+  }
+ }
+ 0;
+}

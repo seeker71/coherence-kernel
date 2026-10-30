@@ -1,0 +1,205 @@
+// lowering-cache-race-observe.bml — kernels that lower one door's cold import chain at once, read for the lowering's refusals.
+//
+//   printf '{"door":"observe/native-turn-run.bml"}' | ./fkwu observe/lowering-cache-race-observe.bml
+//   printf '{"door":"observe/native-turn-run.bml","fkwu":"./fkwu.next","tag":"next"}' | ./fkwu observe/lowering-cache-race-observe.bml
+//   printf '{"door":"observe/native-turn-run.bml","mover":"form/form-stdlib/bml/form-cli-code-request.bml"}' | ./fkwu observe/lowering-cache-race-observe.bml
+//
+// Why: on 2026-10-29 (.hearth/walk-here/03c-turn-7..18.log) every kernel that loaded observe/native-turn-run.bml,
+// form-cli-task.bml or form-cli-code-request.bml while a native turn stood its candidates of form-cli-code-request.bml in
+// the tree answered "BML source observations changed or lowering packet is incomplete", exit 2, until the turn ended.
+// This door makes that meeting on purpose, away from the checkout's own caches: kernels lowering one cold chain at once,
+// and, with a mover, one file of the chain rewritten under them as a turn's publish window rewrites it.
+//
+// stdin is one JSON object (door-options.bml), every key but door optional:
+//   door        the unit to lower, a path from the checkout's root that the checkout has lowered once: its memo
+//               (<door>.lowfk) names every file the lowering read, and those files are the import chain copied
+//   kernels     how many kernels begin at once (4)
+//   rounds      how many rounds, each on a fresh copy (3)
+//   fkwu        the binary the kernels run ("./fkwu")
+//   tag         names the rounds' directories and logs ("race")
+//   deadline_s  each round's bound: a kernel still running at it is stopped with its lineage (hch-wait, host-child.bml) (900)
+//   mover       a path of the chain this door rewrites while the kernels lower ("": none): a candidate stands in place and
+//               the original comes back, with write_file_text, a truncating write on purpose: hw-put (host-walk-publish.bml)
+//               stands a turn's candidate by stage and rename, and this mover keeps the harder race a torn read gives
+//   hold_ms     how long each candidate stands (4000); gap_ms, how long the original stands between two (500). The turn
+//               of 2026-10-29 read its band 1510 times in nineteen minutes, a candidate every ~550 ms: hold_ms 450 with
+//               gap_ms 100 is that cadence, faster than one lowering of a unit reaching the file, so it reads refusals
+//               on any kernel (named, after its lowerings); a turn that stands a candidate for seconds between longer
+//               generations is the cadence a kernel can lower through
+//   keep        1 keeps the last round's copy for reading (0: every copy is removed once read)
+//   pair        1 reads the image and its lens instead of the race: a probe lowered and run cold, a sibling's lens (its
+//               compile counted an error) copied beside the probe's image -- the crossed pair two writers of one unit can
+//               leave -- and the probe read warm twice; the verdict says whether the warm reader took the crossed lens's
+//               count as the image's exit truth (last value 1) or refused the pair (0). Its steps keep their evidence in
+//               .hearth/cache-race/pair/<step>.{out,exit}
+//
+// Effects: per round, the chain copied to .hearth/cache-race/<tag>-r<n>/ under the paths it has in the checkout, with no
+// cache beside any file; the kernels begun there at once (host_spawn_at, cwd the copy) on `<fkwu> --check <door>`, each
+// with stdout and stderr in .hearth/cache-race/<tag>-r<n>-k<i>.out. Nothing in the checkout's own tree is written.
+//
+// Reading: a line per kernel, a line per round, then the verdict.
+//   [cache-race] <tag> r<n> k<i>: exit <status | none: why> refusals <n> relowered <n>
+//   [cache-race] <tag> round <n>: kernels <K> exit0 <n> failed <n> refusals <n> relowered <n> flips <n> ms <n>
+//   [cache-race] <tag> verdict: failed <n> of <K*rounds> kernels, refusals <n>, relowered <n>, flips <n>
+// refusals counts the error lines naming "observations changed" or "lowering packet is incomplete" (a packet the
+// lowering refused); relowered counts the warning lines saying "lowering it again" (a unit whose source moved while it
+// was lowered, asked again). The last value is the number of failed kernels.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/form-fs.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/host-child.bml
+section [form.bml] {
+ class LoweringCacheRace {
+  def lcr-dir() = ".hearth/cache-race";
+  def lcr-has(doc, key) = json-object-has?(doc, key);
+  def lcr-str(doc, key, fallback) = lcr-has(doc, key) ? json-string-value(json-object-get(doc, key)) : fallback;
+  def lcr-int(doc, key, fallback) = lcr-has(doc, key) ? json-int-value(json-object-get(doc, key)) : fallback;
+  // the memo's manifest: its rows, before the blank line that closes them; a row is "<kind> <16 hex> <count>:<path>"
+  def lcr-rows(text) {
+   let end = str_find(text, "\n\n", 0);
+   end < 0 ? [] : split-on(substring(text, 0, end), "\n");
+  }
+  def lcr-kind(row) = len(row) > 0 ? substring(row, 0, 1) : "";
+  def lcr-path(row) {
+   let colon = str_find(row, ":", 19);
+   colon < 0 ? "" : substring(row, colon + 1, len(row));
+  }
+  def lcr-cwd(rows) = foldl((acc, r) => (String) lcr-kind(r) == "C" ? lcr-path(r) : acc, "", rows);
+  def lcr-read(rows) = map(r => lcr-path(r), filter(r => (String) lcr-kind(r) == "F", rows));
+  def lcr-under?(base, p) = len(p) > len(base) + 1 && (String) substring(p, 0, len(base) + 1) == base ++ "/";
+  def lcr-rel(base, p) = substring(p, len(base) + 1, len(p));
+  def lcr-parent(p) {
+   let s = fs-last-slash(p);
+   s <= 0 ? "." : substring(p, 0, s);
+  }
+  // one file of the chain under the copy's root: 0 copied, 1 not
+  def lcr-copy-one(root, base, p) {
+   let dest = root ++ "/" ++ lcr-rel(base, p);
+   let made = hch-mkdirs(lcr-parent(dest));
+   (Comparable) host_file_copy(p, dest) >= 0 ? 0 : 1;
+  }
+  def lcr-copy(root, base, paths) = foldl((acc, p) => acc + lcr-copy-one(root, base, p), 0, paths);
+  def lcr-out(tag, r, k) = lcr-dir() ++ "/" ++ tag ++ "-r" ++ r.str() ++ "-k" ++ k.str() ++ ".out";
+  // a kernel begun in the copy: its out file starts empty (the door opens it to append), its stdin is /dev/null
+  def lcr-begin(bin, door, root, tag, r, k) {
+   let out = lcr-out(tag, r, k);
+   let cleared = host_path_remove(out);
+   sg-spawn-at([bin, "--check", door], ["/dev/null", out, out, root]);
+  }
+  def lcr-alive?(pids) = any?(p => (Comparable) p > 0 && (Comparable) host_alive(p) == 1, pids);
+  // the mover: while a kernel lowers and the round's bound stands, a candidate stands hold ms, the original gap ms
+  def lcr-move(path, original, pids, until, hold, gap, flips) = !lcr-alive?(pids) || host_monotonic_ms() >= until ? flips : lcr-move-on(path, original, pids, until, hold, gap, flips);
+  def lcr-move-on(path, original, pids, until, hold, gap, flips) {
+   let stood = write_file_text(path, original ++ "\n// cache-race candidate " ++ (flips + 1).str() ++ "\n");
+   let held = host_sleep_ms(hold);
+   let back = write_file_text(path, original);
+   let rested = host_sleep_ms(gap);
+   lcr-move(path, original, pids, until, hold, gap, flips + 1);
+  }
+  def lcr-wait(p, until) = (Comparable) p > 0 ? hch-wait(p, until) : [nothing(), hch-birth-why(p)];
+  def lcr-said(text, kind, needles) = len(filter(l => str_find(l, kind, 0) >= 0 && hch-any-in?(l, needles), hch-lines(text)));
+  def lcr-refusals(text) = lcr-said(text, "error:", ["observations changed", "lowering packet is incomplete"]);
+  def lcr-relowered(text) = lcr-said(text, "warning:", ["lowering it again"]);
+  def lcr-ok?(w) = !nothing?(w[0]) && (Comparable) w[0] == 0;
+  def lcr-status(w) = nothing?(w[0]) ? "none: " ++ w[1] : w[0].str();
+  def lcr-kernel-line(tag, r, k, w, text) {
+   let refusals = lcr-refusals(text);
+   let relowered = lcr-relowered(text);
+   "[cache-race] " ++ tag ++ " r" ++ r.str() ++ " k" ++ k.str() ++ ": exit " ++ lcr-status(w) ++ " refusals " ++ refusals.str() ++ " relowered " ++ relowered.str();
+  }
+  // cfg is [binary, door, tag, kernels, deadline ms, mover, hold ms, gap ms, keep]; a round answers [failed, refusals, relowered, flips]
+  def lcr-round(cfg, base, paths, r) {
+   let root = lcr-dir() ++ "/" ++ cfg[2] ++ "-r" ++ r.str();
+   let cleared = host_dir_rmdir(root);
+   let made = hch-mkdirs(root);
+   let missed = lcr-copy(root, base, paths);
+   missed > 0 ? lcr-unrun(cfg, r, missed) : lcr-run(cfg, root, r);
+  }
+  def lcr-unrun(cfg, r, missed) {
+   let kernels = cfg[3];
+   let said = print_str("[cache-race] " ++ cfg[2] ++ " round " ++ r.str() ++ ": refused: " ++ missed.str() ++ " file(s) of the chain did not copy");
+   [kernels, 0, 0, 0];
+  }
+  def lcr-run(cfg, root, r) {
+   let tag = cfg[2];
+   let kernels = cfg[3];
+   let mover = cfg[5];
+   let started = host_monotonic_ms();
+   let until = started + cfg[4];
+   let ks = range(1, kernels + 1);
+   let pids = map(k => lcr-begin(cfg[0], cfg[1], root, tag, r, k), ks);
+   let moved = root ++ "/" ++ mover;
+   let original = (String) mover == "" ? "" : read_file(moved) ?? "";
+   let flips = (String) mover == "" ? 0 : lcr-move(moved, original, pids, until, cfg[6], cfg[7], 0);
+   let put_back = (String) mover == "" ? 0 : write_file_text(moved, original);
+   let waits = map(p => lcr-wait(p, until), pids);
+   let texts = map(k => read_file(lcr-out(tag, r, k)) ?? "", ks);
+   let said = foldl((acc, k) => print_str(lcr-kernel-line(tag, r, k, waits[k - 1], texts[k - 1])), 0, ks);
+   let exit0 = len(filter(w => lcr-ok?(w), waits));
+   let failed = kernels - exit0;
+   let refusals = foldl((acc, t) => acc + lcr-refusals(t), 0, texts);
+   let relowered = foldl((acc, t) => acc + lcr-relowered(t), 0, texts);
+   let ms = host_monotonic_ms() - started;
+   let line = print_str("[cache-race] " ++ tag ++ " round " ++ r.str() ++ ": kernels " ++ kernels.str() ++ " exit0 " ++ exit0.str() ++ " failed " ++ failed.str() ++ " refusals " ++ refusals.str() ++ " relowered " ++ relowered.str() ++ " flips " ++ flips.str() ++ " ms " ++ ms.str());
+   let removed = (Comparable) cfg[8] == 1 ? 0 : host_dir_rmdir(root);
+   [failed, refusals, relowered, flips];
+  }
+  def lcr-sum(results, i) = foldl((acc, x) => acc + x[i], 0, results);
+  def lcr-why(door, memo, base, paths, mover) = (String) door == "" ? "key \"door\" names the unit to lower"
+   : nothing?(memo) ? door ++ ".lowfk is absent: lower the door once in the checkout first (./fkwu --check " ++ door ++ ")"
+   : (String) base == "" || nil?(paths) ? door ++ ".lowfk names no working directory or no file it read"
+   : any?(p => !lcr-under?(base, p), paths) ? "the chain reaches outside " ++ base ++ ": " ++ filter(p => !lcr-under?(base, p), paths)[0]
+   : (String) mover != "" && !any?(p => (String) lcr-rel(base, p) == mover, paths) ? "mover " ++ mover ++ " is not a file of the chain"
+   : "";
+  def lcr-binary(bin) = (String) substring(bin, 0, 1) == "/" ? bin : host_cwd() ++ "/" ++ ((Comparable) str_find(bin, "./", 0) == 0 ? substring(bin, 2, len(bin)) : bin);
+  // ── the image and its lens, a crossed pair read warm ("pair": 1) ──
+  // An image (.fkb) and its lens (.sym) land by two renames, so two writers of one unit can leave one's lens beside the
+  // other's image. The probe is lowered and run cold (its image and lens); a sibling whose compile counts an error (an
+  // unresolved call) leaves a lens naming its own identity; that lens copied beside the probe's image, the probe's own
+  // bytes untouched, is the crossed pair. Read warm, the probe must not take the sibling's count as its own exit truth.
+  def lcr-pair-dir() = lcr-dir() ++ "/pair";
+  def lcr-pair-text(expr) = "// pair-probe: a unit whose image and lens the warm reader is asked about\nsection [form.bml] {\n let answer = " ++ expr ++ ";\n answer;\n}\n";
+  def lcr-pair-step(bin, unit, step) = hch-run-in(lcr-pair-dir(), step, [bin, unit], "", hch-by(120000));
+  def lcr-said?(run, needle) = str_find((String) run[1], needle, 0) >= 0;
+  def lcr-pair-line(step, run) = "[cache-race] pair " ++ step ++ ": exit " ++ hch-status-text(run) ++ (lcr-said?(run, "compiled with errors") ? ", took a lens's error count" : "") ++ (lcr-said?(run, "does not match today's bytes") ? ", refused the cache and lowered again" : "") ++ (lcr-said?(run, "42") ? ", answered 42" : "");
+  def lcr-pair(bin) {
+   let dir = lcr-pair-dir();
+   let cleared = host_dir_rmdir(dir);
+   let made = hch-mkdirs(dir);
+   let probe = dir ++ "/pair-probe.bml";
+   let other = dir ++ "/pair-probe-other.bml";
+   let wrote = write_file_text(probe, lcr-pair-text("41 + 1"));
+   let wrote_other = write_file_text(other, lcr-pair-text("lcr-pair-no-such-recipe(1)"));
+   let cold = lcr-pair-step(bin, probe, "cold");
+   let sibling = lcr-pair-step(bin, other, "other");
+   let crossed = host_file_copy(other ++ ".sym", probe ++ ".sym");
+   let warm = lcr-pair-step(bin, probe, "warm");
+   let again = lcr-pair-step(bin, probe, "again");
+   let said = foldl((acc, l) => print_str(l), 0, [lcr-pair-line("cold", cold), lcr-pair-line("other", sibling), "[cache-race] pair crossed: the other's lens copied beside the probe's image (" ++ crossed.str() ++ " bytes)", lcr-pair-line("warm", warm), lcr-pair-line("again", again)]);
+   let took = lcr-said?(warm, "compiled with errors") || !hch-ok?(warm);
+   let verdict = print_str("[cache-race] pair verdict: " ++ (took ? "the warm reader took the crossed lens as the image's truth" : "the warm reader refused the crossed pair") ++ ", binary " ++ bin);
+   took ? 1 : 0;
+  }
+  // ── the race: kernels lowering one door's cold chain at once, a round at a time ──
+  def lcr-race(doc) {
+   let door = lcr-str(doc, "door", "");
+   let memo = (String) door == "" ? nothing() : read_file(door ++ ".lowfk");
+   let rows = nothing?(memo) ? [] : lcr-rows(memo);
+   let base = lcr-cwd(rows);
+   let paths = lcr-read(rows);
+   let mover = lcr-str(doc, "mover", "");
+   let why = lcr-why(door, memo, base, paths, mover);
+   let refused = len(why) > 0 ? dop-refuse("lowering-cache-race", why) : 0;
+   let tag = lcr-str(doc, "tag", "race");
+   let kernels = lcr-int(doc, "kernels", 4);
+   let rounds = lcr-int(doc, "rounds", 3);
+   let bin = lcr-binary(lcr-str(doc, "fkwu", "./fkwu"));
+   let cfg = [bin, door, tag, kernels, lcr-int(doc, "deadline_s", 900) * 1000, mover, lcr-int(doc, "hold_ms", 4000), lcr-int(doc, "gap_ms", 500), lcr-int(doc, "keep", 0)];
+   let opened = print_str("[cache-race] " ++ tag ++ ": " ++ door ++ ", chain " ++ len(paths).str() ++ " files, kernels " ++ kernels.str() ++ ", rounds " ++ rounds.str() ++ ", binary " ++ bin ++ ((String) mover == "" ? "" : ", mover " ++ mover));
+   let results = map(r => lcr-round(cfg, base, paths, r), range(1, rounds + 1));
+   let failed = lcr-sum(results, 0);
+   let verdict = print_str("[cache-race] " ++ tag ++ " verdict: failed " ++ failed.str() ++ " of " ++ (kernels * rounds).str() ++ " kernels, refusals " ++ lcr-sum(results, 1).str() ++ ", relowered " ++ lcr-sum(results, 2).str() ++ ", flips " ++ lcr-sum(results, 3).str());
+   failed;
+  }
+ }
+ let doc = dop-doc("lowering-cache-race", stdin-text(), [["door", "str"], ["kernels", "int"], ["rounds", "int"], ["fkwu", "str"], ["tag", "str"], ["deadline_s", "int"], ["mover", "str"], ["hold_ms", "int"], ["gap_ms", "int"], ["keep", "int"], ["pair", "int"]]);
+ lcr-int(doc, "pair", 0) == 1 ? lcr-pair(lcr-binary(lcr-str(doc, "fkwu", "./fkwu"))) : lcr-race(doc);
+}

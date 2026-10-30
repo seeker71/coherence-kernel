@@ -233,7 +233,8 @@ the seed's process, as a cell:
   `fk_bml_scan` leave with it (`runtime/fkwu-uni.c`, "THE BML FLOOR COMPILER, A CELL OF THIS PROCESS").
 - **A unit the floor refuses is said once.** A floor call that stops (`form_error`) is set aside and read again whole by the next call (its
   readers were left mid-read: one unterminated string made every unit after it "unterminated"), the stop is voiced on the unit it stopped on
-  (the old child said only "lowering child failed; run the floor by hand"), the unit is not asked again by this process, and the load
+  (the old child said only "lowering child failed; run the floor by hand"), the unit is not asked again by this process while its bytes stand
+  and this process writes no source (`fk_bml_bad_has`, `fk_src_wrote`, band `bml-bad-list-band` 511), and the load
   fails as before (exit 2) after every unit that could be lowered was.
 - **Two spellings of one unit.** A memo names one owner path; the same unit met as `/abs/x/form/...` and as `form/...` (a symlinked
   checkout, as the landing band's scratch checkout is) took turns overwriting each other's memo and never settled ("did not settle in 256 rounds":

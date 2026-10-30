@@ -1,0 +1,247 @@
+// qwen-last-block-lift-run.bml — the last block's trained adapter is judged against its parent on accepted rows it never saw, and
+// one promotion row lands where the gap register reads it.
+//
+//   echo '{"captures":".hearth/qwen-rung-4","train_captures":".hearth/qwen-rung-3"}' | ./fkwu observe/qwen-last-block-lift-run.bml
+//
+// The child is an adapter the rung-3 trainer exported (form-stdlib/bml/qwen-last-block-train.bml, qlbt-export; by default
+// form/form-stdlib/adapters/qwen38-last-block-next). The parent is the lane's adapter home, form/form-stdlib/adapters/qwen38-last-block:
+// absent, the lane wears no adapter and the parent reads as the base 27B, its absence named in the row. Both are scored by
+// form-stdlib/bml/qwen-last-block-judge.bml with the loss the child descended (the prompt-masked cross-entropy through the frozen head,
+// the mean of the rows' token-mean losses) on the last valid_rows rows of `rows` (accepted, and disjoint by draft id from the lines the
+// child's config names), and on every row of `negatives` beside, for information. A new door, not an extension of
+// observe/lora-lift-run.bml: that door trains the 3B and reads its trainer's validation events; this one trains nothing and scores an
+// exported pair on the 27B, so the two share the lift's rules (read in place through the judge) and no flow.
+// stdin, optional, one JSON object read strictly (form-stdlib/bml/door-options.bml): malformed JSON, an unknown key, a key of the wrong
+// kind or a key given twice is refused by name with this door's key list. The keys: child (str), parent (str), rows (str,
+// learn/draft-readings.jsonl), valid_rows (int, 5), negatives (str, learn/draft-readings-heldout.jsonl; "" is none), captures (str,
+// .hearth/qwen-last-block-lift: the judged rows' block-input captures, cached by their ids under accepted/ and rejected/),
+// train_captures (str, "" is none: a directory holding the captures of the child's own training rows, read and never written; named,
+// the child as loaded must read its config's mean_loss_step20 on those rows exactly — the child judged is the child trained — or the
+// door refuses).
+// Refused by name before anything opens: the request; an absent child adapter or config, or a config the judge cannot stand on; a
+// present parent home that does not stand beside the child; a split that does not stand; a negatives row that does not read
+// "rejected"; an absent model; a child (or parent) whose tensors are not the pair on the block the head reads next. Then the memory
+// governor's lease (held: refused with the governor's line, nothing opens), the model and the tokfast index, the rows, the captures,
+// the parent pass, the child pass, every handle freed, the context closed and the lease given back. A held-out row with no supervised
+// target under the cap, a held-out capture that does not land, or a held-out loss that does not arrive refuses; a rejected row of
+// any of those kinds is set aside and named in the row (no silent cap). One row lands in receipts/lora-promotion-ledger.jsonl: parent,
+// parent_reads, child (its sha256 and bytes), both held-out losses x1000 as the mean and per row, better from the accepted held-out
+// alone (ll-better), the ids digests, the rejected losses beside with every row set aside, the in-sample witness when read, memory,
+// rent 0, wall. Serving does not change: the lane wears an adapter only by a separate, witnessed decision.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-capture.bml form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml form-stdlib/bml/qwen-last-block-train.bml form-stdlib/bml/qwen-last-block-judge.bml
+section [form.bml] {
+ class QwenLastBlockLift {
+  def qlbl-door() = "qwen-last-block-lift";
+  def qlbl-spec() = [["child", "str"], ["parent", "str"], ["rows", "str"], ["valid_rows", "int"], ["negatives", "str"], ["captures", "str"], ["train_captures", "str"]];
+  def qlbl-ledger() = "receipts/lora-promotion-ledger.jsonl";
+  def qlbl-maxpos() = 256;
+  def qlbl-span() = 64;
+  def qlbl-handles() = 41;
+  def qlbl-say(s) = print_str("[qwen-last-block-lift] " ++ s);
+  def qlbl-refuse(why) = dop-refuse(qlbl-door(), why);
+  def qlbl-stand(why) = len(why) > 0 ? qlbl-refuse(why) : 0;
+  def qlbl-text(opts, key, d) = json-object-has?(opts, key) ? fhn-text(opts, key) : d;
+  def qlbl-int(opts, key, d) = json-object-has?(opts, key) ? json-int-value(json-object-get(opts, key)) : d;
+  def qlbl-absent-reads() = "absent: the lane wears no adapter; the parent is the base 27B (the pair at +0)";
+  def qlbl-num(x) = nothing?(x) ? "unread" : x.str();
+  def qlbl-draft(p) = ll-id(p[0]);
+  def qlbl-negs-why(negPath, negs) = len(negPath) == 0 ? "" : file_size(negPath) < 0 ? "negatives " ++ negPath ++ " is absent" : nil?(negs) ? "negatives " ++ negPath ++ " has no rows" : qlbj-reading-why(negPath, negs, "rejected", "the rejected set is the rows we turned away");
+  def qlbl-block-why(model, geo, L, cap) = (Comparable) L != qlbj-last-block(geo) ? "the child's layer " ++ L.str() ++ " is not the block the head reads next (" ++ qlbj-last-block(geo).str() ++ " in " ++ model ++ "); the judge reads the head right after the block"
+   : cap > qlbl-maxpos() ? "the child's ids_cap " ++ cap.str() ++ " exceeds the judge's " ++ qlbl-maxpos().str() ++ " positions" : "";
+  // ── rows: each selected [text, line] in the trainer's shape, said as it is prepared: [row, [text, line]] ──
+  def qlbl-row-text(side, row) = side ++ " line " ++ row[0].str() ++ ": " ++ qlbt-row-n(row).str() ++ " positions, " ++ qlbt-row-count(row).str() ++ " supervised targets, prompt " ++ row[5].str() ++ " ids" ++ (row[6] == 1 ? ", whole" : ", cut at the cap");
+  def qlbl-prepared(side, src, x, p, cap) {
+   let row = qlbj-row-of(src, x, p, cap);
+   qlbl-say(qlbl-row-text(side, row) ++ " (draft " ++ qlbl-draft(p) ++ ")");
+   [row, p];
+  }
+  def qlbl-prepare(side, src, x, ps, cap) = map(p => qlbl-prepared(side, src, x, p, cap), ps);
+  def qlbl-rows-of(es) = map(e => e[0], es);
+  def qlbl-unsup-why(row, cap) = "its prompt is " ++ row[5].str() ++ " ids: under the " ++ cap.str() ++ "-id cap no assistant token is a supervised target";
+  // ── captures: [row, xin, prefill ms, cached?, [text, line]] each, said as they land ──
+  def qlbl-capture-one(ctx, L, dir, side, e, cap, i, n) {
+   let c = qlbt-capture(ctx, L, dir, e[0], cap);
+   qlbl-say(side ++ " capture " ++ i.str() ++ " of " ++ n.str() ++ " (line " ++ e[0][0].str() ++ "): " ++ (c[2] == 1 ? "from cache" : "prefill " ++ c[1].str() ++ " ms") ++ ", " ++ len(c[0]).str() ++ " bytes" ++ (len(c[0]) == 0 ? " — did not land" : ""));
+   [e[0], c[0], c[1], c[2], e[1]];
+  }
+  def qlbl-capture-go(ctx, L, dir, side, es, cap, i, n, acc) = nil?(es) ? reverse(acc) : qlbl-capture-go(ctx, L, dir, side, es[1:], cap, i + 1, n, cons(qlbl-capture-one(ctx, L, dir, side, es[0], cap, i, n), acc));
+  // the rejected side in file order: a row with no supervised target is set aside uncaptured, a capture that does not land is set aside
+  // [judged captures, [line, why] set aside]
+  def qlbl-neg-go(ctx, L, dir, es, cap, i, n, judged, aside) = nil?(es) ? [reverse(judged), reverse(aside)]
+   : qlbt-row-count(es[0][0]) <= 0 ? qlbl-neg-go(ctx, L, dir, es[1:], cap, i, n, judged, cons([es[0][0][0], qlbl-unsup-why(es[0][0], cap)], aside))
+   : qlbl-neg-landed(ctx, L, dir, es, cap, i, n, judged, aside, qlbl-capture-one(ctx, L, dir, "rejected", es[0], cap, i, n));
+  def qlbl-neg-landed(ctx, L, dir, es, cap, i, n, judged, aside, c) = len(c[1]) == 0 ? qlbl-neg-go(ctx, L, dir, es[1:], cap, i + 1, n, judged, cons([c[0][0], "its capture did not land (prefill " ++ c[2].str() ++ " ms)"], aside))
+   : qlbl-neg-go(ctx, L, dir, es[1:], cap, i + 1, n, cons(c, judged), aside);
+  def qlbl-ints(i, n) = i >= n ? [] : cons(i, qlbl-ints(i + 1, n));
+  // a pass's reading of row i: nothing when the pass did not read it (a pass that did not run reads nothing for every row)
+  def qlbl-at(xs, i) = i < len(xs) ? nth(xs, i) : nothing();
+  def qlbl-said-means(side, prep, pm, cm) = map(i => qlbl-say(side ++ " line " ++ nth(prep, i)[0][0].str() ++ " (draft " ++ qlbl-draft(nth(prep, i)[4]) ++ ", " ++ qlbt-row-count(nth(prep, i)[0]).str() ++ " supervised): parent " ++ qlbl-num(qlbl-at(pm, i)) ++ ", child " ++ qlbl-num(qlbl-at(cm, i))), qlbl-ints(0, len(prep)));
+  // the rejected rows whose loss arrived under both pairs, and the ones set aside for a loss that did not: [kept, pm, cm, aside]
+  def qlbl-both?(pm, cm, i) = !nothing?(qlbl-at(pm, i)) && !nothing?(qlbl-at(cm, i));
+  def qlbl-neg-kept(prep, pm, cm) {
+   let idx = qlbl-ints(0, len(prep));
+   let kept = filter(i => qlbl-both?(pm, cm, i), idx);
+   let lost = filter(i => !qlbl-both?(pm, cm, i), idx);
+   [map(i => nth(prep, i), kept), map(i => nth(pm, i), kept), map(i => nth(cm, i), kept), map(i => [nth(prep, i)[0][0], "its loss did not arrive (parent " ++ qlbl-num(qlbl-at(pm, i)) ++ ", child " ++ qlbl-num(qlbl-at(cm, i)) ++ ")"], lost)];
+  }
+  def qlbl-first-unread(prep, xs) = foldl((acc, i) => !nothing?(acc) ? acc : nothing?(qlbl-at(xs, i)) ? nth(prep, i)[0][0] : acc, nothing(), qlbl-ints(0, len(prep)));
+  // the in-sample witness holds when it was not read, or when the child as loaded reads its config's mean_loss_step20 exactly
+  def qlbl-witness?(trainPrep, cIn, m20) = nil?(trainPrep) ? true : nothing?(cIn) ? false : nothing?(m20) ? false : cIn == m20;
+  // ── the passes on the device: the parent's pair (+0 or its adapter), then the child's, over the same captures ──
+  def qlbl-passes(ctx, c, plan, pAbsent, trainPrep, validPrep, negPrep, aside, need) {
+   let geo = ctx[2];
+   let ps = ctx[0];
+   let L = record_get(plan, "layer");
+   let lay = nth(ctx[3], L);
+   let cap = record_get(plan, "cap");
+   let o = qlbt-open(geo, lay, ctx[5], cap, record_get(plan, "rank"), record_get(c, "scale"));
+   let sx = qlbf-scratch(geo, 0, cap);
+   !qlbt-ok?(o) || !qlbf-ok?(sx) ? {
+    let freed = qlbf-free(sx) + qlbt-free(o);
+    ["refused", "the judge's device state did not open (freed " ++ freed.str() ++ " handles)"];
+   } : {
+    let t0 = host_monotonic_ms();
+    let p0 = pAbsent ? qlbj-zero(o) : qlbj-load(o, record_get(plan, "parent"), L);
+    let pTrain = qlbj-means(ps, geo, lay, ctx[5], ctx[6], sx, o, trainPrep);
+    let pValid = qlbj-means(ps, geo, lay, ctx[5], ctx[6], sx, o, validPrep);
+    let pNeg = qlbj-means(ps, geo, lay, ctx[5], ctx[6], sx, o, negPrep);
+    let t1 = host_monotonic_ms();
+    let c0 = qlbj-load(o, record_get(plan, "child"), L);
+    let cTrain = c0 == 1 ? qlbj-means(ps, geo, lay, ctx[5], ctx[6], sx, o, trainPrep) : [];
+    let cValid = c0 == 1 ? qlbj-means(ps, geo, lay, ctx[5], ctx[6], sx, o, validPrep) : [];
+    let cNeg = c0 == 1 ? qlbj-means(ps, geo, lay, ctx[5], ctx[6], sx, o, negPrep) : [];
+    let t2 = host_monotonic_ms();
+    let freed = qlbf-free(sx) + qlbt-free(o);
+    qlbl-say("passes: parent " ++ (pAbsent ? "(the pair at +0)" : "(its adapter, loaded " ++ p0.str() ++ ")") ++ " " ++ (t1 - t0).str() ++ " ms, child (loaded " ++ c0.str() ++ ") " ++ (t2 - t1).str() ++ " ms over " ++ (len(trainPrep) + len(validPrep) + len(negPrep)).str() ++ " rows each; freed " ++ freed.str() ++ " of " ++ qlbl-handles().str() ++ " handles; " ++ mg-status-line(mg-sense()));
+    let saidT = qlbl-said-means("in-sample", trainPrep, pTrain, cTrain);
+    let saidV = qlbl-said-means("held-out", validPrep, pValid, cValid);
+    let saidN = qlbl-said-means("rejected", negPrep, pNeg, cNeg);
+    qlbl-judged(c, plan, pAbsent, p0, c0, freed, trainPrep, validPrep, negPrep, aside, pTrain, pValid, pNeg, cTrain, cValid, cNeg, need);
+   };
+  }
+  // what the passes read, judged: every refusal named, or ["judged", the record qlbj-row reads]
+  def qlbl-judged(c, plan, pAbsent, p0, c0, freed, trainPrep, validPrep, negPrep, aside, pTrain, pValid, pNeg, cTrain, cValid, cNeg, need) {
+   let pIn = qlbj-mean(pTrain);
+   let cIn = qlbj-mean(cTrain);
+   let witness = nil?(trainPrep) ? "" : "in-sample witness on the " ++ len(trainPrep).str() ++ " training rows: parent " ++ qlbl-num(pIn) ++ " (config mean_loss_step0 " ++ qlbl-num(record_get(c, "mean0")) ++ "), child " ++ qlbl-num(cIn) ++ " (config mean_loss_step20 " ++ qlbl-num(record_get(c, "mean20")) ++ ")";
+   let said = len(witness) > 0 ? qlbl-say(witness) : 0;
+   (Comparable) freed != qlbl-handles() ? ["refused", "the judge gave back " ++ freed.str() ++ " of " ++ qlbl-handles().str() ++ " device handles"]
+   : (Comparable) p0 != 1 ? ["refused", "the parent's pair did not load whole from " ++ qlbj-st(record_get(plan, "parent"))]
+   : (Comparable) c0 != 1 ? ["refused", "the child's pair did not load whole from " ++ qlbj-st(record_get(plan, "child"))]
+   : !nothing?(qlbl-first-unread(validPrep, pValid)) ? ["refused", "the parent's loss on held-out line " ++ qlbl-first-unread(validPrep, pValid).str() ++ " did not arrive"]
+   : !nothing?(qlbl-first-unread(validPrep, cValid)) ? ["refused", "the child's loss on held-out line " ++ qlbl-first-unread(validPrep, cValid).str() ++ " did not arrive"]
+   : !qlbl-witness?(trainPrep, cIn, record_get(c, "mean20")) ? ["refused", witness ++ ": the child as loaded does not read its config's in-sample loss, so the pair judged is not the pair trained"]
+   : ["judged", qlbl-judged-record(validPrep, pValid, cValid, qlbl-neg-kept(negPrep, pNeg, cNeg), aside, len(trainPrep), pIn, cIn, need)];
+  }
+  def qlbl-judged-record(validPrep, pValid, cValid, kept, aside, inRows, pIn, cIn, need) = qlbj-judged(qlbl-rows-of(validPrep), pValid, cValid, map(e => e[4], kept[0]), qlbl-rows-of(kept[0]), qlbj-mean(kept[1]), qlbj-mean(kept[2]), append(aside, kept[3]), inRows, pIn, cIn, need, 0);
+  // ── inside the lease: rows, captures, passes ──
+  def qlbl-judge(ctx, src, x, c, plan, pAbsent, caps, trainCaps, need) {
+   let geo = ctx[2];
+   let L = record_get(plan, "layer");
+   let cap = record_get(plan, "cap");
+   let d = geo[0];
+   qlbl-say("block L = " ++ L.str() ++ ", d " ++ d.str() ++ ", ff " ++ geo[10].str() ++ ", vocab " ++ geo[19].str() ++ ", cap " ++ cap.str() ++ " ids; tokfast index " ++ qtf2-index-status(x) ++ "; gpu utilization " ++ host_gpu_utilization().str() ++ "; " ++ mg-status-line(mg-sense()));
+   let t0 = host_monotonic_ms();
+   let trainEs = len(trainCaps) == 0 ? [] : qlbl-prepare("in-sample", src, x, record_get(plan, "train"), cap);
+   let validEs = qlbl-prepare("held-out", src, x, record_get(plan, "valid"), cap);
+   let negEs = qlbl-prepare("rejected", src, x, record_get(plan, "negs"), cap);
+   let t1 = host_monotonic_ms();
+   let unsup = qlbj-unsupervised(append(qlbl-rows-of(trainEs), qlbl-rows-of(validEs)));
+   qlbl-say("rows: " ++ len(trainEs).str() ++ " trained (the in-sample witness), " ++ len(validEs).str() ++ " held-out, " ++ len(negEs).str() ++ " rejected, prepared in " ++ (t1 - t0).str() ++ " ms");
+   !nil?(unsup) ? ["refused", "line " ++ unsup[0][0].str() ++ ": " ++ qlbl-unsup-why(unsup[0], cap) ++ "; a judged or witnessed row needs one"]
+   : qlbl-captured(ctx, c, plan, pAbsent, caps, trainCaps, trainEs, validEs, negEs, need);
+  }
+  def qlbl-captured(ctx, c, plan, pAbsent, caps, trainCaps, trainEs, validEs, negEs, need) {
+   let L = record_get(plan, "layer");
+   let cap = record_get(plan, "cap");
+   let d = ctx[2][0];
+   let dirs = qlbt-dir-ready(caps) + qlbt-dir-ready(caps ++ "/accepted") + qlbt-dir-ready(caps ++ "/rejected");
+   let trainPrep = map(e => [e[0], qlbj-cached(trainCaps, e[0], d), 0, 1, e[1]], trainEs);
+   let unread = filter(p => len(p[1]) == 0, trainPrep);
+   !nil?(unread) ? ["refused", "the in-sample witness: no capture of line " ++ unread[0][0][0].str() ++ " with its ids under " ++ trainCaps ++ " (" ++ qlbt-capture-path(trainCaps, unread[0][0]) ++ ")"] : {
+    let t0 = host_monotonic_ms();
+    let validPrep = qlbl-capture-go(ctx, L, caps ++ "/accepted", "held-out", validEs, cap, 1, len(validEs), []);
+    let t1 = host_monotonic_ms();
+    let missing = filter(p => len(p[1]) == 0, validPrep);
+    qlbl-say("held-out captures: " ++ (len(validPrep) - len(missing)).str() ++ " of " ++ len(validPrep).str() ++ " landed in " ++ (t1 - t0).str() ++ " ms");
+    !nil?(missing) ? ["refused", "the capture of held-out line " ++ missing[0][0][0].str() ++ " did not land (prefill " ++ missing[0][2].str() ++ " ms)"] : {
+     let n = len(filter(e => qlbt-row-count(e[0]) > 0, negEs));
+     let neg = qlbl-neg-go(ctx, L, caps ++ "/rejected", negEs, cap, 1, n, [], []);
+     let t2 = host_monotonic_ms();
+     qlbl-say("rejected captures: " ++ len(neg[0]).str() ++ " judged, " ++ len(neg[1]).str() ++ " set aside, of " ++ len(negEs).str() ++ ", in " ++ (t2 - t1).str() ++ " ms");
+     qlbl-passes(ctx, c, plan, pAbsent, trainPrep, validPrep, neg[0], neg[1], need);
+    };
+   };
+  }
+  def qlbl-leased(model, src, c, plan, pAbsent, caps, trainCaps, need) {
+   let x = qtf2-load(qtf2-root-for(model), qsx-seal-line(model));
+   let ctx = q38-open-span(model, qlbl-maxpos(), qlbl-span());
+   let out = (Comparable) q38-context-ok?(ctx) == 1 ? qlbl-judge(ctx, src, x, c, plan, pAbsent, caps, trainCaps, need) : ["refused", "the model context of " ++ model ++ " did not open"];
+   let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
+   let unleased = mg-release();
+   out;
+  }
+  // ── the row ──
+  def qlbl-land(plan, j, started) {
+   let w = record_set(j, "wall", now_unix_ms() - started);
+   let row = qlbj-row(plan, j);
+   let appended = fhn-append(qlbl-ledger(), json-emit(row) ++ "\n");
+   qlbl-say("verdict on the accepted held-out (" ++ len(record_get(plan, "valid")).str() ++ " rows): parent " ++ qlbl-num(qlbj-parent-mean(j)) ++ ", child " ++ qlbl-num(qlbj-child-mean(j)) ++ ", better " ++ json-int-value(json-object-get(row, "better")).str() ++ "; rejected beside: parent " ++ qlbl-num(record_get(j, "neg_parent")) ++ ", child " ++ qlbl-num(record_get(j, "neg_child")) ++ " over " ++ len(record_get(j, "neg_judged")).str() ++ " rows, " ++ len(record_get(j, "excluded")).str() ++ " set aside");
+   (String) appended == "appended" ? qlbl-say(json-emit(row)) : qlbl-refuse("the promotion row did not land in " ++ qlbl-ledger() ++ " (" ++ appended ++ ")");
+  }
+  def qlbl-run() {
+   let started = now_unix_ms();
+   let opts = dop-doc(qlbl-door(), stdin-text(), qlbl-spec());
+   let child = qlbl-text(opts, "child", qlbj-next());
+   let parent = qlbl-text(opts, "parent", qlbj-home());
+   let rowsPath = qlbl-text(opts, "rows", "learn/draft-readings.jsonl");
+   let k = qlbl-int(opts, "valid_rows", 5);
+   let negPath = qlbl-text(opts, "negatives", "learn/draft-readings-heldout.jsonl");
+   let caps = qlbl-text(opts, "captures", ".hearth/qwen-last-block-lift");
+   let trainCaps = qlbl-text(opts, "train_captures", "");
+   // the child and its config; an absent parent home is the base, a present one stands beside the child
+   let s1 = qlbl-stand(qlbj-present-why("child", child));
+   let c = qlbj-config(child);
+   let s2 = qlbl-stand(qlbj-config-why("child", child, c));
+   let s3 = qlbl-stand(len(trainCaps) > 0 && nothing?(record_get(c, "mean20")) ? "child adapter config " ++ qlbj-cfg(child) ++ " carries no mean_loss_step20; the in-sample witness has nothing to read" : "");
+   let pAbsent = qlbj-home-absent?(parent);
+   let s4 = qlbl-stand(pAbsent ? "" : qlbj-parent-why(parent, c));
+   // the split: the held-out from the end of rows, the trained lines the config names, disjoint by draft id; the negatives
+   let lines = qlbj-lines(rowsPath);
+   let valid = qlbj-last(lines, k);
+   let trainPath = record_get(c, "data");
+   let train = qlbj-at(qlbj-lines(trainPath), record_get(c, "rows"));
+   let s5 = qlbl-stand(qlbj-split-why(rowsPath, lines, k, valid, trainPath, record_get(c, "rows"), train));
+   let negs = len(negPath) == 0 ? [] : qlbj-lines(negPath);
+   let s6 = qlbl-stand(qlbl-negs-why(negPath, negs));
+   // the model, the block the head reads next, the pair against it
+   let model = record_get(c, "model");
+   let s7 = qlbl-stand(file_size(model) < 0 ? "the child's model " ++ model ++ " is absent" : "");
+   let src = fcmg-src(model);
+   let geo = q38-geo(src, qlbl-maxpos());
+   let L = qlbj-layer(c);
+   let r = record_get(c, "rank");
+   let cap = record_get(c, "cap");
+   let s8 = qlbl-stand(qlbl-block-why(model, geo, L, cap));
+   let s9 = qlbl-stand(qlbj-pair-why("child", child, L, geo[10], r, geo[0]));
+   let s10 = qlbl-stand(pAbsent ? "" : qlbj-pair-why("parent", parent, L, geo[10], r, geo[0]));
+   let blob = read_file(qlbj-st(child)) ?? "";
+   let plan = qlbj-plan(parent, pAbsent ? qlbl-absent-reads() : "adapter", child, nlp-hex(sha256-stream-string(blob)), len(blob), model, L, r, cap, record_get(c, "steps"), record_get(c, "batch"), trainPath, train, rowsPath, valid, negPath, negs);
+   qlbl-say("child " ++ child ++ ": " ++ len(blob).str() ++ " bytes, sha256 " ++ record_get(plan, "child_sha256") ++ "; rank " ++ r.str() ++ ", scale " ++ record_get(c, "scale").str() ++ ", layer " ++ L.str() ++ ", trained on " ++ trainPath ++ " lines " ++ qlbj-nums(record_get(c, "rows")) ++ " (" ++ qlbl-num(record_get(c, "steps")) ++ " steps)");
+   qlbl-say("parent " ++ parent ++ ": " ++ record_get(plan, "parent_reads"));
+   qlbl-say("held-out: " ++ rowsPath ++ " lines " ++ qlbj-nums(qlbj-line-nums(valid)) ++ " (the last " ++ k.str() ++ " of " ++ len(lines).str() ++ " rows, accepted, disjoint by draft id from the trained lines); rejected beside: " ++ (len(negPath) == 0 ? "none" : negPath ++ ", " ++ len(negs).str() ++ " rows") ++ "; captures under " ++ caps ++ (len(trainCaps) == 0 ? "" : "; in-sample witness from " ++ trainCaps));
+   // the lease, then everything that opens
+   let own = fcms-qwen-own(src, qlbl-maxpos()) + qlbf-scratch-bytes(geo, 0, cap) + qlbt-own-bytes(geo, cap, r) + qlbc-own-bytes(geo[0], cap);
+   let need = own + fcms-weights-bytes(model);
+   let granted = mg-lease("qwen last-block lift", model, fcms-weights-bytes(model), own);
+   let line = mg-line("qwen last-block lift", need, granted);
+   let said = mg-granted?(granted) ? qlbl-say(line ++ "; counted own " ++ own.str() ++ " bytes beside the shared weights") : 0;
+   let out = !mg-granted?(granted) ? ["held", line] : qlbl-leased(model, src, c, plan, pAbsent, caps, trainCaps, need);
+   (String) out[0] == "held" ? qlbl-refuse("held by the memory governor: " ++ out[1])
+   : (String) out[0] == "refused" ? qlbl-refuse(out[1])
+   : qlbl-land(plan, out[1], started);
+  }
+ }
+ cs-entry?("observe/qwen-last-block-lift-run.bml") ? qlbl-run() : nothing();
+}

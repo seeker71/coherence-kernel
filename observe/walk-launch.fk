@@ -1,0 +1,101 @@
+; walk-launch.fk — launchd's program begins the walk's door as its own child, so the program launchd names never changes
+; when the walk rebuilds its kernel. This file is the source of the door the jobs read: it moves with main, and what they
+; read is launch/walk-launch.fk, the copy a pin took of it.
+;
+;   /Users/ursmuff/source/coherence-kernel-walk/launch/fkwu /Users/ursmuff/source/coherence-kernel-walk/launch/walk-launch.fk observe/day-turn.bml
+;
+; launchd keeps a lightweight code requirement per job, from the program it spawned; a program signed ad hoc (no CMS blob,
+; linker-signed or codesign -s -) is matched by its content, so since 2026-10-28 a rebuild of that program broke the match
+; once per job (the 2026-10-24 rebuild cost no slot; docs/launchd/README.md):
+; the first spawn of each job after the walk's 2026-10-28 19:00:23 rebuild died at exec ("Launch Constraint Violation
+; (enforcing) ... (Constraint not matched)", OS_REASON_CODESIGNING) and launchd repaired the requirement on the spawn
+; after it ("Requesting repair LWCR update", then the same binary ran). A child a live process spawns is not held to the
+; job's requirement (19:00:42, while the 19:00 day turn ran, the rebuilt kernel was exec'd with no violation). So
+; the jobs name launch/fkwu, a pinned copy of the kernel, and launch/walk-launch.fk, a pinned copy of this door, a pair only a
+; deliberate, witnessed pin writes (observe/walk-launch-pin.bml, hw-pin-at in form/form-stdlib/bml/host-walk-seal.bml); the
+; walk's build writes ./fkwu and never touches launch/. A change here that needs a primitive the pinned kernel lacks fails no
+; job: it waits here until a person pins, and the pin's witness refuses a pair that cannot carry a child, with the pair that
+; stands left as it stood. The cause, its log lines and the install: docs/launchd/README.md.
+;
+; What it does: reads its one argument, the door (the token fkwu stages after the unit, read through input_byte), and
+; begins `./fkwu <door>` from this directory as its child, with this process's stdin, stdout and stderr (host_spawn_at
+; with "" for each stream: the child holds the job's own descriptors, so its lines land in the job's logs as they always
+; did) and this directory; it reads no stdin of its own, so what a hand start pipes in reaches the door. It waits for the
+; child's end (host_wait) and ends with it:
+;   0                       the launcher ends 0; its value, printed on stdout after the child's lines, is the line
+;                           "[walk-launch] <door> ended 0"
+;   1                       the launcher ends 1 (form_error, "[walk-launch] <door> ended 1")
+;   a signal that ends a process without a core and that this kernel does not catch (1 2 9 13 14 15 24 25 26 27 30 31:
+;                           on macOS SIGXCPU and SIGXFSZ terminate with no core, signal(3))
+;                           the line "[walk-launch] <door> ended by signal <n>; the launcher ends by the same signal" on
+;                           stderr, then that signal raised on the launcher itself (host_signal on host_pid), so launchd
+;                           reads the child's own death
+;   any other ending        the launcher ends 1 and says why: a core signal (a crash: the child's own report and
+;                           fatal-signal row name it; raised here it would leave a second, false crash of the launcher), or an
+;                           exit this kernel has no door to end a process with (2, a door that would not load, and every
+;                           other code)
+; A door that cannot be begun ends 1 by name: no argument ("need"), a door that does not stand in this directory (read by
+; host_realpath, which answers nothing for a missing path; the size and presence doors would find a missing relative path
+; higher up the checkout and say it stands), a ./fkwu that did not exec (-4) or any refusal at birth, an exit that did
+; not arrive.
+;
+; Why direct Form and not BML: the launcher runs on the pinned kernel while the checkout follows main. A .bml is lowered
+; through the checkout's Form compiler, which moves with main; this unit carries no section, no import and no prelude,
+; so the pinned kernel reads the pinned copy with its own reader (fk_run_src) and calls only its own doors. Why a child and not an
+; exec carrier (/usr/bin/env, /bin/sh -c "exec ..."): an exec keeps the very process launchd constrained, and whether
+; AMFI holds the rebuilt image to the job's requirement at that second exec was never observed here, while children were
+; observed passing; and a shell would be logic as text, env a borrowed program for one syscall.
+; Proof: form/form-stdlib/tests/walk-launch-band.bml (the pinned pair carrying a child: the streams, stdin, the endings, the
+; refusals; the plists' shape; a change here reaching launch/ only through a pin).
+; preflight-exec: forbidden
+(do
+    ; the door: the one argument, read byte by byte to the first 0 (input_byte answers 0 past the staged token)
+    (defn wl-arg-from (i acc)
+        (if (eq (input_byte i) 0) acc (wl-arg-from (add i 1) (str_concat acc (byte_to_str (input_byte i))))))
+    (defn wl-arg () (wl-arg-from 0 ""))
+    ; a line on stderr, appended to whatever the job's stderr is (nothing here truncates launchd's log)
+    (defn wl-bytes-from (s i out) (if (lt i 0) out (wl-bytes-from s (sub i 1) (cons (str_byte_at s i) out))))
+    (defn wl-say (line)
+        (do (let s (str_concat "[walk-launch] " (str_concat line "\n")))
+            (host_file_append_bytes "/dev/stderr" (wl-bytes-from s (sub (str_len s) 1) (list)))))
+    (defn wl-num (n) (value_str n))
+    (defn wl-in? (x xs) (if (eq (len xs) 0) 0 (if (eq (head xs) x) 1 (wl-in? x (tail xs)))))
+    ; the signals whose default action ends a process with no core, none of them caught by this kernel (fk_fatal_arm keeps
+    ; 4 6 8 10 11): raised here, they end the launcher as they ended the child, and leave no report or row of their own
+    (defn wl-plain-signal? (n) (wl-in? n (list 1 2 9 13 14 15 24 25 26 27 30 31)))
+    (defn wl-core-signal? (n) (wl-in? n (list 3 4 5 6 7 8 10 11 12)))
+    (defn wl-fail (door what) (form_error (str_concat "[walk-launch] " (str_concat door (str_concat " " what)))))
+    (defn wl-raise (door n)
+        (do (wl-say (str_concat door (str_concat " ended by signal " (str_concat (wl-num n) "; the launcher ends by the same signal"))))
+            (host_signal (host_pid) n)
+            (host_sleep_ms 2000)
+            (wl-fail door (str_concat "ended by signal " (str_concat (wl-num n) ", and that signal raised on the launcher did not end it")))))
+    (defn wl-signal-end (door n)
+        (if (eq (wl-plain-signal? n) 1) (wl-raise door n)
+            (if (eq (wl-core-signal? n) 1)
+                (wl-fail door (str_concat "ended by signal " (str_concat (wl-num n) ", a crash: its own report and fatal-signal row name it; the launcher ends 1 rather than raise a core signal of its own")))
+                (wl-fail door (str_concat "ended by signal " (str_concat (wl-num n) ", which ends no process by default; the launcher ends 1"))))))
+    (defn wl-end (door st)
+        (if (nothing? st) (wl-fail door "began, and no exit arrived from it (host_wait answered nothing)")
+            (if (lt st 0) (wl-fail door (str_concat "began, and no exit arrived from it (host_wait answered " (str_concat (wl-num st) ")")))
+                (if (eq st 0) (str_concat "[walk-launch] " (str_concat door " ended 0"))
+                    (if (eq st 1) (wl-fail door "ended 1")
+                        (if (and (lt 128 st) (lt st 160)) (wl-signal-end door (sub st 128))
+                            (wl-fail door (str_concat "ended " (str_concat (wl-num st) ": this kernel has no door that ends a process with an exit it chooses, so the launcher ends 1")))))))))
+    (defn wl-birth-why (pid)
+        (if (eq pid -1) "was not begun: the argv cannot be run (-1)"
+            (if (eq pid -2) "was not begun: a stream would not open (-2)"
+                (if (eq pid -3) "was not begun: the host refused to fork (-3)"
+                    (if (eq pid -4) (str_concat "was not begun: ./fkwu did not exec in " (str_concat (host_cwd) " (-4)"))
+                        (str_concat "was not begun: host_spawn_at answered " (wl-num pid)))))))
+    (defn wl-born (door pid)
+        (if (nothing? pid) (wl-fail door "was not begun: this kernel has no host_spawn_at door")
+            (if (lt pid 1) (wl-fail door (wl-birth-why pid))
+                (wl-end door (host_wait pid)))))
+    (defn wl-run ()
+        (do (let door (wl-arg))
+            (if (eq (str_len door) 0)
+                (form_error "[walk-launch] need: the door to begin, as the launcher's one argument (launch/fkwu launch/walk-launch.fk observe/<door>.bml)")
+                (if (nothing? (host_realpath door)) (wl-fail door (str_concat "is not a door in " (host_cwd)))
+                    (wl-born door (host_spawn_at (list "./fkwu" door) (list "" "" "" "")))))))
+    (wl-run))

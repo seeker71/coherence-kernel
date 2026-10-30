@@ -1,7 +1,7 @@
 // prompt-draft-run.bml — the body's own agent drafts what it would answer to the person's own prompts.
 //
-// Reads the prompts the harness captured (prompt-capture.jsonl in the main checkout's hearth, hearth-home():
-// cwd, prompt, session, t), keeps the person's own words (system-reminder blocks removed; notifications, hook
+// Reads the prompts the harness captured (prompt-capture.jsonl in the hearth, hearth-home(), the main worktree's for
+// a linked worktree: cwd, prompt, session, t), keeps the person's own words (system-reminder blocks removed; notifications, hook
 // feedback and prompts under 16 characters left out), and drafts the newest `count` not yet drafted through the
 // registry's answer model in this process (form-stdlib/bml/form-cli-native-voice.bml), given the turn before the
 // prompt from its own session transcript (form-stdlib/bml/session-transcript.bml, found under the person's home: the
@@ -10,19 +10,32 @@
 // under that same hearth, .hearth/drafts/<id>.md, and one row in receipts/draft-ledger.jsonl with reading
 // "pending"; our reading is recorded beside it by observe/draft-reading-run.bml. The draft text never enters the
 // ledger.
-// stdin, optional: {"count":2,"max_reply_tokens":900,"redraft":0,"repair":0}; redraft 1 rewrites pending drafts
-// written without the turn before them. repair 1 rewrites drafts whose latest reading is revised, and the packet
-// carries that reading's note so the next draft can remove the miss.
+// stdin, optional: {"count":2,"max_reply_tokens":900,"redraft":0,"repair":0,"capture":"<file>","drafts":"<dir>"};
+// redraft 1 rewrites pending drafts written without the turn before them. repair 1 rewrites drafts whose latest
+// reading is revised, and the packet carries that reading's note so the next draft can remove the miss. capture names
+// the prompt capture to read and drafts the directory the drafts land in, instead of the hearth's own (as
+// observe/walk-retry.bml takes its stamp and lock): hearth-home() answers this checkout's own hearth for a kernel
+// lodged as a submodule of the application's worktree (form-stdlib/tests/hearth-home-band.bml), a hearth no capture
+// lands in, and a capture read from elsewhere can keep its drafts beside it. A capture that holds no rows is refused
+// by name ("[draft] need the prompt capture ..."), never read as "drafted 0".
+// The drafts' directory is made with its parents before any voice opens, and one that cannot be made is refused by name
+// ("[draft] need the drafts directory ..."). A draft's file is written before its row and the write's answer read: a
+// file that did not land is refused by name ("[draft] need the draft's file ...") and no row lands for it. "[draft]
+// drafted n" counts the rows that landed.
 // preflight-exec: forbidden
 // preludes: form-stdlib/bml/session-transcript.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml
 section [form.bml] {
  class PromptDraft {
-  // one hearth for every checkout: the capture and the drafts live beside each other in the main checkout
+  // one hearth for a repository's checkouts: the capture and the drafts live beside each other in hearth-home()
   def pd-hearth() = hearth-home();
   def pd-capture() = pd-hearth() ++ "/prompt-capture.jsonl";
   def pd-ledger() = "receipts/draft-ledger.jsonl";
   def pd-dir() = pd-hearth() ++ "/drafts";
   def pd-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def pd-str(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  // the capture read and the directory the drafts land in: the hearth's own unless stdin names them
+  def pd-capture-of(opts) = pd-str(opts, "capture", pd-capture());
+  def pd-dir-of(opts) = pd-str(opts, "drafts", pd-dir());
   def pd-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
   def pd-strip(s) {
    let a = str_find(s, "<system-reminder>", 0);
@@ -79,6 +92,20 @@ section [form.bml] {
   def pd-context(before) = ((Comparable) len(before[0]) == 0) && ((Comparable) len(trim(before[1])) == 0) ? "" : ("The person asked just before: " ++ pd-tail(before[0], 800) ++ "\n\nThe answer they received: " ++ pd-tail(before[1], 3000));
   def pd-packet(prompt, context, files) = "You are this body's own agent, speaking for the coherence-kernel body on its own Mac. The person below asked the body to do something or to answer something. Write the answer or the concrete plan you would give them, as the body would act on it: plainly, specifically, naming the files, doors or steps you would use when the request is about the body's work, and saying what you do not know rather than guessing. You cannot run anything while you draft: when the request asks for something to be run or checked, name the door you would run and the reading that would mean it is done. Keep the answer or plan within about 250 words. Name only files and doors you were shown here or that the conversation names; where you would need to look something up, say what you would look for instead of naming a file you have not seen.\n\n" ++ ((Comparable) len(context) == 0 ? "" : context ++ "\n\n") ++ files ++ "The person asks now:\n" ++ prompt ++ "\n\nYour answer or plan:";
   def pd-repair-packet(prompt, context, files, note, prior) = pd-packet(prompt, context, files) ++ "\n\nA reading of your previous draft said revised. The miss: " ++ note ++ "\nWrite the answer again. Keep what heard the person. Remove that miss. Name only files and doors already in the turn before, the files above, or your previous draft. About 250 words.\n\nPrevious draft:\n" ++ pd-tail(prior, 1600) ++ "\n";
+  // A draft lands whole or is refused by name. The file first, its write's answer read (the byte count when the whole
+  // text landed, -1 when the path does not open, fewer when it fell short); then its row, the ledger's answer read.
+  // Answers 1 when the row landed, 0 otherwise: that is the count "[draft] drafted" says.
+  def pd-land(path, text, row, said) = pd-file-landed(write_file_text(path, text), path, text, row, said);
+  def pd-file-landed(wrote, path, text, row, said) = (Comparable) wrote == len(text) ? pd-row-landed(fhn-append(pd-ledger(), json-emit(row) ++ "\n"), path, said) : pd-refused("[draft] need the draft's file: " ++ path ++ " did not land (the write answered " ++ wrote.str() ++ " of " ++ len(text).str() ++ " bytes); no row landed for it");
+  def pd-row-landed(appended, path, said) = (String) appended == "appended" ? pd-said(said) : pd-refused("[draft] need the ledger's row: " ++ pd-ledger() ++ " did not take the row for " ++ path ++ " (" ++ appended ++ "); the file stands without one");
+  def pd-said(line) {
+   let printed = print_str(line ++ "\n");
+   1;
+  }
+  def pd-refused(line) {
+   let printed = print_str(line ++ "\n");
+   0;
+  }
   def pd-one(r, opts, root) {
    let id = pd-id(r);
    let prompt = pd-own(fhn-text(r, "prompt"));
@@ -94,27 +121,31 @@ section [form.bml] {
    let v = fcnv-ask(packet, json-node-object([fhn-n("max_reply_tokens", pd-int(opts, "max_reply_tokens", 900))]));
    // an answer cut at the reply budget is still what the voice would say; it is kept and marked as cut
    let text = (String) v[0] == "answered" ? v[1] : ((String) v[0] == "incomplete") && (len(trim(v[8])) > 0) ? (trim(v[8]) ++ "\n\n(cut at the reply budget of " ++ pd-int(opts, "max_reply_tokens", 900).str() ++ " tokens)") : "";
-   let path = pd-dir() ++ "/" ++ id ++ ".md";
+   let path = pd-dir-of(opts) ++ "/" ++ id ++ ".md";
    let seen = ((Comparable) len(context) == 0 ? "" : ("\n# The turn before (what the voice was given)\n\n" ++ context ++ "\n")) ++ (nil?(named) ? "" : ("\n# Files the voice read\n\n" ++ pd-lines(named) ++ "\n"));
-   let wrote = write_file_text(path, "# The person asked\n\n" ++ prompt ++ "\n\n# The body's draft\n\n" ++ text ++ "\n" ++ seen);
    let row = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("draft", id), fhn-n("prompt_t", fhn-count(r, "t")), fhn-s("session", fhn-text(r, "session")), fhn-s("path", path), fhn-n("packet", len(note) > 0 ? 6 : pd-packet-version()), fhn-n("context_chars", len(context)), fhn-n("files", len(named)), fhn-n("cut", (String) v[0] == "incomplete" ? 1 : 0), fhn-s("voice", v[0]), fhn-n("generated", v[3]), fhn-n("wall_ms", now_unix_ms() - started), fhn-s("reading", "pending")]);
-   let appended = fhn-append(pd-ledger(), json-emit(row) ++ "\n");
-   print_str("[draft] " ++ id ++ " voice=" ++ v[0] ++ " generated=" ++ v[3].str() ++ " -> " ++ path ++ "\n");
+   pd-land(path, "# The person asked\n\n" ++ prompt ++ "\n\n# The body's draft\n\n" ++ text ++ "\n" ++ seen, row, "[draft] " ++ id ++ " voice=" ++ v[0] ++ " generated=" ++ v[3].str() ++ " -> " ++ path);
   }
-  def pd-all(rows, opts, root) = nil?(rows) ? 0 : pd-all-next(pd-one(rows[0], opts, root), rows[1:], opts, root);
-  def pd-all-next(done, rest, opts, root) = pd-all(rest, opts, root);
+  def pd-all(rows, opts, root, landed) = nil?(rows) ? landed : pd-all(rows[1:], opts, root, landed + pd-one(rows[0], opts, root));
   def pd-run() {
    let line0 = read_line();
    let line = nothing?(line0) ? "" : trim(line0);
    let opts = (String) line == "" ? json-node-object([]) : parse-json("draft-options", line);
-   let made = fs_mkdir(pd-dir());
+   let capture = pd-capture-of(opts);
+   file_size(capture) < 1 ? print_str("[draft] need the prompt capture: " ++ capture ++ " holds no rows (name one on stdin as \"capture\"); no draft was made\n") : pd-draft(opts, capture);
+  }
+  def pd-draft(opts, capture) {
+   let made = hch-mkdirs(pd-dir-of(opts));
+   (Comparable) fs_is_dir(pd-dir-of(opts)) == 1 ? pd-picked(opts, capture) : print_str("[draft] need the drafts directory: " ++ pd-dir-of(opts) ++ " could not be made; no draft was made\n");
+  }
+  def pd-picked(opts, capture) {
    let mode = (Comparable) pd-int(opts, "repair", 0) == 1 ? 2 : pd-int(opts, "redraft", 0);
-   let picked = pd-pick(reverse(pd-rows(pd-capture())), pd-rows(pd-ledger()), pd-int(opts, "count", 2), mode, []);
+   let picked = pd-pick(reverse(pd-rows(capture)), pd-rows(pd-ledger()), pd-int(opts, "count", 2), mode, []);
    // the transcripts' root is read once for every draft (the person's home is a host read)
    let root = st-root();
    let blind = nothing?(root) ? print_str("[draft] need the person's home (no HOME given to this process, no HEARTH_PERSON_HOME in fkwu.conf): drafts carry no turn-before context") : 0;
-   let done = pd-all(picked, opts, root);
-   print_str("[draft] drafted " ++ len(picked).str() ++ "\n");
+   let landed = pd-all(picked, opts, root, 0);
+   print_str("[draft] drafted " ++ landed.str() ++ "\n");
   }
  }
  pd-run();
