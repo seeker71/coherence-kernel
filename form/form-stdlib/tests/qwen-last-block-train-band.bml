@@ -1,0 +1,220 @@
+// qwen-last-block-train-band.bml — rung 3 of the last-block LoRA ladder: the rank-8 LoRA pair on block 63's ffn_down learns from
+// real rows through the frozen head (docs/qwen-last-block-lora-design.md, sections C, D and E.3; the door is
+// qwen-last-block-train.bml over rung 1's forward, rung 2's pair and the capture tap).
+//
+// Rows: the first 8 accepted rows of learn/draft-readings.jsonl, ChatML through the tokfast index, prompt-masked (the assistant's
+// tokens only), cut to 160 ids (design D); batch 1, Adam (nlb_adam) at lr 1e-4, clip 1.0, scale 2.0 (alpha 16 at rank 8), 20 steps,
+// step s on row (s - 1) mod 8. Each row's block input is captured once by a serving prefill with the tap (cached under
+// .hearth/qwen-rung-3 by the row's ids).
+//   1   rows and captures: 8 accepted rows prepared, each with at least one supervised target under the cap, each capture n x 5120
+//       f32 rows for its n positions
+//   2   the loss at step 0 is the serving head's: on 4 supervised positions of row 0, the trainer's per-token loss (batched
+//       output_norm span rms, batched Q8_0 head matmul, nlb_ce) against the serving head's own path (q38-rms, q38-mv on the same
+//       block-output row, the same CE) — the widest gap in ulp is within the measured bound (qlbtb-serve-bound: the first run's
+//       reading, pinned; the band prints every position every run)
+//   4   the head + norm backward: the analytic dB on 4 entries of B (the argmax |dB| of 4 windows, where the finite difference has
+//       signal above the f32 floor of the loss) against the central finite difference of the mean loss, at the zero pair (B = +0,
+//       A seeded) on row 0, eps 2^-2 on B read back from the device — within the measured bound (qlbtb-fd-bound)
+//   8   the mean loss over the 8 rows (the mean of the rows' token-mean losses) after step 20 is below the mean at step 0; every
+//       step's row, loss and gradient norm are printed
+//  16   memory and export: the bytes the step holds (forward scratch + the door's own, counted) are within the design-D budget at
+//       T 160, r 8; every handle is given back; the adapter is written as F32 safetensors with blk.63.ffn_down.weight.lora_a [17408, 8]
+//       and .lora_b [8, 5120] plus adapter_config.json naming rank, alpha, layers [63], and reads back whole (la-whole?, 1 pair,
+//       rank 8, f32, a at offset 0, b after a)
+// Verdict 31. It needs the 27 GiB file, a Metal device and the readings rows; it takes the memory lease first and holds nothing when
+// the governor says held. Nothing serving changes: the adapter lands under form/form-stdlib/adapters/qwen38-last-block-next/ and is
+// not worn.
+// REQUIRES: a live Metal device, /Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf, learn/draft-readings.jsonl
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-capture.bml form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml form-stdlib/bml/qwen-last-block-train.bml
+section [form.bml] {
+ class QwenLastBlockTrainBand {
+  def qlbtb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qlbtb-dir() = ".hearth/qwen-rung-3";
+  def qlbtb-rows-path() = "learn/draft-readings.jsonl";
+  def qlbtb-export-dir() = "form/form-stdlib/adapters/qwen38-last-block-next";
+  def qlbtb-span() = 64;
+  def qlbtb-maxpos() = 256;
+  def qlbtb-cap() = 160;
+  def qlbtb-want() = 8;
+  def qlbtb-rank() = 8;
+  def qlbtb-alpha() = 16.0;
+  def qlbtb-scale() = qlbtb-alpha() / (qlbtb-rank() + 0.0);
+  def qlbtb-lr() = 0.0001;
+  def qlbtb-steps() = 20;
+  def qlbtb-a-scale() = 0.02;
+  def qlbtb-eps-b() = 0.25;
+  def qlbtb-fd-samples() = 4;
+  // the bounds bits 2 and 4 hold to: the readings of the runs that first read them, 2026-10-29 (.hearth/qwen-rung-3/band-run-2.log
+  // for the serving head, band-run-3.log for the finite differences; the design doc, "Rung 3 observed"), pinned — a later run reads
+  // the same numbers or names what moved. The serving gap is the batched head (span rms, mm64/t64 Q8_0 matmul) against the
+  // single-token head (q38-rms, q38-mv) on one block-output row: 768 ulp at a token loss of 0.0737 (5.7e-6 absolute), 1 ulp at 10.2.
+  // The finite difference reads the mean CE through 248,320 f32 logits: its floor is ~1.5e-5 in gradient units (band-run-2.log,
+  // fixed entries, eps 2^-5), so the entries are sampled where |dB| is largest in 4 windows of B and eps is 2^-2.
+  def qlbtb-serve-bound() = 768;
+  def qlbtb-fd-bound() = 0.0007181389990548648;
+  def qlbtb-say(s) = print_str("[qwen-last-block-train-band] " ++ s);
+  def qlbtb-last-full(geo) = geo[21] - 1;
+  def qlbtb-ints(i, n) = i >= n ? [] : cons(i, qlbtb-ints(i + 1, n));
+  def qlbtb-max(xs) = foldl((m, x) => x > m ? x : m, 0.0, xs);
+  def qlbtb-maxi(xs) = foldl((m, x) => x > m ? x : m, 0, xs);
+  def qlbtb-finite?(x) = !nothing?(x) && (x >= 0.0 || x < 0.0) && x < 1.0e30 && x > -1.0e30;
+  def qlbtb-join(xs) = foldl((acc, x) => acc ++ (len(acc) == 0 ? "" : ",") ++ x, "", xs);
+  def qlbtb-mean(xs) = nil?(xs) ? nothing() : sum(xs) / (len(xs) + 0.0);
+  def qlbtb-num(x) = nothing?(x) ? "null" : x.str();
+  // ── rows and captures: [row, xin, prefill ms, cached?] per row, said as they land ──
+  def qlbtb-row-text(row) = "line " ++ row[0].str() ++ ": " ++ qlbt-row-n(row).str() ++ " positions, " ++ qlbt-row-count(row).str() ++ " supervised targets, prefix " ++ row[5].str() ++ " ids" ++ (row[6] == 1 ? ", whole" : ", cut at the cap") ++ (row[7] == 1 ? " (assistant text encoded over its first " ++ qlbt-cut-bytes().str() ++ " bytes)" : "");
+  def qlbtb-prepare(ctx, L, rows, acc) = nil?(rows) ? reverse(acc) : {
+   let c = qlbt-capture(ctx, L, qlbtb-dir(), rows[0], qlbtb-cap());
+   qlbtb-say("capture " ++ (len(acc) + 1).str() ++ " (line " ++ rows[0][0].str() ++ "): " ++ (c[2] == 1 ? "from cache" : "prefill " ++ c[1].str() ++ " ms") ++ ", " ++ len(c[0]).str() ++ " bytes" ++ (len(c[0]) == 0 ? " — DID NOT LAND" : ""));
+   qlbtb-prepare(ctx, L, rows[1:], cons([rows[0], c[0], c[1], c[2]], acc));
+  };
+  // ── the mean loss of every prepared row (evaluation only): [mean per row] ──
+  def qlbtb-row-mean(ps, geo, lay, onormTv, projTv, sx, o, p) = qlbt-mean(qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, p[0], p[1]), qlbt-row-count(p[0]));
+  def qlbtb-means(ps, geo, lay, onormTv, projTv, sx, o, prep) = map(p => qlbtb-row-mean(ps, geo, lay, onormTv, projTv, sx, o, p), prep);
+  // ── the serving-head check on row 0 at positions ts: [t, target, trainer, serving, ulp] ──
+  def qlbtb-serve-one(ctx, o, sx, row, losses, t) {
+   let target = nth(row[2], t);
+   let trainer = nth(losses, t);
+   let serving = qlbt-serve-loss(ctx, o, sx, t, target);
+   [t, target, trainer, serving, nothing?(serving) ? 4294967295 : qlbt-ulp(trainer, serving)];
+  }
+  def qlbtb-serve-text(e) = "position " ++ e[0].str() ++ " (target " ++ e[1].str() ++ "): trainer " ++ e[2].str() ++ ", serving head " ++ qlbtb-num(e[3]) ++ ", gap " ++ e[4].str() ++ " ulp";
+  def qlbtb-serve-json(e) = "{\"t\":" ++ e[0].str() ++ ",\"target\":" ++ e[1].str() ++ ",\"trainer\":" ++ e[2].str() ++ ",\"serving\":" ++ qlbtb-num(e[3]) ++ ",\"ulp\":" ++ e[4].str() ++ "}";
+  def qlbtb-fd-text(k, j, e) = "dB[" ++ k.str() ++ "," ++ j.str() ++ "]: analytic " ++ e[0].str() ++ ", finite difference " ++ qlbtb-num(e[1]) ++ ", relative error " ++ e[2].str() ++ " (perturbation " ++ e[3].str() ++ ", loss+ " ++ qlbtb-num(e[4]) ++ ", loss- " ++ qlbtb-num(e[5]) ++ ")";
+  def qlbtb-fd-json(k, j, e) = "{\"entry\":\"dB[" ++ k.str() ++ "," ++ j.str() ++ "]\",\"analytic\":" ++ e[0].str() ++ ",\"fd\":" ++ qlbtb-num(e[1]) ++ ",\"rel\":" ++ e[2].str() ++ ",\"loss_plus\":" ++ qlbtb-num(e[4]) ++ ",\"loss_minus\":" ++ qlbtb-num(e[5]) ++ "}";
+  // ── the steps: [step, line, loss, grad norm, ms] each ──
+  def qlbtb-train(ps, geo, lay, onormTv, projTv, sx, o, prep, s, acc) = s > qlbtb-steps() ? reverse(acc) : {
+   let p = nth(prep, (s - 1) % len(prep));
+   let t0 = host_monotonic_ms();
+   let losses = qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, p[0], p[1]);
+   let L = qlbt-mean(losses, qlbt-row-count(p[0]));
+   nothing?(L) ? form_error("qwen last-block train band: the loss of step " ++ s.str() ++ " did not arrive") : 0;
+   let bw = qlbt-backward(geo, sx, o, onormTv, projTv, qlbt-row-n(p[0]), qlbt-row-count(p[0]));
+   let g = qlbt-step(o, qlbtb-lr(), s);
+   let t1 = host_monotonic_ms();
+   qlbtb-say("step " ++ s.str() ++ ": row line " ++ p[0][0].str() ++ ", loss " ++ L.str() ++ ", |grad| " ++ g.str() ++ ", " ++ (t1 - t0).str() ++ " ms");
+   qlbtb-train(ps, geo, lay, onormTv, projTv, sx, o, prep, s + 1, cons([s, p[0][0], L, g, t1 - t0], acc));
+  };
+  def qlbtb-step-json(e) = "{\"step\":" ++ e[0].str() ++ ",\"line\":" ++ e[1].str() ++ ",\"loss\":" ++ e[2].str() ++ ",\"grad_norm\":" ++ e[3].str() ++ ",\"ms\":" ++ e[4].str() ++ "}";
+  def qlbtb-config(L, path, mean0, mean20, prep) = "{\"model\":\"" ++ path ++ "\",\"fine_tune_type\":\"lora\",\"owner\":\"Form-native-Metal\",\"band\":\"qwen-last-block-train-band\",\"lora_parameters\":{\"rank\":" ++ qlbtb-rank().str() ++ ",\"alpha\":" ++ qlbtb-alpha().str() ++ ",\"scale\":" ++ qlbtb-scale().str() ++ ",\"dropout\":0.0},\"layers\":[" ++ L.str() ++ "],\"targets\":[\"ffn_down\"],\"tensors\":[\"" ++ qlh-rr-name(L, "ffn_down", "a") ++ "\",\"" ++ qlh-rr-name(L, "ffn_down", "b") ++ "\"],\"optimizer\":\"adam\",\"learning_rate\":" ++ qlbtb-lr().str() ++ ",\"batch_size\":1,\"mask_prompt\":1,\"ids_cap\":" ++ qlbtb-cap().str() ++ ",\"data\":\"" ++ qlbtb-rows-path() ++ "\",\"rows\":[" ++ qlbtb-join(map(p => p[0][0].str(), prep)) ++ "],\"trained_native_steps\":" ++ qlbtb-steps().str() ++ ",\"mean_loss_step0\":" ++ mean0.str() ++ ",\"mean_loss_step20\":" ++ mean20.str() ++ ",\"worn\":0}\n";
+  def qlbtb-run-all(ctx, src, x, path) {
+   let geo = ctx[2];
+   let L = qlbtb-last-full(geo);
+   let d = geo[0];
+   let ff = geo[10];
+   let vocab = geo[19];
+   let r = qlbtb-rank();
+   let lay = nth(ctx[3], L);
+   qlbtb-say("block L = " ++ L.str() ++ ", d " ++ d.str() ++ ", ff " ++ ff.str() ++ ", vocab " ++ vocab.str() ++ ", rank " ++ r.str() ++ ", scale " ++ qlbtb-scale().str() ++ ", lr " ++ qlbtb-lr().str() ++ ", cap " ++ qlbtb-cap().str() ++ " ids; tokfast index " ++ qtf2-index-status(x) ++ "; gpu utilization " ++ host_gpu_utilization().str());
+   let t0 = host_monotonic_ms();
+   let rows = qlbt-rows(src, x, read_file(qlbtb-rows-path()) ?? "", qlbtb-cap(), qlbtb-want());
+   let t1 = host_monotonic_ms();
+   qlbtb-say("rows: " ++ len(rows).str() ++ " accepted rows prepared in " ++ (t1 - t0).str() ++ " ms");
+   let said-rows = map(row => qlbtb-say(qlbtb-row-text(row)), rows);
+   let unsupervised = filter(row => qlbt-row-count(row) <= 0, rows);
+   len(rows) != qlbtb-want() || !nil?(unsupervised) ? {
+    qlbtb-say("refused: " ++ (len(rows) != qlbtb-want() ? "only " ++ len(rows).str() ++ " accepted rows" : "a row has no supervised target under the cap (line " ++ unsupervised[0][0].str() ++ ")"));
+    0;
+   } : {
+    let t2 = host_monotonic_ms();
+    let prep = qlbtb-prepare(ctx, L, rows, []);
+    let t3 = host_monotonic_ms();
+    let landed = filter(p => len(p[1]) == qlbt-row-n(p[0]) * d * 4, prep);
+    qlbtb-say("captures: " ++ len(landed).str() ++ " of " ++ len(prep).str() ++ " landed in " ++ (t3 - t2).str() ++ " ms");
+    len(landed) != len(prep) ? {
+     qlbtb-say("refused: a capture did not land");
+     0;
+    } : {
+     let o = qlbt-open(geo, lay, ctx[5], qlbtb-cap(), r, qlbtb-scale());
+     let sx = qlbf-scratch(geo, 0, qlbtb-cap());
+     let counted = qlbf-scratch-bytes(geo, 0, qlbtb-cap()) + qlbt-own-bytes(geo, qlbtb-cap(), r);
+     let budget = qlbt-design-budget(geo, qlbtb-cap(), r);
+     qlbtb-say("memory counted: forward scratch " ++ qlbf-scratch-bytes(geo, 0, qlbtb-cap()).str() ++ " + step " ++ qlbt-own-bytes(geo, qlbtb-cap(), r).str() ++ " = " ++ counted.str() ++ " bytes (" ++ (counted / 1048576).str() ++ " MiB); design D budget at T " ++ qlbtb-cap().str() ++ ", r " ++ r.str() ++ ": " ++ budget.str() ++ " bytes (" ++ (budget / 1048576).str() ++ " MiB)");
+     qlbtb-say("machine before the steps: " ++ mg-status-line(mg-sense()));
+     !qlbt-ok?(o) || !qlbf-ok?(sx) ? {
+      qlbtb-say("refused: the step's device state did not open");
+      let freed = qlbf-free(sx) + qlbt-free(o);
+      0;
+     } : {
+      let ps = ctx[0];
+      let seeded = qlbt-seed(o, qlbtb-a-scale());
+      // step 0: every row's mean loss with the zero pair
+      let t4 = host_monotonic_ms();
+      let means0 = qlbtb-means(ps, geo, lay, ctx[5], ctx[6], sx, o, prep);
+      let t5 = host_monotonic_ms();
+      let mean0 = qlbtb-mean(means0);
+      qlbtb-say("step 0 (zero pair): per-row mean loss " ++ qlbtb-join(map(m => qlbtb-num(m), means0)) ++ "; mean over " ++ len(means0).str() ++ " rows " ++ qlbtb-num(mean0) ++ " (" ++ (t5 - t4).str() ++ " ms for " ++ len(means0).str() ++ " evaluations)");
+      // the serving head on row 0: its per-token losses, then 4 supervised positions through the serving path
+      let p0 = nth(prep, 0);
+      let losses0 = qlbt-eval(ps, geo, lay, ctx[5], ctx[6], sx, o, p0[0], p0[1]);
+      let first = p0[0][5] - 1;
+      let last = qlbt-row-n(p0[0]) - 1;
+      let ts = [first, (first + last) / 2, (first + (first + last) / 2) / 2, last];
+      let serve = nothing?(losses0) ? [] : map(t => qlbtb-serve-one(ctx, o, sx, p0[0], losses0, t), ts);
+      let said-serve = map(e => qlbtb-say("serving head, row line " ++ p0[0][0].str() ++ ", " ++ qlbtb-serve-text(e)), serve);
+      let serveUlp = nil?(serve) ? 4294967295 : qlbtb-maxi(map(e => e[4], serve));
+      qlbtb-say("serving head: widest gap " ++ serveUlp.str() ++ " ulp over " ++ len(serve).str() ++ " positions (bound " ++ qlbtb-serve-bound().str() ++ ")");
+      // the head + norm backward on row 0 at the zero pair: analytic dB, then 4 finite differences
+      let t6 = host_monotonic_ms();
+      let losses1 = qlbt-eval(ps, geo, lay, ctx[5], ctx[6], sx, o, p0[0], p0[1]);
+      let bw0 = qlbt-backward(geo, sx, o, ctx[5], ctx[6], qlbt-row-n(p0[0]), qlbt-row-count(p0[0]));
+      let g0 = qlbt-grad-health(o);
+      let t7 = host_monotonic_ms();
+      qlbtb-say("analytic gradient at the zero pair, row line " ++ p0[0][0].str() ++ ": non-finite " ++ g0[0].str() ++ ", |grad| " ++ math_sqrt(g0[1]).str() ++ " (dA is exactly zero with B = 0); forward + backward " ++ (t7 - t6).str() ++ " ms");
+      let dbs = qlt-f32s(metal_buf_read(record_get(o, "dB"), 0, r * d * 4), r * d);
+      let picks = qlbw-pick-windows(dbs, r * d, qlbtb-fd-samples(), 0, []);
+      qlbtb-say("B entries sampled (argmax |dB| in " ++ qlbtb-fd-samples().str() ++ " windows of B): " ++ qlbtb-join(map(i => (i / d).str() ++ "," ++ (i % d).str(), picks)) ++ "; dB read " ++ len(dbs).str() ++ " floats");
+      let fd = map(i => [i / d, i % d, qlbt-fd-b(ps, geo, lay, ctx[5], ctx[6], sx, o, p0[0], p0[1], i, qlbtb-eps-b())], picks);
+      let t8 = host_monotonic_ms();
+      let said-fd = map(e => qlbtb-say(qlbtb-fd-text(e[0], e[1], e[2])), fd);
+      let fdMax = qlbtb-max(map(e => e[2][2], fd));
+      qlbtb-say("finite differences: " ++ (2 * qlbtb-fd-samples()).str() ++ " evaluations in " ++ (t8 - t7).str() ++ " ms; max relative error dB " ++ fdMax.str() ++ " (bound " ++ qlbtb-fd-bound().str() ++ ")");
+      // the steps
+      let t9 = host_monotonic_ms();
+      let steps = qlbtb-train(ps, geo, lay, ctx[5], ctx[6], sx, o, prep, 1, []);
+      let t10 = host_monotonic_ms();
+      let means20 = qlbtb-means(ps, geo, lay, ctx[5], ctx[6], sx, o, prep);
+      let mean20 = qlbtb-mean(means20);
+      qlbtb-say("after step " ++ qlbtb-steps().str() ++ ": per-row mean loss " ++ qlbtb-join(map(m => qlbtb-num(m), means20)) ++ "; mean over " ++ len(means20).str() ++ " rows " ++ qlbtb-num(mean20) ++ " (step 0: " ++ qlbtb-num(mean0) ++ "; " ++ qlbtb-steps().str() ++ " steps in " ++ (t10 - t9).str() ++ " ms)");
+      // the export
+      let ex = qlbt-export(o, L, qlbtb-export-dir(), qlbtb-config(L, path, mean0, mean20, prep));
+      let back = qlbt-export-read(qlbtb-export-dir(), ex[3], ex[4], ff * r * 4);
+      qlbtb-say("export: " ++ qlbtb-export-dir() ++ "/adapters.safetensors " ++ ex[0].str() ++ " of " ++ ex[1].str() ++ " bytes, adapter_config.json " ++ ex[2].str() ++ " bytes; read back: whole " ++ back[0].str() ++ ", pairs " ++ back[1].str() ++ ", rank " ++ back[2].str() ++ ", dtype " ++ back[3] ++ ", " ++ ex[3] ++ " at 0: " ++ back[4].str() ++ ", " ++ ex[4] ++ " after a: " ++ back[5].str() ++ ", file " ++ back[6].str() ++ " bytes");
+      qlbtb-say("machine after the steps: " ++ mg-status-line(mg-sense()));
+      let freed = qlbf-free(sx) + qlbt-free(o);
+      let b1 = len(prep) == qlbtb-want() ? 1 : 0;
+      let b2 = len(serve) == 4 && serveUlp <= qlbtb-serve-bound() ? 2 : 0;
+      let b4 = len(fd) == qlbtb-fd-samples() && fdMax <= qlbtb-fd-bound() ? 4 : 0;
+      let b8 = qlbtb-finite?(mean0) && qlbtb-finite?(mean20) && mean20 < mean0 && len(steps) == qlbtb-steps() ? 8 : 0;
+      let b16 = counted <= budget && freed == 17 + qlbt-handle-count() && ex[0] == ex[1] && ex[2] > 0 && back[0] == 1 && back[1] == 1 && back[2] == r && (String) back[3] == "f32" && back[4] == 1 && back[5] == 1 && back[6] == ex[1] ? 16 : 0;
+      let receipt = write_file(qlbtb-dir() ++ "/rung-3-receipt.json", "{\"band\":\"qwen-last-block-train-band\",\"layer\":" ++ L.str() ++ ",\"slot\":\"ffn_down\",\"rank\":" ++ r.str() ++ ",\"alpha\":" ++ qlbtb-alpha().str() ++ ",\"scale\":" ++ qlbtb-scale().str() ++ ",\"lr\":" ++ qlbtb-lr().str() ++ ",\"optimizer\":\"adam\",\"batch\":1,\"cap\":" ++ qlbtb-cap().str() ++ ",\"steps\":" ++ qlbtb-steps().str() ++ ",\"rows\":[" ++ qlbtb-join(map(p => "{\"line\":" ++ p[0][0].str() ++ ",\"positions\":" ++ qlbt-row-n(p[0]).str() ++ ",\"supervised\":" ++ qlbt-row-count(p[0]).str() ++ ",\"prefix\":" ++ p[0][5].str() ++ ",\"prefill_ms\":" ++ p[2].str() ++ ",\"cached\":" ++ p[3].str() ++ "}", prep)) ++ "],\"rows_ms\":" ++ (t1 - t0).str() ++ ",\"captures_ms\":" ++ (t3 - t2).str() ++ ",\"means_step0\":[" ++ qlbtb-join(map(m => qlbtb-num(m), means0)) ++ "],\"mean_step0\":" ++ qlbtb-num(mean0) ++ ",\"means_step20\":[" ++ qlbtb-join(map(m => qlbtb-num(m), means20)) ++ "],\"mean_step20\":" ++ qlbtb-num(mean20) ++ ",\"serving\":[" ++ qlbtb-join(map(e => qlbtb-serve-json(e), serve)) ++ "],\"serve_ulp\":" ++ serveUlp.str() ++ ",\"serve_bound\":" ++ qlbtb-serve-bound().str() ++ ",\"eps_b\":" ++ qlbtb-eps-b().str() ++ ",\"fd\":[" ++ qlbtb-join(map(e => qlbtb-fd-json(e[0], e[1], e[2]), fd)) ++ "],\"fd_max_rel\":" ++ fdMax.str() ++ ",\"fd_bound\":" ++ qlbtb-fd-bound().str() ++ ",\"steps_detail\":[" ++ qlbtb-join(map(e => qlbtb-step-json(e), steps)) ++ "],\"steps_ms\":" ++ (t10 - t9).str() ++ ",\"counted_bytes\":" ++ counted.str() ++ ",\"design_budget_bytes\":" ++ budget.str() ++ ",\"freed\":" ++ freed.str() ++ ",\"export_bytes\":" ++ ex[0].str() ++ ",\"export_expected\":" ++ ex[1].str() ++ ",\"export_whole\":" ++ back[0].str() ++ ",\"bits\":" ++ (b1 + b2 + b4 + b8 + b16).str() ++ "}\n");
+      qlbtb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ "; freed " ++ freed.str() ++ " handles");
+      b1 + b2 + b4 + b8 + b16;
+     };
+    };
+   };
+  }
+  def qlbtb-leased(path, src) {
+   let x = qtf2-load(qtf2-root-for(path), qsx-seal-line(path));
+   let ctx = q38-open-span(path, qlbtb-maxpos(), qlbtb-span());
+   let verdict = (Comparable) q38-context-ok?(ctx) == 1 ? qlbtb-run-all(ctx, src, x, path) : 0;
+   let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
+   let unleased = mg-release();
+   verdict;
+  }
+  def qlbtb-held(granted) {
+   qlbtb-say("held: " ++ granted[1]);
+   0;
+  }
+  def qlbtb-open(path) {
+   let src = fcmg-src(path);
+   let geo = q38-geo(src, qlbtb-maxpos());
+   let own = fcms-qwen-own(src, qlbtb-maxpos()) + qlbf-scratch-bytes(geo, 0, qlbtb-cap()) + qlbt-own-bytes(geo, qlbtb-cap(), qlbtb-rank()) + qlbc-own-bytes(geo[0], qlbtb-cap());
+   let granted = mg-lease("qwen last-block train band", path, fcms-weights-bytes(path), own);
+   !mg-granted?(granted) ? qlbtb-held(granted) : qlbtb-leased(path, src);
+  }
+  def qlbtb-run() = qlbtb-open(qlbtb-file());
+ }
+ qlbtb-run();
+}

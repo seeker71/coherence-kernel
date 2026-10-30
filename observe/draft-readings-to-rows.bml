@@ -14,17 +14,33 @@
 // the turn-before and files sections after it are context, never taught). An accepted or revised draft whose text is not
 // readable here counts in skipped_no_text; a rejected reading always lands with the ledger's own fields. Both row files are
 // rewritten whole on each run: the ledger is the source and the rows are its projection. Nothing is scheduled by this door.
-// stdin, optional: {"ledger":"receipts/draft-ledger.jsonl","drafts":"<dir>","out":"learn","receipt":"receipts/draft-readings-ledger.jsonl"}
+// stdin, optional: {"ledger":"receipts/draft-ledger.jsonl","drafts":"<dir>","out":"learn","receipt":"receipts/draft-readings-ledger.jsonl",
+//   "readers":["native-voice"]}
 //   drafts defaults to hearth-home()/drafts, where prompt-draft-run lands them; a key outside these is refused by name.
+//   readers chooses whose readings become rows. Absent (or []) it is our readings of record: rows without a "reader", or with
+//   a reader other than native-voice; the latest of those is a draft's reading, and the two row files above are written.
+//   ["native-voice"] is the body's own readings (observe/draft-native-reading-run.bml): their latest is a draft's reading,
+//   accepted and revised drafts become <out>/draft-readings-native.jsonl, and no held-out file is written, so a lift chooses
+//   its rows and the held-out it is assessed against stays our readings of record. Any other readers is refused by name.
 // Prints one JSON line {accepted, revised, rejected, rows_written, heldout_written, skipped_no_text} and appends one row to the
 // receipt ledger with provenance: the source ledger's path, sha256 digest and row count, the drafts dir and whether it stood,
-// the counts, the two row paths, retention "local-only" and authorization "our own readings of our own drafts".
+// the counts, the two row paths ("" for a file not written), the readers projected ("of-record" or "native-voice"),
+// retention "local-only" and authorization "our own readings of our own drafts".
 // preflight-exec: forbidden
 // preludes: form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml form-stdlib/hearth.bml
 section [form.bml] {
  class DraftReadingsToRows {
   def drr-door() = "draft-readings-to-rows";
-  def drr-spec() = [["ledger", "str"], ["drafts", "str"], ["out", "str"], ["receipt", "str"]];
+  def drr-spec() = [["ledger", "str"], ["drafts", "str"], ["out", "str"], ["receipt", "str"], ["readers", "strs"]];
+  // whose readings become rows: "of-record" (absent or []), "native-voice" (["native-voice"]), or "" for a readers refused
+  def drr-native() = "native-voice";
+  def drr-readers(opts) {
+   let named = json-object-has?(opts, "readers") ? map(n => json-string-value(n), json-array-elements(json-object-get(opts, "readers"))) : [];
+   nil?(named) ? "of-record" : ((Comparable) len(named) == 1) && ((String) named[0] == drr-native()) ? drr-native() : "";
+  }
+  // a path row is a draft and stays in every projection; a reading row belongs to the readers it was read by
+  def drr-native?(r) = (String) fhn-text(r, "reader") == drr-native();
+  def drr-keeps?(readers, r) = drr-path?(r) || ((String) readers == drr-native() ? drr-native?(r) : !drr-native?(r));
   def drr-opt(opts, key, d) = json-object-has?(opts, key) && (len(fhn-text(opts, key)) > 0) ? fhn-text(opts, key) : d;
   def drr-nonempty(xs) = nil?(xs) ? [] : (Comparable) len(trim(xs[0])) == 0 ? drr-nonempty(xs[1:]) : cons(xs[0], drr-nonempty(xs[1:]));
   def drr-rows(path) = file_size(path) < 1 ? [] : drr-nonempty(split-on(fhn-read(path), "\n")) |> map(x => parse-json("draft-row", x));
@@ -74,21 +90,27 @@ section [form.bml] {
   def drr-join(xs) = foldl((acc, x) => acc ++ x, "", xs);
   def drr-digest(path) = file_size(path) < 1 ? "" : qaf-string-hex(saj-file-digest-any-tail(path, file_size(path)));
   def drr-run(opts) {
+   let readers = drr-readers(opts);
+   (String) readers == "" ? dop-refuse(drr-door(), "readers names whose readings become rows: absent or [] for our readings of record, or [\"native-voice\"] for the body's own") : drr-project(opts, readers);
+  }
+  def drr-project(opts, readers) {
    let ledger = drr-opt(opts, "ledger", "receipts/draft-ledger.jsonl");
    let dir = drr-opt(opts, "drafts", hearth-home() ++ "/drafts");
    let out = drr-opt(opts, "out", "learn");
    let receipt = drr-opt(opts, "receipt", "receipts/draft-readings-ledger.jsonl");
-   let all = drr-rows(ledger);
+   let native = (String) readers == drr-native();
+   let source = drr-rows(ledger);
+   let all = filter(r => drr-keeps?(readers, r), source);
    let present = (Comparable) host_path_is_dir(dir) == 1;
    let said = present ? 0 : print_str("[readings] drafts dir absent here: " ++ dir ++ " (accepted and revised drafts are skipped; rejected readings carry the ledger's own fields)\n");
    let s = drr-all(drr-drafts(all), all, dir, [0, 0, 0, [], [], 0]);
    let made = fs_mkdir(out);
-   let rows-path = out ++ "/draft-readings.jsonl";
-   let held-path = out ++ "/draft-readings-heldout.jsonl";
+   let rows-path = out ++ (native ? "/draft-readings-native.jsonl" : "/draft-readings.jsonl");
+   let held-path = native ? "" : out ++ "/draft-readings-heldout.jsonl";
    let w1 = write_file_text(rows-path, drr-join(reverse(s[3])));
-   let w2 = write_file_text(held-path, drr-join(reverse(s[4])));
-   let counts = [fhn-n("accepted", s[0]), fhn-n("revised", s[1]), fhn-n("rejected", s[2]), fhn-n("rows_written", len(s[3])), fhn-n("heldout_written", len(s[4])), fhn-n("skipped_no_text", s[5])];
-   let row = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("source", ledger), fhn-s("source_digest", drr-digest(ledger)), fhn-n("source_rows", len(all)), fhn-s("drafts", dir), fhn-n("drafts_present", present ? 1 : 0)], append(counts, [fhn-s("rows", rows-path), fhn-s("heldout", held-path), fhn-s("retention", "local-only"), fhn-s("authorization", "our own readings of our own drafts")])));
+   let w2 = native ? 0 : write_file_text(held-path, drr-join(reverse(s[4])));
+   let counts = [fhn-n("accepted", s[0]), fhn-n("revised", s[1]), fhn-n("rejected", s[2]), fhn-n("rows_written", len(s[3])), fhn-n("heldout_written", native ? 0 : len(s[4])), fhn-n("skipped_no_text", s[5])];
+   let row = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("source", ledger), fhn-s("source_digest", drr-digest(ledger)), fhn-n("source_rows", len(source)), fhn-s("drafts", dir), fhn-n("drafts_present", present ? 1 : 0)], append(counts, [fhn-s("rows", rows-path), fhn-s("heldout", held-path), fhn-s("readers", readers), fhn-s("retention", "local-only"), fhn-s("authorization", "our own readings of our own drafts")])));
    let appended = fhn-append(receipt, json-emit(row) ++ "\n");
    print_str(json-emit(json-node-object(counts)) ++ "\n");
   }

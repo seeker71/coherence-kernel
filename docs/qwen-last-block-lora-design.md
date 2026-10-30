@@ -182,10 +182,10 @@ run here; every number below is copied from the band's own print lines (`.hearth
   failure was witnessed on that path; the repair is structural.
 - **What rung 3 inherits.** The step record (`qlbw-open` / `qlbw-free`, `qlbw-own-bytes`), `qlbw-eval` as one loss evaluation,
   `qlbw-grad` as the pair's gradient at the point the last evaluation left in `diff` and `u`, the exact loss fold and the hash fill.
-  Adam on this pair is rung 3, below. Still unbuilt: the CE loss over the head (`nlb_ce` widened or `form_head_ce` batched),
-  and — only when a pair moves upstream of ffn_down — the frozen transposes of section C.
+  Adam on this pair is rung 3, and the cross-entropy over the head is its second door, both below. Still unbuilt: only when a pair
+  moves upstream of ffn_down, the frozen transposes of section C.
 
-## Rung 3 observed (2026-10-30)
+## Rung 3, the loop on the mean square, observed (2026-10-30)
 
 Door `form/form-stdlib/bml/qwen-last-block-step.bml`, band `form/form-stdlib/tests/qwen-last-block-step-band.bml`, verdict 7 in two
 runs (the second reproduced every printed loss and the gradient norm to the last digit; wall 185 / 192 ms for the steps, model
@@ -204,5 +204,169 @@ non-negative descent over all twenty steps.
 | held out (2 rows) | 12.42888900463431 | 1.1003874898338721 |
 
 Last gradient norm 5.005819393980161. Handles freed 31 (forward scratch 17, pair and its gradient 9, Adam moments and the token
-gate 5). Events: `.hearth/qwen-rung-3/training-events.jsonl` (`round` and `validation` before step 0 and at step 20). The head's
-cross-entropy is still unbuilt; this rung steps the loss whose gradient was already checked.
+gate 5). Events: `.hearth/qwen-rung-3/training-events.jsonl` (`round` and `validation` before step 0 and at step 20). This door
+steps the loss whose gradient was already checked; the door below steps the head's cross-entropy on real rows.
+
+## Rung 3, through the head on real rows, observed (2026-10-29)
+
+Door and band written by the implementer of this step (branch `offline-voice-iteration-4`, kernel HEAD 863ef4119), run four
+times here; every number below is copied from the band's own print lines (`.hearth/qwen-rung-3/band-run-2.log` — the first whole
+run, captures included — `band-run-3.log` and `band-run-4.log` on the cached captures, `rung-3-receipt.json`; `band-run-1.log` is a
+run stopped by hand after its first capture, see "Friction").
+
+- **Doors.** `form/form-stdlib/bml/qwen-last-block-train.bml` (the pair of rung 2 on `blk.63.ffn_down` learning from real rows
+  through the frozen head: rows, captures, one loss evaluation, the backward, Adam, the serving-head check, the finite difference,
+  the export) and the band `form/form-stdlib/tests/qwen-last-block-train-band.bml`, verdict **31**, exit 0 (runs 2, 3, 4).
+  **ffn_down only**; attn_output was not added: its backward crosses the post-attention rms, the swiglu and two frozen Q8 transposes
+  of the block (section C.1 `form_q8_tmm_f32` on `ffn_gate`/`ffn_up`), kernels the body does not yet dispatch on that path — the
+  transposed Q8_0 matmul now exists (below), the rms and swiglu backwards exist for the 3B, but wiring them through the block is the
+  next rung's work, not a flag on this one.
+- **The one new kernel: `form_q8_tmm_f32`** (in the train door): `dx[t, c] = scale · Σ_v dy[t, v] · W[v, c]` over Q8_0 blocks via
+  `q80_w`, one 256-thread group per 32 columns × 8 tokens with 8 vocab parts folded through threadgroup memory — the batched sibling
+  of `form_head_transpose` (`qwen-head-learning.bml`). Everything else is reused by name: `nlb_ce` (per-token CE and
+  `dz = softmax − onehot`, masked), `nam_rms` (for `inv` per row; the serving `form_q38_rmsnorm_par_span_f32` keeps none),
+  `nlb_rms` (the RMSNorm backward, dispatched at d 5120 over the row count), `nam_matmul`/`nam_matmul_sk` (the pair's dB, du, dA as
+  rung 2 wrote them), `nlb_adam` (bias-corrected, clip 1.0), `form_hash_fill_f32` (A's seed), the rung-1 forward and capture tap,
+  and the tokfast index lane (`qei-chat-ids` / `qei-encode`, byte-identical to `q35-encode`: the reference lane measured 30–112 s per
+  assistant text in `.hearth/qwen-rung-3/rows-probe-1.log`, the index 96–157 s for all eight rows).
+- **Rows.** The first 8 accepted rows of `learn/draft-readings.jsonl` (lines 1–8), ChatML (user turn, assistant header, empty think
+  block) ++ the assistant's ids ++ `<|im_end|>`, cut to 160 ids → 159 positions each, prompt-masked: supervised targets
+  120, 5, 131, 138, 143, 123, 141, 121 (prefix 40, 155, 29, 22, 17, 37, 19, 39 ids). Every row is cut at the cap, so no row's end
+  marker is inside the window; line 2's 626-byte prompt leaves it 5 targets. The assistant text is encoded over its first 1200 bytes
+  (a UTF-8 boundary), enough for the cap at the rows' 2.6–3.7 bytes per id.
+- **Captures.** One serving prefill per row with the rung-1 tap at `l = 62`, `[159 × 5120]` f32 = 3,256,320 bytes each, cached as
+  `.hearth/qwen-rung-3/row-<line>-xin.f32` + a JSON sidecar naming the ids (reused when the ids match: runs 3 and 4 found all eight
+  in 126 ms). Prefill wall, run 2: 437,057 / 546,244 / 601,693 / 299,824 / 26,809 / 18,899 / 13,026 ms (row 1 in run 1:
+  466,753 ms) — 13 s to 10 minutes for the same 159 positions, entirely the neighbours' GPU load (`host_gpu_utilization` 100 at
+  run 1's start, 51 at run 2's; the walk's day-turn, a drafter and an observer shared the device).
+- **(a) The loss at step 0 is the serving head's.** Row line 1, zero pair, four supervised positions, trainer (batched span rms,
+  mm64/t64 Q8_0 matmul, `nlb_ce`) against the serving path (`q38-rms`, `q38-mv` on the same block-output row, the same CE):
+  position 39 (target 15771) 0.07373237609863281 vs 0.07372665405273438, **768 ulp** (5.7e-6 absolute); 98 (1510)
+  2.5693111419677734 vs 2.5693016052246094, 40 ulp; 68 (279) 0.08082008361816406 vs 0.08082199096679688, 256 ulp; 158 (5817)
+  10.200820922851562 vs 10.200819969177246, 1 ulp. Not 0 ulp: the batched matmul associates the 5120-term dot differently from
+  the single-token matvec, and a small CE (0.07) is a difference of two large logsumexp terms, so the same logit gap reads as more
+  ulp there. The band's `qlbtb-serve-bound` is pinned at 768; runs 3 and 4 read the same four numbers.
+- **(b) The head + norm backward against finite differences.** At the zero pair on row line 1 (|grad| 0.3102130415110602, dA
+  exactly zero with B = 0), eps 2⁻² on B (perturbation read back: 0.5), entries the argmax |dB| of 4 windows of B (all in
+  column 505): dB[0,505] 0.006935873068869114 / fd 0.006940857569376568 / rel 7.18e-4 (loss± 2.1752665042877197 /
+  2.1717960755030314); dB[2,505] 0.011325083673000336 / 0.01132782300313373 / 2.42e-4; dB[4,505] −0.012515222653746605 /
+  −0.012517992655435961 / 2.21e-4; dB[7,505] 0.005151477642357349 / 0.005152352650960701 / 1.70e-4. **Max relative error
+  7.181389990548648e-4**, pinned as `qlbtb-fd-bound`. Run 2 read fixed entries at eps 2⁻⁵ first: dB[1,738] 5.65e-3 and dB[3,2020]
+  5.35e-3 agreed, dB[0,97] (analytic −2.86e-4) 6.4e-2 and dB[2,1379] (analytic −2.07e-5, loss± differing by 4.3e-7) 0.669 —
+  a floor of ~1.5e-5 in gradient units, the f32 rounding of a mean CE through 248,320 f32 logits, below which a finite
+  difference carries no signal. The band therefore samples where the signal is (as rung 2 sampled A rows by activation) and widens
+  eps; both readings stand in `band-run-2.log` and `band-run-3.log`.
+- **(c) The loss falls.** Adam, lr 1e-4, scale 2.0 (alpha 16, rank 8), batch 1, step s on row (s − 1) mod 8. Mean of the rows'
+  token-mean losses at step 0: **1.7919827729396287** (per row 2.173508326212565, 0.738223648071289, 1.606509834755468,
+  1.511119704315628, 2.1013369993730024, 1.9430674653712328, 2.2809016383286065, 1.9811945670892384); after step 20:
+  **1.732151931993421** (2.1188844124476116, 0.4820262908935547, 1.5712586614011808, 1.4846517037654268, 2.056710089836921,
+  1.9258476893107097, 2.249946357510614, 1.967890250781351) — every row lower. Per step (row line, loss before the update,
+  |grad|): 1: 1 2.1735 0.3102; 2: 2 0.7377 0.8874; 3: 3 1.6060 0.2692; 4: 4 1.5097 0.2639; 5: 5 2.0980 0.3209; 6: 6 1.9432
+  0.3226; 7: 7 2.2776 0.3202; 8: 8 1.9807 0.3499; 9: 1 2.1557 0.4716; 10: 2 0.6674 1.5970; 11: 3 1.5942 0.3776; 12: 4 1.5002
+  0.4166; 13: 5 2.0814 0.4895; 14: 6 1.9355 0.4353; 15: 7 2.2646 0.4685; 16: 8 1.9740 0.4831; 17: 1 2.1341 0.6567; 18: 2
+  0.5500 2.2514; 19: 3 1.5774 0.5062; 20: 4 1.4870 0.5549 (full digits in the receipt). 20 steps in 50,121 / 52,525 / 90,626 ms
+  (runs 2, 3, 4) — 1.9–5.2 s a step at 159 positions, the design's "≈1.5–2 s at T=160" read under a shared GPU; runs 3 and 4
+  read every loss, gradient and finite difference of run 2 to the last printed digit. Why Adam: with B = +0 the step-0
+  dA is exactly zero and dB is the only signal, at entries ~1e-3; a plain step small enough for A would not move B in 20 steps,
+  Adam's normalized step moves every entry by ~lr from the first. Held-out rows were not read in this rung (E.3 names two); the
+  descent is in-sample and 2.5 epochs over 8 rows — a fit, not yet a generalization claim.
+- **(d) Export.** `form/form-stdlib/adapters/qwen38-last-block-next/adapters.safetensors`, 721,096 bytes: F32
+  `blk.63.ffn_down.weight.lora_a` [17408, 8] at offsets [0, 557056] and `.lora_b` [8, 5120] at [557056, 720896]; read back
+  through `la-header` / `la-whole?` / `la-pairs` / `la-rank-of` / `la-dtype` / `ln-tensor-begin`: whole 1, 1 pair, rank 8, f32,
+  a at 0, b after a. `adapter_config.json` (589 bytes) names rank 8, alpha 16, scale 2, layers [63], targets ["ffn_down"], the two
+  tensor names, adam, lr 1e-4, batch 1, mask_prompt 1, ids_cap 160, the rows, 20 steps, both mean losses, `"worn": 0`. Nothing
+  serving reads it; promotion stays a separate witnessed write. Snag from E.4 confirmed by the read-back: `la-layers` parses
+  `model.layers.N` only, so a census of this file reports layers −1 (the band reads the tensor names directly).
+- **(e) Memory.** Counted: forward scratch 83,558,400 + the door's own 334,846,512 = **418,404,912 bytes (399 MiB)** against the
+  design-D budget at T 160, r 8 of 503,906,304 bytes (480 MiB): tape + grads 170 MiB, logits + dz 303 MiB, P + dP 4.7 MiB,
+  the ffn_down pair × 4 2.75 MiB (design D's 13.3 MiB priced the whole block's seven pairs); the door holds logits and dz (two [160 × 248,320] f32 = 303 MiB) as the design priced them, and nothing
+  the design did not. 41 of 41 handles freed (17 forward + 24 door). Machine around the steps (run 2): available 9.3 GiB, wired
+  39.0, compressor 44.9 GiB before; 15.6 / 20.8 / 62.6 after — the neighbours were deep in the compressor; the band's lease shared
+  the 27.0 GiB file. Governor before run 2 (`governor-before.log`): available 51.8 GiB, wired 51.4; before run 3
+  (`governor-before-3.log`): available 18.6 GiB, wired 31.8, compressor 13.0.
+- **Friction, observed.** Run 1 was stopped by hand after its first capture (466,753 ms) because the runner's 3600 s bound would have
+  cut the eighth; stopping the bound's wrapper left the kernel alive for a few seconds until it was ended by name (never orphaned);
+  the bound is now 9000 s. The per-position prefill cost of the tap path (82 ms a position at best, 3.8 s at worst) is the rung-1
+  friction again, read under load; its cause stays outside this rung's files.
+- **What rung 4 inherits.** The export in the `qlh-rr-open` shapes; the forward hook named at `qwen-lora-head.fk:62-64` still unwired;
+  `la-layers` to teach `blk.N`; a held-out reading beside the in-sample fall; and `form_q8_tmm_f32` for the block's own frozen
+  transposes should a pair move upstream of ffn_down.
+
+## Rung 4 observed (2026-10-29)
+
+Judge, door and band written by the implementer of this step (branch `offline-voice-iteration-4`, kernel HEAD 863ef4119); the door
+ran once on the 27B and the band once. Every number below is copied from their print lines (`.hearth/qwen-rung-4/lift-run-1.log`,
+`judge-band-run-1.log`, `gaps-before.log`, `gaps-after.log`) or from the ledger row the door landed; differences between two
+printed numbers are my subtraction and say so.
+
+- **Doors.** `form/form-stdlib/bml/qwen-last-block-judge.bml`, the judge. It reads an adapter directory back by name: the file,
+  then `adapter_config.json`, then the header against the block's geometry (exactly the pair `blk.L.ffn_down.weight.lora_a`
+  [ff, r] at 0 and `.lora_b` [r, d] right after it, F32, whole). It writes A and B into rung 3's step record by the header's
+  spans, scores every row's token-mean CE through the frozen head with `qlbt-eval`, and builds the promotion row.
+  `observe/qwen-last-block-lift-run.bml` is a **new door**: `observe/lora-lift-run.bml` trains the 3B and reads its trainer's
+  validation events, while this one trains nothing and scores an exported pair, so the two share the lift's rules and no flow.
+  Those rules are the 3B door's own, read in place through the judge's import of that door (`ll-digest`, `ll-better`,
+  `ll-milli`, `ll-id`, `ll-reading-of`, `ll-shared`, `ll-negative-pairs`): one definition serves both lifts. The band is
+  `form/form-stdlib/tests/qwen-last-block-judge-band.bml`, verdict **63**, exit 0, no model, 11.2 s with two door runs as
+  children. It proves:
+  - better 1 for a lower child, and 0 for a higher or equal one even when its rejected loss fell;
+  - a missing adapter file and a missing config are refused by name, and the door run as a child exits 1 with no governor line;
+  - the fixture pair's A and B read back by their spans to the floats written;
+  - a wrong shape, a wrong layer and an F16 tensor are each refused;
+  - the split holds by draft id, and the absent home reads as the base.
+- **The parent.** `form/form-stdlib/adapters/qwen38-last-block` is absent. The lane wears no adapter, so the parent reads as the
+  base 27B: the pair at +0, which leaves the block's own output (rung 2's bit 1: 0 of 117,760 words differed). The row names it
+  as `"parent_reads":"absent: the lane wears no adapter; the parent is the base 27B (the pair at +0)"`. A present home would be
+  read and loaded as the child is, at the child's rank, scale and layer; the fixtures prove that path, the 27B has not run it.
+- **The child.** `form/form-stdlib/adapters/qwen38-last-block-next`, 721,096 bytes, sha256
+  `e59f22ffe17a5b16e8d19e71e14482bf4a17779f8c6df6dffd3f44258c50cc4a`. It is the export of rung 3's fifth run
+  (`.hearth/qwen-rung-3/band-run-5-skeptic.log`, 16:01:21, verdict 31), whose step-0 and step-20 means equal runs 2–4's to the
+  last digit.
+- **The in-sample witness: the pair judged is the pair trained.** On the 8 training rows, from rung 3's own captures (read and
+  never written; their mtimes stand at 14:52–15:36), the parent read 1.7919827729396287 and the child 1.732151931993421. Those
+  are the config's `mean_loss_step0` and `mean_loss_step20` exactly, and every row's mean equals the rung-3 band's per-row mean
+  to the last digit. The door refuses when this does not hold; it held.
+- **The judgement (accepted held-out).** Lines 21–25 of `learn/draft-readings.jsonl`: accepted, and disjoint by draft id from
+  lines 1–8. Their `valid_ids_sha256` is `5603ba5ebb44edb9dd86a767224fb83a084193bb364fd53742b224451327f748`, the same split the
+  3B lift was judged on (its row 3). Each row has 159 positions; 121 / 130 / 93 / 145 / 71 targets are supervised (560 of 795).
+  Parent → child per row:
+
+  | line | supervised | parent | child |
+  |---|---|---|---|
+  | 21 | 121 | 2.6813191185312824 | 2.6647132763192674 |
+  | 22 | 130 | 2.849067449569702 | 2.8344144931206334 |
+  | 23 | 93 | 2.9638931161613873 | 2.9544913640586277 |
+  | 24 | 145 | 3.813677998246818 | 3.7958080785027866 |
+  | 25 | 71 | 1.589413602587203 | **1.5990697296572403 (higher)** |
+
+  The mean went **2.7794742570192787 → 2.769699388331711** (2779 → 2769 milli): **better 1**. Four rows fell and one rose. By my
+  subtraction, the mean fell 0.0098 nats (0.35 %), about a sixth of the in-sample fall (0.0598, 3.3 %).
+- **Rejected beside (information, never the judge).** Of the 27 rows of `learn/draft-readings-heldout.jsonl`, 26 were judged
+  and line 24 was set aside by name (`its prompt is 544 ids: under the 160-id cap no assistant token is a supervised target`).
+  The mean went 2.0692298974197554 → 2.0552387556182743 (2069 → 2055 milli); 23 of 26 rows fell, and lines 6, 10 and 27 rose.
+  **The rejected rows fell further than the accepted held-out**: 0.0140 nats (0.68 %) against 0.0098 (0.35 %), by my
+  subtraction. The 3B lift's row has the same shape: accepted 3585 → 3294 milli, rejected 2611 → 2302 (8.1 % against 11.8 %).
+  Both lifts show it (observed). The reading I infer: next-token likelihood on accepted drafts teaches the drafter's own
+  register, which the drafts we turned away share, more than it teaches our choice between them. `better` is honest by its
+  contract, which reads the accepted held-out alone; its margin is thin.
+- **Time and memory.** Wall 717,186 ms (11 m 58 s):
+  - rows through the tokfast index: 504,322 ms for 40 rows, 12.6 s a row and 70 % of the wall — the door's largest cost;
+  - held-out captures: 40,768 ms (13.6 / 7.0 / 6.6 / 7.4 / 6.0 s for 159 positions each, GPU utilization 99 at the start);
+  - rejected captures: 150,966 ms for 26;
+  - the passes: 9,114 ms for the parent (pair at +0) and 9,111 ms for the child, over 39 rows each.
+
+  The lease was granted at a need of 27.8 GiB (own 823,813,024 bytes beside the shared 27 GiB file; available 72.0 GiB).
+  41 of 41 handles were freed, and 51.3 GiB was available after.
+- **The gap.** Before (`gaps-before.log`): `lora-27b-last-block: unread — … no row where parent
+  "form/form-stdlib/adapters/qwen38-last-block" among 3 row(s)`. After (`gaps-after.log`): `lora-27b-last-block: closed — 27B
+  last-block rung reached: a promoted adapter whose child beats its parent; better 1 == 1 (the last of 1 row(s) where parent
+  "form/form-stdlib/adapters/qwen38-last-block" of 4, at 1793264714367)`. The summary reads 13 gaps: closed 10, open 3, unread 0
+  (before: 9, 3, 1). The gap row's parent path stood as written, so `learn/offline-voice-gaps.jsonl` is unchanged. "Promoted"
+  in the gap's title reads the promotion ledger's row; nothing is worn.
+- **Serving does not change.** The adapter stays under `-next` with `"worn": 0`, and the forward hook (`qwen-lora-head.fk:62-64`)
+  stays unwired. Wearing the adapter in the voice is a separate, witnessed decision; no decoded comparison has been read to
+  inform it.
+- **What the next rung inherits.** A judge for any child the trainer exports (the door names its child, parent, rows and
+  captures); 31 cached block-input captures under `.hearth/qwen-rung-4/accepted` and `rejected`; the rejected set's larger
+  fall, which makes the preference margin (the accepted fall against the rejected fall) the reading a gate before wearing could
+  ask for; and row preparation as the door's dominant cost.

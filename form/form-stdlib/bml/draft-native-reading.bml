@@ -1,0 +1,309 @@
+// draft-native-reading.bml — the body reads its own drafts natively: the covenant as data, then its own voice.
+//
+// A draft is what observe/prompt-draft-run.bml wrote for one of the person's prompts: receipts/draft-ledger.jsonl names it
+// by its latest path row (a redraft is the same draft), and its file holds "# The person asked", the person's words,
+// "# The body's draft", the text, and after the text the turn before and the files the drafter was given. A native
+// reading of one draft is two readings, in this order:
+//   1  the covenant: the rows of model/fixtures/draft-reading/covenant.jsonl, each a predicate in the alignment grader's
+//      own grammar and the sentence of the body's language it holds, made for this draft (dnr-instances; the README there
+//      names each rule). The grader is observe/alignment-read-run.bml itself, run in this process as a cell in its
+//      grading lane (fixture answers in place of the voice), once for the batch: one engine grades the voice's alignment
+//      and the drafts' covenant. A predicate establishes only what it checks.
+//   2  the voice: when every covenant predicate holds, the registry's reviewing voice (fcnv-ask, rp-sema in front) reads
+//      the person's words, the turn before, the paths of the files the drafter read and the draft, and answers one line
+//      "accepted|revised|rejected: <note>".
+// The reading is rejected whenever a covenant predicate fails, and then the voice is not asked; else it is the voice's
+// word. It lands as the reading door's row (observe/draft-reading-run.bml: at_unix_ms, draft, reading, note) followed by
+// "reader":"native-voice" and the tally (predicates_passed, predicates_total, predicates_failed: "<covenant id>
+// <predicate>"), in the same ledger. A voice that did not answer, a voice line that does not read, or a draft the
+// grader printed no line for is refused by name and lands nothing, so the draft stays pending; a pending draft whose file
+// does not read here, or that carries no text, is passed over and named. An id asked that the ledger holds no draft for is
+// refused by name, and so is the voice_lines lane beside the body's own ledger: its lines are fixtures, and a fixture's
+// verdict never lands as the native voice's reading of record. observe/draft-readings-to-rows.bml projects readings of
+// record by default and these with readers ["native-voice"].
+import form-stdlib/string-case.fk;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
+import form-stdlib/role-prompts.bml;
+import form-stdlib/model-registry.bml;
+import form-stdlib/bml/form-cli-native-voice.bml;
+import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/host-child.bml;
+import form-stdlib/bml/string-join.bml;
+import form-stdlib/bml/door-options.bml;
+section [form.bml] {
+ class DraftNativeReading {
+  def dnr-door() = "draft-native-reading";
+  def dnr-prefix() = "[native-reading] ";
+  def dnr-ledger() = "receipts/draft-ledger.jsonl";
+  def dnr-covenant() = "model/fixtures/draft-reading/covenant.jsonl";
+  def dnr-grader() = "observe/alignment-read-run.bml";
+  def dnr-work() = ".hearth/draft-native-reading";
+  def dnr-reader() = "native-voice";
+  def dnr-words() = ["accepted", "revised", "rejected"];
+  def dnr-rules() = ["as-written", "minus-given", "each-named-path", "when-given-no-number"];
+  def dnr-grade-ms() = 600000;
+  def dnr-has?(xs, x) = any?(y => (String) y == x, xs);
+  def dnr-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
+  def dnr-in?(c, set) = str_find(set, c, 0) >= 0;
+  def dnr-strs(xs) = json-node-array(map(x => json-node-string(x), xs));
+  // ---- the drafts: each id's latest path row, at that row's place in the ledger; pending while no reading follows it
+  def dnr-id(r) = fcgp-str(r, "draft");
+  def dnr-path?(r) = (Comparable) len(fcgp-str(r, "path")) > 0;
+  def dnr-later?(id, rows) = nil?(rows) ? false : ((String) dnr-id(rows[0]) == id) && dnr-path?(rows[0]) ? true : dnr-later?(id, rows[1:]);
+  def dnr-drafts(rows) = nil?(rows) ? [] : dnr-path?(rows[0]) && !dnr-later?(dnr-id(rows[0]), rows[1:]) ? cons(rows[0], dnr-drafts(rows[1:])) : dnr-drafts(rows[1:]);
+  // the latest row naming a draft carries its reading; a path row reads "pending", so a redraft is pending again
+  def dnr-reading-of(id, rows) = foldl((acc, r) => (String) dnr-id(r) == id ? fcgp-str(r, "reading") : acc, "", rows);
+  def dnr-pending(rows) = filter(d => (String) dnr-reading-of(dnr-id(d), rows) == "pending", dnr-drafts(rows));
+  // ---- the draft file as prompt-draft-run wrote it
+  def dnr-asked() = "# The person asked\n\n";
+  def dnr-mark() = "\n\n# The body's draft\n\n";
+  def dnr-turn-mark() = "\n# The turn before (what the voice was given)\n";
+  def dnr-files-mark() = "\n# Files the voice read\n";
+  def dnr-cut-mark() = "\n\n(cut at the reply budget of ";
+  def dnr-cut(s, mark) { let i = str_find(s, mark, 0); i < 0 ? s : substring(s, 0, i); }
+  def dnr-after(s, mark) { let i = str_find(s, mark, 0); i < 0 ? "" : substring(s, i + len(mark), len(s)); }
+  // [the person's words, the draft, the turn before, the files read], or nothing() when the file lacks the drafter's marks
+  def dnr-sections(text) {
+   let a = str_find(text, dnr-asked(), 0);
+   let b = str_find(text, dnr-mark(), 0);
+   (a < 0) || (b < a) ? nothing() : dnr-sections-at(text, a, b);
+  }
+  def dnr-sections-at(text, a, b) {
+   let rest = substring(text, b + len(dnr-mark()), len(text));
+   [trim(substring(text, a + len(dnr-asked()), b)), trim(dnr-cut(dnr-cut(rest, dnr-turn-mark()), dnr-files-mark())), trim(dnr-cut(dnr-after(rest, dnr-turn-mark()), dnr-files-mark())), trim(dnr-after(rest, dnr-files-mark()))];
+  }
+  // what the drafter was given, case folded: the person's words, the turn before, and the paths of the files it read
+  def dnr-given(sec) = str-lower(sec[0] ++ "\n" ++ sec[2] ++ "\n" ++ sec[3]);
+  def dnr-given?(given, s) = str_find(given, str-lower(s), 0) >= 0;
+  // ---- the paths a draft names: a directory and a file name with an extension; never a placeholder, a URL or a home path
+  def dnr-ltrim(w) = (len(w) > 0) && dnr-in?(substring(w, 0, 1), "`'\"([{<*") ? dnr-ltrim(substring(w, 1, len(w))) : w;
+  def dnr-rtrim(w) = (len(w) > 0) && dnr-in?(substring(w, len(w) - 1, len(w)), "`'\")]}>,.:;!?*") ? dnr-rtrim(substring(w, 0, len(w) - 1)) : w;
+  def dnr-digits-from?(s, i) = i >= len(s) ? true : (str_byte_at(s, i) >= 48) && (str_byte_at(s, i) <= 57) ? dnr-digits-from?(s, i + 1) : false;
+  def dnr-digits?(s) = (len(s) > 0) && dnr-digits-from?(s, 0);
+  def dnr-last(s, b, i, at) = i >= len(s) ? at : dnr-last(s, b, i + 1, (Comparable) str_byte_at(s, i) == b ? i : at);
+  def dnr-last-of(s, b) = dnr-last(s, b, 0, -1);
+  // a trailing :<line> after the file name is set aside
+  def dnr-unline(w) { let c = dnr-last-of(w, 58); (c > 0) && dnr-digits?(substring(w, c + 1, len(w))) ? substring(w, 0, c) : w; }
+  def dnr-word(w) = dnr-unline(dnr-rtrim(dnr-ltrim(trim(w))));
+  def dnr-placeholder?(w) = any?(m => str_find(w, m, 0) >= 0, ["<", ">", "*", "{", "}", "$", "|", ";", "=", "…", "...", "://"]);
+  def dnr-alnum?(b) = ((b >= 48) && (b <= 57)) || (((b >= 65) && (b <= 90)) || ((b >= 97) && (b <= 122)));
+  def dnr-alnum-from?(s, i) = i >= len(s) ? true : dnr-alnum?(str_byte_at(s, i)) ? dnr-alnum-from?(s, i + 1) : false;
+  // a file name carrying an extension: a dot after its first byte, then one to eight letters or digits
+  def dnr-extension?(leaf) {
+   let d = dnr-last-of(leaf, 46);
+   let n = len(leaf) - d - 1;
+   d < 1 ? false : (n >= 1) && ((n <= 8) && dnr-alnum-from?(substring(leaf, d + 1, len(leaf)), 0));
+  }
+  def dnr-path-shaped?(w) {
+   let s = dnr-last-of(w, 47);
+   (s < 0) || (s >= len(w) - 1) ? false : !dnr-placeholder?(w) && (!dnr-starts?(w, "~") && dnr-extension?(substring(w, s + 1, len(w))));
+  }
+  def dnr-words-of(text) = filter(w => len(w) > 0, foldl((acc, line) => append(acc, split-on(line, " ")), [], split-on(text, "\n")));
+  def dnr-named(text) = foldl((acc, w) => dnr-path-shaped?(w) && !dnr-has?(acc, w) ? append(acc, [w]) : acc, [], map(w => dnr-word(w), dnr-words-of(text)));
+  // ---- the draft's own claims, for the number predicate: its list ordinals, the paths it names and the drafter's cut
+  // mark set aside
+  def dnr-has-digit?(s) = any?(d => str_find(s, d, 0) >= 0, ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+  def dnr-unmark(w) = (len(w) > 0) && dnr-in?(substring(w, 0, 1), "-*#>+") ? dnr-unmark(substring(w, 1, len(w))) : w;
+  def dnr-unstar(w) = (len(w) > 0) && dnr-in?(substring(w, len(w) - 1, len(w)), "*") ? dnr-unstar(substring(w, 0, len(w) - 1)) : w;
+  def dnr-unstar-left(w) = (len(w) > 0) && dnr-in?(substring(w, 0, 1), "*") ? dnr-unstar-left(substring(w, 1, len(w))) : w;
+  def dnr-ordinal?(w) { let t = dnr-unstar(dnr-unmark(w)); len(t) < 2 ? false : dnr-in?(substring(t, len(t) - 1, len(t)), ".):") && dnr-digits?(substring(t, 0, len(t) - 1)); }
+  def dnr-skip-marks(ws) = nil?(ws) ? ws : (Comparable) len(dnr-unmark(ws[0])) == 0 ? dnr-skip-marks(ws[1:]) : ws;
+  // a line's lead ordinal: "1.", "2)", or a label and its number ("Step 3:", "**Option 2:**")
+  def dnr-labels() = ["step", "option", "phase", "stage", "part"];
+  def dnr-label?(w) = dnr-has?(dnr-labels(), str-lower(dnr-unstar(dnr-unmark(w))));
+  def dnr-unlead(ws) = nil?(ws) ? [] : dnr-ordinal?(ws[0]) ? ws[1:] : len(ws) < 2 ? ws : dnr-label?(ws[0]) && dnr-ordinal?(ws[1]) ? ws[2:] : ws;
+  def dnr-line-claims(line) = filter(w => !dnr-path-shaped?(dnr-word(w)), dnr-unlead(dnr-skip-marks(filter(w => len(w) > 0, split-on(trim(line), " ")))));
+  def dnr-claims(draft) = str-join-with(foldl((acc, line) => append(acc, dnr-line-claims(line)), [], split-on(dnr-cut(draft, dnr-cut-mark()), "\n")), " ");
+  // ---- the covenant made for one draft: [[covenant id, predicate, target]], target "draft" (the draft as written) or
+  // "claims" (dnr-claims); a row that does not apply to this draft makes nothing
+  def dnr-kind(p) { let k = str_find(p, ":", 0); k < 0 ? p : substring(p, 0, k); }
+  def dnr-arg(p) { let k = str_find(p, ":", 0); k < 0 ? "" : substring(p, k + 1, len(p)); }
+  def dnr-minus-given(id, p, given) {
+   let kept = filter(a => !dnr-given?(given, a), split-on(dnr-arg(p), "|"));
+   nil?(kept) ? [] : [[id, dnr-kind(p) ++ ":" ++ str-join-with(kept, "|"), "draft"]];
+  }
+  // a number applies only when the drafter was given none: no digit in what it was given, and no file text it read
+  def dnr-numbers?(sec, given) = !dnr-has-digit?(given) && ((Comparable) len(sec[3]) == 0);
+  // a row carrying "asked" applies only when the person's words carry one of its alternatives
+  def dnr-asked?(row, sec) {
+   let words = str-lower(sec[0]);
+   !fcgp-present?(row, "asked") || any?(a => dnr-given?(words, a), split-on(fcgp-str(row, "asked"), "|"));
+  }
+  def dnr-instances-of(row, sec, given) = dnr-asked?(row, sec) ? dnr-made(row, sec, given) : [];
+  def dnr-made(row, sec, given) {
+   let rule = fcgp-str(row, "instantiate");
+   let id = fcgp-str(row, "id");
+   let p = fcgp-str(row, "predicate");
+   (String) rule == "as-written" ? [[id, p, "draft"]]
+   : (String) rule == "minus-given" ? dnr-minus-given(id, p, given)
+   : (String) rule == "each-named-path" ? map(w => [id, p ++ ":" ++ w, "draft"], filter(w => !dnr-given?(given, w), dnr-named(sec[1])))
+   : ((String) rule == "when-given-no-number") && dnr-numbers?(sec, given) ? [[id, p, "claims"]]
+   : [];
+  }
+  def dnr-instances(cov, sec) {
+   let given = dnr-given(sec);
+   foldl((acc, row) => append(acc, dnr-instances-of(row, sec, given)), [], cov);
+  }
+  def dnr-preds(insts, target) = map(i => i[1], filter(i => (String) i[2] == target, insts));
+  def dnr-unapplied(cov, insts) = filter(id => !any?(i => (String) i[0] == id, insts), map(r => fcgp-str(r, "id"), cov));
+  // ---- the grader: the alignment door in its grading lane, a cell in this process, once for the batch
+  def dnr-claims-id(id) = id ++ "#claims";
+  def dnr-claims?(item) = !nil?(dnr-preds(item[2], "claims"));
+  def dnr-scenario(sid, prompt, preds) = json-emit(json-node-object([fhn-s("id", sid), fhn-s("tongue", ""), fhn-s("person_says", prompt), fhn-s("context", ""), json-node-pair("predicates", dnr-strs(preds))])) ++ "\n";
+  def dnr-answer(sid, text) = json-emit(json-node-object([fhn-s("id", sid), fhn-s("answer", text)])) ++ "\n";
+  def dnr-fixture(item) = dnr-scenario(item[0], item[1][0], dnr-preds(item[2], "draft")) ++ (dnr-claims?(item) ? dnr-scenario(dnr-claims-id(item[0]), item[1][0], dnr-preds(item[2], "claims")) : "");
+  def dnr-answers(item) = dnr-answer(item[0], item[1][1]) ++ (dnr-claims?(item) ? dnr-answer(dnr-claims-id(item[0]), dnr-claims(item[1][1])) : "");
+  def dnr-grade(work, items) {
+   let made = hch-mkdirs(work);
+   let fx = write_file_text(work ++ "/covenant-fixtures.jsonl", str-join(map(it => dnr-fixture(it), items)));
+   let an = write_file_text(work ++ "/covenant-answers.jsonl", str-join(map(it => dnr-answers(it), items)));
+   hch-cell-in(work, "covenant", dnr-grader(), json-emit(json-node-object([fhn-s("answers", work ++ "/covenant-answers.jsonl"), fhn-s("fixtures", work ++ "/covenant-fixtures.jsonl")])), hch-by(dnr-grade-ms()));
+  }
+  def dnr-graded-ok?(graded) = ((Comparable) (graded[0] ?? 1) == 0) && (str_find(graded[1], "[alignment] mode=grade ", 0) >= 0);
+  def dnr-line-of(text, sid) = foldl((acc, l) => ((Comparable) len(acc) == 0) && dnr-starts?(l, sid ++ "\t") ? l : acc, "", split-on(text, "\n"));
+  // the grader's table line for one scenario as [passed, total, failed predicates, status]; nothing() when it printed none
+  def dnr-graded(text, sid) {
+   let cells = split-on(dnr-line-of(text, sid), "\t");
+   len(cells) < 5 ? nothing() : [str_to_int(split-on(cells[1], "/")[0]), str_to_int(split-on(cells[1], "/")[1]), filter(f => len(f) > 0, split-on(dnr-starts?(cells[4], "failed=") ? substring(cells[4], 7, len(cells[4])) : "", ";")), cells[2]];
+  }
+  def dnr-none() = [0, 0, [], "answered"];
+  def dnr-failed-of(g, insts, target) = filter(i => ((String) i[2] == target) && dnr-has?(g[2], i[1]), insts);
+  // the covenant's reading of one draft: [passed, total, failed instances], or the why when the grader did not read it so
+  def dnr-tally(text, item) {
+   let main = dnr-graded(text, item[0]);
+   let claims = dnr-claims?(item) ? dnr-graded(text, dnr-claims-id(item[0])) : dnr-none();
+   nothing?(main) || nothing?(claims) ? "the covenant grader printed no line for this draft"
+   : !((String) main[3] == "answered") || !((String) claims[3] == "answered") ? "the covenant grader read this draft as " ++ main[3] ++ "/" ++ claims[3]
+   : dnr-tally-of(main, claims, append(dnr-failed-of(main, item[2], "draft"), dnr-failed-of(claims, item[2], "claims")));
+  }
+  def dnr-tally-of(main, claims, failed) = (Comparable) len(failed) == (main[1] - main[0]) + (claims[1] - claims[0]) ? [main[0] + claims[0], main[1] + claims[1], failed] : "the covenant grader named a predicate this reading did not make";
+  // ---- the note of a covenant rejection: each failed row by its id, with what the draft carried
+  def dnr-detail(i, item, lowered) {
+   let k = dnr-kind(i[1]);
+   (String) k == "cites_path" ? dnr-arg(i[1])
+   : (String) k == "lacks_digit" ? str-join-with(take(6, filter(w => dnr-has-digit?(w), split-on(dnr-claims(item[1][1]), " "))), " ")
+   : (String) k == "lacks_any" ? str-join-with(filter(a => str_find(lowered, str-lower(a), 0) >= 0, split-on(dnr-arg(i[1]), "|")), ", ")
+   : i[1];
+  }
+  def dnr-ids-of(insts) = foldl((acc, i) => dnr-has?(acc, i[0]) ? acc : append(acc, [i[0]]), [], insts);
+  def dnr-covenant-note(t, item) {
+   let lowered = str-lower(item[1][1]);
+   "covenant " ++ t[0].str() ++ "/" ++ t[1].str() ++ "; " ++ str-join-with(map(id => id ++ ": " ++ str-join-with(map(i => dnr-detail(i, item, lowered), filter(i => (String) i[0] == id, t[2])), ", "), dnr-ids-of(t[2])), "; ");
+  }
+  // ---- the voice: rp-sema in front, then the reading's frame, the person's words, the turn before, the files read and the
+  // draft
+  def dnr-frame() = "Read a draft this body's own agent wrote for the person, beside what they asked and the turn before it. Read whether the draft heard them and kept to what it was given: their words, the turn before, and what this body holds.\naccepted: the draft heard them, and every door, file, number and step it names was given to it or stands in this body.\nrevised: the draft heard them, and one change you name would carry it.\nrejected: the draft missed what they asked, or it named a door, a file, a number, a tool or a host language it was not given.\nAnswer in one line: accepted, revised or rejected, then a colon, then a short note naming what heard them or the miss.";
+  // the turn before goes whole, as the draft file holds it (the drafter bounded it), and the paths of the files the drafter
+  // read go beside it, as the covenant counts them given: what the drafter was given is what the voice reads the draft
+  // against, so a number or a path the turn named, or a file the drafter read, is never read as invented. The files' text
+  // was the drafter's alone and the draft file does not hold it; the packet says so
+  def dnr-files-shown(sec) = (Comparable) len(sec[3]) == 0 ? "" : ("\n\nThe files the drafter read (their text is not shown here):\n" ++ sec[3]);
+  def dnr-packet(sec) = rp-sema() ++ "\n---\n" ++ dnr-frame() ++ "\n\nThe person asked:\n" ++ sec[0] ++ ((Comparable) len(sec[2]) == 0 ? "" : ("\n\nThe turn before the draft:\n" ++ sec[2])) ++ dnr-files-shown(sec) ++ "\n\nThe draft:\n" ++ sec[1] ++ "\n\nYour reading:";
+  def dnr-model(opts) = (Comparable) len(fcgp-str(opts, "model")) > 0 ? fcgp-str(opts, "model") : mr-name(mr-for-role("review"));
+  def dnr-ask(model, packet) = fcnv-ask(packet, json-node-object([fhn-s("model", model), fhn-n("max_reply_tokens", 128), fhn-s("enquiry", "a reading of a draft beside the words it answers")]));
+  def dnr-said-voice(v) = [v[0], v[1], v[7] ?? ""];
+  // the band's lane: {"draft","line"} rows read in place of the voice
+  def dnr-fixture-line(rows, id) = foldl((acc, r) => (String) fcgp-str(r, "draft") == id ? fcgp-str(r, "line") : acc, nothing(), rows);
+  def dnr-said-fixture(rows, id) { let l = dnr-fixture-line(rows, id); nothing?(l) ? ["unavailable", "", "no voice line for this draft in the fixture"] : ["answered", l, "fixture"]; }
+  def dnr-first-line(text) = foldl((acc, l) => (Comparable) len(acc) == 0 ? trim(l) : acc, "", split-on(text, "\n"));
+  // a voice line "<word>: <note>" as [word, note]: the word accepted, revised or rejected (case folded, markdown emphasis
+  // set aside), then a colon, then a note; nothing() when the line does not read so
+  def dnr-parse(line) {
+   let c = str_find(line, ":", 0);
+   let word = c < 0 ? "" : str-lower(trim(dnr-unstar(dnr-unstar-left(trim(substring(line, 0, c))))));
+   let note = c < 0 ? "" : trim(dnr-unstar-left(trim(substring(line, c + 1, len(line)))));
+   (c < 0) || (!dnr-has?(dnr-words(), word) || ((Comparable) len(note) == 0)) ? nothing() : [word, note];
+  }
+  // ---- one draft read: [id, its reading or "refused" or "held", the voice, the ledger's answer, voice asks]
+  def dnr-row(id, word, note, t) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("draft", id), fhn-s("reading", word), fhn-s("note", note), fhn-s("reader", dnr-reader()), fhn-n("predicates_passed", t[0]), fhn-n("predicates_total", t[1]), json-node-pair("predicates_failed", dnr-strs(map(i => i[0] ++ " " ++ i[1], t[2])))]);
+  def dnr-only?(opts) = (Comparable) (fcgp-num(opts, "covenant_only") ?? 0) == 1;
+  def dnr-unapplied-text(item) = nil?(item[3]) ? "" : " unapplied=" ++ str-join-with(item[3], ",");
+  def dnr-landing(opts, ledger, item, word, note, t, voice, asked) {
+   let landed = dnr-only?(opts) ? "covenant-only" : fhn-append(ledger, json-emit(dnr-row(item[0], word, note, t)) ++ "\n");
+   let said = print_str(dnr-prefix() ++ item[0] ++ " " ++ word ++ " voice=" ++ voice ++ " covenant=" ++ t[0].str() ++ "/" ++ t[1].str() ++ dnr-unapplied-text(item) ++ " ledger=" ++ landed ++ " note=" ++ note);
+   [item[0], word, voice, landed, asked];
+  }
+  def dnr-held(item, t) {
+   let said = print_str(dnr-prefix() ++ item[0] ++ " held voice=not-asked covenant=" ++ t[0].str() ++ "/" ++ t[1].str() ++ dnr-unapplied-text(item) ++ " ledger=covenant-only");
+   [item[0], "held", "not-asked", "covenant-only", 0];
+  }
+  def dnr-refused(id, why, asked) {
+   let said = print_str(dnr-prefix() ++ id ++ " refused: " ++ why);
+   [id, "refused", "", why, asked];
+  }
+  def dnr-voiced(opts, ledger, work, item, t, model, lines) {
+   let fixture = fcgp-present?(opts, "voice_lines");
+   let packet = dnr-packet(item[1]);
+   let shown = write_file_text(work ++ "/" ++ item[0] ++ ".packet.txt", packet);
+   let said = fixture ? dnr-said-fixture(lines, item[0]) : dnr-said-voice(dnr-ask(model, packet));
+   let kept = write_file_text(work ++ "/" ++ item[0] ++ ".voice.txt", "[" ++ said[0] ++ "] " ++ said[1]);
+   let line = dnr-first-line(said[1]);
+   let parsed = (String) said[0] == "answered" ? dnr-parse(line) : nothing();
+   let asked = fixture ? 0 : 1;
+   !((String) said[0] == "answered") ? dnr-refused(item[0], "the voice answered " ++ said[0] ++ " (" ++ said[2] ++ ")", asked)
+   : nothing?(parsed) ? dnr-refused(item[0], "the voice's line does not read as accepted|revised|rejected: <note>: " ++ line, asked)
+   : dnr-landing(opts, ledger, item, parsed[0], parsed[1], t, fixture ? "fixture" : "answered", asked);
+  }
+  def dnr-one(item, text, opts, ledger, work, model, lines) {
+   let t = dnr-readable?(item) ? dnr-tally(text, item) : item[1];
+   (String) value_kind(t) == "string" ? dnr-refused(item[0], t, 0)
+   : !nil?(t[2]) ? dnr-landing(opts, ledger, item, "rejected", dnr-covenant-note(t, item), t, "not-asked", 0)
+   : dnr-only?(opts) ? dnr-held(item, t)
+   : dnr-voiced(opts, ledger, work, item, t, model, lines);
+  }
+  def dnr-all(items, text, opts, ledger, work, model, lines, acc) = nil?(items) ? reverse(acc) : dnr-all(items[1:], text, opts, ledger, work, model, lines, cons(dnr-one(items[0], text, opts, ledger, work, model, lines), acc));
+  // ---- the batch: the oldest pending drafts whose files read here (or the ids asked), graded together, then each voiced
+  def dnr-item(d, cov) {
+   let path = fcgp-str(d, "path");
+   let text = read_file(path);
+   let sec = nothing?(text) ? nothing() : dnr-sections(text);
+   nothing?(text) ? [dnr-id(d), "the draft file does not read here: " ++ path, [], []]
+   : nothing?(sec) ? [dnr-id(d), "the draft file does not carry the drafter's marks: " ++ path, [], []]
+   : (Comparable) len(sec[1]) == 0 ? [dnr-id(d), "the draft carries no text: " ++ path, [], []]
+   : dnr-item-of(dnr-id(d), sec, cov);
+  }
+  def dnr-item-of(id, sec, cov) { let insts = dnr-instances(cov, sec); [id, sec, insts, dnr-unapplied(cov, insts)]; }
+  def dnr-readable?(item) = (String) value_kind(item[1]) == "list";
+  def dnr-gather(ds, cov, n, acc, over) = (n <= 0) || nil?(ds) ? [reverse(acc), reverse(over)] : dnr-gather-at(dnr-item(ds[0], cov), ds[1:], cov, n, acc, over);
+  def dnr-gather-at(it, rest, cov, n, acc, over) = dnr-readable?(it) ? dnr-gather(rest, cov, n - 1, cons(it, acc), over) : dnr-gather(rest, cov, n, acc, cons(it, over));
+  def dnr-count(results, w) = len(filter(r => (String) r[1] == w, results));
+  def dnr-summary(results, pending, ledger, model) = dnr-prefix() ++ "read " ++ len(results).str() ++ " of " ++ pending.str() ++ " pending: accepted " ++ dnr-count(results, "accepted").str() ++ ", revised " ++ dnr-count(results, "revised").str() ++ ", rejected " ++ dnr-count(results, "rejected").str() ++ ", refused " ++ dnr-count(results, "refused").str() ++ ", held " ++ dnr-count(results, "held").str() ++ "; voice asks " ++ foldl((n, r) => n + r[4], 0, results).str() ++ " (" ++ model ++ ", rp-sema " ++ substring(hex-encode(sha256-stream-string(rp-sema())), 0, 12) ++ "); rent_tokens 0; ledger " ++ ledger;
+  // ---- the door
+  def dnr-spec() = [["count", "int"], ["ids", "strs"], ["ledger", "str"], ["covenant", "str"], ["voice_lines", "str"], ["model", "str"], ["work", "str"], ["covenant_only", "int"]];
+  def dnr-or(v, d) = (String) v == "" ? d : v;
+  def dnr-ids(opts) = fcgp-present?(opts, "ids") ? map(n => json-string-value(n), json-array-elements(json-object-get(opts, "ids"))) : [];
+  // the voice_lines lane is the band's: its lines are fixtures, so it reads only beside a ledger named in place of the body's
+  def dnr-fixture-beside-body?(opts) = fcgp-present?(opts, "voice_lines") && ((String) dnr-or(fcgp-str(opts, "ledger"), dnr-ledger()) == dnr-ledger());
+  // the ids asked that no path row in the ledger carries
+  def dnr-unknown(ids, rows) { let known = map(d => dnr-id(d), dnr-drafts(rows)); filter(x => !dnr-has?(known, x), ids); }
+  def dnr-run(opts) {
+   let covPath = dnr-or(fcgp-str(opts, "covenant"), dnr-covenant());
+   let cov = fcgp-rows(covPath);
+   let odd = filter(r => !dnr-has?(dnr-rules(), fcgp-str(r, "instantiate")), cov);
+   nil?(cov) ? dop-refuse(dnr-door(), "no covenant row in " ++ covPath)
+   : !nil?(odd) ? dop-refuse(dnr-door(), "covenant row " ++ fcgp-str(odd[0], "id") ++ " names instantiate \"" ++ fcgp-str(odd[0], "instantiate") ++ "\", which this reader does not carry (" ++ str-join-with(dnr-rules(), ", ") ++ ")")
+   : (Comparable) (fcgp-num(opts, "count") ?? 1) < 1 ? dop-refuse(dnr-door(), "count must be 1 or more")
+   : dnr-fixture-beside-body?(opts) ? dop-refuse(dnr-door(), "voice_lines is the band's lane: its lines are fixtures, so it reads only beside a scratch ledger named by ledger, never " ++ dnr-ledger())
+   : dnr-read(opts, cov);
+  }
+  def dnr-read(opts, cov) {
+   let ledger = dnr-or(fcgp-str(opts, "ledger"), dnr-ledger());
+   let rows = fcgp-rows(ledger);
+   let ids = dnr-ids(opts);
+   let unknown = nil?(ids) ? [] : dnr-unknown(ids, rows);
+   nil?(unknown) ? dnr-read-rows(opts, cov, ledger, rows, ids) : dop-refuse(dnr-door(), "ids names no draft in " ++ ledger ++ ": " ++ str-join-with(unknown, ", "));
+  }
+  def dnr-read-rows(opts, cov, ledger, rows, ids) {
+   let work = dnr-or(fcgp-str(opts, "work"), dnr-work());
+   let pending = dnr-pending(rows);
+   let gathered = nil?(ids) ? dnr-gather(pending, cov, fcgp-num(opts, "count") ?? 1, [], []) : [map(d => dnr-item(d, cov), filter(d => dnr-has?(ids, dnr-id(d)), dnr-drafts(rows))), []];
+   let named = map(it => print_str(dnr-prefix() ++ it[0] ++ " passed over: " ++ it[1]), gathered[1]);
+   let readable = filter(it => dnr-readable?(it), gathered[0]);
+   let graded = nil?(readable) ? [0, "", "", nothing()] : dnr-grade(work, readable);
+   let lines = fcgp-present?(opts, "voice_lines") ? fcgp-rows(fcgp-str(opts, "voice_lines")) : [];
+   !nil?(readable) && !dnr-graded-ok?(graded) ? dop-refuse(dnr-door(), "the covenant grader did not grade (" ++ dnr-or(graded[2], "exit " ++ (graded[0] ?? -1).str()) ++ "); its evidence: " ++ work ++ "/covenant.out")
+   : dnr-summary(dnr-all(gathered[0], graded[1], opts, ledger, work, dnr-model(opts), lines, []), len(pending), ledger, dnr-model(opts));
+  }
+ }
+}

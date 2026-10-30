@@ -13,10 +13,11 @@ section [form.bml] {
   // A candidate in the tracked tree, with ownership-aware restoration.
   // hw-with-published(dir, paths, before, texts, run) writes a marker (<dir>/publish-<pid>.marker: the pid, its
   // stamp, the paths, their checkpoint texts and the bytes this publish writes) and reads it back, publishes the
-  // texts over the paths, answers run() while they stand, and restores still-owned bytes in a deferred step, so a stop
-  // inside run restores too. Intervening writes retain the recovery marker. Nothing is published over a tree that moved from its checkpoint, over a marker this pid
-  // already holds (an earlier restore that did not hold), or before the marker reads back. A kill skips the defer;
-  // the marker outlives it, and hw-heal-publishes(dir) at the next start returns each path still holding the
+  // texts over the paths, answers run() while they stand, and restores still-owned bytes in a deferred step, so a
+  // form_error inside run restores too. Intervening writes retain the recovery marker. Nothing is published over a tree that moved from its checkpoint, over a marker this pid
+  // already holds (an earlier restore that did not hold), or before the marker reads back. A kill skips the defer, and so
+  // does a cell's deadline (the cell ends where it stands, its caller runs on); the marker outlives either, and
+  // hw-heal-publishes(dir) at the next start returns each path still holding the
   // killed publish's own bytes to its checkpoint. Bytes another writer left stay, and so does their marker.
   // Answers [run's answer, or nothing when it stopped; restored; "" or why nothing was published].
   def hw-turn-dir() = ".hearth/native-turns";
@@ -27,9 +28,32 @@ section [form.bml] {
   def hw-marker-text(pid, at, paths, before, texts) = json-emit(json-node-object([fhn-n("pid", pid), fhn-n("at", at), json-node-pair("paths", json-node-array(hw-strings(paths))), json-node-pair("before", json-node-array(hw-strings(before))), json-node-pair("published", json-node-array(hw-strings(texts)))])) ++ "\n";
   def hw-same?(a, b) = nothing?(a) ? nothing?(b) : (!nothing?(b) && ((String) a == b));
   def hw-all-same?(paths, texts) = nil?(paths) ? nil?(texts) : (!nil?(texts) && hw-same?(read_file(paths[0]), texts[0]) && hw-all-same?(paths[1:], texts[1:]));
-  def hw-put(path, text) = nothing?(text) ? host_path_remove(path) : write_file_text(path, text);
-  def hw-put-all(paths, texts) = nil?(paths) ? 0 : hw-put-next(hw-put(paths[0], texts[0]), paths, texts);
-  def hw-put-next(put, paths, texts) = hw-put-all(paths[1:], texts[1:]);
+  // A candidate or a checkpoint stands whole or not at all: its bytes are written beside the path under this process's own
+  // stage name, then renamed over it, so a floor reading the path meets the old bytes or the new, never a truncation
+  // (write_file opens with O_TRUNC, and a floor reading mid-write stopped once on "BML contract source incomplete"). A
+  // path that stands keeps its permission bits, and a symlink stays one: the stage goes beside what it names.
+  // hw-put answers "" when the path stands as asked, else the refusal by name; no stage is left behind a refusal.
+  def hw-put-why(path, what) = "put-refused: " ++ path ++ ": " ++ what;
+  def hw-stage-of(target, pid) = target ++ ".hw-" ++ pid.str();
+  def hw-put(path, text) = nothing?(text) ? hw-unput(path) : hw-stand(path, text);
+  def hw-unput(path) = (Comparable) host_path_remove(path) == 0 || nothing?(host_realpath(path)) ? "" : hw-put-why(path, "the host refused its removal");
+  def hw-stand(path, text) {
+   let real = host_realpath(path);
+   let stands = (String) value_kind(real) == "string";
+   let target = stands ? real : path;
+   let stage = hw-stage-of(target, host_pid());
+   let whole = (Comparable) write_file_text(stage, text) == len(text);
+   let modes = whole && stands ? host_chmod(stage, host_file_mode(target) % 4096) : 0;
+   let moved = whole ? host_path_rename(stage, target) : (0 - 1);
+   (Comparable) moved == 0 ? "" : hw-stage-refused(path, stage, whole);
+  }
+  def hw-stage-refused(path, stage, whole) {
+   let gone = host_path_remove(stage);
+   hw-put-why(path, whole ? "the host refused the rename from " ++ stage : "its stage " ++ stage ++ " did not write whole");
+  }
+  // the first refusal of a list of puts, "" when every path stands as asked; nothing after a refusal is written
+  def hw-put-all(paths, texts) = nil?(paths) ? "" : hw-put-next(hw-put(paths[0], texts[0]), paths, texts);
+  def hw-put-next(put, paths, texts) = (String) put != "" ? put : hw-put-all(paths[1:], texts[1:]);
   def hw-marked?(marker, text) {
    let wrote = write_file_text(marker, text);
    (String) (read_file(marker) ?? "") == text;
@@ -50,24 +74,30 @@ section [form.bml] {
   def hw-install(dir,paths,before,texts) {
    let why=hw-publication-why(dir,paths,before,texts);
    why != "" ? [false,hw-all-same?(paths,before),why] : {
-    let wrote=try {hw-put-all(paths,texts);hw-all-same?(paths,texts);} else false;
+    let put=try hw-put-all(paths,texts) else "put-refused: the put stopped";
+    let wrote=(String) put == "" && hw-all-same?(paths,texts);
     let cleared=wrote ? host_path_remove(hw-marker(dir)) : -1;
     let installed=wrote && cleared==0 && host_path_exists(hw-marker(dir))!=1;
     let restored=installed ? false : {let conflicts=hw-heal-each(paths,before,texts);nil?(conflicts);};
     if restored then host_path_remove(hw-marker(dir)) else 0;
-    [installed,restored,installed ? "" : restored ? "installation-failed: original source restored" : "installation-incomplete: retained marker owns restoration"];
+    let named=(String) put == "" ? "" : " (" ++ put ++ ")";
+    [installed,restored,installed ? "" : restored ? "installation-failed: original source restored" ++ named : "installation-incomplete: retained marker owns restoration" ++ named];
    };
   }
-  def hw-held(paths, before, texts, run) {
+  // a put the door refuses is the window's own "why nothing was published": the run never starts, and the deferred heal
+  // returns whatever the list had already put
+  def hw-held(said, paths, before, texts, run) {
    defer hw-heal-each(paths, before, texts);
    let put = hw-put-all(paths, texts);
-   hw-all-same?(paths,texts) ? run() : form_error("candidate-installation-incomplete");
+   let named = record_set(said, "why", put);
+   (String) put != "" ? form_error(put) : hw-all-same?(paths,texts) ? run() : form_error("candidate-installation-incomplete");
   }
   def hw-published-window(marker, paths, before, texts, run) {
-   let answer = try hw-held(paths, before, texts, run) else nothing();
+   let said = record_new(0, "why", "");
+   let answer = try hw-held(said, paths, before, texts, run) else nothing();
    let restored = hw-all-same?(paths, before);
    let cleared = restored ? host_path_remove(marker) : 0;
-   [answer, restored, ""];
+   [answer, restored, record_get(said, "why")];
   }
   // A publish's checkpoint is the tree as it stands, absence included: each path's bytes, or nothing where no file
   // stands, so a writable path the lane creates publishes and is absent again after the window (hw-put removes it).
@@ -79,10 +109,13 @@ section [form.bml] {
   // was published and the door did not refuse it, and then it reads run's first answer (nothing when the run
   // stopped). A refused or empty publish ran no band: the reading stays where it was before.
   def hw-band-after(window, published, before) = (published > 0) && ((String) window[2] == "") ? [true, nothing?(window[0]) ? nothing() : window[0][0]] : [false, before];
-  // A marker whose publisher no longer holds (or names this very process, which has published nothing yet) is a
-  // publish whose restore never ran. Each path is read: its checkpoint bytes need nothing, the publish's own bytes
+  // A marker whose publisher no longer holds, or that names this very process (a cell stopped on its deadline, a restore
+  // that did not hold, a pid the host gave again), is a publish whose restore never ran. A heal inside an open window of
+  // this process reads that window's marker the same way and takes its candidate away: nothing here tells them apart yet.
+  // Each path is read: its checkpoint bytes need nothing, the publish's own bytes
   // return to the checkpoint, any other bytes are a later writer's and stay, and so does the marker. A marker that
-  // does not read was never read back, so no publish followed it, and it goes. Answers [markers cleared, conflicts].
+  // does not read was never read back, so no publish followed it, and it goes. A stage the killed publish left beside a
+  // path goes too: only that pid's hw-put wrote it. Answers [markers cleared, conflicts].
   def hw-heal-publishes(dir) = (Comparable) host_path_is_dir(dir) != 1 ? [0, []] : foldl((acc, name) => hw-heal-add(acc, hw-heal-name(dir, name)), [0, []], fs_list(dir) ?? []);
   def hw-heal-add(acc, one) = [acc[0] + one[0], append(acc[1], one[1])];
   def hw-heal-name(dir, name) = hw-starts?(name, "publish-") && hw-ends?(name, ".marker") ? hw-heal-marker(dir ++ "/" ++ name, read_file(dir ++ "/" ++ name) ?? "") : [0, []];
@@ -90,7 +123,11 @@ section [form.bml] {
   def hw-heal-unread(path) = (Comparable) host_path_remove(path) == 0 ? [1, []] : [0, ["heal-conflict: " ++ path ++ " does not read and could not be removed"]];
   def hw-heal-texts(row, key) = json-array-elements(json-object-get(row, key)) |> map(n => hw-node-text(n));
   def hw-heal-live?(row) = (Comparable) hw-row-int(row, "pid") != host_pid() && hw-holds?(hw-row-int(row, "pid"), hw-row-int(row, "at"));
-  def hw-heal-row(path, row) = hw-heal-live?(row) ? [0, []] : hw-heal-paths(path, hw-heal-texts(row, "paths"), hw-heal-texts(row, "before"), hw-heal-texts(row, "published"));
+  def hw-heal-row(path, row) = hw-heal-live?(row) ? [0, []] : hw-heal-dead(path, row);
+  def hw-heal-dead(path, row) {
+   let swept = hw-heal-texts(row, "paths") |> map(p => host_path_remove(hw-stage-of(p, hw-row-int(row, "pid"))));
+   hw-heal-paths(path, hw-heal-texts(row, "paths"), hw-heal-texts(row, "before"), hw-heal-texts(row, "published"));
+  }
   def hw-heal-paths(path, paths, before, own) {
    let said = hw-heal-each(paths, before, own);
    nil?(said) && ((Comparable) host_path_remove(path) == 0) ? [1, []] : [0, said];
@@ -102,7 +139,7 @@ section [form.bml] {
   }
   def hw-heal-put(path, before) {
    let put = hw-put(path, before);
-   hw-same?(read_file(path), before) ? [] : ["heal-conflict: " ++ path ++ " did not return to its checkpoint"];
+   (String) put != "" ? ["heal-conflict: " ++ path ++ " did not return to its checkpoint: " ++ put] : hw-same?(read_file(path), before) ? [] : ["heal-conflict: " ++ path ++ " did not return to its checkpoint"];
   }
   def hw-heal-line(healed) = (Comparable) healed[0] == 0 && nil?(healed[1]) ? "" : "[walk-heal] " ++ healed[0].str() ++ " killed publish(es) returned to their checkpoint" ++ (nil?(healed[1]) ? "" : "; " ++ hw-join(healed[1], "; "));
   def hw-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ hw-join(xs[1:], sep);

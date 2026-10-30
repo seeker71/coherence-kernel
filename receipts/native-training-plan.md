@@ -291,6 +291,51 @@ Memory counted 13,791,888 bytes against the design-D budget 28,609,728; 26 of 26
 needed on this path (two new in the door: `form_hash_fill_f32`, `form_mse_fixed_f32`); the plan's
 rung-1 note about `inv` per row described the attn_output choice. Detail: `docs/qwen-last-block-lora-design.md`,
 "Rung 2 observed". Rung 3 is the Adam loop on that loss, observed 2026-10-30
-(`docs/qwen-last-block-lora-design.md`, "Rung 3 observed"): twenty steps, eight token-rows,
-two held out, train mean 3.1072222511585776 → 0.27509687245846803. The head's
-cross-entropy is still unbuilt.
+(`docs/qwen-last-block-lora-design.md`, "Rung 3, the loop on the mean square"): twenty steps, eight
+token-rows, two held out, train mean 3.1072222511585776 → 0.27509687245846803. The cross-entropy over
+the head on real rows is its second door, below.
+
+## 2026-10-29 — Qwen3.8-27B last-block ladder, rung 3 (the pair learns through the head)
+
+Band `form/form-stdlib/tests/qwen-last-block-train-band.bml`, verdict 31, exit 0 in three runs
+(`.hearth/qwen-rung-3/band-run-2.log` with the captures, `band-run-3.log` and `band-run-4.log` on
+the cached captures, `rung-3-receipt.json`). Door `qwen-last-block-train.bml`: the rank-8 pair on
+`blk.63.ffn_down` (scale 2.0, alpha 16) trained with Adam (`nlb_adam`, lr 1e-4, clip 1.0), batch 1,
+20 steps over the first 8 accepted rows of `learn/draft-readings.jsonl` (ChatML through the tokfast
+index, prompt-masked, cut to 160 ids: 159 positions, 5–143 supervised targets a row), each row's block
+input captured once by the rung-1 tap and cached by its ids. The loss is `nlb_ce` through the serving
+head (span rms, Q8_0 batched matmul); the backward is one new kernel, `form_q8_tmm_f32` (dz through
+`output.weight` transposed over Q8_0 blocks), then `nlb_rms` with `inv` from `nam_rms`, then rung 2's
+pair gradient. Step-0 loss on 4 positions of row 1 against the serving single-token head: 768, 40,
+256, 1 ulp (pinned 768; 5.7e-6 absolute at the widest). Finite differences on 4 B entries (argmax
+|dB| per window, eps 2⁻²): max relative error 7.181389990548648e-4 (pinned); fixed small entries at
+eps 2⁻⁵ read the f32 floor (~1.5e-5 in gradient units) and are kept in `band-run-2.log` as the
+yardstick's limit. Mean loss over the 8 rows 1.7919827729396287 → 1.732151931993421 after step 20,
+every row lower, per-step losses and |grad| printed. Export
+`form/form-stdlib/adapters/qwen38-last-block-next/adapters.safetensors` (721,096 bytes, F32
+`blk.63.ffn_down.weight.lora_a` [17408, 8], `.lora_b` [8, 5120]) + `adapter_config.json` (rank 8,
+alpha 16, layers [63]), read back whole; not worn. Memory 418,404,912 bytes counted against the
+design-D budget 503,906,304; 41 of 41 handles freed. Captures: 13 s – 10 min a row for 159 positions,
+set by the neighbours' GPU load (utilization 100 → 51); steps 1.9–5.2 s each (runs 2–4). attn_output stays
+untrained (its backward crosses the block's own frozen Q8 transposes, not yet dispatched); no held-out
+reading in this rung. Detail: `docs/qwen-last-block-lora-design.md`, "Rung 3 observed".
+
+## 2026-10-29 — Qwen3.8-27B last-block ladder, rung 4 (the child judged on rows it never saw)
+
+Door `observe/qwen-last-block-lift-run.bml` (new; judge `form/form-stdlib/bml/qwen-last-block-judge.bml`;
+band `form/form-stdlib/tests/qwen-last-block-judge-band.bml`, verdict 63, exit 0, no model), run once
+(`.hearth/qwen-rung-4/lift-run-1.log`, exit 0, 717,186 ms). The child is rung 3's export (sha256
+e59f22ff…cc4a). The parent is the lane's home, `form/form-stdlib/adapters/qwen38-last-block`, which is
+absent, so it reads as the base 27B with the pair at +0. The loss is the CE the child descended, on the
+accepted held-out lines 21–25 (the 3B lift's own split, valid_ids_sha256 5603ba5e…):
+**2.7794742570192787 → 2.769699388331711, better 1**, with four rows lower and line 25 higher. The
+in-sample witness on rung 3's captures read 1.7919827729396287 / 1.732151931993421, the config's own
+means exactly. Rejected rows beside: 26 of 27 judged (line 24's 544-id prompt fills the cap),
+2.0692298974197554 → 2.0552387556182743, a larger fall than the accepted rows', as in the 3B lift. One
+row landed in `receipts/lora-promotion-ledger.jsonl`; the gap `lora-27b-last-block` reads closed (closed
+10, open 3, unread 0). Rows through the tokfast index took 504,322 ms of the wall (12.6 s a row).
+**Serving does not change.** The adapter stays at `-next`, not worn, and the forward hook stays
+unwired. Wearing it in the voice is a separate, witnessed decision. That decision has two readings to
+weigh, neither taken here: a decoded comparison, and the preference margin (the accepted fall against
+the rejected one), which this rung read as thin. Detail: `docs/qwen-last-block-lora-design.md`, "Rung 4
+observed".

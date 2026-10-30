@@ -1,60 +1,123 @@
-// host-walk-seal.bml — the kernel the walk builds is sealed under its own name before it takes fkwu's place, so the
-// exec launchd makes of it from a slot's plist is not killed for its signature.
+// host-walk-seal.bml — launchd's program and its door are sealed against the walk's own build and its own sync: the walk
+// compiles fkwu and the Metal carrier when their sources are newer, and never touches launch/, the pinned pair the jobs
+// name (launch/fkwu, launch/walk-launch.fk), which only a deliberate, witnessed pin writes.
 //
-// Why: a slot's exec of the walk checkout's fkwu died at launch on 2026-10-28 19:10 and 2026-10-29 03:30, 03:40 and
-// 12:30 (SIGKILL (Code Signature Invalid), termination CODESIGNING "Launch Constraint Violation", last exit reason
-// OS_REASON_CODESIGNING on every job), every report reading codeSigningID fkwu.next with the linker-signed flag: the
-// compiler had written fkwu.next, the linker had signed it ad hoc and minimally under that build name (flags
-// adhoc,linker-signed; Internal requirements=none; a designated requirement of one bare cdhash), and the rename over
-// fkwu kept that seal. So the build is two named steps through the child door: the compiler writes the product beside
-// itself (hw-build-argv), codesign --force --sign - --identifier <the product's name> seals it completely under its own
-// name (hw-sign-argv), and only then does it take the product's place (hw-placed).
-// A product is fresh only when it is newer than its source AND sealed (hw-fresh-sealed?: codesign -dvv, read back
-// through the child door, says Identifier=<the product's name> and a CodeDirectory without linker-signed); a product
-// that is newer but linker-signed, as every walk built before this part stood, is rebuilt and sealed. The placed
-// product is read back the same way, and hw-made-sealed refuses one by name: "<name>=refused: <what the seal read> on
-// the placed product". A sign step that fails leaves the product as it was and says so, "<name>=0 <name>-sign=<rc>";
-// a compiler that fails reads as it always did, "<name>=<rc>"; a step never born reads "nothing" in its place.
-// The carrier (hw-carrier, host-walk-sync.bml) is loaded in-process, never exec'd by launchd, and keeps the plain maker
-// (hw-make), which reads freshness and placement from here: host-walk-sync.bml imports this part, so a root that
-// preludes host-walk-sync.bml alone (band-sweep.bml) reaches hw-build through it.
-// What it needs: host-child.bml (every step is an argv child; hch-lines) and host-walk-text.bml (hw-rc-text,
-// hw-starts?, hw-has?).
+// Why: launchd keeps a code requirement (LWCR) per job from the program it spawned, and an ad-hoc signature (no CMS blob:
+// the linker's and codesign -s -'s alike) is matched by the program's content. The first spawn of each job after the walk's
+// 2026-10-28 19:00:23 rebuild died at exec (Launch Constraint Violation, OS_REASON_CODESIGNING) and the same binary, under
+// the same seal, ran on the spawn after it. So the build re-signs nothing and refuses no seal, and the jobs name launch/
+// (the log lines: docs/launchd/README.md).
+//
+// The makers (hw-make): a product newer than its source stands, "<name>=fresh"; otherwise the compiler runs through the
+// child door and what it wrote takes the product's place by a rename (hw-placed: a new inode, never a write into a binary
+// a running kernel maps), "<name>=<the compiler's exit>", "<name>=nothing" for a compiler never born. hw-build is the
+// kernel's (cc -O2 -o fkwu.next runtime/fkwu-uni.c, renamed over fkwu), hw-carrier the Metal carrier's.
+//
+// The pin (hw-pin-at; a person runs it through observe/walk-launch-pin.bml, the walk never does): the kernel that stands
+// in the checkout is copied to launch/fkwu.next (host_file_copy keeps its mode) and the door's source, observe/walk-launch.fk,
+// which moves with main, to launch/walk-launch.next.fk (fkwu reads a door by no other ending: walk-launch.fk.next ends 2,
+// "unsupported file extension"). The staged pair is witnessed as the plists begin it, with a probe door as its child (the
+// probe's line, the launcher's own "ended 0", exit 0), and only then placed, door first and kernel last. Why that order:
+// launch/fkwu is the one launchd holds the jobs to, so its rename is the pin's commit, and the cdhash the line says moves
+// only when a whole pair was placed; a refusal reads before == after with launch/fkwu as it stood. The door is cheap to put
+// back, since launchd never sees it: it is kept aside first and returns when the kernel's rename fails. Kernel first would
+// leave a refused pin with the program moved under every job beside an older door, a pair no pin witnessed. A pin killed
+// between the renames leaves the new door by the old kernel, with launch/fkwu.next standing to say so; the next pin places
+// a whole pair over it.
+// "pin=0" placed, "pin=refused: <why>" (the stage removed), each followed by the launcher's cdhash before and after
+// (codesign -dvvv). A placed door takes its old image with it, so the first launch after a pin writes a fresh one with no
+// "stale .fkb" line in a job's log. Why the launcher keeps the name fkwu and stands outside the hearth: docs/launchd/README.md.
+// A pin that changes the kernel's bytes costs each job's next spawn once, as every rebuild of fkwu did while the jobs named it.
+// What it needs: host-child.bml (every step is an argv child) and host-walk-text.bml (hw-rc-text, hw-starts?, hw-has?,
+// and through it the JSON writers of the pin's row).
 import form-stdlib/bml/host-walk-text.bml;
 import form-stdlib/bml/host-child.bml;
 section [form.bml] {
  class HostWalkSeal {
-  // A product is fresh when it stands and is newer than its source (file_mtime, whole seconds: a source touched in
-  // the product's own second rebuilds). The kernel is built beside itself and renamed over fkwu (a new inode, never a
-  // write into the live binary): the compiler wrote `built`; it takes the product's place (a compiler that wrote the
-  // product itself needs none)
+  // ── the makers. Fresh while the product stands and is newer than its source (file_mtime, whole seconds: a source
+  // touched in the product's own second rebuilds); the compiler wrote `built`, which takes the product's place (a
+  // compiler that wrote the product itself needs none)
   def hw-mtime(path) = file_mtime(path);
   def hw-mtime-int?(at) = (String) value_kind(at) == "int" && at > 0;
   def hw-fresh?(product, source) = hw-mtime-int?(hw-mtime(product)) && (!hw-mtime-int?(hw-mtime(source)) || hw-mtime(product) > hw-mtime(source));
   def hw-placed(product, built) = (String) built == product ? 0 : host_path_rename(built, product);
+  def hw-make(io, name, product, source, argv, built) = hw-fresh?(product, source) ? name ++ "=fresh" : hw-made(io, name, product, built, hch-run-in(io, name, argv, "", nothing()));
+  def hw-made(io, name, product, built, run) = name ++ "=" ++ hw-rc-text(hch-ok?(run) ? hw-placed(product, built) : run[0]);
   def hw-build-argv() = ["cc", "-O2", "-o", "fkwu.next", "runtime/fkwu-uni.c"];
-  // the product's own name: what follows its last slash
-  def hw-leaf(path) = hw-leaf-at(path, len(path) - 1);
-  def hw-leaf-at(path, i) = i < 0 ? path : (Comparable) str_byte_at(path, i) == 47 ? substring(path, i + 1, len(path)) : hw-leaf-at(path, i - 1);
-  def hw-sign-argv(built, id) = ["codesign", "--force", "--sign", "-", "--identifier", id, built];
-  // the seal read back: the lines codesign -dvv says (on stderr, which the child door keeps beside stdout in <io>/<name>-seal.out)
-  def hw-seal-text(io, name, path) = hch-run-in(io, name ++ "-seal", ["codesign", "-dvv", path], "", nothing())[1];
-  def hw-seal-id(text) = hw-seal-id-of(filter(l => hw-starts?(l, "Identifier="), hch-lines(text)));
-  def hw-seal-id-of(lines) = nil?(lines) ? "" : substring(lines[0], len("Identifier="), len(lines[0]));
-  def hw-seal-linker?(text) = !nil?(filter(l => hw-starts?(l, "CodeDirectory") && hw-has?(l, "linker-signed"), hch-lines(text)));
-  // "" when the seal is the product's own; else what it read, named
-  def hw-seal-why(text, name) = (String) hw-seal-id(text) == "" ? "no seal read" : hw-seal-linker?(text) ? "linker-signed, identifier " ++ hw-seal-id(text) : (String) hw-seal-id(text) != name ? "identifier " ++ hw-seal-id(text) ++ ", not " ++ name : "";
-  def hw-sealed-why(io, name, product) = hw-seal-why(hw-seal-text(io, name, product), hw-leaf(product));
-  def hw-sealed?(io, name, product) = (String) hw-sealed-why(io, name, product) == "";
-  def hw-fresh-sealed?(io, name, product, source) = hw-fresh?(product, source) && hw-sealed?(io, name, product);
-  // compile, sign, place, read back: each step named, each exit the host's
-  def hw-make-sealed(io, name, product, source, argv, sign, built) = hw-fresh-sealed?(io, name, product, source) ? name ++ "=fresh" : hw-compiled(io, name, product, sign, built, hch-run-in(io, name, argv, "", nothing()));
-  def hw-compiled(io, name, product, sign, built, run) = hch-ok?(run) ? hw-signed(io, name, product, built, hch-run-in(io, name ++ "-sign", sign, "", nothing())) : name ++ "=" ++ hw-rc-text(run[0]);
-  def hw-signed(io, name, product, built, run) = hch-ok?(run) ? hw-made-sealed(io, name, product, hw-placed(product, built)) : name ++ "=0 " ++ name ++ "-sign=" ++ hw-rc-text(run[0]);
-  def hw-made-sealed(io, name, product, placed) = nothing?(placed) || (Comparable) placed != 0 ? name ++ "=" ++ hw-rc-text(placed) : hw-made-read(name, hw-sealed-why(io, name, product));
-  def hw-made-read(name, why) = (String) why == "" ? name ++ "=0" : name ++ "=refused: " ++ why ++ " on the placed product";
-  def hw-build-sign-argv() = hw-sign-argv("fkwu.next", "fkwu");
-  def hw-build-at(io) = hw-make-sealed(io, "build", "fkwu", "runtime/fkwu-uni.c", hw-build-argv(), hw-build-sign-argv(), "fkwu.next");
+  def hw-build-at(io) = hw-make(io, "build", "fkwu", "runtime/fkwu-uni.c", hw-build-argv(), "fkwu.next");
   def hw-build() = hw-build-at(hch-dir());
+  def hw-carrier-argv() = ["cc", "-O2", "-dynamiclib", "-o", "form/native/metal/fk-metal-carrier.dylib", "form/native/metal/fk-metal-carrier.m", "-framework", "Metal", "-framework", "Foundation", "-fobjc-arc"];
+  def hw-carrier-at(io) = hw-make(io, "carrier", "form/native/metal/fk-metal-carrier.dylib", "form/native/metal/fk-metal-carrier.m", hw-carrier-argv(), "form/native/metal/fk-metal-carrier.dylib");
+  def hw-carrier() = hw-carrier-at(hch-dir());
+  // ── the pin: launchd's program and the door it reads, written here and nowhere else
+  def hw-launch-dir() = "launch";
+  def hw-launcher() = hw-launch-dir() ++ "/fkwu";
+  // the door's source, which moves with main, and the copy the jobs read, which moves only with a pin
+  def hw-launch-door() = "observe/walk-launch.fk";
+  def hw-pinned-door() = hw-launch-dir() ++ "/walk-launch.fk";
+  // the pair staged beside the pair that stands, and the door that stood while the pair is placed
+  def hw-staged-kernel() = hw-launcher() ++ ".next";
+  def hw-staged-door() = hw-launch-dir() ++ "/walk-launch.next.fk";
+  def hw-kept-door() = hw-launch-dir() ++ "/walk-launch.prev";
+  // what the kernel writes beside a door it reads: the .fk gives way to .fkb and .sym
+  def hw-door-images(door) = [substring(door, 0, len(door) - 3) ++ ".fkb", substring(door, 0, len(door) - 3) ++ ".sym"];
+  // the names a pin leaves behind only when it was cut short
+  def hw-pin-stage() = append([hw-staged-kernel(), hw-staged-door(), hw-kept-door()], hw-door-images(hw-staged-door()));
+  def hw-pin-record() = ".hearth/walk-launch-pin.jsonl";
+  def hw-pin-probe() = ".hearth/walk-launch-pin/probe.fk";
+  // a binary's cdhash as codesign -dvvv says it on stderr (the child door keeps stderr beside stdout); "" when none was read
+  def hw-cdhash(io, path) = hw-cdhash-of(hch-last(hch-run-in(io, "pin-cdhash", ["codesign", "-dvvv", path], "", nothing())[1], "CDHash="));
+  def hw-cdhash-of(line) = hw-starts?(line, "CDHash=") ? substring(line, 7, len(line)) : "";
+  def hw-or-absent(hash) = (String) hash == "" ? "absent" : hash;
+  // the witness: the staged pair, begun in the checkout as the plists begin the pair (kernel and door by absolute path, the
+  // door to carry as the checkout reaches it) with the probe door as its child (a line, exit 0)
+  def hw-pin-argv(home) = [home ++ "/" ++ hw-staged-kernel(), home ++ "/" ++ hw-staged-door(), hw-pin-probe()];
+  def hw-pin-line(nonce) = "[walk-launch-pin] carried " ++ nonce;
+  def hw-pin-witness(io, home) {
+   let nonce = now_unix_ms().str();
+   let made = hch-mkdirs(home ++ "/.hearth/walk-launch-pin");
+   let wrote = write_file_text(home ++ "/" ++ hw-pin-probe(), "(do (print_str \"" ++ hw-pin-line(nonce) ++ "\") 0)\n");
+   hw-pin-saw(hch-run-with-at(io, "pin-witness", home, hw-pin-argv(home), "", hch-by(120000), ""), nonce);
+  }
+  // "" when the copy carried its child; else what it did instead
+  def hw-pin-saw(run, nonce) = !hch-ok?(run) ? "the copy ended " ++ hch-status-text(run) ++ ((String) run[2] == "" ? "" : " (" ++ run[2] ++ ")") ++ ": " ++ hch-tail-line(run[1]) : !hw-has?(run[1], hw-pin-line(nonce)) ? "the copy ended 0 and its child's line did not come through" : !hw-has?(run[1], "[walk-launch] " ++ hw-pin-probe() ++ " ended 0") ? "the copy ended 0 without the launcher's own line" : "";
+  // dir: the checkout, named absolutely before any path in it is read (host_realpath answers nothing for a directory that
+  // does not stand, while the size and copy doors find a relative path that does not stand higher up the checkout);
+  // door: the door's source, absolute or as that directory reaches it
+  def hw-pin-at(io, dir, door) = hw-pin-in(io, host_realpath(dir) ?? "", door);
+  def hw-pin-in(io, home, door) = (String) home == "" ? "pin=refused: the checkout does not stand cdhash absent -> absent" : hw-pin-from(io, home, home ++ "/fkwu", hw-starts?(door, "/") ? door : home ++ "/" ++ door, hw-cdhash(io, home ++ "/" ++ hw-launcher()));
+  def hw-pin-from(io, home, kernel, door, before) {
+   let made = (Comparable) file_size(kernel) < 1 ? 0 : hch-mkdirs(home ++ "/" ++ hw-launch-dir());
+   let staged = (Comparable) file_size(kernel) < 1 ? kernel ++ " does not stand" : (Comparable) file_size(door) < 1 ? door ++ " does not stand" : hw-pin-staged(home, kernel, door);
+   let why = (String) staged != "" ? staged : hw-pin-witness(io, home);
+   (String) why != "" ? hw-pin-end(io, home, "refused: " ++ why, before) : hw-pin-place(io, home, before);
+  }
+  // "" when the pair is staged whole; else why it is not
+  def hw-pin-staged(home, kernel, door) {
+   let short = hw-pin-short("the copy", file_size(kernel), host_file_copy(kernel, home ++ "/" ++ hw-staged-kernel()));
+   (String) short != "" ? short : hw-pin-short("the door's copy", file_size(door), host_file_copy(door, home ++ "/" ++ hw-staged-door()));
+  }
+  def hw-pin-short(what, size, copied) = (Comparable) copied == size ? "" : what ++ " fell short (" ++ hw-rc-text(copied) ++ " of " ++ hw-rc-text(size) ++ " bytes)";
+  // door first, kernel last (the header says why); the door that stands goes aside as a copy before anything moves
+  def hw-pin-place(io, home, before) {
+   let door = home ++ "/" ++ hw-pinned-door();
+   let kernel = home ++ "/" ++ hw-launcher();
+   let kept = home ++ "/" ++ hw-kept-door();
+   let unkept = (Comparable) host_path_exists(door) == 0 ? "" : hw-pin-short("the door that stands, kept aside,", file_size(door), host_file_copy(door, kept));
+   let doorMoved = (String) unkept != "" ? 1 : host_path_rename(home ++ "/" ++ hw-staged-door(), door);
+   let unimaged = (Comparable) doorMoved != 0 ? 0 : hw-pin-removed(home, hw-door-images(hw-pinned-door()));
+   let kernelMoved = (Comparable) doorMoved != 0 ? 1 : host_path_rename(home ++ "/" ++ hw-staged-kernel(), kernel);
+   hw-pin-end(io, home, (String) unkept != "" ? "refused: " ++ unkept : (Comparable) doorMoved != 0 ? "refused: the rename over " ++ door ++ " answered " ++ hw-rc-text(doorMoved) : (Comparable) kernelMoved != 0 ? "refused: the rename over " ++ kernel ++ " answered " ++ hw-rc-text(kernelMoved) ++ hw-pin-door-back(door, kept) : "0", before);
+  }
+  // the kernel stayed, so the door goes back: the one kept aside, or none when none stood
+  def hw-pin-door-back(door, kept) = (Comparable) ((Comparable) host_path_exists(kept) == 1 ? host_path_rename(kept, door) : host_path_remove(door)) == 0 ? "; the door is as it was" : "; the new door stands beside the old kernel, a pair no pin witnessed: pin again";
+  def hw-pin-removed(home, names) = foldl((acc, one) => host_path_remove(home ++ "/" ++ one), 0, names);
+  // every ending passes here: the stage goes, and the line reads the launcher as it now stands
+  def hw-pin-end(io, home, word, before) {
+   let removed = hw-pin-removed(home, hw-pin-stage());
+   "pin=" ++ word ++ " cdhash " ++ hw-or-absent(before) ++ " -> " ++ hw-or-absent(hw-cdhash(io, home ++ "/" ++ hw-launcher()));
+  }
+  // the pin's row in .hearth/walk-launch-pin.jsonl: when, in which checkout, what it said
+  def hw-pin-row(at, dir, said) = json-emit(json-node-object([fhn-n("at_unix_ms", at), fhn-s("dir", dir), fhn-s("said", said)])) ++ "\n";
  }
 }

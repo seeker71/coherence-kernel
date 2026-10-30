@@ -355,6 +355,11 @@ beside it. Of 594 tracked `.bml` files, 528 carry a `section [form.bml]` block a
 read on the tree that carries this line, 2026-10-02; the counts grow with each new unit). `true` and `false` are literals in the
 dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
 
+A unit the floor refused is not asked again while its bytes stand and this process writes no source, and
+a cached lowering is served only over the bytes it was made from: a tree moving under a lowering lowers
+the moved unit again, up to eight times, then says so (`./fkwu form/form-stdlib/tests/bml-bad-list-band.bml`
+-> 511).
+
 The cursor (`grammars/form-bml.fk`, lowered by `form-bml-lower.fk`) is the compiler's one reader of a
 `form.bml`, `form.route` or `form.action` section — the body, its imports' signature catalog and its
 refusals all come through it. It reads a section whole, with direct backtracking, and rebuilds it with

@@ -6081,6 +6081,16 @@ static void fk_rappend(long long r, long long key, long long val) {
         fk_rhash[r][h] = n;
     }
 }
+/* fk_src_wrote — every door that changes a file's bytes or a path's standing says so here. A write of a source file (.bml,
+ * .fk) moves the count a refusal of the floor compiler stands on (fk_bml_bad_has), so a unit refused for a source it
+ * imports is asked again once this process rewrites that source. Lowering memos and images never pass a door. */
+static long long fk_src_writes;
+static void fk_src_wrote(const char *p) {
+    long long n = fk_cstrlen(p);
+    if ((n >= 3 && memcmp(p + n - 3, ".fk", 3) == 0) || (n >= 4 && memcmp(p + n - 4, ".bml", 4) == 0)) {
+        fk_src_writes = fk_src_writes + 1;
+    }
+}
 /* fk_host_resolve — where a host path names a file for a read-side door, the same way on every
  * kernel. A path that stands where the kernel runs names itself. Otherwise the walk tries dir/p,
  * dir/form/p and dir/form/form/p from the working directory upward and stops at the checkout that
@@ -11546,6 +11556,7 @@ FK_PHASED(FK_PHASE_FILE, long long, fk_host_door_fs, (long long mode, long long 
     if (mode == 36 || mode == 37) {
         /* host_symlink target path / host_link existing path */
         if (!fk_door_pair(x, &a, &b) || !fk_door_path(a, pa) || !fk_door_path(b, pb)) { return (0 - 2) * 2; }
+        fk_src_wrote(pb);
         return (mode == 36 ? symlink(pa, pb) : link(pa, pb)) == 0 ? 0 : (0 - 1) * 2;
     }
     if (mode == 38) { sync(); return 0; }
@@ -11658,6 +11669,7 @@ FK_PHASED(FK_PHASE_FILE, long long, fk_host_door_fs, (long long mode, long long 
         if (stat(pb, &sd) == 0 && sd.st_dev == ss.st_dev && sd.st_ino == ss.st_ino) { return (0 - 1) * 2; } /* a file over itself would be emptied by the truncate */
         int fi = open(pa, O_RDBIN);
         if (fi < 0) { return (0 - 1) * 2; }
+        fk_src_wrote(pb);
         int fo = open(pb, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fo < 0) { close(fi); return (0 - 1) * 2; }
         static unsigned char cb[1 << 20];
@@ -18493,6 +18505,7 @@ static long long fk_host_pwrite(long long pw, long long ow, long long dw) {
 #else
     static char pp[FK_PATH_CAP];
     if (!fk_door_path(pw, pp)) { return (0 - 2) * 2; }
+    fk_src_wrote(pp);
     if ((ow & 1) != 0 || fk_is_str(ow)) { return (0 - 2) * 2; }
     long long off = ow >> 1;
     if (off < 0) { return (0 - 2) * 2; }
@@ -18562,6 +18575,7 @@ FK_PHASED(FK_PHASE_FILE, long long, fk_fb_door, (long long mode, long long x), (
         if ((x & 1) == 0 || q < 1 || !FK_POK(q)) { return -2; }
         static char p[FK_PATH_CAP];
         fk_cstr(FK_HH(q), p, FK_PATH_CAP);
+        fk_src_wrote(p);
         long long start = 0, n = 0;
         if (!fk_fb_serialize(FK_HT(q), &start, &n)) { return -2; }
         /* the file appears whole or not at all: written beside, then renamed over (a ledger held as one node is rewritten
@@ -18615,6 +18629,7 @@ FK_PHASED(FK_PHASE_FILE, long long, fk_fb_door, (long long mode, long long x), (
         if (!fk_byte_list_ok(FK_HT(q))) { return -2; }
         static char p[FK_PATH_CAP];
         fk_cstr(FK_HH(q), p, FK_PATH_CAP);
+        fk_src_wrote(p);
         int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { return -2; }
         long long count = 0;
@@ -19794,6 +19809,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 58) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
+        fk_src_wrote(p);
         return unlink(p) << 1;
     }
     if (t == 143) {
@@ -19810,6 +19826,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_cstr(fk_walk(fk_node[i][1], fp), p143, FK_PATH_CAP);
         long long want143 = fk_walk(fk_node[i][2], fp) >> 1;
         if (want143 < 0) { return fk_nothing; }
+        fk_src_wrote(p143);
         int fd143 = open(p143, O_WRONLY | O_CREAT, 0666);
         if (fd143 < 0) { return fk_nothing; }
         if (ftruncate(fd143, want143) != 0) { close(fd143); return fk_nothing; }
@@ -19822,6 +19839,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         static char b[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), a, FK_PATH_CAP);
         fk_cstr(fk_walk(fk_node[i][2], fp), b, FK_PATH_CAP);
+        fk_src_wrote(a);
+        fk_src_wrote(b);
         return rename(a, b) << 1;
     }
     if (t == 60) {
@@ -19852,6 +19871,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             int ok_err = fk_write_byte_list(2, xs, &to_err);
             return ok_err ? (to_err << 1) : -2;
         }
+        fk_src_wrote(p);
         int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
         if (fd < 0) {
             return -2;
@@ -20568,6 +20588,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return -2;
         }
         long long n104 = FK_SLEN(sa104);
+        fk_src_wrote(p);
         int fd104 = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (fd104 < 0) {
             return -2;
@@ -25504,13 +25525,29 @@ static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len);
  *                   miss met there is a refusal, never a recursion. */
 static int fk_load_phase = 1;
 static int fk_bml_round;                 /* how many times this command has begun again after lowering (from FK_BML_ROUND) */
+/* The begin-again continues one load across exec: the image whose last scan found every memo holding hands its
+ * successor exactly those memos (FK_BML_HELD, one "<seal> <memo path>" line each), and the successor takes them as
+ * they were verified, its context rows still read, while it loads -- never once it walks, never once it must lower
+ * again itself. Without the hand-over the successor asked the tree again what its predecessor had just answered, and a
+ * tree that moved within those seconds sent it back to lower (2026-10-29: 7 of 12 kernels of a slow-moving chain
+ * refused at the third begin-again, .hearth/cache-race/14-next3-slow.log). */
+static char *fk_bml_trust;               /* "\n" then the lines handed over, or 0 */
+static long long fk_bml_trust_n;
+static char *fk_bml_seen;                /* the lines this image's current scan recorded, for its successor */
+static long long fk_bml_seen_n;
+static long long fk_bml_seen_cap;
+static int fk_bml_scanning;              /* 1 while fk_bml_scan collects */
+#define FK_BML_TRUST_CAP (512 * 1024)   /* beyond this the hand-over is not made: the successor reads the tree itself */
 static char fk_boot_root[FK_PATH_CAP];   /* the unit the command was asked to load: where the miss scan starts */
 static int fk_bml_defer;
 static int fk_bml_floor_busy;
 static char **fk_bml_need;
 static long long fk_bml_need_n;
 static long long fk_bml_need_cap;
-static char **fk_bml_bad;                /* units the floor compiler refused (voiced by name once): never asked again by this process */
+/* The units the floor compiler refused (voiced by name once), each with what its refusal stood on: the unit's own bytes
+ * and this process's writes of sources (fk_src_writes). While both stand it is not asked again (fk_bml_bad_has). */
+typedef struct { char *path; unsigned long long print; long long writes; } fk_bml_bad_t;
+static fk_bml_bad_t *fk_bml_bad;
 static long long fk_bml_bad_n;
 static long long fk_bml_bad_cap;
 static int fk_bml_bad_hit;               /* a load met one of them */
@@ -26357,8 +26394,8 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
         node = node + 1;
     }
     if (!fk_fkb_flush(fd)) { close(fd); return 0; }
-    close(fd);
-    return 1;
+    /* a close that fails may not have written the lens whole: it is not renamed into place */
+    return close(fd) == 0;
 }
 #if !defined(_WIN32)
 extern int kill(int, int);
@@ -26624,7 +26661,8 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         i = i + 1;
     }
     ok = ok && fk_fkb_flush(fd);
-    close(fd);
+    /* a close that fails may not have written the image whole: it is not renamed into place */
+    if (close(fd) != 0) ok = 0;
     if (!ok) {
         fk_src_sym_index_free();
         unlink(fkb_tmp);
@@ -27526,6 +27564,33 @@ static long long fk_src_fkb_version_raw(const char *fkb_path) {
     return ((long long)b[8] << 24) | ((long long)b[9] << 16) | ((long long)b[10] << 8) |
            (long long)b[11];
 }
+/* where a lens field's value begins in the lens's first `got` bytes (just past `needle`), or -1 when it is absent */
+static long long fk_src_sym_at(const char *buf, long long got, const char *needle) {
+    long long i = 0;
+    while (i < got) {
+        long long j = 0;
+        while (needle[j] != 0 && i + j < got && buf[i + j] == needle[j]) {
+            j = j + 1;
+        }
+        if (needle[j] == 0) {
+            return i + j;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+/* the number a lens field carries, or -1 when the field is absent */
+static long long fk_src_sym_number(const char *buf, long long got, const char *needle) {
+    long long p = fk_src_sym_at(buf, got, needle), v = 0;
+    if (p < 0) {
+        return -1;
+    }
+    while (p < got && buf[p] >= '0' && buf[p] <= '9') {
+        v = v * 10 + (buf[p] - '0');
+        p = p + 1;
+    }
+    return v;
+}
 static long long fk_src_sym_recorded_errors(const char *sym_path) {
     /* the .sym lens records fk_nerr at image-write time (second header line).
      * Returns -1 when the file or the line is absent: an image without its
@@ -27546,32 +27611,22 @@ static long long fk_src_sym_recorded_errors(const char *sym_path) {
         return -1;
     }
     buf[got] = 0;
-    const char *needle = "\ncompile-errors ";
-    long long i = 0;
-    while (i < got) {
-        long long j = 0;
-        while (needle[j] != 0 && i + j < got && buf[i + j] == needle[j]) {
-            j = j + 1;
-        }
-        if (needle[j] == 0) {
-            long long v = 0;
-            long long p = i + j;
-            while (p < got && buf[p] >= '0' && buf[p] <= '9') {
-                v = v * 10 + (buf[p] - '0');
-                p = p + 1;
-            }
-            return v;
-        }
-        i = i + 1;
-    }
-    return -1;
+    return fk_src_sym_number(buf, got, "\ncompile-errors ");
 }
-/* the unrunnable latch as the image recorded it: 1 refused, 0 runnable, -1 absent.
- * -1 means an older lens that predates the field, and the caller treats it the same
- * way it treats a missing error record -- an incomplete cache to rebuild, never a
- * clean one. Guessing "probably runnable" here would restore exactly the laundering
- * this field exists to stop. */
-static long long fk_src_sym_recorded_unrunnable(const char *sym_path) {
+/* The lens read once, for the image it stands beside: the compile-error count and the unrunnable latch as the image
+ * recorded them (the latch 1 refused, 0 runnable), each -1 when absent -- an older lens that predates the field, which
+ * the caller treats as it treats a missing error record: an incomplete cache to rebuild, never a clean one (guessing
+ * "probably runnable" would restore the laundering the latch exists to stop) -- and whether the lens names
+ * `source_hash`, the identity the image is checked against: 1 it names it, 0 it names another, -1 it names none. An
+ * image and its lens land by two renames (fk_src_write_fkb), so two writers of one unit from two states of its closure
+ * can leave the second's lens beside the first's image (A's lens, B's lens, B's image, A's image) -- and two reads of
+ * the lens can meet two lenses. A lens that does not name the image's identity belongs to another image, and its
+ * counts are not this image's truth. */
+static int fk_src_sym_lens(const char *sym_path, const char *source_hash, long long *errors, long long *unrunnable) {
+    static char buf[2 * FK_PATH_CAP + FK_SRC_HASH_CAP + 256];
+    long long got = 0, cap = (long long)sizeof(buf) - 1, at, end, hn = fk_cstrlen(source_hash);
+    *errors = -1;
+    *unrunnable = -1;
 #if defined(_WIN32)
     int fd = open(sym_path, 0x8000);
 #else
@@ -27580,32 +27635,32 @@ static long long fk_src_sym_recorded_unrunnable(const char *sym_path) {
     if (fd < 0) {
         return -1;
     }
-    char buf[256];
-    long long got = read(fd, buf, 255);
+    while (got < cap) {
+        long long r = (long long)read(fd, buf + got, (unsigned long)(cap - got));
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        if (r <= 0) {
+            break;
+        }
+        got = got + r;
+    }
     close(fd);
-    if (got <= 0) {
+    buf[got] = 0;
+    *errors = fk_src_sym_number(buf, got, "\ncompile-errors ");
+    *unrunnable = fk_src_sym_number(buf, got, "\nunrunnable ");
+    at = fk_src_sym_at(buf, got, "\nsource-hash ");
+    if (at < 0) {
         return -1;
     }
-    buf[got] = 0;
-    const char *needle = "\nunrunnable ";
-    long long i = 0;
-    while (i < got) {
-        long long j = 0;
-        while (needle[j] != 0 && i + j < got && buf[i + j] == needle[j]) {
-            j = j + 1;
-        }
-        if (needle[j] == 0) {
-            long long v = 0;
-            long long p = i + j;
-            while (p < got && buf[p] >= '0' && buf[p] <= '9') {
-                v = v * 10 + (buf[p] - '0');
-                p = p + 1;
-            }
-            return v;
-        }
-        i = i + 1;
+    end = at;
+    while (end < got && buf[end] != FK_CH_LF) {
+        end = end + 1;
     }
-    return -1;
+    if (end >= got) {
+        return -1;   /* the line did not end inside what was read: not a whole field */
+    }
+    return end - at == hn && memcmp(buf + at, source_hash, (unsigned long)hn) == 0 ? 1 : 0;
 }
 static void fk_src_reset_compile_state(void) {
     fk_fn_reserve(1);
@@ -29523,15 +29578,17 @@ static int fk_run_src(const char *path, long long arg) {
     } else if (dylib_mtime > 0) {
         fk_diag_path("warning", dylib_path, "stale .dylib ignored");
     }
-    long long recorded = fk_src_sym_recorded_errors(sym_path);
-    long long recorded_unrunnable = fk_src_sym_recorded_unrunnable(sym_path);
+    /* the lens read once, and joined to the identity its image must hold (fk_src_sym_lens): a lens another writer
+     * placed beside this image does not lend it its counts */
+    long long recorded = -1, recorded_unrunnable = -1;
+    int lens_joined = fk_src_sym_lens(sym_path, expected_source_hash, &recorded, &recorded_unrunnable);
     if (fkb_mtime >= unit_mtime && (recorded < 0 || recorded_unrunnable < 0)) {
         /* an image without its error record is an incomplete cache; rebuild
          * rather than guess (older lenses, or a lens deleted out from under
          * the image) */
         fk_diag_path("warning", sym_path, "sym lens lacks a compile-error record; rebuilding");
     } else if (fkb_mtime >= unit_mtime) {
-        if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
+        if (lens_joined == 1 && fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
             /* THE REFUSAL TRAVELS WITH THE IMAGE. The fresh-compile door returns
              * without printing the root value when the unrunnable latch is set,
              * so a cached run that prints it anyway does not merely replay a
@@ -29973,10 +30030,18 @@ static const char *fk_bml_floor_path(const char *unit) {
     }
     return "form/form-stdlib/bml-floor-compile.fk";
 }
+/* A packet answers its lowered body when every row reads and every observation it carries still holds. When it does
+ * not, `moved` (FK_BML_MOVED_CAP bytes, when given) says which: the observation the tree has moved past since it was
+ * taken ("<path> changed", "<path> is gone", "<path> appeared"), or "" when the packet itself does not read as one for
+ * this unit, this working directory and this home. The two are different facts: a moved tree is lowered again, a
+ * packet that does not read is the floor's own wound. With `observe` 0 the observations are read as rows but not asked
+ * of the tree: a memo the image before this one verified at its last scan (fk_bml_trust). */
+#define FK_BML_MOVED_CAP (FK_PATH_CAP + 32)
 static char *fk_bml_packet_body(const char *owner, const char *packet, long long n,
-                                long long *out_len) {
+                                long long *out_len, char *moved, int observe) {
     long long at = 7, context = 0, files = 0;
     char cwd[FK_PATH_CAP];
+    if (moved) moved[0] = 0;
     if (n < 7 || memcmp(packet, "fklow2\n", 7) || !getcwd(cwd, sizeof(cwd))) return 0;
     while (at < n && packet[at] != '\n') {
         char kind = packet[at], path[FK_PATH_CAP];
@@ -29998,14 +30063,25 @@ static char *fk_bml_packet_body(const char *owner, const char *packet, long long
         else if (kind == 'C' && context == 1 && fk_cstr_eq(path, cwd)) context = 2;
         else if (kind == 'H' && context == 2 && fk_cstr_eq(path, fk_home_path)) context = 3;
         else if (context == 3 && kind == 'N') {
-            if (fk_path_size_raw(path) >= 0) return 0;
+            if (observe && fk_path_size_raw(path) >= 0) {
+                if (moved) sprintf(moved, "%.4000s appeared", path);
+                return 0;
+            }
+        } else if (context == 3 && kind == 'F' && !observe) {
+            files++;
         } else if (context == 3 && kind == 'F') {
             long long bytes = 0;
             char *source = fk_read_whole_file(path, &bytes);
-            if (!source) return 0;
+            if (!source) {
+                if (moved) sprintf(moved, "%.4000s is gone", path);
+                return 0;
+            }
             unsigned long long actual = fk_bytes_fnv1a(source, bytes);
             free(source);
-            if (actual != expected) return 0;
+            if (actual != expected) {
+                if (moved) sprintf(moved, "%.4000s changed", path);
+                return 0;
+            }
             files++;
         } else return 0;
     }
@@ -30046,24 +30122,23 @@ static int fk_bml_memo_owner_is(const char *memo, const char *path) {
         return memcmp(head + at, path, (unsigned long)count) == 0 ? 1 : 0;
     }
 }
-static void fk_bml_low_memo_write(const char *path, const char *packet, long long n) {
+static int fk_closure_put(int fd, const char *bytes, long long n);
+/* The memo is written beside itself under this process's name (<memo>.tmp.<pid>) and renamed into place, so a reader
+ * meets the whole memo or the one before it; its seal (fkend2) covers every byte above it. Answers 1 when the memo
+ * stands whole, 0 when it could not be written (nothing is left behind). */
+static int fk_bml_low_memo_write(const char *path, const char *packet, long long n) {
     char memo[4400], primary[4400], temporary[4500], footer[32];
     fk_bml_memo_name(path, 0, primary);
     fk_bml_memo_name(path, fk_bml_memo_owner_is(primary, path) == 0 ? 1 : 0, memo);
     sprintf(temporary, "%s.tmp.%lld", memo, (long long)getpid());
     int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) return;
-    long long at = 0;
-    while (at < n) {
-        long long put = write(fd, packet + at, (unsigned long)(n - at));
-        if (put < 0 && errno == EINTR) continue;
-        if (put <= 0) break;
-        at += put;
-    }
+    if (fd < 0) return 0;
     int size = sprintf(footer, "\nfkend2 %016llx\n", fk_bytes_fnv1a(packet, n));
-    int complete = at == n && write(fd, footer, (unsigned long)size) == size;
+    int complete = fk_closure_put(fd, packet, n) && fk_closure_put(fd, footer, size);
     if (close(fd) != 0) complete = 0;
-    if (!complete || rename(temporary, memo) != 0) unlink(temporary);
+    if (complete && rename(temporary, memo) == 0) return 1;
+    unlink(temporary);
+    return 0;
 }
 static void fk_bml_bootstrap(const char *first);
 static void fk_bml_need_add(const char *path) {
@@ -30085,19 +30160,35 @@ static void fk_bml_need_add(const char *path) {
     fk_bml_need[fk_bml_need_n] = copy;
     fk_bml_need_n = fk_bml_need_n + 1;
 }
+/* a unit's bytes as one number: 0 when it does not read (an empty file reads the hash's own start, never 0) */
+static unsigned long long fk_bml_unit_print(const char *path) {
+    long long n = 0;
+    char *bytes = fk_read_whole_file(path, &n);
+    unsigned long long print = bytes ? fk_bytes_fnv1a(bytes, n) : 0;
+    free(bytes);
+    return print;
+}
+/* 1 while what the unit was refused for stands. An entry whose ground moved leaves the list: the unit is asked again, and
+ * fk_bml_bad_n counts only the refusals that stand. */
 static int fk_bml_bad_has(const char *path) {
     long long k = 0;
     while (k < fk_bml_bad_n) {
-        if (fk_cstr_eq(fk_bml_bad[k], path)) return 1;
+        if (fk_cstr_eq(fk_bml_bad[k].path, path)) {
+            if (fk_bml_bad[k].writes == fk_src_writes && fk_bml_bad[k].print == fk_bml_unit_print(path)) return 1;
+            free(fk_bml_bad[k].path);
+            fk_bml_bad_n = fk_bml_bad_n - 1;
+            fk_bml_bad[k] = fk_bml_bad[fk_bml_bad_n];
+            return 0;
+        }
         k = k + 1;
     }
     return 0;
 }
-static void fk_bml_bad_add(const char *path) {
+static void fk_bml_bad_add(const char *path, unsigned long long print) {
     if (fk_bml_bad_has(path)) return;
     if (fk_bml_bad_n + 1 > fk_bml_bad_cap) {
         long long nc = fk_bml_bad_cap > 0 ? fk_bml_bad_cap * 2 : 16;
-        fk_bml_bad = (char **)realloc(fk_bml_bad, (unsigned long)nc * sizeof(char *));
+        fk_bml_bad = (fk_bml_bad_t *)realloc(fk_bml_bad, (unsigned long)nc * sizeof(fk_bml_bad_t));
         if (fk_bml_bad == 0) fk_die("fk_bml_bad_add: out of memory");
         fk_bml_bad_cap = nc;
     }
@@ -30105,8 +30196,101 @@ static void fk_bml_bad_add(const char *path) {
     char *copy = (char *)malloc((unsigned long)len + 1);
     if (copy == 0) fk_die("fk_bml_bad_add: out of memory");
     memcpy(copy, path, (unsigned long)len + 1);
-    fk_bml_bad[fk_bml_bad_n] = copy;
+    fk_bml_bad[fk_bml_bad_n].path = copy;
+    fk_bml_bad[fk_bml_bad_n].print = print;
+    fk_bml_bad[fk_bml_bad_n].writes = fk_src_writes;
     fk_bml_bad_n = fk_bml_bad_n + 1;
+}
+/* What this process's lowerings of each unit met, two different facts kept apart:
+ *   fk_bml_low_moved  the lowerings in a row whose packets the tree moved past WHILE the floor lowered the unit; a
+ *                     lowering whose packet held, or the refusal that ends a row, sets it back to 0
+ *   fk_bml_low_held   the lowerings whose packets held and were written; a unit the bootstrap's scan needs again after
+ *                     that had its memo outrun by the tree AFTER it was written, which only a load still running meets
+ * fk_bml_low_slot answers a unit's row, made on first asking. */
+static char **fk_bml_low_path;
+static long long *fk_bml_low_moved;
+static long long *fk_bml_low_held;
+static long long fk_bml_low_n;
+static long long fk_bml_low_cap;
+static long long fk_bml_moved_refused;   /* units refused because their sources moved under every lowering of a row */
+static long long fk_bml_low_slot(const char *path) {
+    long long k = 0;
+    while (k < fk_bml_low_n) {
+        if (fk_cstr_eq(fk_bml_low_path[k], path)) return k;
+        k = k + 1;
+    }
+    if (fk_bml_low_n + 1 > fk_bml_low_cap) {
+        long long nc = fk_bml_low_cap > 0 ? fk_bml_low_cap * 2 : 32;
+        fk_bml_low_path = (char **)realloc(fk_bml_low_path, (unsigned long)nc * sizeof(char *));
+        fk_bml_low_moved = (long long *)realloc(fk_bml_low_moved, (unsigned long)nc * sizeof(long long));
+        fk_bml_low_held = (long long *)realloc(fk_bml_low_held, (unsigned long)nc * sizeof(long long));
+        if (fk_bml_low_path == 0 || fk_bml_low_moved == 0 || fk_bml_low_held == 0) fk_die("fk_bml_low_slot: out of memory");
+        fk_bml_low_cap = nc;
+    }
+    long long len = fk_path_len(path);
+    char *copy = (char *)malloc((unsigned long)len + 1);
+    if (copy == 0) fk_die("fk_bml_low_slot: out of memory");
+    memcpy(copy, path, (unsigned long)len + 1);
+    fk_bml_low_path[fk_bml_low_n] = copy;
+    fk_bml_low_moved[fk_bml_low_n] = 0;
+    fk_bml_low_held[fk_bml_low_n] = 0;
+    fk_bml_low_n = fk_bml_low_n + 1;
+    return fk_bml_low_n - 1;
+}
+/* the line a memo is handed over by: "<seal> <memo path>\n", with the "\n" of the line before it in front */
+static void fk_bml_hand_line(char *out, const char *memo, unsigned long long seal) {
+    sprintf(out, "\n%016llx %.4300s\n", seal, memo);
+}
+/* the memo and seal were verified by the image before this one at its last scan, and this image still loads */
+static int fk_bml_trusts(const char *memo, unsigned long long seal) {
+    char line[4400];
+    if (!fk_load_phase || fk_bml_trust == 0) return 0;
+    fk_bml_hand_line(line, memo, seal);
+    return fk_src_sym_at(fk_bml_trust, fk_bml_trust_n, line) >= 0;
+}
+static void fk_bml_seen_add(const char *memo, unsigned long long seal) {
+    char line[4400];
+    long long ln;
+    fk_bml_hand_line(line, memo, seal);
+    ln = fk_cstrlen(line) - 1;   /* the leading "\n" belongs to the line before */
+    if (fk_bml_seen_n + ln + 1 > fk_bml_seen_cap) {
+        long long nc = fk_bml_seen_cap > 0 ? fk_bml_seen_cap * 2 : 65536;
+        while (nc < fk_bml_seen_n + ln + 1) nc = nc * 2;
+        fk_bml_seen = (char *)realloc(fk_bml_seen, (unsigned long)nc);
+        if (fk_bml_seen == 0) fk_die("fk_bml_seen_add: out of memory");
+        fk_bml_seen_cap = nc;
+    }
+    memcpy(fk_bml_seen + fk_bml_seen_n, line + 1, (unsigned long)ln);
+    fk_bml_seen_n = fk_bml_seen_n + ln;
+    fk_bml_seen[fk_bml_seen_n] = 0;
+}
+/* The memo of a unit, read: its lowered body when a sealed memo of it (the primary, else this spelling's sidecar)
+ * still holds, else 0. `why` (FK_BML_MOVED_CAP bytes, when given) says why none holds: "" when no sealed memo stands
+ * (none was written, or it is torn), else what the last sealed one no longer agrees with. A memo the image before this
+ * one verified at its last scan is taken as verified while this image loads (fk_bml_trust); a memo that holds while
+ * fk_bml_scan collects is recorded for this image's own successor. */
+static char *fk_bml_memo_read(const char *bml_path, long long *out_len, char *why) {
+    char memo[4400], moved[FK_BML_MOVED_CAP];
+    long long n = 0;
+    unsigned long long seal;
+    int which = 0;
+    if (why) why[0] = 0;
+    while (which < 2) {
+        fk_bml_memo_name(bml_path, which, memo);
+        which = which + 1;
+        char *packet = fk_read_whole_file(memo, &n), *body = 0;
+        if (packet) {
+            if (n >= 25 && !memcmp(packet + n - 25, "\nfkend2 ", 8) && packet[n - 1] == '\n' &&
+                fk_hex16_parse(packet + n - 17, &seal) && seal == fk_bytes_fnv1a(packet, n - 25)) {
+                body = fk_bml_packet_body(bml_path, packet, n - 25, out_len, moved, !fk_bml_trusts(memo, seal));
+                if (!body && why) sprintf(why, "%s", moved[0] ? moved : "it names another unit, working directory or home");
+                if (body && fk_bml_scanning) fk_bml_seen_add(memo, seal);
+            }
+            free(packet);
+            if (body) return body;
+        }
+    }
+    return 0;
 }
 /* A lowering is a memo read. The memo is valid when its seal holds and every file it observed still has the bytes it
  * saw; any other state is a miss, and a miss is answered by the floor compiler in THIS process:
@@ -30117,22 +30301,8 @@ static void fk_bml_bad_add(const char *path) {
  *   - once a program walks, a miss is a refusal naming the way out (nothing is collecting that could be restarted). */
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len) {
     if (!fk_home_loaded) fk_home_load(bml_path);
-    char memo[4400];
-    long long n = 0;
-    unsigned long long seal;
-    int which = 0;
-    while (which < 2) {
-        fk_bml_memo_name(bml_path, which, memo);
-        which = which + 1;
-        char *packet = fk_read_whole_file(memo, &n), *body = 0;
-        if (packet) {
-            if (n >= 25 && !memcmp(packet + n - 25, "\nfkend2 ", 8) && packet[n - 1] == '\n' &&
-                fk_hex16_parse(packet + n - 17, &seal) && seal == fk_bytes_fnv1a(packet, n - 25))
-                body = fk_bml_packet_body(bml_path, packet, n - 25, out_len);
-            free(packet);
-            if (body) return body;
-        }
-    }
+    char *body = fk_bml_memo_read(bml_path, out_len, 0);
+    if (body) return body;
 #if defined(_WIN32)
     fk_diag_path("error", bml_path, "bml lowering is not wired on this platform yet");
     return 0;
@@ -30257,13 +30427,28 @@ FK_PHASED(FK_PHASE_RECIPE, fk_char_p, fk_bml_floor_call, (char **paths, long lon
     (void)stopped_msg_shown;
     return out;
 }
-/* Lower every path in the miss list with the floor cell and write each memo. Answers how many memos stand now. The
- * list is emptied. A path the floor cannot lower is voiced by name and left without a memo. */
+/* Lower every path in the miss list with the floor cell and write each memo. Answers how many memos stand now, or 0
+ * when a unit's sources moved under every lowering this load could give it (the load that asked cannot settle while the
+ * tree moves, so it is not asked to load again). The list is emptied. A path the floor cannot lower is voiced by name
+ * and left without a memo.
+ *
+ * A packet whose observations no longer hold names bytes the tree moved past while the floor lowered it: another
+ * writer stood other bytes in a file of its closure meanwhile. On 2026-10-29 a native turn's publish window
+ * (host-walk-publish.bml) stood 1510 candidates of form-cli-code-request.bml in the tree in nineteen minutes, and every
+ * kernel that lowered a door reaching that file in those minutes was refused, exit 2 (.hearth/walk-here/03c-turn-*.log).
+ * Such a unit is lowered again by the same resident floor, from the tree as it stands now -- alone in its floor call, so
+ * the window the tree must hold still for is that one unit's lowering -- and is refused by name when its sources moved
+ * under FK_BML_LOWER_TRIES lowerings in a row (fk_bml_low_moved). That refusal is the tree's motion, not the unit's wound:
+ * it never marks the unit bad, so a long-lived process lowers it again once the tree stands still. A packet that does not
+ * read at all is refused at once and marked bad: that is the floor's own wound. Every memo written held whole against the
+ * tree when it was written; a memo the tree outran AFTER it was written is the bootstrap's to meet (fk_bml_bootstrap). */
+#define FK_BML_LOWER_TRIES 8
 static long long fk_bml_floor_lower_needs(void) {
-    long long n = fk_bml_need_n, i = 0, done = 0;
+    long long n = fk_bml_need_n, cap = fk_bml_need_n, first_n = fk_bml_need_n, i = 0, done = 0, moved_out = 0;
     char **paths;
+    char moved[FK_BML_MOVED_CAP], said[FK_BML_MOVED_CAP + 256];
     if (n <= 0) return 0;
-    paths = (char **)malloc((unsigned long)n * sizeof(char *));
+    paths = (char **)malloc((unsigned long)cap * sizeof(char *));
     if (paths == 0) fk_die("fk_bml_floor_lower_needs: out of memory");
     while (i < n) { paths[i] = fk_bml_need[i]; i = i + 1; }
     fk_bml_need_n = 0;   /* the floor's own load starts from an empty list; the paths are held here */
@@ -30272,8 +30457,10 @@ static long long fk_bml_floor_lower_needs(void) {
     while (i < n) {
         long long out_len = 0, at = 0, start = 0, answered = 0, shown = 0;
         /* sixteen requests to a floor call: the pin of the compiler's own sources is paid once for sixteen units, and
-         * each sixteen is on disk as memos before the next begins, so a long cold run is durable and can be watched */
-        long long end = i + 16 < n ? i + 16 : n;
+         * each sixteen is on disk as memos before the next begins, so a long cold run is durable and can be watched.
+         * A unit lowered again goes alone: its request stands after every first request, so a call never mixes them. */
+        long long end = i >= first_n ? i + 1 : (i + 16 < first_n ? i + 16 : first_n);
+        unsigned long long first_print = fk_bml_unit_print(paths[i]);   /* read before the floor reads it: see the stop below */
         char *out = fk_bml_floor_call(paths, i, end, &out_len, &shown);
         while (i + answered < end) {
             const char *term = "\n@bml-floor-lowered\n\n";
@@ -30286,20 +30473,54 @@ static long long fk_bml_floor_lower_needs(void) {
             if (found < 0) break;
             {
                 const char *bml = paths[i + answered];
+                long long slot = fk_bml_low_slot(bml), row = fk_bml_low_moved[slot] + 1;
                 long long plen = found + 1 - start, blen = 0;
                 char *packet = (char *)malloc((unsigned long)plen + 1);
                 char *body;
                 if (packet == 0) fk_die("fk_bml_floor_lower_needs: out of memory");
                 memcpy(packet, out + start, (unsigned long)plen);
                 packet[plen] = 0;
-                body = fk_bml_packet_body(bml, packet, plen, &blen);
+                body = fk_bml_packet_body(bml, packet, plen, &blen, moved, 1);
                 if (body) {
-                    fk_bml_low_memo_write(bml, packet, plen);
+                    int wrote = fk_bml_low_memo_write(bml, packet, plen);
                     free(body);
-                    done = done + 1;
+                    fk_bml_low_moved[slot] = 0;
+                    if (wrote) {
+                        fk_bml_low_held[slot] = fk_bml_low_held[slot] + 1;
+                        done = done + 1;
+                    } else {
+                        /* a lowering that held but cannot stand as a memo would be asked again round after round */
+                        fk_diag_path("error", bml, "bml lowering memo could not be written beside the unit; is its "
+                                     "directory writable?");
+                        fk_bml_bad_add(bml, fk_bml_unit_print(bml));
+                    }
+                } else if (moved[0] != 0 && row < FK_BML_LOWER_TRIES) {
+                    long long len = fk_path_len(bml);
+                    char *again = (char *)malloc((unsigned long)len + 1);
+                    if (again == 0) fk_die("fk_bml_floor_lower_needs: out of memory");
+                    memcpy(again, bml, (unsigned long)len + 1);
+                    fk_bml_low_moved[slot] = row;
+                    sprintf(said, "BML source observations changed while it was lowered (%s); lowering it again (%lld of %d)",
+                            moved, row + 1, FK_BML_LOWER_TRIES);
+                    fk_diag_path("warning", bml, said);
+                    if (n == cap) {
+                        cap = cap * 2;
+                        paths = (char **)realloc(paths, (unsigned long)cap * sizeof(char *));
+                        if (paths == 0) fk_die("fk_bml_floor_lower_needs: out of memory");
+                    }
+                    paths[n] = again;
+                    n = n + 1;
+                } else if (moved[0] != 0) {
+                    fk_bml_low_moved[slot] = 0;
+                    sprintf(said, "BML source observations changed under each of its %lld lowerings in a row (the last: "
+                            "%s); the tree kept moving, so no lowering of it holds", row, moved);
+                    fk_diag_path("error", bml, said);
+                    fk_bml_moved_refused = fk_bml_moved_refused + 1;
+                    moved_out = 1;
                 } else {
-                    fk_diag_path("error", bml, "BML source observations changed or lowering packet is incomplete");
-                    fk_bml_bad_add(bml);
+                    fk_diag_path("error", bml, "BML lowering packet is incomplete: the floor's answer does not read as a "
+                                 "packet for this unit, this working directory and this home");
+                    fk_bml_bad_add(bml, fk_bml_unit_print(bml));
                 }
                 free(packet);
             }
@@ -30318,9 +30539,11 @@ static long long fk_bml_floor_lower_needs(void) {
             }
         }
         if (answered == 0) {
-            /* the floor ended before it closed the first request left: say which, and go on to the next */
+            /* the floor ended before it closed the first request left: say which, and go on to the next. It is said once and
+             * not asked again while its bytes, as they stood before the floor read them, still stand: a torn read (a writer
+             * truncated the unit under the floor) recovers when the bytes move, which they do when that writer finishes */
             int stale = out_len >= 16 && memcmp(out, "@bml-floor-stale", 16) == 0;
-            fk_bml_bad_add(paths[i]);   /* said once, and not asked again by this process */
+            fk_bml_bad_add(paths[i], first_print);
             if (!shown) {
                 fk_diag_path("error", paths[i], stale
                     ? "bml floor compiler found its own sources changed while it lowered"
@@ -30334,7 +30557,7 @@ static long long fk_bml_floor_lower_needs(void) {
     i = 0;
     while (i < n) { free(paths[i]); i = i + 1; }
     free(paths);
-    return done;
+    return moved_out ? 0 : done;
 }
 /* A memo was missing while the program was still loading. Its collection is abandoned (the process is about to begin
  * again, so what the arena holds is of no use): the floor compiler is loaded as a cell beyond it, the missing memos are
@@ -30358,6 +30581,8 @@ static void fk_bml_scan(const char *root_path) {
     fk_cell_epoch = fk_cell_epoch + 1;
     fk_cell_load_base = fk_src_dep_count;
     fk_cell_collect = 1;
+    fk_bml_seen_n = 0;     /* the memos this scan finds holding, and only those, are what a begin-again would carry */
+    fk_bml_scanning = 1;
     if (fk_unit_lowers(root_path)) {
         long long ln = 0, mt = fk_path_mtime_raw(root_path);
         char *low = mt > 0 ? fk_bml_lower_to_mem(root_path, &ln) : 0;
@@ -30367,6 +30592,7 @@ static void fk_bml_scan(const char *root_path) {
         ok = fk_src_collect_file(root_path, -1);
     }
     (void)ok;
+    fk_bml_scanning = 0;
     fk_cell_collect = 0;
     k = d0;
     while (k < fk_src_dep_count) { free(fk_cd_win[k]); fk_cd_win[k] = 0; k = k + 1; }
@@ -30379,20 +30605,71 @@ static void fk_bml_scan(const char *root_path) {
 }
 static void fk_bml_bootstrap(const char *first) {
     long long rounds = 0;
+    /* this image met a miss: what its predecessor handed over no longer stands for it, and it reads the tree itself */
+    free(fk_bml_trust);
+    fk_bml_trust = 0;
+    fk_bml_trust_n = 0;
     if (fk_bml_round >= 3) {
-        fk_diag_path("error", first, "bml lowering memo is still missing after three begin-agains; is the directory writable?");
+        /* three begin-agains met a miss: a memo that was never written (an unwritable directory) is a different fact from
+         * one that was written and no longer agrees with the tree (its sources moved after it was lowered), and the
+         * refusal says which */
+        char why[FK_BML_MOVED_CAP], said[FK_BML_MOVED_CAP + 160];
+        long long len = 0;
+        char *body = fk_bml_memo_read(first, &len, why);
+        if (body) {
+            free(body);
+            fk_diag_path("error", first, "bml lowering memo did not hold when the third begin-again read it, and holds again "
+                         "now: its sources are moving under it");
+        } else if (why[0] != 0) {
+            sprintf(said, "bml lowering memo was written but did not hold at the third begin-again: %s", why);
+            fk_diag_path("error", first, said);
+        } else {
+            fk_diag_path("error", first, "bml lowering memo is still missing after three begin-agains; is the directory writable?");
+        }
         return;
     }
     if (fk_boot_root[0] == 0) fk_cstr_copy(fk_boot_root, first, FK_PATH_CAP);
     fk_bml_need_add(first);
+    long long stale = 0;
     while (fk_bml_need_n > 0 && rounds < 256) {
-        long long made;
+        long long made, refused = fk_bml_moved_refused, k = 0, again;
         fk_bml_defer = 0;
         made = fk_bml_floor_lower_needs();
         (void)made;   /* a unit the floor could not lower is voiced by name, set aside, and the rest go on */
+        if (fk_bml_moved_refused > refused) {
+            /* a unit's sources moved under every lowering of a row (voiced by name): the load cannot settle while the
+             * tree moves, so it ends here rather than lowering the rest again round after round */
+            return;
+        }
         fk_bml_defer = 1;
         fk_bml_scan(fk_boot_root);
         rounds = rounds + 1;
+        /* every unit the scan still needs was lowered and written by this load already: the tree outran those memos
+         * after they were written. A load still lowering meets that while the tree moves, and lowers them again; after
+         * FK_BML_LOWER_TRIES such rounds in a row it ends, naming what moved */
+        again = fk_bml_need_n > 0;
+        while (again && k < fk_bml_need_n) {
+            long long slot = fk_bml_low_slot(fk_bml_need[k]);   /* taken first: making a slot may move the arrays */
+            if (fk_bml_low_held[slot] == 0) again = 0;
+            k = k + 1;
+        }
+        stale = again ? stale + 1 : 0;
+        if (stale >= FK_BML_LOWER_TRIES) {
+            char why[FK_BML_MOVED_CAP], said[FK_BML_MOVED_CAP + 220];
+            long long len = 0;
+            char *body = fk_bml_memo_read(fk_bml_need[0], &len, why);
+            if (body) free(body);
+            sprintf(said, "bml lowering did not settle: every unit it still needed was lowered by this load and went stale "
+                    "again, %d rounds in a row (%s); the tree kept moving under the load", FK_BML_LOWER_TRIES,
+                    why[0] ? why : "its memo holds again now");
+            fk_diag_path("error", fk_bml_need[0], said);
+            fk_bml_defer = 0;
+            while (fk_bml_need_n > 0) {
+                fk_bml_need_n = fk_bml_need_n - 1;
+                free(fk_bml_need[fk_bml_need_n]);
+            }
+            return;
+        }
     }
     fk_bml_defer = 0;
     if (fk_bml_need_n > 0) {
@@ -30405,6 +30682,9 @@ static void fk_bml_bootstrap(const char *first) {
         char round[2];
         round[0] = (char)('0' + fk_bml_round + 1); round[1] = 0;
         setenv("FK_BML_ROUND", round, 1);
+        /* the last scan found every memo holding: those memos, as verified, go with the command into its next image */
+        if (fk_bml_seen_n > 0 && fk_bml_seen_n < FK_BML_TRUST_CAP) setenv("FK_BML_HELD", fk_bml_seen, 1);
+        else unsetenv("FK_BML_HELD");
     }
     if (fk_run_argv != 0) {
         execvp(fk_self_path, (char *const *)fk_run_argv);
@@ -30451,8 +30731,9 @@ static int fk_run_bml(const char *path, long long arg) {
         return 2;
     }
     if (!fk_check_only && fk_path_mtime_raw(fkb_path) > 0) {
-        long long recorded = fk_src_sym_recorded_errors(sym_path);
-        long long unrunnable = fk_src_sym_recorded_unrunnable(sym_path);
+        /* the lens read once, and joined to the identity its image must hold (fk_src_sym_lens) */
+        long long recorded = -1, unrunnable = -1;
+        int lens_joined = fk_src_sym_lens(sym_path, expected_source_hash, &recorded, &unrunnable);
         if (unrunnable > 0) {
             /* an unrunnable mark on the ice may be the floor's own honest
              * refusal or a foreign writer's (an import probe once compiled
@@ -30462,7 +30743,7 @@ static int fk_run_bml(const char *path, long long arg) {
              * diagnostics instead of a cached tombstone. */
             fk_diag_path("warning", sym_path,
                     "cached image carries a refusal mark; re-lowering fresh");
-        } else if (recorded >= 0 &&
+        } else if (recorded >= 0 && lens_joined == 1 &&
                    fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
             if (recorded > 0) {
                 fk_diag_path("warning", sym_path,
@@ -30585,11 +30866,22 @@ static int fk_run(int argc, char **argv) {
     fk_nodes_init();
 #if !defined(_WIN32)
     {
-        /* the begin-again after lowering (fk_bml_bootstrap) leaves its round count in the environment; this process
-         * takes it and clears it, so neither the program nor its children ever see it */
+        /* the begin-again after lowering (fk_bml_bootstrap) leaves its round count and the memos its last scan verified
+         * (fk_bml_trust) in the environment; this process takes them and clears them, so neither the program nor its
+         * children ever see them. A hand-over without a round count is no begin-again's and is not taken. */
         const char *round = getenv("FK_BML_ROUND");
+        const char *held = getenv("FK_BML_HELD");
         if (round != 0 && round[0] >= '0' && round[0] <= '9') fk_bml_round = round[0] - '0';
+        if (fk_bml_round > 0 && held != 0 && held[0] != 0) {
+            long long hn = fk_cstrlen(held);
+            fk_bml_trust = (char *)malloc((unsigned long)hn + 2);
+            if (fk_bml_trust == 0) fk_die("fk_run: out of memory");
+            fk_bml_trust[0] = '\n';
+            memcpy(fk_bml_trust + 1, held, (unsigned long)hn + 1);
+            fk_bml_trust_n = hn + 1;
+        }
         unsetenv("FK_BML_ROUND");
+        unsetenv("FK_BML_HELD");
         if (argc >= 2 && fk_path_len(argv[argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH ? 2 : 1]) < FK_PATH_CAP) {
             fk_cstr_copy(fk_boot_root, argv[argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH ? 2 : 1], FK_PATH_CAP);
         }
