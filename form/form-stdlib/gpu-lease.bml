@@ -97,7 +97,7 @@ section [form.bml] {
   def gpl-ancestors(pid, depth) = gpl-ancestors-of(host_process(pid), depth);
   def gpl-ancestors-of(row, depth) = ((depth <= 0) || ((String) value_kind(row) != "list")) ? [] : cons(row[1], gpl-ancestors(row[1], depth - 1));
   def gpl-waiting?(lock, pid, start) = gpl-waiting-text?(read_file(gpl-wait-dir(lock) ++ "/" ++ pid.str()), start);
-  def gpl-waiting-text?(t, start) = nothing?(t) ? 0 : ((Comparable) gpl-int(str_to_int(t)) == start ? 1 : 0);
+  def gpl-waiting-text?(t, start) = nothing?(t) || len(t) == 0 ? 0 : ((Comparable) gpl-int(str_to_int(gpl-lines(t)[0])) == start ? 1 : 0);
   def gpl-peer?(lock, ms, pid, cwd, kin) = gpl-peer-row?(lock, ms, pid, cwd, kin, host_process(pid));
   def gpl-peer-row?(lock, ms, pid, cwd, kin, row) = (String) value_kind(row) != "list" ? 0 : ((Comparable) gpl-in?(pid, kin) == 1 ? 0 : ((Comparable) gpl-marked?(gpl-argv-text(row[4]), ms) == 0 ? 0 : ((Comparable) gpl-waiting?(lock, pid, row[5]) == 1 ? 0 : 1)));
   def gpl-peers(lock, ms) = gpl-peers-of(lock, ms, host_processes("fkwu"), host_cwd(), cons(host_pid(), gpl-ancestors(host_pid(), 16)));
@@ -108,11 +108,33 @@ section [form.bml] {
   def gpu-lease-take(lock, label, wait-ms) = gpu-lease-take-with(lock, label, [wait-ms, gpl-poll-ms(), gpl-unowned-ms(), gpl-markers()]);
   def gpu-lease-take-with(lock, label, opts) {
    let t0 = host_monotonic_ms();
-   let ans = gpl-go([lock, label, opts, t0, t0 + opts[0]], 0);
+   let queued = gpl-enqueue(lock, t0);
+   let owner = gpl-read(lock);
+   let ans = (String) owner[0] == "rec" && owner[2] == host_pid() && gpl-inheritable?(owner) ? ["refused","already-held-by-this-process",owner[1]] : queued < 0 ? ["refused", "cannot-make-lock",lock] : gpl-go([lock, label, opts, t0, t0 + opts[0]], 0);
    let cleared = host_path_remove(gpl-wait-dir(lock) ++ "/" ++ host_pid().str());
    ans;
   }
-  def gpl-go(c, slept) = (Comparable) host_dir_mkdir(c[0]) == 1 ? gpl-claim(c, slept, nothing()) : gpl-meet(c, slept, gpl-judge(c[0]));
+  // A settled operation rejoins behind existing waiters. Keep the process
+  // start on line one so older clients still recognize a waiting peer.
+  def gpl-enqueue(lock, stamp) {
+   let made = host_dir_mkdir(gpl-wait-dir(lock));
+   write_file(gpl-wait-dir(lock) ++ "/" ++ host_pid().str(), gpl-me-start().str() ++ gpl-nl() ++ stamp.str());
+  }
+  def gpl-wait-row(lock, name) {
+   let pid = gpl-int(str_to_int(name));
+   let text = read_file(gpl-wait-dir(lock) ++ "/" ++ name);
+   let lines = nothing?(text) ? [] : gpl-lines(text);
+   let start = nil?(lines) ? 0 : gpl-int(str_to_int(lines[0]));
+   let live = pid > 0 && start > 0 && host_alive(pid) == 1 && gpl-same-process?(pid,start) == 1;
+   !live ? [] : [pid,start,len(lines) > 1 ? gpl-int(str_to_int(lines[1])) : 0];
+  }
+  def gpl-before?(a,b) = a[2] < b[2] || (a[2] == b[2] && a[0] < b[0]);
+  def gpl-first?(lock) {
+   let mine = gpl-wait-row(lock,host_pid().str());
+   let rows = map(name => gpl-wait-row(lock,name), host_dir_list(gpl-wait-dir(lock)) ?? []);
+   !nil?(mine) && !any?(row => !nil?(row) && gpl-before?(row,mine),rows);
+  }
+  def gpl-go(c, slept) = !gpl-first?(c[0]) ? gpl-wait(c,slept,["queued"]) : ((Comparable) host_dir_mkdir(c[0]) == 1 ? gpl-claim(c, slept, nothing()) : gpl-meet(c, slept, gpl-judge(c[0])));
   def gpl-claim(c, slept, prev) {
    let token = gpl-token();
    let w = gpl-publish(c[0], token, c[1], now_unix_ms());
@@ -133,8 +155,6 @@ section [form.bml] {
   def gpl-live(c, slept, r) = (Comparable) r[2] == host_pid() ? ["refused", "already-held-by-this-process", r[1]] : gpl-wait(c, slept, ["live", r[1], r[2], r[6]]);
   def gpl-wait(c, slept, owner) = host_monotonic_ms() >= c[4] ? ["refused", "held-by-live-owner", owner] : gpl-wait-again(c, owner);
   def gpl-wait-again(c, owner) {
-   let m = host_dir_mkdir(gpl-wait-dir(c[0]));
-   let n = write_file(gpl-wait-dir(c[0]) ++ "/" ++ host_pid().str(), gpl-me-start().str());
    let s = host_sleep_ms(c[2][1]);
    gpl-go(c, 1);
   }
@@ -209,10 +229,32 @@ section [form.bml] {
   // Waits as long as a take does (gpl-wait-ms); a refusal stops the open aloud, before the device is touched. No line is printed:
   // the open is inside a stage whose output is the stage's.
   def gpu-lease-hold-at(lock, label, wait-ms) = gpl-hold-judged(lock, label, wait-ms, gpl-read(lock));
-  def gpl-hold-judged(lock, label, wait-ms, r) = ((String) r[0] == "rec" && (Comparable) r[2] == host_pid()) ? ["inherited", r[1]] : gpl-held-or-stop(gpu-lease-take(lock, label, wait-ms));
+  def gpl-inheritable?(r) = (String) r[0] == "rec" && r[2] == host_pid() && r[3] > 0 && r[3] == gpl-me-start();
+  def gpl-hold-judged(lock, label, wait-ms, r) = gpl-inheritable?(r) ? ["inherited", r[1]] : gpl-held-or-stop(gpu-lease-take(lock, label, wait-ms));
   def gpu-lease-hold(label) = gpu-lease-hold-at(gpu-lease-path(), label, gpl-wait-ms());
   def gpu-lease-unhold-at(lock, ans) = (String) ans[0] == "inherited" ? ans : gpu-lease-give(lock, ans);
   def gpu-lease-unhold(ans) = gpu-lease-unhold-at(gpu-lease-path(), ans);
+  // Work keeps its model/KV owner between turns. Only settled device work
+  // hands the shared lease onward; an incomplete drain retains ownership.
+  // The injected settle function lets the existing lease band observe unwind
+  // without opening a model or changing the machine's real lease.
+  def gpu-lease-turn-at(lock,label,wait-ms,settle,run) {
+   let current = gpl-read(lock);
+   let lease = gpl-inheritable?(current) ? ["inherited",current[1]] : gpl-held-or-stop(gpu-lease-take-with(lock,label,[wait-ms,10,gpl-unowned-ms(),gpl-markers()]));
+   let outcome = try [1,run()] catch [0];
+   let drained = settle();
+   !drained ? form_error("gpu-lease: operation did not settle; ownership retained") : {
+    let released = gpu-lease-unhold-at(lock,lease);
+    !((String) released[0] == "released" || (String) released[0] == "inherited") ? form_error("gpu-lease: release refused " ++ value_str(released)) :
+    outcome[0] == 1 ? outcome[1] : form_error("gpu-lease: operation raised after ownership was released");
+   };
+  }
+  def gpl-metal-settle() {
+   let sync = metal_sync();
+   let live = metal_live();
+   len(live) == 20 && live[5] == 0 && live[6] == 0 && live[14] == 0;
+  }
+  def gpu-lease-turn(label,run) = gpu-lease-turn-at(gpu-lease-path(),label,gpl-wait-ms(),gpl-metal-settle,run);
   def gpu-lease-renew(lock, token) = gpl-renew-of(lock, token, gpl-read(lock));
   def gpl-renew-of(lock, token, r) = (Comparable) gpl-mine?(r, token) == 1 ? gpl-renew-now(lock, token, r) : gpl-not-mine(r);
   def gpl-renew-now(lock, token, r) = (Comparable) gpl-publish(lock, token, r[6], r[4]) == 0 ? ["renewed", token] : ["refused", "renew-not-written", token];

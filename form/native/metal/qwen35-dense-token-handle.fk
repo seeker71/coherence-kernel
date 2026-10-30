@@ -17,6 +17,7 @@ import form-stdlib/bml/qwen38-prefill-quant.bml;
 import form-stdlib/bml/qwen38-decode-quant.bml;
 import form-stdlib/bml/qwen38-prefill-completion.bml;
 import form-stdlib/bml/qwen38-prefill-attention.bml;
+import form-stdlib/gpu-lease.bml;
 section [form.bml] {
     // Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
     // proven kernel at pipeline 17; dense appends the wide Q8_0 matvec whose 256-thread group owns
@@ -325,10 +326,10 @@ section [form.bml] {
         q38-forward-state-b(ps, bs, geo, lays, sts, embTv, ids[0], pos, 1, 1);
         q38-prefill-mvb-go(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids[1:], (Number) pos + (Number) 1);
     };
-    def q38-prefill-mvb(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos) = {
+    def q38-prefill-mvb(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos) = gpu-lease-turn("qwen vector prefill", () => {
         metal_batch_concurrent();
         q38-prefill-mvb-go(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos);
-    };
+    });
     // ── layer-major prefill ────────────────────────────────────────────────
     // The shape is transcribed from ds4.c: prefill is
     // LAYER-MAJOR — all prompt tokens pass through layer 0, then layer 1. Decode
@@ -534,14 +535,14 @@ section [form.bml] {
     };
     def q38-lm-layers-span-f(ps, bs, geo, lays, sts, l, nL, n, pos0, fold) = q38-lm-layers-span-t(ps, bs, geo, lays, sts, l, nL, n, pos0, fold, nothing());
     def q38-lm-layers-span(ps, bs, geo, lays, sts, l, nL, n, pos0) = q38-lm-layers-span-f(ps, bs, geo, lays, sts, l, nL, n, pos0, 1);
-    def q38-prefill-span-batched-f(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, fold) = {
+    def q38-prefill-span-batched-f(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, fold) = gpu-lease-turn("qwen batched prefill", () => {
         let n = len(ids);
         metal_batch_concurrent();
         q38-lm-embed(ps, bs, geo, embTv, ids, 0);
         q38-lm-layers-span-f(ps, bs, geo, lays, sts, 0, geo[21], n, pos, fold);
         q38-gather(ps, bs, geo, n - 1, 1);
         [q38-head-only(ps, bs, geo, onormTv, projTv), (Number) pos + (Number) n];
-    };
+    });
     def q38-prefill-span-batched(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos) = q38-prefill-span-batched-f(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, 1);
     def q38-lm-embed(ps, bs, geo, embTv, ids, t) = (Comparable) len(ids) == 0 ? t : {
         q38-embed(ps, bs, geo, embTv, ids[0], 1);
@@ -564,7 +565,7 @@ section [form.bml] {
         let bytes = metal_buf_read(bs[31], 0, 4);
         q38pc-head-bytes?(bytes) ? kth-u32at(bytes, 0) : -1;
     };
-    def q38-prefill-lm(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos) = {
+    def q38-prefill-lm(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos) = gpu-lease-turn("qwen layer prefill", () => {
         let n = len(ids);
         metal_batch_concurrent();
         q38-lm-embed(ps, bs, geo, embTv, ids, 0);
@@ -575,7 +576,7 @@ section [form.bml] {
         // CLOSES the batch, and the head's dispatches then have no batch to
         // land in, so the argmax read comes back from a buffer nothing wrote.
         [q38-head-only(ps, bs, geo, onormTv, projTv), (Number) pos + (Number) n];
-    };
+    });
     def q38-blocks(ps, bs, geo, lays, sts, pos, l, n, interval) = q38-blocks-scoped(ps, bs, geo, lays, sts, pos, l, n, interval, nothing());
     // THE HAND-OVER: the open batch goes to the queue after every `q38-submit-every()` layers (0: never) without waiting, and the next
     // is armed, so the device starts on the early layers while the host encodes the later ones (a token encodes ~1265 dispatches in
@@ -625,36 +626,36 @@ section [form.bml] {
         q38-blocks-scoped(ps, bs, geo, lays, sts, pos, 0, geo[21], geo[22], scope);
         1;
     };
-    def q38-forward(ps, bs, geo, lays, sts, embTv, onormTv, projTv, id, pos) = {
+    def q38-forward(ps, bs, geo, lays, sts, embTv, onormTv, projTv, id, pos) = gpu-lease-turn("qwen decode", () => {
         q38-forward-state(ps, bs, geo, lays, sts, embTv, id, pos);
         q38-head(ps, bs, geo, onormTv, projTv);
         kth-u32at(metal_buf_read(bs[31], 0, 4), 0);
-    };
+    });
     // Opt-in scope entry. Refuse before advancing recurrent state or KV when
     // the plan cannot cover the present position inside the allocated cache.
-    def q38-forward-scoped(ps, bs, geo, lays, sts, embTv, onormTv, projTv, id, pos, scope) = (Comparable) dam-valid?(scope, (Number) pos + (Number) 1) == 0 || pos >= geo[18] ? -1 : {
+    def q38-forward-scoped(ps, bs, geo, lays, sts, embTv, onormTv, projTv, id, pos, scope) = (Comparable) dam-valid?(scope, (Number) pos + (Number) 1) == 0 || pos >= geo[18] ? -1 : gpu-lease-turn("qwen scoped decode", () => {
         q38-forward-state-scoped(ps, bs, geo, lays, sts, embTv, id, pos, scope);
         q38-head(ps, bs, geo, onormTv, projTv);
         kth-u32at(metal_buf_read(bs[31], 0, 4), 0);
-    };
+    });
     // The adapted entry refuses a mismatched adapter before any model state is
     // advanced.  A successful token therefore crossed the device rank-one head,
     // never a merely named projection.
-    def q38-forward-adapted(ps, bs, geo, lays, sts, embTv, onormTv, projTv, adapter, id, pos) = (Comparable) q38-lora-rank1-valid?(adapter, geo[0]) == 1 ? {
+    def q38-forward-adapted(ps, bs, geo, lays, sts, embTv, onormTv, projTv, adapter, id, pos) = (Comparable) q38-lora-rank1-valid?(adapter, geo[0]) == 1 ? gpu-lease-turn("qwen adapted decode", () => {
         q38-forward-state(ps, bs, geo, lays, sts, embTv, id, pos);
         q38-head-adapted(ps, bs, geo, onormTv, projTv, adapter);
         kth-u32at(metal_buf_read(bs[31], 0, 4), 0);
-    } : 0 - 1;
+    }) : 0 - 1;
     // Advance one position without asking the head.  metal_sync stands exactly
     // where the argmax read-back stood in a full forward: the batch is submitted
     // and waited on before the next position is encoded, so this position's state
     // and KV writes are complete before the next one reads them.  Same ordering,
     // one fewer question.
-    def q38-advance(ps, bs, geo, lays, sts, embTv, id, pos) = {
+    def q38-advance(ps, bs, geo, lays, sts, embTv, id, pos) = gpu-lease-turn("qwen prefill token", () => {
         q38-forward-state(ps, bs, geo, lays, sts, embTv, id, pos);
         metal_sync();
         1;
-    };
+    });
     def q38-stop?(id, stops) = (Comparable) len(stops) == 0 ? 0 : (Comparable) id == stops[0] ? 1 : q38-stop?(id, stops[1:]);
     def q38-generate(ps, bs, geo, lays, sts, embTv, onormTv, projTv, id, pos, n, stops, acc) = n <= 0 ? acc : {
         let nid = q38-forward(ps, bs, geo, lays, sts, embTv, onormTv, projTv, id, pos);
@@ -680,13 +681,13 @@ section [form.bml] {
         let handed = q38-handover-after((Number) l + (Number) 1, n);
         q38-plan-blocks(ps, bs, geo, sts, entries[1:], pos, (Number) l + (Number) 1, n);
     };
-    def q38-forward-planned(ctx, plan, sts, id, pos) {
+    def q38-forward-planned(ctx, plan, sts, id, pos) = gpu-lease-turn("qwen planned decode", () => {
         metal_batch_concurrent();
         q38-embed(ctx[0], ctx[1], ctx[2], ctx[4], id, 0);
         q38-plan-blocks(ctx[0], ctx[1], ctx[2], sts, plan[0], pos, 0, ctx[2][21]);
         q38-run(plan[1]);
         kth-u32at(metal_buf_read(ctx[1][31], 0, 4), 0);
-    }
+    });
     def q38-generate-planned(ctx, plan, sts, id, pos, n, stops, acc) = n <= 0 ? acc : {
         let nid = q38-forward-planned(ctx, plan, sts, id, pos);
         (nid < 0 ? 1 : q38-stop?(nid, stops)) ? acc : q38-generate-planned(ctx, plan, sts, nid, (Number) pos + (Number) 1, n - 1, stops, append(acc, [nid]));
@@ -729,14 +730,15 @@ section [form.bml] {
         q38-forward-state(ps, bs, geo, lays, sts, embTv, id, pos);
         1;
     };
-    def q38-prefill-chunk-go(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, chunk, k) = (Comparable) len(ids) == 1 ? {
+    def q38-prefill-chunk-go(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, chunk, k) = gpu-lease-turn("qwen chunked prefill", () => q38-prefill-chunk-owned(ps,bs,geo,lays,sts,embTv,onormTv,projTv,ids,pos,chunk,k));
+    def q38-prefill-chunk-owned(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, chunk, k) = (Comparable) len(ids) == 1 ? {
         metal_sync();
         [q38-forward(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids[0], pos), (Number) pos + (Number) 1];
     } : {
         q38-advance-open(ps, bs, geo, lays, sts, embTv, ids[0], pos);
         let settle = (Number) k + (Number) 1 >= chunk ? 1 : 0;
         (Comparable) settle == 1 ? metal_sync() : 0;
-        q38-prefill-chunk-go(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids[1:], (Number) pos + (Number) 1, chunk, (Comparable) settle == 1 ? 0 : (Number) k + (Number) 1);
+        q38-prefill-chunk-owned(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids[1:], (Number) pos + (Number) 1, chunk, (Comparable) settle == 1 ? 0 : (Number) k + (Number) 1);
     };
     // ── one batch for the whole span ───────────────────────────────────────
     // chunk 64 answered no: the scratch buffers bs 0, bs 1, ... are reused by
@@ -763,10 +765,10 @@ section [form.bml] {
         q38-forward-state-after(ps, bs, geo, lays, sts, embTv, ids[0], pos, 1);
         q38-prefill-span-go(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids[1:], (Number) pos + (Number) 1);
     };
-    def q38-prefill-span(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos) = {
+    def q38-prefill-span(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos) = gpu-lease-turn("qwen sequential prefill", () => {
         metal_batch_concurrent();
         q38-prefill-span-go(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos);
-    };
+    });
     // chunk 1 = a barrier-per-position sync, the lane as it has always been.
     // chunk 0 = one batch for the whole span, ordering by barrier.
     // chunk n>1 = settle every n positions (the probe that answered no).
@@ -788,28 +790,33 @@ section [form.bml] {
     // the same walk with a tap (q38-lm-layers-span-t): each slice's layers run with it, inside the slice's own batch
     def q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, ids, pos, span, tap) = (Comparable) len(ids) == 0 ? [pos, 1] : {
         let n = len(ids) < span ? len(ids) : span;
-        metal_batch_concurrent();
-        q38pc-stage(pos, "embed-begin");
-        q38-lm-embed(ps, bs, geo, embTv, take(n, ids), 0);
-        q38pc-stage(pos, "layers-begin");
-        q38-lm-layers-span-t(ps, bs, geo, lays, sts, 0, geo[21], n, pos, 1, tap);
-        !q38pc-sync(pos, n) ? [pos, 0] : {
+        let complete = gpu-lease-turn("qwen prefill slice", () => q38-prefill-slice-t(ps,bs,geo,lays,sts,embTv,take(n,ids),pos,tap));
+        !complete ? [pos,0] : {
             q38oo-stage(("model-prefill-positions-" + ((Number) pos + (Number) n).str()), 8388623);
             q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, drop(n, ids), (Number) pos + (Number) n, span, tap);
         };
     };
+    def q38-prefill-slice-t(ps,bs,geo,lays,sts,embTv,ids,pos,tap) {
+        let n = len(ids);
+        metal_batch_concurrent();
+        q38pc-stage(pos, "embed-begin");
+        q38-lm-embed(ps, bs, geo, embTv, ids, 0);
+        q38pc-stage(pos, "layers-begin");
+        q38-lm-layers-span-t(ps, bs, geo, lays, sts, 0, geo[21], n, pos, 1, tap);
+        q38pc-sync(pos, n);
+    }
     def q38-prefill-span-sliced(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span) = q38-prefill-span-sliced-t(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span, nothing());
     def q38-prefill-span-sliced-t(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span, tap) = span <= 0 || (Comparable) len(ids) == 0 ? [-1, pos] : {
         q38pc-wait-policy();
         let end = q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, ids, pos, span, tap);
-        !end[1] ? [-1, end[0]] : {
+        !end[1] ? [-1, end[0]] : gpu-lease-turn("qwen prefill head", () => {
             // The final slice sync closed its concurrent batch. Re-arm before
             // the barrier-bearing gather and head, or their enqueues refuse
             // and the first prediction is read from an unwritten/stale buffer.
             metal_batch_concurrent();
             q38-gather(ps, bs, geo, q38-last-slice-n(len(ids), span) - 1, 1);
             [q38-head-only(ps, bs, geo, onormTv, projTv), end[0]];
-        };
+        });
     };
     def q38-last-slice-n(n, span) = n <= span ? n : {
         let r = n % span;
@@ -887,7 +894,8 @@ section [form.bml] {
     // q38-open is q38-open-span at span 1 — the same allocation the lane has
     // always made. ctx slot 10 carries the span so the stack can read it.
     def q38-open(path, maxpos) = q38-open-span(path, maxpos, 1);
-    def q38-open-span(path, maxpos, span) =     // The header is read once.  Its required extent decides admission and
+    def q38-open-span(path, maxpos, span) = gpu-lease-turn("qwen model open", () => q38-open-span-owned(path,maxpos,span));
+    def q38-open-span-owned(path, maxpos, span) =     // The header is read once.  Its required extent decides admission and
     // the same retained source then feeds every open step below; a second
     // header read was pure bookkeeping with no new authority or knowledge.
 {
@@ -951,12 +959,12 @@ section [form.bml] {
         2;
     };
     def q38-recur-go(ps, sts, spare, convn, deltan, fwd, acc) = (Comparable) len(sts) == 0 ? acc : q38-recur-go(ps, sts[1:], spare[1:], convn, deltan, fwd, (Number) acc + (Number) (spare[0][0] > 0 ? (Comparable) fwd == 1 ? q38-recur-pair(ps, sts[0], spare[0], convn, deltan) : q38-recur-pair(ps, spare[0], sts[0], convn, deltan) : 0));
-    def q38-recur-sweep(ps, sts, spare, geo, fwd) = {
+    def q38-recur-sweep(ps, sts, spare, geo, fwd) = gpu-lease-turn("qwen recurrent copy", () => {
         let n = q38-recur-go(ps, sts, spare, q38-recur-conv-n(geo), q38-recur-delta-n(geo), fwd, 0);
         metal_submit();
         metal_sync();
         n;
-    };
+    });
     def q38-state-mark(ps, sts, spare, geo) = q38-recur-sweep(ps, sts, spare, geo, 1);
     def q38-state-restore(ps, sts, spare, geo) = q38-recur-sweep(ps, sts, spare, geo, 0);
     def q38-free-spare-row(row) = (Number) q38-free-handle(row[0]) + (Number) q38-free-handle(row[1]);

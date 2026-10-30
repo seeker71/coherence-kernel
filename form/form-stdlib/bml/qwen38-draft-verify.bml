@@ -25,27 +25,27 @@ section [form.bml] {
  class Qwen38DraftVerify {
   // The ids enter at pos and every layer's state and KV take them; no head is read. 1 when the carrier
   // settled the work, 0 when it did not (the span walk is not retried on a state it may have mutated).
-  def q38dv-span(ctx, sts, ids, pos) {
+  def q38dv-span(ctx, sts, ids, pos) = gpu-lease-turn("qwen draft span", () => {
    let n = len(ids);
    q38pc-wait-policy();
    metal_batch_concurrent();
    q38-lm-embed(ctx[0], ctx[1], ctx[2], ctx[4], ids, 0);
    q38-lm-layers-span(ctx[0], ctx[1], ctx[2], ctx[3], sts, 0, ctx[2][21], n, pos);
    q38pc-sync(pos, n);
-  }
+  });
   def q38dv-fits?(ctx, ids) = (len(ids) > 0) && (len(ids) <= q38-ctx-span(ctx));
   // State only: the re-run after a restore, over the accepted prefix.
   def q38dv-advance(ctx, sts, ids, pos) = q38dv-fits?(ctx, ids) ? q38dv-span(ctx, sts, ids, pos) : 0;
   // The head after row t, as the session reads its own: base, or with the rank-one carrier the session wears
   // (as fcmd-pending does). The settle closed the batch, so each row re-arms it before its barrier-bearing
   // gather and head, or their enqueues refuse and the argmax is read from a buffer nothing wrote.
-  def q38dv-row(ctx, carrier, t) {
+  def q38dv-row(ctx, carrier, t) = gpu-lease-turn("qwen draft head", () => {
    metal_batch_concurrent();
    q38-gather(ctx[0], ctx[1], ctx[2], t, 1);
    nil?(carrier) ? q38-head(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6]) : q38-head-adapted(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6], fcmd-adapter(carrier));
    let bytes = metal_buf_read(ctx[1][31], 0, 4);
    q38pc-head-bytes?(bytes) ? kth-u32at(bytes, 0) : nothing();
-  }
+  });
   def q38dv-rows(ctx, carrier, t, n, out) = t >= n ? out : q38dv-rows-next(ctx, carrier, t, n, out, q38dv-row(ctx, carrier, t));
   def q38dv-rows-next(ctx, carrier, t, n, out, id) = nothing?(id) ? nothing() : q38dv-rows(ctx, carrier, t + 1, n, append(out, [id]));
   // The k+1 argmaxes for ids = [pending, d1..dk] at pos, or nothing() when the span did not settle or a head
