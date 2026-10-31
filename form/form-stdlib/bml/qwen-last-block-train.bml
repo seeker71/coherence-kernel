@@ -30,6 +30,7 @@ import form-stdlib/q8-0-msl.fk;
 import form-stdlib/qwen35-encode-indexed.fk;
 import native/metal/qwen35-crystal.fk;
 import form-stdlib/json.fk;
+import form-stdlib/gpu-lease.bml;
 section [form.bml] {
  class QwenLastBlockTrain {
   def qlbt-cut-bytes() = 1200;
@@ -133,7 +134,7 @@ section [form.bml] {
   // design D at this T and rank: tape + gradient temporaries per token, logits + dz, P + dP, the pair x4 (param, grad, m, v)
   def qlbt-design-budget(geo, T, r) = T * 2 * 139264 * 4 + 2 * geo[19] * T * 4 + 2 * geo[12] * T * T * 4 + 4 * 4 * r * (geo[10] + geo[0]);
   // A from the hash at aScale, B = +0, the moments +0 (serial batch; synced)
-  def qlbt-seed(o, aScale) {
+  def qlbt-seed(o, aScale) = gpu-lease-turn("qwen training seed", () => {
    let rec = record_get(o, "rec");
    let fa = metal_enqueue(record_get(o, "fill"), md-bind([rec[3]], [rec[6] * rec[7], 11, md-f32-bits(aScale)]), rec[6] * rec[7]);
    let zb = nam-zero(rec[4], rec[7] * rec[8]);
@@ -142,10 +143,10 @@ section [form.bml] {
    let z3 = nam-zero(record_get(o, "mB"), rec[7] * rec[8]);
    let z4 = nam-zero(record_get(o, "vB"), rec[7] * rec[8]);
    nam-sync();
-  }
+  });
   // ── one loss evaluation of a row: the block's forward from the capture, the pair, output_norm, output.weight, the token losses ──
   // answers the per-token losses (n floats; masked tokens read 0), or nothing; dz is left on the device for the backward
-  def qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, row, xin) {
+  def qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, row, xin) = gpu-lease-turn("qwen training forward", () => {
    let n = qlbt-row-n(row);
    let d = geo[0];
    let vocab = geo[19];
@@ -161,11 +162,11 @@ section [form.bml] {
    let raw = metal_buf_read(record_get(o, "loss"), 0, n * 4);
    let losses = applied == 1 && wrote == len(xin) && len(raw) == n * 4 ? qlt-f32s(raw, n) : [];
    len(losses) == n ? losses : nothing();
-  }
+  });
   def qlbt-mean(losses, count) = nothing?(losses) || count <= 0 ? nothing() : sum(losses) / (count + 0.0);
   // ── the backward at the point the last qlbt-eval left in sx and dz (serial batch; synced) ──
   // inv per row (nam_rms into a scratch norm), dh = (1/count) dz W^T over Q8_0, dres = rms backward, then the pair's dB, du, dA
-  def qlbt-backward(geo, sx, o, onormTv, projTv, n, count) {
+  def qlbt-backward(geo, sx, o, onormTv, projTv, n, count) = gpu-lease-turn("qwen training backward", () => {
    let d = geo[0];
    let ff = geo[10];
    let r = record_get(o, "r");
@@ -179,16 +180,16 @@ section [form.bml] {
    let gu = nam-mm(record_get(o, "dres"), rec[4], record_get(o, "du"), n, d, r, 0, 1, scale, 0);
    let ga = nam-mm(sx[13], record_get(o, "du"), record_get(o, "dA"), ff, n, r, 1, 0, 1.0, 0);
    th < 0 ? form_error("qwen last-block train: the transposed head dispatch was refused") : nam-sync();
-  }
+  });
   // the gradient's health: [non-finite entries, |g|^2] over dA and dB
-  def qlbt-grad-health(o) {
+  def qlbt-grad-health(o) = gpu-lease-turn("qwen training gradient health", () => {
    let rec = record_get(o, "rec");
    let a = nam-stats(record_get(o, "dA"), rec[6] * rec[7]);
    let b = nam-stats(record_get(o, "dB"), rec[7] * rec[8]);
    [a[0] + b[0], a[1] + b[1]];
-  }
+  });
   // one Adam step on A and B (step counts from 1); refuses a non-finite gradient by name, the weights unchanged
-  def qlbt-step(o, lr, step) {
+  def qlbt-step(o, lr, step) = gpu-lease-turn("qwen training update", () => {
    let rec = record_get(o, "rec");
    let health = qlbt-grad-health(o);
    health[0] > 0 ? form_error("qwen last-block train: non-finite gradient at step " ++ step.str() ++ "; weights unchanged") : {
@@ -197,9 +198,9 @@ section [form.bml] {
     let synced = nam-sync();
     math_sqrt(health[1]);
    };
-  }
+  });
   // ── the serving head's own loss on one token: the block output row t into the serving bs, output_norm, output.weight, CE ──
-  def qlbt-serve-loss(ctx, o, sx, t, target) {
+  def qlbt-serve-loss(ctx, o, sx, t, target) = gpu-lease-turn("qwen training serving loss", () => {
    let ps = ctx[0];
    let bs = ctx[1];
    let geo = ctx[2];
@@ -214,7 +215,7 @@ section [form.bml] {
    metal_enqueue(record_get(o, "ce"), md-bind16([bs[28], record_get(o, "t1"), record_get(o, "dz1"), record_get(o, "l1"), record_get(o, "m1")], [geo[19], 1, md-f32-bits(1.0), md-f32-bits(1.0)], 32, 0, 1, 1), 1);
    let raw = metal_buf_read(record_get(o, "l1"), 0, 4);
    len(raw) == 4 && len(rowb) == d * 4 ? ln-f32-decode(ln-u32-le(raw, 0)) : nothing();
-  }
+  });
   // the same-sign u32 distance of two f32 values (0 when they are one word)
   def qlbt-ulp(a, b) {
    let wa = md-f32-bits(a);
