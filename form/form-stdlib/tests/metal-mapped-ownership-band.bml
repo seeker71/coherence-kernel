@@ -1,0 +1,39 @@
+// Tiny real Metal witness: exact view, private COW, pending-work release,
+// explicit shared-file writes and retired handles. No model is opened.
+// Verdict 31. Handle retirement does not measure final framework deallocation.
+import form-stdlib/core.fk;
+import form-stdlib/metal-door.fk;
+import form-stdlib/metal-carrier.bml;
+import form-stdlib/gpu-lease.bml;
+section [form.bml] {
+ class MetalMappedOwnershipBand {
+  def mmo-bit(ok,bit) = ok ? bit : 0;
+  def mmo-run() = gpu-lease-turn("mapped ownership witness",() => {
+   let path=temp_dir() ++ "/mapped-ownership-" ++ host_pid().str();
+   let original="___abcdefg___";
+   let wrote=write_file_text(path,original);
+   let source=metal_buf_from_file(path,3,7);
+   let output=metal_buf_alloc(7);
+   let exact=metal_buf_read(source,0,7) == "abcdefg";
+   let changed=metal_buf_write(source,0,"Z");
+   let cow=changed == 1 && read_file(path) == original && metal_buf_read(source,0,7) == "Zbcdefg";
+   let pipe=metal_pipeline("#include <metal_stdlib>\nusing namespace metal;\nkernel void copy_view(device const uchar *s [[buffer(0)]], device uchar *d [[buffer(1)]], uint i [[thread_position_in_grid]]) { if(i<7) d[i]=s[i]; }","copy_view");
+   let queued=metal_enqueue(pipe,md-bind([source,output],[]),7);
+   // Free settles the pending copy before retiring the mapped handle.
+   let freed=metal_buf_free(source);
+   let copied=queued > 0 && freed == 1 && metal_buf_read(output,0,7) == "Zbcdefg" && read_file(path) == original;
+   let shared=metal_buf_from_file(path,3,0 - 7);
+   let shared-write=metal_buf_write(shared,0,"Y");
+   let shared-free=metal_buf_free(shared);
+   let persisted=shared-write == 1 && shared-free == 1 && read_file(path) == "___Ybcdefg___";
+   let output-free=metal_buf_free(output);
+   let stale=metal_buf_free(source);
+   let removed=host_path_remove(path);
+   let verdict=mmo-bit(exact,1)+mmo-bit(cow,2)+mmo-bit(copied,4)+mmo-bit(persisted,8)+mmo-bit(output-free == 1 && stale == 0 && removed == 0 && fs_exists(path) == 0,16);
+   print(["mapped-ownership",verdict]);
+   verdict == 31 ? verdict : form_error("mapped ownership witness failed");
+  });
+ }
+ let admitted=mca-admit(".hearth/mapped-carrier.log",".hearth/mapped-carrier.err");
+ mmo-run();
+}

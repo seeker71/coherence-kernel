@@ -524,14 +524,17 @@ section [form.bml] {
     // batch, so what it reads is read where it is produced and the prompt is never run twice. phase 0 follows layer l's FFN (the residual in
     // bs[33] holds that layer's output for the n positions of the span that begins at pos0); phase 1 follows the last layer (l = nL). The walk
     // with no tap is the walk it always was.
-    def q38-lm-layers-span-t(ps, bs, geo, lays, sts, l, nL, n, pos0, fold, tap) = l >= nL ? (nothing?(tap) ? 1 : tap(1, l, n, pos0)) : {
+    def q38-lm-layers-span-t(ps, bs, geo, lays, sts, l, nL, n, pos0, fold, tap) = q38-lm-layers-range-t(ps,bs,geo,lays,sts,l,nL,nL,n,pos0,fold,tap);
+    // A range preserves the full model boundary: the final tap runs once,
+    // after its actual last layer, even when settled turns divide the walk.
+    def q38-lm-layers-range-t(ps, bs, geo, lays, sts, l, end, nL, n, pos0, fold, tap) = l >= end ? (l >= nL && !nothing?(tap) ? tap(1,l,n,pos0) : 1) : {
         kth-full?(l, geo[22]) ? q38-full-attn-span(ps, bs, geo, nth(lays, l), nth(sts, l), pos0, n) : q38-linear-attn-span-f(ps, bs, geo, nth(lays, l), nth(sts, l), n, fold);
         q38-ffn-span(ps, bs, geo, nth(lays, l), n);
         nothing?(tap) ? 0 : tap(0, l, n, pos0);
         // the hand-over (decode's, below): the open batch goes to the queue every q38-submit-every() layers without waiting, so the device runs the
         // early layers while the host encodes the later ones; the host's ~1400 dispatches no longer run before the first begins
-        let handed = q38-handover-after((Number) l + (Number) 1, nL);
-        q38-lm-layers-span-t(ps, bs, geo, lays, sts, (Number) l + (Number) 1, nL, n, pos0, fold, tap);
+        let handed = q38-handover-after((Number) l + (Number) 1, end);
+        q38-lm-layers-range-t(ps, bs, geo, lays, sts, (Number) l + (Number) 1, end, nL, n, pos0, fold, tap);
     };
     def q38-lm-layers-span-f(ps, bs, geo, lays, sts, l, nL, n, pos0, fold) = q38-lm-layers-span-t(ps, bs, geo, lays, sts, l, nL, n, pos0, fold, nothing());
     def q38-lm-layers-span(ps, bs, geo, lays, sts, l, nL, n, pos0) = q38-lm-layers-span-f(ps, bs, geo, lays, sts, l, nL, n, pos0, 1);
@@ -790,21 +793,35 @@ section [form.bml] {
     // the same walk with a tap (q38-lm-layers-span-t): each slice's layers run with it, inside the slice's own batch
     def q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, ids, pos, span, tap) = (Comparable) len(ids) == 0 ? [pos, 1] : {
         let n = len(ids) < span ? len(ids) : span;
-        let complete = gpu-lease-turn("qwen prefill slice", () => q38-prefill-slice-t(ps,bs,geo,lays,sts,embTv,take(n,ids),pos,tap));
+        let complete = q38-prefill-slice-t(ps,bs,geo,lays,sts,embTv,take(n,ids),pos,tap);
         !complete ? [pos,0] : {
             q38oo-stage(("model-prefill-positions-" + ((Number) pos + (Number) n).str()), 8388623);
             q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, drop(n, ids), (Number) pos + (Number) n, span, tap);
         };
     };
-    def q38-prefill-slice-t(ps,bs,geo,lays,sts,embTv,ids,pos,tap) {
+    // Wide token slices keep their matmuls. Eight-layer turns bound the wait
+    // experienced by another session's decode; model/KV/scratch stay owned.
+    def q38-prefill-turn-layers() = 8;
+    def q38-prefill-turns(l,nL,width,run) = l >= nL ? 1 : width <= 0 ? 0 : {
+        let end = min2(nL,l + width);
+        run(l,end) ? q38-prefill-turns(end,nL,width,run) : 0;
+    };
+    def q38-prefill-slice-t(ps,bs,geo,lays,sts,embTv,ids,pos,tap) = q38-prefill-turns(0,geo[21],q38-prefill-turn-layers(),(l,end) => gpu-lease-turn("qwen prefill layers",() => {
         let n = len(ids);
         metal_batch_concurrent();
-        q38pc-stage(pos, "embed-begin");
-        q38-lm-embed(ps, bs, geo, embTv, ids, 0);
-        q38pc-stage(pos, "layers-begin");
-        q38-lm-layers-span-t(ps, bs, geo, lays, sts, 0, geo[21], n, pos, 1, tap);
-        q38pc-sync(pos, n);
-    }
+        if l == 0 then {
+            q38pc-stage(pos,"embed-begin");
+            q38-lm-embed(ps,bs,geo,embTv,ids,0);
+            q38pc-stage(pos,"layers-begin");
+        } else 0;
+        q38-lm-layers-range-t(ps,bs,geo,lays,sts,l,end,geo[21],n,pos,1,tap);
+        if end == geo[21] then q38pc-sync(pos,n) else {
+            let drained=metal_sync();
+            let frame=q38pc-frame(metal_status());
+            let live=metal_live();
+            drained > 0 && q38pc-settled(live) && (frame == "completed" || frame == "released") ? 1 : q38pc-refuse(pos,n,drained,frame,live);
+        };
+    }));
     def q38-prefill-span-sliced(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span) = q38-prefill-span-sliced-t(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span, nothing());
     def q38-prefill-span-sliced-t(ps, bs, geo, lays, sts, embTv, onormTv, projTv, ids, pos, span, tap) = span <= 0 || (Comparable) len(ids) == 0 ? [-1, pos] : {
         q38pc-wait-policy();

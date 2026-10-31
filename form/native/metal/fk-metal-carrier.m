@@ -1008,11 +1008,9 @@ static long long fk_buf_register(id<MTLBuffer> b, void *map_base, size_t map_len
             fk_err([NSString stringWithFormat:
                 @"buffer handle protocol exhausted at %d live or retired slots",
                 FK_BUF_SLOT_MAX]);
-            if (map_base != NULL) { munmap(map_base, map_len); }
             return 0;
         }
         if (!fk_buf_tables_reserve((size_t)[fk_buf_objs count] + 1)) {
-            if (map_base != NULL) { munmap(map_base, map_len); }
             return 0;
         }
         [fk_buf_objs addObject:b];
@@ -1103,7 +1101,9 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
         id<MTLBuffer> b = [fk_dev newBufferWithBytesNoCopy:m
                                                     length:(NSUInteger)span
                                                    options:MTLResourceStorageModeShared
-                                               deallocator:nil];
+                                               deallocator:^(void *pointer, NSUInteger length) {
+                                                   munmap(pointer, (size_t)length);
+                                               }];
         if (b != nil) {
             return fk_buf_register(b, m, (size_t)span, (unsigned long long)(off - base),
                                    (unsigned long long)len, shared_file ? 2 : 1);
@@ -1466,7 +1466,9 @@ long long fk_metal_buf_free_external(long long h) {
         // handle settles. Unrelated resources do not participate in this release.
         if (fk_buffer_settle(h) < 0) { return -1; }
         fk_bufmeta *m = &fk_buf_meta[slot - 1];
-        if (m->map_base != NULL) { munmap(m->map_base, m->map_len); }
+        // The MTLBuffer owns its mapped pages until Metal releases its last
+        // reference. Its deallocator unmaps them; retiring this Form handle
+        // must not unmap storage while a framework resource still names it.
         if (m->nocopy) { fk_nocopy_bufs--; }
         m->map_base = NULL;
         m->map_len = 0;
