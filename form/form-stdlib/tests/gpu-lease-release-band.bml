@@ -1,0 +1,38 @@
+// A new holder may acquire the public path during the old holder's cleanup.
+// Scratch directories only; no GPU or shared lease is touched. Expected: 31.
+import form-stdlib/gpu-lease.bml;
+section [form.bml] {
+ class GpuLeaseReleaseBand {
+  def glr-bit(ok,bit) = ok ? bit : 0;
+  def glr-new(lock,token) {
+   let made=host_dir_mkdir(lock);
+   gpl-publish(lock,token,"release-band",now_unix_ms());
+  }
+ }
+ let root=host_temp_dir() ++ "/gpu-release-" ++ host_pid().str();
+ let made=host_dir_mkdir(root);
+ let lock=root ++ "/lock";
+ let own=glr-new(lock,"first");
+ let refused=gpu-lease-release(lock,"not-owner");
+ let c1=glr-bit(refused[0] == "refused" && gpl-read(lock)[1] == "first",1);
+ let released=gpl-release-remove(lock,"first",gone => {
+  let next=glr-new(lock,"second");
+  host_dir_rmdir(gone);
+ });
+ let c2=glr-bit(released == ["released","first"] && gpl-read(lock)[1] == "second",2);
+ let retained=gpl-release-remove(lock,"second",gone => -1);
+ let c4=glr-bit(retained[0] == "released" && retained[2] == "cleanup-retained" && host_path_exists(lock) == 0 && gpl-read(retained[3])[1] == "second",4);
+ let again=glr-new(lock,"third");
+ let blocked=gpl-gone-dir(lock) ++ "/released-third";
+ let collision=host_dir_mkdir(blocked);
+ let evidence=write_file(blocked ++ "/held","keep");
+ let failed=gpu-lease-release(lock,"third");
+ let c8=glr-bit(failed[0] == "refused" && failed[1] == "release-rename-failed" && gpl-read(lock)[1] == "third" && read_file(blocked ++ "/held") == "keep",8);
+ let clear=host_dir_rmdir(blocked);
+ let normal=gpu-lease-release(lock,"third");
+ let c16=glr-bit(normal == ["released","third"] && host_path_exists(lock) == 0,16);
+ let cleanup=host_dir_rmdir(root);
+ let verdict=c1+c2+c4+c8+c16;
+ print(["gpu-release",verdict]);
+ verdict == 31 && cleanup == 0 ? verdict : form_error("GPU release ownership or cleanup failed");
+}

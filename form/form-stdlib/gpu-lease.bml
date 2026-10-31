@@ -31,6 +31,17 @@
 //////////////////////////////////////////////////////////////////////
 import form/form-stdlib/core.fk;
 section [form.bml] {
+  // Synchronous intent follows this call and restores on every exit. The
+  // queue remains shared; an interactive ticket receives a bounded head start.
+  let GPL-INTENT = record_new(0,"interactive",0);
+  def gpu-lease-interactive?() = record_get(GPL-INTENT,"interactive") == 1;
+  def gpu-lease-with-interactive(run) {
+   let saved=record_get(GPL-INTENT,"interactive");
+   let held=record_set(GPL-INTENT,"interactive",1);
+   defer record_set(GPL-INTENT,"interactive",saved);
+   run();
+  }
+  def gpl-order-stamp(stamp) = max2(0,stamp - (gpu-lease-interactive?() ? 500 : 0));
   // ONE path for the whole machine: the GPU is shared by every checkout and every session, so the lease is too
   // (a relative path gave each checkout its own lock, and two checkouts never excluded each other)
   def gpu-lease-path() = "/tmp/form-gpu.lock";
@@ -108,14 +119,16 @@ section [form.bml] {
   def gpu-lease-take(lock, label, wait-ms) = gpu-lease-take-with(lock, label, [wait-ms, gpl-poll-ms(), gpl-unowned-ms(), gpl-markers()]);
   def gpu-lease-take-with(lock, label, opts) {
    let t0 = host_monotonic_ms();
-   let queued = gpl-enqueue(lock, t0);
+   let queued = gpl-enqueue(lock, gpl-order-stamp(t0));
    let owner = gpl-read(lock);
    let ans = (String) owner[0] == "rec" && owner[2] == host_pid() && gpl-inheritable?(owner) ? ["refused","already-held-by-this-process",owner[1]] : queued < 0 ? ["refused", "cannot-make-lock",lock] : gpl-go([lock, label, opts, t0, t0 + opts[0]], 0);
    let cleared = host_path_remove(gpl-wait-dir(lock) ++ "/" ++ host_pid().str());
    ans;
   }
-  // A settled operation rejoins behind existing waiters. Keep the process
-  // start on line one so older clients still recognize a waiting peer.
+  // Line two is the queue-order clock. Ordinary turns remain FIFO; interactive
+  // intent moves that clock back by at most 500 ms. A waiting ordinary ticket
+  // therefore ages ahead of newly arriving interactive tickets. The unchanged
+  // two-line format and comparison also work with existing FIFO clients.
   def gpl-enqueue(lock, stamp) {
    let made = host_dir_mkdir(gpl-wait-dir(lock));
    write_file(gpl-wait-dir(lock) ++ "/" ++ host_pid().str(), gpl-me-start().str() ++ gpl-nl() ++ stamp.str());
@@ -204,7 +217,20 @@ section [form.bml] {
   def gpl-not-mine(r) = (String) r[0] == "rec" ? ["refused", "not-yours", r[1]] : ["refused", "no-lease"];
   def gpu-lease-release(lock, token) = gpl-release-of(lock, token, gpl-read(lock));
   def gpl-release-of(lock, token, r) = (Comparable) gpl-mine?(r, token) == 1 ? gpl-release-now(lock, token) : gpl-not-mine(r);
-  def gpl-release-now(lock, token) = (Comparable) host_dir_rmdir(lock) == 0 ? ["released", token] : ["refused", "rmdir-failed", token];
+  // Detach the owned directory atomically before recursive cleanup. Another
+  // waiter may recreate the public path immediately; its lease is independent
+  // of both this cleanup and the host remover's final existence check.
+  def gpl-release-now(lock, token) = gpl-release-remove(lock,token,path => host_dir_rmdir(path));
+  def gpl-release-remove(lock,token,remove) {
+   let made = host_dir_mkdir(gpl-gone-dir(lock));
+   let gone = gpl-gone-dir(lock) ++ "/released-" ++ token;
+   host_path_rename(lock,gone) == 0 ? gpl-release-cleaned(token,gone,remove(gone)) : ["refused","release-rename-failed",token];
+  }
+  def gpl-release-cleaned(token,gone,removed) = removed == 0 ? ["released",token] : {
+   let result=["released",token,"cleanup-retained",gone];
+   let noted=print_str("gpu-lease cleanup retained " ++ value_str([token,gone,removed]) ++ gpl-nl());
+   result;
+  };
   // give back what a take answered; a refused take holds nothing and gives back nothing
   def gpu-lease-give(lock, ans) = (Comparable) gpu-lease-held?(ans) == 1 ? gpu-lease-release(lock, gpu-lease-token(ans)) : ["refused", "no-lease"];
   // ---- for a door: take on the one real lock, say so on the door's own stdout in its `name  value` line shape ----
