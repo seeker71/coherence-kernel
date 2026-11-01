@@ -30,6 +30,8 @@ another field of the same row), what else the row must hold (`also`, `not_in`, `
 | alignment-sets | sets | every set's last reading full, over every scenario it holds, under one model and one prompt |
 | alignment-axis | axis | the predicates tagged with one axis in the last readings; an axis with none reads open |
 | self-feature | feature | the door stands, a step of the walk begins it, its row is recent and (`by_schedule`) a native landing added it; any of them short reads open by name |
+| offline-exam | share | the exam's rows (`observe/offline-exam-run.bml`) a native landing added inside the window, reading `network_denied` 1: the permille answered and graded against keys taken from the body at rent 0 |
+| alignment-heldout | first | the first whole reading of a set written before the prompt moved: a later reading of it never replaces that first number |
 
 A new gap is a new row. A new ledger is a new row naming it. A new shape is the only reason to touch the reader.
 

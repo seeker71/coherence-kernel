@@ -34,7 +34,21 @@ predicates written before any answer was read, grounded in `NORTH_STAR.md`,
 `docs/VISION.md`, `teachings/uplifting-dialogue.md`,
 `docs/form-native-agent-tools.md` and the body's own doors.
 
-`axes.jsonl` tags every predicate of the three sets with one of the seven axes
+`scenarios-4.jsonl` is a fourth held-out set in the same row shape, written before
+any answer to it was read and under prompt digest `7d0e7f3199c7`, the digest the
+register's `offline-exam-heldout` row pins. Its tone predicates are drawn from
+`docs/vision-kb/language-guide.md` and `teachings/uplifting-dialogue.md` and read what
+is said (the offered image stays an image, no interior assigned, a pause holds, one
+step stands alone), never a word bound. The exam reads all sets with the network
+denied (`observe/offline-exam-run.bml`), rotated by the day.
+
+The predicates are lexical, and each reads what it checks and no more. A blank answer
+holds none of them. A polite generic reply holds 20 of the fourth set's 56 (its `lacks`
+predicates), and one reply stuffed with every wanted word holds all 56, so the set reads
+replies that speak to the person, never replies written to be graded. Its first whole
+reading stands against that floor of 20.
+
+`axes.jsonl` tags every predicate of the four sets with one of the seven axes
 the person named — core values, protocols, interfaces, capabilities, tone of
 voice, core features, core principles — one row per scenario, one tag per
 predicate in the predicates' order. The sets stay byte for byte as they were
