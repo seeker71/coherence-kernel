@@ -99,6 +99,18 @@ section [form.bml] {
   // the body reads that as an answer with no evidence. A key is four characters,
   // and the door resolves it back to the path it stands for — so the citation is
   // the body's own mapping rather than the voice's memory of a filename.
+  // The receipts ranked first carry more than an opening and one line: the lines that hold the most terms, because a measured table stands far past a receipt's opening,
+  // and an answer read from the opening alone can contradict the receipt it cites.
+  def fgs-deep-receipts() = 2;
+  def fgs-deep-lines() = 12;
+  def fgs-line-rows(text, terms) = map(l => [fgs-hits(l, terms), substring(l, 0, fgs-min(len(l), fgs-line-cap()))], filter(l => len(trim(l)) > 0, split-on(text, "\n")));
+  def fgs-dense(path, terms) = str-join-with(map(r => r[1], fgs-top-lines(fgs-line-rows(read_file(path) ?? "", terms), fgs-deep-lines())), "\n");
+  def fgs-top-lines(rows, k) = fgs-top-by(rows, k, []);
+  def fgs-top-by(rows, k, acc) = nil?(rows) || k < 1 ? acc : fgs-top-at(rows, k, acc, fgs-best-line(rows, rows[0]));
+  def fgs-top-at(rows, k, acc, best) = best[0] < 2 ? acc : fgs-top-by(fgs-without-line(rows, best), k - 1, append(acc, [best]));
+  def fgs-best-line(rows, best) = nil?(rows) ? best : fgs-best-line(rows[1:], rows[0][0] > best[0] ? rows[0] : best);
+  def fgs-without-line(rows, row) = nil?(rows) ? [] : (String) rows[0][1] == row[1] ? rows[1:] : cons(rows[0], fgs-without-line(rows[1:], row));
+  def fgs-deepen(rows, terms) = map(k => k < fgs-deep-receipts() ? [rows[k][0], rows[k][1], rows[k][2], fgs-dense(rows[k][1], terms)] : rows[k], range(0, len(rows)));
   def fgs-index(rows, opening) = fgs-index-at(rows, opening, 1);
   def fgs-index-at(rows, opening, k) = nil?(rows) ? "" : ("--- [R" ++ k.str() ++ "] " ++ rows[0][1] ++ " (terms matched: " ++ rows[0][2].str() ++ ")\n" ++ fgs-opening(rows[0][1], opening) ++ "\n" ++ (len(rows[0]) > 3 && (String) rows[0][3] != "" ? "[further in] " ++ rows[0][3] ++ "\n" : "") ++ fgs-index-at(rows[1:], opening, k + 1));
   def fgs-packet(enquiry, enrichment, index) = enquiry ++ "\n\n[Native Form grounding: one in-process enrich reading of the enquiry's exact terms. Use the observed definitions and relations.]\n" ++ enrichment ++ "\n[Receipts in this body whose text carries the terms, each with its key, its opening bytes and a line from further in. Cite by key, as [R1], only what these bytes support, and every key that supports a point; name what would need the full receipt.]\n" ++ index ++ "\nThis turn has no tools and no file access; everything usable is in this message. Answer the enquiry itself, point by point, from the material above, citing a receipt by its key wherever its bytes support the point. After the answer, say plainly what the material does not establish.\n";
@@ -128,19 +140,25 @@ section [form.bml] {
   def fgs-pinned?(enquiry) = (String) fgs-one-line(read_file(fgs-pinned()) ?? "") == fgs-one-line(enquiry);
   def fgs-ask-movement(enquiry) = fgs-pinned?(enquiry) ? "S1 pinned " ++ substring(hw-day-in(hw-zone-ms(), now_unix_ms()), 0, 10) : "S1 enquiry";
   // held: what a native lane already answered (form-cli's token route or grounded index), with its lane; "" when none did
-  def fgs-ask-request(enquiry, held, heldLane) = json-node-object([
-   fhn-s("enquiry", enquiry),
-   fhn-s("terms", fgs-terms-of(enquiry)),
-   fhn-n("receipts", fgs-ask-receipts()),
-   fhn-n("reply_budget", fgs-bound-of(enquiry)),
-   fhn-s("movement", fgs-ask-movement(enquiry)),
-   fhn-s("via", "form-cli-ask"),
-   fhn-s("held", held),
-   fhn-s("held_lane", heldLane)]);
+  // An enquiry with no word of four letters has nothing to ground it: no voice is asked, the terms are its own words, and the row still lands. An ask checks the voice first (voice_state).
+  def fgs-ask-request(enquiry, held, heldLane) {
+   let terms = fgs-terms-of(enquiry);
+   let ungrounded = (String) terms == "" && (String) held == "";
+   json-node-object(append([
+    fhn-s("enquiry", enquiry),
+    fhn-s("terms", (String) terms == "" ? trim(enquiry) : terms),
+    fhn-n("receipts", fgs-ask-receipts()),
+    fhn-n("reply_budget", fgs-bound-of(enquiry)),
+    fhn-s("movement", fgs-ask-movement(enquiry)),
+    fhn-s("via", "form-cli-ask"),
+    fhn-n("voice_check", 1),
+    fhn-s("held", held),
+    fhn-s("held_lane", heldLane)], ungrounded ? [fhn-s("voice_state", "no-word-to-ground: the enquiry holds no word of four letters")] : []));
+  }
   // what the person reads: the answer, then the lane and where its evidence stands
   def fgs-ask-text(report) {
    let answer = read_file(fhn-text(report, "answer")) ?? "";
-   let said = len(trim(answer)) > 0 ? answer : "[ask: no voice answered: " ++ fhn-text(report, "oracle") ++ "; the grounded packet stands at " ++ fhn-text(report, "packet") ++ "]";
+   let said = len(trim(answer)) > 0 ? answer : "[ask: no voice answered: " ++ fhn-text(report, "oracle") ++ " (" ++ fhn-text(report, "oracle_reason") ++ "); the grounded packet stands at " ++ fhn-text(report, "packet") ++ "]";
    said ++ "\nlocal-lane:" ++ fhn-text(report, "lane") ++ "\nsynthesis-lane:grounded-synthesis\nreceipts-offered:" ++ fhn-count(report, "citation_keys_offered").str() ++ " keys-used:" ++ fhn-count(report, "citation_keys_used").str() ++ "\nevidence:" ++ fhn-text(report, "evidence");
   }
   // ---- the report row of one enquiry, in the rent ledger. The enquiry stands as the pinned path, else as its digest: the row is tracked and public, the words stay with who asked ----
@@ -209,6 +227,17 @@ section [form.bml] {
   def fgs-share-kind(root, job, doc) = pt-read(root, fhn-at(job, "share-meter"), pt-claude-transcript(fhn-at(job, "claude-home"), fhn-text(doc, "session_id")), fgs-doc-total(doc));
   def fgs-ledger() = "learn/query-recipes.jsonl";
   def fgs-question?(enquiry) = qc-question?(enquiry);
+  def fgs-short?(enquiry) = qc-short?(enquiry);
+  // A second decoding session runs about twelve times slower than one, and the wait for admission is minutes, so an ask met by a busy voice says so at once:
+  // another live process holds the weights, the GPU's lease has a live owner, or the memory governor would hold this load. "" is a free voice.
+  def fgs-voice-why(heldElsewhere, leaseLive, memory) = heldElsewhere ? "voice-busy: another live process holds its weights" : leaseLive ? "voice-busy: the GPU lease has a live owner" : !memory[0] ? "voice-held: " ++ memory[1] : "";
+  def fgs-voice-state() {
+   let path = mr-path(mr-find(fcnv-default-model()));
+   let held = adm-held-elsewhere?(adm-root(), host_pid(), path);
+   let verdict = held ? [] : mg-ask(adm-need-for(dls-weights-bytes(path), false, 0));
+   fgs-voice-why(held, (String) gpl-judge(gpu-lease-path())[0] == "live", held ? [true, ""] : [mg-granted?(verdict), verdict[1]]);
+  }
+  def fgs-voice-of(request, usePrior, askOracle) = usePrior || !askOracle || !json-object-has?(request, "voice_check") ? "" : json-object-has?(request, "voice_state") ? fhn-text(request, "voice_state") : fgs-voice-state();
   def fgs-remembered(enquiry) = {
    let raw = read_file(fgs-ledger());
    let step = qlr-serve(raw ?? "", enquiry);
@@ -247,16 +276,19 @@ section [form.bml] {
    let opening = json-object-has?(request, "opening_bytes") ? fhn-number(request, "opening_bytes") : fgs-opening-bytes();
    ((String) trim(enquiry) == "") || ((String) trim(terms) == "") ? form_error("grounded synthesis needs enquiry and terms") : fgs-start(enquiry, terms, seconds, limit, askOracle, allowProvider, allowRepair, effort, opening, request);
   }
+  // A packet holds the enquiry's words: it stands in the body's ignored spool, and in the host's temp directory when asked from any other directory, whose repository may not ignore it.
+  def fgs-spool(root) = (Comparable) fs_is_dir(fhn-at(root, "receipts")) == 1 ? fhn-at(root, ".form-heal") : temp_dir() ++ "/form-heal";
   def fgs-start(enquiry, terms, seconds, limit, askOracle, allowProvider, allowRepair, effort, opening, request) {
    let started = now_unix_ms();
    let root = fhn-root();
-   let spool = fhn-at(root, ".form-heal");
+   let spool = fgs-spool(root);
    let made = fs_mkdir(spool);
    let job = fhn-unique(spool, "grounded-");
    nothing?(job) ? form_error("grounded synthesis evidence directory unavailable") : 0;
    let saved = fhn-write-json(fhn-at(job, "snapshot.json"), json-node-object([fhn-s("root", root)]));
    let enrichment = fce-command(terms);
-   let rows = fgs-top(fgs-rank(fs_list(fhn-at(root, "receipts")) ?? [], fgs-clean(split-on(terms, " "))), limit);
+   let termList = fgs-clean(split-on(terms, " "));
+   let rows = fgs-deepen(fgs-top(fgs-rank(fs_list(fhn-at(root, "receipts")) ?? [], termList), limit), map(t => str-lower(t), termList));
    let packet = fgs-packet(enquiry, enrichment, fgs-index(rows, opening));
    let packetPath = fhn-at(job, "packet.txt");
    let wrote = write_file_text(packetPath, packet);
@@ -264,7 +296,9 @@ section [form.bml] {
    let heldBy = fgs-held(request, enquiry);
    let prior = heldBy[0];
    let usePrior = askOracle && ((Comparable) len(prior) > 0);
-   let oracle = usePrior ? fgs-substrate-oracle(prior) : askOracle ? fcnv-ask(packet,request) : fcnv-not-asked();
+   let voiceWhy = fgs-voice-of(request, usePrior, askOracle);
+   let voiceBusy = (String) voiceWhy != "";
+   let oracle = usePrior ? fgs-substrate-oracle(prior) : voiceBusy ? fcnv-none("unavailable", "", voiceWhy) : askOracle ? fcnv-ask(packet,request) : fcnv-not-asked();
    let nativeEvidence = askOracle ? fcnv-retain(job,oracle) : 0;
    let oracleDone = now_unix_ms();
    let bound = json-object-has?(request, "reply_budget") && ((String) oracle[0] == "incomplete") && ((String) trim(oracle[8]) != "");
@@ -301,7 +335,7 @@ section [form.bml] {
    let output = fgs-usage2(doc1, doc2, "output_tokens");
    let rent = (input + cacheWrite) + (cacheRead + output);
    let kind = qc-kind(enquiry);
-   let covered = fgs-own-row?(usePrior, askOracle, askProvider) ? qc-record-at(json-object-has?(request, "coverage_ledger") ? fhn-text(request, "coverage_ledger") : qc-ledger(), kind, source, lane, oracle[4], (String) source == "none" ? 0 : 1, rent, ended - started) : "voice";
+   let covered = voiceBusy || fgs-own-row?(usePrior, askOracle, askProvider) ? qc-record-at(json-object-has?(request, "coverage_ledger") ? fhn-text(request, "coverage_ledger") : qc-ledger(), kind, source, lane, oracle[4], (String) source == "none" ? 0 : 1, rent, ended - started) : "voice";
    json-node-object([
     fhn-s("source", source),
     fhn-s("lane", lane),
@@ -324,6 +358,7 @@ section [form.bml] {
     fhn-s("packet", packetPath),
     fhn-s("answer", answerPath),
     fhn-s("oracle", oracle[0]),
+    fhn-s("oracle_reason", oracle[7]),
     json-node-pair("native_generation",fcnv-metadata(oracle)),
     fhn-n("oracle_ms", oracleDone - grounded),
     fhn-n("oracle_tokens_evaluated", oracle[2]),
