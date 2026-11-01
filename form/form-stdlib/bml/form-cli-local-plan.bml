@@ -315,7 +315,23 @@ section [form.bml] {
    let bad=flp-first(0 .. len(items),i=>len(flp-delims(flp-case-call(items[i]),true))>0);
    nothing?(bad) ? flp-cases-owned(flp-case-plan(obj),goal,cases,reference) : ["case-delimiters","Case " + (bad+1).str() + ": " + flp-delims(flp-case-call(items[bad]),true) + "\nThe exact BML call: " + flp-case-call(items[bad]) + "\nUse function and arguments to let Form generate this expression, or complete the call before its witness is generated.",[]];
   }
-  def flp-cases-owned(obj,goal,cases,reference) = flp-parsed(obj,(goal ?? flp-text(obj,"goal")) + "\nDefinition manifest: " + flp-join(map(d=>d[0],flp-defs-of(obj,flp-strs(obj,"writable"))),", "),flp-cases-band(obj,json-array-elements(cases)),reference);
+  // A definition the reference writes as today's text, line for line, is no change: Form leaves it out of the manifest and
+  // the measured rung reads the rest. A plan with no change at all keeps its manifest for the gap-closed reading.
+  def flp-def-lines(text) = flp-join(map(trim,flp-lines(text))," \n");
+  def flp-unchanged?(d,reference) {
+   let bml=flp-file-bml?(d[2]);
+   let next=flp-ref-text(reference,d,bml);
+   let today=flp-exists?(d[2]) ? flp-ref-text(fhn-read(d[2]),d,bml) : nothing();
+   !nothing?(next) && !nothing?(today) && flp-def-lines(next)==flp-def-lines(today);
+  }
+  def flp-changed-only(obj,reference) {
+   let writable=flp-strs(obj,"writable");
+   let items=fcgp-array?(fcgp-node(obj,"definitions")) ? json-array-elements(json-object-get(obj,"definitions")) : [];
+   let kept=filter(n=>!flp-unchanged?(flp-def-of(n,writable),reference),items);
+   nil?(kept) || len(kept)==len(items) ? obj : oh-set(obj,"definitions",json-node-array(kept));
+  }
+  def flp-cases-owned(obj0,goal,cases,reference) = flp-cases-manifest(flp-changed-only(obj0,reference),goal,cases,reference);
+  def flp-cases-manifest(obj,goal,cases,reference) = flp-parsed(obj,(goal ?? flp-text(obj,"goal")) + "\nDefinition manifest: " + flp-join(map(d=>d[0],flp-defs-of(obj,flp-strs(obj,"writable"))),", "),flp-cases-band(obj,json-array-elements(cases)),reference);
   def flp-case-lines(state,item) {
    let id=state[0].str(); let call=flp-case-call(item); let expected=flp-case-value(json-object-get(item,"equals"));
    [state[0]+1,state[1] + " let result" + id + "=try [{\n" + call + (flp-ends?(trim(call),";") ? "\n" : ";\n") + "}] catch [];\n let actual" + id + "=nil?(result" + id + ") ? nothing() : result" + id + "[0];\n let expected" + id + "=" + expected + ";\n let held" + id + "=len(result" + id + ")==1 && actual" + id + "==expected" + id + ";\n let observation" + id + "=[" + flp-said(call) + ",value_kind(actual" + id + "),actual" + id + ",expected" + id + ",held" + id + ",len(result" + id + ")==1];\n fb_record(observation" + id + ",\"native-plan-case\"," + id + ");\n print(observation" + id + ");\n let all=all && held" + id + ";\n let counted=counted+(held" + id + " ? 1 : 0);\n let said" + id + "=held" + id + " ? 0 : print_str(flpc-failed(" + id + "," + flp-said(call) + ",len(result" + id + ")==1,actual" + id + ",expected" + id + "));\n"];
@@ -977,7 +993,7 @@ section [form.bml] {
   // The base is the last entry with failing rows, with only focused replies after it. Form keeps every held case by
   // construction; a reply answers one case per failing case over the same function, and whole changed definitions.
   def flp-failed-of(m) = fcgp-array?(fcgp-node(m[5],"cases_failed")) ? flp-cases-rows(json-object-get(m[5],"cases_failed")) : [];
-  def flp-focus-from(rest) = nil?(rest) ? nothing() : !nil?(flp-failed-of(rest[0])) ? rest[0] : flp-text(rest[0][5],"rung")=="focus" ? flp-focus-from(rest[1:]) : nothing();
+  def flp-focus-from(rest) = nil?(rest) ? nothing() : !nil?(flp-failed-of(rest[0])) ? rest[0] : !nothing?(flp-held-of(rest[0])) ? nothing() : flp-text(rest[0][5],"rung")=="focus" ? flp-focus-from(rest[1:]) : nothing();
   def flp-focus-base(memory) {
    let base=flp-focus-from(reverse(memory));
    nothing?(base) || !all?(tag=>!nothing?(flp-block(base[4],tag)),["plan","goal","cases","reference"]) || !faj-valid(flp-block(base[4],"plan")) ? nothing() : base;
@@ -1011,10 +1027,11 @@ section [form.bml] {
    else if !flp-same-words?(map(flp-case-function,items),map(i=>flp-case-function(prior[i]),ids)) then [["cases-dropped",mc-cat(["Your <cases> measures ",flp-join(map(flp-case-function,items),", ")," where the failing cases measure ",flp-join(map(i=>flp-case-function(prior[i]),ids),", "),": each failing case stays over its own function."])],"",0]
    else {
     let retained=flp-block(base[4],"reference");
-    let plan=flp-parse(base[4])[2];
+    let head=parse-json("focus-plan",flp-block(base[4],"plan"));
+    let defs=flp-defs-of(head,flp-strs(head,"writable"));
     let replied=flp-block(reply,"reference") ?? "";
-    let merged=flp-join(map(d=>flp-ref-text(replied,d,flp-file-bml?(d[2])) ?? flp-ref-text(retained,d,flp-file-bml?(d[2])) ?? "",flp-p-defs(plan)),"\n");
-    let moved=any?(d=>{ let bml=flp-file-bml?(d[2]); let next=flp-ref-text(replied,d,bml); !nothing?(next) && next != flp-ref-text(retained,d,bml); },flp-p-defs(plan));
+    let merged=flp-join(map(d=>flp-ref-text(replied,d,flp-file-bml?(d[2])) ?? flp-ref-text(retained,d,flp-file-bml?(d[2])) ?? "",defs),"\n");
+    let moved=any?(d=>{ let bml=flp-file-bml?(d[2]); let next=flp-ref-text(replied,d,bml); !nothing?(next) && next != flp-ref-text(retained,d,bml); },defs);
     let copied=len(filter(i=>flp-case-call(items[i])==failed[i][1] && flp-case-text(json-object-get(items[i],"equals"))==failed[i][2],0 .. len(items)));
     let cases=map(i=>{ let at=flp-index-int(ids,i,0); at<0 ? prior[i] : items[at]; },0 .. len(prior));
     if len(failed)>=2 && copied==len(failed) && !moved then [["cases-copied",mc-cat(["Each of your ",copied.str()," cases keeps its call and takes the candidate's own answer as its expectation, and no definition moved: that agrees with the candidate without reading the request. Read the request for each failing case and repair what it shows is wrong."])],"",copied]
