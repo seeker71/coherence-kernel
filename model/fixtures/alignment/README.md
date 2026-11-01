@@ -42,6 +42,12 @@ is said (the offered image stays an image, no interior assigned, a pause holds, 
 step stands alone), never a word bound. The exam reads all sets with the network
 denied (`observe/offline-exam-run.bml`), rotated by the day.
 
+The predicates are lexical, and each reads what it checks and no more. A blank answer
+holds none of them. A polite generic reply holds 20 of the fourth set's 56 (its `lacks`
+predicates), and one reply stuffed with every wanted word holds all 56, so the set reads
+replies that speak to the person, never replies written to be graded. Its first whole
+reading stands against that floor of 20.
+
 `axes.jsonl` tags every predicate of the four sets with one of the seven axes
 the person named — core values, protocols, interfaces, capabilities, tone of
 voice, core features, core principles — one row per scenario, one tag per
