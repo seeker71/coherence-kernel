@@ -28,7 +28,8 @@
 //
 // The second ledger, receipts/query-coverage-ledger.jsonl, holds one QueryCoverageRow per ask through a lane: the enquiry's
 // kind (lookup | structural | prose | code | plan, read from its own words by qc-kind, the one classifier), the source
-// that answered, the lane that carried it, the model, whether it was answered, the rent it took and its wall clock. It is
+// that answered, the lane that carried it, the model, whether it was answered, the rent it took, its wall clock and the
+// session that asked ("" when the host's schedule or the person asked; a row with no session column cannot say). It is
 // written at the voice door (every fcnv-ask, source fkwu-model-session), at form-cli ask's answer seam (form-cli.fk
 // fc-session-ask-at, source form-cli-ask), at the grounded synthesis door for what the voice did not carry (substrate,
 // provider, an ask not made; form-cli-grounded-synthesis.bml), at the code lane's door (form-cli-code-request.bml
@@ -45,8 +46,8 @@
 //////////////////////////////////////////////////////////////////////
 // preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/host-fs.bml form-stdlib/query-lane-resolve.bml
 section [form.bml] {
- blueprint LocalRun { at_unix_ms: int, session: string, lane: string, status: string, prompt_ids: int, generated_ids: int, model: string, wall_ms: option<int>, prefill_tok_s: option<float>, decode_tok_s: option<float>, reason: option<string>, admission_ms: option<int>, open_ms: option<int> }
- blueprint QueryCoverageRow { at_unix_ms: int, kind: string, source: string, lane: string, model: string, answered: int, rent_tokens: int, wall_ms: int }
+ blueprint LocalRun { at_unix_ms: int, session: string, lane: string, status: string, prompt_ids: int, generated_ids: int, model: string, wall_ms: option<int>, prefill_tok_s: option<float>, decode_tok_s: option<float>, reason: option<string>, admission_ms: option<int>, open_ms: option<int>, enquiry_kind: option<string> }
+ blueprint QueryCoverageRow { at_unix_ms: int, kind: string, source: string, lane: string, model: string, answered: int, rent_tokens: int, wall_ms: int, session: option<string> }
  class LocalRunLedger {
   def lrun-ledger() = "receipts/local-run-ledger.jsonl";
   // the host's session id (CLAUDE_CODE_SESSION_ID) from the environment door, "" when the host's own schedule asked
@@ -58,8 +59,9 @@ section [form.bml] {
   def local-run-rate(ids, ms) = nothing?(ms) || (ms <= 0) || (ids <= 0) ? nothing() : (ids + 0.0) * 1000.0 / (ms + 0.0);
   // a span is kept as the session read it; one it did not stamp (nothing), or that did not run (0), is absent
   def lrun-span(ms) = nothing?(ms) || (ms <= 0) ? nothing() : ms;
-  def lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs) = LocalRun{at_unix_ms: now_unix_ms(), session: lrun-session(), lane: lrun-lane(result), status: result[0], prompt_ids: result[2], generated_ids: result[3], model: result[4], wall_ms: lrun-span(wallMs), prefill_tok_s: local-run-rate(result[2], prefillMs), decode_tok_s: local-run-rate(result[3], decodeMs), reason: lrun-reason(result), admission_ms: lrun-span(admissionMs), open_ms: lrun-span(openMs)};
-  def local-run-record-clocked-at(path, result, wallMs, prefillMs, decodeMs, admissionMs, openMs) = ledger-append(path, lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs));
+  def lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs, kind) = LocalRun{at_unix_ms: now_unix_ms(), session: lrun-session(), lane: lrun-lane(result), status: result[0], prompt_ids: result[2], generated_ids: result[3], model: result[4], wall_ms: lrun-span(wallMs), prefill_tok_s: local-run-rate(result[2], prefillMs), decode_tok_s: local-run-rate(result[3], decodeMs), reason: lrun-reason(result), admission_ms: lrun-span(admissionMs), open_ms: lrun-span(openMs), enquiry_kind: kind};
+  def local-run-record-kinded-at(path, result, wallMs, prefillMs, decodeMs, admissionMs, openMs, kind) = ledger-append(path, lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs, kind));
+  def local-run-record-clocked-at(path, result, wallMs, prefillMs, decodeMs, admissionMs, openMs) = local-run-record-kinded-at(path, result, wallMs, prefillMs, decodeMs, admissionMs, openMs, nothing());
   def local-run-record-timed-at(path, result, wallMs, prefillMs, decodeMs) = local-run-record-clocked-at(path, result, wallMs, prefillMs, decodeMs, nothing(), nothing());
   def local-run-record-timed(result, wallMs, prefillMs, decodeMs) = local-run-record-timed-at(lrun-ledger(), result, wallMs, prefillMs, decodeMs);
   def local-run-record-at(path, result) = local-run-record-timed-at(path, result, 0, 0, 0);
@@ -90,8 +92,12 @@ section [form.bml] {
   def qc-kinds() = ["lookup", "structural", "prose", "code", "plan"];
   def qc-native-sources() = ["substrate", "fkwu-model-session", "form-cli-ask", "form-cli-code", "form-find"];
   def qc-lane(source, askOracle, oracle) = (String) source == "substrate" ? "substrate" : (String) source == "provider" ? "provider" : askOracle ? lrun-lane(oracle) : "not-asked";
-  def qc-row(kind, source, lane, model, answered, rent, wallMs) = QueryCoverageRow{at_unix_ms: now_unix_ms(), kind: kind, source: source, lane: lane, model: model, answered: answered, rent_tokens: rent, wall_ms: wallMs};
-  def qc-record-at(path, kind, source, lane, model, answered, rent, wallMs) = ledger-append(path, qc-row(kind, source, lane, model, answered, rent, wallMs));
+  def qc-row(kind, source, lane, model, answered, rent, wallMs) = QueryCoverageRow{at_unix_ms: now_unix_ms(), kind: kind, source: source, lane: lane, model: model, answered: answered, rent_tokens: rent, wall_ms: wallMs, session: lrun-session()};
+  // a measurement ask (an alignment or wear arm, named by its request's "enquiry_kind") is no traffic: it lands no coverage row, and its LocalRun row carries the kind
+  def qc-measurement() = "measurement";
+  def qc-traffic?(kind) = (String) kind != qc-measurement();
+  def qc-kind-named(enquiry, named) = (String) named == "" ? qc-kind(enquiry) : named;
+  def qc-record-at(path, kind, source, lane, model, answered, rent, wallMs) = qc-traffic?(kind) ? ledger-append(path, qc-row(kind, source, lane, model, answered, rent, wallMs)) : qc-measurement();
   def qc-record(kind, source, lane, model, answered, rent, wallMs) = qc-record-at(qc-ledger(), kind, source, lane, model, answered, rent, wallMs);
   def qc-rows(path) = ledger-rows(path, "QueryCoverageRow");
   def qc-since(rows, since) = rows |> filter(row => row-get(row, "at_unix_ms") >= since);

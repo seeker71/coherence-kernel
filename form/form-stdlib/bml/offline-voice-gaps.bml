@@ -8,8 +8,8 @@
 //   source, checkout       the file read; checkout "walk" resolves it inside the walk checkout the day-turn plist names
 //   where, match           the tests a row must hold to count (where) or to be counted among those (match). A plain value is an
 //                          equality; an object tests the field: {">":0} {">=":0} {"<":0} {"<=":0} a number; {"!=":v} absent or
-//                          different; {"in":[v,..]} equal to one; {"absent":1} the key is not in the row; {"present":1} it is, not
-//                          null; {"empty":1} absent, null or ""
+//                          different; {"in":[v,..]} equal to one; {"has":s} a string holding s; {"absent":1} the key is not in the row;
+//                          {"present":1} it is, not null; {"empty":1} absent, null or ""
 //   since_ms               rows before that instant are history, outside the reading (the text names the window)
 //   field, compare,        the field read, the comparison (==, !=, >=, <=, >, <) and what it is compared with: a
 //   threshold | against    threshold (a number, or a string for a string field) or another field of the same row
@@ -20,8 +20,11 @@
 //   show                   fields of the row printed beside its verdict
 //   within_ms              (last) the row must be younger than this, or the gap reads open; (share, sets, axis) only rows younger than this are read: a door that stopped
 //                          running is not a door that runs, and a miss ages out once the lane answers again
-//   by_schedule            1: a tracked ledger with no coordinator column reads only the rows native landings on the ref added inside within_ms (exit-proof.bml
+//   by_schedule            1 (feature, share): a tracked ledger with no coordinator column reads only the rows native landings on the ref added inside within_ms (exit-proof.bml
 //                          ep-landed-rows): a session's row, in this tree or landed under its own commit, is no row of the schedule, whatever its clock reads
+//   left, right            (pair) the tests that choose the two sides, among the rows holding `where`
+//   stood                  (landings) {days, gated}: a landing younger than days waits; a native one counts only when each line it added to source still stands on the ref and, gated 1, a gate runs the band of its code
+//   next                   {band, step}: the band a closing movement answers to and the step toward it; observe/self-steer-run.bml offers it while the row stands open
 //   on_slot                1: a file no landing carries (the walk's own .hearth): the row's time must stand in a slot's window, or the gap reads open
 //   none_reads             "open": no row holding `where` is an open gap by its own name; absent, it reads unread
 //   seam                   (share) a test at least one counted row must hold, so a seam that landed nothing never reads closed
@@ -35,6 +38,8 @@
 // One reader per shape, every kind dropping in as data:
 //   last      the last row that holds `where`: `field` compared with threshold or `against`, and `also`
 //   share     the rows that hold `where`: the permille of them that hold `match`, compared with threshold
+//   pair      the rows that hold `where` and are that young: the median of `field` over the `left` side compared with the `right` side, in milli; a side with no row reads by none_reads
+//   rent      rented tokens the sessions' rows grew by inside the last days, against the threshold; the meter's newest row older than within_ms reads open
 //   table     a markdown table in a document: two cells compared as decimals in milli
 //   queue     every gap of the queue by its own last real row: once green is not green now, and a gap with no row stands open
 //   schedule  of the slots due, the permille a stamp or a landed row reads, naming the unread (exit-proof.bml ep-slot-reading: read from the
@@ -63,7 +68,7 @@ section [form.bml] {
   def ovg-register() = "receipts/offline-voice-gap-register.jsonl";
   def ovg-prefix() = "[offline-voice-gaps] ";
   // ── the kinds, each with the shape its reader takes ──
-  def ovg-kinds() = [["turn-ledger", "last"], ["lora", "last"], ["readings", "last"], ["exit-proof", "last"], ["coverage", "share"], ["voice-availability", "share"], ["plan-doc", "table"], ["walk-schedule", "schedule"], ["queue-gaps", "queue"], ["landings", "landings"], ["gaps-native", "gaps"], ["alignment-sets", "sets"], ["alignment-axis", "axis"], ["self-feature", "feature"]];
+  def ovg-kinds() = [["turn-ledger", "last"], ["lora", "last"], ["readings", "last"], ["exit-proof", "last"], ["coverage", "share"], ["voice-availability", "share"], ["rate-pair", "pair"], ["rent-week", "rent"], ["plan-doc", "table"], ["walk-schedule", "schedule"], ["queue-gaps", "queue"], ["landings", "landings"], ["gaps-native", "gaps"], ["alignment-sets", "sets"], ["alignment-axis", "axis"], ["self-feature", "feature"]];
   def ovg-shape(kind) = foldl((found, k) => (String) k[0] == kind ? k[1] : found, "", ovg-kinds());
   def ovg-kind-names() = str-join-with(map(k => k[0], ovg-kinds()), ", ");
   // ── the comparison, as data ──
@@ -85,6 +90,7 @@ section [form.bml] {
    : (String) op == "empty" ? (!fcgp-present?(row, key)) || node_eq(json-object-get(row, key), json-node-string(""))
    : (String) op == "!=" ? (!json-object-has?(row, key)) || !node_eq(json-object-get(row, key), want)
    : (String) op == "in" ? json-object-has?(row, key) && any?(w => node_eq(json-object-get(row, key), w), json-array-elements(want))
+   : (String) op == "has" ? str_find(fcgp-str(row, key), json-string-value(want), 0) >= 0
    : ovg-test-num?(fcgp-num(row, key), op, want);
   def ovg-test-num?(v, op, want) = nothing?(v) ? false : (Comparable) (ovg-cmp(op, v, json-int-value(want)) ?? 0) == 1;
   def ovg-holds?(row, obj, key) {
@@ -181,6 +187,51 @@ section [form.bml] {
    : ovg-share-of(gap, mine, m, op, want, len(filter(r => ovg-matches?(r, m), mine)));
   }
   def ovg-share-of(gap, mine, m, op, want, hits) = ovg-judged(ovg-cmp(op, ovg-pm(hits, len(mine)), want), hits.str() ++ " of " ++ len(mine).str() ++ " row(s)" ++ ovg-where-text(gap) ++ ovg-within-text(gap) ++ " hold " ++ ovg-obj-text(m) ++ ": " ++ ovg-pm(hits, len(mine)).str() ++ " pm " ++ op ++ " " ++ want.str(), op);
+  // ── pair: the median of a field over two sides of the young rows, in milli ──
+  def ovg-sorted-in(x, xs) = nil?(xs) ? [x] : x <= xs[0] ? cons(x, xs) : cons(xs[0], ovg-sorted-in(x, xs[1:]));
+  def ovg-median(xs) {
+   let sorted = foldl((acc, x) => ovg-sorted-in(x, acc), [], xs);
+   sorted[len(sorted) / 2];
+  }
+  def ovg-side(gap, rows, key) {
+   let field = fcgp-str(gap, "field");
+   let m = fcgp-obj(gap, key);
+   filter(v => !nothing?(v), map(r => fcgp-present?(r, field) ? ovg-milli(json-emit(fcgp-node(r, field))) : nothing(), filter(r => ovg-matches?(r, m), rows)));
+  }
+  def ovg-read-pair(gap, rows, opts) {
+   let mine = ovg-recent(gap, ovg-where(gap, rows), opts);
+   let left = ovg-side(gap, mine, "left");
+   let right = ovg-side(gap, mine, "right");
+   let op = fcgp-str(gap, "compare");
+   let sides = "holding " ++ ovg-obj-text(fcgp-obj(gap, "left")) ++ " " ++ len(left).str() ++ " row(s), holding " ++ ovg-obj-text(fcgp-obj(gap, "right")) ++ " " ++ len(right).str() ++ " row(s)";
+   nil?(left) || nil?(right) ? [ovg-none-verdict(gap), "a side has no row" ++ ovg-where-text(gap) ++ ovg-within-text(gap) ++ ": " ++ sides ++ ", among " ++ len(rows).str() ++ " row(s)"]
+   : ovg-judged(ovg-cmp(op, ovg-median(left), ovg-median(right)), "the median " ++ fcgp-str(gap, "field") ++ ovg-within-text(gap) ++ ": " ++ sides ++ ": " ++ ovg-median(left).str() ++ " " ++ op ++ " " ++ ovg-median(right).str() ++ " in milli", op);
+  }
+  // ── rent: rented tokens the sessions' rows grew by inside a window; a session's row is cumulative, so its growth is its newest row less its newest before the window ──
+  def ovg-rented-of(r) {
+   let rented = fcgp-obj(r, "rented");
+   fcgp-num(r, "rented_total") ?? ((fcgp-num(rented, "input") ?? 0) + (fcgp-num(rented, "cache_write") ?? 0) + (fcgp-num(rented, "cache_read") ?? 0) + (fcgp-num(rented, "output") ?? 0));
+  }
+  def ovg-row-at(r) = fcgp-num(r, "at_unix_ms") ?? 0;
+  def ovg-newest(rows) = foldl((best, r) => nothing?(best) || ovg-row-at(r) >= ovg-row-at(best) ? r : best, nothing(), rows);
+  def ovg-growth(mine, from, to) {
+   let last = ovg-newest(filter(r => ovg-row-at(r) < to, mine));
+   let base = ovg-newest(filter(r => ovg-row-at(r) < from, mine));
+   let grew = (nothing?(last) ? 0 : ovg-rented-of(last)) - (nothing?(base) ? 0 : ovg-rented-of(base));
+   grew < 0 ? 0 : grew;
+  }
+  def ovg-rent-between(rows, from, to) = foldl((acc, s) => acc + ovg-growth(filter(r => (String) fcgp-str(r, "session") == s, rows), from, to), 0, ovg-distinct(map(r => fcgp-str(r, "session"), rows)));
+  def ovg-read-rent(gap, rows, opts) {
+   let days = fcgp-num(gap, "days") ?? 7;
+   let now = ovg-now(opts);
+   let span = days * ep-day-ms();
+   let newest = ovg-newest(rows);
+   let op = fcgp-str(gap, "compare");
+   let want = fcgp-num(gap, "threshold") ?? 0;
+   nothing?(newest) ? [ovg-none-verdict(gap), "no row of the meter"]
+   : ovg-stale?(gap, newest, opts) ? ["open", "the meter is quiet: its newest row of " ++ len(rows).str() ++ " is older than " ++ (fcgp-num(gap, "within_ms") / 3600000).str() ++ " hours" ++ ovg-at(newest)]
+   : ovg-judged(ovg-cmp(op, ovg-rent-between(rows, now - span, now + 1), want), ovg-rent-between(rows, now - span, now + 1).str() ++ " rented token(s) in the last " ++ days.str() ++ " days (the " ++ days.str() ++ " before: " ++ ovg-rent-between(rows, now - 2 * span, now - span).str() ++ "), over " ++ len(rows).str() ++ " meter row(s): " ++ op ++ " " ++ want.str(), op);
+  }
   // ── table: a markdown table in a document, two cells as decimals in milli ──
   def ovg-drop-last(xs) = len(xs) <= 1 ? [] : cons(xs[0], ovg-drop-last(xs[1:]));
   def ovg-cells(line) = map(c => trim(c), ovg-drop-last(split-on(line, "|")[1:]));
@@ -240,13 +291,37 @@ section [form.bml] {
    let landings = ep-landings(repo, ref, ovg-now(opts) - days * ep-day-ms());
    let crossings = ovg-crossings(repo, ref);
    let zone = ovg-zone(opts);
-   nothing?(landings) || nothing?(crossings) || nothing?(zone) ? ["unread", "git or the crossings ledger did not read on " ++ ref ++ " in " ++ repo] : ovg-landings-said(gap, filter(l => ep-source-changing?(l, ovg-strings(gap, "not_source")), landings), crossings, zone, days, ref);
+   nothing?(landings) || nothing?(crossings) || nothing?(zone) ? ["unread", "git or the crossings ledger did not read on " ++ ref ++ " in " ++ repo] : ovg-landings-said(gap, opts, filter(l => ep-source-changing?(l, ovg-strings(gap, "not_source")), landings), crossings, zone, days, ref);
   }
-  def ovg-landings-said(gap, changing, crossings, zone, days, ref) {
-   let native = filter(l => ep-native-landing?(l, crossings, zone), changing);
+  // stood: why a native landing does not yet count ("" when it does): each line it added to source must still stand on the ref, and a gate must run the band of its code
+  def ovg-added-lines(repo, sha, path) {
+   let run = ep-git(repo, "stood", ["show", sha, "--no-renames", "-U0", "--format=", "--", path]);
+   hch-ok?(run) ? filter(l => (Comparable) len(trim(l)) > 0, map(l => substring(l, 1, len(l)), filter(l => ep-starts?(l, "+") && !ep-starts?(l, "+++ "), split-on(hch-said(run), "\n")))) : nothing();
+  }
+  def ovg-path-stands?(repo, ref, sha, path) {
+   let lines = ovg-added-lines(repo, sha, path);
+   let blob = nothing?(lines) || nil?(lines) ? "" : ep-blob(repo, ref, path, "stood-blob");
+   !nothing?(lines) && (nil?(lines) || (!nothing?(blob) && all?(l => ep-has?("\n" ++ blob ++ "\n", "\n" ++ l ++ "\n"), lines)));
+  }
+  def ovg-stood-why(rule, l, repo, ref, notSource, gates) {
+   let unread = (Comparable) (fcgp-num(rule, "gated") ?? 0) == 1 ? ep-unwitnessed(l, gates) : [];
+   let gone = filter(p => ep-source-path?(p, notSource) && !ovg-path-stands?(repo, ref, l[0], p), l[4]);
+   !nil?(gone) ? "a line no longer stands in " ++ gone[0] : !nil?(unread) ? "no gate's band reads " ++ unread[0] : "";
+  }
+  def ovg-landings-said(gap, opts, changing, crossings, zone, days, ref) {
+   let rule = fcgp-obj(gap, "stood");
+   let wait = fcgp-num(rule, "days") ?? 0;
+   let ripe = filter(l => l[1] <= ovg-now(opts) - wait * ep-day-ms(), changing);
+   let young = len(changing) - len(ripe);
+   let repo = ovg-repo(opts);
+   let gates = nil?(ovg-keys(rule)) ? "" : ep-gates-code(repo, ref);
+   let told = filter(l => ep-native-landing?(l, crossings, zone), ripe);
+   let read = map(l => [l, nil?(ovg-keys(rule)) ? "" : ovg-stood-why(rule, l, repo, ref, ovg-strings(gap, "not_source"), gates)], told);
+   let native = map(p => p[0], filter(p => (String) p[1] == "", read));
+   let held = filter(p => (String) p[1] != "", read);
    let op = fcgp-str(gap, "compare");
    let want = fcgp-num(gap, "threshold") ?? 1000;
-   nil?(changing) ? [ovg-none-verdict(gap), "no source-changing landing on " ++ ref ++ " in the last " ++ days.str() ++ " days"] : ovg-judged(ovg-cmp(op, ovg-pm(len(native), len(changing)), want), len(native).str() ++ " of " ++ len(changing).str() ++ " source-changing landing(s) on " ++ ref ++ " in the last " ++ days.str() ++ " days read native" ++ (nil?(native) ? "" : " (" ++ str-join-with(map(l => substring(l[0], 0, 9), ovg-take(5, native)), ", ") ++ ")") ++ ": " ++ ovg-pm(len(native), len(changing)).str() ++ " pm " ++ op ++ " " ++ want.str(), op);
+   nil?(ripe) ? [ovg-none-verdict(gap), "no source-changing landing on " ++ ref ++ " in the last " ++ days.str() ++ " days" ++ (young > 0 ? " older than " ++ wait.str() ++ " days (" ++ young.str() ++ " younger wait)" : "")] : ovg-judged(ovg-cmp(op, ovg-pm(len(native), len(ripe)), want), len(native).str() ++ " of " ++ len(ripe).str() ++ " source-changing landing(s) on " ++ ref ++ " in the last " ++ days.str() ++ " days read native" ++ (nil?(native) ? "" : " (" ++ str-join-with(map(l => substring(l[0], 0, 9), ovg-take(5, native)), ", ") ++ ")") ++ (young > 0 ? "; " ++ young.str() ++ " younger than " ++ wait.str() ++ " days wait" : "") ++ (nil?(held) ? "" : "; held out: " ++ str-join-with(map(p => substring(p[0][0], 0, 9) ++ " " ++ p[1], ovg-take(5, held)), ", ")) ++ ": " ++ ovg-pm(len(native), len(ripe)).str() ++ " pm " ++ op ++ " " ++ want.str(), op);
   }
   // ── gaps: of the gaps opened, the share the native lane closed and landed with no guide ──
   def ovg-real?(r) = ((Comparable) (fcgp-num(r, "dry") ?? 0) == 0) && ((Comparable) (fcgp-num(r, "test") ?? 0) == 0);
@@ -379,15 +454,23 @@ section [form.bml] {
    : ovg-read-last(gap, fcgp-rows(path), opts);
   }
   // by_schedule: the rows native landings on the ref added to this source inside within_ms, and the reading is the last of them
-  def ovg-read-landed(gap, opts) {
+  def ovg-carried(gap, opts) {
    let repo = ovg-repo(opts);
-   let ref = ovg-ref(opts);
-   let crossings = ovg-crossings(repo, ref);
+   let crossings = ovg-crossings(repo, ovg-ref(opts));
    let zone = ovg-zone(opts);
-   let rows = nothing?(crossings) || nothing?(zone) ? nothing() : ep-landed-rows(repo, ref, ovg-now(opts) - (fcgp-num(gap, "within_ms") ?? (7 * ep-day-ms())), fcgp-str(gap, "source"), crossings, zone);
-   nothing?(rows) ? ["unread", "git or the crossings ledger did not read on " ++ ref ++ " in " ++ repo]
+   nothing?(crossings) || nothing?(zone) ? nothing() : ep-landed-rows(repo, ovg-ref(opts), ovg-now(opts) - (fcgp-num(gap, "within_ms") ?? (7 * ep-day-ms())), fcgp-str(gap, "source"), crossings, zone);
+  }
+  def ovg-carried-unread(opts) = ["unread", "git or the crossings ledger did not read on " ++ ovg-ref(opts) ++ " in " ++ ovg-repo(opts)];
+  def ovg-read-landed(gap, opts) {
+   let ref = ovg-ref(opts);
+   let rows = ovg-carried(gap, opts);
+   nothing?(rows) ? ovg-carried-unread(opts)
    : nil?(ovg-where(gap, rows)) ? [ovg-none-verdict(gap), "no native landing on " ++ ref ++ ovg-within-text(gap) ++ " added a row" ++ ovg-where-text(gap) ++ " to this ledger (" ++ len(rows).str() ++ " row(s) they added hold none): a session's row, in this tree or under its own commit, is no row of the schedule"]
    : ovg-read-last(gap, rows, opts);
+  }
+  def ovg-read-carried-rows(shape, gap, opts) {
+   let rows = ovg-carried(gap, opts);
+   nothing?(rows) ? ovg-carried-unread(opts) : ovg-read-rows(shape, gap, rows, opts);
   }
   def ovg-occurrences(text, needle, from, n) {
    let at = str_find(text, needle, from);
@@ -411,7 +494,7 @@ section [form.bml] {
   // ── one gap: [verdict, observation] ──
   def ovg-self-reading?(shape) = any?(s => (String) s == shape, ["queue", "landings", "gaps", "sets", "axis", "feature"]);
   def ovg-read-self(gap, shape, opts) = (String) shape == "queue" ? ovg-read-queue(gap, opts) : (String) shape == "landings" ? ovg-read-landings(gap, opts) : (String) shape == "gaps" ? ovg-read-gaps(gap, opts) : (String) shape == "sets" ? ovg-read-sets(gap, opts) : (String) shape == "axis" ? ovg-read-axis(gap, opts) : ovg-read-feature(gap, opts);
-  def ovg-read-rows(shape, gap, rows, opts) = (String) shape == "last" ? ovg-read-last(gap, rows, opts) : ovg-read-share(gap, rows, opts);
+  def ovg-read-rows(shape, gap, rows, opts) = (String) shape == "last" ? ovg-read-last(gap, rows, opts) : (String) shape == "pair" ? ovg-read-pair(gap, rows, opts) : (String) shape == "rent" ? ovg-read-rent(gap, rows, opts) : ovg-read-share(gap, rows, opts);
   def ovg-read(gap, opts) {
    let kind = fcgp-str(gap, "kind");
    let shape = ovg-shape(kind);
@@ -422,6 +505,7 @@ section [form.bml] {
    : (String) shape == "schedule" ? ovg-read-schedule(gap, opts)
    : (Comparable) host_path_exists(path) != 1 ? [ovg-none-verdict(gap), "absent: " ++ path]
    : (String) shape == "table" ? ovg-read-table(gap, fhn-read(path))
+   : (Comparable) (fcgp-num(gap, "by_schedule") ?? 0) == 1 ? ovg-read-carried-rows(shape, gap, opts)
    : ovg-read-rows(shape, gap, fcgp-rows(path), opts);
   }
   // [gap, verdict, observation, source shown]
