@@ -1,10 +1,20 @@
 // host-walk-turns.bml — a turn's row read in Form, and the window's turns loop.
 //
 // What it holds: why a turn was idle or unknown (hw-idle-why, hw-unknown-line), a lane that gave its memory back read
-// as a choice point (hw-memory-low?), and the loop that takes a window's turns until one ran no gap, one was idle,
-// the count bound was reached, or the window is not ready (hw-turns). A lane that gave its memory back
-// (lane_reason host-memory-low) is read as a choice point, neither idle nor unknown: the window goes on and the next
-// turn waits for the machine (hw-ready, host-walk-window.bml).
+// as a choice point (hw-memory-low?), a turn that spent nothing of the window's allowance (hw-free-gap), and the loop that
+// takes a window's turns until one ran no gap, one was idle, the allowance was spent, or the window is not ready (hw-turns).
+// A lane that gave its memory back (lane_reason host-memory-low) is read as a choice point, neither idle nor unknown: the
+// window goes on and the next turn waits for the machine (hw-ready, host-walk-window.bml).
+//
+// The allowance counts turns that opened an option or ran the planner. The door and the review read "open" differently:
+// the review (lfr-green?) reads a gap closed once any row of it read green, while the door (nt-green?) reads it closed only
+// under today's contract, whose digest folds the door's own source and the lane's. So a landed kernel reopens every gap for
+// the door while the review says "no open gap"; the door reads each band again, it still reads its full, and that row
+// (option 0, already-full) opened nothing. The door reads them all in one pass before any gap takes an option
+// (observe/native-turn-run.bml, nt-met), so its "no open gap" reaches the planner inside the same window, and a row a pass
+// ended on (the door's park limit, the window's end) takes nothing from the allowance here either. The rows land. A real
+// idle turn still ends the window's turns, and so does a gap read twice in one window: its contract moves under its own
+// reading, and only the window's end would stop a loop that kept reading it.
 // What it needs: host-walk-text.bml (hw-starts?, hw-say, hw-row-node, hw-row-int, hw-row-str), host-walk-turn.bml
 // (hw-turned?, hw-planned-in?) and memory-governor.bml (mg-memory-ending?, mg-memory-held?).
 import form-stdlib/bml/host-walk-text.bml;
@@ -43,23 +53,42 @@ section [form.bml] {
   def hw-unknown-spend-why-of(row) = json-object-has?(row, "gap") && hw-band-unmoved?(row) && nothing?(hw-row-int(row, "local_generated_ids")) && ((String) hw-spent-none-why(row) == "") ? "its spend is unknown (lane " ++ hw-row-str(row, "lane") ++ " wrote no local ID count)" : "";
   def hw-unknown-said(why) = (String) why == "" ? "" : "[walk-window] " ++ why ++ ": not read as idle, the window goes on";
   def hw-unknown-line(turn) = (String) hw-row-of(turn) == "" ? "" : hw-unknown-said(try hw-unknown-why-of(parse-json("turn-row", hw-row-of(turn))) else "");
+  // The gap of a turn that spent nothing of the allowance ("" for any other turn): its last row opened no option (option
+  // 0: a closed gap read again, a contract the band cannot meet, a query answered) and it ran no planner.
+  def hw-row-free?(row) = json-object-has?(row, "gap") && !nothing?(hw-row-int(row, "option")) && (Comparable) hw-row-int(row, "option") == 0;
+  def hw-free-gap-of(row) = hw-row-free?(row) ? hw-row-str(row, "gap") : "";
+  def hw-free-gap(turn) = hw-planned-in?(turn) || (String) hw-row-of(turn) == "" ? "" : (try hw-free-gap-of(parse-json("turn-row", hw-row-of(turn))) else "");
+  // what the door's line says it wrote on the way to a turn that ran no gap
+  def hw-rows-in?(turn) = hw-has?(turn, "; read again this turn: ") || hw-has?(turn, "; parked this turn: ");
+  def hw-read?(read, gap) = nil?(read) ? false : ((String) read[0] == gap) || hw-read?(read[1:], gap);
   // A window's turns. Each begins while ready(until) answers [true, line] (hw-ready: the host's other checkouts let
-  // the GPU go and the time left holds an option), at most `most` (nothing: no count bound); a turn that ran no gap
-  // ends them (landing a plan it queued), and so does an idle turn once it lands. take(deadline, n) is the nth turn; land(turn) answers the
-  // line its landing spoke ("" when the walk lands later). Answers the count of turns that ran a gap.
-  def hw-turns(until, most, ready, take, land) = hw-turns-from(until, most, ready, take, land, 0);
-  def hw-turns-from(until, most, ready, take, land, n) {
+  // the GPU go and the time left holds an option), at most `most` that opened an option or ran the planner (nothing: no
+  // count bound); a turn that ran no gap ends them (landing a plan it queued and the rows its door wrote), and so does an
+  // idle turn once it lands. take(deadline, n) is the nth turn; land(turn) answers the line its landing spoke ("" when the
+  // walk lands later). Answers the count of turns that opened an option or ran the planner. read: the gaps this window's
+  // free turns read.
+  def hw-turns(until, most, ready, take, land) = hw-turns-from(until, most, ready, take, land, 0, []);
+  def hw-turns-from(until, most, ready, take, land, n, read) {
    let room = !nothing?(most) && n >= most ? [false, "[walk-window] " ++ n.str() ++ " turn(s): this walk takes no more"] : ready(until);
    let said = print_str(room[1]);
-   room[0] ? hw-turn-taken(until, most, ready, take, land, n, take(until, n)) : n;
+   room[0] ? hw-turn-taken(until, most, ready, take, land, n, read, take(until, n)) : n;
   }
-  def hw-turn-taken(until, most, ready, take, land, n, turn) {
+  def hw-turn-taken(until, most, ready, take, land, n, read, turn) {
    let said = hw-say(turn);
-   !hw-turned?(turn) ? hw-turn-unturned(n, turn, land) : hw-idle?(turn) ? hw-turn-idle(n, hw-idle-why(turn), land(turn)) : hw-turn-landed(until, most, ready, take, land, n, land(turn), hw-unknown-line(turn));
+   !hw-turned?(turn) ? hw-turn-unturned(n, turn, land) : (String) hw-free-gap(turn) != "" ? hw-turn-free(until, most, ready, take, land, n, read, hw-free-gap(turn), land(turn)) : hw-idle?(turn) ? hw-turn-idle(n, hw-idle-why(turn), land(turn)) : hw-turn-landed(until, most, ready, take, land, n, read, land(turn), hw-unknown-line(turn));
   }
-  // a turn that ran no gap ends the turns; a plan it queued (its band and queue row) still lands with it
+  // a turn that ran no gap ends the turns; a plan it queued (its band and queue row), and the rows its door wrote on the way, still land with it
   def hw-turn-unturned(n, turn, land) {
-   let said = hw-planned-in?(turn) ? hw-say(land(turn)) : 0;
+   let said = hw-planned-in?(turn) || hw-rows-in?(turn) ? hw-say(land(turn)) : 0;
+   n;
+  }
+  // a row that opened nothing lands and takes nothing from the allowance; the same gap read twice in one window is idle
+  def hw-turn-free(until, most, ready, take, land, n, read, gap, landed) {
+   let said = hw-say(landed);
+   hw-read?(read, gap) ? hw-read-twice(n, gap) : hw-turns-from(until, most, ready, take, land, n, cons(gap, read));
+  }
+  def hw-read-twice(n, gap) {
+   let told = print_str("[walk-window] the turn was idle (" ++ gap ++ " was read again twice and stayed open: its contract moves under its own reading): this window takes no more turns");
    n;
   }
   def hw-turn-idle(n, why, landed) {
@@ -67,10 +96,10 @@ section [form.bml] {
    let told = print_str("[walk-window] the turn was idle (" ++ why ++ "): this window takes no more turns");
    n + 1;
   }
-  def hw-turn-landed(until, most, ready, take, land, n, landed, unknown) {
+  def hw-turn-landed(until, most, ready, take, land, n, read, landed, unknown) {
    let said = hw-say(landed);
    let told = hw-say(unknown);
-   hw-turns-from(until, most, ready, take, land, n + 1);
+   hw-turns-from(until, most, ready, take, land, n + 1, read);
   }
  }
 }

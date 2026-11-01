@@ -49,6 +49,12 @@ recipe execution; lower training loss does not yet establish improved answer qua
   [`observe/draft-page-run.bml`](observe/draft-page-run.bml) lays them on one page
   (`.hearth/drafts/index.html`); [`observe/draft-reading-run.bml`](observe/draft-reading-run.bml)
   records our reading of each: accepted, revised or rejected.
+  [`observe/draft-native-reading-run.bml`](observe/draft-native-reading-run.bml) reads them
+  beside us (the covenant, then the voice), a second reader our own list never moves for;
+  [`observe/draft-readings-to-rows.bml`](observe/draft-readings-to-rows.bml) turns what each
+  reader accepted into rows and counts how often the two agree. The walk does this after it
+  drafts, and lifts at its cadence
+  ([`form/form-stdlib/bml/host-walk-learn.bml`](form/form-stdlib/bml/host-walk-learn.bml)).
 - **Companion** — [`observe/companion-run.bml`](observe/companion-run.bml) takes
   what the person says and their tongue, and the voice answers with the last six
   exchanges as its memory. It listens for what the person means and knows when a

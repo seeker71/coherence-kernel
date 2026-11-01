@@ -12,9 +12,13 @@
 // Publication uses an ordinary atomic push and confirms every requested ref.
 // Changed runtime inputs renew the artifact and resume from the native checkpoint.
 // Terminal text and an explicitly supplied shell witness have their own boundary.
+// A named path that does not stand, or that git ignores, is named in the landing's line and left out; the rest lands. No
+// route to origin (host-walk-offline.bml) is the stage "local": the commit, verified over the tree as it stands, stays on
+// the branch, the line says "landed locally", and the walk's carry pushes it next time.
 // preflight-exec: forbidden
 import form-stdlib/bml/form-cli-reunion.bml;
 import form-stdlib/bml/host-child.bml;
+import form-stdlib/bml/host-walk-offline.bml;
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/meaning-codes.bml;
 import observe/form-membrane-runtime-census.fk;
@@ -27,10 +31,12 @@ section [form.bml] {
   def ld-source() = "observe/land-run.bml";
   def ld-message-path() = ".form-heal/land-message.txt";
   def ld-paths(doc) = json-object-has?(doc, "paths") ? oh-values(json-array-elements(json-object-get(doc, "paths"))) : [];
-  // git add stages nothing at all when one named path matches no file (fatal: pathspec did not match), so a path is
-  // added when it is present, or tracked and gone (its removal is staged); any other is named and left unstaged
+  // git add stages nothing at all when one named path matches no file (fatal: pathspec did not match), and refuses with
+  // exit 1 when one is ignored, so a path is added when it is present and not ignored, or tracked and gone (its removal is
+  // staged); any other is named and left out, and the rest lands
   def ld-has?(xs, x) = nil?(xs) ? false : ((String) xs[0] == x) || ld-has?(xs[1:], x);
-  def ld-absent(paths) = filter(p => file_size(p) < 0, paths);
+  def ld-at(dir, p) = str_find(p, "/", 0) == 0 ? p : fcr-abs(dir) ++ "/" ++ p;
+  def ld-absent-in(dir, paths) = filter(p => file_size(ld-at(dir, p)) < 0, paths);
   // Each absent path git still tracks, in the spelling it was named: git lists the tracked names under the absent
   // paths (ls-files -z, so no name is quoted), a chunk at a time because an argv holds 32 words, and Form matches a
   // name that is the path or lies under it (a path git tracks as a directory). Paths are literal, never globs.
@@ -48,10 +54,22 @@ section [form.bml] {
    let names = nil?(named) ? [] : ld-listed-all(io, dir, named);
    filter(p => ld-under?(names, ld-bare(p)), named);
   }
-  def ld-addable-in(io, dir, paths) = append(filter(p => file_size(p) >= 0, paths), ld-tracked-in(io, dir, ld-absent(paths)));
-  def ld-addable(paths) = ld-addable-in(hch-dir(), ".", paths);
-  def ld-unstaged(paths, addable) = filter(p => !ld-has?(addable, p), ld-absent(paths));
-  def ld-unstaged-line(left) = nil?(left) ? "" : "[paths] neither present nor tracked, left unstaged: " ++ str-join-with(left, " ") ++ "\n";
+  // Each present path git ignores, in the spelling it was named (a tracked file is subject to no ignore rule, so it never
+  // reads here). The names cross on stdin, NUL-separated, so no argv bounds them and no name is quoted; check-ignore
+  // reads each as the path it is (it takes no --literal-pathspecs, and no glob of a pathspec applies to it).
+  def ld-ignored-in(io, dir, present) = nil?(present) ? [] : ld-names(hch-run-quiet-in(io, "land-ignored", hch-git-argv(dir, ["check-ignore", "--stdin", "-z"]), ld-nul-join(present), hch-by(hch-git-backstop-ms()))[1]);
+  // the named paths as git can take them, each once: [what is added, what is left out: [path, why]]
+  def ld-once(paths) = foldl((seen, p) => ld-has?(seen, p) ? seen : append(seen, [p]), [], paths);
+  def ld-standing-in(io, dir, paths) {
+   let absent = ld-absent-in(dir, ld-once(paths));
+   let gone = ld-tracked-in(io, dir, absent);
+   let present = filter(p => !ld-has?(absent, p), ld-once(paths));
+   let ignored = ld-ignored-in(io, dir, present);
+   [append(filter(p => !ld-has?(ignored, p), present), gone), append(filter(p => !ld-has?(gone, p), absent) |> map(p => [p, "does not stand"]), ignored |> map(p => [p, "ignored by git"]))];
+  }
+  def ld-left-row(left) = json-node-object([fhn-s("path", left[0]), fhn-s("why", left[1])]);
+  def ld-left-rows(state) = ld-nodes(state, "left_out");
+  def ld-left-said(state) = nil?(ld-left-rows(state)) ? "" : "; left out: " ++ str-join-with(ld-left-rows(state) |> map(row => fhn-text(row, "path") ++ " (" ++ fhn-text(row, "why") ++ ")"), ", ");
   def ld-tail(text, n) = len(text) <= n ? text : substring(text, len(text) - n, len(text));
   def ld-planes(planes, rows) = nil?(planes) ? "" : "  " ++ planes[0] ++ "=" ++ fmrc-delta-plane-total(rows, planes[0]).str() ++ "\n" ++ ld-planes(planes[1:], rows);
   def ld-plane-names() = ["stdio", "filesystem", "local-process", "network-address-unknown", "mesh"];
@@ -136,6 +154,8 @@ section [form.bml] {
   def ld-rev(s,ref) { let r=ld-step(s,"read-" + fcam-hash(ref),["rev-parse","--verify",ref]); hch-ok?(r) ? trim(r[1]) : ""; }
   def ld-changed(s,args) { let r=ld-step(s,"changed",args); hch-ok?(r) ? ld-names(r[1]) : form_error("publication path observation " + args.join(" ") + ": " + hch-said(r)); }
   def ld-owned(s) = ld-paths(ld-field(s,"request"));
+  // what this landing carries of what it was named: the owned paths with what was left out set apart
+  def ld-carried(s) = filter(p => !any?(row => fhn-text(row,"path") == p,ld-left-rows(ld-state(s))),ld-owned(s));
   def ld-receipt(s) = intern_node(bp("form-native-publication-v1"),[ld-state(s),record_get(s,"checks")]);
   def ld-admit(request,dir) {
    let owner=fhn-text(request,"owner") == "" ? fcam-hash(fhn-text(request,"subject") + ld-paths(request).join("\n")) : fhn-text(request,"owner");
@@ -151,9 +171,11 @@ section [form.bml] {
   def ld-commit-owned(s) {
    let foreign=ld-changed(s,["diff","--cached","--name-only","-z"]) |> filter(p => !ld-has?(ld-owned(s),p));
    !nil?(foreign) ? ld-attention(s,"The index contains another owner's paths: " + foreign.join(", ")) : {
+    let standing=ld-standing-in(ld-text(s,"io"),ld-text(s,"directory"),ld-owned(s));
+    ld-set(s,"left_out",json-node-array(standing[1] |> map(ld-left-row)));
     let path=ld-text(s,"io") + "/paths";
-    write_file_text(path,ld-nul-join(ld-owned(s))) == len(ld-nul-join(ld-owned(s))) ? 1 : form_error("publication path list was not retained");
-    let add=ld-step(s,"add",["--literal-pathspecs","add","--pathspec-from-file=" + path,"--pathspec-file-nul"]);
+    write_file_text(path,ld-nul-join(standing[0])) == len(ld-nul-join(standing[0])) ? 1 : form_error("publication path list was not retained");
+    let add=nil?(standing[0]) ? [0,"",""] : ld-step(s,"add",["--literal-pathspecs","add","--pathspec-from-file=" + path,"--pathspec-file-nul"]);
     !hch-ok?(add) ? ld-attention(s,hch-said(add)) : {
      let changed=ld-changed(s,["diff","--cached","--name-only","-z"]);
      nil?(changed) ? s : {
@@ -214,7 +236,7 @@ section [form.bml] {
      ld-say(s,"seed",seedHash); ld-say(s,"carrier",carrierHash); ld-say(s,"stage","renewing");
      let resumed=hch-run-at(ld-text(s,"io"),"renewed-entry",dir,["./fkwu",ld-source()],"@" + record_get(s,"checkpoint") + "\n",nothing());
      let next=fcam-read(record_get(s,"checkpoint"));
-     hch-ok?(resumed) && !nothing?(next) && (fhn-text(next,"stage") == "published" || fhn-text(next,"stage") == "attention") ? record_set(s,"state",next) : ld-attention(s,"Renewed runtime retains its continuation: " + hch-said(resumed));
+     hch-ok?(resumed) && !nothing?(next) && (fhn-text(next,"stage") == "published" || fhn-text(next,"stage") == "local" || fhn-text(next,"stage") == "attention") ? record_set(s,"state",next) : ld-attention(s,"Renewed runtime retains its continuation: " + hch-said(resumed));
     };
     true;
    };
@@ -244,7 +266,7 @@ section [form.bml] {
    let contract=fcam-hash(read_file(fhn-text(task,"band")) ?? "");
    head == old && contract == ld-text(s,"verified_contract") ? true : {
     let base=old == "" ? ld-text(s,"base") : old;
-    let moved=ld-owned(s) + ld-changed(s,["diff","--name-only","-z",base,head]);
+    let moved=ld-carried(s) + ld-changed(s,["diff","--name-only","-z",base,head]);
     let good=verify(s,moved);
     if good then { ld-say(s,"verified_head",head); ld-say(s,"verified_contract",contract); } else 0;
     good;
@@ -257,9 +279,13 @@ section [form.bml] {
    let lines=split-on(run[1],"\n");
    hch-ok?(run) && all?(ref => any?(line => line == head + byte_to_str(9) + ref,lines),refs);
   }
+  // No route to origin: the commit stands on the branch, and its reason names why it went no further.
+  def ld-stands-local(s,run) { ld-say(s,"commit",ld-rev(s,"HEAD")); ld-say(s,"reason",hw-offline-mark() + " " + hw-step-said(run)); ld-say(s,"stage","local"); }
+  // a fetch with no route verifies the tree as it stands and lands locally; any other fetch that failed needs care
+  def ld-unfetched(s,verify,run) = !hw-offline?(run) ? ld-attention(s,hch-said(run)) : !ld-verified(s,verify) ? ld-attention(s,"Current-source verification needs local care; native results and framebuffer retain the reading.") : ld-stands-local(s,run);
   def ld-sync(s,verify) {
    let fetched=ld-step(s,"fetch",["fetch","-q","origin"]);
-   !hch-ok?(fetched) ? ld-attention(s,hch-said(fetched)) : {
+   !hch-ok?(fetched) ? ld-unfetched(s,verify,fetched) : {
     let main=ld-rev(s,"refs/remotes/origin/main");
     let rebased=ld-step(s,"rebase",["rebase","origin/main"]);
     let joined=hch-ok?(rebased) ? true : fcr-rounds-in(ld-text(s,"io"),ld-text(s,"directory"),[])[0] == "joined";
@@ -267,7 +293,7 @@ section [form.bml] {
      let branch=ld-text(s,"branch");
      let specs=["HEAD:refs/heads/" + branch] + (fhn-count(ld-field(s,"request"),"main") == 1 && branch != "main" ? ["HEAD:refs/heads/main"] : []);
      let pushed=ld-step(s,"push",["push","--atomic","origin"] + specs);
-     hch-ok?(pushed) && ld-remote(s) ? { ld-say(s,"commit",ld-rev(s,"HEAD")); ld-say(s,"reason",""); ld-say(s,"stage","published"); } : {
+     hch-ok?(pushed) && ld-remote(s) ? { ld-say(s,"commit",ld-rev(s,"HEAD")); ld-say(s,"reason",""); ld-say(s,"stage","published"); } : hw-offline?(pushed) ? ld-stands-local(s,pushed) : {
       let refreshed=ld-step(s,"refresh",["fetch","-q","origin"]);
       hch-ok?(refreshed) && ld-rev(s,"refs/remotes/origin/main") != main ? ld-sync(s,verify) : ld-attention(s,"Publication has not reached the requested refs: " + hch-said(pushed));
      };
@@ -333,8 +359,10 @@ section [form.bml] {
    let receipt=misses == 0 ? ld-publish-in(request,".",ld-verify) : ld-receipt(ld-attention(ld-admit(request,"."),"An edit did not find its unique source span."));
    let state=node_children(receipt)[0]; let landed=fhn-text(state,"stage") == "published";
    let readings=oh-voice-all([ld-health(fhn-text(request,"subject"),fhn-text(state,"reason"),landed)]);
-   ["[files] written=" + written.str() + " appended=" + appendedFiles.str() + " edit-misses=" + misses.str() + "\n[landing] " + (landed ? "landed" : fhn-text(state,"reason")) + "\n[commit] " + fhn-text(state,"commit") + "\n[continuation] " + fhn-text(state,"io") + "\n",readings,receipt];
+   ["[files] written=" + written.str() + " appended=" + appendedFiles.str() + " edit-misses=" + misses.str() + "\n[landing] " + ld-landing-said(state) + "\n[commit] " + fhn-text(state,"commit") + "\n[continuation] " + fhn-text(state,"io") + "\n",readings,receipt];
   }
+  // the landing's one line: what became of it, and every named path it left out
+  def ld-landing-said(state) = (fhn-text(state,"stage") == "published" ? "landed" : fhn-text(state,"stage") == "local" ? "landed locally (" + fhn-text(state,"reason") + "); the carry pushes it next time" : fhn-text(state,"reason")) + ld-left-said(state);
   def ld-run() {
    let input=cell_input();
    value_kind(input) == "node_id" ? ld-land(input)[2] : {

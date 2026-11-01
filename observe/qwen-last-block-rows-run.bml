@@ -1,0 +1,69 @@
+// qwen-last-block-rows-run.bml — the rows the last block's larger lift trains on, compiled into one file with each row's source beside it.
+//
+//   ./fkwu observe/qwen-last-block-rows-run.bml
+//
+// One JSONL the trainer and the judge read by line (learn/last-block-train-rows.jsonl), in this order:
+//   1. draft readings: the accepted rows of learn/draft-readings.jsonl before its last valid_rows (the judge's held-out), each line's text as it stands, so lines 1..20 keep their numbers;
+//   2. teacher rows: each scenario of model/fixtures/alignment/scenarios.jsonl whose every predicate held in the reading labelled teacher_label (the ledger's row, per_scenario): the
+//      frame the voice reads without a role prompt as the user turn, the answer the voice kept under that role prompt as the assistant turn. The weights learn what the prompt did.
+//   3. native readings: the accepted rows of learn/draft-readings-native.jsonl as they stand, when the reader step has landed any.
+// Sets 2 and 3 of the alignment fixtures stay out of every training packet: they are what a child trained on these rows is read on. A scenario whose answer is absent, or whose predicates
+// did not all hold, is left out and named. No model opens. Prints one line per source and the count; a compile that finds no row is refused by name.
+// stdin, optional, one JSON object read strictly: readings, valid_rows, fixtures, teacher_label, ledger, answers, native, out.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/string-case.fk form-stdlib/bml/ledger.bml form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/string-join.bml form-stdlib/bml/form-cli-heal-native-io.bml
+section [form.bml] {
+ blueprint AlignmentScenario { id: string, tongue: string, person_says: string, context: string, predicates: list<string> }
+ blueprint AlignmentScenarioRow { id: string, status: string, words: int, passed: int, total: int, failed: list<string>, generated_ids: option<int>, prefill_ms: option<int>, decode_ms: option<int> }
+ blueprint AlignmentRow { at_unix_ms: int, model: string, prompt_variant: string, prompt_digest: string, fixtures: string, scenarios: int, predicates_total: int, predicates_passed: int, per_scenario: list<AlignmentScenarioRow>, wall_ms: int, rent_tokens: int, role: option<string>, adapter: option<string>, adapter_sha256: option<string>, adapter_scale: option<string> }
+ class QwenLastBlockRows {
+  def qlr-door() = "qwen-last-block-rows";
+  def qlr-spec() = [["readings", "str"], ["valid_rows", "int"], ["fixtures", "str"], ["teacher_label", "str"], ["ledger", "str"], ["answers", "str"], ["native", "str"], ["out", "str"]];
+  def qlr-say(s) = print_str("[qwen-last-block-rows] " ++ s);
+  def qlr-text(opts, key, d) = json-object-has?(opts, key) ? fhn-text(opts, key) : d;
+  def qlr-int(opts, key, d) = json-object-has?(opts, key) ? json-int-value(json-object-get(opts, key)) : d;
+  def qlr-lines(path) = filter(l => len(trim(l)) > 0, split-on(read_file(path) ?? "", "\n"));
+  def qlr-accepted?(l) { let d = parse-json("rows-line", l); json-object-has?(d, "messages") && json-object-has?(d, "reading") && (String) fhn-text(d, "reading") == "accepted"; }
+  // the frame alignment-read-run.bml's ar-frame builds: what the voice reads when no role prompt stands in front
+  def qlr-frame(scen) {
+   let ctx = row-get(scen, "context");
+   (len(ctx) > 0 ? ("Context: " ++ ctx ++ "\n") : "") ++ "Their tongue: " ++ row-get(scen, "tongue") ++ "\nThe person says: " ++ row-get(scen, "person_says") ++ "\n\nCompanion:";
+  }
+  def qlr-msg(role, text) = json-node-object([fhn-s("role", role), fhn-s("content", text)]);
+  def qlr-teacher-line(scen, answer, label) = json-emit(json-node-object([fhn-s("draft", "alignment-" ++ row-get(scen, "id")), fhn-s("reading", "accepted"), fhn-s("source", "teacher: " ++ label), fhn-a("messages", [qlr-msg("user", qlr-frame(scen)), qlr-msg("assistant", answer)])]));
+  def qlr-held?(arm, id) = any?(r => (String) row-get(r, "id") == id && (Comparable) row-get(r, "passed") == row-get(r, "total") && (String) row-get(r, "status") == "answered", row-get(arm, "per_scenario"));
+  def qlr-answer(home, label, id) = trim(read_file(home ++ "/" ++ label ++ "/" ++ id ++ ".txt") ?? "");
+  def qlr-teacher(scens, arm, home, label) = foldl((acc, s) => {
+    let id = row-get(s, "id");
+    let a = qlr-answer(home, label, id);
+    let kept = qlr-held?(arm, id) && len(a) > 0;
+    let said = kept ? 0 : qlr-say("teacher row left out: " ++ id ++ (len(a) == 0 ? " (no answer kept)" : " (its predicates did not all hold)"));
+    kept ? append(acc, [qlr-teacher-line(s, a, label)]) : acc;
+   }, [], scens);
+  def qlr-take-last-off(xs, k) = len(xs) <= k ? [] : take(len(xs) - k, xs);
+  def qlr-last-arm(rows, label, fixtures) = foldl((acc, r) => (String) row-get(r, "prompt_variant") == label && (String) row-get(r, "fixtures") == fixtures ? r : acc, nothing(), rows);
+  def qlr-run() {
+   let opts = dop-doc(qlr-door(), stdin-text(), qlr-spec());
+   let readings = qlr-text(opts, "readings", "learn/draft-readings.jsonl");
+   let k = qlr-int(opts, "valid_rows", 5);
+   let fixtures = qlr-text(opts, "fixtures", "model/fixtures/alignment/scenarios.jsonl");
+   let label = qlr-text(opts, "teacher_label", "revised-3");
+   let ledger = qlr-text(opts, "ledger", "receipts/alignment-ledger.jsonl");
+   let home = qlr-text(opts, "answers", ".hearth/alignment");
+   let native = qlr-text(opts, "native", "learn/draft-readings-native.jsonl");
+   let out = qlr-text(opts, "out", "learn/last-block-train-rows.jsonl");
+   let draft = filter(l => qlr-accepted?(l), qlr-take-last-off(qlr-lines(readings), k));
+   let arm = qlr-last-arm(ledger-rows(ledger, "AlignmentRow"), label, fixtures);
+   let teacher = nothing?(arm) ? [] : qlr-teacher(ledger-rows(fixtures, "AlignmentScenario"), arm, home, label);
+   let saidArm = nothing?(arm) ? qlr-say("no reading labelled " ++ label ++ " of " ++ fixtures ++ " in " ++ ledger ++ ": no teacher row") : qlr-say("teacher reading " ++ label ++ ": prompt digest " ++ substring(row-get(arm, "prompt_digest"), 0, 12) ++ ", " ++ row-get(arm, "predicates_passed").str() ++ "/" ++ row-get(arm, "predicates_total").str());
+   let nativeRows = filter(l => qlr-accepted?(l), qlr-lines(native));
+   let all = append(draft, append(teacher, nativeRows));
+   nil?(all) ? dop-refuse(qlr-door(), "no row to compile") : {
+    let wrote = write_file_text(out, str-join-with(all, "\n") ++ "\n");
+    qlr-say("compiled " ++ len(all).str() ++ " rows into " ++ out ++ ": " ++ len(draft).str() ++ " draft readings (lines 1.." ++ len(draft).str() ++ "), " ++ len(teacher).str() ++ " teacher rows (lines " ++ (len(draft) + 1).str() ++ ".." ++ (len(draft) + len(teacher)).str() ++ "), " ++ len(nativeRows).str() ++ " native readings");
+    len(all);
+   };
+  }
+ }
+ qlr-run();
+}

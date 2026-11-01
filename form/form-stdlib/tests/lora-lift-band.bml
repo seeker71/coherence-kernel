@@ -3,8 +3,8 @@
 ; The door's functions are read in place (the door runs only as the entry); fixture rows live under a scratch directory the
 ; band makes and removes. No governor is asked, no tokenizer or model opens, no ledger row lands.
 ;
-; Expected: 63
-; Verdict 63 when every claim lands:
+; Expected: 255
+; Verdict 255 when every claim lands:
 ;   1   split: train is the first train_rows rows from the front, held-out the last valid_rows from the end, each under
 ;       max_chars (a long last row is skipped), both in file order, disjoint by draft id, and the split stands
 ;   2   overlap: a file too short for the ask puts one draft on both sides, and the split is refused naming that draft
@@ -17,6 +17,11 @@
 ;       and no rejected_* key stands when no negatives were named
 ;   32  door: run as a child on an unknown key and on a short rows file, the door exits 1 with the refusal and prints no
 ;       governor line (refused before anything opens)
+;   64  source: a held-out from valid_source reads its own end and the train side stays the rows' front; a draft on both sides of the two files is refused
+;       naming it, an absent valid_source is refused; the row names both sources, and its digests hold over those sides
+;   128 cadence: the rows beyond the last lift of these rows from this parent, the last lift read from the ledger's latest such row and no other parent's or rows';
+;       a lift with fewer new rows than the cadence says so on one line, and run as a child it opens no governor and exits 0; a window short of the row
+;       visits at the slowest rate this parent measured says so the same way; a plant that counts any parent's lift fails the check
 ;
 ; REQUIRES: the built ./fkwu and the body root as the working directory.
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml observe/lora-lift-run.bml
@@ -54,7 +59,7 @@ section [form.bml] {
   def llb-c-stdin(ctx) {
    let unknown = dop-refusal(ll-door(), "{\"heldout\":\"x\"}", ll-spec());
    let kind = dop-refusal(ll-door(), "{\"learning_rate\":0.0001}", ll-spec());
-   llb-has(unknown, "unknown key \"heldout\"") && llb-has(unknown, "the keys are: train_rows, valid_rows, max_chars, steps, batch, learning_rate, rows, negatives")
+   llb-has(unknown, "unknown key \"heldout\"") && llb-has(unknown, "the keys are: train_rows, valid_rows, max_chars, steps, batch, learning_rate, rows, negatives, valid_source, ledger, cadence, until_ms")
    && llb-has(kind, "key \"learning_rate\" must be a string") && (String) dop-refusal(ll-door(), "{\"train_rows\":20,\"valid_rows\":5,\"learning_rate\":\"0.0001\"}", ll-spec()) == ""
    && (String) ll-rate-why("0.0001") == "" && llb-has(ll-rate-why("abc"), "not a positive decimal") && len(ll-rate-why("-1")) > 0;
   }
@@ -100,10 +105,40 @@ section [form.bml] {
    (Comparable) typo[0] == 1 && llb-has(typo[1], "lora-lift: unknown key \"heldout\"") && !llb-has(typo[1], "[memory]")
    && (Comparable) short[0] == 1 && llb-has(short[1], "lora-lift: train and held-out share draft e") && !llb-has(short[1], "[memory]");
   }
+  // ---- 64 source
+  def llb-c-source(ctx) {
+   let native = [llb-accepted("n1"), llb-accepted("n2"), llb-accepted("n3")];
+   let record = [llb-accepted("r1"), llb-accepted("r2"), llb-accepted("r3")];
+   let s = ll-split-from(native, record, 3, 2, 6000);
+   let row = ll-row-from("child", "data", "native.jsonl", "record.jsonl", s[0], s[1], 100, 50, 10, 2, 2.5, 2.2, [], 1, 5);
+   let crossed = ll-split-from([llb-accepted("n1"), llb-accepted("r3")], record, 2, 1, 6000);
+   let path = llb-rows-path(ctx);
+   llb-same?(ll-ids(s[0]), ["n1", "n2", "n3"]) && llb-same?(ll-ids(s[1]), ["r2", "r3"]) && (String) ll-split-why-from(path, path, native, s[0], s[1], 6000) == ""
+   && llb-has(ll-split-why-from(path, path, crossed[0], crossed[0], crossed[1], 6000), "share draft r3") && llb-has(ll-split-why-from(path, llb-root(ctx) ++ "/no-such.jsonl", native, s[0], s[1], 6000), "valid_source")
+   && (String) fhn-text(row, "train_source") == "native.jsonl" && (String) fhn-text(row, "valid_source") == "record.jsonl" && (String) fhn-text(row, "train_ids_sha256") == ll-digest(s[0]) && (String) fhn-text(row, "valid_ids_sha256") == ll-digest(s[1]);
+  }
+  // ---- 128 cadence
+  def llb-led(parent, source, rows, wall, steps, batch) = parse-json("led", "{\"parent\":\"" ++ parent ++ "\",\"train_source\":\"" ++ source ++ "\",\"train_rows\":" ++ rows.str() ++ ",\"wall_ms\":" ++ wall.str() ++ ",\"steps\":" ++ steps.str() ++ ",\"batch\":" ++ batch.str() ++ "}");
+  def llb-ledger-rows() = [llb-led(ll-parent(), "x.jsonl", 8, 200000, 10, 2), llb-led(ll-parent(), "x.jsonl", 20, 340000, 10, 2), llb-led("another-parent", "x.jsonl", 90, 9000000, 1, 1), llb-led(ll-parent(), "y.jsonl", 70, 1000, 1, 1)];
+  def llb-cadence-holds?(lifted) = (Comparable) lifted(llb-ledger-rows(), ll-parent(), "x.jsonl") == 20 && (Comparable) lifted(llb-ledger-rows(), ll-parent(), "z.jsonl") == 0;
+  def llb-plant-lifted(rows, parent, rowsPath) = foldl((n, r) => (String) fhn-text(r, "train_source") == rowsPath ? fhn-count(r, "train_rows") : n, 0, rows);
+  def llb-c-cadence(ctx) {
+   let path = llb-rows-path(ctx);
+   let ledger = llb-root(ctx) ++ "/ledger.jsonl";
+   let w = write_file(ledger, "{\"parent\":\"" ++ ll-parent() ++ "\",\"train_source\":\"" ++ path ++ "\",\"train_rows\":4,\"wall_ms\":20000,\"steps\":10,\"batch\":1}\n");
+   let waits = llb-run(ctx, "waits", "{\"rows\":\"" ++ path ++ "\",\"ledger\":\"" ++ ledger ++ "\",\"cadence\":8}");
+   let spent = llb-run(ctx, "spent", "{\"rows\":\"" ++ path ++ "\",\"ledger\":\"" ++ ledger ++ "\",\"cadence\":2,\"batch\":2,\"until_ms\":1}");
+   llb-cadence-holds?(ll-lifted) && !llb-cadence-holds?(llb-plant-lifted)
+   && (String) ll-cadence-line("x", 28, 20, 8) == "" && llb-has(ll-cadence-line("x", 27, 20, 8), "holds 27 rows, 7 beyond the last lift of 20; a lift begins at 8")
+   && (Comparable) ll-visit-ms(llb-ledger-rows(), ll-parent()) == 17000 && (Comparable) ll-visit-ms([], ll-parent()) == ll-visit-unmeasured-ms() && (Comparable) ll-steps-for(9, 2) == 5 && (Comparable) ll-steps-for(8, 2) == 4
+   && (String) ll-window-line(nothing(), 5, 10, 1000) == "" && (String) ll-window-line(10005, 5, 10, 1000) == "" && llb-has(ll-window-line(10004, 5, 10, 1000), "cannot hold 10 row visits")
+   && (Comparable) waits[0] == 0 && llb-has(waits[1], "[lift] cadence: " ++ path ++ " holds 7 rows, 3 beyond the last lift of 4; a lift begins at 8") && !llb-has(waits[1], "[memory]")
+   && (Comparable) spent[0] == 0 && llb-has(spent[1], "[lift] window:") && llb-has(spent[1], "cannot hold 8 row visits at 2000 ms a visit") && !llb-has(spent[1], "[memory]");
+  }
  }
  let ctx = llb-fresh();
  nothing?(ctx) ? form_error("lora-lift band needs a fresh directory") : 0;
- let verdict = live-claims("lora-lift-band", ctx, [["split", 1, 1, llb-c-split], ["overlap", 2, 1, llb-c-overlap], ["stdin", 4, 1, llb-c-stdin], ["reading", 8, 1, llb-c-reading], ["row", 16, 1, llb-c-row], ["door", 32, 1, llb-c-door]]);
+ let verdict = live-claims("lora-lift-band", ctx, [["split", 1, 1, llb-c-split], ["overlap", 2, 1, llb-c-overlap], ["stdin", 4, 1, llb-c-stdin], ["reading", 8, 1, llb-c-reading], ["row", 16, 1, llb-c-row], ["door", 32, 1, llb-c-door], ["source", 64, 1, llb-c-source], ["cadence", 128, 1, llb-c-cadence]]);
  host_dir_rmdir(llb-root(ctx));
  verdict;
 }

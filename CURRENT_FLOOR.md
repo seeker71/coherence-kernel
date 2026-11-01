@@ -238,7 +238,7 @@ native-turn-ladder-band 262143 · local-flow-reading-band 4194303  (a memory end
                                 checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
                                 the wall, its renewals and the prompt IDs they re-fed; a lane killed at its deadline writes no counts
                                 and its counts are folded from its stamps and said so; the day option reproduces to the ms)
-host-walk-band 8796093022207  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
+host-walk-band 2251799813685247  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
                                 pid, unix ms, door) under the lock it holds; a later start of the same door that finds its own
                                 row under 25 minutes old (hw-slot-window-ms: the retry gap plus slack, far under the two-hour
                                 windows and the eight hours between slots) ends 0 with `[walk-lock] <door> already began at <hh:mm>
@@ -320,7 +320,7 @@ host-walk-retry-band 4194303  (the informed retry, observe/walk-retry.bml over h
                                 already ended leaves its log written in the window, which is begun; only a first slot that left neither
                                 is read for why. The walk checkout must hold observe/walk-retry.bml before the retry jobs are loaded
                                 (observe/walk-sync-run.bml {"dir":"..."} on it).)
-form-cli-landing-band 262143  (the landing and the walk read every child's exit from `host_wait` through
+form-cli-landing-band 524287  (the landing and the walk read every child's exit from `host_wait` through
                                 `host-child.bml` (`hch-run`), never from a printed mark; a red witness holds the landing; the
                                 reunion after a push behind origin is argv in the checkout it joins and is read end to end in a
                                 scratch origin: joined, refused with what git said, the side taken, and its default wiring)
@@ -331,7 +331,7 @@ control/tests/attempt-band 4095 · file-bytes-band 127
 form-bml-cursor-full-band 105
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 form/form-stdlib/tests/form-agent-tools-band.bml 4294967295 (2026-10-04: the sixteen resident agent tools over their JSON wire, grep among them)
-form/form-stdlib/tests/findings-requests-band.bml 1048575 · form/form-stdlib/tests/form-cli-local-plan-band.bml 33554431
+form/form-stdlib/tests/findings-requests-band.bml 1048575 · form/form-stdlib/tests/form-cli-local-plan-band.bml 33554431 · form/form-stdlib/tests/local-plan-parks-band.bml 255 · form/form-stdlib/tests/exit-proof-band.bml 511 · form/form-stdlib/tests/offline-voice-gaps-band.bml 4095 · form/form-stdlib/tests/host-walk-learn-band.bml 255 · form/form-stdlib/tests/native-turn-green-band.bml 32767 · form/form-stdlib/tests/draft-native-reading-band.bml 65535
                                             (2026-10-02, rc 0: the feeder reads whether the code a request cites moved since its
                                             review, git hunks plus the closing gate and no model, and keeps the definition the
                                             change landed in; the planner proposes a request moot only when the voice's band names

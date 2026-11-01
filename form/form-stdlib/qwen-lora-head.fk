@@ -58,15 +58,17 @@ section [form.bml] {
 //   [slot, dot-pipe, add-pipe, A, B, u, din, rank, dout, scale-bits, ntok-capacity]
 // An adapted layer table is the opened one with each layer's record list appended (linear
 // 14 -> 15 entries, full 11 -> 12), built by qlh-rr-table, which refuses a record that could
-// not carry the context's span or sits on a slot its layer lacks; close and the ok?-checks keep
-// reading ctx[3], the original. The hook inside qwen35-dense-token-handle.fk that enqueues a
-// record after its projection is the one edit that file needs; it is named in this stone's
-// handoff.
+// not carry the context's span or sits on a slot its layer lacks. The hook stands in
+// qwen35-dense-token-handle.fk (q38-wear-recs): each residual writer's records run right after
+// its residual add, decode and span alike, and the walkers over a layer's tensors read
+// q38-lay-tvs, so a context whose slot 3 is an adapted table closes and checks as the opened one.
+// form-stdlib/bml/qwen-last-block-wear.bml opens a worn context from an adapter directory.
 section [form.bml] {
+    def qlh-rr-nonfinite-msl(fname) = "kernel void " + (fname + " (device const uint* x [[buffer(0)]], device metal::atomic_uint* n [[buffer(1)]], constant uint& count [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i < count && (x[i] & 0x7f800000u) == 0x7f800000u) metal::atomic_fetch_add_explicit(n, 1u, metal::memory_order_relaxed); }");
     def qlh-rr-dot-msl(fname) = "kernel void " + (fname + " (device const float* x [[buffer(0)]], device const float* a [[buffer(1)]], device float* u [[buffer(2)]], constant uint& din [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint g [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { if (g >= rank * ntok) return; uint t = g / rank; uint k = g - t * rank; float acc = 0.0f; for (uint i = lane; i < din; i += 32u) { acc = acc + a[i * rank + k] * x[t * din + i]; } acc = metal::simd_sum(acc); if (lane == 0u) u[t * rank + k] = acc; }");
     def qlh-rr-add-msl(fname) = "kernel void " + (fname + " (device float* y [[buffer(0)]], device const float* b [[buffer(1)]], device const float* u [[buffer(2)]], constant uint& dout [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant float& scale [[buffer(6)]], uint gid [[thread_position_in_grid]]) { if (gid >= dout * ntok) return; uint t = gid / dout; uint j = gid - t * dout; float acc = 0.0f; for (uint k = 0u; k < rank; ++k) { acc = acc + u[t * rank + k] * b[k * dout + j]; } y[gid] = y[gid] + scale * acc; }");
     // No `using namespace metal;`: the body's own arithmetic names stay unambiguous.
-    def qlh-rr-msl() = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n" + (qlh-rr-dot-msl("form_qwen_lora_rr_dot_f32") + qlh-rr-add-msl("form_qwen_lora_rr_add_f32"));
+    def qlh-rr-msl() = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n" + (qlh-rr-dot-msl("form_qwen_lora_rr_dot_f32") + (qlh-rr-add-msl("form_qwen_lora_rr_add_f32") + qlh-rr-nonfinite-msl("form_qwen_lora_rr_nonfinite_f32")));
     // the layer slots: [slot index in the layer table, tensor suffix]
     def qlh-rr-slots() = [[13, "ssm_out"], [10, "attn_output"], [4, "ffn_down"]];
     def qlh-rr-name(layer, suffix, part) = "blk." + (layer.str() + ("." + (suffix + (".weight.lora_" + part))));
@@ -86,13 +88,22 @@ section [form.bml] {
     } : [];
     def qlh-rr-valid?(rec) = (Comparable) len(rec) == 11 && rec[1] > 0 && rec[2] > 0 && rec[3] > 0 && rec[4] > 0 && rec[5] > 0 ? 1 : 0;
     def qlh-rr-close(rec) = (Comparable) len(rec) == 11 ? sum([q38-free-handle(rec[3]), q38-free-handle(rec[4]), q38-free-handle(rec[5])]) : 0;
-    // The enqueue a hook makes: x [ntok, din] -> y [ntok, dout] += scale * B^T (A^T x).
+    // The enqueue the hook makes: x [ntok, din] -> y [ntok, dout] += scale * B^T (A^T x).
     // The dot dispatch is one 32-thread simd group per (token, k): mode 1 counts groups.
-    def qlh-rr-apply(rec, xh, yh, ntok) = (Comparable) qlh-rr-valid?(rec) == 1 && ntok <= rec[10] ? {
-        metal_enqueue(rec[1], md-bind16([xh, rec[3], rec[5]], [rec[6], rec[7], ntok], 32, 0, 1, 1), rec[7] * ntok);
-        metal_enqueue(rec[2], md-bind16([yh, rec[4], rec[5]], [rec[8], rec[7], ntok, rec[9]], 256, 0, 0, 1), rec[8] * ntok);
-        1;
-    } : 0;
+    def qlh-rr-apply(rec, xh, yh, ntok) = (Comparable) qlh-rr-valid?(rec) == 1 && ntok <= rec[10] ? q38-run(q38-wear-rec-recs(rec, xh, yh, ntok)) : 0;
+    // How many of the pair's words are not finite, counted on the device (a Form walk over 180,224 floats would cost every open a second);
+    // nothing when the count did not arrive.
+    def qlh-rr-nonfinite(rec) = gpu-lease-turn("qwen wear admission", () => {
+        let pipe = metal_pipeline(qlh-rr-msl(), "form_qwen_lora_rr_nonfinite_f32");
+        let nh = metal_buf_alloc(16);
+        let zero = metal_buf_write(nh, 0, md-le32(0));
+        metal_batch_concurrent();
+        metal_enqueue(pipe, md-bind16([rec[3], nh], [rec[6] * rec[7]], 256, 0, 0, 1), rec[6] * rec[7]);
+        metal_enqueue(pipe, md-bind16([rec[4], nh], [rec[7] * rec[8]], 256, 0, 0, 1), rec[7] * rec[8]);
+        let raw = metal_buf_read(nh, 0, 4);
+        let freed = q38-free-handle(nh);
+        (Comparable) len(raw) == 4 ? kth-u32at(raw, 0) : nothing();
+    });
     // an adapted layer table: each layer's record list appended (records-by-layer[l] may be [])
     def qlh-rr-lays(lays, records) = (Comparable) len(lays) == 0 ? empty() : cons(append(lays[0], [records[0]]), qlh-rr-lays(lays[1:], records[1:]));
     // A table is built only for records the forward can carry whole. qlh-rr-apply answers 0 for a
@@ -111,8 +122,8 @@ section [form.bml] {
     def qlh-rr-refusal(records, interval, span) = qlh-rr-refusal-go(records, 0, interval, span);
     // the adapted table for a context of `span` tokens, or nothing when a record would not hold
     def qlh-rr-table(lays, records, interval, span) = !((Comparable) len(lays) == len(records)) ? nothing() : (Comparable) len(qlh-rr-refusal(records, interval, span)) > 0 ? nothing() : qlh-rr-lays(lays, records);
-    // the record list a hook reads from an adapted layer (linear 15 entries, full 12)
-    def qlh-rr-of(lay) = (Comparable) len(lay) == 15 ? lay[14] : (Comparable) len(lay) == 12 ? lay[11] : empty();
+    // the record list the hook reads from an adapted layer (linear 15 entries, full 12)
+    def qlh-rr-of(lay) = q38-lay-wear(lay);
     def qlh-rr-slot-apply(lay, slot, xh, yh, ntok) = foldl((acc, rec) => acc + ((Comparable) rec[0] == slot ? qlh-rr-apply(rec, xh, yh, ntok) : 0), 0, qlh-rr-of(lay));
     0;
 }
