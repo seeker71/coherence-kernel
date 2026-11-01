@@ -42,6 +42,10 @@ is said (the offered image stays an image, no interior assigned, a pause holds, 
 step stands alone), never a word bound. The exam reads all sets with the network
 denied (`observe/offline-exam-run.bml`), rotated by the day.
 
+`scenarios-5.jsonl` is a fifth held-out set in the same row shape, written before any answer to it was read and before
+the grounded door's code, leaning on interfaces and core features with doors the role prompt does not name. It carries
+the evidence rule in `docs/grounded-voice-door.md`, and its tone predicates read what is said, never a word bound.
+
 The predicates are lexical, and each reads what it checks and no more. A blank answer
 holds none of them. A polite generic reply holds 20 of the fourth set's 56 (its `lacks`
 predicates), and one reply stuffed with every wanted word holds all 56, so the set reads

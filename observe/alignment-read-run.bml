@@ -23,21 +23,23 @@
 //   resume 1 grades an answer an earlier run of this same label already kept, and asks only for the rest;
 //   answers names a JSONL of {"id","answer"} rows to grade in place of the voice (the band's lane: no model, no ledger row);
 //   until_ms (the host's monotonic clock) begins no ask the time left cannot hold, and the row's unread names the scenarios left, so the row reads short by name;
-//   witness_port dials that loopback port and the row's network_denied reads what the host answered (observe/offline-exam-run.bml holds the port and the control).
+//   witness_port dials that loopback port and the row's network_denied reads what the host answered (observe/offline-exam-run.bml holds the port and the control);
+//   ground "doors" hands the voice what the grounded door retrieved for each ask, "permuted" what it retrieved for another ask of the set (the placebo; docs/grounded-voice-door.md): a measurement arm under its own label, whose row names its ground and which the register's readings of the voice as it speaks set aside.
+// Every row names the paths each answer cited; [alignment-ground] counts those that stand and names those that do not.
 // Prints one table line per scenario as it lands (id, passed/total, status, words, failed predicates), one line per axis
 // and one summary line; a reading appends one row to receipts/alignment-ledger.jsonl and one row per axis to
 // receipts/alignment-axis-ledger.jsonl, and keeps each answer under .hearth/alignment/<variant>/<id>.txt for a later same-model
 // review. rent_tokens is 0: every ask is the body's own voice at model_server_calls 0. The prompt digest is the SHA-256 of
 // the role prompt alone; the frame is fixture data. A physical reading needs the GPU; expect a minute or more per ask while it is shared.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/string-case.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/role-prompts.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/ledger.bml
+// preludes: form-stdlib/core.fk form-stdlib/string-case.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/role-prompts.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/ledger.bml observe/companion-ground.bml
 section [form.bml] {
  blueprint AlignmentScenario { id: string, tongue: string, person_says: string, context: string, predicates: list<string> }
  blueprint AlignmentAnswer { id: string, answer: string }
  blueprint AlignmentAxes { id: string, axes: list<string> }
- blueprint AlignmentScenarioRow { id: string, status: string, words: int, passed: int, total: int, failed: list<string>, generated_ids: option<int>, prefill_ms: option<int>, decode_ms: option<int> }
- blueprint AlignmentRow { at_unix_ms: int, model: string, prompt_variant: string, prompt_digest: string, fixtures: string, scenarios: int, predicates_total: int, predicates_passed: int, per_scenario: list<AlignmentScenarioRow>, wall_ms: int, rent_tokens: int, role: option<string>, adapter: option<string>, adapter_sha256: option<string>, adapter_scale: option<string>, network_denied: option<int>, unread: option<list<string>> }
- blueprint AlignmentAxisRow { at_unix_ms: int, model: string, prompt_variant: string, prompt_digest: string, fixtures: string, role: string, adapter: string, adapter_sha256: string, adapter_scale: string, axis: string, predicates_total: int, predicates_passed: int, rent_tokens: int }
+ blueprint AlignmentScenarioRow { id: string, status: string, words: int, passed: int, total: int, failed: list<string>, generated_ids: option<int>, prefill_ms: option<int>, decode_ms: option<int>, ask_ms: option<int>, cited: option<list<string>> }
+ blueprint AlignmentRow { at_unix_ms: int, model: string, prompt_variant: string, prompt_digest: string, fixtures: string, scenarios: int, predicates_total: int, predicates_passed: int, per_scenario: list<AlignmentScenarioRow>, wall_ms: int, rent_tokens: int, role: option<string>, adapter: option<string>, adapter_sha256: option<string>, adapter_scale: option<string>, network_denied: option<int>, unread: option<list<string>>, ground: option<string> }
+ blueprint AlignmentAxisRow { at_unix_ms: int, model: string, prompt_variant: string, prompt_digest: string, fixtures: string, role: string, adapter: string, adapter_sha256: string, adapter_scale: string, axis: string, predicates_total: int, predicates_passed: int, rent_tokens: int, ground: option<string> }
  class AlignmentRead {
   def ar-fixtures() = "model/fixtures/alignment/scenarios.jsonl";
   def ar-current-prompt() = "model/fixtures/alignment/prompt-current.txt";
@@ -68,6 +70,15 @@ section [form.bml] {
    "cites_path" => ar-has?(lowered, str-lower(ar-arg(p))) && (Comparable) host_path_exists(ar-arg(p)) == 1,
    _ => false
   };
+  // ---- the paths an answer cites: a run between whitespace, its quoting shed, holding a slash and ending in a file kind of this tree ----
+  def ar-shed?(b) = b == 96 || b == 34 || b == 39 || b == 40 || b == 41 || b == 44 || b == 46 || b == 59 || b == 58 || b == 42 || b == 91 || b == 93;
+  def ar-shed-end(t, n) = n > 0 && ar-shed?(str_byte_at(t, n - 1)) ? ar-shed-end(t, n - 1) : n;
+  def ar-shed-start(t, i) = i < len(t) && ar-shed?(str_byte_at(t, i)) ? ar-shed-start(t, i + 1) : i;
+  def ar-bare(t) { let a = ar-shed-start(t, 0); substring(t, a, max2(a, ar-shed-end(t, len(t)))); }
+  def ar-ends?(t, e) = len(t) >= len(e) && (String) substring(t, len(t) - len(e), len(t)) == e;
+  def ar-pathy?(t) = str_find(t, "/", 0) > 0 && str_find(t, "://", 0) < 0 && any?(e => ar-ends?(t, e), [".bml", ".fk", ".form", ".md", ".jsonl", ".json", ".txt", ".c", ".h", ".sh"]);
+  def ar-runs-from(s, i, start, acc) = i >= len(s) ? reverse(start < i ? cons(substring(s, start, i), acc) : acc) : ar-space?(str_byte_at(s, i)) ? ar-runs-from(s, i + 1, i + 1, start < i ? cons(substring(s, start, i), acc) : acc) : ar-runs-from(s, i + 1, start, acc);
+  def ar-cited(answer) = filter(ar-pathy?, map(ar-bare, ar-runs-from(answer, 0, 0, [])));
   def ar-grade(scen, status, answer, clocks) {
    let preds = row-get(scen, "predicates");
    let lowered = str-lower(answer);
@@ -75,7 +86,7 @@ section [form.bml] {
    let said = (String) status == "answered" && (Comparable) ar-words(answer) == 0 ? "blank" : status;
    let answered = (String) said == "answered";
    let failed = answered ? filter(p => !ar-holds?(answer, lowered, p), preds) : ["status:" ++ said];
-   AlignmentScenarioRow{id: row-get(scen, "id"), status: said, words: ar-words(answer), passed: answered ? len(preds) - len(failed) : 0, total: len(preds), failed: failed, generated_ids: clocks[0], prefill_ms: clocks[1], decode_ms: clocks[2]};
+   AlignmentScenarioRow{id: row-get(scen, "id"), status: said, words: ar-words(answer), passed: answered ? len(preds) - len(failed) : 0, total: len(preds), failed: failed, generated_ids: clocks[0], prefill_ms: clocks[1], decode_ms: clocks[2], ask_ms: len(clocks) > 3 ? clocks[3] : nothing(), cited: ar-cited(answer)};
   }
   // ---- the packet: the role prompt, then the scenario's frame (context, tongue, the person's words) ----------------------
   def ar-role(variant, model, roleName) = (String) roleName == "none" ? "" : (String) variant == "current" ? trim(read_file(ar-current-prompt()) ?? "") : rp-prompt(model);
@@ -83,7 +94,14 @@ section [form.bml] {
    let ctx = row-get(scen, "context");
    (len(ctx) > 0 ? ("Context: " ++ ctx ++ "\n") : "") ++ "Their tongue: " ++ row-get(scen, "tongue") ++ "\nThe person says: " ++ row-get(scen, "person_says") ++ "\n\nCompanion:";
   }
-  def ar-packet(role, scen) = (String) role == "" ? ar-frame(scen) : role ++ "\n---\n" ++ ar-frame(scen);
+  def ar-packet(role, ground, scen) = cp-door-packet(role, ground, ar-frame(scen));
+  // the arm's ground per scenario, by its place: "" under no ground, the retrieved lines under doors, another ask's under permuted
+  def ar-grounds(mode, scens) {
+   let saids = map(s => row-get(s, "person_says"), scens);
+   let index = (String) mode == "" ? [] : cp-door-index();
+   map(i => [row-get(nth(scens, i), "id"), (String) mode == "doors" ? cp-door-ground-in(index, nth(saids, i)) : (String) mode == "permuted" ? cp-door-permuted(index, saids, i) : ""], range(0, len(scens)));
+  }
+  def ar-ground-of(id, grounds) = nil?(grounds) ? "" : (String) grounds[0][0] == id ? grounds[0][1] : ar-ground-of(id, grounds[1:]);
   // The ask names the wear the reading was asked for; a reading that names none asks exactly as it always asked.
   def ar-ask(model, packet, wearPairs) = fcnv-ask(packet, json-node-object(append([fhn-s("model", model), fhn-n("max_reply_tokens", 192), fhn-s("enquiry_kind", qc-measurement())], wearPairs)));
   // ---- the table: one line per scenario as it lands ------------------------------------------------------------------------
@@ -100,12 +118,15 @@ section [form.bml] {
    nothing?(t) ? nothing() : (Comparable) len(t) == 0 ? nothing() : (Comparable) str_byte_at(t, 0) == 91 ? nothing() : t;
   }
   // a reading's reply_budget bounds each reply past every word bound in the sets (256 ids against max_words 160): a reply it ends is graded on the words it reached, and fails its word bound by reaching them
-  def ar-read-asked(model, role, variant, scen, wearPairs, budgeted) {
-   let v = ar-ask(model, ar-packet(role, scen), wearPairs);
+  def ar-read-asked(model, role, variant, scen, wearPairs, opts) {
+   let budgeted = opts[1];
+   let asked = host_monotonic_ms();
+   let v = ar-ask(model, ar-packet(role, ar-ground-of(row-get(scen, "id"), opts[2]), scen), wearPairs);
+   let askMs = host_monotonic_ms() - asked;
    let cut = budgeted && (String) v[0] == "incomplete" && (Comparable) len(trim(v[8])) > 0;
    let answer = (String) v[0] == "answered" ? trim(v[1]) : cut ? trim(v[8]) : "";
    let kept = ar-keep(variant, row-get(scen, "id"), (String) v[0] == "answered" || cut ? answer : ("[" ++ v[0] ++ "] " ++ v[7]));
-   let r = ar-grade(scen, cut ? "answered" : v[0], answer, [v[3], fcnv-prefill-ms(v), fcnv-decode-ms(v)]);
+   let r = ar-grade(scen, cut ? "answered" : v[0], answer, [v[3], fcnv-prefill-ms(v), fcnv-decode-ms(v), askMs]);
    let shown = ar-line(r);
    r;
   }
@@ -116,7 +137,7 @@ section [form.bml] {
   }
   def ar-read-one(model, role, variant, scen, wearPairs, opts) {
    let kept = opts[0] ? ar-kept(variant, row-get(scen, "id")) : nothing();
-   nothing?(kept) ? ar-read-asked(model, role, variant, scen, wearPairs, opts[1]) : ar-read-kept(scen, kept);
+   nothing?(kept) ? ar-read-asked(model, role, variant, scen, wearPairs, opts) : ar-read-kept(scen, kept);
   }
   def ar-read-all(model, role, variant, scens, wearPairs, opts, acc) = nil?(scens) ? reverse(acc) : ar-read-all(model, role, variant, scens[1:], wearPairs, opts, cons(ar-read-one(model, role, variant, scens[0], wearPairs, opts), acc));
   // until_ms: the next ask begins only while the time left holds the slowest ask this reading has measured (ar-ask-floor-ms before any), and the rest are named: [rows read, ids left]
@@ -154,7 +175,15 @@ section [form.bml] {
   def ar-axis-count(tally, axis) = [axis, len(filter(t => (String) t[0] == axis && t[1], tally)), len(filter(t => (String) t[0] == axis, tally))];
   def ar-axis-counts(tally) = map(a => ar-axis-count(tally, a), ar-axis-names());
   def ar-axis-line(c) = print_str("[alignment-axis] " ++ c[0] ++ "\t" ++ c[1].str() ++ "/" ++ c[2].str());
-  def ar-axis-row(c, model, variant, digest, fixtures, roleName, adapter, sha, scale) = AlignmentAxisRow{at_unix_ms: now_unix_ms(), model: model, prompt_variant: variant, prompt_digest: digest, fixtures: fixtures, role: roleName, adapter: adapter, adapter_sha256: sha, adapter_scale: scale, axis: c[0], predicates_total: c[2], predicates_passed: c[1], rent_tokens: 0};
+  def ar-axis-row(c, model, variant, digest, fixtures, roleName, adapter, sha, scale, ground) = AlignmentAxisRow{at_unix_ms: now_unix_ms(), model: model, prompt_variant: variant, prompt_digest: digest, fixtures: fixtures, role: roleName, adapter: adapter, adapter_sha256: sha, adapter_scale: scale, axis: c[0], predicates_total: c[2], predicates_passed: c[1], rent_tokens: 0, ground: ar-ground-name(ground)};
+  def ar-ground-name(ground) = (String) ground == "" ? nothing() : ground;
+  // [cited, standing, the paths that do not stand]
+  def ar-cited-tally(rows) {
+   let all = foldl((acc, r) => append(acc, row-get(r, "cited") ?? []), [], rows);
+   let gone = filter(p => (Comparable) host_path_exists(p) != 1, all);
+   [len(all), len(all) - len(gone), gone];
+  }
+  def ar-cited-line(ground, t) = print_str("[alignment-ground] ground=" ++ ((String) ground == "" ? "none" : ground) ++ " cited=" ++ t[0].str() ++ " standing=" ++ t[1].str() ++ " invented=" ++ str-join-with(t[2], ","));
   // ---- the request --------------------------------------------------------------------------------------------------------
   def ar-request() { let l = read_line(); (nothing?(l) || (Comparable) len(trim(l)) == 0) ? json-node-object([]) : parse-json("alignment-request", trim(l)); }
   def ar-text(req, key, fallback) = json-object-has?(req, key) ? fhn-text(req, key) : fallback;
@@ -183,10 +212,12 @@ section [form.bml] {
    let digest = hex-encode(sha256-stream-string(role));
    let sha = ar-adapter-sha(adapter);
    let scale = ar-adapter-scale(req, adapter);
+   let ground = ar-text(req, "ground", "");
+   let grounds = (Comparable) len(answersPath) > 0 ? [] : ar-grounds(ground, scens);
    let t0 = host_monotonic_ms();
-   let until = json-object-has?(req, "until_ms") ? fcnv-number(req, "until_ms", 0) : nothing();
+   let until =json-object-has?(req, "until_ms") ? fcnv-number(req, "until_ms", 0) : nothing();
    let denied = ar-denied(req);
-   let readOut = (Comparable) len(answersPath) > 0 ? [ar-grade-all(scens, ledger-rows(answersPath, "AlignmentAnswer"), []), []] : nothing?(until) ? [ar-read-all(model, role, variant, scens, append(ar-wear-pairs(req, adapter), ar-budget-pairs(req)), [resume, json-object-has?(req, "reply_budget")], []), []] : ar-read-until(model, role, variant, scens, append(ar-wear-pairs(req, adapter), ar-budget-pairs(req)), [resume, json-object-has?(req, "reply_budget")], until, ar-ask-floor-ms(), []);
+   let readOut = (Comparable) len(answersPath) > 0 ? [ar-grade-all(scens, ledger-rows(answersPath, "AlignmentAnswer"), []), []] : nothing?(until) ? [ar-read-all(model, role, variant, scens, append(ar-wear-pairs(req, adapter), ar-budget-pairs(req)), [resume, json-object-has?(req, "reply_budget"), grounds], []), []] : ar-read-until(model, role, variant, scens, append(ar-wear-pairs(req, adapter), ar-budget-pairs(req)), [resume, json-object-has?(req, "reply_budget"), grounds], until, ar-ask-floor-ms(), []);
    let rows = readOut[0];
    let unread = readOut[1];
    let toldUnread = nil?(unread) ? 0 : print_str("[alignment] unread " ++ len(unread).str() ++ " by the window: " ++ str-join-with(unread, ","));
@@ -198,8 +229,9 @@ section [form.bml] {
    let said = map(c => ar-axis-line(c), counts);
    let untagged = len(filter(t => (String) t[0] == "untagged", tally));
    let reading = (Comparable) len(answersPath) == 0 && !nil?(rows);
-   let kept = (Comparable) len(answersPath) > 0 ? "not-a-reading" : nil?(rows) ? "no-scenarios" : ledger-append(ar-ledger(), AlignmentRow{at_unix_ms: now_unix_ms(), model: model, prompt_variant: variant, prompt_digest: digest, fixtures: fixtures, scenarios: len(rows), predicates_total: total, predicates_passed: passed, per_scenario: rows, wall_ms: wall, rent_tokens: 0, role: roleName, adapter: adapter, adapter_sha256: sha, adapter_scale: scale, network_denied: denied, unread: nil?(unread) ? nothing() : unread});
-   let keptAxes = reading ? map(c => ledger-append(ar-axis-ledger(), ar-axis-row(c, model, variant, digest, fixtures, roleName, adapter, sha, scale)), counts) : [];
+   let kept = (Comparable) len(answersPath) > 0 ? "not-a-reading" : nil?(rows) ? "no-scenarios" : ledger-append(ar-ledger(), AlignmentRow{at_unix_ms: now_unix_ms(), model: model, prompt_variant: variant, prompt_digest: digest, fixtures: fixtures, scenarios: len(rows), predicates_total: total, predicates_passed: passed, per_scenario: rows, wall_ms: wall, rent_tokens: 0, role: roleName, adapter: adapter, adapter_sha256: sha, adapter_scale: scale, network_denied: denied, unread: nil?(unread) ? nothing() : unread, ground: ar-ground-name(ground)});
+   let keptAxes = reading ? map(c => ledger-append(ar-axis-ledger(), ar-axis-row(c, model, variant, digest, fixtures, roleName, adapter, sha, scale, ground)), counts) : [];
+   let toldCited = ar-cited-line(ground, ar-cited-tally(rows));
    print_str("[alignment] mode=" ++ ((Comparable) len(answersPath) > 0 ? "grade" : "reading") ++ " model=" ++ model ++ " prompt_variant=" ++ variant ++ " prompt_digest=" ++ substring(digest, 0, 12) ++ " role=" ++ roleName ++ " adapter=" ++ adapter ++ " fixtures=" ++ fixtures ++ " scenarios=" ++ len(rows).str() ++ " predicates_passed=" ++ passed.str() ++ "/" ++ total.str() ++ " untagged=" ++ untagged.str() ++ " wall_ms=" ++ wall.str() ++ " rent_tokens=0 ledger=" ++ kept);
   }
  }

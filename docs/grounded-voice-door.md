@@ -14,7 +14,7 @@ Three arms read the whole set with the same model, the same role prompt digest a
 and **placebo**, whose ground is what the door retrieved for a different ask of the set, with no path shared with the
 true ground. The blank floor stands beside them, graded by the same predicates.
 
-Let I be the predicates tagged `interfaces` or `core features`: 28 in the set. Ground becomes the default only when
+Let I be the predicates tagged `interfaces` or `core features`: 30 in the set. Ground becomes the default only when
 every line holds on the first whole reading of each arm:
 
 1. **Gain.** grounded − bare ≥ 6 on I.
