@@ -229,7 +229,7 @@ run stopped by hand after its first capture, see "Friction").
   rung 2 wrote them), `nlb_adam` (bias-corrected, clip 1.0), `form_hash_fill_f32` (A's seed), the rung-1 forward and capture tap,
   and the tokfast index lane (`qei-chat-ids` / `qei-encode`, byte-identical to `q35-encode`: the reference lane measured 30–112 s per
   assistant text in `.hearth/qwen-rung-3/rows-probe-1.log`, the index 96–157 s for all eight rows).
-- **Rows.** The first 8 accepted rows of `learn/draft-readings.jsonl` (lines 1–8), ChatML (user turn, assistant header, empty think
+- **Rows.** The first 8 accepted rows of the walk's of-record rows (local, `hw-words`) (lines 1–8), ChatML (user turn, assistant header, empty think
   block) ++ the assistant's ids ++ `<|im_end|>`, cut to 160 ids → 159 positions each, prompt-masked: supervised targets
   120, 5, 131, 138, 143, 123, 141, 121 (prefix 40, 155, 29, 22, 17, 37, 19, 39 ids). Every row is cut at the cap, so no row's end
   marker is inside the window; line 2's 626-byte prompt leaves it 5 targets. The assistant text is encoded over its first 1200 bytes
@@ -326,7 +326,7 @@ printed numbers are my subtraction and say so.
   never written; their mtimes stand at 14:52–15:36), the parent read 1.7919827729396287 and the child 1.732151931993421. Those
   are the config's `mean_loss_step0` and `mean_loss_step20` exactly, and every row's mean equals the rung-3 band's per-row mean
   to the last digit. The door refuses when this does not hold; it held.
-- **The judgement (accepted held-out).** Lines 21–25 of `learn/draft-readings.jsonl`: accepted, and disjoint by draft id from
+- **The judgement (accepted held-out).** Lines 21–25 of the walk's of-record rows (local, `hw-words`): accepted, and disjoint by draft id from
   lines 1–8. Their `valid_ids_sha256` is `5603ba5ebb44edb9dd86a767224fb83a084193bb364fd53742b224451327f748`, the same split the
   3B lift was judged on (its row 3). Each row has 159 positions; 121 / 130 / 93 / 145 / 71 targets are supervised (560 of 795).
   Parent → child per row:
@@ -341,7 +341,7 @@ printed numbers are my subtraction and say so.
 
   The mean went **2.7794742570192787 → 2.769699388331711** (2779 → 2769 milli): **better 1**. Four rows fell and one rose. By my
   subtraction, the mean fell 0.0098 nats (0.35 %), about a sixth of the in-sample fall (0.0598, 3.3 %).
-- **Rejected beside (information, never the judge).** Of the 27 rows of `learn/draft-readings-heldout.jsonl`, 26 were judged
+- **Rejected beside (information, never the judge).** Of the 27 rows of the walk's held-out rows (local, `hw-words`), 26 were judged
   and line 24 was set aside by name (`its prompt is 544 ids: under the 160-id cap no assistant token is a supervised target`).
   The mean went 2.0692298974197554 → 2.0552387556182743 (2069 → 2055 milli); 23 of 26 rows fell, and lines 6, 10 and 27 rose.
   **The rejected rows fell further than the accepted held-out**: 0.0140 nats (0.68 %) against 0.0098 (0.35 %), by my
