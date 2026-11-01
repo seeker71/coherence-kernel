@@ -2,7 +2,7 @@
 // The door is observe/review-panel-run.bml (its header carries the doors' table and the isolation rule); the band is
 // observe/tests/review-panel-band.bml. A reviewer is a rented program: it is begun by argv through spawn-guard (from a scratch
 // directory holding only a copy of the artifact), waited on by host-child's deadline, and read back as a file.
-// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/door-options.bml form-stdlib/bml/host-fs.bml
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/host-child.bml form-stdlib/bml/spawn-guard.bml form-stdlib/bml/door-options.bml form-stdlib/bml/host-fs.bml form-stdlib/bml/host-walk-clock.bml form-stdlib/bml/provider-turn.bml
 section [form.bml] {
  class ReviewPanel {
   def rpr-default() = "grok,claude,codex,cursor";
@@ -43,11 +43,30 @@ section [form.bml] {
   // one prompt, identical for every door, so the answers are comparable
   def rpr-prompt(question, artifact, text) = question ++ "\n\nAnswer from the artifact below. Be specific and name what is wrong or\nunsupported; agreement is less useful than a located objection. If a\nclaim is unsupported by the text, say which claim and why.\n\n----- BEGIN ARTIFACT: " ++ artifact ++ " -----\n" ++ text ++ "\n----- END ARTIFACT -----";
   def rpr-base(path) = nil?(split-on(path, "/")) ? path : split-on(path, "/")[len(split-on(path, "/")) - 1];
+  // codex runs under a home of this run's own, linked only to the credential: the turn carries the prompt and none of the host's guidance, and its rollout stands there
+  def rpr-codex-home(outdir) = outdir ++ "/codex-home";
+  def rpr-argv-in(door, prompt, outdir) {
+   let home = rpr-codex-home(outdir);
+   let made = (String) door == "codex" ? hch-mkdirs(home) : 0;
+   let linked = (String) door == "codex" ? hfs-symlink(hfs-env("HOME", "") ++ "/.codex/auth.json", home ++ "/auth.json") : false;
+   let said = rpr-long?(prompt) ? rpr-argv-stdin(door) : rpr-argv(door, prompt);
+   (String) door == "codex" ? append(["env", "CODEX_HOME=" ++ home], said) : said;
+  }
+  // host_spawn_at holds each argv element in 1024 bytes, so a longer prompt goes on the child's stdin, for a door that reads it there; a door that does not is skipped by name
+  def rpr-long?(prompt) = len(prompt) > 1000;
+  def rpr-argv-stdin(door) = (String) door == "codex" ? ["codex", "exec", "--skip-git-repo-check", "-"] : (String) door == "claude" ? ["claude", "-p"] : [];
+  def rpr-carries?(door, prompt) = !rpr-long?(prompt) || !nil?(rpr-argv-stdin(door));
+  def rpr-stdin(prompt, outdir) {
+   let path = outdir ++ "/prompt.txt";
+   let kept = rpr-long?(prompt) ? write_file(path, prompt) : 0;
+   rpr-long?(prompt) ? path : "/dev/null";
+  }
   // a door begun with its stdout and stderr in files, from the scratch work directory; [door, pid, out]
   def rpr-begin(door, prompt, outdir) {
-   let argv = rpr-argv(door, prompt);
-   let pid = rpr-open?(door) ? sg-spawn-at(argv, ["/dev/null", outdir ++ "/" ++ door ++ ".out", outdir ++ "/" ++ door ++ ".err", outdir ++ "/work"]) : nothing();
-   let skipped = nothing?(pid) ? write_file(outdir ++ "/" ++ door ++ ".out", "DOOR NOT OPEN\n") + write_file(outdir ++ "/" ++ door ++ ".rc", "78\n") + print_str("SKIP " ++ door ++ " (door not open)") : 0;
+   let argv = rpr-argv-in(door, prompt, outdir);
+   let pid = rpr-open?(door) && rpr-carries?(door, prompt) ? sg-spawn-at(argv, [rpr-stdin(prompt, outdir), outdir ++ "/" ++ door ++ ".out", outdir ++ "/" ++ door ++ ".err", outdir ++ "/work"]) : nothing();
+   let why = rpr-open?(door) ? "prompt too long for its argv, and it reads no stdin" : "door not open";
+   let skipped = nothing?(pid) ? write_file(outdir ++ "/" ++ door ++ ".out", "DOOR NOT OPEN\n") + write_file(outdir ++ "/" ++ door ++ ".rc", "78\n") + print_str("SKIP " ++ door ++ " (" ++ why ++ ")") : 0;
    [door, pid, outdir];
   }
   def rpr-end(job, until) {
@@ -55,6 +74,10 @@ section [form.bml] {
    let said = nothing?(job[1]) ? 0 : write_file(job[2] ++ "/" ++ job[0] ++ ".rc", (nothing?(rc) ? "none" : rc.str()) ++ "\n");
    rc;
   }
+  // one row per door begun (provider-turn.bml): codex keeps a rollout that names this run's work directory; the other doors keep no transcript this seam reads
+  def rpr-transcript(door, outdir) = (String) door == "codex" ? pt-codex-rollout(rpr-codex-home(outdir), hw-day-in(hw-zone-ms(), now_unix_ms()), rpr-run-tail(outdir) ++ "/work") : "";
+  def rpr-run-tail(outdir) { let cells = split-on(outdir, "/"); "review-panel/" ++ cells[len(cells) - 1]; }
+  def rpr-land(job, outdir) = pt-land(fhn-root(), outdir ++ "/share-" ++ job[0], "review-panel:" ++ job[0], job[0], rpr-transcript(job[0], outdir), nothing(), trim(read_file(outdir ++ "/" ++ job[0] ++ ".rc") ?? "?"));
   def rpr-line(door, outdir) {
    let out = read_file(outdir ++ "/" ++ door ++ ".out") ?? "";
    let rc = trim(read_file(outdir ++ "/" ++ door ++ ".rc") ?? "?");
@@ -79,6 +102,8 @@ section [form.bml] {
    let jobs = map(d => rpr-begin(d, prompt, outdir), panel);
    let until = hch-by(deadline-s * 1000);
    let ended = map(j => rpr-end(j, until), jobs);
+   let landed = map(j => rpr-land(j, outdir), filter(j => !nothing?(j[1]), jobs));
+   let marked = write_file(outdir ++ "/" ++ pt-landed-mark(), "");
    let table = print_str("") + print_str(rpr-pad("DOOR", 8) ++ " " ++ rpr-pad("RC", 4) ++ " " ++ rpr-pad("BYTES", 7) ++ " FIRST-LINE");
    let rows = map(d => rpr-line(d, outdir), panel);
    print_str("full answers: " ++ outdir ++ "/<door>.out");
