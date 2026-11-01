@@ -1121,16 +1121,25 @@ section [form.bml] {
   def flp-source-text(p) = if (flp-exists?(p) && (!flp-is-dir?(p))) then fhn-read(p) else p;
   def flp-source-digest(req) = flp-sha(mc-cat(append([flp-request-text(req), flp-source-text(flp-self())], map(flp-source-text, flp-req-files(req)))));
   def flp-parked?(req, memory, voices) = !nil?(memory) && (flp-ways-spent?(memory, voices) || flp-outcome-still?(memory)) && ((String) flp-row-digest(memory[-1], "source_digest") == flp-source-digest(req));
+  // A decline that read the ways spent or the walk still leaves a mark beside the ledger, keyed on what the request stands
+  // on. The ledger holds more than a walk's memory (a recheck, a care row), so the next pick reads the mark rather than
+  // reading the rows again; a request whose digest moved reads unmarked and takes one option.
+  def flp-park-path(ledger) = ledger ++ ".parked";
+  def flp-park-mark(req, ctx, why) = fhn-append(flp-park-path(flp-ctx-ledger(ctx)), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-s("source_digest", flp-source-digest(req)), fhn-s("why", why)])) ++ "\n");
+  def flp-park-marked?(req, ledger) {
+   let rows = filter(r => (String) flp-text(r, "request") == flp-req-id(req), flp-queue-rows(flp-park-path(ledger)));
+   nil?(rows) ? false : { let today = flp-source-digest(req); any?(r => (String) flp-text(r, "source_digest") == today, rows); };
+  }
   def flp-parked-line(req, memory) = mc-cat(["[local-plan:parked] ", flp-req-id(req), ": ", len(memory).str(), " option(s) read last ", flp-text(memory[-1][5], "kind"), " and no way is left on what it stands on; it returns when its source moves"]);
   def flp-repeat(context,event) {
    let memory=record_get(record_get(nve-event-watch(event),"repeat"),"cursor");
    let ack=oac-offer(flp-option,[[context[0],context[1]],memory]);
    let next=oac-node?(ack) ? append(memory,[oac-payload(ack)]) : memory;
-   oac-node?(ack) ? (flp-outcome-still?(next) ? { print_str(flp-still-line(context[0], next)); flp-declined(context[0],context[1],next); } : flp-ways-spent?(next, flp-ctx-voices(context[1])) ? { print_str(flp-spent-line(context[0], next)); flp-declined(context[0],context[1],next); } : again(next)) :
+   oac-node?(ack) ? (flp-outcome-still?(next) ? { print_str(flp-still-line(context[0], next)); flp-park-mark(context[0],context[1],"still"); flp-declined(context[0],context[1],next); } : flp-ways-spent?(next, flp-ctx-voices(context[1])) ? { print_str(flp-spent-line(context[0], next)); flp-park-mark(context[0],context[1],"spent"); flp-declined(context[0],context[1],next); } : again(next)) :
     oac-one?(ack) ? flp-ended(oac-payload(ack),memory) : flp-declined(context[0],context[1],memory);
   }
   def flp-walk-from(req, ctx, memory) {
-   if flp-parked?(req, memory, flp-ctx-voices(ctx)) then { print_str(flp-parked-line(req, memory)); flp-declined(req, ctx, memory); } else if nothing?(flp-ctx-attempts(ctx)) then {
+   if flp-parked?(req, memory, flp-ctx-voices(ctx)) || ((!nil?(memory)) && flp-park-marked?(req, flp-ctx-ledger(ctx))) then { print_str(flp-parked-line(req, memory)); flp-declined(req, ctx, memory); } else if nothing?(flp-ctx-attempts(ctx)) then {
     let owner=nve-open();
     let watch=repeat(owner,flp-repeat,[req,ctx],memory,[]);
     nve-run(owner,nothing());
