@@ -4,6 +4,12 @@
 // Result: [status, source, attempts, reason]. Each attempt is
 // [start-byte, end-byte, wrapper, passed, observation, source-sha256].
 // A passing original is unchanged; exhaustion/refusal preserves the original.
+// A rung-0 candidate turns one number, and a number reads only what its band reads, so what an edit moved is read from the two
+// texts as well: fbvs-moved-def(before,after) names the definition it stands in ("" outside any), and fbvs-kind-why(before,after) answers
+// "" or "kind-moved: ..." when the edit leaves a kind the body knows where another stood. The kinds are data (fbvs-kinds): a call's argument
+// kinds and its answer's, "nodes" a list of nodes. A call with a known position answers to that position; a removed call with none answers to
+// its own answer kind. A string where a JSON node belongs stops json-emit and reads "" through the wire doors, and a band can read full over it.
+// A call the kinds do not know, at a position whose kind they do, leaves there what the body cannot read ("kind-unread"): a local wrapper hides the same string its door would.
 import form-stdlib/bml/form-bml-boolean-repair.bml;
 import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
@@ -66,6 +72,48 @@ section [form.bml] {
     };
    },[spent ? "exhausted" : nothing(),source,attempts,spent ? "check-budget-exhausted" : ""],index .. len(tokens));
    fbvs-result(nothing?(result[0]) ? "exhausted" : result[0],result[1],result[2],nothing?(result[0]) ? "no-passing-single-value-rewrite" : result[3]);
+  }
+  def fbvs-first-diff(a,b,i) = if ((i >= len(a)) || (i >= len(b))) then i else if (!((Comparable) str_byte_at(a,i) == str_byte_at(b,i))) then i else fbvs-first-diff(a,b,(i + 1));
+  def fbvs-near(ts,byte,i,found) = if ((i >= len(ts)) || ((Comparable) ts[i][1] > byte)) then found else fbvs-near(ts,byte,(i + 1),i);
+  def fbvs-def-from(ts,i) = if (i < 0) then "" else if ((String) fbr-at(ts,i) == "def") then fbr-at(ts,(i + 1)) else fbvs-def-from(ts,(i - 1));
+  def fbvs-moved-def(before,after) {
+   let ts = fbr-lex(before,0,[])[1];
+   fbvs-def-from(ts,fbvs-near(ts,fbvs-first-diff(before,after,0),0,-1));
+  }
+  def fbvs-kinds() = [["json-node-string",["string"],"node"],["json-node-nullable-string",["string"],"node"],["json-node-float-text",["string"],"node"],["json-node-int",["int"],"node"],["json-node-bool",["bool"],"node"],["json-node-array",["nodes"],"node"],["json-node-object",["nodes"],"node"],["json-node-pair",["string","node"],"node"],["fhn-s",["string","string"],"node"],["fhn-n",["string","int"],"node"],["nsm-s",["string","string"],"node"],["nsm-n",["string","int"],"node"],["fct-pair",["string","string"],"node"],["json-string-value",["node"],"string"],["json-int-value",["node"],"int"],["json-array-elements",["node"],"nodes"],["json-object-pairs",["node"],"nodes"],["json-object-get",["node","string"],"node"]];
+  def fbvs-kinds-of(name) = filter(row => (String) row[0] == name,fbvs-kinds());
+  def fbvs-argument-kind(name,n) {
+   let rows = fbvs-kinds-of(name);
+   if (nil?(rows) || (n >= len(rows[0][1]))) then "" else rows[0][1][n];
+  }
+  def fbvs-around(ts,i,depth,commas) = if (i < 0) then [-1,0] else if fbr-closing(fbr-at(ts,i)) then fbvs-around(ts,(i - 1),(depth + 1),commas) else if (!((String) fbr-closer(fbr-at(ts,i)) == "")) then (if ((Comparable) depth == 0) then [i,commas] else fbvs-around(ts,(i - 1),(depth - 1),commas)) else fbvs-around(ts,(i - 1),depth,if (((Comparable) depth == 0) && ((String) fbr-at(ts,i) == ",")) then (commas + 1) else commas);
+  def fbvs-wants(ts,at) {
+   let open = fbvs-around(ts,(at - 1),0,0);
+   if (open[0] < 1) then "" else if ((String) fbr-at(ts,open[0]) == "(") then fbvs-argument-kind(fbr-at(ts,(open[0] - 1)),open[1]) else if ((String) fbr-at(ts,open[0]) == "[") then (if ((String) fbvs-wants(ts,open[0]) == "nodes") then "node" else "") else "";
+  }
+  def fbvs-literal-kind(t) {
+   let b = str_byte_at(t,0);
+   if (((Comparable) b == 34) || ((Comparable) b == 39)) then "string" else if (((Comparable) b >= 48) && ((Comparable) b <= 57)) then "int" else "";
+  }
+  def fbvs-expression-kind(ts,from,to) {
+   let rows = fbvs-kinds-of(fbr-at(ts,from));
+   if ((to - from) == 1) then fbvs-literal-kind(fbr-at(ts,from)) else if (nil?(rows) || (!((String) fbr-at(ts,(from + 1)) == "(")) || (!((Comparable) fbvs-group-end(ts,(from + 2),")") == to))) then "" else rows[0][2];
+  }
+  def fbvs-kind-read(ts,at,shorter) {
+   let name = fbr-at(ts,at);
+   let rows = fbvs-kinds-of(name);
+   let inner = fbvs-expression-kind(ts,(at + 2),(fbvs-group-end(ts,(at + 2),")") - 1));
+   let wants = fbvs-wants(ts,at);
+   let have = if shorter then (if (!((String) inner == "")) then inner else if nil?(rows) then "" else rows[0][1][0]) else (if nil?(rows) then "" else rows[0][2]);
+   let need = if (!((String) wants == "")) then wants else if (shorter && (!nil?(rows))) then rows[0][2] else "";
+   if (((String) need == "") || ((String) have == need)) then "" else if ((String) have == "") then ("kind-unread: " + (if shorter then "removing " else "wrapping in ") + name + " leaves no kind the body can read where " + need + " stood") else ("kind-moved: " + (if shorter then "removing " else "wrapping in ") + name + " leaves " + have + " where " + need + " stood");
+  }
+  def fbvs-kind-why(before,after) {
+   let shorter = len(after) < len(before);
+   let ts = fbr-lex(shorter ? before : after,0,[])[1];
+   let near = fbvs-near(ts,fbvs-first-diff(before,after,0),0,-1);
+   let at = ((String) fbr-at(ts,near) == "(") ? (near - 1) : near;
+   if ((at < 0) || (!((String) fbr-at(ts,(at + 1)) == "(")) || (!fbvs-name(fbr-at(ts,at)))) then "" else fbvs-kind-read(ts,at,shorter);
   }
  }
  0;

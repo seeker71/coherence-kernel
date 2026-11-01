@@ -148,25 +148,42 @@ section [form.bml] {
   // answers the per-token losses (n floats; masked tokens read 0), or nothing; dz is left on the device for the backward
   def qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, row, xin) = gpu-lease-turn("qwen training forward", () => {
    let n = qlbt-row-n(row);
-   let d = geo[0];
-   let vocab = geo[19];
    let wrote = metal_buf_write(sx[0], 0, xin);
    let wt = metal_buf_write(record_get(o, "targets"), 0, md-le32-list(row[2], ""));
    let wm = metal_buf_write(record_get(o, "mask"), 0, nam-f32s(row[3]));
    metal_batch_concurrent();
    let ran = qlbf-forward(ps, geo, lay, sx, 0, n);
    let applied = qlh-rr-apply(record_get(o, "rec"), sx[13], sx[0], n);
+   let losses = qlbt-head-losses(ps, geo, onormTv, projTv, sx, o, n);
+   applied == 1 && wrote == len(xin) ? losses : nothing();
+  });
+  // the head on the block output in sx[0], in the open batch: output_norm, output.weight, the token losses (targets and mask already written)
+  def qlbt-head-losses(ps, geo, onormTv, projTv, sx, o, n) {
+   let d = geo[0];
+   let vocab = geo[19];
    q38-rms-span(ps, sx[0], onormTv, record_get(o, "hn"), d, geo[6], n, 1);
    q38-mv-batch(ps, projTv, record_get(o, "hn"), record_get(o, "logits"), n, 1);
    metal_enqueue(record_get(o, "ce"), md-bind16([record_get(o, "logits"), record_get(o, "targets"), record_get(o, "dz"), record_get(o, "loss"), record_get(o, "mask")], [vocab, n, md-f32-bits(1.0), md-f32-bits(1.0)], 32, 0, 1, 1), n);
    let raw = metal_buf_read(record_get(o, "loss"), 0, n * 4);
-   let losses = applied == 1 && wrote == len(xin) && len(raw) == n * 4 ? qlt-f32s(raw, n) : [];
+   let losses = len(raw) == n * 4 ? qlt-f32s(raw, n) : [];
    len(losses) == n ? losses : nothing();
+  }
+  // the token losses of a whole block output the lane produced (n x d f32 bytes), through the same head and the same CE: the band's reading of a worn forward
+  def qlbt-eval-output(ps, geo, onormTv, projTv, sx, o, row, xout) = gpu-lease-turn("qwen training worn forward", () => {
+   let n = qlbt-row-n(row);
+   let wrote = metal_buf_write(sx[0], 0, xout);
+   let wt = metal_buf_write(record_get(o, "targets"), 0, md-le32-list(row[2], ""));
+   let wm = metal_buf_write(record_get(o, "mask"), 0, nam-f32s(row[3]));
+   metal_batch_concurrent();
+   let losses = qlbt-head-losses(ps, geo, onormTv, projTv, sx, o, n);
+   wrote == len(xout) ? losses : nothing();
   });
   def qlbt-mean(losses, count) = nothing?(losses) || count <= 0 ? nothing() : sum(losses) / (count + 0.0);
   // ── the backward at the point the last qlbt-eval left in sx and dz (serial batch; synced) ──
   // inv per row (nam_rms into a scratch norm), dh = (1/count) dz W^T over Q8_0, dres = rms backward, then the pair's dB, du, dA
-  def qlbt-backward(geo, sx, o, onormTv, projTv, n, count) = gpu-lease-turn("qwen training backward", () => {
+  def qlbt-backward(geo, sx, o, onormTv, projTv, n, count) = qlbt-backward-by(geo, sx, o, onormTv, projTv, n, 1.0 / (count + 0.0));
+  // the same backward of (factor x the row's summed token CE): factor 1/count descends the row's mean, -lambda/count ascends it (the margin's side)
+  def qlbt-backward-by(geo, sx, o, onormTv, projTv, n, factor) = gpu-lease-turn("qwen training backward", () => {
    let d = geo[0];
    let ff = geo[10];
    let r = record_get(o, "r");
@@ -174,7 +191,7 @@ section [form.bml] {
    let rec = record_get(o, "rec");
    let scale = record_get(o, "scale");
    let rm = nam-rms(sx[0], kth-tv-h(onormTv), record_get(o, "nrm"), record_get(o, "inv"), d, n, ln-f32-decode(geo[6]));
-   let th = metal_enqueue(record_get(o, "tmm"), md-bind16([kth-tv-h(projTv), record_get(o, "dz"), record_get(o, "dh")], [vocab, d, n, md-f32-bits(1.0 / (count + 0.0))], 256, 0, 1, 0), ((d + 31) / 32) * ((n + 7) / 8));
+   let th = metal_enqueue(record_get(o, "tmm"), md-bind16([kth-tv-h(projTv), record_get(o, "dz"), record_get(o, "dh")], [vocab, d, n, md-f32-bits(factor)], 256, 0, 1, 0), ((d + 31) / 32) * ((n + 7) / 8));
    let rb = nlb-rms(sx[0], kth-tv-h(onormTv), record_get(o, "inv"), record_get(o, "dh"), record_get(o, "dres"), d, n);
    let gb = nam-mm(rec[5], record_get(o, "dres"), record_get(o, "dB"), r, n, d, 1, 0, scale, 0);
    let gu = nam-mm(record_get(o, "dres"), rec[4], record_get(o, "du"), n, d, r, 0, 1, scale, 0);
@@ -224,11 +241,12 @@ section [form.bml] {
   }
   // ── the central finite difference of the mean loss in entry i of B against the analytic dB[i] (computed at the base point) ──
   // [analytic, finite difference, relative error, p+ - p-, loss+, loss-]
-  def qlbt-fd-b(ps, geo, lay, onormTv, projTv, sx, o, row, xin, i, eps) {
-   let h = record_get(o, "rec")[4];
+  def qlbt-fd-b(ps, geo, lay, onormTv, projTv, sx, o, row, xin, i, eps) = qlbt-fd-at(ps, geo, lay, onormTv, projTv, sx, o, row, xin, record_get(o, "rec")[4], record_get(o, "dB"), i, eps, 1.0);
+  // the same reading of any entry: parameter buffer h, its gradient buffer gh, and the objective's sign on the row's mean CE (-1.0 reads the margin's ascent)
+  def qlbt-fd-at(ps, geo, lay, onormTv, projTv, sx, o, row, xin, h, gh, i, eps, sign) {
    let count = qlbt-row-count(row);
    let p = qlbw-read-at(h, i);
-   let g = qlbw-read-at(record_get(o, "dB"), i);
+   let g = qlbw-read-at(gh, i);
    let w1 = qlbw-write-at(h, i, p + eps);
    let pp = qlbw-read-at(h, i);
    let fp = qlbt-mean(qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, row, xin), count);
@@ -236,9 +254,17 @@ section [form.bml] {
    let pm = qlbw-read-at(h, i);
    let fm = qlbt-mean(qlbt-eval(ps, geo, lay, onormTv, projTv, sx, o, row, xin), count);
    let w3 = qlbw-write-at(h, i, p);
-   let fd = nothing?(fp) || nothing?(fm) || nothing?(pp) || nothing?(pm) || pp == pm ? nothing() : (fp - fm) / (pp - pm);
+   let fd = nothing?(fp) || nothing?(fm) || nothing?(pp) || nothing?(pm) || pp == pm ? nothing() : sign * (fp - fm) / (pp - pm);
    [g, fd, nothing?(fd) || nothing?(g) ? 1.0e30 : qlbw-rel(g, fd), nothing?(pp) || nothing?(pm) ? 0.0 : pp - pm, fp, fm];
   }
+  // the entry of B with the largest |dB| in each of k windows of COLUMNS (flat index k_rank * d + column): the head's gradient crowds one column (505 at the zero
+  // pair, rung 3), so a window over the flat array reads that column every time; these read the gradient across the width
+  def qlbt-pick-columns(raw, r, d, k) = map(w => qlbt-pick-column(raw, r, d, w * (d / k), w + 1 == k ? d : (w + 1) * (d / k)), range(0, k));
+  def qlbt-pick-column(raw, r, d, lo, hi) = foldl((best, j) => foldl((b, rk) => {
+    let v = ln-f32-decode(ln-u32-le(raw, (rk * d + j) * 4));
+    let m = v < 0.0 ? 0.0 - v : v;
+    m > b[1] ? [rk * d + j, m] : b;
+   }, best, range(0, r)), [lo, -1.0], range(lo, hi))[0];
   // ── export: A and B as F32 safetensors (blk.L.ffn_down.weight.lora_a [ff, r], .lora_b [r, d]) and adapter_config.json ──
   def qlbt-st-entry(name, shape, begin, bytes) = "\"" ++ name ++ "\":{\"dtype\":\"F32\",\"shape\":[" ++ shape ++ "],\"data_offsets\":[" ++ begin.str() ++ "," ++ (begin + bytes).str() ++ "]}";
   def qlbt-pad8(s) = len(s) % 8 == 0 ? s : qlbt-pad8(s ++ " ");

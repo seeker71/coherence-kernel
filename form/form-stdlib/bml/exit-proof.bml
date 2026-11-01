@@ -1,0 +1,507 @@
+// exit-proof.bml — the goal's own exit proof (docs/rent-to-zero-goal.form, E1 to E6) read from the ledgers and git, no human
+// judgment: holds, a precise named wall (the goal's honest floor), or unread. Unread is never holds; a wall is a valid reading and
+// never a pass. observe/exit-proof-run.bml is the door, form-stdlib/tests/exit-proof-band.bml the witness.
+//
+// What a row is worth is read here once, because the gap register (offline-voice-gaps.bml) reads through the same rules:
+//   ep-kept?          a crossings row the host's own schedule began: a movement named "scheduled <day>" or "native-turn <day> <hhmm>",
+//                     coordinated_by host-schedule, coordinator launchd, rented_mind 0, no session named. "walk-here 2026-10-29"
+//                     (at 1793261028971) reads host-schedule because a session began it detached; its name keeps it out, and its turn
+//                     row at 1793254917714 reads the same way. Both rows stand as written and undercount rent. A row number moves under
+//                     a rebase (the ones first written down as 150 and 217 stand at lines 155 and 222 on 2026-10-31), so rows here are
+//                     named by at_unix_ms.
+//   ep-on-time?       the row's own time falls in a slot of the schedule (hr-slots) on the day its name says: a "scheduled" row only in the
+//                     night's slot, from the slot's start to its window's end and ep-overrun-ms more (the landing follows the window)
+//   ep-landing-of     the commit that landed a movement: reachable from the ref, its subject "Scheduled movement <day>:" or
+//                     "Native turn <day> <hhmm>:"; the row must stand in that commit's own blob of the ledger
+//   ep-due-slots      every slot of the schedule due in the last days, oldest first; ep-slot-reading says for each whether a stamp in
+//                     .hearth/walk.began or a landed row reads it. A stamp says began, never finished, and walk.began keeps one row per
+//                     door, so a slot that began and landed nothing reads only until the same door's next stamp
+//   ep-landings       the commits of a ref since an instant, with their paths; ep-native-landing? tells one no rented mind wrote
+//   ep-landed-rows    the rows native landings added to a tracked ledger since an instant: for a ledger with no coordinator column, the only witness of the schedule
+//
+// E1 FULL SOVEREIGNTY  the newest on-schedule "scheduled" crossings row at rented_mind 0 whose rent row reads answered at rent 0, by no provider, with a
+//                      receipt cited, beside its landing on the ref, which no co-author signed: the sha, and the stamp's witness while the stamp still stands
+// E2 THE SCORE         the path ledger's second column (L1..Ln of the goal), a record at E1, with the meters that kept counting beside it:
+//                      receipts/session-rent-ledger.jsonl (each session's last row), receipts/rented-work-sessions.jsonl, rent-ledger
+// E3 READER, NOT LOOP  the coordinating column over the windows ep-windows: rows on the schedule and the rent they read, rows a session
+//                      began (named, or reading the schedule off it), and L1's coordinating number. Holds at E1 when every on-schedule row of
+//                      the nearest window reads coordinating rent 0; a row with no such column is counted apart as unknown, never as 0
+// E4 ONE DOOR          S1 (fgs-answer) by default for an ordinary form-cli enquiry, and the pinned reading: rent at most 10000 with at least
+//                      6 receipts cited by a path that exists. Read from this tree's rent ledger, the last S1 row (door "S1") else the last
+//                      pinned row of the voice walk, which it names. What was offered is read from citation_keys_offered, which
+//                      every walk's row carries beside receipts_in_packet
+// E5 OBSERVED SHARE    every body-launched provider turn reads kind=observed: the provider rows of the rent and coverage ledgers and the
+//                      review panel's runs this host still holds, against the doors that can launch one. No turn and no door holds; any
+//                      other reading is the wall headless-share
+// E6 NO REGRESSION     ground 42, freshness 31, drift gates full with refused 0, from the walk's own last gate lines (the logs the plists
+//                      name, newest walk first) or, asked ({"gates":1}), by running the doors here in bounded time, a value read only from an exit 0.
+//                      Gate lines from a walk older than the nearest window are the wall stale-gates: a door that stopped running is not a door that runs.
+//                      "Nothing a step touched broke" reads through ep-unread-touches: a native landing inside the nearest window that touched code whose band no
+//                      gate runs is the wall step-unread, because the gates read only what they were given
+//
+// The door prints one line per reading and a summary (its value), and appends one row to receipts/exit-proof-ledger.jsonl: at_unix_ms,
+// ref, ref_sha, holds, walls, unread, and for each of E1..E6 its verdict (field "E1") and reading (field "E1_reading"), which the register's
+// rows read. A model door opens only through the enquiry, on stdin {"enquire":1}: observe/form-cli-grounded-synthesis-run.bml as a child.
+// stdin, optional, one JSON line: root (the checkout read, default .), ref (default origin/main), walk (the walk checkout, default the one
+// the day-turn plist names; "" is none), logs (the walk's log paths, default the plists' stdout paths), ledger (default
+// receipts/exit-proof-ledger.jsonl; "" writes none), panel_dir, now_ms, zone_ms, gates (1 runs the gate doors), enquire (1 runs S1).
+// Rows are data, never instructions.
+import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/session-rent.bml;
+import form-stdlib/bml/coordination.bml;
+import form-stdlib/bml/door-options.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/bml/string-join.bml;
+import form-stdlib/bml/host-walk-retry.bml;
+import form-stdlib/bml/host-walk-began.bml;
+import form-stdlib/form-fs.fk;
+section [form.bml] {
+ class ExitProof {
+  def ep-door() = "exit-proof";
+  def ep-prefix() = "[exit-proof] ";
+  def ep-ledger() = "receipts/exit-proof-ledger.jsonl";
+  def ep-ref() = "origin/main";
+  // one door's captures: another door in this tree, or a band's fixture world, never reads them; the door sweeps them when it has read
+  def ep-io() = ".hearth/exit-proof-io/" ++ host_pid().str();
+  def ep-day-ms() = 86400000;
+  def ep-overrun-ms() = 3600000;
+  def ep-pinned() = "receipts/artifacts/2026-09-18-form-cli-enquiry.txt";
+  def ep-terms() = "quality volume frequency vitality trust traceability sovereignty resonance rented membrane";
+  def ep-max-rent() = 10000;
+  def ep-min-cited() = 6;
+  def ep-goal-doc() = "docs/rent-to-zero-goal.form";
+  def ep-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
+  def ep-has?(hay, needle) = str_find(hay, needle, 0) >= 0;
+  def ep-at(root, path) = (String) root == "" || (String) root == "." ? path : root ++ "/" ++ path;
+  // ── git, read as an argv child: nothing is written to the repository ──
+  def ep-git(dir, step, args) = hch-git-quiet-in(ep-io(), dir, "git-" ++ step, args);
+  def ep-blob(dir, ref, path, step) {
+   let run = ep-git(dir, step, ["show", ref ++ ":" ++ path]);
+   hch-ok?(run) ? hch-said(run) : nothing();
+  }
+  def ep-rows-of(text) = nothing?(text) ? nothing() : fcgp-rows-of(text);
+  def ep-text-rows(path) = (Comparable) host_path_exists(path) == 1 ? fcgp-rows(path) : [];
+  def ep-ref-sha(dir, ref) {
+   let run = ep-git(dir, "ref", ["rev-parse", "--verify", "-q", ref]);
+   hch-ok?(run) ? trim(hch-said(run)) : "";
+  }
+  // ── a crossings row: who began it and when ──
+  def ep-str(r, k) = fcgp-str(r, k);
+  def ep-num(r, k) = fcgp-num(r, k);
+  def ep-scheduled-name?(m) = ep-starts?(m, "scheduled ");
+  def ep-turn-name?(m) = ep-starts?(m, "native-turn ");
+  def ep-tail-of(m) { let at = str_find(m, " ", 0); at < 0 ? "" : substring(m, at + 1, len(m)); }
+  def ep-day-of-name(m) = substring(ep-tail-of(m) ++ "          ", 0, 10);
+  def ep-kept?(row) {
+   let m = ep-str(row, "movement");
+   (ep-scheduled-name?(m) || ep-turn-name?(m)) && ((String) ep-str(row, "coordinated_by") == "host-schedule") && crd-keeper?(ep-str(row, "coordinator")) && ((Comparable) (ep-num(row, "rented_mind") ?? 1) == 0) && !json-object-has?(row, "session");
+  }
+  // the slots of the day a row's time stands in: [slot, slot ms]
+  def ep-slots-of-day(at, zone) = map(s => [s, hr-slot-ms(s, at, zone)], hr-slots());
+  def ep-slot-holds?(pair, at) = (pair[1] <= at) && (at <= pair[1] + pair[0][3] + ep-overrun-ms());
+  def ep-on-time?(row, zone) {
+   let at = ep-num(row, "at_unix_ms");
+   let m = ep-str(row, "movement");
+   nothing?(at) || nothing?(zone) ? false : (String) hw-day-in(zone, at) != ep-day-of-name(m) ? false : any?(p => ep-slot-holds?(p, at) && (!ep-scheduled-name?(m) || ((String) p[0][0] == "scheduled-walk")), ep-slots-of-day(at, zone));
+  }
+  def ep-on-schedule?(row, zone) = ep-kept?(row) && ep-on-time?(row, zone);
+  // an instant inside any slot's window: all a ledger with no coordinator column can say of who wrote a row
+  def ep-in-a-slot?(at, zone) = nothing?(zone) ? false : any?(p => ep-slot-holds?(p, at), ep-slots-of-day(at, zone));
+  def ep-clock(zone, at) = nothing?(zone) ? at.str() : hw-day-in(zone, at) ++ " " ++ hw-clock-text(zone, at);
+  // ── the landing of a movement ──
+  def ep-landing-subject(m) = (ep-scheduled-name?(m) ? "Scheduled movement " : "Native turn ") ++ ep-tail-of(m) ++ ":";
+  def ep-unit() = byte_to_str(31);
+  def ep-record-mark() = byte_to_str(1);
+  // --grep reads a whole message, so a later commit that quotes the subject comes first: the subject itself decides
+  def ep-landing-of(dir, ref, m) {
+   let prefix = ep-landing-subject(m);
+   let run = ep-git(dir, "landing", ["log", ref, "-n", "32", "-F", "--grep=" ++ prefix, "--format=%H%x1f%at%x1f%s%x1f%(trailers:key=Co-Authored-By,valueonly,separator=%x3B)"]);
+   let rows = hch-ok?(run) ? map(l => split-on(trim(l), ep-unit()), split-on(hch-said(run), "\n")) : [];
+   let mine = filter(cells => (len(cells) >= 3) && ep-starts?(cells[2], prefix), rows);
+   nil?(mine) ? nothing() : mine[0];
+  }
+  def ep-co-signed?(landing) = (len(landing) >= 4) && ((String) trim(landing[3]) != "");
+  def ep-row-mark(row) = "\"at_unix_ms\":" ++ ep-num(row, "at_unix_ms").str() ++ ",\"movement\":\"" ++ ep-str(row, "movement") ++ "\"";
+  def ep-row-in-commit?(dir, sha, row) {
+   let blob = ep-blob(dir, sha, "receipts/crossings-ledger.jsonl", "landed-row");
+   !nothing?(blob) && ep-has?(blob, ep-row-mark(row));
+  }
+  // ── the commits of a ref since an instant: [sha, at ms, subject, co-authors, paths] ──
+  def ep-landing-format() = "--format=%x01%H%x1f%at%x1f%s%x1f%(trailers:key=Co-Authored-By,valueonly,separator=%x3B)";
+  def ep-record(text) {
+   let lines = filter(l => (Comparable) len(trim(l)) > 0, split-on(text, "\n"));
+   let cells = nil?(lines) ? [] : split-on(lines[0], ep-unit());
+   (len(cells) < 4) ? nothing() : [cells[0], str_to_int(cells[1]) * 1000, cells[2], cells[3], map(p => trim(p), lines[1:])];
+  }
+  def ep-landings(dir, ref, since_ms) {
+   let run = ep-git(dir, "landings", ["log", ref, "--since=" ++ (since_ms / 1000).str(), "--no-renames", "--name-only", ep-landing-format()]);
+   hch-ok?(run) ? filter(r => !nothing?(r), map(t => ep-record(t), split-on(hch-said(run), ep-record-mark()))) : nothing();
+  }
+  def ep-source-path?(p, notSource) = !any?(n => ep-starts?(p, n), notSource);
+  def ep-source-changing?(landing, notSource) = any?(p => ep-source-path?(p, notSource), landing[4]);
+  // the movement a landing's subject names, or "" for a subject that names none
+  def ep-subject-movement(s) {
+   let colon = str_find(s, ":", 0);
+   let head = colon < 0 ? s : substring(s, 0, colon);
+   ep-starts?(head, "Scheduled movement ") ? "scheduled " ++ substring(head, 19, len(head)) : ep-starts?(head, "Native turn ") ? "native-turn " ++ substring(head, 12, len(head)) : "";
+  }
+  // told as native: the subject names a movement, the movement's crossings row was on the schedule, and no co-author signed it
+  def ep-native-landing?(landing, crossings, zone) {
+   let m = ep-subject-movement(landing[2]);
+   (String) m != "" && (String) trim(landing[3]) == "" && any?(r => ((String) ep-str(r, "movement") == m) && ep-on-schedule?(r, zone), crossings);
+  }
+  // the rows native landings added to a tracked ledger since an instant, oldest first, read from one git call. A session's row, in a working tree or landed under
+  // its own commit, stands in no such landing, whatever its clock reads: a slot's windows are ten hours of a day, and a session runs through them
+  def ep-added-of(lines) = fcgp-rows-of(str-join-with(map(l => substring(l, 1, len(l)), filter(l => ep-starts?(l, "+{"), lines)), "\n"));
+  def ep-landed-rows(dir, ref, since_ms, path, crossings, zone) {
+   let run = ep-git(dir, "landed-rows", ["log", ref, "--reverse", "--since=" ++ (since_ms / 1000).str(), "--no-renames", "-p", "-U0", ep-landing-format(), "--", path]);
+   hch-ok?(run) ? foldl((acc, l) => ep-native-landing?(l, crossings, zone) ? append(acc, ep-added-of(l[4])) : acc, [], filter(r => !nothing?(r), map(t => ep-record(t), split-on(hch-said(run), ep-record-mark())))) : nothing();
+  }
+  // ── the schedule, slot by slot ──
+  // [ms, door, label, "hh:mm", next ms] for every instant of the schedule from `days` back, one day past now, oldest first
+  def ep-instants(now, zone, days) = foldl((acc, k) => append(acc, map(s => [hr-slot-ms(s, now + (k - days) * ep-day-ms(), zone), s[0], s[1], hr-hhmm-text(s)], hr-slots())), [], range(0, days + 2));
+  def ep-with-next(xs) = len(xs) < 2 ? [] : cons([xs[0][0], xs[0][1], xs[0][2], xs[0][3], xs[1][0]], ep-with-next(xs[1:]));
+  def ep-due-slots(now, zone, days, grace) = filter(s => (s[0] >= now - days * ep-day-ms()) && (s[0] + grace <= now), ep-with-next(ep-instants(now, zone, days)));
+  def ep-slot-name(s, zone) = hw-day-in(zone, s[0]) ++ " " ++ s[3];
+  def ep-stamp-reads?(s, stamp, within) {
+   let at = hw-field(stamp, " at=");
+   nothing?(at) ? false : ((String) hw-owner-door(stamp) == s[1]) && (s[0] <= at) && (at < s[0] + within);
+  }
+  def ep-row-in-slot?(s, row, zone) {
+   let at = ep-num(row, "at_unix_ms");
+   nothing?(at) ? false : (s[0] <= at) && (at < s[4]) && ep-on-schedule?(row, zone);
+  }
+  // the retry row's class for a slot, a note beside an unread slot: a killed retry leaves none
+  def ep-retry-note(s, retries) {
+   let mine = filter(r => ((String) ep-str(r, "phase") == "outcome") && ((String) ep-str(r, "door") == s[1]) && ((String) ep-str(r, "slot") == s[3]) && ((ep-num(r, "at_unix_ms") ?? 0) >= s[0]) && ((ep-num(r, "at_unix_ms") ?? 0) < s[4]), retries);
+   nil?(mine) ? "" : " (retry " ++ ep-str(mine[-1], "class") ++ ")";
+  }
+  // one slot: [name, "landed" | "began" | "unread", note]
+  def ep-slot-state(s, stamps, rows, retries, zone, within) {
+   let landed = any?(r => ep-row-in-slot?(s, r, zone), rows);
+   let began = any?(st => ep-stamp-reads?(s, st, within), stamps);
+   [ep-slot-name(s, zone), landed ? "landed" : began ? "began" : "unread", ep-retry-note(s, retries)];
+  }
+  def ep-slots-of-state(states, word) = filter(st => (String) st[1] == word, states);
+  // the rows a slot can read: the crossings the walk checkout's ref holds. Landed means on the ref: a row only in a working tree, or on a
+  // branch that never reached it, reads nothing here. Answers [states, why]: why "" when the ledger read
+  def ep-slot-reading(walk, ref, now, zone, days, grace, within) {
+   let blob = ep-blob(walk, ref, "receipts/crossings-ledger.jsonl", "slot-crossings");
+   let stamps = hw-slot-rows(walk ++ "/.hearth/walk.began");
+   let retries = ep-text-rows(walk ++ "/.hearth/walk-retry.jsonl");
+   nothing?(blob) ? [[], "no crossings ledger on " ++ ref ++ " in " ++ walk] : [map(s => ep-slot-state(s, stamps, fcgp-rows-of(blob), retries, zone, within), ep-due-slots(now, zone, days, grace)), ""];
+  }
+  // ── E1 ──
+  def ep-rent-row(rents, m) = foldl((best, r) => (String) ep-str(r, "movement") == m ? r : best, nothing(), rents);
+  def ep-rent-reads?(r) = !nothing?(r) && ((String) ep-str(r, "source") != "provider") && ((Comparable) (ep-num(r, "rent_tokens") ?? 1) == 0) && ((String) ep-str(r, "oracle") == "answered") && ((ep-num(r, "answer_bytes") ?? 0) > 0) && ((ep-num(r, "answer_receipts_existing") ?? 0) >= 1);
+  def ep-stamp-of(walk, door, at) {
+   let stamps = (String) walk == "" ? [] : hw-slot-rows(walk ++ "/.hearth/walk.began");
+   filter(st => (String) hw-owner-door(st) == door && ((hw-field(st, " at=") ?? 0) >= at - ep-day-ms()) && ((hw-field(st, " at=") ?? 0) <= at), stamps);
+  }
+  // while the night's stamp stands, its pid is the one the voice's evidence directory names: the walk that began is the walk that spoke
+  def ep-stamp-text(walk, rent, at) {
+   let stamps = ep-stamp-of(walk, "scheduled-walk", at);
+   let pid = nil?(stamps) ? nothing() : hw-field(stamps[-1], "pid=");
+   nothing?(pid) ? "; its stamp has moved on" : ep-has?(ep-str(rent, "evidence"), "-" ++ pid.str() ++ "-") ? "; the stamp's pid " ++ pid.str() ++ " is the pid the voice's evidence names" : "; the stamp's pid " ++ pid.str() ++ " is not the one the voice's evidence names";
+  }
+  def ep-candidates(rows, zone) = filter(r => ep-scheduled-name?(ep-str(r, "movement")) && ep-on-schedule?(r, zone), rows);
+  def ep-e1-try(cands, rents, ctx, tried, why) {
+   nil?(cands) ? ["wall", (String) why == "" ? "no crossings row on the schedule reads rented_mind 0 on " ++ ep-ctx-ref(ctx) : why, ""] : tried >= 8 ? ["wall", why, ""] : ep-e1-one(cands[-1], cands, rents, ctx, tried);
+  }
+  def ep-drop-last(xs) = len(xs) <= 1 ? [] : cons(xs[0], ep-drop-last(xs[1:]));
+  def ep-e1-one(row, cands, rents, ctx, tried) {
+   let m = ep-str(row, "movement");
+   let rent = ep-rent-row(rents, m);
+   !ep-rent-reads?(rent) ? ep-e1-try(ep-drop-last(cands), rents, ctx, tried + 1, m ++ ": no rent row reads answered at rent 0, by no provider, with a receipt cited") : ep-e1-landed(row, m, rent, ep-landing-of(ep-ctx-root(ctx), ep-ctx-ref(ctx), m), cands, rents, ctx, tried);
+  }
+  def ep-e1-landed(row, m, rent, landing, cands, rents, ctx, tried) {
+   let inBlob = !nothing?(landing) && ep-row-in-commit?(ep-ctx-root(ctx), landing[0], row);
+   nothing?(landing) ? ep-e1-try(ep-drop-last(cands), rents, ctx, tried + 1, m ++ ": no landing on " ++ ep-ctx-ref(ctx) ++ " carries its subject")
+   : ep-co-signed?(landing) ? ep-e1-try(ep-drop-last(cands), rents, ctx, tried + 1, m ++ ": a co-author signed its landing " ++ substring(landing[0], 0, 9))
+   : !inBlob ? ep-e1-try(ep-drop-last(cands), rents, ctx, tried + 1, m ++ ": its landing " ++ substring(landing[0], 0, 9) ++ " does not carry the row")
+   : ["holds", m ++ " at " ++ ep-clock(ep-ctx-zone(ctx), ep-num(row, "at_unix_ms")) ++ ": coordinator " ++ ep-str(row, "coordinator") ++ ", rented_mind 0, rent 0, answered " ++ ep-num(rent, "answer_bytes").str() ++ " bytes by " ++ ep-str(rent, "source") ++ ", receipts cited " ++ ep-num(rent, "answer_receipts_existing").str() ++ ", landed " ++ substring(landing[0], 0, 9) ++ " on " ++ ep-ctx-ref(ctx) ++ ep-stamp-text(ep-ctx-walk(ctx), rent, ep-num(row, "at_unix_ms")), landing[0]];
+  }
+  def ep-e1(ctx) {
+   let rows = ep-rows-of(ep-blob(ep-ctx-root(ctx), ep-ctx-ref(ctx), "receipts/crossings-ledger.jsonl", "e1-crossings"));
+   let rents = ep-rows-of(ep-blob(ep-ctx-root(ctx), ep-ctx-ref(ctx), "receipts/rent-ledger.jsonl", "e1-rent"));
+   nothing?(rows) || nothing?(rents) ? ["unread", "no crossings or rent ledger on " ++ ep-ctx-ref(ctx), ""] : nothing?(ep-ctx-zone(ctx)) ? ["unread", "the host's zone did not read", ""] : ep-e1-try(ep-candidates(rows, ep-ctx-zone(ctx)), rents, ctx, 0, "");
+  }
+  // ── E2: the second column, then the meters beside it ──
+  def ep-digit?(b) = (b >= 48) && (b <= 57);
+  def ep-number-at(t, i, acc, seen) = i >= len(t) ? (seen ? acc : nothing()) : ep-digit?(str_byte_at(t, i)) ? ep-number-at(t, i + 1, acc * 10 + (str_byte_at(t, i) - 48), true) : (seen && ((Comparable) str_byte_at(t, i) == 44)) ? ep-number-at(t, i + 1, acc, seen) : (seen ? acc : nothing());
+  def ep-l-mark(i) = "(L" ++ i.str() ++ " \"";
+  // the second string of a ledger row: where it opens, or nothing
+  def ep-second-string(doc, i) {
+   let at = str_find(doc, ep-l-mark(i), 0);
+   let first = at < 0 ? -1 : str_find(doc, "\"", at + len(ep-l-mark(i)));
+   let second = first < 0 ? -1 : str_find(doc, "\"", first + 1);
+   second < 0 ? nothing() : second + 1;
+  }
+  def ep-column-two(doc, i, rows, sum) {
+   let open = ep-second-string(doc, i);
+   let v = nothing?(open) ? nothing() : ep-number-at(doc, open, 0, false);
+   nothing?(open) ? [rows, sum] : nothing?(v) ? nothing() : ep-column-two(doc, i + 1, rows + 1, sum + v);
+  }
+  // L1's coordinating number, read from its own second column
+  def ep-l1-coordinating(doc) {
+   let open = ep-second-string(doc, 1);
+   let at = nothing?(open) ? -1 : str_find(doc, "coordinating ", open);
+   at < 0 ? nothing() : ep-number-at(doc, at + 13, 0, false);
+  }
+  // a session's last row is its reading; the older rows carry their parts
+  def ep-rented-of(r) {
+   let total = ep-num(r, "rented_total");
+   let parts = fcgp-obj(r, "rented");
+   !nothing?(total) ? total : (ep-num(parts, "input") ?? 0) + (ep-num(parts, "cache_write") ?? 0) + (ep-num(parts, "cache_read") ?? 0) + (ep-num(parts, "output") ?? 0);
+  }
+  def ep-work-of(r) = ep-num(fcgp-obj(r, "work"), "total_tokens") ?? 0;
+  // [sessions, tokens] over each session's last row
+  def ep-meter(rows, read) {
+   let tab = foldl((t, r) => { let k = ep-str(r, "session"); let set = record_set(t, (String) k == "" ? "-" : k, read(r)); t; }, record_new(0), rows);
+   let keys = record_keys(tab);
+   [len(keys), foldl((acc, k) => acc + record_get(tab, k), 0, keys)];
+  }
+  def ep-rent-sum(rows) = foldl((acc, r) => acc + (ep-num(r, "rent_tokens") ?? 0), 0, rows);
+  def ep-e2(ctx, e1) {
+   let root = ep-ctx-root(ctx);
+   let ref = ep-ctx-ref(ctx);
+   let doc = ep-blob(root, ref, ep-goal-doc(), "e2-doc");
+   let col = nothing?(doc) ? nothing() : ep-column-two(doc, 1, 0, 0);
+   let rents = ep-rows-of(ep-blob(root, ref, "receipts/rent-ledger.jsonl", "e2-rent"));
+   let sessions = ep-meter(ep-rows-of(ep-blob(root, ref, "receipts/session-rent-ledger.jsonl", "e2-sessions")) ?? [], r => ep-rented-of(r));
+   let work = ep-meter(ep-rows-of(ep-blob(root, ref, "receipts/rented-work-sessions.jsonl", "e2-work")) ?? [], r => ep-work-of(r));
+   nothing?(col) ? ["unread", "the goal's path ledger did not read on " ++ ref, ""]
+   : (String) e1[0] != "holds" ? ["wall", "the score is read at E1, which does not hold; the column reads " ++ col[1].str(), col[1].str()]
+   : ["holds", "the second column of L1..L" ++ col[0].str() ++ " sums to " ++ col[1].str() ++ ", the number the star names at E1, a record. Its rows stopped at L" ++ col[0].str() ++ "; the meters kept counting beside it: session-rent-ledger " ++ sessions[1].str() ++ " tokens over " ++ sessions[0].str() ++ " session(s), rented-work-sessions " ++ work[1].str() ++ " over " ++ work[0].str() ++ ", rent-ledger " ++ ep-rent-sum(rents ?? []).str() ++ " across " ++ len(rents ?? []).str() ++ " movement row(s)", col[1].str()];
+  }
+  // ── E3: the coordinating column over the windows ──
+  def ep-windows() = [7, 30, 90];
+  def ep-rent-known(r) = ep-num(r, "coordinating_rent");
+  def ep-window(rows, now, zone, days) {
+   let mine = filter(r => (ep-num(r, "at_unix_ms") ?? 0) >= now - days * ep-day-ms(), rows);
+   let onTime = filter(r => ep-on-schedule?(r, zone), mine);
+   let named = filter(r => (String) ep-str(r, "coordinated_by") == "session" || (Comparable) (ep-num(r, "rented_mind") ?? 0) == 1, mine);
+   let reading = filter(r => (String) ep-str(r, "coordinated_by") == "host-schedule" && !ep-on-schedule?(r, zone), mine);
+   let rentOn = foldl((acc, r) => acc + (ep-rent-known(r) ?? 0), 0, onTime);
+   [days, len(mine), len(onTime), rentOn, len(named), map(r => ep-str(r, "movement"), reading), len(filter(r => nothing?(ep-rent-known(r)), onTime))];
+  }
+  def ep-window-text(w) = w[0].str() ++ " days: " ++ w[1].str() ++ " row(s), " ++ w[2].str() ++ " on the schedule at coordinating rent " ++ w[3].str() ++ (w[6] > 0 ? " (" ++ w[6].str() ++ " with no such column, unknown)" : "") ++ ", " ++ w[4].str() ++ " a session named or the table read" ++ (nil?(w[5]) ? "" : ", " ++ len(w[5]).str() ++ " reading the schedule off it (" ++ str-join-with(w[5], ", ") ++ ": a session began it detached, or a row off its slot; its rent is undercounted and the row stands)");
+  def ep-e3(ctx, e1) {
+   let root = ep-ctx-root(ctx);
+   let ref = ep-ctx-ref(ctx);
+   let rows = ep-rows-of(ep-blob(root, ref, "receipts/crossings-ledger.jsonl", "e3-crossings"));
+   let doc = ep-blob(root, ref, ep-goal-doc(), "e3-doc");
+   let l1 = nothing?(doc) ? nothing() : ep-l1-coordinating(doc);
+   let zone = ep-ctx-zone(ctx);
+   nothing?(rows) || nothing?(zone) ? ["unread", "no crossings ledger on " ++ ref ++ ", or the zone did not read", ""] : ep-e3-read(map(d => ep-window(rows, ep-ctx-now(ctx), zone, d), ep-windows()), l1, e1);
+  }
+  def ep-e3-read(ws, l1, e1) {
+   let near = ws[0];
+   let text = "L1 coordinating " ++ (nothing?(l1) ? "unread" : l1.str()) ++ " -> over the last " ++ str-join-with(map(w => ep-window-text(w), ws), "; over the last ");
+   (String) e1[0] != "holds" ? ["wall", "E1 does not hold; " ++ text, ""]
+   : (near[2] > 0) && ((Comparable) near[3] == 0) && ((Comparable) near[6] == 0) ? ["holds", text, ""]
+   : ["wall", "the nearest window holds no on-schedule row at coordinating rent 0, or one whose rent is unknown; " ++ text, ""];
+  }
+  // ── E4: S1 as the default, and the pinned reading ──
+  def ep-s1-door() = "observe/form-cli-grounded-synthesis-run.bml";
+  def ep-default-file() = "form/form-stdlib/form-cli.fk";
+  // a word in a comment is no caller
+  def ep-no-comment(l) { let at = str_find(l, "//", 0); at < 0 ? l : substring(l, 0, at); }
+  def ep-code-of(text) = str-join-with(map(l => ep-no-comment(l), split-on(text ?? "", "\n")), "\n");
+  def ep-s1-default?(root) = ep-has?(ep-code-of(read_file(ep-at(root, ep-default-file()))), "fgs-answer");
+  def ep-pinned-of(rows) = filter(r => (String) ep-str(r, "enquiry") == ep-pinned(), rows);
+  def ep-s1-rows(rows) = filter(r => (String) ep-str(r, "door") == "S1", rows);
+  def ep-e4-row(rows) {
+   let pinned = ep-pinned-of(rows);
+   let s1 = ep-s1-rows(pinned);
+   nil?(s1) ? (nil?(pinned) ? nothing() : pinned[-1]) : s1[-1];
+  }
+  def ep-e4-offered(r) = fcgp-present?(r, "citation_keys_offered") ? ep-num(r, "citation_keys_offered").str() ++ " receipt key(s) offered" : "keys offered unread";
+  def ep-e4(ctx) {
+   let root = ep-ctx-root(ctx);
+   let rows = ep-text-rows(ep-at(root, "receipts/rent-ledger.jsonl"));
+   let r = ep-e4-row(rows);
+   let dflt = ep-s1-default?(root);
+   let door = (Comparable) host_path_exists(ep-at(root, ep-s1-door())) == 1;
+   nothing?(r) ? ["unread", "no pinned row in " ++ ep-at(root, "receipts/rent-ledger.jsonl"), ""] : ep-e4-read(r, dflt, door, ep-num(r, "rent_tokens"), ep-num(r, "answer_receipts_existing"));
+  }
+  def ep-e4-lane(r) = (String) ep-str(r, "door") == "S1" ? "through S1" : "through the voice walk, not S1";
+  def ep-e4-read(r, dflt, door, rent, cited) {
+   let rentOk = !nothing?(rent) && (rent <= ep-max-rent());
+   let citedOk = !nothing?(cited) && (cited >= ep-min-cited());
+   let reading = "the pinned reading " ++ ep-str(r, "movement") ++ " " ++ ep-e4-lane(r) ++ ": rent " ++ (rent ?? "unread").str() ++ " <= " ++ ep-max-rent().str() ++ " " ++ (rentOk ? "holds" : "fails") ++ " (the voice is native, so the rented reading may be 0), receipts cited by an existing path " ++ (cited ?? "unread").str() ++ " >= " ++ ep-min-cited().str() ++ " " ++ (citedOk ? "holds" : "fails") ++ ", " ++ ep-e4-offered(r);
+   let whyDefault = dflt ? "" : "wall s1-not-default: an ordinary form-cli enquiry answers through fca-ask and the native session (" ++ ep-default-file() ++ " fc-session-ask-at never names fgs-answer; its coverage row is the report row per enquiry)" ++ (door ? ", and S1 stands as its own door, " ++ ep-s1-door() : ", and no door serves S1 since 115fea55e cut it") ++ "; ";
+   let whyCited = citedOk ? "" : "wall s1-receipts-cited: fgs-rank chooses receipts by the terms in their names, and few names carry them since the cut; ";
+   dflt && rentOk && citedOk ? ["holds", reading, ""] : ["wall", whyDefault ++ whyCited ++ reading, ""];
+  }
+  // ── E5: the provider turns the body launched ──
+  def ep-launchers() = ["form/form-stdlib/bml/form-cli-grounded-synthesis.bml", "form/form-stdlib/bml/review-panel.bml", "form/form-stdlib/bml/form-cli-heal.bml", "form/form-stdlib/bml/form-cli-response-resource.bml"];
+  def ep-provider-rows(rows) = filter(r => (String) ep-str(r, "source") == "provider", rows);
+  def ep-observed?(r) = (String) ep-str(r, "kind") == "observed" || (String) ep-str(r, "share_kind") == "observed";
+  def ep-panel-runs(dir) = (String) dir == "" || (Comparable) fs_is_dir(dir) != 1 ? [] : fs_list(dir) ?? [];
+  def ep-e5(ctx) {
+   let root = ep-ctx-root(ctx);
+   let rents = ep-provider-rows(ep-text-rows(ep-at(root, "receipts/rent-ledger.jsonl")));
+   let covers = ep-provider-rows(ep-text-rows(ep-at(root, "receipts/query-coverage-ledger.jsonl")));
+   let panel = ep-panel-runs(ep-ctx-panel(ctx));
+   let doors = filter(p => (Comparable) host_path_exists(ep-at(root, p)) == 1, ep-launchers());
+   let turns = len(rents) + len(covers) + len(panel);
+   let seen = len(filter(r => ep-observed?(r), append(rents, covers)));
+   let last = nil?(rents) ? "no provider row in the rent ledger" : "the rent ledger's last provider row is " ++ ep-str(rents[-1], "movement") ++ " at " ++ ep-clock(ep-ctx-zone(ctx), ep-num(rents[-1], "at_unix_ms")) ++ ", rent " ++ (ep-num(rents[-1], "rent_tokens") ?? 0).str();
+   let text = last ++ "; " ++ len(covers).str() ++ " provider row(s) in the coverage ledger; " ++ len(panel).str() ++ " review panel run(s) this host still holds, which land no row; " ++ seen.str() ++ " of " ++ turns.str() ++ " turn(s) read kind=observed; " ++ len(doors).str() ++ " door(s) can launch one (" ++ str-join-with(doors, ", ") ++ ")";
+   (turns == 0) && nil?(doors) ? ["holds", "no door can launch a provider and no turn stands: " ++ text, ""]
+   : (turns > 0) && ((Comparable) seen == turns) ? ["holds", text, ""]
+   : ["wall", "wall headless-share: the share collector withholds kind=observed on a headless transcript, and no row carries that reading; " ++ text, ""];
+  }
+  // ── E6: the gates, as the walk last read them or as run here ──
+  def ep-tail-bytes() = 400000;
+  def ep-log-tail(path) {
+   let size = file_size(path);
+   size < 1 ? "" : read_file_slice(path, size > ep-tail-bytes() ? size - ep-tail-bytes() : 0, ep-tail-bytes()) ?? "";
+  }
+  // a gate line: "<name>  rc=<rc>  <value>  <mark>"; [rc, value] of the last one, or nothing
+  def ep-gate-cells(line) = filter(c => (Comparable) len(c) > 0, split-on(trim(line), " "));
+  def ep-gate-line(lines, name) = foldl((best, l) => ep-starts?(l, name ++ "  rc=") ? l : best, "", lines);
+  def ep-gate-value(lines, name) {
+   let cells = ep-gate-cells(ep-gate-line(lines, name));
+   len(cells) < 3 ? nothing() : ((String) cells[1] == "rc=0" ? str_to_int(cells[2]) : nothing());
+  }
+  def ep-drift-line(lines) = foldl((best, l) => ep-starts?(l, "drift-gates pass=") ? l : best, "", lines);
+  // the walk this block belongs to: the health row after the drift line names its process's start
+  def ep-walk-begun(tail) {
+   let line = ep-rfind(tail, "drift-gates pass=", 0, -1);
+   let at = line < 0 ? -1 : str_find(tail, "\"id\":\"", line);
+   let colon = at < 0 ? -1 : str_find(tail, ":", at + 6);
+   colon < 0 ? 0 : (ep-number-at(tail, colon + 1, 0, false) ?? 0);
+  }
+  def ep-rfind(t, needle, from, last) {
+   let at = str_find(t, needle, from);
+   at < 0 ? last : ep-rfind(t, needle, at + 1, at);
+  }
+  // [path, begun ms, ground, freshness, drift line]
+  def ep-gates-of-log(path) {
+   let tail = ep-log-tail(path);
+   let lines = split-on(tail, "\n");
+   [path, ep-walk-begun(tail), ep-gate-value(lines, "ground"), ep-gate-value(lines, "binary-freshness"), ep-drift-line(lines)];
+  }
+  def ep-gates-newest(reads) = foldl((best, g) => nothing?(best) || (g[1] > best[1]) ? g : best, nothing(), filter(g => (String) g[4] != "", reads));
+  def ep-drift-full?(line) {
+   let pass = hw-field(line, "pass=");
+   let full = hw-field(line, " full=");
+   let refused = hw-field(line, " refused=");
+   !nothing?(pass) && !nothing?(full) && !nothing?(refused) && (full > 0) && ((Comparable) pass == full) && ((Comparable) refused == 0);
+  }
+  def ep-e6-judge(where, ground, fresh, drift) {
+   let ok = ((Comparable) (ground ?? 0) == 42) && ((Comparable) (fresh ?? 0) == 31) && ep-drift-full?(drift);
+   let text = where ++ ": ground " ++ (ground ?? "unread").str() ++ ", freshness " ++ (fresh ?? "unread").str() ++ ", " ++ (String) (drift == "" ? "no drift line" : trim(drift));
+   ok ? ["holds", text, ""] : ["wall", "wall regression: " ++ text, ""];
+  }
+  def ep-gates-stale?(g, ctx) = ep-ctx-now(ctx) - g[1] > ep-windows()[0] * ep-day-ms();
+  def ep-e6-logs(ctx) {
+   let reads = map(p => ep-gates-of-log(p), ep-ctx-logs(ctx));
+   let g = ep-gates-newest(reads);
+   nothing?(g) ? ["unread", "no gate lines in " ++ str-join-with(ep-ctx-logs(ctx), ", "), ""] : ep-gates-stale?(g, ctx) ? ["wall", "wall stale-gates: the newest gate lines (" ++ g[0] ++ ") are from a walk begun " ++ ep-clock(ep-ctx-zone(ctx), g[1]) ++ ", older than " ++ ep-windows()[0].str() ++ " days: a door that stopped running is not a door that runs", ""] : ep-e6-judge("the walk's own last gate lines (" ++ g[0] ++ ", the walk begun " ++ ep-clock(ep-ctx-zone(ctx), g[1]) ++ ")", g[2], g[3], g[4]);
+  }
+  def ep-gate-deadline-ms() = 1200000;
+  def ep-run-gate(step, door) = hch-run-quiet-in(ep-io(), step, ["./fkwu", door], "", hch-by(ep-gate-deadline-ms()));
+  // a gate door's value reads only when it exited 0: a number printed before a death is no reading
+  def ep-run-said(run) = hch-ok?(run) ? hch-said(run) : "";
+  def ep-last-int(run) {
+   let lines = filter(l => (Comparable) len(trim(l)) > 0, split-on(ep-run-said(run), "\n"));
+   nil?(lines) ? nothing() : ep-number-at(trim(lines[-1]), 0, 0, false);
+  }
+  def ep-e6-run() {
+   let ground = ep-run-gate("gate-ground", "bootstrap/ground.fk");
+   let fresh = ep-run-gate("gate-freshness", "form/form-stdlib/tests/binary-freshness-band.fk");
+   let drift = ep-run-gate("gate-drift", "gate/drift-gates-run.bml");
+   ep-e6-judge("run here, each door bounded to " ++ (ep-gate-deadline-ms() / 60000).str() ++ " minutes", ep-last-int(ground), ep-last-int(fresh), ep-drift-line(split-on(ep-run-said(drift), "\n")));
+  }
+  // nothing a step touched broke: a native landing's edit stands read only when a gate runs the band of the file it touched. On 2026-10-31 19:25 cf090e073 re-landed a wrong line a
+  // session had repaired the day before (fccw-covers, arg == fat-exit(name)): its gap's band went green, form-cli-check-witness-band fell from 1023 to 959, and at 19:32 the gates read full
+  def ep-ends?(s, e) = (len(s) >= len(e)) && ((String) substring(s, len(s) - len(e), len(s)) == e);
+  def ep-code-path?(p) = !ep-has?(p, "/tests/") && (ep-ends?(p, ".bml") || ep-ends?(p, ".fk"));
+  def ep-stem(p) {
+   let at = ep-rfind(p, "/", 0, -1);
+   let base = at < 0 ? p : substring(p, at + 1, len(p));
+   let dot = ep-rfind(base, ".", 0, -1);
+   dot < 0 ? base : substring(base, 0, dot);
+  }
+  def ep-gated?(p, gates) = ep-has?(gates, "form/form-stdlib/tests/" ++ ep-stem(p) ++ "-band");
+  def ep-gates-code(root, ref) = ep-code-of(ep-blob(root, ref, "gate/drift-gates.bml", "gate-rows"));
+  // the code files a landing touched whose band no gate runs
+  def ep-unwitnessed(landing, gates) = filter(p => ep-code-path?(p) && !ep-gated?(p, gates), landing[4]);
+  // [sha, path] of each such file, over the native landings of the nearest window
+  def ep-unread-touches(ctx) {
+   let root = ep-ctx-root(ctx);
+   let ref = ep-ctx-ref(ctx);
+   let zone = ep-ctx-zone(ctx);
+   let crossings = ep-rows-of(ep-blob(root, ref, "receipts/crossings-ledger.jsonl", "e6-crossings"));
+   let landings = ep-landings(root, ref, ep-ctx-now(ctx) - ep-windows()[0] * ep-day-ms());
+   let gates = ep-gates-code(root, ref);
+   nothing?(crossings) || nothing?(landings) || nothing?(zone) ? [] : foldl((acc, l) => ep-native-landing?(l, crossings, zone) ? append(acc, map(p => substring(l[0], 0, 9) ++ " " ++ p, ep-unwitnessed(l, gates))) : acc, [], landings);
+  }
+  // holds reads only when nothing a step touched stands unread; a wall or an unread already says more
+  def ep-e6-touched(ctx, read) {
+   let touched = (String) read[0] == "holds" ? ep-unread-touches(ctx) : [];
+   nil?(touched) ? read : ["wall", "wall step-unread: a native landing inside " ++ ep-windows()[0].str() ++ " days touched code whose band no gate runs (" ++ str-join-with(touched, ", ") ++ "), so that nothing a step touched broke stands unread; " ++ read[1], ""];
+  }
+  def ep-e6(ctx, opts) = ep-e6-touched(ctx, (Comparable) (fcgp-num(opts, "gates") ?? 0) == 1 ? ep-e6-run() : ep-e6-logs(ctx));
+  // ── the enquiry through S1, as a child, when asked ──
+  // a shared GPU stretches a decode: on 2026-10-31, with three other sessions on the lease, 25 minutes read 128 ids and 45 minutes read 8, each child stopped at its bound; with the lease to itself the same enquiry answered in 466 s
+  def ep-enquiry-deadline-ms() = 2700000;
+  def ep-enquire(root) {
+   let request = json-emit(json-node-object([fhn-s("enquiry", read_file(ep-at(root, ep-pinned())) ?? ""), fhn-s("terms", ep-terms()), fhn-s("movement", "S1 pinned " ++ hw-day-in(hw-zone-ms(), now_unix_ms()))])) ++ "\n";
+   let run = hch-run-quiet-in(ep-io(), "s1-enquiry", ["./fkwu", ep-s1-door()], request, hch-by(ep-enquiry-deadline-ms()));
+   print_str(ep-prefix() ++ "S1 enquiry: exit " ++ hch-status-text(run));
+  }
+  // ── the door ──
+  // ctx: [root, ref, walk, now, zone, logs, panel]
+  def ep-ctx-root(c) = c[0];
+  def ep-ctx-ref(c) = c[1];
+  def ep-ctx-walk(c) = c[2];
+  def ep-ctx-now(c) = c[3];
+  def ep-ctx-zone(c) = c[4];
+  def ep-ctx-logs(c) = c[5];
+  def ep-ctx-panel(c) = c[6];
+  def ep-spec() = [["root", "str"], ["ref", "str"], ["walk", "str"], ["logs", "strs"], ["ledger", "str"], ["panel_dir", "str"], ["now_ms", "int"], ["zone_ms", "int"], ["gates", "int"], ["enquire", "int"]];
+  def ep-opts() = dop-doc(ep-door(), stdin-text(), ep-spec());
+  def ep-or(opts, key, dflt) = json-object-has?(opts, key) ? fcgp-str(opts, key) : dflt;
+  def ep-plist-logs() = map(n => "docs/launchd/" ++ n, ["earth.hati.rent-walk.plist", "earth.hati.day-turn.plist"]);
+  def ep-plist-out(path) {
+   let text = read_file(path) ?? "";
+   let at = str_find(text, "<key>StandardOutPath</key><string>", 0);
+   let open = at < 0 ? -1 : at + 34;
+   let close = open < 0 ? -1 : str_find(text, "</string>", open);
+   close < 0 ? "" : substring(text, open, close);
+  }
+  def ep-logs(opts) = json-object-has?(opts, "logs") ? map(n => json-string-value(n), json-array-elements(json-object-get(opts, "logs"))) : filter(p => (String) p != "", map(p => ep-plist-out(p), ep-plist-logs()));
+  def ep-panel-default() = temp_dir() ++ "/review-panel";
+  def ep-ctx(opts) = [ep-or(opts, "root", "."), ep-or(opts, "ref", ep-ref()), ep-or(opts, "walk", sr-walk-dir()), fcgp-num(opts, "now_ms") ?? now_unix_ms(), fcgp-num(opts, "zone_ms") ?? hw-zone-ms(), ep-logs(opts), ep-or(opts, "panel_dir", ep-panel-default())];
+  // [id, verdict, reading, value]
+  def ep-read(ctx, opts) {
+   let e1 = ep-e1(ctx);
+   let e2 = ep-e2(ctx, e1);
+   let e3 = ep-e3(ctx, e1);
+   let e4 = ep-e4(ctx);
+   let e5 = ep-e5(ctx);
+   let e6 = ep-e6(ctx, opts);
+   [["E1", e1], ["E2", e2], ["E3", e3], ["E4", e4], ["E5", e5], ["E6", e6]];
+  }
+  def ep-line(r) = ep-prefix() ++ r[0] ++ ": " ++ r[1][0] ++ " — " ++ r[1][1];
+  def ep-count(reads, word) = len(filter(r => (String) r[1][0] == word, reads));
+  def ep-pairs-of(r) = [fhn-s(r[0], r[1][0]), fhn-s(r[0] ++ "_reading", r[1][1]), fhn-s(r[0] ++ "_value", r[1][2])];
+  def ep-row(reads, ctx) = json-node-object(append([fhn-n("at_unix_ms", ep-ctx-now(ctx)), fhn-s("ref", ep-ctx-ref(ctx)), fhn-s("ref_sha", ep-ref-sha(ep-ctx-root(ctx), ep-ctx-ref(ctx))), fhn-n("holds", ep-count(reads, "holds")), fhn-n("walls", ep-count(reads, "wall")), fhn-n("unread", ep-count(reads, "unread"))], foldl((acc, r) => append(acc, ep-pairs-of(r)), [], reads)));
+  def ep-summary(reads, path, kept) = ep-prefix() ++ "summary: 6 readings: holds " ++ ep-count(reads, "holds").str() ++ ", walls " ++ ep-count(reads, "wall").str() ++ ", unread " ++ ep-count(reads, "unread").str() ++ "; ledger " ++ ((String) path == "" ? "none" : path ++ " " ++ kept);
+  def ep-run(opts) {
+   let asked = (Comparable) (fcgp-num(opts, "enquire") ?? 0) == 1 ? ep-enquire(ep-or(opts, "root", ".")) : 0;
+   let ctx = ep-ctx(opts);
+   let reads = ep-read(ctx, opts);
+   let row = json-emit(ep-row(reads, ctx)) ++ "\n";
+   let swept = fs-remove-tree(ep-io());
+   let printed = map(r => print_str(ep-line(r)), reads);
+   let path = ep-or(opts, "ledger", ep-ledger());
+   let kept = (String) path == "" ? "none" : fhn-append(path, row);
+   ep-summary(reads, path, kept);
+  }
+ }
+}

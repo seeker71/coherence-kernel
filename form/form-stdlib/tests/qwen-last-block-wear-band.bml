@@ -1,0 +1,344 @@
+// qwen-last-block-wear-band.bml — the 27B wears the adapter it trained: the forward hook read on the model (form-stdlib/bml/qwen-last-block-wear.bml,
+// q38-wear-recs in native/metal/qwen35-dense-token-handle.fk; docs/qwen-last-block-lora-design.md, "The voice wears its lesson").
+//   1   the table: the worn context's layer 63 carries the record and every other layer an empty entry; its FFN records are the bare ones in their
+//       order plus the hook's two, every other layer's are the bare ones word for word; the walkers read 11 / 14 tensors; the context reads ok and
+//       its close count is the opened count plus the record's 3 handles
+//   2   scale 0 is the bare lane, bit for bit: the 248,320 logits after the prefill and after each of 8 decode steps, token-wise and planned, equal
+//       the bare lane's words; the same for a rank-2 pair on attn_output (block 63) and on ssm_out (block 62) at scale 0
+//   4   worn at its config scale the pair reaches the head: the logits differ from the bare lane's; so do the attn_output and ssm_out pairs at scale 1
+//   8   the worn prefill leaves the stream the base's: the bare forward of the next id, from a state a worn prefill left, equals the bare lane's words
+//  16   the worn span forward equals the judge's offline forward on the judge's rows (accepted held-out lines 21-25, the rung-4 captures): the block
+//       output's widest gap and the mean loss's gap within the measured bounds (qlwb-out-ulp-bound, qlwb-mean-bound), the child's mean read beside
+//       rung 4's 2.769699388331711
+//  32   the worn decode lane, token by token over one judged row (line 25), against the worn span lane on the same positions: the widest per-token
+//       loss gap within the measured bound (qlwb-decode-bound): two arithmetics, the matvec and the matmul, one meaning
+//  64   the wear's memory and handles: the record frees 3 handles each time it is taken off, the live handle count returns to where it stood, the
+//       machine read around the passes
+// 128   decode speed, worn against bare, on the same prompt in interleaved windows on one context: the best window's ms per id, worn over bare, within
+//       qlwb-speed-bound (the medians printed beside)
+// 256   the voice door: the same packet through fcnv-run-wearing bare and at scale 0 answers the same text; at its config scale it answers, its
+//       result names the adapter, and every session released whole
+// Verdict 511. It needs the 27 GiB file, a Metal device, the readings rows and the child adapter; it takes the memory lease first and holds nothing
+// when the governor says held. Nothing serving changes: no default names an adapter.
+// REQUIRES: a live Metal device, /Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf, learn/draft-readings.jsonl, form/form-stdlib/adapters/qwen38-last-block-next, .hearth/qwen-rung-4/accepted
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-capture.bml form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml form-stdlib/bml/qwen-last-block-train.bml form-stdlib/bml/qwen-last-block-judge.bml form-stdlib/bml/qwen-last-block-wear.bml form-stdlib/bml/form-cli-native-voice.bml
+section [form.bml] {
+ class QwenLastBlockWearBand {
+  def qlwb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qlwb-adapter() = "form/form-stdlib/adapters/qwen38-last-block-next";
+  def qlwb-rows() = "learn/draft-readings.jsonl";
+  def qlwb-captures() = ".hearth/qwen-rung-4/accepted";
+  def qlwb-home() = ".hearth/voice-wears-its-lesson";
+  def qlwb-span() = 64;
+  def qlwb-maxpos() = 256;
+  def qlwb-cap() = 160;
+  def qlwb-steps() = 8;
+  def qlwb-speed-ids() = 32;
+  // the child rung 4 judged reads this mean on these rows (receipts/lora-promotion-ledger.jsonl, docs/qwen-last-block-lora-design.md, "Rung 4 observed")
+  def qlwb-rung4-child() = 2.769699388331711;
+  // the bounds: the readings of the runs that first read them (.hearth/voice-wears-its-lesson/wear-band-run-1.log and run-2), pinned. The worn span forward and
+  // the judge's offline forward are one arithmetic: every word of the block's output agrees, so the output's bound and the mean's are 0. The decode lane
+  // is the matvec beside the matmul (qwen38-draft-verify.bml: "two arithmetics"): its widest per-token gap over line 25 read 5.340576171875e-05 in both runs.
+  // The speed bound is the design doc's evidence rule, named before any decoded reading: worn within 5% of bare on the best window.
+  def qlwb-out-ulp-bound() = 0;
+  def qlwb-mean-bound() = 0.0;
+  def qlwb-decode-bound() = 5.340576171875e-05;
+  def qlwb-speed-bound() = 1.05;
+  def qlwb-say(s) = print_str("[qwen-last-block-wear-band] " ++ s);
+  def qlwb-prompt() = [248045, 846, 198, 814, 20139, 303, 1330, 22157, 3069, 279, 12515, 369, 6105, 13, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271];
+  def qlwb-abs(x) = x < 0.0 ? 0.0 - x : x;
+  def qlwb-all(xs) = foldl((acc, x) => acc && x, true, xs);
+  def qlwb-num(x) = nothing?(x) ? "null" : x.str();
+  def qlwb-mean(xs) = nil?(xs) ? nothing() : any?(x => nothing?(x), xs) ? nothing() : sum(xs) / (len(xs) + 0.0);
+  def qlwb-sorted(xs) = foldl((acc, x) => qlwb-insert(acc, x), [], xs);
+  def qlwb-insert(sorted, x) = nil?(sorted) ? [x] : x <= sorted[0] ? cons(x, sorted) : cons(sorted[0], qlwb-insert(sorted[1:], x));
+  def qlwb-median(xs) = nil?(xs) ? nothing() : nth(qlwb-sorted(xs), len(xs) / 2);
+  def qlwb-min(xs) = nil?(xs) ? nothing() : qlwb-sorted(xs)[0];
+  def qlwb-logits(ctx) = metal_buf_read(ctx[1][28], 0, ctx[2][19] * 4);
+  // ── one pass: a fresh stream, the prompt's span prefill, then steps decoded token-wise or planned; [logits per stop, generated ids, ms per id, stream] ──
+  def qlwb-prefill(ctx, sts, ids) = q38-prefill-span-sliced(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, q38-ctx-span(ctx));
+  def qlwb-token-step(ctx, sts) = (id, pos) => q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], id, pos);
+  def qlwb-plan-step(ctx, sts, plan) = (id, pos) => q38-forward-planned(ctx, plan, sts, id, pos);
+  def qlwb-walk(ctx, step, id, pos, left, out, gen) = left <= 0 ? [reverse(out), reverse(gen)] : {
+   let nid = step(id, pos);
+   qlwb-walk(ctx, step, nid, pos + 1, left - 1, cons(qlwb-logits(ctx), out), cons(nid, gen));
+  };
+  def qlwb-pass(ctx, ids, steps, planned) {
+   let sts = q38-new-state(ctx[2]);
+   let pf = qlwb-prefill(ctx, sts, ids);
+   let first = qlwb-logits(ctx);
+   let step = planned ? qlwb-plan-step(ctx, sts, q38-plan(ctx, sts)) : qlwb-token-step(ctx, sts);
+   let walked = qlwb-walk(ctx, step, pf[0], pf[1], steps, [], []);
+   let settled = metal_sync();
+   let freed = q38-free-state(sts);
+   [cons(first, walked[0]), cons(pf[0], walked[1]), freed];
+  }
+  def qlwb-same-all?(a, b) = len(a) == len(b) && qlwb-all(map(i => (String) nth(a, i) == nth(b, i), range(0, len(a))));
+  def qlwb-diff-any?(a, b) = any?(i => !((String) nth(a, i) == nth(b, i)), range(0, len(a)));
+  // ── the worn contexts ──
+  def qlwb-wear(ctx, scale) = qlwe-open(ctx, [qlwb-adapter(), scale]);
+  // a hash-filled rank-2 pair on any residual writer, for the hook's other two slots: the worn context, or [] when it did not open
+  def qlwb-raw(ctx, slot, L, din, scale) {
+   let d = ctx[2][0];
+   let rec = qlh-rr-open(slot, qlt-f32-bytes(qlt-rr-values(din * 2, 1, 0.02)), qlt-f32-bytes(qlt-rr-values(2 * d, 2, 0.2)), din, 2, d, scale, q38-ctx-span(ctx));
+   let table = nil?(rec) ? nothing() : qlh-rr-table(ctx[3], qlwe-records(rec, L, ctx[2][21]), ctx[2][22], q38-ctx-span(ctx));
+   nothing?(table) ? [] : qlwe-ctx(ctx, table, rec, ["qwen-wear-v1", "raw-slot-" ++ slot.str(), "", scale, rec, L]);
+  }
+  def qlwb-raw-pass(ctx, slot, L, din, scale, ids) {
+   let worn = qlwb-raw(ctx, slot, L, din, scale);
+   nil?(worn) ? [[], [], 0, 0] : qlwb-raw-ran(worn, qlwb-pass(worn, ids, 2, false));
+  }
+  def qlwb-raw-ran(worn, p) {
+   let settled = metal_sync();
+   [p[0], p[1], p[2], qlwe-take-off(worn)];
+  }
+  // ── bit 1: the table against the opened context ──
+  def qlwb-table-holds?(ctx, worn, L) {
+   let nL = ctx[2][21];
+   let ps = ctx[0];
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let lays = ctx[3];
+   let wl = worn[3];
+   let hook = map(l => len(q38-ffn-recs(ps, bs, geo, nth(wl, l))) - len(q38-ffn-recs(ps, bs, geo, nth(lays, l))), range(0, nL));
+   let bare = q38-ffn-recs(ps, bs, geo, nth(lays, L));
+   let keeps = (Value) take(len(bare), q38-ffn-recs(ps, bs, geo, nth(wl, L))) == bare;
+   let others = all?(l => (Comparable) l == L ? true : (Value) q38-ffn-recs(ps, bs, geo, nth(wl, l)) == q38-ffn-recs(ps, bs, geo, nth(lays, l)), range(0, nL));
+   let tvs = all?(l => (Comparable) len(q38-lay-tvs(nth(wl, l))) == (kth-full?(l, geo[22]) ? 11 : 14), range(0, nL));
+   let hooked = all?(l => (Comparable) nth(hook, l) == ((Comparable) l == L ? 2 : 0), range(0, nL));
+   let counts = (Comparable) q38-close-expected(worn, []) == q38-close-expected(ctx, []) + 3;
+   let ok = (Comparable) q38-context-ok?(worn) == 1;
+   let wear = q38-ctx-wear(worn);
+   let bytes = (Comparable) q38-forward-weight-bytes(worn) == q38-forward-weight-bytes(ctx);
+   qlwb-say("table: worn layer " ++ L.str() ++ " carries " ++ len(q38-lay-wear(nth(wl, L))).str() ++ " record, FFN records bare " ++ len(bare).str() ++ " worn " ++ (len(bare) + nth(hook, L)).str() ++ "; keeps the bare ones " ++ keeps.str() ++ ", other layers word for word " ++ others.str() ++ ", walkers read the tensors " ++ tvs.str() ++ ", close count +3 " ++ counts.str() ++ ", context ok " ++ ok.str() ++ ", weight bytes unchanged " ++ bytes.str() ++ "; wear " ++ wear[1] ++ " sha256 " ++ wear[2] ++ " scale " ++ wear[3].str());
+   keeps && others && tvs && hooked && counts && ok && bytes && (String) wear[0] == "qwen-wear-v1";
+  }
+  // ── bit 8: the bare forward of the next id from a state a prefill left ──
+  def qlwb-stream-after(prefilledBy, bare, ids) {
+   let sts = q38-new-state(bare[2]);
+   let pf = qlwb-prefill(prefilledBy, sts, ids);
+   let nid = q38-forward(bare[0], bare[1], bare[2], bare[3], sts, bare[4], bare[5], bare[6], pf[0], pf[1]);
+   let out = qlwb-logits(bare);
+   let settled = metal_sync();
+   let freed = q38-free-state(sts);
+   [pf[0], nid, out];
+  }
+  // ── bit 16: one judged row, offline (the capture through the block's forward and the pair) and through the worn span lane ──
+  def qlwb-row-compare(ctx, worn, o, sx, L, row, xin) {
+   let geo = ctx[2];
+   let ps = ctx[0];
+   let lay = nth(ctx[3], L);
+   let n = qlbt-row-n(row);
+   let d = geo[0];
+   let off = qlbt-eval(ps, geo, lay, ctx[5], ctx[6], sx, o, row, xin);
+   let offOut = metal_buf_read(sx[0], 0, n * d * 4);
+   let cap = qlbc-open(worn, L, qlwb-cap());
+   let sts = q38-new-state(geo);
+   let t0 = host_monotonic_ms();
+   let r = qlbc-prefill(cap, sts, row[1]);
+   let t1 = host_monotonic_ms();
+   let laneIn = qlbc-bytes(cap, "xin");
+   let laneOut = qlbc-bytes(cap, "xfin");
+   let settled = metal_sync();
+   let freed = qlbc-free(cap) + q38-free-state(sts);
+   let inSame = (String) laneIn == xin;
+   let outSame = (String) laneOut == offOut;
+   let cmp = outSame ? [0, 0, 0.0, 0.0] : qlbf-compare(laneOut, offOut, n * d);
+   let lane = qlbt-eval-output(ps, geo, ctx[5], ctx[6], sx, o, row, laneOut);
+   let mo = qlbt-mean(off, qlbt-row-count(row));
+   let ml = qlbt-mean(lane, qlbt-row-count(row));
+   qlwb-say("line " ++ row[0].str() ++ ": " ++ n.str() ++ " positions, " ++ qlbt-row-count(row).str() ++ " supervised; lane prefill " ++ (t1 - t0).str() ++ " ms; block input equals the capture " ++ inSame.str() ++ "; block output words differ " ++ cmp[0].str() ++ ", widest " ++ cmp[1].str() ++ " ulp, max gap " ++ cmp[2].str() ++ "; offline mean " ++ qlwb-num(mo) ++ ", lane mean " ++ qlwb-num(ml));
+   [row[0], mo, ml, cmp, off, lane, inSame, laneOut];
+  }
+  // ── bit 32: the worn decode lane over a row's positions, each next-token loss read from the serving logits through the same CE ──
+  def qlwb-decode-losses(worn, o, row) {
+   let geo = worn[2];
+   let sts = q38-new-state(geo);
+   let ids = row[1];
+   let targets = row[2];
+   let mask = row[3];
+   let w1 = metal_buf_write(record_get(o, "m1"), 0, nam-f32s([1.0]));
+   let out = qlwb-decode-go(worn, q38-plan(worn, sts), o, sts, ids, targets, mask, 0, []);
+   let settled = metal_sync();
+   let freed = q38-free-state(sts);
+   out;
+  }
+  def qlwb-decode-go(worn, plan, o, sts, ids, targets, mask, pos, acc) = nil?(ids) ? reverse(acc) : {
+   let nid = q38-forward-planned(worn, plan, sts, ids[0], pos);
+   let wt = metal_buf_write(record_get(o, "t1"), 0, md-le32-list([targets[0]], ""));
+   metal_batch_concurrent();
+   metal_enqueue(record_get(o, "ce"), md-bind16([worn[1][28], record_get(o, "t1"), record_get(o, "dz1"), record_get(o, "l1"), record_get(o, "m1")], [worn[2][19], 1, md-f32-bits(1.0), md-f32-bits(1.0)], 32, 0, 1, 1), 1);
+   let raw = metal_buf_read(record_get(o, "l1"), 0, 4);
+   let loss = len(raw) == 4 ? ln-f32-decode(ln-u32-le(raw, 0)) : nothing();
+   qlwb-decode-go(worn, plan, o, sts, ids[1:], targets[1:], mask[1:], pos + 1, cons(mask[0] > 0.5 ? loss : 0.0, acc));
+  };
+  // ── bit 128: one window's ms per id over the planned decode, the first two ids apart (the plan's own cost and the lease's turn) ──
+  def qlwb-window(ctx, ids, n) {
+   let sts = q38-new-state(ctx[2]);
+   let pf = qlwb-prefill(ctx, sts, ids);
+   let plan = q38-plan(ctx, sts);
+   let step = qlwb-plan-step(ctx, sts, plan);
+   let warm = step(pf[0], pf[1]);
+   let warm2 = step(warm, pf[1] + 1);
+   let t0 = host_monotonic_ms();
+   let last = qlwb-speed-go(step, warm2, pf[1] + 2, n);
+   let t1 = host_monotonic_ms();
+   let settled = metal_sync();
+   let freed = q38-free-state(sts);
+   (t1 - t0 + 0.0) / (n + 0.0);
+  }
+  def qlwb-speed-go(step, id, pos, left) = left <= 0 ? id : qlwb-speed-go(step, step(id, pos), pos + 1, left - 1);
+  def qlwb-speed-rounds(ctx, worn, ids, n, k, us, ws) = k <= 0 ? [reverse(us), reverse(ws)] : {
+   let u = qlwb-window(ctx, ids, n);
+   let w = qlwb-window(worn, ids, n);
+   qlwb-say("speed window: bare " ++ u.str() ++ " ms per id, worn " ++ w.str() ++ " ms per id; gpu utilization " ++ host_gpu_utilization().str());
+   qlwb-speed-rounds(ctx, worn, ids, n, k - 1, cons(u, us), cons(w, ws));
+  };
+  // ── inside the lease ──
+  def qlwb-run-all(ctx, src, x) {
+   let geo = ctx[2];
+   let L = qlbj-last-block(geo);
+   let d = geo[0];
+   let ids = qlwb-prompt();
+   let live0 = metal_live();
+   qlwb-say("block L = " ++ L.str() ++ ", d " ++ d.str() ++ ", ff " ++ geo[10].str() ++ ", span " ++ q38-ctx-span(ctx).str() ++ "; gpu utilization " ++ host_gpu_utilization().str() ++ "; " ++ mg-status-line(mg-sense()) ++ "; live handles " ++ live0.str());
+   let wornO = qlwb-wear(ctx, nothing());
+   let zeroO = qlwb-wear(ctx, 0.0);
+   (String) wornO[0] != "worn" || (String) zeroO[0] != "worn" ? {
+    qlwb-say("refused: " ++ wornO[1].str() ++ " / " ++ zeroO[1].str());
+    0;
+   } : {
+    let worn = wornO[1];
+    let zero = zeroO[1];
+    let b1 = qlwb-table-holds?(ctx, worn, L) ? 1 : 0;
+    // bits 2 and 4: logits by the word, bare against scale 0 against the config's scale, token-wise and planned
+    let t0 = host_monotonic_ms();
+    let bareT = qlwb-pass(ctx, ids, qlwb-steps(), false);
+    let t1 = host_monotonic_ms();
+    let bareP = qlwb-pass(ctx, ids, qlwb-steps(), true);
+    let zeroT = qlwb-pass(zero, ids, qlwb-steps(), false);
+    let zeroP = qlwb-pass(zero, ids, qlwb-steps(), true);
+    let wornT = qlwb-pass(worn, ids, qlwb-steps(), false);
+    let wornP = qlwb-pass(worn, ids, qlwb-steps(), true);
+    let t2 = host_monotonic_ms();
+    let eqT = qlwb-same-all?(bareT[0], zeroT[0]);
+    let eqP = qlwb-same-all?(bareP[0], zeroP[0]);
+    let difT = qlwb-diff-any?(bareT[0], wornT[0]);
+    let difP = qlwb-diff-any?(bareP[0], wornP[0]);
+    let planSame = qlwb-same-all?(wornT[0], wornP[0]);
+    qlwb-say("scale 0 against bare, " ++ len(bareT[0]).str() ++ " stops of " ++ geo[19].str() ++ " logits: token-wise equal " ++ eqT.str() ++ ", planned equal " ++ eqP.str() ++ "; bare pass " ++ (t1 - t0).str() ++ " ms, six passes " ++ (t2 - t0).str() ++ " ms");
+    qlwb-say("config scale against bare: token-wise differ " ++ difT.str() ++ ", planned differ " ++ difP.str() ++ "; worn token-wise equals worn planned " ++ planSame.str() ++ "; ids bare " ++ bareT[1].str() ++ ", worn " ++ wornT[1].str());
+    // the other two residual writers: attn_output on block L, ssm_out on the linear block before it
+    let din10 = kth-tv-c(nth(ctx[3], L)[10]);
+    let din13 = kth-tv-c(nth(ctx[3], L - 1)[13]);
+    let bareS = qlwb-pass(ctx, ids, 2, false);
+    let z10 = qlwb-raw-pass(ctx, 10, L, din10, 0.0, ids);
+    let o10 = qlwb-raw-pass(ctx, 10, L, din10, 1.0, ids);
+    let z13 = qlwb-raw-pass(ctx, 13, L - 1, din13, 0.0, ids);
+    let o13 = qlwb-raw-pass(ctx, 13, L - 1, din13, 1.0, ids);
+    let eq10 = qlwb-same-all?(bareS[0], z10[0]);
+    let eq13 = qlwb-same-all?(bareS[0], z13[0]);
+    let dif10 = qlwb-diff-any?(bareS[0], o10[0]);
+    let dif13 = qlwb-diff-any?(bareS[0], o13[0]);
+    qlwb-say("attn_output (din " ++ din10.str() ++ "): scale 0 equal " ++ eq10.str() ++ ", scale 1 differs " ++ dif10.str() ++ "; ssm_out on block " ++ (L - 1).str() ++ " (din " ++ din13.str() ++ "): scale 0 equal " ++ eq13.str() ++ ", scale 1 differs " ++ dif13.str());
+    let b2 = eqT && eqP && eq10 && eq13 ? 2 : 0;
+    let b4 = difT && difP && dif10 && dif13 ? 4 : 0;
+    // bit 8: the stream a worn prefill leaves
+    let afterBare = qlwb-stream-after(ctx, ctx, ids);
+    let afterWorn = qlwb-stream-after(worn, ctx, ids);
+    let streamSame = (String) afterBare[2] == afterWorn[2];
+    qlwb-say("the bare forward of the next id from the stream a prefill left: bare prefill " ++ afterBare[0].str() ++ " then " ++ afterBare[1].str() ++ ", worn prefill " ++ afterWorn[0].str() ++ " then " ++ afterWorn[1].str() ++ "; logits equal " ++ streamSame.str());
+    let b8 = streamSame ? 8 : 0;
+    // bits 16 and 32: the judge's rows
+    let lines = qlbj-lines(qlwb-rows());
+    let valid = qlbj-last(lines, 5);
+    let t3 = host_monotonic_ms();
+    let rows = map(p => qlbj-row-of(src, x, p, qlwb-cap()), valid);
+    let t4 = host_monotonic_ms();
+    let c = qlbj-config(qlwb-adapter());
+    let o = qlbt-open(geo, nth(ctx[3], L), ctx[5], qlwb-cap(), record_get(c, "rank"), record_get(c, "scale"));
+    let sx = qlbf-scratch(geo, 0, qlwb-cap());
+    let loaded = qlbj-load(o, qlwb-adapter(), L);
+    let caps = map(row => qlbj-cached(qlwb-captures(), row, d), rows);
+    let missing = filter(s => len(s) == 0, caps);
+    qlwb-say("judged rows: " ++ len(rows).str() ++ " prepared in " ++ (t4 - t3).str() ++ " ms; captures read " ++ (len(caps) - len(missing)).str() ++ "; pair loaded " ++ loaded.str());
+    let compared = map(i => qlwb-row-compare(ctx, worn, o, sx, L, nth(rows, i), nth(caps, i)), range(0, len(rows)));
+    let moff = qlwb-mean(map(e => e[1], compared));
+    let mlane = qlwb-mean(map(e => e[2], compared));
+    let meanGap = nothing?(moff) || nothing?(mlane) ? 1.0e30 : qlwb-abs(moff - mlane);
+    let outUlp = foldl((m, e) => e[3][1] > m ? e[3][1] : m, 0, compared);
+    let outDiff = foldl((m, e) => m + e[3][0], 0, compared);
+    let inOk = all?(e => e[6], compared);
+    qlwb-say("over the " ++ len(compared).str() ++ " judged rows: offline mean " ++ qlwb-num(moff) ++ " (rung 4's child " ++ qlwb-rung4-child().str() ++ "), worn lane mean " ++ qlwb-num(mlane) ++ ", gap " ++ meanGap.str() ++ " (bound " ++ qlwb-mean-bound().str() ++ "); block output words differ " ++ outDiff.str() ++ ", widest " ++ outUlp.str() ++ " ulp (bound " ++ qlwb-out-ulp-bound().str() ++ "); every block input equals its capture " ++ inOk.str());
+    let b16 = len(missing) == 0 && loaded == 1 && !nothing?(moff) && moff == qlwb-rung4-child() && meanGap <= qlwb-mean-bound() && outUlp <= qlwb-out-ulp-bound() && inOk ? 16 : 0;
+    // bit 32: the decode lane over line 25 against the span lane's per-token losses
+    let last = compared[-1];
+    let lastRow = rows[-1];
+    let t5 = host_monotonic_ms();
+    let dec = qlwb-decode-losses(worn, o, lastRow);
+    let t6 = host_monotonic_ms();
+    let gaps = map(i => nothing?(nth(dec, i)) ? 1.0e30 : qlwb-abs(nth(dec, i) - nth(last[5], i)), range(0, len(dec)));
+    let gapMax = foldl((m, g) => g > m ? g : m, 0.0, gaps);
+    let mdec = qlbt-mean(dec, qlbt-row-count(lastRow));
+    qlwb-say("decode lane over line " ++ lastRow[0].str() ++ ", " ++ len(dec).str() ++ " positions in " ++ (t6 - t5).str() ++ " ms: mean " ++ qlwb-num(mdec) ++ " against the span lane's " ++ qlwb-num(last[2]) ++ "; widest per-token gap " ++ gapMax.str() ++ " (bound " ++ qlwb-decode-bound().str() ++ ")");
+    let b32 = len(dec) == qlbt-row-n(lastRow) && gapMax <= qlwb-decode-bound() ? 32 : 0;
+    let freedStep = qlbf-free(sx) + qlbt-free(o);
+    // bit 128: decode speed
+    let sp = qlwb-speed-rounds(ctx, worn, ids, qlwb-speed-ids(), qlwb-speed-rounds-n(), [], []);
+    let bestU = qlwb-min(sp[0]);
+    let bestW = qlwb-min(sp[1]);
+    let ratio = bestU <= 0.0 ? 1.0e30 : bestW / bestU;
+    qlwb-say("speed over " ++ qlwb-speed-ids().str() ++ " ids a window, " ++ qlwb-speed-rounds-n().str() ++ " windows: bare best " ++ bestU.str() ++ " median " ++ qlwb-median(sp[0]).str() ++ " ms per id; worn best " ++ bestW.str() ++ " median " ++ qlwb-median(sp[1]).str() ++ " ms per id; best worn over best bare " ++ ratio.str() ++ " (bound " ++ qlwb-speed-bound().str() ++ ")");
+    let b128 = ratio <= qlwb-speed-bound() ? 128 : 0;
+    // bit 64: what the wear held, given back
+    let settled = metal_sync();
+    let off1 = qlwe-take-off(worn);
+    let off2 = qlwe-take-off(zero);
+    let live1 = metal_live();
+    qlwb-say("taken off: " ++ off1.str() ++ " and " ++ off2.str() ++ " handles (scratch and step " ++ freedStep.str() ++ "); own " ++ qlwe-own-bytes([qlwb-adapter(), nothing()], q38-ctx-span(ctx)).str() ++ " bytes a wear; live handles " ++ live1.str() ++ " (" ++ live0.str() ++ " before); " ++ mg-status-line(mg-sense()));
+    let b64 = off1 == 3 && off2 == 3 && (Comparable) live0[2] == live1[2] && (Comparable) live0[18] == live1[18] ? 64 : 0;
+    let receipt = write_file(qlwb-home() ++ "/wear-band-receipt.json", "{\"band\":\"qwen-last-block-wear-band\",\"layer\":" ++ L.str() ++ ",\"adapter\":\"" ++ qlwb-adapter() ++ "\",\"offline_mean\":" ++ qlwb-num(moff) ++ ",\"lane_mean\":" ++ qlwb-num(mlane) ++ ",\"mean_gap\":" ++ meanGap.str() ++ ",\"out_words_differ\":" ++ outDiff.str() ++ ",\"out_widest_ulp\":" ++ outUlp.str() ++ ",\"decode_widest_gap\":" ++ gapMax.str() ++ ",\"decode_mean\":" ++ qlwb-num(mdec) ++ ",\"bare_best_ms_per_id\":" ++ bestU.str() ++ ",\"worn_best_ms_per_id\":" ++ bestW.str() ++ ",\"speed_ratio\":" ++ ratio.str() ++ ",\"bits\":" ++ (b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128).str() ++ "}\n");
+    qlwb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ " " ++ b32.str() ++ " " ++ b64.str() ++ " " ++ b128.str());
+    b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128;
+   };
+  }
+  def qlwb-speed-rounds-n() = 3;
+  // ── bit 256: the voice door, after the band's own context closed: one packet, bare, at scale 0, at the config's scale ──
+  def qlwb-packet() = "Their tongue: en\nThe person says: Say good morning to me.\n\nCompanion:";
+  def qlwb-voice() {
+   let model = qlwb-file();
+   let bare = fcnv-run-wearing(qlwb-packet(), model, nothing(), 64, nothing());
+   let zero = fcnv-run-wearing(qlwb-packet(), model, nothing(), 64, [qlwb-adapter(), 0.0]);
+   let worn = fcnv-run-wearing(qlwb-packet(), model, nothing(), 64, [qlwb-adapter(), nothing()]);
+   qlwb-say("voice bare: " ++ bare[0] ++ ", " ++ bare[3].str() ++ " ids, adapter \"" ++ bare[10] ++ "\", released " ++ bare[6].str() ++ ": " ++ bare[1]);
+   qlwb-say("voice scale 0: " ++ zero[0] ++ ", " ++ zero[3].str() ++ " ids, adapter \"" ++ zero[10] ++ "\", released " ++ zero[6].str() ++ ": " ++ zero[1]);
+   qlwb-say("voice worn: " ++ worn[0] ++ ", " ++ worn[3].str() ++ " ids, adapter \"" ++ worn[10] ++ "\", released " ++ worn[6].str() ++ ": " ++ worn[1]);
+   let same = (Value) bare[9] == zero[9];
+   let answered = (String) bare[0] == "answered" && (String) zero[0] == "answered" && (String) worn[0] == "answered";
+   qlwb-say("voice: bare and scale 0 generate the same ids " ++ same.str() ++ "; worn ids the same as bare " ++ ((Value) bare[9] == worn[9]).str());
+   answered && same && (String) bare[10] == "" && (String) worn[10] == qlwb-adapter() && (String) zero[10] == qlwb-adapter() && bare[6] == 1 && zero[6] == 1 && worn[6] == 1 ? 256 : 0;
+  }
+  def qlwb-leased(path, src) {
+   let x = qtf2-load(qtf2-root-for(path), qsx-seal-line(path));
+   let ctx = q38-open-span(path, qlwb-maxpos(), qlwb-span());
+   let verdict = (Comparable) q38-context-ok?(ctx) == 1 ? qlwb-run-all(ctx, src, x) : 0;
+   let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
+   let unleased = mg-release();
+   verdict + qlwb-voice();
+  }
+  def qlwb-open(path) {
+   let made = qlbt-dir-ready(qlwb-home());
+   let src = fcmg-src(path);
+   let geo = q38-geo(src, qlwb-maxpos());
+   let own = fcms-qwen-own(src, qlwb-maxpos()) + qlbf-scratch-bytes(geo, 0, qlwb-cap()) + qlbt-own-bytes(geo, qlwb-cap(), 8) + qlbc-own-bytes(geo[0], qlwb-cap()) + 2 * qlwe-own-bytes([qlwb-adapter(), nothing()], qlwb-span());
+   let granted = mg-lease("qwen last-block wear band", path, fcms-weights-bytes(path), own);
+   !mg-granted?(granted) ? {
+    qlwb-say("held: " ++ granted[1]);
+    0;
+   } : qlwb-leased(path, src);
+  }
+  def qlwb-run() = qlwb-open(qlwb-file());
+ }
+ qlwb-run();
+}

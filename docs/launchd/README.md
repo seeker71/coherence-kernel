@@ -35,10 +35,11 @@ launch passes through (a turn's coordinator climb, `crd-climb-in` in `form/form-
 reaches launchd: host-schedule, no rented mind), its diagnostic reports are named `fkwu-<time>.ips` as the retry reads them, and
 `launch/` stands outside `.hearth/`, which the disk steward composts. `launch/` also comes to hold the door's image
 (`walk-launch.fkb`, `.sym`), which the pinned kernel writes at its first launch and a pin removes. `launch/` is not tracked;
-nothing in the walk stages it (every landing names its paths), and `.gitignore` does not yet carry `/launch/`.
+nothing in the walk stages it (every landing names its paths), and `.gitignore` carries `/launch/`.
 
-Until a person installs these plists, `~/Library/LaunchAgents` holds the earlier ones, which exec
-`/Users/ursmuff/source/coherence-kernel-walk/fkwu` itself.
+`~/Library/LaunchAgents` has held these plists since 2026-10-31 14:16 WITA, with the pinned kernel's cdhash
+`6f827d802b38ac18d097f35a65541e72840140f0`. The ones they replaced, which exec the checkout's `fkwu` itself, stand in
+`.hearth/launcher-install/` of the walk checkout.
 
 ## Why the jobs name a pinned launcher
 
@@ -119,7 +120,7 @@ requirement may hold on these jobs only since that re-registration or the 11:43 
 that names a new program records that program's requirement at once, or the first spawn after the install is killed and
 repaired like any other.
 
-## Install the stable path (a person runs this; the body never runs launchctl but to read it)
+## Install the stable path (by hand, in a terminal or a session; the body's own doors run launchctl only to read it)
 
 The walk checkout must hold this change first (it follows main: once the change has landed, the walk's own sync brings
 it, or a person updates that checkout). Then, in a terminal:
@@ -150,17 +151,19 @@ After the install, read each job after its first slot: `launchctl print gui/$(id
 'runs|last exit|properties'`, and `/usr/bin/log show --start '<the slot>' --end '<a minute later>' --style compact
 --predicate 'eventMessage CONTAINS "earth.hati"'`.
 
-**What stays unknown until it happens**: whether the first spawn of a job after `launchctl bootstrap` is killed once. No
-bootstrap of a plist that names a new program has been observed here. If a job's first spawn reads `last exit reason =
-OS_REASON_CODESIGNING` and `needs LWCR update`, that is the requirement being recorded for the new program; the spawn after
-it runs (for a first slot, its retry ten minutes later), and from then on neither a rebuilt `fkwu` nor a moved door reaches
-launchd.
+**Observed since the install**: no first spawn was killed. `launchctl kickstart` of both retry jobs the same afternoon read
+`runs = 1`, `last exit code = 0`, `properties = inferred program` and `[walk-launch] observe/walk-retry.bml ended 0`. The first
+calendar spawns ran too: day-turn 2026-10-31 19:00 (`[walk-launch] observe/day-turn.bml ended 0`), rent-walk 2026-11-01
+03:30 (`[walk-launch] observe/scheduled-walk.bml ended 0`), and day-turn again at 12:30 with moved doors. Main's
+`runtime/fkwu-uni.c` has not moved since the install, so no walk has rebuilt its kernel under the launcher yet, and that a
+rebuilt `fkwu` costs no slot is still inferred. If a first spawn ever reads `last exit reason = OS_REASON_CODESIGNING` and
+`needs LWCR update`, that is the requirement being recorded for a new program, and the spawn after it runs.
 
 **A caution: a repair reaches the person.** Each requirement repair posts a notification, "“fkwu” can run in the
 background. You can manage background …" (five of five in the log above, the night's 03:30 and 03:40 among them). So expect
 the install, and any later pin that changes the kernel's bytes, to post one for each job at the hour of its repair. The log
 calls it advisory and the walk waits on no answer to it; whether a posted notification shows depends on the person's own
-settings, and how many a bootstrap itself posts is as unknown as its first spawn.
+settings, and how many a bootstrap itself posts was not read.
 
 ## Pin again only by choice
 
@@ -188,8 +191,8 @@ for j in rent-walk rent-walk-retry day-turn day-turn-retry; do git show 863ef411
 for j in rent-walk rent-walk-retry day-turn day-turn-retry; do launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/earth.hati.$j.plist; done
 ```
 
-`launch/` may stay: nothing reads it then. The jobs name a changed program again, so what the first spawn after that
-bootstrap does is as unknown as above, and a rebuilt `fkwu` can cost each of them a spawn again.
+`launch/` may stay: nothing reads it then. The jobs name a changed program again, so read the first spawn after that
+bootstrap as above, and a rebuilt `fkwu` can cost each of them a spawn again.
 
 ## The services
 

@@ -167,6 +167,20 @@ section [form.bml] {
     def q38-rms(ps, xh, gtv, yh, n, epsBits, barrier) = q38-enq(q38-rms-rec(ps, xh, gtv, yh, n, epsBits, barrier));
     def q38-mv-rec(ps, tv, xh, yh, barrier) = q38-tv-planar?(tv) ? [ps[q38-plv-index()], md-bind16([tv[4], tv[5], xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 64, 0, 1, barrier), q38-plv-groups(kth-tv-r(tv))] : (Comparable) kth-tv-ty(tv) == 8 ? [ps[29], md-bind16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 256, 0, 1, barrier), ((Number) kth-tv-r(tv) + (Number) 1) / 2] : q38dq-index(kth-tv-ty(tv)) >= 0 ? q38dq-rec(ps, kth-tv-ty(tv), kth-tv-h(tv), xh, yh, kth-tv-r(tv), kth-tv-c(tv), barrier) : [ps[27], q38-b16([kth-tv-h(tv), xh, yh], [kth-tv-r(tv), kth-tv-c(tv)], 0, barrier), kth-tv-r(tv)];
     def q38-mv(ps, tv, xh, yh, barrier) = q38-enq(q38-mv-rec(ps, tv, xh, yh, barrier));
+    // THE WEAR. A layer a voice wears an adapter on carries one more entry after its tensors: its list of rank-r records, each
+    // [slot, dot-pipe, add-pipe, A, B, u, din, rank, dout, scale-bits, ntok-capacity] (form-stdlib/qwen-lora-head.fk opens them and builds the table).
+    // A tensor view opens with its handle, so a last entry that is empty or opens with a list is the wear; a layer without one wears nothing and
+    // its stream is the one it always was, dispatch for dispatch. On the record's slot, u = A^T x from the projection's input, then y += scale * B^T u
+    // on the residual the block just added to: the place the trainer's forward adds it (qwen-last-block-train.bml, qlbt-eval), so worn and trained
+    // read one arithmetic. The walkers over a layer's tensors read q38-lay-tvs.
+    def q38-wear-entry?(e) = (Comparable) len(e) == 0 ? true : (String) value_kind(e[0]) == "list";
+    def q38-lay-worn?(lay) = (Comparable) len(lay) == 0 ? false : q38-wear-entry?(lay[len(lay) - 1]);
+    def q38-lay-wear(lay) = q38-lay-worn?(lay) ? lay[len(lay) - 1] : [];
+    def q38-lay-tvs(lay) = q38-lay-worn?(lay) ? take(len(lay) - 1, lay) : lay;
+    def q38-wear-rec-recs(rec, xh, yh, ntok) = [[rec[1], md-bind16([xh, rec[3], rec[5]], [rec[6], rec[7], ntok], 32, 0, 1, 1), rec[7] * ntok], [rec[2], md-bind16([yh, rec[4], rec[5]], [rec[8], rec[7], ntok, rec[9]], 256, 0, 0, 1), rec[8] * ntok]];
+    def q38-wear-recs(lay, slot, xh, yh, ntok) = foldl((acc, rec) => (Comparable) rec[0] == slot ? append(acc, q38-wear-rec-recs(rec, xh, yh, ntok)) : acc, [], q38-lay-wear(lay));
+    // the context's wear when it was opened worn: [tag, adapter directory, sha256, scale, record, layer]; [] when it wears nothing
+    def q38-ctx-wear(ctx) = (Comparable) len(ctx) == 12 ? ctx[11] : [];
     // Adapter = [A-handle B-handle dot-handle width alpha-f32-bits].  Its
     // buffers are independent allocations owned by the adapter, so this is an
     // overlay on an activation, never an in-place patch of the immutable GGUF.
@@ -204,7 +218,7 @@ section [form.bml] {
     def q38-layers(src, base, path, n, interval) = q38-layers-go(src, base, path, q38-tabs(src), 0, n, interval, []);
     // Each block is its records (the *-recs below) run in order: one definition of every dispatch, run directly by the blocks and
     // built once into a plan by q38-plan.
-    def q38-linear-attn-recs(ps, bs, geo, lay, st) = [
+    def q38-linear-attn-recs(ps, bs, geo, lay, st) = append([
         q38-rms-rec(ps, bs[0], lay[0], bs[1], geo[0], geo[6], 1),
         q38-mv-rec(ps, lay[5], bs[1], bs[2], 1),
         q38-mv-rec(ps, lay[7], bs[1], bs[3], 0),
@@ -217,7 +231,7 @@ section [form.bml] {
         [ps[11], q38-b16([st[1], bs[2], bs[5], bs[6], bs[8]], [geo[3], geo[5], geo[4], geo[2], geo[7]], 0, 1), geo[3] * geo[5]],
         [ps[12], q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6]], 0, 1), geo[3]],
         q38-mv-rec(ps, lay[13], bs[9], bs[10], 1),
-        [ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]]];
+        [ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]]], q38-wear-recs(lay, 13, bs[9], bs[0], 1));
     def q38-linear-attn(ps, bs, geo, lay, st) = q38-run(q38-linear-attn-recs(ps, bs, geo, lay, st));
     // The full-attention block in three parts: the records before the position's own (projections, q/k split, head norms), the records that
     // carry the position (rope at pos, the K and V rows written at pos * kvd, the attention over pos + 1 rows), and the records after (output
@@ -241,23 +255,23 @@ section [form.bml] {
         [ps[24], q38-b16([bs[24], st[2]], [geo[20], pos * geo[20]], 0, 1), geo[20]],
         [ps[24], q38-b16([bs[25], st[3]], [geo[20], pos * geo[20]], 0, 0), geo[20]],
         nothing?(scope) ? [nth(ps, qlslc-cooperative-gqa-pipeline()), q38-b16([bs[22], st[2], st[3], bs[26], bs[27]], [(Number) pos + (Number) 1, geo[12], geo[13], geo[14], geo[17], geo[18]], 1, 1), geo[12]] : [() => dam-enqueue(scope, bs[22], st[2], st[3], bs[26], bs[27], (Number) pos + (Number) 1, geo[12], geo[13], geo[14], geo[17], geo[18])]];
-    def q38-full-attn-post-recs(ps, bs, geo, lay) = [
+    def q38-full-attn-post-recs(ps, bs, geo, lay) = append([
         [ps[17], q38-b16([bs[26], bs[23]], [geo[12] * geo[14]], 0, 1), geo[12] * geo[14]],
         q38-mv-rec(ps, lay[10], bs[26], bs[10], 1),
-        [ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]]];
+        [ps[19], q38-b16([bs[0], bs[10], bs[0]], [geo[0]], 0, 1), geo[0]]], q38-wear-recs(lay, 10, bs[26], bs[0], 1));
     def q38-full-attn(ps, bs, geo, lay, st, pos) = q38-full-attn-scoped(ps, bs, geo, lay, st, pos, nothing());
     def q38-full-attn-scoped(ps, bs, geo, lay, st, pos, scope) = {
         q38-run(q38-full-attn-pre-recs(ps, bs, geo, lay));
         q38-run(q38-full-attn-pos-recs(ps, bs, geo, st, pos, scope));
         q38-run(q38-full-attn-post-recs(ps, bs, geo, lay));
     };
-    def q38-ffn-recs(ps, bs, geo, lay) = [
+    def q38-ffn-recs(ps, bs, geo, lay) = append([
         q38-rms-rec(ps, bs[0], lay[1], bs[1], geo[0], geo[6], 1),
         q38-mv-rec(ps, lay[2], bs[1], bs[14], 1),
         q38-mv-rec(ps, lay[3], bs[1], bs[15], 0),
         [ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10]], 0, 1), geo[10]],
         q38-mv-rec(ps, lay[4], bs[16], bs[17], 1),
-        [ps[19], q38-b16([bs[0], bs[17], bs[0]], [geo[0]], 0, 1), geo[0]]];
+        [ps[19], q38-b16([bs[0], bs[17], bs[0]], [geo[0]], 0, 1), geo[0]]], q38-wear-recs(lay, 4, bs[16], bs[0], 1));
     def q38-ffn(ps, bs, geo, lay) = q38-run(q38-ffn-recs(ps, bs, geo, lay));
     // ── the batched matmul, dispatched ─────────────────────────────────────
     // The typed batch kernels take rows, cols and ntok, read x[t*cols+j] and
@@ -307,6 +321,7 @@ section [form.bml] {
         metal_enqueue(ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10]], 0, 1), geo[10]);
         q38-mv-batch(ps, lay[4], bs[16], bs[17], ntok, 1);
         metal_enqueue(ps[19], q38-b16([bs[0], bs[17], bs[0]], [geo[0]], 0, 1), geo[0]);
+        q38-run(q38-wear-recs(lay, 4, bs[16], bs[0], 1));
         1;
     };
     def q38-blocks-b(ps, bs, geo, lays, sts, pos, l, n, interval, ntok) = l >= n ? 1 : {
@@ -436,6 +451,7 @@ section [form.bml] {
         metal_enqueue(ps[18], q38-b16([bs[14], bs[15], bs[16]], [geo[10] * ntok], 0, 1), geo[10] * ntok);
         q38-mv-batch(ps, lay[4], bs[16], bs[17], ntok, 1);
         metal_enqueue(ps[19], q38-b16([bs[33], bs[17], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        q38-run(q38-wear-recs(lay, 4, bs[16], bs[33], ntok));
         1;
     };
     // ── the full-attention block over a span ───────────────────────────────
@@ -461,6 +477,7 @@ section [form.bml] {
         metal_enqueue(ps[17], q38-b16([bs[26], bs[23]], [nqhd * ntok], 0, 1), nqhd * ntok);
         q38-mv-batch(ps, lay[10], bs[26], bs[10], ntok, 1);
         metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        q38-run(q38-wear-recs(lay, 10, bs[26], bs[33], ntok));
         1;
     };
     // A linear layer keeps the conv window and delta state recurrences ordered by
@@ -504,6 +521,7 @@ section [form.bml] {
         metal_enqueue(nth(ps, qlslc-norm-gate-span-pipeline()), q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6], ntok], 0, 1), geo[3] * ntok);
         q38-mv-batch(ps, lay[13], bs[9], bs[10], ntok, 1);
         metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);
+        q38-run(q38-wear-recs(lay, 13, bs[9], bs[33], ntok));
         1;
     };
     // The scalar/token-wise witness remains reachable unchanged for chunk=-2
@@ -994,7 +1012,7 @@ section [form.bml] {
     def q38-handle-ok?(h) = h > 0 ? 1 : 0;
     def q38-handles-ok?(hs) = (Comparable) len(hs) == 0 ? 1 : (Comparable) q38-handle-ok?(hs[0]) == 1 ? q38-handles-ok?(hs[1:]) : 0;
     def q38-tvs-ok?(tvs) = (Comparable) len(tvs) == 0 ? 1 : (Comparable) q38-handle-ok?(kth-tv-h(tvs[0])) == 1 ? q38-tvs-ok?(tvs[1:]) : 0;
-    def q38-layers-ok?(lays) = (Comparable) len(lays) == 0 ? 1 : (Comparable) q38-tvs-ok?(lays[0]) == 1 ? q38-layers-ok?(lays[1:]) : 0;
+    def q38-layers-ok?(lays) = (Comparable) len(lays) == 0 ? 1 : (Comparable) q38-tvs-ok?(q38-lay-tvs(lays[0])) == 1 ? q38-layers-ok?(lays[1:]) : 0;
     def q38-state-row-ok?(row) = ((Comparable) row[0] == 0 ? 1 : q38-handle-ok?(row[0])) && (((Comparable) row[1] == 0 ? 1 : q38-handle-ok?(row[1])) && (((Comparable) row[2] == 0 ? 1 : q38-handle-ok?(row[2])) && ((Comparable) row[3] == 0 ? 1 : q38-handle-ok?(row[3]))));
     def q38-state-ok?(sts) = (Comparable) len(sts) == 0 ? 1 : (Comparable) q38-state-row-ok?(sts[0]) == 1 ? q38-state-ok?(sts[1:]) : 0;
     def q38-context-ok?(ctx) = len(ctx) < 10 ? 0 : q38-handles-ok?(ctx[1]) && (q38-layers-ok?(ctx[3]) && (q38-handle-ok?(kth-tv-h(ctx[4])) && (q38-handle-ok?(kth-tv-h(ctx[5])) && q38-handle-ok?(kth-tv-h(ctx[6])))));
@@ -1006,18 +1024,18 @@ section [form.bml] {
     def q38-tv-extra(tv) = q38-tv-planar?(tv) ? 2 : 0;
     def q38-free-tv-extra(tv) = q38-tv-planar?(tv) ? (Number) q38-free-handle(tv[4]) + (Number) q38-free-handle(tv[5]) : 0;
     def q38-free-tvs(tvs) = (Comparable) len(tvs) == 0 ? 0 : (Number) q38-free-handle(kth-tv-h(tvs[0])) + (Number) ((Number) q38-free-tv-extra(tvs[0]) + (Number) q38-free-tvs(tvs[1:]));
-    def q38-free-layers(lays) = (Comparable) len(lays) == 0 ? 0 : (Number) q38-free-tvs(lays[0]) + (Number) q38-free-layers(lays[1:]);
+    def q38-free-layers(lays) = (Comparable) len(lays) == 0 ? 0 : (Number) q38-free-tvs(q38-lay-tvs(lays[0])) + (Number) q38-free-layers(lays[1:]);
     def q38-free-state-row(row) = sum([q38-free-handle(row[0]), q38-free-handle(row[1]), q38-free-handle(row[2]), q38-free-handle(row[3])]);
     def q38-free-state(sts) = (Comparable) len(sts) == 0 ? 0 : (Number) q38-free-state-row(sts[0]) + (Number) q38-free-state(sts[1:]);
     def q38-tvs-extra(tvs) = (Comparable) len(tvs) == 0 ? 0 : (Number) q38-tv-extra(tvs[0]) + (Number) q38-tvs-extra(tvs[1:]);
-    def q38-layer-handle-count(lays) = (Comparable) len(lays) == 0 ? 0 : (Number) len(lays[0]) + (Number) ((Number) q38-tvs-extra(lays[0]) + (Number) q38-layer-handle-count(lays[1:]));
+    def q38-layer-handle-count(lays) = (Comparable) len(lays) == 0 ? 0 : (Number) len(q38-lay-tvs(lays[0])) + (Number) ((Number) q38-tvs-extra(q38-lay-tvs(lays[0])) + (Number) q38-layer-handle-count(lays[1:]));
     // Exact resident weight traffic of one token forward.  Large matrices are
     // streamed in full; token_embd contributes one selected row.  This is read
     // from the opened tensor views, not inferred from a model-size label.
     def q38-tv-storage-bytes(tv) = kth-tybytes(kth-tv-ty(tv), kth-tv-r(tv) * kth-tv-c(tv));
     def q38-tv-row-bytes(tv) = kth-tybytes(kth-tv-ty(tv), kth-tv-c(tv));
     def q38-tvs-storage-bytes(tvs) = (Comparable) len(tvs) == 0 ? 0 : (Number) q38-tv-storage-bytes(tvs[0]) + (Number) q38-tvs-storage-bytes(tvs[1:]);
-    def q38-layers-storage-bytes(lays) = (Comparable) len(lays) == 0 ? 0 : (Number) q38-tvs-storage-bytes(lays[0]) + (Number) q38-layers-storage-bytes(lays[1:]);
+    def q38-layers-storage-bytes(lays) = (Comparable) len(lays) == 0 ? 0 : (Number) q38-tvs-storage-bytes(q38-lay-tvs(lays[0])) + (Number) q38-layers-storage-bytes(lays[1:]);
     def q38-forward-weight-bytes(ctx) = sum([q38-tv-row-bytes(ctx[4]), q38-tv-storage-bytes(ctx[5]), q38-tv-storage-bytes(ctx[6]), q38-layers-storage-bytes(ctx[3])]);
     def q38-state-row-handle-count(row) = sum([row[0] > 0 ? 1 : 0, row[1] > 0 ? 1 : 0, row[2] > 0 ? 1 : 0, row[3] > 0 ? 1 : 0]);
     def q38-state-handle-count(sts) = (Comparable) len(sts) == 0 ? 0 : (Number) q38-state-row-handle-count(sts[0]) + (Number) q38-state-handle-count(sts[1:]);
@@ -1041,13 +1059,13 @@ section [form.bml] {
         [kth-tv-h(tv), kth-tv-r(tv), kth-tv-c(tv), kth-tv-ty(tv), qs, sc];
     } : tv;
     def q38-planar-layer(ps, tvs) = (Comparable) len(tvs) == 0 ? [] : cons(q38-planar-tv(ps, tvs[0]), q38-planar-layer(ps, tvs[1:]));
-    def q38-planar-layers(ps, lays) = (Comparable) len(lays) == 0 ? [] : cons(q38-planar-layer(ps, lays[0]), q38-planar-layers(ps, lays[1:]));
+    def q38-planar-layers(ps, lays) = (Comparable) len(lays) == 0 ? [] : cons(append(q38-planar-layer(ps, q38-lay-tvs(lays[0])), q38-lay-worn?(lays[0]) ? [q38-lay-wear(lays[0])] : []), q38-planar-layers(ps, lays[1:]));
     def q38-planarize(ctx) {
         metal_batch_concurrent();
         let lays = q38-planar-layers(ctx[0], ctx[3]);
         let proj = q38-planar-tv(ctx[0], ctx[6]);
         metal_sync();
-        [ctx[0], ctx[1], ctx[2], lays, ctx[4], ctx[5], proj, ctx[7], ctx[8], ctx[9], ctx[10]];
+        append([ctx[0], ctx[1], ctx[2], lays, ctx[4], ctx[5], proj, ctx[7], ctx[8], ctx[9], ctx[10]], drop(11, ctx));
     }
     0;
 }

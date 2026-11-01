@@ -7,7 +7,8 @@
 // messages | prompt/completion | text | segments), each carrying a draft id and reading "accepted"
 // (observe/draft-readings-to-rows.bml lands them in learn/draft-readings.jsonl). The first train_rows rows under max_chars
 // train; the last valid_rows rows under max_chars are held out; the trainer never sees a held-out row, and the two sides
-// are disjoint by draft id. A draft that would stand on both sides (the file is too short for the ask), a selected row
+// are disjoint by draft id. `valid_source` names another file for the held-out's end: a lift of the body's own accepted rows
+// (rows learn/draft-readings-native.jsonl) stays judged by what we accepted (valid_source learn/draft-readings.jsonl). A draft that would stand on both sides (the file is too short for the ask), a selected row
 // with no draft id, and a selected row that reads anything but "accepted" are each refused by name before anything
 // opens: the lift trains on, and is judged by, what we accepted — never what we turned away. `negatives` may name the
 // rejected drafts (learn/draft-readings-heldout.jsonl): they go to the trainer as its assessment set and are scored
@@ -17,7 +18,14 @@
 // key of the wrong kind or a key given twice is refused by name with this door's key list, before anything opens. The
 // keys: train_rows (int, 8), valid_rows (int, 12), max_chars (int, 6000), steps (int, 8), batch (int, 1), learning_rate
 // (str, "0.0001": a positive decimal the body's parse-float reads), rows (str, learn/draft-readings.jsonl), negatives
-// (str, "" is none).
+// (str, "" is none), valid_source (str, rows), ledger (str, receipts/lora-promotion-ledger.jsonl), cadence (int, 0 is none), until_ms (int).
+// The cadence (the walk's: form-stdlib/bml/host-walk-learn.bml): a lift from a parent trains on every row beyond it, and serving does not
+// move here, so a lift with few new rows would repeat its last judgement at the same price (188-343 s for 20 row visits on the 3B). With
+// `cadence` named, this door lifts only when that many rows stand in `rows` beyond train_rows of the last ledger row of this parent and these
+// rows, and then train_rows defaults to every row in the file and steps to one visit of each (rows / batch, rounded up). Fewer: one
+// "[lift] cadence:" line, no governor, no model, exit 0. `until_ms` is a time on host_monotonic_ms: the lift begins only when the
+// time left holds its row visits at the slowest rate this parent's ledger rows measured (ll-visit-ms); short of that: one "[lift] window:"
+// line, no model, exit 0.
 // Before anything opens on the GPU, the door asks the memory governor (read-only, lease-aware) for the model's weights
 // plus a training margin, and stops with the governor's own line when it reads held; then it opens the 3B's tokenizer
 // and passes every selected row — train, held-out, negatives — through the native dataset reader (nld-prepare,
@@ -36,8 +44,9 @@
 section [form.bml] {
  class LoraLift {
   def ll-door() = "lora-lift";
-  def ll-spec() = [["train_rows", "int"], ["valid_rows", "int"], ["max_chars", "int"], ["steps", "int"], ["batch", "int"], ["learning_rate", "str"], ["rows", "str"], ["negatives", "str"]];
+  def ll-spec() = [["train_rows", "int"], ["valid_rows", "int"], ["max_chars", "int"], ["steps", "int"], ["batch", "int"], ["learning_rate", "str"], ["rows", "str"], ["negatives", "str"], ["valid_source", "str"], ["ledger", "str"], ["cadence", "int"], ["until_ms", "int"]];
   def ll-rows-default() = "learn/draft-readings.jsonl";
+  def ll-ledger-default() = "receipts/lora-promotion-ledger.jsonl";
   def ll-root() = ".hearth/session-learning/lift";
   def ll-parent() = "form/form-stdlib/adapters/llama-3.2-3b-voice";
   def ll-model() = "llama32-3b-mlx-4bit";
@@ -54,7 +63,18 @@ section [form.bml] {
   def ll-join(xs) = ll-join-with(xs, "\n");
   def ll-lines(path) = ll-nonempty(split-on(fhn-read(path), "\n"));
   // ---- the split: train from the front, held-out from the end, each under max_chars; [train, valid], both in file order
-  def ll-split(lines, trainN, validN, maxc) = [ll-take(lines, trainN, maxc, []), reverse(ll-take(reverse(lines), validN, maxc, []))];
+  def ll-split-from(lines, validLines, trainN, validN, maxc) = [ll-take(lines, trainN, maxc, []), reverse(ll-take(reverse(validLines), validN, maxc, []))];
+  def ll-split(lines, trainN, validN, maxc) = ll-split-from(lines, lines, trainN, validN, maxc);
+  // ---- the cadence and the window: the rows beyond the last lift of these rows from this parent, and the slowest row visit this parent measured
+  def ll-rows-of(ledger) = file_size(ledger) < 1 ? [] : map(x => ll-doc(x), ll-lines(ledger));
+  def ll-mine?(row, parent) = (String) fhn-text(row, "parent") == parent;
+  def ll-lifted(rows, parent, rowsPath) = foldl((n, r) => ll-mine?(r, parent) && ((String) fhn-text(r, "train_source") == rowsPath) ? fhn-count(r, "train_rows") : n, 0, rows);
+  def ll-cadence-line(rowsPath, held, lifted, cadence) = held - lifted >= cadence ? "" : "[lift] cadence: " ++ rowsPath ++ " holds " ++ held.str() ++ " rows, " ++ (held - lifted).str() ++ " beyond the last lift of " ++ lifted.str() ++ "; a lift begins at " ++ cadence.str() ++ " new rows: no model opened";
+  def ll-visit-unmeasured-ms() = 30000;
+  def ll-visit-of(r) = fhn-count(r, "steps") * fhn-count(r, "batch") > 0 ? fhn-count(r, "wall_ms") / (fhn-count(r, "steps") * fhn-count(r, "batch")) : 0;
+  def ll-visit-ms(rows, parent) { let slowest = foldl((m, r) => ll-mine?(r, parent) && ll-visit-of(r) > m ? ll-visit-of(r) : m, 0, rows); slowest > 0 ? slowest : ll-visit-unmeasured-ms(); }
+  def ll-window-line(until, now, visits, visit) = nothing?(until) || until - now >= visits * visit ? "" : "[lift] window: " ++ ((until - now) / 1000).str() ++ " s left cannot hold " ++ visits.str() ++ " row visits at " ++ visit.str() ++ " ms a visit (the slowest this parent measured): no model opened";
+  def ll-steps-for(rows, batch) = batch < 1 ? rows : (rows + batch - 1) / batch;
   def ll-doc(x) = parse-json("lift-row", x);
   def ll-id(x) = fhn-text(ll-doc(x), "draft");
   def ll-ids(xs) = map(x => ll-id(x), xs);
@@ -63,13 +83,15 @@ section [form.bml] {
   def ll-shared(a, b) = filter(id => ll-has?(b, id), a);
   def ll-digest(xs) = nlp-hex(sha256-stream-string(ll-join(ll-ids(xs))));
   // why a split does not stand ("" when it does): an empty side, a row with no draft id, a draft on both sides, a reading we did not accept
-  def ll-split-why(path, lines, train, valid, maxc) {
+  def ll-split-why(path, lines, train, valid, maxc) = ll-split-why-from(path, path, lines, train, valid, maxc);
+  def ll-split-why-from(path, validPath, lines, train, valid, maxc) {
    let shared = ll-shared(ll-ids(train), ll-ids(valid));
    file_size(path) < 0 ? "rows " ++ path ++ " is absent"
+   : file_size(validPath) < 0 ? "valid_source " ++ validPath ++ " is absent"
    : nil?(train) ? "no train rows under max_chars " ++ maxc.str() ++ " in " ++ path
-   : nil?(valid) ? "no held-out rows under max_chars " ++ maxc.str() ++ " in " ++ path
+   : nil?(valid) ? "no held-out rows under max_chars " ++ maxc.str() ++ " in " ++ validPath
    : len(filter(id => len(id) == 0, ll-ids(append(train, valid)))) > 0 ? "a selected row of " ++ path ++ " has no draft id; the split is disjoint by draft id"
-   : len(shared) > 0 ? "train and held-out share draft " ++ shared[0] ++ ": " ++ path ++ " holds " ++ len(lines).str() ++ " rows, and train_rows " ++ len(train).str() ++ " from the front meets valid_rows " ++ len(valid).str() ++ " from the end"
+   : len(shared) > 0 ? "train and held-out share draft " ++ shared[0] ++ ": " ++ path ++ " holds " ++ len(lines).str() ++ " rows, and train_rows " ++ len(train).str() ++ " from the front meets valid_rows " ++ len(valid).str() ++ " from the end of " ++ validPath
    : ll-reading-why(path, append(train, valid));
   }
   def ll-reading-why(path, xs) {
@@ -119,26 +141,40 @@ section [form.bml] {
   // ---- the ledger row: `better` reads the accepted held-out alone; the negatives' losses stand beside it as information
   def ll-better(before, after) = (before > 0.0) && ((after > 0.0) && (after < before)) ? 1 : 0;
   def ll-negative-pairs(negPath, negs, negTokens, rejBefore, rejAfter) = len(negPath) == 0 ? [] : [fhn-s("rejected_source", negPath), fhn-s("rejected_reading", nil?(negs) ? "" : ll-reading-of(negs[0])), fhn-n("rejected_rows", len(negs)), fhn-n("rejected_tokens", negTokens), fhn-n("rejected_parent_loss_milli", ll-milli(rejBefore)), fhn-n("rejected_child_loss_milli", ll-milli(rejAfter))];
-  def ll-row(child, data, rowsPath, train, valid, trainTokens, validTokens, steps, batch, before, after, negPairs, need, wall) = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("parent", ll-parent()), fhn-s("child", child), fhn-s("data", data), fhn-s("train_source", rowsPath), fhn-s("valid_source", rowsPath), fhn-s("valid_reading", nil?(valid) ? "" : ll-reading-of(valid[0])), fhn-s("judged_on", "accepted held-out, disjoint from train by draft id"), fhn-n("train_rows", len(train)), fhn-n("valid_rows", len(valid)), fhn-s("train_ids_sha256", ll-digest(train)), fhn-s("valid_ids_sha256", ll-digest(valid)), fhn-n("train_tokens", trainTokens), fhn-n("valid_tokens", validTokens), fhn-n("steps", steps), fhn-n("batch", batch), fhn-n("parent_loss_milli", ll-milli(before)), fhn-n("child_loss_milli", ll-milli(after)), fhn-n("parent_score_milli", 0 - ll-milli(before)), fhn-n("child_score_milli", 0 - ll-milli(after)), fhn-n("better", ll-better(before, after))], append(negPairs, [fhn-n("memory_need_bytes", need), fhn-n("rent_tokens", 0), fhn-n("wall_ms", wall)])));
+  def ll-row(child, data, rowsPath, train, valid, trainTokens, validTokens, steps, batch, before, after, negPairs, need, wall) = ll-row-from(child, data, rowsPath, rowsPath, train, valid, trainTokens, validTokens, steps, batch, before, after, negPairs, need, wall);
+  def ll-row-from(child, data, rowsPath, validPath, train, valid, trainTokens, validTokens, steps, batch, before, after, negPairs, need, wall) = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("parent", ll-parent()), fhn-s("child", child), fhn-s("data", data), fhn-s("train_source", rowsPath), fhn-s("valid_source", validPath), fhn-s("valid_reading", nil?(valid) ? "" : ll-reading-of(valid[0])), fhn-s("judged_on", "accepted held-out, disjoint from train by draft id"), fhn-n("train_rows", len(train)), fhn-n("valid_rows", len(valid)), fhn-s("train_ids_sha256", ll-digest(train)), fhn-s("valid_ids_sha256", ll-digest(valid)), fhn-n("train_tokens", trainTokens), fhn-n("valid_tokens", validTokens), fhn-n("steps", steps), fhn-n("batch", batch), fhn-n("parent_loss_milli", ll-milli(before)), fhn-n("child_loss_milli", ll-milli(after)), fhn-n("parent_score_milli", 0 - ll-milli(before)), fhn-n("child_score_milli", 0 - ll-milli(after)), fhn-n("better", ll-better(before, after))], append(negPairs, [fhn-n("memory_need_bytes", need), fhn-n("rent_tokens", 0), fhn-n("wall_ms", wall)])));
   def ll-run() {
    let opts = dop-doc(ll-door(), stdin-text(), ll-spec());
-   let trainN = ll-num(opts, "train_rows", 8);
+   let rowsPath = ll-str(opts, "rows", ll-rows-default());
+   let ledger = ll-str(opts, "ledger", ll-ledger-default());
+   let cadence = ll-num(opts, "cadence", 0);
+   let lines = ll-lines(rowsPath);
+   let led = cadence > 0 || json-object-has?(opts, "until_ms") ? ll-rows-of(ledger) : [];
+   let waits = cadence > 0 ? ll-cadence-line(rowsPath, len(lines), ll-lifted(led, ll-parent(), rowsPath), cadence) : "";
+   len(waits) > 0 ? print_str(waits ++ "\n") : ll-windowed(opts, rowsPath, ledger, cadence, lines, led);
+  }
+  def ll-windowed(opts, rowsPath, ledger, cadence, lines, led) {
+   let batch = ll-num(opts, "batch", 1);
+   let trainN = ll-num(opts, "train_rows", cadence > 0 ? len(lines) : 8);
+   let steps = ll-num(opts, "steps", cadence > 0 ? ll-steps-for(trainN, batch) : 8);
+   let until = json-object-has?(opts, "until_ms") ? ll-num(opts, "until_ms", 0) : nothing();
+   let waits = ll-window-line(until, host_monotonic_ms(), steps * batch, ll-visit-ms(led, ll-parent()));
+   len(waits) > 0 ? print_str(waits ++ "\n") : ll-lift(opts, rowsPath, ledger, lines, trainN, steps, batch);
+  }
+  def ll-lift(opts, rowsPath, ledger, lines, trainN, steps, batch) {
    let validN = ll-num(opts, "valid_rows", 12);
    let maxc = ll-num(opts, "max_chars", 6000);
-   let steps = ll-num(opts, "steps", 8);
-   let batch = ll-num(opts, "batch", 1);
    let lr = ll-rate(ll-str(opts, "learning_rate", "0.0001"));
-   let rowsPath = ll-str(opts, "rows", ll-rows-default());
+   let validPath = ll-str(opts, "valid_source", rowsPath);
    let negPath = ll-str(opts, "negatives", "");
-   let lines = ll-lines(rowsPath);
-   let split = ll-split(lines, trainN, validN, maxc);
+   let split = ll-split-from(lines, (String) validPath == rowsPath ? lines : ll-lines(validPath), trainN, validN, maxc);
    let train = split[0];
    let valid = split[1];
-   let why = ll-split-why(rowsPath, lines, train, valid, maxc);
+   let why = ll-split-why-from(rowsPath, validPath, lines, train, valid, maxc);
    let stands = len(why) > 0 ? ll-refuse(why) : 0;
    let negs = len(negPath) == 0 ? [] : ll-lines(negPath);
    let negStand = (len(negPath) > 0) && nil?(negs) ? ll-refuse("negatives " ++ negPath ++ " has no rows") : 0;
-   let said = print_str("[lift] rows " ++ rowsPath ++ " holds " ++ len(lines).str() ++ "; train " ++ len(train).str() ++ " from the front, held-out " ++ len(valid).str() ++ " from the end, disjoint by draft id; negatives " ++ len(negs).str() ++ "\n");
+   let said = print_str("[lift] rows " ++ rowsPath ++ " holds " ++ len(lines).str() ++ "; train " ++ len(train).str() ++ " from the front, held-out " ++ len(valid).str() ++ " from the end of " ++ validPath ++ ", disjoint by draft id; negatives " ++ len(negs).str() ++ "\n");
    let model = mr-path(mr-find(ll-model()));
    let need = ll-room(model);
    let m1 = fs_mkdir(".hearth/session-learning");
@@ -162,9 +198,10 @@ section [form.bml] {
    let rejBefore = nil?(negs) ? -1.0 : ll-assessed(out, "before");
    let rejAfter = nil?(negs) ? -1.0 : ll-assessed(out, "after");
    let child = nag-resolve(out);
-   let row = ll-row(child, data, rowsPath, train, valid, trainTokens, validTokens, steps, batch, before, after, ll-negative-pairs(negPath, negs, negTokens, rejBefore, rejAfter), need, now_unix_ms() - started);
-   let appended = fhn-append("receipts/lora-promotion-ledger.jsonl", json-emit(row) ++ "\n");
-   print_str("[lift] " ++ json-emit(row) ++ "\n");
+   let row = ll-row-from(child, data, rowsPath, validPath, train, valid, trainTokens, validTokens, steps, batch, before, after, ll-negative-pairs(negPath, negs, negTokens, rejBefore, rejAfter), need, now_unix_ms() - started);
+   let appended = fhn-append(ledger, json-emit(row) ++ "\n");
+   let shown = print_str("[lift] " ++ json-emit(row) ++ "\n");
+   print_str("[lift] judged on " ++ validPath ++ ": better " ++ ll-better(before, after).str() ++ " parent_loss_milli " ++ ll-milli(before).str() ++ " child_loss_milli " ++ ll-milli(after).str() ++ " train_rows " ++ len(train).str() ++ " valid_rows " ++ len(valid).str() ++ " wall_ms " ++ (now_unix_ms() - started).str() ++ " child " ++ child ++ "\n");
   }
  }
  cs-entry?("observe/lora-lift-run.bml") ? ll-run() : nothing();

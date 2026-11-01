@@ -1,0 +1,226 @@
+// qwen-last-block-train-run.bml — the larger lift: the last block's pair learns from more rows, and learns to tell what we kept from what we turned away.
+//
+//   echo '{"out":"form/form-stdlib/adapters/qwen38-last-block-next-2","steps":400}' | ./fkwu observe/qwen-last-block-train-run.bml
+//
+// Rows: rows (learn/last-block-train-rows.jsonl, observe/qwen-last-block-rows-run.bml: draft readings, teacher rows, native readings) are the accepted side. negatives
+// (learn/draft-readings-heldout.jsonl) is the rejected side; every heldout_every-th line never enters the gradient. The judge's accepted held-out (the last valid_rows of valid,
+// learn/draft-readings.jsonl) never does either.
+// The objective, one row a step, batch 1, Adam (nlb_adam, bias-corrected, clip 1.0) at lr_micro * 1e-6:
+//   an accepted step descends the row's prompt-masked mean CE through the frozen head (qlbt-backward, as rung 3);
+//   every neg_every-th step takes the next rejected row and reads its mean: below its base mean + margin_milli/1000 (the hinge is active) it ascends lambda x that mean
+//   (qlbt-backward-by with factor -1/count, the gradient of -CE; the finite differences hold it across columns, tests/qwen-last-block-margin-band.bml); at or above, no step.
+// So a rejected row may keep what the accepted side leaves it and may not fall below where the base model stood: next-token likelihood stops rewarding the register we turned away.
+// The steps are named before the run and the export is the last step's, or with dev_every the step at the lowest mean over the dev rows (every dev_every-th line of rows, out of the
+// gradient, up to line dev_upto: lines up to 20 are draft readings, the judge's own kind): the judge's rows and the rejected rows select nothing. Validation prints every val_every steps and is only read.
+// The run is bounded: at wall_s the walk stops where it stands, exports and says so (trained_native_steps names how far it went).
+// Export: F32 safetensors + adapter_config.json in the rung-3 shape, read by the judge (observe/qwen-last-block-lift-run.bml) exactly as rung 4 read its child; config also names the
+// rejected lines the gradient saw, so the judge reads the rest as never seen. Nothing serving reads it; wearing it is the wear door's decision.
+// stdin, optional, one JSON object read strictly: out, rows, valid, valid_rows, negatives, heldout_every, steps, lr_micro, margin_milli, neg_every, val_every, captures, valid_captures, neg_captures, wall_s, seed_micro.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-capture.bml form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml form-stdlib/bml/qwen-last-block-train.bml form-stdlib/bml/qwen-last-block-judge.bml
+section [form.bml] {
+ class QwenLastBlockTrainRun {
+  def qlwt-door() = "qwen-last-block-train";
+  def qlwt-spec() = [["out", "str"], ["rows", "str"], ["valid", "str"], ["valid_rows", "int"], ["negatives", "str"], ["heldout_every", "int"], ["steps", "int"], ["lr_micro", "int"], ["margin_milli", "int"], ["neg_every", "int"], ["val_every", "int"], ["captures", "str"], ["valid_captures", "str"], ["neg_captures", "str"], ["wall_s", "int"], ["seed_micro", "int"], ["dev_every", "int"], ["dev_upto", "int"]];
+  def qlwt-model() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qlwt-maxpos() = 256;
+  def qlwt-span() = 64;
+  def qlwt-cap() = 160;
+  def qlwt-rank() = 8;
+  def qlwt-alpha() = 16.0;
+  def qlwt-scale() = qlwt-alpha() / (qlwt-rank() + 0.0);
+  def qlwt-say(s) = print_str("[qwen-last-block-train] " ++ s);
+  def qlwt-text(opts, key, d) = json-object-has?(opts, key) ? fhn-text(opts, key) : d;
+  def qlwt-int(opts, key, d) = json-object-has?(opts, key) ? json-int-value(json-object-get(opts, key)) : d;
+  def qlwt-mean(xs) = nil?(xs) ? nothing() : any?(x => nothing?(x), xs) ? nothing() : sum(xs) / (len(xs) + 0.0);
+  def qlwt-num(x) = nothing?(x) ? "unread" : x.str();
+  def qlwt-join(xs) = str-join-with(xs, ",");
+  def qlwt-ints(xs) = "[" ++ qlwt-join(map(x => x.str(), xs)) ++ "]";
+  // a fixed order that is not the file's: the lines sorted by a multiplicative hash, the same every run
+  def qlwt-key(line) = (line * 7919) % 1009;
+  def qlwt-insert(sorted, p) = nil?(sorted) ? [p] : qlwt-key(p[0][0]) <= qlwt-key(sorted[0][0][0]) ? cons(p, sorted) : cons(sorted[0], qlwt-insert(sorted[1:], p));
+  def qlwt-shuffled(ps) = foldl((acc, p) => qlwt-insert(acc, p), [], ps);
+  // ── rows prepared and captured: [row, xin] each; a row with no supervised target under the cap or no capture is set aside and named ──
+  def qlwt-prepared(side, src, x, lines, cap) = foldl((acc, p) => {
+    let row = qlbj-row-of(src, x, p, cap);
+    qlbt-row-count(row) > 0 ? append(acc, [row]) : { qlwt-say(side ++ " line " ++ p[1].str() ++ " set aside: its prompt is " ++ row[5].str() ++ " ids; under the cap no assistant token is a supervised target"); acc; };
+   }, [], lines);
+  def qlwt-captured(ctx, L, dir, side, rows, cap) = foldl((acc, row) => {
+    let c = qlbt-capture(ctx, L, dir, row, cap);
+    let said = c[2] == 1 ? 0 : qlwt-say(side ++ " line " ++ row[0].str() ++ ": prefill " ++ c[1].str() ++ " ms, " ++ len(c[0]).str() ++ " bytes");
+    len(c[0]) > 0 ? append(acc, [[row, c[0]]]) : { qlwt-say(side ++ " line " ++ row[0].str() ++ " set aside: its capture did not land"); acc; };
+   }, [], rows);
+  // ── evaluation ──
+  def qlwt-means(ctx, L, sx, o, prep) = map(p => qlbt-mean(qlbt-eval(ctx[0], ctx[2], nth(ctx[3], L), ctx[5], ctx[6], sx, o, p[0], p[1]), qlbt-row-count(p[0])), prep);
+  def qlwt-val(ctx, L, sx, o, valid, negHeld, step) {
+   let v = qlwt-mean(qlwt-means(ctx, L, sx, o, valid));
+   let n = qlwt-mean(qlwt-means(ctx, L, sx, o, negHeld));
+   qlwt-say("step " ++ step.str() ++ ": accepted held-out mean " ++ qlwt-num(v) ++ ", rejected the gradient never saw mean " ++ qlwt-num(n));
+   [v, n];
+  }
+  // ── the walk ──
+  def qlwt-accepted-step(ctx, L, sx, o, p, lr, k) {
+   let losses = qlbt-eval(ctx[0], ctx[2], nth(ctx[3], L), ctx[5], ctx[6], sx, o, p[0], p[1]);
+   let m = qlbt-mean(losses, qlbt-row-count(p[0]));
+   nothing?(m) ? form_error("qwen last-block train: the loss of accepted line " ++ p[0][0].str() ++ " did not arrive") : 0;
+   let bw = qlbt-backward(ctx[2], sx, o, ctx[5], ctx[6], qlbt-row-n(p[0]), qlbt-row-count(p[0]));
+   [m, qlbt-step(o, lr, k)];
+  }
+  // the margin's side: one step ascending the row's mean while it stands below base + margin; [mean, grad norm or nothing when the hinge rests]
+  def qlwt-rejected-step(ctx, L, sx, o, p, floor, lr, k) {
+   let losses = qlbt-eval(ctx[0], ctx[2], nth(ctx[3], L), ctx[5], ctx[6], sx, o, p[0], p[1]);
+   let m = qlbt-mean(losses, qlbt-row-count(p[0]));
+   nothing?(m) ? form_error("qwen last-block train: the loss of rejected line " ++ p[0][0].str() ++ " did not arrive") : m >= floor ? [m, nothing()] : {
+    let bw = qlbt-backward-by(ctx[2], sx, o, ctx[5], ctx[6], qlbt-row-n(p[0]), 0.0 - 1.0 / (qlbt-row-count(p[0]) + 0.0));
+    [m, qlbt-step(o, lr, k)];
+   };
+  }
+  def qlwt-walk(ctx, L, sx, o, accepted, rejected, floors, valid, negHeld, c, s, a, j, acc, t0) = s > record_get(c, "steps") || now_unix_ms() - t0 > record_get(c, "wall_ms") ? [s - 1, reverse(acc)] : {
+   let neg = record_get(c, "neg_every") > 0 && !nil?(rejected) && s % record_get(c, "neg_every") == 0;
+   let tA = host_monotonic_ms();
+   let r = neg ? qlwt-rejected-step(ctx, L, sx, o, nth(rejected, j % len(rejected)), nth(floors, j % len(rejected)), record_get(c, "lr"), s) : qlwt-accepted-step(ctx, L, sx, o, nth(accepted, a % len(accepted)), record_get(c, "lr"), s);
+   let tB = host_monotonic_ms();
+   let line = neg ? nth(rejected, j % len(rejected))[0][0] : nth(accepted, a % len(accepted))[0][0];
+   let said = s % record_get(c, "say_every") == 0 ? qlwt-say("step " ++ s.str() ++ " " ++ (neg ? "rejected" : "accepted") ++ " line " ++ line.str() ++ ": mean " ++ r[0].str() ++ (nothing?(r[1]) ? ", the hinge rests" : ", |grad| " ++ r[1].str()) ++ ", " ++ (tB - tA).str() ++ " ms") : 0;
+   let v = s % record_get(c, "val_every") == 0 ? qlwt-val(ctx, L, sx, o, valid, negHeld, s) : 0;
+   let d = s % record_get(c, "val_every") == 0 ? qlwt-dev-read(ctx, L, sx, o, c, s) : 0;
+   qlwt-walk(ctx, L, sx, o, accepted, rejected, floors, valid, negHeld, c, s + 1, neg ? a : a + 1, neg ? j + 1 : j, cons([s, neg ? 1 : 0, line, r[0], nothing?(r[1]) ? -1.0 : r[1], tB - tA], acc), t0);
+  };
+  // ── the stop: with dev_every, every dev_every-th line of rows leaves the gradient; the pair at the lowest mean over those rows (read every val_every steps) is the one kept. The judge's rows and the rejected rows never select anything ──
+  def qlwt-dev?(p, c) = p[0][0] % record_get(c, "dev_every") == 0 && p[0][0] <= record_get(c, "dev_upto");
+  def qlwt-dev-read(ctx, L, sx, o, c, s) = nil?(record_get(c, "dev")) ? 0 : {
+   let m = qlwt-mean(qlwt-means(ctx, L, sx, o, record_get(c, "dev")));
+   let keep = !nothing?(m) && m < record_get(c, "best_mean");
+   let said = qlwt-say("step " ++ s.str() ++ ": dev mean " ++ qlwt-num(m) ++ (keep ? ", the lowest so far: kept" : ""));
+   keep ? qlwt-dev-keep(o, c, s, m) : 0;
+  };
+  def qlwt-dev-keep(o, c, s, m) {
+   let rec = record_get(o, "rec");
+   let w1 = record_set(c, "best_mean", m);
+   let w2 = record_set(c, "best_step", s);
+   let w3 = record_set(c, "best_a", metal_buf_read(rec[3], 0, rec[6] * rec[7] * 4));
+   let w4 = record_set(c, "best_b", metal_buf_read(rec[4], 0, rec[7] * rec[8] * 4));
+   1;
+  }
+  def qlwt-dev-restore(o, c) = nil?(record_get(c, "dev")) ? 0 : {
+   let rec = record_get(o, "rec");
+   let wa = metal_buf_write(rec[3], 0, record_get(c, "best_a"));
+   let wb = metal_buf_write(rec[4], 0, record_get(c, "best_b"));
+   qlwt-say("the pair kept: step " ++ record_get(c, "best_step").str() ++ ", dev mean " ++ qlwt-num(record_get(c, "best_mean")) ++ " over " ++ len(record_get(c, "dev")).str() ++ " rows (lines " ++ qlwt-ints(map(p => p[0][0], record_get(c, "dev"))) ++ ")");
+   wa + wb;
+  };
+  def qlwt-step-json(e) = "{\"step\":" ++ e[0].str() ++ ",\"neg\":" ++ e[1].str() ++ ",\"line\":" ++ e[2].str() ++ ",\"mean\":" ++ e[3].str() ++ ",\"grad\":" ++ e[4].str() ++ ",\"ms\":" ++ e[5].str() ++ "}";
+  def qlwt-config(L, c, rowsPath, trainLines, rejLines, negPath, steps, mean0, mean1) = "{\"model\":\"" ++ qlwt-model() ++ "\",\"fine_tune_type\":\"lora\",\"owner\":\"Form-native-Metal\",\"door\":\"observe/qwen-last-block-train-run.bml\",\"lora_parameters\":{\"rank\":" ++ qlwt-rank().str() ++ ",\"alpha\":" ++ qlwt-alpha().str() ++ ",\"scale\":" ++ qlwt-scale().str() ++ ",\"dropout\":0.0},\"layers\":[" ++ L.str() ++ "],\"targets\":[\"ffn_down\"],\"tensors\":[\"" ++ qlh-rr-name(L, "ffn_down", "a") ++ "\",\"" ++ qlh-rr-name(L, "ffn_down", "b") ++ "\"],\"optimizer\":\"adam\",\"learning_rate\":" ++ record_get(c, "lr").str() ++ ",\"batch_size\":1,\"mask_prompt\":1,\"ids_cap\":" ++ qlwt-cap().str() ++ ",\"data\":\"" ++ rowsPath ++ "\",\"rows\":" ++ qlwt-ints(trainLines) ++ ",\"objective\":\"accepted CE descent; rejected hinge at base + margin\",\"margin\":" ++ record_get(c, "margin").str() ++ ",\"neg_every\":" ++ record_get(c, "neg_every").str() ++ ",\"rejected_source\":\"" ++ negPath ++ "\",\"rejected_rows\":" ++ qlwt-ints(rejLines) ++ ",\"dev_rows\":" ++ qlwt-ints(map(p => p[0][0], record_get(c, "dev"))) ++ ",\"selection\":\"" ++ (nil?(record_get(c, "dev")) ? "the last step" : "the lowest dev mean, read every " ++ record_get(c, "val_every").str() ++ " steps") ++ "\",\"trained_native_steps\":" ++ steps.str() ++ ",\"mean_loss_step0\":" ++ mean0.str() ++ ",\"mean_loss_step20\":" ++ mean1.str() ++ ",\"worn\":0}\n";
+  // the rows are prepared before the lease and the context: the tokfast index is host work, and the machine should not carry a model session through it
+  def qlwt-rows(src, x, c) {
+   let cap = qlwt-cap();
+   let t0 = host_monotonic_ms();
+   let trainRows = qlwt-prepared("accepted", src, x, record_get(c, "train_lines"), cap);
+   let validRows = qlwt-prepared("held-out", src, x, record_get(c, "valid_lines"), cap);
+   let negRows = qlwt-prepared("rejected", src, x, record_get(c, "neg_lines"), cap);
+   let t1 = host_monotonic_ms();
+   qlwt-say("rows: " ++ len(trainRows).str() ++ " accepted, " ++ len(validRows).str() ++ " accepted held-out, " ++ len(negRows).str() ++ " rejected, prepared in " ++ (t1 - t0).str() ++ " ms");
+   [trainRows, validRows, negRows];
+  }
+  def qlwt-open(ctx, prepared, c) {
+   let geo = ctx[2];
+   let L = qlbj-last-block(geo);
+   let cap = qlwt-cap();
+   let trainRows = prepared[0];
+   let validRows = prepared[1];
+   let negRows = prepared[2];
+   qlwt-say("block L = " ++ L.str() ++ ", rank " ++ qlwt-rank().str() ++ ", scale " ++ qlwt-scale().str() ++ ", lr " ++ record_get(c, "lr").str() ++ ", steps " ++ record_get(c, "steps").str() ++ ", margin " ++ record_get(c, "margin").str() ++ ", rejected every " ++ record_get(c, "neg_every").str() ++ "; gpu utilization " ++ host_gpu_utilization().str() ++ "; " ++ mg-status-line(mg-sense()));
+   let t1 = host_monotonic_ms();
+   let dirs = qlbt-dir-ready(record_get(c, "captures")) + qlbt-dir-ready(record_get(c, "valid_captures")) + qlbt-dir-ready(record_get(c, "neg_captures"));
+   let train = qlwt-captured(ctx, L, record_get(c, "captures"), "accepted", trainRows, cap);
+   let valid = qlwt-captured(ctx, L, record_get(c, "valid_captures"), "held-out", validRows, cap);
+   let negs = qlwt-captured(ctx, L, record_get(c, "neg_captures"), "rejected", negRows, cap);
+   let t2 = host_monotonic_ms();
+   let every = record_get(c, "heldout_every");
+   let negGrad = filter(p => p[0][0] % every != 0, negs);
+   let negHeld = filter(p => p[0][0] % every == 0, negs);
+   qlwt-say("captures in " ++ (t2 - t1).str() ++ " ms: " ++ len(train).str() ++ " accepted, " ++ len(valid).str() ++ " held-out, " ++ len(negGrad).str() ++ " rejected in the gradient, " ++ len(negHeld).str() ++ " rejected it never sees (lines " ++ qlwt-ints(map(p => p[0][0], negHeld)) ++ ")");
+   len(valid) != len(validRows) || nil?(train) ? {
+    qlwt-say("refused: a held-out capture did not land, or no accepted row stands");
+    0;
+   } : {
+    let devEvery = record_get(c, "dev_every");
+    let w = record_set(c, "dev", devEvery <= 0 ? [] : filter(p => qlwt-dev?(p, c), train));
+    let grad = devEvery <= 0 ? train : filter(p => !qlwt-dev?(p, c), train);
+    qlwt-say("the gradient: " ++ len(grad).str() ++ " accepted rows; dev: " ++ len(record_get(c, "dev")).str() ++ " rows it never sees");
+    qlwt-train(ctx, L, c, grad, valid, negGrad, negHeld);
+   };
+  }
+  def qlwt-train(ctx, L, c, train, valid, negGrad, negHeld) {
+   let geo = ctx[2];
+   let cap = qlwt-cap();
+   let lay = nth(ctx[3], L);
+   let o = qlbt-open(geo, lay, ctx[5], cap, qlwt-rank(), qlwt-scale());
+   let sx = qlbf-scratch(geo, 0, cap);
+   let counted = qlbf-scratch-bytes(geo, 0, cap) + qlbt-own-bytes(geo, cap, qlwt-rank());
+   !qlbt-ok?(o) || !qlbf-ok?(sx) ? {
+    qlwt-say("refused: the step's device state did not open (freed " ++ (qlbf-free(sx) + qlbt-free(o)).str() ++ ")");
+    0;
+   } : {
+    let seeded = qlbt-seed(o, record_get(c, "seed"));
+    let t0 = host_monotonic_ms();
+    let mean0s = qlwt-means(ctx, L, sx, o, train);
+    let floors = map(p => qlbt-mean(qlbt-eval(ctx[0], geo, lay, ctx[5], ctx[6], sx, o, p[0], p[1]), qlbt-row-count(p[0])) + record_get(c, "margin"), negGrad);
+    let v0 = qlwt-val(ctx, L, sx, o, valid, negHeld, 0);
+    let t1 = host_monotonic_ms();
+    qlwt-say("step 0: train mean " ++ qlwt-num(qlwt-mean(mean0s)) ++ " over " ++ len(train).str() ++ " rows; memory counted " ++ counted.str() ++ " bytes; the base read in " ++ (t1 - t0).str() ++ " ms; " ++ mg-status-line(mg-sense()));
+    let wall0 = now_unix_ms();
+    let d0 = qlwt-dev-read(ctx, L, sx, o, c, 0);
+    let walked = qlwt-walk(ctx, L, sx, o, qlwt-shuffled(train), qlwt-shuffled(negGrad), floors, valid, negHeld, c, 1, 0, 0, [], wall0);
+    let t2 = host_monotonic_ms();
+    let restored = qlwt-dev-restore(o, c);
+    let done = nil?(record_get(c, "dev")) ? walked[0] : record_get(c, "best_step");
+    let means = qlwt-means(ctx, L, sx, o, train);
+    let vEnd = qlwt-val(ctx, L, sx, o, valid, negHeld, done);
+    let mean0 = qlwt-mean(mean0s);
+    let mean1 = qlwt-mean(means);
+    let accFall = nothing?(v0[0]) || nothing?(vEnd[0]) ? nothing() : v0[0] - vEnd[0];
+    let rejFall = nothing?(v0[1]) || nothing?(vEnd[1]) ? nothing() : v0[1] - vEnd[1];
+    qlwt-say("after step " ++ done.str() ++ " of " ++ record_get(c, "steps").str() ++ " in " ++ (t2 - t1).str() ++ " ms: train mean " ++ qlwt-num(mean0) ++ " -> " ++ qlwt-num(mean1) ++ "; accepted held-out fall " ++ qlwt-num(accFall) ++ ", rejected never seen fall " ++ qlwt-num(rejFall));
+    let out = record_get(c, "out");
+    let ex = qlbt-export(o, L, out, qlwt-config(L, c, record_get(c, "rows"), map(p => p[0][0], train), map(p => p[0][0], negGrad), record_get(c, "negatives"), done, mean0, mean1));
+    let events = write_file_text(out ++ "/training-events.jsonl", str-join-with(map(e => qlwt-step-json(e), walked[1]), "\n") ++ "\n");
+    let back = qlbt-export-read(out, ex[3], ex[4], geo[10] * qlwt-rank() * 4);
+    qlwt-say("export: " ++ out ++ "/adapters.safetensors " ++ ex[0].str() ++ " of " ++ ex[1].str() ++ " bytes; read back: whole " ++ back[0].str() ++ ", pairs " ++ back[1].str() ++ ", rank " ++ back[2].str() ++ ", dtype " ++ back[3] ++ "; " ++ mg-status-line(mg-sense()));
+    let freed = qlbf-free(sx) + qlbt-free(o);
+    qlwt-say("freed " ++ freed.str() ++ " of " ++ (17 + qlbt-handle-count()).str() ++ " handles");
+    ex[0] == ex[1] && back[0] == 1 ? done : 0;
+   };
+  }
+  def qlwt-run() {
+   let opts = dop-doc(qlwt-door(), stdin-text(), qlwt-spec());
+   let out = qlwt-text(opts, "out", "form/form-stdlib/adapters/qwen38-last-block-next-2");
+   let rowsPath = qlwt-text(opts, "rows", "learn/last-block-train-rows.jsonl");
+   let validPath = qlwt-text(opts, "valid", "learn/draft-readings.jsonl");
+   let negPath = qlwt-text(opts, "negatives", "learn/draft-readings-heldout.jsonl");
+   let k = qlwt-int(opts, "valid_rows", 5);
+   let lines = qlbj-lines(rowsPath);
+   let valid = qlbj-last(qlbj-lines(validPath), k);
+   let shared = ll-shared(qlbj-ids(valid), qlbj-ids(lines));
+   let s0 = nil?(lines) ? dop-refuse(qlwt-door(), "rows " ++ rowsPath ++ " holds no row (observe/qwen-last-block-rows-run.bml compiles it)") : 0;
+   let s1 = !nil?(shared) ? dop-refuse(qlwt-door(), "held-out draft " ++ shared[0] ++ " of " ++ validPath ++ " stands among the training rows " ++ rowsPath) : 0;
+   let c = record_new(0, "out", out, "rows", rowsPath, "negatives", negPath, "train_lines", lines, "valid_lines", valid, "neg_lines", qlbj-lines(negPath), "steps", qlwt-int(opts, "steps", 400), "lr", qlwt-int(opts, "lr_micro", 100) / 1000000.0, "margin", qlwt-int(opts, "margin_milli", 20) / 1000.0, "neg_every", qlwt-int(opts, "neg_every", 4), "val_every", qlwt-int(opts, "val_every", 100), "say_every", 10, "heldout_every", qlwt-int(opts, "heldout_every", 3), "captures", qlwt-text(opts, "captures", ".hearth/voice-wears-its-lesson/train-captures"), "valid_captures", qlwt-text(opts, "valid_captures", ".hearth/qwen-rung-4/accepted"), "neg_captures", qlwt-text(opts, "neg_captures", ".hearth/qwen-rung-4/rejected"), "wall_ms", qlwt-int(opts, "wall_s", 3000) * 1000, "seed", qlwt-int(opts, "seed_micro", 20000) / 1000000.0, "dev_every", qlwt-int(opts, "dev_every", 0), "dev_upto", qlwt-int(opts, "dev_upto", 1000000), "dev", [], "best_mean", 1.0e30, "best_step", 0, "best_a", "", "best_b", "");
+   let model = qlwt-model();
+   let src = fcmg-src(model);
+   let geo = q38-geo(src, qlwt-maxpos());
+   let cap = qlwt-cap();
+   let x = qtf2-load(qtf2-root-for(model), qsx-seal-line(model));
+   let prepared = qlwt-rows(src, x, c);
+   let own = fcms-qwen-own(src, qlwt-maxpos()) + qlbf-scratch-bytes(geo, 0, cap) + qlbt-own-bytes(geo, cap, qlwt-rank()) + qlbc-own-bytes(geo[0], cap);
+   let granted = mg-lease("qwen last-block train", model, fcms-weights-bytes(model), own);
+   !mg-granted?(granted) ? dop-refuse(qlwt-door(), "held by the memory governor: " ++ mg-line("qwen last-block train", own + fcms-weights-bytes(model), granted)) : {
+    let ctx = q38-open-span(model, qlwt-maxpos(), qlwt-span());
+    let done = (Comparable) q38-context-ok?(ctx) == 1 ? qlwt-open(ctx, prepared, c) : 0;
+    let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
+    let unleased = mg-release();
+    done;
+   };
+  }
+ }
+ qlwt-run();
+}

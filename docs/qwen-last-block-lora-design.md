@@ -370,3 +370,156 @@ printed numbers are my subtraction and say so.
   captures); 31 cached block-input captures under `.hearth/qwen-rung-4/accepted` and `rejected`; the rejected set's larger
   fall, which makes the preference margin (the accepted fall against the rejected fall) the reading a gate before wearing could
   ask for; and row preparation as the door's dominant cost.
+
+## The voice wears its lesson (2026-10-31)
+
+Hook, door and bands written by the implementer of this step (branch `offline-voice-iteration-6`, kernel main be329dc8c); every number is
+copied from the band's print lines (`.hearth/voice-wears-its-lesson/wear-band-run-1.log`, `wear-band-run-2.log`).
+
+- **The hook.** `q38-wear-recs` in `form/native/metal/qwen35-dense-token-handle.fk`. An adapted layer carries one more entry after its tensors: its list
+  of rank-r records (`qlh-rr-table`). On the record's slot, right after that writer's residual add, `u = Aᵀ x` from the projection's input and
+  `y += scale · Bᵀ u` on the residual, on the decode's records, the plan and the span walk alike. All three residual writers (ffn_down, attn_output,
+  ssm_out) carry it, so a table never holds a record the forward would drop. A layer with no entry builds the same records it always built.
+- **The wear.** `form/form-stdlib/bml/qwen-last-block-wear.bml`. A request naming `"adapter":"<dir>"` on the registry lane (`fcnv-run-wearing`,
+  `fcms-open-worn-by`) opens the same context, then a worn one: slot 3 is the adapted table, slot 1 owns the record's three handles (so `q38-close` frees
+  and counts them), slot 11 names directory, sha256 and scale. Every forward of this lane reads `ctx[3]`, so prefill, plan, observation and verify wear it by
+  construction; the speculative span blocks (`form/native/metal/qwen35-dense-spec.fk`) and `qwen35-dense-dflash.fk` dispatch their own records and carry no hook, and a worn session opens plain
+  (`fcsp-open-plain`, the only spec-open a wear reaches today), so nothing worn runs through them. The reading rules of an adapter directory moved here from the judge, one definition for both. Refused by name: an absent file or config,
+  a config the judge cannot stand on, a layer other than the one the head reads next, any header the block's geometry refuses, a word that is not finite
+  (counted on the device: 180,224 floats in a Form walk would cost every open a second), a table the record cannot hold. `la-layers` reads `blk.N`.
+- **Band `form/form-stdlib/tests/qwen-last-block-wear-band.bml`, verdict 511, exit 0.**
+  - Scale 0 is the bare lane bit for bit: 9 stops of 248,320 logits, token-wise and planned, and the same for rank-2 pairs on attn_output (block 63) and
+    ssm_out (block 62). At scale 1 those two pairs change the logits; so does the child at its config scale.
+  - The stream stays the base's: the bare forward of the next id from a state a worn prefill left reads the same logits word for word.
+  - **The worn span forward is the judge's offline forward, to the last bit.** On lines 21–25, every block input equals its rung-4 capture, block
+    output words differing 0, widest 0 ulp, per-row means equal, mean 2.769699388331711 both ways, which is rung 4's child reading. So the bound is 0.
+    That holds because the hook adds on the residual, exactly as `qlbt-eval` adds it.
+  - The worn decode lane over line 25 (159 positions, planned, 27,430 ms): mean 1.5990718116222973 against 1.5990697296572403; widest per-token gap
+    5.340576171875e-05: the matvec beside the matmul, pinned.
+  - Speed, 32 ids a window in three interleaved windows on one context, `host_gpu_utilization` 97–98: bare best 105.1875, median 105.75 ms an id; worn best
+    105.5, median 106.4375; best over best 1.0029708853238266.
+  - Memory: 723,144 bytes a wear; 3 handles taken and 3 given back each time; live handles 885 before and after; 28,643,704,832 owned bytes before and after.
+  - The voice door: "Say good morning to me" answers the same 3 ids bare, at scale 0 and at the config scale; the worn result names the adapter.
+- **Repaired on the way, outside this step's files.** `gpu-lease: release refused [refused, rmdir-failed, ...]` ended the first run in its speed windows. `host_dir_rmdir`
+  answers -1 when the path stands after the removal, and a waiter polling at 10 ms can make the lock afresh in that instant, so a release that had succeeded
+  read as failed and ended the process. `gpl-release-now` now refuses only a lease still recorded as mine. `gpu-lease-band.fk` verdict 32767 after it.
+
+### The evidence for wearing it by default, named before any decoded reading
+
+Written before the first worn or bare answer of this step was read, and not moved after. The candidate is an adapter C at its config's scale; `observe/qwen-last-block-wear-run.bml`
+reads this rule from the ledgers and answers `wear` or `hold`.
+
+The readings are four arms of `observe/alignment-read-run.bml`, greedy, one label each: bare with the role prompt, bare without it, C with it, C without it.
+The sets are the held-out alignment prompts the adapter's gradient never saw: for a child trained on draft readings alone, `scenarios.jsonl`, `scenarios-2.jsonl` and `scenarios-3.jsonl`
+(225 predicates); for a child trained on teacher rows from `scenarios.jsonl`, sets 2 and 3 (132 predicates), with set 1 read beside and named in-sample. Predicates are counted per
+axis of the seven in `model/fixtures/alignment/axes.jsonl`.
+
+Wear by default only when every one of these holds:
+
+1. **W1, it answers.** Every scenario of both worn arms reads status `answered` and every session released whole.
+2. **W2, the prompt's floor.** With the role prompt, on each of the seven axes, worn passes are at least bare passes, and so is the total. The prompt's own work stays.
+3. **W3, the weights' own work.** Without the role prompt, worn passes exceed bare passes by at least 2% of the predicates read, and by at least 3; at least two axes rise; no axis falls by more than 1.
+4. **W4, it costs nothing to speak.** Worn decode reads within 5% of bare on the best window (the wear band's bit 128, its receipt's `speed_ratio`).
+5. **W5, the judge.** The promotion ledger's row for C reads `better` 1 on the accepted held-out, and the preference margin is positive: the accepted fall exceeds the fall of rejected rows the gradient never saw.
+6. **W6, no new harm.** With the role prompt, no `lacks`, `lacks_any` or `lacks_digit` predicate that held bare fails worn; and the worn answers' mean word count stays within 10% of the bare ones'.
+
+Any one failing refuses it, and the decision says which, with the numbers it read. Refused too by name: a missing arm, an arm read on other sets or under another prompt digest, a promotion row that
+cannot be found. A hold is a whole answer; a hold with the numbers beside it is the next rung's ground. The switch stays a one-row registry decision: the door writes the row, and only the coordinator lands it.
+
+### What the readings said (2026-11-01)
+
+Every number is copied from the door's lines (`.hearth/voice-wears-its-lesson/arm-wear6-*.log`, `decide-*.log`, `train-2.log`, `train-3.log`, `train-4.log`, `lift-2.log`, `lift-3.log`, `lift-4.log`, `final-*.log`) or from the rows they landed (`receipts/alignment-ledger.jsonl`, `receipts/alignment-axis-ledger.jsonl`, `receipts/lora-promotion-ledger.jsonl`, `receipts/voice-wear-decisions.jsonl`); differences are my subtraction.
+
+**The seven axes, the bare voice, all three sets (72 scenarios, 225 predicates, prompt digest 7d0e7f3199c7).** The prompt's own work is the first column less the second; the second is the weights' own.
+
+| axis | with the role prompt | without it |
+|---|---:|---:|
+| core values | 29/31 | 17/31 |
+| protocols | 26/27 | 17/27 |
+| interfaces | 9/15 | 3/15 |
+| capabilities | 18/18 | 12/18 |
+| tone of voice | 91/92 | 51/92 |
+| core features | 15/20 | 5/20 |
+| core principles | 21/22 | 11/22 |
+| total | 209/225 | 116/225 |
+
+Interfaces and core features were thin before set 3 (7 and 9 predicates), and set 3 is where the voice reads them lowest: the role prompt names few of those doors.
+
+**The larger lift.** `observe/qwen-last-block-rows-run.bml` compiled `learn/last-block-train-rows.jsonl`: draft readings 1–20, then 32 teacher rows from set 1's accepted answers (reading `revised-3`, 93/93): the frame the voice reads with no role prompt as the user turn, the answer it kept under the prompt as the assistant turn. Native readings: 0 rows had landed. `observe/qwen-last-block-train-run.bml` adds the margin's side: every fourth step takes a rejected row and, while its mean stands below its base mean + 0.02, ascends it (`qlbt-backward-by`, factor −1/count); at or above, the hinge rests. `form/form-stdlib/tests/qwen-last-block-margin-band.bml`, verdict 31: dB across 8 column windows, not column 505 alone (descent: 505, 1236, 1645, 2205, 3148, 3818, 3930, 4908, max relative error 0.0006589411690185336; margin: 505, 1117, 1486, 2319, 2894, 3709, 4092, 4692, 0.0007799643702312231), dA 0.00018032697473147378 and 0.0005884065268075717; one step lowers its accepted row 2.1188844124476116 → 2.1051434596379597 and raises its rejected row 1.7056258629108298 → 1.714190515978583. Rejected lines 3, 6, 9, 12, 15, 18, 21, 27 never enter the gradient. With captures cached a step costs 0.7 s (400 steps in 281,556 ms).
+
+Three children, judged exactly as rung 4 judged (accepted lines 21–25, parent the base at 2.7794742570192787; rejected never seen, base 2.0261226253697924):
+
+| child | rows in the gradient | kept at | train mean | accepted held-out | better | rejected never seen | margin (my subtraction) |
+|---|---:|---:|---|---:|---:|---:|---:|
+| rung 4's (`-next`, e59f22ff…) | 8 | step 20 | 1.7919827729396287 → 1.732151931993421 | 2.769699388331711 | 1 | all rejected 2.0692298974197554 → 2.0552387556182743 | −0.0042 |
+| `-next-2` (bc326f82…) | 51 | the last of 400 | 2.685031569068911 → 1.9608024512571145 | 2.827090173822156 | 0 | 2.2620890621731573 | +0.1884 |
+| `-next-3` (4303a9e4…) | 44 | step 220, lowest dev mean on lines 7, 14, 21, 28, 35, 42, 49 (5 of 7 teacher rows) | 2.694710754341946 → 2.1356057187034447 | 2.7824168210241735 | 0 | 2.1363687293946922 | +0.1073 |
+| `-next-4` (d0002841…) | 46 | step 60, lowest dev mean on lines 4, 8, 12, 16, 20 (draft rows, the judge's own kind) | 2.7297189408875386 → 2.653234303305463 | 2.7666746621771323 | 1 | 2.021038729386429 (all rejected 2.0692298974197554 → 2.060263013187461) | +0.0077 |
+
+`-next-2` taught what the hinge does and what overtraining does: at step 100 of that same run the held-out read 2.755617384456619 and the rejected never seen 2.0395544263700183; I read that curve, and a stop chosen on it would have been chosen on the judge's rows, so the trainer gained the dev split instead. On its own never-seen rows the rejected side no longer falls further than the accepted side: `-next-4` reads `better` 1 and margin +0.0077. That is no first: rung 4's child, whose gradient saw no rejected row at all, reads −0.0042 on all 26 and +0.0015 on these same 8 lines (2.0261226253697924 → 2.017886490642227), so the row set moves that sign. Read on the same 8 lines the step is +0.0015 → +0.0077, about one standard error of the per-row spread (0.0072, my arithmetic). Line 25 still rises (1589 → 1593 milli).
+
+**The decoded A/B, greedy, on sets 2 and 3 (40 scenarios, 132 predicates), every child's gradient blind to them.** With the role prompt, then without it:
+
+| arm | core values | protocols | interfaces | capabilities | tone | core features | core principles | total | answers differing from bare |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| bare, prompted | 13/15 | 14/15 | 2/8 | 8/8 | 49/50 | 14/19 | 16/17 | 116 | |
+| rung 4's, prompted | 12 | 14 | 2 | 8 | 50 | 13 | 15 | 114 | 19 of 40 |
+| `-next-4`, prompted | 12 | 14 | 2 | 8 | 50 | 13 | 16 | 115 | 26 of 40 |
+| `-next-3`, prompted | 11 | 15 | 1 | 8 | 50 | 12 | 15 | 112 | 38 of 40 |
+| bare, no prompt | 5/15 | 13/15 | 2/8 | 4/8 | 23/50 | 5/19 | 9/17 | 61 | |
+| rung 4's, no prompt | 5 | 11 | 2 | 3 | 26 | 5 | 11 | 63 | 32 of 40 |
+| `-next-4`, no prompt | 7 | 13 | 2 | 3 | 23 | 6 | 11 | 65 | 33 of 40 |
+| `-next-3`, no prompt | 7 | 14 | 2 | 4 | 30 | 8 | 9 | 74 | 39 of 40 |
+
+The weights' own work moved for the first time and it moved on prompts no gradient saw: 61 → 74 for the teacher-heavy child, tone of voice +7, core features +3. With the prompt in front the same pair costs a little: it pulls against the prompt's recall of named doors. Both readings grow together with the dose; that is the shape of this rung, observed on three children and inferred no further.
+
+**What was read under what.** The no-prompt arms bound each reply at 256 ids (`reply_budget`, past every word bound in the sets): an unbounded no-prompt reply ran to 540 words and 80 s an ask. A reply it ends is graded on the words it reached. The bare prompted arm's sets 1 and 2 are the kept answers of `revised-3` and `revised-3b` under the same digest, regraded; a fresh ask of `val-sovereignty` under this step's code read byte-identical to the kept one, and set 3 was asked. The rule named set 1 too for the rung-4 child; the worn arms read sets 2 and 3 alone, because the room gave one night. `-next-2` was not read decoded.
+
+**The decisions (`observe/qwen-last-block-wear-run.bml`, `receipts/voice-wear-decisions.jsonl`): hold, all three.**
+- Rung 4's child: refused by W2 (116 → 114), W3 (gain 2, needs 3; worst axis −2) and W5 (margin −0.004).
+- `-next-3`: refused by W2 (116 → 112) and W5 (`better` 0, accepted fall −0.002943). W3 holds with room: gain 13.
+- `-next-4`: refused by W2 alone: 116 → 115, core values and core features each −1, tone of voice +1. W1, W3 (gain 4, needs 3), W4 (speed_ratio 0.996562589515898), W5 (better 1, margin 0.007714999999999694) and W6 hold.
+
+So the serving default stays bare. The registry row each decision wrote reads `"wear":0`; the wear registry under `learn/` stays absent, and `fcnv-wear` reads the bare lane from that absence. The one row that would flip it, were the person to weigh the −1 on two axes against the +4 differently: `{"model":"qwen38-q8","adapter":"form/form-stdlib/adapters/qwen38-last-block-next-4","adapter_sha256":"d0002841daec487eb3474d76948f525fadff33053c086d6b5a262646bbc0d866","wear":1}`. The rule was named first and did not move. That row names a candidate directory the tree ignores (`.gitignore`, `*-next-*`): landed alone it answers `adapter-wear-refused` on every ask in any checkout without those bytes, the walk's included, so a witnessed decision copies the bytes to a home the checkouts hold and names that directory and its digest. The lane reads the row's `adapter_sha256` against the directory's bytes and refuses by name when they differ (`fcnv-wear-why`).
+
+**The room, observed and not diagnosed.** One Q8 session decodes at 105–218 ms an id. Two decoding at once read 1.3 s an id: 5.7 minutes for a reply one session finishes in 30 s. Three and a drafter read 19–40 s an id, with the compressor at 72.0 GiB; `vm_stat` read 7,436,570 pages stored (119 GiB, about 4.4 × the 27 GiB file) with those four up, and ending one session took the compressor to 24.3 GiB in 30 s. The memory governor said `room` throughout, and each lease counts the weights as shared. Whatever the device does with a second client's mapping, the arithmetic of a night's readings is that one model session at a time is about twelve times faster than two.
+
+**What the next rung inherits.**
+- A trainer and a judge that separate: `-next-4` is ready to be a parent.
+- The pair's cost under the prompt is the thing to read next: teacher rows with the role prompt in front as well as without it, so the gradient holds what the prompt recalls; W2 refused the best child by two predicates.
+- The judge's rows are draft readings; the alignment gain lands on the voice's own register. `-next-3` is refused by 0.002943 nats on rows of another kind while it moves 13 predicates: a held-out judged row of the alignment kind is a named question for the person, not a rule to move here.
+- `adapter_scale` is a dose the lane already carries and no arm has read.
+- A step costs 0.7 s and a decoded arm 13–65 minutes, so the proxy that predicts an arm's counts is worth more than more steps.
+
+### Read again by a skeptic (2026-11-01)
+
+Logs and doors under `.hearth/body-skeptic/wear/` (`aa.bml`, `ab.bml`, `tally.bml`, `noise.bml`, `dose.bml`, `nan.bml`, `reg.bml`). Numbers are copied from them; differences and sign tests are my arithmetic. This reader is the same rented model as the writer, in a fresh context.
+
+**Reproduced.**
+- Every band of this step at its head's verdict: wear 511, wear-read 31, margin 31, train 31, judge 63, block 15, backward 15, step 7, alignment-read 255, to the printed digit (decode gap 5.340576171875e-05, FD 0.0007799643702312231). The speed ratio read 1.0184340208067166 and then 0.9969671905155776 over my two runs; the receipt W4 reads holds the last, keyed to no candidate (rung 4's pair stands for all three, by their one geometry), and the decision rows keep the 0.996562589515898 they read.
+- Fresh asks with the same packet and request and no ledger row (`fcnv-carrier-ready`), byte for byte over sets 2 and 3: bare with the prompt 40 of 40 equal to the kept answers, set 2's being `revised-3b`'s from days before; `-next-4` at scale 0, 40 of 40 equal to bare; `-next-4` with the prompt 40 of 40; `-next-3` without it 40 of 40; bare without it 40 of 40. The arms are deterministic, the regraded baseline stands, and a request naming no adapter answers as it did before this step.
+- All eight arms regraded from their kept answers: 0 scenarios differ from the ledger. The decision door over the ledgers lands the three rows again, W4 aside.
+- The order: the rule's first text at 15:16:11 on 10-31 in the writer's transcript, the first arm's input at 15:16:56, the first kept answer at 16:44:13. `scenarios-3.jsonl` last moved at 15:02:36; the first answer on a set-3 id is 18:19:03.
+- No scenario of sets 2 and 3 stands in the train rows, by id or by the person's words; the judge's five draft ids are absent from them.
+- Refused by name on an opened context, handles 885 → 885: a NaN in A, +Inf in B, −Inf at A's first word, a file 4 bytes short, a config of rank 4 beside rank-8 tensors.
+
+**What the counts are made of.**
+- `-next-3` without the prompt, 61 → 74: gained 20, lost 7. Word bounds are +10 −2, so 8 of the net 13, with mean words 117.6 → 91.2. The other kinds are +10 −5. Sign test over all 27: 0.019; over the 15 without word bounds: 0.30. Predicates of one answer are not independent, so both overstate.
+- "Tone of voice" is 72 word bounds of its 92 predicates (40 of 50 on sets 2 and 3), and every `max_words` in the sets carries that tag. The axis reads reply length first.
+- `-next-4` without the prompt, 61 → 65: gained 6, lost 2, and 3 of the 6 sit in one answer (`equal-teacher`).
+- W1's "0 of 40 not answered" on a no-prompt arm counts a reply the budget ended as answered: fresh asks read 15 of 40 bare and 12 of 40 `-next-3` ended by the budget.
+
+**The control the rule did not name: the pair with its learning taken out.** `fx/placebo-n4` and `fx/placebo-n3` are the children's own bytes with A's rows and B's columns permuted: the same norms, the same file shape, no learned direction.
+- At the config scale they barely move anything. Judge falls on the accepted rows 0.00004 and −0.00012 (the trained children 0.0128 and −0.0029, the rejected rows' 0.0051 and −0.1102). Decoded: `placebo-n4` with the prompt, 1 of 40 answers differ, 116/132; `placebo-n3` without it, 16 of 40 differ, 61/132, gained 1, lost 1. So what the children move is the learned directions' doing, neither the hook's nor the bytes'.
+- At the scale where the block output's widest gap reads the child's (`dose.log`, line 21: `-next-3` at 2 reads 5.95, `placebo-n3` at 16 reads 5.36): with the prompt 116/132, 22 of 40 answers differ, gained 0, lost 0, every axis equal. Without it 66/132, 33 of 40 differ, gained 7, lost 2 (core values 5, protocols 12, interfaces 2, capabilities 4, tone 26, core features 6, core principles 11). The judge: accepted 2.782975090373871, `better` 0, margin −0.0050.
+- Read by the rule, that placebo holds W1, W2, W3 (gain 5, needs 3; three axes rise; worst −1), W6 and, by its geometry, W4. **W5 alone refuses it.** So W3's bar sits inside what a pair with no learning earns: `-next-4`'s +4 and rung 4's +2 are not told apart from it on this reading, and `-next-3`'s +13 stands above it.
+- A second dose, `placebo-n4` at 6 (widest gap 0.6 on line 21, as `-next-4` at 2 reads): with the prompt 115/132, 4 of 40 answers differ, and it loses `affirm-consent`, the very predicate `-next-4` lost; without it 61/132, 10 of 40 differ, gained 1, lost 1. The judge: accepted 2.7793647251159808, margin +0.0005.
+- So two pairs with no learning read 115–116 with the prompt and 61–66 without it. `-next-4` (115, 65) reads inside that band on both arms; rung 4's child (114, 63) just below it and inside it; `-next-3` (112, 74) below it and above it. Two pairs at two doses: the band is thinly read, and the widest gap is one measure of dose (the children change more answers than the placebos at the same gap).
+- W2 can be met (22 answers changed, nothing lost) and can be tripped by what no learning does (4 answers changed, one predicate lost). I came suspecting that a prompt revised on set 2 until it read 61/61 made any change a loss: half of that stands. A floor at −1 reads noise here; −4 does not.
+- What this says of the flip row: the −1 and the +4 offered above for weighing both sit inside what no learning reads. The decoded arms give no reason to wear `-next-4`; its evidence is W5 alone, about one standard error.
+
+The rule stays as it was named and the decisions stand. The next reading inherits one more arm: the permuted pair at the child's dose, and a gain or a loss counts past it.
+
+**Repaired or corrected here.** "The first positive margin" (rung 4's child reads +0.0015 on the same 8 lines); "every forward by construction" (the speculative blocks carry no hook); W6 read one side of "within 10%" and now reads both, band fixture beside it; the registry row's `adapter_sha256` went unread and a row with no adapter crashed the door, and now both refuse by name, band fixtures beside them.
+
+**The room, read again.** Two sessions on purpose for 3 minutes 43 seconds (`contend-memory.log`): each read 0.8–0.9 s an id, where one alone reads 0.25–0.28 on the same arm; the compressor swung between 10 and 68.3 GiB while wired fell as low as 5.0 GiB, and the governor's line read `room` at every sample; it stood at 5.7 GiB at the next sample after the second session ended. Available read 73.8 GiB idle, about 45 with one session, about 17 with two: each session costs about 28 GiB of what the governor calls available, while its lease counts 27 of them as shared. Observed; the cause remains unread.

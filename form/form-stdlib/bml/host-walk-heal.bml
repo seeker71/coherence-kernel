@@ -1,0 +1,82 @@
+// host-walk-heal.bml — what stands in a path: a put that stands whole, and the return of a publish whose restore never ran.
+//
+// A candidate or a checkpoint stands whole or not at all: its bytes are written beside the path under this process's own
+// stage name, then renamed over it, so a floor reading the path meets the old bytes or the new, never a truncation
+// (write_file opens with O_TRUNC, and a floor reading mid-write stopped once on "BML contract source incomplete"). A
+// path that stands keeps its permission bits, and a symlink stays one: the stage goes beside what it names.
+// hw-put answers "" when the path stands as asked, else the refusal by name; no stage is left behind a refusal.
+//
+// A marker (host-walk-publish.bml) whose publisher no longer holds is a publish whose restore never ran, and it heals at the next
+// start (hw-heal-publishes). A marker naming this very process holds while its stamp falls inside this process's life: a window of
+// this process may stand open around the reader (a band under a candidate runs the door, and the door heals as it starts), so its
+// candidate stays. A stamp older than this process is a pid the host gave again, and it heals. A cell stopped on its deadline runs
+// no defer, so its window's marker and candidate stand; once that cell has returned no window of it is open, and its caller says so:
+// hw-heal-returned(dir, standing) heals each marker of this process that did not stand when the cell began (hw-own-markers, read
+// before it). A marker that stood then is an outer window's, or a restore that did not hold, and stays.
+// Each path is read: its checkpoint bytes need nothing, the publish's own bytes return to the checkpoint, any other bytes are a later
+// writer's and stay, and so does the marker. A marker that does not read was never read back, so no publish followed it, and it goes.
+// A stage the killed publish left beside a path goes too: only that pid's hw-put wrote it. A heal answers [markers cleared, conflicts].
+// What it needs: host-walk-text.bml (hw-starts?, hw-ends?, hw-row-int) and host-walk-lock.bml (hw-holds?).
+import form-stdlib/bml/host-walk-text.bml;
+import form-stdlib/bml/host-walk-lock.bml;
+section [form.bml] {
+ class HostWalkHeal {
+  def hw-turn-dir() = ".hearth/native-turns";
+  def hw-node-text(n) = node_eq(n, json-node-null()) ? nothing() : json-string-value(n);
+  def hw-same?(a, b) = nothing?(a) ? nothing?(b) : (!nothing?(b) && ((String) a == b));
+  def hw-all-same?(paths, texts) = nil?(paths) ? nil?(texts) : (!nil?(texts) && hw-same?(read_file(paths[0]), texts[0]) && hw-all-same?(paths[1:], texts[1:]));
+  def hw-put-why(path, what) = "put-refused: " ++ path ++ ": " ++ what;
+  def hw-stage-of(target, pid) = target ++ ".hw-" ++ pid.str();
+  def hw-put(path, text) = nothing?(text) ? hw-unput(path) : hw-stand(path, text);
+  def hw-unput(path) = (Comparable) host_path_remove(path) == 0 || nothing?(host_realpath(path)) ? "" : hw-put-why(path, "the host refused its removal");
+  def hw-stand(path, text) {
+   let real = host_realpath(path);
+   let stands = (String) value_kind(real) == "string";
+   let target = stands ? real : path;
+   let stage = hw-stage-of(target, host_pid());
+   let whole = (Comparable) write_file_text(stage, text) == len(text);
+   let modes = whole && stands ? host_chmod(stage, host_file_mode(target) % 4096) : 0;
+   let moved = whole ? host_path_rename(stage, target) : (0 - 1);
+   (Comparable) moved == 0 ? "" : hw-stage-refused(path, stage, whole);
+  }
+  def hw-stage-refused(path, stage, whole) {
+   let gone = host_path_remove(stage);
+   hw-put-why(path, whole ? "the host refused the rename from " ++ stage : "its stage " ++ stage ++ " did not write whole");
+  }
+  // the first refusal of a list of puts, "" when every path stands as asked; nothing after a refusal is written
+  def hw-put-all(paths, texts) = nil?(paths) ? "" : hw-put-next(hw-put(paths[0], texts[0]), paths, texts);
+  def hw-put-next(put, paths, texts) = (String) put != "" ? put : hw-put-all(paths[1:], texts[1:]);
+  // the marker names this process holds in a directory
+  def hw-own-markers(dir) = filter(name => hw-starts?(name, "publish-" ++ host_pid().str() ++ ".") && hw-ends?(name, ".marker"), fs_list(dir) ?? []);
+  def hw-heal-publishes(dir) = (Comparable) host_path_is_dir(dir) != 1 ? [0, []] : foldl((acc, name) => hw-heal-add(acc, hw-heal-name(dir, name)), [0, []], fs_list(dir) ?? []);
+  def hw-heal-add(acc, one) = [acc[0] + one[0], append(acc[1], one[1])];
+  def hw-heal-name(dir, name) = hw-starts?(name, "publish-") && hw-ends?(name, ".marker") ? hw-heal-marker(dir ++ "/" ++ name, read_file(dir ++ "/" ++ name) ?? "") : [0, []];
+  def hw-heal-marker(path, text) = try hw-heal-row(path, parse-json("publish-marker", text)) else hw-heal-unread(path);
+  def hw-heal-unread(path) = (Comparable) host_path_remove(path) == 0 ? [1, []] : [0, ["heal-conflict: " ++ path ++ " does not read and could not be removed"]];
+  def hw-heal-texts(row, key) = json-array-elements(json-object-get(row, key)) |> map(n => hw-node-text(n));
+  def hw-heal-live?(row) = hw-holds?(hw-row-int(row, "pid"), hw-row-int(row, "at"));
+  def hw-heal-row(path, row) = hw-heal-live?(row) ? [0, []] : hw-heal-dead(path, row);
+  def hw-heal-dead(path, row) {
+   let swept = hw-heal-texts(row, "paths") |> map(p => host_path_remove(hw-stage-of(p, hw-row-int(row, "pid"))));
+   hw-heal-paths(path, hw-heal-texts(row, "paths"), hw-heal-texts(row, "before"), hw-heal-texts(row, "published"));
+  }
+  def hw-heal-paths(path, paths, before, own) {
+   let said = hw-heal-each(paths, before, own);
+   nil?(said) && ((Comparable) host_path_remove(path) == 0) ? [1, []] : [0, said];
+  }
+  def hw-heal-each(paths, before, own) = nil?(paths) ? [] : append(hw-heal-path(paths[0], before[0], own[0]), hw-heal-each(paths[1:], before[1:], own[1:]));
+  def hw-heal-path(path, before, own) {
+   let now = read_file(path);
+   hw-same?(now, before) ? [] : !hw-same?(now, own) ? ["heal-conflict: " ++ path ++ " holds bytes the killed publish did not write; they stay"] : hw-heal-put(path, before);
+  }
+  def hw-heal-put(path, before) {
+   let put = hw-put(path, before);
+   (String) put != "" ? ["heal-conflict: " ++ path ++ " did not return to its checkpoint: " ++ put] : hw-same?(read_file(path), before) ? [] : ["heal-conflict: " ++ path ++ " did not return to its checkpoint"];
+  }
+  def hw-heal-returned(dir, standing) = foldl((acc, name) => hw-heal-add(acc, any?(s => (String) s == name, standing) ? [0, []] : hw-heal-over(dir ++ "/" ++ name, read_file(dir ++ "/" ++ name) ?? "")), [0, []], hw-own-markers(dir));
+  def hw-heal-over(path, text) = try hw-heal-dead(path, parse-json("publish-marker", text)) else hw-heal-unread(path);
+  def hw-heal-line(healed) = (Comparable) healed[0] == 0 && nil?(healed[1]) ? "" : "[walk-heal] " ++ healed[0].str() ++ " killed publish(es) returned to their checkpoint" ++ (nil?(healed[1]) ? "" : "; " ++ hw-join(healed[1], "; "));
+  def hw-join(xs, sep) = nil?(xs) ? "" : nil?(xs[1:]) ? xs[0] : xs[0] ++ sep ++ hw-join(xs[1:], sep);
+  def hw-heal() = hw-heal-line(hw-heal-publishes(hw-turn-dir()));
+ }
+}

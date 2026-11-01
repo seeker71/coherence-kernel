@@ -7,8 +7,8 @@
 ; A neighbour band (one that reads the candidate's files) holds when it reads its full under the candidate, or reads
 ; under the candidate exactly what it read on the source: a queued contract waiting for its own gap is no regression.
 ;
-; Expected: 511
-; Verdict 511 when every claim lands:
+; Expected: 32767
+; Verdict 32767 when every claim lands:
 ;   1   a lane that says done while the band never ran under its candidate is not green
 ;   2   a band read full from below, neighbours holding, nothing refused: green
 ;   4   a band that ran under the candidate and read short is not green
@@ -19,6 +19,13 @@
 ;   128 a neighbour short of full that reads under the candidate what it read on the source holds
 ;   256 a neighbour the candidate moved off its source reading, or that printed no number, does not hold, and one such
 ;       neighbour among holding ones fails them all
+;   512 a neighbour run inside a candidate's window reads the candidate: a band that runs the door in this process, whose inner gap publishes and lands and whose
+;       inner band reads the outer candidate too, reads the candidate before and after that door, and a neighbour read after it reads it as well; the window restores
+;   1024 through the real door, the observed shape: a string where a JSON node belongs reads the band full, is refused by name (kind-moved), and the source stands
+;   2048 through the real door: a candidate outside the gap's manifest reads the band full and is refused by name (outside-manifest); one inside it lands
+;   4096 through the real door: a true single-value unwrapper lands green, with no refusal, and the row carries neighbor_readings
+;   8192 rung 0's neighbours: a neighbour the candidate moves off its source reading refuses it by name and the row's readings carry it; holding neighbours pass it
+;   16384 the readings over texts: kinds at a known position, at none, both ways; the moved definition; the manifest line; the syntax stage answers to neither
 ; preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml observe/native-turn-run.bml
 section [form.bml] {
@@ -31,10 +38,121 @@ section [form.bml] {
   def ntg-c-neighbor-full(ctx) = nt-neighbor-held?([7, 7, "a-band.bml", ""]) && nt-neighbors-hold([[7, 7, "a-band.bml", ""]]) == 1;
   def ntg-c-neighbor-waiting(ctx) = nt-neighbor-held?([6, 7, "a-band.bml", "", 6]) && nt-neighbors-hold([[7, 7, "a-band.bml", ""], [6, 7, "b-band.bml", "", 6]]) == 1;
   def ntg-c-neighbor-moved(ctx) = !nt-neighbor-held?([5, 7, "a-band.bml", "", 6]) && !nt-neighbor-held?([nothing(), 7, "a-band.bml", "", 6]) && !nt-neighbor-held?([6, 7, "a-band.bml", ""]) && nt-neighbors-hold([[7, 7, "a-band.bml", ""], [5, 7, "b-band.bml", "", 6]]) == 0;
+  // ── scratch gaps through the real door (cell_run, the native rung alone, no model) ──
+  def ntg-root(name) {
+   let dir = temp_dir() ++ "/ntg-band-" ++ host_pid().str() ++ "-" ++ name;
+   let made = fs_mkdir(dir);
+   dir;
+  }
+  def ntg-gap(id, goal, w, b, full) = json-node-object([fhn-s("id", id), fhn-s("goal", goal), json-node-pair("writable", json-node-array([json-node-string(w)])), fhn-s("band", b), fhn-n("full", full)]);
+  def ntg-opts(dir) = json-emit(json-node-object([fhn-s("queue", dir ++ "/q.jsonl"), fhn-s("ledger", dir ++ "/l.jsonl"), json-node-pair("ways", json-node-array([json-node-string("native")]))]));
+  def ntg-door(dir, row) {
+   let q = write_file_text(dir ++ "/q.jsonl", json-emit(row) ++ "\n");
+   let rec = cell_run("observe/native-turn-run.bml", 0, nothing(), [ntg-opts(dir)]);
+   nt-rows(dir ++ "/l.jsonl");
+  }
+  def ntg-refused(row) = map(n => json-string-value(n), json-array-elements(json-object-get(fcgp-obj(row, "native"), "refused")));
+  def ntg-band(w, full, body) = "; Verdict " ++ full.str() ++ "\nimport " ++ w ++ ";\nsection [form.bml] {\n class NtgBandZz {\n  def nbz-go() = " ++ body ++ ";\n }\n nbz-go();\n}\n";
+  def ntg-reader(w, under, elsewhere) = "; Verdict 1\nsection [form.bml] {\n class NtgReadZz {\n  def nrz-go() = ((String) (read_file(\"" ++ w ++ "\") ?? \"\") == \"the candidate\\n\") ? " ++ under.str() ++ " : " ++ elsewhere.str() ++ ";\n }\n nrz-go();\n}\n";
+  def ntg-wrap() = "section [form.bml] {\n class NtgIn {\n  def nin-neg(x) = 0 - x;\n  def nin-use() = nin-neg(2);\n  def nin-answer(n) = n;\n }\n 0;\n}\n";
+  // the band that runs the door: it reads the writable before and after, and says what it read
+  def ntg-door-band(w, inner) = "; Verdict 1\nsection [form.bml] {\n class NtgDoorZz {\n  def ndz-go() {\n   let before = read_file(\"" ++ w ++ "\") ?? \"\";\n   let rec = cell_run(\"observe/native-turn-run.bml\", 0, nothing(), [" ++ json-emit(json-node-string(ntg-opts(inner))) ++ "]);\n   let after = read_file(\"" ++ w ++ "\") ?? \"\";\n   let said = print_str(\"under-window before-door=[\" ++ before ++ \"] after-door=[\" ++ after ++ \"]\");\n   ((String) before == \"the candidate\\n\" && (String) after == \"the candidate\\n\") ? 1 : 0;\n  }\n }\n ndz-go();\n}\n";
+  def ntg-c-under-window(ctx) {
+   let dir = ntg-root("under");
+   let inner = ntg-root("under-inner");
+   let w = dir ++ "/w.txt";
+   let iw = inner ++ "/iw.bml";
+   let ib = inner ++ "/ib.bml";
+   let db = dir ++ "/door-band.bml";
+   let nb = dir ++ "/after-band.bml";
+   let w1 = write_file_text(w, "the checkpoint\n");
+   let w2 = write_file_text(iw, ntg-wrap());
+   let w3 = write_file_text(ib, ntg-band(iw, 3, "((String) (read_file(\"" ++ w ++ "\") ?? \"\") == \"the candidate\\n\") ? (0 - nin-answer(3)) : 0"));
+   let w4 = write_file_text(inner ++ "/q.jsonl", json-emit(ntg-gap("ntg-inner", "read three", iw, ib, 3)) ++ "\n");
+   let w5 = write_file_text(db, ntg-door-band(w, inner));
+   let w6 = write_file_text(nb, ntg-reader(w, 1, 0));
+   let window = hw-with-published(nt-dir(), [w], ["the checkpoint\n"], ["the candidate\n"], () => nt-read-neighbors([[db, 1], [nb, 1]], 0));
+   let rows = nt-rows(inner ++ "/l.jsonl");
+   let landed = read_file(iw) ?? "";
+   let back = read_file(w) ?? "";
+   let swept = fs_rmdir(dir) + fs_rmdir(inner);
+   !nothing?(window[0]) && (Comparable) len(window[0]) == 2 && all?(r => fctrt-held?(r), window[0]) && window[1] && (String) window[2] == "" && (String) back == "the checkpoint\n" && (Comparable) len(rows) == 1 && (Comparable) (fcgp-num(rows[0], "band_green") ?? 0) == 1 && str_find(landed, "def nin-answer(n) = nin-neg(n);", 0) >= 0;
+  }
+  def ntg-c-kind(ctx) {
+   let dir = ntg-root("kind");
+   let w = dir ++ "/w.bml";
+   let b = dir ++ "/b.bml";
+   let source = "import form-stdlib/json.fk;\nsection [form.bml] {\n class NtgQn {\n  def qn-node(held) = json-node-object([json-node-pair(\"answer\", json-node-string(held[0])), json-node-pair(\"context\", json-node-string(held[1]))]);\n }\n 0;\n}\n";
+   let w1 = write_file_text(w, source);
+   let w2 = write_file_text(b, ntg-band(w, 1, "((String) value_kind(node_children(node_children(qn-node([\"a\", \"b\"]))[1])[1]) == \"string\") ? 1 : 0"));
+   let rows = ntg-door(dir, ntg-gap("ntg-kind", "read one", w, b, 1));
+   let after = read_file(w) ?? "";
+   let swept = fs_rmdir(dir);
+   (Comparable) len(rows) == 1 && (Comparable) (fcgp-num(rows[0], "band_green") ?? 1) == 0 && (String) fcgp-str(rows[0], "lane_status") == "exhausted" && (Comparable) (fcgp-num(rows[0], "published") ?? 1) == 0 && (Comparable) len(ntg-refused(rows[0])) == 1 && str_find(ntg-refused(rows[0])[0], "green-refused: kind-moved: removing json-node-string leaves string where node stood", 0) == 0 && str_find(fcgp-str(rows[0], "lane_reason"), "green-refused: kind-moved", 0) == 0 && (String) after == source;
+  }
+  def ntg-mn() = "section [form.bml] {\n class NtgMn {\n  def mn-neg(x) = 0 - x;\n  def mn-use() = mn-neg(2);\n  def mn-wanted(n) = n;\n  def mn-other(n) = n;\n }\n 0;\n}\n";
+  def ntg-manifest-door(name, body) {
+   let dir = ntg-root(name);
+   let w = dir ++ "/w.bml";
+   let b = dir ++ "/b.bml";
+   let w1 = write_file_text(w, ntg-mn());
+   let w2 = write_file_text(b, ntg-band(w, 3, body));
+   let rows = ntg-door(dir, ntg-gap("ntg-" ++ name, "read three\nDefinition manifest: mn-wanted", w, b, 3));
+   let after = read_file(w) ?? "";
+   let swept = fs_rmdir(dir);
+   [rows, after];
+  }
+  def ntg-c-manifest(ctx) {
+   let outside = ntg-manifest-door("outside", "0 - mn-other(3)");
+   let inside = ntg-manifest-door("inside", "0 - mn-wanted(3)");
+   let o = outside[0];
+   let i = inside[0];
+   (Comparable) len(o) == 1 && (Comparable) (fcgp-num(o[0], "band_green") ?? 1) == 0 && (Comparable) len(ntg-refused(o[0])) == 1 && str_find(ntg-refused(o[0])[0], "green-refused: outside-manifest: the edit moves mn-other; the gap came to move mn-wanted", 0) == 0 && (String) outside[1] == ntg-mn() && (Comparable) len(i) == 1 && (Comparable) (fcgp-num(i[0], "band_green") ?? 0) == 1 && nil?(ntg-refused(i[0])) && str_find(inside[1], "def mn-wanted(n) = mn-neg(n);", 0) >= 0;
+  }
+  def ntg-c-true-unwrap(ctx) {
+   let dir = ntg-root("unwrap");
+   let w = dir ++ "/w.bml";
+   let b = dir ++ "/b.bml";
+   let w1 = write_file_text(w, "section [form.bml] {\n class NtgTr {\n  def tr-neg(x) = 0 - x;\n  def tr-answer() = tr-neg(2);\n }\n 0;\n}\n");
+   let w2 = write_file_text(b, ntg-band(w, 2, "tr-answer()"));
+   let rows = ntg-door(dir, ntg-gap("ntg-unwrap", "read two", w, b, 2));
+   let after = read_file(w) ?? "";
+   let swept = fs_rmdir(dir);
+   (Comparable) len(rows) == 1 && (Comparable) (fcgp-num(rows[0], "band_green") ?? 0) == 1 && (String) fcgp-str(rows[0], "lane_reason") == "single-value-unwrapper" && nil?(ntg-refused(rows[0])) && json-object-has?(rows[0], "neighbor_readings") && str_find(after, "def tr-answer() = 2;", 0) >= 0;
+  }
+  def ntg-c-neighbors(ctx) {
+   let dir = ntg-root("neighbors");
+   let w = dir ++ "/w.txt";
+   let b = dir ++ "/b.bml";
+   let moved = dir ++ "/moved.bml";
+   let holds = dir ++ "/holds.bml";
+   let w1 = write_file_text(w, "the checkpoint\n");
+   let w2 = write_file_text(b, ntg-reader(w, 1, 0));
+   let w3 = write_file_text(moved, ntg-reader(w, 0, 1));
+   let w4 = write_file_text(holds, ntg-reader(w, 1, 0));
+   let seen = record_new(0, "neighbors", [], "refused", []);
+   let c = [ntg-gap("ntg-n", "read one", w, b, 1), [w], ["the checkpoint\n"], json-node-object([]), b, 1, seen, ["the checkpoint\n"]];
+   let refused = nt-native-neighbors(c, ["the candidate\n"], [[holds, 1], [moved, 1]]);
+   let kept = record_get(seen, "neighbors");
+   let held = nt-native-neighbors([c[0], c[1], c[2], c[3], c[4], c[5], record_new(0, "neighbors", [], "refused", []), c[7]], ["the candidate\n"], [[holds, 1]]);
+   let back = read_file(w) ?? "";
+   let swept = fs_rmdir(dir);
+   (Comparable) refused[0] == 0 && str_find(refused[1], "green-refused: neighbor-moved: ", 0) == 0 && str_find(refused[1], "moved.bml read 0 of 1", 0) > 0 && (Comparable) len(kept) == 2 && (Comparable) len(kept[1]) == 5 && (Comparable) kept[1][4] == 1 && (Comparable) len(record_get(seen, "refused")) == 1 && (Comparable) held[0] == 1 && (String) back == "the checkpoint\n";
+  }
+  def ntg-swap(text, old, new) {
+   let at = str_find(text, old, 0);
+   substring(text, 0, at) ++ new ++ substring(text, at + len(old), len(text));
+  }
+  def ntg-kinds() = "section [form.bml] {\n class NtgK {\n  def k-a(held) = json-node-pair(\"c\", json-node-string(held[4]));\n  def k-b(s) = json-node-string(json-node-string(s));\n  def k-c(n) = fhn-s(\"k\", json-string-value(n));\n  def k-d(x) = trim(x);\n  def k-e(c, a, b) = json-node-pair(\"c\", if c then a else b);\n  def k-f(s) = json-node-string(s);\n  def k-g(xs) = json-node-array([json-node-string(xs[0])]);\n  def k-h(s) = json-node-pair(\"c\", k-f(s));\n }\n 0;\n}\n";
+  def ntg-why(old, new) = fbvs-kind-why(ntg-kinds(), ntg-swap(ntg-kinds(), old, new));
+  def ntg-c-readings(ctx) {
+   let t = ntg-kinds();
+   (String) ntg-why("json-node-string(held[4])", "held[4]") == "kind-moved: removing json-node-string leaves string where node stood" && (String) ntg-why("json-node-string(json-node-string(s))", "json-node-string(s)") == "" && (String) ntg-why("json-string-value(n)", "n") == "kind-moved: removing json-string-value leaves node where string stood" && (String) ntg-why("trim(x)", "x") == "" && (String) ntg-why("\"c\", k-f(s)", "\"c\", s") == "kind-unread: removing k-f leaves no kind the body can read where node stood" && (String) ntg-why("then a else", "then k-f(a) else") == "kind-unread: wrapping in k-f leaves no kind the body can read where node stood" && (String) ntg-why("then a else", "then json-string-value(a) else") == "kind-moved: wrapping in json-string-value leaves string where node stood" && (String) ntg-why("then a else", "then json-node-string(a) else") == "" && (String) ntg-why("= json-node-string(s);\n  def k-g", "= s;\n  def k-g") == "kind-moved: removing json-node-string leaves string where node stood" && (String) ntg-why("[json-node-string(xs[0])]", "[xs[0]]") == "kind-moved: removing json-node-string leaves string where node stood" && (String) fbvs-moved-def(t, ntg-swap(t, "trim(x)", "x")) == "k-d" && (Value) ntl-manifest-of("x\nDefinition manifest: a, b\nmore") == ["a", "b"] && nil?(ntl-manifest-of("x")) && str_find(ntl-green-why(["k-a"], t, ntg-swap(t, "trim(x)", "x")), "outside-manifest: the edit moves k-d; the gap came to move k-a", 0) == 0 && (String) ntl-green-why(["k-d"], t, ntg-swap(t, "trim(x)", "x")) == "" && (String) ntl-green-why([], t, ntg-swap(t, "trim(x)", "x")) == "" && (String) ntl-green-why(["k-a"], t, t) == "";
+  }
   def ntg-c-door(ctx) {
    let src = read_file("observe/native-turn-run.bml") ?? "";
    str_find(src, "let green = nt-option-green(refused, ran, after, before, full, neighbors);", 0) >= 0 && str_find(src, "if (published > 0) then hw-with-published(", 0) >= 0 && str_find(src, "if done then (claim[0] == 1)", 0) < 0;
   }
  }
- live-claims("native-turn-green-band", 0, [["done-unread", 1, 1, ntg-c-done-unread], ["full", 2, 1, ntg-c-full], ["short", 4, 1, ntg-c-short], ["refused", 8, 1, ntg-c-refused], ["already", 16, 1, ntg-c-already], ["door", 32, 1, ntg-c-door], ["neighbor-full", 64, 1, ntg-c-neighbor-full], ["neighbor-waiting", 128, 1, ntg-c-neighbor-waiting], ["neighbor-moved", 256, 1, ntg-c-neighbor-moved]]);
+ live-claims("native-turn-green-band", 0, [["done-unread", 1, 1, ntg-c-done-unread], ["full", 2, 1, ntg-c-full], ["short", 4, 1, ntg-c-short], ["refused", 8, 1, ntg-c-refused], ["already", 16, 1, ntg-c-already], ["door", 32, 1, ntg-c-door], ["neighbor-full", 64, 1, ntg-c-neighbor-full], ["neighbor-waiting", 128, 1, ntg-c-neighbor-waiting], ["neighbor-moved", 256, 1, ntg-c-neighbor-moved], ["under-window", 512, 1, ntg-c-under-window], ["kind", 1024, 1, ntg-c-kind], ["manifest", 2048, 1, ntg-c-manifest], ["true-unwrap", 4096, 1, ntg-c-true-unwrap], ["neighbors", 8192, 1, ntg-c-neighbors], ["readings", 16384, 1, ntg-c-readings]]);
 }

@@ -1,0 +1,128 @@
+// qwen-last-block-margin-band.bml — the discriminating objective's gradient, held by finite differences across the width (observe/qwen-last-block-train-run.bml).
+//
+// Rung 3 sampled B where |dB| was largest in 4 windows of the flat array, and all four landed in column 505: the head's gradient at the zero pair crowds one column. This band
+// reads at a pair that has learned (the child at form/form-stdlib/adapters/qwen38-last-block-next, B != 0, so dA != 0 too), in windows of columns, so the entries sit across the width:
+//   1   the rows: one accepted row and one rejected row, each with a cached capture and supervised targets; the pair loads whole
+//   2   the descent's side: on the accepted row, dB at 8 column windows against the central difference of the row's mean CE; at least 6 distinct columns; max relative error within the
+//       measured bound (qlmb-b-bound)
+//   4   the margin's side: on the rejected row, the backward with factor -1/count: dB at 8 column windows against the central difference of -mean CE; same bound
+//   8   A on both sides: dA at 4 windows against the central difference; max relative error within the measured bound (qlmb-a-bound)
+//  16   a step of each side moves its row the way it says: the accepted step lowers its row's mean, the margin's step raises its row's mean; the pair is restored; every handle freed
+// Verdict 31. It needs the 27 GiB file, a Metal device and the rung-3/4 captures; it takes the memory lease first and holds nothing when the governor says held.
+// REQUIRES: a live Metal device, /Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf, .hearth/qwen-rung-3, .hearth/qwen-rung-4/rejected, form/form-stdlib/adapters/qwen38-last-block-next
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-capture.bml form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml form-stdlib/bml/qwen-last-block-train.bml form-stdlib/bml/qwen-last-block-judge.bml
+section [form.bml] {
+ class QwenLastBlockMarginBand {
+  def qlmb-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qlmb-adapter() = "form/form-stdlib/adapters/qwen38-last-block-next";
+  def qlmb-cap() = 160;
+  def qlmb-maxpos() = 256;
+  def qlmb-span() = 64;
+  def qlmb-rank() = 8;
+  def qlmb-eps-b() = 0.25;
+  def qlmb-eps-a() = 0.25;
+  def qlmb-lr() = 0.0001;
+  // the bounds: the first run's readings (.hearth/voice-wears-its-lesson/margin-band-run-1.log), pinned: the f32 floor of a mean CE through 248,320 logits, at eps 2^-2
+  def qlmb-b-bound() = 0.0007799643702312231;
+  def qlmb-a-bound() = 0.0005884065268075717;
+  def qlmb-say(s) = print_str("[qwen-last-block-margin-band] " ++ s);
+  def qlmb-max(xs) = foldl((m, x) => x > m ? x : m, 0.0, xs);
+  def qlmb-num(x) = nothing?(x) ? "null" : x.str();
+  def qlmb-uniq(xs) = foldl((acc, x) => any?(y => (Comparable) y == x, acc) ? acc : append(acc, [x]), [], xs);
+  def qlmb-entry-text(kind, i, cols, e) = kind ++ "[" ++ (i / cols).str() ++ "," ++ (i % cols).str() ++ "]: analytic " ++ e[0].str() ++ ", finite difference " ++ qlmb-num(e[1]) ++ ", relative error " ++ e[2].str() ++ " (perturbation " ++ e[3].str() ++ ", loss+ " ++ qlmb-num(e[4]) ++ ", loss- " ++ qlmb-num(e[5]) ++ ")";
+  // one side: forward, backward with the factor, the column windows of dB and the windows of dA, each entry against the difference of sign x mean CE: [max rel dB, columns, max rel dA]
+  def qlmb-side(ctx, L, sx, o, name, row, xin, factor, sign) {
+   let geo = ctx[2];
+   let ps = ctx[0];
+   let lay = nth(ctx[3], L);
+   let d = geo[0];
+   let ff = geo[10];
+   let r = qlmb-rank();
+   let rec = record_get(o, "rec");
+   let losses = qlbt-eval(ps, geo, lay, ctx[5], ctx[6], sx, o, row, xin);
+   let bw = qlbt-backward-by(geo, sx, o, ctx[5], ctx[6], qlbt-row-n(row), factor);
+   let health = qlbt-grad-health(o);
+   qlmb-say(name ++ " line " ++ row[0].str() ++ ": mean " ++ qlmb-num(qlbt-mean(losses, qlbt-row-count(row))) ++ ", " ++ qlbt-row-count(row).str() ++ " supervised; non-finite " ++ health[0].str() ++ ", |grad| " ++ math_sqrt(health[1]).str());
+   let rawB = metal_buf_read(record_get(o, "dB"), 0, r * d * 4);
+   let picksB = qlbt-pick-columns(rawB, r, d, 8);
+   let rawA = metal_buf_read(record_get(o, "dA"), 0, ff * r * 4);
+   let picksA = qlbt-pick-columns(rawA, ff, r, 4);
+   let fdB = map(i => qlbt-fd-at(ps, geo, lay, ctx[5], ctx[6], sx, o, row, xin, rec[4], record_get(o, "dB"), i, qlmb-eps-b(), sign), picksB);
+   let saidB = map(k => qlmb-say(name ++ " " ++ qlmb-entry-text("dB", nth(picksB, k), d, nth(fdB, k))), range(0, len(picksB)));
+   let fdA = map(i => qlbt-fd-at(ps, geo, lay, ctx[5], ctx[6], sx, o, row, xin, rec[3], record_get(o, "dA"), i, qlmb-eps-a(), sign), picksA);
+   let saidA = map(k => qlmb-say(name ++ " " ++ qlmb-entry-text("dA", nth(picksA, k), r, nth(fdA, k))), range(0, len(picksA)));
+   let cols = qlmb-uniq(map(i => i % d, picksB));
+   let relB = qlmb-max(map(e => e[2], fdB));
+   let relA = qlmb-max(map(e => e[2], fdA));
+   qlmb-say(name ++ ": max relative error dB " ++ relB.str() ++ " over " ++ len(cols).str() ++ " columns " ++ cols.str() ++ ", dA " ++ relA.str());
+   [relB, len(cols), relA];
+  }
+  // one step of a side on the record's pair, its row's mean before and after, the pair put back from the file
+  def qlmb-step(ctx, L, sx, o, row, xin, factor) {
+   let geo = ctx[2];
+   let ps = ctx[0];
+   let lay = nth(ctx[3], L);
+   let m0 = qlbt-mean(qlbt-eval(ps, geo, lay, ctx[5], ctx[6], sx, o, row, xin), qlbt-row-count(row));
+   let bw = qlbt-backward-by(geo, sx, o, ctx[5], ctx[6], qlbt-row-n(row), factor);
+   let g = qlbt-step(o, qlmb-lr(), 1);
+   let m1 = qlbt-mean(qlbt-eval(ps, geo, lay, ctx[5], ctx[6], sx, o, row, xin), qlbt-row-count(row));
+   let back = qlbj-load(o, qlmb-adapter(), L);
+   [m0, m1, back];
+  }
+  def qlmb-run-all(ctx, src, x) {
+   let geo = ctx[2];
+   let L = qlbj-last-block(geo);
+   let d = geo[0];
+   let accLines = qlbj-at(qlbj-lines("learn/draft-readings.jsonl"), [1]);
+   let negLines = qlbj-at(qlbj-lines("learn/draft-readings-heldout.jsonl"), [1]);
+   let accRow = qlbj-row-of(src, x, accLines[0], qlmb-cap());
+   let negRow = qlbj-row-of(src, x, negLines[0], qlmb-cap());
+   let accX = qlbj-cached(".hearth/qwen-rung-3", accRow, d);
+   let negX = qlbj-cached(".hearth/qwen-rung-4/rejected", negRow, d);
+   let o = qlbt-open(geo, nth(ctx[3], L), ctx[5], qlmb-cap(), qlmb-rank(), 2.0);
+   let sx = qlbf-scratch(geo, 0, qlmb-cap());
+   let z1 = nam-zero(record_get(o, "mA"), geo[10] * qlmb-rank());
+   let z2 = nam-zero(record_get(o, "vA"), geo[10] * qlmb-rank());
+   let z3 = nam-zero(record_get(o, "mB"), qlmb-rank() * d);
+   let z4 = nam-zero(record_get(o, "vB"), qlmb-rank() * d);
+   let settled = nam-sync();
+   let loaded = qlbj-load(o, qlmb-adapter(), L);
+   let b1 = len(accX) > 0 && len(negX) > 0 && loaded == 1 && qlbt-row-count(accRow) > 0 && qlbt-row-count(negRow) > 0 ? 1 : 0;
+   qlmb-say("rows: accepted line " ++ accRow[0].str() ++ " (" ++ len(accX).str() ++ " bytes), rejected line " ++ negRow[0].str() ++ " (" ++ len(negX).str() ++ " bytes); pair loaded " ++ loaded.str() ++ "; gpu utilization " ++ host_gpu_utilization().str());
+   b1 == 0 ? {
+    let freed0 = qlbf-free(sx) + qlbt-free(o);
+    0;
+   } : {
+    let acc = qlmb-side(ctx, L, sx, o, "descent", accRow, accX, 1.0 / (qlbt-row-count(accRow) + 0.0), 1.0);
+    let neg = qlmb-side(ctx, L, sx, o, "margin", negRow, negX, 0.0 - 1.0 / (qlbt-row-count(negRow) + 0.0), 0.0 - 1.0);
+    let b2 = acc[0] <= qlmb-b-bound() && acc[1] >= 6 ? 2 : 0;
+    let b4 = neg[0] <= qlmb-b-bound() && neg[1] >= 6 ? 4 : 0;
+    let b8 = acc[2] <= qlmb-a-bound() && neg[2] <= qlmb-a-bound() ? 8 : 0;
+    let sa = qlmb-step(ctx, L, sx, o, accRow, accX, 1.0 / (qlbt-row-count(accRow) + 0.0));
+    let sn = qlmb-step(ctx, L, sx, o, negRow, negX, 0.0 - 1.0 / (qlbt-row-count(negRow) + 0.0));
+    qlmb-say("one step: accepted mean " ++ qlmb-num(sa[0]) ++ " -> " ++ qlmb-num(sa[1]) ++ ", rejected mean " ++ qlmb-num(sn[0]) ++ " -> " ++ qlmb-num(sn[1]) ++ "; pair put back " ++ sa[2].str() ++ " " ++ sn[2].str());
+    let freed = qlbf-free(sx) + qlbt-free(o);
+    let b16 = sa[1] < sa[0] && sn[1] > sn[0] && sa[2] == 1 && sn[2] == 1 && freed == 17 + qlbt-handle-count() ? 16 : 0;
+    qlmb-say("bits " ++ b1.str() ++ " " ++ b2.str() ++ " " ++ b4.str() ++ " " ++ b8.str() ++ " " ++ b16.str() ++ "; freed " ++ freed.str());
+    b1 + b2 + b4 + b8 + b16;
+   };
+  }
+  def qlmb-run() {
+   let path = qlmb-file();
+   let src = fcmg-src(path);
+   let geo = q38-geo(src, qlmb-maxpos());
+   let own = fcms-qwen-own(src, qlmb-maxpos()) + qlbf-scratch-bytes(geo, 0, qlmb-cap()) + qlbt-own-bytes(geo, qlmb-cap(), qlmb-rank());
+   let granted = mg-lease("qwen last-block margin band", path, fcms-weights-bytes(path), own);
+   !mg-granted?(granted) ? { qlmb-say("held: " ++ granted[1]); 0; } : {
+    let x = qtf2-load(qtf2-root-for(path), qsx-seal-line(path));
+    let ctx = q38-open-span(path, qlmb-maxpos(), qlmb-span());
+    let verdict = (Comparable) q38-context-ok?(ctx) == 1 ? qlmb-run-all(ctx, src, x) : 0;
+    let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
+    let unleased = mg-release();
+    verdict;
+   };
+  }
+ }
+ qlmb-run();
+}

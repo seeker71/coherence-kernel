@@ -339,3 +339,13 @@ unwired. Wearing it in the voice is a separate, witnessed decision. That decisio
 weigh, neither taken here: a decoded comparison, and the preference margin (the accepted fall against
 the rejected one), which this rung read as thin. Detail: `docs/qwen-last-block-lora-design.md`, "Rung 4
 observed".
+
+## 2026-11-01 — the 27B wears what it trained, and hears it on seven axes
+
+Hook `q38-wear-recs` (`form/native/metal/qwen35-dense-token-handle.fk`), door `form/form-stdlib/bml/qwen-last-block-wear.bml`, request field `"adapter"` on the registry lane; no default names one. Band
+`qwen-last-block-wear-band` verdict 511: scale 0 reads bit-equal logits, token-wise and planned; the worn span forward is the judge's offline forward to the last bit on lines 21–25 (0 words differ, mean
+2.769699388331711 both ways); worn decode within 5% of bare (best over best 1.0029708853238266, then 0.996562589515898); 3 handles each way. Bare voice over the three sets: 209/225 with the role prompt, 116/225 without.
+Trainer `observe/qwen-last-block-train-run.bml` on 51 rows with a hinge on rejected rows (FD across 8 columns, `qwen-last-block-margin-band` verdict 31; 0.7 s a step with captures cached): `-next-4` at step 60 reads
+2.7794742570192787 → 2.7666746621771323, better 1, rejected never seen 2.0261226253697924 → 2.021038729386429, margin +0.0077 on those 8 rows (rung 4's child reads +0.0015 on the same 8 and −0.0042 on all 26). Decoded on sets 2 and 3 (132 predicates): no prompt 61 → 65
+(`-next-3`, more steps, teacher-heavy stop: 61 → 74), with the prompt 116 → 115 (`-next-3`: 112). The rule named before reading refuses all three by W2 and more: **hold; serving does not change.** Detail: `docs/qwen-last-block-lora-design.md`, "The voice wears its lesson".
+Read again the same day (`docs/qwen-last-block-lora-design.md`, "Read again by a skeptic"): fresh asks reproduce every arm read, byte for byte. The pair with its learning permuted out, at the child's dose, reads 116 with the prompt and 66 without it and is refused by W5 alone, so a no-prompt gain counts above that: `-next-3`'s +13 stands there, `-next-4`'s +4 does not, and 8 of the +13 are word bounds. At `-next-4`'s dose it reads 115 and 61, losing the very predicate `-next-4` lost, so `-next-4` reads inside what no learning reads on both arms.

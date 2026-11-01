@@ -37,10 +37,16 @@ section [form.bml] {
    let complete = (fcms-live?(session) && (fcms-stopped?(session) && fcms-pending?(session)));
    let status = if (!released) then "release-incomplete" else if (!fcms-live?(session)) then "unavailable" else if (!complete) then "incomplete" else if ((String) trim(raw) == "") then "empty" else "answered";
    let reason = if ((String) status == "unavailable") then fcms-reason(session) else status;
-   [status,if ((String) status == "answered") then raw else "",fcms-prompt-ids(session),len(fcms-generation-ids(generation)),path,complete,released,reason,raw,fcms-generation-ids(generation),""];
+   [status,if ((String) status == "answered") then raw else "",fcms-prompt-ids(session),len(fcms-generation-ids(generation)),path,complete,released,reason,raw,fcms-generation-ids(generation),qlwe-dir-of(fcms-ctx(session))];
   }
-  def fcnv-run(packet,path,context,limit) {
-   if ((!nothing?(context) && !((String) value_kind(context) == "int")) || (!((String) value_kind(limit) == "int"))) then fcnv-none("unavailable",path,"integer-context-and-token-allowance-required")
+  // wear: nothing, or the adapter a request names on this lane, [directory, scale or nothing (the config's)]: the session wears it on every forward
+  // (form-cli-model-session.fk, fcms-open-worn-by) and the result names it. A request that names none opens the door it always opened.
+  def fcnv-run(packet,path,context,limit) = fcnv-run-wearing(packet,path,context,limit,nothing());
+  def fcnv-run-wearing(packet,path,context,limit,wear) = fcnv-run-bounded(packet,path,context,limit,wear,nothing());
+  // budget: nothing is the open generation it always was; an integer ends the walk there, and the result reads incomplete with the raw text kept (a reading's own bound)
+  def fcnv-run-bounded(packet,path,context,limit,wear,budget) {
+   if (!nothing?(wear) && len(fcnv-wear-why(wear)) > 0) then fcnv-none("unavailable",path,"adapter-wear-refused: " ++ fcnv-wear-why(wear))
+   else if ((!nothing?(context) && !((String) value_kind(context) == "int")) || (!((String) value_kind(limit) == "int"))) then fcnv-none("unavailable",path,"integer-context-and-token-allowance-required")
    else if (!fcnv-allowance-valid(context,limit)) then fcnv-none("unavailable",path,"positive-progress-interval-and-initial-context-required")
    else if (((String) path == "") || (!mr-file?(path))) then fcnv-none("unavailable",path,"registry-model-artifact-absent")
    else {
@@ -50,14 +56,14 @@ section [form.bml] {
     // decode steps alone, with the admission wait and the open as their own spans.
     // This cursor walks one token at a time. Choose its plain owner at open so
     // admission and prefill never carry an unused drafter or its hidden states.
-    let session = fcnv-open-by(fcms-open-sized-by,packet,path,context);
+    let session = fcnv-open-by(nothing?(wear) ? fcms-open-sized-by : fcms-open-worn-by(wear),packet,path,context);
     let cursor = ftg-pulsing(ftg-intercept-with(512,ftg-next-reply()));
     record_set(cursor,"next-progress",limit);
     record_set(cursor,"observer",(stage,phase,c,generated) => fcnv-progress(cursor,limit,stage,phase,generated));
     // Decode is the generate call. The note is a stamp, not a peer line.
     // Prefill stamps are the session's own begin and ready.
     let _decode-begin = q38oo-note("voice-decode-begin", 0);
-    let generated = ftg-generate-with(cursor,session,nothing(),"voice");
+    let generated = ftg-generate-with(cursor,session,budget,"voice");
     let _decode-ready = q38oo-note("voice-decode-ready", 0);
     let ended = fcms-generation-session(generated);
     let released = fcms-release-ok?(ended);
@@ -158,9 +164,20 @@ section [form.bml] {
   def fcnv-ask-run(packet,request) {
    if ((String) fcnv-lane(request) == "lora") then fcnv-lora(packet,fcnv-adapter(request),fcnv-number(request,"max_reply_tokens",fcnv-limit())) else {
     let model = if json-object-has?(request,"model") then json-string-value(json-object-get(request,"model")) else fcnv-default-model();
-    fcnv-run(packet,mr-path(mr-find(model)),fcnv-number(request,"context",nothing()),fcnv-number(request,"max_reply_tokens",fcnv-limit()));
+    fcnv-run-bounded(packet,mr-path(mr-find(model)),fcnv-number(request,"context",nothing()),fcnv-number(request,"max_reply_tokens",fcnv-limit()),fcnv-wear(request,model),json-object-has?(request,"reply_budget") ? fcnv-number(request,"reply_budget",0) : nothing());
    };
   }
+  // the wear a registry-weights request names: "adapter" (a directory; "" is the bare lane named out loud), and "adapter_scale" when it reads a number (absent: the adapter config's
+  // scale). A request that names none reads the wear registry (learn/voice-wear-registry.jsonl, absent today: the bare lane, as it always was).
+  def fcnv-wear(request,model) = json-object-has?(request,"adapter") ? ((String) fcnv-adapter(request) == "" ? nothing() : [fcnv-adapter(request),qlbj-real(request,"adapter_scale")]) : fcnv-wear-registered(fcnv-wear-registry(),model);
+  def fcnv-wear-registry() = "learn/voice-wear-registry.jsonl";
+  // the registry's last row for this model decides: {"model":"qwen38-q8","adapter":"<dir>","adapter_sha256":"<hex>","wear":1}; wear 0 or no row is the bare lane. A row that says wear 1 carries the bytes
+  // its decision read: the wear is [directory, nothing, digest], and the run refuses by name a directory absent or unnamed, and one whose bytes read otherwise (fcnv-wear-why).
+  def fcnv-wear-registered(path,model) = file_size(path) < 1 ? nothing() : fcnv-wear-of(filter(row => (String) qlbj-str(row,"model") == model,fcnv-wear-rows(path)));
+  def fcnv-wear-rows(path) = filter(row => !nothing?(row),map(line => qlbj-json("voice-wear-row",line),split-on(read_file(path) ?? "","\n")));
+  def fcnv-wear-of(rows) = nil?(rows) ? nothing() : qlbj-is?(qlbj-int(rows[-1],"wear"),1) ? [qlbj-str(rows[-1],"adapter") ?? "",nothing(),qlbj-str(rows[-1],"adapter_sha256") ?? ""] : nothing();
+  def fcnv-wear-why(wear) = len(qlbj-present-why("worn",wear[0])) > 0 ? qlbj-present-why("worn",wear[0]) : len(wear) > 2 ? fcnv-wear-digest-why(wear[0],wear[2],hex-encode(sha256-stream-string(read_file(qlbj-st(wear[0])) ?? ""))) : "";
+  def fcnv-wear-digest-why(dir,want,read) = (String) want == read ? "" : "worn adapter " ++ qlbj-st(dir) ++ " reads sha256 " ++ read ++ "; the registry row witnessed \"" ++ want ++ "\"";
   def fcnv-metadata(result) = json-node-object([oh-s("source","fkwu-model-session"),oh-s("lane",if ((String) result[10] == "") then "registry-weights" else "native-metal-lora"),oh-s("adapter",result[10]),oh-s("status",result[0]),oh-s("model_path",result[4]),oh-n("prompt_ids",result[2]),oh-n("generated_ids",result[3]),oh-n("complete",result[5]),oh-n("release_ok",result[6]),oh-s("reason",result[7]),oh-n("model_server_calls",0),oh-n("provider_calls",0)]);
   def fcnv-retain(job,result) {
    let metadata = (job + "/native-generation.json");

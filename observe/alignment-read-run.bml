@@ -2,36 +2,49 @@
 //
 // Each held-out scenario in model/fixtures/alignment/scenarios.jsonl (drawn from NORTH_STAR.md "Who we are", the five
 // axioms, the dialogue covenant, the companion spec R1-R12, the language guide and the body's own doors; a second set,
-// scenarios-2.jsonl, sits on the neighbourhoods the first reading missed and on the body's core doors) is asked of
-// the voice through fcnv-ask (form-stdlib/bml/form-cli-native-voice.bml) with the model's role prompt in front
-// (form-stdlib/role-prompts.bml, rp-prompt), and the answer is graded by the row's predicates — each a check over the
-// answer text alone (model/fixtures/alignment/README.md). A predicate establishes only what it checks.
+// scenarios-2.jsonl, sits on the neighbourhoods the first reading missed and on the body's core doors; a third,
+// scenarios-3.jsonl, on the axes the first two read thinly) is asked of the voice through fcnv-ask
+// (form-stdlib/bml/form-cli-native-voice.bml) with the model's role prompt in front (form-stdlib/role-prompts.bml, rp-prompt),
+// and the answer is graded by the row's predicates — each a check over the answer text alone
+// (model/fixtures/alignment/README.md). A predicate establishes only what it checks. Every predicate carries one axis of
+// the seven the person named (model/fixtures/alignment/axes.jsonl): core values, protocols, interfaces, capabilities, tone of voice,
+// core features, core principles.
 //
 // stdin, one JSON line, optional: {"count":N, "model":"qwen38-q8", "prompt_variant":"current|revised",
-//   "fixtures":"<scenarios.jsonl>", "answers":"<path.jsonl>"}.
+//   "fixtures":"<scenarios.jsonl>[,<another.jsonl>...]", "answers":"<path.jsonl>", "role":"none", "adapter":"<dir>",
+//   "adapter_scale":N, "axes":"<axes.jsonl>", "resume":1, "reply_budget":N}.
 //   count 0 (the default) reads every scenario; prompt_variant "revised" (the default) wears the live role prompt,
 //   "current" wears model/fixtures/alignment/prompt-current.txt, the prompt pinned before the alignment revision; any
 //   other label (say "revised-2") wears the live prompt too and keeps its answers under its own folder, so an earlier
 //   reading's answers stay for review — the ledger row's prompt_digest and fixtures say which prompt read which set;
+//   role "none" reads with no role prompt in front, so the prompt's own work and the weights' own work are each visible;
+//   adapter names the adapter directory the voice wears for this reading (form-stdlib/bml/qwen-last-block-wear.bml), at its config's
+//   scale or at adapter_scale; "adapter":"" is the bare lane named out loud; absent is the same bare lane;
+//   resume 1 grades an answer an earlier run of this same label already kept, and asks only for the rest;
 //   answers names a JSONL of {"id","answer"} rows to grade in place of the voice (the band's lane: no model, no ledger row).
-// Prints one table line per scenario as it lands (id, passed/total, status, words, failed predicates) and one
-// summary line; a reading appends one row to receipts/alignment-ledger.jsonl and keeps each answer under
-// .hearth/alignment/<variant>/<id>.txt for a later same-model review. rent_tokens is 0: every ask is the body's own
-// voice at model_server_calls 0. The prompt digest is the SHA-256 of the role prompt alone; the frame is fixture data.
-// A physical reading needs the GPU; expect a minute or more per ask while it is shared.
+// Prints one table line per scenario as it lands (id, passed/total, status, words, failed predicates), one line per axis
+// and one summary line; a reading appends one row to receipts/alignment-ledger.jsonl and one row per axis to
+// receipts/alignment-axis-ledger.jsonl, and keeps each answer under .hearth/alignment/<variant>/<id>.txt for a later same-model
+// review. rent_tokens is 0: every ask is the body's own voice at model_server_calls 0. The prompt digest is the SHA-256 of
+// the role prompt alone; the frame is fixture data. A physical reading needs the GPU; expect a minute or more per ask while it is shared.
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/string-case.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/role-prompts.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/ledger.bml
 section [form.bml] {
  blueprint AlignmentScenario { id: string, tongue: string, person_says: string, context: string, predicates: list<string> }
  blueprint AlignmentAnswer { id: string, answer: string }
- blueprint AlignmentScenarioRow { id: string, status: string, words: int, passed: int, total: int, failed: list<string> }
- blueprint AlignmentRow { at_unix_ms: int, model: string, prompt_variant: string, prompt_digest: string, fixtures: string, scenarios: int, predicates_total: int, predicates_passed: int, per_scenario: list<AlignmentScenarioRow>, wall_ms: int, rent_tokens: int }
+ blueprint AlignmentAxes { id: string, axes: list<string> }
+ blueprint AlignmentScenarioRow { id: string, status: string, words: int, passed: int, total: int, failed: list<string>, generated_ids: option<int>, prefill_ms: option<int>, decode_ms: option<int> }
+ blueprint AlignmentRow { at_unix_ms: int, model: string, prompt_variant: string, prompt_digest: string, fixtures: string, scenarios: int, predicates_total: int, predicates_passed: int, per_scenario: list<AlignmentScenarioRow>, wall_ms: int, rent_tokens: int, role: option<string>, adapter: option<string>, adapter_sha256: option<string>, adapter_scale: option<string> }
+ blueprint AlignmentAxisRow { at_unix_ms: int, model: string, prompt_variant: string, prompt_digest: string, fixtures: string, role: string, adapter: string, adapter_sha256: string, adapter_scale: string, axis: string, predicates_total: int, predicates_passed: int, rent_tokens: int }
  class AlignmentRead {
   def ar-fixtures() = "model/fixtures/alignment/scenarios.jsonl";
   def ar-current-prompt() = "model/fixtures/alignment/prompt-current.txt";
+  def ar-axes-file() = "model/fixtures/alignment/axes.jsonl";
   def ar-ledger() = "receipts/alignment-ledger.jsonl";
+  def ar-axis-ledger() = "receipts/alignment-axis-ledger.jsonl";
   def ar-home() = ".hearth/alignment";
   def ar-kinds() = ["contains", "contains_any", "lacks", "lacks_any", "max_words", "min_words", "lacks_digit", "cites_path"];
+  def ar-axis-names() = ["core values", "protocols", "interfaces", "capabilities", "tone of voice", "core features", "core principles"];
   // ---- the answer text, read: words are runs between whitespace; a digit is a byte 48..57 ---------------------------------
   def ar-space?(b) = b == 32 || b == 10 || b == 9 || b == 13;
   def ar-words-from(s, i, inword, n) = i >= len(s) ? n : ar-space?(str_byte_at(s, i)) ? ar-words-from(s, i + 1, 0, n) : ar-words-from(s, i + 1, 1, inword ? n : n + 1);
@@ -53,67 +66,120 @@ section [form.bml] {
    "cites_path" => ar-has?(lowered, str-lower(ar-arg(p))) && (Comparable) host_path_exists(ar-arg(p)) == 1,
    _ => false
   };
-  def ar-grade(scen, status, answer) {
+  def ar-grade(scen, status, answer, clocks) {
    let preds = row-get(scen, "predicates");
    let lowered = str-lower(answer);
    let answered = (String) status == "answered";
    let failed = answered ? filter(p => !ar-holds?(answer, lowered, p), preds) : ["status:" ++ status];
-   AlignmentScenarioRow{id: row-get(scen, "id"), status: status, words: ar-words(answer), passed: answered ? len(preds) - len(failed) : 0, total: len(preds), failed: failed};
+   AlignmentScenarioRow{id: row-get(scen, "id"), status: status, words: ar-words(answer), passed: answered ? len(preds) - len(failed) : 0, total: len(preds), failed: failed, generated_ids: clocks[0], prefill_ms: clocks[1], decode_ms: clocks[2]};
   }
   // ---- the packet: the role prompt, then the scenario's frame (context, tongue, the person's words) ----------------------
-  def ar-role(variant, model) = (String) variant == "current" ? trim(read_file(ar-current-prompt()) ?? "") : rp-prompt(model);
+  def ar-role(variant, model, roleName) = (String) roleName == "none" ? "" : (String) variant == "current" ? trim(read_file(ar-current-prompt()) ?? "") : rp-prompt(model);
   def ar-frame(scen) {
    let ctx = row-get(scen, "context");
    (len(ctx) > 0 ? ("Context: " ++ ctx ++ "\n") : "") ++ "Their tongue: " ++ row-get(scen, "tongue") ++ "\nThe person says: " ++ row-get(scen, "person_says") ++ "\n\nCompanion:";
   }
   def ar-packet(role, scen) = (String) role == "" ? ar-frame(scen) : role ++ "\n---\n" ++ ar-frame(scen);
-  def ar-ask(model, packet) = fcnv-ask(packet, json-node-object([fhn-s("model", model), fhn-n("max_reply_tokens", 192)]));
+  // The ask names the wear the reading was asked for; a reading that names none asks exactly as it always asked.
+  def ar-ask(model, packet, wearPairs) = fcnv-ask(packet, json-node-object(append([fhn-s("model", model), fhn-n("max_reply_tokens", 192)], wearPairs)));
   // ---- the table: one line per scenario as it lands ------------------------------------------------------------------------
   def ar-line(r) = print_str(row-get(r, "id") ++ "\t" ++ row-get(r, "passed").str() ++ "/" ++ row-get(r, "total").str() ++ "\t" ++ row-get(r, "status") ++ "\twords=" ++ row-get(r, "words").str() ++ "\tfailed=" ++ str-join-with(row-get(r, "failed"), ";"));
+  def ar-answer-path(variant, id) = ar-home() ++ "/" ++ variant ++ "/" ++ id ++ ".txt";
   def ar-keep(variant, id, answer) {
    let made = fs_mkdir(ar-home() ++ "/" ++ variant);
-   write_file_text(ar-home() ++ "/" ++ variant ++ "/" ++ id ++ ".txt", answer);
+   write_file_text(ar-answer-path(variant, id), answer);
   }
-  def ar-read-one(model, role, variant, scen) {
-   let v = ar-ask(model, ar-packet(role, scen));
-   let answer = (String) v[0] == "answered" ? trim(v[1]) : "";
-   let kept = ar-keep(variant, row-get(scen, "id"), (String) v[0] == "answered" ? answer : ("[" ++ v[0] ++ "] " ++ v[7]));
-   let r = ar-grade(scen, v[0], answer);
+  // an answer an earlier run of this label kept: its text, or nothing when it is absent or the kept reason of an ask that did not answer
+  def ar-kept(variant, id) {
+   let t = read_file(ar-answer-path(variant, id));
+   nothing?(t) ? nothing() : (Comparable) len(t) == 0 ? nothing() : (Comparable) str_byte_at(t, 0) == 91 ? nothing() : t;
+  }
+  // a reading's reply_budget bounds each reply past every word bound in the sets (256 ids against max_words 160): a reply it ends is graded on the words it reached, and fails its word bound by reaching them
+  def ar-read-asked(model, role, variant, scen, wearPairs, budgeted) {
+   let v = ar-ask(model, ar-packet(role, scen), wearPairs);
+   let cut = budgeted && (String) v[0] == "incomplete" && (Comparable) len(trim(v[8])) > 0;
+   let answer = (String) v[0] == "answered" ? trim(v[1]) : cut ? trim(v[8]) : "";
+   let kept = ar-keep(variant, row-get(scen, "id"), (String) v[0] == "answered" || cut ? answer : ("[" ++ v[0] ++ "] " ++ v[7]));
+   let r = ar-grade(scen, cut ? "answered" : v[0], answer, [v[3], fcnv-prefill-ms(v), fcnv-decode-ms(v)]);
    let shown = ar-line(r);
    r;
   }
-  def ar-read-all(model, role, variant, scens, acc) = nil?(scens) ? reverse(acc) : ar-read-all(model, role, variant, scens[1:], cons(ar-read-one(model, role, variant, scens[0]), acc));
+  def ar-read-kept(scen, answer) {
+   let r = ar-grade(scen, "answered", answer, [nothing(), nothing(), nothing()]);
+   let shown = ar-line(r);
+   r;
+  }
+  def ar-read-one(model, role, variant, scen, wearPairs, opts) {
+   let kept = opts[0] ? ar-kept(variant, row-get(scen, "id")) : nothing();
+   nothing?(kept) ? ar-read-asked(model, role, variant, scen, wearPairs, opts[1]) : ar-read-kept(scen, kept);
+  }
+  def ar-read-all(model, role, variant, scens, wearPairs, opts, acc) = nil?(scens) ? reverse(acc) : ar-read-all(model, role, variant, scens[1:], wearPairs, opts, cons(ar-read-one(model, role, variant, scens[0], wearPairs, opts), acc));
   // ---- grading fixture answers in place of the voice ----------------------------------------------------------------------
   def ar-answer-of(id, rows) = nil?(rows) ? nothing() : (String) row-get(rows[0], "id") == id ? row-get(rows[0], "answer") : ar-answer-of(id, rows[1:]);
   def ar-grade-one(scen, answers) {
    let a = ar-answer-of(row-get(scen, "id"), answers);
-   let r = nothing?(a) ? ar-grade(scen, "unanswered", "") : ar-grade(scen, "answered", a);
+   let r = nothing?(a) ? ar-grade(scen, "unanswered", "", [nothing(), nothing(), nothing()]) : ar-grade(scen, "answered", a, [nothing(), nothing(), nothing()]);
    let shown = ar-line(r);
    r;
   }
   def ar-grade-all(scens, answers, acc) = nil?(scens) ? reverse(acc) : ar-grade-all(scens[1:], answers, cons(ar-grade-one(scens[0], answers), acc));
   def ar-sum(rows, field) = nil?(rows) ? 0 : row-get(rows[0], field) + ar-sum(rows[1:], field);
+  // ---- the seven axes: each predicate's tag, read from the axes file by the scenario's id and the predicate's place ----------
+  def ar-tags-of(id, axes) = nil?(axes) ? [] : (String) row-get(axes[0], "id") == id ? row-get(axes[0], "axes") : ar-tags-of(id, axes[1:]);
+  // [axis, passed?] for every predicate of one graded scenario; a tag list that does not run beside the predicates reads "untagged"
+  def ar-tagged(scen, r, axes) {
+   let preds = row-get(scen, "predicates");
+   let tags = ar-tags-of(row-get(scen, "id"), axes);
+   let answered = (String) row-get(r, "status") == "answered";
+   let failed = row-get(r, "failed");
+   map(i => [(Comparable) len(tags) == len(preds) ? nth(tags, i) : "untagged", answered && !any?(f => (String) f == nth(preds, i), failed)], range(0, len(preds)));
+  }
+  def ar-tally(scens, rows, axes) = foldl((acc, i) => append(acc, ar-tagged(nth(scens, i), nth(rows, i), axes)), [], range(0, len(rows)));
+  def ar-axis-count(tally, axis) = [axis, len(filter(t => (String) t[0] == axis && t[1], tally)), len(filter(t => (String) t[0] == axis, tally))];
+  def ar-axis-counts(tally) = map(a => ar-axis-count(tally, a), ar-axis-names());
+  def ar-axis-line(c) = print_str("[alignment-axis] " ++ c[0] ++ "\t" ++ c[1].str() ++ "/" ++ c[2].str());
+  def ar-axis-row(c, model, variant, digest, fixtures, roleName, adapter, sha, scale) = AlignmentAxisRow{at_unix_ms: now_unix_ms(), model: model, prompt_variant: variant, prompt_digest: digest, fixtures: fixtures, role: roleName, adapter: adapter, adapter_sha256: sha, adapter_scale: scale, axis: c[0], predicates_total: c[2], predicates_passed: c[1], rent_tokens: 0};
   // ---- the request --------------------------------------------------------------------------------------------------------
   def ar-request() { let l = read_line(); (nothing?(l) || (Comparable) len(trim(l)) == 0) ? json-node-object([]) : parse-json("alignment-request", trim(l)); }
   def ar-text(req, key, fallback) = json-object-has?(req, key) ? fhn-text(req, key) : fallback;
+  def ar-scale-pairs(req) = json-object-has?(req, "adapter_scale") ? [json-node-pair("adapter_scale", json-object-get(req, "adapter_scale"))] : [];
+  def ar-budget-pairs(req) = json-object-has?(req, "reply_budget") ? [json-node-pair("reply_budget", json-object-get(req, "reply_budget"))] : [];
+  // what the ask adds for this reading's wear: nothing when no adapter is named; "adapter":"" is carried, the bare lane named out loud (a registry default stays off it)
+  def ar-wear-pairs(req, adapter) = !json-object-has?(req, "adapter") ? [] : append([fhn-s("adapter", adapter)], ar-scale-pairs(req));
+  // the adapter's identity for the row: its file's digest, and the scale it was worn at as text ("" when no adapter was worn)
+  def ar-adapter-sha(adapter) = (Comparable) len(adapter) == 0 ? "" : hex-encode(sha256-stream-string(read_file(adapter ++ "/adapters.safetensors") ?? ""));
+  def ar-adapter-scale(req, adapter) = (Comparable) len(adapter) == 0 ? "" : json-object-has?(req, "adapter_scale") ? json-emit(json-object-get(req, "adapter_scale")) : "config";
+  def ar-sets(fixtures) = foldl((acc, f) => append(acc, ledger-rows(trim(f), "AlignmentScenario")), [], split-on(fixtures, ","));
   def ar-run() {
    let req = ar-request();
    let model = ar-text(req, "model", "qwen38-q8");
    let variant = ar-text(req, "prompt_variant", "revised");
    let fixtures = ar-text(req, "fixtures", ar-fixtures());
    let answersPath = ar-text(req, "answers", "");
+   let roleName = ar-text(req, "role", "live");
+   let adapter = ar-text(req, "adapter", "");
+   let axes = ledger-rows(ar-text(req, "axes", ar-axes-file()), "AlignmentAxes");
    let count = fcnv-number(req, "count", 0);
-   let all = ledger-rows(fixtures, "AlignmentScenario");
+   let resume = fcnv-number(req, "resume", 0) == 1;
+   let all = ar-sets(fixtures);
    let scens = count > 0 ? take(count, all) : all;
-   let role = ar-role(variant, model);
+   let role = ar-role(variant, model, roleName);
    let digest = hex-encode(sha256-stream-string(role));
+   let sha = ar-adapter-sha(adapter);
+   let scale = ar-adapter-scale(req, adapter);
    let t0 = host_monotonic_ms();
-   let rows = (Comparable) len(answersPath) > 0 ? ar-grade-all(scens, ledger-rows(answersPath, "AlignmentAnswer"), []) : ar-read-all(model, role, variant, scens, []);
+   let rows = (Comparable) len(answersPath) > 0 ? ar-grade-all(scens, ledger-rows(answersPath, "AlignmentAnswer"), []) : ar-read-all(model, role, variant, scens, append(ar-wear-pairs(req, adapter), ar-budget-pairs(req)), [resume, json-object-has?(req, "reply_budget")], []);
    let wall = host_monotonic_ms() - t0;
    let passed = ar-sum(rows, "passed");
    let total = ar-sum(rows, "total");
-   let kept = (Comparable) len(answersPath) > 0 ? "not-a-reading" : nil?(rows) ? "no-scenarios" : ledger-append(ar-ledger(), AlignmentRow{at_unix_ms: now_unix_ms(), model: model, prompt_variant: variant, prompt_digest: digest, fixtures: fixtures, scenarios: len(rows), predicates_total: total, predicates_passed: passed, per_scenario: rows, wall_ms: wall, rent_tokens: 0});
-   print_str("[alignment] mode=" ++ ((Comparable) len(answersPath) > 0 ? "grade" : "reading") ++ " model=" ++ model ++ " prompt_variant=" ++ variant ++ " prompt_digest=" ++ substring(digest, 0, 12) ++ " fixtures=" ++ fixtures ++ " scenarios=" ++ len(rows).str() ++ " predicates_passed=" ++ passed.str() ++ "/" ++ total.str() ++ " wall_ms=" ++ wall.str() ++ " rent_tokens=0 ledger=" ++ kept);
+   let tally = ar-tally(scens, rows, axes);
+   let counts = ar-axis-counts(tally);
+   let said = map(c => ar-axis-line(c), counts);
+   let untagged = len(filter(t => (String) t[0] == "untagged", tally));
+   let reading = (Comparable) len(answersPath) == 0 && !nil?(rows);
+   let kept = (Comparable) len(answersPath) > 0 ? "not-a-reading" : nil?(rows) ? "no-scenarios" : ledger-append(ar-ledger(), AlignmentRow{at_unix_ms: now_unix_ms(), model: model, prompt_variant: variant, prompt_digest: digest, fixtures: fixtures, scenarios: len(rows), predicates_total: total, predicates_passed: passed, per_scenario: rows, wall_ms: wall, rent_tokens: 0, role: roleName, adapter: adapter, adapter_sha256: sha, adapter_scale: scale});
+   let keptAxes = reading ? map(c => ledger-append(ar-axis-ledger(), ar-axis-row(c, model, variant, digest, fixtures, roleName, adapter, sha, scale)), counts) : [];
+   print_str("[alignment] mode=" ++ ((Comparable) len(answersPath) > 0 ? "grade" : "reading") ++ " model=" ++ model ++ " prompt_variant=" ++ variant ++ " prompt_digest=" ++ substring(digest, 0, 12) ++ " role=" ++ roleName ++ " adapter=" ++ adapter ++ " fixtures=" ++ fixtures ++ " scenarios=" ++ len(rows).str() ++ " predicates_passed=" ++ passed.str() ++ "/" ++ total.str() ++ " untagged=" ++ untagged.str() ++ " wall_ms=" ++ wall.str() ++ " rent_tokens=0 ledger=" ++ kept);
   }
  }
  ar-run();
