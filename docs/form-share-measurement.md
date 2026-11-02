@@ -50,6 +50,8 @@ matching source coordinates, completed call identities, and retained failures.
 For example, one observed turn yielded `native=56 local=127 remote=58`, or
 `23/53/24` by event count. That is a historical example, never a default value.
 
-No band holds the collector today; its regression bands left in the 2026-09-29
-cut. A change to the collector is witnessed by a live run against a bound
-rollout until a band returns.
+`form/form-stdlib/tests/provider-turn-band.bml` holds the collector over fixture
+transcripts: a rollout in the shape codex-cli writes reads `kind=observed`, a
+`claude -p` session file reads `kind=unknown`. A provider turn the body launches
+is read this way through `form/form-stdlib/bml/provider-turn.bml`, in a directory
+of its own, so no live session's binding or cursor is touched.
