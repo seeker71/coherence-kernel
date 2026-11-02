@@ -642,6 +642,10 @@ section [form.bml] {
   // full from below, the neighbours held, and nothing refused the publish. A lane that says it is done (its own checks
   // passed) still answers to the band.
   def nt-option-green(refused, ran, after, before, full, neighbors) = ((String) refused == "") && ran && ((Comparable) after == full) && !((Comparable) before == full) && ((Comparable) neighbors == 1);
+  // The option's coding observation (full: the band ran under the candidate and read its full): a moved band's crosswise
+  // reasons, then a neighbour that moved off its reading (red-band), the lane's own reason when it says done, and a stall
+  // only for a lane that ran here (direct): a caller's candidate generates no tokens, so its wall says nothing of a model.
+  def nt-option-reason(hollow, full, neighbors, done, direct, clock, raw) = if (!nil?(hollow) && full) then nt-comma(hollow) else if (((Comparable) neighbors == 0) && full) then "red-band" else if done then raw else if (direct && ((String) clock == "stall") && ((String) fctrt-act(raw)[0] == "red-band")) then "local-stall" else raw;
   def nt-lane-done?(result) =((String) nt-str(result, "status") == "complete") && ((Comparable) nt-int(result, "release_ok", 0) == 1) && node_eq(nt-node-or-null(result, "blocking_check"), json-node-null());
   // one option: ask the lane, publish inside hw-with-published, read the band; returns (list green row finding)
   def nt-attempt(gap, opts, id, full, band, before, coordinator, request, memory, n, way, verdict, hist, target) {
@@ -656,7 +660,8 @@ section [form.bml] {
    let paths = nt-strs(request,"writable");
    let originals = nt-originals(request,paths);
    let expectations=nt-int(opts,"test",0)==1 ? [] : nt-neighbor-contracts(nt-strs(gap,"writable"),band);
-   let checking=record_new(0,"paths",paths,"checkpoint",hw-tree(paths),"checks",json-array-elements(json-object-get(request,"checks")),"band",band,"full",full,"deadline",nt-deadline(opts),"neighbors",expectations,"test",nt-int(opts,"test",0));
+   let checking=record_new(0,"paths",paths,"checkpoint",hw-tree(paths),"checks",json-array-elements(json-object-get(request,"checks")),"band",band,"full",full,"deadline",nt-deadline(opts),"neighbors",expectations,"test",nt-int(opts,"test",0),"memo",fctrt-memo-new());
+   let memo=record_get(checking,"memo");
    // the contract this option runs under, read before the lane, while the tree holds what the lane is given
    let digest = nt-checks-digest(gap);
    let bdigest = nt-band-digest(gap);
@@ -690,16 +695,17 @@ section [form.bml] {
    let cand = nt-candidate(nt-docs-of(result), paths);
    let published = if ready then nt-written(cand) else 0;
    let test = ((Comparable) nt-int(opts, "test", 0) == 1);
-   let window = if (published > 0) then hw-with-published(nt-dir(), paths, checkpoint, hw-over(cand, checkpoint), () => nt-candidate-under(band, full, nt-deadline(opts), test,expectations)) else [[before, [], "", "", []], true, ""];
+   let window = if (published > 0) then hw-with-published(nt-dir(), paths, checkpoint, hw-over(cand, checkpoint), () => nt-candidate-under(band, full, nt-deadline(opts), test, expectations, fctrt-pairs(paths, checkpoint), memo)) else [[before, [], "", "", []], true, ""];
    // a band ran under the candidate only when the door published it; a refused publish leaves the band where it
    // was, and its compiler words and claims are the original source's, never the candidate's
    let reading = hw-band-after(window, published, before);
    let ran = reading[0];
    let after = reading[1];
    let shown = if (done || ran) then published else 0;
-   let neighborReadings = nt-neighbor-before(ran && !nothing?(window[0]) ? window[0][1] : [], nt-deadline(opts));
+   let neighborReadings = nt-neighbor-before(ran && !nothing?(window[0]) ? window[0][1] : [], nt-deadline(opts), memo);
    let errors = ran && nothing?(after) && !nothing?(window[0]) ? window[0][2] : "";
-   let neighbors = nt-neighbors-hold(neighborReadings);
+   let hollow = ran && !nothing?(window[0]) ? nt-hollow(window[0], nt-deadline(opts), memo) : [];
+   let neighbors = nt-neighbors-hold(neighborReadings) == 1 && nil?(hollow) ? 1 : 0;
    let claim = (test == 1 || neighbors == 0 || published == 0) ? [1, 0] : fctrt-claim-file(".hearth/tasks", id, host_pid().str());
    let refused = (String) window[2] != "" ? window[2] : (claim[0] == 0 ? "writer-held" : "");
    let green = nt-option-green(refused, ran, after, before, full, neighbors);
@@ -712,8 +718,8 @@ section [form.bml] {
    let claims = green || !ran || nothing?(window[0]) ? "" : window[0][3];
    let raw = nt-lane-reason(said, result);
    let clock = fctrt-clock(nt-maybe(result, "generated_ids"), nt-maybe(result, "injected_ids"), (now_unix_ms() - started), raw);
-   let reason = neighbors==0 && ran && after==full ? "red-band" : if done then raw else if (((String) clock == "stall") && ((String) fctrt-act(raw)[0] == "red-band")) then "local-stall" else raw;
-   let neighborNote = neighbors == 0 ? "\nNeighbor readings under the candidate [actual, expected, path, diagnostics]: " + json-emit(fcam-pack(filter(r=>!nt-neighbor-held?(r),neighborReadings))) : "";
+   let reason = nt-option-reason(hollow, ran && after==full, neighbors, done, direct, clock, raw);
+   let neighborNote = (nt-neighbors-hold(neighborReadings) == 0 ? "\nNeighbor readings under the candidate [actual, expected, path, diagnostics]: " + json-emit(fcam-pack(filter(r=>!nt-neighbor-held?(r),neighborReadings))) : "") + nt-hollow-note(hollow);
    let finding = if green then "" else (conflict ? "Source changed during generation; candidate was not published. Refresh the caller's source contract before resuming." : mc-cat([nt-finding(n,before,after,full,said,nt-str(result,"status"),shown,nt-diff-texts(paths,cand,originals),errors,claims), if ((String) refused == "") then "" else mc-cat(["\nThe candidate was not published: ", refused]), neighborNote])) + "\nCoding observation: " + reason;
    let kept = nt-keep(paths, cand, originals, stamp);
    // what this option left, read without its diff: the clinamen gate compares it with the options before it
@@ -744,10 +750,14 @@ section [form.bml] {
   // on the source: a band that waits for its own gap (a queued contract short of full) is no regression of this one.
   // Only a neighbour that did not read its full is read again, on the source the window restored; a row then carries
   // that reading fifth: [actual, expected, path, diagnostics, before].
-  def nt-neighbor-before(rows, deadline) = rows |> map(row => fctrt-held?(row) ? row : append(row, [nt-band(row[2], row[1], deadline)]));
+  // the baseline is the turn's (fctrt-baseline): a band read here on main's source is read once, for the crosswise rule too
+  def nt-neighbor-before(rows, deadline, memo) = rows |> map(row => fctrt-held?(row) ? row : append(row, [fctrt-baseline(memo, row[2], read_file(row[2]), (path, verdict) => nt-band(path, verdict, deadline), row[1])]));
   def nt-neighbor-held?(row) = fctrt-held?(row) || (len(row) > 4 && !nothing?(row[0]) && !nothing?(row[4]) && (Comparable) row[0] == row[4]);
   def nt-neighbors-hold(rows) = all?(nt-neighbor-held?, rows) ? 1 : 0;
   def nt-neighbor-contracts(paths,primary) = nt-all-scratch?(paths)==1 ? [] : (fctrt-neighbor-paths(fctrt-read-tree(),paths,primary) |> map(path=>[path,fctrt-verdict(read_file(path) ?? "")]));
+  // the moved neighbour bands' reasons, read on main's source once the window restored it (fctrt-crossed)
+  def nt-hollow(reading, deadline, memo) = len(reading) > 5 ? fctrt-cross-reasons(nt-dir(), reading[5], (path, verdict) => nt-band(path, verdict, deadline), memo) : [];
+  def nt-hollow-note(hollow) = nil?(hollow) ? "" : "\n" + fctrt-cross-note(hollow);
   def nt-source-check(context,docs) {
    let checks=record_get(context,"checks") |> map(check=>fccw-eval(check,docs));
    let failed=filter(check=>!check[0],checks);
@@ -756,23 +766,28 @@ section [form.bml] {
     !hw-all-same?(paths,checkpoint) ? [0,"Source changed outside this retained candidate; current input is needed."] : {
      let candidate=paths |> map(path=>{let doc=fat-find-doc(docs,path);nil?(doc) ? nothing() : doc[2];});
      let started=host_monotonic_ms();
-     let window=hw-with-published(nt-dir(),paths,checkpoint,hw-over(candidate,checkpoint),()=>nt-candidate-under(record_get(context,"band"),record_get(context,"full"),record_get(context,"deadline"),record_get(context,"test"),record_get(context,"neighbors")));
+     let memo=fctrt-memo-of(context);
+     let window=hw-with-published(nt-dir(),paths,checkpoint,hw-over(candidate,checkpoint),()=>nt-candidate-under(record_get(context,"band"),record_get(context,"full"),record_get(context,"deadline"),record_get(context,"test"),record_get(context,"neighbors"),fctrt-pairs(paths,checkpoint),memo));
      let reading=window[0];
      nothing?(reading) || !window[1] || window[2]!="" ? [0,"Native source observation or restoration remains open: " + window[2]] : {
-      let neighbors=nt-neighbor-before(reading[1],record_get(context,"deadline"));
-      let held=reading[0]==record_get(context,"full") && nt-neighbors-hold(neighbors)==1;
-      let observed=fb_record([checks,reading,neighbors,host_monotonic_ms()-started],"native-turn-code-check",0);
-      [held,held ? "Original task and owning native observations hold." : "Native task reading " + nt-reading-text(reading[0]) + " of " + record_get(context,"full").str() + ".\n" + reading[2] + "\n" + reading[3] + "\nNeighbor observations [actual, expected, path, diagnostics, baseline]: " + filter(row=>!nt-neighbor-held?(row),neighbors).str()];
+      let neighbors=nt-neighbor-before(reading[1],record_get(context,"deadline"),memo);
+      let hollow=nt-hollow(reading,record_get(context,"deadline"),memo);
+      let held=reading[0]==record_get(context,"full") && nt-neighbors-hold(neighbors)==1 && nil?(hollow);
+      let observed=fb_record([checks,reading,neighbors,hollow,host_monotonic_ms()-started],"native-turn-code-check",0);
+      [held,held ? "Original task and owning native observations hold." : "Native task reading " + nt-reading-text(reading[0]) + " of " + record_get(context,"full").str() + ".\n" + reading[2] + "\n" + reading[3] + "\nNeighbor observations [actual, expected, path, diagnostics, baseline]: " + filter(row=>!nt-neighbor-held?(row),neighbors).str() + nt-hollow-note(hollow)];
      };
     };
    };
   }
-  // Every acceptance observation shares the candidate's publication window.
-  def nt-candidate-under(band, full, deadline, test,expectations) {
+  // Every acceptance observation shares the candidate's publication window. mains are [path, main's text] of the paths the
+  // candidate may write (the window's checkpoint: a path main does not hold is nothing, and no band of main to cross); the
+  // rule reads the moved bands among them (fctrt-cross-under), with the neighbours' own readings
+  def nt-candidate-under(band, full, deadline, test, expectations, mains, memo) {
    let after=nt-band(band,full,deadline);
    let errors=nt-band-errors(); let claims=nt-band-claims(); let aspects=nt-unheld-aspects();
    let neighbors=test==1 || nothing?(after) || after != full ? [] : nt-read-neighbors(expectations,deadline);
-   [after,neighbors,errors,claims,aspects];
+   let crossed=nil?(neighbors) ? [] : fctrt-cross-under(nt-dir(),mains,band,(path,verdict)=>nt-band(path,verdict,deadline),map(r=>[r[2],r[0]],neighbors),memo);
+   [after,neighbors,errors,claims,aspects,crossed];
   }
   // the claim aspects whose last reading did not hold in the band's latest run
   def nt-unheld-aspects() {
@@ -809,14 +824,16 @@ section [form.bml] {
   }
   def nt-native-neighbors(ctx, over, expectations) {
    let opts = ctx[3];
-   let window = hw-with-published(nt-dir(), ctx[1], ctx[2], over, () => nt-candidate-under(ctx[4], ctx[5], nt-deadline(opts), nt-int(opts, "test", 0), expectations));
-   if ((String) window[2] != "") then [0, mc-cat(["publish-refused: ", window[2]])] else if nothing?(window[0]) then [0, "band-stopped"] else nt-native-held(ctx, window[0][0], nt-neighbor-before(window[0][1], nt-deadline(opts)));
+   let memo = fctrt-memo-of(ctx[6]);
+   let window = hw-with-published(nt-dir(), ctx[1], ctx[2], over, () => nt-candidate-under(ctx[4], ctx[5], nt-deadline(opts), nt-int(opts, "test", 0), expectations, fctrt-pairs(ctx[1], ctx[2]), memo));
+   if ((String) window[2] != "") then [0, mc-cat(["publish-refused: ", window[2]])] else if nothing?(window[0]) then [0, "band-stopped"] else nt-native-held(ctx, window[0][0], nt-neighbor-before(window[0][1], nt-deadline(opts), memo), nt-hollow(window[0], nt-deadline(opts), memo));
   }
   def nt-unheld-names(rows) = nt-comma(map(r => mc-cat([r[2], " read ", ntl-reading-word(r[0]), " of ", r[1].str()]), filter(r => !nt-neighbor-held?(r), rows)));
-  def nt-native-held(ctx, after, rows) {
+  def nt-native-held(ctx, after, rows, hollow) {
    let kept = record_set(ctx[6], "neighbors", rows);
    let again = !nothing?(after) && ((Comparable) after == ctx[5]);
-   (again && ((Comparable) nt-neighbors-hold(rows) == 1)) ? [1, after.str()] : !nt-native-room?(ctx[3]) ? [0, "window-closed"] : nt-native-refused(ctx, again ? mc-cat(["neighbor-moved: ", nt-unheld-names(rows)]) : mc-cat(["band-moved: under the same candidate the band read ", ntl-reading-word(after)]));
+   let still = (Comparable) nt-neighbors-hold(rows) == 1;
+   (again && still && nil?(hollow)) ? [1, after.str()] : !nt-native-room?(ctx[3]) ? [0, "window-closed"] : nt-native-refused(ctx, !again ? mc-cat(["band-moved: under the same candidate the band read ", ntl-reading-word(after)]) : !still ? mc-cat(["neighbor-moved: ", nt-unheld-names(rows)]) : nt-comma(hollow));
   }
   def nt-native-attempt(gap, opts, id, full, band, before, coordinator, memory, n, way, verdict, hist) {
    let candidate=fct-plan-candidate(gap);
@@ -832,7 +849,7 @@ section [form.bml] {
    let checkpoint = hw-tree(paths);
    let texts = nt-as-text(checkpoint);
    let until = nt-deadline(opts)>0 ? nt-deadline(opts) : nothing();
-   let seen = record_new(0, "neighbors", [], "refused", []);
+   let seen = record_new(0, "neighbors", [], "refused", [], "memo", fctrt-memo-new());
    let ctx = [gap, paths, checkpoint, opts, band, full, seen, texts];
    let found = dry ? ["not-run", texts, 0, "dry", ""] : ntl-native(texts, (i, text) => nt-native-check(ctx, until, i, text), nothing());
    let refusals = record_get(seen, "refused");
