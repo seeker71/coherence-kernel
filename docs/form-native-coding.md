@@ -932,8 +932,10 @@ runtime (`form-stdlib/bml/form-cli-task-runtime.bml`) is what a task rides, insi
 the turn. A gap whose band is empty and whose goal names paths becomes that
 contract as a value: the band whose prelude names one of them, or, when several
 bands only share a barrel that imports the path, the larger verdict. The model
-way calls `fcaq-decoded` in the same process. The request and the result stay
-nodes. Text is emitted once, at a stdin door or a ledger row. A tool result
+way hands its request to the lane in the same process through
+`fcaq-managed-covered`, the seam the JSON door crosses at `fcaq-decoded`, so it
+lands one coverage row. The request and the result stay nodes. Text is emitted
+once, at a stdin door or a ledger row. A tool result
 stays that resident value. A structured tool keeps its node on the value, and
 the model note is emitted once from the node.
 A lane reason is a failure class with its own spend, next step, and whether

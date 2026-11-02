@@ -65,7 +65,7 @@ row reads rented_mind 0 on the schedule, no co-author signed it, a gate's band r
 ## Whose rows it reads
 
 The query rows and `voice-answers` read the schedule's and the person's rows: session empty. A session's rows are the session's own, and a measurement ask (an alignment or wear arm,
-`"enquiry_kind":"measurement"`) lands no coverage row at all, so an experiment does not read as traffic. A coverage row from before the session column cannot say whose it was: it is counted by nobody, and the reading names how many such rows hold the rest of `where` (unattributed, uncounted). The walk carries
+`"enquiry_kind":"measurement"`) lands no coverage row at all, so an experiment does not read as traffic; the exam's children name the exam (`offline-exam`), so its keyed asks read in its own gaps and never as the schedule's traffic. A coverage row from before the session column cannot say whose it was: it is counted by nobody, and the reading names how many such rows hold the rest of `where` (unattributed, uncounted). The walk carries
 these ledgers to main at each landing (`hw-learned`, `host-walk-carry.bml`), so a reading on main is at most a slot old. `q4-decode-vs-q8` reads the same rows, `queries-native-plan` reads only rows a native landing carried and counts a plan answered only when the planner verified it (source `local-plan`, one row per option, landed after the verdict by `observe/local-plan-run.bml`), and the turn rows
 tell the voice's own edit (`local_generated_ids` above 0: `self-turn`, `last-option-green`, `guided-gap-dependence`) from the no-model rung's rewrite (`self-rung`).
 
@@ -85,8 +85,8 @@ its own ledger and never the queue, and `self-steer` reads the share offered. A 
 
 ## What it cannot see
 
-The coverage rows count what crossed a door: a question a rented mind answered itself, the shell's zero-process redirect into the
-form-find spool, and `form-cli task` under `fcaq-managed-with` land none. Who asked is read from the process's own ancestor line: under a rented agent, the session id its argv carries or its word (`rented:claude`), so two sessions whose agents carry no id read as one; a kernel a session detached to launchd reads as the schedule's, and the person's ask and the schedule's are one lane. A stamp says a slot began, never that it finished, and
+The coverage rows count what crossed a door: a question a rented mind answered itself and the shell's zero-process redirect into the
+form-find spool land none. Who asked is read from the process's own ancestor line: under a rented agent, the session id its argv carries or its word (`rented:claude`), so two sessions whose agents carry no id read as one; a kernel a session detached to launchd reads detached and is counted by nobody, and the person's ask and the schedule's are one lane. A stamp says a slot began, never that it finished, and
 `.hearth/walk.began` keeps one row per door, so a slot older than its door's last stamp reads only through a landed row; the retry's class stands
 beside an unread slot as a note, because a killed retry leaves no row. A feature's ledger that carries no coordinator reads a session's run and the
 walk's alike, and a row's clock proves nothing: the slots' windows are ten hours of a day, and on 2026-10-31 a session's reading at 22:07 read as the schedule's. So
