@@ -4,12 +4,15 @@
 // one-thread attestant beside it, and EVERY row of both held against the Form fp64 dot of THAT row (q4m-* /
 // q6m-flat-at over the row's own bytes), so a kernel that reads another row, or another superblock of its row, reads
 // short. The tensor's d class (q38dq-fill: positive normal, normal of either sign, subnormal of either sign) is the
-// caller's, so a kernel that mishandles d's sign or a subnormal d reads short on the class that carries it.
+// caller's, so a kernel that mishandles d's sign or a subnormal d reads short on the class that carries it. x is the
+// witness's own (kqr-xv), every caller's alike: full 24-bit significands, as fine as the f32 hidden state a real decode
+// reads, so a kernel that reads x through half (or any type narrower than f32) reads short.
 //   kqr-decode  1 when every row r of the fused kernel sits within q38dq-bound-coeff(cols) * 2^-24 * S_r of exact_r,
 //               every row of the attestant within cols * 2^-24 * S_r, the four words past y[rows - 1] of both stand,
 //               and the tensor tells its rows apart under the fused bound b_r: |exact_r - exact_(r+1)| > b_r + b_(r+1)
 //               for every even r with r + 1 < rows, and |exact_(rows-1) - exact_0| > b_(rows-1) + b_0, so a kernel
-//               within its bound of row r^1 (or of row 0) cannot pass as row r (or as the last row). A row a kernel
+//               within its bound of row r^1 (or of row 0) cannot pass as row r (or as the last row); a salt whose
+//               tensor leaves such a pair within that sum reads short, and another salt is the remedy. A row a kernel
 //               wrote as inf or NaN is named (the count, and the first by row, kernel and kind) and reads short.
 // preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
 section [form.bml] {
@@ -19,6 +22,12 @@ section [form.bml] {
   def kqr-max(a, b) = a > b ? a : b;
   def kqr-repeat(text, n, acc) = n <= 0 ? acc : kqr-repeat(text, n - 1, acc ++ text);
   def kqr-f(s, i) = ln-f32-decode(ln-u32-le(s, 4 * i));
+  // x_i = k_i 2^-23, k_i = ((i * 2654435761 + 1013904223) mod 2^24) - 2^23: a full 24-bit significand in [-1, 1), exact
+  // in f32 (so the fp64 dot of the floats the kernels read is exact) and, past f16's eleven bits for nearly every i, not in
+  // f16; the f32 bytes of n of them, 256 a chunk
+  def kqr-xv(i) = (1.0 * (((i * 2654435761 + 1013904223) % 16777216) - 8388608)) / 8388608.0;
+  def kqr-xs-chunk(lo, hi, acc) = lo >= hi ? acc : kqr-xs-chunk(lo + 1, hi, acc ++ md-le32(md-f32-bits(kqr-xv(lo))));
+  def kqr-xs(n, lo, acc) = lo >= n ? acc : kqr-xs(n, lo + 256, acc ++ kqr-xs-chunk(lo, lo + 256 > n ? n : lo + 256, ""));
   // the two parts of the Q4_K weight at flat index idx of a row's bytes ws (q4m-flat-at's own decomposition): the
   // scale part (d * sc) * nib and the min part dmin * mn; Q6_K has one part, q6m-flat-at itself
   def kqr-q4-b(idx) = 144 * (idx / 256);
@@ -65,9 +74,10 @@ section [form.bml] {
   def kqr-apart?(ex, bs, a, b) = kqr-abs(ex[a] - ex[b]) > bs[a] + bs[b];
   def kqr-pairs(ex, bs, r, rows) = r + 1 >= rows ? 1 : (kqr-apart?(ex, bs, r, r + 1) ? kqr-pairs(ex, bs, r + 2, rows) : 0);
   def kqr-apart(ex, bs, rows) = rows <= 1 ? 1 : (((Comparable) kqr-pairs(ex, bs, 0, rows) == 1) && kqr-apart?(ex, bs, rows - 1, 0) ? 1 : 0);
-  // one witness: a rows x cols tensor of `type` (12 or 14) filled with `salt` in d class dcls, x the f32 bytes xs of
-  // cols floats
-  def kqr-decode(ps, pfill, type, rows, cols, xs, salt, dcls) {
+  // one witness: a rows x cols tensor of `type` (12 or 14) filled with `salt` in d class dcls, x the f32 bytes of
+  // kqr-xv over cols floats
+  def kqr-decode(ps, pfill, type, rows, cols, salt, dcls) {
+   let xs = kqr-xs(cols, 0, "");
    let w = metal_buf_alloc(rows * (cols / 256) * q38dq-fill-stride(type));
    let filled = q38dq-fill(pfill, type, w, rows, cols, salt, dcls);
    let s0 = metal_sync();
