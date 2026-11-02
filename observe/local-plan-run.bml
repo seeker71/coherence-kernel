@@ -96,19 +96,22 @@ section [form.bml] {
    offered;
   }
   // The voice opens while the caller's window ("until_ms" on the host's monotonic
-  // clock; nothing when no window was given) still holds an option: the median option the ledger measured
-  // (hw-option-floor-of over .hearth/local-plans/ledger.jsonl; half an hour before any is measured). The memory wait
-  // ends by the window's end less that floor. The packet is kept before it is read and the reply after, so a review
-  // reads every step; unavailable memory or a window that cannot hold an option answers "held", and the walk ends
-  // with no row
-  def lpr-floor() = hw-option-floor-at(flp-dir() ++ "/ledger.jsonl");
+  // clock; nothing when no window was given) still holds an option: the median real option of that voice on the
+  // planner's ledger (hw-option-floor-of over .hearth/local-plans/ledger.jsonl; every voice's while it has none; half an
+  // hour before any is measured). The walk's own checks read the first voice it offers. A reply still decoding at the
+  // window's end ends there (ftg-window-at, set by lpr-run) and its row's voice_status reads window-end. The packet is
+  // kept before it is read and the reply after, so a review reads every step; unavailable memory or a window that
+  // cannot hold an option answers "held", and the walk ends with no row
+  def lpr-floor-of(voice) = hw-option-floor-at(flp-dir() ++ "/ledger.jsonl", voice);
+  def lpr-floor(opts) = lpr-floor-of(nil?(lpr-voices(opts)) ? "" : lpr-voices(opts)[0]);
   def lpr-latest(until, floor) = until - floor[0];
   def lpr-closed?(until, floor) = (!nothing?(until)) && (host_monotonic_ms() > lpr-latest(until, floor));
   def lpr-window-line(until, floor) = mc-cat(["[local-plan:window] ", hw-minutes(hw-left(until, host_monotonic_ms())), " left cannot hold an option of ", hw-minutes(floor[0]), " (", floor[1], "); no model opens"]);
   def lpr-began(rid, name, n) = fhn-append(lpr-began-path(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", rid), fhn-n("option", n), fhn-s("voice", name)])) ++ "\n");
   // a voice whose file the registry holds is leased by its path (the weights are one promise for every process that
   // maps the file); a voice the registry does not hold is asked as the walk asks a turn
-  def lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, until, floor) {
+  def lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, until) {
+   let floor = lpr-floor-of(name);
    let open = !lpr-closed?(until, floor);
    // The voice admits its actual weights and KV geometry. A second guessed
    // scratch lease can refuse a model whose real allocation fits.
@@ -132,21 +135,23 @@ section [form.bml] {
    let stem = mc-cat([dir, "/", id, "-", n.str(), "-", now_unix_ms().str()]);
    let kept = write_file_text(stem ++ ".packet.txt", packet);
    let request=json-node-object(append([fhn-s("model",name),fhn-n("max_reply_tokens",limit),fhn-s("enquiry",lpr-enquiry(rid,n))],nothing?(context) ? [] : [fhn-n("context",context)]));
-   let v = fcnv-ask(packet, request);
+   let asked = fcnv-ask(packet, request);
+   // a reply cut at the window's end names itself: its status is the window's word, not unavailable
+   let v = (String) asked[7] == ftg-window-end() ? append([ftg-window-end()], asked[1:]) : asked;
    let text = v[0] == "answered" ? v[1] : len(trim(v[8])) > 0 ? trim(v[8]) : v[7];
    let heard = write_file_text(stem ++ ".reply.txt", text);
    let owned = lpr-heard(rid, name, n, lens, v, stem ++ ".reply.txt");
    let said = print_str(mc-cat(["[local-plan:voice] ", name, " option ", n.str(), " ", v[0], " prompt_ids=", v[2].str(), " generated_ids=", v[3].str(), " reply=", stem, ".reply.txt"]));
    [v[0], text, v[2], v[3], stem ++ ".reply.txt"];
   }
-  def lpr-voice(dir, id, rid, context, limit, until, floor) = (packet, name, n, lens) => lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, until, floor);
+  def lpr-voice(dir, id, rid, context, limit, until) = (packet, name, n, lens) => lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, until);
   def lpr-read(path) = if ((String) path == "") then "" else fhn-read(path);
   // an earlier walk of this request left its refused options in the ledger; the walk resumes from them unless
   // {"fresh":1} asks for a clean start
   def lpr-memory(req, opts) = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then [] else flp-memory-of(flp-queue-rows(flp-dir() ++ "/ledger.jsonl"), flp-req-id(req), p => lpr-read(p));
   def lpr-focus-guide(req,opts) {
    let named=any?(name=>flp-mentioned?(flp-text(req,"needs"),name,0),flp-source-names(flp-req-files(req)));
-   named || !nil?(flp-guided-focus(req)) || lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor()) ? 0 : {
+   named || !nil?(flp-guided-focus(req)) || lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor-of(mr-chain-names("triage")[0])) ? 0 : {
     let model=mr-chain-names("triage")[0];
     let prompt=flp-focus-prompt(req);
     let answer=fcnv-ask(prompt,json-node-object([fhn-s("model",model),fhn-n("max_reply_tokens",1024),fhn-s("enquiry",lpr-enquiry(flp-req-id(req),-1))]));
@@ -163,8 +168,8 @@ section [form.bml] {
    let focused = parked ? 0 : lpr-focus-guide(req,opts);
    let spent = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then 0 else lpr-spent(lpr-tried(attempts), flp-req-id(req));
    let left = json-object-has?(opts,"attempts") ? lpr-left(attempts, spent) : nothing();
-    let base = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), fcgp-num(opts, "until_ms"), lpr-floor()), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
-    let ctx=flp-with-reference-care(base,(request,context,said,refusal)=>lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor()) ? nothing() : lrpr-repair(request,context,said,refusal,opts));
+    let base = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), fcgp-num(opts, "until_ms")), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
+    let ctx=flp-with-reference-care(base,(request,context,said,refusal)=>lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor(opts)) ? nothing() : lrpr-repair(request,context,said,refusal,opts));
    let resumed = if ((spent == 0) && nil?(memory)) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), ": ", spent.str(), " option(s) spent, ", len(memory).str(), " refused row(s) retained; ", nothing?(left) ? "native choices continue" : left.str()+" caller option(s) left"]));
    let care=parked ? nothing() : lrpr-resume(req,ctx,memory);
    let r=nothing?(care) ? flp-walk-from(req,ctx,memory) : care[0]==1 ? flp-ended(["queued",care[1]],memory) : care[0]==3 ? flp-ended(["moot",care[1]],memory) : flp-walk-from(req,ctx,append(memory,[care[1]]));
@@ -178,13 +183,16 @@ section [form.bml] {
   def lpr-declined?(answer) = (!nothing?(answer)) && fcgp-present?(answer, "status") && ((String) fcgp-str(answer, "status") == "declined");
   def lpr-walks(req, opts, voices, queue) {
    let answer = lpr-walk(req, opts, voices, queue);
-   let more = (lpr-declined?(answer) && ((Comparable) lpr-int(opts, "next", 0) == 1) && (!lpr-closed?(fcgp-num(opts, "until_ms"), lpr-floor()))) ? lpr-pick(opts, queue) : nothing();
+   let more = (lpr-declined?(answer) && ((Comparable) lpr-int(opts, "next", 0) == 1) && (!lpr-closed?(fcgp-num(opts, "until_ms"), lpr-floor(opts)))) ? lpr-pick(opts, queue) : nothing();
    (nothing?(more) || ((String) flp-req-id(more) == flp-req-id(req))) ? answer : lpr-walks(more, opts, voices, queue);
   }
   def lpr-run() {
    let input = cell_input();
    let line = fat-wire-object?(input) ? "" : trim(stdin-text());
    let opts = fat-wire-object?(input) ? input : fcgp-object-line?(line) ? parse-json("local-plan-options", line) : json-node-object([]);
+   let window = ftg-window-until();
+   let windowed = ftg-window-at(fcgp-num(opts, "until_ms"));
+   defer ftg-window-at(window);
    let queue = lpr-queue(opts);
    let req = lpr-pick(opts, queue);
    let queued = if nothing?(req) then nothing() else flp-request-row(queue, flp-req-id(req));
