@@ -234,7 +234,7 @@ memory-governor-band 67108863 (form/form-stdlib/bml/memory-governor.bml asks the
 form-cli-code-low-memory-band 1023  (a running coding lane saves its checkpoint and ends with host-memory-low when the machine
                                 runs low, continues on a roomy or unreadable reading, and a lane that spent its turns keeps that
                                 ending; the walk reads it as a choice point)
-native-turn-ladder-band 262143 · local-flow-reading-band 4194303  (a memory ending, host-memory-low or host-memory-held:*, is no
+native-turn-ladder-band 1048575 · local-flow-reading-band 8388607  (a memory ending, host-memory-low or host-memory-held:*, is no
                                 tried approach and no option of the review; its checkpoint is the resume's target, with no failure text)
                                 (the review's phase fold is standing: every option whose lane output this host holds, in its own
                                 checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
@@ -333,7 +333,7 @@ control/tests/attempt-band 4095 · file-bytes-band 127
 form-bml-cursor-full-band 105
 control-invite-grammar-band 1023 · cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15
 form/form-stdlib/tests/form-agent-tools-band.bml 4294967295 (2026-10-04: the sixteen resident agent tools over their JSON wire, grep among them)
-form/form-stdlib/tests/findings-requests-band.bml 1048575 · form/form-stdlib/tests/form-cli-local-plan-band.bml 33554431 · form/form-stdlib/tests/local-plan-parks-band.bml 511 · form/form-stdlib/tests/local-plan-gradient-band.bml 8191 · form/form-stdlib/tests/local-plan-false-green-band.bml 2047 · form/form-stdlib/tests/exit-proof-band.bml 511 · form/form-stdlib/tests/offline-voice-gaps-band.bml 4095 · form/form-stdlib/tests/host-walk-learn-band.bml 255 · form/form-stdlib/tests/native-turn-green-band.bml 32767 · form/form-stdlib/tests/draft-native-reading-band.bml 65535 · form/form-stdlib/tests/reply-envelope-band.bml 16383 · form/form-stdlib/tests/envelope-hold-band.bml 255
+form/form-stdlib/tests/findings-requests-band.bml 1048575 · form/form-stdlib/tests/form-cli-local-plan-band.bml 33554431 · form/form-stdlib/tests/local-plan-parks-band.bml 511 · form/form-stdlib/tests/local-plan-gradient-band.bml 8191 · form/form-stdlib/tests/local-plan-false-green-band.bml 2047 · form/form-stdlib/tests/exit-proof-band.bml 511 · form/form-stdlib/tests/offline-voice-gaps-band.bml 1048575 · form/form-stdlib/tests/host-walk-learn-band.bml 255 · form/form-stdlib/tests/native-turn-green-band.bml 65535 · form/form-stdlib/tests/draft-native-reading-band.bml 65535 · form/form-stdlib/tests/reply-envelope-band.bml 16383 · form/form-stdlib/tests/envelope-hold-band.bml 511
                                             (2026-10-02, rc 0: the feeder reads whether the code a request cites moved since its
                                             review, git hunks plus the closing gate and no model, and keeps the definition the
                                             change landed in; the planner proposes a request moot only when the voice's band names
@@ -346,7 +346,9 @@ form/form-stdlib/tests/findings-requests-band.bml 1048575 · form/form-stdlib/te
                                             an observation too, and exchanges a refused one for the first of the device's
                                             top-k candidates that holds; a reply the hold ends inside a block reads
                                             envelope-ended in its row; a reply spends at most 6144 ids. Every stored reply the
-                                            parser reads past its envelope holds, and every one it refused there is refused)
+                                            parser reads past its envelope holds, and every one it refused there is refused.
+                                            The opened ask and the resident turn decode through one cursor that holds it,
+                                            fcnv-generate-held, and a held result keeps its reading after the ownership slots)
 ```
 
 Every tracked cell's `witnessed:` stamp is read into the belief lens, oldest first; the re-witness door

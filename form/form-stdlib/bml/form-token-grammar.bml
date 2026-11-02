@@ -63,6 +63,22 @@ section [form.bml] {
    if (record_get(FTG-DEFAULT, "bound") == 1) || (ftw-lineage(ws) == ftw-safe(lane)) then 0 else record_set(FTG-DEFAULT, "ws", ftw-open(ftw-root(ws), lane, ftw-request(ws)));
    FTG-DEFAULT;
   }
+  // The window this process's lanes live inside: one instant on host_monotonic_ms, set by the door that heard it (a
+  // turn's deadline_ms, a plan's until_ms) and given back when that door returns; 0 is no window. A reply decoding past
+  // it ends there, its session refused with ftg-window-end() as the reason, and a coding lane ends between replies with
+  // the same word (fcac-window-stop), so an option begun inside a window ends with it. The window names the cell that
+  // set it (cell_path) and only that cell reads it: cells called in one process share this record, and a cell stopped at
+  // its deadline runs no defer, so its window stays behind; a later cell that set none reads no window.
+  def ftg-window-end() = "window-end";
+  def ftg-window-owner() = cell_path() ?? "";
+  def ftg-window-at(until) {
+   let owned = record_set(FTG-DEFAULT, "window-owner", ftg-window-owner());
+   record_set(FTG-DEFAULT, "window-until", until ?? 0);
+  }
+  def ftg-window-until() = value_eq(record_get(FTG-DEFAULT, "window-owner") ?? "", ftg-window-owner()) ? (record_get(FTG-DEFAULT, "window-until") ?? 0) : 0;
+  def ftg-window-past?() = ftg-window-until() > 0 && host_monotonic_ms() >= ftg-window-until();
+  def ftg-window-feed(icpt, cursor, chunk) = ftg-window-past?() ? [cursor, chunk, ftg-window-end()] : ftg-feed(icpt, cursor, chunk);
+  def ftg-window-inject(icpt, s, text) = ftg-window-past?() ? fcms-refuse(s, ftg-window-end()) : ftg-inject(icpt, s, text);
   // a lane that knows its request's lineage (a conversation, a task) binds the lanes' workspace to
   // it; "" for the request starts a fresh one in that lineage
   def ftg-bind(lineage, request) {
@@ -247,7 +263,7 @@ section [form.bml] {
   def ftg-observer(icpt) = (String) value_kind(record_get(icpt,"observer")) == "closure" ? record_get(icpt,"observer") : frxs-observe-none;
   def ftg-generate-with(icpt, session, budget, lane) {
    record_set(icpt,"open-generation",nothing?(budget));
-   let moved = frxs-run-protocol-with-injector(session, budget, 0, icpt, ftg-feed, ftg-observer(icpt), (s, text) => ftg-inject(icpt, s, text));
+   let moved = frxs-run-protocol-with-injector(session, budget, 0, icpt, ftg-window-feed, ftg-observer(icpt), (s, text) => ftg-window-inject(icpt, s, text));
    let ids = append(frxs-before-ids(moved), frxs-after-ids(moved));
    ftg-retain-with(lane, reverse(record_get(icpt, "frames")), reverse(record_get(icpt, "results")), reverse(record_get(icpt, "injected")), reverse(record_get(icpt, "touched")));
    fcms-generation(ftdb-text(fcms-src(session), ids), ids, frxs-session(moved));
