@@ -7,10 +7,15 @@
 //                                                                variant's ms a token and its ids: the base lane (q38-forward), the same with the host's encode
 //                                                                and the device's wait split, and the hand-over every n layers (0 never).
 // stdin, one JSON line, all optional: go, decode (24), prompt, file, mode (decode), blocks (session, 6), and for mode plain runs
-// (12) and budget (840 s). A plain run is a fresh prefill of the prompt and `decode` tokens; one begins only while the time spent
-// since the door began and the last run's length fit the budget, so a reading bounded at 900 s ends by its own choice and gives
-// its leases back (inferred: at the 21-28 positions/s the run ledger reads for the K-quant lane, twelve fresh prefills of a
-// ~4K-id prompt take 30 to 40 minutes).
+// (12) and budget (840 s). A plain run is a fresh prefill of the prompt and `decode` tokens; every run, the first among them,
+// begins only while the time spent since the door's first step and that run's estimate fit the budget. The first's is the
+// prompt's ids at 21 positions/s and `decode` tokens at 200 ms (the slowest prefill receipts/local-run-ledger.jsonl reads for
+// the K-quant lane at a prompt of 4K ids or more, before its tile, and above the slowest plain step its rows read, 155 ms);
+// each later one's is the longest run so far. So a reading bounded at 900 s ends by its own choice and gives its leases back
+// while no run outruns its estimate by more than the minute the bound holds beyond the budget, which also carries the compile
+// before the first step (3 to 10 s), the close and the release. A run that does is cut by the bound, and its leases are taken
+// back as a dead holder's (the memory governor's next reading, the GPU lease door). Inferred: at the 21-28 positions/s the
+// ledger reads, twelve fresh prefills of a ~4K-id prompt take 30 to 40 minutes.
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
 section [form.bml] {
@@ -93,17 +98,21 @@ section [form.bml] {
    let idsay = run == 1 ? print_str("[q38-decode] ids: " ++ qdr-ids-line(spoken)) : 0;
    qdr-plain-go(ctx, ids, k, runs, run + 1);
   };
-  // mode plain inside its budget: go(run) speaks run `run`; a run begins only when the ms since t0 and the last run's length fit
-  // `budget`; the answer is how many ran
-  def qdr-plain-fit(go, runs, run, t0, budget, last) = run > runs || (run > 1 && host_monotonic_ms() - t0 + last > budget) ? run - 1 : {
+  // mode plain inside its budget: go(run) speaks run `run`; every run, the first among them, begins only when the ms since t0 and
+  // its estimate fit `budget`: the first's is `est`, each later one's the longest run so far; the answer is how many ran
+  def qdr-plain-fit(go, runs, run, t0, budget, est) = run > runs || host_monotonic_ms() - t0 + est > budget ? run - 1 : {
    let a = host_monotonic_ms();
    let r = go(run);
-   qdr-plain-fit(go, runs, run + 1, t0, budget, host_monotonic_ms() - a);
+   let took = host_monotonic_ms() - a;
+   qdr-plain-fit(go, runs, run + 1, t0, budget, run == 1 || took > est ? took : est);
   };
+  // the first run's estimate, before any run is measured: the prompt's ids at 21 positions/s and `decode` tokens at 200 ms
+  def qdr-first-ms(ids, k) = len(ids) * 1000 / 21 + k * 200;
   // plain: [runs, budget ms, the door's start ms]
   def qdr-plain-bounded(ctx, ids, k, plain) {
-   let n = qdr-plain-fit((run) => qdr-plain-go(ctx, ids, k, run, run), plain[0], 1, plain[2], plain[1], 0);
-   print_str("[q38-decode] plain: " ++ n.str() ++ " of " ++ plain[0].str() ++ " runs inside the budget of " ++ (plain[1] / 1000).str() ++ " s, " ++ (host_monotonic_ms() - plain[2]).str() ++ " ms since the door began");
+   let first = qdr-first-ms(ids, k);
+   let n = qdr-plain-fit((run) => qdr-plain-go(ctx, ids, k, run, run), plain[0], 1, plain[2], plain[1], first);
+   print_str("[q38-decode] plain: " ++ n.str() ++ " of " ++ plain[0].str() ++ " runs inside the budget of " ++ (plain[1] / 1000).str() ++ " s (the first estimated at " ++ (first / 1000).str() ++ " s), " ++ (host_monotonic_ms() - plain[2]).str() ++ " ms since the door began");
   }
   // ---- the layout A/B: the Q8_0 matvec on the FFN tensors of `n` layers, as the lane reads them (34-byte blocks) against a planar
   // repack (the scales in one array, the int8 in a 16-byte-aligned array) and against a pure stream of the same bytes ----

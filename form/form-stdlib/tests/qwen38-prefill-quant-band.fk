@@ -39,12 +39,26 @@
 ; Bit 256: rows of the lane's real widths, 20, 24 and 68 superblocks (cols 5120, 6144 and 17408: the ffn_down rows hold
 ;   68), 33 rows and 33 tokens (two tiles of each), Q4_K and Q6_K. The edge pools laid end to end (superblock s of row r
 ;   is pool[(r * width + s) mod n], width the row's superblocks) answer the attestant byte for byte. An exact world (d
-;   and dmin 0x3c00, Q6_K's scales in -29..29, activations +-1: every weight an integer of magnitude at most 945 (928),
-;   every partial sum of a row, in any association, at most 945 * 17408 = 16450560 < 2^24, so exact in f32) answers the
-;   attestant AND the scalar reference (pipelines 1 / 3: one thread a row, the serial fold, a dispatch a token) byte for
-;   byte: the tile's shared frame seen at full width against arithmetic it does not share. Its exactness is read back
-;   from its bytes.
-; Verdict 511. Runs small fixture buffers only; no model admission or living state.
+;   and dmin 0x3c00, Q6_K's scales in -29..29, activations +-1) answers the attestant AND the scalar reference (pipelines
+;   1 / 3: one thread a row, the serial fold, a dispatch a token) byte for byte: the tile's shared frame, its indexing and
+;   its accumulation, seen at full width against arithmetic it does not share. Its exactness is read back from its bytes
+;   through the body's decode (q4m-flat-at / q6m-flat-at): every weight an integer, the largest magnitude present times
+;   the widest row's cols below 2^24, every activation word +-1, so every partial sum of a row, in any association, is an
+;   integer below 2^24 and exact in f32. Its operands are exact in a half, so their precision is bit 512's.
+; Bit 512: a one-hot world, where the exact world is blind to the frame's operands: every superblock zero but one a row,
+;   and in it one weight, at local index (37 r + 11) mod 256 of superblock (7 r + 3) mod the row's: Q4_K d 0x3c01 x sc 63 x
+;   nib 15 = 945.9228515625 and Q6_K d 0x3c01 x sc 127 x q 31 = 3940.8447265625 (20 and 22 significant bits: a half reads
+;   946 and 3940), over 257 activations of full significand, +-pi (1 + (97 i mod 1021) / 1021) 2^(4 (i mod 9) - 16), among
+;   a half's subnormals at the bottom and past its largest finite at the top. Every output is the one product fl32(w x),
+;   exact in any association, so the tile answers the attestant AND the scalar reference byte for byte and every bit of
+;   both operands shows: a frame that stages x through a half, holds ws as half or clamps x to +-1 reads short here while
+;   bits 1, 2, 32 and 256 read full. Rows of 1, 20, 24 and 68 superblocks (33 rows, 33 tokens) and a tall shape, 4097 rows
+;   of 20 at 33 tokens, Q4_K and Q6_K: the tall shape carries the superblock index and the output slot past 2^16 (81940
+;   superblocks, 135300 slots), so an index narrowed to 16 bits reads short; the lane's real counts (348160 superblocks,
+;   512 x 17408 outputs) are L1's to witness. The world is read back through the body's decode: each of the 256
+;   one-weight superblocks holds that weight alone, at its index and of its value, a zero superblock none, and every
+;   activation carries more than a half's eleven significant bits.
+; Verdict 1023. Runs small fixture buffers only; no model admission or living state.
 ; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
 (do
  (defn qpqb-repeat (text n acc) (if (le n 0) acc (qpqb-repeat text (sub n 1) (str_concat acc text))))
@@ -345,24 +359,74 @@
  (defn qpqb-x4 (i) (qpqb-q4x 15360 15360 (qpqb-runm i 13 0 12 89 7 256 0 "") (qpqb-runm i 131 0 128 167 3 256 0 "")))
  (defn qpqb-x6 (i) (qpqb-q6x (qpqb-runm i 131 0 128 89 13 256 0 "") (qpqb-runm i 67 0 64 53 29 256 0 "") (qpqb-runm i 17 0 16 7 3 59 227 "") 15360))
  (defn qpqb-xpool (type i n acc) (if (ge i n) acc (qpqb-xpool type (add i 1) n (append acc (list (if (eq type 12) (qpqb-x4 i) (qpqb-x6 i)))))))
- ; the exactness, read back from the world's bytes: d (and dmin) 0x3c00, Q6_K's sixteen scales in -29..29
- (defn qpqb-s6ok? (sb s)
-  (if (ge s 16) 1
-   (do (let v (qpqb-s8 (str_byte_at sb (add 192 s))))
-       (if (and (ge v -29) (le v 29)) (qpqb-s6ok? sb (add s 1)) 0))))
- (defn qpqb-exact? (type pool k n)
-  (if (ge k n) 1
-   (do (let sb (nth pool k))
-       (if (if (eq type 12) (and (eq (qpqb-u16at sb 0) 15360) (eq (qpqb-u16at sb 2) 15360)) (and (eq (qpqb-u16at sb 208) 15360) (eq (qpqb-s6ok? sb 0) 1)))
-        (qpqb-exact? type pool (add k 1) n) 0))))
+ ; the exactness, read back from the world's bytes through the body's decode (q4m-flat-at / q6m-flat-at): (every weight an
+ ; integer, the largest magnitude present) over weights i..255 of the pool's superblocks k..n-1
+ (defn qpqb-xread (type pool k n i acc)
+  (if (ge k n) acc
+   (if (ge i 256) (qpqb-xread type pool (add k 1) n 0 acc)
+    (do (let w (if (eq type 12) (q4m-flat-at (nth pool k) 0 i) (q6m-flat-at (nth pool k) 0 i))) (let m (qpqb-abs w))
+        (qpqb-xread type pool k n (add i 1) (list (if (and (eq (nth acc 0) 1) (eq w (add (float_to_int w) 0.0))) 1 0) (if (gt m (nth acc 1)) m (nth acc 1))))))))
  ; activations of +-1, 257 of them: -1 where (17 i mod 257) < 128
  (defn qpqb-pm (i acc) (if (ge i 257) acc (qpqb-pm (add i 1) (str_concat acc (md-le32 (md-f32-bits (if (lt (mod (mul i 17) 257) 128) -1.0 1.0)))))))
+ ; and read back: every word 0x3f800000 or 0xbf800000
+ (defn qpqb-pm? (pm i)
+  (if (ge i (div (str_len pm) 4)) 1
+   (if (or (eq (ln-u32-le pm (mul 4 i)) 1065353216) (eq (ln-u32-le pm (mul 4 i)) 3212836864)) (qpqb-pm? pm (add i 1)) 0)))
  ; 33 rows of `cols` columns at 33 tokens (two tiles of each), the pool laid end to end: superblock s of row r is
  ; pool[(r * cols / 256 + s) mod n]
  (defn qpqb-wide (ps old type pool n stride cols per sp label)
   (qpqb-pool-tile ps old type pool n stride 33 cols 33 (div cols 256) 1 label per sp))
  ; every run of a list answered ok
  (defn qpqb-oks (rs i) (if (ge i (len rs)) 1 (if (nth (nth rs i) 0) (qpqb-oks rs (add i 1)) 0)))
+ ; ---- bit 512: the one-hot world ----
+ ; n bytes, every one zero but byte `at`, which is b
+ (defn qpqb-one (b at n) (str_concat (qpqb-fill 0 at "") (str_concat (byte_to_str b) (qpqb-fill 0 (sub (sub n at) 1) ""))))
+ ; a superblock zero in every byte but its one weight at local index li. Q4_K: d 0x3c01 (1 + 2^-10), dmin +0, sub-block
+ ; js = li / 32 at sc 63 and mn 0 (js < 4: scale byte js; from 4 on, the high pair of byte js - 4 and the low nibble of byte
+ ; js + 4), its nibble li mod 32 at 15: 63 x 15 x (1 + 2^-10) = 945.9228515625
+ (defn qpqb-h4 (li)
+  (do (let js (div li 32)) (let q (add (mul (div js 2) 32) (mod li 32)))
+      (qpqb-q4x 15361 0
+       (if (lt js 4) (qpqb-one 63 js 12) (str_concat (qpqb-one 192 (sub js 4) 8) (qpqb-one 15 (sub js 4) 4)))
+       (qpqb-one (if (eq (mod js 2) 0) 15 240) q 128))))
+ ; Q6_K: d 0x3c01, every quant at q 0 (nibble 0, high pair 2: the high-bit bytes 0xaa) but weight li (half h, quarter g,
+ ; column l) at q 31 (nibble 15, high pair 3), its scale byte h * 8 + 2 g + l / 16 at 127 and every other scale 0:
+ ; 127 x 31 x (1 + 2^-10) = 3940.8447265625
+ (defn qpqb-h6 (li)
+  (do (let h (div li 128)) (let g (div (mod li 128) 32)) (let l (mod li 32)) (let ho (add (mul h 32) l))
+      (qpqb-q6x (qpqb-one (if (lt g 2) 15 240) (add (mul h 64) (add l (mul (mod g 2) 32))) 128)
+                (str_concat (qpqb-fill 170 ho "") (str_concat (byte_to_str (add 170 (qpqb-p4 g))) (qpqb-fill 170 (sub 63 ho) "")))
+                (qpqb-one 127 (add (mul h 8) (add (mul 2 g) (div l 16))) 16) 15361)))
+ ; the 257 activations: +-pi (1 + (97 i mod 1021) / 1021) 2^(4 (i mod 9) - 16), the sign alternating
+ (defn qpqb-p2 (e) (if (lt e 0) (div 1.0 (qpqb-p2 (sub 0 e))) (if (eq e 0) 1.0 (mul 2.0 (qpqb-p2 (sub e 1))))))
+ (defn qpqb-hx (i acc)
+  (if (ge i 257) acc
+   (qpqb-hx (add i 1) (str_concat acc (md-le32 (md-f32-bits (mul (if (eq (mod i 2) 0) 1.0 -1.0)
+    (mul (mul 3.141592653589793 (add 1.0 (div (mul 1.0 (mod (mul i 97) 1021)) 1021.0))) (qpqb-p2 (sub (mul 4 (mod i 9)) 16))))))))))
+ ; row r's one weight: local index (37 r + 11) mod 256 of its superblock (7 r + 3) mod nsb
+ (defn qpqb-oh-li (r) (mod (add (mul r 37) 11) 256))
+ (defn qpqb-oh-put (wh type stride nsb rows r)
+  (if (ge r rows) wh
+   (do (let w (metal_buf_write wh (mul stride (add (mul r nsb) (mod (add (mul r 7) 3) nsb))) (if (eq type 12) (qpqb-h4 (qpqb-oh-li r)) (qpqb-h6 (qpqb-oh-li r)))))
+       (qpqb-oh-put wh type stride nsb rows (add r 1)))))
+ ; rows of `cols` columns at 33 tokens: the weights written zero whole, then each row's one superblock; against the attestant
+ ; and the scalar reference sp
+ (defn qpqb-onehot (ps old type stride rows cols hx sp label)
+  (do (let nsb (div cols 256)) (let wh (metal_buf_alloc (mul rows (mul nsb stride))))
+      (let z (metal_buf_write wh 0 (qpqb-rep2 (qpqb-fill 0 stride "") (mul rows nsb))))
+      (qpqb-tile-run ps old type (qpqb-oh-put wh type stride nsb rows 0) rows cols 33 label hx sp)))
+ ; the world read back through the body's decode: superblock sb's (nonzero weights, the last one's index, its value)
+ (defn qpqb-oh-read (type sb i acc)
+  (if (ge i 256) acc
+   (do (let v (if (eq type 12) (q4m-flat-at sb 0 i) (q6m-flat-at sb 0 i)))
+       (qpqb-oh-read type sb (add i 1) (if (eq v 0.0) acc (list (add (nth acc 0) 1) i v))))))
+ ; how many of the one-weight superblocks li..255 do not hold weight w alone at li
+ (defn qpqb-oh-bad (type li w bad)
+  (if (ge li 256) bad
+   (do (let r (qpqb-oh-read type (if (eq type 12) (qpqb-h4 li) (qpqb-h6 li)) 0 (list 0 -1 0.0)))
+       (qpqb-oh-bad type (add li 1) w (if (and (eq (nth r 0) 1) (and (eq (nth r 1) li) (eq (nth r 2) w))) bad (add bad 1))))))
+ ; every activation word carries more than a half's eleven significant bits: its f32 significand's low thirteen not all zero
+ (defn qpqb-hx-full? (hx i) (if (ge i (div (str_len hx) 4)) 1 (if (eq (mod (ln-u32-le hx (mul 4 i)) 8192) 0) 0 (qpqb-hx-full? hx (add i 1)))))
  ; ---- bit 64: what the pair answers on the non-finite patterns p..hi-1, summed into
  ; (pow2 loop at sign | 0x47800000 | m << 13, as_type +-inf at m 0 and NaN otherwise, NaN payload kept, NaN quieted,
  ; NaN read as the canonical 0x7fc00000); the last three are printed, not claimed
@@ -480,21 +544,41 @@
  ; and the scalar reference (pipelines 1 / 3)
  (let pm (qpqb-pm 0 ""))
  (let X4 (qpqb-xpool 12 0 71 (list))) (let X6 (qpqb-xpool 14 0 71 (list)))
- (let exact (and (and (eq (qpqb-exact? 12 X4 0 71) 1) (eq (qpqb-exact? 14 X6 0 71) 1)) (and (lt (mul 945 17408) 16777216) (lt (mul 928 17408) 16777216))))
- (print (list "exact world: Q4_K d and dmin 0x3c00, Q6_K d 0x3c00 and scales in -29..29, read back" exact
-  "largest row sums 945 * 17408, 928 * 17408 against 2^24" (mul 945 17408) (mul 928 17408) 16777216))
- (let w4 (list (qpqb-wide ps o4 12 P4 n4 144 5120 per 0 "pool, 20 superblocks a row") (qpqb-wide ps o4 12 P4 n4 144 6144 per 0 "pool, 24 superblocks a row")
-               (qpqb-wide ps o4 12 P4 n4 144 17408 per 0 "pool, 68 superblocks a row") (qpqb-wide ps o4 12 X4 71 144 5120 pm (nth ps 1) "exact, 20 superblocks a row")
-               (qpqb-wide ps o4 12 X4 71 144 6144 pm (nth ps 1) "exact, 24 superblocks a row") (qpqb-wide ps o4 12 X4 71 144 17408 pm (nth ps 1) "exact, 68 superblocks a row")))
- (let w6 (list (qpqb-wide ps o6 14 P6 n6 210 5120 per 0 "pool, 20 superblocks a row") (qpqb-wide ps o6 14 P6 n6 210 6144 per 0 "pool, 24 superblocks a row")
-               (qpqb-wide ps o6 14 P6 n6 210 17408 per 0 "pool, 68 superblocks a row") (qpqb-wide ps o6 14 X6 71 210 5120 pm (nth ps 3) "exact, 20 superblocks a row")
-               (qpqb-wide ps o6 14 X6 71 210 6144 pm (nth ps 3) "exact, 24 superblocks a row") (qpqb-wide ps o6 14 X6 71 210 17408 pm (nth ps 3) "exact, 68 superblocks a row")))
+ ; the real rows' widths, the widest last
+ (let wd (list 5120 6144 17408))
+ (let r4 (qpqb-xread 12 X4 0 71 0 (list 1 0.0))) (let r6 (qpqb-xread 14 X6 0 71 0 (list 1 0.0)))
+ (let exact (and (and (eq (nth r4 0) 1) (eq (nth r6 0) 1))
+                 (and (eq (qpqb-pm? pm 0) 1) (and (lt (mul (nth r4 1) (nth wd 2)) 16777216.0) (lt (mul (nth r6 1) (nth wd 2)) 16777216.0)))))
+ (print (list "exact world, read back through the body's decode: every weight an integer (Q4_K, Q6_K)" (nth r4 0) (nth r6 0)
+  "the largest magnitude present" (nth r4 1) (nth r6 1) "times the widest row's cols" (nth wd 2) "against 2^24" (mul (nth r4 1) (nth wd 2)) (mul (nth r6 1) (nth wd 2)) 16777216
+  "every activation +-1" (qpqb-pm? pm 0) "exact" (if exact 1 0)))
+ (let w4 (list (qpqb-wide ps o4 12 P4 n4 144 (nth wd 0) per 0 "pool, 20 superblocks a row") (qpqb-wide ps o4 12 P4 n4 144 (nth wd 1) per 0 "pool, 24 superblocks a row")
+               (qpqb-wide ps o4 12 P4 n4 144 (nth wd 2) per 0 "pool, 68 superblocks a row") (qpqb-wide ps o4 12 X4 71 144 (nth wd 0) pm (nth ps 1) "exact, 20 superblocks a row")
+               (qpqb-wide ps o4 12 X4 71 144 (nth wd 1) pm (nth ps 1) "exact, 24 superblocks a row") (qpqb-wide ps o4 12 X4 71 144 (nth wd 2) pm (nth ps 1) "exact, 68 superblocks a row")))
+ (let w6 (list (qpqb-wide ps o6 14 P6 n6 210 (nth wd 0) per 0 "pool, 20 superblocks a row") (qpqb-wide ps o6 14 P6 n6 210 (nth wd 1) per 0 "pool, 24 superblocks a row")
+               (qpqb-wide ps o6 14 P6 n6 210 (nth wd 2) per 0 "pool, 68 superblocks a row") (qpqb-wide ps o6 14 X6 71 210 (nth wd 0) pm (nth ps 3) "exact, 20 superblocks a row")
+               (qpqb-wide ps o6 14 X6 71 210 (nth wd 1) pm (nth ps 3) "exact, 24 superblocks a row") (qpqb-wide ps o6 14 X6 71 210 (nth wd 2) pm (nth ps 3) "exact, 68 superblocks a row")))
  (let c256 (if (and exact (and (eq (qpqb-oks w4 0) 1) (eq (qpqb-oks w6 0) 1))) 256 0))
+ ; bit 512: the one-hot world at 1, 20, 24 and 68 superblocks a row and the tall shape, 4097 rows of 20, against the attestant
+ ; and the scalar reference (pipelines 1 / 3), the world read back first
+ (let hx (qpqb-hx 0 ""))
+ (let ob4 (qpqb-oh-bad 12 0 945.9228515625 0)) (let ob6 (qpqb-oh-bad 14 0 3940.8447265625 0))
+ (let oz4 (nth (qpqb-oh-read 12 (qpqb-fill 0 144 "") 0 (list 0 -1 0.0)) 0)) (let oz6 (nth (qpqb-oh-read 14 (qpqb-fill 0 210 "") 0 (list 0 -1 0.0)) 0))
+ (let ohread (and (and (eq ob4 0) (eq ob6 0)) (and (and (eq oz4 0) (eq oz6 0)) (eq (qpqb-hx-full? hx 0) 1))))
+ (print (list "one-hot world, read back through the body's decode: superblocks not holding their one weight alone (Q4_K, Q6_K)" ob4 ob6
+  "nonzero weights in a zero superblock" oz4 oz6 "every activation past a half's significand" (qpqb-hx-full? hx 0)))
+ (let h4 (list (qpqb-onehot ps o4 12 144 33 256 hx (nth ps 1) "one-hot, 1 superblock a row") (qpqb-onehot ps o4 12 144 33 (nth wd 0) hx (nth ps 1) "one-hot, 20 superblocks a row")
+               (qpqb-onehot ps o4 12 144 33 (nth wd 1) hx (nth ps 1) "one-hot, 24 superblocks a row") (qpqb-onehot ps o4 12 144 33 (nth wd 2) hx (nth ps 1) "one-hot, 68 superblocks a row")
+               (qpqb-onehot ps o4 12 144 4097 (nth wd 0) hx (nth ps 1) "one-hot, tall: 4097 rows of 20 superblocks")))
+ (let h6 (list (qpqb-onehot ps o6 14 210 33 256 hx (nth ps 3) "one-hot, 1 superblock a row") (qpqb-onehot ps o6 14 210 33 (nth wd 0) hx (nth ps 3) "one-hot, 20 superblocks a row")
+               (qpqb-onehot ps o6 14 210 33 (nth wd 1) hx (nth ps 3) "one-hot, 24 superblocks a row") (qpqb-onehot ps o6 14 210 33 (nth wd 2) hx (nth ps 3) "one-hot, 68 superblocks a row")
+               (qpqb-onehot ps o6 14 210 4097 (nth wd 0) hx (nth ps 3) "one-hot, tall: 4097 rows of 20 superblocks")))
+ (let c512 (if (and ohread (and (eq (qpqb-oks h4 0) 1) (eq (qpqb-oks h6 0) 1))) 512 0))
  ; bit 128: the refusal, and the widths the lane holds read whole
  (let c128 (if (and (and (qpqb-refused ps 12 384) (qpqb-refused ps 14 640)) (and (qpqb-refused ps 12 255)
                 (and (and (eq (str_len (q38pq-whole-refusal 12 5120)) 0) (eq (str_len (q38pq-whole-refusal 14 17408)) 0))
                      (and (and (eq (str_len (q38pq-whole-refusal 12 6144)) 0) (eq (str_len (q38pq-whole-refusal 14 256)) 0)) (eq (str_len (q38pq-whole-refusal 8 48)) 0))))) 128 0))
  (let guard (if (and (and (eq (q38pq-index 99) -1) (eq (q38dq-index 99) -1))
    (and (eq (nth (metal_live) 2) 0) (and (and d4a d4b) (and d6a d6b)))) 16 0))
- (let verdict (sum (list c4 c6 c8 cf guard c32 c64 c128 c256)))
- (if (eq verdict 511) verdict (form_error (str_concat "qwen prefill quant band failed: " (int_to_str verdict)))))
+ (let verdict (sum (list c4 c6 c8 cf guard c32 c64 c128 c256 c512)))
+ (if (eq verdict 1023) verdict (form_error (str_concat "qwen prefill quant band failed: " (int_to_str verdict)))))
