@@ -10,6 +10,8 @@
 //   not-a-word       the host's word list holds it (/usr/share/dict/words): a coined word cannot be told from noise without a second reader; a list that does not read refuses as no-lexicon
 //   no-why           WHY runs at least 6 words
 //   why-untethered   WHY shares at least 2 long words with the finding: an answer about nothing in particular teaches nothing
+//   no-decoys        the reply offered at least 2 other real words beside it, the blind read's choices
+//   blind-miss       a second reader, shown only the WHY with the word hidden and the offered words in two different orders, names the word both times: a WHY that says nothing of its word leaves it a guess. Tests of words cannot read meaning; this one reads whether the sentence carries the word, and a hollow WHY still passes it by luck about one time in nine (three choices) or fewer, and the reader is the same voice that wrote it
 // An admitted row lands in learn/distillation-native-candidates.jsonl: the coordinator's rented rows never write there, so a band counts the two apart and the corpus's field code keeps reading rented rows alone.
 // Every attempt lands one row in receipts/self-distill-ledger.jsonl: admitted, refused with its name and the voice's words, or held with the lane's reason. Both files are public and hold no word of the person's.
 // PROOF: form-stdlib/tests/self-distill-band.bml; learn/tests/homecoming-distillation-corpus-band.fk reads the native gate beside the rented one.
@@ -22,7 +24,7 @@ section [form.bml] {
  class SelfDistill {
   def sd-door() = "self-distill";
   def sd-source() = "native-voice";
-  def sd-spec() = [["candidates", "str"], ["ledger", "str"], ["corpus", "str"], ["lexicon", "str"], ["proof", "str"], ["turns", "str"], ["register", "str"], ["reply", "str"], ["until_ms", "int"]];
+  def sd-spec() = [["candidates", "str"], ["ledger", "str"], ["corpus", "str"], ["lexicon", "str"], ["proof", "str"], ["turns", "str"], ["register", "str"], ["reply", "str"], ["blind", "strs"], ["until_ms", "int"]];
   def sd-opt(opts, key, dflt) = (String) fcgp-str(opts, key) == "" ? dflt : fcgp-str(opts, key);
   def sd-candidates(opts) = sd-opt(opts, "candidates", "learn/distillation-native-candidates.jsonl");
   def sd-ledger(opts) = sd-opt(opts, "ledger", "receipts/self-distill-ledger.jsonl");
@@ -79,6 +81,19 @@ section [form.bml] {
    : nothing?(lexicon) ? "no-lexicon"
    : !sd-has?("\n" ++ lexicon ++ "\n", "\n" ++ word ++ "\n") ? "not-a-word"
    : "";
+  // ---- the blind read: the WHY alone, its word hidden, the reply's own words the choices; a band's stand-in reads open no model
+  def sd-listed?(w, lexicon) = !nothing?(lexicon) && sd-has?("\n" ++ lexicon ++ "\n", "\n" ++ w ++ "\n");
+  def sd-decoys(words, word, lexicon) = sd-take(3, sd-distinct(filter(w => (String) w != word && sd-word?(w) && sd-listed?(w, lexicon), words)));
+  def sd-hide(text, piece) = str-join-with(split-on(text, piece), "____");
+  def sd-blanked(why, word) = len(word) >= 6 ? sd-hide(sd-hide(sd-lower(why), word), substring(word, 0, len(word) - 2)) : sd-hide(sd-lower(why), word);
+  def sd-rotated(xs, k) = append(xs[k:], sd-take(k, xs));
+  def sd-blind-packet(why, choices) = "A sentence with one word hidden as ____:\n\n" ++ why ++ "\n\nWhich of these words was hidden: " ++ str-join-with(choices, ", ") ++ "? Answer with that one word alone.";
+  def sd-blind-stand-in(opts, i) { let said = fcgp-present?(opts, "blind") ? json-array-elements(json-object-get(opts, "blind")) : []; i < len(said) ? json-string-value(said[i]) : ""; }
+  def sd-blind-ask(why, choices) { let v = fcnv-ask(sd-blind-packet(why, choices), json-node-object([fhn-n("max_reply_tokens", 16), fhn-n("reply_budget", 32), fhn-s("enquiry_kind", qc-measurement()), fhn-s("enquiry", "which word a sentence hides")])); (String) v[0] == "answered" ? trim(v[1]) : ""; }
+  def sd-blind-said(opts, i, why, choices) = (String) fcgp-str(opts, "reply") != "" ? sd-blind-stand-in(opts, i) : sd-blind-ask(why, choices);
+  def sd-blind-reads(opts, word, why, decoys) { let xs = cons(word, decoys); let k = len(why) % len(xs); let b = sd-blanked(why, word); let one = sd-blind-said(opts, 0, b, sd-rotated(xs, k)); [one, sd-blind-said(opts, 1, b, sd-rotated(xs, (k + 1) % len(xs)))]; }
+  def sd-blind-right?(said, word) { let t = sd-tokens(said); !nil?(t) && (String) t[0] == word; }
+  def sd-blind-name(reads, word) = all?(r => sd-blind-right?(r, word), reads) ? "" : "blind-miss";
   // ---- the rows
   def sd-date() = parse-int(str-join(split-on(hw-day-in(hw-zone-ms(), now_unix_ms()), "-"))) ?? 0;
   def sd-candidate(f, word, why, v) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("date", sd-date()), json-node-pair("q", json-node-array(map(w => json-node-string(w), sd-question(f)))), fhn-s("a", word), fhn-s("fresh", word), fhn-s("src", sd-source()), fhn-s("verdict", "admitted"), fhn-s("why", why), fhn-s("where", f[0]), fhn-s("finding", f[1]), fhn-s("model", v[4]), fhn-n("generated_ids", v[3]), fhn-s("session", lrun-session())]);
@@ -86,7 +101,7 @@ section [form.bml] {
   def sd-say(line) { let p = print_str("[self-distill] " ++ line); line; }
   // ---- the voice: a band's stand-in reply opens no model
   def sd-voice(f, opts) = (String) fcgp-str(opts, "reply") != "" ? ["answered", fcgp-str(opts, "reply"), 0, 1, "stand-in", 0, 1, "", "", [], ""] : fcnv-ask(sd-packet(f), json-node-object([fhn-n("max_reply_tokens", 96), fhn-n("reply_budget", 128), fhn-s("enquiry_kind", qc-measurement()), fhn-s("enquiry", "one word for a finding")]));
-  def sd-window-ms() = 180000;
+  def sd-window-ms() = 300000;
   def sd-window-why(opts) = nothing?(fcgp-num(opts, "until_ms")) || (fcgp-num(opts, "until_ms") - host_monotonic_ms() >= sd-window-ms()) ? "" : "the window cannot hold an ask: no finding was asked";
   def sd-land(f, v, opts) = (String) v[0] != "answered" ? sd-held(f, v, opts) : sd-judged(f, v, trim(v[1]), opts);
   def sd-held(f, v, opts) {
@@ -101,8 +116,11 @@ section [form.bml] {
    let words = sd-words-of(reply);
    let word = sd-word-pick(words, f[1], corpus, offered, lexicon);
    let why = (String) sd-word-judge(word, f[1], corpus, offered, lexicon) == "" ? sd-why-for(f, word, words[0], firstWhy, opts) : firstWhy;
-   let name = sd-judge(word, why, f[1], corpus, offered, lexicon);
-   let kept = fhn-append(sd-ledger(opts), lrun-row-line(sd-attempt(f, (String) name == "" ? "admitted" : "refused", name, reply ++ "\nJUDGED: " ++ word ++ "\nITS WHY: " ++ why, v)) ++ "\n");
+   let first = sd-judge(word, why, f[1], corpus, offered, lexicon);
+   let decoys = (String) first == "" ? sd-decoys(words, word, lexicon) : [];
+   let reads = (String) first == "" && len(decoys) >= 2 ? sd-blind-reads(opts, word, why, decoys) : [];
+   let name = (String) first != "" ? first : len(decoys) < 2 ? "no-decoys" : sd-blind-name(reads, word);
+   let kept = fhn-append(sd-ledger(opts), lrun-row-line(sd-attempt(f, (String) name == "" ? "admitted" : "refused", name, reply ++ "\nJUDGED: " ++ word ++ "\nITS WHY: " ++ why ++ "\nBLIND: " ++ str-join-with(reads, " | "), v)) ++ "\n");
    (String) name == "" ? sd-admitted(f, word, why, v, opts) : sd-say("refused by name " ++ name ++ ": the voice said \"" ++ word ++ ": " ++ sd-clip(lrun-home-free(why), 200) ++ "\" on " ++ f[0]);
   }
   def sd-admitted(f, word, why, v, opts) {

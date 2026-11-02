@@ -218,8 +218,8 @@ form/form-stdlib/tests/command-words-band -> 2147483647  (form/form-stdlib/bml/c
 observe/tests/belief-rewitness-band      -> 63
 ./fkwu form/form-stdlib/release-ledger.bml -> open=17 moving=0, then 17000000 (2026-10-04)
 learn/tests/homecoming-distillation-corpus-band -> 65535
-form-stdlib/tests/self-distill-band -> 127  (the voice's own frontier row, judged and refused by name, in learn/distillation-native-candidates.jsonl apart from the rented rows)
-form-stdlib/tests/self-review-band -> 255  (the wrong line of e06d7217e and cf090e073 and its repair, replayed through the voice; the register's self-review reads that row)
+form-stdlib/tests/self-distill-band -> 255  (the voice's own frontier row, judged and refused by name, a blind second read of its why, in learn/distillation-native-candidates.jsonl apart from the rented rows)
+form-stdlib/tests/self-review-band -> 511  (the wrong line of e06d7217e and cf090e073 and its repair, replayed through the voice door and graded on what the line computes; the register's self-review reads that row, and the reason stays a person's to read)
 value-eq-arena-band 31 · import-carry-band 255 · form-cli-author-high-band 4095
 closure-lines-band 31 · sort-band 31   (the queue's two gaps, written by the local lane; 2026-10-01)
 memory-governor-band 67108863 (form/form-stdlib/bml/memory-governor.bml asks the whole machine, not one process, before a
