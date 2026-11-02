@@ -10,11 +10,30 @@
 ; floats must sit within the lane's named bound of the per-token lane's (each side within one bound of the exact
 ; sum, |w x| from the K-quant weights through q4m-flat-at / q6m-flat-at); padding must retain its sentinel.
 ; Bit 32: the lane's K-quant tile (pipelines 52/53, the weights decoded one sub-block a K step) answers the
-; per-weight attestant tile (qmb-quant-mma, emitted here) byte for byte, padding included, on rows of eight
-; superblocks (superblock s of row r is the fixture's superblock (r >> s) & 1, so rows 0..255 differ): Q4_K and
-; Q6_K, 3 and 257 rows (one and nine row tiles), 9 and 33 tokens (one and two token tiles); both dispatches come
-; back, every written slot has left its sentinel and the four buffers free.
-; Expected 63. Runs small fixture buffers only; no model admission or living state.
+; per-weight attestant tile (qmb-quant-mma, emitted here) byte for byte, padding included, every slot written,
+; the attestant's first token not all zero; both dispatches come back and the four buffers free. Two fixtures:
+;   the committed superblocks in rows of eight (superblock s of row r is the fixture's (r >> s) & 1, so rows
+;   0..255 differ): Q4_K and Q6_K, 3 and 257 rows (one and nine row tiles), 9 and 33 tokens (one and two token tiles);
+;   edge pools that meet every exponent a finite half holds, 0 (the subnormals) through 30 (the largest finite),
+;   0x0001 0x03ff 0x0400 0x7bff and their negatives among them, each where its term stands alone. Q4_K (103): d at
+;   each exponent with dmin a signed zero, dmin at each with d a signed zero, both in one binade, and named edges
+;   (zeros of both signs, 0x7bff / 0xfbff over twelve 0xff scale bytes and nibbles 15, a huge d over nibbles 0 so a
+;   subnormal dmin answers alone, scale bytes whose high bits alone carry sub-blocks 4..7), sc and mn across 0..63 at
+;   sub-blocks 0..3 and at 4..7 (through their high bits). Q6_K (70): d at each exponent of both signs, scale bytes
+;   across all 256 (-128 and 127 among them), quants across -32..31 and whole superblocks of -32 and of 31. Rows of
+;   ONE superblock (cols 256: no larger neighbour's rounding swallows a small one's error) at 9 and 33 tokens, and
+;   rows of two pool neighbours (cols 512) at 33. The pools' coverage is read back from their bytes (Q4_K through the
+;   body's q4m-scale / q4m-min) and is part of the bit.
+; Bit 64: the f16 identity the tile's equality rests on, on the device without a model, in the lane's own unit:
+;   float(as_type<half>(h)) and q4k_f16(h) / q6k_f16(h) (the attestant's pow2 loop) agree bit for bit on all 63488
+;   finite patterns, +0 (0x0000 -> 0x00000000) and -0 (0x8000 -> 0x80000000) among them; on the 2048 non-finite
+;   patterns the pair parts, and the bit claims what each answers: as_type<half> +-inf at mantissa 0 and NaN at the
+;   other 2046, the pow2 loop the finite +-2^16 (1 + m/1024), bits sign | 0x47800000 | m << 13. How the NaNs read
+;   (payload kept, quieted, or the canonical 0x7fc00000) is printed, not claimed.
+; Bit 128: q38-mv-batch-y refuses a Q4_K or Q6_K view whose cols is not a multiple of 256 aloud (q38pq-whole-refusal)
+;   before anything is enqueued: the attempt answers nothing, the dispatch count and the output's sentinel hold;
+;   the lane's widths read whole and a Q8_0 view is not this refusal's.
+; Expected 255. Runs small fixture buffers only; no model admission or living state.
 ; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
 (do
  (defn qpqb-repeat (text n acc) (if (le n 0) acc (qpqb-repeat text (sub n 1) (str_concat acc text))))
@@ -139,6 +158,13 @@
   (if (ge r rows) wh
    (do (let w (metal_buf_write wh (mul r (mul 8 stride)) (qpqb-tile-row sb stride r 0 "")))
        (qpqb-tile-put wh sb stride rows (add r 1)))))
+ ; a pool's row r: its superblocks s are pool[(r + s * step) mod n] (step 0 keeps a row to one superblock)
+ (defn qpqb-pool-row (pool n nsb step r s acc)
+  (if (ge s nsb) acc (qpqb-pool-row pool n nsb step r (add s 1) (str_concat acc (nth pool (mod (add r (mul s step)) n))))))
+ (defn qpqb-pool-put (wh pool n stride nsb step rows r)
+  (if (ge r rows) wh
+   (do (let w (metal_buf_write wh (mul r (mul nsb stride)) (qpqb-pool-row pool n nsb step r 0 "")))
+       (qpqb-pool-put wh pool n stride nsb step rows (add r 1)))))
  ; every (token, row) slot of the output was written: none still holds the sentinel
  (defn qpqb-written? (out pitch rows ntok t r sent)
   (if (ge t ntok) 1
@@ -151,12 +177,12 @@
    (if (le (sub hi lo) 1) lo
     (do (let mid (div (add lo hi) 2)) (let left (qpqb-first-diff a b lo mid))
         (if (ge left 0) left (qpqb-first-diff a b mid hi))))))
- (defn qpqb-tile (ps old type sb stride rows ntok)
+ ; the attestant and the lane's dispatch over the weights in wh (rows x cols), the outputs word for word
+ (defn qpqb-tile-run (ps old type wh rows cols ntok label)
   (do
-   (let cols 2048) (let pitch (add rows 3)) (let nout (mul ntok pitch))
+   (let pitch (add rows 3)) (let nout (mul ntok pitch))
    (let sent (md-le32 (md-f32-bits 42.25)))
    (let fill (qpqb-rep2 sent nout))
-   (let wh (qpqb-tile-put (metal_buf_alloc (mul rows (mul 8 stride))) sb stride rows 0))
    (let x (metal_buf_alloc (mul 4 (mul ntok cols))))
    (let yo (metal_buf_alloc (mul 4 nout)))
    (let yn (metal_buf_alloc (mul 4 nout)))
@@ -171,12 +197,132 @@
    (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free yo) (metal_buf_free yn))))
    (let at (qpqb-first-diff a b 0 nout))
    (let written (qpqb-written? b pitch rows ntok 0 0 sent))
-   (print (list "k-quant tile type" type "rows" rows "cols" cols "tokens" ntok "dispatched" eo en "first differing word" at
-    "attestant" (if (ge at 0) (ln-u32-le a (mul 4 at)) -1) "tile" (if (ge at 0) (ln-u32-le b (mul 4 at)) -1) "written" written "freed" freed))
-   (and (and (gt eo 0) (gt en 0)) (and (lt at 0) (and (eq written 1) (eq freed 4))))))
+   (let live (if (str_eq (substring a 0 (mul 4 rows)) (qpqb-rep2 (md-le32 0) rows)) 0 1))
+   (print (list "k-quant tile" label "type" type "rows" rows "cols" cols "tokens" ntok "dispatched" eo en "first differing word" at
+    "attestant" (if (ge at 0) (ln-u32-le a (mul 4 at)) -1) "tile" (if (ge at 0) (ln-u32-le b (mul 4 at)) -1) "written" written "live" live "freed" freed))
+   (and (and (gt eo 0) (gt en 0)) (and (lt at 0) (and (eq written 1) (and (eq live 1) (eq freed 4)))))))
+ (defn qpqb-tile (ps old type sb stride rows ntok)
+  (qpqb-tile-run ps old type (qpqb-tile-put (metal_buf_alloc (mul rows (mul 8 stride))) sb stride rows 0) rows 2048 ntok "fixture"))
+ (defn qpqb-pool-tile (ps old type pool n stride rows cols ntok step)
+  (qpqb-tile-run ps old type (qpqb-pool-put (metal_buf_alloc (mul rows (mul (div cols 256) stride))) pool n stride (div cols 256) step rows 0) rows cols ntok "edge pool"))
+ ; ---- the edge pools ----
+ (defn qpqb-u16 (v) (str_concat (byte_to_str (mod v 256)) (byte_to_str (div v 256))))
+ (defn qpqb-u16at (s o) (add (str_byte_at s o) (mul 256 (str_byte_at s (add o 1)))))
+ (defn qpqb-h (s e m) (add (mul s 32768) (add (mul e 1024) m)))
+ (defn qpqb-fill (b n acc) (if (le n 0) acc (qpqb-fill b (sub n 1) (str_concat acc (byte_to_str b)))))
+ ; the mantissa at exponent e: at 0 the smallest (a) or the largest (b) subnormal, at 1 the smallest normal, at 30
+ ; the largest finite; elsewhere spread and nonzero, so a clamp at 2^15 or a flush below 2^-14 moves the weights
+ (defn qpqb-ma (e) (if (eq e 0) 1 (if (eq e 1) 0 (if (eq e 30) 1023 (add (mod (mul e 397) 1023) 1)))))
+ (defn qpqb-mb (e) (if (eq e 0) 1023 (if (eq e 1) 0 (if (eq e 30) 1023 (add (mod (add (mul e 211) 5) 1023) 1)))))
+ ; bytes ((i * n + b) * k + c) mod 256 for b in 0..n-1: superblock i's own run of quant, high-bit or scale bytes
+ (defn qpqb-run (i b n k c acc) (if (ge b n) acc (qpqb-run i (add b 1) n k c (str_concat acc (byte_to_str (mod (add (mul (add (mul i n) b) k) c) 256))))))
+ ; Q4_K: sc_j = (27 i + 9 j + 5) mod 64 and mn_j = (45 i + 21 j + 17) mod 64 laid into get_scale_min_k4's twelve
+ ; bytes: byte t (t < 4) is sc_t with sc_{t+4}'s high pair, byte t + 4 is mn_t with mn_{t+4}'s, byte t + 8 the two
+ ; low nibbles of sc_{t+4} and mn_{t+4}
+ (defn qpqb-sc (i j) (mod (add (mul i 27) (add (mul j 9) 5)) 64))
+ (defn qpqb-mn (i j) (mod (add (mul i 45) (add (mul j 21) 17)) 64))
+ (defn qpqb-scb (i t acc)
+  (if (ge t 12) acc
+   (qpqb-scb i (add t 1) (str_concat acc (byte_to_str
+    (if (lt t 4) (add (qpqb-sc i t) (mul 64 (div (qpqb-sc i (add t 4)) 16)))
+     (if (lt t 8) (add (qpqb-mn i (sub t 4)) (mul 64 (div (qpqb-mn i t) 16)))
+      (add (mod (qpqb-sc i (sub t 4)) 16) (mul 16 (mod (qpqb-mn i (sub t 4)) 16))))))))))
+ (defn qpqb-q4x (d dmin sc qs) (str_concat (qpqb-u16 d) (str_concat (qpqb-u16 dmin) (str_concat sc qs))))
+ (defn qpqb-q4 (i d dmin) (qpqb-q4x d dmin (qpqb-scb i 0 "") (qpqb-run i 0 128 167 3 "")))
+ ; family 0: d at exponent e, dmin a signed zero; 1: dmin at e, d a signed zero; 2: both at e
+ (defn qpqb-q4fam (f e acc)
+  (if (gt e 30) acc
+   (qpqb-q4fam f (add e 1) (append acc (list
+    (if (eq f 0) (qpqb-q4 e (qpqb-h (mod e 2) e (qpqb-ma e)) (mul (mod (div e 2) 2) 32768))
+     (if (eq f 1) (qpqb-q4 (add 31 e) (mul (mod (add (div e 2) 1) 2) 32768) (qpqb-h (mod (add e 1) 2) e (qpqb-mb e)))
+      (qpqb-q4 (add 62 e) (qpqb-h (mod (div e 2) 2) e (mod (add (mul e 113) 7) 1024)) (qpqb-h (mod (div (add e 1) 2) 2) e (mod (add (mul e 331) 11) 1024))))))))))
+ ; Q6_K: ql, qh and the sixteen signed scales from superblock i's own runs, d last
+ (defn qpqb-q6x (ql qh sc d) (str_concat ql (str_concat qh (str_concat sc (qpqb-u16 d)))))
+ (defn qpqb-q6 (i d) (qpqb-q6x (qpqb-run i 0 128 89 13 "") (qpqb-run i 0 64 53 29 "") (qpqb-run i 0 16 151 9 "") d))
+ (defn qpqb-q6fam (f e acc)
+  (if (gt e 30) acc
+   (qpqb-q6fam f (add e 1) (append acc (list
+    (if (eq f 0) (qpqb-q6 e (qpqb-h (mod e 2) e (qpqb-ma e))) (qpqb-q6 (add 31 e) (qpqb-h (mod (add e 1) 2) e (qpqb-mb e)))))))))
+ ; coverage, read back from the pool's bytes: sets as strings of "0"/"1"
+ (defn qpqb-mark (s v) (str_concat (substring s 0 v) (str_concat "1" (substring s (add v 1) (str_len s)))))
+ (defn qpqb-ex (h) (mod (div h 1024) 32))
+ (defn qpqb-zero? (h) (eq (mod h 32768) 0))
+ ; Q4_K: (d's exponents where dmin is a signed zero, dmin's where d is, sc at sub-blocks 0..3, sc at 4..7 (d nonzero),
+ ; mn at 0..3, mn at 4..7 (dmin nonzero)), sc and mn through the body's q4m-scale / q4m-min
+ (defn qpqb-q4cov-j (sb dz mz j cov)
+  (if (ge j 8) cov
+   (do (let sc (q4m-scale sb 0 j)) (let mn (q4m-min sb 0 j)) (let hi (ge j 4))
+       (qpqb-q4cov-j sb dz mz (add j 1)
+        (list (nth cov 0) (nth cov 1)
+              (if (or dz hi) (nth cov 2) (qpqb-mark (nth cov 2) sc))
+              (if (or dz (not hi)) (nth cov 3) (qpqb-mark (nth cov 3) sc))
+              (if (or mz hi) (nth cov 4) (qpqb-mark (nth cov 4) mn))
+              (if (or mz (not hi)) (nth cov 5) (qpqb-mark (nth cov 5) mn)))))))
+ (defn qpqb-q4cov (pool k n cov)
+  (if (ge k n) cov
+   (do (let sb (nth pool k)) (let d (qpqb-u16at sb 0)) (let m (qpqb-u16at sb 2))
+       (let dz (qpqb-zero? d)) (let mz (qpqb-zero? m))
+       (qpqb-q4cov pool (add k 1) n
+        (qpqb-q4cov-j sb dz mz 0
+         (list (if (and mz (not dz)) (qpqb-mark (nth cov 0) (qpqb-ex d)) (nth cov 0))
+               (if (and dz (not mz)) (qpqb-mark (nth cov 1) (qpqb-ex m)) (nth cov 1))
+               (nth cov 2) (nth cov 3) (nth cov 4) (nth cov 5)))))))
+ ; Q6_K: q at weight i of superblock sb, q6k_wi's nib + hi * 16 - 32
+ (defn qpqb-p4 (g) (if (le g 0) 1 (mul 4 (qpqb-p4 (sub g 1)))))
+ (defn qpqb-q6q (sb i)
+  (do (let h (div i 128)) (let wi (mod i 128)) (let l (mod wi 32)) (let g (div wi 32))
+      (let qlb (str_byte_at sb (add (mul h 64) (add l (mul (mod g 2) 32)))))
+      (let nib (if (lt g 2) (mod qlb 16) (div qlb 16)))
+      (let hi (mod (div (str_byte_at sb (add 128 (add (mul h 32) l))) (qpqb-p4 g)) 4))
+      (sub (add nib (mul hi 16)) 32)))
+ (defn qpqb-q6cov-q (sb i acc) (if (ge i 256) acc (qpqb-q6cov-q sb (add i 1) (qpqb-mark acc (add (qpqb-q6q sb i) 32)))))
+ (defn qpqb-q6cov-s (sb s acc) (if (ge s 16) acc (qpqb-q6cov-s sb (add s 1) (qpqb-mark acc (str_byte_at sb (add 192 s))))))
+ ; (d's exponents, the scale bytes, the quants (q + 32), whole superblocks of -32 and of 31), d nonzero
+ (defn qpqb-q6cov (pool k n cov)
+  (if (ge k n) cov
+   (do (let sb (nth pool k)) (let d (qpqb-u16at sb 208))
+       (qpqb-q6cov pool (add k 1) n
+        (if (qpqb-zero? d) cov
+         (list (qpqb-mark (nth cov 0) (qpqb-ex d)) (qpqb-q6cov-s sb 0 (nth cov 1)) (qpqb-q6cov-q sb 0 (nth cov 2))
+               (if (str_eq (substring sb 0 192) (qpqb-fill 0 192 "")) 1 (nth cov 3))
+               (if (str_eq (substring sb 0 192) (qpqb-fill 255 192 "")) 1 (nth cov 4))))))))
+ ; ---- bit 64: what the pair answers on the non-finite patterns p..hi-1, summed into
+ ; (pow2 loop at sign | 0x47800000 | m << 13, as_type +-inf at m 0 and NaN otherwise, NaN payload kept, NaN quieted,
+ ; NaN read as the canonical 0x7fc00000); the last three are printed, not claimed
+ (defn qpqb-nf (va vb p hi acc)
+  (if (ge p hi) acc
+   (do (let m (mod p 1024)) (let s (mul (div p 32768) 2147483648))
+       (let a (ln-u32-le va (mul 4 p))) (let b (ln-u32-le vb (mul 4 p)))
+       (let fa (if (eq a (add s (add 1199570944 (mul m 8192)))) 1 0))
+       (let fb (if (eq m 0) (if (eq b (add s 2139095040)) 1 0)
+                (if (and (eq (mod (div b 8388608) 256) 255) (gt (mod b 8388608) 0)) 1 0)))
+       (let kept (if (and (gt m 0) (eq b (add s (add 2139095040 (mul m 8192))))) 1 0))
+       (let quiet (if (and (and (gt m 0) (lt m 512)) (eq b (add s (add 2139095040 (mul (add m 512) 8192))))) 1 0))
+       (let canon (if (and (gt m 0) (eq b 2143289344)) 1 0))
+       (qpqb-nf va vb (add p 1) hi (list (add (nth acc 0) fa) (add (nth acc 1) fb) (add (nth acc 2) kept) (add (nth acc 3) quiet) (add (nth acc 4) canon))))))
+ ; ---- bit 128: the dispatch refuses a K-quant view whose cols is not whole superblocks, before any enqueue ----
+ (defn qpqb-refused (ps type cols)
+  (do
+   (let wh (metal_buf_alloc 8192)) (let x (metal_buf_alloc 8192)) (let y (metal_buf_alloc 64))
+   (let sent (qpqb-rep2 (md-le32 (md-f32-bits 42.25)) 16))
+   (let w0 (metal_buf_write y 0 sent))
+   (let before (nth (metal_live) 7))
+   (let r (attempt (q38-mv-batch-y ps (list wh 3 cols type) x y 1 3 0)))
+   (let after (nth (metal_live) 7))
+   (let synced (metal_sync))
+   (let kept (str_eq (metal_buf_read y 0 64) sent))
+   (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free y))))
+   (let why (q38pq-whole-refusal type cols))
+   (print (list "k-quant cols refusal: type" type "cols" cols "answered nothing" (if (nothing? r) 1 0) "dispatches before, after" before after "output kept" (if kept 1 0) "freed" freed "named" why))
+   (and (nothing? r) (and (eq before after) (and kept (and (eq freed 3) (gt (str_len why) 0)))))))
+ ; the unit's references: the per-token lanes, the attestant tiles, and bit 64's probe in the lane's own unit (its
+ ; pragma, its compile): code 1 when q4k_f16 and as_type<half> differ in a bit, 2 when q6k_f16 and as_type<half> do,
+ ; 4 / 8 / 16 when as_type / q4k_f16 / q6k_f16 read non-finite, 32 when the two software decodes differ; and the bits
+ ; of the pow2 loop's reading (va) and as_type's (vb)
  (let refs (str_concat (qml-lane-msl "qpqb_q4" "q4k" "144") (str_concat (qml-lane-msl "qpqb_q6" "q6k" "210")
    (str_concat "kernel void qpqb_f32(device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float a = 0.0f; uint k = (cols > lane) ? ((cols-lane+31u)/32u) : 0u; while(k > 0u) { --k; uint j = lane+k*32u; float p = w[r*cols+j]*x[j]; a = p+a; } float s = metal::simd_sum(a); if (lane == 0u) y[r]=s; }"
-    (str_concat (qmb-quant-mma "qpqb_q4k_mma_wi" "q4k" "144" "256") (qmb-quant-mma "qpqb_q6k_mma_wi" "q6k" "210" "256"))))))
+    (str_concat (qmb-quant-mma "qpqb_q4k_mma_wi" "q4k" "144" "256") (str_concat (qmb-quant-mma "qpqb_q6k_mma_wi" "q6k" "210" "256")
+     "kernel void qpqb_f16 (device uint* code [[buffer(0)]], device uint* va [[buffer(1)]], device uint* vb [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= 65536u) return; uint ua = as_type<uint>(q4k_f16(int(i))); uint uc = as_type<uint>(q6k_f16(int(i))); uint ub = as_type<uint>(float(as_type<half>(ushort(i)))); va[i] = ua; vb[i] = ub; code[i] = (ua == ub ? 0u : 1u) | (uc == ub ? 0u : 2u) | ((ub & 2139095040u) == 2139095040u ? 4u : 0u) | ((ua & 2139095040u) == 2139095040u ? 8u : 0u) | ((uc & 2139095040u) == 2139095040u ? 16u : 0u) | (ua == uc ? 0u : 32u); }"))))))
  (let msl (str_concat (q38-msl) refs))
  (let ps (q38-pipes msl))
  (let c4 (qpqb-shape ps msl 12 (read_file_slice "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 0 288) 2 256 "qpqb_q4" 1))
@@ -193,8 +339,64 @@
  (let sb6 (read_file_slice "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 0 420))
  (let t4 (list (qpqb-tile ps o4 12 sb4 144 3 9) (qpqb-tile ps o4 12 sb4 144 3 33) (qpqb-tile ps o4 12 sb4 144 257 9) (qpqb-tile ps o4 12 sb4 144 257 33)))
  (let t6 (list (qpqb-tile ps o6 14 sb6 210 3 9) (qpqb-tile ps o6 14 sb6 210 3 33) (qpqb-tile ps o6 14 sb6 210 257 9) (qpqb-tile ps o6 14 sb6 210 257 33)))
- (let c32 (if (and (and (gt o4 0) (gt o6 0)) (and (and (and (nth t4 0) (nth t4 1)) (and (nth t4 2) (nth t4 3))) (and (and (nth t6 0) (nth t6 1)) (and (nth t6 2) (nth t6 3))))) 32 0))
+ ; the edge pools: the two committed superblocks first, then the families and the named edges
+ (let ff12 (qpqb-fill 255 12 "")) (let ho12 (str_concat (qpqb-fill 192 8 "") (qpqb-fill 0 4 "")))
+ (let P4 (append (list (substring sb4 0 144) (substring sb4 144 288))
+  (append (qpqb-q4fam 0 0 (list)) (append (qpqb-q4fam 1 0 (list)) (append (qpqb-q4fam 2 0 (list))
+   (list (qpqb-q4 93 0 0) (qpqb-q4 94 32768 32768) (qpqb-q4 95 1 32769) (qpqb-q4 96 1023 1023)
+         (qpqb-q4x 1024 33792 ho12 (qpqb-run 97 0 128 167 3 "")) (qpqb-q4x 31743 64511 ff12 (qpqb-fill 255 128 ""))
+         (qpqb-q4x 64511 1 ho12 (qpqb-fill 0 128 "")) (qpqb-q4 100 15360 15360)))))))
+ (let P6 (append (list (substring sb6 0 210) (substring sb6 210 420))
+  (append (qpqb-q6fam 0 0 (list)) (append (qpqb-q6fam 1 0 (list))
+   (list (qpqb-q6x (qpqb-fill 255 128 "") (qpqb-fill 255 64 "") (qpqb-fill 128 16 "") 31743)
+         (qpqb-q6x (qpqb-fill 0 128 "") (qpqb-fill 0 64 "") (qpqb-fill 127 16 "") 64511)
+         (qpqb-q6x (qpqb-fill 0 128 "") (qpqb-fill 0 64 "") (qpqb-fill 128 16 "") 1)
+         (qpqb-q6 65 0) (qpqb-q6 66 32768) (qpqb-q6 67 15360))))))
+ (let n4 (len P4)) (let n6 (len P6))
+ (let z31 (qpqb-fill 48 31 "")) (let z64 (qpqb-fill 48 64 "")) (let z256 (qpqb-fill 48 256 ""))
+ (let f31 (qpqb-fill 49 31 "")) (let f64 (qpqb-fill 49 64 "")) (let f256 (qpqb-fill 49 256 ""))
+ (let cov4 (qpqb-q4cov P4 0 n4 (list z31 z31 z64 z64 z64 z64)))
+ (let cov6 (qpqb-q6cov P6 0 n6 (list z31 z256 z64 0 0)))
+ (let cov4ok (and (and (str_eq (nth cov4 0) f31) (str_eq (nth cov4 1) f31))
+                  (and (and (str_eq (nth cov4 2) f64) (str_eq (nth cov4 3) f64)) (and (str_eq (nth cov4 4) f64) (str_eq (nth cov4 5) f64)))))
+ (let cov6ok (and (and (str_eq (nth cov6 0) f31) (str_eq (nth cov6 1) f256)) (and (str_eq (nth cov6 2) f64) (and (eq (nth cov6 3) 1) (eq (nth cov6 4) 1)))))
+ (print (list "edge pools: Q4_K superblocks" n4 "d alone at exponents" (nth cov4 0) "dmin alone at" (nth cov4 1)
+  "sc at sub-blocks 0..3 / 4..7 whole" (str_eq (nth cov4 2) f64) (str_eq (nth cov4 3) f64) "mn whole" (str_eq (nth cov4 4) f64) (str_eq (nth cov4 5) f64)))
+ (print (list "edge pools: Q6_K superblocks" n6 "d at exponents" (nth cov6 0) "scale bytes whole" (str_eq (nth cov6 1) f256)
+  "quants -32..31 whole" (str_eq (nth cov6 2) f64) "a superblock of -32, of 31" (nth cov6 3) (nth cov6 4)))
+ (let e4 (list (qpqb-pool-tile ps o4 12 P4 n4 144 n4 256 9 0) (qpqb-pool-tile ps o4 12 P4 n4 144 n4 256 33 0) (qpqb-pool-tile ps o4 12 P4 n4 144 n4 512 33 1)))
+ (let e6 (list (qpqb-pool-tile ps o6 14 P6 n6 210 n6 256 9 0) (qpqb-pool-tile ps o6 14 P6 n6 210 n6 256 33 0) (qpqb-pool-tile ps o6 14 P6 n6 210 n6 512 33 1)))
+ (let c32 (if (and (and (gt o4 0) (gt o6 0)) (and (and (and (and (nth t4 0) (nth t4 1)) (and (nth t4 2) (nth t4 3))) (and (and (nth t6 0) (nth t6 1)) (and (nth t6 2) (nth t6 3))))
+               (and (and cov4ok cov6ok) (and (and (nth e4 0) (and (nth e4 1) (nth e4 2))) (and (nth e6 0) (and (nth e6 1) (nth e6 2))))))) 32 0))
+ ; bit 64: the f16 identity over every pattern
+ (let pf (metal_pipeline msl "qpqb_f16"))
+ (let fc (metal_buf_alloc (mul 4 65536))) (let fa (metal_buf_alloc (mul 4 65536))) (let fb (metal_buf_alloc (mul 4 65536)))
+ (let ef (metal_enqueue pf (md-bind (list fc fa fb) (list)) 65536))
+ (let sf (metal_sync))
+ (let codes (metal_buf_read fc 0 (mul 4 65536))) (let va (metal_buf_read fa 0 (mul 4 65536))) (let vb (metal_buf_read fb 0 (mul 4 65536)))
+ (let ffreed (sum (list (metal_buf_free fc) (metal_buf_free fa) (metal_buf_free fb))))
+ (let z31744 (qpqb-rep2 (md-le32 0) 31744))
+ (let finpos (qpqb-first-diff codes z31744 0 31744))
+ (let finneg (qpqb-first-diff (substring codes (mul 4 32768) (mul 4 64512)) z31744 0 31744))
+ (let n7 (qpqb-rep2 (md-le32 7) 1024))
+ (let nfpos (str_eq (substring codes (mul 4 31744) (mul 4 32768)) n7))
+ (let nfneg (str_eq (substring codes (mul 4 64512) (mul 4 65536)) n7))
+ (let nf (qpqb-nf va vb 31744 32768 (qpqb-nf va vb 64512 65536 (list 0 0 0 0 0))))
+ (let zeros (and (and (eq (ln-u32-le va 0) 0) (eq (ln-u32-le vb 0) 0)) (and (eq (ln-u32-le va (mul 4 32768)) 2147483648) (eq (ln-u32-le vb (mul 4 32768)) 2147483648))))
+ (print (list "f16 identity: finite patterns 63488, first mismatch (+, -)" finpos finneg
+  "+0 (pow2 loop, as_type)" (ln-u32-le va 0) (ln-u32-le vb 0) "-0" (ln-u32-le va (mul 4 32768)) (ln-u32-le vb (mul 4 32768))))
+ (print (list "f16 non-finite 2048: codes as claimed (+, -)" (if nfpos 1 0) (if nfneg 1 0) "pow2 loop finite +-2^16 (1 + m/1024)" (nth nf 0)
+  "as_type +-inf at m 0, NaN otherwise" (nth nf 1) "NaN payload kept" (nth nf 2) "quieted" (nth nf 3) "read as the canonical 0x7fc00000" (nth nf 4)))
+ (print (list "f16 samples (pow2 loop, as_type): 0x7c00" (ln-u32-le va (mul 4 31744)) (ln-u32-le vb (mul 4 31744))
+  "0xfc00" (ln-u32-le va (mul 4 64512)) (ln-u32-le vb (mul 4 64512)) "0x7d00" (ln-u32-le va (mul 4 32000)) (ln-u32-le vb (mul 4 32000))
+  "0x7e00" (ln-u32-le va (mul 4 32256)) (ln-u32-le vb (mul 4 32256)) "0xffff" (ln-u32-le va (mul 4 65535)) (ln-u32-le vb (mul 4 65535))))
+ (let c64 (if (and (and (gt pf 0) (gt ef 0)) (and (and (lt finpos 0) (lt finneg 0)) (and (and nfpos nfneg)
+               (and (and (eq (nth nf 0) 2048) (eq (nth nf 1) 2048)) (and zeros (eq ffreed 3)))))) 64 0))
+ ; bit 128: the refusal, and the widths the lane holds read whole
+ (let c128 (if (and (and (qpqb-refused ps 12 384) (qpqb-refused ps 14 640)) (and (qpqb-refused ps 12 255)
+                (and (and (eq (str_len (q38pq-whole-refusal 12 5120)) 0) (eq (str_len (q38pq-whole-refusal 14 17408)) 0))
+                     (and (and (eq (str_len (q38pq-whole-refusal 12 6144)) 0) (eq (str_len (q38pq-whole-refusal 14 256)) 0)) (eq (str_len (q38pq-whole-refusal 8 48)) 0))))) 128 0))
  (let guard (if (and (and (eq (q38pq-index 99) -1) (eq (q38dq-index 99) -1))
    (and (eq (nth (metal_live) 2) 0) (and (and d4a d4b) (and d6a d6b)))) 16 0))
- (let verdict (sum (list c4 c6 c8 cf guard c32)))
- (if (eq verdict 63) verdict (form_error (str_concat "qwen prefill quant band failed: " (int_to_str verdict)))))
+ (let verdict (sum (list c4 c6 c8 cf guard c32 c64 c128)))
+ (if (eq verdict 255) verdict (form_error (str_concat "qwen prefill quant band failed: " (int_to_str verdict)))))

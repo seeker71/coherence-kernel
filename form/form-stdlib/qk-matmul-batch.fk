@@ -255,8 +255,11 @@ section [form.bml] {
     // columns of a step are ONE Q4_K sub-block of one superblock, js = (k0 mod 256) / 32, the same for
     // every thread of the group. A thread stages four of them (row wrow, columns k0 + wc .. + 3), and all
     // four share d, dmin, sc and mn. So each is decoded once a step: d and dmin by float(as_type<half>)
-    // from one word (equal to q4k_f16 on every finite f16: q4k-decode-wide-band, bit 1; a non-finite one,
-    // which no file holds, reads infinite here and finite through the software decode), sc and mn by
+    // from one word (q4k_f16's own reading, bit for bit, of all 63488 finite halves, +0 and -0 among them:
+    // qwen38-prefill-quant-band, bit 64, on the device without a model; on the 2048 non-finite patterns
+    // the two part, +-inf and NaN here as in the decode lanes 57/58, the finite +-2^16 (1 + m/1024)
+    // through the pow2 loop, and no reader on the path tests d or dmin for them: q38-open's views are the
+    // file's bytes, kth-tv-at), sc and mn by
     // get_scale_min_k4 on the step's sub-block (q4k_sc / q4k_mn's integer identities: & 63 = mod 64,
     // >> 6 = div 64, << 4 = mul 16, | over disjoint fields = +), and the four nibbles from one 32-bit
     // read of their four quant bytes (qb four-aligned, as the decode kernel already holds it). Each
@@ -264,7 +267,12 @@ section [form.bml] {
     // (an f16 significand of 11 bits times a 6-bit scale times a 4-bit nibble is at most 21 bits), so
     // the subtraction is the one rounding however the compiler associates, and ws[] holds the
     // attestant's floats. The matrix unit then takes the same operands in the same order, and the
-    // output is the attestant's bytes. Requires cols a multiple of 256, rows any.
+    // output is the attestant's bytes. Requires cols a multiple of 256 (q38-mv-batch-y refuses any other
+    // aloud, q38pq-whole-refusal), rows any. The lab's kq lane (observe/q38-mm-lab.bml, best of 5 beside
+    // other cells' load, 2026-11-03) reads the tile at 4.15x its attestant for Q4_K at 17408 x 5120 x 512
+    // tokens (12388 us against 51360) and 3.5x for Q6_K at 5120 x 17408 (12186 against 42284); the lab's
+    // Q8_0 twins at the Q4_K shape (8503 us, the mm64-like base; 7444, t64e) are the headroom left to a
+    // wider tile.
     def qmb-q4k-mma(fname) = qmb-mma(fname,
         "float gsc = 0.0f; float gmn = 0.0f; uint q4 = 0u; uint hs = 0u; if (wrow < rows) { uint js = (k0 % 256u) / 32u; device const uchar* sb = qb + (wrow * (cols / 256u) + k0 / 256u) * 144u; uint dd = *(device const uint*)(sb); uint sc = (js < 4u) ? (uint(sb[4u + js]) & 63u) : ((uint(sb[8u + js]) & 15u) | ((uint(sb[js]) >> 6u) << 4u)); uint mn = (js < 4u) ? (uint(sb[8u + js]) & 63u) : ((uint(sb[8u + js]) >> 4u) | ((uint(sb[4u + js]) >> 6u) << 4u)); gsc = float(as_type<half>(ushort(dd & 65535u))) * float(sc); gmn = float(as_type<half>(ushort(dd >> 16u))) * float(mn); q4 = *(device const uint*)(sb + 16u + (js / 2u) * 32u + wc); hs = (js & 1u) * 4u; } for (uint j = 0u; j < 4u; j++) { ws[(wc + j) * 32u + wn] = (wrow < rows) ? gsc * float((q4 >> (j * 8u + hs)) & 15u) - gmn : 0.0f; } ");
     // Q6_K, the same step over its own layout: the step's 32 columns are half h = kk / 128 and quarter
