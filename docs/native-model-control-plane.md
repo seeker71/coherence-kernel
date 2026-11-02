@@ -236,7 +236,7 @@ external model server and the page cache could each pass their own check and tog
   that saved a checkpoint and is the contract's latest row leaves one pending row in the history: the resume way takes
   its checkpoint and hears `ntl-continue-text` (nothing failed, so no "diagnose" instruction), and the first way waits
   for it (`memory-pending`). The next turn's `hw-ready` waits for the machine. Bands: `form-cli-code-low-memory-band`
-  1023, `native-turn-ladder-band` 262143, `local-flow-reading-band` 32767.
+  1023, `native-turn-ladder-band` 1048575, `local-flow-reading-band` 8388607.
 
 ## Present floor and direction
 
