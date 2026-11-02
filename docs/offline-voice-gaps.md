@@ -20,7 +20,9 @@ another field of the same row), what else the row must hold (`also`, `not_in`, `
 |---|---|---|
 | turn-ledger, lora, readings, exit-proof | last | the last row that holds `where`; its `field` against the threshold or the `against` field |
 | coverage, voice-availability | share | among the rows that hold `where` (and, with `within_ms`, are that young: a lane gone quiet reads open and a miss ages out), the permille that also hold `match` |
-| plan-doc | table | a markdown table in a document: two cells, as decimals in milli, the last row of each key |
+| rate-pair | pair | among the rows that hold `where` and are that young, the median of `field` over the `left` side against the `right` side; a side gone quiet reads by `none_reads` |
+| rent-week | rent | what each session's meter rows grew by inside the last days, against the threshold; a meter quiet longer than `within_ms` reads open |
+| plan-doc | table | a markdown table in a document: two cells, as decimals in milli, the last row of each key (no living row reads one) |
 | queue-gaps | queue | every gap of the queue by its own last real row: once green is not green now |
 | walk-schedule | schedule | of the slots due in the last days, the permille a stamp or a landed row reads, naming the unread |
 | landings | landings | of the source-changing landings on the ref, the permille no rented mind wrote |
@@ -28,6 +30,8 @@ another field of the same row), what else the row must hold (`also`, `not_in`, `
 | alignment-sets | sets | every set's last reading full, over every scenario it holds, under one model and one prompt |
 | alignment-axis | axis | the predicates tagged with one axis in the last readings; an axis with none reads open |
 | self-feature | feature | the door stands, a step of the walk begins it, its row is recent and (`by_schedule`) a native landing added it; any of them short reads open by name |
+| offline-exam | share | the exam's rows (`observe/offline-exam-run.bml`) a native landing added inside the window, reading `network_denied` 1: the permille answered and graded against keys taken from the body at rent 0 |
+| alignment-heldout | first | the first whole reading of a set written before the prompt moved: a later reading of it never replaces that first number |
 
 A new gap is a new row. A new ledger is a new row naming it. A new shape is the only reason to touch the reader.
 
@@ -53,14 +57,26 @@ row must read closed, so no gap is out of reach by construction. A row added wit
 remote guide comes only after local guides failed, and the remote tokens doing the work go to zero. So the register reads the work:
 of the source-changing landings on main in the last 30 days, the share no rented mind wrote, and of the gaps opened, the share the
 native lane closed and landed with no guide. A landing reads native when its subject is `Native turn` or `Scheduled movement`, its crossings
-row reads rented_mind 0 on the schedule, and no co-author signed it. Two rows stand as written and undercount rent: the crossings row of
+row reads rented_mind 0 on the schedule, no co-author signed it, a gate's band reads its code, and seven days on every line it added still stands; a younger landing waits, named. `rent-week` reads what rent actually went: rented tokens per week, from the meter the walk runs (`observe/session-rent-run.bml`, usage counts only). Two rows stand as written and undercount rent: the crossings row of
 `walk-here 2026-10-29` (at 1793261028971) and its turn row (at 1793254917714), which a session began detached. Rows are named by
 `at_unix_ms`, because a row number moves under a rebase.
+
+## Whose rows it reads
+
+The query rows and `voice-answers` read the schedule's and the person's rows: session empty. A session's rows are the session's own, and a measurement ask (an alignment or wear arm,
+`"enquiry_kind":"measurement"`) lands no coverage row at all, so an experiment does not read as traffic. A coverage row from before the session column cannot say whose it was and reads as nobody's. The walk carries
+these ledgers to main at each landing (`hw-learned`, `host-walk-carry.bml`), so a reading on main is at most a slot old. `q4-decode-vs-q8` reads the same rows, `queries-native-plan` reads only rows a native landing carried, and the turn rows
+tell the voice's own edit (`local_generated_ids` above 0: `self-turn`, `last-option-green`, `guided-gap-dependence`) from the no-model rung's rewrite (`self-rung`).
+
+## Steering
+
+`observe/self-steer-run.bml`, after the register in each walk, offers each row the register left open whose `next` names a band: as a queue row when that band stands, as a finding when it does not. It writes one row to
+its own ledger and never the queue, and `self-steer` reads the share offered. A row with no `next` stays unoffered and lowers the share.
 
 ## What it cannot see
 
 The coverage rows count what crossed a door: a question a rented mind answered itself, the shell's zero-process redirect into the
-form-find spool, and `form-cli task` under `fcaq-managed-with` land none. A stamp says a slot began, never that it finished, and
+form-find spool, and `form-cli task` under `fcaq-managed-with` land none. A session's child that loses CLAUDE_CODE_SESSION_ID reads as the schedule's, and the person's ask and the schedule's are one lane. A stamp says a slot began, never that it finished, and
 `.hearth/walk.began` keeps one row per door, so a slot older than its door's last stamp reads only through a landed row; the retry's class stands
 beside an unread slot as a note, because a killed retry leaves no row. A feature's ledger that carries no coordinator reads a session's run and the
 walk's alike, and a row's clock proves nothing: the slots' windows are ten hours of a day, and on 2026-10-31 a session's reading at 22:07 read as the schedule's. So

@@ -32,15 +32,23 @@ section [form.bml] {
         acc[1] + sr-field(text, usageAt, rowEnd, "cache_creation_input_tokens"),
         acc[2] + sr-field(text, usageAt, rowEnd, "cache_read_input_tokens"),
         acc[3] + sr-field(text, usageAt, rowEnd, "output_tokens"), acc[4] + 1];
+    // The request ids a session already counted, held in a row of short strings by the id's last bytes: one string rewritten per request grows with the square of a session's requests
+    // (one session of 814 MB read 33.5 GB resident and 114 s), and the rewrite and the search here touch one short string.
+    def sr-seen-buckets() = 32;
+    def sr-seen-start(seen) = foldl((acc, i) => cons(seen, acc), [], 0 .. sr-seen-buckets());
+    def sr-seen-at(reqId) = (str_byte_at(reqId, len(reqId) - 1) + 31 * str_byte_at(reqId, max2(0, len(reqId) - 2))) % sr-seen-buckets();
+    def sr-seen?(seen, reqId) = str_find(seen[sr-seen-at(reqId)], rtm-seen-key(reqId), 0) >= 0;
+    def sr-seen-put(xs, i, v) = (Comparable) i == 0 ? cons(xs[0] ++ v ++ ",", xs[1:]) : cons(xs[0], sr-seen-put(xs[1:], i - 1, v));
+    def sr-seen-add(seen, reqId) = sr-seen-put(seen, sr-seen-at(reqId), reqId);
     // rtm-scan-go's walk, summing four fields per fresh request instead of one
     def sr-scan-go(text, from, acc, seen) {
         let usageAt = str_find(text, rtm-usage-mark(), from);
         let rowEnd = usageAt < 0 ? 0 - 1 : str_find(text, "\n", usageAt);
         let reqId = rowEnd < 0 ? "" : rtm-row-request(text, usageAt, rowEnd);
-        let fresh = (String) reqId != "" && str_find(seen, rtm-seen-key(reqId), 0) < 0;
+        let fresh = (String) reqId != "" && !sr-seen?(seen, reqId);
         usageAt < 0 ? [acc, rtm-rest-at(text, from), seen] :
          rowEnd < 0 ? [acc, usageAt, seen] :
-         sr-scan-go(text, rowEnd + 1, fresh ? sr-add(acc, text, usageAt, rowEnd) : acc, fresh ? seen ++ reqId ++ "," : seen);
+         sr-scan-go(text, rowEnd + 1, fresh ? sr-add(acc, text, usageAt, rowEnd) : acc, fresh ? sr-seen-add(seen, reqId) : seen);
     }
     def sr-file-go(path, size, off, acc, seen, chunk) {
         let slice = off >= size ? "" : read_file_slice(path, off, min2(chunk, size - off));
@@ -58,9 +66,10 @@ section [form.bml] {
     def sr-tree-rows(paths) = nil?(paths) ? [] :
         append((Comparable) fs_is_dir(paths[0]) == 1 ? sr-tree(paths[0]) : sr-jsonl?(paths[0]) ? [paths[0]] : [], sr-tree-rows(paths[1:]));
     def sr-files(main) = cons(main, sr-tree(substring(main, 0, len(main) - 6) ++ "/subagents"));
-    def sr-rented(files, acc, seen) = nil?(files) ? acc : {
+    def sr-rented(files, acc, seen) = sr-rented-go(files, acc, sr-seen-start(seen));
+    def sr-rented-go(files, acc, seen) = nil?(files) ? acc : {
         let read = sr-file-go(files[0], file_size(files[0]), 0, acc, seen, rtm-chunk());
-        sr-rented(files[1:], read[0], read[1]);
+        sr-rented-go(files[1:], read[0], read[1]);
     };
     // local: the voice's drafts written for this session
     def sr-local(session, rows, drafts, generated) = nil?(rows) ? [drafts, generated] : {
