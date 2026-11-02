@@ -4,6 +4,7 @@ import form-stdlib/form-cli-model-session.fk;
 import form-stdlib/organ-health.bml;
 import form-stdlib/native-llama-voice.bml;
 import form-stdlib/bml/form-token-grammar.bml;
+import form-stdlib/bml/reply-envelope.bml;
 import form-stdlib/bml/local-run.bml;
 import form-stdlib/bml/qwen38-open-observation.bml;
 import form-stdlib/bml/model-admission.bml;
@@ -48,7 +49,9 @@ section [form.bml] {
   def fcnv-run(packet,path,context,limit) = fcnv-run-wearing(packet,path,context,limit,nothing());
   def fcnv-run-wearing(packet,path,context,limit,wear) = fcnv-run-bounded(packet,path,context,limit,wear,nothing());
   // budget: nothing is the open generation it always was; an integer ends the walk there, and the result reads incomplete with the raw text kept (a reading's own bound)
-  def fcnv-run-bounded(packet,path,context,limit,wear,budget) {
+  def fcnv-run-bounded(packet,path,context,limit,wear,budget) = fcnv-run-held(packet,path,context,limit,wear,budget,nothing());
+  // envelope: nothing, or a reply grammar's name ("local-plan", reply-envelope.bml) that holds each id the walk commits
+  def fcnv-run-held(packet,path,context,limit,wear,budget,envelope) {
    if (!nothing?(wear) && len(fcnv-wear-why(wear)) > 0) then fcnv-none("unavailable",path,"adapter-wear-refused: " ++ fcnv-wear-why(wear))
    else if ((!nothing?(context) && !((String) value_kind(context) == "int")) || (!((String) value_kind(limit) == "int"))) then fcnv-none("unavailable",path,"integer-context-and-token-allowance-required")
    else if (!fcnv-allowance-valid(context,limit)) then fcnv-none("unavailable",path,"positive-progress-interval-and-initial-context-required")
@@ -64,20 +67,102 @@ section [form.bml] {
     // Decode is the generate call. The note is a stamp, not a peer line.
     // Prefill stamps are the session's own begin and ready.
     let _decode-begin = q38oo-note("voice-decode-begin", 0);
-    let generated = fcnv-generate(session,limit,budget);
+    let heard = fcnv-generate-held(session,limit,budget,envelope);
+    let generated = heard[0];
     let _decode-ready = q38oo-note("voice-decode-ready", 0);
     let ended = fcms-generation-session(generated);
     let released = fcms-release-ok?(ended);
     let clocks = fcms-clock-read(ended);
-    fcnv-admitted(fcnv-clocked(fcnv-read(generated,released,path),record_get(clocks,"prefill_ms") ?? 0,record_get(clocks,"decode_ms") ?? 0),record_get(clocks,"admission_ms"),record_get(clocks,"open_ms"));
+    // fcms-clock-read sets each of its four keys, nothing() where the session did not stamp the span
+    fcnv-enveloped(fcnv-admitted(fcnv-clocked(fcnv-read(generated,released,path),record_get(clocks,"prefill_ms") ?? 0,record_get(clocks,"decode_ms") ?? 0),record_get(clocks,"admission_ms"),record_get(clocks,"open_ms")),heard[1]);
    };
   }
-  def fcnv-generate(session,limit,budget) {
+  // The one cursor every native ask decodes through, the opened ask's and the resident turn's: the progress signal at
+  // each interval, and, when the request names an envelope, the hold (fcnv-envelope-hold). It answers the generation
+  // and the envelope's reading, nothing() for an ask the envelope did not hold.
+  def fcnv-generate(session,limit,budget) = fcnv-generate-held(session,limit,budget,nothing())[0];
+  def fcnv-generate-held(session,limit,budget,envelope) {
    let cursor = ftg-pulsing(ftg-intercept-with(512,ftg-next-reply()));
    record_set(cursor,"next-progress",limit);
    record_set(cursor,"observer",(stage,phase,c,generated) => fcnv-progress(cursor,limit,stage,phase,generated));
-   ftg-generate-with(cursor,session,budget,"voice");
+   let held = fcnv-envelope-hold(cursor,session,envelope);
+   let generated = ftg-generate-with(cursor,session,budget,"voice");
+   [generated,fcnv-envelope-close(cursor)];
   }
+  // After its clocks a result names its ownership and the prefix ids it reused (fcnv-metadata): an opened ask's is
+  // released or release-incomplete with none reused, a resident turn's is its own (fcnv-resident-turn). A held ask's
+  // result carries the envelope's reading after those two: [mode, swaps, ends, cut, candidate ms], cut "" when the
+  // reply closed inside its envelope, else where the hold ended it ("<tag>" or "candidates-unavailable").
+  def fcnv-ownership(result) = len(result) > 15 ? result[15] : result[6] ? "released" : "release-incomplete";
+  def fcnv-reused-ids(result) = len(result) > 16 ? result[16] : 0;
+  def fcnv-enveloped(result,reading) = nothing?(reading) ? result : append(take(15,result),[fcnv-ownership(result),fcnv-reused-ids(result),reading]);
+  def fcnv-envelope-of(result) = len(result) > 17 ? result[17] : nothing();
+  // The envelope holds the walk where it is made. Each id the greedy forward predicts is read against the grammar;
+  // an id that leaves the envelope, or a stop inside a block, is exchanged for the first of the device's top-k
+  // candidates over the logits the forward left that keeps the reply inside it (the sampler's buffers, opened on the
+  // first exchange, presence penalty 0, so its first candidate is the greedy one). The prefill's first prediction and
+  // the first after an observation are held the same way (frxs-held). When none of the candidates holds, the reply
+  // ends with the assistant close, and the cursor names where: the block it cut, or that the candidates did not answer.
+  def fcnv-envelope(request) = json-object-has?(request,"envelope") ? json-string-value(json-object-get(request,"envelope")) : nothing();
+  def fcnv-envelope-broken() = ["broken","","",[],"",0,[],0,0];
+  def fcnv-envelope-stop(s) = c => (Comparable) q38-stop?(c,fcmo-stops(s)) == 1;
+  def fcnv-envelope-text(s) = c => fcmo-token-text(s,c);
+  def fcnv-envelope-hold(cursor,session,envelope) = nothing?(envelope) || !((String) envelope == "local-plan") || !((Comparable) fcms-live?(session) == 1) || fcms-ds4?(session) ? 0 : {
+   let held = fcnv-envelope-start(cursor);
+   record_set(cursor,"hold",(s,id) => fcnv-envelope-held(cursor,s,id));
+  };
+  def fcnv-envelope-start(cursor) {
+   record_set(cursor,"envelope",renv-start());
+   record_set(cursor,"envelope-swaps",0);
+   record_set(cursor,"envelope-ends",0);
+   record_set(cursor,"envelope-cut","");
+   record_set(cursor,"envelope-ms",0);
+   record_set(cursor,"envelope-owner",[]);
+   cursor;
+  }
+  def fcnv-envelope-held(cursor,s,id) = fcnv-envelope-held-by(cursor,id,fcnv-envelope-text(s),fcnv-envelope-stop(s),() => fcnv-envelope-found(cursor,s),fcmo-end-id(s));
+  // the device's top-k ids over the logits the forward left, best first; [] when the sampler's buffers do not answer
+  def fcnv-envelope-found(cursor,s) {
+   let began = host_monotonic_ms();
+   let found = fcsam-candidates(fcnv-envelope-owner(cursor,s),fcms-ctx(s)[1][28],0.0);
+   let spent = record_set(cursor,"envelope-ms",record_get(cursor,"envelope-ms") + host_monotonic_ms() - began);
+   nil?(found) ? [] : found[1];
+  }
+  // the hold's own decision, over a token's text, its stop reading, the candidates (asked only on a refusal) and the close id
+  def fcnv-envelope-held-by(cursor,id,text,stop?,found,close) {
+   let st = record_get(cursor,"envelope");
+   let next = id < 0 || (String) renv-mode(st) == "broken" ? st : renv-take(st,id,text,stop?);
+   !nothing?(next) ? fcnv-envelope-took(cursor,next,id) : fcnv-envelope-swap(cursor,st,text,stop?,found(),close);
+  }
+  def fcnv-envelope-took(cursor,next,id) { record_set(cursor,"envelope",next); id; }
+  def fcnv-envelope-count(cursor,key) = record_set(cursor,key,record_get(cursor,key) + 1);
+  // the close ends the reply where no candidate holds: whole when a stop may end it there, else cut at the block
+  def fcnv-envelope-swap(cursor,st,text,stop?,ids,close) {
+   let pick = renv-pick(st,ids,text,stop?);
+   if nothing?(pick) then {
+    fcnv-envelope-count(cursor,"envelope-ends");
+    record_set(cursor,"envelope-cut",renv-stop-ok?(st) ? "" : nil?(ids) ? "candidates-unavailable" : mc-cat(["<",(String) renv-mode(st) == "out" ? "between" : st[1],">"]));
+    fcnv-envelope-took(cursor,fcnv-envelope-broken(),close);
+   }
+   else { fcnv-envelope-count(cursor,"envelope-swaps"); fcnv-envelope-took(cursor,renv-take(st,pick,text,stop?),pick); };
+  }
+  // a cursor held from the envelope's start, for a walk whose session the caller scripts
+  def fcnv-envelope-cursor() = fcnv-envelope-start(record_new(0));
+  def fcnv-envelope-owner(cursor,s) = !nil?(record_get(cursor,"envelope-owner")) ? record_get(cursor,"envelope-owner") : {
+   let owner = fcsam-open(fcms-ctx(s)[2][19],1729);
+   let cleared = fcsam-reset(owner);
+   record_set(cursor,"envelope-owner",owner);
+   owner;
+  };
+  // the envelope's reading, [mode, swaps, ends, cut, candidate ms], printed once; nothing() for an ask it did not hold
+  def fcnv-envelope-reading(cursor) = [renv-mode(record_get(cursor,"envelope")),record_get(cursor,"envelope-swaps"),record_get(cursor,"envelope-ends"),record_get(cursor,"envelope-cut"),record_get(cursor,"envelope-ms")];
+  def fcnv-envelope-close(cursor) = !((String) value_kind(record_get(cursor,"hold")) == "closure") ? nothing() : {
+   let owner = record_get(cursor,"envelope-owner");
+   let closed = nil?(owner) ? 0 : fcsam-close(owner);
+   let r = fcnv-envelope-reading(cursor);
+   let said = print_str(mc-cat(["[native-voice:envelope] mode=",r[0]," swaps=",r[1].str()," ends=",r[2].str()," cut=",len(r[3]) == 0 ? "none" : r[3]," candidate_ms=",r[4].str()]));
+   r;
+  };
   // The caller owns this residence and closes it at EOF/stop. It retains an
   // exact guidance checkpoint and an optional retrieved-context checkpoint.
   // The live buffers also
@@ -149,7 +234,7 @@ section [form.bml] {
    let prefixIds=fcnv-cold-ids(path,floor);
    let count=nothing?(prefixIds) ? 0 : fcnv-common(ids,prefixIds,0);
    count <= 0 || count >= len(ids) ? fcnv-none("unavailable",path,"resident-prefix-refused") : {
-    let session=fcms-open-sized-by(fcsp-open-plain,path,packet,0,fcms-prefix-profile(fcnv-profile(),count),fcnv-room(json-object-has?(request,"reply_budget") ? fcnv-number(request,"reply_budget",0) : nothing()));
+    let session=fcms-open-sized-by(fcsp-open-plain,path,packet,0,fcms-prefix-profile(fcnv-profile(),count),fcnv-room(fcnv-budget(request)));
     record_set(owner,"session",session);
     !fcms-live?(session) || fcms-ds4?(session) || nothing?(fcmo-owner(session)) ? {
      let reason=fcms-reason(session);
@@ -227,14 +312,15 @@ section [form.bml] {
     let prepared=fcms-observe-ids(fcms-with-clock(contextual,clock),suffix,"resident-suffix-refused");
     record_set(owner,"session",prepared);
     let prefillMs=host_monotonic_ms()-began;
-    let generated=fcnv-generate(prepared,fcnv-number(request,"max_reply_tokens",fcnv-limit()),json-object-has?(request,"reply_budget") ? fcnv-number(request,"reply_budget",0) : nothing());
+    let heard=fcnv-generate-held(prepared,fcnv-number(request,"max_reply_tokens",fcnv-limit()),fcnv-budget(request),fcnv-envelope(request));
+    let generated=heard[0];
     let ended=fcms-generation-session(generated); record_set(owner,"session",ended);
     let live=fcms-live?(ended);
     let closed=live ? 0 : fcnv-residence-close(owner);
     let raw=live ? fcnv-read-owned(generated,0,path,1) : fcnv-read(generated,closed,path);
     let result=append(take(2,raw),cons(len(ids),drop(3,raw)));
     let decodeMs=record_get(fcms-clock-read(ended),"decode_ms") ?? 0;
-    append(fcnv-admitted(fcnv-clocked(result,prefillMs+opening[2],decodeMs),opening[0],opening[1]),[live ? "resident" : closed ? "released" : "release-incomplete",reused]);
+    fcnv-enveloped(append(fcnv-admitted(fcnv-clocked(result,prefillMs+opening[2],decodeMs),opening[0],opening[1]),[live ? "resident" : closed ? "released" : "release-incomplete",reused]),heard[1]);
    };
   }
   // The compatibility field max_reply_tokens now asks for a progress signal.
@@ -334,9 +420,11 @@ section [form.bml] {
   def fcnv-ask-run(packet,request) {
    if ((String) fcnv-lane(request) == "lora") then fcnv-lora(packet,fcnv-adapter(request),fcnv-number(request,"max_reply_tokens",fcnv-limit())) else {
     let model = if json-object-has?(request,"model") then json-string-value(json-object-get(request,"model")) else fcnv-default-model();
-    fcnv-run-bounded(packet,mr-path(mr-find(model)),fcnv-number(request,"context",nothing()),fcnv-number(request,"max_reply_tokens",fcnv-limit()),fcnv-wear(request,model),json-object-has?(request,"reply_budget") ? fcnv-number(request,"reply_budget",0) : nothing());
+    fcnv-run-held(packet,mr-path(mr-find(model)),fcnv-number(request,"context",nothing()),fcnv-number(request,"max_reply_tokens",fcnv-limit()),fcnv-wear(request,model),fcnv-budget(request),fcnv-envelope(request));
    };
   }
+  // "reply_budget": the ids one reply may spend, where its walk ends; absent, the generation is open
+  def fcnv-budget(request) = json-object-has?(request,"reply_budget") ? fcnv-number(request,"reply_budget",0) : nothing();
   // the wear a registry-weights request names: "adapter" (a directory; "" is the bare lane named out loud), and "adapter_scale" when it reads a number (absent: the adapter config's
   // scale). A request that names none reads the wear registry (learn/voice-wear-registry.jsonl, absent today: the bare lane, as it always was).
   def fcnv-wear(request,model) = json-object-has?(request,"adapter") ? ((String) fcnv-adapter(request) == "" ? nothing() : [fcnv-adapter(request),qlbj-real(request,"adapter_scale")]) : fcnv-wear-registered(fcnv-wear-registry(),model);
@@ -348,7 +436,7 @@ section [form.bml] {
   def fcnv-wear-of(rows) = nil?(rows) ? nothing() : qlbj-is?(qlbj-int(rows[-1],"wear"),1) ? [qlbj-str(rows[-1],"adapter") ?? "",nothing(),qlbj-str(rows[-1],"adapter_sha256") ?? ""] : nothing();
   def fcnv-wear-why(wear) = len(qlbj-present-why("worn",wear[0])) > 0 ? qlbj-present-why("worn",wear[0]) : len(wear) > 2 ? fcnv-wear-digest-why(wear[0],wear[2],hex-encode(sha256-stream-string(read_file(qlbj-st(wear[0])) ?? ""))) : "";
   def fcnv-wear-digest-why(dir,want,read) = (String) want == read ? "" : "worn adapter " ++ qlbj-st(dir) ++ " reads sha256 " ++ read ++ "; the registry row witnessed \"" ++ want ++ "\"";
-  def fcnv-metadata(result) = json-node-object([oh-s("source","fkwu-model-session"),oh-s("lane",if ((String) result[10] == "") then "registry-weights" else "native-metal-lora"),oh-s("adapter",result[10]),oh-s("status",result[0]),oh-s("model_path",result[4]),oh-n("prompt_ids",result[2]),oh-n("generated_ids",result[3]),oh-n("complete",result[5]),oh-n("release_ok",result[6]),oh-s("ownership",len(result)>15 ? result[15] : result[6] ? "released" : "release-incomplete"),oh-n("reused_prefix_ids",len(result)>16 ? result[16] : 0),oh-s("reason",result[7]),oh-n("model_server_calls",0),oh-n("provider_calls",0)]);
+  def fcnv-metadata(result) = json-node-object([oh-s("source","fkwu-model-session"),oh-s("lane",if ((String) result[10] == "") then "registry-weights" else "native-metal-lora"),oh-s("adapter",result[10]),oh-s("status",result[0]),oh-s("model_path",result[4]),oh-n("prompt_ids",result[2]),oh-n("generated_ids",result[3]),oh-n("complete",result[5]),oh-n("release_ok",result[6]),oh-s("ownership",fcnv-ownership(result)),oh-n("reused_prefix_ids",fcnv-reused-ids(result)),oh-s("reason",result[7]),oh-n("model_server_calls",0),oh-n("provider_calls",0)]);
   def fcnv-retain(job,result) {
    let metadata = (job + "/native-generation.json");
    let raw = write_file_text((job + "/native-generation.txt"),result[8]);
