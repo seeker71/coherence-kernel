@@ -8,8 +8,8 @@
 ; and a turn that does not start writes no row, so the floor could never come down again: it is held at 60 min, half of
 ; the night's 120-minute window, and its words say so.
 ;
-; Expected: 1023
-; Verdict 1023 when every claim lands:
+; Expected: 2047
+; Verdict 2047 when every claim lands:
 ;   1   a median above 60 min is held at 3600000 ms: "the median of 3 real options of qwen38-q4, held at 60 min"
 ;   2   a median at or below 60 min stands unchanged: "the median of 3 real options of qwen38-q4"
 ;   4   a 120-minute window holds the held floor
@@ -25,6 +25,9 @@
 ;       floor's cut word; with no window the same feed is not past
 ;   512 a coding lane past its window ends between replies with window-end;checkpoint-retained and its checkpoint saved;
 ;       with the window given back the same lane goes on to its own next decision (its turn budget)
+;   1024 a window is heard only by the cell that set it: a cell stopped at its deadline runs no defer and leaves its
+;       window behind, and a later cell in the same process that set none hears no window; a window recorded under
+;       another cell's name is not heard here, and this cell's own is
 ; preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/host-walk.bml
 section [form.bml] {
@@ -45,6 +48,7 @@ section [form.bml] {
    ++ "{\"approach\":{\"model\":\"qwen38-q4\"},\"lane\":\"lane-exit=0\",\"lane_status\":\"attention\",\"lane_reason\":\"host-memory-low\",\"local_generated_ids\":30,\"dry\":0,\"test\":0,\"wall_ms\":50000}\n"
    ++ "{\"approach\":{\"model\":\"qwen38-q4\"},\"lane\":\"lane-exit=0\",\"lane_status\":\"attention\",\"lane_reason\":\"generation-incomplete;candidate-retained\",\"local_generated_ids\":40,\"dry\":0,\"test\":0,\"wall_ms\":90000}\n"
    ++ "{\"approach\":{\"model\":\"qwen38-q4\"},\"lane\":\"lane-exit=0\",\"lane_status\":\"attention\",\"lane_reason\":\"window-end;checkpoint-retained\",\"local_generated_ids\":800,\"dry\":0,\"test\":0,\"wall_ms\":300000}\n"
+   ++ "{\"approach\":{\"model\":\"qwen38-q4\"},\"lane\":\"lane-exit=0\",\"lane_status\":\"attention\",\"lane_reason\":\"window-end;checkpoint-write-refused;candidate-retained\",\"local_generated_ids\":700,\"dry\":0,\"test\":0,\"wall_ms\":200000}\n"
    ++ "{\"rung\":\"focus\",\"voice\":\"qwen38-q8\",\"verdict\":\"refused\",\"voice_status\":\"window-end\",\"local_generated_ids\":300,\"wall_ms\":120000}\n";
   def wfb-mixed() = wfb-noise() ++ wfb-plan("qwen38-q8", 600000) ++ wfb-turn("qwen38-q4", 1400000) ++ wfb-plan("qwen38-q8", 800000) ++ wfb-turn("qwen38-q4", 1600000) ++ wfb-plan("qwen38-q8", 700000) ++ wfb-turn("qwen38-q4", 1500000);
   def wfb-c-held(ctx) {
@@ -108,6 +112,29 @@ section [form.bml] {
    let swept = host_dir_rmdir(root);
    (String) fcap-note(cut[1]) == "window-end;checkpoint-retained" && fcap-done(cut[1]) && !nothing?(kept) && (String) fcap-note(after[1]) == "caller-turn-budget-reached;checkpoint-retained";
   }
+  // two cells called in this process: the first sets a window an instant ahead and is stopped at its deadline before
+  // its defer gives the window back; the second sets none and answers whether it hears a window
+  def wfb-stopped-cell() = "import form-stdlib/bml/form-token-grammar.bml;\nsection [form.bml] {\n class WfbStopped {\n  def wfb-spin(until, n) = host_monotonic_ms() >= until ? n : wfb-spin(until, n + 1);\n  def wfb-door() {\n   let window = ftg-window-until();\n   let set = ftg-window-at(host_monotonic_ms() + 200);\n   defer ftg-window-at(window);\n   wfb-spin(host_monotonic_ms() + 20000, 0);\n  }\n }\n wfb-door();\n}\n";
+  def wfb-later-cell() = "import form-stdlib/bml/form-token-grammar.bml;\nsection [form.bml] {\n ftg-window-until() == 0 && !ftg-window-past?() ? 1 : 0;\n}\n";
+  def wfb-c-owner(ctx) {
+   let dir = temp_dir() ++ "/walk-floor-owner-" ++ host_pid().str() ++ "-" ++ now_unix_ms().str();
+   let made = host_dir_mkdir(dir);
+   let a = write_file_text(dir ++ "/stopped.bml", wfb-stopped-cell());
+   let b = write_file_text(dir ++ "/later.bml", wfb-later-cell());
+   let stopped = cell_run(dir ++ "/stopped.bml", 0, 1500, nothing());
+   let rested = host_sleep_ms(400);
+   let later = cell_run(dir ++ "/later.bml", 0, 30000, nothing());
+   let saved = ftg-window-until();
+   let other = record_set(FTG-DEFAULT, "window-owner", dir ++ "/stopped.bml");
+   let stale = record_set(FTG-DEFAULT, "window-until", host_monotonic_ms() - 1);
+   let unheard = ftg-window-until() == 0 && !ftg-window-past?();
+   let own = ftg-window-at(host_monotonic_ms() - 1);
+   let heard = ftg-window-past?();
+   let back = ftg-window-at(saved);
+   let gone = host_dir_rmdir(dir);
+   let kind = nothing?(stopped) || nothing?(record_get(stopped, "stopped")) ? "" : (String) record_get(record_get(stopped, "stopped"), "kind");
+   (String) kind == "deadline" && !nothing?(later) && (Comparable) (record_get(later, "value") ?? 0) == 1 && unheard && heard;
+  }
  }
- live-claims("walk-floor-band", 0, [["held", 1, 1, wfb-c-held], ["short", 2, 1, wfb-c-short], ["room", 4, 1, wfb-c-room], ["empty", 8, 1, wfb-c-empty], ["voice", 16, 1, wfb-c-voice], ["every", 32, 1, wfb-c-every], ["none", 64, 1, wfb-c-none], ["rows", 128, 1, wfb-c-rows], ["feed", 256, 1, wfb-c-feed], ["lane", 512, 1, wfb-c-lane]]);
+ live-claims("walk-floor-band", 0, [["held", 1, 1, wfb-c-held], ["short", 2, 1, wfb-c-short], ["room", 4, 1, wfb-c-room], ["empty", 8, 1, wfb-c-empty], ["voice", 16, 1, wfb-c-voice], ["every", 32, 1, wfb-c-every], ["none", 64, 1, wfb-c-none], ["rows", 128, 1, wfb-c-rows], ["feed", 256, 1, wfb-c-feed], ["lane", 512, 1, wfb-c-lane], ["owner", 1024, 1, wfb-c-owner]]);
 }
