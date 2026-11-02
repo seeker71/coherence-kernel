@@ -1,0 +1,80 @@
+// provider-turn.bml — the one seam every door that launches a provider turn lands through: the turn's kind, read from the share meter over the turn's own transcript.
+//
+// observe/provider-turn-kind-run.bml runs the share meter's collector as a child, in a directory of the turn's own, over the transcript the turn left. A turn reads kind=observed only
+// when that collector settles a valid turn from it and, where the provider reported its own usage, the meter's total agrees (the goal's measured-twice). Anything else reads kind=unknown
+// with the reason: no transcript (a codex exec --ephemeral keeps none), a transcript shape the collector does not read (a claude -p session file), or a disagreement.
+// S1 carries the reading on its own report row (share_kind, fgs-report-row); a door with no row of its own lands one here (pt-land) on the rent ledger. The row holds no words of the turn.
+// Witness: form-stdlib/tests/provider-turn-band.bml.
+import form-stdlib/bml/form-cli-heal-native-io.bml;
+import form-stdlib/bml/host-child.bml;
+import form-stdlib/bml/spawn-guard.bml;
+section [form.bml] {
+ class ProviderTurn {
+  def pt-ledger() = "receipts/rent-ledger.jsonl";
+  def pt-door() = "observe/provider-turn-kind-run.bml";
+  def pt-deadline-ms() = 300000;
+  def pt-binding() = ".form-cli-turn-rollout";
+  def pt-landed-mark() = "provider-turn-landed";
+  def pt-word(line, key) {
+   let at = str_find(line, " " ++ key ++ "=", 0);
+   let open = at < 0 ? -1 : at + len(key) + 2;
+   let close = open < 0 ? -1 : str_find(line ++ " ", " ", open);
+   close < 0 ? "" : substring(line, open, close);
+  }
+  // the meter's own line, from a child in dir; a child that ended without one reads unknown, by name
+  def pt-meter-line(root, dir, transcript) {
+   let made = hch-mkdirs(dir);
+   let bound = write_file_text(dir ++ "/" ++ pt-binding(), transcript ++ "\n");
+   let out = dir ++ "/meter.out";
+   let pid = sg-spawn-at([root ++ "/fkwu", root ++ "/" ++ pt-door()], ["/dev/null", out, dir ++ "/meter.err", dir]);
+   let waited = pid <= 0 ? [nothing()] : hch-wait(pid, hch-by(pt-deadline-ms()));
+   let lines = filter(l => str_find(l, "kind=", 0) == 0, split-on(read_file(out) ?? "", "\n"));
+   nil?(lines) ? "kind=unknown reason=meter-ended-with-no-reading" : lines[-1];
+  }
+  // [kind, the meter's line]. reported: the provider's own total, or nothing where it reported none
+  def pt-read-line(line, reported) {
+   let observed = str_find(line, "kind=observed", 0) == 0;
+   let total = str_to_int(pt-word(line, "total"));
+   let agrees = nothing?(reported) || (Comparable) reported == total;
+   observed && agrees ? ["observed", line] : observed ? ["unknown", "kind=unknown reason=measured-twice-disagrees provider=" ++ reported.str() ++ " meter=" ++ total.str()] : ["unknown", line];
+  }
+  def pt-read(root, dir, transcript, reported) = (String) transcript == "" || (Comparable) file_size(transcript) < 1 ? ["unknown", "kind=unknown reason=no-transcript"] : pt-read-line(pt-meter-line(root, dir, transcript), reported);
+  // ---- the transcript a turn left ----
+  // a claude -p turn under its own config home keeps <home>/projects/<directory>/<session>.jsonl
+  def pt-claude-transcript(home, session) {
+   let dirs = fs_list(home ++ "/projects") ?? [];
+   let hits = filter(p => (Comparable) file_size(p) > 0, map(d => home ++ "/projects/" ++ d ++ "/" ++ session ++ ".jsonl", dirs));
+   (String) session == "" || nil?(hits) ? "" : hits[0];
+  }
+  // a codex exec turn keeps a rollout under <codex home>/sessions/<yyyy>/<mm>/<dd>; its opening line names the directory it ran in. needle: that directory's own tail
+  def pt-rollout-of(dir, needle) {
+   let names = filter(n => str_find(n, "rollout-", 0) == 0, fs_list(dir) ?? []);
+   let hits = filter(p => str_find(read_file_slice(p, 0, 65536) ?? "", needle, 0) >= 0, map(n => dir ++ "/" ++ n, names));
+   nil?(hits) ? "" : hits[-1];
+  }
+  def pt-codex-rollout(codexHome, day, needle) = pt-rollout-of(codexHome ++ "/sessions/" ++ substring(day, 0, 4) ++ "/" ++ substring(day, 5, 7) ++ "/" ++ substring(day, 8, 10), needle);
+  // ---- the row of a door with no report of its own. reported, or the meter's total when the provider said nothing; a turn neither read stands with no rent column, unknown, never 0 ----
+  def pt-rent(read, reported) {
+   let total = pt-word(read[1], "total");
+   !nothing?(reported) ? reported : (String) read[0] == "observed" && (String) total != "" ? str_to_int(total) : nothing();
+  }
+  def pt-row(door, provider, read, reported, status) {
+   let rent = pt-rent(read, reported);
+   json-node-object(append([
+    fhn-n("at_unix_ms", now_unix_ms()),
+    fhn-s("movement", door ++ " provider turn"),
+    fhn-s("door", door),
+    fhn-s("source", "provider"),
+    fhn-s("provider", provider),
+    fhn-s("status", status),
+    fhn-s("kind", read[0]),
+    fhn-s("kind_reading", read[1])], nothing?(rent) ? [] : [fhn-n("rent_tokens", rent)]));
+  }
+  def pt-land-at(ledger, root, dir, door, provider, transcript, reported, status) {
+   let read = pt-read(root, dir, transcript, reported);
+   let kept = fhn-append(ledger, lrun-row-line(pt-row(door, provider, read, reported, status)) ++ "\n");
+   read;
+  }
+  def pt-land(root, dir, door, provider, transcript, reported, status) = pt-land-at(root ++ "/" ++ pt-ledger(), root, dir, door, provider, transcript, reported, status);
+ }
+}
