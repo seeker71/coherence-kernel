@@ -54,21 +54,31 @@ tags in `axes.jsonl`. It was written as a seal and graduated unread: rows of it 
 draft of the next role prompt, so it could not be blind to the prompt it would measure. A reading of it is in-sample to
 that prompt, as a rotation reading may be; only a seal holds a prompt out.
 
-`sealed/` holds a set written before any answer to it was read and before the prompt it tests moved, its tags beside it
-(`sealed/axes-N.jsonl` for `sealed/scenarios-N.jsonl`). It stands outside the rotation until its first reading: the
-register's sets and axes read only the `scenarios*` files of this folder and the tags of `axes.jsonl`, and its
-`offline-exam-heldout` row reads the sealed set's first whole reading by the exam (the voice as it speaks, `qwen38-q8`,
-variant `exam`, every ask spoken) under any prompt but the one it was sealed under. A reading of the voice under another
-prompt ahead of it spoils the seal (its `before` rule), and the row reads open by name until a new seal. A seal is blind
-to the prompt it will measure: its rows are written from the body's tissue alone, by a hand that has read no role prompt,
-no draft of one and no finding about one, and nothing outside `sealed/` says what a sealed row asks. After the held-out
-reading the set graduates: `git mv` into this folder, its tags appended to `axes.jsonl`, and the held-out row re-pointed
-to the next seal; a set found not blind graduates the same way, unread.
+`sealed/` holds a set written before any answer to it was read and before the prompt it tests moved, with its tags, its
+sources and two answer sets beside it, for `sealed/scenarios-N.jsonl`: `sealed/axes-N.jsonl`; `sealed/sources-N.jsonl`, one
+`{id, sources}` row per scenario naming the lines of the body its keys are drawn from; and `sealed/faithful-N.jsonl` and
+`sealed/wrong-N.jsonl`, answers in the grading lane's `{id, answer}` shape, one true to the body and one not. It stands
+outside the rotation until its first reading: the register's sets and axes read only the `scenarios*` files of this folder and the tags of `axes.jsonl`,
+and its `offline-exam-heldout` row reads the sealed set's first whole reading by the exam (the voice as it speaks,
+`qwen38-q8`, variant `exam`, every ask spoken) under any prompt but the one it was sealed under. A reading of the voice
+under another prompt ahead of it spoils the seal (its `before` rule), and the row reads open by name until a new seal. A
+seal is blind to the prompt it will measure: its rows are written from the body's tissue alone, by a hand that has read no
+role prompt, no draft of one and no finding about one; its ids say nothing of what a row asks, and the reading door reads
+a sealed set blind, naming a failed predicate by its place and no cited path, so until its held-out reading counts nothing
+outside `sealed/` says what a sealed row asks. A seal stands whole before that reading (`alignment-read-band`): every row
+parsed, tagged and sourced, its held-out row's count, ids of its own, every cited path standing; its faithful answers hold
+every row whole and its wrong answers none, a blank reply holds none of its predicates, and one content-free reply holds no
+row whole and at most a quarter of them. After the held-out reading the set graduates: `git mv` into this folder with its
+sources and answer sets, its tags appended to `axes.jsonl`, and the held-out row re-pointed to the next seal; a set found
+not blind graduates the same way, unread.
 
 Sealed under the live role prompt digest `7d0e7f3199c79b93a710c5b9ee57f5fadaf75d5d1bff6850e9318714f847bf31`:
 
-- `sealed/scenarios-7.jsonl` sha256 `eaad0e65be660c8c2f64045f1057b074ca773d60cd99780f1d232bc83e6381a0`
-- `sealed/axes-7.jsonl` sha256 `ad31434d6a456ccb457bb79044a09104304f2aa5b7aa940ca5a632d30cfe0fa0`
+- `sealed/scenarios-7.jsonl` sha256 `cb91f300253473405e4f606f717caa827060582a6bb7fc7eddc8cab28bcbc280`
+- `sealed/axes-7.jsonl` sha256 `c31045d3e78cb8f0424fffcce6288c4758e59cf30c852097ddd81a59669e401e`
+- `sealed/sources-7.jsonl` sha256 `5b95547b7b7647004adf8f65ef7d700e94a8bbd317f69ca855d030d5f79b345b`
+- `sealed/faithful-7.jsonl` sha256 `dc480f7e6a514e6964826d435b727272a4deff1d86df3c1062c7c32633505ba9`
+- `sealed/wrong-7.jsonl` sha256 `09a77dc6187e1b4e3c5261c3746fd00c4c3c8b17ae6ded2504ee23b82e603e18`
 
 The predicates are lexical, and each reads what it checks and no more. A blank answer
 holds none of them. A polite generic reply holds 20 of the fourth set's 56 (its `lacks`
