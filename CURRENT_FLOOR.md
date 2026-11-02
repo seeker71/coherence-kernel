@@ -240,7 +240,7 @@ native-turn-ladder-band 1048575 · local-flow-reading-band 8388607  (a memory en
                                 checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
                                 the wall, its renewals and the prompt IDs they re-fed; a lane killed at its deadline writes no counts
                                 and its counts are folded from its stamps and said so; the day option reproduces to the ms)
-host-walk-band 2251799813685247  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
+host-walk-band 4503599627370495  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
                                 pid, unix ms, door) under the lock it holds; a later start of the same door that finds its own
                                 row under 25 minutes old (hw-slot-window-ms: the retry gap plus slack, far under the two-hour
                                 windows and the eight hours between slots) ends 0 with `[walk-lock] <door> already began at <hh:mm>
@@ -251,6 +251,16 @@ host-walk-band 2251799813685247  (a walk door that claims the checkout stamps it
                                 `began-plants` (a begin that never stamps, one that compares the window with the wrong inequality,
                                 one that ignores the door, one that ignores the age each fail the checks the real begin keeps) and
                                 `gap` (the lens over synthetic stamps and the door as a child);
+                                a walk door has two starts (host-walk-renew.bml hw-walk-door): after its sync, build and carrier the
+                                launched start begins its own argv again as its child, on the kernel the build placed and compiled
+                                from the tree the sync left, hands it `{"renewal":{...}}` (the window's end, the day, the slot hour, the
+                                safe flag, the branch, the sync, build and carrier lines; the day turn adds its continuation's options)
+                                and ends with it; the renewed start takes the lock and the slot stamp (the day turn its continuation)
+                                and walks every step, so a rule the walk evaluates after its sync is the code the sync brought
+                                (2026-11-03 03:30: the night's movement request ran the carry list from before its rebase); claim
+                                `renewal` (a scratch walk whose main moves its carry list under it: the launched start builds with the
+                                one path it compiled, the renewed one with the two the sync brought; with the steps walked in the
+                                launched start instead, the band reads 2251799813685247);
                                 the walk's turn waits for memory within the window and a held answer takes no turn;
                                 the sync settles what the body knows through the reunion's rounds: a drawn page takes main's side
                                 and is remade (in its directory) into one new commit, a river of at_unix_ms rows with both banks
@@ -266,10 +276,10 @@ host-walk-band 2251799813685247  (a walk door that claims the checkout stamps it
                                 on docs/rent-ladder.html): observe/walk-sync-run.bml runs the landed sync once on a named checkout
                                 ({"dir":"/abs/path"}), leaves a checkout whose walk lock stands alone and names the owner; run on the
                                 walk checkout at 14:30 it printed healed:, redrawn:, sync=0;
-                                host-walk.bml is an aggregator over sixteen parts `host-walk-<seam>.bml`, each under 12000 bytes so the
+                                host-walk.bml is an aggregator over twenty-six parts `host-walk-<seam>.bml`, each under 12000 bytes so the
                                 local lane reads one whole and can read it twice, and every definition's name (not its body) is pinned
                                 in tests/fixtures/host-walk-defs.txt)
-host-walk-retry-band 4194303  (the informed retry, observe/walk-retry.bml over host-walk-evidence.bml, -class.bml, -retry.bml, -record.bml
+host-walk-retry-band 8388607  (the informed retry, observe/walk-retry.bml over host-walk-evidence.bml, -class.bml, -retry.bml, -record.bml
                                 and -attempt.bml: each schedule has a second launchd job, earth.hati.rent-walk-retry at 03:40 and
                                 earth.hati.day-turn-retry at 12:40 and 19:10 (sources in docs/launchd), whose door first reads what became
                                 of the first slot AGAINST THE SLOT'S TIME (a retry may start 5 to 45 minutes after its slot): its row in
