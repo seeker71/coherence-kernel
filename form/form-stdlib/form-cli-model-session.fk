@@ -351,7 +351,14 @@ section [form.bml] {
         let dropped = adm-drop(path);
         opened;
     };
-    def fcms-open-body(path, prompt, requested-maxpos, profile, reserve, clock, spec-open, span-lease, wear) = {
+    // A prefix preparation retains the ordinary seal, tokenizer, capacity and
+    // admission path. Only exact initial IDs are prepared; the predicted ID at
+    // that boundary is never committed when a caller supplies the real suffix.
+    def fcms-prefix-profile(profile, count) = record_new(0,"profile",profile,"prefix-count",count);
+    def fcms-prefix-count(preparation, count) = value_kind(preparation) == "record" ? record_get(preparation,"prefix-count") : count;
+    def fcms-prefix-valid?(count, total) = value_kind(count) == "int" && count > 0 && count <= total;
+    def fcms-open-body(path, prompt, requested-maxpos, preparation, reserve, clock, spec-open, span-lease, wear) = {
+        let profile = value_kind(preparation) == "record" ? record_get(preparation,"profile") : preparation;
         let _seal-begin = fcms-stage(clock, "model-session-seal-begin", 8388609);
         let verdict = qaf-seal-verdict(path);
         let _seal-complete = fcms-stage(clock, "model-session-seal-complete", 8388610);
@@ -380,6 +387,7 @@ section [form.bml] {
                 let _count-begin = fcms-stage(clock, "model-session-prompt-count-begin", 8388620);
                 let prompt-count = (Comparable) live-cursor == 1 ? qtlc-token-count(counted[1]) : len(ids);
                 let maxpos = reserve > 0 ? prompt-count + reserve : requested-maxpos;
+                let prepared-count = fcms-prefix-count(preparation,prompt-count);
                 let _count-complete = fcms-stage(clock, "model-session-prompt-count-complete", 8388621);
                 let _positions = fcms-open-stage(clock, ("model-session-prompt-positions-" + prompt-count.str()), 8388625);
                 let _reopen-begin = fcms-stage(clock, "model-session-prompt-cursor-reopen-begin", 8388622);
@@ -391,12 +399,15 @@ section [form.bml] {
                 } : prompt-count <= 0 ? {
                     qtlc-release-index(qtlc-index(cursor));
                     fcms-none("initial-turn-encoded-no-ids");
-                } : maxpos <= prompt-count || maxpos > gmt-u32(src, q38-key(arch, "context_length")) ? {
+                } : !fcms-prefix-valid?(prepared-count,prompt-count) || maxpos <= prompt-count || maxpos > gmt-u32(src, q38-key(arch, "context_length")) ? {
                     qtlc-release-index(qtlc-index(cursor));
                     fcms-none("session-context-window-refused");
                 } : {
                     let _admit-begin = fcms-stage(clock, "model-session-open-prefill-begin", 8388611);
-                    let opened = fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span-lease, wear);
+                    let partial = prepared-count < prompt-count;
+                    let complete-ids = partial && live-cursor == 1 ? fcmo-direct-cursor-ids(cursor) : ids;
+                    let prepared-ids = partial && !nothing?(complete-ids) ? take(prepared-count,complete-ids) : ids;
+                    let opened = partial && (nothing?(complete-ids) || len(complete-ids) != prompt-count) ? fcms-none("prefix-tokenizer-refused") : fcms-open-context(path, src, maxpos, partial ? prepared-count : prompt-count, cursor, prepared-ids, partial ? 0 : live-cursor, x, iced, clock, spec-open, span-lease, wear);
                     let _admit-complete = fcms-stage(clock, "model-session-open-prefill-complete", 8388612);
                     (Comparable) live-cursor == 1 ? fcms-resident?(opened) ? fcmo-with-index(opened, qtlc-index(cursor)) : {
                         qtlc-release-index(qtlc-index(cursor));
