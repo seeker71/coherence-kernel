@@ -1,11 +1,13 @@
 ; q4k-decode-wide-band.fk — the Qwen3.8 lane's K-quant decode matvecs (form_qwen_q4k_decode_f32 and
 ; form_qwen_q6k_decode_f32, the fused cooperative dots of form-stdlib/bml/qwen38-decode-quant.bml) answer to
-; the exact dot within the door's named bound, on one committed superblock fixture and on real rows of the
+; the exact dot within the door's named bound, on row-distinct synthetic tensors and on real rows of the
 ; Q4_K_M file, and the lane dispatches them through the door's own record.
 ;   bit 1   float(as_type<half>(bits)) is bit-identical to the body's q4k_f16(bits) on every finite f16
 ;           (all 65536 patterns, the 2048 inf/nan ones excluded): the kernels' d/dmin decode IS the attestant's
-;   bit 2   the Q4_K fixture (q4k-two-superblocks.bin, one row of 512, repeated to 3 rows): the fused kernel
-;           and the one-thread attestant (form_q4k_matvec_f32) both sit within their bound of the Form fp64 dot
+;   bit 2   Q4_K on row-distinct synthetic tensors (q38dq-fill; kquant-rows-fixture.bml), rows 1..9 (every
+;           residue of the pair and of the four-row group) of one, two, three and seventeen superblocks: every
+;           row of the fused kernel and of the one-thread attestant (form_q4k_matvec_f32) within its bound of
+;           the Form fp64 dot of THAT row, the rows told apart under the fused bound, four sentinels standing
 ;   bit 4   real weights, the first Q4_K ffn_gate of the file: four rows (the first and last pair) within
 ;           the bound of the fp64 dot; 20 dispatches of the fused kernel and of the serial hoist (the previous
 ;           kernel, compiled beside) timed, the best of five rounds each (the GPU is shared with siblings)
@@ -14,8 +16,8 @@
 ;   bit 32  q38-mv-rec hands a type-12 view to pipeline 57 with (rows + 1) / 2 groups — the door's record
 ;   bit 64  q38-mv-rec hands a type-14 view to pipeline 58 with (rows + 3) / 4 groups — the door's record (four
 ;           rows a Q6_K group)
-;   bit 128 the Q6_K fixture (q6k-two-superblocks.bin): the fused Q6_K kernel and its one-thread attestant
-;           (form_q6k_matvec_f32) within their bound of the fp64 dot
+;   bit 128 Q6_K on the same row-distinct shapes: the fused Q6_K kernel and its one-thread attestant
+;           (form_q6k_matvec_f32), every row within its bound of the fp64 dot of that row
 ;   bit 256 real weights, the first Q6_K ffn_down: four rows within the bound; fused and hoist timed
 ;   bit 512 the first Q6_K attn_qkv, the same
 ;   bit 1024 the head (output.weight, Q6_K, the widest dispatch of a token), four rows; 4 dispatches timed
@@ -25,7 +27,7 @@
 ; is cols (their fold depth).
 ; REQUIRES: a live Metal device and the Q4_K_M file of the registry row qwen38-q4 (a physical run; it needs
 ; the GPU). Opened through q38-open, the lane's own door, mmap-shared with any sibling lease.
-; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/model-registry.bml form-stdlib/lora-adapter.bml
+; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/model-registry.bml form-stdlib/lora-adapter.bml form-stdlib/tests/kquant-rows-fixture.bml
 (do
     (defn qdw-abs (v) (if (lt v 0.0) (sub 0.0 v) v))
     (defn qdw-u () 0.000000059604644775390625)
@@ -112,29 +114,14 @@
             (let sentinel (str_eq (substring y (mul 4 rows) (mul 4 (add rows 1))) (md-le32 (md-f32-bits 42.25))))
             (let freed (add (metal_buf_free ya) (metal_buf_free yb)))
             (if (and (ge a 0) (and (ge b 0) (and sentinel (and r0 (and r1 (and r2 (and r3 h0))))))) bit 0)))
-    ; one fixture: a one-row-of-512 K-quant fixture repeated to 3 rows; the fused kernel (the door's record)
-    ; and the one-thread attestant `pa` within their bounds of the fp64 dot, the sentinel at y[3] untouched
-    (defn qdw-fixture (ps type fx pa bit)
-        (do (let n (str_len fx))
-            (let fw (metal_buf_alloc (mul 3 n)))
-            (let fwrote (metal_buf_write fw 0 (str_concat fx (str_concat fx fx))))
-            (let fxh (metal_buf_alloc (mul 4 512)))
-            (let fxw (metal_buf_write fxh 0 (qdw-xs 512 0 "")))
-            (let fya (metal_buf_alloc 16)) (let fyb (metal_buf_alloc 16))
-            (let fsent (add (metal_buf_write fya 12 (md-le32 (md-f32-bits 42.25))) (metal_buf_write fyb 12 (md-le32 (md-f32-bits 42.25)))))
-            (let fe (q38-enq (q38dq-rec ps type fw fxh fya 3 512 0)))
-            (let fa (metal_enqueue pa (md-bind (list fw fxh fyb) (list 3 512)) 3))
-            (let fs (metal_sync))
-            (let fy (metal_buf_read fya 0 16)) (let fz (metal_buf_read fyb 0 16))
-            (let fexact (qdw-dot type fx 512 0 0.0)) (let fS (qdw-mag type fx 512 0 0.0))
-            (let fcoeff (q38dq-bound-coeff 512))
-            (print (list "fixture type" type "exact" fexact "S" fS "fused rows" (qdw-f fy 0) (qdw-f fy 1) (qdw-f fy 2) "dev/bound" (qdw-ratio (qdw-f fy 0) fexact fS fcoeff) (qdw-ratio (qdw-f fy 2) fexact fS fcoeff) "attestant" (qdw-f fz 0) "dev/bound" (qdw-ratio (qdw-f fz 0) fexact fS 512)))
-            (let freed (sum (list (metal_buf_free fw) (metal_buf_free fxh) (metal_buf_free fya) (metal_buf_free fyb))))
-            (if (and (qdw-within? (qdw-f fy 0) fexact fS fcoeff)
-                 (and (qdw-within? (qdw-f fy 1) fexact fS fcoeff)
-                 (and (qdw-within? (qdw-f fy 2) fexact fS fcoeff)
-                 (and (qdw-within? (qdw-f fz 0) fexact fS 512)
-                 (and (str_eq (substring fy 12 16) (md-le32 (md-f32-bits 42.25))) (str_eq (substring fz 12 16) (md-le32 (md-f32-bits 42.25)))))))) bit 0)))
+    ; one fixture bit: every [rows, cols, salt] of `cases` through the shared witness (kquant-rows-fixture.bml):
+    ; a row-distinct synthetic tensor, the fused kernel by the lane's door and the attestant, every row against
+    ; the fp64 dot of that row, x the band's own qdw-xs
+    (defn qdw-fixture (ps pfill type cases i acc)
+        (if (ge i (len cases)) acc
+            (do (let c (nth cases i))
+                (qdw-fixture ps pfill type cases (add i 1) (add acc (kqr-decode ps pfill type (nth c 0) (nth c 1) (qdw-xs (nth c 1) 0 "") (nth c 2)))))))
+    (defn qdw-fixture-cases () (list (list 1 256 11) (list 2 512 12) (list 3 512 13) (list 4 768 14) (list 5 256 15) (list 6 512 16) (list 7 4352 17) (list 8 768 18) (list 9 512 19)))
     ; ---- the unit: the lane's own, plus the f16 identity probe and the previous (hoisted serial) kernels ----
     (let msl (str_concat (q38-msl) (str_concat (qml-hoist-msl "qdw_hoist_q4k" "q4k" "144") (str_concat (qml-hoist-msl "qdw_hoist_q6k" "q6k" "210") "kernel void qdw_f16 (device uint* out [[buffer(0)]], uint i [[thread_position_in_grid]]) { if (i >= 65536u) return; uint ex = (i / 1024u) % 32u; float a = q4k_f16(int(i)); float b = float(as_type<half>(ushort(i))); out[i] = (ex == 31u) ? 0u : ((as_type<uint>(a) == as_type<uint>(b)) ? 0u : 1u); }"))))
     (let ps (q38-pipes msl))
@@ -149,9 +136,10 @@
     (let mism (qdw-cnt (metal_buf_read fo 0 (mul 4 65536)) 0 65536 0))
     (print (list "f16 identity: patterns" 65536 "excluded inf/nan" 2048 "mismatches" mism))
     (let c1 (if (eq mism 0) 1 0))
-    ; --- bits 2 and 128: the committed fixtures, 3 rows of 512 ---
-    (let c2 (qdw-fixture ps 12 (read_file_slice "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 0 288) (nth ps 1) 2))
-    (let c128 (qdw-fixture ps 14 (read_file_slice "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 0 420) (nth ps 3) 128))
+    ; --- bits 2 and 128: row-distinct synthetic tensors, rows 1..9 ---
+    (let pfill (metal_pipeline (q38dq-fill-msl) "q38dq_fill"))
+    (let c2 (if (and (gt pfill 0) (eq (qdw-fixture ps pfill 12 (qdw-fixture-cases) 0 0) (len (qdw-fixture-cases)))) 2 0))
+    (let c128 (if (and (gt pfill 0) (eq (qdw-fixture ps pfill 14 (qdw-fixture-cases) 0 0) (len (qdw-fixture-cases)))) 128 0))
     ; --- bits 4/8/16 and 256/512/1024: real rows of the Q4_K_M file through the lane's open door ---
     (let ctx (q38-open (mr-path (mr-find "qwen38-q4")) 64))
     (if (eq (len ctx) 0) (form_error "q4k decode wide band: q38-open refused the qwen38-q4 artifact") 0)

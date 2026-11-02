@@ -1,0 +1,155 @@
+// q6k-decode-rate-run.bml — how fast the Q6_K decode matvec (pipeline 58) reads its bytes against the kernel it replaced,
+// on synthetic tensors only: the door the rates in form-stdlib/bml/qwen38-decode-quant.bml cite.
+//
+//   ./fkwu observe/q6k-decode-rate-run.bml
+//
+// Synthetic Q6_K filled on the device (q38dq-fill: no model file, no lease) at two shapes: 5120 x 17408 (an ffn_down,
+// 73 MB, more than any cache holds between dispatches) and the head 248320 x 5120 (1.04 GB); Q4_K's pipeline 57 is
+// timed beside them on the first shape. The previous kernel is origin/main 7b217aa91's eight-weight, pair-of-rows text,
+// verbatim but for its names, compiled in this door only. A round times every kernel once, n dispatches to one sync, by
+// the device's own busy time (metal_live word 11); even rounds run them in the listed order and odd rounds in reverse,
+// so each kernel is timed both first and last, and each keeps its best round in each order (qkr-rounds-per-order rounds
+// an order). Beside the reading: the load averages before and after (host_load_avg), the lease directory and its live
+// leases (mg-lease-view), the GPU lock (gpl-judge), the fkwu peers carrying a GPU marker (gpl-peers), the other fkwu
+// processes, and host_gpu_utilization before the first dispatch (and after a 1.5 s rest past the last, which still
+// carries the tail of this door's own work: printed, not judged). The reading is called NOISY when a lease, the lock,
+// a peer or any other fkwu process is live before or after, or the device read at least qkr-busy() percent busy before
+// the first dispatch; otherwise quiet. The previous and the lane's outputs are compared row by row.
+// preflight-exec: forbidden
+// preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml form-stdlib/bml/memory-governor.bml form-stdlib/gpu-lease.bml
+section [form.bml] {
+ class Q6kDecodeRateRun {
+  def qkr-say(s) = print_str("[q6k-rate] " ++ s);
+  def qkr-busy() = 10;
+  def qkr-rounds-per-order() = 6;
+  // the previous kernel: origin/main 7b217aa91's q38dq-q6-quant-msl and q38dq-q6-wide-msl, q38dq_q6 named qkr_prev_q6
+  def qkr-prev-msl() = "static inline float qkr_prev_q6(uint a, uint e, uint s, uint nsh, uint hsh) { return float(int(((a >> (s + nsh)) & 15u) | (((e >> (s + hsh)) & 3u) << 4u)) - 32); } " ++ "kernel void qkr_prev_f32" ++ q38dq-sig-msl() ++ "uint sg = (uint)tiisg / 2u; uint p = (uint)tiisg - sg * 2u; uint h = sg / 8u; uint rem = sg - h * 8u; uint g = rem / 2u; uint is = rem - g * 2u; uint l0 = is * 16u + p * 8u; uint qloff = h * 64u + l0 + (g & 1u) * 32u; uint qhoff = 128u + h * 32u + l0; uint scoff = 192u + h * 8u + is + 2u * g; uint nsh = (g / 2u) * 4u; uint hsh = 2u * g; uint xoff = h * 128u + g * 32u + l0; for (uint ib = (uint)sgitg; ib < nb; ib += nsg) { device const float* xp = x + ib * 256u + xoff; packed_float4 ya = *(device const packed_float4*)(xp); packed_float4 yc = *(device const packed_float4*)(xp + 4); for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; device const uchar* b = qb + ((ulong)r * (ulong)nb + (ulong)ib) * 210ul; packed_ushort4 ql = *(device const packed_ushort4*)(b + qloff); packed_ushort4 qh = *(device const packed_ushort4*)(b + qhoff); ushort hd = (ushort)b[208] | ((ushort)b[209] << 8); float gsc = float(as_type<half>(hd)) * float(q6k_s8(int(b[scoff]))); uint a0 = uint(ql.x); uint a1 = uint(ql.y); uint a2 = uint(ql.z); uint a3 = uint(ql.w); uint e0 = uint(qh.x); uint e1 = uint(qh.y); uint e2 = uint(qh.z); uint e3 = uint(qh.w); float qd = 0.0f; qd = metal::fma(qkr_prev_q6(a0, e0, 0u, nsh, hsh), ya.x, qd); qd = metal::fma(qkr_prev_q6(a0, e0, 8u, nsh, hsh), ya.y, qd); qd = metal::fma(qkr_prev_q6(a1, e1, 0u, nsh, hsh), ya.z, qd); qd = metal::fma(qkr_prev_q6(a1, e1, 8u, nsh, hsh), ya.w, qd); qd = metal::fma(qkr_prev_q6(a2, e2, 0u, nsh, hsh), yc.x, qd); qd = metal::fma(qkr_prev_q6(a2, e2, 8u, nsh, hsh), yc.y, qd); qd = metal::fma(qkr_prev_q6(a3, e3, 0u, nsh, hsh), yc.z, qd); qd = metal::fma(qkr_prev_q6(a3, e3, 8u, nsh, hsh), yc.w, qd); float part = gsc * qd; if (row == 0u) sumf0 = sumf0 + part; else sumf1 = sumf1 + part; } } " ++ q38dq-epilogue-msl();
+  // its record: a pair of rows a 256-thread group, as the lane dispatched it
+  def qkr-prev-rec(p, w, x, y, rows, cols) = [p, md-bind16([w, x, y], [rows, cols], 256, 0, 1, 0), (rows + 1) / 2];
+  // x exact in f32: multiples of 2^-10 in [-1, 1], 256 a chunk
+  def qkr-xv(i) = (1.0 * (((i * 37) % 2049) - 1024)) / 1024.0;
+  def qkr-xs-chunk(lo, hi, acc) = lo >= hi ? acc : qkr-xs-chunk(lo + 1, hi, acc ++ md-le32(md-f32-bits(qkr-xv(lo))));
+  def qkr-xs(n, lo, acc) = lo >= n ? acc : qkr-xs(n, lo + 256, acc ++ qkr-xs-chunk(lo, lo + 256 > n ? n : lo + 256, ""));
+  // n dispatches of one record to one sync: the device's busy us
+  def qkr-n(rec, n) = n <= 0 ? 1 : {
+   let e = metal_enqueue(rec[0], rec[1], rec[2]);
+   qkr-n(rec, n - 1);
+  };
+  def qkr-once(rec, n) {
+   let b0 = metal_live();
+   let sent = qkr-n(rec, n);
+   let s = metal_sync();
+   let b1 = metal_live();
+   b1[11] - b0[11];
+  }
+  // one round in `order` (indices of es): [index, us] pairs, timed in that order
+  def qkr-time(es, n, order) = nil?(order) ? [] : {
+   let us = qkr-once(es[order[0]][1], n);
+   let rest = qkr-time(es, n, order[1:]);
+   cons([order[0], us], rest);
+  };
+  def qkr-upto(n, i) = i >= n ? [] : cons(i, qkr-upto(n, i + 1));
+  def qkr-rev(xs, acc) = nil?(xs) ? acc : qkr-rev(xs[1:], cons(xs[0], acc));
+  def qkr-find(pairs, i) = nil?(pairs) ? 0 - 1 : ((Comparable) pairs[0][0] == i ? pairs[0][1] : qkr-find(pairs[1:], i));
+  def qkr-min(a, b) = (Comparable) a < 0 ? b : ((Comparable) b < a ? b : a);
+  // bests: per kernel [best us in the listed order, best us in reverse]
+  def qkr-merge(bests, got, odd, i) = i >= len(bests) ? [] : {
+   let b = bests[i];
+   let us = qkr-find(got, i);
+   let kept = (Comparable) odd == 0 ? [qkr-min(b[0], us), b[1]] : [b[0], qkr-min(b[1], us)];
+   cons(kept, qkr-merge(bests, got, odd, i + 1));
+  };
+  def qkr-rounds(es, n, k, rounds, bests) = k >= rounds ? bests : {
+   let order = (Comparable) (k % 2) == 0 ? qkr-upto(len(es), 0) : qkr-rev(qkr-upto(len(es), 0), []);
+   let got = qkr-time(es, n, order);
+   qkr-rounds(es, n, k + 1, rounds, qkr-merge(bests, got, k % 2, 0));
+  };
+  def qkr-fresh(n) = n <= 0 ? [] : cons([0 - 1, 0 - 1], qkr-fresh(n - 1));
+  def qkr-gbs(bytes, n, us) = (Comparable) us <= 0 ? 0.0 : (1.0 * bytes * n) / (1000.0 * us);
+  def qkr-report(shape, es, bests, n, i) = i >= len(es) ? 1 : {
+   let e = es[i];
+   let b = bests[i];
+   let said = qkr-say(shape ++ " " ++ e[0] ++ ": best of " ++ qkr-rounds-per-order().str() ++ " rounds of " ++ n.str() ++ " dispatches, listed order " ++ b[0].str() ++ " us = " ++ qkr-gbs(e[2], n, b[0]).str() ++ " GB/s, reversed " ++ b[1].str() ++ " us = " ++ qkr-gbs(e[2], n, b[1]).str() ++ " GB/s");
+   qkr-report(shape, es, bests, n, i + 1);
+  };
+  // max |a_r - b_r|, the rows whose bits differ and the largest |b_r|, 1024 rows a chunk: [max, count, largest]
+  def qkr-f(s, i) = ln-f32-decode(ln-u32-le(s, 4 * i));
+  def qkr-abs(v) = v < 0.0 ? 0.0 - v : v;
+  def qkr-dmax-go(a, b, i, end, acc) = i >= end ? acc : {
+   let dv = qkr-abs(qkr-f(a, i) - qkr-f(b, i));
+   let same = (String) substring(a, 4 * i, 4 * i + 4) == substring(b, 4 * i, 4 * i + 4);
+   qkr-dmax-go(a, b, i + 1, end, [dv > acc[0] ? dv : acc[0], same ? acc[1] : acc[1] + 1, qkr-abs(qkr-f(b, i)) > acc[2] ? qkr-abs(qkr-f(b, i)) : acc[2]]);
+  };
+  def qkr-dmax(a, b, i, n, acc) = i >= n ? acc : qkr-dmax(a, b, i + 1024, n, qkr-dmax-go(a, b, i, i + 1024 > n ? n : i + 1024, acc));
+  def qkr-compare(shape, yp, yl, rows) {
+   let d = qkr-dmax(metal_buf_read(yp, 0, 4 * rows), metal_buf_read(yl, 0, 4 * rows), 0, rows, [0.0, 0, 0.0]);
+   qkr-say(shape ++ " previous vs lane: max |d| " ++ d[0].str() ++ ", rows whose bits differ " ++ d[1].str() ++ " of " ++ rows.str() ++ ", largest |lane| " ++ d[2].str());
+  }
+  def qkr-others() = filter(r => (Comparable) r[0] != host_pid(), host_processes("fkwu") ?? []);
+  def qkr-pids(rows) = foldl((acc, r) => acc ++ r[0].str() ++ " ", "", rows);
+  def qkr-names(xs) = foldl((acc, x) => acc ++ x.str() ++ " ", "", xs);
+  def qkr-load(l) = (l[0] / 1000).str() ++ "." ++ ((l[0] % 1000) / 10).str() ++ " " ++ (l[1] / 1000).str() ++ "." ++ ((l[1] % 1000) / 10).str() ++ " " ++ (l[2] / 1000).str() ++ "." ++ ((l[2] % 1000) / 10).str();
+  def qkr-run() {
+   let msl = q38-msl() ++ qkr-prev-msl() ++ q38dq-fill-msl();
+   let ps = q38-pipes(msl);
+   let pprev = metal_pipeline(msl, "qkr_prev_f32");
+   let pfill = metal_pipeline(msl, "q38dq_fill");
+   (Comparable) ps[57] <= 0 || (Comparable) ps[58] <= 0 || (Comparable) pprev <= 0 || (Comparable) pfill <= 0 ? form_error("q6k-rate: the unit did not compile (57, 58, the previous kernel or the fill is 0)") : 0;
+   let load0 = host_load_avg();
+   let names = host_dir_list(mg-lease-dir()) ?? [];
+   let leases = mg-lease-view(mg-lease-dir());
+   let lock = gpl-judge(gpu-lease-path());
+   let peers = gpl-peers(gpu-lease-path(), gpl-markers());
+   let others = qkr-others();
+   let u0 = host_gpu_utilization();
+   let said0 = qkr-say("beside: load " ++ qkr-load(load0) ++ "; lease dir " ++ mg-lease-dir() ++ " holds [" ++ qkr-names(names) ++ "], live leases " ++ len(leases).str() ++ "; gpu lock " ++ lock[0] ++ "; gpu peers [" ++ qkr-names(peers) ++ "]; other fkwu [" ++ qkr-pids(others) ++ "]; gpu utilization " ++ u0.str());
+   // ---- 5120 x 17408: the previous kernel, pipeline 58, and Q4_K's pipeline 57 on the same shape ----
+   let ra = 5120;
+   let ca = 17408;
+   let b6 = ra * (ca / 256) * 210;
+   let b4 = ra * (ca / 256) * 144;
+   let w6 = metal_buf_alloc(b6);
+   let w4 = metal_buf_alloc(b4);
+   let f6 = q38dq-fill(pfill, 14, w6, ra, ca, 7);
+   let f4 = q38dq-fill(pfill, 12, w4, ra, ca, 11);
+   let xa = metal_buf_alloc(4 * ca);
+   let xw = metal_buf_write(xa, 0, qkr-xs(ca, 0, ""));
+   let yp = metal_buf_alloc(4 * (ra + 4));
+   let yl = metal_buf_alloc(4 * (ra + 4));
+   let y4 = metal_buf_alloc(4 * (ra + 4));
+   let sa = metal_sync();
+   let ea = [["previous Q6_K (7b217aa91)", qkr-prev-rec(pprev, w6, xa, yp, ra, ca), b6], ["lane Q6_K pipeline 58", q38dq-rec(ps, 14, w6, xa, yl, ra, ca, 0), b6], ["Q4_K pipeline 57", q38dq-rec(ps, 12, w4, xa, y4, ra, ca, 0), b4]];
+   let warma = qkr-rounds(ea, 2, 0, 1, qkr-fresh(3));
+   let besta = qkr-rounds(ea, 20, 0, 2 * qkr-rounds-per-order(), qkr-fresh(3));
+   let repa = qkr-report("5120x17408", ea, besta, 20, 0);
+   let cmpa = qkr-compare("5120x17408", yp, yl, ra);
+   let freeda = metal_buf_free(w6) + metal_buf_free(w4) + metal_buf_free(xa) + metal_buf_free(yp) + metal_buf_free(yl) + metal_buf_free(y4);
+   // ---- the head shape 248320 x 5120: the previous kernel and pipeline 58 ----
+   let rh = 248320;
+   let ch = 5120;
+   let bh = rh * (ch / 256) * 210;
+   let wh = metal_buf_alloc(bh);
+   let fh = q38dq-fill(pfill, 14, wh, rh, ch, 23);
+   let xh = metal_buf_alloc(4 * ch);
+   let xhw = metal_buf_write(xh, 0, qkr-xs(ch, 0, ""));
+   let yhp = metal_buf_alloc(4 * (rh + 4));
+   let yhl = metal_buf_alloc(4 * (rh + 4));
+   let sh = metal_sync();
+   let eh = [["previous Q6_K (7b217aa91)", qkr-prev-rec(pprev, wh, xh, yhp, rh, ch), bh], ["lane Q6_K pipeline 58", q38dq-rec(ps, 14, wh, xh, yhl, rh, ch, 0), bh]];
+   let warmh = qkr-rounds(eh, 1, 0, 1, qkr-fresh(2));
+   let besth = qkr-rounds(eh, 4, 0, 2 * qkr-rounds-per-order(), qkr-fresh(2));
+   let reph = qkr-report("248320x5120", eh, besth, 4, 0);
+   let cmph = qkr-compare("248320x5120", yhp, yhl, rh);
+   let freedh = metal_buf_free(wh) + metal_buf_free(xh) + metal_buf_free(yhp) + metal_buf_free(yhl);
+   let rest = host_sleep_ms(1500);
+   let u1 = host_gpu_utilization();
+   let load1 = host_load_avg();
+   let leases1 = mg-lease-view(mg-lease-dir());
+   let lock1 = gpl-judge(gpu-lease-path());
+   let others1 = qkr-others();
+   let noisy = len(leases) > 0 || len(leases1) > 0 || (String) lock[0] == "live" || (String) lock1[0] == "live" || len(peers) > 0 || len(others) > 0 || len(others1) > 0 || (Comparable) u0 >= qkr-busy();
+   qkr-say((noisy ? "NOISY" : "quiet") ++ ": live leases " ++ len(leases).str() ++ " -> " ++ len(leases1).str() ++ ", gpu lock " ++ lock[0] ++ " -> " ++ lock1[0] ++ ", gpu peers " ++ len(peers).str() ++ ", other fkwu " ++ len(others).str() ++ " -> " ++ len(others1).str() ++ " [" ++ qkr-pids(others1) ++ "], gpu utilization before " ++ u0.str() ++ " (after the rest, this door's tail included: " ++ u1.str() ++ "), load " ++ qkr-load(load0) ++ " -> " ++ qkr-load(load1) ++ "; buffers freed " ++ (freeda + freedh).str() ++ " of 10, live " ++ metal_live()[2].str());
+  }
+ }
+ qkr-run();
+}

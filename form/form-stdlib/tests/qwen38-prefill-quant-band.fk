@@ -2,16 +2,17 @@
 ; Q4_K/Q6_K/Q8_0 committed byte fixtures; F32 deterministic weights.
 ; Nine distinct inputs cross the eight-token tile; output pitch exceeds rows.
 ; Q4_K and Q6_K decode run the fused kernels (qwen38-decode-quant.bml: a pair of rows a Q4_K group, four a
-; Q6_K group), across superblocks and a row count that leaves the last group short (3 and 257 rows): row 0
-; sits within the door's named bound of the Form fp64 dot, every row answers
-; row 0 byte for byte (identical rows, identical input), the serial reference sits within its own bound,
-; and the output padding keeps its sentinel.
+; Q6_K group) on row-distinct synthetic tensors (q38dq-fill: no two rows share a superblock, no row repeats
+; one), across superblocks and row counts that leave the last group short (3 rows of 512, 257 rows of 5120):
+; EVERY row of the fused kernel sits within the door's named bound of the Form fp64 dot of THAT row, every
+; row of the serial attestant within its own, the rows are told apart under the fused bound (r and r^1, the
+; last and row 0), and the four words past the last row keep their sentinels (kquant-rows-fixture.bml).
 ; F32 prefill floats must match byte-for-byte; Q8_0, Q4_K and Q6_K prefill run on the matrix unit
 ; (qmb-q80-mma / qmb-quant-mma: simdgroup_multiply_accumulate chooses its own association) and their floats
 ; must sit within the lane's named bound of the per-token lane's (each side within one bound of the exact
 ; sum, |w x| from the K-quant weights through q4m-flat-at / q6m-flat-at); padding must retain its sentinel.
 ; Expected 31. Runs small fixture buffers only; no model admission or living state.
-; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
+; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml form-stdlib/tests/kquant-rows-fixture.bml
 (do
  (defn qpqb-repeat (text n acc) (if (le n 0) acc (qpqb-repeat text (sub n 1) (str_concat acc text))))
  (defn qpqb-input (n i acc)
@@ -79,51 +80,6 @@
    (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free y))))
    (print (list "type" type "tokens" tokens "rows" rows "cols" cols "pitch" pitch "same-and-padding" same))
     (if (and (gt dispatched 0) same) bit 0)))
- ; Q4_K decode: the fused kernel's row 0 against the Form fp64 dot (q4m-* of q4k-msl.fk over the fixture row,
- ; S the unfused magnitude, the door's coefficient), every row byte-equal to row 0, and the serial reference
- ; within its own bound (coefficient cols, its fold depth)
- (defn qpqb-q4-b (idx) (mul 144 (div idx 256)))
- (defn qpqb-q4-j (i) (add (mul 2 (div i 64)) (div (mod i 64) 32)))
- (defn qpqb-q4-nib (ws idx)
-  (do (let i (mod idx 256)) (let c (div i 64)) (let within (mod i 64)) (let hf (div within 32)) (let l (mod within 32))
-      (let qb (q4m-qsb ws (qpqb-q4-b idx) (add (mul c 32) l)))
-      (if (eq hf 0) (q4k-mod qb 16) (div qb 16))))
- (defn qpqb-q4-sp (ws idx) (mul (mul (q4m-d ws (qpqb-q4-b idx)) (q4m-scale ws (qpqb-q4-b idx) (qpqb-q4-j (mod idx 256)))) (qpqb-q4-nib ws idx)))
- (defn qpqb-q4-mp (ws idx) (mul (q4m-dmin ws (qpqb-q4-b idx)) (q4m-min ws (qpqb-q4-b idx) (qpqb-q4-j (mod idx 256)))))
- ; the parts by type: Q6_K has no min term (q6m-flat-at, stride 210)
- (defn qpqb-qk-sp (type ws idx) (if (eq type 12) (qpqb-q4-sp ws idx) (q6m-flat-at ws 0 idx)))
- (defn qpqb-qk-mp (type ws idx) (if (eq type 12) (qpqb-q4-mp ws idx) 0.0))
- (defn qpqb-qk-dot (type ws cols j acc) (if (ge j cols) acc (qpqb-qk-dot type ws cols (add j 1) (add acc (mul (sub (qpqb-qk-sp type ws j) (qpqb-qk-mp type ws j)) (qpqb-x j))))))
- (defn qpqb-qk-mag (type ws cols j acc) (if (ge j cols) acc (qpqb-qk-mag type ws cols (add j 1) (add acc (add (qpqb-abs (mul (qpqb-qk-sp type ws j) (qpqb-x j))) (qpqb-abs (mul (qpqb-qk-mp type ws j) (qpqb-x j))))))))
- (defn qpqb-qk-near? (got exact S coeff) (le (qpqb-abs (sub got exact)) (add (mul (mul coeff 0.000000059604644775390625) S) 0.000000000001)))
- (defn qpqb-qk-agree (type ws cols rows expected actual)
-  (do (let exact (qpqb-qk-dot type ws cols 0 0.0)) (let S (qpqb-qk-mag type ws cols 0 0.0))
-      (let got (qpqb-f actual 0)) (let ref (qpqb-f expected 0))
-      (print (list "k-quant decode type" type "row 0: exact" exact "fused" got "serial" ref "fused dev/bound" (div (qpqb-abs (sub got exact)) (add (mul (mul (q38dq-bound-coeff cols) 0.000000059604644775390625) S) 0.000000000001))))
-      (and (qpqb-qk-near? got exact S (q38dq-bound-coeff cols))
-           (and (qpqb-qk-near? ref exact S cols)
-                (str_eq (substring actual 0 (mul 4 rows)) (qpqb-repeat (substring actual 0 4) rows ""))))))
- (defn qpqb-decode (ps type fixture stride rows cols refindex)
-  (do
-   (let row (qpqb-repeat (read_file_slice fixture 0 (mul stride 2)) (div cols 512) ""))
-   (let weights (qpqb-repeat row rows ""))
-   (let wh (metal_buf_alloc (str_len weights)))
-   (let x (metal_buf_alloc (mul cols 4)))
-   (let y (metal_buf_alloc (mul (add rows 1) 4)))
-   (let z (metal_buf_alloc (mul (add rows 1) 4)))
-   (let sentinel (md-le32 (md-f32-bits 42.25)))
-   (let writes (list (metal_buf_write wh 0 weights) (metal_buf_write x 0 (qpqb-input cols 0 ""))
-    (metal_buf_write y 0 (qpqb-repeat sentinel (add rows 1) ""))
-    (metal_buf_write z 0 (qpqb-repeat sentinel (add rows 1) ""))))
-   (metal_batch_concurrent)
-   (let reference (metal_enqueue (nth ps refindex) (md-bind16 (list wh x y) (list rows cols) 256 0 0 1) rows))
-   (let dispatched (q38-mv ps (list wh rows cols type) x z 1))
-   (let expected (metal_buf_read y 0 (mul (add rows 1) 4)))
-   (let actual (metal_buf_read z 0 (mul (add rows 1) 4)))
-   (let same (and (if (or (eq type 12) (eq type 14)) (qpqb-qk-agree type weights cols rows expected actual) (str_eq expected actual)) (str_eq (substring actual (mul rows 4) (str_len actual)) sentinel)))
-   (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free y) (metal_buf_free z))))
-   (print (list "decode-type" type "rows" rows "cols" cols "same-and-padding" same "freed" freed))
-   (and (and (gt reference 0) (gt dispatched 0)) (and same (eq freed 4)))))
  (let refs (str_concat (qml-lane-msl "qpqb_q4" "q4k" "144") (str_concat (qml-lane-msl "qpqb_q6" "q6k" "210")
    "kernel void qpqb_f32(device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float a = 0.0f; uint k = (cols > lane) ? ((cols-lane+31u)/32u) : 0u; while(k > 0u) { --k; uint j = lane+k*32u; float p = w[r*cols+j]*x[j]; a = p+a; } float s = metal::simd_sum(a); if (lane == 0u) y[r]=s; }")))
  (let msl (str_concat (q38-msl) refs))
@@ -132,11 +88,15 @@
  (let c6 (qpqb-shape ps msl 14 (read_file_slice "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 0 420) 2 256 "qpqb_q6" 2))
  (let c8 (qpqb-shape ps msl 8 (read_file_slice "form/form-stdlib/tests/fixtures/q8-0-three-blocks.bin" 0 102) 3 32 "form_q8_0_matvec_lane_f32" 4))
  (let cf (qpqb-shape ps msl 0 (qpqb-input 512 0 "") 2 256 "qpqb_f32" 8))
- (let d4a (qpqb-decode ps 12 "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 144 3 512 1))
- (let d4b (qpqb-decode ps 12 "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 144 257 5120 1))
- (let d6a (qpqb-decode ps 14 "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 210 3 512 3))
- (let d6b (qpqb-decode ps 14 "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 210 257 5120 3))
+ ; K-quant decode: the shared witness (kquant-rows-fixture.bml) on row-distinct synthetic tensors, x the band's
+ ; own input, every row against the fp64 dot of that row
+ (let pfill (metal_pipeline (q38dq-fill-msl) "q38dq_fill"))
+ (let xd (qpqb-input 5120 0 ""))
+ (let d4a (kqr-decode ps pfill 12 3 512 (substring xd 0 2048) 4))
+ (let d4b (kqr-decode ps pfill 12 257 5120 xd 5))
+ (let d6a (kqr-decode ps pfill 14 3 512 (substring xd 0 2048) 6))
+ (let d6b (kqr-decode ps pfill 14 257 5120 xd 7))
  (let guard (if (and (and (eq (q38pq-index 99) -1) (eq (q38dq-index 99) -1))
-   (and (eq (nth (metal_live) 2) 0) (and (and d4a d4b) (and d6a d6b)))) 16 0))
+   (and (eq (nth (metal_live) 2) 0) (and (gt pfill 0) (eq (add d4a (add d4b (add d6a d6b))) 4)))) 16 0))
  (let verdict (sum (list c4 c6 c8 cf guard)))
  (if (eq verdict 31) verdict (form_error (str_concat "qwen prefill quant band failed: " (int_to_str verdict)))))

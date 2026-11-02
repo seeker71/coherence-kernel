@@ -1,0 +1,85 @@
+// kquant-rows-fixture.bml — the K-quant decode witness the bands share (qwen38-prefill-quant-band.fk,
+// q4k-decode-wide-band.fk): a row-distinct synthetic tensor (q38dq-fill of form-stdlib/bml/qwen38-decode-quant.bml,
+// filled on the device: no model file, no lease), the fused kernel through the lane's own door (q38-mv) and its
+// one-thread attestant beside it, and EVERY row of both held against the Form fp64 dot of THAT row (q4m-* /
+// q6m-flat-at over the row's own bytes), so a kernel that reads another row, or another superblock of its row, reads
+// short.
+//   kqr-decode  1 when every row r of the fused kernel sits within q38dq-bound-coeff(cols) * 2^-24 * S_r of exact_r,
+//               every row of the attestant within cols * 2^-24 * S_r, the four words past y[rows - 1] of both stand,
+//               and the tensor tells its rows apart under the fused bound b_r: |exact_r - exact_(r+1)| > b_r + b_(r+1)
+//               for every even r with r + 1 < rows, and |exact_(rows-1) - exact_0| > b_(rows-1) + b_0, so a kernel
+//               within its bound of row r^1 (or of row 0) cannot pass as row r (or as the last row)
+// preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class KquantRowsFixture {
+  def kqr-u() = 0.000000059604644775390625;
+  def kqr-abs(v) = v < 0.0 ? 0.0 - v : v;
+  def kqr-max(a, b) = a > b ? a : b;
+  def kqr-repeat(text, n, acc) = n <= 0 ? acc : kqr-repeat(text, n - 1, acc ++ text);
+  def kqr-f(s, i) = ln-f32-decode(ln-u32-le(s, 4 * i));
+  // the two parts of the Q4_K weight at flat index idx of a row's bytes ws (q4m-flat-at's own decomposition): the
+  // scale part (d * sc) * nib and the min part dmin * mn; Q6_K has one part, q6m-flat-at itself
+  def kqr-q4-b(idx) = 144 * (idx / 256);
+  def kqr-q4-j(i) = 2 * (i / 64) + (i % 64) / 32;
+  def kqr-q4-nib(ws, idx) {
+   let i = idx % 256;
+   let qb = q4m-qsb(ws, kqr-q4-b(idx), (i / 64) * 32 + i % 32);
+   (Comparable) ((i % 64) / 32) == 0 ? q4k-mod(qb, 16) : qb / 16;
+  }
+  def kqr-sp(type, ws, idx) = (Comparable) type == 12 ? q4m-d(ws, kqr-q4-b(idx)) * q4m-scale(ws, kqr-q4-b(idx), kqr-q4-j(idx % 256)) * kqr-q4-nib(ws, idx) : q6m-flat-at(ws, 0, idx);
+  def kqr-mp(type, ws, idx) = (Comparable) type == 12 ? q4m-dmin(ws, kqr-q4-b(idx)) * q4m-min(ws, kqr-q4-b(idx), kqr-q4-j(idx % 256)) : 0.0;
+  // [exact, S] of one row: the fp64 dot of its own bytes ws (base 0) with x (the f32 bytes xs the kernels read) and
+  // S = sum (|sp x| + |mp x|), the unfused magnitude, folded a superblock at a time
+  def kqr-ref-sb(type, ws, xs, j, end, dot, mag) = j >= end ? [dot, mag] : {
+   let x = kqr-f(xs, j);
+   let sp = kqr-sp(type, ws, j);
+   let mp = kqr-mp(type, ws, j);
+   kqr-ref-sb(type, ws, xs, j + 1, end, dot + (sp - mp) * x, mag + (kqr-abs(sp * x) + kqr-abs(mp * x)));
+  };
+  def kqr-ref(type, ws, xs, s, nb, dot, mag) = s >= nb ? [dot, mag] : {
+   let part = kqr-ref-sb(type, ws, xs, s * 256, s * 256 + 256, 0.0, 0.0);
+   kqr-ref(type, ws, xs, s + 1, nb, dot + part[0], mag + part[1]);
+  };
+  // every row r of y (the fused kernel) and z (the attestant) against its own fp64 dot: [all within, fused max
+  // dev/bound, attestant max dev/bound, the exact dots, the fused bounds]
+  def kqr-rows(type, w, xs, y, z, rows, cols, r, acc) = r >= rows ? acc : {
+   let rb = (cols / 256) * q38dq-fill-stride(type);
+   let ref = kqr-ref(type, metal_buf_read(w, r * rb, rb), xs, 0, cols / 256, 0.0, 0.0);
+   let fb = q38dq-bound-coeff(cols) * kqr-u() * ref[1] + 0.000000000001;
+   let fd = kqr-abs(kqr-f(y, r) - ref[0]) / fb;
+   let sd = kqr-abs(kqr-f(z, r) - ref[0]) / (cols * kqr-u() * ref[1] + 0.000000000001);
+   let within = ((Comparable) acc[0] == 1) && (fd <= 1.0) && (sd <= 1.0) ? 1 : 0;
+   kqr-rows(type, w, xs, y, z, rows, cols, r + 1, [within, kqr-max(acc[1], fd), kqr-max(acc[2], sd), append(acc[3], [ref[0]]), append(acc[4], [fb])]);
+  };
+  // the tensor tells rows a and b apart: no value within its bound of exact_b lies within the bound of exact_a
+  def kqr-apart?(ex, bs, a, b) = kqr-abs(ex[a] - ex[b]) > bs[a] + bs[b];
+  def kqr-pairs(ex, bs, r, rows) = r + 1 >= rows ? 1 : (kqr-apart?(ex, bs, r, r + 1) ? kqr-pairs(ex, bs, r + 2, rows) : 0);
+  def kqr-apart(ex, bs, rows) = rows <= 1 ? 1 : (((Comparable) kqr-pairs(ex, bs, 0, rows) == 1) && kqr-apart?(ex, bs, rows - 1, 0) ? 1 : 0);
+  // one witness: a rows x cols tensor of `type` (12 or 14) filled with `salt`, x the f32 bytes xs of cols floats
+  def kqr-decode(ps, pfill, type, rows, cols, xs, salt) {
+   let w = metal_buf_alloc(rows * (cols / 256) * q38dq-fill-stride(type));
+   let filled = q38dq-fill(pfill, type, w, rows, cols, salt);
+   let s0 = metal_sync();
+   let x = metal_buf_alloc(4 * cols);
+   let y = metal_buf_alloc(4 * (rows + 4));
+   let z = metal_buf_alloc(4 * (rows + 4));
+   let sent = kqr-repeat(md-le32(md-f32-bits(42.25)), 4, "");
+   let written = metal_buf_write(x, 0, xs) + metal_buf_write(y, 4 * rows, sent) + metal_buf_write(z, 4 * rows, sent);
+   let pa = (Comparable) type == 12 ? ps[1] : ps[3];
+   metal_batch_concurrent();
+   let a = metal_enqueue(pa, md-bind16([w, x, z], [rows, cols], 256, 0, 0, 1), rows);
+   let f = q38-mv(ps, [w, rows, cols, type], x, y, 1);
+   let s1 = metal_sync();
+   let yb = metal_buf_read(y, 0, 4 * (rows + 4));
+   let zb = metal_buf_read(z, 0, 4 * (rows + 4));
+   let acc = kqr-rows(type, w, xs, yb, zb, rows, cols, 0, [1, 0.0, 0.0, [], []]);
+   let apart = kqr-apart(acc[3], acc[4], rows);
+   let sentok = ((String) substring(yb, 4 * rows, 4 * (rows + 4)) == sent) && ((String) substring(zb, 4 * rows, 4 * (rows + 4)) == sent) ? 1 : 0;
+   let freed = metal_buf_free(w) + metal_buf_free(x) + metal_buf_free(y) + metal_buf_free(z);
+   let ok = ((Comparable) filled > 0) && (a > 0) && (f > 0) && ((Comparable) acc[0] == 1) && ((Comparable) apart == 1) && ((Comparable) sentok == 1) && ((Comparable) freed == 4) ? 1 : 0;
+   print(["k-quant decode witness type", type, "rows", rows, "cols", cols, "fused max dev/bound", acc[1], "attestant max dev/bound", acc[2], "rows told apart", apart, "sentinels", sentok, "ok", ok]);
+   ok;
+  }
+ }
+ 0;
+}

@@ -14,10 +14,11 @@
 //           walks ib = 2*sgitg + ix, step 16; lane t (tid = t mod 16) owns SIXTEEN weights, l = l0..l0+3
 //           (l0 = 4*(tid mod 8)) of each of the four scale groups g of half ip = tid/8. The four ql bytes at
 //           l0 serve g = 0 by their low nibbles and g = 2 by their high ones, the four at l0 + 32 serve g = 1
-//           and g = 3, and the four qh bytes carry all four high-bit pairs (bits 2g), so every byte a lane
-//           loads is used whole. A row-iteration reads three 4-byte quant words (packed_ushort2: the
-//           210-byte stride is only 2-aligned), the 8-byte scale word of its half (byte is = l0/16 of each
-//           pair is the lane's sc of group g) and d: ONCE per row and superblock for sixteen weights.
+//           and g = 3, and the four qh bytes carry all four high-bit pairs (bits 2g), so every quant byte a
+//           lane loads is used whole. A row-iteration reads three 4-byte quant words (packed_ushort2: the
+//           210-byte stride is only 2-aligned), the 8-byte scale word of its half (of which it uses one byte
+//           of each pair: byte is = l0/16 is the lane's sc of group g) and d: ONCE per row and superblock
+//           for sixteen weights.
 //           q6k_wi's own nib + hi*16 - 32 is assembled four bytes a word, qd_g = sum (q - 32)*x folds the
 //           four l of group g (an fma chain) and part = d * (sc_0*qd_0 + sc_1*qd_1 + sc_2*qd_2 + sc_3*qd_3)
 //           (one product, three fmas, then d). A superblock's sixteen x serve all four rows; a row past the
@@ -36,11 +37,16 @@
 // lane decodes at the speed its bytes allow only when both take the cooperative shape.
 // The Q6_K kernel first took the Q4_K shape (eight weights a lane, one scale group, a pair of rows): every ql
 // byte was loaded by two lanes (one nibble each) and every qh byte by four (two bits each), about 13
-// instructions a byte of weights by a count of its MSL against about 7 at sixteen weights a lane. Read on
-// synthetic tensors filled on the device (no model), the two kernels interleaved, 2026-11-03: 5120 x 17408,
-// best of 12 rounds of 20 dispatches, 438 GB/s for the eight-weight kernel and 488 for this one with the
-// device quiet, 213 against 316 while a sibling's prefill held it; the head shape 248320 x 5120 (1.04 GB, no
-// cache holds it), best of 6 rounds of 4, 435 against 523. Q4_K (pipeline 57) read 275 on the first shape.
+// instructions a byte of weights by a count of its MSL against about 7 at sixteen weights a lane. The rate
+// door observe/q6k-decode-rate-run.bml times both on synthetic tensors (q38dq-fill; the previous text compiled
+// there beside the lane's), the order reversed every other round and each kernel's best kept in each order,
+// with the leases, the GPU lock, the other fkwu processes, the device's utilization and the load read beside.
+// Its three readings of 2026-11-03 01:52-02:05 WITA, all NOISY (two to eight other fkwu processes, the device
+// 28-97 % busy before the first dispatch; no lease, no lock; load 6.7-8.0), best of 6 rounds an order:
+// 5120 x 17408 at 20 dispatches a round, 440-441 GB/s for the eight-weight kernel and 495-538 for this one;
+// the head shape 248320 x 5120 (1.04 GB) at 4, 437-438 against 530-538. The previous kernel's best held while
+// this one's moved with the load; the order moved a best by at most 3 %. Q4_K (pipeline 57) read 275 on the
+// first shape. No reading under a named, controlled load stands, so no gain under contention is claimed.
 //
 // WHAT THEY ANSWER TO. The fused fold reassociates, so it is not byte-equal to the serial attestant; it is
 // held within a NAMED bound of the exact (fp64) dot, the way the Q8_0 wide kernel is: with
@@ -54,13 +60,24 @@
 //           + 31 + 31 = 71 + ceil(nb/16)
 // (every factor is exact in f32: q - 32 and sc are small integers, d an f16 value), so for both
 //     |y_kernel - y_exact| <= (73 + ceil(nb/8)) * 2^-24 * S,   nb = cols/256.
-// The band form-stdlib/tests/q4k-decode-wide-band.fk measures this on the committed superblock fixtures and
-// on real rows of the Q4_K_M file against the Form fp64 references (q4m-* / q6m-flat-at of q4k-msl.fk and
-// q6k-msl.fk), and the greedy reply to .hearth/speed-prompt.txt stays the one the serial fold answered
-// (.hearth/speed-reply-qwen38-q4.txt).
+// What the bands observe, model-free: form-stdlib/tests/qwen38-prefill-quant-band.fk (3 rows of 512, 257 of
+// 5120) and the bits 2 and 128 of form-stdlib/tests/q4k-decode-wide-band.fk (rows 1..9 of one to seventeen
+// superblocks) hold EVERY row of both kernels, and of their one-thread attestants, within this bound of the
+// Form fp64 dot of THAT row (q4m-* / q6m-flat-at of q4k-msl.fk and q6k-msl.fk) on row-distinct synthetic
+// tensors (q38dq-fill below, through form-stdlib/tests/kquant-rows-fixture.bml), in which no two superblocks
+// are equal and rows r and r^1, and the last row and row 0, sit apart under the bound, so a kernel within its
+// bound of the wrong one of such a pair cannot pass.
+// Real rows and the greedy ids: for Q4_K (pipeline 57) q4k-decode-wide-band.fk read 2047 on real rows of the
+// Q4_K_M file and the greedy reply to .hearth/speed-prompt.txt stayed the serial fold's on 2026-10-28
+// (receipts/native-training-plan.md, "Q4_K decode"). For this four-row Q6_K text neither is observed yet; both
+// wait for a live run while no other lease stands: q4k-decode-wide-band.fk in full (2047; its bits 256, 512
+// and 1024 read real Q6_K rows), and L2, printf '{"go":1,"mode":"plain","decode":32,"file":
+// "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q4_K_M.gguf"}' | ./fkwu observe/q38-decode-run.bml (it takes
+// the memory lease; at most 15 minutes), whose "[q38-decode] ids:" line must equal the same run's at
+// origin/main 7b217aa91.
 //
 // Requires cols a multiple of 256 (a K-quant row is whole superblocks by format); rows may be any count (a
-// group's rows past the end are guarded; y[rows] is never written).
+// group's rows past the end are guarded; the words past y[rows - 1] are never written).
 import form-stdlib/qk-matvec-lane.fk;
 import form-stdlib/metal-door.fk;
 section [form.bml] {
@@ -90,6 +107,16 @@ section [form.bml] {
   def q38dq-pipes(msl) = [metal_pipeline(msl,"form_qwen_q4k_decode_f32"),metal_pipeline(msl,"form_qwen_q6k_decode_f32")];
   // the bound's coefficient for a row of `cols`: the deepest association tree the fused fold can take
   def q38dq-bound-coeff(cols) = 73 + (cols / 256 + 7) / 8;
+  // the synthetic tensor the witnesses and the rate door read (never part of q38dq-msl): byte i of a K-quant tensor
+  // of superblock stride `stride` is the low byte of h(i), h the salted lowbias32 mix, but the first quant word of
+  // global superblock g = i / stride (bytes qoff .. qoff + 3) is h(g) whole, a bijection of g for each salt, so no
+  // two superblocks of the tensor share it (no two rows share a superblock, no row repeats one), and the f16 high
+  // bytes dhi0 / dhi1 are held to 0x14 .. 0x1B (sign 0, exponent 5 or 6: d, and dmin for Q4_K, in [2^-10, 2^-8))
+  def q38dq-fill-msl() = "kernel void q38dq_fill(device uchar* b [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& stride [[buffer(2)]], constant uint& qoff [[buffer(3)]], constant uint& dhi0 [[buffer(4)]], constant uint& dhi1 [[buffer(5)]], constant uint& salt [[buffer(6)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint g = i / stride; uint off = i - g * stride; bool tag = off >= qoff && off < qoff + 4u; uint h = (tag ? g : i) * 2654435761u + salt * 40503u + 12345u; h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16; uint v = tag ? ((h >> ((off - qoff) * 8u)) & 255u) : (h & 255u); if (off == dhi0 || off == dhi1) { v = 20u + ((h >> 8) & 7u); } b[i] = uchar(v); }";
+  def q38dq-fill-stride(type) = if ((Comparable) type == 12) then 144 else 210;
+  // its dispatch, one thread a byte: `rows` rows of `cols` (whole superblocks) of `type` into w; quant words from byte
+  // 16 (Q4_K qs) or 0 (Q6_K ql), the high bytes of d and dmin (Q4_K 1 and 3) or of d (Q6_K 209)
+  def q38dq-fill(pfill, type, w, rows, cols, salt) = metal_enqueue(pfill, md-bind([w], [rows * (cols / 256) * q38dq-fill-stride(type), q38dq-fill-stride(type), if ((Comparable) type == 12) then 16 else 0, if ((Comparable) type == 12) then 1 else 209, if ((Comparable) type == 12) then 3 else 209, salt]), rows * (cols / 256) * q38dq-fill-stride(type));
   // the dispatch record [pipeline, binding, grid] (q38-enq runs it): mode 1, groups of 256 threads, a pair of
   // rows a Q4_K group and four a Q6_K group (q38dq-groups)
   def q38dq-rec(ps,type,weight,x,y,rows,cols,barrier) = [ps[q38dq-index(type)],md-bind16([weight,x,y],[rows,cols],q38dq-tpg(),0,1,barrier),q38dq-groups(type,rows)];
