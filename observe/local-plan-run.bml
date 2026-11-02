@@ -22,7 +22,7 @@
 // carries it and opens no model. {"queue":"<path>"} reads and lands in another queue (default
 // learn/native-turn-queue.jsonl).
 // Beside either, optional: "attempts" (explicit caller allowance; absent continues locally), "voices" (else the registry's plan chain, each voice whose weights are on
-// disk), "context" (initial allocation; otherwise prompt plus initial reserve), "max_reply_tokens" (3072, generation-progress signal), "deadline_ms" (600000, one band run), "until_ms" (the
+// disk), "context" (initial allocation; otherwise prompt plus initial reserve), "max_reply_tokens" (3072, generation-progress signal), "reply_budget" (6144, the ids one reply may spend; the voice's walk ends there), "deadline_ms" (600000, one band run), "until_ms" (the
 // caller's window on the host's monotonic clock: no voice opens once the time left cannot hold the median option
 // the ledger measured, and the walk ends held), "dry":1 prints the first packet the voice would read and opens no
 // model. A request an earlier walk left refused resumes from the options its ledger rows keep (their findings and
@@ -108,12 +108,12 @@ section [form.bml] {
   def lpr-began(rid, name, n) = fhn-append(lpr-began-path(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", rid), fhn-n("option", n), fhn-s("voice", name)])) ++ "\n");
   // a voice whose file the registry holds is leased by its path (the weights are one promise for every process that
   // maps the file); a voice the registry does not hold is asked as the walk asks a turn
-  def lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, until, floor) {
+  def lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, budget, until, floor) {
    let open = !lpr-closed?(until, floor);
    // The voice admits its actual weights and KV geometry. A second guessed
    // scratch lease can refuse a model whose real allocation fits.
    let marked = open ? lpr-began(rid, name, n) : 0;
-   open ? lpr-spoken(dir, id, rid, packet, name, n, lens, context, limit) : ["held", lpr-window-line(until, floor), 0, 0, ""];
+   open ? lpr-spoken(dir, id, rid, packet, name, n, lens, context, limit, budget) : ["held", lpr-window-line(until, floor), 0, 0, ""];
   }
   // The reply is owned the moment it is heard: one mark in .hearth/local-plans/heard.jsonl (the request, the option, the
   // voice and its lens, the voice's status, its ids and the reply's path), written before any band runs. An option's
@@ -128,10 +128,13 @@ section [form.bml] {
   // queries-native-plan counted none of the planner's asks). The focus guide (option -1, the triage voice) asks the same way.
   def lpr-enquiry(rid, n) = mc-cat(["plan request ", rid, " option ", n.str(), ": the steps and the witness of one gap"]);
   def lpr-heard(rid, name, n, lens, v, reply) = fhn-append(lpr-heard-path(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", rid), fhn-n("option", n), fhn-s("voice", name), fhn-s("lens", lens), fhn-s("voice_status", v[0]), fhn-n("local_injected_ids", v[2]), fhn-n("local_generated_ids", v[3]), fhn-s("reply", reply)])) ++ "\n");
-  def lpr-spoken(dir, id, rid, packet, name, n, lens, context, limit) {
+  // The reply is asked inside its envelope (reply-envelope.bml, held by the voice's walk) and within its budget: the
+  // ledger's longest reply that reached a band read 5407 ids, and a reply that never closed its <cases> spent 11179.
+  def lpr-reply-budget() = 6144;
+  def lpr-spoken(dir, id, rid, packet, name, n, lens, context, limit, budget) {
    let stem = mc-cat([dir, "/", id, "-", n.str(), "-", now_unix_ms().str()]);
    let kept = write_file_text(stem ++ ".packet.txt", packet);
-   let request=json-node-object(append([fhn-s("model",name),fhn-n("max_reply_tokens",limit),fhn-s("enquiry",lpr-enquiry(rid,n))],nothing?(context) ? [] : [fhn-n("context",context)]));
+   let request=json-node-object(append([fhn-s("model",name),fhn-n("max_reply_tokens",limit),fhn-n("reply_budget",budget),fhn-s("envelope","local-plan"),fhn-s("enquiry",lpr-enquiry(rid,n))],nothing?(context) ? [] : [fhn-n("context",context)]));
    let v = fcnv-ask(packet, request);
    let text = v[0] == "answered" ? v[1] : len(trim(v[8])) > 0 ? trim(v[8]) : v[7];
    let heard = write_file_text(stem ++ ".reply.txt", text);
@@ -139,7 +142,7 @@ section [form.bml] {
    let said = print_str(mc-cat(["[local-plan:voice] ", name, " option ", n.str(), " ", v[0], " prompt_ids=", v[2].str(), " generated_ids=", v[3].str(), " reply=", stem, ".reply.txt"]));
    [v[0], text, v[2], v[3], stem ++ ".reply.txt"];
   }
-  def lpr-voice(dir, id, rid, context, limit, until, floor) = (packet, name, n, lens) => lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, until, floor);
+  def lpr-voice(dir, id, rid, context, limit, budget, until, floor) = (packet, name, n, lens) => lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, budget, until, floor);
   def lpr-read(path) = if ((String) path == "") then "" else fhn-read(path);
   // an earlier walk of this request left its refused options in the ledger; the walk resumes from them unless
   // {"fresh":1} asks for a clean start
@@ -163,7 +166,7 @@ section [form.bml] {
    let focused = parked ? 0 : lpr-focus-guide(req,opts);
    let spent = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then 0 else lpr-spent(lpr-tried(attempts), flp-req-id(req));
    let left = json-object-has?(opts,"attempts") ? lpr-left(attempts, spent) : nothing();
-    let base = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), fcgp-num(opts, "until_ms"), lpr-floor()), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
+    let base = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "reply_budget", lpr-reply-budget()), fcgp-num(opts, "until_ms"), lpr-floor()), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
     let ctx=flp-with-reference-care(base,(request,context,said,refusal)=>lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor()) ? nothing() : lrpr-repair(request,context,said,refusal,opts));
    let resumed = if ((spent == 0) && nil?(memory)) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), ": ", spent.str(), " option(s) spent, ", len(memory).str(), " refused row(s) retained; ", nothing?(left) ? "native choices continue" : left.str()+" caller option(s) left"]));
    let care=parked ? nothing() : lrpr-resume(req,ctx,memory);
