@@ -1,0 +1,77 @@
+; form-core-health-band.bml — the core's health reader, asked in process (form-core-health.bml: ohc-open, ohc-live, ohc-close).
+;
+; An owner opens with closed 0, ohc-live asks closed before every read, and ohc-close sets it to 1. The band plants organ flows
+; (JSONL files of complete observations) in the temp directory and asks the reader the two ways its callers do: the form-cli
+; `health` verb, one owner per command (ohc-command), and the resident REPL, one owner kept across turns (ohc-command-at). Nothing
+; is advertised and no model or remote call is made: status reads the shared roster as it stands, and a planted flow is named by
+; the request.
+;
+; Expected: 15
+; Verdict 15 when every claim lands:
+;   1   status: ohc-command("status") answers the health view (schema form-core-health-v1, coverage currently-advertised,
+;       model_calls 0, remote_calls 0)
+;   2   a named flow: ohc-command over a planted flow reads it caught up and whole, and names its organ with health 1
+;   4   a kept owner: asked again it reads no byte twice and still holds the organ; after one more line it reads only that
+;       line and holds both organs
+;   8   a closed owner: after ohc-close, asking it stops (core health reader is closed), and its closed reads 1
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/form-core-health.bml
+section [form.bml] {
+ class FormCoreHealthBand {
+  def chb-dir() = temp_dir() ++ "/form-core-health-band-" ++ host_pid().str();
+  def chb-names() = ["named", "kept", "closed"];
+  def chb-path(name) = chb-dir() ++ "/" ++ name ++ ".jsonl";
+  def chb-row(organ) = oh-reading-with-id("form-core-health-band:" ++ organ, organ, "fixture-flow", "fixture-aspect", json-node-string("whole"), json-node-string("whole"), json-node-int(1), [], ["continue"], json-node-object([]));
+  def chb-line(organ) = json-emit-precise(chb-row(organ)) ++ "\n";
+  def chb-lines(organs) = nil?(organs) ? "" : chb-line(organs[0]) ++ chb-lines(organs[1:]);
+  def chb-plant(name, organs) {
+   let wrote = write_file(chb-path(name), chb-lines(organs));
+   chb-path(name);
+  }
+  def chb-ask(path) = "{\"sources\":[\"" ++ path ++ "\"],\"budget_bytes\":65536}";
+  def chb-view(text) = parse-json("form-core-health-band", text);
+  def chb-int(row, key) = json-int-value(oh-get(row, key));
+  def chb-source(view) = json-array-elements(oh-get(view, "sources"))[0];
+  def chb-organs(view) = json-array-elements(oh-get(view, "organs")) |> map(o => oh-str(o, "organ"));
+  def chb-holds?(organs, organ) = any?((o: String) => o == organ, organs);
+  def chb-c-status(ctx) {
+   let v = chb-view(ohc-command("status"));
+   (String) oh-str(v, "schema") == "form-core-health-v1" && (String) oh-str(v, "coverage") == "currently-advertised" && chb-int(v, "model_calls") == 0 && chb-int(v, "remote_calls") == 0;
+  }
+  def chb-c-named(ctx) {
+   let path = chb-plant("named", ["chb-named"]);
+   let v = chb-view(ohc-command(chb-ask(path)));
+   let s = chb-source(v);
+   let organ = json-array-elements(oh-get(v, "organs"))[0];
+   (String) oh-str(v, "coverage") == "caller-specified-sources" && (String) oh-str(s, "state") == "caught-up" && chb-int(s, "read_bytes") == file_size(path)
+    && len(chb-organs(v)) == 1 && (String) oh-str(organ, "organ") == "chb-named" && chb-int(organ, "health") == 1;
+  }
+  def chb-c-kept(ctx) {
+   let path = chb-plant("kept", ["chb-first"]);
+   let owner = ohc-open();
+   let first = chb-view(ohc-command-at(owner, chb-ask(path)));
+   let again = chb-view(ohc-command-at(owner, chb-ask(path)));
+   let grown = write_file(path, chb-lines(["chb-first", "chb-second"]));
+   let third = chb-view(ohc-command-at(owner, chb-ask(path)));
+   let closed = ohc-close(owner);
+   chb-int(chb-source(first), "read_bytes") == len(chb-line("chb-first"))
+    && chb-int(chb-source(again), "read_bytes") == 0 && (String) oh-str(chb-source(again), "state") == "caught-up" && len(chb-organs(again)) == 1 && chb-holds?(chb-organs(again), "chb-first")
+    && chb-int(chb-source(third), "read_bytes") == len(chb-line("chb-second")) && len(chb-organs(third)) == 2 && chb-holds?(chb-organs(third), "chb-first") && chb-holds?(chb-organs(third), "chb-second");
+  }
+  def chb-c-closed(ctx) {
+   let path = chb-plant("closed", ["chb-closed"]);
+   let owner = ohc-open();
+   let read = chb-view(ohc-command-at(owner, chb-ask(path)));
+   let closed = ohc-close(owner);
+   let after = try ohc-command-at(owner, "status") catch "stopped";
+   (String) oh-str(chb-source(read), "state") == "caught-up" && (String) after == "stopped" && (Comparable) record_get(owner, "closed") == 1;
+  }
+  def chb-sweep() {
+   let gone = chb-names() |> map(name => host_path_remove(chb-path(name)));
+   host_dir_rmdir(chb-dir());
+  }
+ }
+ let made = host_dir_mkdir(chb-dir());
+ let verdict = live-claims("form-core-health-band", 0, [["status", 1, 1, chb-c-status], ["named", 2, 1, chb-c-named], ["kept", 4, 1, chb-c-kept], ["closed", 8, 1, chb-c-closed]]);
+ let swept = chb-sweep();
+ verdict;
+}
