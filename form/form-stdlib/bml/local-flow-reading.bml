@@ -29,8 +29,11 @@
 // (lane_reason host-memory-low) or was refused it (host-memory-held:*) tried nothing: its row is no option here
 // (lfr-options), so it is never one of the last three options that moved a band nowhere, never a lane failure, and
 // never counted among the options. A lane whose seat was already taken (lane_reason model-queued:) tried nothing
-// the same way.
+// the same way. An opened lane is read by what it returned, never by its lane label (lfr-lane-failed?): one whose
+// generation broke before its reply, or that left no lane status, ended with no lane result, and such an option is
+// never one of the last three that moved a band nowhere.
 import form-stdlib/bml/memory-governor.bml;
+import form-stdlib/bml/host-walk-floor.bml;
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/meaning-codes.bml;
 import form-stdlib/bml/session-rent.bml;
@@ -68,18 +71,31 @@ section [form.bml] {
   def lfr-show(v) = nothing?(v) ? "none" : v.str();
   def lfr-moved?(row) = !nothing?(lfr-num(row, "band_after")) && (!nothing?(lfr-num(row, "band_before")) && (lfr-num(row, "band_after") > lfr-num(row, "band_before")));
   def lfr-last(xs, n) = if (len(xs) <= n) then xs else lfr-last(xs[1:], n);
-  def lfr-stuck?(rows) = (len(rows) >= 3) && !any?(r => lfr-moved?(r), lfr-last(rows, 3));
-  // An option ended with no lane result when its lane names an ending that returned none: an exit other than 0
-  // ("lane-exit=<n>") or a lane that never launched. Every other lane names a result or the walk's own choice:
-  // lane-exit=0 (the lane returned its result), native (rung 0's own result, repaired, exhausted or interrupted: no
-  // model and no request, so no .out.err), lane-deadline (the walk stopped it at its window's deadline), not-run (no
-  // lane was asked). A band-only row (option 0, lane "band": the band already read full and no lane opened) is the
-  // lane's cheapest rung: only an opened lane (option > 0, lane other than "band") can end so
-  def lfr-exit-prefix() = "lane-exit=";
-  def lfr-unlaunched() = "lane-launch-unavailable";
-  def lfr-no-result?(lane) = ((String) lane == lfr-unlaunched()) || (fcgp-starts?(lane, lfr-exit-prefix()) && !((String) lane == "lane-exit=0"));
+  // a gap is stuck when the last three of its options that returned a lane result moved its band nowhere: an option
+  // whose lane returned none stood no candidate under the band, so it says nothing of the gap's size
+  def lfr-stuck?(rows) {
+   let tried = filter(r => !lfr-lane-failed?(r), rows);
+   (len(tried) >= 3) && !any?(r => lfr-moved?(r), lfr-last(tried, 3));
+  }
+  // ── an opened lane, read by what it returned ──
+  // A band-only row (option 0, lane "band": the band already read full and no lane opened) is the lane's cheapest rung:
+  // only an opened lane (option > 0, lane other than "band") can end with no lane result. Its lane label says how it ran,
+  // never what it returned (an in-process lane always reads lane-exit=0), so the row's own result is read: a lane that
+  // returned none left no lane status (a lane killed before its result writes none), or its generation broke before its
+  // reply (hw-broke-of?, the floor's own reading: generation-incomplete in its lane_reason, or a voice that did not
+  // answer). The walk's own endings fail nothing: not-run (no lane was asked), lane-deadline (the walk stopped it at its
+  // window's deadline) and an option cut at its window's end (hw-cut-of?). Every other opened lane returned its result:
+  // complete, attention with its reason, or rung 0's own (lane native).
+  def lfr-voice(row) = if fcgp-present?(row, "voice_status") then lfr-str(row, "voice_status") else nothing();
+  def lfr-walk-ended?(row) = ((String) lfr-str(row, "lane") == "not-run") || ((String) lfr-str(row, "lane") == "lane-deadline") || hw-cut-of?(lfr-voice(row), lfr-str(row, "lane_reason"));
+  def lfr-returned-none?(row) = ((String) lfr-str(row, "lane_status") == "") || hw-broke-of?(lfr-voice(row), lfr-str(row, "lane_reason"));
   def lfr-lane-opened?(row) = ((Comparable) lfr-num0(row, "option") > 0) && !((String) lfr-str(row, "lane") == "band");
-  def lfr-lane-failed?(row) = lfr-lane-opened?(row) && lfr-no-result?(lfr-str(row, "lane"));
+  def lfr-lane-failed?(row) = lfr-lane-opened?(row) && (!lfr-walk-ended?(row)) && lfr-returned-none?(row);
+  // how an option that returned no lane result ended, as the lane next names it: its lane_reason, else its lane with no
+  // status, else its voice
+  def lfr-ending(row) = if ((String) lfr-str(row, "lane_reason") != "") then lfr-str(row, "lane_reason") else if ((String) lfr-str(row, "lane_status") == "") then mc-cat([lfr-str(row, "lane"), " with no lane status"]) else mc-cat(["voice ", lfr-str(row, "voice_status")]);
+  def lfr-endings(rows) = foldl((acc, r) => if fcgp-member?(acc, lfr-ending(r)) then acc else append(acc, [lfr-ending(r)]), [], rows);
+  def lfr-join(xs) = foldl((acc, x) => if ((String) acc == "") then x else mc-cat([acc, ", ", x]), "", xs);
   def lfr-where(row) = if ((String) lfr-str(row, "checkout") == "") then "this checkout" else lfr-str(row, "checkout");
   // ── the lane's own output for a row, in the checkout where its turn ran ──
   // A row both checkouts hold is tagged with the first one named (this checkout), though its turn ran in the walk
@@ -318,11 +334,12 @@ section [form.bml] {
    let contract = filter(g => !((String) g[1] == ""), open);
    let earned = filter(g => (Comparable) lfr-num0(g[2], "earned") == 1, open);
    let stuck = filter(g => lfr-stuck?(lfr-gap-rows(rows, lfr-str(g[0], "id"))), open);
-   let failed = len(filter(r => lfr-lane-failed?(r), lfr-last(rows, 6)));
+   let ended = filter(r => lfr-lane-failed?(r), lfr-last(rows, 6));
+   let failed = len(ended);
    if (!nil?(contract)) then ["contract", mc-cat(["contract ", lfr-str(contract[0][0], "id"), ": ", contract[0][1], "; heal the contract, not the lane"])]
    else if (!nil?(earned)) then ["guide", mc-cat(["guide ", lfr-str(earned[0][0], "id"), ": its local guides failed as distinct experiments (swervecount ", fcgp-show(lfr-num(earned[0][2], "swervecount")), "); one light remote guide may answer one question from fcgp-packet, admitted only as feedback for the next local rung"])]
-   else if (!nil?(stuck)) then ["split", mc-cat(["split ", lfr-str(stuck[0][0], "id"), " into smaller band-first gaps; its last three options moved its band nowhere"])]
-   else if (failed >= 2) then ["lane", mc-cat([failed.str(), " of the last six options ended with no lane result; read their .out.err under .hearth/native-turns and heal the lane"])]
+   else if (!nil?(stuck)) then ["split", mc-cat(["split ", lfr-str(stuck[0][0], "id"), " into smaller band-first gaps; its last three options that returned a lane result moved its band nowhere"])]
+   else if (failed >= 2) then ["lane", mc-cat([failed.str(), " of the last six options ended with no lane result (", lfr-join(lfr-endings(ended)), "); read the turn's own form-code-incomplete lines in .hearth/walk-io/turn.out where the walk ran and heal the lane"])]
    else if (!nil?(landing)) then ["landing", mc-cat(["land ", lfr-str(landing[0][0], "id"), ": its band reads green in ", landing[0][3], " and this checkout's rows do not carry it yet; land that candidate"])]
    else if nil?(open) then ["queue", "no open gap: write the next band-first gap from the work the last rented session did"]
    else ["turn", mc-cat([len(open).str(), " open gap(s) the lane can take; keep it turning"])];
