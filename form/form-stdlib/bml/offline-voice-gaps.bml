@@ -17,6 +17,9 @@
 //   not_in                 {source, on}: the row's `on` value must appear in no row of that source
 //   landed                 {not_source, gated}: a native source-changing landing on the ref must follow the row, or the gap reads open; gated 1: a gate must run the band
 //                          of each code file that landing touched (exit-proof.bml ep-unwitnessed): an edit no gate witnesses is not yet an improvement
+//   spread                 (last) a field: the last row's margin (`against` less `field`) must exceed how far that field scatters over every
+//                          row holding `where`, so a reading closes only when it separates from its siblings' noise; one row alone reads open
+//   moved                  a field: the last row's value must first stand inside within_ms, read over the whole source, or the gap reads open
 //   show                   fields of the row printed beside its verdict
 //   within_ms              (last) the row must be younger than this, or the gap reads open; (share, sets, axis) only rows younger than this are read: a door that stopped
 //                          running is not a door that runs, and a miss ages out once the lane answers again
@@ -63,6 +66,7 @@
 // the counts, each gap's verdict, observation and source) and answers the summary line as the door's value (the kernel
 // echoes it, so it prints once and a parent that reads the cell's record reads the same line).
 import form-stdlib/bml/exit-proof.bml;
+import form-stdlib/bml/host-walk-writers.bml;
 section [form.bml] {
  class OfflineVoiceGaps {
   def ovg-door() = "offline-voice-gaps";
@@ -115,7 +119,30 @@ section [form.bml] {
   def ovg-zone(opts) = fcgp-num(opts, "zone_ms") ?? hw-zone-ms();
   def ovg-read-last(gap, rows, opts) {
    let mine = ovg-where(gap, rows);
-   nil?(mine) ? ovg-none(gap, rows) : ovg-fresh(gap, mine[-1], ovg-place(gap, mine, rows), opts);
+   nil?(mine) ? ovg-none(gap, rows) : ovg-with-spread(gap, mine, ovg-fresh(gap, mine[-1], ovg-place(gap, mine, rows), opts));
+  }
+  // spread: the last row's margin (`against` less `field`) must be wider than the spread of `spread` over its siblings, the
+  // earlier rows holding `where`, so a child closes only when it stands apart from how far they scatter; the last row stands
+  // outside the noise it is read against, so a child far better than its siblings never widens their spread itself. Fewer
+  // than two siblings read no noise
+  def ovg-with-spread(gap, mine, r) = (String) fcgp-str(gap, "spread") == "" ? r : ovg-spread-joined(r, ovg-spread-read(gap, mine[-1], take(len(mine) - 1, mine)));
+  def ovg-spread-joined(r, s) = [ovg-worst([r, s]), r[1] ++ "; " ++ s[1]];
+  def ovg-spread-read(gap, row, siblings) {
+   let key = fcgp-str(gap, "spread");
+   let vs = filter(v => !nothing?(v), map(x => fcgp-num(x, key), siblings));
+   let margin = (fcgp-num(row, fcgp-str(gap, "against")) ?? 0) - (fcgp-num(row, fcgp-str(gap, "field")) ?? 0);
+   let wide = len(vs) < 2 ? 0 : foldl((m, v) => v > m ? v : m, vs[0], vs) - foldl((m, v) => v < m ? v : m, vs[0], vs);
+   len(vs) < 2 ? ["open", "fewer than two siblings read no noise: " ++ len(vs).str() ++ " earlier row(s) hold " ++ key] : ovg-judged(ovg-cmp(">", margin, wide), "margin " ++ margin.str() ++ " > spread " ++ wide.str() ++ " of " ++ key ++ " over " ++ len(vs).str() ++ " sibling row(s)", ">");
+  }
+  // moved: the last row's value of `moved` must first stand inside within_ms, read over the whole source: a count that stopped moving is a door re-reading what it read
+  def ovg-moved-rule(gap, row, opts) = (String) fcgp-str(gap, "moved") == "" ? [] : [ovg-moved-read(gap, fcgp-str(gap, "moved"), row, opts)];
+  def ovg-moved-read(gap, key, row, opts) {
+   let v = fcgp-node(row, key);
+   let first = foldl((found, x) => !nothing?(found) ? found : fcgp-present?(x, key) && node_eq(fcgp-node(x, key), v) ? x : found, nothing(), ovg-where(gap, fcgp-rows(ovg-path(gap, opts))));
+   !fcgp-present?(row, key) ? ["unread", "field " ++ key ++ " absent"]
+   : nothing?(first) ? ["unread", key ++ " " ++ json-emit(v) ++ " stands in no row of " ++ fcgp-str(gap, "source")]
+   : ovg-stale?(gap, first, opts) ? ["open", key ++ " " ++ json-emit(v) ++ " has stood since " ++ fcgp-num(first, "at_unix_ms").str() ++ ", before the window: the rows re-read what did not move"]
+   : ["closed", key ++ " " ++ json-emit(v) ++ " first stood at " ++ fcgp-num(first, "at_unix_ms").str()];
   }
   def ovg-stale?(gap, row, opts) = !nothing?(fcgp-num(gap, "within_ms")) && ((ovg-now(opts) - (fcgp-num(row, "at_unix_ms") ?? 0)) > fcgp-num(gap, "within_ms"));
   def ovg-fresh(gap, row, place, opts) = ovg-stale?(gap, row, opts) ? ["open", "the row is older than " ++ (fcgp-num(gap, "within_ms") / 3600000).str() ++ " hours" ++ place ++ ovg-show(gap, row)] : ovg-off-slot?(gap, row, opts) ? ["open", "the row stands outside every slot of the schedule, so the schedule did not write it" ++ place ++ ovg-show(gap, row)] : ovg-judge-whole(gap, row, place, opts);
@@ -129,7 +156,7 @@ section [form.bml] {
    let more = map(c => ovg-judge(c, row, ""), ovg-also(gap));
    let free = ovg-not-in(gap, row, opts);
    let landed = ovg-landed-rule(gap, row, opts);
-   let all = append(append(cons(first, more), free), landed);
+   let all = append(append(append(cons(first, more), free), landed), ovg-moved-rule(gap, row, opts));
    [ovg-worst(all), str-join-with(map(r => r[1], all), "; ") ++ ovg-show(gap, row)];
   }
   // landed: a green row is not a landed edit: a native source-changing landing on the ref must follow it
@@ -176,7 +203,24 @@ section [form.bml] {
   def ovg-pm(part, whole) = (part * 1000) / whole;
   def ovg-within-text(gap) = nothing?(fcgp-num(gap, "within_ms")) ? "" : " inside the last " ++ (fcgp-num(gap, "within_ms") / 3600000).str() ++ " hours";
   def ovg-recent(gap, rows, opts) = nothing?(fcgp-num(gap, "within_ms")) ? rows : filter(r => !ovg-stale?(gap, r, opts), rows);
-  def ovg-read-share(gap, rows, opts) {
+  def ovg-read-share(gap, rows, opts) = ovg-noted(ovg-share-reading(gap, rows, opts), ovg-unattributed(gap, rows, opts));
+  def ovg-noted(r, note) = [r[0], r[1] ++ note];
+  // a gap whose `where` names session: a row with no session column cannot say who asked; it is named, never counted
+  def ovg-unattributed(gap, rows, opts) {
+   let w = fcgp-obj(gap, "where");
+   let bare = json-object-has?(w, "session") ? ovg-recent(gap, filter(r => !json-object-has?(r, "session") && ovg-since?(gap, r) && all?(k => (String) k == "session" || ovg-holds?(r, w, k), ovg-keys(w)), rows), opts) : [];
+   nil?(bare) ? "" : "; " ++ len(bare).str() ++ " row(s) holding the rest of `where` carry no session column: unattributed, so uncounted";
+  }
+  // a gap whose `where` reads the schedule's and the person's rows (session "", or coordinated_by host-schedule): a row whose
+  // line ended at launchd under no job the body names reads detached there (coordination.bml); it is named, never counted
+  def ovg-schedule-word?(w, k) = json-object-has?(w, k) && ((String) json-emit(json-object-get(w, k)) == ((String) k == "session" ? "\"\"" : "\"host-schedule\""));
+  def ovg-detached(gap, rows, opts) {
+   let w = fcgp-obj(gap, "where");
+   let keys = filter(k => ovg-schedule-word?(w, k), ["session", "coordinated_by"]);
+   let held = nil?(keys) ? [] : ovg-recent(gap, filter(r => any?(k => (String) fcgp-str(r, k) == "detached", keys) && ovg-since?(gap, r) && all?(k => any?(x => (String) x == k, keys) || ovg-holds?(r, w, k), ovg-keys(w)), rows), opts);
+   nil?(held) ? "" : "; " ++ len(held).str() ++ " row(s) holding the rest of `where` read detached: a line that ended at launchd under no job the body names, so uncounted";
+  }
+  def ovg-share-reading(gap, rows, opts) {
    let mine = ovg-recent(gap, ovg-where(gap, rows), opts);
    let m = fcgp-obj(gap, "match");
    let op = fcgp-str(gap, "compare");
@@ -456,10 +500,15 @@ section [form.bml] {
   def ovg-feature-reading(gap, opts) {
    let path = ovg-path(gap, opts);
    (String) path == "" ? ["open", "no walk checkout"]
-   : (Comparable) host_path_exists(path) != 1 ? ["open", "absent: " ++ path]
+   : (Comparable) host_path_exists(path) != 1 ? ["open", "absent: " ++ path ++ ovg-writer-note(fcgp-str(gap, "source"))]
    : (String) fcgp-str(gap, "count_text") != "" ? ovg-count-text(gap, fhn-read(path))
    : (Comparable) (fcgp-num(gap, "by_schedule") ?? 0) == 1 ? ovg-read-landed(gap, opts)
    : ovg-read-last(gap, fcgp-rows(path), opts);
+  }
+  // an absent ledger names its writer (host-walk-writers.bml): a door that stands and has not written here, or no door at all
+  def ovg-writer-note(source) {
+   let units = map(w => w[1], filter(w => (String) w[0] == source, hw-carried-writers()));
+   nil?(units) ? "; no door writes it" : "; its writer " ++ str-join-with(units, ", ") ++ " has landed no row of it in this checkout";
   }
   // by_schedule: the rows native landings on the ref added to this source inside within_ms, and the reading is the last of them
   def ovg-carried(gap, opts) {
@@ -514,7 +563,8 @@ section [form.bml] {
   // ── one gap: [verdict, observation] ──
   def ovg-self-reading?(shape) = any?(s => (String) s == shape, ["queue", "landings", "gaps", "sets", "axis", "feature", "scope"]);
   def ovg-read-self(gap, shape, opts) = (String) shape == "queue" ? ovg-read-queue(gap, opts) : (String) shape == "landings" ? ovg-read-landings(gap, opts) : (String) shape == "gaps" ? ovg-read-gaps(gap, opts) : (String) shape == "sets" ? ovg-read-sets(gap, opts) : (String) shape == "axis" ? ovg-read-axis(gap, opts) : (String) shape == "scope" ? ovg-read-scope(gap, opts) : ovg-read-feature(gap, opts);
-  def ovg-read-rows(shape, gap, rows, opts) = (String) shape == "last" ? ovg-read-last(gap, rows, opts) : (String) shape == "first" ? ovg-read-first(gap, rows, opts) : (String) shape == "pair" ? ovg-read-pair(gap, rows, opts) : (String) shape == "rent" ? ovg-read-rent(gap, rows, opts) : ovg-read-share(gap, rows, opts);
+  def ovg-read-rows(shape, gap, rows, opts) = ovg-noted(ovg-read-rows-of(shape, gap, rows, opts), ovg-detached(gap, rows, opts));
+  def ovg-read-rows-of(shape, gap, rows, opts) = (String) shape == "last" ? ovg-read-last(gap, rows, opts) : (String) shape == "first" ? ovg-read-first(gap, rows, opts) : (String) shape == "pair" ? ovg-read-pair(gap, rows, opts) : (String) shape == "rent" ? ovg-read-rent(gap, rows, opts) : ovg-read-share(gap, rows, opts);
   // first: the first row that holds `where`: a held-out reading counts once, and a later reading of the same set under the same prompt reads nothing
   def ovg-read-first(gap, rows, opts) {
    let mine = ovg-where(gap, rows);
