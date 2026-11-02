@@ -14,26 +14,37 @@
 ; the attestant's first token not all zero; both dispatches come back and the four buffers free. Two fixtures:
 ;   the committed superblocks in rows of eight (superblock s of row r is the fixture's (r >> s) & 1, so rows
 ;   0..255 differ): Q4_K and Q6_K, 3 and 257 rows (one and nine row tiles), 9 and 33 tokens (one and two token tiles);
-;   edge pools that meet every exponent a finite half holds, 0 (the subnormals) through 30 (the largest finite),
-;   0x0001 0x03ff 0x0400 0x7bff and their negatives among them, each where its term stands alone. Q4_K (103): d at
-;   each exponent with dmin a signed zero, dmin at each with d a signed zero, both in one binade, and named edges
-;   (zeros of both signs, 0x7bff / 0xfbff over twelve 0xff scale bytes and nibbles 15, a huge d over nibbles 0 so a
-;   subnormal dmin answers alone, scale bytes whose high bits alone carry sub-blocks 4..7), sc and mn across 0..63 at
-;   sub-blocks 0..3 and at 4..7 (through their high bits). Q6_K (70): d at each exponent of both signs, scale bytes
-;   across all 256 (-128 and 127 among them), quants across -32..31 and whole superblocks of -32 and of 31. Rows of
-;   ONE superblock (cols 256: no larger neighbour's rounding swallows a small one's error) at 9 and 33 tokens, and
-;   rows of two pool neighbours (cols 512) at 33. The pools' coverage is read back from their bytes (Q4_K through the
-;   body's q4m-scale / q4m-min) and is part of the bit.
+;   edge pools that meet every exponent a finite half holds, 0 (the subnormals) through 30 (the largest finite), in
+;   both signs, 0x0001 0x03ff 0x0400 0x7bff and their negatives among them, each where its term stands alone. Q4_K
+;   (165): d at each exponent in each sign with dmin a signed zero, dmin at each in each sign with d a signed zero, both
+;   in one binade, and named edges (zeros of both signs, 0x7bff / 0xfbff over twelve 0xff scale bytes and nibbles 15, a
+;   huge d over nibbles 0 so a subnormal dmin answers alone, scale bytes whose high bits alone carry sub-blocks 4..7),
+;   sc and mn across 0..63 at sub-blocks 0..3 and at 4..7 (through their high bits). Q6_K (70): d at each exponent of
+;   both signs, scale bytes across all 256 (-128 and 127 among them), quants across -32..31 and whole superblocks of -32
+;   and of 31. Rows of ONE superblock (cols 256: no larger neighbour's rounding swallows a small one's error) at 9 and 33
+;   tokens, and rows of two pool neighbours (cols 512) at 33. The pools' coverage is read back from their bytes (Q4_K
+;   through the body's q4m-scale / q4m-min) and is part of the bit. A half's sign x exponent cell (62: + 0..30, then
+;   - 0..30) counts where the half stands alone in a superblock whose row of one answers the attestant a word that is not
+;   a zero: a fault in that cell's sign negates a live word. Every cell of Q4_K's d, of its dmin and of Q6_K's d.
 ; Bit 64: the f16 identity the tile's equality rests on, on the device without a model, in the lane's own unit:
 ;   float(as_type<half>(h)) and q4k_f16(h) / q6k_f16(h) (the attestant's pow2 loop) agree bit for bit on all 63488
 ;   finite patterns, +0 (0x0000 -> 0x00000000) and -0 (0x8000 -> 0x80000000) among them; on the 2048 non-finite
 ;   patterns the pair parts, and the bit claims what each answers: as_type<half> +-inf at mantissa 0 and NaN at the
 ;   other 2046, the pow2 loop the finite +-2^16 (1 + m/1024), bits sign | 0x47800000 | m << 13. How the NaNs read
-;   (payload kept, quieted, or the canonical 0x7fc00000) is printed, not claimed.
+;   (payload kept, quieted, or the canonical 0x7fc00000) is printed, not claimed. The probe's three buffers start as
+;   0x5a5a5a5a, a finite word none of these checks accepts, so a pattern it leaves unwritten reads short.
 ; Bit 128: q38-mv-batch-y refuses a Q4_K or Q6_K view whose cols is not a multiple of 256 aloud (q38pq-whole-refusal)
 ;   before anything is enqueued: the attempt answers nothing, the dispatch count and the output's sentinel hold;
 ;   the lane's widths read whole and a Q8_0 view is not this refusal's.
-; Expected 255. Runs small fixture buffers only; no model admission or living state.
+; Bit 256: rows of the lane's real widths, 20, 24 and 68 superblocks (cols 5120, 6144 and 17408: the ffn_down rows hold
+;   68), 33 rows and 33 tokens (two tiles of each), Q4_K and Q6_K. The edge pools laid end to end (superblock s of row r
+;   is pool[(r * width + s) mod n], width the row's superblocks) answer the attestant byte for byte. An exact world (d
+;   and dmin 0x3c00, Q6_K's scales in -29..29, activations +-1: every weight an integer of magnitude at most 945 (928),
+;   every partial sum of a row, in any association, at most 945 * 17408 = 16450560 < 2^24, so exact in f32) answers the
+;   attestant AND the scalar reference (pipelines 1 / 3: one thread a row, the serial fold, a dispatch a token) byte for
+;   byte: the tile's shared frame seen at full width against arithmetic it does not share. Its exactness is read back
+;   from its bytes.
+; Verdict 511. Runs small fixture buffers only; no model admission or living state.
 ; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
 (do
  (defn qpqb-repeat (text n acc) (if (le n 0) acc (qpqb-repeat text (sub n 1) (str_concat acc text))))
@@ -158,13 +169,14 @@
   (if (ge r rows) wh
    (do (let w (metal_buf_write wh (mul r (mul 8 stride)) (qpqb-tile-row sb stride r 0 "")))
        (qpqb-tile-put wh sb stride rows (add r 1)))))
- ; a pool's row r: its superblocks s are pool[(r + s * step) mod n] (step 0 keeps a row to one superblock)
- (defn qpqb-pool-row (pool n nsb step r s acc)
-  (if (ge s nsb) acc (qpqb-pool-row pool n nsb step r (add s 1) (str_concat acc (nth pool (mod (add r (mul s step)) n))))))
- (defn qpqb-pool-put (wh pool n stride nsb step rows r)
+ ; a pool's row r: its superblocks s are pool[(r * rstep + s * step) mod n] (rstep 1 and step 0 keep a row to one
+ ; superblock; rstep the row's own superblocks and step 1 lay the pool end to end, row after row)
+ (defn qpqb-pool-row (pool n nsb rstep step r s acc)
+  (if (ge s nsb) acc (qpqb-pool-row pool n nsb rstep step r (add s 1) (str_concat acc (nth pool (mod (add (mul r rstep) (mul s step)) n))))))
+ (defn qpqb-pool-put (wh pool n stride nsb rstep step rows r)
   (if (ge r rows) wh
-   (do (let w (metal_buf_write wh (mul r (mul nsb stride)) (qpqb-pool-row pool n nsb step r 0 "")))
-       (qpqb-pool-put wh pool n stride nsb step rows (add r 1)))))
+   (do (let w (metal_buf_write wh (mul r (mul nsb stride)) (qpqb-pool-row pool n nsb rstep step r 0 "")))
+       (qpqb-pool-put wh pool n stride nsb rstep step rows (add r 1)))))
  ; every (token, row) slot of the output was written: none still holds the sentinel
  (defn qpqb-written? (out pitch rows ntok t r sent)
   (if (ge t ntok) 1
@@ -177,34 +189,55 @@
    (if (le (sub hi lo) 1) lo
     (do (let mid (div (add lo hi) 2)) (let left (qpqb-first-diff a b lo mid))
         (if (ge left 0) left (qpqb-first-diff a b mid hi))))))
- ; the attestant and the lane's dispatch over the weights in wh (rows x cols), the outputs word for word
- (defn qpqb-tile-run (ps old type wh rows cols ntok label)
+ ; token t of the lane's batch b against the scalar reference sp (pipeline 1 / 3: one thread a row, its serial fold) over
+ ; the same weights and token t's activations, word for word; the first token whose rows differ, -1 when none does
+ (defn qpqb-scalar (sp wh xs b rows cols pitch ntok t)
+  (if (ge t ntok) -1
+   (do
+    (let x (metal_buf_alloc (mul cols 4))) (let y (metal_buf_alloc (mul rows 4)))
+    (let w (metal_buf_write x 0 (substring xs (mul t (mul cols 4)) (mul (add t 1) (mul cols 4)))))
+    (let e (metal_enqueue sp (md-bind16 (list wh x y) (list rows cols) 256 0 0 0) rows))
+    (let s (metal_sync))
+    (let got (metal_buf_read y 0 (mul rows 4)))
+    (let freed (add (metal_buf_free x) (metal_buf_free y)))
+    (let row (substring b (mul 4 (mul t pitch)) (mul 4 (add (mul t pitch) rows))))
+    (if (and (gt e 0) (str_eq got row))
+     (qpqb-scalar sp wh xs b rows cols pitch ntok (add t 1))
+     (do (let at (qpqb-first-diff got row 0 rows))
+         (print (list "scalar reference differs: token" t "dispatched" e "row" at "scalar" (if (ge at 0) (ln-u32-le got (mul 4 at)) -1) "tile" (if (ge at 0) (ln-u32-le row (mul 4 at)) -1)))
+         t)))))
+ ; the attestant and the lane's dispatch over the weights in wh (rows x cols), the outputs word for word, the activations
+ ; the period's 257 floats laid end to end; with a scalar pipeline sp (0: none) every token against it too. Answers (ok,
+ ; the attestant's words).
+ (defn qpqb-tile-run (ps old type wh rows cols ntok label period sp)
   (do
    (let pitch (add rows 3)) (let nout (mul ntok pitch))
    (let sent (md-le32 (md-f32-bits 42.25)))
    (let fill (qpqb-rep2 sent nout))
+   (let xs (substring (qpqb-rep2 period (add (div (mul ntok cols) 257) 1)) 0 (mul 4 (mul ntok cols))))
    (let x (metal_buf_alloc (mul 4 (mul ntok cols))))
    (let yo (metal_buf_alloc (mul 4 nout)))
    (let yn (metal_buf_alloc (mul 4 nout)))
-   (let writes (list (metal_buf_write x 0 (substring (qpqb-rep2 (qpqb-input 257 0 "") (add (div (mul ntok cols) 257) 1)) 0 (mul 4 (mul ntok cols))))
-    (metal_buf_write yo 0 fill) (metal_buf_write yn 0 fill)))
+   (let writes (list (metal_buf_write x 0 xs) (metal_buf_write yo 0 fill) (metal_buf_write yn 0 fill)))
    (metal_batch_concurrent)
    (let eo (metal_enqueue old (md-bind16 (list wh x yo) (list rows cols ntok pitch) 256 0 1 0) (qmb-mma-groups rows ntok)))
    (let en (q38-mv-batch-y ps (list wh rows cols type) x yn ntok pitch 0))
    (let synced (metal_sync))
    (let a (metal_buf_read yo 0 (mul 4 nout)))
    (let b (metal_buf_read yn 0 (mul 4 nout)))
+   (let st (if (gt sp 0) (qpqb-scalar sp wh xs b rows cols pitch ntok 0) -1))
    (let freed (sum (list (metal_buf_free wh) (metal_buf_free x) (metal_buf_free yo) (metal_buf_free yn))))
    (let at (qpqb-first-diff a b 0 nout))
    (let written (qpqb-written? b pitch rows ntok 0 0 sent))
    (let live (if (str_eq (substring a 0 (mul 4 rows)) (qpqb-rep2 (md-le32 0) rows)) 0 1))
    (print (list "k-quant tile" label "type" type "rows" rows "cols" cols "tokens" ntok "dispatched" eo en "first differing word" at
-    "attestant" (if (ge at 0) (ln-u32-le a (mul 4 at)) -1) "tile" (if (ge at 0) (ln-u32-le b (mul 4 at)) -1) "written" written "live" live "freed" freed))
-   (and (and (gt eo 0) (gt en 0)) (and (lt at 0) (and (eq written 1) (and (eq live 1) (eq freed 4)))))))
- (defn qpqb-tile (ps old type sb stride rows ntok)
-  (qpqb-tile-run ps old type (qpqb-tile-put (metal_buf_alloc (mul rows (mul 8 stride))) sb stride rows 0) rows 2048 ntok "fixture"))
- (defn qpqb-pool-tile (ps old type pool n stride rows cols ntok step)
-  (qpqb-tile-run ps old type (qpqb-pool-put (metal_buf_alloc (mul rows (mul (div cols 256) stride))) pool n stride (div cols 256) step rows 0) rows cols ntok "edge pool"))
+    "attestant" (if (ge at 0) (ln-u32-le a (mul 4 at)) -1) "tile" (if (ge at 0) (ln-u32-le b (mul 4 at)) -1) "written" written "live" live "freed" freed
+    "scalar reference: first differing token" (if (gt sp 0) st "none run")))
+   (list (and (and (gt eo 0) (gt en 0)) (and (lt at 0) (and (eq written 1) (and (eq live 1) (and (eq freed 4) (lt st 0)))))) a)))
+ (defn qpqb-tile (ps old type sb stride rows ntok per)
+  (qpqb-tile-run ps old type (qpqb-tile-put (metal_buf_alloc (mul rows (mul 8 stride))) sb stride rows 0) rows 2048 ntok "fixture" per 0))
+ (defn qpqb-pool-tile (ps old type pool n stride rows cols ntok rstep step label per sp)
+  (qpqb-tile-run ps old type (qpqb-pool-put (metal_buf_alloc (mul rows (mul (div cols 256) stride))) pool n stride (div cols 256) rstep step rows 0) rows cols ntok label per sp))
  ; ---- the edge pools ----
  (defn qpqb-u16 (v) (str_concat (byte_to_str (mod v 256)) (byte_to_str (div v 256))))
  (defn qpqb-u16at (s o) (add (str_byte_at s o) (mul 256 (str_byte_at s (add o 1)))))
@@ -229,13 +262,17 @@
       (add (mod (qpqb-sc i (sub t 4)) 16) (mul 16 (mod (qpqb-mn i (sub t 4)) 16))))))))))
  (defn qpqb-q4x (d dmin sc qs) (str_concat (qpqb-u16 d) (str_concat (qpqb-u16 dmin) (str_concat sc qs))))
  (defn qpqb-q4 (i d dmin) (qpqb-q4x d dmin (qpqb-scb i 0 "") (qpqb-run i 0 128 167 3 "")))
- ; family 0: d at exponent e, dmin a signed zero; 1: dmin at e, d a signed zero; 2: both at e
+ ; family 0: d at exponent e, dmin a signed zero; 1: dmin at e, d a signed zero; 2: both at e; 3 and 4: families 0 and 1
+ ; in the other sign (d's sign follows e in 0 and e + 1 in 3, dmin's e + 1 in 1 and e in 4), so each half stands alone at
+ ; every sign x exponent cell
  (defn qpqb-q4fam (f e acc)
   (if (gt e 30) acc
    (qpqb-q4fam f (add e 1) (append acc (list
     (if (eq f 0) (qpqb-q4 e (qpqb-h (mod e 2) e (qpqb-ma e)) (mul (mod (div e 2) 2) 32768))
      (if (eq f 1) (qpqb-q4 (add 31 e) (mul (mod (add (div e 2) 1) 2) 32768) (qpqb-h (mod (add e 1) 2) e (qpqb-mb e)))
-      (qpqb-q4 (add 62 e) (qpqb-h (mod (div e 2) 2) e (mod (add (mul e 113) 7) 1024)) (qpqb-h (mod (div (add e 1) 2) 2) e (mod (add (mul e 331) 11) 1024))))))))))
+      (if (eq f 2) (qpqb-q4 (add 62 e) (qpqb-h (mod (div e 2) 2) e (mod (add (mul e 113) 7) 1024)) (qpqb-h (mod (div (add e 1) 2) 2) e (mod (add (mul e 331) 11) 1024)))
+       (if (eq f 3) (qpqb-q4 (add 101 e) (qpqb-h (mod (add e 1) 2) e (qpqb-mb e)) (mul (mod (add (div e 2) 1) 2) 32768))
+        (qpqb-q4 (add 132 e) (mul (mod (div e 2) 2) 32768) (qpqb-h (mod e 2) e (qpqb-ma e))))))))))))
  ; Q6_K: ql, qh and the sixteen signed scales from superblock i's own runs, d last
  (defn qpqb-q6x (ql qh sc d) (str_concat ql (str_concat qh (str_concat sc (qpqb-u16 d)))))
  (defn qpqb-q6 (i d) (qpqb-q6x (qpqb-run i 0 128 89 13 "") (qpqb-run i 0 64 53 29 "") (qpqb-run i 0 16 151 9 "") d))
@@ -247,8 +284,15 @@
  (defn qpqb-mark (s v) (str_concat (substring s 0 v) (str_concat "1" (substring s (add v 1) (str_len s)))))
  (defn qpqb-ex (h) (mod (div h 1024) 32))
  (defn qpqb-zero? (h) (eq (mod h 32768) 0))
- ; Q4_K: (d's exponents where dmin is a signed zero, dmin's where d is, sc at sub-blocks 0..3, sc at 4..7 (d nonzero),
- ; mn at 0..3, mn at 4..7 (dmin nonzero)), sc and mn through the body's q4m-scale / q4m-min
+ ; a half's sign x exponent cell: + 0..30, then - 0..30
+ (defn qpqb-sx (h) (add (mul (div h 32768) 31) (qpqb-ex h)))
+ ; row k answers the attestant a word that is not a zero (+0 or -0) at some token t < ntok
+ (defn qpqb-live? (a pitch k t ntok)
+  (if (ge t ntok) 0
+   (if (eq (mod (ln-u32-le a (mul 4 (add (mul t pitch) k))) 2147483648) 0) (qpqb-live? a pitch k (add t 1) ntok) 1)))
+ ; Q4_K: (d's sign x exponent cells where dmin is a signed zero, dmin's where d is, both in live rows, sc at sub-blocks
+ ; 0..3, sc at 4..7 (d nonzero), mn at 0..3, mn at 4..7 (dmin nonzero)), sc and mn through the body's q4m-scale / q4m-min;
+ ; a holds the attestant's words over the pool in rows of one superblock (row k is superblock k), ntok tokens at the pitch
  (defn qpqb-q4cov-j (sb dz mz j cov)
   (if (ge j 8) cov
    (do (let sc (q4m-scale sb 0 j)) (let mn (q4m-min sb 0 j)) (let hi (ge j 4))
@@ -258,15 +302,16 @@
               (if (or dz (not hi)) (nth cov 3) (qpqb-mark (nth cov 3) sc))
               (if (or mz hi) (nth cov 4) (qpqb-mark (nth cov 4) mn))
               (if (or mz (not hi)) (nth cov 5) (qpqb-mark (nth cov 5) mn)))))))
- (defn qpqb-q4cov (pool k n cov)
+ (defn qpqb-q4cov (pool k n cov a pitch ntok)
   (if (ge k n) cov
    (do (let sb (nth pool k)) (let d (qpqb-u16at sb 0)) (let m (qpqb-u16at sb 2))
-       (let dz (qpqb-zero? d)) (let mz (qpqb-zero? m))
+       (let dz (qpqb-zero? d)) (let mz (qpqb-zero? m)) (let live (eq (qpqb-live? a pitch k 0 ntok) 1))
        (qpqb-q4cov pool (add k 1) n
         (qpqb-q4cov-j sb dz mz 0
-         (list (if (and mz (not dz)) (qpqb-mark (nth cov 0) (qpqb-ex d)) (nth cov 0))
-               (if (and dz (not mz)) (qpqb-mark (nth cov 1) (qpqb-ex m)) (nth cov 1))
-               (nth cov 2) (nth cov 3) (nth cov 4) (nth cov 5)))))))
+         (list (if (and live (and mz (not dz))) (qpqb-mark (nth cov 0) (qpqb-sx d)) (nth cov 0))
+               (if (and live (and dz (not mz))) (qpqb-mark (nth cov 1) (qpqb-sx m)) (nth cov 1))
+               (nth cov 2) (nth cov 3) (nth cov 4) (nth cov 5)))
+        a pitch ntok))))
  ; Q6_K: q at weight i of superblock sb, q6k_wi's nib + hi * 16 - 32
  (defn qpqb-p4 (g) (if (le g 0) 1 (mul 4 (qpqb-p4 (sub g 1)))))
  (defn qpqb-q6q (sb i)
@@ -277,15 +322,47 @@
       (sub (add nib (mul hi 16)) 32)))
  (defn qpqb-q6cov-q (sb i acc) (if (ge i 256) acc (qpqb-q6cov-q sb (add i 1) (qpqb-mark acc (add (qpqb-q6q sb i) 32)))))
  (defn qpqb-q6cov-s (sb s acc) (if (ge s 16) acc (qpqb-q6cov-s sb (add s 1) (qpqb-mark acc (str_byte_at sb (add 192 s))))))
- ; (d's exponents, the scale bytes, the quants (q + 32), whole superblocks of -32 and of 31), d nonzero
- (defn qpqb-q6cov (pool k n cov)
+ ; (d's sign x exponent cells in live rows, the scale bytes, the quants (q + 32), whole superblocks of -32 and of 31),
+ ; d nonzero
+ (defn qpqb-q6cov (pool k n cov a pitch ntok)
   (if (ge k n) cov
    (do (let sb (nth pool k)) (let d (qpqb-u16at sb 208))
        (qpqb-q6cov pool (add k 1) n
         (if (qpqb-zero? d) cov
-         (list (qpqb-mark (nth cov 0) (qpqb-ex d)) (qpqb-q6cov-s sb 0 (nth cov 1)) (qpqb-q6cov-q sb 0 (nth cov 2))
+         (list (if (eq (qpqb-live? a pitch k 0 ntok) 1) (qpqb-mark (nth cov 0) (qpqb-sx d)) (nth cov 0))
+               (qpqb-q6cov-s sb 0 (nth cov 1)) (qpqb-q6cov-q sb 0 (nth cov 2))
                (if (str_eq (substring sb 0 192) (qpqb-fill 0 192 "")) 1 (nth cov 3))
-               (if (str_eq (substring sb 0 192) (qpqb-fill 255 192 "")) 1 (nth cov 4))))))))
+               (if (str_eq (substring sb 0 192) (qpqb-fill 255 192 "")) 1 (nth cov 4))))
+        a pitch ntok))))
+ ; ---- bit 256: the real rows' widths ----
+ ; bytes ((i * m + b) * k + c) mod md, plus off (mod 256), for b in 0..n-1: superblock i's own run, of period 256 in i
+ ; when m * k is odd and md is 256
+ (defn qpqb-runm (i m b n k c md off acc)
+  (if (ge b n) acc (qpqb-runm i m (add b 1) n k c md off (str_concat acc (byte_to_str (mod (add (mod (add (mul (add (mul i m) b) k) c) md) off) 256))))))
+ ; the exact world: Q4_K at d = dmin = 1 (0x3c00), so every weight sc * nib - mn is an integer in -63..945; Q6_K at d = 1
+ ; with its sixteen scales in -29..29 (the byte (v + 227) mod 256 for v in 0..58), so every weight is an integer of
+ ; magnitude at most 928
+ (defn qpqb-x4 (i) (qpqb-q4x 15360 15360 (qpqb-runm i 13 0 12 89 7 256 0 "") (qpqb-runm i 131 0 128 167 3 256 0 "")))
+ (defn qpqb-x6 (i) (qpqb-q6x (qpqb-runm i 131 0 128 89 13 256 0 "") (qpqb-runm i 67 0 64 53 29 256 0 "") (qpqb-runm i 17 0 16 7 3 59 227 "") 15360))
+ (defn qpqb-xpool (type i n acc) (if (ge i n) acc (qpqb-xpool type (add i 1) n (append acc (list (if (eq type 12) (qpqb-x4 i) (qpqb-x6 i)))))))
+ ; the exactness, read back from the world's bytes: d (and dmin) 0x3c00, Q6_K's sixteen scales in -29..29
+ (defn qpqb-s6ok? (sb s)
+  (if (ge s 16) 1
+   (do (let v (qpqb-s8 (str_byte_at sb (add 192 s))))
+       (if (and (ge v -29) (le v 29)) (qpqb-s6ok? sb (add s 1)) 0))))
+ (defn qpqb-exact? (type pool k n)
+  (if (ge k n) 1
+   (do (let sb (nth pool k))
+       (if (if (eq type 12) (and (eq (qpqb-u16at sb 0) 15360) (eq (qpqb-u16at sb 2) 15360)) (and (eq (qpqb-u16at sb 208) 15360) (eq (qpqb-s6ok? sb 0) 1)))
+        (qpqb-exact? type pool (add k 1) n) 0))))
+ ; activations of +-1, 257 of them: -1 where (17 i mod 257) < 128
+ (defn qpqb-pm (i acc) (if (ge i 257) acc (qpqb-pm (add i 1) (str_concat acc (md-le32 (md-f32-bits (if (lt (mod (mul i 17) 257) 128) -1.0 1.0)))))))
+ ; 33 rows of `cols` columns at 33 tokens (two tiles of each), the pool laid end to end: superblock s of row r is
+ ; pool[(r * cols / 256 + s) mod n]
+ (defn qpqb-wide (ps old type pool n stride cols per sp label)
+  (qpqb-pool-tile ps old type pool n stride 33 cols 33 (div cols 256) 1 label per sp))
+ ; every run of a list answered ok
+ (defn qpqb-oks (rs i) (if (ge i (len rs)) 1 (if (nth (nth rs i) 0) (qpqb-oks rs (add i 1)) 0)))
  ; ---- bit 64: what the pair answers on the non-finite patterns p..hi-1, summed into
  ; (pow2 loop at sign | 0x47800000 | m << 13, as_type +-inf at m 0 and NaN otherwise, NaN payload kept, NaN quieted,
  ; NaN read as the canonical 0x7fc00000); the last three are printed, not claimed
@@ -337,15 +414,17 @@
  (let o6 (metal_pipeline msl "qpqb_q6k_mma_wi"))
  (let sb4 (read_file_slice "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 0 288))
  (let sb6 (read_file_slice "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 0 420))
- (let t4 (list (qpqb-tile ps o4 12 sb4 144 3 9) (qpqb-tile ps o4 12 sb4 144 3 33) (qpqb-tile ps o4 12 sb4 144 257 9) (qpqb-tile ps o4 12 sb4 144 257 33)))
- (let t6 (list (qpqb-tile ps o6 14 sb6 210 3 9) (qpqb-tile ps o6 14 sb6 210 3 33) (qpqb-tile ps o6 14 sb6 210 257 9) (qpqb-tile ps o6 14 sb6 210 257 33)))
+ (let per (qpqb-input 257 0 ""))
+ (let t4 (list (qpqb-tile ps o4 12 sb4 144 3 9 per) (qpqb-tile ps o4 12 sb4 144 3 33 per) (qpqb-tile ps o4 12 sb4 144 257 9 per) (qpqb-tile ps o4 12 sb4 144 257 33 per)))
+ (let t6 (list (qpqb-tile ps o6 14 sb6 210 3 9 per) (qpqb-tile ps o6 14 sb6 210 3 33 per) (qpqb-tile ps o6 14 sb6 210 257 9 per) (qpqb-tile ps o6 14 sb6 210 257 33 per)))
  ; the edge pools: the two committed superblocks first, then the families and the named edges
  (let ff12 (qpqb-fill 255 12 "")) (let ho12 (str_concat (qpqb-fill 192 8 "") (qpqb-fill 0 4 "")))
  (let P4 (append (list (substring sb4 0 144) (substring sb4 144 288))
   (append (qpqb-q4fam 0 0 (list)) (append (qpqb-q4fam 1 0 (list)) (append (qpqb-q4fam 2 0 (list))
-   (list (qpqb-q4 93 0 0) (qpqb-q4 94 32768 32768) (qpqb-q4 95 1 32769) (qpqb-q4 96 1023 1023)
+   (append (list (qpqb-q4 93 0 0) (qpqb-q4 94 32768 32768) (qpqb-q4 95 1 32769) (qpqb-q4 96 1023 1023)
          (qpqb-q4x 1024 33792 ho12 (qpqb-run 97 0 128 167 3 "")) (qpqb-q4x 31743 64511 ff12 (qpqb-fill 255 128 ""))
-         (qpqb-q4x 64511 1 ho12 (qpqb-fill 0 128 "")) (qpqb-q4 100 15360 15360)))))))
+         (qpqb-q4x 64511 1 ho12 (qpqb-fill 0 128 "")) (qpqb-q4 100 15360 15360))
+    (append (qpqb-q4fam 3 0 (list)) (qpqb-q4fam 4 0 (list)))))))))
  (let P6 (append (list (substring sb6 0 210) (substring sb6 210 420))
   (append (qpqb-q6fam 0 0 (list)) (append (qpqb-q6fam 1 0 (list))
    (list (qpqb-q6x (qpqb-fill 255 128 "") (qpqb-fill 255 64 "") (qpqb-fill 128 16 "") 31743)
@@ -353,24 +432,29 @@
          (qpqb-q6x (qpqb-fill 0 128 "") (qpqb-fill 0 64 "") (qpqb-fill 128 16 "") 1)
          (qpqb-q6 65 0) (qpqb-q6 66 32768) (qpqb-q6 67 15360))))))
  (let n4 (len P4)) (let n6 (len P6))
- (let z31 (qpqb-fill 48 31 "")) (let z64 (qpqb-fill 48 64 "")) (let z256 (qpqb-fill 48 256 ""))
- (let f31 (qpqb-fill 49 31 "")) (let f64 (qpqb-fill 49 64 "")) (let f256 (qpqb-fill 49 256 ""))
- (let cov4 (qpqb-q4cov P4 0 n4 (list z31 z31 z64 z64 z64 z64)))
- (let cov6 (qpqb-q6cov P6 0 n6 (list z31 z256 z64 0 0)))
- (let cov4ok (and (and (str_eq (nth cov4 0) f31) (str_eq (nth cov4 1) f31))
+ (let e4 (list (qpqb-pool-tile ps o4 12 P4 n4 144 n4 256 9 1 0 "edge pool" per 0) (qpqb-pool-tile ps o4 12 P4 n4 144 n4 256 33 1 0 "edge pool" per 0) (qpqb-pool-tile ps o4 12 P4 n4 144 n4 512 33 1 1 "edge pool" per 0)))
+ (let e6 (list (qpqb-pool-tile ps o6 14 P6 n6 210 n6 256 9 1 0 "edge pool" per 0) (qpqb-pool-tile ps o6 14 P6 n6 210 n6 256 33 1 0 "edge pool" per 0) (qpqb-pool-tile ps o6 14 P6 n6 210 n6 512 33 1 1 "edge pool" per 0)))
+ (let z62 (qpqb-fill 48 62 "")) (let z64 (qpqb-fill 48 64 "")) (let z256 (qpqb-fill 48 256 ""))
+ (let f62 (qpqb-fill 49 62 "")) (let f64 (qpqb-fill 49 64 "")) (let f256 (qpqb-fill 49 256 ""))
+ ; a sign x exponent cell counts in a live row: the attestant's words over the rows of one superblock at 9 tokens
+ (let cov4 (qpqb-q4cov P4 0 n4 (list z62 z62 z64 z64 z64 z64) (nth (nth e4 0) 1) (add n4 3) 9))
+ (let cov6 (qpqb-q6cov P6 0 n6 (list z62 z256 z64 0 0) (nth (nth e6 0) 1) (add n6 3) 9))
+ (let cov4ok (and (and (str_eq (nth cov4 0) f62) (str_eq (nth cov4 1) f62))
                   (and (and (str_eq (nth cov4 2) f64) (str_eq (nth cov4 3) f64)) (and (str_eq (nth cov4 4) f64) (str_eq (nth cov4 5) f64)))))
- (let cov6ok (and (and (str_eq (nth cov6 0) f31) (str_eq (nth cov6 1) f256)) (and (str_eq (nth cov6 2) f64) (and (eq (nth cov6 3) 1) (eq (nth cov6 4) 1)))))
- (print (list "edge pools: Q4_K superblocks" n4 "d alone at exponents" (nth cov4 0) "dmin alone at" (nth cov4 1)
+ (let cov6ok (and (and (str_eq (nth cov6 0) f62) (str_eq (nth cov6 1) f256)) (and (str_eq (nth cov6 2) f64) (and (eq (nth cov6 3) 1) (eq (nth cov6 4) 1)))))
+ (print (list "edge pools: Q4_K superblocks" n4 "d alone and live at sign x exponent (+ 0..30, - 0..30)" (nth cov4 0) "dmin alone and live at" (nth cov4 1)
   "sc at sub-blocks 0..3 / 4..7 whole" (str_eq (nth cov4 2) f64) (str_eq (nth cov4 3) f64) "mn whole" (str_eq (nth cov4 4) f64) (str_eq (nth cov4 5) f64)))
- (print (list "edge pools: Q6_K superblocks" n6 "d at exponents" (nth cov6 0) "scale bytes whole" (str_eq (nth cov6 1) f256)
+ (print (list "edge pools: Q6_K superblocks" n6 "d live at sign x exponent" (nth cov6 0) "scale bytes whole" (str_eq (nth cov6 1) f256)
   "quants -32..31 whole" (str_eq (nth cov6 2) f64) "a superblock of -32, of 31" (nth cov6 3) (nth cov6 4)))
- (let e4 (list (qpqb-pool-tile ps o4 12 P4 n4 144 n4 256 9 0) (qpqb-pool-tile ps o4 12 P4 n4 144 n4 256 33 0) (qpqb-pool-tile ps o4 12 P4 n4 144 n4 512 33 1)))
- (let e6 (list (qpqb-pool-tile ps o6 14 P6 n6 210 n6 256 9 0) (qpqb-pool-tile ps o6 14 P6 n6 210 n6 256 33 0) (qpqb-pool-tile ps o6 14 P6 n6 210 n6 512 33 1)))
- (let c32 (if (and (and (gt o4 0) (gt o6 0)) (and (and (and (and (nth t4 0) (nth t4 1)) (and (nth t4 2) (nth t4 3))) (and (and (nth t6 0) (nth t6 1)) (and (nth t6 2) (nth t6 3))))
-               (and (and cov4ok cov6ok) (and (and (nth e4 0) (and (nth e4 1) (nth e4 2))) (and (nth e6 0) (and (nth e6 1) (nth e6 2))))))) 32 0))
+ (let c32 (if (and (and (gt o4 0) (gt o6 0)) (and (and (eq (qpqb-oks t4 0) 1) (eq (qpqb-oks t6 0) 1))
+               (and (and cov4ok cov6ok) (and (eq (qpqb-oks e4 0) 1) (eq (qpqb-oks e6 0) 1))))) 32 0))
  ; bit 64: the f16 identity over every pattern
  (let pf (metal_pipeline msl "qpqb_f16"))
  (let fc (metal_buf_alloc (mul 4 65536))) (let fa (metal_buf_alloc (mul 4 65536))) (let fb (metal_buf_alloc (mul 4 65536)))
+ ; every slot starts as 0x5a5a5a5a, a finite word none of the checks below accepts: a pattern the probe leaves unwritten
+ ; reads short
+ (let f5a (qpqb-rep2 (md-le32 1515870810) 65536))
+ (let fw (list (metal_buf_write fc 0 f5a) (metal_buf_write fa 0 f5a) (metal_buf_write fb 0 f5a)))
  (let ef (metal_enqueue pf (md-bind (list fc fa fb) (list)) 65536))
  (let sf (metal_sync))
  (let codes (metal_buf_read fc 0 (mul 4 65536))) (let va (metal_buf_read fa 0 (mul 4 65536))) (let vb (metal_buf_read fb 0 (mul 4 65536)))
@@ -392,11 +476,25 @@
   "0x7e00" (ln-u32-le va (mul 4 32256)) (ln-u32-le vb (mul 4 32256)) "0xffff" (ln-u32-le va (mul 4 65535)) (ln-u32-le vb (mul 4 65535))))
  (let c64 (if (and (and (gt pf 0) (gt ef 0)) (and (and (lt finpos 0) (lt finneg 0)) (and (and nfpos nfneg)
                (and (and (eq (nth nf 0) 2048) (eq (nth nf 1) 2048)) (and zeros (eq ffreed 3)))))) 64 0))
+ ; bit 256: rows of 20, 24 and 68 superblocks; the edge pools against the attestant, the exact world against the attestant
+ ; and the scalar reference (pipelines 1 / 3)
+ (let pm (qpqb-pm 0 ""))
+ (let X4 (qpqb-xpool 12 0 71 (list))) (let X6 (qpqb-xpool 14 0 71 (list)))
+ (let exact (and (and (eq (qpqb-exact? 12 X4 0 71) 1) (eq (qpqb-exact? 14 X6 0 71) 1)) (and (lt (mul 945 17408) 16777216) (lt (mul 928 17408) 16777216))))
+ (print (list "exact world: Q4_K d and dmin 0x3c00, Q6_K d 0x3c00 and scales in -29..29, read back" exact
+  "largest row sums 945 * 17408, 928 * 17408 against 2^24" (mul 945 17408) (mul 928 17408) 16777216))
+ (let w4 (list (qpqb-wide ps o4 12 P4 n4 144 5120 per 0 "pool, 20 superblocks a row") (qpqb-wide ps o4 12 P4 n4 144 6144 per 0 "pool, 24 superblocks a row")
+               (qpqb-wide ps o4 12 P4 n4 144 17408 per 0 "pool, 68 superblocks a row") (qpqb-wide ps o4 12 X4 71 144 5120 pm (nth ps 1) "exact, 20 superblocks a row")
+               (qpqb-wide ps o4 12 X4 71 144 6144 pm (nth ps 1) "exact, 24 superblocks a row") (qpqb-wide ps o4 12 X4 71 144 17408 pm (nth ps 1) "exact, 68 superblocks a row")))
+ (let w6 (list (qpqb-wide ps o6 14 P6 n6 210 5120 per 0 "pool, 20 superblocks a row") (qpqb-wide ps o6 14 P6 n6 210 6144 per 0 "pool, 24 superblocks a row")
+               (qpqb-wide ps o6 14 P6 n6 210 17408 per 0 "pool, 68 superblocks a row") (qpqb-wide ps o6 14 X6 71 210 5120 pm (nth ps 3) "exact, 20 superblocks a row")
+               (qpqb-wide ps o6 14 X6 71 210 6144 pm (nth ps 3) "exact, 24 superblocks a row") (qpqb-wide ps o6 14 X6 71 210 17408 pm (nth ps 3) "exact, 68 superblocks a row")))
+ (let c256 (if (and exact (and (eq (qpqb-oks w4 0) 1) (eq (qpqb-oks w6 0) 1))) 256 0))
  ; bit 128: the refusal, and the widths the lane holds read whole
  (let c128 (if (and (and (qpqb-refused ps 12 384) (qpqb-refused ps 14 640)) (and (qpqb-refused ps 12 255)
                 (and (and (eq (str_len (q38pq-whole-refusal 12 5120)) 0) (eq (str_len (q38pq-whole-refusal 14 17408)) 0))
                      (and (and (eq (str_len (q38pq-whole-refusal 12 6144)) 0) (eq (str_len (q38pq-whole-refusal 14 256)) 0)) (eq (str_len (q38pq-whole-refusal 8 48)) 0))))) 128 0))
  (let guard (if (and (and (eq (q38pq-index 99) -1) (eq (q38dq-index 99) -1))
    (and (eq (nth (metal_live) 2) 0) (and (and d4a d4b) (and d6a d6b)))) 16 0))
- (let verdict (sum (list c4 c6 c8 cf guard c32 c64 c128)))
- (if (eq verdict 255) verdict (form_error (str_concat "qwen prefill quant band failed: " (int_to_str verdict)))))
+ (let verdict (sum (list c4 c6 c8 cf guard c32 c64 c128 c256)))
+ (if (eq verdict 511) verdict (form_error (str_concat "qwen prefill quant band failed: " (int_to_str verdict)))))
