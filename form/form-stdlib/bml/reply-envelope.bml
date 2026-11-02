@@ -1,30 +1,48 @@
 // reply-envelope.bml — the planner reply's envelope as a byte grammar that holds a decode where it is made.
 //
-// The envelope: blocks <plan>, <goal>, <cases> or <band>, and <reference>, each at most once, with only whitespace
-// between them. <plan> holds one JSON object; <cases> one JSON array of at most eight objects; <goal>, <band> and
-// <reference> hold text up to their own close tag. Each block has a byte room, and a JSON string has its own.
+// The envelope is what flp-parse (form-cli-local-plan.bml) reads: blocks <plan>, <goal>, <cases> or <band>, and
+// <reference>, each at most once, with only whitespace between them. <plan> holds one JSON object; <cases> one JSON
+// array of one to eight cases, each {function, arguments, equals} or {call, equals} as flp-case? reads it (function and
+// call a string that is not blank, arguments an array, equals holding no object); <goal>, <band> and <reference> hold
+// text up to their own close tag. Each block has a byte room, a JSON string has its own, and every block holds UTF-8.
 //
-// A state is [mode, tag, buf, stack, js, elems, seen, n, sl]:
+// A state is [mode, tag, buf, stack, js, elems, seen, n, sl, case, need]:
 //   mode  out (between blocks), open (reading an opening tag, buf the bytes so far), json, text, close (the JSON
 //         value is whole, buf the close tag read so far), end (every block the reply needs is closed), broken
 //   tag   the block's name; stack the open JSON containers, innermost first; js the JSON lexical state (value,
 //         value0, key0, key, keystr, keyesc, colon, str, esc, num, lit, after); elems the cases array's entries;
-//         seen the closed blocks; n the block's bytes; sl the string's bytes (lit: the literal read so far)
+//         seen the closed blocks; n the block's bytes; sl the string's bytes (lit: the literal read so far; num: buf
+//         the number's phase)
+//   case  the open case's [keys read, the key whose value is read, whether its function or call string holds a byte
+//         other than whitespace]; need the UTF-8 continuation bytes the block still owes
 //
 // renv-step(state, byte) answers the next state, or nothing() where the byte leaves the envelope; renv-feed walks a
-// token's text. renv-stop-ok? reads whether a stop may end the reply here: between blocks or after the last one.
+// token's text. renv-stop-ok? reads whether a stop may end the reply here: once <plan> and its witness (<cases> or
+// <band>) are closed, between blocks or after the last one.
 import form-stdlib/core.fk;
 section [form.bml] {
  class ReplyEnvelope {
   def renv-tags() = ["plan", "goal", "cases", "band", "reference"];
   def renv-json?(tag) = (String) tag == "plan" || (String) tag == "cases";
+  // the walk's replies that reached the parser (.hearth/local-plans, 49 replies): the longest <plan> read 1058 bytes,
+  // <goal> 563, <cases> 5424, <reference> 4046, and the longest JSON string 4080
   def renv-room(tag) = (String) tag == "plan" ? 6000 : (String) tag == "goal" ? 3000 : (String) tag == "cases" ? 8000 : 16000;
-  def renv-string-room() = 1200;
+  def renv-string-room() = 6000;
   def renv-case-cap() = 8;
-  def renv-start() = ["out", "", "", [], "", 0, [], 0, 0];
+  // after the whole reply, flp-parse reads past whitespace: a little may stand before the stop
+  def renv-tail-room() = 64;
+  def renv-start() = ["out", "", "", [], "", 0, [], 0, 0, renv-case-none(), 0];
   def renv-mode(st) = st[0];
   def renv-seen(st) = st[6];
-  def renv-at(st, mode, tag, buf, stack, js, elems, seen, n, sl) = [mode, tag, buf, stack, js, elems, seen, n, sl];
+  def renv-case-none() = [[], "", 0];
+  def renv-case(st) = len(st) > 9 ? st[9] : renv-case-none();
+  def renv-utf8(st) = len(st) > 10 ? st[10] : 0;
+  def renv-at(st, mode, tag, buf, stack, js, elems, seen, n, sl) = [mode, tag, buf, stack, js, elems, seen, n, sl, renv-case(st), renv-utf8(st)];
+  // the state with its field i (case 9, need 10) read v
+  def renv-with(st, i, v) = nothing?(st) ? st : {
+   let whole = renv-at(st, st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8]);
+   append(take(i, whole), cons(v, drop(i + 1, whole)));
+  };
   def renv-ws?(b) = b == 32 || b == 10 || b == 13 || b == 9;
   def renv-digit?(b) = b >= 48 && b <= 57;
   def renv-has?(xs, x) = any?(y => (String) y == x, xs);
@@ -34,9 +52,10 @@ section [form.bml] {
   def renv-close-tag(tag) = "</" ++ tag ++ ">";
   // a tag may open when it is not yet closed and cases and band stay one of
   def renv-may-open?(seen, tag) = !renv-has?(seen, tag) && !(((String) tag == "cases" && renv-has?(seen, "band")) || ((String) tag == "band" && renv-has?(seen, "cases")));
-  // the reply is whole once the reference and its witness are closed
-  def renv-whole?(seen) = renv-has?(seen, "reference") && (renv-has?(seen, "cases") || renv-has?(seen, "band"));
-  def renv-stop-ok?(st) = !nothing?(st) && ((String) renv-mode(st) == "out" || (String) renv-mode(st) == "end" || (String) renv-mode(st) == "broken");
+  // flp-parse reads a plan once <plan> and its witness are closed; the reply is whole once its reference is closed too
+  def renv-readable?(seen) = renv-has?(seen, "plan") && (renv-has?(seen, "cases") || renv-has?(seen, "band"));
+  def renv-whole?(seen) = renv-readable?(seen) && renv-has?(seen, "reference");
+  def renv-stop-ok?(st) = !nothing?(st) && ((String) renv-mode(st) == "end" || (String) renv-mode(st) == "broken" || ((String) renv-mode(st) == "out" && renv-readable?(renv-seen(st))));
   // the state after an id, nothing where the id leaves the envelope: a stop id carries no text
   def renv-take(st, id, textf, stop?) = stop?(id) ? (renv-stop-ok?(st) ? st : nothing()) : renv-feed(st, textf(id));
   // the first id of ids, in the decode's own order, that keeps the reply inside the envelope; nothing when none does
@@ -46,13 +65,20 @@ section [form.bml] {
   def renv-step(st, b) {
    let mode = renv-mode(st);
    (String) mode == "broken" ? st
-   : (String) mode == "end" ? nothing()
+   : (String) mode == "end" ? (renv-ws?(b) && st[7] < renv-tail-room() ? renv-bump(st) : nothing())
    : (String) mode == "out" ? (renv-ws?(b) ? st : b == 60 ? renv-at(st, "open", "", "<", [], "", 0, renv-seen(st), 0, 0) : nothing())
    : (String) mode == "open" ? renv-opening(st, b)
+   : renv-utf8(st) > 0 ? (b >= 128 && b <= 191 ? renv-with(renv-bump(st), 10, renv-utf8(st) - 1) : nothing())
    : st[7] >= renv-room(st[1]) ? nothing()
-   : (String) mode == "text" ? renv-text(st, b)
-   : (String) mode == "close" ? renv-closing(st, b)
-   : renv-json(st, b);
+   : b >= 128 ? renv-lead(st, b)
+   : renv-in-block(st, b);
+  }
+  def renv-in-block(st, b) = (String) renv-mode(st) == "text" ? renv-text(st, b) : (String) renv-mode(st) == "close" ? renv-closing(st, b) : renv-json(st, b);
+  // a UTF-8 lead byte opens its sequence where its block takes the byte (text, or a JSON string); its continuation
+  // bytes follow before anything else, so a swap never lands inside a character
+  def renv-lead(st, b) {
+   let need = b >= 194 && b <= 223 ? 1 : b >= 224 && b <= 239 ? 2 : b >= 240 && b <= 244 ? 3 : 0;
+   need == 0 ? nothing() : renv-with(renv-in-block(st, b), 10, need);
   }
   def renv-opening(st, b) {
    let buf = st[2] ++ (b < 32 || b > 126 ? "\n" : renv-chr(b));
@@ -83,16 +109,18 @@ section [form.bml] {
   def renv-bump(st) = renv-at(st, st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7] + 1, st[8]);
   def renv-js(st, js, sl) = renv-at(st, "json", st[1], "", st[3], js, st[5], st[6], st[7] + 1, sl);
   def renv-push(st, kind, js, elems) = renv-at(st, "json", st[1], "", cons(kind, st[3]), js, elems, st[6], st[7] + 1, 0);
-  // a container closes; the top one's close turns to the close tag
-  def renv-pop(st, kind) = nil?(st[3]) || (String) st[3][0] != kind ? nothing() : nil?(st[3][1:]) ? renv-at(st, "close", st[1], "", [], "", st[5], st[6], st[7] + 1, 0) : renv-at(st, "json", st[1], "", st[3][1:], "after", st[5], st[6], st[7] + 1, 0);
+  // a container closes, a case only once its keys are whole; the top one's close turns to the close tag
+  def renv-pop(st, kind) = nil?(st[3]) || (String) st[3][0] != kind ? nothing() : renv-case-object?(st) && !renv-case-whole?(renv-case(st)[0]) ? nothing() : nil?(st[3][1:]) ? renv-at(st, "close", st[1], "", [], "", st[5], st[6], st[7] + 1, 0) : renv-at(st, "json", st[1], "", st[3][1:], "after", st[5], st[6], st[7] + 1, 0);
   def renv-json(st, b) {
    let js = st[4];
-   (String) js == "str" ? renv-in-string(st, b, "str", "esc", "after")
+   (String) js == "str" && renv-case-string?(st) ? renv-case-string(st, b)
+   : (String) js == "str" ? renv-in-string(st, b, "str", "esc", "after")
    : (String) js == "keystr" && renv-case-object?(st) ? renv-case-key(st, b)
    : (String) js == "keystr" ? renv-in-string(st, b, "keystr", "keyesc", "colon")
-   : (String) js == "esc" ? (renv-has?(["\"", "\\", "/", "b", "f", "n", "r", "t", "u"], renv-chr(b < 32 || b > 126 ? 32 : b)) ? renv-js(st, "str", st[8] + 1) : nothing())
-   : (String) js == "keyesc" ? (renv-has?(["\"", "\\", "/", "b", "f", "n", "r", "t", "u"], renv-chr(b < 32 || b > 126 ? 32 : b)) ? renv-js(st, "keystr", st[8] + 1) : nothing())
-   : (String) js == "num" ? (renv-digit?(b) || b == 46 || b == 101 || b == 69 || b == 43 || b == 45 ? renv-js(st, "num", 0) : renv-after(renv-at(st, "json", st[1], "", st[3], "after", st[5], st[6], st[7], 0), b))
+   : (String) js == "esc" && renv-case-string?(st) ? renv-case-escape(st, b)
+   : (String) js == "esc" ? renv-escape(st, b, "str")
+   : (String) js == "keyesc" ? renv-escape(st, b, "keystr")
+   : (String) js == "num" ? renv-number(st, b)
    : (String) js == "lit" ? renv-literal(st, b)
    : renv-ws?(b) ? renv-bump(st)
    : (String) js == "colon" ? (b == 58 ? renv-js(st, "value", 0) : nothing())
@@ -102,15 +130,31 @@ section [form.bml] {
    : (String) js == "value" || (String) js == "value0" ? renv-value(st, b)
    : renv-after(st, b);
   }
-  // a case object's keys are function, arguments, equals or call: buf carries the key read so far
+  def renv-escape(st, b, back) = renv-has?(["\"", "\\", "/", "b", "f", "n", "r", "t", "u"], renv-chr(b < 32 || b > 126 ? 32 : b)) ? renv-js(st, back, st[8] + 1) : nothing();
+  // a case is {function, arguments, equals} or {call, equals}: a key comes once, and call never beside function or
+  // arguments; buf carries the key read so far
   def renv-case-keys() = ["function", "arguments", "equals", "call"];
   def renv-case-object?(st) = (String) st[1] == "cases" && len(st[3]) == 2;
   def renv-case-array?(st) = (String) st[1] == "cases" && len(st[3]) == 1;
+  def renv-case-may?(keys, k) = !renv-has?(keys, k) && ((String) k == "call" ? !renv-has?(keys, "function") && !renv-has?(keys, "arguments") : (String) k == "equals" || !renv-has?(keys, "call"));
+  def renv-case-whole?(keys) = renv-has?(keys, "equals") && (renv-has?(keys, "call") || (renv-has?(keys, "function") && renv-has?(keys, "arguments")));
   def renv-case-key(st, b) {
+   let keys = renv-case(st)[0];
+   let free = filter(k => renv-case-may?(keys, k), renv-case-keys());
    let read = st[2] ++ (b < 32 || b > 126 ? "\n" : renv-chr(b));
-   b == 34 ? (renv-has?(renv-case-keys(), st[2]) ? renv-js(st, "colon", 0) : nothing())
-   : any?(k => renv-prefix?(read, k), renv-case-keys()) ? renv-at(st, "json", st[1], read, st[3], "keystr", st[5], st[6], st[7] + 1, 0)
+   b == 34 ? (renv-has?(free, st[2]) ? renv-with(renv-js(st, "colon", 0), 9, [cons(st[2], keys), st[2], 0]) : nothing())
+   : any?(k => renv-prefix?(read, k), free) ? renv-at(st, "json", st[1], read, st[3], "keystr", st[5], st[6], st[7] + 1, 0)
    : nothing();
+  }
+  // a function or call string holds more than whitespace (flp-case? trims it)
+  def renv-case-string?(st) = renv-case-object?(st) && renv-has?(["function", "call"], renv-case(st)[1]);
+  def renv-case-string(st, b) {
+   let cs = renv-case(st);
+   b == 34 && cs[2] == 0 ? nothing() : renv-with(renv-in-string(st, b, "str", "esc", "after"), 9, b == 34 || b == 92 || renv-ws?(b) ? cs : [cs[0], cs[1], 1]);
+  }
+  def renv-case-escape(st, b) {
+   let cs = renv-case(st);
+   renv-with(renv-escape(st, b, "str"), 9, b == 110 || b == 116 || b == 114 ? cs : [cs[0], cs[1], 1]);
   }
   def renv-in-string(st, b, here, esc, next) = b == 34 ? renv-js(st, next, 0) : b == 92 ? renv-js(st, esc, st[8] + 1) : b < 32 || st[8] >= renv-string-room() ? nothing() : renv-js(st, here, st[8] + 1);
   def renv-literal(st, b) {
@@ -118,16 +162,37 @@ section [form.bml] {
    let fits = filter(w => renv-prefix?(read, w), ["true", "false", "null"]);
    nil?(fits) ? nothing() : any?(w => (String) w == read, fits) ? renv-at(st, "json", st[1], "", st[3], "after", st[5], st[6], st[7] + 1, 0) : renv-at(st, "json", st[1], read, st[3], "lit", st[5], st[6], st[7] + 1, 0);
   }
-  // the top value is the block's own: an object for <plan>, an array for <cases>; each case is an object, eight at most
+  // a JSON number by its phase: - sign, 0 a leading zero, i integer digits, . the point, f fraction digits, e the
+  // exponent mark, s its sign, x its digits; a number may end after 0, i, f or x
+  def renv-num-next(p, b) = (String) p == "" ? (b == 45 ? "-" : b == 48 ? "0" : renv-digit?(b) ? "i" : nothing())
+   : (String) p == "-" ? (b == 48 ? "0" : renv-digit?(b) ? "i" : nothing())
+   : (String) p == "0" ? (b == 46 ? "." : b == 101 || b == 69 ? "e" : nothing())
+   : (String) p == "i" ? (renv-digit?(b) ? "i" : b == 46 ? "." : b == 101 || b == 69 ? "e" : nothing())
+   : (String) p == "." ? (renv-digit?(b) ? "f" : nothing())
+   : (String) p == "f" ? (renv-digit?(b) ? "f" : b == 101 || b == 69 ? "e" : nothing())
+   : (String) p == "e" ? (b == 43 || b == 45 ? "s" : renv-digit?(b) ? "x" : nothing())
+   : renv-digit?(b) ? "x" : nothing();
+  def renv-number(st, b) {
+   let next = renv-num-next(st[2], b);
+   !nothing?(next) ? renv-at(st, "json", st[1], next, st[3], "num", st[5], st[6], st[7] + 1, 0)
+   : renv-has?(["0", "i", "f", "x"], st[2]) ? renv-after(renv-at(st, "json", st[1], "", st[3], "after", st[5], st[6], st[7], 0), b)
+   : nothing();
+  }
+  // the top value is the block's own: an object for <plan>, an array for <cases>; each case is an object, eight at most,
+  // its function or call a string, its arguments an array, and no object anywhere in its equals
   def renv-value(st, b) {
    let top = nil?(st[3]);
    let entry = !top && nil?(st[3][1:]) && (String) st[1] == "cases";
+   let key = (String) st[1] == "cases" && len(st[3]) >= 2 ? renv-case(st)[1] : "";
    top ? ((String) st[1] == "plan" && b == 123 ? renv-push(st, "{", "key0", 0) : (String) st[1] == "cases" && b == 91 ? renv-push(st, "[", "value0", 0) : nothing())
-   : entry ? (b == 123 && st[5] < renv-case-cap() ? renv-push(st, "{", "key0", st[5] + 1) : nothing())
+   : entry ? (b == 123 && st[5] < renv-case-cap() ? renv-with(renv-push(st, "{", "key0", st[5] + 1), 9, renv-case-none()) : nothing())
+   : renv-case-object?(st) && ((String) key == "function" || (String) key == "call") && b != 34 ? nothing()
+   : renv-case-object?(st) && (String) key == "arguments" && b != 91 ? nothing()
+   : (String) key == "equals" && b == 123 ? nothing()
    : b == 123 ? renv-push(st, "{", "key0", st[5])
    : b == 91 ? renv-push(st, "[", "value0", st[5])
    : b == 34 ? renv-js(st, "str", 0)
-   : renv-digit?(b) || b == 45 ? renv-js(st, "num", 0)
+   : renv-digit?(b) || b == 45 ? renv-at(st, "json", st[1], renv-num-next("", b), st[3], "num", st[5], st[6], st[7] + 1, 0)
    : b == 116 || b == 102 || b == 110 ? renv-at(st, "json", st[1], renv-chr(b), st[3], "lit", st[5], st[6], st[7] + 1, 0)
    : nothing();
   }

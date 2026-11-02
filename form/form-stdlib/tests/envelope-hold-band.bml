@@ -1,15 +1,20 @@
 // envelope-hold-band.bml — the voice's walk held by the reply envelope (form-cli-native-voice.bml fcnv-envelope-held-by,
 // form-cli-recipe-exec-session.fk frxs-held), with a scripted voice: ids are bytes plus 1000, 0 is the stop and the
 // close, and the candidates are a scripted top-k. No model, GPU or ledger opens.
-// Verdict 63 when every claim lands:
+// Verdict 255 when every claim lands:
 //   1   the walk's hook passes an id through a context with no hold, and a record's hold answers the id it commits
 //   2   a whole reply proposed greedily walks held to end with no exchange, and the candidates are never asked
 //   4   a raw newline inside a JSON string is exchanged for the first candidate that holds, its escape
-//   8   a stop inside a block is exchanged; a stop between blocks is kept
+//   8   a stop inside a block, or before <plan> and its witness close, is exchanged; a stop once they have is kept
 //   16  when no candidate holds, the walk commits the close, counts one end, and passes later ids through
 //   32  a voice that repeats its cases runs unheld to the step limit; held, it closes after eight cases and stops,
-//       and its reply is the eight-case envelope byte for byte
+//       and its reply is the plan and the eight-case envelope byte for byte
+//   64  an end names where it cut the reply: the block, between blocks, or that the candidates did not answer; an end
+//       where a stop may stand cuts nothing; the planner refuses a cut reply as envelope-ended
+//   128 the planner's request carries the envelope and its reply budget (6144), and the voice door reads both; an
+//       interceptor with no observer walks with the silent one
 import form/form-stdlib/bml/form-cli-native-voice.bml;
+import form/form-stdlib/bml/form-cli-local-plan.bml;
 section [form.bml] {
  class EnvelopeHoldBand {
   def ehb-id(b) = b + 1000;
@@ -20,8 +25,10 @@ section [form.bml] {
   def ehb-case() = "{\"function\":\"f\",\"arguments\":[1],\"equals\":2}";
   def ehb-cases(n) = n <= 1 ? ehb-case() : ehb-case() ++ "," ++ ehb-cases(n - 1);
   def ehb-repeat(s, n) = n <= 0 ? "" : s ++ ehb-repeat(s, n - 1);
-  def ehb-whole() = "<plan>{\"id\":\"g\"}</plan>\n<goal>f doubles.</goal>\n<cases>[" ++ ehb-case() ++ "]</cases>\n<reference>def f(a) = a * 2;</reference>";
-  def ehb-asked(cursor) = () => { record_set(cursor, "asked", (record_get(cursor, "asked") ?? 0) + 1); append(ehb-ids("]"), append([0], ehb-ids("</cases>"))); };
+  def ehb-plan() = "<plan>{\"id\":\"g\"}</plan>\n";
+  def ehb-whole() = ehb-plan() ++ "<goal>f doubles.</goal>\n<cases>[" ++ ehb-case() ++ "]</cases>\n<reference>def f(a) = a * 2;</reference>";
+  // a record answers 0 for a key it never held
+  def ehb-asked(cursor) = () => { record_set(cursor, "asked", record_get(cursor, "asked") + 1); append(ehb-ids("]"), append([0], ehb-ids("</cases>"))); };
   def ehb-step(cursor, id, found) = fcnv-envelope-held-by(cursor, id, ehb-text, ehb-stop?, found, 0);
   // a greedy voice proposes the next byte of wish at the reply's length; held or not, each step commits one id
   def ehb-walk(cursor, wish, held, step, limit, out) {
@@ -45,20 +52,36 @@ section [form.bml] {
    let c4 = swapped == ehb-id(92) && record_get(n, "envelope-swaps") == 1 ? 4 : 0;
    let inside = ehb-feed(fcnv-envelope-cursor(), "<goal>half");
    let kept = fcnv-envelope-held-by(inside, 0, ehb-text, ehb-stop?, () => append([0], ehb-ids(".")), 0);
-   let between = ehb-feed(fcnv-envelope-cursor(), "<goal>half</goal>");
-   let c8 = kept == ehb-id(46) && fcnv-envelope-held-by(between, 0, ehb-text, ehb-stop?, () => ehb-ids("x"), 0) == 0 && record_get(between, "envelope-swaps") == 0 ? 8 : 0;
+   let early = ehb-feed(fcnv-envelope-cursor(), "<goal>half</goal>");
+   let opened = fcnv-envelope-held-by(early, 0, ehb-text, ehb-stop?, () => append([0], ehb-ids("<")), 0);
+   let between = ehb-feed(fcnv-envelope-cursor(), ehb-plan() ++ "<band>(do 1)</band>");
+   let c8 = kept == ehb-id(46) && opened == ehb-id(60) && fcnv-envelope-held-by(between, 0, ehb-text, ehb-stop?, () => ehb-ids("x"), 0) == 0 && record_get(between, "envelope-swaps") == 0 ? 8 : 0;
    let dead = ehb-feed(fcnv-envelope-cursor(), "<plan>{");
    let closed = fcnv-envelope-held-by(dead, ehb-id(120), ehb-text, ehb-stop?, () => append(ehb-ids("x]"), [0]), 0);
    let c16 = closed == 0 && record_get(dead, "envelope-ends") == 1 && (String) renv-mode(record_get(dead, "envelope")) == "broken" && fcnv-envelope-held-by(dead, ehb-id(120), ehb-text, ehb-stop?, () => [], 0) == ehb-id(120) ? 16 : 0;
-   let wish = "<cases>[" ++ ehb-repeat(ehb-case() ++ ",", 60);
+   let wish = ehb-plan() ++ "<cases>[" ++ ehb-repeat(ehb-case() ++ ",", 60);
    let unheld = ehb-walk(record_new(0), wish, false, 0, 2000, "");
    let r = fcnv-envelope-cursor();
    let runaway = ehb-walk(r, wish, true, 0, 2000, "");
-   let c32 = (String) unheld[1] == "limit" && (String) runaway[1] == "stop" && (String) runaway[0] == "<cases>[" ++ ehb-cases(8) ++ "]</cases>" && record_get(r, "envelope-ends") == 0 ? 32 : 0;
-   print(["envelope-hold", c1, c2, c4, c8, c16, c32, record_get(r, "envelope-swaps"), len(runaway[0]), len(unheld[0])]);
-   c1 + c2 + c4 + c8 + c16 + c32;
+   let c32 = (String) unheld[1] == "limit" && (String) runaway[1] == "stop" && (String) runaway[0] == ehb-plan() ++ "<cases>[" ++ ehb-cases(8) ++ "]</cases>" && record_get(r, "envelope-ends") == 0 ? 32 : 0;
+   let gone = ehb-feed(fcnv-envelope-cursor(), "<goal>half</goal>");
+   let left = fcnv-envelope-held-by(gone, ehb-id(120), ehb-text, ehb-stop?, () => ehb-ids("x"), 0);
+   let blind = ehb-feed(fcnv-envelope-cursor(), "<cases>[");
+   let unread = fcnv-envelope-held-by(blind, ehb-id(120), ehb-text, ehb-stop?, () => [], 0);
+   let done = ehb-feed(fcnv-envelope-cursor(), ehb-plan() ++ "<band>(do 1)</band>");
+   let stood = fcnv-envelope-held-by(done, ehb-id(120), ehb-text, ehb-stop?, () => ehb-ids("x"), 0);
+   let c64 = (String) record_get(dead, "envelope-cut") == "<plan>" && (String) record_get(gone, "envelope-cut") == "<between>" && (String) record_get(blind, "envelope-cut") == "candidates-unavailable"
+    && stood == 0 && (String) record_get(done, "envelope-cut") == "" && (String) flp-envelope-refusal(fcnv-envelope-reading(dead))[0] == "envelope-ended" && nothing?(flp-envelope-refusal(fcnv-envelope-reading(done))) && nothing?(flp-envelope-refusal(nothing())) ? 64 : 0;
+   let asked = flp-voice-request("qwen38-q8", 3072, flp-reply-budget(), "plan request r option 1", nothing());
+   let quiet = ftg-intercept-with(512, nothing());
+   let heard = ftg-intercept-with(512, nothing());
+   record_set(heard, "observer", (stage, phase, c, generated) => 5);
+   let c128 = fcnv-budget(asked) == 6144 && (String) fcnv-envelope(asked) == "local-plan" && nothing?(fcnv-budget(json-node-object([fhn-s("model", "qwen38-q8")])))
+    && ftg-observer(quiet)("run", "begin", 0, 0) == 0 && ftg-observer(heard)("run", "begin", 0, 0) == 5 ? 128 : 0;
+   print(["envelope-hold", c1, c2, c4, c8, c16, c32, c64, c128, record_get(r, "envelope-swaps"), len(runaway[0]), len(unheld[0])]);
+   c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128;
   }
  }
  let verdict = ehb-observe();
- verdict == 63 ? verdict : form_error("the envelope hold read " + verdict.str() + " of 63");
+ verdict == 255 ? verdict : form_error("the envelope hold read " + verdict.str() + " of 255");
 }
