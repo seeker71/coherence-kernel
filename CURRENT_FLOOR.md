@@ -234,7 +234,7 @@ memory-governor-band 67108863 (form/form-stdlib/bml/memory-governor.bml asks the
 form-cli-code-low-memory-band 1023  (a running coding lane saves its checkpoint and ends with host-memory-low when the machine
                                 runs low, continues on a roomy or unreadable reading, and a lane that spent its turns keeps that
                                 ending; the walk reads it as a choice point)
-native-turn-ladder-band 1048575 · local-flow-reading-band 4194303  (a memory ending, host-memory-low or host-memory-held:*, is no
+native-turn-ladder-band 1048575 · local-flow-reading-band 8388607  (a memory ending, host-memory-low or host-memory-held:*, is no
                                 tried approach and no option of the review; its checkpoint is the resume's target, with no failure text)
                                 (the review's phase fold is standing: every option whose lane output this host holds, in its own
                                 checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
