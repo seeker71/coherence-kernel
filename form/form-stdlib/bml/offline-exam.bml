@@ -12,16 +12,32 @@
 // plan, a band the voice wrote tells a wrong function from a right one. A key establishes only what it checks.
 // fkwu grades; no model opens. A row: at_unix_ms, session ("" when the schedule asked), network_denied, kind, exam, answered, graded, rent_tokens 0, wall_ms, status, failed
 // (receipts/offline-exam-ledger.jsonl; failed names keys, never words). Answers stay under .hearth/offline-exam; a planted lane's under its planted folder.
-// A kind the time left cannot hold lands no row and is named unread; a set is read by observe/alignment-read-run.bml with until_ms and names the scenarios it left. The sets are rotated by the day, so a slow night's last set is another night's first.
+// A kind the time left cannot hold lands no row and is named unread; a set is read by observe/alignment-read-run.bml with until_ms and names the scenarios it left.
+// The exam reads the sets that moved, in this order, until its room ends: a sealed set (a scenarios file in a folder named sealed) its held-out row would count a reading of
+// now, with its own tags beside it (sealed/axes-N.jsonl); then every set of the rotation whose last reading is missing, by another model, cut, short of an ask the voice
+// spoke in, under a prompt other than the live one or older than five days, the oldest first; and when none is, the one set read longest ago, so an unchanged prompt re-reads
+// one set a night. A reading is what the register counts as one (offline-voice-gaps.bml, kind alignment-sets): a row of the alignment ledger naming the set, a role prompt on,
+// no ground, no adapter, over every scenario its sets hold, the voice speaking in each (its per-scenario table). A set the room cut lands a row that reads short and names the rest,
+// so it is read again and never taken for a whole reading; the exam names it cut.
+// A sealed set is the register's own rule, read as data: its alignment-heldout row (learn/offline-voice-gaps.jsonl) says which reading counts (where) and which readings
+// of the voice before it must wear that reading's prompt (before). The exam holds the set back by name while its held-out reading stands (spent), while the live prompt is
+// the one it was sealed under (it waits for the prompt to move), and once a reading of the voice under another prompt read it (spoiled: it waits for a new seal). It begins
+// a sealed set only while the time left holds every one of its asks at the voice's last measured pace, and keeps its answers only once the held-out row counts the reading.
+// What a set's reading answered is kept by the prompt it wore, receipts/alignment-answers/<digest12>/<set>.jsonl, the voice's own generated text in the grading lane's
+// {"id","answer"} shape, so a later grading needs no model; the walk's landing carries the folder (host-walk-carry.bml hw-learned).
 //
 // Every child stands inside the profile. Its asker is the exam (session "offline-exam", read from the child's own ancestor line, local-run.bml lrun-asker-doors), so its asks are no row of the schedule's or the person's in the local-run and coverage ledgers; structural is asked cold (FORM_FIND_COLD), since the form-find service answers from outside any profile.
 // The plan exam takes a fixture request and a scratch queue, its option's row carries its id (the register's self-plan row reads past it), and its bands leave when graded.
 // PROOF: form-stdlib/tests/offline-exam-band.bml.
 import form-stdlib/bml/exit-proof.bml;
+import form-stdlib/bml/offline-voice-gaps.bml;
 import form-stdlib/bml/local-run.bml;
 import form-stdlib/bml/form-agent-tools.bml;
 import form-stdlib/bml/form-agent-json-query.bml;
 import form-stdlib/model-registry.bml;
+import form-stdlib/role-prompts.bml;
+import form-stdlib/sha256.fk;
+import form-stdlib/hex.fk;
 import form-stdlib/string-case.fk;
 section [form.bml] {
  class OfflineExam {
@@ -216,23 +232,153 @@ section [form.bml] {
    let gone = (String) fcgp-str(exam, "kind") == "plan" ? oex-after-plan(answer) : 0;
    row;
   }
-  // ---- the sets: read under the profile, rotated by the day -------------------------------------------------------
-  def oex-set-names() = filter(n => ep-starts?(n, "scenarios") && str_find(n, ".jsonl", 0) > 0, fs_list(oex-sets-dir()) ?? []);
-  def oex-rotate(xs, n) { let k = nil?(xs) ? 0 : n % len(xs); append(xs[k:], take(k, xs)); }
-  def oex-sets(opts) {
+  // ---- the sets: what moved is read under the profile, and what it read is kept ---------------------------------------
+  def oex-alignment-ledger() = "receipts/alignment-ledger.jsonl";
+  def oex-gaps() = "learn/offline-voice-gaps.jsonl";
+  def oex-sealed-dir() = oex-sets-dir() ++ "/sealed";
+  def oex-voice() = "qwen38-q8";
+  def oex-variant() = "exam";
+  def oex-stale-ms() = 432000000;
+  def oex-set-floor-ms() = 60000;
+  def oex-set-file?(n) = ep-starts?(n, "scenarios") && str_find(n, ".jsonl", 0) > 0;
+  def oex-sets-in(dir) = map(n => dir ++ "/" ++ n, filter(n => oex-set-file?(n), fs_list(dir) ?? []));
+  def oex-dir-of(p) { let at = ep-rfind(p, "/", 0, -1); at < 0 ? "" : substring(p, 0, at); }
+  def oex-base(p) { let at = ep-rfind(p, "/", 0, -1); at < 0 ? p : substring(p, at + 1, len(p)); }
+  def oex-sealed?(set) = (String) oex-base(oex-dir-of(set)) == "sealed";
+  // a sealed set's own tags stand beside it: axes-N.jsonl for scenarios-N.jsonl
+  def oex-axes-of(set) = oex-dir-of(set) ++ "/axes" ++ substring(oex-base(set), 9, len(oex-base(set)));
+  // the digest a set's reading wears: the voice's live role prompt alone (observe/alignment-read-run.bml ar-role and ar-run)
+  def oex-live-digest() = hex-encode(sha256-stream-string(rp-prompt(oex-voice())));
+  def oex-d12(d) = substring(d ++ "            ", 0, 12);
+  def oex-read-sets-of(r) = map(s => trim(s), split-on(fcgp-str(r, "fixtures"), ","));
+  def oex-names?(r, set) = any?(s => (String) s == set, oex-read-sets-of(r));
+  def oex-speaks?(r) = (String) fcgp-str(r, "role") != "none" && (String) fcgp-str(r, "ground") == "" && (String) fcgp-str(r, "adapter") == "";
+  def oex-held-n(r) = foldl((acc, s) => acc + len(ep-text-rows(s)), 0, oex-read-sets-of(r));
+  def oex-cut?(r) = (fcgp-num(r, "predicates_total") ?? 0) <= 0 || !((Comparable) (fcgp-num(r, "scenarios") ?? 0) == oex-held-n(r));
+  // the asks the voice spoke in, read from the row's own table: per_scenario status answered or blank, the asks observe/alignment-read-run.bml counts as the row's spoke
+  // (the scalar the register's flat where reads); an ask the voice never reached (unavailable, refused) is none, and a row with no table spoke in none
+  def oex-spoke-of(r) = len(filter(s => (String) fcgp-str(s, "status") == "answered" || (String) fcgp-str(s, "status") == "blank", fcgp-present?(r, "per_scenario") ? json-array-elements(json-object-get(r, "per_scenario")) : []));
+  // whole: every scenario its sets hold, and the voice spoke in each
+  def oex-whole?(r) = !oex-cut?(r) && (Comparable) oex-spoke-of(r) == (fcgp-num(r, "scenarios") ?? 0);
+  def oex-last-of(rows, set) = foldl((best, r) => oex-speaks?(r) && oex-names?(r, set) ? r : best, nothing(), rows);
+  def oex-at-of(r) = nothing?(r) ? 0 : (fcgp-num(r, "at_unix_ms") ?? 0);
+  def oex-unspoken(r) = "the voice spoke in " ++ oex-spoke-of(r).str() ++ " of the " ++ (fcgp-num(r, "scenarios") ?? 0).str() ++ " asks of its last reading";
+  // why a set's last reading asks for another; "" when it is the voice's, whole, wears the live prompt and is younger than five days
+  def oex-why(r, digest, now) = nothing?(r) ? "no reading"
+   : (String) fcgp-str(r, "model") != oex-voice() ? "its last reading is by " ++ oex-or(fcgp-str(r, "model"), "no model named") ++ ", not the voice"
+   : oex-cut?(r) ? "its last reading was cut at " ++ (fcgp-num(r, "scenarios") ?? 0).str() ++ " scenario(s)"
+   : !oex-whole?(r) ? oex-unspoken(r)
+   : (String) fcgp-str(r, "prompt_digest") != digest ? "its last reading wears prompt " ++ oex-d12(fcgp-str(r, "prompt_digest"))
+   : now - oex-at-of(r) > oex-stale-ms() ? "its last reading is " ++ ((now - oex-at-of(r)) / 86400000).str() ++ " days old"
+   : "";
+  // the oldest last reading first, a set never read before any; equal ages keep the folder's order
+  def oex-insert(x, xs) = nil?(xs) ? [x] : oex-at-of(x[2]) < oex-at-of(xs[0][2]) ? cons(x, xs) : cons(xs[0], oex-insert(x, xs[1:]));
+  def oex-by-age(xs) = foldl((acc, x) => oex-insert(x, acc), [], xs);
+  // ---- a sealed set: the register's own held-out row, read as data ------------------------------------------------------
+  def oex-heldout-of(set, gaps) = foldl((found, g) => !nothing?(found) ? found : (String) fcgp-str(g, "kind") == "alignment-heldout" && (String) fcgp-str(fcgp-obj(g, "where"), "fixtures") == set ? g : found, nothing(), gaps);
+  def oex-seal-of(g) = fcgp-str(fcgp-obj(fcgp-obj(g, "where"), "prompt_digest"), "!=");
+  // the row the exam's reading of a set would land now: the voice, the exam's variant, the live digest, role on, no adapter, every scenario read and spoken in
+  def oex-probe(set, digest) { let n = len(ep-text-rows(set)); json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("model", oex-voice()), fhn-s("prompt_variant", oex-variant()), fhn-s("prompt_digest", digest), fhn-s("fixtures", set), fhn-n("scenarios", n), fhn-n("spoke", n), fhn-s("role", "live"), fhn-s("adapter", "")]); }
+  // why a sealed set waits tonight, "" when the exam reads it: no held-out row names it; its held-out reading stands (spent); the live prompt is the one it was sealed under;
+  // its row would not count a reading of it now; or a reading of the voice under another prompt read it first (spoiled), so no prompt that follows is held out from it
+  def oex-sealed-why(set, g, rows, digest) {
+   let probe = oex-probe(set, digest);
+   let counted = nothing?(g) ? [] : ovg-where(g, rows);
+   let spoiled = nothing?(g) ? [] : ovg-spoiling(g, rows, probe);
+   nothing?(g) ? "no held-out row of the register names it: it waits for its rule"
+   : !nil?(counted) ? "spent: its held-out reading stands, at " ++ oex-at-of(counted[0]).str()
+   : (String) oex-seal-of(g) == digest ? "sealed under the live prompt " ++ oex-d12(digest) ++ ": it waits for the prompt to move"
+   : !ovg-matches?(probe, fcgp-obj(g, "where")) ? "its held-out row would not count a reading of it now (" ++ ovg-obj-text(fcgp-obj(g, "where")) ++ "): it waits"
+   : !nil?(spoiled) ? "spoiled: a reading of the voice under prompt " ++ oex-d12(fcgp-str(spoiled[0], "prompt_digest")) ++ " read it at " ++ oex-at-of(spoiled[0]).str() ++ ", before the live prompt: it waits for a new seal"
+   : "";
+  }
+  def oex-sealed-chosen(g, rows) = nil?(ovg-before-rows(g, rows)) ? "sealed, unread" : "sealed, its reading under the live prompt was not whole";
+  def oex-seals(sealed, rows, digest, gaps) = map(s => { let g = oex-heldout-of(s, gaps); [s, oex-sealed-why(s, g, rows, digest), g]; }, sealed);
+  // the sealed sets the exam holds back, each with why
+  def oex-held(sealed, rows, digest, gaps) = map(x => [x[0], x[1]], filter(x => (String) x[1] != "", oex-seals(sealed, rows, digest, gaps)));
+  // [set, why] in the order the exam reads them: the sealed sets their held-out rows would count a reading of now, then the rotation's sets that moved,
+  // and when none moved, the one read longest ago
+  def oex-choose(sealed, rotation, rows, digest, now, gaps) {
+   let unread = filter(x => (String) x[1] == "", oex-seals(sealed, rows, digest, gaps));
+   let judged = map(s => { let r = oex-last-of(rows, s); [s, oex-why(r, digest, now), r]; }, rotation);
+   let moved = oex-by-age(filter(x => (String) x[1] != "", judged));
+   append(map(x => [x[0], oex-sealed-chosen(x[2], rows)], unread), nil?(moved) ? map(x => [x[0], "nothing moved; its reading is the oldest"], take(1, oex-by-age(judged))) : map(x => [x[0], x[1]], moved));
+  }
+  // [chosen, held]
+  def oex-sets(opts, rows, gaps) {
    let named = fcgp-str(opts, "sets");
-   (String) named == "none" ? [] : (String) named != "" ? map(s => trim(s), split-on(named, ",")) : map(n => oex-sets-dir() ++ "/" ++ n, oex-rotate(oex-set-names(), now_unix_ms() / 86400000));
+   let sealed = oex-sets-in(oex-sealed-dir());
+   (String) named == "none" ? [[], []] : (String) named != "" ? [map(s => [trim(s), "named"], split-on(named, ",")), []] : [oex-choose(sealed, oex-sets-in(oex-sets-dir()), rows, oex-live-digest(), now_unix_ms(), gaps), oex-held(sealed, rows, oex-live-digest(), gaps)];
   }
-  def oex-set-request(set, port, until) = json-emit(json-node-object(append([fhn-s("fixtures", set), fhn-s("prompt_variant", "exam"), fhn-n("reply_budget", 256), fhn-n("witness_port", port)], nothing?(until) ? [] : [fhn-n("until_ms", until)]))) ++ "\n";
-  def oex-set-one(ctx, set, until) {
+  def oex-chosen-line(sets) = "sets chosen: " ++ (nil?(sets) ? "none" : str-join-with(map(s => s[0] ++ " (" ++ s[1] ++ ")", sets), ", "));
+  def oex-held-line(held) = "sets held: " ++ str-join-with(map(s => s[0] ++ " (" ++ s[1] ++ ")", held), ", ");
+  // a sealed set begins only while the time left holds each of its asks at the median pace of the voice's last measured reading, the slowest of them after,
+  // and the floor any set begins with; a rotation set begins on that floor alone
+  def oex-ask-ms(r) = filter(x => !nothing?(x), map(s => fcgp-num(s, "ask_ms"), fcgp-present?(r, "per_scenario") ? json-array-elements(json-object-get(r, "per_scenario")) : []));
+  def oex-paced(rows) = foldl((best, r) => (String) fcgp-str(r, "model") == oex-voice() && oex-speaks?(r) && !nil?(oex-ask-ms(r)) ? r : best, nothing(), rows);
+  def oex-floor-of(set, rows) {
+   let paced = oex-paced(rows);
+   let asks = nothing?(paced) ? [] : oex-ask-ms(paced);
+   let slowest = foldl((m, x) => x > m ? x : m, oex-set-floor-ms(), asks);
+   !oex-sealed?(set) ? oex-set-floor-ms() : nil?(asks) ? len(ep-text-rows(set)) * oex-set-floor-ms() + oex-set-floor-ms() : len(ep-text-rows(set)) * ovg-median(asks) + slowest;
+  }
+  def oex-set-request(set, port, until) = json-emit(json-node-object(append(append([fhn-s("fixtures", set), fhn-s("model", oex-voice()), fhn-s("prompt_variant", oex-variant()), fhn-n("reply_budget", 256), fhn-n("witness_port", port)], oex-sealed?(set) ? [fhn-s("axes", oex-axes-of(set))] : []), nothing?(until) ? [] : [fhn-n("until_ms", until)]))) ++ "\n";
+  def oex-set-one(ctx, set, until, gaps) {
    let w = oex-witness(ctx, "set");
-   (Comparable) w[0] != 1 ? oex-say(set ++ ": no reading: " ++ w[1]) : oex-set-read(ctx, set, until);
+   (Comparable) w[0] != 1 ? oex-say(set ++ ": no reading: " ++ w[1]) : oex-set-read(ctx, set, until, gaps);
   }
-  def oex-set-read(ctx, set, until) {
+  // the line it says: the reading's exit, a cut, what was kept, and the reading's own lines
+  def oex-set-read(ctx, set, until, gaps) {
+   let began = now_unix_ms();
    let run = hch-run-in(ctx[0], "set", oex-denied(ctx[1], oex-read-door()), oex-set-request(set, ctx[2], until), nothing?(until) ? hch-by(7200000) : until + 600000);
-   oex-say(set ++ ": exit " ++ hch-status-text(run) ++ "\n" ++ hch-with(run[1], ["[alignment] mode=", "[alignment] unread", "[alignment-axis]"]));
+   let kept = oex-kept-of(run[1], set, began, gaps, ep-text-rows(oex-alignment-ledger()));
+   let line = set ++ ": exit " ++ hch-status-text(run) ++ oex-cut-note(run[1]) ++ "; " ++ kept ++ "\n" ++ hch-with(run[1], ["[alignment] mode=", "[alignment] unread", "[alignment-axis]"]);
+   let said = oex-say(line);
+   line;
   }
-  def oex-set-at(ctx, set, until, floor) = oex-holds-floor?(until, floor) ? oex-set-one(ctx, set, until) : oex-say(set ++ ": unread this night: " ++ hw-minutes(oex-left(until)) ++ " left");
+  // a sealed set's answers stay only once its held-out row counts the reading that read them: a cut or unspoken reading keeps nothing, so no part of the seal is carried
+  def oex-counted-since?(set, began, gaps, rows) { let g = oex-heldout-of(set, gaps); !nothing?(g) && any?(r => oex-at-of(r) >= began, ovg-where(g, rows)); }
+  def oex-kept-of(out, set, began, gaps, rows) = oex-sealed?(set) && !oex-counted-since?(set, began, gaps, rows) ? "no answer kept: its held-out row does not count this reading, so nothing of the seal is carried" : oex-keep(out, set, oex-answers-home(), oex-live-digest(), oex-kept-home());
+  // a set the room cut: its row holds the scenarios read and names the rest, so no reader takes it for a whole reading and the next night reads it again;
+  // a room that ended before the first ask lands no row at all
+  def oex-cut-note(out) = !oex-has?(out, "[alignment] unread ") ? "" : oex-has?(out, " scenarios=0 ") ? "; the room ended before its first ask: no row" : "; cut by the room: its row reads short and names the scenarios left, never a whole reading";
+  // ---- what a reading answered, kept by the prompt it wore --------------------------------------------------------------
+  // The ids the reading's table names answered ("id\tpassed/total\tstatus\twords=N\tfailed=..."), their text as the reading kept it (.hearth/alignment/exam/<id>.txt): the
+  // voice's own generated text only. A later reading under the same prompt takes its ids' places and the rest stay, so a cut reading keeps what it read. A reading
+  // whose mode line names another prompt than the live one keeps nothing, named.
+  def oex-answers-home() = "receipts/alignment-answers";
+  def oex-kept-home() = ".hearth/alignment/exam";
+  def oex-answer-row(id, answer) = json-node-object([fhn-s("id", id), fhn-s("answer", answer)]);
+  def oex-answered(out) = map(f => f[0], filter(f => len(f) >= 5 && ep-starts?(f[3], "words=") && (String) f[2] == "answered", map(l => split-on(l, "\t"), split-on(out, "\n"))));
+  def oex-mode-digest(out) = trim(oex-field(foldl((found, l) => ep-starts?(l, "[alignment] mode=") ? l : found, "", split-on(out, "\n")), "prompt_digest"));
+  def oex-keep(out, set, home, digest, kept) {
+   let worn = oex-mode-digest(out);
+   let ids = oex-answered(out);
+   (String) worn != "" && (String) worn != oex-d12(digest) ? "no answer kept: the reading wore prompt " ++ worn ++ ", the live prompt is " ++ oex-d12(digest)
+   : nil?(ids) ? "no answer kept: the reading answered none"
+   : oex-keep-in(set, ids, home ++ "/" ++ oex-d12(digest), kept);
+  }
+  // the count it says is the answers this reading kept: its set's answered ids whose text stands; an id whose text is gone is named, and no file is written when none stands
+  def oex-keep-in(set, ids, dir, kept) {
+   let path = dir ++ "/" ++ oex-base(set);
+   let mine = filter(i => any?(r => (String) fcgp-str(r, "id") == i, ep-text-rows(set)), ids);
+   let fresh = filter(i => !nothing?(read_file(kept ++ "/" ++ i ++ ".txt")), mine);
+   let missing = filter(i => !any?(f => (String) f == i, fresh), mine);
+   let gone = nil?(missing) ? "" : "; no text stood for " ++ str-join-with(missing, ",");
+   nil?(fresh) ? "no answer kept: no text stood for " ++ oex-or(str-join-with(missing, ","), "an id of this set") : oex-keep-wrote(dir, path, map(r => oex-keep-line(fcgp-str(r, "id"), fresh, ep-text-rows(path), kept), ep-text-rows(set)), len(fresh), gone);
+  }
+  def oex-keep-wrote(dir, path, all, n, gone) {
+   let lines = filter(l => (String) l != "", all);
+   let made = hch-mkdirs(dir);
+   let wrote = write_file_text(path, str-join-with(lines, "\n") ++ "\n");
+   n.str() ++ " answer(s) kept, " ++ len(lines).str() ++ " in " ++ path ++ gone;
+  }
+  def oex-keep-line(id, ids, old, kept) {
+   let fresh = any?(i => (String) i == id, ids) ? read_file(kept ++ "/" ++ id ++ ".txt") : nothing();
+   let prior = foldl((found, r) => (String) fcgp-str(r, "id") == id ? fcgp-str(r, "answer") : found, nothing(), old);
+   !nothing?(fresh) ? lrun-row-line(oex-answer-row(id, fresh)) : !nothing?(prior) ? lrun-row-line(oex-answer-row(id, prior)) : "";
+  }
+  def oex-set-at(ctx, set, until, floor, gaps) = oex-holds-floor?(until, floor) ? oex-set-one(ctx, set, until, gaps) : oex-say(set ++ ": unread this night: " ++ hw-minutes(oex-left(until)) ++ " left cannot hold its floor of " ++ hw-minutes(floor));
   // ---- the door ----------------------------------------------------------------------------------------------------
   def oex-profile(opts, home) {
    let named = fcgp-str(opts, "profile");
@@ -263,11 +409,15 @@ section [form.bml] {
    let ctx = [home, oex-profile(opts, home), port, oex-or(fcgp-str(opts, "ledger"), oex-ledger())];
    let until = fcgp-num(opts, "until_ms");
    let rows = filter(r => !nothing?(r), map(e => oex-exam-at(ctx, e, opts, until), oex-chosen(opts)));
-   let sets = oex-sets(opts);
-   let read = map(s => oex-set-at(ctx, s, until, 60000), sets);
+   let ledger = ep-text-rows(oex-alignment-ledger());
+   let gaps = fcgp-rows(oex-gaps());
+   let sets = oex-sets(opts, ledger, gaps);
+   let chose = oex-say(oex-chosen-line(sets[0]));
+   let toldHeld = nil?(sets[1]) ? 0 : oex-say(oex-held-line(sets[1]));
+   let read = map(s => oex-set-at(ctx, s[0], until, oex-floor-of(s[0], ledger), gaps), sets[0]);
    let denied = len(filter(r => (Comparable) fcgp-num(r, "network_denied") == 1, rows));
    let graded = len(filter(r => (Comparable) fcgp-num(r, "graded") == 1, rows));
-   let summary = "[offline-exam] summary: kinds " ++ len(rows).str() ++ " read, " ++ denied.str() ++ " denied, " ++ graded.str() ++ " graded; sets " ++ len(sets).str() ++ " begun; ledger " ++ ctx[3];
+   let summary = "[offline-exam] summary: kinds " ++ len(rows).str() ++ " read, " ++ denied.str() ++ " denied, " ++ graded.str() ++ " graded; sets " ++ len(sets[0]).str() ++ " chosen, " ++ len(sets[1]).str() ++ " held; ledger " ++ ctx[3];
    print_str(summary);
   }
  }
