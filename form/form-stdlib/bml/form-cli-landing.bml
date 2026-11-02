@@ -5,8 +5,10 @@
 //    "paths":["file", ...], "subject":"<commit subject>", "body":"<commit body>",
 //    "restart":"origin/main" (optional), "main":1 (optional: the landed commit also fast-forwards main),
 //    "bands":[{"band","full","writable":[..]}, ...] (optional: the queued gaps' bands, host-walk-carry.bml hw-bands)}
-// Each named band whose writable files the landing's own commit touches is read over the tree that lands, after the
-// gates, and the commit carries each reading as a Band-Witness trailer naming that tree (ld-witnessed).
+// After the gates the landing reads, over the tree that lands, the own band of each code file its own commit touched and
+// each named band whose writable files it touched (a gate row that ran a band answers for it), a queued band short there
+// once more over the tree its commit stands on, and the commit carries each reading as a Band-Witness trailer naming the
+// tree it read, inside the message's one trailer block (ld-band-witness, ld-witnessed).
 // A native request and receipt stay nodes. The continuation and Git evidence live
 // under .form-heal/landing-*/. Owned paths are committed; unrelated tracked edits
 // retain a private Git ref while rebase and current-source observation run.
@@ -28,6 +30,7 @@ import observe/form-membrane-runtime-census.fk;
 import form-stdlib/bml/string-join.bml;
 import form-stdlib/bml/form-cli-code-memory.bml;
 import form-stdlib/bml/form-cli-check-witness.bml;
+import form-stdlib/bml/form-cli-task-runtime.bml;
 import gate/drift-gates.bml;
 section [form.bml] {
  class Land {
@@ -261,39 +264,97 @@ section [form.bml] {
    let run=ld-witness-run(witness);
    !ld-witness-ok?(witness,run[1]) || !ld-task-witness(s) ? false : {
     let rows=dg-rows-for(moved); let pass=dg-run(rows);
-    ld-set(s,"verification",json-node-object([fhn-n("pass",pass),fhn-n("full",dg-full(rows)),json-node-pair("paths",json-node-array(moved |> map(json-node-string)))]));
+    ld-set(s,"verification",json-node-object([fhn-n("pass",pass),fhn-n("full",dg-full(rows)),json-node-pair("paths",json-node-array(moved |> map(json-node-string))),fhn-a("rows",rows |> map(r => json-node-object([fhn-s("unit",dg-unit(r)),fhn-n("want",dg-want(r))])))]));
     dg-green?(pass,rows);
    };
   }
-  // the landing's own commit: HEAD under the request's subject, which origin/main does not hold yet; a commit main holds is never rewritten
+  // the landing's own commit: HEAD under the request's subject, which no remote branch holds yet; a commit a remote holds is never rewritten
   def ld-own?(s) {
    let subject=trim(ld-step(s,"own-subject",["log","-1","--format=%s","HEAD"])[1]);
-   let held=ld-step(s,"own-ahead",["merge-base","--is-ancestor","HEAD","refs/remotes/origin/main"]);
-   subject == fhn-text(ld-field(s,"request"),"subject") && !nothing?(held[0]) && held[0] == 1;
+   let held=ld-step(s,"own-held",["for-each-ref","--contains","HEAD","--format=%(refname)","refs/remotes"]);
+   subject == fhn-text(ld-field(s,"request"),"subject") && hch-ok?(held) && trim(held[1]) == "";
   }
   def ld-touched(s) = ld-own?(s) ? ld-changed(s,["diff-tree","--no-commit-id","--name-only","-z","-r","HEAD"]) : [];
-  // The bands the request names (the queued gaps', host-walk-carry.bml hw-bands) whose writable files the landing's own commit touched, each read once over the
-  // tree that lands by a gate row's own reader (dg-read), after the gates: the witness the commit carries. A band short of its full holds nothing and witnesses nothing
+  // The bands a landing reads over the tree that lands, after the gates, each once with the touched files it reads: [band, full, paths, own]. The own band of each
+  // code file its own commit touched, the one its stem names (form/form-stdlib/tests/<stem>-band.bml or .fk) standing in that tree, and each band the request names
+  // (the queued gaps', host-walk-carry.bml hw-bands) whose writable files it touched. A band's full is the pin its head names (fctrt-verdict), else its gap's
   def ld-writable(band) = ld-nodes(band,"writable") |> map(json-string-value);
-  def ld-band-read(band,touched) {
-   let reading=dg-read(dg-row("band-witness",fhn-text(band,"band"),nothing(),fhn-count(band,"full")));
-   let value=dg-exited-0?(reading) && !nothing?(reading[3]) ? reading[3].str() : "-";
-   json-node-object([fhn-s("band",fhn-text(band,"band")),fhn-s("read",value + "/" + fhn-count(band,"full").str()),fhn-a("paths",ld-writable(band) |> filter(p => ld-has?(touched,p)) |> map(json-node-string))]);
+  def ld-code?(p) = str_find(p,"/tests/",0) < 0 && (dg-ends?(p,".bml") || dg-ends?(p,".fk"));
+  def ld-stem(p) { let base=substring(p,dg-rfind(p,"/") + 1,len(p)); let dot=dg-rfind(base,"."); dot < 0 ? base : substring(base,0,dot); }
+  def ld-own-bands(s,p) = ["-band.bml","-band.fk"] |> map(x => "form/form-stdlib/tests/" + ld-stem(p) + x) |> filter(b => file_size(ld-at(ld-text(s,"directory"),b)) >= 0);
+  def ld-merged(acc,x) = any?(y => y[0] == x[0],acc) ? acc |> map(y => y[0] == x[0] ? [y[0],y[1] > 0 ? y[1] : x[1],ld-once(y[2] + x[2]),y[3] || x[3]] : y) : acc + [x];
+  def ld-bands-of(s,touched) {
+   let own=foldl((acc,p) => acc + (ld-own-bands(s,p) |> map(b => [b,0,[p],true])),[],touched |> filter(p => ld-code?(p)));
+   let named=ld-nodes(ld-field(s,"request"),"bands") |> filter(b => fhn-text(b,"band") != "") |> map(b => [fhn-text(b,"band"),fhn-count(b,"full"),ld-writable(b) |> filter(p => ld-has?(touched,p)),false]) |> filter(x => !nil?(x[2]));
+   foldl((acc,x) => ld-merged(acc,x),[],own + named);
   }
-  def ld-band-witness-of(s,touched) {
-   let named=ld-nodes(ld-field(s,"request"),"bands") |> filter(b => fhn-text(b,"band") != "" && any?(p => ld-has?(touched,p),ld-writable(b)));
-   ld-set(s,"band_witness",json-node-array(named |> map(b => ld-band-read(b,touched))));
+  def ld-full(s,x) { let pin=fctrt-verdict(read_file(ld-at(ld-text(s,"directory"),x[0]))); pin > 0 ? pin : x[1]; }
+  // a band's reading: a gate row that ran it as the landing verified read its want (the gates were green); any other is read here, at its place in the checkout
+  // that lands, by a gate row's own reader (dg-read)
+  def ld-gate-want(s,band) {
+   let rows=json-object-has?(ld-state(s),"verification") ? ld-nodes(ld-field(s,"verification"),"rows") |> filter(r => fhn-text(r,"unit") == band && fhn-count(r,"want") >= 0) : [];
+   nil?(rows) ? nothing() : fhn-count(rows[0],"want");
   }
-  def ld-band-witness(s) = nil?(ld-nodes(ld-field(s,"request"),"bands")) ? s : ld-band-witness-of(s,ld-touched(s));
-  // The commit carries what its bands read over the tree that lands: its subject, its body, then one trailer per band,
-  // "Band-Witness: <band> <value>/<full> <tree> <path> ..", the witness exit-proof.bml ep-unwitnessed reads. The message is
-  // rewritten in place, the tree unchanged; a message that already says so stands
-  def ld-witness-lines(s,tree) = ld-nodes(ld-state(s),"band_witness") |> map(row => "Band-Witness: " + fhn-text(row,"band") + " " + fhn-text(row,"read") + " " + tree + " " + (ld-nodes(row,"paths") |> map(json-string-value)).join(" "));
+  def ld-read-here(s,band,full) {
+   let reading=dg-read(dg-row("band-witness",ld-at(ld-text(s,"directory"),band),nothing(),full));
+   dg-exited-0?(reading) && !nothing?(reading[3]) ? reading[3] : nothing();
+  }
+  // A queued band short over the tree that lands is read once more over the tree its commit stands on (HEAD~1): a detached worktree beside the landing's
+  // evidence, the band run there by this kernel as a child. A reading no higher there was short before this landing came; an own band short holds its file whatever
+  def ld-parent-at(s) = ld-text(s,"io") + "/parent";
+  def ld-parent-free(s) {
+   let removed=ld-step(s,"parent-remove",["worktree","remove","--force",ld-parent-at(s)]);
+   let swept=fs-remove-tree(ld-parent-at(s));
+   ld-step(s,"parent-prune",["worktree","prune"]);
+  }
+  // a band inside the checkout is read at its place in the worktree; one outside it reads where it stands
+  def ld-in-tree(s,band) { let at=fcr-abs(ld-text(s,"directory")) + "/"; len(band) > len(at) && substring(band,0,len(at)) == at ? substring(band,len(at),len(band)) : band; }
+  def ld-parent-read(s,band) {
+   let freed=ld-parent-free(s);
+   let added=ld-step(s,"parent-add",["worktree","add","--detach","--force",ld-parent-at(s),"HEAD~1"]);
+   let run=hch-ok?(added) ? hch-run-with-at(ld-text(s,"io"),"parent-band",ld-parent-at(s),[fhn-root() + "/fkwu",ld-in-tree(s,band)],"",hch-by(dg-deadline-ms()),"/dev/null") : [nothing(),"",""];
+   let value=hch-ok?(run) ? parse-int(hch-tail-line(run[1])) : nothing();
+   let gone=ld-parent-free(s);
+   value;
+  }
+  def ld-read-text(v,full) = (nothing?(v) ? "-" : v.str()) + "/" + full.str();
+  def ld-band-row(band,read,tree,paths) = json-node-object([fhn-s("band",band),fhn-s("read",read),fhn-s("tree",tree),fhn-a("paths",paths |> map(json-node-string))]);
+  def ld-band-rows(s,x,tree) {
+   let full=ld-full(s,x);
+   let ran=ld-gate-want(s,x[0]);
+   let v=nothing?(ran) ? ld-read-here(s,x[0],full) : ran;
+   let before=!x[3] && !nothing?(v) && v != full ? ld-parent-read(s,x[0]) : nothing();
+   [ld-band-row(x[0],ld-read-text(v,full),tree,x[2])] + (nothing?(before) ? [] : [ld-band-row(x[0],ld-read-text(before,full),ld-rev(s,"HEAD~1^{tree}"),x[2])]);
+  }
+  // the witness the commit carries: what each band read and the tree it read. A band short of its full holds nothing and witnesses nothing
+  def ld-band-witness(s) {
+   let touched=ld-touched(s);
+   let bands=nil?(touched) ? [] : ld-bands-of(s,touched);
+   let tree=nil?(bands) ? "" : ld-rev(s,"HEAD^{tree}");
+   ld-set(s,"band_witness",json-node-array(foldl((acc,x) => acc + ld-band-rows(s,x,tree),[],bands)));
+  }
+  // The commit carries what its bands read, one trailer per reading, "Band-Witness: <band> <value>/<full> <tree> <path> ..", the record exit-proof.bml
+  // ep-unwitnessed reads. The message keeps one trailer block: the witness lines open the body's own block when its last paragraph is one, so a co-author
+  // stays a trailer and stays last, and else they make a block of their own after the body. The message is rewritten in place, the tree unchanged; a
+  // message that already says so stands
+  def ld-witness-lines(s) = ld-nodes(ld-state(s),"band_witness") |> map(row => "Band-Witness: " + fhn-text(row,"band") + " " + fhn-text(row,"read") + " " + fhn-text(row,"tree") + " " + (ld-nodes(row,"paths") |> map(json-string-value)).join(" "));
+  def ld-key-byte?(b) = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 45;
+  def ld-key-end(l,i) = i < len(l) && ld-key-byte?(str_byte_at(l,i)) ? ld-key-end(l,i + 1) : i;
+  def ld-trailer-line?(l) { let k=ld-key-end(l,0); k > 0 && k + 1 < len(l) && str_byte_at(l,k) == 58 && str_byte_at(l,k + 1) == 32; }
+  def ld-folded?(l) = len(l) > 0 && (str_byte_at(l,0) == 32 || str_byte_at(l,0) == 9);
+  def ld-trailer-block?(lines) = !nil?(lines) && ld-trailer-line?(lines[0]) && all?(l => ld-trailer-line?(l) || ld-folded?(l),lines);
+  def ld-witness-message(subject,body,lines) {
+   let paras=split-on(trim(body),"\n\n") |> filter(p => trim(p) != "");
+   let last=nil?(paras) ? [] : split-on(trim(paras[len(paras) - 1]),"\n");
+   let block=ld-trailer-block?(last);
+   let head=block ? take(len(paras) - 1,paras) : paras;
+   subject + "\n\n" + (nil?(head) ? "" : head.join("\n\n") + "\n\n") + (block ? lines + last : lines).join("\n") + "\n";
+  }
   def ld-witnessed(s) {
-   let lines=ld-witness-lines(s,ld-rev(s,"HEAD^{tree}"));
+   let lines=ld-witness-lines(s);
    nil?(lines) ? true : {
-    let request=ld-field(s,"request"); let body=fhn-text(request,"body");
-    let text=fhn-text(request,"subject") + "\n\n" + (body == "" ? "" : body + "\n\n") + lines.join("\n") + "\n";
+    let request=ld-field(s,"request");
+    let text=ld-witness-message(fhn-text(request,"subject"),fhn-text(request,"body"),lines);
     let said=ld-step(s,"witness-read",["log","-1","--format=%B","HEAD"]);
     trim(said[1]) == trim(text) ? true : {
      let message=ld-text(s,"io") + "/witness-message";

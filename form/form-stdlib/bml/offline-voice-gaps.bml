@@ -15,9 +15,10 @@
 //   threshold | against    threshold (a number, or a string for a string field) or another field of the same row
 //   also                   more comparisons the same row must hold: [{field, compare, threshold|against}, ..]
 //   not_in                 {source, on}: the row's `on` value must appear in no row of that source
-//   landed                 {not_source, gated}: a native source-changing landing on the ref must follow the row, or the gap reads open; gated 1: a gate must have run the band
-//                          of each code file that landing touched as it landed, a gate row at its commit or the queued gaps' bands the landing read over its own tree
-//                          (exit-proof.bml ep-unwitnessed): an edit no gate witnesses is not yet an improvement, and a landing that followed with one is named
+//   landed                 {not_source, gated, queue}: a native source-changing landing on the ref that touched the files the row's gap writes (the queue's row of
+//                          the row's `gap` names them) must follow the row, or the gap reads open; gated 1: each such landing's record reads every code file it
+//                          touched whole as it landed (exit-proof.bml ep-unwitnessed) and the gap's own band at its full over the tree that landed: an edit no
+//                          band witnesses is not yet an improvement, and each landing short is named
 //   spread                 (last) a field: the last row's margin (`against` less `field`) must exceed how far that field scatters over every
 //                          row holding `where`, so a reading closes only when it separates from its siblings' noise; one row alone reads open
 //   moved                  a field: the last row's value must first stand inside within_ms, read over the whole source, or the gap reads open
@@ -27,7 +28,7 @@
 //   by_schedule            1 (feature, share): a tracked ledger with no coordinator column reads only the rows native landings on the ref added inside within_ms (exit-proof.bml
 //                          ep-landed-rows): a session's row, in this tree or landed under its own commit, is no row of the schedule, whatever its clock reads
 //   left, right            (pair) the tests that choose the two sides, among the rows holding `where`
-//   stood                  (landings) {days, gated}: a landing younger than days waits; a native one counts only when each line it added to source still stands on the ref and, gated 1, a gate ran the band of its code as it landed
+//   stood                  (landings) {days, gated}: a landing younger than days waits; a native one counts only when each line it added to source still stands on the ref and, gated 1, its record reads its code whole as it landed
 //   next                   {band, step}: the band a closing movement answers to and the step toward it; observe/self-steer-run.bml offers it while the row stands open
 //   on_slot                1: a file no landing carries (the walk's own .hearth): the row's time must stand in a slot's window, or the gap reads open
 //   none_reads             "open": no row holding `where` is an open gap by its own name; absent, it reads unread
@@ -162,24 +163,36 @@ section [form.bml] {
    let all = append(append(append(cons(first, more), free), landed), ovg-moved-rule(gap, row, opts));
    [ovg-worst(all), str-join-with(map(r => r[1], all), "; ") ++ ovg-show(gap, row)];
   }
-  // landed: a green row is not a landed edit: a native source-changing landing on the ref must follow it. Gated, that landing's touched code stands witnessed as it
-  // landed (exit-proof.bml ep-unwitnessed); a native landing that followed with code no gate ran is named, and counts not
+  // landed: a green row is not a landed edit: a native source-changing landing on the ref must follow it and touch the files the row's gap writes, which the
+  // rule's queue names: the landing that carried its edit. A landing that touched none of them carried another edit and answers not for this one. Gated, each
+  // landing that touched them stands witnessed as it landed (exit-proof.bml ep-unwitnessed) and its record reads the gap's own band whole over the tree that
+  // landed: the turn said its band went green, and the landing reads it again. Each one short is named
   def ovg-landed-rule(gap, row, opts) = nil?(ovg-keys(fcgp-obj(gap, "landed"))) ? [] : ovg-landed-read(fcgp-obj(gap, "landed"), row, opts);
   def ovg-landed-read(rule, row, opts) {
    let repo = ovg-repo(opts);
    let ref = ovg-ref(opts);
+   let id = fcgp-str(row, "gap");
+   let queue = fcgp-str(rule, "queue");
+   let q = (String) queue == "" ? nothing() : ovg-queue-row(ep-text-rows(ovg-under(opts, queue)), id);
+   let writable = nothing?(q) ? [] : ovg-strings(q, "writable");
+   let band = nothing?(q) ? "" : fcgp-str(q, "band");
    let landings = ep-landings(repo, ref, (fcgp-num(row, "at_unix_ms") ?? 0) - 60000);
    let crossings = ovg-crossings(repo, ref);
    let zone = ovg-zone(opts);
    let gated = (Comparable) (fcgp-num(rule, "gated") ?? 0) == 1;
-   nothing?(landings) || nothing?(crossings) || nothing?(zone) ? [["unread", "git or the crossings ledger did not read on " ++ ref ++ " in " ++ repo]]
-   : ovg-landed-said(ref, gated, map(l => [l, gated ? ep-unwitnessed(repo, l) : []], filter(l => ovg-landed-after?(row, [l], []) && ep-native-landing?(l, crossings, zone) && ep-source-changing?(l, ovg-strings(rule, "not_source")), landings)));
+   nil?(writable) ? [["open", ((String) queue == "" ? "the rule names no queue" : "the queue " ++ queue ++ " names no file gap \"" ++ id ++ "\" writes") ++ ", so no landing reads as the one that carried its edit"]]
+   : nothing?(landings) || nothing?(crossings) || nothing?(zone) ? [["unread", "git or the crossings ledger did not read on " ++ ref ++ " in " ++ repo]]
+   : ovg-landed-said(ref, id, band, map(l => [l, gated ? ep-unwitnessed(repo, l) : [], gated && (String) band != "" && !ep-band-whole?(l, band, writable)], filter(l => ovg-landed-after?(row, [l], writable) && ep-native-landing?(l, crossings, zone) && ep-source-changing?(l, ovg-strings(rule, "not_source")), landings)));
   }
-  // [landing, its code no gate witnessed] of each native landing that followed the row: one with none is the landed edit
-  def ovg-landed-said(ref, gated, read) {
-   let short = filter(p => !nil?(p[1]), read);
-   any?(p => nil?(p[1]), read) ? [] : [["open", "no native source-changing landing on " ++ ref ++ (gated ? " whose touched code a gate's band reads" : "") ++ " followed it within " ++ (ovg-land-reach-ms() / 3600000).str() ++ " hours" ++ (nil?(short) ? "" : " (" ++ str-join-with(map(p => substring(p[0][0], 0, 9) ++ " touched " ++ str-join-with(p[1], ", "), ovg-take(3, short)), "; ") ++ ", whose band no gate ran as it landed)")]];
+  // [landing, its code no band witnessed, the gap's band not read whole] of each native landing that followed the row and touched the gap's files: one at least, each whole
+  def ovg-landed-said(ref, id, band, read) {
+   let short = filter(p => !nil?(p[1]) || p[2], read);
+   let within = " within " ++ (ovg-land-reach-ms() / 3600000).str() ++ " hours";
+   nil?(read) ? [["open", "no native source-changing landing on " ++ ref ++ " that touched gap \"" ++ id ++ "\"'s files followed it" ++ within]]
+   : nil?(short) ? []
+   : [["open", "the native landing(s) on " ++ ref ++ " that touched gap \"" ++ id ++ "\"'s files" ++ within ++ " stand unwitnessed (" ++ str-join-with(map(p => ovg-short-said(p, band), ovg-take(3, short)), "; ") ++ ")"]];
   }
+  def ovg-short-said(p, band) = substring(p[0][0], 0, 9) ++ (nil?(p[1]) ? "" : " touched " ++ str-join-with(p[1], ", ") ++ ", whose band no gate ran as it landed") ++ (p[2] ? (nil?(p[1]) ? "" : ", and") ++ " carries no reading of " ++ band ++ " at its full over the tree that landed" : "");
   def ovg-not-in(gap, row, opts) {
    let rule = fcgp-obj(gap, "not_in");
    let on = fcgp-str(rule, "on");
@@ -351,7 +364,7 @@ section [form.bml] {
    let zone = ovg-zone(opts);
    nothing?(landings) || nothing?(crossings) || nothing?(zone) ? ["unread", "git or the crossings ledger did not read on " ++ ref ++ " in " ++ repo] : ovg-landings-said(gap, opts, filter(l => ep-source-changing?(l, ovg-strings(gap, "not_source")), landings), crossings, zone, days, ref);
   }
-  // stood: why a native landing does not yet count ("" when it does): each line it added to source must still stand on the ref, and a gate must have run the band of its code as it landed
+  // stood: why a native landing does not yet count ("" when it does): each line it added to source must still stand on the ref, and its record must read its code whole as it landed
   def ovg-added-lines(repo, sha, path) {
    let run = ep-git(repo, "stood", ["show", sha, "--no-renames", "-U0", "--format=", "--", path]);
    hch-ok?(run) ? filter(l => (Comparable) len(trim(l)) > 0, map(l => substring(l, 1, len(l)), filter(l => ep-starts?(l, "+") && !ep-starts?(l, "+++ "), split-on(hch-said(run), "\n")))) : nothing();
