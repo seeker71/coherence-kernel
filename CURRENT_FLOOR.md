@@ -510,7 +510,7 @@ laid out one line per word, the recipes the reads would be judged by, and the re
 | lane | band | last witnessed |
 |---|---|---|
 | Qwen3.8-27B handle, all 64 layers on the device | `qwen35-dense-token-handle-band` 2147483647 | `receipts/2026-08-30-reground-the-floor-answered-fresh.md` |
-| Q8_0 prefill on the matrix unit; the 577-token prefill at 9.5–16.6 s of GPU, the same token | `q8-0-matmul-mma-band` 15, `qwen38-prefill-quant-band` 31 | `receipts/2026-09-11-named-pain-walked.md` |
+| Q8_0 prefill on the matrix unit; the 577-token prefill at 9.5–16.6 s of GPU, the same token; the K-quant tile decodes its weights one sub-block a K step, the per-weight attestant's bytes | `q8-0-matmul-mma-band` 15, `qwen38-prefill-quant-band` 63 | `receipts/2026-09-11-named-pain-walked.md` |
 | cooperative matvec twins on real weights | `q8-0-matvec-tg-band` 1023, `q6k-q4k-matvec-tg-band` 8191 | `receipts/2026-09-06-the-root-crosses-the-barrier.md`, `receipts/2026-09-06-the-loader-was-the-wall.md` |
 | up to eight sequences in one decode step | `dense-multi-band` 1023 | `receipts/2026-09-09-the-body-had-a-mind-and-the-wrong-question.md` |
 | half and bfloat element formats | `precision-lanes-metal-live-band` 2097151 | `receipts/2026-09-11-the-registry-resolved-and-the-host-that-decided.md` |

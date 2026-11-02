@@ -242,8 +242,40 @@ section [form.bml] {
         "metal::simdgroup_store(acc0, xs + (r4 * 8u) * 32u + c2 * 16u, 32); metal::simdgroup_store(acc1, xs + (r4 * 8u) * 32u + c2 * 16u + 8u, 32); threadgroup_barrier(metal::mem_flags::mem_threadgroup); ",
         "uint tx = lt % 16u; uint ty = lt / 16u; for (uint i = 0u; i < 2u; i++) { uint t = t0 + ty * 2u + i; if (t >= ntok) { continue; } for (uint j = 0u; j < 2u; j++) { uint n = n0 + tx * 2u + j; if (n >= rows) { continue; } y[t * ystride + n] = xs[(ty * 2u + i) * 32u + tx * 2u + j]; } } }"
     ]);
+    // The per-weight K-quant load: every weight decoded whole through the lane's q4k_wi / q6k_wi with its
+    // superblock's q4k_inv / q6k_inv, so per weight the software f16 with its pow2 loop (twice for Q4_K),
+    // the scale (and min) by byte loads and integer division, and the index by division. Kept as the
+    // ATTESTANT the lane's K-quant tile below answers byte for byte (qwen38-prefill-quant-band, bit 32);
+    // the lane dispatches the tile, and the band and the lab (observe/q38-mm-lab.bml, "kq") run this one
+    // beside it.
     def qmb-quant-mma(fname,pfx,stride,blockn) = qmb-mma(fname,
         "for (uint j = 0u; j < 4u; j++) { float w = 0.0f; if (wrow < rows && k0 + wc + j < cols) { uint idx = wrow * cols + k0 + wc + j; uint blk = idx / "+blockn+"u; uint b = blk * "+stride+"u; w = "+pfx+"_wi(qb, b, int(idx - blk * "+blockn+"u), "+pfx+"_inv(qb, b)); } ws[(wc + j) * 32u + wn] = w; } ");
+    // ── the K-quant tile the lane dispatches: one sub-block a K step ──────────
+    // A K step is 32 columns and a K-quant row is whole 256-weight superblocks (by format), so the 32
+    // columns of a step are ONE Q4_K sub-block of one superblock, js = (k0 mod 256) / 32, the same for
+    // every thread of the group. A thread stages four of them (row wrow, columns k0 + wc .. + 3), and all
+    // four share d, dmin, sc and mn. So each is decoded once a step: d and dmin by float(as_type<half>)
+    // from one word (equal to q4k_f16 on every finite f16: q4k-decode-wide-band, bit 1; a non-finite one,
+    // which no file holds, reads infinite here and finite through the software decode), sc and mn by
+    // get_scale_min_k4 on the step's sub-block (q4k_sc / q4k_mn's integer identities: & 63 = mod 64,
+    // >> 6 = div 64, << 4 = mul 16, | over disjoint fields = +), and the four nibbles from one 32-bit
+    // read of their four quant bytes (qb four-aligned, as the decode kernel already holds it). Each
+    // weight is (d * sc) * nib - dmin * mn: d * sc, its product with nib and dmin * mn are exact in f32
+    // (an f16 significand of 11 bits times a 6-bit scale times a 4-bit nibble is at most 21 bits), so
+    // the subtraction is the one rounding however the compiler associates, and ws[] holds the
+    // attestant's floats. The matrix unit then takes the same operands in the same order, and the
+    // output is the attestant's bytes. Requires cols a multiple of 256, rows any.
+    def qmb-q4k-mma(fname) = qmb-mma(fname,
+        "float gsc = 0.0f; float gmn = 0.0f; uint q4 = 0u; uint hs = 0u; if (wrow < rows) { uint js = (k0 % 256u) / 32u; device const uchar* sb = qb + (wrow * (cols / 256u) + k0 / 256u) * 144u; uint dd = *(device const uint*)(sb); uint sc = (js < 4u) ? (uint(sb[4u + js]) & 63u) : ((uint(sb[8u + js]) & 15u) | ((uint(sb[js]) >> 6u) << 4u)); uint mn = (js < 4u) ? (uint(sb[8u + js]) & 63u) : ((uint(sb[8u + js]) >> 4u) | ((uint(sb[4u + js]) >> 6u) << 4u)); gsc = float(as_type<half>(ushort(dd & 65535u))) * float(sc); gmn = float(as_type<half>(ushort(dd >> 16u))) * float(mn); q4 = *(device const uint*)(sb + 16u + (js / 2u) * 32u + wc); hs = (js & 1u) * 4u; } for (uint j = 0u; j < 4u; j++) { ws[(wc + j) * 32u + wn] = (wrow < rows) ? gsc * float((q4 >> (j * 8u + hs)) & 15u) - gmn : 0.0f; } ");
+    // Q6_K, the same step over its own layout: the step's 32 columns are half h = kk / 128 and quarter
+    // g = (kk / 32) mod 4 of their superblock (kk = k0 mod 256), a thread's four columns sit in one of the
+    // two sixteen-weight scale groups (is = wc / 16), so d (as_type<half>, bytes 208-209) and the signed
+    // scale byte decode once a step and the four quants come from two 16-bit reads of low nibbles and two
+    // of high bits (the 210-byte stride is two-aligned): q6k_wi's nib + hi * 16 - 32, the nibble by
+    // nsh = (g / 2) * 4, hi = (qh >> 2g) & 3. (d * sc) * q is exact in f32 (2047 * 128 * 32 < 2^24), so
+    // ws[] holds the attestant's floats exactly.
+    def qmb-q6k-mma(fname) = qmb-mma(fname,
+        "float gsc = 0.0f; uint ql4 = 0u; uint qh4 = 0u; uint nsh = 0u; uint hsh = 0u; if (wrow < rows) { uint kk = k0 % 256u; uint h = kk / 128u; uint g = (kk / 32u) % 4u; device const uchar* sb = qb + (wrow * (cols / 256u) + k0 / 256u) * 210u; gsc = float(as_type<half>(*(device const ushort*)(sb + 208u))) * float(q6k_s8(int(sb[192u + h * 8u + wc / 16u + 2u * g]))); device const ushort* ql = (device const ushort*)(sb + h * 64u + (g & 1u) * 32u + wc); device const ushort* qh = (device const ushort*)(sb + 128u + h * 32u + wc); ql4 = uint(ql[0]) | (uint(ql[1]) << 16u); qh4 = uint(qh[0]) | (uint(qh[1]) << 16u); nsh = (g / 2u) * 4u; hsh = 2u * g; } for (uint j = 0u; j < 4u; j++) { ws[(wc + j) * 32u + wn] = (wrow < rows) ? gsc * float(int(((ql4 >> (j * 8u + nsh)) & 15u) | (((qh4 >> (j * 8u + hsh)) & 3u) << 4u)) - 32) : 0.0f; } ");
     def qmb-q80-mma() = qmb-mma("form_q8_0_matmul_mma_f32",
         "float d = 0.0f; uint b = 0u; if (wrow < rows) { b = ((wrow * cols + k0) / 32u) * 34u; ushort h = (ushort)qb[b] | ((ushort)qb[b + 1u] << 8); d = float(as_type<half>(h)); } for (uint j = 0u; j < 4u; j++) { ws[(wc + j) * 32u + wn] = (wrow < rows) ? d * float((char)qb[b + 2u + wc + j]) : 0.0f; } ");
     def qmb-mma-groups(rows, ntok) = (ntok + 31) / 32 * ((rows + 31) / 32);
