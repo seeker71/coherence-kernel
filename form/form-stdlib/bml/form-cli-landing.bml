@@ -3,7 +3,10 @@
 // stdin: one JSON object
 //   {"witness":"<a command to run and show, or empty>",
 //    "paths":["file", ...], "subject":"<commit subject>", "body":"<commit body>",
-//    "restart":"origin/main" (optional), "main":1 (optional: the landed commit also fast-forwards main)}
+//    "restart":"origin/main" (optional), "main":1 (optional: the landed commit also fast-forwards main),
+//    "bands":[{"band","full","writable":[..]}, ...] (optional: the queued gaps' bands, host-walk-carry.bml hw-bands)}
+// Each named band whose writable files the landing's own commit touches is read over the tree that lands, after the
+// gates, and the commit carries each reading as a Band-Witness trailer naming that tree (ld-witnessed).
 // A native request and receipt stay nodes. The continuation and Git evidence live
 // under .form-heal/landing-*/. Owned paths are committed; unrelated tracked edits
 // retain a private Git ref while rebase and current-source observation run.
@@ -262,6 +265,43 @@ section [form.bml] {
     dg-green?(pass,rows);
    };
   }
+  // the landing's own commit: HEAD under the request's subject, which origin/main does not hold yet; a commit main holds is never rewritten
+  def ld-own?(s) {
+   let subject=trim(ld-step(s,"own-subject",["log","-1","--format=%s","HEAD"])[1]);
+   let held=ld-step(s,"own-ahead",["merge-base","--is-ancestor","HEAD","refs/remotes/origin/main"]);
+   subject == fhn-text(ld-field(s,"request"),"subject") && !nothing?(held[0]) && held[0] == 1;
+  }
+  def ld-touched(s) = ld-own?(s) ? ld-changed(s,["diff-tree","--no-commit-id","--name-only","-z","-r","HEAD"]) : [];
+  // The bands the request names (the queued gaps', host-walk-carry.bml hw-bands) whose writable files the landing's own commit touched, each read once over the
+  // tree that lands by a gate row's own reader (dg-read), after the gates: the witness the commit carries. A band short of its full holds nothing and witnesses nothing
+  def ld-writable(band) = ld-nodes(band,"writable") |> map(json-string-value);
+  def ld-band-read(band,touched) {
+   let reading=dg-read(dg-row("band-witness",fhn-text(band,"band"),nothing(),fhn-count(band,"full")));
+   let value=dg-exited-0?(reading) && !nothing?(reading[3]) ? reading[3].str() : "-";
+   json-node-object([fhn-s("band",fhn-text(band,"band")),fhn-s("read",value + "/" + fhn-count(band,"full").str()),fhn-a("paths",ld-writable(band) |> filter(p => ld-has?(touched,p)) |> map(json-node-string))]);
+  }
+  def ld-band-witness-of(s,touched) {
+   let named=ld-nodes(ld-field(s,"request"),"bands") |> filter(b => fhn-text(b,"band") != "" && any?(p => ld-has?(touched,p),ld-writable(b)));
+   ld-set(s,"band_witness",json-node-array(named |> map(b => ld-band-read(b,touched))));
+  }
+  def ld-band-witness(s) = nil?(ld-nodes(ld-field(s,"request"),"bands")) ? s : ld-band-witness-of(s,ld-touched(s));
+  // The commit carries what its bands read over the tree that lands: its subject, its body, then one trailer per band,
+  // "Band-Witness: <band> <value>/<full> <tree> <path> ..", the witness exit-proof.bml ep-unwitnessed reads. The message is
+  // rewritten in place, the tree unchanged; a message that already says so stands
+  def ld-witness-lines(s,tree) = ld-nodes(ld-state(s),"band_witness") |> map(row => "Band-Witness: " + fhn-text(row,"band") + " " + fhn-text(row,"read") + " " + tree + " " + (ld-nodes(row,"paths") |> map(json-string-value)).join(" "));
+  def ld-witnessed(s) {
+   let lines=ld-witness-lines(s,ld-rev(s,"HEAD^{tree}"));
+   nil?(lines) ? true : {
+    let request=ld-field(s,"request"); let body=fhn-text(request,"body");
+    let text=fhn-text(request,"subject") + "\n\n" + (body == "" ? "" : body + "\n\n") + lines.join("\n") + "\n";
+    let said=ld-step(s,"witness-read",["log","-1","--format=%B","HEAD"]);
+    trim(said[1]) == trim(text) ? true : {
+     let message=ld-text(s,"io") + "/witness-message";
+     write_file_text(message,text) == len(text) ? 1 : form_error("publication witness message was not retained");
+     hch-ok?(ld-step(s,"witness",["commit","-q","--amend","-F",message]));
+    };
+   };
+  }
   def ld-verified(s,verify) {
    let head=ld-rev(s,"HEAD"); let old=ld-text(s,"verified_head");
    let task=json-object-get(ld-field(s,"request"),"task");
@@ -270,8 +310,9 @@ section [form.bml] {
     let base=old == "" ? ld-text(s,"base") : old;
     let moved=ld-carried(s) + ld-changed(s,["diff","--name-only","-z",base,head]);
     let good=verify(s,moved);
-    if good then { ld-say(s,"verified_head",head); ld-say(s,"verified_contract",contract); } else 0;
-    good;
+    let witnessed=if good then ld-witnessed(ld-band-witness(s)) else false;
+    if witnessed then { ld-say(s,"verified_head",ld-rev(s,"HEAD")); ld-say(s,"verified_contract",contract); } else 0;
+    witnessed;
    };
   }
   def ld-remote(s) {

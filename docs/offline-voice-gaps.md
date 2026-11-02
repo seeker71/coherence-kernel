@@ -91,9 +91,13 @@ form-find spool, and `form-cli task` under `fcaq-managed-with` land none. Who as
 beside an unread slot as a note, because a killed retry leaves no row. A feature's ledger that carries no coordinator reads a session's run and the
 walk's alike, and a row's clock proves nothing: the slots' windows are ten hours of a day, and on 2026-10-31 a session's reading at 22:07 read as the schedule's. So
 such a row counts only when a native landing on the ref added it (`by_schedule`, exit-proof.bml `ep-landed-rows`). A session that forged a movement's subject and its crossings
-row would still read native. The walk's own `.hearth` files, which no landing carries, are read by the row's time inside a slot's window (`on_slot`): an inference, not a witness. A turn's landing reads closed only when a gate runs the band of each code file it
-touched (`landed` with `gated`): on 2026-10-31 19:25 the rung's one-value wrapper cf090e073 re-landed a wrong line a session had repaired the day before, its gap's band green,
-`form-cli-check-witness-band` at 959, the gates full. A band-first row says its own band went green, never that the rest of the body stayed whole.
+row would still read native. The walk's own `.hearth` files, which no landing carries, are read by the row's time inside a slot's window (`on_slot`): an inference, not a witness. A turn's landing reads closed only when a gate ran the band of each code file it
+touched as it landed (`landed` with `gated`, exit-proof.bml `ep-unwitnessed`): a gate row at the landing's own commit names the file's own band, or, for a file
+with no band of its own (`parse.bml` has only its queued gaps' bands), the landing read those bands over the tree that landed and its commit carries each
+reading as a `Band-Witness` trailer naming that tree (form-cli-landing.bml `ld-witnessed`; the walk names the queue's bands, `hw-bands`). On 2026-10-31 19:25
+the rung's one-value wrapper cf090e073 re-landed a wrong line a session had repaired the day before, its gap's band green, `form-cli-check-witness-band` at
+959, the gates full; the `check-witness` row that reads it landed the next day (314f17ea8), so a gate is read as it stood at the landing's commit, never at the
+ref. A band-first row says its own band went green, never that the rest of the body stayed whole.
 
 ## The register
 
