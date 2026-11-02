@@ -56,10 +56,15 @@ recipe execution; lower training loss does not yet establish improved answer qua
   drafts, and lifts at its cadence
   ([`form/form-stdlib/bml/host-walk-learn.bml`](form/form-stdlib/bml/host-walk-learn.bml)).
 - **Companion** — [`observe/companion-run.bml`](observe/companion-run.bml) takes
-  what the person says and their tongue, and the voice answers with the last six
-  exchanges as its memory. It listens for what the person means and knows when a
-  human is needed. Each exchange stays in `.hearth/companion/conversation.jsonl`;
-  nothing leaves the Mac.
+  successive stdin triples: words, language, and voice flag (`0` records without
+  generation). It supplies the last six stored exchanges explicitly. One native
+  owner retains the prepared guidance and current retrieved context; exact token
+  matches reuse them, changed context returns to the guidance checkpoint, and
+  changed language/model opens afresh. EOF releases both checkpoints and the
+  model, printing its release result. Per-turn metadata names retained ownership.
+  The door attempts to append exchanges to `.hearth/companion/conversation.jsonl`;
+  inspect writes and host capture controls before claiming retention or privacy.
+  Native inference makes no model-server or provider call.
 - **Engineering turns** — [`observe/native-turn-run.bml`](observe/native-turn-run.bml)
   takes the open gap in [`learn/native-turn-queue.jsonl`](learn/native-turn-queue.jsonl)
   with the fewest attempts, runs its band, hands the goal to the native code lane
