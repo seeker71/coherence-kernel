@@ -9,11 +9,12 @@
 //                           finding and the documents. A red band spends the attempt and stays in repair.
 //   fctrt-claim / commit    one writer holds the session. A second writer cannot claim, and cannot commit a tool
 //                           result. The file door is fctrt-claim-file / fctrt-commit-file.
-//   fctrt-neighbor-paths    the bands whose prelude names a changed file, or a barrel that imports it. Publish
-//                           waits until each of those reads its own verdict (fctrt-holds).
-//   fctrt-hollowed          a neighbour band whose code the candidate moved holds when main's text under the candidate's
-//                           source and the candidate's text under main's source read the same claims short; both lanes
-//                           read it through fctrt-cross-under (in the window) and fctrt-cross-reasons (on main)
+//   fctrt-neighbor-paths    the bands whose preludes (every load directive line) name a changed file, or a barrel that
+//                           imports it. Publish waits until each of those reads its own verdict (fctrt-holds).
+//   fctrt-crossed           a band whose code the candidate moved (fctrt-code: what its loader and judge read) holds when
+//                           the candidate's text under main's source reads main's claims as main's text holds them under
+//                           both sources, and the change owed the move; both lanes read it through fctrt-cross-under (in
+//                           the window) and fctrt-cross-reasons (on main), with a memo the lane keeps for its turn
 //   the voice row of fctrt-act("local-stall") is how the next model receives the same task
 //   fctrt-clock             tokens are progress. A seat or a memory ending is a seat. No tokens past the local
 //                           idle bound is a stall. A short silence is idle.
@@ -34,14 +35,35 @@ section [form.bml] {
   def fctrt-trim-start(s) = (fctrt-starts?(s, "\"") || fctrt-starts?(s, "'") || fctrt-starts?(s, "(") || fctrt-starts?(s, ",")) ? fctrt-trim-start(substring(s, 1, len(s))) : s;
   def fctrt-trim-end(s) = (len(s) > 0 && (fctrt-ends?(s, "\"") || fctrt-ends?(s, "'") || fctrt-ends?(s, ")") || fctrt-ends?(s, ",") || fctrt-ends?(s, ".") || fctrt-ends?(s, ";"))) ? fctrt-trim-end(substring(s, 0, len(s) - 1)) : s;
   def fctrt-paths(sentence) = filter(t => fctrt-path?(t), map(t => fctrt-trim-token(t), split-on(sentence ?? "", " ")));
+  // A band's prelude: every line its loader reads as a load directive, joined. bml-source-prelude-line takes a // or ;
+  // comment line whose words begin with preludes:, in the head or deep in the body; the kernel's collector
+  // (fk_src_collect_preludes) takes the words after a line's ; in Form, preludes: and the import word both. A line a
+  // preludes list carries on to with a \ belongs to it.
   def fctrt-prelude(text) {
-   let source=text ?? "";let marker=str_find(source,"preludes:",0);let newline=str_byte_at("\n",0);
-   marker<0 ? "" : {
-    let start=foldl((begin,index)=>str_byte_at(source,index)==newline ? index+1 : begin,0,0 .. marker);
-    let end=str_find(source,"\n",marker);
-    substring(source,start,end<0 ? len(source) : end);
-   };
+   let t = text ?? "";
+   let form = !fctrt-lowers?(t, 0);
+   str-join(reverse(foldl((held, line) => fctrt-prelude-step(held, line, form), [[], false], split-on(t, "\n"))[0]));
   }
+  def fctrt-prelude-step(held, line, form) {
+   let keep = held[1] || fctrt-load-line?(line, form);
+   [keep ? cons(line ++ "\n", held[0]) : held[0], keep && fctrt-ends?(trim(line), "\\")];
+  }
+  def fctrt-load-line?(line, form) {
+   let t = trim(line);
+   let semi = form ? str_find(t, ";", 0) : (fctrt-starts?(t, ";") ? 0 : -1);
+   let at = fctrt-starts?(t, "//") ? 2 : (semi >= 0 ? semi + 1 : -1);
+   let p = at < 0 ? "" : trim(substring(t, at, len(t)));
+   at >= 0 && (fctrt-starts?(p, "preludes:") || (form && fctrt-import-at?(p, 0)));
+  }
+  // a text lowers through the BML floor when a line begins with `section [` (fk_unit_lowers); any other text is Form
+  def fctrt-lowers?(t, i) {
+   let at = str_find(t, "section [", i);
+   at < 0 ? false : fctrt-first-on-line?(t, at - 1) ? true : fctrt-lowers?(t, at + 9);
+  }
+  def fctrt-lower(b) = (b >= 65 && b <= 90) ? b + 32 : b;
+  def fctrt-ci-at?(t, p, w, k) = k >= len(w) ? true : (p + k < len(t) && fctrt-lower(str_byte_at(t, p + k)) == str_byte_at(w, k) && fctrt-ci-at?(t, p, w, k + 1));
+  // the loader's import word (fk_src_word_at_ci): any case, then a space, a tab, a colon, a quote or the line's end
+  def fctrt-import-at?(t, p) = fctrt-ci-at?(t, p, "import", 0) && (p + 6 >= len(t) || any?(c => str_byte_at(t, p + 6) == c, [32, 9, 58, 34, 10, 13]));
   def fctrt-band?(path) = str_find(path, "/tests/", 0) >= 0 || fctrt-starts?(path, "tests/");
   def fctrt-imports?(text, path) = str_find(text, "import " ++ fctrt-body-path(path), 0) >= 0;
   def fctrt-any?(paths, f) = nil?(paths) ? 0 : (f(paths[0]) ? 1 : fctrt-any?(paths[1:], f));
@@ -55,9 +77,15 @@ section [form.bml] {
    map(e=>e[0],filter(e=>fctrt-neighbor?(e,changed,barrels,primary),entries));
   }
   def fctrt-owned(paths,primary) = foldl((owned,path)=>any?(p=>p==path,owned) ? owned : owned+[path],paths,fctrt-neighbor-paths(fctrt-read-tree(),paths,primary));
-  def fctrt-verdict-at(text, at) = at < 0 ? 0 : fctrt-verdict-digits(text, at + 10, "");
+  def fctrt-verdict-at(text, at, w) = at < 0 ? 0 : fctrt-verdict-digits(text, at + w, "");
   def fctrt-verdict-digits(text, i, out) = (i >= len(text) || !(((Comparable) str_byte_at(text, i) >= 48) && ((Comparable) str_byte_at(text, i) <= 57))) ? (out == "" ? 0 : parse-int(out)) : fctrt-verdict-digits(text, i + 1, out ++ substring(text, i, i + 1));
-  def fctrt-verdict(text) = fctrt-verdict-at(text, str_find(text ?? "", "; Verdict ", 0));
+  // a band's pin, on a ; line or a // line, whichever comes first
+  def fctrt-verdict(text) {
+   let t = text ?? "";
+   let semi = str_find(t, "; Verdict ", 0);
+   let slash = str_find(t, "// Verdict ", 0);
+   (slash < 0 || (semi >= 0 && semi < slash)) ? fctrt-verdict-at(t, semi, 10) : fctrt-verdict-at(t, slash, 11);
+  }
   def fctrt-band-score(entry, changed, barrelPaths) = fctrt-mentions-any?(fctrt-prelude(entry[1]), changed) ? 2 : (fctrt-mentions-any?(fctrt-prelude(entry[1]), barrelPaths) ? 1 : 0);
   def fctrt-band-row(entry, changed, barrelPaths) = [fctrt-band-score(entry, changed, barrelPaths), fctrt-verdict(entry[1]), entry[0]];
   def fctrt-prefer?(a, b) = ((Comparable) a[0] > b[0]) || (((Comparable) a[0] == b[0]) && ((Comparable) a[1] > b[1]));
@@ -132,34 +160,130 @@ section [form.bml] {
   def fctrt-holds(rows) = nil?(rows) ? 1 : (fctrt-held?(rows[0]) ? fctrt-holds(rows[1:]) : 0);
 
   // ── a neighbour band the candidate moved ──
-  // The rule. For an owned band whose code the candidate moved, a is main's text read under the candidate's source and c
-  // the candidate's text read under main's source. An alignment the change owes misses the same claims both ways, and
-  // is owed only where main's text reads short of its verdict under the candidate: it holds when c == a < verdict. A
-  // stub or a claim true under any source reads more under main than main's text reads under the candidate, or moves a
-  // band the change left whole (neighbor-hollowed); a text that needs a name only the candidate defines reads nothing
-  // under main (neighbor-unread). "" holds; a reason names the path and both readings.
+  // The rule, said once for both lanes. A band reads its claims one bit each: its pin (main's Verdict) is all ones below
+  // some bit. For an owned band whose code the candidate moved, b is main's text read under main's source, a main's text
+  // under the candidate's source, c the candidate's text under main's source and d the candidate's text under its own.
+  // An alignment the change owes leaves main's claims reading the same claims both ways (the claims of c that main's pin
+  // names are the claims a and b both hold), and is owed only when a claim main's text held on main fails under the
+  // candidate, or when the candidate adds a claim the change makes true (one past the pin that d holds and c does not).
+  // A stub, a claim made true under any source, or a broken claim made vacuous reads neighbor-hollowed; a move the
+  // change did not owe (a stub of a band it left whole, or of a band that waits short for its own gap) reads
+  // neighbor-whole; a text that reads nothing on a side reads neighbor-unread; a pin that is not one bit per claim (a
+  // count) reads its claims together, so a moved one is neighbor-uncounted and is read no further. "" holds.
   def fctrt-word(v) = nothing?(v) ? "nothing" : v.str();
-  def fctrt-hollowed(path, verdict, a, c) = nothing?(c) ? "neighbor-unread: " ++ path ++ " A " ++ fctrt-word(a) ++ " C nothing"
-   : (nothing?(a) || !((Comparable) a == c) || (Comparable) a >= verdict) ? "neighbor-hollowed: " ++ path ++ " A " ++ fctrt-word(a) ++ " C " ++ c.str() ++ " verdict " ++ verdict.str() : "";
-  // A text's code: its bytes with whitespace runs and comments (// to the line's end, a ; that begins its line) read as
-  // one space, its strings whole. An edit to a band's prose moves none of its code, and pays no reading.
-  def fctrt-code(text) = str-join(reverse(fctrt-code-go(text ?? "", 0, 0, [])));
-  def fctrt-code-go(t, s, i, out) = i >= len(t) ? cons(substring(t, s, i), out) : fctrt-code-at(t, s, i, out, str_byte_at(t, i));
-  def fctrt-code-at(t, s, i, out, b) = b == 34 ? fctrt-code-go(t, s, fctrt-str-end(t, i + 1), out)
-   : fctrt-trivia?(t, i, b) ? fctrt-code-past(t, s, i, out, fctrt-trivia-end(t, i)) : fctrt-code-go(t, s, i + 1, out);
-  def fctrt-code-past(t, s, i, out, e) = fctrt-code-go(t, e, e, cons(" ", cons(substring(t, s, i), out)));
+  def fctrt-ones?(v) = !nothing?(v) && (Comparable) v > 0 && band(v, v + 1) == 0;
+  def fctrt-past(r, v) = r - band(r, v);
+  def fctrt-adds?(v, c, d) = !nothing?(d) && (Comparable) (fctrt-past(d, v) - band(fctrt-past(d, v), fctrt-past(c, v))) > 0;
+  def fctrt-abc(a, b, c) = " A " ++ fctrt-word(a) ++ " B " ++ fctrt-word(b) ++ " C " ++ fctrt-word(c);
+  def fctrt-crossed(path, v, b, a, c, d) = !fctrt-ones?(v) ? "neighbor-uncounted: " ++ path ++ " pin " ++ fctrt-word(v)
+   : (nothing?(a) || nothing?(b) || nothing?(c)) ? "neighbor-unread: " ++ path ++ fctrt-abc(a, b, c)
+   : !((Comparable) band(c, v) == band(a, b)) ? "neighbor-hollowed: " ++ path ++ fctrt-abc(a, b, c) ++ " verdict " ++ v.str()
+   : ((Comparable) band(a, b) == b && !fctrt-adds?(v, c, d)) ? "neighbor-whole: " ++ path ++ fctrt-abc(a, b, c) : "";
+  // what the next option hears, in both lanes, when a moved band does not hold
+  def fctrt-cross-note(reasons) = nil?(reasons) ? "" : "Neighbor bands the candidate moved, read crosswise (A: main's text under the candidate's source; B: main's text under main's source; C: the candidate's text under main's source): " ++ str-join(fctrt-commas(reasons)) ++ ". A moved band holds when C reads main's claims as A and B both hold them, and the change owes the move: a claim main's text held fails under the candidate, or the candidate adds a claim the change makes true. Keep each band's claims; align only an expectation the change replaces; leave a band the change left whole as main has it.";
+  def fctrt-commas(xs) = nil?(xs) ? [] : cons(xs[0], nil?(xs[1:]) ? [] : cons(", ", fctrt-commas(xs[1:])));
+  // A text's code: its bytes with whitespace runs and comments read as one space, its edges trimmed, its strings whole.
+  // Which bytes are comment is the reader's: a text that lowers takes // and /* */ as comments, and a ; that begins its
+  // line; any other text is Form, where a ; outside a string begins a comment and // is code (a//b is a name). A line
+  // comment whose words begin with a head the body reads is code, kept to its line's end (its quotes open no string, as
+  // they open none for its reader): the loader's preludes: and, in Form, its import word; the contract's Verdict;
+  // preflight-exec:; the sweep's PROOF LEVEL and STAGED CARRIER (the heads frq-directive? keeps); and a comment line a
+  // preludes list carries on to with a \. An edit to a band's prose moves none of its code, and pays no reading.
+  def fctrt-code(text) = trim(str-join(reverse(fctrt-code-go(text ?? "", fctrt-lowers?(text ?? "", 0), 0, 0, []))));
+  def fctrt-code-go(t, m, s, i, out) = i >= len(t) ? cons(substring(t, s, i), out) : fctrt-code-at(t, m, s, i, out, str_byte_at(t, i));
+  def fctrt-code-at(t, m, s, i, out, b) = b == 34 ? fctrt-code-go(t, m, s, fctrt-str-end(t, i + 1), out)
+   : fctrt-trivia?(t, m, i, b) ? fctrt-code-past(t, m, s, i, out, fctrt-trivia-end(t, m, i))
+   : fctrt-mark(t, m, i, b) > 0 ? fctrt-code-go(t, m, s, scan_run(t, i, 5), out) : fctrt-code-go(t, m, s, i + 1, out);
+  def fctrt-code-past(t, m, s, i, out, e) = fctrt-code-go(t, m, e, e, cons(" ", cons(substring(t, s, i), out)));
   def fctrt-str-end(t, i) {
    let j = scan_run(t, i, 4);
    j >= len(t) ? len(t) : str_byte_at(t, j) == 34 ? j + 1 : fctrt-str-end(t, j + 2);
   }
   def fctrt-first-on-line?(t, j) = j < 0 ? true : str_byte_at(t, j) == 10 ? true : (str_byte_at(t, j) == 32 || str_byte_at(t, j) == 9) ? fctrt-first-on-line?(t, j - 1) : false;
-  def fctrt-comment?(t, i, b) = (b == 47 && i + 1 < len(t) && str_byte_at(t, i + 1) == 47) || (b == 59 && fctrt-first-on-line?(t, i - 1));
-  def fctrt-trivia?(t, i, b) = b == 32 || b == 9 || b == 10 || b == 13 || fctrt-comment?(t, i, b);
-  def fctrt-trivia-end(t, i) {
+  // the width of the comment marker that begins at i in mode m (true: the text lowers), 0 when none does
+  def fctrt-mark(t, m, i, b) = m ? ((b == 47 && i + 1 < len(t) && (str_byte_at(t, i + 1) == 47 || str_byte_at(t, i + 1) == 42)) ? 2 : (b == 59 && fctrt-first-on-line?(t, i - 1)) ? 1 : 0) : (b == 59 ? 1 : 0);
+  def fctrt-heads() = ["preludes:", "Verdict", "preflight-exec:", "PROOF LEVEL", "STAGED CARRIER"];
+  def fctrt-blank-end(t, j) = (j < len(t) && (str_byte_at(t, j) == 32 || str_byte_at(t, j) == 9)) ? fctrt-blank-end(t, j + 1) : j;
+  def fctrt-at?(t, p, w) = p + len(w) <= len(t) && (String) substring(t, p, p + len(w)) == w;
+  def fctrt-directive?(t, m, p) = any?(h => fctrt-at?(t, p, h), fctrt-heads()) || (!m && fctrt-import-at?(t, p));
+  // a comment line a preludes list carries on to: the line before it ends in a \ (fk_src_prelude_backslash_token)
+  def fctrt-line-start(t, j) = j < 0 ? 0 : str_byte_at(t, j) == 10 ? j + 1 : fctrt-line-start(t, j - 1);
+  def fctrt-solid-before(t, j) = j < 0 ? -1 : (str_byte_at(t, j) == 32 || str_byte_at(t, j) == 9 || str_byte_at(t, j) == 13) ? fctrt-solid-before(t, j - 1) : j;
+  def fctrt-carried?(t, i) {
+   let start = fctrt-line-start(t, i - 1);
+   let k = fctrt-solid-before(t, start - 2);
+   start > 0 && k >= 0 && str_byte_at(t, k) == 92;
+  }
+  def fctrt-block?(t, m, i, b) = m && b == 47 && i + 1 < len(t) && str_byte_at(t, i + 1) == 42;
+  def fctrt-kept?(t, m, i, b) = !fctrt-block?(t, m, i, b) && (fctrt-directive?(t, m, fctrt-blank-end(t, i + fctrt-mark(t, m, i, b))) || fctrt-carried?(t, i));
+  def fctrt-comment?(t, m, i, b) = fctrt-mark(t, m, i, b) > 0 && !fctrt-kept?(t, m, i, b);
+  def fctrt-trivia?(t, m, i, b) = b == 32 || b == 9 || b == 10 || b == 13 || fctrt-comment?(t, m, i, b);
+  def fctrt-comment-end(t, m, i) {
+   let close = str_find(t, "*/", i + 2);
+   fctrt-block?(t, m, i, str_byte_at(t, i)) ? (close < 0 ? len(t) : close + 2) : scan_run(t, i, 5);
+  }
+  def fctrt-trivia-end(t, m, i) {
    let j = scan_run(t, i, 0);
-   j < len(t) && fctrt-comment?(t, j, str_byte_at(t, j)) ? fctrt-trivia-end(t, scan_run(t, j, 5)) : j;
+   (j < len(t) && fctrt-comment?(t, m, j, str_byte_at(t, j))) ? fctrt-trivia-end(t, m, fctrt-comment-end(t, m, j)) : j;
   }
   def fctrt-moved?(main, cand) = !nothing?(main) && !nothing?(cand) && (String) main != cand && (String) fctrt-code(main) != fctrt-code(cand);
+  // ── a rename the change makes ──
+  // The names a text defines, in order (BML's def NAME, Form's (defn NAME and (def NAME). A change renames when the names
+  // main's sources define and the candidate's no longer do are as many as the names only the candidate's define; they
+  // pair in order. A text read across the rename has each whole name of a pair [old, new] as its other side.
+  def fctrt-name-byte?(b) = (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || b == 45;
+  def fctrt-name-end(t, i) {
+   let j = scan_run(t, i, 3);
+   (j < len(t) && (str_byte_at(t, j) == 63 || str_byte_at(t, j) == 33)) ? j + 1 : j;
+  }
+  def fctrt-def-lead?(t, at) = at == 0 || any?(c => str_byte_at(t, at - 1) == c, [32, 9, 10, 13, 40, 123]);
+  def fctrt-def-at(t, i) {
+   let a = str_find(t, "def ", i);
+   let n = str_find(t, "defn ", i);
+   let at = a < 0 ? n : ((n < 0 || a < n) ? a : n);
+   at < 0 ? [-1, -1] : fctrt-def-lead?(t, at) ? fctrt-def-name(t, scan_run(t, at + (at == n ? 5 : 4), 0), at + 1) : fctrt-def-at(t, at + 1);
+  }
+  def fctrt-def-name(t, s, next) = fctrt-name-end(t, s) > s ? [s, fctrt-name-end(t, s)] : fctrt-def-at(t, next);
+  def fctrt-defs(text) = fctrt-defs-go(text ?? "", 0, []);
+  def fctrt-defs-go(t, i, out) {
+   let at = fctrt-def-at(t, i);
+   at[0] < 0 ? reverse(out) : fctrt-defs-go(t, at[1], cons(substring(t, at[0], at[1]), out));
+  }
+  def fctrt-has?(xs, x) = any?(y => (String) y == x, xs);
+  def fctrt-zip(xs, ys) = (nil?(xs) || nil?(ys)) ? [] : cons([xs[0], ys[0]], fctrt-zip(xs[1:], ys[1:]));
+  // pairs are [main's text, candidate's text] of the change's sources
+  def fctrt-renames(pairs) {
+   let olds = foldl((all, p) => append(all, fctrt-defs(p[0])), [], pairs);
+   let news = foldl((all, p) => append(all, fctrt-defs(p[1])), [], pairs);
+   let gone = filter(n => !fctrt-has?(news, n), olds);
+   let made = filter(n => !fctrt-has?(olds, n), news);
+   (!nil?(gone) && (Comparable) len(gone) == len(made)) ? fctrt-zip(gone, made) : [];
+  }
+  // to 1: each old name becomes its new one; to 0: each new name its old one. A word after a / or before a . is a path's
+  // segment or a file's name (a preludes or import line naming the source by its stem), never a call, and stays.
+  def fctrt-renamed(text, renames, to) = (nil?(renames) || nothing?(text)) ? text : str-join(reverse(fctrt-ren-go(text, renames, to, 0, 0, [])));
+  def fctrt-ren-go(t, rs, to, s, i, out) = i >= len(t) ? cons(substring(t, s, i), out)
+   : fctrt-name-byte?(str_byte_at(t, i)) ? fctrt-ren-word(t, rs, to, s, i, out, fctrt-name-end(t, i)) : fctrt-ren-go(t, rs, to, s, i + 1, out);
+  def fctrt-path-word?(t, i, e) = (i > 0 && str_byte_at(t, i - 1) == 47) || (e < len(t) && str_byte_at(t, e) == 46);
+  def fctrt-ren-word(t, rs, to, s, i, out, e) {
+   let word = substring(t, i, e);
+   let hit = fctrt-path-word?(t, i, e) ? [] : filter(r => (String) r[1 - to] == word, rs);
+   nil?(hit) ? fctrt-ren-go(t, rs, to, s, e, out) : fctrt-ren-go(t, rs, to, e, e, cons(hit[0][to], cons(substring(t, s, i), out)));
+  }
+  // ── the rule's readings ──
+  // A reading kept for the lane's turn: memo is the record the lane keeps (fctrt-memo-new), or nothing; the same key reads
+  // once. A baseline (b) keys on the band's path and main's text, so every reader of the turn shares it.
+  def fctrt-memo-new() = record_new(0, "rows", []);
+  def fctrt-memo-of(rec) = ((String) value_kind(rec) == "record" && (String) value_kind(record_get(rec, "memo")) == "record") ? record_get(rec, "memo") : nothing();
+  def fctrt-memo(memo, key, f) = (String) value_kind(memo) != "record" ? f() : fctrt-memo-hit(memo, key, f, filter(r => (String) r[0] == key, record_get(memo, "rows")));
+  def fctrt-memo-hit(memo, key, f, hit) = !nil?(hit) ? hit[0][1] : fctrt-memo-keep(memo, key, f());
+  def fctrt-memo-keep(memo, key, v) {
+   let kept = record_set(memo, "rows", cons([key, v], record_get(memo, "rows")));
+   v;
+  }
+  def fctrt-baseline(memo, path, text, read, verdict) = fctrt-memo(memo, "b\n" ++ path ++ "\n" ++ (text ?? ""), () => read(path, verdict));
+  def fctrt-pairs(paths, texts) = nil?(paths) ? [] : cons([paths[0], nil?(texts) ? nothing() : texts[0]], fctrt-pairs(paths[1:], nil?(texts) ? [] : texts[1:]));
+  def fctrt-d(rows, path) = nil?(rows) ? nothing() : ((String) rows[0][0] == path ? rows[0][1] : fctrt-d(rows[1:], path));
   // a text read through the caller's band reader, read(path, verdict), at a path of its own in a directory of its own
   // under dir; the directory leaves after the read, with what the run compiled beside the text
   def fctrt-read-text(dir, tag, path, text, verdict, read) {
@@ -172,12 +296,31 @@ section [form.bml] {
    let gone = host_dir_rmdir(home);
    value;
   }
-  // The rule's two readings, one on each side of the candidate's window. Inside it, while the candidate stands: each owned
-  // band other than the primary whose code the candidate moved, as [path, verdict, a, candidate's text]; mains are
-  // [path, main's text]. Outside it, on main's source: the reasons those bands leave.
-  def fctrt-cross-under(dir, mains, primary, read) = mains |> filter(m => fctrt-band?(m[0]) && (String) m[0] != primary && fctrt-moved?(m[1], read_file(m[0])))
-   |> map(m => [m[0], fctrt-verdict(m[1]), fctrt-read-text(dir, "a", m[0], m[1], fctrt-verdict(m[1]), read), read_file(m[0])]);
-  def fctrt-cross-reasons(dir, crossed, read) = crossed |> map(x => fctrt-hollowed(x[0], x[1], x[2], fctrt-read-text(dir, "c", x[0], x[3], x[1], read))) |> filter(r => (String) r != "");
+  // The rule's readings, one side of the candidate's window each. Inside it, while the candidate stands: mains are
+  // [path, main's text] for every path the candidate may write, d the lane's own readings [path, value] of its bands under
+  // the candidate. Each owned band other than the primary whose code the candidate moved becomes [path, pin, a,
+  // candidate's text, d, how, renames, main's text]; how is "uncounted" (read no further), "follows" (main's text across
+  // the change's renames is the candidate's code: it holds unread) or "cross" (a, main's text across the renames under the
+  // candidate's source). Outside it, on main's source: b and c, and the reasons the moved bands leave.
+  def fctrt-cross-under(dir, mains, primary, read, d, memo) {
+   let renames = fctrt-renames(map(m => [m[1] ?? "", read_file(m[0]) ?? ""], filter(m => !fctrt-band?(m[0]), mains)));
+   let under = str-join(map(m => (read_file(m[0]) ?? "") ++ "\n", mains));
+   mains |> filter(m => fctrt-band?(m[0]) && (String) m[0] != primary && fctrt-moved?(m[1], read_file(m[0])))
+    |> map(m => fctrt-cross-row(dir, m, read_file(m[0]), fctrt-verdict(m[1]), renames, read, fctrt-d(d, m[0]), memo, under));
+  }
+  def fctrt-cross-row(dir, m, text, pin, renames, read, d, memo, under) {
+   let mainText = fctrt-renamed(m[1], renames, 1);
+   let how = !fctrt-ones?(pin) ? "uncounted" : ((String) fctrt-code(mainText) == fctrt-code(text) ? "follows" : "cross");
+   let a = (String) how == "cross" ? fctrt-memo(memo, "a\n" ++ m[0] ++ "\n" ++ mainText ++ "\n" ++ under, () => fctrt-read-text(dir, "a", m[0], mainText, pin, read)) : nothing();
+   [m[0], pin, a, text, d, how, renames, m[1]];
+  }
+  def fctrt-cross-reasons(dir, crossed, read, memo) = crossed |> map(x => fctrt-cross-reason(dir, x, read, memo)) |> filter(r => (String) r != "");
+  def fctrt-cross-reason(dir, x, read, memo) = (String) x[5] == "follows" ? "" : (String) x[5] == "uncounted" ? fctrt-crossed(x[0], x[1], nothing(), nothing(), nothing(), x[4]) : fctrt-cross-read(dir, x, read, memo, fctrt-renamed(x[3], x[6], 0));
+  def fctrt-cross-read(dir, x, read, memo, candText) {
+   let b = fctrt-baseline(memo, x[0], x[7], read, x[1]);
+   let c = fctrt-memo(memo, "c\n" ++ x[0] ++ "\n" ++ candText, () => fctrt-read-text(dir, "c", x[0], candText, x[1], read));
+   fctrt-crossed(x[0], x[1], b, x[2], c, x[4]);
+  }
 
   // ── local clock ──
   // progress, seat, stall, idle
