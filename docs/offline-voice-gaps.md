@@ -13,7 +13,7 @@ self-improvement feature native, an aligned voice, rent toward zero — and says
 A gap is one row of `learn/offline-voice-gaps.jsonl`. The row carries the whole reading rule as data: which ledger
 (`source`), which rows count (`where`: an equality, or a test such as `{">":0}`, `{"in":[..]}`, `{"absent":1}`,
 `{"!=":v}`), which field is read (`field`), how it is compared (`compare`) and with what (`threshold`, or `against`,
-another field of the same row), what else the row must hold (`also`, `not_in`, `within_ms`), and the goal line it serves
+another field of the same row), what else the row must hold (`also`, `not_in`, `within_ms`, `spread`, `moved`), and the goal line it serves
 (`goal`). The door holds no code per gap. It holds one reader per shape, and each `kind` names its shape:
 
 | kind | shape | what is read |
@@ -65,9 +65,18 @@ row reads rented_mind 0 on the schedule, no co-author signed it, a gate's band r
 ## Whose rows it reads
 
 The query rows and `voice-answers` read the schedule's and the person's rows: session empty. A session's rows are the session's own, and a measurement ask (an alignment or wear arm,
-`"enquiry_kind":"measurement"`) lands no coverage row at all, so an experiment does not read as traffic. A coverage row from before the session column cannot say whose it was and reads as nobody's. The walk carries
-these ledgers to main at each landing (`hw-learned`, `host-walk-carry.bml`), so a reading on main is at most a slot old. `q4-decode-vs-q8` reads the same rows, `queries-native-plan` reads only rows a native landing carried, and the turn rows
+`"enquiry_kind":"measurement"`) lands no coverage row at all, so an experiment does not read as traffic. A coverage row from before the session column cannot say whose it was: it is counted by nobody, and the reading names how many such rows hold the rest of `where` (unattributed, uncounted). The walk carries
+these ledgers to main at each landing (`hw-learned`, `host-walk-carry.bml`), so a reading on main is at most a slot old. `q4-decode-vs-q8` reads the same rows, `queries-native-plan` reads only rows a native landing carried and counts a plan answered only when the planner verified it (source `local-plan`, one row per option, landed after the verdict by `observe/local-plan-run.bml`), and the turn rows
 tell the voice's own edit (`local_generated_ids` above 0: `self-turn`, `last-option-green`, `guided-gap-dependence`) from the no-model rung's rewrite (`self-rung`).
+
+## Noise and stillness
+
+A gap closes on evidence that separates it from noise or from nothing. A LoRA child closes only when its margin over the parent is
+wider than the earlier children's losses scatter (`spread`); the child itself stands outside that scatter, so a child far better
+than its siblings never widens their noise, and fewer than two siblings read no noise. `self-read` needs a reading the voice generated, `self-heal` a heal that returned a path, `self-rows` voice readings
+that grew inside the window (`moved`, read over the whole ledger), and `exit-E4` a reading of whether each cited receipt supports its
+sentence (`E4_support`), unread until the exit proof writes it. A feature ledger that is absent names its writer (`host-walk-writers.bml`),
+or says no door writes it.
 
 ## Steering
 
@@ -77,7 +86,7 @@ its own ledger and never the queue, and `self-steer` reads the share offered. A 
 ## What it cannot see
 
 The coverage rows count what crossed a door: a question a rented mind answered itself, the shell's zero-process redirect into the
-form-find spool, and `form-cli task` under `fcaq-managed-with` land none. A session's child that loses CLAUDE_CODE_SESSION_ID reads as the schedule's, and the person's ask and the schedule's are one lane. A stamp says a slot began, never that it finished, and
+form-find spool, and `form-cli task` under `fcaq-managed-with` land none. Who asked is read from the process's own ancestor line: under a rented agent, the session id its argv carries or its word (`rented:claude`), so two sessions whose agents carry no id read as one; a kernel a session detached to launchd reads as the schedule's, and the person's ask and the schedule's are one lane. A stamp says a slot began, never that it finished, and
 `.hearth/walk.began` keeps one row per door, so a slot older than its door's last stamp reads only through a landed row; the retry's class stands
 beside an unread slot as a note, because a killed retry leaves no row. A feature's ledger that carries no coordinator reads a session's run and the
 walk's alike, and a row's clock proves nothing: the slots' windows are ten hours of a day, and on 2026-10-31 a session's reading at 22:07 read as the schedule's. So

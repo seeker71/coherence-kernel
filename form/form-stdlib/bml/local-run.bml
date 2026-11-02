@@ -3,10 +3,13 @@
 //
 // The voice door (form-cli-native-voice.bml fcnv-ask) is the one place every lane asks the model, so it is the one place
 // a generation can be counted without a caller remembering to. Each ask lands one LocalRun row: when, which session asked
-// (the host's CLAUDE_CODE_SESSION_ID; "rented:<host>" when no id arrived and a rented host stands among the ancestors in the
-// process table; "" when the host's schedule or the person asked), the lane, how it ended, the IDs the
+// (read from this process's own ancestor line, never the environment: the asker a door names for its children, the offline
+// exam; the id the nearest rented agent's argv carries, or "rented:<host>" when it carries none; "" when the host's
+// schedule or the person at their terminal asked), the lane, how it ended, the IDs the
 // prompt and the answer took, the ask's wall clock and its rates: prefill_tok_s (prompt IDs per second of prefill) and
-// decode_tok_s (generated IDs per second of decode), and, when the ask did not answer, the reason the lane named (the
+// decode_tok_s (generated IDs per second of decode), on the LoRA lane the adapter it wore and that adapter's bytes as
+// adapter_sha256 (the CPU SHA organ, saj-file-digest-any-tail; null when its bytes did not read), so a native-metal-lora
+// row says what it wore, and, when the ask did not answer, the reason the lane named (the
 // governor's reading, the registry's, the carrier's). receipts/session-rent-ledger.jsonl reads the rows back per session,
 // so a probe, a draft, a companion turn and an engineering turn all count as the local tokens they were. A row written
 // before the rates or the reason were fields reads as a row with them absent (null).
@@ -35,7 +38,9 @@
 // fc-session-ask-at, source form-cli-ask), at the grounded synthesis door for what the voice did not carry (substrate,
 // provider, an ask not made; form-cli-grounded-synthesis.bml), at the code lane's door (form-cli-code-request.bml
 // fcaq-decoded, source form-cli-code: one row per request a caller or a native turn hands the lane) and at the structural
-// door (observe/form-find-ask.bml, source form-find: one row per question it carries). observe/query-coverage-run.bml reads
+// door (observe/form-find-ask.bml, source form-find: one row per question it carries) and at the planner
+// (observe/local-plan-run.bml, source local-plan: one row per option its voice spoke, landed after the verdict and answered
+// only when the plan verified; its asks name coverage "after-verdict", so the voice door lands none of its own for them). observe/query-coverage-run.bml reads
 // the native fraction by kind back from it. A row is native when it was answered and its source is the body's own
 // (qc-native-sources). The ledger counts what crossed a door: a question a rented mind answered itself, the shell's
 // zero-process redirect into the form-find spool, and form-cli task under fcaq-managed-with cross none of these seams.
@@ -46,19 +51,34 @@
 //   qc-rows(path) / qc-since(rows, ms) / qc-table(rows) / qc-percent(native, all)   the reading
 //////////////////////////////////////////////////////////////////////
 // preludes: form-stdlib/bml/ledger.bml form-stdlib/bml/host-fs.bml form-stdlib/bml/coordination.bml form-stdlib/query-lane-resolve.bml
+import form-stdlib/qwen35-artifact-seal-reader.fk;
 section [form.bml] {
- blueprint LocalRun { at_unix_ms: int, session: string, lane: string, status: string, prompt_ids: int, generated_ids: int, model: string, wall_ms: option<int>, prefill_tok_s: option<float>, decode_tok_s: option<float>, reason: option<string>, admission_ms: option<int>, open_ms: option<int>, enquiry_kind: option<string> }
+ blueprint LocalRun { at_unix_ms: int, session: string, lane: string, status: string, prompt_ids: int, generated_ids: int, model: string, wall_ms: option<int>, prefill_tok_s: option<float>, decode_tok_s: option<float>, reason: option<string>, admission_ms: option<int>, open_ms: option<int>, enquiry_kind: option<string>, adapter: option<string>, adapter_sha256: option<string> }
  blueprint QueryCoverageRow { at_unix_ms: int, kind: string, source: string, lane: string, model: string, answered: int, rent_tokens: int, wall_ms: int, session: option<string> }
  class LocalRunLedger {
   def lrun-ledger() = "receipts/local-run-ledger.jsonl";
-  // the host's session id (CLAUDE_CODE_SESSION_ID) from the environment door, "" when the host's own schedule asked
-  // A child that lost the id still stands under its rented host: the whole ancestor line is read, since a shell, env or timeout may stand between. A kernel detached to launchd reads ""
-  // (coordination.bml names that wall). An empty session is the schedule's or the person's, so a rented ask must not reach it.
-  def lrun-session() = lrun-session-of(trim(hfs-env("CLAUDE_CODE_SESSION_ID", "")), crd-host-row, crd-host-row(host_pid()));
-  def lrun-session-of(id, table, me) = (String) id != "" ? id : lrun-rented-mark(lrun-rented-in(table, crd-parent-in(table, me), 16));
-  def lrun-rented-hosts() = ["claude", "codex"];
-  def lrun-rented-in(table, row, hops) = (len(row) < 3) || (hops <= 0) ? "" : any?(h => (String) crd-base(crd-exe(row)) == h, lrun-rented-hosts()) ? crd-base(crd-exe(row)) : lrun-rented-in(table, crd-parent-in(table, row), hops - 1);
-  def lrun-rented-mark(host) = (String) host == "" ? "" : "rented:" ++ host;
+  // Who asked, read from this process's own ancestor line (coordination.bml), never from the environment. A door that asks
+  // as its own asker names its children: an ancestor whose argv runs it (the offline exam's children read "offline-exam").
+  // Else the nearest rented agent (crd-rented-row): the session id its argv carries (--resume, --session-id), which names
+  // its transcript, or its word "rented:<host>" when it carries none, since the table holds no session id. Else the line's
+  // own word (coordination.bml's rule): "" for the walk's job or the person, "detached" for a line that ends at launchd
+  // under no job the body names, "unread" when the table did not answer.
+  def lrun-session() = lrun-session-in(crd-host-row, crd-host-row(host_pid()));
+  def lrun-session-in(table, me) {
+   let asker = lrun-asker-in(table, crd-parent-in(table, me), 16);
+   let r = crd-rented-row-in(table, me);
+   (String) asker != "" ? asker : len(r) >= 3 ? lrun-rented-session(r) : crd-line-word-in(table, me);
+  }
+  def lrun-asker-doors() = [["observe/offline-exam-run.bml", "offline-exam"]];
+  def lrun-asker-of(argv) = foldl((w, d) => (String) w != "" ? w : any?(a => (String) a == d[0], argv) ? d[1] : w, "", lrun-asker-doors());
+  def lrun-asker-in(table, row, hops) = (len(row) < 3) || (hops <= 0) ? "" : (String) lrun-asker-of(crd-argv(row)) != "" ? lrun-asker-of(crd-argv(row)) : lrun-asker-in(table, crd-parent-in(table, row), hops - 1);
+  def lrun-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
+  def lrun-argv-id(argv) = nil?(argv) ? ""
+   : lrun-starts?(argv[0], "--resume=") ? substring(argv[0], 9, len(argv[0]))
+   : lrun-starts?(argv[0], "--session-id=") ? substring(argv[0], 13, len(argv[0]))
+   : any?(f => (String) argv[0] == f, ["--resume", "--session-id", "-r"]) && (len(argv) > 1) && !lrun-starts?(argv[1], "-") ? argv[1]
+   : lrun-argv-id(argv[1:]);
+  def lrun-rented-session(r) = len(r) < 3 ? "" : (String) lrun-argv-id(crd-argv(r)) != "" ? lrun-argv-id(crd-argv(r)) : "rented:" ++ crd-base(crd-exe(r));
   def lrun-lane(result) = result[10] == "" ? "registry-weights" : "native-metal-lora";
   // an answered ask needs no reason; any other ending carries the one the lane named
   def lrun-reason(result) = (String) result[0] == "answered" ? nothing() : lrun-home-free(result[7]);
@@ -66,7 +86,15 @@ section [form.bml] {
   def local-run-rate(ids, ms) = nothing?(ms) || (ms <= 0) || (ids <= 0) ? nothing() : (ids + 0.0) * 1000.0 / (ms + 0.0);
   // a span is kept as the session read it; one it did not stamp (nothing), or that did not run (0), is absent
   def lrun-span(ms) = nothing?(ms) || (ms <= 0) ? nothing() : ms;
-  def lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs, kind) = LocalRun{at_unix_ms: now_unix_ms(), session: lrun-session(), lane: lrun-lane(result), status: result[0], prompt_ids: result[2], generated_ids: result[3], model: lrun-home-free(result[4]), wall_ms: lrun-span(wallMs), prefill_tok_s: local-run-rate(result[2], prefillMs), decode_tok_s: local-run-rate(result[3], decodeMs), reason: lrun-reason(result), admission_ms: lrun-span(admissionMs), open_ms: lrun-span(openMs), enquiry_kind: kind};
+  // the adapter a LoRA ask wore (result[10]) and the sha256 of its bytes; the registry lane wears none here
+  def lrun-adapter(result) = (String) result[10] == "" ? nothing() : lrun-home-free(result[10]);
+  def lrun-adapter-sha(result) = (String) result[10] == "" ? nothing() : lrun-bytes-sha(result[10] ++ "/adapters.safetensors");
+  def lrun-bytes-sha(path) {
+   let size = file_size(path);
+   let raw = size < 0 ? "" : saj-file-digest-any-tail(path, size);
+   (Comparable) len(raw) == 0 ? nothing() : qaf-string-hex(raw);
+  }
+  def lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs, kind) = LocalRun{at_unix_ms: now_unix_ms(), session: lrun-session(), lane: lrun-lane(result), status: result[0], prompt_ids: result[2], generated_ids: result[3], model: lrun-home-free(result[4]), wall_ms: lrun-span(wallMs), prefill_tok_s: local-run-rate(result[2], prefillMs), decode_tok_s: local-run-rate(result[3], decodeMs), reason: lrun-reason(result), admission_ms: lrun-span(admissionMs), open_ms: lrun-span(openMs), enquiry_kind: kind, adapter: lrun-adapter(result), adapter_sha256: lrun-adapter-sha(result)};
   def local-run-record-kinded-at(path, result, wallMs, prefillMs, decodeMs, admissionMs, openMs, kind) = ledger-append(path, lrun-row(result, wallMs, prefillMs, decodeMs, admissionMs, openMs, kind));
   def local-run-record-clocked-at(path, result, wallMs, prefillMs, decodeMs, admissionMs, openMs) = local-run-record-kinded-at(path, result, wallMs, prefillMs, decodeMs, admissionMs, openMs, nothing());
   def local-run-record-timed-at(path, result, wallMs, prefillMs, decodeMs) = local-run-record-clocked-at(path, result, wallMs, prefillMs, decodeMs, nothing(), nothing());
@@ -98,7 +126,8 @@ section [form.bml] {
   // ---- the coverage ledger: one row per ask through a lane, read back as the native fraction by kind ----
   def qc-ledger() = "receipts/query-coverage-ledger.jsonl";
   def qc-kinds() = ["lookup", "structural", "prose", "code", "plan"];
-  def qc-native-sources() = ["substrate", "fkwu-model-session", "form-cli-ask", "form-cli-code", "form-find"];
+  // local-plan: a plan the planner verified (observe/local-plan-run.bml lands it after the verdict; answered is verified)
+  def qc-native-sources() = ["substrate", "fkwu-model-session", "form-cli-ask", "form-cli-code", "form-find", "local-plan"];
   def qc-lane(source, askOracle, oracle) = (String) source == "substrate" ? "substrate" : (String) source == "provider" ? "provider" : askOracle ? lrun-lane(oracle) : "not-asked";
   def qc-row(kind, source, lane, model, answered, rent, wallMs) = QueryCoverageRow{at_unix_ms: now_unix_ms(), kind: kind, source: source, lane: lane, model: lrun-home-free(model), answered: answered, rent_tokens: rent, wall_ms: wallMs, session: lrun-session()};
   // a measurement ask (an alignment or wear arm, named by its request's "enquiry_kind") is no traffic: it lands no coverage row, and its LocalRun row carries the kind
@@ -108,6 +137,36 @@ section [form.bml] {
   def qc-record-at(path, kind, source, lane, model, answered, rent, wallMs) = qc-traffic?(kind) ? ledger-append(path, qc-row(kind, source, lane, model, answered, rent, wallMs)) : qc-measurement();
   def qc-record(kind, source, lane, model, answered, rent, wallMs) = qc-record-at(qc-ledger(), kind, source, lane, model, answered, rent, wallMs);
   def qc-rows(path) = ledger-rows(path, "QueryCoverageRow");
+  // ---- the planner's coverage: one row per option the voice spoke, landed after its verdict ----
+  // plans: the planner's option rows as [request, option, rung, verdict, voice, at_unix_ms, wall_ms]. The rows past the mark
+  // (the last local-plan row of this coverage ledger, or the walk's start when none stands) are read, so the options of a
+  // walk the window ended land with the next walk. An option's rows (its refusal, its reference care, its repair) are one
+  // ask, answered 1 when one of them verified, or when a recheck of its request verified after it and no later option of
+  // that request spoke; a recheck alone spoke no voice and adds no row. Answers the rows it landed.
+  def qc-plan-mark(path, walked) {
+   let m = foldl((m, r) => (String) row-get(r, "source") == "local-plan" && row-get(r, "at_unix_ms") > m ? row-get(r, "at_unix_ms") : m, 0, qc-rows(path));
+   m > 0 ? m : walked;
+  }
+  def qc-plan-recheck?(p) = (String) p[2] == "recheck";
+  def qc-plan-verified?(p) = (String) p[3] == "verified";
+  def qc-plan-key(p) = p[0] ++ "#" ++ p[1].str();
+  def qc-plan-asks(plans) = foldl((keys, p) => qc-plan-recheck?(p) || any?(k => (String) k == qc-plan-key(p), keys) ? keys : append(keys, [qc-plan-key(p)]), [], plans);
+  def qc-plan-of(plans, key) = filter(p => !qc-plan-recheck?(p) && (String) qc-plan-key(p) == key, plans);
+  def qc-plan-answered(plans, key) {
+   let mine = qc-plan-of(plans, key);
+   let last = mine[-1];
+   let later = filter(p => !qc-plan-recheck?(p) && (String) p[0] == last[0] && (String) qc-plan-key(p) != key && p[5] > last[5], plans);
+   any?(qc-plan-verified?, mine) || (nil?(later) && any?(p => qc-plan-recheck?(p) && qc-plan-verified?(p) && (String) p[0] == last[0] && p[5] >= last[5], plans)) ? 1 : 0;
+  }
+  def qc-plan-one(path, plans, key) {
+   let mine = qc-plan-of(plans, key);
+   qc-record-at(path, "plan", "local-plan", "registry-weights", mine[-1][4], qc-plan-answered(plans, key), 0, foldl((t, p) => t + p[6], 0, mine));
+  }
+  def qc-plan-covered-at(plans, path, walked) {
+   let since = qc-plan-mark(path, walked);
+   let fresh = filter(p => p[5] > since, plans);
+   len(map(key => qc-plan-one(path, fresh, key), qc-plan-asks(fresh)));
+  }
   def qc-since(rows, since) = rows |> filter(row => row-get(row, "at_unix_ms") >= since);
   def qc-native?(row) = (row-get(row, "answered") == 1) && any?(s => (String) row-get(row, "source") == s, qc-native-sources());
   def qc-of(rows, kind) = (String) kind == "all" ? rows : rows |> filter(row => (String) row-get(row, "kind") == kind);
