@@ -1,6 +1,6 @@
 ; form-cli-task-runtime-band.bml — the task runtime, with no model.
 ; preludes: form-stdlib/line-grammar.fk form-stdlib/bml/parse.bml form-stdlib/bml/form-cli-task-runtime.bml
-; Verdict 111
+; Verdict 495
 ;
 ;   1  a sentence that names a source becomes that source, the band whose prelude imports it, and the band's verdict.
 ;      When several bands only share the barrel, the larger verdict is the one the sentence claims
@@ -11,6 +11,14 @@
 ;  32  a neighbor is a band whose prelude names the changed file or a barrel that imports it; a short neighbor
 ;      does not hold; no neighbor holds
 ;  64  tokens are progress; a taken seat is a seat; no tokens past the idle bound is a stall; a short silence is idle
+; 128  a neighbour band the candidate moved, read crosswise on a scratch source whose main reads "one" and whose candidate
+;      reads "two": main's band claims "one" (1) and three bytes (2), verdict 3. An honest alignment to "two" reads A 2 C 2
+;      and holds; a stub printing 3, and a claim made true under any source, read A 2 C 3, neighbor-hollowed; a text
+;      calling a name only the candidate defines reads C nothing, neighbor-unread; a comment-only edit is no move and
+;      reads nothing crosswise; a stub of a band the change left whole (candidate source "one") reads A 3 C 3,
+;      neighbor-hollowed; the primary band is never crossed
+; 256  a band's code: whitespace runs and comments (a ; that begins its line, // to the line's end) are not code, a //
+;      inside a string is, and a changed claim moves the code
 section [form.bml] {
  class FormCliTaskRuntimeBand {
   def trb-bit(holds, n) = holds ? n : 0;
@@ -64,8 +72,54 @@ section [form.bml] {
    && (String) fctrt-clock(0, 0, 300000, "deadline") == "stall"
    && (String) fctrt-clock(0, 0, 1000, "caller-check-unmeetable") == "idle"
    && (String) fctrt-clock(nothing(), nothing(), nothing(), "") == "idle", 64);
+  // the band reader the lanes hand the rule: a cell run in this process, a number only when it ran whole
+  def trb-read(path, verdict) {
+   let rec = cell_run(path, 0, 60000, nothing());
+   nothing?(rec) || !nothing?(record_get(rec, "stopped")) || (Comparable) record_get(rec, "errors") > 0 || (String) value_kind(record_get(rec, "value")) != "int" ? nothing() : record_get(rec, "value");
+  }
+  def trb-claims(src, first) = "; Verdict 3\nsection [form.bml] {\n (" ++ first ++ " ? 1 : 0) + (len(read_file(\"" ++ src ++ "\") ?? \"\") == 3 ? 2 : 0);\n}\n";
+  def trb-main-band(src) = trb-claims(src, "(read_file(\"" ++ src ++ "\") ?? \"\") == \"one\"");
+  // one world: the candidate's window (its source and band text stand), then main's source; [crossed, reasons]
+  def trb-world(n, candSrc, candBand) {
+   let root = temp_dir() ++ "/task-runtime-cross-" ++ host_pid().str() ++ "-" ++ n.str();
+   let made = fs_mkdir(root) + fs_mkdir(root ++ "/tests");
+   let src = root ++ "/src.txt";
+   let band = root ++ "/tests/x-band.bml";
+   let primary = root ++ "/tests/primary-band.bml";
+   let main = trb-main-band(src);
+   let mains = [[primary, "; Verdict 1\n"], [band, main]];
+   let opened = write_file_text(src, candSrc) + write_file_text(band, candBand(src)) + write_file_text(primary, "; Verdict 1\nsection [form.bml] { 7; }\n");
+   let crossed = fctrt-cross-under(root ++ "/cross", mains, primary, trb-read);
+   let closed = write_file_text(src, "one") + write_file_text(band, main);
+   let reasons = fctrt-cross-reasons(root ++ "/cross", crossed, trb-read);
+   let cleaned = host_dir_rmdir(root);
+   let said = print(["cross world", n, map(x => [x[1], x[2]], crossed), reasons]);
+   [crossed, reasons];
+  }
+  def trb-starts?(s, p) = fctrt-starts?(s, p);
+  def trb-cross() {
+   let honest = trb-world(1, "two", src => trb-claims(src, "(read_file(\"" ++ src ++ "\") ?? \"\") == \"two\""));
+   let stub = trb-world(2, "two", src => "; Verdict 3\nsection [form.bml] { 3; }\n");
+   let vacuous = trb-world(3, "two", src => trb-claims(src, "true || (read_file(\"" ++ src ++ "\") ?? \"\") == \"one\""));
+   let unread = trb-world(4, "two", src => trb-claims(src, "trb-only-the-candidate-defines(\"" ++ src ++ "\")"));
+   let comment = trb-world(5, "two", src => "; the band claims what main's source reads\n" ++ trb-main-band(src) ++ "// and nothing more\n");
+   let whole = trb-world(6, "one", src => "; Verdict 3\nsection [form.bml] { 3; }\n");
+   trb-bit(len(honest[0]) == 1 && honest[0][0][2] == 2 && nil?(honest[1])
+    && len(stub[1]) == 1 && (String) stub[1][0] == "neighbor-hollowed: " ++ stub[0][0][0] ++ " A 2 C 3 verdict 3"
+    && len(vacuous[1]) == 1 && trb-starts?(vacuous[1][0], "neighbor-hollowed: ") && str_find(vacuous[1][0], " A 2 C 3 ", 0) > 0
+    && len(unread[1]) == 1 && (String) unread[1][0] == "neighbor-unread: " ++ unread[0][0][0] ++ " A 2 C nothing"
+    && nil?(comment[0]) && nil?(comment[1])
+    && len(whole[1]) == 1 && trb-starts?(whole[1][0], "neighbor-hollowed: ") && str_find(whole[1][0], " A 3 C 3 ", 0) > 0, 128);
+  }
+  def trb-code() {
+   let band = "; Verdict 3\nsection [form.bml] {\n def x() = f(\"a//b\") + 1;\n}\n";
+   let prose = "; a band of one claim\n; Verdict 3\nsection [form.bml] {\n  // the claim\n def x()   =  f(\"a//b\") + 1; // trailing\n}\n";
+   let inString = "; Verdict 3\nsection [form.bml] {\n def x() = f(\"a//c\") + 1;\n}\n";
+   let claim = "; Verdict 3\nsection [form.bml] {\n def x() = f(\"a//b\") + 2;\n}\n";
+   trb-bit(!fctrt-moved?(band, prose) && fctrt-moved?(band, inString) && fctrt-moved?(band, claim) && !fctrt-moved?(band, band) && !fctrt-moved?(nothing(), claim), 256);
+  }
   def trb-run() {
-   let score = trb-intake() + trb-failures() + trb-writer(0) + trb-accept() + trb-clock();
+   let score = trb-intake() + trb-failures() + trb-writer(0) + trb-accept() + trb-clock() + trb-cross() + trb-code();
    print_str(score.str());
    score;
   }

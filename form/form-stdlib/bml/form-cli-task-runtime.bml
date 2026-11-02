@@ -1,6 +1,6 @@
 // form-cli-task-runtime.bml — the runtime a task rides: one sentence in, a finished task out.
 //
-// Seven organs, each a reading the live doors call:
+// Eight organs, each a reading the live doors call:
 //   fctrt-intake            a sentence becomes a contract: the paths it names, the band whose prelude names one
 //                           of them, or, among bands that only share a barrel, the larger verdict, and the model
 //   fctrt-act               a lane reason becomes [class, spend, next, end]. spend 0 and end 1 tried nothing
@@ -11,6 +11,9 @@
 //                           result. The file door is fctrt-claim-file / fctrt-commit-file.
 //   fctrt-neighbor-paths    the bands whose prelude names a changed file, or a barrel that imports it. Publish
 //                           waits until each of those reads its own verdict (fctrt-holds).
+//   fctrt-hollowed          a neighbour band whose code the candidate moved holds when main's text under the candidate's
+//                           source and the candidate's text under main's source read the same claims short; both lanes
+//                           read it through fctrt-cross-under (in the window) and fctrt-cross-reasons (on main)
 //   the voice row of fctrt-act("local-stall") is how the next model receives the same task
 //   fctrt-clock             tokens are progress. A seat or a memory ending is a seat. No tokens past the local
 //                           idle bound is a stall. A short silence is idle.
@@ -127,6 +130,54 @@ section [form.bml] {
   // ── acceptance ──
   def fctrt-held?(row) = (!nothing?(row[0])) && ((Comparable) row[0] == row[1]);
   def fctrt-holds(rows) = nil?(rows) ? 1 : (fctrt-held?(rows[0]) ? fctrt-holds(rows[1:]) : 0);
+
+  // ── a neighbour band the candidate moved ──
+  // The rule. For an owned band whose code the candidate moved, a is main's text read under the candidate's source and c
+  // the candidate's text read under main's source. An alignment the change owes misses the same claims both ways, and
+  // is owed only where main's text reads short of its verdict under the candidate: it holds when c == a < verdict. A
+  // stub or a claim true under any source reads more under main than main's text reads under the candidate, or moves a
+  // band the change left whole (neighbor-hollowed); a text that needs a name only the candidate defines reads nothing
+  // under main (neighbor-unread). "" holds; a reason names the path and both readings.
+  def fctrt-word(v) = nothing?(v) ? "nothing" : v.str();
+  def fctrt-hollowed(path, verdict, a, c) = nothing?(c) ? "neighbor-unread: " ++ path ++ " A " ++ fctrt-word(a) ++ " C nothing"
+   : (nothing?(a) || !((Comparable) a == c) || (Comparable) a >= verdict) ? "neighbor-hollowed: " ++ path ++ " A " ++ fctrt-word(a) ++ " C " ++ c.str() ++ " verdict " ++ verdict.str() : "";
+  // A text's code: its bytes with whitespace runs and comments (// to the line's end, a ; that begins its line) read as
+  // one space, its strings whole. An edit to a band's prose moves none of its code, and pays no reading.
+  def fctrt-code(text) = str-join(reverse(fctrt-code-go(text ?? "", 0, 0, [])));
+  def fctrt-code-go(t, s, i, out) = i >= len(t) ? cons(substring(t, s, i), out) : fctrt-code-at(t, s, i, out, str_byte_at(t, i));
+  def fctrt-code-at(t, s, i, out, b) = b == 34 ? fctrt-code-go(t, s, fctrt-str-end(t, i + 1), out)
+   : fctrt-trivia?(t, i, b) ? fctrt-code-past(t, s, i, out, fctrt-trivia-end(t, i)) : fctrt-code-go(t, s, i + 1, out);
+  def fctrt-code-past(t, s, i, out, e) = fctrt-code-go(t, e, e, cons(" ", cons(substring(t, s, i), out)));
+  def fctrt-str-end(t, i) {
+   let j = scan_run(t, i, 4);
+   j >= len(t) ? len(t) : str_byte_at(t, j) == 34 ? j + 1 : fctrt-str-end(t, j + 2);
+  }
+  def fctrt-first-on-line?(t, j) = j < 0 ? true : str_byte_at(t, j) == 10 ? true : (str_byte_at(t, j) == 32 || str_byte_at(t, j) == 9) ? fctrt-first-on-line?(t, j - 1) : false;
+  def fctrt-comment?(t, i, b) = (b == 47 && i + 1 < len(t) && str_byte_at(t, i + 1) == 47) || (b == 59 && fctrt-first-on-line?(t, i - 1));
+  def fctrt-trivia?(t, i, b) = b == 32 || b == 9 || b == 10 || b == 13 || fctrt-comment?(t, i, b);
+  def fctrt-trivia-end(t, i) {
+   let j = scan_run(t, i, 0);
+   j < len(t) && fctrt-comment?(t, j, str_byte_at(t, j)) ? fctrt-trivia-end(t, scan_run(t, j, 5)) : j;
+  }
+  def fctrt-moved?(main, cand) = !nothing?(main) && !nothing?(cand) && (String) main != cand && (String) fctrt-code(main) != fctrt-code(cand);
+  // a text read through the caller's band reader, read(path, verdict), at a path of its own in a directory of its own
+  // under dir; the directory leaves after the read, with what the run compiled beside the text
+  def fctrt-read-text(dir, tag, path, text, verdict, read) {
+   let parts = split-on(path, "/");
+   let home = dir ++ "/cross-" ++ tag ++ "-" ++ host_pid().str() ++ "-" ++ now_unix_ms().str();
+   let made = fs_mkdir(dir) + fs_mkdir(home);
+   let at = home ++ "/" ++ parts[len(parts) - 1];
+   let wrote = write_file_text(at, text);
+   let value = read(at, verdict);
+   let gone = host_dir_rmdir(home);
+   value;
+  }
+  // The rule's two readings, one on each side of the candidate's window. Inside it, while the candidate stands: each owned
+  // band other than the primary whose code the candidate moved, as [path, verdict, a, candidate's text]; mains are
+  // [path, main's text]. Outside it, on main's source: the reasons those bands leave.
+  def fctrt-cross-under(dir, mains, primary, read) = mains |> filter(m => fctrt-band?(m[0]) && (String) m[0] != primary && fctrt-moved?(m[1], read_file(m[0])))
+   |> map(m => [m[0], fctrt-verdict(m[1]), fctrt-read-text(dir, "a", m[0], m[1], fctrt-verdict(m[1]), read), read_file(m[0])]);
+  def fctrt-cross-reasons(dir, crossed, read) = crossed |> map(x => fctrt-hollowed(x[0], x[1], x[2], fctrt-read-text(dir, "c", x[0], x[3], x[1], read))) |> filter(r => (String) r != "");
 
   // ── local clock ──
   // progress, seat, stall, idle
