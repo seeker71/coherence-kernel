@@ -72,7 +72,8 @@ tell the voice's own edit (`local_generated_ids` above 0: `self-turn`, `last-opt
 ## Noise and stillness
 
 A gap closes on evidence that separates it from noise or from nothing. A LoRA child closes only when its margin over the parent is
-wider than its siblings' losses scatter (`spread`), and one child alone reads no noise. `self-read` needs a reading the voice generated, `self-heal` a heal that returned a path, `self-rows` voice readings
+wider than the earlier children's losses scatter (`spread`); the child itself stands outside that scatter, so a child far better
+than its siblings never widens their noise, and fewer than two siblings read no noise. `self-read` needs a reading the voice generated, `self-heal` a heal that returned a path, `self-rows` voice readings
 that grew inside the window (`moved`, read over the whole ledger), and `exit-E4` a reading of whether each cited receipt supports its
 sentence (`E4_support`), unread until the exit proof writes it. A feature ledger that is absent names its writer (`host-walk-writers.bml`),
 or says no door writes it.
@@ -85,7 +86,7 @@ its own ledger and never the queue, and `self-steer` reads the share offered. A 
 ## What it cannot see
 
 The coverage rows count what crossed a door: a question a rented mind answered itself, the shell's zero-process redirect into the
-form-find spool, and `form-cli task` under `fcaq-managed-with` land none. A session's child that loses CLAUDE_CODE_SESSION_ID reads its rented host (`rented:claude`) from the process table, one detached to launchd reads as the schedule's, and the person's ask and the schedule's are one lane. A stamp says a slot began, never that it finished, and
+form-find spool, and `form-cli task` under `fcaq-managed-with` land none. Who asked is read from the process's own ancestor line: under a rented agent, the session id its argv carries or its word (`rented:claude`), so two sessions whose agents carry no id read as one; a kernel a session detached to launchd reads as the schedule's, and the person's ask and the schedule's are one lane. A stamp says a slot began, never that it finished, and
 `.hearth/walk.began` keeps one row per door, so a slot older than its door's last stamp reads only through a landed row; the retry's class stands
 beside an unread slot as a note, because a killed retry leaves no row. A feature's ledger that carries no coordinator reads a session's run and the
 walk's alike, and a row's clock proves nothing: the slots' windows are ten hours of a day, and on 2026-10-31 a session's reading at 22:07 read as the schedule's. So
