@@ -1,0 +1,103 @@
+// self-review.bml — the review lane answers for a wrong line it once let pass: pinned diffs replayed through the voice, one row that says whether it refused them.
+//
+// learn/self-review-cases.jsonl pins the cases, each with what a review owes it (expects refuse or accept), the gap's goal, the diff and the source lines a reviewer needs. e06d7217e and cf090e073 landed
+// the same wrong line in fccw-covers; 1d44ed62b is the true repair of it. Each case is one review ask through the voice door (fcnv-ask), its report one JSON line {"judgment":"refuse"|"accept","reason":"..."}; words that hold no report stand as an abstention with what was said.
+// {"through":"lane"} takes the tool-driven review lane instead (fcap-open-direct-review through fcac-admit, as form-cli-code-circle.bml reads a candidate). Read 2026-11-02: it spent six turns and about twelve minutes on one case and closed with no report, so the night asks through the door. One voice at a time; the cases run in turn.
+// A row reads closed only when every planted case was refused for a reason of its own, and every repair was accepted: a voice that refuses everything fails its repair, and a voice that refuses for an unrelated reason fails its plant.
+// A reason grades fault (a word of reason_names: what the line computes) or goal (a word of goal_names: the edit left the goal's own target untouched), and the row counts the two apart. A word the diff itself shows (fat-exit) grades neither: echoing the line explains nothing. Short of that the row reads open and carries what the voice said.
+// One row lands in receipts/self-review-ledger.jsonl per run; the register's self-review reads that row, and only a row a native landing carried. A cadence holds a young row: the cases do not change nightly.
+// PROOF: form-stdlib/tests/self-review-band.bml.
+import form-stdlib/bml/form-cli-code-live.bml;
+import form-stdlib/bml/form-cli-native-voice.bml;
+import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/local-run.bml;
+import form-stdlib/model-registry.bml;
+import form-stdlib/bml/door-options.bml;
+import form-stdlib/bml/stdin-source.bml;
+section [form.bml] {
+ class SelfReview {
+  def sr-door() = "self-review";
+  def sr-spec() = [["cases", "str"], ["ledger", "str"], ["model", "str"], ["until_ms", "int"], ["cadence_ms", "int"], ["judgments", "strs"], ["through", "str"]];
+  def sr-opt(opts, key, dflt) = (String) fcgp-str(opts, key) == "" ? dflt : fcgp-str(opts, key);
+  def sr-cases-path(opts) = sr-opt(opts, "cases", "learn/self-review-cases.jsonl");
+  def sr-ledger(opts) = sr-opt(opts, "ledger", "receipts/self-review-ledger.jsonl");
+  def sr-model(opts) = sr-opt(opts, "model", mr-name(mr-for-role("review")));
+  def sr-cadence-ms() = 432000000;
+  def sr-ask-ms() = 300000;
+  def sr-has?(hay, needle) = str_find(hay, needle, 0) >= 0;
+  def sr-rows(path) = (Comparable) host_path_exists(path) == 1 ? fcgp-rows(path) : [];
+  def sr-clip(text, n) = len(text) <= n ? text : substring(text, 0, n);
+  // ---- the packet and the report
+  def sr-packet(c) = json-emit(json-node-object([fhn-s("role", "code-review"), fhn-s("goal", fcgp-str(c, "goal")), fhn-s("diff", fcgp-str(c, "diff")), fhn-s("source", fcgp-str(c, "source")), fhn-s("instruction", "Read the diff against the source lines: would this edit do what its code says, for the values that reach it? Return one JSON object {\"judgment\":\"refuse\"|\"accept\",\"reason\":\"what the code does and why that decides it\"}.")]));
+  def sr-report-check(contract, subject) {
+   let report = subject[1];
+   let obj = faj-valid(report) ? parse-json("self-review", report) : json-node-object([]);
+   let word = fat-wire-object?(obj) ? fcap-string(obj, "judgment") : "";
+   !fat-has(["refuse", "accept"], word) ? [0, "Submit one JSON object {\"judgment\":\"refuse\"|\"accept\",\"reason\":\"what the code does\"}."]
+   : (Comparable) len(fat-trim(fcap-string(obj, "reason"))) == 0 ? [0, "reason must say what the code does."]
+   : [1, "Review shape holds."];
+  }
+  def sr-source-ok(contract, docs) = [1, "The review packet is read-only evidence."];
+  // [judgment, reason, generated, ended]: "abstain" when the lane closed with no report
+  def sr-act(model, c) {
+   let goal = "You review one code edit a native turn landed. Read the packet and submit the report it asks for.";
+   let result = fcac-admit(model, fcap-open-direct-review(goal, [["review-packet", "review-packet.json", sr-packet(c)]]), [sr-report-check, 0, sr-source-ok, 0], 16384, 6);
+   let done = (String) fcap-stage(result[0]) == "complete";
+   let obj = done && faj-valid(fcap-report(result[0])) ? parse-json("self-review", fcap-report(result[0])) : json-node-object([]);
+   [done ? fcap-string(obj, "judgment") : "abstain", done ? fcap-string(obj, "reason") : "the lane closed at stage " ++ fcap-stage(result[0]) ++ " with no report " ++ fcap-report(result[0]), result[2], fcap-stage(result[0])];
+  }
+  // the first {..} of a reply is its report; a reply with none abstains and keeps its words
+  def sr-report-of(reply) { let a = str_find(reply, "{", 0); let z = str_find(reply, "}", a < 0 ? 0 : a); a < 0 || z < 0 ? "" : substring(reply, a, z + 1); }
+  def sr-said-of(reply, ids, ended) {
+   let report = sr-report-of(reply);
+   let obj = (String) report != "" && faj-valid(report) ? parse-json("self-review", report) : json-node-object([]);
+   let word = fat-wire-object?(obj) ? fcap-string(obj, "judgment") : "";
+   fat-has(["refuse", "accept"], word) ? [word, fcap-string(obj, "reason"), ids, ended] : ["abstain", reply, ids, ended];
+  }
+  def sr-ask(model, c) {
+   let v = fcnv-ask(sr-packet(c), json-node-object([fhn-s("model", model), fhn-n("max_reply_tokens", 256), fhn-n("reply_budget", 320), fhn-s("enquiry_kind", qc-measurement()), fhn-s("enquiry", "a review of one code edit")]));
+   (String) v[0] == "answered" || len(trim(v[8])) > 0 ? sr-said-of(trim((String) v[0] == "answered" ? v[1] : v[8]), v[3], v[0]) : ["abstain", "the voice ended " ++ v[0] ++ ": " ++ lrun-home-free(v[7]), v[3], v[0]];
+  }
+  def sr-voice(opts, c) = (String) fcgp-str(opts, "through") == "lane" ? sr-act(sr-model(opts), c) : sr-ask(sr-model(opts), c);
+  def sr-stand-in(text) { let o = parse-json("self-review", text); [fcap-string(o, "judgment"), fcap-string(o, "reason"), 0, "stand-in"]; }
+  // ---- one case, read
+  def sr-names?(c, key, reason) = any?(n => sr-has?(reason, json-string-value(n)), json-array-elements(json-object-get(c, key)));
+  def sr-grade(c, reason) = sr-names?(c, "reason_names", reason) ? "fault" : sr-names?(c, "goal_names", reason) ? "goal" : "none";
+  def sr-held?(c, said) = (String) fcgp-str(c, "expects") == "refuse" ? ((String) said[0] == "refuse") && (String) sr-grade(c, said[1]) != "none" : (String) said[0] == "accept";
+  def sr-case-row(c, said, wall) = json-node-object([fhn-s("case", fcgp-str(c, "case")), fhn-s("expects", fcgp-str(c, "expects")), fhn-s("judgment", said[0]), fhn-s("reason", sr-clip(said[1], 480)), fhn-n("held", sr-held?(c, said) ? 1 : 0), fhn-s("grade", sr-grade(c, said[1])), fhn-n("generated_ids", said[2]), fhn-n("wall_ms", wall), fhn-s("ended", said[3])]);
+  def sr-of(results, want) = filter(r => (String) fcgp-str(r[0], "expects") == want, results);
+  def sr-held-of(results) = len(filter(r => sr-held?(r[0], r[1]), results));
+  def sr-short-said(results) = str-join-with(map(r => fcgp-str(r[0], "case") ++ " " ++ r[1][0] ++ ": " ++ sr-clip(r[1][1], 200), filter(r => !sr-held?(r[0], r[1]), results)), "; ");
+  def sr-reads(results) = !nil?(results) && (Comparable) sr-held-of(results) == len(results) ? "closed" : "open";
+  def sr-row(results, model) {
+   let planted = sr-of(results, "refuse");
+   let repairs = sr-of(results, "accept");
+   json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("reads", sr-reads(results)), fhn-n("planted", len(planted)), fhn-n("refused_planted", sr-held-of(planted)), fhn-n("refused_on_fault", len(filter(r => sr-held?(r[0], r[1]) && (String) sr-grade(r[0], r[1][1]) == "fault", planted))), fhn-n("repairs", len(repairs)), fhn-n("accepted_repairs", sr-held-of(repairs)), fhn-n("generated_ids", foldl((acc, r) => acc + r[1][2], 0, results)), fhn-s("model", model), fhn-s("session", lrun-session()), fhn-s("said", sr-short-said(results)), json-node-pair("cases", json-node-array(map(r => sr-case-row(r[0], r[1], r[2]), results)))]);
+  }
+  // ---- the run: a stand-in judgment per case opens no model; an ask the window cannot hold ends the run short, and a short run lands no row
+  def sr-one(c, i, opts) {
+   let began = host_monotonic_ms();
+   let said = fcgp-present?(opts, "judgments") ? sr-stand-in(json-string-value(json-array-elements(json-object-get(opts, "judgments"))[i])) : sr-voice(opts, c);
+   let p = print_str("[self-review] " ++ fcgp-str(c, "case") ++ " expects " ++ fcgp-str(c, "expects") ++ ": " ++ said[0] ++ " (" ++ said[2].str() ++ " ids, " ++ said[3] ++ "): " ++ sr-clip(said[1], 300));
+   [c, said, host_monotonic_ms() - began];
+  }
+  def sr-window?(opts) = nothing?(fcgp-num(opts, "until_ms")) || (fcgp-num(opts, "until_ms") - host_monotonic_ms() >= sr-ask-ms());
+  def sr-walk(cases, i, opts, acc) = i >= len(cases) ? acc : !sr-window?(opts) ? nothing() : sr-walk(cases, i + 1, opts, append(acc, [sr-one(cases[i], i, opts)]));
+  def sr-young?(opts) { let rows = filter(r => (String) fcgp-str(r, "session") == "", sr-rows(sr-ledger(opts))); !nil?(rows) && ((now_unix_ms() - (fcgp-num(rows[-1], "at_unix_ms") ?? 0)) < (fcgp-num(opts, "cadence_ms") ?? sr-cadence-ms())); }
+  def sr-say(line) { let p = print_str("[self-review] " ++ line); line; }
+  def sr-landed(results, opts) {
+   let row = sr-row(results, sr-model-shown(opts));
+   let kept = fhn-append(sr-ledger(opts), lrun-row-line(row) ++ "\n");
+   sr-say("reads " ++ sr-reads(results) ++ ": refused " ++ sr-held-of(sr-of(results, "refuse")).str() ++ " of " ++ len(sr-of(results, "refuse")).str() ++ " planted, accepted " ++ sr-held-of(sr-of(results, "accept")).str() ++ " of " ++ len(sr-of(results, "accept")).str() ++ " repair(s); ledger " ++ sr-ledger(opts) ++ " " ++ kept);
+  }
+  def sr-model-shown(opts) = fcgp-present?(opts, "judgments") ? "stand-in" : sr-model(opts);
+  def sr-run(opts) {
+   let cases = sr-rows(sr-cases-path(opts));
+   nil?(cases) ? dop-refuse(sr-door(), "no case in " ++ sr-cases-path(opts))
+   : sr-young?(opts) ? sr-say("cadence: the last row is younger than its cadence; no model opened")
+   : sr-finish(sr-walk(cases, 0, opts, []), opts);
+  }
+  def sr-finish(results, opts) = nothing?(results) ? sr-say("the window cannot hold the next ask: no row landed") : sr-landed(results, opts);
+ }
+ 0;
+}

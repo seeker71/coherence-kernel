@@ -29,6 +29,7 @@ another field of the same row), what else the row must hold (`also`, `not_in`, `
 | gaps-native | gaps | of the gaps opened, the permille the native lane closed and landed with no guide |
 | alignment-sets | sets | every set's last reading full, over every scenario it holds, under one model and one prompt |
 | alignment-axis | axis | the predicates tagged with one axis in the last readings; an axis with none reads open |
+| host-scope | scope | a `(query-scope "<scope>" "<state>" "<what answers>")` line of a document: `open` reads open with what answers there, and only `person-said` reads closed |
 | self-feature | feature | the door stands, a step of the walk begins it, its row is recent and (`by_schedule`) a native landing added it; any of them short reads open by name |
 | offline-exam | share | the exam's rows (`observe/offline-exam-run.bml`) a native landing added inside the window, reading `network_denied` 1: the permille answered and graded against keys taken from the body at rent 0 |
 | alignment-heldout | first | the first whole reading of a set written before the prompt moved: a later reading of it never replaces that first number |
