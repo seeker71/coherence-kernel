@@ -95,10 +95,14 @@ row would still read native. The walk's own `.hearth` files, which no landing ca
 touched the files the row's gap writes (`landed` with its `queue`); a landing of other files answers not for it. It reads closed only when each such landing
 read every code file it touched whole as it landed and the gap's own band at its full over the tree that landed (`gated`, exit-proof.bml `ep-unwitnessed`,
 `ep-band-whole?`). What a landing read is the record its own commit carries, one `Band-Witness` trailer per reading naming the tree it read, inside the
-message's one trailer block (form-cli-landing.bml `ld-band-witness`, `ld-witnessed`): the own band of each code file it touched (a gate row that ran it answers
-for it), and the bands of the queued gaps that write it (the walk names them, `hw-bands`). A file with a band of its own is read whole only by that band;
-`parse.bml` has only its gaps' bands, and one of them short (an open sibling's) is read once more over the tree the commit stands on, so a band that read no
-higher there was short before the landing came and one that fell holds the file. On 2026-10-31 19:25 the rung's one-value wrapper cf090e073 re-landed a wrong
+message's one trailer block (form-cli-landing.bml `ld-band-witness`, `ld-witnessed`): the stem band of each code file it touched and the bands of the queued
+gaps that write it (the walk names them, `hw-bands`), each read in a clean worktree of that tree, so an untracked file or a path the landing left out reads as
+absent, and naming only the touched files its closure loads (`dg-closure`). A file's own band is its stem band that loads it, and a file with one is read
+whole only by that band; a stem band that loads none of the files is recorded naming none, so `form/form-stdlib/bml/q.bml` is never witnessed by the band of
+`form/form-stdlib/q.bml`. `parse.bml` has only its gaps' bands, and one of them short (an open sibling's) is read once more over the tree the commit stands on.
+A band's reading is the claims it holds, one bit each, so the sibling is kept only when every claim it held there still holds: `parse-float-dot-band` reads
+12 (floats and rest), and a landing that raised it to 19 while floats fell would hold the file. A sibling whose band file the landing rewrote, or whose head
+folds a count, holds it too. The register names what each record read. On 2026-10-31 19:25 the rung's one-value wrapper cf090e073 re-landed a wrong
 line a session had repaired the day before, its gap's band green, `form-cli-check-witness-band` at 959, the gates full; the `check-witness` row that reads it
 landed the next day (314f17ea8). A gate row in a commit is no record that it ran: a landing runs the rows it compiled. A band-first row says its own band went
 green, never that the rest of the body stayed whole.
