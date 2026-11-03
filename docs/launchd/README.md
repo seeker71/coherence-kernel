@@ -19,6 +19,17 @@ The launcher door gives its child the job's own stdin, stdout and stderr and dir
 ended: 0 as 0, 1 as 1, a signal that ends a process without a core (SIGTERM, SIGKILL, ...) by raising the same signal on
 itself, so launchd reads the child's own death; any other ending (a crash, exit 2) ends it 1 with the reason on stderr.
 
+The job's door has two starts (`form/form-stdlib/bml/host-walk-renew.bml`). The start the launcher begins claims the
+checkout, heals, syncs, builds and rebuilds the carrier, then begins its own `./fkwu <door>` again as its child, with the
+job's own stdout and stderr: that renewed start runs on the kernel the build placed and compiles from the tree the sync
+left, takes the walk (the lock and the slot stamp name it) and walks the steps, and the first start waits and ends as it
+ended: 0 as 0 with its line `[walk-renew] the renewed walk ended 0`; a signal of the launcher's no-core set by raising the
+same signal on itself, so the launcher, and launchd after it, read the walk's own death; any other ending, and a 0 that left
+the lock naming the first start (a door from before its two starts walks nothing), as 1 naming it. A kernel the walk
+rebuilt is so begun by a live process, the shape the 2026-10-28 19:00:42 exec below passed. Each door walks only as the
+entry its plist names, spelled as there (`observe/scheduled-walk.bml`, `observe/day-turn.bml`; the kernel's `cell_path()`
+reads the path as it was begun), so a fixture may import a door to read its renewal without beginning a walk.
+
 The two stand still together. The walk's build writes `./fkwu` and its sync moves `observe/walk-launch.fk` with main, and
 neither reaches `launch/` (`form/form-stdlib/bml/host-walk-seal.bml`). Only `observe/walk-launch-pin.bml`, run by a person,
 writes the pair: it copies `./fkwu` to `launch/fkwu.next` and `observe/walk-launch.fk` to `launch/walk-launch.next.fk` (a
