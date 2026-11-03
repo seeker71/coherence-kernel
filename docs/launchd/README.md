@@ -26,7 +26,9 @@ left, takes the walk (the lock and the slot stamp name it) and walks the steps, 
 ended: 0 as 0 with its line `[walk-renew] the renewed walk ended 0`; a signal of the launcher's no-core set by raising the
 same signal on itself, so the launcher, and launchd after it, read the walk's own death; any other ending, and a 0 that left
 the lock naming the first start (a door from before its two starts walks nothing), as 1 naming it. A kernel the walk
-rebuilt is so begun by a live process, the shape the 2026-10-28 19:00:42 exec below passed.
+rebuilt is so begun by a live process, the shape the 2026-10-28 19:00:42 exec below passed. Each door walks only as the
+entry its plist names, spelled as there (`observe/scheduled-walk.bml`, `observe/day-turn.bml`; the kernel's `cell_path()`
+reads the path as it was begun), so a fixture may import a door to read its renewal without beginning a walk.
 
 The two stand still together. The walk's build writes `./fkwu` and its sync moves `observe/walk-launch.fk` with main, and
 neither reaches `launch/` (`form/form-stdlib/bml/host-walk-seal.bml`). Only `observe/walk-launch-pin.bml`, run by a person,
