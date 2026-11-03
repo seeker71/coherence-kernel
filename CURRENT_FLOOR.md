@@ -933,7 +933,7 @@ safetensors-write-band    -> 15871    the body's own weight file, written whole 
 voice-master-band         -> 1048575  filters, shelves, compressor profiles, room, fades, K-weighted loudness, WAV
 voice-score-band          -> 4095     whisper round trip per piece: WER, CER, and two readings of Persian joiners
 voice-measure-band        -> 511      loudness, range, peaks, pauses, centroid, F0 and level jumps on the device
-gpu-lease-band            -> 16383    one Metal client at a time: owner, staleness, tombstone takeover
+gpu-lease-band            -> 1048575  one Metal client at a time: owner, staleness, tombstone takeover; a lend to the holder's child alone; a door's hold over its reading, given back on a stop, yielding where a run begins
 gpu-window-band           -> 511      a GPU window: peers paused and resumed only by their holder, swept when the holder is gone, proven by a gauge
 role-singleton-band       -> 255      one working process of a role: the elder stays, the younger yields, a stopped or dead elder is no role
 ```
