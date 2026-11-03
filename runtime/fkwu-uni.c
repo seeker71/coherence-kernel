@@ -25390,20 +25390,14 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
     char canon[FK_PATH_CAP];
     unsigned long long fold = 14695981039346656037ULL;
     long long count = 0;
-    /* v2 -> v3: the identity was the full dependency text, and a unit past
-     * ~120 deps could not state its own identity -- the buffer walled and the
-     * load refused, a program-size wall in the dep dimension. The identity is
-     * compare-only (written to .sym/.fkb, read back for equality), so a
-     * streamed FNV-1a fold over the SAME fields carries the same testimony at
-     * constant size: any dep's canonical path, mtime, size, or content digest
-     * change changes the fold. The format bump invalidates v2 artifacts once,
-     * the same door v1 -> v2 walked (a v2 artifact cannot testify in v3's
-     * voice); the dep COUNT stays readable beside the fold. */
+    /* v4 retains v3's bounded identity but removes timestamps: touching an
+     * unchanged dependency does not change its meaning. Ordered canonical
+     * paths, sizes and content digests still bind the resolved closure; the
+     * separate builder identity binds its interpretation. The version names
+     * this contract and invalidates the timestamp-bearing v3 identity once. */
     while (i < end && i < fk_src_dep_count) {
         const char *cid = fk_path_canon_id(fk_src_dep_path[i], canon);
         fold = fold ^ fk_bytes_fnv1a(cid, fk_path_len(cid));
-        fold = fold * 1099511628211ULL;
-        fold = fold ^ (unsigned long long)fk_src_dep_mtime[i];
         fold = fold * 1099511628211ULL;
         fold = fold ^ (unsigned long long)fk_src_dep_size[i];
         fold = fold * 1099511628211ULL;
@@ -25412,7 +25406,7 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
         count = count + 1;
         i = i + 1;
     }
-    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v3|n=") ||
+    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v4|n=") ||
         !fk_source_hash_append_ll(out, cap, &pos, count) ||
         !fk_source_hash_append(out, cap, &pos, "|") ||
         !fk_source_hash_append_ll(out, cap, &pos, (long long)(fold >> 1))) {
@@ -26947,8 +26941,7 @@ static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
     return 1;
 }
 static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_src_path,
-                                   const char *expected_source_hash,
-                                   long long expected_source_mtime) {
+                                   const char *expected_source_hash) {
 #if defined(_WIN32)
     int fd = open(fkb_path, 0x8000);
 #else
@@ -26988,10 +26981,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon));
     int source_hash_matches = fk_fkb_read_string_matches_cstr(expected_source_hash);
     int source_identity_ok = src_path_matches && source_hash_matches;
-    long long stored_source_mtime = fk_fkb_read_signed();
-    if (stored_source_mtime != expected_source_mtime) {
-        source_identity_ok = 0;
-    }
+    (void)fk_fkb_read_signed(); /* source mtime is provenance, not identity */
     fk_fkb_skip_string();
     long long sealed = fk_fkb_read_signed();
     if (fk_fkb_bad) {
@@ -27352,8 +27342,7 @@ static int fk_fkb_restore_symbol_image(long long version) {
     return !fk_fkb_bad;
 }
 static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
-                                   const char *expected_source_hash,
-                                   long long expected_source_mtime) {
+                                   const char *expected_source_hash) {
 #if defined(_WIN32)
     int fd = open(fkb_path, 0x8000);
 #else
@@ -27400,7 +27389,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     if (!fk_fkb_read_string_matches_cstr(FK_FKB_BUILDER_ID)) {
         /* Named through mark_bad, not folded into source_identity_ok: the
          * source is exactly what it claims to be here, and reporting "source
-         * path, content, or mtime changed" would send the reader hunting a
+         * path or content changed" would send the reader hunting a
          * directory that is not the cause. A diagnostic that misnames its own
          * cause is the defect it is reporting on, one level up. */
         fk_fkb_mark_bad("written by a different fkwu build; the bytes of a source do not fix its "
@@ -27422,10 +27411,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     } else {
         fk_fkb_skip_string();
     }
-    long long stored_source_mtime = fk_fkb_read_signed();
-    if (expected_source_mtime > 0 && stored_source_mtime != expected_source_mtime) {
-        source_identity_ok = 0;
-    }
+    (void)fk_fkb_read_signed(); /* source mtime is provenance, not identity */
     fk_fkb_skip_string();
     long long sealed = fk_fkb_read_signed();
     if (fk_fkb_bad) {
@@ -27502,7 +27488,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     return 1;
 }
 static int fk_src_load_fkb(const char *fkb_path) {
-    return fk_src_load_fkb_checked(fkb_path, 0, 0, 0);
+    return fk_src_load_fkb_checked(fkb_path, 0, 0);
 }
 static int fk_run_loaded_program_image(long long arg) {
     if (fk_fn_count <= 0 || fk_fn[0] < 0) {
@@ -28179,7 +28165,6 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
     long long n_all = fk_src_dep_count;
     long long *dix = malloc((unsigned long)nd * 8);
     char (*dhash)[FK_SRC_HASH_CAP] = malloc(sizeof(*dhash) * (unsigned long)nd);
-    long long *dmtime = malloc((unsigned long)nd * 8);
     unsigned long long **dids = calloc((unsigned long)nd, sizeof(unsigned long long *));
     long long *dn = calloc((unsigned long)nd, 8);
     char *keep = calloc((unsigned long)nd, 1);
@@ -28189,7 +28174,7 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
     long long *carry_idx = malloc((unsigned long)n_all * 8);
     long long *carry_lo = malloc((unsigned long)n_all * 8);
     long long *carry_hi = malloc((unsigned long)n_all * 8);
-    if (dix == 0 || dhash == 0 || dmtime == 0 || dids == 0 || dn == 0 || keep == 0 ||
+    if (dix == 0 || dhash == 0 || dids == 0 || dn == 0 || keep == 0 ||
         flat == 0 || flat_id == 0 || carried_at == 0 || carry_idx == 0 || carry_lo == 0 ||
         carry_hi == 0) {
         fk_die("fk_src_try_import_fkb_images: out of memory planning the imports");
@@ -28206,27 +28191,30 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
             i = i + 1;
         }
     }
-    /* each direct dep's own identity and closure; an image missing or older than it is
-     * compiled standing alone now */
+    /* Each direct dep's own identity and closure; compile a missing or changed
+     * image standing alone. Timestamp differences alone do not cause work. */
     long long ids_total = 0;
     d = 0;
     while (ok && d < nd) {
         char dpath[FK_PATH_CAP];
         char dep_fkb_path[FK_PATH_CAP];
+        char dep_sym_path[FK_PATH_CAP];
         fk_cstr_copy(dpath, fk_src_dep_path[dix[d]], FK_PATH_CAP);
-        if (!fk_path_replace_ext(dpath, ".fkb", dep_fkb_path, FK_PATH_CAP)) {
+        if (!fk_path_replace_ext(dpath, ".fkb", dep_fkb_path, FK_PATH_CAP) ||
+            !fk_path_replace_ext(dpath, ".sym", dep_sym_path, FK_PATH_CAP)) {
             fk_import_refusal = 4;
             ok = 0;
             break;
         }
-        if (!fk_src_standalone_unit(dpath, 0, dhash[d], FK_SRC_HASH_CAP, &dmtime[d], &dids[d],
+        if (!fk_src_standalone_unit(dpath, 0, dhash[d], FK_SRC_HASH_CAP, 0, &dids[d],
                                     &dn[d])) {
             fk_import_refusal = 3;
             ok = 0;
             break;
         }
-        if (fk_path_mtime_raw(dep_fkb_path) < dmtime[d] ||
-            fk_src_fkb_version_raw(dep_fkb_path) < 7) {
+        long long recorded, unrunnable;
+        if (fk_src_fkb_version_raw(dep_fkb_path) < 7 ||
+            fk_src_sym_lens(dep_sym_path, dhash[d], &recorded, &unrunnable) != 1) {
             if (!fk_src_compile_artifact_only(dpath)) {
                 fk_import_refusal = 3;
                 ok = 0;
@@ -28379,7 +28367,7 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
                 ok = 0;
                 break;
             }
-            if (!fk_src_import_fkb_image(dep_fkb_path, dpath, dhash[d], dmtime[d])) {
+            if (!fk_src_import_fkb_image(dep_fkb_path, dpath, dhash[d])) {
                 fk_import_refusal = 7;
                 ok = 0;
                 break;
@@ -28441,7 +28429,6 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
     }
     free(dix);
     free(dhash);
-    free(dmtime);
     free(dids);
     free(dn);
     free(keep);
@@ -29567,7 +29554,7 @@ static int fk_run_src(const char *path, long long arg) {
     if (!fk_src_load_unit(path, expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         return 2;
     }
-    long long fkb_mtime = fk_check_only ? -1 : fk_path_mtime_raw(fkb_path);
+    int fkb_present = !fk_check_only && fk_path_size_raw(fkb_path) > 0;
     long long dylib_mtime = fk_check_only ? -1 : fk_path_mtime_raw(dylib_path);
     if (dylib_mtime >= unit_mtime) {
         fk_run_door = 3;
@@ -29582,13 +29569,13 @@ static int fk_run_src(const char *path, long long arg) {
      * placed beside this image does not lend it its counts */
     long long recorded = -1, recorded_unrunnable = -1;
     int lens_joined = fk_src_sym_lens(sym_path, expected_source_hash, &recorded, &recorded_unrunnable);
-    if (fkb_mtime >= unit_mtime && (recorded < 0 || recorded_unrunnable < 0)) {
+    if (fkb_present && (recorded < 0 || recorded_unrunnable < 0)) {
         /* an image without its error record is an incomplete cache; rebuild
          * rather than guess (older lenses, or a lens deleted out from under
          * the image) */
         fk_diag_path("warning", sym_path, "sym lens lacks a compile-error record; rebuilding");
-    } else if (fkb_mtime >= unit_mtime) {
-        if (lens_joined == 1 && fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
+    } else if (fkb_present) {
+        if (lens_joined == 1 && fk_src_load_fkb_checked(fkb_path, path, expected_source_hash)) {
             /* THE REFUSAL TRAVELS WITH THE IMAGE. The fresh-compile door returns
              * without printing the root value when the unrunnable latch is set,
              * so a cached run that prints it anyway does not merely replay a
@@ -29621,11 +29608,9 @@ static int fk_run_src(const char *path, long long arg) {
             fk_diag_path("warning", fkb_path, whybuf);
         } else {
             fk_diag_path("warning", fkb_path,
-                         "fresh-looking .fkb failed source identity check (source path, content, "
-                         "or mtime changed, e.g. invoked from a different directory); rebuilding");
+                         ".fkb failed source identity check (source path or content changed, "
+                         "e.g. invoked from a different directory); rebuilding");
         }
-    } else if (fkb_mtime > 0) {
-        fk_diag_path("warning", fkb_path, "stale .fkb ignored");
     }
     int import_images_loaded = fk_src_try_import_fkb_images(path);
     fk_run_door = import_images_loaded ? 1 : 0;
@@ -30730,7 +30715,7 @@ static int fk_run_bml(const char *path, long long arg) {
             expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         return 2;
     }
-    if (!fk_check_only && fk_path_mtime_raw(fkb_path) > 0) {
+    if (!fk_check_only && fk_path_size_raw(fkb_path) > 0) {
         /* the lens read once, and joined to the identity its image must hold (fk_src_sym_lens) */
         long long recorded = -1, unrunnable = -1;
         int lens_joined = fk_src_sym_lens(sym_path, expected_source_hash, &recorded, &unrunnable);
@@ -30744,7 +30729,7 @@ static int fk_run_bml(const char *path, long long arg) {
             fk_diag_path("warning", sym_path,
                     "cached image carries a refusal mark; re-lowering fresh");
         } else if (recorded >= 0 && lens_joined == 1 &&
-                   fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
+                   fk_src_load_fkb_checked(fkb_path, path, expected_source_hash)) {
             if (recorded > 0) {
                 fk_diag_path("warning", sym_path,
                         "cached image was compiled with errors; fix the .bml and rerun to clear");

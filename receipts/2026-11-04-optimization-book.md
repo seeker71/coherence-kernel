@@ -142,3 +142,62 @@ The activity publisher initially retained its row but could not publish the
 shared-memory dashboard (`glass-publish-v1, failed`). Re-execution with approved
 access published it. The PDF network download likewise needed the authorized
 network boundary. Original command outputs remain in the session transcript.
+
+## Cold/warm contract and timestamp repair
+
+Urs clarified the target: cold and warm times may differ at most by storage
+bandwidth. For unchanged meaning and target, repeated dependency discovery,
+parsing, lowering, pure initialization and JIT specialization are unfinished
+work against that contract. The compiler north star now carries it explicitly.
+The separated startup observations above diagnose this gap; their differences
+are not an accepted steady-state design.
+
+Source inspection found that ordinary `.fkb` images retain the evaluator graph,
+but admission recollects the source closure and decodes/rebuilds its tables.
+First `cell_run` admission still parses source. Constant-hold memo values and
+transparent JIT pages do not survive process exit. A persisted native image
+must retain relocatable function/node/literal references and any mirror nodes
+the emitter creates. Copying current machine words alone would be incorrect.
+The existing program-image owner and native compiler's retained closure/load
+plan are the owners of this remaining work.
+
+One false invalidation is repaired now. `fk_src_unit_hash_range` formerly
+included every dependency's mtime; both image readers also compared a stored
+mtime, and root/import admission checked timestamp ordering. The v4 closure
+identity keeps ordered canonical paths, sizes and content digests while
+removing timestamp authority. Builder identity, source path, seal, diagnostic
+record and content checks remain. The v7 binary format still consumes the
+timestamp as provenance. Old v3 identities rebuild once. The dependency
+planner no longer allocates a timestamp array; the C seed shrinks by 15 lines.
+The scalar demand-JIT identity consumer moves to v4 with its existing guard.
+
+The experiment used `.hearth/research/algorithms-for-optimization/identity-*.fk`
+and `identity-bml.bml`, with a separate candidate built directly from the seed.
+Fresh processes reported `[answer, kernel_stat(15), kernel_stat(16),
+kernel_stat(18)]`: lane 1 is import compilation, lane 2 is cached-image replay.
+
+| Observation | Result |
+| --- | --- |
+| Original binary: repeat unchanged source | `[42, 2, 0, 0]` |
+| Original binary: `touch -t 202701010101 identity-dep.fk` | `stale .fkb ignored`, then `[42, 1, 1, 0]` |
+| Candidate: touch root and dependency to `202701020101` | `[42, 2, 0, 0]`; root and dependency `.fkb` files byte-identical by `cmp` |
+| Change only caller text; dependency remains future-dated | `[42, 1, 1, 0]`; dependency image still byte-identical |
+| Change dependency `42` to `43`, same size and restored timestamp | `[43, 1, 1, 0]`, then `[43, 2, 0, 0]` |
+| Touch unchanged BML source | `[42, 2]`; its `.fkb` remains byte-identical |
+| Change BML `42` to `43`, same size and restored timestamp | `[43, 0]`; changed content rebuilds |
+| Unbound value, then touch unchanged refused source | Exit 1 both times; cached execution retains the refusal |
+| Feed actual generated v4 `.sym` identity to demand-JIT consumer | Nonempty identity, readiness 1 |
+
+The transparent JIT band returns 63; the extended demand-JIT guard returns 511.
+Bootstrap witnesses return 31, 42, 55, `[1, 2.5, [3, 4]]` and 11111.
+Canonical conformance passes all 13 expressions, pinned FORMBIN2 roundtrips and
+12 malformed-artifact refusals. The demand guard first stopped under the
+sandbox with `fkwu: form_error: native owner process birth unavailable`; its
+approved retry completed with 511. The separate outputs are retained as
+`identity-demand-guard.txt` and `identity-demand-guard-allowed.txt` in the local
+research directory. JIT and conformance outputs are retained there too.
+
+This establishes removal of unnecessary recompilation after timestamp-only
+changes. It does not establish the full storage-only cold/warm bound or a new
+wall-time speedup. Dependency discovery, graph reconstruction, restart JIT
+persistence and the separate timestamp-gated `.dylib` route remain open.

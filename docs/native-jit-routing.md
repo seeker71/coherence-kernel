@@ -30,8 +30,30 @@ accumulator, preserving left-to-right evaluation and reversing once at the
 boundary. Its existing `jit-page-band.bml` includes ordered argument effects.
 The [optimization-book study](../receipts/2026-11-04-optimization-book.md)
 retains exact-emission comparisons, measured wide-call compilation gains and
-startup hypotheses. Keep first admission, disk-cache reuse, resident execution,
-JIT cost and memory separate when evaluating the next change.
+startup hypotheses. The compiler's
+[cold/warm contract](../grammars/bml-native-north-star.form) permits only the
+storage-delivery difference for unchanged meaning on the same target. Separate
+first admission, disk-cache reuse, resident execution, JIT cost and memory to
+locate violations of that contract.
+
+The current `.fkb` stores an evaluator graph. Admission still rediscovers the
+source closure and decodes tables; first `cell_run` admission parses source;
+transparent native pages and pure constant-hold results remain process-local.
+These are open costs. Persisted native specialization must carry relocatable
+references and any added graph nodes: emitted words can contain current
+function/node indices and literal-pool words, so saving raw pages is insufficient.
+The existing program-image owner is the place to carry that state and its
+resolved load plan. Fresh runtime handles and effects still belong to the
+current execution.
+
+The seed's `.fkb` identity now binds the ordered resolved paths, sizes and
+content digests, together with the separate builder identity. Timestamps remain
+provenance and no longer force recompilation. The v4 source identity replaces
+v3 once; the binary container remains v7. This removes timestamp authority and
+its temporary allocation from the seed. The native source compiler's retained
+closure/load plan is the shrink path for the remaining seed-owned admission.
+The separate `.dylib` route still uses timestamp freshness and needs a
+content-bound artifact contract before that check can be removed.
 
 For recovery, search local Form cells, RAG, git history and receipts. Make the
 native attempt, retain behavior checks and per-stage streams, exit status and
