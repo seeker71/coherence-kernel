@@ -1,10 +1,14 @@
 // gpu-lease-child-run.fk — a short-lived stand-in for a Metal client, spawned by gpu-lease-band.
 //
-// It touches no device. It takes a lease on a SCRATCH lock (never .hearth/gpu.lock), writes what the take
-// answered, and then does one of three things:
+// It touches no device. It takes a lease on a SCRATCH lock (never the machine's /tmp/form-gpu.lock), writes what the
+// take answered, and then does one of three things:
 //   exit   leaves without giving the lease back (a client that died on a form_error)
 //   hold   keeps it hold-ms, then gives it back and writes what the give answered
 //   hang   sleeps hold-ms holding it (the band kills it mid-hold)
+// or, in mode lent, it is the cell a lending door runs: it holds instead of taking (gpu-lease-hold-at), runs a turn and a
+// door's hold over two turns, each reading the lock's token inside itself, gives back what it held, and writes one line
+// each: the hold's answer and token, the turn's token, the two turns' tokens, what the give answered, the hold's ms. A
+// refused hold writes "refused" and stops there.
 // The band cannot pass arguments to a cell, so it writes the request to .hearth/lease-probe/req-<this pid>
 // after the spawn, one value per line: mode, lock, tag, hold-ms, wait-ms, go-path (a file to wait for, or empty).
 //
@@ -36,7 +40,22 @@ section [form.bml] {
    let w = gpc-write(ls[2], "ans", ans);
    (String) ls[0] == "hold" ? gpc-hold(ls, ans) : ((String) ls[0] == "hang" ? host_sleep_ms(gpl-num(ls[3])) : 0);
   }
+  def gpc-lent(ls) {
+   let t0 = host_monotonic_ms();
+   let held = try gpu-lease-hold-at(ls[1], "child-" ++ ls[2], gpl-num(ls[4])) catch ["refused"];
+   let ms = host_monotonic_ms() - t0;
+   (String) held[0] == "refused" ? write_file(gpc-dir() ++ "/lent-" ++ ls[2], "refused") : gpc-lent-turns(ls, held, ms);
+  }
+  // a turn on the request's lock whose run reads the token standing on that lock
+  def gpc-turn(ls, label) = gpu-lease-turn-at(ls[1], label ++ "-" ++ ls[2], gpl-num(ls[4]), () => true, () => gpl-read(ls[1])[1]);
+  def gpc-held-token(held) = (String) held[0] == "inherited" ? held[1] : (gpu-lease-token(held) ?? "");
+  def gpc-lent-turns(ls, held, ms) {
+   let turned = gpc-turn(ls, "child-turn");
+   let door = gpu-lease-door-hold-at(ls[1], "child-door-" ++ ls[2], gpl-num(ls[4]), () => true, () => [gpc-turn(ls, "child-door-a"), gpc-turn(ls, "child-door-b")]);
+   let gave = gpu-lease-unhold-at(ls[1], held);
+   write_file(gpc-dir() ++ "/lent-" ++ ls[2], held[0] ++ gpl-nl() ++ gpc-held-token(held) ++ gpl-nl() ++ turned ++ gpl-nl() ++ door[0] ++ gpl-nl() ++ door[1] ++ gpl-nl() ++ gave[0] ++ gpl-nl() ++ ms.str());
+  }
   let req = gpc-await(gpc-dir() ++ "/req-" ++ host_pid().str(), 200, 50);
   let taken = host_path_remove(gpc-dir() ++ "/req-" ++ host_pid().str());
-  nothing?(req) ? 0 : gpc-run(gpl-lines(req));
+  nothing?(req) ? 0 : ((String) gpl-lines(req)[0] == "lent" ? gpc-lent(gpl-lines(req)) : gpc-run(gpl-lines(req)));
 }

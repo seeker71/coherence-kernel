@@ -1,7 +1,7 @@
 ; gpu-lease-band.fk — the GPU lease, held against synthetic truth. Every lock here is a SCRATCH directory under
-; .hearth/lease-probe/; the real .hearth/gpu.lock is never touched. The "clients" are fkwu children of
+; .hearth/lease-probe/; the machine's /tmp/form-gpu.lock is never touched. The "clients" are fkwu children of
 ; tests/gpu-lease-child-run.fk (no device): they take a lease and exit without giving it back, hold it and
-; give it back, or hang holding it.
+; give it back, hang holding it, or run as the cell a lending door runs.
 ;
 ;   1      a take on a free lock answers ["held" token]; the record names this pid, this process's start time, the label
 ;   2      the holder's give answers ["released" token] and the directory is gone
@@ -26,8 +26,21 @@
 ;   8192   a lock that cannot be made (no parent directory) is refused ["refused" "cannot-make-lock" ...], not waited on
 ;
 ;   16384  an operation that rejoins waits behind a queued peer, preserving FIFO between turns
-; Expected: 32767
-; Verdict 32767
+;   32768  a holder that LENDS its lease (gpu-lease-lend-at) runs a child that holds, turns, and holds a door's reading
+;          over two turns: every one answers ["inherited" the holder's token] at once and reads that token inside, the
+;          child gives nothing back, and after it the lease stands, lent, the holder's to give; the same child of a
+;          holder that did not lend waits out its bound and is refused
+;   65536  a door's one hold over its reading (gpu-lease-door-hold-at): three turns inside it read the door's token and
+;          take no lease of their own, and the lease is gone once the reading ends
+;   131072 a door's reading that stops gives its lease back and stops again: the stop reaches its caller, the lock is gone,
+;          and the next take answers ["held" ...]; a reading whose device did not settle keeps its lease and stops aloud
+;   262144 a lent lease is no bystander's: a process that is not its holder's child (here this band, against a lease its
+;          own child holds and lends) waits out its bound, is refused, and the record stays the holder's
+;   524288 a door's reading holds the device a run at a time: where a run begins (gpu-lease-door-yield) a client whose
+;          ticket waits gets the lease within its bound and the door takes it again behind it (["yielded" ...]); with no
+;          ticket waiting it keeps the lease (["kept" token]), and the lease is gone once the reading ends
+; Expected: 1048575
+; Verdict 1048575
 ; REQUIRES: (spawns fkwu children, among them tests/host-sleeper-run.fk, a Form child that only waits;
 ; host_process; no sibling kernel carries those doors)
 ; preflight-exec: forbidden
@@ -69,6 +82,20 @@ section [form.bml] {
   def glb-opts(wait, unowned, markers) = [wait, 100, unowned, markers];
   def glb-only-children() = ["gpu-lease-child-run"];
   def glb-take(lock, opts) = gpu-lease-take-with(lock, "band", opts);
+  // a turn of a door's reading: its run reads the token standing on the lock
+  def glb-door-turn(lock, label) = gpu-lease-turn-at(lock, label, 1000, () => true, () => gpl-read(lock)[1]);
+  // a reading of two runs: the first begins with no ticket waiting; the second begins once a child waits on the lock, with a bound
+  // shorter than the reading holds the lease after it: [the first token, the first yield, the second, the child's answer, the token after]
+  def glb-yield-reading(lock, tag) {
+   let first = gpl-read(lock)[1];
+   let kept = gpu-lease-door-yield();
+   let pid = glb-spawn("hold", lock, tag, 100, 3000, "");
+   let waiting = glb-await(gpl-wait-dir(lock) ++ "/" ++ pid.str(), 300);
+   let yielded = gpu-lease-door-yield();
+   let child = glb-ans(tag, "ans");
+   let w = host_wait(pid);
+   [first, kept, yielded, glb-line(child, 0), gpl-read(lock)[1], nothing?(waiting) ? "no-ticket" : "ticket"];
+  }
   def glb-ms-since(t0) = host_monotonic_ms() - t0;
   def glb-round(k) {
    let lock = glb-lock("r" ++ k.str());
@@ -247,10 +274,71 @@ section [form.bml] {
   let b16384 = glb-bit(!nothing?(waiting15) && glb-line(child15,0) == "waited" && rejoined15[0] == "waited",16384);
   let said15 = glb-say("FIFO handover",[child15,rejoined15]);
 
+  // ===== 32768: a lent lease is its holder's child's; an unlent one is not =====
+  let l16 = glb-lock("lend");
+  let a16 = glb-take(l16, glb-opts(1000, 60000, gpl-markers()));
+  let n16 = gpu-lease-lend-at(l16, a16);
+  let t16 = glb-tag("lend");
+  let p16 = glb-spawn("lent", l16, t16, 0, 3000, "");
+  let h16 = host_wait(p16);
+  let c16 = glb-ans(t16, "lent");
+  let r16 = gpl-read(l16);
+  let g16 = gpu-lease-give(l16, a16);
+  let tk16 = gpu-lease-token(a16);
+  let l17 = glb-lock("unlent");
+  let a17 = glb-take(l17, glb-opts(1000, 60000, gpl-markers()));
+  let t17 = glb-tag("unlent");
+  let p17 = glb-spawn("lent", l17, t17, 0, 1200, "");
+  let h17 = host_wait(p17);
+  let c17 = glb-ans(t17, "lent");
+  let g17 = gpu-lease-give(l17, a17);
+  let s32768 = glb-say("lent to the child", [c16, r16, c17]);
+  let b32768 = glb-bit(glb-all([n16 >= 0 ? 1 : 0, glb-seq(glb-line(c16, 0), "inherited"), glb-seq(glb-line(c16, 1), tk16), glb-seq(glb-line(c16, 2), tk16), glb-seq(glb-line(c16, 3), tk16), glb-seq(glb-line(c16, 4), tk16), glb-seq(glb-line(c16, 5), "inherited"), (gpl-num(glb-line(c16, 6)) ?? 1000) < 1000 ? 1 : 0, glb-seq(r16[1], tk16), glb-seq(r16[7], tk16), glb-seq(g16[0], "released"), (Comparable) host_path_exists(l16) == 0 ? 1 : 0, glb-seq(glb-line(c17, 0), "refused"), glb-seq(g17[0], "released")]), 32768);
+
+  // ===== 65536: a door's one hold over its reading =====
+  let l18 = glb-lock("door");
+  let d18 =gpu-lease-door-hold-at(l18, "door", 1000, () => true, () => [gpl-read(l18)[1], glb-door-turn(l18, "t1"), glb-door-turn(l18, "t2"), glb-door-turn(l18, "t3")]);
+  let s65536 = glb-say("one hold over a door's reading", d18);
+  let b65536 = glb-bit(glb-all([(String) value_kind(d18[0]) == "string" ? 1 : 0, glb-seq(d18[1], d18[0]), glb-seq(d18[2], d18[0]), glb-seq(d18[3], d18[0]), (Comparable) host_path_exists(l18) == 0 ? 1 : 0]), 65536);
+
+  // ===== 131072: a reading that stops gives its lease back; one that did not settle keeps it, aloud =====
+  let l19 = glb-lock("stop");
+  let d19 = try gpu-lease-door-hold-at(l19, "door", 1000, () => true, () => form_error("gpu-lease-band: the reading stopped")) catch "stopped";
+  let gone19 = (Comparable) host_path_exists(l19) == 0 ? 1 : 0;
+  let a19 = glb-take(l19, glb-opts(1000, 60000, gpl-markers()));
+  let g19 = gpu-lease-give(l19, a19);
+  let l19b = glb-lock("unsettled");
+  let d19b = try gpu-lease-door-hold-at(l19b, "door", 1000, () => false, () => "read") catch "stopped";
+  let r19b = gpl-read(l19b);
+  let g19b = gpu-lease-release(l19b, r19b[1] ?? "");
+  let s131072 = glb-say("a reading that stops, one that did not settle", [d19, gone19, a19, d19b, r19b, g19b]);
+  let b131072 = glb-bit(glb-all([glb-seq(d19, "stopped"), gone19, glb-seq(a19[0], "held"), glb-seq(g19[0], "released"), glb-seq(d19b, "stopped"), glb-seq(r19b[0], "rec"), glb-eq(r19b[2], host_pid()), glb-seq(g19b[0], "released")]), 131072);
+
+  // ===== 262144: a lent lease is no bystander's =====
+  let keeper = host_spawn_at(["./fkwu", "form/form-stdlib/tests/host-sleeper-run.fk"], ["/dev/null", "/dev/null", "/dev/null"]);
+  let l20 = glb-lock("bystander");
+  let f20 = glb-forge(l20, "forged-lent", keeper, gpl-start-of(keeper));
+  let n20 = write_file(gpl-lent-file(l20), "forged-lent");
+  let t0d = host_monotonic_ms();
+  let a20 = try gpu-lease-hold-at(l20, "bystander", 800) catch ["refused"];
+  let ms20 = glb-ms-since(t0d);
+  let r20 = gpl-read(l20);
+  let k20 = host_kill(keeper);
+  let w20 = host_wait(keeper);
+  let rm20 = glb-rm(l20 ++ "/owner") + glb-rm(gpl-lent-file(l20)) + glb-rm(l20);
+  let s262144 = glb-say("a bystander of a lent lease", [a20, ms20, r20]);
+  let b262144 = glb-bit(glb-all([n20 >= 0 ? 1 : 0, glb-seq(a20[0], "refused"), ms20 >= 700 ? 1 : 0, glb-seq(r20[1], "forged-lent"), glb-eq(r20[2], keeper), glb-seq(r20[7], "forged-lent")]), 262144);
+
+  // ===== 524288: a reading holds the device a run at a time =====
+  let l21 = glb-lock("yield");
+  let d21 = gpu-lease-door-hold-at(l21, "door", 10000, () => true, () => glb-yield-reading(l21, glb-tag("yield")));
+  let s524288 = glb-say("a reading yields where a run begins", d21);
+  let b524288 = glb-bit(glb-all([glb-seq(d21[1][0], "kept"), glb-seq(d21[1][1], d21[0]), glb-seq(d21[5], "ticket"), glb-seq(d21[2][0], "yielded"), glb-seq(d21[2][1][0], "released"), glb-seq(d21[2][2][0], "waited"), glb-seq(d21[3], "waited"), glb-seq(d21[4], gpu-lease-token(d21[2][2])), (Comparable) host_path_exists(l21) == 0 ? 1 : 0]), 524288);
+
   // ===== leave nothing behind =====
   let swept = glb-sweep(host_dir_list(glb-dir()));
   let sh-swept = glb-say("scratch entries removed", swept);
-  let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024 + b2048 + b4096 + b8192 + b16384;
+  let verdict = b1 + b2 + b4 + b8 + b16 + b32 + b64 + b128 + b256 + b512 + b1024 + b2048 + b4096 + b8192 + b16384 + b32768 + b65536 + b131072 + b262144 + b524288;
   let shown = print(["gpu-lease-band", "verdict", verdict]);
   verdict;
 }
