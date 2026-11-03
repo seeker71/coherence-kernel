@@ -2,7 +2,7 @@
 //
 //   echo '{}' | ./fkwu observe/q38-decode-run.bml               the plan. Opens nothing.
 //   echo '{"go":1,"decode":24,"prompt":"Explain in two sentences why the sky is blue."}' | ./fkwu observe/q38-decode-run.bml
-//                                                                THE MEASURE. Takes the memory lease, opens the Qwen context once, prefills the prompt batched
+//                                                                THE MEASURE. Holds the GPU lease and takes the memory lease, opens the Qwen context once, prefills the prompt batched
 //                                                                from a fresh state per variant and speaks `decode` tokens one position at a time, reading each
 //                                                                variant's ms a token and its ids: the base lane (q38-forward), the same with the host's encode
 //                                                                and the device's wait split, and the hand-over every n layers (0 never).
@@ -15,9 +15,14 @@
 // while no run outruns its estimate by more than the minute the bound holds beyond the budget, which also carries the compile
 // before the first step (3 to 10 s), the close and the release. A run that does is cut by the bound, and its leases are taken
 // back as a dead holder's (the memory governor's next reading, the GPU lease door). Inferred: at the 21-28 positions/s the
-// ledger reads, twelve fresh prefills of a ~4K-id prompt take 30 to 40 minutes.
+// ledger reads, twelve fresh prefills of a ~4K-id prompt take 30 to 40 minutes. Every plain run prints a digest: its ids and
+// the last token's logits (bs 28) and final residual (bs 0) folded word by word, so runs and trees read bitwise.
+// The lease: every go mode that touches the device holds the GPU lease once for its whole reading (gpu-lease-door-hold), after
+// the prompt's ids are read; every turn of the lane (the open, each prefill, each token) inherits it, so a plain run of 32
+// tokens takes it once and not once a token, and the door's own dispatches between turns run under it too. Under
+// observe/gpu-lease-run.fk the hold inherits the lease that door lends. The `lease  ...` lines say how it came and went.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/metal-carrier.bml
 section [form.bml] {
  class Q38DecodeRun {
   def qdr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
@@ -96,8 +101,17 @@ section [form.bml] {
    let freed = q38-free-state(st[0]);
    let say = print_str("[q38-decode] q38-generate run " ++ run.str() ++ ": " ++ k.str() ++ " tokens in " ++ (t1 - t0).str() ++ " ms = " ++ ((t1 - t0) * 10 / k).str() ++ " ms/10 a token");
    let idsay = run == 1 ? print_str("[q38-decode] ids: " ++ qdr-ids-line(spoken)) : 0;
+   let dig = qdr-digest(run, c, spoken);
    qdr-plain-go(ctx, ids, k, runs, run + 1);
   };
+  // the digest of a run: words folded (h * 65599 + w) mod 4294967291 in order, over a float row read back or over a list of ids
+  def qdr-fold-go(a, i, n, h) = i >= n ? h : qdr-fold-go(a, i + 1, n, (h * 65599 + ln-u32-le(a, i * 4)) % 4294967291);
+  def qdr-fold-ids(xs, h) = len(xs) == 0 ? h : qdr-fold-ids(xs[1:], (h * 65599 + xs[0]) % 4294967291);
+  def qdr-digest(run, c, spoken) {
+   let logits = metal_buf_read(c[1][28], 0, c[2][19] * 4);
+   let resid = metal_buf_read(c[1][0], 0, c[2][0] * 4);
+   print_str("[q38-decode] digest run " ++ run.str() ++ ": " ++ len(spoken).str() ++ " ids fold " ++ qdr-fold-ids(spoken, 0).str() ++ ", last logits fold " ++ qdr-fold-go(logits, 0, c[2][19], 0).str() ++ ", last residual fold " ++ qdr-fold-go(resid, 0, c[2][0], 0).str());
+  }
   // mode plain inside its budget: go(run) speaks run `run`; every run, the first among them, begins only when the ms since t0 and
   // its estimate fit `budget`: the first's is `est`, each later one's the longest run so far; the answer is how many ran
   def qdr-plain-fit(go, runs, run, t0, budget, est) = run > runs || host_monotonic_ms() - t0 + est > budget ? run - 1 : {
@@ -841,6 +855,12 @@ section [form.bml] {
    let src = fcmg-src(path);
    let ids = q35-chat-ids(src, prompt);
    let span = len(ids);
+   let said = print_str("[q38-decode] prompt " ++ span.str() ++ " ids, first " ++ qdr-ids-line(qdr-take(ids, 8)) ++ "last " ++ nth(ids, span - 1).str() ++ ", ids fold " ++ qdr-fold-ids(ids, 0).str());
+   gpu-lease-door-hold("q38-decode-run " ++ mode, () => qdr-held(path, k, mode, plain, src, ids));
+  }
+  // under the door's one GPU hold: the memory lease, the open, the measure, the close
+  def qdr-held(path, k, mode, plain, src, ids) {
+   let span = len(ids);
    let maxpos = span + k + 8;
    let own = fcms-qwen-own(src, maxpos);
    let weights = fcms-weights-bytes(path);
@@ -860,6 +880,16 @@ section [form.bml] {
     };
    };
   }
+  // a go mode that touches the device: the Metal carrier first (a fresh worktree holds its source and no dylib, and every handle
+  // would read 0 there; metal-carrier.bml builds it through the host door, a standing one is read and kept), then one GPU hold over
+  // the reading (qdr-open holds it once the prompt's ids are read)
+  def qdr-device(opts, path, k, plain) {
+   let made = host_dir_mkdir(".hearth");
+   let carrier = mca-admit(".hearth/carrier.log", ".hearth/carrier.err");
+   let said = (String) carrier[0] == "standing" ? 0 : print_str("[q38-decode] the Metal carrier: " ++ carrier[0]);
+   let mode = qdr-text(opts, "mode", "decode");
+   !((String) carrier[0] == "standing" || (String) carrier[0] == "admitted") ? print_str("[q38-decode] nothing was opened: the carrier is not admitted (.hearth/carrier.err)") : (String) mode == "burn2" ? gpu-lease-door-hold("q38-decode-run burn2", () => qdr-burn2()) : (String) mode == "alu2" ? gpu-lease-door-hold("q38-decode-run alu2", () => qdr-alu2()) : (String) mode == "session" ? gpu-lease-door-hold("q38-decode-run session", () => qdr-session(path, qdr-text(opts, "prompt", qdr-prompt()), qdr-int(opts, "blocks", 6), k)) : qdr-open(path, k, qdr-text(opts, "prompt", qdr-prompt()), mode, plain);
+  }
   def qdr-run() {
    let t0 = host_monotonic_ms();
    let opts = qdr-opts();
@@ -867,7 +897,7 @@ section [form.bml] {
    let k = qdr-int(opts, "decode", 24);
    // the 900 s bound of the reading less a minute for the close and the release
    let plain = [qdr-int(opts, "runs", 12), qdr-int(opts, "budget", 840) * 1000, t0];
-   (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "burn2" ? qdr-burn2() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "alu2" ? qdr-alu2() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "bind" ? qdr-bind-bench() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "session" ? qdr-session(path, qdr-text(opts, "prompt", qdr-prompt()), qdr-int(opts, "blocks", 6), k) :(Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(path, k, qdr-text(opts, "prompt", qdr-prompt()), qdr-text(opts, "mode", "decode"), plain) : print_str("[q38-decode] plan: decode " ++ k.str() ++ ", file " ++ path ++ "; mode plain runs up to " ++ plain[0].str() ++ " inside " ++ (plain[1] / 1000).str() ++ " s; {\"go\":1} opens it and measures");
+   (Comparable) qdr-int(opts, "go", 0) != 1 ? print_str("[q38-decode] plan: decode " ++ k.str() ++ ", file " ++ path ++ "; mode plain runs up to " ++ plain[0].str() ++ " inside " ++ (plain[1] / 1000).str() ++ " s; {\"go\":1} opens it and measures") : (String) qdr-text(opts, "mode", "decode") == "bind" ? qdr-bind-bench() : qdr-device(opts, path, k, plain);
   }
  }
  qdr-run();
