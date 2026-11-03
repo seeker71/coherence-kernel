@@ -17,6 +17,25 @@ kernel void lab_fill_q8(device uchar* qb [[buffer(0)]], constant uint& nblk [[bu
   p[0] = (uchar)(sb & 255u); p[1] = (uchar)(sb >> 8);
   for (uint i = 0u; i < 32u; i++) { h = h * 1664525u + 1013904223u; p[2u + i] = (uchar)(h >> 24); }
 }
+// K-quant superblocks: d (and Q4_K's dmin) a finite f16 that varies by superblock across a few binades, as a
+// file's do (so the software f16's pow2 loop runs the trip counts it meets there); every other byte hashed
+kernel void lab_fill_q4k(device uchar* qb [[buffer(0)]], constant uint& nblk [[buffer(1)]], uint t [[thread_position_in_grid]]) {
+  if (t >= nblk) return;
+  uint h = t * 2654435761u + 4242u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+  ushort d = as_type<ushort>(half(0.0004f + float(h >> 26) * 0.00006f));
+  ushort m = as_type<ushort>(half(0.0001f + float((h >> 20) & 63u) * 0.00003f));
+  device uchar* p = qb + (ulong)t * 144ul;
+  p[0] = (uchar)(d & 255u); p[1] = (uchar)(d >> 8); p[2] = (uchar)(m & 255u); p[3] = (uchar)(m >> 8);
+  for (uint i = 4u; i < 144u; i++) { h = h * 1664525u + 1013904223u; p[i] = (uchar)(h >> 24); }
+}
+kernel void lab_fill_q6k(device uchar* qb [[buffer(0)]], constant uint& nblk [[buffer(1)]], uint t [[thread_position_in_grid]]) {
+  if (t >= nblk) return;
+  uint h = t * 2654435761u + 6161u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+  ushort d = as_type<ushort>(half(0.0001f + float(h >> 26) * 0.00002f));
+  device uchar* p = qb + (ulong)t * 210ul;
+  for (uint i = 0u; i < 208u; i++) { h = h * 1664525u + 1013904223u; p[i] = (uchar)(h >> 24); }
+  p[208] = (uchar)(d & 255u); p[209] = (uchar)(d >> 8);
+}
 
 // ---- the fp32 FMA ceiling: no matrix unit, no memory
 kernel void lab_fma(device float* out [[buffer(0)]], constant uint& iters [[buffer(1)]], uint t [[thread_position_in_grid]]) {
