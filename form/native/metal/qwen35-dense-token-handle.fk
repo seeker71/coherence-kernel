@@ -132,9 +132,9 @@ section [form.bml] {
         append(append(append(append(append(append(base, q38-lora-rank1-pipes(msl)), q38e-pipes(msl)), q38pq-pipes(msl)), q38dq-pipes(msl)), q38pa-pipes(msl)), [metal_pipeline(msl, "form_q38_rmsnorm_par_f32"), metal_pipeline(msl, "form_q38_rmsnorm_par_span_f32"), metal_pipeline(msl, "form_q38_q8_mm64_f32"), metal_pipeline(msl, "form_q38_gdn_delta_sg_f32"), metal_pipeline(msl, "form_q38_q8_mm64e_f32"), metal_pipeline(msl, "form_q38_q8_planar_mv_f32"), metal_pipeline(msl, "form_q38_q8_repack_f32")]);
     };
     def q38-embed(ps, bs, geo, embTv, id, barrier) = q38e-index(kth-tv-ty(embTv)) < 0 ? -1 : metal_enqueue(nth(ps, q38e-index(kth-tv-ty(embTv))), q38-b16([kth-tv-h(embTv), bs[0]], [id * geo[0], geo[0]], 0, barrier), geo[0]);
-    // One exact 256-thread group per output-row pair for Q8_0, and the same pair-of-rows
-    // shape for Q4_K and Q6_K through their fused dots (qwen38-decode-quant.bml owns that
-    // record).
+    // One exact 256-thread group per output-row pair for Q8_0, the same pair-of-rows shape
+    // for Q4_K and four rows a group for Q6_K through their fused dots (qwen38-decode-quant.bml
+    // owns that record).
     // Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
     // norm type 0.  md-bind16's mode=1 makes the op's threads argument a group count.
     // A dense forward runs in the carrier's concurrent encoder.  The last bit is an explicit
@@ -295,9 +295,12 @@ section [form.bml] {
     // reads the token before it.
     // Quantization and output pitch belong to the producer. Each K-quant
     // supplies its decoder to the shared matrix-unit tile; Q8 uses its wider tile.
+    // A K-quant view whose cols is not whole superblocks is refused aloud
+    // (q38pq-whole-refusal) before anything is enqueued.
     def q38-mv-batch-y(ps, tv, xh, yh, ntok, ystride, barrier) {
         let type=kth-tv-ty(tv); let rows=kth-tv-r(tv); let cols=kth-tv-c(tv);
-        q38pq-index(type) < 0 ? form_error("qwen prefill: unsupported matrix quantization") : type==8 ? q38-mm-q80(ps,tv,xh,yh,ntok,ystride,barrier) : {
+        let whole=q38pq-whole-refusal(type,cols);
+        q38pq-index(type) < 0 ? form_error("qwen prefill: unsupported matrix quantization") : (Comparable) len(whole) > 0 ? form_error(whole) : type==8 ? q38-mm-q80(ps,tv,xh,yh,ntok,ystride,barrier) : {
             let matrix=q38pq-k-mma-index(type);
             let pipeline=matrix >= 0 ? matrix : q38pq-index(type);
             let grid=matrix >= 0 ? qmb-mma-groups(rows,ntok) : (rows + 7)/8*8*qmb-ntile(ntok)*32;

@@ -1,0 +1,52 @@
+// kquant-scale-census-run.bml — the superblock scales of a GGUF file's K-quant tensors by class: how many d (and, for
+// Q4_K, dmin) are negative, subnormal, zero, normal, or inf or NaN. The classes q38dq-fill gives the decode witnesses
+// (form-stdlib/bml/qwen38-decode-quant.bml) answer to what a real file holds; this door reads what it holds.
+//
+//   ./fkwu observe/kquant-scale-census-run.bml < /dev/null                      (the registry row qwen38-q4)
+//   printf '/path/to/model.gguf\n' | ./fkwu observe/kquant-scale-census-run.bml
+//
+// Reads the header (its first 40 MB) and the first kqc-sample() superblocks of every Q4_K (type 12) and Q6_K (type 14)
+// tensor from disk (read_file_slice, the data base aligned to 32): no model session, no Metal, no lease. One line for the
+// file (its tensors and each type's row widths), then one a type and scale.
+// preludes: form-stdlib/core.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/model-registry.bml
+section [form.bml] {
+ class KquantScaleCensusRun {
+  def kqc-say(s) = print_str("[kquant-scales] " ++ s);
+  def kqc-sample() = 1024;
+  def kqc-name(src, off) = substring(src, off + 8, off + 8 + egg-ti-namelen(src, off));
+  def kqc-ne1(src, off) = (Comparable) egg-ti-ndims(src, off) > 1 ? egg-ti-dim(src, off, 1) : 1;
+  // every tensor: [name, type, row width, rows, data offset]
+  def kqc-walk(src, off, k, n, acc) = k >= n ? reverse(acc) : kqc-walk(src, egg-ti-next(src, off), k + 1, n, cons([kqc-name(src, off), egg-ti-type(src, off), egg-ti-dim(src, off, 0), kqc-ne1(src, off), egg-ti-dataoff(src, off)], acc));
+  // the f16 at byte dof of superblocks s .. n of a slice of stride st, by class: [negative (the sign bit), subnormal
+  // (exponent 0, a mantissa), zero, normal (exponents 1 .. 30), inf or NaN (exponent 31)]
+  def kqc-classes(bytes, st, dof, s, n, acc) = s >= n ? acc : {
+   let u = str_byte_at(bytes, st * s + dof) + 256 * str_byte_at(bytes, st * s + dof + 1);
+   let mag = u % 32768;
+   kqc-classes(bytes, st, dof, s + 1, n, [acc[0] + (u >= 32768 ? 1 : 0), acc[1] + ((Comparable) mag < 1024 && mag > 0 ? 1 : 0), acc[2] + ((Comparable) mag == 0 ? 1 : 0), acc[3] + ((Comparable) mag >= 1024 && mag < 31744 ? 1 : 0), acc[4] + ((Comparable) mag >= 31744 ? 1 : 0)]);
+  };
+  // one scale of every tensor of `type`: [negative, subnormal, zero, normal, inf or NaN, superblocks read, tensors]
+  def kqc-type(path, base, ts, type, st, dof, acc) = nil?(ts) ? acc : {
+   let t = ts[0];
+   let mine = (Comparable) t[1] == type ? 1 : 0;
+   let take = (t[2] / 256) * t[3] < kqc-sample() ? (t[2] / 256) * t[3] : kqc-sample();
+   let c = (Comparable) mine == 1 ? kqc-classes(read_file_slice(path, base + t[4], take * st), st, dof, 0, take, [0, 0, 0, 0, 0]) : [0, 0, 0, 0, 0];
+   kqc-type(path, base, ts[1:], type, st, dof, [acc[0] + c[0], acc[1] + c[1], acc[2] + c[2], acc[3] + c[3], acc[4] + c[4], acc[5] + mine * take, acc[6] + mine]);
+  };
+  def kqc-has(xs, v) = nil?(xs) ? 0 : ((Comparable) xs[0] == v ? 1 : kqc-has(xs[1:], v));
+  def kqc-widths(ts, type, acc) = nil?(ts) ? acc : kqc-widths(ts[1:], type, (Comparable) ts[0][1] == type && (Comparable) kqc-has(acc, ts[0][2]) == 0 ? append(acc, [ts[0][2]]) : acc);
+  def kqc-line(label, c) = kqc-say(label ++ ": " ++ c[5].str() ++ " superblocks of " ++ c[6].str() ++ " tensors (the first " ++ kqc-sample().str() ++ " of each): negative " ++ c[0].str() ++ ", subnormal " ++ c[1].str() ++ ", zero " ++ c[2].str() ++ ", normal " ++ c[3].str() ++ ", inf or NaN " ++ c[4].str());
+  def kqc-run(path) {
+   let src = eqr-of-file(path, 0, 40000000);
+   (Comparable) egg-magic-ok?(src) == 1 ? 0 : form_error("kquant-scales: not a GGUF file: " ++ path);
+   let ts = kqc-walk(src, egg-tinfo-start(src), 0, egg-tensor-count(src), []);
+   let base = egg-data-base(src, 32);
+   let said = kqc-say(path ++ ": " ++ len(ts).str() ++ " tensors; row widths Q6_K " ++ value_str(kqc-widths(ts, 14, [])) ++ ", Q4_K " ++ value_str(kqc-widths(ts, 12, [])));
+   let q6 = kqc-line("Q6_K d", kqc-type(path, base, ts, 14, 210, 208, [0, 0, 0, 0, 0, 0, 0]));
+   let q4d = kqc-line("Q4_K d", kqc-type(path, base, ts, 12, 144, 0, [0, 0, 0, 0, 0, 0, 0]));
+   let q4m = kqc-line("Q4_K dmin", kqc-type(path, base, ts, 12, 144, 2, [0, 0, 0, 0, 0, 0, 0]));
+   0;
+  }
+ }
+ let line = read_line();
+ kqc-run(nothing?(line) || (Comparable) len(line) == 0 ? mr-path(mr-find("qwen38-q4")) : line);
+}
