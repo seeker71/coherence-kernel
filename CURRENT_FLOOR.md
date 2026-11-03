@@ -263,11 +263,11 @@ host-walk-band 9007199254740991  (a walk door that claims the checkout stamps it
                                 the time the launched start stamped; the day turn's renewal takes a planted continuation, its pid and
                                 kernel start, reads its options as planted and archives it under the renewed pid; each door's steps
                                 are its own reader (sw-handed, dt-handed) over its walked function, and each reader puts every pair
-                                of a planted line, a value of its own in each, in its own place; each door reads its slot hour before
+                                of a planted line, a value no other place holds, in its own place; each door reads its slot hour before
                                 it begins; the nine keys stand closed and a pair added later is read with its default; with dt-taken
                                 a no-op the band reads 6755399441055743, and with sw-handed's hour and window swapped, dt-handed's
-                                safe flag read inverted, the stamp taking the take's time or the day's hour read after its carrier
-                                the claim alone reads short) and `renew-ends` (the launched start
+                                safe flag read inverted or read from the from pair, the stamp taking the take's time or the day's
+                                hour read after its carrier the claim alone reads short) and `renew-ends` (the launched start
                                 ends by its renewed self's no-core signal, raised on itself, the launcher's set: the band reads 143;
                                 1 by name for a renewal that would not compile (ended 2) and for a 0 that left the lock naming it, a
                                 door from before its two starts; with the raise or the lock's reading reverted the band reads
