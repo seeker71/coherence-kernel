@@ -1,0 +1,144 @@
+# Algorithms for Optimization applied to Form
+
+The second-edition preview supplied a useful experimental discipline, and one
+source-derived JIT improvement is implemented: argument emission now assembles
+instruction words in linear time instead of repeatedly copying the prefix.
+Whole-program startup improvement has not been established.
+
+## Source and scope
+
+Mykel J. Kochenderfer and Tim A. Wheeler, *Algorithms for Optimization*, second
+edition preview, revision 2026-09-05, 634 PDF pages, 18,967,454 bytes.
+The [authors' download page](https://algorithmsbook.com/optimization/) identifies
+the preview and January 5, 2027 publication. Its
+[PDF](https://algorithmsbook.com/optimization/files/optimization.pdf) redirects
+to Google Drive file `1Rx7MAekKZbyNVc5B2MNfR0HXXIEJCksp`.
+
+The original PDF and extracted reading are local inputs under
+`.hearth/research/algorithms-for-optimization/optimization-2e.pdf` and
+`optimization-2e.txt`. The PDF remains unchanged; it carries CC-BY-NC-ND 4.0.
+Relevant sections were studied, not every page. Arriving Codex supplied the
+analysis and patch; native Form supplied emission, execution and observations.
+The hearth enquiry returned `signal=nothing reason=no-standing-hearth`.
+
+## What the book changes in our approach
+
+Page references below use printed book pages. The kernel applications are our
+inferences, not claims that the book discusses this implementation.
+
+| Reading | Application |
+| --- | --- |
+| Section 1.2, pp. 4–5: optimization process | Name the objective, legal changes, constraints and baseline before experimenting. Distinguish startup, first useful answer, compilation, warm throughput and memory. |
+| Sections 7.3–7.4, pp. 116–119: direct search | Evaluate small legal neighborhoods of inline settings or batch sizes. Timing is discontinuous and noisy; a gradient is not assumed. |
+| Sections 15.1–15.3, pp. 325–333: multiple objectives | Retain latency/memory/throughput trade-offs. Correctness and source freshness are requirements, not soft penalties that a fast wrong result can offset. |
+| Sections 16.1, 16.3–16.5, pp. 349–356: sampling | Enumerate a small configuration space; use stratified or space-filling plans for larger spaces. Include boundary configurations and interactions. |
+| Sections 17.4–17.6, pp. 372–384: noise, model selection, multifidelity | Repeat observations, hold out workloads, and use cheap isolated experiments to screen candidates before expensive end-to-end measurements. |
+| Sections 18.5 and 19.3–19.5, pp. 399–400, 413–416 | If experiment cost warrants a surrogate, model uncertainty and use it to select another real measurement. Predicted improvement is not acceptance evidence. |
+| Section 22.5, pp. 474–477: dynamic programming | Reuse overlapping immutable compilation subproblems within the owning compilation. Preserve identity and invalidation. |
+| Appendix C.1, pp. 571–572: asymptotic notation | Check scaling with input size. A constant-size example cannot establish removal of repeated prefix copying. |
+
+Chapter 8's noisy descent adds deliberate search noise; it is not the benchmark
+noise model. Smooth optimization guarantees do not transfer automatically to
+integer compiler settings and contention-sensitive timings.
+
+## Implemented JIT change
+
+Owner: `form/form-stdlib/bml/jit-page.bml`, `jp-args` / `jp-args-at`.
+All four production callers retain the same six-argument entry point.
+Previously each argument appended its emitted words to the entire accumulated
+prefix. Core's `append` traverses its first argument twice. The replacement
+emits children left to right, prepends their reversed words and store instruction,
+then reverses once at completion. Empty input returns the original accumulator.
+There is no C-seed change and no new runtime or band.
+
+The emission contract remains `[words, slots-used, native-node-count]`. A prefix
+`A`, child words `R`, and store word `S` become
+`S ++ reverse(R) ++ reverse(A)` internally and `A ++ R ++ S` on return.
+Slot high-water marks, native counts, ABI, frame ownership and helper calls stay
+unchanged. The old production helper implementation is removed.
+
+Native experiment:
+`form-run ./fkwu .hearth/research/algorithms-for-optimization/jit-args-experiment.bml`.
+It retains the old algorithm only as a local comparison specimen, calls the
+actual new entry, and compares the complete emission at arities
+0, 1, 2, 4, 16, 64 and 256. The equality case includes a nonempty prefix,
+nonzero initial argument index and slot offset. All emissions match.
+
+Timing uses 80 emissions per sample, five alternating old/new rounds, with the
+same AST for `x + 7`. `host_monotonic_ms` measures emission inside the process,
+excluding process startup and source admission. The timings include warm-up;
+small cases have visible outliers and insufficient resolution for a gain claim.
+
+| Arguments | Old milliseconds, five samples | New milliseconds, five samples | Median old → new |
+| --- | --- | --- | --- |
+| 16 | 5, 5, 4, 4, 5 | 5, 3, 4, 3, 3 | 5 → 3 |
+| 64 | 26, 23, 22, 23, 23 | 13, 14, 14, 14, 14 | 23 → 14 |
+| 256 | 192, 189, 190, 188, 189 | 55, 56, 57, 55, 54 | 189 → 55 |
+
+This demonstrates reduced compilation work for wide synthetic calls. It does
+not establish a warm execution or whole-program startup gain. The generated
+instruction words are identical. Raw observations are retained locally in
+`jit-args-results.txt` beside the experiment.
+
+The existing `form/form-stdlib/tests/jit-page-band.bml` now also exercises an
+eight-argument call with separate position and ordered-effect expectations:
+`[87654321, 12345678]`. The order function must have a bound native page.
+The extended family still returns **63**, with no differing cold/hot answers,
+matching tail loops, divide-by-zero refusal and all six requested pages bound.
+Independent source review found no blocking issue.
+
+## Startup observations and next experiments
+
+The native `startup-experiment.bml` in the same local research directory uses
+`cell_run`, retaining result, residency, elapsed milliseconds and CPU microseconds.
+This measures cell admission plus execution, not operating-system process launch.
+
+For `observe/form-cli-enrich-run.bml` with `optimization` on stdin, one initial
+admission was 495 ms / 490,314 CPU us. A later fresh process using the now-warm
+disk caches admitted it in 30 ms / 30,341 CPU us. The five resident calls in
+that later process used 350, 874, 331, 312 and 320 CPU us. The second run's raw
+rows are in `startup-results.txt`. The initial run's exact rows remain in this
+session's execution transcript. This contrast motivates distinct cache-state
+experiments; it is not an A/B result for the JIT patch.
+
+The next useful choices are:
+
+1. **Startup dependency work.** `form-source-compile-packet` in
+   `source-compiler.fk` rebuilds the compiler closure for each packet while
+   `bml-floor-compile.fk` already owns an exact-byte compiler pin. Measure reuse
+   tied to that pin, home bindings and absent dependency candidates. Never
+   replace exact source checks with mtimes. `fsc-bml-reading-counts` counts
+   parsed-fact reuse, not saved physical reads: `fsc-bml-read-source` still reads.
+2. **JIT amortization.** Measure compiler cost against expected remaining call
+   savings before changing heat or inline choices. Our break-even model is
+   `remaining_calls * (walk_cost - native_cost) > compilation_cost`.
+   Current transparent thresholds are `FK_JIT_HEAT=4096` and
+   `FK_JIT_TIME_SAMPLES=32`; the older `jit-decision.fk` registry is a different
+   route. Inline depth 2 and the 768-word limit belong to `jit-page.bml`.
+3. **Admission latency versus memory.** The seed batches up to 16 cold lowerings.
+   Compare legal batch sizes on equivalent isolated inputs, retaining completed
+   memos and diagnostics. The historical memory failures in
+   `docs/in-process-cells.md` are leads, not current measurements.
+
+Existing source already lowers BML in-process. Do not propose that completed
+migration again. Repeated warm memo hashing remains seed-owned; its replacement
+should move admission meaning into Form rather than add another global C cache.
+These three changes remain hypotheses, not implemented speedups.
+
+## Local care and retained limitations
+
+The temporary experiment initially failed on `reps-1` being read as a name;
+the exact diagnostic was `[unbound-name] 'reps-1' in value position matched no
+binding/const/fn`. Spacing the subtraction fixed that input. `jp-fn` requires a
+numeric function index, not a callable value; the experiment now resolves the
+definition's row. Reading the AST header under the sandbox returned absence,
+and the dependent comparison stopped with `only numbers have an order -- in
+obe-find`. The same experiment completed with approved shared-memory access.
+The startup probe's untyped equality lacked `bml-value-equal`; declaring its
+numeric comparison `(Comparable)` resolved the binding. These were experiment
+construction/access findings, not kernel correctness failures.
+
+The activity publisher initially retained its row but could not publish the
+shared-memory dashboard (`glass-publish-v1, failed`). Re-execution with approved
+access published it. The PDF network download likewise needed the authorized
+network boundary. Original command outputs remain in the session transcript.

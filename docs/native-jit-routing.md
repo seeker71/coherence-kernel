@@ -25,6 +25,14 @@ Observe native JIT demand and reuse from the resident Form panel in its own
 process. API observation routes retain framebuffer events and route timings.
 Each process reports its own measurements.
 
+The transparent page emitter assembles argument words with a reversed
+accumulator, preserving left-to-right evaluation and reversing once at the
+boundary. Its existing `jit-page-band.bml` includes ordered argument effects.
+The [optimization-book study](../receipts/2026-11-04-optimization-book.md)
+retains exact-emission comparisons, measured wide-call compilation gains and
+startup hypotheses. Keep first admission, disk-cache reuse, resident execution,
+JIT cost and memory separate when evaluating the next change.
+
 For recovery, search local Form cells, RAG, git history and receipts. Make the
 native attempt, retain behavior checks and per-stage streams, exit status and
 timing, update callers, then re-observe. The shared native authoring guide links
