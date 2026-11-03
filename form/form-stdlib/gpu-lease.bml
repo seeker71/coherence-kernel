@@ -52,6 +52,7 @@ section [form.bml] {
   def gpl-unowned-ms() = 60000;
   def gpl-keep-ms() = 3600000;
   def gpl-owner-file(lock) = lock ++ "/owner";
+  def gpl-lent-file(lock) = lock ++ "/lent";
   def gpl-stage-file(lock) = lock ++ "/owner.new";
   def gpl-gone-dir(lock) = lock ++ ".gone";
   def gpl-wait-dir(lock) = lock ++ ".wait";
@@ -80,11 +81,13 @@ section [form.bml] {
    let n = str_to_int(s);
    (String) n.str() == s ? n : nothing();
   }
-  // ["rec" token pid start acquired beat label] | ["none"] no record | ["garbage"] a record that does not read
+  // ["rec" token pid start acquired beat label lent] | ["none"] no record | ["garbage"] a record that does not read; lent is the
+  // token the holder lent to the cell it runs as its child (gpu-lease-lend), "" when it lent none
   def gpl-read(lock) {
    let t = read_file(gpl-owner-file(lock));
-   nothing?(t) ? ["none"] : gpl-parse(gpl-lines(t));
+   nothing?(t) ? ["none"] : gpl-lent-of(gpl-parse(gpl-lines(t)), read_file(gpl-lent-file(lock)));
   }
+  def gpl-lent-of(r, lent) = (String) r[0] != "rec" ? r : append(r, [nothing?(lent) ? "" : lent]);
   def gpl-parse(ls) = len(ls) < 7 ? ["garbage"] : ((String) ls[0] != gpl-magic() ? ["garbage"] : gpl-parse-nums(ls, gpl-num(ls[2]), gpl-num(ls[3]), gpl-num(ls[4]), gpl-num(ls[5])));
   def gpl-parse-nums(ls, pid, start, acq, beat) = (nothing?(pid) || (nothing?(start) || (nothing?(acq) || nothing?(beat)))) ? ["garbage"] : ["rec", ls[1], pid, start, acq, beat, ls[6]];
 
@@ -92,6 +95,11 @@ section [form.bml] {
   // the pid answers and is the process that took the lease (a start time of 0 is a host that would not say)
   def gpl-same-process?(pid, start) = gpl-same-start?(gpl-start-of(pid), start);
   def gpl-same-start?(now, start) = (Comparable) start == 0 ? 1 : (nothing?(now) ? 0 : ((Comparable) now == 0 ? 1 : ((Comparable) now == start ? 1 : 0)));
+  // a lease lent to this process: its holder is this process's parent, the same process by its start time, and the lend names
+  // the lease's own token (gpu-lease-lend)
+  def gpl-parent() = gpl-parent-of(host_process(host_pid()));
+  def gpl-parent-of(row) = (String) value_kind(row) == "list" ? row[1] : 0;
+  def gpl-lent-here?(r) = len(r) > 7 && (String) r[7] == r[1] && r[2] == gpl-parent() && (Comparable) gpl-same-process?(r[2], r[3]) == 1;
   // ["absent"] | ["live" rec] | ["dead" rec why] | ["unowned" why]
   def gpl-judge(lock) = (Comparable) host_path_exists(lock) == 1 ? gpl-judge-rec(gpl-read(lock)) : ["absent"];
   def gpl-judge-rec(r) = (String) r[0] == "rec" ? gpl-judge-owner(r) : ["unowned", r[0]];
@@ -248,14 +256,79 @@ section [form.bml] {
    let said = print_str(gpu-lease-line(ans));
    ans;
   }
+  // ---- lending: a door that holds the lease and runs its Metal client as its child (observe/gpu-lease-run.fk) ----
+  // The child's own holds and turns (the Qwen lane takes one a turn: the open, a prefill, each token) found the lease held by
+  // their parent and waited on it for the whole take while the parent waited on them: 20 minutes, then a refusal, a turn at a
+  // time. The holder lends before it spawns, and its child's holds and turns inherit the lease (gpl-inheritable?) and give
+  // nothing back. Only the holder lends and only its own child inherits; every other process still waits. The lend leaves with
+  // the lease: a give or a takeover moves the whole directory.
+  def gpu-lease-lend-at(lock, ans) = (Comparable) gpu-lease-held?(ans) == 1 && (Comparable) gpl-mine?(gpl-read(lock), gpu-lease-token(ans)) == 1 ? write_file(gpl-lent-file(lock), gpu-lease-token(ans)) : -1;
+  def gpu-lease-lend(ans) = gpu-lease-lend-at(gpu-lease-path(), ans);
+  // ---- for a door whose lane takes the lease a turn at a time ----
+  // One hold over the door's whole reading: taken, or inherited where this process holds the lease or the door that runs it lent
+  // it. Every turn inside inherits it, the door's own dispatches between turns run under it, and a reading takes the lease once,
+  // not once a token. The door's `lease  ...` lines say how it came and how it went; a refused hold stops the door aloud before
+  // it touches the device. A lease the door took goes back once its device work has settled, as a turn's does, on every exit
+  // (BML defer): a reading that stops gives it back and stops again, and one whose device did not settle keeps it and stops aloud.
+  // A reading holds the device for its runs and no longer than a waiting client waits (gpl-wait-ms): where a run begins the door
+  // asks gpu-lease-door-yield, which hands a lease the door took to the client whose ticket waits, once the device has settled,
+  // and takes it again behind that ticket. An inherited hold does not yield: the span is its holder's (the lease door's lend).
+  // the door hold this process is inside, [lock label wait-ms settle lease] ([] outside every one), and what the last one gave back
+  let GPL-DOOR = record_new(0, "hold", [], "gave", []);
+  def gpu-lease-door-hold-at(lock, label, wait-ms, settle, run) {
+   let lease = gpu-lease-hold-at(lock, label, wait-ms);
+   let said = print_str(gpu-lease-line(lease));
+   let out = gpl-door-reading([lock, label, wait-ms, settle, lease], run);
+   (String) record_get(GPL-DOOR, "gave")[0] == "retained" ? form_error("gpu-lease: the reading did not settle; ownership retained") : out;
+  }
+  def gpu-lease-door-hold(label, run) = gpu-lease-door-hold-at(gpu-lease-path(), label, gpl-wait-ms(), gpl-metal-settle, run);
+  // the reading under its hold; on every exit, a stop among them, the lease goes back and the hold outside it is restored
+  def gpl-door-reading(h, run) {
+   let outer = record_get(GPL-DOOR, "hold");
+   let entered = record_set(GPL-DOOR, "hold", h);
+   defer gpl-door-end(outer);
+   run();
+  }
+  // the lease the hold holds now (a yield took it again) goes back once settled; an inherited or handed-on one gives nothing
+  def gpl-door-end(outer) {
+   let h = record_get(GPL-DOOR, "hold");
+   let settle = h[3];
+   let gave = (Comparable) gpu-lease-held?(h[4]) == 1 ? (settle() ? gpu-lease-give(h[0], h[4]) : ["retained", gpu-lease-token(h[4])]) : h[4];
+   let kept = record_set(GPL-DOOR, "gave", gave);
+   let back = record_set(GPL-DOOR, "hold", outer);
+   print_str(gpu-lease-line(gave));
+  }
+  // where a run of a door's reading begins (never inside a turn: the turn's lease is the door's): ["yielded" gave again] when
+  // another client's ticket waits and the device has settled, ["kept" token] when none waits, ["unsettled" token], the hold itself
+  // when it is inherited, ["outside"] outside every door hold
+  def gpu-lease-door-yield() = gpl-door-yield-of(record_get(GPL-DOOR, "hold"));
+  def gpl-door-yield-of(h) = nil?(h) ? ["outside"] : ((Comparable) gpu-lease-held?(h[4]) != 1 ? h[4] : (gpl-others-wait?(h[0]) ? gpl-door-hand-on(h) : ["kept", gpu-lease-token(h[4])]));
+  def gpl-others-wait?(lock) = any?(row => !nil?(row) && row[0] != host_pid(), map(name => gpl-wait-row(lock, name), host_dir_list(gpl-wait-dir(lock)) ?? []));
+  def gpl-door-hand-on(h) {
+   let settle = h[3];
+   settle() ? gpl-door-handed(h, gpu-lease-give(h[0], h[4])) : ["unsettled", gpu-lease-token(h[4])];
+  }
+  // the door takes the lease again looking as a turn does, every 10 ms: at a take's own second between looks it came back a whole
+  // second after the waiter had given the lease back, and the device stood idle that second
+  def gpl-door-handed(h, gave) {
+   let said = print_str(gpu-lease-line(gave));
+   let given = record_set(GPL-DOOR, "hold", [h[0], h[1], h[2], h[3], gave]);
+   (String) gave[0] != "released" ? form_error("gpu-lease: the reading could not hand its lease on " ++ value_str(gave)) : gpl-door-again(h, gave, gpl-held-or-stop(gpu-lease-take-with(h[0], h[1], [h[2], 10, gpl-unowned-ms(), gpl-markers()])));
+  }
+  def gpl-door-again(h, gave, again) {
+   let held = record_set(GPL-DOOR, "hold", [h[0], h[1], h[2], h[3], again]);
+   let said = print_str(gpu-lease-line(again));
+   ["yielded", gave, again];
+  }
   // ---- for a model open that may sit inside a door which holds the lease already ----
   // The cycle takes the lease once for its train, evaluation and usage stages, run as cells in one process; each stage opens the
   // voice, and a second take by the same process is refused ("already-held-by-this-process"). A hold is the lease taken, or, when
-  // this process owns it, inherited: the answer ["inherited" token] gives nothing back at the end, so the stage that took it does.
+  // this process owns it or its parent lent it (gpu-lease-lend), inherited: the answer ["inherited" token] gives nothing back at
+  // the end, so the holder that took it does.
   // Waits as long as a take does (gpl-wait-ms); a refusal stops the open aloud, before the device is touched. No line is printed:
   // the open is inside a stage whose output is the stage's.
   def gpu-lease-hold-at(lock, label, wait-ms) = gpl-hold-judged(lock, label, wait-ms, gpl-read(lock));
-  def gpl-inheritable?(r) = (String) r[0] == "rec" && r[2] == host_pid() && r[3] > 0 && r[3] == gpl-me-start();
+  def gpl-inheritable?(r) = (String) r[0] == "rec" && r[3] > 0 && ((r[2] == host_pid() && r[3] == gpl-me-start()) || gpl-lent-here?(r));
   def gpl-hold-judged(lock, label, wait-ms, r) = gpl-inheritable?(r) ? ["inherited", r[1]] : gpl-held-or-stop(gpu-lease-take(lock, label, wait-ms));
   def gpu-lease-hold(label) = gpu-lease-hold-at(gpu-lease-path(), label, gpl-wait-ms());
   def gpu-lease-unhold-at(lock, ans) = (String) ans[0] == "inherited" ? ans : gpu-lease-give(lock, ans);

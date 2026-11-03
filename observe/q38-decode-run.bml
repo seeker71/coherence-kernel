@@ -2,7 +2,7 @@
 //
 //   echo '{}' | ./fkwu observe/q38-decode-run.bml               the plan. Opens nothing.
 //   echo '{"go":1,"decode":24,"prompt":"Explain in two sentences why the sky is blue."}' | ./fkwu observe/q38-decode-run.bml
-//                                                                THE MEASURE. Takes the memory lease, opens the Qwen context once, prefills the prompt batched
+//                                                                THE MEASURE. Holds the GPU lease and takes the memory lease, opens the Qwen context once, prefills the prompt batched
 //                                                                from a fresh state per variant and speaks `decode` tokens one position at a time, reading each
 //                                                                variant's ms a token and its ids: the base lane (q38-forward), the same with the host's encode
 //                                                                and the device's wait split, and the hand-over every n layers (0 never).
@@ -15,9 +15,19 @@
 // while no run outruns its estimate by more than the minute the bound holds beyond the budget, which also carries the compile
 // before the first step (3 to 10 s), the close and the release. A run that does is cut by the bound, and its leases are taken
 // back as a dead holder's (the memory governor's next reading, the GPU lease door). Inferred: at the 21-28 positions/s the
-// ledger reads, twelve fresh prefills of a ~4K-id prompt take 30 to 40 minutes.
+// ledger reads, twelve fresh prefills of a ~4K-id prompt take 30 to 40 minutes. Every plain run prints a digest: its ids and
+// the last token's logits (bs 28) and final residual (bs 0) folded word by word, so runs and trees read bitwise.
+// The lease: every go mode that touches the device holds the GPU lease once for its whole reading (gpu-lease-door-hold), after
+// the prompt's ids are read; every turn of the lane (the open, each prefill, each token) inherits it, so a plain run of 32
+// tokens takes it once and not once a token, and the door's own dispatches between turns run under it too. Where a run
+// begins from a fresh state (qdr-start) a client whose ticket waits goes first (gpu-lease-door-yield), so a long reading
+// holds the device a run at a time, never a waiter's whole wait; the modes with no fresh state (burn burn2 burn3 strm alu2)
+// hold it whole, minutes at most. Under observe/gpu-lease-run.fk the hold inherits the lease
+// that door lends and does not yield. The `lease  ...` lines say how it came and went. The layout A/B family (ab ab2 ab3 ab4
+// burn3) repacks and runs the planar kernels on Q8_0 tensors alone and names any other type; the streams and the GB/s read
+// each view by its own type and the decode GB/s by the opened file's weights.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/metal-carrier.bml
 section [form.bml] {
  class Q38DecodeRun {
   def qdr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
@@ -62,7 +72,9 @@ section [form.bml] {
    let t3 = host_monotonic_ms();
    qdr-split-go(ctx, nid, pos + 1, k - 1, every, append(acc, [nid]), enc + (t1 - t0), hd + (t2 - t1), rd + (t3 - t2));
   };
+  // a run begins from a fresh state: where it begins, a client whose ticket waits on the GPU lease goes first (gpu-lease-door-yield)
   def qdr-start(ctx, ids) {
+   let yielded = gpu-lease-door-yield();
    let sts = q38-new-state(ctx[2]);
    let r = q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
    [sts, r[0]];
@@ -96,8 +108,17 @@ section [form.bml] {
    let freed = q38-free-state(st[0]);
    let say = print_str("[q38-decode] q38-generate run " ++ run.str() ++ ": " ++ k.str() ++ " tokens in " ++ (t1 - t0).str() ++ " ms = " ++ ((t1 - t0) * 10 / k).str() ++ " ms/10 a token");
    let idsay = run == 1 ? print_str("[q38-decode] ids: " ++ qdr-ids-line(spoken)) : 0;
+   let dig = qdr-digest(run, c, spoken);
    qdr-plain-go(ctx, ids, k, runs, run + 1);
   };
+  // the digest of a run: words folded (h * 65599 + w) mod 4294967291 in order, over a float row read back or over a list of ids
+  def qdr-fold-go(a, i, n, h) = i >= n ? h : qdr-fold-go(a, i + 1, n, (h * 65599 + ln-u32-le(a, i * 4)) % 4294967291);
+  def qdr-fold-ids(xs, h) = len(xs) == 0 ? h : qdr-fold-ids(xs[1:], (h * 65599 + xs[0]) % 4294967291);
+  def qdr-digest(run, c, spoken) {
+   let logits = metal_buf_read(c[1][28], 0, c[2][19] * 4);
+   let resid = metal_buf_read(c[1][0], 0, c[2][0] * 4);
+   print_str("[q38-decode] digest run " ++ run.str() ++ ": " ++ len(spoken).str() ++ " ids fold " ++ qdr-fold-ids(spoken, 0).str() ++ ", last logits fold " ++ qdr-fold-go(logits, 0, c[2][19], 0).str() ++ ", last residual fold " ++ qdr-fold-go(resid, 0, c[2][0], 0).str());
+  }
   // mode plain inside its budget: go(run) speaks run `run`; every run, the first among them, begins only when the ms since t0 and
   // its estimate fit `budget`: the first's is `est`, each later one's the longest run so far; the answer is how many ran
   def qdr-plain-fit(go, runs, run, t0, budget, est) = run > runs || host_monotonic_ms() - t0 + est > budget ? run - 1 : {
@@ -127,8 +148,19 @@ section [form.bml] {
   def qdr-planar-msl(fname, R, SG) = "kernel void " ++ fname ++ " (device const uchar* qs [[buffer(0)]], device const half* sc [[buffer(1)]], device const float* x [[buffer(2)]], device float* y [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort sgi [[simdgroup_index_in_threadgroup]]) { uint nb = cols / 32u; uint r0 = (tg * " ++ SG.str() ++ "u + (uint)sgi) * " ++ R.str() ++ "u; " ++ qdr-acc-decl(R, 0) ++ "for (uint k = 0u; k < cols; k += 512u) { device const float4* yp = (device const float4*)(x + k + (uint)lane * 16u); float4 y0 = yp[0]; float4 y1 = yp[1]; float4 y2 = yp[2]; float4 y3 = yp[3]; " ++ qdr-row-body(R, 0) ++ "} " ++ qdr-row-store(R, 0) ++ "}";
   def qdr-ab-msl() = qdr-hdr() ++ qdr-stream-msl() ++ qdr-repack-msl() ++ qdr-dot16-msl() ++ qdr-planar-msl("q38_pl_r2s2", 2, 2) ++ qdr-planar-msl("q38_pl_r4s2", 4, 2) ++ qdr-planar-msl("q38_pl_r4s4", 4, 4) ++ qdr-planar-msl("q38_pl_r8s2", 8, 2) ++ qdr-planar-msl("q38_pl_r1s8", 1, 8);
   def qdr-ffn-tvs(lays, l, n) = l >= n ? [] : append([nth(lays, l)[2], nth(lays, l)[3], nth(lays, l)[4]], qdr-ffn-tvs(lays, l + 1, n));
+  // a stream reads a view's bytes as its own type maps them (kth-tybytes: Q8_0 34 a 32, Q4_K 144 a 256, Q6_K 210 a 256), and no
+  // further: each view is its own mapping of exactly those bytes. The repack and the planar kernels decode Q8_0's 34-byte blocks
+  // and read nothing else: a mode built on them runs on Q8_0 tensors alone (qdr-q8-only), and names any other type and runs nothing
+  // (on Q4_K_M, 34 a 32 read 176 percent of what the FFN views map, every one of the 120 past its end)
   def qdr-nblk(tv) = (kth-tv-r(tv) * kth-tv-c(tv)) / 32;
-  def qdr-tv-bytes(tv) = qdr-nblk(tv) * 34;
+  def qdr-tv-bytes(tv) = kth-tybytes(kth-tv-ty(tv), kth-tv-r(tv) * kth-tv-c(tv));
+  // the types among the views that are not Q8_0, each once ([] when the repack and the planar kernels may read every view)
+  def qdr-not-q8(tvs) = foldl((acc, tv) => (Comparable) kth-tv-ty(tv) == 8 || any?(ty => (Comparable) ty == kth-tv-ty(tv), acc) ? acc : append(acc, [kth-tv-ty(tv)]), [], tvs);
+  def qdr-q8-only(mode, tvs, run) = (Comparable) len(qdr-not-q8(tvs)) == 0 ? run() : qdr-not-run(mode, qdr-not-q8(tvs));
+  def qdr-not-run(mode, tys) {
+   let said = print_str("[q38-decode] " ++ mode ++ ": not run, the tensors it reads include type " ++ value_str(tys) ++ "; its repack and planar kernels decode Q8_0's 34-byte blocks alone");
+   ["not-run", tys];
+  }
   def qdr-bytes-sum(tvs) = len(tvs) == 0 ? 0 : qdr-tv-bytes(tvs[0]) + qdr-bytes-sum(tvs[1:]);
   // [qs, sc, rows, cols] per tensor, repacked on the device
   def qdr-repack-one(pipe, tv) {
@@ -414,7 +446,8 @@ section [form.bml] {
    let sp = qdr-timed-hb(pst, hb, o);
    qdr-pair-go(ctx, c, pst, hb, o, nid, pos + 1, k, i + 1, sd + (t1 - t0), ss + sp, append(ids, [nid]));
   };
-  def qdr-pair(ctx, ids, k, nl) {
+  // weights: the bytes of the file the context opened, a token's (fcms-weights-bytes, the door's own "weights ... per token")
+  def qdr-pair(ctx, ids, k, nl, weights) {
    let msl = qdr-ab-msl();
    let pst = metal_pipeline(msl, "q38_stream");
    let hb = qdr-hb-mapped(qdr-ffn-tvs(ctx[3], 0, nl));
@@ -424,7 +457,7 @@ section [form.bml] {
    let w = qdr-timed-hb(pst, hb, o);
    let r = qdr-pair-go(ctx, c, pst, hb, o, st[1], len(ids), k, 1, 0, 0, []);
    let bytes = qdr-hb-bytes(hb);
-   let say = print_str("[q38-decode] pair over " ++ k.str() ++ " tokens: decode " ++ r[0].str() ++ " ms = " ++ (r[0] * 10 / k).str() ++ " ms/10 a token = " ++ (r[0] <= 0 ? 0 : (29047000000 * k) / r[0] / 1000000).str() ++ " GB/s; stream " ++ r[1].str() ++ " ms for " ++ k.str() ++ " passes of " ++ (bytes / 1000000).str() ++ " MB = " ++ (r[1] <= 0 ? 0 : (bytes * k) / r[1] / 1000000).str() ++ " GB/s; ratio decode/stream " ++ (r[0] <= 0 || r[1] <= 0 ? 0 : ((29047000000 * k) / r[0]) * 100 / ((bytes * k) / r[1])).str() ++ " percent");
+   let say = print_str("[q38-decode] pair over " ++ k.str() ++ " tokens: decode " ++ r[0].str() ++ " ms = " ++ (r[0] * 10 / k).str() ++ " ms/10 a token = " ++ (r[0] <= 0 ? 0 : (weights * k) / r[0] / 1000000).str() ++ " GB/s; stream " ++ r[1].str() ++ " ms for " ++ k.str() ++ " passes of " ++ (bytes / 1000000).str() ++ " MB = " ++ (r[1] <= 0 ? 0 : (bytes * k) / r[1] / 1000000).str() ++ " GB/s; ratio decode/stream " ++ (r[0] <= 0 || r[1] <= 0 ? 0 : ((weights * k) / r[0]) * 100 / ((bytes * k) / r[1])).str() ++ " percent");
    let freed = q38-free-state(st[0]);
    let fo = metal_buf_free(o);
    1;
@@ -461,7 +494,7 @@ section [form.bml] {
    let rb = first ? r2 : r1;
    qdr-dev-go(c1, c2, ra[0], rb[0], pos + 1, k, i + 1, ta + ra[1], tb + rb[1], ra[0] == rb[0] ? same + 1 : same, ra[0] == rb[0] ? diff : diff + 1, append(la, [ra[0]]), append(lb, [rb[0]]));
   };
-  def qdr-lane-dev(ctx, ids, k) {
+  def qdr-lane-dev(ctx, ids, k, weights) {
    let c2 = q38-planarize(ctx);
    let s1 = qdr-start(ctx, ids);
    let s2 = qdr-start(ctx, ids);
@@ -469,7 +502,7 @@ section [form.bml] {
    let cb = qdr-ctx(c2, s2[0]);
    let w = qdr-dev-go(ca, cb, s1[1], s2[1], len(ids), 8, 1, 0, 0, 0, 0, [], []);
    let res = qdr-dev-go(ca, cb, nth(w[4], len(w[4]) - 1), nth(w[5], len(w[5]) - 1), len(ids) + 8, k, 1, 0, 0, 0, 0, [], []);
-   let say = print_str("[q38-decode] device-only over " ++ k.str() ++ " tokens, alternating: wide " ++ res[0].str() ++ " ms = " ++ (res[0] * 10 / k).str() ++ " ms/10 a token = " ++ (res[0] <= 0 ? 0 : (29047000000 * k) / res[0] / 1000000).str() ++ " GB/s; planar " ++ res[1].str() ++ " ms = " ++ (res[1] * 10 / k).str() ++ " ms/10 a token = " ++ (res[1] <= 0 ? 0 : (29047000000 * k) / res[1] / 1000000).str() ++ " GB/s; ids same " ++ res[2].str() ++ " differ " ++ res[3].str() ++ "; planar/wide speed " ++ (res[1] <= 0 ? 0 : res[0] * 100 / res[1]).str() ++ " percent");
+   let say = print_str("[q38-decode] device-only over " ++ k.str() ++ " tokens, alternating: wide " ++ res[0].str() ++ " ms = " ++ (res[0] * 10 / k).str() ++ " ms/10 a token = " ++ (res[0] <= 0 ? 0 : (weights * k) / res[0] / 1000000).str() ++ " GB/s; planar " ++ res[1].str() ++ " ms = " ++ (res[1] * 10 / k).str() ++ " ms/10 a token = " ++ (res[1] <= 0 ? 0 : (weights * k) / res[1] / 1000000).str() ++ " GB/s; ids same " ++ res[2].str() ++ " differ " ++ res[3].str() ++ "; planar/wide speed " ++ (res[1] <= 0 ? 0 : res[0] * 100 / res[1]).str() ++ " percent");
    let idsw = print_str("[q38-decode] dev ids wide: " ++ qdr-ids-line(append(w[4], res[4])));
    let idsp = print_str("[q38-decode] dev ids planar: " ++ qdr-ids-line(append(w[5], res[5])));
    let f1 = q38-free-state(s1[0]);
@@ -477,7 +510,7 @@ section [form.bml] {
    let closed = q38-close(c2, []);
    1;
   }
-  def qdr-lane(ctx, ids, k) {
+  def qdr-lane(ctx, ids, k, weights) {
    let c2 = q38-planarize(ctx);
    let planar-n = len(ctx[3]);
    let s1 = qdr-start(ctx, ids);
@@ -487,7 +520,7 @@ section [form.bml] {
    let s3 = qdr-start(ctx, ids);
    let s4 = qdr-start(ctx, ids);
    let res = qdr-lane-go(ctx, c2, s3[0], s4[0], s3[1], s4[1], len(ids), k, 1, 0, 0, 0, 0, [], []);
-   let say = print_str("[q38-decode] lane over " ++ k.str() ++ " tokens, alternating: wide " ++ res[0].str() ++ " ms = " ++ (res[0] * 10 / k).str() ++ " ms/10 a token = " ++ (res[0] <= 0 ? 0 : (29047000000 * k) / res[0] / 1000000).str() ++ " GB/s; planar " ++ res[1].str() ++ " ms = " ++ (res[1] * 10 / k).str() ++ " ms/10 a token = " ++ (res[1] <= 0 ? 0 : (29047000000 * k) / res[1] / 1000000).str() ++ " GB/s; ids same " ++ res[2].str() ++ " differ " ++ res[3].str() ++ "; planar/wide speed " ++ (res[1] <= 0 ? 0 : res[0] * 100 / res[1]).str() ++ " percent");
+   let say = print_str("[q38-decode] lane over " ++ k.str() ++ " tokens, alternating: wide " ++ res[0].str() ++ " ms = " ++ (res[0] * 10 / k).str() ++ " ms/10 a token = " ++ (res[0] <= 0 ? 0 : (weights * k) / res[0] / 1000000).str() ++ " GB/s; planar " ++ res[1].str() ++ " ms = " ++ (res[1] * 10 / k).str() ++ " ms/10 a token = " ++ (res[1] <= 0 ? 0 : (weights * k) / res[1] / 1000000).str() ++ " GB/s; ids same " ++ res[2].str() ++ " differ " ++ res[3].str() ++ "; planar/wide speed " ++ (res[1] <= 0 ? 0 : res[0] * 100 / res[1]).str() ++ " percent");
    let idsw = print_str("[q38-decode] ids wide: " ++ qdr-ids-line(res[4]));
    let idsp = print_str("[q38-decode] ids planar: " ++ qdr-ids-line(res[5]));
    let f1 = q38-free-state(s1[0]);
@@ -539,10 +572,10 @@ section [form.bml] {
    " " ++ names[0] ++ " " ++ (med * 1000 / n).str() ++ qdr-ab4-lines(names[1:], hist[1:], n);
   };
   def qdr-rep3(tvs) = append(tvs, append(tvs, tvs));
+  // a class runs its sweep only where every tensor of it has its planar view (q38-planarize: Q8_0 tensors alone)
   def qdr-ab4-class(ps, lays, geo, bs, vs, vp, cname, slot, f, count) {
    let tvs = qdr-rep3(qdr-cls-list(lays, 0, geo[21], slot, f, count, geo[22]));
-   let hist = qdr-ab4-round(ps, tvs, bs[16], bs[28], vs, vp, 30, []);
-   qdr-ab4-say(cname, tvs, append(["wide", "prod"], qdr-vnames(vs, 0)), hist);
+   all?(tv => q38-tv-planar?(tv), tvs) ? qdr-ab4-say(cname, tvs, append(["wide", "prod"], qdr-vnames(vs, 0)), qdr-ab4-round(ps, tvs, bs[16], bs[28], vs, vp, 30, [])) : qdr-not-run("ab4 " ++ cname, qdr-not-q8(tvs));
   }
   def qdr-ab4(ctx, ids) {
    let c2 = q38-planarize(ctx);
@@ -807,17 +840,18 @@ section [form.bml] {
    let d = qdr-burn2-go(pst, pa, bufs, o, 1, 150, 15, host_monotonic_ms());
    1;
   }
-  def qdr-measure(ctx, ids, k, mode, plain) {
+  def qdr-measure(ctx, ids, k, mode, plain, weights) {
+   let ffn = qdr-ffn-tvs(ctx[3], 0, 40);
    let bn = (String) mode == "burn" ? qdr-burn(ctx, 40, 1000) : 0;
-   let b3 = (String) mode == "burn3" ? qdr-burn3(ctx, 40, 700) : 0;
-   let pr = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40) : 0;
-   let pr2 = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40) : 0;
-   let pr3 = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40) : 0;
-   let ab = (String) mode == "ab" || (String) mode == "both" ? qdr-ab(ctx, ids, 40, 28) : 0;
-   let ab2 = (String) mode == "ab2" ? qdr-ab2(ctx, ids, 40, 28) : 0;
-   let ab3 = (String) mode == "ab3" ? qdr-ab3(ctx, ids, 40, 60) : 0;
-   let ln = (String) mode == "lane" ? qdr-lane(ctx, ids, k) : 0;
-   let ld = (String) mode == "lane-dev" ? qdr-lane-dev(ctx, ids, k) : 0;
+   let b3 = (String) mode == "burn3" ? qdr-q8-only(mode, ffn, () => qdr-burn3(ctx, 40, 700)) : 0;
+   let pr = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40, weights) : 0;
+   let pr2 = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40, weights) : 0;
+   let pr3 = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40, weights) : 0;
+   let ab = (String) mode == "ab" || (String) mode == "both" ? qdr-q8-only("ab", ffn, () => qdr-ab(ctx, ids, 40, 28)) : 0;
+   let ab2 = (String) mode == "ab2" ? qdr-q8-only(mode, ffn, () => qdr-ab2(ctx, ids, 40, 28)) : 0;
+   let ab3 = (String) mode == "ab3" ? qdr-q8-only(mode, ffn, () => qdr-ab3(ctx, ids, 40, 60)) : 0;
+   let ln = (String) mode == "lane" ? qdr-lane(ctx, ids, k, weights) : 0;
+   let ld = (String) mode == "lane-dev" ? qdr-lane-dev(ctx, ids, k, weights) : 0;
    let a4 = (String) mode == "ab4" ? qdr-ab4(ctx, ids) : 0;
    let sx = (String) mode == "strm" ? qdr-strm(ctx) : 0;
    let pn = (String) mode == "plan" ? qdr-plan(ctx, ids, k) : 0;
@@ -841,6 +875,12 @@ section [form.bml] {
    let src = fcmg-src(path);
    let ids = q35-chat-ids(src, prompt);
    let span = len(ids);
+   let said = print_str("[q38-decode] prompt " ++ span.str() ++ " ids, first " ++ qdr-ids-line(qdr-take(ids, 8)) ++ "last " ++ nth(ids, span - 1).str() ++ ", ids fold " ++ qdr-fold-ids(ids, 0).str());
+   gpu-lease-door-hold("q38-decode-run " ++ mode, () => qdr-held(path, k, mode, plain, src, ids));
+  }
+  // under the door's one GPU hold: the memory lease, the open, the measure, the close
+  def qdr-held(path, k, mode, plain, src, ids) {
+   let span = len(ids);
    let maxpos = span + k + 8;
    let own = fcms-qwen-own(src, maxpos);
    let weights = fcms-weights-bytes(path);
@@ -853,12 +893,22 @@ section [form.bml] {
      let why = len(ctx) < 10 ? print_str("[q38-decode] context length " ++ len(ctx).str()) : print_str("[q38-decode] handles " ++ q38-handles-ok?(ctx[1]).str() ++ " layers " ++ q38-layers-ok?(ctx[3]).str() ++ " emb " ++ kth-tv-h(ctx[4]).str() ++ " onorm " ++ kth-tv-h(ctx[5]).str() ++ " proj " ++ kth-tv-h(ctx[6]).str() ++ " bs " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", ctx[1]));
      print_str("[q38-decode] the context did not open");
     } : {
-     let measured = qdr-measure(ctx, ids, k, mode, plain);
+     let measured = qdr-measure(ctx, ids, k, mode, plain, weights);
      let closed = q38-close(ctx, []);
      let unleased = mg-release();
      print_str("[q38-decode] released; weights " ++ (weights / 1000000).str() ++ " MB per token");
     };
    };
+  }
+  // a go mode that touches the device: the Metal carrier first (a fresh worktree holds its source and no dylib, and every handle
+  // would read 0 there; metal-carrier.bml builds it through the host door, a standing one is read and kept), then one GPU hold over
+  // the reading (qdr-open holds it once the prompt's ids are read)
+  def qdr-device(opts, path, k, plain) {
+   let made = host_dir_mkdir(".hearth");
+   let carrier = mca-admit(".hearth/carrier.log", ".hearth/carrier.err");
+   let said = (String) carrier[0] == "standing" ? 0 : print_str("[q38-decode] the Metal carrier: " ++ carrier[0]);
+   let mode = qdr-text(opts, "mode", "decode");
+   !((String) carrier[0] == "standing" || (String) carrier[0] == "admitted") ? print_str("[q38-decode] nothing was opened: the carrier is not admitted (.hearth/carrier.err)") : (String) mode == "burn2" ? gpu-lease-door-hold("q38-decode-run burn2", () => qdr-burn2()) : (String) mode == "alu2" ? gpu-lease-door-hold("q38-decode-run alu2", () => qdr-alu2()) : (String) mode == "session" ? gpu-lease-door-hold("q38-decode-run session", () => qdr-session(path, qdr-text(opts, "prompt", qdr-prompt()), qdr-int(opts, "blocks", 6), k)) : qdr-open(path, k, qdr-text(opts, "prompt", qdr-prompt()), mode, plain);
   }
   def qdr-run() {
    let t0 = host_monotonic_ms();
@@ -867,7 +917,7 @@ section [form.bml] {
    let k = qdr-int(opts, "decode", 24);
    // the 900 s bound of the reading less a minute for the close and the release
    let plain = [qdr-int(opts, "runs", 12), qdr-int(opts, "budget", 840) * 1000, t0];
-   (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "burn2" ? qdr-burn2() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "alu2" ? qdr-alu2() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "bind" ? qdr-bind-bench() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "session" ? qdr-session(path, qdr-text(opts, "prompt", qdr-prompt()), qdr-int(opts, "blocks", 6), k) :(Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(path, k, qdr-text(opts, "prompt", qdr-prompt()), qdr-text(opts, "mode", "decode"), plain) : print_str("[q38-decode] plan: decode " ++ k.str() ++ ", file " ++ path ++ "; mode plain runs up to " ++ plain[0].str() ++ " inside " ++ (plain[1] / 1000).str() ++ " s; {\"go\":1} opens it and measures");
+   (Comparable) qdr-int(opts, "go", 0) != 1 ? print_str("[q38-decode] plan: decode " ++ k.str() ++ ", file " ++ path ++ "; mode plain runs up to " ++ plain[0].str() ++ " inside " ++ (plain[1] / 1000).str() ++ " s; {\"go\":1} opens it and measures") : (String) qdr-text(opts, "mode", "decode") == "bind" ? qdr-bind-bench() : qdr-device(opts, path, k, plain);
   }
  }
  qdr-run();

@@ -46,11 +46,13 @@
 
     ;; A grammar carries its rules and, built once, an index from each rule's name to
     ;; the first rule of that name: a reference is one read, not a walk of the list.
+    ;; A reader asks record_has before it reads a key its record may never have held: the
+    ;; answer is the same whether record_get reads such a key 0 or nothing().
     (defn grammar (start rules) (list "G" start rules (g-index rules (record_new 0))))
     (defn g-index (rs tab)
         (if (eq rs (empty)) tab
             (g-index (tail rs)
-                (if (eq (record_get tab (head (head rs))) 0) (record_set tab (head (head rs)) (head rs)) tab))))
+                (if (record_has tab (head (head rs))) tab (record_set tab (head (head rs)) (head rs))))))
     (defn g-start (g) (nth g 1))
     (defn g-rules (g) (nth g 2))
     (defn rule3 (name pat tpl) (list name pat tpl))
@@ -59,8 +61,7 @@
     (defn r3-tpl (r) (nth r 2))
     (defn g-rule (g name)
         (if (nil? (tail (tail (tail g)))) (g-rule-find (g-rules g) name)
-            (do (let r (record_get (nth g 3) name))
-                (if (eq r 0) (empty) r))))
+            (if (record_has (nth g 3) name) (record_get (nth g 3) name) (empty))))
     (defn g-rule-find (rs name)
         (if (eq rs (empty)) (empty)
             (if (str_eq (head (head rs)) name) (head rs)
@@ -215,8 +216,7 @@
     ;; the set as text: runs of "0" and "1" cut from two held 257-byte runs
     (defn gs-run (t k)
         (do (let key (str_concat " run" t))
-            (let held (record_get GX-CLASSES key))
-            (substring (if (eq held 0) (gs-held-run key t) held) 0 k)))
+            (substring (if (record_has GX-CLASSES key) (record_get GX-CLASSES key) (gs-held-run key t)) 0 k)))
     (defn gs-held-run (key t) (do (let r (gs-repeat t 257)) (record_set GX-CLASSES key r) r))
     (defn gs-text (set) (gs-text-from set 0 ""))
     (defn gs-text-from (set i acc)
@@ -228,13 +228,11 @@
     ;; a named byte class (cp-in-class?) as (list text set), read once in a process
     (let GX-CLASSES (record_new 0))
     (defn gx-class (cls)
-        (do (let held (record_get GX-CLASSES cls))
-            (if (eq held 0)
-                (do (let set (gx-class-set cls 0 -1 (empty)))
-                    (let made (list (gs-text set) set))
-                    (record_set GX-CLASSES cls made)
-                    made)
-                held)))
+        (if (record_has GX-CLASSES cls) (record_get GX-CLASSES cls)
+            (do (let set (gx-class-set cls 0 -1 (empty)))
+                (let made (list (gs-text set) set))
+                (record_set GX-CLASSES cls made)
+                made)))
     ;; one pass over the bytes, a range closed where the class ends
     (defn gx-class-set (cls b start acc)
         (if (gt b 255) (reverse (if (ge start 0) (cons (list (add start 1) 256) acc) acc))
@@ -242,10 +240,8 @@
                 (gx-class-set cls (add b 1) (if (lt start 0) b start) acc)
                 (gx-class-set cls (add b 1) -1 (if (ge start 0) (cons (list (add start 1) b) acc) acc)))))
     (defn gx-every ()
-        (do (let held (record_get GX-CLASSES " every"))
-            (if (eq held 0)
-                (do (let t (gs-text (gs-all))) (record_set GX-CLASSES " every" t) t)
-                held)))
+        (if (record_has GX-CLASSES " every") (record_get GX-CLASSES " every")
+            (do (let t (gs-text (gs-all))) (record_set GX-CLASSES " every" t) t)))
 
     ;; FIRST of a pattern: (list set nullable). The set holds every index at which reading the
     ;; pattern may consume, build or succeed with a reading of its own; nullable says it may
@@ -255,7 +251,7 @@
     ;; reference to it is tried everywhere too.
     (defn gf (pat rf)
         (do (let tag (head pat))
-            (if (str_eq tag "ref") (gf-ref (record_get rf (nth pat 1)))
+            (if (str_eq tag "ref") (gf-ref rf (nth pat 1))
             (if (str_eq tag "cap") (gf (nth pat 2) rf)
             (if (str_eq tag "lit") (gf-lit (nth pat 1))
             (if (str_eq tag "seq") (gf-seq (tail pat) rf)
@@ -271,7 +267,8 @@
             (if (str_eq tag "not") (list (gs-all) 0)
                 (list (gs-none) 0))))))))))))))))
     (defn gf-strict (f) (if (eq (nth f 1) 1) (list (gs-all) 0) (list (head f) 0)))
-    (defn gf-ref (f) (if (eq f 0) (list (gs-none) 0) (gf-strict f)))
+    ;; a reference's FIRST: its rule's, or none for a name no rule defines
+    (defn gf-ref (rf name) (if (record_has rf name) (gf-strict (record_get rf name)) (list (gs-none) 0)))
     (defn gf-lit (s) (if (eq (str_len s) 0) (list (gs-none) 1) (list (gs-one (add (str_byte_at s 0) 1)) 0)))
     (defn gf-seq (parts rf)
         (if (eq parts (empty)) (list (gs-none) 1)
@@ -289,10 +286,10 @@
     ;; the rules a name reads: the first rule of each name, as g-index keeps them
     (defn gx-unique (rs seen)
         (if (eq rs (empty)) (empty)
-            (if (eq (record_get seen (head (head rs))) 0)
+            (if (record_has seen (head (head rs)))
+                (gx-unique (tail rs) seen)
                 (do (record_set seen (head (head rs)) 1)
-                    (cons (head rs) (gx-unique (tail rs) seen)))
-                (gx-unique (tail rs) seen))))
+                    (cons (head rs) (gx-unique (tail rs) seen))))))
     ;; every rule's FIRST grows from nothing until a round moves none; read in the order a
     ;; depth-first walk of the references finishes them, a rule's FIRST mostly stands on
     ;; FIRSTs already read, and two or three rounds settle it
@@ -308,11 +305,12 @@
                 acc)))))))
     (defn gf-refs-all (ps acc) (if (eq ps (empty)) acc (gf-refs-all (tail ps) (gf-refs (head ps) acc))))
     (defn gf-visit (name src seen acc)
-        (if (eq (record_get seen name) 0)
+        (if (record_has seen name) acc
             (do (record_set seen name 1)
-                (let r (record_get src name))
-                (if (eq r 0) acc (cons r (gf-visit-all (gf-refs (nth r 1) (empty)) src seen acc))))
-            acc))
+                (if (record_has src name)
+                    (do (let r (record_get src name))
+                        (cons r (gf-visit-all (gf-refs (nth r 1) (empty)) src seen acc)))
+                    acc))))
     (defn gf-visit-all (names src seen acc)
         (if (eq names (empty)) acc (gf-visit-all (tail names) src seen (gf-visit (head names) src seen acc))))
     (defn gf-order (rs src seen acc)
@@ -360,32 +358,28 @@
     ;; the rule reads one pattern through (op 22), or, closing a cycle back to a rule still
     ;; being compiled, the cell that rule fills (op 1).
     (defn gc-ref (name ctx)
-        (do (let cell (record_get (nth ctx 1) name))
-            (if (eq cell 0) (list 19)
-                (do (let text (gc-ref-text name ctx))
-                    (if (eq (record_get (nth ctx 6) name) 1) (list 1 cell text)
-                        (do (let r (gc-rule-named name ctx))
-                            (if (eq (nth r 4) 1)
-                                (if (eq (nth r 3) 0) (list 22 (nth r 1) text (head r)) (list 23 r text))
-                                (list 23 r text))))))))
+        (if (not (record_has (nth ctx 1) name)) (list 19)
+            (do (let cell (record_get (nth ctx 1) name))
+                (let text (gc-ref-text name ctx))
+                (if (and (record_has (nth ctx 6) name) (eq (record_get (nth ctx 6) name) 1)) (list 1 cell text)
+                    (do (let r (gc-rule-named name ctx))
+                        (if (eq (nth r 4) 1)
+                            (if (eq (nth r 3) 0) (list 22 (nth r 1) text (head r)) (list 23 r text))
+                            (list 23 r text)))))))
     (defn gc-rule-named (name ctx)
-        (do (let done (record_get (nth ctx 5) name))
-            (if (eq done 0)
-                (do (record_set (nth ctx 6) name 1)
-                    (let r (gc-rule (record_get (nth ctx 4) name) ctx))
-                    (record_set (nth ctx 6) name 0)
-                    (record_set (nth ctx 5) name r)
-                    (record_set (record_get (nth ctx 1) name) "r" r)
-                    r)
-                done)))
+        (if (record_has (nth ctx 5) name) (record_get (nth ctx 5) name)
+            (do (record_set (nth ctx 6) name 1)
+                (let r (gc-rule (record_get (nth ctx 4) name) ctx))
+                (record_set (nth ctx 6) name 0)
+                (record_set (nth ctx 5) name r)
+                (record_set (record_get (nth ctx 1) name) "r" r)
+                r)))
     (defn gc-ref-text (name ctx)
         (if (eq (nth ctx 2) 0) (gx-every)
-            (do (let held (record_get (nth ctx 3) name))
-                (if (eq held 0)
-                    (do (let t (gs-text (head (gf-ref (record_get (head ctx) name)))))
-                        (record_set (nth ctx 3) name t)
-                        t)
-                    held))))
+            (if (record_has (nth ctx 3) name) (record_get (nth ctx 3) name)
+                (do (let t (gs-text (head (gf-ref (head ctx) name))))
+                    (record_set (nth ctx 3) name t)
+                    t))))
     ;; An alternation reads the byte under the cursor once: its table holds, at index i, 48 +
     ;; the group of alternatives that can begin there, in their order.
     (defn gc-alt (alts ctx)
@@ -407,8 +401,8 @@
     ;; pattern is a sequence, or 0
     (defn gc-seq-rule (pat ctx)
         (if (not (str_eq (head pat) "ref")) 0
-            (do (let r (record_get (nth ctx 4) (nth pat 1)))
-                (if (eq r 0) 0
+            (if (not (record_has (nth ctx 4) (nth pat 1))) 0
+                (do (let r (record_get (nth ctx 4) (nth pat 1)))
                     (if (gt (len r) 3) 0
                         (if (str_eq (head (nth r 1)) "seq") r 0))))))
     ;; the longest run from the head whose rules share at least their first part
@@ -559,20 +553,21 @@
             (do (gc-rule-named (head (head rs)) ctx)
                 (gx-fill (tail rs) ctx))))
     ;; the compiled rule sets this process holds, newest first: a record of "rules" and its
-    ;; "pruned" and "traced" forms. A set is found by eq, which answers at once for the same list.
+    ;; "pruned" and "traced" forms, each nothing until it is compiled. A set is found by eq,
+    ;; which answers at once for the same list.
     (let GX-GRAMMARS (record_set (record_new 0) "all" (empty)))
     (defn gx-compiled (rules traced)
         (do (let entry (gx-entry (record_get GX-GRAMMARS "all") rules))
             (let slot (if traced "traced" "pruned"))
             (let held (record_get entry slot))
-            (if (eq held 0)
+            (if (nothing? held)
                 (do (let made (gx-compile rules (if traced 0 1)))
                     (record_set entry slot made)
                     made)
                 held)))
     (defn gx-entry (es rules)
         (if (eq es (empty))
-            (do (let fresh (record_set (record_new 0) "rules" rules))
+            (do (let fresh (record_set (record_set (record_set (record_new 0) "rules" rules) "pruned" (nothing)) "traced" (nothing)))
                 (record_set GX-GRAMMARS "all" (cons fresh (record_get GX-GRAMMARS "all")))
                 fresh)
             (if (eq (record_get (head es) "rules") rules) (head es) (gx-entry (tail es) rules))))
@@ -785,14 +780,16 @@
     (defn gx-rule-memo (s n x r c cs caps)
         (do (let shard (gx-memo-shard (head x) (str_concat (nth r 5) (int_to_str (div c 1024)))))
             (let key (int_to_str c))
-            (let hit (record_get shard key))
+            ;; a place not read yet and a place released (g-release-values writes 0) both read 0
+            (let hit (if (record_has shard key) (record_get shard key) 0))
             (if (eq hit 0)
                 (do (let m (gx-rule-run s n x r c cs caps))
                     (record_set shard key (if (eq m 0) 1 m))
                     m)
                 (if (eq hit 1) 0 (cons (head hit) (cons (nth hit 1) caps))))))
     (defn gx-memo-shard (memo k)
-        (do (let held (record_get memo k))
+        ;; a shard not made yet and a shard released (g-release-shards writes 0) both read 0
+        (do (let held (if (record_has memo k) (record_get memo k) 0))
             (if (eq held 0)
                 (do (let fresh (record_new 0))
                     (record_set memo k fresh)
@@ -906,14 +903,11 @@
                                 ;; the operator's node: a call row builds fncall[ident name, lhs, rhs]
                                 (do (let h (nth e 6))
                                     (let node (if (eq (nth e 4) 1)
-                                        (do (let fc (record_get h "fncall"))
-                                            (let fcat (if (eq fc 0) (gx-hold h "fncall") fc))
-                                            (let ic (record_get h "ident"))
+                                        (do (let fcat (gx-held h "fncall"))
                                             (intern_node fcat (list
-                                                (intern_node (if (eq ic 0) (gx-hold h "ident") ic) (list (intern_trivial_string (nth e 2))))
+                                                (intern_node (gx-held h "ident") (list (intern_trivial_string (nth e 2))))
                                                 lhs (nth rhs 1))))
-                                        (do (let oc (record_get h (nth e 2)))
-                                            (intern_node (if (eq oc 0) (gx-hold h (nth e 2)) oc) (list lhs (nth rhs 1))))))
+                                        (intern_node (gx-held h (nth e 2)) (list lhs (nth rhs 1)))))
                                     (gx-infix-loop s n x p node (tail (tail rhs)) (head rhs) minp)))))))))
     (defn gx-peek-op-in (s cc es)
         (if (eq es (empty)) 0
@@ -922,17 +916,15 @@
                 (gx-peek-op-in s cc (tail es)))))
     ;; a category an op holds once its first node asked bmf-bp for it
     (defn gx-held (holder name)
-        (do (let held (record_get holder name)) (if (eq held 0) (gx-hold holder name) held)))
+        (if (record_has holder name) (record_get holder name) (gx-hold holder name)))
     (defn gx-hold (holder name) (do (let cat (bmf-bp name)) (record_set holder name cat) cat))
 
     ;; A pure chain (a fourth element on the pattern) is the functional dialect's: an index
     ;; `[` must touch the term it indexes, and `++` is never a postfix step -- it stays whole
     ;; for the infix reader, where it joins two strings.
     (defn gx-member-name ()
-        (do (let held (record_get GX-CLASSES " member"))
-            (if (eq held 0)
-                (do (let op (list 7 (head (gx-class "alnum")))) (record_set GX-CLASSES " member" op) op)
-                held)))
+        (if (record_has GX-CLASSES " member") (record_get GX-CLASSES " member")
+            (do (let op (list 7 (head (gx-class "alnum")))) (record_set GX-CLASSES " member" op) op)))
     ;; cp is the chain op (15 base expr pure holder): its holder keeps the categories its
     ;; nodes ask for
     (defn gx-chain-loop (s n x cp acc caps c)
@@ -948,8 +940,7 @@
                 (do (let call (if (eq b 40) (gx-args s n x (nth cp 2) (add cc 1) caps)
                                   (if (eq b 60) (gx-call-generic s n x (nth cp 2) cc caps) 0)))
                     (if (eq call 0) (cons c (cons acc caps))
-                        (do (let fc (record_get (nth cp 4) "fncall"))
-                            (gx-chain-loop s n x cp (intern_node (if (eq fc 0) (gx-hold (nth cp 4) "fncall") fc) (cons acc (head call))) caps (nth call 1)))))))))))
+                        (gx-chain-loop s n x cp (intern_node (gx-held (nth cp 4) "fncall") (cons acc (head call))) caps (nth call 1))))))))))
     (defn gx-chain-member (s n x cp acc caps c cc)
         (do (let idm (gx-run s n (gx-member-name) (add cc 1) caps))
             (if (eq idm 0) (gx-ok c acc caps)
@@ -1040,9 +1031,10 @@
         (do (let c (if (str_eq (surf-kind (cur-surface c0)) "string") c0
                 (cursor-row (surface-string (gx-text (cur-surface c0))) (cur-pos c0) (empty))))
             (let traced (gt (len g) 5))
-            (let cell (record_get (gx-compiled (g-rules g) traced) name))
-            (if (eq cell 0) (list "rno")
-                (do (let s (surf-payload (cur-surface c)))
+            (let cells (gx-compiled (g-rules g) traced))
+            (if (not (record_has cells name)) (list "rno")
+                (do (let cell (record_get cells name))
+                    (let s (surf-payload (cur-surface c)))
                     (let n (str_len s))
                     (let pos (cur-pos c))
                     (let memo (if (gt (len g) 4) (nth g 4) 0))
@@ -1056,8 +1048,7 @@
     (defn gx-build (t caps)
         (do (let op (head t))
             (if (eq op 1)
-                (do (let held (record_get (nth t 2) "c"))
-                    (intern_node (if (eq held 0) (gx-cat t) held) (gx-kids (nth t 3) caps)))
+                (intern_node (if (record_has (nth t 2) "c") (record_get (nth t 2) "c") (gx-cat t)) (gx-kids (nth t 3) caps))
             (if (eq op 2) (gc-get caps (nth t 1))
             ;; bind: a name alone, or $bml-typed[name, type] when a contract was captured
             (if (eq op 5)

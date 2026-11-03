@@ -217,7 +217,7 @@ form/form-stdlib/tests/command-words-band -> 2147483647  (form/form-stdlib/bml/c
 ./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
 observe/tests/belief-rewitness-band      -> 63
 ./fkwu form/form-stdlib/release-ledger.bml -> open=17 moving=0, then 17000000 (2026-10-04)
-learn/tests/homecoming-distillation-corpus-band -> 65535
+learn/tests/homecoming-distillation-corpus-band -> 131071
 form-stdlib/tests/self-distill-band -> 255  (the voice's own frontier row, judged and refused by name, a blind second read of its why, in learn/distillation-native-candidates.jsonl apart from the rented rows)
 form-stdlib/tests/self-review-band -> 511  (the wrong line of e06d7217e and cf090e073 and its repair, replayed through the voice door and graded on what the line computes; the register's self-review reads that row, and the reason stays a person's to read)
 value-eq-arena-band 31 · import-carry-band 255 · form-cli-author-high-band 4095
@@ -240,7 +240,7 @@ native-turn-ladder-band 1048575 · local-flow-reading-band 8388607  (a memory en
                                 checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
                                 the wall, its renewals and the prompt IDs they re-fed; a lane killed at its deadline writes no counts
                                 and its counts are folded from its stamps and said so; the day option reproduces to the ms)
-host-walk-band 2251799813685247  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
+host-walk-band 9007199254740991  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
                                 pid, unix ms, door) under the lock it holds; a later start of the same door that finds its own
                                 row under 25 minutes old (hw-slot-window-ms: the retry gap plus slack, far under the two-hour
                                 windows and the eight hours between slots) ends 0 with `[walk-lock] <door> already began at <hh:mm>
@@ -251,6 +251,31 @@ host-walk-band 2251799813685247  (a walk door that claims the checkout stamps it
                                 `began-plants` (a begin that never stamps, one that compares the window with the wrong inequality,
                                 one that ignores the door, one that ignores the age each fail the checks the real begin keeps) and
                                 `gap` (the lens over synthetic stamps and the door as a child);
+                                a walk door has two starts (host-walk-renew.bml hw-walk-door): after its sync, build and carrier the
+                                launched start begins its own argv again as its child, on the kernel the build placed and compiled
+                                from the tree the sync left, hands it `{"renewal":{...}}` (the window's end, the day, the slot hour, the
+                                safe flag, the branch, the sync, build and carrier lines; the day turn adds its continuation's options)
+                                and ends as it ended; the renewed start takes the lock and the slot stamp (the day turn its
+                                continuation) and walks every step, so every step after the sync, build and carrier is the code the
+                                sync brought (2026-11-03 03:30: the night's movement request ran the carry list from before its
+                                rebase); claim `renewal` (a scratch walk whose main moves its carry list under it: the launched start
+                                builds with the one path it compiled, the renewed one with the two the sync brought, its stamp keeping
+                                the time the launched start stamped, and it reads the entry the launched start read, so a door that
+                                walks only as the entry (both real doors do) walks renewed; the day turn's renewal takes a planted
+                                continuation, its pid and kernel start, reads its options as planted and archives it under the renewed
+                                pid; each door's steps are its own reader (sw-handed, dt-handed) over its walked function, and each
+                                reader puts every pair of a planted line, a value no other place holds, in its own place; each door
+                                reads its slot hour before it begins; the nine keys stand closed and a pair added later is read with
+                                its default; with dt-taken a no-op the band reads 6755399441055743, and with sw-handed's hour and
+                                window swapped, dt-handed's safe flag read inverted or read from the from pair, the stamp taking the
+                                take's time, the day's hour read after its carrier, or the renewal begun by another spelling of its
+                                entry the claim alone reads short) and `renew-ends` (the launched start ends by its renewed self's
+                                no-core signal, raised on itself, the launcher's set: the band reads 143; 1 by name for a renewal that
+                                would not compile (ended 2) and for a 0 that left the lock naming it, a door from before its two
+                                starts; with the raise or the lock's reading reverted the band reads 4503599627370495); with the steps
+                                walked in the launched start instead, both are short and the band
+                                reads 2251799813685247; the waiting launched start's cost is named in the part (221 MB resident on
+                                the miniature door beside 78 MB for its renewed self);
                                 the walk's turn waits for memory within the window and a held answer takes no turn;
                                 the sync settles what the body knows through the reunion's rounds: a drawn page takes main's side
                                 and is remade (in its directory) into one new commit, a river of at_unix_ms rows with both banks
@@ -266,10 +291,10 @@ host-walk-band 2251799813685247  (a walk door that claims the checkout stamps it
                                 on docs/rent-ladder.html): observe/walk-sync-run.bml runs the landed sync once on a named checkout
                                 ({"dir":"/abs/path"}), leaves a checkout whose walk lock stands alone and names the owner; run on the
                                 walk checkout at 14:30 it printed healed:, redrawn:, sync=0;
-                                host-walk.bml is an aggregator over sixteen parts `host-walk-<seam>.bml`, each under 12000 bytes so the
+                                host-walk.bml is an aggregator over twenty-six parts `host-walk-<seam>.bml`, each under 12000 bytes so the
                                 local lane reads one whole and can read it twice, and every definition's name (not its body) is pinned
                                 in tests/fixtures/host-walk-defs.txt)
-host-walk-retry-band 4194303  (the informed retry, observe/walk-retry.bml over host-walk-evidence.bml, -class.bml, -retry.bml, -record.bml
+host-walk-retry-band 8388607  (the informed retry, observe/walk-retry.bml over host-walk-evidence.bml, -class.bml, -retry.bml, -record.bml
                                 and -attempt.bml: each schedule has a second launchd job, earth.hati.rent-walk-retry at 03:40 and
                                 earth.hati.day-turn-retry at 12:40 and 19:10 (sources in docs/launchd), whose door first reads what became
                                 of the first slot AGAINST THE SLOT'S TIME (a retry may start 5 to 45 minutes after its slot): its row in
@@ -908,7 +933,7 @@ safetensors-write-band    -> 15871    the body's own weight file, written whole 
 voice-master-band         -> 1048575  filters, shelves, compressor profiles, room, fades, K-weighted loudness, WAV
 voice-score-band          -> 4095     whisper round trip per piece: WER, CER, and two readings of Persian joiners
 voice-measure-band        -> 511      loudness, range, peaks, pauses, centroid, F0 and level jumps on the device
-gpu-lease-band            -> 16383    one Metal client at a time: owner, staleness, tombstone takeover
+gpu-lease-band            -> 1048575  one Metal client at a time: owner, staleness, tombstone takeover; a lend to the holder's child alone; a door's hold over its reading, given back on a stop, yielding where a run begins
 gpu-window-band           -> 511      a GPU window: peers paused and resumed only by their holder, swept when the holder is gone, proven by a gauge
 role-singleton-band       -> 255      one working process of a role: the elder stays, the younger yields, a stopped or dead elder is no role
 ```
