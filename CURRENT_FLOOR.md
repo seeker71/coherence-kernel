@@ -240,7 +240,7 @@ native-turn-ladder-band 1048575 · local-flow-reading-band 8388607  (a memory en
                                 checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
                                 the wall, its renewals and the prompt IDs they re-fed; a lane killed at its deadline writes no counts
                                 and its counts are folded from its stamps and said so; the day option reproduces to the ms)
-host-walk-band 4503599627370495  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
+host-walk-band 9007199254740991  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
                                 pid, unix ms, door) under the lock it holds; a later start of the same door that finds its own
                                 row under 25 minutes old (hw-slot-window-ms: the retry gap plus slack, far under the two-hour
                                 windows and the eight hours between slots) ends 0 with `[walk-lock] <door> already began at <hh:mm>
@@ -255,12 +255,20 @@ host-walk-band 4503599627370495  (a walk door that claims the checkout stamps it
                                 launched start begins its own argv again as its child, on the kernel the build placed and compiled
                                 from the tree the sync left, hands it `{"renewal":{...}}` (the window's end, the day, the slot hour, the
                                 safe flag, the branch, the sync, build and carrier lines; the day turn adds its continuation's options)
-                                and ends with it; the renewed start takes the lock and the slot stamp (the day turn its continuation)
-                                and walks every step, so a rule the walk evaluates after its sync is the code the sync brought
-                                (2026-11-03 03:30: the night's movement request ran the carry list from before its rebase); claim
-                                `renewal` (a scratch walk whose main moves its carry list under it: the launched start builds with the
-                                one path it compiled, the renewed one with the two the sync brought; with the steps walked in the
-                                launched start instead, the band reads 2251799813685247);
+                                and ends as it ended; the renewed start takes the lock and the slot stamp (the day turn its
+                                continuation) and walks every step, so every step after the sync, build and carrier is the code the
+                                sync brought (2026-11-03 03:30: the night's movement request ran the carry list from before its
+                                rebase); claim `renewal` (a scratch walk whose main moves its carry list under it: the launched start
+                                builds with the one path it compiled, the renewed one with the two the sync brought; the day turn's
+                                renewal takes a planted continuation, its pid and kernel start, reads its options as planted and
+                                archives it under the renewed pid; the nine keys stand closed and a pair added later is read with its
+                                default; with dt-taken a no-op the band reads 6755399441055743) and `renew-ends` (the launched start
+                                ends by its renewed self's no-core signal, raised on itself, the launcher's set: the band reads 143;
+                                1 by name for a renewal that would not compile (ended 2) and for a 0 that left the lock naming it, a
+                                door from before its two starts; with the raise or the lock's reading reverted the band reads
+                                4503599627370495); with the steps walked in the launched start instead, both are short and the band
+                                reads 2251799813685247; the waiting launched start's cost is named in the part (221 MB resident on
+                                the miniature door beside 78 MB for its renewed self);
                                 the walk's turn waits for memory within the window and a held answer takes no turn;
                                 the sync settles what the body knows through the reunion's rounds: a drawn page takes main's side
                                 and is remade (in its directory) into one new commit, a river of at_unix_ms rows with both banks
