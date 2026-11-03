@@ -1,20 +1,30 @@
 ; q4k-decode-wide-band.fk — the Qwen3.8 lane's K-quant decode matvecs (form_qwen_q4k_decode_f32 and
 ; form_qwen_q6k_decode_f32, the fused cooperative dots of form-stdlib/bml/qwen38-decode-quant.bml) answer to
-; the exact dot within the door's named bound, on one committed superblock fixture and on real rows of the
+; the exact dot within the door's named bound, on row-distinct synthetic tensors and on real rows of the
 ; Q4_K_M file, and the lane dispatches them through the door's own record.
 ;   bit 1   float(as_type<half>(bits)) is bit-identical to the body's q4k_f16(bits) on every finite f16
 ;           (all 65536 patterns, the 2048 inf/nan ones excluded): the kernels' d/dmin decode IS the attestant's
-;   bit 2   the Q4_K fixture (q4k-two-superblocks.bin, one row of 512, repeated to 3 rows): the fused kernel
-;           and the one-thread attestant (form_q4k_matvec_f32) both sit within their bound of the Form fp64 dot
+;   bit 2   Q4_K on row-distinct synthetic tensors (q38dq-fill; kquant-rows-fixture.bml), rows 1..9 (every
+;           residue of the pair and of the four-row group) of one, two, three and seventeen superblocks, and rows
+;           5, 6 and 7 of the lane's own widths: 20 superblocks (5120: every matrix fed the hidden state, the head
+;           among them), 24 (6144: ssm_out, attn_output) and 68 (17408: ffn_down; the Q6_K kernel's lane walks
+;           five sweeps of sixteen superblocks there, the Q4_K kernel's nine of eight), each width in all three d
+;           classes (positive normal, normal of either sign, subnormal of either sign: q38dq-fill) and the small
+;           shapes by turns, x of full 24-bit significands (kqr-xv: exact in f32, not in f16, as fine as a real
+;           hidden state): every row of the fused kernel and of the one-thread attestant (form_q4k_matvec_f32)
+;           within its bound of the Form fp64 dot of THAT row, the rows told apart under the fused bound, four
+;           sentinels standing, an inf or NaN row named
 ;   bit 4   real weights, the first Q4_K ffn_gate of the file: four rows (the first and last pair) within
-;           the bound of the fp64 dot; 20 dispatches of the fused kernel and of the serial hoist (the previous
-;           kernel, compiled beside) timed, the best of five rounds each (the GPU is shared with siblings)
+;           the bound of the fp64 dot (x the same kqr-xv; a row written as inf or NaN is named and reads short);
+;           20 dispatches of the fused kernel and of the serial hoist (the previous kernel, compiled beside)
+;           timed, the best of five rounds each (the GPU is shared with siblings)
 ;   bit 8   the first Q4_K ffn_down (the wide rows), the same
 ;   bit 16  the first Q4_K attn_q / attn_qkv, the same
 ;   bit 32  q38-mv-rec hands a type-12 view to pipeline 57 with (rows + 1) / 2 groups — the door's record
-;   bit 64  q38-mv-rec hands a type-14 view to pipeline 58 with (rows + 1) / 2 groups — the same record shape
-;   bit 128 the Q6_K fixture (q6k-two-superblocks.bin): the fused Q6_K kernel and its one-thread attestant
-;           (form_q6k_matvec_f32) within their bound of the fp64 dot
+;   bit 64  q38-mv-rec hands a type-14 view to pipeline 58 with (rows + 3) / 4 groups — the door's record (four
+;           rows a Q6_K group)
+;   bit 128 Q6_K on the same row-distinct shapes: the fused Q6_K kernel and its one-thread attestant
+;           (form_q6k_matvec_f32), every row within its bound of the fp64 dot of that row
 ;   bit 256 real weights, the first Q6_K ffn_down: four rows within the bound; fused and hoist timed
 ;   bit 512 the first Q6_K attn_qkv, the same
 ;   bit 1024 the head (output.weight, Q6_K, the widest dispatch of a token), four rows; 4 dispatches timed
@@ -24,14 +34,12 @@
 ; is cols (their fold depth).
 ; REQUIRES: a live Metal device and the Q4_K_M file of the registry row qwen38-q4 (a physical run; it needs
 ; the GPU). Opened through q38-open, the lane's own door, mmap-shared with any sibling lease.
-; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/model-registry.bml form-stdlib/lora-adapter.bml
+; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/model-registry.bml form-stdlib/lora-adapter.bml form-stdlib/tests/kquant-rows-fixture.bml
 (do
     (defn qdw-abs (v) (if (lt v 0.0) (sub 0.0 v) v))
     (defn qdw-u () 0.000000059604644775390625)
-    ; x_i exact in f32: multiples of 2^-10 in [-1, 1]
-    (defn qdw-xv (i) (div (mul 1.0 (sub (mod (mul i 37) 2049) 1024)) 1024.0))
-    (defn qdw-xs-chunk (lo hi acc) (if (ge lo hi) acc (qdw-xs-chunk (add lo 1) hi (str_concat acc (md-le32 (md-f32-bits (qdw-xv lo)))))))
-    (defn qdw-xs (n lo acc) (if (ge lo n) acc (qdw-xs n (add lo 256) (str_concat acc (qdw-xs-chunk lo (if (gt (add lo 256) n) n (add lo 256)) "")))))
+    ; x is the shared witness's (kqr-xv / kqr-xs of kquant-rows-fixture.bml), for the real rows as for the synthetic
+    ; ones: full 24-bit significands, exact in f32 and not in f16
     (defn qdw-f (s i) (ln-f32-decode (ln-u32-le s (mul 4 i))))
     ; the two parts of the Q4_K weight at flat index idx of row bytes `src` (block stride 144, base 0):
     ; the scale part (d * sc) * nib and the min part dmin * mn — q4m-flat-at's own decomposition
@@ -48,9 +56,9 @@
     (defn qdw-sp (type src idx) (if (eq type 12) (qdw-sp4 src idx) (q6m-flat-at src 0 idx)))
     (defn qdw-mp (type src idx) (if (eq type 12) (qdw-mp4 src idx) 0.0))
     ; the exact (fp64) dot of one row with x, and S, folded 256 weights a chunk
-    (defn qdw-dot-chunk (type src lo hi acc) (if (ge lo hi) acc (qdw-dot-chunk type src (add lo 1) hi (add acc (mul (sub (qdw-sp type src lo) (qdw-mp type src lo)) (qdw-xv lo))))))
+    (defn qdw-dot-chunk (type src lo hi acc) (if (ge lo hi) acc (qdw-dot-chunk type src (add lo 1) hi (add acc (mul (sub (qdw-sp type src lo) (qdw-mp type src lo)) (kqr-xv lo))))))
     (defn qdw-dot (type src cols lo acc) (if (ge lo cols) acc (qdw-dot type src cols (add lo 256) (add acc (qdw-dot-chunk type src lo (add lo 256) 0.0)))))
-    (defn qdw-mag-chunk (type src lo hi acc) (if (ge lo hi) acc (qdw-mag-chunk type src (add lo 1) hi (add acc (add (qdw-abs (mul (qdw-sp type src lo) (qdw-xv lo))) (qdw-abs (mul (qdw-mp type src lo) (qdw-xv lo))))))))
+    (defn qdw-mag-chunk (type src lo hi acc) (if (ge lo hi) acc (qdw-mag-chunk type src (add lo 1) hi (add acc (add (qdw-abs (mul (qdw-sp type src lo) (kqr-xv lo))) (qdw-abs (mul (qdw-mp type src lo) (kqr-xv lo))))))))
     (defn qdw-mag (type src cols lo acc) (if (ge lo cols) acc (qdw-mag type src cols (add lo 256) (add acc (qdw-mag-chunk type src lo (add lo 256) 0.0)))))
     (defn qdw-within? (got exact S coeff) (le (qdw-abs (sub got exact)) (add (mul (mul coeff (qdw-u)) S) 0.000000000001)))
     (defn qdw-ratio (got exact S coeff) (div (qdw-abs (sub got exact)) (add (mul (mul coeff (qdw-u)) S) 0.000000000001)))
@@ -59,15 +67,19 @@
     (defn qdw-cnt1 (s i end acc) (if (ge i end) acc (qdw-cnt1 s (add i 1) end (add acc (str_byte_at s (mul 4 i))))))
     (defn qdw-cnt (s i n acc) (if (ge i n) acc (qdw-cnt s (add i 1024) n (qdw-cnt1 s i (if (gt (add i 1024) n) n (add i 1024)) acc))))
     (defn qdw-stride (type) (if (eq type 12) 144 210))
-    ; one row of a real tensor: its bytes from the file, the exact dot and S, the kernel's value at row r
+    ; one row of a real tensor: its bytes from the file, the exact dot and S, the kernel's value at row r; a row the
+    ; kernel wrote as inf or NaN (qdw-f answers nothing on exponent 255) is named by the fixture's kqr-nonfinite and
+    ; reads short
     (defn qdw-row-ok? (type path base dataoff cols r y coeff label)
         (do (let rowbytes (mul (qdw-stride type) (div cols 256)))
             (let src (read_file_slice path (add base (add dataoff (mul r rowbytes))) rowbytes))
             (let exact (qdw-dot type src cols 0 0.0))
             (let S (qdw-mag type src cols 0 0.0))
             (let got (qdw-f y r))
-            (print (list label "row" r "exact" exact "got" got "S" S "dev/bound" (qdw-ratio got exact S coeff)))
-            (qdw-within? got exact S coeff)))
+            (if (nothing? got)
+                (do (print (list label "row" r "exact" exact "got" (kqr-nonfinite y r) "S" S "non-finite: short")) false)
+                (do (print (list label "row" r "exact" exact "got" got "S" S "dev/bound" (qdw-ratio got exact S coeff)))
+                    (qdw-within? got exact S coeff)))))
     ; the first layer whose slot `slot` is type `ty`, or -1
     (defn qdw-find (lays slot ty l) (if (ge l (len lays)) (sub 0 1) (if (eq (kth-tv-ty (nth (nth lays l) slot)) ty) l (qdw-find lays slot ty (add l 1)))))
     ; a layer's slot k >= 5 reads table 5 + (k - 5) on a linear layer and 14 + (k - 5) on a full-attention
@@ -111,29 +123,17 @@
             (let sentinel (str_eq (substring y (mul 4 rows) (mul 4 (add rows 1))) (md-le32 (md-f32-bits 42.25))))
             (let freed (add (metal_buf_free ya) (metal_buf_free yb)))
             (if (and (ge a 0) (and (ge b 0) (and sentinel (and r0 (and r1 (and r2 (and r3 h0))))))) bit 0)))
-    ; one fixture: a one-row-of-512 K-quant fixture repeated to 3 rows; the fused kernel (the door's record)
-    ; and the one-thread attestant `pa` within their bounds of the fp64 dot, the sentinel at y[3] untouched
-    (defn qdw-fixture (ps type fx pa bit)
-        (do (let n (str_len fx))
-            (let fw (metal_buf_alloc (mul 3 n)))
-            (let fwrote (metal_buf_write fw 0 (str_concat fx (str_concat fx fx))))
-            (let fxh (metal_buf_alloc (mul 4 512)))
-            (let fxw (metal_buf_write fxh 0 (qdw-xs 512 0 "")))
-            (let fya (metal_buf_alloc 16)) (let fyb (metal_buf_alloc 16))
-            (let fsent (add (metal_buf_write fya 12 (md-le32 (md-f32-bits 42.25))) (metal_buf_write fyb 12 (md-le32 (md-f32-bits 42.25)))))
-            (let fe (q38-enq (q38dq-rec ps type fw fxh fya 3 512 0)))
-            (let fa (metal_enqueue pa (md-bind (list fw fxh fyb) (list 3 512)) 3))
-            (let fs (metal_sync))
-            (let fy (metal_buf_read fya 0 16)) (let fz (metal_buf_read fyb 0 16))
-            (let fexact (qdw-dot type fx 512 0 0.0)) (let fS (qdw-mag type fx 512 0 0.0))
-            (let fcoeff (q38dq-bound-coeff 512))
-            (print (list "fixture type" type "exact" fexact "S" fS "fused rows" (qdw-f fy 0) (qdw-f fy 1) (qdw-f fy 2) "dev/bound" (qdw-ratio (qdw-f fy 0) fexact fS fcoeff) (qdw-ratio (qdw-f fy 2) fexact fS fcoeff) "attestant" (qdw-f fz 0) "dev/bound" (qdw-ratio (qdw-f fz 0) fexact fS 512)))
-            (let freed (sum (list (metal_buf_free fw) (metal_buf_free fxh) (metal_buf_free fya) (metal_buf_free fyb))))
-            (if (and (qdw-within? (qdw-f fy 0) fexact fS fcoeff)
-                 (and (qdw-within? (qdw-f fy 1) fexact fS fcoeff)
-                 (and (qdw-within? (qdw-f fy 2) fexact fS fcoeff)
-                 (and (qdw-within? (qdw-f fz 0) fexact fS 512)
-                 (and (str_eq (substring fy 12 16) (md-le32 (md-f32-bits 42.25))) (str_eq (substring fz 12 16) (md-le32 (md-f32-bits 42.25)))))))) bit 0)))
+    ; one fixture bit: every [rows, cols, salt, d class] of `cases` through the shared witness
+    ; (kquant-rows-fixture.bml): a row-distinct synthetic tensor, the fused kernel by the lane's door and the
+    ; attestant, every row against the fp64 dot of that row, x the witness's own kqr-xv
+    (defn qdw-fixture (ps pfill type cases i acc)
+        (if (ge i (len cases)) acc
+            (do (let c (nth cases i))
+                (qdw-fixture ps pfill type cases (add i 1) (add acc (kqr-decode ps pfill type (nth c 0) (nth c 1) (nth c 2) (nth c 3)))))))
+    ; rows 1..9 of one to seventeen superblocks, the d class by turns; then rows 5, 6, 7 of 20, 24 and 68
+    ; superblocks, every width in every class
+    (defn qdw-fixture-cases () (list (list 1 256 11 0) (list 2 512 12 1) (list 3 512 13 2) (list 4 768 14 0) (list 5 256 15 1) (list 6 512 16 2) (list 7 4352 17 0) (list 8 768 18 1) (list 9 512 19 2)
+        (list 5 5120 20 0) (list 6 5120 21 1) (list 7 5120 22 2) (list 5 6144 23 1) (list 6 6144 24 2) (list 7 6144 25 0) (list 5 17408 26 2) (list 6 17408 27 0) (list 7 17408 28 1)))
     ; ---- the unit: the lane's own, plus the f16 identity probe and the previous (hoisted serial) kernels ----
     (let msl (str_concat (q38-msl) (str_concat (qml-hoist-msl "qdw_hoist_q4k" "q4k" "144") (str_concat (qml-hoist-msl "qdw_hoist_q6k" "q6k" "210") "kernel void qdw_f16 (device uint* out [[buffer(0)]], uint i [[thread_position_in_grid]]) { if (i >= 65536u) return; uint ex = (i / 1024u) % 32u; float a = q4k_f16(int(i)); float b = float(as_type<half>(ushort(i))); out[i] = (ex == 31u) ? 0u : ((as_type<uint>(a) == as_type<uint>(b)) ? 0u : 1u); }"))))
     (let ps (q38-pipes msl))
@@ -148,9 +148,10 @@
     (let mism (qdw-cnt (metal_buf_read fo 0 (mul 4 65536)) 0 65536 0))
     (print (list "f16 identity: patterns" 65536 "excluded inf/nan" 2048 "mismatches" mism))
     (let c1 (if (eq mism 0) 1 0))
-    ; --- bits 2 and 128: the committed fixtures, 3 rows of 512 ---
-    (let c2 (qdw-fixture ps 12 (read_file_slice "form/form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 0 288) (nth ps 1) 2))
-    (let c128 (qdw-fixture ps 14 (read_file_slice "form/form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 0 420) (nth ps 3) 128))
+    ; --- bits 2 and 128: row-distinct synthetic tensors, rows 1..9 ---
+    (let pfill (metal_pipeline (q38dq-fill-msl) "q38dq_fill"))
+    (let c2 (if (and (gt pfill 0) (eq (qdw-fixture ps pfill 12 (qdw-fixture-cases) 0 0) (len (qdw-fixture-cases)))) 2 0))
+    (let c128 (if (and (gt pfill 0) (eq (qdw-fixture ps pfill 14 (qdw-fixture-cases) 0 0) (len (qdw-fixture-cases)))) 128 0))
     ; --- bits 4/8/16 and 256/512/1024: real rows of the Q4_K_M file through the lane's open door ---
     (let ctx (q38-open (mr-path (mr-find "qwen38-q4")) 64))
     (if (eq (len ctx) 0) (form_error "q4k decode wide band: q38-open refused the qwen38-q4 artifact") 0)
@@ -162,7 +163,7 @@
     (if (or (lt lg 0) (or (lt ld 0) (or (lt lq 0) (or (lt l6d 0) (lt l6q 0))))) (form_error "q4k decode wide band: a Q4_K ffn_gate / ffn_down / slot-5 layer or a Q6_K ffn_down / slot-5 layer is missing from the file") 0)
     (let geo (nth ctx 2))
     (let xh (metal_buf_alloc (mul 4 (nth geo 10))))
-    (let xw (metal_buf_write xh 0 (qdw-xs (nth geo 10) 0 "")))
+    (let xw (metal_buf_write xh 0 (kqr-xs (nth geo 10) 0 "")))
     (let cps (nth ctx 0))
     ; the tensor-info offsets come from the lane's own suffix tables (q38-tabs), the way kth-tv-at found them
     (let tabs (q38-tabs (nth ctx 7)))
@@ -178,7 +179,7 @@
     (let c32 (if (and (eq (nth grec 0) (nth cps 57)) (eq (nth grec 2) (div (add (kth-tv-r gtv) 1) 2))) 32 0))
     (let stv (nth (nth lays l6d) 4))
     (let srec (q38-mv-rec cps stv xh xh 0))
-    (let c64 (if (and (eq (nth srec 0) (nth cps 58)) (eq (nth srec 2) (div (add (kth-tv-r stv) 1) 2))) 64 0))
+    (let c64 (if (and (eq (nth srec 0) (nth cps 58)) (eq (nth srec 2) (div (add (kth-tv-r stv) 3) 4))) 64 0))
     (let verdict (add c1 (add c2 (add c4 (add c8 (add c16 (add c32 (add c64 (add c128 (add c256 (add c512 c1024)))))))))))
     (print (list "q4k-decode-wide-band verdict" verdict))
     (if (eq verdict 2047) verdict (form_error (str_concat "q4k decode wide band failed: " (int_to_str verdict)))))

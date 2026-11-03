@@ -2,22 +2,31 @@
 // dispatch record (pipeline, binding, grid) so each kernel's shape and its grid are said in one place.
 //
 // Q4_K (type 12) decodes through form_qwen_q4k_decode_f32 and Q6_K (type 14) through
-// form_qwen_q6k_decode_f32: FUSED cooperative dots, shaped as the lane's Q8_0 wide matvec
-// (q80-matvec-wide-body) — one 256-thread group (eight SIMD groups) per PAIR of rows, each SIMD group walking
-// the superblocks ib = sgitg, sgitg+8, ...; inside a superblock each lane owns eight weights of one scale
-// group, folds qd = sum q*x over them (an fma chain) and lands the group's part with its scale products made
-// ONCE per eight weights:
-//     Q4_K  lane t: sub-block j = t/4, slice t mod 4;   part = (d*sc_j) * qd - (dmin*mn_j) * xs,  xs = sum x
-//     Q6_K  lane t: scale group t/2 (half h, group g, sixteen is), slice t mod 2;   part = (d*sc) * qd
-// A row-iteration reads two words of weights: Q4_K the superblock's 16-byte head (d, dmin, the twelve scale
-// bytes) as one packed_uint4 and the eight quant bytes as one packed_uint2; Q6_K the eight low-nibble bytes
-// and the eight high-bit bytes as two packed_ushort4 (the 210-byte stride is only 2-aligned), the scale byte
-// and d. sc_j / mn_j are get_scale_min_k4 on the register bytes (q38dq_sc / q38dq_mn: the same integer
-// identities q4k_sc / q4k_mn carry — x&63 = mod 64, >>6 = div 64, <<4 = mul 16, | over disjoint fields = +);
-// the Q6_K quant is q6k_wi's own nib + hi*16 - 32 with hi = (qh >> 2g) & 3; d and dmin by
-// float(as_type<half>), which the band proves bit-identical to q4k_f16 on every finite f16. The lane partials
-// fold by metal::simd_sum and the eight SIMD groups by one more simd_sum over threadgroup memory — the Q8_0
-// wide kernel's own epilogue.
+// form_qwen_q6k_decode_f32: FUSED cooperative dots in one 256-thread group (eight SIMD groups) whose lane
+// partials fold by metal::simd_sum and whose eight SIMD groups fold by one more simd_sum over threadgroup
+// memory — the epilogue of the lane's Q8_0 wide matvec (q80-matvec-wide-body).
+//     Q4_K  a group owns a PAIR of rows; SIMD group sgitg walks the superblocks ib = sgitg, sgitg+8, ...;
+//           lane t owns eight weights of sub-block j = t/4, slice t mod 4, folds qd = sum nib*x (an fma
+//           chain) and lands part = (d*sc_j) * qd - (dmin*mn_j) * xs, xs = sum x, its scale products made
+//           ONCE per eight weights. A row-iteration reads the superblock's 16-byte head (d, dmin, the twelve
+//           scale bytes) as one packed_uint4 and the eight quant bytes as one packed_uint2.
+//     Q6_K  a group owns FOUR rows; half a SIMD group takes a superblock (ix = t/16), so SIMD group sgitg
+//           walks ib = 2*sgitg + ix, step 16; lane t (tid = t mod 16) owns SIXTEEN weights, l = l0..l0+3
+//           (l0 = 4*(tid mod 8)) of each of the four scale groups g of half ip = tid/8. The four ql bytes at
+//           l0 serve g = 0 by their low nibbles and g = 2 by their high ones, the four at l0 + 32 serve g = 1
+//           and g = 3, and the four qh bytes carry all four high-bit pairs (bits 2g), so every quant byte a
+//           lane loads is used whole. A row-iteration reads three 4-byte quant words (packed_ushort2: the
+//           210-byte stride is only 2-aligned), the 8-byte scale word of its half (of which it uses one byte
+//           of each pair: byte is = l0/16 is the lane's sc of group g) and d: ONCE per row and superblock
+//           for sixteen weights.
+//           q6k_wi's own nib + hi*16 - 32 is assembled four bytes a word, qd_g = sum (q - 32)*x folds the
+//           four l of group g (an fma chain) and part = d * (sc_0*qd_0 + sc_1*qd_1 + sc_2*qd_2 + sc_3*qd_3)
+//           (one product, three fmas, then d). A superblock's sixteen x serve all four rows; a row past the
+//           end reads the last row (its pointer clamped) and writes nothing.
+// sc_j / mn_j are get_scale_min_k4 on the register bytes (q38dq_sc / q38dq_mn: the same integer identities
+// q4k_sc / q4k_mn carry — x&63 = mod 64, >>6 = div 64, <<4 = mul 16, | over disjoint fields = +); the Q6_K
+// scale is q6k_s8 by an arithmetic shift of its byte to the top of the word; d and dmin by
+// float(as_type<half>), which the band proves bit-identical to q4k_f16 on every finite f16.
 //
 // WHY. The previous kernels here (qml-hoist-msl at parts 1) were the attestant's serial fold with the
 // superblock's d/dmin hoisted: ONE thread per row, cols dependent steps each, and the per-weight scale decode
@@ -26,45 +35,111 @@
 // wide twin — measured 0.27-0.61 tok/s against Q8_0's 2.1-2.8 (receipts/native-training-plan.md, "Voice
 // rates"). The Q4_K_M file carries BOTH types (attn_qkv, the early ffn_down and the head are Q6_K), so the
 // lane decodes at the speed its bytes allow only when both take the cooperative shape.
+// The Q6_K kernel first took the Q4_K shape (eight weights a lane, one scale group, a pair of rows): every ql
+// byte was loaded by two lanes (one nibble each) and every qh byte by four (two bits each), about 13
+// instructions a byte of weights by a count of its MSL against about 7 at sixteen weights a lane. The rate
+// door observe/q6k-decode-rate-run.bml times both on synthetic tensors (q38dq-fill, d subnormal of either sign as
+// a real Q6_K row's is; the previous text compiled there beside the lane's) under the GPU lease it takes, beside a
+// plain read of the same bytes (a uint4 a thread), every entry in every position of a round by turns and each
+// keeping its best at each position, the 73 MB shape as four copies read in turn, with the memory leases, the other
+// fkwu processes, the device's utilization and the load read beside. It judges the device's busy clock against the
+// host's wall clock (within 5 % over a quarter second of plain reads) and the lane against the previous kernel, and
+// prints every rate as a share of the plain read's fastest and of the 546 GB/s Apple states for this M4 Max (40 GPU
+// cores), shares it does not judge: on the head the lane meets the plain read within the spread of the readings, and
+// the stated figure is no ceiling for this clock (on a quiet device, 2026-11-03 07:15 WITA, the lane read
+// 547.5-548.3 GB/s on one 73 MB copy). Its three readings of 07:23-07:24, all verdict 3 and all NOISY (five or six
+// other fkwu processes; the device 84-86 % busy before the first dispatch; load 5.6-6.2), best of 6 rounds a
+// position: 5120 x 17408 over four copies at 20 dispatches a round, 439.6-440.4 GB/s for the eight-weight kernel and
+// 499.8-502.7 for this one (93.4-94.1 % of the plain read's 532.7-535.2); the head shape 248320 x 5120 (1.04 GB) at
+// 4, 436.9-437.6 against 532.3-536.6 (98.6-99.1 % of the plain read's 538.4-541.2); the busy clock 0.4-0.5 % under
+// the host's. Q4_K (pipeline 57) read 275.0-275.2 (51.4-51.5 % of the plain read) on the first shape. No reading
+// under a named, controlled load stands, so no gain under contention is claimed.
 //
 // WHAT THEY ANSWER TO. The fused fold reassociates, so it is not byte-equal to the serial attestant; it is
 // held within a NAMED bound of the exact (fp64) dot, the way the Q8_0 wide kernel is: with
 //     S = sum_j (|d*sc*nib_j*x_j| + |dmin*mn_j*x_j|)   for Q4_K (the unfused magnitude: the min term cancels)
 //     S = sum_j |w_j*x_j|                               for Q6_K
-// every association tree a kernel can take has depth <= 8 (fma chain) + 3 (the scale products and the
-// subtraction) + ceil(nb/8) (one thread's superblock chain) + 31 + 31 (two 32-way reductions), so
+// every association tree a kernel can take has depth at most
+//     Q4_K  8 (fma chain) + 3 (the scale products and the subtraction) + ceil(nb/8) (one thread's superblock
+//           chain) + 31 + 31 (two 32-way reductions)
+//     Q6_K  4 (a group's fma chain) + 4 (the scaled group sums: one product, three fmas) + 1 (d) +
+//           ceil(nb/16) (one lane's superblock chain: half a SIMD group a superblock, eight SIMD groups)
+//           + 31 + 31 = 71 + ceil(nb/16)
+// (every factor is exact in f32: q - 32 and sc are small integers, d an f16 value), so for both
 //     |y_kernel - y_exact| <= (73 + ceil(nb/8)) * 2^-24 * S,   nb = cols/256.
-// The band form-stdlib/tests/q4k-decode-wide-band.fk measures this on the committed superblock fixtures and
-// on real rows of the Q4_K_M file against the Form fp64 references (q4m-* / q6m-flat-at of q4k-msl.fk and
-// q6k-msl.fk), and the greedy reply to .hearth/speed-prompt.txt stays the one the serial fold answered
-// (.hearth/speed-reply-qwen38-q4.txt).
+// What the bands observe, model-free: form-stdlib/tests/qwen38-prefill-quant-band.fk (3 rows of 512, 257 of
+// 5120) and the bits 2 and 128 of form-stdlib/tests/q4k-decode-wide-band.fk (rows 1..9 of one to seventeen
+// superblocks, and rows 5..7 of the lane's own widths: 20, 24 and 68 superblocks, 68 being five sweeps of
+// sixteen for this kernel's lane) hold EVERY row of both kernels, and of their one-thread attestants, within
+// this bound of the Form fp64 dot of THAT row (q4m-* / q6m-flat-at of q4k-msl.fk and q6k-msl.fk) on
+// row-distinct synthetic tensors (q38dq-fill below, through form-stdlib/tests/kquant-rows-fixture.bml) whose d
+// is positive normal, normal of either sign or subnormal of either sign, in which no two superblocks are equal
+// and rows r and r^1, and the last row and row 0, sit apart under the bound, so a kernel within its bound of
+// the wrong one of such a pair cannot pass, with x of full 24-bit significands (kqr-xv: exact in f32, not in
+// f16, as fine as the hidden state a real decode reads), so a kernel that reads x through half reads short; a
+// row a kernel writes as inf or NaN is named and reads short.
+// Real rows and the greedy ids: for Q4_K (pipeline 57) q4k-decode-wide-band.fk read 2047 on real rows of the
+// Q4_K_M file and the greedy reply to .hearth/speed-prompt.txt stayed the serial fold's on 2026-10-28
+// (receipts/native-training-plan.md, "Q4_K decode"). For this four-row Q6_K text neither is observed yet; both
+// wait for a live run while no other lease stands: q4k-decode-wide-band.fk in full (2047; its bits 256, 512
+// and 1024 read real Q6_K rows), and L2, printf '{"go":1,"mode":"plain","decode":32,"file":
+// "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q4_K_M.gguf"}' | ./fkwu observe/q38-decode-run.bml (it takes
+// the memory lease; at most 15 minutes), whose "[q38-decode] ids:" line must equal the same run's at
+// origin/main 7b217aa91.
 //
-// Requires cols a multiple of 256 (a K-quant row is whole superblocks by format); rows may be odd (the
-// second row of the last pair is guarded; y[rows] is never written).
+// Requires cols a multiple of 256 (a K-quant row is whole superblocks by format); rows may be any count (a
+// group's rows past the end are guarded; the words past y[rows - 1] are never written).
 import form-stdlib/qk-matvec-lane.fk;
 import form-stdlib/metal-door.fk;
 section [form.bml] {
  class Qwen38DecodeQuant {
   def q38dq-index(type) = if ((Comparable) type == 12) then 57 else if ((Comparable) type == 14) then 58 else -1;
   def q38dq-tpg() = 256;
-  def q38dq-groups(rows) = (rows + 1) / 2;
+  // the grid: a Q4_K group owns a pair of rows, a Q6_K group four
+  def q38dq-groups(type, rows) = if ((Comparable) type == 14) then (rows + 3) / 4 else (rows + 1) / 2;
   // the Q8_0 wide kernel's epilogue: lane partials by simd_sum, the eight SIMD groups by one more over sh[]
   def q38dq-epilogue-msl() = "if (sgitg == 0u) { sh[tiisg] = 0.0f; sh[32u + tiisg] = 0.0f; } sumf0 = metal::simd_sum(sumf0); sumf1 = metal::simd_sum(sumf1); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) { sh[sgitg] = sumf0; sh[32u + sgitg] = sumf1; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float t0 = metal::simd_sum(sh[tiisg]); float t1 = metal::simd_sum(sh[32u + tiisg]); if (tiisg == 0u && sgitg == 0u) { if (r0 < rows) y[r0] = t0; if (r0 + 1u < rows) y[r0 + 1u] = t1; } }";
   def q38dq-sig-msl() = " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 ntg [[threads_per_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { threadgroup float sh[64]; uint nb = cols / 256u; uint r0 = tgpig.x * 2u; uint nsg = (uint)ntg.x / 32u; float sumf0 = 0.0f; float sumf1 = 0.0f; ";
   // get_scale_min_k4 over the superblock head held in registers: h.x = d | dmin<<16, h.y/h.z/h.w = scales[0..11]
   def q38dq-head-msl() = "static inline uint q38dq_sb(packed_uint4 h, uint k) { uint wv = (k < 4u) ? h.y : ((k < 8u) ? h.z : h.w); return (wv >> ((k & 3u) * 8u)) & 255u; } static inline uint q38dq_sc(packed_uint4 h, uint j) { if (j < 4u) { return q38dq_sb(h, j) & 63u; } return (q38dq_sb(h, j + 4u) & 15u) | ((q38dq_sb(h, j - 4u) >> 6u) << 4u); } static inline uint q38dq_mn(packed_uint4 h, uint j) { if (j < 4u) { return q38dq_sb(h, j + 4u) & 63u; } return (q38dq_sb(h, j + 4u) >> 4u) | ((q38dq_sb(h, j) >> 6u) << 4u); } ";
   def q38dq-q4-wide-msl(fname) = ("kernel void " + (fname + (q38dq-sig-msl() + ("uint sub = (uint)tiisg / 4u; uint il = (uint)tiisg - sub * 4u; uint c = sub / 2u; uint nsh = (sub - c * 2u) * 4u; uint qoff = 16u + c * 32u + il * 8u; for (uint ib = (uint)sgitg; ib < nb; ib += nsg) { device const float* xp = x + ib * 256u + sub * 32u + il * 8u; packed_float4 ya = *(device const packed_float4*)(xp); packed_float4 yc = *(device const packed_float4*)(xp + 4); float xs = ((ya.x + ya.y) + (ya.z + ya.w)) + ((yc.x + yc.y) + (yc.z + yc.w)); for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; device const uchar* b = qb + ((ulong)r * (ulong)nb + (ulong)ib) * 144ul; packed_uint4 h = *(device const packed_uint4*)(b); packed_uint2 q = *(device const packed_uint2*)(b + qoff); float d = float(as_type<half>(ushort(h.x & 65535u))); float dmin = float(as_type<half>(ushort(h.x >> 16u))); float gsc = d * float(q38dq_sc(h, sub)); float gmn = dmin * float(q38dq_mn(h, sub)); uint qx = q.x >> nsh; uint qy = q.y >> nsh; float qd = 0.0f; qd = metal::fma(float(qx & 15u), ya.x, qd); qd = metal::fma(float((qx >> 8u) & 15u), ya.y, qd); qd = metal::fma(float((qx >> 16u) & 15u), ya.z, qd); qd = metal::fma(float((qx >> 24u) & 15u), ya.w, qd); qd = metal::fma(float(qy & 15u), yc.x, qd); qd = metal::fma(float((qy >> 8u) & 15u), yc.y, qd); qd = metal::fma(float((qy >> 16u) & 15u), yc.z, qd); qd = metal::fma(float((qy >> 24u) & 15u), yc.w, qd); float part = gsc * qd - gmn * xs; if (row == 0u) sumf0 = sumf0 + part; else sumf1 = sumf1 + part; } } " + q38dq-epilogue-msl()))));
-  // one Q6_K quant from its low-nibble word `a`, its high-bit word `e` and the byte shift `s` (0 or 8):
-  // q6k_wi's nib + hi*16 - 32, the nibble by nsh (low for g < 2, high for g >= 2) and hi = (qh >> 2g) & 3
-  def q38dq-q6-quant-msl() = "static inline float q38dq_q6(uint a, uint e, uint s, uint nsh, uint hsh) { return float(int(((a >> (s + nsh)) & 15u) | (((e >> (s + hsh)) & 3u) << 4u)) - 32); } ";
-  def q38dq-q6-wide-msl(fname) = ("kernel void " + (fname + (q38dq-sig-msl() + ("uint sg = (uint)tiisg / 2u; uint p = (uint)tiisg - sg * 2u; uint h = sg / 8u; uint rem = sg - h * 8u; uint g = rem / 2u; uint is = rem - g * 2u; uint l0 = is * 16u + p * 8u; uint qloff = h * 64u + l0 + (g & 1u) * 32u; uint qhoff = 128u + h * 32u + l0; uint scoff = 192u + h * 8u + is + 2u * g; uint nsh = (g / 2u) * 4u; uint hsh = 2u * g; uint xoff = h * 128u + g * 32u + l0; for (uint ib = (uint)sgitg; ib < nb; ib += nsg) { device const float* xp = x + ib * 256u + xoff; packed_float4 ya = *(device const packed_float4*)(xp); packed_float4 yc = *(device const packed_float4*)(xp + 4); for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; device const uchar* b = qb + ((ulong)r * (ulong)nb + (ulong)ib) * 210ul; packed_ushort4 ql = *(device const packed_ushort4*)(b + qloff); packed_ushort4 qh = *(device const packed_ushort4*)(b + qhoff); ushort hd = (ushort)b[208] | ((ushort)b[209] << 8); float gsc = float(as_type<half>(hd)) * float(q6k_s8(int(b[scoff]))); uint a0 = uint(ql.x); uint a1 = uint(ql.y); uint a2 = uint(ql.z); uint a3 = uint(ql.w); uint e0 = uint(qh.x); uint e1 = uint(qh.y); uint e2 = uint(qh.z); uint e3 = uint(qh.w); float qd = 0.0f; qd = metal::fma(q38dq_q6(a0, e0, 0u, nsh, hsh), ya.x, qd); qd = metal::fma(q38dq_q6(a0, e0, 8u, nsh, hsh), ya.y, qd); qd = metal::fma(q38dq_q6(a1, e1, 0u, nsh, hsh), ya.z, qd); qd = metal::fma(q38dq_q6(a1, e1, 8u, nsh, hsh), ya.w, qd); qd = metal::fma(q38dq_q6(a2, e2, 0u, nsh, hsh), yc.x, qd); qd = metal::fma(q38dq_q6(a2, e2, 8u, nsh, hsh), yc.y, qd); qd = metal::fma(q38dq_q6(a3, e3, 0u, nsh, hsh), yc.z, qd); qd = metal::fma(q38dq_q6(a3, e3, 8u, nsh, hsh), yc.w, qd); float part = gsc * qd; if (row == 0u) sumf0 = sumf0 + part; else sumf1 = sumf1 + part; } } " + q38dq-epilogue-msl()))));
-  def q38dq-msl() = ((String) q38dq-head-msl() + ((String) q38dq-q6-quant-msl() + ((String) q38dq-q4-wide-msl("form_qwen_q4k_decode_f32") + q38dq-q6-wide-msl("form_qwen_q6k_decode_f32"))));
+  // one Q6_K superblock of one row, the lane's sixteen weights: the low-nibble words `a` (ql at l0) and `c`
+  // (ql at l0 + 32) and the high-bit word `e` (qh at l0) assemble q6k_wi's nib + hi*16 for g = 0..3 four
+  // bytes at a time (hi = (qh >> 2g) & 3 lands at bits 4..5 of each byte), less 32 exactly in f32; the
+  // scale of group g is byte is of the g-th pair of the half's scale word, sign-extended by shifting it to
+  // the top (ssh = 24 - 8 is) and back
+  def q38dq-q6-part-msl() = "static inline float q38dq_q6_part(device const uchar* b, uint qloff, uint qhoff, uint scoff, uint ssh, float4 x0, float4 x1, float4 x2, float4 x3) { packed_ushort2 la = *(device const packed_ushort2*)(b + qloff); packed_ushort2 lc = *(device const packed_ushort2*)(b + qloff + 32u); packed_ushort2 lh = *(device const packed_ushort2*)(b + qhoff); packed_ushort4 sw = *(device const packed_ushort4*)(b + scoff); float d = float(as_type<half>(*(device const ushort*)(b + 208))); uint a = uint(la.x) | (uint(la.y) << 16u); uint c = uint(lc.x) | (uint(lc.y) << 16u); uint e = uint(lh.x) | (uint(lh.y) << 16u); float4 q0 = float4(as_type<uchar4>((a & 0x0F0F0F0Fu) | ((e << 4u) & 0x30303030u))) - 32.0f; float4 q1 = float4(as_type<uchar4>((c & 0x0F0F0F0Fu) | ((e << 2u) & 0x30303030u))) - 32.0f; float4 q2 = float4(as_type<uchar4>(((a >> 4u) & 0x0F0F0F0Fu) | (e & 0x30303030u))) - 32.0f; float4 q3 = float4(as_type<uchar4>(((c >> 4u) & 0x0F0F0F0Fu) | ((e >> 2u) & 0x30303030u))) - 32.0f; float s0 = q0.x * x0.x; s0 = metal::fma(q0.y, x0.y, s0); s0 = metal::fma(q0.z, x0.z, s0); s0 = metal::fma(q0.w, x0.w, s0); float s1 = q1.x * x1.x; s1 = metal::fma(q1.y, x1.y, s1); s1 = metal::fma(q1.z, x1.z, s1); s1 = metal::fma(q1.w, x1.w, s1); float s2 = q2.x * x2.x; s2 = metal::fma(q2.y, x2.y, s2); s2 = metal::fma(q2.z, x2.z, s2); s2 = metal::fma(q2.w, x2.w, s2); float s3 = q3.x * x3.x; s3 = metal::fma(q3.y, x3.y, s3); s3 = metal::fma(q3.z, x3.z, s3); s3 = metal::fma(q3.w, x3.w, s3); float t = float(as_type<int>(uint(sw.x) << ssh) >> 24) * s0; t = metal::fma(float(as_type<int>(uint(sw.y) << ssh) >> 24), s1, t); t = metal::fma(float(as_type<int>(uint(sw.z) << ssh) >> 24), s2, t); t = metal::fma(float(as_type<int>(uint(sw.w) << ssh) >> 24), s3, t); return d * t; } ";
+  // the four-row group: its prologue (sh[] holds eight SIMD partials of each of the four rows) and the Q8_0
+  // wide epilogue over four rows, SIMD group k folding row k
+  def q38dq-sig4-msl() = " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 ntg [[threads_per_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { threadgroup float sh[128]; uint nb = cols / 256u; uint r0 = tgpig.x * 4u; uint nsg = (uint)ntg.x / 32u; float sumf0 = 0.0f; float sumf1 = 0.0f; float sumf2 = 0.0f; float sumf3 = 0.0f; ";
+  def q38dq-epilogue4-msl() = "if (sgitg == 0u) { sh[tiisg] = 0.0f; sh[32u + tiisg] = 0.0f; sh[64u + tiisg] = 0.0f; sh[96u + tiisg] = 0.0f; } sumf0 = metal::simd_sum(sumf0); sumf1 = metal::simd_sum(sumf1); sumf2 = metal::simd_sum(sumf2); sumf3 = metal::simd_sum(sumf3); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) { sh[sgitg] = sumf0; sh[32u + sgitg] = sumf1; sh[64u + sgitg] = sumf2; sh[96u + sgitg] = sumf3; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint k = (uint)sgitg; k < 4u; k += nsg) { float t = metal::simd_sum(sh[k * 32u + (uint)tiisg]); if (tiisg == 0u && r0 + k < rows) y[r0 + k] = t; } }";
+  def q38dq-q6-wide-msl(fname) = ("kernel void " + (fname + (q38dq-sig4-msl() + ("uint ix = (uint)tiisg / 16u; uint tid = (uint)tiisg - ix * 16u; uint ip = tid / 8u; uint l0 = (tid - ip * 8u) * 4u; uint qloff = ip * 64u + l0; uint qhoff = 128u + ip * 32u + l0; uint scoff = 192u + ip * 8u; uint ssh = 24u - (l0 / 16u) * 8u; uint xoff = ip * 128u + l0; ulong rs = (ulong)nb * 210ul; uint rl = rows - 1u; device const uchar* b0 = qb + (ulong)metal::min(r0, rl) * rs; device const uchar* b1 = qb + (ulong)metal::min(r0 + 1u, rl) * rs; device const uchar* b2 = qb + (ulong)metal::min(r0 + 2u, rl) * rs; device const uchar* b3 = qb + (ulong)metal::min(r0 + 3u, rl) * rs; for (uint ib = (uint)sgitg * 2u + ix; ib < nb; ib += nsg * 2u) { device const float* xp = x + ib * 256u + xoff; float4 x0 = float4(*(device const packed_float4*)(xp)); float4 x1 = float4(*(device const packed_float4*)(xp + 32)); float4 x2 = float4(*(device const packed_float4*)(xp + 64)); float4 x3 = float4(*(device const packed_float4*)(xp + 96)); ulong bo = (ulong)ib * 210ul; sumf0 = sumf0 + q38dq_q6_part(b0 + bo, qloff, qhoff, scoff, ssh, x0, x1, x2, x3); sumf1 = sumf1 + q38dq_q6_part(b1 + bo, qloff, qhoff, scoff, ssh, x0, x1, x2, x3); sumf2 = sumf2 + q38dq_q6_part(b2 + bo, qloff, qhoff, scoff, ssh, x0, x1, x2, x3); sumf3 = sumf3 + q38dq_q6_part(b3 + bo, qloff, qhoff, scoff, ssh, x0, x1, x2, x3); } " + q38dq-epilogue4-msl()))));
+  def q38dq-msl() = ((String) q38dq-head-msl() + ((String) q38dq-q6-part-msl() + ((String) q38dq-q4-wide-msl("form_qwen_q4k_decode_f32") + q38dq-q6-wide-msl("form_qwen_q6k_decode_f32"))));
   def q38dq-pipes(msl) = [metal_pipeline(msl,"form_qwen_q4k_decode_f32"),metal_pipeline(msl,"form_qwen_q6k_decode_f32")];
   // the bound's coefficient for a row of `cols`: the deepest association tree the fused fold can take
   def q38dq-bound-coeff(cols) = 73 + (cols / 256 + 7) / 8;
-  // the dispatch record [pipeline, binding, grid] (q38-enq runs it): the cooperative pair-of-rows grid
-  // (mode 1: (rows + 1) / 2 groups of 256 threads) for both K-quants
-  def q38dq-rec(ps,type,weight,x,y,rows,cols,barrier) = [ps[q38dq-index(type)],md-bind16([weight,x,y],[rows,cols],q38dq-tpg(),0,1,barrier),q38dq-groups(rows)];
+  // the synthetic tensor the witnesses and the rate door read (never part of q38dq-msl): byte i of a K-quant tensor
+  // of superblock stride `stride` is the low byte of h(i), h the salted lowbias32 mix, but the first quant word of
+  // global superblock g = i / stride (bytes qoff .. qoff + 3) is h(g) whole, a bijection of g for each salt, so no
+  // two superblocks of the tensor share it (no two rows share a superblock, no row repeats one), and the f16 high
+  // bytes dhi0 / dhi1 (d, and dmin for Q4_K) take the d class dcls of the whole tensor (q38dq-dclass-name):
+  //     0  0x14 .. 0x1B: sign 0, exponent 5 or 6, d in [2^-10, 2^-8)
+  //     1  the same magnitudes, the sign bit drawn from h: d in (-2^-8, -2^-10] as often as in [2^-10, 2^-8)
+  //     2  exponent 0, the sign bit drawn from h: subnormal, |d| = m 2^-24 with m < 1024, the full mantissa drawn
+  // (a row's d is any finite f16: the format bounds it no further), so a kernel that drops d's sign, flushes a
+  // subnormal d to zero or reads it as a normal one leaves its bound on class 1 or 2; no class reaches exponent 31.
+  // Class 2 is a real Q6_K row's: observe/kquant-scale-census-run.bml read the Q4_K_M file's Q6_K d subnormal in
+  // 68549 of 68608 superblocks (the first 1024 of each of its 67 Q6_K tensors) and negative in 34344, and its Q4_K d
+  // subnormal in 91645 of 443392 and never negative (2026-11-03)
+  def q38dq-fill-msl() = "kernel void q38dq_fill(device uchar* b [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& stride [[buffer(2)]], constant uint& qoff [[buffer(3)]], constant uint& dhi0 [[buffer(4)]], constant uint& dhi1 [[buffer(5)]], constant uint& salt [[buffer(6)]], constant uint& dcls [[buffer(7)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint g = i / stride; uint off = i - g * stride; bool tag = off >= qoff && off < qoff + 4u; uint h = (tag ? g : i) * 2654435761u + salt * 40503u + 12345u; h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16; uint v = tag ? ((h >> ((off - qoff) * 8u)) & 255u) : (h & 255u); if (off == dhi0 || off == dhi1) { v = (dcls == 2u) ? ((h >> 8) & 3u) : (20u + ((h >> 8) & 7u)); if (dcls != 0u) { v = v | ((h >> 4) & 128u); } } b[i] = uchar(v); }";
+  def q38dq-dclass-name(dcls) = if ((Comparable) dcls == 0) then "d normal, positive" else if ((Comparable) dcls == 1) then "d normal, either sign" else "d subnormal, either sign";
+  def q38dq-fill-stride(type) = if ((Comparable) type == 12) then 144 else 210;
+  // its dispatch, one thread a byte: `rows` rows of `cols` (whole superblocks) of `type` into w; quant words from byte
+  // 16 (Q4_K qs) or 0 (Q6_K ql), the high bytes of d and dmin (Q4_K 1 and 3) or of d (Q6_K 209), d class dcls
+  def q38dq-fill(pfill, type, w, rows, cols, salt, dcls) = metal_enqueue(pfill, md-bind([w], [rows * (cols / 256) * q38dq-fill-stride(type), q38dq-fill-stride(type), if ((Comparable) type == 12) then 16 else 0, if ((Comparable) type == 12) then 1 else 209, if ((Comparable) type == 12) then 3 else 209, salt, dcls]), rows * (cols / 256) * q38dq-fill-stride(type));
+  // the dispatch record [pipeline, binding, grid] (q38-enq runs it): mode 1, groups of 256 threads, a pair of
+  // rows a Q4_K group and four a Q6_K group (q38dq-groups)
+  def q38dq-rec(ps,type,weight,x,y,rows,cols,barrier) = [ps[q38dq-index(type)],md-bind16([weight,x,y],[rows,cols],q38dq-tpg(),0,1,barrier),q38dq-groups(type,rows)];
  }
  0;
 }
