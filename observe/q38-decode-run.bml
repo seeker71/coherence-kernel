@@ -6,7 +6,16 @@
 //                                                                from a fresh state per variant and speaks `decode` tokens one position at a time, reading each
 //                                                                variant's ms a token and its ids: the base lane (q38-forward), the same with the host's encode
 //                                                                and the device's wait split, and the hand-over every n layers (0 never).
-// stdin, one JSON line, all optional: go, decode (24), prompt, only (a variant name).
+// stdin, one JSON line, all optional: go, decode (24), prompt, file, mode (decode), blocks (session, 6), and for mode plain runs
+// (12) and budget (840 s). A plain run is a fresh prefill of the prompt and `decode` tokens; every run, the first among them,
+// begins only while the time spent since the door's first step and that run's estimate fit the budget. The first's is the
+// prompt's ids at 21 positions/s and `decode` tokens at 200 ms (the slowest prefill receipts/local-run-ledger.jsonl reads for
+// the K-quant lane at a prompt of 4K ids or more, before its tile, and above the slowest plain step its rows read, 155 ms);
+// each later one's is the longest run so far. So a reading bounded at 900 s ends by its own choice and gives its leases back
+// while no run outruns its estimate by more than the minute the bound holds beyond the budget, which also carries the compile
+// before the first step (3 to 10 s), the close and the release. A run that does is cut by the bound, and its leases are taken
+// back as a dead holder's (the memory governor's next reading, the GPU lease door). Inferred: at the 21-28 positions/s the
+// ledger reads, twelve fresh prefills of a ~4K-id prompt take 30 to 40 minutes.
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
 section [form.bml] {
@@ -89,6 +98,22 @@ section [form.bml] {
    let idsay = run == 1 ? print_str("[q38-decode] ids: " ++ qdr-ids-line(spoken)) : 0;
    qdr-plain-go(ctx, ids, k, runs, run + 1);
   };
+  // mode plain inside its budget: go(run) speaks run `run`; every run, the first among them, begins only when the ms since t0 and
+  // its estimate fit `budget`: the first's is `est`, each later one's the longest run so far; the answer is how many ran
+  def qdr-plain-fit(go, runs, run, t0, budget, est) = run > runs || host_monotonic_ms() - t0 + est > budget ? run - 1 : {
+   let a = host_monotonic_ms();
+   let r = go(run);
+   let took = host_monotonic_ms() - a;
+   qdr-plain-fit(go, runs, run + 1, t0, budget, run == 1 || took > est ? took : est);
+  };
+  // the first run's estimate, before any run is measured: the prompt's ids at 21 positions/s and `decode` tokens at 200 ms
+  def qdr-first-ms(ids, k) = len(ids) * 1000 / 21 + k * 200;
+  // plain: [runs, budget ms, the door's start ms]
+  def qdr-plain-bounded(ctx, ids, k, plain) {
+   let first = qdr-first-ms(ids, k);
+   let n = qdr-plain-fit((run) => qdr-plain-go(ctx, ids, k, run, run), plain[0], 1, plain[2], plain[1], first);
+   print_str("[q38-decode] plain: " ++ n.str() ++ " of " ++ plain[0].str() ++ " runs inside the budget of " ++ (plain[1] / 1000).str() ++ " s (the first estimated at " ++ (first / 1000).str() ++ " s), " ++ (host_monotonic_ms() - plain[2]).str() ++ " ms since the door began");
+  }
   // ---- the layout A/B: the Q8_0 matvec on the FFN tensors of `n` layers, as the lane reads them (34-byte blocks) against a planar
   // repack (the scales in one array, the int8 in a 16-byte-aligned array) and against a pure stream of the same bytes ----
   def qdr-hdr() = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n";
@@ -782,7 +807,7 @@ section [form.bml] {
    let d = qdr-burn2-go(pst, pa, bufs, o, 1, 150, 15, host_monotonic_ms());
    1;
   }
-  def qdr-measure(ctx, ids, k, mode) {
+  def qdr-measure(ctx, ids, k, mode, plain) {
    let bn = (String) mode == "burn" ? qdr-burn(ctx, 40, 1000) : 0;
    let b3 = (String) mode == "burn3" ? qdr-burn3(ctx, 40, 700) : 0;
    let pr = (String) mode == "pair" ? qdr-pair(ctx, ids, k, 40) : 0;
@@ -799,7 +824,7 @@ section [form.bml] {
    let po = (String) mode == "plan-only" ? qdr-plan-only(ctx, ids, k) : 0;
    let s2 = (String) mode == "session2" ? qdr-session2(ctx, ids, 6, 8) : 0;
    let dc = (String) mode == "decode" || (String) mode == "both" ? qdr-measure-decode(ctx, ids, k) : 0;
-   let pl = (String) mode == "plain" ? qdr-plain-go(ctx, ids, k, 12, 1) : 0;
+   let pl = (String) mode == "plain" ? qdr-plain-bounded(ctx, ids, k, plain) : 0;
    1;
   }
   def qdr-measure-decode(ctx, ids, k) {
@@ -812,7 +837,7 @@ section [form.bml] {
    let g = qdr-variant(ctx, ids, "split", k, 16, 2);
    1;
   }
-  def qdr-open(path, k, prompt, mode) {
+  def qdr-open(path, k, prompt, mode, plain) {
    let src = fcmg-src(path);
    let ids = q35-chat-ids(src, prompt);
    let span = len(ids);
@@ -828,7 +853,7 @@ section [form.bml] {
      let why = len(ctx) < 10 ? print_str("[q38-decode] context length " ++ len(ctx).str()) : print_str("[q38-decode] handles " ++ q38-handles-ok?(ctx[1]).str() ++ " layers " ++ q38-layers-ok?(ctx[3]).str() ++ " emb " ++ kth-tv-h(ctx[4]).str() ++ " onorm " ++ kth-tv-h(ctx[5]).str() ++ " proj " ++ kth-tv-h(ctx[6]).str() ++ " bs " ++ foldl((acc, x) => acc ++ x.str() ++ " ", "", ctx[1]));
      print_str("[q38-decode] the context did not open");
     } : {
-     let measured = qdr-measure(ctx, ids, k, mode);
+     let measured = qdr-measure(ctx, ids, k, mode, plain);
      let closed = q38-close(ctx, []);
      let unleased = mg-release();
      print_str("[q38-decode] released; weights " ++ (weights / 1000000).str() ++ " MB per token");
@@ -836,10 +861,13 @@ section [form.bml] {
    };
   }
   def qdr-run() {
+   let t0 = host_monotonic_ms();
    let opts = qdr-opts();
    let path = qdr-text(opts, "file", qdr-file());
    let k = qdr-int(opts, "decode", 24);
-   (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "burn2" ? qdr-burn2() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "alu2" ? qdr-alu2() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "bind" ? qdr-bind-bench() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "session" ? qdr-session(path, qdr-text(opts, "prompt", qdr-prompt()), qdr-int(opts, "blocks", 6), k) :(Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(path, k, qdr-text(opts, "prompt", qdr-prompt()), qdr-text(opts, "mode", "decode")) : print_str("[q38-decode] plan: decode " ++ k.str() ++ ", file " ++ path ++ "; {\"go\":1} opens it and measures");
+   // the 900 s bound of the reading less a minute for the close and the release
+   let plain = [qdr-int(opts, "runs", 12), qdr-int(opts, "budget", 840) * 1000, t0];
+   (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "burn2" ? qdr-burn2() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "alu2" ? qdr-alu2() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "bind" ? qdr-bind-bench() : (Comparable) qdr-int(opts, "go", 0) == 1 && (String) qdr-text(opts, "mode", "decode") == "session" ? qdr-session(path, qdr-text(opts, "prompt", qdr-prompt()), qdr-int(opts, "blocks", 6), k) :(Comparable) qdr-int(opts, "go", 0) == 1 ? qdr-open(path, k, qdr-text(opts, "prompt", qdr-prompt()), qdr-text(opts, "mode", "decode"), plain) : print_str("[q38-decode] plan: decode " ++ k.str() ++ ", file " ++ path ++ "; mode plain runs up to " ++ plain[0].str() ++ " inside " ++ (plain[1] / 1000).str() ++ " s; {\"go\":1} opens it and measures");
   }
  }
  qdr-run();
